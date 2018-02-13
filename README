@@ -1,106 +1,65 @@
-         QEMU README
-         ===========
+# FEMU README #
 
-QEMU is a generic and open source machine & userspace emulator and
-virtualizer.
+## Installation ##
 
-QEMU is capable of emulating a complete machine in software without any
-need for hardware virtualization support. By using dynamic translation,
-it achieves very good performance. QEMU can also integrate with the Xen
-and KVM hypervisors to provide emulated hardware while allowing the
-hypervisor to manage the CPU. With hypervisor support, QEMU can achieve
-near native performance for CPUs. When QEMU emulates CPUs directly it is
-capable of running operating systems made for one machine (e.g. an ARMv7
-board) on a different machine (e.g. an x86_64 PC board).
+**Make sure you already install necessary libraries for building QEMU**
 
-QEMU is also capable of providing userspace API virtualization for Linux
-and BSD kernel interfaces. This allows binaries compiled against one
-architecture ABI (e.g. the Linux PPC64 ABI) to be run on a host using a
-different architecture ABI (e.g. the Linux x86_64 ABI). This does not
-involve any hardware emulation, simply CPU and syscall emulation.
+Then,
 
-QEMU aims to fit into a variety of use cases. It can be invoked directly
-by users wishing to have full control over its behaviour and settings.
-It also aims to facilitate integration into higher level management
-layers, by providing a stable command line interface and monitor API.
-It is commonly invoked indirectly via the libvirt library when using
-open source applications such as oVirt, OpenStack and virt-manager.
+  $ cd build-femu
 
-QEMU as a whole is released under the GNU General Public License,
-version 2. For full licensing details, consult the LICENSE file.
+  $ ./femu-compile.sh
+
+## Before running ##
+
+- **FEMU currently uses its own malloc'ed space for data storage, instead of using
+image-files. However, FEMU still requires a image-file in QEMU command line so
+as to cheat QEMU to probe correct internal numbers about the backend storage.
+Thus, if you want to emulate an SSD of 32GB, you need to create an image file
+of 32GB on your local filesystem and attach it to QEMU**
+
+- FEMU relies on DRAM to provide accurate delay emulation, so make sure you
+  have enought available DRAM free space for the emulated SSD
+
+## Run an emulated SSD in blackbox mode (device-managed FTL) ##
 
 
-Building
-========
+Under this mode, each emulated NVMe SSD needs configuration files in the format
+of vssd1.conf, vssd2.conf to run.
 
-QEMU is multi-platform software intended to be buildable on all modern
-Linux platforms, OS-X, Win32 (via the Mingw64 toolchain) and a variety
-of other UNIX targets. The simple steps to build QEMU are:
+The key configuration options are explained below:
 
-  mkdir build
-  cd build
-  ../configure
-  make
+It configures an emulated SSD with 8 channels and there are 8 chips on each channel.
+The total SSD size is 1GB.
 
-Additional information can also be found online via the QEMU website:
+```
+    PAGE_SIZE           4096            // SSD page size in bytes
+    PAGE_NB             256             // # of pages in one block
+    SECTOR_SIZE         512             // # sector size in bytes
+    FLASH_NB            64              // total # of NAND chips
+    BLOCK_NB            16              // # of blocks in one chip
 
-  http://qemu-project.org/Hosts/Linux
-  http://qemu-project.org/Hosts/Mac
-  http://qemu-project.org/Hosts/W32
-
-
-Submitting patches
-==================
-
-The QEMU source code is maintained under the GIT version control system.
-
-   git clone git://git.qemu-project.org/qemu.git
-
-When submitting patches, the preferred approach is to use 'git
-format-patch' and/or 'git send-email' to format & send the mail to the
-qemu-devel@nongnu.org mailing list. All patches submitted must contain
-a 'Signed-off-by' line from the author. Patches should follow the
-guidelines set out in the HACKING and CODING_STYLE files.
-
-Additional information on submitting patches can be found online via
-the QEMU website
-
-  http://qemu-project.org/Contribute/SubmitAPatch
-  http://qemu-project.org/Contribute/TrivialPatches
+    REG_WRITE_DELAY     40000           // channel transfer time for one page (program) in nanosecond
+    CELL_PROGRAM_DELAY  800000          // NAND page program latency in nanosecond
+    REG_READ_DELAY      60000           // NAND page read latency in nanosecond
+    CELL_READ_DELAY     40000           // channel transfer time for one page (read) in nanosecond
+    BLOCK_ERASE_DELAY   3000000         // Block erase latency in nanosecond
+    CHANNEL_NB          8               // # of channels
+    GC_MODE             2               // GC blocking mode, see hw/block/ssd/common.h for definition
+```
 
 
-Bug reporting
-=============
-
-The QEMU project uses Launchpad as its primary upstream bug tracker. Bugs
-found when running code built from QEMU git or upstream released sources
-should be reported via:
-
-  https://bugs.launchpad.net/qemu/
-
-If using QEMU via an operating system vendor pre-built binary package, it
-is preferable to report bugs to the vendor's own bug tracker first. If
-the bug is also known to affect latest upstream code, it can also be
-reported via launchpad.
-
-For additional information on bug reporting consult:
-
-  http://qemu-project.org/Contribute/ReportABug
 
 
-Contact
-=======
+  $ cd build-femu
 
-The QEMU community can be contacted in a number of ways, with the two
-main methods being email and IRC
+  $ ./wcc-run.sh
 
- - qemu-devel@nongnu.org
-   http://lists.nongnu.org/mailman/listinfo/qemu-devel
- - #qemu on irc.oftc.net
+## Run an emulated SSD in whitebox mode (OpenChannel-SSD) ##
 
-Information on additional methods of contacting the community can be
-found online via the QEMU website:
+  $ cd build-femu
 
-  http://qemu-project.org/Contribute/StartHere
+  $ ./femu-run.sh
 
--- End
+
+
