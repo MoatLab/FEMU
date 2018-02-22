@@ -312,7 +312,7 @@ int femu_oc_meta_state_get(FEMU_OC_Ctrl *ln, uint64_t ppa,
 #endif
     uint32_t oft = ppa * ln->meta_len;
 
-    assert(oft + ln->meta_len < ln->meta_tbytes);
+    assert(oft + ln->meta_len <= ln->meta_tbytes);
     /* Coperd: only need the internal oob area */
     memcpy(state, &ln->meta_buf[oft], ln->int_meta_size);
     return 0;
