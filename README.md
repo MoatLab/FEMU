@@ -19,7 +19,7 @@ Installation
 	# Switch to the FEMU building directory
 	cd femu/build-femu
 	# Copy femu script
-	cp -r ../femu-scripts/[femu-compile,lnvm-run,wcc-run,pin].sh ../femu-scripts/ftk ../femu-scripts/vssd1.conf . 
+	cp -r ../femu-scripts/[pkgdep,femu-compile,lnvm-run,wcc-run,pin].sh ../femu-scripts/ftk ../femu-scripts/vssd1.conf . 
 	# only Debian based distributions supported
 	sudo ./pkgdep.sh 
 	```
