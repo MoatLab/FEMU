@@ -1,6 +1,6 @@
 #!/bin/bash
 # Huaicheng Li <huaicheng@cs.uchicago.edu>
-# Run VM with FEMU support
+# Run VM with lightnvm support
 
 IMGDIR=$HOME/images
 
@@ -9,14 +9,14 @@ is_mounted=$(mount | grep "/mnt/tmpfs")
 if [[ $is_mounted == "" ]]; then
     sudo mkdir -p /mnt/tmpfs
     # huge=always
-    #sudo mount -t tmpfs -o size=4G,huge=always tmpfs /mnt/tmpfs
+    sudo mount -t tmpfs -o size=128G,huge=always tmpfs /mnt/tmpfs
 fi
 
 
 # every time we run a new SSD
-sudo rm -rf /mnt/tmpfs/test2.raw
+sudo rm -rf /mnt/tmpfs/test1.raw
 
-[[ ! -e /mnt/tmpfs/test2.raw ]] && ./qemu-img create -f raw /mnt/tmpfs/test2.raw 8G
+[[ ! -e /mnt/tmpfs/test1.raw ]] && ./qemu-img create -f raw /mnt/tmpfs/test1.raw 128G
 
 # huge page related settings
 #echo 25000 | sudo tee /proc/sys/vm/nr_hugepages
@@ -37,29 +37,30 @@ sudo rm -rf /mnt/tmpfs/test2.raw
     #-object memory-backend-file,id=mem1,size=8G,mem-path=/dev/hugepages2M \
     #-device pc-dimm,id=dimm1,memdev=mem1 \
 
+    # VOC related options
+    #lbbtable=/media/bbtable.qemu,
 
-sudo x86_64-softmmu/qemu-system-x86_64 \
+
+sudo valgrind x86_64-softmmu/qemu-system-x86_64 \
     -name "nvme-FEMU-test" \
     -enable-kvm \
     -cpu host \
-    -smp 2 \
-    -m 2G \
+    -smp 16 \
+    -m 8G,slots=2,maxmem=32G \
+    -object memory-backend-file,id=mem1,size=8G,mem-path=/dev/hugepages2M \
+    -device pc-dimm,id=dimm1,memdev=mem1 \
     -device virtio-scsi-pci,id=scsi0 \
     -device scsi-hd,drive=hd0 \
-    -drive file=$IMGDIR/u14s-s1.qcow2,if=none,aio=native,cache=none,format=qcow2,id=hd0 \
+    -drive file=$IMGDIR/u14s.qcow2,if=none,aio=native,cache=none,format=qcow2,id=hd0 \
     -device virtio-scsi-pci,id=scsi1 \
     -device scsi-hd,drive=hd1 \
-    -drive file=$IMGDIR/vmdata-s1.qcow2,if=none,aio=native,cache=none,format=qcow2,id=hd1 \
-    -drive file=/mnt/tmpfs/test2.raw,if=none,aio=threads,format=raw,id=id0 \
-    -device nvme,drive=id0,serial=serial0,id=nvme0 \
-    -device virtio-net-pci,netdev=net0,mac=52:54:00:12:34:10 \
-    -netdev user,id=net0,hostfwd=tcp::8081-:22 \
-    -device virtio-net-pci,netdev=net1,mac=52:54:00:12:34:11 \
-    -netdev tap,helper=qemu-bridge-helper,id=net1,vhost=on \
+    -drive file=$IMGDIR/vmdata.qcow2,if=none,aio=native,cache=none,format=qcow2,id=hd1 \
+    -drive file=/mnt/tmpfs/test1.raw,if=none,aio=threads,format=raw,id=id0 \
+    -device nvme,drive=id0,serial=serial0,id=nvme0,namespaces=1,lver=1,lmetasize=16,ll2pmode=0,nlbaf=5,lba_index=3,mdts=10,lnum_ch=16,lnum_lun=8,lnum_pln=2,lsec_size=4096,lsecs_per_pg=4,lpgs_per_blk=512,lbbtable=/media/bbtable.qemu,lmetadata=/media/meta.qemu,ldebug=0 \
+        -net user,hostfwd=tcp::8080-:22 \
+    -net nic,model=virtio \
     -nographic \
-    -qmp unix:./qmp-sock,server,nowait | tee /media/log-s1 &
-    #-net user,hostfwd=tcp::8081-:22 \
-    #-nographic \
+    -qmp unix:./qmp-sock,server,nowait | tee /media/log
     #-object iothread,id=iothread0 \
     #-display none \
     #-nographic \

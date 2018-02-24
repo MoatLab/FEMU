@@ -9,20 +9,20 @@ is_mounted=$(mount | grep "/mnt/tmpfs")
 if [[ $is_mounted == "" ]]; then
     sudo mkdir -p /mnt/tmpfs
     # huge=always
-    sudo mount -t tmpfs -o size=4G,huge=always tmpfs /mnt/tmpfs
-    #sudo mount -t tmpfs -o size=4G tmpfs /mnt/tmpfs
+    #sudo mount -t tmpfs -o size=4G,huge=always tmpfs /mnt/tmpfs
 fi
 
 
 # every time we run a new SSD
-sudo rm -rf /mnt/tmpfs/test1.raw
+sudo rm -rf $IMGDIR/vssd1.raw
 
-[[ ! -e /mnt/tmpfs/test1.raw ]] && ./qemu-img create -f raw /mnt/tmpfs/test1.raw 4G
+# Please match the image file size with the emulated SSD size in vssd1.conf file
+[[ ! -e $IMGDIR/vssd1.raw ]] && ./qemu-img create -f raw $IMGDIR/vssd1.raw 1G
 
 # huge page related settings
 #echo 25000 | sudo tee /proc/sys/vm/nr_hugepages
 
-[[ ! -d /dev/hugepages2M ]] && sudo mkdir /dev/hugepages2M && sudo mount -t hugetlbfs none /dev/hugepages2M -o pagesize=2M
+#[[ ! -d /dev/hugepages2M ]] && sudo mkdir /dev/hugepages2M && sudo mount -t hugetlbfs none /dev/hugepages2M -o pagesize=2M
 
 
 #-object iothread,id=iothread0 \
@@ -37,25 +37,23 @@ sudo rm -rf /mnt/tmpfs/test1.raw
     #-trace events=/tmp/events \
     #-object memory-backend-file,id=mem1,size=8G,mem-path=/dev/hugepages2M \
     #-device pc-dimm,id=dimm1,memdev=mem1 \
+    #-device virtio-scsi-pci,id=scsi1 \
+    #-device scsi-hd,drive=hd1 \
+    #-drive file=$IMGDIR/vmdata.qcow2,if=none,aio=native,cache=none,format=qcow2,id=hd1 \
 
-    #-object memory-backend-file,id=mem1,size=8G,mem-path=/dev/hugepages2M \
-    #-device pc-dimm,id=dimm1,memdev=mem1 \
 
 sudo x86_64-softmmu/qemu-system-x86_64 \
     -name "nvme-FEMU-test" \
     -enable-kvm \
     -cpu host \
-    -smp 2 \
-    -m 8G,slots=2,maxmem=32G \
+    -smp 4 \
+    -m 4G \
     -device virtio-scsi-pci,id=scsi0 \
     -device scsi-hd,drive=hd0 \
     -drive file=$IMGDIR/u14s.qcow2,if=none,aio=native,cache=none,format=qcow2,id=hd0 \
-    -device virtio-scsi-pci,id=scsi1 \
-    -device scsi-hd,drive=hd1 \
-    -drive file=$IMGDIR/vmdata.qcow2,if=none,aio=native,cache=none,format=qcow2,id=hd1 \
-    -drive file=/mnt/tmpfs/test1.raw,if=none,aio=threads,format=raw,id=id0 \
+    -drive file=$IMGDIR/vssd1.raw,if=none,aio=threads,format=raw,id=id0 \
     -device nvme,drive=id0,serial=serial0,id=nvme0 \
-    -net user,hostfwd=tcp::11111-:22 \
+    -net user,hostfwd=tcp::8080-:22 \
     -net nic,model=virtio \
     -nographic \
     -qmp unix:./qmp-sock,server,nowait | tee /media/log

@@ -16,7 +16,7 @@ fi
 # every time we run a new SSD
 sudo rm -rf /mnt/tmpfs/test1.raw
 
-[[ ! -e /mnt/tmpfs/test1.raw ]] && ./qemu-img create -f raw /mnt/tmpfs/test1.raw 8G
+[[ ! -e /mnt/tmpfs/test1.raw ]] && ./qemu-img create -f raw /mnt/tmpfs/test1.raw 32G
 
 # huge page related settings
 #echo 25000 | sudo tee /proc/sys/vm/nr_hugepages
@@ -42,8 +42,8 @@ sudo x86_64-softmmu/qemu-system-x86_64 \
     -name "nvme-FEMU-test" \
     -enable-kvm \
     -cpu host \
-    -smp 2 \
-    -m 2G \
+    -smp 4 \
+    -m 4G \
     -device virtio-scsi-pci,id=scsi0 \
     -device scsi-hd,drive=hd0 \
     -drive file=$IMGDIR/u14s.qcow2,if=none,aio=native,cache=none,format=qcow2,id=hd0 \
@@ -58,7 +58,6 @@ sudo x86_64-softmmu/qemu-system-x86_64 \
     -netdev tap,helper=qemu-bridge-helper,id=net1,vhost=on \
     -nographic \
     -qmp unix:./qmp-sock,server,nowait | tee /media/log-m &
-    #-netdev tap,ifname=tap0,script=qemu-ifup.sh,downscript=no,id=net1,vhost=on \
     #-device virtio-net-pci,netdev=net1,mac=52:54:00:12:34:01 \
     #-netdev type=tap,id=net1,vhost=on \
     #-net nic,macaddr=1a:46:0b:ca:bc:7b,model=virtio \

@@ -161,6 +161,9 @@
 #define NVME_TEMPERATURE        0x143
 #define NVME_OP_ABORTED         0xff
 
+#define FEMU_WHITEBOX_MODE      0
+#define FEMU_BLACKBOX_MODE      1
+
 extern void SSD_INIT(struct ssdstate *ssd);
 extern int64_t SSD_READ(struct ssdstate *ssd, unsigned int length, int64_t sector_nb);
 extern int64_t SSD_WRITE(struct ssdstate *ssd, unsigned int length, int64_t sector_nb);
@@ -1017,11 +1020,13 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     if (req->is_write) {
         //printf("SSD_WRITE: nlb = %lld, slba=%lld, data_size=%lld, data_offset=%lld\n", nlb, slba, data_size, data_offset);
         overhead = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - req->expire_time;
-        req->expire_time += SSD_WRITE(ssd, data_size >> 9, data_offset >> 9) - overhead;
+        if (n->femu_mode == FEMU_BLACKBOX_MODE)
+            req->expire_time += SSD_WRITE(ssd, data_size >> 9, data_offset >> 9) - overhead;
     } else {
         //printf("SSD_READ: nlb = %lld, slba=%lld, data_size=%lld, data_offset=%lld\n", nlb, slba, data_size, data_offset);
         overhead = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - req->expire_time;
-        req->expire_time += SSD_READ(ssd, data_size >> 9 , data_offset >> 9) - overhead;
+        if (n->femu_mode == FEMU_BLACKBOX_MODE)
+            req->expire_time += SSD_READ(ssd, data_size >> 9 , data_offset >> 9) - overhead;
     }
 
     //return NVME_SUCCESS;
@@ -2697,7 +2702,7 @@ static void nvme_init_ctrl(NvmeCtrl *n)
 
     id->vid = cpu_to_le16(pci_get_word(pci_conf + PCI_VENDOR_ID));
     id->ssvid = cpu_to_le16(pci_get_word(pci_conf + PCI_SUBSYSTEM_VENDOR_ID));
-    strpadcpy((char *)id->mn, sizeof(id->mn), "QEMU NVMe Ctrl", ' ');
+    strpadcpy((char *)id->mn, sizeof(id->mn), "FEMU NVMe Ctrl", ' ');
     strpadcpy((char *)id->fr, sizeof(id->fr), "1.0", ' ');
     strpadcpy((char *)id->sn, sizeof(id->sn), n->serial, ' ');
     id->rab = 6;
@@ -2835,7 +2840,8 @@ static int nvme_init(PCIDevice *pci_dev)
         return femu_oc_init(n);
 
     struct ssdstate *ssd = &(n->ssd);
-    SSD_INIT(ssd);
+    if (n->femu_mode == FEMU_BLACKBOX_MODE)
+        SSD_INIT(ssd);
 
     return 0;
 }
@@ -2896,6 +2902,7 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT16("oncs", NvmeCtrl, oncs, NVME_ONCS_DSM),
     DEFINE_PROP_UINT16("vid", NvmeCtrl, vid, 0x1d1d),
     DEFINE_PROP_UINT16("did", NvmeCtrl, did, 0x1f1f),
+    DEFINE_PROP_UINT8("femu_mode", NvmeCtrl, femu_mode, FEMU_WHITEBOX_MODE),
     DEFINE_PROP_UINT8("lver", NvmeCtrl, femu_oc_ctrl.id_ctrl.ver_id, 0),
     DEFINE_PROP_UINT32("ll2pmode", NvmeCtrl, femu_oc_ctrl.id_ctrl.dom, 1),
     DEFINE_PROP_UINT16("lsec_size", NvmeCtrl, femu_oc_ctrl.params.sec_size, 4096),
