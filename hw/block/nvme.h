@@ -901,6 +901,7 @@ typedef struct NvmeCtrl {
     struct ssdstate ssd;
 
     void            *heap_storage;
+    uint8_t         femu_mode; // 0 for white-box and 1 for black-box
 } NvmeCtrl;
 
 typedef struct NvmeDifTuple {

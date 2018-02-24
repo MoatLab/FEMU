@@ -760,7 +760,7 @@ uint16_t femu_oc_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                 chnl_next_avail_time[ch] = start_data_transfer_ts + chnl_transfer_time;
             }
 
-            //chip_next_avail_time[lunid] = chnl_next_avail_time[ch];
+            chip_next_avail_time[lunid] = chnl_next_avail_time[ch];
             io_done_ts = chnl_next_avail_time[ch];
 
             /* Coperd: the time need to emulate is (io_done_ts - now) */
@@ -1403,10 +1403,12 @@ int femu_oc_init(NvmeCtrl *n)
 
     if (ln->params.mtype != 0)
         error_report("nvme: Only NAND Flash Memory supported at the moment\n");
+#if 0
     if (ln->params.fmtype != 0)
         error_report("nvme: Only SLC Flash is supported at the moment\n");
     if (ln->params.num_ch != 1)
         error_report("nvme: Only 1 channel is supported at the moment\n");
+#endif
     if ((ln->params.num_pln > 4) || (ln->params.num_pln == 3))
         error_report("nvme: Only single, dual and quad plane modes supported \n");
 

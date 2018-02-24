@@ -18,6 +18,8 @@ Installation
 	```bash
 	# Switch to the FEMU building directory
 	cd femu/build-femu
+  # Copy femu script
+  cp -r ../femu-scripts/[femu-compile,lnvm-run,wcc-run,pin].sh ../femu-scripts/ftk ../femu-scripts/vssd1.conf . 
 	# only Debian based distributions supported
 	sudo ./pkgdep.sh 
 	```
@@ -78,7 +80,7 @@ After the FEMU configuration file is ready, boot the VM using the following scri
 ### 3. Run FEMU as an emulated whitebox SSD (OpenChannel-SSD) ###
 
 ```Bash
-./femu-run.sh
+./lnvm-run.sh
 ```
 
 Inside the VM, you can play with LightNVM. 

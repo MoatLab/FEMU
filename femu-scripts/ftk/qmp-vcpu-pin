@@ -1,0 +1,45 @@
+#!/usr/bin/python
+# QEMU vCPU pinning tool
+#
+# Copyright (C) 2016 Red Hat Inc.
+#
+# Authors:
+#  Maxime Coquelin <maxime.coquelin@redhat.com>
+#
+# This work is licensed under the terms of the GNU GPL, version 2.  See
+# the COPYING file in the top-level directory
+import argparse
+import json
+import os
+
+from subprocess import call
+from qmp import QEMUMonitorProtocol
+
+pinned = []
+
+parser = argparse.ArgumentParser(description='Pin QEMU vCPUs to physical CPUs')
+parser.add_argument('-s', '--server', type=str, required=True,
+                    help='QMP server path or address:port')
+parser.add_argument('cpu', type=int, nargs='+',
+                    help='Physical CPUs IDs')
+args = parser.parse_args()
+
+devnull = open(os.devnull, 'w')
+
+srv = QEMUMonitorProtocol(args.server)
+srv.connect()
+
+for vcpu in srv.command('query-cpus'):
+    vcpuid = vcpu['CPU']
+    tid = vcpu['thread_id']
+    if tid in pinned:
+        print 'vCPU{}\'s tid {} already pinned, skipping'.format(vcpuid, tid)
+        continue
+
+    cpuid = args.cpu[vcpuid % len(args.cpu)]
+    print 'Pin vCPU {} (tid {}) to physical CPU {}'.format(vcpuid, tid, cpuid)
+    try:
+        call(['taskset', '-pc', str(cpuid), str(tid)], stdout=devnull)
+        pinned.append(tid)
+    except OSError:
+        print 'Failed to pin vCPU{} to CPU{}'.format(vcpuid, cpuid)
