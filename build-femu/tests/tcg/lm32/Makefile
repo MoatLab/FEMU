@@ -1,1 +1,0 @@
-/home/huaicheng/git/femu/tests/tcg/lm32/Makefile
