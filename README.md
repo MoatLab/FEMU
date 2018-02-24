@@ -107,36 +107,35 @@ What we need to do is to add one sentence (``return false;``) after ``*dbbuf_db 
 
 After this, recompile your guest Linux kernel. 
 
-	```C
-	/* Update dbbuf and return true if an MMIO is required */
-	static bool nvme_dbbuf_update_and_check_event(u16 value, u32 *dbbuf_db,
+```C
+/* Update dbbuf and return true if an MMIO is required */
+static bool nvme_dbbuf_update_and_check_event(u16 value, u32 *dbbuf_db,
 					      volatile u32 *dbbuf_ei)
-	{
-		if (dbbuf_db) {
-			u16 old_value;
+{
+	if (dbbuf_db) {
+		u16 old_value;
 
-			/*
-		 	* Ensure that the queue is written before updating
-		 	* the doorbell in memory
-		 	*/
-			wmb();
+		/*
+		 * Ensure that the queue is written before updating
+		 * the doorbell in memory
+		 */
+		wmb();
 
-			old_value = *dbbuf_db;
-			*dbbuf_db = value;
+		old_value = *dbbuf_db;
+		*dbbuf_db = value;
 			
-			/* Disable Doorbell Writes for FEMU: We only need to 
-			 * add the following statement */
+		/* Disable Doorbell Writes for FEMU: We only need to 
+		 * add the following statement */
+		return false;
+		/* End FEMU modification for NVMe driver */
+
+		if (!nvme_dbbuf_need_event(*dbbuf_ei, value, old_value))
 			return false;
-			/* End FEMU modification for NVMe driver */
-
-			if (!nvme_dbbuf_need_event(*dbbuf_ei, value, old_value))
-				return false;
-		}
-
-		return true;
 	}
 
-	```
+	return true;
+}
+```
 
 
 
