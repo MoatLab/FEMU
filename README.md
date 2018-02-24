@@ -45,11 +45,10 @@ of 32GB on your local filesystem and attach it to QEMU. (This limitation will be
   
 - Only **Guest Linux version >= 4.12** are supported as FEMU requires the shadow doorbell buffer support in Linux NVMe driver implementation. **Optionally**, to achieve best performance, users need to disable the doorbell write operations in guest Linux NVMe driver since FEMU uses polling. Please see [here](#ddb) for how to do this. 
 
-### 2. Run FEMU an emulated SSD in blackbox mode (device-managed FTL) ###
-
+### 2. Run FEMU as an emulated blackbox SSD (device-managed FTL) ###
 
 Under this mode, each emulated NVMe SSD needs configuration files in the format
-of vssd1.conf, vssd2.conf to run.
+of vssd1.conf, vssd2.conf, ..., etc. to run.
 
 The key configuration options are explained below:
 
@@ -76,11 +75,15 @@ After the FEMU configuration file is ready, boot the VM using the following scri
 ./wcc-run.sh
 ```
 
-### 3. Run an emulated SSD in whitebox mode (OpenChannel-SSD) ###
+### 3. Run FEMU as an emulated whitebox SSD (OpenChannel-SSD) ###
 
 ```Bash
 ./femu-run.sh
 ```
+
+Inside the VM, you can play with LightNVM. 
+
+Currently FEMU only supports [OpenChannel Specification 1.2](http://lightnvm.io/docs/Open-ChannelSSDInterfaceSpecification12-final.pdf), the newer 2.0 spec support in work-in-progress and will be added soon.
   
 Tuning
 ------
