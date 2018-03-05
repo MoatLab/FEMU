@@ -106,7 +106,11 @@ Additonal Tweaks
 
 1. <a name="ddb"></a>Disable doorbell writes in your guest Linux NVMe driver:
 
-In Linux 4.12 source code, file ``drivers/nvme/host/pcie.c``, around ``line 293``, you will find below function which is used to indicate whether to perform doorbell write operations. 
+**Note: Linux kernel version less than 4.14 has a wrong implementation over the doorbell buffer config support bit. (Fixed in this commit: 223694b9ae8bfba99f3528d49d07a740af6ff95a). FEMU has been updated to fix this problem accordingly. Thus, in order for FEMU polling to work properly out of box, please use guest Linux >= 4.14.
+
+Otherwise, if you want to stick to 4.12/4.13, please make sure ``NVME_OACS_DBBUF = 1 << 7`` in ``hw/block/nvme.h`` as this is what was wrongly implemented in 4.12/4.13**
+
+In Linux 4.14 source code, file ``drivers/nvme/host/pcie.c``, around ``line 293``, you will find below function which is used to indicate whether to perform doorbell write operations. 
 
 What we need to do is to add one sentence (``return false;``) after ``*dbbuf_db = value;``, as shown in the code block below.
 

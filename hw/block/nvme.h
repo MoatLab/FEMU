@@ -588,7 +588,7 @@ enum NvmeIdCtrlOacs {
     NVME_OACS_FORMAT    = 1 << 1,
     NVME_OACS_FW        = 1 << 2,
     NVME_OACS_FEMU_OC_DEV  = 1 << 3,
-    NVME_OACS_DBBUF     = 1 << 7,
+    NVME_OACS_DBBUF     = 1 << 8,
 };
 
 enum NvmeIdCtrlOncs {
