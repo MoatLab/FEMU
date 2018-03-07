@@ -166,6 +166,7 @@
 
 #define FEMU_WHITEBOX_MODE      0
 #define FEMU_BLACKBOX_MODE      1
+#define FEMU_DEF_NOSSD_MODE		2
 
 extern void SSD_INIT(struct ssdstate *ssd);
 extern int64_t SSD_READ(struct ssdstate *ssd, unsigned int length, int64_t sector_nb);
@@ -551,7 +552,9 @@ static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
             n->cqe_size);
     }
 
-    femu_oc_post_cqe(n, req);
+	if (n->femu_mode == FEMU_WHITEBOX_MODE) {
+		femu_oc_post_cqe(n, req);
+	}
 
     cqe->status = cpu_to_le16((req->status << 1) | phase);
     cqe->sq_id = cpu_to_le16(sq->sqid);
@@ -911,25 +914,27 @@ void nvme_rw_cb(void *opaque, int ret)
         if (req->is_write) {
             bitmap_clear(ns->util, req->slba, req->nlb);
         }
-    } else {
-        if (femu_oc_dev(n)) {
-            if (femu_oc_hybrid_dev(n) && req->is_write) {
-                if (req->nlb > 1) {
-                    /* NOTE: This causes segfault with rpc
-                       int i;
-                       for (i = 0; i < req->nlb; i++)
-                       ns->tbl[req->femu_oc_slba + i] =
-                       req->femu_oc_ppa_list[i]; */
-                } else {
-                    ns->tbl[req->femu_oc_slba] = req->slba;
-                }
-            }
+	} else {
+		if (n->femu_mode == FEMU_WHITEBOX_MODE) {
+			if (femu_oc_dev(n)) {
+				if (femu_oc_hybrid_dev(n) && req->is_write) {
+					if (req->nlb > 1) {
+						/* NOTE: This causes segfault with rpc
+						   int i;
+						   for (i = 0; i < req->nlb; i++)
+						   ns->tbl[req->femu_oc_slba + i] =
+						   req->femu_oc_ppa_list[i]; */
+					} else {
+						ns->tbl[req->femu_oc_slba] = req->slba;
+					}
+				}
 
-            /* TODO: Check this on spec 2.0 format */
-            if (!femu_oc_hybrid_dev(n) && req->femu_oc_ppa_list)
-                g_free(req->femu_oc_ppa_list);
-        }
-    }
+				/* TODO: Check this on spec 2.0 format */
+				if (!femu_oc_hybrid_dev(n) && req->femu_oc_ppa_list)
+					g_free(req->femu_oc_ppa_list);
+			}
+		}
+	}
 
     if (req->qsg.nsg) {
         qemu_sglist_destroy(&req->qsg);
@@ -962,8 +967,10 @@ uint16_t nvme_rw_check_req(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
             offsetof(NvmeRwCmd, control), ctrl, ns->id);
         /* Not contemplated in LightNVM for now */
-        if (femu_oc_dev(n))
-            return 0;
+		if (n->femu_mode == FEMU_WHITEBOX_MODE) {
+			if (femu_oc_dev(n))
+				return 0;
+		}
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     if (!req->is_write && find_next_bit(ns->uncorrectable, elba, slba) < elba) {
@@ -1893,13 +1900,13 @@ static uint64_t ns_blks(NvmeNamespace *ns, uint8_t lba_idx)
 
     printf("Coperd,ns_size=%ld,lba_ds=%d,lba_sz=%d\n", ns_size, lba_ds, lba_sz);
     return ns_size / lba_sz;
-    if (femu_oc_dev(n)) {
-        /* p_ent: LBA + md + L2P entry */
-        uint64_t p_ent = lba_sz + sizeof(*(ns->tbl));
-        uint64_t p_ents = ns_size / p_ent;
+	if (n->femu_mode == FEMU_WHITEBOX_MODE && femu_oc_dev(n)) {
+		/* p_ent: LBA + md + L2P entry */
+		uint64_t p_ent = lba_sz + sizeof(*(ns->tbl));
+		uint64_t p_ents = ns_size / p_ent;
 
-        return p_ents;
-    } else {
+		return p_ents;
+	} else {
         return ns_size / lba_sz;
     }
 }
@@ -1927,7 +1934,7 @@ static void nvme_partition_ns(NvmeNamespace *ns, uint8_t lba_idx)
     blks = ns->ns_blks;
     bdrv_blks = ns_bdrv_blks(ns, ns->ns_blks, lba_idx);
 
-    if (femu_oc_dev(n) && femu_oc_hybrid_dev(n)) {
+    if (n->femu_mode == FEMU_WHITEBOX_MODE && femu_oc_dev(n) && femu_oc_hybrid_dev(n)) {
         ns->tbl_dsk_start_offset =
             (ns->start_block + bdrv_blks) << BDRV_SECTOR_BITS;
         ns->tbl_entries = blks;
@@ -2392,8 +2399,10 @@ static void nvme_clear_ctrl(NvmeCtrl *n)
     }
 
     blk_flush(n->conf.blk);
-    if (femu_oc_hybrid_dev(n))
-        femu_oc_flush_tbls(n);
+	if (n->femu_mode == FEMU_WHITEBOX_MODE) {
+		if (femu_oc_hybrid_dev(n))
+			femu_oc_flush_tbls(n);
+	}
     n->bar.cc = 0;
     n->features.temp_thresh = 0x14d;
     n->temp_warn_issued = 0;
@@ -2682,8 +2691,10 @@ static void nvme_init_namespaces(NvmeCtrl *n)
         id_ns->dpc = n->dpc;
         id_ns->dps = n->dps;
 
-        if (femu_oc_dev(n))
-            id_ns->vs[0] = 0x1;
+		if (n->femu_mode == FEMU_WHITEBOX_MODE) {
+			if (femu_oc_dev(n))
+				id_ns->vs[0] = 0x1;
+		}
 
         /* TOFIX */
         for (j = 0; j < ji; j++) {
@@ -2773,8 +2784,10 @@ static void nvme_init_ctrl(NvmeCtrl *n)
     NVME_CAP_SET_DSTRD(n->bar.cap, n->db_stride);
     NVME_CAP_SET_NSSRS(n->bar.cap, 0);
     NVME_CAP_SET_CSS(n->bar.cap, 1);
-    if (femu_oc_dev(n))
-        NVME_CAP_SET_FEMU_OC(n->bar.cap, 1);
+	if (n->femu_mode == FEMU_WHITEBOX_MODE) {
+		if (femu_oc_dev(n))
+			NVME_CAP_SET_FEMU_OC(n->bar.cap, 1);
+	}
 
     NVME_CAP_SET_MPSMIN(n->bar.cap, n->mpsmin);
     NVME_CAP_SET_MPSMAX(n->bar.cap, n->mpsmax);
@@ -2854,8 +2867,10 @@ static int nvme_init(PCIDevice *pci_dev)
     nvme_init_pci(n);
     nvme_init_ctrl(n);
     nvme_init_namespaces(n);
-    if (femu_oc_dev(n))
-        return femu_oc_init(n);
+	if (n->femu_mode == FEMU_WHITEBOX_MODE) {
+		if (femu_oc_dev(n))
+			return femu_oc_init(n);
+	}
 
     struct ssdstate *ssd = &(n->ssd);
     if (n->femu_mode == FEMU_BLACKBOX_MODE)
@@ -2882,9 +2897,11 @@ static void nvme_exit(PCIDevice *pci_dev)
         memory_region_unref(&n->ctrl_mem);
     }
 
-    if (femu_oc_dev(n)) {
-        femu_oc_exit(n);
-    }
+	if (n->femu_mode == FEMU_WHITEBOX_MODE) {
+		if (femu_oc_dev(n)) {
+			femu_oc_exit(n);
+		}
+	}
 }
 
 static Property nvme_props[] = {
@@ -2920,7 +2937,7 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT16("oncs", NvmeCtrl, oncs, NVME_ONCS_DSM),
     DEFINE_PROP_UINT16("vid", NvmeCtrl, vid, 0x1d1d),
     DEFINE_PROP_UINT16("did", NvmeCtrl, did, 0x1f1f),
-    DEFINE_PROP_UINT8("femu_mode", NvmeCtrl, femu_mode, FEMU_WHITEBOX_MODE),
+    DEFINE_PROP_UINT8("femu_mode", NvmeCtrl, femu_mode, FEMU_DEF_NOSSD_MODE),
     DEFINE_PROP_UINT8("lver", NvmeCtrl, femu_oc_ctrl.id_ctrl.ver_id, 0),
     DEFINE_PROP_UINT32("ll2pmode", NvmeCtrl, femu_oc_ctrl.id_ctrl.dom, 1),
     DEFINE_PROP_UINT16("lsec_size", NvmeCtrl, femu_oc_ctrl.params.sec_size, 4096),
