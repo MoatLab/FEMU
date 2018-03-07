@@ -161,6 +161,9 @@
 #define NVME_TEMPERATURE        0x143
 #define NVME_OP_ABORTED         0xff
 
+#define SQ_POLLING_PERIOD_NS	(5000)
+#define CQ_POLLING_PERIOD_NS	(5000)
+
 #define FEMU_WHITEBOX_MODE      0
 #define FEMU_BLACKBOX_MODE      1
 
@@ -639,7 +642,7 @@ static void nvme_post_cqes_io(void *opaque)
         nc++;
     }
 
-    ntt = (ntt == 0) ? qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + 10000 : ntt;
+    ntt = (ntt == 0) ? qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + CQ_POLLING_PERIOD_NS : ntt;
     timer_mod(cq->timer, ntt);
 
     /* Coperd: only interrupt guest when we "do" complete some I/Os */
@@ -710,7 +713,7 @@ static void nvme_post_cqes(void *opaque)
         nc++;
     }
 
-    ntt = (ntt == 0) ? qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + 10000 : ntt;
+    ntt = (ntt == 0) ? qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + 8000 : ntt;
     timer_mod(cq->timer, ntt);
 
     /* Coperd: only interrupt guest when we "do" complete some I/Os */
@@ -1350,6 +1353,8 @@ static uint16_t nvme_init_sq(NvmeSQueue *sq, NvmeCtrl *n, uint64_t dma_addr,
     uint16_t sqid, uint16_t cqid, uint16_t size, enum NvmeQueueFlags prio,
     int contig)
 {
+	uint8_t stride = n->db_stride;
+	int dbbuf_entry_sz = 1 << (2 + stride);
     int i;
     NvmeCQueue *cq;
 
@@ -1396,8 +1401,11 @@ static uint16_t nvme_init_sq(NvmeSQueue *sq, NvmeCtrl *n, uint64_t dma_addr,
     } else {
         sq->timer = timer_new_ns(QEMU_CLOCK_REALTIME, nvme_process_sq_io, sq);
     }
-    sq->db_addr = 0;
-    sq->eventidx_addr = 0;
+	if (sqid && n->dbs_addr && n->eis_addr) {
+		sq->db_addr = n->dbs_addr + 2 * sqid * dbbuf_entry_sz;
+		sq->eventidx_addr = n->eis_addr + 2 * sqid * dbbuf_entry_sz;
+		printf("Coperd, SQ, db_addr=%" PRIu64 ", eventidx_addr=%" PRIu64 "\n", sq->db_addr, sq->eventidx_addr);
+	}
 
     assert(n->cq[cqid]);
     cq = n->cq[cqid];
@@ -1492,6 +1500,10 @@ static uint16_t nvme_init_cq(NvmeCQueue *cq, NvmeCtrl *n, uint64_t dma_addr,
     cq->vector = vector;
     cq->head = cq->tail = 0;
     cq->phys_contig = contig;
+
+	uint8_t stride = n->db_stride;
+	int dbbuf_entry_sz = 1 << (2 + stride);
+
     if (cq->phys_contig) {
         cq->dma_addr = dma_addr;
     } else {
@@ -1504,8 +1516,11 @@ static uint16_t nvme_init_cq(NvmeCQueue *cq, NvmeCtrl *n, uint64_t dma_addr,
 
     QTAILQ_INIT(&cq->req_list);
     QTAILQ_INIT(&cq->sq_list);
-    cq->db_addr = 0;
-    cq->eventidx_addr = 0;
+	if (cqid && n->dbs_addr && n->eis_addr) {
+		cq->db_addr = n->dbs_addr + (2 * cqid + 1) * dbbuf_entry_sz;
+		cq->eventidx_addr = n->eis_addr + (2 * cqid + 1) * dbbuf_entry_sz;
+		printf("Coperd, CQ, db_addr=%" PRIu64 ", eventidx_addr=%" PRIu64 "\n", cq->db_addr, cq->eventidx_addr);
+	}
     msix_vector_use(&n->parent_obj, cq->vector);
     n->cq[cqid] = cq;
     if (cq->cqid == 0) {
@@ -2026,39 +2041,42 @@ static uint16_t nvme_format(NvmeCtrl *n, NvmeCmd *cmd)
 
 static uint16_t nvme_set_db_memory(NvmeCtrl *n, const NvmeCmd *cmd)
 {
-    uint64_t db_addr = le64_to_cpu(cmd->prp1);
-    uint64_t eventidx_addr = le64_to_cpu(cmd->prp2);
-    int i;
+	uint64_t dbs_addr = le64_to_cpu(cmd->prp1);
+	uint64_t eis_addr = le64_to_cpu(cmd->prp2);
+	uint8_t stride = n->db_stride;
+	int dbbuf_entry_sz = 1 << (2 + stride);
+	int i;
 
-    /* Addresses should not be NULL and should be page aligned. */
-    if (db_addr == 0 || db_addr & (n->page_size - 1) ||
-        eventidx_addr == 0 || eventidx_addr & (n->page_size - 1)) {
-        return NVME_INVALID_MEMORY_ADDRESS | NVME_DNR;
-    }
+	/* Addresses should not be NULL and should be page aligned. */
+	if (dbs_addr == 0 || dbs_addr & (n->page_size - 1) ||
+			eis_addr == 0 || eis_addr & (n->page_size - 1)) {
+		return NVME_INVALID_FIELD | NVME_DNR;
+	}
 
-    /* This assumes all I/O queues are created before this command is handled.
-     * We skip the admin queues. */
-    for (i = 1; i < n->num_queues; i++) {
-        NvmeSQueue *sq = n->sq[i];
-        NvmeCQueue *cq = n->cq[i];
+	n->dbs_addr = dbs_addr;
+	n->eis_addr = eis_addr;
 
-        if (sq) {
-            /* Submission queue tail pointer location, 2 * QID * stride. */
-            sq->db_addr = db_addr + 2 * i * (1 << (2  + n->db_stride));
-            sq->eventidx_addr = eventidx_addr + 2 * i *
-                                    (1 << (2 + n->db_stride));
-            printf("Coperd,DBBUF,sq[%d]:db_addr=%" PRIu64 ",eventidx_addr=%" PRIu64 "\n", i, sq->db_addr, sq->eventidx_addr);
-        }
-        if (cq) {
-            /* Completion queue head pointer location, (2 * QID + 1) * stride. */
-            cq->db_addr = db_addr + (2 * i + 1) * (1 << (2 + n->db_stride));
-            cq->eventidx_addr = eventidx_addr + (2 * i + 1) *
-                        (1 << (2 + n->db_stride));
-            printf("Coperd,DBBUF,cq[%d]:db_addr=%" PRIu64 ",eventidx_addr=%" PRIu64 "\n", i, cq->db_addr, cq->eventidx_addr);
-        }
-    }
-    printf("Coperd, nvme_set_db_memory returns SUCCESS!\n");
-    return NVME_SUCCESS;
+	/* This assumes all I/O queues are created before this command is handled.
+	 * We skip the admin queues. */
+	for (i = 1; i < n->num_queues; i++) {
+		NvmeSQueue *sq = n->sq[i];
+		NvmeCQueue *cq = n->cq[i];
+
+		if (sq) {
+			/* Submission queue tail pointer location, 2 * QID * stride. */
+			sq->db_addr = dbs_addr + 2 * i * dbbuf_entry_sz;
+			sq->eventidx_addr = eis_addr + 2 * i * dbbuf_entry_sz;
+			printf("Coperd,DBBUF,sq[%d]:db_addr=%" PRIu64 ",eventidx_addr=%" PRIu64 "\n", i, sq->db_addr, sq->eventidx_addr);
+		}
+		if (cq) {
+			/* Completion queue head pointer location, (2 * QID + 1) * stride. */
+			cq->db_addr = dbs_addr + (2 * i + 1) * dbbuf_entry_sz;
+			cq->eventidx_addr = eis_addr + (2 * i + 1) * dbbuf_entry_sz;
+			printf("Coperd,DBBUF,cq[%d]:db_addr=%" PRIu64 ",eventidx_addr=%" PRIu64 "\n", i, cq->db_addr, cq->eventidx_addr);
+		}
+	}
+	printf("Coperd, nvme_set_db_memory returns SUCCESS!\n");
+	return NVME_SUCCESS;
 }
 
 extern int64_t nand_read_upper_t;
@@ -2262,7 +2280,7 @@ static void nvme_process_sq_io(void *opaque)
      * good tradeoff between CPU utilization and performance
      * TODO: design an algo to automatically adjust polling period
      */
-    timer_mod(sq->timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + 10000);
+    timer_mod(sq->timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + SQ_POLLING_PERIOD_NS);
 
     if (on) {
         qemu_mutex_lock_iothread();
