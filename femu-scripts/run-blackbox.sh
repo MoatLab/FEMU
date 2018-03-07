@@ -1,23 +1,30 @@
 #!/bin/bash
 # Huaicheng Li <huaicheng@cs.uchicago.edu>
-# Run VM with FEMU support
+# Run VM with FEMU support: FEMU as a black-box SSD (FTL managed by the device)
 
+# image directory
 IMGDIR=$HOME/images
+# virtual machine disk image
+OSIMGF=$IMGDIR/u14s.qcow2
+# virtual NVMe disk image
+NVMEIMGF=$IMGDIR/vssd1.raw
+# virtual NVMe disk size: 1GB
+NVMEIMGSZ=1G
 
-is_mounted=$(mount | grep "/mnt/tmpfs")
+# every time we create a new SSD image file
+#sudo rm -rf $IMGDIR/vssd1.raw
 
-if [[ $is_mounted == "" ]]; then
-    sudo mkdir -p /mnt/tmpfs
-    # huge=always
-    #sudo mount -t tmpfs -o size=4G,huge=always tmpfs /mnt/tmpfs
+if [[ ! -e "$OSIMGF" ]]; then
+	echo ""
+	echo "VM disk image couldn't be found ..."
+	echo "Please prepare a usable VM image and place it as $OSIMGF"
+	echo "Once VM disk image is ready, please rerun this script again"
+	echo ""
+	exit
 fi
 
-
-# every time we run a new SSD
-sudo rm -rf $IMGDIR/vssd1.raw
-
 # Please match the image file size with the emulated SSD size in vssd1.conf file
-[[ ! -e $IMGDIR/vssd1.raw ]] && ./qemu-img create -f raw $IMGDIR/vssd1.raw 1G
+[[ ! -e $NVMEIMGF ]] && ./qemu-img create -f raw $NVMEIMGF $NVMEIMGSZ
 
 # huge page related settings
 #echo 25000 | sudo tee /proc/sys/vm/nr_hugepages
@@ -25,6 +32,7 @@ sudo rm -rf $IMGDIR/vssd1.raw
 #[[ ! -d /dev/hugepages2M ]] && sudo mkdir /dev/hugepages2M && sudo mount -t hugetlbfs none /dev/hugepages2M -o pagesize=2M
 
 
+# Useful options you may want to further try:
 #-object iothread,id=iothread0 \
 #-device virtio-blk-pci,iothread=iothread0,drive=id0 \
     #-nographic \
@@ -43,20 +51,20 @@ sudo rm -rf $IMGDIR/vssd1.raw
 
 
 sudo x86_64-softmmu/qemu-system-x86_64 \
-    -name "nvme-FEMU-test" \
+    -name "FEMU-blackbox-SSD" \
     -enable-kvm \
     -cpu host \
     -smp 4 \
     -m 4G \
     -device virtio-scsi-pci,id=scsi0 \
     -device scsi-hd,drive=hd0 \
-    -drive file=$IMGDIR/u14s.qcow2,if=none,aio=native,cache=none,format=qcow2,id=hd0 \
-    -drive file=$IMGDIR/vssd1.raw,if=none,aio=threads,format=raw,id=id0 \
-    -device nvme,drive=id0,serial=serial0,id=nvme0 \
+    -drive file=$OSIMGF,if=none,aio=native,cache=none,format=qcow2,id=hd0 \
+    -drive file=$NVMEIMGF,if=none,aio=threads,format=raw,id=id0 \
+    -device nvme,femu_mode=1,drive=id0,serial=serial0,id=nvme0 \
     -net user,hostfwd=tcp::8080-:22 \
     -net nic,model=virtio \
     -nographic \
-    -qmp unix:./qmp-sock,server,nowait | tee /media/log
+    -qmp unix:./qmp-sock,server,nowait 
     #-object iothread,id=iothread0 \
     #-display none \
     #-nographic \
@@ -65,6 +73,10 @@ sudo x86_64-softmmu/qemu-system-x86_64 \
     #
 
 #sleep 10
+
+#
+# Please manually run the following commands for better FEMU performance/accuracy
+#
 
 #./pin.sh
 #sshsim "~/tsc.sh"
