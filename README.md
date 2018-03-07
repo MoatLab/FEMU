@@ -19,8 +19,8 @@ Installation
 	# Switch to the FEMU building directory
 	cd femu/build-femu
 	# Copy femu script
-  cp ../femu-scripts/femu-copy-scripts.sh .
-  ./femu-copy-scripts.sh .
+  	cp ../femu-scripts/femu-copy-scripts.sh .
+  	./femu-copy-scripts.sh .
 	# only Debian/Ubuntu based distributions supported
 	sudo ./pkgdep.sh 
 	```
