@@ -548,7 +548,7 @@ uint16_t femu_oc_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t eppa;
     uint64_t ppa;
     uint64_t aio_sector_list[ln->params.max_sec_per_rq];
-    uint32_t nlb  = le16_to_cpu(lrw->nlb) + 1;
+    uint16_t nlb  = le16_to_cpu(lrw->nlb) + 1;
     uint64_t prp1 = le64_to_cpu(lrw->prp1);
     uint64_t prp2 = le64_to_cpu(lrw->prp2);
     uint64_t spba = le64_to_cpu(lrw->spba);
@@ -840,8 +840,12 @@ uint16_t femu_oc_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     req->expire_time = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + max - overhead;
     //printf("Coperd,should,%" PRId64 "\n", max);
 
-    if (meta && !is_write)
-        nvme_addr_write(n, meta, (void *)msl, n_pages * ln->params.sos);
+	/* Coperd: TOFIX, fix the meta buf later. For now, comment out the part to
+	 * mask LightNVM corrupted read LBA warnings */
+#if 0
+	if (meta && !is_write) nvme_addr_write(n, meta, (void *)msl, n_pages *
+		ln->params.sos);
+#endif
 
     g_free(msl);
 
