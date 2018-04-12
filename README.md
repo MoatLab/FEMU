@@ -55,10 +55,10 @@ Installation
   Option 1: Build your own VM image by following guides (e.g.
   [here](https://help.ubuntu.com/community/Installation/QemuEmulator#Installation_of_an_operating_system_from_ISO_to_the_QEMU_environment)).
   After the guest OS is installed, make following changes to redirect VM output
-  to the console, instead of using a separate GUI window.
+  to the console, instead of using a separate GUI window. (**Desktop version guest OS is not tested**)
 
    - Inside your guest Ubuntu server, edit `/etc/default/grub`, make sure the
-     following options are set
+     following options are set.
 
 ```
 GRUB_CMDLINE_LINUX="ip=dhcp console=ttyS0,115200 console=tty console=ttyS0"
@@ -66,13 +66,30 @@ GRUB_TERMINAL=serial
 GRUB_SERIAL_COMMAND="serial --unit=0 --speed=115200 --word=8 --parity=no --stop=1"
 ```
 
-  Update the grub by `sudo update-grub`. Now you're ready to `Run FEMU`. If you stick to a Desktop version guest OS,
+   - Still in the VM, update the grub
+   
+```
+$ sudo update-grub
+```
+  
+  Now you're ready to `Run FEMU`. If you stick to a Desktop version guest OS,
   please remove "-nographics" command option from the running script before
   running FEMU.
 
 
   Option 2: Use our VM image, please download it from our site(??) and save it as
   `$HOME/images/u14s.qcow2`
+ 
+ 4. Login to FEMU VM
+  - If you correctly setup the aforementioned configurations, you should be able to
+  see **text-based** VM login in the same terminal where you issue the running scripts.
+  - Or, more conviniently, FEMU running script has mapped host port `8080` to guest VM
+  port `22`, thus, after you install and run `openssh-server` inside the VM, you can also
+  ssh into the VM via below command line. (Please run it from your host machine)
+  
+  ```
+  $ ssh -p8080 $user@localhost
+  ```
 
 Run FEMU
 --------
