@@ -66,7 +66,7 @@ GRUB_TERMINAL=serial
 GRUB_SERIAL_COMMAND="serial --unit=0 --speed=115200 --word=8 --parity=no --stop=1"
 ```
 
-  Now you're ready to `Run FEMU`. If you stick to a Desktop version guest OS,
+  Update the grub by `sudo update-grub`. Now you're ready to `Run FEMU`. If you stick to a Desktop version guest OS,
   please remove "-nographics" command option from the running script before
   running FEMU.
 
