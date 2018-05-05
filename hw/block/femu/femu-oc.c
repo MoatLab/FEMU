@@ -716,7 +716,7 @@ uint16_t femu_oc_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         int nb_secs_to_read = 0;
         now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
         for (i = 0; i <= secs_idx; i++) {
-            ppa = psl[si]; 
+            ppa = psl[si];
             nb_secs_to_read = secs_layout[i];
             //printf("Coperd,secs_layout[%d]=%d,si=%d\n", i, nb_secs_to_read, si);
             si += nb_secs_to_read;
@@ -749,7 +749,7 @@ uint16_t femu_oc_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             }
             start_data_transfer_ts = chip_next_avail_time[lunid];
             /* Coperd: TODO: replace 4 with a calculated value (c->num_sec) */
-            assert(nb_secs_to_read <= 4 && nb_secs_to_read >= 1);
+            assert(nb_secs_to_read <= 8 && nb_secs_to_read >= 1);
             int chnl_transfer_time = chnl_page_tr_t * nb_secs_to_read / 4;
 
             if (start_data_transfer_ts < chnl_next_avail_time[ch]) {
@@ -1393,7 +1393,7 @@ fail_bbt:
 
     return ret;
 }
- 
+
 int femu_oc_init(NvmeCtrl *n)
 {
     FEMU_OC_Ctrl *ln;
