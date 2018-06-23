@@ -1198,8 +1198,9 @@ uint16_t femu_oc_erase_async(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     int ch = (psl[0] & ln->ppaf.ch_mask) >> ln->ppaf.ch_offset;
     int lun = (psl[0] & ln->ppaf.lun_mask) >> ln->ppaf.lun_offset;
-    int num_ch = ln->id_ctrl.groups[0].num_ch;
-    int lunid = ch * num_ch + lun;
+    //int num_ch = ln->id_ctrl.groups[0].num_ch;
+    int num_lun = ln->id_ctrl.groups[0].num_lun;
+    int lunid = ch * num_lun + lun;
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     //printf("Coperd,in erase, meta ops time: %" PRId64 ", overhead=%" PRId64 "\n", now - req->st, overhead);
     if (now < chip_next_avail_time[lunid]) {
