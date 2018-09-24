@@ -2,6 +2,8 @@ FEMU README
 ===========
 -------------------
 
+Notes: I'm upgrading FEMU to use QEMU v2.12 with some optimizations and fixes. Please stay tuned. --Huaicheng 24/09/2018
+
 Project Description
 -------------------
 
