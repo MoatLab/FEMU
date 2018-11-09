@@ -299,12 +299,12 @@ void nvme_addr_write(NvmeCtrl *n, hwaddr addr, void *buf, int size)
 
 static int nvme_check_sqid(NvmeCtrl *n, uint16_t sqid)
 {
-    return sqid < n->num_queues && n->sq[sqid] != NULL ? 0 : -1;
+    return sqid <= n->num_io_queues && n->sq[sqid] != NULL ? 0 : -1;
 }
 
 static int nvme_check_cqid(NvmeCtrl *n, uint16_t cqid)
 {
-    return cqid < n->num_queues && n->cq[cqid] != NULL ? 0 : -1;
+    return cqid <= n->num_io_queues && n->cq[cqid] != NULL ? 0 : -1;
 }
 
 static void nvme_inc_cq_tail(NvmeCQueue *cq)
@@ -1562,7 +1562,7 @@ static uint16_t nvme_create_cq(NvmeCtrl *n, NvmeCmd *cmd)
     if (!prp1) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
-    if (vector > n->num_queues) {
+    if (vector > n->num_io_queues) {
         return NVME_INVALID_IRQ_VECTOR | NVME_DNR;
     }
     if (!(NVME_CQ_FLAGS_PC(qflags)) && NVME_CAP_CQR(n->bar.cap)) {
@@ -1628,7 +1628,8 @@ static uint16_t nvme_get_feature(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
             MIN(sizeof(*rt), (dw11 & 0x3f) * sizeof(*rt)),
             prp1, prp2);
     case NVME_NUMBER_OF_QUEUES:
-        req->cqe.n.result = cpu_to_le32(n->num_queues | (n->num_queues << 16));
+        req->cqe.n.result = cpu_to_le32((n->num_io_queues - 1) |
+                ((n->num_io_queues - 1) << 16));
         break;
     case NVME_TEMPERATURE_THRESHOLD:
         req->cqe.n.result = cpu_to_le32(n->features.temp_thresh);
@@ -1643,7 +1644,7 @@ static uint16_t nvme_get_feature(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         req->cqe.n.result = cpu_to_le32(n->features.int_coalescing);
         break;
     case NVME_INTERRUPT_VECTOR_CONF:
-        if ((dw11 & 0xffff) > n->num_queues) {
+        if ((dw11 & 0xffff) > n->num_io_queues) {
             return NVME_INVALID_FIELD | NVME_DNR;
         }
         req->cqe.n.result = cpu_to_le32(
@@ -1690,7 +1691,8 @@ static uint16_t nvme_set_feature(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
             MIN(sizeof(*rt), (dw11 & 0x3f) * sizeof(*rt)),
             prp1, prp2);
     case NVME_NUMBER_OF_QUEUES:
-        req->cqe.n.result = cpu_to_le32(n->num_queues | (n->num_queues << 16));
+        /* Coperd: num_io_queues is 0-based */
+        req->cqe.n.result = cpu_to_le32((n->num_io_queues - 1) | ((n->num_io_queues - 1) << 16));
         break;
     case NVME_TEMPERATURE_THRESHOLD:
         n->features.temp_thresh = dw11;
@@ -1714,7 +1716,7 @@ static uint16_t nvme_set_feature(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         n->features.int_coalescing = dw11;
         break;
     case NVME_INTERRUPT_VECTOR_CONF:
-        if ((dw11 & 0xffff) > n->num_queues) {
+        if ((dw11 & 0xffff) > n->num_io_queues) {
             return NVME_INVALID_FIELD | NVME_DNR;
         }
         n->features.int_vector_config[dw11 & 0xffff] = dw11 & 0x1ffff;
@@ -2065,7 +2067,7 @@ static uint16_t nvme_set_db_memory(NvmeCtrl *n, const NvmeCmd *cmd)
 
 	/* This assumes all I/O queues are created before this command is handled.
 	 * We skip the admin queues. */
-	for (i = 1; i < n->num_queues; i++) {
+	for (i = 1; i <= n->num_io_queues; i++) {
 		NvmeSQueue *sq = n->sq[i];
 		NvmeCQueue *cq = n->cq[i];
 
@@ -2378,12 +2380,12 @@ static void nvme_clear_ctrl(NvmeCtrl *n)
     NvmeAsyncEvent *event;
     int i;
 
-    for (i = 0; i < n->num_queues; i++) {
+    for (i = 0; i <= n->num_io_queues; i++) {
         if (n->sq[i] != NULL) {
             nvme_free_sq(n->sq[i], n);
         }
     }
-    for (i = 0; i < n->num_queues; i++) {
+    for (i = 0; i <= n->num_io_queues; i++) {
         if (n->cq[i] != NULL) {
             nvme_free_cq(n->cq[i], n);
         }
@@ -2646,7 +2648,7 @@ static int nvme_check_constraints(NvmeCtrl *n)
 {
     if ((!(n->conf.blk)) || !(n->serial) ||
         (n->num_namespaces == 0 || n->num_namespaces > NVME_MAX_NUM_NAMESPACES) ||
-        (n->num_queues < 1 || n->num_queues > NVME_MAX_QS) ||
+        (n->num_io_queues < 1 || n->num_io_queues > NVME_MAX_QS) ||
         (n->db_stride > NVME_MAX_STRIDE) ||
         (n->max_q_ents < 1) ||
         (n->max_sqes > NVME_MAX_QUEUE_ES || n->max_cqes > NVME_MAX_QUEUE_ES ||
@@ -2765,14 +2767,14 @@ static void nvme_init_ctrl(NvmeCtrl *n)
     n->features.temp_thresh     = 0x14d;
     n->features.err_rec         = 0;
     n->features.volatile_wc     = n->vwc;
-    n->features.num_queues      = (n->num_queues - 1) |
-                                 ((n->num_queues - 1) << 16);
+    n->features.num_io_queues      = (n->num_io_queues - 1) |
+                                 ((n->num_io_queues - 1) << 16);
     n->features.int_coalescing  = n->intc_thresh | (n->intc_time << 8);
     n->features.write_atomicity = 0;
     n->features.async_config    = 0x0;
     n->features.sw_prog_marker  = 0;
 
-    for (i = 0; i < n->num_queues; i++) {
+    for (i = 0; i <= n->num_io_queues; i++) {
         n->features.int_vector_config[i] = i | (n->intc << 16);
     }
 
@@ -2816,7 +2818,7 @@ static void nvme_init_pci(NvmeCtrl *n)
     pci_register_bar(&n->parent_obj, 0,
         PCI_BASE_ADDRESS_SPACE_MEMORY | PCI_BASE_ADDRESS_MEM_TYPE_64,
         &n->iomem);
-    msix_init_exclusive_bar(&n->parent_obj, n->num_queues, 4, NULL);
+    msix_init_exclusive_bar(&n->parent_obj, n->num_io_queues, 4, NULL);
     msi_init(&n->parent_obj, 0x50, 32, true, false, NULL);
 
     if (n->cmbsz) {
@@ -2853,15 +2855,16 @@ static int nvme_init(PCIDevice *pci_dev)
     n->heap_storage = g_malloc0(bs_size);
 
     n->start_time = time(NULL);
-    n->reg_size = pow2ceil(0x1004 + 2 * (n->num_queues + 1) * 4);
+    n->reg_size = pow2ceil(0x1004 + 2 * (n->num_io_queues + 1) * 4);
     n->ns_size = bs_size / (uint64_t)n->num_namespaces;
 
-    n->sq = g_malloc0(sizeof(*n->sq)*n->num_queues);
-    n->cq = g_malloc0(sizeof(*n->cq)*n->num_queues);
+    /* Coperd: [1..num_io_queues] are used for IO queues */
+    n->sq = g_malloc0(sizeof(*n->sq) * (n->num_io_queues + 1));
+    n->cq = g_malloc0(sizeof(*n->cq) * (n->num_io_queues + 1));
     n->namespaces = g_malloc0(sizeof(*n->namespaces) * n->num_namespaces);
     n->elpes = g_malloc0((n->elpe + 1) * sizeof(*n->elpes));
     n->aer_reqs = g_malloc0((n->aerl + 1) * sizeof(*n->aer_reqs));
-    n->features.int_vector_config = g_malloc0(n->num_queues *
+    n->features.int_vector_config = g_malloc0((n->num_io_queues + 1) *
         sizeof(*n->features.int_vector_config));
 
     nvme_init_pci(n);
@@ -2908,7 +2911,7 @@ static Property nvme_props[] = {
     DEFINE_BLOCK_PROPERTIES(NvmeCtrl, conf),
     DEFINE_PROP_STRING("serial", NvmeCtrl, serial),
     DEFINE_PROP_UINT32("namespaces", NvmeCtrl, num_namespaces, 1),
-    DEFINE_PROP_UINT32("queues", NvmeCtrl, num_queues, 64),
+    DEFINE_PROP_UINT32("queues", NvmeCtrl, num_io_queues, 1),
     DEFINE_PROP_UINT32("entries", NvmeCtrl, max_q_ents, 0x7ff),
     DEFINE_PROP_UINT8("max_cqes", NvmeCtrl, max_cqes, 0x4),
     DEFINE_PROP_UINT8("max_sqes", NvmeCtrl, max_sqes, 0x6),

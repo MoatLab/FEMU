@@ -611,7 +611,7 @@ typedef struct NvmeFeatureVal {
     uint32_t    temp_thresh;
     uint32_t    err_rec;
     uint32_t    volatile_wc;
-    uint32_t    num_queues;
+    uint32_t    num_io_queues;
     uint32_t    int_coalescing;
     uint32_t    *int_vector_config;
     uint32_t    write_atomicity;
@@ -846,7 +846,7 @@ typedef struct NvmeCtrl {
     uint16_t    oncs;
     uint32_t    reg_size;
     uint32_t    num_namespaces;
-    uint32_t    num_queues;
+    uint32_t    num_io_queues;
     uint32_t    max_q_ents;
     uint64_t    ns_size;
     uint8_t     db_stride;
