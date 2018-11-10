@@ -2,6 +2,8 @@
 #define HW_NVME_H
 #include "qemu/cutils.h"
 #include "qemu/bitops.h"
+#include "hw/virtio/vhost.h"
+#include "sysemu/hostmem.h"
 #include "femu/femu-oc.h"
 #include "ssd/vssim_config_manager.h"
 
@@ -792,10 +794,12 @@ typedef struct NvmeCQueue {
     uint16_t    irq_enabled;
     uint32_t    head;
     uint32_t    tail;
+    int32_t     virq;
     uint32_t    vector;
     uint32_t    size;
     uint64_t    dma_addr;
     uint64_t    *prp_list;
+    EventNotifier guest_notifier;
     QEMUTimer   *timer;
     QTAILQ_HEAD(sq_list, NvmeSQueue) sq_list;
     QTAILQ_HEAD(cq_req_list, NvmeRequest) req_list;
@@ -881,6 +885,9 @@ typedef struct NvmeCtrl {
     uint32_t    cmbsz;
     uint32_t    cmbloc;
     uint8_t     *cmbuf;
+
+    bool        dataplane_started;
+    bool        vector_poll_started;
 
     char            *serial;
     NvmeErrorLog    *elpes;
