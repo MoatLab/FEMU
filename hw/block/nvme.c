@@ -2875,6 +2875,11 @@ static int nvme_init(PCIDevice *pci_dev)
     }
 
     n->heap_storage = g_malloc0(bs_size);
+    if (n->heap_storage == NULL) {
+        error_report("FEMU: cannot allocate %ld bytes for emulating SSD,"
+                "make sure you have enough free DRAM in your host\n", bs_size);
+        exit(EXIT_FAILURE);
+    }
 
     n->start_time = time(NULL);
     n->reg_size = pow2ceil(0x1004 + 2 * (n->num_io_queues + 1) * 4);
