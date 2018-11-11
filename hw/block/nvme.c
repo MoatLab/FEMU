@@ -162,52 +162,6 @@
 #define NVME_TEMPERATURE        0x143
 #define NVME_OP_ABORTED         0xff
 
-#define SQ_POLLING_PERIOD_NS	(5000)
-#define CQ_POLLING_PERIOD_NS	(5000)
-
-#define FEMU_WHITEBOX_MODE      0
-#define FEMU_BLACKBOX_MODE      1
-#define FEMU_DEF_NOSSD_MODE		2
-
-extern void SSD_INIT(struct ssdstate *ssd);
-extern int64_t SSD_READ(struct ssdstate *ssd, unsigned int length, int64_t sector_nb);
-extern int64_t SSD_WRITE(struct ssdstate *ssd, unsigned int length, int64_t sector_nb);
-extern void femu_oc_exit(NvmeCtrl *n);
-extern int femu_oc_init(NvmeCtrl *n);
-extern int femu_oc_flush_tbls(NvmeCtrl *n);
-extern uint16_t femu_oc_bbt_set(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
-extern uint16_t femu_oc_bbt_get(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
-extern uint16_t femu_oc_get_l2p_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
-extern uint16_t femu_oc_identity(NvmeCtrl *n, NvmeCmd *cmd);
-extern void femu_oc_tbl_initialize(NvmeNamespace *ns);
-extern void femu_oc_post_cqe(NvmeCtrl *n, NvmeRequest *req);
-extern uint8_t femu_oc_dev(NvmeCtrl *n);
-extern uint8_t femu_oc_hybrid_dev(NvmeCtrl *n);
-extern uint16_t femu_oc_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
-    NvmeRequest *req);
-extern uint16_t femu_oc_erase_async(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
-    NvmeRequest *req);
-extern uint32_t femu_oc_tbl_size(NvmeNamespace *ns);
-
-uint16_t nvme_rw_check_req(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
-        NvmeRequest *req, uint64_t slba, uint64_t elba, uint32_t nlb,
-        uint16_t ctrl, uint64_t data_size, uint64_t meta_size);
-void nvme_set_error_page(NvmeCtrl *n, uint16_t sqid, uint16_t cid,
-        uint16_t status, uint16_t location, uint64_t lba, uint32_t nsid);
-void nvme_rw_cb(void *opaque, int ret);
-//static void nvme_process_sq(void *opaque);
-static void nvme_process_sq_admin(void *opaque);
-static void nvme_process_sq_io(void *opaque);
-void nvme_addr_read(NvmeCtrl *n, hwaddr addr, void *buf, int size);
-void nvme_addr_write(NvmeCtrl *n, hwaddr addr, void *buf, int size);
-uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov,
-        uint64_t prp1, uint64_t prp2, uint32_t len, NvmeCtrl *n);
-uint16_t nvme_dma_write_prp(NvmeCtrl *n, uint8_t *ptr, uint32_t len,
-        uint64_t prp1, uint64_t prp2);
-uint16_t nvme_dma_read_prp(NvmeCtrl *n, uint8_t *ptr, uint32_t len,
-        uint64_t prp1, uint64_t prp2);
-//void init_low_upp_layout(NvmeCtrl *n);
-
 static uint64_t nvme_heap_storage_rw(NvmeCtrl *n, NvmeNamespace *ns,
         NvmeCmd *cmd, NvmeRequest *req)
 {
@@ -2897,14 +2851,15 @@ static int nvme_init(PCIDevice *pci_dev)
     nvme_init_pci(n);
     nvme_init_ctrl(n);
     nvme_init_namespaces(n);
-    if (n->femu_mode == FEMU_WHITEBOX_MODE) {
-        if (femu_oc_dev(n))
-            return femu_oc_init(n);
-    }
 
-    struct ssdstate *ssd = &(n->ssd);
-    if (n->femu_mode == FEMU_BLACKBOX_MODE)
+    if (n->femu_mode == FEMU_WHITEBOX_MODE) {
+        if (femu_oc_dev(n)) {
+            return femu_oc_init(n);
+        }
+    } else if (n->femu_mode == FEMU_BLACKBOX_MODE) {
+        struct ssdstate *ssd = &(n->ssd);
         SSD_INIT(ssd);
+    }
 
     return 0;
 }
