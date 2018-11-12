@@ -3,10 +3,12 @@
 
 #include <stdint.h>
 
+
 /* Coperd: FEMU memory backend structure */
 struct femu_mbe {
     void *mem_backend;
     int64_t size; /* in bytes */
 };
+
 
 #endif

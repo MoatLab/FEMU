@@ -53,11 +53,6 @@ void femu_destroy_mbe(struct femu_mbe *mbe)
     }
 }
 
-void femu_read_mbe_iov()
-{
-    return;
-}
-
 /* Coperd: directly read/write to memory backend from NVMe command */
 uint64_t femu_rw_mbe(NvmeCtrl *n, NvmeNamespace *ns,
         NvmeCmd *cmd, NvmeRequest *req)

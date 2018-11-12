@@ -21,29 +21,13 @@
 #include "god.h"
 #include "femu-oc.h"
 
-extern void nvme_set_error_page(NvmeCtrl *n, uint16_t sqid, uint16_t cid,
-        uint16_t status, uint16_t location, uint64_t lba, uint32_t nsid);
-extern void nvme_addr_read(NvmeCtrl *n, hwaddr addr, void *buf, int size);
-extern void nvme_addr_write(NvmeCtrl *n, hwaddr addr, void *buf, int size);
-extern uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov,
-        uint64_t prp1, uint64_t prp2, uint32_t len, NvmeCtrl *n);
-extern uint16_t nvme_rw_check_req(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
-        NvmeRequest *req, uint64_t slba, uint64_t elba, uint32_t nlb,
-        uint16_t ctrl, uint64_t data_size, uint64_t meta_size);
-extern uint16_t nvme_dma_read_prp(NvmeCtrl *n, uint8_t *ptr, uint32_t len,
-        uint64_t prp1, uint64_t prp2);
-extern uint16_t nvme_dma_write_prp(NvmeCtrl *n, uint8_t *ptr, uint32_t len,
-        uint64_t prp1, uint64_t prp2);
-
 int is_upper_page(int pg);
-void nvme_rw_cb(void *opaque, int ret);
 void init_low_upp_layout(NvmeCtrl *n);
-uint8_t femu_oc_dev(NvmeCtrl *n);
-uint8_t femu_oc_hybrid_dev(NvmeCtrl *n);
-void femu_oc_inject_w_err(FEMU_OC_Ctrl *ln, NvmeRequest *req, NvmeCqe *cqe);
-uint16_t femu_oc_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
-    NvmeRequest *req);
-void femu_oc_post_cqe(NvmeCtrl *n, NvmeCqe *cqe);
+//uint8_t femu_oc_dev(NvmeCtrl *n);
+//uint8_t femu_oc_hybrid_dev(NvmeCtrl *n);
+//uint16_t femu_oc_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
+    //NvmeRequest *req);
+//void femu_oc_post_cqe(NvmeCtrl *n, NvmeCqe *cqe);
 void print_ppa(FEMU_OC_Ctrl *ln, uint64_t ppa);
 int femu_oc_meta_write(FEMU_OC_Ctrl *ln, void *meta);
 int femu_oc_meta_read(FEMU_OC_Ctrl *ln, void *meta);
@@ -51,24 +35,11 @@ int64_t femu_oc_ppa_to_off(FEMU_OC_Ctrl *ln, uint64_t r);
 int femu_oc_meta_state_get(FEMU_OC_Ctrl *ln, uint64_t ppa, uint32_t *state);
 int femu_oc_meta_blk_set_erased(NvmeNamespace *ns, FEMU_OC_Ctrl *ln,
                                   uint64_t *psl, int nr_ppas, int pmode);
-void femu_oc_tbl_initialize(NvmeNamespace *ns);
 void femu_oc_erase_io_complete_cb(void *opaque, int ret);
 int femu_oc_meta_state_set_written(FEMU_OC_Ctrl *ln, uint64_t ppa);
-void *femu_oc_meta_index(FEMU_OC_Ctrl *ln, void *meta, uint32_t index);
-uint32_t femu_oc_tbl_size(NvmeNamespace *ns);
-uint16_t femu_oc_identity(NvmeCtrl *n, NvmeCmd *cmd);
-uint16_t femu_oc_get_l2p_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe);
-uint16_t femu_oc_bbt_get(NvmeCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe);
-uint16_t femu_oc_bbt_set(NvmeCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe);
-int femu_oc_read_tbls(NvmeCtrl *n);
-int femu_oc_flush_tbls(NvmeCtrl *n);
-uint16_t femu_oc_erase_async(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
-    NvmeRequest *req);
 void femu_oc_init_id_ctrl(FEMU_OC_Ctrl *ln);
 int femu_oc_init_meta(FEMU_OC_Ctrl *ln);
 int femu_oc_bbtbl_init(NvmeCtrl *n, NvmeNamespace *ns);
-int femu_oc_init(NvmeCtrl *n);
-void femu_oc_exit(NvmeCtrl *n);
 
 int64_t chip_next_avail_time[128]; /* Coperd: when chip will be not busy */
 int64_t chnl_next_avail_time[16]; /* Coperd: when chnl will be free */
@@ -147,36 +118,6 @@ void femu_oc_tbl_initialize(NvmeNamespace *ns)
 
     for (i = 0; i < len; i++)
         ns->tbl[i] = FEMU_OC_LBA_UNMAPPED;
-}
-
-void femu_oc_inject_w_err(FEMU_OC_Ctrl *ln, NvmeRequest *req, NvmeCqe *cqe)
-{
-   if (ln->err_write && req->is_write) {
-        if (ln->debug)
-            printf("nvme:err_stat:err_write_cnt:%d,nppas:%d,err_write:%d, n_err_write:%d\n",
-                    ln->err_write_cnt, req->nlb, ln->err_write, ln->n_err_write);
-        if ((ln->err_write_cnt + req->nlb) > ln->err_write) {
-            int i;
-            int bit;
-
-            /* kill n_err_write sectors in ppa list */
-            for (i = 0; i < req->nlb; i++) {
-                if (ln->err_write_cnt + i < ln->err_write)
-                    continue;
-
-                bit = i;
-                bitmap_set(&cqe->res64, bit, ln->n_err_write);
-                break;
-            }
-
-            if (ln->debug)
-                printf("nvme: injected error:%u, n:%u, bitmap:%lu\n",
-                                             bit, ln->n_err_write, cqe->res64);
-            req->status = 0x40ff; /* FAIL WRITE status code */
-            ln->err_write_cnt = 0;
-        }
-        ln->err_write_cnt += req->nlb;
-    }
 }
 
 void print_ppa(FEMU_OC_Ctrl *ln, uint64_t ppa)
@@ -513,7 +454,7 @@ int femu_oc_meta_state_set_written(FEMU_OC_Ctrl *ln, uint64_t ppa)
     return 0;
 }
 
-void *femu_oc_meta_index(FEMU_OC_Ctrl *ln, void *meta, uint32_t index)
+static void *femu_oc_meta_index(FEMU_OC_Ctrl *ln, void *meta, uint32_t index)
 {
     return meta + (index * ln->params.sos);
 }
@@ -1081,7 +1022,7 @@ uint16_t femu_oc_bbt_set(NvmeCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     return NVME_SUCCESS;
 }
 
-int femu_oc_read_tbls(NvmeCtrl *n)
+static int femu_oc_read_tbls(NvmeCtrl *n)
 {
     uint32_t i;
 
