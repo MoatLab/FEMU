@@ -24,7 +24,9 @@
 
 #include "god.h"
 
-void nvme_mem_backend_init(NvmeCtrl *n, int64_t nbytes)
+/* Coperd: FEMU NVMe Memory Backend (mbe) */
+
+void nvme_init_mbe(NvmeCtrl *n, int64_t nbytes)
 {
     assert(!n->mem_backend);
 
@@ -33,15 +35,17 @@ void nvme_mem_backend_init(NvmeCtrl *n, int64_t nbytes)
     if (n->mem_backend == NULL) {
         error_report("FEMU: cannot allocate %" PRId64 " bytes for emulating SSD,"
                 "make sure you have enough free DRAM in your host\n", nbytes);
-        exit(EXIT_FAILURE);
+        abort();
     }
 
     if (mlock(n->mem_backend, nbytes) == -1) {
         error_report("FEMU: failed to pin %" PRId64 " bytes ...\n", nbytes);
+        g_free(n->mem_backend);
+        abort();
     }
 }
 
-void nvme_mem_backend_destroy(NvmeCtrl *n)
+void nvme_destroy_mbe(NvmeCtrl *n)
 {
     if (n->mem_backend) {
         munlock(n->mem_backend, n->bs_size);
@@ -49,7 +53,8 @@ void nvme_mem_backend_destroy(NvmeCtrl *n)
     }
 }
 
-uint64_t nvme_mem_backend_rw(NvmeCtrl *n, NvmeNamespace *ns,
+/* Coperd: directly read/write to memory backend from NVMe command */
+uint64_t nvme_rw_mbe(NvmeCtrl *n, NvmeNamespace *ns,
         NvmeCmd *cmd, NvmeRequest *req)
 {
     QEMUIOVector iov;
