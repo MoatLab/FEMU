@@ -910,7 +910,8 @@ typedef struct NvmeCtrl {
     FEMU_OC_Ctrl    femu_oc_ctrl;
     struct ssdstate ssd;
 
-    void            *heap_storage;
+    void            *mem_backend;
+    int64_t         bs_size;
     uint8_t         femu_mode; // 0 for white-box and 1 for black-box
 } NvmeCtrl;
 
