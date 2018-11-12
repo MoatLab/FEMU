@@ -247,7 +247,6 @@ static void nvme_isr_notify(void *opaque)
 static void nvme_isr_notify_io(void *opaque)
 {
     NvmeCQueue *cq = opaque;
-    NvmeCtrl *n = cq->ctrl;
 
     /* Coperd: utilize irqfd mechanism */
     if (cq->irq_enabled && cq->virq) {
@@ -593,14 +592,6 @@ static void nvme_enqueue_req_completion_io(NvmeCQueue *cq, NvmeRequest *req)
      * Coperd: no need to trigger cq->timer here, cq->timer is repeating or it
      * can be polled by another thread
      */
-}
-
-static void nvme_enqueue_req_completion_admin(NvmeCQueue *cq, NvmeRequest *req)
-{
-    assert(cq->cqid == req->sq->cqid);
-    QTAILQ_REMOVE(&req->sq->out_req_list, req, entry);
-    QTAILQ_INSERT_TAIL(&cq->req_list, req, entry);
-    timer_mod(cq->timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + 500);
 }
 
 static void nvme_enqueue_req_completion(NvmeCQueue *cq, NvmeRequest *req)
@@ -1185,9 +1176,8 @@ static uint16_t nvme_init_sq(NvmeSQueue *sq, NvmeCtrl *n, uint64_t dma_addr,
             sq->arb_burst = NVME_ARB_LPW(n->features.arbitration) + 1;
             break;
     }
-    if (sqid == 0) {
-        sq->timer = timer_new_ns(QEMU_CLOCK_REALTIME, nvme_process_sq_admin, sq);
-    } else {
+
+    if (sqid) {
         sq->timer = timer_new_ns(QEMU_CLOCK_REALTIME, nvme_process_sq_io, sq);
     }
     if (sqid && n->dbs_addr && n->eis_addr) {
@@ -2113,7 +2103,7 @@ static void nvme_update_sq_tail(NvmeSQueue *sq)
     }
 }
 
-static void nvme_process_sq_admin(void *opaque)
+void nvme_process_sq_admin(void *opaque)
 {
     NvmeSQueue *sq = opaque;
     NvmeCtrl *n = sq->ctrl;
@@ -2123,7 +2113,6 @@ static void nvme_process_sq_admin(void *opaque)
     hwaddr addr;
     NvmeCmd cmd;
     NvmeCqe cqe;
-    int processed = 0;
 
     while (!(nvme_sq_empty(sq))) {
         if (sq->phys_contig) {
@@ -2155,7 +2144,7 @@ static void nvme_process_sq_admin(void *opaque)
     }
 }
 
-static void nvme_process_sq_io(void *opaque)
+void nvme_process_sq_io(void *opaque)
 {
     bool on = qemu_mutex_iothread_locked();
     if (on) {
@@ -2404,7 +2393,6 @@ static void nvme_process_db_admin(NvmeCtrl *n, hwaddr addr, int val)
 
     if (((addr - 0x1000) >> (2 + n->db_stride)) & 1) {
         NvmeCQueue *cq;
-        bool start_sqs;
 
         qid = (addr - (0x1000 + (1 << (2 + n->db_stride)))) >>
             (3 + n->db_stride);

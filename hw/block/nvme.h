@@ -959,8 +959,8 @@ void nvme_set_error_page(NvmeCtrl *n, uint16_t sqid, uint16_t cid,
         uint16_t status, uint16_t location, uint64_t lba, uint32_t nsid);
 void nvme_rw_cb(void *opaque, int ret);
 //static void nvme_process_sq(void *opaque);
-static void nvme_process_sq_admin(void *opaque);
-static void nvme_process_sq_io(void *opaque);
+void nvme_process_sq_admin(void *opaque);
+void nvme_process_sq_io(void *opaque);
 void nvme_addr_read(NvmeCtrl *n, hwaddr addr, void *buf, int size);
 void nvme_addr_write(NvmeCtrl *n, hwaddr addr, void *buf, int size);
 uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov,
@@ -969,6 +969,11 @@ uint16_t nvme_dma_write_prp(NvmeCtrl *n, uint8_t *ptr, uint32_t len,
         uint64_t prp1, uint64_t prp2);
 uint16_t nvme_dma_read_prp(NvmeCtrl *n, uint8_t *ptr, uint32_t len,
         uint64_t prp1, uint64_t prp2);
+
+void femu_init_mbe(struct femu_mbe *mbe, int64_t nbytes);
+void femu_destroy_mbe(struct femu_mbe *mbe);
+uint64_t femu_rw_mbe(NvmeCtrl *n, NvmeNamespace *ns,
+        NvmeCmd *cmd, NvmeRequest *req);
 
 #endif /* HW_NVME_H */
 
