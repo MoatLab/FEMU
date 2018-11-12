@@ -908,7 +908,7 @@ uint16_t femu_oc_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     // copy data from or write data to "heap_storage"
     // heap_storage[data_offset] .. heap_storage[data_offset+data_size]
-    void *hs = n->mem_backend;
+    void *hs = n->mbe.mem_backend;
     for (i = 0; i < n_pages; i++) {
         int64_t hs_oft = aio_sector_list[i];
         if (req->is_write) {

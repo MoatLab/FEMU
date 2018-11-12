@@ -4,7 +4,8 @@
 #include "qemu/bitops.h"
 #include "hw/virtio/vhost.h"
 #include "sysemu/hostmem.h"
-#include "femu/femu-oc.h"
+#include "femu-mem-backend.h"
+#include "ocssd/femu-oc.h"
 #include "ssd/vssim_config_manager.h"
 
 typedef struct NvmeBar {
@@ -910,8 +911,8 @@ typedef struct NvmeCtrl {
     FEMU_OC_Ctrl    femu_oc_ctrl;
     struct ssdstate ssd;
 
-    void            *mem_backend;
-    int64_t         bs_size;
+    struct femu_mbe mbe;
+
     uint8_t         femu_mode; // 0 for white-box and 1 for black-box
 } NvmeCtrl;
 
