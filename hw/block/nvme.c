@@ -162,74 +162,6 @@
 #define NVME_TEMPERATURE        0x143
 #define NVME_OP_ABORTED         0xff
 
-static uint64_t nvme_heap_storage_rw(NvmeCtrl *n, NvmeNamespace *ns,
-        NvmeCmd *cmd, NvmeRequest *req)
-{
-    QEMUIOVector iov;
-    int sg_cur_index = 0;
-    dma_addr_t sg_cur_byte = 0;
-    int i;
-    void *hs = n->heap_storage;
-    void *mem;
-    dma_addr_t cur_addr, cur_len;
-    DMADirection dir = req->is_write ? DMA_DIRECTION_TO_DEVICE : DMA_DIRECTION_FROM_DEVICE;
-    qemu_iovec_init(&iov, req->qsg.nsg);
-
-    // this is dma_blk_unmap()
-    for (i = 0; i < iov.niov; ++i) {
-        dma_memory_unmap(req->qsg.as, iov.iov[i].iov_base, iov.iov[i].iov_len,
-                dir, iov.iov[i].iov_len);
-    }
-    qemu_iovec_reset(&iov);
-
-    while (sg_cur_index < req->qsg.nsg) {
-        cur_addr = req->qsg.sg[sg_cur_index].base + sg_cur_byte;
-        cur_len = req->qsg.sg[sg_cur_index].len - sg_cur_byte;
-        mem = dma_memory_map(req->qsg.as, cur_addr, &cur_len, dir);
-        if (!mem)
-            break;
-        qemu_iovec_add(&iov, mem, cur_len);
-        sg_cur_byte += cur_len;
-        if (sg_cur_byte == req->qsg.sg[sg_cur_index].len) {
-            sg_cur_byte = 0;
-            ++sg_cur_index;
-        }
-    }
-
-    if (iov.size == 0) {
-        printf("Coperd, you poor boy, DMA mapping failed!\n");
-    }
-
-    if (!QEMU_IS_ALIGNED(iov.size, BDRV_SECTOR_SIZE)) {
-        qemu_iovec_discard_back(&iov, QEMU_ALIGN_DOWN(iov.size, BDRV_SECTOR_SIZE));
-    }
-
-    // copy data from or write data to "heap_storage"
-    // heap_storage[data_offset] .. heap_storage[data_offset+data_size]
-    int64_t hs_oft = req->data_offset;
-    if (req->is_write) {
-        // iov -> heap storage
-        for (i = 0; i < iov.niov; ++i) {
-            memcpy(hs + hs_oft, iov.iov[i].iov_base, iov.iov[i].iov_len);
-            hs_oft += iov.iov[i].iov_len;
-        }
-    } else {
-        // heap storage -> iov
-        for (i = 0; i < iov.niov; ++i) {
-            memcpy(iov.iov[i].iov_base, hs + hs_oft, iov.iov[i].iov_len);
-            hs_oft += iov.iov[i].iov_len;
-        }
-    }
-
-    // dma_blk_unmap()
-    for (i = 0; i < iov.niov; ++i) {
-        dma_memory_unmap(req->qsg.as, iov.iov[i].iov_base, iov.iov[i].iov_len,
-                dir, iov.iov[i].iov_len);
-    }
-    qemu_iovec_reset(&iov);
-
-    return NVME_SUCCESS;
-}
 
 void nvme_addr_read(NvmeCtrl *n, hwaddr addr, void *buf, int size)
 {
@@ -892,7 +824,7 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
 
     //return NVME_SUCCESS;
-    return nvme_heap_storage_rw(n, ns, cmd, req);
+    return nvme_mem_backend_rw(n, ns, cmd, req);
 
     dma_acct_start(n->conf.blk, &req->acct, &req->qsg, req->is_write ?
             BLOCK_ACCT_WRITE : BLOCK_ACCT_READ);
@@ -2828,12 +2760,7 @@ static int nvme_init(PCIDevice *pci_dev)
         return -1;
     }
 
-    n->heap_storage = g_malloc0(bs_size);
-    if (n->heap_storage == NULL) {
-        error_report("FEMU: cannot allocate %ld bytes for emulating SSD,"
-                "make sure you have enough free DRAM in your host\n", bs_size);
-        exit(EXIT_FAILURE);
-    }
+    nvme_mem_backend_init(n, bs_size);
 
     n->start_time = time(NULL);
     n->reg_size = pow2ceil(0x1004 + 2 * (n->num_io_queues + 1) * 4);
@@ -2869,7 +2796,9 @@ static void nvme_exit(PCIDevice *pci_dev)
     NvmeCtrl *n = NVME(pci_dev);
 
     nvme_clear_ctrl(n, true);
-    g_free(n->heap_storage);
+
+    nvme_mem_backend_destroy(n);
+
     g_free(n->namespaces);
     g_free(n->features.int_vector_config);
     g_free(n->aer_reqs);
