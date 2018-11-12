@@ -17,9 +17,9 @@
 #include "sysemu/block-backend.h"
 #include <qemu/main-loop.h>
 
-#include "femu-oc.h"
 #include "../nvme.h"
 #include "god.h"
+#include "femu-oc.h"
 
 extern void nvme_set_error_page(NvmeCtrl *n, uint16_t sqid, uint16_t cid,
         uint16_t status, uint16_t location, uint64_t lba, uint32_t nsid);
@@ -43,7 +43,7 @@ uint8_t femu_oc_hybrid_dev(NvmeCtrl *n);
 void femu_oc_inject_w_err(FEMU_OC_Ctrl *ln, NvmeRequest *req, NvmeCqe *cqe);
 uint16_t femu_oc_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     NvmeRequest *req);
-void femu_oc_post_cqe(NvmeCtrl *n, NvmeRequest *req);
+void femu_oc_post_cqe(NvmeCtrl *n, NvmeCqe *cqe);
 void print_ppa(FEMU_OC_Ctrl *ln, uint64_t ppa);
 int femu_oc_meta_write(FEMU_OC_Ctrl *ln, void *meta);
 int femu_oc_meta_read(FEMU_OC_Ctrl *ln, void *meta);
@@ -57,9 +57,9 @@ int femu_oc_meta_state_set_written(FEMU_OC_Ctrl *ln, uint64_t ppa);
 void *femu_oc_meta_index(FEMU_OC_Ctrl *ln, void *meta, uint32_t index);
 uint32_t femu_oc_tbl_size(NvmeNamespace *ns);
 uint16_t femu_oc_identity(NvmeCtrl *n, NvmeCmd *cmd);
-uint16_t femu_oc_get_l2p_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
-uint16_t femu_oc_bbt_get(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
-uint16_t femu_oc_bbt_set(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
+uint16_t femu_oc_get_l2p_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe);
+uint16_t femu_oc_bbt_get(NvmeCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe);
+uint16_t femu_oc_bbt_set(NvmeCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe);
 int femu_oc_read_tbls(NvmeCtrl *n);
 int femu_oc_flush_tbls(NvmeCtrl *n);
 uint16_t femu_oc_erase_async(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
@@ -176,21 +176,6 @@ void femu_oc_inject_w_err(FEMU_OC_Ctrl *ln, NvmeRequest *req, NvmeCqe *cqe)
             ln->err_write_cnt = 0;
         }
         ln->err_write_cnt += req->nlb;
-    }
-}
-
-void femu_oc_post_cqe(NvmeCtrl *n, NvmeRequest *req)
-{
-    FEMU_OC_Ctrl *ln = &n->femu_oc_ctrl;
-    NvmeCqe *cqe = &req->cqe;
-
-    /* Do post-completion processing depending on the type of command. This is
-     * used primarily to inject different types of errors.
-     */
-    switch (req->cmd_opcode) {
-    case FEMU_OC_CMD_HYBRID_WRITE:
-    case FEMU_OC_CMD_PHYS_WRITE:
-        femu_oc_inject_w_err(ln, req, cqe);
     }
 }
 
@@ -985,7 +970,7 @@ uint16_t femu_oc_identity(NvmeCtrl *n, NvmeCmd *cmd)
                                     sizeof(FEMU_OC_IdCtrl), prp1, prp2);
 }
 
-uint16_t femu_oc_get_l2p_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
+uint16_t femu_oc_get_l2p_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
 {
     NvmeNamespace *ns;
     FEMU_OC_GetL2PTbl *gtbl = (FEMU_OC_GetL2PTbl*)cmd;
@@ -1002,26 +987,20 @@ uint16_t femu_oc_get_l2p_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     ns = &n->namespaces[nsid - 1];
 
     if (slba >= ns->tbl_entries) {
-        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
-            offsetof(FEMU_OC_GetL2PTbl, slba), 0, ns->id);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     if ((slba + nlb) > ns->tbl_entries) {
-        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
-            offsetof(FEMU_OC_GetL2PTbl, nlb), 0, ns->id);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
     if (nvme_dma_read_prp(n, (uint8_t *)&ns->tbl[slba], xfer_len,
                           prp1, prp2)) {
-        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
-                            offsetof(FEMU_OC_GetL2PTbl, prp1), 0, ns->id);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     return NVME_SUCCESS;
 }
 
-uint16_t femu_oc_bbt_get(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
+uint16_t femu_oc_bbt_get(NvmeCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
 {
     NvmeNamespace *ns;
     FEMU_OC_Ctrl *ln = &n->femu_oc_ctrl;
@@ -1047,16 +1026,15 @@ uint16_t femu_oc_bbt_get(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     lunid = ch * c->num_lun + lun;
     bbt = ns->bbtbl[lunid];
 
-    if (nvme_dma_read_prp(n, (uint8_t*)bbt, sizeof(FEMU_OC_Bbt) + blks_per_lun, prp1, prp2)) {
-        nvme_set_error_page(n, req->sq->sqid, cmd->cid,
-                NVME_INVALID_FIELD, (uint16_t)1234, 0, ns->id);
+    if (nvme_dma_read_prp(n, (uint8_t*)bbt, sizeof(FEMU_OC_Bbt) + blks_per_lun,
+                prp1, prp2)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
     return ret;
 }
 
-uint16_t femu_oc_bbt_set(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
+uint16_t femu_oc_bbt_set(NvmeCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
 {
     NvmeNamespace *ns;
     FEMU_OC_Ctrl *ln = &n->femu_oc_ctrl;
@@ -1088,8 +1066,6 @@ uint16_t femu_oc_bbt_set(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 
     } else {
         if (nvme_dma_write_prp(n, (uint8_t *)ppas, nlb * 8, spba, prp2)) {
-            nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
-                    offsetof(FEMU_OC_BbtSet, spba), 0, ns->id);
             return NVME_INVALID_FIELD | NVME_DNR;
         }
 

@@ -938,12 +938,12 @@ extern int64_t SSD_WRITE(struct ssdstate *ssd, unsigned int length, int64_t sect
 extern void femu_oc_exit(NvmeCtrl *n);
 extern int femu_oc_init(NvmeCtrl *n);
 extern int femu_oc_flush_tbls(NvmeCtrl *n);
-extern uint16_t femu_oc_bbt_set(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
-extern uint16_t femu_oc_bbt_get(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
-extern uint16_t femu_oc_get_l2p_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
+extern uint16_t femu_oc_bbt_set(NvmeCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe);
+extern uint16_t femu_oc_bbt_get(NvmeCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe);
+extern uint16_t femu_oc_get_l2p_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe);
 extern uint16_t femu_oc_identity(NvmeCtrl *n, NvmeCmd *cmd);
 extern void femu_oc_tbl_initialize(NvmeNamespace *ns);
-extern void femu_oc_post_cqe(NvmeCtrl *n, NvmeRequest *req);
+extern void femu_oc_post_cqe(NvmeCtrl *n, NvmeCqe *cqe);
 extern uint8_t femu_oc_dev(NvmeCtrl *n);
 extern uint8_t femu_oc_hybrid_dev(NvmeCtrl *n);
 extern uint16_t femu_oc_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,

@@ -1,8 +1,6 @@
 #ifndef __FEMU_OC
 #define __FEMU_OC
 
-#include "qemu/osdep.h"
-
 enum FEMU_OC_AdminCommands {
     FEMU_OC_ADM_CMD_IDENTITY          = 0xe2,
     FEMU_OC_ADM_CMD_GET_L2P_TBL       = 0xea,
@@ -254,5 +252,6 @@ struct femu_oc_tgt_meta {
 #define FEMU_OC_LBA_UNMAPPED UINT64_MAX
 
 void femu_oc_check_size(void);
+
 
 #endif
