@@ -824,7 +824,7 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
 
     //return NVME_SUCCESS;
-    return nvme_rw_mbe(n, ns, cmd, req);
+    return femu_rw_mbe(n, ns, cmd, req);
 
     dma_acct_start(n->conf.blk, &req->acct, &req->qsg, req->is_write ?
             BLOCK_ACCT_WRITE : BLOCK_ACCT_READ);
@@ -2760,7 +2760,7 @@ static int nvme_init(PCIDevice *pci_dev)
         return -1;
     }
 
-    nvme_init_mbe(n, bs_size);
+    femu_init_mbe(&n->mbe, bs_size);
 
     n->start_time = time(NULL);
     n->reg_size = pow2ceil(0x1004 + 2 * (n->num_io_queues + 1) * 4);
@@ -2797,7 +2797,7 @@ static void nvme_exit(PCIDevice *pci_dev)
 
     nvme_clear_ctrl(n, true);
 
-    nvme_destroy_mbe(n);
+    femu_destroy_mbe(&n->mbe);
 
     g_free(n->namespaces);
     g_free(n->features.int_vector_config);

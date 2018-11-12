@@ -26,42 +26,47 @@
 
 /* Coperd: FEMU NVMe Memory Backend (mbe) */
 
-void nvme_init_mbe(NvmeCtrl *n, int64_t nbytes)
+void femu_init_mbe(struct femu_mbe *mbe, int64_t nbytes)
 {
-    assert(!n->mem_backend);
+    assert(!mbe->mem_backend);
 
-    n->bs_size = nbytes;
-    n->mem_backend = g_malloc0(nbytes);
-    if (n->mem_backend == NULL) {
+    mbe->size = nbytes;
+    mbe->mem_backend = g_malloc0(nbytes);
+    if (mbe->mem_backend == NULL) {
         error_report("FEMU: cannot allocate %" PRId64 " bytes for emulating SSD,"
                 "make sure you have enough free DRAM in your host\n", nbytes);
         abort();
     }
 
-    if (mlock(n->mem_backend, nbytes) == -1) {
+    if (mlock(mbe->mem_backend, nbytes) == -1) {
         error_report("FEMU: failed to pin %" PRId64 " bytes ...\n", nbytes);
-        g_free(n->mem_backend);
+        g_free(mbe->mem_backend);
         abort();
     }
 }
 
-void nvme_destroy_mbe(NvmeCtrl *n)
+void femu_destroy_mbe(struct femu_mbe *mbe)
 {
-    if (n->mem_backend) {
-        munlock(n->mem_backend, n->bs_size);
-        g_free(n->mem_backend);
+    if (mbe->mem_backend) {
+        munlock(mbe->mem_backend, mbe->size);
+        g_free(mbe->mem_backend);
     }
 }
 
+void femu_read_mbe_iov()
+{
+    return;
+}
+
 /* Coperd: directly read/write to memory backend from NVMe command */
-uint64_t nvme_rw_mbe(NvmeCtrl *n, NvmeNamespace *ns,
+uint64_t femu_rw_mbe(NvmeCtrl *n, NvmeNamespace *ns,
         NvmeCmd *cmd, NvmeRequest *req)
 {
     QEMUIOVector iov;
     int sg_cur_index = 0;
     dma_addr_t sg_cur_byte = 0;
     int i;
-    void *hs = n->mem_backend;
+    void *hs = n->mbe.mem_backend;
     void *mem;
     dma_addr_t cur_addr, cur_len;
     DMADirection dir = req->is_write ? DMA_DIRECTION_TO_DEVICE : 
