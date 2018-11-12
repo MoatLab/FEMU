@@ -2,8 +2,6 @@ FEMU README
 ===========
 -------------------
 
-Notes: I'm upgrading FEMU to use QEMU v2.12 with some optimizations and fixes. Please stay tuned. --Huaicheng 24/09/2018
-
 Project Description
 -------------------
 
@@ -79,7 +77,7 @@ $ sudo update-grub
   running FEMU.
 
 
-  Option 2: Use our VM image, please download it from our site(??) and save it as
+  Option 2: Use our VM image, please download it from our site(https://goo.gl/forms/fIrMZGEEv1TZQkLX2) and save it as
   `$HOME/images/u14s.qcow2`
  
  4. Login to FEMU VM
