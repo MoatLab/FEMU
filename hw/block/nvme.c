@@ -1177,20 +1177,21 @@ static uint16_t nvme_init_sq(NvmeSQueue *sq, NvmeCtrl *n, uint64_t dma_addr,
             break;
     }
 
-    if (sqid) {
-        sq->timer = timer_new_ns(QEMU_CLOCK_REALTIME, nvme_process_sq_io, sq);
-    }
     if (sqid && n->dbs_addr && n->eis_addr) {
         sq->db_addr = n->dbs_addr + 2 * sqid * dbbuf_entry_sz;
         sq->eventidx_addr = n->eis_addr + 2 * sqid * dbbuf_entry_sz;
-        printf("Coperd, SQ, db_addr=%" PRIu64 ", eventidx_addr=%" PRIu64 "\n", sq->db_addr, sq->eventidx_addr);
+        printf("FEMU:SQ[%d],db=%" PRIu64 ",ei=%" PRIu64 "\n", sqid, sq->db_addr,
+                sq->eventidx_addr);
     }
 
     assert(n->cq[cqid]);
     cq = n->cq[cqid];
     QTAILQ_INSERT_TAIL(&(cq->sq_list), sq, entry);
     n->sq[sqid] = sq;
+
+    /* Coperd: kick start SQ */
     if (sqid) {
+        sq->timer = timer_new_ns(QEMU_CLOCK_REALTIME, nvme_process_sq_io, sq);
         timer_mod(sq->timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + 1000000);
     }
 
@@ -1340,7 +1341,7 @@ static int nvme_add_kvm_msi_virq(NvmeCtrl *n, NvmeCQueue *cq)
         return -1;
     }
     cq->virq = virq;
-    printf("Coperd,%s,cq[%d]->virq=%d\n", __func__, cq->cqid, virq);
+    printf("FEMU,%s,cq[%d]->virq=%d\n", __func__, cq->cqid, virq);
 
     return 0;
 }
@@ -1630,7 +1631,8 @@ static uint16_t nvme_set_feature(NvmeCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
                     prp1, prp2);
         case NVME_NUMBER_OF_QUEUES:
             /* Coperd: num_io_queues is 0-based */
-            cqe->n.result = cpu_to_le32((n->num_io_queues - 1) | ((n->num_io_queues - 1) << 16));
+            cqe->n.result = cpu_to_le32((n->num_io_queues - 1) |
+                    ((n->num_io_queues - 1) << 16));
             break;
         case NVME_TEMPERATURE_THRESHOLD:
             n->features.temp_thresh = dw11;
@@ -1849,12 +1851,6 @@ static uint64_t ns_bdrv_blks(NvmeNamespace *ns, uint64_t blks, uint8_t lba_idx)
 
 static void nvme_partition_ns(NvmeNamespace *ns, uint8_t lba_idx)
 {
-    /*
-      Issues:
-      * all I/O to NS must have stopped as this frees several ns structures
-        (util, uncorrectable, tbl) -- failure to do so could render I/O code
-        referencing freed memory -- DANGEROUS.
-    */
     NvmeCtrl *n = ns->ctrl;
     NvmeIdNs *id_ns = &ns->id_ns;
     uint64_t blks;
@@ -1916,25 +1912,12 @@ static uint16_t nvme_format_namespace(NvmeNamespace *ns, uint8_t lba_idx,
         return NVME_INVALID_FORMAT | NVME_DNR;
     }
 
-    //g_free(ns->util);
-    //g_free(ns->uncorrectable);
-    //blks = ns->ctrl->ns_size / ((1 << ns->id_ns.lbaf[lba_idx].ds) +
-    //            ns->ctrl->meta);
     ns->id_ns.flbas = lba_idx | meta_loc;
-    //ns->id_ns.nsze = cpu_to_le64(blks);
-    //ns->id_ns.ncap = ns->id_ns.nsze;
-    //ns->id_ns.nuse = ns->id_ns.nsze;
     ns->id_ns.dps = pil | pi;
-    //ns->util = bitmap_new(blks);
-    //ns->uncorrectable = bitmap_new(blks);
 
     printf("Coperd,nvme_format_namespace\n");
     ns->ns_blks = ns_blks(ns, lba_idx);
     nvme_partition_ns(ns, lba_idx);
-
-    if (sec_erase) {
-        /* TODO: write zeros, complete asynchronously */;
-    }
 
     return NVME_SUCCESS;
 }
@@ -1958,7 +1941,7 @@ static uint16_t nvme_format(NvmeCtrl *n, NvmeCmd *cmd)
         for (i = 0; i < n->num_namespaces; ++i) {
             ns = &n->namespaces[i];
             ret = nvme_format_namespace(ns, lba_idx, meta_loc, pil, pi,
-                sec_erase);
+                    sec_erase);
             if (ret != NVME_SUCCESS) {
                 return ret;
             }
@@ -1971,8 +1954,7 @@ static uint16_t nvme_format(NvmeCtrl *n, NvmeCmd *cmd)
     }
 
     ns = &n->namespaces[nsid - 1];
-    return nvme_format_namespace(ns, lba_idx, meta_loc, pil, pi,
-        sec_erase);
+    return nvme_format_namespace(ns, lba_idx, meta_loc, pil, pi, sec_erase);
 }
 
 static uint16_t nvme_set_db_memory(NvmeCtrl *n, const NvmeCmd *cmd)
@@ -1992,8 +1974,6 @@ static uint16_t nvme_set_db_memory(NvmeCtrl *n, const NvmeCmd *cmd)
     n->dbs_addr = dbs_addr;
     n->eis_addr = eis_addr;
 
-    /* This assumes all I/O queues are created before this command is handled.
-     * We skip the admin queues. */
     for (i = 1; i <= n->num_io_queues; i++) {
         NvmeSQueue *sq = n->sq[i];
         NvmeCQueue *cq = n->cq[i];
@@ -2002,19 +1982,19 @@ static uint16_t nvme_set_db_memory(NvmeCtrl *n, const NvmeCmd *cmd)
             /* Submission queue tail pointer location, 2 * QID * stride. */
             sq->db_addr = dbs_addr + 2 * i * dbbuf_entry_sz;
             sq->eventidx_addr = eis_addr + 2 * i * dbbuf_entry_sz;
-            printf("Coperd,DBBUF,sq[%d]:db=%" PRIu64 ",ei=%" PRIu64 "\n",
-                    i, sq->db_addr, sq->eventidx_addr);
+            printf("FEMU:DBBUF,sq[%d]:db=%" PRIu64 ",ei=%" PRIu64 "\n", i,
+                    sq->db_addr, sq->eventidx_addr);
         }
         if (cq) {
             /* Completion queue head pointer location, (2 * QID + 1) * stride. */
             cq->db_addr = dbs_addr + (2 * i + 1) * dbbuf_entry_sz;
             cq->eventidx_addr = eis_addr + (2 * i + 1) * dbbuf_entry_sz;
-            printf("Coperd,DBBUF,cq[%d]:db=%" PRIu64 ",ei=%" PRIu64 "\n",
-                    i, cq->db_addr, cq->eventidx_addr);
+            printf("FEMU:DBBUF,cq[%d]:db=%" PRIu64 ",ei=%" PRIu64 "\n", i,
+                    cq->db_addr, cq->eventidx_addr);
         }
     }
     n->dataplane_started = true;
-    printf("Coperd, nvme_set_db_memory returns SUCCESS!\n");
+    printf("FEMU:nvme_set_db_memory returns SUCCESS!\n");
 
     return NVME_SUCCESS;
 }
