@@ -2431,75 +2431,48 @@ static void nvme_process_db_io(NvmeCtrl *n, hwaddr addr, int val)
     uint16_t new_val = val & 0xffff;
     NvmeSQueue *sq;
 
+    if (n->dataplane_started) {
+        printf("FEMU: ignoring guest MMIO DB ring since poller is up\n");
+        return;
+    }
+
     if (addr & ((1 << (2 + n->db_stride)) - 1)) {
-        nvme_enqueue_event(n, NVME_AER_TYPE_ERROR,
-                NVME_AER_INFO_ERR_INVALID_DB, NVME_LOG_ERROR_INFO);
         return;
     }
 
     if (((addr - 0x1000) >> (2 + n->db_stride)) & 1) {
         NvmeCQueue *cq;
-        bool start_sqs;
 
         qid = (addr - (0x1000 + (1 << (2 + n->db_stride)))) >>
             (3 + n->db_stride);
         if (nvme_check_cqid(n, qid)) {
-            nvme_enqueue_event(n, NVME_AER_TYPE_ERROR,
-                    NVME_AER_INFO_ERR_INVALID_DB, NVME_LOG_ERROR_INFO);
             return;
         }
 
         cq = n->cq[qid];
         if (new_val >= cq->size) {
-            nvme_enqueue_event(n, NVME_AER_TYPE_ERROR,
-                    NVME_AER_INFO_ERR_INVALID_DB, NVME_LOG_ERROR_INFO);
             return;
         }
 
-        start_sqs = nvme_cq_full(cq) ? true : false;
-
-        /* When the mapped pointer memory area is setup, we don't rely on
-         * the MMIO written values to update the head pointer. */
         if (!cq->db_addr) {
             cq->head = new_val;
         }
-        if (start_sqs) {
-            NvmeSQueue *sq;
-            QTAILQ_FOREACH(sq, &cq->sq_list, entry) {
-                if (!timer_pending(sq->timer)) {
-                    if (sq->sqid == 0)
-                        timer_mod(sq->timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + 500);
-                }
-            }
-            /* Coperd: QEMU v2.9 use timer_mod instead of nvme_post_cqes */
-            /*nvme_post_cqes(cq);*/
-            if (cq->cqid == 0)
-                timer_mod(cq->timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + 500);
-        } else if (cq->tail != cq->head) {
-            nvme_isr_notify(cq);
+
+        if (cq->tail != cq->head) {
+            nvme_isr_notify_io(cq);
         }
     } else {
         qid = (addr - 0x1000) >> (3 + n->db_stride);
         if (nvme_check_sqid(n, qid)) {
-            nvme_enqueue_event(n, NVME_AER_TYPE_ERROR,
-                    NVME_AER_INFO_ERR_INVALID_SQ, NVME_LOG_ERROR_INFO);
             return;
         }
         sq = n->sq[qid];
         if (new_val >= sq->size) {
-            nvme_enqueue_event(n, NVME_AER_TYPE_ERROR,
-                    NVME_AER_INFO_ERR_INVALID_DB, NVME_LOG_ERROR_INFO);
             return;
         }
 
-        /* When the mapped pointer memory area is setup, we don't rely on
-         * the MMIO written values to update the tail pointer. */
         if (!sq->db_addr) {
             sq->tail = new_val;
-        }
-        if (!timer_pending(sq->timer)) {
-            if (sq->sqid == 0)
-                timer_mod(sq->timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + 500);
         }
     }
 }
