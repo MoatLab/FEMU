@@ -2237,7 +2237,8 @@ static const MemoryRegionOps nvme_mmio_ops = {
 
 static int nvme_check_constraints(NvmeCtrl *n)
 {
-    if ((!(n->conf.blk)) || !(n->serial) ||
+    /* Coperd: FEMU doesn't rely on backend image file: !(n->conf.blk) */
+    if (!(n->serial) ||
         (n->num_namespaces == 0 || n->num_namespaces > NVME_MAX_NUM_NAMESPACES) ||
         (n->num_io_queues < 1 || n->num_io_queues > NVME_MAX_QS) ||
         (n->db_stride > NVME_MAX_STRIDE) ||
@@ -2263,6 +2264,7 @@ static int nvme_check_constraints(NvmeCtrl *n)
             NVME_ONCS_DSM | NVME_ONCS_WRITE_ZEROS))) {
         return -1;
     }
+
     return 0;
 }
 
@@ -2289,7 +2291,6 @@ static void nvme_init_namespaces(NvmeCtrl *n)
                 id_ns->vs[0] = 0x1;
         }
 
-        /* TOFIX */
         for (j = 0; j < ji; j++) {
             for (k = 0; k < n->nlbaf / ji; k++) {
                 id_ns->lbaf[k + (n->nlbaf / ji) * j].ds = BDRV_SECTOR_BITS + k;
@@ -2306,7 +2307,6 @@ static void nvme_init_namespaces(NvmeCtrl *n)
         ns->id = i + 1;
         ns->ctrl = n;
         //ns->start_block = i * n->ns_size >> BDRV_SECTOR_BITS;
-        printf("Coperd,lba_index=%d\n", lba_index);
         ns->ns_blks = ns_blks(ns, lba_index);
         ns->start_block = i * ((n->ns_size >> BDRV_SECTOR_BITS)
                 + (n->meta * ns_bdrv_blks(ns, ns->ns_blks, lba_index)));
@@ -2437,11 +2437,7 @@ static int nvme_init(PCIDevice *pci_dev)
         return -1;
     }
 
-    bs_size = blk_getlength(n->conf.blk);
-    printf("Coperd,bs_size=%" PRId64 "\n", bs_size);
-    if (bs_size < 0) {
-        return -1;
-    }
+    bs_size = n->memsz * 1024 * 1024;
 
     femu_init_mem_backend(&n->mbe, bs_size);
 
@@ -2463,11 +2459,13 @@ static int nvme_init(PCIDevice *pci_dev)
     nvme_init_namespaces(n);
 
     if (n->femu_mode == FEMU_WHITEBOX_MODE) {
+        printf("FEMU: starting in OCSSD mode ..\n");
         if (femu_oc_dev(n)) {
             return femu_oc_init(n);
         }
     } else if (n->femu_mode == FEMU_BLACKBOX_MODE) {
         struct ssdstate *ssd = &(n->ssd);
+        printf("FEMU: starting in blackbox SSD mode ..\n");
         SSD_INIT(ssd);
     }
 
@@ -2504,6 +2502,7 @@ static void nvme_exit(PCIDevice *pci_dev)
 static Property nvme_props[] = {
     DEFINE_BLOCK_PROPERTIES(NvmeCtrl, conf),
     DEFINE_PROP_STRING("serial", NvmeCtrl, serial),
+    DEFINE_PROP_UINT32("memsz", NvmeCtrl, memsz, 1024), /* Coperd: MB */
     DEFINE_PROP_UINT32("namespaces", NvmeCtrl, num_namespaces, 1),
     DEFINE_PROP_UINT32("queues", NvmeCtrl, num_io_queues, 1),
     DEFINE_PROP_UINT32("entries", NvmeCtrl, max_q_ents, 0x7ff),
