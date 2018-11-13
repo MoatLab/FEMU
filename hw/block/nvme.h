@@ -840,6 +840,7 @@ typedef struct NvmeCtrl {
     NvmeBar      bar;
     BlockConf    conf;
 
+    uint32_t    memsz; /* Coperd: memory backend size */
     time_t      start_time;
     uint16_t    temperature;
     uint16_t    page_size;
