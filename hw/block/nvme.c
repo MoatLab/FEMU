@@ -486,7 +486,7 @@ static void nvme_post_cqes_io(void *opaque)
     }
 
     if (ntt == 0) {
-        ntt = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + CQ_POLLING_PERIOD_ND;
+        ntt = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + CQ_POLLING_PERIOD_NS;
     }
 
     timer_mod(cq->timer, ntt);
@@ -552,53 +552,6 @@ void nvme_set_error_page(NvmeCtrl *n, uint16_t sqid, uint16_t cid,
     elp->nsid = nsid;
     n->elp_index = (n->elp_index + 1) % n->elpe;
     ++n->num_errors;
-}
-
-static void nvme_enqueue_event(NvmeCtrl *n, uint8_t event_type,
-    uint8_t event_info, uint8_t log_page)
-{
-    NvmeAsyncEvent *event;
-
-    if (!(n->bar.csts & NVME_CSTS_READY))
-        return;
-
-    event = (NvmeAsyncEvent *)g_malloc0(sizeof(*event));
-    event->result.event_type = event_type;
-    event->result.event_info = event_info;
-    event->result.log_page   = log_page;
-    QSIMPLEQ_INSERT_TAIL(&(n->aer_queue), event, entry);
-    timer_mod(n->aer_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + 500);
-}
-
-static void nvme_aer_process_cb(void *param)
-{
-    NvmeCtrl *n = param;
-    NvmeRequest *req;
-    NvmeAerResult *result;
-    NvmeAsyncEvent *event, *next;;
-
-    QSIMPLEQ_FOREACH_SAFE(event, &n->aer_queue, entry, next) {
-        if (n->outstanding_aers <= 0) {
-            break;
-        }
-        if (n->aer_mask & (1 << event->result.event_type)) {
-            continue;
-        }
-
-        QSIMPLEQ_REMOVE_HEAD(&n->aer_queue, entry);
-        n->aer_mask |= 1 << event->result.event_type;
-        n->outstanding_aers--;
-
-        req = n->aer_reqs[n->outstanding_aers];
-        result = (NvmeAerResult *)&req->cqe.n.result;
-        result->event_type = event->result.event_type;
-        result->event_info = event->result.event_info;
-        result->log_page = event->result.log_page;
-        g_free(event);
-
-        req->status = NVME_SUCCESS;
-        nvme_enqueue_req_completion(n->cq[0], req);
-    }
 }
 
 void nvme_rw_cb(void *opaque, int ret)
@@ -1570,9 +1523,6 @@ static uint16_t nvme_set_feature(NvmeCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
             n->features.temp_thresh = dw11;
             if (n->features.temp_thresh <= n->temperature && !n->temp_warn_issued) {
                 n->temp_warn_issued = 1;
-                nvme_enqueue_event(n, NVME_AER_TYPE_SMART,
-                        NVME_AER_INFO_SMART_TEMP_THRESH,
-                        NVME_LOG_SMART_INFO);
             } else if (n->features.temp_thresh > n->temperature &&
                     !(n->aer_mask & 1 << NVME_AER_TYPE_SMART)) {
                 n->temp_warn_issued = 0;
@@ -1627,9 +1577,6 @@ static uint16_t nvme_error_log_info(NvmeCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
 
     trans_len = MIN(sizeof(*n->elpes) * n->elpe, buf_len);
     n->aer_mask &= ~(1 << NVME_AER_TYPE_ERROR);
-    if (!QSIMPLEQ_EMPTY(&n->aer_queue)) {
-        timer_mod(n->aer_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + 20000);
-    }
     return nvme_dma_read_prp(n, (uint8_t *)n->elpes, trans_len, prp1, prp2);
 }
 
@@ -1668,9 +1615,6 @@ static uint16_t nvme_smart_info(NvmeCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
     }
 
     n->aer_mask &= ~(1 << NVME_AER_TYPE_SMART);
-    if (!QSIMPLEQ_EMPTY(&n->aer_queue)) {
-        timer_mod(n->aer_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + 500);
-    }
 
     return nvme_dma_read_prp(n, (uint8_t *)&smart, trans_len, prp1, prp2);
 }
@@ -2141,7 +2085,6 @@ static void nvme_clear_guest_notifier(NvmeCtrl *n)
 
 static void nvme_clear_ctrl(NvmeCtrl *n, bool shutdown)
 {
-    NvmeAsyncEvent *event;
     int i;
 
     if (shutdown) {
@@ -2164,26 +2107,16 @@ static void nvme_clear_ctrl(NvmeCtrl *n, bool shutdown)
             nvme_free_cq(n->cq[i], n);
         }
     }
-    if (n->aer_timer) {
-        timer_del(n->aer_timer);
-        timer_free(n->aer_timer);
-        n->aer_timer = NULL;
-    }
-    while ((event = QSIMPLEQ_FIRST(&n->aer_queue)) != NULL) {
-        QSIMPLEQ_REMOVE_HEAD(&n->aer_queue, entry);
-        g_free(event);
-    }
 
     blk_flush(n->conf.blk);
-	if (n->femu_mode == FEMU_WHITEBOX_MODE) {
-		if (femu_oc_hybrid_dev(n))
-			femu_oc_flush_tbls(n);
-	}
+    if (n->femu_mode == FEMU_WHITEBOX_MODE) {
+        if (femu_oc_hybrid_dev(n))
+            femu_oc_flush_tbls(n);
+    }
     n->bar.cc = 0;
     n->dataplane_started = false;
     n->features.temp_thresh = 0x14d;
     n->temp_warn_issued = 0;
-    n->outstanding_aers = 0;
 }
 
 static int nvme_start_ctrl(NvmeCtrl *n)
@@ -2215,8 +2148,6 @@ static int nvme_start_ctrl(NvmeCtrl *n)
     nvme_init_sq(&n->admin_sq, n, n->bar.asq, 0, 0,
             NVME_AQA_ASQS(n->bar.aqa) + 1, NVME_Q_PRIO_HIGH, 1);
 
-    n->aer_timer = timer_new_ns(QEMU_CLOCK_REALTIME, nvme_aer_process_cb, n);
-    QSIMPLEQ_INIT(&n->aer_queue);
     return 0;
 }
 
