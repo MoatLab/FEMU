@@ -459,23 +459,6 @@ static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
     QTAILQ_INSERT_TAIL(&sq->req_list, req, entry);
 }
 
-static void nvme_post_cqes_admin(void *opaque)
-{
-    NvmeCQueue *cq = opaque;
-    NvmeRequest *req, *next;
-
-    QTAILQ_FOREACH_SAFE(req, &cq->req_list, entry, next) {
-        if (nvme_cq_full(cq)) {
-            break;
-        }
-
-        QTAILQ_REMOVE(&cq->req_list, req, entry);
-        nvme_post_cqe(cq, req);
-    }
-
-    nvme_isr_notify_admin(cq);
-}
-
 static void nvme_post_cqes_io(void *opaque)
 {
     bool on = qemu_mutex_iothread_locked();
@@ -1309,13 +1292,10 @@ static uint16_t nvme_init_cq(NvmeCQueue *cq, NvmeCtrl *n, uint64_t dma_addr,
     }
     msix_vector_use(&n->parent_obj, cq->vector);
     n->cq[cqid] = cq;
-    if (cq->cqid == 0) {
-        cq->timer = timer_new_ns(QEMU_CLOCK_REALTIME, nvme_post_cqes_admin, cq);
-    } else {
-        cq->timer = timer_new_ns(QEMU_CLOCK_REALTIME, nvme_post_cqes_io, cq);
-    }
-    /* Coperd: kick off cq->timer for I/O CQs */
+
     if (cqid) {
+        cq->timer = timer_new_ns(QEMU_CLOCK_REALTIME, nvme_post_cqes_io, cq);
+        /* Coperd: kick off cq->timer for I/O CQs */
         timer_mod(cq->timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + 200000);
     }
 
