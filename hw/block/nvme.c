@@ -1610,14 +1610,14 @@ static void nvme_partition_ns(NvmeNamespace *ns, uint8_t lba_idx)
     blks = ns->ns_blks;
     bdrv_blks = ns_bdrv_blks(ns, ns->ns_blks, lba_idx);
 
-    if (n->femu_mode == FEMU_WHITEBOX_MODE && femu_oc_dev(n) && femu_oc_hybrid_dev(n)) {
+    if (n->femu_mode == FEMU_WHITEBOX_MODE && femu_oc_dev(n)) {
         ns->tbl_dsk_start_offset =
             (ns->start_block + bdrv_blks) << BDRV_SECTOR_BITS;
         ns->tbl_entries = blks;
         if (ns->tbl) {
             g_free(ns->tbl);
         }
-        ns->tbl = qemu_blockalign(blk_bs(n->conf.blk), femu_oc_tbl_size(ns));
+        ns->tbl = qemu_memalign(4096, femu_oc_tbl_size(ns));
         femu_oc_tbl_initialize(ns);
     } else {
         ns->tbl = NULL;
@@ -2437,7 +2437,7 @@ static int nvme_init(PCIDevice *pci_dev)
         return -1;
     }
 
-    bs_size = n->memsz * 1024 * 1024;
+    bs_size = ((int64_t)n->memsz) * 1024 * 1024;
 
     femu_init_mem_backend(&n->mbe, bs_size);
 
