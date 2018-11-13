@@ -218,6 +218,7 @@ static void nvme_update_cq_head(NvmeCQueue *cq)
 static uint8_t nvme_cq_full(NvmeCQueue *cq)
 {
     nvme_update_cq_head(cq);
+
     return (cq->tail + 1) % cq->size == cq->head;
 }
 
@@ -226,7 +227,7 @@ static uint8_t nvme_sq_empty(NvmeSQueue *sq)
     return sq->head == sq->tail;
 }
 
-static void nvme_isr_notify(void *opaque)
+static void nvme_isr_notify_legacy(void *opaque)
 {
     NvmeCQueue *cq = opaque;
     NvmeCtrl *n = cq->ctrl;
@@ -244,6 +245,11 @@ static void nvme_isr_notify(void *opaque)
     }
 }
 
+static void nvme_isr_notify_admin(void *opaque)
+{
+    return nvme_isr_notify_legacy(opaque);
+}
+
 static void nvme_isr_notify_io(void *opaque)
 {
     NvmeCQueue *cq = opaque;
@@ -255,7 +261,7 @@ static void nvme_isr_notify_io(void *opaque)
     }
 
     /* Coperd: fall back */
-    nvme_isr_notify(opaque);
+    nvme_isr_notify_legacy(opaque);
 }
 
 static uint64_t *nvme_setup_discontig(NvmeCtrl *n, uint64_t prp_addr,
@@ -467,7 +473,7 @@ static void nvme_post_cqes_admin(void *opaque)
         nvme_post_cqe(cq, req);
     }
 
-    nvme_isr_notify(cq);
+    nvme_isr_notify_admin(cq);
 }
 
 static void nvme_post_cqes_io(void *opaque)
@@ -554,7 +560,7 @@ static void nvme_post_cqes(void *opaque)
 
     /* Coperd: only interrupt guest when we "do" complete some I/Os */
     if (nc > 0) {
-        nvme_isr_notify(cq);
+        nvme_isr_notify_io(cq);
     }
 
     if (on) {
@@ -2120,7 +2126,7 @@ void nvme_process_sq_admin(void *opaque)
         }
         nvme_addr_write(n, addr, (void *)&cqe, sizeof(cqe));
         nvme_inc_cq_tail(cq);
-        nvme_isr_notify(cq);
+        nvme_isr_notify_admin(cq);
     }
 }
 
@@ -2388,7 +2394,7 @@ static void nvme_process_db_admin(NvmeCtrl *n, hwaddr addr, int val)
         cq->head = new_val;
 
         if (cq->tail != cq->head) {
-            nvme_isr_notify(cq);
+            nvme_isr_notify_admin(cq);
         }
     } else {
         qid = (addr - 0x1000) >> (3 + n->db_stride);
