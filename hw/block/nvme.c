@@ -645,7 +645,7 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
 
     //return NVME_SUCCESS;
-    return femu_rw_mbe(n, ns, cmd, req);
+    return femu_rw_mem_backend(n, ns, cmd, req);
 }
 
 static uint16_t nvme_dsm(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
@@ -741,6 +741,7 @@ static uint16_t nvme_compare(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 static uint16_t nvme_flush(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     NvmeRequest *req)
 {
+    /* Coperd: TODO */
     return NVME_SUCCESS;
 }
 
@@ -757,7 +758,9 @@ static uint16_t nvme_write_zeros(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         return NVME_LBA_RANGE | NVME_DNR;
     }
 
+    /* Coperd: TODO */
     printf("FEMU:%s,return success, TODO\n", __func__);
+
     return NVME_SUCCESS;
 }
 
@@ -2440,7 +2443,7 @@ static int nvme_init(PCIDevice *pci_dev)
         return -1;
     }
 
-    femu_init_mbe(&n->mbe, bs_size);
+    femu_init_mem_backend(&n->mbe, bs_size);
 
     n->start_time = time(NULL);
     n->reg_size = pow2ceil(0x1004 + 2 * (n->num_io_queues + 1) * 4);
@@ -2477,7 +2480,7 @@ static void nvme_exit(PCIDevice *pci_dev)
 
     nvme_clear_ctrl(n, true);
 
-    femu_destroy_mbe(&n->mbe);
+    femu_destroy_mem_backend(&n->mbe);
 
     g_free(n->namespaces);
     g_free(n->features.int_vector_config);
