@@ -970,9 +970,9 @@ uint16_t nvme_dma_write_prp(NvmeCtrl *n, uint8_t *ptr, uint32_t len,
 uint16_t nvme_dma_read_prp(NvmeCtrl *n, uint8_t *ptr, uint32_t len,
         uint64_t prp1, uint64_t prp2);
 
-void femu_init_mbe(struct femu_mbe *mbe, int64_t nbytes);
-void femu_destroy_mbe(struct femu_mbe *mbe);
-uint64_t femu_rw_mbe(NvmeCtrl *n, NvmeNamespace *ns,
+void femu_init_mem_backend(struct femu_mbe *mbe, int64_t nbytes);
+void femu_destroy_mem_backend(struct femu_mbe *mbe);
+uint64_t femu_rw_mem_backend(NvmeCtrl *n, NvmeNamespace *ns,
         NvmeCmd *cmd, NvmeRequest *req);
 
 #endif /* HW_NVME_H */

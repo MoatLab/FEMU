@@ -26,7 +26,7 @@
 
 /* Coperd: FEMU NVMe Memory Backend (mbe) */
 
-void femu_init_mbe(struct femu_mbe *mbe, int64_t nbytes)
+void femu_init_mem_backend(struct femu_mbe *mbe, int64_t nbytes)
 {
     assert(!mbe->mem_backend);
 
@@ -45,7 +45,7 @@ void femu_init_mbe(struct femu_mbe *mbe, int64_t nbytes)
     }
 }
 
-void femu_destroy_mbe(struct femu_mbe *mbe)
+void femu_destroy_mem_backend(struct femu_mbe *mbe)
 {
     if (mbe->mem_backend) {
         munlock(mbe->mem_backend, mbe->size);
@@ -54,7 +54,7 @@ void femu_destroy_mbe(struct femu_mbe *mbe)
 }
 
 /* Coperd: directly read/write to memory backend from NVMe command */
-uint64_t femu_rw_mbe(NvmeCtrl *n, NvmeNamespace *ns,
+uint64_t femu_rw_mem_backend(NvmeCtrl *n, NvmeNamespace *ns,
         NvmeCmd *cmd, NvmeRequest *req)
 {
     QEMUIOVector iov;
