@@ -434,7 +434,6 @@ uint16_t nvme_dma_read_prp(NvmeCtrl *n, uint8_t *ptr, uint32_t len,
     return status;
 }
 
-
 static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
 {
     NvmeCtrl *n = cq->ctrl;
@@ -446,8 +445,7 @@ static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
     if (cq->phys_contig) {
         addr = cq->dma_addr + cq->tail * n->cqe_size;
     } else {
-        addr = nvme_discontig(cq->prp_list, cq->tail, n->page_size,
-                n->cqe_size);
+        addr = nvme_discontig(cq->prp_list, cq->tail, n->page_size, n->cqe_size);
     }
 
     cqe->status = cpu_to_le16((req->status << 1) | phase);
@@ -461,26 +459,21 @@ static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
 
 static void nvme_post_cqes_io(void *opaque)
 {
-    bool on = qemu_mutex_iothread_locked();
-    if (on) {
-        qemu_mutex_unlock_iothread();
-    }
-
     NvmeCQueue *cq = opaque;
     NvmeRequest *req, *next;
     int64_t cur_time, ntt = 0;
-    int nc = 0;
+    int processed = 0;
 
     QTAILQ_FOREACH_SAFE(req, &cq->req_list, entry, next) {
         if (nvme_cq_full(cq)) {
             break;
         }
 
-       /*
-        * Coperd: decide whether to return I/O based on its expire_time
-        * Set a 5us grace time period as overhead of QEMU-to-guest is not
-        * included in delay emulation (TODO: optimize this)
-        */
+        /*
+         * Coperd: decide whether to return I/O based on its expire_time
+         * Set a 5us grace time period as overhead of QEMU-to-guest is not
+         * included in delay emulation (TODO: optimize this)
+         */
         cur_time = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
         if (cq->cqid != 0 && cur_time < req->expire_time) {
             ntt = req->expire_time;
@@ -489,65 +482,18 @@ static void nvme_post_cqes_io(void *opaque)
 
         QTAILQ_REMOVE(&cq->req_list, req, entry);
         nvme_post_cqe(cq, req);
-        nc++;
+        processed++;
     }
 
-    ntt = (ntt == 0) ? qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + CQ_POLLING_PERIOD_NS : ntt;
+    if (ntt == 0) {
+        ntt = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + CQ_POLLING_PERIOD_ND;
+    }
+
     timer_mod(cq->timer, ntt);
 
     /* Coperd: only interrupt guest when we "do" complete some I/Os */
-    if (nc > 0) {
+    if (processed > 0) {
         nvme_isr_notify_io(cq);
-    }
-
-    if (on) {
-        qemu_mutex_lock_iothread();
-    }
-}
-
-static void nvme_post_cqes(void *opaque)
-{
-    bool on = qemu_mutex_iothread_locked();
-    if (on) {
-        qemu_mutex_unlock_iothread();
-    }
-
-    NvmeCQueue *cq = opaque;
-    NvmeRequest *req, *next;
-    int64_t cur_time, ntt = 0;
-    int nc = 0;
-
-    QTAILQ_FOREACH_SAFE(req, &cq->req_list, entry, next) {
-        if (nvme_cq_full(cq)) {
-            break;
-        }
-
-       /*
-        * Coperd: decide whether to return I/O based on its expire_time
-        * Set a 5us grace time period as overhead of QEMU-to-guest is not
-        * included in delay emulation (TODO: optimize this)
-        */
-        cur_time = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-        if (cq->cqid != 0 && cur_time < req->expire_time) {
-            ntt = req->expire_time;
-            break;
-        }
-
-        QTAILQ_REMOVE(&cq->req_list, req, entry);
-        nvme_post_cqe(cq, req);
-        nc++;
-    }
-
-    ntt = (ntt == 0) ? qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + 8000 : ntt;
-    timer_mod(cq->timer, ntt);
-
-    /* Coperd: only interrupt guest when we "do" complete some I/Os */
-    if (nc > 0) {
-        nvme_isr_notify_io(cq);
-    }
-
-    if (on) {
-        qemu_mutex_lock_iothread();
     }
 }
 
@@ -1105,7 +1051,7 @@ static uint16_t nvme_del_sq(NvmeCtrl *n, NvmeCmd *cmd)
         cq = n->cq[sq->cqid];
         QTAILQ_REMOVE(&cq->sq_list, sq, entry);
 
-        nvme_post_cqes(cq);
+        nvme_post_cqes_io(cq);
         QTAILQ_FOREACH_SAFE(req, &cq->req_list, entry, next) {
             if (req->sq == sq) {
                 QTAILQ_REMOVE(&cq->req_list, req, entry);
@@ -2112,11 +2058,6 @@ void nvme_process_sq_admin(void *opaque)
 
 void nvme_process_sq_io(void *opaque)
 {
-    bool on = qemu_mutex_iothread_locked();
-    if (on) {
-        qemu_mutex_unlock_iothread();
-    }
-
     NvmeSQueue *sq = opaque;
     NvmeCtrl *n = sq->ctrl;
     NvmeCQueue *cq = n->cq[sq->cqid];
@@ -2134,7 +2075,7 @@ void nvme_process_sq_io(void *opaque)
             addr = sq->dma_addr + sq->head * n->sqe_size;
         } else {
             addr = nvme_discontig(sq->prp_list, sq->head, n->page_size,
-                n->sqe_size);
+                    n->sqe_size);
         }
         nvme_addr_read(n, addr, (void *)&cmd, sizeof(cmd));
         nvme_inc_sq_head(sq);
@@ -2174,10 +2115,6 @@ void nvme_process_sq_io(void *opaque)
      * TODO: design an algo to automatically adjust polling period
      */
     timer_mod(sq->timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + SQ_POLLING_PERIOD_NS);
-
-    if (on) {
-        qemu_mutex_lock_iothread();
-    }
 }
 
 static void nvme_clear_guest_notifier(NvmeCtrl *n)
