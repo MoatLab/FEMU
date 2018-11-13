@@ -462,8 +462,6 @@ static void *femu_oc_meta_index(FEMU_OC_Ctrl *ln, void *meta, uint32_t index)
 uint16_t femu_oc_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     NvmeRequest *req)
 {
-    /* In the case of a LightNVM device. The slba is the logical address, while
-     * the actual physical block address is stored in Command Dword 11-10. */
     FEMU_OC_Ctrl *ln = &n->femu_oc_ctrl;
     FEMU_OC_IdGroup *c = &ln->id_ctrl.groups[0];
     FEMU_OC_RwCmd *lrw = (FEMU_OC_RwCmd *)cmd;
@@ -1029,10 +1027,8 @@ static int femu_oc_read_tbls(NvmeCtrl *n)
     for (i = 0; i < n->num_namespaces; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
         uint32_t tbl_size = femu_oc_tbl_size(ns);
-        if (blk_pread(n->conf.blk, ns->tbl_dsk_start_offset,
-                       ns->tbl, tbl_size) != tbl_size) {
-            return -1;
-        }
+        printf("Coperd: tbl_size=%d\n", tbl_size);
+        assert(tbl_size);
     }
 
     return 0;
@@ -1040,14 +1036,6 @@ static int femu_oc_read_tbls(NvmeCtrl *n)
 
 int femu_oc_flush_tbls(NvmeCtrl *n)
 {
-    uint32_t i;
-    for (i = 0; i < n->num_namespaces; i++) {
-        NvmeNamespace *ns = &n->namespaces[i];
-        if (bdrv_pwrite_sync(blk_child(n->conf.blk), ns->tbl_dsk_start_offset,
-                             ns->tbl, femu_oc_tbl_size(ns))) {
-            return -1;
-        }
-    }
     return 0;
 }
 
@@ -1354,12 +1342,12 @@ int femu_oc_init(NvmeCtrl *n)
         c->sos = cpu_to_le16(ln->params.sos);
         printf("Coperd,num_ch=%d,num_lun=%d,num_pln=%d,num_blk=%d,num_pg=%d,pg_sz=%d,sos=%d,csecs=%d\n", c->num_ch, c->num_lun, c->num_pln, c->num_blk, c->num_pg, c->fpg_sz, c->sos, c->csecs);
 
-        c->trdt = cpu_to_le32(70000);
-        c->trdm = cpu_to_le32(100000);
+        c->trdt = cpu_to_le32(40000);
+        c->trdm = cpu_to_le32(80000);
         c->tprt = cpu_to_le32(1900000);
-        c->tprm = cpu_to_le32(3500000);
-        c->tbet = cpu_to_le32(3000000);
-        c->tbem = cpu_to_le32(3000000);
+        c->tprm = cpu_to_le32(3700000);
+        c->tbet = cpu_to_le32(7000000);
+        c->tbem = cpu_to_le32(20000000);
 
         switch(c->num_pln) {
             case 1:
