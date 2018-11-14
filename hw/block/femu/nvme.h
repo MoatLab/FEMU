@@ -930,6 +930,11 @@ enum {
     FEMU_DEF_NOSSD_MODE,
 };
 
+static inline bool OCSSD(FemuCtrl *n)
+{
+    return (n->femu_mode == FEMU_WHITEBOX_MODE);
+}
+
 extern void SSD_INIT(struct ssdstate *ssd);
 extern int64_t SSD_READ(struct ssdstate *ssd, unsigned int length, int64_t sector_nb);
 extern int64_t SSD_WRITE(struct ssdstate *ssd, unsigned int length, int64_t sector_nb);

@@ -541,10 +541,9 @@ static const MemoryRegionOps nvme_mmio_ops = {
 
 static int nvme_check_constraints(FemuCtrl *n)
 {
-    /* Coperd: FEMU doesn't rely on backend image file: !(n->conf.blk) */
-    if (!(n->serial) ||
-        (n->num_namespaces == 0 || n->num_namespaces > NVME_MAX_NUM_NAMESPACES) ||
-        (n->num_io_queues < 1 || n->num_io_queues > NVME_MAX_QS) ||
+    /* FEMU doesn't depend on image file: !(n->conf.blk), !(n->serial) || */
+    if ((n->num_namespaces == 0 || n->num_namespaces > NVME_MAX_NUM_NAMESPACES)
+        || (n->num_io_queues < 1 || n->num_io_queues > NVME_MAX_QS) ||
         (n->db_stride > NVME_MAX_STRIDE) ||
         (n->max_q_ents < 1) ||
         (n->max_sqes > NVME_MAX_QUEUE_ES || n->max_cqes > NVME_MAX_QUEUE_ES ||
@@ -685,6 +684,38 @@ static void nvme_init_namespaces(FemuCtrl *n)
     }
 }
 
+/* Coperd: info shown in "nvme list" */
+static void femu_set_devinfo(FemuCtrl *n)
+{
+    static int fsid_voc = 0;
+    static int fsid_vssd = 0;
+
+    NvmeIdCtrl *id = &n->id_ctrl;
+    char serial[20], tmp[4];
+    const char *vocssd_mn = "FEMU OpenChannel-SSD Controller";
+    const char *vssd_mn   = "FEMU BlackBox-SSD Controller";
+    const char *vocssd_sn = "vOCSSD";
+    const char *vssd_sn   = "vSSD";
+
+    memset(serial, 0, 20);
+    if (n->femu_mode == FEMU_WHITEBOX_MODE) {
+        sprintf(tmp, "%d", fsid_voc);
+        fsid_voc++;
+        strcat(serial, vocssd_sn);
+        strcat(serial, tmp);
+        strpadcpy((char *)id->mn, sizeof(id->mn), vocssd_mn, ' ');
+    } else {
+        sprintf(tmp, "%d", fsid_vssd);
+        fsid_vssd++;
+        strcat(serial, vssd_sn);
+        strcat(serial, tmp);
+        strpadcpy((char *)id->mn, sizeof(id->mn), vssd_mn, ' ');
+    }
+
+    strpadcpy((char *)id->sn, sizeof(id->sn), serial, ' ');
+    strpadcpy((char *)id->fr, sizeof(id->fr), "1.0", ' ');
+}
+
 static void nvme_init_ctrl(FemuCtrl *n)
 {
     int i;
@@ -693,9 +724,9 @@ static void nvme_init_ctrl(FemuCtrl *n)
 
     id->vid = cpu_to_le16(pci_get_word(pci_conf + PCI_VENDOR_ID));
     id->ssvid = cpu_to_le16(pci_get_word(pci_conf + PCI_SUBSYSTEM_VENDOR_ID));
-    strpadcpy((char *)id->mn, sizeof(id->mn), "FEMU NVMe Ctrl", ' ');
-    strpadcpy((char *)id->fr, sizeof(id->fr), "1.0", ' ');
-    strpadcpy((char *)id->sn, sizeof(id->sn), n->serial, ' ');
+
+    femu_set_devinfo(n);
+
     id->rab = 6;
     id->ieee[0] = 0x00;
     id->ieee[1] = 0x02;
@@ -727,7 +758,7 @@ static void nvme_init_ctrl(FemuCtrl *n)
     n->features.temp_thresh     = 0x14d;
     n->features.err_rec         = 0;
     n->features.volatile_wc     = n->vwc;
-    n->features.num_io_queues      = (n->num_io_queues - 1) |
+    n->features.num_io_queues   = (n->num_io_queues - 1) |
         ((n->num_io_queues - 1) << 16);
     n->features.int_coalescing  = n->intc_thresh | (n->intc_time << 8);
     n->features.write_atomicity = 0;
@@ -746,9 +777,8 @@ static void nvme_init_ctrl(FemuCtrl *n)
     NVME_CAP_SET_DSTRD(n->bar.cap, n->db_stride);
     NVME_CAP_SET_NSSRS(n->bar.cap, 0);
     NVME_CAP_SET_CSS(n->bar.cap, 1);
-    if (n->femu_mode == FEMU_WHITEBOX_MODE) {
-        if (femu_oc_dev(n))
-            NVME_CAP_SET_FEMU_OC(n->bar.cap, 1);
+    if (OCSSD(n) && femu_oc_dev(n)) {
+        NVME_CAP_SET_FEMU_OC(n->bar.cap, 1);
     }
 
     NVME_CAP_SET_MPSMIN(n->bar.cap, n->mpsmin);
@@ -802,7 +832,7 @@ static int femu_init(PCIDevice *pci_dev)
     FemuCtrl *n = FEMU(pci_dev);
     int64_t bs_size;
 
-    blkconf_serial(&n->conf, &n->serial);
+    //blkconf_serial(&n->conf, &n->serial);
     if (nvme_check_constraints(n)) {
         return -1;
     }
