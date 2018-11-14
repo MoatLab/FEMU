@@ -146,8 +146,8 @@
 #include <qemu/main-loop.h>
 
 #include "nvme.h"
-#include "trace-root.h"
-#include "trace.h"
+//#include "trace-root.h"
+//#include "trace.h"
 
 #include "god.h"
 
@@ -2084,7 +2084,7 @@ static uint64_t nvme_mmio_read(void *opaque, hwaddr addr, unsigned size)
         memcpy(&val, ptr + addr, size);
     }
 
-    trace_nvme_mmio_read(addr, size, val);
+    //trace_nvme_mmio_read(addr, size, val);
 
     return val;
 }
@@ -2193,7 +2193,7 @@ static void nvme_mmio_write(void *opaque, hwaddr addr, uint64_t data,
         nvme_process_db_io(n, addr, data);
     }
 
-    trace_nvme_mmio_write(addr, size, data);
+    //trace_nvme_mmio_write(addr, size, data);
 }
 
 static void nvme_cmb_write(void *opaque, hwaddr addr, uint64_t data,
@@ -2202,7 +2202,7 @@ static void nvme_cmb_write(void *opaque, hwaddr addr, uint64_t data,
     NvmeCtrl *n = (NvmeCtrl *)opaque;
     memcpy(&n->cmbuf[addr], &data, size);
 
-    trace_nvme_cmb_write(addr, size, data);
+    //trace_nvme_cmb_write(addr, size, data);
 }
 
 static uint64_t nvme_cmb_read(void *opaque, hwaddr addr, unsigned size)
@@ -2211,7 +2211,7 @@ static uint64_t nvme_cmb_read(void *opaque, hwaddr addr, unsigned size)
     NvmeCtrl *n = (NvmeCtrl *)opaque;
 
     memcpy(&val, &n->cmbuf[addr], size);
-    trace_nvme_cmb_read(addr, size, val);
+    //trace_nvme_cmb_read(addr, size, val);
     return val;
 }
 
@@ -2622,7 +2622,7 @@ static void nvme_instance_init(Object *obj)
 }
 
 static const TypeInfo nvme_info = {
-    .name          = "nvme",
+    .name          = "femu",
     .parent        = TYPE_PCI_DEVICE,
     .instance_size = sizeof(NvmeCtrl),
     .class_init    = nvme_class_init,

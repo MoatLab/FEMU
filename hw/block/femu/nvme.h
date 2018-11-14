@@ -4,7 +4,7 @@
 #include "qemu/bitops.h"
 #include "hw/virtio/vhost.h"
 #include "sysemu/hostmem.h"
-#include "femu-mem-backend.h"
+#include "mem-backend.h"
 #include "ocssd/femu-oc.h"
 #include "ssd/vssim_config_manager.h"
 
@@ -829,7 +829,7 @@ typedef struct NvmeNamespace {
     FEMU_OC_Bbt         **bbtbl;
 } NvmeNamespace;
 
-#define TYPE_NVME "nvme"
+#define TYPE_NVME "femu"
 #define NVME(obj) \
         OBJECT_CHECK(NvmeCtrl, (obj), TYPE_NVME)
 
