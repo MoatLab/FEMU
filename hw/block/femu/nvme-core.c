@@ -1,22 +1,7 @@
 #include "qemu/osdep.h"
-#include "block/block_int.h"
-#include "block/qapi.h"
-#include "exec/memory.h"
 #include "hw/block/block.h"
-#include "hw/hw.h"
-#include "sysemu/kvm.h"
 #include "hw/pci/msix.h"
 #include "hw/pci/msi.h"
-#include "hw/pci/pci.h"
-#include "qapi/visitor.h"
-#include "qapi/error.h"
-#include "qemu/error-report.h"
-#include "qemu/bitops.h"
-#include "qemu/bitmap.h"
-#include "qom/object.h"
-#include "sysemu/sysemu.h"
-#include "sysemu/block-backend.h"
-#include <qemu/main-loop.h>
 
 #include "nvme.h"
 
@@ -200,6 +185,7 @@ uint16_t nvme_del_cq(FemuCtrl *n, NvmeCmd *cmd)
         return NVME_INVALID_QUEUE_DEL;
     }
     nvme_free_cq(cq, n);
+
     return NVME_SUCCESS;
 }
 
@@ -401,6 +387,7 @@ uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         default:
             return NVME_INVALID_FIELD | NVME_DNR;
     }
+
     return NVME_SUCCESS;
 }
 
@@ -412,6 +399,7 @@ uint16_t nvme_fw_log_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
     NvmeFwSlotInfoLog fw_log;
 
     trans_len = MIN(sizeof(fw_log), buf_len);
+
     return nvme_dma_read_prp(n, (uint8_t *)&fw_log, trans_len, prp1, prp2);
 }
 
@@ -423,6 +411,7 @@ uint16_t nvme_error_log_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
 
     trans_len = MIN(sizeof(*n->elpes) * n->elpe, buf_len);
     n->aer_mask &= ~(1 << NVME_AER_TYPE_ERROR);
+
     return nvme_dma_read_prp(n, (uint8_t *)n->elpes, trans_len, prp1, prp2);
 }
 
@@ -568,6 +557,7 @@ uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
 
     qemu_sglist_destroy(&req->qsg);
+
     return NVME_SUCCESS;
 }
 
@@ -662,13 +652,13 @@ static uint16_t nvme_abort_req(FemuCtrl *n, NvmeCmd *cmd, uint32_t *result)
 
         ++index;
     }
+
     return NVME_SUCCESS;
 }
 
 static uint16_t nvme_format_namespace(NvmeNamespace *ns, uint8_t lba_idx,
     uint8_t meta_loc, uint8_t pil, uint8_t pi, uint8_t sec_erase)
 {
-    //uint64_t blks;
     uint16_t ms = le16_to_cpu(ns->id_ns.lbaf[lba_idx].ms);
 
     if (lba_idx > ns->id_ns.nlbaf) {
@@ -734,16 +724,9 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
     }
 
     ns = &n->namespaces[nsid - 1];
+
     return nvme_format_namespace(ns, lba_idx, meta_loc, pil, pi, sec_erase);
 }
-
-
-extern int64_t nand_read_upper_t;
-extern int64_t nand_read_lower_t;
-extern int64_t nand_write_upper_t;
-extern int64_t nand_write_lower_t;
-extern int64_t nand_erase_t;
-extern int64_t chnl_page_tr_t;
 
 static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
 {
@@ -803,7 +786,6 @@ static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         return NVME_INVALID_OPCODE | NVME_DNR;
     }
 }
-
 
 void nvme_process_sq_admin(void *opaque)
 {

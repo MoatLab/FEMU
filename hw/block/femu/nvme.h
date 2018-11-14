@@ -1,5 +1,6 @@
-#ifndef HW_NVME_H
-#define HW_NVME_H
+#ifndef __FEMU_NVME_H
+#define __FEMU_NVME_H
+
 #include "qemu/cutils.h"
 #include "qemu/bitops.h"
 #include "hw/virtio/vhost.h"
@@ -272,7 +273,6 @@ enum NvmeIoCommands {
     NVME_CMD_DSM                = 0x09,
 };
 
-
 typedef struct NvmeDeleteQ {
     uint8_t     opcode;
     uint8_t     flags;
@@ -478,7 +478,7 @@ enum NvmeStatusCodes {
     NVME_CONFLICTING_ATTRS      = 0x0180,
     NVME_INVALID_PROT_INFO      = 0x0181,
     NVME_WRITE_TO_RO            = 0x0182,
-    NVME_INVALID_MEMORY_ADDRESS = 0x01C0,  /* Vendor extension. */
+    NVME_INVALID_MEMORY_ADDRESS = 0x01C0, 
     NVME_WRITE_FAULT            = 0x0280,
     NVME_UNRECOVERED_READ       = 0x0281,
     NVME_E2E_GUARD_ERROR        = 0x0282,
@@ -596,7 +596,6 @@ typedef struct NvmeIdCtrl {
     NvmePSD     psd[32];
     uint8_t     vs[1024];
 } NvmeIdCtrl;
-
 
 enum NvmeIdCtrlOacs {
     NVME_OACS_SECURITY  = 1 << 0,
@@ -742,7 +741,6 @@ typedef struct NvmeRequest {
     struct NvmeSQueue       *sq;
     struct NvmeNamespace    *ns;
     BlockAIOCB               *aiocb;
-    uint8_t                 cmd_opcode;
     uint16_t                status;
     uint64_t                slba;
     uint16_t                is_write;
@@ -762,7 +760,6 @@ typedef struct NvmeRequest {
     int64_t                 data_offset;
     int                     lunid;
     int                     chnl;
-    int64_t                 st;
 
 } NvmeRequest;
 
@@ -790,12 +787,8 @@ typedef struct NvmeSQueue {
     QTAILQ_HEAD(sq_req_list, NvmeRequest) req_list;
     QTAILQ_HEAD(out_req_list, NvmeRequest) out_req_list;
     QTAILQ_ENTRY(NvmeSQueue) entry;
-    /* Mapped memory location where the tail pointer is stored by the guest
-     * without triggering MMIO exits. */
+
     uint64_t    db_addr;
-    /* virtio-like eventidx pointer, guest updates to the tail pointer that
-     * do not go over this value will not result in MMIO writes (but will
-     * still write the tail pointer to the "db_addr" location above). */
     uint64_t    eventidx_addr;
 } NvmeSQueue;
 
@@ -816,12 +809,7 @@ typedef struct NvmeCQueue {
     QEMUTimer   *timer;
     QTAILQ_HEAD(sq_list, NvmeSQueue) sq_list;
     QTAILQ_HEAD(cq_req_list, NvmeRequest) req_list;
-    /* Mapped memory location where the head pointer is stored by the guest
-     * without triggering MMIO exits. */
     uint64_t    db_addr;
-    /* virtio-like eventidx pointer, guest updates to the head pointer that
-     * do not go over this value will not result in MMIO writes (but will
-     * still write the head pointer to the "db_addr" location above). */
     uint64_t    eventidx_addr;
 } NvmeCQueue;
 
@@ -838,7 +826,7 @@ typedef struct NvmeNamespace {
     uint64_t        tbl_dsk_start_offset;
     uint32_t        tbl_entries;
     uint64_t        *tbl;
-    FEMU_OC_Bbt         **bbtbl;
+    FEMU_OC_Bbt     **bbtbl;
 } NvmeNamespace;
 
 #define TYPE_NVME "femu"
@@ -852,7 +840,6 @@ typedef struct FemuCtrl {
     NvmeBar      bar;
     BlockConf    conf;
 
-    uint32_t    memsz; /* Coperd: memory backend size */
     time_t      start_time;
     uint16_t    temperature;
     uint16_t    page_size;
@@ -921,12 +908,11 @@ typedef struct FemuCtrl {
 	uint64_t		dbs_addr;
 	uint64_t		eis_addr;
     
+    uint8_t         femu_mode; 
+    uint32_t        memsz; 
     FEMU_OC_Ctrl    femu_oc_ctrl;
     struct ssdstate ssd;
-
     struct femu_mbe mbe;
-
-    uint8_t         femu_mode; // 0 for white-box and 1 for black-box
 } FemuCtrl;
 
 typedef struct NvmeDifTuple {
@@ -934,7 +920,6 @@ typedef struct NvmeDifTuple {
     uint16_t app_tag;
     uint32_t ref_tag;
 } NvmeDifTuple;
-
 
 #define SQ_POLLING_PERIOD_NS	(5000)
 #define CQ_POLLING_PERIOD_NS	(5000)
@@ -948,6 +933,8 @@ enum {
 extern void SSD_INIT(struct ssdstate *ssd);
 extern int64_t SSD_READ(struct ssdstate *ssd, unsigned int length, int64_t sector_nb);
 extern int64_t SSD_WRITE(struct ssdstate *ssd, unsigned int length, int64_t sector_nb);
+
+
 extern void femu_oc_exit(FemuCtrl *n);
 extern int femu_oc_init(FemuCtrl *n);
 extern int femu_oc_flush_tbls(FemuCtrl *n);
@@ -965,8 +952,10 @@ extern uint16_t femu_oc_erase_async(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd
     NvmeRequest *req);
 extern uint32_t femu_oc_tbl_size(NvmeNamespace *ns);
 
+
 void nvme_process_sq_admin(void *opaque);
 void nvme_process_sq_io(void *opaque);
+
 
 void femu_init_mem_backend(struct femu_mbe *mbe, int64_t nbytes);
 void femu_destroy_mem_backend(struct femu_mbe *mbe);
@@ -1016,11 +1005,6 @@ uint64_t nvme_cmb_read(void *opaque, hwaddr addr, unsigned size);
 void nvme_cmb_write(void *opaque, hwaddr addr, uint64_t data, unsigned size);
 
 
-
-
-
-
-
 uint16_t nvme_init_sq(NvmeSQueue *sq, FemuCtrl *n, uint64_t dma_addr,
     uint16_t sqid, uint16_t cqid, uint16_t size, enum NvmeQueueFlags prio,
     int contig);
@@ -1052,19 +1036,17 @@ uint16_t nvme_write_uncor(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     NvmeRequest *req);
 
 
-
-
-
-
-
-
-
-
-
 uint64_t ns_blks(NvmeNamespace *ns, uint8_t lba_idx);
 void nvme_partition_ns(NvmeNamespace *ns, uint8_t lba_idx);
 void nvme_post_cqes_io(void *opaque);
 
 
-#endif /* HW_NVME_H */
+extern int64_t nand_read_upper_t;
+extern int64_t nand_read_lower_t;
+extern int64_t nand_write_upper_t;
+extern int64_t nand_write_lower_t;
+extern int64_t nand_erase_t;
+extern int64_t chnl_page_tr_t;
+
+#endif /* __FEMU_NVME_H */
 
