@@ -860,29 +860,6 @@ uint16_t femu_oc_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     return NVME_SUCCESS;
 
-
-    dma_acct_start(n->conf.blk, &req->acct, &req->qsg, req->is_write ?
-            BLOCK_ACCT_WRITE : BLOCK_ACCT_READ);
-    if (req->qsg.nsg > 0) {
-        req->aiocb = req->is_write ?
-            dma_blk_write_list(n->conf.blk, &req->qsg, aio_sector_list,
-                    BDRV_SECTOR_SIZE, nvme_rw_cb, req) :
-            dma_blk_read_list(n->conf.blk, &req->qsg, aio_sector_list,
-                    BDRV_SECTOR_SIZE, nvme_rw_cb, req);
-    } else {
-        uint64_t aio_sector = aio_sector_list[0];
-
-        req->aiocb = req->is_write ?
-            // Coperd: FIX
-            blk_aio_pwritev(n->conf.blk, aio_sector, &req->iov,
-                    data_size >> 9, nvme_rw_cb, req) :
-            blk_aio_preadv(n->conf.blk, aio_sector, &req->iov,
-                    data_size >> 9, nvme_rw_cb, req);
-
-    }
-
-    return NVME_NO_COMPLETE;
-
 fail_free_msl:
     g_free(msl);
 
