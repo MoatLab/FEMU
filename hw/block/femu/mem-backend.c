@@ -54,7 +54,7 @@ void femu_destroy_mem_backend(struct femu_mbe *mbe)
 }
 
 /* Coperd: directly read/write to memory backend from NVMe command */
-uint64_t femu_rw_mem_backend(NvmeCtrl *n, NvmeNamespace *ns,
+uint64_t femu_rw_mem_backend(FemuCtrl *n, NvmeNamespace *ns,
         NvmeCmd *cmd, NvmeRequest *req)
 {
     QEMUIOVector iov;

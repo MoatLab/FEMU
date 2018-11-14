@@ -762,7 +762,7 @@ typedef struct DMAOff {
 } DMAOff;
 
 typedef struct NvmeSQueue {
-    struct NvmeCtrl *ctrl;
+    struct FemuCtrl *ctrl;
     uint8_t     phys_contig;
     uint8_t     arb_burst;
     uint16_t    sqid;
@@ -788,7 +788,7 @@ typedef struct NvmeSQueue {
 } NvmeSQueue;
 
 typedef struct NvmeCQueue {
-    struct NvmeCtrl *ctrl;
+    struct FemuCtrl *ctrl;
     uint8_t     phys_contig;
     uint8_t     phase;
     uint16_t    cqid;
@@ -814,7 +814,7 @@ typedef struct NvmeCQueue {
 } NvmeCQueue;
 
 typedef struct NvmeNamespace {
-    struct NvmeCtrl *ctrl;
+    struct FemuCtrl *ctrl;
     NvmeIdNs        id_ns;
     NvmeRangeType   lba_range[64];
     unsigned long   *util;
@@ -830,10 +830,10 @@ typedef struct NvmeNamespace {
 } NvmeNamespace;
 
 #define TYPE_NVME "femu"
-#define NVME(obj) \
-        OBJECT_CHECK(NvmeCtrl, (obj), TYPE_NVME)
+#define FEMU(obj) \
+        OBJECT_CHECK(FemuCtrl, (obj), TYPE_NVME)
 
-typedef struct NvmeCtrl {
+typedef struct FemuCtrl {
     PCIDevice    parent_obj;
     MemoryRegion iomem;
     MemoryRegion ctrl_mem;
@@ -915,7 +915,7 @@ typedef struct NvmeCtrl {
     struct femu_mbe mbe;
 
     uint8_t         femu_mode; // 0 for white-box and 1 for black-box
-} NvmeCtrl;
+} FemuCtrl;
 
 typedef struct NvmeDifTuple {
     uint16_t guard_tag;
@@ -936,44 +936,44 @@ enum {
 extern void SSD_INIT(struct ssdstate *ssd);
 extern int64_t SSD_READ(struct ssdstate *ssd, unsigned int length, int64_t sector_nb);
 extern int64_t SSD_WRITE(struct ssdstate *ssd, unsigned int length, int64_t sector_nb);
-extern void femu_oc_exit(NvmeCtrl *n);
-extern int femu_oc_init(NvmeCtrl *n);
-extern int femu_oc_flush_tbls(NvmeCtrl *n);
-extern uint16_t femu_oc_bbt_set(NvmeCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe);
-extern uint16_t femu_oc_bbt_get(NvmeCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe);
-extern uint16_t femu_oc_get_l2p_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe);
-extern uint16_t femu_oc_identity(NvmeCtrl *n, NvmeCmd *cmd);
+extern void femu_oc_exit(FemuCtrl *n);
+extern int femu_oc_init(FemuCtrl *n);
+extern int femu_oc_flush_tbls(FemuCtrl *n);
+extern uint16_t femu_oc_bbt_set(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe);
+extern uint16_t femu_oc_bbt_get(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe);
+extern uint16_t femu_oc_get_l2p_tbl(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe);
+extern uint16_t femu_oc_identity(FemuCtrl *n, NvmeCmd *cmd);
 extern void femu_oc_tbl_initialize(NvmeNamespace *ns);
-extern void femu_oc_post_cqe(NvmeCtrl *n, NvmeCqe *cqe);
-extern uint8_t femu_oc_dev(NvmeCtrl *n);
-extern uint8_t femu_oc_hybrid_dev(NvmeCtrl *n);
-extern uint16_t femu_oc_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
+extern void femu_oc_post_cqe(FemuCtrl *n, NvmeCqe *cqe);
+extern uint8_t femu_oc_dev(FemuCtrl *n);
+extern uint8_t femu_oc_hybrid_dev(FemuCtrl *n);
+extern uint16_t femu_oc_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     NvmeRequest *req);
-extern uint16_t femu_oc_erase_async(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
+extern uint16_t femu_oc_erase_async(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     NvmeRequest *req);
 extern uint32_t femu_oc_tbl_size(NvmeNamespace *ns);
 
-uint16_t nvme_rw_check_req(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
+uint16_t nvme_rw_check_req(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         NvmeRequest *req, uint64_t slba, uint64_t elba, uint32_t nlb,
         uint16_t ctrl, uint64_t data_size, uint64_t meta_size);
-void nvme_set_error_page(NvmeCtrl *n, uint16_t sqid, uint16_t cid,
+void nvme_set_error_page(FemuCtrl *n, uint16_t sqid, uint16_t cid,
         uint16_t status, uint16_t location, uint64_t lba, uint32_t nsid);
 void nvme_rw_cb(void *opaque, int ret);
 //static void nvme_process_sq(void *opaque);
 void nvme_process_sq_admin(void *opaque);
 void nvme_process_sq_io(void *opaque);
-void nvme_addr_read(NvmeCtrl *n, hwaddr addr, void *buf, int size);
-void nvme_addr_write(NvmeCtrl *n, hwaddr addr, void *buf, int size);
+void nvme_addr_read(FemuCtrl *n, hwaddr addr, void *buf, int size);
+void nvme_addr_write(FemuCtrl *n, hwaddr addr, void *buf, int size);
 uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov,
-        uint64_t prp1, uint64_t prp2, uint32_t len, NvmeCtrl *n);
-uint16_t nvme_dma_write_prp(NvmeCtrl *n, uint8_t *ptr, uint32_t len,
+        uint64_t prp1, uint64_t prp2, uint32_t len, FemuCtrl *n);
+uint16_t nvme_dma_write_prp(FemuCtrl *n, uint8_t *ptr, uint32_t len,
         uint64_t prp1, uint64_t prp2);
-uint16_t nvme_dma_read_prp(NvmeCtrl *n, uint8_t *ptr, uint32_t len,
+uint16_t nvme_dma_read_prp(FemuCtrl *n, uint8_t *ptr, uint32_t len,
         uint64_t prp1, uint64_t prp2);
 
 void femu_init_mem_backend(struct femu_mbe *mbe, int64_t nbytes);
 void femu_destroy_mem_backend(struct femu_mbe *mbe);
-uint64_t femu_rw_mem_backend(NvmeCtrl *n, NvmeNamespace *ns,
+uint64_t femu_rw_mem_backend(FemuCtrl *n, NvmeNamespace *ns,
         NvmeCmd *cmd, NvmeRequest *req);
 
 #endif /* HW_NVME_H */

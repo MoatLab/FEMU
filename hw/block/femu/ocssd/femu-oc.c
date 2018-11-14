@@ -22,12 +22,12 @@
 #include "femu-oc.h"
 
 int is_upper_page(int pg);
-void init_low_upp_layout(NvmeCtrl *n);
-//uint8_t femu_oc_dev(NvmeCtrl *n);
-//uint8_t femu_oc_hybrid_dev(NvmeCtrl *n);
-//uint16_t femu_oc_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
+void init_low_upp_layout(FemuCtrl *n);
+//uint8_t femu_oc_dev(FemuCtrl *n);
+//uint8_t femu_oc_hybrid_dev(FemuCtrl *n);
+//uint16_t femu_oc_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     //NvmeRequest *req);
-//void femu_oc_post_cqe(NvmeCtrl *n, NvmeCqe *cqe);
+//void femu_oc_post_cqe(FemuCtrl *n, NvmeCqe *cqe);
 void print_ppa(FEMU_OC_Ctrl *ln, uint64_t ppa);
 int femu_oc_meta_write(FEMU_OC_Ctrl *ln, void *meta);
 int femu_oc_meta_read(FEMU_OC_Ctrl *ln, void *meta);
@@ -39,7 +39,7 @@ void femu_oc_erase_io_complete_cb(void *opaque, int ret);
 int femu_oc_meta_state_set_written(FEMU_OC_Ctrl *ln, uint64_t ppa);
 void femu_oc_init_id_ctrl(FEMU_OC_Ctrl *ln);
 int femu_oc_init_meta(FEMU_OC_Ctrl *ln);
-int femu_oc_bbtbl_init(NvmeCtrl *n, NvmeNamespace *ns);
+int femu_oc_bbtbl_init(FemuCtrl *n, NvmeNamespace *ns);
 
 int64_t chip_next_avail_time[128]; /* Coperd: when chip will be not busy */
 int64_t chnl_next_avail_time[16]; /* Coperd: when chnl will be free */
@@ -65,7 +65,7 @@ int mlc_tbl[511];
 #define MLC_UPPER_PAGE  1
 
 /* Coperd: L95B lower/upper page layout in one block */
-void init_low_upp_layout(NvmeCtrl *n)
+void init_low_upp_layout(FemuCtrl *n)
 {
     int i;
     int lowp[] = {0, 1, 2, 3, 4, 5, 7, 8, 502, 503, 506, 507, 509, 510};
@@ -89,7 +89,7 @@ int is_upper_page(int pg)
     return mlc_tbl[pg];
 }
 
-uint8_t femu_oc_dev(NvmeCtrl *n)
+uint8_t femu_oc_dev(FemuCtrl *n)
 {
     return (n->femu_oc_ctrl.id_ctrl.ver_id != 0);
 }
@@ -106,7 +106,7 @@ void femu_oc_check_size(void)
     QEMU_BUILD_BUG_ON(sizeof(FEMU_OC_IdGroup) != 960);
 }
 
-uint8_t femu_oc_hybrid_dev(NvmeCtrl *n)
+uint8_t femu_oc_hybrid_dev(FemuCtrl *n)
 {
     return (n->femu_oc_ctrl.id_ctrl.dom == 1);
 }
@@ -459,7 +459,7 @@ static void *femu_oc_meta_index(FEMU_OC_Ctrl *ln, void *meta, uint32_t index)
     return meta + (index * ln->params.sos);
 }
 
-uint16_t femu_oc_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
+uint16_t femu_oc_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     NvmeRequest *req)
 {
     FEMU_OC_Ctrl *ln = &n->femu_oc_ctrl;
@@ -894,7 +894,7 @@ uint32_t femu_oc_tbl_size(NvmeNamespace *ns)
     return ns->tbl_entries * sizeof(*(ns->tbl));
 }
 
-uint16_t femu_oc_identity(NvmeCtrl *n, NvmeCmd *cmd)
+uint16_t femu_oc_identity(FemuCtrl *n, NvmeCmd *cmd)
 {
     NvmeIdentify *c = (NvmeIdentify *)cmd;
     uint32_t nsid = le32_to_cpu(c->nsid);
@@ -909,7 +909,7 @@ uint16_t femu_oc_identity(NvmeCtrl *n, NvmeCmd *cmd)
                                     sizeof(FEMU_OC_IdCtrl), prp1, prp2);
 }
 
-uint16_t femu_oc_get_l2p_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
+uint16_t femu_oc_get_l2p_tbl(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
 {
     NvmeNamespace *ns;
     FEMU_OC_GetL2PTbl *gtbl = (FEMU_OC_GetL2PTbl*)cmd;
@@ -939,7 +939,7 @@ uint16_t femu_oc_get_l2p_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     return NVME_SUCCESS;
 }
 
-uint16_t femu_oc_bbt_get(NvmeCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
+uint16_t femu_oc_bbt_get(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
 {
     NvmeNamespace *ns;
     FEMU_OC_Ctrl *ln = &n->femu_oc_ctrl;
@@ -973,7 +973,7 @@ uint16_t femu_oc_bbt_get(NvmeCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     return ret;
 }
 
-uint16_t femu_oc_bbt_set(NvmeCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
+uint16_t femu_oc_bbt_set(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
 {
     NvmeNamespace *ns;
     FEMU_OC_Ctrl *ln = &n->femu_oc_ctrl;
@@ -1020,7 +1020,7 @@ uint16_t femu_oc_bbt_set(NvmeCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     return NVME_SUCCESS;
 }
 
-static int femu_oc_read_tbls(NvmeCtrl *n)
+static int femu_oc_read_tbls(FemuCtrl *n)
 {
     uint32_t i;
 
@@ -1034,7 +1034,7 @@ static int femu_oc_read_tbls(NvmeCtrl *n)
     return 0;
 }
 
-int femu_oc_flush_tbls(NvmeCtrl *n)
+int femu_oc_flush_tbls(FemuCtrl *n)
 {
     return 0;
 }
@@ -1043,7 +1043,7 @@ void femu_oc_erase_io_complete_cb(void *opaque, int ret)
 {
     NvmeRequest *req = opaque;
     //NvmeSQueue *sq = req->sq;
-    //NvmeCtrl *n = sq->ctrl;
+    //FemuCtrl *n = sq->ctrl;
     //NvmeCQueue *cq = n->cq[sq->cqid];
 
     //block_acct_done(blk_get_stats(n->conf.blk), &req->acct);
@@ -1056,7 +1056,7 @@ void femu_oc_erase_io_complete_cb(void *opaque, int ret)
     //nvme_enqueue_req_completion_io(cq, req);
 }
 
-uint16_t femu_oc_erase_async(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
+uint16_t femu_oc_erase_async(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     NvmeRequest *req)
 {
     FEMU_OC_Ctrl *ln = &n->femu_oc_ctrl;
@@ -1251,7 +1251,7 @@ int femu_oc_init_meta(FEMU_OC_Ctrl *ln)
     return 0;
  }
 
-int femu_oc_bbtbl_init(NvmeCtrl *n, NvmeNamespace *ns)
+int femu_oc_bbtbl_init(FemuCtrl *n, NvmeNamespace *ns)
 {
     FEMU_OC_Ctrl *ln = &n->femu_oc_ctrl;
     FEMU_OC_IdGroup *c = &ln->id_ctrl.groups[0];
@@ -1300,7 +1300,7 @@ fail_bbt:
     return ret;
 }
 
-int femu_oc_init(NvmeCtrl *n)
+int femu_oc_init(FemuCtrl *n)
 {
     FEMU_OC_Ctrl *ln;
     FEMU_OC_IdGroup *c;
@@ -1449,7 +1449,7 @@ int femu_oc_init(NvmeCtrl *n)
     return 0;
 }
 
-void femu_oc_exit(NvmeCtrl *n)
+void femu_oc_exit(FemuCtrl *n)
 {
     FEMU_OC_Ctrl *ln = &n->femu_oc_ctrl;
 
