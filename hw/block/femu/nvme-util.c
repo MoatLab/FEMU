@@ -126,24 +126,11 @@
  */
 
 #include "qemu/osdep.h"
-#include "block/block_int.h"
-#include "block/qapi.h"
-#include "exec/memory.h"
 #include "hw/block/block.h"
-#include "hw/hw.h"
 #include "sysemu/kvm.h"
 #include "hw/pci/msix.h"
 #include "hw/pci/msi.h"
-#include "hw/pci/pci.h"
-#include "qapi/visitor.h"
-#include "qapi/error.h"
 #include "qemu/error-report.h"
-#include "qemu/bitops.h"
-#include "qemu/bitmap.h"
-#include "qom/object.h"
-#include "sysemu/sysemu.h"
-#include "sysemu/block-backend.h"
-#include <qemu/main-loop.h>
 
 #include "nvme.h"
 
@@ -273,6 +260,7 @@ uint64_t *nvme_setup_discontig(FemuCtrl *n, uint64_t prp_addr,
             return NULL;
         }
     }
+
     return prp_list;
 }
 
@@ -360,6 +348,7 @@ uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov,
             }
         }
     }
+
     return NVME_SUCCESS;
 
 unmap:
@@ -368,6 +357,7 @@ unmap:
     } else {
         qemu_iovec_destroy(iov);
     }
+
     return NVME_INVALID_FIELD | NVME_DNR;
 }
 
@@ -392,6 +382,7 @@ uint16_t nvme_dma_write_prp(FemuCtrl *n, uint8_t *ptr, uint32_t len,
         }
         qemu_iovec_destroy(&iov);
     }
+
     return status;
 }
 
@@ -416,9 +407,9 @@ uint16_t nvme_dma_read_prp(FemuCtrl *n, uint8_t *ptr, uint32_t len,
         }
         qemu_iovec_destroy(&iov);
     }
+
     return status;
 }
-
 
 void nvme_set_error_page(FemuCtrl *n, uint16_t sqid, uint16_t cid,
         uint16_t status, uint16_t location, uint64_t lba, uint32_t nsid)
@@ -475,7 +466,6 @@ uint16_t nvme_rw_check_req(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     return 0;
 }
 
-
 int nvme_add_kvm_msi_virq(FemuCtrl *n, NvmeCQueue *cq)
 {
     int virq;
@@ -513,7 +503,6 @@ void nvme_remove_kvm_msi_virq(NvmeCQueue *cq)
     cq->virq = -1;
 }
 
-/* Coperd: we need to register the virq info to WPT */
 int nvme_set_guest_notifier(FemuCtrl *n, EventNotifier *notifier, uint32_t qid)
 {
     return 0;
@@ -579,8 +568,6 @@ void nvme_vector_mask(PCIDevice *dev, unsigned vector)
             return;
         }
     }
-
-    return;
 }
 
 void nvme_vector_poll(PCIDevice *dev, unsigned int vector_start,
@@ -721,7 +708,6 @@ void nvme_clear_guest_notifier(FemuCtrl *n)
         n->vector_poll_started = false;
     }
 }
-
 
 uint16_t nvme_set_db_memory(FemuCtrl *n, const NvmeCmd *cmd)
 {

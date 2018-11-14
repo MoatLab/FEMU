@@ -1,25 +1,11 @@
 #include "qemu/osdep.h"
-#include "block/block_int.h"
-#include "block/qapi.h"
-#include "exec/memory.h"
 #include "hw/block/block.h"
-#include "hw/hw.h"
-#include "sysemu/kvm.h"
 #include "hw/pci/msix.h"
 #include "hw/pci/msi.h"
-#include "hw/pci/pci.h"
 #include "qapi/visitor.h"
 #include "qapi/error.h"
-#include "qemu/error-report.h"
-#include "qemu/bitops.h"
-#include "qemu/bitmap.h"
-#include "qom/object.h"
-#include "sysemu/sysemu.h"
-#include "sysemu/block-backend.h"
-#include <qemu/main-loop.h>
 
 #include "nvme.h"
-#include "god.h"
 
 static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
 {
@@ -109,14 +95,6 @@ static void nvme_enqueue_req_completion_io(NvmeCQueue *cq, NvmeRequest *req)
     if (inserted == false) {
         QTAILQ_INSERT_TAIL(&cq->req_list, req, entry);
     }
-}
-
-static void nvme_enqueue_req_completion(NvmeCQueue *cq, NvmeRequest *req)
-{
-    assert(cq->cqid == req->sq->cqid);
-    QTAILQ_REMOVE(&req->sq->out_req_list, req, entry);
-    QTAILQ_INSERT_TAIL(&cq->req_list, req, entry);
-    timer_mod(cq->timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + 500);
 }
 
 static uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
@@ -241,7 +219,6 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     }
 }
 
-
 /* Coperd: eventidx buffer is not needed */
 #if 0
 static void nvme_update_sq_eventidx(const NvmeSQueue *sq)
@@ -252,7 +229,6 @@ static void nvme_update_sq_eventidx(const NvmeSQueue *sq)
     }
 }
 #endif
-
 
 void nvme_process_sq_io(void *opaque)
 {
@@ -287,7 +263,6 @@ void nvme_process_sq_io(void *opaque)
         memset(&req->cqe, 0, sizeof(req->cqe));
         req->cqe.cid = cmd.cid;
         req->aiocb = NULL;
-        req->cmd_opcode = cmd.opcode;
 
         status = nvme_io_cmd(n, &cmd, req);
         if (status != NVME_NO_COMPLETE) {
@@ -309,7 +284,6 @@ void nvme_process_sq_io(void *opaque)
 
     timer_mod(sq->timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + SQ_POLLING_PERIOD_NS);
 }
-
 
 static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
 {
@@ -378,52 +352,52 @@ static void nvme_write_bar(FemuCtrl *n, hwaddr offset, uint64_t data,
     unsigned size)
 {
     switch (offset) {
-        case 0xc:
-            n->bar.intms |= data & 0xffffffff;
-            n->bar.intmc = n->bar.intms;
-            break;
-        case 0x10:
-            n->bar.intms &= ~(data & 0xffffffff);
-            n->bar.intmc = n->bar.intms;
-            break;
-        case 0x14:
-            if (NVME_CC_EN(data) && !NVME_CC_EN(n->bar.cc)) {
-                n->bar.cc = data;
-                if (nvme_start_ctrl(n)) {
-                    n->bar.csts = NVME_CSTS_FAILED;
-                } else {
-                    n->bar.csts = NVME_CSTS_READY;
-                }
-            } else if (!NVME_CC_EN(data) && NVME_CC_EN(n->bar.cc)) {
-                nvme_clear_ctrl(n, false);
-                n->bar.csts &= ~NVME_CSTS_READY;
+    case 0xc:
+        n->bar.intms |= data & 0xffffffff;
+        n->bar.intmc = n->bar.intms;
+        break;
+    case 0x10:
+        n->bar.intms &= ~(data & 0xffffffff);
+        n->bar.intmc = n->bar.intms;
+        break;
+    case 0x14:
+        if (NVME_CC_EN(data) && !NVME_CC_EN(n->bar.cc)) {
+            n->bar.cc = data;
+            if (nvme_start_ctrl(n)) {
+                n->bar.csts = NVME_CSTS_FAILED;
+            } else {
+                n->bar.csts = NVME_CSTS_READY;
             }
-            if (NVME_CC_SHN(data) && !(NVME_CC_SHN(n->bar.cc))) {
-                nvme_clear_ctrl(n, true);
-                n->bar.cc = data;
-                n->bar.csts |= NVME_CSTS_SHST_COMPLETE;
-            } else if (!NVME_CC_SHN(data) && NVME_CC_SHN(n->bar.cc)) {
-                n->bar.csts &= ~NVME_CSTS_SHST_COMPLETE;
-                n->bar.cc = data;
-            }
-            break;
-        case 0x24:
-            n->bar.aqa = data & 0xffffffff;
-            break;
-        case 0x28:
-            n->bar.asq = data;
-            break;
-        case 0x2c:
-            n->bar.asq |= data << 32;
-            break;
-        case 0x30:
-            n->bar.acq = data;
-            break;
-        case 0x34:
-            n->bar.acq |= data << 32;
-            break;
-        default:
-            break;
+        } else if (!NVME_CC_EN(data) && NVME_CC_EN(n->bar.cc)) {
+            nvme_clear_ctrl(n, false);
+            n->bar.csts &= ~NVME_CSTS_READY;
+        }
+        if (NVME_CC_SHN(data) && !(NVME_CC_SHN(n->bar.cc))) {
+            nvme_clear_ctrl(n, true);
+            n->bar.cc = data;
+            n->bar.csts |= NVME_CSTS_SHST_COMPLETE;
+        } else if (!NVME_CC_SHN(data) && NVME_CC_SHN(n->bar.cc)) {
+            n->bar.csts &= ~NVME_CSTS_SHST_COMPLETE;
+            n->bar.cc = data;
+        }
+        break;
+    case 0x24:
+        n->bar.aqa = data & 0xffffffff;
+        break;
+    case 0x28:
+        n->bar.asq = data;
+        break;
+    case 0x2c:
+        n->bar.asq |= data << 32;
+        break;
+    case 0x30:
+        n->bar.acq = data;
+        break;
+    case 0x34:
+        n->bar.acq |= data << 32;
+        break;
+    default:
+        break;
     }
 }
 
@@ -533,7 +507,7 @@ static void nvme_process_db_io(FemuCtrl *n, hwaddr addr, int val)
 }
 
 static void nvme_mmio_write(void *opaque, hwaddr addr, uint64_t data,
-    unsigned size)
+        unsigned size)
 {
     FemuCtrl *n = (FemuCtrl *)opaque;
     if (addr < sizeof(n->bar)) {
@@ -793,6 +767,7 @@ static void nvme_init_pci(FemuCtrl *n)
     uint8_t *pci_conf = n->parent_obj.config;
 
     pci_conf[PCI_INTERRUPT_PIN] = 1;
+    /* Coperd: QEMU-OCSSD(0x1d1d,0x1f1f), QEMU-NVMe(0x8086,0x5845) */
     pci_config_set_prog_interface(pci_conf, 0x2);
     pci_config_set_vendor_id(pci_conf, n->vid);
     pci_config_set_device_id(pci_conf, n->did);
