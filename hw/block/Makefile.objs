@@ -7,11 +7,12 @@ common-obj-$(CONFIG_PFLASH_CFI02) += pflash_cfi02.o
 common-obj-$(CONFIG_XEN) += xen_disk.o
 common-obj-$(CONFIG_ECC) += ecc.o
 common-obj-$(CONFIG_ONENAND) += onenand.o
+common-obj-$(CONFIG_NVME_PCI) += nvme.o
 
-obj-$(CONFIG_NVME_PCI) += femu/nvme.o
-obj-$(CONFIG_NVME_PCI) += femu/ocssd/
-obj-$(CONFIG_NVME_PCI) += femu/ssd/
-obj-$(CONFIG_NVME_PCI) += femu/mem-backend.o
+obj-$(CONFIG_FEMU_PCI) += femu/nvme.o
+obj-$(CONFIG_FEMU_PCI) += femu/ocssd/
+obj-$(CONFIG_FEMU_PCI) += femu/ssd/
+obj-$(CONFIG_FEMU_PCI) += femu/mem-backend.o
 
 obj-$(CONFIG_SH4) += tc58128.o
 
