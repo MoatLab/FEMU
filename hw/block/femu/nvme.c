@@ -146,9 +146,6 @@
 #include <qemu/main-loop.h>
 
 #include "nvme.h"
-//#include "trace-root.h"
-//#include "trace.h"
-
 #include "god.h"
 
 #define NVME_MAX_QS PCI_MSIX_FLAGS_QSIZE
@@ -870,11 +867,6 @@ static uint16_t nvme_del_sq(NvmeCtrl *n, NvmeCmd *cmd)
     }
 
     sq = n->sq[qid];
-    QTAILQ_FOREACH_SAFE(req, &sq->out_req_list, entry, next) {
-        if (req->aiocb) {
-            blk_aio_cancel(req->aiocb);
-        }
-    }
     if (!nvme_check_cqid(n, sq->cqid)) {
         cq = n->cq[sq->cqid];
         QTAILQ_REMOVE(&cq->sq_list, sq, entry);
@@ -1464,14 +1456,12 @@ static uint16_t nvme_smart_info(NvmeCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
     time_t current_seconds;
     NvmeSmartLog smart;
 
-    BlockAcctStats *stats = blk_get_stats(n->conf.blk);
-
     trans_len = MIN(sizeof(smart), buf_len);
     memset(&smart, 0x0, sizeof(smart));
-    smart.data_units_read[0] = cpu_to_le64(stats->nr_bytes[BLOCK_ACCT_READ]);
-    smart.data_units_written[0] = cpu_to_le64(stats->nr_bytes[BLOCK_ACCT_WRITE]);
-    smart.host_read_commands[0] = cpu_to_le64(stats->nr_ops[BLOCK_ACCT_READ]);
-    smart.host_write_commands[0] = cpu_to_le64(stats->nr_ops[BLOCK_ACCT_WRITE]);
+    smart.data_units_read[0] = cpu_to_le64(0);
+    smart.data_units_written[0] = cpu_to_le64(0);
+    smart.host_read_commands[0] = cpu_to_le64(0);
+    smart.host_write_commands[0] = cpu_to_le64(0);
 
     smart.number_of_error_log_entries[0] = cpu_to_le64(n->num_errors);
     smart.temperature[0] = n->temperature & 0xff;
@@ -1518,7 +1508,7 @@ static uint16_t nvme_abort_req(NvmeCtrl *n, NvmeCmd *cmd, uint32_t *result)
     uint16_t sqid = cmd->cdw10 & 0xffff;
     uint16_t cid = (cmd->cdw10 >> 16) & 0xffff;
     NvmeSQueue *sq;
-    NvmeRequest *req, *next;
+    NvmeRequest *req;
 
     *result = 1;
     if (nvme_check_sqid(n, sqid)) {
@@ -1526,15 +1516,6 @@ static uint16_t nvme_abort_req(NvmeCtrl *n, NvmeCmd *cmd, uint32_t *result)
     }
 
     sq = n->sq[sqid];
-    QTAILQ_FOREACH_SAFE(req, &sq->out_req_list, entry, next) {
-        if (sq->sqid) {
-            if (req->aiocb && req->cqe.cid == cid) {
-                bdrv_aio_cancel(req->aiocb);
-                *result = 0;
-                return NVME_SUCCESS;
-            }
-        }
-    }
 
     while ((sq->head + index) % sq->size != sq->tail) {
         NvmeCmd abort_cmd;
@@ -1978,11 +1959,6 @@ static void nvme_clear_ctrl(NvmeCtrl *n, bool shutdown)
         }
     }
 
-    blk_flush(n->conf.blk);
-    if (n->femu_mode == FEMU_WHITEBOX_MODE) {
-        if (femu_oc_hybrid_dev(n))
-            femu_oc_flush_tbls(n);
-    }
     n->bar.cc = 0;
     n->dataplane_started = false;
     n->features.temp_thresh = 0x14d;
@@ -2083,8 +2059,6 @@ static uint64_t nvme_mmio_read(void *opaque, hwaddr addr, unsigned size)
     if (addr < sizeof(n->bar)) {
         memcpy(&val, ptr + addr, size);
     }
-
-    //trace_nvme_mmio_read(addr, size, val);
 
     return val;
 }
@@ -2192,17 +2166,14 @@ static void nvme_mmio_write(void *opaque, hwaddr addr, uint64_t data,
     } else {
         nvme_process_db_io(n, addr, data);
     }
-
-    //trace_nvme_mmio_write(addr, size, data);
 }
 
 static void nvme_cmb_write(void *opaque, hwaddr addr, uint64_t data,
     unsigned size)
 {
     NvmeCtrl *n = (NvmeCtrl *)opaque;
-    memcpy(&n->cmbuf[addr], &data, size);
 
-    //trace_nvme_cmb_write(addr, size, data);
+    memcpy(&n->cmbuf[addr], &data, size);
 }
 
 static uint64_t nvme_cmb_read(void *opaque, hwaddr addr, unsigned size)
@@ -2211,7 +2182,7 @@ static uint64_t nvme_cmb_read(void *opaque, hwaddr addr, unsigned size)
     NvmeCtrl *n = (NvmeCtrl *)opaque;
 
     memcpy(&val, &n->cmbuf[addr], size);
-    //trace_nvme_cmb_read(addr, size, val);
+
     return val;
 }
 
