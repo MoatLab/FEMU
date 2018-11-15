@@ -961,13 +961,6 @@ extern uint32_t femu_oc_tbl_size(NvmeNamespace *ns);
 void nvme_process_sq_admin(void *opaque);
 void nvme_process_sq_io(void *opaque);
 
-
-void femu_init_mem_backend(struct femu_mbe *mbe, int64_t nbytes);
-void femu_destroy_mem_backend(struct femu_mbe *mbe);
-uint64_t femu_rw_mem_backend(FemuCtrl *n, NvmeNamespace *ns,
-        NvmeCmd *cmd, NvmeRequest *req);
-
-
 void nvme_addr_read(FemuCtrl *n, hwaddr addr, void *buf, int size);
 void nvme_addr_write(FemuCtrl *n, hwaddr addr, void *buf, int size);
 int nvme_check_sqid(FemuCtrl *n, uint16_t sqid);

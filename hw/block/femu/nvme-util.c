@@ -289,7 +289,7 @@ uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov,
         cmb = true;
         qsg->nsg = 0;
         qemu_iovec_init(iov, num_prps);
-        qemu_iovec_add(iov, (void *)&n->cmbuf[prp1 - n->ctrl_mem.addr], trans_len);
+        qemu_iovec_add(iov, (void *)&n->cmbuf[prp1-n->ctrl_mem.addr], trans_len);
     } else {
         pci_dma_sglist_init(qsg, &n->parent_obj, num_prps);
         qemu_sglist_add(qsg, prp1, trans_len);
@@ -352,7 +352,7 @@ uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov,
     return NVME_SUCCESS;
 
 unmap:
-    if (!cmb){
+    if (!cmb) {
         qemu_sglist_destroy(qsg);
     } else {
         qemu_iovec_destroy(iov);
