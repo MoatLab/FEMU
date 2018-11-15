@@ -117,6 +117,7 @@ static uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint16_t err;
     int64_t overhead = 0;
     struct ssdstate *ssd = &(n->ssd);
+    int ret;
 
     req->data_offset = data_offset;
     req->is_write = (rw->opcode == NVME_CMD_WRITE) ? 1 : 0;
@@ -154,8 +155,12 @@ static uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             req->expire_time += SSD_READ(ssd, data_size >> 9 , data_offset >> 9) - overhead;
     }
 
-    //return NVME_SUCCESS;
-    return femu_rw_mem_backend(n, ns, cmd, req);
+    ret = femu_rw_mem_backend(&n->mbe, &req->qsg, data_offset, req->is_write);
+    if (!ret) {
+        return NVME_SUCCESS;
+    }
+
+    return NVME_DNR;
 }
 
 static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)

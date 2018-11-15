@@ -1,30 +1,11 @@
 #include "qemu/osdep.h"
-#include "block/block_int.h"
-#include "block/qapi.h"
-#include "exec/memory.h"
 #include "hw/block/block.h"
-#include "hw/hw.h"
-#include "sysemu/kvm.h"
-#include "hw/pci/msix.h"
-#include "hw/pci/msi.h"
 #include "hw/pci/pci.h"
-#include "qapi/visitor.h"
-#include "qapi/error.h"
 #include "qemu/error-report.h"
-#include "qemu/bitops.h"
-#include "qemu/bitmap.h"
-#include "qom/object.h"
-#include "sysemu/sysemu.h"
-#include "sysemu/block-backend.h"
-#include <qemu/main-loop.h>
 
-#include "nvme.h"
-#include "trace-root.h"
-//#include "trace.h"
+#include "mem-backend.h"
 
-#include "god.h"
-
-/* Coperd: FEMU NVMe Memory Backend (mbe) */
+/* Coperd: FEMU Memory Backend (mbe) for emulated SSD */
 
 void femu_init_mem_backend(struct femu_mbe *mbe, int64_t nbytes)
 {
@@ -54,72 +35,35 @@ void femu_destroy_mem_backend(struct femu_mbe *mbe)
 }
 
 /* Coperd: directly read/write to memory backend from NVMe command */
-uint64_t femu_rw_mem_backend(FemuCtrl *n, NvmeNamespace *ns,
-        NvmeCmd *cmd, NvmeRequest *req)
+int femu_rw_mem_backend(struct femu_mbe *mbe, QEMUSGList *qsg,
+        uint64_t data_offset, bool is_write)
 {
-    QEMUIOVector iov;
     int sg_cur_index = 0;
     dma_addr_t sg_cur_byte = 0;
-    int i;
-    void *hs = n->mbe.mem_backend;
-    void *mem;
     dma_addr_t cur_addr, cur_len;
-    DMADirection dir = req->is_write ? DMA_DIRECTION_TO_DEVICE : 
-        DMA_DIRECTION_FROM_DEVICE;
-    qemu_iovec_init(&iov, req->qsg.nsg);
+    uint64_t mb_oft = data_offset;
+    void *mb = mbe->mem_backend;
 
-    // this is dma_blk_unmap()
-    for (i = 0; i < iov.niov; ++i) {
-        dma_memory_unmap(req->qsg.as, iov.iov[i].iov_base, iov.iov[i].iov_len,
-                dir, iov.iov[i].iov_len);
+    DMADirection dir = DMA_DIRECTION_FROM_DEVICE;
+
+    if (is_write) { 
+        dir = DMA_DIRECTION_TO_DEVICE;
     }
-    qemu_iovec_reset(&iov);
 
-    while (sg_cur_index < req->qsg.nsg) {
-        cur_addr = req->qsg.sg[sg_cur_index].base + sg_cur_byte;
-        cur_len = req->qsg.sg[sg_cur_index].len - sg_cur_byte;
-        mem = dma_memory_map(req->qsg.as, cur_addr, &cur_len, dir);
-        if (!mem)
-            break;
-        qemu_iovec_add(&iov, mem, cur_len);
+    while (sg_cur_index < qsg->nsg) {
+        cur_addr = qsg->sg[sg_cur_index].base + sg_cur_byte;
+        cur_len = qsg->sg[sg_cur_index].len - sg_cur_byte;
+        if (dma_memory_rw(qsg->as, cur_addr, mb + mb_oft, cur_len, dir)) {
+            error_report("FEMU: dma_memory_rw error");
+        }
+        mb_oft += cur_len;
+
         sg_cur_byte += cur_len;
-        if (sg_cur_byte == req->qsg.sg[sg_cur_index].len) {
+        if (sg_cur_byte == qsg->sg[sg_cur_index].len) {
             sg_cur_byte = 0;
             ++sg_cur_index;
         }
     }
 
-    if (iov.size == 0) {
-        printf("Coperd, you poor boy, DMA mapping failed!\n");
-    }
-
-    if (!QEMU_IS_ALIGNED(iov.size, BDRV_SECTOR_SIZE)) {
-        qemu_iovec_discard_back(&iov, QEMU_ALIGN_DOWN(iov.size, BDRV_SECTOR_SIZE));
-    }
-
-    // copy data from or write data to "heap_storage"
-    // heap_storage[data_offset] .. heap_storage[data_offset+data_size]
-    int64_t hs_oft = req->data_offset;
-    if (req->is_write) {
-        // iov -> heap storage
-        for (i = 0; i < iov.niov; ++i) {
-            memcpy(hs + hs_oft, iov.iov[i].iov_base, iov.iov[i].iov_len);
-            hs_oft += iov.iov[i].iov_len;
-        }
-    } else {
-        // heap storage -> iov
-        for (i = 0; i < iov.niov; ++i) {
-            memcpy(iov.iov[i].iov_base, hs + hs_oft, iov.iov[i].iov_len);
-            hs_oft += iov.iov[i].iov_len;
-        }
-    }
-
-    // dma_blk_unmap()
-    for (i = 0; i < iov.niov; ++i) {
-        dma_memory_unmap(req->qsg.as, iov.iov[i].iov_base, iov.iov[i].iov_len,
-                dir, iov.iov[i].iov_len);
-    }
-    qemu_iovec_reset(&iov);
-
-    return NVME_SUCCESS;
+    return 0;
 }
