@@ -46,6 +46,7 @@ uint16_t nvme_del_sq(FemuCtrl *n, NvmeCmd *cmd)
     }
 
     nvme_free_sq(sq, n);
+
     return NVME_SUCCESS;
 }
 
@@ -268,56 +269,56 @@ uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     uint64_t prp2 = le64_to_cpu(cmd->prp2);
 
     switch (dw10) {
-        case NVME_ARBITRATION:
-            cqe->n.result = cpu_to_le32(n->features.arbitration);
-
-            break;
-        case NVME_POWER_MANAGEMENT:
-            cqe->n.result = cpu_to_le32(n->features.power_mgmt);
-            break;
-        case NVME_LBA_RANGE_TYPE:
-            if (nsid == 0 || nsid > n->num_namespaces) {
-                return NVME_INVALID_NSID | NVME_DNR;
-            }
-            rt = n->namespaces[nsid - 1].lba_range;
-            return nvme_dma_read_prp(n, (uint8_t *)rt,
-                    MIN(sizeof(*rt), (dw11 & 0x3f) * sizeof(*rt)),
-                    prp1, prp2);
-        case NVME_NUMBER_OF_QUEUES:
-            cqe->n.result = cpu_to_le32((n->num_io_queues - 1) |
-                    ((n->num_io_queues - 1) << 16));
-            break;
-        case NVME_TEMPERATURE_THRESHOLD:
-            cqe->n.result = cpu_to_le32(n->features.temp_thresh);
-            break;
-        case NVME_ERROR_RECOVERY:
-            cqe->n.result = cpu_to_le32(n->features.err_rec);
-            break;
-        case NVME_VOLATILE_WRITE_CACHE:
-            cqe->n.result = cpu_to_le32(n->features.volatile_wc);
-            break;
-        case NVME_INTERRUPT_COALESCING:
-            cqe->n.result = cpu_to_le32(n->features.int_coalescing);
-            break;
-        case NVME_INTERRUPT_VECTOR_CONF:
-            if ((dw11 & 0xffff) > n->num_io_queues) {
-                return NVME_INVALID_FIELD | NVME_DNR;
-            }
-            cqe->n.result = cpu_to_le32(
-                    n->features.int_vector_config[dw11 & 0xffff]);
-            break;
-        case NVME_WRITE_ATOMICITY:
-            cqe->n.result = cpu_to_le32(n->features.write_atomicity);
-            break;
-        case NVME_ASYNCHRONOUS_EVENT_CONF:
-            cqe->n.result = cpu_to_le32(n->features.async_config);
-            break;
-        case NVME_SOFTWARE_PROGRESS_MARKER:
-            cqe->n.result = cpu_to_le32(n->features.sw_prog_marker);
-            break;
-        default:
+    case NVME_ARBITRATION:
+        cqe->n.result = cpu_to_le32(n->features.arbitration);
+        break;
+    case NVME_POWER_MANAGEMENT:
+        cqe->n.result = cpu_to_le32(n->features.power_mgmt);
+        break;
+    case NVME_LBA_RANGE_TYPE:
+        if (nsid == 0 || nsid > n->num_namespaces) {
+            return NVME_INVALID_NSID | NVME_DNR;
+        }
+        rt = n->namespaces[nsid - 1].lba_range;
+        return nvme_dma_read_prp(n, (uint8_t *)rt,
+                MIN(sizeof(*rt), (dw11 & 0x3f) * sizeof(*rt)),
+                prp1, prp2);
+    case NVME_NUMBER_OF_QUEUES:
+        cqe->n.result = cpu_to_le32((n->num_io_queues - 1) |
+                ((n->num_io_queues - 1) << 16));
+        break;
+    case NVME_TEMPERATURE_THRESHOLD:
+        cqe->n.result = cpu_to_le32(n->features.temp_thresh);
+        break;
+    case NVME_ERROR_RECOVERY:
+        cqe->n.result = cpu_to_le32(n->features.err_rec);
+        break;
+    case NVME_VOLATILE_WRITE_CACHE:
+        cqe->n.result = cpu_to_le32(n->features.volatile_wc);
+        break;
+    case NVME_INTERRUPT_COALESCING:
+        cqe->n.result = cpu_to_le32(n->features.int_coalescing);
+        break;
+    case NVME_INTERRUPT_VECTOR_CONF:
+        if ((dw11 & 0xffff) > n->num_io_queues) {
             return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        cqe->n.result = cpu_to_le32(
+                n->features.int_vector_config[dw11 & 0xffff]);
+        break;
+    case NVME_WRITE_ATOMICITY:
+        cqe->n.result = cpu_to_le32(n->features.write_atomicity);
+        break;
+    case NVME_ASYNCHRONOUS_EVENT_CONF:
+        cqe->n.result = cpu_to_le32(n->features.async_config);
+        break;
+    case NVME_SOFTWARE_PROGRESS_MARKER:
+        cqe->n.result = cpu_to_le32(n->features.sw_prog_marker);
+        break;
+    default:
+        return NVME_INVALID_FIELD | NVME_DNR;
     }
+
     return NVME_SUCCESS;
 }
 
