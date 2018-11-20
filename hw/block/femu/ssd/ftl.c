@@ -545,7 +545,7 @@ int64_t _FTL_WRITE(struct ssdstate *ssd, int64_t sector_nb, unsigned int length)
 		ret = GET_NEW_PAGE(ssd, VICTIM_OVERALL, EMPTY_TABLE_ENTRY_NB, &new_ppn);
 #endif
 		if(ret == FAIL){
-			printf("ERROR[%s] Get new page fail \n", __FUNCTION__);
+			//printf("ERROR[%s] Get new page fail \n", __FUNCTION__);
 			return FAIL;
 		}
 

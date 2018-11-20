@@ -790,6 +790,7 @@ typedef struct NvmeSQueue {
 
     uint64_t    db_addr;
     uint64_t    eventidx_addr;
+    uint64_t    lisr_tick;
 } NvmeSQueue;
 
 typedef struct NvmeCQueue {
@@ -887,6 +888,7 @@ typedef struct FemuCtrl {
     uint32_t    cmbloc;
     uint8_t     *cmbuf;
 
+    QemuThread  poller;
     bool        dataplane_started;
     bool        vector_poll_started;
 
@@ -913,6 +915,8 @@ typedef struct FemuCtrl {
     FEMU_OC_Ctrl    femu_oc_ctrl;
     struct ssdstate ssd;
     struct femu_mbe mbe;
+    int             completed;
+    uint64_t        lisr_tick;
 } FemuCtrl;
 
 typedef struct NvmeDifTuple {
@@ -1037,6 +1041,8 @@ uint16_t nvme_write_uncor(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 uint64_t ns_blks(NvmeNamespace *ns, uint8_t lba_idx);
 void nvme_partition_ns(NvmeNamespace *ns, uint8_t lba_idx);
 void nvme_post_cqes_io(void *opaque);
+
+void femu_create_nvme_poller(FemuCtrl *n);
 
 
 extern int64_t nand_read_upper_t;

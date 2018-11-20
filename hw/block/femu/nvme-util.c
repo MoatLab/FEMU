@@ -745,6 +745,9 @@ uint16_t nvme_set_db_memory(FemuCtrl *n, const NvmeCmd *cmd)
                     cq->db_addr, cq->eventidx_addr);
         }
     }
+
+
+    femu_create_nvme_poller(n);
     n->dataplane_started = true;
     printf("FEMU:nvme_set_db_memory returns SUCCESS!\n");
 
