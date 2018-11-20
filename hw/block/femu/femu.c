@@ -1,4 +1,5 @@
 #include "qemu/osdep.h"
+#include "qemu/thread.h"
 #include "hw/block/block.h"
 #include "hw/pci/msix.h"
 #include "hw/pci/msi.h"
@@ -6,6 +7,52 @@
 #include "qapi/error.h"
 
 #include "nvme.h"
+
+/* Coperd: IO thread */
+static void *nvme_poller(void *arg)
+{
+    FemuCtrl *n = (FemuCtrl *)arg;
+    int i;
+
+    while (1) {
+        for (i = 1; i < 5; i++) {
+            //printf("Coperd,%s\n", __func__);
+            NvmeSQueue *sq = n->sq[i];
+            NvmeCQueue *cq = n->cq[i];
+            if (!sq || !cq)
+                continue;
+
+            nvme_process_sq_io(sq);
+            //nvme_post_cqes_io(cq);
+
+#if 0
+            n->completed += sq->completed;
+            uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+            if (n->completed > 0 && (now - n->lisr_tick >= 32000)) {
+                for (j = 1; j < 5; j++) {
+                    NvmeSQueue *tsq = n->sq[j];
+                    NvmeCQueue *tcq = n->sq[j];
+                    if (tsq->completed) {
+                        nvme_isr_notify_io(tcq);
+                        tsq->completed = 0;
+                    }
+                }
+                n->lisr_tick = now;
+                n->completed = 0;
+            }
+#endif
+        }
+    }
+
+    return NULL;
+}
+
+void femu_create_nvme_poller(FemuCtrl *n)
+{
+    // create the polling thread here
+    qemu_thread_create(&n->poller, "nvme-poller", nvme_poller, n,
+            QEMU_THREAD_JOINABLE);
+}
 
 static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
 {
@@ -26,8 +73,6 @@ static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
     cqe->sq_head = cpu_to_le16(sq->head);
     nvme_addr_write(n, addr, (void *)cqe, sizeof(*cqe));
     nvme_inc_cq_tail(cq);
-
-    QTAILQ_INSERT_TAIL(&sq->req_list, req, entry);
 }
 
 void nvme_post_cqes_io(void *opaque)
@@ -53,7 +98,7 @@ void nvme_post_cqes_io(void *opaque)
             break;
         }
 
-        QTAILQ_REMOVE(&cq->req_list, req, entry);
+        //QTAILQ_REMOVE(&cq->req_list, req, entry);
         nvme_post_cqe(cq, req);
         processed++;
     }
@@ -62,7 +107,7 @@ void nvme_post_cqes_io(void *opaque)
         ntt = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + CQ_POLLING_PERIOD_NS;
     }
 
-    timer_mod(cq->timer, ntt);
+    //timer_mod(cq->timer, ntt);
 
     /* Coperd: only interrupt guest when we "do" complete some I/Os */
     if (processed > 0) {
@@ -70,6 +115,7 @@ void nvme_post_cqes_io(void *opaque)
     }
 }
 
+#if 0
 static void nvme_enqueue_req_completion_io(NvmeCQueue *cq, NvmeRequest *req)
 {
     NvmeRequest *iter, *next;
@@ -81,7 +127,7 @@ static void nvme_enqueue_req_completion_io(NvmeCQueue *cq, NvmeRequest *req)
 
     if (QTAILQ_EMPTY(&cq->req_list)) {
         QTAILQ_INSERT_HEAD(&cq->req_list, req, entry);
-        timer_mod(cq->timer, req->expire_time);
+        //timer_mod(cq->timer, req->expire_time);
         return;
     }
 
@@ -96,6 +142,7 @@ static void nvme_enqueue_req_completion_io(NvmeCQueue *cq, NvmeRequest *req)
         QTAILQ_INSERT_TAIL(&cq->req_list, req, entry);
     }
 }
+#endif
 
 static uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     NvmeRequest *req)
@@ -248,8 +295,9 @@ void nvme_process_sq_io(void *opaque)
     int processed = 0;
 
     nvme_update_sq_tail(sq);
-    while (!(nvme_sq_empty(sq) || QTAILQ_EMPTY(&sq->req_list)) &&
-            processed++ < sq->arb_burst) {
+    /*  || QTAILQ_EMPTY(&sq->req_list)) &&
+        processed++ < sq->arb_burst */
+    while (!(nvme_sq_empty(sq))) {
         if (sq->phys_contig) {
             addr = sq->dma_addr + sq->head * n->sqe_size;
         } else {
@@ -260,11 +308,10 @@ void nvme_process_sq_io(void *opaque)
         nvme_inc_sq_head(sq);
 
         if (cmd.opcode == NVME_OP_ABORTED) {
+            printf("Coperd,abort!!!!\n");
             continue;
         }
         req = QTAILQ_FIRST(&sq->req_list);
-        QTAILQ_REMOVE(&sq->req_list, req, entry);
-        QTAILQ_INSERT_TAIL(&sq->out_req_list, req, entry);
         memset(&req->cqe, 0, sizeof(req->cqe));
         req->cqe.cid = cmd.cid;
         req->aiocb = NULL;
@@ -272,8 +319,20 @@ void nvme_process_sq_io(void *opaque)
         status = nvme_io_cmd(n, &cmd, req);
         if (status != NVME_NO_COMPLETE) {
             req->status = status;
-            nvme_enqueue_req_completion_io(cq, req);
+            nvme_post_cqe(cq, req);
+        } else {
+            printf("Error IO processed!\n");
         }
+
+        processed++;
+    }
+
+    n->completed += sq->completed;
+    uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    if ((processed > 0) && (now - sq->lisr_tick >= 32000)) {
+        nvme_isr_notify_io(cq);
+        n->lisr_tick = now;
+        n->completed = 0;
     }
 
     /*
@@ -287,7 +346,7 @@ void nvme_process_sq_io(void *opaque)
 
     sq->completed += processed;
 
-    timer_mod(sq->timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + SQ_POLLING_PERIOD_NS);
+    //timer_mod(sq->timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + SQ_POLLING_PERIOD_NS);
 }
 
 static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
@@ -846,6 +905,8 @@ static int femu_init(PCIDevice *pci_dev)
 
     femu_init_mem_backend(&n->mbe, bs_size);
 
+    n->lisr_tick = 0;
+    n->completed = 0;
     n->start_time = time(NULL);
     n->reg_size = pow2ceil(0x1004 + 2 * (n->num_io_queues + 1) * 4);
     n->ns_size = bs_size / (uint64_t)n->num_namespaces;
@@ -909,7 +970,7 @@ static Property femu_props[] = {
     DEFINE_PROP_STRING("serial", FemuCtrl, serial),
     DEFINE_PROP_UINT32("devsz_mb", FemuCtrl, memsz, 1024), /* Coperd: in MB */
     DEFINE_PROP_UINT32("namespaces", FemuCtrl, num_namespaces, 1),
-    DEFINE_PROP_UINT32("queues", FemuCtrl, num_io_queues, 1),
+    DEFINE_PROP_UINT32("queues", FemuCtrl, num_io_queues, 4),
     DEFINE_PROP_UINT32("entries", FemuCtrl, max_q_ents, 0x7ff),
     DEFINE_PROP_UINT8("max_cqes", FemuCtrl, max_cqes, 0x4),
     DEFINE_PROP_UINT8("max_sqes", FemuCtrl, max_sqes, 0x6),
