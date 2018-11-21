@@ -891,7 +891,7 @@ typedef struct FemuCtrl {
     uint32_t    cmbloc;
     uint8_t     *cmbuf;
 
-    QemuThread  poller;
+    QemuThread  sq_poller;
     bool        dataplane_started;
     bool        vector_poll_started;
 
@@ -1047,7 +1047,7 @@ uint64_t ns_blks(NvmeNamespace *ns, uint8_t lba_idx);
 void nvme_partition_ns(NvmeNamespace *ns, uint8_t lba_idx);
 void nvme_post_cqes_io(void *opaque);
 
-void femu_create_nvme_poller(FemuCtrl *n);
+void femu_create_nvme_sq_poller(FemuCtrl *n);
 
 
 extern int64_t nand_read_upper_t;

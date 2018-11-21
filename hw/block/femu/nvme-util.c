@@ -765,7 +765,7 @@ uint16_t nvme_set_db_memory(FemuCtrl *n, const NvmeCmd *cmd)
     }
 
     if (!n->dataplane_started) {
-        femu_create_nvme_poller(n);
+        femu_create_nvme_sq_poller(n);
         n->dataplane_started = true;
     }
     printf("FEMU:nvme_set_db_memory returns SUCCESS!\n");
