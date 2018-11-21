@@ -295,8 +295,6 @@ void nvme_process_sq_io(void *opaque)
     int processed = 0;
 
     nvme_update_sq_tail(sq);
-    /*  || QTAILQ_EMPTY(&sq->req_list)) &&
-        processed++ < sq->arb_burst */
     while (!(nvme_sq_empty(sq))) {
         if (sq->phys_contig) {
             addr = sq->dma_addr + sq->head * n->sqe_size;

@@ -100,7 +100,9 @@ uint16_t nvme_init_sq(NvmeSQueue *sq, FemuCtrl *n, uint64_t dma_addr,
 
     if (sqid && n->dbs_addr && n->eis_addr) {
         sq->db_addr = n->dbs_addr + 2 * sqid * dbbuf_entry_sz;
+        sq->db_addr_hva = n->dbs_addr_hva + 2 * sqid * dbbuf_entry_sz;
         sq->eventidx_addr = n->eis_addr + 2 * sqid * dbbuf_entry_sz;
+        sq->eventidx_addr = n->eis_addr_hva + 2 * sqid + dbbuf_entry_sz;
         printf("FEMU:SQ[%d],db=%" PRIu64 ",ei=%" PRIu64 "\n", sqid, sq->db_addr,
                 sq->eventidx_addr);
     }
@@ -222,8 +224,11 @@ uint16_t nvme_init_cq(NvmeCQueue *cq, FemuCtrl *n, uint64_t dma_addr,
     QTAILQ_INIT(&cq->sq_list);
     if (cqid && n->dbs_addr && n->eis_addr) {
         cq->db_addr = n->dbs_addr + (2 * cqid + 1) * dbbuf_entry_sz;
+        cq->db_addr_hva = n->dbs_addr_hva + (2 * cqid + 1) * dbbuf_entry_sz;
         cq->eventidx_addr = n->eis_addr + (2 * cqid + 1) * dbbuf_entry_sz;
-        printf("Coperd, CQ, db_addr=%" PRIu64 ", eventidx_addr=%" PRIu64 "\n", cq->db_addr, cq->eventidx_addr);
+        cq->eventidx_addr_hva = n->eis_addr_hva + (2 * cqid + 1) * dbbuf_entry_sz;
+        printf("Coperd, CQ, db_addr=%" PRIu64 ", eventidx_addr=%" PRIu64 "\n",
+                cq->db_addr, cq->eventidx_addr);
     }
     msix_vector_use(&n->parent_obj, cq->vector);
     n->cq[cqid] = cq;

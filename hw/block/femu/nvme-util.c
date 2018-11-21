@@ -182,6 +182,11 @@ void nvme_inc_sq_head(NvmeSQueue *sq)
 
 void nvme_update_cq_head(NvmeCQueue *cq)
 {
+    if (cq->db_addr_hva) {
+        memcpy(&cq->head, (void *)cq->db_addr_hva, sizeof(cq->head));
+        return;
+    }
+
     if (cq->db_addr) {
         nvme_addr_read(cq->ctrl, cq->db_addr, &cq->head, sizeof(cq->head));
     }
@@ -682,6 +687,11 @@ uint64_t nvme_cmb_read(void *opaque, hwaddr addr, unsigned size)
 
 void nvme_update_sq_tail(NvmeSQueue *sq)
 {
+    if (sq->db_addr_hva) {
+        memcpy(&sq->tail, (void *)sq->db_addr_hva, sizeof(sq->tail));
+        return;
+    }
+
     if (sq->db_addr) {
         nvme_addr_read(sq->ctrl, sq->db_addr, &sq->tail, sizeof(sq->tail));
     }
@@ -715,6 +725,8 @@ uint16_t nvme_set_db_memory(FemuCtrl *n, const NvmeCmd *cmd)
     uint64_t eis_addr = le64_to_cpu(cmd->prp2);
     uint8_t stride = n->db_stride;
     int dbbuf_entry_sz = 1 << (2 + stride);
+    AddressSpace *as = pci_get_address_space(&n->parent_obj);
+    dma_addr_t dbs_tlen = n->page_size, eis_tlen = n->page_size;
     int i;
 
     /* Addresses should not be NULL and should be page aligned. */
@@ -725,6 +737,8 @@ uint16_t nvme_set_db_memory(FemuCtrl *n, const NvmeCmd *cmd)
 
     n->dbs_addr = dbs_addr;
     n->eis_addr = eis_addr;
+    n->dbs_addr_hva = (uint64_t)dma_memory_map(as, dbs_addr, &dbs_tlen, 0);
+    n->eis_addr_hva = (uint64_t)dma_memory_map(as, eis_addr, &eis_tlen, 0);
 
     for (i = 1; i <= n->num_io_queues; i++) {
         NvmeSQueue *sq = n->sq[i];
@@ -733,22 +747,27 @@ uint16_t nvme_set_db_memory(FemuCtrl *n, const NvmeCmd *cmd)
         if (sq) {
             /* Submission queue tail pointer location, 2 * QID * stride. */
             sq->db_addr = dbs_addr + 2 * i * dbbuf_entry_sz;
+            sq->db_addr_hva = n->dbs_addr_hva + 2 * i * dbbuf_entry_sz;
             sq->eventidx_addr = eis_addr + 2 * i * dbbuf_entry_sz;
+            sq->eventidx_addr_hva = n->eis_addr_hva + 2 * i * dbbuf_entry_sz;
             printf("FEMU:DBBUF,sq[%d]:db=%" PRIu64 ",ei=%" PRIu64 "\n", i,
                     sq->db_addr, sq->eventidx_addr);
         }
         if (cq) {
             /* Completion queue head pointer location, (2 * QID + 1) * stride. */
             cq->db_addr = dbs_addr + (2 * i + 1) * dbbuf_entry_sz;
+            cq->db_addr_hva = n->dbs_addr_hva + (2 * i + 1) * dbbuf_entry_sz;
             cq->eventidx_addr = eis_addr + (2 * i + 1) * dbbuf_entry_sz;
+            cq->eventidx_addr_hva = n->eis_addr_hva + (2 * i + 1) * dbbuf_entry_sz;
             printf("FEMU:DBBUF,cq[%d]:db=%" PRIu64 ",ei=%" PRIu64 "\n", i,
                     cq->db_addr, cq->eventidx_addr);
         }
     }
 
-
-    femu_create_nvme_poller(n);
-    n->dataplane_started = true;
+    if (!n->dataplane_started) {
+        femu_create_nvme_poller(n);
+        n->dataplane_started = true;
+    }
     printf("FEMU:nvme_set_db_memory returns SUCCESS!\n");
 
     return NVME_SUCCESS;
