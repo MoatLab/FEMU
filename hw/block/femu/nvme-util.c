@@ -184,7 +184,6 @@ void nvme_update_cq_head(NvmeCQueue *cq)
 {
     if (cq->db_addr_hva) {
         cq->head = *(uint32_t *)(cq->db_addr_hva);
-        //memcpy(&cq->head, (void *)cq->db_addr_hva, sizeof(cq->head));
         return;
     }
 
@@ -690,7 +689,6 @@ void nvme_update_sq_tail(NvmeSQueue *sq)
 {
     if (sq->db_addr_hva) {
         sq->tail = *((uint32_t *)sq->db_addr_hva);
-        //memcpy(&sq->tail, (void *)sq->db_addr_hva, sizeof(sq->tail));
         return;
     }
 
