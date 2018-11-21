@@ -9,50 +9,37 @@
 #include <immintrin.h>
 #include "nvme.h"
 
-/* Coperd: IO thread */
-static void *nvme_poller(void *arg)
+QemuThread g_cq_poller;
+
+/* Coperd: IO thread for NVMe submission processing */
+/* TODO: need to handle controller reset correctly */
+static void *nvme_sq_poller(void *arg)
 {
     FemuCtrl *n = (FemuCtrl *)arg;
     int i;
 
     while (1) {
-        for (i = 1; i < 5; i++) {
-            //printf("Coperd,%s\n", __func__);
+        for (i = 1; i <= n->num_io_queues; i++) {
             NvmeSQueue *sq = n->sq[i];
             NvmeCQueue *cq = n->cq[i];
             if (!sq || !cq)
                 continue;
 
             nvme_process_sq_io(sq);
-            //nvme_post_cqes_io(cq);
-
-#if 0
-            n->completed += sq->completed;
-            uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-            if (n->completed > 0 && (now - n->lisr_tick >= 32000)) {
-                for (j = 1; j < 5; j++) {
-                    NvmeSQueue *tsq = n->sq[j];
-                    NvmeCQueue *tcq = n->sq[j];
-                    if (tsq->completed) {
-                        nvme_isr_notify_io(tcq);
-                        tsq->completed = 0;
-                    }
-                }
-                n->lisr_tick = now;
-                n->completed = 0;
-            }
-#endif
         }
     }
 
     return NULL;
 }
 
-void femu_create_nvme_poller(FemuCtrl *n)
+void femu_create_nvme_sq_poller(FemuCtrl *n)
 {
-    // create the polling thread here
-    qemu_thread_create(&n->poller, "nvme-poller", nvme_poller, n,
-            QEMU_THREAD_JOINABLE);
+    qemu_thread_create(&n->sq_poller, "sq-poller", nvme_sq_poller, n, QEMU_THREAD_JOINABLE);
+}
+
+static void femu_destroy_nvme_sq_poller(FemuCtrl *n)
+{
+    qemu_thread_join(&n->sq_poller);
 }
 
 static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
@@ -947,6 +934,7 @@ static void femu_exit(PCIDevice *pci_dev)
 
     nvme_clear_ctrl(n, true);
 
+    femu_destroy_nvme_sq_poller(n);
     femu_destroy_mem_backend(&n->mbe);
 
     g_free(n->namespaces);
