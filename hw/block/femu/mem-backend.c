@@ -65,5 +65,7 @@ int femu_rw_mem_backend(struct femu_mbe *mbe, QEMUSGList *qsg,
         }
     }
 
+    qemu_sglist_destroy(qsg);
+
     return 0;
 }
