@@ -115,14 +115,6 @@ uint16_t nvme_init_sq(NvmeSQueue *sq, FemuCtrl *n, uint64_t dma_addr,
     QTAILQ_INSERT_TAIL(&(cq->sq_list), sq, entry);
     n->sq[sqid] = sq;
 
-    /* Coperd: kick start SQ */
-#if 0
-    if (sqid) {
-        sq->timer = timer_new_ns(QEMU_CLOCK_REALTIME, nvme_process_sq_io, sq);
-        timer_mod(sq->timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + 1000000);
-    }
-#endif
-
     return NVME_SUCCESS;
 }
 
@@ -238,14 +230,6 @@ uint16_t nvme_init_cq(NvmeCQueue *cq, FemuCtrl *n, uint64_t dma_addr,
     }
     msix_vector_use(&n->parent_obj, cq->vector);
     n->cq[cqid] = cq;
-
-#if 0
-    if (cqid) {
-        cq->timer = timer_new_ns(QEMU_CLOCK_REALTIME, nvme_post_cqes_io, cq);
-        /* Coperd: kick off cq->timer for I/O CQs */
-        timer_mod(cq->timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + 200000);
-    }
-#endif
 
     return NVME_SUCCESS;
 }
@@ -662,7 +646,6 @@ static uint16_t nvme_abort_req(FemuCtrl *n, NvmeCmd *cmd, uint32_t *result)
             nvme_addr_write(n, addr, (void *)&abort_cmd,
                 sizeof(abort_cmd));
 
-            //nvme_enqueue_req_completion(n->cq[sq->cqid], req);
             return NVME_SUCCESS;
         }
 

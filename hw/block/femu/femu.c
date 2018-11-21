@@ -108,8 +108,6 @@ void nvme_post_cqes_io(void *opaque)
         ntt = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + CQ_POLLING_PERIOD_NS;
     }
 
-    //timer_mod(cq->timer, ntt);
-
     /* Coperd: only interrupt guest when we "do" complete some I/Os */
     if (processed > 0) {
         nvme_isr_notify_io(cq);
@@ -154,7 +152,6 @@ static uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t slba = le64_to_cpu(rw->slba);
     uint64_t prp1 = le64_to_cpu(rw->prp1);
     uint64_t prp2 = le64_to_cpu(rw->prp2);
-    //uint64_t gtsc = le64_to_cpu(rw->rsvd2);
     const uint8_t lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
     const uint16_t ms = le16_to_cpu(ns->id_ns.lbaf[lba_index].ms);
     const uint8_t data_shift = ns->id_ns.lbaf[lba_index].ds;
@@ -163,7 +160,6 @@ static uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t meta_size = nlb * ms;
     uint64_t elba = slba + nlb;
     uint16_t err;
-    int64_t overhead = 0;
     struct ssdstate *ssd = &(n->ssd);
     int ret;
 
@@ -188,19 +184,14 @@ static uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     req->status = NVME_SUCCESS;
     req->nlb = nlb;
     req->ns = ns;
-    //overhead = cyc2ns(rdtscp() + tsc_offset - gtsc);
-    req->expire_time = qemu_clock_get_ns(QEMU_CLOCK_REALTIME); // + 200000 - overhead;
+    req->expire_time = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
 
     if (req->is_write) {
-        //printf("SSD_WRITE: nlb = %lld, slba=%lld, data_size=%lld, data_offset=%lld\n", nlb, slba, data_size, data_offset);
-        overhead = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - req->expire_time;
         if (n->femu_mode == FEMU_BLACKBOX_MODE)
-            req->expire_time += SSD_WRITE(ssd, data_size >> 9, data_offset >> 9) - overhead;
+            req->expire_time += SSD_WRITE(ssd, data_size >> 9, data_offset >> 9);
     } else {
-        //printf("SSD_READ: nlb = %lld, slba=%lld, data_size=%lld, data_offset=%lld\n", nlb, slba, data_size, data_offset);
-        overhead = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - req->expire_time;
         if (n->femu_mode == FEMU_BLACKBOX_MODE)
-            req->expire_time += SSD_READ(ssd, data_size >> 9 , data_offset >> 9) - overhead;
+            req->expire_time += SSD_READ(ssd, data_size >> 9 , data_offset >> 9);
     }
 
     ret = femu_rw_mem_backend(&n->mbe, &req->qsg, data_offset, req->is_write);
