@@ -222,13 +222,7 @@ size_t femu_ring_count(struct rte_ring *ring)
 
 size_t femu_ring_enqueue(struct rte_ring *ring, void **objs, size_t count)
 {
-	int rc;
-	rc = rte_ring_enqueue_bulk((struct rte_ring *)ring, objs, count, NULL);
-	if (rc == 0) {
-		return count;
-	}
-
-	return 0;
+    return rte_ring_enqueue_bulk((struct rte_ring *)ring, objs, count, NULL);
 }
 
 size_t femu_ring_dequeue(struct rte_ring *ring, void **objs, size_t count)
