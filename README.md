@@ -33,6 +33,8 @@ Installation
 	```bash
 	# Switch to the FEMU building directory
 	cd femu/build-femu
+	# Recent commits are not safe for public use yet ..
+	git checkout ba56426057f57f7eab839e860c7672d5289e25c5
 	# Copy femu script
   	cp ../femu-scripts/femu-copy-scripts.sh .
   	./femu-copy-scripts.sh .
