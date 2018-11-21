@@ -6,6 +6,7 @@
 #include "qapi/visitor.h"
 #include "qapi/error.h"
 
+#include <immintrin.h>
 #include "nvme.h"
 
 /* Coperd: IO thread */
@@ -271,16 +272,39 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     }
 }
 
-/* Coperd: eventidx buffer is not needed */
-#if 0
 static void nvme_update_sq_eventidx(const NvmeSQueue *sq)
 {
+    if (sq->eventidx_addr_hva) {
+        *((uint32_t *)(sq->eventidx_addr_hva)) = sq->tail;
+        return;
+    }
+
     if (sq->eventidx_addr) {
         nvme_addr_write(sq->ctrl, sq->eventidx_addr, (void *)&sq->tail,
-            sizeof(sq->tail));
+                sizeof(sq->tail));
     }
 }
+
+static inline void nvme_copy_cmd(NvmeCmd *dst, NvmeCmd *src)
+{
+#if defined(__AVX__)
+    __m256i *d256 = (__m256i *)dst;
+    const __m256i *s256 = (const __m256i *)src;
+
+    _mm256_store_si256(&d256[0], _mm256_load_si256(&s256[0]));
+    _mm256_store_si256(&d256[1], _mm256_load_si256(&s256[1]));
+#elif defined(__SSE2__)
+    __m128i *d128 = (__m128i *)dst;
+    const __m128i *s128 = (const __m128i *)src;
+
+    _mm_store_si128(&d128[0], _mm_load_si128(&s128[0]));
+    _mm_store_si128(&d128[1], _mm_load_si128(&s128[1]));
+    _mm_store_si128(&d128[2], _mm_load_si128(&s128[2]));
+    _mm_store_si128(&d128[3], _mm_load_si128(&s128[3]));
+#else
+    *dst = *src;
 #endif
+}
 
 void nvme_process_sq_io(void *opaque)
 {
@@ -298,24 +322,24 @@ void nvme_process_sq_io(void *opaque)
     while (!(nvme_sq_empty(sq))) {
         if (sq->phys_contig) {
             addr = sq->dma_addr + sq->head * n->sqe_size;
+            nvme_copy_cmd(&cmd, (void *)&(((NvmeCmd *)sq->dma_addr_hva)[sq->head]));
         } else {
             addr = nvme_discontig(sq->prp_list, sq->head, n->page_size,
                     n->sqe_size);
+            nvme_addr_read(n, addr, (void *)&cmd, sizeof(cmd));
         }
-        nvme_addr_read(n, addr, (void *)&cmd, sizeof(cmd));
         nvme_inc_sq_head(sq);
 
         if (cmd.opcode == NVME_OP_ABORTED) {
-            printf("Coperd,abort!!!!\n");
+            printf("Coperd,abort!!!! Please report this as a bug !\n");
             continue;
         }
         req = QTAILQ_FIRST(&sq->req_list);
         memset(&req->cqe, 0, sizeof(req->cqe));
         req->cqe.cid = cmd.cid;
-        req->aiocb = NULL;
 
         status = nvme_io_cmd(n, &cmd, req);
-        if (status != NVME_NO_COMPLETE) {
+        if (status == NVME_SUCCESS) {
             req->status = status;
             nvme_post_cqe(cq, req);
         } else {
@@ -333,18 +357,8 @@ void nvme_process_sq_io(void *opaque)
         n->completed = 0;
     }
 
-    /*
-     * Coperd: no need to keep the tail up-to-date with guest, we will handle
-     * newly submitted I/Os during next sq->timer triggering
-     */
-#if 0
     nvme_update_sq_eventidx(sq);
-    nvme_update_sq_tail(sq);
-#endif
-
     sq->completed += processed;
-
-    //timer_mod(sq->timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + SQ_POLLING_PERIOD_NS);
 }
 
 static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)

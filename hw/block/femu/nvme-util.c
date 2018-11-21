@@ -183,7 +183,8 @@ void nvme_inc_sq_head(NvmeSQueue *sq)
 void nvme_update_cq_head(NvmeCQueue *cq)
 {
     if (cq->db_addr_hva) {
-        memcpy(&cq->head, (void *)cq->db_addr_hva, sizeof(cq->head));
+        cq->head = *(uint32_t *)(cq->db_addr_hva);
+        //memcpy(&cq->head, (void *)cq->db_addr_hva, sizeof(cq->head));
         return;
     }
 
@@ -688,7 +689,8 @@ uint64_t nvme_cmb_read(void *opaque, hwaddr addr, unsigned size)
 void nvme_update_sq_tail(NvmeSQueue *sq)
 {
     if (sq->db_addr_hva) {
-        memcpy(&sq->tail, (void *)sq->db_addr_hva, sizeof(sq->tail));
+        sq->tail = *((uint32_t *)sq->db_addr_hva);
+        //memcpy(&sq->tail, (void *)sq->db_addr_hva, sizeof(sq->tail));
         return;
     }
 

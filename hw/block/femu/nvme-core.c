@@ -56,8 +56,10 @@ uint16_t nvme_init_sq(NvmeSQueue *sq, FemuCtrl *n, uint64_t dma_addr,
 {
     uint8_t stride = n->db_stride;
     int dbbuf_entry_sz = 1 << (2 + stride);
-    int i;
+    AddressSpace *as = pci_get_address_space(&n->parent_obj);
+    dma_addr_t sqsz = (dma_addr_t)size;
     NvmeCQueue *cq;
+    int i;
 
     sq->ctrl = n;
     sq->sqid = sqid;
@@ -67,6 +69,7 @@ uint16_t nvme_init_sq(NvmeSQueue *sq, FemuCtrl *n, uint64_t dma_addr,
     sq->phys_contig = contig;
     if (sq->phys_contig) {
         sq->dma_addr = dma_addr;
+        sq->dma_addr_hva = (uint64_t)dma_memory_map(as, dma_addr, &sqsz, 0);
     } else {
         sq->prp_list = nvme_setup_discontig(n, dma_addr, size, n->sqe_size);
         if (!sq->prp_list) {
@@ -209,9 +212,12 @@ uint16_t nvme_init_cq(NvmeCQueue *cq, FemuCtrl *n, uint64_t dma_addr,
 
     uint8_t stride = n->db_stride;
     int dbbuf_entry_sz = 1 << (2 + stride);
+    AddressSpace *as = pci_get_address_space(&n->parent_obj);
+    dma_addr_t cqsz = (dma_addr_t)size;
 
     if (cq->phys_contig) {
         cq->dma_addr = dma_addr;
+        cq->dma_addr_hva = (uint64_t)dma_memory_map(as, dma_addr, &cqsz, 1);
     } else {
         cq->prp_list = nvme_setup_discontig(n, dma_addr, size,
                 n->cqe_size);

@@ -740,7 +740,6 @@ typedef struct NvmeAsyncEvent {
 typedef struct NvmeRequest {
     struct NvmeSQueue       *sq;
     struct NvmeNamespace    *ns;
-    BlockAIOCB               *aiocb;
     uint16_t                status;
     uint64_t                slba;
     uint16_t                is_write;
@@ -752,7 +751,6 @@ typedef struct NvmeRequest {
     uint64_t                femu_oc_slba;
     uint64_t                *femu_oc_ppa_list;
     NvmeCqe                 cqe;
-    BlockAcctCookie         acct;
     QEMUSGList              qsg;
     QEMUIOVector            iov;
     QTAILQ_ENTRY(NvmeRequest)entry;
@@ -760,7 +758,6 @@ typedef struct NvmeRequest {
     int64_t                 data_offset;
     int                     lunid;
     int                     chnl;
-
 } NvmeRequest;
 
 typedef struct DMAOff {
@@ -780,6 +777,7 @@ typedef struct NvmeSQueue {
     uint32_t    tail;
     uint32_t    size;
     uint64_t    dma_addr;
+    uint64_t    dma_addr_hva;
     uint64_t    completed;
     uint64_t    *prp_list;
     QEMUTimer   *timer;
@@ -807,6 +805,7 @@ typedef struct NvmeCQueue {
     uint32_t    vector;
     uint32_t    size;
     uint64_t    dma_addr;
+    uint64_t    dma_addr_hva;
     uint64_t    *prp_list;
     EventNotifier guest_notifier;
     QEMUTimer   *timer;
