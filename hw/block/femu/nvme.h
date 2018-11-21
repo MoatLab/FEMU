@@ -789,7 +789,9 @@ typedef struct NvmeSQueue {
     QTAILQ_ENTRY(NvmeSQueue) entry;
 
     uint64_t    db_addr;
+    uint64_t    db_addr_hva;
     uint64_t    eventidx_addr;
+    uint64_t    eventidx_addr_hva;
     uint64_t    lisr_tick;
 } NvmeSQueue;
 
@@ -811,7 +813,9 @@ typedef struct NvmeCQueue {
     QTAILQ_HEAD(sq_list, NvmeSQueue) sq_list;
     QTAILQ_HEAD(cq_req_list, NvmeRequest) req_list;
     uint64_t    db_addr;
+    uint64_t    db_addr_hva;
     uint64_t    eventidx_addr;
+    uint64_t    eventidx_addr_hva;
 } NvmeCQueue;
 
 typedef struct NvmeNamespace {
@@ -909,6 +913,8 @@ typedef struct FemuCtrl {
 
 	uint64_t		dbs_addr;
 	uint64_t		eis_addr;
+    uint64_t        dbs_addr_hva;
+    uint64_t        eis_addr_hva;
     
     uint8_t         femu_mode; 
     uint32_t        memsz; 
