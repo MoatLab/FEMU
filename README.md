@@ -77,7 +77,7 @@ $ sudo update-grub
   running FEMU.
 
 
-  Option 2: Use our VM image, please download it from our [site](https://goo.gl/forms/aCap1XDgE8Raj9Jy1) and save it as
+  Option 2: Use our VM image, please download it from our [site](https://goo.gl/forms/NptPVEOy9EnwN70Y2) and save it as
   `$HOME/images/u14s.qcow2`
  
  4. Login to FEMU VM
