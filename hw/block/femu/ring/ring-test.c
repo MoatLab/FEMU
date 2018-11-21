@@ -50,28 +50,35 @@ void test_femu_ring(void)
 #define RSZ (31)
     int i;
     struct rte_ring *r = femu_ring_create(FEMU_RING_TYPE_MP_SC, RSZ + 1);
-    struct msg *tmsg;
+    struct msg *tmsg[2];
     struct msg *p;
     int ret;
 
-    //assert(rte_ring_empty(r));
+    assert(rte_ring_empty(r));
 
-    for (i = 0; i < 7/*RSZ*/; i++) {
-        tmsg = malloc(sizeof(struct msg));
-        tmsg->fn = test_fn;
-        tmsg->arg = NULL;
-        ret = femu_ring_enqueue(r, (void **)&tmsg, 1);
-        if (ret != 1) {
+    for (i = 0; i < 2/*RSZ*/; i++) {
+        tmsg[0] = malloc(sizeof(struct msg));
+        tmsg[0]->fn = test_fn;
+        tmsg[0]->arg = NULL;
+        tmsg[1] = malloc(sizeof(struct msg));
+        tmsg[1]->fn = test_fn;
+        tmsg[1]->arg = NULL;
+        ret = femu_ring_enqueue(r, (void **)tmsg, 2);
+        if (ret == 2) {
             printf("Coperd,%s,enqueue,ret=%d\n", __func__, ret);
+        } else {
+            printf("Coperd,failed to enqueue, ret=%d\n", ret);
         }
     }
 
+    printf("Coperd,enqueued: %d\n", femu_ring_count(r));
     //assert(rte_ring_full(r));
 
     while (femu_ring_count(r)) {
         assert(femu_ring_dequeue(r, (void *)&p, 1) == 1);
+        printf("Coperd,now: %d\n", femu_ring_count(r));
         p->fn(p->arg);
-        free(p);
+        //free(p);
     }
 
     //assert(rte_ring_empty(r));

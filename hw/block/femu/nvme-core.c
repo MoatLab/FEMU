@@ -8,8 +8,6 @@
 void nvme_free_sq(NvmeSQueue *sq, FemuCtrl *n)
 {
     n->sq[sq->sqid] = NULL;
-    timer_del(sq->timer);
-    timer_free(sq->timer);
     g_free(sq->io_req);
     if (sq->prp_list) {
         g_free(sq->prp_list);
@@ -159,8 +157,6 @@ uint16_t nvme_create_sq(FemuCtrl *n, NvmeCmd *cmd)
 void nvme_free_cq(NvmeCQueue *cq, FemuCtrl *n)
 {
     n->cq[cq->cqid] = NULL;
-    timer_del(cq->timer);
-    timer_free(cq->timer);
     msix_vector_unuse(&n->parent_obj, cq->vector);
     if (cq->prp_list) {
         g_free(cq->prp_list);

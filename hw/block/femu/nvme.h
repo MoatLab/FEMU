@@ -739,6 +739,7 @@ typedef struct NvmeAsyncEvent {
 
 typedef struct NvmeRequest {
     struct NvmeSQueue       *sq;
+    struct NvmeCQueue       *cq;
     struct NvmeNamespace    *ns;
     uint16_t                status;
     uint64_t                slba;
@@ -780,7 +781,6 @@ typedef struct NvmeSQueue {
     uint64_t    dma_addr_hva;
     uint64_t    completed;
     uint64_t    *prp_list;
-    QEMUTimer   *timer;
     NvmeRequest *io_req;
     QTAILQ_HEAD(sq_req_list, NvmeRequest) req_list;
     QTAILQ_HEAD(out_req_list, NvmeRequest) out_req_list;
@@ -922,6 +922,9 @@ typedef struct FemuCtrl {
     struct femu_mbe mbe;
     int             completed;
     uint64_t        lisr_tick;
+
+    struct rte_ring *to_ftl;
+    struct rte_ring *to_poller;
 } FemuCtrl;
 
 typedef struct NvmeDifTuple {

@@ -5,42 +5,10 @@
 #include "hw/pci/msi.h"
 #include "qapi/visitor.h"
 #include "qapi/error.h"
+#include "ring/rte_ring.h"
 
 #include <immintrin.h>
 #include "nvme.h"
-
-QemuThread g_cq_poller;
-
-/* Coperd: IO thread for NVMe submission processing */
-/* TODO: need to handle controller reset correctly */
-static void *nvme_sq_poller(void *arg)
-{
-    FemuCtrl *n = (FemuCtrl *)arg;
-    int i;
-
-    while (1) {
-        for (i = 1; i <= n->num_io_queues; i++) {
-            NvmeSQueue *sq = n->sq[i];
-            NvmeCQueue *cq = n->cq[i];
-            if (!sq || !cq)
-                continue;
-
-            nvme_process_sq_io(sq);
-        }
-    }
-
-    return NULL;
-}
-
-void femu_create_nvme_sq_poller(FemuCtrl *n)
-{
-    qemu_thread_create(&n->sq_poller, "sq-poller", nvme_sq_poller, n, QEMU_THREAD_JOINABLE);
-}
-
-static void femu_destroy_nvme_sq_poller(FemuCtrl *n)
-{
-    qemu_thread_join(&n->sq_poller);
-}
 
 static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
 {
@@ -61,6 +29,74 @@ static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
     cqe->sq_head = cpu_to_le16(sq->head);
     nvme_addr_write(n, addr, (void *)cqe, sizeof(*cqe));
     nvme_inc_cq_tail(cq);
+}
+
+static void nvme_process_cq_io(void *arg)
+{
+    FemuCtrl *n = (FemuCtrl *)arg;
+    NvmeCQueue *cq = NULL;
+    int rc;
+
+    while (femu_ring_count(n->to_ftl)) {
+        NvmeRequest *req = NULL;
+        rc = femu_ring_dequeue(n->to_ftl, (void *)&req, 1);
+        if (rc != 1) {
+            printf("FEMU: dequeue request failed\n");
+        }
+        cq = n->cq[req->sq->sqid];
+        nvme_post_cqe(cq, req);
+        free(req);
+        nvme_isr_notify_io(cq);
+    }
+}
+
+/* Coperd: IO thread for NVMe submission processing */
+/* TODO: need to handle controller reset correctly */
+static void *nvme_sq_poller(void *arg)
+{
+    FemuCtrl *n = (FemuCtrl *)arg;
+    int i;
+
+    while (1) {
+        for (i = 1; i <= n->num_io_queues; i++) {
+            NvmeSQueue *sq = n->sq[i];
+            NvmeCQueue *cq = n->cq[i];
+            if (!sq || !cq)
+                continue;
+
+            nvme_process_sq_io(sq);
+        }
+
+        nvme_process_cq_io(n);
+    }
+
+    return NULL;
+}
+
+void femu_create_nvme_sq_poller(FemuCtrl *n)
+{
+    /* Coperd: we put NvmeRequest into these rings */
+
+    n->to_ftl = femu_ring_create(FEMU_RING_TYPE_MP_SC, 2048);
+    if (!n->to_ftl) {
+        printf("FEMU: failed to create ring (n->to_ftl) ...\n");
+        abort();
+    }
+    assert(rte_ring_empty(n->to_ftl));
+
+    n->to_poller = femu_ring_create(FEMU_RING_TYPE_MP_SC, 2048);
+    if (!n->to_poller) {
+        printf("FEMU: failed to create ring (n->to_poller) ...\n");
+        abort();
+    }
+    assert(rte_ring_empty(n->to_poller));
+
+    qemu_thread_create(&n->sq_poller, "sq-poller", nvme_sq_poller, n, QEMU_THREAD_JOINABLE);
+}
+
+static void femu_destroy_nvme_sq_poller(FemuCtrl *n)
+{
+    qemu_thread_join(&n->sq_poller);
 }
 
 void nvme_post_cqes_io(void *opaque)
@@ -288,7 +324,6 @@ void nvme_process_sq_io(void *opaque)
 {
     NvmeSQueue *sq = opaque;
     FemuCtrl *n = sq->ctrl;
-    NvmeCQueue *cq = n->cq[sq->cqid];
 
     uint16_t status;
     hwaddr addr;
@@ -319,20 +354,18 @@ void nvme_process_sq_io(void *opaque)
         status = nvme_io_cmd(n, &cmd, req);
         if (status == NVME_SUCCESS) {
             req->status = status;
-            nvme_post_cqe(cq, req);
+            NvmeRequest *treq = g_malloc(sizeof(NvmeRequest));
+            memcpy(treq, req, sizeof(NvmeRequest));
+
+            int rc = femu_ring_enqueue(n->to_ftl, (void *)&treq, 1);
+            if (rc != 1) {
+                printf("FEMU: enqueue failed, ret=%d\n", rc);
+            }
         } else {
-            printf("Error IO processed!\n");
+            printf("FEMU: Error IO processed!\n");
         }
 
         processed++;
-    }
-
-    n->completed += sq->completed;
-    uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-    if ((processed > 0) && (now - sq->lisr_tick >= 32000)) {
-        nvme_isr_notify_io(cq);
-        n->lisr_tick = now;
-        n->completed = 0;
     }
 
     nvme_update_sq_eventidx(sq);
