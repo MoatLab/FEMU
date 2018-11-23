@@ -5,7 +5,6 @@
 #include "hw/pci/msi.h"
 #include "qapi/visitor.h"
 #include "qapi/error.h"
-#include "include/rte_ring.h"
 
 #include <immintrin.h>
 #include "nvme.h"
@@ -37,15 +36,22 @@ static void nvme_process_cq_cpl(void *arg)
 {
     FemuCtrl *n = (FemuCtrl *)arg;
     NvmeCQueue *cq = NULL;
+    NvmeRequest *req = NULL;
     int rc;
 
     while (femu_ring_count(n->to_ftl)) {
-        NvmeRequest *req = NULL;
+        req = NULL;
         rc = femu_ring_dequeue(n->to_ftl, (void *)&req, 1);
         if (rc != 1) {
             printf("FEMU: dequeue request failed\n");
         }
         assert(req);
+
+        pqueue_insert(n->pq, req); 
+    }
+
+    req = NULL;
+    while ((req = pqueue_pop(n->pq))) {
         cq = n->cq[req->sq->sqid];
         nvme_post_cqe(cq, req);
         QTAILQ_INSERT_TAIL(&req->sq->req_list, req, entry);
@@ -76,6 +82,31 @@ static void *nvme_sq_poller(void *arg)
     return NULL;
 }
 
+static int cmp_pri(pqueue_pri_t next, pqueue_pri_t curr)
+{
+    return (next < curr);
+}
+
+static pqueue_pri_t get_pri(void *a)
+{
+    return ((NvmeRequest *)a)->expire_time;
+}
+
+static void set_pri(void *a, pqueue_pri_t pri)
+{
+    ((NvmeRequest *)a)->expire_time = pri;
+}
+
+static size_t get_pos(void *a)
+{
+    return ((NvmeRequest *)a)->pos;
+}
+
+static void set_pos(void *a, size_t pos)
+{
+    ((NvmeRequest *)a)->pos = pos;
+}
+
 void femu_create_nvme_sq_poller(FemuCtrl *n)
 {
     /* Coperd: we put NvmeRequest into these rings */
@@ -94,12 +125,21 @@ void femu_create_nvme_sq_poller(FemuCtrl *n)
     }
     assert(rte_ring_empty(n->to_poller));
 
+    n->pq = pqueue_init(2048, cmp_pri, get_pri, set_pri, get_pos, set_pos);
+    if (!n->pq) {
+        printf("FEMU: failed to create pqueue (n->pq) ...\n");
+        abort();
+    }
+
     qemu_thread_create(&n->sq_poller, "sq-poller", nvme_sq_poller, n, QEMU_THREAD_JOINABLE);
 }
 
 static void femu_destroy_nvme_sq_poller(FemuCtrl *n)
 {
     qemu_thread_join(&n->sq_poller);
+    pqueue_free(n->pq);
+    femu_ring_free(n->to_poller);
+    femu_ring_free(n->to_ftl);
 }
 
 void nvme_post_cqes_io(void *opaque)

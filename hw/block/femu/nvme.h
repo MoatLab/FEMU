@@ -6,6 +6,8 @@
 #include "hw/virtio/vhost.h"
 #include "sysemu/hostmem.h"
 #include "mem-backend.h"
+#include "include/rte_ring.h"
+#include "include/pqueue.h"
 #include "ocssd/femu-oc.h"
 #include "ssd/vssim_config_manager.h"
 
@@ -755,10 +757,11 @@ typedef struct NvmeRequest {
     QEMUSGList              qsg;
     QEMUIOVector            iov;
     QTAILQ_ENTRY(NvmeRequest)entry;
-    int64_t                 expire_time;
-    int64_t                 data_offset;
+    uint64_t                expire_time;
+    uint64_t                data_offset;
     int                     lunid;
     int                     chnl;
+    size_t                  pos;
 } NvmeRequest;
 
 typedef struct DMAOff {
@@ -925,6 +928,7 @@ typedef struct FemuCtrl {
 
     struct rte_ring *to_ftl;
     struct rte_ring *to_poller;
+    pqueue_t        *pq;
 } FemuCtrl;
 
 typedef struct NvmeDifTuple {
