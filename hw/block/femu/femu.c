@@ -18,16 +18,18 @@ static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
     uint8_t phase = cq->phase;
     hwaddr addr;
 
-    if (cq->phys_contig) {
-        addr = cq->dma_addr + cq->tail * n->cqe_size;
-    } else {
-        addr = nvme_discontig(cq->prp_list, cq->tail, n->page_size, n->cqe_size);
-    }
-
     cqe->status = cpu_to_le16((req->status << 1) | phase);
     cqe->sq_id = cpu_to_le16(sq->sqid);
     cqe->sq_head = cpu_to_le16(sq->head);
-    nvme_addr_write(n, addr, (void *)cqe, sizeof(*cqe));
+
+    if (cq->phys_contig) {
+        addr = cq->dma_addr + cq->tail * n->cqe_size;
+        ((NvmeCqe *)cq->dma_addr_hva)[cq->tail] = *cqe;
+    } else {
+        addr = nvme_discontig(cq->prp_list, cq->tail, n->page_size, n->cqe_size);
+        nvme_addr_write(n, addr, (void *)cqe, sizeof(*cqe));
+    }
+
     nvme_inc_cq_tail(cq);
 }
 
