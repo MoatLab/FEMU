@@ -1,1 +1,2 @@
 obj-y += rte_ring.o
+obj-y += pqueue.o
