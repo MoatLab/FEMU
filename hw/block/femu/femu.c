@@ -31,7 +31,7 @@ static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
     nvme_inc_cq_tail(cq);
 }
 
-static void nvme_process_cq_io(void *arg)
+static void nvme_process_cq_cpl(void *arg)
 {
     FemuCtrl *n = (FemuCtrl *)arg;
     NvmeCQueue *cq = NULL;
@@ -43,9 +43,10 @@ static void nvme_process_cq_io(void *arg)
         if (rc != 1) {
             printf("FEMU: dequeue request failed\n");
         }
+        assert(req);
         cq = n->cq[req->sq->sqid];
         nvme_post_cqe(cq, req);
-        free(req);
+        QTAILQ_INSERT_TAIL(&req->sq->req_list, req, entry);
         nvme_isr_notify_io(cq);
     }
 }
@@ -67,7 +68,7 @@ static void *nvme_sq_poller(void *arg)
             nvme_process_sq_io(sq);
         }
 
-        nvme_process_cq_io(n);
+        nvme_process_cq_cpl(n);
     }
 
     return NULL;
@@ -344,20 +345,19 @@ void nvme_process_sq_io(void *opaque)
         nvme_inc_sq_head(sq);
 
         if (cmd.opcode == NVME_OP_ABORTED) {
-            printf("Coperd,abort!!!! Please report this as a bug !\n");
+            printf("FEMU: [abort] command! Please report this as a bug!\n");
             continue;
         }
         req = QTAILQ_FIRST(&sq->req_list);
+        QTAILQ_REMOVE(&sq->req_list, req, entry);
         memset(&req->cqe, 0, sizeof(req->cqe));
         req->cqe.cid = cmd.cid;
 
         status = nvme_io_cmd(n, &cmd, req);
         if (status == NVME_SUCCESS) {
             req->status = status;
-            NvmeRequest *treq = g_malloc(sizeof(NvmeRequest));
-            memcpy(treq, req, sizeof(NvmeRequest));
 
-            int rc = femu_ring_enqueue(n->to_ftl, (void *)&treq, 1);
+            int rc = femu_ring_enqueue(n->to_ftl, (void *)&req, 1);
             if (rc != 1) {
                 printf("FEMU: enqueue failed, ret=%d\n", rc);
             }
