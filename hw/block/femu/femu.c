@@ -5,7 +5,7 @@
 #include "hw/pci/msi.h"
 #include "qapi/visitor.h"
 #include "qapi/error.h"
-#include "ring/rte_ring.h"
+#include "include/rte_ring.h"
 
 #include <immintrin.h>
 #include "nvme.h"
