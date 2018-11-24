@@ -757,8 +757,8 @@ typedef struct NvmeRequest {
     QEMUSGList              qsg;
     QEMUIOVector            iov;
     QTAILQ_ENTRY(NvmeRequest)entry;
-    uint64_t                expire_time;
-    uint64_t                data_offset;
+    int64_t                expire_time;
+    int64_t                data_offset;
     int                     lunid;
     int                     chnl;
     size_t                  pos;
