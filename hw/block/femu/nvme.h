@@ -35,7 +35,7 @@ enum NvmeCapShift {
     CAP_DSTRD_SHIFT    = 32,
     CAP_NSSRS_SHIFT    = 33,
     CAP_CSS_SHIFT      = 37,
-    CAP_FEMU_OC_SHIFT     = 44,
+    CAP_FEMU_OC_SHIFT  = 44,
     CAP_MPSMIN_SHIFT   = 48,
     CAP_MPSMAX_SHIFT   = 52,
 };
@@ -48,7 +48,7 @@ enum NvmeCapMask {
     CAP_DSTRD_MASK     = 0xf,
     CAP_NSSRS_MASK     = 0x1,
     CAP_CSS_MASK       = 0xff,
-    CAP_FEMU_OC_MASK      = 0x1,
+    CAP_FEMU_OC_MASK   = 0x1,
     CAP_MPSMIN_MASK    = 0xf,
     CAP_MPSMAX_MASK    = 0xf,
 };
@@ -894,7 +894,7 @@ typedef struct FemuCtrl {
     uint32_t    cmbloc;
     uint8_t     *cmbuf;
 
-    QemuThread  sq_poller;
+    QemuThread  poller;
     bool        dataplane_started;
     bool        vector_poll_started;
 
@@ -924,11 +924,11 @@ typedef struct FemuCtrl {
     struct ssdstate ssd;
     struct femu_mbe mbe;
     int             completed;
-    uint64_t        lisr_tick;
 
     struct rte_ring *to_ftl;
     struct rte_ring *to_poller;
     pqueue_t        *pq;
+    bool            *should_isr;
 } FemuCtrl;
 
 typedef struct NvmeDifTuple {
@@ -939,6 +939,7 @@ typedef struct NvmeDifTuple {
 
 #define SQ_POLLING_PERIOD_NS	(5000)
 #define CQ_POLLING_PERIOD_NS	(5000)
+#define FEMU_MAX_INF_REQS       (65536)
 
 enum {
     FEMU_WHITEBOX_MODE = 0,
@@ -1054,7 +1055,7 @@ uint64_t ns_blks(NvmeNamespace *ns, uint8_t lba_idx);
 void nvme_partition_ns(NvmeNamespace *ns, uint8_t lba_idx);
 void nvme_post_cqes_io(void *opaque);
 
-void femu_create_nvme_sq_poller(FemuCtrl *n);
+void femu_create_nvme_poller(FemuCtrl *n);
 
 
 extern int64_t nand_read_upper_t;
