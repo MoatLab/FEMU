@@ -38,7 +38,6 @@ static void nvme_process_cq_cpl(void *arg)
     NvmeCQueue *cq = NULL;
     NvmeRequest *req = NULL;
     uint64_t now;
-    bool should_isr[5] = {false};
     int rc;
     int i;
 
@@ -64,29 +63,22 @@ static void nvme_process_cq_cpl(void *arg)
         cq = n->cq[req->sq->sqid];
         nvme_post_cqe(cq, req);
         QTAILQ_INSERT_TAIL(&req->sq->req_list, req, entry);
-        req = pqueue_pop(n->pq);
-        should_isr[req->sq->sqid] = true;
+        pqueue_pop(n->pq);
+        n->should_isr[req->sq->sqid] = true;
     }
 
-    for (i = 1; i <= 4; i++) {
-        if (should_isr[i])
+    for (i = 1; i <= n->num_io_queues; i++) {
+        if (n->should_isr[i]) {
+            n->should_isr[i] = false;
             nvme_isr_notify_io(n->cq[i]);
+        }
+        assert(n->should_isr[i] == false);
     }
-
-#if 0
-    req = NULL;
-    while ((req = pqueue_pop(n->pq))) {
-        cq = n->cq[req->sq->sqid];
-        nvme_post_cqe(cq, req);
-        QTAILQ_INSERT_TAIL(&req->sq->req_list, req, entry);
-        nvme_isr_notify_io(cq);
-    }
-#endif
 }
 
 /* Coperd: IO thread for NVMe submission processing */
 /* TODO: need to handle controller reset correctly */
-static void *nvme_sq_poller(void *arg)
+static void *nvme_poller(void *arg)
 {
     FemuCtrl *n = (FemuCtrl *)arg;
     int i;
@@ -132,39 +124,43 @@ static void set_pos(void *a, size_t pos)
     ((NvmeRequest *)a)->pos = pos;
 }
 
-void femu_create_nvme_sq_poller(FemuCtrl *n)
+void femu_create_nvme_poller(FemuCtrl *n)
 {
-    /* Coperd: we put NvmeRequest into these rings */
+    n->should_isr = g_malloc0(sizeof(bool) * (n->num_io_queues + 1));
 
-    n->to_ftl = femu_ring_create(FEMU_RING_TYPE_MP_SC, 2048);
+    /* Coperd: we put NvmeRequest into these rings */
+    n->to_ftl = femu_ring_create(FEMU_RING_TYPE_MP_SC, FEMU_MAX_INF_REQS);
     if (!n->to_ftl) {
         printf("FEMU: failed to create ring (n->to_ftl) ...\n");
         abort();
     }
     assert(rte_ring_empty(n->to_ftl));
 
-    n->to_poller = femu_ring_create(FEMU_RING_TYPE_MP_SC, 2048);
+    n->to_poller = femu_ring_create(FEMU_RING_TYPE_MP_SC, FEMU_MAX_INF_REQS);
     if (!n->to_poller) {
         printf("FEMU: failed to create ring (n->to_poller) ...\n");
         abort();
     }
     assert(rte_ring_empty(n->to_poller));
 
-    n->pq = pqueue_init(2048, cmp_pri, get_pri, set_pri, get_pos, set_pos);
+    n->pq = pqueue_init(FEMU_MAX_INF_REQS, cmp_pri, get_pri, set_pri, get_pos,
+            set_pos);
     if (!n->pq) {
         printf("FEMU: failed to create pqueue (n->pq) ...\n");
         abort();
     }
 
-    qemu_thread_create(&n->sq_poller, "sq-poller", nvme_sq_poller, n, QEMU_THREAD_JOINABLE);
+    qemu_thread_create(&n->poller, "nvme-poller", nvme_poller, n, 
+            QEMU_THREAD_JOINABLE);
 }
 
-static void femu_destroy_nvme_sq_poller(FemuCtrl *n)
+static void femu_destroy_nvme_poller(FemuCtrl *n)
 {
-    qemu_thread_join(&n->sq_poller);
+    qemu_thread_join(&n->poller);
     pqueue_free(n->pq);
     femu_ring_free(n->to_poller);
     femu_ring_free(n->to_ftl);
+    g_free(n->should_isr);
 }
 
 void nvme_post_cqes_io(void *opaque)
@@ -1000,7 +996,6 @@ static int femu_init(PCIDevice *pci_dev)
 
     femu_init_mem_backend(&n->mbe, bs_size);
 
-    n->lisr_tick = 0;
     n->completed = 0;
     n->start_time = time(NULL);
     n->reg_size = pow2ceil(0x1004 + 2 * (n->num_io_queues + 1) * 4);
@@ -1039,7 +1034,7 @@ static void femu_exit(PCIDevice *pci_dev)
 
     nvme_clear_ctrl(n, true);
 
-    femu_destroy_nvme_sq_poller(n);
+    femu_destroy_nvme_poller(n);
     femu_destroy_mem_backend(&n->mbe);
 
     g_free(n->namespaces);
