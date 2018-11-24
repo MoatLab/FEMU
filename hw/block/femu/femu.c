@@ -37,7 +37,10 @@ static void nvme_process_cq_cpl(void *arg)
     FemuCtrl *n = (FemuCtrl *)arg;
     NvmeCQueue *cq = NULL;
     NvmeRequest *req = NULL;
+    uint64_t now;
+    bool should_isr[5] = {false};
     int rc;
+    int i;
 
     while (femu_ring_count(n->to_ftl)) {
         req = NULL;
@@ -50,6 +53,27 @@ static void nvme_process_cq_cpl(void *arg)
         pqueue_insert(n->pq, req); 
     }
 
+    int cnt = 0;
+    while ((req = pqueue_peek(n->pq))) {
+        now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        cnt++;
+        if (now < req->expire_time) {
+            break;
+        }
+
+        cq = n->cq[req->sq->sqid];
+        nvme_post_cqe(cq, req);
+        QTAILQ_INSERT_TAIL(&req->sq->req_list, req, entry);
+        req = pqueue_pop(n->pq);
+        should_isr[req->sq->sqid] = true;
+    }
+
+    for (i = 1; i <= 4; i++) {
+        if (should_isr[i])
+            nvme_isr_notify_io(n->cq[i]);
+    }
+
+#if 0
     req = NULL;
     while ((req = pqueue_pop(n->pq))) {
         cq = n->cq[req->sq->sqid];
@@ -57,6 +81,7 @@ static void nvme_process_cq_cpl(void *arg)
         QTAILQ_INSERT_TAIL(&req->sq->req_list, req, entry);
         nvme_isr_notify_io(cq);
     }
+#endif
 }
 
 /* Coperd: IO thread for NVMe submission processing */
@@ -84,7 +109,7 @@ static void *nvme_sq_poller(void *arg)
 
 static int cmp_pri(pqueue_pri_t next, pqueue_pri_t curr)
 {
-    return (next < curr);
+    return (next > curr);
 }
 
 static pqueue_pri_t get_pri(void *a)
@@ -227,6 +252,7 @@ static uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t elba = slba + nlb;
     uint16_t err;
     struct ssdstate *ssd = &(n->ssd);
+    uint64_t simtime;
     int ret;
 
     req->data_offset = data_offset;
@@ -250,14 +276,18 @@ static uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     req->status = NVME_SUCCESS;
     req->nlb = nlb;
     req->ns = ns;
-    req->expire_time = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    req->expire_time = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + 100000;
 
     if (req->is_write) {
-        if (n->femu_mode == FEMU_BLACKBOX_MODE)
-            req->expire_time += SSD_WRITE(ssd, data_size >> 9, data_offset >> 9);
+        if (n->femu_mode == FEMU_BLACKBOX_MODE) {
+            simtime = SSD_WRITE(ssd, data_size >> 9, data_offset >> 9);
+            req->expire_time += simtime;
+        }
     } else {
-        if (n->femu_mode == FEMU_BLACKBOX_MODE)
-            req->expire_time += SSD_READ(ssd, data_size >> 9 , data_offset >> 9);
+        if (n->femu_mode == FEMU_BLACKBOX_MODE) {
+            simtime = SSD_READ(ssd, data_size >> 9 , data_offset >> 9);
+            req->expire_time += simtime;
+        }
     }
 
     ret = femu_rw_mem_backend(&n->mbe, &req->qsg, data_offset, req->is_write);
@@ -1035,7 +1065,7 @@ static Property femu_props[] = {
     DEFINE_BLOCK_PROPERTIES(FemuCtrl, conf),
     DEFINE_PROP_STRING("serial", FemuCtrl, serial),
     DEFINE_PROP_UINT32("devsz_mb", FemuCtrl, memsz, 1024), /* Coperd: in MB */
-    DEFINE_PROP_UINT32("namespaces", FemuCtrl, num_namespaces, 1),
+    DEFINE_PROP_UINT32("namespaces", FemuCtrl, num_namespaces, 4),
     DEFINE_PROP_UINT32("queues", FemuCtrl, num_io_queues, 4),
     DEFINE_PROP_UINT32("entries", FemuCtrl, max_q_ents, 0x7ff),
     DEFINE_PROP_UINT8("max_cqes", FemuCtrl, max_cqes, 0x4),
