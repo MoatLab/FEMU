@@ -665,6 +665,9 @@ uint16_t nvme_create_cq(FemuCtrl *n, NvmeCmd *cmd)
         }
     }
 
+    assert(cq->is_active == false);
+    cq->is_active = true;
+
     return NVME_SUCCESS;
 }
 
@@ -764,10 +767,13 @@ uint16_t nvme_set_db_memory(FemuCtrl *n, const NvmeCmd *cmd)
         }
     }
 
-    if (!n->dataplane_started) {
+    assert(n->dataplane_started == false);
+    if (!n->poller_on) {
+        /* Coperd: make sure this only run once across all controller resets */
         femu_create_nvme_poller(n);
-        n->dataplane_started = true;
+        n->poller_on = true;
     }
+    n->dataplane_started = true;
     printf("FEMU:nvme_set_db_memory returns SUCCESS!\n");
 
     return NVME_SUCCESS;

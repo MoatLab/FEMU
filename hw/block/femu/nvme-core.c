@@ -30,6 +30,8 @@ uint16_t nvme_del_sq(FemuCtrl *n, NvmeCmd *cmd)
     }
 
     sq = n->sq[qid];
+    assert(sq->is_active == true);
+    sq->is_active = false;
     if (!nvme_check_cqid(n, sq->cqid)) {
         cq = n->cq[sq->cqid];
         QTAILQ_REMOVE(&cq->sq_list, sq, entry);
@@ -151,6 +153,9 @@ uint16_t nvme_create_sq(FemuCtrl *n, NvmeCmd *cmd)
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
+    assert(sq->is_active == false);
+    sq->is_active = true;
+
     return NVME_SUCCESS;
 }
 
@@ -177,6 +182,8 @@ uint16_t nvme_del_cq(FemuCtrl *n, NvmeCmd *cmd)
     }
 
     cq = n->cq[qid];
+    assert(cq->is_active == true);
+    cq->is_active = false;
     if (!QTAILQ_EMPTY(&cq->sq_list)) {
         return NVME_INVALID_QUEUE_DEL;
     }
@@ -739,22 +746,30 @@ static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
                 nand_write_lower_t, nand_erase_t, chnl_page_tr_t);
         return NVME_SUCCESS;
     case NVME_ADM_CMD_DELETE_SQ:
+        printf("FEMU:admin cmd,del_sq\n");
         return nvme_del_sq(n, cmd);
     case NVME_ADM_CMD_CREATE_SQ:
+        printf("FEMU:admin cmd,create_sq\n");
         return nvme_create_sq(n, cmd);
     case NVME_ADM_CMD_DELETE_CQ:
+        printf("FEMU:admin cmd,del_cq\n");
         return nvme_del_cq(n, cmd);
     case NVME_ADM_CMD_CREATE_CQ:
+        printf("FEMU:admin cmd,create_cq\n");
         return nvme_create_cq(n, cmd);
     case NVME_ADM_CMD_IDENTIFY:
+        printf("FEMU:admin cmd,identify\n");
         return nvme_identify(n, cmd);
     case NVME_ADM_CMD_SET_FEATURES:
+        printf("FEMU:admin cmd,set_feature\n");
         return nvme_set_feature(n, cmd, cqe);
     case NVME_ADM_CMD_GET_FEATURES:
+        printf("FEMU:admin cmd,get_feature\n");
         return nvme_get_feature(n, cmd, cqe);
     case NVME_ADM_CMD_GET_LOG_PAGE:
         return nvme_get_log(n, cmd);
     case NVME_ADM_CMD_ABORT:
+        printf("FEMU:admin cmd,abort\n");
         return nvme_abort_req(n, cmd, &cqe->n.result);
     case NVME_ADM_CMD_FORMAT_NVM:
         if (NVME_OACS_FORMAT & n->oacs) {
