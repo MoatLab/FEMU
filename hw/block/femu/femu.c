@@ -38,6 +38,7 @@ static void nvme_process_cq_cpl(void *arg)
     NvmeCQueue *cq = NULL;
     NvmeRequest *req = NULL;
     uint64_t now;
+    int processed = 0;
     int rc;
     int i;
 
@@ -52,43 +53,51 @@ static void nvme_process_cq_cpl(void *arg)
         pqueue_insert(n->pq, req); 
     }
 
-    int cnt = 0;
     while ((req = pqueue_peek(n->pq))) {
         now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-        cnt++;
         if (now < req->expire_time) {
             break;
         }
 
         cq = n->cq[req->sq->sqid];
+        if (!cq->is_active)
+            continue;
         nvme_post_cqe(cq, req);
         QTAILQ_INSERT_TAIL(&req->sq->req_list, req, entry);
         pqueue_pop(n->pq);
+        processed++;
         n->should_isr[req->sq->sqid] = true;
     }
 
+    if (processed == 0)
+        return;
+
     for (i = 1; i <= n->num_io_queues; i++) {
         if (n->should_isr[i]) {
-            n->should_isr[i] = false;
             nvme_isr_notify_io(n->cq[i]);
+            n->should_isr[i] = false;
         }
         assert(n->should_isr[i] == false);
     }
 }
 
-/* Coperd: IO thread for NVMe submission processing */
-/* TODO: need to handle controller reset correctly */
 static void *nvme_poller(void *arg)
 {
     FemuCtrl *n = (FemuCtrl *)arg;
     int i;
 
     while (1) {
+        if ((!n->dataplane_started)) {
+            usleep(1000);
+            continue;
+        }
+
         for (i = 1; i <= n->num_io_queues; i++) {
             NvmeSQueue *sq = n->sq[i];
             NvmeCQueue *cq = n->cq[i];
-            if (!sq || !cq)
+            if (!sq || !sq->is_active || !cq || !cq->is_active) {
                 continue;
+            }
 
             nvme_process_sq_io(sq);
         }
@@ -152,10 +161,12 @@ void femu_create_nvme_poller(FemuCtrl *n)
 
     qemu_thread_create(&n->poller, "nvme-poller", nvme_poller, n, 
             QEMU_THREAD_JOINABLE);
+    printf("FEMU: nvme-poller created ...\n");
 }
 
 static void femu_destroy_nvme_poller(FemuCtrl *n)
 {
+    printf("FEMU:destroying NVMe poller !!\n");
     qemu_thread_join(&n->poller);
     pqueue_free(n->pq);
     femu_ring_free(n->to_poller);
@@ -412,10 +423,6 @@ void nvme_process_sq_io(void *opaque)
         }
         nvme_inc_sq_head(sq);
 
-        if (cmd.opcode == NVME_OP_ABORTED) {
-            printf("FEMU: [abort] command! Please report this as a bug!\n");
-            continue;
-        }
         req = QTAILQ_FIRST(&sq->req_list);
         QTAILQ_REMOVE(&sq->req_list, req, entry);
         memset(&req->cqe, 0, sizeof(req->cqe));
@@ -444,6 +451,9 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
 {
     int i;
 
+    /* Coperd: pause nvme poller at earliest convenience */
+    n->dataplane_started = false;
+
     if (shutdown) {
         printf("FEMU shutting down NVMe Controller ...\n");
     } else {
@@ -451,6 +461,7 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
     }
 
     if (shutdown) {
+        printf("FEMU,%s,clear_guest_notifier\n", __func__);
         nvme_clear_guest_notifier(n);
     }
 
@@ -466,9 +477,12 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
     }
 
     n->bar.cc = 0;
-    n->dataplane_started = false;
     n->features.temp_thresh = 0x14d;
     n->temp_warn_issued = 0;
+    n->dbs_addr = 0;
+    n->dbs_addr_hva = 0;
+    n->eis_addr = 0;
+    n->eis_addr_hva = 0;
 }
 
 static int nvme_start_ctrl(FemuCtrl *n)
@@ -499,6 +513,7 @@ static int nvme_start_ctrl(FemuCtrl *n)
             NVME_AQA_ACQS(n->bar.aqa) + 1, 1, 1);
     nvme_init_sq(&n->admin_sq, n, n->bar.asq, 0, 0,
             NVME_AQA_ASQS(n->bar.aqa) + 1, NVME_Q_PRIO_HIGH, 1);
+    printf("FEMU,nvme_start_ctrl,created admin SQ/CQ success\n");
 
     return 0;
 }
@@ -945,6 +960,8 @@ static void nvme_init_ctrl(FemuCtrl *n)
         n->bar.vs = 0x00010100;
     n->bar.intmc = n->bar.intms = 0;
     n->temperature = NVME_TEMPERATURE;
+
+    printf("Coperd,nvme_init_ctrl done!\n");
 }
 
 static void nvme_init_pci(FemuCtrl *n)
@@ -980,6 +997,8 @@ static void nvme_init_pci(FemuCtrl *n)
                 &n->ctrl_mem);
 
     }
+
+    printf("Coperd,nvme_init_pci done!\n");
 }
 
 static int femu_init(PCIDevice *pci_dev)
@@ -1025,12 +1044,16 @@ static int femu_init(PCIDevice *pci_dev)
         SSD_INIT(ssd);
     }
 
+    printf("Coperd,femu_init done!\n");
+
     return 0;
 }
 
 static void femu_exit(PCIDevice *pci_dev)
 {
     FemuCtrl *n = FEMU(pci_dev);
+
+    printf("Coperd,femu_exit starting!\n");
 
     nvme_clear_ctrl(n, true);
 

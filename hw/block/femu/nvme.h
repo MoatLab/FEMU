@@ -793,7 +793,7 @@ typedef struct NvmeSQueue {
     uint64_t    db_addr_hva;
     uint64_t    eventidx_addr;
     uint64_t    eventidx_addr_hva;
-    uint64_t    lisr_tick;
+    bool        is_active;
 } NvmeSQueue;
 
 typedef struct NvmeCQueue {
@@ -818,6 +818,7 @@ typedef struct NvmeCQueue {
     uint64_t    db_addr_hva;
     uint64_t    eventidx_addr;
     uint64_t    eventidx_addr_hva;
+    bool        is_active;
 } NvmeCQueue;
 
 typedef struct NvmeNamespace {
@@ -929,6 +930,7 @@ typedef struct FemuCtrl {
     struct rte_ring *to_poller;
     pqueue_t        *pq;
     bool            *should_isr;
+    bool            poller_on;
 } FemuCtrl;
 
 typedef struct NvmeDifTuple {
