@@ -154,7 +154,7 @@ void FTL_TERM(struct ssdstate *ssd)
 
 int64_t FTL_READ(struct ssdstate *ssd, int64_t sector_nb, unsigned int length)
 {
-	int ret;
+	int64_t ret;
 
 #ifdef GET_FTL_WORKLOAD
 	FILE* fp_workload = fopen("./data/workload_ftl.txt","a");
@@ -182,7 +182,7 @@ int64_t FTL_READ(struct ssdstate *ssd, int64_t sector_nb, unsigned int length)
 
 int64_t FTL_WRITE(struct ssdstate *ssd, int64_t sector_nb, unsigned int length)
 {
-	int ret;
+	int64_t ret;
 
 #ifdef GET_FTL_WORKLOAD
 	FILE* fp_workload = fopen("./data/workload_ftl.txt","a");
