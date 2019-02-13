@@ -9,7 +9,7 @@
 #include "include/rte_ring.h"
 #include "include/pqueue.h"
 #include "ocssd/femu-oc.h"
-#include "ssd/vssim_config_manager.h"
+#include "ftl/ftl.h"
 
 typedef struct NvmeBar {
     uint64_t    cap;
@@ -761,6 +761,8 @@ typedef struct NvmeRequest {
     int64_t                data_offset;
     int                     lunid;
     int                     chnl;
+
+    /* position in the priority queue for delay emulation */
     size_t                  pos;
 } NvmeRequest;
 
@@ -922,7 +924,7 @@ typedef struct FemuCtrl {
     uint8_t         femu_mode; 
     uint32_t        memsz; 
     FEMU_OC_Ctrl    femu_oc_ctrl;
-    struct ssdstate ssd;
+    struct ssd      ssd;
     struct femu_mbe mbe;
     int             completed;
 
@@ -954,9 +956,9 @@ static inline bool OCSSD(FemuCtrl *n)
     return (n->femu_mode == FEMU_WHITEBOX_MODE);
 }
 
-extern void SSD_INIT(struct ssdstate *ssd);
-extern int64_t SSD_READ(struct ssdstate *ssd, unsigned int length, int64_t sector_nb);
-extern int64_t SSD_WRITE(struct ssdstate *ssd, unsigned int length, int64_t sector_nb);
+extern void ssd_init(struct ssd *ssd);
+extern uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req);
+extern uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req);
 
 
 extern void femu_oc_exit(FemuCtrl *n);

@@ -21,16 +21,8 @@
 #define CHANNEL_BLOCKING    2
 #define CHIP_BLOCKING       3
 
-//extern int GC_MODE;
-//extern int64_t *gc_slot;
-
-//extern static long mygc_cnt = 0;
-//extern static long mycopy_page_nb = 0;
-//extern static long last_time = 0;
-
 /* FTL */
 /* VSSIM Function */
-//#define MONITOR_ON
 
 /* Page Mapping FTL */
 #ifdef PAGE_MAP
@@ -81,7 +73,6 @@
 
 /* HEADER - FTL MODULE */
 #include "ftl.h"
-#include "ftl_perf_manager.h"
 #include "ftl_inverse_mapping_manager.h"
 
 /* HEADER - VSSIM BENCH */
@@ -91,7 +82,6 @@
 
 /* HEADER - SSD MODULE */
 #include "ssd_io_manager.h"
-#include "ssd_log_manager.h"
 
 /* HEADER - FIRMWARE */
 #include "firm_buffer_manager.h"

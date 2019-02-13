@@ -6,38 +6,81 @@
 // Embedded Software Systems Laboratory. All right reserved
 
 #include "ssd.h"
-#include "common.h"
-#include <stdbool.h>
-#include <stdint.h>
-#include <inttypes.h>
-#include "ftl_inverse_mapping_manager.h"
-#include "vssim_config_manager.h"
-#include <time.h>
-#include <stdlib.h>
-#include <unistd.h>
 
-#ifdef GET_WORKLOAD
-#include <time.h>
-#include <sys/time.h>
-#endif
+static int ssd_num = 1;
 
-//extern long mygc_cnt;
-//extern long mycopy_page_nb;
-
-int ssd_num = 1;
-
-char *get_ssd_name()
+/* Coperd: SSD FTL thread */
+static void *ftl_thread(void *arg)
 {
-    return "nvme ssd";
+    struct ssdstate *ssd = (struct ssdstate *)arg;
+    NvmeRequest *req = NULL;
+    int64_t lat = 0;
+    int rc;
+    
+    while (!*(ssd->dataplane_started_ptr)) {
+        //printf("Coperd, waiting for NVMe dataplane to be up ...\n");
+        usleep(100000);
+    }
+
+    printf("FEMU, FTL thread woke up from sleeping !!!!!!!!!!\n");
+    printf("FEMU, FTL thread woke up from sleeping !!!!!!!!!!\n");
+    printf("FEMU, FTL thread woke up from sleeping !!!!!!!!!!\n");
+    printf("FEMU, FTL thread woke up from sleeping !!!!!!!!!!\n");
+    printf("FEMU, FTL thread woke up from sleeping !!!!!!!!!!\n");
+    printf("FEMU, FTL thread woke up from sleeping !!!!!!!!!!\n");
+    printf("FEMU, FTL thread woke up from sleeping !!!!!!!!!!\n");
+    printf("FEMU, FTL thread woke up from sleeping !!!!!!!!!!\n");
+    printf("FEMU, FTL thread woke up from sleeping !!!!!!!!!!\n");
+    printf("FEMU, FTL thread woke up from sleeping !!!!!!!!!!\n");
+    printf("FEMU, FTL thread woke up from sleeping !!!!!!!!!!\n");
+    printf("FEMU, FTL thread woke up from sleeping !!!!!!!!!!\n");
+
+    while (1) {
+        if (!ssd->to_ftl || !femu_ring_count(ssd->to_ftl))
+            continue;
+
+        rc = femu_ring_dequeue(ssd->to_ftl, (void *)&req, 1);
+        if (rc != 1) {
+            printf("FEMU: FTL to_ftl dequeue failed\n");
+        }
+        assert(req);
+        //printf("FEMU: FTL gets a requests from poller threads ...\n");
+        /* process one request */
+        uint64_t lst, let;
+        switch (req->is_write) {
+            case 1:
+                lat = SSD_WRITE(ssd, req->data_offset >> 9, req->nlb << 3);
+                break;
+            case 0:
+                lst = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+                lat = SSD_READ(ssd, req->data_offset >> 9, req->nlb << 3);
+                let = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+                printf("Coperd,ftl-oh,read,%" PRId64 "\n", let - lst);
+                break;
+            default:
+                printf("FEMU: FTL received unkown request type, ERROR\n");
+        }
+
+        req->expire_time += lat;
+
+        /* Coperd: greedly wait for to_poller to be ready */
+        //while (!ssd->to_poller);
+        /* Coperd: now it's time to put the request back to poller thread */
+        rc = femu_ring_enqueue(ssd->to_poller, (void *)&req, 1);
+        if (rc != 1) {
+            printf("FEMU: FTL to_poller enqueue failed\n");
+        }
+    }
 }
 
-void do_warmup(struct ssdstate *ssd)
+#if 0
+static void do_warmup(struct ssdstate *ssd)
 {
     struct ssdconf *sc = &(ssd->ssdparams);
     int GC_THRESHOLD_BLOCK_NB = sc->GC_THRESHOLD_BLOCK_NB;
 
     ssd->in_warmup_stage = true;
-    char *tfname = "./data/warmup.trace";
+    const char *tfname = "./data/warmup.trace";
 
     FILE *tfp = fopen(tfname, "r");
     if (tfp == NULL) {
@@ -77,12 +120,13 @@ void do_warmup(struct ssdstate *ssd)
 
     ssd->in_warmup_stage = false;
 }
+#endif
 
-void do_rand_warmup(struct ssdstate *ssd)
+static void do_rand_warmup(struct ssdstate *ssd)
 {
     struct ssdconf *sc = &(ssd->ssdparams);
     int GC_THRESHOLD_BLOCK_NB = sc->GC_THRESHOLD_BLOCK_NB;
-    double GC_THRESHOLD = sc->GC_THRESHOLD;
+    //double GC_THRESHOLD = sc->GC_THRESHOLD;
 
     int i;
     int nios = 10;
@@ -111,7 +155,7 @@ void do_rand_warmup(struct ssdstate *ssd)
 
         ssd->in_warmup_stage = 1;
         while(fscanf(fp, "%"PRId64"%d\n", &io_oft, &io_sz) != EOF) {
-            SSD_WRITE(ssd, io_sz, io_oft);
+            SSD_WRITE(ssd, io_oft, io_sz);
             written_sz_in_sects += io_sz;
         }
         ssd->in_warmup_stage = 0;
@@ -130,7 +174,7 @@ void do_rand_warmup(struct ssdstate *ssd)
         while (written_sz_in_sects <= ssd_sz_in_sects * (sc->GC_THRESHOLD - 0.02)) {
             io_sz = io[rand() % nios] * 2; 
             io_oft = (rand() % (ssd_sz_in_sects / 4)) * 4;
-            SSD_WRITE(ssd, io_sz, io_oft);
+            SSD_WRITE(ssd, io_oft, io_sz);
             //printf("%"PRId64", %d\n", io_oft, io_sz);
             written_sz_in_sects += io_sz;
 
@@ -151,7 +195,7 @@ void do_rand_warmup(struct ssdstate *ssd)
 //sector_entry* PARSE_SECTOR_LIST(trim_data, length);
 void SSD_INIT(struct ssdstate *ssd)
 {
-    memset(ssd, 0, sizeof(struct ssdstate));
+    //memset(ssd, 0, sizeof(struct ssdstate));
 
     /* Coperd: ssdstate structure initialization */
     strcpy(ssd->ssdname, "vssd");
@@ -167,11 +211,6 @@ void SSD_INIT(struct ssdstate *ssd)
 
     printf("[%s] is up\n", ssd->ssdname);
     sleep(1);
-
-    ssd->io_request_start = NULL;
-    ssd->io_request_end = NULL;
-    ssd->io_request_nb = 0;
-
 
 	FTL_INIT(ssd);
 
@@ -190,153 +229,25 @@ void SSD_INIT(struct ssdstate *ssd)
 
     /* Coperd: do warmup immediately after SSD structures are initialized */
     do_rand_warmup(ssd);
+
+    /* Coperd: let's kick start FTL thread for user request processing */
+    qemu_thread_create(&ssd->ftl_thread, "ftl-thread", ftl_thread, ssd,
+            QEMU_THREAD_JOINABLE);
 }
 
-void SSD_TERM(struct ssdstate *ssd)
+#if 0
+static void SSD_TERM(struct ssdstate *ssd)
 {	
 	FTL_TERM(ssd);
 }
-
-//long last_time = 0;
-
-int64_t SSD_WRITE(struct ssdstate *ssd, unsigned int length, int64_t sector_nb)
-{
-#if 0
-    int64_t curtime = get_usec();
-    if (curtime - last_time >= 100000) {
-        /* Coperd: print statistics */
-        printf("curtime=%ld, GC=%ld, CP_PAGES=%ld\n", curtime, mygc_cnt, mycopy_page_nb);
-        last_time = curtime;
-        mycopy_page_nb = 0;
-    }
 #endif
-    
-#if defined SSD_THREAD	
 
-	pthread_mutex_lock(&cq_lock);
-	DEQUEUE_COMPLETED_READ();
-	pthread_mutex_unlock(&cq_lock);
-
-	if(EVENT_QUEUE_IS_FULL(WRITE, length)){
-		w_queue_full = 1;
-		while(w_queue_full == 1){
-			pthread_cond_signal(&eq_ready);
-		}
-	}
-	
-	pthread_mutex_lock(&eq_lock);
-	ENQUEUE_IO(WRITE, sector_nb, length);
-	pthread_mutex_unlock(&eq_lock);
-
-    #ifdef SSD_THREAD_MODE_1
-	pthread_cond_signal(&eq_ready);
-    #endif
-
-#elif defined FIRM_IO_BUFFER
-	DEQUEUE_COMPLETED_READ();
-	if(EVENT_QUEUE_IS_FULL(WRITE, length)){
-		SECURE_WRITE_BUFFER();
-	}
-	ENQUEUE_IO(WRITE, sector_nb, length);
-#else
+int64_t SSD_WRITE(struct ssdstate *ssd, int64_t sector_nb, unsigned int length)
+{
 	return FTL_WRITE(ssd, sector_nb, length);
-#endif
 }
 
-int64_t SSD_READ(struct ssdstate *ssd, unsigned int length, int64_t sector_nb)
+int64_t SSD_READ(struct ssdstate *ssd, int64_t sector_nb, unsigned int length)
 {
-#if 0
-    int64_t curtime = get_usec();
-    if (curtime - last_time >= 100000) {
-        /* Coperd: print statistics */
-        printf("curtime=%ld, GC=%ld, CP_PAGES=%ld\n", curtime, mygc_cnt, mycopy_page_nb);
-        last_time = curtime;
-        mycopy_page_nb = 0;
-    }
-#endif
-
-#if defined SSD_THREAD
-
-	pthread_mutex_lock(&cq_lock);
-	DEQUEUE_COMPLETED_READ();
-	pthread_mutex_unlock(&cq_lock);
-
-	if(EVENT_QUEUE_IS_FULL(READ, length)){
-		r_queue_full = 1;
-		while(r_queue_full == 1){
-			pthread_cond_signal(&eq_ready);
-		}
-	}
-
-	pthread_mutex_lock(&eq_lock);
-	ENQUEUE_IO(READ, sector_nb, length);
-	pthread_mutex_unlock(&eq_lock);
-
-    #ifdef SSD_THREAD_MODE_1
-	pthread_cond_signal(&eq_ready);
-    #endif
-
-#elif defined FIRM_IO_BUFFER
-	DEQUEUE_COMPLETED_READ();
-	if(EVENT_QUEUE_IS_FULL(READ, length)){
-		SECURE_READ_BUFFER();
-	}
-	ENQUEUE_IO(READ, sector_nb, length);
-#else
-	return FTL_READ(ssd, sector_nb, length);
-#endif
+    return FTL_READ(ssd, sector_nb, length);
 }
-
-void SSD_DSM_TRIM(struct ssdstate *ssd, unsigned int length, void* trim_data)
-{
-/*
-	if(DSM_TRIM_ENABLE == 0)
-		return;
-		
-	
-	sector_entry* pSE_T = NULL;
-	sector_entry* pSE = NULL;
-	
-	int i;
-	int64_t sector_nb;
-	unsigned int sector_length;
-	int* pBuff;
-	
-	pBuff = (int*)trim_data;
-	int k = 0;
-	for(i=0;i<length;i++)
-	{
-		sector_nb = (int64_t)*pBuff;
-		pBuff++;
-		sector_length = (int)*pBuff;	
-		sector_length = sector_length >> 16;
-		if(sector_nb == 0 && sector_length == 0)
-			break;
-		
-		pSE_T = new_sector_entry();
-		pSE_T->sector_nb = sector_nb;
-		pSE_T->length = sector_length;
-		
-		if(pSE == NULL)
-			pSE = pSE_T;
-		else
-		{
-			k++;
-			add_sector_list(pSE, pSE_T);
-		}
-		
-		pBuff++;
-	}
-	
-	INSERT_TRIM_SECTORS(pSE);
-
-	release_sector_list(pSE);
-*/
-}
-
-int SSD_IS_SUPPORT_TRIM(struct ssdstate *ssd)
-{
-//	return DSM_TRIM_ENABLE;
-	return 0;
-}
-
