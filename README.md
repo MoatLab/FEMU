@@ -5,12 +5,12 @@ FEMU README
 Project Description
 -------------------
 
-Briefly speaking, FEMU is a NVMe SSD Emulator. Based upon QEMU/KVM, FEMU is
-exposed to Guest OS (Linux) as a NVMe block device (e.g. /dev/nvme0nX). It can
+Briefly speaking, FEMU is an NVMe SSD Emulator. Based upon QEMU/KVM, FEMU is
+exposed to Guest OS (Linux) as an NVMe block device (e.g. /dev/nvme0nX). It can
 be used as an emulated whitebox or blackbox SSD: (1). whitebox mode (a.k.a.
 Software-Defined Flash (SDF), or OpenChannel-SSD) with FTL residing in the host
-side (e.g. LightNVM) (2). blackbox mode with FTL residing inside the device
-(most of current commercial SSDs).
+side (e.g. LightNVM) (2). blackbox mode with FTL managed by the device
+(like most of current commercial SSDs).
 
 FEMU tries to achieve benefits of both SSD Hardware platforms (e.g. CNEX
 OpenChannel SSD, OpenSSD, etc.) and SSD simulators (e.g. DiskSim+SSD, FlashSim,
@@ -28,7 +28,7 @@ Installation
 
 
 1. Make sure you have installed necessary libraries for building QEMU. The
-   dependencies can be installed automatically by
+   dependencies can be installed by following instructions below:
 
 	```bash
 	# Switch to the FEMU building directory
@@ -54,10 +54,16 @@ Installation
 
   You can either build your own VM image, or use the VM image provided by us
 
-  Option 1: Build your own VM image by following guides (e.g.
+  **Option 1**: Use our VM image, please download it from our
+  [FEMU-VM-image-site](https://goo.gl/forms/NptPVEOy9EnwN70Y2) and save it as
+  `$HOME/images/u14s.qcow2`. After you fill in the query, VM image downloading
+  link will be sent to your email address shortly.
+
+  **Option 2**: Build your own VM image by following guides (e.g.
   [here](https://help.ubuntu.com/community/Installation/QemuEmulator#Installation_of_an_operating_system_from_ISO_to_the_QEMU_environment)).
   After the guest OS is installed, make following changes to redirect VM output
-  to the console, instead of using a separate GUI window. (**Desktop version guest OS is not tested**)
+  to the console, instead of using a separate GUI window. (**Desktop version
+  guest OS is not tested**)
 
    - Inside your guest Ubuntu server, edit `/etc/default/grub`, make sure the
      following options are set.
@@ -78,16 +84,16 @@ $ sudo update-grub
   please remove "-nographics" command option from the running script before
   running FEMU.
 
-
-  Option 2: Use our VM image, please download it from our [site](https://goo.gl/forms/NptPVEOy9EnwN70Y2) and save it as
-  `$HOME/images/u14s.qcow2`
  
  4. Login to FEMU VM
-  - If you correctly setup the aforementioned configurations, you should be able to
-  see **text-based** VM login in the same terminal where you issue the running scripts.
-  - Or, more conviniently, FEMU running script has mapped host port `8080` to guest VM
-  port `22`, thus, after you install and run `openssh-server` inside the VM, you can also
-  ssh into the VM via below command line. (Please run it from your host machine)
+
+  - If you correctly setup the aforementioned configurations, you should be
+    able to see **text-based** VM login in the same terminal where you issue
+    the running scripts.
+  - Or, more conviniently, FEMU running script has mapped host port `8080` to
+    guest VM port `22`, thus, after you install and run `openssh-server` inside
+    the VM, you can also ssh into the VM via below command line. (Please run it
+    from your host machine)
   
   ```
   $ ssh -p8080 $user@localhost
@@ -239,7 +245,4 @@ static bool nvme_dbbuf_update_and_check_event(u16 value, u32 *dbbuf_db,
 	return true;
 }
 ```
-
-
-
 
