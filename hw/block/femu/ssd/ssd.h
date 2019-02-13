@@ -8,18 +8,15 @@
 #ifndef _SSD_H_
 #define _SSD_H_
 
-//#include "hw.h"
+#include "qemu/osdep.h"
+#include "qemu/thread.h"
+#include "hw/block/block.h"
+#include "hw/pci/msix.h"
+#include "hw/pci/msi.h"
+#include "qapi/visitor.h"
+#include "qapi/error.h"
 #include <stdint.h>
 #include "vssim_config_manager.h"
-
-
-//FILE *fp;
-void SSD_INIT(struct ssdstate *ssd);
-void SSD_TERM(struct ssdstate *ssd);
-
-int64_t SSD_WRITE(struct ssdstate *ssd, unsigned int length, int64_t sector_nb);
-int64_t SSD_READ(struct ssdstate *ssd, unsigned int length, int64_t sector_nb);
-void SSD_DSM_TRIM(struct ssdstate *ssd, unsigned int length, void* trim_data);
-int SSD_IS_SUPPORT_TRIM(struct ssdstate *ssd);
+#include "../nvme.h"
 
 #endif

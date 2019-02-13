@@ -42,11 +42,13 @@ static void nvme_process_cq_cpl(void *arg)
     int rc;
     int i;
 
-    while (femu_ring_count(n->to_ftl)) {
+    while (femu_ring_count(n->to_poller)) {
+    //while (femu_ring_count(n->to_ftl)) {
         req = NULL;
-        rc = femu_ring_dequeue(n->to_ftl, (void *)&req, 1);
+        rc = femu_ring_dequeue(n->to_poller, (void *)&req, 1);
+        //rc = femu_ring_dequeue(n->to_ftl, (void *)&req, 1);
         if (rc != 1) {
-            printf("FEMU: dequeue request failed\n");
+            printf("FEMU: dequeue from to_poller request failed\n");
         }
         assert(req);
 
@@ -66,6 +68,7 @@ static void nvme_process_cq_cpl(void *arg)
         QTAILQ_INSERT_TAIL(&req->sq->req_list, req, entry);
         pqueue_pop(n->pq);
         processed++;
+        printf("Coperd,diff,pq.count=%d,%" PRId64 "\n", pqueue_size(n->pq), qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - req->expire_time);
         n->should_isr[req->sq->sqid] = true;
     }
 
@@ -144,6 +147,10 @@ void femu_create_nvme_poller(FemuCtrl *n)
         abort();
     }
     assert(rte_ring_empty(n->to_ftl));
+#if 1
+    n->ssd.to_ftl = n->to_ftl;
+    printf("FEMU,ssd->to_ftl=%p, n->to_ftl=%p\n", n->ssd.to_ftl, n->to_ftl);
+#endif
 
     n->to_poller = femu_ring_create(FEMU_RING_TYPE_MP_SC, FEMU_MAX_INF_REQS);
     if (!n->to_poller) {
@@ -151,6 +158,10 @@ void femu_create_nvme_poller(FemuCtrl *n)
         abort();
     }
     assert(rte_ring_empty(n->to_poller));
+#if 1
+    n->ssd.to_poller = n->to_poller;
+    printf("FEMU,ssd->to_poller=%p, n->to_poller=%p\n", n->ssd.to_poller, n->to_poller);
+#endif
 
     n->pq = pqueue_init(FEMU_MAX_INF_REQS, cmp_pri, get_pri, set_pri, get_pos,
             set_pos);
@@ -258,8 +269,8 @@ static uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t meta_size = nlb * ms;
     uint64_t elba = slba + nlb;
     uint16_t err;
-    struct ssdstate *ssd = &(n->ssd);
     uint64_t simtime;
+    struct ssd *ssd = &(n->ssd);
     int ret;
 
     req->data_offset = data_offset;
@@ -283,19 +294,23 @@ static uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     req->status = NVME_SUCCESS;
     req->nlb = nlb;
     req->ns = ns;
-    req->expire_time = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + 100000;
+    req->expire_time = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);// + 100000;
 
+#if 0
     if (req->is_write) {
         if (n->femu_mode == FEMU_BLACKBOX_MODE) {
-            simtime = SSD_WRITE(ssd, data_size >> 9, data_offset >> 9);
+            //simtime = ssd_write(ssd, data_size >> 9, data_offset >> 9);
+            simtime = ssd_write(ssd, req);
             req->expire_time += simtime;
         }
     } else {
         if (n->femu_mode == FEMU_BLACKBOX_MODE) {
-            simtime = SSD_READ(ssd, data_size >> 9 , data_offset >> 9);
+            //simtime = ssd_read(ssd, data_size >> 9 , data_offset >> 9);
+            simtime = ssd_read(ssd, req);
             req->expire_time += simtime;
         }
     }
+#endif
 
     ret = femu_rw_mem_backend(&n->mbe, &req->qsg, data_offset, req->is_write);
     if (!ret) {
@@ -1039,9 +1054,11 @@ static int femu_init(PCIDevice *pci_dev)
             return femu_oc_init(n);
         }
     } else if (n->femu_mode == FEMU_BLACKBOX_MODE) {
-        struct ssdstate *ssd = &(n->ssd);
+        struct ssd *ssd = &(n->ssd);
+        memset(ssd, 0, sizeof(struct ssd));
+        ssd->dataplane_started_ptr = &n->dataplane_started;
         printf("FEMU: starting in blackbox SSD mode ..\n");
-        SSD_INIT(ssd);
+        ssd_init(ssd);
     }
 
     printf("Coperd,femu_init done!\n");
@@ -1101,7 +1118,7 @@ static Property femu_props[] = {
     DEFINE_PROP_UINT8("mpsmin", FemuCtrl, mpsmin, 0),
     DEFINE_PROP_UINT8("mpsmax", FemuCtrl, mpsmax, 0),
     DEFINE_PROP_UINT8("nlbaf", FemuCtrl, nlbaf, 5),
-    DEFINE_PROP_UINT8("lba_index", FemuCtrl, lba_index, 3),
+    DEFINE_PROP_UINT8("lba_index", FemuCtrl, lba_index, 0),
     DEFINE_PROP_UINT8("extended", FemuCtrl, extended, 0),
     DEFINE_PROP_UINT8("dpc", FemuCtrl, dpc, 0),
     DEFINE_PROP_UINT8("dps", FemuCtrl, dps, 0),
