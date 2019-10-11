@@ -23,7 +23,9 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu-common.h"
 #include "qemu/log.h"
+#include "qemu/module.h"
 #include "hw/dma/xlnx_dpdma.h"
 
 #ifndef DEBUG_DPDMA
@@ -34,7 +36,7 @@
     if (DEBUG_DPDMA) {                                                         \
         qemu_log("xlnx_dpdma: " fmt , ## __VA_ARGS__);                         \
     }                                                                          \
-} while (0);
+} while (0)
 
 /*
  * Registers offset for DPDMA.

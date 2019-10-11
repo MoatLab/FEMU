@@ -24,126 +24,165 @@
  */
 
 #include "qemu/osdep.h"
-#include "qemu-common.h"
 #include "block/block.h"
 #include "block/blockjob_int.h"
 #include "block/block_int.h"
+#include "block/trace.h"
 #include "sysemu/block-backend.h"
+#include "qapi/error.h"
+#include "qapi/qapi-events-block-core.h"
 #include "qapi/qmp/qerror.h"
-#include "qapi/qmp/qjson.h"
 #include "qemu/coroutine.h"
-#include "qemu/id.h"
-#include "qmp-commands.h"
 #include "qemu/timer.h"
-#include "qapi-event.h"
 
-static void block_job_event_cancelled(BlockJob *job);
-static void block_job_event_completed(BlockJob *job, const char *msg);
+/*
+ * The block job API is composed of two categories of functions.
+ *
+ * The first includes functions used by the monitor.  The monitor is
+ * peculiar in that it accesses the block job list with block_job_get, and
+ * therefore needs consistency across block_job_get and the actual operation
+ * (e.g. block_job_set_speed).  The consistency is achieved with
+ * aio_context_acquire/release.  These functions are declared in blockjob.h.
+ *
+ * The second includes functions used by the block job drivers and sometimes
+ * by the core block layer.  These do not care about locking, because the
+ * whole coroutine runs under the AioContext lock, and are declared in
+ * blockjob_int.h.
+ */
 
-/* Transactional group of block jobs */
-struct BlockJobTxn {
-
-    /* Is this txn being cancelled? */
-    bool aborting;
-
-    /* List of jobs */
-    QLIST_HEAD(, BlockJob) jobs;
-
-    /* Reference count */
-    int refcnt;
-};
-
-static QLIST_HEAD(, BlockJob) block_jobs = QLIST_HEAD_INITIALIZER(block_jobs);
-
-static char *child_job_get_parent_desc(BdrvChild *c)
+static bool is_block_job(Job *job)
 {
-    BlockJob *job = c->opaque;
-    return g_strdup_printf("%s job '%s'",
-                           BlockJobType_lookup[job->driver->job_type],
-                           job->id);
+    return job_type(job) == JOB_TYPE_BACKUP ||
+           job_type(job) == JOB_TYPE_COMMIT ||
+           job_type(job) == JOB_TYPE_MIRROR ||
+           job_type(job) == JOB_TYPE_STREAM;
 }
 
-static const BdrvChildRole child_job = {
-    .get_parent_desc    = child_job_get_parent_desc,
-    .stay_at_node       = true,
-};
-
-static void block_job_drained_begin(void *opaque)
+BlockJob *block_job_next(BlockJob *bjob)
 {
-    BlockJob *job = opaque;
-    block_job_pause(job);
-}
+    Job *job = bjob ? &bjob->job : NULL;
 
-static void block_job_drained_end(void *opaque)
-{
-    BlockJob *job = opaque;
-    block_job_resume(job);
-}
+    do {
+        job = job_next(job);
+    } while (job && !is_block_job(job));
 
-static const BlockDevOps block_job_dev_ops = {
-    .drained_begin = block_job_drained_begin,
-    .drained_end = block_job_drained_end,
-};
-
-BlockJob *block_job_next(BlockJob *job)
-{
-    if (!job) {
-        return QLIST_FIRST(&block_jobs);
-    }
-    return QLIST_NEXT(job, job_list);
+    return job ? container_of(job, BlockJob, job) : NULL;
 }
 
 BlockJob *block_job_get(const char *id)
 {
-    BlockJob *job;
+    Job *job = job_get(id);
 
-    QLIST_FOREACH(job, &block_jobs, job_list) {
-        if (job->id && !strcmp(id, job->id)) {
-            return job;
+    if (job && is_block_job(job)) {
+        return container_of(job, BlockJob, job);
+    } else {
+        return NULL;
+    }
+}
+
+void block_job_free(Job *job)
+{
+    BlockJob *bjob = container_of(job, BlockJob, job);
+
+    block_job_remove_all_bdrv(bjob);
+    blk_unref(bjob->blk);
+    error_free(bjob->blocker);
+}
+
+void block_job_drain(Job *job)
+{
+    BlockJob *bjob = container_of(job, BlockJob, job);
+    const JobDriver *drv = job->driver;
+    BlockJobDriver *bjdrv = container_of(drv, BlockJobDriver, job_driver);
+
+    blk_drain(bjob->blk);
+    if (bjdrv->drain) {
+        bjdrv->drain(bjob);
+    }
+}
+
+static char *child_job_get_parent_desc(BdrvChild *c)
+{
+    BlockJob *job = c->opaque;
+    return g_strdup_printf("%s job '%s'", job_type_str(&job->job), job->job.id);
+}
+
+static void child_job_drained_begin(BdrvChild *c)
+{
+    BlockJob *job = c->opaque;
+    job_pause(&job->job);
+}
+
+static bool child_job_drained_poll(BdrvChild *c)
+{
+    BlockJob *bjob = c->opaque;
+    Job *job = &bjob->job;
+    const BlockJobDriver *drv = block_job_driver(bjob);
+
+    /* An inactive or completed job doesn't have any pending requests. Jobs
+     * with !job->busy are either already paused or have a pause point after
+     * being reentered, so no job driver code will run before they pause. */
+    if (!job->busy || job_is_completed(job)) {
+        return false;
+    }
+
+    /* Otherwise, assume that it isn't fully stopped yet, but allow the job to
+     * override this assumption. */
+    if (drv->drained_poll) {
+        return drv->drained_poll(bjob);
+    } else {
+        return true;
+    }
+}
+
+static void child_job_drained_end(BdrvChild *c, int *drained_end_counter)
+{
+    BlockJob *job = c->opaque;
+    job_resume(&job->job);
+}
+
+static bool child_job_can_set_aio_ctx(BdrvChild *c, AioContext *ctx,
+                                      GSList **ignore, Error **errp)
+{
+    BlockJob *job = c->opaque;
+    GSList *l;
+
+    for (l = job->nodes; l; l = l->next) {
+        BdrvChild *sibling = l->data;
+        if (!bdrv_child_can_set_aio_context(sibling, ctx, ignore, errp)) {
+            return false;
         }
     }
-
-    return NULL;
+    return true;
 }
 
-static void block_job_attached_aio_context(AioContext *new_context,
-                                           void *opaque)
+static void child_job_set_aio_ctx(BdrvChild *c, AioContext *ctx,
+                                  GSList **ignore)
 {
-    BlockJob *job = opaque;
+    BlockJob *job = c->opaque;
+    GSList *l;
 
-    if (job->driver->attached_aio_context) {
-        job->driver->attached_aio_context(job, new_context);
+    for (l = job->nodes; l; l = l->next) {
+        BdrvChild *sibling = l->data;
+        if (g_slist_find(*ignore, sibling)) {
+            continue;
+        }
+        *ignore = g_slist_prepend(*ignore, sibling);
+        bdrv_set_aio_context_ignore(sibling->bs, ctx, ignore);
     }
 
-    block_job_resume(job);
+    job->job.aio_context = ctx;
 }
 
-static void block_job_drain(BlockJob *job)
-{
-    /* If job is !job->busy this kicks it into the next pause point. */
-    block_job_enter(job);
-
-    blk_drain(job->blk);
-    if (job->driver->drain) {
-        job->driver->drain(job);
-    }
-}
-
-static void block_job_detach_aio_context(void *opaque)
-{
-    BlockJob *job = opaque;
-
-    /* In case the job terminates during aio_poll()... */
-    block_job_ref(job);
-
-    block_job_pause(job);
-
-    while (!job->paused && !job->completed) {
-        block_job_drain(job);
-    }
-
-    block_job_unref(job);
-}
+static const BdrvChildRole child_job = {
+    .get_parent_desc    = child_job_get_parent_desc,
+    .drained_begin      = child_job_drained_begin,
+    .drained_poll       = child_job_drained_poll,
+    .drained_end        = child_job_drained_end,
+    .can_set_aio_ctx    = child_job_can_set_aio_ctx,
+    .set_aio_ctx        = child_job_set_aio_ctx,
+    .stay_at_node       = true,
+};
 
 void block_job_remove_all_bdrv(BlockJob *job)
 {
@@ -157,505 +196,95 @@ void block_job_remove_all_bdrv(BlockJob *job)
     job->nodes = NULL;
 }
 
+bool block_job_has_bdrv(BlockJob *job, BlockDriverState *bs)
+{
+    GSList *el;
+
+    for (el = job->nodes; el; el = el->next) {
+        BdrvChild *c = el->data;
+        if (c->bs == bs) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 int block_job_add_bdrv(BlockJob *job, const char *name, BlockDriverState *bs,
                        uint64_t perm, uint64_t shared_perm, Error **errp)
 {
     BdrvChild *c;
 
-    c = bdrv_root_attach_child(bs, name, &child_job, perm, shared_perm,
-                               job, errp);
+    bdrv_ref(bs);
+    if (job->job.aio_context != qemu_get_aio_context()) {
+        aio_context_release(job->job.aio_context);
+    }
+    c = bdrv_root_attach_child(bs, name, &child_job, job->job.aio_context,
+                               perm, shared_perm, job, errp);
+    if (job->job.aio_context != qemu_get_aio_context()) {
+        aio_context_acquire(job->job.aio_context);
+    }
     if (c == NULL) {
         return -EPERM;
     }
 
     job->nodes = g_slist_prepend(job->nodes, c);
-    bdrv_ref(bs);
     bdrv_op_block_all(bs, job->blocker);
 
     return 0;
 }
 
-void *block_job_create(const char *job_id, const BlockJobDriver *driver,
-                       BlockDriverState *bs, uint64_t perm,
-                       uint64_t shared_perm, int64_t speed, int flags,
-                       BlockCompletionFunc *cb, void *opaque, Error **errp)
+static void block_job_on_idle(Notifier *n, void *opaque)
 {
-    BlockBackend *blk;
-    BlockJob *job;
-    int ret;
-
-    if (bs->job) {
-        error_setg(errp, QERR_DEVICE_IN_USE, bdrv_get_device_name(bs));
-        return NULL;
-    }
-
-    if (job_id == NULL && !(flags & BLOCK_JOB_INTERNAL)) {
-        job_id = bdrv_get_device_name(bs);
-        if (!*job_id) {
-            error_setg(errp, "An explicit job ID is required for this node");
-            return NULL;
-        }
-    }
-
-    if (job_id) {
-        if (flags & BLOCK_JOB_INTERNAL) {
-            error_setg(errp, "Cannot specify job ID for internal block job");
-            return NULL;
-        }
-
-        if (!id_wellformed(job_id)) {
-            error_setg(errp, "Invalid job ID '%s'", job_id);
-            return NULL;
-        }
-
-        if (block_job_get(job_id)) {
-            error_setg(errp, "Job ID '%s' already in use", job_id);
-            return NULL;
-        }
-    }
-
-    blk = blk_new(perm, shared_perm);
-    ret = blk_insert_bs(blk, bs, errp);
-    if (ret < 0) {
-        blk_unref(blk);
-        return NULL;
-    }
-
-    job = g_malloc0(driver->instance_size);
-    job->driver        = driver;
-    job->id            = g_strdup(job_id);
-    job->blk           = blk;
-    job->cb            = cb;
-    job->opaque        = opaque;
-    job->busy          = false;
-    job->paused        = true;
-    job->pause_count   = 1;
-    job->refcnt        = 1;
-
-    error_setg(&job->blocker, "block device is in use by block job: %s",
-               BlockJobType_lookup[driver->job_type]);
-    block_job_add_bdrv(job, "main node", bs, 0, BLK_PERM_ALL, &error_abort);
-    bs->job = job;
-
-    blk_set_dev_ops(blk, &block_job_dev_ops, job);
-    bdrv_op_unblock(bs, BLOCK_OP_TYPE_DATAPLANE, job->blocker);
-
-    QLIST_INSERT_HEAD(&block_jobs, job, job_list);
-
-    blk_add_aio_context_notifier(blk, block_job_attached_aio_context,
-                                 block_job_detach_aio_context, job);
-
-    /* Only set speed when necessary to avoid NotSupported error */
-    if (speed != 0) {
-        Error *local_err = NULL;
-
-        block_job_set_speed(job, speed, &local_err);
-        if (local_err) {
-            block_job_unref(job);
-            error_propagate(errp, local_err);
-            return NULL;
-        }
-    }
-    return job;
+    aio_wait_kick();
 }
 
 bool block_job_is_internal(BlockJob *job)
 {
-    return (job->id == NULL);
+    return (job->job.id == NULL);
 }
 
-static bool block_job_started(BlockJob *job)
+const BlockJobDriver *block_job_driver(BlockJob *job)
 {
-    return job->co;
+    return container_of(job->job.driver, BlockJobDriver, job_driver);
 }
 
-/**
- * All jobs must allow a pause point before entering their job proper. This
- * ensures that jobs can be paused prior to being started, then resumed later.
- */
-static void coroutine_fn block_job_co_entry(void *opaque)
+/* Assumes the job_mutex is held */
+static bool job_timer_pending(Job *job)
 {
-    BlockJob *job = opaque;
-
-    assert(job && job->driver && job->driver->start);
-    block_job_pause_point(job);
-    job->driver->start(job);
-}
-
-void block_job_start(BlockJob *job)
-{
-    assert(job && !block_job_started(job) && job->paused &&
-           job->driver && job->driver->start);
-    job->co = qemu_coroutine_create(block_job_co_entry, job);
-    job->pause_count--;
-    job->busy = true;
-    job->paused = false;
-    bdrv_coroutine_enter(blk_bs(job->blk), job->co);
-}
-
-void block_job_ref(BlockJob *job)
-{
-    ++job->refcnt;
-}
-
-void block_job_unref(BlockJob *job)
-{
-    if (--job->refcnt == 0) {
-        BlockDriverState *bs = blk_bs(job->blk);
-        bs->job = NULL;
-        block_job_remove_all_bdrv(job);
-        blk_remove_aio_context_notifier(job->blk,
-                                        block_job_attached_aio_context,
-                                        block_job_detach_aio_context, job);
-        blk_unref(job->blk);
-        error_free(job->blocker);
-        g_free(job->id);
-        QLIST_REMOVE(job, job_list);
-        g_free(job);
-    }
-}
-
-static void block_job_completed_single(BlockJob *job)
-{
-    if (!job->ret) {
-        if (job->driver->commit) {
-            job->driver->commit(job);
-        }
-    } else {
-        if (job->driver->abort) {
-            job->driver->abort(job);
-        }
-    }
-    if (job->driver->clean) {
-        job->driver->clean(job);
-    }
-
-    if (job->cb) {
-        job->cb(job->opaque, job->ret);
-    }
-
-    /* Emit events only if we actually started */
-    if (block_job_started(job)) {
-        if (block_job_is_cancelled(job)) {
-            block_job_event_cancelled(job);
-        } else {
-            const char *msg = NULL;
-            if (job->ret < 0) {
-                msg = strerror(-job->ret);
-            }
-            block_job_event_completed(job, msg);
-        }
-    }
-
-    if (job->txn) {
-        QLIST_REMOVE(job, txn_list);
-        block_job_txn_unref(job->txn);
-    }
-    block_job_unref(job);
-}
-
-static void block_job_completed_txn_abort(BlockJob *job)
-{
-    AioContext *ctx;
-    BlockJobTxn *txn = job->txn;
-    BlockJob *other_job, *next;
-
-    if (txn->aborting) {
-        /*
-         * We are cancelled by another job, which will handle everything.
-         */
-        return;
-    }
-    txn->aborting = true;
-    /* We are the first failed job. Cancel other jobs. */
-    QLIST_FOREACH(other_job, &txn->jobs, txn_list) {
-        ctx = blk_get_aio_context(other_job->blk);
-        aio_context_acquire(ctx);
-    }
-    QLIST_FOREACH(other_job, &txn->jobs, txn_list) {
-        if (other_job == job || other_job->completed) {
-            /* Other jobs are "effectively" cancelled by us, set the status for
-             * them; this job, however, may or may not be cancelled, depending
-             * on the caller, so leave it. */
-            if (other_job != job) {
-                other_job->cancelled = true;
-            }
-            continue;
-        }
-        block_job_cancel_sync(other_job);
-        assert(other_job->completed);
-    }
-    QLIST_FOREACH_SAFE(other_job, &txn->jobs, txn_list, next) {
-        ctx = blk_get_aio_context(other_job->blk);
-        block_job_completed_single(other_job);
-        aio_context_release(ctx);
-    }
-}
-
-static void block_job_completed_txn_success(BlockJob *job)
-{
-    AioContext *ctx;
-    BlockJobTxn *txn = job->txn;
-    BlockJob *other_job, *next;
-    /*
-     * Successful completion, see if there are other running jobs in this
-     * txn.
-     */
-    QLIST_FOREACH(other_job, &txn->jobs, txn_list) {
-        if (!other_job->completed) {
-            return;
-        }
-    }
-    /* We are the last completed job, commit the transaction. */
-    QLIST_FOREACH_SAFE(other_job, &txn->jobs, txn_list, next) {
-        ctx = blk_get_aio_context(other_job->blk);
-        aio_context_acquire(ctx);
-        assert(other_job->ret == 0);
-        block_job_completed_single(other_job);
-        aio_context_release(ctx);
-    }
-}
-
-void block_job_completed(BlockJob *job, int ret)
-{
-    assert(blk_bs(job->blk)->job == job);
-    assert(!job->completed);
-    job->completed = true;
-    job->ret = ret;
-    if (!job->txn) {
-        block_job_completed_single(job);
-    } else if (ret < 0 || block_job_is_cancelled(job)) {
-        block_job_completed_txn_abort(job);
-    } else {
-        block_job_completed_txn_success(job);
-    }
+    return timer_pending(&job->sleep_timer);
 }
 
 void block_job_set_speed(BlockJob *job, int64_t speed, Error **errp)
 {
-    Error *local_err = NULL;
+    int64_t old_speed = job->speed;
 
-    if (!job->driver->set_speed) {
-        error_setg(errp, QERR_UNSUPPORTED);
+    if (job_apply_verb(&job->job, JOB_VERB_SET_SPEED, errp)) {
         return;
     }
-    job->driver->set_speed(job, speed, &local_err);
-    if (local_err) {
-        error_propagate(errp, local_err);
+    if (speed < 0) {
+        error_setg(errp, QERR_INVALID_PARAMETER, "speed");
         return;
     }
+
+    ratelimit_set_speed(&job->limit, speed, BLOCK_JOB_SLICE_TIME);
 
     job->speed = speed;
-}
-
-void block_job_complete(BlockJob *job, Error **errp)
-{
-    /* Should not be reachable via external interface for internal jobs */
-    assert(job->id);
-    if (job->pause_count || job->cancelled ||
-        !block_job_started(job) || !job->driver->complete) {
-        error_setg(errp, "The active block job '%s' cannot be completed",
-                   job->id);
+    if (speed && speed <= old_speed) {
         return;
     }
 
-    job->driver->complete(job, errp);
+    /* kick only if a timer is pending */
+    job_enter_cond(&job->job, job_timer_pending);
 }
 
-void block_job_pause(BlockJob *job)
+int64_t block_job_ratelimit_get_delay(BlockJob *job, uint64_t n)
 {
-    job->pause_count++;
-}
-
-void block_job_user_pause(BlockJob *job)
-{
-    job->user_paused = true;
-    block_job_pause(job);
-}
-
-static bool block_job_should_pause(BlockJob *job)
-{
-    return job->pause_count > 0;
-}
-
-bool block_job_user_paused(BlockJob *job)
-{
-    return job ? job->user_paused : 0;
-}
-
-void coroutine_fn block_job_pause_point(BlockJob *job)
-{
-    assert(job && block_job_started(job));
-
-    if (!block_job_should_pause(job)) {
-        return;
-    }
-    if (block_job_is_cancelled(job)) {
-        return;
+    if (!job->speed) {
+        return 0;
     }
 
-    if (job->driver->pause) {
-        job->driver->pause(job);
-    }
-
-    if (block_job_should_pause(job) && !block_job_is_cancelled(job)) {
-        job->paused = true;
-        job->busy = false;
-        qemu_coroutine_yield(); /* wait for block_job_resume() */
-        job->busy = true;
-        job->paused = false;
-    }
-
-    if (job->driver->resume) {
-        job->driver->resume(job);
-    }
-}
-
-void block_job_resume(BlockJob *job)
-{
-    assert(job->pause_count > 0);
-    job->pause_count--;
-    if (job->pause_count) {
-        return;
-    }
-    block_job_enter(job);
-}
-
-void block_job_user_resume(BlockJob *job)
-{
-    if (job && job->user_paused && job->pause_count > 0) {
-        job->user_paused = false;
-        block_job_resume(job);
-    }
-}
-
-void block_job_enter(BlockJob *job)
-{
-    if (job->co && !job->busy) {
-        bdrv_coroutine_enter(blk_bs(job->blk), job->co);
-    }
-}
-
-void block_job_cancel(BlockJob *job)
-{
-    if (block_job_started(job)) {
-        job->cancelled = true;
-        block_job_iostatus_reset(job);
-        block_job_enter(job);
-    } else {
-        block_job_completed(job, -ECANCELED);
-    }
-}
-
-bool block_job_is_cancelled(BlockJob *job)
-{
-    return job->cancelled;
-}
-
-void block_job_iostatus_reset(BlockJob *job)
-{
-    job->iostatus = BLOCK_DEVICE_IO_STATUS_OK;
-    if (job->driver->iostatus_reset) {
-        job->driver->iostatus_reset(job);
-    }
-}
-
-static int block_job_finish_sync(BlockJob *job,
-                                 void (*finish)(BlockJob *, Error **errp),
-                                 Error **errp)
-{
-    Error *local_err = NULL;
-    int ret;
-
-    assert(blk_bs(job->blk)->job == job);
-
-    block_job_ref(job);
-
-    finish(job, &local_err);
-    if (local_err) {
-        error_propagate(errp, local_err);
-        block_job_unref(job);
-        return -EBUSY;
-    }
-    /* block_job_drain calls block_job_enter, and it should be enough to
-     * induce progress until the job completes or moves to the main thread.
-    */
-    while (!job->deferred_to_main_loop && !job->completed) {
-        block_job_drain(job);
-    }
-    while (!job->completed) {
-        aio_poll(qemu_get_aio_context(), true);
-    }
-    ret = (job->cancelled && job->ret == 0) ? -ECANCELED : job->ret;
-    block_job_unref(job);
-    return ret;
-}
-
-/* A wrapper around block_job_cancel() taking an Error ** parameter so it may be
- * used with block_job_finish_sync() without the need for (rather nasty)
- * function pointer casts there. */
-static void block_job_cancel_err(BlockJob *job, Error **errp)
-{
-    block_job_cancel(job);
-}
-
-int block_job_cancel_sync(BlockJob *job)
-{
-    return block_job_finish_sync(job, &block_job_cancel_err, NULL);
-}
-
-void block_job_cancel_sync_all(void)
-{
-    BlockJob *job;
-    AioContext *aio_context;
-
-    while ((job = QLIST_FIRST(&block_jobs))) {
-        aio_context = blk_get_aio_context(job->blk);
-        aio_context_acquire(aio_context);
-        block_job_cancel_sync(job);
-        aio_context_release(aio_context);
-    }
-}
-
-int block_job_complete_sync(BlockJob *job, Error **errp)
-{
-    return block_job_finish_sync(job, &block_job_complete, errp);
-}
-
-void block_job_sleep_ns(BlockJob *job, QEMUClockType type, int64_t ns)
-{
-    assert(job->busy);
-
-    /* Check cancellation *before* setting busy = false, too!  */
-    if (block_job_is_cancelled(job)) {
-        return;
-    }
-
-    job->busy = false;
-    if (!block_job_should_pause(job)) {
-        co_aio_sleep_ns(blk_get_aio_context(job->blk), type, ns);
-    }
-    job->busy = true;
-
-    block_job_pause_point(job);
-}
-
-void block_job_yield(BlockJob *job)
-{
-    assert(job->busy);
-
-    /* Check cancellation *before* setting busy = false, too!  */
-    if (block_job_is_cancelled(job)) {
-        return;
-    }
-
-    job->busy = false;
-    if (!block_job_should_pause(job)) {
-        qemu_coroutine_yield();
-    }
-    job->busy = true;
-
-    block_job_pause_point(job);
+    return ratelimit_calculate_delay(&job->limit, n);
 }
 
 BlockJobInfo *block_job_query(BlockJob *job, Error **errp)
@@ -667,15 +296,20 @@ BlockJobInfo *block_job_query(BlockJob *job, Error **errp)
         return NULL;
     }
     info = g_new0(BlockJobInfo, 1);
-    info->type      = g_strdup(BlockJobType_lookup[job->driver->job_type]);
-    info->device    = g_strdup(job->id);
-    info->len       = job->len;
-    info->busy      = job->busy;
-    info->paused    = job->pause_count > 0;
-    info->offset    = job->offset;
+    info->type      = g_strdup(job_type_str(&job->job));
+    info->device    = g_strdup(job->job.id);
+    info->busy      = atomic_read(&job->job.busy);
+    info->paused    = job->job.pause_count > 0;
+    info->offset    = job->job.progress_current;
+    info->len       = job->job.progress_total;
     info->speed     = job->speed;
     info->io_status = job->iostatus;
-    info->ready     = job->ready;
+    info->ready     = job_is_ready(&job->job),
+    info->status    = job->job.status;
+    info->auto_finalize = job->job.auto_finalize;
+    info->auto_dismiss  = job->job.auto_dismiss;
+    info->has_error = job->job.ret != 0;
+    info->error     = job->job.ret ? g_strdup(strerror(-job->job.ret)) : NULL;
     return info;
 }
 
@@ -687,49 +321,160 @@ static void block_job_iostatus_set_err(BlockJob *job, int error)
     }
 }
 
-static void block_job_event_cancelled(BlockJob *job)
+static void block_job_event_cancelled(Notifier *n, void *opaque)
 {
+    BlockJob *job = opaque;
+
     if (block_job_is_internal(job)) {
         return;
     }
 
-    qapi_event_send_block_job_cancelled(job->driver->job_type,
-                                        job->id,
-                                        job->len,
-                                        job->offset,
-                                        job->speed,
-                                        &error_abort);
+    qapi_event_send_block_job_cancelled(job_type(&job->job),
+                                        job->job.id,
+                                        job->job.progress_total,
+                                        job->job.progress_current,
+                                        job->speed);
 }
 
-static void block_job_event_completed(BlockJob *job, const char *msg)
+static void block_job_event_completed(Notifier *n, void *opaque)
 {
+    BlockJob *job = opaque;
+    const char *msg = NULL;
+
     if (block_job_is_internal(job)) {
         return;
     }
 
-    qapi_event_send_block_job_completed(job->driver->job_type,
-                                        job->id,
-                                        job->len,
-                                        job->offset,
+    if (job->job.ret < 0) {
+        msg = strerror(-job->job.ret);
+    }
+
+    qapi_event_send_block_job_completed(job_type(&job->job),
+                                        job->job.id,
+                                        job->job.progress_total,
+                                        job->job.progress_current,
                                         job->speed,
                                         !!msg,
-                                        msg,
-                                        &error_abort);
+                                        msg);
 }
 
-void block_job_event_ready(BlockJob *job)
+static void block_job_event_pending(Notifier *n, void *opaque)
 {
-    job->ready = true;
+    BlockJob *job = opaque;
 
     if (block_job_is_internal(job)) {
         return;
     }
 
-    qapi_event_send_block_job_ready(job->driver->job_type,
-                                    job->id,
-                                    job->len,
-                                    job->offset,
-                                    job->speed, &error_abort);
+    qapi_event_send_block_job_pending(job_type(&job->job),
+                                      job->job.id);
+}
+
+static void block_job_event_ready(Notifier *n, void *opaque)
+{
+    BlockJob *job = opaque;
+
+    if (block_job_is_internal(job)) {
+        return;
+    }
+
+    qapi_event_send_block_job_ready(job_type(&job->job),
+                                    job->job.id,
+                                    job->job.progress_total,
+                                    job->job.progress_current,
+                                    job->speed);
+}
+
+
+/*
+ * API for block job drivers and the block layer.  These functions are
+ * declared in blockjob_int.h.
+ */
+
+void *block_job_create(const char *job_id, const BlockJobDriver *driver,
+                       JobTxn *txn, BlockDriverState *bs, uint64_t perm,
+                       uint64_t shared_perm, int64_t speed, int flags,
+                       BlockCompletionFunc *cb, void *opaque, Error **errp)
+{
+    BlockBackend *blk;
+    BlockJob *job;
+    int ret;
+
+    if (job_id == NULL && !(flags & JOB_INTERNAL)) {
+        job_id = bdrv_get_device_name(bs);
+    }
+
+    blk = blk_new(bdrv_get_aio_context(bs), perm, shared_perm);
+    ret = blk_insert_bs(blk, bs, errp);
+    if (ret < 0) {
+        blk_unref(blk);
+        return NULL;
+    }
+
+    job = job_create(job_id, &driver->job_driver, txn, blk_get_aio_context(blk),
+                     flags, cb, opaque, errp);
+    if (job == NULL) {
+        blk_unref(blk);
+        return NULL;
+    }
+
+    assert(is_block_job(&job->job));
+    assert(job->job.driver->free == &block_job_free);
+    assert(job->job.driver->user_resume == &block_job_user_resume);
+    assert(job->job.driver->drain == &block_job_drain);
+
+    job->blk = blk;
+
+    job->finalize_cancelled_notifier.notify = block_job_event_cancelled;
+    job->finalize_completed_notifier.notify = block_job_event_completed;
+    job->pending_notifier.notify = block_job_event_pending;
+    job->ready_notifier.notify = block_job_event_ready;
+    job->idle_notifier.notify = block_job_on_idle;
+
+    notifier_list_add(&job->job.on_finalize_cancelled,
+                      &job->finalize_cancelled_notifier);
+    notifier_list_add(&job->job.on_finalize_completed,
+                      &job->finalize_completed_notifier);
+    notifier_list_add(&job->job.on_pending, &job->pending_notifier);
+    notifier_list_add(&job->job.on_ready, &job->ready_notifier);
+    notifier_list_add(&job->job.on_idle, &job->idle_notifier);
+
+    error_setg(&job->blocker, "block device is in use by block job: %s",
+               job_type_str(&job->job));
+    block_job_add_bdrv(job, "main node", bs, 0, BLK_PERM_ALL, &error_abort);
+
+    bdrv_op_unblock(bs, BLOCK_OP_TYPE_DATAPLANE, job->blocker);
+
+    blk_set_allow_aio_context_change(blk, true);
+
+    /* Only set speed when necessary to avoid NotSupported error */
+    if (speed != 0) {
+        Error *local_err = NULL;
+
+        block_job_set_speed(job, speed, &local_err);
+        if (local_err) {
+            job_early_fail(&job->job);
+            error_propagate(errp, local_err);
+            return NULL;
+        }
+    }
+
+    return job;
+}
+
+void block_job_iostatus_reset(BlockJob *job)
+{
+    if (job->iostatus == BLOCK_DEVICE_IO_STATUS_OK) {
+        return;
+    }
+    assert(job->job.user_paused && job->job.pause_count > 0);
+    job->iostatus = BLOCK_DEVICE_IO_STATUS_OK;
+}
+
+void block_job_user_resume(Job *job)
+{
+    BlockJob *bjob = container_of(job, BlockJob, job);
+    block_job_iostatus_reset(bjob);
 }
 
 BlockErrorAction block_job_error_action(BlockJob *job, BlockdevOnError on_err,
@@ -756,96 +501,18 @@ BlockErrorAction block_job_error_action(BlockJob *job, BlockdevOnError on_err,
         abort();
     }
     if (!block_job_is_internal(job)) {
-        qapi_event_send_block_job_error(job->id,
+        qapi_event_send_block_job_error(job->job.id,
                                         is_read ? IO_OPERATION_TYPE_READ :
                                         IO_OPERATION_TYPE_WRITE,
-                                        action, &error_abort);
+                                        action);
     }
     if (action == BLOCK_ERROR_ACTION_STOP) {
-        /* make the pause user visible, which will be resumed from QMP. */
-        block_job_user_pause(job);
+        if (!job->job.user_paused) {
+            job_pause(&job->job);
+            /* make the pause user visible, which will be resumed from QMP. */
+            job->job.user_paused = true;
+        }
         block_job_iostatus_set_err(job, error);
     }
     return action;
-}
-
-typedef struct {
-    BlockJob *job;
-    AioContext *aio_context;
-    BlockJobDeferToMainLoopFn *fn;
-    void *opaque;
-} BlockJobDeferToMainLoopData;
-
-static void block_job_defer_to_main_loop_bh(void *opaque)
-{
-    BlockJobDeferToMainLoopData *data = opaque;
-    AioContext *aio_context;
-
-    /* Prevent race with block_job_defer_to_main_loop() */
-    aio_context_acquire(data->aio_context);
-
-    /* Fetch BDS AioContext again, in case it has changed */
-    aio_context = blk_get_aio_context(data->job->blk);
-    if (aio_context != data->aio_context) {
-        aio_context_acquire(aio_context);
-    }
-
-    data->job->deferred_to_main_loop = false;
-    data->fn(data->job, data->opaque);
-
-    if (aio_context != data->aio_context) {
-        aio_context_release(aio_context);
-    }
-
-    aio_context_release(data->aio_context);
-
-    g_free(data);
-}
-
-void block_job_defer_to_main_loop(BlockJob *job,
-                                  BlockJobDeferToMainLoopFn *fn,
-                                  void *opaque)
-{
-    BlockJobDeferToMainLoopData *data = g_malloc(sizeof(*data));
-    data->job = job;
-    data->aio_context = blk_get_aio_context(job->blk);
-    data->fn = fn;
-    data->opaque = opaque;
-    job->deferred_to_main_loop = true;
-
-    aio_bh_schedule_oneshot(qemu_get_aio_context(),
-                            block_job_defer_to_main_loop_bh, data);
-}
-
-BlockJobTxn *block_job_txn_new(void)
-{
-    BlockJobTxn *txn = g_new0(BlockJobTxn, 1);
-    QLIST_INIT(&txn->jobs);
-    txn->refcnt = 1;
-    return txn;
-}
-
-static void block_job_txn_ref(BlockJobTxn *txn)
-{
-    txn->refcnt++;
-}
-
-void block_job_txn_unref(BlockJobTxn *txn)
-{
-    if (txn && --txn->refcnt == 0) {
-        g_free(txn);
-    }
-}
-
-void block_job_txn_add_job(BlockJobTxn *txn, BlockJob *job)
-{
-    if (!txn) {
-        return;
-    }
-
-    assert(!job->txn);
-    job->txn = txn;
-
-    QLIST_INSERT_HEAD(&txn->jobs, job, txn_list);
-    block_job_txn_ref(txn);
 }

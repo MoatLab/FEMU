@@ -2,7 +2,6 @@
 #define OBJECT_INTERFACES_H
 
 #include "qom/object.h"
-#include "qapi/qmp/qdict.h"
 #include "qapi/visitor.h"
 
 #define TYPE_USER_CREATABLE "user-creatable"
@@ -17,11 +16,7 @@
      INTERFACE_CHECK(UserCreatable, (obj), \
                      TYPE_USER_CREATABLE)
 
-
-typedef struct UserCreatable {
-    /* <private> */
-    Object Parent;
-} UserCreatable;
+typedef struct UserCreatable UserCreatable;
 
 /**
  * UserCreatableClass:
@@ -51,29 +46,28 @@ typedef struct UserCreatableClass {
 
     /* <public> */
     void (*complete)(UserCreatable *uc, Error **errp);
-    bool (*can_be_deleted)(UserCreatable *uc, Error **errp);
+    bool (*can_be_deleted)(UserCreatable *uc);
 } UserCreatableClass;
 
 /**
  * user_creatable_complete:
- * @obj: the object whose complete() method is called if defined
+ * @uc: the user-creatable object whose complete() method is called if defined
  * @errp: if an error occurs, a pointer to an area to store the error
  *
  * Wrapper to call complete() method if one of types it's inherited
  * from implements USER_CREATABLE interface, otherwise the call does
  * nothing.
  */
-void user_creatable_complete(Object *obj, Error **errp);
+void user_creatable_complete(UserCreatable *uc, Error **errp);
 
 /**
  * user_creatable_can_be_deleted:
  * @uc: the object whose can_be_deleted() method is called if implemented
- * @errp: if an error occurs, a pointer to an area to store the error
  *
  * Wrapper to call can_be_deleted() method if one of types it's inherited
  * from implements USER_CREATABLE interface.
  */
-bool user_creatable_can_be_deleted(UserCreatable *uc, Error **errp);
+bool user_creatable_can_be_deleted(UserCreatable *uc);
 
 /**
  * user_creatable_add_type:
@@ -147,5 +141,13 @@ int user_creatable_add_opts_foreach(void *opaque,
  * by @id.
  */
 void user_creatable_del(const char *id, Error **errp);
+
+/**
+ * user_creatable_cleanup:
+ *
+ * Delete all user-creatable objects and the user-creatable
+ * objects container.
+ */
+void user_creatable_cleanup(void);
 
 #endif

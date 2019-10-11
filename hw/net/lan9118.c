@@ -13,10 +13,12 @@
 #include "qemu/osdep.h"
 #include "hw/sysbus.h"
 #include "net/net.h"
-#include "hw/devices.h"
+#include "net/eth.h"
+#include "hw/net/lan9118.h"
 #include "sysemu/sysemu.h"
 #include "hw/ptimer.h"
 #include "qemu/log.h"
+#include "qemu/module.h"
 /* For crc32 */
 #include <zlib.h>
 
@@ -174,7 +176,6 @@ static const VMStateDescription vmstate_lan9118_packet = {
     }
 };
 
-#define TYPE_LAN9118 "lan9118"
 #define LAN9118(obj) OBJECT_CHECK(lan9118_state, (obj), TYPE_LAN9118)
 
 typedef struct {
@@ -504,7 +505,7 @@ static int lan9118_filter(lan9118_state *s, const uint8_t *addr)
         }
     } else {
         /* Hash matching  */
-        hash = compute_mcast_idx(addr);
+        hash = net_crc32(addr, ETH_ALEN) >> 26;
         if (hash & 0x20) {
             return (s->mac_hashh >> (hash & 0x1f)) & 1;
         } else {
@@ -1319,9 +1320,9 @@ static NetClientInfo net_lan9118_info = {
     .link_status_changed = lan9118_set_link,
 };
 
-static int lan9118_init1(SysBusDevice *sbd)
+static void lan9118_realize(DeviceState *dev, Error **errp)
 {
-    DeviceState *dev = DEVICE(sbd);
+    SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
     lan9118_state *s = LAN9118(dev);
     QEMUBH *bh;
     int i;
@@ -1348,8 +1349,6 @@ static int lan9118_init1(SysBusDevice *sbd)
     s->timer = ptimer_init(bh, PTIMER_POLICY_DEFAULT);
     ptimer_set_freq(s->timer, 10000);
     ptimer_set_limit(s->timer, 0xffff, 1);
-
-    return 0;
 }
 
 static Property lan9118_properties[] = {
@@ -1361,12 +1360,11 @@ static Property lan9118_properties[] = {
 static void lan9118_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
 
-    k->init = lan9118_init1;
     dc->reset = lan9118_reset;
     dc->props = lan9118_properties;
     dc->vmsd = &vmstate_lan9118;
+    dc->realize = lan9118_realize;
 }
 
 static const TypeInfo lan9118_info = {

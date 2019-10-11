@@ -27,23 +27,25 @@
 
 #include "qemu/osdep.h"
 #include "cpu.h"
-#include "exec/exec-all.h"
 #include "exec/gdbstub.h"
 #include "qemu/host-utils.h"
+#include "qemu/timer.h"
 
 #include "core-dc232b/core-isa.h"
 #include "overlay_tool.h"
 
+#define xtensa_modules xtensa_modules_dc232b
+#include "core-dc232b/xtensa-modules.inc.c"
+
 static XtensaConfig dc232b __attribute__((unused)) = {
     .name = "dc232b",
     .gdb_regmap = {
-        .num_regs = 120,
-        .num_core_regs = 52,
         .reg = {
-#include "core-dc232b/gdb-config.c"
+#include "core-dc232b/gdb-config.inc.c"
         }
     },
-    .clock_freq_khz = 10000,
+    .isa_internal = &xtensa_modules,
+    .clock_freq_khz = (NANOSECONDS_PER_SECOND / 64) / 1000,
     DEFAULT_SECTIONS
 };
 

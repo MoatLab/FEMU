@@ -77,7 +77,8 @@ static inline bool dma_memory_valid(AddressSpace *as,
                                     DMADirection dir)
 {
     return address_space_access_valid(as, addr, len,
-                                      dir == DMA_DIRECTION_FROM_DEVICE);
+                                      dir == DMA_DIRECTION_FROM_DEVICE,
+                                      MEMTXATTRS_UNSPECIFIED);
 }
 
 static inline int dma_memory_rw_relaxed(AddressSpace *as, dma_addr_t addr,
@@ -132,7 +133,8 @@ static inline void *dma_memory_map(AddressSpace *as,
     hwaddr xlen = *len;
     void *p;
 
-    p = address_space_map(as, addr, &xlen, dir == DMA_DIRECTION_FROM_DEVICE);
+    p = address_space_map(as, addr, &xlen, dir == DMA_DIRECTION_FROM_DEVICE,
+                          MEMTXATTRS_UNSPECIFIED);
     *len = xlen;
     return p;
 }
@@ -208,16 +210,6 @@ BlockAIOCB *dma_blk_read(BlockBackend *blk,
 BlockAIOCB *dma_blk_write(BlockBackend *blk,
                           QEMUSGList *sg, uint64_t offset, uint32_t align,
                           BlockCompletionFunc *cb, void *opaque);
-BlockAIOCB *dma_blk_io_list(AioContext *ctx,
-        QEMUSGList *sg, uint64_t *sector_list, uint32_t align,
-        DMAIOFunc *io_func, void *io_func_opaque, BlockCompletionFunc *cb,
-        void *opaque, DMADirection dir);
-BlockAIOCB *dma_blk_read_list(BlockBackend *blk, QEMUSGList *sg,
-        uint64_t *sector_list, uint32_t align,
-        void (*cb)(void *opaque, int ret), void *opaque);
-BlockAIOCB *dma_blk_write_list(BlockBackend *blk, QEMUSGList *sg,
-        uint64_t *sector_list, uint32_t align,
-        void (*cb)(void *opaque, int ret), void *opaque);
 uint64_t dma_buf_read(uint8_t *ptr, int32_t len, QEMUSGList *sg);
 uint64_t dma_buf_write(uint8_t *ptr, int32_t len, QEMUSGList *sg);
 

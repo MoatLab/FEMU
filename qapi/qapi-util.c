@@ -12,11 +12,17 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
-#include "qemu-common.h"
-#include "qapi/util.h"
+#include "qemu/ctype.h"
 
-int qapi_enum_parse(const char * const lookup[], const char *buf,
-                    int max, int def, Error **errp)
+const char *qapi_enum_lookup(const QEnumLookup *lookup, int val)
+{
+    assert(val >= 0 && val < lookup->size);
+
+    return lookup->array[val];
+}
+
+int qapi_enum_parse(const QEnumLookup *lookup, const char *buf,
+                    int def, Error **errp)
 {
     int i;
 
@@ -24,8 +30,8 @@ int qapi_enum_parse(const char * const lookup[], const char *buf,
         return def;
     }
 
-    for (i = 0; i < max; i++) {
-        if (!strcmp(buf, lookup[i])) {
+    for (i = 0; i < lookup->size; i++) {
+        if (!strcmp(buf, lookup->array[i])) {
             return i;
         }
     }
@@ -40,7 +46,7 @@ int qapi_enum_parse(const char * const lookup[], const char *buf,
  * It may be prefixed by __RFQDN_ (downstream extension), where RFQDN
  * may contain only letters, digits, hyphen and period.
  * The special exception for enumeration names is not implemented.
- * See docs/qapi-code-gen.txt for more on QAPI naming rules.
+ * See docs/devel/qapi-code-gen.txt for more on QAPI naming rules.
  * Keep this consistent with scripts/qapi.py!
  * If @complete, the parse fails unless it consumes @str completely.
  * Return its length on success, -1 on failure.

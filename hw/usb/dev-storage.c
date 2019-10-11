@@ -9,18 +9,17 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
-#include "qemu-common.h"
 #include "qemu/error-report.h"
+#include "qemu/module.h"
 #include "qemu/option.h"
 #include "qemu/config-file.h"
 #include "hw/usb.h"
-#include "hw/usb/desc.h"
+#include "desc.h"
 #include "hw/scsi/scsi.h"
 #include "ui/console.h"
 #include "monitor/monitor.h"
 #include "sysemu/sysemu.h"
 #include "sysemu/block-backend.h"
-#include "sysemu/blockdev.h"
 #include "qapi/visitor.h"
 #include "qemu/cutils.h"
 
@@ -589,30 +588,20 @@ static const struct SCSIBusInfo usb_msd_scsi_info_bot = {
     .load_request = usb_msd_load_request,
 };
 
-static void usb_msd_unrealize_storage(USBDevice *dev, Error **errp)
-{
-    MSDState *s = USB_STORAGE_DEV(dev);
-
-    object_unref(OBJECT(&s->bus));
-}
-
-static void usb_msd_realize_storage(USBDevice *dev, Error **errp)
+static void usb_msd_storage_realize(USBDevice *dev, Error **errp)
 {
     MSDState *s = USB_STORAGE_DEV(dev);
     BlockBackend *blk = s->conf.blk;
     SCSIDevice *scsi_dev;
-    Error *err = NULL;
 
     if (!blk) {
         error_setg(errp, "drive property not set");
         return;
     }
 
-    blkconf_serial(&s->conf, &dev->serial);
     blkconf_blocksizes(&s->conf);
-    blkconf_apply_backend_options(&s->conf, blk_is_read_only(blk), true, &err);
-    if (err) {
-        error_propagate(errp, err);
+    if (!blkconf_apply_backend_options(&s->conf, blk_is_read_only(blk), true,
+                                       errp)) {
         return;
     }
 
@@ -627,7 +616,7 @@ static void usb_msd_realize_storage(USBDevice *dev, Error **errp)
      * The hack is probably a bad idea.
      */
     blk_ref(blk);
-    blk_detach_dev(blk, &s->dev.qdev);
+    blk_detach_dev(blk, DEVICE(s));
     s->conf.blk = NULL;
 
     usb_desc_create_serial(dev);
@@ -635,25 +624,19 @@ static void usb_msd_realize_storage(USBDevice *dev, Error **errp)
     scsi_bus_new(&s->bus, sizeof(s->bus), DEVICE(dev),
                  &usb_msd_scsi_info_storage, NULL);
     scsi_dev = scsi_bus_legacy_add_drive(&s->bus, blk, 0, !!s->removable,
-                                         s->conf.bootindex, dev->serial,
-                                         &err);
+                                         s->conf.bootindex, s->conf.share_rw,
+                                         s->conf.rerror, s->conf.werror,
+                                         dev->serial,
+                                         errp);
     blk_unref(blk);
     if (!scsi_dev) {
-        error_propagate(errp, err);
         return;
     }
     usb_msd_handle_reset(dev);
     s->scsi_dev = scsi_dev;
 }
 
-static void usb_msd_unrealize_bot(USBDevice *dev, Error **errp)
-{
-    MSDState *s = USB_STORAGE_DEV(dev);
-
-    object_unref(OBJECT(&s->bus));
-}
-
-static void usb_msd_realize_bot(USBDevice *dev, Error **errp)
+static void usb_msd_bot_realize(USBDevice *dev, Error **errp)
 {
     MSDState *s = USB_STORAGE_DEV(dev);
     DeviceState *d = DEVICE(dev);
@@ -667,63 +650,6 @@ static void usb_msd_realize_bot(USBDevice *dev, Error **errp)
     scsi_bus_new(&s->bus, sizeof(s->bus), DEVICE(dev),
                  &usb_msd_scsi_info_bot, NULL);
     usb_msd_handle_reset(dev);
-}
-
-static USBDevice *usb_msd_init(USBBus *bus, const char *filename)
-{
-    static int nr=0;
-    Error *err = NULL;
-    char id[8];
-    QemuOpts *opts;
-    DriveInfo *dinfo;
-    USBDevice *dev;
-    const char *p1;
-    char fmt[32];
-
-    /* parse -usbdevice disk: syntax into drive opts */
-    do {
-        snprintf(id, sizeof(id), "usb%d", nr++);
-        opts = qemu_opts_create(qemu_find_opts("drive"), id, 1, NULL);
-    } while (!opts);
-
-    p1 = strchr(filename, ':');
-    if (p1++) {
-        const char *p2;
-
-        if (strstart(filename, "format=", &p2)) {
-            int len = MIN(p1 - p2, sizeof(fmt));
-            pstrcpy(fmt, len, p2);
-            qemu_opt_set(opts, "format", fmt, &error_abort);
-        } else if (*filename != ':') {
-            error_report("unrecognized USB mass-storage option %s", filename);
-            return NULL;
-        }
-        filename = p1;
-    }
-    if (!*filename) {
-        error_report("block device specification needed");
-        return NULL;
-    }
-    qemu_opt_set(opts, "file", filename, &error_abort);
-    qemu_opt_set(opts, "if", "none", &error_abort);
-
-    /* create host drive */
-    dinfo = drive_new(opts, 0);
-    if (!dinfo) {
-        qemu_opts_del(opts);
-        return NULL;
-    }
-
-    /* create guest device */
-    dev = usb_create(bus, "usb-storage");
-    qdev_prop_set_drive(&dev->qdev, "drive", blk_by_legacy_dinfo(dinfo),
-                        &err);
-    if (err) {
-        error_report_err(err);
-        object_unparent(OBJECT(dev));
-        return NULL;
-    }
-    return dev;
 }
 
 static const VMStateDescription vmstate_usb_msd = {
@@ -746,6 +672,7 @@ static const VMStateDescription vmstate_usb_msd = {
 
 static Property msd_properties[] = {
     DEFINE_BLOCK_PROPERTIES(MSDState, conf),
+    DEFINE_BLOCK_ERROR_PROPERTIES(MSDState, conf),
     DEFINE_PROP_BIT("removable", MSDState, removable, 0, false),
     DEFINE_PROP_END_OF_LIST(),
 };
@@ -767,13 +694,12 @@ static void usb_msd_class_initfn_common(ObjectClass *klass, void *data)
     dc->vmsd = &vmstate_usb_msd;
 }
 
-static void usb_msd_class_initfn_storage(ObjectClass *klass, void *data)
+static void usb_msd_class_storage_initfn(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     USBDeviceClass *uc = USB_DEVICE_CLASS(klass);
 
-    uc->realize = usb_msd_realize_storage;
-    uc->unrealize = usb_msd_unrealize_storage;
+    uc->realize = usb_msd_storage_realize;
     dc->props = msd_properties;
 }
 
@@ -831,26 +757,25 @@ static void usb_msd_instance_init(Object *obj)
     object_property_set_int(obj, -1, "bootindex", NULL);
 }
 
-static void usb_msd_class_initfn_bot(ObjectClass *klass, void *data)
+static void usb_msd_class_bot_initfn(ObjectClass *klass, void *data)
 {
     USBDeviceClass *uc = USB_DEVICE_CLASS(klass);
 
-    uc->realize = usb_msd_realize_bot;
-    uc->unrealize = usb_msd_unrealize_bot;
+    uc->realize = usb_msd_bot_realize;
     uc->attached_settable = true;
 }
 
 static const TypeInfo msd_info = {
     .name          = "usb-storage",
     .parent        = TYPE_USB_STORAGE,
-    .class_init    = usb_msd_class_initfn_storage,
+    .class_init    = usb_msd_class_storage_initfn,
     .instance_init = usb_msd_instance_init,
 };
 
 static const TypeInfo bot_info = {
     .name          = "usb-bot",
     .parent        = TYPE_USB_STORAGE,
-    .class_init    = usb_msd_class_initfn_bot,
+    .class_init    = usb_msd_class_bot_initfn,
 };
 
 static void usb_msd_register_types(void)
@@ -858,7 +783,6 @@ static void usb_msd_register_types(void)
     type_register_static(&usb_storage_dev_type_info);
     type_register_static(&msd_info);
     type_register_static(&bot_info);
-    usb_legacy_register("usb-storage", "disk", usb_msd_init);
 }
 
 type_init(usb_msd_register_types)

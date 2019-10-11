@@ -27,8 +27,8 @@
 #include "hw/sysbus.h"
 #include "hw/scsi/esp.h"
 #include "trace.h"
-#include "qapi/error.h"
 #include "qemu/log.h"
+#include "qemu/module.h"
 
 /*
  * On Sparc32, this is the ESP (NCR53C90) part of chip STP2000 (Master I/O),
@@ -287,11 +287,8 @@ static void esp_do_dma(ESPState *s)
     esp_dma_done(s);
 }
 
-void esp_command_complete(SCSIRequest *req, uint32_t status,
-                                 size_t resid)
+static void esp_report_command_complete(ESPState *s, uint32_t status)
 {
-    ESPState *s = req->hba_private;
-
     trace_esp_command_complete();
     if (s->ti_size != 0) {
         trace_esp_command_complete_unexpected();
@@ -310,6 +307,23 @@ void esp_command_complete(SCSIRequest *req, uint32_t status,
         s->current_req = NULL;
         s->current_dev = NULL;
     }
+}
+
+void esp_command_complete(SCSIRequest *req, uint32_t status,
+                          size_t resid)
+{
+    ESPState *s = req->hba_private;
+
+    if (s->rregs[ESP_RSTAT] & STAT_INT) {
+        /* Defer handling command complete until the previous
+         * interrupt has been handled.
+         */
+        trace_esp_command_complete_deferred();
+        s->deferred_status = status;
+        s->deferred_complete = true;
+        return;
+    }
+    esp_report_command_complete(s, status);
 }
 
 void esp_transfer_data(SCSIRequest *req, uint32_t len)
@@ -423,7 +437,10 @@ uint64_t esp_reg_read(ESPState *s, uint32_t saddr)
         s->rregs[ESP_RSTAT] &= ~STAT_TC;
         s->rregs[ESP_RSEQ] = SEQ_CD;
         esp_lower_irq(s);
-
+        if (s->deferred_complete) {
+            esp_report_command_complete(s, s->deferred_status);
+            s->deferred_complete = false;
+        }
         return old_val;
     case ESP_TCHI:
         /* Return the unique id if the value has never been written */
@@ -565,7 +582,8 @@ void esp_reg_write(ESPState *s, uint32_t saddr, uint64_t val)
 }
 
 static bool esp_mem_accepts(void *opaque, hwaddr addr,
-                            unsigned size, bool is_write)
+                            unsigned size, bool is_write,
+                            MemTxAttrs attrs)
 {
     return (size == 1) || (is_write && size == 4);
 }
@@ -582,6 +600,8 @@ const VMStateDescription vmstate_esp = {
         VMSTATE_UINT32(ti_wptr, ESPState),
         VMSTATE_BUFFER(ti_buf, ESPState),
         VMSTATE_UINT32(status, ESPState),
+        VMSTATE_UINT32(deferred_status, ESPState),
+        VMSTATE_BOOL(deferred_complete, ESPState),
         VMSTATE_UINT32(dma, ESPState),
         VMSTATE_PARTIAL_BUFFER(cmdbuf, ESPState, 16),
         VMSTATE_BUFFER_START_MIDDLE_V(cmdbuf, ESPState, 16, 4),
@@ -591,19 +611,6 @@ const VMStateDescription vmstate_esp = {
         VMSTATE_END_OF_LIST()
     }
 };
-
-#define TYPE_ESP "esp"
-#define ESP(obj) OBJECT_CHECK(SysBusESPState, (obj), TYPE_ESP)
-
-typedef struct {
-    /*< private >*/
-    SysBusDevice parent_obj;
-    /*< public >*/
-
-    MemoryRegion iomem;
-    uint32_t it_shift;
-    ESPState esp;
-} SysBusESPState;
 
 static void sysbus_esp_mem_write(void *opaque, hwaddr addr,
                                  uint64_t val, unsigned int size)
@@ -632,34 +639,6 @@ static const MemoryRegionOps sysbus_esp_mem_ops = {
     .valid.accepts = esp_mem_accepts,
 };
 
-void esp_init(hwaddr espaddr, int it_shift,
-              ESPDMAMemoryReadWriteFunc dma_memory_read,
-              ESPDMAMemoryReadWriteFunc dma_memory_write,
-              void *dma_opaque, qemu_irq irq, qemu_irq *reset,
-              qemu_irq *dma_enable)
-{
-    DeviceState *dev;
-    SysBusDevice *s;
-    SysBusESPState *sysbus;
-    ESPState *esp;
-
-    dev = qdev_create(NULL, TYPE_ESP);
-    sysbus = ESP(dev);
-    esp = &sysbus->esp;
-    esp->dma_memory_read = dma_memory_read;
-    esp->dma_memory_write = dma_memory_write;
-    esp->dma_opaque = dma_opaque;
-    sysbus->it_shift = it_shift;
-    /* XXX for now until rc4030 has been changed to use DMA enable signal */
-    esp->dma_enabled = 1;
-    qdev_init_nofail(dev);
-    s = SYS_BUS_DEVICE(dev);
-    sysbus_connect_irq(s, 0, irq);
-    sysbus_mmio_map(s, 0, espaddr);
-    *reset = qdev_get_gpio_in(dev, 0);
-    *dma_enable = qdev_get_gpio_in(dev, 1);
-}
-
 static const struct SCSIBusInfo esp_scsi_info = {
     .tcq = false,
     .max_target = ESP_MAX_DEVS,
@@ -672,7 +651,7 @@ static const struct SCSIBusInfo esp_scsi_info = {
 
 static void sysbus_esp_gpio_demux(void *opaque, int irq, int level)
 {
-    SysBusESPState *sysbus = ESP(opaque);
+    SysBusESPState *sysbus = ESP_STATE(opaque);
     ESPState *s = &sysbus->esp;
 
     switch (irq) {
@@ -688,7 +667,7 @@ static void sysbus_esp_gpio_demux(void *opaque, int irq, int level)
 static void sysbus_esp_realize(DeviceState *dev, Error **errp)
 {
     SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
-    SysBusESPState *sysbus = ESP(dev);
+    SysBusESPState *sysbus = ESP_STATE(dev);
     ESPState *s = &sysbus->esp;
 
     sysbus_init_irq(sbd, &s->irq);
@@ -706,14 +685,14 @@ static void sysbus_esp_realize(DeviceState *dev, Error **errp)
 
 static void sysbus_esp_hard_reset(DeviceState *dev)
 {
-    SysBusESPState *sysbus = ESP(dev);
+    SysBusESPState *sysbus = ESP_STATE(dev);
     esp_hard_reset(&sysbus->esp);
 }
 
 static const VMStateDescription vmstate_sysbus_esp_scsi = {
     .name = "sysbusespscsi",
-    .version_id = 0,
-    .minimum_version_id = 0,
+    .version_id = 1,
+    .minimum_version_id = 1,
     .fields = (VMStateField[]) {
         VMSTATE_STRUCT(esp, SysBusESPState, 0, vmstate_esp, ESPState),
         VMSTATE_END_OF_LIST()

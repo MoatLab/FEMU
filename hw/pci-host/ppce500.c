@@ -20,6 +20,7 @@
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_host.h"
 #include "qemu/bswap.h"
+#include "qemu/module.h"
 #include "hw/pci-host/ppce500.h"
 
 #ifdef DEBUG_PCI
@@ -423,11 +424,6 @@ static void e500_pcihost_bridge_realize(PCIDevice *d, Error **errp)
     PPCE500CCSRState *ccsr = CCSR(container_get(qdev_get_machine(),
                                   "/e500-ccsr"));
 
-    pci_config_set_class(d->config, PCI_CLASS_BRIDGE_PCI);
-    d->config[PCI_HEADER_TYPE] =
-        (d->config[PCI_HEADER_TYPE] & PCI_HEADER_TYPE_MULTI_FUNCTION) |
-        PCI_HEADER_TYPE_BRIDGE;
-
     memory_region_init_alias(&b->bar0, OBJECT(ccsr), "e500-pci-bar0", &ccsr->ccsr_space,
                              0, int128_get64(ccsr->ccsr_space.size));
     pci_register_bar(d, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &b->bar0);
@@ -441,8 +437,9 @@ static AddressSpace *e500_pcihost_set_iommu(PCIBus *bus, void *opaque,
     return &s->bm_as;
 }
 
-static int e500_pcihost_initfn(SysBusDevice *dev)
+static void e500_pcihost_realize(DeviceState *dev, Error **errp)
 {
+    SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
     PCIHostState *h;
     PPCE500PCIState *s;
     PCIBus *b;
@@ -452,7 +449,7 @@ static int e500_pcihost_initfn(SysBusDevice *dev)
     s = PPC_E500_PCI_HOST_BRIDGE(dev);
 
     for (i = 0; i < ARRAY_SIZE(s->irq); i++) {
-        sysbus_init_irq(dev, &s->irq[i]);
+        sysbus_init_irq(sbd, &s->irq[i]);
     }
 
     for (i = 0; i < PCI_NUM_PINS; i++) {
@@ -465,9 +462,9 @@ static int e500_pcihost_initfn(SysBusDevice *dev)
     /* PIO lives at the bottom of our bus space */
     memory_region_add_subregion_overlap(&s->busmem, 0, &s->pio, -2);
 
-    b = pci_register_bus(DEVICE(dev), NULL, mpc85xx_pci_set_irq,
-                         mpc85xx_pci_map_irq, s, &s->busmem, &s->pio,
-                         PCI_DEVFN(s->first_slot, 0), 4, TYPE_PCI_BUS);
+    b = pci_register_root_bus(dev, NULL, mpc85xx_pci_set_irq,
+                              mpc85xx_pci_map_irq, s, &s->busmem, &s->pio,
+                              PCI_DEVFN(s->first_slot, 0), 4, TYPE_PCI_BUS);
     h->bus = b;
 
     /* Set up PCI view of memory */
@@ -488,10 +485,8 @@ static int e500_pcihost_initfn(SysBusDevice *dev)
     memory_region_add_subregion(&s->container, PCIE500_CFGADDR, &h->conf_mem);
     memory_region_add_subregion(&s->container, PCIE500_CFGDATA, &h->data_mem);
     memory_region_add_subregion(&s->container, PCIE500_REG_BASE, &s->iomem);
-    sysbus_init_mmio(dev, &s->container);
+    sysbus_init_mmio(sbd, &s->container);
     pci_bus_set_route_irq_fn(b, e500_route_intx_pin_to_irq);
-
-    return 0;
 }
 
 static void e500_host_bridge_class_init(ObjectClass *klass, void *data)
@@ -508,7 +503,7 @@ static void e500_host_bridge_class_init(ObjectClass *klass, void *data)
      * PCI-facing part of the host bridge, not usable without the
      * host-facing part, which can't be device_add'ed, yet.
      */
-    dc->cannot_instantiate_with_device_add_yet = true;
+    dc->user_creatable = false;
 }
 
 static const TypeInfo e500_host_bridge_info = {
@@ -516,6 +511,10 @@ static const TypeInfo e500_host_bridge_info = {
     .parent        = TYPE_PCI_DEVICE,
     .instance_size = sizeof(PPCE500PCIBridgeState),
     .class_init    = e500_host_bridge_class_init,
+    .interfaces = (InterfaceInfo[]) {
+        { INTERFACE_CONVENTIONAL_PCI_DEVICE },
+        { },
+    },
 };
 
 static Property pcihost_properties[] = {
@@ -527,9 +526,8 @@ static Property pcihost_properties[] = {
 static void e500_pcihost_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
 
-    k->init = e500_pcihost_initfn;
+    dc->realize = e500_pcihost_realize;
     set_bit(DEVICE_CATEGORY_BRIDGE, dc->categories);
     dc->props = pcihost_properties;
     dc->vmsd = &vmstate_ppce500_pci;

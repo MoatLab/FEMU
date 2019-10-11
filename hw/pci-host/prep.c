@@ -24,6 +24,8 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu-common.h"
+#include "qemu/units.h"
 #include "qapi/error.h"
 #include "hw/hw.h"
 #include "hw/pci/pci.h"
@@ -31,6 +33,7 @@
 #include "hw/pci/pci_host.h"
 #include "hw/i386/pc.h"
 #include "hw/loader.h"
+#include "hw/or-irq.h"
 #include "exec/address-spaces.h"
 #include "elf.h"
 
@@ -54,7 +57,8 @@ typedef struct RavenPCIState {
 typedef struct PRePPCIState {
     PCIHostState parent_obj;
 
-    qemu_irq irq[PCI_NUM_PINS];
+    qemu_or_irq *or_irq;
+    qemu_irq pci_irqs[PCI_NUM_PINS];
     PCIBus pci_bus;
     AddressSpace pci_io_as;
     MemoryRegion pci_io;
@@ -68,9 +72,10 @@ typedef struct PRePPCIState {
     RavenPCIState pci_dev;
 
     int contiguous_map;
+    bool is_legacy_prep;
 } PREPPCIState;
 
-#define BIOS_SIZE (1024 * 1024)
+#define BIOS_SIZE (1 * MiB)
 
 static inline uint32_t raven_pci_io_config(hwaddr addr)
 {
@@ -193,9 +198,9 @@ static int raven_map_irq(PCIDevice *pci_dev, int irq_num)
 
 static void raven_set_irq(void *opaque, int irq_num, int level)
 {
-    qemu_irq *pic = opaque;
+    PREPPCIState *s = opaque;
 
-    qemu_set_irq(pic[irq_num] , level);
+    qemu_set_irq(s->pci_irqs[irq_num], level);
 }
 
 static AddressSpace *raven_pcihost_set_iommu(PCIBus *bus, void *opaque,
@@ -221,14 +226,28 @@ static void raven_pcihost_realizefn(DeviceState *d, Error **errp)
     MemoryRegion *address_space_mem = get_system_memory();
     int i;
 
-    for (i = 0; i < PCI_NUM_PINS; i++) {
-        sysbus_init_irq(dev, &s->irq[i]);
+    if (s->is_legacy_prep) {
+        for (i = 0; i < PCI_NUM_PINS; i++) {
+            sysbus_init_irq(dev, &s->pci_irqs[i]);
+        }
+    } else {
+        /* According to PReP specification section 6.1.6 "System Interrupt
+         * Assignments", all PCI interrupts are routed via IRQ 15 */
+        s->or_irq = OR_IRQ(object_new(TYPE_OR_IRQ));
+        object_property_set_int(OBJECT(s->or_irq), PCI_NUM_PINS, "num-lines",
+                                &error_fatal);
+        object_property_set_bool(OBJECT(s->or_irq), true, "realized",
+                                 &error_fatal);
+        sysbus_init_irq(dev, &s->or_irq->out_irq);
+
+        for (i = 0; i < PCI_NUM_PINS; i++) {
+            s->pci_irqs[i] = qdev_get_gpio_in(DEVICE(s->or_irq), i);
+        }
     }
 
     qdev_init_gpio_in(d, raven_change_gpio, 1);
 
-    pci_bus_irqs(&s->pci_bus, raven_set_irq, raven_map_irq, s->irq,
-                 PCI_NUM_PINS);
+    pci_bus_irqs(&s->pci_bus, raven_set_irq, raven_map_irq, s, PCI_NUM_PINS);
 
     memory_region_init_io(&h->conf_mem, OBJECT(h), &pci_host_conf_le_ops, s,
                           "pci-conf-idx", 4);
@@ -269,8 +288,8 @@ static void raven_pcihost_initfn(Object *obj)
     memory_region_add_subregion_overlap(address_space_mem, 0x80000000,
                                         &s->pci_io_non_contiguous, 1);
     memory_region_add_subregion(address_space_mem, 0xc0000000, &s->pci_memory);
-    pci_bus_new_inplace(&s->pci_bus, sizeof(s->pci_bus), DEVICE(obj), NULL,
-                        &s->pci_memory, &s->pci_io, 0, TYPE_PCI_BUS);
+    pci_root_bus_new_inplace(&s->pci_bus, sizeof(s->pci_bus), DEVICE(obj), NULL,
+                             &s->pci_memory, &s->pci_io, 0, TYPE_PCI_BUS);
 
     /* Bus master address space */
     memory_region_init(&s->bm, obj, "bm-raven", UINT32_MAX);
@@ -304,7 +323,7 @@ static void raven_realize(PCIDevice *d, Error **errp)
     d->config[0x0D] = 0x10; // latency_timer
     d->config[0x34] = 0x00; // capabilities_pointer
 
-    memory_region_init_ram(&s->bios, OBJECT(s), "bios", BIOS_SIZE,
+    memory_region_init_ram_nomigrate(&s->bios, OBJECT(s), "bios", BIOS_SIZE,
                            &error_fatal);
     memory_region_set_readonly(&s->bios, true);
     memory_region_add_subregion(get_system_memory(), (uint32_t)(-BIOS_SIZE),
@@ -313,7 +332,7 @@ static void raven_realize(PCIDevice *d, Error **errp)
         filename = qemu_find_file(QEMU_FILE_TYPE_BIOS, s->bios_name);
         if (filename) {
             if (s->elf_machine != EM_NONE) {
-                bios_size = load_elf(filename, NULL, NULL, NULL,
+                bios_size = load_elf(filename, NULL, NULL, NULL, NULL,
                                      NULL, NULL, 1, s->elf_machine, 0, 0);
             }
             if (bios_size < 0) {
@@ -364,7 +383,7 @@ static void raven_class_init(ObjectClass *klass, void *data)
      * Reason: PCI-facing part of the host bridge, not usable without
      * the host-facing part, which can't be device_add'ed, yet.
      */
-    dc->cannot_instantiate_with_device_add_yet = true;
+    dc->user_creatable = false;
 }
 
 static const TypeInfo raven_info = {
@@ -372,12 +391,19 @@ static const TypeInfo raven_info = {
     .parent = TYPE_PCI_DEVICE,
     .instance_size = sizeof(RavenPCIState),
     .class_init = raven_class_init,
+    .interfaces = (InterfaceInfo[]) {
+        { INTERFACE_CONVENTIONAL_PCI_DEVICE },
+        { },
+    },
 };
 
 static Property raven_pcihost_properties[] = {
     DEFINE_PROP_UINT32("elf-machine", PREPPCIState, pci_dev.elf_machine,
                        EM_NONE),
     DEFINE_PROP_STRING("bios-name", PREPPCIState, pci_dev.bios_name),
+    /* Temporary workaround until legacy prep machine is removed */
+    DEFINE_PROP_BOOL("is-legacy-prep", PREPPCIState, is_legacy_prep,
+                     false),
     DEFINE_PROP_END_OF_LIST()
 };
 

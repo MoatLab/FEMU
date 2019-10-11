@@ -16,17 +16,8 @@
 #include "hw/sysbus.h"
 #include "hw/misc/unimp.h"
 #include "qemu/log.h"
+#include "qemu/module.h"
 #include "qapi/error.h"
-
-#define UNIMPLEMENTED_DEVICE(obj) \
-    OBJECT_CHECK(UnimplementedDeviceState, (obj), TYPE_UNIMPLEMENTED_DEVICE)
-
-typedef struct {
-    SysBusDevice parent_obj;
-    MemoryRegion iomem;
-    char *name;
-    uint64_t size;
-} UnimplementedDeviceState;
 
 static uint64_t unimp_read(void *opaque, hwaddr offset, unsigned size)
 {

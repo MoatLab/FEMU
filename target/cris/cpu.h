@@ -21,13 +21,7 @@
 #ifndef CRIS_CPU_H
 #define CRIS_CPU_H
 
-#include "qemu-common.h"
 #include "cpu-qom.h"
-
-#define TARGET_LONG_BITS 32
-
-#define CPUArchState struct CPUCRISState
-
 #include "exec/cpu-defs.h"
 
 #define EXCP_NMI        1
@@ -105,8 +99,6 @@
 #define CC_A   14
 #define CC_P   15
 
-#define NB_MMU_MODES 2
-
 typedef struct {
     uint32_t hi;
     uint32_t lo;
@@ -170,8 +162,6 @@ typedef struct CPUCRISState {
         /* Fields up to this point are cleared by a CPU reset */
         struct {} end_reset_fields;
 
-        CPU_COMMON
-
         /* Members from load_info on are preserved across resets.  */
         void *load_info;
 } CPUCRISState;
@@ -187,17 +177,10 @@ struct CRISCPU {
     CPUState parent_obj;
     /*< public >*/
 
+    CPUNegativeOffsetState neg;
     CPUCRISState env;
 };
 
-static inline CRISCPU *cris_env_get_cpu(CPUCRISState *env)
-{
-    return container_of(env, CRISCPU, env);
-}
-
-#define ENV_GET_CPU(e) CPU(cris_env_get_cpu(e))
-
-#define ENV_OFFSET offsetof(CRISCPU, env)
 
 #ifndef CONFIG_USER_ONLY
 extern const struct VMStateDescription vmstate_cris_cpu;
@@ -207,8 +190,7 @@ void cris_cpu_do_interrupt(CPUState *cpu);
 void crisv10_cpu_do_interrupt(CPUState *cpu);
 bool cris_cpu_exec_interrupt(CPUState *cpu, int int_req);
 
-void cris_cpu_dump_state(CPUState *cs, FILE *f, fprintf_function cpu_fprintf,
-                         int flags);
+void cris_cpu_dump_state(CPUState *cs, FILE *f, int flags);
 
 hwaddr cris_cpu_get_phys_page_debug(CPUState *cpu, vaddr addr);
 
@@ -216,7 +198,6 @@ int crisv10_cpu_gdb_read_register(CPUState *cpu, uint8_t *buf, int reg);
 int cris_cpu_gdb_read_register(CPUState *cpu, uint8_t *buf, int reg);
 int cris_cpu_gdb_write_register(CPUState *cpu, uint8_t *buf, int reg);
 
-CRISCPU *cpu_cris_init(const char *cpu_model);
 /* you can call this signal handler from your SIGBUS and SIGSEGV
    signal handlers to inform the virtual CPU of exceptions. non zero
    is returned if the signal was handled by the virtual CPU.  */
@@ -262,13 +243,11 @@ enum {
 };
 
 /* CRIS uses 8k pages.  */
-#define TARGET_PAGE_BITS 13
 #define MMAP_SHIFT TARGET_PAGE_BITS
 
-#define TARGET_PHYS_ADDR_SPACE_BITS 32
-#define TARGET_VIRT_ADDR_SPACE_BITS 32
-
-#define cpu_init(cpu_model) CPU(cpu_cris_init(cpu_model))
+#define CRIS_CPU_TYPE_SUFFIX "-" TYPE_CRIS_CPU
+#define CRIS_CPU_TYPE_NAME(name) (name CRIS_CPU_TYPE_SUFFIX)
+#define CPU_RESOLVING_TYPE TYPE_CRIS_CPU
 
 #define cpu_signal_handler cpu_cris_signal_handler
 
@@ -281,8 +260,9 @@ static inline int cpu_mmu_index (CPUCRISState *env, bool ifetch)
 	return !!(env->pregs[PR_CCS] & U_FLAG);
 }
 
-int cris_cpu_handle_mmu_fault(CPUState *cpu, vaddr address, int rw,
-                              int mmu_idx);
+bool cris_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
+                       MMUAccessType access_type, int mmu_idx,
+                       bool probe, uintptr_t retaddr);
 
 /* Support function regs.  */
 #define SFR_RW_GC_CFG      0][0
@@ -293,6 +273,9 @@ int cris_cpu_handle_mmu_fault(CPUState *cpu, vaddr address, int rw,
 #define SFR_RW_MM_TLB_SEL  env->pregs[PR_SRS]][4
 #define SFR_RW_MM_TLB_LO   env->pregs[PR_SRS]][5
 #define SFR_RW_MM_TLB_HI   env->pregs[PR_SRS]][6
+
+typedef CPUCRISState CPUArchState;
+typedef CRISCPU ArchCPU;
 
 #include "exec/cpu-all.h"
 
@@ -307,6 +290,6 @@ static inline void cpu_get_tb_cpu_state(CPUCRISState *env, target_ulong *pc,
 }
 
 #define cpu_list cris_cpu_list
-void cris_cpu_list(FILE *f, fprintf_function cpu_fprintf);
+void cris_cpu_list(void);
 
 #endif

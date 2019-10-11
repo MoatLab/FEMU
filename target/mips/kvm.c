@@ -16,6 +16,7 @@
 
 #include "qemu-common.h"
 #include "cpu.h"
+#include "internal.h"
 #include "qemu/error-report.h"
 #include "qemu/timer.h"
 #include "sysemu/sysemu.h"
@@ -90,16 +91,21 @@ int kvm_arch_init_vcpu(CPUState *cs)
     return ret;
 }
 
+int kvm_arch_destroy_vcpu(CPUState *cs)
+{
+    return 0;
+}
+
 void kvm_mips_reset_vcpu(MIPSCPU *cpu)
 {
     CPUMIPSState *env = &cpu->env;
 
     if (!kvm_mips_fpu_cap && env->CP0_Config1 & (1 << CP0C1_FP)) {
-        fprintf(stderr, "Warning: KVM does not support FPU, disabling\n");
+        warn_report("KVM does not support FPU, disabling");
         env->CP0_Config1 &= ~(1 << CP0C1_FP);
     }
     if (!kvm_mips_msa_cap && env->CP0_Config3 & (1 << CP0C3_MSAP)) {
-        fprintf(stderr, "Warning: KVM does not support MSA, disabling\n");
+        warn_report("KVM does not support MSA, disabling");
         env->CP0_Config3 &= ~(1 << CP0C3_MSAP);
     }
 
@@ -523,10 +529,10 @@ static void kvm_mips_update_state(void *opaque, int running, RunState state)
      * already saved and can be restored when it is synced back to KVM.
      */
     if (!running) {
-        if (!cs->kvm_vcpu_dirty) {
+        if (!cs->vcpu_dirty) {
             ret = kvm_mips_save_count(cs);
             if (ret < 0) {
-                fprintf(stderr, "Failed saving count\n");
+                warn_report("Failed saving count");
             }
         }
     } else {
@@ -535,14 +541,14 @@ static void kvm_mips_update_state(void *opaque, int running, RunState state)
         ret = kvm_mips_put_one_ureg64(cs, KVM_REG_MIPS_COUNT_RESUME,
                                       &count_resume);
         if (ret < 0) {
-            fprintf(stderr, "Failed setting COUNT_RESUME\n");
+            warn_report("Failed setting COUNT_RESUME");
             return;
         }
 
-        if (!cs->kvm_vcpu_dirty) {
+        if (!cs->vcpu_dirty) {
             ret = kvm_mips_restore_count(cs);
             if (ret < 0) {
-                fprintf(stderr, "Failed restoring count\n");
+                warn_report("Failed restoring count");
             }
         }
     }

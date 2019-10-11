@@ -6,10 +6,19 @@
 
 #include <SDL.h>
 #include <SDL_syswm.h>
+#ifdef CONFIG_SDL_IMAGE
+# include <SDL_image.h>
+#endif
+
+#include "ui/kbd-state.h"
+#ifdef CONFIG_OPENGL
+# include "ui/egl-helpers.h"
+#endif
 
 struct sdl2_console {
     DisplayChangeListener dcl;
     DisplaySurface *surface;
+    DisplayOptions *opts;
     SDL_Texture *texture;
     SDL_Window *real_window;
     SDL_Renderer *real_renderer;
@@ -20,11 +29,13 @@ struct sdl2_console {
     int opengl;
     int updates;
     int idle_counter;
+    int ignore_hotkeys;
     SDL_GLContext winctx;
+    QKbdState *kbd;
 #ifdef CONFIG_OPENGL
-    ConsoleGLState *gls;
-    GLuint tex_id;
-    GLuint fbo_id;
+    QemuGLShader *gls;
+    egl_fb guest_fb;
+    egl_fb win_fb;
     bool y0_top;
     bool scanout_mode;
 #endif
@@ -35,7 +46,6 @@ void sdl2_window_destroy(struct sdl2_console *scon);
 void sdl2_window_resize(struct sdl2_console *scon);
 void sdl2_poll_events(struct sdl2_console *scon);
 
-void sdl2_reset_keys(struct sdl2_console *scon);
 void sdl2_process_key(struct sdl2_console *scon,
                       SDL_KeyboardEvent *ev);
 

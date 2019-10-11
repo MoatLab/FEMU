@@ -21,9 +21,11 @@
 #include "hw/pci/msix.h"
 #include "net/net.h"
 #include "net/eth.h"
+#include "qapi/error.h"
+#include "qapi/qapi-commands-rocker.h"
 #include "qemu/iov.h"
+#include "qemu/module.h"
 #include "qemu/bitops.h"
-#include "qmp-commands.h"
 
 #include "rocker.h"
 #include "rocker_hw.h"
@@ -69,10 +71,10 @@ struct rocker {
     QLIST_ENTRY(rocker) next;
 };
 
-#define ROCKER "rocker"
+#define TYPE_ROCKER "rocker"
 
-#define to_rocker(obj) \
-    OBJECT_CHECK(Rocker, (obj), ROCKER)
+#define ROCKER(obj) \
+    OBJECT_CHECK(Rocker, (obj), TYPE_ROCKER)
 
 static QLIST_HEAD(, rocker) rockers;
 
@@ -239,16 +241,10 @@ static int tx_consume(Rocker *r, DescInfo *info)
         }
         iov[iovcnt].iov_len = frag_len;
         iov[iovcnt].iov_base = g_malloc(frag_len);
-        if (!iov[iovcnt].iov_base) {
-            err = -ROCKER_ENOMEM;
-            goto err_no_mem;
-        }
 
-        if (pci_dma_read(dev, frag_addr, iov[iovcnt].iov_base,
-                     iov[iovcnt].iov_len)) {
-            err = -ROCKER_ENXIO;
-            goto err_bad_io;
-        }
+        pci_dma_read(dev, frag_addr, iov[iovcnt].iov_base,
+                     iov[iovcnt].iov_len);
+
         iovcnt++;
     }
 
@@ -261,8 +257,6 @@ static int tx_consume(Rocker *r, DescInfo *info)
     err = fp_port_eg(r->fp_port[port], iov, iovcnt);
 
 err_too_many_frags:
-err_bad_io:
-err_no_mem:
 err_bad_attr:
     for (i = 0; i < ROCKER_TX_FRAGS_MAX; i++) {
         g_free(iov[i].iov_base);
@@ -674,10 +668,7 @@ int rx_produce(World *world, uint32_t pport,
      */
 
     data = g_malloc(data_size);
-    if (!data) {
-        err = -ROCKER_ENOMEM;
-        goto out;
-    }
+
     iov_to_buf(iov, iovcnt, 0, data, data_size);
     pci_dma_write(dev, frag_addr, data, data_size);
     g_free(data);
@@ -721,11 +712,6 @@ static void rocker_test_dma_ctrl(Rocker *r, uint32_t val)
     int i;
 
     buf = g_malloc(r->test_dma_size);
-
-    if (!buf) {
-        DPRINTF("test dma buffer alloc failed");
-        return;
-    }
 
     switch (val) {
     case ROCKER_TEST_DMA_CTRL_CLEAR:
@@ -1252,20 +1238,18 @@ rollback:
     return err;
 }
 
-static int rocker_msix_init(Rocker *r)
+static int rocker_msix_init(Rocker *r, Error **errp)
 {
     PCIDevice *dev = PCI_DEVICE(r);
     int err;
-    Error *local_err = NULL;
 
     err = msix_init(dev, ROCKER_MSIX_VEC_COUNT(r->fp_ports),
                     &r->msix_bar,
                     ROCKER_PCI_MSIX_BAR_IDX, ROCKER_PCI_MSIX_TABLE_OFFSET,
                     &r->msix_bar,
                     ROCKER_PCI_MSIX_BAR_IDX, ROCKER_PCI_MSIX_PBA_OFFSET,
-                    0, &local_err);
+                    0, errp);
     if (err) {
-        error_report_err(local_err);
         return err;
     }
 
@@ -1296,14 +1280,14 @@ static World *rocker_world_type_by_name(Rocker *r, const char *name)
     for (i = 0; i < ROCKER_WORLD_TYPE_MAX; i++) {
         if (strcmp(name, world_name(r->worlds[i])) == 0) {
             return r->worlds[i];
-	}
+        }
     }
     return NULL;
 }
 
-static int pci_rocker_init(PCIDevice *dev)
+static void pci_rocker_realize(PCIDevice *dev, Error **errp)
 {
-    Rocker *r = to_rocker(dev);
+    Rocker *r = ROCKER(dev);
     const MACAddr zero = { .a = { 0, 0, 0, 0, 0, 0 } };
     const MACAddr dflt = { .a = { 0x52, 0x54, 0x00, 0x12, 0x35, 0x01 } };
     static int sw_index;
@@ -1313,23 +1297,15 @@ static int pci_rocker_init(PCIDevice *dev)
 
     r->worlds[ROCKER_WORLD_TYPE_OF_DPA] = of_dpa_world_alloc(r);
 
-    for (i = 0; i < ROCKER_WORLD_TYPE_MAX; i++) {
-        if (!r->worlds[i]) {
-            err = -ENOMEM;
-            goto err_world_alloc;
-        }
-    }
-
     if (!r->world_name) {
         r->world_name = g_strdup(world_name(r->worlds[ROCKER_WORLD_TYPE_OF_DPA]));
     }
 
     r->world_dflt = rocker_world_type_by_name(r, r->world_name);
     if (!r->world_dflt) {
-        fprintf(stderr,
-                "rocker: requested world \"%s\" does not exist\n",
+        error_setg(errp,
+                "invalid argument requested world %s does not exist",
                 r->world_name);
-        err = -EINVAL;
         goto err_world_type_by_name;
     }
 
@@ -1349,7 +1325,7 @@ static int pci_rocker_init(PCIDevice *dev)
 
     /* MSI-X init */
 
-    err = rocker_msix_init(r);
+    err = rocker_msix_init(r, errp);
     if (err) {
         goto err_msix_init;
     }
@@ -1357,11 +1333,11 @@ static int pci_rocker_init(PCIDevice *dev)
     /* validate switch properties */
 
     if (!r->name) {
-        r->name = g_strdup(ROCKER);
+        r->name = g_strdup(TYPE_ROCKER);
     }
 
     if (rocker_find(r->name)) {
-        err = -EEXIST;
+        error_setg(errp, "%s already exists", r->name);
         goto err_duplicate;
     }
 
@@ -1375,10 +1351,10 @@ static int pci_rocker_init(PCIDevice *dev)
 #define ROCKER_IFNAMSIZ 16
 #define MAX_ROCKER_NAME_LEN  (ROCKER_IFNAMSIZ - 1 - 3 - 3)
     if (strlen(r->name) > MAX_ROCKER_NAME_LEN) {
-        fprintf(stderr,
-                "rocker: name too long; please shorten to at most %d chars\n",
+        error_setg(errp,
+                "name too long; please shorten to at most %d chars",
                 MAX_ROCKER_NAME_LEN);
-        return -EINVAL;
+        goto err_name_too_long;
     }
 
     if (memcmp(&r->fp_start_macaddr, &zero, sizeof(zero)) == 0) {
@@ -1396,9 +1372,6 @@ static int pci_rocker_init(PCIDevice *dev)
     }
 
     r->rings = g_new(DescRing *, rocker_pci_ring_count(r));
-    if (!r->rings) {
-        goto err_rings_alloc;
-    }
 
     /* Rings are ordered like this:
      * - command ring
@@ -1410,13 +1383,8 @@ static int pci_rocker_init(PCIDevice *dev)
      * .....
      */
 
-    err = -ENOMEM;
     for (i = 0; i < rocker_pci_ring_count(r); i++) {
         DescRing *ring = desc_ring_alloc(r, i);
-
-        if (!ring) {
-            goto err_ring_alloc;
-        }
 
         if (i == ROCKER_RING_CMD) {
             desc_ring_set_consume(ring, cmd_consume, ROCKER_MSIX_VEC_CMD);
@@ -1437,48 +1405,31 @@ static int pci_rocker_init(PCIDevice *dev)
             fp_port_alloc(r, r->name, &r->fp_start_macaddr,
                           i, &r->fp_ports_peers[i]);
 
-        if (!port) {
-            goto err_port_alloc;
-        }
-
         r->fp_port[i] = port;
         fp_port_set_world(port, r->world_dflt);
     }
 
     QLIST_INSERT_HEAD(&rockers, r, next);
 
-    return 0;
+    return;
 
-err_port_alloc:
-    for (--i; i >= 0; i--) {
-        FpPort *port = r->fp_port[i];
-        fp_port_free(port);
-    }
-    i = rocker_pci_ring_count(r);
-err_ring_alloc:
-    for (--i; i >= 0; i--) {
-        desc_ring_free(r->rings[i]);
-    }
-    g_free(r->rings);
-err_rings_alloc:
+err_name_too_long:
 err_duplicate:
     rocker_msix_uninit(r);
 err_msix_init:
     object_unparent(OBJECT(&r->msix_bar));
     object_unparent(OBJECT(&r->mmio));
 err_world_type_by_name:
-err_world_alloc:
     for (i = 0; i < ROCKER_WORLD_TYPE_MAX; i++) {
         if (r->worlds[i]) {
             world_free(r->worlds[i]);
         }
     }
-    return err;
 }
 
 static void pci_rocker_uninit(PCIDevice *dev)
 {
-    Rocker *r = to_rocker(dev);
+    Rocker *r = ROCKER(dev);
     int i;
 
     QLIST_REMOVE(r, next);
@@ -1511,7 +1462,7 @@ static void pci_rocker_uninit(PCIDevice *dev)
 
 static void rocker_reset(DeviceState *dev)
 {
-    Rocker *r = to_rocker(dev);
+    Rocker *r = ROCKER(dev);
     int i;
 
     for (i = 0; i < ROCKER_WORLD_TYPE_MAX; i++) {
@@ -1549,7 +1500,7 @@ static Property rocker_properties[] = {
 };
 
 static const VMStateDescription rocker_vmsd = {
-    .name = ROCKER,
+    .name = TYPE_ROCKER,
     .unmigratable = 1,
 };
 
@@ -1558,7 +1509,7 @@ static void rocker_class_init(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
 
-    k->init = pci_rocker_init;
+    k->realize = pci_rocker_realize;
     k->exit = pci_rocker_uninit;
     k->vendor_id = PCI_VENDOR_ID_REDHAT;
     k->device_id = PCI_DEVICE_ID_REDHAT_ROCKER;
@@ -1572,10 +1523,14 @@ static void rocker_class_init(ObjectClass *klass, void *data)
 }
 
 static const TypeInfo rocker_info = {
-    .name          = ROCKER,
+    .name          = TYPE_ROCKER,
     .parent        = TYPE_PCI_DEVICE,
     .instance_size = sizeof(Rocker),
     .class_init    = rocker_class_init,
+    .interfaces = (InterfaceInfo[]) {
+        { INTERFACE_CONVENTIONAL_PCI_DEVICE },
+        { },
+    },
 };
 
 static void rocker_register_types(void)

@@ -1,7 +1,7 @@
 /*
  * QEMU GRLIB GPTimer Emulator
  *
- * Copyright (c) 2010-2011 AdaCore
+ * Copyright (c) 2010-2019 AdaCore
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -23,10 +23,12 @@
  */
 
 #include "qemu/osdep.h"
+#include "hw/sparc/grlib.h"
 #include "hw/sysbus.h"
 #include "qemu/timer.h"
 #include "hw/ptimer.h"
 #include "qemu/main-loop.h"
+#include "qemu/module.h"
 
 #include "trace.h"
 
@@ -52,7 +54,6 @@
 #define COUNTER_RELOAD_OFFSET 0x04
 #define TIMER_BASE            0x10
 
-#define TYPE_GRLIB_GPTIMER "grlib,gptimer"
 #define GRLIB_GPTIMER(obj) \
     OBJECT_CHECK(GPTimerUnit, (obj), TYPE_GRLIB_GPTIMER)
 
@@ -347,10 +348,11 @@ static void grlib_gptimer_reset(DeviceState *d)
     }
 }
 
-static int grlib_gptimer_init(SysBusDevice *dev)
+static void grlib_gptimer_realize(DeviceState *dev, Error **errp)
 {
     GPTimerUnit  *unit = GRLIB_GPTIMER(dev);
     unsigned int  i;
+    SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
 
     assert(unit->nr_timers > 0);
     assert(unit->nr_timers <= GPTIMER_MAX_TIMERS);
@@ -366,7 +368,7 @@ static int grlib_gptimer_init(SysBusDevice *dev)
         timer->id     = i;
 
         /* One IRQ line for each timer */
-        sysbus_init_irq(dev, &timer->irq);
+        sysbus_init_irq(sbd, &timer->irq);
 
         ptimer_set_freq(timer->ptimer, unit->freq_hz);
     }
@@ -375,8 +377,7 @@ static int grlib_gptimer_init(SysBusDevice *dev)
                           unit, "gptimer",
                           UNIT_REG_SIZE + GPTIMER_REG_SIZE * unit->nr_timers);
 
-    sysbus_init_mmio(dev, &unit->iomem);
-    return 0;
+    sysbus_init_mmio(sbd, &unit->iomem);
 }
 
 static Property grlib_gptimer_properties[] = {
@@ -389,9 +390,8 @@ static Property grlib_gptimer_properties[] = {
 static void grlib_gptimer_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
 
-    k->init = grlib_gptimer_init;
+    dc->realize = grlib_gptimer_realize;
     dc->reset = grlib_gptimer_reset;
     dc->props = grlib_gptimer_properties;
 }

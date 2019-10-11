@@ -17,8 +17,8 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef TARGET_CPU_H
-#define TARGET_CPU_H
+#ifndef NIOS2_TARGET_CPU_H
+#define NIOS2_TARGET_CPU_H
 
 static inline void cpu_clone_regs(CPUNios2State *env, target_ulong newsp)
 {
@@ -36,4 +36,8 @@ static inline void cpu_set_tls(CPUNios2State *env, target_ulong newtls)
      */
 }
 
+static inline abi_ulong get_sp_from_cpustate(CPUNios2State *state)
+{
+    return state->regs[R_SP];
+}
 #endif

@@ -29,7 +29,7 @@ static inline uint16_t applesmc_port(void)
     Object *obj = object_resolve_path_type("", TYPE_APPLE_SMC, NULL);
 
     if (obj) {
-        return object_property_get_int(obj, APPLESMC_PROP_IO_BASE, NULL);
+        return object_property_get_uint(obj, APPLESMC_PROP_IO_BASE, NULL);
     }
     return 0;
 }
@@ -42,10 +42,6 @@ static inline uint16_t applesmc_port(void)
     OBJECT_GET_CLASS(IsaDmaClass, (obj), TYPE_ISADMA)
 #define ISADMA(obj) \
     INTERFACE_CHECK(IsaDma, (obj), TYPE_ISADMA)
-
-struct IsaDma {
-    Object parent;
-};
 
 typedef enum {
     ISADMA_TRANSFER_VERIFY,
@@ -151,6 +147,4 @@ static inline ISABus *isa_bus_from_device(ISADevice *d)
     return ISA_BUS(qdev_get_parent_bus(DEVICE(d)));
 }
 
-/* i8257.c */
-void DMA_init(ISABus *bus, int high_page_enable);
 #endif

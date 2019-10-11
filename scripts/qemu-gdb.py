@@ -7,11 +7,8 @@
 # Authors:
 #  Avi Kivity <avi@redhat.com>
 #
-# This work is licensed under the terms of the GNU GPL, version 2.  See
-# the COPYING file in the top-level directory.
-#
-# Contributions after 2012-01-13 are licensed under the terms of the
-# GNU GPL, version 2 or (at your option) any later version.
+# This work is licensed under the terms of the GNU GPL, version 2 or
+# later.  See the COPYING file in the top-level directory.
 
 # Usage:
 # At the (gdb) prompt, type "source scripts/qemu-gdb.py".
@@ -26,7 +23,7 @@ import os, sys
 
 sys.path.append(os.path.dirname(__file__))
 
-from qemugdb import aio, mtree, coroutine
+from qemugdb import aio, mtree, coroutine, tcg, timers
 
 class QemuCommand(gdb.Command):
     '''Prefix for QEMU debug support commands'''
@@ -38,6 +35,8 @@ QemuCommand()
 coroutine.CoroutineCommand()
 mtree.MtreeCommand()
 aio.HandlersCommand()
+tcg.TCGLockStatusCommand()
+timers.TimersCommand()
 
 coroutine.CoroutineSPFunction()
 coroutine.CoroutinePCFunction()

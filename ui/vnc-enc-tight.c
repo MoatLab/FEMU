@@ -31,7 +31,6 @@
 /* This needs to be before jpeglib.h line because of conflict with
    INT32 definitions between jmorecfg.h (included by jpeglib.h) and
    Win32 basetsd.h (included by windows.h). */
-#include "qemu-common.h"
 
 #ifdef CONFIG_VNC_PNG
 /* The following define is needed by pngconf.h. Otherwise it won't compile,
@@ -44,7 +43,6 @@
 #endif
 
 #include "qemu/bswap.h"
-#include "qapi/qmp/qint.h"
 #include "vnc.h"
 #include "vnc-enc-tight.h"
 #include "vnc-palette.h"
@@ -887,11 +885,11 @@ static int tight_compress_data(VncState *vs, int stream_id, size_t bytes,
  */
 static void tight_pack24(VncState *vs, uint8_t *buf, size_t count, size_t *ret)
 {
-    uint32_t *buf32;
+    uint8_t *buf8;
     uint32_t pix;
     int rshift, gshift, bshift;
 
-    buf32 = (uint32_t *)buf;
+    buf8 = buf;
 
     if (1 /* FIXME */) {
         rshift = vs->client_pf.rshift;
@@ -908,10 +906,11 @@ static void tight_pack24(VncState *vs, uint8_t *buf, size_t count, size_t *ret)
     }
 
     while (count--) {
-        pix = *buf32++;
+        pix = ldl_he_p(buf8);
         *buf++ = (char)(pix >> rshift);
         *buf++ = (char)(pix >> gshift);
         *buf++ = (char)(pix >> bshift);
+        buf8 += 4;
     }
 }
 
@@ -980,7 +979,7 @@ static int send_mono_rect(VncState *vs, int x, int y,
     }
 #endif
 
-    bytes = ((w + 7) / 8) * h;
+    bytes = DIV_ROUND_UP(w, 8) * h;
 
     vnc_write_u8(vs, (stream | VNC_TIGHT_EXPLICIT_FILTER) << 4);
     vnc_write_u8(vs, VNC_TIGHT_FILTER_PALETTE);

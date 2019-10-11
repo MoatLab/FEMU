@@ -5,7 +5,8 @@
 #include "hw/boards.h"
 #include "hw/qdev-core.h"
 #include "trace.h"
-#include "qapi-event.h"
+#include "qapi/error.h"
+#include "qapi/qapi-events-misc.h"
 
 #define MEMORY_SLOTS_NUMBER          "MDNR"
 #define MEMORY_HOTPLUG_IO_REGION     "HPMR"
@@ -83,23 +84,25 @@ static uint64_t acpi_memory_hotplug_read(void *opaque, hwaddr addr,
     o = OBJECT(mdev->dimm);
     switch (addr) {
     case 0x0: /* Lo part of phys address where DIMM is mapped */
-        val = o ? object_property_get_int(o, PC_DIMM_ADDR_PROP, NULL) : 0;
+        val = o ? object_property_get_uint(o, PC_DIMM_ADDR_PROP, NULL) : 0;
         trace_mhp_acpi_read_addr_lo(mem_st->selector, val);
         break;
     case 0x4: /* Hi part of phys address where DIMM is mapped */
-        val = o ? object_property_get_int(o, PC_DIMM_ADDR_PROP, NULL) >> 32 : 0;
+        val =
+            o ? object_property_get_uint(o, PC_DIMM_ADDR_PROP, NULL) >> 32 : 0;
         trace_mhp_acpi_read_addr_hi(mem_st->selector, val);
         break;
     case 0x8: /* Lo part of DIMM size */
-        val = o ? object_property_get_int(o, PC_DIMM_SIZE_PROP, NULL) : 0;
+        val = o ? object_property_get_uint(o, PC_DIMM_SIZE_PROP, NULL) : 0;
         trace_mhp_acpi_read_size_lo(mem_st->selector, val);
         break;
     case 0xc: /* Hi part of DIMM size */
-        val = o ? object_property_get_int(o, PC_DIMM_SIZE_PROP, NULL) >> 32 : 0;
+        val =
+            o ? object_property_get_uint(o, PC_DIMM_SIZE_PROP, NULL) >> 32 : 0;
         trace_mhp_acpi_read_size_hi(mem_st->selector, val);
         break;
     case 0x10: /* node proximity for _PXM method */
-        val = o ? object_property_get_int(o, PC_DIMM_NODE_PROP, NULL) : 0;
+        val = o ? object_property_get_uint(o, PC_DIMM_NODE_PROP, NULL) : 0;
         trace_mhp_acpi_read_pxm(mem_st->selector, val);
         break;
     case 0x14: /* pack and return is_* fields */
@@ -158,7 +161,7 @@ static void acpi_memory_hotplug_write(void *opaque, hwaddr addr, uint64_t data,
         /* TODO: implement memory removal on guest signal */
 
         info = acpi_memory_device_status(mem_st->selector, mdev);
-        qapi_event_send_acpi_device_ost(info, &error_abort);
+        qapi_event_send_acpi_device_ost(info);
         qapi_free_ACPIOSTInfo(info);
         break;
     case 0x14: /* set is_* fields  */
@@ -182,11 +185,11 @@ static void acpi_memory_hotplug_write(void *opaque, hwaddr addr, uint64_t data,
             if (local_err) {
                 trace_mhp_acpi_pc_dimm_delete_failed(mem_st->selector);
                 qapi_event_send_mem_unplug_error(dev->id,
-                                                 error_get_pretty(local_err),
-                                                 &error_abort);
+                                                 error_get_pretty(local_err));
                 error_free(local_err);
                 break;
             }
+            object_unparent(OBJECT(dev));
             trace_mhp_acpi_pc_dimm_deleted(mem_st->selector);
         }
         break;
@@ -684,15 +687,15 @@ void build_memory_hotplug_aml(Aml *table, uint32_t nr_mem,
 
             method = aml_method("_OST", 3, AML_NOTSERIALIZED);
             s = MEMORY_SLOT_OST_METHOD;
-            aml_append(method, aml_return(aml_call4(
-                s, aml_name("_UID"), aml_arg(0), aml_arg(1), aml_arg(2)
-            )));
+            aml_append(method,
+                       aml_call4(s, aml_name("_UID"), aml_arg(0),
+                                 aml_arg(1), aml_arg(2)));
             aml_append(dev, method);
 
             method = aml_method("_EJ0", 1, AML_NOTSERIALIZED);
             s = MEMORY_SLOT_EJECT_METHOD;
-            aml_append(method, aml_return(aml_call2(
-                       s, aml_name("_UID"), aml_arg(0))));
+            aml_append(method,
+                       aml_call2(s, aml_name("_UID"), aml_arg(0)));
             aml_append(dev, method);
 
             aml_append(dev_container, dev);

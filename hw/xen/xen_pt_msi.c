@@ -11,7 +11,7 @@
 
 #include "qemu/osdep.h"
 
-#include "hw/xen/xen_backend.h"
+#include "hw/xen/xen-legacy-backend.h"
 #include "xen_pt.h"
 #include "hw/i386/apic-msidef.h"
 
@@ -24,6 +24,7 @@
 #define XEN_PT_GFLAGS_SHIFT_DM             9
 #define XEN_PT_GFLAGSSHIFT_DELIV_MODE     12
 #define XEN_PT_GFLAGSSHIFT_TRG_MODE       15
+#define XEN_PT_GFLAGSSHIFT_UNMASKED       16
 
 #define latch(fld) latch[PCI_MSIX_ENTRY_##fld / sizeof(uint32_t)]
 
@@ -155,7 +156,8 @@ static int msi_msix_update(XenPCIPassthroughState *s,
                            int pirq,
                            bool is_msix,
                            int msix_entry,
-                           int *old_pirq)
+                           int *old_pirq,
+                           bool masked)
 {
     PCIDevice *d = &s->dev;
     uint8_t gvec = msi_vector(data);
@@ -170,6 +172,8 @@ static int msi_msix_update(XenPCIPassthroughState *s,
     if (is_msix) {
         table_addr = s->msix->mmio_base_addr;
     }
+
+    gflags |= masked ? 0 : (1u << XEN_PT_GFLAGSSHIFT_UNMASKED);
 
     rc = xc_domain_update_msi_irq(xen_xc, xen_domid, gvec,
                                   pirq, gflags, table_addr);
@@ -273,8 +277,10 @@ int xen_pt_msi_setup(XenPCIPassthroughState *s)
 int xen_pt_msi_update(XenPCIPassthroughState *s)
 {
     XenPTMSI *msi = s->msi;
+
+    /* Current MSI emulation in QEMU only supports 1 vector */
     return msi_msix_update(s, msi_addr64(msi), msi->data, msi->pirq,
-                           false, 0, &msi->pirq);
+                           false, 0, &msi->pirq, msi->mask & 1);
 }
 
 void xen_pt_msi_disable(XenPCIPassthroughState *s)
@@ -355,7 +361,8 @@ static int xen_pt_msix_update_one(XenPCIPassthroughState *s, int entry_nr,
     }
 
     rc = msi_msix_update(s, entry->addr, entry->data, pirq, true,
-                         entry_nr, &entry->pirq);
+                         entry_nr, &entry->pirq,
+                         vec_ctrl & PCI_MSIX_ENTRY_CTRL_MASKBIT);
 
     if (!rc) {
         entry->updated = false;
@@ -491,7 +498,8 @@ static uint64_t pci_msix_read(void *opaque, hwaddr addr,
 }
 
 static bool pci_msix_accepts(void *opaque, hwaddr addr,
-                             unsigned size, bool is_write)
+                             unsigned size, bool is_write,
+                             MemTxAttrs attrs)
 {
     return !(addr & (size - 1));
 }
@@ -535,7 +543,11 @@ int xen_pt_msix_init(XenPCIPassthroughState *s, uint32_t base)
         return -1;
     }
 
-    xen_host_pci_get_word(hd, base + PCI_MSIX_FLAGS, &control);
+    rc = xen_host_pci_get_word(hd, base + PCI_MSIX_FLAGS, &control);
+    if (rc) {
+        XEN_PT_ERR(d, "Failed to read PCI_MSIX_FLAGS field\n");
+        return rc;
+    }
     total_entries = control & PCI_MSIX_FLAGS_QSIZE;
     total_entries += 1;
 
@@ -554,7 +566,11 @@ int xen_pt_msix_init(XenPCIPassthroughState *s, uint32_t base)
                            + XC_PAGE_SIZE - 1)
                           & XC_PAGE_MASK);
 
-    xen_host_pci_get_long(hd, base + PCI_MSIX_TABLE, &table_off);
+    rc = xen_host_pci_get_long(hd, base + PCI_MSIX_TABLE, &table_off);
+    if (rc) {
+        XEN_PT_ERR(d, "Failed to read PCI_MSIX_TABLE field\n");
+        goto error_out;
+    }
     bar_index = msix->bar_index = table_off & PCI_MSIX_FLAGS_BIRMASK;
     table_off = table_off & ~PCI_MSIX_FLAGS_BIRMASK;
     msix->table_base = s->real_device.io_regions[bar_index].base_addr;

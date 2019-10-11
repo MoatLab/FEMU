@@ -79,12 +79,16 @@ struct PCIExpressDevice {
 
     /* Offset of ATS capability in config space */
     uint16_t ats_cap;
+
+    /* ACS */
+    uint16_t acs_cap;
 };
 
 #define COMPAT_PROP_PCP "power_controller_present"
 
 /* PCI express capability helper functions */
-int pcie_cap_init(PCIDevice *dev, uint8_t offset, uint8_t type, uint8_t port);
+int pcie_cap_init(PCIDevice *dev, uint8_t offset, uint8_t type,
+                  uint8_t port, Error **errp);
 int pcie_cap_v1_init(PCIDevice *dev, uint8_t offset,
                      uint8_t type, uint8_t port);
 int pcie_endpoint_cap_init(PCIDevice *dev, uint8_t offset);
@@ -103,7 +107,9 @@ void pcie_cap_lnkctl_reset(PCIDevice *dev);
 
 void pcie_cap_slot_init(PCIDevice *dev, uint16_t slot);
 void pcie_cap_slot_reset(PCIDevice *dev);
+void pcie_cap_slot_get(PCIDevice *dev, uint16_t *slt_ctl, uint16_t *slt_sta);
 void pcie_cap_slot_write_config(PCIDevice *dev,
+                                uint16_t old_slt_ctl, uint16_t old_slt_sta,
                                 uint32_t addr, uint32_t val, int len);
 int pcie_cap_slot_post_load(void *opaque, int version_id);
 void pcie_cap_slot_push_attention_button(PCIDevice *dev);
@@ -125,13 +131,21 @@ uint16_t pcie_find_capability(PCIDevice *dev, uint16_t cap_id);
 void pcie_add_capability(PCIDevice *dev,
                          uint16_t cap_id, uint8_t cap_ver,
                          uint16_t offset, uint16_t size);
+void pcie_sync_bridge_lnk(PCIDevice *dev);
+
+void pcie_acs_init(PCIDevice *dev, uint16_t offset);
+void pcie_acs_reset(PCIDevice *dev);
 
 void pcie_ari_init(PCIDevice *dev, uint16_t offset, uint16_t nextfn);
 void pcie_dev_ser_num_init(PCIDevice *dev, uint16_t offset, uint64_t ser_num);
 void pcie_ats_init(PCIDevice *dev, uint16_t offset);
 
-void pcie_cap_slot_hotplug_cb(HotplugHandler *hotplug_dev, DeviceState *dev,
-                              Error **errp);
-void pcie_cap_slot_hot_unplug_request_cb(HotplugHandler *hotplug_dev,
-                                         DeviceState *dev, Error **errp);
+void pcie_cap_slot_pre_plug_cb(HotplugHandler *hotplug_dev, DeviceState *dev,
+                               Error **errp);
+void pcie_cap_slot_plug_cb(HotplugHandler *hotplug_dev, DeviceState *dev,
+                           Error **errp);
+void pcie_cap_slot_unplug_cb(HotplugHandler *hotplug_dev, DeviceState *dev,
+                             Error **errp);
+void pcie_cap_slot_unplug_request_cb(HotplugHandler *hotplug_dev,
+                                     DeviceState *dev, Error **errp);
 #endif /* QEMU_PCIE_H */

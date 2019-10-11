@@ -20,16 +20,10 @@
 #ifndef MICROBLAZE_CPU_H
 #define MICROBLAZE_CPU_H
 
-#include "qemu-common.h"
 #include "cpu-qom.h"
-
-#define TARGET_LONG_BITS 32
-
-#define CPUArchState struct CPUMBState
-
 #include "exec/cpu-defs.h"
-#include "fpu/softfloat.h"
-struct CPUMBState;
+#include "fpu/softfloat-types.h"
+
 typedef struct CPUMBState CPUMBState;
 #if !defined(CONFIG_USER_ONLY)
 #include "mmu.h"
@@ -129,6 +123,8 @@ typedef struct CPUMBState CPUMBState;
 #define PVR0_USER1_MASK                 0x000000FF
 #define PVR0_SPROT_MASK                 0x00000001
 
+#define PVR0_VERSION_SHIFT              8
+
 /* User 2 PVR mask */
 #define PVR1_USER2_MASK                 0xFFFFFFFF
 
@@ -201,6 +197,7 @@ typedef struct CPUMBState CPUMBState;
 
 /* Target family PVR mask */
 #define PVR10_TARGET_FAMILY_MASK        0xFF000000
+#define PVR10_ASIZE_SHIFT               18
 
 /* MMU descrtiption */
 #define PVR11_USE_MMU                   0xC0000000
@@ -225,8 +222,6 @@ typedef struct CPUMBState CPUMBState;
 #define CC_NE  1
 #define CC_EQ  0
 
-#define NB_MMU_MODES    3
-
 #define STREAM_EXCEPTION (1 << 0)
 #define STREAM_ATOMIC    (1 << 1)
 #define STREAM_TEST      (1 << 2)
@@ -236,19 +231,19 @@ typedef struct CPUMBState CPUMBState;
 struct CPUMBState {
     uint32_t debug;
     uint32_t btaken;
-    uint32_t btarget;
+    uint64_t btarget;
     uint32_t bimm;
 
     uint32_t imm;
-    uint32_t regs[33];
-    uint32_t sregs[24];
+    uint32_t regs[32];
+    uint64_t sregs[14];
     float_status fp_status;
     /* Stack protectors. Yes, it's a hw feature.  */
     uint32_t slr, shr;
 
     /* lwx/swx reserved address */
 #define RES_ADDR_NONE 0xffffffff /* Use 0xffffffff to indicate no reservation */
-    uint32_t res_addr;
+    target_ulong res_addr;
     uint32_t res_val;
 
     /* Internal flags.  */
@@ -270,12 +265,10 @@ struct CPUMBState {
     /* Fields up to this point are cleared by a CPU reset */
     struct {} end_reset_fields;
 
-    CPU_COMMON
-
     /* These fields are preserved on reset.  */
 
     struct {
-        uint32_t regs[16];
+        uint32_t regs[13];
     } pvr;
 };
 
@@ -291,53 +284,46 @@ struct MicroBlazeCPU {
 
     /*< public >*/
 
+    CPUNegativeOffsetState neg;
+    CPUMBState env;
+
     /* Microblaze Configuration Settings */
     struct {
         bool stackprot;
         uint32_t base_vectors;
+        uint8_t addr_size;
         uint8_t use_fpu;
+        uint8_t use_hw_mul;
+        bool use_barrel;
+        bool use_div;
+        bool use_msr_instr;
+        bool use_pcmp_instr;
         bool use_mmu;
         bool dcache_writeback;
         bool endi;
+        bool dopb_bus_exception;
+        bool iopb_bus_exception;
         char *version;
         uint8_t pvr;
     } cfg;
-
-    CPUMBState env;
 };
 
-static inline MicroBlazeCPU *mb_env_get_cpu(CPUMBState *env)
-{
-    return container_of(env, MicroBlazeCPU, env);
-}
-
-#define ENV_GET_CPU(e) CPU(mb_env_get_cpu(e))
-
-#define ENV_OFFSET offsetof(MicroBlazeCPU, env)
 
 void mb_cpu_do_interrupt(CPUState *cs);
 bool mb_cpu_exec_interrupt(CPUState *cs, int int_req);
-void mb_cpu_dump_state(CPUState *cpu, FILE *f, fprintf_function cpu_fprintf,
-                       int flags);
+void mb_cpu_dump_state(CPUState *cpu, FILE *f, int flags);
 hwaddr mb_cpu_get_phys_page_debug(CPUState *cpu, vaddr addr);
 int mb_cpu_gdb_read_register(CPUState *cpu, uint8_t *buf, int reg);
 int mb_cpu_gdb_write_register(CPUState *cpu, uint8_t *buf, int reg);
 
 void mb_tcg_init(void);
-MicroBlazeCPU *cpu_mb_init(const char *cpu_model);
 /* you can call this signal handler from your SIGBUS and SIGSEGV
    signal handlers to inform the virtual CPU of exceptions. non zero
    is returned if the signal was handled by the virtual CPU.  */
 int cpu_mb_signal_handler(int host_signum, void *pinfo,
                           void *puc);
 
-/* FIXME: MB uses variable pages down to 1K but linux only uses 4k.  */
-#define TARGET_PAGE_BITS 12
-
-#define TARGET_PHYS_ADDR_SPACE_BITS 32
-#define TARGET_VIRT_ADDR_SPACE_BITS 32
-
-#define cpu_init(cpu_model) CPU(cpu_mb_init(cpu_model))
+#define CPU_RESOLVING_TYPE TYPE_MICROBLAZE_CPU
 
 #define cpu_signal_handler cpu_mb_signal_handler
 
@@ -350,19 +336,12 @@ int cpu_mb_signal_handler(int host_signum, void *pinfo,
 #define MMU_USER_IDX    2
 /* See NB_MMU_MODES further up the file.  */
 
-static inline int cpu_mmu_index (CPUMBState *env, bool ifetch)
-{
-        /* Are we in nommu mode?.  */
-        if (!(env->sregs[SR_MSR] & MSR_VM))
-            return MMU_NOMMU_IDX;
+bool mb_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
+                     MMUAccessType access_type, int mmu_idx,
+                     bool probe, uintptr_t retaddr);
 
-	if (env->sregs[SR_MSR] & MSR_UM)
-            return MMU_USER_IDX;
-        return MMU_KERNEL_IDX;
-}
-
-int mb_cpu_handle_mmu_fault(CPUState *cpu, vaddr address, int rw,
-                            int mmu_idx);
+typedef CPUMBState CPUArchState;
+typedef MicroBlazeCPU ArchCPU;
 
 #include "exec/cpu-all.h"
 
@@ -376,9 +355,25 @@ static inline void cpu_get_tb_cpu_state(CPUMBState *env, target_ulong *pc,
 }
 
 #if !defined(CONFIG_USER_ONLY)
-void mb_cpu_unassigned_access(CPUState *cpu, hwaddr addr,
-                              bool is_write, bool is_exec, int is_asi,
-                              unsigned size);
+void mb_cpu_transaction_failed(CPUState *cs, hwaddr physaddr, vaddr addr,
+                               unsigned size, MMUAccessType access_type,
+                               int mmu_idx, MemTxAttrs attrs,
+                               MemTxResult response, uintptr_t retaddr);
 #endif
+
+static inline int cpu_mmu_index(CPUMBState *env, bool ifetch)
+{
+    MicroBlazeCPU *cpu = env_archcpu(env);
+
+    /* Are we in nommu mode?.  */
+    if (!(env->sregs[SR_MSR] & MSR_VM) || !cpu->cfg.use_mmu) {
+        return MMU_NOMMU_IDX;
+    }
+
+    if (env->sregs[SR_MSR] & MSR_UM) {
+        return MMU_USER_IDX;
+    }
+    return MMU_KERNEL_IDX;
+}
 
 #endif

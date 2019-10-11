@@ -30,6 +30,7 @@
 #include "sysemu/sysemu.h"
 #include "sysemu/dma.h"
 #include "qemu/log.h"
+#include "qemu/module.h"
 
 #define FREQ_HZ 900000000
 
@@ -43,7 +44,7 @@
     if (XLNX_ZYNQ_DEVCFG_ERR_DEBUG) { \
         qemu_log("%s: " fmt, __func__, ## args); \
     } \
-} while (0);
+} while (0)
 
 REG32(CTRL, 0x00)
     FIELD(CTRL,     FORCE_RST,          31,  1) /* Not supported, wr ignored */

@@ -9,11 +9,15 @@
  */
 
 #include "qemu/osdep.h"
-#include "sysemu/char.h"
+#include "qemu-common.h"
+#include "qemu/units.h"
+#include <libcacard.h>
+#include "chardev/char-fe.h"
 #include "qemu/error-report.h"
+#include "qemu/module.h"
 #include "qemu/sockets.h"
 #include "ccid.h"
-#include "cacard/vscard_common.h"
+#include "qapi/error.h"
 
 #define DPRINTF(card, lvl, fmt, ...)                    \
 do {                                                    \
@@ -39,7 +43,7 @@ static const uint8_t DEFAULT_ATR[] = {
  0x13, 0x08
 };
 
-#define VSCARD_IN_SIZE 65536
+#define VSCARD_IN_SIZE      (64 * KiB)
 
 /* maximum size of ATR - from 7816-3 */
 #define MAX_ATR_SIZE        40
@@ -264,10 +268,7 @@ static void ccid_card_vscard_handle_message(PassthruState *card,
 
 static void ccid_card_vscard_drop_connection(PassthruState *card)
 {
-    Chardev *chr = qemu_chr_fe_get_driver(&card->cs);
-
-    qemu_chr_fe_deinit(&card->cs);
-    qemu_chr_delete(chr);
+    qemu_chr_fe_deinit(&card->cs, true);
     card->vscard_in_pos = card->vscard_in_hdr = 0;
 }
 
@@ -277,9 +278,9 @@ static void ccid_card_vscard_read(void *opaque, const uint8_t *buf, int size)
     VSCMsgHeader *hdr;
 
     if (card->vscard_in_pos + size > VSCARD_IN_SIZE) {
-        error_report(
-            "no room for data: pos %d +  size %d > %d. dropping connection.",
-            card->vscard_in_pos, size, VSCARD_IN_SIZE);
+        error_report("no room for data: pos %u +  size %d > %" PRId64 "."
+                     " dropping connection.",
+                     card->vscard_in_pos, size, VSCARD_IN_SIZE);
         ccid_card_vscard_drop_connection(card);
         return;
     }
@@ -325,7 +326,7 @@ static void passthru_apdu_from_guest(
 {
     PassthruState *card = PASSTHRU_CCID_CARD(base);
 
-    if (!qemu_chr_fe_get_driver(&card->cs)) {
+    if (!qemu_chr_fe_backend_connected(&card->cs)) {
         printf("ccid-passthru: no chardev, discarding apdu length %d\n", len);
         return;
     }
@@ -340,29 +341,28 @@ static const uint8_t *passthru_get_atr(CCIDCardState *base, uint32_t *len)
     return card->atr;
 }
 
-static int passthru_initfn(CCIDCardState *base)
+static void passthru_realize(CCIDCardState *base, Error **errp)
 {
     PassthruState *card = PASSTHRU_CCID_CARD(base);
 
     card->vscard_in_pos = 0;
     card->vscard_in_hdr = 0;
-    if (qemu_chr_fe_get_driver(&card->cs)) {
-        DPRINTF(card, D_INFO, "initing chardev\n");
+    if (qemu_chr_fe_backend_connected(&card->cs)) {
+        DPRINTF(card, D_INFO, "ccid-card-passthru: initing chardev");
         qemu_chr_fe_set_handlers(&card->cs,
             ccid_card_vscard_can_read,
             ccid_card_vscard_read,
-            ccid_card_vscard_event, card, NULL, true);
+            ccid_card_vscard_event, NULL, card, NULL, true);
         ccid_card_vscard_send_init(card);
     } else {
-        error_report("missing chardev");
-        return -1;
+        error_setg(errp, "missing chardev");
+        return;
     }
     card->debug = parse_debug_env("QEMU_CCID_PASSTHRU_DEBUG", D_VERBOSE,
                                   card->debug);
     assert(sizeof(DEFAULT_ATR) <= MAX_ATR_SIZE);
     memcpy(card->atr, DEFAULT_ATR, sizeof(DEFAULT_ATR));
     card->atr_length = sizeof(DEFAULT_ATR);
-    return 0;
 }
 
 static VMStateDescription passthru_vmstate = {
@@ -390,7 +390,7 @@ static void passthru_class_initfn(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
     CCIDCardClass *cc = CCID_CARD_CLASS(klass);
 
-    cc->initfn = passthru_initfn;
+    cc->realize = passthru_realize;
     cc->get_atr = passthru_get_atr;
     cc->apdu_from_guest = passthru_apdu_from_guest;
     set_bit(DEVICE_CATEGORY_INPUT, dc->categories);

@@ -20,9 +20,8 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
+#include "qemu/qemu-print.h"
 #include "cpu.h"
-#include "qemu-common.h"
-#include "exec/exec-all.h"
 
 
 static void lm32_cpu_set_pc(CPUState *cs, vaddr value)
@@ -32,43 +31,25 @@ static void lm32_cpu_set_pc(CPUState *cs, vaddr value)
     cpu->env.pc = value;
 }
 
-/* Sort alphabetically by type name. */
-static gint lm32_cpu_list_compare(gconstpointer a, gconstpointer b)
-{
-    ObjectClass *class_a = (ObjectClass *)a;
-    ObjectClass *class_b = (ObjectClass *)b;
-    const char *name_a, *name_b;
-
-    name_a = object_class_get_name(class_a);
-    name_b = object_class_get_name(class_b);
-    return strcmp(name_a, name_b);
-}
-
 static void lm32_cpu_list_entry(gpointer data, gpointer user_data)
 {
     ObjectClass *oc = data;
-    CPUListState *s = user_data;
     const char *typename = object_class_get_name(oc);
     char *name;
 
-    name = g_strndup(typename, strlen(typename) - strlen("-" TYPE_LM32_CPU));
-    (*s->cpu_fprintf)(s->file, "  %s\n", name);
+    name = g_strndup(typename, strlen(typename) - strlen(LM32_CPU_TYPE_SUFFIX));
+    qemu_printf("  %s\n", name);
     g_free(name);
 }
 
 
-void lm32_cpu_list(FILE *f, fprintf_function cpu_fprintf)
+void lm32_cpu_list(void)
 {
-    CPUListState s = {
-        .file = f,
-        .cpu_fprintf = cpu_fprintf,
-    };
     GSList *list;
 
-    list = object_class_get_list(TYPE_LM32_CPU, false);
-    list = g_slist_sort(list, lm32_cpu_list_compare);
-    (*cpu_fprintf)(f, "Available CPUs:\n");
-    g_slist_foreach(list, lm32_cpu_list_entry, &s);
+    list = object_class_get_list_sorted(TYPE_LM32_CPU, false);
+    qemu_printf("Available CPUs:\n");
+    g_slist_foreach(list, lm32_cpu_list_entry, NULL);
     g_slist_free(list);
 }
 
@@ -160,19 +141,12 @@ static void lm32_cpu_realizefn(DeviceState *dev, Error **errp)
 
 static void lm32_cpu_initfn(Object *obj)
 {
-    CPUState *cs = CPU(obj);
     LM32CPU *cpu = LM32_CPU(obj);
     CPULM32State *env = &cpu->env;
-    static bool tcg_initialized;
 
-    cs->env_ptr = env;
+    cpu_set_cpustate_pointers(cpu);
 
     env->flags = 0;
-
-    if (tcg_enabled() && !tcg_initialized) {
-        tcg_initialized = true;
-        lm32_translate_init();
-    }
 }
 
 static void lm32_basic_cpu_initfn(Object *obj)
@@ -221,36 +195,12 @@ static void lm32_full_cpu_initfn(Object *obj)
                   | LM32_FEATURE_CYCLE_COUNT;
 }
 
-typedef struct LM32CPUInfo {
-    const char *name;
-    void (*initfn)(Object *obj);
-} LM32CPUInfo;
-
-static const LM32CPUInfo lm32_cpus[] = {
-    {
-        .name = "lm32-basic",
-        .initfn = lm32_basic_cpu_initfn,
-    },
-    {
-        .name = "lm32-standard",
-        .initfn = lm32_standard_cpu_initfn,
-    },
-    {
-        .name = "lm32-full",
-        .initfn = lm32_full_cpu_initfn,
-    },
-};
-
 static ObjectClass *lm32_cpu_class_by_name(const char *cpu_model)
 {
     ObjectClass *oc;
     char *typename;
 
-    if (cpu_model == NULL) {
-        return NULL;
-    }
-
-    typename = g_strdup_printf("%s-" TYPE_LM32_CPU, cpu_model);
+    typename = g_strdup_printf(LM32_CPU_TYPE_NAME("%s"), cpu_model);
     oc = object_class_by_name(typename);
     g_free(typename);
     if (oc != NULL && (!object_class_dynamic_cast(oc, TYPE_LM32_CPU) ||
@@ -266,9 +216,8 @@ static void lm32_cpu_class_init(ObjectClass *oc, void *data)
     CPUClass *cc = CPU_CLASS(oc);
     DeviceClass *dc = DEVICE_CLASS(oc);
 
-    lcc->parent_realize = dc->realize;
-    dc->realize = lm32_cpu_realizefn;
-
+    device_class_set_parent_realize(dc, lm32_cpu_realizefn,
+                                    &lcc->parent_realize);
     lcc->parent_reset = cc->reset;
     cc->reset = lm32_cpu_reset;
 
@@ -280,9 +229,8 @@ static void lm32_cpu_class_init(ObjectClass *oc, void *data)
     cc->set_pc = lm32_cpu_set_pc;
     cc->gdb_read_register = lm32_cpu_gdb_read_register;
     cc->gdb_write_register = lm32_cpu_gdb_write_register;
-#ifdef CONFIG_USER_ONLY
-    cc->handle_mmu_fault = lm32_cpu_handle_mmu_fault;
-#else
+    cc->tlb_fill = lm32_cpu_tlb_fill;
+#ifndef CONFIG_USER_ONLY
     cc->get_phys_page_debug = lm32_cpu_get_phys_page_debug;
     cc->vmsd = &vmstate_lm32_cpu;
 #endif
@@ -290,38 +238,29 @@ static void lm32_cpu_class_init(ObjectClass *oc, void *data)
     cc->gdb_stop_before_watchpoint = true;
     cc->debug_excp_handler = lm32_debug_excp_handler;
     cc->disas_set_info = lm32_cpu_disas_set_info;
+    cc->tcg_initialize = lm32_translate_init;
 }
 
-static void lm32_register_cpu_type(const LM32CPUInfo *info)
-{
-    TypeInfo type_info = {
-        .parent = TYPE_LM32_CPU,
-        .instance_init = info->initfn,
-    };
+#define DEFINE_LM32_CPU_TYPE(cpu_model, initfn) \
+    { \
+        .parent = TYPE_LM32_CPU, \
+        .name = LM32_CPU_TYPE_NAME(cpu_model), \
+        .instance_init = initfn, \
+    }
 
-    type_info.name = g_strdup_printf("%s-" TYPE_LM32_CPU, info->name);
-    type_register(&type_info);
-    g_free((void *)type_info.name);
-}
-
-static const TypeInfo lm32_cpu_type_info = {
-    .name = TYPE_LM32_CPU,
-    .parent = TYPE_CPU,
-    .instance_size = sizeof(LM32CPU),
-    .instance_init = lm32_cpu_initfn,
-    .abstract = true,
-    .class_size = sizeof(LM32CPUClass),
-    .class_init = lm32_cpu_class_init,
+static const TypeInfo lm32_cpus_type_infos[] = {
+    { /* base class should be registered first */
+         .name = TYPE_LM32_CPU,
+         .parent = TYPE_CPU,
+         .instance_size = sizeof(LM32CPU),
+         .instance_init = lm32_cpu_initfn,
+         .abstract = true,
+         .class_size = sizeof(LM32CPUClass),
+         .class_init = lm32_cpu_class_init,
+    },
+    DEFINE_LM32_CPU_TYPE("lm32-basic", lm32_basic_cpu_initfn),
+    DEFINE_LM32_CPU_TYPE("lm32-standard", lm32_standard_cpu_initfn),
+    DEFINE_LM32_CPU_TYPE("lm32-full", lm32_full_cpu_initfn),
 };
 
-static void lm32_cpu_register_types(void)
-{
-    int i;
-
-    type_register_static(&lm32_cpu_type_info);
-    for (i = 0; i < ARRAY_SIZE(lm32_cpus); i++) {
-        lm32_register_cpu_type(&lm32_cpus[i]);
-    }
-}
-
-type_init(lm32_cpu_register_types)
+DEFINE_TYPES(lm32_cpus_type_infos)

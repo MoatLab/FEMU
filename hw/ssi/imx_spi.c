@@ -12,6 +12,7 @@
 #include "hw/ssi/imx_spi.h"
 #include "sysemu/sysemu.h"
 #include "qemu/log.h"
+#include "qemu/module.h"
 
 #ifndef DEBUG_IMX_SPI
 #define DEBUG_IMX_SPI 0
@@ -208,8 +209,6 @@ static void imx_spi_flush_txfifo(IMXSPIState *s)
         }
 
         if (s->burst_length <= 0) {
-            s->regs[ECSPI_CONREG] &= ~ECSPI_CONREG_XCH;
-
             if (!imx_spi_is_multiple_master_burst(s)) {
                 s->regs[ECSPI_STATREG] |= ECSPI_STATREG_TC;
                 break;
@@ -219,6 +218,7 @@ static void imx_spi_flush_txfifo(IMXSPIState *s)
 
     if (fifo32_is_empty(&s->tx_fifo)) {
         s->regs[ECSPI_STATREG] |= ECSPI_STATREG_TC;
+        s->regs[ECSPI_CONREG] &= ~ECSPI_CONREG_XCH;
     }
 
     /* TODO: We should also use TDR and RDR bits */

@@ -15,16 +15,26 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "crypto/hmac.h"
+#include "hmacpriv.h"
 #include <nettle/hmac.h>
 
+#if CONFIG_NETTLE_VERSION_MAJOR < 3
+typedef unsigned int hmac_length_t;
+#else
+typedef size_t hmac_length_t;
+#endif
+
 typedef void (*qcrypto_nettle_hmac_setkey)(void *ctx,
-              size_t key_length, const uint8_t *key);
+                                           hmac_length_t key_length,
+                                           const uint8_t *key);
 
 typedef void (*qcrypto_nettle_hmac_update)(void *ctx,
-              size_t length, const uint8_t *data);
+                                           hmac_length_t length,
+                                           const uint8_t *data);
 
 typedef void (*qcrypto_nettle_hmac_digest)(void *ctx,
-              size_t length, uint8_t *digest);
+                                           hmac_length_t length,
+                                           uint8_t *digest);
 
 typedef struct QCryptoHmacNettle QCryptoHmacNettle;
 struct QCryptoHmacNettle {
@@ -97,54 +107,44 @@ bool qcrypto_hmac_supports(QCryptoHashAlgorithm alg)
     return false;
 }
 
-QCryptoHmac *qcrypto_hmac_new(QCryptoHashAlgorithm alg,
-                              const uint8_t *key, size_t nkey,
-                              Error **errp)
+void *qcrypto_hmac_ctx_new(QCryptoHashAlgorithm alg,
+                           const uint8_t *key, size_t nkey,
+                           Error **errp)
 {
-    QCryptoHmac *hmac;
     QCryptoHmacNettle *ctx;
 
     if (!qcrypto_hmac_supports(alg)) {
         error_setg(errp, "Unsupported hmac algorithm %s",
-                   QCryptoHashAlgorithm_lookup[alg]);
+                   QCryptoHashAlgorithm_str(alg));
         return NULL;
     }
-
-    hmac = g_new0(QCryptoHmac, 1);
-    hmac->alg = alg;
 
     ctx = g_new0(QCryptoHmacNettle, 1);
 
     qcrypto_hmac_alg_map[alg].setkey(&ctx->u, nkey, key);
 
-    hmac->opaque = ctx;
-
-    return hmac;
+    return ctx;
 }
 
-void qcrypto_hmac_free(QCryptoHmac *hmac)
+static void
+qcrypto_nettle_hmac_ctx_free(QCryptoHmac *hmac)
 {
     QCryptoHmacNettle *ctx;
-
-    if (!hmac) {
-        return;
-    }
 
     ctx = hmac->opaque;
-
     g_free(ctx);
-    g_free(hmac);
 }
 
-int qcrypto_hmac_bytesv(QCryptoHmac *hmac,
-                        const struct iovec *iov,
-                        size_t niov,
-                        uint8_t **result,
-                        size_t *resultlen,
-                        Error **errp)
+static int
+qcrypto_nettle_hmac_bytesv(QCryptoHmac *hmac,
+                           const struct iovec *iov,
+                           size_t niov,
+                           uint8_t **result,
+                           size_t *resultlen,
+                           Error **errp)
 {
     QCryptoHmacNettle *ctx;
-    int i;
+    size_t i;
 
     ctx = (QCryptoHmacNettle *)hmac->opaque;
 
@@ -173,3 +173,8 @@ int qcrypto_hmac_bytesv(QCryptoHmac *hmac,
 
     return 0;
 }
+
+QCryptoHmacDriver qcrypto_hmac_lib_driver = {
+    .hmac_bytesv = qcrypto_nettle_hmac_bytesv,
+    .hmac_free = qcrypto_nettle_hmac_ctx_free,
+};

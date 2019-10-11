@@ -18,7 +18,6 @@
 #include "qemu/osdep.h"
 #include "net/eth.h"
 #include "net/checksum.h"
-#include "qemu-common.h"
 #include "net/tap.h"
 
 void eth_setup_vlan_headers_ex(struct eth_header *ehdr, uint16_t vlan_tag,
@@ -423,7 +422,7 @@ _eth_get_rss_ex_dst_addr(const struct iovec *pkt, int pkt_frags,
                                 rthdr_offset + sizeof(*ext_hdr),
                                 dst_addr, sizeof(*dst_addr));
 
-        return bytes_read == sizeof(dst_addr);
+        return bytes_read == sizeof(*dst_addr);
     }
 
     return false;
@@ -472,7 +471,7 @@ _eth_get_rss_ex_src_addr(const struct iovec *pkt, int pkt_frags,
                                     opt_offset + sizeof(opthdr),
                                     src_addr, sizeof(*src_addr));
 
-            return bytes_read == sizeof(src_addr);
+            return bytes_read == sizeof(*src_addr);
         }
 
         opt_offset += optlen;

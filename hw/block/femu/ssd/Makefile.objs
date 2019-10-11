@@ -1,5 +1,0 @@
-obj-y += vssim_config_manager.o
-obj-y += ftl.o ftl_mapping_manager.o ftl_inverse_mapping_manager.o
-obj-y += ftl_gc_manager.o
-obj-y += ssd.o ssd_io_manager.o
-obj-y += firm_buffer_manager.o

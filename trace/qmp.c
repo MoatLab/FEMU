@@ -8,8 +8,9 @@
  */
 
 #include "qemu/osdep.h"
-#include "qmp-commands.h"
-#include "trace/control.h"
+#include "qapi/error.h"
+#include "qapi/qapi-commands-trace.h"
+#include "control.h"
 
 
 static CPUState *get_cpu(bool has_vcpu, int vcpu, Error **errp)

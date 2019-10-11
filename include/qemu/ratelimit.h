@@ -24,7 +24,8 @@ typedef struct {
 
 /** Calculate and return delay for next request in ns
  *
- * Record that we sent @p n data units. If we may send more data units
+ * Record that we sent @n data units (where @n matches the scale chosen
+ * during ratelimit_set_speed). If we may send more data units
  * in the current time slice, return 0 (i.e. no delay). Otherwise
  * return the amount of time (in ns) until the start of the next time
  * slice that will permit sending the next chunk of data.
@@ -35,7 +36,7 @@ typedef struct {
 static inline int64_t ratelimit_calculate_delay(RateLimit *limit, uint64_t n)
 {
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-    uint64_t delay_slices;
+    double delay_slices;
 
     assert(limit->slice_quota && limit->slice_ns);
 
@@ -54,12 +55,11 @@ static inline int64_t ratelimit_calculate_delay(RateLimit *limit, uint64_t n)
         return 0;
     }
 
-    /* Quota exceeded. Calculate the next time slice we may start
-     * sending data again. */
-    delay_slices = (limit->dispatched + limit->slice_quota - 1) /
-        limit->slice_quota;
+    /* Quota exceeded. Wait based on the excess amount and then start a new
+     * slice. */
+    delay_slices = (double)limit->dispatched / limit->slice_quota;
     limit->slice_end_time = limit->slice_start_time +
-        delay_slices * limit->slice_ns;
+        (uint64_t)(delay_slices * limit->slice_ns);
     return limit->slice_end_time - now;
 }
 

@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -20,17 +20,11 @@
 #ifndef OPENRISC_CPU_H
 #define OPENRISC_CPU_H
 
-#define TARGET_LONG_BITS 32
-
-#define CPUArchState struct CPUOpenRISCState
+#include "exec/cpu-defs.h"
+#include "qom/cpu.h"
 
 /* cpu_openrisc_map_address_* in CPUOpenRISCTLBContext need this decl.  */
 struct OpenRISCCPU;
-
-#include "qemu-common.h"
-#include "exec/cpu-defs.h"
-#include "fpu/softfloat.h"
-#include "qom/cpu.h"
 
 #define TYPE_OPENRISC_CPU "or1k-cpu"
 
@@ -57,7 +51,6 @@ typedef struct OpenRISCCPUClass {
     void (*parent_reset)(CPUState *cpu);
 } OpenRISCCPUClass;
 
-#define NB_MMU_MODES    3
 #define TARGET_INSN_START_EXTRA_WORDS 1
 
 enum {
@@ -65,11 +58,6 @@ enum {
     MMU_SUPERVISOR_IDX = 1,
     MMU_USER_IDX = 2,
 };
-
-#define TARGET_PAGE_BITS 13
-
-#define TARGET_PHYS_ADDR_SPACE_BITS 32
-#define TARGET_VIRT_ADDR_SPACE_BITS 32
 
 #define SET_FP_CAUSE(reg, v)    do {\
                                     (reg) = ((reg) & ~(0x3f << 12)) | \
@@ -111,6 +99,11 @@ enum {
     CPUCFGR_OF32S = (1 << 7),
     CPUCFGR_OF64S = (1 << 8),
     CPUCFGR_OV64S = (1 << 9),
+    /* CPUCFGR_ND = (1 << 10), */
+    /* CPUCFGR_AVRP = (1 << 11), */
+    CPUCFGR_EVBARP = (1 << 12),
+    /* CPUCFGR_ISRP = (1 << 13), */
+    /* CPUCFGR_AECSRP = (1 << 14), */
 };
 
 /* DMMU configure register */
@@ -133,6 +126,15 @@ enum {
     IMMUCFGR_PRI = (1 << 9),
     IMMUCFGR_TEIRI = (1 << 10),
     IMMUCFGR_HTR = (1 << 11),
+};
+
+/* Power management register */
+enum {
+    PMR_SDF = (15 << 0),
+    PMR_DME = (1 << 4),
+    PMR_SME = (1 << 5),
+    PMR_DCGE = (1 << 6),
+    PMR_SUME = (1 << 7),
 };
 
 /* Float point control status register */
@@ -191,17 +193,6 @@ enum {
     SR_SCE = (1 << 17),
 };
 
-/* OpenRISC Hardware Capabilities */
-enum {
-    OPENRISC_FEATURE_NSGF = (15 << 0),
-    OPENRISC_FEATURE_CGF = (1 << 4),
-    OPENRISC_FEATURE_OB32S = (1 << 5),
-    OPENRISC_FEATURE_OB64S = (1 << 6),
-    OPENRISC_FEATURE_OF32S = (1 << 7),
-    OPENRISC_FEATURE_OF64S = (1 << 8),
-    OPENRISC_FEATURE_OV64S = (1 << 9),
-};
-
 /* Tick Timer Mode Register */
 enum {
     TTMR_TP = (0xfffffff),
@@ -220,12 +211,8 @@ enum {
 
 /* TLB size */
 enum {
-    DTLB_WAYS = 1,
-    DTLB_SIZE = 64,
-    DTLB_MASK = (DTLB_SIZE-1),
-    ITLB_WAYS = 1,
-    ITLB_SIZE = 64,
-    ITLB_MASK = (ITLB_SIZE-1),
+    TLB_SIZE = 128,
+    TLB_MASK = TLB_SIZE - 1,
 };
 
 /* TLB prot */
@@ -239,14 +226,6 @@ enum {
     UXE = (1 << 7),
 };
 
-/* check if tlb available */
-enum {
-    TLBRET_INVALID = -3,
-    TLBRET_NOMATCH = -2,
-    TLBRET_BADADDR = -1,
-    TLBRET_MATCH = 0
-};
-
 typedef struct OpenRISCTLBEntry {
     uint32_t mr;
     uint32_t tr;
@@ -254,8 +233,8 @@ typedef struct OpenRISCTLBEntry {
 
 #ifndef CONFIG_USER_ONLY
 typedef struct CPUOpenRISCTLBContext {
-    OpenRISCTLBEntry itlb[ITLB_WAYS][ITLB_SIZE];
-    OpenRISCTLBEntry dtlb[DTLB_WAYS][DTLB_SIZE];
+    OpenRISCTLBEntry itlb[TLB_SIZE];
+    OpenRISCTLBEntry dtlb[TLB_SIZE];
 
     int (*cpu_openrisc_map_address_code)(struct OpenRISCCPU *cpu,
                                          hwaddr *physical,
@@ -269,7 +248,8 @@ typedef struct CPUOpenRISCTLBContext {
 #endif
 
 typedef struct CPUOpenRISCState {
-    target_ulong gpr[32];     /* General registers */
+    target_ulong shadow_gpr[16][32]; /* Shadow registers */
+
     target_ulong pc;          /* Program counter */
     target_ulong ppc;         /* Prev PC */
     target_ulong jmp_pc;      /* Jump PC */
@@ -285,10 +265,11 @@ typedef struct CPUOpenRISCState {
     uint32_t sr;              /* Supervisor register, without SR_{F,CY,OV} */
     uint32_t vr;              /* Version register */
     uint32_t upr;             /* Unit presence register */
-    uint32_t cpucfgr;         /* CPU configure register */
     uint32_t dmmucfgr;        /* DMMU configure register */
     uint32_t immucfgr;        /* IMMU configure register */
     uint32_t esr;             /* Exception supervisor register */
+    uint32_t evbar;           /* Exception vector base address register */
+    uint32_t pmr;             /* Power Management Register */
     uint32_t fpcsr;           /* Float register */
     float_status fp_status;
 
@@ -297,18 +278,20 @@ typedef struct CPUOpenRISCState {
 
     uint32_t dflag;           /* In delay slot (boolean) */
 
+#ifndef CONFIG_USER_ONLY
+    CPUOpenRISCTLBContext tlb;
+#endif
+
     /* Fields up to this point are cleared by a CPU reset */
     struct {} end_reset_fields;
 
-    CPU_COMMON
-
     /* Fields from here on are preserved across CPU reset. */
-#ifndef CONFIG_USER_ONLY
-    CPUOpenRISCTLBContext * tlb;
+    uint32_t cpucfgr;         /* CPU configure register */
 
+#ifndef CONFIG_USER_ONLY
     QEMUTimer *timer;
     uint32_t ttmr;          /* Timer tick mode register */
-    uint32_t ttcr;          /* Timer tick count register */
+    int is_counting;
 
     uint32_t picmr;         /* Interrupt mask register */
     uint32_t picsr;         /* Interrupt contrl register*/
@@ -327,34 +310,24 @@ typedef struct OpenRISCCPU {
     CPUState parent_obj;
     /*< public >*/
 
+    CPUNegativeOffsetState neg;
     CPUOpenRISCState env;
-
-    uint32_t feature;       /* CPU Capabilities */
 } OpenRISCCPU;
 
-static inline OpenRISCCPU *openrisc_env_get_cpu(CPUOpenRISCState *env)
-{
-    return container_of(env, OpenRISCCPU, env);
-}
 
-#define ENV_GET_CPU(e) CPU(openrisc_env_get_cpu(e))
-
-#define ENV_OFFSET offsetof(OpenRISCCPU, env)
-
-OpenRISCCPU *cpu_openrisc_init(const char *cpu_model);
-
-void cpu_openrisc_list(FILE *f, fprintf_function cpu_fprintf);
+void cpu_openrisc_list(void);
 void openrisc_cpu_do_interrupt(CPUState *cpu);
 bool openrisc_cpu_exec_interrupt(CPUState *cpu, int int_req);
-void openrisc_cpu_dump_state(CPUState *cpu, FILE *f,
-                             fprintf_function cpu_fprintf, int flags);
+void openrisc_cpu_dump_state(CPUState *cpu, FILE *f, int flags);
 hwaddr openrisc_cpu_get_phys_page_debug(CPUState *cpu, vaddr addr);
 int openrisc_cpu_gdb_read_register(CPUState *cpu, uint8_t *buf, int reg);
 int openrisc_cpu_gdb_write_register(CPUState *cpu, uint8_t *buf, int reg);
 void openrisc_translate_init(void);
-int openrisc_cpu_handle_mmu_fault(CPUState *cpu, vaddr address,
-                                  int rw, int mmu_idx);
+bool openrisc_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
+                           MMUAccessType access_type, int mmu_idx,
+                           bool probe, uintptr_t retaddr);
 int cpu_openrisc_signal_handler(int host_signum, void *pinfo, void *puc);
+int print_insn_or1k(bfd_vma addr, disassemble_info *info);
 
 #define cpu_list cpu_openrisc_list
 #define cpu_signal_handler cpu_openrisc_signal_handler
@@ -367,30 +340,39 @@ void cpu_openrisc_pic_init(OpenRISCCPU *cpu);
 
 /* hw/openrisc_timer.c */
 void cpu_openrisc_clock_init(OpenRISCCPU *cpu);
+uint32_t cpu_openrisc_count_get(OpenRISCCPU *cpu);
+void cpu_openrisc_count_set(OpenRISCCPU *cpu, uint32_t val);
 void cpu_openrisc_count_update(OpenRISCCPU *cpu);
 void cpu_openrisc_timer_update(OpenRISCCPU *cpu);
 void cpu_openrisc_count_start(OpenRISCCPU *cpu);
 void cpu_openrisc_count_stop(OpenRISCCPU *cpu);
-
-void cpu_openrisc_mmu_init(OpenRISCCPU *cpu);
-int cpu_openrisc_get_phys_nommu(OpenRISCCPU *cpu,
-                                hwaddr *physical,
-                                int *prot, target_ulong address, int rw);
-int cpu_openrisc_get_phys_code(OpenRISCCPU *cpu,
-                               hwaddr *physical,
-                               int *prot, target_ulong address, int rw);
-int cpu_openrisc_get_phys_data(OpenRISCCPU *cpu,
-                               hwaddr *physical,
-                               int *prot, target_ulong address, int rw);
 #endif
 
-#define cpu_init(cpu_model) CPU(cpu_openrisc_init(cpu_model))
+#define OPENRISC_CPU_TYPE_SUFFIX "-" TYPE_OPENRISC_CPU
+#define OPENRISC_CPU_TYPE_NAME(model) model OPENRISC_CPU_TYPE_SUFFIX
+#define CPU_RESOLVING_TYPE TYPE_OPENRISC_CPU
+
+typedef CPUOpenRISCState CPUArchState;
+typedef OpenRISCCPU ArchCPU;
 
 #include "exec/cpu-all.h"
 
-#define TB_FLAGS_DFLAG 1
-#define TB_FLAGS_R0_0  2
+#define TB_FLAGS_SM    SR_SM
+#define TB_FLAGS_DME   SR_DME
+#define TB_FLAGS_IME   SR_IME
 #define TB_FLAGS_OVE   SR_OVE
+#define TB_FLAGS_DFLAG 2      /* reuse SR_TEE */
+#define TB_FLAGS_R0_0  4      /* reuse SR_IEE */
+
+static inline uint32_t cpu_get_gpr(const CPUOpenRISCState *env, int i)
+{
+    return env->shadow_gpr[0][i];
+}
+
+static inline void cpu_set_gpr(CPUOpenRISCState *env, int i, uint32_t val)
+{
+    env->shadow_gpr[0][i] = val;
+}
 
 static inline void cpu_get_tb_cpu_state(CPUOpenRISCState *env,
                                         target_ulong *pc,
@@ -398,17 +380,21 @@ static inline void cpu_get_tb_cpu_state(CPUOpenRISCState *env,
 {
     *pc = env->pc;
     *cs_base = 0;
-    *flags = (env->dflag
-              | (env->gpr[0] == 0 ? TB_FLAGS_R0_0 : 0)
-              | (env->sr & SR_OVE));
+    *flags = (env->dflag ? TB_FLAGS_DFLAG : 0)
+           | (cpu_get_gpr(env, 0) ? 0 : TB_FLAGS_R0_0)
+           | (env->sr & (SR_SM | SR_DME | SR_IME | SR_OVE));
 }
 
 static inline int cpu_mmu_index(CPUOpenRISCState *env, bool ifetch)
 {
-    if (!(env->sr & SR_IME)) {
-        return MMU_NOMMU_IDX;
+    int ret = MMU_NOMMU_IDX;  /* mmu is disabled */
+
+    if (env->sr & (ifetch ? SR_IME : SR_DME)) {
+        /* The mmu is enabled; test supervisor state.  */
+        ret = env->sr & SR_SM ? MMU_SUPERVISOR_IDX : MMU_USER_IDX;
     }
-    return (env->sr & SR_SM) == 0 ? MMU_USER_IDX : MMU_SUPERVISOR_IDX;
+
+    return ret;
 }
 
 static inline uint32_t cpu_get_sr(const CPUOpenRISCState *env)

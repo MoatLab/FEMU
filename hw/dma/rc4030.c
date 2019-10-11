@@ -23,11 +23,13 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/units.h"
 #include "hw/hw.h"
 #include "hw/mips/mips.h"
 #include "hw/sysbus.h"
 #include "qemu/timer.h"
 #include "qemu/log.h"
+#include "qemu/module.h"
 #include "exec/address-spaces.h"
 #include "trace.h"
 
@@ -54,8 +56,10 @@ typedef struct dma_pagetable_entry {
 #define RC4030(obj) \
     OBJECT_CHECK(rc4030State, (obj), TYPE_RC4030)
 
-typedef struct rc4030State
-{
+#define TYPE_RC4030_IOMMU_MEMORY_REGION "rc4030-iommu-memory-region"
+
+typedef struct rc4030State {
+
     SysBusDevice parent;
 
     uint32_t config; /* 0x0000: RC4030 config register */
@@ -90,7 +94,7 @@ typedef struct rc4030State
     qemu_irq jazz_bus_irq;
 
     /* whole DMA memory region, root of DMA address space */
-    MemoryRegion dma_mr;
+    IOMMUMemoryRegion dma_mr;
     AddressSpace dma_as;
 
     MemoryRegion iomem_chipset;
@@ -148,8 +152,9 @@ static uint64_t rc4030_read(void *opaque, hwaddr addr, unsigned int size)
     case 0x0058:
         val = s->cache_bmask;
         /* HACK */
-        if (s->cache_bmask == (uint32_t)-1)
+        if (s->cache_bmask == (uint32_t)-1) {
             s->cache_bmask = 0;
+        }
         break;
     /* Remote Speed Registers */
     case 0x0070:
@@ -488,8 +493,8 @@ static const MemoryRegionOps jazzio_ops = {
     .endianness = DEVICE_NATIVE_ENDIAN,
 };
 
-static IOMMUTLBEntry rc4030_dma_translate(MemoryRegion *iommu, hwaddr addr,
-                                          bool is_write)
+static IOMMUTLBEntry rc4030_dma_translate(IOMMUMemoryRegion *iommu, hwaddr addr,
+                                          IOMMUAccessFlags flag, int iommu_idx)
 {
     rc4030State *s = container_of(iommu, rc4030State, dma_mr);
     IOMMUTLBEntry ret = {
@@ -516,10 +521,6 @@ static IOMMUTLBEntry rc4030_dma_translate(MemoryRegion *iommu, hwaddr addr,
     return ret;
 }
 
-static const MemoryRegionIOMMUOps rc4030_dma_ops = {
-    .translate = rc4030_dma_translate,
-};
-
 static void rc4030_reset(DeviceState *dev)
 {
     rc4030State *s = RC4030(dev);
@@ -538,8 +539,9 @@ static void rc4030_reset(DeviceState *dev)
 
     s->memory_refresh_rate = 0x18186;
     s->nvram_protect = 7;
-    for (i = 0; i < 15; i++)
+    for (i = 0; i < 15; i++) {
         s->rem_speed[i] = 7;
+    }
     s->imr_jazz = 0x10; /* XXX: required by firmware, but why? */
     s->isr_jazz = 0;
 
@@ -551,7 +553,7 @@ static void rc4030_reset(DeviceState *dev)
 
 static int rc4030_post_load(void *opaque, int version_id)
 {
-    rc4030State* s = opaque;
+    rc4030State *s = opaque;
 
     set_next_tick(s);
     update_jazz_irq(s);
@@ -591,7 +593,8 @@ static void rc4030_do_dma(void *opaque, int n, uint8_t *buf, int len, int is_wri
     hwaddr dma_addr;
     int dev_to_mem;
 
-    s->dma_regs[n][DMA_REG_ENABLE] &= ~(DMA_FLAG_TC_INTR | DMA_FLAG_MEM_INTR | DMA_FLAG_ADDR_INTR);
+    s->dma_regs[n][DMA_REG_ENABLE] &=
+           ~(DMA_FLAG_TC_INTR | DMA_FLAG_MEM_INTR | DMA_FLAG_ADDR_INTR);
 
     /* Check DMA channel consistency */
     dev_to_mem = (s->dma_regs[n][DMA_REG_ENABLE] & DMA_FLAG_MEM_TO_DEV) ? 0 : 1;
@@ -603,8 +606,9 @@ static void rc4030_do_dma(void *opaque, int n, uint8_t *buf, int len, int is_wri
     }
 
     /* Get start address and len */
-    if (len > s->dma_regs[n][DMA_REG_COUNT])
+    if (len > s->dma_regs[n][DMA_REG_COUNT]) {
         len = s->dma_regs[n][DMA_REG_COUNT];
+    }
     dma_addr = s->dma_regs[n][DMA_REG_ADDRESS];
 
     /* Read/write data at right place */
@@ -677,9 +681,10 @@ static void rc4030_realize(DeviceState *dev, Error **errp)
     memory_region_init_io(&s->iomem_jazzio, NULL, &jazzio_ops, s,
                           "rc4030.jazzio", 0x00001000);
 
-    memory_region_init_iommu(&s->dma_mr, o, &rc4030_dma_ops,
-                             "rc4030.dma", UINT32_MAX);
-    address_space_init(&s->dma_as, &s->dma_mr, "rc4030-dma");
+    memory_region_init_iommu(&s->dma_mr, sizeof(s->dma_mr),
+                             TYPE_RC4030_IOMMU_MEMORY_REGION,
+                             o, "rc4030.dma", 4 * GiB);
+    address_space_init(&s->dma_as, MEMORY_REGION(&s->dma_mr), "rc4030-dma");
 }
 
 static void rc4030_unrealize(DeviceState *dev, Error **errp)
@@ -710,14 +715,29 @@ static const TypeInfo rc4030_info = {
     .class_init = rc4030_class_init,
 };
 
+static void rc4030_iommu_memory_region_class_init(ObjectClass *klass,
+                                                  void *data)
+{
+    IOMMUMemoryRegionClass *imrc = IOMMU_MEMORY_REGION_CLASS(klass);
+
+    imrc->translate = rc4030_dma_translate;
+}
+
+static const TypeInfo rc4030_iommu_memory_region_info = {
+    .parent = TYPE_IOMMU_MEMORY_REGION,
+    .name = TYPE_RC4030_IOMMU_MEMORY_REGION,
+    .class_init = rc4030_iommu_memory_region_class_init,
+};
+
 static void rc4030_register_types(void)
 {
     type_register_static(&rc4030_info);
+    type_register_static(&rc4030_iommu_memory_region_info);
 }
 
 type_init(rc4030_register_types)
 
-DeviceState *rc4030_init(rc4030_dma **dmas, MemoryRegion **dma_mr)
+DeviceState *rc4030_init(rc4030_dma **dmas, IOMMUMemoryRegion **dma_mr)
 {
     DeviceState *dev;
 

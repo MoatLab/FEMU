@@ -15,6 +15,8 @@
 #ifndef REPLICATION_H
 #define REPLICATION_H
 
+#include "qapi/qapi-types-block-core.h"
+#include "qemu/module.h"
 #include "qemu/queue.h"
 
 typedef struct ReplicationOps ReplicationOps;
@@ -66,7 +68,6 @@ typedef struct ReplicationState ReplicationState;
  *
  * BlockDriver bdrv_replication = {
  *     .format_name                = "replication",
- *     .protocol_name              = "replication",
  *     .instance_size              = sizeof(BDRVReplicationState),
  *
  *     .bdrv_open                  = replication_open,

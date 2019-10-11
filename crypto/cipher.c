@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -21,6 +21,7 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "crypto/cipher.h"
+#include "cipherpriv.h"
 
 
 static size_t alg_key_len[QCRYPTO_CIPHER_ALG__MAX] = {
@@ -149,9 +150,85 @@ qcrypto_cipher_munge_des_rfb_key(const uint8_t *key,
 #endif /* CONFIG_GCRYPT || CONFIG_NETTLE */
 
 #ifdef CONFIG_GCRYPT
-#include "crypto/cipher-gcrypt.c"
+#include "cipher-gcrypt.c"
 #elif defined CONFIG_NETTLE
-#include "crypto/cipher-nettle.c"
+#include "cipher-nettle.c"
 #else
-#include "crypto/cipher-builtin.c"
+#include "cipher-builtin.c"
 #endif
+
+QCryptoCipher *qcrypto_cipher_new(QCryptoCipherAlgorithm alg,
+                                  QCryptoCipherMode mode,
+                                  const uint8_t *key, size_t nkey,
+                                  Error **errp)
+{
+    QCryptoCipher *cipher;
+    void *ctx = NULL;
+    QCryptoCipherDriver *drv = NULL;
+
+#ifdef CONFIG_AF_ALG
+    ctx = qcrypto_afalg_cipher_ctx_new(alg, mode, key, nkey, NULL);
+    if (ctx) {
+        drv = &qcrypto_cipher_afalg_driver;
+    }
+#endif
+
+    if (!ctx) {
+        ctx = qcrypto_cipher_ctx_new(alg, mode, key, nkey, errp);
+        if (!ctx) {
+            return NULL;
+        }
+
+        drv = &qcrypto_cipher_lib_driver;
+    }
+
+    cipher = g_new0(QCryptoCipher, 1);
+    cipher->alg = alg;
+    cipher->mode = mode;
+    cipher->opaque = ctx;
+    cipher->driver = (void *)drv;
+
+    return cipher;
+}
+
+
+int qcrypto_cipher_encrypt(QCryptoCipher *cipher,
+                           const void *in,
+                           void *out,
+                           size_t len,
+                           Error **errp)
+{
+    QCryptoCipherDriver *drv = cipher->driver;
+    return drv->cipher_encrypt(cipher, in, out, len, errp);
+}
+
+
+int qcrypto_cipher_decrypt(QCryptoCipher *cipher,
+                           const void *in,
+                           void *out,
+                           size_t len,
+                           Error **errp)
+{
+    QCryptoCipherDriver *drv = cipher->driver;
+    return drv->cipher_decrypt(cipher, in, out, len, errp);
+}
+
+
+int qcrypto_cipher_setiv(QCryptoCipher *cipher,
+                         const uint8_t *iv, size_t niv,
+                         Error **errp)
+{
+    QCryptoCipherDriver *drv = cipher->driver;
+    return drv->cipher_setiv(cipher, iv, niv, errp);
+}
+
+
+void qcrypto_cipher_free(QCryptoCipher *cipher)
+{
+    QCryptoCipherDriver *drv;
+    if (cipher) {
+        drv = cipher->driver;
+        drv->cipher_free(cipher);
+        g_free(cipher);
+    }
+}

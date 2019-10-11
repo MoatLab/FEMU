@@ -24,7 +24,6 @@
 /* Ported SDL 1.2 code to 2.0 by Dave Airlie. */
 
 #include "qemu/osdep.h"
-#include "qemu-common.h"
 #include "ui/console.h"
 #include "ui/input.h"
 #include "ui/sdl2.h"
@@ -36,7 +35,7 @@ void sdl2_2d_update(DisplayChangeListener *dcl,
     struct sdl2_console *scon = container_of(dcl, struct sdl2_console, dcl);
     DisplaySurface *surf = qemu_console_surface(dcl->con);
     SDL_Rect rect;
-
+    size_t surface_data_offset;
     assert(!scon->opengl);
 
     if (!surf) {
@@ -46,27 +45,18 @@ void sdl2_2d_update(DisplayChangeListener *dcl,
         return;
     }
 
-    /*
-     * SDL2 seems to do some double-buffering, and trying to only
-     * update the changed areas results in only one of the two buffers
-     * being updated.  Which flickers alot.  So lets not try to be
-     * clever do a full update every time ...
-     */
-#if 0
+    surface_data_offset = surface_bytes_per_pixel(surf) * x +
+                          surface_stride(surf) * y;
     rect.x = x;
     rect.y = y;
     rect.w = w;
     rect.h = h;
-#else
-    rect.x = 0;
-    rect.y = 0;
-    rect.w = surface_width(surf);
-    rect.h = surface_height(surf);
-#endif
 
-    SDL_UpdateTexture(scon->texture, NULL, surface_data(surf),
+    SDL_UpdateTexture(scon->texture, &rect,
+                      surface_data(surf) + surface_data_offset,
                       surface_stride(surf));
-    SDL_RenderCopy(scon->real_renderer, scon->texture, &rect, &rect);
+    SDL_RenderClear(scon->real_renderer);
+    SDL_RenderCopy(scon->real_renderer, scon->texture, NULL, NULL);
     SDL_RenderPresent(scon->real_renderer);
 }
 
@@ -110,14 +100,23 @@ void sdl2_2d_switch(DisplayChangeListener *dcl,
     case PIXMAN_r5g6b5:
         format = SDL_PIXELFORMAT_RGB565;
         break;
+    case PIXMAN_a8r8g8b8:
     case PIXMAN_x8r8g8b8:
         format = SDL_PIXELFORMAT_ARGB8888;
         break;
+    case PIXMAN_a8b8g8r8:
+    case PIXMAN_x8b8g8r8:
+        format = SDL_PIXELFORMAT_ABGR8888;
+        break;
+    case PIXMAN_r8g8b8a8:
     case PIXMAN_r8g8b8x8:
         format = SDL_PIXELFORMAT_RGBA8888;
         break;
     case PIXMAN_b8g8r8x8:
         format = SDL_PIXELFORMAT_BGRX8888;
+        break;
+    case PIXMAN_b8g8r8a8:
+        format = SDL_PIXELFORMAT_BGRA8888;
         break;
     default:
         g_assert_not_reached();
@@ -158,7 +157,13 @@ bool sdl2_2d_check_format(DisplayChangeListener *dcl,
      * the native ones. Thes are the ones I have tested.
      */
     return (format == PIXMAN_x8r8g8b8 ||
+            format == PIXMAN_a8r8g8b8 ||
+            format == PIXMAN_a8b8g8r8 ||
+            format == PIXMAN_x8b8g8r8 ||
             format == PIXMAN_b8g8r8x8 ||
+            format == PIXMAN_b8g8r8a8 ||
+            format == PIXMAN_r8g8b8x8 ||
+            format == PIXMAN_r8g8b8a8 ||
             format == PIXMAN_x1r5g5b5 ||
             format == PIXMAN_r5g6b5);
 }

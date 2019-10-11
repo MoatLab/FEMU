@@ -23,11 +23,10 @@
  */
 
 #include "qemu/osdep.h"
+#include "qapi/qapi-commands-ui.h"
 #include "sysemu/sysemu.h"
 #include "ui/console.h"
-#include "qmp-commands.h"
-#include "qapi-types.h"
-#include "ui/keymaps.h"
+#include "keymaps.h"
 #include "ui/input.h"
 
 struct QEMUPutMouseEntry {
@@ -61,9 +60,9 @@ int index_from_key(const char *key, size_t key_length)
 {
     int i;
 
-    for (i = 0; QKeyCode_lookup[i] != NULL; i++) {
-        if (!strncmp(key, QKeyCode_lookup[i], key_length) &&
-            !QKeyCode_lookup[i][key_length]) {
+    for (i = 0; i < Q_KEY_CODE__MAX; i++) {
+        if (!strncmp(key, QKeyCode_str(i), key_length) &&
+            !QKeyCode_str(i)[key_length]) {
             break;
         }
     }
@@ -76,6 +75,11 @@ static KeyValue *copy_key_value(KeyValue *src)
 {
     KeyValue *dst = g_new(KeyValue, 1);
     memcpy(dst, src, sizeof(*src));
+    if (dst->type == KEY_VALUE_KIND_NUMBER) {
+        QKeyCode code = qemu_input_key_number_to_qcode(dst->u.number.data);
+        dst->type = KEY_VALUE_KIND_QCODE;
+        dst->u.qcode.data = code;
+    }
     return dst;
 }
 

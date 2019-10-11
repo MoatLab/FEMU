@@ -11,6 +11,7 @@
  * top-level directory.
  *
  */
+
 #include "qemu/osdep.h"
 #include "hw/pci/pci.h"
 #include "hw/virtio/virtio.h"
@@ -18,6 +19,21 @@
 #include "hw/virtio/virtio-pci.h"
 #include "hw/virtio/virtio-crypto.h"
 #include "qapi/error.h"
+#include "qemu/module.h"
+
+typedef struct VirtIOCryptoPCI VirtIOCryptoPCI;
+
+/*
+ * virtio-crypto-pci: This extends VirtioPCIProxy.
+ */
+#define TYPE_VIRTIO_CRYPTO_PCI "virtio-crypto-pci"
+#define VIRTIO_CRYPTO_PCI(obj) \
+        OBJECT_CHECK(VirtIOCryptoPCI, (obj), TYPE_VIRTIO_CRYPTO_PCI)
+
+struct VirtIOCryptoPCI {
+    VirtIOPCIProxy parent_obj;
+    VirtIOCrypto vdev;
+};
 
 static Property virtio_crypto_pci_properties[] = {
     DEFINE_PROP_BIT("ioeventfd", VirtIOPCIProxy, flags,
@@ -62,13 +78,10 @@ static void virtio_crypto_initfn(Object *obj)
 
     virtio_instance_init_common(obj, &dev->vdev, sizeof(dev->vdev),
                                 TYPE_VIRTIO_CRYPTO);
-    object_property_add_alias(obj, "cryptodev", OBJECT(&dev->vdev),
-                              "cryptodev", &error_abort);
 }
 
-static const TypeInfo virtio_crypto_pci_info = {
-    .name          = TYPE_VIRTIO_CRYPTO_PCI,
-    .parent        = TYPE_VIRTIO_PCI,
+static const VirtioPCIDeviceTypeInfo virtio_crypto_pci_info = {
+    .generic_name  = TYPE_VIRTIO_CRYPTO_PCI,
     .instance_size = sizeof(VirtIOCryptoPCI),
     .instance_init = virtio_crypto_initfn,
     .class_init    = virtio_crypto_pci_class_init,
@@ -76,6 +89,6 @@ static const TypeInfo virtio_crypto_pci_info = {
 
 static void virtio_crypto_pci_register_types(void)
 {
-    type_register_static(&virtio_crypto_pci_info);
+    virtio_pci_types_register(&virtio_crypto_pci_info);
 }
 type_init(virtio_crypto_pci_register_types)

@@ -24,13 +24,24 @@
 #include "sysemu/cpus.h"
 #include "qemu/error-report.h"
 #include "qapi/error.h"
+#include "qapi/visitor.h"
 #include "cpu-models.h"
 
 typedef struct {
+    const char *name;
     uint32_t pvr;
     uint64_t pcr;
     uint64_t pcr_level;
-    int max_threads;
+
+    /*
+     * Maximum allowed virtual threads per virtual core
+     *
+     * This is to stop older guests getting confused by seeing more
+     * threads than they think the cpu can support.  Usually it's
+     * equal to the number of threads supported on bare metal
+     * hardware, but not always (see POWER9).
+     */
+    int max_vthreads;
 } CompatInfo;
 
 static const CompatInfo compat_table[] = {
@@ -38,35 +49,47 @@ static const CompatInfo compat_table[] = {
      * Ordered from oldest to newest - the code relies on this
      */
     { /* POWER6, ISA2.05 */
+        .name = "power6",
         .pvr = CPU_POWERPC_LOGICAL_2_05,
         .pcr = PCR_COMPAT_3_00 | PCR_COMPAT_2_07 | PCR_COMPAT_2_06 |
                PCR_COMPAT_2_05 | PCR_TM_DIS | PCR_VSX_DIS,
         .pcr_level = PCR_COMPAT_2_05,
-        .max_threads = 2,
+        .max_vthreads = 2,
     },
     { /* POWER7, ISA2.06 */
+        .name = "power7",
         .pvr = CPU_POWERPC_LOGICAL_2_06,
         .pcr = PCR_COMPAT_3_00 | PCR_COMPAT_2_07 | PCR_COMPAT_2_06 | PCR_TM_DIS,
         .pcr_level = PCR_COMPAT_2_06,
-        .max_threads = 4,
+        .max_vthreads = 4,
     },
     {
+        .name = "power7+",
         .pvr = CPU_POWERPC_LOGICAL_2_06_PLUS,
         .pcr = PCR_COMPAT_3_00 | PCR_COMPAT_2_07 | PCR_COMPAT_2_06 | PCR_TM_DIS,
         .pcr_level = PCR_COMPAT_2_06,
-        .max_threads = 4,
+        .max_vthreads = 4,
     },
     { /* POWER8, ISA2.07 */
+        .name = "power8",
         .pvr = CPU_POWERPC_LOGICAL_2_07,
         .pcr = PCR_COMPAT_3_00 | PCR_COMPAT_2_07,
         .pcr_level = PCR_COMPAT_2_07,
-        .max_threads = 8,
+        .max_vthreads = 8,
     },
     { /* POWER9, ISA3.00 */
+        .name = "power9",
         .pvr = CPU_POWERPC_LOGICAL_3_00,
         .pcr = PCR_COMPAT_3_00,
         .pcr_level = PCR_COMPAT_3_00,
-        .max_threads = 4,
+        /*
+         * POWER9 hardware only supports 4 threads / core, but this
+         * limit is for guests.  We need to support 8 vthreads/vcore
+         * on POWER9 for POWER8 compatibility guests, and it's very
+         * confusing if half of the threads disappear from the guest
+         * if it announces it's POWER9 aware at CAS time.
+         */
+        .max_vthreads = 8,
     },
 };
 
@@ -82,17 +105,13 @@ static const CompatInfo *compat_by_pvr(uint32_t pvr)
     return NULL;
 }
 
-bool ppc_check_compat(PowerPCCPU *cpu, uint32_t compat_pvr,
-                      uint32_t min_compat_pvr, uint32_t max_compat_pvr)
+static bool pcc_compat(PowerPCCPUClass *pcc, uint32_t compat_pvr,
+                       uint32_t min_compat_pvr, uint32_t max_compat_pvr)
 {
-    PowerPCCPUClass *pcc = POWERPC_CPU_GET_CLASS(cpu);
     const CompatInfo *compat = compat_by_pvr(compat_pvr);
     const CompatInfo *min = compat_by_pvr(min_compat_pvr);
     const CompatInfo *max = compat_by_pvr(max_compat_pvr);
 
-#if !defined(CONFIG_USER_ONLY)
-    g_assert(cpu->vhyp);
-#endif
     g_assert(!min_compat_pvr || min);
     g_assert(!max_compat_pvr || max);
 
@@ -109,6 +128,25 @@ bool ppc_check_compat(PowerPCCPU *cpu, uint32_t compat_pvr,
         return false;
     }
     return true;
+}
+
+bool ppc_check_compat(PowerPCCPU *cpu, uint32_t compat_pvr,
+                      uint32_t min_compat_pvr, uint32_t max_compat_pvr)
+{
+    PowerPCCPUClass *pcc = POWERPC_CPU_GET_CLASS(cpu);
+
+#if !defined(CONFIG_USER_ONLY)
+    g_assert(cpu->vhyp);
+#endif
+
+    return pcc_compat(pcc, compat_pvr, min_compat_pvr, max_compat_pvr);
+}
+
+bool ppc_type_check_compat(const char *cputype, uint32_t compat_pvr,
+                           uint32_t min_compat_pvr, uint32_t max_compat_pvr)
+{
+    PowerPCCPUClass *pcc = POWERPC_CPU_CLASS(object_class_by_name(cputype));
+    return pcc_compat(pcc, compat_pvr, min_compat_pvr, max_compat_pvr);
 }
 
 void ppc_set_compat(PowerPCCPU *cpu, uint32_t compat_pvr, Error **errp)
@@ -133,16 +171,17 @@ void ppc_set_compat(PowerPCCPU *cpu, uint32_t compat_pvr, Error **errp)
 
     cpu_synchronize_state(CPU(cpu));
 
-    cpu->compat_pvr = compat_pvr;
-    env->spr[SPR_PCR] = pcr & pcc->pcr_mask;
-
-    if (kvm_enabled()) {
-        int ret = kvmppc_set_compat(cpu, cpu->compat_pvr);
+    if (kvm_enabled() && cpu->compat_pvr != compat_pvr) {
+        int ret = kvmppc_set_compat(cpu, compat_pvr);
         if (ret < 0) {
             error_setg_errno(errp, -ret,
                              "Unable to set CPU compatibility mode in KVM");
+            return;
         }
     }
+
+    cpu->compat_pvr = compat_pvr;
+    env->spr[SPR_PCR] = pcr & pcc->pcr_mask;
 }
 
 typedef struct {
@@ -177,15 +216,110 @@ void ppc_set_compat_all(uint32_t compat_pvr, Error **errp)
     }
 }
 
-int ppc_compat_max_threads(PowerPCCPU *cpu)
+int ppc_compat_max_vthreads(PowerPCCPU *cpu)
 {
     const CompatInfo *compat = compat_by_pvr(cpu->compat_pvr);
     int n_threads = CPU(cpu)->nr_threads;
 
     if (cpu->compat_pvr) {
         g_assert(compat);
-        n_threads = MIN(n_threads, compat->max_threads);
+        n_threads = MIN(n_threads, compat->max_vthreads);
     }
 
     return n_threads;
+}
+
+static void ppc_compat_prop_get(Object *obj, Visitor *v, const char *name,
+                                void *opaque, Error **errp)
+{
+    uint32_t compat_pvr = *((uint32_t *)opaque);
+    const char *value;
+
+    if (!compat_pvr) {
+        value = "";
+    } else {
+        const CompatInfo *compat = compat_by_pvr(compat_pvr);
+
+        g_assert(compat);
+
+        value = compat->name;
+    }
+
+    visit_type_str(v, name, (char **)&value, errp);
+}
+
+static void ppc_compat_prop_set(Object *obj, Visitor *v, const char *name,
+                                void *opaque, Error **errp)
+{
+    Error *local_err = NULL;
+    char *value;
+    uint32_t compat_pvr;
+
+    visit_type_str(v, name, &value, &local_err);
+    if (local_err) {
+        error_propagate(errp, local_err);
+        return;
+    }
+
+    if (strcmp(value, "") == 0) {
+        compat_pvr = 0;
+    } else {
+        int i;
+        const CompatInfo *compat = NULL;
+
+        for (i = 0; i < ARRAY_SIZE(compat_table); i++) {
+            if (strcmp(value, compat_table[i].name) == 0) {
+                compat = &compat_table[i];
+                break;
+
+            }
+        }
+
+        if (!compat) {
+            error_setg(errp, "Invalid compatibility mode \"%s\"", value);
+            goto out;
+        }
+        compat_pvr = compat->pvr;
+    }
+
+    *((uint32_t *)opaque) = compat_pvr;
+
+out:
+    g_free(value);
+}
+
+void ppc_compat_add_property(Object *obj, const char *name,
+                             uint32_t *compat_pvr, const char *basedesc,
+                             Error **errp)
+{
+    Error *local_err = NULL;
+    gchar *namesv[ARRAY_SIZE(compat_table) + 1];
+    gchar *names, *desc;
+    int i;
+
+    object_property_add(obj, name, "string",
+                        ppc_compat_prop_get, ppc_compat_prop_set, NULL,
+                        compat_pvr, &local_err);
+    if (local_err) {
+        goto out;
+    }
+
+    for (i = 0; i < ARRAY_SIZE(compat_table); i++) {
+        /*
+         * Have to discard const here, because g_strjoinv() takes
+         * (gchar **), not (const gchar **) :(
+         */
+        namesv[i] = (gchar *)compat_table[i].name;
+    }
+    namesv[ARRAY_SIZE(compat_table)] = NULL;
+
+    names = g_strjoinv(", ", namesv);
+    desc = g_strdup_printf("%s. Valid values are %s.", basedesc, names);
+    object_property_set_description(obj, name, desc, &local_err);
+
+    g_free(names);
+    g_free(desc);
+
+out:
+    error_propagate(errp, local_err);
 }

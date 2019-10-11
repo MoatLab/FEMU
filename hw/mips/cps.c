@@ -19,6 +19,7 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
+#include "qemu/module.h"
 #include "hw/mips/cps.h"
 #include "hw/mips/mips.h"
 #include "hw/mips/cpudevs.h"
@@ -69,13 +70,10 @@ static void mips_cps_realize(DeviceState *dev, Error **errp)
     Error *err = NULL;
     target_ulong gcr_base;
     bool itu_present = false;
+    bool saar_present = false;
 
     for (i = 0; i < s->num_vp; i++) {
-        cpu = cpu_mips_init(s->cpu_model);
-        if (cpu == NULL) {
-            error_setg(errp, "%s: CPU initialization failed",  __func__);
-            return;
-        }
+        cpu = MIPS_CPU(cpu_create(s->cpu_type));
 
         /* Init internal devices */
         cpu_mips_irq_init_cpu(cpu);
@@ -86,20 +84,26 @@ static void mips_cps_realize(DeviceState *dev, Error **errp)
             itu_present = true;
             /* Attach ITC Tag to the VP */
             env->itc_tag = mips_itu_get_tag_region(&s->itu);
+            env->itu = &s->itu;
         }
         qemu_register_reset(main_cpu_reset, cpu);
     }
 
     cpu = MIPS_CPU(first_cpu);
     env = &cpu->env;
+    saar_present = (bool)env->saarp;
 
     /* Inter-Thread Communication Unit */
     if (itu_present) {
-        object_initialize(&s->itu, sizeof(s->itu), TYPE_MIPS_ITU);
-        qdev_set_parent_bus(DEVICE(&s->itu), sysbus_get_default());
-
+        sysbus_init_child_obj(OBJECT(dev), "itu", &s->itu, sizeof(s->itu),
+                              TYPE_MIPS_ITU);
         object_property_set_int(OBJECT(&s->itu), 16, "num-fifo", &err);
         object_property_set_int(OBJECT(&s->itu), 16, "num-semaphores", &err);
+        object_property_set_bool(OBJECT(&s->itu), saar_present, "saar-present",
+                                 &err);
+        if (saar_present) {
+            qdev_prop_set_ptr(DEVICE(&s->itu), "saar", (void *)&env->CP0_SAAR);
+        }
         object_property_set_bool(OBJECT(&s->itu), true, "realized", &err);
         if (err != NULL) {
             error_propagate(errp, err);
@@ -111,9 +115,8 @@ static void mips_cps_realize(DeviceState *dev, Error **errp)
     }
 
     /* Cluster Power Controller */
-    object_initialize(&s->cpc, sizeof(s->cpc), TYPE_MIPS_CPC);
-    qdev_set_parent_bus(DEVICE(&s->cpc), sysbus_get_default());
-
+    sysbus_init_child_obj(OBJECT(dev), "cpc", &s->cpc, sizeof(s->cpc),
+                          TYPE_MIPS_CPC);
     object_property_set_int(OBJECT(&s->cpc), s->num_vp, "num-vp", &err);
     object_property_set_int(OBJECT(&s->cpc), 1, "vp-start-running", &err);
     object_property_set_bool(OBJECT(&s->cpc), true, "realized", &err);
@@ -126,9 +129,8 @@ static void mips_cps_realize(DeviceState *dev, Error **errp)
                             sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->cpc), 0));
 
     /* Global Interrupt Controller */
-    object_initialize(&s->gic, sizeof(s->gic), TYPE_MIPS_GIC);
-    qdev_set_parent_bus(DEVICE(&s->gic), sysbus_get_default());
-
+    sysbus_init_child_obj(OBJECT(dev), "gic", &s->gic, sizeof(s->gic),
+                          TYPE_MIPS_GIC);
     object_property_set_int(OBJECT(&s->gic), s->num_vp, "num-vp", &err);
     object_property_set_int(OBJECT(&s->gic), 128, "num-irq", &err);
     object_property_set_bool(OBJECT(&s->gic), true, "realized", &err);
@@ -143,9 +145,8 @@ static void mips_cps_realize(DeviceState *dev, Error **errp)
     /* Global Configuration Registers */
     gcr_base = env->CP0_CMGCRBase << 4;
 
-    object_initialize(&s->gcr, sizeof(s->gcr), TYPE_MIPS_GCR);
-    qdev_set_parent_bus(DEVICE(&s->gcr), sysbus_get_default());
-
+    sysbus_init_child_obj(OBJECT(dev), "gcr", &s->gcr, sizeof(s->gcr),
+                          TYPE_MIPS_GCR);
     object_property_set_int(OBJECT(&s->gcr), s->num_vp, "num-vp", &err);
     object_property_set_int(OBJECT(&s->gcr), 0x800, "gcr-rev", &err);
     object_property_set_int(OBJECT(&s->gcr), gcr_base, "gcr-base", &err);
@@ -164,7 +165,7 @@ static void mips_cps_realize(DeviceState *dev, Error **errp)
 static Property mips_cps_properties[] = {
     DEFINE_PROP_UINT32("num-vp", MIPSCPSState, num_vp, 1),
     DEFINE_PROP_UINT32("num-irq", MIPSCPSState, num_irq, 256),
-    DEFINE_PROP_STRING("cpu-model", MIPSCPSState, cpu_model),
+    DEFINE_PROP_STRING("cpu-type", MIPSCPSState, cpu_type),
     DEFINE_PROP_END_OF_LIST()
 };
 

@@ -33,6 +33,8 @@
 # define PIXMAN_BE_r8g8b8a8   PIXMAN_r8g8b8a8
 # define PIXMAN_BE_x8b8g8r8   PIXMAN_x8b8g8r8
 # define PIXMAN_BE_a8b8g8r8   PIXMAN_a8b8g8r8
+# define PIXMAN_LE_r8g8b8     PIXMAN_b8g8r8
+# define PIXMAN_LE_a8r8g8b8   PIXMAN_b8g8r8a8
 # define PIXMAN_LE_x8r8g8b8   PIXMAN_b8g8r8x8
 #else
 # define PIXMAN_BE_r8g8b8     PIXMAN_b8g8r8
@@ -44,13 +46,26 @@
 # define PIXMAN_BE_r8g8b8a8   PIXMAN_a8b8g8r8
 # define PIXMAN_BE_x8b8g8r8   PIXMAN_r8g8b8x8
 # define PIXMAN_BE_a8b8g8r8   PIXMAN_r8g8b8a8
+# define PIXMAN_LE_r8g8b8     PIXMAN_r8g8b8
+# define PIXMAN_LE_a8r8g8b8   PIXMAN_a8r8g8b8
 # define PIXMAN_LE_x8r8g8b8   PIXMAN_x8r8g8b8
 #endif
 
 /* -------------------------------------------------------------------- */
 
+typedef struct PixelFormat {
+    uint8_t bits_per_pixel;
+    uint8_t bytes_per_pixel;
+    uint8_t depth; /* color depth in bits */
+    uint32_t rmask, gmask, bmask, amask;
+    uint8_t rshift, gshift, bshift, ashift;
+    uint8_t rmax, gmax, bmax, amax;
+    uint8_t rbits, gbits, bbits, abits;
+} PixelFormat;
+
 PixelFormat qemu_pixelformat_from_pixman(pixman_format_code_t format);
 pixman_format_code_t qemu_default_pixman_format(int bpp, bool native_endian);
+pixman_format_code_t qemu_drm_format_to_pixman(uint32_t drm_format);
 int qemu_pixman_get_type(int rshift, int gshift, int bshift);
 pixman_format_code_t qemu_pixman_get_format(PixelFormat *pf);
 bool qemu_pixman_check_format(DisplayChangeListener *dcl,

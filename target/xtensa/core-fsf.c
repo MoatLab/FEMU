@@ -27,12 +27,14 @@
 
 #include "qemu/osdep.h"
 #include "cpu.h"
-#include "exec/exec-all.h"
 #include "exec/gdbstub.h"
 #include "qemu/host-utils.h"
 
 #include "core-fsf/core-isa.h"
 #include "overlay_tool.h"
+
+#define xtensa_modules xtensa_modules_fsf
+#include "core-fsf/xtensa-modules.inc.c"
 
 static XtensaConfig fsf __attribute__((unused)) = {
     .name = "fsf",
@@ -42,6 +44,7 @@ static XtensaConfig fsf __attribute__((unused)) = {
             XTREG_END
         },
     },
+    .isa_internal = &xtensa_modules,
     .clock_freq_khz = 10000,
     DEFAULT_SECTIONS
 };

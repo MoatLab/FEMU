@@ -24,7 +24,7 @@ import os
 
 interval_length = 10
 nsec_per_sec = 1000000000
-op_latency = nsec_per_sec / 1000 # See qtest_latency_ns in accounting.c
+op_latency = nsec_per_sec // 1000 # See qtest_latency_ns in accounting.c
 bad_sector = 8192
 bad_offset = bad_sector * 512
 blkdebug_file = os.path.join(iotests.test_dir, 'blkdebug.conf')
@@ -74,8 +74,9 @@ sector = "%d"
                           (self.account_invalid and "on" or "off"))
         drive_args.append("stats-account-failed=%s" %
                           (self.account_failed and "on" or "off"))
+        drive_args.append("file.image.read-zeroes=on")
         self.create_blkdebug_file()
-        self.vm = iotests.VM().add_drive('blkdebug:%s:%s ' %
+        self.vm = iotests.VM().add_drive('blkdebug:%s:%s' %
                                          (blkdebug_file, self.test_img),
                                          ','.join(drive_args))
         self.vm.launch()
@@ -203,7 +204,7 @@ sector = "%d"
         if (self.accounted_ops(read = True, write = True, flush = True) != 0):
             self.assertLess(0, stats['idle_time_ns'])
         else:
-            self.assertFalse(stats.has_key('idle_time_ns'))
+            self.assertFalse('idle_time_ns' in stats)
 
         # This test does not alter these, so they must be all 0
         self.assertEqual(0, stats['rd_merged'])
@@ -238,6 +239,18 @@ sector = "%d"
         for i in range(failed_wr_ops):
             ops.append("aio_write %d 512" % bad_offset)
 
+        # We need an extra aio_flush to settle all outstanding AIO
+        # operations before we can advance the virtual clock, so that
+        # the last access happens before clock_step and idle_time_ns
+        # will be greater than 0
+        extra_flush = 0
+        if rd_ops + wr_ops + invalid_rd_ops + invalid_wr_ops + \
+                failed_rd_ops + failed_wr_ops > 0:
+            extra_flush = 1
+
+        if extra_flush > 0:
+            ops.append("aio_flush")
+
         if failed_wr_ops > 0:
             highest_offset = max(highest_offset, bad_offset + 512)
 
@@ -251,7 +264,7 @@ sector = "%d"
         self.total_wr_bytes += wr_ops * wr_size
         self.total_wr_ops += wr_ops
         self.total_wr_merged += wr_merged
-        self.total_flush_ops += flush_ops
+        self.total_flush_ops += flush_ops + extra_flush
         self.invalid_rd_ops += invalid_rd_ops
         self.invalid_wr_ops += invalid_wr_ops
         self.failed_rd_ops += failed_rd_ops

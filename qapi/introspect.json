@@ -1,7 +1,5 @@
 # -*- Mode: Python -*-
 #
-# QAPI/QMP introspection
-#
 # Copyright (C) 2015 Red Hat, Inc.
 #
 # Authors:
@@ -9,6 +7,10 @@
 #
 # This work is licensed under the terms of the GNU GPL, version 2 or later.
 # See the COPYING file in the top-level directory.
+
+##
+# = QMP introspection
+##
 
 ##
 # @query-qmp-schema:
@@ -118,7 +120,7 @@
 ##
 # @JSONType:
 #
-# The four primitive and two structured types according to RFC 7159
+# The four primitive and two structured types according to RFC 8259
 # section 1, plus 'int' (split off 'number'), plus the obvious top
 # type 'value'.
 #
@@ -172,6 +174,9 @@
 #            and may even differ from the order of the values of the
 #            enum type of the @tag.
 #
+# @features: names of features associated with the type, in no particular
+#            order. (since: 4.1)
+#
 # Values of this type are JSON object on the wire.
 #
 # Since: 2.5
@@ -179,7 +184,8 @@
 { 'struct': 'SchemaInfoObject',
   'data': { 'members': [ 'SchemaInfoObjectMember' ],
             '*tag': 'str',
-            '*variants': [ 'SchemaInfoObjectVariant' ] } }
+            '*variants': [ 'SchemaInfoObjectVariant' ],
+            '*features': [ 'str' ] } }
 
 ##
 # @SchemaInfoObjectMember:
@@ -226,7 +232,7 @@
 #
 # @members: the alternate type's members, in no particular order.
 #           The members' wire encoding is distinct, see
-#           docs/qapi-code-gen.txt section Alternate types.
+#           docs/devel/qapi-code-gen.txt section Alternate types.
 #
 # On the wire, this can be any of the members.
 #
@@ -257,12 +263,16 @@
 #
 # @ret-type: the name of the command's result type.
 #
+# @allow-oob: whether the command allows out-of-band execution,
+#             defaults to false (Since: 2.12)
+#
 # TODO: @success-response (currently irrelevant, because it's QGA, not QMP)
 #
 # Since: 2.5
 ##
 { 'struct': 'SchemaInfoCommand',
-  'data': { 'arg-type': 'str', 'ret-type': 'str' } }
+  'data': { 'arg-type': 'str', 'ret-type': 'str',
+            '*allow-oob': 'bool' } }
 
 ##
 # @SchemaInfoEvent:

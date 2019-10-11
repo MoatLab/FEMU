@@ -1,6 +1,9 @@
 /* from asm/termbits.h */
 /* NOTE: exactly the same as i386 */
 
+#ifndef LINUX_USER_AARCH64_TERMBITS_H
+#define LINUX_USER_AARCH64_TERMBITS_H
+
 #define TARGET_NCCS 19
 
 struct target_termios {
@@ -187,6 +190,8 @@ struct target_termios {
         /* Get Pty Number (of pty-mux device) */
 #define TARGET_TIOCSPTLCK       TARGET_IOW('T', 0x31, int)
         /* Lock/unlock Pty */
+#define TARGET_TIOCGPTPEER      TARGET_IO('T', 0x41)
+        /* Safely open the slave */
 
 #define TARGET_FIONCLEX         0x5450  /* these numbers need to be adjusted. */
 #define TARGET_FIOCLEX          0x5451
@@ -218,3 +223,5 @@ struct target_termios {
 #define TARGET_TIOCPKT_DOSTOP           32
 
 #define TARGET_TIOCSER_TEMT    0x01 /* Transmitter physically empty */
+
+#endif

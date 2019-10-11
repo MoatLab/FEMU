@@ -14,13 +14,14 @@
 #include "qemu/osdep.h"
 
 #include "qemu-common.h"
-#include "test-qapi-types.h"
-#include "test-qapi-visit.h"
-#include "test-qapi-event.h"
-#include "qapi/qmp/types.h"
-#include "qapi/qmp/qint.h"
-#include "qapi/qmp/qobject.h"
+#include "qapi/error.h"
+#include "qapi/qmp/qbool.h"
+#include "qapi/qmp/qdict.h"
+#include "qapi/qmp/qnum.h"
+#include "qapi/qmp/qstring.h"
 #include "qapi/qmp-event.h"
+#include "test-qapi-events.h"
+#include "test-qapi-emit-events.h"
 
 typedef struct TestEventData {
     QDict *expect;
@@ -32,7 +33,7 @@ typedef struct QDictCmpData {
 } QDictCmpData;
 
 TestEventData *test_event_data;
-static CompatGMutex test_event_lock;
+static GMutex test_event_lock;
 
 /* Only compares bool, int, string */
 static
@@ -41,6 +42,7 @@ void qdict_cmp_do_simple(const char *key, QObject *obj1, void *opaque)
 {
     QObject *obj2;
     QDictCmpData d_new, *d = opaque;
+    int64_t val1, val2;
 
     if (!d->result) {
         return;
@@ -59,21 +61,22 @@ void qdict_cmp_do_simple(const char *key, QObject *obj1, void *opaque)
 
     switch (qobject_type(obj1)) {
     case QTYPE_QBOOL:
-        d->result = (qbool_get_bool(qobject_to_qbool(obj1)) ==
-                     qbool_get_bool(qobject_to_qbool(obj2)));
+        d->result = (qbool_get_bool(qobject_to(QBool, obj1)) ==
+                     qbool_get_bool(qobject_to(QBool, obj2)));
         return;
-    case QTYPE_QINT:
-        d->result = (qint_get_int(qobject_to_qint(obj1)) ==
-                     qint_get_int(qobject_to_qint(obj2)));
+    case QTYPE_QNUM:
+        g_assert(qnum_get_try_int(qobject_to(QNum, obj1), &val1));
+        g_assert(qnum_get_try_int(qobject_to(QNum, obj2), &val2));
+        d->result = val1 == val2;
         return;
     case QTYPE_QSTRING:
-        d->result = g_strcmp0(qstring_get_str(qobject_to_qstring(obj1)),
-                              qstring_get_str(qobject_to_qstring(obj2))) == 0;
+        d->result = g_strcmp0(qstring_get_str(qobject_to(QString, obj1)),
+                              qstring_get_str(qobject_to(QString, obj2))) == 0;
         return;
     case QTYPE_QDICT:
-        d_new.expect = qobject_to_qdict(obj2);
+        d_new.expect = qobject_to(QDict, obj2);
         d_new.result = true;
-        qdict_iter(qobject_to_qdict(obj1), qdict_cmp_do_simple, &d_new);
+        qdict_iter(qobject_to(QDict, obj1), qdict_cmp_do_simple, &d_new);
         d->result = d_new.result;
         return;
     default:
@@ -91,9 +94,7 @@ static bool qdict_cmp_simple(QDict *a, QDict *b)
     return d.result;
 }
 
-/* This function is hooked as final emit function, which can verify the
-   correctness. */
-static void event_test_emit(test_QAPIEvent event, QDict *d, Error **errp)
+void test_qapi_event_emit(test_QAPIEvent event, QDict *d)
 {
     QDict *t;
     int64_t s, ms;
@@ -131,7 +132,7 @@ static void event_prepare(TestEventData *data,
 static void event_teardown(TestEventData *data,
                            const void *unused)
 {
-    QDECREF(data->expect);
+    qobject_unref(data->expect);
     test_event_data = NULL;
 
     g_mutex_unlock(&test_event_lock);
@@ -153,8 +154,8 @@ static void test_event_a(TestEventData *data,
 {
     QDict *d;
     d = data->expect;
-    qdict_put(d, "event", qstring_from_str("EVENT_A"));
-    qapi_event_send_event_a(&error_abort);
+    qdict_put_str(d, "event", "EVENT_A");
+    qapi_event_send_event_a();
 }
 
 static void test_event_b(TestEventData *data,
@@ -162,8 +163,8 @@ static void test_event_b(TestEventData *data,
 {
     QDict *d;
     d = data->expect;
-    qdict_put(d, "event", qstring_from_str("EVENT_B"));
-    qapi_event_send_event_b(&error_abort);
+    qdict_put_str(d, "event", "EVENT_B");
+    qapi_event_send_event_b();
 }
 
 static void test_event_c(TestEventData *data,
@@ -177,19 +178,19 @@ static void test_event_c(TestEventData *data,
     b.has_enum1 = false;
 
     d_b = qdict_new();
-    qdict_put(d_b, "integer", qint_from_int(2));
-    qdict_put(d_b, "string", qstring_from_str("test1"));
+    qdict_put_int(d_b, "integer", 2);
+    qdict_put_str(d_b, "string", "test1");
 
     d_data = qdict_new();
-    qdict_put(d_data, "a", qint_from_int(1));
+    qdict_put_int(d_data, "a", 1);
     qdict_put(d_data, "b", d_b);
-    qdict_put(d_data, "c", qstring_from_str("test2"));
+    qdict_put_str(d_data, "c", "test2");
 
     d = data->expect;
-    qdict_put(d, "event", qstring_from_str("EVENT_C"));
+    qdict_put_str(d, "event", "EVENT_C");
     qdict_put(d, "data", d_data);
 
-    qapi_event_send_event_c(true, 1, true, &b, "test2", &error_abort);
+    qapi_event_send_event_c(true, 1, true, &b, "test2");
 
     g_free(b.string);
 }
@@ -213,26 +214,25 @@ static void test_event_d(TestEventData *data,
     a.enum2 = ENUM_ONE_VALUE2;
 
     d_struct1 = qdict_new();
-    qdict_put(d_struct1, "integer", qint_from_int(2));
-    qdict_put(d_struct1, "string", qstring_from_str("test1"));
-    qdict_put(d_struct1, "enum1", qstring_from_str("value1"));
+    qdict_put_int(d_struct1, "integer", 2);
+    qdict_put_str(d_struct1, "string", "test1");
+    qdict_put_str(d_struct1, "enum1", "value1");
 
     d_a = qdict_new();
     qdict_put(d_a, "struct1", d_struct1);
-    qdict_put(d_a, "string", qstring_from_str("test2"));
-    qdict_put(d_a, "enum2", qstring_from_str("value2"));
+    qdict_put_str(d_a, "string", "test2");
+    qdict_put_str(d_a, "enum2", "value2");
 
     d_data = qdict_new();
     qdict_put(d_data, "a", d_a);
-    qdict_put(d_data, "b", qstring_from_str("test3"));
-    qdict_put(d_data, "enum3", qstring_from_str("value3"));
+    qdict_put_str(d_data, "b", "test3");
+    qdict_put_str(d_data, "enum3", "value3");
 
     d = data->expect;
-    qdict_put(d, "event", qstring_from_str("EVENT_D"));
+    qdict_put_str(d, "event", "EVENT_D");
     qdict_put(d, "data", d_data);
 
-    qapi_event_send_event_d(&a, "test3", false, NULL, true, ENUM_ONE_VALUE3,
-                           &error_abort);
+    qapi_event_send_event_d(&a, "test3", false, NULL, true, ENUM_ONE_VALUE3);
 
     g_free(struct1.string);
     g_free(a.string);
@@ -240,14 +240,6 @@ static void test_event_d(TestEventData *data,
 
 int main(int argc, char **argv)
 {
-#if !GLIB_CHECK_VERSION(2, 31, 0)
-    if (!g_thread_supported()) {
-       g_thread_init(NULL);
-    }
-#endif
-
-    qmp_event_set_func_emit(event_test_emit);
-
     g_test_init(&argc, &argv, NULL);
 
     event_test_add("/event/event_a", test_event_a);

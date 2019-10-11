@@ -27,7 +27,6 @@
  */
 
 #include "qemu/osdep.h"
-#include "qemu-common.h"
 #include "qemu/coroutine.h"
 #include "qemu/coroutine_int.h"
 #include "qemu/processor.h"
@@ -40,13 +39,13 @@ void qemu_co_queue_init(CoQueue *queue)
     QSIMPLEQ_INIT(&queue->entries);
 }
 
-void coroutine_fn qemu_co_queue_wait(CoQueue *queue, CoMutex *mutex)
+void coroutine_fn qemu_co_queue_wait_impl(CoQueue *queue, QemuLockable *lock)
 {
     Coroutine *self = qemu_coroutine_self();
     QSIMPLEQ_INSERT_TAIL(&queue->entries, self, co_queue_next);
 
-    if (mutex) {
-        qemu_co_mutex_unlock(mutex);
+    if (lock) {
+        qemu_lockable_unlock(lock);
     }
 
     /* There is no race condition here.  Other threads will call
@@ -60,28 +59,11 @@ void coroutine_fn qemu_co_queue_wait(CoQueue *queue, CoMutex *mutex)
     /* TODO: OSv implements wait morphing here, where the wakeup
      * primitive automatically places the woken coroutine on the
      * mutex's queue.  This avoids the thundering herd effect.
+     * This could be implemented for CoMutexes, but not really for
+     * other cases of QemuLockable.
      */
-    if (mutex) {
-        qemu_co_mutex_lock(mutex);
-    }
-}
-
-/**
- * qemu_co_queue_run_restart:
- *
- * Enter each coroutine that was previously marked for restart by
- * qemu_co_queue_next() or qemu_co_queue_restart_all().  This function is
- * invoked by the core coroutine code when the current coroutine yields or
- * terminates.
- */
-void qemu_co_queue_run_restart(Coroutine *co)
-{
-    Coroutine *next;
-
-    trace_qemu_co_queue_run_restart(co);
-    while ((next = QSIMPLEQ_FIRST(&co->co_queue_wakeup))) {
-        QSIMPLEQ_REMOVE_HEAD(&co->co_queue_wakeup, co_queue_next);
-        qemu_coroutine_enter(next);
+    if (lock) {
+        qemu_lockable_lock(lock);
     }
 }
 
@@ -115,7 +97,7 @@ void coroutine_fn qemu_co_queue_restart_all(CoQueue *queue)
     qemu_co_queue_do_restart(queue, false);
 }
 
-bool qemu_co_enter_next(CoQueue *queue)
+bool qemu_co_enter_next_impl(CoQueue *queue, QemuLockable *lock)
 {
     Coroutine *next;
 
@@ -125,7 +107,13 @@ bool qemu_co_enter_next(CoQueue *queue)
     }
 
     QSIMPLEQ_REMOVE_HEAD(&queue->entries, co_queue_next);
-    qemu_coroutine_enter(next);
+    if (lock) {
+        qemu_lockable_unlock(lock);
+    }
+    aio_co_wake(next);
+    if (lock) {
+        qemu_lockable_lock(lock);
+    }
     return true;
 }
 
@@ -387,6 +375,21 @@ void qemu_co_rwlock_unlock(CoRwlock *lock)
     qemu_co_mutex_unlock(&lock->mutex);
 }
 
+void qemu_co_rwlock_downgrade(CoRwlock *lock)
+{
+    Coroutine *self = qemu_coroutine_self();
+
+    /* lock->mutex critical section started in qemu_co_rwlock_wrlock or
+     * qemu_co_rwlock_upgrade.
+     */
+    assert(lock->reader == 0);
+    lock->reader++;
+    qemu_co_mutex_unlock(&lock->mutex);
+
+    /* The rest of the read-side critical section is run without the mutex.  */
+    self->locks_held++;
+}
+
 void qemu_co_rwlock_wrlock(CoRwlock *lock)
 {
     qemu_co_mutex_lock(&lock->mutex);
@@ -400,4 +403,24 @@ void qemu_co_rwlock_wrlock(CoRwlock *lock)
      * the mutex taken, so that lock->reader remains zero.
      * There is no need to update self->locks_held.
      */
+}
+
+void qemu_co_rwlock_upgrade(CoRwlock *lock)
+{
+    Coroutine *self = qemu_coroutine_self();
+
+    qemu_co_mutex_lock(&lock->mutex);
+    assert(lock->reader > 0);
+    lock->reader--;
+    lock->pending_writer++;
+    while (lock->reader) {
+        qemu_co_queue_wait(&lock->queue, &lock->mutex);
+    }
+    lock->pending_writer--;
+
+    /* The rest of the write-side critical section is run with
+     * the mutex taken, similar to qemu_co_rwlock_wrlock.  Do
+     * not account for the lock twice in self->locks_held.
+     */
+    self->locks_held--;
 }

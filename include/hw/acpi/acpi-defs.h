@@ -40,30 +40,13 @@ enum {
     ACPI_FADT_F_LOW_POWER_S0_IDLE_CAPABLE,
 };
 
-/*
- * ACPI 2.0 Generic Address Space definition.
- */
-struct Acpi20GenericAddress {
-    uint8_t  address_space_id;
-    uint8_t  register_bit_width;
-    uint8_t  register_bit_offset;
-    uint8_t  reserved;
-    uint64_t address;
-} QEMU_PACKED;
-typedef struct Acpi20GenericAddress Acpi20GenericAddress;
+typedef struct AcpiRsdpData {
+    uint8_t oem_id[6] QEMU_NONSTRING; /* OEM identification */
+    uint8_t revision;                 /* Must be 0 for 1.0, 2 for 2.0 */
 
-struct AcpiRsdpDescriptor {        /* Root System Descriptor Pointer */
-    uint64_t signature;              /* ACPI signature, contains "RSD PTR " */
-    uint8_t  checksum;               /* To make sum of struct == 0 */
-    uint8_t  oem_id [6];             /* OEM identification */
-    uint8_t  revision;               /* Must be 0 for 1.0, 2 for 2.0 */
-    uint32_t rsdt_physical_address;  /* 32-bit physical address of RSDT */
-    uint32_t length;                 /* XSDT Length in bytes including hdr */
-    uint64_t xsdt_physical_address;  /* 64-bit physical address of XSDT */
-    uint8_t  extended_checksum;      /* Checksum of entire table */
-    uint8_t  reserved [3];           /* Reserved field must be 0 */
-} QEMU_PACKED;
-typedef struct AcpiRsdpDescriptor AcpiRsdpDescriptor;
+    unsigned *rsdt_tbl_offset;
+    unsigned *xsdt_tbl_offset;
+} AcpiRsdpData;
 
 /* Table structure from Linux kernel (the ACPI tables are under the
    BSD license) */
@@ -74,122 +57,60 @@ typedef struct AcpiRsdpDescriptor AcpiRsdpDescriptor;
     uint32_t length;                 /* Length of table, in bytes, including header */ \
     uint8_t  revision;               /* ACPI Specification minor version # */ \
     uint8_t  checksum;               /* To make sum of entire table == 0 */ \
-    uint8_t  oem_id [6];             /* OEM identification */ \
-    uint8_t  oem_table_id [8];       /* OEM table identification */ \
+    uint8_t  oem_id[6] \
+                 QEMU_NONSTRING;     /* OEM identification */ \
+    uint8_t  oem_table_id[8] \
+                 QEMU_NONSTRING;     /* OEM table identification */ \
     uint32_t oem_revision;           /* OEM revision number */ \
-    uint8_t  asl_compiler_id [4];    /* ASL compiler vendor ID */ \
+    uint8_t  asl_compiler_id[4] \
+                 QEMU_NONSTRING;     /* ASL compiler vendor ID */ \
     uint32_t asl_compiler_revision;  /* ASL compiler revision number */
 
 
-struct AcpiTableHeader         /* ACPI common table header */
-{
+/* ACPI common table header */
+struct AcpiTableHeader {
     ACPI_TABLE_HEADER_DEF
 } QEMU_PACKED;
 typedef struct AcpiTableHeader AcpiTableHeader;
-
-/*
- * ACPI Fixed ACPI Description Table (FADT)
- */
-#define ACPI_FADT_COMMON_DEF /* FADT common definition */ \
-    ACPI_TABLE_HEADER_DEF    /* ACPI common table header */ \
-    uint32_t firmware_ctrl;  /* Physical address of FACS */ \
-    uint32_t dsdt;         /* Physical address of DSDT */ \
-    uint8_t  model;        /* System Interrupt Model */ \
-    uint8_t  reserved1;    /* Reserved */ \
-    uint16_t sci_int;      /* System vector of SCI interrupt */ \
-    uint32_t smi_cmd;      /* Port address of SMI command port */ \
-    uint8_t  acpi_enable;  /* Value to write to smi_cmd to enable ACPI */ \
-    uint8_t  acpi_disable; /* Value to write to smi_cmd to disable ACPI */ \
-    /* Value to write to SMI CMD to enter S4BIOS state */ \
-    uint8_t  S4bios_req; \
-    uint8_t  reserved2;    /* Reserved - must be zero */ \
-    /* Port address of Power Mgt 1a acpi_event Reg Blk */ \
-    uint32_t pm1a_evt_blk; \
-    /* Port address of Power Mgt 1b acpi_event Reg Blk */ \
-    uint32_t pm1b_evt_blk; \
-    uint32_t pm1a_cnt_blk; /* Port address of Power Mgt 1a Control Reg Blk */ \
-    uint32_t pm1b_cnt_blk; /* Port address of Power Mgt 1b Control Reg Blk */ \
-    uint32_t pm2_cnt_blk;  /* Port address of Power Mgt 2 Control Reg Blk */ \
-    uint32_t pm_tmr_blk;   /* Port address of Power Mgt Timer Ctrl Reg Blk */ \
-    /* Port addr of General Purpose acpi_event 0 Reg Blk */ \
-    uint32_t gpe0_blk; \
-    /* Port addr of General Purpose acpi_event 1 Reg Blk */ \
-    uint32_t gpe1_blk; \
-    uint8_t  pm1_evt_len;  /* Byte length of ports at pm1_x_evt_blk */ \
-    uint8_t  pm1_cnt_len;  /* Byte length of ports at pm1_x_cnt_blk */ \
-    uint8_t  pm2_cnt_len;  /* Byte Length of ports at pm2_cnt_blk */ \
-    uint8_t  pm_tmr_len;   /* Byte Length of ports at pm_tm_blk */ \
-    uint8_t  gpe0_blk_len; /* Byte Length of ports at gpe0_blk */ \
-    uint8_t  gpe1_blk_len; /* Byte Length of ports at gpe1_blk */ \
-    uint8_t  gpe1_base;    /* Offset in gpe model where gpe1 events start */ \
-    uint8_t  reserved3;    /* Reserved */ \
-    uint16_t plvl2_lat;    /* Worst case HW latency to enter/exit C2 state */ \
-    uint16_t plvl3_lat;    /* Worst case HW latency to enter/exit C3 state */ \
-    uint16_t flush_size;   /* Size of area read to flush caches */ \
-    uint16_t flush_stride; /* Stride used in flushing caches */ \
-    uint8_t  duty_offset;  /* Bit location of duty cycle field in p_cnt reg */ \
-    uint8_t  duty_width;   /* Bit width of duty cycle field in p_cnt reg */ \
-    uint8_t  day_alrm;     /* Index to day-of-month alarm in RTC CMOS RAM */ \
-    uint8_t  mon_alrm;     /* Index to month-of-year alarm in RTC CMOS RAM */ \
-    uint8_t  century;      /* Index to century in RTC CMOS RAM */
-
-struct AcpiFadtDescriptorRev1
-{
-    ACPI_FADT_COMMON_DEF
-    uint8_t  reserved4;              /* Reserved */
-    uint8_t  reserved4a;             /* Reserved */
-    uint8_t  reserved4b;             /* Reserved */
-    uint32_t flags;
-} QEMU_PACKED;
-typedef struct AcpiFadtDescriptorRev1 AcpiFadtDescriptorRev1;
 
 struct AcpiGenericAddress {
     uint8_t space_id;        /* Address space where struct or register exists */
     uint8_t bit_width;       /* Size in bits of given register */
     uint8_t bit_offset;      /* Bit offset within the register */
-    uint8_t access_width;    /* Minimum Access size (ACPI 3.0) */
+    uint8_t access_width;    /* ACPI 3.0: Minimum Access size (ACPI 3.0),
+                                ACPI 2.0: Reserved, Table 5-1 */
     uint64_t address;        /* 64-bit address of struct or register */
 } QEMU_PACKED;
 
-struct AcpiFadtDescriptorRev5_1 {
-    ACPI_FADT_COMMON_DEF
-    /* IA-PC Boot Architecture Flags (see below for individual flags) */
-    uint16_t boot_flags;
-    uint8_t reserved;    /* Reserved, must be zero */
-    /* Miscellaneous flag bits (see below for individual flags) */
-    uint32_t flags;
-    /* 64-bit address of the Reset register */
-    struct AcpiGenericAddress reset_register;
-    /* Value to write to the reset_register port to reset the system */
-    uint8_t reset_value;
-    /* ARM-Specific Boot Flags (see below for individual flags) (ACPI 5.1) */
-    uint16_t arm_boot_flags;
-    uint8_t minor_revision;  /* FADT Minor Revision (ACPI 5.1) */
-    uint64_t Xfacs;          /* 64-bit physical address of FACS */
-    uint64_t Xdsdt;          /* 64-bit physical address of DSDT */
-    /* 64-bit Extended Power Mgt 1a Event Reg Blk address */
-    struct AcpiGenericAddress xpm1a_event_block;
-    /* 64-bit Extended Power Mgt 1b Event Reg Blk address */
-    struct AcpiGenericAddress xpm1b_event_block;
-    /* 64-bit Extended Power Mgt 1a Control Reg Blk address */
-    struct AcpiGenericAddress xpm1a_control_block;
-    /* 64-bit Extended Power Mgt 1b Control Reg Blk address */
-    struct AcpiGenericAddress xpm1b_control_block;
-    /* 64-bit Extended Power Mgt 2 Control Reg Blk address */
-    struct AcpiGenericAddress xpm2_control_block;
-    /* 64-bit Extended Power Mgt Timer Ctrl Reg Blk address */
-    struct AcpiGenericAddress xpm_timer_block;
-    /* 64-bit Extended General Purpose Event 0 Reg Blk address */
-    struct AcpiGenericAddress xgpe0_block;
-    /* 64-bit Extended General Purpose Event 1 Reg Blk address */
-    struct AcpiGenericAddress xgpe1_block;
-    /* 64-bit Sleep Control register (ACPI 5.0) */
-    struct AcpiGenericAddress sleep_control;
-    /* 64-bit Sleep Status register (ACPI 5.0) */
-    struct AcpiGenericAddress sleep_status;
-} QEMU_PACKED;
+typedef struct AcpiFadtData {
+    struct AcpiGenericAddress pm1a_cnt;   /* PM1a_CNT_BLK */
+    struct AcpiGenericAddress pm1a_evt;   /* PM1a_EVT_BLK */
+    struct AcpiGenericAddress pm_tmr;    /* PM_TMR_BLK */
+    struct AcpiGenericAddress gpe0_blk;  /* GPE0_BLK */
+    struct AcpiGenericAddress reset_reg; /* RESET_REG */
+    uint8_t reset_val;         /* RESET_VALUE */
+    uint8_t  rev;              /* Revision */
+    uint32_t flags;            /* Flags */
+    uint32_t smi_cmd;          /* SMI_CMD */
+    uint16_t sci_int;          /* SCI_INT */
+    uint8_t  int_model;        /* INT_MODEL */
+    uint8_t  acpi_enable_cmd;  /* ACPI_ENABLE */
+    uint8_t  acpi_disable_cmd; /* ACPI_DISABLE */
+    uint8_t  rtc_century;      /* CENTURY */
+    uint16_t plvl2_lat;        /* P_LVL2_LAT */
+    uint16_t plvl3_lat;        /* P_LVL3_LAT */
+    uint16_t arm_boot_arch;    /* ARM_BOOT_ARCH */
+    uint8_t minor_ver;         /* FADT Minor Version */
 
-typedef struct AcpiFadtDescriptorRev5_1 AcpiFadtDescriptorRev5_1;
+    /*
+     * respective tables offsets within ACPI_BUILD_TABLE_FILE,
+     * NULL if table doesn't exist (in that case field's value
+     * won't be patched by linker and will be kept set to 0)
+     */
+    unsigned *facs_tbl_offset; /* FACS offset in */
+    unsigned *dsdt_tbl_offset;
+    unsigned *xdsdt_tbl_offset;
+} AcpiFadtData;
 
 #define ACPI_FADT_ARM_PSCI_COMPLIANT  (1 << 0)
 #define ACPI_FADT_ARM_PSCI_USE_HVC    (1 << 1)
@@ -229,8 +150,7 @@ typedef struct AcpiSerialPortConsoleRedirection
 /*
  * ACPI 1.0 Root System Description Table (RSDT)
  */
-struct AcpiRsdtDescriptorRev1
-{
+struct AcpiRsdtDescriptorRev1 {
     ACPI_TABLE_HEADER_DEF       /* ACPI common table header */
     uint32_t table_offset_entry[0];  /* Array of pointers to other */
     /* ACPI tables */
@@ -238,10 +158,19 @@ struct AcpiRsdtDescriptorRev1
 typedef struct AcpiRsdtDescriptorRev1 AcpiRsdtDescriptorRev1;
 
 /*
+ * ACPI 2.0 eXtended System Description Table (XSDT)
+ */
+struct AcpiXsdtDescriptorRev2 {
+    ACPI_TABLE_HEADER_DEF       /* ACPI common table header */
+    uint64_t table_offset_entry[0];  /* Array of pointers to other */
+    /* ACPI tables */
+} QEMU_PACKED;
+typedef struct AcpiXsdtDescriptorRev2 AcpiXsdtDescriptorRev2;
+
+/*
  * ACPI 1.0 Firmware ACPI Control Structure (FACS)
  */
-struct AcpiFacsDescriptorRev1
-{
+struct AcpiFacsDescriptorRev1 {
     uint32_t signature;           /* ACPI Signature */
     uint32_t length;                 /* Length of structure, in bytes */
     uint32_t hardware_signature;     /* Hardware configuration signature */
@@ -267,8 +196,7 @@ typedef struct AcpiFacsDescriptorRev1 AcpiFacsDescriptorRev1;
 
 /* Master MADT */
 
-struct AcpiMultipleApicTable
-{
+struct AcpiMultipleApicTable {
     ACPI_TABLE_HEADER_DEF     /* ACPI common table header */
     uint32_t local_apic_address;     /* Physical address of local APIC */
     uint32_t flags;
@@ -304,8 +232,7 @@ typedef struct AcpiMultipleApicTable AcpiMultipleApicTable;
 
 /* Sub-structures for MADT */
 
-struct AcpiMadtProcessorApic
-{
+struct AcpiMadtProcessorApic {
     ACPI_SUB_HEADER_DEF
     uint8_t  processor_id;           /* ACPI processor id */
     uint8_t  local_apic_id;          /* Processor's local APIC id */
@@ -313,8 +240,7 @@ struct AcpiMadtProcessorApic
 } QEMU_PACKED;
 typedef struct AcpiMadtProcessorApic AcpiMadtProcessorApic;
 
-struct AcpiMadtIoApic
-{
+struct AcpiMadtIoApic {
     ACPI_SUB_HEADER_DEF
     uint8_t  io_apic_id;             /* I/O APIC ID */
     uint8_t  reserved;               /* Reserved - must be zero */
@@ -456,7 +382,7 @@ typedef struct AcpiGenericTimerTable AcpiGenericTimerTable;
 struct Acpi20Hpet {
     ACPI_TABLE_HEADER_DEF                    /* ACPI common table header */
     uint32_t           timer_block_id;
-    Acpi20GenericAddress addr;
+    struct AcpiGenericAddress addr;
     uint8_t            hpet_number;
     uint16_t           min_tick;
     uint8_t            page_protect;
@@ -467,8 +393,7 @@ typedef struct Acpi20Hpet Acpi20Hpet;
  * SRAT (NUMA topology description) table
  */
 
-struct AcpiSystemResourceAffinityTable
-{
+struct AcpiSystemResourceAffinityTable {
     ACPI_TABLE_HEADER_DEF
     uint32_t    reserved1;
     uint32_t    reserved2[2];
@@ -480,8 +405,7 @@ typedef struct AcpiSystemResourceAffinityTable AcpiSystemResourceAffinityTable;
 #define ACPI_SRAT_PROCESSOR_x2APIC   2
 #define ACPI_SRAT_PROCESSOR_GICC     3
 
-struct AcpiSratProcessorAffinity
-{
+struct AcpiSratProcessorAffinity {
     ACPI_SUB_HEADER_DEF
     uint8_t     proximity_lo;
     uint8_t     local_apic_id;
@@ -503,8 +427,7 @@ struct AcpiSratProcessorX2ApicAffinity {
 } QEMU_PACKED;
 typedef struct AcpiSratProcessorX2ApicAffinity AcpiSratProcessorX2ApicAffinity;
 
-struct AcpiSratMemoryAffinity
-{
+struct AcpiSratMemoryAffinity {
     ACPI_SUB_HEADER_DEF
     uint32_t    proximity;
     uint16_t    reserved1;
@@ -516,8 +439,7 @@ struct AcpiSratMemoryAffinity
 } QEMU_PACKED;
 typedef struct AcpiSratMemoryAffinity AcpiSratMemoryAffinity;
 
-struct AcpiSratProcessorGiccAffinity
-{
+struct AcpiSratProcessorGiccAffinity {
     ACPI_SUB_HEADER_DEF
     uint32_t    proximity;
     uint32_t    acpi_processor_uid;
@@ -526,24 +448,6 @@ struct AcpiSratProcessorGiccAffinity
 } QEMU_PACKED;
 
 typedef struct AcpiSratProcessorGiccAffinity AcpiSratProcessorGiccAffinity;
-
-/* PCI fw r3.0 MCFG table. */
-/* Subtable */
-struct AcpiMcfgAllocation {
-    uint64_t address;                /* Base address, processor-relative */
-    uint16_t pci_segment;            /* PCI segment group number */
-    uint8_t start_bus_number;       /* Starting PCI Bus number */
-    uint8_t end_bus_number;         /* Final PCI Bus number */
-    uint32_t reserved;
-} QEMU_PACKED;
-typedef struct AcpiMcfgAllocation AcpiMcfgAllocation;
-
-struct AcpiTableMcfg {
-    ACPI_TABLE_HEADER_DEF;
-    uint8_t reserved[8];
-    AcpiMcfgAllocation allocation[0];
-} QEMU_PACKED;
-typedef struct AcpiTableMcfg AcpiTableMcfg;
 
 /*
  * TCPA Description Table
@@ -562,8 +466,8 @@ typedef struct Acpi20Tcpa Acpi20Tcpa;
 /*
  * TPM2
  *
- * Following Level 00, Rev 00.37 of specs:
- * http://www.trustedcomputinggroup.org/resources/tcg_acpi_specification
+ * Following Version 1.2, Revision 8 of specs:
+ * https://trustedcomputinggroup.org/tcg-acpi-specification/
  */
 struct Acpi20TPM2 {
     ACPI_TABLE_HEADER_DEF
@@ -571,6 +475,9 @@ struct Acpi20TPM2 {
     uint16_t reserved;
     uint64_t control_area_address;
     uint32_t start_method;
+    uint8_t start_method_params[12];
+    uint32_t log_area_minimum_length;
+    uint64_t log_area_start_address;
 } QEMU_PACKED;
 typedef struct Acpi20TPM2 Acpi20TPM2;
 
@@ -700,6 +607,23 @@ struct AcpiIortItsGroup {
     uint32_t identifiers[0];
 } QEMU_PACKED;
 typedef struct AcpiIortItsGroup AcpiIortItsGroup;
+
+#define ACPI_IORT_SMMU_V3_COHACC_OVERRIDE 1
+
+struct AcpiIortSmmu3 {
+    ACPI_IORT_NODE_HEADER_DEF
+    uint64_t base_address;
+    uint32_t flags;
+    uint32_t reserved2;
+    uint64_t vatos_address;
+    uint32_t model;
+    uint32_t event_gsiv;
+    uint32_t pri_gsiv;
+    uint32_t gerr_gsiv;
+    uint32_t sync_gsiv;
+    AcpiIortIdMapping id_mapping_array[0];
+} QEMU_PACKED;
+typedef struct AcpiIortSmmu3 AcpiIortSmmu3;
 
 struct AcpiIortRC {
     ACPI_IORT_NODE_HEADER_DEF

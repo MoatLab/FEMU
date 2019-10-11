@@ -19,8 +19,6 @@
 
 #include "qemu/osdep.h"
 #include <linux/vfio.h>
-#include "qapi/error.h"
-#include "qemu-common.h"
 #include "cpu.h"
 #include "hw/ppc/spapr.h"
 #include "hw/pci-host/spapr.h"
@@ -29,37 +27,12 @@
 #include "qemu/error-report.h"
 #include "sysemu/qtest.h"
 
-#define TYPE_SPAPR_PCI_VFIO_HOST_BRIDGE "spapr-pci-vfio-host-bridge"
-
-#define SPAPR_PCI_VFIO_HOST_BRIDGE(obj) \
-    OBJECT_CHECK(sPAPRPHBVFIOState, (obj), TYPE_SPAPR_PCI_VFIO_HOST_BRIDGE)
-
-typedef struct sPAPRPHBVFIOState sPAPRPHBVFIOState;
-
-struct sPAPRPHBVFIOState {
-    sPAPRPHBState phb;
-
-    int32_t iommugroupid;
-};
-
-static Property spapr_phb_vfio_properties[] = {
-    DEFINE_PROP_INT32("iommu", sPAPRPHBVFIOState, iommugroupid, -1),
-    DEFINE_PROP_END_OF_LIST(),
-};
-
-static void spapr_phb_vfio_instance_init(Object *obj)
-{
-    if (!qtest_enabled()) {
-        error_report("spapr-pci-vfio-host-bridge is deprecated");
-    }
-}
-
-bool spapr_phb_eeh_available(sPAPRPHBState *sphb)
+bool spapr_phb_eeh_available(SpaprPhbState *sphb)
 {
     return vfio_eeh_as_ok(&sphb->iommu_as);
 }
 
-static void spapr_phb_vfio_eeh_reenable(sPAPRPHBState *sphb)
+static void spapr_phb_vfio_eeh_reenable(SpaprPhbState *sphb)
 {
     vfio_eeh_as_op(&sphb->iommu_as, VFIO_EEH_PE_ENABLE);
 }
@@ -75,7 +48,7 @@ void spapr_phb_vfio_reset(DeviceState *qdev)
     spapr_phb_vfio_eeh_reenable(SPAPR_PCI_HOST_BRIDGE(qdev));
 }
 
-int spapr_phb_vfio_eeh_set_option(sPAPRPHBState *sphb,
+int spapr_phb_vfio_eeh_set_option(SpaprPhbState *sphb,
                                   unsigned int addr, int option)
 {
     uint32_t op;
@@ -122,7 +95,7 @@ int spapr_phb_vfio_eeh_set_option(sPAPRPHBState *sphb,
     return RTAS_OUT_SUCCESS;
 }
 
-int spapr_phb_vfio_eeh_get_state(sPAPRPHBState *sphb, int *state)
+int spapr_phb_vfio_eeh_get_state(SpaprPhbState *sphb, int *state)
 {
     int ret;
 
@@ -171,14 +144,14 @@ static void spapr_phb_vfio_eeh_clear_bus_msix(PCIBus *bus, void *opaque)
                            spapr_phb_vfio_eeh_clear_dev_msix, NULL);
 }
 
-static void spapr_phb_vfio_eeh_pre_reset(sPAPRPHBState *sphb)
+static void spapr_phb_vfio_eeh_pre_reset(SpaprPhbState *sphb)
 {
        PCIHostState *phb = PCI_HOST_BRIDGE(sphb);
 
        pci_for_each_bus(phb->bus, spapr_phb_vfio_eeh_clear_bus_msix, NULL);
 }
 
-int spapr_phb_vfio_eeh_reset(sPAPRPHBState *sphb, int option)
+int spapr_phb_vfio_eeh_reset(SpaprPhbState *sphb, int option)
 {
     uint32_t op;
     int ret;
@@ -207,7 +180,7 @@ int spapr_phb_vfio_eeh_reset(sPAPRPHBState *sphb, int option)
     return RTAS_OUT_SUCCESS;
 }
 
-int spapr_phb_vfio_eeh_configure(sPAPRPHBState *sphb)
+int spapr_phb_vfio_eeh_configure(SpaprPhbState *sphb)
 {
     int ret;
 
@@ -218,25 +191,3 @@ int spapr_phb_vfio_eeh_configure(sPAPRPHBState *sphb)
 
     return RTAS_OUT_SUCCESS;
 }
-
-static void spapr_phb_vfio_class_init(ObjectClass *klass, void *data)
-{
-    DeviceClass *dc = DEVICE_CLASS(klass);
-
-    dc->props = spapr_phb_vfio_properties;
-}
-
-static const TypeInfo spapr_phb_vfio_info = {
-    .name          = TYPE_SPAPR_PCI_VFIO_HOST_BRIDGE,
-    .parent        = TYPE_SPAPR_PCI_HOST_BRIDGE,
-    .instance_size = sizeof(sPAPRPHBVFIOState),
-    .instance_init = spapr_phb_vfio_instance_init,
-    .class_init    = spapr_phb_vfio_class_init,
-};
-
-static void spapr_pci_vfio_register_types(void)
-{
-    type_register_static(&spapr_phb_vfio_info);
-}
-
-type_init(spapr_pci_vfio_register_types)

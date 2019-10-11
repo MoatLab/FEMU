@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -22,7 +22,7 @@
 #include "qapi/error.h"
 #include "qemu/bswap.h"
 
-#include "crypto/block-luks.h"
+#include "block-luks.h"
 
 #include "crypto/hash.h"
 #include "crypto/afsplit.h"
@@ -146,7 +146,7 @@ struct QCryptoBlockLUKSKeySlot {
     uint32_t key_offset;
     /* number of anti-forensic stripes */
     uint32_t stripes;
-} QEMU_PACKED;
+};
 
 QEMU_BUILD_BUG_ON(sizeof(struct QCryptoBlockLUKSKeySlot) != 48);
 
@@ -191,7 +191,7 @@ struct QCryptoBlockLUKSHeader {
 
     /* key slots */
     QCryptoBlockLUKSKeySlot key_slots[QCRYPTO_BLOCK_LUKS_NUM_KEY_SLOTS];
-} QEMU_PACKED;
+};
 
 QEMU_BUILD_BUG_ON(sizeof(struct QCryptoBlockLUKSHeader) != 592);
 
@@ -257,47 +257,41 @@ qcrypto_block_luks_cipher_alg_lookup(QCryptoCipherAlgorithm alg,
     }
 
     error_setg(errp, "Algorithm '%s' not supported",
-               QCryptoCipherAlgorithm_lookup[alg]);
+               QCryptoCipherAlgorithm_str(alg));
     return NULL;
 }
 
 /* XXX replace with qapi_enum_parse() in future, when we can
  * make that function emit a more friendly error message */
 static int qcrypto_block_luks_name_lookup(const char *name,
-                                          const char *const *map,
-                                          size_t maplen,
+                                          const QEnumLookup *map,
                                           const char *type,
                                           Error **errp)
 {
-    size_t i;
-    for (i = 0; i < maplen; i++) {
-        if (g_str_equal(map[i], name)) {
-            return i;
-        }
-    }
+    int ret = qapi_enum_parse(map, name, -1, NULL);
 
-    error_setg(errp, "%s %s not supported", type, name);
-    return 0;
+    if (ret < 0) {
+        error_setg(errp, "%s %s not supported", type, name);
+        return 0;
+    }
+    return ret;
 }
 
 #define qcrypto_block_luks_cipher_mode_lookup(name, errp)               \
     qcrypto_block_luks_name_lookup(name,                                \
-                                   QCryptoCipherMode_lookup,            \
-                                   QCRYPTO_CIPHER_MODE__MAX,            \
+                                   &QCryptoCipherMode_lookup,           \
                                    "Cipher mode",                       \
                                    errp)
 
 #define qcrypto_block_luks_hash_name_lookup(name, errp)                 \
     qcrypto_block_luks_name_lookup(name,                                \
-                                   QCryptoHashAlgorithm_lookup,         \
-                                   QCRYPTO_HASH_ALG__MAX,               \
+                                   &QCryptoHashAlgorithm_lookup,        \
                                    "Hash algorithm",                    \
                                    errp)
 
 #define qcrypto_block_luks_ivgen_name_lookup(name, errp)                \
     qcrypto_block_luks_name_lookup(name,                                \
-                                   QCryptoIVGenAlgorithm_lookup,        \
-                                   QCRYPTO_IVGEN_ALG__MAX,              \
+                                   &QCryptoIVGenAlgorithm_lookup,       \
                                    "IV generator",                      \
                                    errp)
 
@@ -398,7 +392,7 @@ qcrypto_block_luks_essiv_cipher(QCryptoCipherAlgorithm cipher,
         break;
     default:
         error_setg(errp, "Cipher %s not supported with essiv",
-                   QCryptoCipherAlgorithm_lookup[cipher]);
+                   QCryptoCipherAlgorithm_str(cipher));
         return 0;
     }
 }
@@ -475,8 +469,8 @@ qcrypto_block_luks_load_key(QCryptoBlock *block,
     rv = readfunc(block,
                   slot->key_offset * QCRYPTO_BLOCK_LUKS_SECTOR_SIZE,
                   splitkey, splitkeylen,
-                  errp,
-                  opaque);
+                  opaque,
+                  errp);
     if (rv < 0) {
         goto cleanup;
     }
@@ -510,14 +504,14 @@ qcrypto_block_luks_load_key(QCryptoBlock *block,
      * to reset the encryption cipher every time the master
      * key crosses a sector boundary.
      */
-    if (qcrypto_block_decrypt_helper(cipher,
-                                     niv,
-                                     ivgen,
-                                     QCRYPTO_BLOCK_LUKS_SECTOR_SIZE,
-                                     0,
-                                     splitkey,
-                                     splitkeylen,
-                                     errp) < 0) {
+    if (qcrypto_block_cipher_decrypt_helper(cipher,
+                                            niv,
+                                            ivgen,
+                                            QCRYPTO_BLOCK_LUKS_SECTOR_SIZE,
+                                            0,
+                                            splitkey,
+                                            splitkeylen,
+                                            errp) < 0) {
         goto cleanup;
     }
 
@@ -638,9 +632,11 @@ qcrypto_block_luks_find_key(QCryptoBlock *block,
 static int
 qcrypto_block_luks_open(QCryptoBlock *block,
                         QCryptoBlockOpenOptions *options,
+                        const char *optprefix,
                         QCryptoBlockReadFunc readfunc,
                         void *opaque,
                         unsigned int flags,
+                        size_t n_threads,
                         Error **errp)
 {
     QCryptoBlockLUKS *luks;
@@ -661,7 +657,8 @@ qcrypto_block_luks_open(QCryptoBlock *block,
 
     if (!(flags & QCRYPTO_BLOCK_OPEN_NO_IO)) {
         if (!options->u.luks.key_secret) {
-            error_setg(errp, "Parameter 'key-secret' is required for cipher");
+            error_setg(errp, "Parameter '%skey-secret' is required for cipher",
+                       optprefix ? optprefix : "");
             return -1;
         }
         password = qcrypto_secret_lookup_as_utf8(
@@ -679,8 +676,8 @@ qcrypto_block_luks_open(QCryptoBlock *block,
     rv = readfunc(block, 0,
                   (uint8_t *)&luks->header,
                   sizeof(luks->header),
-                  errp,
-                  opaque);
+                  opaque,
+                  errp);
     if (rv < 0) {
         ret = rv;
         goto fail;
@@ -840,18 +837,18 @@ qcrypto_block_luks_open(QCryptoBlock *block,
             goto fail;
         }
 
-        block->cipher = qcrypto_cipher_new(cipheralg,
-                                           ciphermode,
-                                           masterkey, masterkeylen,
-                                           errp);
-        if (!block->cipher) {
+        ret = qcrypto_block_init_cipher(block, cipheralg, ciphermode,
+                                        masterkey, masterkeylen, n_threads,
+                                        errp);
+        if (ret < 0) {
             ret = -ENOTSUP;
             goto fail;
         }
     }
 
+    block->sector_size = QCRYPTO_BLOCK_LUKS_SECTOR_SIZE;
     block->payload_offset = luks->header.payload_offset *
-        QCRYPTO_BLOCK_LUKS_SECTOR_SIZE;
+        block->sector_size;
 
     luks->cipher_alg = cipheralg;
     luks->cipher_mode = ciphermode;
@@ -866,7 +863,7 @@ qcrypto_block_luks_open(QCryptoBlock *block,
 
  fail:
     g_free(masterkey);
-    qcrypto_cipher_free(block->cipher);
+    qcrypto_block_free_cipher(block);
     qcrypto_ivgen_free(block->ivgen);
     g_free(luks);
     g_free(password);
@@ -885,6 +882,7 @@ qcrypto_block_luks_uuid_gen(uint8_t *uuidstr)
 static int
 qcrypto_block_luks_create(QCryptoBlock *block,
                           QCryptoBlockCreateOptions *options,
+                          const char *optprefix,
                           QCryptoBlockInitFunc initfunc,
                           QCryptoBlockWriteFunc writefunc,
                           void *opaque,
@@ -937,7 +935,8 @@ qcrypto_block_luks_create(QCryptoBlock *block,
      * be silently ignored, for compatibility with dm-crypt */
 
     if (!options->u.luks.key_secret) {
-        error_setg(errp, "Parameter 'key-secret' is required for cipher");
+        error_setg(errp, "Parameter '%skey-secret' is required for cipher",
+                   optprefix ? optprefix : "");
         return -1;
     }
     password = qcrypto_secret_lookup_as_utf8(luks_opts.key_secret, errp);
@@ -964,16 +963,16 @@ qcrypto_block_luks_create(QCryptoBlock *block,
         goto error;
     }
 
-    cipher_mode = QCryptoCipherMode_lookup[luks_opts.cipher_mode];
-    ivgen_alg = QCryptoIVGenAlgorithm_lookup[luks_opts.ivgen_alg];
+    cipher_mode = QCryptoCipherMode_str(luks_opts.cipher_mode);
+    ivgen_alg = QCryptoIVGenAlgorithm_str(luks_opts.ivgen_alg);
     if (luks_opts.has_ivgen_hash_alg) {
-        ivgen_hash_alg = QCryptoHashAlgorithm_lookup[luks_opts.ivgen_hash_alg];
+        ivgen_hash_alg = QCryptoHashAlgorithm_str(luks_opts.ivgen_hash_alg);
         cipher_mode_spec = g_strdup_printf("%s-%s:%s", cipher_mode, ivgen_alg,
                                            ivgen_hash_alg);
     } else {
         cipher_mode_spec = g_strdup_printf("%s-%s", cipher_mode, ivgen_alg);
     }
-    hash_alg = QCryptoHashAlgorithm_lookup[luks_opts.hash_alg];
+    hash_alg = QCryptoHashAlgorithm_str(luks_opts.hash_alg);
 
 
     if (strlen(cipher_alg) >= QCRYPTO_BLOCK_LUKS_CIPHER_NAME_LEN) {
@@ -1031,11 +1030,9 @@ qcrypto_block_luks_create(QCryptoBlock *block,
 
 
     /* Setup the block device payload encryption objects */
-    block->cipher = qcrypto_cipher_new(luks_opts.cipher_alg,
-                                       luks_opts.cipher_mode,
-                                       masterkey, luks->header.key_bytes,
-                                       errp);
-    if (!block->cipher) {
+    if (qcrypto_block_init_cipher(block, luks_opts.cipher_alg,
+                                  luks_opts.cipher_mode, masterkey,
+                                  luks->header.key_bytes, 1, errp) < 0) {
         goto error;
     }
 
@@ -1220,12 +1217,12 @@ qcrypto_block_luks_create(QCryptoBlock *block,
 
     /* Now we encrypt the split master key with the key generated
      * from the user's password, before storing it */
-    if (qcrypto_block_encrypt_helper(cipher, block->niv, ivgen,
-                                     QCRYPTO_BLOCK_LUKS_SECTOR_SIZE,
-                                     0,
-                                     splitkey,
-                                     splitkeylen,
-                                     errp) < 0) {
+    if (qcrypto_block_cipher_encrypt_helper(cipher, block->niv, ivgen,
+                                            QCRYPTO_BLOCK_LUKS_SECTOR_SIZE,
+                                            0,
+                                            splitkey,
+                                            splitkeylen,
+                                            errp) < 0) {
         goto error;
     }
 
@@ -1242,11 +1239,12 @@ qcrypto_block_luks_create(QCryptoBlock *block,
                    QCRYPTO_BLOCK_LUKS_SECTOR_SIZE)) *
          QCRYPTO_BLOCK_LUKS_NUM_KEY_SLOTS);
 
+    block->sector_size = QCRYPTO_BLOCK_LUKS_SECTOR_SIZE;
     block->payload_offset = luks->header.payload_offset *
-        QCRYPTO_BLOCK_LUKS_SECTOR_SIZE;
+        block->sector_size;
 
     /* Reserve header space to match payload offset */
-    initfunc(block, block->payload_offset, &local_err, opaque);
+    initfunc(block, block->payload_offset, opaque, &local_err);
     if (local_err) {
         error_propagate(errp, local_err);
         goto error;
@@ -1271,8 +1269,8 @@ qcrypto_block_luks_create(QCryptoBlock *block,
     writefunc(block, 0,
               (const uint8_t *)&luks->header,
               sizeof(luks->header),
-              &local_err,
-              opaque);
+              opaque,
+              &local_err);
 
     /* Delay checking local_err until we've byte-swapped */
 
@@ -1301,8 +1299,8 @@ qcrypto_block_luks_create(QCryptoBlock *block,
                   luks->header.key_slots[0].key_offset *
                   QCRYPTO_BLOCK_LUKS_SECTOR_SIZE,
                   splitkey, splitkeylen,
-                  errp,
-                  opaque) != splitkeylen) {
+                  opaque,
+                  errp) != splitkeylen) {
         goto error;
     }
 
@@ -1340,6 +1338,9 @@ qcrypto_block_luks_create(QCryptoBlock *block,
 
     qcrypto_ivgen_free(ivgen);
     qcrypto_cipher_free(cipher);
+
+    qcrypto_block_free_cipher(block);
+    qcrypto_ivgen_free(block->ivgen);
 
     g_free(luks);
     return -1;
@@ -1399,29 +1400,31 @@ static void qcrypto_block_luks_cleanup(QCryptoBlock *block)
 
 static int
 qcrypto_block_luks_decrypt(QCryptoBlock *block,
-                           uint64_t startsector,
+                           uint64_t offset,
                            uint8_t *buf,
                            size_t len,
                            Error **errp)
 {
-    return qcrypto_block_decrypt_helper(block->cipher,
-                                        block->niv, block->ivgen,
+    assert(QEMU_IS_ALIGNED(offset, QCRYPTO_BLOCK_LUKS_SECTOR_SIZE));
+    assert(QEMU_IS_ALIGNED(len, QCRYPTO_BLOCK_LUKS_SECTOR_SIZE));
+    return qcrypto_block_decrypt_helper(block,
                                         QCRYPTO_BLOCK_LUKS_SECTOR_SIZE,
-                                        startsector, buf, len, errp);
+                                        offset, buf, len, errp);
 }
 
 
 static int
 qcrypto_block_luks_encrypt(QCryptoBlock *block,
-                           uint64_t startsector,
+                           uint64_t offset,
                            uint8_t *buf,
                            size_t len,
                            Error **errp)
 {
-    return qcrypto_block_encrypt_helper(block->cipher,
-                                        block->niv, block->ivgen,
+    assert(QEMU_IS_ALIGNED(offset, QCRYPTO_BLOCK_LUKS_SECTOR_SIZE));
+    assert(QEMU_IS_ALIGNED(len, QCRYPTO_BLOCK_LUKS_SECTOR_SIZE));
+    return qcrypto_block_encrypt_helper(block,
                                         QCRYPTO_BLOCK_LUKS_SECTOR_SIZE,
-                                        startsector, buf, len, errp);
+                                        offset, buf, len, errp);
 }
 
 

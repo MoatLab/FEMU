@@ -15,26 +15,128 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
 #include "qemu/osdep.h"
-#include <glob.h>
-#include <dirent.h>
-
+#include "qemu/drm.h"
 #include "qemu/error-report.h"
+#include "ui/console.h"
 #include "ui/egl-helpers.h"
 
 EGLDisplay *qemu_egl_display;
 EGLConfig qemu_egl_config;
+DisplayGLMode qemu_egl_mode;
 
-/* ---------------------------------------------------------------------- */
+/* ------------------------------------------------------------------ */
 
-static bool egl_gles;
-static int egl_debug;
+static void egl_fb_delete_texture(egl_fb *fb)
+{
+    if (!fb->delete_texture) {
+        return;
+    }
 
-#define egl_dbg(_x ...)                          \
-    do {                                         \
-        if (egl_debug) {                         \
-            fprintf(stderr, "egl: " _x);         \
-        }                                        \
-    } while (0);
+    glDeleteTextures(1, &fb->texture);
+    fb->delete_texture = false;
+}
+
+void egl_fb_destroy(egl_fb *fb)
+{
+    if (!fb->framebuffer) {
+        return;
+    }
+
+    egl_fb_delete_texture(fb);
+    glDeleteFramebuffers(1, &fb->framebuffer);
+
+    fb->width = 0;
+    fb->height = 0;
+    fb->texture = 0;
+    fb->framebuffer = 0;
+}
+
+void egl_fb_setup_default(egl_fb *fb, int width, int height)
+{
+    fb->width = width;
+    fb->height = height;
+    fb->framebuffer = 0; /* default framebuffer */
+}
+
+void egl_fb_setup_for_tex(egl_fb *fb, int width, int height,
+                          GLuint texture, bool delete)
+{
+    egl_fb_delete_texture(fb);
+
+    fb->width = width;
+    fb->height = height;
+    fb->texture = texture;
+    fb->delete_texture = delete;
+    if (!fb->framebuffer) {
+        glGenFramebuffers(1, &fb->framebuffer);
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER_EXT, fb->framebuffer);
+    glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT,
+                              GL_TEXTURE_2D, fb->texture, 0);
+}
+
+void egl_fb_setup_new_tex(egl_fb *fb, int width, int height)
+{
+    GLuint texture;
+
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height,
+                 0, GL_BGRA, GL_UNSIGNED_BYTE, 0);
+
+    egl_fb_setup_for_tex(fb, width, height, texture, true);
+}
+
+void egl_fb_blit(egl_fb *dst, egl_fb *src, bool flip)
+{
+    GLuint y1, y2;
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, src->framebuffer);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, dst->framebuffer);
+    glViewport(0, 0, dst->width, dst->height);
+    y1 = flip ? src->height : 0;
+    y2 = flip ? 0 : src->height;
+    glBlitFramebuffer(0, y1, src->width, y2,
+                      0, 0, dst->width, dst->height,
+                      GL_COLOR_BUFFER_BIT, GL_LINEAR);
+}
+
+void egl_fb_read(void *dst, egl_fb *src)
+{
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, src->framebuffer);
+    glReadBuffer(GL_COLOR_ATTACHMENT0_EXT);
+    glReadPixels(0, 0, src->width, src->height,
+                 GL_BGRA, GL_UNSIGNED_BYTE, dst);
+}
+
+void egl_texture_blit(QemuGLShader *gls, egl_fb *dst, egl_fb *src, bool flip)
+{
+    glBindFramebuffer(GL_FRAMEBUFFER_EXT, dst->framebuffer);
+    glViewport(0, 0, dst->width, dst->height);
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, src->texture);
+    qemu_gl_run_texture_blit(gls, flip);
+}
+
+void egl_texture_blend(QemuGLShader *gls, egl_fb *dst, egl_fb *src, bool flip,
+                       int x, int y, double scale_x, double scale_y)
+{
+    glBindFramebuffer(GL_FRAMEBUFFER_EXT, dst->framebuffer);
+    int w = scale_x * src->width;
+    int h = scale_y * src->height;
+    if (flip) {
+        glViewport(x, y, w, h);
+    } else {
+        glViewport(x, dst->height - h - y, w, h);
+    }
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, src->texture);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    qemu_gl_run_texture_blit(gls, flip);
+    glDisable(GL_BLEND);
+}
 
 /* ---------------------------------------------------------------------- */
 
@@ -44,56 +146,12 @@ int qemu_egl_rn_fd;
 struct gbm_device *qemu_egl_rn_gbm_dev;
 EGLContext qemu_egl_rn_ctx;
 
-static int qemu_egl_rendernode_open(const char *rendernode)
-{
-    DIR *dir;
-    struct dirent *e;
-    int r, fd;
-    char *p;
-
-    if (rendernode) {
-        return open(rendernode, O_RDWR | O_CLOEXEC | O_NOCTTY | O_NONBLOCK);
-    }
-
-    dir = opendir("/dev/dri");
-    if (!dir) {
-        return -1;
-    }
-
-    fd = -1;
-    while ((e = readdir(dir))) {
-        if (e->d_type != DT_CHR) {
-            continue;
-        }
-
-        if (strncmp(e->d_name, "renderD", 7)) {
-            continue;
-        }
-
-        p = g_strdup_printf("/dev/dri/%s", e->d_name);
-
-        r = open(p, O_RDWR | O_CLOEXEC | O_NOCTTY | O_NONBLOCK);
-        if (r < 0) {
-            g_free(p);
-            continue;
-        }
-        fd = r;
-        g_free(p);
-        break;
-    }
-
-    closedir(dir);
-    if (fd < 0) {
-        return -1;
-    }
-    return fd;
-}
-
-int egl_rendernode_init(const char *rendernode)
+int egl_rendernode_init(const char *rendernode, DisplayGLMode mode)
 {
     qemu_egl_rn_fd = -1;
+    int rc;
 
-    qemu_egl_rn_fd = qemu_egl_rendernode_open(rendernode);
+    qemu_egl_rn_fd = qemu_drm_rendernode_open(rendernode);
     if (qemu_egl_rn_fd == -1) {
         error_report("egl: no drm render node available");
         goto err;
@@ -105,7 +163,12 @@ int egl_rendernode_init(const char *rendernode)
         goto err;
     }
 
-    qemu_egl_init_dpy((EGLNativeDisplayType)qemu_egl_rn_gbm_dev, false, false);
+    rc = qemu_egl_init_dpy_mesa((EGLNativeDisplayType)qemu_egl_rn_gbm_dev,
+                                mode);
+    if (rc != 0) {
+        /* qemu_egl_init_dpy_mesa reports error */
+        goto err;
+    }
 
     if (!epoxy_has_egl_extension(qemu_egl_display,
                                  "EGL_KHR_surfaceless_context")) {
@@ -137,7 +200,8 @@ err:
     return -1;
 }
 
-int egl_get_fd_for_texture(uint32_t tex_id, EGLint *stride, EGLint *fourcc)
+int egl_get_fd_for_texture(uint32_t tex_id, EGLint *stride, EGLint *fourcc,
+                           EGLuint64KHR *modifier)
 {
     EGLImageKHR image;
     EGLint num_planes, fd;
@@ -151,7 +215,7 @@ int egl_get_fd_for_texture(uint32_t tex_id, EGLint *stride, EGLint *fourcc)
     }
 
     eglExportDMABUFImageQueryMESA(qemu_egl_display, image, fourcc,
-                                  &num_planes, NULL);
+                                  &num_planes, modifier);
     if (num_planes != 1) {
         eglDestroyImageKHR(qemu_egl_display, image);
         return -1;
@@ -162,20 +226,79 @@ int egl_get_fd_for_texture(uint32_t tex_id, EGLint *stride, EGLint *fourcc)
     return fd;
 }
 
+void egl_dmabuf_import_texture(QemuDmaBuf *dmabuf)
+{
+    EGLImageKHR image = EGL_NO_IMAGE_KHR;
+    EGLint attrs[64];
+    int i = 0;
+
+    if (dmabuf->texture != 0) {
+        return;
+    }
+
+    attrs[i++] = EGL_WIDTH;
+    attrs[i++] = dmabuf->width;
+    attrs[i++] = EGL_HEIGHT;
+    attrs[i++] = dmabuf->height;
+    attrs[i++] = EGL_LINUX_DRM_FOURCC_EXT;
+    attrs[i++] = dmabuf->fourcc;
+
+    attrs[i++] = EGL_DMA_BUF_PLANE0_FD_EXT;
+    attrs[i++] = dmabuf->fd;
+    attrs[i++] = EGL_DMA_BUF_PLANE0_PITCH_EXT;
+    attrs[i++] = dmabuf->stride;
+    attrs[i++] = EGL_DMA_BUF_PLANE0_OFFSET_EXT;
+    attrs[i++] = 0;
+#ifdef EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT
+    if (dmabuf->modifier) {
+        attrs[i++] = EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT;
+        attrs[i++] = (dmabuf->modifier >>  0) & 0xffffffff;
+        attrs[i++] = EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT;
+        attrs[i++] = (dmabuf->modifier >> 32) & 0xffffffff;
+    }
+#endif
+    attrs[i++] = EGL_NONE;
+
+    image = eglCreateImageKHR(qemu_egl_display,
+                              EGL_NO_CONTEXT,
+                              EGL_LINUX_DMA_BUF_EXT,
+                              NULL, attrs);
+    if (image == EGL_NO_IMAGE_KHR) {
+        error_report("eglCreateImageKHR failed");
+        return;
+    }
+
+    glGenTextures(1, &dmabuf->texture);
+    glBindTexture(GL_TEXTURE_2D, dmabuf->texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, (GLeglImageOES)image);
+    eglDestroyImageKHR(qemu_egl_display, image);
+}
+
+void egl_dmabuf_release_texture(QemuDmaBuf *dmabuf)
+{
+    if (dmabuf->texture == 0) {
+        return;
+    }
+
+    glDeleteTextures(1, &dmabuf->texture);
+    dmabuf->texture = 0;
+}
+
 #endif /* CONFIG_OPENGL_DMABUF */
 
 /* ---------------------------------------------------------------------- */
 
-EGLSurface qemu_egl_init_surface_x11(EGLContext ectx, Window win)
+EGLSurface qemu_egl_init_surface_x11(EGLContext ectx, EGLNativeWindowType win)
 {
     EGLSurface esurface;
     EGLBoolean b;
 
-    egl_dbg("eglCreateWindowSurface (x11 win id 0x%lx) ...\n",
-            (unsigned long) win);
     esurface = eglCreateWindowSurface(qemu_egl_display,
                                       qemu_egl_config,
-                                      (EGLNativeWindowType)win, NULL);
+                                      win, NULL);
     if (esurface == EGL_NO_SURFACE) {
         error_report("egl: eglCreateWindowSurface failed");
         return NULL;
@@ -220,20 +343,19 @@ EGLSurface qemu_egl_init_surface_x11(EGLContext ectx, Window win)
  * platform extensions (EGL_KHR_platform_gbm and friends) yet it doesn't seem
  * like mesa will be able to advertise these (even though it can do EGL 1.5).
  */
-static EGLDisplay qemu_egl_get_display(void *native)
+static EGLDisplay qemu_egl_get_display(EGLNativeDisplayType native,
+                                       EGLenum platform)
 {
     EGLDisplay dpy = EGL_NO_DISPLAY;
 
-#ifdef EGL_MESA_platform_gbm
     /* In practise any EGL 1.5 implementation would support the EXT extension */
     if (epoxy_has_egl_extension(NULL, "EGL_EXT_platform_base")) {
         PFNEGLGETPLATFORMDISPLAYEXTPROC getPlatformDisplayEXT =
             (void *) eglGetProcAddress("eglGetPlatformDisplayEXT");
-        if (getPlatformDisplayEXT) {
-            dpy = getPlatformDisplayEXT(EGL_PLATFORM_GBM_MESA, native, NULL);
+        if (getPlatformDisplayEXT && platform != 0) {
+            dpy = getPlatformDisplayEXT(platform, native, NULL);
         }
     }
-#endif
 
     if (dpy == EGL_NO_DISPLAY) {
         /* fallback */
@@ -242,9 +364,11 @@ static EGLDisplay qemu_egl_get_display(void *native)
     return dpy;
 }
 
-int qemu_egl_init_dpy(EGLNativeDisplayType dpy, bool gles, bool debug)
+static int qemu_egl_init_dpy(EGLNativeDisplayType dpy,
+                             EGLenum platform,
+                             DisplayGLMode mode)
 {
-    static const EGLint conf_att_gl[] = {
+    static const EGLint conf_att_core[] = {
         EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
         EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
         EGL_RED_SIZE,   5,
@@ -265,63 +389,74 @@ int qemu_egl_init_dpy(EGLNativeDisplayType dpy, bool gles, bool debug)
     EGLint major, minor;
     EGLBoolean b;
     EGLint n;
+    bool gles = (mode == DISPLAYGL_MODE_ES);
 
-    if (debug) {
-        egl_debug = 1;
-        setenv("EGL_LOG_LEVEL", "debug", true);
-        setenv("LIBGL_DEBUG", "verbose", true);
-    }
-
-    egl_dbg("qemu_egl_get_display (dpy %p) ...\n", dpy);
-    qemu_egl_display = qemu_egl_get_display(dpy);
+    qemu_egl_display = qemu_egl_get_display(dpy, platform);
     if (qemu_egl_display == EGL_NO_DISPLAY) {
         error_report("egl: eglGetDisplay failed");
         return -1;
     }
 
-    egl_dbg("eglInitialize ...\n");
     b = eglInitialize(qemu_egl_display, &major, &minor);
     if (b == EGL_FALSE) {
         error_report("egl: eglInitialize failed");
         return -1;
     }
 
-    egl_dbg("eglBindAPI ...\n");
-    b = eglBindAPI(gles ? EGL_OPENGL_ES_API : EGL_OPENGL_API);
+    b = eglBindAPI(gles ?  EGL_OPENGL_ES_API : EGL_OPENGL_API);
     if (b == EGL_FALSE) {
-        error_report("egl: eglBindAPI failed");
+        error_report("egl: eglBindAPI failed (%s mode)",
+                     gles ? "gles" : "core");
         return -1;
     }
 
-    egl_dbg("eglChooseConfig ...\n");
     b = eglChooseConfig(qemu_egl_display,
-                        gles ? conf_att_gles : conf_att_gl,
+                        gles ? conf_att_gles : conf_att_core,
                         &qemu_egl_config, 1, &n);
     if (b == EGL_FALSE || n != 1) {
-        error_report("egl: eglChooseConfig failed");
+        error_report("egl: eglChooseConfig failed (%s mode)",
+                     gles ? "gles" : "core");
         return -1;
     }
 
-    egl_gles = gles;
+    qemu_egl_mode = gles ? DISPLAYGL_MODE_ES : DISPLAYGL_MODE_CORE;
     return 0;
+}
+
+int qemu_egl_init_dpy_x11(EGLNativeDisplayType dpy, DisplayGLMode mode)
+{
+#ifdef EGL_KHR_platform_x11
+    return qemu_egl_init_dpy(dpy, EGL_PLATFORM_X11_KHR, mode);
+#else
+    return qemu_egl_init_dpy(dpy, 0, mode);
+#endif
+}
+
+int qemu_egl_init_dpy_mesa(EGLNativeDisplayType dpy, DisplayGLMode mode)
+{
+#ifdef EGL_MESA_platform_gbm
+    return qemu_egl_init_dpy(dpy, EGL_PLATFORM_GBM_MESA, mode);
+#else
+    return qemu_egl_init_dpy(dpy, 0, mode);
+#endif
 }
 
 EGLContext qemu_egl_init_ctx(void)
 {
-    static const EGLint ctx_att_gl[] = {
+    static const EGLint ctx_att_core[] = {
+        EGL_CONTEXT_OPENGL_PROFILE_MASK, EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
         EGL_NONE
     };
     static const EGLint ctx_att_gles[] = {
         EGL_CONTEXT_CLIENT_VERSION, 2,
         EGL_NONE
     };
-
+    bool gles = (qemu_egl_mode == DISPLAYGL_MODE_ES);
     EGLContext ectx;
     EGLBoolean b;
 
-    egl_dbg("eglCreateContext ...\n");
     ectx = eglCreateContext(qemu_egl_display, qemu_egl_config, EGL_NO_CONTEXT,
-                            egl_gles ? ctx_att_gles : ctx_att_gl);
+                            gles ? ctx_att_gles : ctx_att_core);
     if (ectx == EGL_NO_CONTEXT) {
         error_report("egl: eglCreateContext failed");
         return NULL;

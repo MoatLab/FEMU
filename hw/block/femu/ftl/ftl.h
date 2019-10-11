@@ -11,7 +11,16 @@
 enum {
     NAND_READ =  0,
     NAND_WRITE = 1,
-    NAND_ERASE = 2
+    NAND_ERASE = 2,
+
+    NAND_READ_LATENCY = 40000,
+    NAND_PROG_LATENCY = 200000,
+    NAND_ERASE_LATENCY = 2000000,
+};
+
+enum {
+    USER_IO = 0,
+    GC_IO = 1,
 };
 
 enum {
@@ -53,7 +62,7 @@ typedef int nand_sec_status_t;
 struct nand_page {
     nand_sec_status_t *sec;
     int nsecs;
-    int status; 
+    int status;
 };
 
 struct nand_block {
@@ -75,6 +84,7 @@ struct nand_lun {
     int npls;
     uint64_t next_lun_avail_time;
     bool busy;
+    uint64_t gc_endtime;
 };
 
 struct ssd_channel {
@@ -82,6 +92,7 @@ struct ssd_channel {
     int nluns;
     uint64_t next_ch_avail_time;
     bool busy;
+    uint64_t gc_endtime;
 };
 
 struct ssdparams {
@@ -102,6 +113,9 @@ struct ssdparams {
 
     double gc_thres_pcent;
     int gc_thres_lines;
+    double gc_thres_pcent_high;
+    int gc_thres_lines_high;
+    bool enable_gc_delay;
 
     /* below are all calculated values */
     int secs_per_blk; /* # of sectors per block */
@@ -135,6 +149,8 @@ typedef struct line {
     int ipc; /* invalid page count in this line */
     int vpc; /* valid page count in this line */
     QTAILQ_ENTRY(line) entry; /* in either {free,victim,full} list */
+    /* position in the priority queue for victim lines */
+    size_t                  pos;
 } line;
 
 /* wp: record next write addr */
@@ -151,7 +167,8 @@ struct line_mgmt {
     struct line *lines;
     /* free line list, we only need to maintain a list of blk numbers */
     QTAILQ_HEAD(free_line_list, line) free_line_list;
-    QTAILQ_HEAD(victim_line_list, line) victim_line_list;
+    pqueue_t *victim_line_pq;
+    //QTAILQ_HEAD(victim_line_list, line) victim_line_list;
     QTAILQ_HEAD(full_line_list, line) full_line_list;
     int tt_lines;
     int free_line_cnt;
@@ -159,7 +176,14 @@ struct line_mgmt {
     int full_line_cnt;
 };
 
+struct nand_cmd {
+    int type;
+    int cmd;
+    int64_t stime; /* Coperd: request arrival time */
+};
+
 struct ssd {
+    char *ssdname;
     struct ssdparams sp;
     struct ssd_channel *ch;
     struct ppa *maptbl; /* page level mapping table */
@@ -173,5 +197,6 @@ struct ssd {
     bool *dataplane_started_ptr;
     QemuThread ftl_thread;
 };
+
 
 #endif

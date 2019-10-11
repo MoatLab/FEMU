@@ -12,7 +12,6 @@
 #ifndef HW_VFIO_VFIO_PCI_H
 #define HW_VFIO_VFIO_PCI_H
 
-#include "qemu-common.h"
 #include "exec/memory.h"
 #include "hw/pci/pci.h"
 #include "hw/vfio/vfio-common.h"
@@ -24,15 +23,33 @@
 
 struct VFIOPCIDevice;
 
+typedef struct VFIOIOEventFD {
+    QLIST_ENTRY(VFIOIOEventFD) next;
+    MemoryRegion *mr;
+    hwaddr addr;
+    unsigned size;
+    uint64_t data;
+    EventNotifier e;
+    VFIORegion *region;
+    hwaddr region_addr;
+    bool dynamic; /* Added runtime, removed on device reset */
+    bool vfio;
+} VFIOIOEventFD;
+
 typedef struct VFIOQuirk {
     QLIST_ENTRY(VFIOQuirk) next;
     void *data;
+    QLIST_HEAD(, VFIOIOEventFD) ioeventfds;
     int nr_mem;
     MemoryRegion *mem;
+    void (*reset)(struct VFIOPCIDevice *vdev, struct VFIOQuirk *quirk);
 } VFIOQuirk;
 
 typedef struct VFIOBAR {
     VFIORegion region;
+    MemoryRegion *mr;
+    size_t size;
+    uint8_t type;
     bool ioport;
     bool mem64;
     QLIST_HEAD(, VFIOQuirk) quirks;
@@ -86,15 +103,13 @@ enum {
     VFIO_INT_MSIX = 3,
 };
 
-/* Cache of MSI-X setup plus extra mmap and memory region for split BAR map */
+/* Cache of MSI-X setup */
 typedef struct VFIOMSIXInfo {
     uint8_t table_bar;
     uint8_t pba_bar;
     uint16_t entries;
     uint32_t table_offset;
     uint32_t pba_offset;
-    MemoryRegion mmap_mem;
-    void *mmap;
     unsigned long *pending;
 } VFIOMSIXInfo;
 
@@ -132,9 +147,14 @@ typedef struct VFIOPCIDevice {
 #define VFIO_FEATURE_ENABLE_IGD_OPREGION_BIT 2
 #define VFIO_FEATURE_ENABLE_IGD_OPREGION \
                                 (1 << VFIO_FEATURE_ENABLE_IGD_OPREGION_BIT)
+    OnOffAuto display;
+    uint32_t display_xres;
+    uint32_t display_yres;
     int32_t bootindex;
     uint32_t igd_gms;
+    OffAutoPCIBAR msix_relo;
     uint8_t pm_cap;
+    uint8_t nv_gpudirect_clique;
     bool pci_aer;
     bool req_enabled;
     bool has_flr;
@@ -143,6 +163,11 @@ typedef struct VFIOPCIDevice {
     bool no_kvm_intx;
     bool no_kvm_msi;
     bool no_kvm_msix;
+    bool no_geforce_quirks;
+    bool no_kvm_ioeventfd;
+    bool no_vfio_ioeventfd;
+    bool enable_ramfb;
+    VFIODisplay *dpy;
 } VFIOPCIDevice;
 
 uint32_t vfio_pci_read_config(PCIDevice *pdev, uint32_t addr, int len);
@@ -160,11 +185,21 @@ void vfio_bar_quirk_setup(VFIOPCIDevice *vdev, int nr);
 void vfio_bar_quirk_exit(VFIOPCIDevice *vdev, int nr);
 void vfio_bar_quirk_finalize(VFIOPCIDevice *vdev, int nr);
 void vfio_setup_resetfn_quirk(VFIOPCIDevice *vdev);
+int vfio_add_virt_caps(VFIOPCIDevice *vdev, Error **errp);
+void vfio_quirk_reset(VFIOPCIDevice *vdev);
+
+extern const PropertyInfo qdev_prop_nv_gpudirect_clique;
 
 int vfio_populate_vga(VFIOPCIDevice *vdev, Error **errp);
 
 int vfio_pci_igd_opregion_init(VFIOPCIDevice *vdev,
                                struct vfio_region_info *info,
                                Error **errp);
+int vfio_pci_nvidia_v100_ram_init(VFIOPCIDevice *vdev, Error **errp);
+int vfio_pci_nvlink2_init(VFIOPCIDevice *vdev, Error **errp);
+
+void vfio_display_reset(VFIOPCIDevice *vdev);
+int vfio_display_probe(VFIOPCIDevice *vdev, Error **errp);
+void vfio_display_finalize(VFIOPCIDevice *vdev);
 
 #endif /* HW_VFIO_VFIO_PCI_H */

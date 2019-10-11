@@ -1,5 +1,8 @@
 /* from asm/termbits.h */
 
+#ifndef LINUX_USER_SPARC_TERMBITS_H
+#define LINUX_USER_SPARC_TERMBITS_H
+
 #define TARGET_NCCS 19
 
 struct target_termios {
@@ -245,6 +248,7 @@ struct target_termios {
 /* Get minor device of a pty master's FD -- Solaris equiv is ISPTM */
 #define TARGET_TIOCGPTN	TARGET_IOR('t', 134, unsigned int) /* Get Pty Number */
 #define TARGET_TIOCSPTLCK	TARGET_IOW('t', 135, int) /* Lock/unlock PTY */
+#define TARGET_TIOCGPTPEER      TARGET_IO('t', 137) /* Safely open the slave */
 
 /* Little f */
 #define TARGET_FIOCLEX		TARGET_IO('f', 1)
@@ -277,3 +281,5 @@ struct target_termios {
 #define TARGET_TIOCSERSETMULTI 0x545B /* Set multiport config */
 #define TARGET_TIOCMIWAIT	0x545C /* Wait input */
 #define TARGET_TIOCGICOUNT	0x545D /* Read serial port inline interrupt counts */
+
+#endif

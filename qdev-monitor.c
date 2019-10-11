@@ -22,13 +22,18 @@
 #include "hw/sysbus.h"
 #include "monitor/monitor.h"
 #include "monitor/qdev.h"
-#include "qmp-commands.h"
 #include "sysemu/arch_init.h"
+#include "qapi/error.h"
+#include "qapi/qapi-commands-qdev.h"
+#include "qapi/qmp/qdict.h"
 #include "qapi/qmp/qerror.h"
 #include "qemu/config-file.h"
 #include "qemu/error-report.h"
 #include "qemu/help_option.h"
+#include "qemu/option.h"
+#include "qemu/qemu-print.h"
 #include "sysemu/block-backend.h"
+#include "migration/misc.h"
 
 /*
  * Aliases were a bad idea from the start.  Let's keep them
@@ -45,7 +50,6 @@ typedef struct QDevAlias
 static const QDevAlias qdev_alias_table[] = {
     { "e1000", "e1000-82540em" },
     { "ich9-ahci", "ahci" },
-    { "kvm-pci-assign", "pci-assign" },
     { "lsi53c895a", "lsi" },
     { "virtio-9p-ccw", "virtio-9p", QEMU_ARCH_S390X },
     { "virtio-9p-pci", "virtio-9p", QEMU_ARCH_ALL & ~QEMU_ARCH_S390X },
@@ -103,26 +107,20 @@ static bool qdev_class_has_alias(DeviceClass *dc)
 
 static void qdev_print_devinfo(DeviceClass *dc)
 {
-    error_printf("name \"%s\"", object_class_get_name(OBJECT_CLASS(dc)));
+    qemu_printf("name \"%s\"", object_class_get_name(OBJECT_CLASS(dc)));
     if (dc->bus_type) {
-        error_printf(", bus %s", dc->bus_type);
+        qemu_printf(", bus %s", dc->bus_type);
     }
     if (qdev_class_has_alias(dc)) {
-        error_printf(", alias \"%s\"", qdev_class_get_alias(dc));
+        qemu_printf(", alias \"%s\"", qdev_class_get_alias(dc));
     }
     if (dc->desc) {
-        error_printf(", desc \"%s\"", dc->desc);
+        qemu_printf(", desc \"%s\"", dc->desc);
     }
-    if (dc->cannot_instantiate_with_device_add_yet) {
-        error_printf(", no-user");
+    if (!dc->user_creatable) {
+        qemu_printf(", no-user");
     }
-    error_printf("\n");
-}
-
-static gint devinfo_cmp(gconstpointer a, gconstpointer b)
-{
-    return strcasecmp(object_class_get_name((ObjectClass *)a),
-                      object_class_get_name((ObjectClass *)b));
+    qemu_printf("\n");
 }
 
 static void qdev_print_devinfos(bool show_no_user)
@@ -143,8 +141,7 @@ static void qdev_print_devinfos(bool show_no_user)
     int i;
     bool cat_printed;
 
-    list = g_slist_sort(object_class_get_list(TYPE_DEVICE, false),
-                        devinfo_cmp);
+    list = object_class_get_list_sorted(TYPE_DEVICE, false);
 
     for (i = 0; i <= DEVICE_CATEGORY_MAX; i++) {
         cat_printed = false;
@@ -155,12 +152,11 @@ static void qdev_print_devinfos(bool show_no_user)
                  ? !test_bit(i, dc->categories)
                  : !bitmap_empty(dc->categories, DEVICE_CATEGORY_MAX))
                 || (!show_no_user
-                    && dc->cannot_instantiate_with_device_add_yet)) {
+                    && !dc->user_creatable)) {
                 continue;
             }
             if (!cat_printed) {
-                error_printf("%s%s devices:\n", i ? "\n" : "",
-                             cat_name[i]);
+                qemu_printf("%s%s devices:\n", i ? "\n" : "", cat_name[i]);
                 cat_printed = true;
             }
             qdev_print_devinfo(dc);
@@ -240,7 +236,7 @@ static DeviceClass *qdev_get_device_class(const char **driver, Error **errp)
     }
 
     dc = DEVICE_CLASS(oc);
-    if (dc->cannot_instantiate_with_device_add_yet ||
+    if (!dc->user_creatable ||
         (qdev_hotplug && !dc->hotpluggable)) {
         error_setg(errp, QERR_INVALID_PARAMETER_VALUE, "driver",
                    "pluggable device type");
@@ -255,8 +251,8 @@ int qdev_device_help(QemuOpts *opts)
 {
     Error *local_err = NULL;
     const char *driver;
-    DevicePropertyInfoList *prop_list;
-    DevicePropertyInfoList *prop;
+    ObjectPropertyInfoList *prop_list;
+    ObjectPropertyInfoList *prop;
 
     driver = qemu_opt_get(opts, "driver");
     if (driver && is_help_option(driver)) {
@@ -281,18 +277,25 @@ int qdev_device_help(QemuOpts *opts)
         goto error;
     }
 
+    if (prop_list) {
+        qemu_printf("%s options:\n", driver);
+    } else {
+        qemu_printf("There are no options for %s.\n", driver);
+    }
     for (prop = prop_list; prop; prop = prop->next) {
-        error_printf("%s.%s=%s", driver,
-                     prop->value->name,
-                     prop->value->type);
+        int len;
+        qemu_printf("  %s=<%s>%n", prop->value->name, prop->value->type, &len);
         if (prop->value->has_description) {
-            error_printf(" (%s)\n", prop->value->description);
+            if (len < 24) {
+                qemu_printf("%*s", 24 - len, "");
+            }
+            qemu_printf(" - %s\n", prop->value->description);
         } else {
-            error_printf("\n");
+            qemu_printf("\n");
         }
     }
 
-    qapi_free_DevicePropertyInfoList(prop_list);
+    qapi_free_ObjectPropertyInfoList(prop_list);
     return 1;
 
 error:
@@ -403,7 +406,7 @@ static DeviceState *qbus_find_dev(BusState *bus, char *elem)
 static inline bool qbus_is_full(BusState *bus)
 {
     BusClass *bus_class = BUS_GET_CLASS(bus);
-    return bus_class->max_dev && bus->max_index >= bus_class->max_dev;
+    return bus_class->max_dev && bus->num_children >= bus_class->max_dev;
 }
 
 /*
@@ -603,33 +606,43 @@ DeviceState *qdev_device_add(QemuOpts *opts, Error **errp)
         return NULL;
     }
 
+    if (!migration_is_idle()) {
+        error_setg(errp, "device_add not allowed while migrating");
+        return NULL;
+    }
+
     /* create device */
     dev = DEVICE(object_new(driver));
 
     if (bus) {
         qdev_set_parent_bus(dev, bus);
+    } else if (qdev_hotplug && !qdev_get_machine_hotplug_handler(dev)) {
+        /* No bus, no machine hotplug handler --> device is not hotpluggable */
+        error_setg(&err, "Device '%s' can not be hotplugged on this machine",
+                   driver);
+        goto err_del_dev;
     }
 
     qdev_set_id(dev, qemu_opts_id(opts));
 
     /* set properties */
     if (qemu_opt_foreach(opts, set_property, dev, &err)) {
-        error_propagate(errp, err);
-        object_unparent(OBJECT(dev));
-        object_unref(OBJECT(dev));
-        return NULL;
+        goto err_del_dev;
     }
 
     dev->opts = opts;
     object_property_set_bool(OBJECT(dev), true, "realized", &err);
     if (err != NULL) {
-        error_propagate(errp, err);
         dev->opts = NULL;
-        object_unparent(OBJECT(dev));
-        object_unref(OBJECT(dev));
-        return NULL;
+        goto err_del_dev;
     }
     return dev;
+
+err_del_dev:
+    error_propagate(errp, err);
+    object_unparent(OBJECT(dev));
+    object_unref(OBJECT(dev));
+    return NULL;
 }
 
 
@@ -726,63 +739,6 @@ void hmp_info_qdm(Monitor *mon, const QDict *qdict)
     qdev_print_devinfos(true);
 }
 
-typedef struct QOMCompositionState {
-    Monitor *mon;
-    int indent;
-} QOMCompositionState;
-
-static void print_qom_composition(Monitor *mon, Object *obj, int indent);
-
-static int print_qom_composition_child(Object *obj, void *opaque)
-{
-    QOMCompositionState *s = opaque;
-
-    print_qom_composition(s->mon, obj, s->indent);
-
-    return 0;
-}
-
-static void print_qom_composition(Monitor *mon, Object *obj, int indent)
-{
-    QOMCompositionState s = {
-        .mon = mon,
-        .indent = indent + 2,
-    };
-    char *name;
-
-    if (obj == object_get_root()) {
-        name = g_strdup("");
-    } else {
-        name = object_get_canonical_path_component(obj);
-    }
-    monitor_printf(mon, "%*s/%s (%s)\n", indent, "", name,
-                   object_get_typename(obj));
-    g_free(name);
-    object_child_foreach(obj, print_qom_composition_child, &s);
-}
-
-void hmp_info_qom_tree(Monitor *mon, const QDict *dict)
-{
-    const char *path = qdict_get_try_str(dict, "path");
-    Object *obj;
-    bool ambiguous = false;
-
-    if (path) {
-        obj = object_resolve_path(path, &ambiguous);
-        if (!obj) {
-            monitor_printf(mon, "Path '%s' could not be resolved.\n", path);
-            return;
-        }
-        if (ambiguous) {
-            monitor_printf(mon, "Warning: Path '%s' is ambiguous.\n", path);
-            return;
-        }
-    } else {
-        obj = qdev_get_machine();
-    }
-    print_qom_composition(mon, obj, 0);
-}
-
 void qmp_device_add(QDict *qdict, QObject **ret_data, Error **errp)
 {
     Error *local_err = NULL;
@@ -834,6 +790,50 @@ static DeviceState *find_device_state(const char *id, Error **errp)
     }
 
     return DEVICE(obj);
+}
+
+void qdev_unplug(DeviceState *dev, Error **errp)
+{
+    DeviceClass *dc = DEVICE_GET_CLASS(dev);
+    HotplugHandler *hotplug_ctrl;
+    HotplugHandlerClass *hdc;
+    Error *local_err = NULL;
+
+    if (dev->parent_bus && !qbus_is_hotpluggable(dev->parent_bus)) {
+        error_setg(errp, QERR_BUS_NO_HOTPLUG, dev->parent_bus->name);
+        return;
+    }
+
+    if (!dc->hotpluggable) {
+        error_setg(errp, QERR_DEVICE_NO_HOTPLUG,
+                   object_get_typename(OBJECT(dev)));
+        return;
+    }
+
+    if (!migration_is_idle()) {
+        error_setg(errp, "device_del not allowed while migrating");
+        return;
+    }
+
+    qdev_hot_removed = true;
+
+    hotplug_ctrl = qdev_get_hotplug_handler(dev);
+    /* hotpluggable device MUST have HotplugHandler, if it doesn't
+     * then something is very wrong with it */
+    g_assert(hotplug_ctrl);
+
+    /* If device supports async unplug just request it to be done,
+     * otherwise just remove it synchronously */
+    hdc = HOTPLUG_HANDLER_GET_CLASS(hotplug_ctrl);
+    if (hdc->unplug_request) {
+        hotplug_handler_unplug_request(hotplug_ctrl, dev, &local_err);
+    } else {
+        hotplug_handler_unplug(hotplug_ctrl, dev, &local_err);
+        if (!local_err) {
+            object_unparent(OBJECT(dev));
+        }
+    }
+    error_propagate(errp, local_err);
 }
 
 void qmp_device_del(const char *id, Error **errp)

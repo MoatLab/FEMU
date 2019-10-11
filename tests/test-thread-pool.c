@@ -27,9 +27,10 @@ static int worker_cb(void *opaque)
 static int long_cb(void *opaque)
 {
     WorkerTestData *data = opaque;
-    atomic_inc(&data->n);
-    g_usleep(2000000);
-    atomic_inc(&data->n);
+    if (atomic_cmpxchg(&data->n, 0, 1) == 0) {
+        g_usleep(2000000);
+        atomic_or(&data->n, 2);
+    }
     return 0;
 }
 
@@ -171,7 +172,7 @@ static void do_test_cancel(bool sync)
     /* Cancel the jobs that haven't been started yet.  */
     num_canceled = 0;
     for (i = 0; i < 100; i++) {
-        if (atomic_cmpxchg(&data[i].n, 0, 3) == 0) {
+        if (atomic_cmpxchg(&data[i].n, 0, 4) == 0) {
             data[i].ret = -ECANCELED;
             if (sync) {
                 bdrv_aio_cancel(data[i].aiocb);
@@ -185,7 +186,7 @@ static void do_test_cancel(bool sync)
     g_assert_cmpint(num_canceled, <, 100);
 
     for (i = 0; i < 100; i++) {
-        if (data[i].aiocb && data[i].n != 3) {
+        if (data[i].aiocb && atomic_read(&data[i].n) < 4) {
             if (sync) {
                 /* Canceling the others will be a blocking operation.  */
                 bdrv_aio_cancel(data[i].aiocb);
@@ -201,13 +202,22 @@ static void do_test_cancel(bool sync)
     }
     g_assert_cmpint(active, ==, 0);
     for (i = 0; i < 100; i++) {
-        if (data[i].n == 3) {
+        g_assert(data[i].aiocb == NULL);
+        switch (data[i].n) {
+        case 0:
+            fprintf(stderr, "Callback not canceled but never started?\n");
+            abort();
+        case 3:
+            /* Couldn't be canceled asynchronously, must have completed.  */
+            g_assert_cmpint(data[i].ret, ==, 0);
+            break;
+        case 4:
+            /* Could be canceled asynchronously, never started.  */
             g_assert_cmpint(data[i].ret, ==, -ECANCELED);
-            g_assert(data[i].aiocb == NULL);
-        } else {
-            g_assert_cmpint(data[i].n, ==, 2);
-            g_assert(data[i].ret == 0 || data[i].ret == -ECANCELED);
-            g_assert(data[i].aiocb == NULL);
+            break;
+        default:
+            fprintf(stderr, "Callback aborted while running?\n");
+            abort();
         }
     }
 }
@@ -224,8 +234,6 @@ static void test_cancel_async(void)
 
 int main(int argc, char **argv)
 {
-    int ret;
-
     qemu_init_main_loop(&error_abort);
     ctx = qemu_get_current_aio_context();
     pool = aio_get_thread_pool(ctx);
@@ -238,7 +246,5 @@ int main(int argc, char **argv)
     g_test_add_func("/thread-pool/cancel", test_cancel);
     g_test_add_func("/thread-pool/cancel-async", test_cancel_async);
 
-    ret = g_test_run();
-
-    return ret;
+    return g_test_run();
 }

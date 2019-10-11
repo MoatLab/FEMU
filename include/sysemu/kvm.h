@@ -19,25 +19,16 @@
 #include "exec/memattrs.h"
 #include "hw/irq.h"
 
-#ifdef CONFIG_KVM
-#include <linux/kvm.h>
-#include <linux/kvm_para.h>
+#ifdef NEED_CPU_H
+# ifdef CONFIG_KVM
+#  include <linux/kvm.h>
+#  define CONFIG_KVM_IS_POSSIBLE
+# endif
 #else
-/* These constants must never be used at runtime if kvm_enabled() is false.
- * They exist so we don't need #ifdefs around KVM-specific code that already
- * checks kvm_enabled() properly.
- */
-#define KVM_CPUID_SIGNATURE      0
-#define KVM_CPUID_FEATURES       0
-#define KVM_FEATURE_CLOCKSOURCE  0
-#define KVM_FEATURE_NOP_IO_DELAY 0
-#define KVM_FEATURE_MMU_OP       0
-#define KVM_FEATURE_CLOCKSOURCE2 0
-#define KVM_FEATURE_ASYNC_PF     0
-#define KVM_FEATURE_STEAL_TIME   0
-#define KVM_FEATURE_PV_EOI       0
-#define KVM_FEATURE_CLOCKSOURCE_STABLE_BIT 0
+# define CONFIG_KVM_IS_POSSIBLE
 #endif
+
+#ifdef CONFIG_KVM_IS_POSSIBLE
 
 extern bool kvm_allowed;
 extern bool kvm_kernel_irqchip;
@@ -55,7 +46,6 @@ extern bool kvm_direct_msi_allowed;
 extern bool kvm_ioeventfd_any_length_allowed;
 extern bool kvm_msi_use_devid;
 
-#if defined CONFIG_KVM || !defined NEED_CPU_H
 #define kvm_enabled()           (kvm_allowed)
 /**
  * kvm_irqchip_in_kernel:
@@ -178,6 +168,7 @@ extern bool kvm_msi_use_devid;
 #define kvm_msi_devid_required() (kvm_msi_use_devid)
 
 #else
+
 #define kvm_enabled()           (0)
 #define kvm_irqchip_in_kernel() (false)
 #define kvm_irqchip_is_split() (false)
@@ -193,7 +184,8 @@ extern bool kvm_msi_use_devid;
 #define kvm_direct_msi_enabled() (false)
 #define kvm_ioeventfd_any_length_enabled() (false)
 #define kvm_msi_devid_required() (false)
-#endif
+
+#endif  /* CONFIG_KVM_IS_POSSIBLE */
 
 struct kvm_run;
 struct kvm_lapic_state;
@@ -214,10 +206,11 @@ extern KVMState *kvm_state;
 /* external API */
 
 bool kvm_has_free_slot(MachineState *ms);
-int kvm_has_sync_mmu(void);
+bool kvm_has_sync_mmu(void);
 int kvm_has_vcpu_events(void);
 int kvm_has_robust_singlestep(void);
 int kvm_has_debugregs(void);
+int kvm_max_nested_state_length(void);
 int kvm_has_pit_state2(void);
 int kvm_has_many_ioeventfds(void);
 int kvm_has_gsi_routing(void);
@@ -226,6 +219,34 @@ int kvm_has_intx_set_mask(void);
 int kvm_init_vcpu(CPUState *cpu);
 int kvm_cpu_exec(CPUState *cpu);
 int kvm_destroy_vcpu(CPUState *cpu);
+
+/**
+ * kvm_arm_supports_user_irq
+ *
+ * Not all KVM implementations support notifications for kernel generated
+ * interrupt events to user space. This function indicates whether the current
+ * KVM implementation does support them.
+ *
+ * Returns: true if KVM supports using kernel generated IRQs from user space
+ */
+bool kvm_arm_supports_user_irq(void);
+
+/**
+ * kvm_memcrypt_enabled - return boolean indicating whether memory encryption
+ *                        is enabled
+ * Returns: 1 memory encryption is enabled
+ *          0 memory encryption is disabled
+ */
+bool kvm_memcrypt_enabled(void);
+
+/**
+ * kvm_memcrypt_encrypt_data: encrypt the memory range
+ *
+ * Return: 1 failed to encrypt the range
+ *         0 succesfully encrypted memory region
+ */
+int kvm_memcrypt_encrypt_data(uint8_t *ptr, uint64_t len);
+
 
 #ifdef NEED_CPU_H
 #include "cpu.h"
@@ -244,7 +265,7 @@ int kvm_on_sigbus(int code, void *addr);
 
 /* interface with exec.c */
 
-void phys_mem_set_alloc(void *(*alloc)(size_t, uint64_t *align));
+void phys_mem_set_alloc(void *(*alloc)(size_t, uint64_t *align, bool shared));
 
 /* internal API */
 
@@ -294,12 +315,15 @@ int kvm_device_check_attr(int fd, uint32_t group, uint64_t attr);
  * @attr: the attribute of that group to set or get
  * @val: pointer to a storage area for the value
  * @write: true for set and false for get operation
+ * @errp: error object handle
  *
- * This function is not allowed to fail. Use kvm_device_check_attr()
- * in order to check for the availability of optional attributes.
+ * Returns: 0 on success
+ *          < 0 on error
+ * Use kvm_device_check_attr() in order to check for the availability
+ * of optional attributes.
  */
-void kvm_device_access(int fd, int group, uint64_t attr,
-                       void *val, bool write);
+int kvm_device_access(int fd, int group, uint64_t attr,
+                      void *val, bool write, Error **errp);
 
 /**
  * kvm_create_device - create a KVM device for the device control API
@@ -348,6 +372,7 @@ int kvm_arch_put_registers(CPUState *cpu, int level);
 int kvm_arch_init(MachineState *ms, KVMState *s);
 
 int kvm_arch_init_vcpu(CPUState *cpu);
+int kvm_arch_destroy_vcpu(CPUState *cpu);
 
 bool kvm_vcpu_id_is_valid(int vcpu_id);
 
@@ -389,8 +414,6 @@ struct kvm_sw_breakpoint {
     QTAILQ_ENTRY(kvm_sw_breakpoint) entry;
 };
 
-QTAILQ_HEAD(kvm_sw_breakpoint_head, kvm_sw_breakpoint);
-
 struct kvm_sw_breakpoint *kvm_find_sw_breakpoint(CPUState *cpu,
                                                  target_ulong pc);
 
@@ -421,11 +444,8 @@ int kvm_vm_check_extension(KVMState *s, unsigned int extension);
             .flags = cap_flags,                                      \
         };                                                           \
         uint64_t args_tmp[] = { __VA_ARGS__ };                       \
-        int i;                                                       \
-        for (i = 0; i < (int)ARRAY_SIZE(args_tmp) &&                 \
-                     i < ARRAY_SIZE(cap.args); i++) {                \
-            cap.args[i] = args_tmp[i];                               \
-        }                                                            \
+        size_t n = MIN(ARRAY_SIZE(args_tmp), ARRAY_SIZE(cap.args));  \
+        memcpy(cap.args, args_tmp, n * sizeof(cap.args[0]));         \
         kvm_vm_ioctl(s, KVM_ENABLE_CAP, &cap);                       \
     })
 
@@ -436,16 +456,15 @@ int kvm_vm_check_extension(KVMState *s, unsigned int extension);
             .flags = cap_flags,                                      \
         };                                                           \
         uint64_t args_tmp[] = { __VA_ARGS__ };                       \
-        int i;                                                       \
-        for (i = 0; i < (int)ARRAY_SIZE(args_tmp) &&                 \
-                     i < ARRAY_SIZE(cap.args); i++) {                \
-            cap.args[i] = args_tmp[i];                               \
-        }                                                            \
+        size_t n = MIN(ARRAY_SIZE(args_tmp), ARRAY_SIZE(cap.args));  \
+        memcpy(cap.args, args_tmp, n * sizeof(cap.args[0]));         \
         kvm_vcpu_ioctl(cpu, KVM_ENABLE_CAP, &cap);                   \
     })
 
 uint32_t kvm_arch_get_supported_cpuid(KVMState *env, uint32_t function,
                                       uint32_t index, int reg);
+uint32_t kvm_arch_get_supported_msr_feature(KVMState *s, uint32_t index);
+
 
 void kvm_set_sigmask_len(KVMState *s, unsigned int sigmask_len);
 
@@ -459,6 +478,7 @@ int kvm_physical_memory_addr_from_host(KVMState *s, void *ram_addr,
 void kvm_cpu_synchronize_state(CPUState *cpu);
 void kvm_cpu_synchronize_post_reset(CPUState *cpu);
 void kvm_cpu_synchronize_post_init(CPUState *cpu);
+void kvm_cpu_synchronize_pre_loadvm(CPUState *cpu);
 
 void kvm_init_cpu_signals(CPUState *cpu);
 
@@ -527,5 +547,6 @@ int kvm_set_one_reg(CPUState *cs, uint64_t id, void *source);
  * Returns: 0 on success, or a negative errno on failure.
  */
 int kvm_get_one_reg(CPUState *cs, uint64_t id, void *target);
+struct ppc_radix_page_info *kvm_get_radix_page_info(void);
 int kvm_get_max_memslots(void);
 #endif

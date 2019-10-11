@@ -21,9 +21,12 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+
 #include "qemu/osdep.h"
-#include "sysemu/char.h"
+#include "chardev/char.h"
 #include "qapi/error.h"
+#include "qemu/module.h"
+#include "qemu/option.h"
 #include <sys/ioctl.h>
 
 #ifdef CONFIG_BSD
@@ -41,8 +44,8 @@
 #endif
 #endif
 
-#include "char-fd.h"
-#include "char-parallel.h"
+#include "chardev/char-fd.h"
+#include "chardev/char-parallel.h"
 
 #if defined(__linux__)
 

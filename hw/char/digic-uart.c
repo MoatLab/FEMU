@@ -29,8 +29,9 @@
 #include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "hw/sysbus.h"
-#include "sysemu/char.h"
+#include "chardev/char-fe.h"
 #include "qemu/log.h"
+#include "qemu/module.h"
 
 #include "hw/char/digic-uart.h"
 
@@ -60,7 +61,7 @@ static uint64_t digic_uart_read(void *opaque, hwaddr addr,
     default:
         qemu_log_mask(LOG_UNIMP,
                       "digic-uart: read access to unknown register 0x"
-                      TARGET_FMT_plx, addr << 2);
+                      TARGET_FMT_plx "\n", addr << 2);
     }
 
     return ret;
@@ -98,7 +99,7 @@ static void digic_uart_write(void *opaque, hwaddr addr, uint64_t value,
     default:
         qemu_log_mask(LOG_UNIMP,
                       "digic-uart: write access to unknown register 0x"
-                      TARGET_FMT_plx, addr << 2);
+                      TARGET_FMT_plx "\n", addr << 2);
     }
 }
 
@@ -146,7 +147,7 @@ static void digic_uart_realize(DeviceState *dev, Error **errp)
     DigicUartState *s = DIGIC_UART(dev);
 
     qemu_chr_fe_set_handlers(&s->chr, uart_can_rx, uart_rx,
-                             uart_event, s, NULL, true);
+                             uart_event, NULL, s, NULL, true);
 }
 
 static void digic_uart_init(Object *obj)

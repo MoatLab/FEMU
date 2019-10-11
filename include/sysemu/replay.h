@@ -12,7 +12,9 @@
  *
  */
 
-#include "qapi-types.h"
+#include "sysemu.h"
+#include "qapi/qapi-types-misc.h"
+#include "qapi/qapi-types-ui.h"
 
 /* replay clock kinds */
 enum ReplayClockKind {
@@ -45,6 +47,19 @@ extern ReplayMode replay_mode;
 
 /* Name of the initial VM snapshot */
 extern char *replay_snapshot;
+
+/* Replay locking
+ *
+ * The locks are needed to protect the shared structures and log file
+ * when doing record/replay. They also are the main sync-point between
+ * the main-loop thread and the vCPU thread. This was a role
+ * previously filled by the BQL which has been busy trying to reduce
+ * its impact across the code. This ensures blocks of events stay
+ * sequential and reproducible.
+ */
+
+void replay_mutex_lock(void);
+void replay_mutex_unlock(void);
 
 /* Replay process control functions */
 
@@ -85,26 +100,35 @@ bool replay_has_interrupt(void);
 /* Processing clocks and other time sources */
 
 /*! Save the specified clock */
-int64_t replay_save_clock(ReplayClockKind kind, int64_t clock);
+int64_t replay_save_clock(ReplayClockKind kind, int64_t clock,
+                          int64_t raw_icount);
 /*! Read the specified clock from the log or return cached data */
 int64_t replay_read_clock(ReplayClockKind kind);
 /*! Saves or reads the clock depending on the current replay mode. */
 #define REPLAY_CLOCK(clock, value)                                      \
     (replay_mode == REPLAY_MODE_PLAY ? replay_read_clock((clock))       \
         : replay_mode == REPLAY_MODE_RECORD                             \
-            ? replay_save_clock((clock), (value))                       \
+            ? replay_save_clock((clock), (value), cpu_get_icount_raw()) \
+        : (value))
+#define REPLAY_CLOCK_LOCKED(clock, value)                               \
+    (replay_mode == REPLAY_MODE_PLAY ? replay_read_clock((clock))       \
+        : replay_mode == REPLAY_MODE_RECORD                             \
+            ? replay_save_clock((clock), (value), cpu_get_icount_raw_locked()) \
         : (value))
 
 /* Events */
 
 /*! Called when qemu shutdown is requested. */
-void replay_shutdown_request(void);
+void replay_shutdown_request(ShutdownCause cause);
 /*! Should be called at check points in the execution.
     These check points are skipped, if they were not met.
     Saves checkpoint in the SAVE mode and validates in the PLAY mode.
     Returns 0 in PLAY mode if checkpoint was not found.
     Returns 1 in all other cases. */
 bool replay_checkpoint(ReplayCheckpoint checkpoint);
+/*! Used to determine that checkpoint is pending.
+    Does not proceed to the next event in the log. */
+bool replay_has_checkpoint(void);
 
 /* Asynchronous events queue */
 
@@ -164,5 +188,8 @@ void replay_audio_in(int *recorded, void *samples, int *wpos, int size);
 /*! Called at the start of execution.
     Loads or saves initial vmstate depending on execution mode. */
 void replay_vmstate_init(void);
+/*! Called to ensure that replay state is consistent and VM snapshot
+    can be created */
+bool replay_can_snapshot(void);
 
 #endif

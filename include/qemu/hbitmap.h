@@ -73,16 +73,23 @@ void hbitmap_truncate(HBitmap *hb, uint64_t size);
 
 /**
  * hbitmap_merge:
- * @a: The bitmap to store the result in.
- * @b: The bitmap to merge into @a.
- * @return true if the merge was successful,
- *         false if it was not attempted.
  *
- * Merge two bitmaps together.
- * A := A (BITOR) B.
- * B is left unmodified.
+ * Store result of merging @a and @b into @result.
+ * @result is allowed to be equal to @a or @b.
+ *
+ * Return true if the merge was successful,
+ *        false if it was not attempted.
  */
-bool hbitmap_merge(HBitmap *a, const HBitmap *b);
+bool hbitmap_merge(const HBitmap *a, const HBitmap *b, HBitmap *result);
+
+/**
+ * hbitmap_can_merge:
+ *
+ * hbitmap_can_merge(a, b) && hbitmap_can_merge(a, result) is sufficient and
+ * necessary for hbitmap_merge will not fail.
+ *
+ */
+bool hbitmap_can_merge(const HBitmap *a, const HBitmap *b);
 
 /**
  * hbitmap_empty:
@@ -159,16 +166,16 @@ bool hbitmap_get(const HBitmap *hb, uint64_t item);
 bool hbitmap_is_serializable(const HBitmap *hb);
 
 /**
- * hbitmap_serialization_granularity:
+ * hbitmap_serialization_align:
  * @hb: HBitmap to operate on.
  *
- * Granularity of serialization chunks, used by other serialization functions.
- * For every chunk:
+ * Required alignment of serialization chunks, used by other serialization
+ * functions. For every chunk:
  * 1. Chunk start should be aligned to this granularity.
  * 2. Chunk size should be aligned too, except for last chunk (for which
  *      start + count == hb->size)
  */
-uint64_t hbitmap_serialization_granularity(const HBitmap *hb);
+uint64_t hbitmap_serialization_align(const HBitmap *hb);
 
 /**
  * hbitmap_serialization_size:
@@ -229,6 +236,21 @@ void hbitmap_deserialize_zeroes(HBitmap *hb, uint64_t start, uint64_t count,
                                 bool finish);
 
 /**
+ * hbitmap_deserialize_ones
+ * @hb: HBitmap to operate on.
+ * @start: First bit to restore.
+ * @count: Number of bits to restore.
+ * @finish: Whether to call hbitmap_deserialize_finish automatically.
+ *
+ * Fills the bitmap with ones.
+ *
+ * If @finish is false, caller must call hbitmap_serialize_finish before using
+ * the bitmap.
+ */
+void hbitmap_deserialize_ones(HBitmap *hb, uint64_t start, uint64_t count,
+                              bool finish);
+
+/**
  * hbitmap_deserialize_finish
  * @hb: HBitmap to operate on.
  *
@@ -236,6 +258,14 @@ void hbitmap_deserialize_zeroes(HBitmap *hb, uint64_t start, uint64_t count,
  * layers are restored here.
  */
 void hbitmap_deserialize_finish(HBitmap *hb);
+
+/**
+ * hbitmap_sha256:
+ * @bitmap: HBitmap to operate on.
+ *
+ * Returns SHA256 hash of the last level.
+ */
+char *hbitmap_sha256(const HBitmap *bitmap, Error **errp);
 
 /**
  * hbitmap_free:
@@ -256,10 +286,9 @@ void hbitmap_free(HBitmap *hb);
  * the lowest-numbered bit that is set in @hb, starting at @first.
  *
  * Concurrent setting of bits is acceptable, and will at worst cause the
- * iteration to miss some of those bits.  Resetting bits before the current
- * position of the iterator is also okay.  However, concurrent resetting of
- * bits can lead to unexpected behavior if the iterator has not yet reached
- * those bits.
+ * iteration to miss some of those bits.
+ *
+ * The concurrent resetting of bits is OK.
  */
 void hbitmap_iter_init(HBitmapIter *hbi, const HBitmap *hb, uint64_t first);
 
@@ -269,6 +298,34 @@ void hbitmap_iter_init(HBitmapIter *hbi, const HBitmap *hb, uint64_t first);
  * Internal function used by hbitmap_iter_next and hbitmap_iter_next_word.
  */
 unsigned long hbitmap_iter_skip_words(HBitmapIter *hbi);
+
+/* hbitmap_next_zero:
+ *
+ * Find next not dirty bit within selected range. If not found, return -1.
+ *
+ * @hb: The HBitmap to operate on
+ * @start: The bit to start from.
+ * @count: Number of bits to proceed. If @start+@count > bitmap size, the whole
+ * bitmap is looked through. You can use UINT64_MAX as @count to search up to
+ * the bitmap end.
+ */
+int64_t hbitmap_next_zero(const HBitmap *hb, uint64_t start, uint64_t count);
+
+/* hbitmap_next_dirty_area:
+ * @hb: The HBitmap to operate on
+ * @start: in-out parameter.
+ *         in: the offset to start from
+ *         out: (if area found) start of found area
+ * @count: in-out parameter.
+ *         in: length of requested region
+ *         out: length of found area
+ *
+ * If dirty area found within [@start, @start + @count), returns true and sets
+ * @offset and @bytes appropriately. Otherwise returns false and leaves @offset
+ * and @bytes unchanged.
+ */
+bool hbitmap_next_dirty_area(const HBitmap *hb, uint64_t *start,
+                             uint64_t *count);
 
 /* hbitmap_create_meta:
  * Create a "meta" hbitmap to track dirtiness of the bits in this HBitmap.
@@ -298,24 +355,7 @@ void hbitmap_free_meta(HBitmap *hb);
  * Return the next bit that is set in @hbi's associated HBitmap,
  * or -1 if all remaining bits are zero.
  */
-static inline int64_t hbitmap_iter_next(HBitmapIter *hbi)
-{
-    unsigned long cur = hbi->cur[HBITMAP_LEVELS - 1];
-    int64_t item;
-
-    if (cur == 0) {
-        cur = hbitmap_iter_skip_words(hbi);
-        if (cur == 0) {
-            return -1;
-        }
-    }
-
-    /* The next call will resume work from the next bit.  */
-    hbi->cur[HBITMAP_LEVELS - 1] = cur & (cur - 1);
-    item = ((uint64_t)hbi->pos << BITS_PER_LEVEL) + ctzl(cur);
-
-    return item << hbi->granularity;
-}
+int64_t hbitmap_iter_next(HBitmapIter *hbi);
 
 /**
  * hbitmap_iter_next_word:

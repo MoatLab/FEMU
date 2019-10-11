@@ -4,7 +4,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -14,6 +14,9 @@
  * You should have received a copy of the GNU Lesser General Public
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
+
+#ifndef TARGET_TRICORE_TRICORE_OPCODES_H
+#define TARGET_TRICORE_TRICORE_OPCODES_H
 
 /*
  * Opcode Masks for Tricore
@@ -313,6 +316,7 @@ enum {
     OPC1_16_SBC_JEQ                                  = 0x1e,
     OPC1_16_SBC_JEQ2                                 = 0x9e,
     OPC1_16_SBR_JEQ                                  = 0x3e,
+    OPC1_16_SBR_JEQ2                                 = 0xbe,
     OPC1_16_SBR_JGEZ                                 = 0xce,
     OPC1_16_SBR_JGTZ                                 = 0x4e,
     OPC1_16_SR_JI                                    = 0xdc,
@@ -321,6 +325,7 @@ enum {
     OPC1_16_SBC_JNE                                  = 0x5e,
     OPC1_16_SBC_JNE2                                 = 0xde,
     OPC1_16_SBR_JNE                                  = 0x7e,
+    OPC1_16_SBR_JNE2                                 = 0xfe,
     OPC1_16_SB_JNZ                                   = 0xee,
     OPC1_16_SBR_JNZ                                  = 0xf6,
     OPC1_16_SBR_JNZ_A                                = 0x7c,
@@ -1064,6 +1069,7 @@ enum {
     OPC2_32_RR_MIN_H                             = 0x78,
     OPC2_32_RR_MIN_HU                            = 0x79,
     OPC2_32_RR_MOV                               = 0x1f,
+    OPC2_32_RR_MOVS_64                           = 0x80,
     OPC2_32_RR_MOV_64                            = 0x81,
     OPC2_32_RR_NE                                = 0x11,
     OPC2_32_RR_OR_EQ                             = 0x27,
@@ -1464,3 +1470,5 @@ enum {
     OPC2_32_SYS_RESTORE                          = 0x0e,
     OPC2_32_SYS_FRET                             = 0x03,
 };
+
+#endif

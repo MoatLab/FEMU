@@ -18,28 +18,36 @@
  * Contributions after 2012-01-13 are licensed under the terms of the
  * GNU GPL, version 2 or (at your option) any later version.
  */
+
 #include "qemu/osdep.h"
 #include "sysemu/sysemu.h"
 #include "hw/hw.h"
-#include "hw/i386/pc.h"
 #include "hw/acpi/acpi.h"
 #include "hw/nvram/fw_cfg.h"
 #include "qemu/config-file.h"
+#include "qapi/error.h"
 #include "qapi/opts-visitor.h"
-#include "qapi-visit.h"
-#include "qapi-event.h"
+#include "qapi/qapi-events-run-state.h"
+#include "qapi/qapi-visit-misc.h"
+#include "qemu/error-report.h"
+#include "qemu/module.h"
+#include "qemu/option.h"
 
 struct acpi_table_header {
     uint16_t _length;         /* our length, not actual part of the hdr */
                               /* allows easier parsing for fw_cfg clients */
-    char sig[4];              /* ACPI signature (4 ASCII characters) */
+    char sig[4]
+             QEMU_NONSTRING;  /* ACPI signature (4 ASCII characters) */
     uint32_t length;          /* Length of table, in bytes, including header */
     uint8_t revision;         /* ACPI Specification minor version # */
     uint8_t checksum;         /* To make sum of entire table == 0 */
-    char oem_id[6];           /* OEM identification */
-    char oem_table_id[8];     /* OEM table identification */
+    char oem_id[6]
+             QEMU_NONSTRING;  /* OEM identification */
+    char oem_table_id[8]
+             QEMU_NONSTRING;  /* OEM table identification */
     uint32_t oem_revision;    /* OEM revision number */
-    char asl_compiler_id[4];  /* ASL compiler vendor ID */
+    char asl_compiler_id[4]
+             QEMU_NONSTRING;  /* ASL compiler vendor ID */
     uint32_t asl_compiler_revision; /* ASL compiler revision number */
 } QEMU_PACKED;
 
@@ -183,10 +191,9 @@ static void acpi_table_install(const char unsigned *blob, size_t bloblen,
     }
 
     if (has_header && le32_to_cpu(ext_hdr->length) != acpi_payload_size) {
-        fprintf(stderr,
-                "warning: ACPI table has wrong length, header says "
-                "%" PRIu32 ", actual size %zu bytes\n",
-                le32_to_cpu(ext_hdr->length), acpi_payload_size);
+        warn_report("ACPI table has wrong length, header says "
+                    "%" PRIu32 ", actual size %zu bytes",
+                    le32_to_cpu(ext_hdr->length), acpi_payload_size);
     }
     ext_hdr->length = cpu_to_le32(acpi_payload_size);
 
@@ -221,7 +228,7 @@ static void acpi_table_install(const char unsigned *blob, size_t bloblen,
     }
 
     if (!has_header && changed_fields == 0) {
-        fprintf(stderr, "warning: ACPI table: no headers are specified\n");
+        warn_report("ACPI table: no headers are specified");
     }
 
     /* recalculate checksum */
@@ -301,14 +308,6 @@ out:
     error_propagate(errp, err);
 }
 
-static bool acpi_table_builtin = false;
-
-void acpi_table_add_builtin(const QemuOpts *opts, Error **errp)
-{
-    acpi_table_builtin = true;
-    acpi_table_add(opts, errp);
-}
-
 unsigned acpi_table_len(void *current)
 {
     struct acpi_table_header *hdr = current - sizeof(hdr->_length);
@@ -324,7 +323,7 @@ void *acpi_table_hdr(void *h)
 
 uint8_t *acpi_table_first(void)
 {
-    if (acpi_table_builtin || !acpi_tables) {
+    if (!acpi_tables) {
         return NULL;
     }
     return acpi_table_hdr(acpi_tables + ACPI_TABLE_PFX_SIZE);
@@ -512,7 +511,8 @@ static uint32_t acpi_pm_tmr_get(ACPIREGS *ar)
 static void acpi_pm_tmr_timer(void *opaque)
 {
     ACPIREGS *ar = opaque;
-    qemu_system_wakeup_request(QEMU_WAKEUP_REASON_PMTIMER);
+
+    qemu_system_wakeup_request(QEMU_WAKEUP_REASON_PMTIMER, NULL);
     ar->tmr.update_sci(ar);
 }
 
@@ -561,15 +561,15 @@ static void acpi_pm1_cnt_write(ACPIREGS *ar, uint16_t val)
         uint16_t sus_typ = (val >> 10) & 7;
         switch(sus_typ) {
         case 0: /* soft power off */
-            qemu_system_shutdown_request();
+            qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
             break;
         case 1:
             qemu_system_suspend_request();
             break;
         default:
             if (sus_typ == ar->pm1.cnt.s4_val) { /* S4 request */
-                qapi_event_send_suspend_disk(&error_abort);
-                qemu_system_shutdown_request();
+                qapi_event_send_suspend_disk();
+                qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
             }
             break;
         }
@@ -615,6 +615,12 @@ void acpi_pm1_cnt_init(ACPIREGS *ar, MemoryRegion *parent,
     ar->pm1.cnt.s4_val = s4_val;
     ar->wakeup.notify = acpi_notify_wakeup;
     qemu_register_wakeup_notifier(&ar->wakeup);
+
+    /*
+     * Register wake-up support in QMP query-current-machine API
+     */
+    qemu_register_wakeup_support();
+
     memory_region_init_io(&ar->pm1.cnt.io, memory_region_owner(parent),
                           &acpi_pm_cnt_ops, ar, "acpi-cnt", 2);
     memory_region_add_subregion(parent, 4, &ar->pm1.cnt.io);

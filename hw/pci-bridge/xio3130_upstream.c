@@ -23,8 +23,8 @@
 #include "hw/pci/pci_ids.h"
 #include "hw/pci/msi.h"
 #include "hw/pci/pcie.h"
-#include "xio3130_upstream.h"
-#include "qapi/error.h"
+#include "hw/pci/pcie_port.h"
+#include "qemu/module.h"
 
 #define PCI_DEVICE_ID_TI_XIO3130U       0x8232  /* upstream port */
 #define XIO3130_REVISION                0x2
@@ -53,32 +53,32 @@ static void xio3130_upstream_reset(DeviceState *qdev)
     pcie_cap_deverr_reset(d);
 }
 
-static int xio3130_upstream_initfn(PCIDevice *d)
+static void xio3130_upstream_realize(PCIDevice *d, Error **errp)
 {
     PCIEPort *p = PCIE_PORT(d);
     int rc;
-    Error *err = NULL;
 
     pci_bridge_initfn(d, TYPE_PCIE_BUS);
     pcie_port_init_reg(d);
 
     rc = msi_init(d, XIO3130_MSI_OFFSET, XIO3130_MSI_NR_VECTOR,
                   XIO3130_MSI_SUPPORTED_FLAGS & PCI_MSI_FLAGS_64BIT,
-                  XIO3130_MSI_SUPPORTED_FLAGS & PCI_MSI_FLAGS_MASKBIT, &err);
+                  XIO3130_MSI_SUPPORTED_FLAGS & PCI_MSI_FLAGS_MASKBIT,
+                  errp);
     if (rc < 0) {
         assert(rc == -ENOTSUP);
-        error_report_err(err);
         goto err_bridge;
     }
 
     rc = pci_bridge_ssvid_init(d, XIO3130_SSVID_OFFSET,
-                               XIO3130_SSVID_SVID, XIO3130_SSVID_SSID);
+                               XIO3130_SSVID_SVID, XIO3130_SSVID_SSID,
+                               errp);
     if (rc < 0) {
         goto err_bridge;
     }
 
     rc = pcie_cap_init(d, XIO3130_EXP_OFFSET, PCI_EXP_TYPE_UPSTREAM,
-                       p->port);
+                       p->port, errp);
     if (rc < 0) {
         goto err_msi;
     }
@@ -86,13 +86,12 @@ static int xio3130_upstream_initfn(PCIDevice *d)
     pcie_cap_deverr_init(d);
 
     rc = pcie_aer_init(d, PCI_ERR_VER, XIO3130_AER_OFFSET,
-                       PCI_ERR_SIZEOF, &err);
+                       PCI_ERR_SIZEOF, errp);
     if (rc < 0) {
-        error_report_err(err);
         goto err;
     }
 
-    return 0;
+    return;
 
 err:
     pcie_cap_exit(d);
@@ -100,7 +99,6 @@ err_msi:
     msi_uninit(d);
 err_bridge:
     pci_bridge_exitfn(d);
-    return rc;
 }
 
 static void xio3130_upstream_exitfn(PCIDevice *d)
@@ -111,30 +109,9 @@ static void xio3130_upstream_exitfn(PCIDevice *d)
     pci_bridge_exitfn(d);
 }
 
-PCIEPort *xio3130_upstream_init(PCIBus *bus, int devfn, bool multifunction,
-                             const char *bus_name, pci_map_irq_fn map_irq,
-                             uint8_t port)
-{
-    PCIDevice *d;
-    PCIBridge *br;
-    DeviceState *qdev;
-
-    d = pci_create_multifunction(bus, devfn, multifunction, "x3130-upstream");
-    if (!d) {
-        return NULL;
-    }
-    br = PCI_BRIDGE(d);
-
-    qdev = DEVICE(d);
-    pci_bridge_map_irq(br, bus_name, map_irq);
-    qdev_prop_set_uint8(qdev, "port", port);
-    qdev_init_nofail(qdev);
-
-    return PCIE_PORT(d);
-}
-
 static const VMStateDescription vmstate_xio3130_upstream = {
     .name = "xio3130-express-upstream-port",
+    .priority = MIG_PRI_PCI_BUS,
     .version_id = 1,
     .minimum_version_id = 1,
     .fields = (VMStateField[]) {
@@ -150,10 +127,9 @@ static void xio3130_upstream_class_init(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
 
-    k->is_express = 1;
-    k->is_bridge = 1;
+    k->is_bridge = true;
     k->config_write = xio3130_upstream_write_config;
-    k->init = xio3130_upstream_initfn;
+    k->realize = xio3130_upstream_realize;
     k->exit = xio3130_upstream_exitfn;
     k->vendor_id = PCI_VENDOR_ID_TI;
     k->device_id = PCI_DEVICE_ID_TI_XIO3130U;
@@ -168,6 +144,10 @@ static const TypeInfo xio3130_upstream_info = {
     .name          = "x3130-upstream",
     .parent        = TYPE_PCIE_PORT,
     .class_init    = xio3130_upstream_class_init,
+    .interfaces = (InterfaceInfo[]) {
+        { INTERFACE_PCIE_DEVICE },
+        { }
+    },
 };
 
 static void xio3130_upstream_register_types(void)

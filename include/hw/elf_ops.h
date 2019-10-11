@@ -105,7 +105,7 @@ static int glue(symcmp, SZ)(const void *s0, const void *s1)
 }
 
 static int glue(load_symbols, SZ)(struct elfhdr *ehdr, int fd, int must_swab,
-                                  int clear_lsb)
+                                  int clear_lsb, symbol_fn_t sym_cb)
 {
     struct elf_shdr *symtab, *strtab, *shdr_table = NULL;
     struct elf_sym *syms = NULL;
@@ -133,10 +133,26 @@ static int glue(load_symbols, SZ)(struct elfhdr *ehdr, int fd, int must_swab,
 
     nsyms = symtab->sh_size / sizeof(struct elf_sym);
 
+    /* String table */
+    if (symtab->sh_link >= ehdr->e_shnum) {
+        goto fail;
+    }
+    strtab = &shdr_table[symtab->sh_link];
+
+    str = load_at(fd, strtab->sh_offset, strtab->sh_size);
+    if (!str) {
+        goto fail;
+    }
+
     i = 0;
     while (i < nsyms) {
-        if (must_swab)
+        if (must_swab) {
             glue(bswap_sym, SZ)(&syms[i]);
+        }
+        if (sym_cb) {
+            sym_cb(str + syms[i].st_name, syms[i].st_info,
+                   syms[i].st_value, syms[i].st_size);
+        }
         /* We are only interested in function symbols.
            Throw everything else away.  */
         if (syms[i].st_shndx == SHN_UNDEF ||
@@ -162,15 +178,6 @@ static int glue(load_symbols, SZ)(struct elfhdr *ehdr, int fd, int must_swab,
             syms[i].st_size = syms[i + 1].st_value - syms[i].st_value;
         }
     }
-
-    /* String table */
-    if (symtab->sh_link >= ehdr->e_shnum)
-        goto fail;
-    strtab = &shdr_table[symtab->sh_link];
-
-    str = load_at(fd, strtab->sh_offset, strtab->sh_size);
-    if (!str)
-        goto fail;
 
     /* Commit */
     s = g_malloc0(sizeof(*s));
@@ -258,13 +265,60 @@ fail:
     return ret;
 }
 
+/*
+ * Given 'nhdr', a pointer to a range of ELF Notes, search through them
+ * for a note matching type 'elf_note_type' and return a pointer to
+ * the matching ELF note.
+ */
+static struct elf_note *glue(get_elf_note_type, SZ)(struct elf_note *nhdr,
+                                                    elf_word note_size,
+                                                    elf_word phdr_align,
+                                                    elf_word elf_note_type)
+{
+    elf_word nhdr_size = sizeof(struct elf_note);
+    elf_word elf_note_entry_offset = 0;
+    elf_word note_type;
+    elf_word nhdr_namesz;
+    elf_word nhdr_descsz;
+
+    if (nhdr == NULL) {
+        return NULL;
+    }
+
+    note_type = nhdr->n_type;
+    while (note_type != elf_note_type) {
+        nhdr_namesz = nhdr->n_namesz;
+        nhdr_descsz = nhdr->n_descsz;
+
+        elf_note_entry_offset = nhdr_size +
+            QEMU_ALIGN_UP(nhdr_namesz, phdr_align) +
+            QEMU_ALIGN_UP(nhdr_descsz, phdr_align);
+
+        /*
+         * If the offset calculated in this iteration exceeds the
+         * supplied size, we are done and no matching note was found.
+         */
+        if (elf_note_entry_offset > note_size) {
+            return NULL;
+        }
+
+        /* skip to the next ELF Note entry */
+        nhdr = (void *)nhdr + elf_note_entry_offset;
+        note_type = nhdr->n_type;
+    }
+
+    return nhdr;
+}
+
 static int glue(load_elf, SZ)(const char *name, int fd,
+                              uint64_t (*elf_note_fn)(void *, void *, bool),
                               uint64_t (*translate_fn)(void *, uint64_t),
                               void *translate_opaque,
                               int must_swab, uint64_t *pentry,
                               uint64_t *lowaddr, uint64_t *highaddr,
                               int elf_machine, int clear_lsb, int data_swab,
-                              AddressSpace *as, bool load_rom)
+                              AddressSpace *as, bool load_rom,
+                              symbol_fn_t sym_cb)
 {
     struct elfhdr ehdr;
     struct elf_phdr *phdr = NULL, *ph;
@@ -319,6 +373,14 @@ static int glue(load_elf, SZ)(const char *name, int fd,
                 }
             }
             break;
+        case EM_MIPS:
+        case EM_NANOMIPS:
+            if ((ehdr.e_machine != EM_MIPS) &&
+                (ehdr.e_machine != EM_NANOMIPS)) {
+                ret = ELF_LOAD_WRONG_ARCH;
+                goto fail;
+            }
+            break;
         default:
             if (elf_machine != ehdr.e_machine) {
                 ret = ELF_LOAD_WRONG_ARCH;
@@ -327,9 +389,9 @@ static int glue(load_elf, SZ)(const char *name, int fd,
     }
 
     if (pentry)
-   	*pentry = (uint64_t)(elf_sword)ehdr.e_entry;
+        *pentry = (uint64_t)(elf_sword)ehdr.e_entry;
 
-    glue(load_symbols, SZ)(&ehdr, fd, must_swab, clear_lsb);
+    glue(load_symbols, SZ)(&ehdr, fd, must_swab, clear_lsb, sym_cb);
 
     size = ehdr.e_phnum * sizeof(phdr[0]);
     if (lseek(fd, ehdr.e_phoff, SEEK_SET) != ehdr.e_phoff) {
@@ -362,6 +424,54 @@ static int glue(load_elf, SZ)(const char *name, int fd,
                     goto fail;
                 }
             }
+
+            /* The ELF spec is somewhat vague about the purpose of the
+             * physical address field. One common use in the embedded world
+             * is that physical address field specifies the load address
+             * and the virtual address field specifies the execution address.
+             * Segments are packed into ROM or flash, and the relocation
+             * and zero-initialization of data is done at runtime. This
+             * means that the memsz header represents the runtime size of the
+             * segment, but the filesz represents the loadtime size. If
+             * we try to honour the memsz value for an ELF file like this
+             * we will end up with overlapping segments (which the
+             * loader.c code will later reject).
+             * We support ELF files using this scheme by by checking whether
+             * paddr + memsz for this segment would overlap with any other
+             * segment. If so, then we assume it's using this scheme and
+             * truncate the loaded segment to the filesz size.
+             * If the segment considered as being memsz size doesn't overlap
+             * then we use memsz for the segment length, to handle ELF files
+             * which assume that the loader will do the zero-initialization.
+             */
+            if (mem_size > file_size) {
+                /* If this segment's zero-init portion overlaps another
+                 * segment's data or zero-init portion, then truncate this one.
+                 * Invalid ELF files where the segments overlap even when
+                 * only file_size bytes are loaded will be rejected by
+                 * the ROM overlap check in loader.c, so we don't try to
+                 * explicitly detect those here.
+                 */
+                int j;
+                elf_word zero_start = ph->p_paddr + file_size;
+                elf_word zero_end = ph->p_paddr + mem_size;
+
+                for (j = 0; j < ehdr.e_phnum; j++) {
+                    struct elf_phdr *jph = &phdr[j];
+
+                    if (i != j && jph->p_type == PT_LOAD) {
+                        elf_word other_start = jph->p_paddr;
+                        elf_word other_end = jph->p_paddr + jph->p_memsz;
+
+                        if (!(other_start >= zero_end ||
+                              zero_start >= other_end)) {
+                            mem_size = file_size;
+                            break;
+                        }
+                    }
+                }
+            }
+
             /* address_offset is hack for kernel images that are
                linked at the wrong physical address.  */
             if (translate_fn) {
@@ -403,14 +513,26 @@ static int glue(load_elf, SZ)(const char *name, int fd,
                 *pentry = ehdr.e_entry - ph->p_vaddr + ph->p_paddr;
             }
 
-            if (load_rom) {
-                snprintf(label, sizeof(label), "phdr #%d: %s", i, name);
-
-                /* rom_add_elf_program() seize the ownership of 'data' */
-                rom_add_elf_program(label, data, file_size, mem_size, addr, as);
-            } else {
-                cpu_physical_memory_write(addr, data, file_size);
+            if (mem_size == 0) {
+                /* Some ELF files really do have segments of zero size;
+                 * just ignore them rather than trying to create empty
+                 * ROM blobs, because the zero-length blob can falsely
+                 * trigger the overlapping-ROM-blobs check.
+                 */
                 g_free(data);
+            } else {
+                if (load_rom) {
+                    snprintf(label, sizeof(label), "phdr #%d: %s", i, name);
+
+                    /* rom_add_elf_program() seize the ownership of 'data' */
+                    rom_add_elf_program(label, data, file_size, mem_size,
+                                        addr, as);
+                } else {
+                    address_space_write(as ? as : &address_space_memory,
+                                        addr, MEMTXATTRS_UNSPECIFIED,
+                                        data, file_size);
+                    g_free(data);
+                }
             }
 
             total_size += mem_size;
@@ -420,8 +542,39 @@ static int glue(load_elf, SZ)(const char *name, int fd,
                 high = addr + mem_size;
 
             data = NULL;
+
+        } else if (ph->p_type == PT_NOTE && elf_note_fn) {
+            struct elf_note *nhdr = NULL;
+
+            file_size = ph->p_filesz; /* Size of the range of ELF notes */
+            data = g_malloc0(file_size);
+            if (ph->p_filesz > 0) {
+                if (lseek(fd, ph->p_offset, SEEK_SET) < 0) {
+                    goto fail;
+                }
+                if (read(fd, data, file_size) != file_size) {
+                    goto fail;
+                }
+            }
+
+            /*
+             * Search the ELF notes to find one with a type matching the
+             * value passed in via 'translate_opaque'
+             */
+            nhdr = (struct elf_note *)data;
+            assert(translate_opaque != NULL);
+            nhdr = glue(get_elf_note_type, SZ)(nhdr, file_size, ph->p_align,
+                                               *(uint64_t *)translate_opaque);
+            if (nhdr != NULL) {
+                bool is64 =
+                    sizeof(struct elf_note) == sizeof(struct elf64_note);
+                elf_note_fn((void *)nhdr, (void *)&ph->p_align, is64);
+            }
+            g_free(data);
+            data = NULL;
         }
     }
+
     g_free(phdr);
     if (lowaddr)
         *lowaddr = (uint64_t)(elf_sword)low;

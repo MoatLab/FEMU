@@ -9,50 +9,31 @@
 
 #include "qemu/osdep.h"
 #include "libqtest.h"
+#include "qemu/module.h"
+#include "libqos/virtio-serial.h"
 
 /* Tests only initialization so far. TODO: Replace with functional tests */
-static void pci_nop(void)
+static void virtio_serial_nop(void *obj, void *data, QGuestAllocator *alloc)
 {
+    /* no operation */
 }
 
-static void hotplug(void)
+static void serial_hotplug(void *obj, void *data, QGuestAllocator *alloc)
 {
-    QDict *response;
-
-    response = qmp("{\"execute\": \"device_add\","
-                   " \"arguments\": {"
-                   "   \"driver\": \"virtserialport\","
-                   "   \"id\": \"hp-port\""
-                   "}}");
-
-    g_assert(response);
-    g_assert(!qdict_haskey(response, "error"));
-    QDECREF(response);
-
-    response = qmp("{\"execute\": \"device_del\","
-                   " \"arguments\": {"
-                   "   \"id\": \"hp-port\""
-                   "}}");
-
-    g_assert(response);
-    g_assert(!qdict_haskey(response, "error"));
-    g_assert(qdict_haskey(response, "event"));
-    g_assert(!strcmp(qdict_get_str(response, "event"), "DEVICE_DELETED"));
-    QDECREF(response);
+    qtest_qmp_device_add("virtserialport", "hp-port", "{}");
+    qtest_qmp_device_del("hp-port");
 }
 
-int main(int argc, char **argv)
+static void register_virtio_serial_test(void)
 {
-    int ret;
+    QOSGraphTestOptions opts = { };
 
-    g_test_init(&argc, &argv, NULL);
-    qtest_add_func("/virtio/serial/pci/nop", pci_nop);
-    qtest_add_func("/virtio/serial/pci/hotplug", hotplug);
+    opts.edge.before_cmd_line = "-device virtconsole,bus=vser0.0";
+    qos_add_test("console-nop", "virtio-serial", virtio_serial_nop, &opts);
 
-    qtest_start("-device virtio-serial-pci");
-    ret = g_test_run();
+    opts.edge.before_cmd_line = "-device virtserialport,bus=vser0.0";
+    qos_add_test("serialport-nop", "virtio-serial", virtio_serial_nop, &opts);
 
-    qtest_end();
-
-    return ret;
+    qos_add_test("hotplug", "virtio-serial", serial_hotplug, NULL);
 }
+libqos_init(register_virtio_serial_test);

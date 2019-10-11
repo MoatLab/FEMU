@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -19,9 +19,8 @@
  */
 
 #include "qemu/osdep.h"
-#include "qapi/error.h"
 #include "qemu/bswap.h"
-#include "crypto/ivgen-essiv.h"
+#include "ivgen-essiv.h"
 
 typedef struct QCryptoIVGenESSIV QCryptoIVGenESSIV;
 struct QCryptoIVGenESSIV {
@@ -79,7 +78,7 @@ static int qcrypto_ivgen_essiv_calculate(QCryptoIVGen *ivgen,
     uint8_t *data = g_new(uint8_t, ndata);
 
     sector = cpu_to_le64(sector);
-    memcpy(data, (uint8_t *)&sector, ndata);
+    memcpy(data, (uint8_t *)&sector, MIN(sizeof(sector), ndata));
     if (sizeof(sector) < ndata) {
         memset(data + sizeof(sector), 0, ndata - sizeof(sector));
     }

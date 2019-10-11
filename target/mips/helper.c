@@ -19,10 +19,12 @@
 #include "qemu/osdep.h"
 
 #include "cpu.h"
-#include "sysemu/kvm.h"
+#include "internal.h"
 #include "exec/exec-all.h"
 #include "exec/cpu_ldst.h"
 #include "exec/log.h"
+#include "hw/mips/cpudevs.h"
+#include "qapi/qapi-commands-machine-target.h"
 
 enum {
     TLBRET_XI = -6,
@@ -41,7 +43,7 @@ int no_mmu_map_address (CPUMIPSState *env, hwaddr *physical, int *prot,
                         target_ulong address, int rw, int access_type)
 {
     *physical = address;
-    *prot = PAGE_READ | PAGE_WRITE;
+    *prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
     return TLBRET_MATCH;
 }
 
@@ -59,7 +61,7 @@ int fixed_mmu_map_address (CPUMIPSState *env, hwaddr *physical, int *prot,
     else
         *physical = address;
 
-    *prot = PAGE_READ | PAGE_WRITE;
+    *prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
     return TLBRET_MATCH;
 }
 
@@ -99,6 +101,9 @@ int r4k_map_address (CPUMIPSState *env, hwaddr *physical, int *prot,
                 *prot = PAGE_READ;
                 if (n ? tlb->D1 : tlb->D0)
                     *prot |= PAGE_WRITE;
+                if (!(n ? tlb->XI1 : tlb->XI0)) {
+                    *prot |= PAGE_EXEC;
+                }
                 return TLBRET_MATCH;
             }
             return TLBRET_DIRTY;
@@ -107,15 +112,107 @@ int r4k_map_address (CPUMIPSState *env, hwaddr *physical, int *prot,
     return TLBRET_NOMATCH;
 }
 
+static int is_seg_am_mapped(unsigned int am, bool eu, int mmu_idx)
+{
+    /*
+     * Interpret access control mode and mmu_idx.
+     *           AdE?     TLB?
+     *      AM  K S U E  K S U E
+     * UK    0  0 1 1 0  0 - - 0
+     * MK    1  0 1 1 0  1 - - !eu
+     * MSK   2  0 0 1 0  1 1 - !eu
+     * MUSK  3  0 0 0 0  1 1 1 !eu
+     * MUSUK 4  0 0 0 0  0 1 1 0
+     * USK   5  0 0 1 0  0 0 - 0
+     * -     6  - - - -  - - - -
+     * UUSK  7  0 0 0 0  0 0 0 0
+     */
+    int32_t adetlb_mask;
+
+    switch (mmu_idx) {
+    case 3 /* ERL */:
+        /* If EU is set, always unmapped */
+        if (eu) {
+            return 0;
+        }
+        /* fall through */
+    case MIPS_HFLAG_KM:
+        /* Never AdE, TLB mapped if AM={1,2,3} */
+        adetlb_mask = 0x70000000;
+        goto check_tlb;
+
+    case MIPS_HFLAG_SM:
+        /* AdE if AM={0,1}, TLB mapped if AM={2,3,4} */
+        adetlb_mask = 0xc0380000;
+        goto check_ade;
+
+    case MIPS_HFLAG_UM:
+        /* AdE if AM={0,1,2,5}, TLB mapped if AM={3,4} */
+        adetlb_mask = 0xe4180000;
+        /* fall through */
+    check_ade:
+        /* does this AM cause AdE in current execution mode */
+        if ((adetlb_mask << am) < 0) {
+            return TLBRET_BADADDR;
+        }
+        adetlb_mask <<= 8;
+        /* fall through */
+    check_tlb:
+        /* is this AM mapped in current execution mode */
+        return ((adetlb_mask << am) < 0);
+    default:
+        assert(0);
+        return TLBRET_BADADDR;
+    };
+}
+
+static int get_seg_physical_address(CPUMIPSState *env, hwaddr *physical,
+                                    int *prot, target_ulong real_address,
+                                    int rw, int access_type, int mmu_idx,
+                                    unsigned int am, bool eu,
+                                    target_ulong segmask,
+                                    hwaddr physical_base)
+{
+    int mapped = is_seg_am_mapped(am, eu, mmu_idx);
+
+    if (mapped < 0) {
+        /* is_seg_am_mapped can report TLBRET_BADADDR */
+        return mapped;
+    } else if (mapped) {
+        /* The segment is TLB mapped */
+        return env->tlb->map_address(env, physical, prot, real_address, rw,
+                                     access_type);
+    } else {
+        /* The segment is unmapped */
+        *physical = physical_base | (real_address & segmask);
+        *prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
+        return TLBRET_MATCH;
+    }
+}
+
+static int get_segctl_physical_address(CPUMIPSState *env, hwaddr *physical,
+                                       int *prot, target_ulong real_address,
+                                       int rw, int access_type, int mmu_idx,
+                                       uint16_t segctl, target_ulong segmask)
+{
+    unsigned int am = (segctl & CP0SC_AM_MASK) >> CP0SC_AM;
+    bool eu = (segctl >> CP0SC_EU) & 1;
+    hwaddr pa = ((hwaddr)segctl & CP0SC_PA_MASK) << 20;
+
+    return get_seg_physical_address(env, physical, prot, real_address, rw,
+                                    access_type, mmu_idx, am, eu, segmask,
+                                    pa & ~(hwaddr)segmask);
+}
+
 static int get_physical_address (CPUMIPSState *env, hwaddr *physical,
                                 int *prot, target_ulong real_address,
-                                int rw, int access_type)
+                                int rw, int access_type, int mmu_idx)
 {
     /* User mode can only access useg/xuseg */
-    int user_mode = (env->hflags & MIPS_HFLAG_MODE) == MIPS_HFLAG_UM;
-    int supervisor_mode = (env->hflags & MIPS_HFLAG_MODE) == MIPS_HFLAG_SM;
-    int kernel_mode = !user_mode && !supervisor_mode;
 #if defined(TARGET_MIPS64)
+    int user_mode = mmu_idx == MIPS_HFLAG_UM;
+    int supervisor_mode = mmu_idx == MIPS_HFLAG_SM;
+    int kernel_mode = !user_mode && !supervisor_mode;
     int UX = (env->CP0_Status & (1 << CP0St_UX)) != 0;
     int SX = (env->CP0_Status & (1 << CP0St_SX)) != 0;
     int KX = (env->CP0_Status & (1 << CP0St_KX)) != 0;
@@ -124,16 +221,16 @@ static int get_physical_address (CPUMIPSState *env, hwaddr *physical,
     /* effective address (modified for KVM T&E kernel segments) */
     target_ulong address = real_address;
 
-#define USEG_LIMIT      0x7FFFFFFFUL
-#define KSEG0_BASE      0x80000000UL
-#define KSEG1_BASE      0xA0000000UL
-#define KSEG2_BASE      0xC0000000UL
-#define KSEG3_BASE      0xE0000000UL
+#define USEG_LIMIT      ((target_ulong)(int32_t)0x7FFFFFFFUL)
+#define KSEG0_BASE      ((target_ulong)(int32_t)0x80000000UL)
+#define KSEG1_BASE      ((target_ulong)(int32_t)0xA0000000UL)
+#define KSEG2_BASE      ((target_ulong)(int32_t)0xC0000000UL)
+#define KSEG3_BASE      ((target_ulong)(int32_t)0xE0000000UL)
 
-#define KVM_KSEG0_BASE  0x40000000UL
-#define KVM_KSEG2_BASE  0x60000000UL
+#define KVM_KSEG0_BASE  ((target_ulong)(int32_t)0x40000000UL)
+#define KVM_KSEG2_BASE  ((target_ulong)(int32_t)0x60000000UL)
 
-    if (kvm_enabled()) {
+    if (mips_um_ksegs_enabled()) {
         /* KVM T&E adds guest kernel segments in useg */
         if (real_address >= KVM_KSEG0_BASE) {
             if (real_address < KVM_KSEG2_BASE) {
@@ -148,12 +245,16 @@ static int get_physical_address (CPUMIPSState *env, hwaddr *physical,
 
     if (address <= USEG_LIMIT) {
         /* useg */
-        if (env->CP0_Status & (1 << CP0St_ERL)) {
-            *physical = address & 0xFFFFFFFF;
-            *prot = PAGE_READ | PAGE_WRITE;
+        uint16_t segctl;
+
+        if (address >= 0x40000000UL) {
+            segctl = env->CP0_SegCtl2;
         } else {
-            ret = env->tlb->map_address(env, physical, prot, real_address, rw, access_type);
+            segctl = env->CP0_SegCtl2 >> 16;
         }
+        ret = get_segctl_physical_address(env, physical, prot, real_address, rw,
+                                          access_type, mmu_idx, segctl,
+                                          0x3FFFFFFF);
 #if defined(TARGET_MIPS64)
     } else if (address < 0x4000000000000000ULL) {
         /* xuseg */
@@ -172,10 +273,33 @@ static int get_physical_address (CPUMIPSState *env, hwaddr *physical,
         }
     } else if (address < 0xC000000000000000ULL) {
         /* xkphys */
-        if (kernel_mode && KX &&
-            (address & 0x07FFFFFFFFFFFFFFULL) <= env->PAMask) {
-            *physical = address & env->PAMask;
-            *prot = PAGE_READ | PAGE_WRITE;
+        if ((address & 0x07FFFFFFFFFFFFFFULL) <= env->PAMask) {
+            /* KX/SX/UX bit to check for each xkphys EVA access mode */
+            static const uint8_t am_ksux[8] = {
+                [CP0SC_AM_UK]    = (1u << CP0St_KX),
+                [CP0SC_AM_MK]    = (1u << CP0St_KX),
+                [CP0SC_AM_MSK]   = (1u << CP0St_SX),
+                [CP0SC_AM_MUSK]  = (1u << CP0St_UX),
+                [CP0SC_AM_MUSUK] = (1u << CP0St_UX),
+                [CP0SC_AM_USK]   = (1u << CP0St_SX),
+                [6]              = (1u << CP0St_KX),
+                [CP0SC_AM_UUSK]  = (1u << CP0St_UX),
+            };
+            unsigned int am = CP0SC_AM_UK;
+            unsigned int xr = (env->CP0_SegCtl2 & CP0SC2_XR_MASK) >> CP0SC2_XR;
+
+            if (xr & (1 << ((address >> 59) & 0x7))) {
+                am = (env->CP0_SegCtl1 & CP0SC1_XAM_MASK) >> CP0SC1_XAM;
+            }
+            /* Does CP0_Status.KX/SX/UX permit the access mode (am) */
+            if (env->CP0_Status & am_ksux[am]) {
+                ret = get_seg_physical_address(env, physical, prot,
+                                               real_address, rw, access_type,
+                                               mmu_idx, am, false, env->PAMask,
+                                               0);
+            } else {
+                ret = TLBRET_BADADDR;
+            }
         } else {
             ret = TLBRET_BADADDR;
         }
@@ -188,47 +312,35 @@ static int get_physical_address (CPUMIPSState *env, hwaddr *physical,
             ret = TLBRET_BADADDR;
         }
 #endif
-    } else if (address < (int32_t)KSEG1_BASE) {
+    } else if (address < KSEG1_BASE) {
         /* kseg0 */
-        if (kernel_mode) {
-            *physical = address - (int32_t)KSEG0_BASE;
-            *prot = PAGE_READ | PAGE_WRITE;
-        } else {
-            ret = TLBRET_BADADDR;
-        }
-    } else if (address < (int32_t)KSEG2_BASE) {
+        ret = get_segctl_physical_address(env, physical, prot, real_address, rw,
+                                          access_type, mmu_idx,
+                                          env->CP0_SegCtl1 >> 16, 0x1FFFFFFF);
+    } else if (address < KSEG2_BASE) {
         /* kseg1 */
-        if (kernel_mode) {
-            *physical = address - (int32_t)KSEG1_BASE;
-            *prot = PAGE_READ | PAGE_WRITE;
-        } else {
-            ret = TLBRET_BADADDR;
-        }
-    } else if (address < (int32_t)KSEG3_BASE) {
+        ret = get_segctl_physical_address(env, physical, prot, real_address, rw,
+                                          access_type, mmu_idx,
+                                          env->CP0_SegCtl1, 0x1FFFFFFF);
+    } else if (address < KSEG3_BASE) {
         /* sseg (kseg2) */
-        if (supervisor_mode || kernel_mode) {
-            ret = env->tlb->map_address(env, physical, prot, real_address, rw, access_type);
-        } else {
-            ret = TLBRET_BADADDR;
-        }
+        ret = get_segctl_physical_address(env, physical, prot, real_address, rw,
+                                          access_type, mmu_idx,
+                                          env->CP0_SegCtl0 >> 16, 0x1FFFFFFF);
     } else {
         /* kseg3 */
         /* XXX: debug segment is not emulated */
-        if (kernel_mode) {
-            ret = env->tlb->map_address(env, physical, prot, real_address, rw, access_type);
-        } else {
-            ret = TLBRET_BADADDR;
-        }
+        ret = get_segctl_physical_address(env, physical, prot, real_address, rw,
+                                          access_type, mmu_idx,
+                                          env->CP0_SegCtl0, 0x1FFFFFFF);
     }
     return ret;
 }
 
 void cpu_mips_tlb_flush(CPUMIPSState *env)
 {
-    MIPSCPU *cpu = mips_env_get_cpu(env);
-
     /* Flush qemu's TLB and discard all shadowed entries.  */
-    tlb_flush(CPU(cpu));
+    tlb_flush(env_cpu(env));
     env->tlb->tlb_in_use = env->tlb->nb_tlb;
 }
 
@@ -290,7 +402,7 @@ void cpu_mips_store_status(CPUMIPSState *env, target_ulong val)
 #if defined(TARGET_MIPS64)
     if ((env->CP0_Status ^ old) & (old & (7 << CP0St_UX))) {
         /* Access to at least one of the 64-bit segments has been disabled */
-        cpu_mips_tlb_flush(env);
+        tlb_flush(env_cpu(env));
     }
 #endif
     if (env->CP0_Config3 & (1 << CP0C3_MT)) {
@@ -335,7 +447,7 @@ void cpu_mips_store_cause(CPUMIPSState *env, target_ulong val)
 static void raise_mmu_exception(CPUMIPSState *env, target_ulong address,
                                 int rw, int tlb_error)
 {
-    CPUState *cs = CPU(mips_env_get_cpu(env));
+    CPUState *cs = env_cpu(env);
     int exception = 0, error_code = 0;
 
     if (rw == MMU_INST_FETCH) {
@@ -392,7 +504,9 @@ static void raise_mmu_exception(CPUMIPSState *env, target_ulong address,
         break;
     }
     /* Raise exception */
-    env->CP0_BadVAddr = address;
+    if (!(env->hflags & MIPS_HFLAG_DM)) {
+        env->CP0_BadVAddr = address;
+    }
     env->CP0_Context = (env->CP0_Context & ~0x007fffff) |
                        ((address >> 9) & 0x007ffff0);
     env->CP0_EntryHi = (env->CP0_EntryHi & env->CP0_EntryHi_ASID_mask) |
@@ -413,43 +527,373 @@ static void raise_mmu_exception(CPUMIPSState *env, target_ulong address,
 hwaddr mips_cpu_get_phys_page_debug(CPUState *cs, vaddr addr)
 {
     MIPSCPU *cpu = MIPS_CPU(cs);
+    CPUMIPSState *env = &cpu->env;
     hwaddr phys_addr;
     int prot;
 
-    if (get_physical_address(&cpu->env, &phys_addr, &prot, addr, 0,
-                             ACCESS_INT) != 0) {
+    if (get_physical_address(env, &phys_addr, &prot, addr, 0, ACCESS_INT,
+                             cpu_mmu_index(env, false)) != 0) {
         return -1;
     }
     return phys_addr;
 }
 #endif
 
-int mips_cpu_handle_mmu_fault(CPUState *cs, vaddr address, int rw,
-                              int mmu_idx)
+#if !defined(CONFIG_USER_ONLY)
+#if !defined(TARGET_MIPS64)
+
+/*
+ * Perform hardware page table walk
+ *
+ * Memory accesses are performed using the KERNEL privilege level.
+ * Synchronous exceptions detected on memory accesses cause a silent exit
+ * from page table walking, resulting in a TLB or XTLB Refill exception.
+ *
+ * Implementations are not required to support page table walk memory
+ * accesses from mapped memory regions. When an unsupported access is
+ * attempted, a silent exit is taken, resulting in a TLB or XTLB Refill
+ * exception.
+ *
+ * Note that if an exception is caused by AddressTranslation or LoadMemory
+ * functions, the exception is not taken, a silent exit is taken,
+ * resulting in a TLB or XTLB Refill exception.
+ */
+
+static bool get_pte(CPUMIPSState *env, uint64_t vaddr, int entry_size,
+        uint64_t *pte)
+{
+    if ((vaddr & ((entry_size >> 3) - 1)) != 0) {
+        return false;
+    }
+    if (entry_size == 64) {
+        *pte = cpu_ldq_code(env, vaddr);
+    } else {
+        *pte = cpu_ldl_code(env, vaddr);
+    }
+    return true;
+}
+
+static uint64_t get_tlb_entry_layout(CPUMIPSState *env, uint64_t entry,
+        int entry_size, int ptei)
+{
+    uint64_t result = entry;
+    uint64_t rixi;
+    if (ptei > entry_size) {
+        ptei -= 32;
+    }
+    result >>= (ptei - 2);
+    rixi = result & 3;
+    result >>= 2;
+    result |= rixi << CP0EnLo_XI;
+    return result;
+}
+
+static int walk_directory(CPUMIPSState *env, uint64_t *vaddr,
+        int directory_index, bool *huge_page, bool *hgpg_directory_hit,
+        uint64_t *pw_entrylo0, uint64_t *pw_entrylo1)
+{
+    int dph = (env->CP0_PWCtl >> CP0PC_DPH) & 0x1;
+    int psn = (env->CP0_PWCtl >> CP0PC_PSN) & 0x3F;
+    int hugepg = (env->CP0_PWCtl >> CP0PC_HUGEPG) & 0x1;
+    int pf_ptew = (env->CP0_PWField >> CP0PF_PTEW) & 0x3F;
+    int ptew = (env->CP0_PWSize >> CP0PS_PTEW) & 0x3F;
+    int native_shift = (((env->CP0_PWSize >> CP0PS_PS) & 1) == 0) ? 2 : 3;
+    int directory_shift = (ptew > 1) ? -1 :
+            (hugepg && (ptew == 1)) ? native_shift + 1 : native_shift;
+    int leaf_shift = (ptew > 1) ? -1 :
+            (ptew == 1) ? native_shift + 1 : native_shift;
+    uint32_t direntry_size = 1 << (directory_shift + 3);
+    uint32_t leafentry_size = 1 << (leaf_shift + 3);
+    uint64_t entry;
+    uint64_t paddr;
+    int prot;
+    uint64_t lsb = 0;
+    uint64_t w = 0;
+
+    if (get_physical_address(env, &paddr, &prot, *vaddr, MMU_DATA_LOAD,
+                             ACCESS_INT, cpu_mmu_index(env, false)) !=
+                             TLBRET_MATCH) {
+        /* wrong base address */
+        return 0;
+    }
+    if (!get_pte(env, *vaddr, direntry_size, &entry)) {
+        return 0;
+    }
+
+    if ((entry & (1 << psn)) && hugepg) {
+        *huge_page = true;
+        *hgpg_directory_hit = true;
+        entry = get_tlb_entry_layout(env, entry, leafentry_size, pf_ptew);
+        w = directory_index - 1;
+        if (directory_index & 0x1) {
+            /* Generate adjacent page from same PTE for odd TLB page */
+            lsb = (1 << w) >> 6;
+            *pw_entrylo0 = entry & ~lsb; /* even page */
+            *pw_entrylo1 = entry | lsb; /* odd page */
+        } else if (dph) {
+            int oddpagebit = 1 << leaf_shift;
+            uint64_t vaddr2 = *vaddr ^ oddpagebit;
+            if (*vaddr & oddpagebit) {
+                *pw_entrylo1 = entry;
+            } else {
+                *pw_entrylo0 = entry;
+            }
+            if (get_physical_address(env, &paddr, &prot, vaddr2, MMU_DATA_LOAD,
+                                     ACCESS_INT, cpu_mmu_index(env, false)) !=
+                                     TLBRET_MATCH) {
+                return 0;
+            }
+            if (!get_pte(env, vaddr2, leafentry_size, &entry)) {
+                return 0;
+            }
+            entry = get_tlb_entry_layout(env, entry, leafentry_size, pf_ptew);
+            if (*vaddr & oddpagebit) {
+                *pw_entrylo0 = entry;
+            } else {
+                *pw_entrylo1 = entry;
+            }
+        } else {
+            return 0;
+        }
+        return 1;
+    } else {
+        *vaddr = entry;
+        return 2;
+    }
+}
+
+static bool page_table_walk_refill(CPUMIPSState *env, vaddr address, int rw,
+        int mmu_idx)
+{
+    int gdw = (env->CP0_PWSize >> CP0PS_GDW) & 0x3F;
+    int udw = (env->CP0_PWSize >> CP0PS_UDW) & 0x3F;
+    int mdw = (env->CP0_PWSize >> CP0PS_MDW) & 0x3F;
+    int ptw = (env->CP0_PWSize >> CP0PS_PTW) & 0x3F;
+    int ptew = (env->CP0_PWSize >> CP0PS_PTEW) & 0x3F;
+
+    /* Initial values */
+    bool huge_page = false;
+    bool hgpg_bdhit = false;
+    bool hgpg_gdhit = false;
+    bool hgpg_udhit = false;
+    bool hgpg_mdhit = false;
+
+    int32_t pw_pagemask = 0;
+    target_ulong pw_entryhi = 0;
+    uint64_t pw_entrylo0 = 0;
+    uint64_t pw_entrylo1 = 0;
+
+    /* Native pointer size */
+    /*For the 32-bit architectures, this bit is fixed to 0.*/
+    int native_shift = (((env->CP0_PWSize >> CP0PS_PS) & 1) == 0) ? 2 : 3;
+
+    /* Indices from PWField */
+    int pf_gdw = (env->CP0_PWField >> CP0PF_GDW) & 0x3F;
+    int pf_udw = (env->CP0_PWField >> CP0PF_UDW) & 0x3F;
+    int pf_mdw = (env->CP0_PWField >> CP0PF_MDW) & 0x3F;
+    int pf_ptw = (env->CP0_PWField >> CP0PF_PTW) & 0x3F;
+    int pf_ptew = (env->CP0_PWField >> CP0PF_PTEW) & 0x3F;
+
+    /* Indices computed from faulting address */
+    int gindex = (address >> pf_gdw) & ((1 << gdw) - 1);
+    int uindex = (address >> pf_udw) & ((1 << udw) - 1);
+    int mindex = (address >> pf_mdw) & ((1 << mdw) - 1);
+    int ptindex = (address >> pf_ptw) & ((1 << ptw) - 1);
+
+    /* Other HTW configs */
+    int hugepg = (env->CP0_PWCtl >> CP0PC_HUGEPG) & 0x1;
+
+    /* HTW Shift values (depend on entry size) */
+    int directory_shift = (ptew > 1) ? -1 :
+            (hugepg && (ptew == 1)) ? native_shift + 1 : native_shift;
+    int leaf_shift = (ptew > 1) ? -1 :
+            (ptew == 1) ? native_shift + 1 : native_shift;
+
+    /* Offsets into tables */
+    int goffset = gindex << directory_shift;
+    int uoffset = uindex << directory_shift;
+    int moffset = mindex << directory_shift;
+    int ptoffset0 = (ptindex >> 1) << (leaf_shift + 1);
+    int ptoffset1 = ptoffset0 | (1 << (leaf_shift));
+
+    uint32_t leafentry_size = 1 << (leaf_shift + 3);
+
+    /* Starting address - Page Table Base */
+    uint64_t vaddr = env->CP0_PWBase;
+
+    uint64_t dir_entry;
+    uint64_t paddr;
+    int prot;
+    int m;
+
+    if (!(env->CP0_Config3 & (1 << CP0C3_PW))) {
+        /* walker is unimplemented */
+        return false;
+    }
+    if (!(env->CP0_PWCtl & (1 << CP0PC_PWEN))) {
+        /* walker is disabled */
+        return false;
+    }
+    if (!(gdw > 0 || udw > 0 || mdw > 0)) {
+        /* no structure to walk */
+        return false;
+    }
+    if ((directory_shift == -1) || (leaf_shift == -1)) {
+        return false;
+    }
+
+    /* Global Directory */
+    if (gdw > 0) {
+        vaddr |= goffset;
+        switch (walk_directory(env, &vaddr, pf_gdw, &huge_page, &hgpg_gdhit,
+                               &pw_entrylo0, &pw_entrylo1))
+        {
+        case 0:
+            return false;
+        case 1:
+            goto refill;
+        case 2:
+        default:
+            break;
+        }
+    }
+
+    /* Upper directory */
+    if (udw > 0) {
+        vaddr |= uoffset;
+        switch (walk_directory(env, &vaddr, pf_udw, &huge_page, &hgpg_udhit,
+                               &pw_entrylo0, &pw_entrylo1))
+        {
+        case 0:
+            return false;
+        case 1:
+            goto refill;
+        case 2:
+        default:
+            break;
+        }
+    }
+
+    /* Middle directory */
+    if (mdw > 0) {
+        vaddr |= moffset;
+        switch (walk_directory(env, &vaddr, pf_mdw, &huge_page, &hgpg_mdhit,
+                               &pw_entrylo0, &pw_entrylo1))
+        {
+        case 0:
+            return false;
+        case 1:
+            goto refill;
+        case 2:
+        default:
+            break;
+        }
+    }
+
+    /* Leaf Level Page Table - First half of PTE pair */
+    vaddr |= ptoffset0;
+    if (get_physical_address(env, &paddr, &prot, vaddr, MMU_DATA_LOAD,
+                             ACCESS_INT, cpu_mmu_index(env, false)) !=
+                             TLBRET_MATCH) {
+        return false;
+    }
+    if (!get_pte(env, vaddr, leafentry_size, &dir_entry)) {
+        return false;
+    }
+    dir_entry = get_tlb_entry_layout(env, dir_entry, leafentry_size, pf_ptew);
+    pw_entrylo0 = dir_entry;
+
+    /* Leaf Level Page Table - Second half of PTE pair */
+    vaddr |= ptoffset1;
+    if (get_physical_address(env, &paddr, &prot, vaddr, MMU_DATA_LOAD,
+                             ACCESS_INT, cpu_mmu_index(env, false)) !=
+                             TLBRET_MATCH) {
+        return false;
+    }
+    if (!get_pte(env, vaddr, leafentry_size, &dir_entry)) {
+        return false;
+    }
+    dir_entry = get_tlb_entry_layout(env, dir_entry, leafentry_size, pf_ptew);
+    pw_entrylo1 = dir_entry;
+
+refill:
+
+    m = (1 << pf_ptw) - 1;
+
+    if (huge_page) {
+        switch (hgpg_bdhit << 3 | hgpg_gdhit << 2 | hgpg_udhit << 1 |
+                hgpg_mdhit)
+        {
+        case 4:
+            m = (1 << pf_gdw) - 1;
+            if (pf_gdw & 1) {
+                m >>= 1;
+            }
+            break;
+        case 2:
+            m = (1 << pf_udw) - 1;
+            if (pf_udw & 1) {
+                m >>= 1;
+            }
+            break;
+        case 1:
+            m = (1 << pf_mdw) - 1;
+            if (pf_mdw & 1) {
+                m >>= 1;
+            }
+            break;
+        }
+    }
+    pw_pagemask = m >> 12;
+    update_pagemask(env, pw_pagemask << 13, &pw_pagemask);
+    pw_entryhi = (address & ~0x1fff) | (env->CP0_EntryHi & 0xFF);
+    {
+        target_ulong tmp_entryhi = env->CP0_EntryHi;
+        int32_t tmp_pagemask = env->CP0_PageMask;
+        uint64_t tmp_entrylo0 = env->CP0_EntryLo0;
+        uint64_t tmp_entrylo1 = env->CP0_EntryLo1;
+
+        env->CP0_EntryHi = pw_entryhi;
+        env->CP0_PageMask = pw_pagemask;
+        env->CP0_EntryLo0 = pw_entrylo0;
+        env->CP0_EntryLo1 = pw_entrylo1;
+
+        /*
+         * The hardware page walker inserts a page into the TLB in a manner
+         * identical to a TLBWR instruction as executed by the software refill
+         * handler.
+         */
+        r4k_helper_tlbwr(env);
+
+        env->CP0_EntryHi = tmp_entryhi;
+        env->CP0_PageMask = tmp_pagemask;
+        env->CP0_EntryLo0 = tmp_entrylo0;
+        env->CP0_EntryLo1 = tmp_entrylo1;
+    }
+    return true;
+}
+#endif
+#endif
+
+bool mips_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
+                       MMUAccessType access_type, int mmu_idx,
+                       bool probe, uintptr_t retaddr)
 {
     MIPSCPU *cpu = MIPS_CPU(cs);
     CPUMIPSState *env = &cpu->env;
 #if !defined(CONFIG_USER_ONLY)
     hwaddr physical;
     int prot;
-    int access_type;
+    int mips_access_type;
 #endif
-    int ret = 0;
-
-#if 0
-    log_cpu_state(cs, 0);
-#endif
-    qemu_log_mask(CPU_LOG_MMU,
-              "%s pc " TARGET_FMT_lx " ad %" VADDR_PRIx " rw %d mmu_idx %d\n",
-              __func__, env->active_tc.PC, address, rw, mmu_idx);
+    int ret = TLBRET_BADADDR;
 
     /* data access */
 #if !defined(CONFIG_USER_ONLY)
-    /* XXX: put correct access by using cpu_restore_state()
-       correctly */
-    access_type = ACCESS_INT;
-    ret = get_physical_address(env, &physical, &prot,
-                               address, rw, access_type);
+    /* XXX: put correct access by using cpu_restore_state() correctly */
+    mips_access_type = ACCESS_INT;
+    ret = get_physical_address(env, &physical, &prot, address,
+                               access_type, mips_access_type, mmu_idx);
     switch (ret) {
     case TLBRET_MATCH:
         qemu_log_mask(CPU_LOG_MMU,
@@ -464,20 +908,43 @@ int mips_cpu_handle_mmu_fault(CPUState *cs, vaddr address, int rw,
     }
     if (ret == TLBRET_MATCH) {
         tlb_set_page(cs, address & TARGET_PAGE_MASK,
-                     physical & TARGET_PAGE_MASK, prot | PAGE_EXEC,
+                     physical & TARGET_PAGE_MASK, prot,
                      mmu_idx, TARGET_PAGE_SIZE);
-        ret = 0;
-    } else if (ret < 0)
-#endif
-    {
-        raise_mmu_exception(env, address, rw, ret);
-        ret = 1;
+        return true;
     }
+#if !defined(TARGET_MIPS64)
+    if ((ret == TLBRET_NOMATCH) && (env->tlb->nb_tlb > 1)) {
+        /*
+         * Memory reads during hardware page table walking are performed
+         * as if they were kernel-mode load instructions.
+         */
+        int mode = (env->hflags & MIPS_HFLAG_KSU);
+        bool ret_walker;
+        env->hflags &= ~MIPS_HFLAG_KSU;
+        ret_walker = page_table_walk_refill(env, address, access_type, mmu_idx);
+        env->hflags |= mode;
+        if (ret_walker) {
+            ret = get_physical_address(env, &physical, &prot, address,
+                                       access_type, mips_access_type, mmu_idx);
+            if (ret == TLBRET_MATCH) {
+                tlb_set_page(cs, address & TARGET_PAGE_MASK,
+                             physical & TARGET_PAGE_MASK, prot,
+                             mmu_idx, TARGET_PAGE_SIZE);
+                return true;
+            }
+        }
+    }
+#endif
+    if (probe) {
+        return false;
+    }
+#endif
 
-    return ret;
+    raise_mmu_exception(env, address, access_type, ret);
+    do_raise_exception_err(env, cs->exception_index, env->error_code, retaddr);
 }
 
-#if !defined(CONFIG_USER_ONLY)
+#ifndef CONFIG_USER_ONLY
 hwaddr cpu_mips_translate_address(CPUMIPSState *env, target_ulong address, int rw)
 {
     hwaddr physical;
@@ -487,8 +954,8 @@ hwaddr cpu_mips_translate_address(CPUMIPSState *env, target_ulong address, int r
 
     /* data access */
     access_type = ACCESS_INT;
-    ret = get_physical_address(env, &physical, &prot,
-                               address, rw, access_type);
+    ret = get_physical_address(env, &physical, &prot, address, rw, access_type,
+                               cpu_mmu_index(env, false));
     if (ret != TLBRET_MATCH) {
         raise_mmu_exception(env, address, rw, ret);
         return -1LL;
@@ -569,6 +1036,22 @@ static void set_hflags_for_handler (CPUMIPSState *env)
 
 static inline void set_badinstr_registers(CPUMIPSState *env)
 {
+    if (env->insn_flags & ISA_NANOMIPS32) {
+        if (env->CP0_Config3 & (1 << CP0C3_BI)) {
+            uint32_t instr = (cpu_lduw_code(env, env->active_tc.PC)) << 16;
+            if ((instr & 0x10000000) == 0) {
+                instr |= cpu_lduw_code(env, env->active_tc.PC + 2);
+            }
+            env->CP0_BadInstr = instr;
+
+            if ((instr & 0xFC000000) == 0x60000000) {
+                instr = cpu_lduw_code(env, env->active_tc.PC + 4) << 16;
+                env->CP0_BadInstrX = instr;
+            }
+        }
+        return;
+    }
+
     if (env->hflags & MIPS_HFLAG_M16) {
         /* TODO: add BadInstr support for microMIPS */
         return;
@@ -627,6 +1110,8 @@ void mips_cpu_do_interrupt(CPUState *cs)
         goto set_DEPC;
     case EXCP_DBp:
         env->CP0_Debug |= 1 << CP0DB_DBp;
+        /* Setup DExcCode - SDBBP instruction */
+        env->CP0_Debug = (env->CP0_Debug & ~(0x1fULL << CP0DB_DEC)) | 9 << CP0DB_DEC;
         goto set_DEPC;
     case EXCP_DDBS:
         env->CP0_Debug |= 1 << CP0DB_DDBS;
@@ -719,15 +1204,17 @@ void mips_cpu_do_interrupt(CPUState *cs)
 #if defined(TARGET_MIPS64)
             int R = env->CP0_BadVAddr >> 62;
             int UX = (env->CP0_Status & (1 << CP0St_UX)) != 0;
-            int SX = (env->CP0_Status & (1 << CP0St_SX)) != 0;
             int KX = (env->CP0_Status & (1 << CP0St_KX)) != 0;
 
-            if (((R == 0 && UX) || (R == 1 && SX) || (R == 3 && KX)) &&
-                (!(env->insn_flags & (INSN_LOONGSON2E | INSN_LOONGSON2F))))
+            if ((R != 0 || UX) && (R != 3 || KX) &&
+                (!(env->insn_flags & (INSN_LOONGSON2E | INSN_LOONGSON2F)))) {
                 offset = 0x080;
-            else
+            } else {
 #endif
                 offset = 0x000;
+#if defined(TARGET_MIPS64)
+            }
+#endif
         }
         goto set_EPC;
     case EXCP_TLBS:
@@ -738,15 +1225,17 @@ void mips_cpu_do_interrupt(CPUState *cs)
 #if defined(TARGET_MIPS64)
             int R = env->CP0_BadVAddr >> 62;
             int UX = (env->CP0_Status & (1 << CP0St_UX)) != 0;
-            int SX = (env->CP0_Status & (1 << CP0St_SX)) != 0;
             int KX = (env->CP0_Status & (1 << CP0St_KX)) != 0;
 
-            if (((R == 0 && UX) || (R == 1 && SX) || (R == 3 && KX)) &&
-                (!(env->insn_flags & (INSN_LOONGSON2E | INSN_LOONGSON2F))))
+            if ((R != 0 || UX) && (R != 3 || KX) &&
+                (!(env->insn_flags & (INSN_LOONGSON2E | INSN_LOONGSON2F)))) {
                 offset = 0x080;
-            else
+            } else {
 #endif
                 offset = 0x000;
+#if defined(TARGET_MIPS64)
+            }
+#endif
         }
         goto set_EPC;
     case EXCP_AdEL:
@@ -829,11 +1318,7 @@ void mips_cpu_do_interrupt(CPUState *cs)
         goto set_EPC;
     case EXCP_CACHE:
         cause = 30;
-        if (env->CP0_Status & (1 << CP0St_BEV)) {
-            offset = 0x100;
-        } else {
-            offset = 0x20000100;
-        }
+        offset = 0x100;
  set_EPC:
         if (!(env->CP0_Status & (1 << CP0St_EXL))) {
             env->CP0_EPC = exception_resume_pc(env);
@@ -859,9 +1344,14 @@ void mips_cpu_do_interrupt(CPUState *cs)
         env->hflags &= ~MIPS_HFLAG_BMASK;
         if (env->CP0_Status & (1 << CP0St_BEV)) {
             env->active_tc.PC = env->exception_base + 0x200;
+        } else if (cause == 30 && !(env->CP0_Config3 & (1 << CP0C3_SC) &&
+                                    env->CP0_Config5 & (1 << CP0C5_CV))) {
+            /* Force KSeg1 for cache errors */
+            env->active_tc.PC = KSEG1_BASE | (env->CP0_EBase & 0x1FFFF000);
         } else {
-            env->active_tc.PC = (int32_t)(env->CP0_EBase & ~0x3ff);
+            env->active_tc.PC = env->CP0_EBase & ~0xfff;
         }
+
         env->active_tc.PC += offset;
         set_hflags_for_handler(env);
         env->CP0_Cause = (env->CP0_Cause & ~(0x1f << CP0Ca_EC)) | (cause << CP0Ca_EC);
@@ -902,8 +1392,7 @@ bool mips_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 #if !defined(CONFIG_USER_ONLY)
 void r4k_invalidate_tlb (CPUMIPSState *env, int idx, int use_extra)
 {
-    MIPSCPU *cpu = mips_env_get_cpu(env);
-    CPUState *cs;
+    CPUState *cs = env_cpu(env);
     r4k_tlb_t *tlb;
     target_ulong addr;
     target_ulong end;
@@ -929,7 +1418,6 @@ void r4k_invalidate_tlb (CPUMIPSState *env, int idx, int use_extra)
     /* 1k pages are not supported. */
     mask = tlb->PageMask | ~(TARGET_PAGE_MASK << 1);
     if (tlb->V0) {
-        cs = CPU(cpu);
         addr = tlb->VPN & ~mask;
 #if defined(TARGET_MIPS64)
         if (addr >= (0xFFFFFFFF80000000ULL & env->SEGMask)) {
@@ -943,7 +1431,6 @@ void r4k_invalidate_tlb (CPUMIPSState *env, int idx, int use_extra)
         }
     }
     if (tlb->V1) {
-        cs = CPU(cpu);
         addr = (tlb->VPN & ~mask) | ((mask >> 1) + 1);
 #if defined(TARGET_MIPS64)
         if (addr >= (0xFFFFFFFF80000000ULL & env->SEGMask)) {
@@ -964,14 +1451,44 @@ void QEMU_NORETURN do_raise_exception_err(CPUMIPSState *env,
                                           int error_code,
                                           uintptr_t pc)
 {
-    CPUState *cs = CPU(mips_env_get_cpu(env));
+    CPUState *cs = env_cpu(env);
 
-    if (exception < EXCP_SC) {
-        qemu_log_mask(CPU_LOG_INT, "%s: %d %d\n",
-                      __func__, exception, error_code);
-    }
+    qemu_log_mask(CPU_LOG_INT, "%s: %d %d\n",
+                  __func__, exception, error_code);
     cs->exception_index = exception;
     env->error_code = error_code;
 
     cpu_loop_exit_restore(cs, pc);
+}
+
+static void mips_cpu_add_definition(gpointer data, gpointer user_data)
+{
+    ObjectClass *oc = data;
+    CpuDefinitionInfoList **cpu_list = user_data;
+    CpuDefinitionInfoList *entry;
+    CpuDefinitionInfo *info;
+    const char *typename;
+
+    typename = object_class_get_name(oc);
+    info = g_malloc0(sizeof(*info));
+    info->name = g_strndup(typename,
+                           strlen(typename) - strlen("-" TYPE_MIPS_CPU));
+    info->q_typename = g_strdup(typename);
+
+    entry = g_malloc0(sizeof(*entry));
+    entry->value = info;
+    entry->next = *cpu_list;
+    *cpu_list = entry;
+}
+
+CpuDefinitionInfoList *qmp_query_cpu_definitions(Error **errp)
+{
+    CpuDefinitionInfoList *cpu_list = NULL;
+    GSList *list;
+
+    list = object_class_get_list(TYPE_MIPS_CPU, false);
+    g_slist_foreach(list, mips_cpu_add_definition, &cpu_list);
+    g_slist_free(list);
+
+    return cpu_list;
 }

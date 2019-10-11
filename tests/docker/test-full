@@ -1,4 +1,4 @@
-#!/bin/bash -e
+#!/bin/bash
 #
 # Compile all the targets.
 #
@@ -15,5 +15,4 @@
 
 cd "$BUILD_DIR"
 
-build_qemu
-make check $MAKEFLAGS
+build_qemu && check_qemu && install_qemu

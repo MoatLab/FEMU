@@ -15,23 +15,11 @@
 #include "qemu-common.h"
 #include "qemu/host-utils.h"
 
-typedef QTAILQ_HEAD(MemList, MemBlock) MemList;
-
 typedef struct MemBlock {
     QTAILQ_ENTRY(MemBlock) MLIST_ENTNAME;
     uint64_t size;
     uint64_t addr;
 } MemBlock;
-
-struct QGuestAllocator {
-    QAllocOpts opts;
-    uint64_t start;
-    uint64_t end;
-    uint32_t page_size;
-
-    MemList *used;
-    MemList *free;
-};
 
 #define DEFAULT_PAGE_SIZE 4096
 
@@ -104,7 +92,7 @@ static void mlist_coalesce(MemList *head, MemBlock *node)
 
     do {
         merge = 0;
-        left = QTAILQ_PREV(node, MemList, MLIST_ENTNAME);
+        left = QTAILQ_PREV(node, MLIST_ENTNAME);
         right = QTAILQ_NEXT(node, MLIST_ENTNAME);
 
         /* clowns to the left of me */
@@ -129,7 +117,7 @@ static MemBlock *mlist_new(uint64_t addr, uint64_t size)
     if (!size) {
         return NULL;
     }
-    block = g_malloc0(sizeof(MemBlock));
+    block = g_new0(MemBlock, 1);
 
     block->addr = addr;
     block->size = size;
@@ -225,7 +213,7 @@ static void mlist_free(QGuestAllocator *s, uint64_t addr)
  * Mostly for valgrind happiness, but it does offer
  * a chokepoint for debugging guest memory leaks, too.
  */
-void alloc_uninit(QGuestAllocator *allocator)
+void alloc_destroy(QGuestAllocator *allocator)
 {
     MemBlock *node;
     MemBlock *tmp;
@@ -261,7 +249,6 @@ void alloc_uninit(QGuestAllocator *allocator)
 
     g_free(allocator->used);
     g_free(allocator->free);
-    g_free(allocator);
 }
 
 uint64_t guest_alloc(QGuestAllocator *allocator, size_t size)
@@ -297,42 +284,25 @@ void guest_free(QGuestAllocator *allocator, uint64_t addr)
     }
 }
 
-QGuestAllocator *alloc_init(uint64_t start, uint64_t end)
+void alloc_init(QGuestAllocator *s, QAllocOpts opts,
+                uint64_t start, uint64_t end,
+                size_t page_size)
 {
-    QGuestAllocator *s = g_malloc0(sizeof(*s));
     MemBlock *node;
 
+    s->opts = opts;
     s->start = start;
     s->end = end;
 
-    s->used = g_malloc(sizeof(MemList));
-    s->free = g_malloc(sizeof(MemList));
+    s->used = g_new(MemList, 1);
+    s->free = g_new(MemList, 1);
     QTAILQ_INIT(s->used);
     QTAILQ_INIT(s->free);
 
     node = mlist_new(s->start, s->end - s->start);
     QTAILQ_INSERT_HEAD(s->free, node, MLIST_ENTNAME);
 
-    s->page_size = DEFAULT_PAGE_SIZE;
-
-    return s;
-}
-
-QGuestAllocator *alloc_init_flags(QAllocOpts opts,
-                                  uint64_t start, uint64_t end)
-{
-    QGuestAllocator *s = alloc_init(start, end);
-    s->opts = opts;
-    return s;
-}
-
-void alloc_set_page_size(QGuestAllocator *allocator, size_t page_size)
-{
-    /* Can't alter the page_size for an allocator in-use */
-    g_assert(QTAILQ_EMPTY(allocator->used));
-
-    g_assert(is_power_of_2(page_size));
-    allocator->page_size = page_size;
+    s->page_size = page_size;
 }
 
 void alloc_set_flags(QGuestAllocator *allocator, QAllocOpts opts)

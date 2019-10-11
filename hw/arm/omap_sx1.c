@@ -31,11 +31,11 @@
 #include "ui/console.h"
 #include "hw/arm/omap.h"
 #include "hw/boards.h"
-#include "hw/arm/arm.h"
+#include "hw/arm/boot.h"
 #include "hw/block/flash.h"
-#include "sysemu/block-backend.h"
 #include "sysemu/qtest.h"
 #include "exec/address-spaces.h"
+#include "cpu.h"
 
 /*****************************************************************************/
 /* Siemens SX1 Cellphone V1 */
@@ -120,12 +120,11 @@ static void sx1_init(MachineState *machine, const int version)
     }
 
     mpu = omap310_mpu_init(address_space, sx1_binfo.ram_size,
-                           machine->cpu_model);
+                           machine->cpu_type);
 
     /* External Flash (EMIFS) */
     memory_region_init_ram(flash, NULL, "omap_sx1.flash0-0", flash_size,
                            &error_fatal);
-    vmstate_register_ram_global(flash);
     memory_region_set_readonly(flash, true);
     memory_region_add_subregion(address_space, OMAP_CS0_BASE, flash);
 
@@ -153,11 +152,10 @@ static void sx1_init(MachineState *machine, const int version)
 #endif
 
     if ((dinfo = drive_get(IF_PFLASH, 0, fl_idx)) != NULL) {
-        if (!pflash_cfi01_register(OMAP_CS0_BASE, NULL,
+        if (!pflash_cfi01_register(OMAP_CS0_BASE,
                                    "omap_sx1.flash0-1", flash_size,
                                    blk_by_legacy_dinfo(dinfo),
-                                   sector_size, flash_size / sector_size,
-                                   4, 0, 0, 0, 0, be)) {
+                                   sector_size, 4, 0, 0, 0, 0, be)) {
             fprintf(stderr, "qemu: Error registering flash memory %d.\n",
                            fl_idx);
         }
@@ -167,9 +165,8 @@ static void sx1_init(MachineState *machine, const int version)
     if ((version == 1) &&
             (dinfo = drive_get(IF_PFLASH, 0, fl_idx)) != NULL) {
         MemoryRegion *flash_1 = g_new(MemoryRegion, 1);
-        memory_region_init_ram(flash_1, NULL, "omap_sx1.flash1-0", flash1_size,
-                               &error_fatal);
-        vmstate_register_ram_global(flash_1);
+        memory_region_init_ram(flash_1, NULL, "omap_sx1.flash1-0",
+                               flash1_size, &error_fatal);
         memory_region_set_readonly(flash_1, true);
         memory_region_add_subregion(address_space, OMAP_CS1_BASE, flash_1);
 
@@ -178,11 +175,10 @@ static void sx1_init(MachineState *machine, const int version)
         memory_region_add_subregion(address_space,
                                 OMAP_CS1_BASE + flash1_size, &cs[1]);
 
-        if (!pflash_cfi01_register(OMAP_CS1_BASE, NULL,
+        if (!pflash_cfi01_register(OMAP_CS1_BASE,
                                    "omap_sx1.flash1-1", flash1_size,
                                    blk_by_legacy_dinfo(dinfo),
-                                   sector_size, flash1_size / sector_size,
-                                   4, 0, 0, 0, 0, be)) {
+                                   sector_size, 4, 0, 0, 0, 0, be)) {
             fprintf(stderr, "qemu: Error registering flash memory %d.\n",
                            fl_idx);
         }
@@ -195,7 +191,7 @@ static void sx1_init(MachineState *machine, const int version)
     }
 
     if (!machine->kernel_filename && !fl_idx && !qtest_enabled()) {
-        fprintf(stderr, "Kernel or Flash image must be specified\n");
+        error_report("Kernel or Flash image must be specified");
         exit(1);
     }
 
@@ -225,6 +221,8 @@ static void sx1_machine_v2_class_init(ObjectClass *oc, void *data)
 
     mc->desc = "Siemens SX1 (OMAP310) V2";
     mc->init = sx1_init_v2;
+    mc->ignore_memory_transaction_failures = true;
+    mc->default_cpu_type = ARM_CPU_TYPE_NAME("ti925t");
 }
 
 static const TypeInfo sx1_machine_v2_type = {
@@ -239,6 +237,8 @@ static void sx1_machine_v1_class_init(ObjectClass *oc, void *data)
 
     mc->desc = "Siemens SX1 (OMAP310) V1";
     mc->init = sx1_init_v1;
+    mc->ignore_memory_transaction_failures = true;
+    mc->default_cpu_type = ARM_CPU_TYPE_NAME("ti925t");
 }
 
 static const TypeInfo sx1_machine_v1_type = {

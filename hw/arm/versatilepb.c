@@ -9,17 +9,15 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
-#include "qemu-common.h"
 #include "cpu.h"
 #include "hw/sysbus.h"
-#include "hw/arm/arm.h"
-#include "hw/devices.h"
+#include "hw/arm/boot.h"
+#include "hw/net/smc91c111.h"
 #include "net/net.h"
 #include "sysemu/sysemu.h"
 #include "hw/pci/pci.h"
 #include "hw/i2c/i2c.h"
 #include "hw/boards.h"
-#include "sysemu/block-backend.h"
 #include "exec/address-spaces.h"
 #include "hw/block/flash.h"
 #include "qemu/error-report.h"
@@ -181,7 +179,6 @@ static struct arm_boot_info versatile_binfo;
 
 static void versatile_init(MachineState *machine, int board_id)
 {
-    ObjectClass *cpu_oc;
     Object *cpuobj;
     ARMCPU *cpu;
     MemoryRegion *sysmem = get_system_memory();
@@ -207,17 +204,7 @@ static void versatile_init(MachineState *machine, int board_id)
         exit(1);
     }
 
-    if (!machine->cpu_model) {
-        machine->cpu_model = "arm926";
-    }
-
-    cpu_oc = cpu_class_by_name(TYPE_ARM_CPU, machine->cpu_model);
-    if (!cpu_oc) {
-        fprintf(stderr, "Unable to find CPU definition\n");
-        exit(1);
-    }
-
-    cpuobj = object_new(object_class_get_name(cpu_oc));
+    cpuobj = object_new(machine->cpu_type);
 
     /* By default ARM1176 CPUs have EL3 enabled.  This board does not
      * currently support EL3 so the CPU EL3 property is disabled before
@@ -290,16 +277,24 @@ static void versatile_init(MachineState *machine, int board_id)
     }
     n = drive_get_max_bus(IF_SCSI);
     while (n >= 0) {
-        lsi53c895a_create(pci_bus);
+        dev = DEVICE(pci_create_simple(pci_bus, -1, "lsi53c895a"));
+        lsi53c8xx_handle_legacy_cmdline(dev);
         n--;
     }
 
-    pl011_create(0x101f1000, pic[12], serial_hds[0]);
-    pl011_create(0x101f2000, pic[13], serial_hds[1]);
-    pl011_create(0x101f3000, pic[14], serial_hds[2]);
-    pl011_create(0x10009000, sic[6], serial_hds[3]);
+    pl011_create(0x101f1000, pic[12], serial_hd(0));
+    pl011_create(0x101f2000, pic[13], serial_hd(1));
+    pl011_create(0x101f3000, pic[14], serial_hd(2));
+    pl011_create(0x10009000, sic[6], serial_hd(3));
 
-    sysbus_create_simple("pl080", 0x10130000, pic[17]);
+    dev = qdev_create(NULL, "pl080");
+    object_property_set_link(OBJECT(dev), OBJECT(sysmem), "downstream",
+                             &error_fatal);
+    qdev_init_nofail(dev);
+    busdev = SYS_BUS_DEVICE(dev);
+    sysbus_mmio_map(busdev, 0, 0x10130000);
+    sysbus_connect_irq(busdev, 0, pic[17]);
+
     sysbus_create_simple("sp804", 0x101e2000, pic[4]);
     sysbus_create_simple("sp804", 0x101e3000, pic[5]);
 
@@ -369,11 +364,10 @@ static void versatile_init(MachineState *machine, int board_id)
     /* 0x34000000 NOR Flash */
 
     dinfo = drive_get(IF_PFLASH, 0, 0);
-    if (!pflash_cfi01_register(VERSATILE_FLASH_ADDR, NULL, "versatile.flash",
+    if (!pflash_cfi01_register(VERSATILE_FLASH_ADDR, "versatile.flash",
                           VERSATILE_FLASH_SIZE,
                           dinfo ? blk_by_legacy_dinfo(dinfo) : NULL,
                           VERSATILE_FLASH_SECT_SIZE,
-                          VERSATILE_FLASH_SIZE / VERSATILE_FLASH_SECT_SIZE,
                           4, 0x0089, 0x0018, 0x0000, 0x0, 0)) {
         fprintf(stderr, "qemu: Error registering flash memory.\n");
     }
@@ -403,6 +397,8 @@ static void versatilepb_class_init(ObjectClass *oc, void *data)
     mc->desc = "ARM Versatile/PB (ARM926EJ-S)";
     mc->init = vpb_init;
     mc->block_default_type = IF_SCSI;
+    mc->ignore_memory_transaction_failures = true;
+    mc->default_cpu_type = ARM_CPU_TYPE_NAME("arm926");
 }
 
 static const TypeInfo versatilepb_type = {
@@ -418,6 +414,8 @@ static void versatileab_class_init(ObjectClass *oc, void *data)
     mc->desc = "ARM Versatile/AB (ARM926EJ-S)";
     mc->init = vab_init;
     mc->block_default_type = IF_SCSI;
+    mc->ignore_memory_transaction_failures = true;
+    mc->default_cpu_type = ARM_CPU_TYPE_NAME("arm926");
 }
 
 static const TypeInfo versatileab_type = {

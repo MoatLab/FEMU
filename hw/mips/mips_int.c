@@ -21,6 +21,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/main-loop.h"
 #include "hw/hw.h"
 #include "hw/mips/cpudevs.h"
 #include "cpu.h"
@@ -32,9 +33,16 @@ static void cpu_mips_irq_request(void *opaque, int irq, int level)
     MIPSCPU *cpu = opaque;
     CPUMIPSState *env = &cpu->env;
     CPUState *cs = CPU(cpu);
+    bool locked = false;
 
     if (irq < 0 || irq > 7)
         return;
+
+    /* Make sure locking works even if BQL is already held by the caller */
+    if (!qemu_mutex_iothread_locked()) {
+        locked = true;
+        qemu_mutex_lock_iothread();
+    }
 
     if (level) {
         env->CP0_Cause |= 1 << (irq + CP0Ca_IP);
@@ -56,6 +64,10 @@ static void cpu_mips_irq_request(void *opaque, int irq, int level)
     } else {
         cpu_reset_interrupt(cs, CPU_INTERRUPT_HARD);
     }
+
+    if (locked) {
+        qemu_mutex_unlock_iothread();
+    }
 }
 
 void cpu_mips_irq_init_cpu(MIPSCPU *cpu)
@@ -64,7 +76,7 @@ void cpu_mips_irq_init_cpu(MIPSCPU *cpu)
     qemu_irq *qi;
     int i;
 
-    qi = qemu_allocate_irqs(cpu_mips_irq_request, mips_env_get_cpu(env), 8);
+    qi = qemu_allocate_irqs(cpu_mips_irq_request, env_archcpu(env), 8);
     for (i = 0; i < 8; i++) {
         env->irq[i] = qi[i];
     }

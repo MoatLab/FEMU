@@ -19,13 +19,14 @@
 #define IMX_SERIAL_H
 
 #include "hw/sysbus.h"
-#include "sysemu/char.h"
+#include "chardev/char-fe.h"
 
 #define TYPE_IMX_SERIAL "imx.serial"
 #define IMX_SERIAL(obj) OBJECT_CHECK(IMXSerialState, (obj), TYPE_IMX_SERIAL)
 
 #define URXD_CHARRDY    (1<<15)   /* character read is valid */
 #define URXD_ERR        (1<<14)   /* Character has error */
+#define URXD_FRMERR     (1<<12)   /* Character has frame error */
 #define URXD_BRK        (1<<11)   /* Break received */
 
 #define USR1_PARTYER    (1<<15)   /* Parity Error */
@@ -67,6 +68,9 @@
 #define UCR2_RXEN       (1<<1)    /* Receiver enable */
 #define UCR2_SRST       (1<<0)    /* Reset complete */
 
+#define UCR4_DREN       BIT(0)    /* Receive Data Ready interrupt enable */
+#define UCR4_TCEN       BIT(3)    /* TX complete interrupt enable */
+
 #define UTS1_TXEMPTY    (1<<6)
 #define UTS1_RXEMPTY    (1<<5)
 #define UTS1_TXFULL     (1<<4)
@@ -95,6 +99,7 @@ typedef struct IMXSerialState {
     uint32_t ubmr;
     uint32_t ubrc;
     uint32_t ucr3;
+    uint32_t ucr4;
 
     qemu_irq irq;
     CharBackend chr;

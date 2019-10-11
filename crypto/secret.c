@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,6 +24,7 @@
 #include "qapi/error.h"
 #include "qom/object_interfaces.h"
 #include "qemu/base64.h"
+#include "qemu/module.h"
 #include "trace.h"
 
 
@@ -378,7 +379,7 @@ qcrypto_secret_class_init(ObjectClass *oc, void *data)
                                    NULL);
     object_class_property_add_enum(oc, "format",
                                    "QCryptoSecretFormat",
-                                   QCryptoSecretFormat_lookup,
+                                   &QCryptoSecretFormat_lookup,
                                    qcrypto_secret_prop_get_format,
                                    qcrypto_secret_prop_set_format,
                                    NULL);

@@ -1,5 +1,8 @@
 /* from asm/termbits.h */
 
+#ifndef LINUX_USER_MIPS_TERMBITS_H
+#define LINUX_USER_MIPS_TERMBITS_H
+
 #define TARGET_NCCS 23
 
 struct target_termios {
@@ -233,6 +236,7 @@ struct target_termios {
 #define TARGET_TIOCGPKT         TARGET_IOR('T', 0x38, int)
 #define TARGET_TIOCGPTLCK       TARGET_IOR('T', 0x39, int)
 #define TARGET_TIOCGEXCL        TARGET_IOR('T', 0x40, int)
+#define TARGET_TIOCGPTPEER      TARGET_IO('T', 0x41)
 
 /* I hope the range from 0x5480 on is free ... */
 #define TARGET_TIOCSCTTY	0x5480		/* become controlling tty */
@@ -255,3 +259,5 @@ struct target_termios {
 #define TARGET_TIOCGICOUNT     0x5492 /* read serial port inline interrupt counts */
 #define TARGET_TIOCGHAYESESP	0x5493 /* Get Hayes ESP configuration */
 #define TARGET_TIOCSHAYESESP	0x5494 /* Set Hayes ESP configuration */
+
+#endif

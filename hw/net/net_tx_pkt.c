@@ -205,7 +205,7 @@ static bool net_tx_pkt_parse_headers(struct NetTxPkt *pkt)
             return false;
         }
 
-        pkt->l4proto = ((struct ip_header *) l3_hdr->iov_base)->ip_p;
+        pkt->l4proto = IP_HDR_GET_P(l3_hdr->iov_base);
 
         if (IP_HDR_GET_LEN(l3_hdr->iov_base) != sizeof(struct ip_header)) {
             /* copy optional IPv4 header data if any*/
@@ -486,7 +486,7 @@ static void net_tx_pkt_do_sw_csum(struct NetTxPkt *pkt)
         net_checksum_add_iov(iov, iov_len, pkt->virt_hdr.csum_start, csl, cso);
 
     /* Put the checksum obtained into the packet */
-    csum = cpu_to_be16(net_checksum_finish(csum_cntr));
+    csum = cpu_to_be16(net_checksum_finish_nozero(csum_cntr));
     iov_from_buf(iov, iov_len, csum_offset, &csum, sizeof csum);
 }
 

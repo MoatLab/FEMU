@@ -3,6 +3,7 @@
  *
  * Copyright (C) 2009 Hewlett-Packard Development Company, L.P.
  * Copyright (C) 2013 Red Hat, Inc.
+ * Copyright (c) 2015,2016 Corey Minyard, MontaVista Software, LLC
  *
  * Authors:
  *  Alex Williamson <alex.williamson@hp.com>
@@ -63,6 +64,18 @@ extern unsigned smbios_table_cnt;
         }                                                                 \
     } while (0)
 
+#define SMBIOS_TABLE_SET_STR_LIST(tbl_type, value)                        \
+    do {                                                                  \
+        int len = (value != NULL) ? strlen(value) + 1 : 0;                \
+        if (len > 1) {                                                    \
+            smbios_tables = g_realloc(smbios_tables,                      \
+                                      smbios_tables_len + len);           \
+            memcpy(smbios_tables + smbios_tables_len, value, len);        \
+            smbios_tables_len += len;                                     \
+            ++str_index;                                                  \
+        }                                                                 \
+    } while (0)
+
 #define SMBIOS_BUILD_TABLE_POST                                           \
     do {                                                                  \
         size_t term_cnt, t_size;                                          \
@@ -83,5 +96,8 @@ extern unsigned smbios_table_cnt;
         /* update smbios element count */                                 \
         smbios_table_cnt++;                                               \
     } while (0)
+
+/* IPMI SMBIOS firmware handling */
+void smbios_build_type_38_table(void);
 
 #endif /* QEMU_SMBIOS_BUILD_H */

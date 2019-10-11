@@ -27,11 +27,13 @@
  */
 
 #include "qemu/osdep.h"
-#include "qemu-common.h"
 #include "qemu/rcu.h"
 #include "qemu/atomic.h"
 #include "qemu/thread.h"
 #include "qemu/main-loop.h"
+#if defined(CONFIG_MALLOC_TRIM)
+#include <malloc.h>
+#endif
 
 /*
  * Global grace period counter.  Bit 0 is always one in rcu_gp_ctr.
@@ -89,10 +91,11 @@ static void wait_for_readers(void)
             atomic_set(&index->waiting, true);
         }
 
-        /* Here, order the stores to index->waiting before the
-         * loads of index->ctr.
+        /* Here, order the stores to index->waiting before the loads of
+         * index->ctr.  Pairs with smp_mb_placeholder() in rcu_read_unlock(),
+         * ensuring that the loads of index->ctr are sequentially consistent.
          */
-        smp_mb();
+        smp_mb_global();
 
         QLIST_FOREACH_SAFE(index, &registry, node, tmp) {
             if (!rcu_gp_ongoing(&index->ctr)) {
@@ -139,8 +142,13 @@ static void wait_for_readers(void)
 void synchronize_rcu(void)
 {
     qemu_mutex_lock(&rcu_sync_lock);
-    qemu_mutex_lock(&rcu_registry_lock);
 
+    /* Write RCU-protected pointers before reading p_rcu_reader->ctr.
+     * Pairs with smp_mb_placeholder() in rcu_read_lock().
+     */
+    smp_mb_global();
+
+    qemu_mutex_lock(&rcu_registry_lock);
     if (!QLIST_EMPTY(&registry)) {
         /* In either case, the atomic_mb_set below blocks stores that free
          * old RCU-protected pointers.
@@ -246,6 +254,9 @@ static void *call_rcu_thread(void *opaque)
                 qemu_event_reset(&rcu_call_ready_event);
                 n = atomic_read(&rcu_call_count);
                 if (n == 0) {
+#if defined(CONFIG_MALLOC_TRIM)
+                    malloc_trim(4 * 1024 * 1024);
+#endif
                     qemu_event_wait(&rcu_call_ready_event);
                 }
             }
@@ -318,30 +329,55 @@ static void rcu_init_complete(void)
     rcu_register_thread();
 }
 
+static int atfork_depth = 1;
+
+void rcu_enable_atfork(void)
+{
+    atfork_depth++;
+}
+
+void rcu_disable_atfork(void)
+{
+    atfork_depth--;
+}
+
 #ifdef CONFIG_POSIX
 static void rcu_init_lock(void)
 {
+    if (atfork_depth < 1) {
+        return;
+    }
+
     qemu_mutex_lock(&rcu_sync_lock);
     qemu_mutex_lock(&rcu_registry_lock);
 }
 
 static void rcu_init_unlock(void)
 {
+    if (atfork_depth < 1) {
+        return;
+    }
+
     qemu_mutex_unlock(&rcu_registry_lock);
     qemu_mutex_unlock(&rcu_sync_lock);
 }
-#endif
 
-void rcu_after_fork(void)
+static void rcu_init_child(void)
 {
+    if (atfork_depth < 1) {
+        return;
+    }
+
     memset(&registry, 0, sizeof(registry));
     rcu_init_complete();
 }
+#endif
 
 static void __attribute__((__constructor__)) rcu_init(void)
 {
+    smp_mb_global_init();
 #ifdef CONFIG_POSIX
-    pthread_atfork(rcu_init_lock, rcu_init_unlock, rcu_init_unlock);
+    pthread_atfork(rcu_init_lock, rcu_init_unlock, rcu_init_child);
 #endif
     rcu_init_complete();
 }

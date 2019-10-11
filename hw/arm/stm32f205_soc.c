@@ -24,8 +24,8 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
-#include "qemu-common.h"
-#include "hw/arm/arm.h"
+#include "qemu/module.h"
+#include "hw/arm/boot.h"
 #include "exec/address-spaces.h"
 #include "hw/arm/stm32f205_soc.h"
 
@@ -49,36 +49,32 @@ static void stm32f205_soc_initfn(Object *obj)
     STM32F205State *s = STM32F205_SOC(obj);
     int i;
 
-    object_initialize(&s->armv7m, sizeof(s->armv7m), TYPE_ARMV7M);
-    qdev_set_parent_bus(DEVICE(&s->armv7m), sysbus_get_default());
+    sysbus_init_child_obj(obj, "armv7m", &s->armv7m, sizeof(s->armv7m),
+                          TYPE_ARMV7M);
 
-    object_initialize(&s->syscfg, sizeof(s->syscfg), TYPE_STM32F2XX_SYSCFG);
-    qdev_set_parent_bus(DEVICE(&s->syscfg), sysbus_get_default());
+    sysbus_init_child_obj(obj, "syscfg", &s->syscfg, sizeof(s->syscfg),
+                          TYPE_STM32F2XX_SYSCFG);
 
     for (i = 0; i < STM_NUM_USARTS; i++) {
-        object_initialize(&s->usart[i], sizeof(s->usart[i]),
-                          TYPE_STM32F2XX_USART);
-        qdev_set_parent_bus(DEVICE(&s->usart[i]), sysbus_get_default());
+        sysbus_init_child_obj(obj, "usart[*]", &s->usart[i],
+                              sizeof(s->usart[i]), TYPE_STM32F2XX_USART);
     }
 
     for (i = 0; i < STM_NUM_TIMERS; i++) {
-        object_initialize(&s->timer[i], sizeof(s->timer[i]),
-                          TYPE_STM32F2XX_TIMER);
-        qdev_set_parent_bus(DEVICE(&s->timer[i]), sysbus_get_default());
+        sysbus_init_child_obj(obj, "timer[*]", &s->timer[i],
+                              sizeof(s->timer[i]), TYPE_STM32F2XX_TIMER);
     }
 
     s->adc_irqs = OR_IRQ(object_new(TYPE_OR_IRQ));
 
     for (i = 0; i < STM_NUM_ADCS; i++) {
-        object_initialize(&s->adc[i], sizeof(s->adc[i]),
-                          TYPE_STM32F2XX_ADC);
-        qdev_set_parent_bus(DEVICE(&s->adc[i]), sysbus_get_default());
+        sysbus_init_child_obj(obj, "adc[*]", &s->adc[i], sizeof(s->adc[i]),
+                              TYPE_STM32F2XX_ADC);
     }
 
     for (i = 0; i < STM_NUM_SPIS; i++) {
-        object_initialize(&s->spi[i], sizeof(s->spi[i]),
-                          TYPE_STM32F2XX_SPI);
-        qdev_set_parent_bus(DEVICE(&s->spi[i]), sysbus_get_default());
+        sysbus_init_child_obj(obj, "spi[*]", &s->spi[i], sizeof(s->spi[i]),
+                              TYPE_STM32F2XX_SPI);
     }
 }
 
@@ -100,8 +96,6 @@ static void stm32f205_soc_realize(DeviceState *dev_soc, Error **errp)
     memory_region_init_alias(flash_alias, NULL, "STM32F205.flash.alias",
                              flash, 0, FLASH_SIZE);
 
-    vmstate_register_ram_global(flash);
-
     memory_region_set_readonly(flash, true);
     memory_region_set_readonly(flash_alias, true);
 
@@ -110,12 +104,12 @@ static void stm32f205_soc_realize(DeviceState *dev_soc, Error **errp)
 
     memory_region_init_ram(sram, NULL, "STM32F205.sram", SRAM_SIZE,
                            &error_fatal);
-    vmstate_register_ram_global(sram);
     memory_region_add_subregion(system_memory, SRAM_BASE_ADDRESS, sram);
 
     armv7m = DEVICE(&s->armv7m);
     qdev_prop_set_uint32(armv7m, "num-irq", 96);
-    qdev_prop_set_string(armv7m, "cpu-model", s->cpu_model);
+    qdev_prop_set_string(armv7m, "cpu-type", s->cpu_type);
+    qdev_prop_set_bit(armv7m, "enable-bitband", true);
     object_property_set_link(OBJECT(&s->armv7m), OBJECT(get_system_memory()),
                                      "memory", &error_abort);
     object_property_set_bool(OBJECT(&s->armv7m), true, "realized", &err);
@@ -138,8 +132,7 @@ static void stm32f205_soc_realize(DeviceState *dev_soc, Error **errp)
     /* Attach UART (uses USART registers) and USART controllers */
     for (i = 0; i < STM_NUM_USARTS; i++) {
         dev = DEVICE(&(s->usart[i]));
-        qdev_prop_set_chr(dev, "chardev",
-                          i < MAX_SERIAL_PORTS ? serial_hds[i] : NULL);
+        qdev_prop_set_chr(dev, "chardev", serial_hd(i));
         object_property_set_bool(OBJECT(&s->usart[i]), true, "realized", &err);
         if (err != NULL) {
             error_propagate(errp, err);
@@ -203,7 +196,7 @@ static void stm32f205_soc_realize(DeviceState *dev_soc, Error **errp)
 }
 
 static Property stm32f205_soc_properties[] = {
-    DEFINE_PROP_STRING("cpu-model", STM32F205State, cpu_model),
+    DEFINE_PROP_STRING("cpu-type", STM32F205State, cpu_type),
     DEFINE_PROP_END_OF_LIST(),
 };
 

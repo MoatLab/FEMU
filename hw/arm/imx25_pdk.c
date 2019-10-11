@@ -25,7 +25,6 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
-#include "qemu-common.h"
 #include "cpu.h"
 #include "hw/arm/fsl-imx25.h"
 #include "hw/boards.h"
@@ -72,17 +71,16 @@ static void imx25_pdk_init(MachineState *machine)
     unsigned int alias_offset;
     int i;
 
-    object_initialize(&s->soc, sizeof(s->soc), TYPE_FSL_IMX25);
-    object_property_add_child(OBJECT(machine), "soc", OBJECT(&s->soc),
-                              &error_abort);
+    object_initialize_child(OBJECT(machine), "soc", &s->soc, sizeof(s->soc),
+                            TYPE_FSL_IMX25, &error_abort, NULL);
 
     object_property_set_bool(OBJECT(&s->soc), true, "realized", &error_fatal);
 
     /* We need to initialize our memory */
     if (machine->ram_size > (FSL_IMX25_SDRAM0_SIZE + FSL_IMX25_SDRAM1_SIZE)) {
-        error_report("WARNING: RAM size " RAM_ADDR_FMT " above max supported, "
-                     "reduced to %x", machine->ram_size,
-                     FSL_IMX25_SDRAM0_SIZE + FSL_IMX25_SDRAM1_SIZE);
+        warn_report("RAM size " RAM_ADDR_FMT " above max supported, "
+                    "reduced to %x", machine->ram_size,
+                    FSL_IMX25_SDRAM0_SIZE + FSL_IMX25_SDRAM1_SIZE);
         machine->ram_size = FSL_IMX25_SDRAM0_SIZE + FSL_IMX25_SDRAM1_SIZE;
     }
 
@@ -132,15 +130,6 @@ static void imx25_pdk_init(MachineState *machine)
      */
     if (!qtest_enabled()) {
         arm_load_kernel(&s->soc.cpu, &imx25_pdk_binfo);
-    } else {
-        /*
-         * This I2C device doesn't exist on the real board.
-         * We add it here (only on qtest usage) to be able to do a bit
-         * of simple qtest. See "make check" for details.
-         */
-        i2c_create_slave((I2CBus *)qdev_get_child_bus(DEVICE(&s->soc.i2c[0]),
-                                                      "i2c-bus.0"),
-                         "ds1338", 0x68);
     }
 }
 
@@ -148,6 +137,7 @@ static void imx25_pdk_machine_init(MachineClass *mc)
 {
     mc->desc = "ARM i.MX25 PDK board (ARM926)";
     mc->init = imx25_pdk_init;
+    mc->ignore_memory_transaction_failures = true;
 }
 
 DEFINE_MACHINE("imx25-pdk", imx25_pdk_machine_init)

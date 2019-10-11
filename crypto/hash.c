@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -19,8 +19,8 @@
  */
 
 #include "qemu/osdep.h"
-#include "qapi/error.h"
 #include "crypto/hash.h"
+#include "hashpriv.h"
 
 static size_t qcrypto_hash_alg_size[QCRYPTO_HASH_ALG__MAX] = {
     [QCRYPTO_HASH_ALG_MD5] = 16,
@@ -36,6 +36,32 @@ size_t qcrypto_hash_digest_len(QCryptoHashAlgorithm alg)
 {
     assert(alg < G_N_ELEMENTS(qcrypto_hash_alg_size));
     return qcrypto_hash_alg_size[alg];
+}
+
+int qcrypto_hash_bytesv(QCryptoHashAlgorithm alg,
+                        const struct iovec *iov,
+                        size_t niov,
+                        uint8_t **result,
+                        size_t *resultlen,
+                        Error **errp)
+{
+#ifdef CONFIG_AF_ALG
+    int ret;
+    /*
+     * TODO:
+     * Maybe we should treat some afalg errors as fatal
+     */
+    ret = qcrypto_hash_afalg_driver.hash_bytesv(alg, iov, niov,
+                                                result, resultlen,
+                                                NULL);
+    if (ret == 0) {
+        return ret;
+    }
+#endif
+
+    return qcrypto_hash_lib_driver.hash_bytesv(alg, iov, niov,
+                                               result, resultlen,
+                                               errp);
 }
 
 

@@ -4,19 +4,20 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or(at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * Lesser General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
+ * You should have received a copy of the GNU Lesser General Public License
  * along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
 #include "qemu/osdep.h"
 #include "hw/usb/hcd-ehci.h"
+#include "qemu/module.h"
 
 static const VMStateDescription vmstate_ehci_sysbus = {
     .name        = "ehci-sysbus",
@@ -94,6 +95,22 @@ static const TypeInfo ehci_type_info = {
     .class_size    = sizeof(SysBusEHCIClass),
 };
 
+static void ehci_platform_class_init(ObjectClass *oc, void *data)
+{
+    SysBusEHCIClass *sec = SYS_BUS_EHCI_CLASS(oc);
+    DeviceClass *dc = DEVICE_CLASS(oc);
+
+    sec->capsbase = 0x0;
+    sec->opregbase = 0x20;
+    set_bit(DEVICE_CATEGORY_USB, dc->categories);
+}
+
+static const TypeInfo ehci_platform_type_info = {
+    .name          = TYPE_PLATFORM_EHCI,
+    .parent        = TYPE_SYS_BUS_EHCI,
+    .class_init    = ehci_platform_class_init,
+};
+
 static void ehci_xlnx_class_init(ObjectClass *oc, void *data)
 {
     SysBusEHCIClass *sec = SYS_BUS_EHCI_CLASS(oc);
@@ -140,6 +157,30 @@ static const TypeInfo ehci_tegra2_type_info = {
     .name          = TYPE_TEGRA2_EHCI,
     .parent        = TYPE_SYS_BUS_EHCI,
     .class_init    = ehci_tegra2_class_init,
+};
+
+static void ehci_ppc4xx_init(Object *o)
+{
+    EHCISysBusState *s = SYS_BUS_EHCI(o);
+
+    s->ehci.companion_enable = true;
+}
+
+static void ehci_ppc4xx_class_init(ObjectClass *oc, void *data)
+{
+    SysBusEHCIClass *sec = SYS_BUS_EHCI_CLASS(oc);
+    DeviceClass *dc = DEVICE_CLASS(oc);
+
+    sec->capsbase = 0x0;
+    sec->opregbase = 0x10;
+    set_bit(DEVICE_CATEGORY_USB, dc->categories);
+}
+
+static const TypeInfo ehci_ppc4xx_type_info = {
+    .name          = TYPE_PPC4xx_EHCI,
+    .parent        = TYPE_SYS_BUS_EHCI,
+    .class_init    = ehci_ppc4xx_class_init,
+    .instance_init = ehci_ppc4xx_init,
 };
 
 /*
@@ -221,9 +262,11 @@ static const TypeInfo ehci_fusbh200_type_info = {
 static void ehci_sysbus_register_types(void)
 {
     type_register_static(&ehci_type_info);
+    type_register_static(&ehci_platform_type_info);
     type_register_static(&ehci_xlnx_type_info);
     type_register_static(&ehci_exynos4210_type_info);
     type_register_static(&ehci_tegra2_type_info);
+    type_register_static(&ehci_ppc4xx_type_info);
     type_register_static(&ehci_fusbh200_type_info);
 }
 

@@ -16,9 +16,9 @@
  */
 
 #include "qemu/osdep.h"
-#include "qemu-common.h"
 #include "ui/qemu-spice.h"
 #include "qemu/timer.h"
+#include "qemu/option.h"
 #include "qemu/queue.h"
 #include "ui/console.h"
 #include "sysemu/sysemu.h"
@@ -26,18 +26,7 @@
 
 #include "ui/spice-display.h"
 
-static int debug = 0;
-
-static void GCC_FMT_ATTR(2, 3) dprint(int level, const char *fmt, ...)
-{
-    va_list args;
-
-    if (level <= debug) {
-        va_start(args, fmt);
-        vfprintf(stderr, fmt, args);
-        va_end(args);
-    }
-}
+bool spice_opengl;
 
 int qemu_spice_rect_is_empty(const QXLRect* r)
 {
@@ -321,8 +310,6 @@ void qemu_spice_create_host_memslot(SimpleSpiceDisplay *ssd)
 {
     QXLDevMemSlot memslot;
 
-    dprint(1, "%s/%d:\n", __func__, ssd->qxl.id);
-
     memset(&memslot, 0, sizeof(memslot));
     memslot.slot_group_id = MEMSLOT_GROUP_HOST;
     memslot.virt_end = ~0;
@@ -346,10 +333,6 @@ void qemu_spice_create_host_primary(SimpleSpiceDisplay *ssd)
         ssd->buf = g_malloc(ssd->bufsize);
     }
 
-    dprint(1, "%s/%d: %ux%u (size %" PRIu64 "/%d)\n", __func__, ssd->qxl.id,
-           surface_width(ssd->ds), surface_height(ssd->ds),
-           surface_size, ssd->bufsize);
-
     surface.format     = SPICE_SURFACE_FMT_32_xRGB;
     surface.width      = surface_width(ssd->ds);
     surface.height     = surface_height(ssd->ds);
@@ -365,8 +348,6 @@ void qemu_spice_create_host_primary(SimpleSpiceDisplay *ssd)
 
 void qemu_spice_destroy_host_primary(SimpleSpiceDisplay *ssd)
 {
-    dprint(1, "%s/%d:\n", __func__, ssd->qxl.id);
-
     qemu_spice_destroy_primary_surface(ssd, 0, QXL_SYNC);
 }
 
@@ -388,8 +369,7 @@ void qemu_spice_display_update(SimpleSpiceDisplay *ssd,
 {
     QXLRect update_area;
 
-    dprint(2, "%s/%d: x %d y %d w %d h %d\n", __func__,
-           ssd->qxl.id, x, y, w, h);
+    trace_qemu_spice_display_update(ssd->qxl.id, x, y, w, h);
     update_area.left = x,
     update_area.right = x + w;
     update_area.top = y;
@@ -412,8 +392,10 @@ void qemu_spice_display_switch(SimpleSpiceDisplay *ssd,
         surface_height(surface) == pixman_image_get_height(ssd->surface) &&
         surface_format(surface) == pixman_image_get_format(ssd->surface)) {
         /* no-resize fast path: just swap backing store */
-        dprint(1, "%s/%d: fast (%dx%d)\n", __func__, ssd->qxl.id,
-               surface_width(surface), surface_height(surface));
+        trace_qemu_spice_display_surface(ssd->qxl.id,
+                                         surface_width(surface),
+                                         surface_height(surface),
+                                         true);
         qemu_mutex_lock(&ssd->lock);
         ssd->ds = surface;
         pixman_image_unref(ssd->surface);
@@ -426,11 +408,10 @@ void qemu_spice_display_switch(SimpleSpiceDisplay *ssd,
     }
 
     /* full mode switch */
-    dprint(1, "%s/%d: full (%dx%d -> %dx%d)\n", __func__, ssd->qxl.id,
-           ssd->surface ? pixman_image_get_width(ssd->surface)  : 0,
-           ssd->surface ? pixman_image_get_height(ssd->surface) : 0,
-           surface ? surface_width(surface)  : 0,
-           surface ? surface_height(surface) : 0);
+    trace_qemu_spice_display_surface(ssd->qxl.id,
+                                     surface ? surface_width(surface)  : 0,
+                                     surface ? surface_height(surface) : 0,
+                                     false);
 
     memset(&ssd->dirty, 0, sizeof(ssd->dirty));
     if (ssd->surface) {
@@ -469,32 +450,37 @@ void qemu_spice_display_switch(SimpleSpiceDisplay *ssd,
     qemu_mutex_unlock(&ssd->lock);
 }
 
-static void qemu_spice_cursor_refresh_unlocked(SimpleSpiceDisplay *ssd)
-{
-    if (ssd->cursor) {
-        assert(ssd->dcl.con);
-        dpy_cursor_define(ssd->dcl.con, ssd->cursor);
-    }
-    if (ssd->mouse_x != -1 && ssd->mouse_y != -1) {
-        assert(ssd->dcl.con);
-        dpy_mouse_set(ssd->dcl.con, ssd->mouse_x, ssd->mouse_y, 1);
-        ssd->mouse_x = -1;
-        ssd->mouse_y = -1;
-    }
-}
-
 void qemu_spice_cursor_refresh_bh(void *opaque)
 {
     SimpleSpiceDisplay *ssd = opaque;
 
     qemu_mutex_lock(&ssd->lock);
-    qemu_spice_cursor_refresh_unlocked(ssd);
-    qemu_mutex_unlock(&ssd->lock);
+    if (ssd->cursor) {
+        QEMUCursor *c = ssd->cursor;
+        assert(ssd->dcl.con);
+        cursor_get(c);
+        qemu_mutex_unlock(&ssd->lock);
+        dpy_cursor_define(ssd->dcl.con, c);
+        qemu_mutex_lock(&ssd->lock);
+        cursor_put(c);
+    }
+
+    if (ssd->mouse_x != -1 && ssd->mouse_y != -1) {
+        int x, y;
+        assert(ssd->dcl.con);
+        x = ssd->mouse_x;
+        y = ssd->mouse_y;
+        ssd->mouse_x = -1;
+        ssd->mouse_y = -1;
+        qemu_mutex_unlock(&ssd->lock);
+        dpy_mouse_set(ssd->dcl.con, x, y, 1);
+    } else {
+        qemu_mutex_unlock(&ssd->lock);
+    }
 }
 
 void qemu_spice_display_refresh(SimpleSpiceDisplay *ssd)
 {
-    dprint(3, "%s/%d:\n", __func__, ssd->qxl.id);
     graphic_hw_update(ssd->dcl.con);
 
     qemu_mutex_lock(&ssd->lock);
@@ -504,10 +490,10 @@ void qemu_spice_display_refresh(SimpleSpiceDisplay *ssd)
     }
     qemu_mutex_unlock(&ssd->lock);
 
+    trace_qemu_spice_display_refresh(ssd->qxl.id, ssd->notify);
     if (ssd->notify) {
         ssd->notify = 0;
         qemu_spice_wakeup(ssd);
-        dprint(2, "%s/%d: notify\n", __func__, ssd->qxl.id);
     }
 }
 
@@ -515,22 +501,17 @@ void qemu_spice_display_refresh(SimpleSpiceDisplay *ssd)
 
 static void interface_attach_worker(QXLInstance *sin, QXLWorker *qxl_worker)
 {
-    SimpleSpiceDisplay *ssd = container_of(sin, SimpleSpiceDisplay, qxl);
-
-    dprint(1, "%s/%d:\n", __func__, ssd->qxl.id);
-    ssd->worker = qxl_worker;
+    /* nothing to do */
 }
 
 static void interface_set_compression_level(QXLInstance *sin, int level)
 {
-    dprint(1, "%s/%d:\n", __func__, sin->id);
     /* nothing to do */
 }
 
 #if SPICE_NEEDS_SET_MM_TIME
 static void interface_set_mm_time(QXLInstance *sin, uint32_t mm_time)
 {
-    dprint(3, "%s/%d:\n", __func__, sin->id);
     /* nothing to do */
 }
 #endif
@@ -554,8 +535,6 @@ static int interface_get_command(QXLInstance *sin, QXLCommandExt *ext)
     SimpleSpiceUpdate *update;
     int ret = false;
 
-    dprint(3, "%s/%d:\n", __func__, ssd->qxl.id);
-
     qemu_mutex_lock(&ssd->lock);
     update = QTAILQ_FIRST(&ssd->updates);
     if (update != NULL) {
@@ -570,7 +549,6 @@ static int interface_get_command(QXLInstance *sin, QXLCommandExt *ext)
 
 static int interface_req_cmd_notification(QXLInstance *sin)
 {
-    dprint(2, "%s/%d:\n", __func__, sin->id);
     return 1;
 }
 
@@ -582,7 +560,6 @@ static void interface_release_resource(QXLInstance *sin,
     SimpleSpiceCursor *cursor;
     QXLCommandExt *ext;
 
-    dprint(2, "%s/%d:\n", __func__, ssd->qxl.id);
     ext = (void *)(intptr_t)(rext.info->id);
     switch (ext->cmd.type) {
     case QXL_CMD_DRAW:
@@ -603,8 +580,6 @@ static int interface_get_cursor_command(QXLInstance *sin, QXLCommandExt *ext)
     SimpleSpiceDisplay *ssd = container_of(sin, SimpleSpiceDisplay, qxl);
     int ret;
 
-    dprint(3, "%s/%d:\n", __func__, ssd->qxl.id);
-
     qemu_mutex_lock(&ssd->lock);
     if (ssd->ptr_define) {
         *ext = ssd->ptr_define->ext;
@@ -623,19 +598,18 @@ static int interface_get_cursor_command(QXLInstance *sin, QXLCommandExt *ext)
 
 static int interface_req_cursor_notification(QXLInstance *sin)
 {
-    dprint(2, "%s:\n", __func__);
     return 1;
 }
 
 static void interface_notify_update(QXLInstance *sin, uint32_t update_id)
 {
-    fprintf(stderr, "%s: abort()\n", __FUNCTION__);
+    fprintf(stderr, "%s: abort()\n", __func__);
     abort();
 }
 
 static int interface_flush_resources(QXLInstance *sin)
 {
-    fprintf(stderr, "%s: abort()\n", __FUNCTION__);
+    fprintf(stderr, "%s: abort()\n", __func__);
     abort();
     return 0;
 }
@@ -680,7 +654,7 @@ static void interface_set_client_capabilities(QXLInstance *sin,
                                               uint8_t client_present,
                                               uint8_t caps[58])
 {
-    dprint(3, "%s:\n", __func__);
+    /* nothing to do */
 }
 
 static int interface_client_monitors_config(QXLInstance *sin,
@@ -700,14 +674,32 @@ static int interface_client_monitors_config(QXLInstance *sin,
 
     memset(&info, 0, sizeof(info));
 
-    head = qemu_console_get_head(ssd->dcl.con);
-    if (mc->num_of_monitors > head) {
-        info.width  = mc->monitors[head].width;
-        info.height = mc->monitors[head].height;
+    if (mc->num_of_monitors == 1) {
+        /*
+         * New spice-server version which filters the list of monitors
+         * to only include those that belong to our display channel.
+         *
+         * single-head configuration (where filtering doesn't matter)
+         * takes this code path too.
+         */
+        info.width  = mc->monitors[0].width;
+        info.height = mc->monitors[0].height;
+    } else {
+        /*
+         * Old spice-server which gives us all monitors, so we have to
+         * figure ourself which entry we need.  Array index is the
+         * channel_id, which is the qemu console index, see
+         * qemu_spice_add_display_interface().
+         */
+        head = qemu_console_get_index(ssd->dcl.con);
+        if (mc->num_of_monitors > head) {
+            info.width  = mc->monitors[head].width;
+            info.height = mc->monitors[head].height;
+        }
     }
+
+    trace_qemu_spice_ui_info(ssd->qxl.id, info.width, info.height);
     dpy_set_ui_info(ssd->dcl.con, &info);
-    dprint(1, "%s/%d: size %dx%d\n", __func__, ssd->qxl.id,
-           info.width, info.height);
     return 1;
 }
 
@@ -849,7 +841,7 @@ static void qemu_spice_gl_unblock_bh(void *opaque)
 
 static void qemu_spice_gl_block_timer(void *opaque)
 {
-    fprintf(stderr, "WARNING: spice: no gl-draw-done within one second\n");
+    warn_report("spice: no gl-draw-done within one second");
 }
 
 static void spice_gl_refresh(DisplayChangeListener *dcl)
@@ -896,15 +888,17 @@ static void spice_gl_switch(DisplayChangeListener *dcl,
     if (ssd->ds) {
         surface_gl_create_texture(ssd->gls, ssd->ds);
         fd = egl_get_fd_for_texture(ssd->ds->texture,
-                                    &stride, &fourcc);
+                                    &stride, &fourcc,
+                                    NULL);
         if (fd < 0) {
             surface_gl_destroy_texture(ssd->gls, ssd->ds);
             return;
         }
 
-        dprint(1, "%s: %dx%d (stride %d/%d, fourcc 0x%x)\n", __func__,
-               surface_width(ssd->ds), surface_height(ssd->ds),
-               surface_stride(ssd->ds), stride, fourcc);
+        trace_qemu_spice_gl_surface(ssd->qxl.id,
+                                    surface_width(ssd->ds),
+                                    surface_height(ssd->ds),
+                                    fourcc);
 
         /* note: spice server will close the fd */
         spice_qxl_gl_scanout(&ssd->qxl, fd,
@@ -932,7 +926,7 @@ static void qemu_spice_gl_scanout_disable(DisplayChangeListener *dcl)
 {
     SimpleSpiceDisplay *ssd = container_of(dcl, SimpleSpiceDisplay, dcl);
 
-    dprint(1, "%s: no framebuffer\n", __func__);
+    trace_qemu_spice_gl_scanout_disable(ssd->qxl.id);
     spice_qxl_gl_scanout(&ssd->qxl, -1, 0, 0, 0, 0, false);
     qemu_spice_gl_monitor_config(ssd, 0, 0, 0, 0);
     ssd->have_surface = false;
@@ -952,13 +946,12 @@ static void qemu_spice_gl_scanout_texture(DisplayChangeListener *dcl,
     int fd = -1;
 
     assert(tex_id);
-    fd = egl_get_fd_for_texture(tex_id, &stride, &fourcc);
+    fd = egl_get_fd_for_texture(tex_id, &stride, &fourcc, NULL);
     if (fd < 0) {
         fprintf(stderr, "%s: failed to get fd for texture\n", __func__);
         return;
     }
-    dprint(1, "%s: %dx%d (stride %d, fourcc 0x%x)\n", __func__,
-           w, h, stride, fourcc);
+    trace_qemu_spice_gl_scanout_texture(ssd->qxl.id, w, h, fourcc);
 
     /* note: spice server will close the fd */
     spice_qxl_gl_scanout(&ssd->qxl, fd, backing_width, backing_height,
@@ -968,17 +961,141 @@ static void qemu_spice_gl_scanout_texture(DisplayChangeListener *dcl,
     ssd->have_scanout = true;
 }
 
+static void qemu_spice_gl_scanout_dmabuf(DisplayChangeListener *dcl,
+                                         QemuDmaBuf *dmabuf)
+{
+    SimpleSpiceDisplay *ssd = container_of(dcl, SimpleSpiceDisplay, dcl);
+
+    ssd->guest_dmabuf = dmabuf;
+    ssd->guest_dmabuf_refresh = true;
+
+    ssd->have_surface = false;
+    ssd->have_scanout = true;
+}
+
+static void qemu_spice_gl_cursor_dmabuf(DisplayChangeListener *dcl,
+                                        QemuDmaBuf *dmabuf, bool have_hot,
+                                        uint32_t hot_x, uint32_t hot_y)
+{
+    SimpleSpiceDisplay *ssd = container_of(dcl, SimpleSpiceDisplay, dcl);
+
+    ssd->have_hot = have_hot;
+    ssd->hot_x = hot_x;
+    ssd->hot_y = hot_y;
+
+    trace_qemu_spice_gl_cursor(ssd->qxl.id, dmabuf != NULL, have_hot);
+    if (dmabuf) {
+        egl_dmabuf_import_texture(dmabuf);
+        if (!dmabuf->texture) {
+            return;
+        }
+        egl_fb_setup_for_tex(&ssd->cursor_fb, dmabuf->width, dmabuf->height,
+                             dmabuf->texture, false);
+    } else {
+        egl_fb_destroy(&ssd->cursor_fb);
+    }
+}
+
+static void qemu_spice_gl_cursor_position(DisplayChangeListener *dcl,
+                                          uint32_t pos_x, uint32_t pos_y)
+{
+    SimpleSpiceDisplay *ssd = container_of(dcl, SimpleSpiceDisplay, dcl);
+
+    qemu_mutex_lock(&ssd->lock);
+    ssd->ptr_x = pos_x;
+    ssd->ptr_y = pos_y;
+    qemu_mutex_unlock(&ssd->lock);
+}
+
+static void qemu_spice_gl_release_dmabuf(DisplayChangeListener *dcl,
+                                         QemuDmaBuf *dmabuf)
+{
+    SimpleSpiceDisplay *ssd = container_of(dcl, SimpleSpiceDisplay, dcl);
+
+    if (ssd->guest_dmabuf == dmabuf) {
+        ssd->guest_dmabuf = NULL;
+        ssd->guest_dmabuf_refresh = false;
+    }
+    egl_dmabuf_release_texture(dmabuf);
+}
+
 static void qemu_spice_gl_update(DisplayChangeListener *dcl,
                                  uint32_t x, uint32_t y, uint32_t w, uint32_t h)
 {
     SimpleSpiceDisplay *ssd = container_of(dcl, SimpleSpiceDisplay, dcl);
+    EGLint stride = 0, fourcc = 0;
+    bool render_cursor = false;
+    bool y_0_top = false; /* FIXME */
     uint64_t cookie;
+    int fd;
 
     if (!ssd->have_scanout) {
         return;
     }
 
-    dprint(2, "%s: %dx%d+%d+%d\n", __func__, w, h, x, y);
+    if (ssd->cursor_fb.texture) {
+        render_cursor = true;
+    }
+    if (ssd->render_cursor != render_cursor) {
+        ssd->render_cursor = render_cursor;
+        ssd->guest_dmabuf_refresh = true;
+        egl_fb_destroy(&ssd->blit_fb);
+    }
+
+    if (ssd->guest_dmabuf_refresh) {
+        QemuDmaBuf *dmabuf = ssd->guest_dmabuf;
+        if (render_cursor) {
+            egl_dmabuf_import_texture(dmabuf);
+            if (!dmabuf->texture) {
+                return;
+            }
+
+            /* source framebuffer */
+            egl_fb_setup_for_tex(&ssd->guest_fb,
+                                 dmabuf->width, dmabuf->height,
+                                 dmabuf->texture, false);
+
+            /* dest framebuffer */
+            if (ssd->blit_fb.width  != dmabuf->width ||
+                ssd->blit_fb.height != dmabuf->height) {
+                trace_qemu_spice_gl_render_dmabuf(ssd->qxl.id, dmabuf->width,
+                                                  dmabuf->height);
+                egl_fb_destroy(&ssd->blit_fb);
+                egl_fb_setup_new_tex(&ssd->blit_fb,
+                                     dmabuf->width, dmabuf->height);
+                fd = egl_get_fd_for_texture(ssd->blit_fb.texture,
+                                            &stride, &fourcc, NULL);
+                spice_qxl_gl_scanout(&ssd->qxl, fd,
+                                     dmabuf->width, dmabuf->height,
+                                     stride, fourcc, false);
+            }
+        } else {
+            trace_qemu_spice_gl_forward_dmabuf(ssd->qxl.id,
+                                               dmabuf->width, dmabuf->height);
+            /* note: spice server will close the fd, so hand over a dup */
+            spice_qxl_gl_scanout(&ssd->qxl, dup(dmabuf->fd),
+                                 dmabuf->width, dmabuf->height,
+                                 dmabuf->stride, dmabuf->fourcc,
+                                 dmabuf->y0_top);
+        }
+        qemu_spice_gl_monitor_config(ssd, 0, 0, dmabuf->width, dmabuf->height);
+        ssd->guest_dmabuf_refresh = false;
+    }
+
+    if (render_cursor) {
+        int x, y;
+        qemu_mutex_lock(&ssd->lock);
+        x = ssd->ptr_x;
+        y = ssd->ptr_y;
+        qemu_mutex_unlock(&ssd->lock);
+        egl_texture_blit(ssd->gls, &ssd->blit_fb, &ssd->guest_fb,
+                         !y_0_top);
+        egl_texture_blend(ssd->gls, &ssd->blit_fb, &ssd->cursor_fb,
+                          !y_0_top, x, y, 1.0, 1.0);
+        glFlush();
+    }
+
+    trace_qemu_spice_gl_update(ssd->qxl.id, w, h, x, y);
     qemu_spice_gl_block(ssd, true);
     cookie = (uintptr_t)qxl_cookie_new(QXL_COOKIE_TYPE_GL_DRAW_DONE, 0);
     spice_qxl_gl_draw_async(&ssd->qxl, x, y, w, h, cookie);
@@ -1000,6 +1117,10 @@ static const DisplayChangeListenerOps display_listener_gl_ops = {
 
     .dpy_gl_scanout_disable  = qemu_spice_gl_scanout_disable,
     .dpy_gl_scanout_texture  = qemu_spice_gl_scanout_texture,
+    .dpy_gl_scanout_dmabuf   = qemu_spice_gl_scanout_dmabuf,
+    .dpy_gl_cursor_dmabuf    = qemu_spice_gl_cursor_dmabuf,
+    .dpy_gl_cursor_position  = qemu_spice_gl_cursor_position,
+    .dpy_gl_release_dmabuf   = qemu_spice_gl_release_dmabuf,
     .dpy_gl_update           = qemu_spice_gl_update,
 };
 
@@ -1013,12 +1134,12 @@ static void qemu_spice_display_init_one(QemuConsole *con)
 
     ssd->dcl.ops = &display_listener_ops;
 #ifdef HAVE_SPICE_GL
-    if (display_opengl) {
+    if (spice_opengl) {
         ssd->dcl.ops = &display_listener_gl_ops;
         ssd->gl_unblock_bh = qemu_bh_new(qemu_spice_gl_unblock_bh, ssd);
         ssd->gl_unblock_timer = timer_new_ms(QEMU_CLOCK_REALTIME,
                                              qemu_spice_gl_block_timer, ssd);
-        ssd->gls = console_gl_init_context();
+        ssd->gls = qemu_gl_init_shader();
         ssd->have_surface = false;
         ssd->have_scanout = false;
     }
@@ -1027,7 +1148,17 @@ static void qemu_spice_display_init_one(QemuConsole *con)
 
     ssd->qxl.base.sif = &dpy_interface.base;
     qemu_spice_add_display_interface(&ssd->qxl, con);
-    assert(ssd->worker);
+
+#if SPICE_SERVER_VERSION >= 0x000e02 /* release 0.14.2 */
+    char device_address[256] = "";
+    if (qemu_spice_fill_device_address(con, device_address, 256)) {
+        spice_qxl_set_device_info(&ssd->qxl,
+                                  device_address,
+                                  qemu_console_get_head(con),
+                                  1);
+    }
+#endif
+
     qemu_spice_create_host_memslot(ssd);
 
     register_displaychangelistener(&ssd->dcl);

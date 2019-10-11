@@ -24,7 +24,8 @@
 
 #include "qemu/osdep.h"
 #include "hw/sysbus.h"
-#include "sysemu/char.h"
+#include "qemu/module.h"
+#include "chardev/char-fe.h"
 
 #define DUART(x)
 
@@ -212,7 +213,7 @@ static void xilinx_uartlite_realize(DeviceState *dev, Error **errp)
     XilinxUARTLite *s = XILINX_UARTLITE(dev);
 
     qemu_chr_fe_set_handlers(&s->chr, uart_can_rx, uart_rx,
-                             uart_event, s, NULL, true);
+                             uart_event, NULL, s, NULL, true);
 }
 
 static void xilinx_uartlite_init(Object *obj)

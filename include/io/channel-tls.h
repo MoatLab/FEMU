@@ -48,6 +48,7 @@ struct QIOChannelTLS {
     QIOChannel parent;
     QIOChannel *master;
     QCryptoTLSSession *session;
+    QIOChannelShutdown shutdown;
 };
 
 /**
@@ -116,6 +117,8 @@ qio_channel_tls_new_client(QIOChannel *master,
  * @func: the callback to invoke when completed
  * @opaque: opaque data to pass to @func
  * @destroy: optional callback to free @opaque
+ * @context: the context that TLS handshake will run with. If %NULL,
+ *           the default context will be used
  *
  * Perform the TLS session handshake. This method
  * will return immediately and the handshake will
@@ -126,7 +129,8 @@ qio_channel_tls_new_client(QIOChannel *master,
 void qio_channel_tls_handshake(QIOChannelTLS *ioc,
                                QIOTaskFunc func,
                                gpointer opaque,
-                               GDestroyNotify destroy);
+                               GDestroyNotify destroy,
+                               GMainContext *context);
 
 /**
  * qio_channel_tls_get_session:

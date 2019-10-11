@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # Test case for support of JSON filenames
 #
@@ -24,7 +24,6 @@ owner=mreitz@redhat.com
 seq="$(basename $0)"
 echo "QA output created by $seq"
 
-here="$PWD"
 status=1	# failure is the default!
 
 _cleanup()
@@ -39,7 +38,6 @@ trap "_cleanup; exit \$status" 0 1 2 3 15
 
 _supported_fmt qcow2
 _supported_proto file
-_supported_os Linux
 # Because anything other than 16 would change the output of qemu_io -c info
 _unsupported_imgopts 'refcount_bits=\([^1]\|.\([^6]\|$\)\)'
 
@@ -82,6 +80,26 @@ $QEMU_IO_PROG --cache $CACHEMODE \
 $QEMU_IO -c 'read -P 42 0 512' "$TEST_IMG" | _filter_qemu_io
 
 
+echo
+echo "=== Testing correct handling of 'backing':null ==="
+echo
+
+_make_test_img -b "$TEST_IMG.base" $IMG_SIZE
+
+# This should read 42
+$QEMU_IO -c 'read -P 42 0 512' "$TEST_IMG" | _filter_qemu_io
+
+# This should read 0
+$QEMU_IO -c 'read -P 0 0 512' "json:{\
+    'driver': '$IMGFMT',
+    'file': {
+        'driver': 'file',
+        'filename': '$TEST_IMG'
+    },
+    'backing': null
+}" | _filter_qemu_io
+
+
 # Taken from test 071
 echo
 echo "=== Testing blkdebug ==="
@@ -119,11 +137,11 @@ echo
 
 # Both options given directly and those given in the filename should be used
 $QEMU_IO -c "open -o driver=qcow2 json:{\"file.filename\":\"$TEST_IMG\"}" \
-         -c "info" 2>&1 | _filter_testdir | _filter_imgfmt
+         -c "info" 2>&1 | _filter_img_info
 
 # Options given directly should be prioritized over those given in the filename
 $QEMU_IO -c "open -o driver=qcow2 json:{\"driver\":\"raw\",\"file.filename\":\"$TEST_IMG\"}" \
-         -c "info" 2>&1 | _filter_testdir | _filter_imgfmt
+         -c "info" 2>&1 | _filter_img_info
 
 
 # success, all done

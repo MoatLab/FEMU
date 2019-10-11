@@ -21,10 +21,10 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
-#include "qemu-common.h"
+#include "qemu/module.h"
 #include "cpu.h"
 #include "hw/sysbus.h"
-#include "migration/migration.h"
+#include "migration/blocker.h"
 #include "sysemu/kvm.h"
 #include "kvm_arm.h"
 #include "gic_internal.h"
@@ -100,14 +100,14 @@ static void kvm_gicd_access(GICState *s, int offset, int cpu,
                             uint32_t *val, bool write)
 {
     kvm_device_access(s->dev_fd, KVM_DEV_ARM_VGIC_GRP_DIST_REGS,
-                      KVM_VGIC_ATTR(offset, cpu), val, write);
+                      KVM_VGIC_ATTR(offset, cpu), val, write, &error_abort);
 }
 
 static void kvm_gicc_access(GICState *s, int offset, int cpu,
                             uint32_t *val, bool write)
 {
     kvm_device_access(s->dev_fd, KVM_DEV_ARM_VGIC_GRP_CPU_REGS,
-                      KVM_VGIC_ATTR(offset, cpu), val, write);
+                      KVM_VGIC_ATTR(offset, cpu), val, write, &error_abort);
 }
 
 #define for_each_irq_reg(_ctr, _max_irq, _field_width) \
@@ -140,10 +140,10 @@ static void translate_group(GICState *s, int irq, int cpu,
     int cm = (irq < GIC_INTERNAL) ? (1 << cpu) : ALL_CPU_MASK;
 
     if (to_kernel) {
-        *field = GIC_TEST_GROUP(irq, cm);
+        *field = GIC_DIST_TEST_GROUP(irq, cm);
     } else {
         if (*field & 1) {
-            GIC_SET_GROUP(irq, cm);
+            GIC_DIST_SET_GROUP(irq, cm);
         }
     }
 }
@@ -154,10 +154,10 @@ static void translate_enabled(GICState *s, int irq, int cpu,
     int cm = (irq < GIC_INTERNAL) ? (1 << cpu) : ALL_CPU_MASK;
 
     if (to_kernel) {
-        *field = GIC_TEST_ENABLED(irq, cm);
+        *field = GIC_DIST_TEST_ENABLED(irq, cm);
     } else {
         if (*field & 1) {
-            GIC_SET_ENABLED(irq, cm);
+            GIC_DIST_SET_ENABLED(irq, cm);
         }
     }
 }
@@ -171,7 +171,7 @@ static void translate_pending(GICState *s, int irq, int cpu,
         *field = gic_test_pending(s, irq, cm);
     } else {
         if (*field & 1) {
-            GIC_SET_PENDING(irq, cm);
+            GIC_DIST_SET_PENDING(irq, cm);
             /* TODO: Capture is level-line is held high in the kernel */
         }
     }
@@ -183,10 +183,10 @@ static void translate_active(GICState *s, int irq, int cpu,
     int cm = (irq < GIC_INTERNAL) ? (1 << cpu) : ALL_CPU_MASK;
 
     if (to_kernel) {
-        *field = GIC_TEST_ACTIVE(irq, cm);
+        *field = GIC_DIST_TEST_ACTIVE(irq, cm);
     } else {
         if (*field & 1) {
-            GIC_SET_ACTIVE(irq, cm);
+            GIC_DIST_SET_ACTIVE(irq, cm);
         }
     }
 }
@@ -195,10 +195,10 @@ static void translate_trigger(GICState *s, int irq, int cpu,
                               uint32_t *field, bool to_kernel)
 {
     if (to_kernel) {
-        *field = (GIC_TEST_EDGE_TRIGGER(irq)) ? 0x2 : 0x0;
+        *field = (GIC_DIST_TEST_EDGE_TRIGGER(irq)) ? 0x2 : 0x0;
     } else {
         if (*field & 0x2) {
-            GIC_SET_EDGE_TRIGGER(irq);
+            GIC_DIST_SET_EDGE_TRIGGER(irq);
         }
     }
 }
@@ -207,9 +207,10 @@ static void translate_priority(GICState *s, int irq, int cpu,
                                uint32_t *field, bool to_kernel)
 {
     if (to_kernel) {
-        *field = GIC_GET_PRIORITY(irq, cpu) & 0xff;
+        *field = GIC_DIST_GET_PRIORITY(irq, cpu) & 0xff;
     } else {
-        gic_set_priority(s, cpu, irq, *field & 0xff, MEMTXATTRS_UNSPECIFIED);
+        gic_dist_set_priority(s, cpu, irq,
+                              *field & 0xff, MEMTXATTRS_UNSPECIFIED);
     }
 }
 
@@ -510,6 +511,12 @@ static void kvm_arm_gic_realize(DeviceState *dev, Error **errp)
         return;
     }
 
+    if (s->virt_extn) {
+        error_setg(errp, "the in-kernel VGIC does not implement the "
+                   "virtualization extensions");
+        return;
+    }
+
     if (!kvm_arm_gic_can_save_restore(s)) {
         error_setg(&s->migration_blocker, "This operating system kernel does "
                                           "not support vGICv2 migration");
@@ -521,7 +528,7 @@ static void kvm_arm_gic_realize(DeviceState *dev, Error **errp)
         }
     }
 
-    gic_init_irqs_and_mmio(s, kvm_arm_gicv2_set_irq, NULL);
+    gic_init_irqs_and_mmio(s, kvm_arm_gicv2_set_irq, NULL, NULL);
 
     for (i = 0; i < s->num_irq - GIC_INTERNAL; i++) {
         qemu_irq irq = qdev_get_gpio_in(dev, i);
@@ -538,13 +545,14 @@ static void kvm_arm_gic_realize(DeviceState *dev, Error **errp)
         if (kvm_device_check_attr(s->dev_fd, KVM_DEV_ARM_VGIC_GRP_NR_IRQS, 0)) {
             uint32_t numirqs = s->num_irq;
             kvm_device_access(s->dev_fd, KVM_DEV_ARM_VGIC_GRP_NR_IRQS, 0,
-                              &numirqs, true);
+                              &numirqs, true, &error_abort);
         }
         /* Tell the kernel to complete VGIC initialization now */
         if (kvm_device_check_attr(s->dev_fd, KVM_DEV_ARM_VGIC_GRP_CTRL,
                                   KVM_DEV_ARM_VGIC_CTRL_INIT)) {
             kvm_device_access(s->dev_fd, KVM_DEV_ARM_VGIC_GRP_CTRL,
-                              KVM_DEV_ARM_VGIC_CTRL_INIT, NULL, true);
+                              KVM_DEV_ARM_VGIC_CTRL_INIT, NULL, true,
+                              &error_abort);
         }
     } else if (ret != -ENODEV && ret != -ENOTSUP) {
         error_setg_errno(errp, -ret, "error creating in-kernel VGIC");
@@ -557,7 +565,7 @@ static void kvm_arm_gic_realize(DeviceState *dev, Error **errp)
                             | KVM_VGIC_V2_ADDR_TYPE_DIST,
                             KVM_DEV_ARM_VGIC_GRP_ADDR,
                             KVM_VGIC_V2_ADDR_TYPE_DIST,
-                            s->dev_fd);
+                            s->dev_fd, 0);
     /* CPU interface for current core. Unlike arm_gic, we don't
      * provide the "interface for core #N" memory regions, because
      * cores with a VGIC don't have those.
@@ -567,11 +575,10 @@ static void kvm_arm_gic_realize(DeviceState *dev, Error **errp)
                             | KVM_VGIC_V2_ADDR_TYPE_CPU,
                             KVM_DEV_ARM_VGIC_GRP_ADDR,
                             KVM_VGIC_V2_ADDR_TYPE_CPU,
-                            s->dev_fd);
+                            s->dev_fd, 0);
 
     if (kvm_has_gsi_routing()) {
         /* set up irq routing */
-        kvm_init_irq_routing(kvm_state);
         for (i = 0; i < s->num_irq - GIC_INTERNAL; ++i) {
             kvm_irqchip_add_irq_route(kvm_state, i, 0, i);
         }
@@ -590,10 +597,9 @@ static void kvm_arm_gic_class_init(ObjectClass *klass, void *data)
 
     agcc->pre_save = kvm_arm_gic_get;
     agcc->post_load = kvm_arm_gic_put;
-    kgc->parent_realize = dc->realize;
-    kgc->parent_reset = dc->reset;
-    dc->realize = kvm_arm_gic_realize;
-    dc->reset = kvm_arm_gic_reset;
+    device_class_set_parent_realize(dc, kvm_arm_gic_realize,
+                                    &kgc->parent_realize);
+    device_class_set_parent_reset(dc, kvm_arm_gic_reset, &kgc->parent_reset);
 }
 
 static const TypeInfo kvm_arm_gic_info = {

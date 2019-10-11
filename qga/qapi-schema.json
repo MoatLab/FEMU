@@ -426,10 +426,18 @@
 ##
 # @guest-fsfreeze-freeze:
 #
-# Sync and freeze all freezable, local guest filesystems
+# Sync and freeze all freezable, local guest filesystems. If this
+# command succeeded, you may call @guest-fsfreeze-thaw later to
+# unfreeze.
+#
+# Note: On Windows, the command is implemented with the help of a
+# Volume Shadow-copy Service DLL helper. The frozen state is limited
+# for up to 10 seconds by VSS.
 #
 # Returns: Number of file systems currently frozen. On error, all filesystems
-# will be thawed.
+# will be thawed. If no filesystems are frozen as a result of this call,
+# then @guest-fsfreeze-status will remain "thawed" and calling
+# @guest-fsfreeze-thaw is not necessary.
 #
 # Since: 0.15.0
 ##
@@ -439,10 +447,12 @@
 ##
 # @guest-fsfreeze-freeze-list:
 #
-# Sync and freeze specified guest filesystems
+# Sync and freeze specified guest filesystems.
+# See also @guest-fsfreeze-freeze.
 #
 # @mountpoints: an array of mountpoints of filesystems to be frozen.
 #               If omitted, every mounted filesystem is frozen.
+#               Invalid mount points are ignored.
 #
 # Returns: Number of file systems currently frozen. On error, all filesystems
 # will be thawed.
@@ -522,12 +532,12 @@
 #
 # Suspend guest to disk.
 #
-# This command tries to execute the scripts provided by the pm-utils package.
-# If it's not available, the suspend operation will be performed by manually
-# writing to a sysfs file.
+# This command attempts to suspend the guest using three strategies, in this
+# order:
 #
-# For the best results it's strongly recommended to have the pm-utils
-# package installed in the guest.
+# - systemd hibernate
+# - pm-utils (via pm-hibernate)
+# - manual write into sysfs
 #
 # This command does NOT return a response on success. There is a high chance
 # the command succeeded if the VM exits with a zero exit status or, when
@@ -550,16 +560,18 @@
 #
 # Suspend guest to ram.
 #
-# This command tries to execute the scripts provided by the pm-utils package.
-# If it's not available, the suspend operation will be performed by manually
-# writing to a sysfs file.
+# This command attempts to suspend the guest using three strategies, in this
+# order:
 #
-# For the best results it's strongly recommended to have the pm-utils
-# package installed in the guest.
+# - systemd suspend
+# - pm-utils (via pm-suspend)
+# - manual write into sysfs
 #
-# IMPORTANT: guest-suspend-ram requires QEMU to support the 'system_wakeup'
-# command.  Thus, it's *required* to query QEMU for the presence of the
-# 'system_wakeup' command before issuing guest-suspend-ram.
+# IMPORTANT: guest-suspend-ram requires working wakeup support in
+# QEMU. You should check QMP command query-current-machine returns
+# wakeup-suspend-support: true before issuing this command. Failure in
+# doing so can result in a suspended guest that QEMU will not be able to
+# awaken, forcing the user to power cycle the guest to bring it back.
 #
 # This command does NOT return a response on success. There are two options
 # to check for success:
@@ -582,11 +594,16 @@
 #
 # Save guest state to disk and suspend to ram.
 #
-# This command requires the pm-utils package to be installed in the guest.
+# This command attempts to suspend the guest by executing, in this order:
 #
-# IMPORTANT: guest-suspend-hybrid requires QEMU to support the 'system_wakeup'
-# command.  Thus, it's *required* to query QEMU for the presence of the
-# 'system_wakeup' command before issuing guest-suspend-hybrid.
+# - systemd hybrid-sleep
+# - pm-utils (via pm-suspend-hybrid)
+#
+# IMPORTANT: guest-suspend-hybrid requires working wakeup support in
+# QEMU. You should check QMP command query-current-machine returns
+# wakeup-suspend-support: true before issuing this command. Failure in
+# doing so can result in a suspended guest that QEMU will not be able to
+# awaken, forcing the user to power cycle the guest to bring it back.
 #
 # This command does NOT return a response on success. There are two options
 # to check for success:
@@ -635,6 +652,38 @@
            'prefix': 'int'} }
 
 ##
+# @GuestNetworkInterfaceStat:
+#
+# @rx-bytes: total bytes received
+#
+# @rx-packets: total packets received
+#
+# @rx-errs: bad packets received
+#
+# @rx-dropped: receiver dropped packets
+#
+# @tx-bytes: total bytes transmitted
+#
+# @tx-packets: total packets transmitted
+#
+# @tx-errs: packet transmit problems
+#
+# @tx-dropped: dropped packets transmitted
+#
+# Since: 2.11
+##
+{ 'struct': 'GuestNetworkInterfaceStat',
+  'data': {'rx-bytes': 'uint64',
+            'rx-packets': 'uint64',
+            'rx-errs': 'uint64',
+            'rx-dropped': 'uint64',
+            'tx-bytes': 'uint64',
+            'tx-packets': 'uint64',
+            'tx-errs': 'uint64',
+            'tx-dropped': 'uint64'
+           } }
+
+##
 # @GuestNetworkInterface:
 #
 # @name: The name of interface for which info are being delivered
@@ -643,12 +692,16 @@
 #
 # @ip-addresses: List of addresses assigned to @name
 #
+# @statistics: various statistic counters related to @name
+# (since 2.11)
+#
 # Since: 1.1
 ##
 { 'struct': 'GuestNetworkInterface',
   'data': {'name': 'str',
            '*hardware-address': 'str',
-           '*ip-addresses': ['GuestIpAddress'] } }
+           '*ip-addresses': ['GuestIpAddress'],
+           '*statistics': 'GuestNetworkInterfaceStat' } }
 
 ##
 # @guest-network-get-interfaces:
@@ -788,13 +841,16 @@
 # @bus: bus id
 # @target: target id
 # @unit: unit id
+# @serial: serial number (since: 3.1)
+# @dev: device node (POSIX) or device UNC (Windows) (since: 3.1)
 #
 # Since: 2.2
 ##
 { 'struct': 'GuestDiskAddress',
   'data': {'pci-controller': 'GuestPCIAddress',
            'bus-type': 'GuestDiskBusType',
-           'bus': 'int', 'target': 'int', 'unit': 'int'} }
+           'bus': 'int', 'target': 'int', 'unit': 'int',
+           '*serial': 'str', '*dev': 'str'} }
 
 ##
 # @GuestFilesystemInfo:
@@ -802,6 +858,8 @@
 # @name: disk name
 # @mountpoint: mount point path
 # @type: file system type string
+# @used-bytes: file system used bytes (since 3.0)
+# @total-bytes: non-root file system total bytes (since 3.0)
 # @disk: an array of disk hardware information that the volume lies on,
 #        which may be empty if the disk type is not supported
 #
@@ -809,6 +867,7 @@
 ##
 { 'struct': 'GuestFilesystemInfo',
   'data': {'name': 'str', 'mountpoint': 'str', 'type': 'str',
+           '*used-bytes': 'uint64', '*total-bytes': 'uint64',
            'disk': ['GuestDiskAddress']} }
 
 ##
@@ -1042,3 +1101,144 @@
   'data':    { 'path': 'str', '*arg': ['str'], '*env': ['str'],
                '*input-data': 'str', '*capture-output': 'bool' },
   'returns': 'GuestExec' }
+
+
+##
+# @GuestHostName:
+# @host-name: Fully qualified domain name of the guest OS
+#
+# Since: 2.10
+##
+{ 'struct': 'GuestHostName',
+  'data':   { 'host-name': 'str' } }
+
+##
+# @guest-get-host-name:
+#
+# Return a name for the machine.
+#
+# The returned name is not necessarily a fully-qualified domain name, or even
+# present in DNS or some other name service at all. It need not even be unique
+# on your local network or site, but usually it is.
+#
+# Returns: the host name of the machine on success
+#
+# Since: 2.10
+##
+{ 'command': 'guest-get-host-name',
+  'returns': 'GuestHostName' }
+
+
+##
+# @GuestUser:
+# @user:       Username
+# @domain:     Logon domain (windows only)
+# @login-time: Time of login of this user on the computer. If multiple
+#              instances of the user are logged in, the earliest login time is
+#              reported. The value is in fractional seconds since epoch time.
+#
+# Since: 2.10
+##
+{ 'struct': 'GuestUser',
+  'data': { 'user': 'str', 'login-time': 'number', '*domain': 'str' } }
+
+##
+# @guest-get-users:
+# Retrieves a list of currently active users on the VM.
+#
+# Returns: A unique list of users.
+#
+# Since: 2.10
+##
+{ 'command': 'guest-get-users',
+  'returns': ['GuestUser'] }
+
+##
+# @GuestTimezone:
+#
+# @zone:    Timezone name. These values may differ depending on guest/OS and
+#           should only be used for informational purposes.
+# @offset:  Offset to UTC in seconds, negative numbers for time zones west of
+#           GMT, positive numbers for east
+#
+# Since: 2.10
+##
+{ 'struct': 'GuestTimezone',
+  'data':   { '*zone': 'str', 'offset': 'int' } }
+
+##
+# @guest-get-timezone:
+#
+# Retrieves the timezone information from the guest.
+#
+# Returns: A GuestTimezone dictionary.
+#
+# Since: 2.10
+##
+{ 'command': 'guest-get-timezone',
+  'returns': 'GuestTimezone' }
+
+##
+# @GuestOSInfo:
+#
+# @kernel-release:
+#     * POSIX: release field returned by uname(2)
+#     * Windows: build number of the OS
+# @kernel-version:
+#     * POSIX: version field returned by uname(2)
+#     * Windows: version number of the OS
+# @machine:
+#     * POSIX: machine field returned by uname(2)
+#     * Windows: one of x86, x86_64, arm, ia64
+# @id:
+#     * POSIX: as defined by os-release(5)
+#     * Windows: contains string "mswindows"
+# @name:
+#     * POSIX: as defined by os-release(5)
+#     * Windows: contains string "Microsoft Windows"
+# @pretty-name:
+#     * POSIX: as defined by os-release(5)
+#     * Windows: product name, e.g. "Microsoft Windows 10 Enterprise"
+# @version:
+#     * POSIX: as defined by os-release(5)
+#     * Windows: long version string, e.g. "Microsoft Windows Server 2008"
+# @version-id:
+#     * POSIX: as defined by os-release(5)
+#     * Windows: short version identifier, e.g. "7" or "20012r2"
+# @variant:
+#     * POSIX: as defined by os-release(5)
+#     * Windows: contains string "server" or "client"
+# @variant-id:
+#     * POSIX: as defined by os-release(5)
+#     * Windows: contains string "server" or "client"
+#
+# Notes:
+#
+# On POSIX systems the fields @id, @name, @pretty-name, @version, @version-id,
+# @variant and @variant-id follow the definition specified in os-release(5).
+# Refer to the manual page for exact description of the fields. Their values
+# are taken from the os-release file. If the file is not present in the system,
+# or the values are not present in the file, the fields are not included.
+#
+# On Windows the values are filled from information gathered from the system.
+#
+# Since: 2.10
+##
+{ 'struct': 'GuestOSInfo',
+  'data': {
+      '*kernel-release': 'str', '*kernel-version': 'str',
+      '*machine': 'str', '*id': 'str', '*name': 'str',
+      '*pretty-name': 'str', '*version': 'str', '*version-id': 'str',
+      '*variant': 'str', '*variant-id': 'str' } }
+
+##
+# @guest-get-osinfo:
+#
+# Retrieve guest operating system information
+#
+# Returns: @GuestOSInfo
+#
+# Since: 2.10
+##
+{ 'command': 'guest-get-osinfo',
+  'returns': 'GuestOSInfo' }

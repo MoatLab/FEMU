@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # Test case for drive-mirror to NBD
 #
@@ -24,10 +24,16 @@ owner=mreitz@redhat.com
 seq="$(basename $0)"
 echo "QA output created by $seq"
 
-here="$PWD"
 status=1	# failure is the default!
 
-trap "exit \$status" 0 1 2 3 15
+_cleanup()
+{
+    _cleanup_qemu
+    _cleanup_test_img
+    rm -f "$TEST_DIR/source.$IMGFMT"
+}
+
+trap "_cleanup; exit \$status" 0 1 2 3 15
 
 # get standard environment, filters and checks
 . ./common.rc
@@ -36,7 +42,6 @@ trap "exit \$status" 0 1 2 3 15
 
 _supported_fmt generic
 _supported_proto nbd
-_supported_os Linux
 _unsupported_imgopts "subformat=monolithicFlat" "subformat=twoGbMaxExtentFlat"
 
 _make_test_img 64M
@@ -73,8 +78,6 @@ _send_qemu_cmd $QEMU_HANDLE \
 
 wait=1 _cleanup_qemu
 
-_cleanup_test_img
-rm -f "$TEST_DIR/source.$IMGFMT"
 
 # success, all done
 echo '*** done'

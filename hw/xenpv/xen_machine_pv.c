@@ -23,10 +23,11 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/error-report.h"
 #include "hw/hw.h"
 #include "hw/boards.h"
-#include "hw/xen/xen_backend.h"
-#include "xen_domainbuild.h"
+#include "hw/xen/xen-legacy-backend.h"
+#include "hw/xen/xen-bus.h"
 #include "sysemu/block-backend.h"
 
 static void xen_init_pv(MachineState *machine)
@@ -36,33 +37,20 @@ static void xen_init_pv(MachineState *machine)
 
     /* Initialize backend core & drivers */
     if (xen_be_init() != 0) {
-        fprintf(stderr, "%s: xen backend core setup failed\n", __FUNCTION__);
+        error_report("%s: xen backend core setup failed", __func__);
         exit(1);
     }
 
     switch (xen_mode) {
     case XEN_ATTACH:
-        /* nothing to do, xend handles everything */
+        /* nothing to do, libxl handles everything */
         break;
-#ifdef CONFIG_XEN_PV_DOMAIN_BUILD
-    case XEN_CREATE: {
-        const char *kernel_filename = machine->kernel_filename;
-        const char *kernel_cmdline = machine->kernel_cmdline;
-        const char *initrd_filename = machine->initrd_filename;
-        if (xen_domain_build_pv(kernel_filename, initrd_filename,
-                                kernel_cmdline) < 0) {
-            fprintf(stderr, "xen pv domain creation failed\n");
-            exit(1);
-        }
-        break;
-    }
-#endif
     case XEN_EMULATE:
-        fprintf(stderr, "xen emulation not implemented (yet)\n");
+        error_report("xen emulation not implemented (yet)");
         exit(1);
         break;
     default:
-        fprintf(stderr, "unhandled xen_mode %d\n", xen_mode);
+        error_report("unhandled xen_mode %d", xen_mode);
         exit(1);
         break;
     }
@@ -92,11 +80,10 @@ static void xen_init_pv(MachineState *machine)
         xen_config_dev_nic(nd_table + i);
     }
 
+    xen_bus_init();
+
     /* config cleanup hook */
     atexit(xen_config_cleanup);
-
-    /* setup framebuffer */
-    xen_init_display(xen_domid);
 }
 
 static void xenpv_machine_init(MachineClass *mc)

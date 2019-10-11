@@ -29,17 +29,17 @@
 #include "qemu/log.h"
 #include "qemu/error-report.h"
 #include "sysemu/sysemu.h"
-#include "sysemu/char.h"
 #include "hw/qdev.h"
 #include "sysemu/device_tree.h"
 #include "sysemu/cpus.h"
-#include "sysemu/kvm.h"
+#include "sysemu/hw_accel.h"
+#include "kvm_ppc.h"
 
 #include "hw/ppc/spapr.h"
 #include "hw/ppc/spapr_vio.h"
 #include "hw/ppc/spapr_rtas.h"
+#include "hw/ppc/spapr_cpu_core.h"
 #include "hw/ppc/ppc.h"
-#include "qapi-event.h"
 #include "hw/boards.h"
 
 #include <libfdt.h>
@@ -47,52 +47,16 @@
 #include "qemu/cutils.h"
 #include "trace.h"
 #include "hw/ppc/fdt.h"
+#include "target/ppc/mmu-hash64.h"
+#include "target/ppc/mmu-book3s-v3.h"
 
-static sPAPRConfigureConnectorState *spapr_ccs_find(sPAPRMachineState *spapr,
-                                                    uint32_t drc_index)
-{
-    sPAPRConfigureConnectorState *ccs = NULL;
-
-    QTAILQ_FOREACH(ccs, &spapr->ccs_list, next) {
-        if (ccs->drc_index == drc_index) {
-            break;
-        }
-    }
-
-    return ccs;
-}
-
-static void spapr_ccs_add(sPAPRMachineState *spapr,
-                          sPAPRConfigureConnectorState *ccs)
-{
-    g_assert(!spapr_ccs_find(spapr, ccs->drc_index));
-    QTAILQ_INSERT_HEAD(&spapr->ccs_list, ccs, next);
-}
-
-static void spapr_ccs_remove(sPAPRMachineState *spapr,
-                             sPAPRConfigureConnectorState *ccs)
-{
-    QTAILQ_REMOVE(&spapr->ccs_list, ccs, next);
-    g_free(ccs);
-}
-
-void spapr_ccs_reset_hook(void *opaque)
-{
-    sPAPRMachineState *spapr = opaque;
-    sPAPRConfigureConnectorState *ccs, *ccs_tmp;
-
-    QTAILQ_FOREACH_SAFE(ccs, &spapr->ccs_list, next, ccs_tmp) {
-        spapr_ccs_remove(spapr, ccs);
-    }
-}
-
-static void rtas_display_character(PowerPCCPU *cpu, sPAPRMachineState *spapr,
+static void rtas_display_character(PowerPCCPU *cpu, SpaprMachineState *spapr,
                                    uint32_t token, uint32_t nargs,
                                    target_ulong args,
                                    uint32_t nret, target_ulong rets)
 {
     uint8_t c = rtas_ld(args, 0);
-    VIOsPAPRDevice *sdev = vty_lookup(spapr, 0);
+    SpaprVioDevice *sdev = vty_lookup(spapr, 0);
 
     if (!sdev) {
         rtas_st(rets, 0, RTAS_OUT_HW_ERROR);
@@ -102,7 +66,7 @@ static void rtas_display_character(PowerPCCPU *cpu, sPAPRMachineState *spapr,
     }
 }
 
-static void rtas_power_off(PowerPCCPU *cpu, sPAPRMachineState *spapr,
+static void rtas_power_off(PowerPCCPU *cpu, SpaprMachineState *spapr,
                            uint32_t token, uint32_t nargs, target_ulong args,
                            uint32_t nret, target_ulong rets)
 {
@@ -110,12 +74,12 @@ static void rtas_power_off(PowerPCCPU *cpu, sPAPRMachineState *spapr,
         rtas_st(rets, 0, RTAS_OUT_PARAM_ERROR);
         return;
     }
-    qemu_system_shutdown_request();
+    qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
     cpu_stop_current();
     rtas_st(rets, 0, RTAS_OUT_SUCCESS);
 }
 
-static void rtas_system_reboot(PowerPCCPU *cpu, sPAPRMachineState *spapr,
+static void rtas_system_reboot(PowerPCCPU *cpu, SpaprMachineState *spapr,
                                uint32_t token, uint32_t nargs,
                                target_ulong args,
                                uint32_t nret, target_ulong rets)
@@ -124,12 +88,12 @@ static void rtas_system_reboot(PowerPCCPU *cpu, sPAPRMachineState *spapr,
         rtas_st(rets, 0, RTAS_OUT_PARAM_ERROR);
         return;
     }
-    qemu_system_reset_request();
+    qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
     rtas_st(rets, 0, RTAS_OUT_SUCCESS);
 }
 
 static void rtas_query_cpu_stopped_state(PowerPCCPU *cpu_,
-                                         sPAPRMachineState *spapr,
+                                         SpaprMachineState *spapr,
                                          uint32_t token, uint32_t nargs,
                                          target_ulong args,
                                          uint32_t nret, target_ulong rets)
@@ -143,7 +107,7 @@ static void rtas_query_cpu_stopped_state(PowerPCCPU *cpu_,
     }
 
     id = rtas_ld(args, 0);
-    cpu = ppc_get_vcpu_by_dt_id(id);
+    cpu = spapr_find_cpu(id);
     if (cpu != NULL) {
         if (CPU(cpu)->halted) {
             rtas_st(rets, 1, 0);
@@ -159,34 +123,16 @@ static void rtas_query_cpu_stopped_state(PowerPCCPU *cpu_,
     rtas_st(rets, 0, RTAS_OUT_PARAM_ERROR);
 }
 
-/*
- * Set the timebase offset of the CPU to that of first CPU.
- * This helps hotplugged CPU to have the correct timebase offset.
- */
-static void spapr_cpu_update_tb_offset(PowerPCCPU *cpu)
-{
-    PowerPCCPU *fcpu = POWERPC_CPU(first_cpu);
-
-    cpu->env.tb_env->tb_offset = fcpu->env.tb_env->tb_offset;
-}
-
-static void spapr_cpu_set_endianness(PowerPCCPU *cpu)
-{
-    PowerPCCPU *fcpu = POWERPC_CPU(first_cpu);
-    PowerPCCPUClass *pcc = POWERPC_CPU_GET_CLASS(fcpu);
-
-    if (!pcc->interrupts_big_endian(fcpu)) {
-        cpu->env.spr[SPR_LPCR] |= LPCR_ILE;
-    }
-}
-
-static void rtas_start_cpu(PowerPCCPU *cpu_, sPAPRMachineState *spapr,
+static void rtas_start_cpu(PowerPCCPU *callcpu, SpaprMachineState *spapr,
                            uint32_t token, uint32_t nargs,
                            target_ulong args,
                            uint32_t nret, target_ulong rets)
 {
     target_ulong id, start, r3;
-    PowerPCCPU *cpu;
+    PowerPCCPU *newcpu;
+    CPUPPCState *env;
+    PowerPCCPUClass *pcc;
+    target_ulong lpcr;
 
     if (nargs != 3 || nret != 1) {
         rtas_st(rets, 0, RTAS_OUT_PARAM_ERROR);
@@ -197,58 +143,77 @@ static void rtas_start_cpu(PowerPCCPU *cpu_, sPAPRMachineState *spapr,
     start = rtas_ld(args, 1);
     r3 = rtas_ld(args, 2);
 
-    cpu = ppc_get_vcpu_by_dt_id(id);
-    if (cpu != NULL) {
-        CPUState *cs = CPU(cpu);
-        CPUPPCState *env = &cpu->env;
-
-        if (!cs->halted) {
-            rtas_st(rets, 0, RTAS_OUT_HW_ERROR);
-            return;
-        }
-
-        /* This will make sure qemu state is up to date with kvm, and
-         * mark it dirty so our changes get flushed back before the
-         * new cpu enters */
-        kvm_cpu_synchronize_state(cs);
-
-        env->msr = (1ULL << MSR_SF) | (1ULL << MSR_ME);
-        env->nip = start;
-        env->gpr[3] = r3;
-        cs->halted = 0;
-        spapr_cpu_set_endianness(cpu);
-        spapr_cpu_update_tb_offset(cpu);
-
-        qemu_cpu_kick(cs);
-
-        rtas_st(rets, 0, RTAS_OUT_SUCCESS);
+    newcpu = spapr_find_cpu(id);
+    if (!newcpu) {
+        /* Didn't find a matching cpu */
+        rtas_st(rets, 0, RTAS_OUT_PARAM_ERROR);
         return;
     }
 
-    /* Didn't find a matching cpu */
-    rtas_st(rets, 0, RTAS_OUT_PARAM_ERROR);
+    env = &newcpu->env;
+    pcc = POWERPC_CPU_GET_CLASS(newcpu);
+
+    if (!CPU(newcpu)->halted) {
+        rtas_st(rets, 0, RTAS_OUT_HW_ERROR);
+        return;
+    }
+
+    cpu_synchronize_state(CPU(newcpu));
+
+    env->msr = (1ULL << MSR_SF) | (1ULL << MSR_ME);
+
+    /* Enable Power-saving mode Exit Cause exceptions for the new CPU */
+    lpcr = env->spr[SPR_LPCR];
+    if (!pcc->interrupts_big_endian(callcpu)) {
+        lpcr |= LPCR_ILE;
+    }
+    if (env->mmu_model == POWERPC_MMU_3_00) {
+        /*
+         * New cpus are expected to start in the same radix/hash mode
+         * as the existing CPUs
+         */
+        if (ppc64_v3_radix(callcpu)) {
+            lpcr |= LPCR_UPRT | LPCR_GTSE | LPCR_HR;
+        } else {
+            lpcr &= ~(LPCR_UPRT | LPCR_GTSE | LPCR_HR);
+        }
+        env->spr[SPR_PSSCR] &= ~PSSCR_EC;
+    }
+    ppc_store_lpcr(newcpu, lpcr);
+
+    /*
+     * Set the timebase offset of the new CPU to that of the invoking
+     * CPU.  This helps hotplugged CPU to have the correct timebase
+     * offset.
+     */
+    newcpu->env.tb_env->tb_offset = callcpu->env.tb_env->tb_offset;
+
+    spapr_cpu_set_entry_state(newcpu, start, r3);
+
+    qemu_cpu_kick(CPU(newcpu));
+
+    rtas_st(rets, 0, RTAS_OUT_SUCCESS);
 }
 
-static void rtas_stop_self(PowerPCCPU *cpu, sPAPRMachineState *spapr,
+static void rtas_stop_self(PowerPCCPU *cpu, SpaprMachineState *spapr,
                            uint32_t token, uint32_t nargs,
                            target_ulong args,
                            uint32_t nret, target_ulong rets)
 {
     CPUState *cs = CPU(cpu);
     CPUPPCState *env = &cpu->env;
+    PowerPCCPUClass *pcc = POWERPC_CPU_GET_CLASS(cpu);
 
-    cs->halted = 1;
-    qemu_cpu_kick(cs);
-    /*
-     * While stopping a CPU, the guest calls H_CPPR which
-     * effectively disables interrupts on XICS level.
-     * However decrementer interrupts in TCG can still
-     * wake the CPU up so here we disable interrupts in MSR
-     * as well.
-     * As rtas_start_cpu() resets the whole MSR anyway, there is
-     * no need to bother with specific bits, we just clear it.
+    /* Disable Power-saving mode Exit Cause exceptions for the CPU.
+     * This could deliver an interrupt on a dying CPU and crash the
+     * guest.
+     * For the same reason, set PSSCR_EC.
      */
-    env->msr = 0;
+    ppc_store_lpcr(cpu, env->spr[SPR_LPCR] & ~pcc->lpcr_pm);
+    env->spr[SPR_PSSCR] |= PSSCR_EC;
+    cs->halted = 1;
+    kvmppc_set_reg_ppc_online(cpu, 0);
+    qemu_cpu_kick(cs);
 }
 
 static inline int sysparm_st(target_ulong addr, target_ulong len,
@@ -265,11 +230,13 @@ static inline int sysparm_st(target_ulong addr, target_ulong len,
 }
 
 static void rtas_ibm_get_system_parameter(PowerPCCPU *cpu,
-                                          sPAPRMachineState *spapr,
+                                          SpaprMachineState *spapr,
                                           uint32_t token, uint32_t nargs,
                                           target_ulong args,
                                           uint32_t nret, target_ulong rets)
 {
+    MachineState *ms = MACHINE(qdev_get_machine());
+    unsigned int max_cpus = ms->smp.max_cpus;
     target_ulong parameter = rtas_ld(args, 0);
     target_ulong buffer = rtas_ld(args, 1);
     target_ulong length = rtas_ld(args, 2);
@@ -278,12 +245,12 @@ static void rtas_ibm_get_system_parameter(PowerPCCPU *cpu,
     switch (parameter) {
     case RTAS_SYSPARM_SPLPAR_CHARACTERISTICS: {
         char *param_val = g_strdup_printf("MaxEntCap=%d,"
-                                          "DesMem=%llu,"
+                                          "DesMem=%" PRIu64 ","
                                           "DesProcs=%d,"
                                           "MaxPlatProcs=%d",
                                           max_cpus,
-                                          current_machine->ram_size / M_BYTE,
-                                          smp_cpus,
+                                          current_machine->ram_size / MiB,
+                                          ms->smp.cpus,
                                           max_cpus);
         ret = sysparm_st(buffer, length, param_val, strlen(param_val) + 1);
         g_free(param_val);
@@ -307,7 +274,7 @@ static void rtas_ibm_get_system_parameter(PowerPCCPU *cpu,
 }
 
 static void rtas_ibm_set_system_parameter(PowerPCCPU *cpu,
-                                          sPAPRMachineState *spapr,
+                                          SpaprMachineState *spapr,
                                           uint32_t token, uint32_t nargs,
                                           target_ulong args,
                                           uint32_t nret, target_ulong rets)
@@ -327,20 +294,17 @@ static void rtas_ibm_set_system_parameter(PowerPCCPU *cpu,
 }
 
 static void rtas_ibm_os_term(PowerPCCPU *cpu,
-                            sPAPRMachineState *spapr,
+                            SpaprMachineState *spapr,
                             uint32_t token, uint32_t nargs,
                             target_ulong args,
                             uint32_t nret, target_ulong rets)
 {
-    target_ulong ret = 0;
+    qemu_system_guest_panicked(NULL);
 
-    qapi_event_send_guest_panicked(GUEST_PANIC_ACTION_PAUSE, false, NULL,
-                                   &error_abort);
-
-    rtas_st(rets, 0, ret);
+    rtas_st(rets, 0, RTAS_OUT_SUCCESS);
 }
 
-static void rtas_set_power_level(PowerPCCPU *cpu, sPAPRMachineState *spapr,
+static void rtas_set_power_level(PowerPCCPU *cpu, SpaprMachineState *spapr,
                                  uint32_t token, uint32_t nargs,
                                  target_ulong args, uint32_t nret,
                                  target_ulong rets)
@@ -365,7 +329,7 @@ static void rtas_set_power_level(PowerPCCPU *cpu, sPAPRMachineState *spapr,
     rtas_st(rets, 1, 100);
 }
 
-static void rtas_get_power_level(PowerPCCPU *cpu, sPAPRMachineState *spapr,
+static void rtas_get_power_level(PowerPCCPU *cpu, SpaprMachineState *spapr,
                                   uint32_t token, uint32_t nargs,
                                   target_ulong args, uint32_t nret,
                                   target_ulong rets)
@@ -390,272 +354,12 @@ static void rtas_get_power_level(PowerPCCPU *cpu, sPAPRMachineState *spapr,
     rtas_st(rets, 1, 100);
 }
 
-static bool sensor_type_is_dr(uint32_t sensor_type)
-{
-    switch (sensor_type) {
-    case RTAS_SENSOR_TYPE_ISOLATION_STATE:
-    case RTAS_SENSOR_TYPE_DR:
-    case RTAS_SENSOR_TYPE_ALLOCATION_STATE:
-        return true;
-    }
-
-    return false;
-}
-
-static void rtas_set_indicator(PowerPCCPU *cpu, sPAPRMachineState *spapr,
-                               uint32_t token, uint32_t nargs,
-                               target_ulong args, uint32_t nret,
-                               target_ulong rets)
-{
-    uint32_t sensor_type;
-    uint32_t sensor_index;
-    uint32_t sensor_state;
-    uint32_t ret = RTAS_OUT_SUCCESS;
-    sPAPRDRConnector *drc;
-    sPAPRDRConnectorClass *drck;
-
-    if (nargs != 3 || nret != 1) {
-        ret = RTAS_OUT_PARAM_ERROR;
-        goto out;
-    }
-
-    sensor_type = rtas_ld(args, 0);
-    sensor_index = rtas_ld(args, 1);
-    sensor_state = rtas_ld(args, 2);
-
-    if (!sensor_type_is_dr(sensor_type)) {
-        goto out_unimplemented;
-    }
-
-    /* if this is a DR sensor we can assume sensor_index == drc_index */
-    drc = spapr_dr_connector_by_index(sensor_index);
-    if (!drc) {
-        trace_spapr_rtas_set_indicator_invalid(sensor_index);
-        ret = RTAS_OUT_PARAM_ERROR;
-        goto out;
-    }
-    drck = SPAPR_DR_CONNECTOR_GET_CLASS(drc);
-
-    switch (sensor_type) {
-    case RTAS_SENSOR_TYPE_ISOLATION_STATE:
-        /* if the guest is configuring a device attached to this
-         * DRC, we should reset the configuration state at this
-         * point since it may no longer be reliable (guest released
-         * device and needs to start over, or unplug occurred so
-         * the FDT is no longer valid)
-         */
-        if (sensor_state == SPAPR_DR_ISOLATION_STATE_ISOLATED) {
-            sPAPRConfigureConnectorState *ccs = spapr_ccs_find(spapr,
-                                                               sensor_index);
-            if (ccs) {
-                spapr_ccs_remove(spapr, ccs);
-            }
-        }
-        ret = drck->set_isolation_state(drc, sensor_state);
-        break;
-    case RTAS_SENSOR_TYPE_DR:
-        ret = drck->set_indicator_state(drc, sensor_state);
-        break;
-    case RTAS_SENSOR_TYPE_ALLOCATION_STATE:
-        ret = drck->set_allocation_state(drc, sensor_state);
-        break;
-    default:
-        goto out_unimplemented;
-    }
-
-out:
-    rtas_st(rets, 0, ret);
-    return;
-
-out_unimplemented:
-    /* currently only DR-related sensors are implemented */
-    trace_spapr_rtas_set_indicator_not_supported(sensor_index, sensor_type);
-    rtas_st(rets, 0, RTAS_OUT_NOT_SUPPORTED);
-}
-
-static void rtas_get_sensor_state(PowerPCCPU *cpu, sPAPRMachineState *spapr,
-                                  uint32_t token, uint32_t nargs,
-                                  target_ulong args, uint32_t nret,
-                                  target_ulong rets)
-{
-    uint32_t sensor_type;
-    uint32_t sensor_index;
-    uint32_t sensor_state = 0;
-    sPAPRDRConnector *drc;
-    sPAPRDRConnectorClass *drck;
-    uint32_t ret = RTAS_OUT_SUCCESS;
-
-    if (nargs != 2 || nret != 2) {
-        ret = RTAS_OUT_PARAM_ERROR;
-        goto out;
-    }
-
-    sensor_type = rtas_ld(args, 0);
-    sensor_index = rtas_ld(args, 1);
-
-    if (sensor_type != RTAS_SENSOR_TYPE_ENTITY_SENSE) {
-        /* currently only DR-related sensors are implemented */
-        trace_spapr_rtas_get_sensor_state_not_supported(sensor_index,
-                                                        sensor_type);
-        ret = RTAS_OUT_NOT_SUPPORTED;
-        goto out;
-    }
-
-    drc = spapr_dr_connector_by_index(sensor_index);
-    if (!drc) {
-        trace_spapr_rtas_get_sensor_state_invalid(sensor_index);
-        ret = RTAS_OUT_PARAM_ERROR;
-        goto out;
-    }
-    drck = SPAPR_DR_CONNECTOR_GET_CLASS(drc);
-    ret = drck->entity_sense(drc, &sensor_state);
-
-out:
-    rtas_st(rets, 0, ret);
-    rtas_st(rets, 1, sensor_state);
-}
-
-/* configure-connector work area offsets, int32_t units for field
- * indexes, bytes for field offset/len values.
- *
- * as documented by PAPR+ v2.7, 13.5.3.5
- */
-#define CC_IDX_NODE_NAME_OFFSET 2
-#define CC_IDX_PROP_NAME_OFFSET 2
-#define CC_IDX_PROP_LEN 3
-#define CC_IDX_PROP_DATA_OFFSET 4
-#define CC_VAL_DATA_OFFSET ((CC_IDX_PROP_DATA_OFFSET + 1) * 4)
-#define CC_WA_LEN 4096
-
-static void configure_connector_st(target_ulong addr, target_ulong offset,
-                                   const void *buf, size_t len)
-{
-    cpu_physical_memory_write(ppc64_phys_to_real(addr + offset),
-                              buf, MIN(len, CC_WA_LEN - offset));
-}
-
-static void rtas_ibm_configure_connector(PowerPCCPU *cpu,
-                                         sPAPRMachineState *spapr,
-                                         uint32_t token, uint32_t nargs,
-                                         target_ulong args, uint32_t nret,
-                                         target_ulong rets)
-{
-    uint64_t wa_addr;
-    uint64_t wa_offset;
-    uint32_t drc_index;
-    sPAPRDRConnector *drc;
-    sPAPRDRConnectorClass *drck;
-    sPAPRConfigureConnectorState *ccs;
-    sPAPRDRCCResponse resp = SPAPR_DR_CC_RESPONSE_CONTINUE;
-    int rc;
-    const void *fdt;
-
-    if (nargs != 2 || nret != 1) {
-        rtas_st(rets, 0, RTAS_OUT_PARAM_ERROR);
-        return;
-    }
-
-    wa_addr = ((uint64_t)rtas_ld(args, 1) << 32) | rtas_ld(args, 0);
-
-    drc_index = rtas_ld(wa_addr, 0);
-    drc = spapr_dr_connector_by_index(drc_index);
-    if (!drc) {
-        trace_spapr_rtas_ibm_configure_connector_invalid(drc_index);
-        rc = RTAS_OUT_PARAM_ERROR;
-        goto out;
-    }
-
-    drck = SPAPR_DR_CONNECTOR_GET_CLASS(drc);
-    fdt = drck->get_fdt(drc, NULL);
-    if (!fdt) {
-        trace_spapr_rtas_ibm_configure_connector_missing_fdt(drc_index);
-        rc = SPAPR_DR_CC_RESPONSE_NOT_CONFIGURABLE;
-        goto out;
-    }
-
-    ccs = spapr_ccs_find(spapr, drc_index);
-    if (!ccs) {
-        ccs = g_new0(sPAPRConfigureConnectorState, 1);
-        (void)drck->get_fdt(drc, &ccs->fdt_offset);
-        ccs->drc_index = drc_index;
-        spapr_ccs_add(spapr, ccs);
-    }
-
-    do {
-        uint32_t tag;
-        const char *name;
-        const struct fdt_property *prop;
-        int fdt_offset_next, prop_len;
-
-        tag = fdt_next_tag(fdt, ccs->fdt_offset, &fdt_offset_next);
-
-        switch (tag) {
-        case FDT_BEGIN_NODE:
-            ccs->fdt_depth++;
-            name = fdt_get_name(fdt, ccs->fdt_offset, NULL);
-
-            /* provide the name of the next OF node */
-            wa_offset = CC_VAL_DATA_OFFSET;
-            rtas_st(wa_addr, CC_IDX_NODE_NAME_OFFSET, wa_offset);
-            configure_connector_st(wa_addr, wa_offset, name, strlen(name) + 1);
-            resp = SPAPR_DR_CC_RESPONSE_NEXT_CHILD;
-            break;
-        case FDT_END_NODE:
-            ccs->fdt_depth--;
-            if (ccs->fdt_depth == 0) {
-                /* done sending the device tree, don't need to track
-                 * the state anymore
-                 */
-                drck->set_configured(drc);
-                spapr_ccs_remove(spapr, ccs);
-                ccs = NULL;
-                resp = SPAPR_DR_CC_RESPONSE_SUCCESS;
-            } else {
-                resp = SPAPR_DR_CC_RESPONSE_PREV_PARENT;
-            }
-            break;
-        case FDT_PROP:
-            prop = fdt_get_property_by_offset(fdt, ccs->fdt_offset,
-                                              &prop_len);
-            name = fdt_string(fdt, fdt32_to_cpu(prop->nameoff));
-
-            /* provide the name of the next OF property */
-            wa_offset = CC_VAL_DATA_OFFSET;
-            rtas_st(wa_addr, CC_IDX_PROP_NAME_OFFSET, wa_offset);
-            configure_connector_st(wa_addr, wa_offset, name, strlen(name) + 1);
-
-            /* provide the length and value of the OF property. data gets
-             * placed immediately after NULL terminator of the OF property's
-             * name string
-             */
-            wa_offset += strlen(name) + 1,
-            rtas_st(wa_addr, CC_IDX_PROP_LEN, prop_len);
-            rtas_st(wa_addr, CC_IDX_PROP_DATA_OFFSET, wa_offset);
-            configure_connector_st(wa_addr, wa_offset, prop->data, prop_len);
-            resp = SPAPR_DR_CC_RESPONSE_NEXT_PROPERTY;
-            break;
-        case FDT_END:
-            resp = SPAPR_DR_CC_RESPONSE_ERROR;
-        default:
-            /* keep seeking for an actionable tag */
-            break;
-        }
-        if (ccs) {
-            ccs->fdt_offset = fdt_offset_next;
-        }
-    } while (resp == SPAPR_DR_CC_RESPONSE_CONTINUE);
-
-    rc = resp;
-out:
-    rtas_st(rets, 0, rc);
-}
-
 static struct rtas_call {
     const char *name;
     spapr_rtas_fn fn;
 } rtas_table[RTAS_TOKEN_MAX - RTAS_TOKEN_BASE];
 
-target_ulong spapr_rtas_call(PowerPCCPU *cpu, sPAPRMachineState *spapr,
+target_ulong spapr_rtas_call(PowerPCCPU *cpu, SpaprMachineState *spapr,
                              uint32_t token, uint32_t nargs, target_ulong args,
                              uint32_t nret, target_ulong rets)
 {
@@ -689,7 +393,7 @@ uint64_t qtest_rtas_call(char *cmd, uint32_t nargs, uint64_t args,
 
     for (token = 0; token < RTAS_TOKEN_MAX - RTAS_TOKEN_BASE; token++) {
         if (strcmp(cmd, rtas_table[token].name) == 0) {
-            sPAPRMachineState *spapr = SPAPR_MACHINE(qdev_get_machine());
+            SpaprMachineState *spapr = SPAPR_MACHINE(qdev_get_machine());
             PowerPCCPU *cpu = POWERPC_CPU(first_cpu);
 
             rtas_table[token].fn(cpu, spapr, token + RTAS_TOKEN_BASE,
@@ -706,7 +410,7 @@ void spapr_rtas_register(int token, const char *name, spapr_rtas_fn fn)
 
     token -= RTAS_TOKEN_BASE;
 
-    assert(!rtas_table[token].name);
+    assert(!name || !rtas_table[token].name);
 
     rtas_table[token].name = name;
     rtas_table[token].fn = fn;
@@ -727,7 +431,7 @@ void spapr_dt_rtas_tokens(void *fdt, int rtas)
     }
 }
 
-void spapr_load_rtas(sPAPRMachineState *spapr, void *fdt, hwaddr addr)
+void spapr_load_rtas(SpaprMachineState *spapr, void *fdt, hwaddr addr)
 {
     int rtas_node;
     int ret;
@@ -791,12 +495,6 @@ static void core_rtas_register_types(void)
                         rtas_set_power_level);
     spapr_rtas_register(RTAS_GET_POWER_LEVEL, "get-power-level",
                         rtas_get_power_level);
-    spapr_rtas_register(RTAS_SET_INDICATOR, "set-indicator",
-                        rtas_set_indicator);
-    spapr_rtas_register(RTAS_GET_SENSOR_STATE, "get-sensor-state",
-                        rtas_get_sensor_state);
-    spapr_rtas_register(RTAS_IBM_CONFIGURE_CONNECTOR, "ibm,configure-connector",
-                        rtas_ibm_configure_connector);
 }
 
 type_init(core_rtas_register_types)

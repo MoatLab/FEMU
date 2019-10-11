@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # Test command line configuration of block devices with qdev
 #
@@ -24,7 +24,6 @@ owner=kwolf@redhat.com
 seq="$(basename $0)"
 echo "QA output created by $seq"
 
-here="$PWD"
 status=1	# failure is the default!
 
 _cleanup()
@@ -39,11 +38,9 @@ trap "_cleanup; exit \$status" 0 1 2 3 15
 
 _supported_fmt generic
 _supported_proto file
-_supported_os Linux
 
-function do_run_qemu()
+do_run_qemu()
 {
-    echo Testing: "$@"
     (
         if ! test -t 0; then
             while read cmd; do
@@ -55,7 +52,7 @@ function do_run_qemu()
     echo
 }
 
-function run_qemu()
+run_qemu()
 {
     do_run_qemu "$@" 2>&1 | _filter_testdir | _filter_imgfmt \
                           | _filter_qemu | _filter_generated_node_ids
@@ -63,7 +60,18 @@ function run_qemu()
 
 
 size=128M
-drive="if=none,file=$TEST_IMG,driver=$IMGFMT"
+if test "$IMGOPTSSYNTAX" = "true"
+then
+    SYSEMU_DRIVE_ARG=if=none,$TEST_IMG
+    SYSEMU_EXTRA_ARGS=""
+    if [ -n "$IMGKEYSECRET" ]; then
+        SECRET_ARG="secret,id=keysec0,data=$IMGKEYSECRET"
+        SYSEMU_EXTRA_ARGS="-object $SECRET_ARG"
+    fi
+else
+    SYSEMU_DRIVE_ARG=if=none,file="$TEST_IMG",driver=$IMGFMT
+    SYSEMU_EXTRA_ARGS=""
+fi
 
 _make_test_img $size
 
@@ -76,8 +84,9 @@ echo
 
 for cache in "writeback" "writethrough"; do
     for wce in "" ",write-cache=auto" ",write-cache=on" ",write-cache=off"; do
+        echo "Testing: cache='$cache' wce='$wce'"
         echo "info block" \
-            | run_qemu -drive "$drive,cache=$cache" \
+            | run_qemu $SYSEMU_EXTRA_ARGS -drive "$SYSEMU_DRIVE_ARG,cache=$cache" \
                        -device "virtio-blk,drive=none0$wce" \
             | grep -e "Testing" -e "Cache mode"
     done

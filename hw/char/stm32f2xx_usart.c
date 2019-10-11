@@ -25,6 +25,7 @@
 #include "qemu/osdep.h"
 #include "hw/char/stm32f2xx_usart.h"
 #include "qemu/log.h"
+#include "qemu/module.h"
 
 #ifndef STM_USART_ERR_DEBUG
 #define STM_USART_ERR_DEBUG 0
@@ -34,7 +35,7 @@
     if (STM_USART_ERR_DEBUG >= lvl) { \
         qemu_log("%s: " fmt, __func__, ## args); \
     } \
-} while (0);
+} while (0)
 
 #define DB_PRINT(fmt, args...) DB_PRINT_L(1, fmt, ## args)
 
@@ -53,14 +54,13 @@ static void stm32f2xx_usart_receive(void *opaque, const uint8_t *buf, int size)
 {
     STM32F2XXUsartState *s = opaque;
 
-    s->usart_dr = *buf;
-
     if (!(s->usart_cr1 & USART_CR1_UE && s->usart_cr1 & USART_CR1_RE)) {
         /* USART not enabled - drop the chars */
         DB_PRINT("Dropping the chars\n");
         return;
     }
 
+    s->usart_dr = *buf;
     s->usart_sr |= USART_SR_RXNE;
 
     if (s->usart_cr1 & USART_CR1_RXNEIE) {
@@ -96,12 +96,10 @@ static uint64_t stm32f2xx_usart_read(void *opaque, hwaddr addr,
     switch (addr) {
     case USART_SR:
         retvalue = s->usart_sr;
-        s->usart_sr &= ~USART_SR_TC;
         qemu_chr_fe_accept_input(&s->chr);
         return retvalue;
     case USART_DR:
         DB_PRINT("Value: 0x%" PRIx32 ", %c\n", s->usart_dr, (char) s->usart_dr);
-        s->usart_sr |= USART_SR_TXE;
         s->usart_sr &= ~USART_SR_RXNE;
         qemu_chr_fe_accept_input(&s->chr);
         qemu_set_irq(s->irq, 0);
@@ -137,7 +135,9 @@ static void stm32f2xx_usart_write(void *opaque, hwaddr addr,
     switch (addr) {
     case USART_SR:
         if (value <= 0x3FF) {
-            s->usart_sr = value;
+            /* I/O being synchronous, TXE is always set. In addition, it may
+               only be set by hardware, so keep it set here. */
+            s->usart_sr = value | USART_SR_TXE;
         } else {
             s->usart_sr &= value;
         }
@@ -151,8 +151,12 @@ static void stm32f2xx_usart_write(void *opaque, hwaddr addr,
             /* XXX this blocks entire thread. Rewrite to use
              * qemu_chr_fe_write and background I/O callbacks */
             qemu_chr_fe_write_all(&s->chr, &ch, 1);
+            /* XXX I/O are currently synchronous, making it impossible for
+               software to observe transient states where TXE or TC aren't
+               set. Unlike TXE however, which is read-only, software may
+               clear TC by writing 0 to the SR register, so set it again
+               on each write. */
             s->usart_sr |= USART_SR_TC;
-            s->usart_sr &= ~USART_SR_TXE;
         }
         return;
     case USART_BRR:
@@ -198,7 +202,7 @@ static void stm32f2xx_usart_init(Object *obj)
     sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq);
 
     memory_region_init_io(&s->mmio, obj, &stm32f2xx_usart_ops, s,
-                          TYPE_STM32F2XX_USART, 0x2000);
+                          TYPE_STM32F2XX_USART, 0x400);
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->mmio);
 }
 
@@ -207,7 +211,8 @@ static void stm32f2xx_usart_realize(DeviceState *dev, Error **errp)
     STM32F2XXUsartState *s = STM32F2XX_USART(dev);
 
     qemu_chr_fe_set_handlers(&s->chr, stm32f2xx_usart_can_receive,
-                             stm32f2xx_usart_receive, NULL, s, NULL, true);
+                             stm32f2xx_usart_receive, NULL, NULL,
+                             s, NULL, true);
 }
 
 static void stm32f2xx_usart_class_init(ObjectClass *klass, void *data)

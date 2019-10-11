@@ -12,7 +12,10 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/units.h"
+#include "qemu/error-report.h"
 #include "qemu-common.h"
+#include "qemu/error-report.h"
 #include "net/net.h"
 #include "hw/hw.h"
 #include "hw/pci/pci.h"
@@ -27,6 +30,7 @@
 #include "hw/ppc/ppc.h"
 #include "ppc405.h"
 #include "sysemu/sysemu.h"
+#include "sysemu/qtest.h"
 #include "hw/sysbus.h"
 
 #define BINARY_DEVICE_TREE_FILE "bamboo.dtb"
@@ -45,8 +49,8 @@
 
 #define PPC440EP_SDRAM_NR_BANKS 4
 
-static const unsigned int ppc440ep_sdram_bank_sizes[] = {
-    256<<20, 128<<20, 64<<20, 32<<20, 16<<20, 8<<20, 0
+static const ram_addr_t ppc440ep_sdram_bank_sizes[] = {
+    256 * MiB, 128 * MiB, 64 * MiB, 32 * MiB, 16 * MiB, 8 * MiB, 0
 };
 
 static hwaddr entry;
@@ -148,7 +152,7 @@ static void main_cpu_reset(void *opaque)
     CPUPPCState *env = &cpu->env;
 
     cpu_reset(CPU(cpu));
-    env->gpr[1] = (16<<20) - 8;
+    env->gpr[1] = (16 * MiB) - 8;
     env->gpr[3] = FDT_ADDR;
     env->nip = entry;
 
@@ -165,8 +169,7 @@ static void bamboo_init(MachineState *machine)
     unsigned int pci_irq_nrs[4] = { 28, 27, 26, 25 };
     MemoryRegion *address_space_mem = get_system_memory();
     MemoryRegion *isa = g_new(MemoryRegion, 1);
-    MemoryRegion *ram_memories
-        = g_malloc(PPC440EP_SDRAM_NR_BANKS * sizeof(*ram_memories));
+    MemoryRegion *ram_memories = g_new(MemoryRegion, PPC440EP_SDRAM_NR_BANKS);
     hwaddr ram_bases[PPC440EP_SDRAM_NR_BANKS];
     hwaddr ram_sizes[PPC440EP_SDRAM_NR_BANKS];
     qemu_irq *pic;
@@ -176,26 +179,18 @@ static void bamboo_init(MachineState *machine)
     CPUPPCState *env;
     uint64_t elf_entry;
     uint64_t elf_lowaddr;
-    hwaddr loadaddr = 0;
+    hwaddr loadaddr = LOAD_UIMAGE_LOADADDR_INVALID;
     target_long initrd_size = 0;
     DeviceState *dev;
     int success;
     int i;
 
-    /* Setup CPU. */
-    if (machine->cpu_model == NULL) {
-        machine->cpu_model = "440EP";
-    }
-    cpu = cpu_ppc_init(machine->cpu_model);
-    if (cpu == NULL) {
-        fprintf(stderr, "Unable to initialize CPU!\n");
-        exit(1);
-    }
+    cpu = POWERPC_CPU(cpu_create(machine->cpu_type));
     env = &cpu->env;
 
     if (env->mmu_model != POWERPC_MMU_BOOKE) {
-        fprintf(stderr, "MMU model %i not supported by this machine.\n",
-            env->mmu_model);
+        error_report("MMU model %i not supported by this machine",
+                     env->mmu_model);
         exit(1);
     }
 
@@ -204,7 +199,7 @@ static void bamboo_init(MachineState *machine)
     ppc_dcr_init(env, NULL, NULL);
 
     /* interrupt controller */
-    irqs = g_malloc0(sizeof(qemu_irq) * PPCUIC_OUTPUT_NB);
+    irqs = g_new0(qemu_irq, PPCUIC_OUTPUT_NB);
     irqs[PPCUIC_OUTPUT_INT] = ((qemu_irq *)env->irq_inputs)[PPC40x_INPUT_INT];
     irqs[PPCUIC_OUTPUT_CINT] = ((qemu_irq *)env->irq_inputs)[PPC40x_INPUT_CINT];
     pic = ppcuic_init(env, irqs, 0x0C0, 0, 1);
@@ -228,7 +223,7 @@ static void bamboo_init(MachineState *machine)
                                 NULL);
     pcibus = (PCIBus *)qdev_get_child_bus(dev, "pci.0");
     if (!pcibus) {
-        fprintf(stderr, "couldn't create PCI controller!\n");
+        error_report("couldn't create PCI controller");
         exit(1);
     }
 
@@ -236,14 +231,14 @@ static void bamboo_init(MachineState *machine)
                              get_system_io(), 0, PPC440EP_PCI_IOLEN);
     memory_region_add_subregion(get_system_memory(), PPC440EP_PCI_IO, isa);
 
-    if (serial_hds[0] != NULL) {
+    if (serial_hd(0) != NULL) {
         serial_mm_init(address_space_mem, 0xef600300, 0, pic[0],
-                       PPC_SERIAL_MM_BAUDBASE, serial_hds[0],
+                       PPC_SERIAL_MM_BAUDBASE, serial_hd(0),
                        DEVICE_BIG_ENDIAN);
     }
-    if (serial_hds[1] != NULL) {
+    if (serial_hd(1) != NULL) {
         serial_mm_init(address_space_mem, 0xef600400, 0, pic[1],
-                       PPC_SERIAL_MM_BAUDBASE, serial_hds[1],
+                       PPC_SERIAL_MM_BAUDBASE, serial_hd(1),
                        DEVICE_BIG_ENDIAN);
     }
 
@@ -261,7 +256,7 @@ static void bamboo_init(MachineState *machine)
         success = load_uimage(kernel_filename, &entry, &loadaddr, NULL,
                               NULL, NULL);
         if (success < 0) {
-            success = load_elf(kernel_filename, NULL, NULL, &elf_entry,
+            success = load_elf(kernel_filename, NULL, NULL, NULL, &elf_entry,
                                &elf_lowaddr, NULL, 1, PPC_ELF_MACHINE,
                                0, 0);
             entry = elf_entry;
@@ -269,8 +264,7 @@ static void bamboo_init(MachineState *machine)
         }
         /* XXX try again as binary */
         if (success < 0) {
-            fprintf(stderr, "qemu: could not load kernel '%s'\n",
-                    kernel_filename);
+            error_report("could not load kernel '%s'", kernel_filename);
             exit(1);
         }
     }
@@ -281,8 +275,8 @@ static void bamboo_init(MachineState *machine)
                                           ram_size - RAMDISK_ADDR);
 
         if (initrd_size < 0) {
-            fprintf(stderr, "qemu: could not load ram disk '%s' at %x\n",
-                    initrd_filename, RAMDISK_ADDR);
+            error_report("could not load ram disk '%s' at %x",
+                         initrd_filename, RAMDISK_ADDR);
             exit(1);
         }
     }
@@ -291,7 +285,7 @@ static void bamboo_init(MachineState *machine)
     if (kernel_filename) {
         if (bamboo_load_device_tree(FDT_ADDR, ram_size, RAMDISK_ADDR,
                                     initrd_size, kernel_cmdline) < 0) {
-            fprintf(stderr, "couldn't load device tree\n");
+            error_report("couldn't load device tree");
             exit(1);
         }
     }
@@ -301,6 +295,7 @@ static void bamboo_machine_init(MachineClass *mc)
 {
     mc->desc = "bamboo";
     mc->init = bamboo_init;
+    mc->default_cpu_type = POWERPC_CPU_TYPE_NAME("440epb");
 }
 
 DEFINE_MACHINE("bamboo", bamboo_machine_init)

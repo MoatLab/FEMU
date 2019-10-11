@@ -15,17 +15,14 @@
 #include <float.h>
 
 #include "qemu-common.h"
-#include "test-qapi-types.h"
 #include "test-qapi-visit.h"
 #include "qapi/error.h"
-#include "qapi/qmp/types.h"
 #include "qapi/qmp/qjson.h"
+#include "qapi/qmp/qstring.h"
 #include "qapi/qobject-input-visitor.h"
 #include "qapi/qobject-output-visitor.h"
 #include "qapi/string-input-visitor.h"
 #include "qapi/string-output-visitor.h"
-#include "qapi-types.h"
-#include "qapi-visit.h"
 #include "qapi/dealloc-visitor.h"
 
 enum PrimitiveTypeKind {
@@ -1039,10 +1036,10 @@ static void qmp_deserialize(void **native_out, void *datap,
     output_json = qobject_to_json(obj_orig);
     obj = qobject_from_json(qstring_get_str(output_json), &error_abort);
 
-    QDECREF(output_json);
+    qobject_unref(output_json);
     d->qiv = qobject_input_visitor_new(obj);
-    qobject_decref(obj_orig);
-    qobject_decref(obj);
+    qobject_unref(obj_orig);
+    qobject_unref(obj);
     visit(d->qiv, native_out, errp);
 }
 
@@ -1118,7 +1115,7 @@ static const SerializeOps visitors[] = {
 
 static void add_visitor_type(const SerializeOps *ops)
 {
-    char testname_prefix[128];
+    char testname_prefix[32];
     char testname[128];
     TestArgs *args;
     int i = 0;

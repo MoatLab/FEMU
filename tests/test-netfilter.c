@@ -10,6 +10,7 @@
 
 #include "qemu/osdep.h"
 #include "libqtest.h"
+#include "qapi/qmp/qdict.h"
 
 /* add a netfilter to a netdev and then remove it */
 static void add_one_netfilter(void)
@@ -28,7 +29,7 @@ static void add_one_netfilter(void)
 
     g_assert(response);
     g_assert(!qdict_haskey(response, "error"));
-    QDECREF(response);
+    qobject_unref(response);
 
     response = qmp("{'execute': 'object-del',"
                    " 'arguments': {"
@@ -36,7 +37,7 @@ static void add_one_netfilter(void)
                    "}}");
     g_assert(response);
     g_assert(!qdict_haskey(response, "error"));
-    QDECREF(response);
+    qobject_unref(response);
 }
 
 /* add a netfilter to a netdev and then remove the netdev */
@@ -56,7 +57,7 @@ static void remove_netdev_with_one_netfilter(void)
 
     g_assert(response);
     g_assert(!qdict_haskey(response, "error"));
-    QDECREF(response);
+    qobject_unref(response);
 
     response = qmp("{'execute': 'netdev_del',"
                    " 'arguments': {"
@@ -64,7 +65,7 @@ static void remove_netdev_with_one_netfilter(void)
                    "}}");
     g_assert(response);
     g_assert(!qdict_haskey(response, "error"));
-    QDECREF(response);
+    qobject_unref(response);
 
     /* add back the netdev */
     response = qmp("{'execute': 'netdev_add',"
@@ -74,7 +75,7 @@ static void remove_netdev_with_one_netfilter(void)
                    "}}");
     g_assert(response);
     g_assert(!qdict_haskey(response, "error"));
-    QDECREF(response);
+    qobject_unref(response);
 }
 
 /* add multi(2) netfilters to a netdev and then remove them */
@@ -94,7 +95,7 @@ static void add_multi_netfilter(void)
 
     g_assert(response);
     g_assert(!qdict_haskey(response, "error"));
-    QDECREF(response);
+    qobject_unref(response);
 
     response = qmp("{'execute': 'object-add',"
                    " 'arguments': {"
@@ -108,7 +109,7 @@ static void add_multi_netfilter(void)
 
     g_assert(response);
     g_assert(!qdict_haskey(response, "error"));
-    QDECREF(response);
+    qobject_unref(response);
 
     response = qmp("{'execute': 'object-del',"
                    " 'arguments': {"
@@ -116,7 +117,7 @@ static void add_multi_netfilter(void)
                    "}}");
     g_assert(response);
     g_assert(!qdict_haskey(response, "error"));
-    QDECREF(response);
+    qobject_unref(response);
 
     response = qmp("{'execute': 'object-del',"
                    " 'arguments': {"
@@ -124,7 +125,7 @@ static void add_multi_netfilter(void)
                    "}}");
     g_assert(response);
     g_assert(!qdict_haskey(response, "error"));
-    QDECREF(response);
+    qobject_unref(response);
 }
 
 /* add multi(2) netfilters to a netdev and then remove the netdev */
@@ -144,7 +145,7 @@ static void remove_netdev_with_multi_netfilter(void)
 
     g_assert(response);
     g_assert(!qdict_haskey(response, "error"));
-    QDECREF(response);
+    qobject_unref(response);
 
     response = qmp("{'execute': 'object-add',"
                    " 'arguments': {"
@@ -158,7 +159,7 @@ static void remove_netdev_with_multi_netfilter(void)
 
     g_assert(response);
     g_assert(!qdict_haskey(response, "error"));
-    QDECREF(response);
+    qobject_unref(response);
 
     response = qmp("{'execute': 'netdev_del',"
                    " 'arguments': {"
@@ -166,7 +167,7 @@ static void remove_netdev_with_multi_netfilter(void)
                    "}}");
     g_assert(response);
     g_assert(!qdict_haskey(response, "error"));
-    QDECREF(response);
+    qobject_unref(response);
 
     /* add back the netdev */
     response = qmp("{'execute': 'netdev_add',"
@@ -176,12 +177,18 @@ static void remove_netdev_with_multi_netfilter(void)
                    "}}");
     g_assert(response);
     g_assert(!qdict_haskey(response, "error"));
-    QDECREF(response);
+    qobject_unref(response);
 }
 
 int main(int argc, char **argv)
 {
     int ret;
+    char *args;
+    const char *devstr = "e1000";
+
+    if (g_str_equal(qtest_get_arch(), "s390x")) {
+        devstr = "virtio-net-ccw";
+    }
 
     g_test_init(&argc, &argv, NULL);
     qtest_add_func("/netfilter/addremove_one", add_one_netfilter);
@@ -191,10 +198,13 @@ int main(int argc, char **argv)
     qtest_add_func("/netfilter/remove_netdev_multi",
                    remove_netdev_with_multi_netfilter);
 
-    qtest_start("-netdev user,id=qtest-bn0 -device e1000,netdev=qtest-bn0");
+    args = g_strdup_printf("-netdev user,id=qtest-bn0 "
+                           "-device %s,netdev=qtest-bn0", devstr);
+    qtest_start(args);
     ret = g_test_run();
 
     qtest_end();
+    g_free(args);
 
     return ret;
 }

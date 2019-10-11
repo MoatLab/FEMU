@@ -16,7 +16,7 @@
 static inline void log_cpu_state(CPUState *cpu, int flags)
 {
     if (qemu_log_enabled()) {
-        cpu_dump_state(cpu, qemu_logfile, fprintf, flags);
+        cpu_dump_state(cpu, qemu_logfile, flags);
     }
 }
 
@@ -38,9 +38,9 @@ static inline void log_cpu_state_mask(int mask, CPUState *cpu, int flags)
 #ifdef NEED_CPU_H
 /* disas() and target_disas() to qemu_logfile: */
 static inline void log_target_disas(CPUState *cpu, target_ulong start,
-                                    target_ulong len, int flags)
+                                    target_ulong len)
 {
-    target_disas(qemu_logfile, cpu, start, len, flags);
+    target_disas(qemu_logfile, cpu, start, len);
 }
 
 static inline void log_disas(void *code, unsigned long size)

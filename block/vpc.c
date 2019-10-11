@@ -22,15 +22,20 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+
 #include "qemu/osdep.h"
 #include "qapi/error.h"
-#include "qemu-common.h"
 #include "block/block_int.h"
+#include "block/qdict.h"
 #include "sysemu/block-backend.h"
 #include "qemu/module.h"
-#include "migration/migration.h"
+#include "qemu/option.h"
+#include "migration/blocker.h"
 #include "qemu/bswap.h"
 #include "qemu/uuid.h"
+#include "qapi/qmp/qdict.h"
+#include "qapi/qobject-input-visitor.h"
+#include "qapi/qapi-visit-block-core.h"
 
 /**************************************************************/
 
@@ -165,6 +170,8 @@ static QemuOptsList vpc_runtime_opts = {
     }
 };
 
+static QemuOptsList vpc_create_opts;
+
 static uint32_t vpc_checksum(uint8_t* buf, size_t size)
 {
     uint32_t res = 0;
@@ -180,7 +187,7 @@ static uint32_t vpc_checksum(uint8_t* buf, size_t size)
 static int vpc_probe(const uint8_t *buf, int buf_size, const char *filename)
 {
     if (buf_size >= 8 && !strncmp((char *)buf, "conectix", 8))
-	return 100;
+        return 100;
     return 0;
 }
 
@@ -219,6 +226,7 @@ static int vpc_open(BlockDriverState *bs, QDict *options, int flags,
     uint64_t pagetable_size;
     int disk_type = VHD_DYNAMIC;
     int ret;
+    int64_t bs_size;
 
     bs->file = bdrv_open_child(NULL, options, "file", bs, &child_file,
                                false, errp);
@@ -276,9 +284,11 @@ static int vpc_open(BlockDriverState *bs, QDict *options, int flags,
 
     checksum = be32_to_cpu(footer->checksum);
     footer->checksum = 0;
-    if (vpc_checksum(s->footer_buf, HEADER_SIZE) != checksum)
-        fprintf(stderr, "block-vpc: The header checksum of '%s' is "
-            "incorrect.\n", bs->filename);
+    if (vpc_checksum(s->footer_buf, HEADER_SIZE) != checksum) {
+        error_setg(errp, "Incorrect header checksum");
+        ret = -EINVAL;
+        goto fail;
+    }
 
     /* Write 'checksum' back to footer, or else will leave it with zero. */
     footer->checksum = cpu_to_be32(checksum);
@@ -411,7 +421,13 @@ static int vpc_open(BlockDriverState *bs, QDict *options, int flags,
             }
         }
 
-        if (s->free_data_block_offset > bdrv_getlength(bs->file->bs)) {
+        bs_size = bdrv_getlength(bs->file->bs);
+        if (bs_size < 0) {
+            error_setg_errno(errp, -bs_size, "Unable to learn image size");
+            ret = bs_size;
+            goto fail;
+        }
+        if (s->free_data_block_offset > bs_size) {
             error_setg(errp, "block-vpc: free_data_block_offset points after "
                              "the end of file. The image has been truncated.");
             ret = -EINVAL;
@@ -440,10 +456,12 @@ static int vpc_open(BlockDriverState *bs, QDict *options, int flags,
     }
 
     qemu_co_mutex_init(&s->lock);
+    qemu_opts_del(opts);
 
     return 0;
 
 fail:
+    qemu_opts_del(opts);
     qemu_vfree(s->pagetable);
 #ifdef CACHE
     g_free(s->pageentry_u8);
@@ -460,16 +478,22 @@ static int vpc_reopen_prepare(BDRVReopenState *state,
 /*
  * Returns the absolute byte offset of the given sector in the image file.
  * If the sector is not allocated, -1 is returned instead.
+ * If an error occurred trying to write an updated block bitmap back to
+ * the file, -2 is returned, and the error value is written to *err.
+ * This can only happen for a write operation.
  *
  * The parameter write must be 1 if the offset will be used for a write
  * operation (the block bitmaps is updated then), 0 otherwise.
+ * If write is true then err must not be NULL.
  */
 static inline int64_t get_image_offset(BlockDriverState *bs, uint64_t offset,
-                                       bool write)
+                                       bool write, int *err)
 {
     BDRVVPCState *s = bs->opaque;
     uint64_t bitmap_offset, block_offset;
     uint32_t pagetable_index, offset_in_block;
+
+    assert(!(write && err == NULL));
 
     pagetable_index = offset / s->block_size;
     offset_in_block = offset % s->block_size;
@@ -487,19 +511,18 @@ static inline int64_t get_image_offset(BlockDriverState *bs, uint64_t offset,
        correctness. */
     if (write && (s->last_bitmap_offset != bitmap_offset)) {
         uint8_t bitmap[s->bitmap_size];
+        int r;
 
         s->last_bitmap_offset = bitmap_offset;
         memset(bitmap, 0xff, s->bitmap_size);
-        bdrv_pwrite_sync(bs->file, bitmap_offset, bitmap, s->bitmap_size);
+        r = bdrv_pwrite_sync(bs->file, bitmap_offset, bitmap, s->bitmap_size);
+        if (r < 0) {
+            *err = r;
+            return -2;
+        }
     }
 
     return block_offset;
-}
-
-static inline int64_t get_sector_offset(BlockDriverState *bs,
-                                        int64_t sector_num, bool write)
-{
-    return get_image_offset(bs, sector_num * BDRV_SECTOR_SIZE, write);
 }
 
 /*
@@ -567,7 +590,7 @@ static int64_t alloc_block(BlockDriverState* bs, int64_t offset)
     if (ret < 0)
         goto fail;
 
-    return get_image_offset(bs, offset, false);
+    return get_image_offset(bs, offset, false, NULL);
 
 fail:
     s->free_data_block_offset -= (s->block_size + s->bitmap_size);
@@ -607,7 +630,7 @@ vpc_co_preadv(BlockDriverState *bs, uint64_t offset, uint64_t bytes,
     qemu_iovec_init(&local_qiov, qiov->niov);
 
     while (bytes > 0) {
-        image_offset = get_image_offset(bs, offset, false);
+        image_offset = get_image_offset(bs, offset, false, NULL);
         n_bytes = MIN(bytes, s->block_size - (offset % s->block_size));
 
         if (image_offset == -1) {
@@ -616,8 +639,10 @@ vpc_co_preadv(BlockDriverState *bs, uint64_t offset, uint64_t bytes,
             qemu_iovec_reset(&local_qiov);
             qemu_iovec_concat(&local_qiov, qiov, bytes_done, n_bytes);
 
+            qemu_co_mutex_unlock(&s->lock);
             ret = bdrv_co_preadv(bs->file, image_offset, n_bytes,
                                  &local_qiov, 0);
+            qemu_co_mutex_lock(&s->lock);
             if (ret < 0) {
                 goto fail;
             }
@@ -644,7 +669,7 @@ vpc_co_pwritev(BlockDriverState *bs, uint64_t offset, uint64_t bytes,
     int64_t image_offset;
     int64_t n_bytes;
     int64_t bytes_done = 0;
-    int ret;
+    int ret = 0;
     VHDFooter *footer =  (VHDFooter *) s->footer_buf;
     QEMUIOVector local_qiov;
 
@@ -656,7 +681,11 @@ vpc_co_pwritev(BlockDriverState *bs, uint64_t offset, uint64_t bytes,
     qemu_iovec_init(&local_qiov, qiov->niov);
 
     while (bytes > 0) {
-        image_offset = get_image_offset(bs, offset, true);
+        image_offset = get_image_offset(bs, offset, true, &ret);
+        if (image_offset == -2) {
+            /* Failed to write block bitmap: can't proceed with write */
+            goto fail;
+        }
         n_bytes = MIN(bytes, s->block_size - (offset % s->block_size));
 
         if (image_offset == -1) {
@@ -670,8 +699,10 @@ vpc_co_pwritev(BlockDriverState *bs, uint64_t offset, uint64_t bytes,
         qemu_iovec_reset(&local_qiov);
         qemu_iovec_concat(&local_qiov, qiov, bytes_done, n_bytes);
 
+        qemu_co_mutex_unlock(&s->lock);
         ret = bdrv_co_pwritev(bs->file, image_offset, n_bytes,
                               &local_qiov, 0);
+        qemu_co_mutex_lock(&s->lock);
         if (ret < 0) {
             goto fail;
         }
@@ -689,49 +720,57 @@ fail:
     return ret;
 }
 
-static int64_t coroutine_fn vpc_co_get_block_status(BlockDriverState *bs,
-        int64_t sector_num, int nb_sectors, int *pnum, BlockDriverState **file)
+static int coroutine_fn vpc_co_block_status(BlockDriverState *bs,
+                                            bool want_zero,
+                                            int64_t offset, int64_t bytes,
+                                            int64_t *pnum, int64_t *map,
+                                            BlockDriverState **file)
 {
     BDRVVPCState *s = bs->opaque;
     VHDFooter *footer = (VHDFooter*) s->footer_buf;
-    int64_t start, offset;
+    int64_t image_offset;
     bool allocated;
-    int n;
+    int ret;
+    int64_t n;
 
     if (be32_to_cpu(footer->type) == VHD_FIXED) {
-        *pnum = nb_sectors;
+        *pnum = bytes;
+        *map = offset;
         *file = bs->file->bs;
-        return BDRV_BLOCK_RAW | BDRV_BLOCK_OFFSET_VALID | BDRV_BLOCK_DATA |
-               (sector_num << BDRV_SECTOR_BITS);
+        return BDRV_BLOCK_RAW | BDRV_BLOCK_OFFSET_VALID;
     }
 
-    offset = get_sector_offset(bs, sector_num, 0);
-    start = offset;
-    allocated = (offset != -1);
+    qemu_co_mutex_lock(&s->lock);
+
+    image_offset = get_image_offset(bs, offset, false, NULL);
+    allocated = (image_offset != -1);
     *pnum = 0;
+    ret = 0;
 
     do {
         /* All sectors in a block are contiguous (without using the bitmap) */
-        n = ROUND_UP(sector_num + 1, s->block_size / BDRV_SECTOR_SIZE)
-          - sector_num;
-        n = MIN(n, nb_sectors);
+        n = ROUND_UP(offset + 1, s->block_size) - offset;
+        n = MIN(n, bytes);
 
         *pnum += n;
-        sector_num += n;
-        nb_sectors -= n;
+        offset += n;
+        bytes -= n;
         /* *pnum can't be greater than one block for allocated
          * sectors since there is always a bitmap in between. */
         if (allocated) {
             *file = bs->file->bs;
-            return BDRV_BLOCK_DATA | BDRV_BLOCK_OFFSET_VALID | start;
-        }
-        if (nb_sectors == 0) {
+            *map = image_offset;
+            ret = BDRV_BLOCK_DATA | BDRV_BLOCK_OFFSET_VALID;
             break;
         }
-        offset = get_sector_offset(bs, sector_num, 0);
-    } while (offset == -1);
+        if (bytes == 0) {
+            break;
+        }
+        image_offset = get_image_offset(bs, offset, false, NULL);
+    } while (image_offset == -1);
 
-    return 0;
+    qemu_co_mutex_unlock(&s->lock);
+    return ret;
 }
 
 /*
@@ -760,7 +799,7 @@ static int calculate_geometry(int64_t total_sectors, uint16_t* cyls,
     } else {
         *secs_per_cyl = 17;
         cyls_times_heads = total_sectors / *secs_per_cyl;
-        *heads = (cyls_times_heads + 1023) / 1024;
+        *heads = DIV_ROUND_UP(cyls_times_heads, 1024);
 
         if (*heads < 4) {
             *heads = 4;
@@ -813,7 +852,7 @@ static int create_dynamic_disk(BlockBackend *blk, uint8_t *buf,
     offset = 3 * 512;
 
     memset(buf, 0xFF, 512);
-    for (i = 0; i < (num_bat_entries * 4 + 511) / 512; i++) {
+    for (i = 0; i < DIV_ROUND_UP(num_bat_entries * 4, 512); i++) {
         ret = blk_pwrite(blk, offset, buf, 512, 0);
         if (ret < 0) {
             goto fail;
@@ -851,79 +890,40 @@ static int create_dynamic_disk(BlockBackend *blk, uint8_t *buf,
 }
 
 static int create_fixed_disk(BlockBackend *blk, uint8_t *buf,
-                             int64_t total_size)
+                             int64_t total_size, Error **errp)
 {
     int ret;
 
     /* Add footer to total size */
     total_size += HEADER_SIZE;
 
-    ret = blk_truncate(blk, total_size);
+    ret = blk_truncate(blk, total_size, PREALLOC_MODE_OFF, errp);
     if (ret < 0) {
         return ret;
     }
 
     ret = blk_pwrite(blk, total_size - HEADER_SIZE, buf, HEADER_SIZE, 0);
     if (ret < 0) {
+        error_setg_errno(errp, -ret, "Unable to write VHD header");
         return ret;
     }
 
     return ret;
 }
 
-static int vpc_create(const char *filename, QemuOpts *opts, Error **errp)
+static int calculate_rounded_image_size(BlockdevCreateOptionsVpc *vpc_opts,
+                                        uint16_t *out_cyls,
+                                        uint8_t *out_heads,
+                                        uint8_t *out_secs_per_cyl,
+                                        int64_t *out_total_sectors,
+                                        Error **errp)
 {
-    uint8_t buf[1024];
-    VHDFooter *footer = (VHDFooter *) buf;
-    char *disk_type_param;
-    int i;
+    int64_t total_size = vpc_opts->size;
     uint16_t cyls = 0;
     uint8_t heads = 0;
     uint8_t secs_per_cyl = 0;
     int64_t total_sectors;
-    int64_t total_size;
-    int disk_type;
-    int ret = -EIO;
-    bool force_size;
-    Error *local_err = NULL;
-    BlockBackend *blk = NULL;
-
-    /* Read out options */
-    total_size = ROUND_UP(qemu_opt_get_size_del(opts, BLOCK_OPT_SIZE, 0),
-                          BDRV_SECTOR_SIZE);
-    disk_type_param = qemu_opt_get_del(opts, BLOCK_OPT_SUBFMT);
-    if (disk_type_param) {
-        if (!strcmp(disk_type_param, "dynamic")) {
-            disk_type = VHD_DYNAMIC;
-        } else if (!strcmp(disk_type_param, "fixed")) {
-            disk_type = VHD_FIXED;
-        } else {
-            error_setg(errp, "Invalid disk type, %s", disk_type_param);
-            ret = -EINVAL;
-            goto out;
-        }
-    } else {
-        disk_type = VHD_DYNAMIC;
-    }
-
-    force_size = qemu_opt_get_bool_del(opts, VPC_OPT_FORCE_SIZE, false);
-
-    ret = bdrv_create_file(filename, opts, &local_err);
-    if (ret < 0) {
-        error_propagate(errp, local_err);
-        goto out;
-    }
-
-    blk = blk_new_open(filename, NULL, NULL,
-                       BDRV_O_RDWR | BDRV_O_RESIZE | BDRV_O_PROTOCOL,
-                       &local_err);
-    if (blk == NULL) {
-        error_propagate(errp, local_err);
-        ret = -EIO;
-        goto out;
-    }
-
-    blk_set_allow_write_beyond_eof(blk, true);
+    int i;
 
     /*
      * Calculate matching total_size and geometry. Increase the number of
@@ -934,7 +934,7 @@ static int vpc_create(const char *filename, QemuOpts *opts, Error **errp)
      * we set the geometry to 65535 x 16 x 255 (CxHxS) sectors and use
      * the image size from the VHD footer to calculate total_sectors.
      */
-    if (force_size) {
+    if (vpc_opts->force_size) {
         /* This will force the use of total_size for sector count, below */
         cyls         = VHD_CHS_MAX_C;
         heads        = VHD_CHS_MAX_H;
@@ -951,19 +951,97 @@ static int vpc_create(const char *filename, QemuOpts *opts, Error **errp)
         /* Allow a maximum disk size of 2040 GiB */
         if (total_sectors > VHD_MAX_SECTORS) {
             error_setg(errp, "Disk size is too large, max size is 2040 GiB");
-            ret = -EFBIG;
-            goto out;
+            return -EFBIG;
         }
     } else {
-        total_sectors = (int64_t)cyls * heads * secs_per_cyl;
-        total_size = total_sectors * BDRV_SECTOR_SIZE;
+        total_sectors = (int64_t) cyls * heads * secs_per_cyl;
+    }
+
+    *out_total_sectors = total_sectors;
+    if (out_cyls) {
+        *out_cyls = cyls;
+        *out_heads = heads;
+        *out_secs_per_cyl = secs_per_cyl;
+    }
+
+    return 0;
+}
+
+static int coroutine_fn vpc_co_create(BlockdevCreateOptions *opts,
+                                      Error **errp)
+{
+    BlockdevCreateOptionsVpc *vpc_opts;
+    BlockBackend *blk = NULL;
+    BlockDriverState *bs = NULL;
+
+    uint8_t buf[1024];
+    VHDFooter *footer = (VHDFooter *) buf;
+    uint16_t cyls = 0;
+    uint8_t heads = 0;
+    uint8_t secs_per_cyl = 0;
+    int64_t total_sectors;
+    int64_t total_size;
+    int disk_type;
+    int ret = -EIO;
+    QemuUUID uuid;
+
+    assert(opts->driver == BLOCKDEV_DRIVER_VPC);
+    vpc_opts = &opts->u.vpc;
+
+    /* Validate options and set default values */
+    total_size = vpc_opts->size;
+
+    if (!vpc_opts->has_subformat) {
+        vpc_opts->subformat = BLOCKDEV_VPC_SUBFORMAT_DYNAMIC;
+    }
+    switch (vpc_opts->subformat) {
+    case BLOCKDEV_VPC_SUBFORMAT_DYNAMIC:
+        disk_type = VHD_DYNAMIC;
+        break;
+    case BLOCKDEV_VPC_SUBFORMAT_FIXED:
+        disk_type = VHD_FIXED;
+        break;
+    default:
+        g_assert_not_reached();
+    }
+
+    /* Create BlockBackend to write to the image */
+    bs = bdrv_open_blockdev_ref(vpc_opts->file, errp);
+    if (bs == NULL) {
+        return -EIO;
+    }
+
+    blk = blk_new(bdrv_get_aio_context(bs),
+                  BLK_PERM_WRITE | BLK_PERM_RESIZE, BLK_PERM_ALL);
+    ret = blk_insert_bs(blk, bs, errp);
+    if (ret < 0) {
+        goto out;
+    }
+    blk_set_allow_write_beyond_eof(blk, true);
+
+    /* Get geometry and check that it matches the image size*/
+    ret = calculate_rounded_image_size(vpc_opts, &cyls, &heads, &secs_per_cyl,
+                                       &total_sectors, errp);
+    if (ret < 0) {
+        goto out;
+    }
+
+    if (total_size != total_sectors * BDRV_SECTOR_SIZE) {
+        error_setg(errp, "The requested image size cannot be represented in "
+                         "CHS geometry");
+        error_append_hint(errp, "Try size=%llu or force-size=on (the "
+                                "latter makes the image incompatible with "
+                                "Virtual PC)",
+                          total_sectors * BDRV_SECTOR_SIZE);
+        ret = -EINVAL;
+        goto out;
     }
 
     /* Prepare the Hard Disk Footer */
     memset(buf, 0, 1024);
 
     memcpy(footer->creator, "conectix", 8);
-    if (force_size) {
+    if (vpc_opts->force_size) {
         memcpy(footer->creator_app, "qem2", 4);
     } else {
         memcpy(footer->creator_app, "qemu", 4);
@@ -990,24 +1068,109 @@ static int vpc_create(const char *filename, QemuOpts *opts, Error **errp)
 
     footer->type = cpu_to_be32(disk_type);
 
-    qemu_uuid_generate(&footer->uuid);
+    qemu_uuid_generate(&uuid);
+    footer->uuid = uuid;
 
     footer->checksum = cpu_to_be32(vpc_checksum(buf, HEADER_SIZE));
 
     if (disk_type == VHD_DYNAMIC) {
         ret = create_dynamic_disk(blk, buf, total_sectors);
+        if (ret < 0) {
+            error_setg(errp, "Unable to create or write VHD header");
+        }
     } else {
-        ret = create_fixed_disk(blk, buf, total_size);
-    }
-    if (ret < 0) {
-        error_setg(errp, "Unable to create or write VHD header");
+        ret = create_fixed_disk(blk, buf, total_size, errp);
     }
 
 out:
     blk_unref(blk);
-    g_free(disk_type_param);
+    bdrv_unref(bs);
     return ret;
 }
+
+static int coroutine_fn vpc_co_create_opts(const char *filename,
+                                           QemuOpts *opts, Error **errp)
+{
+    BlockdevCreateOptions *create_options = NULL;
+    QDict *qdict;
+    Visitor *v;
+    BlockDriverState *bs = NULL;
+    Error *local_err = NULL;
+    int ret;
+
+    static const QDictRenames opt_renames[] = {
+        { VPC_OPT_FORCE_SIZE,           "force-size" },
+        { NULL, NULL },
+    };
+
+    /* Parse options and convert legacy syntax */
+    qdict = qemu_opts_to_qdict_filtered(opts, NULL, &vpc_create_opts, true);
+
+    if (!qdict_rename_keys(qdict, opt_renames, errp)) {
+        ret = -EINVAL;
+        goto fail;
+    }
+
+    /* Create and open the file (protocol layer) */
+    ret = bdrv_create_file(filename, opts, &local_err);
+    if (ret < 0) {
+        error_propagate(errp, local_err);
+        goto fail;
+    }
+
+    bs = bdrv_open(filename, NULL, NULL,
+                   BDRV_O_RDWR | BDRV_O_RESIZE | BDRV_O_PROTOCOL, errp);
+    if (bs == NULL) {
+        ret = -EIO;
+        goto fail;
+    }
+
+    /* Now get the QAPI type BlockdevCreateOptions */
+    qdict_put_str(qdict, "driver", "vpc");
+    qdict_put_str(qdict, "file", bs->node_name);
+
+    v = qobject_input_visitor_new_flat_confused(qdict, errp);
+    if (!v) {
+        ret = -EINVAL;
+        goto fail;
+    }
+
+    visit_type_BlockdevCreateOptions(v, NULL, &create_options, &local_err);
+    visit_free(v);
+
+    if (local_err) {
+        error_propagate(errp, local_err);
+        ret = -EINVAL;
+        goto fail;
+    }
+
+    /* Silently round up size */
+    assert(create_options->driver == BLOCKDEV_DRIVER_VPC);
+    create_options->u.vpc.size =
+        ROUND_UP(create_options->u.vpc.size, BDRV_SECTOR_SIZE);
+
+    if (!create_options->u.vpc.force_size) {
+        int64_t total_sectors;
+        ret = calculate_rounded_image_size(&create_options->u.vpc, NULL, NULL,
+                                           NULL, &total_sectors, errp);
+        if (ret < 0) {
+            goto fail;
+        }
+
+        create_options->u.vpc.size = total_sectors * BDRV_SECTOR_SIZE;
+    }
+
+
+    /* Create the vpc image (format layer) */
+    ret = vpc_co_create(create_options, errp);
+
+fail:
+    qobject_unref(qdict);
+    bdrv_unref(bs);
+    qapi_free_BlockdevCreateOptions(create_options);
+    return ret;
+}
+
 
 static int vpc_has_zero_init(BlockDriverState *bs)
 {
@@ -1060,6 +1223,12 @@ static QemuOptsList vpc_create_opts = {
     }
 };
 
+static const char *const vpc_strong_runtime_opts[] = {
+    VPC_OPT_SIZE_CALC,
+
+    NULL
+};
+
 static BlockDriver bdrv_vpc = {
     .format_name    = "vpc",
     .instance_size  = sizeof(BDRVVPCState),
@@ -1069,16 +1238,18 @@ static BlockDriver bdrv_vpc = {
     .bdrv_close             = vpc_close,
     .bdrv_reopen_prepare    = vpc_reopen_prepare,
     .bdrv_child_perm        = bdrv_format_default_perms,
-    .bdrv_create            = vpc_create,
+    .bdrv_co_create         = vpc_co_create,
+    .bdrv_co_create_opts    = vpc_co_create_opts,
 
     .bdrv_co_preadv             = vpc_co_preadv,
     .bdrv_co_pwritev            = vpc_co_pwritev,
-    .bdrv_co_get_block_status   = vpc_co_get_block_status,
+    .bdrv_co_block_status       = vpc_co_block_status,
 
     .bdrv_get_info          = vpc_get_info,
 
     .create_opts            = &vpc_create_opts,
     .bdrv_has_zero_init     = vpc_has_zero_init,
+    .strong_runtime_opts    = vpc_strong_runtime_opts,
 };
 
 static void bdrv_vpc_init(void)

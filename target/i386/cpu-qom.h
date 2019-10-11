@@ -36,18 +36,12 @@
 #define X86_CPU_GET_CLASS(obj) \
     OBJECT_GET_CLASS(X86CPUClass, (obj), TYPE_X86_CPU)
 
-/**
- * X86CPUDefinition:
- *
- * CPU model definition data that was not converted to QOM per-subclass
- * property defaults yet.
- */
-typedef struct X86CPUDefinition X86CPUDefinition;
+typedef struct X86CPUModel X86CPUModel;
 
 /**
  * X86CPUClass:
  * @cpu_def: CPU model definition
- * @kvm_required: Whether CPU model requires KVM to be enabled.
+ * @host_cpuid_required: Whether CPU model requires cpuid from host.
  * @ordering: Ordering on the "-cpu help" CPU model list.
  * @migration_safe: See CpuDefinitionInfo::migration_safe
  * @static_model: See CpuDefinitionInfo::static
@@ -64,9 +58,9 @@ typedef struct X86CPUClass {
     /* CPU definition, automatically loaded by instance_init if not NULL.
      * Should be eventually replaced by subclass-specific property defaults.
      */
-    X86CPUDefinition *cpu_def;
+    X86CPUModel *model;
 
-    bool kvm_required;
+    bool host_cpuid_required;
     int ordering;
     bool migration_safe;
     bool static_model;

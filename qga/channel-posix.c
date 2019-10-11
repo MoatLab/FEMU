@@ -2,7 +2,7 @@
 #include <termios.h>
 #include "qapi/error.h"
 #include "qemu/sockets.h"
-#include "qga/channel.h"
+#include "channel.h"
 
 #ifdef CONFIG_SOLARIS
 #include <stropts.h>
@@ -190,7 +190,7 @@ static gboolean ga_channel_open(GAChannel *c, const gchar *path,
         if (fd < 0) {
             Error *local_err = NULL;
 
-            fd = unix_listen(path, NULL, strlen(path), &local_err);
+            fd = unix_listen(path, &local_err);
             if (local_err != NULL) {
                 g_critical("%s", error_get_pretty(local_err));
                 error_free(local_err);

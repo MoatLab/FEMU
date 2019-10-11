@@ -6,7 +6,7 @@ Machinery for generating tracing-related intermediate files.
 """
 
 __author__     = "Lluís Vilanova <vilanova@ac.upc.edu>"
-__copyright__  = "Copyright 2012-2016, Lluís Vilanova <vilanova@ac.upc.edu>"
+__copyright__  = "Copyright 2012-2017, Lluís Vilanova <vilanova@ac.upc.edu>"
 __license__    = "GPL version 2 or (at your option) any later version"
 
 __maintainer__ = "Stefan Hajnoczi"
@@ -41,6 +41,49 @@ def out(*lines, **kwargs):
     lines = [ l % kwargs for l in lines ]
     sys.stdout.writelines("\n".join(lines) + "\n")
 
+# We only want to allow standard C types or fixed sized
+# integer types. We don't want QEMU specific types
+# as we can't assume trace backends can resolve all the
+# typedefs
+ALLOWED_TYPES = [
+    "int",
+    "long",
+    "short",
+    "char",
+    "bool",
+    "unsigned",
+    "signed",
+    "int8_t",
+    "uint8_t",
+    "int16_t",
+    "uint16_t",
+    "int32_t",
+    "uint32_t",
+    "int64_t",
+    "uint64_t",
+    "void",
+    "size_t",
+    "ssize_t",
+    "uintptr_t",
+    "ptrdiff_t",
+    # Magic substitution is done by tracetool
+    "TCGv",
+]
+
+def validate_type(name):
+    bits = name.split(" ")
+    for bit in bits:
+        bit = re.sub("\*", "", bit)
+        if bit == "":
+            continue
+        if bit == "const":
+            continue
+        if bit not in ALLOWED_TYPES:
+            raise ValueError("Argument type '%s' is not in whitelist. "
+                             "Only standard C types and fixed size integer "
+                             "types should be used. struct, union, and "
+                             "other complex pointer types should be "
+                             "declared as 'void *'" % name)
 
 class Arguments:
     """Event arguments description."""
@@ -75,6 +118,8 @@ class Arguments:
         res = []
         for arg in arg_str.split(","):
             arg = arg.strip()
+            if not arg:
+                raise ValueError("Empty argument (did you forget to use 'void'?)")
             if arg == 'void':
                 continue
 
@@ -85,6 +130,7 @@ class Arguments:
             else:
                 arg_type, identifier = arg.rsplit(None, 1)
 
+            validate_type(arg_type)
             res.append((arg_type, identifier))
         return Arguments(res)
 
@@ -173,7 +219,7 @@ class Event(object):
         props : list of str
             Property names.
         fmt : str, list of str
-            Event printing format (or formats).
+            Event printing format string(s).
         args : Arguments
             Event arguments.
         orig : Event or None
@@ -190,6 +236,10 @@ class Event(object):
         self.args = args
         self.event_trans = event_trans
         self.event_exec = event_exec
+
+        if len(args) > 10:
+            raise ValueError("Event '%s' has more than maximum permitted "
+                             "argument count" % name)
 
         if orig is None:
             self.original = weakref.ref(self)
@@ -224,6 +274,10 @@ class Event(object):
         props = groups["props"].split()
         fmt = groups["fmt"]
         fmt_trans = groups["fmt_trans"]
+        if fmt.find("%m") != -1 or fmt_trans.find("%m") != -1:
+            raise ValueError("Event format '%m' is forbidden, pass the error "
+                             "as an explicit trace argument")
+
         if len(fmt_trans) > 0:
             fmt = [fmt_trans, fmt]
         args = Arguments.build(groups["args"])
@@ -233,9 +287,9 @@ class Event(object):
         if "tcg-exec" in props:
             raise ValueError("Invalid property 'tcg-exec'")
         if "tcg" not in props and not isinstance(fmt, str):
-            raise ValueError("Only events with 'tcg' property can have two formats")
+            raise ValueError("Only events with 'tcg' property can have two format strings")
         if "tcg" in props and isinstance(fmt, str):
-            raise ValueError("Events with 'tcg' property must have two formats")
+            raise ValueError("Events with 'tcg' property must have two format strings")
 
         event = Event(name, props, fmt, args)
 
@@ -255,17 +309,20 @@ class Event(object):
                                           self.name,
                                           self.args,
                                           fmt)
-
-    _FMT = re.compile("(%[\d\.]*\w+|%.*PRI\S+)")
+    # Star matching on PRI is dangerous as one might have multiple
+    # arguments with that format, hence the non-greedy version of it.
+    _FMT = re.compile("(%[\d\.]*\w+|%.*?PRI\S+)")
 
     def formats(self):
-        """List of argument print formats."""
+        """List conversion specifiers in the argument print format string."""
         assert not isinstance(self.fmt, list)
         return self._FMT.findall(self.fmt)
 
     QEMU_TRACE               = "trace_%(name)s"
+    QEMU_TRACE_NOCHECK       = "_nocheck__" + QEMU_TRACE
     QEMU_TRACE_TCG           = QEMU_TRACE + "_tcg"
     QEMU_DSTATE              = "_TRACE_%(NAME)s_DSTATE"
+    QEMU_BACKEND_DSTATE      = "TRACE_%(NAME)s_BACKEND_DSTATE"
     QEMU_EVENT               = "_TRACE_%(NAME)s_EVENT"
 
     def api(self, fmt=None):
@@ -282,25 +339,34 @@ class Event(object):
                      self)
 
 
-def read_events(fobj):
+def read_events(fobj, fname):
     """Generate the output for the given (format, backends) pair.
 
     Parameters
     ----------
     fobj : file
         Event description file.
+    fname : str
+        Name of event file
 
     Returns a list of Event objects
     """
 
     events = []
-    for line in fobj:
+    for lineno, line in enumerate(fobj, 1):
+        if line[-1] != '\n':
+            raise ValueError("%s does not end with a new line" % fname)
         if not line.strip():
             continue
         if line.lstrip().startswith('#'):
             continue
 
-        event = Event.build(line)
+        try:
+            event = Event.build(line)
+        except ValueError as e:
+            arg0 = 'Error at %s:%d: %s' % (fname, lineno, e.args[0])
+            e.args = (arg0,) + e.args[1:]
+            raise
 
         # transform TCG-enabled events
         if "tcg" not in event.properties:

@@ -12,19 +12,53 @@
 #include "sysemu/block-backend.h"
 #include "hw/block/block.h"
 #include "qapi/error.h"
-#include "qemu/error-report.h"
+#include "qapi/qapi-types-block.h"
 
-void blkconf_serial(BlockConf *conf, char **serial)
+/*
+ * Read the entire contents of @blk into @buf.
+ * @blk's contents must be @size bytes, and @size must be at most
+ * BDRV_REQUEST_MAX_BYTES.
+ * On success, return true.
+ * On failure, store an error through @errp and return false.
+ * Note that the error messages do not identify the block backend.
+ * TODO Since callers don't either, this can result in confusing
+ * errors.
+ * This function not intended for actual block devices, which read on
+ * demand.  It's for things like memory devices that (ab)use a block
+ * backend to provide persistence.
+ */
+bool blk_check_size_and_read_all(BlockBackend *blk, void *buf, hwaddr size,
+                                 Error **errp)
 {
-    DriveInfo *dinfo;
+    int64_t blk_len;
+    int ret;
 
-    if (!*serial) {
-        /* try to fall back to value set with legacy -drive serial=... */
-        dinfo = blk_legacy_dinfo(conf->blk);
-        if (dinfo) {
-            *serial = g_strdup(dinfo->serial);
-        }
+    blk_len = blk_getlength(blk);
+    if (blk_len < 0) {
+        error_setg_errno(errp, -blk_len,
+                         "can't get size of block backend");
+        return false;
     }
+    if (blk_len != size) {
+        error_setg(errp, "device requires %" HWADDR_PRIu " bytes, "
+                   "block backend provides %" PRIu64 " bytes",
+                   size, blk_len);
+        return false;
+    }
+
+    /*
+     * We could loop for @size > BDRV_REQUEST_MAX_BYTES, but if we
+     * ever get to the point we want to read *gigabytes* here, we
+     * should probably rework the device to be more like an actual
+     * block device and read only on demand.
+     */
+    assert(size <= BDRV_REQUEST_MAX_BYTES);
+    ret = blk_pread(blk, 0, buf, size);
+    if (ret < 0) {
+        error_setg_errno(errp, -ret, "can't read block backend");
+        return false;
+    }
+    return true;
 }
 
 void blkconf_blocksizes(BlockConf *conf)
@@ -51,7 +85,7 @@ void blkconf_blocksizes(BlockConf *conf)
     }
 }
 
-void blkconf_apply_backend_options(BlockConf *conf, bool readonly,
+bool blkconf_apply_backend_options(BlockConf *conf, bool readonly,
                                    bool resizable, Error **errp)
 {
     BlockBackend *blk = conf->blk;
@@ -76,7 +110,7 @@ void blkconf_apply_backend_options(BlockConf *conf, bool readonly,
 
     ret = blk_set_perm(blk, perm, shared_perm, errp);
     if (ret < 0) {
-        return;
+        return false;
     }
 
     switch (conf->wce) {
@@ -99,26 +133,14 @@ void blkconf_apply_backend_options(BlockConf *conf, bool readonly,
 
     blk_set_enable_write_cache(blk, wce);
     blk_set_on_error(blk, rerror, werror);
+
+    return true;
 }
 
-void blkconf_geometry(BlockConf *conf, int *ptrans,
+bool blkconf_geometry(BlockConf *conf, int *ptrans,
                       unsigned cyls_max, unsigned heads_max, unsigned secs_max,
                       Error **errp)
 {
-    DriveInfo *dinfo;
-
-    if (!conf->cyls && !conf->heads && !conf->secs) {
-        /* try to fall back to value set with legacy -drive cyls=... */
-        dinfo = blk_legacy_dinfo(conf->blk);
-        if (dinfo) {
-            conf->cyls  = dinfo->cyls;
-            conf->heads = dinfo->heads;
-            conf->secs  = dinfo->secs;
-            if (ptrans) {
-                *ptrans = dinfo->trans;
-            }
-        }
-    }
     if (!conf->cyls && !conf->heads && !conf->secs) {
         hd_geometry_guess(conf->blk,
                           &conf->cyls, &conf->heads, &conf->secs,
@@ -129,15 +151,16 @@ void blkconf_geometry(BlockConf *conf, int *ptrans,
     if (conf->cyls || conf->heads || conf->secs) {
         if (conf->cyls < 1 || conf->cyls > cyls_max) {
             error_setg(errp, "cyls must be between 1 and %u", cyls_max);
-            return;
+            return false;
         }
         if (conf->heads < 1 || conf->heads > heads_max) {
             error_setg(errp, "heads must be between 1 and %u", heads_max);
-            return;
+            return false;
         }
         if (conf->secs < 1 || conf->secs > secs_max) {
             error_setg(errp, "secs must be between 1 and %u", secs_max);
-            return;
+            return false;
         }
     }
+    return true;
 }

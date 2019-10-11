@@ -22,8 +22,10 @@
 #include "exec/helper-proto.h"
 #include "qemu/bitops.h"
 
-/* As the byte ordering doesn't matter, i.e. all columns are treated
-   identically, these unions can be used directly.  */
+/*
+ * As the byte ordering doesn't matter, i.e. all columns are treated
+ * identically, these unions can be used directly.
+ */
 typedef union {
     uint8_t  ub[4];
     int8_t   sb[4];
@@ -45,9 +47,9 @@ typedef union {
 } DSP64Value;
 
 /*** MIPS DSP internal functions begin ***/
-#define MIPSDSP_ABS(x) (((x) >= 0) ? x : -x)
-#define MIPSDSP_OVERFLOW_ADD(a, b, c, d) (~(a ^ b) & (a ^ c) & d)
-#define MIPSDSP_OVERFLOW_SUB(a, b, c, d) ((a ^ b) & (a ^ c) & d)
+#define MIPSDSP_ABS(x) (((x) >= 0) ? (x) : -(x))
+#define MIPSDSP_OVERFLOW_ADD(a, b, c, d) (~((a) ^ (b)) & ((a) ^ (c)) & (d))
+#define MIPSDSP_OVERFLOW_SUB(a, b, c, d) (((a) ^ (b)) & ((a) ^ (c)) & (d))
 
 static inline void set_DSPControl_overflow_flag(uint32_t flag, int position,
                                                 CPUMIPSState *env)
@@ -1047,47 +1049,47 @@ static inline int32_t mipsdsp_cmpu_lt(uint32_t a, uint32_t b)
 
 #define MIPSDSP_SPLIT32_8(num, a, b, c, d)  \
     do {                                    \
-        a = (num >> 24) & MIPSDSP_Q0;       \
-        b = (num >> 16) & MIPSDSP_Q0;       \
-        c = (num >> 8) & MIPSDSP_Q0;        \
-        d = num & MIPSDSP_Q0;               \
+        a = ((num) >> 24) & MIPSDSP_Q0;     \
+        b = ((num) >> 16) & MIPSDSP_Q0;     \
+        c = ((num) >> 8) & MIPSDSP_Q0;      \
+        d = (num) & MIPSDSP_Q0;             \
     } while (0)
 
 #define MIPSDSP_SPLIT32_16(num, a, b)       \
     do {                                    \
-        a = (num >> 16) & MIPSDSP_LO;       \
-        b = num & MIPSDSP_LO;               \
+        a = ((num) >> 16) & MIPSDSP_LO;     \
+        b = (num) & MIPSDSP_LO;             \
     } while (0)
 
-#define MIPSDSP_RETURN32_8(a, b, c, d)  ((target_long)(int32_t) \
-                                         (((uint32_t)a << 24) | \
-                                         (((uint32_t)b << 16) | \
-                                         (((uint32_t)c << 8) |  \
-                                          ((uint32_t)d & 0xFF)))))
-#define MIPSDSP_RETURN32_16(a, b)       ((target_long)(int32_t) \
-                                         (((uint32_t)a << 16) | \
-                                          ((uint32_t)b & 0xFFFF)))
+#define MIPSDSP_RETURN32_8(a, b, c, d)  ((target_long)(int32_t)         \
+                                         (((uint32_t)(a) << 24) |       \
+                                          ((uint32_t)(b) << 16) |       \
+                                          ((uint32_t)(c) << 8) |        \
+                                          ((uint32_t)(d) & 0xFF)))
+#define MIPSDSP_RETURN32_16(a, b)       ((target_long)(int32_t)         \
+                                         (((uint32_t)(a) << 16) |       \
+                                          ((uint32_t)(b) & 0xFFFF)))
 
 #ifdef TARGET_MIPS64
 #define MIPSDSP_SPLIT64_16(num, a, b, c, d)  \
     do {                                     \
-        a = (num >> 48) & MIPSDSP_LO;        \
-        b = (num >> 32) & MIPSDSP_LO;        \
-        c = (num >> 16) & MIPSDSP_LO;        \
-        d = num & MIPSDSP_LO;                \
+        a = ((num) >> 48) & MIPSDSP_LO;      \
+        b = ((num) >> 32) & MIPSDSP_LO;      \
+        c = ((num) >> 16) & MIPSDSP_LO;      \
+        d = (num) & MIPSDSP_LO;              \
     } while (0)
 
 #define MIPSDSP_SPLIT64_32(num, a, b)       \
     do {                                    \
-        a = (num >> 32) & MIPSDSP_LLO;      \
-        b = num & MIPSDSP_LLO;              \
+        a = ((num) >> 32) & MIPSDSP_LLO;    \
+        b = (num) & MIPSDSP_LLO;            \
     } while (0)
 
-#define MIPSDSP_RETURN64_16(a, b, c, d) (((uint64_t)a << 48) | \
-                                         ((uint64_t)b << 32) | \
-                                         ((uint64_t)c << 16) | \
-                                         (uint64_t)d)
-#define MIPSDSP_RETURN64_32(a, b)       (((uint64_t)a << 32) | (uint64_t)b)
+#define MIPSDSP_RETURN64_16(a, b, c, d) (((uint64_t)(a) << 48) |        \
+                                         ((uint64_t)(b) << 32) |        \
+                                         ((uint64_t)(c) << 16) |        \
+                                         (uint64_t)(d))
+#define MIPSDSP_RETURN64_32(a, b)       (((uint64_t)(a) << 32) | (uint64_t)(b))
 #endif
 
 /** DSP Arithmetic Sub-class insns **/
@@ -1445,9 +1447,15 @@ target_ulong helper_precr_ob_qh(target_ulong rs, target_ulong rt)
     return temp;
 }
 
-#define PRECR_QH_PW(name, var) \
-target_ulong helper_precr_##name##_qh_pw(target_ulong rs, target_ulong rt, \
-                                    uint32_t sa)                      \
+
+/*
+ * In case sa == 0, use rt2, rt0, rs2, rs0.
+ * In case sa != 0, use rt3, rt1, rs3, rs1.
+ */
+#define PRECR_QH_PW(name, var)                                        \
+target_ulong helper_precr_##name##_qh_pw(target_ulong rs,             \
+                                         target_ulong rt,             \
+                                         uint32_t sa)                 \
 {                                                                     \
     uint16_t rs3, rs2, rs1, rs0;                                      \
     uint16_t rt3, rt2, rt1, rt0;                                      \
@@ -1456,8 +1464,6 @@ target_ulong helper_precr_##name##_qh_pw(target_ulong rs, target_ulong rt, \
     MIPSDSP_SPLIT64_16(rs, rs3, rs2, rs1, rs0);                       \
     MIPSDSP_SPLIT64_16(rt, rt3, rt2, rt1, rt0);                       \
                                                                       \
-    /* When sa = 0, we use rt2, rt0, rs2, rs0;                        \
-     * when sa != 0, we use rt3, rt1, rs3, rs1. */                    \
     if (sa == 0) {                                                    \
         tempD = rt2 << var;                                           \
         tempC = rt0 << var;                                           \
@@ -1965,7 +1971,8 @@ SHIFT_PH(shra_r, rnd16_rashift);
 #undef SHIFT_PH
 
 /** DSP Multiply Sub-class insns **/
-/* Return value made up by two 16bits value.
+/*
+ * Return value made up by two 16bits value.
  * FIXME give the macro a better name.
  */
 #define MUL_RETURN32_16_PH(name, func, \
@@ -3274,14 +3281,15 @@ target_ulong helper_dextr_l(target_ulong ac, target_ulong shift,
                             CPUMIPSState *env)
 {
     uint64_t temp[3];
-    target_ulong result;
+    target_ulong ret;
 
     shift = shift & 0x3F;
 
     mipsdsp_rndrashift_acc(temp, ac, shift, env);
-    result = (temp[1] << 63) | (temp[0] >> 1);
 
-    return result;
+    ret = (temp[1] << 63) | (temp[0] >> 1);
+
+    return ret;
 }
 
 target_ulong helper_dextr_r_l(target_ulong ac, target_ulong shift,
@@ -3289,7 +3297,7 @@ target_ulong helper_dextr_r_l(target_ulong ac, target_ulong shift,
 {
     uint64_t temp[3];
     uint32_t temp128;
-    target_ulong result;
+    target_ulong ret;
 
     shift = shift & 0x3F;
     mipsdsp_rndrashift_acc(temp, ac, shift, env);
@@ -3309,9 +3317,9 @@ target_ulong helper_dextr_r_l(target_ulong ac, target_ulong shift,
         set_DSPControl_overflow_flag(1, 23, env);
     }
 
-    result = (temp[1] << 63) | (temp[0] >> 1);
+    ret = (temp[1] << 63) | (temp[0] >> 1);
 
-    return result;
+    return ret;
 }
 
 target_ulong helper_dextr_rs_l(target_ulong ac, target_ulong shift,
@@ -3319,7 +3327,7 @@ target_ulong helper_dextr_rs_l(target_ulong ac, target_ulong shift,
 {
     uint64_t temp[3];
     uint32_t temp128;
-    target_ulong result;
+    target_ulong ret;
 
     shift = shift & 0x3F;
     mipsdsp_rndrashift_acc(temp, ac, shift, env);
@@ -3345,9 +3353,10 @@ target_ulong helper_dextr_rs_l(target_ulong ac, target_ulong shift,
         }
         set_DSPControl_overflow_flag(1, 23, env);
     }
-    result = (temp[1] << 63) | (temp[0] >> 1);
 
-    return result;
+    ret = (temp[1] << 63) | (temp[0] >> 1);
+
+    return ret;
 }
 #endif
 

@@ -24,10 +24,14 @@
 
 #include "qemu/osdep.h"
 
-#include "qemu-common.h"
-#include "migration/migration.h"
+#include "../migration/migration.h"
 #include "migration/vmstate.h"
+#include "migration/qemu-file-types.h"
+#include "../migration/qemu-file.h"
+#include "../migration/qemu-file-channel.h"
+#include "../migration/savevm.h"
 #include "qemu/coroutine.h"
+#include "qemu/module.h"
 #include "io/channel-file.h"
 
 static char temp_file[] = "/tmp/vmst.test.XXXXXX";
@@ -66,7 +70,8 @@ static void save_vmstate(const VMStateDescription *desc, void *obj)
     QEMUFile *f = open_test_file(true);
 
     /* Save file with vmstate */
-    vmstate_save_state(f, desc, obj, NULL);
+    int ret = vmstate_save_state(f, desc, obj, NULL);
+    g_assert(!ret);
     qemu_put_byte(f, QEMU_VM_EOF);
     g_assert(!qemu_file_get_error(f));
     qemu_fclose(f);
@@ -279,6 +284,55 @@ static void test_simple_primitive(void)
     FIELD_EQUAL(i64_2);
 }
 
+typedef struct TestSimpleArray {
+    uint16_t u16_1[3];
+} TestSimpleArray;
+
+/* Object instantiation, we are going to use it in more than one test */
+
+TestSimpleArray obj_simple_arr = {
+    .u16_1 = { 0x42, 0x43, 0x44 },
+};
+
+/* Description of the values.  If you add a primitive type
+   you are expected to add a test here */
+
+static const VMStateDescription vmstate_simple_arr = {
+    .name = "simple/array",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (VMStateField[]) {
+        VMSTATE_UINT16_ARRAY(u16_1, TestSimpleArray, 3),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+uint8_t wire_simple_arr[] = {
+    /* u16_1 */ 0x00, 0x42,
+    /* u16_1 */ 0x00, 0x43,
+    /* u16_1 */ 0x00, 0x44,
+    QEMU_VM_EOF, /* just to ensure we won't get EOF reported prematurely */
+};
+
+static void obj_simple_arr_copy(void *target, void *source)
+{
+    memcpy(target, source, sizeof(TestSimpleArray));
+}
+
+static void test_simple_array(void)
+{
+    TestSimpleArray obj, obj_clone;
+
+    memset(&obj, 0, sizeof(obj));
+    save_vmstate(&vmstate_simple_arr, &obj_simple_arr);
+
+    compare_vmstate(wire_simple_arr, sizeof(wire_simple_arr));
+
+    SUCCESS(load_vmstate(&vmstate_simple_arr, &obj, &obj_clone,
+                         obj_simple_arr_copy, 1, wire_simple_arr,
+                         sizeof(wire_simple_arr)));
+}
+
 typedef struct TestStruct {
     uint32_t a, b, c, e;
     uint64_t d, f;
@@ -377,7 +431,8 @@ static void test_save_noskip(void)
     QEMUFile *fsave = open_test_file(true);
     TestStruct obj = { .a = 1, .b = 2, .c = 3, .d = 4, .e = 5, .f = 6,
                        .skip_c_e = false };
-    vmstate_save_state(fsave, &vmstate_skipping, &obj, NULL);
+    int ret = vmstate_save_state(fsave, &vmstate_skipping, &obj, NULL);
+    g_assert(!ret);
     g_assert(!qemu_file_get_error(fsave));
 
     uint8_t expected[] = {
@@ -398,7 +453,8 @@ static void test_save_skip(void)
     QEMUFile *fsave = open_test_file(true);
     TestStruct obj = { .a = 1, .b = 2, .c = 3, .d = 4, .e = 5, .f = 6,
                        .skip_c_e = true };
-    vmstate_save_state(fsave, &vmstate_skipping, &obj, NULL);
+    int ret = vmstate_save_state(fsave, &vmstate_skipping, &obj, NULL);
+    g_assert(!ret);
     g_assert(!qemu_file_get_error(fsave));
 
     uint8_t expected[] = {
@@ -623,7 +679,7 @@ struct TestQtailqElement {
 
 typedef struct TestQtailq {
     int16_t  i16;
-    QTAILQ_HEAD(TestQtailqHead, TestQtailqElement) q;
+    QTAILQ_HEAD(, TestQtailqElement) q;
     int32_t  i32;
 } TestQtailq;
 
@@ -728,9 +784,9 @@ static void test_load_q(void)
     g_assert_cmpint(eof, ==, QEMU_VM_EOF);
 
     TestQtailqElement *qele_from = QTAILQ_FIRST(&obj_q.q);
-    TestQtailqElement *qlast_from = QTAILQ_LAST(&obj_q.q, TestQtailqHead);
+    TestQtailqElement *qlast_from = QTAILQ_LAST(&obj_q.q);
     TestQtailqElement *qele_to = QTAILQ_FIRST(&tgt.q);
-    TestQtailqElement *qlast_to = QTAILQ_LAST(&tgt.q, TestQtailqHead);
+    TestQtailqElement *qlast_to = QTAILQ_LAST(&tgt.q);
 
     while (1) {
         g_assert_cmpint(qele_to->b, ==, qele_from->b);
@@ -748,7 +804,7 @@ static void test_load_q(void)
     /* clean up */
     TestQtailqElement *qele;
     while (!QTAILQ_EMPTY(&tgt.q)) {
-        qele = QTAILQ_LAST(&tgt.q, TestQtailqHead);
+        qele = QTAILQ_LAST(&tgt.q);
         QTAILQ_REMOVE(&tgt.q, qele, next);
         free(qele);
         qele = NULL;
@@ -761,11 +817,13 @@ typedef struct TmpTestStruct {
     int64_t diff;
 } TmpTestStruct;
 
-static void tmp_child_pre_save(void *opaque)
+static int tmp_child_pre_save(void *opaque)
 {
     struct TmpTestStruct *tts = opaque;
 
     tts->diff = tts->parent->b - tts->parent->a;
+
+    return 0;
 }
 
 static int tmp_child_post_load(void *opaque, int version_id)
@@ -850,8 +908,11 @@ int main(int argc, char **argv)
 
     module_call_init(MODULE_INIT_QOM);
 
+    setenv("QTEST_SILENT_ERRORS", "1", 1);
+
     g_test_init(&argc, &argv, NULL);
     g_test_add_func("/vmstate/simple/primitive", test_simple_primitive);
+    g_test_add_func("/vmstate/simple/array", test_simple_array);
     g_test_add_func("/vmstate/versioned/load/v1", test_load_v1);
     g_test_add_func("/vmstate/versioned/load/v2", test_load_v2);
     g_test_add_func("/vmstate/field_exists/load/noskip", test_load_noskip);

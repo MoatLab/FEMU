@@ -1,3 +1,6 @@
+#ifndef LINUX_USER_MICROBLAZE_SYSCALL_NR_H
+#define LINUX_USER_MICROBLAZE_SYSCALL_NR_H
+
 #define TARGET_NR_restart_syscall	0 /* ok */
 #define TARGET_NR_exit		1 /* ok */
 #define TARGET_NR_fork		2 /* not for no MMU - weird */
@@ -363,7 +366,7 @@
 #define TARGET_NR_shutdown		359 /* new */
 #define TARGET_NR_sendmsg		360 /* new */
 #define TARGET_NR_recvmsg		361 /* new */
-#define TARGET_NR_accept04		362 /* new */
+#define TARGET_NR_accept4               362 /* new */
 #define TARGET_NR_preadv                363 /* new */
 #define TARGET_NR_pwritev               364 /* new */
 #define TARGET_NR_rt_tgsigqueueinfo     365 /* new */
@@ -390,3 +393,5 @@
 #define TARGET_NR_memfd_create          386
 #define TARGET_NR_bpf                   387
 #define TARGET_NR_execveat              388
+
+#endif

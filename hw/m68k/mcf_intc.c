@@ -5,13 +5,13 @@
  *
  * This code is licensed under the GPL
  */
+
 #include "qemu/osdep.h"
-#include "qemu-common.h"
+#include "qemu/module.h"
 #include "cpu.h"
 #include "hw/hw.h"
 #include "hw/sysbus.h"
 #include "hw/m68k/mcf.h"
-#include "exec/address-spaces.h"
 
 #define TYPE_MCF_INTC "mcf-intc"
 #define MCF_INTC(obj) OBJECT_CHECK(mcf_intc_state, (obj), TYPE_MCF_INTC)

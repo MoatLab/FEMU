@@ -1,9 +1,11 @@
 #ifndef APM_H
 #define APM_H
 
-#include "qemu-common.h"
 #include "hw/hw.h"
 #include "exec/memory.h"
+
+#define APM_CNT_IOPORT  0xb2
+#define ACPI_PORT_SMI_CMD APM_CNT_IOPORT
 
 typedef void (*apm_ctrl_changed_t)(uint32_t val, void *arg);
 

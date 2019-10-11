@@ -35,6 +35,22 @@ struct AioHandler {
     QLIST_ENTRY(AioHandler) node;
 };
 
+static void aio_remove_fd_handler(AioContext *ctx, AioHandler *node)
+{
+    /* If aio_poll is in progress, just mark the node as deleted */
+    if (qemu_lockcnt_count(&ctx->list_lock)) {
+        node->deleted = 1;
+        node->pfd.revents = 0;
+    } else {
+        /* Otherwise, delete it for real.  We can't just mark it as
+         * deleted because deleted nodes are only cleaned up after
+         * releasing the list_lock.
+         */
+        QLIST_REMOVE(node, node);
+        g_free(node);
+    }
+}
+
 void aio_set_fd_handler(AioContext *ctx,
                         int fd,
                         bool is_external,
@@ -44,40 +60,23 @@ void aio_set_fd_handler(AioContext *ctx,
                         void *opaque)
 {
     /* fd is a SOCKET in our case */
-    AioHandler *node;
+    AioHandler *old_node;
+    AioHandler *node = NULL;
 
     qemu_lockcnt_lock(&ctx->list_lock);
-    QLIST_FOREACH(node, &ctx->aio_handlers, node) {
-        if (node->pfd.fd == fd && !node->deleted) {
+    QLIST_FOREACH(old_node, &ctx->aio_handlers, node) {
+        if (old_node->pfd.fd == fd && !old_node->deleted) {
             break;
         }
     }
 
-    /* Are we deleting the fd handler? */
-    if (!io_read && !io_write) {
-        if (node) {
-            /* If aio_poll is in progress, just mark the node as deleted */
-            if (qemu_lockcnt_count(&ctx->list_lock)) {
-                node->deleted = 1;
-                node->pfd.revents = 0;
-            } else {
-                /* Otherwise, delete it for real.  We can't just mark it as
-                 * deleted because deleted nodes are only cleaned up after
-                 * releasing the list_lock.
-                 */
-                QLIST_REMOVE(node, node);
-                g_free(node);
-            }
-        }
-    } else {
+    if (io_read || io_write) {
         HANDLE event;
+        long bitmask = 0;
 
-        if (node == NULL) {
-            /* Alloc and insert if it's not already there */
-            node = g_new0(AioHandler, 1);
-            node->pfd.fd = fd;
-            QLIST_INSERT_HEAD_RCU(&ctx->aio_handlers, node, node);
-        }
+        /* Alloc and insert if it's not already there */
+        node = g_new0(AioHandler, 1);
+        node->pfd.fd = fd;
 
         node->pfd.events = 0;
         if (node->io_read) {
@@ -95,10 +94,20 @@ void aio_set_fd_handler(AioContext *ctx,
         node->io_write = io_write;
         node->is_external = is_external;
 
+        if (io_read) {
+            bitmask |= FD_READ | FD_ACCEPT | FD_CLOSE;
+        }
+
+        if (io_write) {
+            bitmask |= FD_WRITE | FD_CONNECT;
+        }
+
+        QLIST_INSERT_HEAD_RCU(&ctx->aio_handlers, node, node);
         event = event_notifier_get_handle(&ctx->notifier);
-        WSAEventSelect(node->pfd.fd, event,
-                       FD_READ | FD_ACCEPT | FD_CLOSE |
-                       FD_CONNECT | FD_WRITE | FD_OOB);
+        WSAEventSelect(node->pfd.fd, event, bitmask);
+    }
+    if (old_node) {
+        aio_remove_fd_handler(ctx, old_node);
     }
 
     qemu_lockcnt_unlock(&ctx->list_lock);
@@ -132,18 +141,7 @@ void aio_set_event_notifier(AioContext *ctx,
         if (node) {
             g_source_remove_poll(&ctx->source, &node->pfd);
 
-            /* aio_poll is in progress, just mark the node as deleted */
-            if (qemu_lockcnt_count(&ctx->list_lock)) {
-                node->deleted = 1;
-                node->pfd.revents = 0;
-            } else {
-                /* Otherwise, delete it for real.  We can't just mark it as
-                 * deleted because deleted nodes are only cleaned up after
-                 * releasing the list_lock.
-                 */
-                QLIST_REMOVE(node, node);
-                g_free(node);
-            }
+            aio_remove_fd_handler(ctx, node);
         }
     } else {
         if (node == NULL) {
@@ -366,11 +364,12 @@ bool aio_poll(AioContext *ctx, bool blocking)
         ret = WaitForMultipleObjects(count, events, FALSE, timeout);
         if (blocking) {
             assert(first);
+            assert(in_aio_context_home_thread(ctx));
             atomic_sub(&ctx->notify_me, 2);
+            aio_notify_accept(ctx);
         }
 
         if (first) {
-            aio_notify_accept(ctx);
             progress |= aio_bh_poll(ctx);
             first = false;
         }
@@ -400,8 +399,14 @@ void aio_context_setup(AioContext *ctx)
 {
 }
 
+void aio_context_destroy(AioContext *ctx)
+{
+}
+
 void aio_context_set_poll_params(AioContext *ctx, int64_t max_ns,
                                  int64_t grow, int64_t shrink, Error **errp)
 {
-    error_setg(errp, "AioContext polling is not implemented on Windows");
+    if (max_ns) {
+        error_setg(errp, "AioContext polling is not implemented on Windows");
+    }
 }

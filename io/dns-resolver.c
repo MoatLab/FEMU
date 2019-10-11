@@ -21,9 +21,11 @@
 #include "qemu/osdep.h"
 #include "io/dns-resolver.h"
 #include "qapi/clone-visitor.h"
+#include "qapi/qapi-visit-sockets.h"
 #include "qemu/sockets.h"
 #include "qapi/error.h"
 #include "qemu/cutils.h"
+#include "qemu/module.h"
 
 #ifndef AI_NUMERICSERV
 # define AI_NUMERICSERV 0
@@ -51,7 +53,7 @@ static int qio_dns_resolver_lookup_sync_inet(QIODNSResolver *resolver,
                                              Error **errp)
 {
     struct addrinfo ai, *res, *e;
-    InetSocketAddress *iaddr = addr->u.inet.data;
+    InetSocketAddress *iaddr = &addr->u.inet;
     char port[33];
     char uaddr[INET6_ADDRSTRLEN + 1];
     char uport[33];
@@ -102,23 +104,24 @@ static int qio_dns_resolver_lookup_sync_inet(QIODNSResolver *resolver,
     /* create socket + bind */
     for (i = 0, e = res; e != NULL; i++, e = e->ai_next) {
         SocketAddress *newaddr = g_new0(SocketAddress, 1);
-        InetSocketAddress *newiaddr = g_new0(InetSocketAddress, 1);
-        newaddr->u.inet.data = newiaddr;
-        newaddr->type = SOCKET_ADDRESS_KIND_INET;
+
+        newaddr->type = SOCKET_ADDRESS_TYPE_INET;
 
         getnameinfo((struct sockaddr *)e->ai_addr, e->ai_addrlen,
                     uaddr, INET6_ADDRSTRLEN, uport, 32,
                     NI_NUMERICHOST | NI_NUMERICSERV);
 
-        *newiaddr = (InetSocketAddress){
+        newaddr->u.inet = (InetSocketAddress){
             .host = g_strdup(uaddr),
             .port = g_strdup(uport),
             .has_numeric = true,
             .numeric = true,
             .has_to = iaddr->has_to,
             .to = iaddr->to,
-            .has_ipv4 = false,
-            .has_ipv6 = false,
+            .has_ipv4 = iaddr->has_ipv4,
+            .ipv4 = iaddr->ipv4,
+            .has_ipv6 = iaddr->has_ipv6,
+            .ipv6 = iaddr->ipv6,
         };
 
         (*addrs)[i] = newaddr;
@@ -149,16 +152,16 @@ int qio_dns_resolver_lookup_sync(QIODNSResolver *resolver,
                                  Error **errp)
 {
     switch (addr->type) {
-    case SOCKET_ADDRESS_KIND_INET:
+    case SOCKET_ADDRESS_TYPE_INET:
         return qio_dns_resolver_lookup_sync_inet(resolver,
                                                  addr,
                                                  naddrs,
                                                  addrs,
                                                  errp);
 
-    case SOCKET_ADDRESS_KIND_UNIX:
-    case SOCKET_ADDRESS_KIND_VSOCK:
-    case SOCKET_ADDRESS_KIND_FD:
+    case SOCKET_ADDRESS_TYPE_UNIX:
+    case SOCKET_ADDRESS_TYPE_VSOCK:
+    case SOCKET_ADDRESS_TYPE_FD:
         return qio_dns_resolver_lookup_sync_nop(resolver,
                                                 addr,
                                                 naddrs,
@@ -232,7 +235,8 @@ void qio_dns_resolver_lookup_async(QIODNSResolver *resolver,
     qio_task_run_in_thread(task,
                            qio_dns_resolver_lookup_worker,
                            data,
-                           qio_dns_resolver_lookup_data_free);
+                           qio_dns_resolver_lookup_data_free,
+                           NULL);
 }
 
 

@@ -13,10 +13,14 @@
 
 #include "qemu/osdep.h"
 #include "cpu.h"
-#include "exec/cpu-all.h"
 #include "sysemu/dump.h"
 #include "elf.h"
 #include "sysemu/memory_mapping.h"
+
+#define ELF_NOTE_SIZE(hdr_size, name_size, desc_size)   \
+    ((DIV_ROUND_UP((hdr_size), 4)                       \
+      + DIV_ROUND_UP((name_size), 4)                    \
+      + DIV_ROUND_UP((desc_size), 4)) * 4)
 
 #ifdef TARGET_X86_64
 typedef struct {
@@ -77,16 +81,15 @@ static int x86_64_write_elf64_note(WriteCoreDumpFunction f,
     regs.gs = env->segs[R_GS].selector;
 
     descsz = sizeof(x86_64_elf_prstatus);
-    note_size = ((sizeof(Elf64_Nhdr) + 3) / 4 + (name_size + 3) / 4 +
-                (descsz + 3) / 4) * 4;
+    note_size = ELF_NOTE_SIZE(sizeof(Elf64_Nhdr), name_size, descsz);
     note = g_malloc0(note_size);
     note->n_namesz = cpu_to_le32(name_size);
     note->n_descsz = cpu_to_le32(descsz);
     note->n_type = cpu_to_le32(NT_PRSTATUS);
     buf = (char *)note;
-    buf += ((sizeof(Elf64_Nhdr) + 3) / 4) * 4;
+    buf += ROUND_UP(sizeof(Elf64_Nhdr), 4);
     memcpy(buf, name, name_size);
-    buf += ((name_size + 3) / 4) * 4;
+    buf += ROUND_UP(name_size, 4);
     memcpy(buf + 32, &id, 4); /* pr_pid */
     buf += descsz - sizeof(x86_64_user_regs_struct)-sizeof(target_ulong);
     memcpy(buf, &regs, sizeof(x86_64_user_regs_struct));
@@ -156,16 +159,15 @@ static int x86_write_elf64_note(WriteCoreDumpFunction f, CPUX86State *env,
 
     x86_fill_elf_prstatus(&prstatus, env, id);
     descsz = sizeof(x86_elf_prstatus);
-    note_size = ((sizeof(Elf64_Nhdr) + 3) / 4 + (name_size + 3) / 4 +
-                (descsz + 3) / 4) * 4;
+    note_size = ELF_NOTE_SIZE(sizeof(Elf64_Nhdr), name_size, descsz);
     note = g_malloc0(note_size);
     note->n_namesz = cpu_to_le32(name_size);
     note->n_descsz = cpu_to_le32(descsz);
     note->n_type = cpu_to_le32(NT_PRSTATUS);
     buf = (char *)note;
-    buf += ((sizeof(Elf64_Nhdr) + 3) / 4) * 4;
+    buf += ROUND_UP(sizeof(Elf64_Nhdr), 4);
     memcpy(buf, name, name_size);
-    buf += ((name_size + 3) / 4) * 4;
+    buf += ROUND_UP(name_size, 4);
     memcpy(buf, &prstatus, sizeof(prstatus));
 
     ret = f(note, note_size, opaque);
@@ -211,16 +213,15 @@ int x86_cpu_write_elf32_note(WriteCoreDumpFunction f, CPUState *cs,
 
     x86_fill_elf_prstatus(&prstatus, &cpu->env, cpuid);
     descsz = sizeof(x86_elf_prstatus);
-    note_size = ((sizeof(Elf32_Nhdr) + 3) / 4 + (name_size + 3) / 4 +
-                (descsz + 3) / 4) * 4;
+    note_size = ELF_NOTE_SIZE(sizeof(Elf32_Nhdr), name_size, descsz);
     note = g_malloc0(note_size);
     note->n_namesz = cpu_to_le32(name_size);
     note->n_descsz = cpu_to_le32(descsz);
     note->n_type = cpu_to_le32(NT_PRSTATUS);
     buf = (char *)note;
-    buf += ((sizeof(Elf32_Nhdr) + 3) / 4) * 4;
+    buf += ROUND_UP(sizeof(Elf32_Nhdr), 4);
     memcpy(buf, name, name_size);
-    buf += ((name_size + 3) / 4) * 4;
+    buf += ROUND_UP(name_size, 4);
     memcpy(buf, &prstatus, sizeof(prstatus));
 
     ret = f(note, note_size, opaque);
@@ -257,6 +258,12 @@ struct QEMUCPUState {
     QEMUCPUSegment cs, ds, es, fs, gs, ss;
     QEMUCPUSegment ldt, tr, gdt, idt;
     uint64_t cr[5];
+    /*
+     * Fields below are optional and are being added at the end without
+     * changing the version. External tools may identify their presence
+     * by checking 'size' field.
+     */
+    uint64_t kernel_gs_base;
 };
 
 typedef struct QEMUCPUState QEMUCPUState;
@@ -314,6 +321,10 @@ static void qemu_get_cpustate(QEMUCPUState *s, CPUX86State *env)
     s->cr[2] = env->cr[2];
     s->cr[3] = env->cr[3];
     s->cr[4] = env->cr[4];
+
+#ifdef TARGET_X86_64
+    s->kernel_gs_base = env->kernelgsbase;
+#endif
 }
 
 static inline int cpu_write_qemu_note(WriteCoreDumpFunction f,
@@ -338,8 +349,8 @@ static inline int cpu_write_qemu_note(WriteCoreDumpFunction f,
     } else {
         note_head_size = sizeof(Elf64_Nhdr);
     }
-    note_size = ((note_head_size + 3) / 4 + (name_size + 3) / 4 +
-                (descsz + 3) / 4) * 4;
+    note_size = (DIV_ROUND_UP(note_head_size, 4) + DIV_ROUND_UP(name_size, 4) +
+                DIV_ROUND_UP(descsz, 4)) * 4;
     note = g_malloc0(note_size);
     if (type == 0) {
         note32 = note;
@@ -353,9 +364,9 @@ static inline int cpu_write_qemu_note(WriteCoreDumpFunction f,
         note64->n_type = 0;
     }
     buf = note;
-    buf += ((note_head_size + 3) / 4) * 4;
+    buf += ROUND_UP(note_head_size, 4);
     memcpy(buf, name, name_size);
-    buf += ((name_size + 3) / 4) * 4;
+    buf += ROUND_UP(name_size, 4);
     memcpy(buf, &state, sizeof(state));
 
     ret = f(note, note_size, opaque);
@@ -443,10 +454,8 @@ ssize_t cpu_get_note_size(int class, int machine, int nr_cpus)
 #endif
     qemu_desc_size = sizeof(QEMUCPUState);
 
-    elf_note_size = ((note_head_size + 3) / 4 + (name_size + 3) / 4 +
-                     (elf_desc_size + 3) / 4) * 4;
-    qemu_note_size = ((note_head_size + 3) / 4 + (name_size + 3) / 4 +
-                      (qemu_desc_size + 3) / 4) * 4;
+    elf_note_size = ELF_NOTE_SIZE(note_head_size, name_size, elf_desc_size);
+    qemu_note_size = ELF_NOTE_SIZE(note_head_size, name_size, qemu_desc_size);
 
     return (elf_note_size + qemu_note_size) * nr_cpus;
 }

@@ -26,7 +26,6 @@
 #define HW_IPMI_H
 
 #include "exec/memory.h"
-#include "qemu-common.h"
 #include "hw/qdev.h"
 
 #define MAX_IPMI_MSG_SIZE 300
@@ -114,9 +113,7 @@ uint32_t ipmi_next_uuid(void);
 #define IPMI_INTERFACE_GET_CLASS(class) \
      OBJECT_GET_CLASS(IPMIInterfaceClass, (class), TYPE_IPMI_INTERFACE)
 
-typedef struct IPMIInterface {
-    Object parent;
-} IPMIInterface;
+typedef struct IPMIInterface IPMIInterface;
 
 typedef struct IPMIInterfaceClass {
     InterfaceClass parent;
@@ -258,5 +255,9 @@ struct ipmi_sdr_compact {
 };
 
 typedef uint8_t ipmi_sdr_compact_buffer[sizeof(struct ipmi_sdr_compact)];
+
+int ipmi_bmc_sdr_find(IPMIBmc *b, uint16_t recid,
+                      const struct ipmi_sdr_compact **sdr, uint16_t *nextrec);
+void ipmi_bmc_gen_event(IPMIBmc *b, uint8_t *evt, bool log);
 
 #endif

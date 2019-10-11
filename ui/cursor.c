@@ -1,5 +1,4 @@
 #include "qemu/osdep.h"
-#include "qemu-common.h"
 #include "ui/console.h"
 
 #include "cursor_hidden.xpm"
@@ -19,11 +18,11 @@ static QEMUCursor *cursor_parse_xpm(const char *xpm[])
     if (sscanf(xpm[line], "%u %u %u %u",
                &width, &height, &colors, &chars) != 4) {
         fprintf(stderr, "%s: header parse error: \"%s\"\n",
-                __FUNCTION__, xpm[line]);
+                __func__, xpm[line]);
         return NULL;
     }
     if (chars != 1) {
-        fprintf(stderr, "%s: chars != 1 not supported\n", __FUNCTION__);
+        fprintf(stderr, "%s: chars != 1 not supported\n", __func__);
         return NULL;
     }
     line++;
@@ -41,7 +40,7 @@ static QEMUCursor *cursor_parse_xpm(const char *xpm[])
             }
         }
         fprintf(stderr, "%s: color parse error: \"%s\"\n",
-                __FUNCTION__, xpm[line]);
+                __func__, xpm[line]);
         return NULL;
     }
 
@@ -118,7 +117,7 @@ void cursor_put(QEMUCursor *c)
 
 int cursor_get_mono_bpl(QEMUCursor *c)
 {
-    return (c->width + 7) / 8;
+    return DIV_ROUND_UP(c->width, 8);
 }
 
 void cursor_set_mono(QEMUCursor *c,
@@ -128,13 +127,25 @@ void cursor_set_mono(QEMUCursor *c,
     uint32_t *data = c->data;
     uint8_t bit;
     int x,y,bpl;
+    bool expand_bitmap_only = image == mask;
+    bool has_inverted_colors = false;
+    const uint32_t inverted = 0x80000000;
 
+    /*
+     * Converts a monochrome bitmap with XOR mask 'image' and AND mask 'mask':
+     * https://docs.microsoft.com/en-us/windows-hardware/drivers/display/drawing-monochrome-pointers
+     */
     bpl = cursor_get_mono_bpl(c);
     for (y = 0; y < c->height; y++) {
         bit = 0x80;
         for (x = 0; x < c->width; x++, data++) {
             if (transparent && mask[x/8] & bit) {
-                *data = 0x00000000;
+                if (!expand_bitmap_only && image[x / 8] & bit) {
+                    *data = inverted;
+                    has_inverted_colors = true;
+                } else {
+                    *data = 0x00000000;
+                }
             } else if (!transparent && !(mask[x/8] & bit)) {
                 *data = 0x00000000;
             } else if (image[x/8] & bit) {
@@ -149,6 +160,32 @@ void cursor_set_mono(QEMUCursor *c,
         }
         mask  += bpl;
         image += bpl;
+    }
+
+    /*
+     * If there are any pixels with inverted colors, create an outline (fill
+     * transparent neighbors with the background color) and use the foreground
+     * color as "inverted" color.
+     */
+    if (has_inverted_colors) {
+        data = c->data;
+        for (y = 0; y < c->height; y++) {
+            for (x = 0; x < c->width; x++, data++) {
+                if (*data == 0 /* transparent */ &&
+                        ((x > 0 && data[-1] == inverted) ||
+                         (x + 1 < c->width && data[1] == inverted) ||
+                         (y > 0 && data[-c->width] == inverted) ||
+                         (y + 1 < c->height && data[c->width] == inverted))) {
+                    *data = 0xff000000 | background;
+                }
+            }
+        }
+        data = c->data;
+        for (x = 0; x < c->width * c->height; x++, data++) {
+            if (*data == inverted) {
+                *data = 0xff000000 | foreground;
+            }
+        }
     }
 }
 

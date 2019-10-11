@@ -24,6 +24,8 @@
 #define HW_ACCEL_H
 
 #include "qom/object.h"
+#include "hw/qdev-properties.h"
+#include "exec/hwaddr.h"
 
 typedef struct AccelState {
     /*< private >*/
@@ -35,11 +37,20 @@ typedef struct AccelClass {
     ObjectClass parent_class;
     /*< public >*/
 
-    const char *opt_name;
     const char *name;
-    int (*available)(void);
     int (*init_machine)(MachineState *ms);
+    void (*setup_post)(MachineState *ms, AccelState *accel);
+    bool (*has_memory)(MachineState *ms, AddressSpace *as,
+                       hwaddr start_addr, hwaddr size);
     bool *allowed;
+    /*
+     * Array of global properties that would be applied when specific
+     * accelerator is chosen. It works like MachineClass.compat_props
+     * but it's for accelerators not machines. Accelerator-provided
+     * global properties may be overridden by machine-type
+     * compat_props or user-provided global properties.
+     */
+    GPtrArray *compat_props;
 } AccelClass;
 
 #define TYPE_ACCEL "accel"
@@ -54,8 +65,10 @@ typedef struct AccelClass {
 #define ACCEL_GET_CLASS(obj) \
     OBJECT_GET_CLASS(AccelClass, (obj), TYPE_ACCEL)
 
-extern int tcg_tb_size;
+extern unsigned long tcg_tb_size;
 
-void configure_accelerator(MachineState *ms);
+void configure_accelerator(MachineState *ms, const char *progname);
+/* Called just before os_setup_post (ie just before drop OS privs) */
+void accel_setup_post(MachineState *ms);
 
 #endif

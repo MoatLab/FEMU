@@ -22,17 +22,16 @@
 #ifndef QEMU_HAX_H
 #define QEMU_HAX_H
 
-#include "config-host.h"
-#include "qemu-common.h"
 
 int hax_sync_vcpus(void);
 int hax_init_vcpu(CPUState *cpu);
 int hax_smp_cpu_exec(CPUState *cpu);
-int hax_populate_ram(uint64_t va, uint32_t size);
+int hax_populate_ram(uint64_t va, uint64_t size);
 
 void hax_cpu_synchronize_state(CPUState *cpu);
 void hax_cpu_synchronize_post_reset(CPUState *cpu);
 void hax_cpu_synchronize_post_init(CPUState *cpu);
+void hax_cpu_synchronize_pre_loadvm(CPUState *cpu);
 
 #ifdef CONFIG_HAX
 

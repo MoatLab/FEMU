@@ -17,9 +17,10 @@
  */
 
 #ifndef CADENCE_UART_H
+#define CADENCE_UART_H
 
 #include "hw/sysbus.h"
-#include "sysemu/char.h"
+#include "chardev/char-fe.h"
 #include "qemu/timer.h"
 
 #define CADENCE_UART_RX_FIFO_SIZE           16
@@ -66,5 +67,4 @@ static inline DeviceState *cadence_uart_create(hwaddr addr,
     return dev;
 }
 
-#define CADENCE_UART_H
 #endif

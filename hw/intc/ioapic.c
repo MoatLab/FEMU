@@ -21,28 +21,18 @@
  */
 
 #include "qemu/osdep.h"
-#include "qemu/error-report.h"
+#include "qapi/error.h"
 #include "monitor/monitor.h"
 #include "hw/hw.h"
 #include "hw/i386/pc.h"
 #include "hw/i386/apic.h"
 #include "hw/i386/ioapic.h"
 #include "hw/i386/ioapic_internal.h"
-#include "include/hw/pci/msi.h"
+#include "hw/pci/msi.h"
 #include "sysemu/kvm.h"
-#include "target/i386/cpu.h"
 #include "hw/i386/apic-msidef.h"
 #include "hw/i386/x86-iommu.h"
 #include "trace.h"
-
-//#define DEBUG_IOAPIC
-
-#ifdef DEBUG_IOAPIC
-#define DPRINTF(fmt, ...)                                       \
-    do { printf("ioapic: " fmt , ## __VA_ARGS__); } while (0)
-#else
-#define DPRINTF(fmt, ...)
-#endif
 
 #define APIC_DELIVERY_MODE_SHIFT 8
 #define APIC_POLARITY_SHIFT 14
@@ -149,6 +139,15 @@ static void ioapic_service(IOAPICCommonState *s)
     }
 }
 
+#define SUCCESSIVE_IRQ_MAX_COUNT 10000
+
+static void delayed_ioapic_service_cb(void *opaque)
+{
+    IOAPICCommonState *s = opaque;
+
+    ioapic_service(s);
+}
+
 static void ioapic_set_irq(void *opaque, int vector, int level)
 {
     IOAPICCommonState *s = opaque;
@@ -157,11 +156,12 @@ static void ioapic_set_irq(void *opaque, int vector, int level)
      * to GSI 2.  GSI maps to ioapic 1-1.  This is not
      * the cleanest way of doing it but it should work. */
 
-    DPRINTF("%s: %s vec %x\n", __func__, level ? "raise" : "lower", vector);
+    trace_ioapic_set_irq(vector, level);
+    ioapic_stat_update_irq(s, vector, level);
     if (vector == 0) {
         vector = 2;
     }
-    if (vector >= 0 && vector < IOAPIC_NUM_PINS) {
+    if (vector < IOAPIC_NUM_PINS) {
         uint32_t mask = 1 << vector;
         uint64_t entry = s->ioredtbl[vector];
 
@@ -197,9 +197,11 @@ static void ioapic_update_kvm_routes(IOAPICCommonState *s)
             MSIMessage msg;
             struct ioapic_entry_info info;
             ioapic_entry_parse(s->ioredtbl[i], &info);
-            msg.address = info.addr;
-            msg.data = info.data;
-            kvm_irqchip_update_msi_route(kvm_state, i, msg, NULL);
+            if (!info.masked) {
+                msg.address = info.addr;
+                msg.data = info.data;
+                kvm_irqchip_update_msi_route(kvm_state, i, msg, NULL);
+            }
         }
         kvm_irqchip_commit_routes(kvm_state);
     }
@@ -231,25 +233,40 @@ void ioapic_eoi_broadcast(int vector)
         }
         for (n = 0; n < IOAPIC_NUM_PINS; n++) {
             entry = s->ioredtbl[n];
-            if ((entry & IOAPIC_LVT_REMOTE_IRR)
-                && (entry & IOAPIC_VECTOR_MASK) == vector) {
-                trace_ioapic_clear_remote_irr(n, vector);
-                s->ioredtbl[n] = entry & ~IOAPIC_LVT_REMOTE_IRR;
-                if (!(entry & IOAPIC_LVT_MASKED) && (s->irr & (1 << n))) {
+
+            if ((entry & IOAPIC_VECTOR_MASK) != vector ||
+                ((entry >> IOAPIC_LVT_TRIGGER_MODE_SHIFT) & 1) != IOAPIC_TRIGGER_LEVEL) {
+                continue;
+            }
+
+            if (!(entry & IOAPIC_LVT_REMOTE_IRR)) {
+                continue;
+            }
+
+            trace_ioapic_clear_remote_irr(n, vector);
+            s->ioredtbl[n] = entry & ~IOAPIC_LVT_REMOTE_IRR;
+
+            if (!(entry & IOAPIC_LVT_MASKED) && (s->irr & (1 << n))) {
+                ++s->irq_eoi[n];
+                if (s->irq_eoi[n] >= SUCCESSIVE_IRQ_MAX_COUNT) {
+                    /*
+                     * Real hardware does not deliver the interrupt immediately
+                     * during eoi broadcast, and this lets a buggy guest make
+                     * slow progress even if it does not correctly handle a
+                     * level-triggered interrupt. Emulate this behavior if we
+                     * detect an interrupt storm.
+                     */
+                    s->irq_eoi[n] = 0;
+                    timer_mod_anticipate(s->delayed_ioapic_service_timer,
+                                         qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                                         NANOSECONDS_PER_SECOND / 100);
+                    trace_ioapic_eoi_delayed_reassert(n);
+                } else {
                     ioapic_service(s);
                 }
+            } else {
+                s->irq_eoi[n] = 0;
             }
-        }
-    }
-}
-
-void ioapic_dump_state(Monitor *mon, const QDict *qdict)
-{
-    int i;
-
-    for (i = 0; i < MAX_IOAPICS; i++) {
-        if (ioapics[i] != 0) {
-            ioapic_print_redtbl(mon, ioapics[i]);
         }
     }
 }
@@ -290,11 +307,10 @@ ioapic_mem_read(void *opaque, hwaddr addr, unsigned int size)
                 }
             }
         }
-        DPRINTF("read: %08x = %08x\n", s->ioregsel, val);
         break;
     }
 
-    trace_ioapic_mem_read(addr, size, val);
+    trace_ioapic_mem_read(addr, s->ioregsel, size, val);
 
     return val;
 }
@@ -335,7 +351,7 @@ ioapic_mem_write(void *opaque, hwaddr addr, uint64_t val,
     int index;
 
     addr &= 0xff;
-    trace_ioapic_mem_write(addr, size, val);
+    trace_ioapic_mem_write(addr, s->ioregsel, size, val);
 
     switch (addr) {
     case IOAPIC_IOREGSEL:
@@ -345,7 +361,6 @@ ioapic_mem_write(void *opaque, hwaddr addr, uint64_t val,
         if (size != 4) {
             break;
         }
-        DPRINTF("write: %08x = %08" PRIx64 "\n", s->ioregsel, val);
         switch (s->ioregsel) {
         case IOAPIC_REG_ID:
             s->id = (val >> IOAPIC_ID_SHIFT) & IOAPIC_ID_MASK;
@@ -367,6 +382,7 @@ ioapic_mem_write(void *opaque, hwaddr addr, uint64_t val,
                 /* restore RO bits */
                 s->ioredtbl[index] &= IOAPIC_RW_BITS;
                 s->ioredtbl[index] |= ro_bits;
+                s->irq_eoi[index] = 0;
                 ioapic_fix_edge_remote_irr(&s->ioredtbl[index]);
                 ioapic_service(s);
             }
@@ -415,19 +431,30 @@ static void ioapic_realize(DeviceState *dev, Error **errp)
     IOAPICCommonState *s = IOAPIC_COMMON(dev);
 
     if (s->version != 0x11 && s->version != 0x20) {
-        error_report("IOAPIC only supports version 0x11 or 0x20 "
-                     "(default: 0x%x).", IOAPIC_VER_DEF);
-        exit(1);
+        error_setg(errp, "IOAPIC only supports version 0x11 or 0x20 "
+                   "(default: 0x%x).", IOAPIC_VER_DEF);
+        return;
     }
 
     memory_region_init_io(&s->io_memory, OBJECT(s), &ioapic_io_ops, s,
                           "ioapic", 0x1000);
+
+    s->delayed_ioapic_service_timer =
+        timer_new_ns(QEMU_CLOCK_VIRTUAL, delayed_ioapic_service_cb, s);
 
     qdev_init_gpio_in(dev, ioapic_set_irq, IOAPIC_NUM_PINS);
 
     ioapics[ioapic_no] = s;
     s->machine_done.notify = ioapic_machine_done_notify;
     qemu_add_machine_init_done_notifier(&s->machine_done);
+}
+
+static void ioapic_unrealize(DeviceState *dev, Error **errp)
+{
+    IOAPICCommonState *s = IOAPIC_COMMON(dev);
+
+    timer_del(s->delayed_ioapic_service_timer);
+    timer_free(s->delayed_ioapic_service_timer);
 }
 
 static Property ioapic_properties[] = {
@@ -441,6 +468,7 @@ static void ioapic_class_init(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     k->realize = ioapic_realize;
+    k->unrealize = ioapic_unrealize;
     /*
      * If APIC is in kernel, we need to update the kernel cache after
      * migration, otherwise first 24 gsi routes will be invalid.
@@ -451,7 +479,7 @@ static void ioapic_class_init(ObjectClass *klass, void *data)
 }
 
 static const TypeInfo ioapic_info = {
-    .name          = "ioapic",
+    .name          = TYPE_IOAPIC,
     .parent        = TYPE_IOAPIC_COMMON,
     .instance_size = sizeof(IOAPICCommonState),
     .class_init    = ioapic_class_init,

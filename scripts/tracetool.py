@@ -15,8 +15,6 @@ __email__      = "stefanha@linux.vnet.ibm.com"
 
 import sys
 import getopt
-import os.path
-import re
 
 from tracetool import error_write, out
 import tracetool.backend
@@ -142,7 +140,7 @@ def main(args):
     events = []
     for arg in args:
         with open(arg, "r") as fh:
-            events.extend(tracetool.read_events(fh))
+            events.extend(tracetool.read_events(fh, arg))
 
     try:
         tracetool.generate(events, arg_group, arg_format, arg_backends,

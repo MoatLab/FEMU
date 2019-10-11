@@ -31,12 +31,13 @@
  *  - Add indirect descriptors support
  *  - Maybe do autosense (PAPR seems to mandate it, linux doesn't care)
  */
+
 #include "qemu/osdep.h"
-#include "qemu-common.h"
+#include "qemu/module.h"
 #include "cpu.h"
 #include "hw/hw.h"
 #include "hw/scsi/scsi.h"
-#include "block/scsi.h"
+#include "scsi/constants.h"
 #include "srp.h"
 #include "hw/qdev.h"
 #include "hw/ppc/spapr.h"
@@ -91,7 +92,7 @@ typedef struct vscsi_req {
      OBJECT_CHECK(VSCSIState, (obj), TYPE_VIO_SPAPR_VSCSI_DEVICE)
 
 typedef struct {
-    VIOsPAPRDevice vdev;
+    SpaprVioDevice vdev;
     SCSIBus bus;
     vscsi_req reqs[VSCSI_REQ_LIMIT];
 } VSCSIState;
@@ -1115,7 +1116,7 @@ static void vscsi_got_payload(VSCSIState *s, vscsi_crq *crq)
 }
 
 
-static int vscsi_do_crq(struct VIOsPAPRDevice *dev, uint8_t *crq_data)
+static int vscsi_do_crq(struct SpaprVioDevice *dev, uint8_t *crq_data)
 {
     VSCSIState *s = VIO_SPAPR_VSCSI_DEVICE(dev);
     vscsi_crq crq;
@@ -1187,7 +1188,7 @@ static const struct SCSIBusInfo vscsi_scsi_info = {
     .load_request = vscsi_load_request,
 };
 
-static void spapr_vscsi_reset(VIOsPAPRDevice *dev)
+static void spapr_vscsi_reset(SpaprVioDevice *dev)
 {
     VSCSIState *s = VIO_SPAPR_VSCSI_DEVICE(dev);
     int i;
@@ -1198,7 +1199,7 @@ static void spapr_vscsi_reset(VIOsPAPRDevice *dev)
     }
 }
 
-static void spapr_vscsi_realize(VIOsPAPRDevice *dev, Error **errp)
+static void spapr_vscsi_realize(SpaprVioDevice *dev, Error **errp)
 {
     VSCSIState *s = VIO_SPAPR_VSCSI_DEVICE(dev);
 
@@ -1208,18 +1209,17 @@ static void spapr_vscsi_realize(VIOsPAPRDevice *dev, Error **errp)
                  &vscsi_scsi_info, NULL);
 }
 
-void spapr_vscsi_create(VIOsPAPRBus *bus)
+void spapr_vscsi_create(SpaprVioBus *bus)
 {
     DeviceState *dev;
 
     dev = qdev_create(&bus->bus, "spapr-vscsi");
 
     qdev_init_nofail(dev);
-    scsi_bus_legacy_handle_cmdline(&VIO_SPAPR_VSCSI_DEVICE(dev)->bus,
-                                   false);
+    scsi_bus_legacy_handle_cmdline(&VIO_SPAPR_VSCSI_DEVICE(dev)->bus);
 }
 
-static int spapr_vscsi_devnode(VIOsPAPRDevice *dev, void *fdt, int node_off)
+static int spapr_vscsi_devnode(SpaprVioDevice *dev, void *fdt, int node_off)
 {
     int ret;
 
@@ -1257,7 +1257,7 @@ static const VMStateDescription vmstate_spapr_vscsi = {
 static void spapr_vscsi_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
-    VIOsPAPRDeviceClass *k = VIO_SPAPR_DEVICE_CLASS(klass);
+    SpaprVioDeviceClass *k = VIO_SPAPR_DEVICE_CLASS(klass);
 
     k->realize = spapr_vscsi_realize;
     k->reset = spapr_vscsi_reset;

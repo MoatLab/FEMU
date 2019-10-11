@@ -15,8 +15,7 @@
  */
 
 #include "qemu/osdep.h"
-#include "net/clients.h"
-
+#include "qapi/qapi-types-rocker.h"
 #include "rocker.h"
 #include "rocker_hw.h"
 #include "rocker_fp.h"
@@ -225,10 +224,6 @@ FpPort *fp_port_alloc(Rocker *r, char *sw_name,
                       NICPeers *peers)
 {
     FpPort *port = g_new0(FpPort, 1);
-
-    if (!port) {
-        return NULL;
-    }
 
     port->r = r;
     port->index = index;

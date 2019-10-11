@@ -17,11 +17,13 @@
  * You should have received a copy of the GNU General Public License along
  * with this program; if not, see <http://www.gnu.org/licenses/>.
  */
+
 #include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "hw/arm/omap.h"
 #include "hw/sysbus.h"
 #include "qemu/error-report.h"
+#include "qemu/module.h"
 #include "qapi/error.h"
 
 /* Interrupt Handlers */
@@ -401,7 +403,7 @@ static void omap_intc_class_init(ObjectClass *klass, void *data)
     dc->reset = omap_inth_reset;
     dc->props = omap_intc_properties;
     /* Reason: pointer property "clk" */
-    dc->cannot_instantiate_with_device_add_yet = true;
+    dc->user_creatable = false;
     dc->realize = omap_intc_realize;
 }
 
@@ -540,7 +542,7 @@ static void omap2_inth_write(void *opaque, hwaddr addr,
          * for every register, see Chapter 3 and 4 for privileged mode.  */
         if (value & 1)
             fprintf(stderr, "%s: protection mode enable attempt\n",
-                            __FUNCTION__);
+                            __func__);
         return;
 
     case 0x50:	/* INTC_IDLE */
@@ -656,7 +658,7 @@ static void omap2_intc_class_init(ObjectClass *klass, void *data)
     dc->reset = omap_inth_reset;
     dc->props = omap2_intc_properties;
     /* Reason: pointer property "iclk", "fclk" */
-    dc->cannot_instantiate_with_device_add_yet = true;
+    dc->user_creatable = false;
     dc->realize = omap2_intc_realize;
 }
 

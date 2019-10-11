@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # Test case for qemu-io -c map and qemu-img map
 #
@@ -24,12 +24,12 @@ owner=mreitz@redhat.com
 seq=$(basename $0)
 echo "QA output created by $seq"
 
-here=$PWD
-status=1	# failure is the default!
+status=1    # failure is the default!
 
 _cleanup()
 {
-	_cleanup_test_img
+    _cleanup_qemu
+    _cleanup_test_img
 }
 trap "_cleanup; exit \$status" 0 1 2 3 15
 
@@ -40,7 +40,6 @@ trap "_cleanup; exit \$status" 0 1 2 3 15
 
 _supported_fmt qcow2
 _supported_proto file
-_supported_os Linux
 
 IMG_SIZE=64K
 
@@ -53,10 +52,10 @@ _make_test_img $IMG_SIZE
 $QEMU_IO -c 'write 0 64k' "$TEST_IMG" | _filter_qemu_io
 # Remove data cluster from image (first cluster: image header, second: reftable,
 # third: refblock, fourth: L1 table, fifth: L2 table)
-$QEMU_IMG resize -f raw "$TEST_IMG" $((5 * 64 * 1024))
+$QEMU_IMG resize -f raw --shrink "$TEST_IMG" $((5 * 64 * 1024))
 
 $QEMU_IO -c map "$TEST_IMG"
-$QEMU_IMG map "$TEST_IMG"
+$QEMU_IMG map "$TEST_IMG" | _filter_qemu_img_map
 
 echo
 echo '=== Testing map on an image file truncated outside of qemu ==='
@@ -68,7 +67,12 @@ $QEMU_IO -c 'write 0 64k' "$TEST_IMG" | _filter_qemu_io
 
 qemu_comm_method=monitor _launch_qemu -drive if=none,file="$TEST_IMG",id=drv0
 
-$QEMU_IMG resize -f raw "$TEST_IMG" $((5 * 64 * 1024))
+# Wait for a prompt to appear (so we know qemu has opened the image)
+_send_qemu_cmd '' '(qemu)'
+
+$QEMU_IMG resize --shrink --image-opts \
+    "driver=raw,file.driver=file,file.filename=$TEST_IMG,file.locking=off" \
+    $((5 * 64 * 1024))
 
 _send_qemu_cmd $QEMU_HANDLE 'qemu-io drv0 map' 'allocated' \
     | sed -e 's/^(qemu).*qemu-io drv0 map...$/(qemu) qemu-io drv0 map/'

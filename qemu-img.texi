@@ -33,29 +33,13 @@ The following commands are supported:
 
 Command parameters:
 @table @var
+
 @item filename
- is a disk image filename
-
-@item --object @var{objectdef}
-
-is a QEMU user creatable object definition. See the @code{qemu(1)} manual
-page for a description of the object properties. The most common object
-type is a @code{secret}, which is used to supply passwords and/or encryption
-keys.
-
-@item --image-opts
-
-Indicates that the @var{filename} parameter is to be interpreted as a
-full option string, not a plain filename. This parameter is mutually
-exclusive with the @var{-f} and @var{-F} parameters.
+is a disk image filename
 
 @item fmt
 is the disk image format. It is guessed automatically in most cases. See below
 for a description of the supported disk formats.
-
-@item --backing-chain
-will enumerate information about backing files in a disk image chain. Refer
-below for further description.
 
 @item size
 is the disk image size in bytes. Optional suffixes @code{k} or @code{K}
@@ -66,41 +50,83 @@ and T (terabyte, 1024G) are supported.  @code{b} is ignored.
 is the destination disk image filename
 
 @item output_fmt
- is the destination format
+is the destination format
+
 @item options
 is a comma separated list of format specific options in a
 name=value format. Use @code{-o ?} for an overview of the options supported
 by the used format or see the format descriptions below for details.
+
 @item snapshot_param
 is param used for internal snapshot, format is
 'snapshot.id=[ID],snapshot.name=[NAME]' or '[ID_OR_NAME]'
-@item snapshot_id_or_name
-is deprecated, use snapshot_param instead
+
+@end table
+
+@table @option
+
+@item --object @var{objectdef}
+is a QEMU user creatable object definition. See the @code{qemu(1)} manual
+page for a description of the object properties. The most common object
+type is a @code{secret}, which is used to supply passwords and/or encryption
+keys.
+
+@item --image-opts
+Indicates that the source @var{filename} parameter is to be interpreted as a
+full option string, not a plain filename. This parameter is mutually
+exclusive with the @var{-f} parameter.
+
+@item --target-image-opts
+Indicates that the @var{output_filename} parameter(s) are to be interpreted as
+a full option string, not a plain filename. This parameter is mutually
+exclusive with the @var{-O} parameters. It is currently required to also use
+the @var{-n} parameter to skip image creation. This restriction may be relaxed
+in a future release.
+
+@item --force-share (-U)
+If specified, @code{qemu-img} will open the image in shared mode, allowing
+other QEMU processes to open it in write mode. For example, this can be used to
+get the image information (with 'info' subcommand) when the image is used by a
+running guest.  Note that this could produce inconsistent results because of
+concurrent metadata changes, etc. This option is only allowed when opening
+images in read-only mode.
+
+@item --backing-chain
+will enumerate information about backing files in a disk image chain. Refer
+below for further description.
 
 @item -c
 indicates that target image must be compressed (qcow format only)
+
 @item -h
 with or without a command shows help and lists the supported formats
+
 @item -p
 display progress bar (compare, convert and rebase commands only).
 If the @var{-p} option is not used for a command that supports it, the
-progress is reported when the process receives a @code{SIGUSR1} signal.
+progress is reported when the process receives a @code{SIGUSR1} or
+@code{SIGINFO} signal.
+
 @item -q
 Quiet mode - do not print any output (except errors). There's no progress bar
 in case both @var{-q} and @var{-p} options are used.
+
 @item -S @var{size}
 indicates the consecutive number of bytes that must contain only zeros
 for qemu-img to create a sparse image during conversion. This value is rounded
 down to the nearest 512 bytes. You may use the common size suffixes like
 @code{k} for kilobytes.
+
 @item -t @var{cache}
 specifies the cache mode that should be used with the (destination) file. See
 the documentation of the emulator's @code{-drive cache=...} option for allowed
 values.
+
 @item -T @var{src_cache}
 specifies the cache mode that should be used with the source file(s). See
 the documentation of the emulator's @code{-drive cache=...} option for allowed
 values.
+
 @end table
 
 Parameters to snapshot subcommand:
@@ -143,6 +169,16 @@ Number of parallel coroutines for the convert process
 Allow out-of-order writes to the destination. This option improves performance,
 but is only recommended for preallocated devices like host devices or other
 raw block devices.
+@item -C
+Try to use copy offloading to move data from source image to target. This may
+improve performance if the data is remote, such as with NFS or iSCSI backends,
+but will not automatically sparsify zero sectors, and may result in a fully
+allocated target image depending on the host support for getting allocation
+information.
+@item --salvage
+Try to ignore I/O errors when reading.  Unless in quiet mode (@code{-q}), errors
+will still be printed.  Areas that cannot be read from the source will be
+treated as containing only zeroes.
 @end table
 
 Parameters to dd subcommand:
@@ -164,7 +200,13 @@ sets the number of input blocks to skip
 Command description:
 
 @table @option
-@item bench [-c @var{count}] [-d @var{depth}] [-f @var{fmt}] [--flush-interval=@var{flush_interval}] [-n] [--no-drain] [-o @var{offset}] [--pattern=@var{pattern}] [-q] [-s @var{buffer_size}] [-S @var{step_size}] [-t @var{cache}] [-w] @var{filename}
+
+@item amend [--object @var{objectdef}] [--image-opts] [-p] [-q] [-f @var{fmt}] [-t @var{cache}] -o @var{options} @var{filename}
+
+Amends the image format specific @var{options} for the image file
+@var{filename}. Not all file formats support this operation.
+
+@item bench [-c @var{count}] [-d @var{depth}] [-f @var{fmt}] [--flush-interval=@var{flush_interval}] [-n] [--no-drain] [-o @var{offset}] [--pattern=@var{pattern}] [-q] [-s @var{buffer_size}] [-S @var{step_size}] [-t @var{cache}] [-w] [-U] @var{filename}
 
 Run a simple sequential I/O benchmark on the specified image. If @code{-w} is
 specified, a write test is performed, otherwise a read test is performed.
@@ -188,10 +230,11 @@ specified as well.
 For write tests, by default a buffer filled with zeros is written. This can be
 overridden with a pattern byte specified by @var{pattern}.
 
-@item check [-f @var{fmt}] [--output=@var{ofmt}] [-r [leaks | all]] [-T @var{src_cache}] @var{filename}
+@item check [--object @var{objectdef}] [--image-opts] [-q] [-f @var{fmt}] [--output=@var{ofmt}] [-r [leaks | all]] [-T @var{src_cache}] [-U] @var{filename}
 
 Perform a consistency check on the disk image @var{filename}. The command can
 output in the format @var{ofmt} which is either @code{human} or @code{json}.
+The JSON output is an object of QAPI type @code{ImageCheck}.
 
 If @code{-r} is specified, qemu-img tries to repair any inconsistencies found
 during the check. @code{-r leaks} repairs only cluster leaks, whereas
@@ -224,21 +267,7 @@ If @code{-r} is specified, exit codes representing the image state refer to the
 state after (the attempt at) repairing it. That is, a successful @code{-r all}
 will yield the exit code 0, independently of the image state before.
 
-@item create [-f @var{fmt}] [-o @var{options}] @var{filename} [@var{size}]
-
-Create the new disk image @var{filename} of size @var{size} and format
-@var{fmt}. Depending on the file format, you can add one or more @var{options}
-that enable additional features of this format.
-
-If the option @var{backing_file} is specified, then the image will record
-only the differences from @var{backing_file}. No size needs to be specified in
-this case. @var{backing_file} will never be modified unless you use the
-@code{commit} monitor command (or qemu-img commit).
-
-The size can also be specified using the @var{size} option with @code{-o},
-it doesn't need to be specified separately in this case.
-
-@item commit [-q] [-f @var{fmt}] [-t @var{cache}] [-b @var{base}] [-d] [-p] @var{filename}
+@item commit [--object @var{objectdef}] [--image-opts] [-q] [-f @var{fmt}] [-t @var{cache}] [-b @var{base}] [-d] [-p] @var{filename}
 
 Commit the changes recorded in @var{filename} in its base image or backing file.
 If the backing file is smaller than the snapshot, then the backing file will be
@@ -255,13 +284,12 @@ If the backing chain of the given image file @var{filename} has more than one
 layer, the backing file into which the changes will be committed may be
 specified as @var{base} (which has to be part of @var{filename}'s backing
 chain). If @var{base} is not specified, the immediate backing file of the top
-image (which is @var{filename}) will be used. For reasons of consistency,
-explicitly specifying @var{base} will always imply @code{-d} (since emptying an
-image after committing to an indirect backing file would lead to different data
-being read from the image due to content in the intermediate backing chain
-overruling the commit target).
+image (which is @var{filename}) will be used. Note that after a commit operation
+all images between @var{base} and the top image will be invalid and may return
+garbage data when read. For this reason, @code{-b} implies @code{-d} (so that
+the top image stays valid).
 
-@item compare [-f @var{fmt}] [-F @var{fmt}] [-T @var{src_cache}] [-p] [-s] [-q] @var{filename1} @var{filename2}
+@item compare [--object @var{objectdef}] [--image-opts] [-f @var{fmt}] [-F @var{fmt}] [-T @var{src_cache}] [-p] [-q] [-s] [-U] @var{filename1} @var{filename2}
 
 Check if two images have the same content. You can compare images with
 different format or settings.
@@ -302,9 +330,9 @@ Error on reading data
 
 @end table
 
-@item convert [-c] [-p] [-n] [-f @var{fmt}] [-t @var{cache}] [-T @var{src_cache}] [-O @var{output_fmt}] [-o @var{options}] [-s @var{snapshot_id_or_name}] [-l @var{snapshot_param}] [-m @var{num_coroutines}] [-W] [-S @var{sparse_size}] @var{filename} [@var{filename2} [...]] @var{output_filename}
+@item convert [--object @var{objectdef}] [--image-opts] [--target-image-opts] [-U] [-C] [-c] [-p] [-q] [-n] [-f @var{fmt}] [-t @var{cache}] [-T @var{src_cache}] [-O @var{output_fmt}] [-B @var{backing_file}] [-o @var{options}] [-l @var{snapshot_param}] [-S @var{sparse_size}] [-m @var{num_coroutines}] [-W] @var{filename} [@var{filename2} [...]] @var{output_filename}
 
-Convert the disk image @var{filename} or a snapshot @var{snapshot_param}(@var{snapshot_id_or_name} is deprecated)
+Convert the disk image @var{filename} or a snapshot @var{snapshot_param}
 to disk image @var{output_filename} using format @var{output_fmt}. It can be optionally compressed (@code{-c}
 option) or use any format specific options like encryption (@code{-o} option).
 
@@ -327,6 +355,9 @@ created as a copy on write image of the specified base image; the
 @var{backing_file} should have the same content as the input's base image,
 however the path, image format, etc may differ.
 
+If a relative path name is given, the backing file is looked up relative to
+the directory containing @var{output_filename}.
+
 If the @code{-n} option is specified, the target volume creation will be
 skipped. This is useful for formats such as @code{rbd} if the target
 volume has already been created with site specific options that cannot
@@ -340,7 +371,31 @@ creating compressed images.
 @var{num_coroutines} specifies how many coroutines work in parallel during
 the convert process (defaults to 8).
 
-@item dd [-f @var{fmt}] [-O @var{output_fmt}] [bs=@var{block_size}] [count=@var{blocks}] [skip=@var{blocks}] if=@var{input} of=@var{output}
+@item create [--object @var{objectdef}] [-q] [-f @var{fmt}] [-b @var{backing_file}] [-F @var{backing_fmt}] [-u] [-o @var{options}] @var{filename} [@var{size}]
+
+Create the new disk image @var{filename} of size @var{size} and format
+@var{fmt}. Depending on the file format, you can add one or more @var{options}
+that enable additional features of this format.
+
+If the option @var{backing_file} is specified, then the image will record
+only the differences from @var{backing_file}. No size needs to be specified in
+this case. @var{backing_file} will never be modified unless you use the
+@code{commit} monitor command (or qemu-img commit).
+
+If a relative path name is given, the backing file is looked up relative to
+the directory containing @var{filename}.
+
+Note that a given backing file will be opened to check that it is valid. Use
+the @code{-u} option to enable unsafe backing file mode, which means that the
+image will be created even if the associated backing file cannot be opened. A
+matching backing file must be created or additional options be used to make the
+backing file specification valid when you want to use an image created this
+way.
+
+The size can also be specified using the @var{size} option with @code{-o},
+it doesn't need to be specified separately in this case.
+
+@item dd [--image-opts] [-U] [-f @var{fmt}] [-O @var{output_fmt}] [bs=@var{block_size}] [count=@var{blocks}] [skip=@var{blocks}] if=@var{input} of=@var{output}
 
 Dd copies from @var{input} file to @var{output} file converting it from
 @var{fmt} format to @var{output_fmt} format.
@@ -351,13 +406,12 @@ dd will stop reading input after reading @var{blocks} input blocks.
 
 The size syntax is similar to dd(1)'s size syntax.
 
-@item info [-f @var{fmt}] [--output=@var{ofmt}] [--backing-chain] @var{filename}
+@item info [--object @var{objectdef}] [--image-opts] [-f @var{fmt}] [--output=@var{ofmt}] [--backing-chain] [-U] @var{filename}
 
 Give information about the disk image @var{filename}. Use it in
 particular to know the size reserved on disk which can be different
 from the displayed size. If VM snapshots are stored in the disk image,
-they are displayed too. The command can output in the format @var{ofmt}
-which is either @code{human} or @code{json}.
+they are displayed too.
 
 If a disk image has a backing file chain, information about each disk image in
 the chain can be recursively enumerated by using the option @code{--backing-chain}.
@@ -374,7 +428,52 @@ To enumerate information about each disk image in the above chain, starting from
 qemu-img info --backing-chain snap2.qcow2
 @end example
 
-@item map [-f @var{fmt}] [--output=@var{ofmt}] @var{filename}
+The command can output in the format @var{ofmt} which is either @code{human} or
+@code{json}.  The JSON output is an object of QAPI type @code{ImageInfo}; with
+@code{--backing-chain}, it is an array of @code{ImageInfo} objects.
+
+@code{--output=human} reports the following information (for every image in the
+chain):
+@table @var
+@item image
+The image file name
+
+@item file format
+The image format
+
+@item virtual size
+The size of the guest disk
+
+@item disk size
+How much space the image file occupies on the host file system (may be shown as
+0 if this information is unavailable, e.g. because there is no file system)
+
+@item cluster_size
+Cluster size of the image format, if applicable
+
+@item encrypted
+Whether the image is encrypted (only present if so)
+
+@item cleanly shut down
+This is shown as @code{no} if the image is dirty and will have to be
+auto-repaired the next time it is opened in qemu.
+
+@item backing file
+The backing file name, if present
+
+@item backing file format
+The format of the backing file, if the image enforces it
+
+@item Snapshot list
+A list of all internal snapshots
+
+@item Format specific information
+Further information whose structure depends on the image format.  This section
+is a textual representation of the respective @code{ImageInfoSpecific*} QAPI
+object (e.g. @code{ImageInfoSpecificQCow2} for qcow2 images).
+@end table
+
+@item map [--object @var{objectdef}] [--image-opts] [-f @var{fmt}] [--output=@var{ofmt}] [-U] @var{filename}
 
 Dump the metadata of image @var{filename} and its backing file chain.
 In particular, this commands dumps the allocation state of every sector
@@ -429,11 +528,42 @@ preallocated.
 For more information, consult @file{include/block/block.h} in QEMU's
 source code.
 
-@item snapshot [-l | -a @var{snapshot} | -c @var{snapshot} | -d @var{snapshot} ] @var{filename}
+@item measure [--output=@var{ofmt}] [-O @var{output_fmt}] [-o @var{options}] [--size @var{N} | [--object @var{objectdef}] [--image-opts] [-f @var{fmt}] [-l @var{snapshot_param}] @var{filename}]
+
+Calculate the file size required for a new image.  This information can be used
+to size logical volumes or SAN LUNs appropriately for the image that will be
+placed in them.  The values reported are guaranteed to be large enough to fit
+the image.  The command can output in the format @var{ofmt} which is either
+@code{human} or @code{json}.  The JSON output is an object of QAPI type
+@code{BlockMeasureInfo}.
+
+If the size @var{N} is given then act as if creating a new empty image file
+using @command{qemu-img create}.  If @var{filename} is given then act as if
+converting an existing image file using @command{qemu-img convert}.  The format
+of the new file is given by @var{output_fmt} while the format of an existing
+file is given by @var{fmt}.
+
+A snapshot in an existing image can be specified using @var{snapshot_param}.
+
+The following fields are reported:
+@example
+required size: 524288
+fully allocated size: 1074069504
+@end example
+
+The @code{required size} is the file size of the new image.  It may be smaller
+than the virtual disk size if the image format supports compact representation.
+
+The @code{fully allocated size} is the file size of the new image once data has
+been written to all sectors.  This is the maximum size that the image file can
+occupy with the exception of internal snapshots, dirty bitmaps, vmstate data,
+and other advanced image format features.
+
+@item snapshot [--object @var{objectdef}] [--image-opts] [-U] [-q] [-l | -a @var{snapshot} | -c @var{snapshot} | -d @var{snapshot}] @var{filename}
 
 List, apply, create or delete snapshots in image @var{filename}.
 
-@item rebase [-f @var{fmt}] [-t @var{cache}] [-T @var{src_cache}] [-p] [-u] -b @var{backing_file} [-F @var{backing_fmt}] @var{filename}
+@item rebase [--object @var{objectdef}] [--image-opts] [-U] [-q] [-f @var{fmt}] [-t @var{cache}] [-T @var{src_cache}] [-p] [-u] -b @var{backing_file} [-F @var{backing_fmt}] @var{filename}
 
 Changes the backing file of an image. Only the formats @code{qcow2} and
 @code{qed} support changing the backing file.
@@ -443,6 +573,9 @@ The backing file is changed to @var{backing_file} and (if the image format of
 @var{backing_fmt}. If @var{backing_file} is specified as ``'' (the empty
 string), then the image is rebased onto no backing file (i.e. it will exist
 independently of any backing file).
+
+If a relative path name is given, the backing file is looked up relative to
+the directory containing @var{filename}.
 
 @var{cache} specifies the cache mode to be used for @var{filename}, whereas
 @var{src_cache} specifies the cache mode for reading backing files.
@@ -490,7 +623,7 @@ qemu-img rebase -b base.img diff.qcow2
 At this point, @code{modified.img} can be discarded, since
 @code{base.img + diff.qcow2} contains the same information.
 
-@item resize @var{filename} [+ | -]@var{size}
+@item resize [--object @var{objectdef}] [--image-opts] [-f @var{fmt}] [--preallocation=@var{prealloc}] [-q] [--shrink] @var{filename} [+ | -]@var{size}
 
 Change the disk image as if it had been created with @var{size}.
 
@@ -498,14 +631,19 @@ Before using this command to shrink a disk image, you MUST use file system and
 partitioning tools inside the VM to reduce allocated file systems and partition
 sizes accordingly.  Failure to do so will result in data loss!
 
+When shrinking images, the @code{--shrink} option must be given. This informs
+qemu-img that the user acknowledges all loss of data beyond the truncated
+image's end.
+
 After using this command to grow a disk image, you must use file system and
 partitioning tools inside the VM to actually begin using the new space on the
 device.
 
-@item amend [-p] [-f @var{fmt}] [-t @var{cache}] -o @var{options} @var{filename}
+When growing an image, the @code{--preallocation} option may be used to specify
+how the additional image area should be allocated on the host.  See the format
+description in the @code{NOTES} section which values are allowed.  Using this
+option may result in slightly more data being allocated than necessary.
 
-Amends the image format specific @var{options} for the image file
-@var{filename}. Not all file formats support this operation.
 @end table
 @c man end
 
@@ -558,16 +696,29 @@ The use of encryption in qcow and qcow2 images is considered to be flawed by
 modern cryptography standards, suffering from a number of design problems:
 
 @itemize @minus
-@item The AES-CBC cipher is used with predictable initialization vectors based
+@item
+The AES-CBC cipher is used with predictable initialization vectors based
 on the sector number. This makes it vulnerable to chosen plaintext attacks
 which can reveal the existence of encrypted data.
-@item The user passphrase is directly used as the encryption key. A poorly
+@item
+The user passphrase is directly used as the encryption key. A poorly
 chosen or short passphrase will compromise the security of the encryption.
-@item In the event of the passphrase being compromised there is no way to
+@item
+In the event of the passphrase being compromised there is no way to
 change the passphrase to protect data in any qcow images. The files must
 be cloned, using a different encryption passphrase in the new file. The
 original file must then be securely erased using a program like shred,
 though even this is ineffective with many modern storage technologies.
+@item
+Initialization vectors used to encrypt sectors are based on the
+guest virtual sector number, instead of the host physical sector. When
+a disk image has multiple internal snapshots this means that data in
+multiple physical sectors is encrypted with the same initialization
+vector. With the CBC mode, this opens the possibility of watermarking
+attacks if the attack can collect multiple sectors encrypted with the
+same IV and some predictable data. Having multiple qcow2 images with
+the same passphrase also exposes this weakness since the passphrase
+is directly used as the key.
 @end itemize
 
 Use of qcow / qcow2 encryption is thus strongly discouraged. Users are

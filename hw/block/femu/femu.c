@@ -17,7 +17,21 @@ static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
     uint8_t phase = cq->phase;
     hwaddr addr;
 
-    cqe->status = cpu_to_le16((req->status << 1) | phase);
+    cqe->res64 = req->gcrt;
+
+    if (n->print_log) {
+        femu_debug("%s,req,lba:%lu,lat:%lu\n", n->devname, req->slba, req->reqlat);
+    }
+
+    if (!req->is_write && req->tifa_cmd_flag == 911 && n->print_log)
+        femu_debug("%s,GCT,cqe->res64=%lu\n", n->devname, cqe->res64);
+    if (req->gcrt) {
+        /* Coperd: For TIFA, force error back to host */
+        req->status = NVME_DNR;
+        cqe->status = cpu_to_le16((req->status << 1) | phase);
+    } else {
+        cqe->status = cpu_to_le16((req->status << 1) | phase);
+    }
     cqe->sq_id = cpu_to_le16(sq->sqid);
     cqe->sq_head = cpu_to_le16(sq->head);
 
@@ -26,7 +40,7 @@ static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
         ((NvmeCqe *)cq->dma_addr_hva)[cq->tail] = *cqe;
     } else {
         addr = nvme_discontig(cq->prp_list, cq->tail, n->page_size, n->cqe_size);
-        nvme_addr_write(n, addr, (void *)cqe, sizeof(*cqe));
+        femu_nvme_addr_write(n, addr, (void *)cqe, sizeof(*cqe));
     }
 
     nvme_inc_cq_tail(cq);
@@ -37,22 +51,25 @@ static void nvme_process_cq_cpl(void *arg)
     FemuCtrl *n = (FemuCtrl *)arg;
     NvmeCQueue *cq = NULL;
     NvmeRequest *req = NULL;
+    struct rte_ring *rp = n->to_ftl;
     uint64_t now;
     int processed = 0;
     int rc;
     int i;
 
-    while (femu_ring_count(n->to_poller)) {
-    //while (femu_ring_count(n->to_ftl)) {
+    if (n->femu_mode == FEMU_BLACKBOX_MODE) {
+        rp = n->to_poller;
+    }
+
+    while (femu_ring_count(rp)) {
         req = NULL;
-        rc = femu_ring_dequeue(n->to_poller, (void *)&req, 1);
-        //rc = femu_ring_dequeue(n->to_ftl, (void *)&req, 1);
+        rc = femu_ring_dequeue(rp, (void *)&req, 1);
         if (rc != 1) {
-            printf("FEMU: dequeue from to_poller request failed\n");
+            femu_err("dequeue from to_poller request failed\n");
         }
         assert(req);
 
-        pqueue_insert(n->pq, req); 
+        pqueue_insert(n->pq, req);
     }
 
     while ((req = pqueue_peek(n->pq))) {
@@ -68,7 +85,15 @@ static void nvme_process_cq_cpl(void *arg)
         QTAILQ_INSERT_TAIL(&req->sq->req_list, req, entry);
         pqueue_pop(n->pq);
         processed++;
-        printf("Coperd,diff,pq.count=%d,%" PRId64 "\n", pqueue_size(n->pq), qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - req->expire_time);
+        n->nr_tt_ios++;
+        if (now - req->expire_time >= 20000) {
+            n->nr_tt_late_ios++;
+            if (n->print_log) {
+                femu_debug("%s,diff,pq.count=%lu,%" PRId64 ", %lu/%lu\n",
+                        n->devname, pqueue_size(n->pq), now - req->expire_time,
+                        n->nr_tt_late_ios, n->nr_tt_ios);
+            }
+        }
         n->should_isr[req->sq->sqid] = true;
     }
 
@@ -143,41 +168,41 @@ void femu_create_nvme_poller(FemuCtrl *n)
     /* Coperd: we put NvmeRequest into these rings */
     n->to_ftl = femu_ring_create(FEMU_RING_TYPE_MP_SC, FEMU_MAX_INF_REQS);
     if (!n->to_ftl) {
-        printf("FEMU: failed to create ring (n->to_ftl) ...\n");
+        femu_err("failed to create ring (n->to_ftl) ...\n");
         abort();
     }
     assert(rte_ring_empty(n->to_ftl));
 #if 1
     n->ssd.to_ftl = n->to_ftl;
-    printf("FEMU,ssd->to_ftl=%p, n->to_ftl=%p\n", n->ssd.to_ftl, n->to_ftl);
+    femu_debug("ssd->to_ftl=%p, n->to_ftl=%p\n", n->ssd.to_ftl, n->to_ftl);
 #endif
 
     n->to_poller = femu_ring_create(FEMU_RING_TYPE_MP_SC, FEMU_MAX_INF_REQS);
     if (!n->to_poller) {
-        printf("FEMU: failed to create ring (n->to_poller) ...\n");
+        femu_err("failed to create ring (n->to_poller) ...\n");
         abort();
     }
     assert(rte_ring_empty(n->to_poller));
 #if 1
     n->ssd.to_poller = n->to_poller;
-    printf("FEMU,ssd->to_poller=%p, n->to_poller=%p\n", n->ssd.to_poller, n->to_poller);
+    femu_debug("ssd->to_poller=%p, n->to_poller=%p\n", n->ssd.to_poller, n->to_poller);
 #endif
 
     n->pq = pqueue_init(FEMU_MAX_INF_REQS, cmp_pri, get_pri, set_pri, get_pos,
             set_pos);
     if (!n->pq) {
-        printf("FEMU: failed to create pqueue (n->pq) ...\n");
+        femu_err("failed to create pqueue (n->pq) ...\n");
         abort();
     }
 
-    qemu_thread_create(&n->poller, "nvme-poller", nvme_poller, n, 
+    qemu_thread_create(&n->poller, "nvme-poller", nvme_poller, n,
             QEMU_THREAD_JOINABLE);
-    printf("FEMU: nvme-poller created ...\n");
+    femu_debug("nvme-poller created ...\n");
 }
 
 static void femu_destroy_nvme_poller(FemuCtrl *n)
 {
-    printf("FEMU:destroying NVMe poller !!\n");
+    femu_debug("destroying NVMe poller !!\n");
     qemu_thread_join(&n->poller);
     pqueue_free(n->pq);
     femu_ring_free(n->to_poller);
@@ -223,35 +248,6 @@ void nvme_post_cqes_io(void *opaque)
     }
 }
 
-#if 0
-static void nvme_enqueue_req_completion_io(NvmeCQueue *cq, NvmeRequest *req)
-{
-    NvmeRequest *iter, *next;
-    bool inserted = false;
-
-    assert(cq->cqid == req->sq->cqid);
-    QTAILQ_REMOVE(&req->sq->out_req_list, req, entry);
-    //QTAILQ_INSERT_TAIL(&cq->req_list, req, entry);
-
-    if (QTAILQ_EMPTY(&cq->req_list)) {
-        QTAILQ_INSERT_HEAD(&cq->req_list, req, entry);
-        //timer_mod(cq->timer, req->expire_time);
-        return;
-    }
-
-    QTAILQ_FOREACH_SAFE(iter, &cq->req_list, entry, next) {
-        if (req->expire_time < iter->expire_time) {
-            QTAILQ_INSERT_BEFORE(iter, req, entry);
-            inserted = true;
-            break;
-        }
-    }
-    if (inserted == false) {
-        QTAILQ_INSERT_TAIL(&cq->req_list, req, entry);
-    }
-}
-#endif
-
 static uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     NvmeRequest *req)
 {
@@ -269,14 +265,12 @@ static uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t meta_size = nlb * ms;
     uint64_t elba = slba + nlb;
     uint16_t err;
-    uint64_t simtime;
-    struct ssd *ssd = &(n->ssd);
     int ret;
 
     req->data_offset = data_offset;
     req->is_write = (rw->opcode == NVME_CMD_WRITE) ? 1 : 0;
 
-    err = nvme_rw_check_req(n, ns, cmd, req, slba, elba, nlb, ctrl, data_size,
+    err = femu_nvme_rw_check_req(n, ns, cmd, req, slba, elba, nlb, ctrl, data_size,
             meta_size);
     if (err)
         return err;
@@ -294,25 +288,8 @@ static uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     req->status = NVME_SUCCESS;
     req->nlb = nlb;
     req->ns = ns;
-    req->expire_time = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);// + 100000;
 
-#if 0
-    if (req->is_write) {
-        if (n->femu_mode == FEMU_BLACKBOX_MODE) {
-            //simtime = ssd_write(ssd, data_size >> 9, data_offset >> 9);
-            simtime = ssd_write(ssd, req);
-            req->expire_time += simtime;
-        }
-    } else {
-        if (n->femu_mode == FEMU_BLACKBOX_MODE) {
-            //simtime = ssd_read(ssd, data_size >> 9 , data_offset >> 9);
-            simtime = ssd_read(ssd, req);
-            req->expire_time += simtime;
-        }
-    }
-#endif
-
-    ret = femu_rw_mem_backend(&n->mbe, &req->qsg, data_offset, req->is_write);
+    ret = femu_rw_mem_backend_bb(&n->mbe, &req->qsg, data_offset, req->is_write);
     if (!ret) {
         return NVME_SUCCESS;
     }
@@ -367,14 +344,11 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         return NVME_INVALID_OPCODE | NVME_DNR;
 
     /* Coperd: FEMU OC command handling */
-    case FEMU_OC_CMD_HYBRID_WRITE:
-    case FEMU_OC_CMD_PHYS_READ:
-    case FEMU_OC_CMD_PHYS_WRITE:
-        return femu_oc_rw(n, ns, cmd, req);
-    case FEMU_OC_CMD_ERASE_ASYNC:
-        if (femu_oc_dev(n))
-            return femu_oc_erase_async(n, ns, cmd, req);
-        return NVME_INVALID_OPCODE | NVME_DNR;
+    case FEMU_OC12_CMD_PHYS_READ:
+    case FEMU_OC12_CMD_PHYS_WRITE:
+        return femu_oc12_rw(n, ns, cmd, req);
+    case FEMU_OC12_CMD_ERASE_ASYNC:
+        return femu_oc12_erase_async(n, ns, cmd, req);
 
     default:
         return NVME_INVALID_OPCODE | NVME_DNR;
@@ -389,7 +363,7 @@ static void nvme_update_sq_eventidx(const NvmeSQueue *sq)
     }
 
     if (sq->eventidx_addr) {
-        nvme_addr_write(sq->ctrl, sq->eventidx_addr, (void *)&sq->tail,
+        femu_nvme_addr_write(sq->ctrl, sq->eventidx_addr, (void *)&sq->tail,
                 sizeof(sq->tail));
     }
 }
@@ -434,25 +408,34 @@ void nvme_process_sq_io(void *opaque)
         } else {
             addr = nvme_discontig(sq->prp_list, sq->head, n->page_size,
                     n->sqe_size);
-            nvme_addr_read(n, addr, (void *)&cmd, sizeof(cmd));
+            femu_nvme_addr_read(n, addr, (void *)&cmd, sizeof(cmd));
         }
         nvme_inc_sq_head(sq);
 
         req = QTAILQ_FIRST(&sq->req_list);
         QTAILQ_REMOVE(&sq->req_list, req, entry);
         memset(&req->cqe, 0, sizeof(req->cqe));
+        /* Coperd: record req->stime at earliest convenience */
+        req->expire_time = req->stime = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
         req->cqe.cid = cmd.cid;
 
+        if (n->print_log) {
+            femu_debug("%s,cid:%d\n", __func__, cmd.cid);
+        }
+
+        /* Coperd: For TIFA */
+        req->tifa_cmd_flag = ((NvmeRwCmd *)&cmd)->rsvd2;
+
         status = nvme_io_cmd(n, &cmd, req);
-        if (status == NVME_SUCCESS) {
+        if (1 || status == NVME_SUCCESS) {
             req->status = status;
 
             int rc = femu_ring_enqueue(n->to_ftl, (void *)&req, 1);
             if (rc != 1) {
-                printf("FEMU: enqueue failed, ret=%d\n", rc);
+                femu_err("enqueue failed, ret=%d\n", rc);
             }
         } else {
-            printf("FEMU: Error IO processed!\n");
+            femu_err("Error IO processed!\n");
         }
 
         processed++;
@@ -470,13 +453,13 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
     n->dataplane_started = false;
 
     if (shutdown) {
-        printf("FEMU shutting down NVMe Controller ...\n");
+        femu_debug("shutting down NVMe Controller ...\n");
     } else {
-        printf("FEMU disabling NVMe Controller ...\n");
+        femu_debug("disabling NVMe Controller ...\n");
     }
 
     if (shutdown) {
-        printf("FEMU,%s,clear_guest_notifier\n", __func__);
+        femu_debug("%s,clear_guest_notifier\n", __func__);
         nvme_clear_guest_notifier(n);
     }
 
@@ -528,7 +511,7 @@ static int nvme_start_ctrl(FemuCtrl *n)
             NVME_AQA_ACQS(n->bar.aqa) + 1, 1, 1);
     nvme_init_sq(&n->admin_sq, n, n->bar.asq, 0, 0,
             NVME_AQA_ASQS(n->bar.aqa) + 1, NVME_Q_PRIO_HIGH, 1);
-    printf("FEMU,nvme_start_ctrl,created admin SQ/CQ success\n");
+    femu_debug("nvme_start_ctrl,created admin SQ/CQ success\n");
 
     return 0;
 }
@@ -646,7 +629,6 @@ static void nvme_process_db_io(FemuCtrl *n, hwaddr addr, int val)
     NvmeSQueue *sq;
 
     if (n->dataplane_started) {
-        printf("FEMU: ignoring guest MMIO DB ring since poller is up\n");
         return;
     }
 
@@ -765,17 +747,8 @@ uint64_t ns_blks(NvmeNamespace *ns, uint8_t lba_idx)
     uint32_t lba_ds = (1 << id_ns->lbaf[lba_idx].ds);
     uint32_t lba_sz = lba_ds + n->meta;
 
-    printf("Coperd,ns_size=%ld,lba_ds=%d,lba_sz=%d\n", ns_size, lba_ds, lba_sz);
+    femu_debug("ns_size=%ld,lba_ds=%d,lba_sz=%d\n", ns_size, lba_ds, lba_sz);
     return ns_size / lba_sz;
-	if (n->femu_mode == FEMU_WHITEBOX_MODE && femu_oc_dev(n)) {
-		/* p_ent: LBA + md + L2P entry */
-		uint64_t p_ent = lba_sz + sizeof(*(ns->tbl));
-		uint64_t p_ents = ns_size / p_ent;
-
-		return p_ents;
-	} else {
-        return ns_size / lba_sz;
-    }
 }
 
 static uint64_t ns_bdrv_blks(NvmeNamespace *ns, uint64_t blks, uint8_t lba_idx)
@@ -795,15 +768,14 @@ void nvme_partition_ns(NvmeNamespace *ns, uint8_t lba_idx)
     blks = ns->ns_blks;
     bdrv_blks = ns_bdrv_blks(ns, ns->ns_blks, lba_idx);
 
-    if (n->femu_mode == FEMU_WHITEBOX_MODE && femu_oc_dev(n)) {
-        ns->tbl_dsk_start_offset =
-            (ns->start_block + bdrv_blks) << BDRV_SECTOR_BITS;
+    if (OCSSD(n)) {
+        ns->tbl_dsk_start_offset = (ns->start_block + bdrv_blks) << BDRV_SECTOR_BITS;
         ns->tbl_entries = blks;
         if (ns->tbl) {
             g_free(ns->tbl);
         }
-        ns->tbl = qemu_memalign(4096, femu_oc_tbl_size(ns));
-        femu_oc_tbl_initialize(ns);
+        ns->tbl = qemu_memalign(4096, femu_oc12_tbl_size(ns));
+        femu_oc12_tbl_initialize(ns);
     } else {
         ns->tbl = NULL;
         ns->tbl_entries = 0;
@@ -811,7 +783,7 @@ void nvme_partition_ns(NvmeNamespace *ns, uint8_t lba_idx)
 
     id_ns->nuse = id_ns->ncap = id_ns->nsze = cpu_to_le64(blks);
     ns->meta_start_offset =
-        ((ns->start_block + bdrv_blks) << BDRV_SECTOR_BITS) + femu_oc_tbl_size(ns);
+        ((ns->start_block + bdrv_blks) << BDRV_SECTOR_BITS) + femu_oc12_tbl_size(ns);
 
     if (ns->util)
         g_free(ns->util);
@@ -839,9 +811,8 @@ static void nvme_init_namespaces(FemuCtrl *n)
         id_ns->dpc = n->dpc;
         id_ns->dps = n->dps;
 
-        if (n->femu_mode == FEMU_WHITEBOX_MODE) {
-            if (femu_oc_dev(n))
-                id_ns->vs[0] = 0x1;
+        if (OCSSD(n)) {
+            id_ns->vs[0] = 0x1;
         }
 
         for (j = 0; j < ji; j++) {
@@ -859,10 +830,8 @@ static void nvme_init_namespaces(FemuCtrl *n)
 
         ns->id = i + 1;
         ns->ctrl = n;
-        //ns->start_block = i * n->ns_size >> BDRV_SECTOR_BITS;
+        ns->start_block = i * n->ns_size >> BDRV_SECTOR_BITS;
         ns->ns_blks = ns_blks(ns, lba_index);
-        ns->start_block = i * ((n->ns_size >> BDRV_SECTOR_BITS)
-                + (n->meta * ns_bdrv_blks(ns, ns->ns_blks, lba_index)));
         ns->util = bitmap_new(blks);
         ns->uncorrectable = bitmap_new(blks);
         nvme_partition_ns(ns, lba_index);
@@ -870,7 +839,7 @@ static void nvme_init_namespaces(FemuCtrl *n)
 }
 
 /* Coperd: info shown in "nvme list" */
-static void femu_set_devinfo(FemuCtrl *n)
+static void femu_set_ctrl_info(FemuCtrl *n)
 {
     static int fsid_voc = 0;
     static int fsid_vssd = 0;
@@ -897,20 +866,23 @@ static void femu_set_devinfo(FemuCtrl *n)
         strpadcpy((char *)id->mn, sizeof(id->mn), vssd_mn, ' ');
     }
 
+    memset(n->devname, 0, 64);
+    strcpy(n->devname, serial);
+
     strpadcpy((char *)id->sn, sizeof(id->sn), serial, ' ');
     strpadcpy((char *)id->fr, sizeof(id->fr), "1.0", ' ');
 }
 
 static void nvme_init_ctrl(FemuCtrl *n)
 {
-    int i;
     NvmeIdCtrl *id = &n->id_ctrl;
     uint8_t *pci_conf = n->parent_obj.config;
+    int i;
 
     id->vid = cpu_to_le16(pci_get_word(pci_conf + PCI_VENDOR_ID));
     id->ssvid = cpu_to_le16(pci_get_word(pci_conf + PCI_SUBSYSTEM_VENDOR_ID));
 
-    femu_set_devinfo(n);
+    femu_set_ctrl_info(n);
 
     id->rab = 6;
     id->ieee[0] = 0x00;
@@ -962,8 +934,8 @@ static void nvme_init_ctrl(FemuCtrl *n)
     NVME_CAP_SET_DSTRD(n->bar.cap, n->db_stride);
     NVME_CAP_SET_NSSRS(n->bar.cap, 0);
     NVME_CAP_SET_CSS(n->bar.cap, 1);
-    if (OCSSD(n) && femu_oc_dev(n)) {
-        NVME_CAP_SET_FEMU_OC(n->bar.cap, 1);
+    if (OCSSD(n)) {
+        NVME_CAP_SET_FEMU_OC12(n->bar.cap, 1);
     }
 
     NVME_CAP_SET_MPSMIN(n->bar.cap, n->mpsmin);
@@ -975,8 +947,19 @@ static void nvme_init_ctrl(FemuCtrl *n)
         n->bar.vs = 0x00010100;
     n->bar.intmc = n->bar.intms = 0;
     n->temperature = NVME_TEMPERATURE;
+}
 
-    printf("Coperd,nvme_init_ctrl done!\n");
+static void nvme_init_cmb(FemuCtrl *n)
+{
+    n->bar.cmbloc = n->cmbloc;
+    n->bar.cmbsz  = n->cmbsz;
+
+    n->cmbuf = g_malloc0(NVME_CMBSZ_GETSIZE(n->bar.cmbsz));
+    memory_region_init_io(&n->ctrl_mem, OBJECT(n), &nvme_cmb_ops, n, "nvme-cmb",
+            NVME_CMBSZ_GETSIZE(n->bar.cmbsz));
+    pci_register_bar(&n->parent_obj, NVME_CMBLOC_BIR(n->bar.cmbloc),
+            PCI_BASE_ADDRESS_SPACE_MEMORY | PCI_BASE_ADDRESS_MEM_TYPE_64,
+            &n->ctrl_mem);
 }
 
 static void nvme_init_pci(FemuCtrl *n)
@@ -1000,35 +983,25 @@ static void nvme_init_pci(FemuCtrl *n)
     msi_init(&n->parent_obj, 0x50, 32, true, false, NULL);
 
     if (n->cmbsz) {
-
-        n->bar.cmbloc = n->cmbloc;
-        n->bar.cmbsz  = n->cmbsz;
-
-        n->cmbuf = g_malloc0(NVME_CMBSZ_GETSIZE(n->bar.cmbsz));
-        memory_region_init_io(&n->ctrl_mem, OBJECT(n), &nvme_cmb_ops, n, "nvme-cmb",
-                NVME_CMBSZ_GETSIZE(n->bar.cmbsz));
-        pci_register_bar(&n->parent_obj, NVME_CMBLOC_BIR(n->bar.cmbloc),
-                PCI_BASE_ADDRESS_SPACE_MEMORY | PCI_BASE_ADDRESS_MEM_TYPE_64,
-                &n->ctrl_mem);
-
+        nvme_init_cmb(n);
     }
-
-    printf("Coperd,nvme_init_pci done!\n");
 }
 
-static int femu_init(PCIDevice *pci_dev)
+static void femu_realize(PCIDevice *pci_dev, Error **errp)
 {
     FemuCtrl *n = FEMU(pci_dev);
     int64_t bs_size;
 
-    //blkconf_serial(&n->conf, &n->serial);
+    nvme_check_size();
+
     if (nvme_check_constraints(n)) {
-        return -1;
+        return;
     }
 
     bs_size = ((int64_t)n->memsz) * 1024 * 1024;
 
     femu_init_mem_backend(&n->mbe, bs_size);
+    n->mbe.femu_mode = n->femu_mode;
 
     n->completed = 0;
     n->start_time = time(NULL);
@@ -1048,29 +1021,24 @@ static int femu_init(PCIDevice *pci_dev)
     nvme_init_ctrl(n);
     nvme_init_namespaces(n);
 
-    if (n->femu_mode == FEMU_WHITEBOX_MODE) {
-        printf("FEMU: starting in OCSSD mode ..\n");
-        if (femu_oc_dev(n)) {
-            return femu_oc_init(n);
-        }
-    } else if (n->femu_mode == FEMU_BLACKBOX_MODE) {
+    if (OCSSD(n)) {
+        femu_debug("starting in OCSSD mode ..\n");
+        femu_oc12_init(n);
+    } else if (BBSSD(n)) {
         struct ssd *ssd = &(n->ssd);
         memset(ssd, 0, sizeof(struct ssd));
         ssd->dataplane_started_ptr = &n->dataplane_started;
-        printf("FEMU: starting in blackbox SSD mode ..\n");
+        ssd->ssdname = (char *)n->devname;
+        femu_debug("starting in blackbox SSD mode ..\n");
         ssd_init(ssd);
     }
-
-    printf("Coperd,femu_init done!\n");
-
-    return 0;
 }
 
 static void femu_exit(PCIDevice *pci_dev)
 {
     FemuCtrl *n = FEMU(pci_dev);
 
-    printf("Coperd,femu_exit starting!\n");
+    femu_debug("femu_exit starting!\n");
 
     nvme_clear_ctrl(n, true);
 
@@ -1090,18 +1058,15 @@ static void femu_exit(PCIDevice *pci_dev)
     }
 
     if (n->femu_mode == FEMU_WHITEBOX_MODE) {
-        if (femu_oc_dev(n)) {
-            femu_oc_exit(n);
-        }
+        femu_oc12_exit(n);
     }
 }
 
 static Property femu_props[] = {
-    DEFINE_BLOCK_PROPERTIES(FemuCtrl, conf),
     DEFINE_PROP_STRING("serial", FemuCtrl, serial),
     DEFINE_PROP_UINT32("devsz_mb", FemuCtrl, memsz, 1024), /* Coperd: in MB */
     DEFINE_PROP_UINT32("namespaces", FemuCtrl, num_namespaces, 1),
-    DEFINE_PROP_UINT32("queues", FemuCtrl, num_io_queues, 4),
+    DEFINE_PROP_UINT32("queues", FemuCtrl, num_io_queues, 1),
     DEFINE_PROP_UINT32("entries", FemuCtrl, max_q_ents, 0x7ff),
     DEFINE_PROP_UINT8("max_cqes", FemuCtrl, max_cqes, 0x4),
     DEFINE_PROP_UINT8("max_sqes", FemuCtrl, max_sqes, 0x6),
@@ -1131,26 +1096,14 @@ static Property femu_props[] = {
     DEFINE_PROP_UINT16("vid", FemuCtrl, vid, 0x1d1d),
     DEFINE_PROP_UINT16("did", FemuCtrl, did, 0x1f1f),
     DEFINE_PROP_UINT8("femu_mode", FemuCtrl, femu_mode, FEMU_DEF_NOSSD_MODE),
-    DEFINE_PROP_UINT8("lver", FemuCtrl, femu_oc_ctrl.id_ctrl.ver_id, 0),
-    DEFINE_PROP_UINT32("ll2pmode", FemuCtrl, femu_oc_ctrl.id_ctrl.dom, 1),
-    DEFINE_PROP_UINT16("lsec_size", FemuCtrl, femu_oc_ctrl.params.sec_size, 4096),
-    DEFINE_PROP_UINT8("lsecs_per_pg", FemuCtrl, femu_oc_ctrl.params.sec_per_pg, 1),
-    DEFINE_PROP_UINT16("lpgs_per_blk", FemuCtrl, femu_oc_ctrl.params.pgs_per_blk, 256),
-    DEFINE_PROP_UINT8("lmax_sec_per_rq", FemuCtrl, femu_oc_ctrl.params.max_sec_per_rq, 64),
-    DEFINE_PROP_UINT8("lmtype", FemuCtrl, femu_oc_ctrl.params.mtype, 0),
-    DEFINE_PROP_UINT8("lfmtype", FemuCtrl, femu_oc_ctrl.params.fmtype, 0),
-    DEFINE_PROP_UINT8("lnum_ch", FemuCtrl, femu_oc_ctrl.params.num_ch, 1),
-    DEFINE_PROP_UINT8("lnum_lun", FemuCtrl, femu_oc_ctrl.params.num_lun, 1),
-    DEFINE_PROP_UINT8("lnum_pln", FemuCtrl, femu_oc_ctrl.params.num_pln, 1),
-    DEFINE_PROP_UINT8("lreadl2ptbl", FemuCtrl, femu_oc_ctrl.read_l2p_tbl, 1),
-    DEFINE_PROP_STRING("lbbtable", FemuCtrl, femu_oc_ctrl.bbt_fname),
-    DEFINE_PROP_STRING("lmetadata", FemuCtrl, femu_oc_ctrl.meta_fname),
-    DEFINE_PROP_UINT16("lmetasize", FemuCtrl, femu_oc_ctrl.params.sos, 16),
-    DEFINE_PROP_UINT8("lbbfrequency", FemuCtrl, femu_oc_ctrl.bbt_gen_freq, 0),
-    DEFINE_PROP_UINT32("lb_err_write", FemuCtrl, femu_oc_ctrl.err_write, 0),
-    DEFINE_PROP_UINT32("ln_err_write", FemuCtrl, femu_oc_ctrl.n_err_write, 0),
-    DEFINE_PROP_UINT8("ldebug", FemuCtrl, femu_oc_ctrl.debug, 0),
-    DEFINE_PROP_UINT8("lstrict", FemuCtrl, femu_oc_ctrl.strict, 0),
+    DEFINE_PROP_UINT16("lsec_size", FemuCtrl, femu_oc12_ctrl.params.sec_size, 4096),
+    DEFINE_PROP_UINT8("lsecs_per_pg", FemuCtrl, femu_oc12_ctrl.params.sec_per_pg, 1),
+    DEFINE_PROP_UINT16("lpgs_per_blk", FemuCtrl, femu_oc12_ctrl.params.pgs_per_blk, 256),
+    DEFINE_PROP_UINT8("lmax_sec_per_rq", FemuCtrl, femu_oc12_ctrl.params.max_sec_per_rq, 64),
+    DEFINE_PROP_UINT8("lnum_ch", FemuCtrl, femu_oc12_ctrl.params.num_ch, 1),
+    DEFINE_PROP_UINT8("lnum_lun", FemuCtrl, femu_oc12_ctrl.params.num_lun, 1),
+    DEFINE_PROP_UINT8("lnum_pln", FemuCtrl, femu_oc12_ctrl.params.num_pln, 1),
+    DEFINE_PROP_UINT16("lmetasize", FemuCtrl, femu_oc12_ctrl.params.sos, 16),
     DEFINE_PROP_END_OF_LIST(),
 };
 
@@ -1164,58 +1117,18 @@ static void femu_class_init(ObjectClass *oc, void *data)
     DeviceClass *dc = DEVICE_CLASS(oc);
     PCIDeviceClass *pc = PCI_DEVICE_CLASS(oc);
 
-    pc->init = femu_init;
+    pc->realize = femu_realize;
     pc->exit = femu_exit;
     pc->class_id = PCI_CLASS_STORAGE_EXPRESS;
-    // Coperd: change from PCI_VENDOR_ID_INTEL to 0x1d1d for OCSSD
+    /* Coperd: change from PCI_VENDOR_ID_INTEL to 0x1d1d for OCSSD */
     pc->vendor_id = 0x1d1d;
-    pc->is_express = 1;
+    pc->device_id = 0x1f1f;
+    pc->revision = 2;
 
     set_bit(DEVICE_CATEGORY_STORAGE, dc->categories);
-    dc->desc = "Non-Volatile Memory Express";
+    dc->desc = "FEMU Non-Volatile Memory Express";
     dc->props = femu_props;
     dc->vmsd = &femu_vmstate;
-}
-
-static void femu_get_bootindex(Object *obj, Visitor *v, const char *name,
-                                void *opaque, Error **errp)
-{
-    FemuCtrl *s = FEMU(obj);
-
-    visit_type_int32(v, name, &s->conf.bootindex, errp);
-}
-
-static void femu_set_bootindex(Object *obj, Visitor *v, const char *name,
-                                void *opaque, Error **errp)
-{
-    FemuCtrl *s = FEMU(obj);
-    int32_t boot_index;
-    Error *local_err = NULL;
-
-    visit_type_int32(v, name, &boot_index, &local_err);
-    if (local_err) {
-        goto out;
-    }
-    /* check whether bootindex is present in fw_boot_order list  */
-    check_boot_index(boot_index, &local_err);
-    if (local_err) {
-        goto out;
-    }
-    /* change bootindex to a new one */
-    s->conf.bootindex = boot_index;
-
-out:
-    if (local_err) {
-        error_propagate(errp, local_err);
-    }
-}
-
-static void femu_instance_init(Object *obj)
-{
-    object_property_add(obj, "bootindex", "int32",
-                        femu_get_bootindex,
-                        femu_set_bootindex, NULL, NULL, NULL);
-    object_property_set_int(obj, -1, "bootindex", NULL);
 }
 
 static const TypeInfo femu_info = {
@@ -1223,7 +1136,10 @@ static const TypeInfo femu_info = {
     .parent        = TYPE_PCI_DEVICE,
     .instance_size = sizeof(FemuCtrl),
     .class_init    = femu_class_init,
-    .instance_init = femu_instance_init,
+    .interfaces = (InterfaceInfo[]) {
+        { INTERFACE_PCIE_DEVICE },
+        { }
+    },
 };
 
 static void femu_register_types(void)

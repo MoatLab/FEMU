@@ -65,11 +65,21 @@
 # which will echo back the properly formatted JSON-compliant QMP that is being
 # sent to QEMU, which is useful for debugging and documentation generation.
 
-import qmp
+from __future__ import print_function
 import json
 import ast
 import readline
 import sys
+import os
+import errno
+import atexit
+import re
+
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', 'python'))
+from qemu import qmp
+
+if sys.version_info[0] == 2:
+    input = raw_input
 
 class QMPCompleter(list):
     def complete(self, text, state):
@@ -103,12 +113,14 @@ class FuzzyJSON(ast.NodeTransformer):
 #       _execute_cmd()). Let's design a better one.
 class QMPShell(qmp.QEMUMonitorProtocol):
     def __init__(self, address, pretty=False):
-        qmp.QEMUMonitorProtocol.__init__(self, self.__get_address(address))
+        super(QMPShell, self).__init__(self.__get_address(address))
         self._greeting = None
         self._completer = None
         self._pretty = pretty
         self._transmode = False
         self._actions = list()
+        self._histfile = os.path.join(os.path.expanduser('~'),
+                                      '.qmp-shell_history')
 
     def __get_address(self, arg):
         """
@@ -126,17 +138,36 @@ class QMPShell(qmp.QEMUMonitorProtocol):
         return arg
 
     def _fill_completion(self):
-        for cmd in self.cmd('query-commands')['return']:
+        cmds = self.cmd('query-commands')
+        if 'error' in cmds:
+            return
+        for cmd in cmds['return']:
             self._completer.append(cmd['name'])
 
     def __completer_setup(self):
         self._completer = QMPCompleter()
         self._fill_completion()
+        readline.set_history_length(1024)
         readline.set_completer(self._completer.complete)
         readline.parse_and_bind("tab: complete")
         # XXX: default delimiters conflict with some command names (eg. query-),
         # clearing everything as it doesn't seem to matter
         readline.set_completer_delims('')
+        try:
+            readline.read_history_file(self._histfile)
+        except Exception as e:
+            if isinstance(e, IOError) and e.errno == errno.ENOENT:
+                # File not found. No problem.
+                pass
+            else:
+                print("Failed to read history '%s'; %s" % (self._histfile, e))
+        atexit.register(self.__save_history)
+
+    def __save_history(self):
+        try:
+            readline.write_history_file(self._histfile)
+        except Exception as e:
+            print("Failed to save history file '%s'; %s" % (self._histfile, e))
 
     def __parse_value(self, val):
         try:
@@ -194,7 +225,7 @@ class QMPShell(qmp.QEMUMonitorProtocol):
 
             < command-name > [ arg-name1=arg1 ] ... [ arg-nameN=argN ]
         """
-        cmdargs = cmdline.split()
+        cmdargs = re.findall(r'''(?:[^\s"']|"(?:\\.|[^"])*"|'(?:\\.|[^'])*')+''', cmdline)
 
         # Transactional CLI entry/exit:
         if cmdargs[0] == 'transaction(':
@@ -234,15 +265,15 @@ class QMPShell(qmp.QEMUMonitorProtocol):
         if self._pretty:
             indent = 4
         jsobj = json.dumps(qmp, indent=indent)
-        print str(jsobj)
+        print(str(jsobj))
 
     def _execute_cmd(self, cmdline):
         try:
             qmpcmd = self.__build_cmd(cmdline)
         except Exception as e:
-            print 'Error while parsing command line: %s' % e
-            print 'command format: <command-name> ',
-            print '[arg-name1=arg1] ... [arg-nameN=argN]'
+            print('Error while parsing command line: %s' % e)
+            print('command format: <command-name> ', end=' ')
+            print('[arg-name1=arg1] ... [arg-nameN=argN]')
             return True
         # For transaction mode, we may have just cached the action:
         if qmpcmd is None:
@@ -251,19 +282,22 @@ class QMPShell(qmp.QEMUMonitorProtocol):
             self._print(qmpcmd)
         resp = self.cmd_obj(qmpcmd)
         if resp is None:
-            print 'Disconnected'
+            print('Disconnected')
             return False
         self._print(resp)
         return True
 
-    def connect(self):
-        self._greeting = qmp.QEMUMonitorProtocol.connect(self)
+    def connect(self, negotiate):
+        self._greeting = super(QMPShell, self).connect(negotiate)
         self.__completer_setup()
 
     def show_banner(self, msg='Welcome to the QMP low-level shell!'):
-        print msg
+        print(msg)
+        if not self._greeting:
+            print('Connected')
+            return
         version = self._greeting['QMP']['version']['qemu']
-        print 'Connected to QEMU %d.%d.%d\n' % (version['major'],version['minor'],version['micro'])
+        print('Connected to QEMU %d.%d.%d\n' % (version['major'],version['minor'],version['micro']))
 
     def get_prompt(self):
         if self._transmode:
@@ -277,13 +311,13 @@ class QMPShell(qmp.QEMUMonitorProtocol):
         @return True if execution was ok, return False if disconnected.
         """
         try:
-            cmdline = raw_input(prompt)
+            cmdline = input(prompt)
         except EOFError:
-            print
+            print()
             return False
         if cmdline == '':
             for ev in self.get_events():
-                print ev
+                print(ev)
             self.clear_events()
             return True
         else:
@@ -339,24 +373,24 @@ class HMPShell(QMPShell):
             try:
                 idx = int(cmdline.split()[1])
                 if not 'return' in self.__cmd_passthrough('info version', idx):
-                    print 'bad CPU index'
+                    print('bad CPU index')
                     return True
                 self.__cpu_index = idx
             except ValueError:
-                print 'cpu command takes an integer argument'
+                print('cpu command takes an integer argument')
                 return True
         resp = self.__cmd_passthrough(cmdline, self.__cpu_index)
         if resp is None:
-            print 'Disconnected'
+            print('Disconnected')
             return False
         assert 'return' in resp or 'error' in resp
         if 'return' in resp:
             # Success
             if len(resp['return']) > 0:
-                print resp['return'],
+                print(resp['return'], end=' ')
         else:
             # Error
-            print '%s: %s' % (resp['error']['class'], resp['error']['desc'])
+            print('%s: %s' % (resp['error']['class'], resp['error']['desc']))
         return True
 
     def show_banner(self):
@@ -369,7 +403,11 @@ def die(msg):
 def fail_cmdline(option=None):
     if option:
         sys.stderr.write('ERROR: bad command-line option \'%s\'\n' % option)
-    sys.stderr.write('qemu-shell [ -v ] [ -p ] [ -H ] < UNIX socket path> | < TCP address:port >\n')
+    sys.stderr.write('qmp-shell [ -v ] [ -p ] [ -H ] [ -N ] < UNIX socket path> | < TCP address:port >\n')
+    sys.stderr.write('    -v     Verbose (echo command sent and received)\n')
+    sys.stderr.write('    -p     Pretty-print JSON\n')
+    sys.stderr.write('    -H     Use HMP interface\n')
+    sys.stderr.write('    -N     Skip negotiate (for qemu-ga)\n')
     sys.exit(1)
 
 def main():
@@ -378,6 +416,7 @@ def main():
     hmp = False
     pretty = False
     verbose = False
+    negotiate = True
 
     try:
         for arg in sys.argv[1:]:
@@ -387,6 +426,8 @@ def main():
                 hmp = True
             elif arg == "-p":
                 pretty = True
+            elif arg == "-N":
+                negotiate = False
             elif arg == "-v":
                 verbose = True
             else:
@@ -404,7 +445,7 @@ def main():
         die('bad port number in command-line')
 
     try:
-        qemu.connect()
+        qemu.connect(negotiate)
     except qmp.QMPConnectError:
         die('Didn\'t get QMP greeting message')
     except qmp.QMPCapabilitiesError:

@@ -27,9 +27,12 @@
 
 #include "qemu/osdep.h"
 #include "cpu.h"
+#include "chardev/char-fe.h"
 #include "exec/helper-proto.h"
-#include "exec/semihost.h"
+#include "hw/semihosting/semihost.h"
+#include "qapi/error.h"
 #include "qemu/log.h"
+#include "sysemu/sysemu.h"
 
 enum {
     TARGET_SYS_exit = 1,
@@ -148,14 +151,57 @@ static uint32_t errno_h2g(int host_errno)
     }
 }
 
+typedef struct XtensaSimConsole {
+    CharBackend be;
+    struct {
+        char buffer[16];
+        size_t offset;
+    } input;
+} XtensaSimConsole;
+
+static XtensaSimConsole *sim_console;
+
+static IOCanReadHandler sim_console_can_read;
+static int sim_console_can_read(void *opaque)
+{
+    XtensaSimConsole *p = opaque;
+
+    return sizeof(p->input.buffer) - p->input.offset;
+}
+
+static IOReadHandler sim_console_read;
+static void sim_console_read(void *opaque, const uint8_t *buf, int size)
+{
+    XtensaSimConsole *p = opaque;
+    size_t copy = sizeof(p->input.buffer) - p->input.offset;
+
+    if (size < copy) {
+        copy = size;
+    }
+    memcpy(p->input.buffer + p->input.offset, buf, copy);
+    p->input.offset += copy;
+}
+
+void xtensa_sim_open_console(Chardev *chr)
+{
+    static XtensaSimConsole console;
+
+    qemu_chr_fe_init(&console.be, chr, &error_abort);
+    qemu_chr_fe_set_handlers(&console.be,
+                             sim_console_can_read,
+                             sim_console_read,
+                             NULL, NULL, &console,
+                             NULL, true);
+    sim_console = &console;
+}
+
 void HELPER(simcall)(CPUXtensaState *env)
 {
-    CPUState *cs = CPU(xtensa_env_get_cpu(env));
+    CPUState *cs = env_cpu(env);
     uint32_t *regs = env->regs;
 
     switch (regs[2]) {
     case TARGET_SYS_exit:
-        qemu_log("exit(%d) simcall\n", regs[3]);
         exit(regs[3]);
         break;
 
@@ -166,6 +212,7 @@ void HELPER(simcall)(CPUXtensaState *env)
             uint32_t fd = regs[3];
             uint32_t vaddr = regs[4];
             uint32_t len = regs[5];
+            uint32_t len_done = 0;
 
             while (len > 0) {
                 hwaddr paddr = cpu_get_phys_page_debug(cs, vaddr);
@@ -173,25 +220,70 @@ void HELPER(simcall)(CPUXtensaState *env)
                     TARGET_PAGE_SIZE - (vaddr & (TARGET_PAGE_SIZE - 1));
                 uint32_t io_sz = page_left < len ? page_left : len;
                 hwaddr sz = io_sz;
-                void *buf = cpu_physical_memory_map(paddr, &sz, is_write);
+                void *buf = cpu_physical_memory_map(paddr, &sz, !is_write);
+                uint32_t io_done;
+                bool error = false;
 
                 if (buf) {
                     vaddr += io_sz;
                     len -= io_sz;
-                    regs[2] = is_write ?
-                        write(fd, buf, io_sz) :
-                        read(fd, buf, io_sz);
-                    regs[3] = errno_h2g(errno);
-                    cpu_physical_memory_unmap(buf, sz, is_write, sz);
-                    if (regs[2] == -1) {
-                        break;
+                    if (fd < 3 && sim_console) {
+                        if (is_write && (fd == 1 || fd == 2)) {
+                            io_done = qemu_chr_fe_write_all(&sim_console->be,
+                                                            buf, io_sz);
+                            regs[3] = errno_h2g(errno);
+                        } else if (!is_write && fd == 0) {
+                            if (sim_console->input.offset) {
+                                io_done = sim_console->input.offset;
+                                if (io_sz < io_done) {
+                                    io_done = io_sz;
+                                }
+                                memcpy(buf, sim_console->input.buffer, io_done);
+                                memmove(sim_console->input.buffer,
+                                        sim_console->input.buffer + io_done,
+                                        sim_console->input.offset - io_done);
+                                sim_console->input.offset -= io_done;
+                                qemu_chr_fe_accept_input(&sim_console->be);
+                            } else {
+                                io_done = -1;
+                                regs[3] = TARGET_EAGAIN;
+                            }
+                        } else {
+                            qemu_log_mask(LOG_GUEST_ERROR,
+                                          "%s fd %d is not supported with chardev console\n",
+                                          is_write ?
+                                          "writing to" : "reading from", fd);
+                            io_done = -1;
+                            regs[3] = TARGET_EBADF;
+                        }
+                    } else {
+                        io_done = is_write ?
+                            write(fd, buf, io_sz) :
+                            read(fd, buf, io_sz);
+                        regs[3] = errno_h2g(errno);
                     }
+                    if (io_done == -1) {
+                        error = true;
+                        io_done = 0;
+                    }
+                    cpu_physical_memory_unmap(buf, sz, !is_write, io_done);
                 } else {
-                    regs[2] = -1;
+                    error = true;
                     regs[3] = TARGET_EINVAL;
                     break;
                 }
+                if (error) {
+                    if (!len_done) {
+                        len_done = -1;
+                    }
+                    break;
+                }
+                len_done += io_done;
+                if (io_done < io_sz) {
+                    break;
+                }
             }
+            regs[2] = len_done;
         }
         break;
 
@@ -241,10 +333,6 @@ void HELPER(simcall)(CPUXtensaState *env)
             uint32_t target_tvv[2];
 
             struct timeval tv = {0};
-            fd_set fdset;
-
-            FD_ZERO(&fdset);
-            FD_SET(fd, &fdset);
 
             if (target_tv) {
                 cpu_memory_rw_debug(cs, target_tv,
@@ -252,12 +340,27 @@ void HELPER(simcall)(CPUXtensaState *env)
                 tv.tv_sec = (int32_t)tswap32(target_tvv[0]);
                 tv.tv_usec = (int32_t)tswap32(target_tvv[1]);
             }
-            regs[2] = select(fd + 1,
-                    rq == SELECT_ONE_READ   ? &fdset : NULL,
-                    rq == SELECT_ONE_WRITE  ? &fdset : NULL,
-                    rq == SELECT_ONE_EXCEPT ? &fdset : NULL,
-                    target_tv ? &tv : NULL);
-            regs[3] = errno_h2g(errno);
+            if (fd < 3 && sim_console) {
+                if ((fd == 1 || fd == 2) && rq == SELECT_ONE_WRITE) {
+                    regs[2] = 1;
+                } else if (fd == 0 && rq == SELECT_ONE_READ) {
+                    regs[2] = sim_console->input.offset > 0;
+                } else {
+                    regs[2] = 0;
+                }
+                regs[3] = 0;
+            } else {
+                fd_set fdset;
+
+                FD_ZERO(&fdset);
+                FD_SET(fd, &fdset);
+                regs[2] = select(fd + 1,
+                                 rq == SELECT_ONE_READ   ? &fdset : NULL,
+                                 rq == SELECT_ONE_WRITE  ? &fdset : NULL,
+                                 rq == SELECT_ONE_EXCEPT ? &fdset : NULL,
+                                 target_tv ? &tv : NULL);
+                regs[3] = errno_h2g(errno);
+            }
         }
         break;
 

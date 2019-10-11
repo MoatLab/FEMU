@@ -67,7 +67,7 @@ void framebuffer_update_display(
     int *first_row, /* Input and output.  */
     int *last_row /* Output only */)
 {
-    hwaddr src_len;
+    DirtyBitmapSnapshot *snap;
     uint8_t *dest;
     uint8_t *src;
     int first, last = 0;
@@ -78,13 +78,11 @@ void framebuffer_update_display(
 
     i = *first_row;
     *first_row = -1;
-    src_len = (hwaddr)src_width * rows;
 
     mem = mem_section->mr;
     if (!mem) {
         return;
     }
-    memory_region_sync_dirty_bitmap(mem);
 
     addr = mem_section->offset_within_region;
     src = memory_region_get_ram_ptr(mem) + addr;
@@ -102,9 +100,10 @@ void framebuffer_update_display(
     src += i * src_width;
     dest += i * dest_row_pitch;
 
+    snap = memory_region_snapshot_and_clear_dirty(mem, addr, src_width * rows,
+                                                  DIRTY_MEMORY_VGA);
     for (; i < rows; i++) {
-        dirty = memory_region_get_dirty(mem, addr, src_width,
-                                             DIRTY_MEMORY_VGA);
+        dirty = memory_region_snapshot_get_dirty(mem, snap, addr, src_width);
         if (dirty || invalidate) {
             fn(opaque, dest, src, cols, dest_col_pitch);
             if (first == -1)
@@ -115,11 +114,10 @@ void framebuffer_update_display(
         src += src_width;
         dest += dest_row_pitch;
     }
+    g_free(snap);
     if (first < 0) {
         return;
     }
-    memory_region_reset_dirty(mem, mem_section->offset_within_region, src_len,
-                              DIRTY_MEMORY_VGA);
     *first_row = first;
     *last_row = last;
 }

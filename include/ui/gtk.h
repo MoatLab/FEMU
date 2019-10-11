@@ -22,18 +22,10 @@
 #include <gdk/gdkwayland.h>
 #endif
 
+#include "ui/kbd-state.h"
 #if defined(CONFIG_OPENGL)
 #include "ui/egl-helpers.h"
 #include "ui/egl-context.h"
-#endif
-
-/* Compatibility define to let us build on both Gtk2 and Gtk3 */
-#if GTK_CHECK_VERSION(3, 0, 0)
-static inline void gdk_drawable_get_size(GdkWindow *w, gint *ww, gint *wh)
-{
-    *ww = gdk_window_get_width(w);
-    *wh = gdk_window_get_height(w);
-}
 #endif
 
 typedef struct GtkDisplayState GtkDisplayState;
@@ -41,19 +33,23 @@ typedef struct GtkDisplayState GtkDisplayState;
 typedef struct VirtualGfxConsole {
     GtkWidget *drawing_area;
     DisplayChangeListener dcl;
+    QKbdState *kbd;
     DisplaySurface *ds;
     pixman_image_t *convert;
     cairo_surface_t *surface;
     double scale_x;
     double scale_y;
 #if defined(CONFIG_OPENGL)
-    ConsoleGLState *gls;
+    QemuGLShader *gls;
     EGLContext ectx;
     EGLSurface esurface;
     int glupdates;
     int x, y, w, h;
-    GLuint tex_id;
-    GLuint fbo_id;
+    egl_fb guest_fb;
+    egl_fb win_fb;
+    egl_fb cursor_fb;
+    int cursor_x;
+    int cursor_y;
     bool y0_top;
     bool scanout_mode;
 #endif
@@ -90,6 +86,8 @@ typedef struct VirtualConsole {
     };
 } VirtualConsole;
 
+extern bool gtk_use_gl_area;
+
 /* ui/gtk.c */
 void gd_update_windowsize(VirtualConsole *vc);
 
@@ -111,9 +109,18 @@ void gd_egl_scanout_texture(DisplayChangeListener *dcl,
                             uint32_t backing_height,
                             uint32_t x, uint32_t y,
                             uint32_t w, uint32_t h);
+void gd_egl_scanout_dmabuf(DisplayChangeListener *dcl,
+                           QemuDmaBuf *dmabuf);
+void gd_egl_cursor_dmabuf(DisplayChangeListener *dcl,
+                          QemuDmaBuf *dmabuf, bool have_hot,
+                          uint32_t hot_x, uint32_t hot_y);
+void gd_egl_cursor_position(DisplayChangeListener *dcl,
+                            uint32_t pos_x, uint32_t pos_y);
+void gd_egl_release_dmabuf(DisplayChangeListener *dcl,
+                           QemuDmaBuf *dmabuf);
 void gd_egl_scanout_flush(DisplayChangeListener *dcl,
                           uint32_t x, uint32_t y, uint32_t w, uint32_t h);
-void gtk_egl_init(void);
+void gtk_egl_init(DisplayGLMode mode);
 int gd_egl_make_current(DisplayChangeListener *dcl,
                         QEMUGLContext ctx);
 

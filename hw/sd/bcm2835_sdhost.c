@@ -13,8 +13,10 @@
 
 #include "qemu/osdep.h"
 #include "qemu/log.h"
+#include "qemu/module.h"
 #include "sysemu/blockdev.h"
 #include "hw/sd/bcm2835_sdhost.h"
+#include "trace.h"
 
 #define TYPE_BCM2835_SDHOST_BUS "bcm2835-sdhost-bus"
 #define BCM2835_SDHOST_BUS(obj) \
@@ -99,6 +101,7 @@ static void bcm2835_sdhost_update_irq(BCM2835SDHostState *s)
 {
     uint32_t irq = s->status &
         (SDHSTS_BUSY_IRPT | SDHSTS_BLOCK_IRPT | SDHSTS_SDIO_IRPT);
+    trace_bcm2835_sdhost_update_irq(irq);
     qemu_set_irq(s->irq, !!irq);
 }
 
@@ -116,8 +119,6 @@ static void bcm2835_sdhost_send_command(BCM2835SDHostState *s)
         goto error;
     }
     if (!(s->cmd & SDCMD_NO_RESPONSE)) {
-#define RWORD(n) (((uint32_t)rsp[n] << 24) | (rsp[n + 1] << 16) \
-                  | (rsp[n + 2] << 8) | rsp[n + 3])
         if (rlen == 0 || (rlen == 4 && (s->cmd & SDCMD_LONG_RESPONSE))) {
             goto error;
         }
@@ -125,15 +126,20 @@ static void bcm2835_sdhost_send_command(BCM2835SDHostState *s)
             goto error;
         }
         if (rlen == 4) {
-            s->rsp[0] = RWORD(0);
+            s->rsp[0] = ldl_be_p(&rsp[0]);
             s->rsp[1] = s->rsp[2] = s->rsp[3] = 0;
         } else {
-            s->rsp[0] = RWORD(12);
-            s->rsp[1] = RWORD(8);
-            s->rsp[2] = RWORD(4);
-            s->rsp[3] = RWORD(0);
+            s->rsp[0] = ldl_be_p(&rsp[12]);
+            s->rsp[1] = ldl_be_p(&rsp[8]);
+            s->rsp[2] = ldl_be_p(&rsp[4]);
+            s->rsp[3] = ldl_be_p(&rsp[0]);
         }
-#undef RWORD
+    }
+    /* We never really delay commands, so if this was a 'busywait' command
+     * then we've completed it now and can raise the interrupt.
+     */
+    if ((s->cmd & SDCMD_BUSYWAIT) && (s->config & SDHCFG_BUSY_IRPT_EN)) {
+        s->status |= SDHSTS_BUSY_IRPT;
     }
     return;
 
@@ -174,9 +180,11 @@ static void bcm2835_sdhost_fifo_run(BCM2835SDHostState *s)
     uint32_t value = 0;
     int n;
     int is_read;
+    int is_write;
 
     is_read = (s->cmd & SDCMD_READ_CMD) != 0;
-    if (s->datacnt != 0 && (!is_read || sdbus_data_ready(&s->sdbus))) {
+    is_write = (s->cmd & SDCMD_WRITE_CMD) != 0;
+    if (s->datacnt != 0 && (is_write || sdbus_data_ready(&s->sdbus))) {
         if (is_read) {
             n = 0;
             while (s->datacnt && s->fifo_len < BCM2835_SDHOST_FIFO_LEN) {
@@ -185,18 +193,30 @@ static void bcm2835_sdhost_fifo_run(BCM2835SDHostState *s)
                 n++;
                 if (n == 4) {
                     bcm2835_sdhost_fifo_push(s, value);
+                    s->status |= SDHSTS_DATA_FLAG;
+                    if (s->config & SDHCFG_DATA_IRPT_EN) {
+                        s->status |= SDHSTS_SDIO_IRPT;
+                    }
                     n = 0;
                     value = 0;
                 }
             }
             if (n != 0) {
                 bcm2835_sdhost_fifo_push(s, value);
+                s->status |= SDHSTS_DATA_FLAG;
+                if (s->config & SDHCFG_DATA_IRPT_EN) {
+                    s->status |= SDHSTS_SDIO_IRPT;
+                }
             }
-        } else { /* write */
+        } else if (is_write) { /* write */
             n = 0;
             while (s->datacnt > 0 && (s->fifo_len > 0 || n > 0)) {
                 if (n == 0) {
                     value = bcm2835_sdhost_fifo_pop(s);
+                    s->status |= SDHSTS_DATA_FLAG;
+                    if (s->config & SDHCFG_DATA_IRPT_EN) {
+                        s->status |= SDHSTS_SDIO_IRPT;
+                    }
                     n = 4;
                 }
                 n--;
@@ -205,30 +225,30 @@ static void bcm2835_sdhost_fifo_run(BCM2835SDHostState *s)
                 value >>= 8;
             }
         }
+        if (s->datacnt == 0) {
+            s->edm &= ~SDEDM_FSM_MASK;
+            s->edm |= SDEDM_FSM_DATAMODE;
+            trace_bcm2835_sdhost_edm_change("datacnt 0", s->edm);
+        }
+        if (is_write) {
+            /* set block interrupt at end of each block transfer */
+            if (s->hbct && s->datacnt % s->hbct == 0 &&
+                (s->config & SDHCFG_BLOCK_IRPT_EN)) {
+                s->status |= SDHSTS_BLOCK_IRPT;
+            }
+            /* set data interrupt after each transfer */
+            s->status |= SDHSTS_DATA_FLAG;
+            if (s->config & SDHCFG_DATA_IRPT_EN) {
+                s->status |= SDHSTS_SDIO_IRPT;
+            }
+        }
     }
-    if (s->datacnt == 0) {
-        s->status |= SDHSTS_DATA_FLAG;
 
-        s->edm &= ~0xf;
-        s->edm |= SDEDM_FSM_DATAMODE;
-
-        if (s->config & SDHCFG_DATA_IRPT_EN) {
-            s->status |= SDHSTS_SDIO_IRPT;
-        }
-
-        if ((s->cmd & SDCMD_BUSYWAIT) && (s->config & SDHCFG_BUSY_IRPT_EN)) {
-            s->status |= SDHSTS_BUSY_IRPT;
-        }
-
-        if ((s->cmd & SDCMD_WRITE_CMD) && (s->config & SDHCFG_BLOCK_IRPT_EN)) {
-            s->status |= SDHSTS_BLOCK_IRPT;
-        }
-
-        bcm2835_sdhost_update_irq(s);
-    }
+    bcm2835_sdhost_update_irq(s);
 
     s->edm &= ~(0x1f << 4);
     s->edm |= ((s->fifo_len & 0x1f) << 4);
+    trace_bcm2835_sdhost_edm_change("fifo run", s->edm);
 }
 
 static uint64_t bcm2835_sdhost_read(void *opaque, hwaddr offset,
@@ -280,6 +300,8 @@ static uint64_t bcm2835_sdhost_read(void *opaque, hwaddr offset,
         break;
     }
 
+    trace_bcm2835_sdhost_read(offset, res, size);
+
     return res;
 }
 
@@ -287,6 +309,8 @@ static void bcm2835_sdhost_write(void *opaque, hwaddr offset,
     uint64_t value, unsigned size)
 {
     BCM2835SDHostState *s = (BCM2835SDHostState *)opaque;
+
+    trace_bcm2835_sdhost_write(offset, value, size);
 
     switch (offset) {
     case SDCMD:
@@ -314,6 +338,7 @@ static void bcm2835_sdhost_write(void *opaque, hwaddr offset,
             value &= ~0xf;
         }
         s->edm = value;
+        trace_bcm2835_sdhost_edm_change("guest register write", s->edm);
         break;
     case SDHCFG:
         s->config = value;
@@ -390,6 +415,7 @@ static void bcm2835_sdhost_reset(DeviceState *dev)
     s->cmd = 0;
     s->cmdarg = 0;
     s->edm = 0x0000c60f;
+    trace_bcm2835_sdhost_edm_change("device reset", s->edm);
     s->config = 0;
     s->hbct = 0;
     s->hblc = 0;

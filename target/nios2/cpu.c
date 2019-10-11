@@ -19,7 +19,7 @@
  */
 
 #include "qemu/osdep.h"
-#include "qemu-common.h"
+#include "qemu/module.h"
 #include "qapi/error.h"
 #include "cpu.h"
 #include "exec/log.h"
@@ -66,30 +66,18 @@ static void nios2_cpu_reset(CPUState *cs)
 
 static void nios2_cpu_initfn(Object *obj)
 {
-    CPUState *cs = CPU(obj);
     Nios2CPU *cpu = NIOS2_CPU(obj);
-    CPUNios2State *env = &cpu->env;
-    static bool tcg_initialized;
 
-    cs->env_ptr = env;
+    cpu_set_cpustate_pointers(cpu);
 
 #if !defined(CONFIG_USER_ONLY)
-    mmu_init(env);
+    mmu_init(&cpu->env);
 #endif
-
-    if (tcg_enabled() && !tcg_initialized) {
-        tcg_initialized = true;
-        nios2_tcg_init();
-    }
 }
 
-Nios2CPU *cpu_nios2_init(const char *cpu_model)
+static ObjectClass *nios2_cpu_class_by_name(const char *cpu_model)
 {
-    Nios2CPU *cpu = NIOS2_CPU(object_new(TYPE_NIOS2_CPU));
-
-    object_property_set_bool(OBJECT(cpu), true, "realized", NULL);
-
-    return cpu;
+    return object_class_by_name(TYPE_NIOS2_CPU);
 }
 
 static void nios2_cpu_realizefn(DeviceState *dev, Error **errp)
@@ -197,27 +185,28 @@ static void nios2_cpu_class_init(ObjectClass *oc, void *data)
     CPUClass *cc = CPU_CLASS(oc);
     Nios2CPUClass *ncc = NIOS2_CPU_CLASS(oc);
 
-    ncc->parent_realize = dc->realize;
-    dc->realize = nios2_cpu_realizefn;
+    device_class_set_parent_realize(dc, nios2_cpu_realizefn,
+                                    &ncc->parent_realize);
     dc->props = nios2_properties;
     ncc->parent_reset = cc->reset;
     cc->reset = nios2_cpu_reset;
 
+    cc->class_by_name = nios2_cpu_class_by_name;
     cc->has_work = nios2_cpu_has_work;
     cc->do_interrupt = nios2_cpu_do_interrupt;
     cc->cpu_exec_interrupt = nios2_cpu_exec_interrupt;
     cc->dump_state = nios2_cpu_dump_state;
     cc->set_pc = nios2_cpu_set_pc;
     cc->disas_set_info = nios2_cpu_disas_set_info;
-#ifdef CONFIG_USER_ONLY
-    cc->handle_mmu_fault = nios2_cpu_handle_mmu_fault;
-#else
+    cc->tlb_fill = nios2_cpu_tlb_fill;
+#ifndef CONFIG_USER_ONLY
     cc->do_unaligned_access = nios2_cpu_do_unaligned_access;
     cc->get_phys_page_debug = nios2_cpu_get_phys_page_debug;
 #endif
     cc->gdb_read_register = nios2_cpu_gdb_read_register;
     cc->gdb_write_register = nios2_cpu_gdb_write_register;
     cc->gdb_num_core_regs = 49;
+    cc->tcg_initialize = nios2_tcg_init;
 }
 
 static const TypeInfo nios2_cpu_type_info = {

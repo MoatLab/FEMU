@@ -17,10 +17,8 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
-#include "qemu-common.h"
 #include "cpu.h"
 #include "hw/sysbus.h"
-#include "hw/devices.h"
 #include "hw/boards.h"
 #include "hw/arm/allwinner-a10.h"
 
@@ -86,6 +84,7 @@ static void cubieboard_machine_init(MachineClass *mc)
     mc->init = cubieboard_init;
     mc->block_default_type = IF_IDE;
     mc->units_per_default_bus = 1;
+    mc->ignore_memory_transaction_failures = true;
 }
 
 DEFINE_MACHINE("cubieboard", cubieboard_machine_init)

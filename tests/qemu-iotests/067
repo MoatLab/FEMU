@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # Test automatic deletion of BDSes created by -drive/drive_add
 #
@@ -24,7 +24,6 @@ owner=kwolf@redhat.com
 seq=`basename $0`
 echo "QA output created by $seq"
 
-here=`pwd`
 status=1	# failure is the default!
 
 # get standard environment, filters and checks
@@ -33,11 +32,10 @@ status=1	# failure is the default!
 
 _supported_fmt qcow2
 _supported_proto file
-_supported_os Linux
 # Because anything other than 16 would change the output of query-block
 _unsupported_imgopts 'refcount_bits=\([^1]\|.\([^6]\|$\)\)'
 
-function do_run_qemu()
+do_run_qemu()
 {
     echo Testing: "$@"
     $QEMU -nographic -qmp-pretty stdio -serial none "$@"
@@ -53,11 +51,12 @@ _filter_qmp_events()
 	| tr '\t' '\n'
 }
 
-function run_qemu()
+run_qemu()
 {
     do_run_qemu "$@" 2>&1 | _filter_testdir | _filter_qmp | _filter_qemu \
-                          | sed -e 's/\("actual-size":\s*\)[0-9]\+/\1SIZE/g' \
-                          | _filter_generated_node_ids | _filter_qmp_events
+                          | _filter_actual_image_size \
+                          | _filter_generated_node_ids | _filter_qmp_events \
+                          | _filter_img_info
 }
 
 size=128M
@@ -134,6 +133,19 @@ run_qemu <<EOF
 { "execute": "device_del", "arguments": { "id": "virtio0" } }
 { "execute": "system_reset" }
 { "execute": "query-named-block-nodes" }
+{ "execute": "quit" }
+EOF
+
+echo
+echo === Empty drive with -device and device_del ===
+echo
+
+run_qemu -device virtio-scsi -device scsi-cd,id=cd0 <<EOF
+{ "execute": "qmp_capabilities" }
+{ "execute": "query-block" }
+{ "execute": "device_del", "arguments": { "id": "cd0" } }
+{ "execute": "system_reset" }
+{ "execute": "query-block" }
 { "execute": "quit" }
 EOF
 

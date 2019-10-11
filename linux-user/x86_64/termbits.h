@@ -1,3 +1,6 @@
+#ifndef LINUX_USER_X86_64_TERMBITS_H
+#define LINUX_USER_X86_64_TERMBITS_H
+
 #define TARGET_NCCS 19
 
 typedef unsigned char	target_cc_t;
@@ -215,6 +218,7 @@ struct target_termios {
 #define TARGET_TCSETSF2         TARGET_IOW('T',0x2D, struct termios2)
 #define TARGET_TIOCGPTN         TARGET_IOR('T',0x30, unsigned int) /* Get Pty Number (of pty-mux device) */
 #define TARGET_TIOCSPTLCK       TARGET_IOW('T',0x31, int)  /* Lock/unlock Pty */
+#define TARGET_TIOCGPTPEER      TARGET_IO('T', 0x41) /* Safely open the slave */
 
 #define TARGET_FIONCLEX	0x5450  /* these numbers need to be adjusted. */
 #define TARGET_FIOCLEX		0x5451
@@ -245,3 +249,5 @@ struct target_termios {
 #define TARGET_TIOCPKT_DOSTOP		32
 
 #define TARGET_TIOCSER_TEMT    0x01	/* Transmitter physically empty */
+
+#endif

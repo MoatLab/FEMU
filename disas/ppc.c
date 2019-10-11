@@ -19,7 +19,7 @@ You should have received a copy of the GNU General Public License
 along with this file; see the file COPYING.  If not,
 see <http://www.gnu.org/licenses/>.  */
 #include "qemu/osdep.h"
-#include "disas/bfd.h"
+#include "disas/dis-asm.h"
 #define BFD_DEFAULT_TARGET_SIZE 64
 
 /* ppc.h -- Header file for PowerPC opcode table
@@ -3733,6 +3733,8 @@ const struct powerpc_opcode powerpc_opcodes[] = {
 { "ameo",    XO(31,234,1,0), XORB_MASK, PWRCOM,		{ RT, RA } },
 { "addmeo.", XO(31,234,1,1), XORB_MASK, PPCCOM,		{ RT, RA } },
 { "ameo.",   XO(31,234,1,1), XORB_MASK, PWRCOM,		{ RT, RA } },
+
+{ "addex",   XO(31,170,0,0), XO_MASK,   POWER9,         { RT, RA, RB } },
 
 { "mullw",   XO(31,235,0,0), XO_MASK,	PPCCOM,		{ RT, RA, RB } },
 { "muls",    XO(31,235,0,0), XO_MASK,	PWRCOM,		{ RT, RA, RB } },

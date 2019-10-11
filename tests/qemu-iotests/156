@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # Tests oVirt-like storage migration:
 #  - Create snapshot
@@ -32,12 +32,12 @@ owner=mreitz@redhat.com
 seq="$(basename $0)"
 echo "QA output created by $seq"
 
-here="$PWD"
 status=1	# failure is the default!
 
 _cleanup()
 {
-    rm -f "$TEST_IMG{,.target}{,.backing,.overlay}"
+    _cleanup_qemu
+    rm -f "$TEST_IMG"{,.target}{,.backing,.overlay}
 }
 trap "_cleanup; exit \$status" 0 1 2 3 15
 
@@ -48,7 +48,7 @@ trap "_cleanup; exit \$status" 0 1 2 3 15
 
 _supported_fmt qcow2 qed
 _supported_proto generic
-_supported_os Linux
+_unsupported_proto vxhs
 
 # Create source disk
 TEST_IMG="$TEST_IMG.backing" _make_test_img 1M
@@ -64,7 +64,7 @@ _send_qemu_cmd $QEMU_HANDLE \
     'return'
 
 # Create snapshot
-TEST_IMG="$TEST_IMG.overlay" _make_test_img -b "$TEST_IMG" 1M
+TEST_IMG="$TEST_IMG.overlay" _make_test_img -u -b "$TEST_IMG" 1M
 _send_qemu_cmd $QEMU_HANDLE \
     "{ 'execute': 'blockdev-snapshot-sync',
        'arguments': { 'device': 'source',
@@ -81,7 +81,7 @@ _send_qemu_cmd $QEMU_HANDLE \
     'return'
 
 # Create target image
-TEST_IMG="$TEST_IMG.target.overlay" _make_test_img -b "$TEST_IMG.target" 1M
+TEST_IMG="$TEST_IMG.target.overlay" _make_test_img -u -b "$TEST_IMG.target" 1M
 
 # Mirror snapshot
 _send_qemu_cmd $QEMU_HANDLE \
@@ -117,7 +117,7 @@ _send_qemu_cmd $QEMU_HANDLE \
 
 _send_qemu_cmd $QEMU_HANDLE \
     '' \
-    'BLOCK_JOB_COMPLETED'
+    '"status": "null"'
 
 # Remove the source images
 rm -f "$TEST_IMG{,.backing,.overlay}"

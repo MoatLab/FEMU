@@ -39,6 +39,12 @@
  * bitmap_clear(dst, pos, nbits)		Clear specified bit area
  * bitmap_test_and_clear_atomic(dst, pos, nbits)    Test and clear area
  * bitmap_find_next_zero_area(buf, len, pos, n, mask)	Find bit free area
+ * bitmap_to_le(dst, src, nbits)      Convert bitmap to little endian
+ * bitmap_from_le(dst, src, nbits)    Convert bitmap from little endian
+ * bitmap_copy_with_src_offset(dst, src, offset, nbits)
+ *                                    *dst = *src (with an offset into src)
+ * bitmap_copy_with_dst_offset(dst, src, offset, nbits)
+ *                                    *dst = *src (with an offset into dst)
  */
 
 /*
@@ -82,6 +88,7 @@ int slow_bitmap_andnot(unsigned long *dst, const unsigned long *bitmap1,
                        const unsigned long *bitmap2, long bits);
 int slow_bitmap_intersects(const unsigned long *bitmap1,
                            const unsigned long *bitmap2, long bits);
+long slow_bitmap_count_one(const unsigned long *bitmap, long nbits);
 
 static inline unsigned long *bitmap_try_new(long nbits)
 {
@@ -216,10 +223,38 @@ static inline int bitmap_intersects(const unsigned long *src1,
     }
 }
 
+static inline long bitmap_count_one(const unsigned long *bitmap, long nbits)
+{
+    if (unlikely(!nbits)) {
+        return 0;
+    }
+
+    if (small_nbits(nbits)) {
+        return ctpopl(*bitmap & BITMAP_LAST_WORD_MASK(nbits));
+    } else {
+        return slow_bitmap_count_one(bitmap, nbits);
+    }
+}
+
+static inline long bitmap_count_one_with_offset(const unsigned long *bitmap,
+                                                long offset, long nbits)
+{
+    long aligned_offset = QEMU_ALIGN_DOWN(offset, BITS_PER_LONG);
+    long redundant_bits = offset - aligned_offset;
+    long bits_to_count = nbits + redundant_bits;
+    const unsigned long *bitmap_start = bitmap +
+                                        aligned_offset / BITS_PER_LONG;
+
+    return bitmap_count_one(bitmap_start, bits_to_count) -
+           bitmap_count_one(bitmap_start, redundant_bits);
+}
+
 void bitmap_set(unsigned long *map, long i, long len);
 void bitmap_set_atomic(unsigned long *map, long i, long len);
 void bitmap_clear(unsigned long *map, long start, long nr);
 bool bitmap_test_and_clear_atomic(unsigned long *map, long start, long nr);
+void bitmap_copy_and_clear_atomic(unsigned long *dst, unsigned long *src,
+                                  long nr);
 unsigned long bitmap_find_next_zero_area(unsigned long *map,
                                          unsigned long size,
                                          unsigned long start,
@@ -234,5 +269,15 @@ static inline unsigned long *bitmap_zero_extend(unsigned long *old,
     bitmap_clear(new, old_nbits, new_nbits - old_nbits);
     return new;
 }
+
+void bitmap_to_le(unsigned long *dst, const unsigned long *src,
+                  long nbits);
+void bitmap_from_le(unsigned long *dst, const unsigned long *src,
+                    long nbits);
+
+void bitmap_copy_with_src_offset(unsigned long *dst, const unsigned long *src,
+                                 unsigned long offset, unsigned long nbits);
+void bitmap_copy_with_dst_offset(unsigned long *dst, const unsigned long *src,
+                                 unsigned long shift, unsigned long nbits);
 
 #endif /* BITMAP_H */

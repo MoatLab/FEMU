@@ -12,10 +12,17 @@ Authors:
 This work is licensed under the terms of the GNU GPL, version 2 or later. See
 the COPYING file in the top-level directory.
 """
+from __future__ import print_function
 
 import ctypes
+import struct
 
-UINTPTR_T = gdb.lookup_type("uintptr_t")
+try:
+    UINTPTR_T = gdb.lookup_type("uintptr_t")
+except Exception as inst:
+    raise gdb.GdbError("Symbols must be loaded prior to sourcing dump-guest-memory.\n"
+                       "Symbols may be loaded by 'attach'ing a QEMU process id or by "
+                       "'load'ing a QEMU binary.")
 
 TARGET_PAGE_SIZE = 0x1000
 TARGET_PAGE_MASK = 0xFFFFFFFFFFFFF000
@@ -44,6 +51,17 @@ EM_PPC64 = 21
 EM_S390 = 22
 EM_AARCH = 183
 EM_X86_64 = 62
+
+VMCOREINFO_FORMAT_ELF = 1
+
+def le16_to_cpu(val):
+    return struct.unpack("<H", struct.pack("=H", val))[0]
+
+def le32_to_cpu(val):
+    return struct.unpack("<I", struct.pack("=I", val))[0]
+
+def le64_to_cpu(val):
+    return struct.unpack("<Q", struct.pack("=Q", val))[0]
 
 class ELF(object):
     """Representation of a ELF file."""
@@ -120,12 +138,32 @@ class ELF(object):
         self.segments[0].p_filesz += ctypes.sizeof(note)
         self.segments[0].p_memsz += ctypes.sizeof(note)
 
+
+    def add_vmcoreinfo_note(self, vmcoreinfo):
+        """Adds a vmcoreinfo note to the ELF dump."""
+        # compute the header size, and copy that many bytes from the note
+        header = get_arch_note(self.endianness, 0, 0)
+        ctypes.memmove(ctypes.pointer(header),
+                       vmcoreinfo, ctypes.sizeof(header))
+        if header.n_descsz > 1 << 20:
+            print('warning: invalid vmcoreinfo size')
+            return
+        # now get the full note
+        note = get_arch_note(self.endianness,
+                             header.n_namesz - 1, header.n_descsz)
+        ctypes.memmove(ctypes.pointer(note), vmcoreinfo, ctypes.sizeof(note))
+
+        self.notes.append(note)
+        self.segments[0].p_filesz += ctypes.sizeof(note)
+        self.segments[0].p_memsz += ctypes.sizeof(note)
+
     def add_segment(self, p_type, p_paddr, p_size):
         """Adds a segment to the elf."""
 
         phdr = get_arch_phdr(self.endianness, self.elfclass)
         phdr.p_type = p_type
         phdr.p_paddr = p_paddr
+        phdr.p_vaddr = p_paddr
         phdr.p_filesz = p_size
         phdr.p_memsz = p_size
         self.segments.append(phdr)
@@ -380,7 +418,9 @@ def get_guest_phys_blocks():
         memory_region = flat_range["mr"].dereference()
 
         # we only care about RAM
-        if not memory_region["ram"]:
+        if (not memory_region["ram"] or
+            memory_region["ram_device"] or
+            memory_region["nonvolatile"]):
             continue
 
         section_size = int128_get64(flat_range["addr"]["size"])
@@ -505,6 +545,38 @@ shape and this command should mostly work."""
                 cur += chunk_size
                 left -= chunk_size
 
+    def phys_memory_read(self, addr, size):
+        qemu_core = gdb.inferiors()[0]
+        for block in self.guest_phys_blocks:
+            if block["target_start"] <= addr \
+               and addr + size <= block["target_end"]:
+                haddr = block["host_addr"] + (addr - block["target_start"])
+                return qemu_core.read_memory(haddr, size)
+        return None
+
+    def add_vmcoreinfo(self):
+        if gdb.lookup_symbol("vmcoreinfo_realize")[0] is None:
+            return
+        vmci = 'vmcoreinfo_realize::vmcoreinfo_state'
+        if not gdb.parse_and_eval("%s" % vmci) \
+           or not gdb.parse_and_eval("(%s)->has_vmcoreinfo" % vmci):
+            return
+
+        fmt = gdb.parse_and_eval("(%s)->vmcoreinfo.guest_format" % vmci)
+        addr = gdb.parse_and_eval("(%s)->vmcoreinfo.paddr" % vmci)
+        size = gdb.parse_and_eval("(%s)->vmcoreinfo.size" % vmci)
+
+        fmt = le16_to_cpu(fmt)
+        addr = le64_to_cpu(addr)
+        size = le32_to_cpu(size)
+
+        if fmt != VMCOREINFO_FORMAT_ELF:
+            return
+
+        vmcoreinfo = self.phys_memory_read(addr, size)
+        if vmcoreinfo:
+            self.elf.add_vmcoreinfo_note(bytes(vmcoreinfo))
+
     def invoke(self, args, from_tty):
         """Handles command invocation from gdb."""
 
@@ -518,6 +590,7 @@ shape and this command should mostly work."""
 
         self.elf = ELF(argv[1])
         self.guest_phys_blocks = get_guest_phys_blocks()
+        self.add_vmcoreinfo()
 
         with open(argv[0], "wb") as vmcore:
             self.dump_init(vmcore)

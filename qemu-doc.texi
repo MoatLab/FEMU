@@ -1,11 +1,12 @@
 \input texinfo @c -*- texinfo -*-
 @c %**start of header
 @setfilename qemu-doc.info
+@include version.texi
 
 @documentlanguage en
 @documentencoding UTF-8
 
-@settitle QEMU Emulator User Documentation
+@settitle QEMU version @value{VERSION} User Documentation
 @exampleindent 0
 @paragraphindent 0
 @c %**end of header
@@ -19,7 +20,7 @@
 @iftex
 @titlepage
 @sp 7
-@center @titlefont{QEMU Emulator}
+@center @titlefont{QEMU version @value{VERSION}}
 @sp 1
 @center @titlefont{User Documentation}
 @sp 3
@@ -34,8 +35,13 @@
 * Introduction::
 * QEMU PC System emulator::
 * QEMU System emulator for non PC targets::
+* QEMU Guest Agent::
 * QEMU User space emulator::
+* System requirements::
+* Security::
 * Implementation notes::
+* Deprecated features::
+* Supported build platforms::
 * License::
 * Index::
 @end menu
@@ -69,7 +75,7 @@ without rebooting the PC or to debug system code.
 @cindex user mode emulation
 @item User mode emulation. In this mode, QEMU can launch
 processes compiled for one CPU on another CPU. It can be used to
-launch the Wine Windows API emulator (@url{http://www.winehq.org}) or
+launch the Wine Windows API emulator (@url{https://www.winehq.org}) or
 to ease cross-compilation and cross-debugging.
 
 @end itemize
@@ -102,7 +108,7 @@ QEMU full system emulation has the following features:
 QEMU uses a full software MMU for maximum portability.
 
 @item
-QEMU can optionally use an in-kernel accelerator, like kvm. The accelerators 
+QEMU can optionally use an in-kernel accelerator, like kvm. The accelerators
 execute most of the guest code natively, while
 continuing to emulate the rest of the machine.
 
@@ -131,12 +137,14 @@ accelerator is required to use more than one host CPU for emulation.
 * pcsys_keys::         Keys in the graphical frontends
 * mux_keys::           Keys in the character backend multiplexer
 * pcsys_monitor::      QEMU Monitor
+* cpu_models::         CPU models
 * disk_images::        Disk Images
 * pcsys_network::      Network emulation
 * pcsys_other_devs::   Other Devices
 * direct_linux_boot::  Direct Linux Boot
 * pcsys_usb::          USB emulation
 * vnc_security::       VNC security
+* network_tls::        TLS setup for network services
 * gdb_usage::          GDB usage
 * pcsys_os_specific::  Target OS specific information
 @end menu
@@ -182,7 +190,7 @@ Gravis Ultrasound GF1 sound card
 @item
 CS4231A compatible sound card
 @item
-PCI UHCI USB controller and a virtual USB hub.
+PCI UHCI, OHCI, EHCI or XHCI USB controller and a virtual USB-1.1 hub.
 @end itemize
 
 SMP is supported with up to 255 CPUs.
@@ -239,6 +247,222 @@ Linux should boot and give you a prompt.
 targets do not need a disk image.
 
 @include qemu-options.texi
+
+@c man end
+
+@subsection Device URL Syntax
+@c TODO merge this with section Disk Images
+
+@c man begin NOTES
+
+In addition to using normal file images for the emulated storage devices,
+QEMU can also use networked resources such as iSCSI devices. These are
+specified using a special URL syntax.
+
+@table @option
+@item iSCSI
+iSCSI support allows QEMU to access iSCSI resources directly and use as
+images for the guest storage. Both disk and cdrom images are supported.
+
+Syntax for specifying iSCSI LUNs is
+``iscsi://<target-ip>[:<port>]/<target-iqn>/<lun>''
+
+By default qemu will use the iSCSI initiator-name
+'iqn.2008-11.org.linux-kvm[:<name>]' but this can also be set from the command
+line or a configuration file.
+
+Since version Qemu 2.4 it is possible to specify a iSCSI request timeout to detect
+stalled requests and force a reestablishment of the session. The timeout
+is specified in seconds. The default is 0 which means no timeout. Libiscsi
+1.15.0 or greater is required for this feature.
+
+Example (without authentication):
+@example
+qemu-system-i386 -iscsi initiator-name=iqn.2001-04.com.example:my-initiator \
+                 -cdrom iscsi://192.0.2.1/iqn.2001-04.com.example/2 \
+                 -drive file=iscsi://192.0.2.1/iqn.2001-04.com.example/1
+@end example
+
+Example (CHAP username/password via URL):
+@example
+qemu-system-i386 -drive file=iscsi://user%password@@192.0.2.1/iqn.2001-04.com.example/1
+@end example
+
+Example (CHAP username/password via environment variables):
+@example
+LIBISCSI_CHAP_USERNAME="user" \
+LIBISCSI_CHAP_PASSWORD="password" \
+qemu-system-i386 -drive file=iscsi://192.0.2.1/iqn.2001-04.com.example/1
+@end example
+
+@item NBD
+QEMU supports NBD (Network Block Devices) both using TCP protocol as well
+as Unix Domain Sockets.
+
+Syntax for specifying a NBD device using TCP
+``nbd:<server-ip>:<port>[:exportname=<export>]''
+
+Syntax for specifying a NBD device using Unix Domain Sockets
+``nbd:unix:<domain-socket>[:exportname=<export>]''
+
+Example for TCP
+@example
+qemu-system-i386 --drive file=nbd:192.0.2.1:30000
+@end example
+
+Example for Unix Domain Sockets
+@example
+qemu-system-i386 --drive file=nbd:unix:/tmp/nbd-socket
+@end example
+
+@item SSH
+QEMU supports SSH (Secure Shell) access to remote disks.
+
+Examples:
+@example
+qemu-system-i386 -drive file=ssh://user@@host/path/to/disk.img
+qemu-system-i386 -drive file.driver=ssh,file.user=user,file.host=host,file.port=22,file.path=/path/to/disk.img
+@end example
+
+Currently authentication must be done using ssh-agent.  Other
+authentication methods may be supported in future.
+
+@item Sheepdog
+Sheepdog is a distributed storage system for QEMU.
+QEMU supports using either local sheepdog devices or remote networked
+devices.
+
+Syntax for specifying a sheepdog device
+@example
+sheepdog[+tcp|+unix]://[host:port]/vdiname[?socket=path][#snapid|#tag]
+@end example
+
+Example
+@example
+qemu-system-i386 --drive file=sheepdog://192.0.2.1:30000/MyVirtualMachine
+@end example
+
+See also @url{https://sheepdog.github.io/sheepdog/}.
+
+@item GlusterFS
+GlusterFS is a user space distributed file system.
+QEMU supports the use of GlusterFS volumes for hosting VM disk images using
+TCP, Unix Domain Sockets and RDMA transport protocols.
+
+Syntax for specifying a VM disk image on GlusterFS volume is
+@example
+
+URI:
+gluster[+type]://[host[:port]]/volume/path[?socket=...][,debug=N][,logfile=...]
+
+JSON:
+'json:@{"driver":"qcow2","file":@{"driver":"gluster","volume":"testvol","path":"a.img","debug":N,"logfile":"...",
+@                                 "server":[@{"type":"tcp","host":"...","port":"..."@},
+@                                           @{"type":"unix","socket":"..."@}]@}@}'
+@end example
+
+
+Example
+@example
+URI:
+qemu-system-x86_64 --drive file=gluster://192.0.2.1/testvol/a.img,
+@                               file.debug=9,file.logfile=/var/log/qemu-gluster.log
+
+JSON:
+qemu-system-x86_64 'json:@{"driver":"qcow2",
+@                          "file":@{"driver":"gluster",
+@                                   "volume":"testvol","path":"a.img",
+@                                   "debug":9,"logfile":"/var/log/qemu-gluster.log",
+@                                   "server":[@{"type":"tcp","host":"1.2.3.4","port":24007@},
+@                                             @{"type":"unix","socket":"/var/run/glusterd.socket"@}]@}@}'
+qemu-system-x86_64 -drive driver=qcow2,file.driver=gluster,file.volume=testvol,file.path=/path/a.img,
+@                                      file.debug=9,file.logfile=/var/log/qemu-gluster.log,
+@                                      file.server.0.type=tcp,file.server.0.host=1.2.3.4,file.server.0.port=24007,
+@                                      file.server.1.type=unix,file.server.1.socket=/var/run/glusterd.socket
+@end example
+
+See also @url{http://www.gluster.org}.
+
+@item HTTP/HTTPS/FTP/FTPS
+QEMU supports read-only access to files accessed over http(s) and ftp(s).
+
+Syntax using a single filename:
+@example
+<protocol>://[<username>[:<password>]@@]<host>/<path>
+@end example
+
+where:
+@table @option
+@item protocol
+'http', 'https', 'ftp', or 'ftps'.
+
+@item username
+Optional username for authentication to the remote server.
+
+@item password
+Optional password for authentication to the remote server.
+
+@item host
+Address of the remote server.
+
+@item path
+Path on the remote server, including any query string.
+@end table
+
+The following options are also supported:
+@table @option
+@item url
+The full URL when passing options to the driver explicitly.
+
+@item readahead
+The amount of data to read ahead with each range request to the remote server.
+This value may optionally have the suffix 'T', 'G', 'M', 'K', 'k' or 'b'. If it
+does not have a suffix, it will be assumed to be in bytes. The value must be a
+multiple of 512 bytes. It defaults to 256k.
+
+@item sslverify
+Whether to verify the remote server's certificate when connecting over SSL. It
+can have the value 'on' or 'off'. It defaults to 'on'.
+
+@item cookie
+Send this cookie (it can also be a list of cookies separated by ';') with
+each outgoing request.  Only supported when using protocols such as HTTP
+which support cookies, otherwise ignored.
+
+@item timeout
+Set the timeout in seconds of the CURL connection. This timeout is the time
+that CURL waits for a response from the remote server to get the size of the
+image to be downloaded. If not set, the default timeout of 5 seconds is used.
+@end table
+
+Note that when passing options to qemu explicitly, @option{driver} is the value
+of <protocol>.
+
+Example: boot from a remote Fedora 20 live ISO image
+@example
+qemu-system-x86_64 --drive media=cdrom,file=http://dl.fedoraproject.org/pub/fedora/linux/releases/20/Live/x86_64/Fedora-Live-Desktop-x86_64-20-1.iso,readonly
+
+qemu-system-x86_64 --drive media=cdrom,file.driver=http,file.url=http://dl.fedoraproject.org/pub/fedora/linux/releases/20/Live/x86_64/Fedora-Live-Desktop-x86_64-20-1.iso,readonly
+@end example
+
+Example: boot from a remote Fedora 20 cloud image using a local overlay for
+writes, copy-on-read, and a readahead of 64k
+@example
+qemu-img create -f qcow2 -o backing_file='json:@{"file.driver":"http",, "file.url":"https://dl.fedoraproject.org/pub/fedora/linux/releases/20/Images/x86_64/Fedora-x86_64-20-20131211.1-sda.qcow2",, "file.readahead":"64k"@}' /tmp/Fedora-x86_64-20-20131211.1-sda.qcow2
+
+qemu-system-x86_64 -drive file=/tmp/Fedora-x86_64-20-20131211.1-sda.qcow2,copy-on-read=on
+@end example
+
+Example: boot from an image stored on a VMware vSphere server with a self-signed
+certificate using a local overlay for writes, a readahead of 64k and a timeout
+of 10 seconds.
+@example
+qemu-img create -f qcow2 -o backing_file='json:@{"file.driver":"https",, "file.url":"https://user:password@@vsphere.example.com/folder/test/test-flat.vmdk?dcPath=Datacenter&dsName=datastore1",, "file.sslverify":"off",, "file.readahead":"64k",, "file.timeout":10@}' /tmp/test.qcow2
+
+qemu-system-x86_64 -drive file=/tmp/test.qcow2
+@end example
+
+@end table
 
 @c man end
 
@@ -381,14 +605,17 @@ The monitor understands integers expressions for every integer
 argument. You can use register names to get the value of specifics
 CPU registers by prefixing them with @emph{$}.
 
+@node cpu_models
+@section CPU models
+
+@include docs/qemu-cpu-models.texi
+
 @node disk_images
 @section Disk Images
 
-Since version 0.6.1, QEMU supports many disk image formats, including
-growable disk images (their size increase as non empty sectors are
-written), compressed and encrypted disk images. Version 0.8.3 added
-the new qcow2 disk image format which is essential to support VM
-snapshots.
+QEMU supports many disk image formats, including growable disk images
+(their size increase as non empty sectors are written), compressed and
+encrypted disk images.
 
 @menu
 * disk_images_quickstart::    Quick start for disk image creation
@@ -396,7 +623,6 @@ snapshots.
 * vm_snapshots::              VM snapshots
 * qemu_img_invocation::       qemu-img Invocation
 * qemu_nbd_invocation::       qemu-nbd Invocation
-* qemu_ga_invocation::        qemu-ga Invocation
 * disk_images_formats::       Disk image file formats
 * host_drives::               Using host drives
 * disk_images_fat_images::    Virtual FAT disk images
@@ -405,6 +631,8 @@ snapshots.
 * disk_images_iscsi::         iSCSI LUNs
 * disk_images_gluster::       GlusterFS disk images
 * disk_images_ssh::           Secure Shell (ssh) disk images
+* disk_images_nvme::          NVMe userspace driver
+* disk_image_locking::        Disk image file locking
 @end menu
 
 @node disk_images_quickstart
@@ -490,701 +718,17 @@ state is not saved or restored properly (in particular USB).
 
 @include qemu-nbd.texi
 
-@node qemu_ga_invocation
-@subsection @code{qemu-ga} Invocation
-
-@include qemu-ga.texi
-
-@node disk_images_formats
-@subsection Disk image file formats
-
-QEMU supports many image file formats that can be used with VMs as well as with
-any of the tools (like @code{qemu-img}). This includes the preferred formats
-raw and qcow2 as well as formats that are supported for compatibility with
-older QEMU versions or other hypervisors.
-
-Depending on the image format, different options can be passed to
-@code{qemu-img create} and @code{qemu-img convert} using the @code{-o} option.
-This section describes each format and the options that are supported for it.
-
-@table @option
-@item raw
-
-Raw disk image format. This format has the advantage of
-being simple and easily exportable to all other emulators. If your
-file system supports @emph{holes} (for example in ext2 or ext3 on
-Linux or NTFS on Windows), then only the written sectors will reserve
-space. Use @code{qemu-img info} to know the real size used by the
-image or @code{ls -ls} on Unix/Linux.
-
-Supported options:
-@table @code
-@item preallocation
-Preallocation mode (allowed values: @code{off}, @code{falloc}, @code{full}).
-@code{falloc} mode preallocates space for image by calling posix_fallocate().
-@code{full} mode preallocates space for image by writing zeros to underlying
-storage.
-@end table
-
-@item qcow2
-QEMU image format, the most versatile format. Use it to have smaller
-images (useful if your filesystem does not supports holes, for example
-on Windows), zlib based compression and support of multiple VM
-snapshots.
-
-Supported options:
-@table @code
-@item compat
-Determines the qcow2 version to use. @code{compat=0.10} uses the
-traditional image format that can be read by any QEMU since 0.10.
-@code{compat=1.1} enables image format extensions that only QEMU 1.1 and
-newer understand (this is the default). Amongst others, this includes
-zero clusters, which allow efficient copy-on-read for sparse images.
-
-@item backing_file
-File name of a base image (see @option{create} subcommand)
-@item backing_fmt
-Image format of the base image
-@item encryption
-If this option is set to @code{on}, the image is encrypted with 128-bit AES-CBC.
-
-The use of encryption in qcow and qcow2 images is considered to be flawed by
-modern cryptography standards, suffering from a number of design problems:
-
-@itemize @minus
-@item The AES-CBC cipher is used with predictable initialization vectors based
-on the sector number. This makes it vulnerable to chosen plaintext attacks
-which can reveal the existence of encrypted data.
-@item The user passphrase is directly used as the encryption key. A poorly
-chosen or short passphrase will compromise the security of the encryption.
-@item In the event of the passphrase being compromised there is no way to
-change the passphrase to protect data in any qcow images. The files must
-be cloned, using a different encryption passphrase in the new file. The
-original file must then be securely erased using a program like shred,
-though even this is ineffective with many modern storage technologies.
-@end itemize
-
-Use of qcow / qcow2 encryption with QEMU is deprecated, and support for
-it will go away in a future release.  Users are recommended to use an
-alternative encryption technology such as the Linux dm-crypt / LUKS
-system.
-
-@item cluster_size
-Changes the qcow2 cluster size (must be between 512 and 2M). Smaller cluster
-sizes can improve the image file size whereas larger cluster sizes generally
-provide better performance.
-
-@item preallocation
-Preallocation mode (allowed values: @code{off}, @code{metadata}, @code{falloc},
-@code{full}). An image with preallocated metadata is initially larger but can
-improve performance when the image needs to grow. @code{falloc} and @code{full}
-preallocations are like the same options of @code{raw} format, but sets up
-metadata also.
-
-@item lazy_refcounts
-If this option is set to @code{on}, reference count updates are postponed with
-the goal of avoiding metadata I/O and improving performance. This is
-particularly interesting with @option{cache=writethrough} which doesn't batch
-metadata updates. The tradeoff is that after a host crash, the reference count
-tables must be rebuilt, i.e. on the next open an (automatic) @code{qemu-img
-check -r all} is required, which may take some time.
-
-This option can only be enabled if @code{compat=1.1} is specified.
-
-@item nocow
-If this option is set to @code{on}, it will turn off COW of the file. It's only
-valid on btrfs, no effect on other file systems.
-
-Btrfs has low performance when hosting a VM image file, even more when the guest
-on the VM also using btrfs as file system. Turning off COW is a way to mitigate
-this bad performance. Generally there are two ways to turn off COW on btrfs:
-a) Disable it by mounting with nodatacow, then all newly created files will be
-NOCOW. b) For an empty file, add the NOCOW file attribute. That's what this option
-does.
-
-Note: this option is only valid to new or empty files. If there is an existing
-file which is COW and has data blocks already, it couldn't be changed to NOCOW
-by setting @code{nocow=on}. One can issue @code{lsattr filename} to check if
-the NOCOW flag is set or not (Capital 'C' is NOCOW flag).
-
-@end table
-
-@item qed
-Old QEMU image format with support for backing files and compact image files
-(when your filesystem or transport medium does not support holes).
-
-When converting QED images to qcow2, you might want to consider using the
-@code{lazy_refcounts=on} option to get a more QED-like behaviour.
-
-Supported options:
-@table @code
-@item backing_file
-File name of a base image (see @option{create} subcommand).
-@item backing_fmt
-Image file format of backing file (optional).  Useful if the format cannot be
-autodetected because it has no header, like some vhd/vpc files.
-@item cluster_size
-Changes the cluster size (must be power-of-2 between 4K and 64K). Smaller
-cluster sizes can improve the image file size whereas larger cluster sizes
-generally provide better performance.
-@item table_size
-Changes the number of clusters per L1/L2 table (must be power-of-2 between 1
-and 16).  There is normally no need to change this value but this option can be
-used for performance benchmarking.
-@end table
-
-@item qcow
-Old QEMU image format with support for backing files, compact image files,
-encryption and compression.
-
-Supported options:
-@table @code
-@item backing_file
-File name of a base image (see @option{create} subcommand)
-@item encryption
-If this option is set to @code{on}, the image is encrypted.
-@end table
-
-@item vdi
-VirtualBox 1.1 compatible image format.
-Supported options:
-@table @code
-@item static
-If this option is set to @code{on}, the image is created with metadata
-preallocation.
-@end table
-
-@item vmdk
-VMware 3 and 4 compatible image format.
-
-Supported options:
-@table @code
-@item backing_file
-File name of a base image (see @option{create} subcommand).
-@item compat6
-Create a VMDK version 6 image (instead of version 4)
-@item hwversion
-Specify vmdk virtual hardware version. Compat6 flag cannot be enabled
-if hwversion is specified.
-@item subformat
-Specifies which VMDK subformat to use. Valid options are
-@code{monolithicSparse} (default),
-@code{monolithicFlat},
-@code{twoGbMaxExtentSparse},
-@code{twoGbMaxExtentFlat} and
-@code{streamOptimized}.
-@end table
-
-@item vpc
-VirtualPC compatible image format (VHD).
-Supported options:
-@table @code
-@item subformat
-Specifies which VHD subformat to use. Valid options are
-@code{dynamic} (default) and @code{fixed}.
-@end table
-
-@item VHDX
-Hyper-V compatible image format (VHDX).
-Supported options:
-@table @code
-@item subformat
-Specifies which VHDX subformat to use. Valid options are
-@code{dynamic} (default) and @code{fixed}.
-@item block_state_zero
-Force use of payload blocks of type 'ZERO'.  Can be set to @code{on} (default)
-or @code{off}.  When set to @code{off}, new blocks will be created as
-@code{PAYLOAD_BLOCK_NOT_PRESENT}, which means parsers are free to return
-arbitrary data for those blocks.  Do not set to @code{off} when using
-@code{qemu-img convert} with @code{subformat=dynamic}.
-@item block_size
-Block size; min 1 MB, max 256 MB.  0 means auto-calculate based on image size.
-@item log_size
-Log size; min 1 MB.
-@end table
-@end table
-
-@subsubsection Read-only formats
-More disk image file formats are supported in a read-only mode.
-@table @option
-@item bochs
-Bochs images of @code{growing} type.
-@item cloop
-Linux Compressed Loop image, useful only to reuse directly compressed
-CD-ROM images present for example in the Knoppix CD-ROMs.
-@item dmg
-Apple disk image.
-@item parallels
-Parallels disk image format.
-@end table
-
-
-@node host_drives
-@subsection Using host drives
-
-In addition to disk image files, QEMU can directly access host
-devices. We describe here the usage for QEMU version >= 0.8.3.
-
-@subsubsection Linux
-
-On Linux, you can directly use the host device filename instead of a
-disk image filename provided you have enough privileges to access
-it. For example, use @file{/dev/cdrom} to access to the CDROM.
-
-@table @code
-@item CD
-You can specify a CDROM device even if no CDROM is loaded. QEMU has
-specific code to detect CDROM insertion or removal. CDROM ejection by
-the guest OS is supported. Currently only data CDs are supported.
-@item Floppy
-You can specify a floppy device even if no floppy is loaded. Floppy
-removal is currently not detected accurately (if you change floppy
-without doing floppy access while the floppy is not loaded, the guest
-OS will think that the same floppy is loaded).
-Use of the host's floppy device is deprecated, and support for it will
-be removed in a future release.
-@item Hard disks
-Hard disks can be used. Normally you must specify the whole disk
-(@file{/dev/hdb} instead of @file{/dev/hdb1}) so that the guest OS can
-see it as a partitioned disk. WARNING: unless you know what you do, it
-is better to only make READ-ONLY accesses to the hard disk otherwise
-you may corrupt your host data (use the @option{-snapshot} command
-line option or modify the device permissions accordingly).
-@end table
-
-@subsubsection Windows
-
-@table @code
-@item CD
-The preferred syntax is the drive letter (e.g. @file{d:}). The
-alternate syntax @file{\\.\d:} is supported. @file{/dev/cdrom} is
-supported as an alias to the first CDROM drive.
-
-Currently there is no specific code to handle removable media, so it
-is better to use the @code{change} or @code{eject} monitor commands to
-change or eject media.
-@item Hard disks
-Hard disks can be used with the syntax: @file{\\.\PhysicalDrive@var{N}}
-where @var{N} is the drive number (0 is the first hard disk).
-
-WARNING: unless you know what you do, it is better to only make
-READ-ONLY accesses to the hard disk otherwise you may corrupt your
-host data (use the @option{-snapshot} command line so that the
-modifications are written in a temporary file).
-@end table
-
-
-@subsubsection Mac OS X
-
-@file{/dev/cdrom} is an alias to the first CDROM.
-
-Currently there is no specific code to handle removable media, so it
-is better to use the @code{change} or @code{eject} monitor commands to
-change or eject media.
-
-@node disk_images_fat_images
-@subsection Virtual FAT disk images
-
-QEMU can automatically create a virtual FAT disk image from a
-directory tree. In order to use it, just type:
-
-@example
-qemu-system-i386 linux.img -hdb fat:/my_directory
-@end example
-
-Then you access access to all the files in the @file{/my_directory}
-directory without having to copy them in a disk image or to export
-them via SAMBA or NFS. The default access is @emph{read-only}.
-
-Floppies can be emulated with the @code{:floppy:} option:
-
-@example
-qemu-system-i386 linux.img -fda fat:floppy:/my_directory
-@end example
-
-A read/write support is available for testing (beta stage) with the
-@code{:rw:} option:
-
-@example
-qemu-system-i386 linux.img -fda fat:floppy:rw:/my_directory
-@end example
-
-What you should @emph{never} do:
-@itemize
-@item use non-ASCII filenames ;
-@item use "-snapshot" together with ":rw:" ;
-@item expect it to work when loadvm'ing ;
-@item write to the FAT directory on the host system while accessing it with the guest system.
-@end itemize
-
-@node disk_images_nbd
-@subsection NBD access
-
-QEMU can access directly to block device exported using the Network Block Device
-protocol.
-
-@example
-qemu-system-i386 linux.img -hdb nbd://my_nbd_server.mydomain.org:1024/
-@end example
-
-If the NBD server is located on the same host, you can use an unix socket instead
-of an inet socket:
-
-@example
-qemu-system-i386 linux.img -hdb nbd+unix://?socket=/tmp/my_socket
-@end example
-
-In this case, the block device must be exported using qemu-nbd:
-
-@example
-qemu-nbd --socket=/tmp/my_socket my_disk.qcow2
-@end example
-
-The use of qemu-nbd allows sharing of a disk between several guests:
-@example
-qemu-nbd --socket=/tmp/my_socket --share=2 my_disk.qcow2
-@end example
-
-@noindent
-and then you can use it with two guests:
-@example
-qemu-system-i386 linux1.img -hdb nbd+unix://?socket=/tmp/my_socket
-qemu-system-i386 linux2.img -hdb nbd+unix://?socket=/tmp/my_socket
-@end example
-
-If the nbd-server uses named exports (supported since NBD 2.9.18, or with QEMU's
-own embedded NBD server), you must specify an export name in the URI:
-@example
-qemu-system-i386 -cdrom nbd://localhost/debian-500-ppc-netinst
-qemu-system-i386 -cdrom nbd://localhost/openSUSE-11.1-ppc-netinst
-@end example
-
-The URI syntax for NBD is supported since QEMU 1.3.  An alternative syntax is
-also available.  Here are some example of the older syntax:
-@example
-qemu-system-i386 linux.img -hdb nbd:my_nbd_server.mydomain.org:1024
-qemu-system-i386 linux2.img -hdb nbd:unix:/tmp/my_socket
-qemu-system-i386 -cdrom nbd:localhost:10809:exportname=debian-500-ppc-netinst
-@end example
-
-@node disk_images_sheepdog
-@subsection Sheepdog disk images
-
-Sheepdog is a distributed storage system for QEMU.  It provides highly
-available block level storage volumes that can be attached to
-QEMU-based virtual machines.
-
-You can create a Sheepdog disk image with the command:
-@example
-qemu-img create sheepdog:///@var{image} @var{size}
-@end example
-where @var{image} is the Sheepdog image name and @var{size} is its
-size.
-
-To import the existing @var{filename} to Sheepdog, you can use a
-convert command.
-@example
-qemu-img convert @var{filename} sheepdog:///@var{image}
-@end example
-
-You can boot from the Sheepdog disk image with the command:
-@example
-qemu-system-i386 sheepdog:///@var{image}
-@end example
-
-You can also create a snapshot of the Sheepdog image like qcow2.
-@example
-qemu-img snapshot -c @var{tag} sheepdog:///@var{image}
-@end example
-where @var{tag} is a tag name of the newly created snapshot.
-
-To boot from the Sheepdog snapshot, specify the tag name of the
-snapshot.
-@example
-qemu-system-i386 sheepdog:///@var{image}#@var{tag}
-@end example
-
-You can create a cloned image from the existing snapshot.
-@example
-qemu-img create -b sheepdog:///@var{base}#@var{tag} sheepdog:///@var{image}
-@end example
-where @var{base} is a image name of the source snapshot and @var{tag}
-is its tag name.
-
-You can use an unix socket instead of an inet socket:
-
-@example
-qemu-system-i386 sheepdog+unix:///@var{image}?socket=@var{path}
-@end example
-
-If the Sheepdog daemon doesn't run on the local host, you need to
-specify one of the Sheepdog servers to connect to.
-@example
-qemu-img create sheepdog://@var{hostname}:@var{port}/@var{image} @var{size}
-qemu-system-i386 sheepdog://@var{hostname}:@var{port}/@var{image}
-@end example
-
-@node disk_images_iscsi
-@subsection iSCSI LUNs
-
-iSCSI is a popular protocol used to access SCSI devices across a computer
-network.
-
-There are two different ways iSCSI devices can be used by QEMU.
-
-The first method is to mount the iSCSI LUN on the host, and make it appear as
-any other ordinary SCSI device on the host and then to access this device as a
-/dev/sd device from QEMU. How to do this differs between host OSes.
-
-The second method involves using the iSCSI initiator that is built into
-QEMU. This provides a mechanism that works the same way regardless of which
-host OS you are running QEMU on. This section will describe this second method
-of using iSCSI together with QEMU.
-
-In QEMU, iSCSI devices are described using special iSCSI URLs
-
-@example
-URL syntax:
-iscsi://[<username>[%<password>]@@]<host>[:<port>]/<target-iqn-name>/<lun>
-@end example
-
-Username and password are optional and only used if your target is set up
-using CHAP authentication for access control.
-Alternatively the username and password can also be set via environment
-variables to have these not show up in the process list
-
-@example
-export LIBISCSI_CHAP_USERNAME=<username>
-export LIBISCSI_CHAP_PASSWORD=<password>
-iscsi://<host>/<target-iqn-name>/<lun>
-@end example
-
-Various session related parameters can be set via special options, either
-in a configuration file provided via '-readconfig' or directly on the
-command line.
-
-If the initiator-name is not specified qemu will use a default name
-of 'iqn.2008-11.org.linux-kvm[:<name>'] where <name> is the name of the
-virtual machine.
-
-
-@example
-Setting a specific initiator name to use when logging in to the target
--iscsi initiator-name=iqn.qemu.test:my-initiator
-@end example
-
-@example
-Controlling which type of header digest to negotiate with the target
--iscsi header-digest=CRC32C|CRC32C-NONE|NONE-CRC32C|NONE
-@end example
-
-These can also be set via a configuration file
-@example
-[iscsi]
-  user = "CHAP username"
-  password = "CHAP password"
-  initiator-name = "iqn.qemu.test:my-initiator"
-  # header digest is one of CRC32C|CRC32C-NONE|NONE-CRC32C|NONE
-  header-digest = "CRC32C"
-@end example
-
-
-Setting the target name allows different options for different targets
-@example
-[iscsi "iqn.target.name"]
-  user = "CHAP username"
-  password = "CHAP password"
-  initiator-name = "iqn.qemu.test:my-initiator"
-  # header digest is one of CRC32C|CRC32C-NONE|NONE-CRC32C|NONE
-  header-digest = "CRC32C"
-@end example
-
-
-Howto use a configuration file to set iSCSI configuration options:
-@example
-cat >iscsi.conf <<EOF
-[iscsi]
-  user = "me"
-  password = "my password"
-  initiator-name = "iqn.qemu.test:my-initiator"
-  header-digest = "CRC32C"
-EOF
-
-qemu-system-i386 -drive file=iscsi://127.0.0.1/iqn.qemu.test/1 \
-    -readconfig iscsi.conf
-@end example
-
-
-Howto set up a simple iSCSI target on loopback and accessing it via QEMU:
-@example
-This example shows how to set up an iSCSI target with one CDROM and one DISK
-using the Linux STGT software target. This target is available on Red Hat based
-systems as the package 'scsi-target-utils'.
-
-tgtd --iscsi portal=127.0.0.1:3260
-tgtadm --lld iscsi --op new --mode target --tid 1 -T iqn.qemu.test
-tgtadm --lld iscsi --mode logicalunit --op new --tid 1 --lun 1 \
-    -b /IMAGES/disk.img --device-type=disk
-tgtadm --lld iscsi --mode logicalunit --op new --tid 1 --lun 2 \
-    -b /IMAGES/cd.iso --device-type=cd
-tgtadm --lld iscsi --op bind --mode target --tid 1 -I ALL
-
-qemu-system-i386 -iscsi initiator-name=iqn.qemu.test:my-initiator \
-    -boot d -drive file=iscsi://127.0.0.1/iqn.qemu.test/1 \
-    -cdrom iscsi://127.0.0.1/iqn.qemu.test/2
-@end example
-
-@node disk_images_gluster
-@subsection GlusterFS disk images
-
-GlusterFS is a user space distributed file system.
-
-You can boot from the GlusterFS disk image with the command:
-@example
-URI:
-qemu-system-x86_64 -drive file=gluster[+@var{type}]://[@var{host}[:@var{port}]]/@var{volume}/@var{path}
-                               [?socket=...][,file.debug=9][,file.logfile=...]
-
-JSON:
-qemu-system-x86_64 'json:@{"driver":"qcow2",
-                           "file":@{"driver":"gluster",
-                                    "volume":"testvol","path":"a.img","debug":9,"logfile":"...",
-                                    "server":[@{"type":"tcp","host":"...","port":"..."@},
-                                              @{"type":"unix","socket":"..."@}]@}@}'
-@end example
-
-@var{gluster} is the protocol.
-
-@var{type} specifies the transport type used to connect to gluster
-management daemon (glusterd). Valid transport types are
-tcp and unix. In the URI form, if a transport type isn't specified,
-then tcp type is assumed.
-
-@var{host} specifies the server where the volume file specification for
-the given volume resides. This can be either a hostname or an ipv4 address.
-If transport type is unix, then @var{host} field should not be specified.
-Instead @var{socket} field needs to be populated with the path to unix domain
-socket.
-
-@var{port} is the port number on which glusterd is listening. This is optional
-and if not specified, it defaults to port 24007. If the transport type is unix,
-then @var{port} should not be specified.
-
-@var{volume} is the name of the gluster volume which contains the disk image.
-
-@var{path} is the path to the actual disk image that resides on gluster volume.
-
-@var{debug} is the logging level of the gluster protocol driver. Debug levels
-are 0-9, with 9 being the most verbose, and 0 representing no debugging output.
-The default level is 4. The current logging levels defined in the gluster source
-are 0 - None, 1 - Emergency, 2 - Alert, 3 - Critical, 4 - Error, 5 - Warning,
-6 - Notice, 7 - Info, 8 - Debug, 9 - Trace
-
-@var{logfile} is a commandline option to mention log file path which helps in
-logging to the specified file and also help in persisting the gfapi logs. The
-default is stderr.
-
-
-
-
-You can create a GlusterFS disk image with the command:
-@example
-qemu-img create gluster://@var{host}/@var{volume}/@var{path} @var{size}
-@end example
-
-Examples
-@example
-qemu-system-x86_64 -drive file=gluster://1.2.3.4/testvol/a.img
-qemu-system-x86_64 -drive file=gluster+tcp://1.2.3.4/testvol/a.img
-qemu-system-x86_64 -drive file=gluster+tcp://1.2.3.4:24007/testvol/dir/a.img
-qemu-system-x86_64 -drive file=gluster+tcp://[1:2:3:4:5:6:7:8]/testvol/dir/a.img
-qemu-system-x86_64 -drive file=gluster+tcp://[1:2:3:4:5:6:7:8]:24007/testvol/dir/a.img
-qemu-system-x86_64 -drive file=gluster+tcp://server.domain.com:24007/testvol/dir/a.img
-qemu-system-x86_64 -drive file=gluster+unix:///testvol/dir/a.img?socket=/tmp/glusterd.socket
-qemu-system-x86_64 -drive file=gluster+rdma://1.2.3.4:24007/testvol/a.img
-qemu-system-x86_64 -drive file=gluster://1.2.3.4/testvol/a.img,file.debug=9,file.logfile=/var/log/qemu-gluster.log
-qemu-system-x86_64 'json:@{"driver":"qcow2",
-                           "file":@{"driver":"gluster",
-                                    "volume":"testvol","path":"a.img",
-                                    "debug":9,"logfile":"/var/log/qemu-gluster.log",
-                                    "server":[@{"type":"tcp","host":"1.2.3.4","port":24007@},
-                                              @{"type":"unix","socket":"/var/run/glusterd.socket"@}]@}@}'
-qemu-system-x86_64 -drive driver=qcow2,file.driver=gluster,file.volume=testvol,file.path=/path/a.img,
-                                       file.debug=9,file.logfile=/var/log/qemu-gluster.log,
-                                       file.server.0.type=tcp,file.server.0.host=1.2.3.4,file.server.0.port=24007,
-                                       file.server.1.type=unix,file.server.1.socket=/var/run/glusterd.socket
-@end example
-
-@node disk_images_ssh
-@subsection Secure Shell (ssh) disk images
-
-You can access disk images located on a remote ssh server
-by using the ssh protocol:
-
-@example
-qemu-system-x86_64 -drive file=ssh://[@var{user}@@]@var{server}[:@var{port}]/@var{path}[?host_key_check=@var{host_key_check}]
-@end example
-
-Alternative syntax using properties:
-
-@example
-qemu-system-x86_64 -drive file.driver=ssh[,file.user=@var{user}],file.host=@var{server}[,file.port=@var{port}],file.path=@var{path}[,file.host_key_check=@var{host_key_check}]
-@end example
-
-@var{ssh} is the protocol.
-
-@var{user} is the remote user.  If not specified, then the local
-username is tried.
-
-@var{server} specifies the remote ssh server.  Any ssh server can be
-used, but it must implement the sftp-server protocol.  Most Unix/Linux
-systems should work without requiring any extra configuration.
-
-@var{port} is the port number on which sshd is listening.  By default
-the standard ssh port (22) is used.
-
-@var{path} is the path to the disk image.
-
-The optional @var{host_key_check} parameter controls how the remote
-host's key is checked.  The default is @code{yes} which means to use
-the local @file{.ssh/known_hosts} file.  Setting this to @code{no}
-turns off known-hosts checking.  Or you can check that the host key
-matches a specific fingerprint:
-@code{host_key_check=md5:78:45:8e:14:57:4f:d5:45:83:0a:0e:f3:49:82:c9:c8}
-(@code{sha1:} can also be used as a prefix, but note that OpenSSH
-tools only use MD5 to print fingerprints).
-
-Currently authentication must be done using ssh-agent.  Other
-authentication methods may be supported in future.
-
-Note: Many ssh servers do not support an @code{fsync}-style operation.
-The ssh driver cannot guarantee that disk flush requests are
-obeyed, and this causes a risk of disk corruption if the remote
-server or network goes down during writes.  The driver will
-print a warning when @code{fsync} is not supported:
-
-warning: ssh server @code{ssh.example.com:22} does not support fsync
-
-With sufficiently new versions of libssh2 and OpenSSH, @code{fsync} is
-supported.
+@include docs/qemu-block-drivers.texi
 
 @node pcsys_network
 @section Network emulation
 
-QEMU can simulate several network cards (PCI or ISA cards on the PC
-target) and can connect them to an arbitrary number of Virtual Local
-Area Networks (VLANs). Host TAP devices can be connected to any QEMU
-VLAN. VLAN can be connected between separate instances of QEMU to
-simulate large networks. For simpler usage, a non privileged user mode
-network stack can replace the TAP device to have a basic network
-connection.
-
-@subsection VLANs
-
-QEMU simulates several VLANs. A VLAN can be symbolised as a virtual
-connection between several network devices. These devices can be for
-example QEMU virtual Ethernet cards or virtual Host ethernet devices
-(TAP devices).
+QEMU can simulate several network cards (e.g. PCI or ISA cards on the PC
+target) and can connect them to a network backend on the host or an emulated
+hub. The various host network backends can either be used to connect the NIC of
+the guest to a real network (e.g. by using a TAP devices or the non-privileged
+user mode network stack), or to other guest instances running in another QEMU
+process (e.g. by using the socket host network backend).
 
 @subsection Using TAP network interfaces
 
@@ -1209,7 +753,7 @@ TAP network interfaces.
 There is a virtual ethernet driver for Windows 2000/XP systems, called
 TAP-Win32. But it is not included in standard QEMU for Windows,
 so you will need to get it separately. It is part of OpenVPN package,
-so download OpenVPN from : @url{http://openvpn.net/}.
+so download OpenVPN from : @url{https://openvpn.net/}.
 
 @subsection Using the user mode network stack
 
@@ -1220,7 +764,7 @@ network). The virtual network configuration is the following:
 
 @example
 
-         QEMU VLAN      <------>  Firewall/DHCP server <-----> Internet
+     guest (10.0.2.15)  <------>  Firewall/DHCP server <-----> Internet
                            |          (10.0.2.2)
                            |
                            ---->  DNS server (10.0.2.3)
@@ -1255,11 +799,23 @@ When using the @option{'-netdev user,hostfwd=...'} option, TCP or UDP
 connections can be redirected from the host to the guest. It allows for
 example to redirect X11, telnet or SSH connections.
 
-@subsection Connecting VLANs between QEMU instances
+@subsection Hubs
 
-Using the @option{-net socket} option, it is possible to make VLANs
-that span several QEMU instances. See @ref{sec_invocation} to have a
-basic example.
+QEMU can simulate several hubs. A hub can be thought of as a virtual connection
+between several network devices. These devices can be for example QEMU virtual
+ethernet cards or virtual Host ethernet devices (TAP devices). You can connect
+guest NICs or host network backends to such a hub using the @option{-netdev
+hubport} or @option{-nic hubport} options. The legacy @option{-net} option
+also connects the given device to the emulated hub with ID 0 (i.e. the default
+hub) unless you specify a netdev with @option{-net nic,netdev=xxx} here.
+
+@subsection Connecting emulated networks between QEMU instances
+
+Using the @option{-netdev socket} (or @option{-nic socket} or
+@option{-net socket}) option, it is possible to create emulated
+networks that span several QEMU instances.
+See the description of the @option{-netdev socket} option in the
+@ref{sec_invocation,,Invocation chapter} to have a basic example.
 
 @node pcsys_other_devs
 @section Other Devices
@@ -1357,10 +913,10 @@ monitor (@pxref{pcsys_keys}).
 @node pcsys_usb
 @section USB emulation
 
-QEMU emulates a PCI UHCI USB controller. You can virtually plug
-virtual USB devices or real host USB devices (experimental, works only
-on Linux hosts).  QEMU will automatically create and connect virtual USB hubs
-as necessary to connect multiple USB devices.
+QEMU can emulate a PCI UHCI, OHCI, EHCI or XHCI USB controller. You can
+plug virtual USB devices or real host USB devices (only works with certain
+host operating systems). QEMU will automatically create and connect virtual
+USB hubs as necessary to connect multiple USB devices.
 
 @menu
 * usb_devices::
@@ -1369,53 +925,64 @@ as necessary to connect multiple USB devices.
 @node usb_devices
 @subsection Connecting USB devices
 
-USB devices can be connected with the @option{-usbdevice} commandline option
-or the @code{usb_add} monitor command.  Available devices are:
+USB devices can be connected with the @option{-device usb-...} command line
+option or the @code{device_add} monitor command. Available devices are:
 
 @table @code
-@item mouse
+@item usb-mouse
 Virtual Mouse.  This will override the PS/2 mouse emulation when activated.
-@item tablet
+@item usb-tablet
 Pointer device that uses absolute coordinates (like a touchscreen).
 This means QEMU is able to report the mouse position without having
 to grab the mouse.  Also overrides the PS/2 mouse emulation when activated.
-@item disk:@var{file}
-Mass storage device based on @var{file} (@pxref{disk_images})
-@item host:@var{bus.addr}
-Pass through the host device identified by @var{bus.addr}
-(Linux only)
-@item host:@var{vendor_id:product_id}
-Pass through the host device identified by @var{vendor_id:product_id}
-(Linux only)
-@item wacom-tablet
+@item usb-storage,drive=@var{drive_id}
+Mass storage device backed by @var{drive_id} (@pxref{disk_images})
+@item usb-uas
+USB attached SCSI device, see
+@url{https://git.qemu.org/?p=qemu.git;a=blob_plain;f=docs/usb-storage.txt,usb-storage.txt}
+for details
+@item usb-bot
+Bulk-only transport storage device, see
+@url{https://git.qemu.org/?p=qemu.git;a=blob_plain;f=docs/usb-storage.txt,usb-storage.txt}
+for details here, too
+@item usb-mtp,rootdir=@var{dir}
+Media transfer protocol device, using @var{dir} as root of the file tree
+that is presented to the guest.
+@item usb-host,hostbus=@var{bus},hostaddr=@var{addr}
+Pass through the host device identified by @var{bus} and @var{addr}
+@item usb-host,vendorid=@var{vendor},productid=@var{product}
+Pass through the host device identified by @var{vendor} and @var{product} ID
+@item usb-wacom-tablet
 Virtual Wacom PenPartner tablet.  This device is similar to the @code{tablet}
 above but it can be used with the tslib library because in addition to touch
 coordinates it reports touch pressure.
-@item keyboard
+@item usb-kbd
 Standard USB keyboard.  Will override the PS/2 keyboard (if present).
-@item serial:[vendorid=@var{vendor_id}][,product_id=@var{product_id}]:@var{dev}
+@item usb-serial,chardev=@var{id}
 Serial converter. This emulates an FTDI FT232BM chip connected to host character
-device @var{dev}. The available character devices are the same as for the
-@code{-serial} option. The @code{vendorid} and @code{productid} options can be
-used to override the default 0403:6001. For instance,
-@example
-usb_add serial:productid=FA00:tcp:192.168.0.2:4444
-@end example
-will connect to tcp port 4444 of ip 192.168.0.2, and plug that to the virtual
-serial converter, faking a Matrix Orbital LCD Display (USB ID 0403:FA00).
-@item braille
+device @var{id}.
+@item usb-braille,chardev=@var{id}
 Braille device.  This will use BrlAPI to display the braille output on a real
-or fake device.
-@item net:@var{options}
-Network adapter that supports CDC ethernet and RNDIS protocols.  @var{options}
-specifies NIC options as with @code{-net nic,}@var{options} (see description).
+or fake device referenced by @var{id}.
+@item usb-net[,netdev=@var{id}]
+Network adapter that supports CDC ethernet and RNDIS protocols.  @var{id}
+specifies a netdev defined with @code{-netdev @dots{},id=@var{id}}.
 For instance, user-mode networking can be used with
 @example
-qemu-system-i386 [...OPTIONS...] -net user,vlan=0 -usbdevice net:vlan=0
+qemu-system-i386 [...] -netdev user,id=net0 -device usb-net,netdev=net0
 @end example
-Currently this cannot be used in machines that support PCI NICs.
-@item bt[:@var{hci-type}]
-Bluetooth dongle whose type is specified in the same format as with
+@item usb-ccid
+Smartcard reader device
+@item usb-audio
+USB audio device
+@item usb-bt-dongle
+Bluetooth dongle for the transport layer of HCI. It is connected to HCI
+scatternet 0 by default (corresponds to @code{-bt hci,vlan=0}).
+Note that the syntax for the @code{-device usb-bt-dongle} option is not as
+useful yet as it was with the legacy @code{-usbdevice} option. So to
+configure an USB bluetooth device, you might need to use
+"@code{-usbdevice bt}[:@var{hci-type}]" instead. This configures a
+bluetooth dongle whose type is specified in the same format as with
 the @option{-bt hci} option, @pxref{bt-hcis,,allowed HCI types}.  If
 no type is given, the HCI logic corresponds to @code{-bt hci,vlan=0}.
 This USB device implements the USB Transport Layer of HCI.  Example
@@ -1460,11 +1027,11 @@ hubs, it won't work).
 
 @item Add the device in QEMU by using:
 @example
-usb_add host:1234:5678
+device_add usb-host,vendorid=0x1234,productid=0x5678
 @end example
 
-Normally the guest OS should report that a new USB device is
-plugged. You can use the option @option{-usbdevice} to do the same.
+Normally the guest OS should report that a new USB device is plugged.
+You can use the option @option{-device usb-host,...} to do the same.
 
 @item Now you can try to use the host USB device in QEMU.
 
@@ -1488,7 +1055,6 @@ considerations depending on the deployment scenarios.
 * vnc_sec_certificate_pw::
 * vnc_sec_sasl::
 * vnc_sec_certificate_sasl::
-* vnc_generate_cert::
 * vnc_setup_sasl::
 @end menu
 @node vnc_sec_none
@@ -1539,7 +1105,9 @@ support provides a secure session, but no authentication. This allows any
 client to connect, and provides an encrypted session.
 
 @example
-qemu-system-i386 [...OPTIONS...] -vnc :1,tls,x509=/etc/pki/qemu -monitor stdio
+qemu-system-i386 [...OPTIONS...] \
+  -object tls-creds-x509,id=tls0,dir=/etc/pki/qemu,endpoint=server,verify-peer=no \
+  -vnc :1,tls-creds=tls0 -monitor stdio
 @end example
 
 In the above example @code{/etc/pki/qemu} should contain at least three files,
@@ -1554,10 +1122,14 @@ only be readable by the user owning it.
 Certificates can also provide a means to authenticate the client connecting.
 The server will request that the client provide a certificate, which it will
 then validate against the CA certificate. This is a good choice if deploying
-in an environment with a private internal certificate authority.
+in an environment with a private internal certificate authority. It uses the
+same syntax as previously, but with @code{verify-peer} set to @code{yes}
+instead.
 
 @example
-qemu-system-i386 [...OPTIONS...] -vnc :1,tls,x509verify=/etc/pki/qemu -monitor stdio
+qemu-system-i386 [...OPTIONS...] \
+  -object tls-creds-x509,id=tls0,dir=/etc/pki/qemu,endpoint=server,verify-peer=yes \
+  -vnc :1,tls-creds=tls0 -monitor stdio
 @end example
 
 
@@ -1568,7 +1140,9 @@ Finally, the previous method can be combined with VNC password authentication
 to provide two layers of authentication for clients.
 
 @example
-qemu-system-i386 [...OPTIONS...] -vnc :1,password,tls,x509verify=/etc/pki/qemu -monitor stdio
+qemu-system-i386 [...OPTIONS...] \
+  -object tls-creds-x509,id=tls0,dir=/etc/pki/qemu,endpoint=server,verify-peer=yes \
+  -vnc :1,tls-creds=tls0,password -monitor stdio
 (qemu) change vnc password
 Password: ********
 (qemu)
@@ -1605,28 +1179,111 @@ credentials. This can be enabled, by combining the 'sasl' option
 with the aforementioned TLS + x509 options:
 
 @example
-qemu-system-i386 [...OPTIONS...] -vnc :1,tls,x509,sasl -monitor stdio
+qemu-system-i386 [...OPTIONS...] \
+  -object tls-creds-x509,id=tls0,dir=/etc/pki/qemu,endpoint=server,verify-peer=yes \
+  -vnc :1,tls-creds=tls0,sasl -monitor stdio
 @end example
 
+@node vnc_setup_sasl
 
-@node vnc_generate_cert
-@subsection Generating certificates for VNC
+@subsection Configuring SASL mechanisms
 
-The GNU TLS packages provides a command called @code{certtool} which can
-be used to generate certificates and keys in PEM format. At a minimum it
-is necessary to setup a certificate authority, and issue certificates to
-each server. If using certificates for authentication, then each client
-will also need to be issued a certificate. The recommendation is for the
-server to keep its certificates in either @code{/etc/pki/qemu} or for
-unprivileged users in @code{$HOME/.pki/qemu}.
+The following documentation assumes use of the Cyrus SASL implementation on a
+Linux host, but the principles should apply to any other SASL implementation
+or host. When SASL is enabled, the mechanism configuration will be loaded from
+system default SASL service config /etc/sasl2/qemu.conf. If running QEMU as an
+unprivileged user, an environment variable SASL_CONF_PATH can be used to make
+it search alternate locations for the service config file.
+
+If the TLS option is enabled for VNC, then it will provide session encryption,
+otherwise the SASL mechanism will have to provide encryption. In the latter
+case the list of possible plugins that can be used is drastically reduced. In
+fact only the GSSAPI SASL mechanism provides an acceptable level of security
+by modern standards. Previous versions of QEMU referred to the DIGEST-MD5
+mechanism, however, it has multiple serious flaws described in detail in
+RFC 6331 and thus should never be used any more. The SCRAM-SHA-1 mechanism
+provides a simple username/password auth facility similar to DIGEST-MD5, but
+does not support session encryption, so can only be used in combination with
+TLS.
+
+When not using TLS the recommended configuration is
+
+@example
+mech_list: gssapi
+keytab: /etc/qemu/krb5.tab
+@end example
+
+This says to use the 'GSSAPI' mechanism with the Kerberos v5 protocol, with
+the server principal stored in /etc/qemu/krb5.tab. For this to work the
+administrator of your KDC must generate a Kerberos principal for the server,
+with a name of 'qemu/somehost.example.com@@EXAMPLE.COM' replacing
+'somehost.example.com' with the fully qualified host name of the machine
+running QEMU, and 'EXAMPLE.COM' with the Kerberos Realm.
+
+When using TLS, if username+password authentication is desired, then a
+reasonable configuration is
+
+@example
+mech_list: scram-sha-1
+sasldb_path: /etc/qemu/passwd.db
+@end example
+
+The @code{saslpasswd2} program can be used to populate the @code{passwd.db}
+file with accounts.
+
+Other SASL configurations will be left as an exercise for the reader. Note that
+all mechanisms, except GSSAPI, should be combined with use of TLS to ensure a
+secure data channel.
+
+
+@node network_tls
+@section TLS setup for network services
+
+Almost all network services in QEMU have the ability to use TLS for
+session data encryption, along with x509 certificates for simple
+client authentication. What follows is a description of how to
+generate certificates suitable for usage with QEMU, and applies to
+the VNC server, character devices with the TCP backend, NBD server
+and client, and migration server and client.
+
+At a high level, QEMU requires certificates and private keys to be
+provided in PEM format. Aside from the core fields, the certificates
+should include various extension data sets, including v3 basic
+constraints data, key purpose, key usage and subject alt name.
+
+The GnuTLS package includes a command called @code{certtool} which can
+be used to easily generate certificates and keys in the required format
+with expected data present. Alternatively a certificate management
+service may be used.
+
+At a minimum it is necessary to setup a certificate authority, and
+issue certificates to each server. If using x509 certificates for
+authentication, then each client will also need to be issued a
+certificate.
+
+Assuming that the QEMU network services will only ever be exposed to
+clients on a private intranet, there is no need to use a commercial
+certificate authority to create certificates. A self-signed CA is
+sufficient, and in fact likely to be more secure since it removes
+the ability of malicious 3rd parties to trick the CA into mis-issuing
+certs for impersonating your services. The only likely exception
+where a commercial CA might be desirable is if enabling the VNC
+websockets server and exposing it directly to remote browser clients.
+In such a case it might be useful to use a commercial CA to avoid
+needing to install custom CA certs in the web browsers.
+
+The recommendation is for the server to keep its certificates in either
+@code{/etc/pki/qemu} or for unprivileged users in @code{$HOME/.pki/qemu}.
 
 @menu
-* vnc_generate_ca::
-* vnc_generate_server::
-* vnc_generate_client::
+* tls_generate_ca::
+* tls_generate_server::
+* tls_generate_client::
+* tls_creds_setup::
+* tls_psk::
 @end menu
-@node vnc_generate_ca
-@subsubsection Setup the Certificate Authority
+@node tls_generate_ca
+@subsection Setup the Certificate Authority
 
 This step only needs to be performed once per organization / organizational
 unit. First the CA needs a private key. This key must be kept VERY secret
@@ -1637,11 +1294,10 @@ issued with it is lost.
 # certtool --generate-privkey > ca-key.pem
 @end example
 
-A CA needs to have a public certificate. For simplicity it can be a self-signed
-certificate, or one issue by a commercial certificate issuing authority. To
-generate a self-signed certificate requires one core piece of information, the
-name of the organization.
-
+To generate a self-signed certificate requires one core piece of information,
+the name of the organization. A template file @code{ca.info} should be
+populated with the desired data to avoid having to deal with interactive
+prompts from certtool:
 @example
 # cat > ca.info <<EOF
 cn = Name of your organization
@@ -1654,115 +1310,260 @@ EOF
            --outfile ca-cert.pem
 @end example
 
-The @code{ca-cert.pem} file should be copied to all servers and clients wishing to utilize
-TLS support in the VNC server. The @code{ca-key.pem} must not be disclosed/copied at all.
+The @code{ca} keyword in the template sets the v3 basic constraints extension
+to indicate this certificate is for a CA, while @code{cert_signing_key} sets
+the key usage extension to indicate this will be used for signing other keys.
+The generated @code{ca-cert.pem} file should be copied to all servers and
+clients wishing to utilize TLS support in the VNC server. The @code{ca-key.pem}
+must not be disclosed/copied anywhere except the host responsible for issuing
+certificates.
 
-@node vnc_generate_server
-@subsubsection Issuing server certificates
+@node tls_generate_server
+@subsection Issuing server certificates
 
 Each server (or host) needs to be issued with a key and certificate. When connecting
 the certificate is sent to the client which validates it against the CA certificate.
-The core piece of information for a server certificate is the hostname. This should
-be the fully qualified hostname that the client will connect with, since the client
-will typically also verify the hostname in the certificate. On the host holding the
-secure CA private key:
+The core pieces of information for a server certificate are the hostnames and/or IP
+addresses that will be used by clients when connecting. The hostname / IP address
+that the client specifies when connecting will be validated against the hostname(s)
+and IP address(es) recorded in the server certificate, and if no match is found
+the client will close the connection.
+
+Thus it is recommended that the server certificate include both the fully qualified
+and unqualified hostnames. If the server will have permanently assigned IP address(es),
+and clients are likely to use them when connecting, they may also be included in the
+certificate. Both IPv4 and IPv6 addresses are supported. Historically certificates
+only included 1 hostname in the @code{CN} field, however, usage of this field for
+validation is now deprecated. Instead modern TLS clients will validate against the
+Subject Alt Name extension data, which allows for multiple entries. In the future
+usage of the @code{CN} field may be discontinued entirely, so providing SAN
+extension data is strongly recommended.
+
+On the host holding the CA, create template files containing the information
+for each server, and use it to issue server certificates.
 
 @example
-# cat > server.info <<EOF
+# cat > server-hostNNN.info <<EOF
 organization = Name  of your organization
-cn = server.foo.example.com
+cn = hostNNN.foo.example.com
+dns_name = hostNNN
+dns_name = hostNNN.foo.example.com
+ip_address = 10.0.1.87
+ip_address = 192.8.0.92
+ip_address = 2620:0:cafe::87
+ip_address = 2001:24::92
 tls_www_server
 encryption_key
 signing_key
 EOF
-# certtool --generate-privkey > server-key.pem
+# certtool --generate-privkey > server-hostNNN-key.pem
 # certtool --generate-certificate \
            --load-ca-certificate ca-cert.pem \
            --load-ca-privkey ca-key.pem \
-           --load-privkey server-key.pem \
-           --template server.info \
-           --outfile server-cert.pem
+           --load-privkey server-hostNNN-key.pem \
+           --template server-hostNNN.info \
+           --outfile server-hostNNN-cert.pem
 @end example
 
-The @code{server-key.pem} and @code{server-cert.pem} files should now be securely copied
-to the server for which they were generated. The @code{server-key.pem} is security
-sensitive and should be kept protected with file mode 0600 to prevent disclosure.
+The @code{dns_name} and @code{ip_address} fields in the template are setting
+the subject alt name extension data. The @code{tls_www_server} keyword is the
+key purpose extension to indicate this certificate is intended for usage in
+a web server. Although QEMU network services are not in fact HTTP servers
+(except for VNC websockets), setting this key purpose is still recommended.
+The @code{encryption_key} and @code{signing_key} keyword is the key usage
+extension to indicate this certificate is intended for usage in the data
+session.
 
-@node vnc_generate_client
-@subsubsection Issuing client certificates
+The @code{server-hostNNN-key.pem} and @code{server-hostNNN-cert.pem} files
+should now be securely copied to the server for which they were generated,
+and renamed to @code{server-key.pem} and @code{server-cert.pem} when added
+to the @code{/etc/pki/qemu} directory on the target host. The @code{server-key.pem}
+file is security sensitive and should be kept protected with file mode 0600
+to prevent disclosure.
 
-If the QEMU VNC server is to use the @code{x509verify} option to validate client
-certificates as its authentication mechanism, each client also needs to be issued
-a certificate. The client certificate contains enough metadata to uniquely identify
-the client, typically organization, state, city, building, etc. On the host holding
-the secure CA private key:
+@node tls_generate_client
+@subsection Issuing client certificates
+
+The QEMU x509 TLS credential setup defaults to enabling client verification
+using certificates, providing a simple authentication mechanism. If this
+default is used, each client also needs to be issued a certificate. The client
+certificate contains enough metadata to uniquely identify the client with the
+scope of the certificate authority. The client certificate would typically
+include fields for organization, state, city, building, etc.
+
+Once again on the host holding the CA, create template files containing the
+information for each client, and use it to issue client certificates.
+
 
 @example
-# cat > client.info <<EOF
+# cat > client-hostNNN.info <<EOF
 country = GB
 state = London
-locality = London
+locality = City Of London
 organization = Name of your organization
-cn = client.foo.example.com
+cn = hostNNN.foo.example.com
 tls_www_client
 encryption_key
 signing_key
 EOF
-# certtool --generate-privkey > client-key.pem
+# certtool --generate-privkey > client-hostNNN-key.pem
 # certtool --generate-certificate \
            --load-ca-certificate ca-cert.pem \
            --load-ca-privkey ca-key.pem \
-           --load-privkey client-key.pem \
-           --template client.info \
-           --outfile client-cert.pem
+           --load-privkey client-hostNNN-key.pem \
+           --template client-hostNNN.info \
+           --outfile client-hostNNN-cert.pem
 @end example
 
-The @code{client-key.pem} and @code{client-cert.pem} files should now be securely
-copied to the client for which they were generated.
+The subject alt name extension data is not required for clients, so the
+the @code{dns_name} and @code{ip_address} fields are not included.
+The @code{tls_www_client} keyword is the key purpose extension to indicate
+this certificate is intended for usage in a web client. Although QEMU
+network clients are not in fact HTTP clients, setting this key purpose is
+still recommended. The @code{encryption_key} and @code{signing_key} keyword
+is the key usage extension to indicate this certificate is intended for
+usage in the data session.
 
+The @code{client-hostNNN-key.pem} and @code{client-hostNNN-cert.pem} files
+should now be securely copied to the client for which they were generated,
+and renamed to @code{client-key.pem} and @code{client-cert.pem} when added
+to the @code{/etc/pki/qemu} directory on the target host. The @code{client-key.pem}
+file is security sensitive and should be kept protected with file mode 0600
+to prevent disclosure.
 
-@node vnc_setup_sasl
-
-@subsection Configuring SASL mechanisms
-
-The following documentation assumes use of the Cyrus SASL implementation on a
-Linux host, but the principals should apply to any other SASL impl. When SASL
-is enabled, the mechanism configuration will be loaded from system default
-SASL service config /etc/sasl2/qemu.conf. If running QEMU as an
-unprivileged user, an environment variable SASL_CONF_PATH can be used
-to make it search alternate locations for the service config.
-
-The default configuration might contain
+If a single host is going to be using TLS in both a client and server
+role, it is possible to create a single certificate to cover both roles.
+This would be quite common for the migration and NBD services, where a
+QEMU process will be started by accepting a TLS protected incoming migration,
+and later itself be migrated out to another host. To generate a single
+certificate, simply include the template data from both the client and server
+instructions in one.
 
 @example
-mech_list: digest-md5
-sasldb_path: /etc/qemu/passwd.db
+# cat > both-hostNNN.info <<EOF
+country = GB
+state = London
+locality = City Of London
+organization = Name of your organization
+cn = hostNNN.foo.example.com
+dns_name = hostNNN
+dns_name = hostNNN.foo.example.com
+ip_address = 10.0.1.87
+ip_address = 192.8.0.92
+ip_address = 2620:0:cafe::87
+ip_address = 2001:24::92
+tls_www_server
+tls_www_client
+encryption_key
+signing_key
+EOF
+# certtool --generate-privkey > both-hostNNN-key.pem
+# certtool --generate-certificate \
+           --load-ca-certificate ca-cert.pem \
+           --load-ca-privkey ca-key.pem \
+           --load-privkey both-hostNNN-key.pem \
+           --template both-hostNNN.info \
+           --outfile both-hostNNN-cert.pem
 @end example
 
-This says to use the 'Digest MD5' mechanism, which is similar to the HTTP
-Digest-MD5 mechanism. The list of valid usernames & passwords is maintained
-in the /etc/qemu/passwd.db file, and can be updated using the saslpasswd2
-command. While this mechanism is easy to configure and use, it is not
-considered secure by modern standards, so only suitable for developers /
-ad-hoc testing.
+When copying the PEM files to the target host, save them twice,
+once as @code{server-cert.pem} and @code{server-key.pem}, and
+again as @code{client-cert.pem} and @code{client-key.pem}.
 
-A more serious deployment might use Kerberos, which is done with the 'gssapi'
-mechanism
+@node tls_creds_setup
+@subsection TLS x509 credential configuration
+
+QEMU has a standard mechanism for loading x509 credentials that will be
+used for network services and clients. It requires specifying the
+@code{tls-creds-x509} class name to the @code{--object} command line
+argument for the system emulators.  Each set of credentials loaded should
+be given a unique string identifier via the @code{id} parameter. A single
+set of TLS credentials can be used for multiple network backends, so VNC,
+migration, NBD, character devices can all share the same credentials. Note,
+however, that credentials for use in a client endpoint must be loaded
+separately from those used in a server endpoint.
+
+When specifying the object, the @code{dir} parameters specifies which
+directory contains the credential files. This directory is expected to
+contain files with the names mentioned previously, @code{ca-cert.pem},
+@code{server-key.pem}, @code{server-cert.pem}, @code{client-key.pem}
+and @code{client-cert.pem} as appropriate. It is also possible to
+include a set of pre-generated Diffie-Hellman (DH) parameters in a file
+@code{dh-params.pem}, which can be created using the
+@code{certtool --generate-dh-params} command. If omitted, QEMU will
+dynamically generate DH parameters when loading the credentials.
+
+The @code{endpoint} parameter indicates whether the credentials will
+be used for a network client or server, and determines which PEM
+files are loaded.
+
+The @code{verify} parameter determines whether x509 certificate
+validation should be performed. This defaults to enabled, meaning
+clients will always validate the server hostname against the
+certificate subject alt name fields and/or CN field. It also
+means that servers will request that clients provide a certificate
+and validate them. Verification should never be turned off for
+client endpoints, however, it may be turned off for server endpoints
+if an alternative mechanism is used to authenticate clients. For
+example, the VNC server can use SASL to authenticate clients
+instead.
+
+To load server credentials with client certificate validation
+enabled
 
 @example
-mech_list: gssapi
-keytab: /etc/qemu/krb5.tab
+$QEMU -object tls-creds-x509,id=tls0,dir=/etc/pki/qemu,endpoint=server
 @end example
 
-For this to work the administrator of your KDC must generate a Kerberos
-principal for the server, with a name of  'qemu/somehost.example.com@@EXAMPLE.COM'
-replacing 'somehost.example.com' with the fully qualified host name of the
-machine running QEMU, and 'EXAMPLE.COM' with the Kerberos Realm.
+while to load client credentials use
 
-Other configurations will be left as an exercise for the reader. It should
-be noted that only Digest-MD5 and GSSAPI provides a SSF layer for data
-encryption. For all other mechanisms, VNC should always be configured to
-use TLS and x509 certificates to protect security credentials from snooping.
+@example
+$QEMU -object tls-creds-x509,id=tls0,dir=/etc/pki/qemu,endpoint=client
+@end example
+
+Network services which support TLS will all have a @code{tls-creds}
+parameter which expects the ID of the TLS credentials object. For
+example with VNC:
+
+@example
+$QEMU -vnc 0.0.0.0:0,tls-creds=tls0
+@end example
+
+@node tls_psk
+@subsection TLS Pre-Shared Keys (PSK)
+
+Instead of using certificates, you may also use TLS Pre-Shared Keys
+(TLS-PSK).  This can be simpler to set up than certificates but is
+less scalable.
+
+Use the GnuTLS @code{psktool} program to generate a @code{keys.psk}
+file containing one or more usernames and random keys:
+
+@example
+mkdir -m 0700 /tmp/keys
+psktool -u rich -p /tmp/keys/keys.psk
+@end example
+
+TLS-enabled servers such as qemu-nbd can use this directory like so:
+
+@example
+qemu-nbd \
+  -t -x / \
+  --object tls-creds-psk,id=tls0,endpoint=server,dir=/tmp/keys \
+  --tls-creds tls0 \
+  image.qcow2
+@end example
+
+When connecting from a qemu-based client you must specify the
+directory containing @code{keys.psk} and an optional @var{username}
+(defaults to ``qemu''):
+
+@example
+qemu-img info \
+  --object tls-creds-psk,id=tls0,dir=/tmp/keys,username=rich,endpoint=client \
+  --image-opts \
+  file.driver=nbd,file.host=localhost,file.port=10809,file.tls-creds=tls0,file.export=/
+@end example
 
 @node gdb_usage
 @section GDB usage
@@ -1878,8 +1679,8 @@ resolution modes which the Cirrus Logic BIOS does not support (i.e. >=
 Windows 9x does not correctly use the CPU HLT
 instruction. The result is that it takes host CPU cycles even when
 idle. You can install the utility from
-@url{http://www.user.cityline.ru/~maxamn/amnhltm.zip} to solve this
-problem. Note that no such tool is needed for NT, 2000 or XP.
+@url{https://web.archive.org/web/20060212132151/http://www.user.cityline.ru/~maxamn/amnhltm.zip}
+to solve this problem. Note that no such tool is needed for NT, 2000 or XP.
 
 @subsubsection Windows 2000 disk full problem
 
@@ -1927,9 +1728,9 @@ vvfat block device ("-hdb fat:directory_which_holds_the_SP").
 @subsubsection CPU usage reduction
 
 DOS does not correctly use the CPU HLT instruction. The result is that
-it takes host CPU cycles even when idle. You can install the utility
-from @url{http://www.vmware.com/software/dosidle210.zip} to solve this
-problem.
+it takes host CPU cycles even when idle. You can install the utility from
+@url{https://web.archive.org/web/20051222085335/http://www.vmware.com/software/dosidle210.zip}
+to solve this problem.
 
 @node QEMU System emulator for non PC targets
 @chapter QEMU System emulator for non PC targets
@@ -1999,7 +1800,7 @@ PC compatible keyboard and mouse.
 QEMU uses the Open Hack'Ware Open Firmware Compatible BIOS available at
 @url{http://perso.magic.fr/l_indien/OpenHackWare/index.htm}.
 
-Since version 0.9.1, QEMU uses OpenBIOS @url{http://www.openbios.org/}
+Since version 0.9.1, QEMU uses OpenBIOS @url{https://www.openbios.org/}
 for the g3beige and mac99 PowerMac machines. OpenBIOS is a free (GPL
 v2) portable firmware implementation. The goal is to implement a 100%
 IEEE 1275-1994 (referred to as Open Firmware) compliant firmware.
@@ -2091,7 +1892,7 @@ memory size depends on the machine type, for SS-5 it is 256MB and for
 others 2047MB.
 
 Since version 0.8.2, QEMU uses OpenBIOS
-@url{http://www.openbios.org/}. OpenBIOS is a free (GPL v2) portable
+@url{https://www.openbios.org/}. OpenBIOS is a free (GPL v2) portable
 firmware implementation. The goal is to implement a 100% IEEE
 1275-1994 (referred to as Open Firmware) compliant firmware.
 
@@ -2195,6 +1996,10 @@ Set the emulated machine type. The default is sun4u.
 @section MIPS System emulator
 @cindex system emulation (MIPS)
 
+@menu
+* nanoMIPS System emulator ::
+@end menu
+
 Four executables cover simulation of 32 and 64-bit MIPS systems in
 both endian options, @file{qemu-system-mips}, @file{qemu-system-mipsel}
 @file{qemu-system-mips64} and @file{qemu-system-mips64el}.
@@ -2245,6 +2050,15 @@ Malta FPGA serial device
 Cirrus (default) or any other PCI VGA graphics card
 @end itemize
 
+The Boston board emulation supports the following devices:
+
+@itemize @minus
+@item
+Xilinx FPGA, which includes a PCIe root port and an UART
+@item
+Intel EG20T PCH connects the I/O peripherals, but only the SATA bus is emulated
+@end itemize
+
 The ACER Pica emulation supports:
 
 @itemize @minus
@@ -2256,19 +2070,6 @@ PC-style IRQ and DMA controllers
 PC Keyboard
 @item
 IDE controller
-@end itemize
-
-The mipssim pseudo board emulation provides an environment similar
-to what the proprietary MIPS emulator uses for running Linux.
-It supports:
-
-@itemize @minus
-@item
-A range of MIPS CPUs, default is the 24Kf
-@item
-PC style serial port
-@item
-MIPSnet network emulation
 @end itemize
 
 The MIPS Magnum R4000 emulation supports:
@@ -2285,6 +2086,57 @@ SCSI controller
 @item
 G364 framebuffer
 @end itemize
+
+The Fulong 2E emulation supports:
+
+@itemize @minus
+@item
+Loongson 2E CPU
+@item
+Bonito64 system controller as North Bridge
+@item
+VT82C686 chipset as South Bridge
+@item
+RTL8139D as a network card chipset
+@end itemize
+
+The mipssim pseudo board emulation provides an environment similar
+to what the proprietary MIPS emulator uses for running Linux.
+It supports:
+
+@itemize @minus
+@item
+A range of MIPS CPUs, default is the 24Kf
+@item
+PC style serial port
+@item
+MIPSnet network emulation
+@end itemize
+
+@node nanoMIPS System emulator
+@subsection nanoMIPS System emulator
+@cindex system emulation (nanoMIPS)
+
+Executable @file{qemu-system-mipsel} also covers simulation of
+32-bit nanoMIPS system in little endian mode:
+
+@itemize @minus
+@item
+nanoMIPS I7200 CPU
+@end itemize
+
+Example of @file{qemu-system-mipsel} usage for nanoMIPS is shown below:
+
+Download @code{<disk_image_file>} from @url{https://mipsdistros.mips.com/LinuxDistro/nanomips/buildroot/index.html}.
+
+Download @code{<kernel_image_file>} from @url{https://mipsdistros.mips.com/LinuxDistro/nanomips/kernels/v4.15.18-432-gb2eb9a8b07a1-20180627102142/index.html}.
+
+Start system emulation of Malta board with nanoMIPS I7200 CPU:
+@example
+qemu-system-mipsel -cpu I7200 -kernel @code{<kernel_image_file>} \
+    -M malta -serial stdio -m @code{<memory_size>} -hda @code{<disk_image_file>} \
+    -append "mem=256m@@0x0 rw console=ttyS0 vga=cirrus vesa=0x111 root=/dev/sda"
+@end example
 
 
 @node ARM System emulator
@@ -2551,6 +2403,8 @@ so should only be used with trusted guest OS.
 
 @end table
 
+@c man end
+
 @node ColdFire System emulator
 @section ColdFire System emulator
 @cindex system emulation (ColdFire)
@@ -2594,6 +2448,8 @@ Note that this allows guest direct access to the host filesystem,
 so should only be used with trusted guest OS.
 
 @end table
+
+@c man end
 
 @node Cris System emulator
 @section Cris System emulator
@@ -2666,6 +2522,14 @@ Note that this allows guest direct access to the host filesystem,
 so should only be used with trusted guest OS.
 
 @end table
+
+@c man end
+
+@node QEMU Guest Agent
+@chapter QEMU Guest Agent invocation
+
+@include qemu-ga.texi
+
 @node QEMU User space emulator
 @chapter QEMU User space emulator
 
@@ -2898,8 +2762,17 @@ The binary format is detected automatically.
 @command{qemu-microblaze} TODO.
 
 @cindex user mode (MIPS)
-@command{qemu-mips} TODO.
-@command{qemu-mipsel} TODO.
+@command{qemu-mips} executes 32-bit big endian MIPS binaries (MIPS O32 ABI).
+
+@command{qemu-mipsel} executes 32-bit little endian MIPS binaries (MIPS O32 ABI).
+
+@command{qemu-mips64} executes 64-bit big endian MIPS binaries (MIPS N64 ABI).
+
+@command{qemu-mips64el} executes 64-bit little endian MIPS binaries (MIPS N64 ABI).
+
+@command{qemu-mipsn32} executes 32-bit big endian MIPS binaries (MIPS N32 ABI).
+
+@command{qemu-mipsn32el} executes 32-bit little endian MIPS binaries (MIPS N32 ABI).
 
 @cindex user mode (NiosII)
 @command{qemu-nios2} TODO.
@@ -2993,18 +2866,101 @@ Act as if the host page size was 'pagesize' bytes
 Run the emulation in single step mode.
 @end table
 
+@node System requirements
+@chapter System requirements
+
+@section KVM kernel module
+
+On x86_64 hosts, the default set of CPU features enabled by the KVM accelerator
+require the host to be running Linux v4.5 or newer.
+
+The OpteronG[345] CPU models require KVM support for RDTSCP, which was
+added with Linux 4.5 which is supported by the major distros. And even
+if RHEL7 has kernel 3.10, KVM there has the required functionality there
+to make it close to a 4.5 or newer kernel.
+
+@include docs/security.texi
 
 @include qemu-tech.texi
+
+@include qemu-deprecated.texi
+
+@node Supported build platforms
+@appendix Supported build platforms
+
+QEMU aims to support building and executing on multiple host OS platforms.
+This appendix outlines which platforms are the major build targets. These
+platforms are used as the basis for deciding upon the minimum required
+versions of 3rd party software QEMU depends on. The supported platforms
+are the targets for automated testing performed by the project when patches
+are submitted for review, and tested before and after merge.
+
+If a platform is not listed here, it does not imply that QEMU won't work.
+If an unlisted platform has comparable software versions to a listed platform,
+there is every expectation that it will work. Bug reports are welcome for
+problems encountered on unlisted platforms unless they are clearly older
+vintage than what is described here.
+
+Note that when considering software versions shipped in distros as support
+targets, QEMU considers only the version number, and assumes the features in
+that distro match the upstream release with the same version. In other words,
+if a distro backports extra features to the software in their distro, QEMU
+upstream code will not add explicit support for those backports, unless the
+feature is auto-detectable in a manner that works for the upstream releases
+too.
+
+The Repology site @url{https://repology.org} is a useful resource to identify
+currently shipped versions of software in various operating systems, though
+it does not cover all distros listed below.
+
+@section Linux OS
+
+For distributions with frequent, short-lifetime releases, the project will
+aim to support all versions that are not end of life by their respective
+vendors. For the purposes of identifying supported software versions, the
+project will look at Fedora, Ubuntu, and openSUSE distros. Other short-
+lifetime distros will be assumed to ship similar software versions.
+
+For distributions with long-lifetime releases, the project will aim to support
+the most recent major version at all times. Support for the previous major
+version will be dropped 2 years after the new major version is released. For
+the purposes of identifying supported software versions, the project will look
+at RHEL, Debian, Ubuntu LTS, and SLES distros. Other long-lifetime distros will
+be assumed to ship similar software versions.
+
+@section Windows
+
+The project supports building with current versions of the MinGW toolchain,
+hosted on Linux.
+
+@section macOS
+
+The project supports building with the two most recent versions of macOS, with
+the current homebrew package set available.
+
+@section FreeBSD
+
+The project aims to support the all the versions which are not end of life.
+
+@section NetBSD
+
+The project aims to support the most recent major version at all times. Support
+for the previous major version will be dropped 2 years after the new major
+version is released.
+
+@section OpenBSD
+
+The project aims to support the all the versions which are not end of life.
 
 @node License
 @appendix License
 
 QEMU is a trademark of Fabrice Bellard.
 
-QEMU is released under the GNU General Public License (TODO: add link).
-Parts of QEMU have specific licenses, see file LICENSE.
-
-TODO (refer to file LICENSE, include it, include the GPL?)
+QEMU is released under the
+@url{https://www.gnu.org/licenses/gpl-2.0.txt,GNU General Public License},
+version 2. Parts of QEMU have specific licenses, see file
+@url{https://git.qemu.org/?p=qemu.git;a=blob_plain;f=LICENSE,LICENSE}.
 
 @node Index
 @appendix Index

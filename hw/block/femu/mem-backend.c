@@ -34,8 +34,8 @@ void femu_destroy_mem_backend(struct femu_mbe *mbe)
     }
 }
 
-/* Coperd: directly read/write to memory backend from NVMe command */
-int femu_rw_mem_backend(struct femu_mbe *mbe, QEMUSGList *qsg,
+/* Coperd: directly read/write to memory backend from blackbox mode */
+int femu_rw_mem_backend_bb(struct femu_mbe *mbe, QEMUSGList *qsg,
         uint64_t data_offset, bool is_write)
 {
     int sg_cur_index = 0;
@@ -46,7 +46,7 @@ int femu_rw_mem_backend(struct femu_mbe *mbe, QEMUSGList *qsg,
 
     DMADirection dir = DMA_DIRECTION_FROM_DEVICE;
 
-    if (is_write) { 
+    if (is_write) {
         dir = DMA_DIRECTION_TO_DEVICE;
     }
 
@@ -56,6 +56,7 @@ int femu_rw_mem_backend(struct femu_mbe *mbe, QEMUSGList *qsg,
         if (dma_memory_rw(qsg->as, cur_addr, mb + mb_oft, cur_len, dir)) {
             error_report("FEMU: dma_memory_rw error");
         }
+
         mb_oft += cur_len;
 
         sg_cur_byte += cur_len;
@@ -63,6 +64,48 @@ int femu_rw_mem_backend(struct femu_mbe *mbe, QEMUSGList *qsg,
             sg_cur_byte = 0;
             ++sg_cur_index;
         }
+    }
+
+    qemu_sglist_destroy(qsg);
+
+    return 0;
+}
+
+/* Coperd: directly read/write to memory backend from whitebox mode */
+int femu_rw_mem_backend_oc(struct femu_mbe *mbe, QEMUSGList *qsg,
+        uint64_t *data_offset, bool is_write)
+{
+    int sg_cur_index = 0;
+    dma_addr_t sg_cur_byte = 0;
+    dma_addr_t cur_addr, cur_len;
+    uint64_t mb_oft = data_offset[0];
+    void *mb = mbe->mem_backend;
+
+    DMADirection dir = DMA_DIRECTION_FROM_DEVICE;
+
+    if (is_write) {
+        dir = DMA_DIRECTION_TO_DEVICE;
+    }
+
+    while (sg_cur_index < qsg->nsg) {
+        cur_addr = qsg->sg[sg_cur_index].base + sg_cur_byte;
+        cur_len = qsg->sg[sg_cur_index].len - sg_cur_byte;
+        if (dma_memory_rw(qsg->as, cur_addr, mb + mb_oft, cur_len, dir)) {
+            error_report("FEMU: dma_memory_rw error");
+        }
+
+        sg_cur_byte += cur_len;
+        if (sg_cur_byte == qsg->sg[sg_cur_index].len) {
+            sg_cur_byte = 0;
+            ++sg_cur_index;
+        }
+
+        /*
+         * Coperd: update drive LBA to r/w next time
+         * for OC: all LBAs are in data_offset[]
+         * for BB: LBAs are continuous
+         */
+        mb_oft = data_offset[sg_cur_index];
     }
 
     qemu_sglist_destroy(qsg);

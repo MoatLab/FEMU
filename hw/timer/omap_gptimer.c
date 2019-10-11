@@ -357,7 +357,7 @@ static void omap_gp_timer_write(void *opaque, hwaddr addr,
         s->config = value & 0x33d;
         if (((value >> 3) & 3) == 3)				/* IDLEMODE */
             fprintf(stderr, "%s: illegal IDLEMODE value in TIOCP_CFG\n",
-                            __FUNCTION__);
+                            __func__);
         if (value & 2)						/* SOFTRESET */
             omap_gp_timer_reset(s);
         break;
@@ -395,10 +395,10 @@ static void omap_gp_timer_write(void *opaque, hwaddr addr,
         s->st = (value >> 0) & 1;
         if (s->inout && s->trigger != gpt_trigger_none)
             fprintf(stderr, "%s: GP timer pin must be an output "
-                            "for this trigger mode\n", __FUNCTION__);
+                            "for this trigger mode\n", __func__);
         if (!s->inout && s->capture != gpt_capture_none)
             fprintf(stderr, "%s: GP timer pin must be an input "
-                            "for this capture mode\n", __FUNCTION__);
+                            "for this capture mode\n", __func__);
         if (s->trigger == gpt_trigger_none)
             omap_gp_timer_out(s, s->scpwm);
         /* TODO: make sure this doesn't overflow 32-bits */
@@ -450,19 +450,44 @@ static void omap_gp_timer_writeh(void *opaque, hwaddr addr,
         s->writeh = (uint16_t) value;
 }
 
+static uint64_t omap_gp_timer_readfn(void *opaque, hwaddr addr,
+                                     unsigned size)
+{
+    switch (size) {
+    case 1:
+        return omap_badwidth_read32(opaque, addr);
+    case 2:
+        return omap_gp_timer_readh(opaque, addr);
+    case 4:
+        return omap_gp_timer_readw(opaque, addr);
+    default:
+        g_assert_not_reached();
+    }
+}
+
+static void omap_gp_timer_writefn(void *opaque, hwaddr addr,
+                                  uint64_t value, unsigned size)
+{
+    switch (size) {
+    case 1:
+        omap_badwidth_write32(opaque, addr, value);
+        break;
+    case 2:
+        omap_gp_timer_writeh(opaque, addr, value);
+        break;
+    case 4:
+        omap_gp_timer_write(opaque, addr, value);
+        break;
+    default:
+        g_assert_not_reached();
+    }
+}
+
 static const MemoryRegionOps omap_gp_timer_ops = {
-    .old_mmio = {
-        .read = {
-            omap_badwidth_read32,
-            omap_gp_timer_readh,
-            omap_gp_timer_readw,
-        },
-        .write = {
-            omap_badwidth_write32,
-            omap_gp_timer_writeh,
-            omap_gp_timer_write,
-        },
-    },
+    .read = omap_gp_timer_readfn,
+    .write = omap_gp_timer_writefn,
+    .valid.min_access_size = 1,
+    .valid.max_access_size = 4,
     .endianness = DEVICE_NATIVE_ENDIAN,
 };
 

@@ -1,5 +1,8 @@
 /* from asm/termbits.h */
 
+#ifndef LINUX_USER_PPC_TERMBITS_H
+#define LINUX_USER_PPC_TERMBITS_H
+
 #define TARGET_NCCS 19
 
 struct target_termios {
@@ -219,6 +222,7 @@ struct target_termios {
 #define TARGET_TIOCGSID	0x5429  /* Return the session ID of FD */
 #define TARGET_TIOCGPTN	TARGET_IOR('T',0x30, unsigned int) /* Get Pty Number (of pty-mux device) */
 #define TARGET_TIOCSPTLCK	TARGET_IOW('T',0x31, int)  /* Lock/unlock Pty */
+#define TARGET_TIOCGPTPEER      TARGET_IO('T', 0x41) /* Safely open the slave */
 
 #define TARGET_TIOCSERCONFIG	0x5453
 #define TARGET_TIOCSERGWILD	0x5454
@@ -234,3 +238,5 @@ struct target_termios {
 
 #define TARGET_TIOCMIWAIT	0x545C	/* wait for a change on serial input line(s) */
 #define TARGET_TIOCGICOUNT	0x545D	/* read serial port inline interrupt counts */
+
+#endif

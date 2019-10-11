@@ -23,6 +23,7 @@
 #include "qemu/osdep.h"
 #include "hw/char/bcm2835_aux.h"
 #include "qemu/log.h"
+#include "qemu/module.h"
 
 #define AUX_IRQ         0x0
 #define AUX_ENABLES     0x4
@@ -39,8 +40,8 @@
 #define AUX_MU_BAUD_REG 0x68
 
 /* bits in IER/IIR registers */
-#define TX_INT  0x1
-#define RX_INT  0x2
+#define RX_INT  0x1
+#define TX_INT  0x2
 
 static void bcm2835_aux_update(BCM2835AuxState *s)
 {
@@ -279,7 +280,7 @@ static void bcm2835_aux_realize(DeviceState *dev, Error **errp)
     BCM2835AuxState *s = BCM2835_AUX(dev);
 
     qemu_chr_fe_set_handlers(&s->chr, bcm2835_aux_can_receive,
-                             bcm2835_aux_receive, NULL, s, NULL, true);
+                             bcm2835_aux_receive, NULL, NULL, s, NULL, true);
 }
 
 static Property bcm2835_aux_props[] = {

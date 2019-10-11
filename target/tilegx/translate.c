@@ -33,7 +33,6 @@
 
 #define FMT64X                          "%016" PRIx64
 
-static TCGv_env cpu_env;
 static TCGv cpu_pc;
 static TCGv cpu_regs[TILEGX_R_COUNT];
 
@@ -144,7 +143,7 @@ static bool check_gr(DisasContext *dc, uint8_t reg)
 
 static TCGv load_zero(DisasContext *dc)
 {
-    if (TCGV_IS_UNUSED_I64(dc->zero)) {
+    if (!dc->zero) {
         dc->zero = tcg_const_i64(0);
     }
     return dc->zero;
@@ -298,7 +297,7 @@ static TileExcp gen_st_opcode(DisasContext *dc, unsigned dest, unsigned srca,
     }
 
     tcg_gen_qemu_st_tl(load_gr(dc, srcb), load_gr(dc, srca),
-		       dc->mmuidx, memop);
+                       dc->mmuidx, memop);
 
     qemu_log_mask(CPU_LOG_TB_IN_ASM, "%s %s, %s", name,
                   reg_names[srca], reg_names[srcb]);
@@ -2325,7 +2324,7 @@ static void translate_one_bundle(DisasContext *dc, uint64_t bundle)
     for (i = 0; i < ARRAY_SIZE(dc->wb); i++) {
         DisasContextTemp *wb = &dc->wb[i];
         wb->reg = TILEGX_R_NOREG;
-        TCGV_UNUSED_I64(wb->val);
+        wb->val = NULL;
     }
     dc->num_wb = 0;
 
@@ -2363,45 +2362,34 @@ static void translate_one_bundle(DisasContext *dc, uint64_t bundle)
             tcg_temp_free_i64(next);
         }
         tcg_temp_free_i64(dc->jmp.dest);
-        tcg_gen_exit_tb(0);
+        tcg_gen_exit_tb(NULL, 0);
         dc->exit_tb = true;
     } else if (dc->atomic_excp != TILEGX_EXCP_NONE) {
         gen_exception(dc, dc->atomic_excp);
     }
 }
 
-void gen_intermediate_code(CPUTLGState *env, struct TranslationBlock *tb)
+void gen_intermediate_code(CPUState *cs, TranslationBlock *tb, int max_insns)
 {
-    TileGXCPU *cpu = tilegx_env_get_cpu(env);
+    CPUTLGState *env = cs->env_ptr;
     DisasContext ctx;
     DisasContext *dc = &ctx;
-    CPUState *cs = CPU(cpu);
     uint64_t pc_start = tb->pc;
-    uint64_t next_page_start = (pc_start & TARGET_PAGE_MASK) + TARGET_PAGE_SIZE;
+    uint64_t page_start = pc_start & TARGET_PAGE_MASK;
     int num_insns = 0;
-    int max_insns = tb->cflags & CF_COUNT_MASK;
 
     dc->pc = pc_start;
     dc->mmuidx = 0;
     dc->exit_tb = false;
     dc->atomic_excp = TILEGX_EXCP_NONE;
     dc->jmp.cond = TCG_COND_NEVER;
-    TCGV_UNUSED_I64(dc->jmp.dest);
-    TCGV_UNUSED_I64(dc->jmp.val1);
-    TCGV_UNUSED_I64(dc->zero);
+    dc->jmp.dest = NULL;
+    dc->jmp.val1 = NULL;
+    dc->zero = NULL;
 
     if (qemu_loglevel_mask(CPU_LOG_TB_IN_ASM)) {
         qemu_log_lock();
         qemu_log("IN: %s\n", lookup_symbol(pc_start));
-    }
-    if (!max_insns) {
-        max_insns = CF_COUNT_MASK;
-    }
-    if (cs->singlestep_enabled || singlestep) {
-        max_insns = 1;
-    }
-    if (max_insns > TCG_MAX_INSNS) {
-        max_insns = TCG_MAX_INSNS;
     }
     gen_tb_start(tb);
 
@@ -2417,11 +2405,11 @@ void gen_intermediate_code(CPUTLGState *env, struct TranslationBlock *tb)
         }
         dc->pc += TILEGX_BUNDLE_SIZE_IN_BYTES;
         if (num_insns >= max_insns
-            || dc->pc >= next_page_start
+            || (dc->pc - page_start >= TARGET_PAGE_SIZE)
             || tcg_op_buf_full()) {
             /* Ending the TB due to TB size or page boundary.  Set PC.  */
             tcg_gen_movi_tl(cpu_pc, dc->pc);
-            tcg_gen_exit_tb(0);
+            tcg_gen_exit_tb(NULL, 0);
             break;
         }
     }
@@ -2446,8 +2434,6 @@ void tilegx_tcg_init(void)
 {
     int i;
 
-    cpu_env = tcg_global_reg_new_ptr(TCG_AREG0, "env");
-    tcg_ctx.tcg_env = cpu_env;
     cpu_pc = tcg_global_mem_new_i64(cpu_env, offsetof(CPUTLGState, pc), "pc");
     for (i = 0; i < TILEGX_R_COUNT; i++) {
         cpu_regs[i] = tcg_global_mem_new_i64(cpu_env,

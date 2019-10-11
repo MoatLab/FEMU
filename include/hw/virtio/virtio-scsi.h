@@ -21,6 +21,7 @@
 #include "hw/virtio/virtio.h"
 #include "hw/pci/pci.h"
 #include "hw/scsi/scsi.h"
+#include "chardev/char-fe.h"
 #include "sysemu/iothread.h"
 
 #define TYPE_VIRTIO_SCSI_COMMON "virtio-scsi-common"
@@ -31,7 +32,6 @@
 #define VIRTIO_SCSI(obj) \
         OBJECT_CHECK(VirtIOSCSI, (obj), TYPE_VIRTIO_SCSI)
 
-#define VIRTIO_SCSI_VQ_SIZE     128
 #define VIRTIO_SCSI_MAX_CHANNEL 0
 #define VIRTIO_SCSI_MAX_TARGET  255
 #define VIRTIO_SCSI_MAX_LUN     16383
@@ -47,10 +47,14 @@ typedef struct virtio_scsi_config VirtIOSCSIConfig;
 
 struct VirtIOSCSIConf {
     uint32_t num_queues;
+    uint32_t virtqueue_size;
     uint32_t max_sectors;
     uint32_t cmd_per_lun;
+#ifdef CONFIG_VHOST_SCSI
     char *vhostfd;
     char *wwpn;
+#endif
+    CharBackend chardev;
     uint32_t boot_tpgt;
     IOThread *iothread;
 };
@@ -135,11 +139,13 @@ static inline void virtio_scsi_release(VirtIOSCSI *s)
     }
 }
 
-void virtio_scsi_common_realize(DeviceState *dev, Error **errp,
-                                VirtIOHandleOutput ctrl, VirtIOHandleOutput evt,
-                                VirtIOHandleOutput cmd);
+void virtio_scsi_common_realize(DeviceState *dev,
+                                VirtIOHandleOutput ctrl,
+                                VirtIOHandleOutput evt,
+                                VirtIOHandleOutput cmd,
+                                Error **errp);
 
-void virtio_scsi_common_unrealize(DeviceState *dev, Error **errp);
+void virtio_scsi_common_unrealize(DeviceState *dev);
 bool virtio_scsi_handle_event_vq(VirtIOSCSI *s, VirtQueue *vq);
 bool virtio_scsi_handle_cmd_vq(VirtIOSCSI *s, VirtQueue *vq);
 bool virtio_scsi_handle_ctrl_vq(VirtIOSCSI *s, VirtQueue *vq);

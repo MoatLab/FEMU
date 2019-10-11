@@ -25,43 +25,34 @@
 #include "ui/console.h"
 #include "hw/arm/omap.h"
 #include "hw/boards.h"
-#include "hw/arm/arm.h"
-#include "hw/devices.h"
+#include "hw/arm/boot.h"
+#include "hw/input/tsc2xxx.h"
 #include "hw/loader.h"
 #include "exec/address-spaces.h"
+#include "cpu.h"
 
-static uint32_t static_readb(void *opaque, hwaddr offset)
+static uint64_t static_read(void *opaque, hwaddr offset, unsigned size)
 {
-    uint32_t *val = (uint32_t *) opaque;
-    return *val >> ((offset & 3) << 3);
+    uint32_t *val = (uint32_t *)opaque;
+    uint32_t sizemask = 7 >> size;
+
+    return *val >> ((offset & sizemask) << 3);
 }
 
-static uint32_t static_readh(void *opaque, hwaddr offset)
-{
-    uint32_t *val = (uint32_t *) opaque;
-    return *val >> ((offset & 1) << 3);
-}
-
-static uint32_t static_readw(void *opaque, hwaddr offset)
-{
-    uint32_t *val = (uint32_t *) opaque;
-    return *val >> ((offset & 0) << 3);
-}
-
-static void static_write(void *opaque, hwaddr offset,
-                uint32_t value)
+static void static_write(void *opaque, hwaddr offset, uint64_t value,
+                         unsigned size)
 {
 #ifdef SPY
     printf("%s: value %08lx written at " PA_FMT "\n",
-                    __FUNCTION__, value, offset);
+                    __func__, value, offset);
 #endif
 }
 
 static const MemoryRegionOps static_ops = {
-    .old_mmio = {
-        .read = { static_readb, static_readh, static_readw, },
-        .write = { static_write, static_write, static_write, },
-    },
+    .read = static_read,
+    .write = static_write,
+    .valid.min_access_size = 1,
+    .valid.max_access_size = 4,
     .endianness = DEVICE_NATIVE_ENDIAN,
 };
 
@@ -136,11 +127,11 @@ static void palmte_onoff_gpios(void *opaque, int line, int level)
     switch (line) {
     case 0:
         printf("%s: current to MMC/SD card %sabled.\n",
-                        __FUNCTION__, level ? "dis" : "en");
+                        __func__, level ? "dis" : "en");
         break;
     case 1:
         printf("%s: internal speaker amplifier %s.\n",
-                        __FUNCTION__, level ? "down" : "on");
+                        __func__, level ? "down" : "on");
         break;
 
     /* These LCD & Audio output signals have not been identified yet.  */
@@ -148,12 +139,12 @@ static void palmte_onoff_gpios(void *opaque, int line, int level)
     case 3:
     case 4:
         printf("%s: LCD GPIO%i %s.\n",
-                        __FUNCTION__, line - 1, level ? "high" : "low");
+                        __func__, line - 1, level ? "high" : "low");
         break;
     case 5:
     case 6:
         printf("%s: Audio GPIO%i %s.\n",
-                        __FUNCTION__, line - 4, level ? "high" : "low");
+                        __func__, line - 4, level ? "high" : "low");
         break;
     }
 }
@@ -195,7 +186,6 @@ static struct arm_boot_info palmte_binfo = {
 
 static void palmte_init(MachineState *machine)
 {
-    const char *cpu_model = machine->cpu_model;
     const char *kernel_filename = machine->kernel_filename;
     const char *kernel_cmdline = machine->kernel_cmdline;
     const char *initrd_filename = machine->initrd_filename;
@@ -211,12 +201,11 @@ static void palmte_init(MachineState *machine)
     MemoryRegion *flash = g_new(MemoryRegion, 1);
     MemoryRegion *cs = g_new(MemoryRegion, 4);
 
-    mpu = omap310_mpu_init(address_space_mem, sdram_size, cpu_model);
+    mpu = omap310_mpu_init(address_space_mem, sdram_size, machine->cpu_type);
 
     /* External Flash (EMIFS) */
     memory_region_init_ram(flash, NULL, "palmte.flash", flash_size,
                            &error_fatal);
-    vmstate_register_ram_global(flash);
     memory_region_set_readonly(flash, true);
     memory_region_add_subregion(address_space_mem, OMAP_CS0_BASE, flash);
 
@@ -245,7 +234,7 @@ static void palmte_init(MachineState *machine)
         rom_size = get_image_size(option_rom[0].name);
         if (rom_size > flash_size) {
             fprintf(stderr, "%s: ROM image too big (%x > %x)\n",
-                            __FUNCTION__, rom_size, flash_size);
+                            __func__, rom_size, flash_size);
             rom_size = 0;
         }
         if (rom_size > 0) {
@@ -255,7 +244,7 @@ static void palmte_init(MachineState *machine)
         }
         if (rom_size < 0) {
             fprintf(stderr, "%s: error loading '%s'\n",
-                            __FUNCTION__, option_rom[0].name);
+                            __func__, option_rom[0].name);
         }
     }
 
@@ -275,6 +264,8 @@ static void palmte_machine_init(MachineClass *mc)
 {
     mc->desc = "Palm Tungsten|E aka. Cheetah PDA (OMAP310)";
     mc->init = palmte_init;
+    mc->ignore_memory_transaction_failures = true;
+    mc->default_cpu_type = ARM_CPU_TYPE_NAME("ti925t");
 }
 
 DEFINE_MACHINE("cheetah", palmte_machine_init)
