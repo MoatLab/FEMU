@@ -40,26 +40,27 @@ Installation
 1. Make sure you have installed necessary libraries for building QEMU. The
    dependencies can be installed by following instructions below:
 
-	```bash
-  cd $femu
+```bash
+  git clone https://github.com/ucare-uchicago/femu.git
+  cd femu
   mkdir build-femu
-	# Switch to the FEMU building directory
-	cd build-femu
-	# Copy femu script
+  # Switch to the FEMU building directory
+  cd build-femu
+  # Copy femu script
   cp ../femu-scripts/femu-copy-scripts.sh .
   ./femu-copy-scripts.sh .
-	# only Debian/Ubuntu based distributions supported
-	sudo ./pkgdep.sh
-	```
+  # only Debian/Ubuntu based distributions supported
+  sudo ./pkgdep.sh
+```
 
 2. Compile & Install FEMU:
 
-	```bash
-	./femu-compile.sh
-	```
-	FEMU binary will appear as ``x86_64-softmmu/qemu-system-x86_64``
+```bash
+  ./femu-compile.sh
+```
+  FEMU binary will appear as ``x86_64-softmmu/qemu-system-x86_64``
 
-  Tested environment: 
+  Tested host environment: 
 
   ```
   OS: Ubuntu 16.04.5 LTS
