@@ -14,11 +14,10 @@
 #include "qapi/error.h"
 #include "qemu/host-utils.h"
 #include "hw/hw.h"
-#include "hw/devices.h"
+#include "hw/display/tc6393xb.h"
 #include "hw/block/flash.h"
 #include "ui/console.h"
 #include "ui/pixel_ops.h"
-#include "sysemu/block-backend.h"
 #include "sysemu/blockdev.h"
 
 #define IRQ_TC6393_NAND		0
@@ -138,32 +137,16 @@ struct TC6393xbState {
              blanked : 1;
 };
 
-qemu_irq *tc6393xb_gpio_in_get(TC6393xbState *s)
-{
-    return s->gpio_in;
-}
-
 static void tc6393xb_gpio_set(void *opaque, int line, int level)
 {
 //    TC6393xbState *s = opaque;
 
     if (line > TC6393XB_GPIOS) {
-        printf("%s: No GPIO pin %i\n", __FUNCTION__, line);
+        printf("%s: No GPIO pin %i\n", __func__, line);
         return;
     }
 
     // FIXME: how does the chip reflect the GPIO input level change?
-}
-
-void tc6393xb_gpio_out_set(TC6393xbState *s, int line,
-                    qemu_irq handler)
-{
-    if (line >= TC6393XB_GPIOS) {
-        fprintf(stderr, "TC6393xb: no GPIO pin %d\n", line);
-        return;
-    }
-
-    s->handler[line] = handler;
 }
 
 static void tc6393xb_gpio_handler_update(TC6393xbState *s)
@@ -172,6 +155,7 @@ static void tc6393xb_gpio_handler_update(TC6393xbState *s)
     int bit;
 
     level = s->gpio_level & s->gpio_dir;
+    level &= MAKE_64BIT_MASK(0, TC6393XB_GPIOS);
 
     for (diff = s->prev_level ^ level; diff; diff ^= 1 << bit) {
         bit = ctz32(diff);
@@ -319,7 +303,7 @@ static void tc6393xb_scr_writeb(TC6393xbState *s, hwaddr addr, uint32_t value)
         SCR_REG_B(DEBUG);
     }
     fprintf(stderr, "tc6393xb_scr: unhandled write at %08x: %02x\n",
-					(uint32_t) addr, value & 0xff);
+                                        (uint32_t) addr, value & 0xff);
 }
 #undef SCR_REG_B
 #undef SCR_REG_W
@@ -358,7 +342,7 @@ static void tc6393xb_nand_cfg_writeb(TC6393xbState *s, hwaddr addr, uint32_t val
             return;
     }
     fprintf(stderr, "tc6393xb_nand_cfg: unhandled write at %08x: %02x\n",
-					(uint32_t) addr, value & 0xff);
+                                        (uint32_t) addr, value & 0xff);
 }
 
 static uint32_t tc6393xb_nand_readb(TC6393xbState *s, hwaddr addr) {
@@ -421,7 +405,7 @@ static void tc6393xb_nand_writeb(TC6393xbState *s, hwaddr addr, uint32_t value) 
             return;
     }
     fprintf(stderr, "tc6393xb_nand: unhandled write at %08x: %02x\n",
-					(uint32_t) addr, value & 0xff);
+                                        (uint32_t) addr, value & 0xff);
 }
 
 #define BITS 8
@@ -461,7 +445,7 @@ static void tc6393xb_draw_graphic(TC6393xbState *s, int full_update)
             return;
     }
 
-    dpy_gfx_update(s->con, 0, 0, s->scr_width, s->scr_height);
+    dpy_gfx_update_full(s->con);
 }
 
 static void tc6393xb_draw_blank(TC6393xbState *s, int full_update)
@@ -480,7 +464,7 @@ static void tc6393xb_draw_blank(TC6393xbState *s, int full_update)
         d += surface_stride(surface);
     }
 
-    dpy_gfx_update(s->con, 0, 0, s->scr_width, s->scr_height);
+    dpy_gfx_update_full(s->con);
 }
 
 static void tc6393xb_update_display(void *opaque)
@@ -588,7 +572,6 @@ TC6393xbState *tc6393xb_init(MemoryRegion *sysmem, uint32_t base, qemu_irq irq)
 
     memory_region_init_ram(&s->vram, NULL, "tc6393xb.vram", 0x100000,
                            &error_fatal);
-    vmstate_register_ram_global(&s->vram);
     s->vram_ptr = memory_region_get_ram_ptr(&s->vram);
     memory_region_add_subregion(sysmem, base + 0x100000, &s->vram);
     s->scr_width = 480;

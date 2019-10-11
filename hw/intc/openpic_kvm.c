@@ -24,16 +24,17 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
-#include "qemu-common.h"
 #include "cpu.h"
 #include <sys/ioctl.h>
 #include "exec/address-spaces.h"
 #include "hw/hw.h"
 #include "hw/ppc/openpic.h"
+#include "hw/ppc/openpic_kvm.h"
 #include "hw/pci/msi.h"
 #include "hw/sysbus.h"
 #include "sysemu/kvm.h"
 #include "qemu/log.h"
+#include "qemu/module.h"
 
 #define GCR_RESET        0x80000000
 
@@ -123,10 +124,6 @@ static void kvm_openpic_region_add(MemoryListener *listener,
     struct kvm_device_attr attr;
     uint64_t reg_base;
     int ret;
-
-    if (section->address_space != &address_space_memory) {
-        abort();
-    }
 
     /* Ignore events on regions that are not us */
     if (section->mr != &opp->mem) {

@@ -1,4 +1,18 @@
-enum QType ['none', 'qnull', 'qint', 'qstring', 'qdict', 'qlist', 'qfloat', 'qbool']
-    prefix QTYPE
-enum Status ['good', 'bad', 'ugly']
+module None
 object q_empty
+enum QType
+    prefix QTYPE
+    member none
+    member qnull
+    member qnum
+    member qstring
+    member qdict
+    member qlist
+    member qbool
+module include-simple.json
+include include-simple-sub.json
+module include-simple-sub.json
+enum Status
+    member good
+    member bad
+    member ugly

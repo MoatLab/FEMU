@@ -26,6 +26,7 @@
 #include "qemu/timer.h"
 #include "qemu/bitops.h"
 #include "qemu/log.h"
+#include "qemu/module.h"
 #include "qom/cpu.h"
 
 #ifndef A9_GTIMER_ERR_DEBUG
@@ -37,7 +38,7 @@
         fprintf(stderr,  ": %s: ", __func__); \
         fprintf(stderr, ## __VA_ARGS__); \
     } \
-} while (0);
+} while (0)
 
 #define DB_PRINT(...) DB_PRINT_L(0, ## __VA_ARGS__)
 

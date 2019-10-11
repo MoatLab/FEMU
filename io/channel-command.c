@@ -22,6 +22,7 @@
 #include "io/channel-command.h"
 #include "io/channel-watch.h"
 #include "qapi/error.h"
+#include "qemu/module.h"
 #include "qemu/sockets.h"
 #include "trace.h"
 
@@ -301,6 +302,9 @@ static int qio_channel_command_close(QIOChannel *ioc,
 {
     QIOChannelCommand *cioc = QIO_CHANNEL_COMMAND(ioc);
     int rv = 0;
+#ifndef WIN32
+    pid_t wp;
+#endif
 
     /* We close FDs before killing, because that
      * gives a better chance of clean shutdown
@@ -315,11 +319,18 @@ static int qio_channel_command_close(QIOChannel *ioc,
         rv = -1;
     }
     cioc->writefd = cioc->readfd = -1;
+
 #ifndef WIN32
-    if (qio_channel_command_abort(cioc, errp) < 0) {
+    do {
+        wp = waitpid(cioc->pid, NULL, 0);
+    } while (wp == (pid_t)-1 && errno == EINTR);
+    if (wp == (pid_t)-1) {
+        error_setg_errno(errp, errno, "Failed to wait for pid %llu",
+                         (unsigned long long)cioc->pid);
         return -1;
     }
 #endif
+
     if (rv < 0) {
         error_setg_errno(errp, errno, "%s",
                          "Unable to close command");

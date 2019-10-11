@@ -35,7 +35,7 @@ static QPCIDevice *get_device(void)
 {
     QPCIDevice *dev;
 
-    pcibus = qpci_init_pc(NULL);
+    pcibus = qpci_new_pc(global_qtest, NULL);
     qpci_device_foreach(pcibus, 0x10ec, 0x8139, save_fn, &dev);
     g_assert(dev != NULL);
 
@@ -46,12 +46,12 @@ static QPCIDevice *get_device(void)
 static unsigned __attribute__((unused)) in_##name(void) \
 { \
     unsigned res = qpci_io_read##len(dev, dev_bar, (val));     \
-    g_test_message("*%s -> %x\n", #name, res); \
+    g_test_message("*%s -> %x", #name, res); \
     return res; \
 } \
 static void out_##name(unsigned v) \
 { \
-    g_test_message("%x -> *%s\n", v, #name); \
+    g_test_message("%x -> *%s", v, #name); \
     qpci_io_write##len(dev, dev_bar, (val), v);        \
 }
 
@@ -176,7 +176,7 @@ static void test_timer(void)
         }
     }
 
-    g_test_message("Everythink is ok!\n");
+    g_test_message("Everythink is ok!");
 }
 
 
@@ -197,11 +197,12 @@ int main(int argc, char **argv)
 {
     int ret;
 
+    qtest_start("-device rtl8139");
+
     g_test_init(&argc, &argv, NULL);
     qtest_add_func("/rtl8139/nop", nop);
     qtest_add_func("/rtl8139/timer", test_init);
 
-    qtest_start("-device rtl8139");
     ret = g_test_run();
 
     qtest_end();

@@ -30,24 +30,17 @@ enum IMXI2CDirection {
     IMX_I2C_WRITE,
 };
 
-typedef struct IMXI2C {
-    I2CAdapter parent;
-
-    uint64_t addr;
-} IMXI2C;
-
-
 static void imx_i2c_set_slave_addr(IMXI2C *s, uint8_t addr,
                                    enum IMXI2CDirection direction)
 {
-    writeb(s->addr + I2DR_ADDR, (addr << 1) |
-           (direction == IMX_I2C_READ ? 1 : 0));
+    qtest_writeb(s->parent.qts, s->addr + I2DR_ADDR,
+                 (addr << 1) | (direction == IMX_I2C_READ ? 1 : 0));
 }
 
 static void imx_i2c_send(I2CAdapter *i2c, uint8_t addr,
                          const uint8_t *buf, uint16_t len)
 {
-    IMXI2C *s = (IMXI2C *)i2c;
+    IMXI2C *s = container_of(i2c, IMXI2C, parent);
     uint8_t data;
     uint8_t status;
     uint16_t size = 0;
@@ -63,35 +56,35 @@ static void imx_i2c_send(I2CAdapter *i2c, uint8_t addr,
            I2CR_MTX |
            I2CR_TXAK;
 
-    writeb(s->addr + I2CR_ADDR, data);
-    status = readb(s->addr + I2SR_ADDR);
+    qtest_writeb(i2c->qts, s->addr + I2CR_ADDR, data);
+    status = qtest_readb(i2c->qts, s->addr + I2SR_ADDR);
     g_assert((status & I2SR_IBB) != 0);
 
     /* set the slave address */
     imx_i2c_set_slave_addr(s, addr, IMX_I2C_WRITE);
-    status = readb(s->addr + I2SR_ADDR);
+    status = qtest_readb(i2c->qts, s->addr + I2SR_ADDR);
     g_assert((status & I2SR_IIF) != 0);
     g_assert((status & I2SR_RXAK) == 0);
 
     /* ack the interrupt */
-    writeb(s->addr + I2SR_ADDR, 0);
-    status = readb(s->addr + I2SR_ADDR);
+    qtest_writeb(i2c->qts, s->addr + I2SR_ADDR, 0);
+    status = qtest_readb(i2c->qts, s->addr + I2SR_ADDR);
     g_assert((status & I2SR_IIF) == 0);
 
     while (size < len) {
         /* check we are still busy */
-        status = readb(s->addr + I2SR_ADDR);
+        status = qtest_readb(i2c->qts, s->addr + I2SR_ADDR);
         g_assert((status & I2SR_IBB) != 0);
 
         /* write the data */
-        writeb(s->addr + I2DR_ADDR, buf[size]);
-        status = readb(s->addr + I2SR_ADDR);
+        qtest_writeb(i2c->qts, s->addr + I2DR_ADDR, buf[size]);
+        status = qtest_readb(i2c->qts, s->addr + I2SR_ADDR);
         g_assert((status & I2SR_IIF) != 0);
         g_assert((status & I2SR_RXAK) == 0);
 
         /* ack the interrupt */
-        writeb(s->addr + I2SR_ADDR, 0);
-        status = readb(s->addr + I2SR_ADDR);
+        qtest_writeb(i2c->qts, s->addr + I2SR_ADDR, 0);
+        status = qtest_readb(i2c->qts, s->addr + I2SR_ADDR);
         g_assert((status & I2SR_IIF) == 0);
 
         size++;
@@ -99,15 +92,15 @@ static void imx_i2c_send(I2CAdapter *i2c, uint8_t addr,
 
     /* release the bus */
     data &= ~(I2CR_MSTA | I2CR_MTX);
-    writeb(s->addr + I2CR_ADDR, data);
-    status = readb(s->addr + I2SR_ADDR);
+    qtest_writeb(i2c->qts, s->addr + I2CR_ADDR, data);
+    status = qtest_readb(i2c->qts, s->addr + I2SR_ADDR);
     g_assert((status & I2SR_IBB) == 0);
 }
 
 static void imx_i2c_recv(I2CAdapter *i2c, uint8_t addr,
                          uint8_t *buf, uint16_t len)
 {
-    IMXI2C *s = (IMXI2C *)i2c;
+    IMXI2C *s = container_of(i2c, IMXI2C, parent);
     uint8_t data;
     uint8_t status;
     uint16_t size = 0;
@@ -123,19 +116,19 @@ static void imx_i2c_recv(I2CAdapter *i2c, uint8_t addr,
            I2CR_MTX |
            I2CR_TXAK;
 
-    writeb(s->addr + I2CR_ADDR, data);
-    status = readb(s->addr + I2SR_ADDR);
+    qtest_writeb(i2c->qts, s->addr + I2CR_ADDR, data);
+    status = qtest_readb(i2c->qts, s->addr + I2SR_ADDR);
     g_assert((status & I2SR_IBB) != 0);
 
     /* set the slave address */
     imx_i2c_set_slave_addr(s, addr, IMX_I2C_READ);
-    status = readb(s->addr + I2SR_ADDR);
+    status = qtest_readb(i2c->qts, s->addr + I2SR_ADDR);
     g_assert((status & I2SR_IIF) != 0);
     g_assert((status & I2SR_RXAK) == 0);
 
     /* ack the interrupt */
-    writeb(s->addr + I2SR_ADDR, 0);
-    status = readb(s->addr + I2SR_ADDR);
+    qtest_writeb(i2c->qts, s->addr + I2SR_ADDR, 0);
+    status = qtest_readb(i2c->qts, s->addr + I2SR_ADDR);
     g_assert((status & I2SR_IIF) == 0);
 
     /* set the bus for read */
@@ -144,23 +137,23 @@ static void imx_i2c_recv(I2CAdapter *i2c, uint8_t addr,
     if (len != 1) {
         data &= ~I2CR_TXAK;
     }
-    writeb(s->addr + I2CR_ADDR, data);
-    status = readb(s->addr + I2SR_ADDR);
+    qtest_writeb(i2c->qts, s->addr + I2CR_ADDR, data);
+    status = qtest_readb(i2c->qts, s->addr + I2SR_ADDR);
     g_assert((status & I2SR_IBB) != 0);
 
     /* dummy read */
-    readb(s->addr + I2DR_ADDR);
-    status = readb(s->addr + I2SR_ADDR);
+    qtest_readb(i2c->qts, s->addr + I2DR_ADDR);
+    status = qtest_readb(i2c->qts, s->addr + I2SR_ADDR);
     g_assert((status & I2SR_IIF) != 0);
 
     /* ack the interrupt */
-    writeb(s->addr + I2SR_ADDR, 0);
-    status = readb(s->addr + I2SR_ADDR);
+    qtest_writeb(i2c->qts, s->addr + I2SR_ADDR, 0);
+    status = qtest_readb(i2c->qts, s->addr + I2SR_ADDR);
     g_assert((status & I2SR_IIF) == 0);
 
     while (size < len) {
         /* check we are still busy */
-        status = readb(s->addr + I2SR_ADDR);
+        status = qtest_readb(i2c->qts, s->addr + I2SR_ADDR);
         g_assert((status & I2SR_IBB) != 0);
 
         if (size == (len - 1)) {
@@ -170,38 +163,54 @@ static void imx_i2c_recv(I2CAdapter *i2c, uint8_t addr,
             /* ack the data read */
             data |= I2CR_TXAK;
         }
-        writeb(s->addr + I2CR_ADDR, data);
+        qtest_writeb(i2c->qts, s->addr + I2CR_ADDR, data);
 
         /* read the data */
-        buf[size] = readb(s->addr + I2DR_ADDR);
+        buf[size] = qtest_readb(i2c->qts, s->addr + I2DR_ADDR);
 
         if (size != (len - 1)) {
-            status = readb(s->addr + I2SR_ADDR);
+            status = qtest_readb(i2c->qts, s->addr + I2SR_ADDR);
             g_assert((status & I2SR_IIF) != 0);
 
             /* ack the interrupt */
-            writeb(s->addr + I2SR_ADDR, 0);
+            qtest_writeb(i2c->qts, s->addr + I2SR_ADDR, 0);
         }
 
-        status = readb(s->addr + I2SR_ADDR);
+        status = qtest_readb(i2c->qts, s->addr + I2SR_ADDR);
         g_assert((status & I2SR_IIF) == 0);
 
         size++;
     }
 
-    status = readb(s->addr + I2SR_ADDR);
+    status = qtest_readb(i2c->qts, s->addr + I2SR_ADDR);
     g_assert((status & I2SR_IBB) == 0);
 }
 
-I2CAdapter *imx_i2c_create(uint64_t addr)
+static void *imx_i2c_get_driver(void *obj, const char *interface)
 {
-    IMXI2C *s = g_malloc0(sizeof(*s));
-    I2CAdapter *i2c = (I2CAdapter *)s;
+    IMXI2C *s = obj;
+    if (!g_strcmp0(interface, "i2c-bus")) {
+        return &s->parent;
+    }
+    fprintf(stderr, "%s not present in imx-i2c\n", interface);
+    g_assert_not_reached();
+}
 
+void imx_i2c_init(IMXI2C *s, QTestState *qts, uint64_t addr)
+{
     s->addr = addr;
 
-    i2c->send = imx_i2c_send;
-    i2c->recv = imx_i2c_recv;
+    s->obj.get_driver = imx_i2c_get_driver;
 
-    return i2c;
+    s->parent.send = imx_i2c_send;
+    s->parent.recv = imx_i2c_recv;
+    s->parent.qts = qts;
 }
+
+static void imx_i2c_register_nodes(void)
+{
+    qos_node_create_driver("imx.i2c", NULL);
+    qos_node_produces("imx.i2c", "i2c-bus");
+}
+
+libqos_init(imx_i2c_register_nodes);

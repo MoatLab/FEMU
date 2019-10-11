@@ -16,6 +16,7 @@
 
 #include "qemu/bitmap.h"
 #include "cpu_features_def.h"
+#include "gen-features.h"
 
 /* CPU features are announced via different ways */
 typedef enum {
@@ -37,6 +38,10 @@ typedef enum {
     S390_FEAT_TYPE_KMO,
     S390_FEAT_TYPE_PCC,
     S390_FEAT_TYPE_PPNO,
+    S390_FEAT_TYPE_KMA,
+    S390_FEAT_TYPE_KDSA,
+    S390_FEAT_TYPE_SORTL,
+    S390_FEAT_TYPE_DFLTCC,
 } S390FeatType;
 
 /* Definition of a CPU feature */
@@ -63,20 +68,6 @@ void s390_add_from_feat_block(S390FeatBitmap features, S390FeatType type,
 void s390_feat_bitmap_to_ascii(const S390FeatBitmap features, void *opaque,
                                void (*fn)(const char *name, void *opaque));
 
-/* static groups that will never change */
-typedef enum {
-    S390_FEAT_GROUP_PLO,
-    S390_FEAT_GROUP_TOD_CLOCK_STEERING,
-    S390_FEAT_GROUP_GEN13_PTFF_ENH,
-    S390_FEAT_GROUP_MSA,
-    S390_FEAT_GROUP_MSA_EXT_1,
-    S390_FEAT_GROUP_MSA_EXT_2,
-    S390_FEAT_GROUP_MSA_EXT_3,
-    S390_FEAT_GROUP_MSA_EXT_4,
-    S390_FEAT_GROUP_MSA_EXT_5,
-    S390_FEAT_GROUP_MAX,
-} S390FeatGroup;
-
 /* Definition of a CPU feature group */
 typedef struct {
     const char *name;       /* name exposed to the user */
@@ -88,6 +79,13 @@ typedef struct {
 const S390FeatGroupDef *s390_feat_group_def(S390FeatGroup group);
 
 #define BE_BIT_NR(BIT) (BIT ^ (BITS_PER_LONG - 1))
-#define BE_BIT(BIT) (1ULL < BE_BIT_NR(BIT))
 
+static inline void set_be_bit(unsigned int bit_nr, uint8_t *array)
+{
+    array[bit_nr / 8] |= 0x80 >> (bit_nr % 8);
+}
+static inline bool test_be_bit(unsigned int bit_nr, const uint8_t *array)
+{
+    return array[bit_nr / 8] & (0x80 >> (bit_nr % 8));
+}
 #endif /* TARGET_S390X_CPU_FEATURES_H */

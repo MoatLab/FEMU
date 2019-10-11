@@ -24,6 +24,7 @@
 
 #include "qemu/osdep.h"
 #include "hw/sysbus.h"
+#include "qemu/module.h"
 #include "hw/hw.h"
 //#include "pc.h"
 //#include "etraxfs.h"
@@ -173,7 +174,7 @@ static void etraxfs_pic_class_init(ObjectClass *klass, void *data)
     dc->props = etraxfs_pic_properties;
     /*
      * Note: pointer property "interrupt_vector" may remain null, thus
-     * no need for dc->cannot_instantiate_with_device_add_yet = true;
+     * no need for dc->user_creatable = false;
      */
 }
 

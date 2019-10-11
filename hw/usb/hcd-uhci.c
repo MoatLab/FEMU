@@ -25,6 +25,7 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+
 #include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "hw/usb.h"
@@ -36,6 +37,7 @@
 #include "sysemu/dma.h"
 #include "trace.h"
 #include "qemu/main-loop.h"
+#include "qemu/module.h"
 
 #define FRAME_TIMER_FREQ 1000
 
@@ -99,7 +101,7 @@ struct UHCIQueue {
     UHCIState *uhci;
     USBEndpoint *ep;
     QTAILQ_ENTRY(UHCIQueue) next;
-    QTAILQ_HEAD(asyncs_head, UHCIAsync) asyncs;
+    QTAILQ_HEAD(, UHCIAsync) asyncs;
     int8_t    valid;
 };
 
@@ -415,7 +417,7 @@ static const VMStateDescription vmstate_uhci = {
     .post_load = uhci_post_load,
     .fields = (VMStateField[]) {
         VMSTATE_PCI_DEVICE(dev, UHCIState),
-        VMSTATE_UINT8_EQUAL(num_ports_vmstate, UHCIState),
+        VMSTATE_UINT8_EQUAL(num_ports_vmstate, UHCIState, NULL),
         VMSTATE_STRUCT_ARRAY(ports, UHCIState, NB_PORTS, 1,
                              vmstate_uhci_port, UHCIPort),
         VMSTATE_UINT16(cmd, UHCIState),
@@ -837,7 +839,7 @@ static int uhci_handle_td(UHCIState *s, UHCIQueue *q, uint32_t qh_addr,
         }
         if (!async->done) {
             UHCI_TD last_td;
-            UHCIAsync *last = QTAILQ_LAST(&async->queue->asyncs, asyncs_head);
+            UHCIAsync *last = QTAILQ_LAST(&async->queue->asyncs);
             /*
              * While we are waiting for the current td to complete, the guest
              * may have added more tds to the queue. Note we re-read the td
@@ -858,13 +860,15 @@ static int uhci_handle_td(UHCIState *s, UHCIQueue *q, uint32_t qh_addr,
 
     /* Allocate new packet */
     if (q == NULL) {
-        USBDevice *dev = uhci_find_device(s, (td->token >> 8) & 0x7f);
-        USBEndpoint *ep = usb_ep_get(dev, pid, (td->token >> 15) & 0xf);
+        USBDevice *dev;
+        USBEndpoint *ep;
 
-        if (ep == NULL) {
+        dev = uhci_find_device(s, (td->token >> 8) & 0x7f);
+        if (dev == NULL) {
             return uhci_handle_td_error(s, td, td_addr, USB_RET_NODEV,
                                         int_mask);
         }
+        ep = usb_ep_get(dev, pid, (td->token >> 15) & 0xf);
         q = uhci_queue_new(s, qh_addr, td, ep);
     }
     async = uhci_async_alloc(q, td_addr);
@@ -1056,8 +1060,8 @@ static void uhci_process_frame(UHCIState *s)
                 link = qh.link;
             } else {
                 /* QH with elements */
-            	curr_qh = link;
-            	link = qh.el_link;
+                curr_qh = link;
+                link = qh.el_link;
             }
             continue;
         }
@@ -1323,6 +1327,10 @@ static const TypeInfo uhci_pci_type_info = {
     .class_size    = sizeof(UHCIPCIDeviceClass),
     .abstract = true,
     .class_init = uhci_class_init,
+    .interfaces = (InterfaceInfo[]) {
+        { INTERFACE_CONVENTIONAL_PCI_DEVICE },
+        { },
+    },
 };
 
 static void uhci_data_class_init(ObjectClass *klass, void *data)

@@ -37,7 +37,6 @@ def generate(events, backend, group):
         '     defined(TRACEPOINT_HEADER_MULTI_READ)',
         '#define TRACE_%s_GENERATED_UST_H' % group.upper(),
         '',
-        '#include "qemu-common.h"',
         '#include <lttng/tracepoint.h>',
         '',
         '/*',
@@ -79,7 +78,8 @@ def generate(events, backend, group):
                     out('       ctf_integer_hex('+ t + ', ' + n + ', ' + n + ')')
                 elif ("ptr" in t) or ("*" in t):
                     out('       ctf_integer_hex('+ t + ', ' + n + ', ' + n + ')')
-                elif ('int' in t) or ('long' in t) or ('unsigned' in t) or ('size_t' in t):
+                elif ('int' in t) or ('long' in t) or ('unsigned' in t) \
+                        or ('size_t' in t) or ('bool' in t):
                     out('       ctf_integer(' + t + ', ' + n + ', ' + n + ')')
                 elif ('double' in t) or ('float' in t):
                     out('       ctf_float(' + t + ', ' + n + ', ' + n + ')')

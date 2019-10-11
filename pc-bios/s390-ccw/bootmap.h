@@ -32,10 +32,14 @@ typedef struct FbaBlockPtr {
     uint16_t blockct;
 } __attribute__ ((packed)) FbaBlockPtr;
 
-typedef struct EckdBlockPtr {
-    uint16_t cylinder; /* cylinder/head/sector is an address of the block */
+typedef struct EckdCHS {
+    uint16_t cylinder;
     uint16_t head;
     uint8_t sector;
+} __attribute__ ((packed)) EckdCHS;
+
+typedef struct EckdBlockPtr {
+    EckdCHS chs; /* cylinder/head/sector is an address of the block */
     uint16_t size;
     uint8_t count; /* (size_in_blocks-1);
                     * it's 0 for TablePtr, ScriptPtr, and SectionPtr */
@@ -52,6 +56,13 @@ typedef union BootMapPointer {
     EckdBlockPtr eckd;
     ExtEckdBlockPtr xeckd;
 } __attribute__ ((packed)) BootMapPointer;
+
+/* aka Program Table */
+typedef struct BootMapTable {
+    uint8_t magic[4];
+    uint8_t reserved[12];
+    BootMapPointer entry[];
+} __attribute__ ((packed)) BootMapTable;
 
 typedef struct ComponentEntry {
     ScsiBlockPtr data;
@@ -70,10 +81,11 @@ typedef struct ScsiMbr {
     uint8_t magic[4];
     uint32_t version_id;
     uint8_t reserved[8];
-    ScsiBlockPtr blockptr;
+    ScsiBlockPtr pt;   /* block pointer to program table */
 } __attribute__ ((packed)) ScsiMbr;
 
 #define ZIPL_MAGIC              "zIPL"
+#define ZIPL_MAGIC_EBCDIC       "\xa9\xc9\xd7\xd3"
 #define IPL1_MAGIC "\xc9\xd7\xd3\xf1" /* == "IPL1" in EBCDIC */
 #define IPL2_MAGIC "\xc9\xd7\xd3\xf2" /* == "IPL2" in EBCDIC */
 #define VOL1_MAGIC "\xe5\xd6\xd3\xf1" /* == "VOL1" in EBCDIC */
@@ -86,8 +98,9 @@ typedef struct ScsiMbr {
 #define ZIPL_COMP_HEADER_IPL    0x00
 #define ZIPL_COMP_HEADER_DUMP   0x01
 
-#define ZIPL_COMP_ENTRY_LOAD    0x02
-#define ZIPL_COMP_ENTRY_EXEC    0x01
+#define ZIPL_COMP_ENTRY_EXEC      0x01
+#define ZIPL_COMP_ENTRY_LOAD      0x02
+#define ZIPL_COMP_ENTRY_SIGNATURE 0x03
 
 typedef struct XEckdMbr {
     uint8_t magic[4];   /* == "xIPL"        */
@@ -105,8 +118,9 @@ typedef struct BootMapScriptEntry {
     BootMapPointer blkptr;
     uint8_t pad[7];
     uint8_t type;   /* == BOOT_SCRIPT_* */
-#define BOOT_SCRIPT_EXEC 0x01
-#define BOOT_SCRIPT_LOAD 0x02
+#define BOOT_SCRIPT_EXEC      0x01
+#define BOOT_SCRIPT_LOAD      0x02
+#define BOOT_SCRIPT_SIGNATURE 0x03
     union {
         uint64_t load_address;
         uint64_t load_psw;
@@ -226,22 +240,45 @@ typedef struct BootInfo {          /* @ 0x70, record #0    */
     } bp;
 } __attribute__ ((packed)) BootInfo; /* see also XEckdMbr   */
 
-typedef struct Ipl1 {
-    unsigned char key[4]; /* == "IPL1" */
-    unsigned char data[24];
-} __attribute__((packed)) Ipl1;
+/*
+ * Structs for IPL
+ */
+#define STAGE2_BLK_CNT_MAX  24 /* Stage 1b can load up to 24 blocks */
 
-typedef struct Ipl2 {
-    unsigned char key[4]; /* == "IPL2" */
-    union {
-        unsigned char data[144];
-        struct {
-            unsigned char reserved1[92-4];
-            XEckdMbr mbr;
-            unsigned char reserved2[144-(92-4)-sizeof(XEckdMbr)];
-        } x;
-    } u;
-} __attribute__((packed)) Ipl2;
+typedef struct EckdCdlIpl1 {
+    uint8_t key[4]; /* == "IPL1" */
+    uint8_t data[24];
+} __attribute__((packed)) EckdCdlIpl1;
+
+typedef struct EckdSeekArg {
+    uint16_t pad;
+    EckdCHS chs;
+    uint8_t pad2;
+} __attribute__ ((packed)) EckdSeekArg;
+
+typedef struct EckdStage1b {
+    uint8_t reserved[32 * STAGE2_BLK_CNT_MAX];
+    struct EckdSeekArg seek[STAGE2_BLK_CNT_MAX];
+    uint8_t unused[64];
+} __attribute__ ((packed)) EckdStage1b;
+
+typedef struct EckdStage1 {
+    uint8_t reserved[72];
+    struct EckdSeekArg seek[2];
+} __attribute__ ((packed)) EckdStage1;
+
+typedef struct EckdCdlIpl2 {
+    uint8_t key[4]; /* == "IPL2" */
+    struct EckdStage1 stage1;
+    XEckdMbr mbr;
+    uint8_t reserved[24];
+} __attribute__((packed)) EckdCdlIpl2;
+
+typedef struct EckdLdlIpl1 {
+    uint8_t reserved[24];
+    struct EckdStage1 stage1;
+    BootInfo bip; /* BootInfo is MBR for LDL */
+} __attribute__((packed)) EckdLdlIpl1;
 
 typedef struct IplVolumeLabel {
     unsigned char key[4]; /* == "VOL1" */
@@ -263,28 +300,6 @@ typedef enum {
 } ECKD_IPL_mode_t;
 
 /* utility code below */
-
-static const unsigned char ebc2asc[256] =
-      /* 0123456789abcdef0123456789abcdef */
-        "................................" /* 1F */
-        "................................" /* 3F */
-        " ...........<(+|&.........!$*);." /* 5F first.chr.here.is.real.space */
-        "-/.........,%_>?.........`:#@'=\""/* 7F */
-        ".abcdefghi.......jklmnopqr......" /* 9F */
-        "..stuvwxyz......................" /* BF */
-        ".ABCDEFGHI.......JKLMNOPQR......" /* DF */
-        "..STUVWXYZ......0123456789......";/* FF */
-
-static inline void ebcdic_to_ascii(const char *src,
-                                   char *dst,
-                                   unsigned int size)
-{
-    unsigned int i;
-    for (i = 0; i < size; i++) {
-        unsigned c = src[i];
-        dst[i] = ebc2asc[c];
-    }
-}
 
 static inline void print_volser(const void *volser)
 {
@@ -332,46 +347,6 @@ static inline bool magic_match(const void *data, const void *magic)
     return *((uint32_t *)data) == *((uint32_t *)magic);
 }
 
-static inline int _memcmp(const void *s1, const void *s2, size_t n)
-{
-    int i;
-    const uint8_t *p1 = s1, *p2 = s2;
-
-    for (i = 0; i < n; i++) {
-        if (p1[i] != p2[i]) {
-            return p1[i] > p2[i] ? 1 : -1;
-        }
-    }
-
-    return 0;
-}
-
-/* from include/qemu/bswap.h */
-
-/* El Torito is always little-endian */
-static inline uint16_t bswap16(uint16_t x)
-{
-    return ((x & 0x00ff) << 8) | ((x & 0xff00) >> 8);
-}
-
-static inline uint32_t bswap32(uint32_t x)
-{
-    return ((x & 0x000000ffU) << 24) | ((x & 0x0000ff00U) <<  8) |
-           ((x & 0x00ff0000U) >>  8) | ((x & 0xff000000U) >> 24);
-}
-
-static inline uint64_t bswap64(uint64_t x)
-{
-    return ((x & 0x00000000000000ffULL) << 56) |
-           ((x & 0x000000000000ff00ULL) << 40) |
-           ((x & 0x0000000000ff0000ULL) << 24) |
-           ((x & 0x00000000ff000000ULL) <<  8) |
-           ((x & 0x000000ff00000000ULL) >>  8) |
-           ((x & 0x0000ff0000000000ULL) >> 24) |
-           ((x & 0x00ff000000000000ULL) >> 40) |
-           ((x & 0xff00000000000000ULL) >> 56);
-}
-
 static inline uint32_t iso_733_to_u32(uint64_t x)
 {
     return (uint32_t)x;
@@ -380,10 +355,6 @@ static inline uint32_t iso_733_to_u32(uint64_t x)
 #define ISO_SECTOR_SIZE 2048
 /* El Torito specifies boot image size in 512 byte blocks */
 #define ET_SECTOR_SHIFT 2
-#define KERN_IMAGE_START 0x010000UL
-#define PSW_MASK_64 0x0000000100000000ULL
-#define PSW_MASK_32 0x0000000080000000ULL
-#define IPL_PSW_MASK (PSW_MASK_32 | PSW_MASK_64)
 
 #define ISO_PRIMARY_VD_SECTOR 16
 
@@ -399,9 +370,6 @@ static inline void read_iso_boot_image(uint32_t block_offset, void *load_addr,
     IPL_assert(virtio_read_many(block_offset, load_addr, blks_to_load) == 0,
                "Failed to read boot image!");
 }
-
-const uint8_t el_torito_magic[] = "EL TORITO SPECIFICATION"
-                                  "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
 
 #define ISO9660_MAX_DIR_DEPTH 8
 
@@ -455,19 +423,11 @@ typedef struct IsoVolDesc {
     } vd;
 } __attribute__((packed)) IsoVolDesc;
 
-const uint8_t vol_desc_magic[] = "CD001";
 #define VOL_DESC_TYPE_BOOT 0
 #define VOL_DESC_TYPE_PRIMARY 1
 #define VOL_DESC_TYPE_SUPPLEMENT 2
 #define VOL_DESC_TYPE_PARTITION 3
 #define VOL_DESC_TERMINATOR 255
-
-static inline bool is_iso_vd_valid(IsoVolDesc *vd)
-{
-    return !_memcmp(&vd->ident[0], vol_desc_magic, 5) &&
-           vd->version == 0x1 &&
-           vd->type <= VOL_DESC_TYPE_PARTITION;
-}
 
 typedef struct IsoBcValid {
     uint8_t platform_id;
@@ -492,14 +452,6 @@ typedef struct IsoBcHdr {
     uint16_t sect_num;
     uint8_t id[28];
 } __attribute__((packed)) IsoBcHdr;
-
-/*
- * Match two CCWs located after PSW and eight filler bytes.
- * From libmagic and arch/s390/kernel/head.S.
- */
-const uint8_t linux_s390_magic[] = "\x02\x00\x00\x18\x60\x00\x00\x50\x02\x00"
-                                   "\x00\x68\x60\x00\x00\x50\x40\x40\x40\x40"
-                                   "\x40\x40\x40\x40";
 
 typedef struct IsoBcEntry {
     uint8_t id;

@@ -408,7 +408,7 @@ struct USBPacket {
 
 struct USBCombinedPacket {
     USBPacket *first;
-    QTAILQ_HEAD(packets_head, USBPacket) packets;
+    QTAILQ_HEAD(, USBPacket) packets;
     QEMUIOVector iov;
 };
 
@@ -466,7 +466,6 @@ void usb_wakeup(USBEndpoint *ep, unsigned int stream);
 void usb_generic_async_ctrl_complete(USBDevice *s, USBPacket *p);
 
 /* usb-linux.c */
-USBDevice *usb_host_device_open(USBBus *bus, const char *devname);
 void hmp_info_usbhost(Monitor *mon, const QDict *qdict);
 bool usb_host_dev_is_scsi_storage(USBDevice *usbdev);
 
@@ -549,7 +548,6 @@ void usb_claim_port(USBDevice *dev, Error **errp);
 void usb_release_port(USBDevice *dev);
 void usb_device_attach(USBDevice *dev, Error **errp);
 int usb_device_detach(USBDevice *dev);
-int usb_device_delete_addr(int busnr, int addr);
 void usb_check_attach(USBDevice *dev, Error **errp);
 
 static inline USBBus *usb_bus_from_device(USBDevice *d)
@@ -594,8 +592,6 @@ void usb_device_free_streams(USBDevice *dev, USBEndpoint **eps, int nr_eps);
 const char *usb_device_get_product_desc(USBDevice *dev);
 
 const USBDesc *usb_device_get_usb_desc(USBDevice *dev);
-
-int ehci_create_ich9_with_companions(PCIBus *bus, int slot);
 
 /* quirks.c */
 

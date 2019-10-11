@@ -10,12 +10,13 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
-#include "qemu-common.h"
 #include "qemu/cutils.h"
 #include "qemu/error-report.h"
+#include "qemu/module.h"
 #include "hw/usb.h"
-#include "hw/usb/desc.h"
-#include "sysemu/char.h"
+#include "desc.h"
+#include "chardev/char-serial.h"
+#include "chardev/char-fe.h"
 
 //#define DEBUG_Serial
 
@@ -483,13 +484,12 @@ static void usb_serial_realize(USBDevice *dev, Error **errp)
 {
     USBSerialState *s = USB_SERIAL_DEV(dev);
     Error *local_err = NULL;
-    Chardev *chr = qemu_chr_fe_get_driver(&s->cs);
 
     usb_desc_create_serial(dev);
     usb_desc_init(dev);
     dev->auto_attach = 0;
 
-    if (!chr) {
+    if (!qemu_chr_fe_backend_connected(&s->cs)) {
         error_setg(errp, "Property chardev is required");
         return;
     }
@@ -501,64 +501,12 @@ static void usb_serial_realize(USBDevice *dev, Error **errp)
     }
 
     qemu_chr_fe_set_handlers(&s->cs, usb_serial_can_read, usb_serial_read,
-                             usb_serial_event, s, NULL, true);
+                             usb_serial_event, NULL, s, NULL, true);
     usb_serial_handle_reset(dev);
 
-    if (chr->be_open && !dev->attached) {
+    if (qemu_chr_fe_backend_open(&s->cs) && !dev->attached) {
         usb_device_attach(dev, &error_abort);
     }
-}
-
-static USBDevice *usb_serial_init(USBBus *bus, const char *filename)
-{
-    USBDevice *dev;
-    Chardev *cdrv;
-    uint32_t vendorid = 0, productid = 0;
-    char label[32];
-    static int index;
-
-    while (*filename && *filename != ':') {
-        const char *p;
-        char *e;
-        if (strstart(filename, "vendorid=", &p)) {
-            vendorid = strtol(p, &e, 16);
-            if (e == p || (*e && *e != ',' && *e != ':')) {
-                error_report("bogus vendor ID %s", p);
-                return NULL;
-            }
-            filename = e;
-        } else if (strstart(filename, "productid=", &p)) {
-            productid = strtol(p, &e, 16);
-            if (e == p || (*e && *e != ',' && *e != ':')) {
-                error_report("bogus product ID %s", p);
-                return NULL;
-            }
-            filename = e;
-        } else {
-            error_report("unrecognized serial USB option %s", filename);
-            return NULL;
-        }
-        while(*filename == ',')
-            filename++;
-    }
-    if (!*filename) {
-        error_report("character device specification needed");
-        return NULL;
-    }
-    filename++;
-
-    snprintf(label, sizeof(label), "usbserial%d", index++);
-    cdrv = qemu_chr_new(label, filename);
-    if (!cdrv)
-        return NULL;
-
-    dev = usb_create(bus, "usb-serial");
-    qdev_prop_set_chr(&dev->qdev, "chardev", cdrv);
-    if (vendorid)
-        qdev_prop_set_uint16(&dev->qdev, "vendorid", vendorid);
-    if (productid)
-        qdev_prop_set_uint16(&dev->qdev, "productid", productid);
-    return dev;
 }
 
 static USBDevice *usb_braille_init(USBBus *bus, const char *unused)
@@ -566,7 +514,7 @@ static USBDevice *usb_braille_init(USBBus *bus, const char *unused)
     USBDevice *dev;
     Chardev *cdrv;
 
-    cdrv = qemu_chr_new("braille", "braille");
+    cdrv = qemu_chr_new("braille", "braille", NULL);
     if (!cdrv)
         return NULL;
 
@@ -647,7 +595,6 @@ static void usb_serial_register_types(void)
 {
     type_register_static(&usb_serial_dev_type_info);
     type_register_static(&serial_info);
-    usb_legacy_register("usb-serial", "serial", usb_serial_init);
     type_register_static(&braille_info);
     usb_legacy_register("usb-braille", "braille", usb_braille_init);
 }

@@ -163,7 +163,6 @@ static void zrle_choose_palette_rle(VncState *vs, int w, int h,
             if (packed_bytes < estimated_bytes) {
                 *use_rle = false;
                 *use_palette = true;
-                estimated_bytes = packed_bytes;
             }
         }
     }
@@ -200,56 +199,56 @@ static void zrle_write_u8(VncState *vs, uint8_t value)
 
 #define ZRLE_BPP 8
 #define ZYWRLE_ENDIAN ENDIAN_NO
-#include "vnc-enc-zrle-template.c"
+#include "vnc-enc-zrle.inc.c"
 #undef ZRLE_BPP
 
 #define ZRLE_BPP 15
 #undef ZYWRLE_ENDIAN
 #define ZYWRLE_ENDIAN ENDIAN_LITTLE
-#include "vnc-enc-zrle-template.c"
+#include "vnc-enc-zrle.inc.c"
 
 #undef ZYWRLE_ENDIAN
 #define ZYWRLE_ENDIAN ENDIAN_BIG
-#include "vnc-enc-zrle-template.c"
+#include "vnc-enc-zrle.inc.c"
 
 #undef ZRLE_BPP
 #define ZRLE_BPP 16
 #undef ZYWRLE_ENDIAN
 #define ZYWRLE_ENDIAN ENDIAN_LITTLE
-#include "vnc-enc-zrle-template.c"
+#include "vnc-enc-zrle.inc.c"
 
 #undef ZYWRLE_ENDIAN
 #define ZYWRLE_ENDIAN ENDIAN_BIG
-#include "vnc-enc-zrle-template.c"
+#include "vnc-enc-zrle.inc.c"
 
 #undef ZRLE_BPP
 #define ZRLE_BPP 32
 #undef ZYWRLE_ENDIAN
 #define ZYWRLE_ENDIAN ENDIAN_LITTLE
-#include "vnc-enc-zrle-template.c"
+#include "vnc-enc-zrle.inc.c"
 
 #undef ZYWRLE_ENDIAN
 #define ZYWRLE_ENDIAN ENDIAN_BIG
-#include "vnc-enc-zrle-template.c"
+#include "vnc-enc-zrle.inc.c"
 
 #define ZRLE_COMPACT_PIXEL 24a
 #undef ZYWRLE_ENDIAN
 #define ZYWRLE_ENDIAN ENDIAN_LITTLE
-#include "vnc-enc-zrle-template.c"
+#include "vnc-enc-zrle.inc.c"
 
 #undef ZYWRLE_ENDIAN
 #define ZYWRLE_ENDIAN ENDIAN_BIG
-#include "vnc-enc-zrle-template.c"
+#include "vnc-enc-zrle.inc.c"
 
 #undef ZRLE_COMPACT_PIXEL
 #define ZRLE_COMPACT_PIXEL 24b
 #undef ZYWRLE_ENDIAN
 #define ZYWRLE_ENDIAN ENDIAN_LITTLE
-#include "vnc-enc-zrle-template.c"
+#include "vnc-enc-zrle.inc.c"
 
 #undef ZYWRLE_ENDIAN
 #define ZYWRLE_ENDIAN ENDIAN_BIG
-#include "vnc-enc-zrle-template.c"
+#include "vnc-enc-zrle.inc.c"
 #undef ZRLE_COMPACT_PIXEL
 #undef ZRLE_BPP
 

@@ -20,6 +20,7 @@
 # Exercise the QEMU 'luks' block driver to validate interoperability
 # with the Linux dm-crypt + cryptsetup implementation
 
+from __future__ import print_function
 import subprocess
 import os
 import os.path
@@ -78,7 +79,7 @@ class LUKSConfig(object):
 
     def first_password_base64(self):
         (pw, slot) = self.first_password()
-        return base64.b64encode(pw)
+        return base64.b64encode(pw.encode('ascii')).decode('ascii')
 
     def active_slots(self):
         slots = []
@@ -97,7 +98,8 @@ def verify_passwordless_sudo():
     proc = subprocess.Popen(args,
                             stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT)
+                            stderr=subprocess.STDOUT,
+                            universal_newlines=True)
 
     msg = proc.communicate()[0]
 
@@ -115,7 +117,8 @@ def cryptsetup(args, password=None):
     proc = subprocess.Popen(fullargs,
                             stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT)
+                            stderr=subprocess.STDOUT,
+                            universal_newlines=True)
 
     msg = proc.communicate(password)[0]
 
@@ -136,6 +139,7 @@ def cryptsetup_add_password(config, slot):
         args = ["luksAddKey", config.image_path(),
                 "--key-slot", slot,
                 "--key-file", "-",
+                "--iter-time", "10",
                 pwfile]
 
         cryptsetup(args, password)
@@ -164,6 +168,7 @@ def cryptsetup_format(config):
         args.extend(["--hash", config.hash])
     args.extend(["--key-slot", slot])
     args.extend(["--key-file", "-"])
+    args.extend(["--iter-time", "10"])
     args.append(config.image_path())
 
     cryptsetup(args, password)
@@ -184,7 +189,7 @@ def chown(config):
     msg = proc.communicate()[0]
 
     if proc.returncode != 0:
-        raise Exception("Cannot change owner on %s" % path)
+        raise Exception(msg)
 
 
 def cryptsetup_open(config):
@@ -230,6 +235,7 @@ def qemu_img_create(config, size_mb):
 
     opts = [
         "key-secret=sec0",
+        "iter-time=10",
         "cipher-alg=%s-%d" % (config.cipher, config.keylen),
         "cipher-mode=%s" % config.mode,
         "ivgen-alg=%s" % config.ivgen,
@@ -255,7 +261,7 @@ def qemu_io_image_args(config, dev=False):
     if dev:
         return [
             "--image-opts",
-            "driver=file,filename=%s" % config.device_path()]
+            "driver=host_device,filename=%s" % config.device_path()]
     else:
         return [
             "--object",
@@ -268,6 +274,8 @@ def qemu_io_image_args(config, dev=False):
 def qemu_io_write_pattern(config, pattern, offset_mb, size_mb, dev=False):
     """Write a pattern of data to a LUKS image or device"""
 
+    if dev:
+        chown(config)
     args = ["-c", "write -P 0x%x %dM %dM" % (pattern, offset_mb, size_mb)]
     args.extend(qemu_io_image_args(config, dev))
     iotests.log("qemu-io " + " ".join(args), filters=[iotests.filter_test_dir])
@@ -278,6 +286,8 @@ def qemu_io_write_pattern(config, pattern, offset_mb, size_mb, dev=False):
 def qemu_io_read_pattern(config, pattern, offset_mb, size_mb, dev=False):
     """Read a pattern of data to a LUKS image or device"""
 
+    if dev:
+        chown(config)
     args = ["-c", "read -P 0x%x %dM %dM" % (pattern, offset_mb, size_mb)]
     args.extend(qemu_io_image_args(config, dev))
     iotests.log("qemu-io " + " ".join(args), filters=[iotests.filter_test_dir])
@@ -304,13 +314,13 @@ def test_once(config, qemu_img=False):
     image_size = 4 * oneTB
     if qemu_img:
         iotests.log("# Create image")
-        qemu_img_create(config, image_size / oneMB)
+        qemu_img_create(config, image_size // oneMB)
     else:
         iotests.log("# Create image")
-        create_image(config, image_size / oneMB)
+        create_image(config, image_size // oneMB)
 
     lowOffsetMB = 100
-    highOffsetMB = 3 * oneTB / oneMB
+    highOffsetMB = 3 * oneTB // oneMB
 
     try:
         if not qemu_img:
@@ -328,9 +338,6 @@ def test_once(config, qemu_img=False):
         cryptsetup_open(config)
 
         try:
-            iotests.log("# Set dev owner")
-            chown(config)
-
             iotests.log("# Write test pattern 0xa7")
             qemu_io_write_pattern(config, 0xa7, lowOffsetMB, 10, dev=True)
             iotests.log("# Write test pattern 0x13")
@@ -362,9 +369,6 @@ def test_once(config, qemu_img=False):
         cryptsetup_open(config)
 
         try:
-            iotests.log("# Set dev owner")
-            chown(config)
-
             iotests.log("# Read test pattern 0x91")
             qemu_io_read_pattern(config, 0x91, lowOffsetMB, 10, dev=True)
             iotests.log("# Read test pattern 0x5e")
@@ -375,7 +379,7 @@ def test_once(config, qemu_img=False):
     finally:
         iotests.log("# Delete image")
         delete_image(config)
-        print
+        print()
 
 
 # Obviously we only work with the luks image format
@@ -454,8 +458,12 @@ configs = [
 
 
     # LUKS default but diff hash
+    LUKSConfig("aes-256-xts-plain64-sha224",
+               "aes", 256, "xts", "plain64", None, "sha224"),
     LUKSConfig("aes-256-xts-plain64-sha256",
                "aes", 256, "xts", "plain64", None, "sha256"),
+    LUKSConfig("aes-256-xts-plain64-sha384",
+               "aes", 256, "xts", "plain64", None, "sha384"),
     LUKSConfig("aes-256-xts-plain64-sha512",
                "aes", 256, "xts", "plain64", None, "sha512"),
     LUKSConfig("aes-256-xts-plain64-ripemd160",
@@ -501,12 +509,6 @@ blacklist = [
 
     # GCrypt doesn't support Twofish with 192 bit key
     "twofish-192-xts-plain64-sha1",
-
-    # We don't have sha512 hash wired up yet
-    "aes-256-xts-plain64-sha512",
-
-    # We don't have ripemd160 hash wired up yet
-    "aes-256-xts-plain64-ripemd160",
 ]
 
 whitelist = []

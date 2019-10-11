@@ -15,7 +15,7 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "qemu/timer.h"
-#include "hw/xen/xen_backend.h"
+#include "hw/xen/xen-legacy-backend.h"
 #include "xen_pt.h"
 
 #define XEN_PT_MERGE_VALUE(value, data, val_mask) \
@@ -300,7 +300,9 @@ static int xen_pt_irqpin_reg_init(XenPCIPassthroughState *s,
                                   XenPTRegInfo *reg, uint32_t real_offset,
                                   uint32_t *data)
 {
-    *data = xen_pt_pci_read_intx(s);
+    if (s->real_device.irq) {
+        *data = xen_pt_pci_read_intx(s);
+    }
     return 0;
 }
 
@@ -358,7 +360,7 @@ static uint64_t xen_pt_get_bar_size(PCIIORegion *r)
 static XenPTBarFlag xen_pt_bar_reg_parse(XenPCIPassthroughState *s,
                                          int index)
 {
-    PCIDevice *d = &s->dev;
+    PCIDevice *d = PCI_DEVICE(s);
     XenPTRegion *region = NULL;
     PCIIORegion *r;
 
@@ -469,7 +471,7 @@ static int xen_pt_bar_reg_write(XenPCIPassthroughState *s, XenPTReg *cfg_entry,
 {
     XenPTRegInfo *reg = cfg_entry->reg;
     XenPTRegion *base = NULL;
-    PCIDevice *d = &s->dev;
+    PCIDevice *d = PCI_DEVICE(s);
     const PCIIORegion *r;
     uint32_t writable_mask = 0;
     uint32_t bar_emu_mask = 0;
@@ -504,6 +506,8 @@ static int xen_pt_bar_reg_write(XenPCIPassthroughState *s, XenPTReg *cfg_entry,
         bar_ro_mask = XEN_PT_BAR_IO_RO_MASK | (r_size - 1);
         break;
     case XEN_PT_BAR_FLAG_UPPER:
+        assert(index > 0);
+        r_size = d->io_regions[index - 1].size >> 32;
         bar_emu_mask = XEN_PT_BAR_ALLF;
         bar_ro_mask = r_size ? r_size - 1 : 0;
         break;
@@ -541,7 +545,7 @@ static int xen_pt_exp_rom_bar_reg_write(XenPCIPassthroughState *s,
 {
     XenPTRegInfo *reg = cfg_entry->reg;
     XenPTRegion *base = NULL;
-    PCIDevice *d = (PCIDevice *)&s->dev;
+    PCIDevice *d = PCI_DEVICE(s);
     uint32_t writable_mask = 0;
     uint32_t throughable_mask = get_throughable_mask(s, reg, valid_mask);
     pcibus_t r_size = 0;
@@ -1315,6 +1319,22 @@ static int xen_pt_msgdata_reg_write(XenPCIPassthroughState *s,
     return 0;
 }
 
+static int xen_pt_mask_reg_write(XenPCIPassthroughState *s, XenPTReg *cfg_entry,
+                                 uint32_t *val, uint32_t dev_value,
+                                 uint32_t valid_mask)
+{
+    int rc;
+
+    rc = xen_pt_long_reg_write(s, cfg_entry, val, dev_value, valid_mask);
+    if (rc) {
+        return rc;
+    }
+
+    s->msi->mask = *val;
+
+    return 0;
+}
+
 /* MSI Capability Structure reg static information table */
 static XenPTRegInfo xen_pt_emu_reg_msi[] = {
     /* Next Pointer reg */
@@ -1393,7 +1413,7 @@ static XenPTRegInfo xen_pt_emu_reg_msi[] = {
         .emu_mask   = 0xFFFFFFFF,
         .init       = xen_pt_mask_reg_init,
         .u.dw.read  = xen_pt_long_reg_read,
-        .u.dw.write = xen_pt_long_reg_write,
+        .u.dw.write = xen_pt_mask_reg_write,
     },
     /* Mask reg (if PCI_MSI_FLAGS_MASKBIT set, for 64-bit devices) */
     {
@@ -1404,7 +1424,7 @@ static XenPTRegInfo xen_pt_emu_reg_msi[] = {
         .emu_mask   = 0xFFFFFFFF,
         .init       = xen_pt_mask_reg_init,
         .u.dw.read  = xen_pt_long_reg_read,
-        .u.dw.write = xen_pt_long_reg_write,
+        .u.dw.write = xen_pt_mask_reg_write,
     },
     /* Pending reg (if PCI_MSI_FLAGS_MASKBIT set, for 32-bit devices) */
     {
@@ -1535,6 +1555,7 @@ static XenPTRegInfo xen_pt_emu_reg_igd_opregion[] = {
         .offset     = 0x0,
         .size       = 4,
         .init_val   = 0,
+        .emu_mask   = 0xFFFFFFFF,
         .u.dw.read   = xen_pt_intel_opregion_read,
         .u.dw.write  = xen_pt_intel_opregion_write,
     },
@@ -1568,7 +1589,7 @@ static int xen_pt_pcie_size_init(XenPCIPassthroughState *s,
                                  const XenPTRegGroupInfo *grp_reg,
                                  uint32_t base_offset, uint8_t *size)
 {
-    PCIDevice *d = &s->dev;
+    PCIDevice *d = PCI_DEVICE(s);
     uint8_t version = get_capability_version(s, base_offset);
     uint8_t type = get_device_type(s, base_offset);
     uint8_t pcie_size = 0;

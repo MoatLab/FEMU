@@ -34,9 +34,7 @@ void alpha_cpu_do_unaligned_access(CPUState *cs, vaddr addr,
     uint64_t pc;
     uint32_t insn;
 
-    if (retaddr) {
-        cpu_restore_state(cs, retaddr);
-    }
+    cpu_restore_state(cs, retaddr, true);
 
     pc = env->pc;
     insn = cpu_ldl_code(env, pc);
@@ -49,41 +47,19 @@ void alpha_cpu_do_unaligned_access(CPUState *cs, vaddr addr,
     cpu_loop_exit(cs);
 }
 
-void alpha_cpu_unassigned_access(CPUState *cs, hwaddr addr,
-                                 bool is_write, bool is_exec, int unused,
-                                 unsigned size)
+void alpha_cpu_do_transaction_failed(CPUState *cs, hwaddr physaddr,
+                                     vaddr addr, unsigned size,
+                                     MMUAccessType access_type,
+                                     int mmu_idx, MemTxAttrs attrs,
+                                     MemTxResult response, uintptr_t retaddr)
 {
     AlphaCPU *cpu = ALPHA_CPU(cs);
     CPUAlphaState *env = &cpu->env;
 
     env->trap_arg0 = addr;
-    env->trap_arg1 = is_write ? 1 : 0;
+    env->trap_arg1 = access_type == MMU_DATA_STORE ? 1 : 0;
     cs->exception_index = EXCP_MCHK;
     env->error_code = 0;
-
-    /* ??? We should cpu_restore_state to the faulting insn, but this hook
-       does not have access to the retaddr value from the original helper.
-       It's all moot until the QEMU PALcode grows an MCHK handler.  */
-
-    cpu_loop_exit(cs);
-}
-
-/* try to fill the TLB and return an exception if error. If retaddr is
-   NULL, it means that the function was called in C code (i.e. not
-   from generated code or from helper.c) */
-/* XXX: fix it to restore all registers */
-void tlb_fill(CPUState *cs, target_ulong addr, MMUAccessType access_type,
-              int mmu_idx, uintptr_t retaddr)
-{
-    int ret;
-
-    ret = alpha_cpu_handle_mmu_fault(cs, addr, access_type, mmu_idx);
-    if (unlikely(ret != 0)) {
-        if (retaddr) {
-            cpu_restore_state(cs, retaddr);
-        }
-        /* Exception index and error code are already set */
-        cpu_loop_exit(cs);
-    }
+    cpu_loop_exit_restore(cs, retaddr);
 }
 #endif /* CONFIG_USER_ONLY */

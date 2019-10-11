@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # Test case for loading a saved VM state from a qcow2 image
 #
@@ -24,7 +24,6 @@ owner=mreitz@redhat.com
 seq="$(basename $0)"
 echo "QA output created by $seq"
 
-here="$PWD"
 status=1	# failure is the default!
 
 _cleanup()
@@ -40,33 +39,45 @@ trap "_cleanup; exit \$status" 0 1 2 3 15
 # This tests qocw2-specific low-level functionality
 _supported_fmt qcow2
 _supported_proto generic
-_supported_os Linux
 
 IMGOPTS="compat=1.1"
 IMG_SIZE=128K
 
-echo
-echo "=== Saving and reloading a VM state to/from a qcow2 image ==="
-echo
-_make_test_img $IMG_SIZE
-
 case "$QEMU_DEFAULT_MACHINE" in
   s390-ccw-virtio)
       platform_parm="-no-shutdown"
+      hba=virtio-scsi-ccw
       ;;
   *)
       platform_parm=""
+      hba=virtio-scsi-pci
       ;;
 esac
 
-# Give qemu some time to boot before saving the VM state
-bash -c 'sleep 1; echo -e "savevm 0\nquit"' |\
-    $QEMU $platform_parm -nographic -monitor stdio -serial none -hda "$TEST_IMG" |\
-    _filter_qemu
-# Now try to continue from that VM state (this should just work)
-echo quit |\
-    $QEMU $platform_parm -nographic -monitor stdio -serial none -hda "$TEST_IMG" -loadvm 0 |\
-    _filter_qemu
+_qemu()
+{
+    $QEMU $platform_parm -nographic -monitor stdio -serial none \
+          -drive if=none,id=drive0,file="$TEST_IMG",format="$IMGFMT" \
+          -device $hba,id=hba0 \
+          -device scsi-hd,drive=drive0 \
+          "$@" |\
+    _filter_qemu | _filter_hmp
+}
+
+for extra_args in \
+    "" \
+    "-object iothread,id=iothread0 -set device.hba0.iothread=iothread0"; do
+    echo
+    echo "=== Saving and reloading a VM state to/from a qcow2 image ($extra_args) ==="
+    echo
+
+    _make_test_img $IMG_SIZE
+
+    # Give qemu some time to boot before saving the VM state
+    { sleep 1; printf "savevm 0\nquit\n"; } | _qemu $extra_args
+    # Now try to continue from that VM state (this should just work)
+    { sleep 1; printf "loadvm 0\nloadvm 0\nquit\n"; } | _qemu $extra_args -S
+done
 
 # success, all done
 echo "*** done"

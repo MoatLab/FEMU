@@ -13,8 +13,7 @@
 #ifndef QEMU_FAILOVER_H
 #define QEMU_FAILOVER_H
 
-#include "qemu-common.h"
-#include "qapi-types.h"
+#include "qapi/qapi-types-migration.h"
 
 void failover_init_state(void);
 FailoverStatus failover_set_state(FailoverStatus old_state,

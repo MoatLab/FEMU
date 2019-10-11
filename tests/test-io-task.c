@@ -22,6 +22,7 @@
 
 #include "io/task.h"
 #include "qapi/error.h"
+#include "qemu/module.h"
 
 #define TYPE_DUMMY "qemu:dummy"
 
@@ -187,6 +188,7 @@ static void test_task_thread_complete(void)
     qio_task_run_in_thread(task,
                            test_task_thread_worker,
                            &data,
+                           NULL,
                            NULL);
 
     g_main_loop_run(data.loop);
@@ -228,6 +230,7 @@ static void test_task_thread_failure(void)
     qio_task_run_in_thread(task,
                            test_task_thread_worker,
                            &data,
+                           NULL,
                            NULL);
 
     g_main_loop_run(data.loop);

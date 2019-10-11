@@ -14,7 +14,6 @@
  */
 
 #include "qemu/osdep.h"
-#include "qemu-common.h"
 #include "qemu/uuid.h"
 #include "qemu/bswap.h"
 
@@ -41,7 +40,12 @@ void qemu_uuid_generate(QemuUUID *uuid)
 int qemu_uuid_is_null(const QemuUUID *uu)
 {
     static QemuUUID null_uuid;
-    return memcmp(uu, &null_uuid, sizeof(QemuUUID)) == 0;
+    return qemu_uuid_is_equal(uu, &null_uuid);
+}
+
+int qemu_uuid_is_equal(const QemuUUID *lhv, const QemuUUID *rhv)
+{
+    return memcmp(lhv, rhv, sizeof(QemuUUID)) == 0;
 }
 
 void qemu_uuid_unparse(const QemuUUID *uuid, char *out)
@@ -105,10 +109,10 @@ int qemu_uuid_parse(const char *str, QemuUUID *uuid)
 
 /* Swap from UUID format endian (BE) to the opposite or vice versa.
  */
-void qemu_uuid_bswap(QemuUUID *uuid)
+QemuUUID qemu_uuid_bswap(QemuUUID uuid)
 {
-    assert(QEMU_PTR_IS_ALIGNED(uuid, sizeof(uint32_t)));
-    bswap32s(&uuid->fields.time_low);
-    bswap16s(&uuid->fields.time_mid);
-    bswap16s(&uuid->fields.time_high_and_version);
+    bswap32s(&uuid.fields.time_low);
+    bswap16s(&uuid.fields.time_mid);
+    bswap16s(&uuid.fields.time_high_and_version);
+    return uuid;
 }

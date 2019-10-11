@@ -13,6 +13,7 @@
 #include "hw/sysbus.h"
 #include "hw/arm/pxa.h"
 #include "qemu/log.h"
+#include "qemu/module.h"
 
 #define PXA2XX_GPIO_BANKS	4
 
@@ -107,7 +108,7 @@ static void pxa2xx_gpio_set(void *opaque, int line, int level)
     uint32_t mask;
 
     if (line >= s->lines) {
-        printf("%s: No GPIO pin %i\n", __FUNCTION__, line);
+        printf("%s: No GPIO pin %i\n", __func__, line);
         return;
     }
 
@@ -195,7 +196,7 @@ static uint64_t pxa2xx_gpio_read(void *opaque, hwaddr offset,
         return s->status[bank];
 
     default:
-        hw_error("%s: Bad offset " REG_FMT "\n", __FUNCTION__, offset);
+        hw_error("%s: Bad offset " REG_FMT "\n", __func__, offset);
     }
 
     return 0;
@@ -248,7 +249,7 @@ static void pxa2xx_gpio_write(void *opaque, hwaddr offset,
         break;
 
     default:
-        hw_error("%s: Bad offset " REG_FMT "\n", __FUNCTION__, offset);
+        hw_error("%s: Bad offset " REG_FMT "\n", __func__, offset);
     }
 }
 

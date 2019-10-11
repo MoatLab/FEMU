@@ -25,7 +25,6 @@
 #ifndef BLOCK_QAPI_H
 #define BLOCK_QAPI_H
 
-#include "qapi-types.h"
 #include "block/block.h"
 #include "block/snapshot.h"
 
@@ -38,10 +37,7 @@ void bdrv_query_image_info(BlockDriverState *bs,
                            ImageInfo **p_info,
                            Error **errp);
 
-void bdrv_snapshot_dump(fprintf_function func_fprintf, void *f,
-                        QEMUSnapshotInfo *sn);
-void bdrv_image_info_specific_dump(fprintf_function func_fprintf, void *f,
-                                   ImageInfoSpecific *info_spec);
-void bdrv_image_info_dump(fprintf_function func_fprintf, void *f,
-                          ImageInfo *info);
+void bdrv_snapshot_dump(QEMUSnapshotInfo *sn);
+void bdrv_image_info_specific_dump(ImageInfoSpecific *info_spec);
+void bdrv_image_info_dump(ImageInfo *info);
 #endif

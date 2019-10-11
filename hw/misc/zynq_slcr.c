@@ -20,6 +20,7 @@
 #include "hw/sysbus.h"
 #include "sysemu/sysemu.h"
 #include "qemu/log.h"
+#include "qemu/module.h"
 
 #ifndef ZYNQ_SLCR_ERR_DEBUG
 #define ZYNQ_SLCR_ERR_DEBUG 0
@@ -30,7 +31,7 @@
             fprintf(stderr,  ": %s: ", __func__); \
             fprintf(stderr, ## __VA_ARGS__); \
         } \
-    } while (0);
+    } while (0)
 
 #define XILINX_LOCK_KEY 0x767b
 #define XILINX_UNLOCK_KEY 0xdf0d
@@ -405,7 +406,7 @@ static void zynq_slcr_write(void *opaque, hwaddr offset,
     switch (offset) {
     case PSS_RST_CTRL:
         if (val & R_PSS_RST_CTRL_SOFT_RST) {
-            qemu_system_reset_request();
+            qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
         }
         break;
     }

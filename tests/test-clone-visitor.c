@@ -8,13 +8,10 @@
  */
 
 #include "qemu/osdep.h"
-#include <glib.h>
 
 #include "qemu-common.h"
 #include "qapi/clone-visitor.h"
-#include "test-qapi-types.h"
 #include "test-qapi-visit.h"
-#include "qapi/qmp/types.h"
 
 static void test_clone_struct(void)
 {
@@ -42,32 +39,31 @@ static void test_clone_struct(void)
 
 static void test_clone_alternate(void)
 {
-    AltStrBool *b_src, *s_src, *b_dst, *s_dst;
+    AltEnumBool *b_src, *s_src, *b_dst, *s_dst;
 
-    b_src = g_new0(AltStrBool, 1);
+    b_src = g_new0(AltEnumBool, 1);
     b_src->type = QTYPE_QBOOL;
     b_src->u.b = true;
-    s_src = g_new0(AltStrBool, 1);
+    s_src = g_new0(AltEnumBool, 1);
     s_src->type = QTYPE_QSTRING;
-    s_src->u.s = g_strdup("World");
+    s_src->u.e = ENUM_ONE_VALUE1;
 
-    b_dst = QAPI_CLONE(AltStrBool, b_src);
+    b_dst = QAPI_CLONE(AltEnumBool, b_src);
     g_assert(b_dst);
     g_assert_cmpint(b_dst->type, ==, b_src->type);
     g_assert_cmpint(b_dst->u.b, ==, b_src->u.b);
-    s_dst = QAPI_CLONE(AltStrBool, s_src);
+    s_dst = QAPI_CLONE(AltEnumBool, s_src);
     g_assert(s_dst);
     g_assert_cmpint(s_dst->type, ==, s_src->type);
-    g_assert_cmpstr(s_dst->u.s, ==, s_src->u.s);
-    g_assert(s_dst->u.s != s_src->u.s);
+    g_assert_cmpint(s_dst->u.e, ==, s_src->u.e);
 
-    qapi_free_AltStrBool(b_src);
-    qapi_free_AltStrBool(s_src);
-    qapi_free_AltStrBool(b_dst);
-    qapi_free_AltStrBool(s_dst);
+    qapi_free_AltEnumBool(b_src);
+    qapi_free_AltEnumBool(s_src);
+    qapi_free_AltEnumBool(b_dst);
+    qapi_free_AltEnumBool(s_dst);
 }
 
-static void test_clone_native_list(void)
+static void test_clone_list_union(void)
 {
     uint8List *src, *dst;
     uint8List *tmp = NULL;
@@ -106,18 +102,18 @@ static void test_clone_empty(void)
 
 static void test_clone_complex1(void)
 {
-    UserDefNativeListUnion *src, *dst;
+    UserDefListUnion *src, *dst;
 
-    src = g_new0(UserDefNativeListUnion, 1);
-    src->type = USER_DEF_NATIVE_LIST_UNION_KIND_STRING;
+    src = g_new0(UserDefListUnion, 1);
+    src->type = USER_DEF_LIST_UNION_KIND_STRING;
 
-    dst = QAPI_CLONE(UserDefNativeListUnion, src);
+    dst = QAPI_CLONE(UserDefListUnion, src);
     g_assert(dst);
     g_assert_cmpint(dst->type, ==, src->type);
     g_assert(!dst->u.string.data);
 
-    qapi_free_UserDefNativeListUnion(src);
-    qapi_free_UserDefNativeListUnion(dst);
+    qapi_free_UserDefListUnion(src);
+    qapi_free_UserDefListUnion(dst);
 }
 
 static void test_clone_complex2(void)
@@ -196,7 +192,7 @@ int main(int argc, char **argv)
 
     g_test_add_func("/visitor/clone/struct", test_clone_struct);
     g_test_add_func("/visitor/clone/alternate", test_clone_alternate);
-    g_test_add_func("/visitor/clone/native_list", test_clone_native_list);
+    g_test_add_func("/visitor/clone/list_union", test_clone_list_union);
     g_test_add_func("/visitor/clone/empty", test_clone_empty);
     g_test_add_func("/visitor/clone/complex1", test_clone_complex1);
     g_test_add_func("/visitor/clone/complex2", test_clone_complex2);

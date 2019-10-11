@@ -2,7 +2,6 @@
 #define ACPI_DEV_INTERFACE_H
 
 #include "qom/object.h"
-#include "qapi-types.h"
 #include "hw/boards.h"
 
 /* These values are part of guest ABI, and can not be changed */
@@ -26,11 +25,7 @@ typedef enum {
      INTERFACE_CHECK(AcpiDeviceIf, (obj), \
                      TYPE_ACPI_DEVICE_IF)
 
-
-typedef struct AcpiDeviceIf {
-    /* <private> */
-    Object Parent;
-} AcpiDeviceIf;
+typedef struct AcpiDeviceIf AcpiDeviceIf;
 
 void acpi_send_event(DeviceState *dev, AcpiEventStatusBits event);
 

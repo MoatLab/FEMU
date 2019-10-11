@@ -32,7 +32,9 @@
 #include "qemu/osdep.h"
 #include "hw/pci/pci_bridge.h"
 #include "hw/pci/pci_bus.h"
+#include "qemu/module.h"
 #include "qemu/range.h"
+#include "qapi/error.h"
 
 /* PCI bridge subsystem vendor ID helper functions */
 #define PCI_SSVID_SIZEOF        8
@@ -40,10 +42,13 @@
 #define PCI_SSVID_SSID          6
 
 int pci_bridge_ssvid_init(PCIDevice *dev, uint8_t offset,
-                          uint16_t svid, uint16_t ssid)
+                          uint16_t svid, uint16_t ssid,
+                          Error **errp)
 {
     int pos;
-    pos = pci_add_capability(dev, PCI_CAP_ID_SSVID, offset, PCI_SSVID_SIZEOF);
+
+    pos = pci_add_capability(dev, PCI_CAP_ID_SSVID, offset,
+                             PCI_SSVID_SIZEOF, errp);
     if (pos < 0) {
         return pos;
     }
@@ -179,7 +184,7 @@ static void pci_bridge_init_vga_aliases(PCIBridge *br, PCIBus *parent,
 static PCIBridgeWindows *pci_bridge_region_init(PCIBridge *br)
 {
     PCIDevice *pd = PCI_DEVICE(br);
-    PCIBus *parent = pd->bus;
+    PCIBus *parent = pci_get_bus(pd);
     PCIBridgeWindows *w = g_new(PCIBridgeWindows, 1);
     uint16_t cmd = pci_get_word(pd->config + PCI_COMMAND);
 
@@ -210,7 +215,7 @@ static PCIBridgeWindows *pci_bridge_region_init(PCIBridge *br)
 static void pci_bridge_region_del(PCIBridge *br, PCIBridgeWindows *w)
 {
     PCIDevice *pd = PCI_DEVICE(br);
-    PCIBus *parent = pd->bus;
+    PCIBus *parent = pci_get_bus(pd);
 
     memory_region_del_subregion(parent->address_space_io, &w->alias_io);
     memory_region_del_subregion(parent->address_space_mem, &w->alias_mem);
@@ -237,9 +242,9 @@ void pci_bridge_update_mappings(PCIBridge *br)
      * while another accesses an unaffected region. */
     memory_region_transaction_begin();
     pci_bridge_region_del(br, br->windows);
+    pci_bridge_region_cleanup(br, w);
     br->windows = pci_bridge_region_init(br);
     memory_region_transaction_commit();
-    pci_bridge_region_cleanup(br, w);
 }
 
 /* default write_config function for PCI-to-PCI bridge */
@@ -269,7 +274,7 @@ void pci_bridge_write_config(PCIDevice *d,
     newctl = pci_get_word(d->config + PCI_BRIDGE_CONTROL);
     if (~oldctl & newctl & PCI_BRIDGE_CTL_BUS_RESET) {
         /* Trigger hot reset on 0->1 transition. */
-        qbus_reset_all(&s->sec_bus.qbus);
+        qbus_reset_all(BUS(&s->sec_bus));
     }
 }
 
@@ -335,7 +340,7 @@ void pci_bridge_reset(DeviceState *qdev)
 /* default qdev initialization function for PCI-to-PCI bridge */
 void pci_bridge_initfn(PCIDevice *dev, const char *typename)
 {
-    PCIBus *parent = dev->bus;
+    PCIBus *parent = pci_get_bus(dev);
     PCIBridge *br = PCI_BRIDGE(dev);
     PCIBus *sec_bus = &br->sec_bus;
 
@@ -365,7 +370,7 @@ void pci_bridge_initfn(PCIDevice *dev, const char *typename)
      * let users address the bus using the device name.
      */
     if (!br->bus_name && dev->qdev.id && *dev->qdev.id) {
-	    br->bus_name = dev->qdev.id;
+            br->bus_name = dev->qdev.id;
     }
 
     qbus_create_inplace(sec_bus, sizeof(br->sec_bus), typename, DEVICE(dev),
@@ -375,7 +380,8 @@ void pci_bridge_initfn(PCIDevice *dev, const char *typename)
     sec_bus->address_space_mem = &br->address_space_mem;
     memory_region_init(&br->address_space_mem, OBJECT(br), "pci_bridge_pci", UINT64_MAX);
     sec_bus->address_space_io = &br->address_space_io;
-    memory_region_init(&br->address_space_io, OBJECT(br), "pci_bridge_io", 65536);
+    memory_region_init(&br->address_space_io, OBJECT(br), "pci_bridge_io",
+                       UINT32_MAX);
     br->windows = pci_bridge_region_init(br);
     QLIST_INIT(&sec_bus->child);
     QLIST_INSERT_HEAD(&parent->child, sec_bus, sibling);
@@ -394,7 +400,7 @@ void pci_bridge_exitfn(PCIDevice *pci_dev)
 
 /*
  * before qdev initialization(qdev_init()), this function sets bus_name and
- * map_irq callback which are necessry for pci_bridge_initfn() to
+ * map_irq callback which are necessary for pci_bridge_initfn() to
  * initialize bus.
  */
 void pci_bridge_map_irq(PCIBridge *br, const char* bus_name,
@@ -402,6 +408,62 @@ void pci_bridge_map_irq(PCIBridge *br, const char* bus_name,
 {
     br->map_irq = map_irq;
     br->bus_name = bus_name;
+}
+
+
+int pci_bridge_qemu_reserve_cap_init(PCIDevice *dev, int cap_offset,
+                                     PCIResReserve res_reserve, Error **errp)
+{
+    if (res_reserve.mem_pref_32 != (uint64_t)-1 &&
+        res_reserve.mem_pref_64 != (uint64_t)-1) {
+        error_setg(errp,
+                   "PCI resource reserve cap: PREF32 and PREF64 conflict");
+        return -EINVAL;
+    }
+
+    if (res_reserve.mem_non_pref != (uint64_t)-1 &&
+        res_reserve.mem_non_pref >= (1ULL << 32)) {
+        error_setg(errp,
+                   "PCI resource reserve cap: mem-reserve must be less than 4G");
+        return -EINVAL;
+    }
+
+    if (res_reserve.mem_pref_32 != (uint64_t)-1 &&
+        res_reserve.mem_pref_32 >= (1ULL << 32)) {
+        error_setg(errp,
+                   "PCI resource reserve cap: pref32-reserve  must be less than 4G");
+        return -EINVAL;
+    }
+
+    if (res_reserve.bus == (uint32_t)-1 &&
+        res_reserve.io == (uint64_t)-1 &&
+        res_reserve.mem_non_pref == (uint64_t)-1 &&
+        res_reserve.mem_pref_32 == (uint64_t)-1 &&
+        res_reserve.mem_pref_64 == (uint64_t)-1) {
+        return 0;
+    }
+
+    size_t cap_len = sizeof(PCIBridgeQemuCap);
+    PCIBridgeQemuCap cap = {
+            .len = cap_len,
+            .type = REDHAT_PCI_CAP_RESOURCE_RESERVE,
+            .bus_res = res_reserve.bus,
+            .io = res_reserve.io,
+            .mem = res_reserve.mem_non_pref,
+            .mem_pref_32 = res_reserve.mem_pref_32,
+            .mem_pref_64 = res_reserve.mem_pref_64
+    };
+
+    int offset = pci_add_capability(dev, PCI_CAP_ID_VNDR,
+                                    cap_offset, cap_len, errp);
+    if (offset < 0) {
+        return offset;
+    }
+
+    memcpy(dev->config + offset + PCI_CAP_FLAGS,
+           (char *)&cap + PCI_CAP_FLAGS,
+           cap_len - PCI_CAP_FLAGS);
+    return 0;
 }
 
 static const TypeInfo pci_bridge_type_info = {

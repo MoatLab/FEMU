@@ -24,8 +24,8 @@
 #include "audio/audio.h"
 #include "qemu/timer.h"
 #include "ui/console.h"
-#include "hw/arm/omap.h"	/* For I2SCodec and uWireSlave */
-#include "hw/devices.h"
+#include "hw/arm/omap.h"            /* For I2SCodec */
+#include "hw/input/tsc2xxx.h"
 
 #define TSC_DATA_REGISTERS_PAGE		0x0
 #define TSC_CONTROL_REGISTERS_PAGE	0x1
@@ -287,7 +287,7 @@ static void tsc2102_audio_rate_update(TSC210xState *s)
                         rate->fsref == ((s->audio_ctrl3 >> 13) & 1))/* REFFS */
             break;
     if (!rate->rate) {
-        printf("%s: unknown sampling rate configured\n", __FUNCTION__);
+        printf("%s: unknown sampling rate configured\n", __func__);
         return;
     }
 
@@ -318,7 +318,7 @@ static void tsc2102_audio_output_update(TSC210xState *s)
     fmt.endianness = 0;
     fmt.nchannels = 2;
     fmt.freq = s->codec.tx_rate;
-    fmt.fmt = AUD_FMT_S16;
+    fmt.fmt = AUDIO_FORMAT_S16;
 
     s->dac_voice[0] = AUD_open_out(&s->card, s->dac_voice[0],
                     "tsc2102.sink", s, (void *) tsc210x_audio_out_cb, &fmt);
@@ -552,10 +552,8 @@ static void tsc2102_data_register_write(
         return;
 
     default:
-#ifdef TSC_VERBOSE
-        fprintf(stderr, "tsc2102_data_register_write: "
-                        "no such register: 0x%02x\n", reg);
-#endif
+        qemu_log_mask(LOG_GUEST_ERROR, "tsc2102_data_register_write: "
+                                       "no such register: 0x%02x\n", reg);
     }
 }
 
@@ -577,7 +575,7 @@ static void tsc2102_control_register_write(
     case 0x01:	/* Status / Keypad Control */
         if ((s->model & 0xff00) == 0x2100)
             s->pin_func = value >> 14;
-	else {
+        else {
             s->kb.scan = (value >> 14) & 1;
             s->kb.debounce = (value >> 11) & 7;
             if (s->kb.intr && s->kb.scan) {
@@ -636,10 +634,8 @@ static void tsc2102_control_register_write(
 
     default:
     bad_reg:
-#ifdef TSC_VERBOSE
-        fprintf(stderr, "tsc2102_control_register_write: "
-                        "no such register: 0x%02x\n", reg);
-#endif
+        qemu_log_mask(LOG_GUEST_ERROR, "tsc2102_control_register_write: "
+                                       "no such register: 0x%02x\n", reg);
     }
 }
 
@@ -764,10 +760,8 @@ static void tsc2102_audio_register_write(
         return;
 
     default:
-#ifdef TSC_VERBOSE
-        fprintf(stderr, "tsc2102_audio_register_write: "
-                        "no such register: 0x%02x\n", reg);
-#endif
+        qemu_log_mask(LOG_GUEST_ERROR, "tsc2102_audio_register_write: "
+                                       "no such register: 0x%02x\n", reg);
     }
 }
 
@@ -913,7 +907,7 @@ uint32_t tsc210x_txrx(void *opaque, uint32_t value, int len)
     uint32_t ret = 0;
 
     if (len != 16)
-        hw_error("%s: FIXME: bad SPI word width %i\n", __FUNCTION__, len);
+        hw_error("%s: FIXME: bad SPI word width %i\n", __func__, len);
 
     /* TODO: sequential reads etc - how do we make sure the host doesn't
      * unintentionally read out a conversion result from a register while
@@ -976,10 +970,12 @@ static void tsc210x_i2s_set_rate(TSC210xState *s, int in, int out)
     s->i2s_rx_rate = in;
 }
 
-static void tsc210x_pre_save(void *opaque)
+static int tsc210x_pre_save(void *opaque)
 {
     TSC210xState *s = (TSC210xState *) opaque;
     s->now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+
+    return 0;
 }
 
 static int tsc210x_post_load(void *opaque, int version_id)

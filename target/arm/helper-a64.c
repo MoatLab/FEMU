@@ -30,7 +30,9 @@
 #include "exec/exec-all.h"
 #include "exec/cpu_ldst.h"
 #include "qemu/int128.h"
+#include "qemu/atomic128.h"
 #include "tcg.h"
+#include "fpu/softfloat.h"
 #include <zlib.h> /* For crc32 */
 
 /* C2.4.7 Multiply and divide */
@@ -59,6 +61,36 @@ uint64_t HELPER(rbit64)(uint64_t x)
     return revbit64(x);
 }
 
+void HELPER(msr_i_spsel)(CPUARMState *env, uint32_t imm)
+{
+    update_spsel(env, imm);
+}
+
+static void daif_check(CPUARMState *env, uint32_t op,
+                       uint32_t imm, uintptr_t ra)
+{
+    /* DAIF update to PSTATE. This is OK from EL0 only if UMA is set.  */
+    if (arm_current_el(env) == 0 && !(env->cp15.sctlr_el[1] & SCTLR_UMA)) {
+        raise_exception_ra(env, EXCP_UDEF,
+                           syn_aa64_sysregtrap(0, extract32(op, 0, 3),
+                                               extract32(op, 3, 3), 4,
+                                               imm, 0x1f, 0),
+                           exception_target_el(env), ra);
+    }
+}
+
+void HELPER(msr_i_daifset)(CPUARMState *env, uint32_t imm)
+{
+    daif_check(env, 0x1e, imm, GETPC());
+    env->daif |= (imm << 6) & PSTATE_DAIF;
+}
+
+void HELPER(msr_i_daifclear)(CPUARMState *env, uint32_t imm)
+{
+    daif_check(env, 0x1f, imm, GETPC());
+    env->daif &= ~((imm << 6) & PSTATE_DAIF);
+}
+
 /* Convert a softfloat float_relation_ (as returned by
  * the float*_compare functions) to the correct ARM
  * NZCV flag state.
@@ -82,6 +114,16 @@ static inline uint32_t float_rel_to_flags(int res)
         break;
     }
     return flags;
+}
+
+uint64_t HELPER(vfp_cmph_a64)(uint32_t x, uint32_t y, void *fp_status)
+{
+    return float_rel_to_flags(float16_compare_quiet(x, y, fp_status));
+}
+
+uint64_t HELPER(vfp_cmpeh_a64)(uint32_t x, uint32_t y, void *fp_status)
+{
+    return float_rel_to_flags(float16_compare(x, y, fp_status));
 }
 
 uint64_t HELPER(vfp_cmps_a64)(float32 x, float32 y, void *fp_status)
@@ -153,13 +195,14 @@ uint64_t HELPER(simd_tbl)(CPUARMState *env, uint64_t result, uint64_t indices,
         if (index < 16 * numregs) {
             /* Convert index (a byte offset into the virtual table
              * which is a series of 128-bit vectors concatenated)
-             * into the correct vfp.regs[] element plus a bit offset
+             * into the correct register element plus a bit offset
              * into that element, bearing in mind that the table
              * can wrap around from V31 to V0.
              */
             int elt = (rn * 2 + (index >> 3)) % 64;
             int bitidx = (index & 7) * 8;
-            uint64_t val = extract64(env->vfp.regs[elt], bitidx, 8);
+            uint64_t *q = aa64_vfp_qreg(env, elt >> 1);
+            uint64_t val = extract64(q[elt & 1], bitidx, 8);
 
             result = deposit64(result, shift, 8, val);
         }
@@ -190,6 +233,10 @@ uint64_t HELPER(neon_cgt_f64)(float64 a, float64 b, void *fpstp)
  * versions, these do a fully fused multiply-add or
  * multiply-add-and-halve.
  */
+#define float16_two make_float16(0x4000)
+#define float16_three make_float16(0x4200)
+#define float16_one_point_five make_float16(0x3e00)
+
 #define float32_two make_float32(0x40000000)
 #define float32_three make_float32(0x40400000)
 #define float32_one_point_five make_float32(0x3fc00000)
@@ -197,6 +244,21 @@ uint64_t HELPER(neon_cgt_f64)(float64 a, float64 b, void *fpstp)
 #define float64_two make_float64(0x4000000000000000ULL)
 #define float64_three make_float64(0x4008000000000000ULL)
 #define float64_one_point_five make_float64(0x3FF8000000000000ULL)
+
+uint32_t HELPER(recpsf_f16)(uint32_t a, uint32_t b, void *fpstp)
+{
+    float_status *fpst = fpstp;
+
+    a = float16_squash_input_denormal(a, fpst);
+    b = float16_squash_input_denormal(b, fpst);
+
+    a = float16_chs(a);
+    if ((float16_is_infinity(a) && float16_is_zero(b)) ||
+        (float16_is_infinity(b) && float16_is_zero(a))) {
+        return float16_two;
+    }
+    return float16_muladd(a, b, float16_two, 0, fpst);
+}
 
 float32 HELPER(recpsf_f32)(float32 a, float32 b, void *fpstp)
 {
@@ -226,6 +288,21 @@ float64 HELPER(recpsf_f64)(float64 a, float64 b, void *fpstp)
         return float64_two;
     }
     return float64_muladd(a, b, float64_two, 0, fpst);
+}
+
+uint32_t HELPER(rsqrtsf_f16)(uint32_t a, uint32_t b, void *fpstp)
+{
+    float_status *fpst = fpstp;
+
+    a = float16_squash_input_denormal(a, fpst);
+    b = float16_squash_input_denormal(b, fpst);
+
+    a = float16_chs(a);
+    if ((float16_is_infinity(a) && float16_is_zero(b)) ||
+        (float16_is_infinity(b) && float16_is_zero(a))) {
+        return float16_one_point_five;
+    }
+    return float16_muladd(a, b, float16_three, float_muladd_halve_result, fpst);
 }
 
 float32 HELPER(rsqrtsf_f32)(float32 a, float32 b, void *fpstp)
@@ -320,6 +397,37 @@ uint64_t HELPER(neon_addlp_u16)(uint64_t a)
 }
 
 /* Floating-point reciprocal exponent - see FPRecpX in ARM ARM */
+uint32_t HELPER(frecpx_f16)(uint32_t a, void *fpstp)
+{
+    float_status *fpst = fpstp;
+    uint16_t val16, sbit;
+    int16_t exp;
+
+    if (float16_is_any_nan(a)) {
+        float16 nan = a;
+        if (float16_is_signaling_nan(a, fpst)) {
+            float_raise(float_flag_invalid, fpst);
+            nan = float16_silence_nan(a, fpst);
+        }
+        if (fpst->default_nan_mode) {
+            nan = float16_default_nan(fpst);
+        }
+        return nan;
+    }
+
+    a = float16_squash_input_denormal(a, fpst);
+
+    val16 = float16_val(a);
+    sbit = 0x8000 & val16;
+    exp = extract32(val16, 10, 5);
+
+    if (exp == 0) {
+        return make_float16(deposit32(sbit, 10, 5, 0x1e));
+    } else {
+        return make_float16(deposit32(sbit, 10, 5, ~exp));
+    }
+}
+
 float32 HELPER(frecpx_f32)(float32 a, void *fpstp)
 {
     float_status *fpst = fpstp;
@@ -330,13 +438,15 @@ float32 HELPER(frecpx_f32)(float32 a, void *fpstp)
         float32 nan = a;
         if (float32_is_signaling_nan(a, fpst)) {
             float_raise(float_flag_invalid, fpst);
-            nan = float32_maybe_silence_nan(a, fpst);
+            nan = float32_silence_nan(a, fpst);
         }
         if (fpst->default_nan_mode) {
             nan = float32_default_nan(fpst);
         }
         return nan;
     }
+
+    a = float32_squash_input_denormal(a, fpst);
 
     val32 = float32_val(a);
     sbit = 0x80000000ULL & val32;
@@ -359,13 +469,15 @@ float64 HELPER(frecpx_f64)(float64 a, void *fpstp)
         float64 nan = a;
         if (float64_is_signaling_nan(a, fpst)) {
             float_raise(float_flag_invalid, fpst);
-            nan = float64_maybe_silence_nan(a, fpst);
+            nan = float64_silence_nan(a, fpst);
         }
         if (fpst->default_nan_mode) {
             nan = float64_default_nan(fpst);
         }
         return nan;
     }
+
+    a = float64_squash_input_denormal(a, fpst);
 
     val64 = float64_val(a);
     sbit = 0x8000000000000000ULL & val64;
@@ -391,7 +503,6 @@ float32 HELPER(fcvtx_f64_to_f32)(float64 a, CPUARMState *env)
     set_float_rounding_mode(float_round_to_zero, &tstat);
     set_float_exception_flags(0, &tstat);
     r = float64_to_float32(a, &tstat);
-    r = float32_maybe_silence_nan(r, &tstat);
     exflags = get_float_exception_flags(&tstat);
     if (exflags & float_flag_inexact) {
         r = make_float32(float32_val(r) | 1);
@@ -429,111 +540,547 @@ uint64_t HELPER(crc32c_64)(uint64_t acc, uint64_t val, uint32_t bytes)
     return crc32c(acc, buf, bytes) ^ 0xffffffff;
 }
 
-/* Returns 0 on success; 1 otherwise.  */
 uint64_t HELPER(paired_cmpxchg64_le)(CPUARMState *env, uint64_t addr,
                                      uint64_t new_lo, uint64_t new_hi)
 {
+    Int128 cmpv = int128_make128(env->exclusive_val, env->exclusive_high);
+    Int128 newv = int128_make128(new_lo, new_hi);
+    Int128 oldv;
     uintptr_t ra = GETPC();
-    Int128 oldv, cmpv, newv;
+    uint64_t o0, o1;
     bool success;
+
+#ifdef CONFIG_USER_ONLY
+    /* ??? Enforce alignment.  */
+    uint64_t *haddr = g2h(addr);
+
+    set_helper_retaddr(ra);
+    o0 = ldq_le_p(haddr + 0);
+    o1 = ldq_le_p(haddr + 1);
+    oldv = int128_make128(o0, o1);
+
+    success = int128_eq(oldv, cmpv);
+    if (success) {
+        stq_le_p(haddr + 0, int128_getlo(newv));
+        stq_le_p(haddr + 1, int128_gethi(newv));
+    }
+    clear_helper_retaddr();
+#else
+    int mem_idx = cpu_mmu_index(env, false);
+    TCGMemOpIdx oi0 = make_memop_idx(MO_LEQ | MO_ALIGN_16, mem_idx);
+    TCGMemOpIdx oi1 = make_memop_idx(MO_LEQ, mem_idx);
+
+    o0 = helper_le_ldq_mmu(env, addr + 0, oi0, ra);
+    o1 = helper_le_ldq_mmu(env, addr + 8, oi1, ra);
+    oldv = int128_make128(o0, o1);
+
+    success = int128_eq(oldv, cmpv);
+    if (success) {
+        helper_le_stq_mmu(env, addr + 0, int128_getlo(newv), oi1, ra);
+        helper_le_stq_mmu(env, addr + 8, int128_gethi(newv), oi1, ra);
+    }
+#endif
+
+    return !success;
+}
+
+uint64_t HELPER(paired_cmpxchg64_le_parallel)(CPUARMState *env, uint64_t addr,
+                                              uint64_t new_lo, uint64_t new_hi)
+{
+    Int128 oldv, cmpv, newv;
+    uintptr_t ra = GETPC();
+    bool success;
+    int mem_idx;
+    TCGMemOpIdx oi;
+
+    assert(HAVE_CMPXCHG128);
+
+    mem_idx = cpu_mmu_index(env, false);
+    oi = make_memop_idx(MO_LEQ | MO_ALIGN_16, mem_idx);
 
     cmpv = int128_make128(env->exclusive_val, env->exclusive_high);
     newv = int128_make128(new_lo, new_hi);
+    oldv = helper_atomic_cmpxchgo_le_mmu(env, addr, cmpv, newv, oi, ra);
 
-    if (parallel_cpus) {
-#ifndef CONFIG_ATOMIC128
-        cpu_loop_exit_atomic(ENV_GET_CPU(env), ra);
-#else
-        int mem_idx = cpu_mmu_index(env, false);
-        TCGMemOpIdx oi = make_memop_idx(MO_LEQ | MO_ALIGN_16, mem_idx);
-        oldv = helper_atomic_cmpxchgo_le_mmu(env, addr, cmpv, newv, oi, ra);
-        success = int128_eq(oldv, cmpv);
-#endif
-    } else {
-        uint64_t o0, o1;
-
-#ifdef CONFIG_USER_ONLY
-        /* ??? Enforce alignment.  */
-        uint64_t *haddr = g2h(addr);
-        o0 = ldq_le_p(haddr + 0);
-        o1 = ldq_le_p(haddr + 1);
-        oldv = int128_make128(o0, o1);
-
-        success = int128_eq(oldv, cmpv);
-        if (success) {
-            stq_le_p(haddr + 0, int128_getlo(newv));
-            stq_le_p(haddr + 1, int128_gethi(newv));
-        }
-#else
-        int mem_idx = cpu_mmu_index(env, false);
-        TCGMemOpIdx oi0 = make_memop_idx(MO_LEQ | MO_ALIGN_16, mem_idx);
-        TCGMemOpIdx oi1 = make_memop_idx(MO_LEQ, mem_idx);
-
-        o0 = helper_le_ldq_mmu(env, addr + 0, oi0, ra);
-        o1 = helper_le_ldq_mmu(env, addr + 8, oi1, ra);
-        oldv = int128_make128(o0, o1);
-
-        success = int128_eq(oldv, cmpv);
-        if (success) {
-            helper_le_stq_mmu(env, addr + 0, int128_getlo(newv), oi1, ra);
-            helper_le_stq_mmu(env, addr + 8, int128_gethi(newv), oi1, ra);
-        }
-#endif
-    }
-
+    success = int128_eq(oldv, cmpv);
     return !success;
 }
 
 uint64_t HELPER(paired_cmpxchg64_be)(CPUARMState *env, uint64_t addr,
                                      uint64_t new_lo, uint64_t new_hi)
 {
+    /*
+     * High and low need to be switched here because this is not actually a
+     * 128bit store but two doublewords stored consecutively
+     */
+    Int128 cmpv = int128_make128(env->exclusive_high, env->exclusive_val);
+    Int128 newv = int128_make128(new_hi, new_lo);
+    Int128 oldv;
     uintptr_t ra = GETPC();
-    Int128 oldv, cmpv, newv;
+    uint64_t o0, o1;
     bool success;
 
-    cmpv = int128_make128(env->exclusive_val, env->exclusive_high);
-    newv = int128_make128(new_lo, new_hi);
-
-    if (parallel_cpus) {
-#ifndef CONFIG_ATOMIC128
-        cpu_loop_exit_atomic(ENV_GET_CPU(env), ra);
-#else
-        int mem_idx = cpu_mmu_index(env, false);
-        TCGMemOpIdx oi = make_memop_idx(MO_BEQ | MO_ALIGN_16, mem_idx);
-        oldv = helper_atomic_cmpxchgo_be_mmu(env, addr, cmpv, newv, oi, ra);
-        success = int128_eq(oldv, cmpv);
-#endif
-    } else {
-        uint64_t o0, o1;
-
 #ifdef CONFIG_USER_ONLY
-        /* ??? Enforce alignment.  */
-        uint64_t *haddr = g2h(addr);
-        o1 = ldq_be_p(haddr + 0);
-        o0 = ldq_be_p(haddr + 1);
-        oldv = int128_make128(o0, o1);
+    /* ??? Enforce alignment.  */
+    uint64_t *haddr = g2h(addr);
 
-        success = int128_eq(oldv, cmpv);
-        if (success) {
-            stq_be_p(haddr + 0, int128_gethi(newv));
-            stq_be_p(haddr + 1, int128_getlo(newv));
-        }
-#else
-        int mem_idx = cpu_mmu_index(env, false);
-        TCGMemOpIdx oi0 = make_memop_idx(MO_BEQ | MO_ALIGN_16, mem_idx);
-        TCGMemOpIdx oi1 = make_memop_idx(MO_BEQ, mem_idx);
+    set_helper_retaddr(ra);
+    o1 = ldq_be_p(haddr + 0);
+    o0 = ldq_be_p(haddr + 1);
+    oldv = int128_make128(o0, o1);
 
-        o1 = helper_be_ldq_mmu(env, addr + 0, oi0, ra);
-        o0 = helper_be_ldq_mmu(env, addr + 8, oi1, ra);
-        oldv = int128_make128(o0, o1);
-
-        success = int128_eq(oldv, cmpv);
-        if (success) {
-            helper_be_stq_mmu(env, addr + 0, int128_gethi(newv), oi1, ra);
-            helper_be_stq_mmu(env, addr + 8, int128_getlo(newv), oi1, ra);
-        }
-#endif
+    success = int128_eq(oldv, cmpv);
+    if (success) {
+        stq_be_p(haddr + 0, int128_gethi(newv));
+        stq_be_p(haddr + 1, int128_getlo(newv));
     }
+    clear_helper_retaddr();
+#else
+    int mem_idx = cpu_mmu_index(env, false);
+    TCGMemOpIdx oi0 = make_memop_idx(MO_BEQ | MO_ALIGN_16, mem_idx);
+    TCGMemOpIdx oi1 = make_memop_idx(MO_BEQ, mem_idx);
+
+    o1 = helper_be_ldq_mmu(env, addr + 0, oi0, ra);
+    o0 = helper_be_ldq_mmu(env, addr + 8, oi1, ra);
+    oldv = int128_make128(o0, o1);
+
+    success = int128_eq(oldv, cmpv);
+    if (success) {
+        helper_be_stq_mmu(env, addr + 0, int128_gethi(newv), oi1, ra);
+        helper_be_stq_mmu(env, addr + 8, int128_getlo(newv), oi1, ra);
+    }
+#endif
 
     return !success;
 }
+
+uint64_t HELPER(paired_cmpxchg64_be_parallel)(CPUARMState *env, uint64_t addr,
+                                              uint64_t new_lo, uint64_t new_hi)
+{
+    Int128 oldv, cmpv, newv;
+    uintptr_t ra = GETPC();
+    bool success;
+    int mem_idx;
+    TCGMemOpIdx oi;
+
+    assert(HAVE_CMPXCHG128);
+
+    mem_idx = cpu_mmu_index(env, false);
+    oi = make_memop_idx(MO_BEQ | MO_ALIGN_16, mem_idx);
+
+    /*
+     * High and low need to be switched here because this is not actually a
+     * 128bit store but two doublewords stored consecutively
+     */
+    cmpv = int128_make128(env->exclusive_high, env->exclusive_val);
+    newv = int128_make128(new_hi, new_lo);
+    oldv = helper_atomic_cmpxchgo_be_mmu(env, addr, cmpv, newv, oi, ra);
+
+    success = int128_eq(oldv, cmpv);
+    return !success;
+}
+
+/* Writes back the old data into Rs.  */
+void HELPER(casp_le_parallel)(CPUARMState *env, uint32_t rs, uint64_t addr,
+                              uint64_t new_lo, uint64_t new_hi)
+{
+    Int128 oldv, cmpv, newv;
+    uintptr_t ra = GETPC();
+    int mem_idx;
+    TCGMemOpIdx oi;
+
+    assert(HAVE_CMPXCHG128);
+
+    mem_idx = cpu_mmu_index(env, false);
+    oi = make_memop_idx(MO_LEQ | MO_ALIGN_16, mem_idx);
+
+    cmpv = int128_make128(env->xregs[rs], env->xregs[rs + 1]);
+    newv = int128_make128(new_lo, new_hi);
+    oldv = helper_atomic_cmpxchgo_le_mmu(env, addr, cmpv, newv, oi, ra);
+
+    env->xregs[rs] = int128_getlo(oldv);
+    env->xregs[rs + 1] = int128_gethi(oldv);
+}
+
+void HELPER(casp_be_parallel)(CPUARMState *env, uint32_t rs, uint64_t addr,
+                              uint64_t new_hi, uint64_t new_lo)
+{
+    Int128 oldv, cmpv, newv;
+    uintptr_t ra = GETPC();
+    int mem_idx;
+    TCGMemOpIdx oi;
+
+    assert(HAVE_CMPXCHG128);
+
+    mem_idx = cpu_mmu_index(env, false);
+    oi = make_memop_idx(MO_LEQ | MO_ALIGN_16, mem_idx);
+
+    cmpv = int128_make128(env->xregs[rs + 1], env->xregs[rs]);
+    newv = int128_make128(new_lo, new_hi);
+    oldv = helper_atomic_cmpxchgo_be_mmu(env, addr, cmpv, newv, oi, ra);
+
+    env->xregs[rs + 1] = int128_getlo(oldv);
+    env->xregs[rs] = int128_gethi(oldv);
+}
+
+/*
+ * AdvSIMD half-precision
+ */
+
+#define ADVSIMD_HELPER(name, suffix) HELPER(glue(glue(advsimd_, name), suffix))
+
+#define ADVSIMD_HALFOP(name) \
+uint32_t ADVSIMD_HELPER(name, h)(uint32_t a, uint32_t b, void *fpstp) \
+{ \
+    float_status *fpst = fpstp; \
+    return float16_ ## name(a, b, fpst);    \
+}
+
+ADVSIMD_HALFOP(add)
+ADVSIMD_HALFOP(sub)
+ADVSIMD_HALFOP(mul)
+ADVSIMD_HALFOP(div)
+ADVSIMD_HALFOP(min)
+ADVSIMD_HALFOP(max)
+ADVSIMD_HALFOP(minnum)
+ADVSIMD_HALFOP(maxnum)
+
+#define ADVSIMD_TWOHALFOP(name)                                         \
+uint32_t ADVSIMD_HELPER(name, 2h)(uint32_t two_a, uint32_t two_b, void *fpstp) \
+{ \
+    float16  a1, a2, b1, b2;                        \
+    uint32_t r1, r2;                                \
+    float_status *fpst = fpstp;                     \
+    a1 = extract32(two_a, 0, 16);                   \
+    a2 = extract32(two_a, 16, 16);                  \
+    b1 = extract32(two_b, 0, 16);                   \
+    b2 = extract32(two_b, 16, 16);                  \
+    r1 = float16_ ## name(a1, b1, fpst);            \
+    r2 = float16_ ## name(a2, b2, fpst);            \
+    return deposit32(r1, 16, 16, r2);               \
+}
+
+ADVSIMD_TWOHALFOP(add)
+ADVSIMD_TWOHALFOP(sub)
+ADVSIMD_TWOHALFOP(mul)
+ADVSIMD_TWOHALFOP(div)
+ADVSIMD_TWOHALFOP(min)
+ADVSIMD_TWOHALFOP(max)
+ADVSIMD_TWOHALFOP(minnum)
+ADVSIMD_TWOHALFOP(maxnum)
+
+/* Data processing - scalar floating-point and advanced SIMD */
+static float16 float16_mulx(float16 a, float16 b, void *fpstp)
+{
+    float_status *fpst = fpstp;
+
+    a = float16_squash_input_denormal(a, fpst);
+    b = float16_squash_input_denormal(b, fpst);
+
+    if ((float16_is_zero(a) && float16_is_infinity(b)) ||
+        (float16_is_infinity(a) && float16_is_zero(b))) {
+        /* 2.0 with the sign bit set to sign(A) XOR sign(B) */
+        return make_float16((1U << 14) |
+                            ((float16_val(a) ^ float16_val(b)) & (1U << 15)));
+    }
+    return float16_mul(a, b, fpst);
+}
+
+ADVSIMD_HALFOP(mulx)
+ADVSIMD_TWOHALFOP(mulx)
+
+/* fused multiply-accumulate */
+uint32_t HELPER(advsimd_muladdh)(uint32_t a, uint32_t b, uint32_t c,
+                                 void *fpstp)
+{
+    float_status *fpst = fpstp;
+    return float16_muladd(a, b, c, 0, fpst);
+}
+
+uint32_t HELPER(advsimd_muladd2h)(uint32_t two_a, uint32_t two_b,
+                                  uint32_t two_c, void *fpstp)
+{
+    float_status *fpst = fpstp;
+    float16  a1, a2, b1, b2, c1, c2;
+    uint32_t r1, r2;
+    a1 = extract32(two_a, 0, 16);
+    a2 = extract32(two_a, 16, 16);
+    b1 = extract32(two_b, 0, 16);
+    b2 = extract32(two_b, 16, 16);
+    c1 = extract32(two_c, 0, 16);
+    c2 = extract32(two_c, 16, 16);
+    r1 = float16_muladd(a1, b1, c1, 0, fpst);
+    r2 = float16_muladd(a2, b2, c2, 0, fpst);
+    return deposit32(r1, 16, 16, r2);
+}
+
+/*
+ * Floating point comparisons produce an integer result. Softfloat
+ * routines return float_relation types which we convert to the 0/-1
+ * Neon requires.
+ */
+
+#define ADVSIMD_CMPRES(test) (test) ? 0xffff : 0
+
+uint32_t HELPER(advsimd_ceq_f16)(uint32_t a, uint32_t b, void *fpstp)
+{
+    float_status *fpst = fpstp;
+    int compare = float16_compare_quiet(a, b, fpst);
+    return ADVSIMD_CMPRES(compare == float_relation_equal);
+}
+
+uint32_t HELPER(advsimd_cge_f16)(uint32_t a, uint32_t b, void *fpstp)
+{
+    float_status *fpst = fpstp;
+    int compare = float16_compare(a, b, fpst);
+    return ADVSIMD_CMPRES(compare == float_relation_greater ||
+                          compare == float_relation_equal);
+}
+
+uint32_t HELPER(advsimd_cgt_f16)(uint32_t a, uint32_t b, void *fpstp)
+{
+    float_status *fpst = fpstp;
+    int compare = float16_compare(a, b, fpst);
+    return ADVSIMD_CMPRES(compare == float_relation_greater);
+}
+
+uint32_t HELPER(advsimd_acge_f16)(uint32_t a, uint32_t b, void *fpstp)
+{
+    float_status *fpst = fpstp;
+    float16 f0 = float16_abs(a);
+    float16 f1 = float16_abs(b);
+    int compare = float16_compare(f0, f1, fpst);
+    return ADVSIMD_CMPRES(compare == float_relation_greater ||
+                          compare == float_relation_equal);
+}
+
+uint32_t HELPER(advsimd_acgt_f16)(uint32_t a, uint32_t b, void *fpstp)
+{
+    float_status *fpst = fpstp;
+    float16 f0 = float16_abs(a);
+    float16 f1 = float16_abs(b);
+    int compare = float16_compare(f0, f1, fpst);
+    return ADVSIMD_CMPRES(compare == float_relation_greater);
+}
+
+/* round to integral */
+uint32_t HELPER(advsimd_rinth_exact)(uint32_t x, void *fp_status)
+{
+    return float16_round_to_int(x, fp_status);
+}
+
+uint32_t HELPER(advsimd_rinth)(uint32_t x, void *fp_status)
+{
+    int old_flags = get_float_exception_flags(fp_status), new_flags;
+    float16 ret;
+
+    ret = float16_round_to_int(x, fp_status);
+
+    /* Suppress any inexact exceptions the conversion produced */
+    if (!(old_flags & float_flag_inexact)) {
+        new_flags = get_float_exception_flags(fp_status);
+        set_float_exception_flags(new_flags & ~float_flag_inexact, fp_status);
+    }
+
+    return ret;
+}
+
+/*
+ * Half-precision floating point conversion functions
+ *
+ * There are a multitude of conversion functions with various
+ * different rounding modes. This is dealt with by the calling code
+ * setting the mode appropriately before calling the helper.
+ */
+
+uint32_t HELPER(advsimd_f16tosinth)(uint32_t a, void *fpstp)
+{
+    float_status *fpst = fpstp;
+
+    /* Invalid if we are passed a NaN */
+    if (float16_is_any_nan(a)) {
+        float_raise(float_flag_invalid, fpst);
+        return 0;
+    }
+    return float16_to_int16(a, fpst);
+}
+
+uint32_t HELPER(advsimd_f16touinth)(uint32_t a, void *fpstp)
+{
+    float_status *fpst = fpstp;
+
+    /* Invalid if we are passed a NaN */
+    if (float16_is_any_nan(a)) {
+        float_raise(float_flag_invalid, fpst);
+        return 0;
+    }
+    return float16_to_uint16(a, fpst);
+}
+
+static int el_from_spsr(uint32_t spsr)
+{
+    /* Return the exception level that this SPSR is requesting a return to,
+     * or -1 if it is invalid (an illegal return)
+     */
+    if (spsr & PSTATE_nRW) {
+        switch (spsr & CPSR_M) {
+        case ARM_CPU_MODE_USR:
+            return 0;
+        case ARM_CPU_MODE_HYP:
+            return 2;
+        case ARM_CPU_MODE_FIQ:
+        case ARM_CPU_MODE_IRQ:
+        case ARM_CPU_MODE_SVC:
+        case ARM_CPU_MODE_ABT:
+        case ARM_CPU_MODE_UND:
+        case ARM_CPU_MODE_SYS:
+            return 1;
+        case ARM_CPU_MODE_MON:
+            /* Returning to Mon from AArch64 is never possible,
+             * so this is an illegal return.
+             */
+        default:
+            return -1;
+        }
+    } else {
+        if (extract32(spsr, 1, 1)) {
+            /* Return with reserved M[1] bit set */
+            return -1;
+        }
+        if (extract32(spsr, 0, 4) == 1) {
+            /* return to EL0 with M[0] bit set */
+            return -1;
+        }
+        return extract32(spsr, 2, 2);
+    }
+}
+
+void HELPER(exception_return)(CPUARMState *env, uint64_t new_pc)
+{
+    int cur_el = arm_current_el(env);
+    unsigned int spsr_idx = aarch64_banked_spsr_index(cur_el);
+    uint32_t spsr = env->banked_spsr[spsr_idx];
+    int new_el;
+    bool return_to_aa64 = (spsr & PSTATE_nRW) == 0;
+
+    aarch64_save_sp(env, cur_el);
+
+    arm_clear_exclusive(env);
+
+    /* We must squash the PSTATE.SS bit to zero unless both of the
+     * following hold:
+     *  1. debug exceptions are currently disabled
+     *  2. singlestep will be active in the EL we return to
+     * We check 1 here and 2 after we've done the pstate/cpsr write() to
+     * transition to the EL we're going to.
+     */
+    if (arm_generate_debug_exceptions(env)) {
+        spsr &= ~PSTATE_SS;
+    }
+
+    new_el = el_from_spsr(spsr);
+    if (new_el == -1) {
+        goto illegal_return;
+    }
+    if (new_el > cur_el
+        || (new_el == 2 && !arm_feature(env, ARM_FEATURE_EL2))) {
+        /* Disallow return to an EL which is unimplemented or higher
+         * than the current one.
+         */
+        goto illegal_return;
+    }
+
+    if (new_el != 0 && arm_el_is_aa64(env, new_el) != return_to_aa64) {
+        /* Return to an EL which is configured for a different register width */
+        goto illegal_return;
+    }
+
+    if (new_el == 2 && arm_is_secure_below_el3(env)) {
+        /* Return to the non-existent secure-EL2 */
+        goto illegal_return;
+    }
+
+    if (new_el == 1 && (arm_hcr_el2_eff(env) & HCR_TGE)) {
+        goto illegal_return;
+    }
+
+    qemu_mutex_lock_iothread();
+    arm_call_pre_el_change_hook(env_archcpu(env));
+    qemu_mutex_unlock_iothread();
+
+    if (!return_to_aa64) {
+        env->aarch64 = 0;
+        /* We do a raw CPSR write because aarch64_sync_64_to_32()
+         * will sort the register banks out for us, and we've already
+         * caught all the bad-mode cases in el_from_spsr().
+         */
+        cpsr_write(env, spsr, ~0, CPSRWriteRaw);
+        if (!arm_singlestep_active(env)) {
+            env->uncached_cpsr &= ~PSTATE_SS;
+        }
+        aarch64_sync_64_to_32(env);
+
+        if (spsr & CPSR_T) {
+            env->regs[15] = new_pc & ~0x1;
+        } else {
+            env->regs[15] = new_pc & ~0x3;
+        }
+        qemu_log_mask(CPU_LOG_INT, "Exception return from AArch64 EL%d to "
+                      "AArch32 EL%d PC 0x%" PRIx32 "\n",
+                      cur_el, new_el, env->regs[15]);
+    } else {
+        env->aarch64 = 1;
+        pstate_write(env, spsr);
+        if (!arm_singlestep_active(env)) {
+            env->pstate &= ~PSTATE_SS;
+        }
+        aarch64_restore_sp(env, new_el);
+        env->pc = new_pc;
+        qemu_log_mask(CPU_LOG_INT, "Exception return from AArch64 EL%d to "
+                      "AArch64 EL%d PC 0x%" PRIx64 "\n",
+                      cur_el, new_el, env->pc);
+    }
+    /*
+     * Note that cur_el can never be 0.  If new_el is 0, then
+     * el0_a64 is return_to_aa64, else el0_a64 is ignored.
+     */
+    aarch64_sve_change_el(env, cur_el, new_el, return_to_aa64);
+
+    qemu_mutex_lock_iothread();
+    arm_call_el_change_hook(env_archcpu(env));
+    qemu_mutex_unlock_iothread();
+
+    return;
+
+illegal_return:
+    /* Illegal return events of various kinds have architecturally
+     * mandated behaviour:
+     * restore NZCV and DAIF from SPSR_ELx
+     * set PSTATE.IL
+     * restore PC from ELR_ELx
+     * no change to exception level, execution state or stack pointer
+     */
+    env->pstate |= PSTATE_IL;
+    env->pc = new_pc;
+    spsr &= PSTATE_NZCV | PSTATE_DAIF;
+    spsr |= pstate_read(env) & ~(PSTATE_NZCV | PSTATE_DAIF);
+    pstate_write(env, spsr);
+    if (!arm_singlestep_active(env)) {
+        env->pstate &= ~PSTATE_SS;
+    }
+    qemu_log_mask(LOG_GUEST_ERROR, "Illegal exception return at EL%d: "
+                  "resuming execution at 0x%" PRIx64 "\n", cur_el, env->pc);
+}
+
+/*
+ * Square Root and Reciprocal square root
+ */
+
+uint32_t HELPER(sqrt_f16)(uint32_t a, void *fpstp)
+{
+    float_status *s = fpstp;
+
+    return float16_sqrt(a, s);
+}
+
+

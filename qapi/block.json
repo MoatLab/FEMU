@@ -1,14 +1,13 @@
 # -*- Mode: Python -*-
 
 ##
-# = QAPI block definitions
+# = Block devices
 ##
 
-# QAPI block core definitions
 { 'include': 'block-core.json' }
 
 ##
-# == QAPI block definitions (vm unrelated)
+# == Additional block stuff (VM related)
 ##
 
 ##
@@ -77,6 +76,34 @@
 ##
 { 'struct': 'BlockdevSnapshotInternal',
   'data': { 'device': 'str', 'name': 'str' } }
+
+##
+# @PRManagerInfo:
+#
+# Information about a persistent reservation manager
+#
+# @id: the identifier of the persistent reservation manager
+#
+# @connected: true if the persistent reservation manager is connected to
+#             the underlying storage or helper
+#
+# Since: 3.0
+##
+{ 'struct': 'PRManagerInfo',
+  'data': {'id': 'str', 'connected': 'bool'} }
+
+##
+# @query-pr-managers:
+#
+# Returns a list of information about each persistent reservation manager.
+#
+# Returns: a list of @PRManagerInfo for each persistent reservation manager
+#
+# Since: 3.0
+##
+{ 'command': 'query-pr-managers', 'returns': ['PRManagerInfo'],
+  'allow-preconfig': true }
+
 
 ##
 # @blockdev-snapshot-internal-sync:
@@ -180,7 +207,7 @@
 #
 # Example:
 #
-# -> { "execute": "eject", "arguments": { "device": "ide1-0-1" } }
+# -> { "execute": "eject", "arguments": { "id": "ide1-0-1" } }
 # <- { "return": {} }
 ##
 { 'command': 'eject',
@@ -197,15 +224,21 @@
 # QEMU instance could refer to them as "nbd:HOST:PORT:exportname=NAME".
 #
 # @addr: Address on which to listen.
-# @tls-creds: (optional) ID of the TLS credentials object. Since 2.6
+# @tls-creds: ID of the TLS credentials object (since 2.6).
+# @tls-authz: ID of the QAuthZ authorization object used to validate
+#             the client's x509 distinguished name. This object is
+#             is only resolved at time of use, so can be deleted and
+#             recreated on the fly while the NBD server is active.
+#             If missing, it will default to denying access (since 4.0).
 #
 # Returns: error if the server is already running.
 #
 # Since: 1.3.0
 ##
 { 'command': 'nbd-server-start',
-  'data': { 'addr': 'SocketAddress',
-            '*tls-creds': 'str'} }
+  'data': { 'addr': 'SocketAddressLegacy',
+            '*tls-creds': 'str',
+            '*tls-authz': 'str'} }
 
 ##
 # @nbd-server-add:
@@ -214,14 +247,65 @@
 #
 # @device: The device name or node name of the node to be exported
 #
+# @name: Export name. If unspecified, the @device parameter is used as the
+#        export name. (Since 2.12)
+#
 # @writable: Whether clients should be able to write to the device via the
 #     NBD connection (default false).
+
+# @bitmap: Also export the dirty bitmap reachable from @device, so the
+#          NBD client can use NBD_OPT_SET_META_CONTEXT with
+#          "qemu:dirty-bitmap:NAME" to inspect the bitmap. (since 4.0)
 #
-# Returns: error if the device is already marked for export.
+# Returns: error if the server is not running, or export with the same name
+#          already exists.
 #
 # Since: 1.3.0
 ##
-{ 'command': 'nbd-server-add', 'data': {'device': 'str', '*writable': 'bool'} }
+{ 'command': 'nbd-server-add',
+  'data': {'device': 'str', '*name': 'str', '*writable': 'bool',
+           '*bitmap': 'str' } }
+
+##
+# @NbdServerRemoveMode:
+#
+# Mode for removing an NBD export.
+#
+# @safe: Remove export if there are no existing connections, fail otherwise.
+#
+# @hard: Drop all connections immediately and remove export.
+#
+# Potential additional modes to be added in the future:
+#
+# hide: Just hide export from new clients, leave existing connections as is.
+#       Remove export after all clients are disconnected.
+#
+# soft: Hide export from new clients, answer with ESHUTDOWN for all further
+#       requests from existing clients.
+#
+# Since: 2.12
+##
+{'enum': 'NbdServerRemoveMode', 'data': ['safe', 'hard']}
+
+##
+# @nbd-server-remove:
+#
+# Remove NBD export by name.
+#
+# @name: Export name.
+#
+# @mode: Mode of command operation. See @NbdServerRemoveMode description.
+#        Default is 'safe'.
+#
+# Returns: error if
+#            - the server is not running
+#            - export is not found
+#            - mode is 'safe' and there are existing connections
+#
+# Since: 2.12
+##
+{ 'command': 'nbd-server-remove',
+  'data': {'name': 'str', '*mode': 'NbdServerRemoveMode'} }
 
 ##
 # @nbd-server-stop:
@@ -263,6 +347,30 @@
   'data': { 'device': 'str', 'id': 'str', 'tray-open': 'bool' } }
 
 ##
+# @PR_MANAGER_STATUS_CHANGED:
+#
+# Emitted whenever the connected status of a persistent reservation
+# manager changes.
+#
+# @id: The id of the PR manager object
+#
+# @connected: true if the PR manager is connected to a backend
+#
+# Since: 3.0
+#
+# Example:
+#
+# <- { "event": "PR_MANAGER_STATUS_CHANGED",
+#      "data": { "id": "pr-helper0",
+#                "connected": true
+#      },
+#      "timestamp": { "seconds": 1519840375, "microseconds": 450486 } }
+#
+##
+{ 'event': 'PR_MANAGER_STATUS_CHANGED',
+  'data': { 'id': 'str', 'connected': 'bool' } }
+
+##
 # @QuorumOpType:
 #
 # An enumeration of the quorum operation types
@@ -277,3 +385,71 @@
 ##
 { 'enum': 'QuorumOpType',
   'data': [ 'read', 'write', 'flush' ] }
+
+##
+# @QUORUM_FAILURE:
+#
+# Emitted by the Quorum block driver if it fails to establish a quorum
+#
+# @reference: device name if defined else node name
+#
+# @sector-num: number of the first sector of the failed read operation
+#
+# @sectors-count: failed read operation sector count
+#
+# Note: This event is rate-limited.
+#
+# Since: 2.0
+#
+# Example:
+#
+# <- { "event": "QUORUM_FAILURE",
+#      "data": { "reference": "usr1", "sector-num": 345435, "sectors-count": 5 },
+#      "timestamp": { "seconds": 1344522075, "microseconds": 745528 } }
+#
+##
+{ 'event': 'QUORUM_FAILURE',
+  'data': { 'reference': 'str', 'sector-num': 'int', 'sectors-count': 'int' } }
+
+##
+# @QUORUM_REPORT_BAD:
+#
+# Emitted to report a corruption of a Quorum file
+#
+# @type: quorum operation type (Since 2.6)
+#
+# @error: error message. Only present on failure. This field
+#         contains a human-readable error message. There are no semantics other
+#         than that the block layer reported an error and clients should not
+#         try to interpret the error string.
+#
+# @node-name: the graph node name of the block driver state
+#
+# @sector-num: number of the first sector of the failed read operation
+#
+# @sectors-count: failed read operation sector count
+#
+# Note: This event is rate-limited.
+#
+# Since: 2.0
+#
+# Example:
+#
+# 1. Read operation
+#
+# { "event": "QUORUM_REPORT_BAD",
+#      "data": { "node-name": "node0", "sector-num": 345435, "sectors-count": 5,
+#                "type": "read" },
+#      "timestamp": { "seconds": 1344522075, "microseconds": 745528 } }
+#
+# 2. Flush operation
+#
+# { "event": "QUORUM_REPORT_BAD",
+#      "data": { "node-name": "node0", "sector-num": 0, "sectors-count": 2097120,
+#                "type": "flush", "error": "Broken pipe" },
+#      "timestamp": { "seconds": 1456406829, "microseconds": 291763 } }
+#
+##
+{ 'event': 'QUORUM_REPORT_BAD',
+  'data': { 'type': 'QuorumOpType', '*error': 'str', 'node-name': 'str',
+            'sector-num': 'int', 'sectors-count': 'int' } }

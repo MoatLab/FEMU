@@ -28,6 +28,7 @@ typedef struct S390CcwMachineState {
     /*< public >*/
     bool aes_key_wrap;
     bool dea_key_wrap;
+    uint8_t loadparm[8];
 } S390CcwMachineState;
 
 typedef struct S390CcwMachineClass {
@@ -37,11 +38,21 @@ typedef struct S390CcwMachineClass {
     /*< public >*/
     bool ri_allowed;
     bool cpu_model_allowed;
+    bool css_migration_enabled;
+    bool hpage_1m_allowed;
 } S390CcwMachineClass;
 
 /* runtime-instrumentation allowed by the machine */
 bool ri_allowed(void);
 /* cpu model allowed by the machine */
 bool cpu_model_allowed(void);
+/* 1M huge page mappings allowed by the machine */
+bool hpage_1m_allowed(void);
+
+/**
+ * Returns true if (vmstate based) migration of the channel subsystem
+ * is enabled, false if it is disabled.
+ */
+bool css_migration_enabled(void);
 
 #endif

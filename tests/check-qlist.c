@@ -11,7 +11,7 @@
  */
 #include "qemu/osdep.h"
 
-#include "qapi/qmp/qint.h"
+#include "qapi/qmp/qnum.h"
 #include "qapi/qmp/qlist.h"
 
 /*
@@ -29,17 +29,16 @@ static void qlist_new_test(void)
     g_assert(qlist->base.refcnt == 1);
     g_assert(qobject_type(QOBJECT(qlist)) == QTYPE_QLIST);
 
-    // destroy doesn't exist yet
-    g_free(qlist);
+    qobject_unref(qlist);
 }
 
 static void qlist_append_test(void)
 {
-    QInt *qi;
+    QNum *qi;
     QList *qlist;
     QListEntry *entry;
 
-    qi = qint_from_int(42);
+    qi = qnum_from_int(42);
 
     qlist = qlist_new();
     qlist_append(qlist, qi);
@@ -48,10 +47,7 @@ static void qlist_append_test(void)
     g_assert(entry != NULL);
     g_assert(entry->value == QOBJECT(qi));
 
-    // destroy doesn't exist yet
-    QDECREF(qi);
-    g_free(entry);
-    g_free(qlist);
+    qobject_unref(qlist);
 }
 
 static void qobject_to_qlist_test(void)
@@ -60,23 +56,9 @@ static void qobject_to_qlist_test(void)
 
     qlist = qlist_new();
 
-    g_assert(qobject_to_qlist(QOBJECT(qlist)) == qlist);
+    g_assert(qobject_to(QList, QOBJECT(qlist)) == qlist);
 
-    // destroy doesn't exist yet
-    g_free(qlist);
-}
-
-static void qlist_destroy_test(void)
-{
-    int i;
-    QList *qlist;
-
-    qlist = qlist_new();
-
-    for (i = 0; i < 42; i++)
-        qlist_append(qlist, qint_from_int(i));
-
-    QDECREF(qlist);
+    qobject_unref(qlist);
 }
 
 static int iter_called;
@@ -84,13 +66,17 @@ static const int iter_max = 42;
 
 static void iter_func(QObject *obj, void *opaque)
 {
-    QInt *qi;
+    QNum *qi;
+    int64_t val;
 
     g_assert(opaque == NULL);
 
-    qi = qobject_to_qint(obj);
+    qi = qobject_to(QNum, obj);
     g_assert(qi != NULL);
-    g_assert((qint_get_int(qi) >= 0) && (qint_get_int(qi) <= iter_max));
+
+    g_assert(qnum_get_try_int(qi, &val));
+    g_assert_cmpint(val, >=, 0);
+    g_assert_cmpint(val, <=, iter_max);
 
     iter_called++;
 }
@@ -103,14 +89,14 @@ static void qlist_iter_test(void)
     qlist = qlist_new();
 
     for (i = 0; i < iter_max; i++)
-        qlist_append(qlist, qint_from_int(i));
+        qlist_append_int(qlist, i);
 
     iter_called = 0;
     qlist_iter(qlist, iter_func, NULL);
 
     g_assert(iter_called == iter_max);
 
-    QDECREF(qlist);
+    qobject_unref(qlist);
 }
 
 int main(int argc, char **argv)
@@ -120,7 +106,6 @@ int main(int argc, char **argv)
     g_test_add_func("/public/new", qlist_new_test);
     g_test_add_func("/public/append", qlist_append_test);
     g_test_add_func("/public/to_qlist", qobject_to_qlist_test);
-    g_test_add_func("/public/destroy", qlist_destroy_test);
     g_test_add_func("/public/iter", qlist_iter_test);
 
     return g_test_run();

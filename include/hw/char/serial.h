@@ -28,14 +28,14 @@
 
 #include "hw/hw.h"
 #include "sysemu/sysemu.h"
-#include "sysemu/char.h"
+#include "chardev/char-fe.h"
 #include "exec/memory.h"
 #include "qemu/fifo8.h"
-#include "sysemu/char.h"
+#include "chardev/char.h"
 
 #define UART_FIFO_LENGTH    16      /* 16550A Fifo Length */
 
-struct SerialState {
+typedef struct SerialState {
     uint16_t divider;
     uint8_t rbr; /* receive register */
     uint8_t thr; /* transmit holding register */
@@ -77,7 +77,7 @@ struct SerialState {
 
     QEMUTimer *modem_status_poll;
     MemoryRegion io;
-};
+} SerialState;
 
 extern const VMStateDescription vmstate_serial;
 extern const MemoryRegionOps serial_io_ops;
@@ -95,6 +95,9 @@ SerialState *serial_mm_init(MemoryRegion *address_space,
                             Chardev *chr, enum device_endian end);
 
 /* serial-isa.c */
+
+#define MAX_ISA_SERIAL_PORTS 4
+
 #define TYPE_ISA_SERIAL "isa-serial"
 void serial_hds_isa_init(ISABus *bus, int from, int to);
 

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # Test qcow2 reopen
 #
@@ -24,7 +24,6 @@ owner=kwolf@redhat.com
 seq="$(basename $0)"
 echo "QA output created by $seq"
 
-here="$PWD"
 status=1	# failure is the default!
 
 _cleanup()
@@ -41,6 +40,8 @@ trap "_cleanup; exit \$status" 0 1 2 3 15
 _supported_fmt qcow2
 _supported_proto file
 _supported_os Linux
+# We are going to use lazy-refcounts
+_unsupported_imgopts 'compat=0.10'
 
 
 _make_test_img 64M
@@ -81,6 +82,9 @@ $QEMU_IO \
     -c "reopen -o overlap-check.inactive-l2=off" \
     -c "reopen -o cache-size=1M" \
     -c "reopen -o l2-cache-size=512k" \
+    -c "reopen -o l2-cache-entry-size=512" \
+    -c "reopen -o l2-cache-entry-size=4k" \
+    -c "reopen -o l2-cache-entry-size=64k" \
     -c "reopen -o refcount-cache-size=128k" \
     -c "reopen -o cache-clean-interval=5" \
     -c "reopen -o cache-clean-interval=0" \
@@ -104,13 +108,21 @@ $QEMU_IO \
     -c "reopen -o cache-size=1M,l2-cache-size=64k,refcount-cache-size=64k" \
     -c "reopen -o cache-size=1M,l2-cache-size=2M" \
     -c "reopen -o cache-size=1M,refcount-cache-size=2M" \
-    -c "reopen -o l2-cache-size=256T" \
+    -c "reopen -o l2-cache-entry-size=33k" \
+    -c "reopen -o l2-cache-entry-size=128k" \
     -c "reopen -o refcount-cache-size=256T" \
     -c "reopen -o overlap-check=constant,overlap-check.template=all" \
     -c "reopen -o overlap-check=blubb" \
     -c "reopen -o overlap-check.template=blubb" \
     -c "reopen -o cache-clean-interval=-1" \
     "$TEST_IMG" | _filter_qemu_io
+
+IMGOPTS="cluster_size=256k" _make_test_img 32P
+$QEMU_IO \
+    -c "reopen -o l2-cache-entry-size=512,l2-cache-size=1T" \
+    "$TEST_IMG" | _filter_qemu_io
+
+_make_test_img 64M
 
 echo
 echo === Test transaction semantics ===

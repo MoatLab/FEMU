@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -27,7 +27,7 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 
-#include "crypto/block-qcow.h"
+#include "block-qcow.h"
 #include "crypto/secret.h"
 
 #define QCRYPTO_BLOCK_QCOW_SECTOR_SIZE 512
@@ -44,6 +44,7 @@ qcrypto_block_qcow_has_format(const uint8_t *buf G_GNUC_UNUSED,
 static int
 qcrypto_block_qcow_init(QCryptoBlock *block,
                         const char *keysecret,
+                        size_t n_threads,
                         Error **errp)
 {
     char *password;
@@ -71,21 +72,22 @@ qcrypto_block_qcow_init(QCryptoBlock *block,
         goto fail;
     }
 
-    block->cipher = qcrypto_cipher_new(QCRYPTO_CIPHER_ALG_AES_128,
-                                       QCRYPTO_CIPHER_MODE_CBC,
-                                       keybuf, G_N_ELEMENTS(keybuf),
-                                       errp);
-    if (!block->cipher) {
+    ret = qcrypto_block_init_cipher(block, QCRYPTO_CIPHER_ALG_AES_128,
+                                    QCRYPTO_CIPHER_MODE_CBC,
+                                    keybuf, G_N_ELEMENTS(keybuf),
+                                    n_threads, errp);
+    if (ret < 0) {
         ret = -ENOTSUP;
         goto fail;
     }
 
+    block->sector_size = QCRYPTO_BLOCK_QCOW_SECTOR_SIZE;
     block->payload_offset = 0;
 
     return 0;
 
  fail:
-    qcrypto_cipher_free(block->cipher);
+    qcrypto_block_free_cipher(block);
     qcrypto_ivgen_free(block->ivgen);
     return ret;
 }
@@ -94,21 +96,26 @@ qcrypto_block_qcow_init(QCryptoBlock *block,
 static int
 qcrypto_block_qcow_open(QCryptoBlock *block,
                         QCryptoBlockOpenOptions *options,
+                        const char *optprefix,
                         QCryptoBlockReadFunc readfunc G_GNUC_UNUSED,
                         void *opaque G_GNUC_UNUSED,
                         unsigned int flags,
+                        size_t n_threads,
                         Error **errp)
 {
     if (flags & QCRYPTO_BLOCK_OPEN_NO_IO) {
+        block->sector_size = QCRYPTO_BLOCK_QCOW_SECTOR_SIZE;
+        block->payload_offset = 0;
         return 0;
     } else {
         if (!options->u.qcow.key_secret) {
             error_setg(errp,
-                       "Parameter 'key-secret' is required for cipher");
+                       "Parameter '%skey-secret' is required for cipher",
+                       optprefix ? optprefix : "");
             return -1;
         }
-        return qcrypto_block_qcow_init(block,
-                                       options->u.qcow.key_secret, errp);
+        return qcrypto_block_qcow_init(block, options->u.qcow.key_secret,
+                                       n_threads, errp);
     }
 }
 
@@ -116,17 +123,19 @@ qcrypto_block_qcow_open(QCryptoBlock *block,
 static int
 qcrypto_block_qcow_create(QCryptoBlock *block,
                           QCryptoBlockCreateOptions *options,
+                          const char *optprefix,
                           QCryptoBlockInitFunc initfunc G_GNUC_UNUSED,
                           QCryptoBlockWriteFunc writefunc G_GNUC_UNUSED,
                           void *opaque G_GNUC_UNUSED,
                           Error **errp)
 {
     if (!options->u.qcow.key_secret) {
-        error_setg(errp, "Parameter 'key-secret' is required for cipher");
+        error_setg(errp, "Parameter '%skey-secret' is required for cipher",
+                   optprefix ? optprefix : "");
         return -1;
     }
     /* QCow2 has no special header, since everything is hardwired */
-    return qcrypto_block_qcow_init(block, options->u.qcow.key_secret, errp);
+    return qcrypto_block_qcow_init(block, options->u.qcow.key_secret, 1, errp);
 }
 
 
@@ -138,29 +147,31 @@ qcrypto_block_qcow_cleanup(QCryptoBlock *block)
 
 static int
 qcrypto_block_qcow_decrypt(QCryptoBlock *block,
-                           uint64_t startsector,
+                           uint64_t offset,
                            uint8_t *buf,
                            size_t len,
                            Error **errp)
 {
-    return qcrypto_block_decrypt_helper(block->cipher,
-                                        block->niv, block->ivgen,
+    assert(QEMU_IS_ALIGNED(offset, QCRYPTO_BLOCK_QCOW_SECTOR_SIZE));
+    assert(QEMU_IS_ALIGNED(len, QCRYPTO_BLOCK_QCOW_SECTOR_SIZE));
+    return qcrypto_block_decrypt_helper(block,
                                         QCRYPTO_BLOCK_QCOW_SECTOR_SIZE,
-                                        startsector, buf, len, errp);
+                                        offset, buf, len, errp);
 }
 
 
 static int
 qcrypto_block_qcow_encrypt(QCryptoBlock *block,
-                           uint64_t startsector,
+                           uint64_t offset,
                            uint8_t *buf,
                            size_t len,
                            Error **errp)
 {
-    return qcrypto_block_encrypt_helper(block->cipher,
-                                        block->niv, block->ivgen,
+    assert(QEMU_IS_ALIGNED(offset, QCRYPTO_BLOCK_QCOW_SECTOR_SIZE));
+    assert(QEMU_IS_ALIGNED(len, QCRYPTO_BLOCK_QCOW_SECTOR_SIZE));
+    return qcrypto_block_encrypt_helper(block,
                                         QCRYPTO_BLOCK_QCOW_SECTOR_SIZE,
-                                        startsector, buf, len, errp);
+                                        offset, buf, len, errp);
 }
 
 

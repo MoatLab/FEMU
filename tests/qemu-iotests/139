@@ -25,13 +25,21 @@ import time
 
 base_img = os.path.join(iotests.test_dir, 'base.img')
 new_img = os.path.join(iotests.test_dir, 'new.img')
+if iotests.qemu_default_machine == 's390-ccw-virtio':
+    default_virtio_blk = 'virtio-blk-ccw'
+else:
+    default_virtio_blk = 'virtio-blk-pci'
 
 class TestBlockdevDel(iotests.QMPTestCase):
 
     def setUp(self):
         iotests.qemu_img('create', '-f', iotests.imgfmt, base_img, '1M')
         self.vm = iotests.VM()
-        self.vm.add_device("virtio-scsi-pci,id=virtio-scsi")
+        if iotests.qemu_default_machine == 's390-ccw-virtio':
+            self.vm.add_device("virtio-scsi-ccw,id=virtio-scsi")
+        else:
+            self.vm.add_device("virtio-scsi-pci,id=virtio-scsi")
+
         self.vm.launch()
 
     def tearDown(self):
@@ -43,7 +51,7 @@ class TestBlockdevDel(iotests.QMPTestCase):
     # Check whether a BlockDriverState exists
     def checkBlockDriverState(self, node, must_exist = True):
         result = self.vm.qmp('query-named-block-nodes')
-        nodes = filter(lambda x: x['node-name'] == node, result['return'])
+        nodes = [x for x in result['return'] if x['node-name'] == node]
         self.assertLessEqual(len(nodes), 1)
         self.assertEqual(must_exist, len(nodes) == 1)
 
@@ -65,11 +73,11 @@ class TestBlockdevDel(iotests.QMPTestCase):
     # Add a BlockDriverState that will be used as overlay for the base_img BDS
     def addBlockDriverStateOverlay(self, node):
         self.checkBlockDriverState(node, False)
-        iotests.qemu_img('create', '-f', iotests.imgfmt,
+        iotests.qemu_img('create', '-u', '-f', iotests.imgfmt,
                          '-b', base_img, new_img, '1M')
         opts = {'driver': iotests.imgfmt,
                 'node-name': node,
-                'backing': '',
+                'backing': None,
                 'file': {'driver': 'file',
                          'filename': new_img}}
         result = self.vm.qmp('blockdev-add', conv_keys = False, **opts)
@@ -87,7 +95,7 @@ class TestBlockdevDel(iotests.QMPTestCase):
         self.checkBlockDriverState(node, expect_error)
 
     # Add a device model
-    def addDeviceModel(self, device, backend, driver = 'virtio-blk-pci'):
+    def addDeviceModel(self, device, backend, driver = default_virtio_blk):
         result = self.vm.qmp('device_add', id = device,
                              driver = driver, drive = backend)
         self.assert_qmp(result, 'return', {})
@@ -125,7 +133,7 @@ class TestBlockdevDel(iotests.QMPTestCase):
     # Insert a BlockDriverState
     def insertDrive(self, device, node):
         self.checkBlockDriverState(node)
-        result = self.vm.qmp('x-blockdev-insert-medium',
+        result = self.vm.qmp('blockdev-insert-medium',
                              id = device, node_name = node)
         self.assert_qmp(result, 'return', {})
         self.checkBlockDriverState(node)
@@ -317,6 +325,7 @@ class TestBlockdevDel(iotests.QMPTestCase):
         # FIXME mirror0 disappears, drive-mirror doesn't take a reference
         #self.delBlockDriverState('mirror0')
 
+    @iotests.skip_if_unsupported(['blkdebug'])
     def testBlkDebug(self):
         self.addBlkDebug('debug0', 'node0')
         # 'node0' is used by the blkdebug node
@@ -325,6 +334,7 @@ class TestBlockdevDel(iotests.QMPTestCase):
         self.delBlockDriverState('debug0')
         self.checkBlockDriverState('node0', False)
 
+    @iotests.skip_if_unsupported(['blkverify'])
     def testBlkVerify(self):
         self.addBlkVerify('verify0', 'node0', 'node1')
         # We cannot remove the children of a blkverify device
@@ -335,6 +345,7 @@ class TestBlockdevDel(iotests.QMPTestCase):
         self.checkBlockDriverState('node0', False)
         self.checkBlockDriverState('node1', False)
 
+    @iotests.skip_if_unsupported(['quorum'])
     def testQuorum(self):
         if not iotests.supports_quorum():
             return

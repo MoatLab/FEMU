@@ -20,8 +20,9 @@
 #include "hw/block/block.h"
 #include "net/hub.h"
 #include "qapi/visitor.h"
-#include "sysemu/char.h"
+#include "chardev/char-fe.h"
 #include "sysemu/iothread.h"
+#include "sysemu/tpm_backend.h"
 
 static void get_pointer(Object *obj, Visitor *v, Property *prop,
                         char *(*print)(void *ptr),
@@ -68,8 +69,8 @@ static void set_pointer(Object *obj, Visitor *v, Property *prop,
 
 /* --- drive --- */
 
-static void parse_drive(DeviceState *dev, const char *str, void **ptr,
-                        const char *propname, Error **errp)
+static void do_parse_drive(DeviceState *dev, const char *str, void **ptr,
+                           const char *propname, bool iothread, Error **errp)
 {
     BlockBackend *blk;
     bool blk_created = false;
@@ -79,7 +80,16 @@ static void parse_drive(DeviceState *dev, const char *str, void **ptr,
     if (!blk) {
         BlockDriverState *bs = bdrv_lookup_bs(NULL, str, NULL);
         if (bs) {
-            blk = blk_new(0, BLK_PERM_ALL);
+            /*
+             * If the device supports iothreads, it will make sure to move the
+             * block node to the right AioContext if necessary (or fail if this
+             * isn't possible because of other users). Devices that are not
+             * aware of iothreads require their BlockBackends to be in the main
+             * AioContext.
+             */
+            AioContext *ctx = iothread ? bdrv_get_aio_context(bs) :
+                                         qemu_get_aio_context();
+            blk = blk_new(ctx, 0, BLK_PERM_ALL);
             blk_created = true;
 
             ret = blk_insert_bs(blk, bs, errp);
@@ -115,6 +125,18 @@ fail:
         /* If we need to keep a reference, blk_attach_dev() took it */
         blk_unref(blk);
     }
+}
+
+static void parse_drive(DeviceState *dev, const char *str, void **ptr,
+                        const char *propname, Error **errp)
+{
+    do_parse_drive(dev, str, ptr, propname, false, errp);
+}
+
+static void parse_drive_iothread(DeviceState *dev, const char *str, void **ptr,
+                                 const char *propname, Error **errp)
+{
+    do_parse_drive(dev, str, ptr, propname, true, errp);
 }
 
 static void release_drive(Object *obj, const char *name, void *opaque)
@@ -159,11 +181,25 @@ static void set_drive(Object *obj, Visitor *v, const char *name, void *opaque,
     set_pointer(obj, v, opaque, parse_drive, name, errp);
 }
 
-PropertyInfo qdev_prop_drive = {
+static void set_drive_iothread(Object *obj, Visitor *v, const char *name,
+                               void *opaque, Error **errp)
+{
+    set_pointer(obj, v, opaque, parse_drive_iothread, name, errp);
+}
+
+const PropertyInfo qdev_prop_drive = {
     .name  = "str",
     .description = "Node name or ID of a block device to use as a backend",
     .get   = get_drive,
     .set   = set_drive,
+    .release = release_drive,
+};
+
+const PropertyInfo qdev_prop_drive_iothread = {
+    .name  = "str",
+    .description = "Node name or ID of a block device to use as a backend",
+    .get   = get_drive,
+    .set   = set_drive_iothread,
     .release = release_drive,
 };
 
@@ -225,10 +261,10 @@ static void release_chr(Object *obj, const char *name, void *opaque)
     Property *prop = opaque;
     CharBackend *be = qdev_get_prop_ptr(dev, prop);
 
-    qemu_chr_fe_deinit(be);
+    qemu_chr_fe_deinit(be, false);
 }
 
-PropertyInfo qdev_prop_chr = {
+const PropertyInfo qdev_prop_chr = {
     .name  = "str",
     .description = "ID of a chardev to use as a backend",
     .get   = get_chr,
@@ -287,10 +323,6 @@ static void set_netdev(Object *obj, Visitor *v, const char *name,
     }
 
     for (i = 0; i < queues; i++) {
-        if (peers[i] == NULL) {
-            err = -ENOENT;
-            goto out;
-        }
 
         if (peers[i]->peer) {
             err = -EEXIST;
@@ -313,93 +345,13 @@ out:
     g_free(str);
 }
 
-PropertyInfo qdev_prop_netdev = {
+const PropertyInfo qdev_prop_netdev = {
     .name  = "str",
     .description = "ID of a netdev to use as a backend",
     .get   = get_netdev,
     .set   = set_netdev,
 };
 
-/* --- vlan --- */
-
-static int print_vlan(DeviceState *dev, Property *prop, char *dest, size_t len)
-{
-    NetClientState **ptr = qdev_get_prop_ptr(dev, prop);
-
-    if (*ptr) {
-        int id;
-        if (!net_hub_id_for_client(*ptr, &id)) {
-            return snprintf(dest, len, "%d", id);
-        }
-    }
-
-    return snprintf(dest, len, "<null>");
-}
-
-static void get_vlan(Object *obj, Visitor *v, const char *name, void *opaque,
-                     Error **errp)
-{
-    DeviceState *dev = DEVICE(obj);
-    Property *prop = opaque;
-    NetClientState **ptr = qdev_get_prop_ptr(dev, prop);
-    int32_t id = -1;
-
-    if (*ptr) {
-        int hub_id;
-        if (!net_hub_id_for_client(*ptr, &hub_id)) {
-            id = hub_id;
-        }
-    }
-
-    visit_type_int32(v, name, &id, errp);
-}
-
-static void set_vlan(Object *obj, Visitor *v, const char *name, void *opaque,
-                     Error **errp)
-{
-    DeviceState *dev = DEVICE(obj);
-    Property *prop = opaque;
-    NICPeers *peers_ptr = qdev_get_prop_ptr(dev, prop);
-    NetClientState **ptr = &peers_ptr->ncs[0];
-    Error *local_err = NULL;
-    int32_t id;
-    NetClientState *hubport;
-
-    if (dev->realized) {
-        qdev_prop_set_after_realize(dev, name, errp);
-        return;
-    }
-
-    visit_type_int32(v, name, &id, &local_err);
-    if (local_err) {
-        error_propagate(errp, local_err);
-        return;
-    }
-    if (id == -1) {
-        *ptr = NULL;
-        return;
-    }
-    if (*ptr) {
-        error_set_from_qdev_prop_error(errp, -EINVAL, dev, prop, name);
-        return;
-    }
-
-    hubport = net_hub_port_find(id);
-    if (!hubport) {
-        error_setg(errp, QERR_INVALID_PARAMETER_VALUE,
-                   name, prop->info->name);
-        return;
-    }
-    *ptr = hubport;
-}
-
-PropertyInfo qdev_prop_vlan = {
-    .name  = "int32",
-    .description = "Integer VLAN id to connect to",
-    .print = print_vlan,
-    .get   = get_vlan,
-    .set   = set_vlan,
-};
 
 void qdev_prop_set_drive(DeviceState *dev, const char *name,
                          BlockBackend *value, Error **errp)
@@ -409,7 +361,7 @@ void qdev_prop_set_drive(DeviceState *dev, const char *name,
     if (value) {
         ref = blk_name(value);
         if (!*ref) {
-            BlockDriverState *bs = blk_bs(value);
+            const BlockDriverState *bs = blk_bs(value);
             if (bs) {
                 ref = bdrv_get_node_name(bs);
             }

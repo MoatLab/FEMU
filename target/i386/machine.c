@@ -1,5 +1,4 @@
 #include "qemu/osdep.h"
-#include "qemu-common.h"
 #include "cpu.h"
 #include "exec/exec-all.h"
 #include "hw/hw.h"
@@ -7,8 +6,11 @@
 #include "hw/i386/pc.h"
 #include "hw/isa/isa.h"
 #include "migration/cpu.h"
+#include "hyperv.h"
+#include "kvm_i386.h"
 
 #include "sysemu/kvm.h"
+#include "sysemu/tcg.h"
 
 #include "qemu/error-report.h"
 
@@ -136,179 +138,69 @@ static const VMStateDescription vmstate_mtrr_var = {
 #define VMSTATE_MTRR_VARS(_field, _state, _n, _v)                    \
     VMSTATE_STRUCT_ARRAY(_field, _state, _n, _v, vmstate_mtrr_var, MTRRVar)
 
-static int put_fpreg_error(QEMUFile *f, void *opaque, size_t size,
-                           VMStateField *field, QJSON *vmdesc)
+typedef struct x86_FPReg_tmp {
+    FPReg *parent;
+    uint64_t tmp_mant;
+    uint16_t tmp_exp;
+} x86_FPReg_tmp;
+
+static void cpu_get_fp80(uint64_t *pmant, uint16_t *pexp, floatx80 f)
 {
-    fprintf(stderr, "call put_fpreg() with invalid arguments\n");
-    exit(0);
-    return 0;
+    CPU_LDoubleU temp;
+
+    temp.d = f;
+    *pmant = temp.l.lower;
+    *pexp = temp.l.upper;
 }
 
-/* XXX: add that in a FPU generic layer */
-union x86_longdouble {
-    uint64_t mant;
-    uint16_t exp;
-};
-
-#define MANTD1(fp)	(fp & ((1LL << 52) - 1))
-#define EXPBIAS1 1023
-#define EXPD1(fp)	((fp >> 52) & 0x7FF)
-#define SIGND1(fp)	((fp >> 32) & 0x80000000)
-
-static void fp64_to_fp80(union x86_longdouble *p, uint64_t temp)
+static floatx80 cpu_set_fp80(uint64_t mant, uint16_t upper)
 {
-    int e;
-    /* mantissa */
-    p->mant = (MANTD1(temp) << 11) | (1LL << 63);
-    /* exponent + sign */
-    e = EXPD1(temp) - EXPBIAS1 + 16383;
-    e |= SIGND1(temp) >> 16;
-    p->exp = e;
+    CPU_LDoubleU temp;
+
+    temp.l.upper = upper;
+    temp.l.lower = mant;
+    return temp.d;
 }
 
-static int get_fpreg(QEMUFile *f, void *opaque, size_t size,
-                     VMStateField *field)
+static int fpreg_pre_save(void *opaque)
 {
-    FPReg *fp_reg = opaque;
-    uint64_t mant;
-    uint16_t exp;
+    x86_FPReg_tmp *tmp = opaque;
 
-    qemu_get_be64s(f, &mant);
-    qemu_get_be16s(f, &exp);
-    fp_reg->d = cpu_set_fp80(mant, exp);
-    return 0;
-}
-
-static int put_fpreg(QEMUFile *f, void *opaque, size_t size,
-                     VMStateField *field, QJSON *vmdesc)
-{
-    FPReg *fp_reg = opaque;
-    uint64_t mant;
-    uint16_t exp;
     /* we save the real CPU data (in case of MMX usage only 'mant'
        contains the MMX register */
-    cpu_get_fp80(&mant, &exp, fp_reg->d);
-    qemu_put_be64s(f, &mant);
-    qemu_put_be16s(f, &exp);
+    cpu_get_fp80(&tmp->tmp_mant, &tmp->tmp_exp, tmp->parent->d);
 
     return 0;
 }
 
-static const VMStateInfo vmstate_fpreg = {
+static int fpreg_post_load(void *opaque, int version)
+{
+    x86_FPReg_tmp *tmp = opaque;
+
+    tmp->parent->d = cpu_set_fp80(tmp->tmp_mant, tmp->tmp_exp);
+    return 0;
+}
+
+static const VMStateDescription vmstate_fpreg_tmp = {
+    .name = "fpreg_tmp",
+    .post_load = fpreg_post_load,
+    .pre_save  = fpreg_pre_save,
+    .fields = (VMStateField[]) {
+        VMSTATE_UINT64(tmp_mant, x86_FPReg_tmp),
+        VMSTATE_UINT16(tmp_exp, x86_FPReg_tmp),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static const VMStateDescription vmstate_fpreg = {
     .name = "fpreg",
-    .get  = get_fpreg,
-    .put  = put_fpreg,
+    .fields = (VMStateField[]) {
+        VMSTATE_WITH_TMP(FPReg, x86_FPReg_tmp, vmstate_fpreg_tmp),
+        VMSTATE_END_OF_LIST()
+    }
 };
 
-static int get_fpreg_1_mmx(QEMUFile *f, void *opaque, size_t size,
-                           VMStateField *field)
-{
-    union x86_longdouble *p = opaque;
-    uint64_t mant;
-
-    qemu_get_be64s(f, &mant);
-    p->mant = mant;
-    p->exp = 0xffff;
-    return 0;
-}
-
-static const VMStateInfo vmstate_fpreg_1_mmx = {
-    .name = "fpreg_1_mmx",
-    .get  = get_fpreg_1_mmx,
-    .put  = put_fpreg_error,
-};
-
-static int get_fpreg_1_no_mmx(QEMUFile *f, void *opaque, size_t size,
-                              VMStateField *field)
-{
-    union x86_longdouble *p = opaque;
-    uint64_t mant;
-
-    qemu_get_be64s(f, &mant);
-    fp64_to_fp80(p, mant);
-    return 0;
-}
-
-static const VMStateInfo vmstate_fpreg_1_no_mmx = {
-    .name = "fpreg_1_no_mmx",
-    .get  = get_fpreg_1_no_mmx,
-    .put  = put_fpreg_error,
-};
-
-static bool fpregs_is_0(void *opaque, int version_id)
-{
-    X86CPU *cpu = opaque;
-    CPUX86State *env = &cpu->env;
-
-    return (env->fpregs_format_vmstate == 0);
-}
-
-static bool fpregs_is_1_mmx(void *opaque, int version_id)
-{
-    X86CPU *cpu = opaque;
-    CPUX86State *env = &cpu->env;
-    int guess_mmx;
-
-    guess_mmx = ((env->fptag_vmstate == 0xff) &&
-                 (env->fpus_vmstate & 0x3800) == 0);
-    return (guess_mmx && (env->fpregs_format_vmstate == 1));
-}
-
-static bool fpregs_is_1_no_mmx(void *opaque, int version_id)
-{
-    X86CPU *cpu = opaque;
-    CPUX86State *env = &cpu->env;
-    int guess_mmx;
-
-    guess_mmx = ((env->fptag_vmstate == 0xff) &&
-                 (env->fpus_vmstate & 0x3800) == 0);
-    return (!guess_mmx && (env->fpregs_format_vmstate == 1));
-}
-
-#define VMSTATE_FP_REGS(_field, _state, _n)                               \
-    VMSTATE_ARRAY_TEST(_field, _state, _n, fpregs_is_0, vmstate_fpreg, FPReg), \
-    VMSTATE_ARRAY_TEST(_field, _state, _n, fpregs_is_1_mmx, vmstate_fpreg_1_mmx, FPReg), \
-    VMSTATE_ARRAY_TEST(_field, _state, _n, fpregs_is_1_no_mmx, vmstate_fpreg_1_no_mmx, FPReg)
-
-static bool version_is_5(void *opaque, int version_id)
-{
-    return version_id == 5;
-}
-
-#ifdef TARGET_X86_64
-static bool less_than_7(void *opaque, int version_id)
-{
-    return version_id < 7;
-}
-
-static int get_uint64_as_uint32(QEMUFile *f, void *pv, size_t size,
-                                VMStateField *field)
-{
-    uint64_t *v = pv;
-    *v = qemu_get_be32(f);
-    return 0;
-}
-
-static int put_uint64_as_uint32(QEMUFile *f, void *pv, size_t size,
-                                VMStateField *field, QJSON *vmdesc)
-{
-    uint64_t *v = pv;
-    qemu_put_be32(f, *v);
-
-    return 0;
-}
-
-static const VMStateInfo vmstate_hack_uint64_as_uint32 = {
-    .name = "uint64_as_uint32",
-    .get  = get_uint64_as_uint32,
-    .put  = put_uint64_as_uint32,
-};
-
-#define VMSTATE_HACK_UINT32(_f, _s, _t)                                  \
-    VMSTATE_SINGLE_TEST(_f, _s, _t, 0, vmstate_hack_uint64_as_uint32, uint64_t)
-#endif
-
-static void cpu_pre_save(void *opaque)
+static int cpu_pre_save(void *opaque)
 {
     X86CPU *cpu = opaque;
     CPUX86State *env = &cpu->env;
@@ -340,6 +232,66 @@ static void cpu_pre_save(void *opaque)
         env->segs[R_SS].flags &= ~(env->segs[R_SS].flags & DESC_DPL_MASK);
     }
 
+#ifdef CONFIG_KVM
+    /*
+     * In case vCPU may have enabled VMX, we need to make sure kernel have
+     * required capabilities in order to perform migration correctly:
+     *
+     * 1) We must be able to extract vCPU nested-state from KVM.
+     *
+     * 2) In case vCPU is running in guest-mode and it has a pending exception,
+     * we must be able to determine if it's in a pending or injected state.
+     * Note that in case KVM don't have required capability to do so,
+     * a pending/injected exception will always appear as an
+     * injected exception.
+     */
+    if (kvm_enabled() && cpu_vmx_maybe_enabled(env) &&
+        (!env->nested_state ||
+         (!kvm_has_exception_payload() && (env->hflags & HF_GUEST_MASK) &&
+          env->exception_injected))) {
+        error_report("Guest maybe enabled nested virtualization but kernel "
+                "does not support required capabilities to save vCPU "
+                "nested state");
+        return -EINVAL;
+    }
+#endif
+
+    /*
+     * When vCPU is running L2 and exception is still pending,
+     * it can potentially be intercepted by L1 hypervisor.
+     * In contrast to an injected exception which cannot be
+     * intercepted anymore.
+     *
+     * Furthermore, when a L2 exception is intercepted by L1
+     * hypervisor, it's exception payload (CR2/DR6 on #PF/#DB)
+     * should not be set yet in the respective vCPU register.
+     * Thus, in case an exception is pending, it is
+     * important to save the exception payload seperately.
+     *
+     * Therefore, if an exception is not in a pending state
+     * or vCPU is not in guest-mode, it is not important to
+     * distinguish between a pending and injected exception
+     * and we don't need to store seperately the exception payload.
+     *
+     * In order to preserve better backwards-compatabile migration,
+     * convert a pending exception to an injected exception in
+     * case it is not important to distingiush between them
+     * as described above.
+     */
+    if (env->exception_pending && !(env->hflags & HF_GUEST_MASK)) {
+        env->exception_pending = 0;
+        env->exception_injected = 1;
+
+        if (env->exception_has_payload) {
+            if (env->exception_nr == EXCP01_DB) {
+                env->dr[6] = env->exception_payload;
+            } else if (env->exception_nr == EXCP0E_PAGE) {
+                env->cr[2] = env->exception_payload;
+            }
+        }
+    }
+
+    return 0;
 }
 
 static int cpu_post_load(void *opaque, int version_id)
@@ -356,6 +308,10 @@ static int cpu_post_load(void *opaque, int version_id)
         return -EINVAL;
     }
 
+    if (env->fpregs_format_vmstate) {
+        error_report("Unsupported old non-softfloat CPU state");
+        return -EINVAL;
+    }
     /*
      * Real mode guest segments register DPL should be zero.
      * Older KVM version were setting it wrongly.
@@ -382,28 +338,54 @@ static int cpu_post_load(void *opaque, int version_id)
     env->hflags &= ~HF_CPL_MASK;
     env->hflags |= (env->segs[R_SS].flags >> DESC_DPL_SHIFT) & HF_CPL_MASK;
 
+#ifdef CONFIG_KVM
+    if ((env->hflags & HF_GUEST_MASK) &&
+        (!env->nested_state ||
+        !(env->nested_state->flags & KVM_STATE_NESTED_GUEST_MODE))) {
+        error_report("vCPU set in guest-mode inconsistent with "
+                     "migrated kernel nested state");
+        return -EINVAL;
+    }
+#endif
+
+    /*
+     * There are cases that we can get valid exception_nr with both
+     * exception_pending and exception_injected being cleared.
+     * This can happen in one of the following scenarios:
+     * 1) Source is older QEMU without KVM_CAP_EXCEPTION_PAYLOAD support.
+     * 2) Source is running on kernel without KVM_CAP_EXCEPTION_PAYLOAD support.
+     * 3) "cpu/exception_info" subsection not sent because there is no exception
+     *    pending or guest wasn't running L2 (See comment in cpu_pre_save()).
+     *
+     * In those cases, we can just deduce that a valid exception_nr means
+     * we can treat the exception as already injected.
+     */
+    if ((env->exception_nr != -1) &&
+        !env->exception_pending && !env->exception_injected) {
+        env->exception_injected = 1;
+    }
+
     env->fpstt = (env->fpus_vmstate >> 11) & 7;
     env->fpus = env->fpus_vmstate & ~0x3800;
     env->fptag_vmstate ^= 0xff;
     for(i = 0; i < 8; i++) {
         env->fptags[i] = (env->fptag_vmstate >> i) & 1;
     }
-    update_fp_status(env);
+    if (tcg_enabled()) {
+        target_ulong dr7;
+        update_fp_status(env);
+        update_mxcsr_status(env);
 
-    cpu_breakpoint_remove_all(cs, BP_CPU);
-    cpu_watchpoint_remove_all(cs, BP_CPU);
-    {
+        cpu_breakpoint_remove_all(cs, BP_CPU);
+        cpu_watchpoint_remove_all(cs, BP_CPU);
+
         /* Indicate all breakpoints disabled, as they are, then
            let the helper re-enable them.  */
-        target_ulong dr7 = env->dr[7];
+        dr7 = env->dr[7];
         env->dr[7] = dr7 & ~(DR7_GLOBAL_BP_MASK | DR7_LOCAL_BP_MASK);
         cpu_x86_update_dr7(env, dr7);
     }
     tlb_flush(cs);
-
-    if (tcg_enabled()) {
-        cpu_smm_update(cpu);
-    }
     return 0;
 }
 
@@ -427,6 +409,35 @@ static bool steal_time_msr_needed(void *opaque)
 
     return cpu->env.steal_time_msr != 0;
 }
+
+static bool exception_info_needed(void *opaque)
+{
+    X86CPU *cpu = opaque;
+    CPUX86State *env = &cpu->env;
+
+    /*
+     * It is important to save exception-info only in case
+     * we need to distingiush between a pending and injected
+     * exception. Which is only required in case there is a
+     * pending exception and vCPU is running L2.
+     * For more info, refer to comment in cpu_pre_save().
+     */
+    return env->exception_pending && (env->hflags & HF_GUEST_MASK);
+}
+
+static const VMStateDescription vmstate_exception_info = {
+    .name = "cpu/exception_info",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = exception_info_needed,
+    .fields = (VMStateField[]) {
+        VMSTATE_UINT8(env.exception_pending, X86CPU),
+        VMSTATE_UINT8(env.exception_injected, X86CPU),
+        VMSTATE_UINT8(env.exception_has_payload, X86CPU),
+        VMSTATE_UINT64(env.exception_payload, X86CPU),
+        VMSTATE_END_OF_LIST()
+    }
+};
 
 static const VMStateDescription vmstate_steal_time_msr = {
     .name = "cpu/steal_time_msr",
@@ -497,6 +508,25 @@ static const VMStateDescription vmstate_msr_tsc_adjust = {
     .needed = tsc_adjust_needed,
     .fields = (VMStateField[]) {
         VMSTATE_UINT64(env.tsc_adjust, X86CPU),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static bool msr_smi_count_needed(void *opaque)
+{
+    X86CPU *cpu = opaque;
+    CPUX86State *env = &cpu->env;
+
+    return cpu->migrate_smi_count && env->msr_smi_count != 0;
+}
+
+static const VMStateDescription vmstate_msr_smi_count = {
+    .name = "cpu/msr_smi_count",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = msr_smi_count_needed,
+    .fields = (VMStateField[]) {
+        VMSTATE_UINT64(env.msr_smi_count, X86CPU),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -696,7 +726,7 @@ static bool hyperv_crash_enable_needed(void *opaque)
     CPUX86State *env = &cpu->env;
     int i;
 
-    for (i = 0; i < HV_X64_MSR_CRASH_PARAMS; i++) {
+    for (i = 0; i < HV_CRASH_PARAMS; i++) {
         if (env->msr_hv_crash_params[i]) {
             return true;
         }
@@ -710,8 +740,7 @@ static const VMStateDescription vmstate_msr_hyperv_crash = {
     .minimum_version_id = 1,
     .needed = hyperv_crash_enable_needed,
     .fields = (VMStateField[]) {
-        VMSTATE_UINT64_ARRAY(env.msr_hv_crash_params,
-                             X86CPU, HV_X64_MSR_CRASH_PARAMS),
+        VMSTATE_UINT64_ARRAY(env.msr_hv_crash_params, X86CPU, HV_CRASH_PARAMS),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -721,7 +750,7 @@ static bool hyperv_runtime_enable_needed(void *opaque)
     X86CPU *cpu = opaque;
     CPUX86State *env = &cpu->env;
 
-    if (!cpu->hyperv_runtime) {
+    if (!hyperv_feat_enabled(cpu, HYPERV_FEAT_RUNTIME)) {
         return false;
     }
 
@@ -760,17 +789,24 @@ static bool hyperv_synic_enable_needed(void *opaque)
     return false;
 }
 
+static int hyperv_synic_post_load(void *opaque, int version_id)
+{
+    X86CPU *cpu = opaque;
+    hyperv_x86_synic_update(cpu);
+    return 0;
+}
+
 static const VMStateDescription vmstate_msr_hyperv_synic = {
     .name = "cpu/msr_hyperv_synic",
     .version_id = 1,
     .minimum_version_id = 1,
     .needed = hyperv_synic_enable_needed,
+    .post_load = hyperv_synic_post_load,
     .fields = (VMStateField[]) {
         VMSTATE_UINT64(env.msr_hv_synic_control, X86CPU),
         VMSTATE_UINT64(env.msr_hv_synic_evt_page, X86CPU),
         VMSTATE_UINT64(env.msr_hv_synic_msg_page, X86CPU),
-        VMSTATE_UINT64_ARRAY(env.msr_hv_synic_sint, X86CPU,
-                             HV_SYNIC_SINT_COUNT),
+        VMSTATE_UINT64_ARRAY(env.msr_hv_synic_sint, X86CPU, HV_SINT_COUNT),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -795,10 +831,32 @@ static const VMStateDescription vmstate_msr_hyperv_stimer = {
     .minimum_version_id = 1,
     .needed = hyperv_stimer_enable_needed,
     .fields = (VMStateField[]) {
-        VMSTATE_UINT64_ARRAY(env.msr_hv_stimer_config,
-                             X86CPU, HV_SYNIC_STIMER_COUNT),
-        VMSTATE_UINT64_ARRAY(env.msr_hv_stimer_count,
-                             X86CPU, HV_SYNIC_STIMER_COUNT),
+        VMSTATE_UINT64_ARRAY(env.msr_hv_stimer_config, X86CPU,
+                             HV_STIMER_COUNT),
+        VMSTATE_UINT64_ARRAY(env.msr_hv_stimer_count, X86CPU, HV_STIMER_COUNT),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static bool hyperv_reenlightenment_enable_needed(void *opaque)
+{
+    X86CPU *cpu = opaque;
+    CPUX86State *env = &cpu->env;
+
+    return env->msr_hv_reenlightenment_control != 0 ||
+        env->msr_hv_tsc_emulation_control != 0 ||
+        env->msr_hv_tsc_emulation_status != 0;
+}
+
+static const VMStateDescription vmstate_msr_hyperv_reenlightenment = {
+    .name = "cpu/msr_hyperv_reenlightenment",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = hyperv_reenlightenment_enable_needed,
+    .fields = (VMStateField[]) {
+        VMSTATE_UINT64(env.msr_hv_reenlightenment_control, X86CPU),
+        VMSTATE_UINT64(env.msr_hv_tsc_emulation_control, X86CPU),
+        VMSTATE_UINT64(env.msr_hv_tsc_emulation_status, X86CPU),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -909,6 +967,162 @@ static const VMStateDescription vmstate_tsc_khz = {
     }
 };
 
+#ifdef CONFIG_KVM
+
+static bool vmx_vmcs12_needed(void *opaque)
+{
+    struct kvm_nested_state *nested_state = opaque;
+    return (nested_state->size >
+            offsetof(struct kvm_nested_state, data.vmx[0].vmcs12));
+}
+
+static const VMStateDescription vmstate_vmx_vmcs12 = {
+    .name = "cpu/kvm_nested_state/vmx/vmcs12",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = vmx_vmcs12_needed,
+    .fields = (VMStateField[]) {
+        VMSTATE_UINT8_ARRAY(data.vmx[0].vmcs12,
+                            struct kvm_nested_state,
+                            KVM_STATE_NESTED_VMX_VMCS_SIZE),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static bool vmx_shadow_vmcs12_needed(void *opaque)
+{
+    struct kvm_nested_state *nested_state = opaque;
+    return (nested_state->size >
+            offsetof(struct kvm_nested_state, data.vmx[0].shadow_vmcs12));
+}
+
+static const VMStateDescription vmstate_vmx_shadow_vmcs12 = {
+    .name = "cpu/kvm_nested_state/vmx/shadow_vmcs12",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = vmx_shadow_vmcs12_needed,
+    .fields = (VMStateField[]) {
+        VMSTATE_UINT8_ARRAY(data.vmx[0].shadow_vmcs12,
+                            struct kvm_nested_state,
+                            KVM_STATE_NESTED_VMX_VMCS_SIZE),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static bool vmx_nested_state_needed(void *opaque)
+{
+    struct kvm_nested_state *nested_state = opaque;
+
+    return (nested_state->format == KVM_STATE_NESTED_FORMAT_VMX &&
+            nested_state->hdr.vmx.vmxon_pa != -1ull);
+}
+
+static const VMStateDescription vmstate_vmx_nested_state = {
+    .name = "cpu/kvm_nested_state/vmx",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = vmx_nested_state_needed,
+    .fields = (VMStateField[]) {
+        VMSTATE_U64(hdr.vmx.vmxon_pa, struct kvm_nested_state),
+        VMSTATE_U64(hdr.vmx.vmcs12_pa, struct kvm_nested_state),
+        VMSTATE_U16(hdr.vmx.smm.flags, struct kvm_nested_state),
+        VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription*[]) {
+        &vmstate_vmx_vmcs12,
+        &vmstate_vmx_shadow_vmcs12,
+        NULL,
+    }
+};
+
+static bool nested_state_needed(void *opaque)
+{
+    X86CPU *cpu = opaque;
+    CPUX86State *env = &cpu->env;
+
+    return (env->nested_state &&
+            vmx_nested_state_needed(env->nested_state));
+}
+
+static int nested_state_post_load(void *opaque, int version_id)
+{
+    X86CPU *cpu = opaque;
+    CPUX86State *env = &cpu->env;
+    struct kvm_nested_state *nested_state = env->nested_state;
+    int min_nested_state_len = offsetof(struct kvm_nested_state, data);
+    int max_nested_state_len = kvm_max_nested_state_length();
+
+    /*
+     * If our kernel don't support setting nested state
+     * and we have received nested state from migration stream,
+     * we need to fail migration
+     */
+    if (max_nested_state_len <= 0) {
+        error_report("Received nested state when kernel cannot restore it");
+        return -EINVAL;
+    }
+
+    /*
+     * Verify that the size of received nested_state struct
+     * at least cover required header and is not larger
+     * than the max size that our kernel support
+     */
+    if (nested_state->size < min_nested_state_len) {
+        error_report("Received nested state size less than min: "
+                     "len=%d, min=%d",
+                     nested_state->size, min_nested_state_len);
+        return -EINVAL;
+    }
+    if (nested_state->size > max_nested_state_len) {
+        error_report("Recieved unsupported nested state size: "
+                     "nested_state->size=%d, max=%d",
+                     nested_state->size, max_nested_state_len);
+        return -EINVAL;
+    }
+
+    /* Verify format is valid */
+    if ((nested_state->format != KVM_STATE_NESTED_FORMAT_VMX) &&
+        (nested_state->format != KVM_STATE_NESTED_FORMAT_SVM)) {
+        error_report("Received invalid nested state format: %d",
+                     nested_state->format);
+        return -EINVAL;
+    }
+
+    return 0;
+}
+
+static const VMStateDescription vmstate_kvm_nested_state = {
+    .name = "cpu/kvm_nested_state",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (VMStateField[]) {
+        VMSTATE_U16(flags, struct kvm_nested_state),
+        VMSTATE_U16(format, struct kvm_nested_state),
+        VMSTATE_U32(size, struct kvm_nested_state),
+        VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription*[]) {
+        &vmstate_vmx_nested_state,
+        NULL
+    }
+};
+
+static const VMStateDescription vmstate_nested_state = {
+    .name = "cpu/nested_state",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = nested_state_needed,
+    .post_load = nested_state_post_load,
+    .fields = (VMStateField[]) {
+        VMSTATE_STRUCT_POINTER(env.nested_state, X86CPU,
+                vmstate_kvm_nested_state,
+                struct kvm_nested_state),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+#endif
+
 static bool mcg_ext_ctl_needed(void *opaque)
 {
     X86CPU *cpu = opaque;
@@ -927,10 +1141,126 @@ static const VMStateDescription vmstate_mcg_ext_ctl = {
     }
 };
 
+static bool spec_ctrl_needed(void *opaque)
+{
+    X86CPU *cpu = opaque;
+    CPUX86State *env = &cpu->env;
+
+    return env->spec_ctrl != 0;
+}
+
+static const VMStateDescription vmstate_spec_ctrl = {
+    .name = "cpu/spec_ctrl",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = spec_ctrl_needed,
+    .fields = (VMStateField[]){
+        VMSTATE_UINT64(env.spec_ctrl, X86CPU),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static bool intel_pt_enable_needed(void *opaque)
+{
+    X86CPU *cpu = opaque;
+    CPUX86State *env = &cpu->env;
+    int i;
+
+    if (env->msr_rtit_ctrl || env->msr_rtit_status ||
+        env->msr_rtit_output_base || env->msr_rtit_output_mask ||
+        env->msr_rtit_cr3_match) {
+        return true;
+    }
+
+    for (i = 0; i < MAX_RTIT_ADDRS; i++) {
+        if (env->msr_rtit_addrs[i]) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static const VMStateDescription vmstate_msr_intel_pt = {
+    .name = "cpu/intel_pt",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = intel_pt_enable_needed,
+    .fields = (VMStateField[]) {
+        VMSTATE_UINT64(env.msr_rtit_ctrl, X86CPU),
+        VMSTATE_UINT64(env.msr_rtit_status, X86CPU),
+        VMSTATE_UINT64(env.msr_rtit_output_base, X86CPU),
+        VMSTATE_UINT64(env.msr_rtit_output_mask, X86CPU),
+        VMSTATE_UINT64(env.msr_rtit_cr3_match, X86CPU),
+        VMSTATE_UINT64_ARRAY(env.msr_rtit_addrs, X86CPU, MAX_RTIT_ADDRS),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static bool virt_ssbd_needed(void *opaque)
+{
+    X86CPU *cpu = opaque;
+    CPUX86State *env = &cpu->env;
+
+    return env->virt_ssbd != 0;
+}
+
+static const VMStateDescription vmstate_msr_virt_ssbd = {
+    .name = "cpu/virt_ssbd",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = virt_ssbd_needed,
+    .fields = (VMStateField[]){
+        VMSTATE_UINT64(env.virt_ssbd, X86CPU),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static bool svm_npt_needed(void *opaque)
+{
+    X86CPU *cpu = opaque;
+    CPUX86State *env = &cpu->env;
+
+    return !!(env->hflags2 & HF2_NPT_MASK);
+}
+
+static const VMStateDescription vmstate_svm_npt = {
+    .name = "cpu/svn_npt",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = svm_npt_needed,
+    .fields = (VMStateField[]){
+        VMSTATE_UINT64(env.nested_cr3, X86CPU),
+        VMSTATE_UINT32(env.nested_pg_mode, X86CPU),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+#ifndef TARGET_X86_64
+static bool intel_efer32_needed(void *opaque)
+{
+    X86CPU *cpu = opaque;
+    CPUX86State *env = &cpu->env;
+
+    return env->efer != 0;
+}
+
+static const VMStateDescription vmstate_efer32 = {
+    .name = "cpu/efer32",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = intel_efer32_needed,
+    .fields = (VMStateField[]) {
+        VMSTATE_UINT64(env.efer, X86CPU),
+        VMSTATE_END_OF_LIST()
+    }
+};
+#endif
+
 VMStateDescription vmstate_x86_cpu = {
     .name = "cpu",
     .version_id = 12,
-    .minimum_version_id = 3,
+    .minimum_version_id = 11,
     .pre_save = cpu_pre_save,
     .post_load = cpu_post_load,
     .fields = (VMStateField[]) {
@@ -943,7 +1273,8 @@ VMStateDescription vmstate_x86_cpu = {
         VMSTATE_UINT16(env.fpus_vmstate, X86CPU),
         VMSTATE_UINT16(env.fptag_vmstate, X86CPU),
         VMSTATE_UINT16(env.fpregs_format_vmstate, X86CPU),
-        VMSTATE_FP_REGS(env.fpregs, X86CPU, 8),
+
+        VMSTATE_STRUCT_ARRAY(env.fpregs, X86CPU, 8, 0, vmstate_fpreg, FPReg),
 
         VMSTATE_SEGMENT_ARRAY(env.segs, X86CPU, 6),
         VMSTATE_SEGMENT(env.ldt, X86CPU),
@@ -952,16 +1283,8 @@ VMStateDescription vmstate_x86_cpu = {
         VMSTATE_SEGMENT(env.idt, X86CPU),
 
         VMSTATE_UINT32(env.sysenter_cs, X86CPU),
-#ifdef TARGET_X86_64
-        /* Hack: In v7 size changed from 32 to 64 bits on x86_64 */
-        VMSTATE_HACK_UINT32(env.sysenter_esp, X86CPU, less_than_7),
-        VMSTATE_HACK_UINT32(env.sysenter_eip, X86CPU, less_than_7),
-        VMSTATE_UINTTL_V(env.sysenter_esp, X86CPU, 7),
-        VMSTATE_UINTTL_V(env.sysenter_eip, X86CPU, 7),
-#else
         VMSTATE_UINTTL(env.sysenter_esp, X86CPU),
         VMSTATE_UINTTL(env.sysenter_eip, X86CPU),
-#endif
 
         VMSTATE_UINTTL(env.cr[0], X86CPU),
         VMSTATE_UINTTL(env.cr[2], X86CPU),
@@ -982,46 +1305,45 @@ VMStateDescription vmstate_x86_cpu = {
         VMSTATE_UINT64(env.fmask, X86CPU),
         VMSTATE_UINT64(env.kernelgsbase, X86CPU),
 #endif
-        VMSTATE_UINT32_V(env.smbase, X86CPU, 4),
+        VMSTATE_UINT32(env.smbase, X86CPU),
 
-        VMSTATE_UINT64_V(env.pat, X86CPU, 5),
-        VMSTATE_UINT32_V(env.hflags2, X86CPU, 5),
+        VMSTATE_UINT64(env.pat, X86CPU),
+        VMSTATE_UINT32(env.hflags2, X86CPU),
 
-        VMSTATE_UINT32_TEST(parent_obj.halted, X86CPU, version_is_5),
-        VMSTATE_UINT64_V(env.vm_hsave, X86CPU, 5),
-        VMSTATE_UINT64_V(env.vm_vmcb, X86CPU, 5),
-        VMSTATE_UINT64_V(env.tsc_offset, X86CPU, 5),
-        VMSTATE_UINT64_V(env.intercept, X86CPU, 5),
-        VMSTATE_UINT16_V(env.intercept_cr_read, X86CPU, 5),
-        VMSTATE_UINT16_V(env.intercept_cr_write, X86CPU, 5),
-        VMSTATE_UINT16_V(env.intercept_dr_read, X86CPU, 5),
-        VMSTATE_UINT16_V(env.intercept_dr_write, X86CPU, 5),
-        VMSTATE_UINT32_V(env.intercept_exceptions, X86CPU, 5),
-        VMSTATE_UINT8_V(env.v_tpr, X86CPU, 5),
+        VMSTATE_UINT64(env.vm_hsave, X86CPU),
+        VMSTATE_UINT64(env.vm_vmcb, X86CPU),
+        VMSTATE_UINT64(env.tsc_offset, X86CPU),
+        VMSTATE_UINT64(env.intercept, X86CPU),
+        VMSTATE_UINT16(env.intercept_cr_read, X86CPU),
+        VMSTATE_UINT16(env.intercept_cr_write, X86CPU),
+        VMSTATE_UINT16(env.intercept_dr_read, X86CPU),
+        VMSTATE_UINT16(env.intercept_dr_write, X86CPU),
+        VMSTATE_UINT32(env.intercept_exceptions, X86CPU),
+        VMSTATE_UINT8(env.v_tpr, X86CPU),
         /* MTRRs */
-        VMSTATE_UINT64_ARRAY_V(env.mtrr_fixed, X86CPU, 11, 8),
-        VMSTATE_UINT64_V(env.mtrr_deftype, X86CPU, 8),
+        VMSTATE_UINT64_ARRAY(env.mtrr_fixed, X86CPU, 11),
+        VMSTATE_UINT64(env.mtrr_deftype, X86CPU),
         VMSTATE_MTRR_VARS(env.mtrr_var, X86CPU, MSR_MTRRcap_VCNT, 8),
         /* KVM-related states */
-        VMSTATE_INT32_V(env.interrupt_injected, X86CPU, 9),
-        VMSTATE_UINT32_V(env.mp_state, X86CPU, 9),
-        VMSTATE_UINT64_V(env.tsc, X86CPU, 9),
-        VMSTATE_INT32_V(env.exception_injected, X86CPU, 11),
-        VMSTATE_UINT8_V(env.soft_interrupt, X86CPU, 11),
-        VMSTATE_UINT8_V(env.nmi_injected, X86CPU, 11),
-        VMSTATE_UINT8_V(env.nmi_pending, X86CPU, 11),
-        VMSTATE_UINT8_V(env.has_error_code, X86CPU, 11),
-        VMSTATE_UINT32_V(env.sipi_vector, X86CPU, 11),
+        VMSTATE_INT32(env.interrupt_injected, X86CPU),
+        VMSTATE_UINT32(env.mp_state, X86CPU),
+        VMSTATE_UINT64(env.tsc, X86CPU),
+        VMSTATE_INT32(env.exception_nr, X86CPU),
+        VMSTATE_UINT8(env.soft_interrupt, X86CPU),
+        VMSTATE_UINT8(env.nmi_injected, X86CPU),
+        VMSTATE_UINT8(env.nmi_pending, X86CPU),
+        VMSTATE_UINT8(env.has_error_code, X86CPU),
+        VMSTATE_UINT32(env.sipi_vector, X86CPU),
         /* MCE */
-        VMSTATE_UINT64_V(env.mcg_cap, X86CPU, 10),
-        VMSTATE_UINT64_V(env.mcg_status, X86CPU, 10),
-        VMSTATE_UINT64_V(env.mcg_ctl, X86CPU, 10),
-        VMSTATE_UINT64_ARRAY_V(env.mce_banks, X86CPU, MCE_BANKS_DEF * 4, 10),
+        VMSTATE_UINT64(env.mcg_cap, X86CPU),
+        VMSTATE_UINT64(env.mcg_status, X86CPU),
+        VMSTATE_UINT64(env.mcg_ctl, X86CPU),
+        VMSTATE_UINT64_ARRAY(env.mce_banks, X86CPU, MCE_BANKS_DEF * 4),
         /* rdtscp */
-        VMSTATE_UINT64_V(env.tsc_aux, X86CPU, 11),
+        VMSTATE_UINT64(env.tsc_aux, X86CPU),
         /* KVM pvclock msr */
-        VMSTATE_UINT64_V(env.system_time_msr, X86CPU, 11),
-        VMSTATE_UINT64_V(env.wall_clock_msr, X86CPU, 11),
+        VMSTATE_UINT64(env.system_time_msr, X86CPU),
+        VMSTATE_UINT64(env.wall_clock_msr, X86CPU),
         /* XSAVE related fields */
         VMSTATE_UINT64_V(env.xcr0, X86CPU, 12),
         VMSTATE_UINT64_V(env.xstate_bv, X86CPU, 12),
@@ -1030,6 +1352,7 @@ VMStateDescription vmstate_x86_cpu = {
         /* The above list is not sorted /wrt version numbers, watch out! */
     },
     .subsections = (const VMStateDescription*[]) {
+        &vmstate_exception_info,
         &vmstate_async_pf_msr,
         &vmstate_pv_eoi_msr,
         &vmstate_steal_time_msr,
@@ -1047,13 +1370,25 @@ VMStateDescription vmstate_x86_cpu = {
         &vmstate_msr_hyperv_runtime,
         &vmstate_msr_hyperv_synic,
         &vmstate_msr_hyperv_stimer,
+        &vmstate_msr_hyperv_reenlightenment,
         &vmstate_avx512,
         &vmstate_xss,
         &vmstate_tsc_khz,
+        &vmstate_msr_smi_count,
 #ifdef TARGET_X86_64
         &vmstate_pkru,
 #endif
+        &vmstate_spec_ctrl,
         &vmstate_mcg_ext_ctl,
+        &vmstate_msr_intel_pt,
+        &vmstate_msr_virt_ssbd,
+        &vmstate_svm_npt,
+#ifndef TARGET_X86_64
+        &vmstate_efer32,
+#endif
+#ifdef CONFIG_KVM
+        &vmstate_nested_state,
+#endif
         NULL
     }
 };

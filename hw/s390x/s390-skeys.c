@@ -10,14 +10,17 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/units.h"
 #include "hw/boards.h"
-#include "qmp-commands.h"
-#include "migration/qemu-file.h"
 #include "hw/s390x/storage-keys.h"
+#include "qapi/error.h"
+#include "qapi/qapi-commands-misc-target.h"
+#include "qapi/qmp/qdict.h"
 #include "qemu/error-report.h"
 #include "sysemu/kvm.h"
+#include "migration/register.h"
 
-#define S390_SKEYS_BUFFER_SIZE 131072  /* Room for 128k storage keys */
+#define S390_SKEYS_BUFFER_SIZE (128 * KiB)  /* Room for 128k storage keys */
 #define S390_SKEYS_SAVE_FLAG_EOS 0x01
 #define S390_SKEYS_SAVE_FLAG_SKEYS 0x02
 #define S390_SKEYS_SAVE_FLAG_ERROR 0x04
@@ -229,10 +232,14 @@ static int qemu_s390_skeys_get(S390SKeysState *ss, uint64_t start_gfn,
 static void qemu_s390_skeys_class_init(ObjectClass *oc, void *data)
 {
     S390SKeysClass *skeyclass = S390_SKEYS_CLASS(oc);
+    DeviceClass *dc = DEVICE_CLASS(oc);
 
     skeyclass->skeys_enabled = qemu_s390_skeys_enabled;
     skeyclass->get_skeys = qemu_s390_skeys_get;
     skeyclass->set_skeys = qemu_s390_skeys_set;
+
+    /* Reason: Internal device (only one skeys device for the whole memory) */
+    dc->user_creatable = false;
 }
 
 static const TypeInfo qemu_s390_skeys_info = {
@@ -363,6 +370,11 @@ static inline bool s390_skeys_get_migration_enabled(Object *obj, Error **errp)
     return ss->migration_enabled;
 }
 
+static SaveVMHandlers savevm_s390_storage_keys = {
+    .save_state = s390_storage_keys_save,
+    .load_state = s390_storage_keys_load,
+};
+
 static inline void s390_skeys_set_migration_enabled(Object *obj, bool value,
                                             Error **errp)
 {
@@ -376,8 +388,8 @@ static inline void s390_skeys_set_migration_enabled(Object *obj, bool value,
     ss->migration_enabled = value;
 
     if (ss->migration_enabled) {
-        register_savevm(NULL, TYPE_S390_SKEYS, 0, 1, s390_storage_keys_save,
-                        s390_storage_keys_load, ss);
+        register_savevm_live(NULL, TYPE_S390_SKEYS, 0, 1,
+                             &savevm_s390_storage_keys, ss);
     } else {
         unregister_savevm(DEVICE(ss), TYPE_S390_SKEYS, ss);
     }

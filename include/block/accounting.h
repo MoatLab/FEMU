@@ -26,8 +26,11 @@
 #define BLOCK_ACCOUNTING_H
 
 #include "qemu/timed-average.h"
+#include "qemu/thread.h"
+#include "qapi/qapi-builtin-types.h"
 
 typedef struct BlockAcctTimedStats BlockAcctTimedStats;
+typedef struct BlockAcctStats BlockAcctStats;
 
 enum BlockAcctType {
     BLOCK_ACCT_READ,
@@ -37,12 +40,44 @@ enum BlockAcctType {
 };
 
 struct BlockAcctTimedStats {
+    BlockAcctStats *stats;
     TimedAverage latency[BLOCK_MAX_IOTYPE];
     unsigned interval_length; /* in seconds */
     QSLIST_ENTRY(BlockAcctTimedStats) entries;
 };
 
-typedef struct BlockAcctStats {
+typedef struct BlockLatencyHistogram {
+    /* The following histogram is represented like this:
+     *
+     * 5|           *
+     * 4|           *
+     * 3| *         *
+     * 2| *         *    *
+     * 1| *    *    *    *
+     *  +------------------
+     *      10   50   100
+     *
+     * BlockLatencyHistogram histogram = {
+     *     .nbins = 4,
+     *     .boundaries = {10, 50, 100},
+     *     .bins = {3, 1, 5, 2},
+     * };
+     *
+     * @boundaries array define histogram intervals as follows:
+     * [0, boundaries[0]), [boundaries[0], boundaries[1]), ...
+     * [boundaries[nbins-2], +inf)
+     *
+     * So, for example above, histogram intervals are:
+     * [0, 10), [10, 50), [50, 100), [100, +inf)
+     */
+    int nbins;
+    uint64_t *boundaries; /* @nbins-1 numbers here
+                             (all boundaries, except 0 and +inf) */
+    uint64_t *bins;
+} BlockLatencyHistogram;
+
+struct BlockAcctStats {
+    QemuMutex lock;
     uint64_t nr_bytes[BLOCK_MAX_IOTYPE];
     uint64_t nr_ops[BLOCK_MAX_IOTYPE];
     uint64_t invalid_ops[BLOCK_MAX_IOTYPE];
@@ -53,7 +88,8 @@ typedef struct BlockAcctStats {
     QSLIST_HEAD(, BlockAcctTimedStats) intervals;
     bool account_invalid;
     bool account_failed;
-} BlockAcctStats;
+    BlockLatencyHistogram latency_histogram[BLOCK_MAX_IOTYPE];
+};
 
 typedef struct BlockAcctCookie {
     int64_t bytes;
@@ -61,7 +97,8 @@ typedef struct BlockAcctCookie {
     enum BlockAcctType type;
 } BlockAcctCookie;
 
-void block_acct_init(BlockAcctStats *stats, bool account_invalid,
+void block_acct_init(BlockAcctStats *stats);
+void block_acct_setup(BlockAcctStats *stats, bool account_invalid,
                      bool account_failed);
 void block_acct_cleanup(BlockAcctStats *stats);
 void block_acct_add_interval(BlockAcctStats *stats, unsigned interval_length);
@@ -77,5 +114,8 @@ void block_acct_merge_done(BlockAcctStats *stats, enum BlockAcctType type,
 int64_t block_acct_idle_time_ns(BlockAcctStats *stats);
 double block_acct_queue_depth(BlockAcctTimedStats *stats,
                               enum BlockAcctType type);
+int block_latency_histogram_set(BlockAcctStats *stats, enum BlockAcctType type,
+                                uint64List *boundaries);
+void block_latency_histograms_clear(BlockAcctStats *stats);
 
 #endif

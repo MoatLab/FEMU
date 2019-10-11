@@ -11,9 +11,14 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/units.h"
 #include "qemu/error-report.h"
+#include "qemu/main-loop.h"
+#include "qemu/module.h"
 #include "qemu/range.h"
 #include "qapi/error.h"
+#include "qapi/visitor.h"
+#include <sys/ioctl.h>
 #include "hw/nvram/fw_cfg.h"
 #include "pci.h"
 #include "trace.h"
@@ -201,6 +206,7 @@ typedef struct VFIOConfigMirrorQuirk {
     uint32_t offset;
     uint8_t bar;
     MemoryRegion *mem;
+    uint8_t data[];
 } VFIOConfigMirrorQuirk;
 
 static uint64_t vfio_generic_quirk_mirror_read(void *opaque,
@@ -274,6 +280,136 @@ static const MemoryRegionOps vfio_ati_3c3_quirk = {
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
+static VFIOQuirk *vfio_quirk_alloc(int nr_mem)
+{
+    VFIOQuirk *quirk = g_new0(VFIOQuirk, 1);
+    QLIST_INIT(&quirk->ioeventfds);
+    quirk->mem = g_new0(MemoryRegion, nr_mem);
+    quirk->nr_mem = nr_mem;
+
+    return quirk;
+}
+
+static void vfio_ioeventfd_exit(VFIOPCIDevice *vdev, VFIOIOEventFD *ioeventfd)
+{
+    QLIST_REMOVE(ioeventfd, next);
+    memory_region_del_eventfd(ioeventfd->mr, ioeventfd->addr, ioeventfd->size,
+                              true, ioeventfd->data, &ioeventfd->e);
+
+    if (ioeventfd->vfio) {
+        struct vfio_device_ioeventfd vfio_ioeventfd;
+
+        vfio_ioeventfd.argsz = sizeof(vfio_ioeventfd);
+        vfio_ioeventfd.flags = ioeventfd->size;
+        vfio_ioeventfd.data = ioeventfd->data;
+        vfio_ioeventfd.offset = ioeventfd->region->fd_offset +
+                                ioeventfd->region_addr;
+        vfio_ioeventfd.fd = -1;
+
+        if (ioctl(vdev->vbasedev.fd, VFIO_DEVICE_IOEVENTFD, &vfio_ioeventfd)) {
+            error_report("Failed to remove vfio ioeventfd for %s+0x%"
+                         HWADDR_PRIx"[%d]:0x%"PRIx64" (%m)",
+                         memory_region_name(ioeventfd->mr), ioeventfd->addr,
+                         ioeventfd->size, ioeventfd->data);
+        }
+    } else {
+        qemu_set_fd_handler(event_notifier_get_fd(&ioeventfd->e),
+                            NULL, NULL, NULL);
+    }
+
+    event_notifier_cleanup(&ioeventfd->e);
+    trace_vfio_ioeventfd_exit(memory_region_name(ioeventfd->mr),
+                              (uint64_t)ioeventfd->addr, ioeventfd->size,
+                              ioeventfd->data);
+    g_free(ioeventfd);
+}
+
+static void vfio_drop_dynamic_eventfds(VFIOPCIDevice *vdev, VFIOQuirk *quirk)
+{
+    VFIOIOEventFD *ioeventfd, *tmp;
+
+    QLIST_FOREACH_SAFE(ioeventfd, &quirk->ioeventfds, next, tmp) {
+        if (ioeventfd->dynamic) {
+            vfio_ioeventfd_exit(vdev, ioeventfd);
+        }
+    }
+}
+
+static void vfio_ioeventfd_handler(void *opaque)
+{
+    VFIOIOEventFD *ioeventfd = opaque;
+
+    if (event_notifier_test_and_clear(&ioeventfd->e)) {
+        vfio_region_write(ioeventfd->region, ioeventfd->region_addr,
+                          ioeventfd->data, ioeventfd->size);
+        trace_vfio_ioeventfd_handler(memory_region_name(ioeventfd->mr),
+                                     (uint64_t)ioeventfd->addr, ioeventfd->size,
+                                     ioeventfd->data);
+    }
+}
+
+static VFIOIOEventFD *vfio_ioeventfd_init(VFIOPCIDevice *vdev,
+                                          MemoryRegion *mr, hwaddr addr,
+                                          unsigned size, uint64_t data,
+                                          VFIORegion *region,
+                                          hwaddr region_addr, bool dynamic)
+{
+    VFIOIOEventFD *ioeventfd;
+
+    if (vdev->no_kvm_ioeventfd) {
+        return NULL;
+    }
+
+    ioeventfd = g_malloc0(sizeof(*ioeventfd));
+
+    if (event_notifier_init(&ioeventfd->e, 0)) {
+        g_free(ioeventfd);
+        return NULL;
+    }
+
+    /*
+     * MemoryRegion and relative offset, plus additional ioeventfd setup
+     * parameters for configuring and later tearing down KVM ioeventfd.
+     */
+    ioeventfd->mr = mr;
+    ioeventfd->addr = addr;
+    ioeventfd->size = size;
+    ioeventfd->data = data;
+    ioeventfd->dynamic = dynamic;
+    /*
+     * VFIORegion and relative offset for implementing the userspace
+     * handler.  data & size fields shared for both uses.
+     */
+    ioeventfd->region = region;
+    ioeventfd->region_addr = region_addr;
+
+    if (!vdev->no_vfio_ioeventfd) {
+        struct vfio_device_ioeventfd vfio_ioeventfd;
+
+        vfio_ioeventfd.argsz = sizeof(vfio_ioeventfd);
+        vfio_ioeventfd.flags = ioeventfd->size;
+        vfio_ioeventfd.data = ioeventfd->data;
+        vfio_ioeventfd.offset = ioeventfd->region->fd_offset +
+                                ioeventfd->region_addr;
+        vfio_ioeventfd.fd = event_notifier_get_fd(&ioeventfd->e);
+
+        ioeventfd->vfio = !ioctl(vdev->vbasedev.fd,
+                                 VFIO_DEVICE_IOEVENTFD, &vfio_ioeventfd);
+    }
+
+    if (!ioeventfd->vfio) {
+        qemu_set_fd_handler(event_notifier_get_fd(&ioeventfd->e),
+                            vfio_ioeventfd_handler, NULL, ioeventfd);
+    }
+
+    memory_region_add_eventfd(ioeventfd->mr, ioeventfd->addr, ioeventfd->size,
+                              true, ioeventfd->data, &ioeventfd->e);
+    trace_vfio_ioeventfd_init(memory_region_name(mr), (uint64_t)addr,
+                              size, data, ioeventfd->vfio);
+
+    return ioeventfd;
+}
+
 static void vfio_vga_probe_ati_3c3_quirk(VFIOPCIDevice *vdev)
 {
     VFIOQuirk *quirk;
@@ -287,9 +423,7 @@ static void vfio_vga_probe_ati_3c3_quirk(VFIOPCIDevice *vdev)
         return;
     }
 
-    quirk = g_malloc0(sizeof(*quirk));
-    quirk->mem = g_new0(MemoryRegion, 1);
-    quirk->nr_mem = 1;
+    quirk = vfio_quirk_alloc(1);
 
     memory_region_init_io(quirk->mem, OBJECT(vdev), &vfio_ati_3c3_quirk, vdev,
                           "vfio-ati-3c3-quirk", 1);
@@ -322,9 +456,7 @@ static void vfio_probe_ati_bar4_quirk(VFIOPCIDevice *vdev, int nr)
         return;
     }
 
-    quirk = g_malloc0(sizeof(*quirk));
-    quirk->mem = g_new0(MemoryRegion, 2);
-    quirk->nr_mem = 2;
+    quirk = vfio_quirk_alloc(2);
     window = quirk->data = g_malloc0(sizeof(*window) +
                                      sizeof(VFIOConfigWindowMatch));
     window->vdev = vdev;
@@ -370,10 +502,9 @@ static void vfio_probe_ati_bar2_quirk(VFIOPCIDevice *vdev, int nr)
         return;
     }
 
-    quirk = g_malloc0(sizeof(*quirk));
+    quirk = vfio_quirk_alloc(1);
     mirror = quirk->data = g_malloc0(sizeof(*mirror));
-    mirror->mem = quirk->mem = g_new0(MemoryRegion, 1);
-    quirk->nr_mem = 1;
+    mirror->mem = quirk->mem;
     mirror->vdev = vdev;
     mirror->offset = 0x4000;
     mirror->bar = nr;
@@ -395,8 +526,6 @@ static void vfio_probe_ati_bar2_quirk(VFIOPCIDevice *vdev, int nr)
  * in BAR2 at offset 0xf00.  We don't care to support such older cards, but
  * note it for future reference.
  */
-
-#define PCI_VENDOR_ID_NVIDIA                    0x10de
 
 /*
  * Nvidia has several different methods to get to config space, the
@@ -541,15 +670,14 @@ static void vfio_vga_probe_nvidia_3d0_quirk(VFIOPCIDevice *vdev)
     VFIOQuirk *quirk;
     VFIONvidia3d0Quirk *data;
 
-    if (!vfio_pci_is(vdev, PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID) ||
+    if (vdev->no_geforce_quirks ||
+        !vfio_pci_is(vdev, PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID) ||
         !vdev->bars[1].region.size) {
         return;
     }
 
-    quirk = g_malloc0(sizeof(*quirk));
+    quirk = vfio_quirk_alloc(2);
     quirk->data = data = g_malloc0(sizeof(*data));
-    quirk->mem = g_new0(MemoryRegion, 2);
-    quirk->nr_mem = 2;
     data->vdev = vdev;
 
     memory_region_init_io(&quirk->mem[0], OBJECT(vdev), &vfio_nvidia_3d4_quirk,
@@ -659,14 +787,13 @@ static void vfio_probe_nvidia_bar5_quirk(VFIOPCIDevice *vdev, int nr)
     VFIONvidiaBAR5Quirk *bar5;
     VFIOConfigWindowQuirk *window;
 
-    if (!vfio_pci_is(vdev, PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID) ||
+    if (vdev->no_geforce_quirks ||
+        !vfio_pci_is(vdev, PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID) ||
         !vdev->vga || nr != 5 || !vdev->bars[5].ioport) {
         return;
     }
 
-    quirk = g_malloc0(sizeof(*quirk));
-    quirk->mem = g_new0(MemoryRegion, 4);
-    quirk->nr_mem = 4;
+    quirk = vfio_quirk_alloc(4);
     bar5 = quirk->data = g_malloc0(sizeof(*bar5) +
                                    (sizeof(VFIOConfigWindowMatch) * 2));
     window = &bar5->window;
@@ -716,6 +843,18 @@ static void vfio_probe_nvidia_bar5_quirk(VFIOPCIDevice *vdev, int nr)
     trace_vfio_quirk_nvidia_bar5_probe(vdev->vbasedev.name);
 }
 
+typedef struct LastDataSet {
+    VFIOQuirk *quirk;
+    hwaddr addr;
+    uint64_t data;
+    unsigned size;
+    int hits;
+    int added;
+} LastDataSet;
+
+#define MAX_DYN_IOEVENTFD 10
+#define HITS_FOR_IOEVENTFD 10
+
 /*
  * Finally, BAR0 itself.  We want to redirect any accesses to either
  * 0x1800 or 0x88000 through the PCI config space access functions.
@@ -726,6 +865,7 @@ static void vfio_nvidia_quirk_mirror_write(void *opaque, hwaddr addr,
     VFIOConfigMirrorQuirk *mirror = opaque;
     VFIOPCIDevice *vdev = mirror->vdev;
     PCIDevice *pdev = &vdev->pdev;
+    LastDataSet *last = (LastDataSet *)&mirror->data;
 
     vfio_generic_quirk_mirror_write(opaque, addr, data, size);
 
@@ -740,6 +880,49 @@ static void vfio_nvidia_quirk_mirror_write(void *opaque, hwaddr addr,
                           addr + mirror->offset, data, size);
         trace_vfio_quirk_nvidia_bar0_msi_ack(vdev->vbasedev.name);
     }
+
+    /*
+     * Automatically add an ioeventfd to handle any repeated write with the
+     * same data and size above the standard PCI config space header.  This is
+     * primarily expected to accelerate the MSI-ACK behavior, such as noted
+     * above.  Current hardware/drivers should trigger an ioeventfd at config
+     * offset 0x704 (region offset 0x88704), with data 0x0, size 4.
+     *
+     * The criteria of 10 successive hits is arbitrary but reliably adds the
+     * MSI-ACK region.  Note that as some writes are bypassed via the ioeventfd,
+     * the remaining ones have a greater chance of being seen successively.
+     * To avoid the pathological case of burning up all of QEMU's open file
+     * handles, arbitrarily limit this algorithm from adding no more than 10
+     * ioeventfds, print an error if we would have added an 11th, and then
+     * stop counting.
+     */
+    if (!vdev->no_kvm_ioeventfd &&
+        addr >= PCI_STD_HEADER_SIZEOF && last->added <= MAX_DYN_IOEVENTFD) {
+        if (addr != last->addr || data != last->data || size != last->size) {
+            last->addr = addr;
+            last->data = data;
+            last->size = size;
+            last->hits = 1;
+        } else if (++last->hits >= HITS_FOR_IOEVENTFD) {
+            if (last->added < MAX_DYN_IOEVENTFD) {
+                VFIOIOEventFD *ioeventfd;
+                ioeventfd = vfio_ioeventfd_init(vdev, mirror->mem, addr, size,
+                                        data, &vdev->bars[mirror->bar].region,
+                                        mirror->offset + addr, true);
+                if (ioeventfd) {
+                    VFIOQuirk *quirk = last->quirk;
+
+                    QLIST_INSERT_HEAD(&quirk->ioeventfds, ioeventfd, next);
+                    last->added++;
+                }
+            } else {
+                last->added++;
+                warn_report("NVIDIA ioeventfd queue full for %s, unable to "
+                            "accelerate 0x%"HWADDR_PRIx", data 0x%"PRIx64", "
+                            "size %u", vdev->vbasedev.name, addr, data, size);
+            }
+        }
+    }
 }
 
 static const MemoryRegionOps vfio_nvidia_mirror_quirk = {
@@ -748,23 +931,37 @@ static const MemoryRegionOps vfio_nvidia_mirror_quirk = {
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
+static void vfio_nvidia_bar0_quirk_reset(VFIOPCIDevice *vdev, VFIOQuirk *quirk)
+{
+    VFIOConfigMirrorQuirk *mirror = quirk->data;
+    LastDataSet *last = (LastDataSet *)&mirror->data;
+
+    last->addr = last->data = last->size = last->hits = last->added = 0;
+
+    vfio_drop_dynamic_eventfds(vdev, quirk);
+}
+
 static void vfio_probe_nvidia_bar0_quirk(VFIOPCIDevice *vdev, int nr)
 {
     VFIOQuirk *quirk;
     VFIOConfigMirrorQuirk *mirror;
+    LastDataSet *last;
 
-    if (!vfio_pci_is(vdev, PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID) ||
+    if (vdev->no_geforce_quirks ||
+        !vfio_pci_is(vdev, PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID) ||
         !vfio_is_vga(vdev) || nr != 0) {
         return;
     }
 
-    quirk = g_malloc0(sizeof(*quirk));
-    mirror = quirk->data = g_malloc0(sizeof(*mirror));
-    mirror->mem = quirk->mem = g_new0(MemoryRegion, 1);
-    quirk->nr_mem = 1;
+    quirk = vfio_quirk_alloc(1);
+    quirk->reset = vfio_nvidia_bar0_quirk_reset;
+    mirror = quirk->data = g_malloc0(sizeof(*mirror) + sizeof(LastDataSet));
+    mirror->mem = quirk->mem;
     mirror->vdev = vdev;
     mirror->offset = 0x88000;
     mirror->bar = nr;
+    last = (LastDataSet *)&mirror->data;
+    last->quirk = quirk;
 
     memory_region_init_io(mirror->mem, OBJECT(vdev),
                           &vfio_nvidia_mirror_quirk, mirror,
@@ -777,13 +974,15 @@ static void vfio_probe_nvidia_bar0_quirk(VFIOPCIDevice *vdev, int nr)
 
     /* The 0x1800 offset mirror only seems to get used by legacy VGA */
     if (vdev->vga) {
-        quirk = g_malloc0(sizeof(*quirk));
-        mirror = quirk->data = g_malloc0(sizeof(*mirror));
-        mirror->mem = quirk->mem = g_new0(MemoryRegion, 1);
-        quirk->nr_mem = 1;
+        quirk = vfio_quirk_alloc(1);
+        quirk->reset = vfio_nvidia_bar0_quirk_reset;
+        mirror = quirk->data = g_malloc0(sizeof(*mirror) + sizeof(LastDataSet));
+        mirror->mem = quirk->mem;
         mirror->vdev = vdev;
         mirror->offset = 0x1800;
         mirror->bar = nr;
+        last = (LastDataSet *)&mirror->data;
+        last->quirk = quirk;
 
         memory_region_init_io(mirror->mem, OBJECT(vdev),
                               &vfio_nvidia_mirror_quirk, mirror,
@@ -941,9 +1140,7 @@ static void vfio_probe_rtl8168_bar2_quirk(VFIOPCIDevice *vdev, int nr)
         return;
     }
 
-    quirk = g_malloc0(sizeof(*quirk));
-    quirk->mem = g_new0(MemoryRegion, 2);
-    quirk->nr_mem = 2;
+    quirk = vfio_quirk_alloc(2);
     quirk->data = rtl = g_malloc0(sizeof(*rtl));
     rtl->vdev = vdev;
 
@@ -1197,6 +1394,10 @@ static TypeInfo vfio_pci_igd_lpc_bridge_info = {
     .name = "vfio-pci-igd-lpc-bridge",
     .parent = TYPE_PCI_DEVICE,
     .class_init = vfio_pci_igd_lpc_bridge_class_init,
+    .interfaces = (InterfaceInfo[]) {
+        { INTERFACE_CONVENTIONAL_PCI_DEVICE },
+        { },
+    },
 };
 
 static void vfio_pci_igd_register_types(void)
@@ -1247,9 +1448,9 @@ static int vfio_igd_gtt_max(VFIOPCIDevice *vdev)
         ggms = 1 << ggms;
     }
 
-    ggms *= 1024 * 1024;
+    ggms *= MiB;
 
-    return (ggms / (4 * 1024)) * (gen < 8 ? 4 : 8);
+    return (ggms / (4 * KiB)) * (gen < 8 ? 4 : 8);
 }
 
 /*
@@ -1468,7 +1669,7 @@ static void vfio_probe_igd_bar4_quirk(VFIOPCIDevice *vdev, int nr)
      * but also no point in us enabling VGA if disabled in hardware.
      */
     if (!(gmch & 0x2) && !vdev->vga && vfio_populate_vga(vdev, &err)) {
-        error_reportf_err(err, ERR_PREFIX, vdev->vbasedev.name);
+        error_reportf_err(err, VFIO_MSG_PREFIX, vdev->vbasedev.name);
         error_report("IGD device %s failed to enable VGA access, "
                      "legacy mode disabled", vdev->vbasedev.name);
         goto out;
@@ -1494,19 +1695,17 @@ static void vfio_probe_igd_bar4_quirk(VFIOPCIDevice *vdev, int nr)
     ret = vfio_pci_igd_opregion_init(vdev, opregion, &err);
     if (ret) {
         error_append_hint(&err, "IGD legacy mode disabled\n");
-        error_reportf_err(err, ERR_PREFIX, vdev->vbasedev.name);
+        error_reportf_err(err, VFIO_MSG_PREFIX, vdev->vbasedev.name);
         goto out;
     }
 
     /* Setup our quirk to munge GTT addresses to the VM allocated buffer */
-    quirk = g_malloc0(sizeof(*quirk));
-    quirk->mem = g_new0(MemoryRegion, 2);
-    quirk->nr_mem = 2;
+    quirk = vfio_quirk_alloc(2);
     igd = quirk->data = g_malloc0(sizeof(*igd));
     igd->vdev = vdev;
     igd->index = ~0;
     igd->bdsm = vfio_pci_read_config(&vdev->pdev, IGD_BDSM, 4);
-    igd->bdsm &= ~((1 << 20) - 1); /* 1MB aligned */
+    igd->bdsm &= ~((1 * MiB) - 1); /* 1MB aligned */
 
     memory_region_init_io(&quirk->mem[0], OBJECT(vdev), &vfio_igd_index_quirk,
                           igd, "vfio-igd-index-quirk", 4);
@@ -1553,7 +1752,7 @@ static void vfio_probe_igd_bar4_quirk(VFIOPCIDevice *vdev, int nr)
      * config offset 0x5C.
      */
     bdsm_size = g_malloc(sizeof(*bdsm_size));
-    *bdsm_size = cpu_to_le64((ggms_mb + gms_mb) * 1024 * 1024);
+    *bdsm_size = cpu_to_le64((ggms_mb + gms_mb) * MiB);
     fw_cfg_add_file(fw_cfg_find(), "etc/igd-bdsm-size",
                     bdsm_size, sizeof(*bdsm_size));
 
@@ -1666,6 +1865,10 @@ void vfio_bar_quirk_exit(VFIOPCIDevice *vdev, int nr)
     int i;
 
     QLIST_FOREACH(quirk, &bar->quirks, next) {
+        while (!QLIST_EMPTY(&quirk->ioeventfds)) {
+            vfio_ioeventfd_exit(vdev, QLIST_FIRST(&quirk->ioeventfds));
+        }
+
         for (i = 0; i < quirk->nr_mem; i++) {
             memory_region_del_subregion(bar->region.mem, &quirk->mem[i]);
         }
@@ -1692,6 +1895,21 @@ void vfio_bar_quirk_finalize(VFIOPCIDevice *vdev, int nr)
 /*
  * Reset quirks
  */
+void vfio_quirk_reset(VFIOPCIDevice *vdev)
+{
+    int i;
+
+    for (i = 0; i < PCI_ROM_SLOT; i++) {
+        VFIOQuirk *quirk;
+        VFIOBAR *bar = &vdev->bars[i];
+
+        QLIST_FOREACH(quirk, &bar->quirks, next) {
+            if (quirk->reset) {
+                quirk->reset(vdev, quirk);
+            }
+        }
+    }
+}
 
 /*
  * AMD Radeon PCI config reset, based on Linux:
@@ -1849,4 +2067,248 @@ void vfio_setup_resetfn_quirk(VFIOPCIDevice *vdev)
         }
         break;
     }
+}
+
+/*
+ * The NVIDIA GPUDirect P2P Vendor capability allows the user to specify
+ * devices as a member of a clique.  Devices within the same clique ID
+ * are capable of direct P2P.  It's the user's responsibility that this
+ * is correct.  The spec says that this may reside at any unused config
+ * offset, but reserves and recommends hypervisors place this at C8h.
+ * The spec also states that the hypervisor should place this capability
+ * at the end of the capability list, thus next is defined as 0h.
+ *
+ * +----------------+----------------+----------------+----------------+
+ * | sig 7:0 ('P')  |  vndr len (8h) |    next (0h)   |   cap id (9h)  |
+ * +----------------+----------------+----------------+----------------+
+ * | rsvd 15:7(0h),id 6:3,ver 2:0(0h)|          sig 23:8 ('P2')        |
+ * +---------------------------------+---------------------------------+
+ *
+ * https://lists.gnu.org/archive/html/qemu-devel/2017-08/pdfUda5iEpgOS.pdf
+ */
+static void get_nv_gpudirect_clique_id(Object *obj, Visitor *v,
+                                       const char *name, void *opaque,
+                                       Error **errp)
+{
+    DeviceState *dev = DEVICE(obj);
+    Property *prop = opaque;
+    uint8_t *ptr = qdev_get_prop_ptr(dev, prop);
+
+    visit_type_uint8(v, name, ptr, errp);
+}
+
+static void set_nv_gpudirect_clique_id(Object *obj, Visitor *v,
+                                       const char *name, void *opaque,
+                                       Error **errp)
+{
+    DeviceState *dev = DEVICE(obj);
+    Property *prop = opaque;
+    uint8_t value, *ptr = qdev_get_prop_ptr(dev, prop);
+    Error *local_err = NULL;
+
+    if (dev->realized) {
+        qdev_prop_set_after_realize(dev, name, errp);
+        return;
+    }
+
+    visit_type_uint8(v, name, &value, &local_err);
+    if (local_err) {
+        error_propagate(errp, local_err);
+        return;
+    }
+
+    if (value & ~0xF) {
+        error_setg(errp, "Property %s: valid range 0-15", name);
+        return;
+    }
+
+    *ptr = value;
+}
+
+const PropertyInfo qdev_prop_nv_gpudirect_clique = {
+    .name = "uint4",
+    .description = "NVIDIA GPUDirect Clique ID (0 - 15)",
+    .get = get_nv_gpudirect_clique_id,
+    .set = set_nv_gpudirect_clique_id,
+};
+
+static int vfio_add_nv_gpudirect_cap(VFIOPCIDevice *vdev, Error **errp)
+{
+    PCIDevice *pdev = &vdev->pdev;
+    int ret, pos = 0xC8;
+
+    if (vdev->nv_gpudirect_clique == 0xFF) {
+        return 0;
+    }
+
+    if (!vfio_pci_is(vdev, PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID)) {
+        error_setg(errp, "NVIDIA GPUDirect Clique ID: invalid device vendor");
+        return -EINVAL;
+    }
+
+    if (pci_get_byte(pdev->config + PCI_CLASS_DEVICE + 1) !=
+        PCI_BASE_CLASS_DISPLAY) {
+        error_setg(errp, "NVIDIA GPUDirect Clique ID: unsupported PCI class");
+        return -EINVAL;
+    }
+
+    ret = pci_add_capability(pdev, PCI_CAP_ID_VNDR, pos, 8, errp);
+    if (ret < 0) {
+        error_prepend(errp, "Failed to add NVIDIA GPUDirect cap: ");
+        return ret;
+    }
+
+    memset(vdev->emulated_config_bits + pos, 0xFF, 8);
+    pos += PCI_CAP_FLAGS;
+    pci_set_byte(pdev->config + pos++, 8);
+    pci_set_byte(pdev->config + pos++, 'P');
+    pci_set_byte(pdev->config + pos++, '2');
+    pci_set_byte(pdev->config + pos++, 'P');
+    pci_set_byte(pdev->config + pos++, vdev->nv_gpudirect_clique << 3);
+    pci_set_byte(pdev->config + pos, 0);
+
+    return 0;
+}
+
+int vfio_add_virt_caps(VFIOPCIDevice *vdev, Error **errp)
+{
+    int ret;
+
+    ret = vfio_add_nv_gpudirect_cap(vdev, errp);
+    if (ret) {
+        return ret;
+    }
+
+    return 0;
+}
+
+static void vfio_pci_nvlink2_get_tgt(Object *obj, Visitor *v,
+                                     const char *name,
+                                     void *opaque, Error **errp)
+{
+    uint64_t tgt = (uintptr_t) opaque;
+    visit_type_uint64(v, name, &tgt, errp);
+}
+
+static void vfio_pci_nvlink2_get_link_speed(Object *obj, Visitor *v,
+                                                 const char *name,
+                                                 void *opaque, Error **errp)
+{
+    uint32_t link_speed = (uint32_t)(uintptr_t) opaque;
+    visit_type_uint32(v, name, &link_speed, errp);
+}
+
+int vfio_pci_nvidia_v100_ram_init(VFIOPCIDevice *vdev, Error **errp)
+{
+    int ret;
+    void *p;
+    struct vfio_region_info *nv2reg = NULL;
+    struct vfio_info_cap_header *hdr;
+    struct vfio_region_info_cap_nvlink2_ssatgt *cap;
+    VFIOQuirk *quirk;
+
+    ret = vfio_get_dev_region_info(&vdev->vbasedev,
+                                   VFIO_REGION_TYPE_PCI_VENDOR_TYPE |
+                                   PCI_VENDOR_ID_NVIDIA,
+                                   VFIO_REGION_SUBTYPE_NVIDIA_NVLINK2_RAM,
+                                   &nv2reg);
+    if (ret) {
+        return ret;
+    }
+
+    hdr = vfio_get_region_info_cap(nv2reg, VFIO_REGION_INFO_CAP_NVLINK2_SSATGT);
+    if (!hdr) {
+        ret = -ENODEV;
+        goto free_exit;
+    }
+    cap = (void *) hdr;
+
+    p = mmap(NULL, nv2reg->size, PROT_READ | PROT_WRITE | PROT_EXEC,
+             MAP_SHARED, vdev->vbasedev.fd, nv2reg->offset);
+    if (p == MAP_FAILED) {
+        ret = -errno;
+        goto free_exit;
+    }
+
+    quirk = vfio_quirk_alloc(1);
+    memory_region_init_ram_ptr(&quirk->mem[0], OBJECT(vdev), "nvlink2-mr",
+                               nv2reg->size, p);
+    QLIST_INSERT_HEAD(&vdev->bars[0].quirks, quirk, next);
+
+    object_property_add(OBJECT(vdev), "nvlink2-tgt", "uint64",
+                        vfio_pci_nvlink2_get_tgt, NULL, NULL,
+                        (void *) (uintptr_t) cap->tgt, NULL);
+    trace_vfio_pci_nvidia_gpu_setup_quirk(vdev->vbasedev.name, cap->tgt,
+                                          nv2reg->size);
+free_exit:
+    g_free(nv2reg);
+
+    return ret;
+}
+
+int vfio_pci_nvlink2_init(VFIOPCIDevice *vdev, Error **errp)
+{
+    int ret;
+    void *p;
+    struct vfio_region_info *atsdreg = NULL;
+    struct vfio_info_cap_header *hdr;
+    struct vfio_region_info_cap_nvlink2_ssatgt *captgt;
+    struct vfio_region_info_cap_nvlink2_lnkspd *capspeed;
+    VFIOQuirk *quirk;
+
+    ret = vfio_get_dev_region_info(&vdev->vbasedev,
+                                   VFIO_REGION_TYPE_PCI_VENDOR_TYPE |
+                                   PCI_VENDOR_ID_IBM,
+                                   VFIO_REGION_SUBTYPE_IBM_NVLINK2_ATSD,
+                                   &atsdreg);
+    if (ret) {
+        return ret;
+    }
+
+    hdr = vfio_get_region_info_cap(atsdreg,
+                                   VFIO_REGION_INFO_CAP_NVLINK2_SSATGT);
+    if (!hdr) {
+        ret = -ENODEV;
+        goto free_exit;
+    }
+    captgt = (void *) hdr;
+
+    hdr = vfio_get_region_info_cap(atsdreg,
+                                   VFIO_REGION_INFO_CAP_NVLINK2_LNKSPD);
+    if (!hdr) {
+        ret = -ENODEV;
+        goto free_exit;
+    }
+    capspeed = (void *) hdr;
+
+    /* Some NVLink bridges may not have assigned ATSD */
+    if (atsdreg->size) {
+        p = mmap(NULL, atsdreg->size, PROT_READ | PROT_WRITE | PROT_EXEC,
+                 MAP_SHARED, vdev->vbasedev.fd, atsdreg->offset);
+        if (p == MAP_FAILED) {
+            ret = -errno;
+            goto free_exit;
+        }
+
+        quirk = vfio_quirk_alloc(1);
+        memory_region_init_ram_device_ptr(&quirk->mem[0], OBJECT(vdev),
+                                          "nvlink2-atsd-mr", atsdreg->size, p);
+        QLIST_INSERT_HEAD(&vdev->bars[0].quirks, quirk, next);
+    }
+
+    object_property_add(OBJECT(vdev), "nvlink2-tgt", "uint64",
+                        vfio_pci_nvlink2_get_tgt, NULL, NULL,
+                        (void *) (uintptr_t) captgt->tgt, NULL);
+    trace_vfio_pci_nvlink2_setup_quirk_ssatgt(vdev->vbasedev.name, captgt->tgt,
+                                              atsdreg->size);
+
+    object_property_add(OBJECT(vdev), "nvlink2-link-speed", "uint32",
+                        vfio_pci_nvlink2_get_link_speed, NULL, NULL,
+                        (void *) (uintptr_t) capspeed->link_speed, NULL);
+    trace_vfio_pci_nvlink2_setup_quirk_lnkspd(vdev->vbasedev.name,
+                                              capspeed->link_speed);
+free_exit:
+    g_free(atsdreg);
+
+    return ret;
 }

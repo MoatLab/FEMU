@@ -16,9 +16,10 @@
 
 #include "qemu/osdep.h"
 #include "net/eth.h"
+#include "qapi/error.h"
+#include "qapi/qapi-commands-rocker.h"
 #include "qemu/iov.h"
 #include "qemu/timer.h"
-#include "qmp-commands.h"
 
 #include "rocker.h"
 #include "rocker_hw.h"
@@ -103,7 +104,7 @@ typedef struct of_dpa_flow_key {
 
 /* Width of key which includes field 'f' in u64s, rounded up */
 #define FLOW_KEY_WIDTH(f) \
-    DIV_ROUND_UP(offsetof(OfDpaFlowKey, f) + sizeof(((OfDpaFlowKey *)0)->f), \
+    DIV_ROUND_UP(offsetof(OfDpaFlowKey, f) + sizeof_field(OfDpaFlowKey, f), \
     sizeof(uint64_t))
 
 typedef struct of_dpa_flow_action {
@@ -368,9 +369,6 @@ static OfDpaFlow *of_dpa_flow_alloc(uint64_t cookie)
     int64_t now = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) / 1000;
 
     flow = g_new0(OfDpaFlow, 1);
-    if (!flow) {
-        return NULL;
-    }
 
     flow->cookie = cookie;
     flow->mask.tbl_id = 0xffffffff;
@@ -812,10 +810,6 @@ static int of_dpa_group_get_stats(OfDpa *of_dpa, uint32_t id)
 static OfDpaGroup *of_dpa_group_alloc(uint32_t id)
 {
     OfDpaGroup *group = g_new0(OfDpaGroup, 1);
-
-    if (!group) {
-        return NULL;
-    }
 
     group->id = id;
 
@@ -1867,9 +1861,6 @@ static int of_dpa_cmd_flow_add(OfDpa *of_dpa, uint64_t cookie,
     }
 
     flow = of_dpa_flow_alloc(cookie);
-    if (!flow) {
-        return -ROCKER_ENOMEM;
-    }
 
     err = of_dpa_cmd_flow_add_mod(of_dpa, flow, flow_tlvs);
     if (err) {
@@ -2040,17 +2031,10 @@ static int of_dpa_cmd_add_l2_flood(OfDpa *of_dpa, OfDpaGroup *group,
         rocker_tlv_get_le16(group_tlvs[ROCKER_TLV_OF_DPA_GROUP_COUNT]);
 
     tlvs = g_new0(RockerTlv *, group->l2_flood.group_count + 1);
-    if (!tlvs) {
-        return -ROCKER_ENOMEM;
-    }
 
     g_free(group->l2_flood.group_ids);
     group->l2_flood.group_ids =
         g_new0(uint32_t, group->l2_flood.group_count);
-    if (!group->l2_flood.group_ids) {
-        err = -ROCKER_ENOMEM;
-        goto err_out;
-    }
 
     rocker_tlv_parse_nested(tlvs, group->l2_flood.group_count,
                             group_tlvs[ROCKER_TLV_OF_DPA_GROUP_IDS]);
@@ -2157,9 +2141,6 @@ static int of_dpa_cmd_group_add(OfDpa *of_dpa, uint32_t group_id,
     }
 
     group = of_dpa_group_alloc(group_id);
-    if (!group) {
-        return -ROCKER_ENOMEM;
-    }
 
     err = of_dpa_cmd_group_do(of_dpa, group_id, group, group_tlvs);
     if (err) {

@@ -16,10 +16,11 @@
 #include "hw/qdev.h"
 #include "qemu/thread.h"
 #include "qemu/error-report.h"
+#include "qemu/module.h"
 
 #include "hw/s390x/sclp.h"
 #include "hw/s390x/event-facility.h"
-#include "sysemu/char.h"
+#include "chardev/char-fe.h"
 
 typedef struct ASCIIConsoleData {
     EventBufferHeader ebh;
@@ -83,12 +84,12 @@ static bool can_handle_event(uint8_t type)
     return type == SCLP_EVENT_ASCII_CONSOLE_DATA;
 }
 
-static unsigned int send_mask(void)
+static sccb_mask_t send_mask(void)
 {
     return SCLP_EVENT_MASK_MSG_ASCII;
 }
 
-static unsigned int receive_mask(void)
+static sccb_mask_t receive_mask(void)
 {
     return SCLP_EVENT_MASK_MSG_ASCII;
 }
@@ -163,7 +164,7 @@ static ssize_t write_console_data(SCLPEvent *event, const uint8_t *buf,
 {
     SCLPConsole *scon = SCLP_CONSOLE(event);
 
-    if (!qemu_chr_fe_get_driver(&scon->chr)) {
+    if (!qemu_chr_fe_backend_connected(&scon->chr)) {
         /* If there's no backend, we can just say we consumed all data. */
         return len;
     }
@@ -228,7 +229,7 @@ static int console_init(SCLPEvent *event)
     }
     console_available = true;
     qemu_chr_fe_set_handlers(&scon->chr, chr_can_read,
-                             chr_read, NULL, scon, NULL, true);
+                             chr_read, NULL, NULL, scon, NULL, true);
 
     return 0;
 }
@@ -246,11 +247,6 @@ static void console_reset(DeviceState *dev)
    scon->notify = false;
 }
 
-static int console_exit(SCLPEvent *event)
-{
-    return 0;
-}
-
 static Property console_properties[] = {
     DEFINE_PROP_CHR("chardev", SCLPConsole, chr),
     DEFINE_PROP_END_OF_LIST(),
@@ -265,7 +261,6 @@ static void console_class_init(ObjectClass *klass, void *data)
     dc->reset = console_reset;
     dc->vmsd = &vmstate_sclpconsole;
     ec->init = console_init;
-    ec->exit = console_exit;
     ec->get_send_mask = send_mask;
     ec->get_receive_mask = receive_mask;
     ec->can_handle_event = can_handle_event;

@@ -19,10 +19,10 @@
  */
 
 #include "qemu/osdep.h"
-#include "qemu-common.h"
 #include "qemu/error-report.h"
+#include "qemu/module.h"
 #include "hw/usb.h"
-#include "hw/usb/desc.h"
+#include "desc.h"
 #include "sysemu/bt.h"
 #include "hw/bt.h"
 
@@ -46,7 +46,7 @@ struct USBBtState {
 
     struct usb_hci_out_fifo_s {
         uint8_t data[4096];
-	int len;
+        int len;
     } outcmd, outacl, outsco;
 };
 
@@ -274,13 +274,13 @@ static void usb_bt_fifo_enqueue(struct usb_hci_in_fifo_s *fifo,
     if (off <= DFIFO_LEN_MASK) {
         if (off + len > DFIFO_LEN_MASK + 1 &&
                         (fifo->dsize = off + len) > (DFIFO_LEN_MASK + 1) * 2) {
-            fprintf(stderr, "%s: can't alloc %i bytes\n", __FUNCTION__, len);
+            fprintf(stderr, "%s: can't alloc %i bytes\n", __func__, len);
             exit(-1);
         }
         buf = fifo->data + off;
     } else {
         if (fifo->dlen > fifo->dsize) {
-            fprintf(stderr, "%s: can't alloc %i bytes\n", __FUNCTION__, len);
+            fprintf(stderr, "%s: can't alloc %i bytes\n", __func__, len);
             exit(-1);
         }
         buf = fifo->data + off - fifo->dsize;

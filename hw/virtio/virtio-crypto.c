@@ -10,8 +10,10 @@
  * (at your option) any later version.  See the COPYING file in the
  * top-level directory.
  */
+
 #include "qemu/osdep.h"
 #include "qemu/iov.h"
+#include "qemu/module.h"
 #include "hw/qdev.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
@@ -20,6 +22,7 @@
 #include "hw/virtio/virtio-crypto.h"
 #include "hw/virtio/virtio-access.h"
 #include "standard-headers/linux/virtio_ids.h"
+#include "sysemu/cryptodev-vhost.h"
 
 #define VIRTIO_CRYPTO_VM_VERSION 1
 
@@ -781,6 +784,11 @@ static void virtio_crypto_device_realize(DeviceState *dev, Error **errp)
     if (vcrypto->cryptodev == NULL) {
         error_setg(errp, "'cryptodev' parameter expects a valid object");
         return;
+    } else if (cryptodev_backend_is_used(vcrypto->cryptodev)) {
+        char *path = object_get_canonical_path_component(OBJECT(vcrypto->conf.cryptodev));
+        error_setg(errp, "can't use already used cryptodev backend: %s", path);
+        g_free(path);
+        return;
     }
 
     vcrypto->max_queues = MAX(vcrypto->cryptodev->conf.peers.queues, 1);
@@ -845,6 +853,8 @@ static const VMStateDescription vmstate_virtio_crypto = {
 };
 
 static Property virtio_crypto_properties[] = {
+    DEFINE_PROP_LINK("cryptodev", VirtIOCrypto, conf.cryptodev,
+                     TYPE_CRYPTODEV_BACKEND, CryptoDevBackend *),
     DEFINE_PROP_END_OF_LIST(),
 };
 
@@ -873,6 +883,72 @@ static void virtio_crypto_get_config(VirtIODevice *vdev, uint8_t *config)
     memcpy(config, &crypto_cfg, c->config_size);
 }
 
+static bool virtio_crypto_started(VirtIOCrypto *c, uint8_t status)
+{
+    VirtIODevice *vdev = VIRTIO_DEVICE(c);
+    return (status & VIRTIO_CONFIG_S_DRIVER_OK) &&
+        (c->status & VIRTIO_CRYPTO_S_HW_READY) && vdev->vm_running;
+}
+
+static void virtio_crypto_vhost_status(VirtIOCrypto *c, uint8_t status)
+{
+    VirtIODevice *vdev = VIRTIO_DEVICE(c);
+    int queues = c->multiqueue ? c->max_queues : 1;
+    CryptoDevBackend *b = c->cryptodev;
+    CryptoDevBackendClient *cc = b->conf.peers.ccs[0];
+
+    if (!cryptodev_get_vhost(cc, b, 0)) {
+        return;
+    }
+
+    if ((virtio_crypto_started(c, status)) == !!c->vhost_started) {
+        return;
+    }
+
+    if (!c->vhost_started) {
+        int r;
+
+        c->vhost_started = 1;
+        r = cryptodev_vhost_start(vdev, queues);
+        if (r < 0) {
+            error_report("unable to start vhost crypto: %d: "
+                         "falling back on userspace virtio", -r);
+            c->vhost_started = 0;
+        }
+    } else {
+        cryptodev_vhost_stop(vdev, queues);
+        c->vhost_started = 0;
+    }
+}
+
+static void virtio_crypto_set_status(VirtIODevice *vdev, uint8_t status)
+{
+    VirtIOCrypto *vcrypto = VIRTIO_CRYPTO(vdev);
+
+    virtio_crypto_vhost_status(vcrypto, status);
+}
+
+static void virtio_crypto_guest_notifier_mask(VirtIODevice *vdev, int idx,
+                                           bool mask)
+{
+    VirtIOCrypto *vcrypto = VIRTIO_CRYPTO(vdev);
+    int queue = virtio_crypto_vq2q(idx);
+
+    assert(vcrypto->vhost_started);
+
+    cryptodev_vhost_virtqueue_mask(vdev, queue, idx, mask);
+}
+
+static bool virtio_crypto_guest_notifier_pending(VirtIODevice *vdev, int idx)
+{
+    VirtIOCrypto *vcrypto = VIRTIO_CRYPTO(vdev);
+    int queue = virtio_crypto_vq2q(idx);
+
+    assert(vcrypto->vhost_started);
+
+    return cryptodev_vhost_virtqueue_pending(vdev, queue, idx);
+}
+
 static void virtio_crypto_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -886,20 +962,9 @@ static void virtio_crypto_class_init(ObjectClass *klass, void *data)
     vdc->get_config = virtio_crypto_get_config;
     vdc->get_features = virtio_crypto_get_features;
     vdc->reset = virtio_crypto_reset;
-}
-
-static void
-virtio_crypto_check_cryptodev_is_used(Object *obj, const char *name,
-                                      Object *val, Error **errp)
-{
-    if (cryptodev_backend_is_used(CRYPTODEV_BACKEND(val))) {
-        char *path = object_get_canonical_path_component(val);
-        error_setg(errp,
-            "can't use already used cryptodev backend: %s", path);
-        g_free(path);
-    } else {
-        qdev_prop_allow_set_link_before_realize(obj, name, val, errp);
-    }
+    vdc->set_status = virtio_crypto_set_status;
+    vdc->guest_notifier_mask = virtio_crypto_guest_notifier_mask;
+    vdc->guest_notifier_pending = virtio_crypto_guest_notifier_pending;
 }
 
 static void virtio_crypto_instance_init(Object *obj)
@@ -911,12 +976,6 @@ static void virtio_crypto_instance_init(Object *obj)
      * Can be overriden with virtio_crypto_set_config_size.
      */
     vcrypto->config_size = sizeof(struct virtio_crypto_config);
-
-    object_property_add_link(obj, "cryptodev",
-                             TYPE_CRYPTODEV_BACKEND,
-                             (Object **)&vcrypto->conf.cryptodev,
-                             virtio_crypto_check_cryptodev_is_used,
-                             OBJ_PROP_LINK_UNREF_ON_RELEASE, NULL);
 }
 
 static const TypeInfo virtio_crypto_info = {

@@ -16,8 +16,12 @@
 #include "qapi/qobject-output-visitor.h"
 #include "qapi/visitor-impl.h"
 #include "qemu/queue.h"
-#include "qemu-common.h"
-#include "qapi/qmp/types.h"
+#include "qapi/qmp/qbool.h"
+#include "qapi/qmp/qdict.h"
+#include "qapi/qmp/qlist.h"
+#include "qapi/qmp/qnull.h"
+#include "qapi/qmp/qnum.h"
+#include "qapi/qmp/qstring.h"
 
 typedef struct QStackEntry {
     QObject *value;
@@ -87,11 +91,11 @@ static void qobject_output_add_obj(QObjectOutputVisitor *qov, const char *name,
         switch (qobject_type(cur)) {
         case QTYPE_QDICT:
             assert(name);
-            qdict_put_obj(qobject_to_qdict(cur), name, value);
+            qdict_put_obj(qobject_to(QDict, cur), name, value);
             break;
         case QTYPE_QLIST:
             assert(!name);
-            qlist_append_obj(qobject_to_qlist(cur), value);
+            qlist_append_obj(qobject_to(QList, cur), value);
             break;
         default:
             g_assert_not_reached();
@@ -144,15 +148,14 @@ static void qobject_output_type_int64(Visitor *v, const char *name,
                                       int64_t *obj, Error **errp)
 {
     QObjectOutputVisitor *qov = to_qov(v);
-    qobject_output_add(qov, name, qint_from_int(*obj));
+    qobject_output_add(qov, name, qnum_from_int(*obj));
 }
 
 static void qobject_output_type_uint64(Visitor *v, const char *name,
                                        uint64_t *obj, Error **errp)
 {
-    /* FIXME values larger than INT64_MAX become negative */
     QObjectOutputVisitor *qov = to_qov(v);
-    qobject_output_add(qov, name, qint_from_int(*obj));
+    qobject_output_add(qov, name, qnum_from_uint(*obj));
 }
 
 static void qobject_output_type_bool(Visitor *v, const char *name, bool *obj,
@@ -177,26 +180,27 @@ static void qobject_output_type_number(Visitor *v, const char *name,
                                        double *obj, Error **errp)
 {
     QObjectOutputVisitor *qov = to_qov(v);
-    qobject_output_add(qov, name, qfloat_from_double(*obj));
+    qobject_output_add(qov, name, qnum_from_double(*obj));
 }
 
 static void qobject_output_type_any(Visitor *v, const char *name,
                                     QObject **obj, Error **errp)
 {
     QObjectOutputVisitor *qov = to_qov(v);
-    qobject_incref(*obj);
-    qobject_output_add_obj(qov, name, *obj);
+
+    qobject_output_add_obj(qov, name, qobject_ref(*obj));
 }
 
-static void qobject_output_type_null(Visitor *v, const char *name, Error **errp)
+static void qobject_output_type_null(Visitor *v, const char *name,
+                                     QNull **obj, Error **errp)
 {
     QObjectOutputVisitor *qov = to_qov(v);
-    qobject_output_add_obj(qov, name, qnull());
+    qobject_output_add(qov, name, qnull());
 }
 
 /* Finish building, and return the root object.
  * The root object is never null. The caller becomes the object's
- * owner, and should use qobject_decref() when done with it.  */
+ * owner, and should use qobject_unref() when done with it.  */
 static void qobject_output_complete(Visitor *v, void *opaque)
 {
     QObjectOutputVisitor *qov = to_qov(v);
@@ -205,8 +209,7 @@ static void qobject_output_complete(Visitor *v, void *opaque)
     assert(qov->root && QSLIST_EMPTY(&qov->stack));
     assert(opaque == qov->result);
 
-    qobject_incref(qov->root);
-    *qov->result = qov->root;
+    *qov->result = qobject_ref(qov->root);
     qov->result = NULL;
 }
 
@@ -221,7 +224,7 @@ static void qobject_output_free(Visitor *v)
         g_free(e);
     }
 
-    qobject_decref(qov->root);
+    qobject_unref(qov->root);
     g_free(qov);
 }
 

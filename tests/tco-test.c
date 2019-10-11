@@ -6,11 +6,13 @@
  * This work is licensed under the terms of the GNU GPL, version 2 or later.
  * See the COPYING file in the top-level directory.
  */
+
 #include "qemu/osdep.h"
 
 #include "libqtest.h"
 #include "libqos/pci.h"
 #include "libqos/pci-pc.h"
+#include "qapi/qmp/qdict.h"
 #include "hw/pci/pci_regs.h"
 #include "hw/i386/ich9.h"
 #include "hw/acpi/ich9.h"
@@ -43,28 +45,26 @@ typedef struct {
     QPCIDevice *dev;
     QPCIBar tco_io_bar;
     QPCIBus *bus;
+    QTestState *qts;
 } TestData;
 
 static void test_end(TestData *d)
 {
     g_free(d->dev);
     qpci_free_pc(d->bus);
-    qtest_end();
+    qtest_quit(d->qts);
 }
 
 static void test_init(TestData *d)
 {
     QTestState *qs;
-    char *s;
 
-    s = g_strdup_printf("-machine q35 %s %s",
-                        d->noreboot ? "" : "-global ICH9-LPC.noreboot=false",
-                        !d->args ? "" : d->args);
-    qs = qtest_start(s);
+    qs = qtest_initf("-machine q35 %s %s",
+                     d->noreboot ? "" : "-global ICH9-LPC.noreboot=false",
+                     !d->args ? "" : d->args);
     qtest_irq_intercept_in(qs, "ioapic");
-    g_free(s);
 
-    d->bus = qpci_init_pc(NULL);
+    d->bus = qpci_new_pc(qs, NULL);
     d->dev = qpci_device_find(d->bus, QPCI_DEVFN(0x1f, 0x00));
     g_assert(d->dev != NULL);
 
@@ -78,6 +78,7 @@ static void test_init(TestData *d)
     qpci_config_writel(d->dev, ICH9_LPC_RCBA, RCBA_BASE_ADDR | 0x1);
 
     d->tco_io_bar = qpci_legacy_iomap(d->dev, PM_IO_BASE_ADDR + 0x60);
+    d->qts = qs;
 }
 
 static void stop_tco(const TestData *d)
@@ -115,17 +116,17 @@ static void clear_tco_status(const TestData *d)
     qpci_io_writew(d->dev, d->tco_io_bar, TCO2_STS, 0x0004);
 }
 
-static void reset_on_second_timeout(bool enable)
+static void reset_on_second_timeout(const TestData *td, bool enable)
 {
     uint32_t val;
 
-    val = readl(RCBA_BASE_ADDR + ICH9_CC_GCS);
+    val = qtest_readl(td->qts, RCBA_BASE_ADDR + ICH9_CC_GCS);
     if (enable) {
         val &= ~ICH9_CC_GCS_NO_REBOOT;
     } else {
         val |= ICH9_CC_GCS_NO_REBOOT;
     }
-    writel(RCBA_BASE_ADDR + ICH9_CC_GCS, val);
+    qtest_writel(td->qts, RCBA_BASE_ADDR + ICH9_CC_GCS, val);
 }
 
 static void test_tco_defaults(void)
@@ -171,11 +172,11 @@ static void test_tco_timeout(void)
 
     stop_tco(&d);
     clear_tco_status(&d);
-    reset_on_second_timeout(false);
+    reset_on_second_timeout(&d, false);
     set_tco_timeout(&d, ticks);
     load_tco(&d);
     start_tco(&d);
-    clock_step(ticks * TCO_TICK_NSEC);
+    qtest_clock_step(d.qts, ticks * TCO_TICK_NSEC);
 
     /* test first timeout */
     val = qpci_io_readw(d.dev, d.tco_io_bar, TCO1_STS);
@@ -190,7 +191,7 @@ static void test_tco_timeout(void)
     g_assert(ret == 0);
 
     /* test second timeout */
-    clock_step(ticks * TCO_TICK_NSEC);
+    qtest_clock_step(d.qts, ticks * TCO_TICK_NSEC);
     val = qpci_io_readw(d.dev, d.tco_io_bar, TCO1_STS);
     ret = val & TCO_TIMEOUT ? 1 : 0;
     g_assert(ret == 1);
@@ -215,18 +216,18 @@ static void test_tco_max_timeout(void)
 
     stop_tco(&d);
     clear_tco_status(&d);
-    reset_on_second_timeout(false);
+    reset_on_second_timeout(&d, false);
     set_tco_timeout(&d, ticks);
     load_tco(&d);
     start_tco(&d);
-    clock_step(((ticks & TCO_TMR_MASK) - 1) * TCO_TICK_NSEC);
+    qtest_clock_step(d.qts, ((ticks & TCO_TMR_MASK) - 1) * TCO_TICK_NSEC);
 
     val = qpci_io_readw(d.dev, d.tco_io_bar, TCO_RLD);
     g_assert_cmpint(val & TCO_RLD_MASK, ==, 1);
     val = qpci_io_readw(d.dev, d.tco_io_bar, TCO1_STS);
     ret = val & TCO_TIMEOUT ? 1 : 0;
     g_assert(ret == 0);
-    clock_step(TCO_TICK_NSEC);
+    qtest_clock_step(d.qts, TCO_TICK_NSEC);
     val = qpci_io_readw(d.dev, d.tco_io_bar, TCO1_STS);
     ret = val & TCO_TIMEOUT ? 1 : 0;
     g_assert(ret == 1);
@@ -235,15 +236,14 @@ static void test_tco_max_timeout(void)
     test_end(&d);
 }
 
-static QDict *get_watchdog_action(void)
+static QDict *get_watchdog_action(const TestData *td)
 {
-    QDict *ev = qmp("");
+    QDict *ev = qtest_qmp_eventwait_ref(td->qts, "WATCHDOG");
     QDict *data;
-    g_assert(!strcmp(qdict_get_str(ev, "event"), "WATCHDOG"));
 
     data = qdict_get_qdict(ev, "data");
-    QINCREF(data);
-    QDECREF(ev);
+    qobject_ref(data);
+    qobject_unref(ev);
     return data;
 }
 
@@ -259,14 +259,14 @@ static void test_tco_second_timeout_pause(void)
 
     stop_tco(&td);
     clear_tco_status(&td);
-    reset_on_second_timeout(true);
+    reset_on_second_timeout(&td, true);
     set_tco_timeout(&td, TCO_SECS_TO_TICKS(16));
     load_tco(&td);
     start_tco(&td);
-    clock_step(ticks * TCO_TICK_NSEC * 2);
-    ad = get_watchdog_action();
+    qtest_clock_step(td.qts, ticks * TCO_TICK_NSEC * 2);
+    ad = get_watchdog_action(&td);
     g_assert(!strcmp(qdict_get_str(ad, "action"), "pause"));
-    QDECREF(ad);
+    qobject_unref(ad);
 
     stop_tco(&td);
     test_end(&td);
@@ -284,14 +284,14 @@ static void test_tco_second_timeout_reset(void)
 
     stop_tco(&td);
     clear_tco_status(&td);
-    reset_on_second_timeout(true);
+    reset_on_second_timeout(&td, true);
     set_tco_timeout(&td, TCO_SECS_TO_TICKS(16));
     load_tco(&td);
     start_tco(&td);
-    clock_step(ticks * TCO_TICK_NSEC * 2);
-    ad = get_watchdog_action();
+    qtest_clock_step(td.qts, ticks * TCO_TICK_NSEC * 2);
+    ad = get_watchdog_action(&td);
     g_assert(!strcmp(qdict_get_str(ad, "action"), "reset"));
-    QDECREF(ad);
+    qobject_unref(ad);
 
     stop_tco(&td);
     test_end(&td);
@@ -309,14 +309,14 @@ static void test_tco_second_timeout_shutdown(void)
 
     stop_tco(&td);
     clear_tco_status(&td);
-    reset_on_second_timeout(true);
+    reset_on_second_timeout(&td, true);
     set_tco_timeout(&td, ticks);
     load_tco(&td);
     start_tco(&td);
-    clock_step(ticks * TCO_TICK_NSEC * 2);
-    ad = get_watchdog_action();
+    qtest_clock_step(td.qts, ticks * TCO_TICK_NSEC * 2);
+    ad = get_watchdog_action(&td);
     g_assert(!strcmp(qdict_get_str(ad, "action"), "shutdown"));
-    QDECREF(ad);
+    qobject_unref(ad);
 
     stop_tco(&td);
     test_end(&td);
@@ -334,14 +334,14 @@ static void test_tco_second_timeout_none(void)
 
     stop_tco(&td);
     clear_tco_status(&td);
-    reset_on_second_timeout(true);
+    reset_on_second_timeout(&td, true);
     set_tco_timeout(&td, ticks);
     load_tco(&td);
     start_tco(&td);
-    clock_step(ticks * TCO_TICK_NSEC * 2);
-    ad = get_watchdog_action();
+    qtest_clock_step(td.qts, ticks * TCO_TICK_NSEC * 2);
+    ad = get_watchdog_action(&td);
     g_assert(!strcmp(qdict_get_str(ad, "action"), "none"));
-    QDECREF(ad);
+    qobject_unref(ad);
 
     stop_tco(&td);
     test_end(&td);
@@ -359,7 +359,7 @@ static void test_tco_ticks_counter(void)
 
     stop_tco(&d);
     clear_tco_status(&d);
-    reset_on_second_timeout(false);
+    reset_on_second_timeout(&d, false);
     set_tco_timeout(&d, ticks);
     load_tco(&d);
     start_tco(&d);
@@ -367,7 +367,7 @@ static void test_tco_ticks_counter(void)
     do {
         rld = qpci_io_readw(d.dev, d.tco_io_bar, TCO_RLD) & TCO_RLD_MASK;
         g_assert_cmpint(rld, ==, ticks);
-        clock_step(TCO_TICK_NSEC);
+        qtest_clock_step(d.qts, TCO_TICK_NSEC);
         ticks--;
     } while (!(qpci_io_readw(d.dev, d.tco_io_bar, TCO1_STS) & TCO_TIMEOUT));
 
@@ -406,11 +406,11 @@ static void test_tco1_status_bits(void)
 
     stop_tco(&d);
     clear_tco_status(&d);
-    reset_on_second_timeout(false);
+    reset_on_second_timeout(&d, false);
     set_tco_timeout(&d, ticks);
     load_tco(&d);
     start_tco(&d);
-    clock_step(ticks * TCO_TICK_NSEC);
+    qtest_clock_step(d.qts, ticks * TCO_TICK_NSEC);
 
     qpci_io_writeb(d.dev, d.tco_io_bar, TCO_DAT_IN, 0);
     qpci_io_writeb(d.dev, d.tco_io_bar, TCO_DAT_OUT, 0);
@@ -435,11 +435,11 @@ static void test_tco2_status_bits(void)
 
     stop_tco(&d);
     clear_tco_status(&d);
-    reset_on_second_timeout(true);
+    reset_on_second_timeout(&d, true);
     set_tco_timeout(&d, ticks);
     load_tco(&d);
     start_tco(&d);
-    clock_step(ticks * TCO_TICK_NSEC * 2);
+    qtest_clock_step(d.qts, ticks * TCO_TICK_NSEC * 2);
 
     val = qpci_io_readw(d.dev, d.tco_io_bar, TCO2_STS);
     ret = val & (TCO_SECOND_TO_STS | TCO_BOOT_STS) ? 1 : 0;

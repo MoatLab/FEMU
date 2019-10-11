@@ -37,37 +37,21 @@ void uhci_port_test(struct qhc *hc, int port, uint16_t expect)
     g_assert((value & mask) == (expect & mask));
 }
 
-void usb_test_hotplug(const char *hcd_id, const int port,
+void usb_test_hotplug(const char *hcd_id, const char *port,
                       void (*port_check)(void))
 {
-    QDict *response;
-    char  *cmd;
+    char *id = g_strdup_printf("usbdev%s", port);
+    char *bus = g_strdup_printf("%s.0", hcd_id);
 
-    cmd = g_strdup_printf("{'execute': 'device_add',"
-                          " 'arguments': {"
-                          "   'driver': 'usb-tablet',"
-                          "   'port': '%d',"
-                          "   'bus': '%s.0',"
-                          "   'id': 'usbdev%d'"
-                          "}}", port, hcd_id, port);
-    response = qmp(cmd);
-    g_free(cmd);
-    g_assert(response);
-    g_assert(!qdict_haskey(response, "error"));
-    QDECREF(response);
+    qtest_qmp_device_add("usb-tablet", id, "{'port': %s, 'bus': %s}",
+                         port, bus);
 
     if (port_check) {
         port_check();
     }
 
-    cmd = g_strdup_printf("{'execute': 'device_del',"
-                           " 'arguments': {"
-                           "   'id': 'usbdev%d'"
-                           "}}", port);
-    response = qmp(cmd);
-    g_free(cmd);
-    g_assert(response);
-    g_assert(qdict_haskey(response, "event"));
-    g_assert(!strcmp(qdict_get_str(response, "event"), "DEVICE_DELETED"));
-    QDECREF(response);
+    qtest_qmp_device_del(id);
+
+    g_free(bus);
+    g_free(id);
 }

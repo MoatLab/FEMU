@@ -34,19 +34,22 @@
 */
 
 #include "qemu/osdep.h"
+#include "qemu/units.h"
 #include "net/net.h"
 #include "net/tap.h"
+#include "qemu/module.h"
 #include "qemu/range.h"
 #include "sysemu/sysemu.h"
 #include "hw/pci/msi.h"
 #include "hw/pci/msix.h"
 
-#include "hw/net/e1000_regs.h"
+#include "e1000_regs.h"
 
 #include "e1000x_common.h"
 #include "e1000e_core.h"
 
 #include "trace.h"
+#include "qapi/error.h"
 
 #define TYPE_E1000E "e1000e"
 #define E1000E(obj) OBJECT_CHECK(E1000EState, (obj), TYPE_E1000E)
@@ -80,10 +83,10 @@ typedef struct E1000EState {
 #define E1000E_IO_IDX       2
 #define E1000E_MSIX_IDX     3
 
-#define E1000E_MMIO_SIZE    (128 * 1024)
-#define E1000E_FLASH_SIZE   (128 * 1024)
+#define E1000E_MMIO_SIZE    (128 * KiB)
+#define E1000E_FLASH_SIZE   (128 * KiB)
 #define E1000E_IO_SIZE      (32)
-#define E1000E_MSIX_SIZE    (16 * 1024)
+#define E1000E_MSIX_SIZE    (16 * KiB)
 
 #define E1000E_MSIX_TABLE   (0x0000)
 #define E1000E_MSIX_PBA     (0x2000)
@@ -372,21 +375,26 @@ e1000e_gen_dsn(uint8_t *mac)
 static int
 e1000e_add_pm_capability(PCIDevice *pdev, uint8_t offset, uint16_t pmc)
 {
-    int ret = pci_add_capability(pdev, PCI_CAP_ID_PM, offset, PCI_PM_SIZEOF);
+    Error *local_err = NULL;
+    int ret = pci_add_capability(pdev, PCI_CAP_ID_PM, offset,
+                                 PCI_PM_SIZEOF, &local_err);
 
-    if (ret >= 0) {
-        pci_set_word(pdev->config + offset + PCI_PM_PMC,
-                     PCI_PM_CAP_VER_1_1 |
-                     pmc);
-
-        pci_set_word(pdev->wmask + offset + PCI_PM_CTRL,
-                     PCI_PM_CTRL_STATE_MASK |
-                     PCI_PM_CTRL_PME_ENABLE |
-                     PCI_PM_CTRL_DATA_SEL_MASK);
-
-        pci_set_word(pdev->w1cmask + offset + PCI_PM_CTRL,
-                     PCI_PM_CTRL_PME_STATUS);
+    if (local_err) {
+        error_report_err(local_err);
+        return ret;
     }
+
+    pci_set_word(pdev->config + offset + PCI_PM_PMC,
+                 PCI_PM_CAP_VER_1_1 |
+                 pmc);
+
+    pci_set_word(pdev->wmask + offset + PCI_PM_CTRL,
+                 PCI_PM_CTRL_STATE_MASK |
+                 PCI_PM_CTRL_PME_ENABLE |
+                 PCI_PM_CTRL_DATA_SEL_MASK);
+
+    pci_set_word(pdev->w1cmask + offset + PCI_PM_CTRL,
+                 PCI_PM_CTRL_PME_STATUS);
 
     return ret;
 }
@@ -517,13 +525,15 @@ static void e1000e_qdev_reset(DeviceState *dev)
     e1000e_core_reset(&s->core);
 }
 
-static void e1000e_pre_save(void *opaque)
+static int e1000e_pre_save(void *opaque)
 {
     E1000EState *s = opaque;
 
     trace_e1000e_cb_pre_save();
 
     e1000e_core_pre_save(&s->core);
+
+    return 0;
 }
 
 static int e1000e_post_load(void *opaque, int version_id)
@@ -548,7 +558,7 @@ static const VMStateDescription e1000e_vmstate_tx = {
     .version_id = 1,
     .minimum_version_id = 1,
     .fields = (VMStateField[]) {
-        VMSTATE_UINT8(props.sum_needed, struct e1000e_tx),
+        VMSTATE_UINT8(sum_needed, struct e1000e_tx),
         VMSTATE_UINT8(props.ipcss, struct e1000e_tx),
         VMSTATE_UINT8(props.ipcso, struct e1000e_tx),
         VMSTATE_UINT16(props.ipcse, struct e1000e_tx),
@@ -561,7 +571,7 @@ static const VMStateDescription e1000e_vmstate_tx = {
         VMSTATE_INT8(props.ip, struct e1000e_tx),
         VMSTATE_INT8(props.tcp, struct e1000e_tx),
         VMSTATE_BOOL(props.tse, struct e1000e_tx),
-        VMSTATE_BOOL(props.cptse, struct e1000e_tx),
+        VMSTATE_BOOL(cptse, struct e1000e_tx),
         VMSTATE_BOOL(skip_cp, struct e1000e_tx),
         VMSTATE_END_OF_LIST()
     }
@@ -645,12 +655,12 @@ static PropertyInfo e1000e_prop_disable_vnet,
 
 static Property e1000e_properties[] = {
     DEFINE_NIC_PROPERTIES(E1000EState, conf),
-    DEFINE_PROP_DEFAULT("disable_vnet_hdr", E1000EState, disable_vnet, false,
+    DEFINE_PROP_SIGNED("disable_vnet_hdr", E1000EState, disable_vnet, false,
                         e1000e_prop_disable_vnet, bool),
-    DEFINE_PROP_DEFAULT("subsys_ven", E1000EState, subsys_ven,
+    DEFINE_PROP_SIGNED("subsys_ven", E1000EState, subsys_ven,
                         PCI_VENDOR_ID_INTEL,
                         e1000e_prop_subsys_ven, uint16_t),
-    DEFINE_PROP_DEFAULT("subsys", E1000EState, subsys, 0,
+    DEFINE_PROP_SIGNED("subsys", E1000EState, subsys, 0,
                         e1000e_prop_subsys, uint16_t),
     DEFINE_PROP_END_OF_LIST(),
 };
@@ -667,7 +677,6 @@ static void e1000e_class_init(ObjectClass *class, void *data)
     c->revision = 0;
     c->romfile = "efi-e1000e.rom";
     c->class_id = PCI_CLASS_NETWORK_ETHERNET;
-    c->is_express = 1;
 
     dc->desc = "Intel 82574L GbE Controller";
     dc->reset = e1000e_qdev_reset;
@@ -702,6 +711,10 @@ static const TypeInfo e1000e_info = {
     .instance_size = sizeof(E1000EState),
     .class_init = e1000e_class_init,
     .instance_init = e1000e_instance_init,
+    .interfaces = (InterfaceInfo[]) {
+        { INTERFACE_PCIE_DEVICE },
+        { }
+    },
 };
 
 static void e1000e_register_types(void)

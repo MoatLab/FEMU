@@ -23,7 +23,7 @@
    for things we don't care about.  */
 
 #include "qemu/osdep.h"
-#include "disas/bfd.h"
+#include "disas/dis-asm.h"
 
 #define ARM_EXT_V1	 0
 #define ARM_EXT_V2	 0
@@ -68,6 +68,17 @@ static void floatformat_to_double (unsigned char *data, double *dest)
     } u;
     u.i = data[0] | (data[1] << 8) | (data[2] << 16) | (data[3] << 24);
     *dest = u.f;
+}
+
+static int arm_read_memory(bfd_vma memaddr, bfd_byte *b, int length,
+                           struct disassemble_info *info)
+{
+    assert((info->flags & INSN_ARM_BE32) == 0 || length == 2 || length == 4);
+
+    if ((info->flags & INSN_ARM_BE32) != 0 && length == 2) {
+        memaddr ^= 2;
+    }
+    return info->read_memory_func(memaddr, b, length, info);
 }
 
 /* End of qemu specific additions.  */
@@ -1066,7 +1077,7 @@ static const struct opcode32 arm_opcodes[] =
    %S                   print Thumb register (bits 3..5 as high number if bit 6 set)
    %D                   print Thumb register (bits 0..2 as high number if bit 7 set)
    %<bitfield>I         print bitfield as a signed decimal
-   				(top bit of range being the sign bit)
+				(top bit of range being the sign bit)
    %N                   print Thumb register mask (with LR)
    %O                   print Thumb register mask (with PC)
    %M                   print Thumb register mask
@@ -1651,7 +1662,7 @@ print_insn_coprocessor (bfd_vma pc, struct disassemble_info *info, long given,
 	}
       else
 	{
-	  /* Only match unconditional instuctions against unconditional
+          /* Only match unconditional instructions against unconditional
 	     patterns.  */
 	  if ((given & 0xf0000000) == 0xf0000000)
 	    {
@@ -3810,7 +3821,7 @@ find_ifthen_state (bfd_vma pc, struct disassemble_info *info,
 	  return;
 	}
       addr -= 2;
-      status = info->read_memory_func (addr, (bfd_byte *)b, 2, info);
+      status = arm_read_memory (addr, (bfd_byte *)b, 2, info);
       if (status)
 	return;
 
@@ -3882,7 +3893,7 @@ print_insn_arm (bfd_vma pc, struct disassemble_info *info)
       info->bytes_per_chunk = size;
       printer = print_insn_data;
 
-      status = info->read_memory_func (pc, (bfd_byte *)b, size, info);
+      status = arm_read_memory (pc, (bfd_byte *)b, size, info);
       given = 0;
       if (little)
 	for (i = size - 1; i >= 0; i--)
@@ -3899,7 +3910,7 @@ print_insn_arm (bfd_vma pc, struct disassemble_info *info)
       info->bytes_per_chunk = 4;
       size = 4;
 
-      status = info->read_memory_func (pc, (bfd_byte *)b, 4, info);
+      status = arm_read_memory (pc, (bfd_byte *)b, 4, info);
       if (little)
 	given = (b[0]) | (b[1] << 8) | (b[2] << 16) | ((unsigned)b[3] << 24);
       else
@@ -3915,7 +3926,7 @@ print_insn_arm (bfd_vma pc, struct disassemble_info *info)
       info->bytes_per_chunk = 2;
       size = 2;
 
-      status = info->read_memory_func (pc, (bfd_byte *)b, 2, info);
+      status = arm_read_memory (pc, (bfd_byte *)b, 2, info);
       if (little)
 	given = (b[0]) | (b[1] << 8);
       else
@@ -3929,7 +3940,7 @@ print_insn_arm (bfd_vma pc, struct disassemble_info *info)
 	      || (given & 0xF800) == 0xF000
 	      || (given & 0xF800) == 0xE800)
 	    {
-	      status = info->read_memory_func (pc + 2, (bfd_byte *)b, 2, info);
+	      status = arm_read_memory (pc + 2, (bfd_byte *)b, 2, info);
 	      if (little)
 		given = (b[0]) | (b[1] << 8) | (given << 16);
 	      else

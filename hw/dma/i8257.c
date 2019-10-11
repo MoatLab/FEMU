@@ -21,11 +21,14 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+
 #include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "hw/isa/isa.h"
-#include "hw/isa/i8257.h"
+#include "hw/dma/i8257.h"
 #include "qemu/main-loop.h"
+#include "qemu/module.h"
+#include "qemu/log.h"
 #include "trace.h"
 
 #define I8257(obj) \
@@ -185,7 +188,8 @@ static void i8257_write_cont(void *opaque, hwaddr nport, uint64_t data,
     switch (iport) {
     case 0x00:                  /* command */
         if ((data != 0) && (data & CMD_NOT_SUPPORTED)) {
-            dolog("command %"PRIx64" not supported\n", data);
+            qemu_log_mask(LOG_UNIMP, "%s: cmd 0x%02"PRIx64" not supported\n",
+                          __func__, data);
             return;
         }
         d->command = data;
@@ -601,7 +605,7 @@ static void i8257_class_init(ObjectClass *klass, void *data)
     idc->schedule = i8257_dma_schedule;
     idc->register_channel = i8257_dma_register_channel;
     /* Reason: needs to be wired up by isa_bus_dma() to work */
-    dc->cannot_instantiate_with_device_add_yet = true;
+    dc->user_creatable = false;
 }
 
 static const TypeInfo i8257_info = {
@@ -622,7 +626,7 @@ static void i8257_register_types(void)
 
 type_init(i8257_register_types)
 
-void DMA_init(ISABus *bus, int high_page_enable)
+void i8257_dma_init(ISABus *bus, bool high_page_enable)
 {
     ISADevice *isa1, *isa2;
     DeviceState *d;

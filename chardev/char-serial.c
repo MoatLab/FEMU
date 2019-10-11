@@ -21,20 +21,23 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+
 #include "qemu/osdep.h"
+#include "qemu/module.h"
+#include "qemu/option.h"
 #include "qemu/sockets.h"
 #include "io/channel-file.h"
 #include "qapi/error.h"
 
 #ifdef _WIN32
-#include "char-win.h"
+#include "chardev/char-win.h"
 #else
 #include <sys/ioctl.h>
 #include <termios.h>
-#include "char-fd.h"
+#include "chardev/char-fd.h"
 #endif
 
-#include "char-serial.h"
+#include "chardev/char-serial.h"
 
 #ifdef _WIN32
 
@@ -45,7 +48,7 @@ static void qmp_chardev_open_serial(Chardev *chr,
 {
     ChardevHostdev *serial = backend->u.serial.data;
 
-    win_chr_init(chr, serial->device, errp);
+    win_chr_serial_init(chr, serial->device, errp);
 }
 
 #elif defined(__linux__) || defined(__sun__) || defined(__FreeBSD__)      \
@@ -55,7 +58,7 @@ static void qmp_chardev_open_serial(Chardev *chr,
 static void tty_serial_init(int fd, int speed,
                             int parity, int data_bits, int stop_bits)
 {
-    struct termios tty;
+    struct termios tty = {0};
     speed_t spd;
 
 #if 0
@@ -64,75 +67,80 @@ static void tty_serial_init(int fd, int speed,
 #endif
     tcgetattr(fd, &tty);
 
-#define check_speed(val) if (speed <= val) { spd = B##val; break; }
+#define check_speed(val) \
+    if (speed <= val) {  \
+        spd = B##val;    \
+        goto done;       \
+    }
+
     speed = speed * 10 / 11;
-    do {
-        check_speed(50);
-        check_speed(75);
-        check_speed(110);
-        check_speed(134);
-        check_speed(150);
-        check_speed(200);
-        check_speed(300);
-        check_speed(600);
-        check_speed(1200);
-        check_speed(1800);
-        check_speed(2400);
-        check_speed(4800);
-        check_speed(9600);
-        check_speed(19200);
-        check_speed(38400);
-        /* Non-Posix values follow. They may be unsupported on some systems. */
-        check_speed(57600);
-        check_speed(115200);
+    check_speed(50);
+    check_speed(75);
+    check_speed(110);
+    check_speed(134);
+    check_speed(150);
+    check_speed(200);
+    check_speed(300);
+    check_speed(600);
+    check_speed(1200);
+    check_speed(1800);
+    check_speed(2400);
+    check_speed(4800);
+    check_speed(9600);
+    check_speed(19200);
+    check_speed(38400);
+    /* Non-Posix values follow. They may be unsupported on some systems. */
+    check_speed(57600);
+    check_speed(115200);
 #ifdef B230400
-        check_speed(230400);
+    check_speed(230400);
 #endif
 #ifdef B460800
-        check_speed(460800);
+    check_speed(460800);
 #endif
 #ifdef B500000
-        check_speed(500000);
+    check_speed(500000);
 #endif
 #ifdef B576000
-        check_speed(576000);
+    check_speed(576000);
 #endif
 #ifdef B921600
-        check_speed(921600);
+    check_speed(921600);
 #endif
 #ifdef B1000000
-        check_speed(1000000);
+    check_speed(1000000);
 #endif
 #ifdef B1152000
-        check_speed(1152000);
+    check_speed(1152000);
 #endif
 #ifdef B1500000
-        check_speed(1500000);
+    check_speed(1500000);
 #endif
 #ifdef B2000000
-        check_speed(2000000);
+    check_speed(2000000);
 #endif
 #ifdef B2500000
-        check_speed(2500000);
+    check_speed(2500000);
 #endif
 #ifdef B3000000
-        check_speed(3000000);
+    check_speed(3000000);
 #endif
 #ifdef B3500000
-        check_speed(3500000);
+    check_speed(3500000);
 #endif
 #ifdef B4000000
-        check_speed(4000000);
+    check_speed(4000000);
 #endif
-        spd = B115200;
-    } while (0);
+    spd = B115200;
 
+#undef check_speed
+ done:
     cfsetispeed(&tty, spd);
     cfsetospeed(&tty, spd);
 
     tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP
                      | INLCR | IGNCR | ICRNL | IXON);
-    tty.c_oflag |= OPOST;
+    tty.c_oflag &= ~OPOST;
     tty.c_lflag &= ~(ECHO | ECHONL | ICANON | IEXTEN | ISIG);
     tty.c_cflag &= ~(CSIZE | PARENB | PARODD | CRTSCTS | CSTOPB);
     switch (data_bits) {
@@ -258,7 +266,8 @@ static void qmp_chardev_open_serial(Chardev *chr,
     ChardevHostdev *serial = backend->u.serial.data;
     int fd;
 
-    fd = qmp_chardev_open_file_source(serial->device, O_RDWR, errp);
+    fd = qmp_chardev_open_file_source(serial->device, O_RDWR | O_NONBLOCK,
+                                      errp);
     if (fd < 0) {
         return;
     }

@@ -1,36 +1,36 @@
 #include "qemu/osdep.h"
 #include "qemu/error-report.h"
+#include "qemu/module.h"
 #include "qapi/error.h"
-#include "qemu-common.h"
 #include "cpu.h"
 #include "hw/qdev.h"
-#include "sysemu/char.h"
+#include "chardev/char-fe.h"
 #include "hw/ppc/spapr.h"
 #include "hw/ppc/spapr_vio.h"
 
 #define VTERM_BUFSIZE   16
 
-typedef struct VIOsPAPRVTYDevice {
-    VIOsPAPRDevice sdev;
+typedef struct SpaprVioVty {
+    SpaprVioDevice sdev;
     CharBackend chardev;
     uint32_t in, out;
     uint8_t buf[VTERM_BUFSIZE];
-} VIOsPAPRVTYDevice;
+} SpaprVioVty;
 
 #define TYPE_VIO_SPAPR_VTY_DEVICE "spapr-vty"
 #define VIO_SPAPR_VTY_DEVICE(obj) \
-     OBJECT_CHECK(VIOsPAPRVTYDevice, (obj), TYPE_VIO_SPAPR_VTY_DEVICE)
+     OBJECT_CHECK(SpaprVioVty, (obj), TYPE_VIO_SPAPR_VTY_DEVICE)
 
 static int vty_can_receive(void *opaque)
 {
-    VIOsPAPRVTYDevice *dev = VIO_SPAPR_VTY_DEVICE(opaque);
+    SpaprVioVty *dev = VIO_SPAPR_VTY_DEVICE(opaque);
 
     return VTERM_BUFSIZE - (dev->in - dev->out);
 }
 
 static void vty_receive(void *opaque, const uint8_t *buf, int size)
 {
-    VIOsPAPRVTYDevice *dev = VIO_SPAPR_VTY_DEVICE(opaque);
+    SpaprVioVty *dev = VIO_SPAPR_VTY_DEVICE(opaque);
     int i;
 
     if ((dev->in == dev->out) && size) {
@@ -51,13 +51,31 @@ static void vty_receive(void *opaque, const uint8_t *buf, int size)
     }
 }
 
-static int vty_getchars(VIOsPAPRDevice *sdev, uint8_t *buf, int max)
+static int vty_getchars(SpaprVioDevice *sdev, uint8_t *buf, int max)
 {
-    VIOsPAPRVTYDevice *dev = VIO_SPAPR_VTY_DEVICE(sdev);
+    SpaprVioVty *dev = VIO_SPAPR_VTY_DEVICE(sdev);
     int n = 0;
 
     while ((n < max) && (dev->out != dev->in)) {
         buf[n++] = dev->buf[dev->out++ % VTERM_BUFSIZE];
+
+        /* PowerVM's vty implementation has a bug where it inserts a
+         * \0 after every \r going to the guest.  Existing guests have
+         * a workaround for this which removes every \0 immediately
+         * following a \r, so here we make ourselves bug-for-bug
+         * compatible, so that the guest won't drop a real \0-after-\r
+         * that happens to occur in a binary stream. */
+        if (buf[n - 1] == '\r') {
+            if (n < max) {
+                buf[n++] = '\0';
+            } else {
+                /* No room for the extra \0, roll back and try again
+                 * next time */
+                dev->out--;
+                n--;
+                break;
+            }
+        }
     }
 
     qemu_chr_fe_accept_input(&dev->chardev);
@@ -65,37 +83,37 @@ static int vty_getchars(VIOsPAPRDevice *sdev, uint8_t *buf, int max)
     return n;
 }
 
-void vty_putchars(VIOsPAPRDevice *sdev, uint8_t *buf, int len)
+void vty_putchars(SpaprVioDevice *sdev, uint8_t *buf, int len)
 {
-    VIOsPAPRVTYDevice *dev = VIO_SPAPR_VTY_DEVICE(sdev);
+    SpaprVioVty *dev = VIO_SPAPR_VTY_DEVICE(sdev);
 
     /* XXX this blocks entire thread. Rewrite to use
      * qemu_chr_fe_write and background I/O callbacks */
     qemu_chr_fe_write_all(&dev->chardev, buf, len);
 }
 
-static void spapr_vty_realize(VIOsPAPRDevice *sdev, Error **errp)
+static void spapr_vty_realize(SpaprVioDevice *sdev, Error **errp)
 {
-    VIOsPAPRVTYDevice *dev = VIO_SPAPR_VTY_DEVICE(sdev);
+    SpaprVioVty *dev = VIO_SPAPR_VTY_DEVICE(sdev);
 
-    if (!qemu_chr_fe_get_driver(&dev->chardev)) {
+    if (!qemu_chr_fe_backend_connected(&dev->chardev)) {
         error_setg(errp, "chardev property not set");
         return;
     }
 
     qemu_chr_fe_set_handlers(&dev->chardev, vty_can_receive,
-                             vty_receive, NULL, dev, NULL, true);
+                             vty_receive, NULL, NULL, dev, NULL, true);
 }
 
 /* Forward declaration */
-static target_ulong h_put_term_char(PowerPCCPU *cpu, sPAPRMachineState *spapr,
+static target_ulong h_put_term_char(PowerPCCPU *cpu, SpaprMachineState *spapr,
                                     target_ulong opcode, target_ulong *args)
 {
     target_ulong reg = args[0];
     target_ulong len = args[1];
     target_ulong char0_7 = args[2];
     target_ulong char8_15 = args[3];
-    VIOsPAPRDevice *sdev;
+    SpaprVioDevice *sdev;
     uint8_t buf[16];
 
     sdev = vty_lookup(spapr, reg);
@@ -115,14 +133,14 @@ static target_ulong h_put_term_char(PowerPCCPU *cpu, sPAPRMachineState *spapr,
     return H_SUCCESS;
 }
 
-static target_ulong h_get_term_char(PowerPCCPU *cpu, sPAPRMachineState *spapr,
+static target_ulong h_get_term_char(PowerPCCPU *cpu, SpaprMachineState *spapr,
                                     target_ulong opcode, target_ulong *args)
 {
     target_ulong reg = args[0];
     target_ulong *len = args + 0;
     target_ulong *char0_7 = args + 1;
     target_ulong *char8_15 = args + 2;
-    VIOsPAPRDevice *sdev;
+    SpaprVioDevice *sdev;
     uint8_t buf[16];
 
     sdev = vty_lookup(spapr, reg);
@@ -141,7 +159,7 @@ static target_ulong h_get_term_char(PowerPCCPU *cpu, sPAPRMachineState *spapr,
     return H_SUCCESS;
 }
 
-void spapr_vty_create(VIOsPAPRBus *bus, Chardev *chardev)
+void spapr_vty_create(SpaprVioBus *bus, Chardev *chardev)
 {
     DeviceState *dev;
 
@@ -151,8 +169,8 @@ void spapr_vty_create(VIOsPAPRBus *bus, Chardev *chardev)
 }
 
 static Property spapr_vty_properties[] = {
-    DEFINE_SPAPR_PROPERTIES(VIOsPAPRVTYDevice, sdev),
-    DEFINE_PROP_CHR("chardev", VIOsPAPRVTYDevice, chardev),
+    DEFINE_SPAPR_PROPERTIES(SpaprVioVty, sdev),
+    DEFINE_PROP_CHR("chardev", SpaprVioVty, chardev),
     DEFINE_PROP_END_OF_LIST(),
 };
 
@@ -161,11 +179,11 @@ static const VMStateDescription vmstate_spapr_vty = {
     .version_id = 1,
     .minimum_version_id = 1,
     .fields = (VMStateField[]) {
-        VMSTATE_SPAPR_VIO(sdev, VIOsPAPRVTYDevice),
+        VMSTATE_SPAPR_VIO(sdev, SpaprVioVty),
 
-        VMSTATE_UINT32(in, VIOsPAPRVTYDevice),
-        VMSTATE_UINT32(out, VIOsPAPRVTYDevice),
-        VMSTATE_BUFFER(buf, VIOsPAPRVTYDevice),
+        VMSTATE_UINT32(in, SpaprVioVty),
+        VMSTATE_UINT32(out, SpaprVioVty),
+        VMSTATE_BUFFER(buf, SpaprVioVty),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -173,7 +191,7 @@ static const VMStateDescription vmstate_spapr_vty = {
 static void spapr_vty_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
-    VIOsPAPRDeviceClass *k = VIO_SPAPR_DEVICE_CLASS(klass);
+    SpaprVioDeviceClass *k = VIO_SPAPR_DEVICE_CLASS(klass);
 
     k->realize = spapr_vty_realize;
     k->dt_name = "vty";
@@ -187,13 +205,13 @@ static void spapr_vty_class_init(ObjectClass *klass, void *data)
 static const TypeInfo spapr_vty_info = {
     .name          = TYPE_VIO_SPAPR_VTY_DEVICE,
     .parent        = TYPE_VIO_SPAPR_DEVICE,
-    .instance_size = sizeof(VIOsPAPRVTYDevice),
+    .instance_size = sizeof(SpaprVioVty),
     .class_init    = spapr_vty_class_init,
 };
 
-VIOsPAPRDevice *spapr_vty_get_default(VIOsPAPRBus *bus)
+SpaprVioDevice *spapr_vty_get_default(SpaprVioBus *bus)
 {
-    VIOsPAPRDevice *sdev, *selected;
+    SpaprVioDevice *sdev, *selected;
     BusChild *kid;
 
     /*
@@ -228,9 +246,9 @@ VIOsPAPRDevice *spapr_vty_get_default(VIOsPAPRBus *bus)
     return selected;
 }
 
-VIOsPAPRDevice *vty_lookup(sPAPRMachineState *spapr, target_ulong reg)
+SpaprVioDevice *vty_lookup(SpaprMachineState *spapr, target_ulong reg)
 {
-    VIOsPAPRDevice *sdev;
+    SpaprVioDevice *sdev;
 
     sdev = spapr_vio_find_by_reg(spapr->vio_bus, reg);
     if (!sdev && reg == 0) {

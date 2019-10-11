@@ -7,7 +7,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -18,7 +18,6 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
 #include "qemu/osdep.h"
-#include "qemu-common.h"
 #include "cpu.h"
 #include "exec/gdbstub.h"
 
@@ -28,7 +27,7 @@ int openrisc_cpu_gdb_read_register(CPUState *cs, uint8_t *mem_buf, int n)
     CPUOpenRISCState *env = &cpu->env;
 
     if (n < 32) {
-        return gdb_get_reg32(mem_buf, env->gpr[n]);
+        return gdb_get_reg32(mem_buf, cpu_get_gpr(env, n));
     } else {
         switch (n) {
         case 32:    /* PPC */
@@ -61,7 +60,7 @@ int openrisc_cpu_gdb_write_register(CPUState *cs, uint8_t *mem_buf, int n)
     tmp = ldl_p(mem_buf);
 
     if (n < 32) {
-        env->gpr[n] = tmp;
+        cpu_set_gpr(env, n, tmp);
     } else {
         switch (n) {
         case 32: /* PPC */

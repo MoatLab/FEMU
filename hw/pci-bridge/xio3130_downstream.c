@@ -23,8 +23,9 @@
 #include "hw/pci/pci_ids.h"
 #include "hw/pci/msi.h"
 #include "hw/pci/pcie.h"
-#include "xio3130_downstream.h"
+#include "hw/pci/pcie_port.h"
 #include "qapi/error.h"
+#include "qemu/module.h"
 
 #define PCI_DEVICE_ID_TI_XIO3130D       0x8233  /* downstream port */
 #define XIO3130_REVISION                0x1
@@ -40,9 +41,12 @@
 static void xio3130_downstream_write_config(PCIDevice *d, uint32_t address,
                                          uint32_t val, int len)
 {
+    uint16_t slt_ctl, slt_sta;
+
+    pcie_cap_slot_get(d, &slt_ctl, &slt_sta);
     pci_bridge_write_config(d, address, val, len);
     pcie_cap_flr_write_config(d, address, val, len);
-    pcie_cap_slot_write_config(d, address, val, len);
+    pcie_cap_slot_write_config(d, slt_ctl, slt_sta, address, val, len);
     pcie_aer_write_config(d, address, val, len);
 }
 
@@ -56,33 +60,33 @@ static void xio3130_downstream_reset(DeviceState *qdev)
     pci_bridge_reset(qdev);
 }
 
-static int xio3130_downstream_initfn(PCIDevice *d)
+static void xio3130_downstream_realize(PCIDevice *d, Error **errp)
 {
     PCIEPort *p = PCIE_PORT(d);
     PCIESlot *s = PCIE_SLOT(d);
     int rc;
-    Error *err = NULL;
 
     pci_bridge_initfn(d, TYPE_PCIE_BUS);
     pcie_port_init_reg(d);
 
     rc = msi_init(d, XIO3130_MSI_OFFSET, XIO3130_MSI_NR_VECTOR,
                   XIO3130_MSI_SUPPORTED_FLAGS & PCI_MSI_FLAGS_64BIT,
-                  XIO3130_MSI_SUPPORTED_FLAGS & PCI_MSI_FLAGS_MASKBIT, &err);
+                  XIO3130_MSI_SUPPORTED_FLAGS & PCI_MSI_FLAGS_MASKBIT,
+                  errp);
     if (rc < 0) {
         assert(rc == -ENOTSUP);
-        error_report_err(err);
         goto err_bridge;
     }
 
     rc = pci_bridge_ssvid_init(d, XIO3130_SSVID_OFFSET,
-                               XIO3130_SSVID_SVID, XIO3130_SSVID_SSID);
+                               XIO3130_SSVID_SVID, XIO3130_SSVID_SSID,
+                               errp);
     if (rc < 0) {
         goto err_bridge;
     }
 
     rc = pcie_cap_init(d, XIO3130_EXP_OFFSET, PCI_EXP_TYPE_DOWNSTREAM,
-                       p->port);
+                       p->port, errp);
     if (rc < 0) {
         goto err_msi;
     }
@@ -94,17 +98,17 @@ static int xio3130_downstream_initfn(PCIDevice *d)
     pcie_chassis_create(s->chassis);
     rc = pcie_chassis_add_slot(s);
     if (rc < 0) {
+        error_setg(errp, "Can't add chassis slot, error %d", rc);
         goto err_pcie_cap;
     }
 
     rc = pcie_aer_init(d, PCI_ERR_VER, XIO3130_AER_OFFSET,
-                       PCI_ERR_SIZEOF, &err);
+                       PCI_ERR_SIZEOF, errp);
     if (rc < 0) {
-        error_report_err(err);
         goto err;
     }
 
-    return 0;
+    return;
 
 err:
     pcie_chassis_del_slot(s);
@@ -114,7 +118,6 @@ err_msi:
     msi_uninit(d);
 err_bridge:
     pci_bridge_exitfn(d);
-    return rc;
 }
 
 static void xio3130_downstream_exitfn(PCIDevice *d)
@@ -128,32 +131,6 @@ static void xio3130_downstream_exitfn(PCIDevice *d)
     pci_bridge_exitfn(d);
 }
 
-PCIESlot *xio3130_downstream_init(PCIBus *bus, int devfn, bool multifunction,
-                                  const char *bus_name, pci_map_irq_fn map_irq,
-                                  uint8_t port, uint8_t chassis,
-                                  uint16_t slot)
-{
-    PCIDevice *d;
-    PCIBridge *br;
-    DeviceState *qdev;
-
-    d = pci_create_multifunction(bus, devfn, multifunction,
-                                 "xio3130-downstream");
-    if (!d) {
-        return NULL;
-    }
-    br = PCI_BRIDGE(d);
-
-    qdev = DEVICE(d);
-    pci_bridge_map_irq(br, bus_name, map_irq);
-    qdev_prop_set_uint8(qdev, "port", port);
-    qdev_prop_set_uint8(qdev, "chassis", chassis);
-    qdev_prop_set_uint16(qdev, "slot", slot);
-    qdev_init_nofail(qdev);
-
-    return PCIE_SLOT(d);
-}
-
 static Property xio3130_downstream_props[] = {
     DEFINE_PROP_BIT(COMPAT_PROP_PCP, PCIDevice, cap_present,
                     QEMU_PCIE_SLTCAP_PCP_BITNR, true),
@@ -162,6 +139,7 @@ static Property xio3130_downstream_props[] = {
 
 static const VMStateDescription vmstate_xio3130_downstream = {
     .name = "xio3130-express-downstream-port",
+    .priority = MIG_PRI_PCI_BUS,
     .version_id = 1,
     .minimum_version_id = 1,
     .post_load = pcie_cap_slot_post_load,
@@ -178,10 +156,9 @@ static void xio3130_downstream_class_init(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
 
-    k->is_express = 1;
-    k->is_bridge = 1;
+    k->is_bridge = true;
     k->config_write = xio3130_downstream_write_config;
-    k->init = xio3130_downstream_initfn;
+    k->realize = xio3130_downstream_realize;
     k->exit = xio3130_downstream_exitfn;
     k->vendor_id = PCI_VENDOR_ID_TI;
     k->device_id = PCI_DEVICE_ID_TI_XIO3130D;
@@ -197,6 +174,10 @@ static const TypeInfo xio3130_downstream_info = {
     .name          = "xio3130-downstream",
     .parent        = TYPE_PCIE_SLOT,
     .class_init    = xio3130_downstream_class_init,
+    .interfaces = (InterfaceInfo[]) {
+        { INTERFACE_PCIE_DEVICE },
+        { }
+    },
 };
 
 static void xio3130_downstream_register_types(void)

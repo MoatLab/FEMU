@@ -30,6 +30,7 @@
 #include "trace.h"
 #include "qapi/error.h"
 #include "qemu/log.h"
+#include "qemu/module.h"
 
 #define TYPE_AM53C974_DEVICE "am53c974"
 
@@ -59,7 +60,7 @@
 #define DMA_STAT_SCSIINT 0x10
 #define DMA_STAT_BCMBLT  0x20
 
-#define SBAC_STATUS 0x1000
+#define SBAC_STATUS (1 << 24)
 
 typedef struct PCIESPState {
     /*< private >*/
@@ -136,7 +137,7 @@ static void esp_pci_dma_write(PCIESPState *pci, uint32_t saddr, uint32_t val)
         pci->dma_regs[saddr] = val;
         break;
     case DMA_STAT:
-        if (!(pci->sbac & SBAC_STATUS)) {
+        if (pci->sbac & SBAC_STATUS) {
             /* clear some bits on write */
             uint32_t mask = DMA_STAT_ERROR | DMA_STAT_ABORT | DMA_STAT_DONE;
             pci->dma_regs[DMA_STAT] &= ~(val & mask);
@@ -157,7 +158,7 @@ static uint32_t esp_pci_dma_read(PCIESPState *pci, uint32_t saddr)
         if (pci->esp.rregs[ESP_RSTAT] & STAT_INT) {
             val |= DMA_STAT_SCSIINT;
         }
-        if (pci->sbac & SBAC_STATUS) {
+        if (!(pci->sbac & SBAC_STATUS)) {
             pci->dma_regs[DMA_STAT] &= ~(DMA_STAT_ERROR | DMA_STAT_ABORT |
                                          DMA_STAT_DONE);
         }
@@ -313,8 +314,8 @@ static void esp_pci_hard_reset(DeviceState *dev)
 
 static const VMStateDescription vmstate_esp_pci_scsi = {
     .name = "pciespscsi",
-    .version_id = 0,
-    .minimum_version_id = 0,
+    .version_id = 1,
+    .minimum_version_id = 1,
     .fields = (VMStateField[]) {
         VMSTATE_PCI_DEVICE(parent_obj, PCIESPState),
         VMSTATE_BUFFER_UNSAFE(dma_regs, PCIESPState, 0, 8 * sizeof(uint32_t)),
@@ -398,6 +399,10 @@ static const TypeInfo esp_pci_info = {
     .parent = TYPE_PCI_DEVICE,
     .instance_size = sizeof(PCIESPState),
     .class_init = esp_pci_class_init,
+    .interfaces = (InterfaceInfo[]) {
+        { INTERFACE_CONVENTIONAL_PCI_DEVICE },
+        { },
+    },
 };
 
 typedef struct {

@@ -29,8 +29,10 @@
  * this file are based on code from GNOME glib-2 and use a different license,
  * see the license comment there.
  */
+
 #include "qemu/osdep.h"
 #include <windows.h>
+#include "qemu-common.h"
 #include "qapi/error.h"
 #include "sysemu/sysemu.h"
 #include "qemu/main-loop.h"
@@ -67,15 +69,24 @@ void *qemu_memalign(size_t alignment, size_t size)
     return qemu_oom_check(qemu_try_memalign(alignment, size));
 }
 
-void *qemu_anon_ram_alloc(size_t size, uint64_t *align)
+static int get_allocation_granularity(void)
+{
+    SYSTEM_INFO system_info;
+
+    GetSystemInfo(&system_info);
+    return system_info.dwAllocationGranularity;
+}
+
+void *qemu_anon_ram_alloc(size_t size, uint64_t *align, bool shared)
 {
     void *ptr;
 
-    /* FIXME: this is not exactly optimal solution since VirtualAlloc
-       has 64Kb granularity, but at least it guarantees us that the
-       memory is page aligned. */
     ptr = VirtualAlloc(NULL, size, MEM_COMMIT, PAGE_READWRITE);
     trace_qemu_anon_ram_alloc(size, ptr);
+
+    if (ptr && align) {
+        *align = MAX(get_allocation_granularity(), getpagesize());
+    }
     return ptr;
 }
 
@@ -438,10 +449,8 @@ static int poll_rest(gboolean poll_msgs, HANDLE *handles, gint nhandles,
         if (timeout == 0 && nhandles > 1) {
             /* Remove the handle that fired */
             int i;
-            if (ready < nhandles - 1) {
-                for (i = ready - WAIT_OBJECT_0 + 1; i < nhandles; i++) {
-                    handles[i-1] = handles[i];
-                }
+            for (i = ready - WAIT_OBJECT_0 + 1; i < nhandles; i++) {
+                handles[i-1] = handles[i];
             }
             nhandles--;
             recursed_result = poll_rest(FALSE, handles, nhandles, fds, nfds, 0);
@@ -553,30 +562,11 @@ void os_mem_prealloc(int fd, char *area, size_t memory, int smp_cpus,
     }
 }
 
-
-/* XXX: put correct support for win32 */
-int qemu_read_password(char *buf, int buf_size)
+uint64_t qemu_get_pmem_size(const char *filename, Error **errp)
 {
-    int c, i;
-
-    printf("Password: ");
-    fflush(stdout);
-    i = 0;
-    for (;;) {
-        c = getchar();
-        if (c < 0) {
-            buf[i] = '\0';
-            return -1;
-        } else if (c == '\n') {
-            break;
-        } else if (i < (buf_size - 1)) {
-            buf[i++] = c;
-        }
-    }
-    buf[i] = '\0';
+    error_setg(errp, "pmem support not available");
     return 0;
 }
-
 
 char *qemu_get_pid_name(pid_t pid)
 {
@@ -792,4 +782,31 @@ ssize_t qemu_recvfrom_wrap(int sockfd, void *buf, size_t len, int flags,
         errno = socket_error();
     }
     return ret;
+}
+
+bool qemu_write_pidfile(const char *filename, Error **errp)
+{
+    char buffer[128];
+    int len;
+    HANDLE file;
+    OVERLAPPED overlap;
+    BOOL ret;
+    memset(&overlap, 0, sizeof(overlap));
+
+    file = CreateFile(filename, GENERIC_WRITE, FILE_SHARE_READ, NULL,
+                      OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+
+    if (file == INVALID_HANDLE_VALUE) {
+        error_setg(errp, "Failed to create PID file");
+        return false;
+    }
+    len = snprintf(buffer, sizeof(buffer), FMT_pid "\n", (pid_t)getpid());
+    ret = WriteFile(file, (LPCVOID)buffer, (DWORD)len,
+                    NULL, &overlap);
+    CloseHandle(file);
+    if (ret == 0) {
+        error_setg(errp, "Failed to write PID file");
+        return false;
+    }
+    return true;
 }

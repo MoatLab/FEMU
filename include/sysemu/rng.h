@@ -14,7 +14,6 @@
 #define QEMU_RNG_H
 
 #include "qom/object.h"
-#include "qemu-common.h"
 
 #define TYPE_RNG_BACKEND "rng-backend"
 #define RNG_BACKEND(obj) \
@@ -57,7 +56,7 @@ struct RngBackend
 
     /*< protected >*/
     bool opened;
-    QSIMPLEQ_HEAD(requests, RngRequest) requests;
+    QSIMPLEQ_HEAD(, RngRequest) requests;
 };
 
 

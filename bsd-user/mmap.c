@@ -21,11 +21,12 @@
 #include "qemu.h"
 #include "qemu-common.h"
 #include "bsd-mman.h"
+#include "exec/exec-all.h"
 
 //#define DEBUG_MMAP
 
 static pthread_mutex_t mmap_mutex = PTHREAD_MUTEX_INITIALIZER;
-static int __thread mmap_lock_count;
+static __thread int mmap_lock_count;
 
 void mmap_lock(void)
 {

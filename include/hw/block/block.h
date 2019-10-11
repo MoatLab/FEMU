@@ -11,7 +11,8 @@
 #ifndef HW_BLOCK_H
 #define HW_BLOCK_H
 
-#include "qemu-common.h"
+#include "exec/hwaddr.h"
+#include "qapi/qapi-types-block-core.h"
 
 /* Configuration */
 
@@ -23,7 +24,6 @@ typedef struct BlockConf {
     uint32_t opt_io_size;
     int32_t bootindex;
     uint32_t discard_granularity;
-    uint32_t is_lightnvm;
     /* geometry, not all devices use this */
     uint32_t cyls, heads, secs;
     OnOffAuto wce;
@@ -45,8 +45,7 @@ static inline unsigned int get_physical_block_exp(BlockConf *conf)
     return exp;
 }
 
-#define DEFINE_BLOCK_PROPERTIES(_state, _conf)                          \
-    DEFINE_PROP_DRIVE("drive", _state, _conf.blk),                      \
+#define DEFINE_BLOCK_PROPERTIES_BASE(_state, _conf)                     \
     DEFINE_PROP_BLOCKSIZE("logical_block_size", _state,                 \
                           _conf.logical_block_size),                    \
     DEFINE_PROP_BLOCKSIZE("physical_block_size", _state,                \
@@ -55,10 +54,13 @@ static inline unsigned int get_physical_block_exp(BlockConf *conf)
     DEFINE_PROP_UINT32("opt_io_size", _state, _conf.opt_io_size, 0),    \
     DEFINE_PROP_UINT32("discard_granularity", _state, \
                        _conf.discard_granularity, -1), \
-    DEFINE_PROP_UINT32("is_lightnvm", _state, _conf.is_lightnvm, 0), \
     DEFINE_PROP_ON_OFF_AUTO("write-cache", _state, _conf.wce, \
                             ON_OFF_AUTO_AUTO), \
     DEFINE_PROP_BOOL("share-rw", _state, _conf.share_rw, false)
+
+#define DEFINE_BLOCK_PROPERTIES(_state, _conf)                          \
+    DEFINE_PROP_DRIVE("drive", _state, _conf.blk),                      \
+    DEFINE_BLOCK_PROPERTIES_BASE(_state, _conf)
 
 #define DEFINE_BLOCK_CHS_PROPERTIES(_state, _conf)      \
     DEFINE_PROP_UINT32("cyls", _state, _conf.cyls, 0),  \
@@ -71,14 +73,18 @@ static inline unsigned int get_physical_block_exp(BlockConf *conf)
     DEFINE_PROP_BLOCKDEV_ON_ERROR("werror", _state, _conf.werror,       \
                                   BLOCKDEV_ON_ERROR_AUTO)
 
+/* Backend access helpers */
+
+bool blk_check_size_and_read_all(BlockBackend *blk, void *buf, hwaddr size,
+                                 Error **errp);
+
 /* Configuration helpers */
 
-void blkconf_serial(BlockConf *conf, char **serial);
-void blkconf_geometry(BlockConf *conf, int *trans,
+bool blkconf_geometry(BlockConf *conf, int *trans,
                       unsigned cyls_max, unsigned heads_max, unsigned secs_max,
                       Error **errp);
 void blkconf_blocksizes(BlockConf *conf);
-void blkconf_apply_backend_options(BlockConf *conf, bool readonly,
+bool blkconf_apply_backend_options(BlockConf *conf, bool readonly,
                                    bool resizable, Error **errp);
 
 /* Hard disk geometry */

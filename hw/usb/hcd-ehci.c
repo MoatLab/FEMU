@@ -12,18 +12,17 @@
  * Niels de Vos.  David S. Ahern continued working on it.  Kevin Wolf,
  * Jan Kiszka and Vincent Palatin contributed bugfixes.
  *
- *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or(at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * Lesser General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
+ * You should have received a copy of the GNU Lesser General Public License
  * along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
@@ -32,6 +31,7 @@
 #include "hw/usb/ehci-regs.h"
 #include "hw/usb/hcd-ehci.h"
 #include "trace.h"
+#include "qemu/error-report.h"
 
 #define FRAME_TIMER_FREQ 1000
 #define FRAME_TIMER_NS   (NANOSECONDS_PER_SECOND / FRAME_TIMER_FREQ)
@@ -348,7 +348,7 @@ static void ehci_trace_sitd(EHCIState *s, hwaddr addr,
 static void ehci_trace_guest_bug(EHCIState *s, const char *message)
 {
     trace_usb_ehci_guest_bug(message);
-    fprintf(stderr, "ehci warning: %s\n", message);
+    warn_report("%s", message);
 }
 
 static inline bool ehci_enabled(EHCIState *s)
@@ -1439,9 +1439,12 @@ static int ehci_process_itd(EHCIState *ehci,
                 qemu_sglist_add(&ehci->isgl, ptr1 + off, len);
             }
 
-            pid = dir ? USB_TOKEN_IN : USB_TOKEN_OUT;
-
             dev = ehci_find_device(ehci, devaddr);
+            if (dev == NULL) {
+                ehci_trace_guest_bug(ehci, "no device found");
+                return -1;
+            }
+            pid = dir ? USB_TOKEN_IN : USB_TOKEN_OUT;
             ep = usb_ep_get(dev, pid, endp);
             if (ep && ep->type == USB_ENDPOINT_XFER_ISOC) {
                 usb_packet_setup(&ehci->ipacket, pid, ep, 0, addr, false,
@@ -1671,7 +1674,8 @@ static EHCIQueue *ehci_state_fetchqh(EHCIState *ehci, int async)
         ehci_set_state(ehci, async, EST_HORIZONTALQH);
 
     } else if ((q->qh.token & QTD_TOKEN_ACTIVE) &&
-               (NLPTR_TBIT(q->qh.current_qtd) == 0)) {
+               (NLPTR_TBIT(q->qh.current_qtd) == 0) &&
+               (q->qh.current_qtd != 0)) {
         q->qtdaddr = q->qh.current_qtd;
         ehci_set_state(ehci, async, EST_FETCHQTD);
 
@@ -1728,7 +1732,7 @@ static int ehci_state_fetchsitd(EHCIState *ehci, int async)
         /* siTD is not active, nothing to do */;
     } else {
         /* TODO: split transfers are not implemented */
-        fprintf(stderr, "WARNING: Skipping active siTD\n");
+        warn_report("Skipping active siTD");
     }
 
     ehci_set_fetch_addr(ehci, async, sitd.next);
@@ -1781,9 +1785,17 @@ static int ehci_state_fetchqtd(EHCIQueue *q)
     EHCIqtd qtd;
     EHCIPacket *p;
     int again = 1;
+    uint32_t addr;
 
-    if (get_dwords(q->ehci, NLPTR_GET(q->qtdaddr), (uint32_t *) &qtd,
-                   sizeof(EHCIqtd) >> 2) < 0) {
+    addr = NLPTR_GET(q->qtdaddr);
+    if (get_dwords(q->ehci, addr +  8, &qtd.token,   1) < 0) {
+        return 0;
+    }
+    barrier();
+    if (get_dwords(q->ehci, addr +  0, &qtd.next,    1) < 0 ||
+        get_dwords(q->ehci, addr +  4, &qtd.altnext, 1) < 0 ||
+        get_dwords(q->ehci, addr + 12, qtd.bufptr,
+                   ARRAY_SIZE(qtd.bufptr)) < 0) {
         return 0;
     }
     ehci_trace_qtd(q, NLPTR_GET(q->qtdaddr), &qtd);
@@ -1813,7 +1825,7 @@ static int ehci_state_fetchqtd(EHCIQueue *q)
             break;
         case EHCI_ASYNC_INFLIGHT:
             /* Check if the guest has added new tds to the queue */
-            again = ehci_fill_queue(QTAILQ_LAST(&q->packets, pkts_head));
+            again = ehci_fill_queue(QTAILQ_LAST(&q->packets));
             /* Unfinished async handled packet, go horizontal */
             ehci_set_state(q->ehci, q->async, EST_HORIZONTALQH);
             break;
@@ -2232,14 +2244,19 @@ static void ehci_update_frindex(EHCIState *ehci, int uframes)
     ehci->frindex = (ehci->frindex + uframes) % 0x4000;
 }
 
-static void ehci_frame_timer(void *opaque)
+static void ehci_work_bh(void *opaque)
 {
     EHCIState *ehci = opaque;
     int need_timer = 0;
     int64_t expire_time, t_now;
     uint64_t ns_elapsed;
-    int uframes, skipped_uframes;
+    uint64_t uframes, skipped_uframes;
     int i;
+
+    if (ehci->working) {
+        return;
+    }
+    ehci->working = true;
 
     t_now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     ns_elapsed = t_now - ehci->last_run_ns;
@@ -2322,6 +2339,15 @@ static void ehci_frame_timer(void *opaque)
         }
         timer_mod(ehci->frame_timer, expire_time);
     }
+
+    ehci->working = false;
+}
+
+static void ehci_work_timer(void *opaque)
+{
+    EHCIState *ehci = opaque;
+
+    qemu_bh_schedule(ehci->async_bh);
 }
 
 static const MemoryRegionOps ehci_mmio_caps_ops = {
@@ -2366,7 +2392,7 @@ static USBBusOps ehci_bus_ops_standalone = {
     .wakeup_endpoint = ehci_wakeup_endpoint,
 };
 
-static void usb_ehci_pre_save(void *opaque)
+static int usb_ehci_pre_save(void *opaque)
 {
     EHCIState *ehci = opaque;
     uint32_t new_frindex;
@@ -2375,6 +2401,8 @@ static void usb_ehci_pre_save(void *opaque)
     new_frindex = ehci->frindex & ~7;
     ehci->last_run_ns -= (ehci->frindex - new_frindex) * UFRAME_TIMER_NS;
     ehci->frindex = new_frindex;
+
+    return 0;
 }
 
 static int usb_ehci_post_load(void *opaque, int version_id)
@@ -2469,6 +2497,11 @@ void usb_ehci_realize(EHCIState *s, DeviceState *dev, Error **errp)
                    NB_PORTS);
         return;
     }
+    if (s->maxframes < 8 || s->maxframes > 512)  {
+        error_setg(errp, "maxframes %d out if range (8 .. 512)",
+                   s->maxframes);
+        return;
+    }
 
     usb_bus_new(&s->bus, sizeof(s->bus), s->companion_enable ?
                 &ehci_bus_ops_companion : &ehci_bus_ops_standalone, dev);
@@ -2478,8 +2511,8 @@ void usb_ehci_realize(EHCIState *s, DeviceState *dev, Error **errp)
         s->ports[i].dev = 0;
     }
 
-    s->frame_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, ehci_frame_timer, s);
-    s->async_bh = qemu_bh_new(ehci_frame_timer, s);
+    s->frame_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, ehci_work_timer, s);
+    s->async_bh = qemu_bh_new(ehci_work_bh, s);
     s->device = dev;
 
     s->vmstate = qemu_add_vm_change_state_handler(usb_ehci_vm_state_change, s);

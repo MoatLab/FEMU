@@ -135,7 +135,7 @@
 #include "nvme.h"
 
 
-void nvme_addr_read(FemuCtrl *n, hwaddr addr, void *buf, int size)
+void femu_nvme_addr_read(FemuCtrl *n, hwaddr addr, void *buf, int size)
 {
     if (n->cmbsz && addr >= n->ctrl_mem.addr &&
             addr < (n->ctrl_mem.addr + int128_get64(n->ctrl_mem.size))) {
@@ -145,7 +145,7 @@ void nvme_addr_read(FemuCtrl *n, hwaddr addr, void *buf, int size)
     }
 }
 
-void nvme_addr_write(FemuCtrl *n, hwaddr addr, void *buf, int size)
+void femu_nvme_addr_write(FemuCtrl *n, hwaddr addr, void *buf, int size)
 {
     if (n->cmbsz && addr >= n->ctrl_mem.addr &&
             addr < (n->ctrl_mem.addr + int128_get64(n->ctrl_mem.size))) {
@@ -188,7 +188,7 @@ void nvme_update_cq_head(NvmeCQueue *cq)
     }
 
     if (cq->db_addr) {
-        nvme_addr_read(cq->ctrl, cq->db_addr, &cq->head, sizeof(cq->head));
+        femu_nvme_addr_read(cq->ctrl, cq->db_addr, &cq->head, sizeof(cq->head));
     }
 }
 
@@ -256,7 +256,7 @@ uint64_t *nvme_setup_discontig(FemuCtrl *n, uint64_t prp_addr,
                 g_free(prp_list);
                 return NULL;
             }
-            nvme_addr_write(n, prp_addr, (uint8_t *)&prp, sizeof(prp));
+            femu_nvme_addr_write(n, prp_addr, (uint8_t *)&prp, sizeof(prp));
             prp_addr = le64_to_cpu(prp[prps_per_page - 1]);
         }
         prp_list[i] = le64_to_cpu(prp[i % prps_per_page]);
@@ -312,7 +312,7 @@ uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov,
 
             nents = (len + n->page_size - 1) >> n->page_bits;
             prp_trans = MIN(n->max_prp_ents, nents) * sizeof(uint64_t);
-            nvme_addr_read(n, prp2, (void *)prp_list, prp_trans);
+            femu_nvme_addr_read(n, prp2, (void *)prp_list, prp_trans);
             while (len != 0) {
                 uint64_t prp_ent = le64_to_cpu(prp_list[i]);
 
@@ -324,7 +324,7 @@ uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov,
                     i = 0;
                     nents = (len + n->page_size - 1) >> n->page_bits;
                     prp_trans = MIN(n->max_prp_ents, nents) * sizeof(uint64_t);
-                    nvme_addr_read(n, prp_ent, (void *)prp_list,
+                    femu_nvme_addr_read(n, prp_ent, (void *)prp_list,
                             prp_trans);
                     prp_ent = le64_to_cpu(prp_list[i]);
                 }
@@ -433,7 +433,7 @@ void nvme_set_error_page(FemuCtrl *n, uint16_t sqid, uint16_t cid,
     ++n->num_errors;
 }
 
-uint16_t nvme_rw_check_req(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
+uint16_t femu_nvme_rw_check_req(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         NvmeRequest *req, uint64_t slba, uint64_t elba, uint32_t nlb,
         uint16_t ctrl, uint64_t data_size, uint64_t meta_size)
 {
@@ -457,8 +457,7 @@ uint16_t nvme_rw_check_req(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                 offsetof(NvmeRwCmd, control), ctrl, ns->id);
         /* Not contemplated in LightNVM for now */
         if (n->femu_mode == FEMU_WHITEBOX_MODE) {
-            if (femu_oc_dev(n))
-                return 0;
+            return 0;
         }
         return NVME_INVALID_FIELD | NVME_DNR;
     }
@@ -496,7 +495,7 @@ int nvme_add_kvm_msi_virq(FemuCtrl *n, NvmeCQueue *cq)
         return -1;
     }
     cq->virq = virq;
-    printf("FEMU,%s,cq[%d]->virq=%d\n", __func__, cq->cqid, virq);
+    femu_debug("%s,cq[%d]->virq=%d\n", __func__, cq->cqid, virq);
 
     return 0;
 }
@@ -696,7 +695,7 @@ void nvme_update_sq_tail(NvmeSQueue *sq)
     }
 
     if (sq->db_addr) {
-        nvme_addr_read(sq->ctrl, sq->db_addr, &sq->tail, sizeof(sq->tail));
+        femu_nvme_addr_read(sq->ctrl, sq->db_addr, &sq->tail, sizeof(sq->tail));
     }
 }
 
@@ -753,7 +752,7 @@ uint16_t nvme_set_db_memory(FemuCtrl *n, const NvmeCmd *cmd)
             sq->db_addr_hva = n->dbs_addr_hva + 2 * i * dbbuf_entry_sz;
             sq->eventidx_addr = eis_addr + 2 * i * dbbuf_entry_sz;
             sq->eventidx_addr_hva = n->eis_addr_hva + 2 * i * dbbuf_entry_sz;
-            printf("FEMU:DBBUF,sq[%d]:db=%" PRIu64 ",ei=%" PRIu64 "\n", i,
+            femu_debug("DBBUF,sq[%d]:db=%" PRIu64 ",ei=%" PRIu64 "\n", i,
                     sq->db_addr, sq->eventidx_addr);
         }
         if (cq) {
@@ -762,7 +761,7 @@ uint16_t nvme_set_db_memory(FemuCtrl *n, const NvmeCmd *cmd)
             cq->db_addr_hva = n->dbs_addr_hva + (2 * i + 1) * dbbuf_entry_sz;
             cq->eventidx_addr = eis_addr + (2 * i + 1) * dbbuf_entry_sz;
             cq->eventidx_addr_hva = n->eis_addr_hva + (2 * i + 1) * dbbuf_entry_sz;
-            printf("FEMU:DBBUF,cq[%d]:db=%" PRIu64 ",ei=%" PRIu64 "\n", i,
+            femu_debug("DBBUF,cq[%d]:db=%" PRIu64 ",ei=%" PRIu64 "\n", i,
                     cq->db_addr, cq->eventidx_addr);
         }
     }
@@ -774,7 +773,7 @@ uint16_t nvme_set_db_memory(FemuCtrl *n, const NvmeCmd *cmd)
         n->poller_on = true;
     }
     n->dataplane_started = true;
-    printf("FEMU:nvme_set_db_memory returns SUCCESS!\n");
+    femu_debug("nvme_set_db_memory returns SUCCESS!\n");
 
     return NVME_SUCCESS;
 }

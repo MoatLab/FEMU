@@ -11,9 +11,7 @@
  */
 
 #include "qemu/osdep.h"
-#include <glib.h>
 #include "block/aio.h"
-#include "qapi/error.h"
 #include "qemu/coroutine.h"
 #include "qemu/thread.h"
 #include "qemu/error-report.h"
@@ -144,17 +142,16 @@ static void finish_cb(void *opaque)
 static coroutine_fn void test_multi_co_schedule_entry(void *opaque)
 {
     g_assert(to_schedule[id] == NULL);
-    atomic_mb_set(&to_schedule[id], qemu_coroutine_self());
 
     while (!atomic_mb_read(&now_stopping)) {
         int n;
 
         n = g_test_rand_int_range(0, NUM_CONTEXTS);
         schedule_next(n);
-        qemu_coroutine_yield();
 
-        g_assert(to_schedule[id] == NULL);
         atomic_mb_set(&to_schedule[id], qemu_coroutine_self());
+        qemu_coroutine_yield();
+        g_assert(to_schedule[id] == NULL);
     }
 }
 
@@ -181,7 +178,7 @@ static void test_multi_co_schedule(int seconds)
     }
 
     join_aio_contexts();
-    g_test_message("scheduled %d, queued %d, retry %d, total %d\n",
+    g_test_message("scheduled %d, queued %d, retry %d, total %d",
                   count_other, count_here, count_retry,
                   count_here + count_other + count_retry);
 }
@@ -245,7 +242,7 @@ static void test_multi_co_mutex(int threads, int seconds)
     }
 
     join_aio_contexts();
-    g_test_message("%d iterations/second\n", counter / seconds);
+    g_test_message("%d iterations/second", counter / seconds);
     g_assert_cmpint(counter, ==, atomic_counter);
 }
 
@@ -364,7 +361,7 @@ static void test_multi_fair_mutex(int threads, int seconds)
     }
 
     join_aio_contexts();
-    g_test_message("%d iterations/second\n", counter / seconds);
+    g_test_message("%d iterations/second", counter / seconds);
     g_assert_cmpint(counter, ==, atomic_counter);
 }
 
@@ -420,7 +417,7 @@ static void test_multi_mutex(int threads, int seconds)
     }
 
     join_aio_contexts();
-    g_test_message("%d iterations/second\n", counter / seconds);
+    g_test_message("%d iterations/second", counter / seconds);
     g_assert_cmpint(counter, ==, atomic_counter);
 }
 

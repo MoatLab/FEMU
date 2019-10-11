@@ -22,13 +22,19 @@
  * THE SOFTWARE.
  */
 
+#ifndef HW_OR_IRQ_H
+#define HW_OR_IRQ_H
+
 #include "hw/irq.h"
 #include "hw/sysbus.h"
 #include "qom/object.h"
 
 #define TYPE_OR_IRQ "or-irq"
 
-#define MAX_OR_LINES      16
+/* This can safely be increased if necessary without breaking
+ * migration compatibility (as long as it remains greater than 15).
+ */
+#define MAX_OR_LINES      32
 
 typedef struct OrIRQState qemu_or_irq;
 
@@ -38,7 +44,8 @@ struct OrIRQState {
     DeviceState parent_obj;
 
     qemu_irq out_irq;
-    qemu_irq *in_irqs;
     bool levels[MAX_OR_LINES];
     uint16_t num_lines;
 };
+
+#endif

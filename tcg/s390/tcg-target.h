@@ -58,6 +58,8 @@ typedef enum TCGReg {
 #define FACILITY_GEN_INST_EXT         (1ULL << (63 - 34))
 #define FACILITY_LOAD_ON_COND         (1ULL << (63 - 45))
 #define FACILITY_FAST_BCR_SER         FACILITY_LOAD_ON_COND
+#define FACILITY_DISTINCT_OPS         FACILITY_LOAD_ON_COND
+#define FACILITY_LOAD_ON_COND2        (1ULL << (63 - 53))
 
 extern uint64_t s390_facilities;
 
@@ -83,6 +85,7 @@ extern uint64_t s390_facilities;
 #define TCG_TARGET_HAS_deposit_i32    (s390_facilities & FACILITY_GEN_INST_EXT)
 #define TCG_TARGET_HAS_extract_i32    (s390_facilities & FACILITY_GEN_INST_EXT)
 #define TCG_TARGET_HAS_sextract_i32   0
+#define TCG_TARGET_HAS_extract2_i32   0
 #define TCG_TARGET_HAS_movcond_i32    1
 #define TCG_TARGET_HAS_add2_i32       1
 #define TCG_TARGET_HAS_sub2_i32       1
@@ -92,6 +95,8 @@ extern uint64_t s390_facilities;
 #define TCG_TARGET_HAS_mulsh_i32      0
 #define TCG_TARGET_HAS_extrl_i64_i32  0
 #define TCG_TARGET_HAS_extrh_i64_i32  0
+#define TCG_TARGET_HAS_goto_ptr       1
+#define TCG_TARGET_HAS_direct_jump    (s390_facilities & FACILITY_GEN_INST_EXT)
 
 #define TCG_TARGET_HAS_div2_i64       1
 #define TCG_TARGET_HAS_rot_i64        1
@@ -117,6 +122,7 @@ extern uint64_t s390_facilities;
 #define TCG_TARGET_HAS_deposit_i64    (s390_facilities & FACILITY_GEN_INST_EXT)
 #define TCG_TARGET_HAS_extract_i64    (s390_facilities & FACILITY_GEN_INST_EXT)
 #define TCG_TARGET_HAS_sextract_i64   0
+#define TCG_TARGET_HAS_extract2_i64   0
 #define TCG_TARGET_HAS_movcond_i64    1
 #define TCG_TARGET_HAS_add2_i64       1
 #define TCG_TARGET_HAS_sub2_i64       1
@@ -131,6 +137,9 @@ extern uint64_t s390_facilities;
 #define TCG_TARGET_CALL_STACK_OFFSET	160
 
 #define TCG_TARGET_EXTEND_ARGS 1
+#define TCG_TARGET_HAS_MEMORY_BSWAP   1
+
+#define TCG_TARGET_DEFAULT_MO (TCG_MO_ALL & ~TCG_MO_ST_LD)
 
 enum {
     TCG_AREG0 = TCG_REG_R10,
@@ -139,5 +148,19 @@ enum {
 static inline void flush_icache_range(uintptr_t start, uintptr_t stop)
 {
 }
+
+static inline void tb_target_set_jmp_target(uintptr_t tc_ptr,
+                                            uintptr_t jmp_addr, uintptr_t addr)
+{
+    /* patch the branch destination */
+    intptr_t disp = addr - (jmp_addr - 2);
+    atomic_set((int32_t *)jmp_addr, disp / 2);
+    /* no need to flush icache explicitly */
+}
+
+#ifdef CONFIG_SOFTMMU
+#define TCG_TARGET_NEED_LDST_LABELS
+#endif
+#define TCG_TARGET_NEED_POOL_LABELS
 
 #endif

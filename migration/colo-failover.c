@@ -13,7 +13,10 @@
 #include "qemu/osdep.h"
 #include "migration/colo.h"
 #include "migration/failover.h"
-#include "qmp-commands.h"
+#include "qemu/main-loop.h"
+#include "migration.h"
+#include "qapi/error.h"
+#include "qapi/qapi-commands-migration.h"
 #include "qapi/qmp/qerror.h"
 #include "qemu/error-report.h"
 #include "trace.h"
@@ -32,11 +35,11 @@ static void colo_failover_bh(void *opaque)
                                    FAILOVER_STATUS_ACTIVE);
     if (old_state != FAILOVER_STATUS_REQUIRE) {
         error_report("Unknown error for failover, old_state = %s",
-                    FailoverStatus_lookup[old_state]);
+                    FailoverStatus_str(old_state));
         return;
     }
 
-    colo_do_failover(NULL);
+    colo_do_failover();
 }
 
 void failover_request_active(Error **errp)
@@ -62,7 +65,7 @@ FailoverStatus failover_set_state(FailoverStatus old_state,
 
     old = atomic_cmpxchg(&failover_state, old_state, new_state);
     if (old == old_state) {
-        trace_colo_failover_set_state(FailoverStatus_lookup[new_state]);
+        trace_colo_failover_set_state(FailoverStatus_str(new_state));
     }
     return old;
 }
@@ -74,7 +77,7 @@ FailoverStatus failover_get_state(void)
 
 void qmp_x_colo_lost_heartbeat(Error **errp)
 {
-    if (get_colo_mode() == COLO_MODE_UNKNOWN) {
+    if (get_colo_mode() == COLO_MODE_NONE) {
         error_setg(errp, QERR_FEATURE_DISABLED, "colo");
         return;
     }

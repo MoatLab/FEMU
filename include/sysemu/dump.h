@@ -14,6 +14,8 @@
 #ifndef DUMP_H
 #define DUMP_H
 
+#include "qapi/qapi-types-dump.h"
+
 #define MAKEDUMPFILE_SIGNATURE      "makedumpfile"
 #define MAX_SIZE_MDF_HEADER         (4096) /* max size of makedumpfile_header */
 #define TYPE_FLAT_HEADER            (1)    /* type of flattened format */
@@ -38,7 +40,6 @@
 
 #include "sysemu/dump-arch.h"
 #include "sysemu/memory_mapping.h"
-#include "qapi-types.h"
 
 typedef struct QEMU_PACKED MakedumpfileHeader {
     char signature[16];     /* = "makedumpfile" */
@@ -157,6 +158,7 @@ typedef struct DumpState {
     uint32_t sh_info;
     bool have_section;
     bool resume;
+    bool detached;
     ssize_t note_size;
     hwaddr memory_offset;
     int fd;
@@ -191,6 +193,8 @@ typedef struct DumpState {
                                   * this could be used to calculate
                                   * how much work we have
                                   * finished. */
+    uint8_t *guest_note;         /* ELF note content */
+    size_t guest_note_size;
 } DumpState;
 
 uint16_t cpu_to_dump16(DumpState *s, uint16_t val);

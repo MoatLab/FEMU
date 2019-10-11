@@ -12,25 +12,25 @@
 
 #include "qemu/osdep.h"
 #include "hw/hw.h"
-#include "hw/i386/pc.h"
 #include "hw/isa/vt82c686.h"
 #include "hw/i2c/i2c.h"
-#include "hw/i2c/smbus.h"
 #include "hw/pci/pci.h"
 #include "hw/isa/isa.h"
+#include "hw/isa/superio.h"
 #include "hw/sysbus.h"
 #include "hw/mips/mips.h"
 #include "hw/isa/apm.h"
 #include "hw/acpi/acpi.h"
 #include "hw/i2c/pm_smbus.h"
 #include "sysemu/sysemu.h"
+#include "qemu/module.h"
 #include "qemu/timer.h"
 #include "exec/address-spaces.h"
 
 //#define DEBUG_VT82C686B
 
 #ifdef DEBUG_VT82C686B
-#define DPRINTF(fmt, ...) fprintf(stderr, "%s: " fmt, __FUNCTION__, ##__VA_ARGS__)
+#define DPRINTF(fmt, ...) fprintf(stderr, "%s: " fmt, __func__, ##__VA_ARGS__)
 #else
 #define DPRINTF(fmt, ...)
 #endif
@@ -301,6 +301,10 @@ static const TypeInfo via_ac97_info = {
     .parent        = TYPE_PCI_DEVICE,
     .instance_size = sizeof(VT686AC97State),
     .class_init    = via_ac97_class_init,
+    .interfaces = (InterfaceInfo[]) {
+        { INTERFACE_CONVENTIONAL_PCI_DEVICE },
+        { },
+    },
 };
 
 static void vt82c686b_mc97_realize(PCIDevice *dev, Error **errp)
@@ -341,6 +345,10 @@ static const TypeInfo via_mc97_info = {
     .parent        = TYPE_PCI_DEVICE,
     .instance_size = sizeof(VT686MC97State),
     .class_init    = via_mc97_class_init,
+    .interfaces = (InterfaceInfo[]) {
+        { INTERFACE_CONVENTIONAL_PCI_DEVICE },
+        { },
+    },
 };
 
 /* vt82c686 pm init */
@@ -362,7 +370,7 @@ static void vt82c686b_pm_realize(PCIDevice *dev, Error **errp)
     pci_conf[0x90] = s->smb_io_base | 1;
     pci_conf[0x91] = s->smb_io_base >> 8;
     pci_conf[0xd2] = 0x90;
-    pm_smbus_init(&s->dev.qdev, &s->smb);
+    pm_smbus_init(DEVICE(s), &s->smb, false);
     memory_region_add_subregion(get_system_io(), s->smb_io_base, &s->smb.io);
 
     apm_init(dev, &s->apm, NULL, s);
@@ -419,6 +427,10 @@ static const TypeInfo via_pm_info = {
     .parent        = TYPE_PCI_DEVICE,
     .instance_size = sizeof(VT686PMState),
     .class_init    = via_pm_class_init,
+    .interfaces = (InterfaceInfo[]) {
+        { INTERFACE_CONVENTIONAL_PCI_DEVICE },
+        { },
+    },
 };
 
 static const VMStateDescription vmstate_via = {
@@ -467,7 +479,7 @@ static void vt82c686b_realize(PCIDevice *d, Error **errp)
     qemu_register_reset(vt82c686b_reset, d);
 }
 
-ISABus *vt82c686b_init(PCIBus *bus, int devfn)
+ISABus *vt82c686b_isa_init(PCIBus *bus, int devfn)
 {
     PCIDevice *d;
 
@@ -494,7 +506,7 @@ static void via_class_init(ObjectClass *klass, void *data)
      * Reason: part of VIA VT82C686 southbridge, needs to be wired up,
      * e.g. by mips_fulong2e_init()
      */
-    dc->cannot_instantiate_with_device_add_yet = true;
+    dc->user_creatable = false;
 }
 
 static const TypeInfo via_info = {
@@ -502,6 +514,28 @@ static const TypeInfo via_info = {
     .parent        = TYPE_PCI_DEVICE,
     .instance_size = sizeof(VT82C686BState),
     .class_init    = via_class_init,
+    .interfaces = (InterfaceInfo[]) {
+        { INTERFACE_CONVENTIONAL_PCI_DEVICE },
+        { },
+    },
+};
+
+static void vt82c686b_superio_class_init(ObjectClass *klass, void *data)
+{
+    ISASuperIOClass *sc = ISA_SUPERIO_CLASS(klass);
+
+    sc->serial.count = 2;
+    sc->parallel.count = 1;
+    sc->ide.count = 0;
+    sc->floppy.count = 1;
+}
+
+static const TypeInfo via_superio_info = {
+    .name          = TYPE_VT82C686B_SUPERIO,
+    .parent        = TYPE_ISA_SUPERIO,
+    .instance_size = sizeof(ISASuperIODevice),
+    .class_size    = sizeof(ISASuperIOClass),
+    .class_init    = vt82c686b_superio_class_init,
 };
 
 static void vt82c686b_register_types(void)
@@ -509,6 +543,7 @@ static void vt82c686b_register_types(void)
     type_register_static(&via_ac97_info);
     type_register_static(&via_mc97_info);
     type_register_static(&via_pm_info);
+    type_register_static(&via_superio_info);
     type_register_static(&via_info);
 }
 

@@ -21,10 +21,12 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+
 #include "qemu/osdep.h"
 #include "qapi/error.h"
-#include "char-win.h"
-#include "char-win-stdio.h"
+#include "qemu/module.h"
+#include "chardev/char-win.h"
+#include "chardev/char-win-stdio.h"
 
 typedef struct {
     Chardev parent;

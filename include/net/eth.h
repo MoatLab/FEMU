@@ -177,6 +177,8 @@ struct tcp_hdr {
 #define TH_PUSH 0x08
 #define TH_ACK  0x10
 #define TH_URG  0x20
+#define TH_ECE  0x40
+#define TH_CWR  0x80
     u_short th_win;      /* window */
     u_short th_sum;      /* checksum */
     u_short th_urp;      /* urgent pointer */
@@ -194,7 +196,9 @@ struct tcp_hdr {
 #define PKT_GET_IP_HDR(p)         \
     ((struct ip_header *)(((uint8_t *)(p)) + eth_get_l2_hdr_length(p)))
 #define IP_HDR_GET_LEN(p)         \
-    ((((struct ip_header *)(p))->ip_ver_len & 0x0F) << 2)
+    ((ldub_p(p + offsetof(struct ip_header, ip_ver_len)) & 0x0F) << 2)
+#define IP_HDR_GET_P(p)                                           \
+    (ldub_p(p + offsetof(struct ip_header, ip_p)))
 #define PKT_GET_IP_HDR_LEN(p)     \
     (IP_HDR_GET_LEN(PKT_GET_IP_HDR(p)))
 #define PKT_GET_IP6_HDR(p)        \
@@ -209,6 +213,7 @@ struct tcp_hdr {
 #define ETH_P_IPV6                (0x86dd)
 #define ETH_P_VLAN                (0x8100)
 #define ETH_P_DVLAN               (0x88a8)
+#define ETH_P_NCSI                (0x88f8)
 #define ETH_P_UNKNOWN             (0xffff)
 #define VLAN_VID_MASK             0x0fff
 #define IP_HEADER_VERSION_4       (4)

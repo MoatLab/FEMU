@@ -3,7 +3,7 @@ Formatting 'TEST_DIR/t.IMGFMT', fmt=IMGFMT size=134217728
 
 === -drive/-device and device_del ===
 
-Testing: -drive file=TEST_DIR/t.qcow2,format=qcow2,if=none,id=disk -device virtio-blk,drive=disk,id=virtio0
+Testing: -drive file=TEST_DIR/t.IMGFMT,format=IMGFMT,if=none,id=disk -device virtio-blk,drive=disk,id=virtio0
 {
     QMP_VERSION
 }
@@ -23,26 +23,17 @@ Testing: -drive file=TEST_DIR/t.qcow2,format=qcow2,if=none,id=disk -device virti
                 "detect_zeroes": "off",
                 "image": {
                     "virtual-size": 134217728,
-                    "filename": "TEST_DIR/t.qcow2",
+                    "filename": "TEST_DIR/t.IMGFMT",
                     "cluster-size": 65536,
-                    "format": "qcow2",
+                    "format": "IMGFMT",
                     "actual-size": SIZE,
-                    "format-specific": {
-                        "type": "qcow2",
-                        "data": {
-                            "compat": "1.1",
-                            "lazy-refcounts": false,
-                            "refcount-bits": 16,
-                            "corrupt": false
-                        }
-                    },
                     "dirty-flag": false
                 },
                 "iops_wr": 0,
                 "ro": false,
                 "node-name": "NODE_NAME",
                 "backing_file_depth": 0,
-                "drv": "qcow2",
+                "drv": "IMGFMT",
                 "iops": 0,
                 "bps_wr": 0,
                 "write_threshold": 0,
@@ -54,9 +45,10 @@ Testing: -drive file=TEST_DIR/t.qcow2,format=qcow2,if=none,id=disk -device virti
                     "direct": false,
                     "writeback": true
                 },
-                "file": "TEST_DIR/t.qcow2",
+                "file": "TEST_DIR/t.IMGFMT",
                 "encryption_key_missing": false
             },
+            "qdev": "/machine/peripheral/virtio0/virtio-backend",
             "type": "unknown"
         }
     ]
@@ -80,7 +72,7 @@ Testing: -drive file=TEST_DIR/t.qcow2,format=qcow2,if=none,id=disk -device virti
 
 === -drive/device_add and device_del ===
 
-Testing: -drive file=TEST_DIR/t.qcow2,format=qcow2,if=none,id=disk
+Testing: -drive file=TEST_DIR/t.IMGFMT,format=IMGFMT,if=none,id=disk
 {
     QMP_VERSION
 }
@@ -99,26 +91,17 @@ Testing: -drive file=TEST_DIR/t.qcow2,format=qcow2,if=none,id=disk
                 "detect_zeroes": "off",
                 "image": {
                     "virtual-size": 134217728,
-                    "filename": "TEST_DIR/t.qcow2",
+                    "filename": "TEST_DIR/t.IMGFMT",
                     "cluster-size": 65536,
-                    "format": "qcow2",
+                    "format": "IMGFMT",
                     "actual-size": SIZE,
-                    "format-specific": {
-                        "type": "qcow2",
-                        "data": {
-                            "compat": "1.1",
-                            "lazy-refcounts": false,
-                            "refcount-bits": 16,
-                            "corrupt": false
-                        }
-                    },
                     "dirty-flag": false
                 },
                 "iops_wr": 0,
                 "ro": false,
                 "node-name": "NODE_NAME",
                 "backing_file_depth": 0,
-                "drv": "qcow2",
+                "drv": "IMGFMT",
                 "iops": 0,
                 "bps_wr": 0,
                 "write_threshold": 0,
@@ -130,7 +113,7 @@ Testing: -drive file=TEST_DIR/t.qcow2,format=qcow2,if=none,id=disk
                     "direct": false,
                     "writeback": true
                 },
-                "file": "TEST_DIR/t.qcow2",
+                "file": "TEST_DIR/t.IMGFMT",
                 "encryption_key_missing": false
             },
             "type": "unknown"
@@ -182,26 +165,17 @@ Testing:
                 "detect_zeroes": "off",
                 "image": {
                     "virtual-size": 134217728,
-                    "filename": "TEST_DIR/t.qcow2",
+                    "filename": "TEST_DIR/t.IMGFMT",
                     "cluster-size": 65536,
-                    "format": "qcow2",
+                    "format": "IMGFMT",
                     "actual-size": SIZE,
-                    "format-specific": {
-                        "type": "qcow2",
-                        "data": {
-                            "compat": "1.1",
-                            "lazy-refcounts": false,
-                            "refcount-bits": 16,
-                            "corrupt": false
-                        }
-                    },
                     "dirty-flag": false
                 },
                 "iops_wr": 0,
                 "ro": false,
                 "node-name": "NODE_NAME",
                 "backing_file_depth": 0,
-                "drv": "qcow2",
+                "drv": "IMGFMT",
                 "iops": 0,
                 "bps_wr": 0,
                 "write_threshold": 0,
@@ -213,7 +187,7 @@ Testing:
                     "direct": false,
                     "writeback": true
                 },
-                "file": "TEST_DIR/t.qcow2",
+                "file": "TEST_DIR/t.IMGFMT",
                 "encryption_key_missing": false
             },
             "type": "unknown"
@@ -262,26 +236,17 @@ Testing:
             "detect_zeroes": "off",
             "image": {
                 "virtual-size": 134217728,
-                "filename": "TEST_DIR/t.qcow2",
+                "filename": "TEST_DIR/t.IMGFMT",
                 "cluster-size": 65536,
-                "format": "qcow2",
+                "format": "IMGFMT",
                 "actual-size": SIZE,
-                "format-specific": {
-                    "type": "qcow2",
-                    "data": {
-                        "compat": "1.1",
-                        "lazy-refcounts": false,
-                        "refcount-bits": 16,
-                        "corrupt": false
-                    }
-                },
                 "dirty-flag": false
             },
             "iops_wr": 0,
             "ro": false,
             "node-name": "disk",
             "backing_file_depth": 0,
-            "drv": "qcow2",
+            "drv": "IMGFMT",
             "iops": 0,
             "bps_wr": 0,
             "write_threshold": 0,
@@ -293,7 +258,7 @@ Testing:
                 "direct": false,
                 "writeback": true
             },
-            "file": "TEST_DIR/t.qcow2",
+            "file": "TEST_DIR/t.IMGFMT",
             "encryption_key_missing": false
         },
         {
@@ -301,7 +266,7 @@ Testing:
             "detect_zeroes": "off",
             "image": {
                 "virtual-size": 197120,
-                "filename": "TEST_DIR/t.qcow2",
+                "filename": "TEST_DIR/t.IMGFMT",
                 "format": "file",
                 "actual-size": SIZE,
                 "dirty-flag": false
@@ -322,7 +287,7 @@ Testing:
                 "direct": false,
                 "writeback": true
             },
-            "file": "TEST_DIR/t.qcow2",
+            "file": "TEST_DIR/t.IMGFMT",
             "encryption_key_missing": false
         }
     ]
@@ -346,26 +311,17 @@ Testing:
             "detect_zeroes": "off",
             "image": {
                 "virtual-size": 134217728,
-                "filename": "TEST_DIR/t.qcow2",
+                "filename": "TEST_DIR/t.IMGFMT",
                 "cluster-size": 65536,
-                "format": "qcow2",
+                "format": "IMGFMT",
                 "actual-size": SIZE,
-                "format-specific": {
-                    "type": "qcow2",
-                    "data": {
-                        "compat": "1.1",
-                        "lazy-refcounts": false,
-                        "refcount-bits": 16,
-                        "corrupt": false
-                    }
-                },
                 "dirty-flag": false
             },
             "iops_wr": 0,
             "ro": false,
             "node-name": "disk",
             "backing_file_depth": 0,
-            "drv": "qcow2",
+            "drv": "IMGFMT",
             "iops": 0,
             "bps_wr": 0,
             "write_threshold": 0,
@@ -377,7 +333,7 @@ Testing:
                 "direct": false,
                 "writeback": true
             },
-            "file": "TEST_DIR/t.qcow2",
+            "file": "TEST_DIR/t.IMGFMT",
             "encryption_key_missing": false
         },
         {
@@ -385,7 +341,7 @@ Testing:
             "detect_zeroes": "off",
             "image": {
                 "virtual-size": 197120,
-                "filename": "TEST_DIR/t.qcow2",
+                "filename": "TEST_DIR/t.IMGFMT",
                 "format": "file",
                 "actual-size": SIZE,
                 "dirty-flag": false
@@ -406,9 +362,49 @@ Testing:
                 "direct": false,
                 "writeback": true
             },
-            "file": "TEST_DIR/t.qcow2",
+            "file": "TEST_DIR/t.IMGFMT",
             "encryption_key_missing": false
         }
+    ]
+}
+{
+    "return": {
+    }
+}
+
+=== Empty drive with -device and device_del ===
+
+Testing: -device virtio-scsi -device scsi-cd,id=cd0
+{
+    QMP_VERSION
+}
+{
+    "return": {
+    }
+}
+{
+    "return": [
+        {
+            "io-status": "ok",
+            "device": "",
+            "locked": false,
+            "removable": true,
+            "qdev": "cd0",
+            "tray_open": false,
+            "type": "unknown"
+        }
+    ]
+}
+{
+    "return": {
+    }
+}
+{
+    "return": {
+    }
+}
+{
+    "return": [
     ]
 }
 {

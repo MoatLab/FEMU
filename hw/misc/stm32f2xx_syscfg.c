@@ -25,6 +25,7 @@
 #include "qemu/osdep.h"
 #include "hw/misc/stm32f2xx_syscfg.h"
 #include "qemu/log.h"
+#include "qemu/module.h"
 
 #ifndef STM_SYSCFG_ERR_DEBUG
 #define STM_SYSCFG_ERR_DEBUG 0
@@ -34,7 +35,7 @@
     if (STM_SYSCFG_ERR_DEBUG >= lvl) { \
         qemu_log("%s: " fmt, __func__, ## args); \
     } \
-} while (0);
+} while (0)
 
 #define DB_PRINT(fmt, args...) DB_PRINT_L(1, fmt, ## args)
 

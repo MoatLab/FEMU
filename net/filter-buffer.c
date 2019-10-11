@@ -10,11 +10,10 @@
 #include "net/filter.h"
 #include "net/queue.h"
 #include "qapi/error.h"
-#include "qemu-common.h"
 #include "qemu/timer.h"
 #include "qemu/iov.h"
+#include "qapi/qapi-builtin-visit.h"
 #include "qapi/qmp/qerror.h"
-#include "qapi-visit.h"
 #include "qom/object.h"
 
 #define TYPE_FILTER_BUFFER "filter-buffer"
@@ -191,7 +190,7 @@ out:
 
 static void filter_buffer_init(Object *obj)
 {
-    object_property_add(obj, "interval", "int",
+    object_property_add(obj, "interval", "uint32",
                         filter_buffer_get_interval,
                         filter_buffer_set_interval, NULL, NULL, NULL);
 }

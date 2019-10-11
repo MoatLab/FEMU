@@ -25,7 +25,7 @@
 
 #include "qemu/osdep.h"
 #include "qapi/qmp/qstring.h"
-#include "migration/qjson.h"
+#include "qjson.h"
 
 struct QJSON {
     QString *str;
@@ -109,6 +109,6 @@ void qjson_finish(QJSON *json)
 
 void qjson_destroy(QJSON *json)
 {
-    QDECREF(json->str);
+    qobject_unref(json->str);
     g_free(json);
 }

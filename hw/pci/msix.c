@@ -22,8 +22,7 @@
 #include "hw/xen/xen.h"
 #include "qemu/range.h"
 #include "qapi/error.h"
-
-#define MSIX_CAP_LENGTH 12
+#include "trace.h"
 
 /* MSI enable bit and maskall bit are in byte 1 in FLAGS register */
 #define MSIX_CONTROL_OFFSET (PCI_MSIX_FLAGS + 1)
@@ -130,10 +129,14 @@ static void msix_handle_mask_update(PCIDevice *dev, int vector, bool was_masked)
     }
 }
 
+static bool msix_masked(PCIDevice *dev)
+{
+    return dev->config[dev->msix_cap + MSIX_CONTROL_OFFSET] & MSIX_MASKALL_MASK;
+}
+
 static void msix_update_function_masked(PCIDevice *dev)
 {
-    dev->msix_function_masked = !msix_enabled(dev) ||
-        (dev->config[dev->msix_cap + MSIX_CONTROL_OFFSET] & MSIX_MASKALL_MASK);
+    dev->msix_function_masked = !msix_enabled(dev) || msix_masked(dev);
 }
 
 /* Handle MSI-X capability config write. */
@@ -147,6 +150,8 @@ void msix_write_config(PCIDevice *dev, uint32_t addr,
     if (!msix_present(dev) || !range_covers_byte(addr, len, enable_pos)) {
         return;
     }
+
+    trace_msix_write_config(dev->name, msix_enabled(dev), msix_masked(dev));
 
     was_masked = dev->msix_function_masked;
     msix_update_function_masked(dev);
@@ -294,7 +299,7 @@ int msix_init(struct PCIDevice *dev, unsigned short nentries,
         return -EINVAL;
     }
 
-    cap = pci_add_capability2(dev, PCI_CAP_ID_MSIX,
+    cap = pci_add_capability(dev, PCI_CAP_ID_MSIX,
                               cap_pos, MSIX_CAP_LENGTH, errp);
     if (cap < 0) {
         return cap;
@@ -338,7 +343,7 @@ int msix_init_exclusive_bar(PCIDevice *dev, unsigned short nentries,
     char *name;
     uint32_t bar_size = 4096;
     uint32_t bar_pba_offset = bar_size / 2;
-    uint32_t bar_pba_size = (nentries / 8 + 1) * 8;
+    uint32_t bar_pba_size = QEMU_ALIGN_UP(nentries, 64) / 8;
 
     /*
      * Migration compatibility dictates that this remains a 4k
@@ -431,7 +436,7 @@ void msix_save(PCIDevice *dev, QEMUFile *f)
     }
 
     qemu_put_buffer(f, dev->msix_table, n * PCI_MSIX_ENTRY_SIZE);
-    qemu_put_buffer(f, dev->msix_pba, (n + 7) / 8);
+    qemu_put_buffer(f, dev->msix_pba, DIV_ROUND_UP(n, 8));
 }
 
 /* Should be called after restoring the config space. */
@@ -446,7 +451,7 @@ void msix_load(PCIDevice *dev, QEMUFile *f)
 
     msix_clear_all_vectors(dev);
     qemu_get_buffer(f, dev->msix_table, n * PCI_MSIX_ENTRY_SIZE);
-    qemu_get_buffer(f, dev->msix_pba, (n + 7) / 8);
+    qemu_get_buffer(f, dev->msix_pba, DIV_ROUND_UP(n, 8));
     msix_update_function_masked(dev);
 
     for (vector = 0; vector < n; vector++) {
@@ -494,7 +499,7 @@ void msix_reset(PCIDevice *dev)
     }
     msix_clear_all_vectors(dev);
     dev->config[dev->msix_cap + MSIX_CONTROL_OFFSET] &=
-	    ~dev->wmask[dev->msix_cap + MSIX_CONTROL_OFFSET];
+            ~dev->wmask[dev->msix_cap + MSIX_CONTROL_OFFSET];
     memset(dev->msix_table, 0, dev->msix_entries_nr * PCI_MSIX_ENTRY_SIZE);
     memset(dev->msix_pba, 0, QEMU_ALIGN_UP(dev->msix_entries_nr, 64) / 8);
     msix_mask_all(dev, dev->msix_entries_nr);
@@ -618,7 +623,7 @@ void msix_unset_vector_notifiers(PCIDevice *dev)
 }
 
 static int put_msix_state(QEMUFile *f, void *pv, size_t size,
-                          VMStateField *field, QJSON *vmdesc)
+                          const VMStateField *field, QJSON *vmdesc)
 {
     msix_save(pv, f);
 
@@ -626,7 +631,7 @@ static int put_msix_state(QEMUFile *f, void *pv, size_t size,
 }
 
 static int get_msix_state(QEMUFile *f, void *pv, size_t size,
-                          VMStateField *field)
+                          const VMStateField *field)
 {
     msix_load(pv, f);
     return 0;

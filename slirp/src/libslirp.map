@@ -1,0 +1,21 @@
+SLIRP_4.0 {
+global:
+    slirp_add_exec;
+    slirp_add_guestfwd;
+    slirp_add_hostfwd;
+    slirp_cleanup;
+    slirp_connection_info;
+    slirp_init;
+    slirp_input;
+    slirp_pollfds_fill;
+    slirp_pollfds_poll;
+    slirp_remove_hostfwd;
+    slirp_socket_can_recv;
+    slirp_socket_recv;
+    slirp_state_load;
+    slirp_state_save;
+    slirp_state_version;
+    slirp_version_string;
+local:
+    *;
+};

@@ -29,11 +29,7 @@ void gicv3_set_gicv3state(CPUState *cpu, GICv3CPUState *s)
 
 static GICv3CPUState *icc_cs_from_env(CPUARMState *env)
 {
-    /* Given the CPU, find the right GICv3CPUState struct.
-     * Since we registered the CPU interface with the EL change hook as
-     * the opaque pointer, we can just directly get from the CPU to it.
-     */
-    return arm_get_el_change_hook_opaque(arm_env_get_cpu(env));
+    return env->gicv3state;
 }
 
 static bool gicv3_use_ns_bank(CPUARMState *env)
@@ -89,7 +85,10 @@ static bool icv_access(CPUARMState *env, int hcr_flags)
      *  * access if NS EL1 and either IMO or FMO == 1:
      *    CTLR, DIR, PMR, RPR
      */
-    return (env->cp15.hcr_el2 & hcr_flags) && arm_current_el(env) == 1
+    uint64_t hcr_el2 = arm_hcr_el2_eff(env);
+    bool flagmatch = hcr_el2 & hcr_flags & (HCR_IMO | HCR_FMO);
+
+    return flagmatch && arm_current_el(env) == 1
         && !arm_is_secure_below_el3(env);
 }
 
@@ -216,18 +215,35 @@ static uint32_t icv_gprio_mask(GICv3CPUState *cs, int group)
 {
     /* Return a mask word which clears the subpriority bits from
      * a priority value for a virtual interrupt in the specified group.
-     * This depends on the VBPR value:
+     * This depends on the VBPR value.
+     * If using VBPR0 then:
      *  a BPR of 0 means the group priority bits are [7:1];
      *  a BPR of 1 means they are [7:2], and so on down to
      *  a BPR of 7 meaning no group priority bits at all.
+     * If using VBPR1 then:
+     *  a BPR of 0 is impossible (the minimum value is 1)
+     *  a BPR of 1 means the group priority bits are [7:1];
+     *  a BPR of 2 means they are [7:2], and so on down to
+     *  a BPR of 7 meaning the group priority is [7].
+     *
      * Which BPR to use depends on the group of the interrupt and
      * the current ICH_VMCR_EL2.VCBPR settings.
+     *
+     * This corresponds to the VGroupBits() pseudocode.
      */
+    int bpr;
+
     if (group == GICV3_G1NS && cs->ich_vmcr_el2 & ICH_VMCR_EL2_VCBPR) {
         group = GICV3_G0;
     }
 
-    return ~0U << (read_vbpr(cs, group) + 1);
+    bpr = read_vbpr(cs, group);
+    if (group == GICV3_G1NS) {
+        assert(bpr > 0);
+        bpr--;
+    }
+
+    return ~0U << (bpr + 1);
 }
 
 static bool icv_hppi_can_preempt(GICv3CPUState *cs, uint64_t lr)
@@ -414,7 +430,7 @@ static uint64_t icv_ap_read(CPUARMState *env, const ARMCPRegInfo *ri)
 {
     GICv3CPUState *cs = icc_cs_from_env(env);
     int regno = ri->opc2 & 3;
-    int grp = ri->crm & 1 ? GICV3_G0 : GICV3_G1NS;
+    int grp = (ri->crm & 1) ? GICV3_G1NS : GICV3_G0;
     uint64_t value = cs->ich_apr[grp][regno];
 
     trace_gicv3_icv_ap_read(ri->crm & 1, regno, gicv3_redist_affid(cs), value);
@@ -426,7 +442,7 @@ static void icv_ap_write(CPUARMState *env, const ARMCPRegInfo *ri,
 {
     GICv3CPUState *cs = icc_cs_from_env(env);
     int regno = ri->opc2 & 3;
-    int grp = ri->crm & 1 ? GICV3_G0 : GICV3_G1NS;
+    int grp = (ri->crm & 1) ? GICV3_G1NS : GICV3_G0;
 
     trace_gicv3_icv_ap_write(ri->crm & 1, regno, gicv3_redist_affid(cs), value);
 
@@ -674,20 +690,37 @@ static uint32_t icc_gprio_mask(GICv3CPUState *cs, int group)
 {
     /* Return a mask word which clears the subpriority bits from
      * a priority value for an interrupt in the specified group.
-     * This depends on the BPR value:
+     * This depends on the BPR value. For CBPR0 (S or NS):
      *  a BPR of 0 means the group priority bits are [7:1];
      *  a BPR of 1 means they are [7:2], and so on down to
      *  a BPR of 7 meaning no group priority bits at all.
+     * For CBPR1 NS:
+     *  a BPR of 0 is impossible (the minimum value is 1)
+     *  a BPR of 1 means the group priority bits are [7:1];
+     *  a BPR of 2 means they are [7:2], and so on down to
+     *  a BPR of 7 meaning the group priority is [7].
+     *
      * Which BPR to use depends on the group of the interrupt and
      * the current ICC_CTLR.CBPR settings.
+     *
+     * This corresponds to the GroupBits() pseudocode.
      */
+    int bpr;
+
     if ((group == GICV3_G1 && cs->icc_ctlr_el1[GICV3_S] & ICC_CTLR_EL1_CBPR) ||
         (group == GICV3_G1NS &&
          cs->icc_ctlr_el1[GICV3_NS] & ICC_CTLR_EL1_CBPR)) {
         group = GICV3_G0;
     }
 
-    return ~0U << ((cs->icc_bpr[group] & 7) + 1);
+    bpr = cs->icc_bpr[group] & 7;
+
+    if (group == GICV3_G1NS) {
+        assert(bpr > 0);
+        bpr--;
+    }
+
+    return ~0U << (bpr + 1);
 }
 
 static bool icc_no_enabled_hppi(GICv3CPUState *cs)
@@ -802,7 +835,7 @@ static uint64_t icc_pmr_read(CPUARMState *env, const ARMCPRegInfo *ri)
         /* NS access and Group 0 is inaccessible to NS: return the
          * NS view of the current priority
          */
-        if (value & 0x80) {
+        if ((value & 0x80) == 0) {
             /* Secure priorities not visible to NS */
             value = 0;
         } else if (value != 0xff) {
@@ -837,7 +870,7 @@ static void icc_pmr_write(CPUARMState *env, const ARMCPRegInfo *ri,
             /* Current PMR in the secure range, don't allow NS to change it */
             return;
         }
-        value = (value >> 1) & 0x80;
+        value = (value >> 1) | 0x80;
     }
     cs->icc_pmr_el1 = value;
     gicv3_cpuif_update(cs);
@@ -1388,6 +1421,7 @@ static void icc_bpr_write(CPUARMState *env, const ARMCPRegInfo *ri,
 {
     GICv3CPUState *cs = icc_cs_from_env(env);
     int grp = (ri->crm == 8) ? GICV3_G0 : GICV3_G1;
+    uint64_t minval;
 
     if (icv_access(env, grp == GICV3_G0 ? HCR_FMO : HCR_IMO)) {
         icv_bpr_write(env, ri, value);
@@ -1415,6 +1449,11 @@ static void icc_bpr_write(CPUARMState *env, const ARMCPRegInfo *ri,
         return;
     }
 
+    minval = (grp == GICV3_G1NS) ? GIC_MIN_BPR_NS : GIC_MIN_BPR;
+    if (value < minval) {
+        value = minval;
+    }
+
     cs->icc_bpr[grp] = value & 7;
     gicv3_cpuif_update(cs);
 }
@@ -1425,7 +1464,7 @@ static uint64_t icc_ap_read(CPUARMState *env, const ARMCPRegInfo *ri)
     uint64_t value;
 
     int regno = ri->opc2 & 3;
-    int grp = ri->crm & 1 ? GICV3_G0 : GICV3_G1;
+    int grp = (ri->crm & 1) ? GICV3_G1 : GICV3_G0;
 
     if (icv_access(env, grp == GICV3_G0 ? HCR_FMO : HCR_IMO)) {
         return icv_ap_read(env, ri);
@@ -1447,7 +1486,7 @@ static void icc_ap_write(CPUARMState *env, const ARMCPRegInfo *ri,
     GICv3CPUState *cs = icc_cs_from_env(env);
 
     int regno = ri->opc2 & 3;
-    int grp = ri->crm & 1 ? GICV3_G0 : GICV3_G1;
+    int grp = (ri->crm & 1) ? GICV3_G1 : GICV3_G0;
 
     if (icv_access(env, grp == GICV3_G0 ? HCR_FMO : HCR_IMO)) {
         icv_ap_write(env, ri, value);
@@ -1513,8 +1552,9 @@ static void icc_dir_write(CPUARMState *env, const ARMCPRegInfo *ri,
     /* No need to include !IsSecure in route_*_to_el2 as it's only
      * tested in cases where we know !IsSecure is true.
      */
-    route_fiq_to_el2 = env->cp15.hcr_el2 & HCR_FMO;
-    route_irq_to_el2 = env->cp15.hcr_el2 & HCR_FMO;
+    uint64_t hcr_el2 = arm_hcr_el2_eff(env);
+    route_fiq_to_el2 = hcr_el2 & HCR_FMO;
+    route_irq_to_el2 = hcr_el2 & HCR_IMO;
 
     switch (arm_current_el(env)) {
     case 3:
@@ -1569,7 +1609,7 @@ static uint64_t icc_rpr_read(CPUARMState *env, const ARMCPRegInfo *ri)
     if (arm_feature(env, ARM_FEATURE_EL3) &&
         !arm_is_secure(env) && (env->cp15.scr_el3 & SCR_FIQ)) {
         /* NS GIC access and Group 0 is inaccessible to NS */
-        if (prio & 0x80) {
+        if ((prio & 0x80) == 0) {
             /* NS mustn't see priorities in the Secure half of the range */
             prio = 0;
         } else if (prio != 0xff) {
@@ -1816,7 +1856,7 @@ static void icc_ctlr_el3_write(CPUARMState *env, const ARMCPRegInfo *ri,
     trace_gicv3_icc_ctlr_el3_write(gicv3_redist_affid(cs), value);
 
     /* *_EL1NS and *_EL1S bits are aliases into the ICC_CTLR_EL1 bits. */
-    cs->icc_ctlr_el1[GICV3_NS] &= (ICC_CTLR_EL1_CBPR | ICC_CTLR_EL1_EOIMODE);
+    cs->icc_ctlr_el1[GICV3_NS] &= ~(ICC_CTLR_EL1_CBPR | ICC_CTLR_EL1_EOIMODE);
     if (value & ICC_CTLR_EL3_EOIMODE_EL1NS) {
         cs->icc_ctlr_el1[GICV3_NS] |= ICC_CTLR_EL1_EOIMODE;
     }
@@ -1824,7 +1864,7 @@ static void icc_ctlr_el3_write(CPUARMState *env, const ARMCPRegInfo *ri,
         cs->icc_ctlr_el1[GICV3_NS] |= ICC_CTLR_EL1_CBPR;
     }
 
-    cs->icc_ctlr_el1[GICV3_S] &= (ICC_CTLR_EL1_CBPR | ICC_CTLR_EL1_EOIMODE);
+    cs->icc_ctlr_el1[GICV3_S] &= ~(ICC_CTLR_EL1_CBPR | ICC_CTLR_EL1_EOIMODE);
     if (value & ICC_CTLR_EL3_EOIMODE_EL1S) {
         cs->icc_ctlr_el1[GICV3_S] |= ICC_CTLR_EL1_EOIMODE;
     }
@@ -1856,8 +1896,8 @@ static CPAccessResult gicv3_irqfiq_access(CPUARMState *env,
     if ((env->cp15.scr_el3 & (SCR_FIQ | SCR_IRQ)) == (SCR_FIQ | SCR_IRQ)) {
         switch (el) {
         case 1:
-            if (arm_is_secure_below_el3(env) ||
-                ((env->cp15.hcr_el2 & (HCR_IMO | HCR_FMO)) == 0)) {
+            /* Note that arm_hcr_el2_eff takes secure state into account.  */
+            if ((arm_hcr_el2_eff(env) & (HCR_IMO | HCR_FMO)) == 0) {
                 r = CP_ACCESS_TRAP_EL3;
             }
             break;
@@ -1897,8 +1937,8 @@ static CPAccessResult gicv3_dir_access(CPUARMState *env,
 static CPAccessResult gicv3_sgi_access(CPUARMState *env,
                                        const ARMCPRegInfo *ri, bool isread)
 {
-    if ((env->cp15.hcr_el2 & (HCR_IMO | HCR_FMO)) &&
-        arm_current_el(env) == 1 && !arm_is_secure_below_el3(env)) {
+    if (arm_current_el(env) == 1 &&
+        (arm_hcr_el2_eff(env) & (HCR_IMO | HCR_FMO)) != 0) {
         /* Takes priority over a possible EL3 trap */
         return CP_ACCESS_TRAP_EL2;
     }
@@ -1922,8 +1962,7 @@ static CPAccessResult gicv3_fiq_access(CPUARMState *env,
     if (env->cp15.scr_el3 & SCR_FIQ) {
         switch (el) {
         case 1:
-            if (arm_is_secure_below_el3(env) ||
-                ((env->cp15.hcr_el2 & HCR_FMO) == 0)) {
+            if ((arm_hcr_el2_eff(env) & HCR_FMO) == 0) {
                 r = CP_ACCESS_TRAP_EL3;
             }
             break;
@@ -1962,8 +2001,7 @@ static CPAccessResult gicv3_irq_access(CPUARMState *env,
     if (env->cp15.scr_el3 & SCR_IRQ) {
         switch (el) {
         case 1:
-            if (arm_is_secure_below_el3(env) ||
-                ((env->cp15.hcr_el2 & HCR_IMO) == 0)) {
+            if ((arm_hcr_el2_eff(env) & HCR_IMO) == 0) {
                 r = CP_ACCESS_TRAP_EL3;
             }
             break;
@@ -1999,11 +2037,7 @@ static void icc_reset(CPUARMState *env, const ARMCPRegInfo *ri)
     cs->icc_pmr_el1 = 0;
     cs->icc_bpr[GICV3_G0] = GIC_MIN_BPR;
     cs->icc_bpr[GICV3_G1] = GIC_MIN_BPR;
-    if (arm_feature(env, ARM_FEATURE_EL3)) {
-        cs->icc_bpr[GICV3_G1NS] = GIC_MIN_BPR_NS;
-    } else {
-        cs->icc_bpr[GICV3_G1NS] = GIC_MIN_BPR;
-    }
+    cs->icc_bpr[GICV3_G1NS] = GIC_MIN_BPR_NS;
     memset(cs->icc_apr, 0, sizeof(cs->icc_apr));
     memset(cs->icc_igrpen, 0, sizeof(cs->icc_igrpen));
     cs->icc_ctlr_el3 = ICC_CTLR_EL3_NDS | ICC_CTLR_EL3_A3V |
@@ -2014,7 +2048,7 @@ static void icc_reset(CPUARMState *env, const ARMCPRegInfo *ri)
     cs->ich_hcr_el2 = 0;
     memset(cs->ich_lr_el2, 0, sizeof(cs->ich_lr_el2));
     cs->ich_vmcr_el2 = ICH_VMCR_EL2_VFIQEN |
-        (icv_min_vbpr(cs) << ICH_VMCR_EL2_VBPR1_SHIFT) |
+        ((icv_min_vbpr(cs) + 1) << ICH_VMCR_EL2_VBPR1_SHIFT) |
         (icv_min_vbpr(cs) << ICH_VMCR_EL2_VBPR0_SHIFT);
 }
 
@@ -2260,7 +2294,7 @@ static uint64_t ich_ap_read(CPUARMState *env, const ARMCPRegInfo *ri)
 {
     GICv3CPUState *cs = icc_cs_from_env(env);
     int regno = ri->opc2 & 3;
-    int grp = ri->crm & 1 ? GICV3_G0 : GICV3_G1NS;
+    int grp = (ri->crm & 1) ? GICV3_G1NS : GICV3_G0;
     uint64_t value;
 
     value = cs->ich_apr[grp][regno];
@@ -2273,7 +2307,7 @@ static void ich_ap_write(CPUARMState *env, const ARMCPRegInfo *ri,
 {
     GICv3CPUState *cs = icc_cs_from_env(env);
     int regno = ri->opc2 & 3;
-    int grp = ri->crm & 1 ? GICV3_G0 : GICV3_G1NS;
+    int grp = (ri->crm & 1) ? GICV3_G1NS : GICV3_G0;
 
     trace_gicv3_ich_ap_write(ri->crm & 1, regno, gicv3_redist_affid(cs), value);
 
@@ -2332,7 +2366,7 @@ static void ich_vmcr_write(CPUARMState *env, const ARMCPRegInfo *ri,
     /* Enforce "writing BPRs to less than minimum sets them to the minimum"
      * by reading and writing back the fields.
      */
-    write_vbpr(cs, GICV3_G1, read_vbpr(cs, GICV3_G0));
+    write_vbpr(cs, GICV3_G0, read_vbpr(cs, GICV3_G0));
     write_vbpr(cs, GICV3_G1, read_vbpr(cs, GICV3_G1));
 
     gicv3_cpuif_virt_update(cs);
@@ -2579,9 +2613,7 @@ void gicv3_init_cpuif(GICv3State *s)
          * it might be with code translated by CPU 0 but run by CPU 1, in
          * which case we'd get the wrong value.
          * So instead we define the regs with no ri->opaque info, and
-         * get back to the GICv3CPUState from the ARMCPU by reading back
-         * the opaque pointer from the el_change_hook, which we're going
-         * to need to register anyway.
+         * get back to the GICv3CPUState from the CPUARMState.
          */
         define_arm_cp_regs(cpu, gicv3_cpuif_reginfo);
         if (arm_feature(&cpu->env, ARM_FEATURE_EL2)

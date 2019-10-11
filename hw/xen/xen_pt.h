@@ -1,7 +1,6 @@
 #ifndef XEN_PT_H
 #define XEN_PT_H
 
-#include "qemu-common.h"
 #include "hw/xen/xen_common.h"
 #include "hw/pci/pci.h"
 #include "xen-host-pci-device.h"
@@ -180,6 +179,7 @@ typedef struct XenPTMSI {
     uint32_t addr_hi;  /* guest message upper address */
     uint16_t data;     /* guest message data */
     uint32_t ctrl_offset; /* saved control offset */
+    uint32_t mask;     /* guest mask bits */
     int pirq;          /* guest pirq corresponding */
     bool initialized;  /* when guest MSI is initialized */
     bool mapped;       /* when pirq is mapped */
@@ -318,7 +318,7 @@ static inline bool xen_pt_has_msix_mapping(XenPCIPassthroughState *s, int bar)
 }
 
 extern void *pci_assign_dev_load_option_rom(PCIDevice *dev,
-                                            struct Object *owner, int *size,
+                                            int *size,
                                             unsigned int domain,
                                             unsigned int bus, unsigned int slot,
                                             unsigned int function);

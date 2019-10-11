@@ -1,7 +1,6 @@
 #ifndef HW_M48T59_H
 #define HW_M48T59_H
 
-#include "qemu-common.h"
 #include "qom/object.h"
 
 #define TYPE_NVRAM "nvram"
@@ -13,9 +12,7 @@
 #define NVRAM(obj) \
     INTERFACE_CHECK(Nvram, (obj), TYPE_NVRAM)
 
-typedef struct Nvram {
-    Object parent;
-} Nvram;
+typedef struct Nvram Nvram;
 
 typedef struct NvramClass {
     InterfaceClass parent;

@@ -19,18 +19,15 @@
 
 
 #include "qemu/osdep.h"
+#include "qemu/units.h"
 #include "qapi/error.h"
-#include "qemu-common.h"
 #include "cpu.h"
 #include "hw/hw.h"
-#include "hw/devices.h"
 #include "net/net.h"
 #include "sysemu/sysemu.h"
 #include "hw/boards.h"
 #include "hw/loader.h"
-#include "sysemu/block-backend.h"
 #include "exec/address-spaces.h"
-#include "hw/block/flash.h"
 #include "elf.h"
 #include "hw/tricore/tricore.h"
 #include "qemu/error-report.h"
@@ -46,11 +43,11 @@ static void tricore_load_kernel(CPUTriCoreState *env)
     long kernel_size;
 
     kernel_size = load_elf(tricoretb_binfo.kernel_filename, NULL,
-                           NULL, &entry, NULL,
+                           NULL, NULL, &entry, NULL,
                            NULL, 0,
                            EM_TRICORE, 1, 0);
     if (kernel_size <= 0) {
-        error_report("qemu: no kernel file '%s'",
+        error_report("no kernel file '%s'",
                 tricoretb_binfo.kernel_filename);
         exit(1);
     }
@@ -71,33 +68,20 @@ static void tricore_testboard_init(MachineState *machine, int board_id)
     MemoryRegion *pcp_data = g_new(MemoryRegion, 1);
     MemoryRegion *pcp_text = g_new(MemoryRegion, 1);
 
-    if (!machine->cpu_model) {
-        machine->cpu_model = "tc1796";
-    }
-    cpu = cpu_tricore_init(machine->cpu_model);
-    if (!cpu) {
-        error_report("Unable to find CPU definition");
-        exit(1);
-    }
+    cpu = TRICORE_CPU(cpu_create(machine->cpu_type));
     env = &cpu->env;
-    memory_region_init_ram(ext_cram, NULL, "powerlink_ext_c.ram", 2*1024*1024,
+    memory_region_init_ram(ext_cram, NULL, "powerlink_ext_c.ram",
+                           2 * MiB, &error_fatal);
+    memory_region_init_ram(ext_dram, NULL, "powerlink_ext_d.ram",
+                           4 * MiB, &error_fatal);
+    memory_region_init_ram(int_cram, NULL, "powerlink_int_c.ram", 48 * KiB,
                            &error_fatal);
-    vmstate_register_ram_global(ext_cram);
-    memory_region_init_ram(ext_dram, NULL, "powerlink_ext_d.ram", 4*1024*1024,
+    memory_region_init_ram(int_dram, NULL, "powerlink_int_d.ram", 48 * KiB,
                            &error_fatal);
-    vmstate_register_ram_global(ext_dram);
-    memory_region_init_ram(int_cram, NULL, "powerlink_int_c.ram", 48*1024,
-                           &error_fatal);
-    vmstate_register_ram_global(int_cram);
-    memory_region_init_ram(int_dram, NULL, "powerlink_int_d.ram", 48*1024,
-                           &error_fatal);
-    vmstate_register_ram_global(int_dram);
-    memory_region_init_ram(pcp_data, NULL, "powerlink_pcp_data.ram", 16*1024,
-                           &error_fatal);
-    vmstate_register_ram_global(pcp_data);
-    memory_region_init_ram(pcp_text, NULL, "powerlink_pcp_text.ram", 32*1024,
-                           &error_fatal);
-    vmstate_register_ram_global(pcp_text);
+    memory_region_init_ram(pcp_data, NULL, "powerlink_pcp_data.ram",
+                           16 * KiB, &error_fatal);
+    memory_region_init_ram(pcp_text, NULL, "powerlink_pcp_text.ram",
+                           32 * KiB, &error_fatal);
 
     memory_region_add_subregion(sysmem, 0x80000000, ext_cram);
     memory_region_add_subregion(sysmem, 0xa1000000, ext_dram);
@@ -124,6 +108,7 @@ static void ttb_machine_init(MachineClass *mc)
     mc->desc = "a minimal TriCore board";
     mc->init = tricoreboard_init;
     mc->is_default = 0;
+    mc->default_cpu_type = TRICORE_CPU_TYPE_NAME("tc1796");
 }
 
 DEFINE_MACHINE("tricore_testboard", ttb_machine_init)

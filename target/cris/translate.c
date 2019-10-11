@@ -31,7 +31,9 @@
 #include "exec/helper-proto.h"
 #include "mmu.h"
 #include "exec/cpu_ldst.h"
+#include "exec/translator.h"
 #include "crisv32-decode.h"
+#include "qemu/qemu-print.h"
 
 #include "exec/helper-gen.h"
 
@@ -50,7 +52,11 @@
 #define BUG() (gen_BUG(dc, __FILE__, __LINE__))
 #define BUG_ON(x) ({if (x) BUG();})
 
-#define DISAS_SWI 5
+/* is_jmp field values */
+#define DISAS_JUMP    DISAS_TARGET_0 /* only pc was modified dynamically */
+#define DISAS_UPDATE  DISAS_TARGET_1 /* cpu state was modified dynamically */
+#define DISAS_TB_JUMP DISAS_TARGET_2 /* only pc was modified statically */
+#define DISAS_SWI     DISAS_TARGET_3
 
 /* Used by the decoder.  */
 #define EXTRACT_FIELD(src, start, end) \
@@ -61,7 +67,6 @@
 #define CC_MASK_NZVC 0xf
 #define CC_MASK_RNZV 0x10e
 
-static TCGv_env cpu_env;
 static TCGv cpu_R[16];
 static TCGv cpu_PR[16];
 static TCGv cc_x;
@@ -133,11 +138,7 @@ typedef struct DisasContext {
 
 static void gen_BUG(DisasContext *dc, const char *file, int line)
 {
-    fprintf(stderr, "BUG: pc=%x %s %d\n", dc->pc, file, line);
-    if (qemu_log_separate()) {
-        qemu_log("BUG: pc=%x %s %d\n", dc->pc, file, line);
-    }
-    cpu_abort(CPU(dc->cpu), "%s:%d\n", file, line);
+    cpu_abort(CPU(dc->cpu), "%s:%d pc=%x\n", file, line, dc->pc);
 }
 
 static const char *regnames_v32[] =
@@ -536,10 +537,10 @@ static void gen_goto_tb(DisasContext *dc, int n, target_ulong dest)
     if (use_goto_tb(dc, dest)) {
         tcg_gen_goto_tb(n);
         tcg_gen_movi_tl(env_pc, dest);
-                tcg_gen_exit_tb((uintptr_t)dc->tb + n);
+        tcg_gen_exit_tb(dc->tb, n);
     } else {
         tcg_gen_movi_tl(env_pc, dest);
-        tcg_gen_exit_tb(0);
+        tcg_gen_exit_tb(NULL, 0);
     }
 }
 
@@ -834,7 +835,7 @@ static void cris_alu(DisasContext *dc, int op,
         }
         tcg_gen_or_tl(d, d, tmp);
     }
-    if (!TCGV_EQUAL(tmp, d)) {
+    if (tmp != d) {
         tcg_temp_free(tmp);
     }
 }
@@ -1157,7 +1158,7 @@ static inline void t_gen_sext(TCGv d, TCGv s, int size)
         tcg_gen_ext8s_i32(d, s);
     } else if (size == 2) {
         tcg_gen_ext16s_i32(d, s);
-    } else if (!TCGV_EQUAL(d, s)) {
+    } else {
         tcg_gen_mov_tl(d, s);
     }
 }
@@ -1168,7 +1169,7 @@ static inline void t_gen_zext(TCGv d, TCGv s, int size)
         tcg_gen_ext8u_i32(d, s);
     } else if (size == 2) {
         tcg_gen_ext16u_i32(d, s);
-    } else if (!TCGV_EQUAL(d, s)) {
+    } else {
         tcg_gen_mov_tl(d, s);
     }
 }
@@ -1685,18 +1686,11 @@ static int dec_cmp_r(CPUCRISState *env, DisasContext *dc)
 
 static int dec_abs_r(CPUCRISState *env, DisasContext *dc)
 {
-    TCGv t0;
-
     LOG_DIS("abs $r%u, $r%u\n",
             dc->op1, dc->op2);
     cris_cc_mask(dc, CC_MASK_NZ);
 
-    t0 = tcg_temp_new();
-    tcg_gen_sari_tl(t0, cpu_R[dc->op1], 31);
-    tcg_gen_xor_tl(cpu_R[dc->op2], cpu_R[dc->op1], t0);
-    tcg_gen_sub_tl(cpu_R[dc->op2], cpu_R[dc->op2], t0);
-    tcg_temp_free(t0);
-
+    tcg_gen_abs_tl(cpu_R[dc->op2], cpu_R[dc->op1]);
     cris_alu(dc, CC_OP_MOVE,
             cpu_R[dc->op2], cpu_R[dc->op2], cpu_R[dc->op2], 4);
     return 2;
@@ -2599,7 +2593,7 @@ static int dec_movem_mr(CPUCRISState *env, DisasContext *dc)
         tcg_gen_addi_tl(addr, cpu_R[dc->op1], i * 8);
         gen_load(dc, tmp32, addr, 4, 0);
     } else {
-        TCGV_UNUSED(tmp32);
+        tmp32 = NULL;
     }
     tcg_temp_free(addr);
 
@@ -3043,7 +3037,7 @@ static unsigned int crisv32_decoder(CPUCRISState *env, DisasContext *dc)
     return insn_len;
 }
 
-#include "translate_v10.c"
+#include "translate_v10.inc.c"
 
 /*
  * Delay slots on QEMU/CRIS.
@@ -3080,18 +3074,16 @@ static unsigned int crisv32_decoder(CPUCRISState *env, DisasContext *dc)
  */
 
 /* generate intermediate code for basic block 'tb'.  */
-void gen_intermediate_code(CPUCRISState *env, struct TranslationBlock *tb)
+void gen_intermediate_code(CPUState *cs, TranslationBlock *tb, int max_insns)
 {
-    CRISCPU *cpu = cris_env_get_cpu(env);
-    CPUState *cs = CPU(cpu);
+    CPUCRISState *env = cs->env_ptr;
     uint32_t pc_start;
     unsigned int insn_len;
     struct DisasContext ctx;
     struct DisasContext *dc = &ctx;
-    uint32_t next_page_start;
+    uint32_t page_start;
     target_ulong npc;
     int num_insns;
-    int max_insns;
 
     if (env->pregs[PR_VR] == 32) {
         dc->decoder = crisv32_decoder;
@@ -3105,7 +3097,7 @@ void gen_intermediate_code(CPUCRISState *env, struct TranslationBlock *tb)
      * delayslot, like in real hw.
      */
     pc_start = tb->pc & ~1;
-    dc->cpu = cpu;
+    dc->cpu = env_archcpu(env);
     dc->tb = tb;
 
     dc->is_jmp = DISAS_NEXT;
@@ -3135,15 +3127,8 @@ void gen_intermediate_code(CPUCRISState *env, struct TranslationBlock *tb)
 
     dc->cpustate_changed = 0;
 
-    next_page_start = (pc_start & TARGET_PAGE_MASK) + TARGET_PAGE_SIZE;
+    page_start = pc_start & TARGET_PAGE_MASK;
     num_insns = 0;
-    max_insns = tb->cflags & CF_COUNT_MASK;
-    if (max_insns == 0) {
-        max_insns = CF_COUNT_MASK;
-    }
-    if (max_insns > TCG_MAX_INSNS) {
-        max_insns = TCG_MAX_INSNS;
-    }
 
     gen_tb_start(tb);
     do {
@@ -3167,7 +3152,7 @@ void gen_intermediate_code(CPUCRISState *env, struct TranslationBlock *tb)
         /* Pretty disas.  */
         LOG_DIS("%8.8x:\t", dc->pc);
 
-        if (num_insns == max_insns && (tb->cflags & CF_LAST_IO)) {
+        if (num_insns == max_insns && (tb_cflags(tb) & CF_LAST_IO)) {
             gen_io_start();
         }
         dc->clear_x = 1;
@@ -3231,7 +3216,7 @@ void gen_intermediate_code(CPUCRISState *env, struct TranslationBlock *tb)
     } while (!dc->is_jmp && !dc->cpustate_changed
             && !tcg_op_buf_full()
             && !singlestep
-            && (dc->pc < next_page_start)
+            && (dc->pc - page_start < TARGET_PAGE_SIZE)
             && num_insns < max_insns);
 
     if (dc->clear_locked_irq) {
@@ -3240,7 +3225,7 @@ void gen_intermediate_code(CPUCRISState *env, struct TranslationBlock *tb)
 
     npc = dc->pc;
 
-        if (tb->cflags & CF_LAST_IO)
+        if (tb_cflags(tb) & CF_LAST_IO)
             gen_io_end();
     /* Force an update if the per-tb cpu state has changed.  */
     if (dc->is_jmp == DISAS_NEXT
@@ -3273,7 +3258,7 @@ void gen_intermediate_code(CPUCRISState *env, struct TranslationBlock *tb)
         case DISAS_UPDATE:
             /* indicate that the hash table must be used
                    to find the next TB */
-            tcg_gen_exit_tb(0);
+            tcg_gen_exit_tb(NULL, 0);
             break;
         case DISAS_SWI:
         case DISAS_TB_JUMP:
@@ -3293,18 +3278,14 @@ void gen_intermediate_code(CPUCRISState *env, struct TranslationBlock *tb)
         qemu_log_lock();
         qemu_log("--------------\n");
         qemu_log("IN: %s\n", lookup_symbol(pc_start));
-        log_target_disas(cs, pc_start, dc->pc - pc_start,
-                         env->pregs[PR_VR]);
-        qemu_log("\nisize=%d osize=%d\n",
-                 dc->pc - pc_start, tcg_op_buf_count());
+        log_target_disas(cs, pc_start, dc->pc - pc_start);
         qemu_log_unlock();
     }
 #endif
 #endif
 }
 
-void cris_cpu_dump_state(CPUState *cs, FILE *f, fprintf_function cpu_fprintf,
-                         int flags)
+void cris_cpu_dump_state(CPUState *cs, FILE *f, int flags)
 {
     CRISCPU *cpu = CRIS_CPU(cs);
     CPUCRISState *env = &cpu->env;
@@ -3312,7 +3293,7 @@ void cris_cpu_dump_state(CPUState *cs, FILE *f, fprintf_function cpu_fprintf,
     const char **pregnames;
     int i;
 
-    if (!env || !f) {
+    if (!env) {
         return;
     }
     if (env->pregs[PR_VR] < 32) {
@@ -3323,40 +3304,40 @@ void cris_cpu_dump_state(CPUState *cs, FILE *f, fprintf_function cpu_fprintf,
         regnames = regnames_v32;
     }
 
-    cpu_fprintf(f, "PC=%x CCS=%x btaken=%d btarget=%x\n"
-            "cc_op=%d cc_src=%d cc_dest=%d cc_result=%x cc_mask=%x\n",
-            env->pc, env->pregs[PR_CCS], env->btaken, env->btarget,
-            env->cc_op,
-            env->cc_src, env->cc_dest, env->cc_result, env->cc_mask);
+    qemu_fprintf(f, "PC=%x CCS=%x btaken=%d btarget=%x\n"
+                 "cc_op=%d cc_src=%d cc_dest=%d cc_result=%x cc_mask=%x\n",
+                 env->pc, env->pregs[PR_CCS], env->btaken, env->btarget,
+                 env->cc_op,
+                 env->cc_src, env->cc_dest, env->cc_result, env->cc_mask);
 
 
     for (i = 0; i < 16; i++) {
-        cpu_fprintf(f, "%s=%8.8x ", regnames[i], env->regs[i]);
+        qemu_fprintf(f, "%s=%8.8x ", regnames[i], env->regs[i]);
         if ((i + 1) % 4 == 0) {
-            cpu_fprintf(f, "\n");
+            qemu_fprintf(f, "\n");
         }
     }
-    cpu_fprintf(f, "\nspecial regs:\n");
+    qemu_fprintf(f, "\nspecial regs:\n");
     for (i = 0; i < 16; i++) {
-        cpu_fprintf(f, "%s=%8.8x ", pregnames[i], env->pregs[i]);
+        qemu_fprintf(f, "%s=%8.8x ", pregnames[i], env->pregs[i]);
         if ((i + 1) % 4 == 0) {
-            cpu_fprintf(f, "\n");
+            qemu_fprintf(f, "\n");
         }
     }
     if (env->pregs[PR_VR] >= 32) {
         uint32_t srs = env->pregs[PR_SRS];
-        cpu_fprintf(f, "\nsupport function regs bank %x:\n", srs);
+        qemu_fprintf(f, "\nsupport function regs bank %x:\n", srs);
         if (srs < ARRAY_SIZE(env->sregs)) {
             for (i = 0; i < 16; i++) {
-                cpu_fprintf(f, "s%2.2d=%8.8x ",
-                        i, env->sregs[srs][i]);
+                qemu_fprintf(f, "s%2.2d=%8.8x ",
+                             i, env->sregs[srs][i]);
                 if ((i + 1) % 4 == 0) {
-                    cpu_fprintf(f, "\n");
+                    qemu_fprintf(f, "\n");
                 }
             }
         }
     }
-    cpu_fprintf(f, "\n\n");
+    qemu_fprintf(f, "\n\n");
 
 }
 
@@ -3364,8 +3345,6 @@ void cris_initialize_tcg(void)
 {
     int i;
 
-    cpu_env = tcg_global_reg_new_ptr(TCG_AREG0, "env");
-    tcg_ctx.tcg_env = cpu_env;
     cc_x = tcg_global_mem_new(cpu_env,
                               offsetof(CPUCRISState, cc_x), "cc_x");
     cc_src = tcg_global_mem_new(cpu_env,

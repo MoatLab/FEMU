@@ -28,7 +28,6 @@
 #include "qapi/error.h"
 #include "cpu.h"
 #include "sysemu/sysemu.h"
-#include "sysemu/char.h"
 #include "hw/qdev.h"
 #include "sysemu/device_tree.h"
 
@@ -43,8 +42,6 @@
 #include "hw/ppc/spapr_ovec.h"
 #include <libfdt.h>
 
-struct rtas_error_log {
-    uint32_t summary;
 #define RTAS_LOG_VERSION_MASK                   0xff000000
 #define   RTAS_LOG_VERSION_6                    0x06000000
 #define RTAS_LOG_SEVERITY_MASK                  0x00e00000
@@ -86,6 +83,9 @@ struct rtas_error_log {
 #define   RTAS_LOG_TYPE_ECC_CORR                0x0000000a
 #define   RTAS_LOG_TYPE_EPOW                    0x00000040
 #define   RTAS_LOG_TYPE_HOTPLUG                 0x000000e5
+
+struct rtas_error_log {
+    uint32_t summary;
     uint32_t extended_length;
 } QEMU_PACKED;
 
@@ -167,8 +167,7 @@ struct rtas_event_log_v6_epow {
     uint64_t reason_code;
 } QEMU_PACKED;
 
-struct epow_log_full {
-    struct rtas_error_log hdr;
+struct epow_extended_log {
     struct rtas_event_log_v6 v6hdr;
     struct rtas_event_log_v6_maina maina;
     struct rtas_event_log_v6_mainb mainb;
@@ -206,8 +205,7 @@ struct rtas_event_log_v6_hp {
     union drc_identifier drc_id;
 } QEMU_PACKED;
 
-struct hp_log_full {
-    struct rtas_error_log hdr;
+struct hp_extended_log {
     struct rtas_event_log_v6 v6hdr;
     struct rtas_event_log_v6_maina maina;
     struct rtas_event_log_v6_mainb mainb;
@@ -231,18 +229,18 @@ static const char * const event_names[EVENT_CLASS_MAX] = {
     [EVENT_CLASS_IO]                    = "ibm,io-events",
 };
 
-struct sPAPREventSource {
+struct SpaprEventSource {
     int irq;
     uint32_t mask;
     bool enabled;
 };
 
-static sPAPREventSource *spapr_event_sources_new(void)
+static SpaprEventSource *spapr_event_sources_new(void)
 {
-    return g_new0(sPAPREventSource, EVENT_CLASS_MAX);
+    return g_new0(SpaprEventSource, EVENT_CLASS_MAX);
 }
 
-static void spapr_event_sources_register(sPAPREventSource *event_sources,
+static void spapr_event_sources_register(SpaprEventSource *event_sources,
                                         EventClassIndex index, int irq)
 {
     /* we only support 1 irq per event class at the moment */
@@ -253,8 +251,8 @@ static void spapr_event_sources_register(sPAPREventSource *event_sources,
     event_sources[index].enabled = true;
 }
 
-static const sPAPREventSource *
-spapr_event_sources_get_source(sPAPREventSource *event_sources,
+static const SpaprEventSource *
+spapr_event_sources_get_source(SpaprEventSource *event_sources,
                                EventClassIndex index)
 {
     g_assert(index < EVENT_CLASS_MAX);
@@ -263,11 +261,11 @@ spapr_event_sources_get_source(sPAPREventSource *event_sources,
     return &event_sources[index];
 }
 
-void spapr_dt_events(sPAPRMachineState *spapr, void *fdt)
+void spapr_dt_events(SpaprMachineState *spapr, void *fdt)
 {
     uint32_t irq_ranges[EVENT_CLASS_MAX * 2];
     int i, count = 0, event_sources;
-    sPAPREventSource *events = spapr->event_sources;
+    SpaprEventSource *events = spapr->event_sources;
 
     g_assert(events);
 
@@ -276,7 +274,7 @@ void spapr_dt_events(sPAPRMachineState *spapr, void *fdt)
     for (i = 0, count = 0; i < EVENT_CLASS_MAX; i++) {
         int node_offset;
         uint32_t interrupts[2];
-        const sPAPREventSource *source =
+        const SpaprEventSource *source =
             spapr_event_sources_get_source(events, i);
         const char *source_name = event_names[i];
 
@@ -284,8 +282,7 @@ void spapr_dt_events(sPAPRMachineState *spapr, void *fdt)
             continue;
         }
 
-        interrupts[0] = cpu_to_be32(source->irq);
-        interrupts[1] = 0;
+        spapr_dt_irq(interrupts, source->irq, false);
 
         _FDT(node_offset = fdt_add_subnode(fdt, event_sources, source_name));
         _FDT(fdt_setprop(fdt, node_offset, "interrupts", interrupts,
@@ -295,19 +292,16 @@ void spapr_dt_events(sPAPRMachineState *spapr, void *fdt)
         irq_ranges[count++] = cpu_to_be32(1);
     }
 
-    irq_ranges[count] = cpu_to_be32(count);
-    count++;
-
     _FDT((fdt_setprop(fdt, event_sources, "interrupt-controller", NULL, 0)));
     _FDT((fdt_setprop_cell(fdt, event_sources, "#interrupt-cells", 2)));
     _FDT((fdt_setprop(fdt, event_sources, "interrupt-ranges",
                       irq_ranges, count * sizeof(uint32_t))));
 }
 
-static const sPAPREventSource *
-rtas_event_log_to_source(sPAPRMachineState *spapr, int log_type)
+static const SpaprEventSource *
+rtas_event_log_to_source(SpaprMachineState *spapr, int log_type)
 {
-    const sPAPREventSource *source;
+    const SpaprEventSource *source;
 
     g_assert(spapr->event_sources);
 
@@ -331,9 +325,9 @@ rtas_event_log_to_source(sPAPRMachineState *spapr, int log_type)
     return source;
 }
 
-static int rtas_event_log_to_irq(sPAPRMachineState *spapr, int log_type)
+static int rtas_event_log_to_irq(SpaprMachineState *spapr, int log_type)
 {
-    const sPAPREventSource *source;
+    const SpaprEventSource *source;
 
     source = rtas_event_log_to_source(spapr, log_type);
     g_assert(source);
@@ -342,31 +336,26 @@ static int rtas_event_log_to_irq(sPAPRMachineState *spapr, int log_type)
     return source->irq;
 }
 
-static void rtas_event_log_queue(int log_type, void *data, bool exception)
+static uint32_t spapr_event_log_entry_type(SpaprEventLogEntry *entry)
 {
-    sPAPRMachineState *spapr = SPAPR_MACHINE(qdev_get_machine());
-    sPAPREventLogEntry *entry = g_new(sPAPREventLogEntry, 1);
+    return entry->summary & RTAS_LOG_TYPE_MASK;
+}
 
-    g_assert(data);
-    entry->log_type = log_type;
-    entry->exception = exception;
-    entry->data = data;
+static void rtas_event_log_queue(SpaprMachineState *spapr,
+                                 SpaprEventLogEntry *entry)
+{
     QTAILQ_INSERT_TAIL(&spapr->pending_events, entry, next);
 }
 
-static sPAPREventLogEntry *rtas_event_log_dequeue(uint32_t event_mask,
-                                                  bool exception)
+static SpaprEventLogEntry *rtas_event_log_dequeue(SpaprMachineState *spapr,
+                                                  uint32_t event_mask)
 {
-    sPAPRMachineState *spapr = SPAPR_MACHINE(qdev_get_machine());
-    sPAPREventLogEntry *entry = NULL;
+    SpaprEventLogEntry *entry = NULL;
 
     QTAILQ_FOREACH(entry, &spapr->pending_events, next) {
-        const sPAPREventSource *source =
-            rtas_event_log_to_source(spapr, entry->log_type);
-
-        if (entry->exception != exception) {
-            continue;
-        }
+        const SpaprEventSource *source =
+            rtas_event_log_to_source(spapr,
+                                     spapr_event_log_entry_type(entry));
 
         if (source->mask & event_mask) {
             break;
@@ -380,18 +369,15 @@ static sPAPREventLogEntry *rtas_event_log_dequeue(uint32_t event_mask,
     return entry;
 }
 
-static bool rtas_event_log_contains(uint32_t event_mask, bool exception)
+static bool rtas_event_log_contains(uint32_t event_mask)
 {
-    sPAPRMachineState *spapr = SPAPR_MACHINE(qdev_get_machine());
-    sPAPREventLogEntry *entry = NULL;
+    SpaprMachineState *spapr = SPAPR_MACHINE(qdev_get_machine());
+    SpaprEventLogEntry *entry = NULL;
 
     QTAILQ_FOREACH(entry, &spapr->pending_events, next) {
-        const sPAPREventSource *source =
-            rtas_event_log_to_source(spapr, entry->log_type);
-
-        if (entry->exception != exception) {
-            continue;
-        }
+        const SpaprEventSource *source =
+            rtas_event_log_to_source(spapr,
+                                     spapr_event_log_entry_type(entry));
 
         if (source->mask & event_mask) {
             return true;
@@ -415,14 +401,14 @@ static void spapr_init_v6hdr(struct rtas_event_log_v6 *v6hdr)
 static void spapr_init_maina(struct rtas_event_log_v6_maina *maina,
                              int section_count)
 {
-    sPAPRMachineState *spapr = SPAPR_MACHINE(qdev_get_machine());
+    SpaprMachineState *spapr = SPAPR_MACHINE(qdev_get_machine());
     struct tm tm;
     int year;
 
     maina->hdr.section_id = cpu_to_be16(RTAS_LOG_V6_SECTION_ID_MAINA);
     maina->hdr.section_length = cpu_to_be16(sizeof(*maina));
     /* FIXME: section version, subtype and creator id? */
-    spapr_rtc_read(spapr->rtc, &tm, NULL);
+    spapr_rtc_read(&spapr->rtc, &tm, NULL);
     year = tm.tm_year + 1900;
     maina->creation_date = cpu_to_be32((to_bcd(year / 100) << 24)
                                        | (to_bcd(year % 100) << 16)
@@ -438,28 +424,29 @@ static void spapr_init_maina(struct rtas_event_log_v6_maina *maina,
 
 static void spapr_powerdown_req(Notifier *n, void *opaque)
 {
-    sPAPRMachineState *spapr = SPAPR_MACHINE(qdev_get_machine());
-    struct rtas_error_log *hdr;
+    SpaprMachineState *spapr = SPAPR_MACHINE(qdev_get_machine());
+    SpaprEventLogEntry *entry;
     struct rtas_event_log_v6 *v6hdr;
     struct rtas_event_log_v6_maina *maina;
     struct rtas_event_log_v6_mainb *mainb;
     struct rtas_event_log_v6_epow *epow;
-    struct epow_log_full *new_epow;
+    struct epow_extended_log *new_epow;
 
+    entry = g_new(SpaprEventLogEntry, 1);
     new_epow = g_malloc0(sizeof(*new_epow));
-    hdr = &new_epow->hdr;
+    entry->extended_log = new_epow;
+
     v6hdr = &new_epow->v6hdr;
     maina = &new_epow->maina;
     mainb = &new_epow->mainb;
     epow = &new_epow->epow;
 
-    hdr->summary = cpu_to_be32(RTAS_LOG_VERSION_6
-                               | RTAS_LOG_SEVERITY_EVENT
-                               | RTAS_LOG_DISPOSITION_NOT_RECOVERED
-                               | RTAS_LOG_OPTIONAL_PART_PRESENT
-                               | RTAS_LOG_TYPE_EPOW);
-    hdr->extended_length = cpu_to_be32(sizeof(*new_epow)
-                                       - sizeof(new_epow->hdr));
+    entry->summary = RTAS_LOG_VERSION_6
+                       | RTAS_LOG_SEVERITY_EVENT
+                       | RTAS_LOG_DISPOSITION_NOT_RECOVERED
+                       | RTAS_LOG_OPTIONAL_PART_PRESENT
+                       | RTAS_LOG_TYPE_EPOW;
+    entry->extended_length = sizeof(*new_epow);
 
     spapr_init_v6hdr(v6hdr);
     spapr_init_maina(maina, 3 /* Main-A, Main-B and EPOW */);
@@ -479,47 +466,40 @@ static void spapr_powerdown_req(Notifier *n, void *opaque)
     epow->event_modifier = RTAS_LOG_V6_EPOW_MODIFIER_NORMAL;
     epow->extended_modifier = RTAS_LOG_V6_EPOW_XMODIFIER_PARTITION_SPECIFIC;
 
-    rtas_event_log_queue(RTAS_LOG_TYPE_EPOW, new_epow, true);
+    rtas_event_log_queue(spapr, entry);
 
-    qemu_irq_pulse(xics_get_qirq(XICS_FABRIC(spapr),
-                                 rtas_event_log_to_irq(spapr,
-                                                       RTAS_LOG_TYPE_EPOW)));
-}
-
-static void spapr_hotplug_set_signalled(uint32_t drc_index)
-{
-    sPAPRDRConnector *drc = spapr_dr_connector_by_index(drc_index);
-    sPAPRDRConnectorClass *drck = SPAPR_DR_CONNECTOR_GET_CLASS(drc);
-    drck->set_signalled(drc);
+    qemu_irq_pulse(spapr_qirq(spapr,
+                   rtas_event_log_to_irq(spapr, RTAS_LOG_TYPE_EPOW)));
 }
 
 static void spapr_hotplug_req_event(uint8_t hp_id, uint8_t hp_action,
-                                    sPAPRDRConnectorType drc_type,
+                                    SpaprDrcType drc_type,
                                     union drc_identifier *drc_id)
 {
-    sPAPRMachineState *spapr = SPAPR_MACHINE(qdev_get_machine());
-    struct hp_log_full *new_hp;
-    struct rtas_error_log *hdr;
+    SpaprMachineState *spapr = SPAPR_MACHINE(qdev_get_machine());
+    SpaprEventLogEntry *entry;
+    struct hp_extended_log *new_hp;
     struct rtas_event_log_v6 *v6hdr;
     struct rtas_event_log_v6_maina *maina;
     struct rtas_event_log_v6_mainb *mainb;
     struct rtas_event_log_v6_hp *hp;
 
-    new_hp = g_malloc0(sizeof(struct hp_log_full));
-    hdr = &new_hp->hdr;
+    entry = g_new(SpaprEventLogEntry, 1);
+    new_hp = g_malloc0(sizeof(struct hp_extended_log));
+    entry->extended_log = new_hp;
+
     v6hdr = &new_hp->v6hdr;
     maina = &new_hp->maina;
     mainb = &new_hp->mainb;
     hp = &new_hp->hp;
 
-    hdr->summary = cpu_to_be32(RTAS_LOG_VERSION_6
-                               | RTAS_LOG_SEVERITY_EVENT
-                               | RTAS_LOG_DISPOSITION_NOT_RECOVERED
-                               | RTAS_LOG_OPTIONAL_PART_PRESENT
-                               | RTAS_LOG_INITIATOR_HOTPLUG
-                               | RTAS_LOG_TYPE_HOTPLUG);
-    hdr->extended_length = cpu_to_be32(sizeof(*new_hp)
-                                       - sizeof(new_hp->hdr));
+    entry->summary = RTAS_LOG_VERSION_6
+        | RTAS_LOG_SEVERITY_EVENT
+        | RTAS_LOG_DISPOSITION_NOT_RECOVERED
+        | RTAS_LOG_OPTIONAL_PART_PRESENT
+        | RTAS_LOG_INITIATOR_HOTPLUG
+        | RTAS_LOG_TYPE_HOTPLUG;
+    entry->extended_length = sizeof(*new_hp);
 
     spapr_init_v6hdr(v6hdr);
     spapr_init_maina(maina, 3 /* Main-A, Main-B, HP */);
@@ -539,15 +519,15 @@ static void spapr_hotplug_req_event(uint8_t hp_id, uint8_t hp_action,
     switch (drc_type) {
     case SPAPR_DR_CONNECTOR_TYPE_PCI:
         hp->hotplug_type = RTAS_LOG_V6_HP_TYPE_PCI;
-        if (hp->hotplug_action == RTAS_LOG_V6_HP_ACTION_ADD) {
-            spapr_hotplug_set_signalled(drc_id->index);
-        }
         break;
     case SPAPR_DR_CONNECTOR_TYPE_LMB:
         hp->hotplug_type = RTAS_LOG_V6_HP_TYPE_MEMORY;
         break;
     case SPAPR_DR_CONNECTOR_TYPE_CPU:
         hp->hotplug_type = RTAS_LOG_V6_HP_TYPE_CPU;
+        break;
+    case SPAPR_DR_CONNECTOR_TYPE_PHB:
+        hp->hotplug_type = RTAS_LOG_V6_HP_TYPE_PHB;
         break;
     default:
         /* we shouldn't be signaling hotplug events for resources
@@ -572,36 +552,33 @@ static void spapr_hotplug_req_event(uint8_t hp_id, uint8_t hp_action,
             cpu_to_be32(drc_id->count_indexed.index);
     }
 
-    rtas_event_log_queue(RTAS_LOG_TYPE_HOTPLUG, new_hp, true);
+    rtas_event_log_queue(spapr, entry);
 
-    qemu_irq_pulse(xics_get_qirq(XICS_FABRIC(spapr),
-                                 rtas_event_log_to_irq(spapr,
-                                                       RTAS_LOG_TYPE_HOTPLUG)));
+    qemu_irq_pulse(spapr_qirq(spapr,
+                   rtas_event_log_to_irq(spapr, RTAS_LOG_TYPE_HOTPLUG)));
 }
 
-void spapr_hotplug_req_add_by_index(sPAPRDRConnector *drc)
+void spapr_hotplug_req_add_by_index(SpaprDrc *drc)
 {
-    sPAPRDRConnectorClass *drck = SPAPR_DR_CONNECTOR_GET_CLASS(drc);
-    sPAPRDRConnectorType drc_type = drck->get_type(drc);
+    SpaprDrcType drc_type = spapr_drc_type(drc);
     union drc_identifier drc_id;
 
-    drc_id.index = drck->get_index(drc);
+    drc_id.index = spapr_drc_index(drc);
     spapr_hotplug_req_event(RTAS_LOG_V6_HP_ID_DRC_INDEX,
                             RTAS_LOG_V6_HP_ACTION_ADD, drc_type, &drc_id);
 }
 
-void spapr_hotplug_req_remove_by_index(sPAPRDRConnector *drc)
+void spapr_hotplug_req_remove_by_index(SpaprDrc *drc)
 {
-    sPAPRDRConnectorClass *drck = SPAPR_DR_CONNECTOR_GET_CLASS(drc);
-    sPAPRDRConnectorType drc_type = drck->get_type(drc);
+    SpaprDrcType drc_type = spapr_drc_type(drc);
     union drc_identifier drc_id;
 
-    drc_id.index = drck->get_index(drc);
+    drc_id.index = spapr_drc_index(drc);
     spapr_hotplug_req_event(RTAS_LOG_V6_HP_ID_DRC_INDEX,
                             RTAS_LOG_V6_HP_ACTION_REMOVE, drc_type, &drc_id);
 }
 
-void spapr_hotplug_req_add_by_count(sPAPRDRConnectorType drc_type,
+void spapr_hotplug_req_add_by_count(SpaprDrcType drc_type,
                                        uint32_t count)
 {
     union drc_identifier drc_id;
@@ -611,7 +588,7 @@ void spapr_hotplug_req_add_by_count(sPAPRDRConnectorType drc_type,
                             RTAS_LOG_V6_HP_ACTION_ADD, drc_type, &drc_id);
 }
 
-void spapr_hotplug_req_remove_by_count(sPAPRDRConnectorType drc_type,
+void spapr_hotplug_req_remove_by_count(SpaprDrcType drc_type,
                                           uint32_t count)
 {
     union drc_identifier drc_id;
@@ -621,7 +598,7 @@ void spapr_hotplug_req_remove_by_count(sPAPRDRConnectorType drc_type,
                             RTAS_LOG_V6_HP_ACTION_REMOVE, drc_type, &drc_id);
 }
 
-void spapr_hotplug_req_add_by_count_indexed(sPAPRDRConnectorType drc_type,
+void spapr_hotplug_req_add_by_count_indexed(SpaprDrcType drc_type,
                                             uint32_t count, uint32_t index)
 {
     union drc_identifier drc_id;
@@ -632,7 +609,7 @@ void spapr_hotplug_req_add_by_count_indexed(sPAPRDRConnectorType drc_type,
                             RTAS_LOG_V6_HP_ACTION_ADD, drc_type, &drc_id);
 }
 
-void spapr_hotplug_req_remove_by_count_indexed(sPAPRDRConnectorType drc_type,
+void spapr_hotplug_req_remove_by_count_indexed(SpaprDrcType drc_type,
                                                uint32_t count, uint32_t index)
 {
     union drc_identifier drc_id;
@@ -643,15 +620,15 @@ void spapr_hotplug_req_remove_by_count_indexed(sPAPRDRConnectorType drc_type,
                             RTAS_LOG_V6_HP_ACTION_REMOVE, drc_type, &drc_id);
 }
 
-static void check_exception(PowerPCCPU *cpu, sPAPRMachineState *spapr,
+static void check_exception(PowerPCCPU *cpu, SpaprMachineState *spapr,
                             uint32_t token, uint32_t nargs,
                             target_ulong args,
                             uint32_t nret, target_ulong rets)
 {
     uint32_t mask, buf, len, event_len;
     uint64_t xinfo;
-    sPAPREventLogEntry *event;
-    struct rtas_error_log *hdr;
+    SpaprEventLogEntry *event;
+    struct rtas_error_log header;
     int i;
 
     if ((nargs < 6) || (nargs > 7) || nret != 1) {
@@ -667,21 +644,24 @@ static void check_exception(PowerPCCPU *cpu, sPAPRMachineState *spapr,
         xinfo |= (uint64_t)rtas_ld(args, 6) << 32;
     }
 
-    event = rtas_event_log_dequeue(mask, true);
+    event = rtas_event_log_dequeue(spapr, mask);
     if (!event) {
         goto out_no_events;
     }
 
-    hdr = event->data;
-    event_len = be32_to_cpu(hdr->extended_length) + sizeof(*hdr);
+    event_len = event->extended_length + sizeof(header);
 
     if (event_len < len) {
         len = event_len;
     }
 
-    cpu_physical_memory_write(buf, event->data, len);
+    header.summary = cpu_to_be32(event->summary);
+    header.extended_length = cpu_to_be32(event->extended_length);
+    cpu_physical_memory_write(buf, &header, sizeof(header));
+    cpu_physical_memory_write(buf + sizeof(header), event->extended_log,
+                              event->extended_length);
     rtas_st(rets, 0, RTAS_OUT_SUCCESS);
-    g_free(event->data);
+    g_free(event->extended_log);
     g_free(event);
 
     /* according to PAPR+, the IRQ must be left asserted, or re-asserted, if
@@ -690,12 +670,12 @@ static void check_exception(PowerPCCPU *cpu, sPAPRMachineState *spapr,
      * interrupts.
      */
     for (i = 0; i < EVENT_CLASS_MAX; i++) {
-        if (rtas_event_log_contains(EVENT_CLASS_MASK(i), true)) {
-            const sPAPREventSource *source =
+        if (rtas_event_log_contains(EVENT_CLASS_MASK(i))) {
+            const SpaprEventSource *source =
                 spapr_event_sources_get_source(spapr->event_sources, i);
 
             g_assert(source->enabled);
-            qemu_irq_pulse(xics_get_qirq(XICS_FABRIC(spapr), source->irq));
+            qemu_irq_pulse(spapr_qirq(spapr, source->irq));
         }
     }
 
@@ -705,55 +685,45 @@ out_no_events:
     rtas_st(rets, 0, RTAS_OUT_NO_ERRORS_FOUND);
 }
 
-static void event_scan(PowerPCCPU *cpu, sPAPRMachineState *spapr,
+static void event_scan(PowerPCCPU *cpu, SpaprMachineState *spapr,
                        uint32_t token, uint32_t nargs,
                        target_ulong args,
                        uint32_t nret, target_ulong rets)
 {
-    uint32_t mask, buf, len, event_len;
-    sPAPREventLogEntry *event;
-    struct rtas_error_log *hdr;
-
     if (nargs != 4 || nret != 1) {
         rtas_st(rets, 0, RTAS_OUT_PARAM_ERROR);
         return;
     }
-
-    mask = rtas_ld(args, 0);
-    buf = rtas_ld(args, 2);
-    len = rtas_ld(args, 3);
-
-    event = rtas_event_log_dequeue(mask, false);
-    if (!event) {
-        goto out_no_events;
-    }
-
-    hdr = event->data;
-    event_len = be32_to_cpu(hdr->extended_length) + sizeof(*hdr);
-
-    if (event_len < len) {
-        len = event_len;
-    }
-
-    cpu_physical_memory_write(buf, event->data, len);
-    rtas_st(rets, 0, RTAS_OUT_SUCCESS);
-    g_free(event->data);
-    g_free(event);
-    return;
-
-out_no_events:
     rtas_st(rets, 0, RTAS_OUT_NO_ERRORS_FOUND);
 }
 
-void spapr_events_init(sPAPRMachineState *spapr)
+void spapr_clear_pending_events(SpaprMachineState *spapr)
 {
+    SpaprEventLogEntry *entry = NULL, *next_entry;
+
+    QTAILQ_FOREACH_SAFE(entry, &spapr->pending_events, next, next_entry) {
+        QTAILQ_REMOVE(&spapr->pending_events, entry, next);
+        g_free(entry->extended_log);
+        g_free(entry);
+    }
+}
+
+void spapr_events_init(SpaprMachineState *spapr)
+{
+    int epow_irq = SPAPR_IRQ_EPOW;
+
+    if (SPAPR_MACHINE_GET_CLASS(spapr)->legacy_irq_allocation) {
+        epow_irq = spapr_irq_findone(spapr, &error_fatal);
+    }
+
+    spapr_irq_claim(spapr, epow_irq, false, &error_fatal);
+
     QTAILQ_INIT(&spapr->pending_events);
 
     spapr->event_sources = spapr_event_sources_new();
 
     spapr_event_sources_register(spapr->event_sources, EVENT_CLASS_EPOW,
-                                 spapr_ics_alloc(spapr->ics, 0, false,
-                                                  &error_fatal));
+                                 epow_irq);
 
     /* NOTE: if machine supports modern/dedicated hotplug event source,
      * we add it to the device-tree unconditionally. This means we may
@@ -764,9 +734,16 @@ void spapr_events_init(sPAPRMachineState *spapr)
      * checking that it's enabled.
      */
     if (spapr->use_hotplug_event_source) {
+        int hp_irq = SPAPR_IRQ_HOTPLUG;
+
+        if (SPAPR_MACHINE_GET_CLASS(spapr)->legacy_irq_allocation) {
+            hp_irq = spapr_irq_findone(spapr, &error_fatal);
+        }
+
+        spapr_irq_claim(spapr, hp_irq, false, &error_fatal);
+
         spapr_event_sources_register(spapr->event_sources, EVENT_CLASS_HOT_PLUG,
-                                     spapr_ics_alloc(spapr->ics, 0, false,
-                                                      &error_fatal));
+                                     hp_irq);
     }
 
     spapr->epow_notifier.notify = spapr_powerdown_req;

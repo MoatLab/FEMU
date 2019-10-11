@@ -16,17 +16,18 @@
 #include "qemu/error-report.h"
 #include "qemu-fsdev-throttle.h"
 #include "qemu/iov.h"
+#include "qemu/option.h"
 
 static void fsdev_throttle_read_timer_cb(void *opaque)
 {
     FsThrottle *fst = opaque;
-    qemu_co_enter_next(&fst->throttled_reqs[false]);
+    qemu_co_enter_next(&fst->throttled_reqs[false], NULL);
 }
 
 static void fsdev_throttle_write_timer_cb(void *opaque)
 {
     FsThrottle *fst = opaque;
-    qemu_co_enter_next(&fst->throttled_reqs[true]);
+    qemu_co_enter_next(&fst->throttled_reqs[true], NULL);
 }
 
 void fsdev_throttle_parse_opts(QemuOpts *opts, FsThrottle *fst, Error **errp)
@@ -86,7 +87,7 @@ void fsdev_throttle_init(FsThrottle *fst)
                              fsdev_throttle_read_timer_cb,
                              fsdev_throttle_write_timer_cb,
                              fst);
-        throttle_config(&fst->ts, &fst->tt, &fst->cfg);
+        throttle_config(&fst->ts, QEMU_CLOCK_REALTIME, &fst->cfg);
         qemu_co_queue_init(&fst->throttled_reqs[0]);
         qemu_co_queue_init(&fst->throttled_reqs[1]);
     }

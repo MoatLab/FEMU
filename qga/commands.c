@@ -11,8 +11,9 @@
  */
 
 #include "qemu/osdep.h"
-#include "qga/guest-agent-core.h"
-#include "qga-qmp-commands.h"
+#include "guest-agent-core.h"
+#include "qga-qapi-commands.h"
+#include "qapi/error.h"
 #include "qapi/qmp/qerror.h"
 #include "qemu/base64.h"
 #include "qemu/cutils.h"
@@ -413,10 +414,8 @@ GuestExec *qmp_guest_exec(const char *path,
     argv = guest_exec_get_args(&arglist, true);
     envp = has_env ? guest_exec_get_args(env, false) : NULL;
 
-    flags = G_SPAWN_SEARCH_PATH | G_SPAWN_DO_NOT_REAP_CHILD;
-#if GLIB_CHECK_VERSION(2, 33, 2)
-    flags |= G_SPAWN_SEARCH_PATH_FROM_ENVP;
-#endif
+    flags = G_SPAWN_SEARCH_PATH | G_SPAWN_DO_NOT_REAP_CHILD |
+        G_SPAWN_SEARCH_PATH_FROM_ENVP;
     if (!has_output) {
         flags |= G_SPAWN_STDOUT_TO_DEV_NULL | G_SPAWN_STDERR_TO_DEV_NULL;
     }
@@ -485,7 +484,7 @@ int ga_parse_whence(GuestFileWhence *whence, Error **errp)
 {
     /* Exploit the fact that we picked values to match QGA_SEEK_*. */
     if (whence->type == QTYPE_QSTRING) {
-        whence->type = QTYPE_QINT;
+        whence->type = QTYPE_QNUM;
         whence->u.value = whence->u.name;
     }
     switch (whence->u.value) {
@@ -498,4 +497,48 @@ int ga_parse_whence(GuestFileWhence *whence, Error **errp)
     }
     error_setg(errp, "invalid whence code %"PRId64, whence->u.value);
     return -1;
+}
+
+GuestHostName *qmp_guest_get_host_name(Error **err)
+{
+    GuestHostName *result = NULL;
+    gchar const *hostname = g_get_host_name();
+    if (hostname != NULL) {
+        result = g_new0(GuestHostName, 1);
+        result->host_name = g_strdup(hostname);
+    }
+    return result;
+}
+
+GuestTimezone *qmp_guest_get_timezone(Error **errp)
+{
+    GuestTimezone *info = NULL;
+    GTimeZone *tz = NULL;
+    gint64 now = 0;
+    gint32 intv = 0;
+    gchar const *name = NULL;
+
+    info = g_new0(GuestTimezone, 1);
+    tz = g_time_zone_new_local();
+    if (tz == NULL) {
+        error_setg(errp, QERR_QGA_COMMAND_FAILED,
+                   "Couldn't retrieve local timezone");
+        goto error;
+    }
+
+    now = g_get_real_time() / G_USEC_PER_SEC;
+    intv = g_time_zone_find_interval(tz, G_TIME_TYPE_UNIVERSAL, now);
+    info->offset = g_time_zone_get_offset(tz, intv);
+    name = g_time_zone_get_abbreviation(tz, intv);
+    if (name != NULL) {
+        info->has_zone = true;
+        info->zone = g_strdup(name);
+    }
+    g_time_zone_unref(tz);
+
+    return info;
+
+error:
+    g_free(info);
+    return NULL;
 }

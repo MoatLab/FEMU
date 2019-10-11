@@ -14,10 +14,11 @@
 #define TARGET_S390X_CPU_MODELS_H
 
 #include "cpu_features.h"
+#include "gen-features.h"
 #include "qom/cpu.h"
 
 /* static CPU definition */
-typedef struct S390CPUDef {
+struct S390CPUDef {
     const char *name;       /* name exposed to the user */
     const char *desc;       /* description exposed to the user */
     uint8_t gen;            /* hw generation identification */
@@ -37,29 +38,32 @@ typedef struct S390CPUDef {
     S390FeatBitmap full_feat;
     /* used to init full_feat from generated data */
     S390FeatInit full_init;
-} S390CPUDef;
+};
 
 /* CPU model based on a CPU definition */
-typedef struct S390CPUModel {
+struct S390CPUModel {
     const S390CPUDef *def;
     S390FeatBitmap features;
     /* values copied from the "host" model, can change during migration */
     uint16_t lowest_ibc;    /* lowest IBC that the hardware supports */
     uint32_t cpu_id;        /* CPU id */
+    uint8_t cpu_id_format;  /* CPU id format bit */
     uint8_t cpu_ver;        /* CPU version, usually "ff" for kvm */
-} S390CPUModel;
+};
 
 /*
  * CPU ID
  *
  * bits 0-7: Zeroes (ff for kvm)
  * bits 8-31: CPU ID (serial number)
- * bits 32-48: Machine type
- * bits 48-63: Zeroes
+ * bits 32-47: Machine type
+ * bit  48: CPU ID format
+ * bits 49-63: Zeroes
  */
 #define cpuid_type(x)     (((x) >> 16) & 0xffff)
 #define cpuid_id(x)       (((x) >> 32) & 0xffffff)
 #define cpuid_ver(x)      (((x) >> 56) & 0xff)
+#define cpuid_format(x)   (((x) >> 15) & 0x1)
 
 #define lowest_ibc(x)     (((uint32_t)(x) >> 16) & 0xfff)
 #define unblocked_ibc(x)  ((uint32_t)(x) & 0xfff)
@@ -69,6 +73,10 @@ typedef struct S390CPUModel {
 #define ibc_gen(x)        (x == 0 ? 0 : ((x >> 4) + S390_GEN_Z10))
 #define ibc_ec_ga(x)      (x & 0xf)
 
+void s390_cpudef_featoff(uint8_t gen, uint8_t ec_ga, S390Feat feat);
+void s390_cpudef_featoff_greater(uint8_t gen, uint8_t ec_ga, S390Feat feat);
+void s390_cpudef_group_featoff_greater(uint8_t gen, uint8_t ec_ga,
+                                       S390FeatGroup group);
 uint32_t s390_get_hmfai(void);
 uint8_t s390_get_mha_pow(void);
 uint32_t s390_get_ibc_val(void);
@@ -92,7 +100,8 @@ static inline uint64_t s390_cpuid_from_cpu_model(const S390CPUModel *model)
 {
     return ((uint64_t)model->cpu_ver << 56) |
            ((uint64_t)model->cpu_id << 32) |
-           ((uint64_t)model->def->type << 16);
+           ((uint64_t)model->def->type << 16) |
+           (model->def->gen == 7 ? 0 : (uint64_t)model->cpu_id_format << 15);
 }
 S390CPUDef const *s390_find_cpu_def(uint16_t type, uint8_t gen, uint8_t ec_ga,
                                     S390FeatBitmap features);

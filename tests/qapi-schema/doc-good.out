@@ -1,35 +1,54 @@
+module None
+object q_empty
+enum QType
+    prefix QTYPE
+    member none
+    member qnull
+    member qnum
+    member qstring
+    member qdict
+    member qlist
+    member qbool
+module doc-good.json
+enum Enum
+    member one
+        if ['defined(IFONE)']
+    member two
+    if ['defined(IFCOND)']
 object Base
     member base1: Enum optional=False
-enum Enum ['one', 'two']
+object Variant1
+    member var1: str optional=False
+        if ['defined(IFSTR)']
+object Variant2
 object Object
     base Base
     tag base1
     case one: Variant1
     case two: Variant2
-enum QType ['none', 'qnull', 'qint', 'qstring', 'qdict', 'qlist', 'qfloat', 'qbool']
-    prefix QTYPE
+        if ['IFTWO']
+object q_obj_Variant1-wrapper
+    member data: Variant1 optional=False
+object q_obj_Variant2-wrapper
+    member data: Variant2 optional=False
+enum SugaredUnionKind
+    member one
+    member two
+        if ['IFTWO']
 object SugaredUnion
     member type: SugaredUnionKind optional=False
     tag type
     case one: q_obj_Variant1-wrapper
     case two: q_obj_Variant2-wrapper
-enum SugaredUnionKind ['one', 'two']
-object Variant1
-    member var1: str optional=False
-object Variant2
-command cmd q_obj_cmd-arg -> Object
-   gen=True success_response=True boxed=False
-command cmd-boxed Object -> None
-   gen=True success_response=True boxed=True
-object q_empty
-object q_obj_Variant1-wrapper
-    member data: Variant1 optional=False
-object q_obj_Variant2-wrapper
-    member data: Variant2 optional=False
+        if ['IFTWO']
 object q_obj_cmd-arg
     member arg1: int optional=False
     member arg2: str optional=True
     member arg3: bool optional=False
+command cmd q_obj_cmd-arg -> Object
+   gen=True success_response=True boxed=False oob=False preconfig=False
+command cmd-boxed Object -> None
+   gen=True success_response=True boxed=True oob=False preconfig=False
 doc freeform
     body=
 = Section
@@ -77,12 +96,12 @@ Examples:
 - {braces}
 doc symbol=Enum
     body=
-== Produces *invalid* texinfo
+
     arg=one
 The _one_ {and only}
     arg=two
 
-    section=
+    section=None
 @two is undocumented
 doc symbol=Base
     body=

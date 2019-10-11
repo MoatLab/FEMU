@@ -21,7 +21,6 @@
  */
 
 #include "qemu/notify.h"
-#include "qemu/option.h"
 #include "exec/memory.h"
 #include "hw/irq.h"
 #include "hw/acpi/acpi_dev_interface.h"
@@ -38,6 +37,17 @@
 #define ACPI_PM1_REGISTER_WIDTH         16
 #define ACPI_PM2_REGISTER_WIDTH         8
 #define ACPI_PM_TIMER_WIDTH             32
+
+/* PC-style peripherals (also used by other machines).  */
+#define ACPI_PM_PROP_S3_DISABLED "disable_s3"
+#define ACPI_PM_PROP_S4_DISABLED "disable_s4"
+#define ACPI_PM_PROP_S4_VAL "s4_val"
+#define ACPI_PM_PROP_SCI_INT "sci_int"
+#define ACPI_PM_PROP_ACPI_ENABLE_CMD "acpi_enable_cmd"
+#define ACPI_PM_PROP_ACPI_DISABLE_CMD "acpi_disable_cmd"
+#define ACPI_PM_PROP_PM_IO_BASE "pm_io_base"
+#define ACPI_PM_PROP_GPE0_BLK "gpe0_blk"
+#define ACPI_PM_PROP_GPE0_BLK_LEN "gpe0_blk_len"
 
 /* PM Timer ticks per second (HZ) */
 #define PM_TIMER_FREQUENCY  3579545
@@ -59,13 +69,13 @@
 #define ACPI_BITMASK_WAKE_STATUS                0x8000
 
 #define ACPI_BITMASK_ALL_FIXED_STATUS           (\
-	ACPI_BITMASK_TIMER_STATUS          | \
-	ACPI_BITMASK_BUS_MASTER_STATUS     | \
-	ACPI_BITMASK_GLOBAL_LOCK_STATUS    | \
-	ACPI_BITMASK_POWER_BUTTON_STATUS   | \
-	ACPI_BITMASK_SLEEP_BUTTON_STATUS   | \
-	ACPI_BITMASK_RT_CLOCK_STATUS       | \
-	ACPI_BITMASK_WAKE_STATUS)
+        ACPI_BITMASK_TIMER_STATUS          | \
+        ACPI_BITMASK_BUS_MASTER_STATUS     | \
+        ACPI_BITMASK_GLOBAL_LOCK_STATUS    | \
+        ACPI_BITMASK_POWER_BUTTON_STATUS   | \
+        ACPI_BITMASK_SLEEP_BUTTON_STATUS   | \
+        ACPI_BITMASK_RT_CLOCK_STATUS       | \
+        ACPI_BITMASK_WAKE_STATUS)
 
 /* PM1x_EN */
 #define ACPI_BITMASK_TIMER_ENABLE               0x0001
@@ -180,7 +190,6 @@ uint8_t *acpi_table_first(void);
 uint8_t *acpi_table_next(uint8_t *current);
 unsigned acpi_table_len(void *current);
 void acpi_table_add(const QemuOpts *opts, Error **errp);
-void acpi_table_add_builtin(const QemuOpts *opts, Error **errp);
 
 typedef struct AcpiSlicOem AcpiSlicOem;
 struct AcpiSlicOem {

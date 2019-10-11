@@ -5,13 +5,13 @@
  *
  * This code is licensed under the GPL
  */
+
 #include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "hw/sysbus.h"
+#include "qemu/module.h"
 #include "hw/m68k/mcf.h"
-#include "sysemu/char.h"
-#include "exec/address-spaces.h"
-#include "qapi/error.h"
+#include "chardev/char-fe.h"
 
 typedef struct {
     SysBusDevice parent_obj;
@@ -305,7 +305,7 @@ static void mcf_uart_realize(DeviceState *dev, Error **errp)
     mcf_uart_state *s = MCF_UART(dev);
 
     qemu_chr_fe_set_handlers(&s->chr, mcf_uart_can_receive, mcf_uart_receive,
-                             mcf_uart_event, s, NULL, true);
+                             mcf_uart_event, NULL, s, NULL, true);
 }
 
 static Property mcf_uart_properties[] = {

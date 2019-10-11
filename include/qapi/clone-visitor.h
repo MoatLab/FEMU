@@ -11,9 +11,7 @@
 #ifndef QAPI_CLONE_VISITOR_H
 #define QAPI_CLONE_VISITOR_H
 
-#include "qemu/typedefs.h"
 #include "qapi/visitor.h"
-#include "qapi-visit.h"
 
 /*
  * The clone visitor is for direct use only by the QAPI_CLONE() macro;
@@ -24,6 +22,9 @@ typedef struct QapiCloneVisitor QapiCloneVisitor;
 
 void *qapi_clone(const void *src, void (*visit_type)(Visitor *, const char *,
                                                      void **, Error **));
+void qapi_clone_members(void *dst, const void *src, size_t sz,
+                        void (*visit_type_members)(Visitor *, void *,
+                                                   Error **));
 
 /*
  * Deep-clone QAPI object @src of the given @type, and return the result.
@@ -35,5 +36,16 @@ void *qapi_clone(const void *src, void (*visit_type)(Visitor *, const char *,
     ((type *)qapi_clone(src,                                            \
                         (void (*)(Visitor *, const char *, void**,      \
                                   Error **))visit_type_ ## type))
+
+/*
+ * Copy deep clones of @type members from @src to @dst.
+ *
+ * Not usable on QAPI scalars (integers, strings, enums), nor on a
+ * QAPI object that references the 'any' type.
+ */
+#define QAPI_CLONE_MEMBERS(type, dst, src)                              \
+    qapi_clone_members(dst, src, sizeof(type),                          \
+                       (void (*)(Visitor *, void *,                     \
+                                 Error **))visit_type_ ## type ## _members)
 
 #endif

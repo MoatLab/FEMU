@@ -15,9 +15,9 @@
 #include "qemu/osdep.h"
 #include "cpu.h"
 #include "elf.h"
-#include "exec/cpu-all.h"
 #include "sysemu/dump.h"
 #include "sysemu/kvm.h"
+#include "exec/helper-proto.h"
 
 #ifdef TARGET_PPC64
 #define ELFCLASS ELFCLASS64
@@ -50,7 +50,7 @@ struct PPCUserRegStruct {
 struct PPCElfPrstatus {
     char pad1[112];
     struct PPCUserRegStruct pr_reg;
-    reg_t pad2[4];
+    char pad2[40];
 } QEMU_PACKED;
 
 
@@ -141,7 +141,8 @@ static void ppc_write_elf_fpregset(NoteFuncArg *arg, PowerPCCPU *cpu)
     memset(fpregset, 0, sizeof(*fpregset));
 
     for (i = 0; i < 32; i++) {
-        fpregset->fpr[i] = cpu_to_dump64(s, cpu->env.fpr[i]);
+        uint64_t *fpr = cpu_fpr_ptr(&cpu->env, i);
+        fpregset->fpr[i] = cpu_to_dump64(s, *fpr);
     }
     fpregset->fpscr = cpu_to_dump_reg(s, cpu->env.fpscr);
 }
@@ -159,6 +160,7 @@ static void ppc_write_elf_vmxregset(NoteFuncArg *arg, PowerPCCPU *cpu)
 
     for (i = 0; i < 32; i++) {
         bool needs_byteswap;
+        ppc_avr_t *avr = cpu_avr_ptr(&cpu->env, i);
 
 #ifdef HOST_WORDS_BIGENDIAN
         needs_byteswap = s->dump_info.d_endian == ELFDATA2LSB;
@@ -167,14 +169,14 @@ static void ppc_write_elf_vmxregset(NoteFuncArg *arg, PowerPCCPU *cpu)
 #endif
 
         if (needs_byteswap) {
-            vmxregset->avr[i].u64[0] = bswap64(cpu->env.avr[i].u64[1]);
-            vmxregset->avr[i].u64[1] = bswap64(cpu->env.avr[i].u64[0]);
+            vmxregset->avr[i].u64[0] = bswap64(avr->u64[1]);
+            vmxregset->avr[i].u64[1] = bswap64(avr->u64[0]);
         } else {
-            vmxregset->avr[i].u64[0] = cpu->env.avr[i].u64[0];
-            vmxregset->avr[i].u64[1] = cpu->env.avr[i].u64[1];
+            vmxregset->avr[i].u64[0] = avr->u64[0];
+            vmxregset->avr[i].u64[1] = avr->u64[1];
         }
     }
-    vmxregset->vscr.u32[3] = cpu_to_dump32(s, cpu->env.vscr);
+    vmxregset->vscr.u32[3] = cpu_to_dump32(s, helper_mfvscr(&cpu->env));
 }
 
 static void ppc_write_elf_vsxregset(NoteFuncArg *arg, PowerPCCPU *cpu)
@@ -189,7 +191,8 @@ static void ppc_write_elf_vsxregset(NoteFuncArg *arg, PowerPCCPU *cpu)
     memset(vsxregset, 0, sizeof(*vsxregset));
 
     for (i = 0; i < 32; i++) {
-        vsxregset->vsr[i] = cpu_to_dump64(s, cpu->env.vsr[i]);
+        uint64_t *vsrl = cpu_vsrl_ptr(&cpu->env, i);
+        vsxregset->vsr[i] = cpu_to_dump64(s, *vsrl);
     }
 }
 
@@ -211,11 +214,11 @@ static const struct NoteFuncDescStruct {
     int contents_size;
     void (*note_contents_func)(NoteFuncArg *arg, PowerPCCPU *cpu);
 } note_func[] = {
-    {sizeof(((Note *)0)->contents.prstatus),  ppc_write_elf_prstatus},
-    {sizeof(((Note *)0)->contents.fpregset),  ppc_write_elf_fpregset},
-    {sizeof(((Note *)0)->contents.vmxregset), ppc_write_elf_vmxregset},
-    {sizeof(((Note *)0)->contents.vsxregset), ppc_write_elf_vsxregset},
-    {sizeof(((Note *)0)->contents.speregset), ppc_write_elf_speregset},
+    {sizeof_field(Note, contents.prstatus),  ppc_write_elf_prstatus},
+    {sizeof_field(Note, contents.fpregset),  ppc_write_elf_fpregset},
+    {sizeof_field(Note, contents.vmxregset), ppc_write_elf_vmxregset},
+    {sizeof_field(Note, contents.vsxregset), ppc_write_elf_vsxregset},
+    {sizeof_field(Note, contents.speregset), ppc_write_elf_speregset},
     { 0, NULL}
 };
 
@@ -224,8 +227,15 @@ typedef struct NoteFuncDescStruct NoteFuncDesc;
 int cpu_get_dump_info(ArchDumpInfo *info,
                       const struct GuestPhysBlockList *guest_phys_blocks)
 {
-    PowerPCCPU *cpu = POWERPC_CPU(first_cpu);
-    PowerPCCPUClass *pcc = POWERPC_CPU_GET_CLASS(cpu);
+    PowerPCCPU *cpu;
+    PowerPCCPUClass *pcc;
+
+    if (first_cpu == NULL) {
+        return -1;
+    }
+
+    cpu = POWERPC_CPU(first_cpu);
+    pcc = POWERPC_CPU_GET_CLASS(cpu);
 
     info->d_machine = PPC_ELF_MACHINE;
     info->d_class = ELFCLASS;

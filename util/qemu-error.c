@@ -14,22 +14,36 @@
 #include "monitor/monitor.h"
 #include "qemu/error-report.h"
 
-void error_printf(const char *fmt, ...)
+/*
+ * @report_type is the type of message: error, warning or
+ * informational.
+ */
+typedef enum {
+    REPORT_TYPE_ERROR,
+    REPORT_TYPE_WARNING,
+    REPORT_TYPE_INFO,
+} report_type;
+
+int error_printf(const char *fmt, ...)
 {
     va_list ap;
+    int ret;
 
     va_start(ap, fmt);
-    error_vprintf(fmt, ap);
+    ret = error_vprintf(fmt, ap);
     va_end(ap);
+    return ret;
 }
 
-void error_printf_unless_qmp(const char *fmt, ...)
+int error_printf_unless_qmp(const char *fmt, ...)
 {
     va_list ap;
+    int ret;
 
     va_start(ap, fmt);
-    error_vprintf_unless_qmp(fmt, ap);
+    ret = error_vprintf_unless_qmp(fmt, ap);
     va_end(ap);
+    return ret;
 }
 
 static Location std_loc = {
@@ -132,7 +146,7 @@ static const char *progname;
 /*
  * Set the program name for error_print_loc().
  */
-void error_set_progname(const char *argv0)
+static void error_set_progname(const char *argv0)
 {
     const char *p = strrchr(argv0, '/');
     progname = p ? p + 1 : argv0;
@@ -146,7 +160,7 @@ const char *error_get_progname(void)
 /*
  * Print current location to current monitor if we have one, else to stderr.
  */
-static void error_print_loc(void)
+static void print_loc(void)
 {
     const char *sep = "";
     int i;
@@ -179,13 +193,13 @@ static void error_print_loc(void)
 
 bool enable_timestamp_msg;
 /*
- * Print an error message to current monitor if we have one, else to stderr.
+ * Print a message to current monitor if we have one, else to stderr.
+ * @report_type is the type of message: error, warning or informational.
  * Format arguments like vsprintf().  The resulting message should be
  * a single phrase, with no newline or trailing punctuation.
  * Prepend the current location and append a newline.
- * It's wrong to call this in a QMP monitor.  Use error_setg() there.
  */
-void error_vreport(const char *fmt, va_list ap)
+static void vreport(report_type type, const char *fmt, va_list ap)
 {
     GTimeVal tv;
     gchar *timestr;
@@ -197,15 +211,62 @@ void error_vreport(const char *fmt, va_list ap)
         g_free(timestr);
     }
 
-    error_print_loc();
+    print_loc();
+
+    switch (type) {
+    case REPORT_TYPE_ERROR:
+        break;
+    case REPORT_TYPE_WARNING:
+        error_printf("warning: ");
+        break;
+    case REPORT_TYPE_INFO:
+        error_printf("info: ");
+        break;
+    }
+
     error_vprintf(fmt, ap);
     error_printf("\n");
 }
 
 /*
  * Print an error message to current monitor if we have one, else to stderr.
- * Format arguments like sprintf().  The resulting message should be a
- * single phrase, with no newline or trailing punctuation.
+ * Format arguments like vsprintf().  The resulting message should be
+ * a single phrase, with no newline or trailing punctuation.
+ * Prepend the current location and append a newline.
+ * It's wrong to call this in a QMP monitor.  Use error_setg() there.
+ */
+void error_vreport(const char *fmt, va_list ap)
+{
+    vreport(REPORT_TYPE_ERROR, fmt, ap);
+}
+
+/*
+ * Print a warning message to current monitor if we have one, else to stderr.
+ * Format arguments like vsprintf().  The resulting message should be
+ * a single phrase, with no newline or trailing punctuation.
+ * Prepend the current location and append a newline.
+ */
+void warn_vreport(const char *fmt, va_list ap)
+{
+    vreport(REPORT_TYPE_WARNING, fmt, ap);
+}
+
+/*
+ * Print an information message to current monitor if we have one, else to
+ * stderr.
+ * Format arguments like vsprintf().  The resulting message should be
+ * a single phrase, with no newline or trailing punctuation.
+ * Prepend the current location and append a newline.
+ */
+void info_vreport(const char *fmt, va_list ap)
+{
+    vreport(REPORT_TYPE_INFO, fmt, ap);
+}
+
+/*
+ * Print an error message to current monitor if we have one, else to stderr.
+ * Format arguments like sprintf().  The resulting message should be
+ * a single phrase, with no newline or trailing punctuation.
  * Prepend the current location and append a newline.
  * It's wrong to call this in a QMP monitor.  Use error_setg() there.
  */
@@ -214,6 +275,130 @@ void error_report(const char *fmt, ...)
     va_list ap;
 
     va_start(ap, fmt);
-    error_vreport(fmt, ap);
+    vreport(REPORT_TYPE_ERROR, fmt, ap);
     va_end(ap);
+}
+
+/*
+ * Print a warning message to current monitor if we have one, else to stderr.
+ * Format arguments like sprintf(). The resulting message should be a
+ * single phrase, with no newline or trailing punctuation.
+ * Prepend the current location and append a newline.
+ */
+void warn_report(const char *fmt, ...)
+{
+    va_list ap;
+
+    va_start(ap, fmt);
+    vreport(REPORT_TYPE_WARNING, fmt, ap);
+    va_end(ap);
+}
+
+/*
+ * Print an information message to current monitor if we have one, else to
+ * stderr.
+ * Format arguments like sprintf(). The resulting message should be a
+ * single phrase, with no newline or trailing punctuation.
+ * Prepend the current location and append a newline.
+ */
+void info_report(const char *fmt, ...)
+{
+    va_list ap;
+
+    va_start(ap, fmt);
+    vreport(REPORT_TYPE_INFO, fmt, ap);
+    va_end(ap);
+}
+
+/*
+ * Like error_report(), except print just once.
+ * If *printed is false, print the message, and flip *printed to true.
+ * Return whether the message was printed.
+ */
+bool error_report_once_cond(bool *printed, const char *fmt, ...)
+{
+    va_list ap;
+
+    assert(printed);
+    if (*printed) {
+        return false;
+    }
+    *printed = true;
+    va_start(ap, fmt);
+    vreport(REPORT_TYPE_ERROR, fmt, ap);
+    va_end(ap);
+    return true;
+}
+
+/*
+ * Like warn_report(), except print just once.
+ * If *printed is false, print the message, and flip *printed to true.
+ * Return whether the message was printed.
+ */
+bool warn_report_once_cond(bool *printed, const char *fmt, ...)
+{
+    va_list ap;
+
+    assert(printed);
+    if (*printed) {
+        return false;
+    }
+    *printed = true;
+    va_start(ap, fmt);
+    vreport(REPORT_TYPE_WARNING, fmt, ap);
+    va_end(ap);
+    return true;
+}
+
+static char *qemu_glog_domains;
+
+static void qemu_log_func(const gchar *log_domain,
+                          GLogLevelFlags log_level,
+                          const gchar *message,
+                          gpointer user_data)
+{
+    switch (log_level & G_LOG_LEVEL_MASK) {
+    case G_LOG_LEVEL_DEBUG:
+    case G_LOG_LEVEL_INFO:
+        /*
+         * Use same G_MESSAGES_DEBUG logic as glib to enable/disable debug
+         * messages
+         */
+        if (qemu_glog_domains == NULL) {
+            break;
+        }
+        if (strcmp(qemu_glog_domains, "all") != 0 &&
+          (log_domain == NULL || !strstr(qemu_glog_domains, log_domain))) {
+            break;
+        }
+        /* Fall through */
+    case G_LOG_LEVEL_MESSAGE:
+        info_report("%s%s%s",
+                    log_domain ?: "", log_domain ? ": " : "", message);
+
+        break;
+    case G_LOG_LEVEL_WARNING:
+        warn_report("%s%s%s",
+                    log_domain ?: "", log_domain ? ": " : "", message);
+        break;
+    case G_LOG_LEVEL_CRITICAL:
+    case G_LOG_LEVEL_ERROR:
+        error_report("%s%s%s",
+                     log_domain ?: "", log_domain ? ": " : "", message);
+        break;
+    }
+}
+
+void error_init(const char *argv0)
+{
+    /* Set the program name for error_print_loc(). */
+    error_set_progname(argv0);
+
+    /*
+     * This sets up glib logging so libraries using it also print their logs
+     * through error_report(), warn_report(), info_report().
+     */
+    g_log_set_default_handler(qemu_log_func, NULL);
+    g_warn_if_fail(qemu_glog_domains == NULL);
+    qemu_glog_domains = g_strdup(g_getenv("G_MESSAGES_DEBUG"));
 }

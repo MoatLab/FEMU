@@ -4,21 +4,23 @@
 #ifndef CONFIG_USER_ONLY
 
 #ifdef TARGET_PPC64
-void dump_slb(FILE *f, fprintf_function cpu_fprintf, PowerPCCPU *cpu);
+void dump_slb(PowerPCCPU *cpu);
 int ppc_store_slb(PowerPCCPU *cpu, target_ulong slot,
                   target_ulong esid, target_ulong vsid);
 hwaddr ppc_hash64_get_phys_page_debug(PowerPCCPU *cpu, target_ulong addr);
 int ppc_hash64_handle_mmu_fault(PowerPCCPU *cpu, vaddr address, int rw,
                                 int mmu_idx);
-void ppc_hash64_store_hpte(PowerPCCPU *cpu, hwaddr ptex,
-                           uint64_t pte0, uint64_t pte1);
 void ppc_hash64_tlb_flush_hpte(PowerPCCPU *cpu,
                                target_ulong pte_index,
                                target_ulong pte0, target_ulong pte1);
 unsigned ppc_hash64_hpte_page_shift_noslb(PowerPCCPU *cpu,
                                           uint64_t pte0, uint64_t pte1);
-void ppc_hash64_update_vrma(CPUPPCState *env);
-void ppc_hash64_update_rmls(CPUPPCState *env);
+void ppc_store_lpcr(PowerPCCPU *cpu, target_ulong val);
+void ppc_hash64_init(PowerPCCPU *cpu);
+void ppc_hash64_finalize(PowerPCCPU *cpu);
+void ppc_hash64_filter_pagesizes(PowerPCCPU *cpu,
+                                 bool (*cb)(void *, uint32_t, uint32_t),
+                                 void *opaque);
 #endif
 
 /*
@@ -59,15 +61,20 @@ void ppc_hash64_update_rmls(CPUPPCState *env);
 #define SDR_64_HTABORG         0x0FFFFFFFFFFC0000ULL
 #define SDR_64_HTABSIZE        0x000000000000001FULL
 
+#define PATE0_HTABORG           0x0FFFFFFFFFFC0000ULL
 #define HPTES_PER_GROUP         8
 #define HASH_PTE_SIZE_64        16
 #define HASH_PTEG_SIZE_64       (HASH_PTE_SIZE_64 * HPTES_PER_GROUP)
 
+#define HPTE64_V_SSIZE          SLB_VSID_B
+#define HPTE64_V_SSIZE_256M     SLB_VSID_B_256M
+#define HPTE64_V_SSIZE_1T       SLB_VSID_B_1T
 #define HPTE64_V_SSIZE_SHIFT    62
 #define HPTE64_V_AVPN_SHIFT     7
 #define HPTE64_V_AVPN           0x3fffffffffffff80ULL
 #define HPTE64_V_AVPN_VAL(x)    (((x) & HPTE64_V_AVPN) >> HPTE64_V_AVPN_SHIFT)
 #define HPTE64_V_COMPARE(x, y)  (!(((x) ^ (y)) & 0xffffffffffffff83ULL))
+#define HPTE64_V_BOLTED         0x0000000000000010ULL
 #define HPTE64_V_LARGE          0x0000000000000004ULL
 #define HPTE64_V_SECONDARY      0x0000000000000002ULL
 #define HPTE64_V_VALID          0x0000000000000001ULL
@@ -94,20 +101,10 @@ void ppc_hash64_update_rmls(CPUPPCState *env);
 #define HPTE64_V_1TB_SEG        0x4000000000000000ULL
 #define HPTE64_V_VRMA_MASK      0x4001ffffff000000ULL
 
-static inline hwaddr ppc_hash64_hpt_base(PowerPCCPU *cpu)
-{
-    return cpu->env.spr[SPR_SDR1] & SDR_64_HTABORG;
-}
-
-static inline hwaddr ppc_hash64_hpt_mask(PowerPCCPU *cpu)
-{
-    if (cpu->vhyp) {
-        PPCVirtualHypervisorClass *vhc =
-            PPC_VIRTUAL_HYPERVISOR_GET_CLASS(cpu->vhyp);
-        return vhc->hpt_mask(cpu->vhyp);
-    }
-    return (1ULL << ((cpu->env.spr[SPR_SDR1] & SDR_64_HTABSIZE) + 18 - 7)) - 1;
-}
+/* Format changes for ARCH v3 */
+#define HPTE64_V_COMMON_BITS    0x000fffffffffffffULL
+#define HPTE64_R_3_0_SSIZE_SHIFT 58
+#define HPTE64_R_3_0_SSIZE_MASK (3ULL << HPTE64_R_3_0_SSIZE_SHIFT)
 
 struct ppc_hash_pte64 {
     uint64_t pte0, pte1;
@@ -130,6 +127,48 @@ static inline uint64_t ppc_hash64_hpte1(PowerPCCPU *cpu,
     return ldq_p(&(hptes[i].pte1));
 }
 
+/*
+ * MMU Options
+ */
+
+struct PPCHash64PageSize {
+    uint32_t page_shift;  /* Page shift (or 0) */
+    uint32_t pte_enc;     /* Encoding in the HPTE (>>12) */
+};
+typedef struct PPCHash64PageSize PPCHash64PageSize;
+
+struct PPCHash64SegmentPageSizes {
+    uint32_t page_shift;  /* Base page shift of segment (or 0) */
+    uint32_t slb_enc;     /* SLB encoding for BookS */
+    PPCHash64PageSize enc[PPC_PAGE_SIZES_MAX_SZ];
+};
+
+struct PPCHash64Options {
+#define PPC_HASH64_1TSEG        0x00001
+#define PPC_HASH64_AMR          0x00002
+#define PPC_HASH64_CI_LARGEPAGE 0x00004
+    unsigned flags;
+    unsigned slb_size;
+    PPCHash64SegmentPageSizes sps[PPC_PAGE_SIZES_MAX_SZ];
+};
+
+extern const PPCHash64Options ppc_hash64_opts_basic;
+extern const PPCHash64Options ppc_hash64_opts_POWER7;
+
+static inline bool ppc_hash64_has(PowerPCCPU *cpu, unsigned feature)
+{
+    return !!(cpu->hash64_opts->flags & feature);
+}
+
 #endif /* CONFIG_USER_ONLY */
+
+#if defined(CONFIG_USER_ONLY) || !defined(TARGET_PPC64)
+static inline void ppc_hash64_init(PowerPCCPU *cpu)
+{
+}
+static inline void ppc_hash64_finalize(PowerPCCPU *cpu)
+{
+}
+#endif
 
 #endif /* MMU_HASH64_H */

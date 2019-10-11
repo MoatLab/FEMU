@@ -47,6 +47,10 @@
 #define NVDIMM_CLASS(oc) OBJECT_CLASS_CHECK(NVDIMMClass, (oc), TYPE_NVDIMM)
 #define NVDIMM_GET_CLASS(obj) OBJECT_GET_CLASS(NVDIMMClass, (obj), \
                                                TYPE_NVDIMM)
+
+#define NVDIMM_LABEL_SIZE_PROP "label-size"
+#define NVDIMM_UNARMED_PROP    "unarmed"
+
 struct NVDIMMDevice {
     /* private */
     PCDIMMDevice parent_obj;
@@ -70,7 +74,15 @@ struct NVDIMMDevice {
      * it's the PMEM region in NVDIMM device, which is presented to
      * guest via ACPI NFIT and _FIT method if NVDIMM hotplug is supported.
      */
-    MemoryRegion nvdimm_mr;
+    MemoryRegion *nvdimm_mr;
+
+    /*
+     * The 'on' value results in the unarmed flag set in ACPI NFIT,
+     * which can be used to notify guest implicitly that the host
+     * backend (e.g., files on HDD, /dev/pmemX, etc.) cannot guarantee
+     * the guest write persistence.
+     */
+    bool unarmed;
 };
 typedef struct NVDIMMDevice NVDIMMDevice;
 
@@ -111,7 +123,7 @@ struct NvdimmFitBuffer {
 };
 typedef struct NvdimmFitBuffer NvdimmFitBuffer;
 
-struct AcpiNVDIMMState {
+struct NVDIMMState {
     /* detect if NVDIMM support is enabled. */
     bool is_enabled;
 
@@ -122,14 +134,20 @@ struct AcpiNVDIMMState {
 
     /* the IO region used by OSPM to transfer control to QEMU. */
     MemoryRegion io_mr;
-};
-typedef struct AcpiNVDIMMState AcpiNVDIMMState;
 
-void nvdimm_init_acpi_state(AcpiNVDIMMState *state, MemoryRegion *io,
+    /*
+     * Platform capabilities, section 5.2.25.9 of ACPI 6.2 Errata A
+     */
+    int32_t persistence;
+    char    *persistence_string;
+};
+typedef struct NVDIMMState NVDIMMState;
+
+void nvdimm_init_acpi_state(NVDIMMState *state, MemoryRegion *io,
                             FWCfgState *fw_cfg, Object *owner);
 void nvdimm_build_acpi(GArray *table_offsets, GArray *table_data,
-                       BIOSLinker *linker, AcpiNVDIMMState *state,
+                       BIOSLinker *linker, NVDIMMState *state,
                        uint32_t ram_slots);
-void nvdimm_plug(AcpiNVDIMMState *state);
+void nvdimm_plug(NVDIMMState *state);
 void nvdimm_acpi_plug_cb(HotplugHandler *hotplug_dev, DeviceState *dev);
 #endif

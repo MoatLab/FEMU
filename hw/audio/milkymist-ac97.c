@@ -27,6 +27,7 @@
 #include "trace.h"
 #include "audio/audio.h"
 #include "qemu/error-report.h"
+#include "qemu/module.h"
 
 enum {
     R_AC97_CTRL = 0,
@@ -308,7 +309,7 @@ static void milkymist_ac97_realize(DeviceState *dev, Error **errp)
 
     as.freq = 48000;
     as.nchannels = 2;
-    as.fmt = AUD_FMT_S16;
+    as.fmt = AUDIO_FORMAT_S16;
     as.endianness = 1;
 
     s->voice_in = AUD_open_in(&s->card, s->voice_in,

@@ -23,11 +23,11 @@
  */
 
 #include "qemu/osdep.h"
-#include "qemu-common.h"
 #include "hw/sysbus.h"
 #include "ui/console.h"
 #include "ui/pixel_ops.h"
 #include "qemu/bswap.h"
+#include "qemu/module.h"
 
 /* Debug messages configuration */
 #define EXYNOS4210_FIMD_DEBUG              0
@@ -98,7 +98,7 @@
 #define FIMD_WINCON_BUFSTATUS       ((1 << 21) | (1 << 31))
 #define FIMD_WINCON_BUF0_STAT       ((0 << 21) | (0 << 31))
 #define FIMD_WINCON_BUF1_STAT       ((1 << 21) | (0 << 31))
-#define FIMD_WINCON_BUF2_STAT       ((0 << 21) | (1 << 31))
+#define FIMD_WINCON_BUF2_STAT       ((0 << 21) | (1U << 31))
 #define FIMD_WINCON_BUFSELECT       ((1 << 20) | (1 << 30))
 #define FIMD_WINCON_BUF0_SEL        ((0 << 20) | (0 << 30))
 #define FIMD_WINCON_BUF1_SEL        ((1 << 20) | (0 << 30))
@@ -1263,6 +1263,7 @@ static void exynos4210_fimd_update(void *opaque)
     Exynos4210fimdState *s = (Exynos4210fimdState *)opaque;
     DisplaySurface *surface;
     Exynos4210fimdWindow *w;
+    DirtyBitmapSnapshot *snap;
     int i, line;
     hwaddr fb_line_addr, inc_size;
     int scrn_height;
@@ -1271,8 +1272,6 @@ static void exynos4210_fimd_update(void *opaque)
     uint8_t *host_fb_addr;
     bool is_dirty = false;
     const int global_width = (s->vidtcon[2] & FIMD_VIDTCON2_SIZE_MASK) + 1;
-    const int global_height = ((s->vidtcon[2] >> FIMD_VIDTCON2_VER_SHIFT) &
-            FIMD_VIDTCON2_SIZE_MASK) + 1;
 
     if (!s || !s->console || !s->enabled ||
         surface_bits_per_pixel(qemu_console_surface(s->console)) == 0) {
@@ -1288,13 +1287,14 @@ static void exynos4210_fimd_update(void *opaque)
             scrn_width = w->virtpage_width;
             /* Total width of virtual screen page in bytes */
             inc_size = scrn_width + w->virtpage_offsize;
-            memory_region_sync_dirty_bitmap(w->mem_section.mr);
             host_fb_addr = w->host_fb_addr;
             fb_line_addr = w->mem_section.offset_within_region;
+            snap = memory_region_snapshot_and_clear_dirty(w->mem_section.mr,
+                    fb_line_addr, inc_size * scrn_height, DIRTY_MEMORY_VGA);
 
             for (line = 0; line < scrn_height; line++) {
-                is_dirty = memory_region_get_dirty(w->mem_section.mr,
-                            fb_line_addr, scrn_width, DIRTY_MEMORY_VGA);
+                is_dirty = memory_region_snapshot_get_dirty(w->mem_section.mr,
+                            snap, fb_line_addr, scrn_width);
 
                 if (s->invalidate || is_dirty) {
                     if (first_line == -1) {
@@ -1309,9 +1309,7 @@ static void exynos4210_fimd_update(void *opaque)
                 fb_line_addr += inc_size;
                 is_dirty = false;
             }
-            memory_region_reset_dirty(w->mem_section.mr,
-                w->mem_section.offset_within_region,
-                w->fb_len, DIRTY_MEMORY_VGA);
+            g_free(snap);
             blend = true;
         }
     }
@@ -1329,7 +1327,7 @@ static void exynos4210_fimd_update(void *opaque)
             fimd_copy_line_toqemu(global_width, s->ifb + global_width * line *
                     RGBA_SIZE, d + global_width * line * bpp);
         }
-        dpy_gfx_update(s->console, 0, 0, global_width, global_height);
+        dpy_gfx_update_full(s->console);
     }
     s->invalidate = false;
     s->vidintcon[1] |= FIMD_VIDINT_INTFRMPEND;

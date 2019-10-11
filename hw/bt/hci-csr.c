@@ -19,8 +19,9 @@
  */
 
 #include "qemu/osdep.h"
-#include "qemu-common.h"
-#include "sysemu/char.h"
+#include "qemu/error-report.h"
+#include "qemu/module.h"
+#include "chardev/char-serial.h"
 #include "qemu/timer.h"
 #include "qemu/bswap.h"
 #include "hw/irq.h"
@@ -82,17 +83,14 @@ enum {
 
 static inline void csrhci_fifo_wake(struct csrhci_s *s)
 {
-    Chardev *chr = (Chardev *)s;
-    CharBackend *be = chr->be;
+    Chardev *chr = CHARDEV(s);
 
     if (!s->enable || !s->out_len)
         return;
 
     /* XXX: Should wait for s->modem_state & CHR_TIOCM_RTS? */
-    if (be && be->chr_can_read && be->chr_can_read(be->opaque) &&
-        be->chr_read) {
-        be->chr_read(be->opaque,
-                     s->outfifo + s->out_start++, 1);
+    if (qemu_chr_be_can_write(chr)) {
+        qemu_chr_be_write(chr, s->outfifo + s->out_start++, 1);
         s->out_len--;
         if (s->out_start >= s->out_size) {
             s->out_start = 0;
@@ -114,14 +112,14 @@ static uint8_t *csrhci_out_packet(struct csrhci_s *s, int len)
 
     if (off < FIFO_LEN) {
         if (off + len > FIFO_LEN && (s->out_size = off + len) > FIFO_LEN * 2) {
-            fprintf(stderr, "%s: can't alloc %i bytes\n", __FUNCTION__, len);
+            error_report("%s: can't alloc %i bytes", __func__, len);
             exit(-1);
         }
         return s->outfifo + off;
     }
 
     if (s->out_len > s->out_size) {
-        fprintf(stderr, "%s: can't alloc %i bytes\n", __FUNCTION__, len);
+        error_report("%s: can't alloc %i bytes", __func__, len);
         exit(-1);
     }
 
@@ -171,10 +169,10 @@ static void csrhci_in_packet_vendor(struct csrhci_s *s, int ocf,
             s->bd_addr.b[5] = data[offset + 2];
 
             s->hci->bdaddr_set(s->hci, s->bd_addr.b);
-            fprintf(stderr, "%s: bd_address loaded from firmware: "
-                            "%02x:%02x:%02x:%02x:%02x:%02x\n", __FUNCTION__,
-                            s->bd_addr.b[0], s->bd_addr.b[1], s->bd_addr.b[2],
-                            s->bd_addr.b[3], s->bd_addr.b[4], s->bd_addr.b[5]);
+            error_report("%s: bd_address loaded from firmware: "
+                         "%02x:%02x:%02x:%02x:%02x:%02x", __func__,
+                         s->bd_addr.b[0], s->bd_addr.b[1], s->bd_addr.b[2],
+                         s->bd_addr.b[3], s->bd_addr.b[4], s->bd_addr.b[5]);
         }
 
         rpkt = csrhci_out_packet_event(s, EVT_VENDOR, 11);
@@ -184,7 +182,7 @@ static void csrhci_in_packet_vendor(struct csrhci_s *s, int ocf,
         break;
 
     default:
-        fprintf(stderr, "%s: got a bad CMD packet\n", __FUNCTION__);
+        error_report("%s: got a bad CMD packet", __func__);
         return;
     }
 
@@ -229,7 +227,7 @@ static void csrhci_in_packet(struct csrhci_s *s, uint8_t *pkt)
     case H4_NEG_PKT:
         if (s->in_hdr != sizeof(csrhci_neg_packet) ||
                         memcmp(pkt - 1, csrhci_neg_packet, s->in_hdr)) {
-            fprintf(stderr, "%s: got a bad NEG packet\n", __FUNCTION__);
+            error_report("%s: got a bad NEG packet", __func__);
             return;
         }
         pkt += 2;
@@ -244,7 +242,7 @@ static void csrhci_in_packet(struct csrhci_s *s, uint8_t *pkt)
 
     case H4_ALIVE_PKT:
         if (s->in_hdr != 4 || pkt[1] != 0x55 || pkt[2] != 0x00) {
-            fprintf(stderr, "%s: got a bad ALIVE packet\n", __FUNCTION__);
+            error_report("%s: got a bad ALIVE packet", __func__);
             return;
         }
 
@@ -257,7 +255,7 @@ static void csrhci_in_packet(struct csrhci_s *s, uint8_t *pkt)
     default:
     bad_pkt:
         /* TODO: error out */
-        fprintf(stderr, "%s: got a bad packet\n", __FUNCTION__);
+        error_report("%s: got a bad packet", __func__);
         break;
     }
 
@@ -503,7 +501,7 @@ static const TypeInfo char_hci_type_info = {
 Chardev *uart_hci_init(void)
 {
     return qemu_chardev_new(NULL, TYPE_CHARDEV_HCI,
-                            NULL, &error_abort);
+                            NULL, NULL, &error_abort);
 }
 
 static void register_types(void)

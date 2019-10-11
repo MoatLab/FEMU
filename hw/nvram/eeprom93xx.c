@@ -95,15 +95,15 @@ struct _eeprom_t {
  */
 
 static int get_uint16_from_uint8(QEMUFile *f, void *pv, size_t size,
-                                 VMStateField *field)
+                                 const VMStateField *field)
 {
     uint16_t *v = pv;
     *v = qemu_get_ubyte(f);
     return 0;
 }
 
-static int put_unused(QEMUFile *f, void *pv, size_t size, VMStateField *field,
-                      QJSON *vmdesc)
+static int put_unused(QEMUFile *f, void *pv, size_t size,
+                      const VMStateField *field, QJSON *vmdesc)
 {
     fprintf(stderr, "uint16_from_uint8 is used only for backwards compatibility.\n");
     fprintf(stderr, "Never should be used to write a new state.\n");
@@ -143,7 +143,7 @@ static const VMStateDescription vmstate_eeprom = {
         VMSTATE_UINT8(addrbits, eeprom_t),
         VMSTATE_UINT16_HACK_TEST(size, eeprom_t, is_old_eeprom_version),
         VMSTATE_UNUSED_TEST(is_old_eeprom_version, 1),
-        VMSTATE_UINT16_EQUAL_V(size, eeprom_t, EEPROM_VERSION),
+        VMSTATE_UINT16_EQUAL_V(size, eeprom_t, EEPROM_VERSION, NULL),
         VMSTATE_UINT16(data, eeprom_t),
         VMSTATE_VARRAY_UINT16_UNSAFE(contents, eeprom_t, size, 0,
                                      vmstate_info_uint16, uint16_t),

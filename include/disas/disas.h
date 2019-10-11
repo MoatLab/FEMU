@@ -1,7 +1,6 @@
 #ifndef QEMU_DISAS_H
 #define QEMU_DISAS_H
 
-#include "qemu-common.h"
 
 #ifdef NEED_CPU_H
 #include "cpu.h"
@@ -9,10 +8,10 @@
 /* Disassemble this for me please... (debugging). */
 void disas(FILE *out, void *code, unsigned long size);
 void target_disas(FILE *out, CPUState *cpu, target_ulong code,
-                  target_ulong size, int flags);
+                  target_ulong size);
 
 void monitor_disas(Monitor *mon, CPUState *cpu,
-                   target_ulong pc, int nb_insn, int is_physical, int flags);
+                   target_ulong pc, int nb_insn, int is_physical);
 
 /* Look up symbol for debugging purpose.  Returns "" if unknown. */
 const char *lookup_symbol(target_ulong orig_addr);

@@ -18,13 +18,14 @@
 
 #include "qemu/osdep.h"
 #include "hw/sysbus.h"
+#include "qemu/module.h"
 #include "qemu/timer.h"
 
 #ifdef CADENCE_TTC_ERR_DEBUG
 #define DB_PRINT(...) do { \
     fprintf(stderr,  ": %s: ", __func__); \
     fprintf(stderr, ## __VA_ARGS__); \
-    } while (0);
+    } while (0)
 #else
     #define DB_PRINT(...)
 #endif
@@ -421,9 +422,11 @@ static void cadence_ttc_init(Object *obj)
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
 }
 
-static void cadence_timer_pre_save(void *opaque)
+static int cadence_timer_pre_save(void *opaque)
 {
     cadence_timer_sync((CadenceTimerState *)opaque);
+
+    return 0;
 }
 
 static int cadence_timer_post_load(void *opaque, int version_id)

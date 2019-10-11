@@ -25,31 +25,12 @@
 #ifndef QEMU_KEYMAPS_H
 #define QEMU_KEYMAPS_H
 
-#include "qemu-common.h"
+#include "ui/kbd-state.h"
 
 typedef struct {
-	const char* name;
-	int keysym;
+    const char* name;
+    int keysym;
 } name2keysym_t;
-
-struct key_range {
-    int start;
-    int end;
-    struct key_range *next;
-};
-
-#define MAX_NORMAL_KEYCODE 512
-#define MAX_EXTRA_COUNT 256
-typedef struct {
-    uint16_t keysym2keycode[MAX_NORMAL_KEYCODE];
-    struct {
-	int keysym;
-	uint16_t keycode;
-    } keysym2keycode_extra[MAX_EXTRA_COUNT];
-    int extra_count;
-    struct key_range *keypad_range;
-    struct key_range *numlock_range;
-} kbd_layout_t;
 
 /* scancode without modifiers */
 #define SCANCODE_KEYMASK 0xff
@@ -59,6 +40,7 @@ typedef struct {
 /* "grey" keys will usually need a 0xe0 prefix */
 #define SCANCODE_GREY   0x80
 #define SCANCODE_EMUL0  0xE0
+#define SCANCODE_EMUL1  0xE1
 /* "up" flag */
 #define SCANCODE_UP     0x80
 
@@ -68,10 +50,13 @@ typedef struct {
 #define SCANCODE_ALT    0x400
 #define SCANCODE_ALTGR  0x800
 
+typedef struct kbd_layout_t kbd_layout_t;
 
-void *init_keyboard_layout(const name2keysym_t *table, const char *language);
-int keysym2scancode(void *kbd_layout, int keysym);
-int keycode_is_keypad(void *kbd_layout, int keycode);
-int keysym_is_numlock(void *kbd_layout, int keysym);
+kbd_layout_t *init_keyboard_layout(const name2keysym_t *table,
+                                   const char *language, Error **errp);
+int keysym2scancode(kbd_layout_t *k, int keysym,
+                    QKbdState *kbd, bool down);
+int keycode_is_keypad(kbd_layout_t *k, int keycode);
+int keysym_is_numlock(kbd_layout_t *k, int keysym);
 
 #endif /* QEMU_KEYMAPS_H */

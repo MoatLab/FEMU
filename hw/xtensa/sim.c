@@ -27,7 +27,6 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
-#include "qemu-common.h"
 #include "cpu.h"
 #include "sysemu/sysemu.h"
 #include "hw/boards.h"
@@ -36,27 +35,7 @@
 #include "exec/memory.h"
 #include "exec/address-spaces.h"
 #include "qemu/error-report.h"
-
-static void xtensa_create_memory_regions(const XtensaMemory *memory,
-                                         const char *name)
-{
-    unsigned i;
-    char *num_name = malloc(strlen(name) + sizeof(i) * 3 + 1);
-
-    for (i = 0; i < memory->num; ++i) {
-        MemoryRegion *m;
-
-        sprintf(num_name, "%s%u", name, i);
-        m = g_malloc(sizeof(*m));
-        memory_region_init_ram(m, NULL, num_name,
-                               memory->location[i].size,
-                               &error_fatal);
-        vmstate_register_ram_global(m);
-        memory_region_add_subregion(get_system_memory(),
-                                    memory->location[i].addr, m);
-    }
-    free(num_name);
-}
+#include "xtensa_memory.h"
 
 static uint64_t translate_phys_addr(void *opaque, uint64_t addr)
 {
@@ -77,21 +56,11 @@ static void xtensa_sim_init(MachineState *machine)
     XtensaCPU *cpu = NULL;
     CPUXtensaState *env = NULL;
     ram_addr_t ram_size = machine->ram_size;
-    const char *cpu_model = machine->cpu_model;
     const char *kernel_filename = machine->kernel_filename;
     int n;
 
-    if (!cpu_model) {
-        cpu_model = XTENSA_DEFAULT_CPU_MODEL;
-    }
-
-    for (n = 0; n < smp_cpus; n++) {
-        cpu = cpu_xtensa_init(cpu_model);
-        if (cpu == NULL) {
-            error_report("unable to find CPU definition '%s'",
-                         cpu_model);
-            exit(EXIT_FAILURE);
-        }
+    for (n = 0; n < machine->smp.cpus; n++) {
+        cpu = XTENSA_CPU(cpu_create(machine->cpu_type));
         env = &cpu->env;
 
         env->sregs[PRID] = n;
@@ -106,23 +75,36 @@ static void xtensa_sim_init(MachineState *machine)
         XtensaMemory sysram = env->config->sysram;
 
         sysram.location[0].size = ram_size;
-        xtensa_create_memory_regions(&env->config->instrom, "xtensa.instrom");
-        xtensa_create_memory_regions(&env->config->instram, "xtensa.instram");
-        xtensa_create_memory_regions(&env->config->datarom, "xtensa.datarom");
-        xtensa_create_memory_regions(&env->config->dataram, "xtensa.dataram");
-        xtensa_create_memory_regions(&env->config->sysrom, "xtensa.sysrom");
-        xtensa_create_memory_regions(&sysram, "xtensa.sysram");
+        xtensa_create_memory_regions(&env->config->instrom, "xtensa.instrom",
+                                     get_system_memory());
+        xtensa_create_memory_regions(&env->config->instram, "xtensa.instram",
+                                     get_system_memory());
+        xtensa_create_memory_regions(&env->config->datarom, "xtensa.datarom",
+                                     get_system_memory());
+        xtensa_create_memory_regions(&env->config->dataram, "xtensa.dataram",
+                                     get_system_memory());
+        xtensa_create_memory_regions(&env->config->sysrom, "xtensa.sysrom",
+                                     get_system_memory());
+        xtensa_create_memory_regions(&sysram, "xtensa.sysram",
+                                     get_system_memory());
     }
 
+    if (serial_hd(0)) {
+        xtensa_sim_open_console(serial_hd(0));
+    }
     if (kernel_filename) {
         uint64_t elf_entry;
         uint64_t elf_lowaddr;
 #ifdef TARGET_WORDS_BIGENDIAN
-        int success = load_elf(kernel_filename, translate_phys_addr, cpu,
-                &elf_entry, &elf_lowaddr, NULL, 1, EM_XTENSA, 0, 0);
+        int success = load_elf(kernel_filename, NULL,
+                               translate_phys_addr, cpu,
+                               &elf_entry, &elf_lowaddr,
+                               NULL, 1, EM_XTENSA, 0, 0);
 #else
-        int success = load_elf(kernel_filename, translate_phys_addr, cpu,
-                &elf_entry, &elf_lowaddr, NULL, 0, EM_XTENSA, 0, 0);
+        int success = load_elf(kernel_filename, NULL,
+                               translate_phys_addr, cpu,
+                               &elf_entry, &elf_lowaddr,
+                               NULL, 0, EM_XTENSA, 0, 0);
 #endif
         if (success > 0) {
             env->pc = elf_entry;
@@ -136,6 +118,8 @@ static void xtensa_sim_machine_init(MachineClass *mc)
     mc->is_default = true;
     mc->init = xtensa_sim_init;
     mc->max_cpus = 4;
+    mc->no_serial = 1;
+    mc->default_cpu_type = XTENSA_DEFAULT_CPU_TYPE;
 }
 
 DEFINE_MACHINE("sim", xtensa_sim_machine_init)

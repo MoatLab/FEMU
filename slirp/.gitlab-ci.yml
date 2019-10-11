@@ -1,0 +1,24 @@
+image: fedora:latest
+
+variables:
+  DEPS: meson ninja-build make
+        gcc pkg-config glib2-devel
+        mingw64-gcc mingw64-pkg-config mingw64-glib2
+
+before_script:
+  - dnf install -y $DEPS
+
+build:
+  script:
+    - meson build || (cat build/meson-logs/meson-log.txt && exit 1)
+    - ninja -C build
+    - (cd build && meson test) || (cat build/meson-logs/testlog.txt && exit 1)
+
+build-mingw64:
+  script:
+    - (mkdir buildw && cd buildw && mingw64-meson) || (cat buildw/meson-logs/meson-log.txt && exit 1)
+    - ninja -C buildw
+
+build-qemu:
+  script:
+    - make BUILD_DIR=build

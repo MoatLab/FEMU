@@ -1,4 +1,4 @@
-/* 
+/*
  * FEMU Lockless Ring Buffer: part of the code derived from SPDK wrappers around
  * rte_ring implementation
  */

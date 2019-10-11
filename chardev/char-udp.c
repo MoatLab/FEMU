@@ -21,12 +21,15 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+
 #include "qemu/osdep.h"
-#include "sysemu/char.h"
+#include "chardev/char.h"
 #include "io/channel-socket.h"
 #include "qapi/error.h"
+#include "qemu/module.h"
+#include "qemu/option.h"
 
-#include "char-io.h"
+#include "chardev/char-io.h"
 
 /***********************************************************/
 /* UDP Net console */
@@ -51,6 +54,18 @@ static int udp_chr_write(Chardev *chr, const uint8_t *buf, int len)
         s->ioc, (const char *)buf, len, NULL);
 }
 
+static void udp_chr_flush_buffer(UdpChardev *s)
+{
+    Chardev *chr = CHARDEV(s);
+
+    while (s->max_size > 0 && s->bufptr < s->bufcnt) {
+        int n = MIN(s->max_size, s->bufcnt - s->bufptr);
+        qemu_chr_be_write(chr, &s->buf[s->bufptr], n);
+        s->bufptr += n;
+        s->max_size = qemu_chr_be_can_write(chr);
+    }
+}
+
 static int udp_chr_read_poll(void *opaque)
 {
     Chardev *chr = CHARDEV(opaque);
@@ -61,11 +76,8 @@ static int udp_chr_read_poll(void *opaque)
     /* If there were any stray characters in the queue process them
      * first
      */
-    while (s->max_size > 0 && s->bufptr < s->bufcnt) {
-        qemu_chr_be_write(chr, &s->buf[s->bufptr], 1);
-        s->bufptr++;
-        s->max_size = qemu_chr_be_can_write(chr);
-    }
+    udp_chr_flush_buffer(s);
+
     return s->max_size;
 }
 
@@ -81,32 +93,26 @@ static gboolean udp_chr_read(QIOChannel *chan, GIOCondition cond, void *opaque)
     ret = qio_channel_read(
         s->ioc, (char *)s->buf, sizeof(s->buf), NULL);
     if (ret <= 0) {
-        remove_fd_in_watch(chr, NULL);
+        remove_fd_in_watch(chr);
         return FALSE;
     }
     s->bufcnt = ret;
-
     s->bufptr = 0;
-    while (s->max_size > 0 && s->bufptr < s->bufcnt) {
-        qemu_chr_be_write(chr, &s->buf[s->bufptr], 1);
-        s->bufptr++;
-        s->max_size = qemu_chr_be_can_write(chr);
-    }
+    udp_chr_flush_buffer(s);
 
     return TRUE;
 }
 
-static void udp_chr_update_read_handler(Chardev *chr,
-                                        GMainContext *context)
+static void udp_chr_update_read_handler(Chardev *chr)
 {
     UdpChardev *s = UDP_CHARDEV(chr);
 
-    remove_fd_in_watch(chr, NULL);
+    remove_fd_in_watch(chr);
     if (s->ioc) {
-        chr->fd_in_tag = io_add_watch_poll(chr, s->ioc,
+        chr->gsource = io_add_watch_poll(chr, s->ioc,
                                            udp_chr_read_poll,
                                            udp_chr_read, chr,
-                                           context);
+                                           chr->gcontext);
     }
 }
 
@@ -115,7 +121,7 @@ static void char_udp_finalize(Object *obj)
     Chardev *chr = CHARDEV(obj);
     UdpChardev *s = UDP_CHARDEV(obj);
 
-    remove_fd_in_watch(chr, NULL);
+    remove_fd_in_watch(chr);
     if (s->ioc) {
         object_unref(OBJECT(s->ioc));
     }
@@ -130,7 +136,7 @@ static void qemu_chr_parse_udp(QemuOpts *opts, ChardevBackend *backend,
     const char *localaddr = qemu_opt_get(opts, "localaddr");
     const char *localport = qemu_opt_get(opts, "localport");
     bool has_local = false;
-    SocketAddress *addr;
+    SocketAddressLegacy *addr;
     ChardevUdp *udp;
 
     backend->type = CHARDEV_BACKEND_KIND_UDP;
@@ -155,8 +161,8 @@ static void qemu_chr_parse_udp(QemuOpts *opts, ChardevBackend *backend,
     udp = backend->u.udp.data = g_new0(ChardevUdp, 1);
     qemu_chr_parse_common(opts, qapi_ChardevUdp_base(udp));
 
-    addr = g_new0(SocketAddress, 1);
-    addr->type = SOCKET_ADDRESS_KIND_INET;
+    addr = g_new0(SocketAddressLegacy, 1);
+    addr->type = SOCKET_ADDRESS_LEGACY_KIND_INET;
     addr->u.inet.data = g_new(InetSocketAddress, 1);
     *addr->u.inet.data = (InetSocketAddress) {
         .host = g_strdup(host),
@@ -170,8 +176,8 @@ static void qemu_chr_parse_udp(QemuOpts *opts, ChardevBackend *backend,
 
     if (has_local) {
         udp->has_local = true;
-        addr = g_new0(SocketAddress, 1);
-        addr->type = SOCKET_ADDRESS_KIND_INET;
+        addr = g_new0(SocketAddressLegacy, 1);
+        addr->type = SOCKET_ADDRESS_LEGACY_KIND_INET;
         addr->u.inet.data = g_new(InetSocketAddress, 1);
         *addr->u.inet.data = (InetSocketAddress) {
             .host = g_strdup(localaddr),
@@ -187,13 +193,17 @@ static void qmp_chardev_open_udp(Chardev *chr,
                                  Error **errp)
 {
     ChardevUdp *udp = backend->u.udp.data;
+    SocketAddress *local_addr = socket_address_flatten(udp->local);
+    SocketAddress *remote_addr = socket_address_flatten(udp->remote);
     QIOChannelSocket *sioc = qio_channel_socket_new();
     char *name;
     UdpChardev *s = UDP_CHARDEV(chr);
+    int ret;
 
-    if (qio_channel_socket_dgram_sync(sioc,
-                                      udp->local, udp->remote,
-                                      errp) < 0) {
+    ret = qio_channel_socket_dgram_sync(sioc, local_addr, remote_addr, errp);
+    qapi_free_SocketAddress(local_addr);
+    qapi_free_SocketAddress(remote_addr);
+    if (ret < 0) {
         object_unref(OBJECT(sioc));
         return;
     }

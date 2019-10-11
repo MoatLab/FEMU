@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # Test that qemu-io fail with non-zero exit code
 #
@@ -24,7 +24,6 @@ owner=nirsof@gmail.com
 seq=`basename $0`
 echo "QA output created by $seq"
 
-here=`pwd`
 status=1	# failure is the default!
 
 _cleanup()
@@ -41,7 +40,7 @@ _unsupported_fmt raw
 
 
 size=256K
-IMGFMT=raw IMGOPTS= _make_test_img $size | _filter_imgfmt
+IMGFMT=raw IMGKEYSECRET= IMGOPTS= _make_test_img $size | _filter_imgfmt
 
 echo
 echo "== reading wrong format should fail =="

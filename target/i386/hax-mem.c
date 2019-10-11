@@ -11,7 +11,7 @@
 #include "qemu/osdep.h"
 #include "cpu.h"
 #include "exec/address-spaces.h"
-#include "exec/exec-all.h"
+#include "qemu/error-report.h"
 
 #include "target/i386/hax-i386.h"
 #include "qemu/queue.h"
@@ -56,7 +56,7 @@ typedef struct HAXMapping {
  * send to the kernel only the removal of the pages from the MMIO hole after
  * having computed locally the result of the deletion and additions.
  */
-static QTAILQ_HEAD(HAXMappingListHead, HAXMapping) mappings =
+static QTAILQ_HEAD(, HAXMapping) mappings =
     QTAILQ_HEAD_INITIALIZER(mappings);
 
 /**
@@ -106,10 +106,10 @@ static void hax_update_mapping(uint64_t start_pa, uint32_t size,
                                uint64_t host_va, uint8_t flags)
 {
     uint64_t end_pa = start_pa + size;
-    uint32_t chunk_sz;
     HAXMapping *entry, *next;
 
     QTAILQ_FOREACH_SAFE(entry, &mappings, entry, next) {
+        uint32_t chunk_sz;
         if (start_pa >= entry->start_pa + entry->size) {
             continue;
         }
@@ -121,7 +121,16 @@ static void hax_update_mapping(uint64_t start_pa, uint32_t size,
             start_pa += chunk_sz;
             host_va += chunk_sz;
             size -= chunk_sz;
+        } else if (start_pa > entry->start_pa) {
+            /* split the existing chunk at start_pa */
+            chunk_sz = start_pa - entry->start_pa;
+            hax_insert_mapping_before(entry, entry->start_pa, chunk_sz,
+                                      entry->host_va, entry->flags);
+            entry->start_pa += chunk_sz;
+            entry->host_va += chunk_sz;
+            entry->size -= chunk_sz;
         }
+        /* now start_pa == entry->start_pa */
         chunk_sz = MIN(size, entry->size);
         if (chunk_sz) {
             bool nop = hax_mapping_is_opposite(entry, host_va, flags);
@@ -164,9 +173,15 @@ static void hax_process_section(MemoryRegionSection *section, uint8_t flags)
     ram_addr_t size = int128_get64(section->size);
     unsigned int delta;
     uint64_t host_va;
+    uint32_t max_mapping_size;
 
-    /* We only care about RAM pages */
+    /* We only care about RAM and ROM regions */
     if (!memory_region_is_ram(mr)) {
+        if (memory_region_is_romd(mr)) {
+            /* HAXM kernel module does not support ROMD yet  */
+            warn_report("Ignoring ROMD region 0x%016" PRIx64 "->0x%016" PRIx64,
+                        start_pa, start_pa + size);
+        }
         return;
     }
 
@@ -191,10 +206,23 @@ static void hax_process_section(MemoryRegionSection *section, uint8_t flags)
         flags |= HAX_RAM_INFO_ROM;
     }
 
-    /* the kernel module interface uses 32-bit sizes (but we could split...) */
-    g_assert(size <= UINT32_MAX);
-
-    hax_update_mapping(start_pa, size, host_va, flags);
+    /*
+     * The kernel module interface uses 32-bit sizes:
+     * https://github.com/intel/haxm/blob/master/API.md#hax_vm_ioctl_set_ram
+     *
+     * If the mapping size is longer than 32 bits, we can't process it in one
+     * call into the kernel. Instead, we split the mapping into smaller ones,
+     * and call hax_update_mapping() on each.
+     */
+    max_mapping_size = UINT32_MAX & qemu_real_host_page_mask;
+    while (size > max_mapping_size) {
+        hax_update_mapping(start_pa, max_mapping_size, host_va, flags);
+        start_pa += max_mapping_size;
+        size -= max_mapping_size;
+        host_va += max_mapping_size;
+    }
+    /* Now size <= max_mapping_size */
+    hax_update_mapping(start_pa, (uint32_t)size, host_va, flags);
 }
 
 static void hax_region_add(MemoryListener *listener,
@@ -268,12 +296,16 @@ static MemoryListener hax_memory_listener = {
 static void hax_ram_block_added(RAMBlockNotifier *n, void *host, size_t size)
 {
     /*
-     * In HAX, QEMU allocates the virtual address, and HAX kernel
-     * populates the memory with physical memory. Currently we have no
-     * paging, so user should make sure enough free memory in advance.
+     * We must register each RAM block with the HAXM kernel module, or
+     * hax_set_ram() will fail for any mapping into the RAM block:
+     * https://github.com/intel/haxm/blob/master/API.md#hax_vm_ioctl_alloc_ram
+     *
+     * Old versions of the HAXM kernel module (< 6.2.0) used to preallocate all
+     * host physical pages for the RAM block as part of this registration
+     * process, hence the name hax_populate_ram().
      */
     if (hax_populate_ram((uint64_t)(uintptr_t)host, size) < 0) {
-        fprintf(stderr, "HAX failed to populate RAM");
+        fprintf(stderr, "HAX failed to populate RAM\n");
         abort();
     }
 }

@@ -97,16 +97,13 @@ static void i82378_realize(PCIDevice *pci, Error **errp)
     isa_bus_irqs(isabus, s->i8259);
 
     /* 1 82C54 (pit) */
-    isa = pit_init(isabus, 0x40, 0, NULL);
+    isa = i8254_pit_init(isabus, 0x40, 0, NULL);
 
     /* speaker */
     pcspk_init(isabus, isa);
 
     /* 2 82C37 (dma) */
     isa = isa_create_simple(isabus, "i82374");
-
-    /* timer */
-    isa_create_simple(isabus, "mc146818rtc");
 }
 
 static void i82378_init(Object *obj)
@@ -138,6 +135,10 @@ static const TypeInfo i82378_type_info = {
     .instance_size = sizeof(I82378State),
     .instance_init = i82378_init,
     .class_init = i82378_class_init,
+    .interfaces = (InterfaceInfo[]) {
+        { INTERFACE_CONVENTIONAL_PCI_DEVICE },
+        { },
+    },
 };
 
 static void i82378_register_types(void)

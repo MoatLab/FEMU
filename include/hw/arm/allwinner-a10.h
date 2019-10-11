@@ -1,9 +1,9 @@
-#ifndef ALLWINNER_H_
+#ifndef HW_ARM_ALLWINNER_A10_H
+#define HW_ARM_ALLWINNER_A10_H
 
-#include "qemu-common.h"
 #include "qemu/error-report.h"
 #include "hw/char/serial.h"
-#include "hw/arm/arm.h"
+#include "hw/arm/boot.h"
 #include "hw/timer/allwinner-a10-pit.h"
 #include "hw/intc/allwinner-a10-pic.h"
 #include "hw/net/allwinner_emac.h"
@@ -11,7 +11,6 @@
 #include "hw/ide/ahci.h"
 
 #include "sysemu/sysemu.h"
-#include "exec/address-spaces.h"
 
 
 #define AW_A10_PIC_REG_BASE     0x01c20400
@@ -36,7 +35,7 @@ typedef struct AwA10State {
     AwA10PICState intc;
     AwEmacState emac;
     AllwinnerAHCIState sata;
+    MemoryRegion sram_a;
 } AwA10State;
 
-#define ALLWINNER_H_
 #endif

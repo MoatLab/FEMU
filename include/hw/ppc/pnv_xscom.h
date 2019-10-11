@@ -16,8 +16,9 @@
  * You should have received a copy of the GNU Lesser General Public
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
-#ifndef _PPC_PNV_XSCOM_H
-#define _PPC_PNV_XSCOM_H
+
+#ifndef PPC_PNV_XSCOM_H
+#define PPC_PNV_XSCOM_H
 
 #include "qom/object.h"
 
@@ -36,7 +37,7 @@ typedef struct PnvXScomInterface {
 
 typedef struct PnvXScomInterfaceClass {
     InterfaceClass parent;
-    int (*populate)(PnvXScomInterface *dev, void *fdt, int offset);
+    int (*dt_xscom)(PnvXScomInterface *dev, void *fdt, int offset);
 } PnvXScomInterfaceClass;
 
 /*
@@ -54,14 +55,40 @@ typedef struct PnvXScomInterfaceClass {
  *   PCB SLAVE   0x110Fxxxx
  */
 
-#define PNV_XSCOM_EX_CORE_BASE(base, i) (base | (((uint64_t)i) << 24))
-#define PNV_XSCOM_EX_CORE_SIZE    0x100000
+#define PNV_XSCOM_EX_CORE_BASE    0x10000000ull
+
+#define PNV_XSCOM_EX_BASE(core) \
+    (PNV_XSCOM_EX_CORE_BASE | ((uint64_t)(core) << 24))
+#define PNV_XSCOM_EX_SIZE         0x100000
 
 #define PNV_XSCOM_LPC_BASE        0xb0020
 #define PNV_XSCOM_LPC_SIZE        0x4
 
-extern void pnv_xscom_realize(PnvChip *chip, Error **errp);
-extern int pnv_xscom_populate(PnvChip *chip, void *fdt, int offset);
+#define PNV_XSCOM_PSIHB_BASE      0x2010900
+#define PNV_XSCOM_PSIHB_SIZE      0x20
+
+#define PNV_XSCOM_OCC_BASE        0x0066000
+#define PNV_XSCOM_OCC_SIZE        0x6000
+
+#define PNV9_XSCOM_EC_BASE(core) \
+    ((uint64_t)(((core) & 0x1F) + 0x20) << 24)
+#define PNV9_XSCOM_EC_SIZE        0x100000
+
+#define PNV9_XSCOM_EQ_BASE(core) \
+    ((uint64_t)(((core) & 0x1C) + 0x40) << 22)
+#define PNV9_XSCOM_EQ_SIZE        0x100000
+
+#define PNV9_XSCOM_OCC_BASE       PNV_XSCOM_OCC_BASE
+#define PNV9_XSCOM_OCC_SIZE       0x8000
+
+#define PNV9_XSCOM_PSIHB_BASE     0x5012900
+#define PNV9_XSCOM_PSIHB_SIZE     0x100
+
+#define PNV9_XSCOM_XIVE_BASE      0x5013000
+#define PNV9_XSCOM_XIVE_SIZE      0x300
+
+extern void pnv_xscom_realize(PnvChip *chip, uint64_t size, Error **errp);
+extern int pnv_dt_xscom(PnvChip *chip, void *fdt, int offset);
 
 extern void pnv_xscom_add_subregion(PnvChip *chip, hwaddr offset,
                                     MemoryRegion *mr);
@@ -72,4 +99,4 @@ extern void pnv_xscom_region_init(MemoryRegion *mr,
                                   const char *name,
                                   uint64_t size);
 
-#endif /* _PPC_PNV_XSCOM_H */
+#endif /* PPC_PNV_XSCOM_H */

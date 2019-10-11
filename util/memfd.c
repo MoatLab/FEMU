@@ -27,33 +27,76 @@
 
 #include "qemu/osdep.h"
 
-#include <glib/gprintf.h>
-
+#include "qapi/error.h"
 #include "qemu/memfd.h"
+#include "qemu/host-utils.h"
 
-#ifdef CONFIG_MEMFD
-#include <sys/memfd.h>
-#elif defined CONFIG_LINUX
+#if defined CONFIG_LINUX && !defined CONFIG_MEMFD
 #include <sys/syscall.h>
 #include <asm/unistd.h>
 
-int memfd_create(const char *name, unsigned int flags)
+static int memfd_create(const char *name, unsigned int flags)
 {
 #ifdef __NR_memfd_create
     return syscall(__NR_memfd_create, name, flags);
 #else
+    errno = ENOSYS;
     return -1;
 #endif
 }
 #endif
 
-#ifndef MFD_CLOEXEC
-#define MFD_CLOEXEC 0x0001U
-#endif
+int qemu_memfd_create(const char *name, size_t size, bool hugetlb,
+                      uint64_t hugetlbsize, unsigned int seals, Error **errp)
+{
+    int htsize = hugetlbsize ? ctz64(hugetlbsize) : 0;
 
-#ifndef MFD_ALLOW_SEALING
-#define MFD_ALLOW_SEALING 0x0002U
+    if (htsize && 1ULL << htsize != hugetlbsize) {
+        error_setg(errp, "Hugepage size must be a power of 2");
+        return -1;
+    }
+
+    htsize = htsize << MFD_HUGE_SHIFT;
+
+#ifdef CONFIG_LINUX
+    int mfd = -1;
+    unsigned int flags = MFD_CLOEXEC;
+
+    if (seals) {
+        flags |= MFD_ALLOW_SEALING;
+    }
+    if (hugetlb) {
+        flags |= MFD_HUGETLB;
+        flags |= htsize;
+    }
+    mfd = memfd_create(name, flags);
+    if (mfd < 0) {
+        error_setg_errno(errp, errno,
+                         "failed to create memfd with flags 0x%x", flags);
+        goto err;
+    }
+
+    if (ftruncate(mfd, size) == -1) {
+        error_setg_errno(errp, errno, "failed to resize memfd to %zu", size);
+        goto err;
+    }
+
+    if (seals && fcntl(mfd, F_ADD_SEALS, seals) == -1) {
+        error_setg_errno(errp, errno, "failed to add seals 0x%x", seals);
+        goto err;
+    }
+
+    return mfd;
+
+err:
+    if (mfd >= 0) {
+        close(mfd);
+    }
+#else
+    error_setg_errno(errp, ENOSYS, "failed to create memfd");
 #endif
+    return -1;
+}
 
 /*
  * This is a best-effort helper for shared memory allocation, with
@@ -62,38 +105,17 @@ int memfd_create(const char *name, unsigned int flags)
  * sealing.
  */
 void *qemu_memfd_alloc(const char *name, size_t size, unsigned int seals,
-                       int *fd)
+                       int *fd, Error **errp)
 {
     void *ptr;
-    int mfd = -1;
+    int mfd = qemu_memfd_create(name, size, false, 0, seals, NULL);
 
-    *fd = -1;
-
-#ifdef CONFIG_LINUX
-    if (seals) {
-        mfd = memfd_create(name, MFD_ALLOW_SEALING | MFD_CLOEXEC);
+    /* some systems have memfd without sealing */
+    if (mfd == -1) {
+        mfd = qemu_memfd_create(name, size, false, 0, 0, NULL);
     }
 
     if (mfd == -1) {
-        /* some systems have memfd without sealing */
-        mfd = memfd_create(name, MFD_CLOEXEC);
-        seals = 0;
-    }
-#endif
-
-    if (mfd != -1) {
-        if (ftruncate(mfd, size) == -1) {
-            perror("ftruncate");
-            close(mfd);
-            return NULL;
-        }
-
-        if (seals && fcntl(mfd, F_ADD_SEALS, seals) == -1) {
-            perror("fcntl");
-            close(mfd);
-            return NULL;
-        }
-    } else {
         const char *tmpdir = g_get_tmp_dir();
         gchar *fname;
 
@@ -102,27 +124,26 @@ void *qemu_memfd_alloc(const char *name, size_t size, unsigned int seals,
         unlink(fname);
         g_free(fname);
 
-        if (mfd == -1) {
-            perror("mkstemp");
-            return NULL;
-        }
-
-        if (ftruncate(mfd, size) == -1) {
-            perror("ftruncate");
-            close(mfd);
-            return NULL;
+        if (mfd == -1 ||
+            ftruncate(mfd, size) == -1) {
+            goto err;
         }
     }
 
     ptr = mmap(0, size, PROT_READ | PROT_WRITE, MAP_SHARED, mfd, 0);
     if (ptr == MAP_FAILED) {
-        perror("mmap");
-        close(mfd);
-        return NULL;
+        goto err;
     }
 
     *fd = mfd;
     return ptr;
+
+err:
+    error_setg_errno(errp, errno, "failed to allocate shared memory");
+    if (mfd >= 0) {
+        close(mfd);
+    }
+    return NULL;
 }
 
 void qemu_memfd_free(void *ptr, size_t size, int fd)
@@ -142,7 +163,13 @@ enum {
     MEMFD_TODO
 };
 
-bool qemu_memfd_check(void)
+/**
+ * qemu_memfd_alloc_check():
+ *
+ * Check if qemu_memfd_alloc() can allocate, including using a
+ * fallback implementation when host doesn't support memfd.
+ */
+bool qemu_memfd_alloc_check(void)
 {
     static int memfd_check = MEMFD_TODO;
 
@@ -150,10 +177,30 @@ bool qemu_memfd_check(void)
         int fd;
         void *ptr;
 
-        ptr = qemu_memfd_alloc("test", 4096, 0, &fd);
+        fd = -1;
+        ptr = qemu_memfd_alloc("test", 4096, 0, &fd, NULL);
         memfd_check = ptr ? MEMFD_OK : MEMFD_KO;
         qemu_memfd_free(ptr, 4096, fd);
     }
 
     return memfd_check == MEMFD_OK;
+}
+
+/**
+ * qemu_memfd_check():
+ *
+ * Check if host supports memfd.
+ */
+bool qemu_memfd_check(unsigned int flags)
+{
+#ifdef CONFIG_LINUX
+    int mfd = memfd_create("test", flags | MFD_CLOEXEC);
+
+    if (mfd >= 0) {
+        close(mfd);
+        return true;
+    }
+#endif
+
+    return false;
 }

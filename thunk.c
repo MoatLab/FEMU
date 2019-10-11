@@ -67,7 +67,6 @@ void thunk_register_struct(int id, const char *name, const argtype *types)
     int nb_fields, offset, max_align, align, size, i, j;
 
     assert(id < max_struct_entries);
-    se = struct_entries + id;
 
     /* first we count the number of fields */
     type_ptr = types;
@@ -76,6 +75,8 @@ void thunk_register_struct(int id, const char *name, const argtype *types)
         type_ptr = thunk_type_next(type_ptr);
         nb_fields++;
     }
+    assert(nb_fields > 0);
+    se = struct_entries + id;
     se->field_types = types;
     se->nb_fields = nb_fields;
     se->name = name;
@@ -85,10 +86,10 @@ void thunk_register_struct(int id, const char *name, const argtype *types)
 #endif
     /* now we can alloc the data */
 
-    for(i = 0;i < 2; i++) {
+    for (i = 0; i < ARRAY_SIZE(se->field_offsets); i++) {
         offset = 0;
         max_align = 1;
-        se->field_offsets[i] = malloc(nb_fields * sizeof(int));
+        se->field_offsets[i] = g_new(int, nb_fields);
         type_ptr = se->field_types;
         for(j = 0;j < nb_fields; j++) {
             size = thunk_type_size(type_ptr, i);

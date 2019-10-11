@@ -14,9 +14,9 @@
 #define SYSEMU_HOSTMEM_H
 
 #include "sysemu/sysemu.h" /* for MAX_NODES */
+#include "qapi/qapi-types-machine.h"
 #include "qom/object.h"
 #include "exec/memory.h"
-#include "qemu/option.h"
 #include "qemu/bitmap.h"
 
 #define TYPE_MEMORY_BACKEND "memory-backend"
@@ -52,19 +52,21 @@ struct HostMemoryBackend {
     Object parent;
 
     /* protected */
-    char *id;
     uint64_t size;
-    bool merge, dump;
-    bool prealloc, force_prealloc, is_mapped;
+    bool merge, dump, use_canonical_path;
+    bool prealloc, force_prealloc, is_mapped, share;
     DECLARE_BITMAP(host_nodes, MAX_NODES + 1);
     HostMemPolicy policy;
 
     MemoryRegion mr;
 };
 
-MemoryRegion *host_memory_backend_get_memory(HostMemoryBackend *backend,
-                                             Error **errp);
+bool host_memory_backend_mr_inited(HostMemoryBackend *backend);
+MemoryRegion *host_memory_backend_get_memory(HostMemoryBackend *backend);
 
 void host_memory_backend_set_mapped(HostMemoryBackend *backend, bool mapped);
 bool host_memory_backend_is_mapped(HostMemoryBackend *backend);
+size_t host_memory_backend_pagesize(HostMemoryBackend *memdev);
+char *host_memory_backend_get_name(HostMemoryBackend *backend);
+
 #endif

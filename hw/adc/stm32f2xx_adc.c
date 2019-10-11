@@ -25,8 +25,8 @@
 #include "qemu/osdep.h"
 #include "hw/sysbus.h"
 #include "hw/hw.h"
-#include "qapi/error.h"
 #include "qemu/log.h"
+#include "qemu/module.h"
 #include "hw/adc/stm32f2xx_adc.h"
 
 #ifndef STM_ADC_ERR_DEBUG
@@ -37,7 +37,7 @@
     if (STM_ADC_ERR_DEBUG >= lvl) { \
         qemu_log("%s: " fmt, __func__, ## args); \
     } \
-} while (0);
+} while (0)
 
 #define DB_PRINT(fmt, args...) DB_PRINT_L(1, fmt, ## args)
 

@@ -21,13 +21,16 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+
 #include "qemu/osdep.h"
 #include "hw/hw.h"
-#include "hw/audio/audio.h"
+#include "hw/audio/soundhw.h"
 #include "audio/audio.h"
 #include "hw/isa/isa.h"
 #include "hw/qdev.h"
+#include "qemu/module.h"
 #include "qemu/timer.h"
+#include "qapi/error.h"
 
 /*
   Missing features:
@@ -287,7 +290,7 @@ static void cs_reset_voices (CSState *s, uint32_t val)
 
     switch ((val >> 5) & ((s->dregs[MODE_And_ID] & MODE2) ? 7 : 3)) {
     case 0:
-        as.fmt = AUD_FMT_U8;
+        as.fmt = AUDIO_FORMAT_U8;
         s->shift = as.nchannels == 2;
         break;
 
@@ -297,15 +300,16 @@ static void cs_reset_voices (CSState *s, uint32_t val)
     case 3:
         s->tab = ALawDecompressTable;
     x_law:
-        as.fmt = AUD_FMT_S16;
+        as.fmt = AUDIO_FORMAT_S16;
         as.endianness = AUDIO_HOST_ENDIANNESS;
         s->shift = as.nchannels == 2;
         break;
 
     case 6:
         as.endianness = 1;
+        /* fall through */
     case 2:
-        as.fmt = AUD_FMT_S16;
+        as.fmt = AUDIO_FORMAT_S16;
         s->shift = as.nchannels;
         break;
 
@@ -663,8 +667,13 @@ static void cs4231a_realizefn (DeviceState *dev, Error **errp)
     CSState *s = CS4231A (dev);
     IsaDmaClass *k;
 
-    isa_init_irq (d, &s->pic, s->irq);
     s->isa_dma = isa_get_dma(isa_bus_from_device(d), s->dma);
+    if (!s->isa_dma) {
+        error_setg(errp, "ISA controller does not support DMA");
+        return;
+    }
+
+    isa_init_irq(d, &s->pic, s->irq);
     k = ISADMA_GET_CLASS(s->isa_dma);
     k->register_channel(s->isa_dma, s->dma, cs_dma_read, s);
 

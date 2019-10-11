@@ -15,9 +15,9 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "cpu.h"
-#include "qemu-common.h"
 #include "migration/vmstate.h"
 #include "exec/exec-all.h"
+#include "fpu/softfloat.h"
 
 static void uc32_cpu_set_pc(CPUState *cs, vaddr value)
 {
@@ -44,11 +44,7 @@ static ObjectClass *uc32_cpu_class_by_name(const char *cpu_model)
     ObjectClass *oc;
     char *typename;
 
-    if (cpu_model == NULL) {
-        return NULL;
-    }
-
-    typename = g_strdup_printf("%s-" TYPE_UNICORE32_CPU, cpu_model);
+    typename = g_strdup_printf(UNICORE32_CPU_TYPE_NAME("%s"), cpu_model);
     oc = object_class_by_name(typename);
     g_free(typename);
     if (oc != NULL && (!object_class_dynamic_cast(oc, TYPE_UNICORE32_CPU) ||
@@ -57,11 +53,6 @@ static ObjectClass *uc32_cpu_class_by_name(const char *cpu_model)
     }
     return oc;
 }
-
-typedef struct UniCore32CPUInfo {
-    const char *name;
-    void (*instance_init)(Object *obj);
-} UniCore32CPUInfo;
 
 static void unicore_ii_cpu_initfn(Object *obj)
 {
@@ -78,7 +69,6 @@ static void unicore_ii_cpu_initfn(Object *obj)
 
     set_feature(env, UC32_HWCAP_CMOV);
     set_feature(env, UC32_HWCAP_UCF64);
-    set_snan_bit_is_one(1, &env->ucf64.fp_status);
 }
 
 static void uc32_any_cpu_initfn(Object *obj)
@@ -91,13 +81,7 @@ static void uc32_any_cpu_initfn(Object *obj)
 
     set_feature(env, UC32_HWCAP_CMOV);
     set_feature(env, UC32_HWCAP_UCF64);
-    set_snan_bit_is_one(1, &env->ucf64.fp_status);
 }
-
-static const UniCore32CPUInfo uc32_cpus[] = {
-    { .name = "UniCore-II", .instance_init = unicore_ii_cpu_initfn },
-    { .name = "any",        .instance_init = uc32_any_cpu_initfn },
-};
 
 static void uc32_cpu_realizefn(DeviceState *dev, Error **errp)
 {
@@ -118,12 +102,10 @@ static void uc32_cpu_realizefn(DeviceState *dev, Error **errp)
 
 static void uc32_cpu_initfn(Object *obj)
 {
-    CPUState *cs = CPU(obj);
     UniCore32CPU *cpu = UNICORE32_CPU(obj);
     CPUUniCore32State *env = &cpu->env;
-    static bool inited;
 
-    cs->env_ptr = env;
+    cpu_set_cpustate_pointers(cpu);
 
 #ifdef CONFIG_USER_ONLY
     env->uncached_asr = ASR_MODE_USER;
@@ -132,13 +114,6 @@ static void uc32_cpu_initfn(Object *obj)
     env->uncached_asr = ASR_MODE_PRIV;
     env->regs[31] = 0x03000000;
 #endif
-
-    tlb_flush(cs);
-
-    if (tcg_enabled() && !inited) {
-        inited = true;
-        uc32_translate_init();
-    }
 }
 
 static const VMStateDescription vmstate_uc32_cpu = {
@@ -152,8 +127,8 @@ static void uc32_cpu_class_init(ObjectClass *oc, void *data)
     CPUClass *cc = CPU_CLASS(oc);
     UniCore32CPUClass *ucc = UNICORE32_CPU_CLASS(oc);
 
-    ucc->parent_realize = dc->realize;
-    dc->realize = uc32_cpu_realizefn;
+    device_class_set_parent_realize(dc, uc32_cpu_realizefn,
+                                    &ucc->parent_realize);
 
     cc->class_by_name = uc32_cpu_class_by_name;
     cc->has_work = uc32_cpu_has_work;
@@ -161,44 +136,31 @@ static void uc32_cpu_class_init(ObjectClass *oc, void *data)
     cc->cpu_exec_interrupt = uc32_cpu_exec_interrupt;
     cc->dump_state = uc32_cpu_dump_state;
     cc->set_pc = uc32_cpu_set_pc;
-#ifdef CONFIG_USER_ONLY
-    cc->handle_mmu_fault = uc32_cpu_handle_mmu_fault;
-#else
+    cc->tlb_fill = uc32_cpu_tlb_fill;
     cc->get_phys_page_debug = uc32_cpu_get_phys_page_debug;
-#endif
+    cc->tcg_initialize = uc32_translate_init;
     dc->vmsd = &vmstate_uc32_cpu;
 }
 
-static void uc32_register_cpu_type(const UniCore32CPUInfo *info)
-{
-    TypeInfo type_info = {
-        .parent = TYPE_UNICORE32_CPU,
-        .instance_init = info->instance_init,
-    };
+#define DEFINE_UNICORE32_CPU_TYPE(cpu_model, initfn) \
+    {                                                \
+        .parent = TYPE_UNICORE32_CPU,                \
+        .instance_init = initfn,                     \
+        .name = UNICORE32_CPU_TYPE_NAME(cpu_model),  \
+    }
 
-    type_info.name = g_strdup_printf("%s-" TYPE_UNICORE32_CPU, info->name);
-    type_register(&type_info);
-    g_free((void *)type_info.name);
-}
-
-static const TypeInfo uc32_cpu_type_info = {
-    .name = TYPE_UNICORE32_CPU,
-    .parent = TYPE_CPU,
-    .instance_size = sizeof(UniCore32CPU),
-    .instance_init = uc32_cpu_initfn,
-    .abstract = true,
-    .class_size = sizeof(UniCore32CPUClass),
-    .class_init = uc32_cpu_class_init,
+static const TypeInfo uc32_cpu_type_infos[] = {
+    {
+        .name = TYPE_UNICORE32_CPU,
+        .parent = TYPE_CPU,
+        .instance_size = sizeof(UniCore32CPU),
+        .instance_init = uc32_cpu_initfn,
+        .abstract = true,
+        .class_size = sizeof(UniCore32CPUClass),
+        .class_init = uc32_cpu_class_init,
+    },
+    DEFINE_UNICORE32_CPU_TYPE("UniCore-II", unicore_ii_cpu_initfn),
+    DEFINE_UNICORE32_CPU_TYPE("any", uc32_any_cpu_initfn),
 };
 
-static void uc32_cpu_register_types(void)
-{
-    int i;
-
-    type_register_static(&uc32_cpu_type_info);
-    for (i = 0; i < ARRAY_SIZE(uc32_cpus); i++) {
-        uc32_register_cpu_type(&uc32_cpus[i]);
-    }
-}
-
-type_init(uc32_cpu_register_types)
+DEFINE_TYPES(uc32_cpu_type_infos)

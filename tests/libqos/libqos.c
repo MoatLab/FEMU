@@ -4,6 +4,7 @@
 #include "libqtest.h"
 #include "libqos/libqos.h"
 #include "libqos/pci.h"
+#include "qapi/qmp/qdict.h"
 
 /*** Test Setup & Teardown ***/
 
@@ -17,18 +18,14 @@ QOSState *qtest_vboot(QOSOps *ops, const char *cmdline_fmt, va_list ap)
 {
     char *cmdline;
 
-    struct QOSState *qs = g_malloc(sizeof(QOSState));
+    QOSState *qs = g_new0(QOSState, 1);
 
     cmdline = g_strdup_vprintf(cmdline_fmt, ap);
-    qs->qts = qtest_start(cmdline);
+    qs->qts = qtest_init(cmdline);
     qs->ops = ops;
     if (ops) {
-        if (ops->init_allocator) {
-            qs->alloc = ops->init_allocator(ALLOC_NO_FLAGS);
-        }
-        if (ops->qpci_init && qs->alloc) {
-            qs->pcibus = ops->qpci_init(qs->alloc);
-        }
+        ops->alloc_init(&qs->alloc, qs->qts, ALLOC_NO_FLAGS);
+        qs->pcibus = ops->qpci_new(qs->qts, &qs->alloc);
     }
 
     g_free(cmdline);
@@ -61,11 +58,8 @@ void qtest_common_shutdown(QOSState *qs)
             qs->ops->qpci_free(qs->pcibus);
             qs->pcibus = NULL;
         }
-        if (qs->alloc && qs->ops->uninit_allocator) {
-            qs->ops->uninit_allocator(qs->alloc);
-            qs->alloc = NULL;
-        }
     }
+    alloc_destroy(&qs->alloc);
     qtest_quit(qs->qts);
     g_free(qs);
 }
@@ -79,65 +73,47 @@ void qtest_shutdown(QOSState *qs)
     }
 }
 
-void set_context(QOSState *s)
+static QDict *qmp_execute(QTestState *qts, const char *command)
 {
-    global_qtest = s->qts;
-}
-
-static QDict *qmp_execute(const char *command)
-{
-    char *fmt;
-    QDict *rsp;
-
-    fmt = g_strdup_printf("{ 'execute': '%s' }", command);
-    rsp = qmp(fmt);
-    g_free(fmt);
-
-    return rsp;
+    return qtest_qmp(qts, "{ 'execute': %s }", command);
 }
 
 void migrate(QOSState *from, QOSState *to, const char *uri)
 {
     const char *st;
-    char *s;
     QDict *rsp, *sub;
     bool running;
 
-    set_context(from);
-
     /* Is the machine currently running? */
-    rsp = qmp_execute("query-status");
+    rsp = qmp_execute(from->qts, "query-status");
     g_assert(qdict_haskey(rsp, "return"));
     sub = qdict_get_qdict(rsp, "return");
     g_assert(qdict_haskey(sub, "running"));
     running = qdict_get_bool(sub, "running");
-    QDECREF(rsp);
+    qobject_unref(rsp);
 
     /* Issue the migrate command. */
-    s = g_strdup_printf("{ 'execute': 'migrate',"
-                        "'arguments': { 'uri': '%s' } }",
-                        uri);
-    rsp = qmp(s);
-    g_free(s);
+    rsp = qtest_qmp(from->qts,
+                    "{ 'execute': 'migrate', 'arguments': { 'uri': %s }}",
+                    uri);
     g_assert(qdict_haskey(rsp, "return"));
-    QDECREF(rsp);
+    qobject_unref(rsp);
 
     /* Wait for STOP event, but only if we were running: */
     if (running) {
-        qmp_eventwait("STOP");
+        qtest_qmp_eventwait(from->qts, "STOP");
     }
 
     /* If we were running, we can wait for an event. */
     if (running) {
-        migrate_allocator(from->alloc, to->alloc);
-        set_context(to);
-        qmp_eventwait("RESUME");
+        migrate_allocator(&from->alloc, &to->alloc);
+        qtest_qmp_eventwait(to->qts, "RESUME");
         return;
     }
 
     /* Otherwise, we need to wait: poll until migration is completed. */
     while (1) {
-        rsp = qmp_execute("query-migrate");
+        rsp = qmp_execute(from->qts, "query-migrate");
         g_assert(qdict_haskey(rsp, "return"));
         sub = qdict_get_qdict(rsp, "return");
         g_assert(qdict_haskey(sub, "status"));
@@ -145,12 +121,12 @@ void migrate(QOSState *from, QOSState *to, const char *uri)
 
         /* "setup", "active", "completed", "failed", "cancelled" */
         if (strcmp(st, "completed") == 0) {
-            QDECREF(rsp);
+            qobject_unref(rsp);
             break;
         }
 
         if ((strcmp(st, "setup") == 0) || (strcmp(st, "active") == 0)) {
-            QDECREF(rsp);
+            qobject_unref(rsp);
             g_usleep(5000);
             continue;
         }
@@ -159,8 +135,7 @@ void migrate(QOSState *from, QOSState *to, const char *uri)
         g_assert_not_reached();
     }
 
-    migrate_allocator(from->alloc, to->alloc);
-    set_context(to);
+    migrate_allocator(&from->alloc, &to->alloc);
 }
 
 bool have_qemu_img(void)
@@ -198,21 +173,11 @@ void mkimg(const char *file, const char *fmt, unsigned size_mb)
     cli = g_strdup_printf("%s create -f %s %s %uM", qemu_img_abs_path,
                           fmt, file, size_mb);
     ret = g_spawn_command_line_sync(cli, &out, &out2, &rc, &err);
-    if (err) {
+    if (err || !g_spawn_check_exit_status(rc, &err)) {
         fprintf(stderr, "%s\n", err->message);
         g_error_free(err);
     }
     g_assert(ret && !err);
-
-    /* In glib 2.34, we have g_spawn_check_exit_status. in 2.12, we don't.
-     * glib 2.43.91 implementation assumes that any non-zero is an error for
-     * windows, but uses extra precautions for Linux. However,
-     * 0 is only possible if the program exited normally, so that should be
-     * sufficient for our purposes on all platforms, here. */
-    if (rc) {
-        fprintf(stderr, "qemu-img returned status code %d\n", rc);
-    }
-    g_assert(!rc);
 
     g_free(out);
     g_free(out2);

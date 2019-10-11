@@ -15,6 +15,9 @@
  * along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#ifndef UI_SPICE_DISPLAY_H
+#define UI_SPICE_DISPLAY_H
+
 #include <spice/ipc_ring.h>
 #include <spice/enums.h>
 #include <spice/qxl_dev.h>
@@ -86,7 +89,6 @@ struct SimpleSpiceDisplay {
     DisplayChangeListener dcl;
     void *buf;
     int bufsize;
-    QXLWorker *worker;
     QXLInstance qxl;
     uint32_t unique;
     pixman_image_t *surface;
@@ -119,10 +121,19 @@ struct SimpleSpiceDisplay {
     /* opengl rendering */
     QEMUBH *gl_unblock_bh;
     QEMUTimer *gl_unblock_timer;
-    ConsoleGLState *gls;
+    QemuGLShader *gls;
     int gl_updates;
     bool have_scanout;
     bool have_surface;
+
+    QemuDmaBuf *guest_dmabuf;
+    bool guest_dmabuf_refresh;
+    bool render_cursor;
+
+    egl_fb guest_fb;
+    egl_fb blit_fb;
+    egl_fb cursor_fb;
+    bool have_hot;
 #endif
 };
 
@@ -139,6 +150,8 @@ struct SimpleSpiceCursor {
     QXLCommandExt ext;
     QXLCursor cursor;
 };
+
+extern bool spice_opengl;
 
 int qemu_spice_rect_is_empty(const QXLRect* r);
 void qemu_spice_rect_union(QXLRect *dest, const QXLRect *r);
@@ -169,3 +182,9 @@ void qemu_spice_wakeup(SimpleSpiceDisplay *ssd);
 void qemu_spice_display_start(void);
 void qemu_spice_display_stop(void);
 int qemu_spice_display_is_running(SimpleSpiceDisplay *ssd);
+
+bool qemu_spice_fill_device_address(QemuConsole *con,
+                                    char *device_address,
+                                    size_t size);
+
+#endif

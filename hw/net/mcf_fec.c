@@ -5,16 +5,17 @@
  *
  * This code is licensed under the GPL
  */
+
 #include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "net/net.h"
+#include "qemu/module.h"
 #include "hw/m68k/mcf.h"
 #include "hw/m68k/mcf_fec.h"
 #include "hw/net/mii.h"
 #include "hw/sysbus.h"
 /* For crc32 */
 #include <zlib.h>
-#include "exec/address-spaces.h"
 
 //#define DEBUG_FEC 1
 
