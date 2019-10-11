@@ -1,5 +1,5 @@
 ```
-______ ______ __  __ _    _ 
+  ______ ______ __  __ _    _ 
  |  ____|  ____|  \/  | |  | |
  | |__  | |__  | \  / | |  | |
  |  __| |  __| | |\/| | |  | |
@@ -41,13 +41,13 @@ Installation
    dependencies can be installed by following instructions below:
 
 	```bash
+  cd $femu
+  mkdir build-femu
 	# Switch to the FEMU building directory
-	cd femu/build-femu
-	# Recent commits are not safe for public use yet ..
-	git checkout ba56426057f57f7eab839e860c7672d5289e25c5
+	cd build-femu
 	# Copy femu script
-  	cp ../femu-scripts/femu-copy-scripts.sh .
-  	./femu-copy-scripts.sh .
+  cp ../femu-scripts/femu-copy-scripts.sh .
+  ./femu-copy-scripts.sh .
 	# only Debian/Ubuntu based distributions supported
 	sudo ./pkgdep.sh
 	```
@@ -58,6 +58,13 @@ Installation
 	./femu-compile.sh
 	```
 	FEMU binary will appear as ``x86_64-softmmu/qemu-system-x86_64``
+
+  Tested environment: 
+
+  ```
+  OS: Ubuntu 16.04.5 LTS
+  gcc: 5.4.0
+  ```
 
 3. Prepare the VM image (For performance reasons, we suggest to use a server
    version guest OS [e.g. Ubuntu Server 16.04, 14.04])
@@ -135,30 +142,10 @@ Run FEMU
 
 ### 2. Run FEMU as an emulated blackbox SSD (device-managed FTL) ###
 
-Under this mode, each emulated NVMe SSD needs configuration files in the format
-of vssd1.conf, vssd2.conf, ..., etc. (which should correspond to your virtual
-NVMe image file names: vssd1.raw, vssd2.raw, etc.) to run.
+**TODO:** currently blackbox SSD parameters are hard-coded in
+`hw/block/femu/ftl/ftl.c`, please change them accordingly and re-compile FEMU.
 
-The key configuration options are explained below:
-
-It configures an emulated SSD with 8 channels and there are 8 chips on each
-channel.  The total SSD size is 1GB.
-
-    	PAGE_SIZE           4096            // SSD page size in bytes
-    	PAGE_NB             256             // # of pages in one block
-    	SECTOR_SIZE         512             // # sector size in bytes
-    	FLASH_NB            64              // total # of NAND chips
-    	BLOCK_NB            16              // # of blocks in one chip
-
-    	REG_WRITE_DELAY     40000           // channel transfer time for one page (program) in nanosecond
-    	CELL_PROGRAM_DELAY  800000          // NAND page program latency in nanosecond
-    	REG_READ_DELAY      60000           // NAND page read latency in nanosecond
-    	CELL_READ_DELAY     40000           // channel transfer time for one page (read) in nanosecond
-    	BLOCK_ERASE_DELAY   3000000         // Block erase latency in nanosecond
-    	CHANNEL_NB          8               // # of channels
-    	GC_MODE             2               // GC blocking mode, see hw/block/ssd/common.h for definition
-
-After the FEMU configuration file is ready, boot the VM using the following
+Boot the VM using the following
 script:
 
 ```Bash
@@ -190,12 +177,10 @@ benchmarking.
 
 Tuning
 ------
-To Add ...
 
 
 Debugging
 ---------
-To Add ...
 
 FEMU Design
 -----------
