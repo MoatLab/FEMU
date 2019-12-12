@@ -526,9 +526,10 @@ static int ocssd_ns_load_chunk_info_from_file(OcssdNamespace *ons,
     ssize_t n;
     size_t len = 0;
     int line_num = 0;
-    char *line;
+    char *line = NULL;
     Error *local_err = NULL;
     FILE *fp;
+    int failed = 0;
 
     fp = fopen(fname, "r");
     if (!fp) {
@@ -541,13 +542,15 @@ static int ocssd_ns_load_chunk_info_from_file(OcssdNamespace *ons,
         if (_parse_and_update_chunk_info(ons, line, &local_err)) {
             error_propagate_prepend(errp, local_err,
                 "could not parse chunk info (line %d): ", line_num);
-            return 1;
+            failed = 1;
+            break;
         }
     }
 
+    free(line);
     fclose(fp);
 
-    return 0;
+    return failed;
 }
 
 static int ocssd_ns_load_write_error_injection_from_file(OcssdNamespace *ons,
@@ -556,9 +559,10 @@ static int ocssd_ns_load_write_error_injection_from_file(OcssdNamespace *ons,
     ssize_t n;
     size_t len = 0;
     int line_num = 0;
-    char *line;
+    char *line = NULL;
     Error *local_err = NULL;
     FILE *fp;
+    int failed = 0;
 
     fp = fopen(fname, "r");
     if (!fp) {
@@ -572,13 +576,15 @@ static int ocssd_ns_load_write_error_injection_from_file(OcssdNamespace *ons,
         if (_parse_and_update_write_error_injection(ons, line, &local_err)) {
             error_propagate_prepend(errp, local_err,
                 "could not parse write error injection (line %d): ", line_num);
-            return 1;
+            failed = 1;
+            break;
         }
     }
 
+    free(line);
     fclose(fp);
 
-    return 0;
+    return failed;
 }
 
 static int ocssd_ns_load_reset_error_injection_from_file(OcssdNamespace *ons,
@@ -587,9 +593,10 @@ static int ocssd_ns_load_reset_error_injection_from_file(OcssdNamespace *ons,
     ssize_t n;
     size_t len = 0;
     int line_num = 0;
-    char *line;
+    char *line = NULL;
     Error *local_err = NULL;
     FILE *fp;
+    int failed = 0;
 
     fp = fopen(fname, "r");
     if (!fp) {
@@ -603,13 +610,15 @@ static int ocssd_ns_load_reset_error_injection_from_file(OcssdNamespace *ons,
         if (_parse_and_update_reset_error_injection(ons, line, &local_err)) {
             error_propagate_prepend(errp, local_err,
                 "could not parse reset error injection (line %d): ", line_num);
-            return 1;
+            failed = 1;
+            break;
         }
     }
 
+    free(line);
     fclose(fp);
 
-    return 0;
+    return failed;
 }
 
 static int ocssd_ns_init(OcssdNamespace *ons, Error **errp)
