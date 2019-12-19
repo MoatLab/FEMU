@@ -77,7 +77,7 @@ Installation
   `$HOME/images/u14s.qcow2`. After you fill in the query, VM image downloading
   link will be sent to your email address shortly. ***Please make sure to provide
   a correct email address when filling the above form. Contact
-  [Huaicheng Li](huaicheng@cs.uchicago.edu) upon any problems.***
+  [Huaicheng Li](mailto:huaicheng@cs.uchicago.edu) upon any problems.***
 
   **Option 2**: Build your own VM image by following guides (e.g.
   [here](https://help.ubuntu.com/community/Installation/QemuEmulator#Installation_of_an_operating_system_from_ISO_to_the_QEMU_environment)).
