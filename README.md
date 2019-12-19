@@ -8,14 +8,14 @@
 
 ```
                               
-FEMU README
-===========
--------------------
+Contact Information
+--------------------
 
-Bib
-----
+**Maintainer**: [Huaicheng Li](people.cs.uchicago.edu/~huaicheng/) (huaicheng@cs.uchicago.edu)
 
-If you use FEMU, we would appreciate if you cite the FEMU paper. The bib entry is
+If you have any suggestions, general discussions about FEMU or bug reports, please do not hesistate to contact Huaicheng. We would like to hear your thoughts!
+
+Please cite our FEMU paper if you use FEMU. The bib entry is
 
 ```
 @InProceedings{Li+18-FEMU, 
