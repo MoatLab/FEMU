@@ -12,6 +12,25 @@ FEMU README
 ===========
 -------------------
 
+Bib
+----
+
+If you use FEMU, we would appreciate if you cite the FEMU paper. The bib entry is
+
+```
+@InProceedings{Li+18-FEMU, 
+Author = {Huaicheng Li and Mingzhe Hao and Michael Hao Tong 
+and Swaminathan Sundararaman and Matias Bjørling and Haryadi S. Gunawi},
+Title = "The CASE of FEMU: Cheap, Accurate, Scalable and Extensible Flash Emulator",
+Booktitle =  {Proceedings of 16th USENIX Conference on File and Storage Technologies (FAST)},
+Address = {Oakland, CA},
+Month =  {February},
+Year =  {2018}
+}
+
+```
+
+
 Project Description
 -------------------
 
