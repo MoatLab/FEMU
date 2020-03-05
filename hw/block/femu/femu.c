@@ -46,19 +46,20 @@ static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
     nvme_inc_cq_tail(cq);
 }
 
-static void nvme_process_cq_cpl(void *arg)
+static void nvme_process_cq_cpl(void *arg, int index_poller)
 {
     FemuCtrl *n = (FemuCtrl *)arg;
     NvmeCQueue *cq = NULL;
     NvmeRequest *req = NULL;
-    struct rte_ring *rp = n->to_ftl;
+    struct rte_ring *rp = n->to_ftl[index_poller];
+    pqueue_t *pq = n->pq[index_poller];
     uint64_t now;
     int processed = 0;
     int rc;
     int i;
 
     if (n->femu_mode == FEMU_BLACKBOX_MODE) {
-        rp = n->to_poller;
+        rp = n->to_poller[index_poller];
     }
 
     while (femu_ring_count(rp)) {
@@ -69,10 +70,10 @@ static void nvme_process_cq_cpl(void *arg)
         }
         assert(req);
 
-        pqueue_insert(n->pq, req);
+        pqueue_insert(pq, req);
     }
 
-    while ((req = pqueue_peek(n->pq))) {
+    while ((req = pqueue_peek(pq))) {
         now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
         if (now < req->expire_time) {
             break;
@@ -83,7 +84,7 @@ static void nvme_process_cq_cpl(void *arg)
             continue;
         nvme_post_cqe(cq, req);
         QTAILQ_INSERT_TAIL(&req->sq->req_list, req, entry);
-        pqueue_pop(n->pq);
+        pqueue_pop(pq);
         processed++;
         n->nr_tt_ios++;
         if (now - req->expire_time >= 20000) {
@@ -100,37 +101,61 @@ static void nvme_process_cq_cpl(void *arg)
     if (processed == 0)
         return;
 
-    for (i = 1; i <= n->num_io_queues; i++) {
-        if (n->should_isr[i]) {
-            nvme_isr_notify_io(n->cq[i]);
-            n->should_isr[i] = false;
-        }
-        assert(n->should_isr[i] == false);
+    switch (n->multipoller_enabled) {
+        case 1:
+            nvme_isr_notify_io(n->cq[index_poller]);
+            break;
+
+        default:
+            for (i = 1; i <= n->num_io_queues; i++) {
+                if (n->should_isr[i]) {
+                    nvme_isr_notify_io(n->cq[i]);
+                    n->should_isr[i] = false;
+                }
+            }
+            break;
     }
 }
 
 static void *nvme_poller(void *arg)
 {
-    FemuCtrl *n = (FemuCtrl *)arg;
-    int i;
+    FemuCtrl *n = ((NvmePollerThreadArgument *)arg)->n;
+    int index = ((NvmePollerThreadArgument *)arg)->index;
 
-    while (1) {
-        if ((!n->dataplane_started)) {
-            usleep(1000);
-            continue;
-        }
+    switch (n->multipoller_enabled) {
+        case 1:
+            while (1) {
+                if ((!n->dataplane_started)) {
+                    usleep(1000);
+                    continue;
+                }
 
-        for (i = 1; i <= n->num_io_queues; i++) {
-            NvmeSQueue *sq = n->sq[i];
-            NvmeCQueue *cq = n->cq[i];
-            if (!sq || !sq->is_active || !cq || !cq->is_active) {
-                continue;
+                NvmeSQueue *sq = n->sq[index];
+                NvmeCQueue *cq = n->cq[index];
+                if (sq && sq->is_active && cq && cq->is_active) {
+                    nvme_process_sq_io(sq, index);
+                }
+                nvme_process_cq_cpl(n, index);
             }
+            break;
 
-            nvme_process_sq_io(sq);
-        }
+        default:
+            while (1) {
+                if ((!n->dataplane_started)) {
+                    usleep(1000);
+                    continue;
+                }
 
-        nvme_process_cq_cpl(n);
+                for (int i = 1; i <= n->num_io_queues; i++) {
+                    NvmeSQueue *sq = n->sq[i];
+                    NvmeCQueue *cq = n->cq[i];
+                    if (sq && sq->is_active && cq && cq->is_active) {
+                        nvme_process_sq_io(sq, index);
+                    }
+                }
+                nvme_process_cq_cpl(n, index);
+            }
+            break;
     }
 
     return NULL;
@@ -165,48 +190,66 @@ void femu_create_nvme_poller(FemuCtrl *n)
 {
     n->should_isr = g_malloc0(sizeof(bool) * (n->num_io_queues + 1));
 
+    n->num_poller = n->multipoller_enabled ? n->num_io_queues : 1;
     /* Coperd: we put NvmeRequest into these rings */
-    n->to_ftl = femu_ring_create(FEMU_RING_TYPE_MP_SC, FEMU_MAX_INF_REQS);
-    if (!n->to_ftl) {
-        femu_err("failed to create ring (n->to_ftl) ...\n");
-        abort();
+    n->to_ftl = malloc(sizeof(struct rte_ring *) * (n->num_poller + 1));
+    for (int i = 1; i <= n->num_poller; i++) {
+        n->to_ftl[i] = femu_ring_create(FEMU_RING_TYPE_MP_SC, FEMU_MAX_INF_REQS);
+        if (!n->to_ftl[i]) {
+            femu_err("failed to create ring (n->to_ftl) ...\n");
+            abort();
+        }
+        assert(rte_ring_empty(n->to_ftl[i]));
     }
-    assert(rte_ring_empty(n->to_ftl));
 #if 1
     n->ssd.to_ftl = n->to_ftl;
     femu_debug("ssd->to_ftl=%p, n->to_ftl=%p\n", n->ssd.to_ftl, n->to_ftl);
 #endif
 
-    n->to_poller = femu_ring_create(FEMU_RING_TYPE_MP_SC, FEMU_MAX_INF_REQS);
-    if (!n->to_poller) {
-        femu_err("failed to create ring (n->to_poller) ...\n");
-        abort();
+    n->to_poller = malloc(sizeof(struct rte_ring *) * (n->num_poller + 1));
+    for (int i = 1; i <= n->num_poller; i++) {
+        n->to_poller[i] = femu_ring_create(FEMU_RING_TYPE_MP_SC, FEMU_MAX_INF_REQS);
+        if (!n->to_poller[i]) {
+            femu_err("failed to create ring (n->to_poller) ...\n");
+            abort();
+        }
+        assert(rte_ring_empty(n->to_poller[i]));
     }
-    assert(rte_ring_empty(n->to_poller));
 #if 1
     n->ssd.to_poller = n->to_poller;
     femu_debug("ssd->to_poller=%p, n->to_poller=%p\n", n->ssd.to_poller, n->to_poller);
 #endif
 
-    n->pq = pqueue_init(FEMU_MAX_INF_REQS, cmp_pri, get_pri, set_pri, get_pos,
-            set_pos);
-    if (!n->pq) {
-        femu_err("failed to create pqueue (n->pq) ...\n");
-        abort();
+    n->pq = malloc(sizeof(pqueue_t *) * (n->num_poller + 1));
+    for (int i = 1; i <= n->num_poller; i++) {
+        n->pq[i] = pqueue_init(FEMU_MAX_INF_REQS, cmp_pri, get_pri, set_pri, get_pos, set_pos);
+        if (!n->pq[i]) {
+            femu_err("failed to create pqueue (n->pq) ...\n");
+            abort();
+        }
     }
 
-    qemu_thread_create(&n->poller, "nvme-poller", nvme_poller, n,
-            QEMU_THREAD_JOINABLE);
-    femu_debug("nvme-poller created ...\n");
+    n->poller = malloc(sizeof(QemuThread) * (n->num_poller + 1));
+    NvmePollerThreadArgument *args = malloc(sizeof(NvmePollerThreadArgument) * (n->num_poller + 1));
+    for (int i = 1; i <= n->num_poller; i++) {
+        args[i].n = n;
+        args[i].index = i;
+        qemu_thread_create(&n->poller[i], "nvme-poller", nvme_poller, &args[i], QEMU_THREAD_JOINABLE);
+        femu_debug("nvme-poller created ...\n");
+    }
 }
 
 static void femu_destroy_nvme_poller(FemuCtrl *n)
 {
     femu_debug("destroying NVMe poller !!\n");
-    qemu_thread_join(&n->poller);
-    pqueue_free(n->pq);
-    femu_ring_free(n->to_poller);
-    femu_ring_free(n->to_ftl);
+    for (int i = 1; i <= n->num_poller; i++) {
+        qemu_thread_join(&n->poller[i]);
+    }
+    for (int i = 1; i <= n->num_poller; i++) {
+        pqueue_free(n->pq[i]);
+        femu_ring_free(n->to_poller[i]);
+        femu_ring_free(n->to_ftl[i]);
+    }
     g_free(n->should_isr);
 }
 
@@ -389,7 +432,7 @@ static inline void nvme_copy_cmd(NvmeCmd *dst, NvmeCmd *src)
 #endif
 }
 
-void nvme_process_sq_io(void *opaque)
+void nvme_process_sq_io(void *opaque, int index_poller)
 {
     NvmeSQueue *sq = opaque;
     FemuCtrl *n = sq->ctrl;
@@ -430,7 +473,7 @@ void nvme_process_sq_io(void *opaque)
         if (1 || status == NVME_SUCCESS) {
             req->status = status;
 
-            int rc = femu_ring_enqueue(n->to_ftl, (void *)&req, 1);
+            int rc = femu_ring_enqueue(n->to_ftl[index_poller], (void *)&req, 1);
             if (rc != 1) {
                 femu_err("enqueue failed, ret=%d\n", rc);
             }
@@ -1030,7 +1073,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
         ssd->dataplane_started_ptr = &n->dataplane_started;
         ssd->ssdname = (char *)n->devname;
         femu_debug("starting in blackbox SSD mode ..\n");
-        ssd_init(ssd);
+        ssd_init(n);
     }
 }
 
