@@ -1160,7 +1160,7 @@ typedef struct FemuCtrl {
     uint32_t    cmbloc;
     uint8_t     *cmbuf;
 
-    QemuThread  poller;
+    QemuThread  *poller;
     bool        dataplane_started;
     bool        vector_poll_started;
 
@@ -1192,16 +1192,24 @@ typedef struct FemuCtrl {
     int             completed;
 
     char            devname[64];
-    struct rte_ring *to_ftl;
-    struct rte_ring *to_poller;
-    pqueue_t        *pq;
+    struct rte_ring **to_ftl;
+    struct rte_ring **to_poller;
+    pqueue_t        **pq;
     bool            *should_isr;
     bool            poller_on;
 
     int64_t         nr_tt_ios;
     int64_t         nr_tt_late_ios;
     bool            print_log;
+
+    uint8_t         multipoller_enabled;
+    uint32_t        num_poller;
 } FemuCtrl;
+
+typedef struct NvmePollerThreadArgument {
+    FemuCtrl        *n;
+    int             index;
+} NvmePollerThreadArgument;
 
 typedef struct NvmeDifTuple {
     uint16_t guard_tag;
@@ -1229,7 +1237,7 @@ static inline bool BBSSD(FemuCtrl *n)
     return (n->femu_mode == FEMU_BLACKBOX_MODE);
 }
 
-extern void ssd_init(struct ssd *ssd);
+extern void ssd_init(FemuCtrl *n);
 extern uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req);
 extern uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req);
 
@@ -1250,7 +1258,7 @@ uint32_t femu_oc12_tbl_size(NvmeNamespace *ns);
 
 
 void nvme_process_sq_admin(void *opaque);
-void nvme_process_sq_io(void *opaque);
+void nvme_process_sq_io(void *opaque, int index_poller);
 
 void femu_nvme_addr_read(FemuCtrl *n, hwaddr addr, void *buf, int size);
 void femu_nvme_addr_write(FemuCtrl *n, hwaddr addr, void *buf, int size);
