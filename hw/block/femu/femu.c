@@ -253,6 +253,40 @@ static void femu_destroy_nvme_poller(FemuCtrl *n)
     g_free(n->should_isr);
 }
 
+static int femu_rw_mem_backend_nossd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
+{
+    NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
+    uint32_t nlb  = le16_to_cpu(rw->nlb) + 1;
+    uint64_t slba = le64_to_cpu(rw->slba);
+    uint64_t prp1 = le64_to_cpu(rw->prp1);
+    uint64_t prp2 = le64_to_cpu(rw->prp2);
+    const uint8_t lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
+    const uint8_t data_shift = ns->id_ns.lbaf[lba_index].ds;
+    uint64_t data_size = (uint64_t)nlb << data_shift;
+    uint64_t data_offset = slba << data_shift;
+
+    hwaddr len = n->page_size;
+    uint64_t iteration = data_size / len;
+    /* Processing prp1 */
+    void *buf = n->mbe.mem_backend + data_offset;
+    bool is_write = (rw->opcode == NVME_CMD_WRITE) ? false : true;
+    address_space_rw(&address_space_memory, prp1, MEMTXATTRS_UNSPECIFIED, buf, len, is_write);
+    /* Processing prp2 and its list if exist */
+    if (iteration == 2) {
+        buf += len;
+        address_space_rw(&address_space_memory, prp2, MEMTXATTRS_UNSPECIFIED, buf, len, is_write);
+    } else if (iteration > 2) {
+        uint64_t prp_list[n->max_prp_ents];
+        femu_nvme_addr_read(n, prp2, (void *)prp_list, (iteration - 1) * sizeof(uint64_t));
+        for (int i = 0; i < iteration - 1; i++) {
+            buf += len;
+            address_space_rw(&address_space_memory, prp_list[0], MEMTXATTRS_UNSPECIFIED, buf, len, is_write);
+        }
+    }
+
+    return NVME_SUCCESS;
+}
+
 void nvme_post_cqes_io(void *opaque)
 {
     NvmeCQueue *cq = opaque;
@@ -354,7 +388,10 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     switch (cmd->opcode) {
     case NVME_CMD_READ:
     case NVME_CMD_WRITE:
-        return nvme_rw(n, ns, cmd, req);
+        if (n->femu_mode == FEMU_BLACKBOX_MODE)
+            return nvme_rw(n, ns, cmd, req);
+        else
+            return femu_rw_mem_backend_nossd(n, ns, cmd);
 
     case NVME_CMD_FLUSH:
         if (!n->id_ctrl.vwc || !n->features.volatile_wc) {
