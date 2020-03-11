@@ -192,8 +192,8 @@ struct ssd {
     struct line_mgmt lm;
 
     /* lockless ring for communication with NVMe IO thread */
-    struct rte_ring *to_ftl;
-    struct rte_ring *to_poller;
+    struct rte_ring **to_ftl;
+    struct rte_ring **to_poller;
     bool *dataplane_started_ptr;
     QemuThread ftl_thread;
 };
