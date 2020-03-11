@@ -375,9 +375,10 @@ static void ssd_init_rmap(struct ssd *ssd)
     }
 }
 
-void ssd_init(struct ssd *ssd)
+void ssd_init(FemuCtrl *n)
 {
     int i;
+    struct ssd *ssd = &n->ssd;
     struct ssdparams *spp = &ssd->sp;
 
     assert(ssd);
@@ -402,8 +403,7 @@ void ssd_init(struct ssd *ssd)
     /* initialize write pointer, this is how we allocate new pages for writes */
     ssd_init_write_pointer(ssd);
 
-    qemu_thread_create(&ssd->ftl_thread, "ftl_thread", ftl_thread, ssd,
-            QEMU_THREAD_JOINABLE);
+    qemu_thread_create(&ssd->ftl_thread, "ftl_thread", ftl_thread, n, QEMU_THREAD_JOINABLE);
 }
 
 static inline bool valid_ppa(struct ssd *ssd, struct ppa *ppa)
@@ -815,7 +815,8 @@ static int do_gc(struct ssd *ssd, bool force)
 
 static void *ftl_thread(void *arg)
 {
-    struct ssd *ssd = (struct ssd *)arg;
+    FemuCtrl *n = (FemuCtrl *)arg;
+    struct ssd *ssd = &n->ssd;
     NvmeRequest *req = NULL;
     uint64_t lat = 0;
     int rc;
@@ -825,41 +826,43 @@ static void *ftl_thread(void *arg)
     }
 
     while (1) {
-        if (!ssd->to_ftl || !femu_ring_count(ssd->to_ftl))
-            continue;
+        for (int i = 1; i <= n->num_poller; i++) {
+            if (!ssd->to_ftl[i] || !femu_ring_count(ssd->to_ftl[i]))
+                continue;
 
-        rc = femu_ring_dequeue(ssd->to_ftl, (void *)&req, 1);
-        if (rc != 1) {
-            printf("FEMU: FTL to_ftl dequeue failed\n");
-        }
-        assert(req);
-        switch (req->is_write) {
-            case 1:
-                lat = ssd_write(ssd, req);
-                break;
-            case 0:
-                lat = ssd_read(ssd, req);
+            rc = femu_ring_dequeue(ssd->to_ftl[i], (void *)&req, 1);
+            if (rc != 1) {
+                printf("FEMU: FTL to_ftl dequeue failed\n");
+            }
+            assert(req);
+            switch (req->is_write) {
+                case 1:
+                    lat = ssd_write(ssd, req);
+                    break;
+                case 0:
+                    lat = ssd_read(ssd, req);
 #if 0
                 if (lat >= 20000000) {
                     lat /= 4;
                 }
 #endif
-                break;
-            default:
-                printf("FEMU: FTL received unkown request type, ERROR\n");
-        }
+                    break;
+                default:
+                    printf("FEMU: FTL received unkown request type, ERROR\n");
+            }
 
-        req->reqlat = lat;
-        req->expire_time += lat;
+            req->reqlat = lat;
+            req->expire_time += lat;
 
-        rc = femu_ring_enqueue(ssd->to_poller, (void *)&req, 1);
-        if (rc != 1) {
-            printf("FEMU: FTL to_poller enqueue failed\n");
-        }
+            rc = femu_ring_enqueue(ssd->to_poller[i], (void *)&req, 1);
+            if (rc != 1) {
+                printf("FEMU: FTL to_poller enqueue failed\n");
+            }
 
-        /* clean one line if needed (in the background) */
-        if (should_gc(ssd)) {
-            do_gc(ssd, false);
+            /* clean one line if needed (in the background) */
+            if (should_gc(ssd)) {
+                do_gc(ssd, false);
+            }
         }
     }
 }
