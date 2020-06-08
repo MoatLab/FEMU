@@ -5,9 +5,13 @@
 #include "hw/pci/msi.h"
 #include "qapi/visitor.h"
 #include "qapi/error.h"
+#include <sys/types.h>
 
 #include <immintrin.h>
 #include "nvme.h"
+
+#include <unistd.h>
+#include <sys/syscall.h>
 
 static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
 {
@@ -121,6 +125,14 @@ static void *nvme_poller(void *arg)
 {
     FemuCtrl *n = ((NvmePollerThreadArgument *)arg)->n;
     int index = ((NvmePollerThreadArgument *)arg)->index;
+
+	#ifdef SYS_gettid
+	pid_t tid = syscall(SYS_gettid);
+	#else
+	#error "SYS_gettid unavailable on this system"
+	#endif
+
+        femu_debug("tid = %d\n", tid);
 
     switch (n->multipoller_enabled) {
         case 1:
