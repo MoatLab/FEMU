@@ -132,7 +132,30 @@ static void *nvme_poller(void *arg)
 	#error "SYS_gettid unavailable on this system"
 	#endif
 
-        femu_debug("tid = %d\n", tid);
+	#define PIN_THREAD 27
+
+        femu_debug("%s(): tid = %d\n", __func__,tid);
+
+	int s, j;
+	cpu_set_t cpuset;
+	pthread_t thread;
+
+	thread = pthread_self();
+	CPU_ZERO(&cpuset);
+
+//	for (j = 0; j < ; j++)
+           CPU_SET(PIN_THREAD, &cpuset);
+
+	s = pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cpuset);
+	if (s != 0)
+           femu_debug("%s(): error = pthread_setaffinity_np\n", __func__);
+
+	s = pthread_getaffinity_np(thread, sizeof(cpu_set_t), &cpuset);
+       if (s != 0)
+           femu_debug("%s(): error = pthread_getaffinity_np\n", __func__);
+
+           if (CPU_ISSET(PIN_THREAD, &cpuset))
+               printf("    CPU %d successfully\n", PIN_THREAD);
 
     switch (n->multipoller_enabled) {
         case 1:
