@@ -5,6 +5,9 @@
 #include "../nvme.h"
 #include "ftl.h"
 
+#include <unistd.h>
+#include <sys/syscall.h>
+
 static void *ftl_thread(void *arg);
 
 
@@ -820,6 +823,15 @@ static void *ftl_thread(void *arg)
     NvmeRequest *req = NULL;
     uint64_t lat = 0;
     int rc;
+
+        #ifdef SYS_gettid
+        pid_t tid = syscall(SYS_gettid);
+        #else
+        #error "SYS_gettid unavailable on this system"
+        #endif
+
+        femu_debug("%s():tid = %d\n",__func__, tid);
+
 
     while (!*(ssd->dataplane_started_ptr)) {
         usleep(100000);
