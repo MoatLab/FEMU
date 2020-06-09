@@ -53,6 +53,11 @@ int femu_rw_mem_backend_bb(struct femu_mbe *mbe, QEMUSGList *qsg,
     while (sg_cur_index < qsg->nsg) {
         cur_addr = qsg->sg[sg_cur_index].base + sg_cur_byte;
         cur_len = qsg->sg[sg_cur_index].len - sg_cur_byte;
+	if (is_write) {
+		printf("%s():WRITE addr %" PRId64 " cur_len %" PRId64 " mb_oft = %" PRId64 "\n", __func__, cur_addr, cur_len, mb_oft);
+	}else{
+		printf("%s():READ addr %" PRId64 " cur_len %" PRId64 " mb_oft = %" PRId64 "\n", __func__, cur_addr, cur_len, mb_oft);
+	}
         if (dma_memory_rw(qsg->as, cur_addr, mb + mb_oft, cur_len, dir)) {
             error_report("FEMU: dma_memory_rw error");
         }
