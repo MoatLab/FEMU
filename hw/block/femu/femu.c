@@ -13,6 +13,8 @@
 #include <unistd.h>
 #include <sys/syscall.h>
 
+extern uint64_t iscos_counter;
+
 static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
 {
     FemuCtrl *n = cq->ctrl;
@@ -193,6 +195,7 @@ static void *nvme_poller(void *arg)
             break;
     }
 
+	printf("iscos_counter = %llu\n", iscos_counter);
     return NULL;
 }
 
@@ -572,6 +575,8 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
     } else {
         femu_debug("disabling NVMe Controller ...\n");
     }
+
+	printf("iscos_counter = %llu\n", iscos_counter);
 
     if (shutdown) {
         femu_debug("%s,clear_guest_notifier\n", __func__);
