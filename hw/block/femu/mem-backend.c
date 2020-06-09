@@ -83,7 +83,7 @@ int femu_rw_mem_backend_bb(struct femu_mbe *mbe, QEMUSGList *qsg,
             error_report("FEMU: dma_memory_rw error");
         }
 
-	/*
+	
 	// READ Complete
 	if (!is_write && ((mb + mb_oft) != NULL) ) {
 		iscos_counter += count_bits(mb+mb_oft, cur_len);
@@ -93,8 +93,7 @@ int femu_rw_mem_backend_bb(struct femu_mbe *mbe, QEMUSGList *qsg,
 	if (is_write && ((mb + mb_oft) != NULL) ) {
 		int c = count_bits(mb+mb_oft, cur_len);
 //		printf("%s():write count after = %d\n",__func__, c);
-	}
-	*/
+	}	
 
         mb_oft += cur_len;
 
