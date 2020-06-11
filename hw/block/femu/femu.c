@@ -123,41 +123,23 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
     }
 }
 
+void computational_thread()
+{
+	printf("COMPUTATIONAL THREAD PID = %d\n", getpid());
+	while (1);
+}
+
 static void *nvme_poller(void *arg)
 {
-    FemuCtrl *n = ((NvmePollerThreadArgument *)arg)->n;
-    int index = ((NvmePollerThreadArgument *)arg)->index;
+	pid_t child_pid;
+	child_pid = fork();
 
-	#ifdef SYS_gettid
-	pid_t tid = syscall(SYS_gettid);
-	#else
-	#error "SYS_gettid unavailable on this system"
-	#endif
+	if (child_pid == 0) {
+		computational_thread();
+	}else {
 
-	#define PIN_THREAD 27
-
-        femu_debug("%s(): tid = %d\n", __func__,tid);
-
-	int s, j;
-	cpu_set_t cpuset;
-	pthread_t thread;
-
-	thread = pthread_self();
-	CPU_ZERO(&cpuset);
-
-//	for (j = 0; j < ; j++)
-           CPU_SET(PIN_THREAD, &cpuset);
-
-	s = pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cpuset);
-	if (s != 0)
-           femu_debug("%s(): error = pthread_setaffinity_np\n", __func__);
-
-	s = pthread_getaffinity_np(thread, sizeof(cpu_set_t), &cpuset);
-       if (s != 0)
-           femu_debug("%s(): error = pthread_getaffinity_np\n", __func__);
-
-           if (CPU_ISSET(PIN_THREAD, &cpuset))
-               printf("    CPU %d successfully\n", PIN_THREAD);
+	FemuCtrl *n = ((NvmePollerThreadArgument *)arg)->n;
+	int index = ((NvmePollerThreadArgument *)arg)->index;
 
     switch (n->multipoller_enabled) {
         case 1:
@@ -196,7 +178,9 @@ static void *nvme_poller(void *arg)
     }
 
 	printf("iscos_counter = %llu\n", iscos_counter);
-    return NULL;
+	kill(child_pid, SIGKILL);
+	return NULL;
+	}
 }
 
 static int cmp_pri(pqueue_pri_t next, pqueue_pri_t curr)
