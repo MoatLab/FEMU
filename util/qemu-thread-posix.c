@@ -539,6 +539,9 @@ void qemu_thread_create(QemuThread *thread, const char *name,
     err = pthread_create(&thread->thread, &attr,
                          qemu_thread_start, qemu_thread_args);
 
+    if (name != NULL)
+	fprintf(stdout, "qemu: %s\n", name);
+
     if (err)
         error_exit(err, __func__);
 

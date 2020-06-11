@@ -5,9 +5,15 @@
 #include "hw/pci/msi.h"
 #include "qapi/visitor.h"
 #include "qapi/error.h"
+#include <sys/types.h>
 
 #include <immintrin.h>
 #include "nvme.h"
+
+#include <unistd.h>
+#include <sys/syscall.h>
+
+extern uint64_t iscos_counter;
 
 static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
 {
@@ -122,6 +128,37 @@ static void *nvme_poller(void *arg)
     FemuCtrl *n = ((NvmePollerThreadArgument *)arg)->n;
     int index = ((NvmePollerThreadArgument *)arg)->index;
 
+	#ifdef SYS_gettid
+	pid_t tid = syscall(SYS_gettid);
+	#else
+	#error "SYS_gettid unavailable on this system"
+	#endif
+
+	#define PIN_THREAD 27
+
+        femu_debug("%s(): tid = %d\n", __func__,tid);
+
+	int s, j;
+	cpu_set_t cpuset;
+	pthread_t thread;
+
+	thread = pthread_self();
+	CPU_ZERO(&cpuset);
+
+//	for (j = 0; j < ; j++)
+           CPU_SET(PIN_THREAD, &cpuset);
+
+	s = pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cpuset);
+	if (s != 0)
+           femu_debug("%s(): error = pthread_setaffinity_np\n", __func__);
+
+	s = pthread_getaffinity_np(thread, sizeof(cpu_set_t), &cpuset);
+       if (s != 0)
+           femu_debug("%s(): error = pthread_getaffinity_np\n", __func__);
+
+           if (CPU_ISSET(PIN_THREAD, &cpuset))
+               printf("    CPU %d successfully\n", PIN_THREAD);
+
     switch (n->multipoller_enabled) {
         case 1:
             while (1) {
@@ -158,6 +195,7 @@ static void *nvme_poller(void *arg)
             break;
     }
 
+	printf("iscos_counter = %llu\n", iscos_counter);
     return NULL;
 }
 
@@ -537,6 +575,8 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
     } else {
         femu_debug("disabling NVMe Controller ...\n");
     }
+
+	printf("iscos_counter = %llu\n", iscos_counter);
 
     if (shutdown) {
         femu_debug("%s,clear_guest_notifier\n", __func__);

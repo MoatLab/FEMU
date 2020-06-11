@@ -5,6 +5,8 @@
 
 #include "mem-backend.h"
 
+extern uint64_t iscos_counter;
+
 /* Coperd: FEMU Memory Backend (mbe) for emulated SSD */
 
 void femu_init_mem_backend(struct femu_mbe *mbe, int64_t nbytes)
@@ -34,6 +36,23 @@ void femu_destroy_mem_backend(struct femu_mbe *mbe)
     }
 }
 
+int count_bits(char *buf, int size)
+{
+        int i, j;
+        char c;
+        int count =0;
+
+        for (i = 0 ; i < size ; i++) {
+                c = buf[i];
+                for (j = 0 ; j < 8 ; j++) {
+                        if (c & (1 << j)) {
+                                count +=  1;
+                        }
+                }
+        }
+        return count;
+}
+
 /* Coperd: directly read/write to memory backend from blackbox mode */
 int femu_rw_mem_backend_bb(struct femu_mbe *mbe, QEMUSGList *qsg,
         uint64_t data_offset, bool is_write)
@@ -53,9 +72,28 @@ int femu_rw_mem_backend_bb(struct femu_mbe *mbe, QEMUSGList *qsg,
     while (sg_cur_index < qsg->nsg) {
         cur_addr = qsg->sg[sg_cur_index].base + sg_cur_byte;
         cur_len = qsg->sg[sg_cur_index].len - sg_cur_byte;
+	if (is_write) {
+		//printf("%s():WRITE addr %" PRId64 " cur_len %" PRId64 " mb_oft = %" PRId64 "\n", __func__, cur_addr, cur_len, mb_oft);
+	}else{
+		//printf("%s():READ addr %" PRId64 " cur_len %" PRId64 " mb_oft = %" PRId64 "\n", __func__, cur_addr, cur_len, mb_oft);
+		//iscos_counter++;
+	}
+
         if (dma_memory_rw(qsg->as, cur_addr, mb + mb_oft, cur_len, dir)) {
             error_report("FEMU: dma_memory_rw error");
         }
+
+	
+	// READ Complete
+	if (!is_write && ((mb + mb_oft) != NULL) ) {
+		iscos_counter += count_bits(mb+mb_oft, cur_len);
+//		printf("%s():read count = %d\n",__func__, c);
+	}
+	// WRITE Complete
+	if (is_write && ((mb + mb_oft) != NULL) ) {
+		int c = count_bits(mb+mb_oft, cur_len);
+//		printf("%s():write count after = %d\n",__func__, c);
+	}	
 
         mb_oft += cur_len;
 
