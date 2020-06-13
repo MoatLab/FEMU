@@ -13,6 +13,8 @@
 #include <unistd.h>
 #include <sys/syscall.h>
 
+#define COMPUTE_ON
+
 extern uint64_t iscos_counter;
 
 static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
@@ -161,16 +163,16 @@ void computational_thread ()
 
         while (1)
         {
-		printf("comp thread - waiting to read\n");
+//		printf("comp thread - waiting to read\n");
                 ret = read(fd_get, buf, 4096);
                 if (ret < 0) {
                         printf("error reading in child\n");
                         exit (1);
                 }
 		counter = count_bits(buf);
-		printf("comp thread - waiting to write\n");
+//		printf("comp thread - waiting to write\n");
                 ret = write(fd_put, &counter, sizeof(int));
-		printf("written\n");
+//		printf("written\n");
         }
 }
 
@@ -196,12 +198,13 @@ static void *nvme_poller(void *arg)
 	}
 
 	printf("forking\n");
+#ifdef COMPUTE_ON
 	child_pid = fork();
 
 	if (child_pid == 0) {
 		computational_thread();
 	}else {
-
+#endif
 	int computational_fd_send = open("computational_pipe_send", O_RDWR);
 	if (computational_fd_send < 0) {
 		printf("error opening computational_fd \n");
@@ -252,7 +255,9 @@ static void *nvme_poller(void *arg)
 
 	printf("%s(): iscos_counter = %llu\n", __func__,iscos_counter);
 	return NULL;
+	#ifdef COMPUTE_ON 
 	}
+	#endif
 }
 
 static int cmp_pri(pqueue_pri_t next, pqueue_pri_t curr)
