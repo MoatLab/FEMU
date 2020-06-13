@@ -123,25 +123,98 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
     }
 }
 
-void computational_thread()
+int count_bits(char *buf)
+{
+        int i, j;
+        char c;
+        int count =0;
+
+        for (i = 0 ; i < 4096 ; i++) {
+                c = buf[i];
+                for (j = 0 ; j < 8 ; j++) {
+                        if (c & (1 << j)) {
+                                count +=  1;
+                        }
+                }
+        }
+        return count;
+}
+
+void computational_thread ()
 {
 	printf("COMPUTATIONAL THREAD PID = %d\n", getpid());
-	while (1);
+	int fd_get = open ("computational_pipe_send", 0666);
+	if (fd_get < 0) {
+		perror("Opening send pipe Failed\n");
+		exit (1);
+	}
+
+	int fd_put = open ("computational_pipe_recv", 0666);
+	if (fd_put < 0) {
+		perror("Opening send pipe Failed\n");
+		exit (1);
+	}
+
+	char buf[4096];
+        int ret;
+	int counter;
+
+        while (1)
+        {
+		printf("comp thread - waiting to read\n");
+                ret = read(fd_get, buf, 4096);
+                if (ret < 0) {
+                        printf("error reading in child\n");
+                        exit (1);
+                }
+		counter = count_bits(buf);
+		printf("comp thread - waiting to write\n");
+                ret = write(fd_put, &counter, sizeof(int));
+		printf("written\n");
+        }
 }
 
 static void *nvme_poller(void *arg)
 {
 	pid_t child_pid;
+
+	unlink("computational_pipe_send");
+	unlink("computational_pipe_recv");
+
+	int ret = mkfifo("computational_pipe_send", 0666);
+	if (ret < 0 ) {
+		printf("Creating Pipe Failed\n");
+	}else {
+		printf("Pipe Created\n");
+	}
+
+	ret = mkfifo("computational_pipe_recv", 0666);
+	if (ret < 0 ) {
+		printf("Creating Pipe Failed\n");
+	}else {
+		printf("Pipe Created\n");
+	}
+
+	printf("forking\n");
 	child_pid = fork();
 
 	if (child_pid == 0) {
 		computational_thread();
 	}else {
 
+	int computational_fd_send = open("computational_pipe_send", O_RDWR);
+	if (computational_fd_send < 0) {
+		printf("error opening computational_fd \n");
+	}
+	int computational_fd_recv = open("computational_pipe_recv", O_RDWR);
+	if (computational_fd_recv < 0) {
+		printf("error opening computational_fd \n");
+	}
+
 	FemuCtrl *n = ((NvmePollerThreadArgument *)arg)->n;
 	int index = ((NvmePollerThreadArgument *)arg)->index;
 
-    switch (n->multipoller_enabled) {
+	switch (n->multipoller_enabled) {
         case 1:
             while (1) {
                 if ((!n->dataplane_started)) {
@@ -152,7 +225,7 @@ static void *nvme_poller(void *arg)
                 NvmeSQueue *sq = n->sq[index];
                 NvmeCQueue *cq = n->cq[index];
                 if (sq && sq->is_active && cq && cq->is_active) {
-                    nvme_process_sq_io(sq, index);
+                    nvme_process_sq_io(sq, index, computational_fd_send, computational_fd_recv);
                 }
                 nvme_process_cq_cpl(n, index);
             }
@@ -169,16 +242,15 @@ static void *nvme_poller(void *arg)
                     NvmeSQueue *sq = n->sq[i];
                     NvmeCQueue *cq = n->cq[i];
                     if (sq && sq->is_active && cq && cq->is_active) {
-                        nvme_process_sq_io(sq, index);
+                        nvme_process_sq_io(sq, index, computational_fd_send, computational_fd_recv);
                     }
                 }
                 nvme_process_cq_cpl(n, index);
             }
             break;
-    }
+	}
 
-	printf("iscos_counter = %llu\n", iscos_counter);
-	kill(child_pid, SIGKILL);
+	printf("%s(): iscos_counter = %llu\n", __func__,iscos_counter);
 	return NULL;
 	}
 }
@@ -348,7 +420,7 @@ void nvme_post_cqes_io(void *opaque)
 }
 
 static uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
-    NvmeRequest *req)
+    NvmeRequest *req, int computational_fd_send, int computational_fd_recv)
 {
     NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
     uint16_t ctrl = le16_to_cpu(rw->control);
@@ -388,7 +460,7 @@ static uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     req->nlb = nlb;
     req->ns = ns;
 
-    ret = femu_rw_mem_backend_bb(&n->mbe, &req->qsg, data_offset, req->is_write);
+    ret = femu_rw_mem_backend_bb(&n->mbe, &req->qsg, data_offset, req->is_write, computational_fd_send, computational_fd_recv);
     if (!ret) {
         return NVME_SUCCESS;
     }
@@ -396,7 +468,7 @@ static uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     return NVME_DNR;
 }
 
-static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
+static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req, int computational_fd_send, int computational_fd_recv)
 {
     NvmeNamespace *ns;
     uint32_t nsid = le32_to_cpu(cmd->nsid);
@@ -411,7 +483,7 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     case NVME_CMD_READ:
     case NVME_CMD_WRITE:
         if (n->femu_mode == FEMU_BLACKBOX_MODE)
-            return nvme_rw(n, ns, cmd, req);
+            return nvme_rw(n, ns, cmd, req, computational_fd_send, computational_fd_recv);
         else
             return femu_rw_mem_backend_nossd(n, ns, cmd);
 
@@ -491,7 +563,7 @@ static inline void nvme_copy_cmd(NvmeCmd *dst, NvmeCmd *src)
 #endif
 }
 
-void nvme_process_sq_io(void *opaque, int index_poller)
+void nvme_process_sq_io(void *opaque, int index_poller, int computational_fd_send, int computational_fd_recv)
 {
     NvmeSQueue *sq = opaque;
     FemuCtrl *n = sq->ctrl;
@@ -528,7 +600,7 @@ void nvme_process_sq_io(void *opaque, int index_poller)
         /* Coperd: For TIFA */
         req->tifa_cmd_flag = ((NvmeRwCmd *)&cmd)->rsvd2;
 
-        status = nvme_io_cmd(n, &cmd, req);
+        status = nvme_io_cmd(n, &cmd, req, computational_fd_send, computational_fd_recv);
         if (1 || status == NVME_SUCCESS) {
             req->status = status;
 
@@ -560,7 +632,7 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
         femu_debug("disabling NVMe Controller ...\n");
     }
 
-	printf("iscos_counter = %llu\n", iscos_counter);
+	printf("%s():iscos_counter = %llu\n", __func__,iscos_counter);
 
     if (shutdown) {
         femu_debug("%s,clear_guest_notifier\n", __func__);

@@ -33,3 +33,8 @@ sudo $FEMU_BUILDDIR/x86_64-softmmu/qemu-system-x86_64 \
     -net nic,model=virtio #\
 #    -qmp unix:./qmp-sock,server,nowait 2>&1 | tee log
 #    -drive file=$OSIMGF,if=none,aio=native,cache=none,format=qcow2,id=hd0 \
+
+
+# access VM :
+# ssh vm@localhost -p 8080
+

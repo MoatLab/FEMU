@@ -36,6 +36,7 @@ void femu_destroy_mem_backend(struct femu_mbe *mbe)
     }
 }
 
+/*
 int count_bits(char *buf, int size)
 {
         int i, j;
@@ -52,10 +53,11 @@ int count_bits(char *buf, int size)
         }
         return count;
 }
+*/
 
 /* Coperd: directly read/write to memory backend from blackbox mode */
 int femu_rw_mem_backend_bb(struct femu_mbe *mbe, QEMUSGList *qsg,
-        uint64_t data_offset, bool is_write)
+        uint64_t data_offset, bool is_write, int computational_fd_send, int computational_fd_recv)
 {
     int sg_cur_index = 0;
     dma_addr_t sg_cur_byte = 0;
@@ -82,18 +84,29 @@ int femu_rw_mem_backend_bb(struct femu_mbe *mbe, QEMUSGList *qsg,
         if (dma_memory_rw(qsg->as, cur_addr, mb + mb_oft, cur_len, dir)) {
             error_report("FEMU: dma_memory_rw error");
         }
-
 	
-	// READ Complete
-	if (!is_write && ((mb + mb_oft) != NULL) ) {
-		iscos_counter += count_bits(mb+mb_oft, cur_len);
-//		printf("%s():read count = %d\n",__func__, c);
-	}
 	// WRITE Complete
 	if (is_write && ((mb + mb_oft) != NULL) ) {
-		int c = count_bits(mb+mb_oft, cur_len);
-//		printf("%s():write count after = %d\n",__func__, c);
-	}	
+	//	iscos_counter += count_bits(mb+mb_oft, cur_len);
+	//	printf("%s():read count = %d\n",__func__, c);
+	}
+	// READ Complete
+	if (!is_write && ((mb + mb_oft) != NULL) ) {
+	//	int c = count_bits(mb+mb_oft, cur_len);
+	//	printf("%s():write count after = %d\n",__func__, c);
+		int ret = write(computational_fd_send, mb + mb_oft , 4096);
+		if (ret < 0 ) {
+			printf("write on pipe failed %s\n", strerror(errno));
+		}else {
+			printf("wrote data on computational thread\n");
+		}
+		int c=0;
+		read(computational_fd_recv, &c, sizeof(c));
+		printf("read data from computational process %d\n", c);
+		printf("original val %d\n", iscos_counter);
+		iscos_counter += c;
+		printf("incremented val %d\n", iscos_counter);
+	}
 
         mb_oft += cur_len;
 
