@@ -2,8 +2,8 @@
 
 creates a list of disk pointers with 3 tuples and writes them to dp.dat (diskpointer.dat)
 @parm: num_lists
-@parm: max_pointer_length, @parm:min_pointer_length
-:pointer lists are randomly generated but limited by max and min pointer length
+@parm: max_list_length, @parm:min_list_length
+:pointer lists are randomly generated but limited by max and min list length
 
 eg.
 source_block	destination_block	list_length
