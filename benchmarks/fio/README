@@ -1,0 +1,15 @@
+This folder contains fio tests to measure the FEMU NVMe Performance.
+
+There are two modes that FEMU runs in -
+a) Blackbox mode - which does not model the SSDs internal mechanisms and uses a RAW RAM.
+b) Whitebox mode - which models flash internals according to OCSSD 1.2 specifications.
+
+The two modes can be configured using the scripts in iscos_scripts/ directory
+
+Blackbox mode is run using run-blackbox.sh
+Whitebox mode is run using run-whitebox.sh
+
+The experiments are run using 100GB and 10GB NVMe disk sizes, which can be tuned using
+the parameter `devsz_mb` in the run-*box.sh scripts.
+
+All measurements are in MBps
