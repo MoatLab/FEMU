@@ -13,8 +13,6 @@
 #include <unistd.h>
 #include <sys/syscall.h>
 
-#define COMPUTE_ON
-
 extern uint64_t iscos_counter;
 
 static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
@@ -178,6 +176,12 @@ void computational_thread ()
 
 static void *nvme_poller(void *arg)
 {
+	FemuCtrl *n = ((NvmePollerThreadArgument *)arg)->n;
+	int index = ((NvmePollerThreadArgument *)arg)->index;
+
+	int computational_fd_send = 0;
+	int computational_fd_recv = 0;
+
 	pid_t child_pid;
 
 	unlink("computational_pipe_send");
@@ -197,25 +201,24 @@ static void *nvme_poller(void *arg)
 		printf("Pipe Created\n");
 	}
 
-	printf("forking\n");
-#ifdef COMPUTE_ON
-	child_pid = fork();
+	if (n->computation_mode == FEMU_COMPUTE_ON) {
+		printf("forking Computational Process...\n");
+		child_pid = fork();
 
-	if (child_pid == 0) {
-		computational_thread();
-	}else {
-#endif
-	int computational_fd_send = open("computational_pipe_send", O_RDWR);
-	if (computational_fd_send < 0) {
-		printf("error opening computational_fd \n");
+		if (child_pid == 0) {
+			computational_thread();
+		}
+		else {
+			computational_fd_send = open("computational_pipe_send", O_RDWR);
+			if (computational_fd_send < 0) {
+				printf("error opening computational_fd \n");
+			}
+			computational_fd_recv = open("computational_pipe_recv", O_RDWR);
+			if (computational_fd_recv < 0) {
+				printf("error opening computational_fd \n");
+			}
+		}
 	}
-	int computational_fd_recv = open("computational_pipe_recv", O_RDWR);
-	if (computational_fd_recv < 0) {
-		printf("error opening computational_fd \n");
-	}
-
-	FemuCtrl *n = ((NvmePollerThreadArgument *)arg)->n;
-	int index = ((NvmePollerThreadArgument *)arg)->index;
 
 	switch (n->multipoller_enabled) {
         case 1:
@@ -255,9 +258,6 @@ static void *nvme_poller(void *arg)
 
 	printf("%s(): iscos_counter = %llu\n", __func__,iscos_counter);
 	return NULL;
-	#ifdef COMPUTE_ON 
-	}
-	#endif
 }
 
 static int cmp_pri(pqueue_pri_t next, pqueue_pri_t curr)
@@ -487,10 +487,14 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req, int com
     switch (cmd->opcode) {
     case NVME_CMD_READ:
     case NVME_CMD_WRITE:
-        if (n->femu_mode == FEMU_BLACKBOX_MODE)
-            return nvme_rw(n, ns, cmd, req, computational_fd_send, computational_fd_recv);
-        else
-            return femu_rw_mem_backend_nossd(n, ns, cmd);
+        if (n->femu_mode == FEMU_BLACKBOX_MODE) {
+		femu_debug("%s():bb mode calling - nvme_rw\n", __func__);
+            	return nvme_rw(n, ns, cmd, req, computational_fd_send, computational_fd_recv);
+	}
+        else {
+		femu_debug("%s():non bb mode - calling - femu_rw_mem_backend_nossd\n", __func__);
+            	return femu_rw_mem_backend_nossd(n, ns, cmd);
+	}
 
     case NVME_CMD_FLUSH:
         if (!n->id_ctrl.vwc || !n->features.volatile_wc) {
@@ -1183,6 +1187,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
 
     femu_init_mem_backend(&n->mbe, bs_size);
     n->mbe.femu_mode = n->femu_mode;
+	n->mbe.computation_mode = n->computation_mode;
 
     n->completed = 0;
     n->start_time = time(NULL);
@@ -1278,6 +1283,7 @@ static Property femu_props[] = {
     DEFINE_PROP_UINT16("vid", FemuCtrl, vid, 0x1d1d),
     DEFINE_PROP_UINT16("did", FemuCtrl, did, 0x1f1f),
     DEFINE_PROP_UINT8("femu_mode", FemuCtrl, femu_mode, FEMU_DEF_NOSSD_MODE),
+    DEFINE_PROP_UINT8("computation_mode", FemuCtrl, computation_mode, FEMU_DEF_NOCOMPUTATION_MODE),
     DEFINE_PROP_UINT16("lsec_size", FemuCtrl, femu_oc12_ctrl.params.sec_size, 4096),
     DEFINE_PROP_UINT8("lsecs_per_pg", FemuCtrl, femu_oc12_ctrl.params.sec_per_pg, 1),
     DEFINE_PROP_UINT16("lpgs_per_blk", FemuCtrl, femu_oc12_ctrl.params.pgs_per_blk, 256),

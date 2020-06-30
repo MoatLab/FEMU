@@ -4,7 +4,6 @@
 #include "qemu/error-report.h"
 
 #include "mem-backend.h"
-#define COMPUTE_ON
 
 extern uint64_t iscos_counter;
 
@@ -86,30 +85,27 @@ int femu_rw_mem_backend_bb(struct femu_mbe *mbe, QEMUSGList *qsg,
             error_report("FEMU: dma_memory_rw error");
         }
 
-	#ifdef COMPUTE_ON	
-	// WRITE Complete
-	if (is_write && ((mb + mb_oft) != NULL) ) {
-	//	iscos_counter += count_bits(mb+mb_oft, cur_len);
-	//	printf("%s():read count = %d\n",__func__, c);
-	}
-	// READ Complete
-	if (!is_write && ((mb + mb_oft) != NULL) ) {
-	//	int c = count_bits(mb+mb_oft, cur_len);
-	//	printf("%s():write count after = %d\n",__func__, c);
-		int ret = write(computational_fd_send, mb + mb_oft , 4096);
-		if (ret < 0 ) {
-			printf("write on pipe failed %s\n", strerror(errno));
-		}else {
-	//		printf("wrote data on computational thread\n");
+	if (mbe->computation_mode) {
+		// WRITE Complete
+		if (is_write && ((mb + mb_oft) != NULL) ) {
+		//	iscos_counter += count_bits(mb+mb_oft, cur_len);
+		//	printf("%s():read count = %d\n",__func__, c);
 		}
-		int c=0;
-		read(computational_fd_recv, &c, sizeof(c));
-//		printf("read data from computational process %d\n", c);
-//		printf("original val %d\n", iscos_counter);
-		iscos_counter += c;
-//		printf("incremented val %d\n", iscos_counter);
+		// READ Complete
+		if (!is_write && ((mb + mb_oft) != NULL) ) {
+		//	int c = count_bits(mb+mb_oft, cur_len);
+		//	printf("%s():write count after = %d\n",__func__, c);
+			int ret = write(computational_fd_send, mb + mb_oft , 4096);
+			if (ret < 0 ) {
+				printf("write on pipe failed %s\n", strerror(errno));
+			}else {
+		//		printf("wrote data on computational thread\n");
+			}
+			int c=0;
+			read(computational_fd_recv, &c, sizeof(c));
+			iscos_counter += c;
+		}
 	}
-	#endif
 
         mb_oft += cur_len;
 

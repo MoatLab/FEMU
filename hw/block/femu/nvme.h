@@ -1185,6 +1185,7 @@ typedef struct FemuCtrl {
     uint64_t        eis_addr_hva;
 
     uint8_t         femu_mode;
+	uint8_t		computation_mode;
     uint32_t        memsz;
     FEMU_OC12_Ctrl  femu_oc12_ctrl;
     struct ssd      ssd;
@@ -1225,6 +1226,12 @@ enum {
     FEMU_WHITEBOX_MODE = 0,
     FEMU_BLACKBOX_MODE,
     FEMU_DEF_NOSSD_MODE,
+};
+
+enum {
+	FEMU_COMPUTE_OFF = 0,
+	FEMU_COMPUTE_ON,
+	FEMU_DEF_NOCOMPUTATION_MODE,
 };
 
 static inline bool OCSSD(FemuCtrl *n)
