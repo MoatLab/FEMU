@@ -6,7 +6,7 @@
 
 IMGDIR=$HOME/lighthost/iskos_images
 # virtual machine disk image
-OSIMGF=$IMGDIR/60G
+OSIMGF=$IMGDIR/40G
 
 FEMU_BUILDDIR=$HOME/femu/build_femu
 
