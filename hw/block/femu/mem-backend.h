@@ -9,6 +9,7 @@ struct femu_mbe {
     void *mem_backend;
     int64_t size; /* in bytes */
     int femu_mode;
+	int computation_mode;
 };
 
 void femu_init_mem_backend(struct femu_mbe *mbe, int64_t nbytes);
