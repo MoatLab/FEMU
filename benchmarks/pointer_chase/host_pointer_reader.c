@@ -35,6 +35,10 @@ int main(int argc, char *argv[])
 		current_block = head_pointer;
 		while(current_block != END_BLOCK_MAGIC) {
 			disk_off = lseek(disk_fd_read, current_block * BLOCK_SIZE, SEEK_SET);
+			if (disk_off != current_block * BLOCK_SIZE) {
+				printf("Error: could not seek %s\n", strerror(errno));
+				exit (1);
+			}
 			ret = read(disk_fd_read, &next_block, sizeof(next_block));
 			current_block = next_block;
 			printf("Next PTR = %d\n", current_block);
