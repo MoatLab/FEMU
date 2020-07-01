@@ -4,6 +4,7 @@
 #include "qemu/error-report.h"
 
 #include "mem-backend.h"
+#include "computation.h"
 
 extern uint64_t iscos_counter;
 
@@ -35,25 +36,6 @@ void femu_destroy_mem_backend(struct femu_mbe *mbe)
         g_free(mbe->mem_backend);
     }
 }
-
-/*
-int count_bits(char *buf, int size)
-{
-        int i, j;
-        char c;
-        int count =0;
-
-        for (i = 0 ; i < size ; i++) {
-                c = buf[i];
-                for (j = 0 ; j < 8 ; j++) {
-                        if (c & (1 << j)) {
-                                count +=  1;
-                        }
-                }
-        }
-        return count;
-}
-*/
 
 /* Coperd: directly read/write to memory backend from blackbox mode */
 int femu_rw_mem_backend_bb(struct femu_mbe *mbe, QEMUSGList *qsg,
@@ -100,6 +82,23 @@ int femu_rw_mem_backend_bb(struct femu_mbe *mbe, QEMUSGList *qsg,
 			read(computational_fd_recv, &c, sizeof(c));
 		//	iscos_counter += c;
 			printf("main thread block_pointer %d\n", c);
+			#ifdef POINTER_CHASING
+			while (c != 0 && c != END_BLOCK_MAGIC) {
+				int new_offset = c * BLOCK_SIZE;
+				if (mb+new_offset != NULL) {
+					if (dma_memory_rw(qsg->as, cur_addr, mb + new_offset, cur_len, dir)) {
+						error_report("FEMU: dma_memory_rw error");
+					}
+					int ret = write(computational_fd_send, mb + new_offset, 4096);
+					if ( ret < 0) {
+						printf("write on pipe failed %s\n", strerror(errno));
+					}
+					c = 0;
+					read(computational_fd_recv, &c, sizeof(c));
+					printf("next block_pointer %d\n", c);
+				}
+			}
+			#endif
 		}
 	}
 
@@ -152,6 +151,7 @@ int femu_rw_mem_backend_oc(struct femu_mbe *mbe, QEMUSGList *qsg,
          * for BB: LBAs are continuous
          */
         mb_oft = data_offset[sg_cur_index];
+	printf("mb_oft %d sg_cur_index %d\n", mb_oft, sg_cur_index);
     }
 
     qemu_sglist_destroy(qsg);
