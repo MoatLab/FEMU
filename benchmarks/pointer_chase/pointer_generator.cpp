@@ -8,6 +8,22 @@
 #include <error.h>
 #include <errno.h>
 #include <unistd.h>
+#include <map>
+#include <stdbool.h>
+#include <algorithm>
+
+using namespace std;
+std::map <int, bool> pre_accessed_blocks;
+
+int get_unvisited_pointer(int max_value)
+{
+	int bno = rand() % (max_value);
+	while (pre_accessed_blocks.find(bno) != pre_accessed_blocks.end()) {
+		bno = rand() % (max_value);
+	}
+	pre_accessed_blocks[bno]=true;
+	return bno;
+}
 
 int main(int argc, char *argv[])
 {
@@ -55,10 +71,13 @@ int main(int argc, char *argv[])
 		exit(0);
 	}
 
+	if(max_pointer_value < max_list_length * num_lists) {
+		printf("Please reduce max_list_length %d or num_lists %d\n\nOR\n\nincrease max_pointer_value %d\n\n", max_list_length, num_lists, max_pointer_value);
+	}
 
 	for (i = 0 ; i < num_lists ; i++) {
 		list_length = min_list_length + (rand() % (max_list_length - min_list_length + 1));
-		current_block = rand() % (max_pointer_value + 1);
+		current_block = get_unvisited_pointer(max_pointer_value);
 		next_block = 0;
 		for (j = list_length ; j > 0 ; j--) {
 			if (j > 1) {
