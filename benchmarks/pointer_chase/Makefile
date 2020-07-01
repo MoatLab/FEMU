@@ -10,4 +10,4 @@ host_pointer_reader: host_pointer_reader.c
 	gcc host_pointer_reader.c -o host_pointer_reader
 
 clean:
-	rm pointer_generator write_pointer_to_disk
+	rm pointer_generator write_pointer_to_disk host_pointer_reader
