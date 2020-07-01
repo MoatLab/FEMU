@@ -1,7 +1,12 @@
 `pointer_generator.c`
 
-creates a list of disk pointers with 3 tuples and writes them to dp.dat (diskpointer.dat)
+creates multiple LinkedList of disk pointers with 3 tuples and writes them to dp.dat 
+(diskpointer.dat)
+all head pointers of each LinkedList are stored in hp.dat
+(headpointer.dat)
+
 @parm: num_lists
+@parm: max_pointer_value - maximum disk block number
 @parm: max_list_length, @parm:min_list_length
 :pointer lists are randomly generated but limited by max and min list length
 

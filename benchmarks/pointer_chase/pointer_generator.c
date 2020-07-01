@@ -20,6 +20,7 @@ int main(int argc, char *argv[])
 	int list_length;
 	int current_block, next_block;
 	int outfile;
+	int hpfile;
 
 	if (argc < 5) {
 		printf("Usage: ./pointer_generator <num_lists> <max_pointer_value> <min_list_length> <max_list_length>\n\n");
@@ -32,6 +33,12 @@ int main(int argc, char *argv[])
 
 	outfile = open("dp.dat", O_CREAT | O_TRUNC | O_WRONLY , 0644);
 	if (outfile < 0 ) {
+		printf("Error creating file %s\n", strerror(errno));
+		exit(0);
+	}
+
+	hpfile = open("hp.dat", O_CREAT | O_TRUNC | O_WRONLY , 0644);
+	if (hpfile < 0 ) {
 		printf("Error creating file %s\n", strerror(errno));
 		exit(0);
 	}
@@ -57,6 +64,9 @@ int main(int argc, char *argv[])
 			if (j > 1) {
 				next_block = rand() % (max_pointer_value + 1);
 			}
+			if (j == list_length) {
+				dprintf(hpfile, "%d\n", current_block);
+			}
 		//	printf("%d %d %d\n", current_block, next_block, j);
 			dprintf(outfile, "%d %d %d\n", current_block, next_block, j);
 			current_block = next_block;
@@ -64,4 +74,5 @@ int main(int argc, char *argv[])
 		}
 	}
 	close(outfile);
+	close(hpfile);
 }
