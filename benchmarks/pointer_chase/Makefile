@@ -1,4 +1,4 @@
-all: pointer_generator write_pointer_to_disk host_pointer_reader
+all: pointer_generator write_pointer_to_disk host_pointer_reader guest_pointer_reader
 
 pointer_generator: pointer_generator.cpp
 	g++ pointer_generator.cpp -o pointer_generator	
@@ -9,5 +9,8 @@ write_pointer_to_disk: write_pointer_to_disk.c
 host_pointer_reader: host_pointer_reader.c
 	gcc host_pointer_reader.c -o host_pointer_reader
 
+guest_pointer_reader: guest_pointer_reader.c
+	gcc guest_pointer_reader.c -o guest_pointer_reader
+
 clean:
-	rm pointer_generator write_pointer_to_disk host_pointer_reader
+	rm pointer_generator write_pointer_to_disk host_pointer_reader guest_pointer_reader
