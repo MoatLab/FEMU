@@ -1,15 +1,6 @@
-#include <stdio.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <stdlib.h>
-#include <time.h>
-#include <string.h>
-#include <error.h>
-#include <errno.h>
-#include <unistd.h>
+#include "common.h"
+
 #include <map>
-#include <stdbool.h>
 #include <algorithm>
 
 using namespace std;
@@ -78,7 +69,7 @@ int main(int argc, char *argv[])
 	for (i = 0 ; i < num_lists ; i++) {
 		list_length = min_list_length + (rand() % (max_list_length - min_list_length + 1));
 		current_block = get_unvisited_pointer(max_pointer_value);
-		next_block = 0;
+		next_block = END_BLOCK_MAGIC;
 		for (j = list_length ; j > 0 ; j--) {
 			if (j > 1) {
 				next_block = rand() % (max_pointer_value + 1);
@@ -89,7 +80,7 @@ int main(int argc, char *argv[])
 		//	printf("%d %d %d\n", current_block, next_block, j);
 			dprintf(outfile, "%d %d %d\n", current_block, next_block, j);
 			current_block = next_block;
-			next_block = 0;
+			next_block = END_BLOCK_MAGIC;
 		}
 	}
 	close(outfile);

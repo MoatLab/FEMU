@@ -1,16 +1,6 @@
 // write_pointer_to_disk.c
 
-#include <stdio.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <stdlib.h>
-#include <time.h>
-#include <string.h>
-#include <error.h>
-#include <errno.h>
-#include <unistd.h>
-#define BLOCK_SIZE 4096
+#include "common.h"
 
 int main(int argc, char *argv[])
 {

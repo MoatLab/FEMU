@@ -1,16 +1,6 @@
 // write_pointer_to_disk.c
 
-#include <stdio.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <stdlib.h>
-#include <time.h>
-#include <string.h>
-#include <error.h>
-#include <errno.h>
-#include <unistd.h>
-#define BLOCK_SIZE 4096
+#include "common.h"
 
 int main(int argc, char *argv[])
 {
@@ -43,7 +33,7 @@ int main(int argc, char *argv[])
 	while (fscanf(head_pointer_list_fd, "%d", &head_pointer) != EOF) {
 		printf("Parsing LL with head %d\n", head_pointer);
 		current_block = head_pointer;
-		while(current_block != 0) {
+		while(current_block != END_BLOCK_MAGIC) {
 			disk_off = lseek(disk_fd_read, current_block * BLOCK_SIZE, SEEK_SET);
 			ret = read(disk_fd_read, &next_block, sizeof(next_block));
 			current_block = next_block;
