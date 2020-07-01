@@ -140,6 +140,15 @@ int count_bits(char *buf)
         return count;
 }
 
+int get_disk_pointer(char *buf)
+{
+	int *p = buf;
+	return p[0];
+}
+
+#define COUNTING
+#define POINTER_CHASING
+
 void computational_thread ()
 {
 	printf("COMPUTATIONAL THREAD PID = %d\n", getpid());
@@ -167,7 +176,12 @@ void computational_thread ()
                         printf("error reading in child\n");
                         exit (1);
                 }
+		#ifdef COUNTING
 		counter = count_bits(buf);
+		#endif
+		#ifdef POINTER_CHASING
+		counter = get_disk_pointer(buf);
+		#endif
 //		printf("comp thread - waiting to write\n");
                 ret = write(fd_put, &counter, sizeof(int));
 //		printf("written\n");
