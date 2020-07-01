@@ -54,4 +54,6 @@ int main(int argc, char *argv[])
 			exit(1);
 		}
 	}
+	close(disk_fd);
+	fclose(disk_pointer_list_fd);
 }
