@@ -30,7 +30,7 @@ int main(int argc, char *argv[])
 		exit(0);
 	}
 
-	outfile = open("dp.dat", O_WRONLY | O_CREAT , 0644);
+	outfile = open("dp.dat", O_CREAT | O_TRUNC | O_WRONLY , 0644);
 	if (outfile < 0 ) {
 		printf("Error creating file %s\n", strerror(errno));
 		exit(0);
