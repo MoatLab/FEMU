@@ -3,6 +3,11 @@
 #include <map>
 #include <algorithm>
 
+#define DEBUG 0
+
+#define debug_print(fmt, ...) \
+            do { if (DEBUG) fprintf(stderr, fmt, __VA_ARGS__); } while (0)
+
 using namespace std;
 std::map <int, bool> pre_accessed_blocks;
 
@@ -10,7 +15,7 @@ int get_unvisited_pointer(int max_value)
 {
 	int bno = rand() % (max_value);
 	while (pre_accessed_blocks.find(bno) != pre_accessed_blocks.end()) {
-		printf("collision %d exists\n", bno);
+		debug_print("collision %d exists\n", bno);
 		bno = rand() % (max_value);
 	}
 	pre_accessed_blocks[bno]=true;
@@ -63,8 +68,9 @@ int main(int argc, char *argv[])
 		exit(0);
 	}
 
-	if(max_pointer_value < max_list_length * num_lists) {
+	if(max_pointer_value <= max_list_length * num_lists) {
 		printf("Please reduce max_list_length %d or num_lists %d\n\nOR\n\nincrease max_pointer_value %d\n\n", max_list_length, num_lists, max_pointer_value);
+		exit(0);
 	}
 
 	for (i = 0 ; i < num_lists ; i++) {
