@@ -24,7 +24,7 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	disk_fd_read = open(argv[1], O_RDONLY);
+	disk_fd_read = open(argv[1], O_RDONLY | O_DIRECT);
 	if (disk_fd_read < 0) {
 		printf("disk open error: %s\n", strerror(errno));
 		exit(1);

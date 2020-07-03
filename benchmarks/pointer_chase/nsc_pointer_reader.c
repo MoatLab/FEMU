@@ -14,7 +14,7 @@ int main(int argc, char *argv[])
 	int ret;
 
 	if (argc < 2) {
-		printf("Usage ./host_pointer_reader <disk_name>\n");
+		printf("Usage ./nsc_pointer_reader <disk_name>\n");
 		exit(0);
 	}
 
@@ -24,7 +24,7 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	disk_fd_read = open(argv[1], O_RDONLY);
+	disk_fd_read = open(argv[1], O_RDONLY | O_DIRECT);
 	if (disk_fd_read < 0) {
 		printf("disk open error: %s\n", strerror(errno));
 		exit(1);
