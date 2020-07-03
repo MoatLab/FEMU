@@ -10,6 +10,7 @@ int get_unvisited_pointer(int max_value)
 {
 	int bno = rand() % (max_value);
 	while (pre_accessed_blocks.find(bno) != pre_accessed_blocks.end()) {
+		printf("collision %d exists\n", bno);
 		bno = rand() % (max_value);
 	}
 	pre_accessed_blocks[bno]=true;
@@ -72,7 +73,7 @@ int main(int argc, char *argv[])
 		next_block = END_BLOCK_MAGIC;
 		for (j = list_length ; j > 0 ; j--) {
 			if (j > 1) {
-				next_block = rand() % (max_pointer_value + 1);
+				next_block = get_unvisited_pointer(max_pointer_value);
 			}
 			if (j == list_length) {
 				dprintf(hpfile, "%d\n", current_block);
