@@ -1186,6 +1186,7 @@ typedef struct FemuCtrl {
 
     uint8_t         femu_mode;
 	uint8_t		computation_mode;
+	uint8_t		nscdelay_mode;
     uint32_t        memsz;
     FEMU_OC12_Ctrl  femu_oc12_ctrl;
     struct ssd      ssd;
@@ -1226,6 +1227,12 @@ enum {
     FEMU_WHITEBOX_MODE = 0,
     FEMU_BLACKBOX_MODE,
     FEMU_DEF_NOSSD_MODE,
+};
+
+enum {
+	FEMU_NSCDELAY_OFF = 0,
+	FEMU_NSCDELAY_ON,
+	FEMU_DEF_NSCDELAY_MODE,
 };
 
 enum {

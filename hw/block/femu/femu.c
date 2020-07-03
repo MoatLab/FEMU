@@ -478,11 +478,9 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req, int com
     case NVME_CMD_READ:
     case NVME_CMD_WRITE:
         if (n->femu_mode == FEMU_BLACKBOX_MODE) {
-		femu_debug("%s():bb mode calling - nvme_rw\n", __func__);
             	return nvme_rw(n, ns, cmd, req, computational_fd_send, computational_fd_recv);
 	}
         else {
-		femu_debug("%s():non bb mode - calling - femu_rw_mem_backend_nossd\n", __func__);
             	return femu_rw_mem_backend_nossd(n, ns, cmd);
 	}
 
@@ -1178,6 +1176,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     femu_init_mem_backend(&n->mbe, bs_size);
     n->mbe.femu_mode = n->femu_mode;
 	n->mbe.computation_mode = n->computation_mode;
+	n->mbe.nscdelay_mode = n->nscdelay_mode;
 
     n->completed = 0;
     n->start_time = time(NULL);
@@ -1274,6 +1273,7 @@ static Property femu_props[] = {
     DEFINE_PROP_UINT16("did", FemuCtrl, did, 0x1f1f),
     DEFINE_PROP_UINT8("femu_mode", FemuCtrl, femu_mode, FEMU_DEF_NOSSD_MODE),
     DEFINE_PROP_UINT8("computation_mode", FemuCtrl, computation_mode, FEMU_DEF_NOCOMPUTATION_MODE),
+    DEFINE_PROP_UINT8("nscdelay_mode", FemuCtrl, nscdelay_mode, FEMU_DEF_NSCDELAY_MODE),
     DEFINE_PROP_UINT16("lsec_size", FemuCtrl, femu_oc12_ctrl.params.sec_size, 4096),
     DEFINE_PROP_UINT8("lsecs_per_pg", FemuCtrl, femu_oc12_ctrl.params.sec_per_pg, 1),
     DEFINE_PROP_UINT16("lpgs_per_blk", FemuCtrl, femu_oc12_ctrl.params.pgs_per_blk, 256),

@@ -37,6 +37,9 @@ void femu_destroy_mem_backend(struct femu_mbe *mbe)
     }
 }
 
+#define WRITE_LATENCY 5000
+#define READ_LATENCY 8000
+
 /* Coperd: directly read/write to memory backend from blackbox mode */
 int femu_rw_mem_backend_bb(struct femu_mbe *mbe, QEMUSGList *qsg,
         uint64_t data_offset, bool is_write, int computational_fd_send, int computational_fd_recv)
@@ -46,6 +49,7 @@ int femu_rw_mem_backend_bb(struct femu_mbe *mbe, QEMUSGList *qsg,
     dma_addr_t cur_addr, cur_len;
     uint64_t mb_oft = data_offset;
     void *mb = mbe->mem_backend;
+	unsigned long long current_time, req_time;
 
     DMADirection dir = DMA_DIRECTION_FROM_DEVICE;
 
@@ -56,6 +60,17 @@ int femu_rw_mem_backend_bb(struct femu_mbe *mbe, QEMUSGList *qsg,
     while (sg_cur_index < qsg->nsg) {
         cur_addr = qsg->sg[sg_cur_index].base + sg_cur_byte;
         cur_len = qsg->sg[sg_cur_index].len - sg_cur_byte;
+
+	if (mbe->nscdelay_mode) {
+		current_time = cpu_get_host_ticks();
+		if (is_write) {
+			req_time = current_time + (WRITE_LATENCY);
+		        while(cpu_get_host_ticks() < req_time);
+		} else {
+			req_time = current_time + (READ_LATENCY);
+		        while( cpu_get_host_ticks()  < req_time);
+		}
+	}
 
 	// address_space, current_address, buffer, length_of_dma_address, read_or_write_direction
         if (dma_memory_rw(qsg->as, cur_addr, mb + mb_oft, cur_len, dir)) {
