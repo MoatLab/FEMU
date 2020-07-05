@@ -96,11 +96,16 @@ int femu_rw_mem_backend_bb(struct femu_mbe *mbe, QEMUSGList *qsg,
 			int c=0;
 			read(computational_fd_recv, &c, sizeof(c));
 		//	iscos_counter += c;
-			printf("main thread block_pointer %d\n", c);
+		//	printf("main thread block_pointer %d\n", c);
 			#ifdef POINTER_CHASING
 			while (c != 0 && c != END_BLOCK_MAGIC) {
 				int new_offset = c * BLOCK_SIZE;
 				if (mb+new_offset != NULL) {
+					if (mbe->nscdelay_mode) {
+						current_time = cpu_get_host_ticks();
+						req_time = current_time + (READ_LATENCY);
+					        while( cpu_get_host_ticks()  < req_time);
+					}
 					if (dma_memory_rw(qsg->as, cur_addr, mb + new_offset, cur_len, dir)) {
 						error_report("FEMU: dma_memory_rw error");
 					}
@@ -110,7 +115,7 @@ int femu_rw_mem_backend_bb(struct femu_mbe *mbe, QEMUSGList *qsg,
 					}
 					c = 0;
 					read(computational_fd_recv, &c, sizeof(c));
-					printf("next block_pointer %d\n", c);
+		//			printf("next block_pointer %d\n", c);
 				}
 			}
 			#endif
