@@ -6,8 +6,8 @@
 
 int main(int argc, char *argv[])
 {
-	FILE* head_pointer_list_fptr;
-	FILE* head_pointer_list_fd;
+	FILE* head_pointer_list_ptr;
+	int head_pointer_list_fd;
 	int disk_fd_read;
 	off_t disk_off;
 	struct stat statbuf;
@@ -24,13 +24,13 @@ int main(int argc, char *argv[])
 		exit(0);
 	}
 
-	head_pointer_list_fptr = fopen("hp.dat", "r");
-	if (head_pointer_list_fd == NULL) {
+	head_pointer_list_ptr = fopen("hp.dat", "r");
+	if (head_pointer_list_ptr == NULL) {
 		printf("hp.dat open error: %s\n", strerror(errno));
 		exit(1);
 	}
 
-	head_pointer_list_fd = fileno(head_pointer_list_fptr);
+	head_pointer_list_fd = fileno(head_pointer_list_ptr);
 	if (fstat (head_pointer_list_fd, &statbuf) < 0)
 	{
 		printf ("fstat error\n");
@@ -50,7 +50,7 @@ int main(int argc, char *argv[])
 	}
 
 	start_time = rdtsc();
-	while (fscanf(head_pointer_list_fd, "%lu", &head_pointer) != EOF) {
+	while (fscanf(head_pointer_list_ptr, "%lu", &head_pointer) != EOF) {
 		debug_print("Parsing LL with head %lu\n", head_pointer);
 		current_block = head_pointer;
 		disk_off = lseek(disk_fd_read, current_block * BLOCK_SIZE, SEEK_SET);
@@ -77,5 +77,5 @@ int main(int argc, char *argv[])
         printf("cycles spent: %lu\n",end - start);
 
 	close(disk_fd_read);
-	fclose(head_pointer_list_fd);
+	fclose(head_pointer_list_ptr);
 }
