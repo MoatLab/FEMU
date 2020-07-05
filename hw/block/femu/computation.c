@@ -24,6 +24,7 @@ uint64_t get_disk_pointer(char *buf)
 // we use rdtsc based delay instead of usleep() or delay()
 void inline add_delay(unsigned long long t)
 {
+	unsigned long long current_time, req_time;
 	current_time = cpu_get_host_ticks();
 	req_time = current_time + t;
 	while( cpu_get_host_ticks()  < req_time);

@@ -12,3 +12,4 @@
 
 uint64_t count_bits(char *buf);
 uint64_t get_disk_pointer(char *buf);
+void add_delay(unsigned long long t);

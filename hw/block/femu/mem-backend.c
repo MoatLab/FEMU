@@ -8,6 +8,7 @@
 
 extern uint64_t iscos_counter;
 
+
 /* Coperd: FEMU Memory Backend (mbe) for emulated SSD */
 
 void femu_init_mem_backend(struct femu_mbe *mbe, int64_t nbytes)
@@ -49,7 +50,6 @@ int femu_rw_mem_backend_bb(struct femu_mbe *mbe, QEMUSGList *qsg,
     dma_addr_t cur_addr, cur_len;
     uint64_t mb_oft = data_offset;
     void *mb = mbe->mem_backend;
-	unsigned long long current_time, req_time;
 
     DMADirection dir = DMA_DIRECTION_FROM_DEVICE;
 
