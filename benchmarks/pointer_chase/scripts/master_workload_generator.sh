@@ -67,6 +67,12 @@ fi
 
 echo "RUN WITH OPS $opsList PTRSIZE $ptrList"
 
+if [[ "$POINTER_EXEC" -ne 0 ]]; then
+	echo "Please set host CPU using"
+	echo "cpulimit -c CPU_LIMIT -p pid"
+	read
+fi
+
 for OPS in "${opsList[@]}"; 
 do
 	for POINTERLENGTH in "${ptrList[@]}";

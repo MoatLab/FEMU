@@ -1,8 +1,8 @@
-int count_bits(char *buf)
+uint64_t count_bits(char *buf)
 {
         int i, j;
         char c;
-        int count =0;
+        uint64_t count =0;
 
         for (i = 0 ; i < 4096 ; i++) {
                 c = buf[i];
@@ -15,9 +15,16 @@ int count_bits(char *buf)
         return count;
 }
 
-int get_disk_pointer(char *buf)
+uint64_t get_disk_pointer(char *buf)
 {
-	int *p = buf;
+	uint64_t *p = buf;
 	return p[0];
 }
 
+// we use rdtsc based delay instead of usleep() or delay()
+void inline add_delay(unsigned long long t)
+{
+	current_time = cpu_get_host_ticks();
+	req_time = current_time + t;
+	while( cpu_get_host_ticks()  < req_time);
+}

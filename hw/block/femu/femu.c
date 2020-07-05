@@ -142,7 +142,7 @@ void computational_thread ()
 
 	char buf[4096];
         int ret;
-	int counter;
+	uint64_t counter;
 
         while (1)
         {
@@ -159,7 +159,7 @@ void computational_thread ()
 		counter = get_disk_pointer(buf);
 		#endif
 //		printf("comp thread - waiting to write\n");
-                ret = write(fd_put, &counter, sizeof(int));
+                ret = write(fd_put, &counter, sizeof(counter));
 //		printf("written\n");
         }
 }

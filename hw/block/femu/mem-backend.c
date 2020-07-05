@@ -62,13 +62,10 @@ int femu_rw_mem_backend_bb(struct femu_mbe *mbe, QEMUSGList *qsg,
         cur_len = qsg->sg[sg_cur_index].len - sg_cur_byte;
 
 	if (mbe->nscdelay_mode) {
-		current_time = cpu_get_host_ticks();
 		if (is_write) {
-			req_time = current_time + (WRITE_LATENCY);
-		        while(cpu_get_host_ticks() < req_time);
+			add_delay(WRITE_LATENCY);
 		} else {
-			req_time = current_time + (READ_LATENCY);
-		        while( cpu_get_host_ticks()  < req_time);
+			add_delay(READ_LATENCY);
 		}
 	}
 
@@ -93,18 +90,16 @@ int femu_rw_mem_backend_bb(struct femu_mbe *mbe, QEMUSGList *qsg,
 			}else {
 		//		printf("wrote data on computational thread\n");
 			}
-			int c=0;
+			uint64_t c=0;
 			read(computational_fd_recv, &c, sizeof(c));
 		//	iscos_counter += c;
 		//	printf("main thread block_pointer %d\n", c);
 			#ifdef POINTER_CHASING
 			while (c != 0 && c != END_BLOCK_MAGIC) {
-				int new_offset = c * BLOCK_SIZE;
+				off_t new_offset = c * BLOCK_SIZE;
 				if (mb+new_offset != NULL) {
 					if (mbe->nscdelay_mode) {
-						current_time = cpu_get_host_ticks();
-						req_time = current_time + (READ_LATENCY);
-					        while( cpu_get_host_ticks()  < req_time);
+						add_delay(READ_LATENCY);
 					}
 					if (dma_memory_rw(qsg->as, cur_addr, mb + new_offset, cur_len, dir)) {
 						error_report("FEMU: dma_memory_rw error");

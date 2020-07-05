@@ -10,5 +10,5 @@
 #define BLOCK_SIZE 4096
 
 
-int count_bits(char *buf);
-int get_disk_pointer(char *buf);
+uint64_t count_bits(char *buf);
+uint64_t get_disk_pointer(char *buf);
