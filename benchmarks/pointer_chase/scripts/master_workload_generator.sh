@@ -6,10 +6,10 @@
 # The script can be configured to only generate workloads (to be run later)
 # or it can be used both for generating and running the pointer chase operation.
 
-if [[ "$#" -ne 1 ]]; then
-	echo "Usage ./base_workload_generator [1,2]"
-	echo "1. Varies Operations"
-	echo "2. Varies Linked List Length"
+if [[ "$#" -ne 2 ]]; then
+	echo "Usage ./base_workload_generator [operation] [mode]"
+	printf "operation:\n\t1. Varies Operations \n\t2. Varies Linked List Length\n"
+	printf "mode:\n\t1. host \n\t2. nsc\n"
 	exit
 fi
 
@@ -33,7 +33,7 @@ GENERATE_DISK_POINTERS=1
 WRITE_DISK_POINTERS=1
 # host or nsg configuration, 0 for host, 1 for nsc
 # appropriate command is written to run.sh
-HOST_OR_NSC=0
+HOST_OR_NSC=$2
 # execute pointer chase
 # runs host or nsc command on disk
 POINTER_EXEC=0
@@ -68,10 +68,18 @@ fi
 echo "RUN WITH OPS $opsList PTRSIZE $ptrList"
 
 if [[ "$POINTER_EXEC" -ne 0 ]]; then
-	echo "Please set host CPU using"
-	echo "cpulimit -c CPU_LIMIT -p pid"
+	echo "(OPTIONAL): Please set host CPU using"
+	printf "\n\tcpulimit -c CPU_LIMIT -p pid\n"
+	echo "where CPU_LIMIT is the percentage eg. 50 and pid is (usually) the smaller of the two pids"
+	printf "To get the PID, run the following on host\n"
+	printf "\n\thost$ pidof qemu-system-x86_64\n"
+	echo "..... HIT ENTER When done..."
 	read
 fi
+
+echo "disable readhaead using ./disable_readahead.sh"
+echo ".... HIT ENTER When done..."
+read
 
 for OPS in "${opsList[@]}"; 
 do
@@ -96,14 +104,14 @@ do
 			cd $BASE_DIR
 		fi
 
-		if [[ "$HOST_OR_NSC" -eq 0 ]]; then
+		if [[ "$HOST_OR_NSC" -eq 1 ]]; then
 			echo "echo \"If computation_mode=0, run (using sudo): $SRC_DIR/host_pointer_reader $DEV > host_time\"" >> $script_file
 			if [[ "$POINTER_EXEC" -eq 1 ]]; then
 				cd $workload_dir && \
 				sudo $SRC_DIR/host_pointer_reader $DEV > host_time && \
 				cd $BASE_DIR
 			fi
-		elif [[ "$HOST_OR_NSC" -eq 1 ]]; then
+		elif [[ "$HOST_OR_NSC" -eq 2 ]]; then
 			echo "echo \"If computation_mode=1, run (using sudo): $SRC_DIR/nsc_pointer_reader $DEV > nsc_time\"" >> $script_file
 			if [[ "$POINTER_EXEC" -eq 1 ]]; then
 				cd $workload_dir && \

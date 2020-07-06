@@ -1,8 +1,11 @@
+This script is run from guest, please copy entire `../pointer_chase` folder to the guest.
+
 This folder contains scripts to measure pointer chase benchmarks. 
 Each operation is run assuming a 100G disk containing 2560K x 4K blocks (= 10GB)
 This parameter (2621440) is used in ./pointer\_generator script <max_pointer_value>
 
-`master_workload_generator.sh` generates bechmarks for three different configurations:
+`master_workload_generator.sh` generates bechmarks for three different configurations
+for both `host` and `nsc` mode:
 
 1. Vary number of Pointer chase operations. 1K, 10K, 100K, 1M.
 	This can be done varying the `num_lists` parameter.
