@@ -6,11 +6,11 @@
 #define DEBUG 0
 
 using namespace std;
-std::map <int, bool> pre_accessed_blocks;
+std::map <uint64_t, bool> pre_accessed_blocks;
 
-int get_unvisited_pointer(int max_value)
+int get_unvisited_pointer(uint64_t max_value)
 {
-	int bno = rand() % (max_value);
+	uint64_t bno = rand() % (max_value);
 	while (pre_accessed_blocks.find(bno) != pre_accessed_blocks.end()) {
 		debug_print("collision %d exists\n", bno);
 		bno = rand() % (max_value);
@@ -24,11 +24,11 @@ int main(int argc, char *argv[])
 	int num_lists;
 	int max_list_length;
 	int min_list_length;
-	int max_pointer_value;
+	uint64_t max_pointer_value;
 	int i, j;
 	time_t t;
 	int list_length;
-	int current_block, next_block;
+	uint64_t current_block, next_block;
 	int outfile;
 	int hpfile;
 
