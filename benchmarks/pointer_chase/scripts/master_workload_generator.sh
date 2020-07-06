@@ -31,7 +31,7 @@ GENERATE_DISK_POINTERS=1
 # 0 does not write pointers in dp.dat to the device, but writes the command in run.sh
 # 1 writes the pointers in dp.dat on disk
 WRITE_DISK_POINTERS=1
-# host or nsg configuration, 0 for host, 1 for nsc
+# host or nsg configuration, 1 for host, 2 for nsc
 # appropriate command is written to run.sh
 HOST_OR_NSC=$2
 # execute pointer chase
