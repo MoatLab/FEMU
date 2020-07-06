@@ -36,7 +36,7 @@ WRITE_DISK_POINTERS=1
 HOST_OR_NSC=$2
 # execute pointer chase
 # runs host or nsc command on disk
-POINTER_EXEC=0
+POINTER_EXEC=1
 
 BLOCK_SIZE_BYTES=4096
 MAX_DISK_BLOCKS=`echo "$DISK_SIZE_GB * 1024 * 1024 * 1024 / $BLOCK_SIZE_BYTES" | bc`

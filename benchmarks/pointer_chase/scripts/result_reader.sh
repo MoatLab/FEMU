@@ -6,4 +6,6 @@ if [[ "$#" -ne 1 ]]; then
 	exit 1
 fi
 
+foldername=$1
+
 cat $foldername/*/*_time
