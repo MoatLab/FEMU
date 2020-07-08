@@ -1186,6 +1186,8 @@ typedef struct FemuCtrl {
 
     uint8_t         femu_mode;
 	uint8_t		computation_mode;
+	uint32_t		flash_read_latency;
+	uint32_t		flash_write_latency;
     uint32_t        memsz;
     FEMU_OC12_Ctrl  femu_oc12_ctrl;
     struct ssd      ssd;

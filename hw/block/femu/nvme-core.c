@@ -755,8 +755,8 @@ static void femu_flip_cmd(FemuCtrl *n, NvmeCmd *cmd)
         break;
 
     case FEMU_ENABLE_DELAY_EMU:
-        n->ssd.sp.pg_rd_lat = NAND_READ_LATENCY;
-        n->ssd.sp.pg_wr_lat = NAND_PROG_LATENCY;
+        n->ssd.sp.pg_rd_lat = PCIe_READ_LATENCY;
+        n->ssd.sp.pg_wr_lat = PCIe_PROG_LATENCY;
         n->ssd.sp.blk_er_lat = NAND_ERASE_LATENCY;
         n->ssd.sp.ch_xfer_lat = 0;
         femu_log("%s,FEMU Delay Emulation [Enabled]!\n", n->devname);
