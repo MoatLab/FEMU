@@ -50,27 +50,33 @@ int do_pointer_chase(int computational_fd_send, int computational_fd_recv, void 
 	int c;
 	DMADirection dir = DMA_DIRECTION_FROM_DEVICE;
 
-	while (1)
+	int ret = write(computational_fd_send, mb + new_offset, 4096);
+	if ( ret < 0) {
+		printf("write on pipe failed %s\n", strerror(errno));
+	}
+	c = 0;
+	read(computational_fd_recv, &c, sizeof(c));
+
+	while (c != 0 && c!= END_BLOCK_MAGIC)
 	{
 		if (mb + new_offset != NULL) {
+			new_offset = c * BLOCK_SIZE;
+			add_delay(read_delay);
+			if (dma_memory_rw(as, *cur_addr, mb + new_offset, cur_len, dir)) {
+				error_report("FEMU: dma_memory_rw error");
+			}
 			int ret = write(computational_fd_send, mb + new_offset, 4096);
 			if ( ret < 0) {
 				printf("write on pipe failed %s\n", strerror(errno));
 			}
 			c = 0;
 			read(computational_fd_recv, &c, sizeof(c));
-			if (c == 0 || c == END_BLOCK_MAGIC) {
-				return c;
-			}
-			new_offset = c * BLOCK_SIZE;
-			add_delay(read_delay);
-			if (dma_memory_rw(as, *cur_addr, mb + new_offset, cur_len, dir)) {
-				error_report("FEMU: dma_memory_rw error");
-			}
 			printf("next block_pointer %d\n", c);
+		}else {
+			return c;
 		}
 	}
-	return 0;
+	return c;
 }
 
 int do_count(int computational_fd_send, int computational_fd_recv, void *mb , uint64_t mb_oft, dma_addr_t cur_len)
@@ -118,7 +124,6 @@ int femu_rw_mem_backend_bb(struct femu_mbe *mbe, QEMUSGList *qsg,
 		error_report("FEMU: dma_memory_rw error");
         }
 
-	// address_space, current_address, buffer, length_of_dma_address, read_or_write_direction
 	if (mbe->computation_mode) {
 		// if (is_write) : Write Based computation, eg. compression. else:
 		if (!is_write && ((mb + mb_oft) != NULL) ) {
