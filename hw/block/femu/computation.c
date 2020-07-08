@@ -20,4 +20,3 @@ int get_disk_pointer(char *buf)
 	int *p = buf;
 	return p[0];
 }
-

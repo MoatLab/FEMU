@@ -33,7 +33,7 @@ sudo $FEMU_BUILDDIR/x86_64-softmmu/qemu-system-x86_64 \
     -device virtio-scsi-pci,id=scsi0 \
     -device scsi-hd,drive=hd0 \
     -drive file=$OSIMGF,if=none,aio=native,cache=none,format=raw,id=hd0 \
-    -device femu,devsz_mb=10240,namespaces=1,lmetasize=16,nlbaf=5,lba_index=3,mdts=10,lnum_ch=2,lnum_lun=8,lnum_pln=2,lsec_size=4096,lsecs_per_pg=4,lpgs_per_blk=512,femu_mode=0 \
+    -device femu,devsz_mb=10240,namespaces=1,lmetasize=16,nlbaf=5,lba_index=3,mdts=10,lnum_ch=2,lnum_lun=8,lnum_pln=2,lsec_size=4096,lsecs_per_pg=4,lpgs_per_blk=512,femu_mode=0,computation_mode=1 \
     -net user,hostfwd=tcp::8080-:22 \
     -net nic,model=virtio #\
 #    -nographic \
