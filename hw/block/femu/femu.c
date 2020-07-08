@@ -12,6 +12,8 @@
 
 #include <unistd.h>
 #include <sys/syscall.h>
+#include "computation.h"
+#include "computation.c"
 
 extern uint64_t iscos_counter;
 
@@ -123,23 +125,6 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
     }
 }
 
-int count_bits(char *buf)
-{
-        int i, j;
-        char c;
-        int count =0;
-
-        for (i = 0 ; i < 4096 ; i++) {
-                c = buf[i];
-                for (j = 0 ; j < 8 ; j++) {
-                        if (c & (1 << j)) {
-                                count +=  1;
-                        }
-                }
-        }
-        return count;
-}
-
 void computational_thread ()
 {
 	printf("COMPUTATIONAL THREAD PID = %d\n", getpid());
@@ -167,7 +152,12 @@ void computational_thread ()
                         printf("error reading in child\n");
                         exit (1);
                 }
+		#ifdef COUNTING
 		counter = count_bits(buf);
+		#endif
+		#ifdef POINTER_CHASING
+		counter = get_disk_pointer(buf);
+		#endif
 //		printf("comp thread - waiting to write\n");
                 ret = write(fd_put, &counter, sizeof(int));
 //		printf("written\n");
@@ -488,11 +478,11 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req, int com
     case NVME_CMD_READ:
     case NVME_CMD_WRITE:
         if (n->femu_mode == FEMU_BLACKBOX_MODE) {
-		femu_debug("%s():bb mode calling - nvme_rw\n", __func__);
+		//femu_debug("%s():bb mode calling - nvme_rw\n", __func__);
             	return nvme_rw(n, ns, cmd, req, computational_fd_send, computational_fd_recv);
 	}
         else {
-		femu_debug("%s():non bb mode - calling - femu_rw_mem_backend_nossd\n", __func__);
+		//femu_debug("%s():non bb mode - calling - femu_rw_mem_backend_nossd\n", __func__);
             	return femu_rw_mem_backend_nossd(n, ns, cmd);
 	}
 
