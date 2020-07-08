@@ -1,24 +1,6 @@
-#include <stdio.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <errno.h>
-#include <string.h>
-#include <stdlib.h>
+#include "common.h"
 
-#define BLOCK_SIZE 4096
-
-typedef unsigned long long ticks;
-
-static __inline__ ticks getticks(void)
-{
-     unsigned a, d;
-     asm("cpuid");
-     asm volatile("rdtsc" : "=a" (a), "=d" (d));
-
-     return (((ticks)a) | (((ticks)d) << 32));
-}
+#define DEBUG 0
 
 int count_bits(char *buf)
 {
@@ -32,40 +14,48 @@ int count_bits(char *buf)
 			if (c & (1 << j)) {
 				count +=  1;
 			}
-//			printf("j=%d res=%d\n", j , c & (1 << j));
+			debug_print("j=%d res=%d\n", j , c & (1 << j));
 		}
-//	exit(1);
 	}
 	return count;
 }
 
 int main(int argc, char *argv[])
 {
-	int fd = open(argv[1], O_RDONLY);
-	char buf[4096];
-	long unsigned c;
+	int fd;
 
+	char buf[BLOCK_SIZE];
+	long unsigned c;
+	int i;
+
+	if (argc != 2) {
+		printf("Usage: ./host_count <dev_namme>");
+		exit(0);
+	}
+
+	fd = open(argv[1], O_RDONLY);
 	if (fd < 0) {
 		printf("Error opening %s\n", strerror(errno));
 		exit(1);
 	}
 
 	int r = 0;
-	ticks tick,tick1,tickh;
-	unsigned long long time =0;
-	
-	tick = getticks();
 	int num_blocks=10;
+	unsigned long long start, end;
 
+	start = rdtsc();
 //	while (read (fd, buf, BLOCK_SIZE) > 0) {
-	for (i = 0 ; i < num_blocks ; i++)
-		c += count_bits(buf);
+	for (i = 0 ; i < num_blocks ; i++) {
+		if (read(fd, buf, BLOCK_SIZE) == BLOCK_SIZE) {
+			c += count_bits(buf);
+		}else {
+			printf("error during read %s\n", strerror(errno));
+			exit (1);
+		}
 	}
+	end = rdtsc();
 
-	tick1 = getticks();
-
-	time = (unsigned long long)((tick1-tick)/2904595);
-	printf("\ntime in MS  = %llu\n",time);
+        printf("cycles spent: %llu\n",end - start);
 
 	printf("Count %lu\n", c);
 }
