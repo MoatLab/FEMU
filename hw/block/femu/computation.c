@@ -21,3 +21,9 @@ int get_disk_pointer(char *buf)
 	return p[0];
 }
 
+void inline add_delay(uint32_t micro_seconds) {
+	unsigned long long current_time, req_time;
+	current_time = cpu_get_host_ticks();
+	req_time = current_time + (micro_seconds);
+	while( cpu_get_host_ticks()  < req_time);
+}
