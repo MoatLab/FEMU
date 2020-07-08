@@ -40,7 +40,7 @@ int main(int argc, char *argv[])
 	}
 
 	int r = 0;
-	int num_blocks=10;
+	int num_blocks=NUM_BLOCKS;
 	unsigned long long start, end;
 
 	start = rdtsc();

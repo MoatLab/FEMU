@@ -17,3 +17,7 @@ is run with `computation_mode=1`
 
 First `write_ones` program is executed, followed by either `host_count` or `nsc_count`
 based on the `computation_mode` parameter set while instantiating a FEMU VM.
+
+Please also change `hw/block/femu/computation.h` and define COUNTING and comment any
+other computational workload.
+Computation mode will later be made configurable by the host.

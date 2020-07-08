@@ -16,6 +16,7 @@
 #include <assert.h>
 
 #define BLOCK_SIZE 4096
+#define NUM_BLOCKS 10
 
 static __inline__ unsigned long long rdtsc(void)
 {

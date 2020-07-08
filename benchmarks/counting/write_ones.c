@@ -1,14 +1,4 @@
-#include <stdio.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <error.h>
-#include <errno.h>
-#include <string.h>
-#include <stdlib.h>
-
-#define BLOCK_SIZE 4096
+#include "common.h"
 
 int main(int argc, char *argv[])
 {
@@ -18,7 +8,7 @@ int main(int argc, char *argv[])
 	long unsigned c;
 	int ret;
 
-	int file_size = 10;
+	int file_size = NUM_BLOCKS;
 
 	if (fd < 0) {
 		printf("Error opening %s\n", strerror(errno));

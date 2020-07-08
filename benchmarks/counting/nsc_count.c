@@ -13,6 +13,8 @@ int main(int argc, char *argv[])
 	long unsigned c;
 	long long unsigned start, end;
 	int r = 0;
+	int i;
+	int num_blocks = NUM_BLOCKS;
 	
 	fd = open(argv[1], O_RDONLY);
 	start = rdtsc();
@@ -27,5 +29,4 @@ int main(int argc, char *argv[])
 	end = rdtsc();
 
         printf("cycles spent: %llu\n",end - start);
-	printf("Count %lu\n", c);
 }
