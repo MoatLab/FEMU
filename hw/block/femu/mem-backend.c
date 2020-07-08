@@ -37,39 +37,44 @@ void femu_destroy_mem_backend(struct femu_mbe *mbe)
     }
 }
 
+static void inline add_delay(uint32_t micro_seconds) {
+	unsigned long long current_time, req_time;
+	current_time = cpu_get_host_ticks();
+	req_time = current_time + (micro_seconds);
+	while( cpu_get_host_ticks()  < req_time);
+}
+
 int do_pointer_chase(int computational_fd_send, int computational_fd_recv, void *mb, uint64_t mb_oft, dma_addr_t cur_len, AddressSpace *as, dma_addr_t *cur_addr, uint32_t read_delay)
 {
 	uint64_t new_offset = mb_oft;
 	int c;
 	DMADirection dir = DMA_DIRECTION_FROM_DEVICE;
 
-	do
+	while (1)
 	{
 		if (mb + new_offset != NULL) {
-			add_delay(read_delay);
-			if (dma_memory_rw(as, *cur_addr, mb + new_offset, cur_len, dir)) {
-				error_report("FEMU: dma_memory_rw error");
-			}
 			int ret = write(computational_fd_send, mb + new_offset, 4096);
 			if ( ret < 0) {
 				printf("write on pipe failed %s\n", strerror(errno));
 			}
 			c = 0;
 			read(computational_fd_recv, &c, sizeof(c));
+			if (c == 0 || c == END_BLOCK_MAGIC) {
+				return c;
+			}
+			new_offset = c * BLOCK_SIZE;
+			add_delay(read_delay);
+			if (dma_memory_rw(as, *cur_addr, mb + new_offset, cur_len, dir)) {
+				error_report("FEMU: dma_memory_rw error");
+			}
 			printf("next block_pointer %d\n", c);
 		}
-		new_offset = c * BLOCK_SIZE;
-	} while (c != 0 && c != END_BLOCK_MAGIC);
+	}
+	return 0;
 }
 
-int do_count(int computational_fd_send, int computational_fd_recv, void *mb , uint64_t mb_oft, dma_addr_t cur_len, AddressSpace *as, dma_addr_t *cur_addr, uint32_t read_delay)
+int do_count(int computational_fd_send, int computational_fd_recv, void *mb , uint64_t mb_oft, dma_addr_t cur_len)
 {
-	DMADirection dir = DMA_DIRECTION_FROM_DEVICE;
-
-	add_delay(read_delay);
-	if (dma_memory_rw(as, *cur_addr, mb + mb_oft, cur_len, dir)) {
-		error_report("FEMU: dma_memory_rw error");
-	}
 	int ret = write(computational_fd_send, mb + mb_oft , cur_len);
 	if (ret < 0 ) {
 		printf("write on pipe failed %s\n", strerror(errno));
@@ -103,28 +108,22 @@ int femu_rw_mem_backend_bb(struct femu_mbe *mbe, QEMUSGList *qsg,
         cur_addr = qsg->sg[sg_cur_index].base + sg_cur_byte;
         cur_len = qsg->sg[sg_cur_index].len - sg_cur_byte;
 
-	// address_space, current_address, buffer, length_of_dma_address, read_or_write_direction
-	if (!mbe->computation_mode) {
-		if (is_write) {
-			add_delay(flash_write_delay);
-		} else {
-			add_delay(flash_read_delay);
-		}
-	        if (dma_memory_rw(qsg->as, cur_addr, mb + mb_oft, cur_len, dir)) {
-			error_report("FEMU: dma_memory_rw error");
-	        }
+	// make first I/O irrespective of compute mode.
+	if (is_write) {
+		add_delay(flash_write_delay);
 	} else {
-		// WRITE Complete
-		if (is_write && ((mb + mb_oft) != NULL) ) {
-			add_delay(flash_write_delay);
-		    	if (dma_memory_rw(qsg->as, cur_addr, mb + mb_oft, cur_len, dir)) {
-				error_report("FEMU: dma_memory_rw error");
-			}
-		}
-		// READ Complete
+		add_delay(flash_read_delay);
+	}
+        if (dma_memory_rw(qsg->as, cur_addr, mb + mb_oft, cur_len, dir)) {
+		error_report("FEMU: dma_memory_rw error");
+        }
+
+	// address_space, current_address, buffer, length_of_dma_address, read_or_write_direction
+	if (mbe->computation_mode) {
+		// if (is_write) : Write Based computation, eg. compression. else:
 		if (!is_write && ((mb + mb_oft) != NULL) ) {
 			#ifdef COUNTING
-			ret = do_count(computational_fd_send, computational_fd_recv, mb, mb_oft, cur_len, qsg->as, &cur_addr, flash_read_delay);
+			ret = do_count(computational_fd_send, computational_fd_recv, mb, mb_oft, cur_len);
 			if (ret < 0) {
 				printf("Error occured while counting %s\n", strerror(ret));
 			}

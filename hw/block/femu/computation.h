@@ -9,6 +9,5 @@
 #define END_BLOCK_MAGIC 99999
 #define BLOCK_SIZE 4096
 
-void add_delay(uint32_t micro_seconds);
 int count_bits(char *buf);
 int get_disk_pointer(char *buf);
