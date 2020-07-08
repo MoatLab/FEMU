@@ -1176,7 +1176,8 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     femu_init_mem_backend(&n->mbe, bs_size);
     n->mbe.femu_mode = n->femu_mode;
 	n->mbe.computation_mode = n->computation_mode;
-	n->mbe.nscdelay_mode = n->nscdelay_mode;
+	n->mbe.flash_read_latency = n->flash_read_latency;
+	n->mbe.flash_write_latency = n->flash_write_latency;
 
     n->completed = 0;
     n->start_time = time(NULL);
@@ -1273,7 +1274,8 @@ static Property femu_props[] = {
     DEFINE_PROP_UINT16("did", FemuCtrl, did, 0x1f1f),
     DEFINE_PROP_UINT8("femu_mode", FemuCtrl, femu_mode, FEMU_DEF_NOSSD_MODE),
     DEFINE_PROP_UINT8("computation_mode", FemuCtrl, computation_mode, FEMU_DEF_NOCOMPUTATION_MODE),
-    DEFINE_PROP_UINT8("nscdelay_mode", FemuCtrl, nscdelay_mode, FEMU_DEF_NSCDELAY_MODE),
+    DEFINE_PROP_UINT32("flash_read_latency", FemuCtrl, flash_read_latency, 0),
+    DEFINE_PROP_UINT32("flash_write_latency", FemuCtrl, flash_write_latency, 0),
     DEFINE_PROP_UINT16("lsec_size", FemuCtrl, femu_oc12_ctrl.params.sec_size, 4096),
     DEFINE_PROP_UINT8("lsecs_per_pg", FemuCtrl, femu_oc12_ctrl.params.sec_per_pg, 1),
     DEFINE_PROP_UINT16("lpgs_per_blk", FemuCtrl, femu_oc12_ctrl.params.pgs_per_blk, 256),
