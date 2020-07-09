@@ -39,4 +39,19 @@ issues read to the head of the linked list (inside the guest VM) and receives th
 the linked list. This requires compute_mode=1 and hardcoded values in NSC Process.
 
 scripts/output - the folder contain benchmarks for pointer_chase in different configurations.
-A separate README.md is created for these folders.
+Example Workflow:
+
+1. Run `pointer_generator` eg.:
+	`./pointer_generator 10 1024 2 5
+	This generates 10 pointers with 2 to 5 linkedlist length, with unique disk blocks numbered
+	between 0 to 1023. The created linked lists are written on hp.dat and dp.dat.
+
+2. Run `write_pointer_to_disk` eg.:
+	`./write_pointer_to_disk /dev/nvme0n1`
+	This writes all pointers in dp.dat to the disk at different offsets, with each disk block
+	storing the next pointer in the first 8 bytes (`uint64_t`).
+
+3. Run one of the two scripts `host_pointer_reader` or `nsc_pointer_reader` eg.:
+	`./host_pointer_reader /dev/nvme0n1`
+	This generates `host_time` or `nsc_time` files containing the number of CPU cycles spent
+	while reading the pointer from disk.

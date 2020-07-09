@@ -1,4 +1,9 @@
-// write_pointer_to_disk.c
+// nsc_pointer_reader.c
+
+// reads head pointer from hp.dat, sends a request to the underlying device.
+// the underlying device chases all disk pointers and finally returns the tail
+// the tail block contains END_BLOCK_MAGIC which is what the nsc_pointer_reader
+// would expect once it reaches end of the linked list.
 
 #include "common.h"
 

@@ -251,8 +251,8 @@ static void ssd_init_params(struct ssdparams *spp)
     spp->luns_per_ch = 8;
     spp->nchs = 8;
 
-    spp->pg_rd_lat = NAND_READ_LATENCY;
-    spp->pg_wr_lat = NAND_PROG_LATENCY;
+    spp->pg_rd_lat = PCIe_READ_LATENCY;
+    spp->pg_wr_lat = PCIe_PROG_LATENCY;
     spp->blk_er_lat = NAND_ERASE_LATENCY;
     spp->ch_xfer_lat = 0;
 

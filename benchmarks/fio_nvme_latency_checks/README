@@ -1,7 +1,0 @@
-This folder contains generic benchmarking scripts for tuning FEMU to real NVMe SSD being accessed by guest.
-
-We check for random/sequential writes and random/sequential reads made from the guest on both the nvme device and the FEMU emulated nvme device.
-
-Latency can be disabled using nscdelay_mode (0 - disable, 1 - enable). With nscdelay mode disabled, FEMU disk is 
-accessed at memory speed. with nscddelay_mode enabled, FEMU disk is accessed based on WRITE_LATENCY and READ_LATENCY
-macros defined in `hw/block/femu/mem-backend.c`.
