@@ -414,6 +414,57 @@ void nvme_post_cqes_io(void *opaque)
     }
 }
 
+int nvme_found_in_str_list(NvmeDirStrNsStat *str_ns_stat, uint16_t dspec)
+{
+   int i;
+   
+   if (str_ns_stat->cnt == 0)
+       return -1;
+   
+   for (i=0; i<str_ns_stat->cnt; i++)
+       if (str_ns_stat->id[i] == dspec)
+          return i;
+   return -1;
+
+}
+
+void nvme_add_to_str_list(NvmeDirStrNsStat *str_ns_stat, uint16_t dspec)
+{
+   str_ns_stat->id[str_ns_stat->cnt] = dspec;
+   str_ns_stat->cnt++;
+}
+
+void nvme_del_from_str_list(NvmeDirStrNsStat *str_ns_stat, int pos)
+{
+   int i;
+
+   if (str_ns_stat->cnt == 0)
+       return;
+   str_ns_stat->cnt--;
+   for (i=pos; i<str_ns_stat->cnt; i++)
+       str_ns_stat->id[i] = str_ns_stat->id[i+1];
+   str_ns_stat->id[str_ns_stat->cnt] = 0;
+}
+
+void nvme_update_str_stat(FemuCtrl *n, NvmeNamespace *ns, uint16_t dspec)
+{
+   NvmeDirStrNsStat *st = ns->str_ns_stat;
+   if (dspec == 0) /* skip if normal write */
+       return;
+   if (nvme_found_in_str_list(st, dspec) < 0) { /* not found */
+       /* delete the first if max out */
+       if (n->str_sys_param->nsso == n->str_sys_param->msl) {
+          ns->str_ns_param->nso--;
+          n->str_sys_param->nsso--;
+          nvme_del_from_str_list(st, 0);
+       }
+       nvme_add_to_str_list(st, dspec);
+       ns->str_ns_param->nso++;
+       n->str_sys_param->nsso++;
+   }
+   return;
+}
+
 static uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     NvmeRequest *req, int computational_fd_send, int computational_fd_recv)
 {
@@ -423,6 +474,11 @@ static uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t slba = le64_to_cpu(rw->slba);
     uint64_t prp1 = le64_to_cpu(rw->prp1);
     uint64_t prp2 = le64_to_cpu(rw->prp2);
+    uint16_t control = le16_to_cpu(rw->control);
+    uint32_t dsmgmt = le32_to_cpu(rw->dsmgmt);
+    uint8_t  dtype = (control >> 4) & 0xF;
+    uint16_t dspec = (dsmgmt >> 16) & 0xFFFF;
+
     const uint8_t lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
     const uint16_t ms = le16_to_cpu(ns->id_ns.lbaf[lba_index].ms);
     const uint8_t data_shift = ns->id_ns.lbaf[lba_index].ds;
@@ -448,6 +504,15 @@ static uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
 
     assert((nlb << data_shift) == req->qsg.size);
+
+    if (req->is_write) {
+       femu_debug("%s, opcode:%#x, offset:%#lx, size:%#lx, dtype:%#x, dspec:%#x\n",
+               __func__, rw->opcode, data_offset, data_size, dtype, dspec);
+       if (dtype) {
+		printf("dtype detected %d\n", dtype);
+          nvme_update_str_stat(n, ns, dspec);
+	}
+    }
 
     req->slba = slba;
     req->meta_size = 0;
@@ -968,6 +1033,7 @@ void nvme_partition_ns(NvmeNamespace *ns, uint8_t lba_idx)
 
 static void nvme_init_namespaces(FemuCtrl *n)
 {
+	NvmeIdCtrl *id = &n->id_ctrl;
     int i, j, k;
     int ji = n->meta ? 2 : 1;
 
@@ -1008,6 +1074,19 @@ static void nvme_init_namespaces(FemuCtrl *n)
         ns->util = bitmap_new(blks);
         ns->uncorrectable = bitmap_new(blks);
         nvme_partition_ns(ns, lba_index);
+
+        if (id->oacs & NVME_OACS_DIR) {
+            ns->id_dir = g_new0(NvmeDirId, 1);
+            ns->id_dir->dir_support[0] = NVME_DIR_IDF_IDENTIFY | NVME_DIR_IDF_STREAMS;
+            ns->id_dir->dir_enable[0] = NVME_DIR_IDF_IDENTIFY;
+            ns->str_ns_param = g_new0(NvmeDirStrParam, 1);
+            ns->str_ns_param->sws = cpu_to_le32(32);
+            ns->str_ns_param->sgs = cpu_to_le16(36864);
+            ns->str_ns_param->nsa = 0;
+            ns->str_ns_param->nso = 0;
+            ns->str_ns_stat = g_new0(NvmeDirStrNsStat, 1);
+            ns->str_ns_stat->cnt = 0;
+        }
     }
 }
 
@@ -1063,7 +1142,8 @@ static void nvme_init_ctrl(FemuCtrl *n)
     id->ieee[2] = 0xb3;
     id->cmic = 0;
     id->mdts = n->mdts;
-    id->oacs = cpu_to_le16(n->oacs | NVME_OACS_DBBUF);
+//  id->oacs = cpu_to_le16(n->oacs | NVME_OACS_DBBUF);
+	id->oacs = cpu_to_le16(NVME_OACS_DBBUF | NVME_OACS_DIR);
     id->acl = n->acl;
     id->aerl = n->aerl;
     id->frmw = 7 << 1 | 1;
@@ -1082,6 +1162,14 @@ static void nvme_init_ctrl(FemuCtrl *n)
     id->psd[0].mp = cpu_to_le16(0x9c4);
     id->psd[0].enlat = cpu_to_le32(0x10);
     id->psd[0].exlat = cpu_to_le32(0x4);
+	strpadcpy((char *)id->fr, sizeof(id->fr), "1.3", ' ');
+
+    if (id->oacs & NVME_OACS_DIR) {
+       n->str_sys_param = g_new0(NvmeDirStrParam, 1);
+       n->str_sys_param->msl = cpu_to_le16(8);
+       n->str_sys_param->nssa = cpu_to_le16(8);
+       n->str_sys_param->nsso = 0;
+    }
 
     n->features.arbitration     = 0x1f0f0706;
     n->features.power_mgmt      = 0;
@@ -1163,6 +1251,7 @@ static void nvme_init_pci(FemuCtrl *n)
 static void femu_realize(PCIDevice *pci_dev, Error **errp)
 {
     FemuCtrl *n = FEMU(pci_dev);
+	NvmeIdCtrl *id = &n->id_ctrl;
     int64_t bs_size;
 
     nvme_check_size();
@@ -1214,6 +1303,16 @@ static void femu_exit(PCIDevice *pci_dev)
 {
     FemuCtrl *n = FEMU(pci_dev);
 
+	NvmeNamespace *ns = n->namespaces;
+    int i;
+
+    for (i = 0; i < n->num_namespaces; i++) {
+        g_free(ns->id_dir);
+        g_free(ns->str_ns_param);
+        g_free(ns->str_ns_stat);
+       ns++;
+    }
+
     femu_debug("femu_exit starting!\n");
 
     nvme_clear_ctrl(n, true);
@@ -1222,6 +1321,7 @@ static void femu_exit(PCIDevice *pci_dev)
     femu_destroy_mem_backend(&n->mbe);
 
     g_free(n->namespaces);
+	g_free(n->str_sys_param);
     g_free(n->features.int_vector_config);
     g_free(n->aer_reqs);
     g_free(n->elpes);
