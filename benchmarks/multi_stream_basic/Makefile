@@ -1,6 +1,6 @@
 CFLAGS := -std=gnu99 -O0 -g -pthread -D_GNU_SOURCE -D__CHECK_ENDIAN__ -Wall -Werror
 LDFLAGS := -lm
-NVME_PROGS = nvme_rw_stream
+NVME_PROGS = nvme_rw_stream normal stream
 ALL_PROGS := $(NVME_PROGS)
 default: $(ALL_PROGS)
 clean:
