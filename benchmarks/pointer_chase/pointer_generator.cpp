@@ -3,13 +3,16 @@
 #include <map>
 #include <algorithm>
 
-using namespace std;
-std::map <int, bool> pre_accessed_blocks;
+#define DEBUG 0
 
-int get_unvisited_pointer(int max_value)
+using namespace std;
+std::map <uint64_t, bool> pre_accessed_blocks;
+
+int get_unvisited_pointer(uint64_t max_value)
 {
-	int bno = rand() % (max_value);
+	uint64_t bno = rand() % (max_value);
 	while (pre_accessed_blocks.find(bno) != pre_accessed_blocks.end()) {
+		debug_print("collision %lu exists\n", bno);
 		bno = rand() % (max_value);
 	}
 	pre_accessed_blocks[bno]=true;
@@ -21,11 +24,11 @@ int main(int argc, char *argv[])
 	int num_lists;
 	int max_list_length;
 	int min_list_length;
-	int max_pointer_value;
+	uint64_t max_pointer_value;
 	int i, j;
 	time_t t;
 	int list_length;
-	int current_block, next_block;
+	uint64_t current_block, next_block;
 	int outfile;
 	int hpfile;
 
@@ -62,8 +65,9 @@ int main(int argc, char *argv[])
 		exit(0);
 	}
 
-	if(max_pointer_value < max_list_length * num_lists) {
-		printf("Please reduce max_list_length %d or num_lists %d\n\nOR\n\nincrease max_pointer_value %d\n\n", max_list_length, num_lists, max_pointer_value);
+	if(max_pointer_value <= max_list_length * num_lists) {
+		printf("Please reduce max_list_length %d or num_lists %d\n\nOR\n\nincrease max_pointer_value %lu\n\n", max_list_length, num_lists, max_pointer_value);
+		exit(0);
 	}
 
 	for (i = 0 ; i < num_lists ; i++) {
@@ -72,13 +76,13 @@ int main(int argc, char *argv[])
 		next_block = END_BLOCK_MAGIC;
 		for (j = list_length ; j > 0 ; j--) {
 			if (j > 1) {
-				next_block = rand() % (max_pointer_value + 1);
+				next_block = get_unvisited_pointer(max_pointer_value);
 			}
 			if (j == list_length) {
-				dprintf(hpfile, "%d\n", current_block);
+				dprintf(hpfile, "%lu\n", current_block);
 			}
 		//	printf("%d %d %d\n", current_block, next_block, j);
-			dprintf(outfile, "%d %d %d\n", current_block, next_block, j);
+			dprintf(outfile, "%lu %lu %d\n", current_block, next_block, j);
 			current_block = next_block;
 			next_block = END_BLOCK_MAGIC;
 		}

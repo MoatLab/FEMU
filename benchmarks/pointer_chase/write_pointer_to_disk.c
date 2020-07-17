@@ -2,6 +2,7 @@
 
 #include "common.h"
 
+#define DEBUG 0
 int main(int argc, char *argv[])
 {
 	FILE* disk_pointer_list_fd;
@@ -11,7 +12,7 @@ int main(int argc, char *argv[])
 	ssize_t read;
 	off_t disk_off;
 
-	int first_block, second_block, list_length;
+	uint64_t first_block, second_block, list_length;
 	int ret;
 
 	if (argc < 2) {
@@ -31,16 +32,16 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	while (fscanf(disk_pointer_list_fd, "%d %d %d", &first_block, &second_block, &list_length) != EOF) {
-	//	printf("%d %d %d\n", first_block, second_block, list_length);
+	while (fscanf(disk_pointer_list_fd, "%lu %lu %lu", &first_block, &second_block, &list_length) != EOF) {
+		debug_print("%lu %lu %lu\n", first_block, second_block, list_length);
 		disk_off = lseek(disk_fd, first_block * BLOCK_SIZE, SEEK_SET);
 		if (disk_off != first_block * BLOCK_SIZE) {
-			printf("Could Not seek to %d offset %s\n", first_block * BLOCK_SIZE , strerror(errno));
+			printf("Could Not seek to %lu offset %s\n", first_block * BLOCK_SIZE , strerror(errno));
 			exit(1);
 		}
 		ret = write(disk_fd, &second_block, sizeof(second_block));
 		if (ret  == -1) {
-			printf("Could not write to %d offset %s\n", first_block * BLOCK_SIZE , strerror(errno));
+			printf("Could not write to %lu offset %s\n", first_block * BLOCK_SIZE , strerror(errno));
 			exit(1);
 		}
 	}
