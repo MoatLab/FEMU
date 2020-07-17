@@ -20,9 +20,11 @@ int main(int argc, char *argv[])
 	uint64_t current_block, next_block;
 	uint64_t head_pointer;
 
+	int PAGE_SIZE = getpagesize();
 	int ret;
-	char *data = aligned_alloc(4096, 4096);
+	char *data = aligned_alloc(PAGE_SIZE, PAGE_SIZE);
 	char *region;
+
 
 	if (argc < 2) {
 		printf("Usage ./nsc_pointer_reader <disk_name>\n");
@@ -63,7 +65,7 @@ int main(int argc, char *argv[])
 			printf("Error: could not seek %s\n", strerror(errno));
 			exit (1);
 		}
-		ret = read(disk_fd_read, data, 4096);
+		ret = read(disk_fd_read, data, BLOCK_SIZE);
 		if( ret == -1) {
 			printf("error reading from device %s\n",strerror(errno));
 			exit(1);
@@ -72,7 +74,7 @@ int main(int argc, char *argv[])
 		assert (next_block == END_BLOCK_MAGIC);
 	}
 
-	end_time = rdtsc1();
+	end_time = rdtsc();
 
 	free(data);
 	munmap(region, statbuf.st_size);
