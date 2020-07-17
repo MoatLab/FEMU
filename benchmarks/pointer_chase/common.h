@@ -31,14 +31,6 @@ static __inline__ unsigned long long rdtsc(void)
             "%rax", "rbx", "rcx", "rdx");
 }
 
-static __inline__ unsigned long long rdtsc1(void)
-{
-    __asm__ __volatile__ ("RDTSC\n\t"
-            "mov %%edx, %0\n\t"
-            "mov %%eax, %1\n\t": "=r" (cycles_high1), "=r" (cycles_low1)::
-            "%rax", "rbx", "rcx", "rdx");
-}
-
 #define debug_print(fmt, ...) \
         do { if (DEBUG) fprintf(stderr, "%s:%d:%s(): " fmt, __FILE__, \
                                 __LINE__, __func__, __VA_ARGS__); } while (0)

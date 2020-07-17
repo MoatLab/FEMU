@@ -72,7 +72,7 @@ int main(int argc, char *argv[])
 		assert (next_block == END_BLOCK_MAGIC);
 	}
 
-	end_time = rdtsc1();
+	end_time = rdtsc();
 
 	free(data);
 	munmap(region, statbuf.st_size);
