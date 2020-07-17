@@ -12,7 +12,7 @@ int get_unvisited_pointer(uint64_t max_value)
 {
 	uint64_t bno = rand() % (max_value);
 	while (pre_accessed_blocks.find(bno) != pre_accessed_blocks.end()) {
-		debug_print("collision %d exists\n", bno);
+		debug_print("collision %lu exists\n", bno);
 		bno = rand() % (max_value);
 	}
 	pre_accessed_blocks[bno]=true;
@@ -66,7 +66,7 @@ int main(int argc, char *argv[])
 	}
 
 	if(max_pointer_value <= max_list_length * num_lists) {
-		printf("Please reduce max_list_length %d or num_lists %d\n\nOR\n\nincrease max_pointer_value %d\n\n", max_list_length, num_lists, max_pointer_value);
+		printf("Please reduce max_list_length %d or num_lists %d\n\nOR\n\nincrease max_pointer_value %lu\n\n", max_list_length, num_lists, max_pointer_value);
 		exit(0);
 	}
 
@@ -79,10 +79,10 @@ int main(int argc, char *argv[])
 				next_block = get_unvisited_pointer(max_pointer_value);
 			}
 			if (j == list_length) {
-				dprintf(hpfile, "%d\n", current_block);
+				dprintf(hpfile, "%lu\n", current_block);
 			}
 		//	printf("%d %d %d\n", current_block, next_block, j);
-			dprintf(outfile, "%d %d %d\n", current_block, next_block, j);
+			dprintf(outfile, "%lu %lu %d\n", current_block, next_block, j);
 			current_block = next_block;
 			next_block = END_BLOCK_MAGIC;
 		}
