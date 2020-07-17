@@ -8,6 +8,7 @@
 
 extern uint64_t iscos_counter;
 
+
 /* Coperd: FEMU Memory Backend (mbe) for emulated SSD */
 
 void femu_init_mem_backend(struct femu_mbe *mbe, int64_t nbytes)
@@ -44,10 +45,10 @@ static void inline add_delay(uint32_t micro_seconds) {
 	while( cpu_get_host_ticks()  < req_time);
 }
 
-int do_pointer_chase(int computational_fd_send, int computational_fd_recv, void *mb, uint64_t mb_oft, dma_addr_t cur_len, AddressSpace *as, dma_addr_t *cur_addr, uint32_t read_delay)
+uint64_t do_pointer_chase(int computational_fd_send, int computational_fd_recv, void *mb, uint64_t mb_oft, dma_addr_t cur_len, AddressSpace *as, dma_addr_t *cur_addr, uint32_t read_delay)
 {
 	uint64_t new_offset = mb_oft;
-	int c;
+	uint64_t c;
 	DMADirection dir = DMA_DIRECTION_FROM_DEVICE;
 
 	int ret = write(computational_fd_send, mb + new_offset, 4096);
@@ -55,7 +56,10 @@ int do_pointer_chase(int computational_fd_send, int computational_fd_recv, void 
 		printf("write on pipe failed %s\n", strerror(errno));
 	}
 	c = 0;
-	read(computational_fd_recv, &c, sizeof(c));
+	ret = read(computational_fd_recv, &c, sizeof(c));
+	if (ret < 0) {
+		printf("read from pipe failed %s\n", strerror(errno));	
+	}
 
 	while (c != 0 && c!= END_BLOCK_MAGIC)
 	{
@@ -85,8 +89,11 @@ int do_count(int computational_fd_send, int computational_fd_recv, void *mb , ui
 	if (ret < 0 ) {
 		printf("write on pipe failed %s\n", strerror(errno));
 	}
-	int c=0;
-	read(computational_fd_recv, &c, sizeof(c));
+	uint64_t c=0;
+	ret = read(computational_fd_recv, &c, sizeof(c));
+	if (ret < 0) {
+		printf("read from pipe failed %s\n", strerror(errno));
+	}
 	printf("number of bytes in current block %d\n", c);
 	return c;
 }
@@ -100,6 +107,7 @@ int femu_rw_mem_backend_bb(struct femu_mbe *mbe, QEMUSGList *qsg,
     dma_addr_t cur_addr, cur_len;
     uint64_t mb_oft = data_offset;
     void *mb = mbe->mem_backend;
+
 	uint32_t flash_read_delay = mbe->flash_read_latency;
 	uint32_t flash_write_delay = mbe->flash_write_latency;
 

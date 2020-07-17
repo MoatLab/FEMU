@@ -38,6 +38,7 @@ present.
 issues read to the head of the linked list (inside the guest VM) and receives the tail of
 the linked list. This requires compute_mode=1 and hardcoded values in NSC Process.
 
+scripts/output - the folder contain benchmarks for pointer_chase in different configurations.
 Example Workflow:
 
 1. Run `pointer_generator` eg.:
