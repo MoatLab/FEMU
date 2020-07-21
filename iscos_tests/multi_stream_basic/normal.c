@@ -35,6 +35,7 @@ void normal_write(void *x)
 		}
 		printf("WRITE DONE: \n");
 	}
+	// this is just for completeness, since the disk is opened using O_DIRECT flag, we dont need this.
 	fsync(fd);
 	close(fd);
 }

@@ -28,6 +28,7 @@ void stream_write(void *x)
 			printf("nvme write from st_thread successful on fd %d\n", fd);
 
 	}
+	// this is just for completeness, since the disk is opened using O_DIRECT flag, we dont need this.
 	fsync(fd);
 	close(fd);
 	return;
