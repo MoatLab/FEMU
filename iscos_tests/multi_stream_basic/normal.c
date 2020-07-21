@@ -1,4 +1,4 @@
-#include "common.c"
+#include "common.h"
 
 /* RAND_MAX assumed to be 32767 */
 unsigned char myrand(void) {

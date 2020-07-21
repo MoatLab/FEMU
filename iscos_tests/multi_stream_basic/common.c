@@ -1,8 +1,11 @@
+#ifndef COMMON_C_
+#define COMMON_C_
+
 #include "common.h"
 
 #define COMPUTE_DW11(dspec, dtype, doper) (dspec << 16 | dtype << 8 | doper)
 
-int nvme_dir_send(int fd, __u32 nsid, __u16 dspec, __u8 dtype, __u8 doper,
+static int nvme_dir_send(int fd, __u32 nsid, __u16 dspec, __u8 dtype, __u8 doper,
                   __u32 data_len, __u32 dw12, void *data, __u32 *result)
 {
         struct nvme_admin_cmd cmd = {
@@ -22,7 +25,7 @@ int nvme_dir_send(int fd, __u32 nsid, __u16 dspec, __u8 dtype, __u8 doper,
         return err;
 }
 
-int nvme_dir_recv(int fd, __u32 nsid, __u16 dspec, __u8 dtype, __u8 doper,
+static int nvme_dir_recv(int fd, __u32 nsid, __u16 dspec, __u8 dtype, __u8 doper,
                   __u32 data_len, __u32 dw12, void *data, __u32 *result)
 {
         struct nvme_admin_cmd cmd = {
@@ -42,7 +45,7 @@ int nvme_dir_recv(int fd, __u32 nsid, __u16 dspec, __u8 dtype, __u8 doper,
         return err;
 }
 
-int nvme_get_nsid(int fd)
+static int nvme_get_nsid(int fd)
 {
         static struct stat nvme_stat;
         int err = fstat(fd, &nvme_stat);
@@ -86,4 +89,4 @@ int alloc_stream_resources(int fd, unsigned int rsc_cnt)
 	return err;
 }
 
-
+#endif

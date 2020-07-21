@@ -1,6 +1,7 @@
 #ifndef COMMON_H
 #define COMMON_H
 
+#define _GNU_SOURCE
 #include <errno.h>
 #include <sys/ioctl.h>
 #include <stdio.h>
@@ -30,12 +31,23 @@
 
 #define IO_OPEN_OPTIONS (O_RDWR | O_DIRECT | O_NONBLOCK | O_ASYNC)
 
-static unsigned long next;
+unsigned long next;
 
 struct sdm {
 	char *fn;
 	unsigned char *data_in;
 	unsigned char *data_out;
 };
+
+static int nvme_dir_send(int fd, __u32 nsid, __u16 dspec, __u8 dtype, __u8 doper,
+                  __u32 data_len, __u32 dw12, void *data, __u32 *result);
+
+static int nvme_dir_recv(int fd, __u32 nsid, __u16 dspec, __u8 dtype, __u8 doper,
+                  __u32 data_len, __u32 dw12, void *data, __u32 *result);
+
+
+static int nvme_get_nsid(int fd);
+int enable_stream_directive(int fd);
+int alloc_stream_resources(int fd, unsigned int rsc_cnt);
 
 #endif
