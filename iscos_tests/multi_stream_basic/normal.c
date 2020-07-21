@@ -35,6 +35,7 @@ void normal_write(void *x)
 		}
 		printf("WRITE DONE: \n");
 	}
+	fsync(fd);
 	close(fd);
 }
 

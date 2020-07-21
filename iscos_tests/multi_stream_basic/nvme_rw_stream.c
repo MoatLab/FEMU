@@ -30,6 +30,7 @@ void *normal_write(void *x)
 			printf("nvme write from nw_thread successful on fd %d\n", fd);
 
 	}
+	fsync(fd);
 	close(fd);
 	return NULL;
 }
@@ -55,6 +56,7 @@ void *stream_write(void *x)
 			printf("nvme write from st_thread successful on fd %d\n", fd);
 
 	}
+	fsync(fd);
 	close(fd);
 	return NULL;
 
@@ -87,7 +89,7 @@ int main(int argc, char **argv)
 
 	perrstr = argv[1];
 	f.fn = argv[1];		
-	fd = open(argv[1], O_RDWR | O_DIRECT | O_LARGEFILE);
+	fd = open(argv[1], IO_OPEN_OPTIONS);
 	if (fd < 0)
 		goto perror;
 	printf("Opened fd from main: %d\n", fd);

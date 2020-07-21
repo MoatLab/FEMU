@@ -28,6 +28,7 @@ void stream_write(void *x)
 			printf("nvme write from st_thread successful on fd %d\n", fd);
 
 	}
+	fsync(fd);
 	close(fd);
 	return;
 

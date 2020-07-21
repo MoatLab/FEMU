@@ -28,7 +28,6 @@
 #define nvme_admin_directive_send 0x19
 #define nvme_admin_directive_recv 0x1a
 
-//#define IO_OPEN_OPTIONS (O_RDWR | O_DIRECT | O_LARGEFILE)
 #define IO_OPEN_OPTIONS (O_RDWR | O_DIRECT | O_NONBLOCK | O_ASYNC)
 
 static unsigned long next;
