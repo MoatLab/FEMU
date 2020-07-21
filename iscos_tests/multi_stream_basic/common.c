@@ -1,5 +1,7 @@
 #include "common.h"
 
+#define COMPUTE_DW11(dspec, dtype, doper) (dspec << 16 | dtype << 8 | doper)
+
 int nvme_dir_send(int fd, __u32 nsid, __u16 dspec, __u8 dtype, __u8 doper,
                   __u32 data_len, __u32 dw12, void *data, __u32 *result)
 {
@@ -9,7 +11,7 @@ int nvme_dir_send(int fd, __u32 nsid, __u16 dspec, __u8 dtype, __u8 doper,
                 .data_len       = data_len,
                 .nsid           = nsid,
                 .cdw10          = data_len? (data_len >> 2) - 1 : 0,
-                .cdw11          = dspec << 16 | dtype << 8 | doper,
+                .cdw11          = COMPUTE_DW11(dspec, dtype, doper),
                 .cdw12          = dw12,
         };
         int err;
@@ -29,7 +31,7 @@ int nvme_dir_recv(int fd, __u32 nsid, __u16 dspec, __u8 dtype, __u8 doper,
                 .data_len       = data_len,
                 .nsid           = nsid,
                 .cdw10          = data_len? (data_len >> 2) - 1 : 0,
-                .cdw11          = dspec << 16 | dtype << 8 | doper,
+                .cdw11          = COMPUTE_DW11(dspec, dtype, doper),
                 .cdw12          = dw12,
         };
         int err;
