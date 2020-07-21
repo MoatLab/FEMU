@@ -43,5 +43,3 @@ Directive Types:
 		`doper=01h` - release identifyer 
 		`doper=02h` - release resources
 
-
-
