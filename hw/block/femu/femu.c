@@ -1143,7 +1143,11 @@ static void nvme_init_ctrl(FemuCtrl *n)
     id->cmic = 0;
     id->mdts = n->mdts;
 //  id->oacs = cpu_to_le16(n->oacs | NVME_OACS_DBBUF);
-	id->oacs = cpu_to_le16(NVME_OACS_DBBUF | NVME_OACS_DIR);
+	if (n->computation_mode) {
+		id->oacs = cpu_to_le16(n->oacs | NVME_OACS_DBBUF | NVME_OACS_DIR);
+	}else {
+		id->oacs = cpu_to_le16(n->oacs | NVME_OACS_DBBUF);
+	}
     id->acl = n->acl;
     id->aerl = n->aerl;
     id->frmw = 7 << 1 | 1;
