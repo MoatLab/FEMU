@@ -81,7 +81,6 @@ int main(int argc, char **argv)
 
 	for (i=0; i<IO_SEGMENT_SIZE; i++)
 		f.data_in[i] = myrand();
-	//f.stream_id = 1;
 
 	stream_write(&f);
 

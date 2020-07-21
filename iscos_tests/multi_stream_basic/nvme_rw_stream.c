@@ -110,7 +110,6 @@ int main(int argc, char **argv)
 
 	for (i=0; i<IO_SEGMENT_SIZE; i++)
 		f.data_in[i] = myrand();
-	//f.stream_id = 1;
 	if(pthread_create(&st_thread, NULL, stream_write, &f)) {
 		fprintf(stderr, "Error creating stream write thread\n");
 		goto perror;
