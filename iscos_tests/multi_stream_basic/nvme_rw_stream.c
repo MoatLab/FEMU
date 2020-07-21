@@ -114,14 +114,14 @@ int main(int argc, char **argv)
 		fprintf(stderr, "Error creating stream write thread\n");
 		goto perror;
 	}
-
-	sleep(1); /* let the stream write to start first */
+	if(pthread_join(st_thread, NULL)) {
+		fprintf(stderr, "Error joining st_thread\n");
+	}
 
 	if(pthread_create(&nw_thread, NULL, normal_write, &f)) {
 		fprintf(stderr, "Error creating normal write thread\n");
 		goto perror;
 	}
-
 	if(pthread_join(nw_thread, NULL)) {
 		fprintf(stderr, "Error joining nw_thread\n");
 	}
@@ -152,10 +152,7 @@ int main(int argc, char **argv)
 		}
 	} 
 
-	if(pthread_join(st_thread, NULL)) {
-		fprintf(stderr, "Error joining st_thread\n");
-	}
-
+	
 	/* read */
 	err = pread(fd, f.data_out, IO_TRANSFER_SIZE, IO_OFFSET_ST); 
 	if (err<0)
