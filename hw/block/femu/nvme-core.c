@@ -5,6 +5,10 @@
 
 #include "nvme.h"
 
+#define DSPEC_FROM_DW11(dw11) ((dw11 >> 16) & 0xFFFF)
+#define DTYPE_FROM_DW11(dw11) ((dw11 >> 8) & 0xFF)
+#define DOPER_FROM_DW11(dw11) (dw11 & 0xFF)
+
 void nvme_free_sq(NvmeSQueue *sq, FemuCtrl *n)
 {
     n->sq[sq->sqid] = NULL;
@@ -800,9 +804,9 @@ static uint16_t nvme_dir_send(FemuCtrl *n, NvmeCmd *cmd)
     uint32_t numd  = le32_to_cpu(cmd->cdw10);
     uint32_t dw11  = le32_to_cpu(cmd->cdw11);
     uint32_t dw12  = le32_to_cpu(cmd->cdw12);
-    uint16_t dspec = (dw11 >> 16) & 0xFFFF;
-    uint8_t  dtype  = (dw11 >> 8) & 0xFF;
-    uint8_t  doper  = dw11 & 0xFF;
+    uint16_t dspec = DSPEC_FROM_DW11(dw11); 
+    uint8_t  dtype  = DTYPE_FROM_DW11(dw11);
+    uint8_t  doper  = DOPER_FROM_DW11(dw11);
     uint8_t  tdtype;
     uint8_t  endir;
     NvmeNamespace *ns;

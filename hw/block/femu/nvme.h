@@ -665,6 +665,9 @@ enum NvmeFeatureIds {
 enum NvmeDirectiveType {
     NVME_DIR_TYPE_IDENTIFY          = 0x00,
     NVME_DIR_TYPE_STREAMS           = 0x01,
+};
+
+enum NvmeDirectiveOps {
     NVME_DIR_SND_ID_OP_ENABLE       = 0x01,
     NVME_DIR_SND_ST_OP_REL_ID       = 0x01,
     NVME_DIR_SND_ST_OP_REL_RSC      = 0x02,
@@ -672,7 +675,13 @@ enum NvmeDirectiveType {
     NVME_DIR_RCV_ST_OP_PARAM        = 0x01,
     NVME_DIR_RCV_ST_OP_STATUS       = 0x02,
     NVME_DIR_RCV_ST_OP_RESOURCE     = 0x03,
+};
+
+enum NvmeDirectiveEnable {
     NVME_DIR_ENDIR                  = 0x01,
+};
+
+enum NvmeDirectiveExists {
     NVME_DIR_IDF_IDENTIFY = 0x1,
     NVME_DIR_IDF_STREAMS = 0x2,
 };
