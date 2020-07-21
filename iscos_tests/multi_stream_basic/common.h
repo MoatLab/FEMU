@@ -1,3 +1,6 @@
+#ifndef COMMON_H
+#define COMMON_H
+
 #include <errno.h>
 #include <sys/ioctl.h>
 #include <stdio.h>
@@ -32,9 +35,8 @@ static unsigned long next;
 
 struct sdm {
 	char *fn;
-	unsigned int sid;
 	unsigned char *data_in;
 	unsigned char *data_out;
 };
 
-
+#endif
