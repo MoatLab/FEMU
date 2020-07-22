@@ -1406,6 +1406,12 @@ void nvme_post_cqes_io(void *opaque);
 
 void femu_create_nvme_poller(FemuCtrl *n);
 
+int nvme_found_in_str_list(NvmeDirStrNsStat *str_ns_stat, uint16_t dspec);
+void nvme_del_from_str_list(NvmeDirStrNsStat *str_ns_stat, int pos);
+void nvme_add_to_str_list(NvmeDirStrNsStat *str_ns_stat, uint16_t dspec);
+void nvme_update_str_stat(FemuCtrl *n, NvmeNamespace *ns, uint16_t dspec);
+
+
 extern int64_t nand_read_upper_t;
 extern int64_t nand_read_lower_t;
 extern int64_t nand_write_upper_t;

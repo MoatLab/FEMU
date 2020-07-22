@@ -16,6 +16,7 @@
 #include "computation.c"
 
 extern uint64_t iscos_counter;
+void computational_thread (void);
 
 static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
 {
@@ -99,7 +100,7 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
             n->nr_tt_late_ios++;
             if (n->print_log) {
                 femu_debug("%s,diff,pq.count=%lu,%" PRId64 ", %lu/%lu\n",
-                        n->devname, pqueue_size(n->pq), now - req->expire_time,
+                        n->devname, pqueue_size(*(n->pq)), now - req->expire_time,
                         n->nr_tt_late_ios, n->nr_tt_ios);
             }
         }
@@ -125,7 +126,7 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
     }
 }
 
-void computational_thread ()
+void computational_thread (void)
 {
 	printf("COMPUTATIONAL THREAD PID = %d\n", getpid());
 	int fd_get = open ("computational_pipe_send", 0666);
@@ -162,6 +163,7 @@ void computational_thread ()
                 ret = write(fd_put, &counter, sizeof(counter));
 //		printf("written\n");
         }
+	return;
 }
 
 static void *nvme_poller(void *arg)
@@ -246,7 +248,7 @@ static void *nvme_poller(void *arg)
             break;
 	}
 
-	printf("%s(): iscos_counter = %llu\n", __func__,iscos_counter);
+	printf("%s(): iscos_counter = %lu\n", __func__,iscos_counter);
 	return NULL;
 }
 
@@ -694,7 +696,7 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
         femu_debug("disabling NVMe Controller ...\n");
     }
 
-	printf("%s():iscos_counter = %llu\n", __func__,iscos_counter);
+	printf("%s():iscos_counter = %lu\n", __func__,iscos_counter);
 
     if (shutdown) {
         femu_debug("%s,clear_guest_notifier\n", __func__);
@@ -1255,7 +1257,6 @@ static void nvme_init_pci(FemuCtrl *n)
 static void femu_realize(PCIDevice *pci_dev, Error **errp)
 {
     FemuCtrl *n = FEMU(pci_dev);
-	NvmeIdCtrl *id = &n->id_ctrl;
     int64_t bs_size;
 
     nvme_check_size();

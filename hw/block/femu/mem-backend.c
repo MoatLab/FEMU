@@ -8,6 +8,10 @@
 
 extern uint64_t iscos_counter;
 
+uint64_t do_pointer_chase(int computational_fd_send, int computational_fd_recv, void *mb, 
+		uint64_t mb_oft, dma_addr_t cur_len, AddressSpace *as, dma_addr_t *cur_addr, uint32_t read_delay);
+
+uint64_t do_count(int computational_fd_send, int computational_fd_recv, void *mb , uint64_t mb_oft, dma_addr_t cur_len);
 
 /* Coperd: FEMU Memory Backend (mbe) for emulated SSD */
 
@@ -38,7 +42,7 @@ void femu_destroy_mem_backend(struct femu_mbe *mbe)
     }
 }
 
-static void inline add_delay(uint32_t micro_seconds) {
+inline static void add_delay(uint32_t micro_seconds) {
 	unsigned long long current_time, req_time;
 	current_time = cpu_get_host_ticks();
 	req_time = current_time + (micro_seconds);
@@ -74,8 +78,11 @@ uint64_t do_pointer_chase(int computational_fd_send, int computational_fd_recv, 
 				printf("write on pipe failed %s\n", strerror(errno));
 			}
 			c = 0;
-			read(computational_fd_recv, &c, sizeof(c));
-			printf("next block_pointer %d\n", c);
+			ret = read(computational_fd_recv, &c, sizeof(c));
+			if (ret < 0) {
+				printf("read from pipe failed %s\n", strerror(errno));
+			}
+			printf("next block_pointer %lu\n", c);
 		}else {
 			return c;
 		}
@@ -83,7 +90,7 @@ uint64_t do_pointer_chase(int computational_fd_send, int computational_fd_recv, 
 	return c;
 }
 
-int do_count(int computational_fd_send, int computational_fd_recv, void *mb , uint64_t mb_oft, dma_addr_t cur_len)
+uint64_t do_count(int computational_fd_send, int computational_fd_recv, void *mb , uint64_t mb_oft, dma_addr_t cur_len)
 {
 	int ret = write(computational_fd_send, mb + mb_oft , cur_len);
 	if (ret < 0 ) {
@@ -94,7 +101,7 @@ int do_count(int computational_fd_send, int computational_fd_recv, void *mb , ui
 	if (ret < 0) {
 		printf("read from pipe failed %s\n", strerror(errno));
 	}
-	printf("number of bytes in current block %d\n", c);
+	printf("number of bytes in current block %lu\n", c);
 	return c;
 }
 
@@ -199,7 +206,7 @@ int femu_rw_mem_backend_oc(struct femu_mbe *mbe, QEMUSGList *qsg,
          * for BB: LBAs are continuous
          */
         mb_oft = data_offset[sg_cur_index];
-	printf("mb_oft %d sg_cur_index %d\n", mb_oft, sg_cur_index);
+	printf("mb_oft %lu sg_cur_index %d\n", mb_oft, sg_cur_index);
     }
 
     qemu_sglist_destroy(qsg);

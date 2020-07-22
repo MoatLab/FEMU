@@ -17,6 +17,6 @@ uint64_t count_bits(char *buf)
 
 uint64_t get_disk_pointer(char *buf)
 {
-	uint64_t *p = buf;
+	uint64_t *p = (uint64_t *)buf;
 	return p[0];
 }
