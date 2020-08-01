@@ -304,7 +304,7 @@ uint16_t femu_oc12_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     int secs_layout[ln->params.max_sec_per_rq];
     uint64_t aio_sector_list[ln->params.max_sec_per_rq];
     void *msl;
-    uint64_t sppa, eppa, ppa;
+    uint64_t ppa;
     uint16_t nlb  = le16_to_cpu(ocrw->nlb) + 1;
     uint64_t prp1 = le64_to_cpu(ocrw->prp1);
     uint64_t prp2 = le64_to_cpu(ocrw->prp2);
@@ -364,19 +364,11 @@ uint16_t femu_oc12_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     req->femu_oc12_slba = le64_to_cpu(ocrw->slba);
     req->is_write = is_write;
 
-    sppa = psl[0];
-    eppa = psl[n_pages - 1];
-    if (sppa == -1 || eppa == -1) {
-        femu_err("femu_oc12_rw: EINVAL\n");
-        err = -EINVAL;
-        goto fail_free_msl;
-    }
-
     /* Reuse check logic from nvme_rw */
-    err = femu_nvme_rw_check_req(n, ns, cmd, req, sppa, eppa, nlb, ctrl,
+    err = femu_oc_rw_check_req(n, ns, cmd, req, psl, n_pages, nlb, ctrl,
             data_size, meta_size);
     if (err) {
-        femu_err("femu_oc12_rw: failed nvme_rw_check\n");
+        femu_err("femu_oc12_rw: failed nvme_rw_check (0x%x)\n", err);
         goto fail_free_msl;
     }
 
@@ -600,7 +592,7 @@ uint16_t femu_oc12_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         goto fail_free_msl;
     }
 
-    req->slba = sppa;
+    req->slba = psl[0];
     req->meta_size = 0;
     req->status = NVME_SUCCESS;
     req->nlb = nlb;

@@ -380,6 +380,8 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     uint32_t nsid = le32_to_cpu(cmd->nsid);
 
     if (nsid == 0 || nsid > n->num_namespaces) {
+		femu_err("%s, NVME_INVALID_NSID %lu\n",
+									__func__, nsid);
         return NVME_INVALID_NSID | NVME_DNR;
     }
 
@@ -431,6 +433,8 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         return femu_oc12_erase_async(n, ns, cmd, req);
 
     default:
+		femu_err("%s, NVME_INVALID_OPCODE\n",
+									__func__);
         return NVME_INVALID_OPCODE | NVME_DNR;
     }
 }

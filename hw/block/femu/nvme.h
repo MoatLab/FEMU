@@ -1287,6 +1287,9 @@ void nvme_set_error_page(FemuCtrl *n, uint16_t sqid, uint16_t cid,
 uint16_t femu_nvme_rw_check_req(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         NvmeRequest *req, uint64_t slba, uint64_t elba, uint32_t nlb,
         uint16_t ctrl, uint64_t data_size, uint64_t meta_size);
+uint16_t femu_oc_rw_check_req(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
+        NvmeRequest *req, uint64_t *psl, uint32_t nr_pages, uint32_t nlb,
+        uint16_t ctrl, uint64_t data_size, uint64_t meta_size);
 int nvme_add_kvm_msi_virq(FemuCtrl *n, NvmeCQueue *cq);
 void nvme_remove_kvm_msi_virq(NvmeCQueue *cq);
 int nvme_set_guest_notifier(FemuCtrl *n, EventNotifier *notifier, uint32_t qid);

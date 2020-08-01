@@ -470,6 +470,49 @@ uint16_t femu_nvme_rw_check_req(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     return 0;
 }
 
+uint16_t femu_oc_rw_check_req(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
+        NvmeRequest *req, uint64_t *psl, uint32_t nr_pages, uint32_t nlb,
+        uint16_t ctrl, uint64_t data_size, uint64_t meta_size)
+{
+	uint32_t i;
+	uint64_t slba = psl[0];
+	uint64_t elba = psl[nr_pages-1];
+
+	for (i = 0; i < nr_pages; i++) {
+		if (psl[i] > le64_to_cpu(ns->id_ns.nsze)) {
+			nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
+                offsetof(NvmeRwCmd, nlb), psl[i], ns->id);
+			return NVME_LBA_RANGE | NVME_DNR;
+		}
+	}
+    if (n->id_ctrl.mdts && data_size > n->page_size * (1 << n->id_ctrl.mdts)) {
+        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
+                offsetof(NvmeRwCmd, nlb), nlb, ns->id);
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    if (meta_size) {
+        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
+                offsetof(NvmeRwCmd, control), ctrl, ns->id);
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    if ((ctrl & NVME_RW_PRINFO_PRACT) && !(ns->id_ns.dps & DPS_TYPE_MASK)) {
+        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
+                offsetof(NvmeRwCmd, control), ctrl, ns->id);
+        /* Not contemplated in LightNVM for now */
+        if (n->femu_mode == FEMU_WHITEBOX_MODE) {
+            return 0;
+        }
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    if (!req->is_write && find_next_bit(ns->uncorrectable, elba, slba) < elba) {
+        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_UNRECOVERED_READ,
+                offsetof(NvmeRwCmd, slba), elba, ns->id);
+        return NVME_UNRECOVERED_READ;
+    }
+
+    return 0;
+}
+
 int nvme_add_kvm_msi_virq(FemuCtrl *n, NvmeCQueue *cq)
 {
     int virq;
