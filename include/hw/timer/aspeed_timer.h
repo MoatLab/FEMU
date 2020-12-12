@@ -24,10 +24,14 @@
 
 #include "qemu/timer.h"
 #include "hw/misc/aspeed_scu.h"
+#include "qom/object.h"
 
-#define ASPEED_TIMER(obj) \
-    OBJECT_CHECK(AspeedTimerCtrlState, (obj), TYPE_ASPEED_TIMER);
 #define TYPE_ASPEED_TIMER "aspeed.timer"
+OBJECT_DECLARE_TYPE(AspeedTimerCtrlState, AspeedTimerClass, ASPEED_TIMER)
+#define TYPE_ASPEED_2400_TIMER TYPE_ASPEED_TIMER "-ast2400"
+#define TYPE_ASPEED_2500_TIMER TYPE_ASPEED_TIMER "-ast2500"
+#define TYPE_ASPEED_2600_TIMER TYPE_ASPEED_TIMER "-ast2600"
+
 #define ASPEED_TIMER_NR_TIMERS 8
 
 typedef struct AspeedTimer {
@@ -46,7 +50,7 @@ typedef struct AspeedTimer {
     uint64_t start;
 } AspeedTimer;
 
-typedef struct AspeedTimerCtrlState {
+struct AspeedTimerCtrlState {
     /*< private >*/
     SysBusDevice parent;
 
@@ -55,9 +59,19 @@ typedef struct AspeedTimerCtrlState {
 
     uint32_t ctrl;
     uint32_t ctrl2;
+    uint32_t ctrl3;
+    uint32_t irq_sts;
     AspeedTimer timers[ASPEED_TIMER_NR_TIMERS];
 
     AspeedSCUState *scu;
-} AspeedTimerCtrlState;
+};
+
+
+struct AspeedTimerClass {
+    SysBusDeviceClass parent_class;
+
+    uint64_t (*read)(AspeedTimerCtrlState *s, hwaddr offset);
+    void (*write)(AspeedTimerCtrlState *s, hwaddr offset, uint64_t value);
+};
 
 #endif /* ASPEED_TIMER_H */

@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
 #
 # Compares vmstate information stored in JSON format, obtained from
 # the -dump-vmstate QEMU command.
@@ -19,7 +19,6 @@
 # You should have received a copy of the GNU General Public License along
 # with this program; if not, see <http://www.gnu.org/licenses/>.
 
-from __future__ import print_function
 import argparse
 import json
 import sys
@@ -375,9 +374,11 @@ def main():
     help_text = "Parse JSON-formatted vmstate dumps from QEMU in files SRC and DEST.  Checks whether migration from SRC to DEST QEMU versions would break based on the VMSTATE information contained within the JSON outputs.  The JSON output is created from a QEMU invocation with the -dump-vmstate parameter and a filename argument to it.  Other parameters to QEMU do not matter, except the -M (machine type) parameter."
 
     parser = argparse.ArgumentParser(description=help_text)
-    parser.add_argument('-s', '--src', type=file, required=True,
+    parser.add_argument('-s', '--src', type=argparse.FileType('r'),
+                        required=True,
                         help='json dump from src qemu')
-    parser.add_argument('-d', '--dest', type=file, required=True,
+    parser.add_argument('-d', '--dest', type=argparse.FileType('r'),
+                        required=True,
                         help='json dump from dest qemu')
     parser.add_argument('--reverse', required=False, default=False,
                         action='store_true',

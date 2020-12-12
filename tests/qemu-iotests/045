@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 # Tests for fdsets and getfd.
 #
@@ -175,4 +175,5 @@ class TestSCMFd(iotests.QMPTestCase):
             "File descriptor named '%s' not found" % fdname)
 
 if __name__ == '__main__':
-    iotests.main(supported_fmts=['raw'])
+    iotests.main(supported_fmts=['raw'],
+                 supported_protocols=['file'])

@@ -75,8 +75,6 @@ public class TestArm64 {
           System.out.printf("\t\t\tExt: %d\n", i.ext);
         if (i.vas != ARM64_VAS_INVALID)
           System.out.printf("\t\t\tVector Arrangement Specifier: 0x%x\n", i.vas);
-        if (i.vess != ARM64_VESS_INVALID)
-          System.out.printf("\t\t\tVector Element Size Specifier: %d\n", i.vess);
         if (i.vector_index != -1)
           System.out.printf("\t\t\tVector Index: %d\n", i.vector_index);
 
@@ -96,15 +94,15 @@ public class TestArm64 {
 
   public static void main(String argv[]) {
 
-    final Test.platform[] all_tests = {
-      new Test.platform(Capstone.CS_ARCH_ARM64, Capstone.CS_MODE_ARM, hexString2Byte(ARM64_CODE), "ARM-64"),
+    final TestBasic.platform[] all_tests = {
+      new TestBasic.platform(Capstone.CS_ARCH_ARM64, Capstone.CS_MODE_ARM, hexString2Byte(ARM64_CODE), "ARM-64"),
     };
 
     for (int i=0; i<all_tests.length; i++) {
-      Test.platform test = all_tests[i];
+      TestBasic.platform test = all_tests[i];
       System.out.println(new String(new char[16]).replace("\0", "*"));
       System.out.println("Platform: " + test.comment);
-      System.out.println("Code: " + Test.stringToHex(test.code));
+      System.out.println("Code: " + TestBasic.stringToHex(test.code));
       System.out.println("Disasm:");
 
       cs = new Capstone(test.arch, test.mode);

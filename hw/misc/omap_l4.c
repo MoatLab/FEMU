@@ -18,14 +18,13 @@
  * with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 #include "qemu/osdep.h"
-#include "hw/hw.h"
 #include "hw/arm/omap.h"
 
 struct omap_l4_s {
     MemoryRegion *address_space;
     hwaddr base;
     int ta_num;
-    struct omap_target_agent_s ta[0];
+    struct omap_target_agent_s ta[];
 };
 
 struct omap_l4_s *omap_l4_init(MemoryRegion *address_space,

@@ -25,6 +25,7 @@
 #include "qapi/error.h"
 #include "qemu/cutils.h"
 #include "sysemu/block-backend.h"
+#include "sysemu/runstate.h" /* for qemu_system_killed() prototype */
 #include "block/block_int.h"
 #include "block/nbd.h"
 #include "qemu/main-loop.h"
@@ -65,12 +66,11 @@
 
 #define MBR_SIZE 512
 
-static NBDExport *export;
 static int verbose;
 static char *srcpath;
 static SocketAddress *saddr;
 static int persistent = 0;
-static enum { RUNNING, TERMINATE, TERMINATING, TERMINATED } state;
+static enum { RUNNING, TERMINATE, TERMINATED } state;
 static int shared = 1;
 static int nb_fds;
 static QIONetListener *server;
@@ -100,7 +100,7 @@ static void usage(const char *name)
 "\n"
 "Exposing part of the image:\n"
 "  -o, --offset=OFFSET       offset into the image\n"
-"  -P, --partition=NUM       only expose partition NUM\n"
+"  -A, --allocation-depth    expose the allocation depth\n"
 "  -B, --bitmap=NAME         expose a persistent dirty bitmap\n"
 "\n"
 "General purpose options:\n"
@@ -135,7 +135,7 @@ static void usage(const char *name)
 "                            '[ID_OR_NAME]'\n"
 "  -n, --nocache             disable host cache\n"
 "      --cache=MODE          set cache mode (none, writeback, ...)\n"
-"      --aio=MODE            set AIO mode (native or threads)\n"
+"      --aio=MODE            set AIO mode (native, io_uring or threads)\n"
 "      --discard=MODE        set discard mode (ignore, unmap)\n"
 "      --detect-zeroes=MODE  set detect-zeroes mode (off, on, unmap)\n"
 "      --image-opts          treat FILE as a full set of image options\n"
@@ -156,102 +156,17 @@ QEMU_COPYRIGHT "\n"
     , name);
 }
 
-struct partition_record
+#ifdef CONFIG_POSIX
+/*
+ * The client thread uses SIGTERM to interrupt the server.  A signal
+ * handler ensures that "qemu-nbd -v -c" exits with a nice status code.
+ */
+void qemu_system_killed(int signum, pid_t pid)
 {
-    uint8_t bootable;
-    uint8_t start_head;
-    uint32_t start_cylinder;
-    uint8_t start_sector;
-    uint8_t system;
-    uint8_t end_head;
-    uint8_t end_cylinder;
-    uint8_t end_sector;
-    uint32_t start_sector_abs;
-    uint32_t nb_sectors_abs;
-};
-
-static void read_partition(uint8_t *p, struct partition_record *r)
-{
-    r->bootable = p[0];
-    r->start_head = p[1];
-    r->start_cylinder = p[3] | ((p[2] << 2) & 0x0300);
-    r->start_sector = p[2] & 0x3f;
-    r->system = p[4];
-    r->end_head = p[5];
-    r->end_cylinder = p[7] | ((p[6] << 2) & 0x300);
-    r->end_sector = p[6] & 0x3f;
-
-    r->start_sector_abs = ldl_le_p(p + 8);
-    r->nb_sectors_abs   = ldl_le_p(p + 12);
-}
-
-static int find_partition(BlockBackend *blk, int partition,
-                          uint64_t *offset, uint64_t *size)
-{
-    struct partition_record mbr[4];
-    uint8_t data[MBR_SIZE];
-    int i;
-    int ext_partnum = 4;
-    int ret;
-
-    ret = blk_pread(blk, 0, data, sizeof(data));
-    if (ret < 0) {
-        error_report("error while reading: %s", strerror(-ret));
-        exit(EXIT_FAILURE);
-    }
-
-    if (data[510] != 0x55 || data[511] != 0xaa) {
-        return -EINVAL;
-    }
-
-    for (i = 0; i < 4; i++) {
-        read_partition(&data[446 + 16 * i], &mbr[i]);
-
-        if (!mbr[i].system || !mbr[i].nb_sectors_abs) {
-            continue;
-        }
-
-        if (mbr[i].system == 0xF || mbr[i].system == 0x5) {
-            struct partition_record ext[4];
-            uint8_t data1[MBR_SIZE];
-            int j;
-
-            ret = blk_pread(blk, mbr[i].start_sector_abs * MBR_SIZE,
-                            data1, sizeof(data1));
-            if (ret < 0) {
-                error_report("error while reading: %s", strerror(-ret));
-                exit(EXIT_FAILURE);
-            }
-
-            for (j = 0; j < 4; j++) {
-                read_partition(&data1[446 + 16 * j], &ext[j]);
-                if (!ext[j].system || !ext[j].nb_sectors_abs) {
-                    continue;
-                }
-
-                if ((ext_partnum + j + 1) == partition) {
-                    *offset = (uint64_t)ext[j].start_sector_abs << 9;
-                    *size = (uint64_t)ext[j].nb_sectors_abs << 9;
-                    return 0;
-                }
-            }
-            ext_partnum += 4;
-        } else if ((i + 1) == partition) {
-            *offset = (uint64_t)mbr[i].start_sector_abs << 9;
-            *size = (uint64_t)mbr[i].nb_sectors_abs << 9;
-            return 0;
-        }
-    }
-
-    return -ENOENT;
-}
-
-static void termsig_handler(int signum)
-{
-    atomic_cmpxchg(&state, RUNNING, TERMINATE);
+    qatomic_cmpxchg(&state, RUNNING, TERMINATE);
     qemu_notify_event();
 }
-
+#endif /* CONFIG_POSIX */
 
 static int qemu_nbd_client_list(SocketAddress *saddr, QCryptoTLSCreds *tls,
                                 const char *hostname)
@@ -294,6 +209,7 @@ static int qemu_nbd_client_list(SocketAddress *saddr, QCryptoTLSCreds *tls,
                 [NBD_FLAG_CAN_MULTI_CONN_BIT]       = "multi",
                 [NBD_FLAG_SEND_RESIZE_BIT]          = "resize",
                 [NBD_FLAG_SEND_CACHE_BIT]           = "cache",
+                [NBD_FLAG_SEND_FAST_ZERO_BIT]       = "fast-zero",
             };
 
             printf("  size:  %" PRIu64 "\n", list[i].size);
@@ -362,7 +278,7 @@ static void *nbd_client_thread(void *arg)
         goto out;
     }
 
-    ret = nbd_receive_negotiate(QIO_CHANNEL(sioc),
+    ret = nbd_receive_negotiate(NULL, QIO_CHANNEL(sioc),
                                 NULL, NULL, NULL, &info, &local_error);
     if (ret < 0) {
         if (local_error) {
@@ -419,12 +335,6 @@ out:
 static int nbd_can_accept(void)
 {
     return state == RUNNING && nb_fds < shared;
-}
-
-static void nbd_export_closed(NBDExport *export)
-{
-    assert(state == TERMINATING);
-    state = TERMINATED;
 }
 
 static void nbd_update_server_watch(void);
@@ -506,6 +416,13 @@ static QemuOptsList qemu_object_opts = {
     },
 };
 
+static bool qemu_nbd_object_print_help(const char *type, QemuOpts *opts)
+{
+    if (user_creatable_print_help(type, opts)) {
+        exit(0);
+    }
+    return true;
+}
 
 
 static QCryptoTLSCreds *nbd_get_tls_creds(const char *id, bool list,
@@ -600,16 +517,15 @@ int main(int argc, char **argv)
     BlockBackend *blk;
     BlockDriverState *bs;
     uint64_t dev_offset = 0;
-    uint16_t nbdflags = 0;
+    bool readonly = false;
     bool disconnect = false;
     const char *bindto = NULL;
     const char *port = NULL;
     char *sockpath = NULL;
     char *device = NULL;
-    int64_t fd_size;
     QemuOpts *sn_opts = NULL;
     const char *sn_id_or_name = NULL;
-    const char *sopt = "hVb:o:p:rsnP:c:dvk:e:f:tl:x:T:D:B:L";
+    const char *sopt = "hVb:o:p:rsnc:dvk:e:f:tl:x:T:D:AB:L";
     struct option lopt[] = {
         { "help", no_argument, NULL, 'h' },
         { "version", no_argument, NULL, 'V' },
@@ -618,7 +534,7 @@ int main(int argc, char **argv)
         { "socket", required_argument, NULL, 'k' },
         { "offset", required_argument, NULL, 'o' },
         { "read-only", no_argument, NULL, 'r' },
-        { "partition", required_argument, NULL, 'P' },
+        { "allocation-depth", no_argument, NULL, 'A' },
         { "bitmap", required_argument, NULL, 'B' },
         { "connect", required_argument, NULL, 'c' },
         { "disconnect", no_argument, NULL, 'd' },
@@ -649,7 +565,6 @@ int main(int argc, char **argv)
     int ch;
     int opt_ind = 0;
     int flags = BDRV_O_RDWR;
-    int partition = 0;
     int ret = 0;
     bool seen_cache = false;
     bool seen_discard = false;
@@ -661,29 +576,24 @@ int main(int argc, char **argv)
     QDict *options = NULL;
     const char *export_name = NULL; /* defaults to "" later for server mode */
     const char *export_description = NULL;
-    const char *bitmap = NULL;
+    strList *bitmaps = NULL;
+    bool alloc_depth = false;
     const char *tlscredsid = NULL;
     bool imageOpts = false;
     bool writethrough = true;
-    char *trace_file = NULL;
     bool fork_process = false;
     bool list = false;
     int old_stderr = -1;
     unsigned socket_activation;
     const char *pid_file_name = NULL;
-
-    /* The client thread uses SIGTERM to interrupt the server.  A signal
-     * handler ensures that "qemu-nbd -v -c" exits with a nice status code.
-     */
-    struct sigaction sa_sigterm;
-    memset(&sa_sigterm, 0, sizeof(sa_sigterm));
-    sa_sigterm.sa_handler = termsig_handler;
-    sigaction(SIGTERM, &sa_sigterm, NULL);
+    BlockExportOptions *export_opts;
 
 #ifdef CONFIG_POSIX
-    signal(SIGPIPE, SIG_IGN);
+    os_setup_early_signal_handling();
+    os_setup_signal_handling();
 #endif
 
+    socket_init();
     error_init(argv[0]);
     module_call_init(MODULE_INIT_TRACE);
     qcrypto_init(&error_fatal);
@@ -718,13 +628,9 @@ int main(int argc, char **argv)
                 exit(EXIT_FAILURE);
             }
             seen_aio = true;
-            if (!strcmp(optarg, "native")) {
-                flags |= BDRV_O_NATIVE_AIO;
-            } else if (!strcmp(optarg, "threads")) {
-                /* this is the default */
-            } else {
-               error_report("invalid aio mode `%s'", optarg);
-               exit(EXIT_FAILURE);
+            if (bdrv_parse_aio(optarg, &flags) < 0) {
+                error_report("Invalid aio mode '%s'", optarg);
+                exit(EXIT_FAILURE);
             }
             break;
         case QEMU_NBD_OPT_DISCARD:
@@ -782,20 +688,14 @@ int main(int argc, char **argv)
             }
             /* fall through */
         case 'r':
-            nbdflags |= NBD_FLAG_READ_ONLY;
+            readonly = true;
             flags &= ~BDRV_O_RDWR;
             break;
-        case 'P':
-            warn_report("The '-P' option is deprecated; use --image-opts with "
-                        "a raw device wrapper for subset exports instead");
-            if (qemu_strtoi(optarg, NULL, 0, &partition) < 0 ||
-                partition < 1 || partition > 8) {
-                error_report("Invalid partition '%s'", optarg);
-                exit(EXIT_FAILURE);
-            }
+        case 'A':
+            alloc_depth = true;
             break;
         case 'B':
-            bitmap = optarg;
+            QAPI_LIST_PREPEND(bitmaps, g_strdup(optarg));
             break;
         case 'k':
             sockpath = optarg;
@@ -825,9 +725,18 @@ int main(int argc, char **argv)
             break;
         case 'x':
             export_name = optarg;
+            if (strlen(export_name) > NBD_MAX_STRING_SIZE) {
+                error_report("export name '%s' too long", export_name);
+                exit(EXIT_FAILURE);
+            }
             break;
         case 'D':
             export_description = optarg;
+            if (strlen(export_description) > NBD_MAX_STRING_SIZE) {
+                error_report("export description '%s' too long",
+                             export_description);
+                exit(EXIT_FAILURE);
+            }
             break;
         case 'v':
             verbose = 1;
@@ -858,8 +767,7 @@ int main(int argc, char **argv)
             imageOpts = true;
             break;
         case 'T':
-            g_free(trace_file);
-            trace_file = trace_opt_parse(optarg);
+            trace_opt_parse(optarg);
             break;
         case QEMU_NBD_OPT_TLSAUTHZ:
             tlsauthz = optarg;
@@ -881,9 +789,9 @@ int main(int argc, char **argv)
             error_report("List mode is incompatible with a file name");
             exit(EXIT_FAILURE);
         }
-        if (export_name || export_description || dev_offset || partition ||
-            device || disconnect || fmt || sn_id_or_name || bitmap ||
-            seen_aio || seen_discard || seen_cache) {
+        if (export_name || export_description || dev_offset ||
+            device || disconnect || fmt || sn_id_or_name || bitmaps ||
+            alloc_depth || seen_aio || seen_discard || seen_cache) {
             error_report("List mode is incompatible with per-device settings");
             exit(EXIT_FAILURE);
         }
@@ -901,12 +809,12 @@ int main(int argc, char **argv)
 
     qemu_opts_foreach(&qemu_object_opts,
                       user_creatable_add_opts_foreach,
-                      NULL, &error_fatal);
+                      qemu_nbd_object_print_help, &error_fatal);
 
     if (!trace_init_backends()) {
         exit(1);
     }
-    trace_init_file(trace_file);
+    trace_init_file();
     qemu_set_log(LOG_TRACE);
 
     socket_activation = check_socket_activation();
@@ -945,8 +853,7 @@ int main(int argc, char **argv)
         }
         tlscreds = nbd_get_tls_creds(tlscredsid, list, &local_err);
         if (local_err) {
-            error_report("Failed to get TLS creds %s",
-                         error_get_pretty(local_err));
+            error_reportf_err(local_err, "Failed to get TLS creds: ");
             exit(EXIT_FAILURE);
         }
     } else {
@@ -985,6 +892,7 @@ int main(int argc, char **argv)
 #endif
 
     if ((device && !verbose) || fork_process) {
+#ifndef WIN32
         int stderr_fd[2];
         pid_t pid;
         int ret;
@@ -1005,7 +913,11 @@ int main(int argc, char **argv)
         } else if (pid == 0) {
             close(stderr_fd[0]);
 
-            old_stderr = dup(STDERR_FILENO);
+            /* Remember parent's stderr if we will be restoring it. */
+            if (fork_process) {
+                old_stderr = dup(STDERR_FILENO);
+            }
+
             ret = qemu_daemon(1, 0);
 
             /* Temporarily redirect stderr to the parent's pipe...  */
@@ -1044,6 +956,10 @@ int main(int argc, char **argv)
              */
             exit(errors);
         }
+#else /* WIN32 */
+        error_report("Unable to fork into background on Windows hosts");
+        exit(EXIT_FAILURE);
+#endif /* WIN32 */
     }
 
     if (device != NULL && sockpath == NULL) {
@@ -1054,7 +970,7 @@ int main(int argc, char **argv)
     server = qio_net_listener_new();
     if (socket_activation == 0) {
         saddr = nbd_build_socket_address(sockpath, bindto, port);
-        if (qio_net_listener_open_sync(server, saddr, &local_err) < 0) {
+        if (qio_net_listener_open_sync(server, saddr, 1, &local_err) < 0) {
             object_unref(OBJECT(server));
             error_report_err(local_err);
             exit(EXIT_FAILURE);
@@ -1068,8 +984,8 @@ int main(int argc, char **argv)
                                              &local_err);
             if (sioc == NULL) {
                 object_unref(OBJECT(server));
-                error_report("Failed to use socket activation: %s",
-                             error_get_pretty(local_err));
+                error_reportf_err(local_err,
+                                  "Failed to use socket activation: ");
                 exit(EXIT_FAILURE);
             }
             qio_net_listener_add(server, sioc);
@@ -1114,6 +1030,17 @@ int main(int argc, char **argv)
     }
     bs = blk_bs(blk);
 
+    if (dev_offset) {
+        QDict *raw_opts = qdict_new();
+        qdict_put_str(raw_opts, "driver", "raw");
+        qdict_put_str(raw_opts, "file", bs->node_name);
+        qdict_put_int(raw_opts, "offset", dev_offset);
+        bs = bdrv_open(NULL, NULL, raw_opts, flags, &error_fatal);
+        blk_remove_bs(blk);
+        blk_insert_bs(blk, bs, &error_fatal);
+        bdrv_unref(bs);
+    }
+
     blk_set_enable_write_cache(blk, !writethrough);
 
     if (sn_opts) {
@@ -1131,51 +1058,31 @@ int main(int argc, char **argv)
     }
 
     bs->detect_zeroes = detect_zeroes;
-    fd_size = blk_getlength(blk);
-    if (fd_size < 0) {
-        error_report("Failed to determine the image length: %s",
-                     strerror(-fd_size));
-        exit(EXIT_FAILURE);
-    }
 
-    if (dev_offset >= fd_size) {
-        error_report("Offset (%" PRIu64 ") has to be smaller than the image "
-                     "size (%" PRId64 ")", dev_offset, fd_size);
-        exit(EXIT_FAILURE);
-    }
-    fd_size -= dev_offset;
+    nbd_server_is_qemu_nbd(true);
 
-    if (partition) {
-        uint64_t limit;
-
-        if (dev_offset) {
-            error_report("Cannot request partition and offset together");
-            exit(EXIT_FAILURE);
-        }
-        ret = find_partition(blk, partition, &dev_offset, &limit);
-        if (ret < 0) {
-            error_report("Could not find partition %d: %s", partition,
-                         strerror(-ret));
-            exit(EXIT_FAILURE);
-        }
-        /*
-         * MBR partition limits are (32-bit << 9); this assert lets
-         * the compiler know that we can't overflow 64 bits.
-         */
-        assert(dev_offset + limit >= dev_offset);
-        if (dev_offset + limit > fd_size) {
-            error_report("Discovered partition %d at offset %" PRIu64
-                         " size %" PRIu64 ", but size exceeds file length %"
-                         PRId64, partition, dev_offset, limit, fd_size);
-            exit(EXIT_FAILURE);
-        }
-        fd_size = limit;
-    }
-
-    export = nbd_export_new(bs, dev_offset, fd_size, export_name,
-                            export_description, bitmap, nbdflags,
-                            nbd_export_closed, writethrough, NULL,
-                            &error_fatal);
+    export_opts = g_new(BlockExportOptions, 1);
+    *export_opts = (BlockExportOptions) {
+        .type               = BLOCK_EXPORT_TYPE_NBD,
+        .id                 = g_strdup("qemu-nbd-export"),
+        .node_name          = g_strdup(bdrv_get_node_name(bs)),
+        .has_writethrough   = true,
+        .writethrough       = writethrough,
+        .has_writable       = true,
+        .writable           = !readonly,
+        .u.nbd = {
+            .has_name             = true,
+            .name                 = g_strdup(export_name),
+            .has_description      = !!export_description,
+            .description          = g_strdup(export_description),
+            .has_bitmaps          = !!bitmaps,
+            .bitmaps              = bitmaps,
+            .has_allocation_depth = alloc_depth,
+            .allocation_depth     = alloc_depth,
+        },
+    };
+    blk_exp_add(export_opts, &error_fatal);
+    qapi_free_BlockExportOptions(export_opts);
 
     if (device) {
 #if HAVE_NBD_DEVICE
@@ -1215,10 +1122,8 @@ int main(int argc, char **argv)
     do {
         main_loop_wait(false);
         if (state == TERMINATE) {
-            state = TERMINATING;
-            nbd_export_close(export);
-            nbd_export_put(export);
-            export = NULL;
+            blk_exp_close_all();
+            state = TERMINATED;
         }
     } while (state != TERMINATED);
 

@@ -31,11 +31,11 @@
 
 #include "qemu-common.h"
 /* Needed early for CONFIG_BSD etc. */
-#include "sysemu/sysemu.h"
 #include "net/slirp.h"
 #include "qemu-options.h"
 #include "qemu/error-report.h"
 #include "qemu/log.h"
+#include "sysemu/runstate.h"
 #include "qemu/cutils.h"
 
 #ifdef CONFIG_LINUX
@@ -79,42 +79,6 @@ void os_setup_signal_handling(void)
     sigaction(SIGHUP,  &act, NULL);
     sigaction(SIGTERM, &act, NULL);
 }
-
-/* Find a likely location for support files using the location of the binary.
-   For installed binaries this will be "$bindir/../share/qemu".  When
-   running from the build tree this will be "$bindir/../pc-bios".  */
-#define SHARE_SUFFIX "/share/qemu"
-#define BUILD_SUFFIX "/pc-bios"
-char *os_find_datadir(void)
-{
-    char *dir, *exec_dir;
-    char *res;
-    size_t max_len;
-
-    exec_dir = qemu_get_exec_dir();
-    if (exec_dir == NULL) {
-        return NULL;
-    }
-    dir = g_path_get_dirname(exec_dir);
-
-    max_len = strlen(dir) +
-        MAX(strlen(SHARE_SUFFIX), strlen(BUILD_SUFFIX)) + 1;
-    res = g_malloc0(max_len);
-    snprintf(res, max_len, "%s%s", dir, SHARE_SUFFIX);
-    if (access(res, R_OK)) {
-        snprintf(res, max_len, "%s%s", dir, BUILD_SUFFIX);
-        if (access(res, R_OK)) {
-            g_free(res);
-            res = NULL;
-        }
-    }
-
-    g_free(dir);
-    g_free(exec_dir);
-    return res;
-}
-#undef SHARE_SUFFIX
-#undef BUILD_SUFFIX
 
 void os_set_proc_name(const char *s)
 {
@@ -309,7 +273,7 @@ void os_setup_post(void)
             error_report("not able to chdir to /: %s", strerror(errno));
             exit(1);
         }
-        TFR(fd = qemu_open("/dev/null", O_RDWR));
+        TFR(fd = qemu_open_old("/dev/null", O_RDWR));
         if (fd == -1) {
             exit(1);
         }
@@ -352,6 +316,7 @@ bool is_daemonized(void)
 
 int os_mlock(void)
 {
+#ifdef HAVE_MLOCKALL
     int ret = 0;
 
     ret = mlockall(MCL_CURRENT | MCL_FUTURE);
@@ -360,4 +325,7 @@ int os_mlock(void)
     }
 
     return ret;
+#else
+    return -ENOSYS;
+#endif
 }

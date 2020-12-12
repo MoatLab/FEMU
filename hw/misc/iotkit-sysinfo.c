@@ -22,10 +22,10 @@
 #include "qemu/module.h"
 #include "trace.h"
 #include "qapi/error.h"
-#include "sysemu/sysemu.h"
 #include "hw/sysbus.h"
 #include "hw/registerfields.h"
 #include "hw/misc/iotkit-sysinfo.h"
+#include "hw/qdev-properties.h"
 
 REG32(SYS_VERSION, 0x0)
 REG32(SYS_CONFIG, 0x4)
@@ -121,7 +121,7 @@ static void iotkit_sysinfo_class_init(ObjectClass *klass, void *data)
      * does not need a reset function or VMState.
      */
 
-    dc->props = iotkit_sysinfo_props;
+    device_class_set_props(dc, iotkit_sysinfo_props);
 }
 
 static const TypeInfo iotkit_sysinfo_info = {

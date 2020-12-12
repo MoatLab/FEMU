@@ -16,7 +16,7 @@
 	foobar {
 		n3: baz {
 			ref = &{/foo/baz};
-			lref = &n4;
+			lref = start: &n4 end:;
 		};
 	};
 	foo {

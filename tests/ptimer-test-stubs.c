@@ -12,6 +12,7 @@
 #include "qemu/main-loop.h"
 #include "sysemu/replay.h"
 #include "migration/vmstate.h"
+#include "sysemu/cpu-timers.h"
 
 #include "ptimer-test.h"
 
@@ -30,8 +31,8 @@ QEMUTimerListGroup main_loop_tlg;
 
 int64_t ptimer_test_time_ns;
 
-/* Do not artificially limit period - see hw/core/ptimer.c.  */
-int use_icount = 1;
+/* under qtest_enabled(), will not artificially limit period - see hw/core/ptimer.c. */
+int use_icount;
 bool qtest_allowed;
 
 void timer_init_full(QEMUTimer *ts,
@@ -88,9 +89,9 @@ int64_t qemu_clock_get_ns(QEMUClockType type)
     return ptimer_test_time_ns;
 }
 
-int64_t qemu_clock_deadline_ns_all(QEMUClockType type)
+int64_t qemu_clock_deadline_ns_all(QEMUClockType type, int attr_mask)
 {
-    QEMUTimerList *timer_list = main_loop_tlg.tl[type];
+    QEMUTimerList *timer_list = main_loop_tlg.tl[QEMU_CLOCK_VIRTUAL];
     QEMUTimer *t = timer_list->active_timers.next;
     int64_t deadline = -1;
 
@@ -120,9 +121,4 @@ QEMUBH *qemu_bh_new(QEMUBHFunc *cb, void *opaque)
 void qemu_bh_delete(QEMUBH *bh)
 {
     g_free(bh);
-}
-
-void replay_bh_schedule_event(QEMUBH *bh)
-{
-    bh->cb(bh->opaque);
 }

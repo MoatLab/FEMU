@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,25 +24,30 @@
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_host.h"
 #include "hw/ppc/xics.h"
+#include "qom/object.h"
 
 #define TYPE_SPAPR_PCI_HOST_BRIDGE "spapr-pci-host-bridge"
 
-#define SPAPR_PCI_HOST_BRIDGE(obj) \
-    OBJECT_CHECK(SpaprPhbState, (obj), TYPE_SPAPR_PCI_HOST_BRIDGE)
+OBJECT_DECLARE_SIMPLE_TYPE(SpaprPhbState, SPAPR_PCI_HOST_BRIDGE)
 
 #define SPAPR_PCI_DMA_MAX_WINDOWS    2
 
-typedef struct SpaprPhbState SpaprPhbState;
 
-typedef struct spapr_pci_msi {
+typedef struct SpaprPciMsi {
     uint32_t first_irq;
     uint32_t num;
-} spapr_pci_msi;
+} SpaprPciMsi;
 
-typedef struct spapr_pci_msi_mig {
+typedef struct SpaprPciMsiMig {
     uint32_t key;
-    spapr_pci_msi value;
-} spapr_pci_msi_mig;
+    SpaprPciMsi value;
+} SpaprPciMsiMig;
+
+typedef struct SpaprPciLsi {
+    uint32_t irq;
+} SpaprPciLsi;
+
+typedef struct SpaprPhbPciNvGpuConfig SpaprPhbPciNvGpuConfig;
 
 struct SpaprPhbState {
     PCIHostState parent_obj;
@@ -63,14 +68,12 @@ struct SpaprPhbState {
     AddressSpace iommu_as;
     MemoryRegion iommu_root;
 
-    struct spapr_pci_lsi {
-        uint32_t irq;
-    } lsi_table[PCI_NUM_PINS];
+    SpaprPciLsi lsi_table[PCI_NUM_PINS];
 
     GHashTable *msi;
     /* Temporary cache for migration purposes */
     int32_t msi_devs_num;
-    spapr_pci_msi_mig *msi_devs;
+    SpaprPciMsiMig *msi_devs;
 
     QLIST_ENTRY(SpaprPhbState) list;
 
@@ -89,7 +92,8 @@ struct SpaprPhbState {
     hwaddr mig_io_win_addr, mig_io_win_size;
     hwaddr nv2_gpa_win_addr;
     hwaddr nv2_atsd_win_addr;
-    struct spapr_phb_pci_nvgpu_config *nvgpus;
+    SpaprPhbPciNvGpuConfig *nvgpus;
+    bool pre_5_1_assoc;
 };
 
 #define SPAPR_PCI_MEM_WIN_BUS_OFFSET 0x80000000ULL
@@ -124,15 +128,8 @@ struct SpaprPhbState {
 #define SPAPR_PCI_NV2ATSD_WIN_SIZE   (NVGPU_MAX_NUM * NVGPU_MAX_LINKS * \
                                       64 * KiB)
 
-static inline qemu_irq spapr_phb_lsi_qirq(struct SpaprPhbState *phb, int pin)
-{
-    SpaprMachineState *spapr = SPAPR_MACHINE(qdev_get_machine());
-
-    return spapr_qirq(spapr, phb->lsi_table[pin].irq);
-}
-
-int spapr_dt_phb(SpaprPhbState *phb, uint32_t intc_phandle, void *fdt,
-                 uint32_t nr_msis, int *node_offset);
+int spapr_dt_phb(SpaprMachineState *spapr, SpaprPhbState *phb,
+                 uint32_t intc_phandle, void *fdt, int *node_offset);
 
 void spapr_pci_rtas_init(void);
 

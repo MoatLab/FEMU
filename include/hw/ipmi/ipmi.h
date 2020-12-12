@@ -26,7 +26,8 @@
 #define HW_IPMI_H
 
 #include "exec/memory.h"
-#include "hw/qdev.h"
+#include "hw/qdev-core.h"
+#include "qom/object.h"
 
 #define MAX_IPMI_MSG_SIZE 300
 
@@ -53,8 +54,10 @@ enum ipmi_op {
 #define IPMI_CC_INVALID_DATA_FIELD                       0xcc
 #define IPMI_CC_BMC_INIT_IN_PROGRESS                     0xd2
 #define IPMI_CC_COMMAND_NOT_SUPPORTED                    0xd5
+#define IPMI_CC_UNSPECIFIED                              0xff
 
 #define IPMI_NETFN_APP                0x06
+#define IPMI_NETFN_OEM                0x3a
 
 #define IPMI_DEBUG 1
 
@@ -108,17 +111,21 @@ uint32_t ipmi_next_uuid(void);
 #define TYPE_IPMI_INTERFACE "ipmi-interface"
 #define IPMI_INTERFACE(obj) \
      INTERFACE_CHECK(IPMIInterface, (obj), TYPE_IPMI_INTERFACE)
-#define IPMI_INTERFACE_CLASS(class) \
-     OBJECT_CLASS_CHECK(IPMIInterfaceClass, (class), TYPE_IPMI_INTERFACE)
-#define IPMI_INTERFACE_GET_CLASS(class) \
-     OBJECT_GET_CLASS(IPMIInterfaceClass, (class), TYPE_IPMI_INTERFACE)
+typedef struct IPMIInterfaceClass IPMIInterfaceClass;
+DECLARE_CLASS_CHECKERS(IPMIInterfaceClass, IPMI_INTERFACE,
+                       TYPE_IPMI_INTERFACE)
 
 typedef struct IPMIInterface IPMIInterface;
 
-typedef struct IPMIInterfaceClass {
+struct IPMIInterfaceClass {
     InterfaceClass parent;
 
-    void (*init)(struct IPMIInterface *s, Error **errp);
+    /*
+     * min_size is the requested I/O size and must be a power of 2.
+     * This is so PCI (or other busses) can request a bigger range.
+     * Use 0 for the default.
+     */
+    void (*init)(struct IPMIInterface *s, unsigned int min_size, Error **errp);
 
     /*
      * Perform various operations on the hardware.  If checkonly is
@@ -163,28 +170,24 @@ typedef struct IPMIInterfaceClass {
      * Return the firmware info for a device.
      */
     void (*get_fwinfo)(struct IPMIInterface *s, IPMIFwInfo *info);
-} IPMIInterfaceClass;
+};
 
 /*
  * Define a BMC simulator (or perhaps a connection to a real BMC)
  */
 #define TYPE_IPMI_BMC "ipmi-bmc"
-#define IPMI_BMC(obj) \
-     OBJECT_CHECK(IPMIBmc, (obj), TYPE_IPMI_BMC)
-#define IPMI_BMC_CLASS(obj_class) \
-     OBJECT_CLASS_CHECK(IPMIBmcClass, (obj_class), TYPE_IPMI_BMC)
-#define IPMI_BMC_GET_CLASS(obj) \
-     OBJECT_GET_CLASS(IPMIBmcClass, (obj), TYPE_IPMI_BMC)
+OBJECT_DECLARE_TYPE(IPMIBmc, IPMIBmcClass,
+                    IPMI_BMC)
 
-typedef struct IPMIBmc {
+struct IPMIBmc {
     DeviceState parent;
 
     uint8_t slave_addr;
 
     IPMIInterface *intf;
-} IPMIBmc;
+};
 
-typedef struct IPMIBmcClass {
+struct IPMIBmcClass {
     DeviceClass parent;
 
     /* Called when the system resets to report to the bmc. */
@@ -197,7 +200,7 @@ typedef struct IPMIBmcClass {
                            uint8_t *cmd, unsigned int cmd_len,
                            unsigned int max_cmd_len,
                            uint8_t msg_id);
-} IPMIBmcClass;
+};
 
 /*
  * Add a link property to obj that points to a BMC.
@@ -259,5 +262,44 @@ typedef uint8_t ipmi_sdr_compact_buffer[sizeof(struct ipmi_sdr_compact)];
 int ipmi_bmc_sdr_find(IPMIBmc *b, uint16_t recid,
                       const struct ipmi_sdr_compact **sdr, uint16_t *nextrec);
 void ipmi_bmc_gen_event(IPMIBmc *b, uint8_t *evt, bool log);
+
+#define TYPE_IPMI_BMC_SIMULATOR "ipmi-bmc-sim"
+OBJECT_DECLARE_SIMPLE_TYPE(IPMIBmcSim, IPMI_BMC_SIMULATOR)
+
+
+typedef struct RspBuffer {
+    uint8_t buffer[MAX_IPMI_MSG_SIZE];
+    unsigned int len;
+} RspBuffer;
+
+static inline void rsp_buffer_set_error(RspBuffer *rsp, uint8_t byte)
+{
+    rsp->buffer[2] = byte;
+}
+
+/* Add a byte to the response. */
+static inline void rsp_buffer_push(RspBuffer *rsp, uint8_t byte)
+{
+    if (rsp->len >= sizeof(rsp->buffer)) {
+        rsp_buffer_set_error(rsp, IPMI_CC_REQUEST_DATA_TRUNCATED);
+        return;
+    }
+    rsp->buffer[rsp->len++] = byte;
+}
+
+typedef struct IPMICmdHandler {
+    void (*cmd_handler)(IPMIBmcSim *s,
+                        uint8_t *cmd, unsigned int cmd_len,
+                        RspBuffer *rsp);
+    unsigned int cmd_len_min;
+} IPMICmdHandler;
+
+typedef struct IPMINetfn {
+    unsigned int cmd_nums;
+    const IPMICmdHandler *cmd_handlers;
+} IPMINetfn;
+
+int ipmi_sim_register_netfn(IPMIBmcSim *s, unsigned int netfn,
+                            const IPMINetfn *netfnd);
 
 #endif

@@ -52,7 +52,10 @@ void udp_init(Slirp *slirp)
 
 void udp_cleanup(Slirp *slirp)
 {
-    while (slirp->udb.so_next != &slirp->udb) {
+    struct socket *so, *so_next;
+
+    for (so = slirp->udb.so_next; so != &slirp->udb; so = so_next) {
+        so_next = so->so_next;
         udp_detach(slirp->udb.so_next);
     }
 }
@@ -279,6 +282,12 @@ int udp_attach(struct socket *so, unsigned short af)
 {
     so->s = slirp_socket(af, SOCK_DGRAM, 0);
     if (so->s != -1) {
+        if (slirp_bind_outbound(so, af) != 0) {
+            // bind failed - close socket
+            closesocket(so->s);
+            so->s = -1;
+            return -1;
+        }
         so->so_expire = curtime + SO_EXPIRE;
         insque(so, &so->slirp->udb);
     }
@@ -302,7 +311,8 @@ static uint8_t udp_tos(struct socket *so)
     while (udptos[i].tos) {
         if ((udptos[i].fport && ntohs(so->so_fport) == udptos[i].fport) ||
             (udptos[i].lport && ntohs(so->so_lport) == udptos[i].lport)) {
-            so->so_emu = udptos[i].emu;
+            if (so->slirp->enable_emu)
+                so->so_emu = udptos[i].emu;
             return udptos[i].tos;
         }
         i++;
@@ -319,6 +329,7 @@ struct socket *udp_listen(Slirp *slirp, uint32_t haddr, unsigned hport,
     struct socket *so;
     socklen_t addrlen = sizeof(struct sockaddr_in);
 
+    memset(&addr, 0, sizeof(addr));
     so = socreate(slirp);
     so->s = slirp_socket(AF_INET, SOCK_DGRAM, 0);
     if (so->s < 0) {

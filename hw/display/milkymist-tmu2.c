@@ -8,7 +8,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,8 +25,9 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
+#include "hw/irq.h"
 #include "hw/sysbus.h"
+#include "migration/vmstate.h"
 #include "trace.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
@@ -37,6 +38,7 @@
 #include <X11/Xlib.h>
 #include <epoxy/gl.h>
 #include <epoxy/glx.h>
+#include "qom/object.h"
 
 enum {
     R_CTL = 0,
@@ -81,8 +83,7 @@ struct vertex {
 } QEMU_PACKED;
 
 #define TYPE_MILKYMIST_TMU2 "milkymist-tmu2"
-#define MILKYMIST_TMU2(obj) \
-    OBJECT_CHECK(MilkymistTMU2State, (obj), TYPE_MILKYMIST_TMU2)
+OBJECT_DECLARE_SIMPLE_TYPE(MilkymistTMU2State, MILKYMIST_TMU2)
 
 struct MilkymistTMU2State {
     SysBusDevice parent_obj;
@@ -97,7 +98,6 @@ struct MilkymistTMU2State {
     GLXFBConfig glx_fb_config;
     GLXContext glx_context;
 };
-typedef struct MilkymistTMU2State MilkymistTMU2State;
 
 static const int glx_fbconfig_attr[] = {
     GLX_GREEN_SIZE, 5,
@@ -217,7 +217,7 @@ static void tmu2_start(MilkymistTMU2State *s)
     glGenTextures(1, &texture);
     glBindTexture(GL_TEXTURE_2D, texture);
     fb_len = 2ULL * s->regs[R_TEXHRES] * s->regs[R_TEXVRES];
-    fb = cpu_physical_memory_map(s->regs[R_TEXFBUF], &fb_len, 0);
+    fb = cpu_physical_memory_map(s->regs[R_TEXFBUF], &fb_len, false);
     if (fb == NULL) {
         glDeleteTextures(1, &texture);
         glXMakeContextCurrent(s->dpy, None, None, NULL);
@@ -261,7 +261,7 @@ static void tmu2_start(MilkymistTMU2State *s)
 
     /* Read the QEMU dest. framebuffer into the OpenGL framebuffer */
     fb_len = 2ULL * s->regs[R_DSTHRES] * s->regs[R_DSTVRES];
-    fb = cpu_physical_memory_map(s->regs[R_DSTFBUF], &fb_len, 0);
+    fb = cpu_physical_memory_map(s->regs[R_DSTFBUF], &fb_len, false);
     if (fb == NULL) {
         glDeleteTextures(1, &texture);
         glXMakeContextCurrent(s->dpy, None, None, NULL);
@@ -280,7 +280,7 @@ static void tmu2_start(MilkymistTMU2State *s)
 
     /* Map the texture */
     mesh_len = MESH_MAXSIZE*MESH_MAXSIZE*sizeof(struct vertex);
-    mesh = cpu_physical_memory_map(s->regs[R_VERTICESADDR], &mesh_len, 0);
+    mesh = cpu_physical_memory_map(s->regs[R_VERTICESADDR], &mesh_len, false);
     if (mesh == NULL) {
         glDeleteTextures(1, &texture);
         glXMakeContextCurrent(s->dpy, None, None, NULL);
@@ -297,7 +297,7 @@ static void tmu2_start(MilkymistTMU2State *s)
 
     /* Write back the OpenGL framebuffer to the QEMU framebuffer */
     fb_len = 2ULL * s->regs[R_DSTHRES] * s->regs[R_DSTVRES];
-    fb = cpu_physical_memory_map(s->regs[R_DSTFBUF], &fb_len, 1);
+    fb = cpu_physical_memory_map(s->regs[R_DSTFBUF], &fb_len, true);
     if (fb == NULL) {
         glDeleteTextures(1, &texture);
         glXMakeContextCurrent(s->dpy, None, None, NULL);
@@ -542,8 +542,8 @@ DeviceState *milkymist_tmu2_create(hwaddr base, qemu_irq irq)
     XFree(configs);
     XCloseDisplay(d);
 
-    dev = qdev_create(NULL, TYPE_MILKYMIST_TMU2);
-    qdev_init_nofail(dev);
+    dev = qdev_new(TYPE_MILKYMIST_TMU2);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, base);
     sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0, irq);
 

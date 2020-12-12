@@ -1,11 +1,12 @@
 #ifndef HW_I8257_H
 #define HW_I8257_H
 
-#include "hw/hw.h"
 #include "hw/isa/isa.h"
 #include "exec/ioport.h"
+#include "qom/object.h"
 
 #define TYPE_I8257 "i8257"
+OBJECT_DECLARE_SIMPLE_TYPE(I8257State, I8257)
 
 typedef struct I8257Regs {
     int now[2];
@@ -19,7 +20,7 @@ typedef struct I8257Regs {
     void *opaque;
 } I8257Regs;
 
-typedef struct I8257State {
+struct I8257State {
     /* <private> */
     ISADevice parent_obj;
 
@@ -42,7 +43,7 @@ typedef struct I8257State {
     int running;
     PortioList portio_page;
     PortioList portio_pageh;
-} I8257State;
+};
 
 void i8257_dma_init(ISABus *bus, bool high_page_enable);
 

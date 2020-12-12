@@ -28,6 +28,7 @@
 #include "sysemu/block-backend.h"
 #include "qapi/error.h"
 #include "qapi/qmp/qdict.h"
+#include "qemu/main-loop.h"
 #include "iothread.h"
 
 static int coroutine_fn bdrv_test_co_prwv(BlockDriverState *bs,
@@ -44,8 +45,9 @@ static int coroutine_fn bdrv_test_co_pdiscard(BlockDriverState *bs,
 }
 
 static int coroutine_fn
-bdrv_test_co_truncate(BlockDriverState *bs, int64_t offset,
-                      PreallocMode prealloc, Error **errp)
+bdrv_test_co_truncate(BlockDriverState *bs, int64_t offset, bool exact,
+                      PreallocMode prealloc, BdrvRequestFlags flags,
+                      Error **errp)
 {
     return 0;
 }
@@ -184,18 +186,18 @@ static void test_sync_op_truncate(BdrvChild *c)
     int ret;
 
     /* Normal success path */
-    ret = bdrv_truncate(c, 65536, PREALLOC_MODE_OFF, NULL);
+    ret = bdrv_truncate(c, 65536, false, PREALLOC_MODE_OFF, 0, NULL);
     g_assert_cmpint(ret, ==, 0);
 
     /* Early error: Negative offset */
-    ret = bdrv_truncate(c, -2, PREALLOC_MODE_OFF, NULL);
+    ret = bdrv_truncate(c, -2, false, PREALLOC_MODE_OFF, 0, NULL);
     g_assert_cmpint(ret, ==, -EINVAL);
 
     /* Error: Read-only image */
     c->bs->read_only = true;
     c->bs->open_flags &= ~BDRV_O_RDWR;
 
-    ret = bdrv_truncate(c, 65536, PREALLOC_MODE_OFF, NULL);
+    ret = bdrv_truncate(c, 65536, false, PREALLOC_MODE_OFF, 0, NULL);
     g_assert_cmpint(ret, ==, -EACCES);
 
     c->bs->read_only = false;
@@ -400,7 +402,6 @@ BlockJobDriver test_job_driver = {
         .instance_size  = sizeof(TestBlockJob),
         .free           = block_job_free,
         .user_resume    = block_job_user_resume,
-        .drain          = block_job_drain,
         .run            = test_job_run,
         .complete       = test_job_complete,
         .prepare        = test_job_prepare,
@@ -481,8 +482,13 @@ static void test_propagate_basic(void)
     BlockDriverState *bs_a, *bs_b, *bs_verify;
     QDict *options;
 
-    /* Create bs_a and its BlockBackend */
-    blk = blk_new(qemu_get_aio_context(), BLK_PERM_ALL, BLK_PERM_ALL);
+    /*
+     * Create bs_a and its BlockBackend.  We cannot take the RESIZE
+     * permission because blkverify will not share it on the test
+     * image.
+     */
+    blk = blk_new(qemu_get_aio_context(), BLK_PERM_ALL & ~BLK_PERM_RESIZE,
+                  BLK_PERM_ALL);
     bs_a = bdrv_new_open_driver(&bdrv_test, "bs_a", BDRV_O_RDWR, &error_abort);
     blk_insert_bs(blk, bs_a, &error_abort);
 
@@ -565,7 +571,13 @@ static void test_propagate_diamond(void)
     qdict_put_str(options, "raw", "bs_c");
 
     bs_verify = bdrv_open(NULL, NULL, options, BDRV_O_RDWR, &error_abort);
-    blk = blk_new(qemu_get_aio_context(), BLK_PERM_ALL, BLK_PERM_ALL);
+    /*
+     * Do not take the RESIZE permission: This would require the same
+     * from bs_c and thus from bs_a; however, blkverify will not share
+     * it on bs_b, and thus it will not be available for bs_a.
+     */
+    blk = blk_new(qemu_get_aio_context(), BLK_PERM_ALL & ~BLK_PERM_RESIZE,
+                  BLK_PERM_ALL);
     blk_insert_bs(blk, bs_verify, &error_abort);
 
     /* Switch the AioContext */
@@ -611,7 +623,7 @@ static void test_propagate_mirror(void)
 
     /* Start a mirror job */
     mirror_start("job0", src, target, NULL, JOB_DEFAULT, 0, 0, 0,
-                 MIRROR_SYNC_MODE_NONE, MIRROR_OPEN_BACKING_CHAIN,
+                 MIRROR_SYNC_MODE_NONE, MIRROR_OPEN_BACKING_CHAIN, false,
                  BLOCKDEV_ON_ERROR_REPORT, BLOCKDEV_ON_ERROR_REPORT,
                  false, "filter_node", MIRROR_COPY_MODE_BACKGROUND,
                  &error_abort);
@@ -638,8 +650,7 @@ static void test_propagate_mirror(void)
     blk_insert_bs(blk, src, &error_abort);
 
     bdrv_try_set_aio_context(target, ctx, &local_err);
-    g_assert(local_err);
-    error_free(local_err);
+    error_free_or_abort(&local_err);
 
     g_assert(blk_get_aio_context(blk) == main_ctx);
     g_assert(bdrv_get_aio_context(src) == main_ctx);

@@ -22,7 +22,6 @@
 #include "qapi/error.h"
 #include "cpu.h"
 #include "qemu/module.h"
-#include "hw/qdev-properties.h"
 #include "linux-user/syscall_defs.h"
 #include "qemu/qemu-print.h"
 #include "exec/exec-all.h"
@@ -69,13 +68,14 @@ static bool tilegx_cpu_has_work(CPUState *cs)
     return true;
 }
 
-static void tilegx_cpu_reset(CPUState *s)
+static void tilegx_cpu_reset(DeviceState *dev)
 {
+    CPUState *s = CPU(dev);
     TileGXCPU *cpu = TILEGX_CPU(s);
     TileGXCPUClass *tcc = TILEGX_CPU_GET_CLASS(cpu);
     CPUTLGState *env = &cpu->env;
 
-    tcc->parent_reset(s);
+    tcc->parent_reset(dev);
 
     memset(env, 0, offsetof(CPUTLGState, end_reset_fields));
 }
@@ -143,8 +143,7 @@ static void tilegx_cpu_class_init(ObjectClass *oc, void *data)
     device_class_set_parent_realize(dc, tilegx_cpu_realizefn,
                                     &tcc->parent_realize);
 
-    tcc->parent_reset = cc->reset;
-    cc->reset = tilegx_cpu_reset;
+    device_class_set_parent_reset(dc, tilegx_cpu_reset, &tcc->parent_reset);
 
     cc->class_by_name = tilegx_cpu_class_by_name;
     cc->has_work = tilegx_cpu_has_work;

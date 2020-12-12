@@ -12,27 +12,24 @@
  */
 
 #include "qemu/osdep.h"
+
+#include "block/aio.h"
 #include "qapi/error.h"
 #include "qapi/qmp/dispatch.h"
 #include "qapi/qmp/qdict.h"
 #include "qapi/qmp/qjson.h"
+#include "sysemu/runstate.h"
 #include "qapi/qmp/qbool.h"
-#include "sysemu/sysemu.h"
+#include "qemu/coroutine.h"
+#include "qemu/main-loop.h"
 
-static QDict *qmp_dispatch_check_obj(const QObject *request, bool allow_oob,
+static QDict *qmp_dispatch_check_obj(QDict *dict, bool allow_oob,
                                      Error **errp)
 {
     const char *exec_key = NULL;
     const QDictEntry *ent;
     const char *arg_name;
     const QObject *arg_obj;
-    QDict *dict;
-
-    dict = qobject_to(QDict, request);
-    if (!dict) {
-        error_setg(errp, "QMP input must be a JSON object");
-        return NULL;
-    }
 
     for (ent = qdict_first(dict); ent;
          ent = qdict_next(dict, ent)) {
@@ -75,74 +72,6 @@ static QDict *qmp_dispatch_check_obj(const QObject *request, bool allow_oob,
     return dict;
 }
 
-static QObject *do_qmp_dispatch(QmpCommandList *cmds, QObject *request,
-                                bool allow_oob, Error **errp)
-{
-    Error *local_err = NULL;
-    bool oob;
-    const char *command;
-    QDict *args, *dict;
-    QmpCommand *cmd;
-    QObject *ret = NULL;
-
-    dict = qmp_dispatch_check_obj(request, allow_oob, errp);
-    if (!dict) {
-        return NULL;
-    }
-
-    command = qdict_get_try_str(dict, "execute");
-    oob = false;
-    if (!command) {
-        assert(allow_oob);
-        command = qdict_get_str(dict, "exec-oob");
-        oob = true;
-    }
-    cmd = qmp_find_command(cmds, command);
-    if (cmd == NULL) {
-        error_set(errp, ERROR_CLASS_COMMAND_NOT_FOUND,
-                  "The command %s has not been found", command);
-        return NULL;
-    }
-    if (!cmd->enabled) {
-        error_setg(errp, "The command %s has been disabled for this instance",
-                   command);
-        return NULL;
-    }
-    if (oob && !(cmd->options & QCO_ALLOW_OOB)) {
-        error_setg(errp, "The command %s does not support OOB",
-                   command);
-        return NULL;
-    }
-
-    if (runstate_check(RUN_STATE_PRECONFIG) &&
-        !(cmd->options & QCO_ALLOW_PRECONFIG)) {
-        error_setg(errp, "The command '%s' isn't permitted in '%s' state",
-                   cmd->name, RunState_str(RUN_STATE_PRECONFIG));
-        return NULL;
-    }
-
-    if (!qdict_haskey(dict, "arguments")) {
-        args = qdict_new();
-    } else {
-        args = qdict_get_qdict(dict, "arguments");
-        qobject_ref(args);
-    }
-
-    cmd->fn(args, &ret, &local_err);
-    if (local_err) {
-        error_propagate(errp, local_err);
-    } else if (cmd->options & QCO_NO_SUCCESS_RESP) {
-        g_assert(!ret);
-    } else if (!ret) {
-        /* TODO turn into assertion */
-        ret = QOBJECT(qdict_new());
-    }
-
-    qobject_unref(args);
-
-    return ret;
-}
-
 QDict *qmp_error_response(Error *err)
 {
     QDict *rsp;
@@ -163,26 +92,159 @@ bool qmp_is_oob(const QDict *dict)
         && !qdict_haskey(dict, "execute");
 }
 
-QDict *qmp_dispatch(QmpCommandList *cmds, QObject *request,
-                    bool allow_oob)
+typedef struct QmpDispatchBH {
+    const QmpCommand *cmd;
+    Monitor *cur_mon;
+    QDict *args;
+    QObject **ret;
+    Error **errp;
+    Coroutine *co;
+} QmpDispatchBH;
+
+static void do_qmp_dispatch_bh(void *opaque)
+{
+    QmpDispatchBH *data = opaque;
+
+    assert(monitor_cur() == NULL);
+    monitor_set_cur(qemu_coroutine_self(), data->cur_mon);
+    data->cmd->fn(data->args, data->ret, data->errp);
+    monitor_set_cur(qemu_coroutine_self(), NULL);
+    aio_co_wake(data->co);
+}
+
+/*
+ * Runs outside of coroutine context for OOB commands, but in coroutine
+ * context for everything else.
+ */
+QDict *qmp_dispatch(const QmpCommandList *cmds, QObject *request,
+                    bool allow_oob, Monitor *cur_mon)
 {
     Error *err = NULL;
-    QDict *dict = qobject_to(QDict, request);
-    QObject *ret, *id = dict ? qdict_get(dict, "id") : NULL;
-    QDict *rsp;
+    bool oob;
+    const char *command;
+    QDict *args;
+    const QmpCommand *cmd;
+    QDict *dict;
+    QObject *id;
+    QObject *ret = NULL;
+    QDict *rsp = NULL;
 
-    ret = do_qmp_dispatch(cmds, request, allow_oob, &err);
-    if (err) {
-        rsp = qmp_error_response(err);
-    } else if (ret) {
-        rsp = qdict_new();
-        qdict_put_obj(rsp, "return", ret);
-    } else {
-        /* Can only happen for commands with QCO_NO_SUCCESS_RESP */
-        rsp = NULL;
+    dict = qobject_to(QDict, request);
+    if (!dict) {
+        id = NULL;
+        error_setg(&err, "QMP input must be a JSON object");
+        goto out;
     }
 
-    if (rsp && id) {
+    id = qdict_get(dict, "id");
+
+    if (!qmp_dispatch_check_obj(dict, allow_oob, &err)) {
+        goto out;
+    }
+
+    command = qdict_get_try_str(dict, "execute");
+    oob = false;
+    if (!command) {
+        assert(allow_oob);
+        command = qdict_get_str(dict, "exec-oob");
+        oob = true;
+    }
+    cmd = qmp_find_command(cmds, command);
+    if (cmd == NULL) {
+        error_set(&err, ERROR_CLASS_COMMAND_NOT_FOUND,
+                  "The command %s has not been found", command);
+        goto out;
+    }
+    if (!cmd->enabled) {
+        error_set(&err, ERROR_CLASS_COMMAND_NOT_FOUND,
+                  "The command %s has been disabled for this instance",
+                  command);
+        goto out;
+    }
+    if (oob && !(cmd->options & QCO_ALLOW_OOB)) {
+        error_setg(&err, "The command %s does not support OOB",
+                   command);
+        goto out;
+    }
+
+    if (runstate_check(RUN_STATE_PRECONFIG) &&
+        !(cmd->options & QCO_ALLOW_PRECONFIG)) {
+        error_setg(&err, "The command '%s' isn't permitted in '%s' state",
+                   cmd->name, RunState_str(RUN_STATE_PRECONFIG));
+        goto out;
+    }
+
+    if (!qdict_haskey(dict, "arguments")) {
+        args = qdict_new();
+    } else {
+        args = qdict_get_qdict(dict, "arguments");
+        qobject_ref(args);
+    }
+
+    assert(!(oob && qemu_in_coroutine()));
+    assert(monitor_cur() == NULL);
+    if (!!(cmd->options & QCO_COROUTINE) == qemu_in_coroutine()) {
+        monitor_set_cur(qemu_coroutine_self(), cur_mon);
+        cmd->fn(args, &ret, &err);
+        monitor_set_cur(qemu_coroutine_self(), NULL);
+    } else {
+       /*
+        * Actual context doesn't match the one the command needs.
+        *
+        * Case 1: we are in coroutine context, but command does not
+        * have QCO_COROUTINE.  We need to drop out of coroutine
+        * context for executing it.
+        *
+        * Case 2: we are outside coroutine context, but command has
+        * QCO_COROUTINE.  Can't actually happen, because we get here
+        * outside coroutine context only when executing a command
+        * out of band, and OOB commands never have QCO_COROUTINE.
+        */
+        assert(!oob && qemu_in_coroutine() && !(cmd->options & QCO_COROUTINE));
+
+        QmpDispatchBH data = {
+            .cur_mon    = cur_mon,
+            .cmd        = cmd,
+            .args       = args,
+            .ret        = &ret,
+            .errp       = &err,
+            .co         = qemu_coroutine_self(),
+        };
+        aio_bh_schedule_oneshot(qemu_get_aio_context(), do_qmp_dispatch_bh,
+                                &data);
+        qemu_coroutine_yield();
+    }
+    qobject_unref(args);
+    if (err) {
+        /* or assert(!ret) after reviewing all handlers: */
+        qobject_unref(ret);
+        goto out;
+    }
+
+    if (cmd->options & QCO_NO_SUCCESS_RESP) {
+        g_assert(!ret);
+        return NULL;
+    } else if (!ret) {
+        /*
+         * When the command's schema has no 'returns', cmd->fn()
+         * leaves @ret null.  The QMP spec calls for an empty object
+         * then; supply it.
+         */
+        ret = QOBJECT(qdict_new());
+    }
+
+    rsp = qdict_new();
+    qdict_put_obj(rsp, "return", ret);
+
+out:
+    if (err) {
+        assert(!rsp);
+        rsp = qmp_error_response(err);
+    }
+
+    assert(rsp);
+
+    if (id) {
         qdict_put_obj(rsp, "id", qobject_ref(id));
     }
 

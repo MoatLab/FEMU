@@ -7,7 +7,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -21,17 +21,80 @@
 #include "cpu.h"
 #include "exec/gdbstub.h"
 
-int mb_cpu_gdb_read_register(CPUState *cs, uint8_t *mem_buf, int n)
+/*
+ * GDB expects SREGs in the following order:
+ * PC, MSR, EAR, ESR, FSR, BTR, EDR, PID, ZPR, TLBX, TLBSX, TLBLO, TLBHI.
+ *
+ * PID, ZPR, TLBx, TLBsx, TLBLO, and TLBHI aren't modeled, so we don't
+ * map them to anything and return a value of 0 instead.
+ */
+
+enum {
+    GDB_PC    = 32 + 0,
+    GDB_MSR   = 32 + 1,
+    GDB_EAR   = 32 + 2,
+    GDB_ESR   = 32 + 3,
+    GDB_FSR   = 32 + 4,
+    GDB_BTR   = 32 + 5,
+    GDB_PVR0  = 32 + 6,
+    GDB_PVR11 = 32 + 17,
+    GDB_EDR   = 32 + 18,
+    GDB_SLR   = 32 + 25,
+    GDB_SHR   = 32 + 26,
+};
+
+int mb_cpu_gdb_read_register(CPUState *cs, GByteArray *mem_buf, int n)
 {
     MicroBlazeCPU *cpu = MICROBLAZE_CPU(cs);
+    CPUClass *cc = CPU_GET_CLASS(cs);
     CPUMBState *env = &cpu->env;
+    uint32_t val;
 
-    if (n < 32) {
-        return gdb_get_reg32(mem_buf, env->regs[n]);
-    } else {
-        return gdb_get_reg32(mem_buf, env->sregs[n - 32]);
+    if (n > cc->gdb_num_core_regs) {
+        return 0;
     }
-    return 0;
+
+    switch (n) {
+    case 1 ... 31:
+        val = env->regs[n];
+        break;
+    case GDB_PC:
+        val = env->pc;
+        break;
+    case GDB_MSR:
+        val = mb_cpu_read_msr(env);
+        break;
+    case GDB_EAR:
+        val = env->ear;
+        break;
+    case GDB_ESR:
+        val = env->esr;
+        break;
+    case GDB_FSR:
+        val = env->fsr;
+        break;
+    case GDB_BTR:
+        val = env->btr;
+        break;
+    case GDB_PVR0 ... GDB_PVR11:
+        /* PVR12 is intentionally skipped */
+        val = cpu->cfg.pvr_regs[n - GDB_PVR0];
+        break;
+    case GDB_EDR:
+        val = env->edr;
+        break;
+    case GDB_SLR:
+        val = env->slr;
+        break;
+    case GDB_SHR:
+        val = env->shr;
+        break;
+    default:
+        /* Other SRegs aren't modeled, so report a value of 0 */
+        val = 0;
+        break;
+    }
+    return gdb_get_reg32(mem_buf, val);
 }
 
 int mb_cpu_gdb_write_register(CPUState *cs, uint8_t *mem_buf, int n)
@@ -47,10 +110,37 @@ int mb_cpu_gdb_write_register(CPUState *cs, uint8_t *mem_buf, int n)
 
     tmp = ldl_p(mem_buf);
 
-    if (n < 32) {
+    switch (n) {
+    case 1 ... 31:
         env->regs[n] = tmp;
-    } else {
-        env->sregs[n - 32] = tmp;
+        break;
+    case GDB_PC:
+        env->pc = tmp;
+        break;
+    case GDB_MSR:
+        mb_cpu_write_msr(env, tmp);
+        break;
+    case GDB_EAR:
+        env->ear = tmp;
+        break;
+    case GDB_ESR:
+        env->esr = tmp;
+        break;
+    case GDB_FSR:
+        env->fsr = tmp;
+        break;
+    case GDB_BTR:
+        env->btr = tmp;
+        break;
+    case GDB_EDR:
+        env->edr = tmp;
+        break;
+    case GDB_SLR:
+        env->slr = tmp;
+        break;
+    case GDB_SHR:
+        env->shr = tmp;
+        break;
     }
     return 4;
 }

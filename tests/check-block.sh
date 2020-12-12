@@ -1,24 +1,71 @@
 #!/bin/sh
 
-FORMAT_LIST="raw qcow2 qed vmdk vpc"
-if [ "$#" -ne 0 ]; then
-    FORMAT_LIST="$@"
+# Honor the SPEED environment variable, just like we do it for the qtests.
+if [ "$SPEED" = "slow" ]; then
+    format_list="raw qcow2"
+    group=
+elif [ "$SPEED" = "thorough" ]; then
+    format_list="raw qcow2 qed vmdk vpc"
+    group=
+else
+    format_list=qcow2
+    group="-g auto"
 fi
 
-export QEMU_PROG="$PWD/x86_64-softmmu/qemu-system-x86_64"
-export QEMU_IMG_PROG="$PWD/qemu-img"
-export QEMU_IO_PROG="$PWD/qemu-io"
+if [ "$#" -ne 0 ]; then
+    format_list="$@"
+fi
 
-if [ ! -x $QEMU_PROG ]; then
-    echo "'make check-block' requires qemu-system-x86_64"
-    exit 1
+if grep -q "CONFIG_GPROF=y" config-host.mak 2>/dev/null ; then
+    echo "GPROF is enabled ==> Not running the qemu-iotests."
+    exit 0
+fi
+
+# Disable tests with any sanitizer except for SafeStack
+CFLAGS=$( grep "CFLAGS.*-fsanitize" config-host.mak 2>/dev/null )
+SANITIZE_FLAGS=""
+#Remove all occurrencies of -fsanitize=safe-stack
+for i in ${CFLAGS}; do
+        if [ "${i}" != "-fsanitize=safe-stack" ]; then
+                SANITIZE_FLAGS="${SANITIZE_FLAGS} ${i}"
+        fi
+done
+if echo ${SANITIZE_FLAGS} | grep -q "\-fsanitize" 2>/dev/null; then
+    # Have a sanitize flag that is not allowed, stop
+    echo "Sanitizers are enabled ==> Not running the qemu-iotests."
+    exit 0
+fi
+
+if [ -z "$(find . -name 'qemu-system-*' -print)" ]; then
+    echo "No qemu-system binary available ==> Not running the qemu-iotests."
+    exit 0
+fi
+
+if ! command -v bash >/dev/null 2>&1 ; then
+    echo "bash not available ==> Not running the qemu-iotests."
+    exit 0
+fi
+
+if LANG=C bash --version | grep -q 'GNU bash, version [123]' ; then
+    echo "bash version too old ==> Not running the qemu-iotests."
+    exit 0
+fi
+
+if ! (sed --version | grep 'GNU sed') > /dev/null 2>&1 ; then
+    if ! command -v gsed >/dev/null 2>&1; then
+        echo "GNU sed not available ==> Not running the qemu-iotests."
+        exit 0
+    fi
 fi
 
 cd tests/qemu-iotests
 
+# QEMU_CHECK_BLOCK_AUTO is used to disable some unstable sub-tests
+export QEMU_CHECK_BLOCK_AUTO=1
+
 ret=0
-for FMT in $FORMAT_LIST ; do
-    ./check -T -nocache -$FMT || ret=1
+for fmt in $format_list ; do
+    ./check -makecheck -$fmt $group || ret=1
 done
 
 exit $ret

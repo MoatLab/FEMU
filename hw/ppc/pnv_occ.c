@@ -17,13 +17,11 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
-#include "sysemu/sysemu.h"
 #include "target/ppc/cpu.h"
 #include "qapi/error.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
-
+#include "hw/qdev-properties.h"
 #include "hw/ppc/pnv.h"
 #include "hw/ppc/pnv_xscom.h"
 #include "hw/ppc/pnv_occ.h"
@@ -31,6 +29,24 @@
 #define OCB_OCI_OCCMISC         0x4020
 #define OCB_OCI_OCCMISC_AND     0x4021
 #define OCB_OCI_OCCMISC_OR      0x4022
+
+/* OCC sensors */
+#define OCC_SENSOR_DATA_BLOCK_OFFSET          0x580000
+#define OCC_SENSOR_DATA_VALID                 0x580001
+#define OCC_SENSOR_DATA_VERSION               0x580002
+#define OCC_SENSOR_DATA_READING_VERSION       0x580004
+#define OCC_SENSOR_DATA_NR_SENSORS            0x580008
+#define OCC_SENSOR_DATA_NAMES_OFFSET          0x580010
+#define OCC_SENSOR_DATA_READING_PING_OFFSET   0x580014
+#define OCC_SENSOR_DATA_READING_PONG_OFFSET   0x58000c
+#define OCC_SENSOR_DATA_NAME_LENGTH           0x58000d
+#define OCC_SENSOR_NAME_STRUCTURE_TYPE        0x580023
+#define OCC_SENSOR_LOC_CORE                   0x580022
+#define OCC_SENSOR_LOC_GPU                    0x580020
+#define OCC_SENSOR_TYPE_POWER                 0x580003
+#define OCC_SENSOR_NAME                       0x580005
+#define HWMON_SENSORS_MASK                    0x58001e
+#define SLW_IMAGE_BASE                        0x0
 
 static void pnv_occ_set_misc(PnvOCC *occ, uint64_t val)
 {
@@ -84,12 +100,64 @@ static void pnv_occ_power8_xscom_write(void *opaque, hwaddr addr,
     }
 }
 
+static uint64_t pnv_occ_common_area_read(void *opaque, hwaddr addr,
+                                         unsigned width)
+{
+    switch (addr) {
+    /*
+     * occ-sensor sanity check that asserts the sensor
+     * header block
+     */
+    case OCC_SENSOR_DATA_BLOCK_OFFSET:
+    case OCC_SENSOR_DATA_VALID:
+    case OCC_SENSOR_DATA_VERSION:
+    case OCC_SENSOR_DATA_READING_VERSION:
+    case OCC_SENSOR_DATA_NR_SENSORS:
+    case OCC_SENSOR_DATA_NAMES_OFFSET:
+    case OCC_SENSOR_DATA_READING_PING_OFFSET:
+    case OCC_SENSOR_DATA_READING_PONG_OFFSET:
+    case OCC_SENSOR_NAME_STRUCTURE_TYPE:
+        return 1;
+    case OCC_SENSOR_DATA_NAME_LENGTH:
+        return 0x30;
+    case OCC_SENSOR_LOC_CORE:
+        return 0x0040;
+    case OCC_SENSOR_TYPE_POWER:
+        return 0x0080;
+    case OCC_SENSOR_NAME:
+        return 0x1000;
+    case HWMON_SENSORS_MASK:
+    case OCC_SENSOR_LOC_GPU:
+        return 0x8e00;
+    case SLW_IMAGE_BASE:
+        return 0x1000000000000000;
+    }
+    return 0;
+}
+
+static void pnv_occ_common_area_write(void *opaque, hwaddr addr,
+                                             uint64_t val, unsigned width)
+{
+    /* callback function defined to occ common area write */
+    return;
+}
+
 static const MemoryRegionOps pnv_occ_power8_xscom_ops = {
     .read = pnv_occ_power8_xscom_read,
     .write = pnv_occ_power8_xscom_write,
     .valid.min_access_size = 8,
     .valid.max_access_size = 8,
     .impl.min_access_size = 8,
+    .impl.max_access_size = 8,
+    .endianness = DEVICE_BIG_ENDIAN,
+};
+
+const MemoryRegionOps pnv_occ_sram_ops = {
+    .read = pnv_occ_common_area_read,
+    .write = pnv_occ_common_area_write,
+    .valid.min_access_size = 1,
+    .valid.max_access_size = 8,
+    .impl.min_access_size = 1,
     .impl.max_access_size = 8,
     .endianness = DEVICE_BIG_ENDIAN,
 };
@@ -185,23 +253,25 @@ static void pnv_occ_realize(DeviceState *dev, Error **errp)
 {
     PnvOCC *occ = PNV_OCC(dev);
     PnvOCCClass *poc = PNV_OCC_GET_CLASS(occ);
-    Object *obj;
-    Error *local_err = NULL;
+
+    assert(occ->psi);
 
     occ->occmisc = 0;
-
-    obj = object_property_get_link(OBJECT(dev), "psi", &local_err);
-    if (!obj) {
-        error_propagate(errp, local_err);
-        error_prepend(errp, "required link 'psi' not found: ");
-        return;
-    }
-    occ->psi = PNV_PSI(obj);
 
     /* XScom region for OCC registers */
     pnv_xscom_region_init(&occ->xscom_regs, OBJECT(dev), poc->xscom_ops,
                           occ, "xscom-occ", poc->xscom_size);
+
+    /* OCC common area mmio region for OCC SRAM registers */
+    memory_region_init_io(&occ->sram_regs, OBJECT(dev), &pnv_occ_sram_ops,
+                          occ, "occ-common-area",
+                          PNV_OCC_SENSOR_DATA_BLOCK_SIZE);
 }
+
+static Property pnv_occ_properties[] = {
+    DEFINE_PROP_LINK("psi", PnvOCC, psi, TYPE_PNV_PSI, PnvPsi *),
+    DEFINE_PROP_END_OF_LIST(),
+};
 
 static void pnv_occ_class_init(ObjectClass *klass, void *data)
 {
@@ -209,6 +279,8 @@ static void pnv_occ_class_init(ObjectClass *klass, void *data)
 
     dc->realize = pnv_occ_realize;
     dc->desc = "PowerNV OCC Controller";
+    device_class_set_props(dc, pnv_occ_properties);
+    dc->user_creatable = false;
 }
 
 static const TypeInfo pnv_occ_type_info = {

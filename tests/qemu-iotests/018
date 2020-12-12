@@ -41,7 +41,8 @@ trap "_cleanup; exit \$status" 0 1 2 3 15
 _supported_fmt qcow qcow2 vmdk qed
 _supported_proto file
 _supported_os Linux
-_unsupported_imgopts "subformat=monolithicFlat" "subformat=twoGbMaxExtentFlat"
+_unsupported_imgopts "subformat=monolithicFlat" "subformat=twoGbMaxExtentFlat" \
+                     "streamOptimized"
 
 TEST_OFFSETS="0 4294967296"
 
@@ -65,7 +66,7 @@ echo "Creating test image with backing file"
 echo
 
 TEST_IMG="$TEST_IMG_SAVE.orig"
-_make_test_img -b "$TEST_IMG_SAVE.base" 6G
+_make_test_img -b "$TEST_IMG_SAVE.base" -F $IMGFMT 6G
 
 echo "Filling test image"
 echo

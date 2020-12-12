@@ -15,6 +15,7 @@
 #include "hw/virtio/virtio-rng.h"
 #include "qapi/error.h"
 #include "qemu/module.h"
+#include "qom/object.h"
 
 typedef struct VirtIORngPCI VirtIORngPCI;
 
@@ -22,8 +23,8 @@ typedef struct VirtIORngPCI VirtIORngPCI;
  * virtio-rng-pci: This extends VirtioPCIProxy.
  */
 #define TYPE_VIRTIO_RNG_PCI "virtio-rng-pci-base"
-#define VIRTIO_RNG_PCI(obj) \
-        OBJECT_CHECK(VirtIORngPCI, (obj), TYPE_VIRTIO_RNG_PCI)
+DECLARE_INSTANCE_CHECKER(VirtIORngPCI, VIRTIO_RNG_PCI,
+                         TYPE_VIRTIO_RNG_PCI)
 
 struct VirtIORngPCI {
     VirtIOPCIProxy parent_obj;
@@ -34,18 +35,10 @@ static void virtio_rng_pci_realize(VirtIOPCIProxy *vpci_dev, Error **errp)
 {
     VirtIORngPCI *vrng = VIRTIO_RNG_PCI(vpci_dev);
     DeviceState *vdev = DEVICE(&vrng->vdev);
-    Error *err = NULL;
 
-    qdev_set_parent_bus(vdev, BUS(&vpci_dev->bus));
-    object_property_set_bool(OBJECT(vdev), true, "realized", &err);
-    if (err) {
-        error_propagate(errp, err);
+    if (!qdev_realize(vdev, BUS(&vpci_dev->bus), errp)) {
         return;
     }
-
-    object_property_set_link(OBJECT(vrng),
-                             OBJECT(vrng->vdev.conf.rng), "rng",
-                             NULL);
 }
 
 static void virtio_rng_pci_class_init(ObjectClass *klass, void *data)

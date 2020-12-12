@@ -25,7 +25,9 @@
 #include "qemu/osdep.h"
 #include "hw/sysbus.h"
 #include "qemu/module.h"
-#include "hw/hw.h"
+#include "hw/irq.h"
+#include "hw/qdev-properties.h"
+#include "qom/object.h"
 
 #define D(x)
 
@@ -40,7 +42,8 @@
 #define R_MAX       8
 
 #define TYPE_XILINX_INTC "xlnx.xps-intc"
-#define XILINX_INTC(obj) OBJECT_CHECK(struct xlx_pic, (obj), TYPE_XILINX_INTC)
+DECLARE_INSTANCE_CHECKER(struct xlx_pic, XILINX_INTC,
+                         TYPE_XILINX_INTC)
 
 struct xlx_pic
 {
@@ -184,7 +187,7 @@ static void xilinx_intc_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    dc->props = xilinx_intc_properties;
+    device_class_set_props(dc, xilinx_intc_properties);
 }
 
 static const TypeInfo xilinx_intc_info = {

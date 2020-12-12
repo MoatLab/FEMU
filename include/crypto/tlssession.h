@@ -56,7 +56,7 @@
  *
  * static int mysock_run_tls(int sockfd,
  *                           QCryptoTLSCreds *creds,
- *                           Error *errp)
+ *                           Error **errp)
  * {
  *    QCryptoTLSSession *sess;
  *
@@ -159,6 +159,8 @@ QCryptoTLSSession *qcrypto_tls_session_new(QCryptoTLSCreds *creds,
  * object previously allocated by qcrypto_tls_session_new()
  */
 void qcrypto_tls_session_free(QCryptoTLSSession *sess);
+
+G_DEFINE_AUTOPTR_CLEANUP_FUNC(QCryptoTLSSession, qcrypto_tls_session_free)
 
 /**
  * qcrypto_tls_session_check_credentials:

@@ -6,7 +6,7 @@ QEMU_PROG: -drive if=none,file=null-co://,readonly=off,force-share=on: force-sha
 Formatting 'TEST_DIR/t.IMGFMT.base', fmt=IMGFMT size=33554432
 
 == Creating test image ==
-Formatting 'TEST_DIR/t.IMGFMT', fmt=IMGFMT size=33554432 backing_file=TEST_DIR/t.IMGFMT.base
+Formatting 'TEST_DIR/t.IMGFMT', fmt=IMGFMT size=33554432 backing_file=TEST_DIR/t.IMGFMT.base backing_fmt=IMGFMT
 
 == Launching QEMU, opts: '' ==
 
@@ -56,7 +56,7 @@ _qemu_img_wrapper map TEST_DIR/t.qcow2
 qemu-img: Could not open 'TEST_DIR/t.qcow2': Failed to get shared "write" lock
 Is another process using the image [TEST_DIR/t.qcow2]?
 
-_qemu_img_wrapper amend -o  TEST_DIR/t.qcow2
+_qemu_img_wrapper amend -o size=32M TEST_DIR/t.qcow2
 qemu-img: Could not open 'TEST_DIR/t.qcow2': Failed to get "write" lock
 Is another process using the image [TEST_DIR/t.qcow2]?
 
@@ -68,7 +68,7 @@ _qemu_img_wrapper resize TEST_DIR/t.qcow2 32M
 qemu-img: Could not open 'TEST_DIR/t.qcow2': Failed to get "write" lock
 Is another process using the image [TEST_DIR/t.qcow2]?
 
-_qemu_img_wrapper rebase TEST_DIR/t.qcow2 -b TEST_DIR/t.qcow2.base
+_qemu_img_wrapper rebase TEST_DIR/t.qcow2 -b TEST_DIR/t.qcow2.base -F qcow2
 qemu-img: Could not open 'TEST_DIR/t.qcow2': Failed to get "write" lock
 Is another process using the image [TEST_DIR/t.qcow2]?
 
@@ -92,10 +92,11 @@ _qemu_img_wrapper bench -w -c 1 TEST_DIR/t.qcow2
 qemu-img: Could not open 'TEST_DIR/t.qcow2': Failed to get "write" lock
 Is another process using the image [TEST_DIR/t.qcow2]?
 
-_qemu_img_wrapper create -f qcow2 TEST_DIR/t.qcow2 -b TEST_DIR/t.qcow2.base
+_qemu_img_wrapper create -f qcow2 TEST_DIR/t.qcow2 -b TEST_DIR/t.qcow2.base -F qcow2
 qemu-img: TEST_DIR/t.qcow2: Failed to get "write" lock
 Is another process using the image [TEST_DIR/t.qcow2]?
 file format: IMGFMT
+backing file format: IMGFMT
 
 == Running utility commands -U ==
 
@@ -118,7 +119,7 @@ _qemu_img_wrapper compare -U TEST_DIR/t.qcow2 TEST_DIR/t.qcow2
 
 _qemu_img_wrapper map -U TEST_DIR/t.qcow2
 
-_qemu_img_wrapper amend -o  -U TEST_DIR/t.qcow2
+_qemu_img_wrapper amend -o size=32M -U TEST_DIR/t.qcow2
 qemu-img: unrecognized option '-U'
 Try 'qemu-img --help' for more information
 
@@ -130,7 +131,7 @@ _qemu_img_wrapper resize -U TEST_DIR/t.qcow2 32M
 qemu-img: unrecognized option '-U'
 Try 'qemu-img --help' for more information
 
-_qemu_img_wrapper rebase -U TEST_DIR/t.qcow2 -b TEST_DIR/t.qcow2.base
+_qemu_img_wrapper rebase -U TEST_DIR/t.qcow2 -b TEST_DIR/t.qcow2.base -F qcow2
 qemu-img: Could not open 'TEST_DIR/t.qcow2': Failed to get "write" lock
 Is another process using the image [TEST_DIR/t.qcow2]?
 
@@ -144,6 +145,7 @@ _qemu_img_wrapper bench -U -c 1 TEST_DIR/t.qcow2
 
 _qemu_img_wrapper bench -U -w -c 1 TEST_DIR/t.qcow2
 qemu-img: Could not open 'TEST_DIR/t.qcow2': force-share=on can only be used with read-only images
+{ 'execute': 'quit' }
 
 Round done
 
@@ -151,7 +153,7 @@ Round done
 Formatting 'TEST_DIR/t.IMGFMT.base', fmt=IMGFMT size=33554432
 
 == Creating test image ==
-Formatting 'TEST_DIR/t.IMGFMT', fmt=IMGFMT size=33554432 backing_file=TEST_DIR/t.IMGFMT.base
+Formatting 'TEST_DIR/t.IMGFMT', fmt=IMGFMT size=33554432 backing_file=TEST_DIR/t.IMGFMT.base backing_fmt=IMGFMT
 
 == Launching QEMU, opts: 'read-only=on' ==
 
@@ -186,7 +188,7 @@ _qemu_img_wrapper compare TEST_DIR/t.qcow2 TEST_DIR/t.qcow2
 
 _qemu_img_wrapper map TEST_DIR/t.qcow2
 
-_qemu_img_wrapper amend -o  TEST_DIR/t.qcow2
+_qemu_img_wrapper amend -o size=32M TEST_DIR/t.qcow2
 qemu-img: Could not open 'TEST_DIR/t.qcow2': Failed to get "write" lock
 Is another process using the image [TEST_DIR/t.qcow2]?
 
@@ -198,7 +200,7 @@ _qemu_img_wrapper resize TEST_DIR/t.qcow2 32M
 qemu-img: Could not open 'TEST_DIR/t.qcow2': Failed to get "write" lock
 Is another process using the image [TEST_DIR/t.qcow2]?
 
-_qemu_img_wrapper rebase TEST_DIR/t.qcow2 -b TEST_DIR/t.qcow2.base
+_qemu_img_wrapper rebase TEST_DIR/t.qcow2 -b TEST_DIR/t.qcow2.base -F qcow2
 qemu-img: Could not open 'TEST_DIR/t.qcow2': Failed to get "write" lock
 Is another process using the image [TEST_DIR/t.qcow2]?
 
@@ -214,10 +216,11 @@ _qemu_img_wrapper bench -w -c 1 TEST_DIR/t.qcow2
 qemu-img: Could not open 'TEST_DIR/t.qcow2': Failed to get "write" lock
 Is another process using the image [TEST_DIR/t.qcow2]?
 
-_qemu_img_wrapper create -f qcow2 TEST_DIR/t.qcow2 -b TEST_DIR/t.qcow2.base
+_qemu_img_wrapper create -f qcow2 TEST_DIR/t.qcow2 -b TEST_DIR/t.qcow2.base -F qcow2
 qemu-img: TEST_DIR/t.qcow2: Failed to get "write" lock
 Is another process using the image [TEST_DIR/t.qcow2]?
 file format: IMGFMT
+backing file format: IMGFMT
 
 == Running utility commands -U ==
 
@@ -240,7 +243,7 @@ _qemu_img_wrapper compare -U TEST_DIR/t.qcow2 TEST_DIR/t.qcow2
 
 _qemu_img_wrapper map -U TEST_DIR/t.qcow2
 
-_qemu_img_wrapper amend -o  -U TEST_DIR/t.qcow2
+_qemu_img_wrapper amend -o size=32M -U TEST_DIR/t.qcow2
 qemu-img: unrecognized option '-U'
 Try 'qemu-img --help' for more information
 
@@ -252,7 +255,7 @@ _qemu_img_wrapper resize -U TEST_DIR/t.qcow2 32M
 qemu-img: unrecognized option '-U'
 Try 'qemu-img --help' for more information
 
-_qemu_img_wrapper rebase -U TEST_DIR/t.qcow2 -b TEST_DIR/t.qcow2.base
+_qemu_img_wrapper rebase -U TEST_DIR/t.qcow2 -b TEST_DIR/t.qcow2.base -F qcow2
 qemu-img: Could not open 'TEST_DIR/t.qcow2': Failed to get "write" lock
 Is another process using the image [TEST_DIR/t.qcow2]?
 
@@ -266,6 +269,7 @@ _qemu_img_wrapper bench -U -c 1 TEST_DIR/t.qcow2
 
 _qemu_img_wrapper bench -U -w -c 1 TEST_DIR/t.qcow2
 qemu-img: Could not open 'TEST_DIR/t.qcow2': force-share=on can only be used with read-only images
+{ 'execute': 'quit' }
 
 Round done
 
@@ -273,7 +277,7 @@ Round done
 Formatting 'TEST_DIR/t.IMGFMT.base', fmt=IMGFMT size=33554432
 
 == Creating test image ==
-Formatting 'TEST_DIR/t.IMGFMT', fmt=IMGFMT size=33554432 backing_file=TEST_DIR/t.IMGFMT.base
+Formatting 'TEST_DIR/t.IMGFMT', fmt=IMGFMT size=33554432 backing_file=TEST_DIR/t.IMGFMT.base backing_fmt=IMGFMT
 
 == Launching QEMU, opts: 'read-only=on,force-share=on' ==
 
@@ -301,13 +305,13 @@ _qemu_img_wrapper compare TEST_DIR/t.qcow2 TEST_DIR/t.qcow2
 
 _qemu_img_wrapper map TEST_DIR/t.qcow2
 
-_qemu_img_wrapper amend -o  TEST_DIR/t.qcow2
+_qemu_img_wrapper amend -o size=32M TEST_DIR/t.qcow2
 
 _qemu_img_wrapper commit TEST_DIR/t.qcow2
 
 _qemu_img_wrapper resize TEST_DIR/t.qcow2 32M
 
-_qemu_img_wrapper rebase TEST_DIR/t.qcow2 -b TEST_DIR/t.qcow2.base
+_qemu_img_wrapper rebase TEST_DIR/t.qcow2 -b TEST_DIR/t.qcow2.base -F qcow2
 
 _qemu_img_wrapper snapshot -l TEST_DIR/t.qcow2
 
@@ -319,8 +323,9 @@ _qemu_img_wrapper bench -c 1 TEST_DIR/t.qcow2
 
 _qemu_img_wrapper bench -w -c 1 TEST_DIR/t.qcow2
 
-_qemu_img_wrapper create -f qcow2 TEST_DIR/t.qcow2 -b TEST_DIR/t.qcow2.base
+_qemu_img_wrapper create -f qcow2 TEST_DIR/t.qcow2 -b TEST_DIR/t.qcow2.base -F qcow2
 file format: IMGFMT
+backing file format: IMGFMT
 
 == Running utility commands -U ==
 
@@ -343,7 +348,7 @@ _qemu_img_wrapper compare -U TEST_DIR/t.qcow2 TEST_DIR/t.qcow2
 
 _qemu_img_wrapper map -U TEST_DIR/t.qcow2
 
-_qemu_img_wrapper amend -o  -U TEST_DIR/t.qcow2
+_qemu_img_wrapper amend -o size=32M -U TEST_DIR/t.qcow2
 qemu-img: unrecognized option '-U'
 Try 'qemu-img --help' for more information
 
@@ -355,7 +360,7 @@ _qemu_img_wrapper resize -U TEST_DIR/t.qcow2 32M
 qemu-img: unrecognized option '-U'
 Try 'qemu-img --help' for more information
 
-_qemu_img_wrapper rebase -U TEST_DIR/t.qcow2 -b TEST_DIR/t.qcow2.base
+_qemu_img_wrapper rebase -U TEST_DIR/t.qcow2 -b TEST_DIR/t.qcow2.base -F qcow2
 
 _qemu_img_wrapper snapshot -l -U TEST_DIR/t.qcow2
 
@@ -367,6 +372,7 @@ _qemu_img_wrapper bench -U -c 1 TEST_DIR/t.qcow2
 
 _qemu_img_wrapper bench -U -w -c 1 TEST_DIR/t.qcow2
 qemu-img: Could not open 'TEST_DIR/t.qcow2': force-share=on can only be used with read-only images
+{ 'execute': 'quit' }
 
 Round done
 
@@ -395,9 +401,9 @@ Is another process using the image [TEST_DIR/t.qcow2]?
 == Two devices with the same image (read-only=on,force-share=on - read-only=on,force-share=on) ==
 
 == Creating TEST_DIR/t.qcow2.[abc] ==
-Formatting 'TEST_DIR/t.IMGFMT.a', fmt=IMGFMT size=33554432 backing_file=TEST_DIR/t.IMGFMT
-Formatting 'TEST_DIR/t.IMGFMT.b', fmt=IMGFMT size=33554432 backing_file=TEST_DIR/t.IMGFMT
-Formatting 'TEST_DIR/t.IMGFMT.c', fmt=IMGFMT size=33554432 backing_file=TEST_DIR/t.IMGFMT.b
+Formatting 'TEST_DIR/t.IMGFMT.a', fmt=IMGFMT size=33554432 backing_file=TEST_DIR/t.IMGFMT backing_fmt=IMGFMT
+Formatting 'TEST_DIR/t.IMGFMT.b', fmt=IMGFMT size=33554432 backing_file=TEST_DIR/t.IMGFMT backing_fmt=IMGFMT
+Formatting 'TEST_DIR/t.IMGFMT.c', fmt=IMGFMT size=33554432 backing_file=TEST_DIR/t.IMGFMT.b backing_fmt=IMGFMT
 
 == Two devices sharing the same file in backing chain ==
 
@@ -412,11 +418,14 @@ QEMU_PROG: -drive if=none,file=TEST_DIR/t.qcow2: Failed to get "write" lock
 Is another process using the image [TEST_DIR/t.qcow2]?
 
 == Active commit to intermediate layer should work when base in use ==
+{ 'execute': 'qmp_capabilities' }
 {"return": {}}
 
 _qemu_img_wrapper commit -b TEST_DIR/t.qcow2.b TEST_DIR/t.qcow2.c
+{ 'execute': 'qmp_capabilities' }
 {"return": {}}
 Adding drive
+{ 'execute': 'human-monitor-command', 'arguments': { 'command-line': 'drive_add 0 if=none,id=d0,file=TEST_DIR/t.IMGFMT' } }
 {"return": "OKrn"}
 
 _qemu_io_wrapper TEST_DIR/t.qcow2 -c write 0 512
@@ -424,22 +433,27 @@ qemu-io: can't open device TEST_DIR/t.qcow2: Failed to get "write" lock
 Is another process using the image [TEST_DIR/t.qcow2]?
 Creating overlay with qemu-img when the guest is running should be allowed
 
-_qemu_img_wrapper create -f qcow2 -b TEST_DIR/t.qcow2 TEST_DIR/t.qcow2.overlay
+_qemu_img_wrapper create -f qcow2 -b TEST_DIR/t.qcow2 -F qcow2 TEST_DIR/t.qcow2.overlay
 == Closing an image should unlock it ==
+{ 'execute': 'human-monitor-command', 'arguments': { 'command-line': 'drive_del d0' } }
 {"return": ""}
 
 _qemu_io_wrapper TEST_DIR/t.qcow2 -c write 0 512
 Adding two and closing one
+{ 'execute': 'human-monitor-command', 'arguments': { 'command-line': 'drive_add 0 if=none,id=d0,file=TEST_DIR/t.IMGFMT,readonly=on' } }
 {"return": "OKrn"}
+{ 'execute': 'human-monitor-command', 'arguments': { 'command-line': 'drive_add 0 if=none,id=d1,file=TEST_DIR/t.IMGFMT,readonly=on' } }
 {"return": "OKrn"}
 
 _qemu_img_wrapper info TEST_DIR/t.qcow2
+{ 'execute': 'human-monitor-command', 'arguments': { 'command-line': 'drive_del d0' } }
 {"return": ""}
 
 _qemu_io_wrapper TEST_DIR/t.qcow2 -c write 0 512
 qemu-io: can't open device TEST_DIR/t.qcow2: Failed to get "write" lock
 Is another process using the image [TEST_DIR/t.qcow2]?
 Closing the other
+{ 'execute': 'human-monitor-command', 'arguments': { 'command-line': 'drive_del d1' } }
 {"return": ""}
 
 _qemu_io_wrapper TEST_DIR/t.qcow2 -c write 0 512
@@ -450,7 +464,7 @@ No conflict:
 image: null-co://
 file format: null-co
 virtual size: 1 GiB (1073741824 bytes)
-disk size: unavailable
+disk size: 0 B
 
 Conflict:
 qemu-img: --force-share/-U conflicts with image options

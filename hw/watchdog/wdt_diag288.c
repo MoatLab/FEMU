@@ -12,10 +12,12 @@
  */
 
 #include "qemu/osdep.h"
+#include "sysemu/reset.h"
 #include "sysemu/watchdog.h"
 #include "hw/sysbus.h"
 #include "qemu/timer.h"
 #include "hw/watchdog/wdt_diag288.h"
+#include "migration/vmstate.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
 
@@ -106,7 +108,7 @@ static void wdt_diag288_realize(DeviceState *dev, Error **errp)
                                   dev);
 }
 
-static void wdt_diag288_unrealize(DeviceState *dev, Error **errp)
+static void wdt_diag288_unrealize(DeviceState *dev)
 {
     DIAG288State *diag288 = DIAG288(dev);
 

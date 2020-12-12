@@ -24,6 +24,8 @@
 #include "exec/address-spaces.h"
 #include "hw/arm/nrf51.h"
 #include "hw/nvram/nrf51_nvm.h"
+#include "hw/qdev-properties.h"
+#include "migration/vmstate.h"
 
 /*
  * FICR Registers Assignments
@@ -367,7 +369,7 @@ static void nrf51_nvm_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    dc->props = nrf51_nvm_properties;
+    device_class_set_props(dc, nrf51_nvm_properties);
     dc->vmsd = &vmstate_nvm;
     dc->realize = nrf51_nvm_realize;
     dc->reset = nrf51_nvm_reset;

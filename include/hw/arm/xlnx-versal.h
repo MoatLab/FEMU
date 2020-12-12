@@ -14,17 +14,25 @@
 
 #include "hw/sysbus.h"
 #include "hw/arm/boot.h"
+#include "hw/sd/sdhci.h"
 #include "hw/intc/arm_gicv3.h"
+#include "hw/char/pl011.h"
+#include "hw/dma/xlnx-zdma.h"
+#include "hw/net/cadence_gem.h"
+#include "hw/rtc/xlnx-zynqmp-rtc.h"
+#include "qom/object.h"
 
 #define TYPE_XLNX_VERSAL "xlnx-versal"
-#define XLNX_VERSAL(obj) OBJECT_CHECK(Versal, (obj), TYPE_XLNX_VERSAL)
+OBJECT_DECLARE_SIMPLE_TYPE(Versal, XLNX_VERSAL)
 
 #define XLNX_VERSAL_NR_ACPUS   2
 #define XLNX_VERSAL_NR_UARTS   2
 #define XLNX_VERSAL_NR_GEMS    2
+#define XLNX_VERSAL_NR_ADMAS   8
+#define XLNX_VERSAL_NR_SDS     2
 #define XLNX_VERSAL_NR_IRQS    192
 
-typedef struct Versal {
+struct Versal {
     /*< private >*/
     SysBusDevice parent_obj;
 
@@ -32,7 +40,7 @@ typedef struct Versal {
     struct {
         struct {
             MemoryRegion mr;
-            ARMCPU *cpu[XLNX_VERSAL_NR_ACPUS];
+            ARMCPU cpu[XLNX_VERSAL_NR_ACPUS];
             GICv3State gic;
         } apu;
     } fpd;
@@ -48,16 +56,26 @@ typedef struct Versal {
         MemoryRegion mr_ocm;
 
         struct {
-            SysBusDevice *uart[XLNX_VERSAL_NR_UARTS];
-            SysBusDevice *gem[XLNX_VERSAL_NR_GEMS];
+            PL011State uart[XLNX_VERSAL_NR_UARTS];
+            CadenceGEMState gem[XLNX_VERSAL_NR_GEMS];
+            XlnxZDMA adma[XLNX_VERSAL_NR_ADMAS];
         } iou;
     } lpd;
+
+    /* The Platform Management Controller subsystem.  */
+    struct {
+        struct {
+            SDHCIState sd[XLNX_VERSAL_NR_SDS];
+        } iou;
+
+        XlnxZynqMPRTC rtc;
+    } pmc;
 
     struct {
         MemoryRegion *mr_ddr;
         uint32_t psci_conduit;
     } cfg;
-} Versal;
+};
 
 /* Memory-map and IRQ definitions. Copied a subset from
  * auto-generated files.  */
@@ -74,6 +92,11 @@ typedef struct Versal {
 #define VERSAL_GEM0_WAKE_IRQ_0     57
 #define VERSAL_GEM1_IRQ_0          58
 #define VERSAL_GEM1_WAKE_IRQ_0     59
+#define VERSAL_ADMA_IRQ_0          60
+#define VERSAL_RTC_APB_ERR_IRQ     121
+#define VERSAL_SD0_IRQ_0           126
+#define VERSAL_RTC_ALARM_IRQ       142
+#define VERSAL_RTC_SECONDS_IRQ     143
 
 /* Architecturally reserved IRQs suitable for virtualization.  */
 #define VERSAL_RSVD_IRQ_FIRST 111
@@ -95,6 +118,9 @@ typedef struct Versal {
 #define MM_GEM0_SIZE                0x10000
 #define MM_GEM1                     0xff0d0000U
 #define MM_GEM1_SIZE                0x10000
+
+#define MM_ADMA_CH0                 0xffa80000U
+#define MM_ADMA_CH0_SIZE            0x10000
 
 #define MM_OCM                      0xfffc0000U
 #define MM_OCM_SIZE                 0x40000
@@ -119,4 +145,11 @@ typedef struct Versal {
 #define MM_IOU_SCNTRS_SIZE          0x10000
 #define MM_FPD_CRF                  0xfd1a0000U
 #define MM_FPD_CRF_SIZE             0x140000
+
+#define MM_PMC_SD0                  0xf1040000U
+#define MM_PMC_SD0_SIZE             0x10000
+#define MM_PMC_CRP                  0xf1260000U
+#define MM_PMC_CRP_SIZE             0x10000
+#define MM_PMC_RTC                  0xf12a0000
+#define MM_PMC_RTC_SIZE             0x10000
 #endif

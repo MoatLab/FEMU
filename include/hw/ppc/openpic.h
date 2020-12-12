@@ -2,8 +2,8 @@
 #define OPENPIC_H
 
 #include "hw/sysbus.h"
-#include "hw/qdev-core.h"
-#include "qom/cpu.h"
+#include "hw/core/cpu.h"
+#include "qom/object.h"
 
 #define MAX_CPU     32
 #define MAX_MSI     8
@@ -137,9 +137,9 @@ typedef struct IRQDest {
 } IRQDest;
 
 #define TYPE_OPENPIC "openpic"
-#define OPENPIC(obj) OBJECT_CHECK(OpenPICState, (obj), TYPE_OPENPIC)
+OBJECT_DECLARE_SIMPLE_TYPE(OpenPICState, OPENPIC)
 
-typedef struct OpenPICState {
+struct OpenPICState {
     /*< private >*/
     SysBusDevice parent_obj;
     /*< public >*/
@@ -184,6 +184,6 @@ typedef struct OpenPICState {
     uint32_t irq_ipi0;
     uint32_t irq_tim0;
     uint32_t irq_msi;
-} OpenPICState;
+};
 
 #endif /* OPENPIC_H */

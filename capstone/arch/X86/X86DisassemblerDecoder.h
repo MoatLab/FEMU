@@ -14,7 +14,7 @@
  *===----------------------------------------------------------------------===*/
 
 /* Capstone Disassembly Engine */
-/* By Nguyen Anh Quynh <aquynh@gmail.com>, 2013-2014 */
+/* By Nguyen Anh Quynh <aquynh@gmail.com>, 2013-2019 */
 
 #ifndef CS_X86_DISASSEMBLERDECODER_H
 #define CS_X86_DISASSEMBLERDECODER_H
@@ -23,9 +23,6 @@
 #include <libkern/libkern.h>
 #else
 #include <stdio.h>
-#endif
-#if !defined(_MSC_VER) || !defined(_KERNEL_MODE)
-#include <stdint.h>
 #endif
 
 #include "X86DisassemblerDecoderCommon.h"
@@ -355,7 +352,15 @@
   ENTRY(DR4)        \
   ENTRY(DR5)        \
   ENTRY(DR6)        \
-  ENTRY(DR7)
+  ENTRY(DR7)        \
+  ENTRY(DR8)        \
+  ENTRY(DR9)        \
+  ENTRY(DR10)        \
+  ENTRY(DR11)        \
+  ENTRY(DR12)        \
+  ENTRY(DR13)        \
+  ENTRY(DR14)        \
+  ENTRY(DR15)
 
 #define REGS_CONTROL  \
   ENTRY(CR0)          \
@@ -375,6 +380,12 @@
   ENTRY(CR14)          \
   ENTRY(CR15)
 
+#define REGS_BOUND    \
+  ENTRY(BND0)         \
+  ENTRY(BND1)         \
+  ENTRY(BND2)         \
+  ENTRY(BND3)
+ 
 #define ALL_EA_BASES  \
   EA_BASES_16BIT      \
   EA_BASES_32BIT      \
@@ -397,6 +408,7 @@
   REGS_SEGMENT        \
   REGS_DEBUG          \
   REGS_CONTROL        \
+  REGS_BOUND          \
   ENTRY(RIP)
 
 /*
@@ -531,20 +543,14 @@ struct reader_info {
  */
 typedef int (*byteReader_t)(const struct reader_info *arg, uint8_t* byte, uint64_t address);
 
-/*
- * dlog_t - Type for the logging function that the consumer can provide to
- *   get debugging output from the decoder.
- * @param arg     - A baton that the consumer can associate with any internal
- *                  state that it needs.
- * @param log     - A string that contains the message.  Will be reused after
- *                  the logger returns.
- */
-typedef void (*dlog_t)(void* arg, const char *log);
-
 /// The specification for how to extract and interpret a full instruction and
 /// its operands.
 struct InstructionSpecifier {
+#ifdef CAPSTONE_X86_REDUCE
+	uint8_t operands;
+#else
 	uint16_t operands;
+#endif
 };
 
 /*
@@ -554,30 +560,6 @@ typedef struct InternalInstruction {
   // from here, all members must be initialized to ZERO to work properly
   uint8_t operandSize;
   uint8_t prefix0, prefix1, prefix2, prefix3;
-  /* true if the prefix byte corresponding to the entry is present; false if not */
-  bool isPrefix26;
-  bool isPrefix2e;
-  bool isPrefix36;
-  bool isPrefix3e;
-  bool isPrefix64;
-  bool isPrefix65;
-  bool isPrefix66;
-  bool isPrefix67;
-  bool isPrefixf0;
-  bool isPrefixf2;
-  bool isPrefixf3;
-  /* contains the location (for use with the reader) of the prefix byte */
-  uint64_t prefix26;
-  uint64_t prefix2e;
-  uint64_t prefix36;
-  uint64_t prefix3e;
-  uint64_t prefix64;
-  uint64_t prefix65;
-  uint64_t prefix66;
-  uint64_t prefix67;
-  uint64_t prefixf0;
-  uint64_t prefixf2;
-  uint64_t prefixf3;
   /* The value of the REX prefix, if present */
   uint8_t rexPrefix;
   /* The segment override type */
@@ -589,21 +571,44 @@ typedef struct InternalInstruction {
   uint8_t                       sib;
   /* The displacement, used for memory operands */
   bool                          consumedDisplacement;
-  int32_t                       displacement;
+  int64_t                       displacement;
   /* The value of the two-byte escape prefix (usually 0x0f) */
   uint8_t twoByteEscape;
   /* The value of the three-byte escape prefix (usually 0x38 or 0x3a) */
   uint8_t threeByteEscape;
   /* SIB state */
+  SIBIndex                      sibIndexBase;
   SIBIndex                      sibIndex;
   uint8_t                       sibScale;
   SIBBase                       sibBase;
+
+  // Embedded rounding control.
+  uint8_t                       RC;
+
   uint8_t                       numImmediatesConsumed;
-  /* true if the prefix byte, 0xf2 or 0xf3 is xacquire or xrelease */
-  bool xAcquireRelease;
+  /* 0xf2 or 0xf3 is xacquire or xrelease */
+  uint8_t xAcquireRelease;
+
+  // Address-size override
+  bool hasAdSize;
+  // Operand-size override
+  bool hasOpSize;
+  // Lock prefix
+  bool hasLockPrefix;
+  // The repeat prefix if any
+  uint8_t repeatPrefix;
+
+  // The possible mandatory prefix
+  uint8_t mandatoryPrefix;
 
   /* The value of the vector extension prefix(EVEX/VEX/XOP), if present */
   uint8_t vectorExtensionPrefix[4];
+
+  /* Offsets from the start of the instruction to the pieces of data, which is
+     needed to find relocation entries for adding symbolic operands */
+  uint8_t displacementOffset;
+  uint8_t immediateOffset;
+  uint8_t modRMOffset;
 
   // end-of-zero-members
 
@@ -614,11 +619,6 @@ typedef struct InternalInstruction {
   const void* readerArg;
   /* The address of the next byte to read via the reader */
   uint64_t readerCursor;
-
-  /* Logger interface (C) */
-  dlog_t dlog;
-  /* Opaque value passed to the logger */
-  void* dlogArg;
 
   /* General instruction information */
 
@@ -634,10 +634,6 @@ typedef struct InternalInstruction {
   /* The type of the vector extension prefix */
   VectorExtensionType vectorExtensionType;
 
-  /* The location where a mandatory prefix would have to be (i.e., right before
-	 the opcode, or right before the REX prefix if one is present) */
-  uint64_t necessaryPrefixLocation;
-
   /* Sizes of various critical pieces of data, in bytes */
   uint8_t registerSize;
   uint8_t addressSize;
@@ -645,11 +641,6 @@ typedef struct InternalInstruction {
   uint8_t immediateSize;
 
   uint8_t immSize;	// immediate size for X86_OP_IMM operand
-
-  /* Offsets from the start of the instruction to the pieces of data, which is
-     needed to find relocation entries for adding symbolic operands */
-  uint8_t displacementOffset;
-  uint8_t immediateOffset;
 
   /* opcode state */
 
@@ -694,7 +685,6 @@ typedef struct InternalInstruction {
 
   /* These fields determine the allowable values for the ModR/M fields, which
      depend on operand and address widths */
-  EABase                        eaBaseBase;
   EABase                        eaRegBase;
   Reg                           regBase;
 

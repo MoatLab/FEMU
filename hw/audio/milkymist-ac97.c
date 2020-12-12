@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -22,12 +22,14 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
+#include "hw/irq.h"
 #include "hw/sysbus.h"
+#include "migration/vmstate.h"
 #include "trace.h"
 #include "audio/audio.h"
 #include "qemu/error-report.h"
 #include "qemu/module.h"
+#include "qom/object.h"
 
 enum {
     R_AC97_CTRL = 0,
@@ -54,8 +56,7 @@ enum {
 };
 
 #define TYPE_MILKYMIST_AC97 "milkymist-ac97"
-#define MILKYMIST_AC97(obj) \
-    OBJECT_CHECK(MilkymistAC97State, (obj), TYPE_MILKYMIST_AC97)
+OBJECT_DECLARE_SIMPLE_TYPE(MilkymistAC97State, MILKYMIST_AC97)
 
 struct MilkymistAC97State {
     SysBusDevice parent_obj;
@@ -73,7 +74,6 @@ struct MilkymistAC97State {
     qemu_irq dmar_irq;
     qemu_irq dmaw_irq;
 };
-typedef struct MilkymistAC97State MilkymistAC97State;
 
 static void update_voices(MilkymistAC97State *s)
 {
@@ -184,7 +184,7 @@ static void ac97_in_cb(void *opaque, int avail_b)
     MilkymistAC97State *s = opaque;
     uint8_t buf[4096];
     uint32_t remaining = s->regs[R_U_REMAINING];
-    int temp = audio_MIN(remaining, avail_b);
+    int temp = MIN(remaining, avail_b);
     uint32_t addr = s->regs[R_U_ADDR];
     int transferred = 0;
 
@@ -198,7 +198,7 @@ static void ac97_in_cb(void *opaque, int avail_b)
     while (temp) {
         int acquired, to_copy;
 
-        to_copy = audio_MIN(temp, sizeof(buf));
+        to_copy = MIN(temp, sizeof(buf));
         acquired = AUD_read(s->voice_in, buf, to_copy);
         if (!acquired) {
             break;
@@ -227,7 +227,7 @@ static void ac97_out_cb(void *opaque, int free_b)
     MilkymistAC97State *s = opaque;
     uint8_t buf[4096];
     uint32_t remaining = s->regs[R_D_REMAINING];
-    int temp = audio_MIN(remaining, free_b);
+    int temp = MIN(remaining, free_b);
     uint32_t addr = s->regs[R_D_ADDR];
     int transferred = 0;
 
@@ -241,7 +241,7 @@ static void ac97_out_cb(void *opaque, int free_b)
     while (temp) {
         int copied, to_copy;
 
-        to_copy = audio_MIN(temp, sizeof(buf));
+        to_copy = MIN(temp, sizeof(buf));
         cpu_physical_memory_read(addr, buf, to_copy);
         copied = AUD_write(s->voice_out, buf, to_copy);
         if (!copied) {
@@ -329,6 +329,11 @@ static const VMStateDescription vmstate_milkymist_ac97 = {
     }
 };
 
+static Property milkymist_ac97_properties[] = {
+    DEFINE_AUDIO_PROPERTIES(MilkymistAC97State, card),
+    DEFINE_PROP_END_OF_LIST(),
+};
+
 static void milkymist_ac97_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -336,6 +341,7 @@ static void milkymist_ac97_class_init(ObjectClass *klass, void *data)
     dc->realize = milkymist_ac97_realize;
     dc->reset = milkymist_ac97_reset;
     dc->vmsd = &vmstate_milkymist_ac97;
+    device_class_set_props(dc, milkymist_ac97_properties);
 }
 
 static const TypeInfo milkymist_ac97_info = {

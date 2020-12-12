@@ -20,22 +20,26 @@
 #ifndef QEMU_ARM_CPU_QOM_H
 #define QEMU_ARM_CPU_QOM_H
 
-#include "qom/cpu.h"
+#include "hw/core/cpu.h"
+#include "qom/object.h"
 
 struct arm_boot_info;
 
 #define TYPE_ARM_CPU "arm-cpu"
 
-#define ARM_CPU_CLASS(klass) \
-    OBJECT_CLASS_CHECK(ARMCPUClass, (klass), TYPE_ARM_CPU)
-#define ARM_CPU(obj) \
-    OBJECT_CHECK(ARMCPU, (obj), TYPE_ARM_CPU)
-#define ARM_CPU_GET_CLASS(obj) \
-    OBJECT_GET_CLASS(ARMCPUClass, (obj), TYPE_ARM_CPU)
+OBJECT_DECLARE_TYPE(ARMCPU, ARMCPUClass,
+                    ARM_CPU)
 
 #define TYPE_ARM_MAX_CPU "max-" TYPE_ARM_CPU
 
-typedef struct ARMCPUInfo ARMCPUInfo;
+typedef struct ARMCPUInfo {
+    const char *name;
+    void (*initfn)(Object *obj);
+    void (*class_init)(ObjectClass *oc, void *data);
+} ARMCPUInfo;
+
+void arm_cpu_register(const ARMCPUInfo *info);
+void aarch64_cpu_register(const ARMCPUInfo *info);
 
 /**
  * ARMCPUClass:
@@ -44,29 +48,27 @@ typedef struct ARMCPUInfo ARMCPUInfo;
  *
  * An ARM CPU model.
  */
-typedef struct ARMCPUClass {
+struct ARMCPUClass {
     /*< private >*/
     CPUClass parent_class;
     /*< public >*/
 
     const ARMCPUInfo *info;
     DeviceRealize parent_realize;
-    void (*parent_reset)(CPUState *cpu);
-} ARMCPUClass;
+    DeviceReset parent_reset;
+};
 
-typedef struct ARMCPU ARMCPU;
 
 #define TYPE_AARCH64_CPU "aarch64-cpu"
-#define AARCH64_CPU_CLASS(klass) \
-    OBJECT_CLASS_CHECK(AArch64CPUClass, (klass), TYPE_AARCH64_CPU)
-#define AARCH64_CPU_GET_CLASS(obj) \
-    OBJECT_GET_CLASS(AArch64CPUClass, (obj), TYPE_AArch64_CPU)
+typedef struct AArch64CPUClass AArch64CPUClass;
+DECLARE_CLASS_CHECKERS(AArch64CPUClass, AARCH64_CPU,
+                       TYPE_AARCH64_CPU)
 
-typedef struct AArch64CPUClass {
+struct AArch64CPUClass {
     /*< private >*/
     ARMCPUClass parent_class;
     /*< public >*/
-} AArch64CPUClass;
+};
 
 void register_cp_regs_for_features(ARMCPU *cpu);
 void init_cpreg_list(ARMCPU *cpu);
@@ -76,6 +78,7 @@ void arm_gt_ptimer_cb(void *opaque);
 void arm_gt_vtimer_cb(void *opaque);
 void arm_gt_htimer_cb(void *opaque);
 void arm_gt_stimer_cb(void *opaque);
+void arm_gt_hvtimer_cb(void *opaque);
 
 #define ARM_AFF0_SHIFT 0
 #define ARM_AFF0_MASK  (0xFFULL << ARM_AFF0_SHIFT)

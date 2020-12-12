@@ -2,8 +2,9 @@
 #define QEMU_CHAR_FE_H
 
 #include "chardev/char.h"
+#include "qemu/main-loop.h"
 
-typedef void IOEventHandler(void *opaque, int event);
+typedef void IOEventHandler(void *opaque, QEMUChrEvent event);
 typedef int BackendChangeHandler(void *opaque);
 
 /* This is the backend as seen by frontend, the actual backend is

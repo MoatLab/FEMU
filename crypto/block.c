@@ -115,6 +115,71 @@ QCryptoBlock *qcrypto_block_create(QCryptoBlockCreateOptions *options,
 }
 
 
+static ssize_t qcrypto_block_headerlen_hdr_init_func(QCryptoBlock *block,
+        size_t headerlen, void *opaque, Error **errp)
+{
+    size_t *headerlenp = opaque;
+
+    /* Stash away the payload size */
+    *headerlenp = headerlen;
+    return 0;
+}
+
+
+static ssize_t qcrypto_block_headerlen_hdr_write_func(QCryptoBlock *block,
+        size_t offset, const uint8_t *buf, size_t buflen,
+        void *opaque, Error **errp)
+{
+    /* Discard the bytes, we're not actually writing to an image */
+    return buflen;
+}
+
+
+bool
+qcrypto_block_calculate_payload_offset(QCryptoBlockCreateOptions *create_opts,
+                                       const char *optprefix,
+                                       size_t *len,
+                                       Error **errp)
+{
+    /* Fake LUKS creation in order to determine the payload size */
+    g_autoptr(QCryptoBlock) crypto =
+        qcrypto_block_create(create_opts, optprefix,
+                             qcrypto_block_headerlen_hdr_init_func,
+                             qcrypto_block_headerlen_hdr_write_func,
+                             len, errp);
+    return crypto != NULL;
+}
+
+int qcrypto_block_amend_options(QCryptoBlock *block,
+                                QCryptoBlockReadFunc readfunc,
+                                QCryptoBlockWriteFunc writefunc,
+                                void *opaque,
+                                QCryptoBlockAmendOptions *options,
+                                bool force,
+                                Error **errp)
+{
+    if (options->format != block->format) {
+        error_setg(errp,
+                   "Cannot amend encryption format");
+        return -1;
+    }
+
+    if (!block->driver->amend) {
+        error_setg(errp,
+                   "Crypto format %s doesn't support format options amendment",
+                   QCryptoBlockFormat_str(block->format));
+        return -1;
+    }
+
+    return block->driver->amend(block,
+                                readfunc,
+                                writefunc,
+                                opaque,
+                                options,
+                                force,
+                                errp);
+}
+
 QCryptoBlockInfo *qcrypto_block_get_info(QCryptoBlock *block,
                                          Error **errp)
 {
@@ -299,14 +364,12 @@ static int do_qcrypto_block_cipher_encdec(QCryptoCipher *cipher,
                                           QCryptoCipherEncDecFunc func,
                                           Error **errp)
 {
-    uint8_t *iv;
+    g_autofree uint8_t *iv = niv ? g_new0(uint8_t, niv) : NULL;
     int ret = -1;
     uint64_t startsector = offset / sectorsize;
 
     assert(QEMU_IS_ALIGNED(offset, sectorsize));
     assert(QEMU_IS_ALIGNED(len, sectorsize));
-
-    iv = niv ? g_new0(uint8_t, niv) : NULL;
 
     while (len > 0) {
         size_t nbytes;
@@ -320,19 +383,19 @@ static int do_qcrypto_block_cipher_encdec(QCryptoCipher *cipher,
             }
 
             if (ret < 0) {
-                goto cleanup;
+                return -1;
             }
 
             if (qcrypto_cipher_setiv(cipher,
                                      iv, niv,
                                      errp) < 0) {
-                goto cleanup;
+                return -1;
             }
         }
 
         nbytes = len > sectorsize ? sectorsize : len;
         if (func(cipher, buf, buf, nbytes, errp) < 0) {
-            goto cleanup;
+            return -1;
         }
 
         startsector++;
@@ -340,10 +403,7 @@ static int do_qcrypto_block_cipher_encdec(QCryptoCipher *cipher,
         len -= nbytes;
     }
 
-    ret = 0;
- cleanup:
-    g_free(iv);
-    return ret;
+    return 0;
 }
 
 

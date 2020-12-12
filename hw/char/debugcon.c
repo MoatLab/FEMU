@@ -27,13 +27,13 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "qemu/module.h"
-#include "hw/hw.h"
 #include "chardev/char-fe.h"
 #include "hw/isa/isa.h"
+#include "hw/qdev-properties.h"
+#include "qom/object.h"
 
 #define TYPE_ISA_DEBUGCON_DEVICE "isa-debugcon"
-#define ISA_DEBUGCON_DEVICE(obj) \
-     OBJECT_CHECK(ISADebugconState, (obj), TYPE_ISA_DEBUGCON_DEVICE)
+OBJECT_DECLARE_SIMPLE_TYPE(ISADebugconState, ISA_DEBUGCON_DEVICE)
 
 //#define DEBUG_DEBUGCON
 
@@ -43,12 +43,12 @@ typedef struct DebugconState {
     uint32_t readback;
 } DebugconState;
 
-typedef struct ISADebugconState {
+struct ISADebugconState {
     ISADevice parent_obj;
 
     uint32_t iobase;
     DebugconState state;
-} ISADebugconState;
+};
 
 static void debugcon_ioport_write(void *opaque, hwaddr addr, uint64_t val,
                                   unsigned width)
@@ -125,7 +125,7 @@ static void debugcon_isa_class_initfn(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = debugcon_isa_realizefn;
-    dc->props = debugcon_isa_properties;
+    device_class_set_props(dc, debugcon_isa_properties);
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
 }
 

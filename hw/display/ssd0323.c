@@ -13,8 +13,10 @@
 
 #include "qemu/osdep.h"
 #include "hw/ssi/ssi.h"
+#include "migration/vmstate.h"
 #include "qemu/module.h"
 #include "ui/console.h"
+#include "qom/object.h"
 
 //#define DEBUG_SSD0323 1
 
@@ -46,7 +48,7 @@ enum ssd0323_mode
     SSD0323_DATA
 };
 
-typedef struct {
+struct ssd0323_state {
     SSISlave ssidev;
     QemuConsole *con;
 
@@ -63,11 +65,15 @@ typedef struct {
     int32_t remap;
     uint32_t mode;
     uint8_t framebuffer[128 * 80 / 2];
-} ssd0323_state;
+};
+
+#define TYPE_SSD0323 "ssd0323"
+OBJECT_DECLARE_SIMPLE_TYPE(ssd0323_state, SSD0323)
+
 
 static uint32_t ssd0323_transfer(SSISlave *dev, uint32_t data)
 {
-    ssd0323_state *s = FROM_SSI_SLAVE(ssd0323_state, dev);
+    ssd0323_state *s = SSD0323(dev);
 
     switch (s->mode) {
     case SSD0323_DATA:
@@ -345,7 +351,7 @@ static const GraphicHwOps ssd0323_ops = {
 static void ssd0323_realize(SSISlave *d, Error **errp)
 {
     DeviceState *dev = DEVICE(d);
-    ssd0323_state *s = FROM_SSI_SLAVE(ssd0323_state, d);
+    ssd0323_state *s = SSD0323(d);
 
     s->col_end = 63;
     s->row_end = 79;
@@ -364,10 +370,11 @@ static void ssd0323_class_init(ObjectClass *klass, void *data)
     k->transfer = ssd0323_transfer;
     k->cs_polarity = SSI_CS_HIGH;
     dc->vmsd = &vmstate_ssd0323;
+    set_bit(DEVICE_CATEGORY_DISPLAY, dc->categories);
 }
 
 static const TypeInfo ssd0323_info = {
-    .name          = "ssd0323",
+    .name          = TYPE_SSD0323,
     .parent        = TYPE_SSI_SLAVE,
     .instance_size = sizeof(ssd0323_state),
     .class_init    = ssd0323_class_init,

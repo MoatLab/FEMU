@@ -11,17 +11,22 @@
 #include "qapi/error.h"
 #include "cpu.h"
 #include "hw/sysbus.h"
+#include "migration/vmstate.h"
 #include "hw/arm/boot.h"
 #include "hw/net/smc91c111.h"
 #include "net/net.h"
 #include "sysemu/sysemu.h"
 #include "hw/pci/pci.h"
 #include "hw/i2c/i2c.h"
+#include "hw/i2c/arm_sbcon_i2c.h"
+#include "hw/irq.h"
 #include "hw/boards.h"
 #include "exec/address-spaces.h"
 #include "hw/block/flash.h"
 #include "qemu/error-report.h"
 #include "hw/char/pl011.h"
+#include "hw/sd/sd.h"
+#include "qom/object.h"
 
 #define VERSATILE_FLASH_ADDR 0x34000000
 #define VERSATILE_FLASH_SIZE (64 * 1024 * 1024)
@@ -30,10 +35,9 @@
 /* Primary interrupt controller.  */
 
 #define TYPE_VERSATILE_PB_SIC "versatilepb_sic"
-#define VERSATILE_PB_SIC(obj) \
-    OBJECT_CHECK(vpb_sic_state, (obj), TYPE_VERSATILE_PB_SIC)
+OBJECT_DECLARE_SIMPLE_TYPE(vpb_sic_state, VERSATILE_PB_SIC)
 
-typedef struct vpb_sic_state {
+struct vpb_sic_state {
     SysBusDevice parent_obj;
 
     MemoryRegion iomem;
@@ -42,7 +46,7 @@ typedef struct vpb_sic_state {
     uint32_t pic_enable;
     qemu_irq parent[32];
     int irq;
-} vpb_sic_state;
+};
 
 static const VMStateDescription vmstate_vpb_sic = {
     .name = "versatilepb_sic",
@@ -182,7 +186,6 @@ static void versatile_init(MachineState *machine, int board_id)
     Object *cpuobj;
     ARMCPU *cpu;
     MemoryRegion *sysmem = get_system_memory();
-    MemoryRegion *ram = g_new(MemoryRegion, 1);
     qemu_irq pic[32];
     qemu_irq sic[32];
     DeviceState *dev, *sysctl;
@@ -210,24 +213,22 @@ static void versatile_init(MachineState *machine, int board_id)
      * currently support EL3 so the CPU EL3 property is disabled before
      * realization.
      */
-    if (object_property_find(cpuobj, "has_el3", NULL)) {
-        object_property_set_bool(cpuobj, false, "has_el3", &error_fatal);
+    if (object_property_find(cpuobj, "has_el3")) {
+        object_property_set_bool(cpuobj, "has_el3", false, &error_fatal);
     }
 
-    object_property_set_bool(cpuobj, true, "realized", &error_fatal);
+    qdev_realize(DEVICE(cpuobj), NULL, &error_fatal);
 
     cpu = ARM_CPU(cpuobj);
 
-    memory_region_allocate_system_memory(ram, NULL, "versatile.ram",
-                                         machine->ram_size);
     /* ??? RAM should repeat to fill physical memory space.  */
     /* SDRAM at address zero.  */
-    memory_region_add_subregion(sysmem, 0, ram);
+    memory_region_add_subregion(sysmem, 0, machine->ram);
 
-    sysctl = qdev_create(NULL, "realview_sysctl");
+    sysctl = qdev_new("realview_sysctl");
     qdev_prop_set_uint32(sysctl, "sys_id", 0x41007004);
     qdev_prop_set_uint32(sysctl, "proc_id", 0x02000000);
-    qdev_init_nofail(sysctl);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(sysctl), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(sysctl), 0, 0x10000000);
 
     dev = sysbus_create_varargs("pl190", 0x10140000,
@@ -246,9 +247,9 @@ static void versatile_init(MachineState *machine, int board_id)
     sysbus_create_simple("pl050_keyboard", 0x10006000, sic[3]);
     sysbus_create_simple("pl050_mouse", 0x10007000, sic[4]);
 
-    dev = qdev_create(NULL, "versatile_pci");
+    dev = qdev_new("versatile_pci");
     busdev = SYS_BUS_DEVICE(dev);
-    qdev_init_nofail(dev);
+    sysbus_realize_and_unref(busdev, &error_fatal);
     sysbus_mmio_map(busdev, 0, 0x10001000); /* PCI controller regs */
     sysbus_mmio_map(busdev, 1, 0x41000000); /* PCI self-config */
     sysbus_mmio_map(busdev, 2, 0x42000000); /* PCI config */
@@ -287,11 +288,11 @@ static void versatile_init(MachineState *machine, int board_id)
     pl011_create(0x101f3000, pic[14], serial_hd(2));
     pl011_create(0x10009000, sic[6], serial_hd(3));
 
-    dev = qdev_create(NULL, "pl080");
-    object_property_set_link(OBJECT(dev), OBJECT(sysmem), "downstream",
+    dev = qdev_new("pl080");
+    object_property_set_link(OBJECT(dev), "downstream", OBJECT(sysmem),
                              &error_fatal);
-    qdev_init_nofail(dev);
     busdev = SYS_BUS_DEVICE(dev);
+    sysbus_realize_and_unref(busdev, &error_fatal);
     sysbus_mmio_map(busdev, 0, 0x10130000);
     sysbus_connect_irq(busdev, 0, pic[17]);
 
@@ -309,20 +310,41 @@ static void versatile_init(MachineState *machine, int board_id)
     /* Wire up the mux control signals from the SYS_CLCD register */
     qdev_connect_gpio_out(sysctl, 0, qdev_get_gpio_in(dev, 0));
 
-    sysbus_create_varargs("pl181", 0x10005000, sic[22], sic[1], NULL);
-    sysbus_create_varargs("pl181", 0x1000b000, sic[23], sic[2], NULL);
+    dev = sysbus_create_varargs("pl181", 0x10005000, sic[22], sic[1], NULL);
+    dinfo = drive_get_next(IF_SD);
+    if (dinfo) {
+        DeviceState *card;
+
+        card = qdev_new(TYPE_SD_CARD);
+        qdev_prop_set_drive_err(card, "drive", blk_by_legacy_dinfo(dinfo),
+                                &error_fatal);
+        qdev_realize_and_unref(card, qdev_get_child_bus(dev, "sd-bus"),
+                               &error_fatal);
+    }
+
+    dev = sysbus_create_varargs("pl181", 0x1000b000, sic[23], sic[2], NULL);
+    dinfo = drive_get_next(IF_SD);
+    if (dinfo) {
+        DeviceState *card;
+
+        card = qdev_new(TYPE_SD_CARD);
+        qdev_prop_set_drive_err(card, "drive", blk_by_legacy_dinfo(dinfo),
+                                &error_fatal);
+        qdev_realize_and_unref(card, qdev_get_child_bus(dev, "sd-bus"),
+                               &error_fatal);
+    }
 
     /* Add PL031 Real Time Clock. */
     sysbus_create_simple("pl031", 0x101e8000, pic[10]);
 
-    dev = sysbus_create_simple("versatile_i2c", 0x10002000, NULL);
+    dev = sysbus_create_simple(TYPE_VERSATILE_I2C, 0x10002000, NULL);
     i2c = (I2CBus *)qdev_get_child_bus(dev, "i2c");
-    i2c_create_slave(i2c, "ds1338", 0x68);
+    i2c_slave_create_simple(i2c, "ds1338", 0x68);
 
     /* Add PL041 AACI Interface to the LM4549 codec */
-    pl041 = qdev_create(NULL, "pl041");
+    pl041 = qdev_new("pl041");
     qdev_prop_set_uint32(pl041, "nc_fifo_depth", 512);
-    qdev_init_nofail(pl041);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(pl041), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(pl041), 0, 0x10004000);
     sysbus_connect_irq(SYS_BUS_DEVICE(pl041), 0, sic[24]);
 
@@ -373,11 +395,8 @@ static void versatile_init(MachineState *machine, int board_id)
     }
 
     versatile_binfo.ram_size = machine->ram_size;
-    versatile_binfo.kernel_filename = machine->kernel_filename;
-    versatile_binfo.kernel_cmdline = machine->kernel_cmdline;
-    versatile_binfo.initrd_filename = machine->initrd_filename;
     versatile_binfo.board_id = board_id;
-    arm_load_kernel(cpu, &versatile_binfo);
+    arm_load_kernel(cpu, machine, &versatile_binfo);
 }
 
 static void vpb_init(MachineState *machine)
@@ -399,6 +418,7 @@ static void versatilepb_class_init(ObjectClass *oc, void *data)
     mc->block_default_type = IF_SCSI;
     mc->ignore_memory_transaction_failures = true;
     mc->default_cpu_type = ARM_CPU_TYPE_NAME("arm926");
+    mc->default_ram_id = "versatile.ram";
 }
 
 static const TypeInfo versatilepb_type = {
@@ -416,6 +436,7 @@ static void versatileab_class_init(ObjectClass *oc, void *data)
     mc->block_default_type = IF_SCSI;
     mc->ignore_memory_transaction_failures = true;
     mc->default_cpu_type = ARM_CPU_TYPE_NAME("arm926");
+    mc->default_ram_id = "versatile.ram";
 }
 
 static const TypeInfo versatileab_type = {

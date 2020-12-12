@@ -15,18 +15,21 @@
 #include "qemu-common.h"
 #include "sysemu/accel.h"
 #include "sysemu/whpx.h"
-#include "sysemu/sysemu.h"
 #include "sysemu/cpus.h"
+#include "sysemu/runstate.h"
 #include "qemu/main-loop.h"
 #include "hw/boards.h"
 #include "qemu/error-report.h"
-#include "qemu/queue.h"
 #include "qapi/error.h"
 #include "migration/blocker.h"
 #include "whp-dispatch.h"
 
+#include "whpx-cpus.h"
+
 #include <WinHvPlatform.h>
 #include <WinHvEmulation.h>
+
+#define HYPERV_APIC_BUS_FREQUENCY      (200000000ULL)
 
 struct whpx_state {
     uint64_t mem_quota;
@@ -115,7 +118,6 @@ static const WHV_REGISTER_NAME whpx_register_names[] = {
     WHvX64RegisterXmmControlStatus,
 
     /* X64 MSRs */
-    WHvX64RegisterTsc,
     WHvX64RegisterEfer,
 #ifdef TARGET_X86_64
     WHvX64RegisterKernelGsBase,
@@ -216,7 +218,44 @@ static SegmentCache whpx_seg_h2q(const WHV_X64_SEGMENT_REGISTER *hs)
     return qs;
 }
 
-static void whpx_set_registers(CPUState *cpu)
+static int whpx_set_tsc(CPUState *cpu)
+{
+    struct CPUX86State *env = (CPUArchState *)(cpu->env_ptr);
+    WHV_REGISTER_NAME tsc_reg = WHvX64RegisterTsc;
+    WHV_REGISTER_VALUE tsc_val;
+    HRESULT hr;
+    struct whpx_state *whpx = &whpx_global;
+
+    /*
+     * Suspend the partition prior to setting the TSC to reduce the variance
+     * in TSC across vCPUs. When the first vCPU runs post suspend, the
+     * partition is automatically resumed.
+     */
+    if (whp_dispatch.WHvSuspendPartitionTime) {
+
+        /*
+         * Unable to suspend partition while setting TSC is not a fatal
+         * error. It just increases the likelihood of TSC variance between
+         * vCPUs and some guest OS are able to handle that just fine.
+         */
+        hr = whp_dispatch.WHvSuspendPartitionTime(whpx->partition);
+        if (FAILED(hr)) {
+            warn_report("WHPX: Failed to suspend partition, hr=%08lx", hr);
+        }
+    }
+
+    tsc_val.Reg64 = env->tsc;
+    hr = whp_dispatch.WHvSetVirtualProcessorRegisters(
+        whpx->partition, cpu->cpu_index, &tsc_reg, 1, &tsc_val);
+    if (FAILED(hr)) {
+        error_report("WHPX: Failed to set TSC, hr=%08lx", hr);
+        return -1;
+    }
+
+    return 0;
+}
+
+static void whpx_set_registers(CPUState *cpu, int level)
 {
     struct whpx_state *whpx = &whpx_global;
     struct whpx_vcpu *vcpu = get_whpx_vcpu(cpu);
@@ -230,6 +269,14 @@ static void whpx_set_registers(CPUState *cpu)
     int v86, r86;
 
     assert(cpu_is_stopped(cpu) || qemu_cpu_is_self(cpu));
+
+    /*
+     * Following MSRs have side effects on the guest or are too heavy for
+     * runtime. Limit them to full state update.
+     */
+    if (level >= WHPX_SET_RESET_STATE) {
+        whpx_set_tsc(cpu);
+    }
 
     memset(&vcxt, 0, sizeof(struct whpx_register_set));
 
@@ -331,8 +378,6 @@ static void whpx_set_registers(CPUState *cpu)
     idx += 1;
 
     /* MSRs */
-    assert(whpx_register_names[idx] == WHvX64RegisterTsc);
-    vcxt.values[idx++].Reg64 = env->tsc;
     assert(whpx_register_names[idx] == WHvX64RegisterEfer);
     vcxt.values[idx++].Reg64 = env->efer;
 #ifdef TARGET_X86_64
@@ -380,6 +425,25 @@ static void whpx_set_registers(CPUState *cpu)
     return;
 }
 
+static int whpx_get_tsc(CPUState *cpu)
+{
+    struct CPUX86State *env = (CPUArchState *)(cpu->env_ptr);
+    WHV_REGISTER_NAME tsc_reg = WHvX64RegisterTsc;
+    WHV_REGISTER_VALUE tsc_val;
+    HRESULT hr;
+    struct whpx_state *whpx = &whpx_global;
+
+    hr = whp_dispatch.WHvGetVirtualProcessorRegisters(
+        whpx->partition, cpu->cpu_index, &tsc_reg, 1, &tsc_val);
+    if (FAILED(hr)) {
+        error_report("WHPX: Failed to get TSC, hr=%08lx", hr);
+        return -1;
+    }
+
+    env->tsc = tsc_val.Reg64;
+    return 0;
+}
+
 static void whpx_get_registers(CPUState *cpu)
 {
     struct whpx_state *whpx = &whpx_global;
@@ -394,6 +458,11 @@ static void whpx_get_registers(CPUState *cpu)
     int i;
 
     assert(cpu_is_stopped(cpu) || qemu_cpu_is_self(cpu));
+
+    if (!env->tsc_valid) {
+        whpx_get_tsc(cpu);
+        env->tsc_valid = !runstate_is_running();
+    }
 
     hr = whp_dispatch.WHvGetVirtualProcessorRegisters(
         whpx->partition, cpu->cpu_index,
@@ -493,8 +562,6 @@ static void whpx_get_registers(CPUState *cpu)
     idx += 1;
 
     /* MSRs */
-    assert(whpx_register_names[idx] == WHvX64RegisterTsc);
-    env->tsc = vcxt.values[idx++].Reg64;
     assert(whpx_register_names[idx] == WHvX64RegisterEfer);
     env->efer = vcxt.values[idx++].Reg64;
 #ifdef TARGET_X86_64
@@ -512,7 +579,7 @@ static void whpx_get_registers(CPUState *cpu)
     /* WHvX64RegisterPat - Skipped */
 
     assert(whpx_register_names[idx] == WHvX64RegisterSysenterCs);
-    env->sysenter_cs = vcxt.values[idx++].Reg64;;
+    env->sysenter_cs = vcxt.values[idx++].Reg64;
     assert(whpx_register_names[idx] == WHvX64RegisterSysenterEip);
     env->sysenter_eip = vcxt.values[idx++].Reg64;
     assert(whpx_register_names[idx] == WHvX64RegisterSysenterEsp);
@@ -541,7 +608,7 @@ static HRESULT CALLBACK whpx_emu_ioport_callback(
 {
     MemTxAttrs attrs = { 0 };
     address_space_rw(&address_space_io, IoAccess->Port, attrs,
-                     (uint8_t *)&IoAccess->Data, IoAccess->AccessSize,
+                     &IoAccess->Data, IoAccess->AccessSize,
                      IoAccess->Direction);
     return S_OK;
 }
@@ -842,9 +909,8 @@ static void whpx_vcpu_process_async_events(CPUState *cpu)
 
     if ((cpu->interrupt_request & CPU_INTERRUPT_INIT) &&
         !(env->hflags & HF_SMM_MASK)) {
-
+        whpx_cpu_synchronize_state(cpu);
         do_cpu_init(x86_cpu);
-        cpu->vcpu_dirty = true;
         vcpu->interruptable = true;
     }
 
@@ -860,17 +926,13 @@ static void whpx_vcpu_process_async_events(CPUState *cpu)
     }
 
     if (cpu->interrupt_request & CPU_INTERRUPT_SIPI) {
-        if (!cpu->vcpu_dirty) {
-            whpx_get_registers(cpu);
-        }
+        whpx_cpu_synchronize_state(cpu);
         do_cpu_sipi(x86_cpu);
     }
 
     if (cpu->interrupt_request & CPU_INTERRUPT_TPR) {
         cpu->interrupt_request &= ~CPU_INTERRUPT_TPR;
-        if (!cpu->vcpu_dirty) {
-            whpx_get_registers(cpu);
-        }
+        whpx_cpu_synchronize_state(cpu);
         apic_handle_tpr_access_report(x86_cpu->apic_state, env->eip,
                                       env->tpr_access_type);
     }
@@ -888,7 +950,7 @@ static int whpx_vcpu_run(CPUState *cpu)
     whpx_vcpu_process_async_events(cpu);
     if (cpu->halted) {
         cpu->exception_index = EXCP_HLT;
-        atomic_set(&cpu->exit_request, false);
+        qatomic_set(&cpu->exit_request, false);
         return 0;
     }
 
@@ -897,13 +959,13 @@ static int whpx_vcpu_run(CPUState *cpu)
 
     do {
         if (cpu->vcpu_dirty) {
-            whpx_set_registers(cpu);
+            whpx_set_registers(cpu, WHPX_SET_RUNTIME_STATE);
             cpu->vcpu_dirty = false;
         }
 
         whpx_vcpu_pre_run(cpu);
 
-        if (atomic_read(&cpu->exit_request)) {
+        if (qatomic_read(&cpu->exit_request)) {
             whpx_vcpu_kick(cpu);
         }
 
@@ -981,38 +1043,44 @@ static int whpx_vcpu_run(CPUState *cpu)
             WHV_REGISTER_VALUE reg_values[5];
             WHV_REGISTER_NAME reg_names[5];
             UINT32 reg_count = 5;
-            UINT64 rip, rax, rcx, rdx, rbx;
+            UINT64 cpuid_fn, rip = 0, rax = 0, rcx = 0, rdx = 0, rbx = 0;
+            X86CPU *x86_cpu = X86_CPU(cpu);
+            CPUX86State *env = &x86_cpu->env;
 
             memset(reg_values, 0, sizeof(reg_values));
 
             rip = vcpu->exit_ctx.VpContext.Rip +
                   vcpu->exit_ctx.VpContext.InstructionLength;
-            switch (vcpu->exit_ctx.CpuidAccess.Rax) {
-            case 1:
-                rax = vcpu->exit_ctx.CpuidAccess.DefaultResultRax;
-                /* Advertise that we are running on a hypervisor */
-                rcx =
-                    vcpu->exit_ctx.CpuidAccess.DefaultResultRcx |
-                    CPUID_EXT_HYPERVISOR;
+            cpuid_fn = vcpu->exit_ctx.CpuidAccess.Rax;
 
-                rdx = vcpu->exit_ctx.CpuidAccess.DefaultResultRdx;
-                rbx = vcpu->exit_ctx.CpuidAccess.DefaultResultRbx;
+            /*
+             * Ideally, these should be supplied to the hypervisor during VCPU
+             * initialization and it should be able to satisfy this request.
+             * But, currently, WHPX doesn't support setting CPUID values in the
+             * hypervisor once the partition has been setup, which is too late
+             * since VCPUs are realized later. For now, use the values from
+             * QEMU to satisfy these requests, until WHPX adds support for
+             * being able to set these values in the hypervisor at runtime.
+             */
+            cpu_x86_cpuid(env, cpuid_fn, 0, (UINT32 *)&rax, (UINT32 *)&rbx,
+                (UINT32 *)&rcx, (UINT32 *)&rdx);
+            switch (cpuid_fn) {
+            case 0x40000000:
+                /* Expose the vmware cpu frequency cpuid leaf */
+                rax = 0x40000010;
+                rbx = rcx = rdx = 0;
                 break;
+
+            case 0x40000010:
+                rax = env->tsc_khz;
+                rbx = env->apic_bus_freq / 1000; /* Hz to KHz */
+                rcx = rdx = 0;
+                break;
+
             case 0x80000001:
-                rax = vcpu->exit_ctx.CpuidAccess.DefaultResultRax;
                 /* Remove any support of OSVW */
-                rcx =
-                    vcpu->exit_ctx.CpuidAccess.DefaultResultRcx &
-                    ~CPUID_EXT3_OSVW;
-
-                rdx = vcpu->exit_ctx.CpuidAccess.DefaultResultRdx;
-                rbx = vcpu->exit_ctx.CpuidAccess.DefaultResultRbx;
+                rcx &= ~CPUID_EXT3_OSVW;
                 break;
-            default:
-                rax = vcpu->exit_ctx.CpuidAccess.DefaultResultRax;
-                rcx = vcpu->exit_ctx.CpuidAccess.DefaultResultRcx;
-                rdx = vcpu->exit_ctx.CpuidAccess.DefaultResultRdx;
-                rbx = vcpu->exit_ctx.CpuidAccess.DefaultResultRbx;
             }
 
             reg_names[0] = WHvX64RegisterRip;
@@ -1061,28 +1129,30 @@ static int whpx_vcpu_run(CPUState *cpu)
     qemu_mutex_lock_iothread();
     current_cpu = cpu;
 
-    atomic_set(&cpu->exit_request, false);
+    qatomic_set(&cpu->exit_request, false);
 
     return ret < 0;
 }
 
 static void do_whpx_cpu_synchronize_state(CPUState *cpu, run_on_cpu_data arg)
 {
-    whpx_get_registers(cpu);
-    cpu->vcpu_dirty = true;
+    if (!cpu->vcpu_dirty) {
+        whpx_get_registers(cpu);
+        cpu->vcpu_dirty = true;
+    }
 }
 
 static void do_whpx_cpu_synchronize_post_reset(CPUState *cpu,
                                                run_on_cpu_data arg)
 {
-    whpx_set_registers(cpu);
+    whpx_set_registers(cpu, WHPX_SET_RESET_STATE);
     cpu->vcpu_dirty = false;
 }
 
 static void do_whpx_cpu_synchronize_post_init(CPUState *cpu,
                                               run_on_cpu_data arg)
 {
-    whpx_set_registers(cpu);
+    whpx_set_registers(cpu, WHPX_SET_FULL_STATE);
     cpu->vcpu_dirty = false;
 }
 
@@ -1124,12 +1194,25 @@ void whpx_cpu_synchronize_pre_loadvm(CPUState *cpu)
 
 static Error *whpx_migration_blocker;
 
+static void whpx_cpu_update_state(void *opaque, int running, RunState state)
+{
+    CPUX86State *env = opaque;
+
+    if (running) {
+        env->tsc_valid = false;
+    }
+}
+
 int whpx_init_vcpu(CPUState *cpu)
 {
     HRESULT hr;
     struct whpx_state *whpx = &whpx_global;
-    struct whpx_vcpu *vcpu;
+    struct whpx_vcpu *vcpu = NULL;
     Error *local_error = NULL;
+    struct CPUX86State *env = (CPUArchState *)(cpu->env_ptr);
+    X86CPU *x86_cpu = X86_CPU(cpu);
+    UINT64 freq = 0;
+    int ret;
 
     /* Add migration blockers for all unsupported features of the
      * Windows Hypervisor Platform
@@ -1144,7 +1227,8 @@ int whpx_init_vcpu(CPUState *cpu)
             error_report_err(local_error);
             migrate_del_blocker(whpx_migration_blocker);
             error_free(whpx_migration_blocker);
-            return -EINVAL;
+            ret = -EINVAL;
+            goto error;
         }
     }
 
@@ -1152,7 +1236,8 @@ int whpx_init_vcpu(CPUState *cpu)
 
     if (!vcpu) {
         error_report("WHPX: Failed to allocte VCPU context.");
-        return -ENOMEM;
+        ret = -ENOMEM;
+        goto error;
     }
 
     hr = whp_dispatch.WHvEmulatorCreateEmulator(
@@ -1161,8 +1246,8 @@ int whpx_init_vcpu(CPUState *cpu)
     if (FAILED(hr)) {
         error_report("WHPX: Failed to setup instruction completion support,"
                      " hr=%08lx", hr);
-        g_free(vcpu);
-        return -EINVAL;
+        ret = -EINVAL;
+        goto error;
     }
 
     hr = whp_dispatch.WHvCreateVirtualProcessor(
@@ -1171,16 +1256,72 @@ int whpx_init_vcpu(CPUState *cpu)
         error_report("WHPX: Failed to create a virtual processor,"
                      " hr=%08lx", hr);
         whp_dispatch.WHvEmulatorDestroyEmulator(vcpu->emulator);
-        g_free(vcpu);
-        return -EINVAL;
+        ret = -EINVAL;
+        goto error;
+    }
+
+    /*
+     * vcpu's TSC frequency is either specified by user, or use the value
+     * provided by Hyper-V if the former is not present. In the latter case, we
+     * query it from Hyper-V and record in env->tsc_khz, so that vcpu's TSC
+     * frequency can be migrated later via this field.
+     */
+    if (!env->tsc_khz) {
+        hr = whp_dispatch.WHvGetCapability(
+            WHvCapabilityCodeProcessorClockFrequency, &freq, sizeof(freq),
+                NULL);
+        if (hr != WHV_E_UNKNOWN_CAPABILITY) {
+            if (FAILED(hr)) {
+                printf("WHPX: Failed to query tsc frequency, hr=0x%08lx\n", hr);
+            } else {
+                env->tsc_khz = freq / 1000; /* Hz to KHz */
+            }
+        }
+    }
+
+    env->apic_bus_freq = HYPERV_APIC_BUS_FREQUENCY;
+    hr = whp_dispatch.WHvGetCapability(
+        WHvCapabilityCodeInterruptClockFrequency, &freq, sizeof(freq), NULL);
+    if (hr != WHV_E_UNKNOWN_CAPABILITY) {
+        if (FAILED(hr)) {
+            printf("WHPX: Failed to query apic bus frequency hr=0x%08lx\n", hr);
+        } else {
+            env->apic_bus_freq = freq;
+        }
+    }
+
+    /*
+     * If the vmware cpuid frequency leaf option is set, and we have a valid
+     * tsc value, trap the corresponding cpuid's.
+     */
+    if (x86_cpu->vmware_cpuid_freq && env->tsc_khz) {
+        UINT32 cpuidExitList[] = {1, 0x80000001, 0x40000000, 0x40000010};
+
+        hr = whp_dispatch.WHvSetPartitionProperty(
+                whpx->partition,
+                WHvPartitionPropertyCodeCpuidExitList,
+                cpuidExitList,
+                RTL_NUMBER_OF(cpuidExitList) * sizeof(UINT32));
+
+        if (FAILED(hr)) {
+            error_report("WHPX: Failed to set partition CpuidExitList hr=%08lx",
+                        hr);
+            ret = -EINVAL;
+            goto error;
+        }
     }
 
     vcpu->interruptable = true;
-
     cpu->vcpu_dirty = true;
     cpu->hax_vcpu = (struct hax_vcpu_state *)vcpu;
+    qemu_add_vm_change_state_handler(whpx_cpu_update_state, cpu->env_ptr);
 
     return 0;
+
+error:
+    g_free(vcpu);
+
+    return ret;
 }
 
 int whpx_vcpu_exec(CPUState *cpu)
@@ -1347,13 +1488,65 @@ static void whpx_memory_init(void)
     memory_listener_register(&whpx_memory_listener, &address_space_memory);
 }
 
-static void whpx_handle_interrupt(CPUState *cpu, int mask)
+/*
+ * Load the functions from the given library, using the given handle. If a
+ * handle is provided, it is used, otherwise the library is opened. The
+ * handle will be updated on return with the opened one.
+ */
+static bool load_whp_dispatch_fns(HMODULE *handle,
+    WHPFunctionList function_list)
 {
-    cpu->interrupt_request |= mask;
+    HMODULE hLib = *handle;
 
-    if (!qemu_cpu_is_self(cpu)) {
-        qemu_cpu_kick(cpu);
+    #define WINHV_PLATFORM_DLL "WinHvPlatform.dll"
+    #define WINHV_EMULATION_DLL "WinHvEmulation.dll"
+    #define WHP_LOAD_FIELD_OPTIONAL(return_type, function_name, signature) \
+        whp_dispatch.function_name = \
+            (function_name ## _t)GetProcAddress(hLib, #function_name); \
+
+    #define WHP_LOAD_FIELD(return_type, function_name, signature) \
+        whp_dispatch.function_name = \
+            (function_name ## _t)GetProcAddress(hLib, #function_name); \
+        if (!whp_dispatch.function_name) { \
+            error_report("Could not load function %s", #function_name); \
+            goto error; \
+        } \
+
+    #define WHP_LOAD_LIB(lib_name, handle_lib) \
+    if (!handle_lib) { \
+        handle_lib = LoadLibrary(lib_name); \
+        if (!handle_lib) { \
+            error_report("Could not load library %s.", lib_name); \
+            goto error; \
+        } \
+    } \
+
+    switch (function_list) {
+    case WINHV_PLATFORM_FNS_DEFAULT:
+        WHP_LOAD_LIB(WINHV_PLATFORM_DLL, hLib)
+        LIST_WINHVPLATFORM_FUNCTIONS(WHP_LOAD_FIELD)
+        break;
+
+    case WINHV_EMULATION_FNS_DEFAULT:
+        WHP_LOAD_LIB(WINHV_EMULATION_DLL, hLib)
+        LIST_WINHVEMULATION_FUNCTIONS(WHP_LOAD_FIELD)
+        break;
+
+    case WINHV_PLATFORM_FNS_SUPPLEMENTAL:
+        WHP_LOAD_LIB(WINHV_PLATFORM_DLL, hLib)
+        LIST_WINHVPLATFORM_FUNCTIONS_SUPPLEMENTAL(WHP_LOAD_FIELD_OPTIONAL)
+        break;
     }
+
+    *handle = hLib;
+    return true;
+
+error:
+    if (hLib) {
+        FreeLibrary(hLib);
+    }
+
+    return false;
 }
 
 /*
@@ -1368,6 +1561,7 @@ static int whpx_accel_init(MachineState *ms)
     WHV_CAPABILITY whpx_cap;
     UINT32 whpx_cap_size;
     WHV_PARTITION_PROPERTY prop;
+    UINT32 cpuidExitList[] = {1, 0x80000001};
 
     whpx = &whpx_global;
 
@@ -1426,7 +1620,6 @@ static int whpx_accel_init(MachineState *ms)
         goto error;
     }
 
-    UINT32 cpuidExitList[] = {1, 0x80000001};
     hr = whp_dispatch.WHvSetPartitionProperty(
         whpx->partition,
         WHvPartitionPropertyCodeCpuidExitList,
@@ -1449,18 +1642,17 @@ static int whpx_accel_init(MachineState *ms)
 
     whpx_memory_init();
 
-    cpu_interrupt_handler = whpx_handle_interrupt;
+    cpus_register_accel(&whpx_cpus);
 
     printf("Windows Hypervisor Platform accelerator is operational\n");
     return 0;
 
-  error:
+error:
 
     if (NULL != whpx->partition) {
         whp_dispatch.WHvDeletePartition(whpx->partition);
         whpx->partition = NULL;
     }
-
 
     return ret;
 }
@@ -1491,51 +1683,32 @@ static void whpx_type_init(void)
 
 bool init_whp_dispatch(void)
 {
-    const char *lib_name;
-    HMODULE hLib;
-
     if (whp_dispatch_initialized) {
         return true;
     }
 
-    #define WHP_LOAD_FIELD(return_type, function_name, signature) \
-        whp_dispatch.function_name = \
-            (function_name ## _t)GetProcAddress(hLib, #function_name); \
-        if (!whp_dispatch.function_name) { \
-            error_report("Could not load function %s from library %s.", \
-                         #function_name, lib_name); \
-            goto error; \
-        } \
-
-    lib_name = "WinHvPlatform.dll";
-    hWinHvPlatform = LoadLibrary(lib_name);
-    if (!hWinHvPlatform) {
-        error_report("Could not load library %s.", lib_name);
+    if (!load_whp_dispatch_fns(&hWinHvPlatform, WINHV_PLATFORM_FNS_DEFAULT)) {
         goto error;
     }
-    hLib = hWinHvPlatform;
-    LIST_WINHVPLATFORM_FUNCTIONS(WHP_LOAD_FIELD)
 
-    lib_name = "WinHvEmulation.dll";
-    hWinHvEmulation = LoadLibrary(lib_name);
-    if (!hWinHvEmulation) {
-        error_report("Could not load library %s.", lib_name);
+    if (!load_whp_dispatch_fns(&hWinHvEmulation, WINHV_EMULATION_FNS_DEFAULT)) {
         goto error;
     }
-    hLib = hWinHvEmulation;
-    LIST_WINHVEMULATION_FUNCTIONS(WHP_LOAD_FIELD)
 
+    assert(load_whp_dispatch_fns(&hWinHvPlatform,
+        WINHV_PLATFORM_FNS_SUPPLEMENTAL));
     whp_dispatch_initialized = true;
+
     return true;
-
-    error:
-
+error:
     if (hWinHvPlatform) {
         FreeLibrary(hWinHvPlatform);
     }
+
     if (hWinHvEmulation) {
         FreeLibrary(hWinHvEmulation);
     }
+
     return false;
 }
 

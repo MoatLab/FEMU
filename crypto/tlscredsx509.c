@@ -378,9 +378,9 @@ qcrypto_tls_creds_load_cert(QCryptoTLSCredsX509 *creds,
 {
     gnutls_datum_t data;
     gnutls_x509_crt_t cert = NULL;
-    char *buf = NULL;
+    g_autofree char *buf = NULL;
     gsize buflen;
-    GError *gerr;
+    GError *gerr = NULL;
     int ret = -1;
     int err;
 
@@ -420,7 +420,6 @@ qcrypto_tls_creds_load_cert(QCryptoTLSCredsX509 *creds,
         gnutls_x509_crt_deinit(cert);
         cert = NULL;
     }
-    g_free(buf);
     return cert;
 }
 
@@ -434,9 +433,8 @@ qcrypto_tls_creds_load_ca_cert_list(QCryptoTLSCredsX509 *creds,
                                     Error **errp)
 {
     gnutls_datum_t data;
-    char *buf = NULL;
+    g_autofree char *buf = NULL;
     gsize buflen;
-    int ret = -1;
     GError *gerr = NULL;
 
     *ncerts = 0;
@@ -446,7 +444,7 @@ qcrypto_tls_creds_load_ca_cert_list(QCryptoTLSCredsX509 *creds,
         error_setg(errp, "Cannot load CA cert list %s: %s",
                    certFile, gerr->message);
         g_error_free(gerr);
-        goto cleanup;
+        return -1;
     }
 
     data.data = (unsigned char *)buf;
@@ -457,15 +455,11 @@ qcrypto_tls_creds_load_ca_cert_list(QCryptoTLSCredsX509 *creds,
         error_setg(errp,
                    "Unable to import CA certificate list %s",
                    certFile);
-        goto cleanup;
+        return -1;
     }
     *ncerts = certMax;
 
-    ret = 0;
-
- cleanup:
-    g_free(buf);
-    return ret;
+    return 0;
 }
 
 
@@ -780,7 +774,7 @@ qcrypto_tls_creds_x509_prop_get_sanity(Object *obj,
 static void
 qcrypto_tls_creds_x509_complete(UserCreatable *uc, Error **errp)
 {
-    object_property_set_bool(OBJECT(uc), true, "loaded", errp);
+    object_property_set_bool(OBJECT(uc), "loaded", true, errp);
 }
 
 
@@ -812,16 +806,13 @@ qcrypto_tls_creds_x509_class_init(ObjectClass *oc, void *data)
 
     object_class_property_add_bool(oc, "loaded",
                                    qcrypto_tls_creds_x509_prop_get_loaded,
-                                   qcrypto_tls_creds_x509_prop_set_loaded,
-                                   NULL);
+                                   qcrypto_tls_creds_x509_prop_set_loaded);
     object_class_property_add_bool(oc, "sanity-check",
                                    qcrypto_tls_creds_x509_prop_get_sanity,
-                                   qcrypto_tls_creds_x509_prop_set_sanity,
-                                   NULL);
+                                   qcrypto_tls_creds_x509_prop_set_sanity);
     object_class_property_add_str(oc, "passwordid",
                                   qcrypto_tls_creds_x509_prop_get_passwordid,
-                                  qcrypto_tls_creds_x509_prop_set_passwordid,
-                                  NULL);
+                                  qcrypto_tls_creds_x509_prop_set_passwordid);
 }
 
 

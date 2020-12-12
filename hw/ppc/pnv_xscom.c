@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -18,7 +18,6 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "sysemu/hw_accel.h"
@@ -58,13 +57,7 @@ static void xscom_complete(CPUState *cs, uint64_t hmer_bits)
 
 static uint32_t pnv_xscom_pcba(PnvChip *chip, uint64_t addr)
 {
-    addr &= (PNV_XSCOM_SIZE - 1);
-
-    if (pnv_chip_is_power9(chip)) {
-        return addr >> 3;
-    } else {
-        return ((addr >> 4) & ~0xfull) | ((addr >> 3) & 0xf);
-    }
+    return PNV_CHIP_GET_CLASS(chip)->xscom_pcba(chip, addr);
 }
 
 static uint64_t xscom_read_default(PnvChip *chip, uint32_t pcba)
@@ -94,19 +87,23 @@ static uint64_t xscom_read_default(PnvChip *chip, uint32_t pcba)
     case 0x2020009:     /* ADU stuff, error register */
     case 0x202000f:     /* ADU stuff, receive status register*/
         return 0;
-    case 0x2013f00:     /* PBA stuff */
     case 0x2013f01:     /* PBA stuff */
-    case 0x2013f02:     /* PBA stuff */
-    case 0x2013f03:     /* PBA stuff */
-    case 0x2013f04:     /* PBA stuff */
     case 0x2013f05:     /* PBA stuff */
-    case 0x2013f06:     /* PBA stuff */
-    case 0x2013f07:     /* PBA stuff */
         return 0;
     case 0x2013028:     /* CAPP stuff */
     case 0x201302a:     /* CAPP stuff */
     case 0x2013801:     /* CAPP stuff */
     case 0x2013802:     /* CAPP stuff */
+
+        /* P9 CAPP regs */
+    case 0x2010841:
+    case 0x2010842:
+    case 0x201082a:
+    case 0x2010828:
+    case 0x4010841:
+    case 0x4010842:
+    case 0x401082a:
+    case 0x4010828:
         return 0;
     default:
         return -1;
@@ -138,6 +135,16 @@ static bool xscom_write_default(PnvChip *chip, uint32_t pcba, uint64_t val)
     case 0x201302a:     /* CAPP stuff */
     case 0x2013801:     /* CAPP stuff */
     case 0x2013802:     /* CAPP stuff */
+
+        /* P9 CAPP regs */
+    case 0x2010841:
+    case 0x2010842:
+    case 0x201082a:
+    case 0x2010828:
+    case 0x4010841:
+    case 0x4010842:
+    case 0x401082a:
+    case 0x4010828:
 
         /* P8 PRD registers */
     case PRD_P8_IPOLL_REG_MASK:
@@ -253,30 +260,24 @@ static int xscom_dt_child(Object *child, void *opaque)
         PnvXScomInterface *xd = PNV_XSCOM_INTERFACE(child);
         PnvXScomInterfaceClass *xc = PNV_XSCOM_INTERFACE_GET_CLASS(xd);
 
-        if (xc->dt_xscom) {
+        /*
+         * Only "realized" devices should be configured in the DT
+         */
+        if (xc->dt_xscom && DEVICE(child)->realized) {
             _FDT((xc->dt_xscom(xd, args->fdt, args->xscom_offset)));
         }
     }
     return 0;
 }
 
-static const char compat_p8[] = "ibm,power8-xscom\0ibm,xscom";
-static const char compat_p9[] = "ibm,power9-xscom\0ibm,xscom";
-
-int pnv_dt_xscom(PnvChip *chip, void *fdt, int root_offset)
+int pnv_dt_xscom(PnvChip *chip, void *fdt, int root_offset,
+                 uint64_t xscom_base, uint64_t xscom_size,
+                 const char *compat, int compat_size)
 {
-    uint64_t reg[2];
+    uint64_t reg[] = { xscom_base, xscom_size };
     int xscom_offset;
     ForeachPopulateArgs args;
     char *name;
-
-    if (pnv_chip_is_power9(chip)) {
-        reg[0] = cpu_to_be64(PNV9_XSCOM_BASE(chip));
-        reg[1] = cpu_to_be64(PNV9_XSCOM_SIZE);
-    } else {
-        reg[0] = cpu_to_be64(PNV_XSCOM_BASE(chip));
-        reg[1] = cpu_to_be64(PNV_XSCOM_SIZE);
-    }
 
     name = g_strdup_printf("xscom@%" PRIx64, be64_to_cpu(reg[0]));
     xscom_offset = fdt_add_subnode(fdt, root_offset, name);
@@ -286,21 +287,18 @@ int pnv_dt_xscom(PnvChip *chip, void *fdt, int root_offset)
     _FDT((fdt_setprop_cell(fdt, xscom_offset, "#address-cells", 1)));
     _FDT((fdt_setprop_cell(fdt, xscom_offset, "#size-cells", 1)));
     _FDT((fdt_setprop(fdt, xscom_offset, "reg", reg, sizeof(reg))));
-
-    if (pnv_chip_is_power9(chip)) {
-        _FDT((fdt_setprop(fdt, xscom_offset, "compatible", compat_p9,
-                          sizeof(compat_p9))));
-    } else {
-        _FDT((fdt_setprop(fdt, xscom_offset, "compatible", compat_p8,
-                          sizeof(compat_p8))));
-    }
-
+    _FDT((fdt_setprop(fdt, xscom_offset, "compatible", compat, compat_size)));
     _FDT((fdt_setprop(fdt, xscom_offset, "scom-controller", NULL, 0)));
 
     args.fdt = fdt;
     args.xscom_offset = xscom_offset;
 
-    object_child_foreach(OBJECT(chip), xscom_dt_child, &args);
+    /*
+     * Loop on the whole object hierarchy to catch all
+     * PnvXScomInterface objects which can lie a bit deeper than the
+     * first layer.
+     */
+    object_child_foreach_recursive(OBJECT(chip), xscom_dt_child, &args);
     return 0;
 }
 

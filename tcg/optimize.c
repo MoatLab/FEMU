@@ -24,8 +24,7 @@
  */
 
 #include "qemu/osdep.h"
-#include "exec/cpu-common.h"
-#include "tcg-op.h"
+#include "tcg/tcg-op.h"
 
 #define CASE_OP_32_64(x)                        \
         glue(glue(case INDEX_op_, x), _i32):    \
@@ -1014,7 +1013,7 @@ void tcg_optimize(TCGContext *s)
         CASE_OP_32_64(qemu_ld):
             {
                 TCGMemOpIdx oi = op->args[nb_oargs + nb_iargs];
-                TCGMemOp mop = get_memop(oi);
+                MemOp mop = get_memop(oi);
                 if (!(mop & MO_SIGN)) {
                     mask = (2ULL << ((8 << (mop & MO_SIZE)) - 1)) - 1;
                 }
@@ -1107,6 +1106,21 @@ void tcg_optimize(TCGContext *s)
                 tmp = dup_const(TCGOP_VECE(op), tmp);
                 tcg_opt_gen_movi(s, op, op->args[0], tmp);
                 break;
+            }
+            goto do_default;
+
+        case INDEX_op_dup2_vec:
+            assert(TCG_TARGET_REG_BITS == 32);
+            if (arg_is_const(op->args[1]) && arg_is_const(op->args[2])) {
+                tmp = arg_info(op->args[1])->val;
+                if (tmp == arg_info(op->args[2])->val) {
+                    tcg_opt_gen_movi(s, op, op->args[0], tmp);
+                    break;
+                }
+            } else if (args_are_copies(op->args[1], op->args[2])) {
+                op->opc = INDEX_op_dup_vec;
+                TCGOP_VECE(op) = MO_32;
+                nb_iargs = 1;
             }
             goto do_default;
 

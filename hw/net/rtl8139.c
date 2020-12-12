@@ -53,14 +53,16 @@
 #include "qemu/osdep.h"
 #include <zlib.h>
 
-#include "hw/hw.h"
 #include "hw/pci/pci.h"
+#include "hw/qdev-properties.h"
+#include "migration/vmstate.h"
 #include "sysemu/dma.h"
 #include "qemu/module.h"
 #include "qemu/timer.h"
 #include "net/net.h"
 #include "net/eth.h"
 #include "sysemu/sysemu.h"
+#include "qom/object.h"
 
 /* debug RTL8139 card */
 //#define DEBUG_RTL8139 1
@@ -92,8 +94,7 @@ static inline GCC_FMT_ATTR(1, 2) int DPRINTF(const char *fmt, ...)
 
 #define TYPE_RTL8139 "rtl8139"
 
-#define RTL8139(obj) \
-     OBJECT_CHECK(RTL8139State, (obj), TYPE_RTL8139)
+OBJECT_DECLARE_SIMPLE_TYPE(RTL8139State, RTL8139)
 
 /* Symbolic offsets to registers. */
 enum RTL8139_registers {
@@ -430,7 +431,7 @@ typedef struct RTL8139TallyCounters
 /* Clears all tally counters */
 static void RTL8139TallyCounters_clear(RTL8139TallyCounters* counters);
 
-typedef struct RTL8139State {
+struct RTL8139State {
     /*< private >*/
     PCIDevice parent_obj;
     /*< public >*/
@@ -512,7 +513,7 @@ typedef struct RTL8139State {
 
     /* Support migration to/from old versions */
     int rtl8139_mmio_io_addr_dummy;
-} RTL8139State;
+};
 
 /* Writes tally counters to memory via DMA */
 static void RTL8139TallyCounters_dma_write(RTL8139State *s, dma_addr_t tc_addr);
@@ -792,26 +793,28 @@ static bool rtl8139_cp_rx_valid(RTL8139State *s)
     return !(s->RxRingAddrLO == 0 && s->RxRingAddrHI == 0);
 }
 
-static int rtl8139_can_receive(NetClientState *nc)
+static bool rtl8139_can_receive(NetClientState *nc)
 {
     RTL8139State *s = qemu_get_nic_opaque(nc);
     int avail;
 
     /* Receive (drop) packets if card is disabled.  */
-    if (!s->clock_enabled)
-      return 1;
-    if (!rtl8139_receiver_enabled(s))
-      return 1;
+    if (!s->clock_enabled) {
+        return true;
+    }
+    if (!rtl8139_receiver_enabled(s)) {
+        return true;
+    }
 
     if (rtl8139_cp_receiver_enabled(s) && rtl8139_cp_rx_valid(s)) {
         /* ??? Flow control not implemented in c+ mode.
            This is a hack to work around slirp deficiencies anyway.  */
-        return 1;
-    } else {
-        avail = MOD2(s->RxBufferSize + s->RxBufPtr - s->RxBufAddr,
-                     s->RxBufferSize);
-        return (avail == 0 || avail >= 1514 || (s->IntrMask & RxOverflow));
+        return true;
     }
+
+    avail = MOD2(s->RxBufferSize + s->RxBufPtr - s->RxBufAddr,
+                 s->RxBufferSize);
+    return avail == 0 || avail >= 1514 || (s->IntrMask & RxOverflow);
 }
 
 static ssize_t rtl8139_do_receive(NetClientState *nc, const uint8_t *buf, size_t size_, int do_interrupt)
@@ -3412,7 +3415,7 @@ static void rtl8139_instance_init(Object *obj)
 
     device_add_bootindex_property(obj, &s->conf.bootindex,
                                   "bootindex", "/ethernet-phy@0",
-                                  DEVICE(obj), NULL);
+                                  DEVICE(obj));
 }
 
 static Property rtl8139_properties[] = {
@@ -3434,7 +3437,7 @@ static void rtl8139_class_init(ObjectClass *klass, void *data)
     k->class_id = PCI_CLASS_NETWORK_ETHERNET;
     dc->reset = rtl8139_reset;
     dc->vmsd = &vmstate_rtl8139;
-    dc->props = rtl8139_properties;
+    device_class_set_props(dc, rtl8139_properties);
     set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);
 }
 

@@ -26,20 +26,20 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "qemu/module.h"
-#include "hw/hw.h"
 #include "hw/loader.h"
+#include "hw/qdev-properties.h"
 #include "hw/isa/isa.h"
 #include "cirrus_vga_internal.h"
+#include "qom/object.h"
 
 #define TYPE_ISA_CIRRUS_VGA "isa-cirrus-vga"
-#define ISA_CIRRUS_VGA(obj) \
-    OBJECT_CHECK(ISACirrusVGAState, (obj), TYPE_ISA_CIRRUS_VGA)
+OBJECT_DECLARE_SIMPLE_TYPE(ISACirrusVGAState, ISA_CIRRUS_VGA)
 
-typedef struct ISACirrusVGAState {
+struct ISACirrusVGAState {
     ISADevice parent_obj;
 
     CirrusVGAState cirrus_vga;
-} ISACirrusVGAState;
+};
 
 static void isa_cirrus_vga_realizefn(DeviceState *dev, Error **errp)
 {
@@ -80,7 +80,7 @@ static void isa_cirrus_vga_class_init(ObjectClass *klass, void *data)
 
     dc->vmsd  = &vmstate_cirrus_vga;
     dc->realize = isa_cirrus_vga_realizefn;
-    dc->props = isa_cirrus_vga_properties;
+    device_class_set_props(dc, isa_cirrus_vga_properties);
     set_bit(DEVICE_CATEGORY_DISPLAY, dc->categories);
 }
 

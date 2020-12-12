@@ -11,23 +11,25 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
 #include "hw/isa/vt82c686.h"
 #include "hw/i2c/i2c.h"
 #include "hw/pci/pci.h"
+#include "hw/qdev-properties.h"
 #include "hw/isa/isa.h"
 #include "hw/isa/superio.h"
 #include "hw/sysbus.h"
+#include "migration/vmstate.h"
 #include "hw/mips/mips.h"
 #include "hw/isa/apm.h"
 #include "hw/acpi/acpi.h"
 #include "hw/i2c/pm_smbus.h"
-#include "sysemu/sysemu.h"
+#include "qapi/error.h"
 #include "qemu/module.h"
 #include "qemu/timer.h"
 #include "exec/address-spaces.h"
+#include "qom/object.h"
 
-//#define DEBUG_VT82C686B
+/* #define DEBUG_VT82C686B */
 
 #ifdef DEBUG_VT82C686B
 #define DPRINTF(fmt, ...) fprintf(stderr, "%s: " fmt, __func__, ##__VA_ARGS__)
@@ -35,22 +37,20 @@
 #define DPRINTF(fmt, ...)
 #endif
 
-typedef struct SuperIOConfig
-{
+typedef struct SuperIOConfig {
     uint8_t config[0x100];
     uint8_t index;
     uint8_t data;
 } SuperIOConfig;
 
-typedef struct VT82C686BState {
+struct VT82C686BState {
     PCIDevice dev;
     MemoryRegion superio;
     SuperIOConfig superio_conf;
-} VT82C686BState;
+};
 
 #define TYPE_VT82C686B_DEVICE "VT82C686B"
-#define VT82C686B_DEVICE(obj) \
-    OBJECT_CHECK(VT82C686BState, (obj), TYPE_VT82C686B_DEVICE)
+OBJECT_DECLARE_SIMPLE_TYPE(VT82C686BState, VT82C686B_DEVICE)
 
 static void superio_ioport_writeb(void *opaque, hwaddr addr, uint64_t data,
                                   unsigned size)
@@ -102,7 +102,7 @@ static uint64_t superio_ioport_readb(void *opaque, hwaddr addr, unsigned size)
     SuperIOConfig *superio_conf = opaque;
 
     DPRINTF("superio_ioport_readb  address 0x%x\n", addr);
-    return (superio_conf->config[superio_conf->index]);
+    return superio_conf->config[superio_conf->index];
 }
 
 static const MemoryRegionOps superio_ops = {
@@ -115,11 +115,10 @@ static const MemoryRegionOps superio_ops = {
     },
 };
 
-static void vt82c686b_reset(void * opaque)
+static void vt82c686b_isa_reset(DeviceState *dev)
 {
-    PCIDevice *d = opaque;
-    uint8_t *pci_conf = d->config;
-    VT82C686BState *vt82c = VT82C686B_DEVICE(d);
+    VT82C686BState *vt82c = VT82C686B_DEVICE(dev);
+    uint8_t *pci_conf = vt82c->dev.config;
 
     pci_set_long(pci_conf + PCI_CAPABILITY_LIST, 0x000000c0);
     pci_set_word(pci_conf + PCI_COMMAND, PCI_COMMAND_IO | PCI_COMMAND_MEMORY |
@@ -144,7 +143,7 @@ static void vt82c686b_reset(void * opaque)
 }
 
 /* write config pci function0 registers. PCI-ISA bridge */
-static void vt82c686b_write_config(PCIDevice * d, uint32_t address,
+static void vt82c686b_write_config(PCIDevice *d, uint32_t address,
                                    uint32_t val, int len)
 {
     VT82C686BState *vt686 = VT82C686B_DEVICE(d);
@@ -160,34 +159,31 @@ static void vt82c686b_write_config(PCIDevice * d, uint32_t address,
 
 #define ACPI_DBG_IO_ADDR  0xb044
 
-typedef struct VT686PMState {
+struct VT686PMState {
     PCIDevice dev;
     MemoryRegion io;
     ACPIREGS ar;
     APMState apm;
     PMSMBus smb;
     uint32_t smb_io_base;
-} VT686PMState;
+};
 
-typedef struct VT686AC97State {
+struct VT686AC97State {
     PCIDevice dev;
-} VT686AC97State;
+};
 
-typedef struct VT686MC97State {
+struct VT686MC97State {
     PCIDevice dev;
-} VT686MC97State;
+};
 
 #define TYPE_VT82C686B_PM_DEVICE "VT82C686B_PM"
-#define VT82C686B_PM_DEVICE(obj) \
-    OBJECT_CHECK(VT686PMState, (obj), TYPE_VT82C686B_PM_DEVICE)
+OBJECT_DECLARE_SIMPLE_TYPE(VT686PMState, VT82C686B_PM_DEVICE)
 
 #define TYPE_VT82C686B_MC97_DEVICE "VT82C686B_MC97"
-#define VT82C686B_MC97_DEVICE(obj) \
-    OBJECT_CHECK(VT686MC97State, (obj), TYPE_VT82C686B_MC97_DEVICE)
+OBJECT_DECLARE_SIMPLE_TYPE(VT686MC97State, VT82C686B_MC97_DEVICE)
 
 #define TYPE_VT82C686B_AC97_DEVICE "VT82C686B_AC97"
-#define VT82C686B_AC97_DEVICE(obj) \
-    OBJECT_CHECK(VT686AC97State, (obj), TYPE_VT82C686B_AC97_DEVICE)
+OBJECT_DECLARE_SIMPLE_TYPE(VT686AC97State, VT82C686B_AC97_DEVICE)
 
 static void pm_update_sci(VT686PMState *s)
 {
@@ -278,8 +274,8 @@ void vt82c686b_ac97_init(PCIBus *bus, int devfn)
 {
     PCIDevice *dev;
 
-    dev = pci_create(bus, devfn, TYPE_VT82C686B_AC97_DEVICE);
-    qdev_init_nofail(&dev->qdev);
+    dev = pci_new(devfn, TYPE_VT82C686B_AC97_DEVICE);
+    pci_realize_and_unref(dev, bus, &error_fatal);
 }
 
 static void via_ac97_class_init(ObjectClass *klass, void *data)
@@ -322,8 +318,8 @@ void vt82c686b_mc97_init(PCIBus *bus, int devfn)
 {
     PCIDevice *dev;
 
-    dev = pci_create(bus, devfn, TYPE_VT82C686B_MC97_DEVICE);
-    qdev_init_nofail(&dev->qdev);
+    dev = pci_new(devfn, TYPE_VT82C686B_MC97_DEVICE);
+    pci_realize_and_unref(dev, bus, &error_fatal);
 }
 
 static void via_mc97_class_init(ObjectClass *klass, void *data)
@@ -366,7 +362,7 @@ static void vt82c686b_pm_realize(PCIDevice *dev, Error **errp)
     pci_set_long(pci_conf + 0x48, 0x00000001);
 
     /* SMB ports:0xeee0~0xeeef */
-    s->smb_io_base =((s->smb_io_base & 0xfff0) + 0x0);
+    s->smb_io_base = ((s->smb_io_base & 0xfff0) + 0x0);
     pci_conf[0x90] = s->smb_io_base | 1;
     pci_conf[0x91] = s->smb_io_base >> 8;
     pci_conf[0xd2] = 0x90;
@@ -390,12 +386,12 @@ I2CBus *vt82c686b_pm_init(PCIBus *bus, int devfn, uint32_t smb_io_base,
     PCIDevice *dev;
     VT686PMState *s;
 
-    dev = pci_create(bus, devfn, TYPE_VT82C686B_PM_DEVICE);
+    dev = pci_new(devfn, TYPE_VT82C686B_PM_DEVICE);
     qdev_prop_set_uint32(&dev->qdev, "smb_io_base", smb_io_base);
 
     s = VT82C686B_PM_DEVICE(dev);
 
-    qdev_init_nofail(&dev->qdev);
+    pci_realize_and_unref(dev, bus, &error_fatal);
 
     return s->smb.smbus;
 }
@@ -419,7 +415,7 @@ static void via_pm_class_init(ObjectClass *klass, void *data)
     dc->desc = "PM";
     dc->vmsd = &vmstate_acpi;
     set_bit(DEVICE_CATEGORY_BRIDGE, dc->categories);
-    dc->props = via_pm_properties;
+    device_class_set_props(dc, via_pm_properties);
 }
 
 static const TypeInfo via_pm_info = {
@@ -463,20 +459,20 @@ static void vt82c686b_realize(PCIDevice *d, Error **errp)
 
     wmask = d->wmask;
     for (i = 0x00; i < 0xff; i++) {
-       if (i<=0x03 || (i>=0x08 && i<=0x3f)) {
-           wmask[i] = 0x00;
-       }
+        if (i <= 0x03 || (i >= 0x08 && i <= 0x3f)) {
+            wmask[i] = 0x00;
+        }
     }
 
     memory_region_init_io(&vt82c->superio, OBJECT(d), &superio_ops,
                           &vt82c->superio_conf, "superio", 2);
     memory_region_set_enabled(&vt82c->superio, false);
-    /* The floppy also uses 0x3f0 and 0x3f1.
-     * But we do not emulate a floppy, so just set it here. */
+    /*
+     * The floppy also uses 0x3f0 and 0x3f1.
+     * But we do not emulate a floppy, so just set it here.
+     */
     memory_region_add_subregion(isa_bus->address_space_io, 0x3f0,
                                 &vt82c->superio);
-
-    qemu_register_reset(vt82c686b_reset, d);
 }
 
 ISABus *vt82c686b_isa_init(PCIBus *bus, int devfn)
@@ -500,11 +496,12 @@ static void via_class_init(ObjectClass *klass, void *data)
     k->device_id = PCI_DEVICE_ID_VIA_ISA_BRIDGE;
     k->class_id = PCI_CLASS_BRIDGE_ISA;
     k->revision = 0x40;
+    dc->reset = vt82c686b_isa_reset;
     dc->desc = "ISA bridge";
     dc->vmsd = &vmstate_via;
     /*
      * Reason: part of VIA VT82C686 southbridge, needs to be wired up,
-     * e.g. by mips_fulong2e_init()
+     * e.g. by mips_fuloong2e_init()
      */
     dc->user_creatable = false;
 }

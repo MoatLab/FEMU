@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -18,13 +18,15 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
 #include "hw/sysbus.h"
+#include "migration/vmstate.h"
 #include "qemu/module.h"
 #include "trace.h"
 #include "chardev/char-fe.h"
 
 #include "hw/char/lm32_juart.h"
+#include "hw/qdev-properties.h"
+#include "qom/object.h"
 
 enum {
     LM32_JUART_MIN_SAVE_VERSION = 0,
@@ -40,7 +42,7 @@ enum {
     JRX_FULL = (1<<8),
 };
 
-#define LM32_JUART(obj) OBJECT_CHECK(LM32JuartState, (obj), TYPE_LM32_JUART)
+OBJECT_DECLARE_SIMPLE_TYPE(LM32JuartState, LM32_JUART)
 
 struct LM32JuartState {
     SysBusDevice parent_obj;
@@ -50,7 +52,6 @@ struct LM32JuartState {
     uint32_t jtx;
     uint32_t jrx;
 };
-typedef struct LM32JuartState LM32JuartState;
 
 uint32_t lm32_juart_get_jtx(DeviceState *d)
 {
@@ -103,7 +104,7 @@ static int juart_can_rx(void *opaque)
     return !(s->jrx & JRX_FULL);
 }
 
-static void juart_event(void *opaque, int event)
+static void juart_event(void *opaque, QEMUChrEvent event)
 {
 }
 
@@ -145,7 +146,7 @@ static void lm32_juart_class_init(ObjectClass *klass, void *data)
 
     dc->reset = juart_reset;
     dc->vmsd = &vmstate_lm32_juart;
-    dc->props = lm32_juart_properties;
+    device_class_set_props(dc, lm32_juart_properties);
     dc->realize = lm32_juart_realize;
 }
 

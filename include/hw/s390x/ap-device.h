@@ -7,16 +7,21 @@
  * your option) any later version. See the COPYING file in the top-level
  * directory.
  */
+
 #ifndef HW_S390X_AP_DEVICE_H
 #define HW_S390X_AP_DEVICE_H
 
-#define AP_DEVICE_TYPE       "ap-device"
+#include "hw/qdev-core.h"
+#include "qom/object.h"
 
-typedef struct APDevice {
+#define TYPE_AP_DEVICE       "ap-device"
+
+struct APDevice {
     DeviceState parent_obj;
-} APDevice;
+};
+typedef struct APDevice APDevice;
 
-#define AP_DEVICE(obj) \
-    OBJECT_CHECK(APDevice, (obj), AP_DEVICE_TYPE)
+DECLARE_INSTANCE_CHECKER(APDevice, AP_DEVICE,
+                         TYPE_AP_DEVICE)
 
 #endif /* HW_S390X_AP_DEVICE_H */

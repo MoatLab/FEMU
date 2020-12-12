@@ -24,10 +24,12 @@
  */
 
 #include "qemu/osdep.h"
-#include "qemu/main-loop.h"
 #include "qemu/module.h"
 #include "qemu/log.h"
+#include "hw/irq.h"
+#include "hw/qdev-properties.h"
 #include "hw/timer/mss-timer.h"
+#include "migration/vmstate.h"
 
 #ifndef MSS_TIMER_ERR_DEBUG
 #define MSS_TIMER_ERR_DEBUG  0
@@ -64,6 +66,7 @@ static void timer_update_irq(struct Msf2Timer *st)
     qemu_set_irq(st->irq, (ier && isr));
 }
 
+/* Must be called from within a ptimer_transaction_begin/commit block */
 static void timer_update(struct Msf2Timer *st)
 {
     uint64_t count;
@@ -156,7 +159,9 @@ timer_write(void *opaque, hwaddr offset,
     switch (addr) {
     case R_TIM_CTRL:
         st->regs[R_TIM_CTRL] = value;
+        ptimer_transaction_begin(st->ptimer);
         timer_update(st);
+        ptimer_transaction_commit(st->ptimer);
         break;
 
     case R_TIM_RIS:
@@ -168,7 +173,9 @@ timer_write(void *opaque, hwaddr offset,
     case R_TIM_LOADVAL:
         st->regs[R_TIM_LOADVAL] = value;
         if (st->regs[R_TIM_CTRL] & TIMER_CTRL_ENBL) {
+            ptimer_transaction_begin(st->ptimer);
             timer_update(st);
+            ptimer_transaction_commit(st->ptimer);
         }
         break;
 
@@ -225,9 +232,10 @@ static void mss_timer_init(Object *obj)
     for (i = 0; i < NUM_TIMERS; i++) {
         struct Msf2Timer *st = &t->timers[i];
 
-        st->bh = qemu_bh_new(timer_hit, st);
-        st->ptimer = ptimer_init(st->bh, PTIMER_POLICY_DEFAULT);
+        st->ptimer = ptimer_init(timer_hit, st, PTIMER_POLICY_DEFAULT);
+        ptimer_transaction_begin(st->ptimer);
         ptimer_set_freq(st->ptimer, t->freq_hz);
+        ptimer_transaction_commit(st->ptimer);
         sysbus_init_irq(SYS_BUS_DEVICE(obj), &st->irq);
     }
 
@@ -270,7 +278,7 @@ static void mss_timer_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    dc->props = mss_timer_properties;
+    device_class_set_props(dc, mss_timer_properties);
     dc->vmsd = &vmstate_mss_timer;
 }
 

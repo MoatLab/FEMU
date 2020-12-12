@@ -3,31 +3,24 @@
 
 /* Devices attached directly to the main system bus.  */
 
-#include "hw/qdev.h"
+#include "hw/qdev-core.h"
 #include "exec/memory.h"
+#include "qom/object.h"
 
 #define QDEV_MAX_MMIO 32
 #define QDEV_MAX_PIO 32
 
 #define TYPE_SYSTEM_BUS "System"
-#define SYSTEM_BUS(obj) OBJECT_CHECK(BusState, (obj), TYPE_SYSTEM_BUS)
+DECLARE_INSTANCE_CHECKER(BusState, SYSTEM_BUS,
+                         TYPE_SYSTEM_BUS)
 
-typedef struct SysBusDevice SysBusDevice;
 
 #define TYPE_SYS_BUS_DEVICE "sys-bus-device"
-#define SYS_BUS_DEVICE(obj) \
-     OBJECT_CHECK(SysBusDevice, (obj), TYPE_SYS_BUS_DEVICE)
-#define SYS_BUS_DEVICE_CLASS(klass) \
-     OBJECT_CLASS_CHECK(SysBusDeviceClass, (klass), TYPE_SYS_BUS_DEVICE)
-#define SYS_BUS_DEVICE_GET_CLASS(obj) \
-     OBJECT_GET_CLASS(SysBusDeviceClass, (obj), TYPE_SYS_BUS_DEVICE)
+OBJECT_DECLARE_TYPE(SysBusDevice, SysBusDeviceClass,
+                    SYS_BUS_DEVICE)
 
 /**
  * SysBusDeviceClass:
- * @init: Callback function invoked when the #DeviceState.realized property
- * is changed to %true. Deprecated, new types inheriting directly from
- * TYPE_SYS_BUS_DEVICE should use #DeviceClass.realize instead, new leaf
- * types should consult their respective parent type.
  *
  * SysBusDeviceClass is not overriding #DeviceClass.realize, so derived
  * classes overriding it are not required to invoke its implementation.
@@ -35,7 +28,7 @@ typedef struct SysBusDevice SysBusDevice;
 
 #define SYSBUS_DEVICE_GPIO_IRQ "sysbus-irq"
 
-typedef struct SysBusDeviceClass {
+struct SysBusDeviceClass {
     /*< private >*/
     DeviceClass parent_class;
 
@@ -56,7 +49,7 @@ typedef struct SysBusDeviceClass {
      */
     char *(*explicit_ofw_unit_address)(const SysBusDevice *dev);
     void (*connect_irq_notifier)(SysBusDevice *dev, qemu_irq irq);
-} SysBusDeviceClass;
+};
 
 struct SysBusDevice {
     /*< private >*/
@@ -94,22 +87,8 @@ void sysbus_add_io(SysBusDevice *dev, hwaddr addr,
                    MemoryRegion *mem);
 MemoryRegion *sysbus_address_space(SysBusDevice *dev);
 
-/**
- * sysbus_init_child_obj:
- * @parent: The parent object
- * @childname: Used as name of the "child<>" property in the parent
- * @child: A pointer to the memory to be used for the object.
- * @childsize: The maximum size available at @child for the object.
- * @childtype: The name of the type of the object to instantiate.
- *
- * This function will initialize an object and attach it to the main system
- * bus. The memory for the object should have already been allocated. The
- * object will then be added as child to the given parent. The returned object
- * has a reference count of 1 (for the "child<...>" property from the parent),
- * so the object will be finalized automatically when the parent gets removed.
- */
-void sysbus_init_child_obj(Object *parent, const char *childname, void *child,
-                           size_t childsize, const char *childtype);
+bool sysbus_realize(SysBusDevice *dev, Error **errp);
+bool sysbus_realize_and_unref(SysBusDevice *dev, Error **errp);
 
 /* Call func for every dynamically created sysbus device in the system */
 void foreach_dynamic_sysbus_device(FindSysbusDeviceFunc *func, void *opaque);
@@ -117,20 +96,12 @@ void foreach_dynamic_sysbus_device(FindSysbusDeviceFunc *func, void *opaque);
 /* Legacy helper function for creating devices.  */
 DeviceState *sysbus_create_varargs(const char *name,
                                  hwaddr addr, ...);
-DeviceState *sysbus_try_create_varargs(const char *name,
-                                       hwaddr addr, ...);
+
 static inline DeviceState *sysbus_create_simple(const char *name,
                                               hwaddr addr,
                                               qemu_irq irq)
 {
     return sysbus_create_varargs(name, addr, irq, NULL);
-}
-
-static inline DeviceState *sysbus_try_create_simple(const char *name,
-                                                    hwaddr addr,
-                                                    qemu_irq irq)
-{
-    return sysbus_try_create_varargs(name, addr, irq, NULL);
 }
 
 #endif /* HW_SYSBUS_H */

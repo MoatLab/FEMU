@@ -2,8 +2,8 @@
 #define QEMU_CHAR_H
 
 #include "qapi/qapi-types-char.h"
-#include "qemu/main-loop.h"
 #include "qemu/bitmap.h"
+#include "qemu/thread.h"
 #include "qom/object.h"
 
 #define IAC_EOR 239
@@ -210,7 +210,7 @@ void qemu_chr_be_update_read_handlers(Chardev *s,
  *
  * Send an event from the back end to the front end.
  */
-void qemu_chr_be_event(Chardev *s, int event);
+void qemu_chr_be_event(Chardev *s, QEMUChrEvent event);
 
 int qemu_chr_add_client(Chardev *s, int fd);
 Chardev *qemu_chr_find(const char *name);
@@ -226,11 +226,7 @@ int qemu_chr_write(Chardev *s, const uint8_t *buf, int len, bool write_all);
 int qemu_chr_wait_connected(Chardev *chr, Error **errp);
 
 #define TYPE_CHARDEV "chardev"
-#define CHARDEV(obj) OBJECT_CHECK(Chardev, (obj), TYPE_CHARDEV)
-#define CHARDEV_CLASS(klass) \
-    OBJECT_CLASS_CHECK(ChardevClass, (klass), TYPE_CHARDEV)
-#define CHARDEV_GET_CLASS(obj) \
-    OBJECT_GET_CLASS(ChardevClass, (obj), TYPE_CHARDEV)
+OBJECT_DECLARE_TYPE(Chardev, ChardevClass, CHARDEV)
 
 #define TYPE_CHARDEV_NULL "chardev-null"
 #define TYPE_CHARDEV_MUX "chardev-mux"
@@ -251,7 +247,7 @@ int qemu_chr_wait_connected(Chardev *chr, Error **errp);
 #define CHARDEV_IS_PTY(chr) \
     object_dynamic_cast(OBJECT(chr), TYPE_CHARDEV_PTY)
 
-typedef struct ChardevClass {
+struct ChardevClass {
     ObjectClass parent_class;
 
     bool internal; /* TODO: eventually use TYPE_USER_CREATABLE */
@@ -273,10 +269,10 @@ typedef struct ChardevClass {
     void (*chr_accept_input)(Chardev *chr);
     void (*chr_set_echo)(Chardev *chr, bool echo);
     void (*chr_set_fe_open)(Chardev *chr, int fe_open);
-    void (*chr_be_event)(Chardev *s, int event);
+    void (*chr_be_event)(Chardev *s, QEMUChrEvent event);
     /* Return 0 if succeeded, 1 if failed */
     int (*chr_machine_done)(Chardev *chr);
-} ChardevClass;
+};
 
 Chardev *qemu_chardev_new(const char *id, const char *typename,
                           ChardevBackend *backend, GMainContext *context,

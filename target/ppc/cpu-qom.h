@@ -20,7 +20,8 @@
 #ifndef QEMU_PPC_CPU_QOM_H
 #define QEMU_PPC_CPU_QOM_H
 
-#include "qom/cpu.h"
+#include "hw/core/cpu.h"
+#include "qom/object.h"
 
 #ifdef TARGET_PPC64
 #define TYPE_POWERPC_CPU "powerpc64-cpu"
@@ -28,14 +29,9 @@
 #define TYPE_POWERPC_CPU "powerpc-cpu"
 #endif
 
-#define POWERPC_CPU_CLASS(klass) \
-    OBJECT_CLASS_CHECK(PowerPCCPUClass, (klass), TYPE_POWERPC_CPU)
-#define POWERPC_CPU(obj) \
-    OBJECT_CHECK(PowerPCCPU, (obj), TYPE_POWERPC_CPU)
-#define POWERPC_CPU_GET_CLASS(obj) \
-    OBJECT_GET_CLASS(PowerPCCPUClass, (obj), TYPE_POWERPC_CPU)
+OBJECT_DECLARE_TYPE(PowerPCCPU, PowerPCCPUClass,
+                    POWERPC_CPU)
 
-typedef struct PowerPCCPU PowerPCCPU;
 typedef struct CPUPPCState CPUPPCState;
 typedef struct ppc_tb_t ppc_tb_t;
 typedef struct ppc_dcr_t ppc_dcr_t;
@@ -159,14 +155,14 @@ typedef struct PPCHash64Options PPCHash64Options;
  *
  * A PowerPC CPU model.
  */
-typedef struct PowerPCCPUClass {
+struct PowerPCCPUClass {
     /*< private >*/
     CPUClass parent_class;
     /*< public >*/
 
     DeviceRealize parent_realize;
     DeviceUnrealize parent_unrealize;
-    void (*parent_reset)(CPUState *cpu);
+    DeviceReset parent_reset;
     void (*parent_parse_features)(const char *type, char *str, Error **errp);
 
     uint32_t pvr;
@@ -177,6 +173,7 @@ typedef struct PowerPCCPUClass {
     uint64_t insns_flags;
     uint64_t insns_flags2;
     uint64_t msr_mask;
+    uint64_t lpcr_mask;         /* Available bits in the LPCR */
     uint64_t lpcr_pm;           /* Power-saving mode Exit Cause Enable bits */
     powerpc_mmu_t   mmu_model;
     powerpc_excp_t  excp_model;
@@ -191,19 +188,21 @@ typedef struct PowerPCCPUClass {
     const PPCHash64Options *hash64_opts;
     struct ppc_radix_page_info *radix_page_info;
     uint32_t lrg_decr_bits;
+    int n_host_threads;
     void (*init_proc)(CPUPPCState *env);
     int  (*check_pow)(CPUPPCState *env);
     int (*handle_mmu_fault)(PowerPCCPU *cpu, vaddr eaddr, int rwx, int mmu_idx);
     bool (*interrupts_big_endian)(PowerPCCPU *cpu);
-} PowerPCCPUClass;
+};
 
 #ifndef CONFIG_USER_ONLY
 typedef struct PPCTimebase {
     uint64_t guest_timebase;
     int64_t time_of_the_day_ns;
+    bool runstate_paused;
 } PPCTimebase;
 
-extern const struct VMStateDescription vmstate_ppc_timebase;
+extern const VMStateDescription vmstate_ppc_timebase;
 
 #define VMSTATE_PPC_TIMEBASE_V(_field, _state, _version) {            \
     .name       = (stringify(_field)),                                \

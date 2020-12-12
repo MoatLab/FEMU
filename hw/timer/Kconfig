@@ -9,49 +9,23 @@ config ARM_MPTIMER
 config A9_GTIMER
     bool
 
-config DS1338
-    bool
-    depends on I2C
-
 config HPET
     bool
     default y if PC
 
 config I8254
     bool
-
-config M41T80
-    bool
-    depends on I2C
-
-config M48T59
-    bool
-
-config PL031
-    bool
-
-config TWL92230
-    bool
-    depends on I2C
-
-config XLNX_ZYNQMP
-    bool
+    depends on ISA_BUS
 
 config ALTERA_TIMER
     bool
     select PTIMER
-
-config MC146818RTC
-    bool
 
 config ALLWINNER_A10_PIT
     bool
     select PTIMER
 
 config STM32F2XX_TIMER
-    bool
-
-config SUN4V_RTC
     bool
 
 config CMSDK_APB_TIMER
@@ -61,3 +35,12 @@ config CMSDK_APB_TIMER
 config CMSDK_APB_DUALTIMER
     bool
     select PTIMER
+
+config RENESAS_TMR
+    bool
+
+config RENESAS_CMT
+    bool
+
+config AVR_TIMER16
+    bool

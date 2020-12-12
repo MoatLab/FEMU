@@ -33,7 +33,7 @@ QDict *qdict_new(void)
 }
 
 /**
- * tdb_hash(): based on the hash agorithm from gdbm, via tdb
+ * tdb_hash(): based on the hash algorithm from gdbm, via tdb
  * (from module-init-tools)
  */
 static unsigned int tdb_hash(const char *name)
@@ -296,25 +296,6 @@ const char *qdict_get_try_str(const QDict *qdict, const char *key)
     QString *qstr = qobject_to(QString, qdict_get(qdict, key));
 
     return qstr ? qstring_get_str(qstr) : NULL;
-}
-
-/**
- * qdict_iter(): Iterate over all the dictionary's stored values.
- *
- * This function allows the user to provide an iterator, which will be
- * called for each stored value in the dictionary.
- */
-void qdict_iter(const QDict *qdict,
-                void (*iter)(const char *key, QObject *obj, void *opaque),
-                void *opaque)
-{
-    int i;
-    QDictEntry *entry;
-
-    for (i = 0; i < QDICT_BUCKET_MAX; i++) {
-        QLIST_FOREACH(entry, &qdict->table[i], next)
-            iter(entry->key, entry->value, opaque);
-    }
 }
 
 static QDictEntry *qdict_next_entry(const QDict *qdict, int first_bucket)

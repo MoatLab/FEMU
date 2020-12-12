@@ -112,6 +112,9 @@ qemu_edk2_get_cross_prefix()
      ( [ "$gcc_arch" == i686 ] && [ "$host_arch" == x86_64 ] ); then
     # no cross-compiler needed
     :
+  elif ( [ -e /etc/debian_version ] && [ "$gcc_arch" == arm ] ); then
+    # force soft-float cross-compiler on Debian
+    printf 'arm-linux-gnueabi-'
   else
     printf '%s-linux-gnu-\n' "$gcc_arch"
   fi
@@ -250,4 +253,21 @@ qemu_edk2_get_thread_count()
     # Build a single module at a time.
     printf '1\n'
   fi
+}
+
+
+# Work around <https://bugzilla.tianocore.org/show_bug.cgi?id=1607> by
+# filtering jobserver-related flags out of MAKEFLAGS. Print the result to the
+# standard output.
+#
+# Parameters:
+#   $1: the value of the MAKEFLAGS variable
+qemu_edk2_quirk_tianocore_1607()
+{
+  local makeflags="$1"
+
+  printf %s "$makeflags" \
+  | LC_ALL=C sed --regexp-extended \
+      --expression='s/--jobserver-(auth|fds)=[0-9]+,[0-9]+//' \
+      --expression='s/-j([0-9]+)?//'
 }

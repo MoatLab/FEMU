@@ -75,8 +75,11 @@ void icmp_init(Slirp *slirp)
 
 void icmp_cleanup(Slirp *slirp)
 {
-    while (slirp->icmp.so_next != &slirp->icmp) {
-        icmp_detach(slirp->icmp.so_next);
+    struct socket *so, *so_next;
+
+    for (so = slirp->icmp.so_next; so != &slirp->icmp; so = so_next) {
+        so_next = so->so_next;
+        icmp_detach(so);
     }
 }
 
@@ -87,6 +90,13 @@ static int icmp_send(struct socket *so, struct mbuf *m, int hlen)
 
     so->s = slirp_socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP);
     if (so->s == -1) {
+        return -1;
+    }
+
+    if (slirp_bind_outbound(so, AF_INET) != 0) {
+        // bind failed - close socket
+        closesocket(so->s);
+        so->s = -1;
         return -1;
     }
 
@@ -190,7 +200,12 @@ void icmp_input(struct mbuf *m, int hlen)
 
             /* Send the packet */
             addr = so->fhost.ss;
-            sotranslate_out(so, &addr);
+            if (sotranslate_out(so, &addr) < 0) {
+                icmp_send_error(m, ICMP_UNREACH, ICMP_UNREACH_NET, 0,
+                                strerror(errno));
+                udp_detach(so);
+                return;
+            }
 
             if (sendto(so->s, icmp_ping_msg, strlen(icmp_ping_msg), 0,
                        (struct sockaddr *)&addr, sockaddr_size(&addr)) == -1) {
@@ -262,8 +277,8 @@ void icmp_send_error(struct mbuf *msrc, uint8_t type, uint8_t code, int minsize,
     ip = mtod(msrc, struct ip *);
     if (slirp_debug & DBG_MISC) {
         char bufa[20], bufb[20];
-        strcpy(bufa, inet_ntoa(ip->ip_src));
-        strcpy(bufb, inet_ntoa(ip->ip_dst));
+        slirp_pstrcpy(bufa, sizeof(bufa), inet_ntoa(ip->ip_src));
+        slirp_pstrcpy(bufb, sizeof(bufb), inet_ntoa(ip->ip_dst));
         DEBUG_MISC(" %.16s to %.16s", bufa, bufb);
     }
     if (ip->ip_off & IP_OFFMASK)

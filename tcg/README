@@ -101,7 +101,7 @@ This can be overridden using the following function modifiers:
   canonical locations before calling the helper.
 - TCG_CALL_NO_WRITE_GLOBALS means that the helper does not modify any globals.
   They will only be saved to their canonical location before calling helpers,
-  but they won't be reloaded afterwise.
+  but they won't be reloaded afterwards.
 - TCG_CALL_NO_SIDE_EFFECTS means that the call to the function is removed if
   the return value is not used.
 
@@ -512,7 +512,7 @@ Both t0 and t1 may be split into little-endian ordered pairs of registers
 if dealing with 64-bit quantities on a 32-bit host.
 
 The memidx selects the qemu tlb index to use (e.g. user or kernel access).
-The flags are the TCGMemOp bits, selecting the sign, width, and endianness
+The flags are the MemOp bits, selecting the sign, width, and endianness
 of the memory access.
 
 For a 32-bit host, qemu_ld/st_i64 is guaranteed to only be used with a
@@ -605,10 +605,11 @@ E.g. VECL=1 -> 64 << 1 -> v128, and VECE=2 -> 1 << 2 -> i32.
 
 * shri_vec   v0, v1, i2
 * sari_vec   v0, v1, i2
+* rotli_vec  v0, v1, i2
 * shrs_vec   v0, v1, s2
 * sars_vec   v0, v1, s2
 
-  Similarly for logical and arithmetic right shift.
+  Similarly for logical and arithmetic right shift, and left rotate.
 
 * shlv_vec   v0, v1, v2
 
@@ -620,8 +621,10 @@ E.g. VECL=1 -> 64 << 1 -> v128, and VECE=2 -> 1 << 2 -> i32.
 
 * shrv_vec   v0, v1, v2
 * sarv_vec   v0, v1, v2
+* rotlv_vec  v0, v1, v2
+* rotrv_vec  v0, v1, v2
 
-  Similarly for logical and arithmetic right shift.
+  Similarly for logical and arithmetic right shift, and rotates.
 
 * cmp_vec  v0, v1, v2, cond
 
@@ -649,7 +652,7 @@ function tcg_gen_xxx(args).
 
 4) Backend
 
-tcg-target.h contains the target specific definitions. tcg-target.inc.c
+tcg-target.h contains the target specific definitions. tcg-target.c.inc
 contains the target specific code; it is #included by tcg/tcg.c, rather
 than being a standalone C file.
 

@@ -17,28 +17,30 @@
 
 #include "virtio-pci.h"
 #include "hw/9pfs/virtio-9p.h"
+#include "hw/qdev-properties.h"
 #include "qemu/module.h"
+#include "qom/object.h"
 
 /*
  * virtio-9p-pci: This extends VirtioPCIProxy.
  */
 
 #define TYPE_VIRTIO_9P_PCI "virtio-9p-pci-base"
-#define VIRTIO_9P_PCI(obj) \
-        OBJECT_CHECK(V9fsPCIState, (obj), TYPE_VIRTIO_9P_PCI)
+typedef struct V9fsPCIState V9fsPCIState;
+DECLARE_INSTANCE_CHECKER(V9fsPCIState, VIRTIO_9P_PCI,
+                         TYPE_VIRTIO_9P_PCI)
 
-typedef struct V9fsPCIState {
+struct V9fsPCIState {
     VirtIOPCIProxy parent_obj;
     V9fsVirtioState vdev;
-} V9fsPCIState;
+};
 
 static void virtio_9p_pci_realize(VirtIOPCIProxy *vpci_dev, Error **errp)
 {
     V9fsPCIState *dev = VIRTIO_9P_PCI(vpci_dev);
     DeviceState *vdev = DEVICE(&dev->vdev);
 
-    qdev_set_parent_bus(vdev, BUS(&vpci_dev->bus));
-    object_property_set_bool(OBJECT(vdev), true, "realized", errp);
+    qdev_realize(vdev, BUS(&vpci_dev->bus), errp);
 }
 
 static Property virtio_9p_pci_properties[] = {
@@ -60,7 +62,7 @@ static void virtio_9p_pci_class_init(ObjectClass *klass, void *data)
     pcidev_k->revision = VIRTIO_PCI_ABI_VERSION;
     pcidev_k->class_id = 0x2;
     set_bit(DEVICE_CATEGORY_STORAGE, dc->categories);
-    dc->props = virtio_9p_pci_properties;
+    device_class_set_props(dc, virtio_9p_pci_properties);
 }
 
 static void virtio_9p_pci_instance_init(Object *obj)

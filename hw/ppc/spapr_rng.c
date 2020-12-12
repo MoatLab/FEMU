@@ -21,15 +21,16 @@
 #include "qapi/error.h"
 #include "cpu.h"
 #include "qemu/error-report.h"
+#include "qemu/main-loop.h"
 #include "qemu/module.h"
-#include "sysemu/sysemu.h"
 #include "sysemu/device_tree.h"
 #include "sysemu/rng.h"
 #include "hw/ppc/spapr.h"
+#include "hw/qdev-properties.h"
 #include "kvm_ppc.h"
+#include "qom/object.h"
 
-#define SPAPR_RNG(obj) \
-    OBJECT_CHECK(SpaprRngState, (obj), TYPE_SPAPR_RNG)
+OBJECT_DECLARE_SIMPLE_TYPE(SpaprRngState, SPAPR_RNG)
 
 struct SpaprRngState {
     /*< private >*/
@@ -37,7 +38,6 @@ struct SpaprRngState {
     RngBackend *backend;
     bool use_kvm;
 };
-typedef struct SpaprRngState SpaprRngState;
 
 struct HRandomData {
     QemuSemaphore sem;
@@ -102,8 +102,7 @@ static void spapr_rng_instance_init(Object *obj)
     }
 
     object_property_set_description(obj, "rng",
-                                    "ID of the random number generator backend",
-                                    NULL);
+                                    "ID of the random number generator backend");
 }
 
 static void spapr_rng_realize(DeviceState *dev, Error **errp)
@@ -145,7 +144,7 @@ static void spapr_rng_class_init(ObjectClass *oc, void *data)
 
     dc->realize = spapr_rng_realize;
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
-    dc->props = spapr_rng_properties;
+    device_class_set_props(dc, spapr_rng_properties);
     dc->hotpluggable = false;
 }
 

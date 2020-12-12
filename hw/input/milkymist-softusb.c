@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -23,13 +23,16 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
-#include "hw/hw.h"
 #include "hw/sysbus.h"
+#include "migration/vmstate.h"
 #include "trace.h"
 #include "ui/console.h"
 #include "hw/input/hid.h"
+#include "hw/irq.h"
+#include "hw/qdev-properties.h"
 #include "qemu/error-report.h"
 #include "qemu/module.h"
+#include "qom/object.h"
 
 enum {
     R_CTRL = 0,
@@ -48,8 +51,7 @@ enum {
 #define COMLOC_KEVT_BASE     0x1143
 
 #define TYPE_MILKYMIST_SOFTUSB "milkymist-softusb"
-#define MILKYMIST_SOFTUSB(obj) \
-    OBJECT_CHECK(MilkymistSoftUsbState, (obj), TYPE_MILKYMIST_SOFTUSB)
+OBJECT_DECLARE_SIMPLE_TYPE(MilkymistSoftUsbState, MILKYMIST_SOFTUSB)
 
 struct MilkymistSoftUsbState {
     SysBusDevice parent_obj;
@@ -78,7 +80,6 @@ struct MilkymistSoftUsbState {
     /* keyboard state */
     uint8_t kbd_hid_buffer[8];
 };
-typedef struct MilkymistSoftUsbState MilkymistSoftUsbState;
 
 static uint64_t softusb_read(void *opaque, hwaddr addr,
                              unsigned size)
@@ -300,7 +301,7 @@ static void milkymist_softusb_class_init(ObjectClass *klass, void *data)
     dc->realize = milkymist_softusb_realize;
     dc->reset = milkymist_softusb_reset;
     dc->vmsd = &vmstate_milkymist_softusb;
-    dc->props = milkymist_softusb_properties;
+    device_class_set_props(dc, milkymist_softusb_properties);
 }
 
 static const TypeInfo milkymist_softusb_info = {

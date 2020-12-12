@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -26,7 +26,6 @@
 #include "qemu/cutils.h"
 #include "qemu/error-report.h"
 #include "sysemu/device_tree.h"
-#include "sysemu/sysemu.h"
 
 #include <libfdt.h>
 #include <zlib.h>
@@ -179,11 +178,12 @@ static int fit_load_fdt(const struct fit_loader *ldr, const void *itb,
                         int cfg, void *opaque, const void *match_data,
                         hwaddr kernel_end, Error **errp)
 {
+    Error *err = NULL;
     const char *name;
     const void *data;
     const void *load_data;
     hwaddr load_addr;
-    int img_off, err;
+    int img_off;
     size_t sz;
     int ret;
 
@@ -198,13 +198,13 @@ static int fit_load_fdt(const struct fit_loader *ldr, const void *itb,
         return -EINVAL;
     }
 
-    err = fit_image_addr(itb, img_off, "load", &load_addr, errp);
-    if (err == -ENOENT) {
+    ret = fit_image_addr(itb, img_off, "load", &load_addr, &err);
+    if (ret == -ENOENT) {
         load_addr = ROUND_UP(kernel_end, 64 * KiB) + (10 * MiB);
-        error_free(*errp);
-    } else if (err) {
-        error_prepend(errp, "unable to read FDT load address from FIT: ");
-        ret = err;
+        error_free(err);
+    } else if (ret) {
+        error_propagate_prepend(errp, err,
+                                "unable to read FDT load address from FIT: ");
         goto out;
     }
 

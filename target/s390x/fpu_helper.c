@@ -112,7 +112,7 @@ static void handle_exceptions(CPUS390XState *env, bool XxC, uintptr_t retaddr)
     }
 }
 
-int float_comp_to_cc(CPUS390XState *env, int float_compare)
+int float_comp_to_cc(CPUS390XState *env, FloatRelation float_compare)
 {
     switch (float_compare) {
     case float_relation_equal:
@@ -368,7 +368,7 @@ uint64_t HELPER(lexb)(CPUS390XState *env, uint64_t ah, uint64_t al,
 /* 32-bit FP compare */
 uint32_t HELPER(ceb)(CPUS390XState *env, uint64_t f1, uint64_t f2)
 {
-    int cmp = float32_compare_quiet(f1, f2, &env->fpu_status);
+    FloatRelation cmp = float32_compare_quiet(f1, f2, &env->fpu_status);
     handle_exceptions(env, false, GETPC());
     return float_comp_to_cc(env, cmp);
 }
@@ -376,7 +376,7 @@ uint32_t HELPER(ceb)(CPUS390XState *env, uint64_t f1, uint64_t f2)
 /* 64-bit FP compare */
 uint32_t HELPER(cdb)(CPUS390XState *env, uint64_t f1, uint64_t f2)
 {
-    int cmp = float64_compare_quiet(f1, f2, &env->fpu_status);
+    FloatRelation cmp = float64_compare_quiet(f1, f2, &env->fpu_status);
     handle_exceptions(env, false, GETPC());
     return float_comp_to_cc(env, cmp);
 }
@@ -385,9 +385,9 @@ uint32_t HELPER(cdb)(CPUS390XState *env, uint64_t f1, uint64_t f2)
 uint32_t HELPER(cxb)(CPUS390XState *env, uint64_t ah, uint64_t al,
                      uint64_t bh, uint64_t bl)
 {
-    int cmp = float128_compare_quiet(make_float128(ah, al),
-                                     make_float128(bh, bl),
-                                     &env->fpu_status);
+    FloatRelation cmp = float128_compare_quiet(make_float128(ah, al),
+                                               make_float128(bh, bl),
+                                               &env->fpu_status);
     handle_exceptions(env, false, GETPC());
     return float_comp_to_cc(env, cmp);
 }
@@ -675,7 +675,7 @@ uint64_t HELPER(fixb)(CPUS390XState *env, uint64_t ah, uint64_t al,
 /* 32-bit FP compare and signal */
 uint32_t HELPER(keb)(CPUS390XState *env, uint64_t f1, uint64_t f2)
 {
-    int cmp = float32_compare(f1, f2, &env->fpu_status);
+    FloatRelation cmp = float32_compare(f1, f2, &env->fpu_status);
     handle_exceptions(env, false, GETPC());
     return float_comp_to_cc(env, cmp);
 }
@@ -683,7 +683,7 @@ uint32_t HELPER(keb)(CPUS390XState *env, uint64_t f1, uint64_t f2)
 /* 64-bit FP compare and signal */
 uint32_t HELPER(kdb)(CPUS390XState *env, uint64_t f1, uint64_t f2)
 {
-    int cmp = float64_compare(f1, f2, &env->fpu_status);
+    FloatRelation cmp = float64_compare(f1, f2, &env->fpu_status);
     handle_exceptions(env, false, GETPC());
     return float_comp_to_cc(env, cmp);
 }
@@ -692,9 +692,9 @@ uint32_t HELPER(kdb)(CPUS390XState *env, uint64_t f1, uint64_t f2)
 uint32_t HELPER(kxb)(CPUS390XState *env, uint64_t ah, uint64_t al,
                      uint64_t bh, uint64_t bl)
 {
-    int cmp = float128_compare(make_float128(ah, al),
-                               make_float128(bh, bl),
-                               &env->fpu_status);
+    FloatRelation cmp = float128_compare(make_float128(ah, al),
+                                         make_float128(bh, bl),
+                                         &env->fpu_status);
     handle_exceptions(env, false, GETPC());
     return float_comp_to_cc(env, cmp);
 }
@@ -825,7 +825,7 @@ void HELPER(sfpc)(CPUS390XState *env, uint64_t fpc)
 {
     if (fpc_to_rnd[fpc & 0x7] == -1 || fpc & 0x03030088u ||
         (!s390_has_feat(S390_FEAT_FLOATING_POINT_EXT) && fpc & 0x4)) {
-        s390_program_interrupt(env, PGM_SPECIFICATION, ILEN_AUTO, GETPC());
+        tcg_s390_program_interrupt(env, PGM_SPECIFICATION, GETPC());
     }
 
     /* Install everything in the main FPC.  */
@@ -843,7 +843,7 @@ void HELPER(sfas)(CPUS390XState *env, uint64_t fpc)
 
     if (fpc_to_rnd[fpc & 0x7] == -1 || fpc & 0x03030088u ||
         (!s390_has_feat(S390_FEAT_FLOATING_POINT_EXT) && fpc & 0x4)) {
-        s390_program_interrupt(env, PGM_SPECIFICATION, ILEN_AUTO, GETPC());
+        tcg_s390_program_interrupt(env, PGM_SPECIFICATION, GETPC());
     }
 
     /*
@@ -880,7 +880,7 @@ void HELPER(sfas)(CPUS390XState *env, uint64_t fpc)
 void HELPER(srnm)(CPUS390XState *env, uint64_t rnd)
 {
     if (rnd > 0x7 || fpc_to_rnd[rnd & 0x7] == -1) {
-        s390_program_interrupt(env, PGM_SPECIFICATION, ILEN_AUTO, GETPC());
+        tcg_s390_program_interrupt(env, PGM_SPECIFICATION, GETPC());
     }
 
     env->fpc = deposit32(env->fpc, 0, 3, rnd);

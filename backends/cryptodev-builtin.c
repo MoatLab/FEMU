@@ -9,7 +9,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -23,10 +23,10 @@
 
 #include "qemu/osdep.h"
 #include "sysemu/cryptodev.h"
-#include "hw/boards.h"
 #include "qapi/error.h"
 #include "standard-headers/linux/virtio_crypto.h"
 #include "crypto/cipher.h"
+#include "qom/object.h"
 
 
 /**
@@ -35,12 +35,8 @@
  */
 #define TYPE_CRYPTODEV_BACKEND_BUILTIN "cryptodev-backend-builtin"
 
-#define CRYPTODEV_BACKEND_BUILTIN(obj) \
-    OBJECT_CHECK(CryptoDevBackendBuiltin, \
-                 (obj), TYPE_CRYPTODEV_BACKEND_BUILTIN)
+OBJECT_DECLARE_SIMPLE_TYPE(CryptoDevBackendBuiltin, CRYPTODEV_BACKEND_BUILTIN)
 
-typedef struct CryptoDevBackendBuiltin
-                         CryptoDevBackendBuiltin;
 
 typedef struct CryptoDevBackendBuiltinSession {
     QCryptoCipher *cipher;
@@ -283,12 +279,7 @@ static int cryptodev_builtin_sym_close_session(
     CryptoDevBackendBuiltin *builtin =
                       CRYPTODEV_BACKEND_BUILTIN(backend);
 
-    if (session_id >= MAX_NUM_SESSIONS ||
-              builtin->sessions[session_id] == NULL) {
-        error_setg(errp, "Cannot find a valid session id: %" PRIu64 "",
-                      session_id);
-        return -1;
-    }
+    assert(session_id < MAX_NUM_SESSIONS && builtin->sessions[session_id]);
 
     qcrypto_cipher_free(builtin->sessions[session_id]->cipher);
     g_free(builtin->sessions[session_id]);
@@ -357,8 +348,7 @@ static void cryptodev_builtin_cleanup(
 
     for (i = 0; i < MAX_NUM_SESSIONS; i++) {
         if (builtin->sessions[i] != NULL) {
-            cryptodev_builtin_sym_close_session(
-                    backend, i, 0, errp);
+            cryptodev_builtin_sym_close_session(backend, i, 0, &error_abort);
         }
     }
 

@@ -27,14 +27,15 @@
 #include "hw/pci/msi.h"
 #include "hw/pci/shpc.h"
 #include "hw/pci/slotid_cap.h"
+#include "hw/qdev-properties.h"
 #include "exec/memory.h"
 #include "hw/pci/pci_bus.h"
 #include "hw/hotplug.h"
+#include "qom/object.h"
 
 #define TYPE_PCI_BRIDGE_DEV      "pci-bridge"
 #define TYPE_PCI_BRIDGE_SEAT_DEV "pci-bridge-seat"
-#define PCI_BRIDGE_DEV(obj) \
-    OBJECT_CHECK(PCIBridgeDev, (obj), TYPE_PCI_BRIDGE_DEV)
+OBJECT_DECLARE_SIMPLE_TYPE(PCIBridgeDev, PCI_BRIDGE_DEV)
 
 struct PCIBridgeDev {
     /*< private >*/
@@ -51,7 +52,6 @@ struct PCIBridgeDev {
     /* additional resources to reserve */
     PCIResReserve res_reserve;
 };
-typedef struct PCIBridgeDev PCIBridgeDev;
 
 static void pci_bridge_dev_realize(PCIDevice *dev, Error **errp)
 {
@@ -257,7 +257,7 @@ static void pci_bridge_dev_class_init(ObjectClass *klass, void *data)
     k->is_bridge = true;
     dc->desc = "Standard PCI Bridge";
     dc->reset = qdev_pci_bridge_dev_reset;
-    dc->props = pci_bridge_dev_properties;
+    device_class_set_props(dc, pci_bridge_dev_properties);
     dc->vmsd = &pci_bridge_dev_vmstate;
     set_bit(DEVICE_CATEGORY_BRIDGE, dc->categories);
     hc->plug = pci_bridge_dev_plug_cb;

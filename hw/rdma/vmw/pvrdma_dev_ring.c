@@ -14,8 +14,10 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/cutils.h"
 #include "hw/pci/pci.h"
 #include "cpu.h"
+#include "qemu/cutils.h"
 
 #include "trace.h"
 
@@ -30,15 +32,14 @@ int pvrdma_ring_init(PvrdmaRing *ring, const char *name, PCIDevice *dev,
     int i;
     int rc = 0;
 
-    strncpy(ring->name, name, MAX_RING_NAME_SZ);
-    ring->name[MAX_RING_NAME_SZ - 1] = 0;
+    pstrcpy(ring->name, MAX_RING_NAME_SZ, name);
     ring->dev = dev;
     ring->ring_state = ring_state;
     ring->max_elems = max_elems;
     ring->elem_sz = elem_sz;
     /* TODO: Give a moment to think if we want to redo driver settings
-    atomic_set(&ring->ring_state->prod_tail, 0);
-    atomic_set(&ring->ring_state->cons_head, 0);
+    qatomic_set(&ring->ring_state->prod_tail, 0);
+    qatomic_set(&ring->ring_state->cons_head, 0);
     */
     ring->npages = npages;
     ring->pages = g_malloc(npages * sizeof(void *));

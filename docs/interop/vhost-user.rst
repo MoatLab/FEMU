@@ -2,6 +2,7 @@
 Vhost-user Protocol
 ===================
 :Copyright: 2014 Virtual Open Systems Sarl.
+:Copyright: 2019 Intel Corporation
 :Licence: This work is licensed under the terms of the GNU GPL,
           version 2 or later. See the COPYING file in the top-level
           directory.
@@ -121,6 +122,23 @@ A region is:
 +---------------+------+--------------+-------------+
 | guest address | size | user address | mmap offset |
 +---------------+------+--------------+-------------+
+
+:guest address: a 64-bit guest address of the region
+
+:size: a 64-bit size
+
+:user address: a 64-bit user address
+
+:mmap offset: 64-bit offset where region starts in the mapped memory
+
+Single memory region description
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
++---------+---------------+------+--------------+-------------+
+| padding | guest address | size | user address | mmap offset |
++---------+---------------+------+--------------+-------------+
+
+:padding: 64-bit
 
 :guest address: a 64-bit guest address of the region
 
@@ -279,6 +297,9 @@ If *master* is unable to send the full message or receives a wrong
 reply it will close the connection. An optional reconnection mechanism
 can be implemented.
 
+If *slave* detects some error such as incompatible features, it may also
+close the connection. This should only happen in exceptional circumstances.
+
 Any protocol extensions are gated by protocol feature bits, which
 allows full backwards compatibility on both master and slave.  As
 older slaves don't support negotiating protocol features, a feature
@@ -315,7 +336,8 @@ it until ring is started, or after it has been stopped.
 
 Client must start ring upon receiving a kick (that is, detecting that
 file descriptor is readable) on the descriptor specified by
-``VHOST_USER_SET_VRING_KICK``, and stop ring upon receiving
+``VHOST_USER_SET_VRING_KICK`` or receiving the in-band message
+``VHOST_USER_VRING_KICK`` if negotiated, and stop ring upon receiving
 ``VHOST_USER_GET_VRING_BASE``.
 
 While processing the rings (whether they are enabled or not), client
@@ -459,7 +481,7 @@ the ``VHOST_USER_SET_MEM_TABLE`` request. For invalidation events, the
 (3), the I/O virtual address and the size. On success, the slave is
 expected to reply with a zero payload, non-zero otherwise.
 
-The slave relies on the slave communcation channel (see :ref:`Slave
+The slave relies on the slave communication channel (see :ref:`Slave
 communication <slave_communication>` section below) to send IOTLB miss
 and access failure events, by sending ``VHOST_USER_SLAVE_IOTLB_MSG``
 requests to the master with a ``struct vhost_iotlb_msg`` as
@@ -508,7 +530,7 @@ descriptor table (split virtqueue) or descriptor ring (packed
 virtqueue). However, it can't work when we process descriptors
 out-of-order because some entries which store the information of
 inflight descriptors in available ring (split virtqueue) or descriptor
-ring (packed virtqueue) might be overrided by new entries. To solve
+ring (packed virtqueue) might be overridden by new entries. To solve
 this problem, slave need to allocate an extra buffer to store this
 information of inflight descriptors and share it with master for
 persistent. ``VHOST_USER_GET_INFLIGHT_FD`` and
@@ -563,7 +585,7 @@ For split virtqueue, queue region can be implemented as:
       uint16_t used_idx;
 
       /* Used to track the state of each descriptor in descriptor table */
-      DescStateSplit desc[0];
+      DescStateSplit desc[];
   } QueueRegionSplit;
 
 To track inflight I/O, the queue region should be processed as follows:
@@ -685,7 +707,7 @@ For packed virtqueue, queue region can be implemented as:
       uint8_t padding[7];
 
       /* Used to track the state of each descriptor fetched from descriptor ring */
-      DescStatePacked desc[0];
+      DescStatePacked desc[];
   } QueueRegionPacked;
 
 To track inflight I/O, the queue region should be processed as follows:
@@ -767,24 +789,51 @@ When reconnecting:
 #. Resubmit inflight ``DescStatePacked`` entries in order of their
    counter value
 
+In-band notifications
+---------------------
+
+In some limited situations (e.g. for simulation) it is desirable to
+have the kick, call and error (if used) signals done via in-band
+messages instead of asynchronous eventfd notifications. This can be
+done by negotiating the ``VHOST_USER_PROTOCOL_F_INBAND_NOTIFICATIONS``
+protocol feature.
+
+Note that due to the fact that too many messages on the sockets can
+cause the sending application(s) to block, it is not advised to use
+this feature unless absolutely necessary. It is also considered an
+error to negotiate this feature without also negotiating
+``VHOST_USER_PROTOCOL_F_SLAVE_REQ`` and ``VHOST_USER_PROTOCOL_F_REPLY_ACK``,
+the former is necessary for getting a message channel from the slave
+to the master, while the latter needs to be used with the in-band
+notification messages to block until they are processed, both to avoid
+blocking later and for proper processing (at least in the simulation
+use case.) As it has no other way of signalling this error, the slave
+should close the connection as a response to a
+``VHOST_USER_SET_PROTOCOL_FEATURES`` message that sets the in-band
+notifications feature flag without the other two.
+
 Protocol features
 -----------------
 
 .. code:: c
 
-  #define VHOST_USER_PROTOCOL_F_MQ             0
-  #define VHOST_USER_PROTOCOL_F_LOG_SHMFD      1
-  #define VHOST_USER_PROTOCOL_F_RARP           2
-  #define VHOST_USER_PROTOCOL_F_REPLY_ACK      3
-  #define VHOST_USER_PROTOCOL_F_MTU            4
-  #define VHOST_USER_PROTOCOL_F_SLAVE_REQ      5
-  #define VHOST_USER_PROTOCOL_F_CROSS_ENDIAN   6
-  #define VHOST_USER_PROTOCOL_F_CRYPTO_SESSION 7
-  #define VHOST_USER_PROTOCOL_F_PAGEFAULT      8
-  #define VHOST_USER_PROTOCOL_F_CONFIG         9
-  #define VHOST_USER_PROTOCOL_F_SLAVE_SEND_FD  10
-  #define VHOST_USER_PROTOCOL_F_HOST_NOTIFIER  11
-  #define VHOST_USER_PROTOCOL_F_INFLIGHT_SHMFD 12
+  #define VHOST_USER_PROTOCOL_F_MQ                    0
+  #define VHOST_USER_PROTOCOL_F_LOG_SHMFD             1
+  #define VHOST_USER_PROTOCOL_F_RARP                  2
+  #define VHOST_USER_PROTOCOL_F_REPLY_ACK             3
+  #define VHOST_USER_PROTOCOL_F_MTU                   4
+  #define VHOST_USER_PROTOCOL_F_SLAVE_REQ             5
+  #define VHOST_USER_PROTOCOL_F_CROSS_ENDIAN          6
+  #define VHOST_USER_PROTOCOL_F_CRYPTO_SESSION        7
+  #define VHOST_USER_PROTOCOL_F_PAGEFAULT             8
+  #define VHOST_USER_PROTOCOL_F_CONFIG                9
+  #define VHOST_USER_PROTOCOL_F_SLAVE_SEND_FD        10
+  #define VHOST_USER_PROTOCOL_F_HOST_NOTIFIER        11
+  #define VHOST_USER_PROTOCOL_F_INFLIGHT_SHMFD       12
+  #define VHOST_USER_PROTOCOL_F_RESET_DEVICE         13
+  #define VHOST_USER_PROTOCOL_F_INBAND_NOTIFICATIONS 14
+  #define VHOST_USER_PROTOCOL_F_CONFIGURE_MEM_SLOTS  15
+  #define VHOST_USER_PROTOCOL_F_STATUS               16
 
 Master message types
 --------------------
@@ -946,7 +995,12 @@ Master message types
   Bits (0-7) of the payload contain the vring index. Bit 8 is the
   invalid FD flag. This flag is set when there is no file descriptor
   in the ancillary data. This signals that polling should be used
-  instead of waiting for a kick.
+  instead of waiting for the kick. Note that if the protocol feature
+  ``VHOST_USER_PROTOCOL_F_INBAND_NOTIFICATIONS`` has been negotiated
+  this message isn't necessary as the ring is also started on the
+  ``VHOST_USER_VRING_KICK`` message, it may however still be used to
+  set an event file descriptor (which will be preferred over the
+  message) or to enable polling.
 
 ``VHOST_USER_SET_VRING_CALL``
   :id: 13
@@ -959,7 +1013,12 @@ Master message types
   Bits (0-7) of the payload contain the vring index. Bit 8 is the
   invalid FD flag. This flag is set when there is no file descriptor
   in the ancillary data. This signals that polling will be used
-  instead of waiting for the call.
+  instead of waiting for the call. Note that if the protocol features
+  ``VHOST_USER_PROTOCOL_F_INBAND_NOTIFICATIONS`` and
+  ``VHOST_USER_PROTOCOL_F_SLAVE_REQ`` have been negotiated this message
+  isn't necessary as the ``VHOST_USER_SLAVE_VRING_CALL`` message can be
+  used, it may however still be used to set an event file descriptor
+  or to enable polling.
 
 ``VHOST_USER_SET_VRING_ERR``
   :id: 14
@@ -971,7 +1030,12 @@ Master message types
 
   Bits (0-7) of the payload contain the vring index. Bit 8 is the
   invalid FD flag. This flag is set when there is no file descriptor
-  in the ancillary data.
+  in the ancillary data. Note that if the protocol features
+  ``VHOST_USER_PROTOCOL_F_INBAND_NOTIFICATIONS`` and
+  ``VHOST_USER_PROTOCOL_F_SLAVE_REQ`` have been negotiated this message
+  isn't necessary as the ``VHOST_USER_SLAVE_VRING_ERR`` message can be
+  used, it may however still be used to set an event file descriptor
+  (which will be preferred over the message).
 
 ``VHOST_USER_GET_QUEUE_NUM``
   :id: 17
@@ -1190,6 +1254,100 @@ Master message types
   ancillary data. The GPU protocol is used to inform the master of
   rendering state and updates. See vhost-user-gpu.rst for details.
 
+``VHOST_USER_RESET_DEVICE``
+  :id: 34
+  :equivalent ioctl: N/A
+  :master payload: N/A
+  :slave payload: N/A
+
+  Ask the vhost user backend to disable all rings and reset all
+  internal device state to the initial state, ready to be
+  reinitialized. The backend retains ownership of the device
+  throughout the reset operation.
+
+  Only valid if the ``VHOST_USER_PROTOCOL_F_RESET_DEVICE`` protocol
+  feature is set by the backend.
+
+``VHOST_USER_VRING_KICK``
+  :id: 35
+  :equivalent ioctl: N/A
+  :slave payload: vring state description
+  :master payload: N/A
+
+  When the ``VHOST_USER_PROTOCOL_F_INBAND_NOTIFICATIONS`` protocol
+  feature has been successfully negotiated, this message may be
+  submitted by the master to indicate that a buffer was added to
+  the vring instead of signalling it using the vring's kick file
+  descriptor or having the slave rely on polling.
+
+  The state.num field is currently reserved and must be set to 0.
+
+``VHOST_USER_GET_MAX_MEM_SLOTS``
+  :id: 36
+  :equivalent ioctl: N/A
+  :slave payload: u64
+
+  When the ``VHOST_USER_PROTOCOL_F_CONFIGURE_MEM_SLOTS`` protocol
+  feature has been successfully negotiated, this message is submitted
+  by master to the slave. The slave should return the message with a
+  u64 payload containing the maximum number of memory slots for
+  QEMU to expose to the guest. The value returned by the backend
+  will be capped at the maximum number of ram slots which can be
+  supported by the target platform.
+
+``VHOST_USER_ADD_MEM_REG``
+  :id: 37
+  :equivalent ioctl: N/A
+  :slave payload: single memory region description
+
+  When the ``VHOST_USER_PROTOCOL_F_CONFIGURE_MEM_SLOTS`` protocol
+  feature has been successfully negotiated, this message is submitted
+  by the master to the slave. The message payload contains a memory
+  region descriptor struct, describing a region of guest memory which
+  the slave device must map in. When the
+  ``VHOST_USER_PROTOCOL_F_CONFIGURE_MEM_SLOTS`` protocol feature has
+  been successfully negotiated, along with the
+  ``VHOST_USER_REM_MEM_REG`` message, this message is used to set and
+  update the memory tables of the slave device.
+
+``VHOST_USER_REM_MEM_REG``
+  :id: 38
+  :equivalent ioctl: N/A
+  :slave payload: single memory region description
+
+  When the ``VHOST_USER_PROTOCOL_F_CONFIGURE_MEM_SLOTS`` protocol
+  feature has been successfully negotiated, this message is submitted
+  by the master to the slave. The message payload contains a memory
+  region descriptor struct, describing a region of guest memory which
+  the slave device must unmap. When the
+  ``VHOST_USER_PROTOCOL_F_CONFIGURE_MEM_SLOTS`` protocol feature has
+  been successfully negotiated, along with the
+  ``VHOST_USER_ADD_MEM_REG`` message, this message is used to set and
+  update the memory tables of the slave device.
+
+``VHOST_USER_SET_STATUS``
+  :id: 39
+  :equivalent ioctl: VHOST_VDPA_SET_STATUS
+  :slave payload: N/A
+  :master payload: ``u64``
+
+  When the ``VHOST_USER_PROTOCOL_F_STATUS`` protocol feature has been
+  successfully negotiated, this message is submitted by the master to
+  notify the backend with updated device status as defined in the Virtio
+  specification.
+
+``VHOST_USER_GET_STATUS``
+  :id: 40
+  :equivalent ioctl: VHOST_VDPA_GET_STATUS
+  :slave payload: ``u64``
+  :master payload: N/A
+
+  When the ``VHOST_USER_PROTOCOL_F_STATUS`` protocol feature has been
+  successfully negotiated, this message is submitted by the master to
+  query the backend for its device status as defined in the Virtio
+  specification.
+
+
 Slave message types
 -------------------
 
@@ -1246,6 +1404,34 @@ Slave message types
   ``VHOST_USER_PROTOCOL_F_HOST_NOTIFIER`` protocol feature has been
   successfully negotiated.
 
+``VHOST_USER_SLAVE_VRING_CALL``
+  :id: 4
+  :equivalent ioctl: N/A
+  :slave payload: vring state description
+  :master payload: N/A
+
+  When the ``VHOST_USER_PROTOCOL_F_INBAND_NOTIFICATIONS`` protocol
+  feature has been successfully negotiated, this message may be
+  submitted by the slave to indicate that a buffer was used from
+  the vring instead of signalling this using the vring's call file
+  descriptor or having the master relying on polling.
+
+  The state.num field is currently reserved and must be set to 0.
+
+``VHOST_USER_SLAVE_VRING_ERR``
+  :id: 5
+  :equivalent ioctl: N/A
+  :slave payload: vring state description
+  :master payload: N/A
+
+  When the ``VHOST_USER_PROTOCOL_F_INBAND_NOTIFICATIONS`` protocol
+  feature has been successfully negotiated, this message may be
+  submitted by the slave to indicate that an error occurred on the
+  specific vring, instead of signalling the error file descriptor
+  set by the master via ``VHOST_USER_SET_VRING_ERR``.
+
+  The state.num field is currently reserved and must be set to 0.
+
 .. _reply_ack:
 
 VHOST_USER_PROTOCOL_F_REPLY_ACK
@@ -1281,7 +1467,7 @@ vhost-user backends can provide various devices & services and may
 need to be configured manually depending on the use case. However, it
 is a good idea to follow the conventions listed here when
 possible. Users, QEMU or libvirt, can then rely on some common
-behaviour to avoid heterogenous configuration and management of the
+behaviour to avoid heterogeneous configuration and management of the
 backend programs and facilitate interoperability.
 
 Each backend installed on a host system should come with at least one
@@ -1374,5 +1560,22 @@ Command line options:
 --virgl
 
   Enable virgl rendering support.
+
+  (optional)
+
+vhost-user-blk
+--------------
+
+Command line options:
+
+--blk-file=PATH
+
+  Specify block device or file path.
+
+  (optional)
+
+--read-only
+
+  Enable read-only.
 
   (optional)

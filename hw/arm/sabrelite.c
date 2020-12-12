@@ -14,14 +14,10 @@
 #include "qapi/error.h"
 #include "hw/arm/fsl-imx6.h"
 #include "hw/boards.h"
+#include "hw/qdev-properties.h"
 #include "sysemu/sysemu.h"
 #include "qemu/error-report.h"
 #include "sysemu/qtest.h"
-
-typedef struct IMX6Sabrelite {
-    FslIMX6State soc;
-    MemoryRegion ram;
-} IMX6Sabrelite;
 
 static struct arm_boot_info sabrelite_binfo = {
     /* DDR memory start */
@@ -44,8 +40,7 @@ static void sabrelite_reset_secondary(ARMCPU *cpu,
 
 static void sabrelite_init(MachineState *machine)
 {
-    IMX6Sabrelite *s = g_new0(IMX6Sabrelite, 1);
-    Error *err = NULL;
+    FslIMX6State *s;
 
     /* Check the amount of memory is compatible with the SOC */
     if (machine->ram_size > FSL_IMX6_MMDC_SIZE) {
@@ -54,19 +49,12 @@ static void sabrelite_init(MachineState *machine)
         exit(1);
     }
 
-    object_initialize_child(OBJECT(machine), "soc", &s->soc, sizeof(s->soc),
-                            TYPE_FSL_IMX6, &error_abort, NULL);
+    s = FSL_IMX6(object_new(TYPE_FSL_IMX6));
+    object_property_add_child(OBJECT(machine), "soc", OBJECT(s));
+    qdev_realize(DEVICE(s), NULL, &error_fatal);
 
-    object_property_set_bool(OBJECT(&s->soc), true, "realized", &err);
-    if (err != NULL) {
-        error_report("%s", error_get_pretty(err));
-        exit(1);
-    }
-
-    memory_region_allocate_system_memory(&s->ram, NULL, "sabrelite.ram",
-                                         machine->ram_size);
     memory_region_add_subregion(get_system_memory(), FSL_IMX6_MMDC_ADDR,
-                                &s->ram);
+                                machine->ram);
 
     {
         /*
@@ -77,7 +65,7 @@ static void sabrelite_init(MachineState *machine)
         /* Add the sst25vf016b NOR FLASH memory to first SPI */
         Object *spi_dev;
 
-        spi_dev = object_resolve_path_component(OBJECT(&s->soc), "spi1");
+        spi_dev = object_resolve_path_component(OBJECT(s), "spi1");
         if (spi_dev) {
             SSIBus *spi_bus;
 
@@ -87,13 +75,13 @@ static void sabrelite_init(MachineState *machine)
                 qemu_irq cs_line;
                 DriveInfo *dinfo = drive_get_next(IF_MTD);
 
-                flash_dev = ssi_create_slave_no_init(spi_bus, "sst25vf016b");
+                flash_dev = qdev_new("sst25vf016b");
                 if (dinfo) {
-                    qdev_prop_set_drive(flash_dev, "drive",
-                                        blk_by_legacy_dinfo(dinfo),
-                                        &error_fatal);
+                    qdev_prop_set_drive_err(flash_dev, "drive",
+                                            blk_by_legacy_dinfo(dinfo),
+                                            &error_fatal);
                 }
-                qdev_init_nofail(flash_dev);
+                qdev_realize_and_unref(flash_dev, BUS(spi_bus), &error_fatal);
 
                 cs_line = qdev_get_gpio_in_named(flash_dev, SSI_GPIO_CS, 0);
                 sysbus_connect_irq(SYS_BUS_DEVICE(spi_dev), 1, cs_line);
@@ -102,16 +90,13 @@ static void sabrelite_init(MachineState *machine)
     }
 
     sabrelite_binfo.ram_size = machine->ram_size;
-    sabrelite_binfo.kernel_filename = machine->kernel_filename;
-    sabrelite_binfo.kernel_cmdline = machine->kernel_cmdline;
-    sabrelite_binfo.initrd_filename = machine->initrd_filename;
     sabrelite_binfo.nb_cpus = machine->smp.cpus;
     sabrelite_binfo.secure_boot = true;
     sabrelite_binfo.write_secondary_boot = sabrelite_write_secondary;
     sabrelite_binfo.secondary_cpu_reset_hook = sabrelite_reset_secondary;
 
     if (!qtest_enabled()) {
-        arm_load_kernel(&s->soc.cpu[0], &sabrelite_binfo);
+        arm_load_kernel(&s->cpu[0], machine, &sabrelite_binfo);
     }
 }
 
@@ -121,6 +106,7 @@ static void sabrelite_machine_init(MachineClass *mc)
     mc->init = sabrelite_init;
     mc->max_cpus = FSL_IMX6_NUM_CPUS;
     mc->ignore_memory_transaction_failures = true;
+    mc->default_ram_id = "sabrelite.ram";
 }
 
 DEFINE_MACHINE("sabrelite", sabrelite_machine_init)

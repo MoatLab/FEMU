@@ -32,8 +32,6 @@
 #include "exec/cpu-defs.h"
 #include "xtensa-isa.h"
 
-#define ALIGNED_ONLY
-
 /* Xtensa processors have a weak memory model */
 #define TCG_GUEST_DEFAULT_MO      (0)
 
@@ -54,6 +52,8 @@ enum {
     XTENSA_OPTION_COPROCESSOR,
     XTENSA_OPTION_BOOLEAN,
     XTENSA_OPTION_FP_COPROCESSOR,
+    XTENSA_OPTION_DFP_COPROCESSOR,
+    XTENSA_OPTION_DFPU_SINGLE_ONLY,
     XTENSA_OPTION_MP_SYNCHRO,
     XTENSA_OPTION_CONDITIONAL_STORE,
     XTENSA_OPTION_ATOMCTL,
@@ -215,6 +215,9 @@ enum {
 #define MEMCTL_IL0EN 0x1
 
 #define MAX_INSN_LENGTH 64
+#define MAX_INSNBUF_LENGTH \
+    ((MAX_INSN_LENGTH + sizeof(xtensa_insnbuf_word) - 1) / \
+     sizeof(xtensa_insnbuf_word))
 #define MAX_INSN_SLOTS 32
 #define MAX_OPCODE_ARGS 16
 #define MAX_NAREG 64
@@ -358,14 +361,12 @@ typedef struct opcode_arg {
     uint32_t raw_imm;
     void *in;
     void *out;
+    uint32_t num_bits;
 } OpcodeArg;
 
 typedef struct DisasContext DisasContext;
 typedef void (*XtensaOpcodeOp)(DisasContext *dc, const OpcodeArg arg[],
                                const uint32_t par[]);
-typedef bool (*XtensaOpcodeBoolTest)(DisasContext *dc,
-                                     const OpcodeArg arg[],
-                                     const uint32_t par[]);
 typedef uint32_t (*XtensaOpcodeUintTest)(DisasContext *dc,
                                          const OpcodeArg arg[],
                                          const uint32_t par[]);
@@ -407,7 +408,7 @@ enum {
 typedef struct XtensaOpcodeOps {
     const void *name;
     XtensaOpcodeOp translate;
-    XtensaOpcodeBoolTest test_ill;
+    XtensaOpcodeUintTest test_exceptions;
     XtensaOpcodeUintTest test_overflow;
     const uint32_t *par;
     uint32_t op_flags;
@@ -421,6 +422,7 @@ typedef struct XtensaOpcodeTranslators {
 
 extern const XtensaOpcodeTranslators xtensa_core_opcodes;
 extern const XtensaOpcodeTranslators xtensa_fpu2000_opcodes;
+extern const XtensaOpcodeTranslators xtensa_fpu_opcodes;
 
 struct XtensaConfig {
     const char *name;
@@ -435,6 +437,7 @@ struct XtensaConfig {
     uint32_t exception_vector[EXC_MAX];
     unsigned ninterrupt;
     unsigned nlevel;
+    unsigned nmi_level;
     uint32_t interrupt_vector[MAX_NLEVEL + MAX_NNMI + 1];
     uint32_t level_mask[MAX_NLEVEL + MAX_NNMI + 1];
     uint32_t inttype_mask[INTTYPE_MAX];
@@ -463,6 +466,7 @@ struct XtensaConfig {
     XtensaMemory sysrom;
     XtensaMemory sysram;
 
+    unsigned hw_version;
     uint32_t configid[2];
 
     void *isa_internal;
@@ -481,6 +485,8 @@ struct XtensaConfig {
     unsigned n_mpu_fg_segments;
     unsigned n_mpu_bg_segments;
     const xtensa_mpu_entry *mpu_bg;
+
+    bool use_first_nan;
 };
 
 typedef struct XtensaConfigList {
@@ -571,7 +577,7 @@ void xtensa_cpu_dump_state(CPUState *cpu, FILE *f, int flags);
 hwaddr xtensa_cpu_get_phys_page_debug(CPUState *cpu, vaddr addr);
 void xtensa_count_regs(const XtensaConfig *config,
                        unsigned *n_regs, unsigned *n_core_regs);
-int xtensa_cpu_gdb_read_register(CPUState *cpu, uint8_t *buf, int reg);
+int xtensa_cpu_gdb_read_register(CPUState *cpu, GByteArray *buf, int reg);
 int xtensa_cpu_gdb_write_register(CPUState *cpu, uint8_t *buf, int reg);
 void xtensa_cpu_do_unaligned_access(CPUState *cpu, vaddr addr,
                                     MMUAccessType access_type,
@@ -598,7 +604,7 @@ void xtensa_cpu_do_unaligned_access(CPUState *cpu, vaddr addr,
 
 void xtensa_collect_sr_names(const XtensaConfig *config);
 void xtensa_translate_init(void);
-void **xtensa_get_regfile_by_name(const char *name);
+void **xtensa_get_regfile_by_name(const char *name, int entries, int bits);
 void xtensa_breakpoint_handler(CPUState *cs);
 void xtensa_register_core(XtensaConfigList *node);
 void xtensa_sim_open_console(Chardev *chr);
@@ -647,7 +653,9 @@ static inline int xtensa_get_cintlevel(const CPUXtensaState *env)
 
 static inline int xtensa_get_ring(const CPUXtensaState *env)
 {
-    if (xtensa_option_enabled(env->config, XTENSA_OPTION_MMU)) {
+    if (xtensa_option_bits_enabled(env->config,
+                                   XTENSA_OPTION_BIT(XTENSA_OPTION_MMU) |
+                                   XTENSA_OPTION_BIT(XTENSA_OPTION_MPU))) {
         return (env->sregs[PS] & PS_RING) >> PS_RING_SHIFT;
     } else {
         return 0;
@@ -656,8 +664,10 @@ static inline int xtensa_get_ring(const CPUXtensaState *env)
 
 static inline int xtensa_get_cring(const CPUXtensaState *env)
 {
-    if (xtensa_option_enabled(env->config, XTENSA_OPTION_MMU) &&
-            (env->sregs[PS] & PS_EXCM) == 0) {
+    if (xtensa_option_bits_enabled(env->config,
+                                   XTENSA_OPTION_BIT(XTENSA_OPTION_MMU) |
+                                   XTENSA_OPTION_BIT(XTENSA_OPTION_MPU)) &&
+        (env->sregs[PS] & PS_EXCM) == 0) {
         return (env->sregs[PS] & PS_RING) >> PS_RING_SHIFT;
     } else {
         return 0;
@@ -675,6 +685,9 @@ static inline MemoryRegion *xtensa_get_er_region(CPUXtensaState *env)
 {
     return env->system_er;
 }
+#else
+void xtensa_set_abi_call0(void);
+bool xtensa_abi_call0(void);
 #endif
 
 static inline uint32_t xtensa_replicate_windowstart(CPUXtensaState *env)
@@ -684,10 +697,6 @@ static inline uint32_t xtensa_replicate_windowstart(CPUXtensaState *env)
 }
 
 /* MMU modes definitions */
-#define MMU_MODE0_SUFFIX _ring0
-#define MMU_MODE1_SUFFIX _ring1
-#define MMU_MODE2_SUFFIX _ring2
-#define MMU_MODE3_SUFFIX _ring3
 #define MMU_USER_IDX 3
 
 static inline int cpu_mmu_index(CPUXtensaState *env, bool ifetch)

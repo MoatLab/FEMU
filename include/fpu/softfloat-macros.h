@@ -82,6 +82,8 @@ this code that are retained.
 #ifndef FPU_SOFTFLOAT_MACROS_H
 #define FPU_SOFTFLOAT_MACROS_H
 
+#include "fpu/softfloat-types.h"
+
 /*----------------------------------------------------------------------------
 | Shifts `a' right by the number of bits given in `count'.  If any nonzero
 | bits are shifted off, they are ``jammed'' into the least significant bit of
@@ -616,13 +618,13 @@ static inline uint64_t estimateDiv128To64(uint64_t a0, uint64_t a1, uint64_t b)
     uint64_t rem0, rem1, term0, term1;
     uint64_t z;
 
-    if ( b <= a0 ) return LIT64( 0xFFFFFFFFFFFFFFFF );
+    if ( b <= a0 ) return UINT64_C(0xFFFFFFFFFFFFFFFF);
     b0 = b>>32;
-    z = ( b0<<32 <= a0 ) ? LIT64( 0xFFFFFFFF00000000 ) : ( a0 / b0 )<<32;
+    z = ( b0<<32 <= a0 ) ? UINT64_C(0xFFFFFFFF00000000) : ( a0 / b0 )<<32;
     mul64To128( b, z, &term0, &term1 );
     sub128( a0, a1, term0, term1, &rem0, &rem1 );
     while ( ( (int64_t) rem0 ) < 0 ) {
-        z -= LIT64( 0x100000000 );
+        z -= UINT64_C(0x100000000);
         b1 = b<<32;
         add128( rem0, rem1, b0, b1, &rem0, &rem1 );
     }
@@ -754,11 +756,9 @@ static inline uint32_t estimateSqrt32(int aExp, uint32_t a)
 | Otherwise, returns 0.
 *----------------------------------------------------------------------------*/
 
-static inline flag eq128( uint64_t a0, uint64_t a1, uint64_t b0, uint64_t b1 )
+static inline bool eq128(uint64_t a0, uint64_t a1, uint64_t b0, uint64_t b1)
 {
-
-    return ( a0 == b0 ) && ( a1 == b1 );
-
+    return a0 == b0 && a1 == b1;
 }
 
 /*----------------------------------------------------------------------------
@@ -767,11 +767,9 @@ static inline flag eq128( uint64_t a0, uint64_t a1, uint64_t b0, uint64_t b1 )
 | Otherwise, returns 0.
 *----------------------------------------------------------------------------*/
 
-static inline flag le128( uint64_t a0, uint64_t a1, uint64_t b0, uint64_t b1 )
+static inline bool le128(uint64_t a0, uint64_t a1, uint64_t b0, uint64_t b1)
 {
-
-    return ( a0 < b0 ) || ( ( a0 == b0 ) && ( a1 <= b1 ) );
-
+    return a0 < b0 || (a0 == b0 && a1 <= b1);
 }
 
 /*----------------------------------------------------------------------------
@@ -780,11 +778,9 @@ static inline flag le128( uint64_t a0, uint64_t a1, uint64_t b0, uint64_t b1 )
 | returns 0.
 *----------------------------------------------------------------------------*/
 
-static inline flag lt128( uint64_t a0, uint64_t a1, uint64_t b0, uint64_t b1 )
+static inline bool lt128(uint64_t a0, uint64_t a1, uint64_t b0, uint64_t b1)
 {
-
-    return ( a0 < b0 ) || ( ( a0 == b0 ) && ( a1 < b1 ) );
-
+    return a0 < b0 || (a0 == b0 && a1 < b1);
 }
 
 /*----------------------------------------------------------------------------
@@ -793,11 +789,9 @@ static inline flag lt128( uint64_t a0, uint64_t a1, uint64_t b0, uint64_t b1 )
 | Otherwise, returns 0.
 *----------------------------------------------------------------------------*/
 
-static inline flag ne128( uint64_t a0, uint64_t a1, uint64_t b0, uint64_t b1 )
+static inline bool ne128(uint64_t a0, uint64_t a1, uint64_t b0, uint64_t b1)
 {
-
-    return ( a0 != b0 ) || ( a1 != b1 );
-
+    return a0 != b0 || a1 != b1;
 }
 
 #endif

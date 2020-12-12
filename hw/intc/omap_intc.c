@@ -19,7 +19,8 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
+#include "hw/irq.h"
+#include "hw/qdev-properties.h"
 #include "hw/arm/omap.h"
 #include "hw/sysbus.h"
 #include "qemu/error-report.h"
@@ -36,10 +37,6 @@ struct omap_intr_handler_bank_s {
     uint32_t swi;
     unsigned char priority[32];
 };
-
-#define TYPE_OMAP_INTC "common-omap-intc"
-#define OMAP_INTC(obj) \
-    OBJECT_CHECK(struct omap_intr_handler_s, (obj), TYPE_OMAP_INTC)
 
 struct omap_intr_handler_s {
     SysBusDevice parent_obj;
@@ -390,9 +387,18 @@ static void omap_intc_realize(DeviceState *dev, Error **errp)
     }
 }
 
+void omap_intc_set_iclk(omap_intr_handler *intc, omap_clk clk)
+{
+    intc->iclk = clk;
+}
+
+void omap_intc_set_fclk(omap_intr_handler *intc, omap_clk clk)
+{
+    intc->fclk = clk;
+}
+
 static Property omap_intc_properties[] = {
     DEFINE_PROP_UINT32("size", struct omap_intr_handler_s, size, 0x100),
-    DEFINE_PROP_PTR("clk", struct omap_intr_handler_s, iclk),
     DEFINE_PROP_END_OF_LIST(),
 };
 
@@ -401,7 +407,7 @@ static void omap_intc_class_init(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->reset = omap_inth_reset;
-    dc->props = omap_intc_properties;
+    device_class_set_props(dc, omap_intc_properties);
     /* Reason: pointer property "clk" */
     dc->user_creatable = false;
     dc->realize = omap_intc_realize;
@@ -646,8 +652,6 @@ static void omap2_intc_realize(DeviceState *dev, Error **errp)
 static Property omap2_intc_properties[] = {
     DEFINE_PROP_UINT8("revision", struct omap_intr_handler_s,
     revision, 0x21),
-    DEFINE_PROP_PTR("iclk", struct omap_intr_handler_s, iclk),
-    DEFINE_PROP_PTR("fclk", struct omap_intr_handler_s, fclk),
     DEFINE_PROP_END_OF_LIST(),
 };
 
@@ -656,7 +660,7 @@ static void omap2_intc_class_init(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->reset = omap_inth_reset;
-    dc->props = omap2_intc_properties;
+    device_class_set_props(dc, omap2_intc_properties);
     /* Reason: pointer property "iclk", "fclk" */
     dc->user_creatable = false;
     dc->realize = omap2_intc_realize;
@@ -672,7 +676,7 @@ static const TypeInfo omap2_intc_info = {
 static const TypeInfo omap_intc_type_info = {
     .name          = TYPE_OMAP_INTC,
     .parent        = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(struct omap_intr_handler_s),
+    .instance_size = sizeof(omap_intr_handler),
     .abstract      = true,
 };
 

@@ -19,9 +19,12 @@
 #ifndef CADENCE_UART_H
 #define CADENCE_UART_H
 
+#include "hw/qdev-properties.h"
 #include "hw/sysbus.h"
 #include "chardev/char-fe.h"
+#include "qapi/error.h"
 #include "qemu/timer.h"
+#include "qom/object.h"
 
 #define CADENCE_UART_RX_FIFO_SIZE           16
 #define CADENCE_UART_TX_FIFO_SIZE           16
@@ -29,10 +32,9 @@
 #define CADENCE_UART_R_MAX (0x48/4)
 
 #define TYPE_CADENCE_UART "cadence_uart"
-#define CADENCE_UART(obj) OBJECT_CHECK(CadenceUARTState, (obj), \
-                                       TYPE_CADENCE_UART)
+OBJECT_DECLARE_SIMPLE_TYPE(CadenceUARTState, CADENCE_UART)
 
-typedef struct {
+struct CadenceUARTState {
     /*< private >*/
     SysBusDevice parent_obj;
 
@@ -48,23 +50,7 @@ typedef struct {
     CharBackend chr;
     qemu_irq irq;
     QEMUTimer *fifo_trigger_handle;
-} CadenceUARTState;
-
-static inline DeviceState *cadence_uart_create(hwaddr addr,
-                                        qemu_irq irq,
-                                        Chardev *chr)
-{
-    DeviceState *dev;
-    SysBusDevice *s;
-
-    dev = qdev_create(NULL, TYPE_CADENCE_UART);
-    s = SYS_BUS_DEVICE(dev);
-    qdev_prop_set_chr(dev, "chardev", chr);
-    qdev_init_nofail(dev);
-    sysbus_mmio_map(s, 0, addr);
-    sysbus_connect_irq(s, 0, irq);
-
-    return dev;
-}
+    Clock *refclk;
+};
 
 #endif

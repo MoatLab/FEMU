@@ -17,10 +17,12 @@
 
 #include "qemu/osdep.h"
 
+#include "hw/qdev-properties.h"
 #include "hw/virtio/virtio-net.h"
 #include "virtio-pci.h"
 #include "qapi/error.h"
 #include "qemu/module.h"
+#include "qom/object.h"
 
 typedef struct VirtIONetPCI VirtIONetPCI;
 
@@ -28,8 +30,8 @@ typedef struct VirtIONetPCI VirtIONetPCI;
  * virtio-net-pci: This extends VirtioPCIProxy.
  */
 #define TYPE_VIRTIO_NET_PCI "virtio-net-pci-base"
-#define VIRTIO_NET_PCI(obj) \
-        OBJECT_CHECK(VirtIONetPCI, (obj), TYPE_VIRTIO_NET_PCI)
+DECLARE_INSTANCE_CHECKER(VirtIONetPCI, VIRTIO_NET_PCI,
+                         TYPE_VIRTIO_NET_PCI)
 
 struct VirtIONetPCI {
     VirtIOPCIProxy parent_obj;
@@ -51,8 +53,7 @@ static void virtio_net_pci_realize(VirtIOPCIProxy *vpci_dev, Error **errp)
 
     virtio_net_set_netclient_name(&dev->vdev, qdev->id,
                                   object_get_typename(OBJECT(qdev)));
-    qdev_set_parent_bus(vdev, BUS(&vpci_dev->bus));
-    object_property_set_bool(OBJECT(vdev), true, "realized", errp);
+    qdev_realize(vdev, BUS(&vpci_dev->bus), errp);
 }
 
 static void virtio_net_pci_class_init(ObjectClass *klass, void *data)
@@ -67,7 +68,7 @@ static void virtio_net_pci_class_init(ObjectClass *klass, void *data)
     k->revision = VIRTIO_PCI_ABI_VERSION;
     k->class_id = PCI_CLASS_NETWORK_ETHERNET;
     set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);
-    dc->props = virtio_net_properties;
+    device_class_set_props(dc, virtio_net_properties);
     vpciklass->realize = virtio_net_pci_realize;
 }
 
@@ -78,7 +79,7 @@ static void virtio_net_pci_instance_init(Object *obj)
     virtio_instance_init_common(obj, &dev->vdev, sizeof(dev->vdev),
                                 TYPE_VIRTIO_NET);
     object_property_add_alias(obj, "bootindex", OBJECT(&dev->vdev),
-                              "bootindex", &error_abort);
+                              "bootindex");
 }
 
 static const VirtioPCIDeviceTypeInfo virtio_net_pci_info = {

@@ -1,7 +1,7 @@
 #ifndef BLOCK_NVME_H
 #define BLOCK_NVME_H
 
-typedef struct NvmeBar {
+typedef struct QEMU_PACKED NvmeBar {
     uint64_t    cap;
     uint32_t    vs;
     uint32_t    intms;
@@ -15,6 +15,14 @@ typedef struct NvmeBar {
     uint64_t    acq;
     uint32_t    cmbloc;
     uint32_t    cmbsz;
+    uint8_t     padding[3520]; /* not used by QEMU */
+    uint32_t    pmrcap;
+    uint32_t    pmrctl;
+    uint32_t    pmrsts;
+    uint32_t    pmrebs;
+    uint32_t    pmrswtp;
+    uint64_t    pmrmsc;
+    uint8_t     reserved[484];
 } NvmeBar;
 
 enum NvmeCapShift {
@@ -23,10 +31,11 @@ enum NvmeCapShift {
     CAP_AMS_SHIFT      = 17,
     CAP_TO_SHIFT       = 24,
     CAP_DSTRD_SHIFT    = 32,
-    CAP_NSSRS_SHIFT    = 33,
+    CAP_NSSRS_SHIFT    = 36,
     CAP_CSS_SHIFT      = 37,
     CAP_MPSMIN_SHIFT   = 48,
     CAP_MPSMAX_SHIFT   = 52,
+    CAP_PMR_SHIFT      = 56,
 };
 
 enum NvmeCapMask {
@@ -39,6 +48,7 @@ enum NvmeCapMask {
     CAP_CSS_MASK       = 0xff,
     CAP_MPSMIN_MASK    = 0xf,
     CAP_MPSMAX_MASK    = 0xf,
+    CAP_PMR_MASK       = 0x1,
 };
 
 #define NVME_CAP_MQES(cap)  (((cap) >> CAP_MQES_SHIFT)   & CAP_MQES_MASK)
@@ -69,6 +79,13 @@ enum NvmeCapMask {
                                                            << CAP_MPSMIN_SHIFT)
 #define NVME_CAP_SET_MPSMAX(cap, val) (cap |= (uint64_t)(val & CAP_MPSMAX_MASK)\
                                                             << CAP_MPSMAX_SHIFT)
+#define NVME_CAP_SET_PMRS(cap, val) (cap |= (uint64_t)(val & CAP_PMR_MASK)\
+                                                            << CAP_PMR_SHIFT)
+
+enum NvmeCapCss {
+    NVME_CAP_CSS_NVM        = 1 << 0,
+    NVME_CAP_CSS_ADMIN_ONLY = 1 << 7,
+};
 
 enum NvmeCcShift {
     CC_EN_SHIFT     = 0,
@@ -97,6 +114,11 @@ enum NvmeCcMask {
 #define NVME_CC_SHN(cc)    ((cc >> CC_SHN_SHIFT)    & CC_SHN_MASK)
 #define NVME_CC_IOSQES(cc) ((cc >> CC_IOSQES_SHIFT) & CC_IOSQES_MASK)
 #define NVME_CC_IOCQES(cc) ((cc >> CC_IOCQES_SHIFT) & CC_IOCQES_MASK)
+
+enum NvmeCcCss {
+    NVME_CC_CSS_NVM        = 0x0,
+    NVME_CC_CSS_ADMIN_ONLY = 0x7,
+};
 
 enum NvmeCstsShift {
     CSTS_RDY_SHIFT      = 0,
@@ -205,51 +227,212 @@ enum NvmeCmbszMask {
 #define NVME_CMBSZ_GETSIZE(cmbsz) \
     (NVME_CMBSZ_SZ(cmbsz) * (1 << (12 + 4 * NVME_CMBSZ_SZU(cmbsz))))
 
-enum NvmeSglDescriptorType {
-    SGL_DESCR_TYPE_DATA_BLOCK           = 0x0,
-    SGL_DESCR_TYPE_BIT_BUCKET           = 0x1,
-    SGL_DESCR_TYPE_SEGMENT              = 0x2,
-    SGL_DESCR_TYPE_LAST_SEGMENT         = 0x3,
-    SGL_DESCR_TYPE_KEYED_DATA_BLOCK     = 0x4,
+enum NvmePmrcapShift {
+    PMRCAP_RDS_SHIFT      = 3,
+    PMRCAP_WDS_SHIFT      = 4,
+    PMRCAP_BIR_SHIFT      = 5,
+    PMRCAP_PMRTU_SHIFT    = 8,
+    PMRCAP_PMRWBM_SHIFT   = 10,
+    PMRCAP_PMRTO_SHIFT    = 16,
+    PMRCAP_CMSS_SHIFT     = 24,
+};
 
-    SGL_DESCR_TYPE_VENDOR_SPECIFIC      = 0xf,
+enum NvmePmrcapMask {
+    PMRCAP_RDS_MASK      = 0x1,
+    PMRCAP_WDS_MASK      = 0x1,
+    PMRCAP_BIR_MASK      = 0x7,
+    PMRCAP_PMRTU_MASK    = 0x3,
+    PMRCAP_PMRWBM_MASK   = 0xf,
+    PMRCAP_PMRTO_MASK    = 0xff,
+    PMRCAP_CMSS_MASK     = 0x1,
+};
+
+#define NVME_PMRCAP_RDS(pmrcap)    \
+    ((pmrcap >> PMRCAP_RDS_SHIFT)   & PMRCAP_RDS_MASK)
+#define NVME_PMRCAP_WDS(pmrcap)    \
+    ((pmrcap >> PMRCAP_WDS_SHIFT)   & PMRCAP_WDS_MASK)
+#define NVME_PMRCAP_BIR(pmrcap)    \
+    ((pmrcap >> PMRCAP_BIR_SHIFT)   & PMRCAP_BIR_MASK)
+#define NVME_PMRCAP_PMRTU(pmrcap)    \
+    ((pmrcap >> PMRCAP_PMRTU_SHIFT)   & PMRCAP_PMRTU_MASK)
+#define NVME_PMRCAP_PMRWBM(pmrcap)    \
+    ((pmrcap >> PMRCAP_PMRWBM_SHIFT)   & PMRCAP_PMRWBM_MASK)
+#define NVME_PMRCAP_PMRTO(pmrcap)    \
+    ((pmrcap >> PMRCAP_PMRTO_SHIFT)   & PMRCAP_PMRTO_MASK)
+#define NVME_PMRCAP_CMSS(pmrcap)    \
+    ((pmrcap >> PMRCAP_CMSS_SHIFT)   & PMRCAP_CMSS_MASK)
+
+#define NVME_PMRCAP_SET_RDS(pmrcap, val)   \
+    (pmrcap |= (uint64_t)(val & PMRCAP_RDS_MASK) << PMRCAP_RDS_SHIFT)
+#define NVME_PMRCAP_SET_WDS(pmrcap, val)   \
+    (pmrcap |= (uint64_t)(val & PMRCAP_WDS_MASK) << PMRCAP_WDS_SHIFT)
+#define NVME_PMRCAP_SET_BIR(pmrcap, val)   \
+    (pmrcap |= (uint64_t)(val & PMRCAP_BIR_MASK) << PMRCAP_BIR_SHIFT)
+#define NVME_PMRCAP_SET_PMRTU(pmrcap, val)   \
+    (pmrcap |= (uint64_t)(val & PMRCAP_PMRTU_MASK) << PMRCAP_PMRTU_SHIFT)
+#define NVME_PMRCAP_SET_PMRWBM(pmrcap, val)   \
+    (pmrcap |= (uint64_t)(val & PMRCAP_PMRWBM_MASK) << PMRCAP_PMRWBM_SHIFT)
+#define NVME_PMRCAP_SET_PMRTO(pmrcap, val)   \
+    (pmrcap |= (uint64_t)(val & PMRCAP_PMRTO_MASK) << PMRCAP_PMRTO_SHIFT)
+#define NVME_PMRCAP_SET_CMSS(pmrcap, val)   \
+    (pmrcap |= (uint64_t)(val & PMRCAP_CMSS_MASK) << PMRCAP_CMSS_SHIFT)
+
+enum NvmePmrctlShift {
+    PMRCTL_EN_SHIFT   = 0,
+};
+
+enum NvmePmrctlMask {
+    PMRCTL_EN_MASK   = 0x1,
+};
+
+#define NVME_PMRCTL_EN(pmrctl)  ((pmrctl >> PMRCTL_EN_SHIFT)   & PMRCTL_EN_MASK)
+
+#define NVME_PMRCTL_SET_EN(pmrctl, val)   \
+    (pmrctl |= (uint64_t)(val & PMRCTL_EN_MASK) << PMRCTL_EN_SHIFT)
+
+enum NvmePmrstsShift {
+    PMRSTS_ERR_SHIFT    = 0,
+    PMRSTS_NRDY_SHIFT   = 8,
+    PMRSTS_HSTS_SHIFT   = 9,
+    PMRSTS_CBAI_SHIFT   = 12,
+};
+
+enum NvmePmrstsMask {
+    PMRSTS_ERR_MASK    = 0xff,
+    PMRSTS_NRDY_MASK   = 0x1,
+    PMRSTS_HSTS_MASK   = 0x7,
+    PMRSTS_CBAI_MASK   = 0x1,
+};
+
+#define NVME_PMRSTS_ERR(pmrsts)     \
+    ((pmrsts >> PMRSTS_ERR_SHIFT)   & PMRSTS_ERR_MASK)
+#define NVME_PMRSTS_NRDY(pmrsts)    \
+    ((pmrsts >> PMRSTS_NRDY_SHIFT)   & PMRSTS_NRDY_MASK)
+#define NVME_PMRSTS_HSTS(pmrsts)    \
+    ((pmrsts >> PMRSTS_HSTS_SHIFT)   & PMRSTS_HSTS_MASK)
+#define NVME_PMRSTS_CBAI(pmrsts)    \
+    ((pmrsts >> PMRSTS_CBAI_SHIFT)   & PMRSTS_CBAI_MASK)
+
+#define NVME_PMRSTS_SET_ERR(pmrsts, val)   \
+    (pmrsts |= (uint64_t)(val & PMRSTS_ERR_MASK) << PMRSTS_ERR_SHIFT)
+#define NVME_PMRSTS_SET_NRDY(pmrsts, val)   \
+    (pmrsts |= (uint64_t)(val & PMRSTS_NRDY_MASK) << PMRSTS_NRDY_SHIFT)
+#define NVME_PMRSTS_SET_HSTS(pmrsts, val)   \
+    (pmrsts |= (uint64_t)(val & PMRSTS_HSTS_MASK) << PMRSTS_HSTS_SHIFT)
+#define NVME_PMRSTS_SET_CBAI(pmrsts, val)   \
+    (pmrsts |= (uint64_t)(val & PMRSTS_CBAI_MASK) << PMRSTS_CBAI_SHIFT)
+
+enum NvmePmrebsShift {
+    PMREBS_PMRSZU_SHIFT   = 0,
+    PMREBS_RBB_SHIFT      = 4,
+    PMREBS_PMRWBZ_SHIFT   = 8,
+};
+
+enum NvmePmrebsMask {
+    PMREBS_PMRSZU_MASK   = 0xf,
+    PMREBS_RBB_MASK      = 0x1,
+    PMREBS_PMRWBZ_MASK   = 0xffffff,
+};
+
+#define NVME_PMREBS_PMRSZU(pmrebs)  \
+    ((pmrebs >> PMREBS_PMRSZU_SHIFT)   & PMREBS_PMRSZU_MASK)
+#define NVME_PMREBS_RBB(pmrebs)     \
+    ((pmrebs >> PMREBS_RBB_SHIFT)   & PMREBS_RBB_MASK)
+#define NVME_PMREBS_PMRWBZ(pmrebs)  \
+    ((pmrebs >> PMREBS_PMRWBZ_SHIFT)   & PMREBS_PMRWBZ_MASK)
+
+#define NVME_PMREBS_SET_PMRSZU(pmrebs, val)   \
+    (pmrebs |= (uint64_t)(val & PMREBS_PMRSZU_MASK) << PMREBS_PMRSZU_SHIFT)
+#define NVME_PMREBS_SET_RBB(pmrebs, val)   \
+    (pmrebs |= (uint64_t)(val & PMREBS_RBB_MASK) << PMREBS_RBB_SHIFT)
+#define NVME_PMREBS_SET_PMRWBZ(pmrebs, val)   \
+    (pmrebs |= (uint64_t)(val & PMREBS_PMRWBZ_MASK) << PMREBS_PMRWBZ_SHIFT)
+
+enum NvmePmrswtpShift {
+    PMRSWTP_PMRSWTU_SHIFT   = 0,
+    PMRSWTP_PMRSWTV_SHIFT   = 8,
+};
+
+enum NvmePmrswtpMask {
+    PMRSWTP_PMRSWTU_MASK   = 0xf,
+    PMRSWTP_PMRSWTV_MASK   = 0xffffff,
+};
+
+#define NVME_PMRSWTP_PMRSWTU(pmrswtp)   \
+    ((pmrswtp >> PMRSWTP_PMRSWTU_SHIFT)   & PMRSWTP_PMRSWTU_MASK)
+#define NVME_PMRSWTP_PMRSWTV(pmrswtp)   \
+    ((pmrswtp >> PMRSWTP_PMRSWTV_SHIFT)   & PMRSWTP_PMRSWTV_MASK)
+
+#define NVME_PMRSWTP_SET_PMRSWTU(pmrswtp, val)   \
+    (pmrswtp |= (uint64_t)(val & PMRSWTP_PMRSWTU_MASK) << PMRSWTP_PMRSWTU_SHIFT)
+#define NVME_PMRSWTP_SET_PMRSWTV(pmrswtp, val)   \
+    (pmrswtp |= (uint64_t)(val & PMRSWTP_PMRSWTV_MASK) << PMRSWTP_PMRSWTV_SHIFT)
+
+enum NvmePmrmscShift {
+    PMRMSC_CMSE_SHIFT   = 1,
+    PMRMSC_CBA_SHIFT    = 12,
+};
+
+enum NvmePmrmscMask {
+    PMRMSC_CMSE_MASK   = 0x1,
+    PMRMSC_CBA_MASK    = 0xfffffffffffff,
+};
+
+#define NVME_PMRMSC_CMSE(pmrmsc)    \
+    ((pmrmsc >> PMRMSC_CMSE_SHIFT)   & PMRMSC_CMSE_MASK)
+#define NVME_PMRMSC_CBA(pmrmsc)     \
+    ((pmrmsc >> PMRMSC_CBA_SHIFT)   & PMRMSC_CBA_MASK)
+
+#define NVME_PMRMSC_SET_CMSE(pmrmsc, val)   \
+    (pmrmsc |= (uint64_t)(val & PMRMSC_CMSE_MASK) << PMRMSC_CMSE_SHIFT)
+#define NVME_PMRMSC_SET_CBA(pmrmsc, val)   \
+    (pmrmsc |= (uint64_t)(val & PMRMSC_CBA_MASK) << PMRMSC_CBA_SHIFT)
+
+enum NvmeSglDescriptorType {
+    NVME_SGL_DESCR_TYPE_DATA_BLOCK          = 0x0,
+    NVME_SGL_DESCR_TYPE_BIT_BUCKET          = 0x1,
+    NVME_SGL_DESCR_TYPE_SEGMENT             = 0x2,
+    NVME_SGL_DESCR_TYPE_LAST_SEGMENT        = 0x3,
+    NVME_SGL_DESCR_TYPE_KEYED_DATA_BLOCK    = 0x4,
+
+    NVME_SGL_DESCR_TYPE_VENDOR_SPECIFIC     = 0xf,
 };
 
 enum NvmeSglDescriptorSubtype {
-    SGL_DESCR_SUBTYPE_ADDRESS = 0x0,
-    SGL_DESCR_SUBTYPE_OFFSET  = 0x1,
+    NVME_SGL_DESCR_SUBTYPE_ADDRESS = 0x0,
 };
 
-typedef struct NvmeSglDescriptor {
+typedef struct QEMU_PACKED NvmeSglDescriptor {
     uint64_t addr;
     uint32_t len;
     uint8_t  rsvd[3];
     uint8_t  type;
 } NvmeSglDescriptor;
 
-#define NVME_SGL_TYPE(type)     (type >> 4)
+#define NVME_SGL_TYPE(type)     ((type >> 4) & 0xf)
+#define NVME_SGL_SUBTYPE(type)  (type & 0xf)
 
 typedef union NvmeCmdDptr {
     struct {
         uint64_t    prp1;
         uint64_t    prp2;
-    } prp;
+    };
 
     NvmeSglDescriptor sgl;
 } NvmeCmdDptr;
 
 enum NvmePsdt {
-    PSDT_PRP                 = 0x0,
-    PSDT_SGL_MPTR_CONTIGUOUS = 0x1,
-    PSDT_SGL_MPTR_SGL        = 0x2,
+    NVME_PSDT_PRP                 = 0x0,
+    NVME_PSDT_SGL_MPTR_CONTIGUOUS = 0x1,
+    NVME_PSDT_SGL_MPTR_SGL        = 0x2,
 };
 
-typedef struct NvmeCmd {
+typedef struct QEMU_PACKED NvmeCmd {
     uint8_t     opcode;
     uint8_t     flags;
     uint16_t    cid;
     uint32_t    nsid;
-    uint64_t    rsvd2;
+    uint64_t    res1;
     uint64_t    mptr;
     NvmeCmdDptr dptr;
     uint32_t    cdw10;
@@ -287,11 +470,11 @@ enum NvmeIoCommands {
     NVME_CMD_READ               = 0x02,
     NVME_CMD_WRITE_UNCOR        = 0x04,
     NVME_CMD_COMPARE            = 0x05,
-    NVME_CMD_WRITE_ZEROS        = 0x08,
+    NVME_CMD_WRITE_ZEROES       = 0x08,
     NVME_CMD_DSM                = 0x09,
 };
 
-typedef struct NvmeDeleteQ {
+typedef struct QEMU_PACKED NvmeDeleteQ {
     uint8_t     opcode;
     uint8_t     flags;
     uint16_t    cid;
@@ -301,7 +484,7 @@ typedef struct NvmeDeleteQ {
     uint32_t    rsvd11[5];
 } NvmeDeleteQ;
 
-typedef struct NvmeCreateCq {
+typedef struct QEMU_PACKED NvmeCreateCq {
     uint8_t     opcode;
     uint8_t     flags;
     uint16_t    cid;
@@ -318,7 +501,12 @@ typedef struct NvmeCreateCq {
 #define NVME_CQ_FLAGS_PC(cq_flags)  (cq_flags & 0x1)
 #define NVME_CQ_FLAGS_IEN(cq_flags) ((cq_flags >> 1) & 0x1)
 
-typedef struct NvmeCreateSq {
+enum NvmeFlagsCq {
+    NVME_CQ_PC          = 1,
+    NVME_CQ_IEN         = 2,
+};
+
+typedef struct QEMU_PACKED NvmeCreateSq {
     uint8_t     opcode;
     uint8_t     flags;
     uint16_t    cid;
@@ -335,15 +523,16 @@ typedef struct NvmeCreateSq {
 #define NVME_SQ_FLAGS_PC(sq_flags)      (sq_flags & 0x1)
 #define NVME_SQ_FLAGS_QPRIO(sq_flags)   ((sq_flags >> 1) & 0x3)
 
-enum NvmeQueueFlags {
-    NVME_Q_PC           = 1,
-    NVME_Q_PRIO_URGENT  = 0,
-    NVME_Q_PRIO_HIGH    = 1,
-    NVME_Q_PRIO_NORMAL  = 2,
-    NVME_Q_PRIO_LOW     = 3,
+enum NvmeFlagsSq {
+    NVME_SQ_PC          = 1,
+
+    NVME_SQ_PRIO_URGENT = 0,
+    NVME_SQ_PRIO_HIGH   = 1,
+    NVME_SQ_PRIO_NORMAL = 2,
+    NVME_SQ_PRIO_LOW    = 3,
 };
 
-typedef struct NvmeIdentify {
+typedef struct QEMU_PACKED NvmeIdentify {
     uint8_t     opcode;
     uint8_t     flags;
     uint16_t    cid;
@@ -355,15 +544,14 @@ typedef struct NvmeIdentify {
     uint32_t    rsvd11[5];
 } NvmeIdentify;
 
-typedef struct NvmeRwCmd {
+typedef struct QEMU_PACKED NvmeRwCmd {
     uint8_t     opcode;
     uint8_t     flags;
     uint16_t    cid;
     uint32_t    nsid;
     uint64_t    rsvd2;
     uint64_t    mptr;
-    uint64_t    prp1;
-    uint64_t    prp2;
+    NvmeCmdDptr dptr;
     uint64_t    slba;
     uint16_t    nlb;
     uint16_t    control;
@@ -397,14 +585,13 @@ enum {
     NVME_RW_PRINFO_PRCHK_REF    = 1 << 10,
 };
 
-typedef struct NvmeDsmCmd {
+typedef struct QEMU_PACKED NvmeDsmCmd {
     uint8_t     opcode;
     uint8_t     flags;
     uint16_t    cid;
     uint32_t    nsid;
     uint64_t    rsvd2[2];
-    uint64_t    prp1;
-    uint64_t    prp2;
+    NvmeCmdDptr dptr;
     uint32_t    nr;
     uint32_t    attributes;
     uint32_t    rsvd12[4];
@@ -416,7 +603,7 @@ enum {
     NVME_DSMGMT_AD  = 1 << 2,
 };
 
-typedef struct NvmeDsmRange {
+typedef struct QEMU_PACKED NvmeDsmRange {
     uint32_t    cattr;
     uint32_t    nlb;
     uint64_t    slba;
@@ -438,21 +625,16 @@ enum NvmeAsyncEventRequest {
     NVME_AER_INFO_SMART_SPARE_THRESH        = 2,
 };
 
-typedef struct NvmeAerResult {
+typedef struct QEMU_PACKED NvmeAerResult {
     uint8_t event_type;
     uint8_t event_info;
     uint8_t log_page;
     uint8_t resv;
 } NvmeAerResult;
 
-typedef struct NvmeCqe {
-    union {
-        struct {
-            uint32_t cdw0;
-            uint32_t rsvd;
-        };
-        uint64_t res64;
-    };
+typedef struct QEMU_PACKED NvmeCqe {
+    uint32_t    result;
+    uint32_t    rsvd;
     uint16_t    sq_head;
     uint16_t    sq_id;
     uint16_t    cid;
@@ -473,12 +655,13 @@ enum NvmeStatusCodes {
     NVME_CMD_ABORT_MISSING_FUSE = 0x000a,
     NVME_INVALID_NSID           = 0x000b,
     NVME_CMD_SEQ_ERROR          = 0x000c,
-    NVME_INVALID_SGL_SEG_DESCRIPTOR  = 0x000d,
-    NVME_INVALID_NUM_SGL_DESCRIPTORS = 0x000e,
-    NVME_DATA_SGL_LENGTH_INVALID     = 0x000f,
-    NVME_METADATA_SGL_LENGTH_INVALID = 0x0010,
-    NVME_SGL_DESCRIPTOR_TYPE_INVALID = 0x0011,
+    NVME_INVALID_SGL_SEG_DESCR  = 0x000d,
+    NVME_INVALID_NUM_SGL_DESCRS = 0x000e,
+    NVME_DATA_SGL_LEN_INVALID   = 0x000f,
+    NVME_MD_SGL_LEN_INVALID     = 0x0010,
+    NVME_SGL_DESCR_TYPE_INVALID = 0x0011,
     NVME_INVALID_USE_OF_CMB     = 0x0012,
+    NVME_INVALID_PRP_OFFSET     = 0x0013,
     NVME_LBA_RANGE              = 0x0080,
     NVME_CAP_EXCEEDED           = 0x0081,
     NVME_NS_NOT_READY           = 0x0082,
@@ -497,8 +680,8 @@ enum NvmeStatusCodes {
     NVME_FW_REQ_RESET           = 0x010b,
     NVME_INVALID_QUEUE_DEL      = 0x010c,
     NVME_FID_NOT_SAVEABLE       = 0x010d,
-    NVME_FEAT_NOT_CHANGABLE     = 0x010e,
-    NVME_FEAT_NOT_NSID_SPEC     = 0x010f,
+    NVME_FEAT_NOT_CHANGEABLE    = 0x010e,
+    NVME_FEAT_NOT_NS_SPEC       = 0x010f,
     NVME_FW_REQ_SUSYSTEM_RESET  = 0x0110,
     NVME_CONFLICTING_ATTRS      = 0x0180,
     NVME_INVALID_PROT_INFO      = 0x0181,
@@ -510,13 +693,12 @@ enum NvmeStatusCodes {
     NVME_E2E_REF_ERROR          = 0x0284,
     NVME_CMP_FAILURE            = 0x0285,
     NVME_ACCESS_DENIED          = 0x0286,
-    NVME_DULB                   = 0x0287,
     NVME_MORE                   = 0x2000,
     NVME_DNR                    = 0x4000,
     NVME_NO_COMPLETE            = 0xffff,
 };
 
-typedef struct NvmeFwSlotInfoLog {
+typedef struct QEMU_PACKED NvmeFwSlotInfoLog {
     uint8_t     afi;
     uint8_t     reserved1[7];
     uint8_t     frs1[8];
@@ -529,7 +711,7 @@ typedef struct NvmeFwSlotInfoLog {
     uint8_t     reserved2[448];
 } NvmeFwSlotInfoLog;
 
-typedef struct NvmeErrorLog {
+typedef struct QEMU_PACKED NvmeErrorLog {
     uint64_t    error_count;
     uint16_t    sqid;
     uint16_t    cid;
@@ -541,9 +723,9 @@ typedef struct NvmeErrorLog {
     uint8_t     resv[35];
 } NvmeErrorLog;
 
-typedef struct NvmeSmartLog {
+typedef struct QEMU_PACKED NvmeSmartLog {
     uint8_t     critical_warning;
-    uint8_t     temperature[2];
+    uint16_t    temperature;
     uint8_t     available_spare;
     uint8_t     available_spare_threshold;
     uint8_t     percentage_used;
@@ -569,13 +751,13 @@ enum NvmeSmartWarn {
     NVME_SMART_FAILED_VOLATILE_MEDIA  = 1 << 4,
 };
 
-enum LogIdentifier {
+enum NvmeLogIdentifier {
     NVME_LOG_ERROR_INFO     = 0x01,
     NVME_LOG_SMART_INFO     = 0x02,
     NVME_LOG_FW_SLOT_INFO   = 0x03,
 };
 
-typedef struct NvmePSD {
+typedef struct QEMU_PACKED NvmePSD {
     uint16_t    mp;
     uint16_t    reserved;
     uint32_t    enlat;
@@ -587,7 +769,16 @@ typedef struct NvmePSD {
     uint8_t     resv[16];
 } NvmePSD;
 
-typedef struct NvmeIdCtrl {
+#define NVME_IDENTIFY_DATA_SIZE 4096
+
+enum {
+    NVME_ID_CNS_NS             = 0x0,
+    NVME_ID_CNS_CTRL           = 0x1,
+    NVME_ID_CNS_NS_ACTIVE_LIST = 0x2,
+    NVME_ID_CNS_NS_DESCR_LIST  = 0x3,
+};
+
+typedef struct QEMU_PACKED NvmeIdCtrl {
     uint16_t    vid;
     uint16_t    ssvid;
     uint8_t     sn[20];
@@ -599,13 +790,13 @@ typedef struct NvmeIdCtrl {
     uint8_t     mdts;
     uint16_t    cntlid;
     uint32_t    ver;
-    uint16_t    rtd3r;
+    uint32_t    rtd3r;
     uint32_t    rtd3e;
     uint32_t    oaes;
     uint32_t    ctratt;
-    uint8_t     rsvd111[12];
+    uint8_t     rsvd100[12];
     uint8_t     fguid[16];
-    uint8_t     rsvd255[128];
+    uint8_t     rsvd128[128];
     uint16_t    oacs;
     uint8_t     acl;
     uint8_t     aerl;
@@ -631,7 +822,7 @@ typedef struct NvmeIdCtrl {
     uint16_t    mntmt;
     uint16_t    mxtmt;
     uint32_t    sanicap;
-    uint8_t     rsvd511[180];
+    uint8_t     rsvd332[180];
     uint8_t     sqes;
     uint8_t     cqes;
     uint16_t    maxcmd;
@@ -645,11 +836,11 @@ typedef struct NvmeIdCtrl {
     uint8_t     nvscc;
     uint8_t     rsvd531;
     uint16_t    acwu;
-    uint16_t    rsvd535;
+    uint8_t     rsvd534[2];
     uint32_t    sgls;
-    uint8_t     rsvd767[228];
+    uint8_t     rsvd540[228];
     uint8_t     subnqn[256];
-    uint8_t     rsvd2047[1024];
+    uint8_t     rsvd1024[1024];
     NvmePSD     psd[32];
     uint8_t     vs[1024];
 } NvmeIdCtrl;
@@ -664,10 +855,19 @@ enum NvmeIdCtrlOncs {
     NVME_ONCS_COMPARE       = 1 << 0,
     NVME_ONCS_WRITE_UNCORR  = 1 << 1,
     NVME_ONCS_DSM           = 1 << 2,
-    NVME_ONCS_WRITE_ZEROS   = 1 << 3,
+    NVME_ONCS_WRITE_ZEROES  = 1 << 3,
     NVME_ONCS_FEATURES      = 1 << 4,
     NVME_ONCS_RESRVATIONS   = 1 << 5,
     NVME_ONCS_TIMESTAMP     = 1 << 6,
+};
+
+enum NvmeIdCtrlFrmw {
+    NVME_FRMW_SLOT1_RO = 1 << 0,
+};
+
+enum NvmeIdCtrlLpa {
+    NVME_LPA_NS_SMART = 1 << 0,
+    NVME_LPA_EXTENDED = 1 << 2,
 };
 
 #define NVME_CTRL_SQES_MIN(sqes) ((sqes) & 0xf)
@@ -675,31 +875,18 @@ enum NvmeIdCtrlOncs {
 #define NVME_CTRL_CQES_MIN(cqes) ((cqes) & 0xf)
 #define NVME_CTRL_CQES_MAX(cqes) (((cqes) >> 4) & 0xf)
 
-#define NVME_CTRL_SGLS_SUPPORTED(sgls)                 ((sgls) & 0x3)
-#define NVME_CTRL_SGLS_SUPPORTED_NO_ALIGNMENT(sgls)    ((sgls) & (0x1 <<  0))
-#define NVME_CTRL_SGLS_SUPPORTED_DWORD_ALIGNMENT(sgls) ((sgls) & (0x1 <<  1))
-#define NVME_CTRL_SGLS_KEYED(sgls)                     ((sgls) & (0x1 <<  2))
-#define NVME_CTRL_SGLS_BITBUCKET(sgls)                 ((sgls) & (0x1 << 16))
-#define NVME_CTRL_SGLS_MPTR_CONTIGUOUS(sgls)           ((sgls) & (0x1 << 17))
-#define NVME_CTRL_SGLS_EXCESS_LENGTH(sgls)             ((sgls) & (0x1 << 18))
-#define NVME_CTRL_SGLS_MPTR_SGL(sgls)                  ((sgls) & (0x1 << 19))
-#define NVME_CTRL_SGLS_ADDR_OFFSET(sgls)               ((sgls) & (0x1 << 20))
-
-typedef struct NvmeFeatureVal {
-    uint32_t    arbitration;
-    uint32_t    power_mgmt;
-    uint32_t    temp_thresh;
-    uint32_t    err_rec;
-    uint32_t    volatile_wc;
-    uint32_t    num_queues;
-    uint32_t    int_coalescing;
-    uint32_t    *int_vector_config;
-    uint32_t    write_atomicity;
-    uint32_t    async_config;
-    uint32_t    sw_prog_marker;
-} NvmeFeatureVal;
+#define NVME_CTRL_SGLS_SUPPORT_MASK        (0x3 <<  0)
+#define NVME_CTRL_SGLS_SUPPORT_NO_ALIGN    (0x1 <<  0)
+#define NVME_CTRL_SGLS_SUPPORT_DWORD_ALIGN (0x1 <<  1)
+#define NVME_CTRL_SGLS_KEYED               (0x1 <<  2)
+#define NVME_CTRL_SGLS_BITBUCKET           (0x1 << 16)
+#define NVME_CTRL_SGLS_MPTR_CONTIGUOUS     (0x1 << 17)
+#define NVME_CTRL_SGLS_EXCESS_LENGTH       (0x1 << 18)
+#define NVME_CTRL_SGLS_MPTR_SGL            (0x1 << 19)
+#define NVME_CTRL_SGLS_ADDR_OFFSET         (0x1 << 20)
 
 #define NVME_ARB_AB(arb)    (arb & 0x7)
+#define NVME_ARB_AB_NOLIMIT 0x7
 #define NVME_ARB_LPW(arb)   ((arb >> 8) & 0xff)
 #define NVME_ARB_MPW(arb)   ((arb >> 16) & 0xff)
 #define NVME_ARB_HPW(arb)   ((arb >> 24) & 0xff)
@@ -707,7 +894,20 @@ typedef struct NvmeFeatureVal {
 #define NVME_INTC_THR(intc)     (intc & 0xff)
 #define NVME_INTC_TIME(intc)    ((intc >> 8) & 0xff)
 
-#define NVME_ERR_REC_DULBE(err_rec) (err_rec & 0x10000)
+#define NVME_INTVC_NOCOALESCING (0x1 << 16)
+
+#define NVME_TEMP_THSEL(temp)  ((temp >> 20) & 0x3)
+#define NVME_TEMP_THSEL_OVER   0x0
+#define NVME_TEMP_THSEL_UNDER  0x1
+
+#define NVME_TEMP_TMPSEL(temp)     ((temp >> 16) & 0xf)
+#define NVME_TEMP_TMPSEL_COMPOSITE 0x0
+
+#define NVME_TEMP_TMPTH(temp) (temp & 0xffff)
+
+#define NVME_AEC_SMART(aec)         (aec & 0xff)
+#define NVME_AEC_NS_ATTR(aec)       ((aec >> 8) & 0x1)
+#define NVME_AEC_FW_ACTIVATION(aec) ((aec >> 9) & 0x1)
 
 enum NvmeFeatureIds {
     NVME_ARBITRATION                = 0x1,
@@ -722,10 +922,37 @@ enum NvmeFeatureIds {
     NVME_WRITE_ATOMICITY            = 0xa,
     NVME_ASYNCHRONOUS_EVENT_CONF    = 0xb,
     NVME_TIMESTAMP                  = 0xe,
-    NVME_SOFTWARE_PROGRESS_MARKER   = 0x80
+    NVME_SOFTWARE_PROGRESS_MARKER   = 0x80,
+    NVME_FID_MAX                    = 0x100,
 };
 
-typedef struct NvmeRangeType {
+typedef enum NvmeFeatureCap {
+    NVME_FEAT_CAP_SAVE      = 1 << 0,
+    NVME_FEAT_CAP_NS        = 1 << 1,
+    NVME_FEAT_CAP_CHANGE    = 1 << 2,
+} NvmeFeatureCap;
+
+typedef enum NvmeGetFeatureSelect {
+    NVME_GETFEAT_SELECT_CURRENT = 0x0,
+    NVME_GETFEAT_SELECT_DEFAULT = 0x1,
+    NVME_GETFEAT_SELECT_SAVED   = 0x2,
+    NVME_GETFEAT_SELECT_CAP     = 0x3,
+} NvmeGetFeatureSelect;
+
+#define NVME_GETSETFEAT_FID_MASK 0xff
+#define NVME_GETSETFEAT_FID(dw10) (dw10 & NVME_GETSETFEAT_FID_MASK)
+
+#define NVME_GETFEAT_SELECT_SHIFT 8
+#define NVME_GETFEAT_SELECT_MASK  0x7
+#define NVME_GETFEAT_SELECT(dw10) \
+    ((dw10 >> NVME_GETFEAT_SELECT_SHIFT) & NVME_GETFEAT_SELECT_MASK)
+
+#define NVME_SETFEAT_SAVE_SHIFT 31
+#define NVME_SETFEAT_SAVE_MASK  0x1
+#define NVME_SETFEAT_SAVE(dw10) \
+    ((dw10 >> NVME_SETFEAT_SAVE_SHIFT) & NVME_SETFEAT_SAVE_MASK)
+
+typedef struct QEMU_PACKED NvmeRangeType {
     uint8_t     type;
     uint8_t     attributes;
     uint8_t     rsvd2[14];
@@ -735,13 +962,15 @@ typedef struct NvmeRangeType {
     uint8_t     rsvd48[16];
 } NvmeRangeType;
 
-typedef struct NvmeLBAF {
+typedef struct QEMU_PACKED NvmeLBAF {
     uint16_t    ms;
     uint8_t     ds;
     uint8_t     rp;
 } NvmeLBAF;
 
-typedef struct NvmeIdNs {
+#define NVME_NSID_BROADCAST 0xffffffff
+
+typedef struct QEMU_PACKED NvmeIdNs {
     uint64_t    nsze;
     uint64_t    ncap;
     uint64_t    nuse;
@@ -763,13 +992,41 @@ typedef struct NvmeIdNs {
     uint16_t    nabspf;
     uint16_t    noiob;
     uint8_t     nvmcap[16];
-    uint8_t     resv103[40];
+    uint8_t     rsvd64[40];
     uint8_t     nguid[16];
     uint64_t    eui64;
     NvmeLBAF    lbaf[16];
-    uint8_t     res192[192];
+    uint8_t     rsvd192[192];
     uint8_t     vs[3712];
 } NvmeIdNs;
+
+typedef struct QEMU_PACKED NvmeIdNsDescr {
+    uint8_t nidt;
+    uint8_t nidl;
+    uint8_t rsvd2[2];
+} NvmeIdNsDescr;
+
+enum {
+    NVME_NIDT_EUI64_LEN =  8,
+    NVME_NIDT_NGUID_LEN = 16,
+    NVME_NIDT_UUID_LEN  = 16,
+};
+
+enum NvmeNsIdentifierType {
+    NVME_NIDT_EUI64 = 0x1,
+    NVME_NIDT_NGUID = 0x2,
+    NVME_NIDT_UUID  = 0x3,
+};
+
+/*Deallocate Logical Block Features*/
+#define NVME_ID_NS_DLFEAT_GUARD_CRC(dlfeat)       ((dlfeat) & 0x10)
+#define NVME_ID_NS_DLFEAT_WRITE_ZEROES(dlfeat)    ((dlfeat) & 0x08)
+
+#define NVME_ID_NS_DLFEAT_READ_BEHAVIOR(dlfeat)     ((dlfeat) & 0x7)
+#define NVME_ID_NS_DLFEAT_READ_BEHAVIOR_UNDEFINED   0
+#define NVME_ID_NS_DLFEAT_READ_BEHAVIOR_ZEROES      1
+#define NVME_ID_NS_DLFEAT_READ_BEHAVIOR_ONES        2
+
 
 #define NVME_ID_NS_NSFEAT_THIN(nsfeat)      ((nsfeat & 0x1))
 #define NVME_ID_NS_FLBAS_EXTENDED(flbas)    ((flbas >> 4) & 0x1)
@@ -794,6 +1051,7 @@ enum NvmeIdNsDps {
 
 static inline void _nvme_check_size(void)
 {
+    QEMU_BUILD_BUG_ON(sizeof(NvmeBar) != 4096);
     QEMU_BUILD_BUG_ON(sizeof(NvmeAerResult) != 4);
     QEMU_BUILD_BUG_ON(sizeof(NvmeCqe) != 16);
     QEMU_BUILD_BUG_ON(sizeof(NvmeDsmRange) != 16);
@@ -810,5 +1068,7 @@ static inline void _nvme_check_size(void)
     QEMU_BUILD_BUG_ON(sizeof(NvmeSmartLog) != 512);
     QEMU_BUILD_BUG_ON(sizeof(NvmeIdCtrl) != 4096);
     QEMU_BUILD_BUG_ON(sizeof(NvmeIdNs) != 4096);
+    QEMU_BUILD_BUG_ON(sizeof(NvmeSglDescriptor) != 16);
+    QEMU_BUILD_BUG_ON(sizeof(NvmeIdNsDescr) != 4);
 }
 #endif

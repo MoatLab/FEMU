@@ -16,9 +16,11 @@
 #include "qapi/error.h"
 #include "trace.h"
 #include "hw/sysbus.h"
+#include "migration/vmstate.h"
 #include "hw/registerfields.h"
 #include "hw/arm/armsse.h"
 #include "hw/arm/boot.h"
+#include "hw/irq.h"
 
 /* Format of the System Information block SYS_CONFIG register */
 typedef enum SysConfigFormat {
@@ -165,7 +167,7 @@ static void irq_status_forwarder(void *opaque, int n, int level)
 
 static void nsccfg_handler(void *opaque, int n, int level)
 {
-    ARMSSE *s = ARMSSE(opaque);
+    ARMSSE *s = ARM_SSE(opaque);
 
     s->nsccfg = level;
 }
@@ -231,8 +233,8 @@ static void armsse_forward_sec_resp_cfg(ARMSSE *s)
 
 static void armsse_init(Object *obj)
 {
-    ARMSSE *s = ARMSSE(obj);
-    ARMSSEClass *asc = ARMSSE_GET_CLASS(obj);
+    ARMSSE *s = ARM_SSE(obj);
+    ARMSSEClass *asc = ARM_SSE_GET_CLASS(obj);
     const ARMSSEInfo *info = asc->info;
     int i;
 
@@ -249,15 +251,13 @@ static void armsse_init(Object *obj)
         char *name;
 
         name = g_strdup_printf("cluster%d", i);
-        object_initialize_child(obj, name, &s->cluster[i],
-                                sizeof(s->cluster[i]), TYPE_CPU_CLUSTER,
-                                &error_abort, NULL);
+        object_initialize_child(obj, name, &s->cluster[i], TYPE_CPU_CLUSTER);
         qdev_prop_set_uint32(DEVICE(&s->cluster[i]), "cluster-id", i);
         g_free(name);
 
         name = g_strdup_printf("armv7m%d", i);
-        sysbus_init_child_obj(OBJECT(&s->cluster[i]), name,
-                              &s->armv7m[i], sizeof(s->armv7m), TYPE_ARMV7M);
+        object_initialize_child(OBJECT(&s->cluster[i]), name, &s->armv7m[i],
+                                TYPE_ARMV7M);
         qdev_prop_set_string(DEVICE(&s->armv7m[i]), "cpu-type",
                              ARM_CPU_TYPE_NAME("cortex-m33"));
         g_free(name);
@@ -272,74 +272,61 @@ static void armsse_init(Object *obj)
         }
     }
 
-    sysbus_init_child_obj(obj, "secctl", &s->secctl, sizeof(s->secctl),
-                          TYPE_IOTKIT_SECCTL);
-    sysbus_init_child_obj(obj, "apb-ppc0", &s->apb_ppc0, sizeof(s->apb_ppc0),
-                          TYPE_TZ_PPC);
-    sysbus_init_child_obj(obj, "apb-ppc1", &s->apb_ppc1, sizeof(s->apb_ppc1),
-                          TYPE_TZ_PPC);
+    object_initialize_child(obj, "secctl", &s->secctl, TYPE_IOTKIT_SECCTL);
+    object_initialize_child(obj, "apb-ppc0", &s->apb_ppc0, TYPE_TZ_PPC);
+    object_initialize_child(obj, "apb-ppc1", &s->apb_ppc1, TYPE_TZ_PPC);
     for (i = 0; i < info->sram_banks; i++) {
         char *name = g_strdup_printf("mpc%d", i);
-        sysbus_init_child_obj(obj, name, &s->mpc[i],
-                              sizeof(s->mpc[i]), TYPE_TZ_MPC);
+        object_initialize_child(obj, name, &s->mpc[i], TYPE_TZ_MPC);
         g_free(name);
     }
     object_initialize_child(obj, "mpc-irq-orgate", &s->mpc_irq_orgate,
-                            sizeof(s->mpc_irq_orgate), TYPE_OR_IRQ,
-                            &error_abort, NULL);
+                            TYPE_OR_IRQ);
 
     for (i = 0; i < IOTS_NUM_EXP_MPC + info->sram_banks; i++) {
         char *name = g_strdup_printf("mpc-irq-splitter-%d", i);
         SplitIRQ *splitter = &s->mpc_irq_splitter[i];
 
-        object_initialize_child(obj, name, splitter, sizeof(*splitter),
-                                TYPE_SPLIT_IRQ, &error_abort, NULL);
+        object_initialize_child(obj, name, splitter, TYPE_SPLIT_IRQ);
         g_free(name);
     }
-    sysbus_init_child_obj(obj, "timer0", &s->timer0, sizeof(s->timer0),
-                          TYPE_CMSDK_APB_TIMER);
-    sysbus_init_child_obj(obj, "timer1", &s->timer1, sizeof(s->timer1),
-                          TYPE_CMSDK_APB_TIMER);
-    sysbus_init_child_obj(obj, "s32ktimer", &s->s32ktimer, sizeof(s->s32ktimer),
-                          TYPE_CMSDK_APB_TIMER);
-    sysbus_init_child_obj(obj, "dualtimer", &s->dualtimer, sizeof(s->dualtimer),
-                          TYPE_CMSDK_APB_DUALTIMER);
-    sysbus_init_child_obj(obj, "s32kwatchdog", &s->s32kwatchdog,
-                          sizeof(s->s32kwatchdog), TYPE_CMSDK_APB_WATCHDOG);
-    sysbus_init_child_obj(obj, "nswatchdog", &s->nswatchdog,
-                          sizeof(s->nswatchdog), TYPE_CMSDK_APB_WATCHDOG);
-    sysbus_init_child_obj(obj, "swatchdog", &s->swatchdog,
-                          sizeof(s->swatchdog), TYPE_CMSDK_APB_WATCHDOG);
-    sysbus_init_child_obj(obj, "armsse-sysctl", &s->sysctl,
-                          sizeof(s->sysctl), TYPE_IOTKIT_SYSCTL);
-    sysbus_init_child_obj(obj, "armsse-sysinfo", &s->sysinfo,
-                          sizeof(s->sysinfo), TYPE_IOTKIT_SYSINFO);
+    object_initialize_child(obj, "timer0", &s->timer0, TYPE_CMSDK_APB_TIMER);
+    object_initialize_child(obj, "timer1", &s->timer1, TYPE_CMSDK_APB_TIMER);
+    object_initialize_child(obj, "s32ktimer", &s->s32ktimer,
+                            TYPE_CMSDK_APB_TIMER);
+    object_initialize_child(obj, "dualtimer", &s->dualtimer,
+                            TYPE_CMSDK_APB_DUALTIMER);
+    object_initialize_child(obj, "s32kwatchdog", &s->s32kwatchdog,
+                            TYPE_CMSDK_APB_WATCHDOG);
+    object_initialize_child(obj, "nswatchdog", &s->nswatchdog,
+                            TYPE_CMSDK_APB_WATCHDOG);
+    object_initialize_child(obj, "swatchdog", &s->swatchdog,
+                            TYPE_CMSDK_APB_WATCHDOG);
+    object_initialize_child(obj, "armsse-sysctl", &s->sysctl,
+                            TYPE_IOTKIT_SYSCTL);
+    object_initialize_child(obj, "armsse-sysinfo", &s->sysinfo,
+                            TYPE_IOTKIT_SYSINFO);
     if (info->has_mhus) {
-        sysbus_init_child_obj(obj, "mhu0", &s->mhu[0], sizeof(s->mhu[0]),
-                              TYPE_ARMSSE_MHU);
-        sysbus_init_child_obj(obj, "mhu1", &s->mhu[1], sizeof(s->mhu[1]),
-                              TYPE_ARMSSE_MHU);
+        object_initialize_child(obj, "mhu0", &s->mhu[0], TYPE_ARMSSE_MHU);
+        object_initialize_child(obj, "mhu1", &s->mhu[1], TYPE_ARMSSE_MHU);
     }
     if (info->has_ppus) {
         for (i = 0; i < info->num_cpus; i++) {
             char *name = g_strdup_printf("CPU%dCORE_PPU", i);
             int ppuidx = CPU0CORE_PPU + i;
 
-            sysbus_init_child_obj(obj, name, &s->ppu[ppuidx],
-                                  sizeof(s->ppu[ppuidx]),
-                                  TYPE_UNIMPLEMENTED_DEVICE);
+            object_initialize_child(obj, name, &s->ppu[ppuidx],
+                                    TYPE_UNIMPLEMENTED_DEVICE);
             g_free(name);
         }
-        sysbus_init_child_obj(obj, "DBG_PPU", &s->ppu[DBG_PPU],
-                              sizeof(s->ppu[DBG_PPU]),
-                              TYPE_UNIMPLEMENTED_DEVICE);
+        object_initialize_child(obj, "DBG_PPU", &s->ppu[DBG_PPU],
+                                TYPE_UNIMPLEMENTED_DEVICE);
         for (i = 0; i < info->sram_banks; i++) {
             char *name = g_strdup_printf("RAM%d_PPU", i);
             int ppuidx = RAM0_PPU + i;
 
-            sysbus_init_child_obj(obj, name, &s->ppu[ppuidx],
-                                  sizeof(s->ppu[ppuidx]),
-                                  TYPE_UNIMPLEMENTED_DEVICE);
+            object_initialize_child(obj, name, &s->ppu[ppuidx],
+                                    TYPE_UNIMPLEMENTED_DEVICE);
             g_free(name);
         }
     }
@@ -347,9 +334,8 @@ static void armsse_init(Object *obj)
         for (i = 0; i < info->num_cpus; i++) {
             char *name = g_strdup_printf("cachectrl%d", i);
 
-            sysbus_init_child_obj(obj, name, &s->cachectrl[i],
-                                  sizeof(s->cachectrl[i]),
-                                  TYPE_UNIMPLEMENTED_DEVICE);
+            object_initialize_child(obj, name, &s->cachectrl[i],
+                                    TYPE_UNIMPLEMENTED_DEVICE);
             g_free(name);
         }
     }
@@ -357,9 +343,8 @@ static void armsse_init(Object *obj)
         for (i = 0; i < info->num_cpus; i++) {
             char *name = g_strdup_printf("cpusecctrl%d", i);
 
-            sysbus_init_child_obj(obj, name, &s->cpusecctrl[i],
-                                  sizeof(s->cpusecctrl[i]),
-                                  TYPE_UNIMPLEMENTED_DEVICE);
+            object_initialize_child(obj, name, &s->cpusecctrl[i],
+                                    TYPE_UNIMPLEMENTED_DEVICE);
             g_free(name);
         }
     }
@@ -367,27 +352,21 @@ static void armsse_init(Object *obj)
         for (i = 0; i < info->num_cpus; i++) {
             char *name = g_strdup_printf("cpuid%d", i);
 
-            sysbus_init_child_obj(obj, name, &s->cpuid[i],
-                                  sizeof(s->cpuid[i]),
-                                  TYPE_ARMSSE_CPUID);
+            object_initialize_child(obj, name, &s->cpuid[i],
+                                    TYPE_ARMSSE_CPUID);
             g_free(name);
         }
     }
-    object_initialize_child(obj, "nmi-orgate", &s->nmi_orgate,
-                            sizeof(s->nmi_orgate), TYPE_OR_IRQ,
-                            &error_abort, NULL);
+    object_initialize_child(obj, "nmi-orgate", &s->nmi_orgate, TYPE_OR_IRQ);
     object_initialize_child(obj, "ppc-irq-orgate", &s->ppc_irq_orgate,
-                            sizeof(s->ppc_irq_orgate), TYPE_OR_IRQ,
-                            &error_abort, NULL);
+                            TYPE_OR_IRQ);
     object_initialize_child(obj, "sec-resp-splitter", &s->sec_resp_splitter,
-                            sizeof(s->sec_resp_splitter), TYPE_SPLIT_IRQ,
-                            &error_abort, NULL);
+                            TYPE_SPLIT_IRQ);
     for (i = 0; i < ARRAY_SIZE(s->ppc_irq_splitter); i++) {
         char *name = g_strdup_printf("ppc-irq-splitter-%d", i);
         SplitIRQ *splitter = &s->ppc_irq_splitter[i];
 
-        object_initialize_child(obj, name, splitter, sizeof(*splitter),
-                                TYPE_SPLIT_IRQ, &error_abort, NULL);
+        object_initialize_child(obj, name, splitter, TYPE_SPLIT_IRQ);
         g_free(name);
     }
     if (info->num_cpus > 1) {
@@ -396,8 +375,7 @@ static void armsse_init(Object *obj)
                 char *name = g_strdup_printf("cpu-irq-splitter%d", i);
                 SplitIRQ *splitter = &s->cpu_irq_splitter[i];
 
-                object_initialize_child(obj, name, splitter, sizeof(*splitter),
-                                        TYPE_SPLIT_IRQ, &error_abort, NULL);
+                object_initialize_child(obj, name, splitter, TYPE_SPLIT_IRQ);
                 g_free(name);
             }
         }
@@ -413,7 +391,7 @@ static void armsse_exp_irq(void *opaque, int n, int level)
 
 static void armsse_mpcexp_status(void *opaque, int n, int level)
 {
-    ARMSSE *s = ARMSSE(opaque);
+    ARMSSE *s = ARM_SSE(opaque);
     qemu_set_irq(s->mpcexp_status_in[n], level);
 }
 
@@ -423,7 +401,7 @@ static qemu_irq armsse_get_common_irq_in(ARMSSE *s, int irqno)
      * Return a qemu_irq which can be used to signal IRQ n to
      * all CPUs in the SSE.
      */
-    ARMSSEClass *asc = ARMSSE_GET_CLASS(s);
+    ARMSSEClass *asc = ARM_SSE_GET_CLASS(s);
     const ARMSSEInfo *info = asc->info;
 
     assert(irq_is_common[irqno]);
@@ -444,14 +422,14 @@ static void map_ppu(ARMSSE *s, int ppuidx, const char *name, hwaddr addr)
 
     qdev_prop_set_string(dev, "name", name);
     qdev_prop_set_uint64(dev, "size", 0x1000);
-    qdev_init_nofail(dev);
+    sysbus_realize(SYS_BUS_DEVICE(dev), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->ppu[ppuidx]), 0, addr);
 }
 
 static void armsse_realize(DeviceState *dev, Error **errp)
 {
-    ARMSSE *s = ARMSSE(dev);
-    ARMSSEClass *asc = ARMSSE_GET_CLASS(dev);
+    ARMSSE *s = ARM_SSE(dev);
+    ARMSSEClass *asc = ARM_SSE_GET_CLASS(dev);
     const ARMSSEInfo *info = asc->info;
     int i;
     MemoryRegion *mr;
@@ -473,6 +451,8 @@ static void armsse_realize(DeviceState *dev, Error **errp)
         error_setg(errp, "MAINCLK property was not set");
         return;
     }
+
+    assert(info->num_cpus <= SSE_MAX_CPUS);
 
     /* max SRAM_ADDR_WIDTH: 24 - log2(SRAM_NUM_BANK) */
     assert(is_power_of_2(info->sram_banks));
@@ -556,23 +536,18 @@ static void armsse_realize(DeviceState *dev, Error **errp)
          * later if necessary.
          */
         if (extract32(info->cpuwait_rst, i, 1)) {
-            object_property_set_bool(cpuobj, true, "start-powered-off", &err);
-            if (err) {
-                error_propagate(errp, err);
+            if (!object_property_set_bool(cpuobj, "start-powered-off", true,
+                                          errp)) {
                 return;
             }
         }
         if (!s->cpu_fpu[i]) {
-            object_property_set_bool(cpuobj, false, "vfp", &err);
-            if (err) {
-                error_propagate(errp, err);
+            if (!object_property_set_bool(cpuobj, "vfp", false, errp)) {
                 return;
             }
         }
         if (!s->cpu_dsp[i]) {
-            object_property_set_bool(cpuobj, false, "dsp", &err);
-            if (err) {
-                error_propagate(errp, err);
+            if (!object_property_set_bool(cpuobj, "dsp", false, errp)) {
                 return;
             }
         }
@@ -584,20 +559,10 @@ static void armsse_realize(DeviceState *dev, Error **errp)
             memory_region_add_subregion_overlap(&s->cpu_container[i], 0,
                                                 &s->container, -1);
         }
-        object_property_set_link(cpuobj, OBJECT(&s->cpu_container[i]),
-                                 "memory", &err);
-        if (err) {
-            error_propagate(errp, err);
-            return;
-        }
-        object_property_set_link(cpuobj, OBJECT(s), "idau", &err);
-        if (err) {
-            error_propagate(errp, err);
-            return;
-        }
-        object_property_set_bool(cpuobj, true, "realized", &err);
-        if (err) {
-            error_propagate(errp, err);
+        object_property_set_link(cpuobj, "memory",
+                                 OBJECT(&s->cpu_container[i]), &error_abort);
+        object_property_set_link(cpuobj, "idau", OBJECT(s), &error_abort);
+        if (!sysbus_realize(SYS_BUS_DEVICE(cpuobj), errp)) {
             return;
         }
         /*
@@ -606,10 +571,7 @@ static void armsse_realize(DeviceState *dev, Error **errp)
          * CPU must exist and have been parented into the cluster before
          * the cluster is realized.
          */
-        object_property_set_bool(OBJECT(&s->cluster[i]),
-                                 true, "realized", &err);
-        if (err) {
-            error_propagate(errp, err);
+        if (!qdev_realize(DEVICE(&s->cluster[i]), NULL, errp)) {
             return;
         }
 
@@ -637,15 +599,11 @@ static void armsse_realize(DeviceState *dev, Error **errp)
                 DeviceState *devs = DEVICE(splitter);
                 int cpunum;
 
-                object_property_set_int(splitter, info->num_cpus,
-                                        "num-lines", &err);
-                if (err) {
-                    error_propagate(errp, err);
+                if (!object_property_set_int(splitter, "num-lines",
+                                             info->num_cpus, errp)) {
                     return;
                 }
-                object_property_set_bool(splitter, true, "realized", &err);
-                if (err) {
-                    error_propagate(errp, err);
+                if (!qdev_realize(DEVICE(splitter), NULL, errp)) {
                     return;
                 }
                 for (cpunum = 0; cpunum < info->num_cpus; cpunum++) {
@@ -676,9 +634,7 @@ static void armsse_realize(DeviceState *dev, Error **errp)
     }
 
     /* Security controller */
-    object_property_set_bool(OBJECT(&s->secctl), true, "realized", &err);
-    if (err) {
-        error_propagate(errp, err);
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->secctl), errp)) {
         return;
     }
     sbd_secctl = SYS_BUS_DEVICE(&s->secctl);
@@ -693,16 +649,11 @@ static void armsse_realize(DeviceState *dev, Error **errp)
      * multiple lines, one for each of the PPCs within the ARMSSE and one
      * that will be an output from the ARMSSE to the system.
      */
-    object_property_set_int(OBJECT(&s->sec_resp_splitter), 3,
-                            "num-lines", &err);
-    if (err) {
-        error_propagate(errp, err);
+    if (!object_property_set_int(OBJECT(&s->sec_resp_splitter),
+                                 "num-lines", 3, errp)) {
         return;
     }
-    object_property_set_bool(OBJECT(&s->sec_resp_splitter), true,
-                             "realized", &err);
-    if (err) {
-        error_propagate(errp, err);
+    if (!qdev_realize(DEVICE(&s->sec_resp_splitter), NULL, errp)) {
         return;
     }
     dev_splitter = DEVICE(&s->sec_resp_splitter);
@@ -722,15 +673,9 @@ static void armsse_realize(DeviceState *dev, Error **errp)
             error_propagate(errp, err);
             return;
         }
-        object_property_set_link(OBJECT(&s->mpc[i]), OBJECT(&s->sram[i]),
-                                 "downstream", &err);
-        if (err) {
-            error_propagate(errp, err);
-            return;
-        }
-        object_property_set_bool(OBJECT(&s->mpc[i]), true, "realized", &err);
-        if (err) {
-            error_propagate(errp, err);
+        object_property_set_link(OBJECT(&s->mpc[i]), "downstream",
+                                 OBJECT(&s->sram[i]), &error_abort);
+        if (!sysbus_realize(SYS_BUS_DEVICE(&s->mpc[i]), errp)) {
             return;
         }
         /* Map the upstream end of the MPC into the right place... */
@@ -744,17 +689,12 @@ static void armsse_realize(DeviceState *dev, Error **errp)
     }
 
     /* We must OR together lines from the MPC splitters to go to the NVIC */
-    object_property_set_int(OBJECT(&s->mpc_irq_orgate),
-                            IOTS_NUM_EXP_MPC + info->sram_banks,
-                            "num-lines", &err);
-    if (err) {
-        error_propagate(errp, err);
+    if (!object_property_set_int(OBJECT(&s->mpc_irq_orgate), "num-lines",
+                                 IOTS_NUM_EXP_MPC + info->sram_banks,
+                                 errp)) {
         return;
     }
-    object_property_set_bool(OBJECT(&s->mpc_irq_orgate), true,
-                             "realized", &err);
-    if (err) {
-        error_propagate(errp, err);
+    if (!qdev_realize(DEVICE(&s->mpc_irq_orgate), NULL, errp)) {
         return;
     }
     qdev_connect_gpio_out(DEVICE(&s->mpc_irq_orgate), 0,
@@ -771,50 +711,34 @@ static void armsse_realize(DeviceState *dev, Error **errp)
      * map its upstream ends to the right place in the container.
      */
     qdev_prop_set_uint32(DEVICE(&s->timer0), "pclk-frq", s->mainclk_frq);
-    object_property_set_bool(OBJECT(&s->timer0), true, "realized", &err);
-    if (err) {
-        error_propagate(errp, err);
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->timer0), errp)) {
         return;
     }
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->timer0), 0,
                        armsse_get_common_irq_in(s, 3));
     mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->timer0), 0);
-    object_property_set_link(OBJECT(&s->apb_ppc0), OBJECT(mr), "port[0]", &err);
-    if (err) {
-        error_propagate(errp, err);
-        return;
-    }
+    object_property_set_link(OBJECT(&s->apb_ppc0), "port[0]", OBJECT(mr),
+                             &error_abort);
 
     qdev_prop_set_uint32(DEVICE(&s->timer1), "pclk-frq", s->mainclk_frq);
-    object_property_set_bool(OBJECT(&s->timer1), true, "realized", &err);
-    if (err) {
-        error_propagate(errp, err);
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->timer1), errp)) {
         return;
     }
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->timer1), 0,
                        armsse_get_common_irq_in(s, 4));
     mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->timer1), 0);
-    object_property_set_link(OBJECT(&s->apb_ppc0), OBJECT(mr), "port[1]", &err);
-    if (err) {
-        error_propagate(errp, err);
-        return;
-    }
-
+    object_property_set_link(OBJECT(&s->apb_ppc0), "port[1]", OBJECT(mr),
+                             &error_abort);
 
     qdev_prop_set_uint32(DEVICE(&s->dualtimer), "pclk-frq", s->mainclk_frq);
-    object_property_set_bool(OBJECT(&s->dualtimer), true, "realized", &err);
-    if (err) {
-        error_propagate(errp, err);
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->dualtimer), errp)) {
         return;
     }
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->dualtimer), 0,
                        armsse_get_common_irq_in(s, 5));
     mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->dualtimer), 0);
-    object_property_set_link(OBJECT(&s->apb_ppc0), OBJECT(mr), "port[2]", &err);
-    if (err) {
-        error_propagate(errp, err);
-        return;
-    }
+    object_property_set_link(OBJECT(&s->apb_ppc0), "port[2]", OBJECT(mr),
+                             &error_abort);
 
     if (info->has_mhus) {
         /*
@@ -831,21 +755,14 @@ static void armsse_realize(DeviceState *dev, Error **errp)
             int cpunum;
             SysBusDevice *mhu_sbd = SYS_BUS_DEVICE(&s->mhu[i]);
 
-            object_property_set_bool(OBJECT(&s->mhu[i]), true,
-                                     "realized", &err);
-            if (err) {
-                error_propagate(errp, err);
+            if (!sysbus_realize(SYS_BUS_DEVICE(&s->mhu[i]), errp)) {
                 return;
             }
             port = g_strdup_printf("port[%d]", i + 3);
             mr = sysbus_mmio_get_region(mhu_sbd, 0);
-            object_property_set_link(OBJECT(&s->apb_ppc0), OBJECT(mr),
-                                     port, &err);
+            object_property_set_link(OBJECT(&s->apb_ppc0), port, OBJECT(mr),
+                                     &error_abort);
             g_free(port);
-            if (err) {
-                error_propagate(errp, err);
-                return;
-            }
 
             /*
              * Each MHU has an irq line for each CPU:
@@ -863,9 +780,7 @@ static void armsse_realize(DeviceState *dev, Error **errp)
         }
     }
 
-    object_property_set_bool(OBJECT(&s->apb_ppc0), true, "realized", &err);
-    if (err) {
-        error_propagate(errp, err);
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->apb_ppc0), errp)) {
         return;
     }
 
@@ -906,16 +821,11 @@ static void armsse_realize(DeviceState *dev, Error **errp)
      * ones) are sent individually to the security controller, and also
      * ORed together to give a single combined PPC interrupt to the NVIC.
      */
-    object_property_set_int(OBJECT(&s->ppc_irq_orgate),
-                            NUM_PPCS, "num-lines", &err);
-    if (err) {
-        error_propagate(errp, err);
+    if (!object_property_set_int(OBJECT(&s->ppc_irq_orgate),
+                                 "num-lines", NUM_PPCS, errp)) {
         return;
     }
-    object_property_set_bool(OBJECT(&s->ppc_irq_orgate), true,
-                             "realized", &err);
-    if (err) {
-        error_propagate(errp, err);
+    if (!qdev_realize(DEVICE(&s->ppc_irq_orgate), NULL, errp)) {
         return;
     }
     qdev_connect_gpio_out(DEVICE(&s->ppc_irq_orgate), 0,
@@ -936,10 +846,7 @@ static void armsse_realize(DeviceState *dev, Error **errp)
             qdev_prop_set_string(DEVICE(&s->cachectrl[i]), "name", name);
             g_free(name);
             qdev_prop_set_uint64(DEVICE(&s->cachectrl[i]), "size", 0x1000);
-            object_property_set_bool(OBJECT(&s->cachectrl[i]), true,
-                                     "realized", &err);
-            if (err) {
-                error_propagate(errp, err);
+            if (!sysbus_realize(SYS_BUS_DEVICE(&s->cachectrl[i]), errp)) {
                 return;
             }
 
@@ -955,10 +862,7 @@ static void armsse_realize(DeviceState *dev, Error **errp)
             qdev_prop_set_string(DEVICE(&s->cpusecctrl[i]), "name", name);
             g_free(name);
             qdev_prop_set_uint64(DEVICE(&s->cpusecctrl[i]), "size", 0x1000);
-            object_property_set_bool(OBJECT(&s->cpusecctrl[i]), true,
-                                     "realized", &err);
-            if (err) {
-                error_propagate(errp, err);
+            if (!sysbus_realize(SYS_BUS_DEVICE(&s->cpusecctrl[i]), errp)) {
                 return;
             }
 
@@ -971,10 +875,7 @@ static void armsse_realize(DeviceState *dev, Error **errp)
             MemoryRegion *mr;
 
             qdev_prop_set_uint32(DEVICE(&s->cpuid[i]), "CPUID", i);
-            object_property_set_bool(OBJECT(&s->cpuid[i]), true,
-                                     "realized", &err);
-            if (err) {
-                error_propagate(errp, err);
+            if (!sysbus_realize(SYS_BUS_DEVICE(&s->cpuid[i]), errp)) {
                 return;
             }
 
@@ -988,23 +889,16 @@ static void armsse_realize(DeviceState *dev, Error **errp)
      *   0x4002f000: S32K timer
      */
     qdev_prop_set_uint32(DEVICE(&s->s32ktimer), "pclk-frq", S32KCLK);
-    object_property_set_bool(OBJECT(&s->s32ktimer), true, "realized", &err);
-    if (err) {
-        error_propagate(errp, err);
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->s32ktimer), errp)) {
         return;
     }
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->s32ktimer), 0,
                        armsse_get_common_irq_in(s, 2));
     mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->s32ktimer), 0);
-    object_property_set_link(OBJECT(&s->apb_ppc1), OBJECT(mr), "port[0]", &err);
-    if (err) {
-        error_propagate(errp, err);
-        return;
-    }
+    object_property_set_link(OBJECT(&s->apb_ppc1), "port[0]", OBJECT(mr),
+                             &error_abort);
 
-    object_property_set_bool(OBJECT(&s->apb_ppc1), true, "realized", &err);
-    if (err) {
-        error_propagate(errp, err);
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->apb_ppc1), errp)) {
         return;
     }
     mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->apb_ppc1), 0);
@@ -1027,38 +921,29 @@ static void armsse_realize(DeviceState *dev, Error **errp)
                           qdev_get_gpio_in_named(dev_apb_ppc1,
                                                  "cfg_sec_resp", 0));
 
-    object_property_set_int(OBJECT(&s->sysinfo), info->sys_version,
-                            "SYS_VERSION", &err);
-    if (err) {
-        error_propagate(errp, err);
+    if (!object_property_set_int(OBJECT(&s->sysinfo), "SYS_VERSION",
+                                 info->sys_version, errp)) {
         return;
     }
-    object_property_set_int(OBJECT(&s->sysinfo),
-                            armsse_sys_config_value(s, info),
-                            "SYS_CONFIG", &err);
-    if (err) {
-        error_propagate(errp, err);
+    if (!object_property_set_int(OBJECT(&s->sysinfo), "SYS_CONFIG",
+                                 armsse_sys_config_value(s, info), errp)) {
         return;
     }
-    object_property_set_bool(OBJECT(&s->sysinfo), true, "realized", &err);
-    if (err) {
-        error_propagate(errp, err);
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->sysinfo), errp)) {
         return;
     }
     /* System information registers */
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->sysinfo), 0, 0x40020000);
     /* System control registers */
-    object_property_set_int(OBJECT(&s->sysctl), info->sys_version,
-                            "SYS_VERSION", &err);
-    object_property_set_int(OBJECT(&s->sysctl), info->cpuwait_rst,
-                            "CPUWAIT_RST", &err);
-    object_property_set_int(OBJECT(&s->sysctl), s->init_svtor,
-                            "INITSVTOR0_RST", &err);
-    object_property_set_int(OBJECT(&s->sysctl), s->init_svtor,
-                            "INITSVTOR1_RST", &err);
-    object_property_set_bool(OBJECT(&s->sysctl), true, "realized", &err);
-    if (err) {
-        error_propagate(errp, err);
+    object_property_set_int(OBJECT(&s->sysctl), "SYS_VERSION",
+                            info->sys_version, &error_abort);
+    object_property_set_int(OBJECT(&s->sysctl), "CPUWAIT_RST",
+                            info->cpuwait_rst, &error_abort);
+    object_property_set_int(OBJECT(&s->sysctl), "INITSVTOR0_RST",
+                            s->init_svtor, &error_abort);
+    object_property_set_int(OBJECT(&s->sysctl), "INITSVTOR1_RST",
+                            s->init_svtor, &error_abort);
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->sysctl), errp)) {
         return;
     }
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->sysctl), 0, 0x50021000);
@@ -1086,23 +971,18 @@ static void armsse_realize(DeviceState *dev, Error **errp)
     }
 
     /* This OR gate wires together outputs from the secure watchdogs to NMI */
-    object_property_set_int(OBJECT(&s->nmi_orgate), 2, "num-lines", &err);
-    if (err) {
-        error_propagate(errp, err);
+    if (!object_property_set_int(OBJECT(&s->nmi_orgate), "num-lines", 2,
+                                 errp)) {
         return;
     }
-    object_property_set_bool(OBJECT(&s->nmi_orgate), true, "realized", &err);
-    if (err) {
-        error_propagate(errp, err);
+    if (!qdev_realize(DEVICE(&s->nmi_orgate), NULL, errp)) {
         return;
     }
     qdev_connect_gpio_out(DEVICE(&s->nmi_orgate), 0,
                           qdev_get_gpio_in_named(DEVICE(&s->armv7m), "NMI", 0));
 
     qdev_prop_set_uint32(DEVICE(&s->s32kwatchdog), "wdogclk-frq", S32KCLK);
-    object_property_set_bool(OBJECT(&s->s32kwatchdog), true, "realized", &err);
-    if (err) {
-        error_propagate(errp, err);
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->s32kwatchdog), errp)) {
         return;
     }
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->s32kwatchdog), 0,
@@ -1112,9 +992,7 @@ static void armsse_realize(DeviceState *dev, Error **errp)
     /* 0x40080000 .. 0x4008ffff : ARMSSE second Base peripheral region */
 
     qdev_prop_set_uint32(DEVICE(&s->nswatchdog), "wdogclk-frq", s->mainclk_frq);
-    object_property_set_bool(OBJECT(&s->nswatchdog), true, "realized", &err);
-    if (err) {
-        error_propagate(errp, err);
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->nswatchdog), errp)) {
         return;
     }
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->nswatchdog), 0,
@@ -1122,9 +1000,7 @@ static void armsse_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->nswatchdog), 0, 0x40081000);
 
     qdev_prop_set_uint32(DEVICE(&s->swatchdog), "wdogclk-frq", s->mainclk_frq);
-    object_property_set_bool(OBJECT(&s->swatchdog), true, "realized", &err);
-    if (err) {
-        error_propagate(errp, err);
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->swatchdog), errp)) {
         return;
     }
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->swatchdog), 0,
@@ -1134,14 +1010,10 @@ static void armsse_realize(DeviceState *dev, Error **errp)
     for (i = 0; i < ARRAY_SIZE(s->ppc_irq_splitter); i++) {
         Object *splitter = OBJECT(&s->ppc_irq_splitter[i]);
 
-        object_property_set_int(splitter, 2, "num-lines", &err);
-        if (err) {
-            error_propagate(errp, err);
+        if (!object_property_set_int(splitter, "num-lines", 2, errp)) {
             return;
         }
-        object_property_set_bool(splitter, true, "realized", &err);
-        if (err) {
-            error_propagate(errp, err);
+        if (!qdev_realize(DEVICE(splitter), NULL, errp)) {
             return;
         }
     }
@@ -1181,14 +1053,11 @@ static void armsse_realize(DeviceState *dev, Error **errp)
         SplitIRQ *splitter = &s->mpc_irq_splitter[i];
         DeviceState *dev_splitter = DEVICE(splitter);
 
-        object_property_set_int(OBJECT(splitter), 2, "num-lines", &err);
-        if (err) {
-            error_propagate(errp, err);
+        if (!object_property_set_int(OBJECT(splitter), "num-lines", 2,
+                                     errp)) {
             return;
         }
-        object_property_set_bool(OBJECT(splitter), true, "realized", &err);
-        if (err) {
-            error_propagate(errp, err);
+        if (!qdev_realize(DEVICE(splitter), NULL, errp)) {
             return;
         }
 
@@ -1205,7 +1074,8 @@ static void armsse_realize(DeviceState *dev, Error **errp)
                                         qdev_get_gpio_in(dev_splitter, 0));
             qdev_connect_gpio_out(dev_splitter, 0,
                                   qdev_get_gpio_in_named(dev_secctl,
-                                                         "mpc_status", 0));
+                                                         "mpc_status",
+                                                         i - IOTS_NUM_EXP_MPC));
         }
 
         qdev_connect_gpio_out(dev_splitter, 1,
@@ -1245,7 +1115,7 @@ static void armsse_idau_check(IDAUInterface *ii, uint32_t address,
      * of the address bits. The NSC attribute is guest-adjustable via the
      * NSCCFG register in the security controller.
      */
-    ARMSSE *s = ARMSSE(ii);
+    ARMSSE *s = ARM_SSE(ii);
     int region = extract32(address, 28, 4);
 
     *ns = !(region & 1);
@@ -1267,7 +1137,7 @@ static const VMStateDescription armsse_vmstate = {
 
 static void armsse_reset(DeviceState *dev)
 {
-    ARMSSE *s = ARMSSE(dev);
+    ARMSSE *s = ARM_SSE(dev);
 
     s->nsccfg = 0;
 }
@@ -1276,21 +1146,22 @@ static void armsse_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     IDAUInterfaceClass *iic = IDAU_INTERFACE_CLASS(klass);
-    ARMSSEClass *asc = ARMSSE_CLASS(klass);
+    ARMSSEClass *asc = ARM_SSE_CLASS(klass);
     const ARMSSEInfo *info = data;
 
     dc->realize = armsse_realize;
     dc->vmsd = &armsse_vmstate;
-    dc->props = info->props;
+    device_class_set_props(dc, info->props);
     dc->reset = armsse_reset;
     iic->check = armsse_idau_check;
     asc->info = info;
 }
 
 static const TypeInfo armsse_info = {
-    .name = TYPE_ARMSSE,
+    .name = TYPE_ARM_SSE,
     .parent = TYPE_SYS_BUS_DEVICE,
     .instance_size = sizeof(ARMSSE),
+    .class_size = sizeof(ARMSSEClass),
     .instance_init = armsse_init,
     .abstract = true,
     .interfaces = (InterfaceInfo[]) {
@@ -1308,7 +1179,7 @@ static void armsse_register_types(void)
     for (i = 0; i < ARRAY_SIZE(armsse_variants); i++) {
         TypeInfo ti = {
             .name = armsse_variants[i].name,
-            .parent = TYPE_ARMSSE,
+            .parent = TYPE_ARM_SSE,
             .class_init = armsse_class_init,
             .class_data = (void *)&armsse_variants[i],
         };

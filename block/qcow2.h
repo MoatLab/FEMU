@@ -61,9 +61,15 @@
  * space for snapshot names and IDs */
 #define QCOW_MAX_SNAPSHOTS_SIZE (1024 * QCOW_MAX_SNAPSHOTS)
 
+/* Maximum amount of extra data per snapshot table entry to accept */
+#define QCOW_MAX_SNAPSHOT_EXTRA_DATA 1024
+
 /* Bitmap header extension constraints */
 #define QCOW2_MAX_BITMAPS 65535
 #define QCOW2_MAX_BITMAP_DIRECTORY_SIZE (1024 * QCOW2_MAX_BITMAPS)
+
+/* Maximum of parallel sub-request per guest request */
+#define QCOW2_MAX_WORKERS 8
 
 /* indicate that the refcount of the referenced cluster is exactly one. */
 #define QCOW_OFLAG_COPIED     (1ULL << 63)
@@ -72,12 +78,39 @@
 /* The cluster reads as all zeros */
 #define QCOW_OFLAG_ZERO (1ULL << 0)
 
+#define QCOW_EXTL2_SUBCLUSTERS_PER_CLUSTER 32
+
+/* The subcluster X [0..31] is allocated */
+#define QCOW_OFLAG_SUB_ALLOC(X)   (1ULL << (X))
+/* The subcluster X [0..31] reads as zeroes */
+#define QCOW_OFLAG_SUB_ZERO(X)    (QCOW_OFLAG_SUB_ALLOC(X) << 32)
+/* Subclusters [X, Y) (0 <= X <= Y <= 32) are allocated */
+#define QCOW_OFLAG_SUB_ALLOC_RANGE(X, Y) \
+    (QCOW_OFLAG_SUB_ALLOC(Y) - QCOW_OFLAG_SUB_ALLOC(X))
+/* Subclusters [X, Y) (0 <= X <= Y <= 32) read as zeroes */
+#define QCOW_OFLAG_SUB_ZERO_RANGE(X, Y) \
+    (QCOW_OFLAG_SUB_ALLOC_RANGE(X, Y) << 32)
+/* L2 entry bitmap with all allocation bits set */
+#define QCOW_L2_BITMAP_ALL_ALLOC  (QCOW_OFLAG_SUB_ALLOC_RANGE(0, 32))
+/* L2 entry bitmap with all "read as zeroes" bits set */
+#define QCOW_L2_BITMAP_ALL_ZEROES (QCOW_OFLAG_SUB_ZERO_RANGE(0, 32))
+
+/* Size of normal and extended L2 entries */
+#define L2E_SIZE_NORMAL   (sizeof(uint64_t))
+#define L2E_SIZE_EXTENDED (sizeof(uint64_t) * 2)
+
+/* Size of L1 table entries */
+#define L1E_SIZE (sizeof(uint64_t))
+
+/* Size of reftable entries */
+#define REFTABLE_ENTRY_SIZE (sizeof(uint64_t))
+
 #define MIN_CLUSTER_BITS 9
 #define MAX_CLUSTER_BITS 21
 
 /* Defined in the qcow2 spec (compressed cluster descriptor) */
 #define QCOW2_COMPRESSED_SECTOR_SIZE 512U
-#define QCOW2_COMPRESSED_SECTOR_MASK (~(QCOW2_COMPRESSED_SECTOR_SIZE - 1))
+#define QCOW2_COMPRESSED_SECTOR_MASK (~(QCOW2_COMPRESSED_SECTOR_SIZE - 1ULL))
 
 /* Must be at least 2 to cover COW */
 #define MIN_L2_CACHE_SIZE 2 /* cache entries */
@@ -140,7 +173,15 @@ typedef struct QCowHeader {
 
     uint32_t refcount_order;
     uint32_t header_length;
+
+    /* Additional fields */
+    uint8_t compression_type;
+
+    /* header must be a multiple of 8 */
+    uint8_t padding[7];
 } QEMU_PACKED QCowHeader;
+
+QEMU_BUILD_BUG_ON(!QEMU_IS_ALIGNED(sizeof(QCowHeader), 8));
 
 typedef struct QEMU_PACKED QCowSnapshotHeader {
     /* header is 8 byte aligned */
@@ -165,6 +206,7 @@ typedef struct QEMU_PACKED QCowSnapshotHeader {
 typedef struct QEMU_PACKED QCowSnapshotExtraData {
     uint64_t vm_state_size_large;
     uint64_t disk_size;
+    uint64_t icount;
 } QCowSnapshotExtraData;
 
 
@@ -178,6 +220,12 @@ typedef struct QCowSnapshot {
     uint32_t date_sec;
     uint32_t date_nsec;
     uint64_t vm_clock_nsec;
+    /* icount value for the moment when snapshot was taken */
+    uint64_t icount;
+    /* Size of all extra data, including QCowSnapshotExtraData if available */
+    uint32_t extra_data_size;
+    /* Data beyond QCowSnapshotExtraData, if any */
+    void *unknown_extra_data;
 } QCowSnapshot;
 
 struct Qcow2Cache;
@@ -206,13 +254,19 @@ enum {
     QCOW2_INCOMPAT_DIRTY_BITNR      = 0,
     QCOW2_INCOMPAT_CORRUPT_BITNR    = 1,
     QCOW2_INCOMPAT_DATA_FILE_BITNR  = 2,
+    QCOW2_INCOMPAT_COMPRESSION_BITNR = 3,
+    QCOW2_INCOMPAT_EXTL2_BITNR      = 4,
     QCOW2_INCOMPAT_DIRTY            = 1 << QCOW2_INCOMPAT_DIRTY_BITNR,
     QCOW2_INCOMPAT_CORRUPT          = 1 << QCOW2_INCOMPAT_CORRUPT_BITNR,
     QCOW2_INCOMPAT_DATA_FILE        = 1 << QCOW2_INCOMPAT_DATA_FILE_BITNR,
+    QCOW2_INCOMPAT_COMPRESSION      = 1 << QCOW2_INCOMPAT_COMPRESSION_BITNR,
+    QCOW2_INCOMPAT_EXTL2            = 1 << QCOW2_INCOMPAT_EXTL2_BITNR,
 
     QCOW2_INCOMPAT_MASK             = QCOW2_INCOMPAT_DIRTY
                                     | QCOW2_INCOMPAT_CORRUPT
-                                    | QCOW2_INCOMPAT_DATA_FILE,
+                                    | QCOW2_INCOMPAT_DATA_FILE
+                                    | QCOW2_INCOMPAT_COMPRESSION
+                                    | QCOW2_INCOMPAT_EXTL2,
 };
 
 /* Compatible feature bits */
@@ -274,6 +328,9 @@ typedef struct BDRVQcow2State {
     int cluster_bits;
     int cluster_size;
     int l2_slice_size;
+    int subcluster_bits;
+    int subcluster_size;
+    int subclusters_per_cluster;
     int l2_bits;
     int l2_size;
     int l1_size;
@@ -286,14 +343,11 @@ typedef struct BDRVQcow2State {
     uint64_t l1_table_offset;
     uint64_t *l1_table;
 
-    Qcow2Cache* l2_table_cache;
-    Qcow2Cache* refcount_block_cache;
+    Qcow2Cache *l2_table_cache;
+    Qcow2Cache *refcount_block_cache;
     QEMUTimer *cache_clean_timer;
     unsigned cache_clean_interval;
 
-    uint8_t *cluster_cache;
-    uint8_t *cluster_data;
-    uint64_t cluster_cache_offset;
     QLIST_HEAD(, QCowL2Meta) cluster_allocs;
 
     uint64_t *refcount_table;
@@ -340,7 +394,7 @@ typedef struct BDRVQcow2State {
     uint64_t autoclear_features;
 
     size_t unknown_header_fields_size;
-    void* unknown_header_fields;
+    void *unknown_header_fields;
     QLIST_HEAD(, Qcow2UnknownHeaderExtension) unknown_header_ext;
     QTAILQ_HEAD (, Qcow2DiscardRegion) discards;
     bool cache_discards;
@@ -359,6 +413,13 @@ typedef struct BDRVQcow2State {
 
     bool metadata_preallocation_checked;
     bool metadata_preallocation;
+    /*
+     * Compression type used for the image. Default: 0 - ZLIB
+     * The image compression type is set on image creation.
+     * For now, the only way to change the compression type
+     * is to convert the image with the desired compression type set.
+     */
+    Qcow2CompressionType compression_type;
 } BDRVQcow2State;
 
 typedef struct Qcow2COWRegion {
@@ -374,17 +435,18 @@ typedef struct Qcow2COWRegion {
 
 /**
  * Describes an in-flight (part of a) write request that writes to clusters
- * that are not referenced in their L2 table yet.
+ * that need to have their L2 table entries updated (because they are
+ * newly allocated or need changes in their L2 bitmaps)
  */
 typedef struct QCowL2Meta
 {
-    /** Guest offset of the first newly allocated cluster */
+    /** Guest offset of the first updated cluster */
     uint64_t offset;
 
-    /** Host offset of the first newly allocated cluster */
+    /** Host offset of the first updated cluster */
     uint64_t alloc_offset;
 
-    /** Number of newly allocated clusters */
+    /** Number of updated clusters */
     int nb_clusters;
 
     /** Do not free the old clusters */
@@ -397,14 +459,16 @@ typedef struct QCowL2Meta
     CoQueue dependent_requests;
 
     /**
-     * The COW Region between the start of the first allocated cluster and the
-     * area the guest actually writes to.
+     * The COW Region immediately before the area the guest actually
+     * writes to. This (part of the) write request starts at
+     * cow_start.offset + cow_start.nb_bytes.
      */
     Qcow2COWRegion cow_start;
 
     /**
-     * The COW Region between the area the guest actually writes to and the
-     * end of the last allocated cluster.
+     * The COW Region immediately after the area the guest actually
+     * writes to. This (part of the) write request ends at cow_end.offset
+     * (which must always be set even when cow_end.nb_bytes is 0).
      */
     Qcow2COWRegion cow_end;
 
@@ -415,17 +479,53 @@ typedef struct QCowL2Meta
     bool skip_cow;
 
     /**
+     * Indicates that this is not a normal write request but a preallocation.
+     * If the image has extended L2 entries this means that no new individual
+     * subclusters will be marked as allocated in the L2 bitmap (but any
+     * existing contents of that bitmap will be kept).
+     */
+    bool prealloc;
+
+    /**
      * The I/O vector with the data from the actual guest write request.
      * If non-NULL, this is meant to be merged together with the data
      * from @cow_start and @cow_end into one single write operation.
      */
     QEMUIOVector *data_qiov;
+    size_t data_qiov_offset;
 
     /** Pointer to next L2Meta of the same write request */
     struct QCowL2Meta *next;
 
     QLIST_ENTRY(QCowL2Meta) next_in_flight;
 } QCowL2Meta;
+
+/*
+ * In images with standard L2 entries all clusters are treated as if
+ * they had one subcluster so QCow2ClusterType and QCow2SubclusterType
+ * can be mapped to each other and have the exact same meaning
+ * (QCOW2_SUBCLUSTER_UNALLOCATED_ALLOC cannot happen in these images).
+ *
+ * In images with extended L2 entries QCow2ClusterType refers to the
+ * complete cluster and QCow2SubclusterType to each of the individual
+ * subclusters, so there are several possible combinations:
+ *
+ *     |--------------+---------------------------|
+ *     | Cluster type | Possible subcluster types |
+ *     |--------------+---------------------------|
+ *     | UNALLOCATED  |         UNALLOCATED_PLAIN |
+ *     |              |                ZERO_PLAIN |
+ *     |--------------+---------------------------|
+ *     | NORMAL       |         UNALLOCATED_ALLOC |
+ *     |              |                ZERO_ALLOC |
+ *     |              |                    NORMAL |
+ *     |--------------+---------------------------|
+ *     | COMPRESSED   |                COMPRESSED |
+ *     |--------------+---------------------------|
+ *
+ * QCOW2_SUBCLUSTER_INVALID means that the L2 entry is incorrect and
+ * the image should be marked corrupt.
+ */
 
 typedef enum QCow2ClusterType {
     QCOW2_CLUSTER_UNALLOCATED,
@@ -434,6 +534,16 @@ typedef enum QCow2ClusterType {
     QCOW2_CLUSTER_NORMAL,
     QCOW2_CLUSTER_COMPRESSED,
 } QCow2ClusterType;
+
+typedef enum QCow2SubclusterType {
+    QCOW2_SUBCLUSTER_UNALLOCATED_PLAIN,
+    QCOW2_SUBCLUSTER_UNALLOCATED_ALLOC,
+    QCOW2_SUBCLUSTER_ZERO_PLAIN,
+    QCOW2_SUBCLUSTER_ZERO_ALLOC,
+    QCOW2_SUBCLUSTER_NORMAL,
+    QCOW2_SUBCLUSTER_COMPRESSED,
+    QCOW2_SUBCLUSTER_INVALID,
+} QCow2SubclusterType;
 
 typedef enum QCow2MetadataOverlap {
     QCOW2_OL_MAIN_HEADER_BITNR      = 0,
@@ -484,6 +594,49 @@ typedef enum QCow2MetadataOverlap {
 
 #define INV_OFFSET (-1ULL)
 
+static inline bool has_subclusters(BDRVQcow2State *s)
+{
+    return s->incompatible_features & QCOW2_INCOMPAT_EXTL2;
+}
+
+static inline size_t l2_entry_size(BDRVQcow2State *s)
+{
+    return has_subclusters(s) ? L2E_SIZE_EXTENDED : L2E_SIZE_NORMAL;
+}
+
+static inline uint64_t get_l2_entry(BDRVQcow2State *s, uint64_t *l2_slice,
+                                    int idx)
+{
+    idx *= l2_entry_size(s) / sizeof(uint64_t);
+    return be64_to_cpu(l2_slice[idx]);
+}
+
+static inline uint64_t get_l2_bitmap(BDRVQcow2State *s, uint64_t *l2_slice,
+                                     int idx)
+{
+    if (has_subclusters(s)) {
+        idx *= l2_entry_size(s) / sizeof(uint64_t);
+        return be64_to_cpu(l2_slice[idx + 1]);
+    } else {
+        return 0; /* For convenience only; this value has no meaning. */
+    }
+}
+
+static inline void set_l2_entry(BDRVQcow2State *s, uint64_t *l2_slice,
+                                int idx, uint64_t entry)
+{
+    idx *= l2_entry_size(s) / sizeof(uint64_t);
+    l2_slice[idx] = cpu_to_be64(entry);
+}
+
+static inline void set_l2_bitmap(BDRVQcow2State *s, uint64_t *l2_slice,
+                                 int idx, uint64_t bitmap)
+{
+    assert(has_subclusters(s));
+    idx *= l2_entry_size(s) / sizeof(uint64_t);
+    l2_slice[idx + 1] = cpu_to_be64(bitmap);
+}
+
 static inline bool has_data_file(BlockDriverState *bs)
 {
     BDRVQcow2State *s = bs->opaque;
@@ -506,9 +659,19 @@ static inline int64_t offset_into_cluster(BDRVQcow2State *s, int64_t offset)
     return offset & (s->cluster_size - 1);
 }
 
+static inline int64_t offset_into_subcluster(BDRVQcow2State *s, int64_t offset)
+{
+    return offset & (s->subcluster_size - 1);
+}
+
 static inline uint64_t size_to_clusters(BDRVQcow2State *s, uint64_t size)
 {
     return (size + (s->cluster_size - 1)) >> s->cluster_bits;
+}
+
+static inline uint64_t size_to_subclusters(BDRVQcow2State *s, uint64_t size)
+{
+    return (size + (s->subcluster_size - 1)) >> s->subcluster_bits;
 }
 
 static inline int64_t size_to_l1(BDRVQcow2State *s, int64_t size)
@@ -532,6 +695,11 @@ static inline int offset_to_l2_slice_index(BDRVQcow2State *s, int64_t offset)
     return (offset >> s->cluster_bits) & (s->l2_slice_size - 1);
 }
 
+static inline int offset_to_sc_index(BDRVQcow2State *s, int64_t offset)
+{
+    return (offset >> s->subcluster_bits) & (s->subclusters_per_cluster - 1);
+}
+
 static inline int64_t qcow2_vm_state_offset(BDRVQcow2State *s)
 {
     return (int64_t)s->l1_vm_state_index << (s->cluster_bits + s->l2_bits);
@@ -540,9 +708,11 @@ static inline int64_t qcow2_vm_state_offset(BDRVQcow2State *s)
 static inline QCow2ClusterType qcow2_get_cluster_type(BlockDriverState *bs,
                                                       uint64_t l2_entry)
 {
+    BDRVQcow2State *s = bs->opaque;
+
     if (l2_entry & QCOW_OFLAG_COMPRESSED) {
         return QCOW2_CLUSTER_COMPRESSED;
-    } else if (l2_entry & QCOW_OFLAG_ZERO) {
+    } else if ((l2_entry & QCOW_OFLAG_ZERO) && !has_subclusters(s)) {
         if (l2_entry & L2E_OFFSET_MASK) {
             return QCOW2_CLUSTER_ZERO_ALLOC;
         }
@@ -560,6 +730,72 @@ static inline QCow2ClusterType qcow2_get_cluster_type(BlockDriverState *bs,
     } else {
         return QCOW2_CLUSTER_NORMAL;
     }
+}
+
+/*
+ * In an image without subsclusters @l2_bitmap is ignored and
+ * @sc_index must be 0.
+ * Return QCOW2_SUBCLUSTER_INVALID if an invalid l2 entry is detected
+ * (this checks the whole entry and bitmap, not only the bits related
+ * to subcluster @sc_index).
+ */
+static inline
+QCow2SubclusterType qcow2_get_subcluster_type(BlockDriverState *bs,
+                                              uint64_t l2_entry,
+                                              uint64_t l2_bitmap,
+                                              unsigned sc_index)
+{
+    BDRVQcow2State *s = bs->opaque;
+    QCow2ClusterType type = qcow2_get_cluster_type(bs, l2_entry);
+    assert(sc_index < s->subclusters_per_cluster);
+
+    if (has_subclusters(s)) {
+        switch (type) {
+        case QCOW2_CLUSTER_COMPRESSED:
+            return QCOW2_SUBCLUSTER_COMPRESSED;
+        case QCOW2_CLUSTER_NORMAL:
+            if ((l2_bitmap >> 32) & l2_bitmap) {
+                return QCOW2_SUBCLUSTER_INVALID;
+            } else if (l2_bitmap & QCOW_OFLAG_SUB_ZERO(sc_index)) {
+                return QCOW2_SUBCLUSTER_ZERO_ALLOC;
+            } else if (l2_bitmap & QCOW_OFLAG_SUB_ALLOC(sc_index)) {
+                return QCOW2_SUBCLUSTER_NORMAL;
+            } else {
+                return QCOW2_SUBCLUSTER_UNALLOCATED_ALLOC;
+            }
+        case QCOW2_CLUSTER_UNALLOCATED:
+            if (l2_bitmap & QCOW_L2_BITMAP_ALL_ALLOC) {
+                return QCOW2_SUBCLUSTER_INVALID;
+            } else if (l2_bitmap & QCOW_OFLAG_SUB_ZERO(sc_index)) {
+                return QCOW2_SUBCLUSTER_ZERO_PLAIN;
+            } else {
+                return QCOW2_SUBCLUSTER_UNALLOCATED_PLAIN;
+            }
+        default:
+            g_assert_not_reached();
+        }
+    } else {
+        switch (type) {
+        case QCOW2_CLUSTER_COMPRESSED:
+            return QCOW2_SUBCLUSTER_COMPRESSED;
+        case QCOW2_CLUSTER_ZERO_PLAIN:
+            return QCOW2_SUBCLUSTER_ZERO_PLAIN;
+        case QCOW2_CLUSTER_ZERO_ALLOC:
+            return QCOW2_SUBCLUSTER_ZERO_ALLOC;
+        case QCOW2_CLUSTER_NORMAL:
+            return QCOW2_SUBCLUSTER_NORMAL;
+        case QCOW2_CLUSTER_UNALLOCATED:
+            return QCOW2_SUBCLUSTER_UNALLOCATED_PLAIN;
+        default:
+            g_assert_not_reached();
+        }
+    }
+}
+
+static inline bool qcow2_cluster_is_allocated(QCow2ClusterType type)
+{
+    return (type == QCOW2_CLUSTER_COMPRESSED || type == QCOW2_CLUSTER_NORMAL ||
+            type == QCOW2_CLUSTER_ZERO_ALLOC);
 }
 
 /* Check whether refcounts are eager or lazy */
@@ -631,8 +867,8 @@ int64_t qcow2_alloc_bytes(BlockDriverState *bs, int size);
 void qcow2_free_clusters(BlockDriverState *bs,
                           int64_t offset, int64_t size,
                           enum qcow2_discard_type type);
-void qcow2_free_any_clusters(BlockDriverState *bs, uint64_t l2_entry,
-                             int nb_clusters, enum qcow2_discard_type type);
+void qcow2_free_any_cluster(BlockDriverState *bs, uint64_t l2_entry,
+                            enum qcow2_discard_type type);
 
 int qcow2_update_snapshot_refcount(BlockDriverState *bs,
     int64_t l1_table_offset, int l1_size, int addend);
@@ -668,11 +904,12 @@ int qcow2_write_l1_entry(BlockDriverState *bs, int l1_index);
 int qcow2_encrypt_sectors(BDRVQcow2State *s, int64_t sector_num,
                           uint8_t *buf, int nb_sectors, bool enc, Error **errp);
 
-int qcow2_get_cluster_offset(BlockDriverState *bs, uint64_t offset,
-                             unsigned int *bytes, uint64_t *cluster_offset);
-int qcow2_alloc_cluster_offset(BlockDriverState *bs, uint64_t offset,
-                               unsigned int *bytes, uint64_t *host_offset,
-                               QCowL2Meta **m);
+int qcow2_get_host_offset(BlockDriverState *bs, uint64_t offset,
+                          unsigned int *bytes, uint64_t *host_offset,
+                          QCow2SubclusterType *subcluster_type);
+int qcow2_alloc_host_offset(BlockDriverState *bs, uint64_t offset,
+                            unsigned int *bytes, uint64_t *host_offset,
+                            QCowL2Meta **m);
 int qcow2_alloc_compressed_cluster_offset(BlockDriverState *bs,
                                           uint64_t offset,
                                           int compressed_size,
@@ -683,8 +920,8 @@ void qcow2_alloc_cluster_abort(BlockDriverState *bs, QCowL2Meta *m);
 int qcow2_cluster_discard(BlockDriverState *bs, uint64_t offset,
                           uint64_t bytes, enum qcow2_discard_type type,
                           bool full_discard);
-int qcow2_cluster_zeroize(BlockDriverState *bs, uint64_t offset,
-                          uint64_t bytes, int flags);
+int qcow2_subcluster_zeroize(BlockDriverState *bs, uint64_t offset,
+                             uint64_t bytes, int flags);
 
 int qcow2_expand_zero_clusters(BlockDriverState *bs,
                                BlockDriverAmendStatusCB *status_cb,
@@ -704,7 +941,15 @@ int qcow2_snapshot_load_tmp(BlockDriverState *bs,
                             Error **errp);
 
 void qcow2_free_snapshots(BlockDriverState *bs);
-int qcow2_read_snapshots(BlockDriverState *bs);
+int qcow2_read_snapshots(BlockDriverState *bs, Error **errp);
+int qcow2_write_snapshots(BlockDriverState *bs);
+
+int coroutine_fn qcow2_check_read_snapshot_table(BlockDriverState *bs,
+                                                 BdrvCheckResult *result,
+                                                 BdrvCheckMode fix);
+int coroutine_fn qcow2_check_fix_snapshot_table(BlockDriverState *bs,
+                                                BdrvCheckResult *result,
+                                                BdrvCheckMode fix);
 
 /* qcow2-cache.c functions */
 Qcow2Cache *qcow2_cache_create(BlockDriverState *bs, int num_tables,
@@ -736,19 +981,21 @@ int qcow2_check_bitmaps_refcounts(BlockDriverState *bs, BdrvCheckResult *res,
 bool qcow2_load_dirty_bitmaps(BlockDriverState *bs, Error **errp);
 Qcow2BitmapInfoList *qcow2_get_bitmap_info_list(BlockDriverState *bs,
                                                 Error **errp);
-int qcow2_reopen_bitmaps_rw_hint(BlockDriverState *bs, bool *header_updated,
-                                 Error **errp);
 int qcow2_reopen_bitmaps_rw(BlockDriverState *bs, Error **errp);
 int qcow2_truncate_bitmaps_check(BlockDriverState *bs, Error **errp);
-void qcow2_store_persistent_dirty_bitmaps(BlockDriverState *bs, Error **errp);
+void qcow2_store_persistent_dirty_bitmaps(BlockDriverState *bs,
+                                          bool release_stored, Error **errp);
 int qcow2_reopen_bitmaps_ro(BlockDriverState *bs, Error **errp);
-bool qcow2_can_store_new_dirty_bitmap(BlockDriverState *bs,
-                                      const char *name,
-                                      uint32_t granularity,
-                                      Error **errp);
-void qcow2_remove_persistent_dirty_bitmap(BlockDriverState *bs,
-                                          const char *name,
-                                          Error **errp);
+bool qcow2_co_can_store_new_dirty_bitmap(BlockDriverState *bs,
+                                         const char *name,
+                                         uint32_t granularity,
+                                         Error **errp);
+int qcow2_co_remove_persistent_dirty_bitmap(BlockDriverState *bs,
+                                            const char *name,
+                                            Error **errp);
+bool qcow2_supports_persistent_dirty_bitmap(BlockDriverState *bs);
+uint64_t qcow2_get_persistent_dirty_bitmap_size(BlockDriverState *bs,
+                                                uint32_t cluster_size);
 
 ssize_t coroutine_fn
 qcow2_co_compress(BlockDriverState *bs, void *dest, size_t dest_size,
@@ -757,10 +1004,10 @@ ssize_t coroutine_fn
 qcow2_co_decompress(BlockDriverState *bs, void *dest, size_t dest_size,
                     const void *src, size_t src_size);
 int coroutine_fn
-qcow2_co_encrypt(BlockDriverState *bs, uint64_t file_cluster_offset,
-                 uint64_t offset, void *buf, size_t len);
+qcow2_co_encrypt(BlockDriverState *bs, uint64_t host_offset,
+                 uint64_t guest_offset, void *buf, size_t len);
 int coroutine_fn
-qcow2_co_decrypt(BlockDriverState *bs, uint64_t file_cluster_offset,
-                 uint64_t offset, void *buf, size_t len);
+qcow2_co_decrypt(BlockDriverState *bs, uint64_t host_offset,
+                 uint64_t guest_offset, void *buf, size_t len);
 
 #endif

@@ -21,6 +21,7 @@
 #include "hw/sysbus.h"
 #include "hw/boards.h"
 #include "hw/i386/x86-iommu.h"
+#include "hw/qdev-properties.h"
 #include "hw/i386/pc.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
@@ -106,7 +107,7 @@ IommuType x86_iommu_get_type(void)
 static void x86_iommu_realize(DeviceState *dev, Error **errp)
 {
     X86IOMMUState *x86_iommu = X86_IOMMU_DEVICE(dev);
-    X86IOMMUClass *x86_class = X86_IOMMU_GET_CLASS(dev);
+    X86IOMMUClass *x86_class = X86_IOMMU_DEVICE_GET_CLASS(dev);
     MachineState *ms = MACHINE(qdev_get_machine());
     MachineClass *mc = MACHINE_GET_CLASS(ms);
     PCMachineState *pcms =
@@ -152,7 +153,7 @@ static void x86_iommu_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     dc->realize = x86_iommu_realize;
-    dc->props = x86_iommu_properties;
+    device_class_set_props(dc, x86_iommu_properties);
 }
 
 bool x86_iommu_ir_supported(X86IOMMUState *s)

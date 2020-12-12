@@ -23,12 +23,15 @@
 #include "hw/hw.h"
 #include "hw/block/flash.h"
 #include "hw/irq.h"
+#include "hw/qdev-properties.h"
 #include "sysemu/block-backend.h"
 #include "exec/memory.h"
 #include "hw/sysbus.h"
+#include "migration/vmstate.h"
 #include "qemu/error-report.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
+#include "qom/object.h"
 
 /* 11 for 2kB-page OneNAND ("2nd generation") and 10 for 1kB-page chips */
 #define PAGE_SHIFT	11
@@ -37,9 +40,9 @@
 #define BLOCK_SHIFT	(PAGE_SHIFT + 6)
 
 #define TYPE_ONE_NAND "onenand"
-#define ONE_NAND(obj) OBJECT_CHECK(OneNANDState, (obj), TYPE_ONE_NAND)
+OBJECT_DECLARE_SIMPLE_TYPE(OneNANDState, ONE_NAND)
 
-typedef struct OneNANDState {
+struct OneNANDState {
     SysBusDevice parent_obj;
 
     struct {
@@ -83,7 +86,7 @@ typedef struct OneNANDState {
     int secs_cur;
     int blocks;
     uint8_t *blockwp;
-} OneNANDState;
+};
 
 enum {
     ONEN_BUF_BLOCK = 0,
@@ -820,7 +823,7 @@ static void onenand_realize(DeviceState *dev, Error **errp)
     onenand_mem_setup(s);
     sysbus_init_irq(sbd, &s->intr);
     sysbus_init_mmio(sbd, &s->container);
-    vmstate_register(dev,
+    vmstate_register(VMSTATE_IF(dev),
                      ((s->shift & 0x7f) << 24)
                      | ((s->id.man & 0xff) << 16)
                      | ((s->id.dev & 0xff) << 8)
@@ -843,7 +846,7 @@ static void onenand_class_init(ObjectClass *klass, void *data)
 
     dc->realize = onenand_realize;
     dc->reset = onenand_system_reset;
-    dc->props = onenand_properties;
+    device_class_set_props(dc, onenand_properties);
 }
 
 static const TypeInfo onenand_info = {

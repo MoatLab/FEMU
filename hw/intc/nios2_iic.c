@@ -22,18 +22,19 @@
 #include "qemu/module.h"
 #include "qapi/error.h"
 
+#include "hw/irq.h"
 #include "hw/sysbus.h"
 #include "cpu.h"
+#include "qom/object.h"
 
 #define TYPE_ALTERA_IIC "altera,iic"
-#define ALTERA_IIC(obj) \
-    OBJECT_CHECK(AlteraIIC, (obj), TYPE_ALTERA_IIC)
+OBJECT_DECLARE_SIMPLE_TYPE(AlteraIIC, ALTERA_IIC)
 
-typedef struct AlteraIIC {
+struct AlteraIIC {
     SysBusDevice  parent_obj;
     void         *cpu;
     qemu_irq      parent_irq;
-} AlteraIIC;
+};
 
 static void update_irq(AlteraIIC *pv)
 {
@@ -65,14 +66,8 @@ static void altera_iic_init(Object *obj)
 static void altera_iic_realize(DeviceState *dev, Error **errp)
 {
     struct AlteraIIC *pv = ALTERA_IIC(dev);
-    Error *err = NULL;
 
-    pv->cpu = object_property_get_link(OBJECT(dev), "cpu", &err);
-    if (!pv->cpu) {
-        error_setg(errp, "altera,iic: CPU link not found: %s",
-                   error_get_pretty(err));
-        return;
-    }
+    pv->cpu = object_property_get_link(OBJECT(dev), "cpu", &error_abort);
 }
 
 static void altera_iic_class_init(ObjectClass *klass, void *data)
@@ -85,7 +80,7 @@ static void altera_iic_class_init(ObjectClass *klass, void *data)
 }
 
 static TypeInfo altera_iic_info = {
-    .name          = "altera,iic",
+    .name          = TYPE_ALTERA_IIC,
     .parent        = TYPE_SYS_BUS_DEVICE,
     .instance_size = sizeof(AlteraIIC),
     .instance_init = altera_iic_init,

@@ -28,6 +28,7 @@
 
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_bus.h"
+#include "qom/object.h"
 
 typedef struct PCIBridgeWindows PCIBridgeWindows;
 
@@ -50,7 +51,7 @@ struct PCIBridgeWindows {
 };
 
 #define TYPE_PCI_BRIDGE "base-pci-bridge"
-#define PCI_BRIDGE(obj) OBJECT_CHECK(PCIBridge, (obj), TYPE_PCI_BRIDGE)
+OBJECT_DECLARE_SIMPLE_TYPE(PCIBridge, PCI_BRIDGE)
 
 struct PCIBridge {
     /*< private >*/
@@ -108,7 +109,7 @@ void pci_bridge_dev_unplug_request_cb(HotplugHandler *hotplug_dev,
 
 /*
  * before qdev initialization(qdev_init()), this function sets bus_name and
- * map_irq callback which are necessry for pci_bridge_initfn() to
+ * map_irq callback which are necessary for pci_bridge_initfn() to
  * initialize bus.
  */
 void pci_bridge_map_irq(PCIBridge *br, const char* bus_name,

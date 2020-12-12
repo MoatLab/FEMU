@@ -77,7 +77,7 @@ static void vi_input_send(VuInput *vi, struct virtio_input_event *event)
         len = iov_from_buf(elem->in_sg, elem->in_num,
                            0, &vi->queue[i].event, sizeof(virtio_input_event));
         vu_queue_push(dev, vq, elem, len);
-        g_free(elem);
+        free(elem);
     }
 
     vu_queue_notify(&vi->dev.parent, vq);
@@ -153,7 +153,7 @@ static void vi_handle_sts(VuDev *dev, int qidx)
                          0, &event, sizeof(event));
         vi_handle_status(vi, &event);
         vu_queue_push(dev, vq, elem, len);
-        g_free(elem);
+        free(elem);
     }
 
     vu_queue_notify(&vi->dev.parent, vq);
@@ -187,7 +187,7 @@ vi_queue_set_started(VuDev *dev, int qidx, bool started)
     }
 
     if (!started && vi->evsrc) {
-        g_source_destroy(vi->evsrc);
+        vug_source_destroy(vi->evsrc);
         vi->evsrc = NULL;
     }
 }
@@ -401,9 +401,7 @@ main(int argc, char *argv[])
 
     vug_deinit(&vi.dev);
 
-    if (vi.evsrc) {
-        g_source_unref(vi.evsrc);
-    }
+    vug_source_destroy(vi.evsrc);
     g_array_free(vi.config, TRUE);
     g_free(vi.queue);
     return 0;

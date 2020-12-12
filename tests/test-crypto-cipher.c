@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -761,10 +761,7 @@ static void test_cipher_short_plaintext(void)
                                  sizeof(plaintext1),
                                  &err);
     g_assert(ret == -1);
-    g_assert(err != NULL);
-
-    error_free(err);
-    err = NULL;
+    error_free_or_abort(&err);
 
     /* Should report an error as plaintext is larger than
      * block size, but not a multiple of block size
@@ -775,9 +772,8 @@ static void test_cipher_short_plaintext(void)
                                  sizeof(plaintext2),
                                  &err);
     g_assert(ret == -1);
-    g_assert(err != NULL);
+    error_free_or_abort(&err);
 
-    error_free(err);
     qcrypto_cipher_free(cipher);
 }
 

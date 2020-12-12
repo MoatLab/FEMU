@@ -12,7 +12,6 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
 #include "hw/sysbus.h"
 #include "hw/misc/unimp.h"
 #include "qemu/log.h"
@@ -23,9 +22,9 @@ static uint64_t unimp_read(void *opaque, hwaddr offset, unsigned size)
 {
     UnimplementedDeviceState *s = UNIMPLEMENTED_DEVICE(opaque);
 
-    qemu_log_mask(LOG_UNIMP, "%s: unimplemented device read "
-                  "(size %d, offset 0x%" HWADDR_PRIx ")\n",
-                  s->name, size, offset);
+    qemu_log_mask(LOG_UNIMP, "%s: unimplemented device read  "
+                  "(size %d, offset 0x%0*" HWADDR_PRIx ")\n",
+                  s->name, size, s->offset_fmt_width, offset);
     return 0;
 }
 
@@ -35,9 +34,9 @@ static void unimp_write(void *opaque, hwaddr offset,
     UnimplementedDeviceState *s = UNIMPLEMENTED_DEVICE(opaque);
 
     qemu_log_mask(LOG_UNIMP, "%s: unimplemented device write "
-                  "(size %d, value 0x%" PRIx64
-                  ", offset 0x%" HWADDR_PRIx ")\n",
-                  s->name, size, value, offset);
+                  "(size %d, offset 0x%0*" HWADDR_PRIx
+                  ", value 0x%0*" PRIx64 ")\n",
+                  s->name, size, s->offset_fmt_width, offset, size << 1, value);
 }
 
 static const MemoryRegionOps unimp_ops = {
@@ -64,6 +63,8 @@ static void unimp_realize(DeviceState *dev, Error **errp)
         return;
     }
 
+    s->offset_fmt_width = DIV_ROUND_UP(64 - clz64(s->size - 1), 4);
+
     memory_region_init_io(&s->iomem, OBJECT(s), &unimp_ops, s,
                           s->name, s->size);
     sysbus_init_mmio(SYS_BUS_DEVICE(s), &s->iomem);
@@ -80,7 +81,7 @@ static void unimp_class_init(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = unimp_realize;
-    dc->props = unimp_properties;
+    device_class_set_props(dc, unimp_properties);
 }
 
 static const TypeInfo unimp_info = {

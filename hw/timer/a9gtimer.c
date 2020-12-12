@@ -21,13 +21,17 @@
  */
 
 #include "qemu/osdep.h"
+#include "hw/hw.h"
+#include "hw/irq.h"
+#include "hw/qdev-properties.h"
 #include "hw/timer/a9gtimer.h"
+#include "migration/vmstate.h"
 #include "qapi/error.h"
 #include "qemu/timer.h"
 #include "qemu/bitops.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
-#include "qom/cpu.h"
+#include "hw/core/cpu.h"
 
 #ifndef A9_GTIMER_ERR_DEBUG
 #define A9_GTIMER_ERR_DEBUG 0
@@ -355,7 +359,7 @@ static void a9_gtimer_class_init(ObjectClass *klass, void *data)
     dc->realize = a9_gtimer_realize;
     dc->vmsd = &vmstate_a9_gtimer;
     dc->reset = a9_gtimer_reset;
-    dc->props = a9_gtimer_properties;
+    device_class_set_props(dc, a9_gtimer_properties);
 }
 
 static const TypeInfo a9_gtimer_info = {

@@ -8,33 +8,35 @@
 
 #include "libc.h"
 #include "s390-ccw.h"
+#include "s390-arch.h"
 
 #define KERN_IMAGE_START 0x010000UL
-#define PSW_MASK_64 0x0000000100000000ULL
-#define PSW_MASK_32 0x0000000080000000ULL
-#define IPL_PSW_MASK (PSW_MASK_32 | PSW_MASK_64)
+#define RESET_PSW_MASK (PSW_MASK_SHORTPSW | PSW_MASK_64)
+#define RESET_PSW ((uint64_t)&jump_to_IPL_addr | RESET_PSW_MASK)
 
-typedef struct ResetInfo {
-    uint32_t ipl_mask;
-    uint32_t ipl_addr;
-    uint32_t ipl_continue;
-} ResetInfo;
+static uint64_t *reset_psw = 0, save_psw, ipl_continue;
 
-static ResetInfo save;
-
-static void jump_to_IPL_2(void)
+void write_reset_psw(uint64_t psw)
 {
-    ResetInfo *current = 0;
+    *reset_psw = psw;
+}
 
-    void (*ipl)(void) = (void *) (uint64_t) current->ipl_continue;
-    *current = save;
-    ipl(); /* should not return */
+static void jump_to_IPL_addr(void)
+{
+    __attribute__((noreturn)) void (*ipl)(void) = (void *)ipl_continue;
+
+    /* Restore reset PSW */
+    write_reset_psw(save_psw);
+
+    ipl();
+    /* should not return */
 }
 
 void jump_to_IPL_code(uint64_t address)
 {
     /* store the subsystem information _after_ the bootmap was loaded */
     write_subsystem_identification();
+    write_iplb_location();
 
     /* prevent unknown IPL types in the guest */
     if (iplb.pbt == S390_IPL_TYPE_QEMU_SCSI) {
@@ -47,13 +49,12 @@ void jump_to_IPL_code(uint64_t address)
      * content of non-BIOS memory after we loaded the guest, so we
      * save the original content and restore it in jump_to_IPL_2.
      */
-    ResetInfo *current = 0;
-
-    save = *current;
-    current->ipl_addr = (uint32_t) (uint64_t) &jump_to_IPL_2;
-    current->ipl_continue = address & 0x7fffffff;
-
-    debug_print_int("set IPL addr to", current->ipl_continue);
+    if (address) {
+        save_psw = *reset_psw;
+        write_reset_psw(RESET_PSW);
+        ipl_continue = address;
+    }
+    debug_print_int("set IPL addr to", address ?: *reset_psw & PSW_MASK_SHORT_ADDR);
 
     /* Ensure the guest output starts fresh */
     sclp_print("\n");
@@ -77,13 +78,18 @@ void jump_to_low_kernel(void)
      * kernel start address (when jumping to the PSW-at-zero address instead,
      * the kernel startup code fails when we booted from a network device).
      */
-    if (!memcmp((char *)0x10008, "S390EP", 6)) {
+    if (!memcmp((char *)S390EP, "S390EP", 6)) {
         jump_to_IPL_code(KERN_IMAGE_START);
     }
 
     /* Trying to get PSW at zero address */
-    if (*((uint64_t *)0) & IPL_PSW_MASK) {
-        jump_to_IPL_code((*((uint64_t *)0)) & 0x7fffffff);
+    if (*((uint64_t *)0) & RESET_PSW_MASK) {
+        /*
+         * Surely nobody will try running directly from lowcore, so
+         * let's use 0 as an indication that we want to load the reset
+         * psw at 0x0 and not jump to the entry.
+         */
+        jump_to_IPL_code(0);
     }
 
     /* No other option left, so use the Linux kernel start address */

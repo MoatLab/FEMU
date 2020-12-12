@@ -10,12 +10,15 @@
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "qapi/error.h"
-#include "hw/hw.h"
+#include "hw/irq.h"
+#include "hw/qdev-properties.h"
 #include "hw/sysbus.h"
+#include "migration/vmstate.h"
 #include "exec/memory.h"
+#include "qom/object.h"
 
 #define TYPE_OR1K_OMPIC "or1k-ompic"
-#define OR1K_OMPIC(obj) OBJECT_CHECK(OR1KOMPICState, (obj), TYPE_OR1K_OMPIC)
+OBJECT_DECLARE_SIMPLE_TYPE(OR1KOMPICState, OR1K_OMPIC)
 
 #define OMPIC_CTRL_IRQ_ACK  (1 << 31)
 #define OMPIC_CTRL_IRQ_GEN  (1 << 30)
@@ -35,7 +38,6 @@
 #define OMPIC_MAX_CPUS 4 /* Real max is much higher, but dont waste memory */
 #define OMPIC_ADDRSPACE_SZ (OMPIC_MAX_CPUS * 2 * 4) /* 2 32-bit regs per cpu */
 
-typedef struct OR1KOMPICState OR1KOMPICState;
 typedef struct OR1KOMPICCPUState OR1KOMPICCPUState;
 
 struct OR1KOMPICCPUState {
@@ -159,7 +161,7 @@ static void or1k_ompic_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    dc->props = or1k_ompic_properties;
+    device_class_set_props(dc, or1k_ompic_properties);
     dc->realize = or1k_ompic_realize;
     dc->vmsd = &vmstate_or1k_ompic;
 }

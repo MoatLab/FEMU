@@ -48,7 +48,7 @@ static bool rng_backend_prop_get_opened(Object *obj, Error **errp)
 
 static void rng_backend_complete(UserCreatable *uc, Error **errp)
 {
-    object_property_set_bool(OBJECT(uc), true, "opened", errp);
+    object_property_set_bool(OBJECT(uc), "opened", true, errp);
 }
 
 static void rng_backend_prop_set_opened(Object *obj, bool value, Error **errp)
@@ -105,11 +105,6 @@ static void rng_backend_init(Object *obj)
     RngBackend *s = RNG_BACKEND(obj);
 
     QSIMPLEQ_INIT(&s->requests);
-
-    object_property_add_bool(obj, "opened",
-                             rng_backend_prop_get_opened,
-                             rng_backend_prop_set_opened,
-                             NULL);
 }
 
 static void rng_backend_finalize(Object *obj)
@@ -124,6 +119,10 @@ static void rng_backend_class_init(ObjectClass *oc, void *data)
     UserCreatableClass *ucc = USER_CREATABLE_CLASS(oc);
 
     ucc->complete = rng_backend_complete;
+
+    object_class_property_add_bool(oc, "opened",
+                                   rng_backend_prop_get_opened,
+                                   rng_backend_prop_set_opened);
 }
 
 static const TypeInfo rng_backend_info = {

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only WITH Linux-syscall-note */
 /*
  * Userspace interface for AMD Secure Encrypted Virtualization (SEV)
  * platform management commands.
@@ -7,10 +8,6 @@
  * Author: Brijesh Singh <brijesh.singh@amd.com>
  *
  * SEV API specification is available at: https://developer.amd.com/sev/
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #ifndef __PSP_SEV_USER_H__
@@ -61,6 +58,9 @@ typedef enum {
 	SEV_RET_HWSEV_RET_PLATFORM,
 	SEV_RET_HWSEV_RET_UNSAFE,
 	SEV_RET_UNSUPPORTED,
+	SEV_RET_INVALID_PARAM,
+	SEV_RET_RESOURCE_LIMIT,
+	SEV_RET_SECURE_DATA_INVALID,
 	SEV_RET_MAX,
 } sev_ret_code;
 
@@ -82,6 +82,8 @@ struct sev_user_data_status {
 	__u8 build;				/* Out */
 	__u32 guest_count;			/* Out */
 } __attribute__((packed));
+
+#define SEV_STATUS_FLAGS_CONFIG_ES	0x0100
 
 /**
  * struct sev_user_data_pek_csr - PEK_CSR command parameters

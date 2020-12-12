@@ -42,6 +42,9 @@ all_tests = (
         (CS_ARCH_SPARC, CS_MODE_BIG_ENDIAN, "Sparc", 0),
         (CS_ARCH_SYSZ, 0, "SystemZ", 0),
         (CS_ARCH_XCORE, 0, "XCore", 0),
+        (CS_ARCH_M68K, 0, "M68K", 0),
+        (CS_ARCH_RISCV, CS_MODE_RISCV32, "riscv32", 0),
+        (CS_ARCH_RISCV, CS_MODE_RISCV64, "riscv64", 0),
         )
 
 

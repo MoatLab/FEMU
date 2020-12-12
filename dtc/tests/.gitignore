@@ -1,11 +1,14 @@
 *.dtb
 *.dts.test.s
 *.test.dts
+*.test.dt.yaml
 tmp.*
+/fs/
 /add_subnode_with_nops
 /addr_size_cells
 /addr_size_cells2
 /appendprop[12]
+/appendprop_addrrange
 /asm_tree_dump
 /boot-cpuid
 /char_literal
@@ -26,8 +29,10 @@ tmp.*
 /get_path
 /get_phandle
 /getprop
+/get_prop_offset
 /incbin
 /integer-expressions
+/fs_tree1
 /mangle-layout
 /move_and_save
 /node_check_compatible
@@ -51,6 +56,7 @@ tmp.*
 /references
 /root_node
 /rw_tree1
+/rw_oom
 /set_name
 /setprop
 /setprop_inplace

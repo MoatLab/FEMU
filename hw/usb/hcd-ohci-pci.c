@@ -19,20 +19,22 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
 #include "qapi/error.h"
 #include "qemu/timer.h"
 #include "hw/usb.h"
+#include "migration/vmstate.h"
 #include "hw/pci/pci.h"
 #include "hw/sysbus.h"
 #include "hw/qdev-dma.h"
+#include "hw/qdev-properties.h"
 #include "trace.h"
 #include "hcd-ohci.h"
+#include "qom/object.h"
 
 #define TYPE_PCI_OHCI "pci-ohci"
-#define PCI_OHCI(obj) OBJECT_CHECK(OHCIPCIState, (obj), TYPE_PCI_OHCI)
+OBJECT_DECLARE_SIMPLE_TYPE(OHCIPCIState, PCI_OHCI)
 
-typedef struct {
+struct OHCIPCIState {
     /*< private >*/
     PCIDevice parent_obj;
     /*< public >*/
@@ -41,7 +43,7 @@ typedef struct {
     char *masterbus;
     uint32_t num_ports;
     uint32_t firstport;
-} OHCIPCIState;
+};
 
 /**
  * A typical PCI OHCI will additionally set PERR in its configspace to
@@ -138,7 +140,7 @@ static void ohci_pci_class_init(ObjectClass *klass, void *data)
     k->class_id = PCI_CLASS_SERIAL_USB;
     set_bit(DEVICE_CATEGORY_USB, dc->categories);
     dc->desc = "Apple USB Controller";
-    dc->props = ohci_pci_properties;
+    device_class_set_props(dc, ohci_pci_properties);
     dc->hotpluggable = false;
     dc->vmsd = &vmstate_ohci;
     dc->reset = usb_ohci_reset_pci;

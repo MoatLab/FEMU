@@ -16,17 +16,18 @@
 #define VHOST_USER_BLK_H
 
 #include "standard-headers/linux/virtio_blk.h"
-#include "hw/qdev.h"
 #include "hw/block/block.h"
 #include "chardev/char-fe.h"
 #include "hw/virtio/vhost.h"
 #include "hw/virtio/vhost-user.h"
+#include "qom/object.h"
 
 #define TYPE_VHOST_USER_BLK "vhost-user-blk"
-#define VHOST_USER_BLK(obj) \
-        OBJECT_CHECK(VHostUserBlk, (obj), TYPE_VHOST_USER_BLK)
+OBJECT_DECLARE_SIMPLE_TYPE(VHostUserBlk, VHOST_USER_BLK)
 
-typedef struct VHostUserBlk {
+#define VHOST_USER_BLK_AUTO_NUM_QUEUES UINT16_MAX
+
+struct VHostUserBlk {
     VirtIODevice parent_obj;
     CharBackend chardev;
     int32_t bootindex;
@@ -37,9 +38,19 @@ typedef struct VHostUserBlk {
     struct vhost_dev dev;
     struct vhost_inflight *inflight;
     VhostUserState vhost_user;
-    struct vhost_virtqueue *vqs;
-    guint watch;
+    struct vhost_virtqueue *vhost_vqs;
+    VirtQueue **virtqs;
+
+    /*
+     * There are at least two steps of initialization of the
+     * vhost-user device. The first is a "connect" step and
+     * second is a "start" step. Make a separation between
+     * those initialization phases by using two fields.
+     */
+    /* vhost_user_blk_connect/vhost_user_blk_disconnect */
     bool connected;
-} VHostUserBlk;
+    /* vhost_user_blk_start/vhost_user_blk_stop */
+    bool started_vu;
+};
 
 #endif

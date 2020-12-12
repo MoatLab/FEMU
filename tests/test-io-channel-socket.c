@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,6 +25,7 @@
 #include "socket-helpers.h"
 #include "qapi/error.h"
 #include "qemu/module.h"
+#include "qemu/main-loop.h"
 
 
 static void test_io_channel_set_socket_bufs(QIOChannel *src,
@@ -57,7 +58,7 @@ static void test_io_channel_setup_sync(SocketAddress *listen_addr,
     QIOChannelSocket *lioc;
 
     lioc = qio_channel_socket_new();
-    qio_channel_socket_listen_sync(lioc, listen_addr, &error_abort);
+    qio_channel_socket_listen_sync(lioc, listen_addr, 1, &error_abort);
 
     if (listen_addr->type == SOCKET_ADDRESS_TYPE_INET) {
         SocketAddress *laddr = qio_channel_socket_get_local_address(
@@ -113,7 +114,7 @@ static void test_io_channel_setup_async(SocketAddress *listen_addr,
 
     lioc = qio_channel_socket_new();
     qio_channel_socket_listen_async(
-        lioc, listen_addr,
+        lioc, listen_addr, 1,
         test_io_channel_complete, &data, NULL, NULL);
 
     g_main_loop_run(data.loop);
@@ -556,6 +557,7 @@ int main(int argc, char **argv)
     bool has_ipv4, has_ipv6;
 
     module_call_init(MODULE_INIT_QOM);
+    qemu_init_main_loop(&error_abort);
     socket_init();
 
     g_test_init(&argc, &argv, NULL);
@@ -566,7 +568,8 @@ int main(int argc, char **argv)
      * with either IPv4 or IPv6 disabled.
      */
     if (socket_check_protocol_support(&has_ipv4, &has_ipv6) < 0) {
-        return 1;
+        g_printerr("socket_check_protocol_support() failed\n");
+        goto end;
     }
 
     if (has_ipv4) {
@@ -595,5 +598,6 @@ int main(int argc, char **argv)
                     test_io_channel_unix_listen_cleanup);
 #endif /* _WIN32 */
 
+end:
     return g_test_run();
 }

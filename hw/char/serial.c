@@ -25,13 +25,16 @@
 
 #include "qemu/osdep.h"
 #include "hw/char/serial.h"
+#include "hw/irq.h"
+#include "migration/vmstate.h"
 #include "chardev/char-serial.h"
 #include "qapi/error.h"
 #include "qemu/timer.h"
+#include "sysemu/reset.h"
+#include "sysemu/runstate.h"
 #include "qemu/error-report.h"
 #include "trace.h"
-
-//#define DEBUG_SERIAL
+#include "hw/qdev-properties.h"
 
 #define UART_LCR_DLAB	0x80	/* Divisor latch access bit */
 
@@ -96,14 +99,6 @@
 #define UART_FCR_FE         0x01    /* FIFO Enable */
 
 #define MAX_XMIT_RETRY      4
-
-#ifdef DEBUG_SERIAL
-#define DPRINTF(fmt, ...) \
-do { fprintf(stderr, "serial: " fmt , ## __VA_ARGS__); } while (0)
-#else
-#define DPRINTF(fmt, ...) \
-do {} while (0)
-#endif
 
 static void serial_receive1(void *opaque, const uint8_t *buf, int size);
 static void serial_xmit(SerialState *s);
@@ -182,9 +177,7 @@ static void serial_update_parameters(SerialState *s)
     ssp.stop_bits = stop_bits;
     s->char_transmit_time =  (NANOSECONDS_PER_SECOND / speed) * frame_size;
     qemu_chr_fe_ioctl(&s->chr, CHR_IOCTL_SERIAL_SET_PARAMS, &ssp);
-
-    DPRINTF("speed=%.2f parity=%c data=%d stop=%d\n",
-           speed, parity, data_bits, stop_bits);
+    trace_serial_update_parameters(speed, parity, data_bits, stop_bits);
 }
 
 static void serial_update_msl(SerialState *s)
@@ -339,8 +332,8 @@ static void serial_ioport_write(void *opaque, hwaddr addr, uint64_t val,
 {
     SerialState *s = opaque;
 
-    addr &= 7;
-    trace_serial_ioport_write(addr, val);
+    assert(size == 1 && addr < 8);
+    trace_serial_write(addr, val);
     switch(addr) {
     default:
     case 0:
@@ -480,7 +473,7 @@ static uint64_t serial_ioport_read(void *opaque, hwaddr addr, unsigned size)
     SerialState *s = opaque;
     uint32_t ret;
 
-    addr &= 7;
+    assert(size == 1 && addr < 8);
     switch(addr) {
     default:
     case 0:
@@ -557,7 +550,7 @@ static uint64_t serial_ioport_read(void *opaque, hwaddr addr, unsigned size)
         ret = s->scr;
         break;
     }
-    trace_serial_ioport_read(addr, ret);
+    trace_serial_read(addr, ret);
     return ret;
 }
 
@@ -630,10 +623,9 @@ static void serial_receive1(void *opaque, const uint8_t *buf, int size)
     serial_update_irq(s);
 }
 
-static void serial_event(void *opaque, int event)
+static void serial_event(void *opaque, QEMUChrEvent event)
 {
     SerialState *s = opaque;
-    DPRINTF("event %x\n", event);
     if (event == CHR_EVENT_BREAK)
         serial_receive_break(s);
 }
@@ -929,8 +921,10 @@ static int serial_be_change(void *opaque)
     return 0;
 }
 
-void serial_realize_core(SerialState *s, Error **errp)
+static void serial_realize(DeviceState *dev, Error **errp)
 {
+    SerialState *s = SERIAL(dev);
+
     s->modem_status_poll = timer_new_ns(QEMU_CLOCK_VIRTUAL, (QEMUTimerCB *) serial_update_msl, s);
 
     s->fifo_timeout_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, (QEMUTimerCB *) fifo_timeout_int, s);
@@ -943,8 +937,10 @@ void serial_realize_core(SerialState *s, Error **errp)
     serial_reset(s);
 }
 
-void serial_exit_core(SerialState *s)
+static void serial_unrealize(DeviceState *dev)
 {
+    SerialState *s = SERIAL(dev);
+
     qemu_chr_fe_deinit(&s->chr, false);
 
     timer_del(s->modem_status_poll);
@@ -976,40 +972,45 @@ const MemoryRegionOps serial_io_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
-SerialState *serial_init(int base, qemu_irq irq, int baudbase,
-                         Chardev *chr, MemoryRegion *system_io)
+static Property serial_properties[] = {
+    DEFINE_PROP_CHR("chardev", SerialState, chr),
+    DEFINE_PROP_UINT32("baudbase", SerialState, baudbase, 115200),
+    DEFINE_PROP_BOOL("wakeup", SerialState, wakeup, false),
+    DEFINE_PROP_END_OF_LIST(),
+};
+
+static void serial_class_init(ObjectClass *klass, void* data)
 {
-    SerialState *s;
+    DeviceClass *dc = DEVICE_CLASS(klass);
 
-    s = g_malloc0(sizeof(SerialState));
-
-    s->irq = irq;
-    s->baudbase = baudbase;
-    qemu_chr_fe_init(&s->chr, chr, &error_abort);
-    serial_realize_core(s, &error_fatal);
-
-    vmstate_register(NULL, base, &vmstate_serial, s);
-
-    memory_region_init_io(&s->io, NULL, &serial_io_ops, s, "serial", 8);
-    memory_region_add_subregion(system_io, base, &s->io);
-
-    return s;
+    /* internal device for serialio/serialmm, not user-creatable */
+    dc->user_creatable = false;
+    dc->realize = serial_realize;
+    dc->unrealize = serial_unrealize;
+    device_class_set_props(dc, serial_properties);
 }
+
+static const TypeInfo serial_info = {
+    .name = TYPE_SERIAL,
+    .parent = TYPE_DEVICE,
+    .instance_size = sizeof(SerialState),
+    .class_init = serial_class_init,
+};
 
 /* Memory mapped interface */
 static uint64_t serial_mm_read(void *opaque, hwaddr addr,
                                unsigned size)
 {
-    SerialState *s = opaque;
-    return serial_ioport_read(s, addr >> s->it_shift, 1);
+    SerialMM *s = SERIAL_MM(opaque);
+    return serial_ioport_read(&s->serial, addr >> s->regshift, 1);
 }
 
 static void serial_mm_write(void *opaque, hwaddr addr,
                             uint64_t value, unsigned size)
 {
-    SerialState *s = opaque;
+    SerialMM *s = SERIAL_MM(opaque);
     value &= 255;
-    serial_ioport_write(s, addr >> s->it_shift, value, 1);
+    serial_ioport_write(&s->serial, addr >> s->regshift, value, 1);
 }
 
 static const MemoryRegionOps serial_mm_ops[3] = {
@@ -1036,25 +1037,95 @@ static const MemoryRegionOps serial_mm_ops[3] = {
     },
 };
 
-SerialState *serial_mm_init(MemoryRegion *address_space,
-                            hwaddr base, int it_shift,
-                            qemu_irq irq, int baudbase,
-                            Chardev *chr, enum device_endian end)
+static void serial_mm_realize(DeviceState *dev, Error **errp)
 {
-    SerialState *s;
+    SerialMM *smm = SERIAL_MM(dev);
+    SerialState *s = &smm->serial;
 
-    s = g_malloc0(sizeof(SerialState));
+    if (!qdev_realize(DEVICE(s), NULL, errp)) {
+        return;
+    }
 
-    s->it_shift = it_shift;
-    s->irq = irq;
-    s->baudbase = baudbase;
-    qemu_chr_fe_init(&s->chr, chr, &error_abort);
-
-    serial_realize_core(s, &error_fatal);
-    vmstate_register(NULL, base, &vmstate_serial, s);
-
-    memory_region_init_io(&s->io, NULL, &serial_mm_ops[end], s,
-                          "serial", 8 << it_shift);
-    memory_region_add_subregion(address_space, base, &s->io);
-    return s;
+    memory_region_init_io(&s->io, OBJECT(dev),
+                          &serial_mm_ops[smm->endianness], smm, "serial",
+                          8 << smm->regshift);
+    sysbus_init_mmio(SYS_BUS_DEVICE(smm), &s->io);
+    sysbus_init_irq(SYS_BUS_DEVICE(smm), &smm->serial.irq);
 }
+
+static const VMStateDescription vmstate_serial_mm = {
+    .name = "serial",
+    .version_id = 3,
+    .minimum_version_id = 2,
+    .fields = (VMStateField[]) {
+        VMSTATE_STRUCT(serial, SerialMM, 0, vmstate_serial, SerialState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+SerialMM *serial_mm_init(MemoryRegion *address_space,
+                         hwaddr base, int regshift,
+                         qemu_irq irq, int baudbase,
+                         Chardev *chr, enum device_endian end)
+{
+    SerialMM *smm = SERIAL_MM(qdev_new(TYPE_SERIAL_MM));
+    MemoryRegion *mr;
+
+    qdev_prop_set_uint8(DEVICE(smm), "regshift", regshift);
+    qdev_prop_set_uint32(DEVICE(smm), "baudbase", baudbase);
+    qdev_prop_set_chr(DEVICE(smm), "chardev", chr);
+    qdev_set_legacy_instance_id(DEVICE(smm), base, 2);
+    qdev_prop_set_uint8(DEVICE(smm), "endianness", end);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(smm), &error_fatal);
+
+    sysbus_connect_irq(SYS_BUS_DEVICE(smm), 0, irq);
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(smm), 0);
+    memory_region_add_subregion(address_space, base, mr);
+
+    return smm;
+}
+
+static void serial_mm_instance_init(Object *o)
+{
+    SerialMM *smm = SERIAL_MM(o);
+
+    object_initialize_child(o, "serial", &smm->serial, TYPE_SERIAL);
+
+    qdev_alias_all_properties(DEVICE(&smm->serial), o);
+}
+
+static Property serial_mm_properties[] = {
+    /*
+     * Set the spacing between adjacent memory-mapped UART registers.
+     * Each register will be at (1 << regshift) bytes after the
+     * previous one.
+     */
+    DEFINE_PROP_UINT8("regshift", SerialMM, regshift, 0),
+    DEFINE_PROP_UINT8("endianness", SerialMM, endianness, DEVICE_NATIVE_ENDIAN),
+    DEFINE_PROP_END_OF_LIST(),
+};
+
+static void serial_mm_class_init(ObjectClass *oc, void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(oc);
+
+    device_class_set_props(dc, serial_mm_properties);
+    dc->realize = serial_mm_realize;
+    dc->vmsd = &vmstate_serial_mm;
+}
+
+static const TypeInfo serial_mm_info = {
+    .name = TYPE_SERIAL_MM,
+    .parent = TYPE_SYS_BUS_DEVICE,
+    .class_init = serial_mm_class_init,
+    .instance_init = serial_mm_instance_init,
+    .instance_size = sizeof(SerialMM),
+};
+
+static void serial_register_types(void)
+{
+    type_register_static(&serial_info);
+    type_register_static(&serial_mm_info);
+}
+
+type_init(serial_register_types)

@@ -33,8 +33,10 @@
 #include "qapi/error.h"
 #include "qemu/timer.h"
 #include "chardev/char-fe.h"
-#include "sysemu/sysemu.h"
 #include "hw/ipmi/ipmi.h"
+#include "hw/qdev-properties.h"
+#include "migration/vmstate.h"
+#include "qom/object.h"
 
 #define VM_MSG_CHAR        0xA0 /* Marks end of message */
 #define VM_CMD_CHAR        0xA1 /* Marks end of a command */
@@ -60,9 +62,8 @@
 #define VM_CMD_GRACEFUL_SHUTDOWN   0x09
 
 #define TYPE_IPMI_BMC_EXTERN "ipmi-bmc-extern"
-#define IPMI_BMC_EXTERN(obj) OBJECT_CHECK(IPMIBmcExtern, (obj), \
-                                        TYPE_IPMI_BMC_EXTERN)
-typedef struct IPMIBmcExtern {
+OBJECT_DECLARE_SIMPLE_TYPE(IPMIBmcExtern, IPMI_BMC_EXTERN)
+struct IPMIBmcExtern {
     IPMIBmc parent;
 
     CharBackend chr;
@@ -84,11 +85,7 @@ typedef struct IPMIBmcExtern {
 
     /* A reset event is pending to be sent upstream. */
     bool send_reset;
-} IPMIBmcExtern;
-
-static int can_receive(void *opaque);
-static void receive(void *opaque, const uint8_t *buf, int size);
-static void chr_event(void *opaque, int event);
+};
 
 static unsigned char
 ipmb_checksum(const unsigned char *data, int size, unsigned char start)
@@ -176,8 +173,7 @@ static void addchar(IPMIBmcExtern *ibe, unsigned char ch)
         ibe->outbuf[ibe->outlen] = VM_ESCAPE_CHAR;
         ibe->outlen++;
         ch |= 0x10;
-        /* No break */
-
+        /* fall through */
     default:
         ibe->outbuf[ibe->outlen] = ch;
         ibe->outlen++;
@@ -383,7 +379,7 @@ static void receive(void *opaque, const uint8_t *buf, int size)
     handle_hw_op(ibe, hw_op);
 }
 
-static void chr_event(void *opaque, int event)
+static void chr_event(void *opaque, QEMUChrEvent event)
 {
     IPMIBmcExtern *ibe = opaque;
     IPMIInterface *s = ibe->parent.intf;
@@ -438,6 +434,12 @@ static void chr_event(void *opaque, int event)
             ibe->inbuf[3] = IPMI_CC_BMC_INIT_IN_PROGRESS;
             k->handle_rsp(s, ibe->outbuf[0], ibe->inbuf + 1, 3);
         }
+        break;
+
+    case CHR_EVENT_BREAK:
+    case CHR_EVENT_MUX_IN:
+    case CHR_EVENT_MUX_OUT:
+        /* Ignore */
         break;
     }
 }
@@ -526,7 +528,7 @@ static void ipmi_bmc_extern_class_init(ObjectClass *oc, void *data)
     bk->handle_reset = ipmi_bmc_extern_handle_reset;
     dc->hotpluggable = false;
     dc->realize = ipmi_bmc_extern_realize;
-    dc->props = ipmi_bmc_extern_properties;
+    device_class_set_props(dc, ipmi_bmc_extern_properties);
 }
 
 static const TypeInfo ipmi_bmc_extern_type = {

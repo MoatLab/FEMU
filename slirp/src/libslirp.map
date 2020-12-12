@@ -19,3 +19,12 @@ global:
 local:
     *;
 };
+
+SLIRP_4.1 {
+    slirp_new;
+} SLIRP_4.0;
+
+SLIRP_4.2 {
+    slirp_add_unix;
+    slirp_remove_guestfwd;
+} SLIRP_4.1;

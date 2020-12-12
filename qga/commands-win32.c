@@ -21,10 +21,11 @@
 #ifdef CONFIG_QGA_NTDDSCSI
 #include <winioctl.h>
 #include <ntddscsi.h>
+#endif
 #include <setupapi.h>
 #include <cfgmgr32.h>
 #include <initguid.h>
-#endif
+#include <devpropdef.h>
 #include <lm.h>
 #include <wtsapi32.h>
 #include <wininet.h>
@@ -37,6 +38,40 @@
 #include "qemu/queue.h"
 #include "qemu/host-utils.h"
 #include "qemu/base64.h"
+#include "commands-common.h"
+
+/*
+ * The following should be in devpkey.h, but it isn't. The key names were
+ * prefixed to avoid (future) name clashes. Once the definitions get into
+ * mingw the following lines can be removed.
+ */
+DEFINE_DEVPROPKEY(qga_DEVPKEY_NAME, 0xb725f130, 0x47ef, 0x101a, 0xa5,
+    0xf1, 0x02, 0x60, 0x8c, 0x9e, 0xeb, 0xac, 10);
+    /* DEVPROP_TYPE_STRING */
+DEFINE_DEVPROPKEY(qga_DEVPKEY_Device_HardwareIds, 0xa45c254e, 0xdf1c,
+    0x4efd, 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0, 3);
+    /* DEVPROP_TYPE_STRING_LIST */
+DEFINE_DEVPROPKEY(qga_DEVPKEY_Device_DriverDate, 0xa8b865dd, 0x2e3d,
+    0x4094, 0xad, 0x97, 0xe5, 0x93, 0xa7, 0xc, 0x75, 0xd6, 2);
+    /* DEVPROP_TYPE_FILETIME */
+DEFINE_DEVPROPKEY(qga_DEVPKEY_Device_DriverVersion, 0xa8b865dd, 0x2e3d,
+    0x4094, 0xad, 0x97, 0xe5, 0x93, 0xa7, 0xc, 0x75, 0xd6, 3);
+    /* DEVPROP_TYPE_STRING */
+/* The CM_Get_DevNode_PropertyW prototype is only sometimes in cfgmgr32.h */
+#ifndef CM_Get_DevNode_Property
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wredundant-decls"
+CMAPI CONFIGRET WINAPI CM_Get_DevNode_PropertyW(
+    DEVINST          dnDevInst,
+    CONST DEVPROPKEY * PropertyKey,
+    DEVPROPTYPE      * PropertyType,
+    PBYTE            PropertyBuffer,
+    PULONG           PropertyBufferSize,
+    ULONG            ulFlags
+);
+#define CM_Get_DevNode_Property CM_Get_DevNode_PropertyW
+#pragma GCC diagnostic pop
+#endif
 
 #ifndef SHTDN_REASON_FLAG_PLANNED
 #define SHTDN_REASON_FLAG_PLANNED 0x80000000
@@ -50,11 +85,11 @@
 
 #define INVALID_SET_FILE_POINTER ((DWORD)-1)
 
-typedef struct GuestFileHandle {
+struct GuestFileHandle {
     int64_t id;
     HANDLE fh;
     QTAILQ_ENTRY(GuestFileHandle) next;
-} GuestFileHandle;
+};
 
 static struct {
     QTAILQ_HEAD(, GuestFileHandle) filehandles;
@@ -126,7 +161,7 @@ static int64_t guest_file_handle_add(HANDLE fh, Error **errp)
     return handle;
 }
 
-static GuestFileHandle *guest_file_handle_find(int64_t id, Error **errp)
+GuestFileHandle *guest_file_handle_find(int64_t id, Error **errp)
 {
     GuestFileHandle *gfh;
     QTAILQ_FOREACH(gfh, &guest_file_state.filehandles, next) {
@@ -277,13 +312,10 @@ out:
 static void execute_async(DWORD WINAPI (*func)(LPVOID), LPVOID opaque,
                           Error **errp)
 {
-    Error *local_err = NULL;
-
     HANDLE thread = CreateThread(NULL, 0, func, opaque, 0, NULL);
     if (!thread) {
-        error_setg(&local_err, QERR_QGA_COMMAND_FAILED,
+        error_setg(errp, QERR_QGA_COMMAND_FAILED,
                    "failed to dispatch asynchronous command");
-        error_propagate(errp, local_err);
     }
 }
 
@@ -315,38 +347,25 @@ void qmp_guest_shutdown(bool has_mode, const char *mode, Error **errp)
     }
 
     if (!ExitWindowsEx(shutdown_flag, SHTDN_REASON_FLAG_PLANNED)) {
-        slog("guest-shutdown failed: %lu", GetLastError());
-        error_setg(errp, QERR_UNDEFINED_ERROR);
+        g_autofree gchar *emsg = g_win32_error_message(GetLastError());
+        slog("guest-shutdown failed: %s", emsg);
+        error_setg_win32(errp, GetLastError(), "guest-shutdown failed");
     }
 }
 
-GuestFileRead *qmp_guest_file_read(int64_t handle, bool has_count,
-                                   int64_t count, Error **errp)
+GuestFileRead *guest_file_read_unsafe(GuestFileHandle *gfh,
+                                      int64_t count, Error **errp)
 {
     GuestFileRead *read_data = NULL;
     guchar *buf;
-    HANDLE fh;
+    HANDLE fh = gfh->fh;
     bool is_ok;
     DWORD read_count;
-    GuestFileHandle *gfh = guest_file_handle_find(handle, errp);
 
-    if (!gfh) {
-        return NULL;
-    }
-    if (!has_count) {
-        count = QGA_READ_COUNT_DEFAULT;
-    } else if (count < 0 || count >= UINT32_MAX) {
-        error_setg(errp, "value '%" PRId64
-                   "' is invalid for argument count", count);
-        return NULL;
-    }
-
-    fh = gfh->fh;
-    buf = g_malloc0(count+1);
+    buf = g_malloc0(count + 1);
     is_ok = ReadFile(fh, buf, count, &read_count, NULL);
     if (!is_ok) {
         error_setg_win32(errp, GetLastError(), "failed to read file");
-        slog("guest-file-read failed, handle %" PRId64, handle);
     } else {
         buf[read_count] = 0;
         read_data = g_new0(GuestFileRead, 1);
@@ -960,10 +979,111 @@ out:
     return list;
 }
 
+GuestDiskInfoList *qmp_guest_get_disks(Error **errp)
+{
+    ERRP_GUARD();
+    GuestDiskInfoList *new = NULL, *ret = NULL;
+    HDEVINFO dev_info;
+    SP_DEVICE_INTERFACE_DATA dev_iface_data;
+    int i;
+
+    dev_info = SetupDiGetClassDevs(&GUID_DEVINTERFACE_DISK, 0, 0,
+        DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+    if (dev_info == INVALID_HANDLE_VALUE) {
+        error_setg_win32(errp, GetLastError(), "failed to get device tree");
+        return NULL;
+    }
+
+    g_debug("enumerating devices");
+    dev_iface_data.cbSize = sizeof(SP_DEVICE_INTERFACE_DATA);
+    for (i = 0;
+        SetupDiEnumDeviceInterfaces(dev_info, NULL, &GUID_DEVINTERFACE_DISK,
+            i, &dev_iface_data);
+        i++) {
+        GuestDiskAddress *address = NULL;
+        GuestDiskInfo *disk = NULL;
+        Error *local_err = NULL;
+        g_autofree PSP_DEVICE_INTERFACE_DETAIL_DATA
+            pdev_iface_detail_data = NULL;
+        STORAGE_DEVICE_NUMBER sdn;
+        HANDLE dev_file;
+        DWORD size = 0;
+        BOOL result;
+        int attempt;
+
+        g_debug("  getting device path");
+        for (attempt = 0, result = FALSE; attempt < 2 && !result; attempt++) {
+            result = SetupDiGetDeviceInterfaceDetail(dev_info,
+                &dev_iface_data, pdev_iface_detail_data, size, &size, NULL);
+            if (result) {
+                break;
+            }
+            if (GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
+                pdev_iface_detail_data = g_realloc(pdev_iface_detail_data,
+                    size);
+                pdev_iface_detail_data->cbSize =
+                    sizeof(*pdev_iface_detail_data);
+            } else {
+                g_debug("failed to get device interface details");
+                break;
+            }
+        }
+        if (!result) {
+            g_debug("skipping device");
+            continue;
+        }
+
+        g_debug("  device: %s", pdev_iface_detail_data->DevicePath);
+        dev_file = CreateFile(pdev_iface_detail_data->DevicePath, 0,
+            FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+        if (!DeviceIoControl(dev_file, IOCTL_STORAGE_GET_DEVICE_NUMBER,
+                NULL, 0, &sdn, sizeof(sdn), &size, NULL)) {
+            CloseHandle(dev_file);
+            debug_error("failed to get storage device number");
+            continue;
+        }
+        CloseHandle(dev_file);
+
+        disk = g_new0(GuestDiskInfo, 1);
+        disk->name = g_strdup_printf("\\\\.\\PhysicalDrive%lu",
+            sdn.DeviceNumber);
+
+        g_debug("  number: %lu", sdn.DeviceNumber);
+        address = g_malloc0(sizeof(GuestDiskAddress));
+        address->has_dev = true;
+        address->dev = g_strdup(disk->name);
+        get_single_disk_info(sdn.DeviceNumber, address, &local_err);
+        if (local_err) {
+            g_debug("failed to get disk info: %s",
+                error_get_pretty(local_err));
+            error_free(local_err);
+            qapi_free_GuestDiskAddress(address);
+            address = NULL;
+        } else {
+            disk->address = address;
+            disk->has_address = true;
+        }
+
+        new = g_malloc0(sizeof(GuestDiskInfoList));
+        new->value = disk;
+        new->next = ret;
+        ret = new;
+    }
+
+    SetupDiDestroyDeviceInfoList(dev_info);
+    return ret;
+}
+
 #else
 
 static GuestDiskAddressList *build_guest_disk_info(char *guid, Error **errp)
 {
+    return NULL;
+}
+
+GuestDiskInfoList *qmp_guest_get_disks(Error **errp)
+{
+    error_setg(errp, QERR_UNSUPPORTED);
     return NULL;
 }
 
@@ -973,11 +1093,13 @@ static GuestFilesystemInfo *build_guest_fsinfo(char *guid, Error **errp)
 {
     DWORD info_size;
     char mnt, *mnt_point;
+    wchar_t wfs_name[32];
     char fs_name[32];
-    char vol_info[MAX_PATH+1];
+    wchar_t vol_info[MAX_PATH + 1];
     size_t len;
     uint64_t i64FreeBytesToCaller, i64TotalBytes, i64FreeBytes;
     GuestFilesystemInfo *fs = NULL;
+    HANDLE hLocalDiskHandle = NULL;
 
     GetVolumePathNamesForVolumeName(guid, (LPCH)&mnt, 0, &info_size);
     if (GetLastError() != ERROR_MORE_DATA) {
@@ -992,18 +1114,27 @@ static GuestFilesystemInfo *build_guest_fsinfo(char *guid, Error **errp)
         goto free;
     }
 
+    hLocalDiskHandle = CreateFile(guid, 0 , 0, NULL, OPEN_EXISTING,
+                                  FILE_ATTRIBUTE_NORMAL |
+                                  FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (INVALID_HANDLE_VALUE == hLocalDiskHandle) {
+        error_setg_win32(errp, GetLastError(), "failed to get handle for volume");
+        goto free;
+    }
+
     len = strlen(mnt_point);
     mnt_point[len] = '\\';
     mnt_point[len+1] = 0;
-    if (!GetVolumeInformation(mnt_point, vol_info, sizeof(vol_info), NULL, NULL,
-                              NULL, (LPSTR)&fs_name, sizeof(fs_name))) {
+
+    if (!GetVolumeInformationByHandleW(hLocalDiskHandle, vol_info,
+                                       sizeof(vol_info), NULL, NULL, NULL,
+                                       (LPWSTR) & wfs_name, sizeof(wfs_name))) {
         if (GetLastError() != ERROR_NOT_READY) {
             error_setg_win32(errp, GetLastError(), "failed to get volume info");
         }
         goto free;
     }
 
-    fs_name[sizeof(fs_name) - 1] = 0;
     fs = g_malloc(sizeof(*fs));
     fs->name = g_strdup(guid);
     fs->has_total_bytes = false;
@@ -1022,9 +1153,11 @@ static GuestFilesystemInfo *build_guest_fsinfo(char *guid, Error **errp)
             fs->has_used_bytes = true;
         }
     }
+    wcstombs(fs_name, wfs_name, sizeof(wfs_name));
     fs->type = g_strdup(fs_name);
     fs->disk = build_guest_disk_info(guid, errp);
 free:
+    CloseHandle(hLocalDiskHandle);
     g_free(mnt_point);
     return fs;
 }
@@ -1042,8 +1175,12 @@ GuestFilesystemInfoList *qmp_guest_get_fsinfo(Error **errp)
     }
 
     do {
-        GuestFilesystemInfo *info = build_guest_fsinfo(guid, errp);
-        if (info == NULL) {
+        Error *local_err = NULL;
+        GuestFilesystemInfo *info = build_guest_fsinfo(guid, &local_err);
+        if (local_err) {
+            g_debug("failed to get filesystem info, ignoring error: %s",
+                    error_get_pretty(local_err));
+            error_free(local_err);
             continue;
         }
         new = g_malloc(sizeof(*ret));
@@ -1282,35 +1419,31 @@ typedef enum {
 static void check_suspend_mode(GuestSuspendMode mode, Error **errp)
 {
     SYSTEM_POWER_CAPABILITIES sys_pwr_caps;
-    Error *local_err = NULL;
 
     ZeroMemory(&sys_pwr_caps, sizeof(sys_pwr_caps));
     if (!GetPwrCapabilities(&sys_pwr_caps)) {
-        error_setg(&local_err, QERR_QGA_COMMAND_FAILED,
+        error_setg(errp, QERR_QGA_COMMAND_FAILED,
                    "failed to determine guest suspend capabilities");
-        goto out;
+        return;
     }
 
     switch (mode) {
     case GUEST_SUSPEND_MODE_DISK:
         if (!sys_pwr_caps.SystemS4) {
-            error_setg(&local_err, QERR_QGA_COMMAND_FAILED,
+            error_setg(errp, QERR_QGA_COMMAND_FAILED,
                        "suspend-to-disk not supported by OS");
         }
         break;
     case GUEST_SUSPEND_MODE_RAM:
         if (!sys_pwr_caps.SystemS3) {
-            error_setg(&local_err, QERR_QGA_COMMAND_FAILED,
+            error_setg(errp, QERR_QGA_COMMAND_FAILED,
                        "suspend-to-ram not supported by OS");
         }
         break;
     default:
-        error_setg(&local_err, QERR_INVALID_PARAMETER_VALUE, "mode",
+        error_setg(errp, QERR_INVALID_PARAMETER_VALUE, "mode",
                    "GuestSuspendMode");
     }
-
-out:
-    error_propagate(errp, local_err);
 }
 
 static DWORD WINAPI do_suspend(LPVOID opaque)
@@ -1319,7 +1452,8 @@ static DWORD WINAPI do_suspend(LPVOID opaque)
     DWORD ret = 0;
 
     if (!SetSuspendState(*mode == GUEST_SUSPEND_MODE_DISK, TRUE, TRUE)) {
-        slog("failed to suspend guest, %lu", GetLastError());
+        g_autofree gchar *emsg = g_win32_error_message(GetLastError());
+        slog("failed to suspend guest: %s", emsg);
         ret = -1;
     }
     g_free(mode);
@@ -1333,9 +1467,16 @@ void qmp_guest_suspend_disk(Error **errp)
 
     *mode = GUEST_SUSPEND_MODE_DISK;
     check_suspend_mode(*mode, &local_err);
+    if (local_err) {
+        goto out;
+    }
     acquire_privilege(SE_SHUTDOWN_NAME, &local_err);
+    if (local_err) {
+        goto out;
+    }
     execute_async(do_suspend, mode, &local_err);
 
+out:
     if (local_err) {
         error_propagate(errp, local_err);
         g_free(mode);
@@ -1349,9 +1490,16 @@ void qmp_guest_suspend_ram(Error **errp)
 
     *mode = GUEST_SUSPEND_MODE_RAM;
     check_suspend_mode(*mode, &local_err);
+    if (local_err) {
+        goto out;
+    }
     acquire_privilege(SE_SHUTDOWN_NAME, &local_err);
+    if (local_err) {
+        goto out;
+    }
     execute_async(do_suspend, mode, &local_err);
 
+out:
     if (local_err) {
         error_propagate(errp, local_err);
         g_free(mode);
@@ -1387,12 +1535,12 @@ static IP_ADAPTER_ADDRESSES *guest_get_adapters_addresses(Error **errp)
 static char *guest_wctomb_dup(WCHAR *wstr)
 {
     char *str;
-    size_t i;
+    size_t str_size;
 
-    i = wcslen(wstr) + 1;
-    str = g_malloc(i);
-    WideCharToMultiByte(CP_ACP, WC_COMPOSITECHECK,
-                        wstr, -1, str, i, NULL, NULL);
+    str_size = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, NULL, 0, NULL, NULL);
+    /* add 1 to str_size for NULL terminator */
+    str = g_malloc(str_size + 1);
+    WideCharToMultiByte(CP_UTF8, 0, wstr, -1, str, str_size, NULL, NULL);
     return str;
 }
 
@@ -1594,6 +1742,12 @@ out:
     return head;
 }
 
+static int64_t filetime_to_ns(const FILETIME *tf)
+{
+    return ((((int64_t)tf->dwHighDateTime << 32) | tf->dwLowDateTime)
+            - W32_FT_OFFSET) * 100;
+}
+
 int64_t qmp_guest_get_time(Error **errp)
 {
     SYSTEMTIME ts = {0};
@@ -1610,8 +1764,7 @@ int64_t qmp_guest_get_time(Error **errp)
         return -1;
     }
 
-    return ((((int64_t)tf.dwHighDateTime << 32) | tf.dwLowDateTime)
-                - W32_FT_OFFSET) * 100;
+    return filetime_to_ns(&tf);
 }
 
 void qmp_guest_set_time(bool has_time, int64_t time_ns, Error **errp)
@@ -1894,7 +2047,7 @@ GList *ga_command_blacklist_init(GList *blacklist)
         "guest-suspend-hybrid",
         "guest-set-vcpus",
         "guest-get-memory-blocks", "guest-set-memory-blocks",
-        "guest-get-memory-block-size",
+        "guest-get-memory-block-size", "guest-get-memory-block-info",
         NULL};
     char **p = (char **)list_unsupported;
 
@@ -1946,7 +2099,7 @@ typedef struct _GA_WTSINFOA {
 
 } GA_WTSINFOA;
 
-GuestUserList *qmp_guest_get_users(Error **err)
+GuestUserList *qmp_guest_get_users(Error **errp)
 {
 #define QGA_NANOSECONDS 10000000
 
@@ -2199,9 +2352,8 @@ GuestOSInfo *qmp_guest_get_osinfo(Error **errp)
     }
 
     server = os_version.wProductType != VER_NT_WORKSTATION;
-    product_name = ga_get_win_product_name(&local_err);
+    product_name = ga_get_win_product_name(errp);
     if (product_name == NULL) {
-        error_propagate(errp, local_err);
         return NULL;
     }
 
@@ -2233,4 +2385,177 @@ GuestOSInfo *qmp_guest_get_osinfo(Error **errp)
     info->variant_id = g_strdup(server ? "server" : "client");
 
     return info;
+}
+
+/*
+ * Safely get device property. Returned strings are using wide characters.
+ * Caller is responsible for freeing the buffer.
+ */
+static LPBYTE cm_get_property(DEVINST devInst, const DEVPROPKEY *propName,
+    PDEVPROPTYPE propType)
+{
+    CONFIGRET cr;
+    g_autofree LPBYTE buffer = NULL;
+    ULONG buffer_len = 0;
+
+    /* First query for needed space */
+    cr = CM_Get_DevNode_PropertyW(devInst, propName, propType,
+        buffer, &buffer_len, 0);
+    if (cr != CR_SUCCESS && cr != CR_BUFFER_SMALL) {
+
+        slog("failed to get property size, error=0x%lx", cr);
+        return NULL;
+    }
+    buffer = g_new0(BYTE, buffer_len + 1);
+    cr = CM_Get_DevNode_PropertyW(devInst, propName, propType,
+        buffer, &buffer_len, 0);
+    if (cr != CR_SUCCESS) {
+        slog("failed to get device property, error=0x%lx", cr);
+        return NULL;
+    }
+    return g_steal_pointer(&buffer);
+}
+
+static GStrv ga_get_hardware_ids(DEVINST devInstance)
+{
+    GArray *values = NULL;
+    DEVPROPTYPE cm_type;
+    LPWSTR id;
+    g_autofree LPWSTR property = (LPWSTR)cm_get_property(devInstance,
+        &qga_DEVPKEY_Device_HardwareIds, &cm_type);
+    if (property == NULL) {
+        slog("failed to get hardware IDs");
+        return NULL;
+    }
+    if (*property == '\0') {
+        /* empty list */
+        return NULL;
+    }
+    values = g_array_new(TRUE, TRUE, sizeof(gchar *));
+    for (id = property; '\0' != *id; id += lstrlenW(id) + 1) {
+        gchar *id8 = g_utf16_to_utf8(id, -1, NULL, NULL, NULL);
+        g_array_append_val(values, id8);
+    }
+    return (GStrv)g_array_free(values, FALSE);
+}
+
+/*
+ * https://docs.microsoft.com/en-us/windows-hardware/drivers/install/identifiers-for-pci-devices
+ */
+#define DEVICE_PCI_RE "PCI\\\\VEN_(1AF4|1B36)&DEV_([0-9A-B]{4})(&|$)"
+
+GuestDeviceInfoList *qmp_guest_get_devices(Error **errp)
+{
+    GuestDeviceInfoList *head = NULL, *cur_item = NULL, *item = NULL;
+    HDEVINFO dev_info = INVALID_HANDLE_VALUE;
+    SP_DEVINFO_DATA dev_info_data;
+    int i, j;
+    GError *gerr = NULL;
+    g_autoptr(GRegex) device_pci_re = NULL;
+    DEVPROPTYPE cm_type;
+
+    device_pci_re = g_regex_new(DEVICE_PCI_RE,
+        G_REGEX_ANCHORED | G_REGEX_OPTIMIZE, 0,
+        &gerr);
+    g_assert(device_pci_re != NULL);
+
+    dev_info_data.cbSize = sizeof(SP_DEVINFO_DATA);
+    dev_info = SetupDiGetClassDevs(0, 0, 0, DIGCF_PRESENT | DIGCF_ALLCLASSES);
+    if (dev_info == INVALID_HANDLE_VALUE) {
+        error_setg(errp, "failed to get device tree");
+        return NULL;
+    }
+
+    slog("enumerating devices");
+    for (i = 0; SetupDiEnumDeviceInfo(dev_info, i, &dev_info_data); i++) {
+        bool skip = true;
+        g_autofree LPWSTR name = NULL;
+        g_autofree LPFILETIME date = NULL;
+        g_autofree LPWSTR version = NULL;
+        g_auto(GStrv) hw_ids = NULL;
+        g_autoptr(GuestDeviceInfo) device = g_new0(GuestDeviceInfo, 1);
+        g_autofree char *vendor_id = NULL;
+        g_autofree char *device_id = NULL;
+
+        name = (LPWSTR)cm_get_property(dev_info_data.DevInst,
+            &qga_DEVPKEY_NAME, &cm_type);
+        if (name == NULL) {
+            slog("failed to get device description");
+            continue;
+        }
+        device->driver_name = g_utf16_to_utf8(name, -1, NULL, NULL, NULL);
+        if (device->driver_name == NULL) {
+            error_setg(errp, "conversion to utf8 failed (driver name)");
+            return NULL;
+        }
+        slog("querying device: %s", device->driver_name);
+        hw_ids = ga_get_hardware_ids(dev_info_data.DevInst);
+        if (hw_ids == NULL) {
+            continue;
+        }
+        for (j = 0; hw_ids[j] != NULL; j++) {
+            GMatchInfo *match_info;
+            GuestDeviceIdPCI *id;
+            if (!g_regex_match(device_pci_re, hw_ids[j], 0, &match_info)) {
+                continue;
+            }
+            skip = false;
+
+            vendor_id = g_match_info_fetch(match_info, 1);
+            device_id = g_match_info_fetch(match_info, 2);
+
+            device->id = g_new0(GuestDeviceId, 1);
+            device->has_id = true;
+            device->id->type = GUEST_DEVICE_TYPE_PCI;
+            id = &device->id->u.pci;
+            id->vendor_id = g_ascii_strtoull(vendor_id, NULL, 16);
+            id->device_id = g_ascii_strtoull(device_id, NULL, 16);
+
+            g_match_info_free(match_info);
+            break;
+        }
+        if (skip) {
+            continue;
+        }
+
+        version = (LPWSTR)cm_get_property(dev_info_data.DevInst,
+            &qga_DEVPKEY_Device_DriverVersion, &cm_type);
+        if (version == NULL) {
+            slog("failed to get driver version");
+            continue;
+        }
+        device->driver_version = g_utf16_to_utf8(version, -1, NULL,
+            NULL, NULL);
+        if (device->driver_version == NULL) {
+            error_setg(errp, "conversion to utf8 failed (driver version)");
+            return NULL;
+        }
+        device->has_driver_version = true;
+
+        date = (LPFILETIME)cm_get_property(dev_info_data.DevInst,
+            &qga_DEVPKEY_Device_DriverDate, &cm_type);
+        if (date == NULL) {
+            slog("failed to get driver date");
+            continue;
+        }
+        device->driver_date = filetime_to_ns(date);
+        device->has_driver_date = true;
+
+        slog("driver: %s\ndriver version: %" PRId64 ",%s\n",
+             device->driver_name, device->driver_date,
+             device->driver_version);
+        item = g_new0(GuestDeviceInfoList, 1);
+        item->value = g_steal_pointer(&device);
+        if (!cur_item) {
+            head = cur_item = item;
+        } else {
+            cur_item->next = item;
+            cur_item = item;
+        }
+    }
+
+    if (dev_info != INVALID_HANDLE_VALUE) {
+        SetupDiDestroyDeviceInfoList(dev_info);
+    }
+    return head;
 }

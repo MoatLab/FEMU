@@ -23,9 +23,13 @@
  */
 
 #include "qemu/osdep.h"
+#include "hw/irq.h"
+#include "hw/qdev-properties.h"
 #include "hw/sysbus.h"
+#include "migration/vmstate.h"
 #include "qemu/module.h"
 #include "trace.h"
+#include "qom/object.h"
 
 /* There are 3 versions of this chip used in SMP sun4m systems:
  * MCC (version 0, implementation 0) SS-600MP
@@ -123,9 +127,9 @@
 #define ECC_DIAG_MASK  (ECC_DIAG_SIZE - 1)
 
 #define TYPE_ECC_MEMCTL "eccmemctl"
-#define ECC_MEMCTL(obj) OBJECT_CHECK(ECCState, (obj), TYPE_ECC_MEMCTL)
+OBJECT_DECLARE_SIMPLE_TYPE(ECCState, ECC_MEMCTL)
 
-typedef struct ECCState {
+struct ECCState {
     SysBusDevice parent_obj;
 
     MemoryRegion iomem, iomem_diag;
@@ -133,7 +137,7 @@ typedef struct ECCState {
     uint32_t regs[ECC_NREGS];
     uint8_t diag[ECC_DIAG_SIZE];
     uint32_t version;
-} ECCState;
+};
 
 static void ecc_mem_write(void *opaque, hwaddr addr, uint64_t val,
                           unsigned size)
@@ -333,7 +337,7 @@ static void ecc_class_init(ObjectClass *klass, void *data)
     dc->realize = ecc_realize;
     dc->reset = ecc_reset;
     dc->vmsd = &vmstate_ecc;
-    dc->props = ecc_properties;
+    device_class_set_props(dc, ecc_properties);
 }
 
 static const TypeInfo ecc_info = {

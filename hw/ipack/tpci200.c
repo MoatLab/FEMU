@@ -11,9 +11,12 @@
 #include "qemu/osdep.h"
 #include "qemu/units.h"
 #include "hw/ipack/ipack.h"
+#include "hw/irq.h"
 #include "hw/pci/pci.h"
+#include "migration/vmstate.h"
 #include "qemu/bitops.h"
 #include "qemu/module.h"
+#include "qom/object.h"
 
 /* #define DEBUG_TPCI */
 
@@ -52,7 +55,7 @@
 #define REG_STATUS    0x0C
 #define IP_N_FROM_REG(REG) ((REG) / 2 - 1)
 
-typedef struct {
+struct TPCI200State {
     PCIDevice dev;
     IPackBus bus;
     MemoryRegion mmio;
@@ -65,12 +68,11 @@ typedef struct {
     uint8_t ctrl[N_MODULES];
     uint16_t status;
     uint8_t int_set;
-} TPCI200State;
+};
 
 #define TYPE_TPCI200 "tpci200"
 
-#define TPCI200(obj) \
-    OBJECT_CHECK(TPCI200State, (obj), TYPE_TPCI200)
+OBJECT_DECLARE_SIMPLE_TYPE(TPCI200State, TPCI200)
 
 static const uint8_t local_config_regs[] = {
     0x00, 0xFF, 0xFF, 0x0F, 0x00, 0xFC, 0xFF, 0x0F, 0x00, 0x00, 0x00,

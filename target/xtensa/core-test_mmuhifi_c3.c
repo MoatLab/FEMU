@@ -27,22 +27,21 @@
 
 #include "qemu/osdep.h"
 #include "cpu.h"
-#include "exec/exec-all.h"
 #include "exec/gdbstub.h"
+#include "qemu-common.h"
 #include "qemu/host-utils.h"
 
 #include "core-test_mmuhifi_c3/core-isa.h"
 #include "overlay_tool.h"
 
 #define xtensa_modules xtensa_modules_test_mmuhifi_c3
-#include "core-test_mmuhifi_c3/xtensa-modules.inc.c"
+#include "core-test_mmuhifi_c3/xtensa-modules.c.inc"
 
 static XtensaConfig test_mmuhifi_c3 __attribute__((unused)) = {
     .name = "test_mmuhifi_c3",
-    .options = XTENSA_OPTIONS,
     .gdb_regmap = {
         .reg = {
-#include "core-test_mmuhifi_c3/gdb-config.inc.c"
+#include "core-test_mmuhifi_c3/gdb-config.c.inc"
         }
     },
     .isa_internal = &xtensa_modules,

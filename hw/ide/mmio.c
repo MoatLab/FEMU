@@ -24,12 +24,14 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
 #include "hw/sysbus.h"
+#include "migration/vmstate.h"
 #include "qemu/module.h"
 #include "sysemu/dma.h"
 
 #include "hw/ide/internal.h"
+#include "hw/qdev-properties.h"
+#include "qom/object.h"
 
 /***********************************************************/
 /* MMIO based ide port
@@ -38,9 +40,11 @@
  */
 
 #define TYPE_MMIO_IDE "mmio-ide"
-#define MMIO_IDE(obj) OBJECT_CHECK(MMIOState, (obj), TYPE_MMIO_IDE)
+typedef struct MMIOIDEState MMIOState;
+DECLARE_INSTANCE_CHECKER(MMIOState, MMIO_IDE,
+                         TYPE_MMIO_IDE)
 
-typedef struct MMIOIDEState {
+struct MMIOIDEState {
     /*< private >*/
     SysBusDevice parent_obj;
     /*< public >*/
@@ -50,7 +54,7 @@ typedef struct MMIOIDEState {
     uint32_t shift;
     qemu_irq irq;
     MemoryRegion iomem1, iomem2;
-} MMIOState;
+};
 
 static void mmio_ide_reset(DeviceState *dev)
 {
@@ -94,16 +98,16 @@ static uint64_t mmio_ide_status_read(void *opaque, hwaddr addr,
     return ide_status_read(&s->bus, 0);
 }
 
-static void mmio_ide_cmd_write(void *opaque, hwaddr addr,
-                               uint64_t val, unsigned size)
+static void mmio_ide_ctrl_write(void *opaque, hwaddr addr,
+                                uint64_t val, unsigned size)
 {
     MMIOState *s = opaque;
-    ide_cmd_write(&s->bus, 0, val);
+    ide_ctrl_write(&s->bus, 0, val);
 }
 
 static const MemoryRegionOps mmio_ide_cs_ops = {
     .read = mmio_ide_status_read,
-    .write = mmio_ide_cmd_write,
+    .write = mmio_ide_ctrl_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
@@ -153,7 +157,7 @@ static void mmio_ide_class_init(ObjectClass *oc, void *data)
 
     dc->realize = mmio_ide_realizefn;
     dc->reset = mmio_ide_reset;
-    dc->props = mmio_ide_properties;
+    device_class_set_props(dc, mmio_ide_properties);
     dc->vmsd = &vmstate_ide_mmio;
 }
 

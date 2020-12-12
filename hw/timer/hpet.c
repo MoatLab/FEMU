@@ -9,7 +9,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,16 +25,19 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
 #include "hw/i386/pc.h"
-#include "ui/console.h"
+#include "hw/irq.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
 #include "qemu/timer.h"
 #include "hw/timer/hpet.h"
 #include "hw/sysbus.h"
-#include "hw/timer/mc146818rtc.h"
+#include "hw/rtc/mc146818rtc.h"
+#include "hw/rtc/mc146818rtc_regs.h"
+#include "migration/vmstate.h"
 #include "hw/timer/i8254.h"
+#include "exec/address-spaces.h"
+#include "qom/object.h"
 
 //#define HPET_DEBUG
 #ifdef HPET_DEBUG
@@ -45,7 +48,7 @@
 
 #define HPET_MSI_SUPPORT        0
 
-#define HPET(obj) OBJECT_CHECK(HPETState, (obj), TYPE_HPET)
+OBJECT_DECLARE_SIMPLE_TYPE(HPETState, HPET)
 
 struct HPETState;
 typedef struct HPETTimer {  /* timers */
@@ -63,7 +66,7 @@ typedef struct HPETTimer {  /* timers */
                              */
 } HPETTimer;
 
-typedef struct HPETState {
+struct HPETState {
     /*< private >*/
     SysBusDevice parent_obj;
     /*< public >*/
@@ -85,7 +88,7 @@ typedef struct HPETState {
     uint64_t isr;               /* interrupt status reg */
     uint64_t hpet_counter;      /* main counter */
     uint8_t  hpet_id;           /* instance id */
-} HPETState;
+};
 
 static uint32_t hpet_in_legacy_mode(HPETState *s)
 {
@@ -414,20 +417,6 @@ static void hpet_del_timer(HPETTimer *t)
     update_irq(t, 0);
 }
 
-#ifdef HPET_DEBUG
-static uint32_t hpet_ram_readb(void *opaque, hwaddr addr)
-{
-    printf("qemu: hpet_read b at %" PRIx64 "\n", addr);
-    return 0;
-}
-
-static uint32_t hpet_ram_readw(void *opaque, hwaddr addr)
-{
-    printf("qemu: hpet_read w at %" PRIx64 "\n", addr);
-    return 0;
-}
-#endif
-
 static uint64_t hpet_ram_read(void *opaque, hwaddr addr,
                               unsigned size)
 {
@@ -507,7 +496,8 @@ static void hpet_ram_write(void *opaque, hwaddr addr,
     HPETState *s = opaque;
     uint64_t old_val, new_val, val, index;
 
-    DPRINTF("qemu: Enter hpet_ram_writel at %" PRIx64 " = %#x\n", addr, value);
+    DPRINTF("qemu: Enter hpet_ram_writel at %" PRIx64 " = 0x%" PRIx64 "\n",
+            addr, value);
     index = addr;
     old_val = hpet_ram_read(opaque, addr, 4);
     new_val = value;
@@ -517,7 +507,7 @@ static void hpet_ram_write(void *opaque, hwaddr addr,
         uint8_t timer_id = (addr - 0x100) / 0x20;
         HPETTimer *timer = &s->timer[timer_id];
 
-        DPRINTF("qemu: hpet_ram_writel timer_id = %#x\n", timer_id);
+        DPRINTF("qemu: hpet_ram_writel timer_id = 0x%x\n", timer_id);
         if (timer_id > s->num_timers) {
             DPRINTF("qemu: timer id out of range\n");
             return;
@@ -649,8 +639,8 @@ static void hpet_ram_write(void *opaque, hwaddr addr,
             }
             s->hpet_counter =
                 (s->hpet_counter & 0xffffffff00000000ULL) | value;
-            DPRINTF("qemu: HPET counter written. ctr = %#x -> %" PRIx64 "\n",
-                    value, s->hpet_counter);
+            DPRINTF("qemu: HPET counter written. ctr = 0x%" PRIx64 " -> "
+                    "%" PRIx64 "\n", value, s->hpet_counter);
             break;
         case HPET_COUNTER + 4:
             if (hpet_enabled(s)) {
@@ -658,8 +648,8 @@ static void hpet_ram_write(void *opaque, hwaddr addr,
             }
             s->hpet_counter =
                 (s->hpet_counter & 0xffffffffULL) | (((uint64_t)value) << 32);
-            DPRINTF("qemu: HPET counter + 4 written. ctr = %#x -> %" PRIx64 "\n",
-                    value, s->hpet_counter);
+            DPRINTF("qemu: HPET counter + 4 written. ctr = 0x%" PRIx64 " -> "
+                    "%" PRIx64 "\n", value, s->hpet_counter);
             break;
         default:
             DPRINTF("qemu: invalid hpet_ram_writel\n");
@@ -798,7 +788,7 @@ static void hpet_device_class_init(ObjectClass *klass, void *data)
     dc->realize = hpet_realize;
     dc->reset = hpet_reset;
     dc->vmsd = &vmstate_hpet;
-    dc->props = hpet_device_properties;
+    device_class_set_props(dc, hpet_device_properties);
 }
 
 static const TypeInfo hpet_device_info = {

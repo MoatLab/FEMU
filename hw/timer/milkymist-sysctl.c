@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -22,14 +22,17 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
+#include "hw/irq.h"
 #include "hw/sysbus.h"
-#include "sysemu/sysemu.h"
+#include "migration/vmstate.h"
 #include "trace.h"
 #include "qemu/timer.h"
+#include "sysemu/runstate.h"
 #include "hw/ptimer.h"
+#include "hw/qdev-properties.h"
 #include "qemu/error-report.h"
 #include "qemu/module.h"
+#include "qom/object.h"
 
 enum {
     CTRL_ENABLE      = (1<<0),
@@ -60,16 +63,13 @@ enum {
 };
 
 #define TYPE_MILKYMIST_SYSCTL "milkymist-sysctl"
-#define MILKYMIST_SYSCTL(obj) \
-    OBJECT_CHECK(MilkymistSysctlState, (obj), TYPE_MILKYMIST_SYSCTL)
+OBJECT_DECLARE_SIMPLE_TYPE(MilkymistSysctlState, MILKYMIST_SYSCTL)
 
 struct MilkymistSysctlState {
     SysBusDevice parent_obj;
 
     MemoryRegion regs_region;
 
-    QEMUBH *bh0;
-    QEMUBH *bh1;
     ptimer_state *ptimer0;
     ptimer_state *ptimer1;
 
@@ -84,7 +84,6 @@ struct MilkymistSysctlState {
     qemu_irq timer0_irq;
     qemu_irq timer1_irq;
 };
-typedef struct MilkymistSysctlState MilkymistSysctlState;
 
 static void sysctl_icap_write(MilkymistSysctlState *s, uint32_t value)
 {
@@ -158,14 +157,19 @@ static void sysctl_write(void *opaque, hwaddr addr, uint64_t value,
         s->regs[addr] = value;
         break;
     case R_TIMER0_COMPARE:
+        ptimer_transaction_begin(s->ptimer0);
         ptimer_set_limit(s->ptimer0, value, 0);
         s->regs[addr] = value;
+        ptimer_transaction_commit(s->ptimer0);
         break;
     case R_TIMER1_COMPARE:
+        ptimer_transaction_begin(s->ptimer1);
         ptimer_set_limit(s->ptimer1, value, 0);
         s->regs[addr] = value;
+        ptimer_transaction_commit(s->ptimer1);
         break;
     case R_TIMER0_CONTROL:
+        ptimer_transaction_begin(s->ptimer0);
         s->regs[addr] = value;
         if (s->regs[R_TIMER0_CONTROL] & CTRL_ENABLE) {
             trace_milkymist_sysctl_start_timer0();
@@ -176,8 +180,10 @@ static void sysctl_write(void *opaque, hwaddr addr, uint64_t value,
             trace_milkymist_sysctl_stop_timer0();
             ptimer_stop(s->ptimer0);
         }
+        ptimer_transaction_commit(s->ptimer0);
         break;
     case R_TIMER1_CONTROL:
+        ptimer_transaction_begin(s->ptimer1);
         s->regs[addr] = value;
         if (s->regs[R_TIMER1_CONTROL] & CTRL_ENABLE) {
             trace_milkymist_sysctl_start_timer1();
@@ -188,6 +194,7 @@ static void sysctl_write(void *opaque, hwaddr addr, uint64_t value,
             trace_milkymist_sysctl_stop_timer1();
             ptimer_stop(s->ptimer1);
         }
+        ptimer_transaction_commit(s->ptimer1);
         break;
     case R_ICAP:
         sysctl_icap_write(s, value);
@@ -260,8 +267,12 @@ static void milkymist_sysctl_reset(DeviceState *d)
         s->regs[i] = 0;
     }
 
+    ptimer_transaction_begin(s->ptimer0);
     ptimer_stop(s->ptimer0);
+    ptimer_transaction_commit(s->ptimer0);
+    ptimer_transaction_begin(s->ptimer1);
     ptimer_stop(s->ptimer1);
+    ptimer_transaction_commit(s->ptimer1);
 
     /* defaults */
     s->regs[R_ICAP] = ICAP_READY;
@@ -280,11 +291,6 @@ static void milkymist_sysctl_init(Object *obj)
     sysbus_init_irq(dev, &s->timer0_irq);
     sysbus_init_irq(dev, &s->timer1_irq);
 
-    s->bh0 = qemu_bh_new(timer0_hit, s);
-    s->bh1 = qemu_bh_new(timer1_hit, s);
-    s->ptimer0 = ptimer_init(s->bh0, PTIMER_POLICY_DEFAULT);
-    s->ptimer1 = ptimer_init(s->bh1, PTIMER_POLICY_DEFAULT);
-
     memory_region_init_io(&s->regs_region, obj, &sysctl_mmio_ops, s,
             "milkymist-sysctl", R_MAX * 4);
     sysbus_init_mmio(dev, &s->regs_region);
@@ -294,8 +300,15 @@ static void milkymist_sysctl_realize(DeviceState *dev, Error **errp)
 {
     MilkymistSysctlState *s = MILKYMIST_SYSCTL(dev);
 
+    s->ptimer0 = ptimer_init(timer0_hit, s, PTIMER_POLICY_DEFAULT);
+    s->ptimer1 = ptimer_init(timer1_hit, s, PTIMER_POLICY_DEFAULT);
+
+    ptimer_transaction_begin(s->ptimer0);
     ptimer_set_freq(s->ptimer0, s->freq_hz);
+    ptimer_transaction_commit(s->ptimer0);
+    ptimer_transaction_begin(s->ptimer1);
     ptimer_set_freq(s->ptimer1, s->freq_hz);
+    ptimer_transaction_commit(s->ptimer1);
 }
 
 static const VMStateDescription vmstate_milkymist_sysctl = {
@@ -329,7 +342,7 @@ static void milkymist_sysctl_class_init(ObjectClass *klass, void *data)
     dc->realize = milkymist_sysctl_realize;
     dc->reset = milkymist_sysctl_reset;
     dc->vmsd = &vmstate_milkymist_sysctl;
-    dc->props = milkymist_sysctl_properties;
+    device_class_set_props(dc, milkymist_sysctl_properties);
 }
 
 static const TypeInfo milkymist_sysctl_info = {

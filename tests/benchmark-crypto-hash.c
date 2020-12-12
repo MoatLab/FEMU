@@ -15,36 +15,42 @@
 #include "crypto/init.h"
 #include "crypto/hash.h"
 
+typedef struct QCryptoHashOpts {
+    size_t chunk_size;
+    QCryptoHashAlgorithm alg;
+} QCryptoHashOpts;
+
 static void test_hash_speed(const void *opaque)
 {
-    size_t chunk_size = (size_t)opaque;
+    const QCryptoHashOpts *opts = opaque;
     uint8_t *in = NULL, *out = NULL;
     size_t out_len = 0;
-    double total = 0.0;
+    const size_t total = 2 * GiB;
+    size_t remain;
     struct iovec iov;
     int ret;
 
-    in = g_new0(uint8_t, chunk_size);
-    memset(in, g_test_rand_int(), chunk_size);
+    in = g_new0(uint8_t, opts->chunk_size);
+    memset(in, g_test_rand_int(), opts->chunk_size);
 
     iov.iov_base = (char *)in;
-    iov.iov_len = chunk_size;
+    iov.iov_len = opts->chunk_size;
 
     g_test_timer_start();
-    do {
-        ret = qcrypto_hash_bytesv(QCRYPTO_HASH_ALG_SHA256,
+    remain = total;
+    while (remain) {
+        ret = qcrypto_hash_bytesv(opts->alg,
                                   &iov, 1, &out, &out_len,
                                   NULL);
         g_assert(ret == 0);
 
-        total += chunk_size;
-    } while (g_test_timer_elapsed() < 5.0);
+        remain -= opts->chunk_size;
+    }
+    g_test_timer_elapsed();
 
-    total /= MiB;
-    g_print("sha256: ");
-    g_print("Testing chunk_size %zu bytes ", chunk_size);
-    g_print("done: %.2f MB in %.2f secs: ", total, g_test_timer_last());
-    g_print("%.2f MB/sec\n", total / g_test_timer_last());
+    g_test_message("hash(%s): chunk %zu bytes %.2f MB/sec",
+                   QCryptoHashAlgorithm_str(opts->alg),
+                   opts->chunk_size, total / g_test_timer_last());
 
     g_free(out);
     g_free(in);
@@ -52,17 +58,59 @@ static void test_hash_speed(const void *opaque)
 
 int main(int argc, char **argv)
 {
-    size_t i;
     char name[64];
 
     g_test_init(&argc, &argv, NULL);
     g_assert(qcrypto_init(NULL) == 0);
 
-    for (i = 512; i <= 64 * KiB; i *= 2) {
-        memset(name, 0 , sizeof(name));
-        snprintf(name, sizeof(name), "/crypto/hash/speed-%zu", i);
-        g_test_add_data_func(name, (void *)i, test_hash_speed);
-    }
+#define TEST_ONE(a, c)                                          \
+    QCryptoHashOpts opts ## a ## c = {                          \
+        .alg = QCRYPTO_HASH_ALG_ ## a, .chunk_size = c,         \
+    };                                                          \
+    memset(name, 0 , sizeof(name));                             \
+    snprintf(name, sizeof(name),                                \
+             "/crypto/benchmark/hash/%s/bufsize-%d",            \
+             QCryptoHashAlgorithm_str(QCRYPTO_HASH_ALG_ ## a),  \
+             c);                                                \
+    if (qcrypto_hash_supports(QCRYPTO_HASH_ALG_ ## a))          \
+        g_test_add_data_func(name,                              \
+                             &opts ## a ## c,                   \
+                             test_hash_speed);
+
+    TEST_ONE(MD5, 512);
+    TEST_ONE(MD5, 1024);
+    TEST_ONE(MD5, 4096);
+    TEST_ONE(MD5, 16384);
+
+    TEST_ONE(SHA1, 512);
+    TEST_ONE(SHA1, 1024);
+    TEST_ONE(SHA1, 4096);
+    TEST_ONE(SHA1, 16384);
+
+    TEST_ONE(SHA224, 512);
+    TEST_ONE(SHA224, 1024);
+    TEST_ONE(SHA224, 4096);
+    TEST_ONE(SHA224, 16384);
+
+    TEST_ONE(SHA384, 512);
+    TEST_ONE(SHA384, 1024);
+    TEST_ONE(SHA384, 4096);
+    TEST_ONE(SHA384, 16384);
+
+    TEST_ONE(SHA256, 512);
+    TEST_ONE(SHA256, 1024);
+    TEST_ONE(SHA256, 4096);
+    TEST_ONE(SHA256, 16384);
+
+    TEST_ONE(SHA512, 512);
+    TEST_ONE(SHA512, 1024);
+    TEST_ONE(SHA512, 4096);
+    TEST_ONE(SHA512, 16384);
+
+    TEST_ONE(RIPEMD160, 512);
+    TEST_ONE(RIPEMD160, 1024);
+    TEST_ONE(RIPEMD160, 4096);
+    TEST_ONE(RIPEMD160, 16384);
 
     return g_test_run();
 }

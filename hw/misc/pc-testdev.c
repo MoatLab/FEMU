@@ -36,14 +36,14 @@
 */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
-#include "hw/qdev.h"
 #include "qemu/module.h"
+#include "hw/irq.h"
 #include "hw/isa/isa.h"
+#include "qom/object.h"
 
 #define IOMEM_LEN    0x10000
 
-typedef struct PCTestdev {
+struct PCTestdev {
     ISADevice parent_obj;
 
     MemoryRegion ioport;
@@ -53,11 +53,10 @@ typedef struct PCTestdev {
     MemoryRegion iomem;
     uint32_t ioport_data;
     char iomem_buf[IOMEM_LEN];
-} PCTestdev;
+};
 
 #define TYPE_TESTDEV "pc-testdev"
-#define TESTDEV(obj) \
-     OBJECT_CHECK(PCTestdev, (obj), TYPE_TESTDEV)
+OBJECT_DECLARE_SIMPLE_TYPE(PCTestdev, TESTDEV)
 
 static uint64_t test_irq_line_read(void *opaque, hwaddr addr, unsigned size)
 {
@@ -126,7 +125,7 @@ static void test_flush_page_write(void *opaque, hwaddr addr, uint64_t data,
                             unsigned len)
 {
     hwaddr page = 4096;
-    void *a = cpu_physical_memory_map(data & ~0xffful, &page, 0);
+    void *a = cpu_physical_memory_map(data & ~0xffful, &page, false);
 
     /* We might not be able to get the full page, only mprotect what we actually
        have mapped */

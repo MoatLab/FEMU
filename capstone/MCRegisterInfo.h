@@ -14,40 +14,36 @@
 //===----------------------------------------------------------------------===//
 
 /* Capstone Disassembly Engine */
-/* By Nguyen Anh Quynh <aquynh@gmail.com>, 2013-2014 */
+/* By Nguyen Anh Quynh <aquynh@gmail.com>, 2013-2019 */
 
 #ifndef CS_LLVM_MC_MCREGISTERINFO_H
 #define CS_LLVM_MC_MCREGISTERINFO_H
 
-#if !defined(_MSC_VER) || !defined(_KERNEL_MODE)
-#include <stdint.h>
-#endif
-#include "include/platform.h"
+#include "capstone/platform.h"
 
 /// An unsigned integer type large enough to represent all physical registers,
 /// but not necessarily virtual registers.
 typedef uint16_t MCPhysReg;
 typedef const MCPhysReg* iterator;
 
-typedef struct MCRegisterClass {
-	const char *Name;
+typedef struct MCRegisterClass2 {
 	iterator RegsBegin;
 	const uint8_t *RegSet;
-	uint16_t RegsSize;
+	uint8_t RegsSize;
+	uint8_t RegSetSize;
+} MCRegisterClass2;
+
+typedef struct MCRegisterClass {
+	iterator RegsBegin;
+	const uint8_t *RegSet;
 	uint16_t RegSetSize;
-	uint16_t ID;
-	uint16_t RegSize, Alignment; // Size & Alignment of register in bytes
-	int8_t CopyCost;
-	bool Allocatable;
 } MCRegisterClass;
 
 /// MCRegisterDesc - This record contains information about a particular
 /// register.  The SubRegs field is a zero terminated array of registers that
 /// are sub-registers of the specific register, e.g. AL, AH are sub-registers
 /// of AX. The SuperRegs field is a zero terminated array of registers that are
-/// super-registers of the specific register, e.g. RAX, EAX, are
 /// super-registers of AX.
-///
 typedef struct MCRegisterDesc {
 	uint32_t Name;      // Printable name for the reg (for debugging)
 	uint32_t SubRegs;   // Sub-register set, described above
@@ -60,6 +56,10 @@ typedef struct MCRegisterDesc {
 	// RegUnits - Points to the list of register units. The low 4 bits holds the
 	// Scale, the high bits hold an offset into DiffLists. See MCRegUnitIterator.
 	uint32_t RegUnits;
+
+	/// Index into list with lane mask sequences. The sequence contains a lanemask
+	/// for every register unit.
+	uint16_t RegUnitLaneMasks;	// ???
 } MCRegisterDesc;
 
 /// MCRegisterInfo base class - We assume that the target defines a static
@@ -73,7 +73,6 @@ typedef struct MCRegisterDesc {
 /// specialize this class. MCRegisterInfo should only contain getters to access
 /// TableGen generated physical register data. It must not be extended with
 /// virtual methods.
-///
 typedef struct MCRegisterInfo {
 	const MCRegisterDesc *Desc;                 // Pointer to the descriptor array
 	unsigned NumRegs;                           // Number of entries in the array
@@ -84,7 +83,9 @@ typedef struct MCRegisterInfo {
 	unsigned NumRegUnits;                       // Number of regunits.
 	uint16_t (*RegUnitRoots)[2];          // Pointer to regunit root table.
 	const MCPhysReg *DiffLists;                 // Pointer to the difflists array
+	// const LaneBitmask *RegUnitMaskSequences;    // Pointer to lane mask sequences
 	const char *RegStrings;                     // Pointer to the string table.
+	// const char *RegClassStrings;                // Pointer to the class strings.
 	const uint16_t *SubRegIndices;              // Pointer to the subreg lookup
 	// array.
 	unsigned NumSubRegIndices;                  // Number of subreg indices.
@@ -103,7 +104,6 @@ void MCRegisterInfo_InitMCRegisterInfo(MCRegisterInfo *RI,
 		const uint16_t *SubIndices,
 		unsigned NumIndices,
 		const uint16_t *RET);
-
 
 unsigned MCRegisterInfo_getMatchingSuperReg(const MCRegisterInfo *RI, unsigned Reg, unsigned SubIdx, const MCRegisterClass *RC);
 

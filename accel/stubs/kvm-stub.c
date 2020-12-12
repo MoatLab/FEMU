@@ -32,35 +32,12 @@ bool kvm_readonly_mem_allowed;
 bool kvm_ioeventfd_any_length_allowed;
 bool kvm_msi_use_devid;
 
-int kvm_destroy_vcpu(CPUState *cpu)
-{
-    return -ENOSYS;
-}
-
-int kvm_init_vcpu(CPUState *cpu)
-{
-    return -ENOSYS;
-}
-
 void kvm_flush_coalesced_mmio_buffer(void)
 {
 }
 
 void kvm_cpu_synchronize_state(CPUState *cpu)
 {
-}
-
-void kvm_cpu_synchronize_post_reset(CPUState *cpu)
-{
-}
-
-void kvm_cpu_synchronize_post_init(CPUState *cpu)
-{
-}
-
-int kvm_cpu_exec(CPUState *cpu)
-{
-    abort();
 }
 
 bool kvm_has_sync_mmu(void)
@@ -135,6 +112,18 @@ int kvm_irqchip_update_msi_route(KVMState *s, int virq, MSIMessage msg,
 }
 
 void kvm_irqchip_commit_routes(KVMState *s)
+{
+}
+
+void kvm_irqchip_add_change_notifier(Notifier *n)
+{
+}
+
+void kvm_irqchip_remove_change_notifier(Notifier *n)
+{
+}
+
+void kvm_irqchip_change_notify(void)
 {
 }
 

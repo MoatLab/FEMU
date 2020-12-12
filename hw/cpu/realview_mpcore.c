@@ -13,15 +13,17 @@
 #include "qemu/module.h"
 #include "hw/cpu/arm11mpcore.h"
 #include "hw/intc/realview_gic.h"
+#include "hw/irq.h"
+#include "hw/qdev-properties.h"
+#include "qom/object.h"
 
 #define TYPE_REALVIEW_MPCORE_RIRQ "realview_mpcore"
-#define REALVIEW_MPCORE_RIRQ(obj) \
-    OBJECT_CHECK(mpcore_rirq_state, (obj), TYPE_REALVIEW_MPCORE_RIRQ)
+OBJECT_DECLARE_SIMPLE_TYPE(mpcore_rirq_state, REALVIEW_MPCORE_RIRQ)
 
 /* Dummy PIC to route IRQ lines.  The baseboard has 4 independent IRQ
    controllers.  The output of these, plus some of the raw input lines
    are fed into a single SMP-aware interrupt controller on the CPU.  */
-typedef struct {
+struct mpcore_rirq_state {
     SysBusDevice parent_obj;
 
     qemu_irq cpuic[32];
@@ -30,7 +32,7 @@ typedef struct {
 
     ARM11MPCorePriveState priv;
     RealViewGICState gic[4];
-} mpcore_rirq_state;
+};
 
 /* Map baseboard IRQs onto CPU IRQ lines.  */
 static const int mpcore_irq_map[32] = {
@@ -63,14 +65,11 @@ static void realview_mpcore_realize(DeviceState *dev, Error **errp)
     DeviceState *priv = DEVICE(&s->priv);
     DeviceState *gic;
     SysBusDevice *gicbusdev;
-    Error *err = NULL;
     int n;
     int i;
 
     qdev_prop_set_uint32(priv, "num-cpu", s->num_cpu);
-    object_property_set_bool(OBJECT(&s->priv), true, "realized", &err);
-    if (err != NULL) {
-        error_propagate(errp, err);
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->priv), errp)) {
         return;
     }
     sysbus_pass_irq(sbd, SYS_BUS_DEVICE(&s->priv));
@@ -79,9 +78,7 @@ static void realview_mpcore_realize(DeviceState *dev, Error **errp)
     }
     /* ??? IRQ routing is hardcoded to "normal" mode.  */
     for (n = 0; n < 4; n++) {
-        object_property_set_bool(OBJECT(&s->gic[n]), true, "realized", &err);
-        if (err != NULL) {
-            error_propagate(errp, err);
+        if (!sysbus_realize(SYS_BUS_DEVICE(&s->gic[n]), errp)) {
             return;
         }
         gic = DEVICE(&s->gic[n]);
@@ -102,14 +99,12 @@ static void mpcore_rirq_init(Object *obj)
     SysBusDevice *privbusdev;
     int i;
 
-    sysbus_init_child_obj(obj, "a11priv", &s->priv, sizeof(s->priv),
-                          TYPE_ARM11MPCORE_PRIV);
+    object_initialize_child(obj, "a11priv", &s->priv, TYPE_ARM11MPCORE_PRIV);
     privbusdev = SYS_BUS_DEVICE(&s->priv);
     sysbus_init_mmio(sbd, sysbus_mmio_get_region(privbusdev, 0));
 
     for (i = 0; i < 4; i++) {
-        sysbus_init_child_obj(obj, "gic[*]", &s->gic[i], sizeof(s->gic[i]),
-                              TYPE_REALVIEW_GIC);
+        object_initialize_child(obj, "gic[*]", &s->gic[i], TYPE_REALVIEW_GIC);
     }
 }
 
@@ -123,7 +118,7 @@ static void mpcore_rirq_class_init(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = realview_mpcore_realize;
-    dc->props = mpcore_rirq_properties;
+    device_class_set_props(dc, mpcore_rirq_properties);
 }
 
 static const TypeInfo mpcore_rirq_info = {

@@ -11,11 +11,14 @@
  */
 
 #include "qemu/osdep.h"
+#include "hw/irq.h"
 #include "hw/ssi/ssi.h"
+#include "migration/vmstate.h"
 #include "qemu/module.h"
 #include "ui/console.h"
+#include "qom/object.h"
 
-typedef struct {
+struct ADS7846State {
     SSISlave ssidev;
     qemu_irq interrupt;
 
@@ -25,7 +28,10 @@ typedef struct {
 
     int cycle;
     int output;
-} ADS7846State;
+};
+
+#define TYPE_ADS7846 "ads7846"
+OBJECT_DECLARE_SIMPLE_TYPE(ADS7846State, ADS7846)
 
 /* Control-byte bitfields */
 #define CB_PD0		(1 << 0)
@@ -59,7 +65,7 @@ static void ads7846_int_update(ADS7846State *s)
 
 static uint32_t ads7846_transfer(SSISlave *dev, uint32_t value)
 {
-    ADS7846State *s = FROM_SSI_SLAVE(ADS7846State, dev);
+    ADS7846State *s = ADS7846(dev);
 
     switch (s->cycle ++) {
     case 0:
@@ -137,7 +143,7 @@ static const VMStateDescription vmstate_ads7846 = {
 static void ads7846_realize(SSISlave *d, Error **errp)
 {
     DeviceState *dev = DEVICE(d);
-    ADS7846State *s = FROM_SSI_SLAVE(ADS7846State, d);
+    ADS7846State *s = ADS7846(d);
 
     qdev_init_gpio_out(dev, &s->interrupt, 1);
 
@@ -152,19 +158,21 @@ static void ads7846_realize(SSISlave *d, Error **errp)
 
     ads7846_int_update(s);
 
-    vmstate_register(NULL, -1, &vmstate_ads7846, s);
+    vmstate_register(NULL, VMSTATE_INSTANCE_ID_ANY, &vmstate_ads7846, s);
 }
 
 static void ads7846_class_init(ObjectClass *klass, void *data)
 {
+    DeviceClass *dc = DEVICE_CLASS(klass);
     SSISlaveClass *k = SSI_SLAVE_CLASS(klass);
 
     k->realize = ads7846_realize;
     k->transfer = ads7846_transfer;
+    set_bit(DEVICE_CATEGORY_INPUT, dc->categories);
 }
 
 static const TypeInfo ads7846_info = {
-    .name          = "ads7846",
+    .name          = TYPE_ADS7846,
     .parent        = TYPE_SSI_SLAVE,
     .instance_size = sizeof(ADS7846State),
     .class_init    = ads7846_class_init,

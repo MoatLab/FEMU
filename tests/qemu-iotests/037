@@ -40,7 +40,8 @@ _supported_fmt qcow qcow2 vmdk qed
 _supported_proto file
 _unsupported_imgopts "subformat=monolithicFlat" \
                      "subformat=twoGbMaxExtentFlat" \
-                     "subformat=twoGbMaxExtentSparse"
+                     "subformat=twoGbMaxExtentSparse" \
+                     "subformat=streamOptimized"
 
 CLUSTER_SIZE=4k
 size=128M
@@ -73,7 +74,7 @@ backing_io 0 256 write | $QEMU_IO "$TEST_IMG" | _filter_qemu_io
 
 TEST_IMG="$TEST_IMG_SAVE"
 
-_make_test_img -b "$TEST_IMG.base" 6G
+_make_test_img -b "$TEST_IMG.base" -F $IMGFMT 6G
 
 echo
 echo "== COW in a single cluster =="

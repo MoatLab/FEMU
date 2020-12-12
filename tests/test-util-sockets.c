@@ -52,6 +52,7 @@ static void test_fd_is_socket_good(void)
 
 static int mon_fd = -1;
 static const char *mon_fdname;
+__thread Monitor *cur_mon;
 
 int monitor_get_fd(Monitor *mon, const char *fdname, Error **errp)
 {
@@ -64,17 +65,17 @@ int monitor_get_fd(Monitor *mon, const char *fdname, Error **errp)
     return dup(mon_fd);
 }
 
-/* Syms in libqemustub.a are discarded at .o file granularity.
- * To replace monitor_get_fd() we must ensure everything in
- * stubs/monitor.c is defined, to make sure monitor.o is discarded
+/*
+ * Syms of stubs in libqemuutil.a are discarded at .o file
+ * granularity.  To replace monitor_get_fd() and monitor_cur(), we
+ * must ensure that we also replace any other symbol that is used in
+ * the binary and would be taken from the same stub object file,
  * otherwise we get duplicate syms at link time.
  */
-__thread Monitor *cur_mon;
+Monitor *monitor_cur(void) { return cur_mon; }
 int monitor_vprintf(Monitor *mon, const char *fmt, va_list ap) { abort(); }
-void monitor_init_qmp(Chardev *chr, bool pretty) {}
-void monitor_init_hmp(Chardev *chr, bool use_readline) {}
 
-
+#ifndef _WIN32
 static void test_socket_fd_pass_name_good(void)
 {
     SocketAddress addr;
@@ -93,7 +94,7 @@ static void test_socket_fd_pass_name_good(void)
     g_assert_cmpint(fd, !=, mon_fd);
     close(fd);
 
-    fd = socket_listen(&addr, &error_abort);
+    fd = socket_listen(&addr, 1, &error_abort);
     g_assert_cmpint(fd, !=, -1);
     g_assert_cmpint(fd, !=, mon_fd);
     close(fd);
@@ -124,7 +125,7 @@ static void test_socket_fd_pass_name_bad(void)
     g_assert_cmpint(fd, ==, -1);
     error_free_or_abort(&err);
 
-    fd = socket_listen(&addr, &err);
+    fd = socket_listen(&addr, 1, &err);
     g_assert_cmpint(fd, ==, -1);
     error_free_or_abort(&err);
 
@@ -151,7 +152,7 @@ static void test_socket_fd_pass_name_nomon(void)
     g_assert_cmpint(fd, ==, -1);
     error_free_or_abort(&err);
 
-    fd = socket_listen(&addr, &err);
+    fd = socket_listen(&addr, 1, &err);
     g_assert_cmpint(fd, ==, -1);
     error_free_or_abort(&err);
 
@@ -174,7 +175,7 @@ static void test_socket_fd_pass_num_good(void)
     fd = socket_connect(&addr, &error_abort);
     g_assert_cmpint(fd, ==, sfd);
 
-    fd = socket_listen(&addr, &error_abort);
+    fd = socket_listen(&addr, 1, &error_abort);
     g_assert_cmpint(fd, ==, sfd);
 
     g_free(addr.u.fd.str);
@@ -197,7 +198,7 @@ static void test_socket_fd_pass_num_bad(void)
     g_assert_cmpint(fd, ==, -1);
     error_free_or_abort(&err);
 
-    fd = socket_listen(&addr, &err);
+    fd = socket_listen(&addr, 1, &err);
     g_assert_cmpint(fd, ==, -1);
     error_free_or_abort(&err);
 
@@ -220,18 +221,119 @@ static void test_socket_fd_pass_num_nocli(void)
     g_assert_cmpint(fd, ==, -1);
     error_free_or_abort(&err);
 
-    fd = socket_listen(&addr, &err);
+    fd = socket_listen(&addr, 1, &err);
     g_assert_cmpint(fd, ==, -1);
     error_free_or_abort(&err);
 
     g_free(addr.u.fd.str);
 }
+#endif
 
+#ifdef CONFIG_LINUX
+
+#define ABSTRACT_SOCKET_VARIANTS 3
+
+typedef struct {
+    SocketAddress *server, *client[ABSTRACT_SOCKET_VARIANTS];
+    bool expect_connect[ABSTRACT_SOCKET_VARIANTS];
+} abstract_socket_matrix_row;
+
+static gpointer unix_client_thread_func(gpointer user_data)
+{
+    abstract_socket_matrix_row *row = user_data;
+    Error *err = NULL;
+    int i, fd;
+
+    for (i = 0; i < ABSTRACT_SOCKET_VARIANTS; i++) {
+        if (row->expect_connect[i]) {
+            fd = socket_connect(row->client[i], &error_abort);
+            g_assert_cmpint(fd, >=, 0);
+        } else {
+            fd = socket_connect(row->client[i], &err);
+            g_assert_cmpint(fd, ==, -1);
+            error_free_or_abort(&err);
+        }
+        close(fd);
+    }
+    return NULL;
+}
+
+static void test_socket_unix_abstract_row(abstract_socket_matrix_row *test)
+{
+    int fd, connfd, i;
+    GThread *cli;
+    struct sockaddr_un un;
+    socklen_t len = sizeof(un);
+
+    /* Last one must connect, or else accept() below hangs */
+    assert(test->expect_connect[ABSTRACT_SOCKET_VARIANTS - 1]);
+
+    fd = socket_listen(test->server, 1, &error_abort);
+    g_assert_cmpint(fd, >=, 0);
+    g_assert(fd_is_socket(fd));
+
+    cli = g_thread_new("abstract_unix_client",
+                       unix_client_thread_func,
+                       test);
+
+    for (i = 0; i < ABSTRACT_SOCKET_VARIANTS; i++) {
+        if (test->expect_connect[i]) {
+            connfd = accept(fd, (struct sockaddr *)&un, &len);
+            g_assert_cmpint(connfd, !=, -1);
+            close(connfd);
+        }
+    }
+
+    close(fd);
+    g_thread_join(cli);
+}
+
+static void test_socket_unix_abstract(void)
+{
+    SocketAddress addr, addr_tight, addr_padded;
+    abstract_socket_matrix_row matrix[ABSTRACT_SOCKET_VARIANTS] = {
+        { &addr,
+          { &addr_tight, &addr_padded, &addr },
+          { true, false, true } },
+        { &addr_tight,
+          { &addr_padded, &addr, &addr_tight },
+          { false, true, true } },
+        { &addr_padded,
+          { &addr, &addr_tight, &addr_padded },
+          { false, false, true } }
+    };
+    int i;
+
+    addr.type = SOCKET_ADDRESS_TYPE_UNIX;
+    addr.u.q_unix.path = g_strdup_printf("unix-%d-%u",
+                                         getpid(), g_random_int());
+    addr.u.q_unix.has_abstract = true;
+    addr.u.q_unix.abstract = true;
+    addr.u.q_unix.has_tight = false;
+    addr.u.q_unix.tight = false;
+
+    addr_tight = addr;
+    addr_tight.u.q_unix.has_tight = true;
+    addr_tight.u.q_unix.tight = true;
+
+    addr_padded = addr;
+    addr_padded.u.q_unix.has_tight = true;
+    addr_padded.u.q_unix.tight = false;
+
+    for (i = 0; i < ABSTRACT_SOCKET_VARIANTS; i++) {
+        test_socket_unix_abstract_row(&matrix[i]);
+    }
+
+    g_free(addr.u.q_unix.path);
+}
+
+#endif  /* CONFIG_LINUX */
 
 int main(int argc, char **argv)
 {
     bool has_ipv4, has_ipv6;
 
+    qemu_init_main_loop(&error_abort);
     socket_init();
 
     g_test_init(&argc, &argv, NULL);
@@ -242,7 +344,8 @@ int main(int argc, char **argv)
      * with either IPv4 or IPv6 disabled.
      */
     if (socket_check_protocol_support(&has_ipv4, &has_ipv6) < 0) {
-        return 1;
+        g_printerr("socket_check_protocol_support() failed\n");
+        goto end;
     }
 
     if (has_ipv4) {
@@ -250,6 +353,7 @@ int main(int argc, char **argv)
                         test_fd_is_socket_bad);
         g_test_add_func("/util/socket/is-socket/good",
                         test_fd_is_socket_good);
+#ifndef _WIN32
         g_test_add_func("/socket/fd-pass/name/good",
                         test_socket_fd_pass_name_good);
         g_test_add_func("/socket/fd-pass/name/bad",
@@ -262,7 +366,14 @@ int main(int argc, char **argv)
                         test_socket_fd_pass_num_bad);
         g_test_add_func("/socket/fd-pass/num/nocli",
                         test_socket_fd_pass_num_nocli);
+#endif
     }
 
+#ifdef CONFIG_LINUX
+    g_test_add_func("/util/socket/unix-abstract",
+                    test_socket_unix_abstract);
+#endif
+
+end:
     return g_test_run();
 }

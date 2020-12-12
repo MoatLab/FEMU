@@ -12,14 +12,15 @@
 #ifndef CMSDK_APB_TIMER_H
 #define CMSDK_APB_TIMER_H
 
+#include "hw/qdev-properties.h"
 #include "hw/sysbus.h"
 #include "hw/ptimer.h"
+#include "qom/object.h"
 
 #define TYPE_CMSDK_APB_TIMER "cmsdk-apb-timer"
-#define CMSDK_APB_TIMER(obj) OBJECT_CHECK(CMSDKAPBTIMER, (obj), \
-                                         TYPE_CMSDK_APB_TIMER)
+OBJECT_DECLARE_SIMPLE_TYPE(CMSDKAPBTIMER, CMSDK_APB_TIMER)
 
-typedef struct {
+struct CMSDKAPBTIMER {
     /*< private >*/
     SysBusDevice parent_obj;
 
@@ -33,7 +34,7 @@ typedef struct {
     uint32_t value;
     uint32_t reload;
     uint32_t intstatus;
-} CMSDKAPBTIMER;
+};
 
 /**
  * cmsdk_apb_timer_create - convenience function to create TYPE_CMSDK_APB_TIMER
@@ -47,10 +48,10 @@ static inline DeviceState *cmsdk_apb_timer_create(hwaddr addr,
     DeviceState *dev;
     SysBusDevice *s;
 
-    dev = qdev_create(NULL, TYPE_CMSDK_APB_TIMER);
+    dev = qdev_new(TYPE_CMSDK_APB_TIMER);
     s = SYS_BUS_DEVICE(dev);
     qdev_prop_set_uint32(dev, "pclk-frq", pclk_frq);
-    qdev_init_nofail(dev);
+    sysbus_realize_and_unref(s, &error_fatal);
     sysbus_mmio_map(s, 0, addr);
     sysbus_connect_irq(s, 0, timerint);
     return dev;

@@ -16,12 +16,35 @@
 #ifndef PPC_XIVE_REGS_H
 #define PPC_XIVE_REGS_H
 
+#include "qemu/bswap.h"
+#include "qemu/host-utils.h"
+
 /*
  * Interrupt source number encoding on PowerBUS
  */
-#define XIVE_SRCNO_BLOCK(srcno) (((srcno) >> 28) & 0xf)
-#define XIVE_SRCNO_INDEX(srcno) ((srcno) & 0x0fffffff)
-#define XIVE_SRCNO(blk, idx)    ((uint32_t)(blk) << 28 | (idx))
+/*
+ * Trigger data definition
+ *
+ * The trigger definition is used for triggers both for HW source
+ * interrupts (PHB, PSI), as well as for rerouting interrupts between
+ * Interrupt Controller.
+ *
+ * HW source controllers set bit0 of word0 to ‘0’ as they provide EAS
+ * information (EAS block + EAS index) in the 8 byte data and not END
+ * information, which is use for rerouting interrupts.
+ *
+ * bit1 of word0 to ‘1’ signals that the state bit check has been
+ * performed.
+ */
+#define XIVE_TRIGGER_END        PPC_BIT(0)
+#define XIVE_TRIGGER_PQ         PPC_BIT(1)
+
+/*
+ * QEMU macros to manipulate the trigger payload in native endian
+ */
+#define XIVE_EAS_BLOCK(n)       (((n) >> 28) & 0xf)
+#define XIVE_EAS_INDEX(n)       ((n) & 0x0fffffff)
+#define XIVE_EAS(blk, idx)      ((uint32_t)(blk) << 28 | (idx))
 
 #define TM_SHIFT                16
 
@@ -48,7 +71,7 @@
  * QW word 2 contains the valid bit at the top and other fields
  * depending on the QW.
  */
-#define TM_WORD2                0x8
+#define   TM_WORD2              0x8
 #define   TM_QW0W2_VU           PPC_BIT32(0)
 #define   TM_QW0W2_LOGIC_SERV   PPC_BITMASK32(1, 31) /* XX 2,31 ? */
 #define   TM_QW1W2_VO           PPC_BIT32(0)
@@ -127,6 +150,8 @@ typedef struct XiveEAS {
 
 #define xive_eas_is_valid(eas)   (be64_to_cpu((eas)->w) & EAS_VALID)
 #define xive_eas_is_masked(eas)  (be64_to_cpu((eas)->w) & EAS_MASKED)
+
+void xive_eas_pic_print_info(XiveEAS *eas, uint32_t lisn, Monitor *mon);
 
 static inline uint64_t xive_get_field64(uint64_t mask, uint64_t word)
 {
@@ -207,6 +232,10 @@ typedef struct XiveEND {
 #define xive_end_is_notify(end)   (be32_to_cpu((end)->w0) & END_W0_UCOND_NOTIFY)
 #define xive_end_is_backlog(end)  (be32_to_cpu((end)->w0) & END_W0_BACKLOG)
 #define xive_end_is_escalate(end) (be32_to_cpu((end)->w0) & END_W0_ESCALATE_CTL)
+#define xive_end_is_uncond_escalation(end)              \
+    (be32_to_cpu((end)->w0) & END_W0_UNCOND_ESCALATE)
+#define xive_end_is_silent_escalation(end)              \
+    (be32_to_cpu((end)->w0) & END_W0_SILENT_ESCALATE)
 
 static inline uint64_t xive_end_qaddr(XiveEND *end)
 {
@@ -214,14 +243,21 @@ static inline uint64_t xive_end_qaddr(XiveEND *end)
         be32_to_cpu(end->w3);
 }
 
+void xive_end_pic_print_info(XiveEND *end, uint32_t end_idx, Monitor *mon);
+void xive_end_queue_pic_print_info(XiveEND *end, uint32_t width, Monitor *mon);
+void xive_end_eas_pic_print_info(XiveEND *end, uint32_t end_idx, Monitor *mon);
+
 /* Notification Virtual Target (NVT) */
 typedef struct XiveNVT {
         uint32_t        w0;
 #define NVT_W0_VALID             PPC_BIT32(0)
         uint32_t        w1;
+#define NVT_W1_EQ_BLOCK          PPC_BITMASK32(0, 3)
+#define NVT_W1_EQ_INDEX          PPC_BITMASK32(4, 31)
         uint32_t        w2;
         uint32_t        w3;
         uint32_t        w4;
+#define NVT_W4_IPB               PPC_BITMASK32(16, 23)
         uint32_t        w5;
         uint32_t        w6;
         uint32_t        w7;
@@ -237,5 +273,27 @@ typedef struct XiveNVT {
 } XiveNVT;
 
 #define xive_nvt_is_valid(nvt)    (be32_to_cpu((nvt)->w0) & NVT_W0_VALID)
+
+/*
+ * The VP number space in a block is defined by the END_W6_NVT_INDEX
+ * field of the XIVE END
+ */
+#define XIVE_NVT_SHIFT                19
+#define XIVE_NVT_COUNT                (1 << XIVE_NVT_SHIFT)
+
+static inline uint32_t xive_nvt_cam_line(uint8_t nvt_blk, uint32_t nvt_idx)
+{
+    return (nvt_blk << XIVE_NVT_SHIFT) | nvt_idx;
+}
+
+static inline uint32_t xive_nvt_idx(uint32_t cam_line)
+{
+    return cam_line & ((1 << XIVE_NVT_SHIFT) - 1);
+}
+
+static inline uint32_t xive_nvt_blk(uint32_t cam_line)
+{
+    return (cam_line >> XIVE_NVT_SHIFT) & 0xf;
+}
 
 #endif /* PPC_XIVE_REGS_H */

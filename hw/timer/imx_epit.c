@@ -14,8 +14,9 @@
 
 #include "qemu/osdep.h"
 #include "hw/timer/imx_epit.h"
+#include "migration/vmstate.h"
+#include "hw/irq.h"
 #include "hw/misc/imx_ccm.h"
-#include "qemu/main-loop.h"
 #include "qemu/module.h"
 #include "qemu/log.h"
 
@@ -72,6 +73,10 @@ static void imx_epit_update_int(IMXEPITState *s)
     }
 }
 
+/*
+ * Must be called from within a ptimer_transaction_begin/commit block
+ * for both s->timer_cmp and s->timer_reload.
+ */
 static void imx_epit_set_freq(IMXEPITState *s)
 {
     uint32_t clksrc;
@@ -103,6 +108,8 @@ static void imx_epit_reset(DeviceState *dev)
     s->lr = EPIT_TIMER_MAX;
     s->cmp = 0;
     s->cnt = 0;
+    ptimer_transaction_begin(s->timer_cmp);
+    ptimer_transaction_begin(s->timer_reload);
     /* stop both timers */
     ptimer_stop(s->timer_cmp);
     ptimer_stop(s->timer_reload);
@@ -115,6 +122,8 @@ static void imx_epit_reset(DeviceState *dev)
         /* if the timer is still enabled, restart it */
         ptimer_run(s->timer_reload, 0);
     }
+    ptimer_transaction_commit(s->timer_cmp);
+    ptimer_transaction_commit(s->timer_reload);
 }
 
 static uint32_t imx_epit_update_count(IMXEPITState *s)
@@ -162,6 +171,7 @@ static uint64_t imx_epit_read(void *opaque, hwaddr offset, unsigned size)
     return reg_value;
 }
 
+/* Must be called from ptimer_transaction_begin/commit block for s->timer_cmp */
 static void imx_epit_reload_compare_timer(IMXEPITState *s)
 {
     if ((s->cr & (CR_EN | CR_OCIEN)) == (CR_EN | CR_OCIEN))  {
@@ -195,7 +205,16 @@ static void imx_epit_write(void *opaque, hwaddr offset, uint64_t value,
         if (s->cr & CR_SWR) {
             /* handle the reset */
             imx_epit_reset(DEVICE(s));
-        } else {
+            /*
+             * TODO: could we 'break' here? following operations appear
+             * to duplicate the work imx_epit_reset() already did.
+             */
+        }
+
+        ptimer_transaction_begin(s->timer_cmp);
+        ptimer_transaction_begin(s->timer_reload);
+
+        if (!(s->cr & CR_SWR)) {
             imx_epit_set_freq(s);
         }
 
@@ -229,6 +248,9 @@ static void imx_epit_write(void *opaque, hwaddr offset, uint64_t value,
         } else {
             ptimer_stop(s->timer_cmp);
         }
+
+        ptimer_transaction_commit(s->timer_cmp);
+        ptimer_transaction_commit(s->timer_reload);
         break;
 
     case 1: /* SR - ACK*/
@@ -242,6 +264,8 @@ static void imx_epit_write(void *opaque, hwaddr offset, uint64_t value,
     case 2: /* LR - set ticks */
         s->lr = value;
 
+        ptimer_transaction_begin(s->timer_cmp);
+        ptimer_transaction_begin(s->timer_reload);
         if (s->cr & CR_RLD) {
             /* Also set the limit if the LRD bit is set */
             /* If IOVW bit is set then set the timer value */
@@ -253,12 +277,16 @@ static void imx_epit_write(void *opaque, hwaddr offset, uint64_t value,
         }
 
         imx_epit_reload_compare_timer(s);
+        ptimer_transaction_commit(s->timer_cmp);
+        ptimer_transaction_commit(s->timer_reload);
         break;
 
     case 3: /* CMP */
         s->cmp = value;
 
+        ptimer_transaction_begin(s->timer_cmp);
         imx_epit_reload_compare_timer(s);
+        ptimer_transaction_commit(s->timer_cmp);
 
         break;
 
@@ -277,6 +305,11 @@ static void imx_epit_cmp(void *opaque)
 
     s->sr = 1;
     imx_epit_update_int(s);
+}
+
+static void imx_epit_reload(void *opaque)
+{
+    /* No action required on rollover of timer_reload */
 }
 
 static const MemoryRegionOps imx_epit_ops = {
@@ -306,7 +339,6 @@ static void imx_epit_realize(DeviceState *dev, Error **errp)
 {
     IMXEPITState *s = IMX_EPIT(dev);
     SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
-    QEMUBH *bh;
 
     DPRINTF("\n");
 
@@ -315,10 +347,9 @@ static void imx_epit_realize(DeviceState *dev, Error **errp)
                           0x00001000);
     sysbus_init_mmio(sbd, &s->iomem);
 
-    s->timer_reload = ptimer_init(NULL, PTIMER_POLICY_DEFAULT);
+    s->timer_reload = ptimer_init(imx_epit_reload, s, PTIMER_POLICY_DEFAULT);
 
-    bh = qemu_bh_new(imx_epit_cmp, s);
-    s->timer_cmp = ptimer_init(bh, PTIMER_POLICY_DEFAULT);
+    s->timer_cmp = ptimer_init(imx_epit_cmp, s, PTIMER_POLICY_DEFAULT);
 }
 
 static void imx_epit_class_init(ObjectClass *klass, void *data)

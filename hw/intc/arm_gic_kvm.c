@@ -29,20 +29,19 @@
 #include "kvm_arm.h"
 #include "gic_internal.h"
 #include "vgic_common.h"
+#include "qom/object.h"
 
 #define TYPE_KVM_ARM_GIC "kvm-arm-gic"
-#define KVM_ARM_GIC(obj) \
-     OBJECT_CHECK(GICState, (obj), TYPE_KVM_ARM_GIC)
-#define KVM_ARM_GIC_CLASS(klass) \
-     OBJECT_CLASS_CHECK(KVMARMGICClass, (klass), TYPE_KVM_ARM_GIC)
-#define KVM_ARM_GIC_GET_CLASS(obj) \
-     OBJECT_GET_CLASS(KVMARMGICClass, (obj), TYPE_KVM_ARM_GIC)
+typedef struct KVMARMGICClass KVMARMGICClass;
+/* This is reusing the GICState typedef from ARM_GIC_COMMON */
+DECLARE_OBJ_CHECKERS(GICState, KVMARMGICClass,
+                     KVM_ARM_GIC, TYPE_KVM_ARM_GIC)
 
-typedef struct KVMARMGICClass {
+struct KVMARMGICClass {
     ARMGICCommonClass parent_class;
     DeviceRealize parent_realize;
     void (*parent_reset)(DeviceState *dev);
-} KVMARMGICClass;
+};
 
 void kvm_arm_gic_set_irq(uint32_t num_irq, int irq, int level)
 {
@@ -55,7 +54,7 @@ void kvm_arm_gic_set_irq(uint32_t num_irq, int irq, int level)
      * has separate fields in the irq number for type,
      * CPU number and interrupt number.
      */
-    int kvm_irq, irqtype, cpu;
+    int irqtype, cpu;
 
     if (irq < (num_irq - GIC_INTERNAL)) {
         /* External interrupt. The kernel numbers these like the GIC
@@ -72,10 +71,7 @@ void kvm_arm_gic_set_irq(uint32_t num_irq, int irq, int level)
         cpu = irq / GIC_INTERNAL;
         irq %= GIC_INTERNAL;
     }
-    kvm_irq = (irqtype << KVM_ARM_IRQ_TYPE_SHIFT)
-        | (cpu << KVM_ARM_IRQ_VCPU_SHIFT) | irq;
-
-    kvm_set_irq(kvm_state, kvm_irq, !!level);
+    kvm_arm_set_irq(cpu, irqtype, irq, !!level);
 }
 
 static void kvm_arm_gicv2_set_irq(void *opaque, int irq, int level)
@@ -520,9 +516,7 @@ static void kvm_arm_gic_realize(DeviceState *dev, Error **errp)
     if (!kvm_arm_gic_can_save_restore(s)) {
         error_setg(&s->migration_blocker, "This operating system kernel does "
                                           "not support vGICv2 migration");
-        migrate_add_blocker(s->migration_blocker, &local_err);
-        if (local_err) {
-            error_propagate(errp, local_err);
+        if (migrate_add_blocker(s->migration_blocker, errp) < 0) {
             error_free(s->migration_blocker);
             return;
         }
@@ -554,7 +548,16 @@ static void kvm_arm_gic_realize(DeviceState *dev, Error **errp)
                               KVM_DEV_ARM_VGIC_CTRL_INIT, NULL, true,
                               &error_abort);
         }
+    } else if (kvm_check_extension(kvm_state, KVM_CAP_DEVICE_CTRL)) {
+        error_setg_errno(errp, -ret, "error creating in-kernel VGIC");
+        error_append_hint(errp,
+                          "Perhaps the host CPU does not support GICv2?\n");
     } else if (ret != -ENODEV && ret != -ENOTSUP) {
+        /*
+         * Very ancient kernel without KVM_CAP_DEVICE_CTRL: assume that
+         * ENODEV or ENOTSUP mean "can't create GICv2 with KVM_CREATE_DEVICE",
+         * and that we will get a GICv2 via KVM_CREATE_IRQCHIP.
+         */
         error_setg_errno(errp, -ret, "error creating in-kernel VGIC");
         return;
     }

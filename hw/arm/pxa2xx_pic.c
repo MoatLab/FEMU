@@ -9,11 +9,14 @@
  */
 
 #include "qemu/osdep.h"
+#include "qapi/error.h"
 #include "qemu/module.h"
+#include "qemu/log.h"
 #include "cpu.h"
-#include "hw/hw.h"
 #include "hw/arm/pxa.h"
 #include "hw/sysbus.h"
+#include "migration/vmstate.h"
+#include "qom/object.h"
 
 #define ICIP	0x00	/* Interrupt Controller IRQ Pending register */
 #define ICMR	0x04	/* Interrupt Controller Mask register */
@@ -35,10 +38,9 @@
 #define PXA2XX_PIC_SRCS	40
 
 #define TYPE_PXA2XX_PIC "pxa2xx_pic"
-#define PXA2XX_PIC(obj) \
-    OBJECT_CHECK(PXA2xxPICState, (obj), TYPE_PXA2XX_PIC)
+OBJECT_DECLARE_SIMPLE_TYPE(PXA2xxPICState, PXA2XX_PIC)
 
-typedef struct {
+struct PXA2xxPICState {
     /*< private >*/
     SysBusDevice parent_obj;
     /*< public >*/
@@ -50,7 +52,7 @@ typedef struct {
     uint32_t is_fiq[2];
     uint32_t int_idle;
     uint32_t priority[PXA2XX_PIC_SRCS];
-} PXA2xxPICState;
+};
 
 static void pxa2xx_pic_update(void *opaque)
 {
@@ -165,7 +167,9 @@ static uint64_t pxa2xx_pic_mem_read(void *opaque, hwaddr offset,
     case ICHP:	/* Highest Priority register */
         return pxa2xx_pic_highest(s);
     default:
-        printf("%s: Bad register offset " REG_FMT "\n", __func__, offset);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "pxa2xx_pic_mem_read: bad register offset 0x%" HWADDR_PRIx
+                      "\n", offset);
         return 0;
     }
 }
@@ -198,7 +202,9 @@ static void pxa2xx_pic_mem_write(void *opaque, hwaddr offset,
         s->priority[32 + ((offset - IPR32) >> 2)] = value & 0x8000003f;
         break;
     default:
-        printf("%s: Bad register offset " REG_FMT "\n", __func__, offset);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "pxa2xx_pic_mem_write: bad register offset 0x%"
+                      HWADDR_PRIx "\n", offset);
         return;
     }
     pxa2xx_pic_update(opaque);
@@ -267,7 +273,7 @@ static int pxa2xx_pic_post_load(void *opaque, int version_id)
 
 DeviceState *pxa2xx_pic_init(hwaddr base, ARMCPU *cpu)
 {
-    DeviceState *dev = qdev_create(NULL, TYPE_PXA2XX_PIC);
+    DeviceState *dev = qdev_new(TYPE_PXA2XX_PIC);
     PXA2xxPICState *s = PXA2XX_PIC(dev);
 
     s->cpu = cpu;
@@ -279,7 +285,7 @@ DeviceState *pxa2xx_pic_init(hwaddr base, ARMCPU *cpu)
     s->is_fiq[0] = 0;
     s->is_fiq[1] = 0;
 
-    qdev_init_nofail(dev);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
 
     qdev_init_gpio_in(dev, pxa2xx_pic_set_irq, PXA2XX_PIC_SRCS);
 

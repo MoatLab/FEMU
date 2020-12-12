@@ -1,37 +1,65 @@
-config HTIF
+config IBEX
     bool
 
-config HART
+config MICROCHIP_PFSOC
     bool
-
-config SIFIVE
-    bool
+    select CADENCE_SDHCI
+    select MCHP_PFSOC_DMC
+    select MCHP_PFSOC_IOSCB
+    select MCHP_PFSOC_MMUART
+    select MCHP_PFSOC_SYSREG
     select MSI_NONBROKEN
+    select SIFIVE_CLINT
+    select SIFIVE_PDMA
+    select SIFIVE_PLIC
+    select UNIMP
 
-config SIFIVE_E
+config OPENTITAN
     bool
-    select HART
-    select SIFIVE
-
-config SIFIVE_U
-    bool
-    select CADENCE
-    select HART
-    select SIFIVE
-
-config SPIKE
-    bool
-    select HART
-    select HTIF
-    select SIFIVE
+    select IBEX
+    select UNIMP
 
 config RISCV_VIRT
     bool
     imply PCI_DEVICES
     imply TEST_DEVICES
+    select GOLDFISH_RTC
+    select MSI_NONBROKEN
     select PCI
-    select HART
-    select SERIAL
-    select VIRTIO_MMIO
     select PCI_EXPRESS_GENERIC_BRIDGE
-    select SIFIVE
+    select PFLASH_CFI01
+    select SERIAL
+    select SIFIVE_CLINT
+    select SIFIVE_PLIC
+    select SIFIVE_TEST
+    select VIRTIO_MMIO
+
+config SIFIVE_E
+    bool
+    select MSI_NONBROKEN
+    select SIFIVE_CLINT
+    select SIFIVE_GPIO
+    select SIFIVE_PLIC
+    select SIFIVE_UART
+    select SIFIVE_E_PRCI
+    select UNIMP
+
+config SIFIVE_U
+    bool
+    select CADENCE
+    select MSI_NONBROKEN
+    select SIFIVE_CLINT
+    select SIFIVE_GPIO
+    select SIFIVE_PDMA
+    select SIFIVE_PLIC
+    select SIFIVE_UART
+    select SIFIVE_U_OTP
+    select SIFIVE_U_PRCI
+    select UNIMP
+
+config SPIKE
+    bool
+    select HTIF
+    select MSI_NONBROKEN
+    select SIFIVE_CLINT
+    select SIFIVE_PLIC

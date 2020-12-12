@@ -8,13 +8,16 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
+#include "hw/irq.h"
+#include "hw/qdev-properties.h"
 #include "qemu/timer.h"
-#include "sysemu/sysemu.h"
+#include "sysemu/runstate.h"
 #include "hw/arm/pxa.h"
 #include "hw/sysbus.h"
+#include "migration/vmstate.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
+#include "qom/object.h"
 
 #define OSMR0	0x00
 #define OSMR1	0x04
@@ -64,10 +67,8 @@ static int pxa2xx_timer4_freq[8] = {
 };
 
 #define TYPE_PXA2XX_TIMER "pxa2xx-timer"
-#define PXA2XX_TIMER(obj) \
-    OBJECT_CHECK(PXA2xxTimerInfo, (obj), TYPE_PXA2XX_TIMER)
+OBJECT_DECLARE_SIMPLE_TYPE(PXA2xxTimerInfo, PXA2XX_TIMER)
 
-typedef struct PXA2xxTimerInfo PXA2xxTimerInfo;
 
 typedef struct {
     uint32_t value;
@@ -138,6 +139,7 @@ static void pxa2xx_timer_update4(void *opaque, uint64_t now_qemu, int n)
     static const int counters[8] = { 0, 0, 0, 0, 4, 4, 6, 6 };
     int counter;
 
+    assert(n < ARRAY_SIZE(counters));
     if (s->tm4[n].control & (1 << 7))
         counter = n;
     else
@@ -560,7 +562,7 @@ static void pxa25x_timer_dev_class_init(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->desc = "PXA25x timer";
-    dc->props = pxa25x_timer_dev_properties;
+    device_class_set_props(dc, pxa25x_timer_dev_properties);
 }
 
 static const TypeInfo pxa25x_timer_dev_info = {
@@ -582,7 +584,7 @@ static void pxa27x_timer_dev_class_init(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->desc = "PXA27x timer";
-    dc->props = pxa27x_timer_dev_properties;
+    device_class_set_props(dc, pxa27x_timer_dev_properties);
 }
 
 static const TypeInfo pxa27x_timer_dev_info = {

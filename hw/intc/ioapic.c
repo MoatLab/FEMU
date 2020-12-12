@@ -9,7 +9,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -23,13 +23,15 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "monitor/monitor.h"
-#include "hw/hw.h"
-#include "hw/i386/pc.h"
 #include "hw/i386/apic.h"
 #include "hw/i386/ioapic.h"
 #include "hw/i386/ioapic_internal.h"
+#include "hw/i386/x86.h"
+#include "hw/intc/i8259.h"
 #include "hw/pci/msi.h"
+#include "hw/qdev-properties.h"
 #include "sysemu/kvm.h"
+#include "sysemu/sysemu.h"
 #include "hw/i386/apic-msidef.h"
 #include "hw/i386/x86-iommu.h"
 #include "trace.h"
@@ -88,7 +90,7 @@ static void ioapic_entry_parse(uint64_t entry, struct ioapic_entry_info *info)
 
 static void ioapic_service(IOAPICCommonState *s)
 {
-    AddressSpace *ioapic_as = PC_MACHINE(qdev_get_machine())->ioapic_as;
+    AddressSpace *ioapic_as = X86_MACHINE(qdev_get_machine())->ioapic_as;
     struct ioapic_entry_info info;
     uint8_t i;
     uint32_t mask;
@@ -238,6 +240,25 @@ void ioapic_eoi_broadcast(int vector)
                 ((entry >> IOAPIC_LVT_TRIGGER_MODE_SHIFT) & 1) != IOAPIC_TRIGGER_LEVEL) {
                 continue;
             }
+
+#ifdef CONFIG_KVM
+            /*
+             * When IOAPIC is in the userspace while APIC is still in
+             * the kernel (i.e., split irqchip), we have a trick to
+             * kick the resamplefd logic for registered irqfds from
+             * userspace to deactivate the IRQ.  When that happens, it
+             * means the irq bypassed userspace IOAPIC (so the irr and
+             * remote-irr of the table entry should be bypassed too
+             * even if interrupt come).  Still kick the resamplefds if
+             * they're bound to the IRQ, to make sure to EOI the
+             * interrupt for the hardware correctly.
+             *
+             * Note: We still need to go through the irr & remote-irr
+             * operations below because we don't know whether there're
+             * emulated devices that are using/sharing the same IRQ.
+             */
+            kvm_resample_fd_notify(n);
+#endif
 
             if (!(entry & IOAPIC_LVT_REMOTE_IRR)) {
                 continue;
@@ -449,7 +470,7 @@ static void ioapic_realize(DeviceState *dev, Error **errp)
     qemu_add_machine_init_done_notifier(&s->machine_done);
 }
 
-static void ioapic_unrealize(DeviceState *dev, Error **errp)
+static void ioapic_unrealize(DeviceState *dev)
 {
     IOAPICCommonState *s = IOAPIC_COMMON(dev);
 
@@ -475,7 +496,7 @@ static void ioapic_class_init(ObjectClass *klass, void *data)
      */
     k->post_load = ioapic_update_kvm_routes;
     dc->reset = ioapic_reset_common;
-    dc->props = ioapic_properties;
+    device_class_set_props(dc, ioapic_properties);
 }
 
 static const TypeInfo ioapic_info = {

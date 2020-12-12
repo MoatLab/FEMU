@@ -32,14 +32,15 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
+#include "hw/irq.h"
 #include "hw/net/mii.h"
+#include "hw/qdev-properties.h"
 #include "hw/sysbus.h"
 #include "net/net.h"
 #include "qemu/module.h"
 #include "net/eth.h"
-#include "sysemu/sysemu.h"
 #include "trace.h"
+#include "qom/object.h"
 
 /* RECSMALL is not used because it breaks tap networking in linux:
  * incoming ARP responses are too short
@@ -271,9 +272,9 @@ typedef struct desc {
 #define DEFAULT_PHY 1
 
 #define TYPE_OPEN_ETH "open_eth"
-#define OPEN_ETH(obj) OBJECT_CHECK(OpenEthState, (obj), TYPE_OPEN_ETH)
+OBJECT_DECLARE_SIMPLE_TYPE(OpenEthState, OPEN_ETH)
 
-typedef struct OpenEthState {
+struct OpenEthState {
     SysBusDevice parent_obj;
 
     NICState *nic;
@@ -287,7 +288,7 @@ typedef struct OpenEthState {
     unsigned tx_desc;
     unsigned rx_desc;
     desc desc[128];
-} OpenEthState;
+};
 
 static desc *rx_desc(OpenEthState *s)
 {
@@ -349,12 +350,11 @@ static void open_eth_reset(void *opaque)
     open_eth_set_link_status(qemu_get_queue(s->nic));
 }
 
-static int open_eth_can_receive(NetClientState *nc)
+static bool open_eth_can_receive(NetClientState *nc)
 {
     OpenEthState *s = qemu_get_nic_opaque(nc);
 
-    return GET_REGBIT(s, MODER, RXEN) &&
-        (s->regs[TX_BD_NUM] < 0x80);
+    return GET_REGBIT(s, MODER, RXEN) && (s->regs[TX_BD_NUM] < 0x80);
 }
 
 static ssize_t open_eth_receive(NetClientState *nc,
@@ -755,7 +755,7 @@ static void open_eth_class_init(ObjectClass *klass, void *data)
     set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);
     dc->desc = "Opencores 10/100 Mbit Ethernet";
     dc->reset = qdev_open_eth_reset;
-    dc->props = open_eth_properties;
+    device_class_set_props(dc, open_eth_properties);
 }
 
 static const TypeInfo open_eth_info = {

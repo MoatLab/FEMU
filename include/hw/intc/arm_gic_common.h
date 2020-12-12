@@ -22,6 +22,7 @@
 #define HW_ARM_GIC_COMMON_H
 
 #include "hw/sysbus.h"
+#include "qom/object.h"
 
 /* Maximum number of possible interrupts, determined by the GIC architecture */
 #define GIC_MAXIRQ 1020
@@ -61,7 +62,7 @@ typedef struct gic_irq_state {
     uint8_t group;
 } gic_irq_state;
 
-typedef struct GICState {
+struct GICState {
     /*< private >*/
     SysBusDevice parent_obj;
     /*< public >*/
@@ -96,6 +97,7 @@ typedef struct GICState {
     uint16_t priority_mask[GIC_NCPU_VCPU];
     uint16_t running_priority[GIC_NCPU_VCPU];
     uint16_t current_pending[GIC_NCPU_VCPU];
+    uint32_t n_prio_bits;
 
     /* If we present the GICv2 without security extensions to a guest,
      * the guest can configure the GICC_CTLR to configure group 1 binary point
@@ -142,24 +144,22 @@ typedef struct GICState {
     bool irq_reset_nonsecure; /* configure IRQs as group 1 (NS) on reset? */
     int dev_fd; /* kvm device fd if backed by kvm vgic support */
     Error *migration_blocker;
-} GICState;
+};
+typedef struct GICState GICState;
 
 #define TYPE_ARM_GIC_COMMON "arm_gic_common"
-#define ARM_GIC_COMMON(obj) \
-     OBJECT_CHECK(GICState, (obj), TYPE_ARM_GIC_COMMON)
-#define ARM_GIC_COMMON_CLASS(klass) \
-     OBJECT_CLASS_CHECK(ARMGICCommonClass, (klass), TYPE_ARM_GIC_COMMON)
-#define ARM_GIC_COMMON_GET_CLASS(obj) \
-     OBJECT_GET_CLASS(ARMGICCommonClass, (obj), TYPE_ARM_GIC_COMMON)
+typedef struct ARMGICCommonClass ARMGICCommonClass;
+DECLARE_OBJ_CHECKERS(GICState, ARMGICCommonClass,
+                     ARM_GIC_COMMON, TYPE_ARM_GIC_COMMON)
 
-typedef struct ARMGICCommonClass {
+struct ARMGICCommonClass {
     /*< private >*/
     SysBusDeviceClass parent_class;
     /*< public >*/
 
     void (*pre_save)(GICState *s);
     void (*post_load)(GICState *s);
-} ARMGICCommonClass;
+};
 
 void gic_init_irqs_and_mmio(GICState *s, qemu_irq_handler handler,
                             const MemoryRegionOps *ops,

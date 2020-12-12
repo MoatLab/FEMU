@@ -9,9 +9,11 @@
 #ifndef ATI_INT_H
 #define ATI_INT_H
 
+#include "qemu/timer.h"
 #include "hw/pci/pci.h"
 #include "hw/i2c/bitbang_i2c.h"
 #include "vga_int.h"
+#include "qom/object.h"
 
 /*#define DEBUG_ATI*/
 
@@ -28,17 +30,20 @@
 #define PCI_DEVICE_ID_ATI_RADEON_QY 0x5159
 
 #define TYPE_ATI_VGA "ati-vga"
-#define ATI_VGA(obj) OBJECT_CHECK(ATIVGAState, (obj), TYPE_ATI_VGA)
+OBJECT_DECLARE_SIMPLE_TYPE(ATIVGAState, ATI_VGA)
 
 typedef struct ATIVGARegs {
     uint32_t mm_index;
     uint32_t bios_scratch[8];
+    uint32_t gen_int_cntl;
+    uint32_t gen_int_status;
     uint32_t crtc_gen_cntl;
     uint32_t crtc_ext_cntl;
     uint32_t dac_cntl;
     uint32_t gpio_vga_ddc;
     uint32_t gpio_dvi_ddc;
     uint32_t gpio_monid;
+    uint32_t config_cntl;
     uint32_t crtc_h_total_disp;
     uint32_t crtc_h_sync_strt_wid;
     uint32_t crtc_v_total_disp;
@@ -78,7 +83,7 @@ typedef struct ATIVGARegs {
     uint32_t default_sc_bottom_right;
 } ATIVGARegs;
 
-typedef struct ATIVGAState {
+struct ATIVGAState {
     PCIDevice dev;
     VGACommonState vga;
     char *model;
@@ -88,11 +93,12 @@ typedef struct ATIVGAState {
     uint16_t cursor_size;
     uint32_t cursor_offset;
     QEMUCursor *cursor;
+    QEMUTimer vblank_timer;
     bitbang_i2c_interface bbi2c;
     MemoryRegion io;
     MemoryRegion mm;
     ATIVGARegs regs;
-} ATIVGAState;
+};
 
 const char *ati_reg_name(int num);
 

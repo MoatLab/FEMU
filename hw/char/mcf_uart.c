@@ -7,13 +7,16 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
+#include "hw/irq.h"
 #include "hw/sysbus.h"
 #include "qemu/module.h"
+#include "qapi/error.h"
 #include "hw/m68k/mcf.h"
+#include "hw/qdev-properties.h"
 #include "chardev/char-fe.h"
+#include "qom/object.h"
 
-typedef struct {
+struct mcf_uart_state {
     SysBusDevice parent_obj;
 
     MemoryRegion iomem;
@@ -31,10 +34,10 @@ typedef struct {
     int rx_enabled;
     qemu_irq irq;
     CharBackend chr;
-} mcf_uart_state;
+};
 
 #define TYPE_MCF_UART "mcf-uart"
-#define MCF_UART(obj) OBJECT_CHECK(mcf_uart_state, (obj), TYPE_MCF_UART)
+OBJECT_DECLARE_SIMPLE_TYPE(mcf_uart_state, MCF_UART)
 
 /* UART Status Register bits.  */
 #define MCF_UART_RxRDY  0x01
@@ -255,7 +258,7 @@ static void mcf_uart_push_byte(mcf_uart_state *s, uint8_t data)
     mcf_uart_update(s);
 }
 
-static void mcf_uart_event(void *opaque, int event)
+static void mcf_uart_event(void *opaque, QEMUChrEvent event)
 {
     mcf_uart_state *s = (mcf_uart_state *)opaque;
 
@@ -319,7 +322,7 @@ static void mcf_uart_class_init(ObjectClass *oc, void *data)
 
     dc->realize = mcf_uart_realize;
     dc->reset = mcf_uart_reset;
-    dc->props = mcf_uart_properties;
+    device_class_set_props(dc, mcf_uart_properties);
     set_bit(DEVICE_CATEGORY_INPUT, dc->categories);
 }
 
@@ -342,11 +345,11 @@ void *mcf_uart_init(qemu_irq irq, Chardev *chrdrv)
 {
     DeviceState  *dev;
 
-    dev = qdev_create(NULL, TYPE_MCF_UART);
+    dev = qdev_new(TYPE_MCF_UART);
     if (chrdrv) {
         qdev_prop_set_chr(dev, "chardev", chrdrv);
     }
-    qdev_init_nofail(dev);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
 
     sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0, irq);
 

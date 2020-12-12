@@ -1,24 +1,30 @@
+# SPDX-License-Identifier: (GPL-2.0-or-later OR BSD-2-Clause)
 # Makefile.pylibfdt
 #
 
-PYLIBFDT_srcs = $(addprefix $(LIBFDT_srcdir)/,$(LIBFDT_SRCS)) \
-		$(PYLIBFDT_srcdir)/libfdt.i
-PYMODULE = $(PYLIBFDT_objdir)/_libfdt.so
+PYLIBFDT_srcs = $(PYLIBFDT_dir)/libfdt.i
+PYMODULE = $(PYLIBFDT_dir)/_libfdt.so
+PYLIBFDT_CLEANFILES_L = libfdt_wrap.c libfdt.py *.pyc *.so
+PYLIBFDT_CLEANFILES = $(PYLIBFDT_CLEANFILES_L:%=$(PYLIBFDT_dir)/%)
+PYLIBFDT_CLEANDIRS_L = build __pycache__
+PYLIBFDT_CLEANDIRS = $(PYLIBFDT_CLEANDIRS_L:%=$(PYLIBFDT_dir)/%)
 
-define run_setup
-	SOURCES="$(1)" CPPFLAGS="$(CPPFLAGS)" OBJDIR="$(PYLIBFDT_objdir)"
-	VERSION="$(dtc_version)"
-	$(PYLIBFDT_objdir)/setup.py --quiet $(2)
-endef
+SETUP = $(PYLIBFDT_dir)/setup.py
+SETUPFLAGS =
 
-$(PYMODULE): $(PYLIBFDT_srcs)
+ifndef V
+SETUPFLAGS += --quiet
+endif
+
+$(PYMODULE): $(PYLIBFDT_srcs) $(LIBFDT_archive) $(SETUP) $(VERSION_FILE)
 	@$(VECHO) PYMOD $@
-	$(call run_setup, $^, build_ext --inplace)
-	mv _libfdt.so $@
+	$(PYTHON) $(SETUP) $(SETUPFLAGS) build_ext --build-lib=../$(PYLIBFDT_dir)
 
 install_pylibfdt: $(PYMODULE)
-	$(VECHO) INSTALL-PYLIB; \
-	$(call run_setup, $(PYLIBFDT_srcs), \
-		install $(if $(SETUP_PREFIX),--prefix=$(SETUP_PREFIX)))
+	@$(VECHO) INSTALL-PYLIB
+	$(PYTHON) $(SETUP) $(SETUPFLAGS) install --prefix=$(PREFIX)
 
-PYLIBFDT_cleanfiles = libfdt_wrap.c libfdt.py libfdt.pyc _libfdt.so
+pylibfdt_clean:
+	@$(VECHO) CLEAN "(pylibfdt)"
+	rm -f $(PYLIBFDT_CLEANFILES)
+	rm -rf $(PYLIBFDT_CLEANDIRS)

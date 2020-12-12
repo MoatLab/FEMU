@@ -4,7 +4,6 @@ source acpi/Kconfig
 source adc/Kconfig
 source audio/Kconfig
 source block/Kconfig
-source bt/Kconfig
 source char/Kconfig
 source core/Kconfig
 source display/Kconfig
@@ -21,12 +20,14 @@ source isa/Kconfig
 source mem/Kconfig
 source misc/Kconfig
 source net/Kconfig
+source nubus/Kconfig
 source nvram/Kconfig
 source pci-bridge/Kconfig
 source pci-host/Kconfig
 source pcmcia/Kconfig
 source pci/Kconfig
 source rdma/Kconfig
+source rtc/Kconfig
 source scsi/Kconfig
 source sd/Kconfig
 source semihosting/Kconfig
@@ -42,6 +43,7 @@ source watchdog/Kconfig
 # arch Kconfig
 source arm/Kconfig
 source alpha/Kconfig
+source avr/Kconfig
 source cris/Kconfig
 source hppa/Kconfig
 source i386/Kconfig
@@ -54,6 +56,7 @@ source nios2/Kconfig
 source openrisc/Kconfig
 source ppc/Kconfig
 source riscv/Kconfig
+source rx/Kconfig
 source s390x/Kconfig
 source sh4/Kconfig
 source sparc/Kconfig
@@ -73,3 +76,7 @@ config XILINX
 config XILINX_AXI
     bool
     select PTIMER # for hw/dma/xilinx_axidma.c
+
+config XLNX_ZYNQMP
+    bool
+    select REGISTER

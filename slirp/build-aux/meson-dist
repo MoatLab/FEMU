@@ -1,0 +1,16 @@
+#!/bin/bash
+
+set -e
+set -o pipefail
+
+if test "$1" = ""; then
+    echo "Version not provided" >&2
+    exit 1
+fi
+if ! test -d "$2"; then
+    echo "Source directory not provided" >&2
+    exit 1
+fi
+
+# generate tarball version
+echo "$1" > "$MESON_DIST_ROOT/.tarball-version"

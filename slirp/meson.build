@@ -1,8 +1,11 @@
 project('libslirp', 'c',
-  version : '4.0.0',
+  version : run_command('build-aux/git-version-gen', '@0@/.tarball-version'.format(meson.source_root()), check : true).stdout().strip(),
   license : 'BSD-3-Clause',
-  default_options : ['warning_level=1', 'c_std=gnu99']
+  default_options : ['warning_level=1', 'c_std=gnu99'],
+  meson_version : '>= 0.49',
 )
+
+meson.add_dist_script('build-aux/meson-dist', meson.project_version(), meson.source_root())
 
 version = meson.project_version()
 varr = version.split('.')
@@ -14,6 +17,7 @@ conf = configuration_data()
 conf.set('SLIRP_MAJOR_VERSION', major_version)
 conf.set('SLIRP_MINOR_VERSION', minor_version)
 conf.set('SLIRP_MICRO_VERSION', micro_version)
+conf.set_quoted('SLIRP_VERSION_STRING', version)
 
 # libtool versioning - this applies to libslirp
 #
@@ -32,10 +36,10 @@ conf.set('SLIRP_MICRO_VERSION', micro_version)
 # - If the interface is the same as the previous version, but bugs are
 #   fixed, change:
 #      REVISION += 1
-lt_current = '0'
-lt_revision = '0'
-lt_age = '0'
-lt_version = '@0@.@1@.@2@'.format(lt_current, lt_age, lt_revision)
+lt_current = 2
+lt_revision = 0
+lt_age = 2
+lt_version = '@0@.@1@.@2@'.format(lt_current - lt_age, lt_age, lt_revision)
 
 host_system = host_machine.system()
 
@@ -100,8 +104,7 @@ configure_file(
   configuration : conf
 )
 
-lib = shared_library('slirp', sources,
-  soversion : lt_current,
+lib = library('slirp', sources,
   version : lt_version,
   c_args : cargs,
   link_args : vflag,
@@ -109,6 +112,10 @@ lib = shared_library('slirp', sources,
   dependencies : [glib_dep, platform_deps],
   install : true
 )
+
+libslirp_dep = declare_dependency(
+  include_directories: include_directories('.', 'src'),
+  link_with: lib)
 
 install_headers(['src/libslirp.h'], subdir : 'slirp')
 

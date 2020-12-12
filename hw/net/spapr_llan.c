@@ -27,17 +27,18 @@
 
 #include "qemu/osdep.h"
 #include "cpu.h"
-#include "hw/hw.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "net/net.h"
-#include "hw/qdev.h"
+#include "migration/vmstate.h"
 #include "hw/ppc/spapr.h"
 #include "hw/ppc/spapr_vio.h"
+#include "hw/qdev-properties.h"
 #include "sysemu/sysemu.h"
 #include "trace.h"
 
 #include <libfdt.h>
+#include "qom/object.h"
 
 #define ETH_ALEN        6
 #define MAX_PACKET_SIZE 65536
@@ -84,8 +85,7 @@ typedef uint64_t vlan_bd_t;
 #define VLAN_MAX_BUFS        (VLAN_RX_BDS_LEN / 8)
 
 #define TYPE_VIO_SPAPR_VLAN_DEVICE "spapr-vlan"
-#define VIO_SPAPR_VLAN_DEVICE(obj) \
-     OBJECT_CHECK(SpaprVioVlan, (obj), TYPE_VIO_SPAPR_VLAN_DEVICE)
+OBJECT_DECLARE_SIMPLE_TYPE(SpaprVioVlan, VIO_SPAPR_VLAN_DEVICE)
 
 #define RX_POOL_MAX_BDS 4096
 #define RX_MAX_POOLS 5
@@ -96,7 +96,7 @@ typedef struct {
     vlan_bd_t bds[RX_POOL_MAX_BDS];
 } RxBufPool;
 
-typedef struct SpaprVioVlan {
+struct SpaprVioVlan {
     SpaprVioDevice sdev;
     NICConf nicconf;
     NICState *nic;
@@ -108,13 +108,13 @@ typedef struct SpaprVioVlan {
     QEMUTimer *rxp_timer;
     uint32_t compat_flags;             /* Compatibility flags for migration */
     RxBufPool *rx_pool[RX_MAX_POOLS];  /* Receive buffer descriptor pools */
-} SpaprVioVlan;
+};
 
-static int spapr_vlan_can_receive(NetClientState *nc)
+static bool spapr_vlan_can_receive(NetClientState *nc)
 {
     SpaprVioVlan *dev = qemu_get_nic_opaque(nc);
 
-    return (dev->isopen && dev->rx_bufs > 0);
+    return dev->isopen && dev->rx_bufs > 0;
 }
 
 /**
@@ -266,7 +266,7 @@ static ssize_t spapr_vlan_receive(NetClientState *nc, const uint8_t *buf,
     }
 
     if (sdev->signal_state & 1) {
-        qemu_irq_pulse(spapr_vio_qirq(sdev));
+        spapr_vio_irq_pulse(sdev);
     }
 
     return size;
@@ -340,7 +340,7 @@ static void spapr_vlan_instance_init(Object *obj)
 
     device_add_bootindex_property(obj, &dev->nicconf.bootindex,
                                   "bootindex", "",
-                                  DEVICE(dev), NULL);
+                                  DEVICE(dev));
 
     if (dev->compat_flags & SPAPRVLAN_FLAG_RX_BUF_POOLS) {
         for (i = 0; i < RX_MAX_POOLS; i++) {
@@ -372,11 +372,11 @@ void spapr_vlan_create(SpaprVioBus *bus, NICInfo *nd)
 {
     DeviceState *dev;
 
-    dev = qdev_create(&bus->bus, "spapr-vlan");
+    dev = qdev_new("spapr-vlan");
 
     qdev_set_nic_properties(dev, nd);
 
-    qdev_init_nofail(dev);
+    qdev_realize_and_unref(dev, &bus->bus, &error_fatal);
 }
 
 static int spapr_vlan_devnode(SpaprVioDevice *dev, void *fdt, int node_off)
@@ -688,7 +688,8 @@ static target_ulong h_send_logical_lan(PowerPCCPU *cpu,
     SpaprVioDevice *sdev = spapr_vio_find_by_reg(spapr->vio_bus, reg);
     SpaprVioVlan *dev = VIO_SPAPR_VLAN_DEVICE(sdev);
     unsigned total_len;
-    uint8_t *lbuf, *p;
+    uint8_t *p;
+    g_autofree uint8_t *lbuf = NULL;
     int i, nbufs;
     int ret;
 
@@ -729,7 +730,7 @@ static target_ulong h_send_logical_lan(PowerPCCPU *cpu,
         return H_RESOURCE;
     }
 
-    lbuf = alloca(total_len);
+    lbuf = g_malloc(total_len);
     p = lbuf;
     for (i = 0; i < nbufs; i++) {
         ret = spapr_vio_dma_read(sdev, VLAN_BD_ADDR(bufs[i]),
@@ -856,7 +857,7 @@ static void spapr_vlan_class_init(ObjectClass *klass, void *data)
     k->dt_compatible = "IBM,l-lan";
     k->signal_mask = 0x1;
     set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);
-    dc->props = spapr_vlan_properties;
+    device_class_set_props(dc, spapr_vlan_properties);
     k->rtce_window_size = 0x10000000;
     dc->vmsd = &vmstate_spapr_llan;
 }

@@ -1,53 +1,8 @@
+// SPDX-License-Identifier: (GPL-2.0-or-later OR BSD-2-Clause)
 /*
  * pylibfdt - Flat Device Tree manipulation in Python
  * Copyright (C) 2017 Google, Inc.
  * Written by Simon Glass <sjg@chromium.org>
- *
- * libfdt is dual licensed: you can use it either under the terms of
- * the GPL, or the BSD license, at your option.
- *
- *  a) This library is free software; you can redistribute it and/or
- *     modify it under the terms of the GNU General Public License as
- *     published by the Free Software Foundation; either version 2 of the
- *     License, or (at your option) any later version.
- *
- *     This library is distributed in the hope that it will be useful,
- *     but WITHOUT ANY WARRANTY; without even the implied warranty of
- *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *     GNU General Public License for more details.
- *
- *     You should have received a copy of the GNU General Public
- *     License along with this library; if not, write to the Free
- *     Software Foundation, Inc., 51 Franklin St, Fifth Floor, Boston,
- *     MA 02110-1301 USA
- *
- * Alternatively,
- *
- *  b) Redistribution and use in source and binary forms, with or
- *     without modification, are permitted provided that the following
- *     conditions are met:
- *
- *     1. Redistributions of source code must retain the above
- *        copyright notice, this list of conditions and the following
- *        disclaimer.
- *     2. Redistributions in binary form must reproduce the above
- *        copyright notice, this list of conditions and the following
- *        disclaimer in the documentation and/or other materials
- *        provided with the distribution.
- *
- *     THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND
- *     CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
- *     INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
- *     MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- *     DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR
- *     CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *     SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- *     NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- *     LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- *     HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- *     CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
- *     OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
- *     EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
 %module libfdt
@@ -63,7 +18,7 @@
  * a struct called fdt_property. That struct causes swig to create a class in
  * libfdt.py called fdt_property(), which confuses things.
  */
-static int fdt_property_stub(void *fdt, const char *name, const char *val,
+static int fdt_property_stub(void *fdt, const char *name, const void *val,
                              int len)
 {
     return fdt_property(fdt, name, val, len);
@@ -137,7 +92,7 @@ def check_err(val, quiet=()):
     Raises
         FdtException if val < 0
     """
-    if val < 0:
+    if isinstance(val, int) and val < 0:
         if -val not in quiet:
             raise FdtException(val)
     return val
@@ -476,6 +431,18 @@ class FdtRo(object):
         """
         return fdt_get_phandle(self._fdt, nodeoffset)
 
+    def get_alias(self, name):
+        """Get the full path referenced by a given alias
+
+        Args:
+            name: name of the alias to lookup
+
+        Returns:
+            Full path to the node for the alias named 'name', if it exists
+            None, if the given alias or the /aliases node does not exist
+        """
+        return fdt_get_alias(self._fdt, name)
+
     def parent_offset(self, nodeoffset, quiet=()):
         """Get the offset of a node's parent
 
@@ -669,21 +636,54 @@ class Fdt(FdtRo):
         Raises:
             FdtException if no parent found or other error occurs
         """
-        val = val.encode('utf-8') + '\0'
+        val = val.encode('utf-8') + b'\0'
         return check_err(fdt_setprop(self._fdt, nodeoffset, prop_name,
                                      val, len(val)), quiet)
 
-    def delprop(self, nodeoffset, prop_name):
+    def delprop(self, nodeoffset, prop_name, quiet=()):
         """Delete a property from a node
 
         Args:
             nodeoffset: Node offset containing property to delete
             prop_name: Name of property to delete
+            quiet: Errors to ignore (empty to raise on all errors)
+
+        Returns:
+            Error code, or 0 if OK
 
         Raises:
             FdtError if the property does not exist, or another error occurs
         """
-        return check_err(fdt_delprop(self._fdt, nodeoffset, prop_name))
+        return check_err(fdt_delprop(self._fdt, nodeoffset, prop_name), quiet)
+
+    def add_subnode(self, parentoffset, name, quiet=()):
+        """Add a new subnode to a node
+
+        Args:
+            parentoffset: Parent offset to add the subnode to
+            name: Name of node to add
+
+        Returns:
+            offset of the node created, or negative error code on failure
+
+        Raises:
+            FdtError if there is not enough space, or another error occurs
+        """
+        return check_err(fdt_add_subnode(self._fdt, parentoffset, name), quiet)
+
+    def del_node(self, nodeoffset, quiet=()):
+        """Delete a node
+
+        Args:
+            nodeoffset: Offset of node to delete
+
+        Returns:
+            Error code, or 0 if OK
+
+        Raises:
+            FdtError if an error occurs
+        """
+        return check_err(fdt_del_node(self._fdt, nodeoffset), quiet)
 
 
 class Property(bytearray):
@@ -739,8 +739,10 @@ class FdtSw(FdtRo):
 
     # First create the device tree with a node and property:
     sw = FdtSw()
-    with sw.add_node('node'):
-        sw.property_u32('reg', 2)
+    sw.finish_reservemap()
+    with sw.add_node(''):
+        with sw.add_node('node'):
+            sw.property_u32('reg', 2)
     fdt = sw.as_fdt()
 
     # Now we can use it as a real device tree
@@ -928,7 +930,7 @@ class FdtSw(FdtRo):
 
         Args:
             name: Name of property to add
-            val: Value of property
+            val: Value of property (bytes)
             quiet: Errors to ignore (empty to raise on all errors)
 
         Raises:
@@ -995,7 +997,7 @@ class NodeAdder():
  */
 typedef uint32_t fdt32_t;
 
-%include "libfdt/fdt.h"
+%include "fdt.h"
 
 %include "typemaps.i"
 
@@ -1041,17 +1043,24 @@ typedef uint32_t fdt32_t;
 	if (!$1)
 		$result = Py_None;
 	else
-		$result = Py_BuildValue("s#", $1, *arg4);
+        %#if PY_VERSION_HEX >= 0x03000000
+            $result = Py_BuildValue("y#", $1, *arg4);
+        %#else
+            $result = Py_BuildValue("s#", $1, *arg4);
+        %#endif
 }
 
 /* typemap used for fdt_setprop() */
 %typemap(in) (const void *val) {
-    $1 = PyString_AsString($input);   /* char *str */
-}
-
-/* typemap used for fdt_add_reservemap_entry() */
-%typemap(in) uint64_t {
-   $1 = PyLong_AsUnsignedLong($input);
+    %#if PY_VERSION_HEX >= 0x03000000
+        if (!PyBytes_Check($input)) {
+            SWIG_exception_fail(SWIG_TypeError, "bytes expected in method '" "$symname"
+                "', argument " "$argnum"" of type '" "$type""'");
+        }
+        $1 = PyBytes_AsString($input);
+    %#else
+        $1 = PyString_AsString($input);   /* char *str */
+    %#endif
 }
 
 /* typemaps used for fdt_next_node() */
@@ -1073,7 +1082,7 @@ typedef uint32_t fdt32_t;
 }
 
 %typemap(argout) uint64_t * {
-        PyObject *val = PyLong_FromUnsignedLong(*arg$argnum);
+        PyObject *val = PyLong_FromUnsignedLongLong(*arg$argnum);
         if (!result) {
            if (PyTuple_GET_SIZE(resultobj) == 0)
               resultobj = val;
@@ -1104,6 +1113,6 @@ int fdt_property_cell(void *fdt, const char *name, uint32_t val);
  * This function has a stub since the name fdt_property is used for both a
   * function and a struct, which confuses SWIG.
  */
-int fdt_property_stub(void *fdt, const char *name, const char *val, int len);
+int fdt_property_stub(void *fdt, const char *name, const void *val, int len);
 
-%include <../libfdt/libfdt.h>
+%include <libfdt.h>

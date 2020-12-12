@@ -7,7 +7,7 @@
 \*===----------------------------------------------------------------------===*/
 
 /* Capstone Disassembly Engine */
-/* By Nguyen Anh Quynh <aquynh@gmail.com>, 2013-2014 */
+/* By Nguyen Anh Quynh <aquynh@gmail.com>, 2013-2019 */
 
 
 #ifdef GET_REGINFO_ENUM
@@ -148,17 +148,6 @@ enum {
   SP_QFPRegs_with_sub_evenRegClassID = 7
 };
 
-// Subregister indices
-enum {
-  SP_NoSubRegister,
-  SP_sub_even,	// 1
-  SP_sub_even64,	// 2
-  SP_sub_odd,	// 3
-  SP_sub_odd64,	// 4
-  SP_sub_odd64_then_sub_even,	// 5
-  SP_sub_odd64_then_sub_odd,	// 6
-  SP_NUM_TARGET_SUBREGS
-};
 #endif // GET_REGINFO_ENUM
 
 /*===- TableGen'erated file -------------------------------------*- C++ -*-===*\
@@ -247,216 +236,216 @@ static const uint16_t SparcSubRegIdxLists[] = {
 };
 
 static const MCRegisterDesc SparcRegDesc[] = { // Descriptors
-  { 3, 0, 0, 0, 0 },
-  { 406, 4, 4, 2, 3393 },
-  { 410, 4, 4, 2, 3393 },
-  { 33, 5, 203, 0, 1794 },
-  { 87, 12, 194, 0, 1794 },
-  { 133, 15, 194, 0, 1794 },
-  { 179, 22, 185, 0, 1794 },
-  { 220, 25, 185, 0, 1794 },
-  { 261, 32, 176, 0, 1794 },
-  { 298, 35, 176, 0, 1794 },
-  { 335, 42, 167, 0, 1794 },
-  { 372, 45, 167, 0, 1794 },
-  { 397, 52, 158, 0, 1794 },
-  { 0, 55, 158, 0, 1794 },
-  { 54, 62, 149, 0, 1794 },
-  { 108, 65, 149, 0, 1794 },
-  { 154, 72, 140, 0, 1794 },
-  { 200, 75, 140, 0, 1794 },
-  { 241, 82, 134, 0, 1794 },
-  { 282, 4, 134, 2, 1841 },
-  { 319, 4, 131, 2, 1841 },
-  { 356, 4, 131, 2, 1841 },
-  { 381, 4, 129, 2, 1841 },
-  { 12, 4, 129, 2, 1841 },
-  { 66, 4, 127, 2, 1841 },
-  { 120, 4, 127, 2, 1841 },
-  { 166, 4, 125, 2, 1841 },
-  { 212, 4, 125, 2, 1841 },
-  { 253, 4, 123, 2, 1841 },
-  { 290, 4, 123, 2, 1841 },
-  { 327, 4, 121, 2, 1841 },
-  { 364, 4, 121, 2, 1841 },
-  { 389, 4, 119, 2, 1841 },
-  { 20, 4, 119, 2, 1841 },
-  { 74, 4, 117, 2, 1841 },
-  { 36, 4, 205, 2, 3329 },
-  { 90, 4, 202, 2, 3329 },
-  { 136, 4, 199, 2, 3329 },
-  { 182, 4, 196, 2, 3329 },
-  { 223, 4, 196, 2, 3329 },
-  { 264, 4, 193, 2, 3329 },
-  { 301, 4, 190, 2, 3329 },
-  { 338, 4, 187, 2, 3329 },
-  { 375, 4, 187, 2, 3329 },
-  { 400, 4, 184, 2, 3329 },
-  { 4, 4, 181, 2, 3329 },
-  { 58, 4, 178, 2, 3329 },
-  { 112, 4, 178, 2, 3329 },
-  { 158, 4, 175, 2, 3329 },
-  { 204, 4, 172, 2, 3329 },
-  { 245, 4, 169, 2, 3329 },
-  { 286, 4, 169, 2, 3329 },
-  { 323, 4, 166, 2, 3329 },
-  { 360, 4, 163, 2, 3329 },
-  { 385, 4, 160, 2, 3329 },
-  { 16, 4, 160, 2, 3329 },
-  { 70, 4, 157, 2, 3329 },
-  { 124, 4, 154, 2, 3329 },
-  { 170, 4, 151, 2, 3329 },
-  { 216, 4, 151, 2, 3329 },
-  { 257, 4, 148, 2, 3329 },
-  { 294, 4, 145, 2, 3329 },
-  { 331, 4, 142, 2, 3329 },
-  { 368, 4, 142, 2, 3329 },
-  { 393, 4, 139, 2, 3329 },
-  { 24, 4, 136, 2, 3329 },
-  { 78, 4, 133, 2, 3329 },
-  { 28, 4, 4, 2, 3361 },
-  { 82, 4, 4, 2, 3361 },
-  { 128, 4, 4, 2, 3361 },
-  { 174, 4, 4, 2, 3361 },
-  { 39, 4, 4, 2, 3361 },
-  { 93, 4, 4, 2, 3361 },
-  { 139, 4, 4, 2, 3361 },
-  { 185, 4, 4, 2, 3361 },
-  { 226, 4, 4, 2, 3361 },
-  { 267, 4, 4, 2, 3361 },
-  { 304, 4, 4, 2, 3361 },
-  { 341, 4, 4, 2, 3361 },
-  { 42, 4, 4, 2, 3361 },
-  { 96, 4, 4, 2, 3361 },
-  { 142, 4, 4, 2, 3361 },
-  { 188, 4, 4, 2, 3361 },
-  { 229, 4, 4, 2, 3361 },
-  { 270, 4, 4, 2, 3361 },
-  { 307, 4, 4, 2, 3361 },
-  { 344, 4, 4, 2, 3361 },
-  { 45, 4, 4, 2, 3361 },
-  { 99, 4, 4, 2, 3361 },
-  { 145, 4, 4, 2, 3361 },
-  { 191, 4, 4, 2, 3361 },
-  { 232, 4, 4, 2, 3361 },
-  { 273, 4, 4, 2, 3361 },
-  { 310, 4, 4, 2, 3361 },
-  { 347, 4, 4, 2, 3361 },
-  { 48, 4, 4, 2, 3361 },
-  { 102, 4, 4, 2, 3361 },
-  { 148, 4, 4, 2, 3361 },
-  { 194, 4, 4, 2, 3361 },
-  { 235, 4, 4, 2, 3361 },
-  { 276, 4, 4, 2, 3361 },
-  { 313, 4, 4, 2, 3361 },
-  { 350, 4, 4, 2, 3361 },
-  { 51, 8, 4, 6, 4 },
-  { 105, 18, 4, 6, 4 },
-  { 151, 28, 4, 6, 4 },
-  { 197, 38, 4, 6, 4 },
-  { 238, 48, 4, 6, 4 },
-  { 279, 58, 4, 6, 4 },
-  { 316, 68, 4, 6, 4 },
-  { 353, 78, 4, 6, 4 },
-  { 378, 88, 4, 3, 1362 },
-  { 403, 91, 4, 3, 1362 },
-  { 8, 94, 4, 3, 1362 },
-  { 62, 97, 4, 3, 1362 },
-  { 116, 100, 4, 3, 1362 },
-  { 162, 103, 4, 3, 1362 },
-  { 208, 106, 4, 3, 1362 },
-  { 249, 109, 4, 3, 1362 },
+  { 3, 0, 0, 0, 0, 0 },
+  { 406, 4, 4, 2, 3393, 0 },
+  { 410, 4, 4, 2, 3393, 0 },
+  { 33, 5, 203, 0, 1794, 2 },
+  { 87, 12, 194, 0, 1794, 2 },
+  { 133, 15, 194, 0, 1794, 2 },
+  { 179, 22, 185, 0, 1794, 2 },
+  { 220, 25, 185, 0, 1794, 2 },
+  { 261, 32, 176, 0, 1794, 2 },
+  { 298, 35, 176, 0, 1794, 2 },
+  { 335, 42, 167, 0, 1794, 2 },
+  { 372, 45, 167, 0, 1794, 2 },
+  { 397, 52, 158, 0, 1794, 2 },
+  { 0, 55, 158, 0, 1794, 2 },
+  { 54, 62, 149, 0, 1794, 2 },
+  { 108, 65, 149, 0, 1794, 2 },
+  { 154, 72, 140, 0, 1794, 2 },
+  { 200, 75, 140, 0, 1794, 2 },
+  { 241, 82, 134, 0, 1794, 2 },
+  { 282, 4, 134, 2, 1841, 0 },
+  { 319, 4, 131, 2, 1841, 0 },
+  { 356, 4, 131, 2, 1841, 0 },
+  { 381, 4, 129, 2, 1841, 0 },
+  { 12, 4, 129, 2, 1841, 0 },
+  { 66, 4, 127, 2, 1841, 0 },
+  { 120, 4, 127, 2, 1841, 0 },
+  { 166, 4, 125, 2, 1841, 0 },
+  { 212, 4, 125, 2, 1841, 0 },
+  { 253, 4, 123, 2, 1841, 0 },
+  { 290, 4, 123, 2, 1841, 0 },
+  { 327, 4, 121, 2, 1841, 0 },
+  { 364, 4, 121, 2, 1841, 0 },
+  { 389, 4, 119, 2, 1841, 0 },
+  { 20, 4, 119, 2, 1841, 0 },
+  { 74, 4, 117, 2, 1841, 0 },
+  { 36, 4, 205, 2, 3329, 0 },
+  { 90, 4, 202, 2, 3329, 0 },
+  { 136, 4, 199, 2, 3329, 0 },
+  { 182, 4, 196, 2, 3329, 0 },
+  { 223, 4, 196, 2, 3329, 0 },
+  { 264, 4, 193, 2, 3329, 0 },
+  { 301, 4, 190, 2, 3329, 0 },
+  { 338, 4, 187, 2, 3329, 0 },
+  { 375, 4, 187, 2, 3329, 0 },
+  { 400, 4, 184, 2, 3329, 0 },
+  { 4, 4, 181, 2, 3329, 0 },
+  { 58, 4, 178, 2, 3329, 0 },
+  { 112, 4, 178, 2, 3329, 0 },
+  { 158, 4, 175, 2, 3329, 0 },
+  { 204, 4, 172, 2, 3329, 0 },
+  { 245, 4, 169, 2, 3329, 0 },
+  { 286, 4, 169, 2, 3329, 0 },
+  { 323, 4, 166, 2, 3329, 0 },
+  { 360, 4, 163, 2, 3329, 0 },
+  { 385, 4, 160, 2, 3329, 0 },
+  { 16, 4, 160, 2, 3329, 0 },
+  { 70, 4, 157, 2, 3329, 0 },
+  { 124, 4, 154, 2, 3329, 0 },
+  { 170, 4, 151, 2, 3329, 0 },
+  { 216, 4, 151, 2, 3329, 0 },
+  { 257, 4, 148, 2, 3329, 0 },
+  { 294, 4, 145, 2, 3329, 0 },
+  { 331, 4, 142, 2, 3329, 0 },
+  { 368, 4, 142, 2, 3329, 0 },
+  { 393, 4, 139, 2, 3329, 0 },
+  { 24, 4, 136, 2, 3329, 0 },
+  { 78, 4, 133, 2, 3329, 0 },
+  { 28, 4, 4, 2, 3361, 0 },
+  { 82, 4, 4, 2, 3361, 0 },
+  { 128, 4, 4, 2, 3361, 0 },
+  { 174, 4, 4, 2, 3361, 0 },
+  { 39, 4, 4, 2, 3361, 0 },
+  { 93, 4, 4, 2, 3361, 0 },
+  { 139, 4, 4, 2, 3361, 0 },
+  { 185, 4, 4, 2, 3361, 0 },
+  { 226, 4, 4, 2, 3361, 0 },
+  { 267, 4, 4, 2, 3361, 0 },
+  { 304, 4, 4, 2, 3361, 0 },
+  { 341, 4, 4, 2, 3361, 0 },
+  { 42, 4, 4, 2, 3361, 0 },
+  { 96, 4, 4, 2, 3361, 0 },
+  { 142, 4, 4, 2, 3361, 0 },
+  { 188, 4, 4, 2, 3361, 0 },
+  { 229, 4, 4, 2, 3361, 0 },
+  { 270, 4, 4, 2, 3361, 0 },
+  { 307, 4, 4, 2, 3361, 0 },
+  { 344, 4, 4, 2, 3361, 0 },
+  { 45, 4, 4, 2, 3361, 0 },
+  { 99, 4, 4, 2, 3361, 0 },
+  { 145, 4, 4, 2, 3361, 0 },
+  { 191, 4, 4, 2, 3361, 0 },
+  { 232, 4, 4, 2, 3361, 0 },
+  { 273, 4, 4, 2, 3361, 0 },
+  { 310, 4, 4, 2, 3361, 0 },
+  { 347, 4, 4, 2, 3361, 0 },
+  { 48, 4, 4, 2, 3361, 0 },
+  { 102, 4, 4, 2, 3361, 0 },
+  { 148, 4, 4, 2, 3361, 0 },
+  { 194, 4, 4, 2, 3361, 0 },
+  { 235, 4, 4, 2, 3361, 0 },
+  { 276, 4, 4, 2, 3361, 0 },
+  { 313, 4, 4, 2, 3361, 0 },
+  { 350, 4, 4, 2, 3361, 0 },
+  { 51, 8, 4, 6, 4, 5 },
+  { 105, 18, 4, 6, 4, 5 },
+  { 151, 28, 4, 6, 4, 5 },
+  { 197, 38, 4, 6, 4, 5 },
+  { 238, 48, 4, 6, 4, 5 },
+  { 279, 58, 4, 6, 4, 5 },
+  { 316, 68, 4, 6, 4, 5 },
+  { 353, 78, 4, 6, 4, 5 },
+  { 378, 88, 4, 3, 1362, 10 },
+  { 403, 91, 4, 3, 1362, 10 },
+  { 8, 94, 4, 3, 1362, 10 },
+  { 62, 97, 4, 3, 1362, 10 },
+  { 116, 100, 4, 3, 1362, 10 },
+  { 162, 103, 4, 3, 1362, 10 },
+  { 208, 106, 4, 3, 1362, 10 },
+  { 249, 109, 4, 3, 1362, 10 },
 };
 
   // FCCRegs Register Class...
   static const MCPhysReg FCCRegs[] = {
-    SP_FCC0, SP_FCC1, SP_FCC2, SP_FCC3, 
+    SP_FCC0, SP_FCC1, SP_FCC2, SP_FCC3,
   };
 
   // FCCRegs Bit set.
   static const uint8_t FCCRegsBits[] = {
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x78, 
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x78,
   };
 
   // FPRegs Register Class...
   static const MCPhysReg FPRegs[] = {
-    SP_F0, SP_F1, SP_F2, SP_F3, SP_F4, SP_F5, SP_F6, SP_F7, SP_F8, SP_F9, SP_F10, SP_F11, SP_F12, SP_F13, SP_F14, SP_F15, SP_F16, SP_F17, SP_F18, SP_F19, SP_F20, SP_F21, SP_F22, SP_F23, SP_F24, SP_F25, SP_F26, SP_F27, SP_F28, SP_F29, SP_F30, SP_F31, 
+    SP_F0, SP_F1, SP_F2, SP_F3, SP_F4, SP_F5, SP_F6, SP_F7, SP_F8, SP_F9, SP_F10, SP_F11, SP_F12, SP_F13, SP_F14, SP_F15, SP_F16, SP_F17, SP_F18, SP_F19, SP_F20, SP_F21, SP_F22, SP_F23, SP_F24, SP_F25, SP_F26, SP_F27, SP_F28, SP_F29, SP_F30, SP_F31,
   };
 
   // FPRegs Bit set.
   static const uint8_t FPRegsBits[] = {
-    0x00, 0x00, 0x00, 0x00, 0xf8, 0xff, 0xff, 0xff, 0x07, 
+    0x00, 0x00, 0x00, 0x00, 0xf8, 0xff, 0xff, 0xff, 0x07,
   };
 
   // IntRegs Register Class...
   static const MCPhysReg IntRegs[] = {
-    SP_I0, SP_I1, SP_I2, SP_I3, SP_I4, SP_I5, SP_I6, SP_I7, SP_G0, SP_G1, SP_G2, SP_G3, SP_G4, SP_G5, SP_G6, SP_G7, SP_L0, SP_L1, SP_L2, SP_L3, SP_L4, SP_L5, SP_L6, SP_L7, SP_O0, SP_O1, SP_O2, SP_O3, SP_O4, SP_O5, SP_O6, SP_O7, 
+    SP_I0, SP_I1, SP_I2, SP_I3, SP_I4, SP_I5, SP_I6, SP_I7, SP_G0, SP_G1, SP_G2, SP_G3, SP_G4, SP_G5, SP_G6, SP_G7, SP_L0, SP_L1, SP_L2, SP_L3, SP_L4, SP_L5, SP_L6, SP_L7, SP_O0, SP_O1, SP_O2, SP_O3, SP_O4, SP_O5, SP_O6, SP_O7,
   };
 
   // IntRegs Bit set.
   static const uint8_t IntRegsBits[] = {
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xff, 0xff, 0xff, 0x7f, 
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xff, 0xff, 0xff, 0x7f,
   };
 
   // DFPRegs Register Class...
   static const MCPhysReg DFPRegs[] = {
-    SP_D0, SP_D1, SP_D2, SP_D3, SP_D4, SP_D5, SP_D6, SP_D7, SP_D8, SP_D9, SP_D10, SP_D11, SP_D12, SP_D13, SP_D14, SP_D15, SP_D16, SP_D17, SP_D18, SP_D19, SP_D20, SP_D21, SP_D22, SP_D23, SP_D24, SP_D25, SP_D26, SP_D27, SP_D28, SP_D29, SP_D30, SP_D31, 
+    SP_D0, SP_D1, SP_D2, SP_D3, SP_D4, SP_D5, SP_D6, SP_D7, SP_D8, SP_D9, SP_D10, SP_D11, SP_D12, SP_D13, SP_D14, SP_D15, SP_D16, SP_D17, SP_D18, SP_D19, SP_D20, SP_D21, SP_D22, SP_D23, SP_D24, SP_D25, SP_D26, SP_D27, SP_D28, SP_D29, SP_D30, SP_D31,
   };
 
   // DFPRegs Bit set.
   static const uint8_t DFPRegsBits[] = {
-    0xf8, 0xff, 0xff, 0xff, 0x07, 
+    0xf8, 0xff, 0xff, 0xff, 0x07,
   };
 
   // I64Regs Register Class...
   static const MCPhysReg I64Regs[] = {
-    SP_I0, SP_I1, SP_I2, SP_I3, SP_I4, SP_I5, SP_I6, SP_I7, SP_G0, SP_G1, SP_G2, SP_G3, SP_G4, SP_G5, SP_G6, SP_G7, SP_L0, SP_L1, SP_L2, SP_L3, SP_L4, SP_L5, SP_L6, SP_L7, SP_O0, SP_O1, SP_O2, SP_O3, SP_O4, SP_O5, SP_O6, SP_O7, 
+    SP_I0, SP_I1, SP_I2, SP_I3, SP_I4, SP_I5, SP_I6, SP_I7, SP_G0, SP_G1, SP_G2, SP_G3, SP_G4, SP_G5, SP_G6, SP_G7, SP_L0, SP_L1, SP_L2, SP_L3, SP_L4, SP_L5, SP_L6, SP_L7, SP_O0, SP_O1, SP_O2, SP_O3, SP_O4, SP_O5, SP_O6, SP_O7,
   };
 
   // I64Regs Bit set.
   static const uint8_t I64RegsBits[] = {
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xff, 0xff, 0xff, 0x7f, 
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xff, 0xff, 0xff, 0x7f,
   };
 
   // DFPRegs_with_sub_even Register Class...
   static const MCPhysReg DFPRegs_with_sub_even[] = {
-    SP_D0, SP_D1, SP_D2, SP_D3, SP_D4, SP_D5, SP_D6, SP_D7, SP_D8, SP_D9, SP_D10, SP_D11, SP_D12, SP_D13, SP_D14, SP_D15, 
+    SP_D0, SP_D1, SP_D2, SP_D3, SP_D4, SP_D5, SP_D6, SP_D7, SP_D8, SP_D9, SP_D10, SP_D11, SP_D12, SP_D13, SP_D14, SP_D15,
   };
 
   // DFPRegs_with_sub_even Bit set.
   static const uint8_t DFPRegs_with_sub_evenBits[] = {
-    0xf8, 0xff, 0x07, 
+    0xf8, 0xff, 0x07,
   };
 
   // QFPRegs Register Class...
   static const MCPhysReg QFPRegs[] = {
-    SP_Q0, SP_Q1, SP_Q2, SP_Q3, SP_Q4, SP_Q5, SP_Q6, SP_Q7, SP_Q8, SP_Q9, SP_Q10, SP_Q11, SP_Q12, SP_Q13, SP_Q14, SP_Q15, 
+    SP_Q0, SP_Q1, SP_Q2, SP_Q3, SP_Q4, SP_Q5, SP_Q6, SP_Q7, SP_Q8, SP_Q9, SP_Q10, SP_Q11, SP_Q12, SP_Q13, SP_Q14, SP_Q15,
   };
 
   // QFPRegs Bit set.
   static const uint8_t QFPRegsBits[] = {
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xff, 0x7f, 
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xff, 0x7f,
   };
 
   // QFPRegs_with_sub_even Register Class...
   static const MCPhysReg QFPRegs_with_sub_even[] = {
-    SP_Q0, SP_Q1, SP_Q2, SP_Q3, SP_Q4, SP_Q5, SP_Q6, SP_Q7, 
+    SP_Q0, SP_Q1, SP_Q2, SP_Q3, SP_Q4, SP_Q5, SP_Q6, SP_Q7,
   };
 
   // QFPRegs_with_sub_even Bit set.
   static const uint8_t QFPRegs_with_sub_evenBits[] = {
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x7f, 
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x7f,
   };
 
 static const MCRegisterClass SparcMCRegisterClasses[] = {
-  { "FCCRegs", FCCRegs, FCCRegsBits, 4, sizeof(FCCRegsBits), SP_FCCRegsRegClassID, 0, 0, 1, 1 },
-  { "FPRegs", FPRegs, FPRegsBits, 32, sizeof(FPRegsBits), SP_FPRegsRegClassID, 4, 4, 1, 1 },
-  { "IntRegs", IntRegs, IntRegsBits, 32, sizeof(IntRegsBits), SP_IntRegsRegClassID, 4, 4, 1, 1 },
-  { "DFPRegs", DFPRegs, DFPRegsBits, 32, sizeof(DFPRegsBits), SP_DFPRegsRegClassID, 8, 8, 1, 1 },
-  { "I64Regs", I64Regs, I64RegsBits, 32, sizeof(I64RegsBits), SP_I64RegsRegClassID, 8, 8, 1, 1 },
-  { "DFPRegs_with_sub_even", DFPRegs_with_sub_even, DFPRegs_with_sub_evenBits, 16, sizeof(DFPRegs_with_sub_evenBits), SP_DFPRegs_with_sub_evenRegClassID, 8, 8, 1, 1 },
-  { "QFPRegs", QFPRegs, QFPRegsBits, 16, sizeof(QFPRegsBits), SP_QFPRegsRegClassID, 16, 16, 1, 1 },
-  { "QFPRegs_with_sub_even", QFPRegs_with_sub_even, QFPRegs_with_sub_evenBits, 8, sizeof(QFPRegs_with_sub_evenBits), SP_QFPRegs_with_sub_evenRegClassID, 16, 16, 1, 1 },
+  { FCCRegs, FCCRegsBits, sizeof(FCCRegsBits) },
+  { FPRegs, FPRegsBits, sizeof(FPRegsBits) },
+  { IntRegs, IntRegsBits, sizeof(IntRegsBits) },
+  { DFPRegs, DFPRegsBits, sizeof(DFPRegsBits) },
+  { I64Regs, I64RegsBits, sizeof(I64RegsBits) },
+  { DFPRegs_with_sub_even, DFPRegs_with_sub_evenBits, sizeof(DFPRegs_with_sub_evenBits) },
+  { QFPRegs, QFPRegsBits, sizeof(QFPRegsBits) },
+  { QFPRegs_with_sub_even, QFPRegs_with_sub_evenBits, sizeof(QFPRegs_with_sub_evenBits) },
 };
 
 #endif // GET_REGINFO_MC_DESC

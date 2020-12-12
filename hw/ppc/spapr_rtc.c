@@ -31,6 +31,7 @@
 #include "qemu/timer.h"
 #include "sysemu/sysemu.h"
 #include "hw/ppc/spapr.h"
+#include "migration/vmstate.h"
 #include "qapi/error.h"
 #include "qapi/qapi-events-misc-target.h"
 #include "qemu/cutils.h"
@@ -148,7 +149,7 @@ static void spapr_rtc_realize(DeviceState *dev, Error **errp)
     rtc_ns = qemu_clock_get_ns(rtc_clock);
     rtc->ns_offset = host_s * NANOSECONDS_PER_SECOND - rtc_ns;
 
-    object_property_add_tm(OBJECT(rtc), "date", spapr_rtc_qom_date, NULL);
+    object_property_add_tm(OBJECT(rtc), "date", spapr_rtc_qom_date);
 }
 
 static const VMStateDescription vmstate_spapr_rtc = {

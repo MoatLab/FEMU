@@ -9,7 +9,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -23,7 +23,6 @@
 
 #include "qemu/osdep.h"
 #include "sysemu/cryptodev.h"
-#include "hw/boards.h"
 #include "qapi/error.h"
 #include "qapi/visitor.h"
 #include "qemu/config-file.h"
@@ -155,21 +154,17 @@ cryptodev_backend_set_queues(Object *obj, Visitor *v, const char *name,
                              void *opaque, Error **errp)
 {
     CryptoDevBackend *backend = CRYPTODEV_BACKEND(obj);
-    Error *local_err = NULL;
     uint32_t value;
 
-    visit_type_uint32(v, name, &value, &local_err);
-    if (local_err) {
-        goto out;
+    if (!visit_type_uint32(v, name, &value, errp)) {
+        return;
     }
     if (!value) {
-        error_setg(&local_err, "Property '%s.%s' doesn't take value '%"
-                   PRIu32 "'", object_get_typename(obj), name, value);
-        goto out;
+        error_setg(errp, "Property '%s.%s' doesn't take value '%" PRIu32 "'",
+                   object_get_typename(obj), name, value);
+        return;
     }
     backend->conf.peers.queues = value;
-out:
-    error_propagate(errp, local_err);
 }
 
 static void
@@ -177,19 +172,10 @@ cryptodev_backend_complete(UserCreatable *uc, Error **errp)
 {
     CryptoDevBackend *backend = CRYPTODEV_BACKEND(uc);
     CryptoDevBackendClass *bc = CRYPTODEV_BACKEND_GET_CLASS(uc);
-    Error *local_err = NULL;
 
     if (bc->init) {
-        bc->init(backend, &local_err);
-        if (local_err) {
-            goto out;
-        }
+        bc->init(backend, errp);
     }
-
-    return;
-
-out:
-    error_propagate(errp, local_err);
 }
 
 void cryptodev_backend_set_used(CryptoDevBackend *backend, bool used)
@@ -220,12 +206,8 @@ cryptodev_backend_can_be_deleted(UserCreatable *uc)
 
 static void cryptodev_backend_instance_init(Object *obj)
 {
-    object_property_add(obj, "queues", "uint32",
-                          cryptodev_backend_get_queues,
-                          cryptodev_backend_set_queues,
-                          NULL, NULL, NULL);
     /* Initialize devices' queues property to 1 */
-    object_property_set_int(obj, 1, "queues", NULL);
+    object_property_set_int(obj, "queues", 1, NULL);
 }
 
 static void cryptodev_backend_finalize(Object *obj)
@@ -244,6 +226,10 @@ cryptodev_backend_class_init(ObjectClass *oc, void *data)
     ucc->can_be_deleted = cryptodev_backend_can_be_deleted;
 
     QTAILQ_INIT(&crypto_clients);
+    object_class_property_add(oc, "queues", "uint32",
+                              cryptodev_backend_get_queues,
+                              cryptodev_backend_set_queues,
+                              NULL, NULL);
 }
 
 static const TypeInfo cryptodev_backend_info = {

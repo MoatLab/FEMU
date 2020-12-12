@@ -8,21 +8,24 @@
  *
  * SPDX-License-Identifier: MIT
  */
+
 #include "qemu/osdep.h"
 #include "sysemu/sysemu.h"
 #include "hw/isa/isa.h"
+#include "hw/qdev-properties.h"
 #include "hw/char/parallel.h"
+#include "qapi/error.h"
 
 static void parallel_init(ISABus *bus, int index, Chardev *chr)
 {
     DeviceState *dev;
     ISADevice *isadev;
 
-    isadev = isa_create(bus, "isa-parallel");
+    isadev = isa_new("isa-parallel");
     dev = DEVICE(isadev);
     qdev_prop_set_uint32(dev, "index", index);
     qdev_prop_set_chr(dev, "chardev", chr);
-    qdev_init_nofail(dev);
+    isa_realize_and_unref(isadev, bus, &error_fatal);
 }
 
 void parallel_hds_isa_init(ISABus *bus, int n)

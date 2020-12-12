@@ -9,7 +9,6 @@
 #include "qapi/error.h"
 #include "qemu-common.h"
 
-#include "hw/qdev.h"
 #include "hw/virtio/virtio-input.h"
 
 static int vhost_input_config_change(struct vhost_dev *dev)
@@ -102,7 +101,7 @@ static void vhost_input_init(Object *obj)
 
     vhi->vhost = VHOST_USER_BACKEND(object_new(TYPE_VHOST_USER_BACKEND));
     object_property_add_alias(obj, "chardev",
-                              OBJECT(vhi->vhost), "chardev", &error_abort);
+                              OBJECT(vhi->vhost), "chardev");
 }
 
 static void vhost_input_finalize(Object *obj)

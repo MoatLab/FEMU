@@ -1,0 +1,8 @@
+{
+  "installed": [
+    {"type": "dir", "file": "usr/share/doc/foobar/html"}
+  ],
+  "tools": {
+    "hotdoc": ">=0.1.0"
+  }
+}

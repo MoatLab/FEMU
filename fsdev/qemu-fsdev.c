@@ -58,6 +58,7 @@ static FsDriverTable FsDrivers[] = {
             "writeout",
             "fmode",
             "dmode",
+            "multidevs",
             "throttling.bps-total",
             "throttling.bps-read",
             "throttling.bps-write",
@@ -77,6 +78,7 @@ static FsDriverTable FsDrivers[] = {
             "throttling.iops-read-max-length",
             "throttling.iops-write-max-length",
             "throttling.iops-size",
+            NULL
         },
     },
     {
@@ -84,6 +86,7 @@ static FsDriverTable FsDrivers[] = {
         .ops = &synth_ops,
         .opts = (const char * []) {
             COMMON_FS_DRIVER_OPTIONS,
+            NULL
         },
     },
     {
@@ -94,6 +97,7 @@ static FsDriverTable FsDrivers[] = {
             "socket",
             "sock_fd",
             "writeout",
+            NULL
         },
     },
 };

@@ -23,8 +23,9 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
 #include "hw/pci/pci.h"
+#include "hw/qdev-properties.h"
+#include "migration/vmstate.h"
 #include "hw/net/mii.h"
 #include "net/net.h"
 #include "qemu/module.h"
@@ -32,6 +33,7 @@
 #include "net/eth.h"
 #include "sysemu/sysemu.h"
 #include "trace.h"
+#include "qom/object.h"
 
 #define HME_REG_SIZE                   0x8000
 
@@ -128,7 +130,7 @@
 #define MII_COMMAND_WRITE      0x1
 
 #define TYPE_SUNHME "sunhme"
-#define SUNHME(obj) OBJECT_CHECK(SunHMEState, (obj), TYPE_SUNHME)
+OBJECT_DECLARE_SIMPLE_TYPE(SunHMEState, SUNHME)
 
 /* Maximum size of buffer */
 #define HME_FIFO_SIZE          0x800
@@ -152,7 +154,7 @@
 
 #define HME_MII_REGS_SIZE      0x20
 
-typedef struct SunHMEState {
+struct SunHMEState {
     /*< private >*/
     PCIDevice parent_obj;
 
@@ -173,7 +175,7 @@ typedef struct SunHMEState {
     uint32_t mifregs[HME_MIF_REG_SIZE >> 2];
 
     uint16_t miiregs[HME_MII_REGS_SIZE];
-} SunHMEState;
+};
 
 static Property sunhme_properties[] = {
     DEFINE_NIC_PROPERTIES(SunHMEState, conf),
@@ -656,11 +658,11 @@ static void sunhme_transmit(SunHMEState *s)
     sunhme_update_irq(s);
 }
 
-static int sunhme_can_receive(NetClientState *nc)
+static bool sunhme_can_receive(NetClientState *nc)
 {
     SunHMEState *s = qemu_get_nic_opaque(nc);
 
-    return s->macregs[HME_MACI_RXCFG >> 2] & HME_MAC_RXCFG_ENABLE;
+    return !!(s->macregs[HME_MACI_RXCFG >> 2] & HME_MAC_RXCFG_ENABLE);
 }
 
 static void sunhme_link_status_changed(NetClientState *nc)
@@ -900,7 +902,7 @@ static void sunhme_instance_init(Object *obj)
 
     device_add_bootindex_property(obj, &s->conf.bootindex,
                                   "bootindex", "/ethernet-phy@0",
-                                  DEVICE(obj), NULL);
+                                  DEVICE(obj));
 }
 
 static void sunhme_reset(DeviceState *ds)
@@ -957,7 +959,7 @@ static void sunhme_class_init(ObjectClass *klass, void *data)
     k->class_id = PCI_CLASS_NETWORK_ETHERNET;
     dc->vmsd = &vmstate_hme;
     dc->reset = sunhme_reset;
-    dc->props = sunhme_properties;
+    device_class_set_props(dc, sunhme_properties);
     set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);
 }
 

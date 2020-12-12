@@ -8,6 +8,7 @@
 #define PCNET_LOOPTEST_NOCRC	2
 
 #include "exec/memory.h"
+#include "hw/irq.h"
 
 /* BUS CONFIGURATION REGISTERS */
 #define BCR_MSRDA    0
@@ -49,7 +50,7 @@ struct PCNetState_st {
                          uint8_t *buf, int len, int do_bswap);
     void (*phys_mem_write)(void *dma_opaque, hwaddr addr,
                           uint8_t *buf, int len, int do_bswap);
-    void *dma_opaque;
+    DeviceState *dma_opaque;
     int tx_busy;
     int looptest;
 };

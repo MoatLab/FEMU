@@ -11,8 +11,12 @@
 #define IF_AUTOCOMP 0x04 /* Autodetect (default) */
 #define IF_NOCIDCOMP 0x08 /* CID compression */
 
-#define IF_MTU 1500
-#define IF_MRU 1500
+#define IF_MTU_DEFAULT 1500
+#define IF_MTU_MIN 68
+#define IF_MTU_MAX 65521
+#define IF_MRU_DEFAULT 1500
+#define IF_MRU_MIN 68
+#define IF_MRU_MAX 65521
 #define IF_COMP IF_AUTOCOMP /* Flags for compression */
 
 /* 2 for alignment, 14 for ethernet */

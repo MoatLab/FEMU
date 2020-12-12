@@ -28,20 +28,32 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "cpu.h"
-#include "hw/hw.h"
 #include "trace.h"
 #include "qemu/timer.h"
 #include "hw/ppc/xics.h"
+#include "hw/qdev-properties.h"
 #include "qemu/error-report.h"
 #include "qemu/module.h"
 #include "qapi/visitor.h"
+#include "migration/vmstate.h"
 #include "monitor/monitor.h"
 #include "hw/intc/intc.h"
+#include "hw/irq.h"
 #include "sysemu/kvm.h"
+#include "sysemu/reset.h"
 
 void icp_pic_print_info(ICPState *icp, Monitor *mon)
 {
-    int cpu_index = icp->cs ? icp->cs->cpu_index : -1;
+    int cpu_index;
+
+    /* Skip partially initialized vCPUs. This can happen on sPAPR when vCPUs
+     * are hot plugged or unplugged.
+     */
+    if (!icp) {
+        return;
+    }
+
+    cpu_index = icp->cs ? icp->cs->cpu_index : -1;
 
     if (!icp->output) {
         return;
@@ -95,32 +107,8 @@ void ics_pic_print_info(ICSState *ics, Monitor *mon)
 #define XISR(icp)   (((icp)->xirr) & XISR_MASK)
 #define CPPR(icp)   (((icp)->xirr) >> 24)
 
-static void ics_reject(ICSState *ics, uint32_t nr)
-{
-    ICSStateClass *k = ICS_BASE_GET_CLASS(ics);
-
-    if (k->reject) {
-        k->reject(ics, nr);
-    }
-}
-
-void ics_resend(ICSState *ics)
-{
-    ICSStateClass *k = ICS_BASE_GET_CLASS(ics);
-
-    if (k->resend) {
-        k->resend(ics);
-    }
-}
-
-static void ics_eoi(ICSState *ics, int nr)
-{
-    ICSStateClass *k = ICS_BASE_GET_CLASS(ics);
-
-    if (k->eoi) {
-        k->eoi(ics, nr);
-    }
-}
+static void ics_reject(ICSState *ics, uint32_t nr);
+static void ics_eoi(ICSState *ics, uint32_t nr);
 
 static void icp_check_ipi(ICPState *icp)
 {
@@ -229,7 +217,7 @@ void icp_eoi(ICPState *icp, uint32_t xirr)
     }
 }
 
-static void icp_irq(ICSState *ics, int server, int nr, uint8_t priority)
+void icp_irq(ICSState *ics, int server, int nr, uint8_t priority)
 {
     ICPState *icp = xics_icp_get(ics->xics, server);
 
@@ -295,21 +283,16 @@ static const VMStateDescription vmstate_icp_server = {
     },
 };
 
-static void icp_reset_handler(void *dev)
+void icp_reset(ICPState *icp)
 {
-    ICPState *icp = ICP(dev);
-
     icp->xirr = 0;
     icp->pending_priority = 0xff;
     icp->mfrr = 0xff;
 
-    /* Make all outputs are deasserted */
-    qemu_set_irq(icp->output, 0);
-
     if (kvm_irqchip_in_kernel()) {
         Error *local_err = NULL;
 
-        icp_set_kvm_state(ICP(dev), &local_err);
+        icp_set_kvm_state(icp, &local_err);
         if (local_err) {
             error_report_err(local_err);
         }
@@ -319,33 +302,13 @@ static void icp_reset_handler(void *dev)
 static void icp_realize(DeviceState *dev, Error **errp)
 {
     ICPState *icp = ICP(dev);
-    PowerPCCPU *cpu;
     CPUPPCState *env;
-    Object *obj;
     Error *err = NULL;
 
-    obj = object_property_get_link(OBJECT(dev), ICP_PROP_XICS, &err);
-    if (!obj) {
-        error_propagate_prepend(errp, err,
-                                "required link '" ICP_PROP_XICS
-                                "' not found: ");
-        return;
-    }
+    assert(icp->xics);
+    assert(icp->cs);
 
-    icp->xics = XICS_FABRIC(obj);
-
-    obj = object_property_get_link(OBJECT(dev), ICP_PROP_CPU, &err);
-    if (!obj) {
-        error_propagate_prepend(errp, err,
-                                "required link '" ICP_PROP_CPU
-                                "' not found: ");
-        return;
-    }
-
-    cpu = POWERPC_CPU(obj);
-    icp->cs = CPU(obj);
-
-    env = &cpu->env;
+    env = &POWERPC_CPU(icp->cs)->env;
     switch (PPC_INPUT(env)) {
     case PPC_FLAGS_INPUT_POWER7:
         icp->output = env->irq_inputs[POWER7_INPUT_INT];
@@ -372,17 +335,22 @@ static void icp_realize(DeviceState *dev, Error **errp)
         }
     }
 
-    qemu_register_reset(icp_reset_handler, dev);
     vmstate_register(NULL, icp->cs->cpu_index, &vmstate_icp_server, icp);
 }
 
-static void icp_unrealize(DeviceState *dev, Error **errp)
+static void icp_unrealize(DeviceState *dev)
 {
     ICPState *icp = ICP(dev);
 
     vmstate_unregister(NULL, &vmstate_icp_server, icp);
-    qemu_unregister_reset(icp_reset_handler, dev);
 }
+
+static Property icp_properties[] = {
+    DEFINE_PROP_LINK(ICP_PROP_XICS, ICPState, xics, TYPE_XICS_FABRIC,
+                     XICSFabric *),
+    DEFINE_PROP_LINK(ICP_PROP_CPU, ICPState, cs, TYPE_CPU, CPUState *),
+    DEFINE_PROP_END_OF_LIST(),
+};
 
 static void icp_class_init(ObjectClass *klass, void *data)
 {
@@ -390,6 +358,12 @@ static void icp_class_init(ObjectClass *klass, void *data)
 
     dc->realize = icp_realize;
     dc->unrealize = icp_unrealize;
+    device_class_set_props(dc, icp_properties);
+    /*
+     * Reason: part of XICS interrupt controller, needs to be wired up
+     * by icp_create().
+     */
+    dc->user_creatable = false;
 }
 
 static const TypeInfo icp_info = {
@@ -402,29 +376,32 @@ static const TypeInfo icp_info = {
 
 Object *icp_create(Object *cpu, const char *type, XICSFabric *xi, Error **errp)
 {
-    Error *local_err = NULL;
     Object *obj;
 
     obj = object_new(type);
-    object_property_add_child(cpu, type, obj, &error_abort);
+    object_property_add_child(cpu, type, obj);
     object_unref(obj);
-    object_property_add_const_link(obj, ICP_PROP_XICS, OBJECT(xi),
-                                   &error_abort);
-    object_property_add_const_link(obj, ICP_PROP_CPU, cpu, &error_abort);
-    object_property_set_bool(obj, true, "realized", &local_err);
-    if (local_err) {
+    object_property_set_link(obj, ICP_PROP_XICS, OBJECT(xi), &error_abort);
+    object_property_set_link(obj, ICP_PROP_CPU, cpu, &error_abort);
+    if (!qdev_realize(DEVICE(obj), NULL, errp)) {
         object_unparent(obj);
-        error_propagate(errp, local_err);
         obj = NULL;
     }
 
     return obj;
 }
 
+void icp_destroy(ICPState *icp)
+{
+    Object *obj = OBJECT(icp);
+
+    object_unparent(obj);
+}
+
 /*
  * ICS: Source layer
  */
-static void ics_simple_resend_msi(ICSState *ics, int srcno)
+static void ics_resend_msi(ICSState *ics, int srcno)
 {
     ICSIRQState *irq = ics->irqs + srcno;
 
@@ -437,7 +414,7 @@ static void ics_simple_resend_msi(ICSState *ics, int srcno)
     }
 }
 
-static void ics_simple_resend_lsi(ICSState *ics, int srcno)
+static void ics_resend_lsi(ICSState *ics, int srcno)
 {
     ICSIRQState *irq = ics->irqs + srcno;
 
@@ -449,11 +426,11 @@ static void ics_simple_resend_lsi(ICSState *ics, int srcno)
     }
 }
 
-static void ics_simple_set_irq_msi(ICSState *ics, int srcno, int val)
+static void ics_set_irq_msi(ICSState *ics, int srcno, int val)
 {
     ICSIRQState *irq = ics->irqs + srcno;
 
-    trace_xics_ics_simple_set_irq_msi(srcno, srcno + ics->offset);
+    trace_xics_ics_set_irq_msi(srcno, srcno + ics->offset);
 
     if (val) {
         if (irq->priority == 0xff) {
@@ -465,20 +442,20 @@ static void ics_simple_set_irq_msi(ICSState *ics, int srcno, int val)
     }
 }
 
-static void ics_simple_set_irq_lsi(ICSState *ics, int srcno, int val)
+static void ics_set_irq_lsi(ICSState *ics, int srcno, int val)
 {
     ICSIRQState *irq = ics->irqs + srcno;
 
-    trace_xics_ics_simple_set_irq_lsi(srcno, srcno + ics->offset);
+    trace_xics_ics_set_irq_lsi(srcno, srcno + ics->offset);
     if (val) {
         irq->status |= XICS_STATUS_ASSERTED;
     } else {
         irq->status &= ~XICS_STATUS_ASSERTED;
     }
-    ics_simple_resend_lsi(ics, srcno);
+    ics_resend_lsi(ics, srcno);
 }
 
-void ics_simple_set_irq(void *opaque, int srcno, int val)
+void ics_set_irq(void *opaque, int srcno, int val)
 {
     ICSState *ics = (ICSState *)opaque;
 
@@ -488,13 +465,13 @@ void ics_simple_set_irq(void *opaque, int srcno, int val)
     }
 
     if (ics->irqs[srcno].flags & XICS_FLAGS_IRQ_LSI) {
-        ics_simple_set_irq_lsi(ics, srcno, val);
+        ics_set_irq_lsi(ics, srcno, val);
     } else {
-        ics_simple_set_irq_msi(ics, srcno, val);
+        ics_set_irq_msi(ics, srcno, val);
     }
 }
 
-static void ics_simple_write_xive_msi(ICSState *ics, int srcno)
+static void ics_write_xive_msi(ICSState *ics, int srcno)
 {
     ICSIRQState *irq = ics->irqs + srcno;
 
@@ -507,13 +484,13 @@ static void ics_simple_write_xive_msi(ICSState *ics, int srcno)
     icp_irq(ics, irq->server, srcno + ics->offset, irq->priority);
 }
 
-static void ics_simple_write_xive_lsi(ICSState *ics, int srcno)
+static void ics_write_xive_lsi(ICSState *ics, int srcno)
 {
-    ics_simple_resend_lsi(ics, srcno);
+    ics_resend_lsi(ics, srcno);
 }
 
-void ics_simple_write_xive(ICSState *ics, int srcno, int server,
-                           uint8_t priority, uint8_t saved_priority)
+void ics_write_xive(ICSState *ics, int srcno, int server,
+                    uint8_t priority, uint8_t saved_priority)
 {
     ICSIRQState *irq = ics->irqs + srcno;
 
@@ -521,21 +498,26 @@ void ics_simple_write_xive(ICSState *ics, int srcno, int server,
     irq->priority = priority;
     irq->saved_priority = saved_priority;
 
-    trace_xics_ics_simple_write_xive(ics->offset + srcno, srcno, server,
-                                     priority);
+    trace_xics_ics_write_xive(ics->offset + srcno, srcno, server, priority);
 
     if (ics->irqs[srcno].flags & XICS_FLAGS_IRQ_LSI) {
-        ics_simple_write_xive_lsi(ics, srcno);
+        ics_write_xive_lsi(ics, srcno);
     } else {
-        ics_simple_write_xive_msi(ics, srcno);
+        ics_write_xive_msi(ics, srcno);
     }
 }
 
-static void ics_simple_reject(ICSState *ics, uint32_t nr)
+static void ics_reject(ICSState *ics, uint32_t nr)
 {
+    ICSStateClass *isc = ICS_GET_CLASS(ics);
     ICSIRQState *irq = ics->irqs + nr - ics->offset;
 
-    trace_xics_ics_simple_reject(nr, nr - ics->offset);
+    if (isc->reject) {
+        isc->reject(ics, nr);
+        return;
+    }
+
+    trace_xics_ics_reject(nr, nr - ics->offset);
     if (irq->flags & XICS_FLAGS_IRQ_MSI) {
         irq->status |= XICS_STATUS_REJECTED;
     } else if (irq->flags & XICS_FLAGS_IRQ_LSI) {
@@ -543,90 +525,37 @@ static void ics_simple_reject(ICSState *ics, uint32_t nr)
     }
 }
 
-static void ics_simple_resend(ICSState *ics)
+void ics_resend(ICSState *ics)
 {
+    ICSStateClass *isc = ICS_GET_CLASS(ics);
     int i;
+
+    if (isc->resend) {
+        isc->resend(ics);
+        return;
+    }
 
     for (i = 0; i < ics->nr_irqs; i++) {
         /* FIXME: filter by server#? */
         if (ics->irqs[i].flags & XICS_FLAGS_IRQ_LSI) {
-            ics_simple_resend_lsi(ics, i);
+            ics_resend_lsi(ics, i);
         } else {
-            ics_simple_resend_msi(ics, i);
+            ics_resend_msi(ics, i);
         }
     }
 }
 
-static void ics_simple_eoi(ICSState *ics, uint32_t nr)
+static void ics_eoi(ICSState *ics, uint32_t nr)
 {
     int srcno = nr - ics->offset;
     ICSIRQState *irq = ics->irqs + srcno;
 
-    trace_xics_ics_simple_eoi(nr);
+    trace_xics_ics_eoi(nr);
 
     if (ics->irqs[srcno].flags & XICS_FLAGS_IRQ_LSI) {
         irq->status &= ~XICS_STATUS_SENT;
     }
 }
-
-static void ics_simple_reset(DeviceState *dev)
-{
-    ICSStateClass *icsc = ICS_BASE_GET_CLASS(dev);
-
-    icsc->parent_reset(dev);
-
-    if (kvm_irqchip_in_kernel()) {
-        Error *local_err = NULL;
-
-        ics_set_kvm_state(ICS_BASE(dev), &local_err);
-        if (local_err) {
-            error_report_err(local_err);
-        }
-    }
-}
-
-static void ics_simple_reset_handler(void *dev)
-{
-    ics_simple_reset(dev);
-}
-
-static void ics_simple_realize(DeviceState *dev, Error **errp)
-{
-    ICSState *ics = ICS_SIMPLE(dev);
-    ICSStateClass *icsc = ICS_BASE_GET_CLASS(ics);
-    Error *local_err = NULL;
-
-    icsc->parent_realize(dev, &local_err);
-    if (local_err) {
-        error_propagate(errp, local_err);
-        return;
-    }
-
-    qemu_register_reset(ics_simple_reset_handler, ics);
-}
-
-static void ics_simple_class_init(ObjectClass *klass, void *data)
-{
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    ICSStateClass *isc = ICS_BASE_CLASS(klass);
-
-    device_class_set_parent_realize(dc, ics_simple_realize,
-                                    &isc->parent_realize);
-    device_class_set_parent_reset(dc, ics_simple_reset,
-                                  &isc->parent_reset);
-
-    isc->reject = ics_simple_reject;
-    isc->resend = ics_simple_resend;
-    isc->eoi = ics_simple_eoi;
-}
-
-static const TypeInfo ics_simple_info = {
-    .name = TYPE_ICS_SIMPLE,
-    .parent = TYPE_ICS_BASE,
-    .instance_size = sizeof(ICSState),
-    .class_init = ics_simple_class_init,
-    .class_size = sizeof(ICSStateClass),
-};
 
 static void ics_reset_irq(ICSIRQState *irq)
 {
@@ -634,9 +563,9 @@ static void ics_reset_irq(ICSIRQState *irq)
     irq->saved_priority = 0xff;
 }
 
-static void ics_base_reset(DeviceState *dev)
+static void ics_reset(DeviceState *dev)
 {
-    ICSState *ics = ICS_BASE(dev);
+    ICSState *ics = ICS(dev);
     int i;
     uint8_t flags[ics->nr_irqs];
 
@@ -650,38 +579,45 @@ static void ics_base_reset(DeviceState *dev)
         ics_reset_irq(ics->irqs + i);
         ics->irqs[i].flags = flags[i];
     }
+
+    if (kvm_irqchip_in_kernel()) {
+        Error *local_err = NULL;
+
+        ics_set_kvm_state(ICS(dev), &local_err);
+        if (local_err) {
+            error_report_err(local_err);
+        }
+    }
 }
 
-static void ics_base_realize(DeviceState *dev, Error **errp)
+static void ics_reset_handler(void *dev)
 {
-    ICSState *ics = ICS_BASE(dev);
-    Object *obj;
-    Error *err = NULL;
+    ics_reset(dev);
+}
 
-    obj = object_property_get_link(OBJECT(dev), ICS_PROP_XICS, &err);
-    if (!obj) {
-        error_propagate_prepend(errp, err,
-                                "required link '" ICS_PROP_XICS
-                                "' not found: ");
-        return;
-    }
-    ics->xics = XICS_FABRIC(obj);
+static void ics_realize(DeviceState *dev, Error **errp)
+{
+    ICSState *ics = ICS(dev);
+
+    assert(ics->xics);
 
     if (!ics->nr_irqs) {
         error_setg(errp, "Number of interrupts needs to be greater 0");
         return;
     }
     ics->irqs = g_malloc0(ics->nr_irqs * sizeof(ICSIRQState));
+
+    qemu_register_reset(ics_reset_handler, ics);
 }
 
-static void ics_base_instance_init(Object *obj)
+static void ics_instance_init(Object *obj)
 {
-    ICSState *ics = ICS_BASE(obj);
+    ICSState *ics = ICS(obj);
 
     ics->offset = XICS_IRQ_BASE;
 }
 
-static int ics_base_pre_save(void *opaque)
+static int ics_pre_save(void *opaque)
 {
     ICSState *ics = opaque;
 
@@ -692,7 +628,7 @@ static int ics_base_pre_save(void *opaque)
     return 0;
 }
 
-static int ics_base_post_load(void *opaque, int version_id)
+static int ics_post_load(void *opaque, int version_id)
 {
     ICSState *ics = opaque;
 
@@ -710,7 +646,7 @@ static int ics_base_post_load(void *opaque, int version_id)
     return 0;
 }
 
-static const VMStateDescription vmstate_ics_base_irq = {
+static const VMStateDescription vmstate_ics_irq = {
     .name = "ics/irq",
     .version_id = 2,
     .minimum_version_id = 1,
@@ -724,45 +660,51 @@ static const VMStateDescription vmstate_ics_base_irq = {
     },
 };
 
-static const VMStateDescription vmstate_ics_base = {
+static const VMStateDescription vmstate_ics = {
     .name = "ics",
     .version_id = 1,
     .minimum_version_id = 1,
-    .pre_save = ics_base_pre_save,
-    .post_load = ics_base_post_load,
+    .pre_save = ics_pre_save,
+    .post_load = ics_post_load,
     .fields = (VMStateField[]) {
         /* Sanity check */
         VMSTATE_UINT32_EQUAL(nr_irqs, ICSState, NULL),
 
         VMSTATE_STRUCT_VARRAY_POINTER_UINT32(irqs, ICSState, nr_irqs,
-                                             vmstate_ics_base_irq,
+                                             vmstate_ics_irq,
                                              ICSIRQState),
         VMSTATE_END_OF_LIST()
     },
 };
 
-static Property ics_base_properties[] = {
+static Property ics_properties[] = {
     DEFINE_PROP_UINT32("nr-irqs", ICSState, nr_irqs, 0),
+    DEFINE_PROP_LINK(ICS_PROP_XICS, ICSState, xics, TYPE_XICS_FABRIC,
+                     XICSFabric *),
     DEFINE_PROP_END_OF_LIST(),
 };
 
-static void ics_base_class_init(ObjectClass *klass, void *data)
+static void ics_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    dc->realize = ics_base_realize;
-    dc->props = ics_base_properties;
-    dc->reset = ics_base_reset;
-    dc->vmsd = &vmstate_ics_base;
+    dc->realize = ics_realize;
+    device_class_set_props(dc, ics_properties);
+    dc->reset = ics_reset;
+    dc->vmsd = &vmstate_ics;
+    /*
+     * Reason: part of XICS interrupt controller, needs to be wired up,
+     * e.g. by spapr_irq_init().
+     */
+    dc->user_creatable = false;
 }
 
-static const TypeInfo ics_base_info = {
-    .name = TYPE_ICS_BASE,
+static const TypeInfo ics_info = {
+    .name = TYPE_ICS,
     .parent = TYPE_DEVICE,
-    .abstract = true,
     .instance_size = sizeof(ICSState),
-    .instance_init = ics_base_instance_init,
-    .class_init = ics_base_class_init,
+    .instance_init = ics_instance_init,
+    .class_init = ics_class_init,
     .class_size = sizeof(ICSStateClass),
 };
 
@@ -802,8 +744,7 @@ void ics_set_irq_type(ICSState *ics, int srcno, bool lsi)
 
 static void xics_register_types(void)
 {
-    type_register_static(&ics_simple_info);
-    type_register_static(&ics_base_info);
+    type_register_static(&ics_info);
     type_register_static(&icp_info);
     type_register_static(&xics_fabric_info);
 }

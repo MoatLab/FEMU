@@ -29,6 +29,11 @@
 #include <net/if.h>
 #endif
 
+/* https://gitlab.freedesktop.org/slirp/libslirp/issues/18 */
+#if defined(__NetBSD__) && defined(if_mtu)
+#undef if_mtu
+#endif
+
 int slirp_debug;
 
 /* Define to 1 if you want KEEPALIVE timers */
@@ -267,6 +272,75 @@ static void slirp_init_once(void)
     }
 }
 
+Slirp *slirp_new(const SlirpConfig *cfg, const SlirpCb *callbacks, void *opaque)
+{
+    Slirp *slirp;
+
+    g_return_val_if_fail(cfg != NULL, NULL);
+    g_return_val_if_fail(cfg->version >= SLIRP_CONFIG_VERSION_MIN, NULL);
+    g_return_val_if_fail(cfg->version <= SLIRP_CONFIG_VERSION_MAX, NULL);
+    g_return_val_if_fail(cfg->if_mtu >= IF_MTU_MIN || cfg->if_mtu == 0, NULL);
+    g_return_val_if_fail(cfg->if_mtu <= IF_MTU_MAX, NULL);
+    g_return_val_if_fail(cfg->if_mru >= IF_MRU_MIN || cfg->if_mru == 0, NULL);
+    g_return_val_if_fail(cfg->if_mru <= IF_MRU_MAX, NULL);
+    g_return_val_if_fail(!cfg->bootfile ||
+                         (strlen(cfg->bootfile) <
+                          G_SIZEOF_MEMBER(struct bootp_t, bp_file)), NULL);
+
+    slirp = g_malloc0(sizeof(Slirp));
+
+    slirp_init_once();
+
+    slirp->opaque = opaque;
+    slirp->cb = callbacks;
+    slirp->grand = g_rand_new();
+    slirp->restricted = cfg->restricted;
+
+    slirp->in_enabled = cfg->in_enabled;
+    slirp->in6_enabled = cfg->in6_enabled;
+
+    if_init(slirp);
+    ip_init(slirp);
+    ip6_init(slirp);
+
+    m_init(slirp);
+
+    slirp->vnetwork_addr = cfg->vnetwork;
+    slirp->vnetwork_mask = cfg->vnetmask;
+    slirp->vhost_addr = cfg->vhost;
+    slirp->vprefix_addr6 = cfg->vprefix_addr6;
+    slirp->vprefix_len = cfg->vprefix_len;
+    slirp->vhost_addr6 = cfg->vhost6;
+    if (cfg->vhostname) {
+        slirp_pstrcpy(slirp->client_hostname, sizeof(slirp->client_hostname),
+                      cfg->vhostname);
+    }
+    slirp->tftp_prefix = g_strdup(cfg->tftp_path);
+    slirp->bootp_filename = g_strdup(cfg->bootfile);
+    slirp->vdomainname = g_strdup(cfg->vdomainname);
+    slirp->vdhcp_startaddr = cfg->vdhcp_start;
+    slirp->vnameserver_addr = cfg->vnameserver;
+    slirp->vnameserver_addr6 = cfg->vnameserver6;
+    slirp->tftp_server_name = g_strdup(cfg->tftp_server_name);
+
+    if (cfg->vdnssearch) {
+        translate_dnssearch(slirp, cfg->vdnssearch);
+    }
+    slirp->if_mtu = cfg->if_mtu == 0 ? IF_MTU_DEFAULT : cfg->if_mtu;
+    slirp->if_mru = cfg->if_mru == 0 ? IF_MRU_DEFAULT : cfg->if_mru;
+    slirp->disable_host_loopback = cfg->disable_host_loopback;
+    slirp->enable_emu = cfg->enable_emu;
+
+    if (cfg->version >= 2) {
+        slirp->outbound_addr = cfg->outbound_addr;
+        slirp->outbound_addr6 = cfg->outbound_addr6;
+    } else {
+        slirp->outbound_addr = NULL;
+        slirp->outbound_addr6 = NULL;
+    }
+    return slirp;
+}
+
 Slirp *slirp_init(int restricted, bool in_enabled, struct in_addr vnetwork,
                   struct in_addr vnetmask, struct in_addr vhost,
                   bool in6_enabled, struct in6_addr vprefix_addr6,
@@ -278,48 +352,28 @@ Slirp *slirp_init(int restricted, bool in_enabled, struct in_addr vnetwork,
                   const char *vdomainname, const SlirpCb *callbacks,
                   void *opaque)
 {
-    Slirp *slirp = g_malloc0(sizeof(Slirp));
-
-    slirp_init_once();
-
-    slirp->opaque = opaque;
-    slirp->cb = callbacks;
-    slirp->grand = g_rand_new();
-    slirp->restricted = restricted;
-
-    slirp->in_enabled = in_enabled;
-    slirp->in6_enabled = in6_enabled;
-
-    if_init(slirp);
-    ip_init(slirp);
-    ip6_init(slirp);
-
-    /* Initialise mbufs *after* setting the MTU */
-    m_init(slirp);
-
-    slirp->vnetwork_addr = vnetwork;
-    slirp->vnetwork_mask = vnetmask;
-    slirp->vhost_addr = vhost;
-    slirp->vprefix_addr6 = vprefix_addr6;
-    slirp->vprefix_len = vprefix_len;
-    slirp->vhost_addr6 = vhost6;
-    if (vhostname) {
-        slirp_pstrcpy(slirp->client_hostname, sizeof(slirp->client_hostname),
-                      vhostname);
-    }
-    slirp->tftp_prefix = g_strdup(tftp_path);
-    slirp->bootp_filename = g_strdup(bootfile);
-    slirp->vdomainname = g_strdup(vdomainname);
-    slirp->vdhcp_startaddr = vdhcp_start;
-    slirp->vnameserver_addr = vnameserver;
-    slirp->vnameserver_addr6 = vnameserver6;
-    slirp->tftp_server_name = g_strdup(tftp_server_name);
-
-    if (vdnssearch) {
-        translate_dnssearch(slirp, vdnssearch);
-    }
-
-    return slirp;
+    SlirpConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.version = 1;
+    cfg.restricted = restricted;
+    cfg.in_enabled = in_enabled;
+    cfg.vnetwork = vnetwork;
+    cfg.vnetmask = vnetmask;
+    cfg.vhost = vhost;
+    cfg.in6_enabled = in6_enabled;
+    cfg.vprefix_addr6 = vprefix_addr6;
+    cfg.vprefix_len = vprefix_len;
+    cfg.vhost6 = vhost6;
+    cfg.vhostname = vhostname;
+    cfg.tftp_server_name = tftp_server_name;
+    cfg.tftp_path = tftp_path;
+    cfg.bootfile = bootfile;
+    cfg.vdhcp_start = vdhcp_start;
+    cfg.vnameserver = vnameserver;
+    cfg.vnameserver6 = vnameserver6;
+    cfg.vdnssearch = vdnssearch;
+    cfg.vdomainname = vdomainname;
+    return slirp_new(&cfg, callbacks, opaque);
 }
 
 void slirp_cleanup(Slirp *slirp)
@@ -329,6 +383,7 @@ void slirp_cleanup(Slirp *slirp)
     for (e = slirp->guestfwd_list; e; e = next) {
         next = e->ex_next;
         g_free(e->ex_exec);
+        g_free(e->ex_unix);
         g_free(e);
     }
 
@@ -689,7 +744,8 @@ void slirp_pollfds_poll(Slirp *slirp, int select_error,
 
 static void arp_input(Slirp *slirp, const uint8_t *pkt, int pkt_len)
 {
-    struct slirp_arphdr *ah = (struct slirp_arphdr *)(pkt + ETH_HLEN);
+    const struct slirp_arphdr *ah =
+        (const struct slirp_arphdr *)(pkt + ETH_HLEN);
     uint8_t arp_reply[MAX(ETH_HLEN + sizeof(struct slirp_arphdr), 64)];
     struct ethhdr *reh = (struct ethhdr *)arp_reply;
     struct slirp_arphdr *rah = (struct slirp_arphdr *)(arp_reply + ETH_HLEN);
@@ -698,6 +754,10 @@ static void arp_input(Slirp *slirp, const uint8_t *pkt, int pkt_len)
 
     if (!slirp->in_enabled) {
         return;
+    }
+
+    if (pkt_len < ETH_HLEN + sizeof(struct slirp_arphdr)) {
+        return; /* packet too short */
     }
 
     ar_op = ntohs(ah->ar_op);
@@ -806,11 +866,6 @@ static int if_encap4(Slirp *slirp, struct mbuf *ifm, struct ethhdr *eh,
 {
     const struct ip *iph = (const struct ip *)ifm->m_data;
 
-    if (iph->ip_dst.s_addr == 0) {
-        /* 0.0.0.0 can not be a destination address, something went wrong,
-         * avoid making it worse */
-        return 1;
-    }
     if (!arp_table_search(slirp, iph->ip_dst.s_addr, ethaddr)) {
         uint8_t arp_req[ETH_HLEN + sizeof(struct slirp_arphdr)];
         struct ethhdr *reh = (struct ethhdr *)arp_req;
@@ -890,7 +945,7 @@ static int if_encap6(Slirp *slirp, struct mbuf *ifm, struct ethhdr *eh,
  */
 int if_encap(Slirp *slirp, struct mbuf *ifm)
 {
-    uint8_t buf[1600];
+    uint8_t buf[IF_MTU_MAX + 100];
     struct ethhdr *eh = (struct ethhdr *)buf;
     uint8_t ethaddr[ETH_ALEN];
     const struct ip *iph = (const struct ip *)ifm->m_data;
@@ -917,7 +972,6 @@ int if_encap(Slirp *slirp, struct mbuf *ifm)
 
     default:
         g_assert_not_reached();
-        break;
     }
 
     memcpy(eh->h_dest, ethaddr, ETH_ALEN);
@@ -1015,6 +1069,22 @@ int slirp_add_exec(Slirp *slirp, const char *cmdline,
     return 0;
 }
 
+int slirp_add_unix(Slirp *slirp, const char *unixsock,
+                   struct in_addr *guest_addr, int guest_port)
+{
+#ifdef G_OS_UNIX
+    if (!check_guestfwd(slirp, guest_addr, guest_port)) {
+        return -1;
+    }
+
+    add_unix(&slirp->guestfwd_list, unixsock, *guest_addr, htons(guest_port));
+    return 0;
+#else
+    g_warn_if_reached();
+    return -1;
+#endif
+}
+
 int slirp_add_guestfwd(Slirp *slirp, SlirpWriteCb write_cb, void *opaque,
                        struct in_addr *guest_addr, int guest_port)
 {
@@ -1025,6 +1095,13 @@ int slirp_add_guestfwd(Slirp *slirp, SlirpWriteCb write_cb, void *opaque,
     add_guestfwd(&slirp->guestfwd_list, write_cb, opaque, *guest_addr,
                  htons(guest_port));
     return 0;
+}
+
+int slirp_remove_guestfwd(Slirp *slirp, struct in_addr guest_addr,
+                          int guest_port)
+{
+    return remove_guestfwd(&slirp->guestfwd_list, guest_addr,
+                           htons(guest_port));
 }
 
 ssize_t slirp_send(struct socket *so, const void *buf, size_t len, int flags)

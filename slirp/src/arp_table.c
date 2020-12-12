@@ -27,7 +27,8 @@
 
 #include <string.h>
 
-void arp_table_add(Slirp *slirp, uint32_t ip_addr, uint8_t ethaddr[ETH_ALEN])
+void arp_table_add(Slirp *slirp, uint32_t ip_addr,
+                   const uint8_t ethaddr[ETH_ALEN])
 {
     const uint32_t broadcast_addr =
         ~slirp->vnetwork_mask.s_addr | slirp->vnetwork_addr.s_addr;
@@ -71,7 +72,7 @@ bool arp_table_search(Slirp *slirp, uint32_t ip_addr,
     DEBUG_ARG("ip = %s", inet_ntoa((struct in_addr){ .s_addr = ip_addr }));
 
     /* If broadcast address */
-    if (ip_addr == 0xffffffff || ip_addr == broadcast_addr) {
+    if (ip_addr == 0 || ip_addr == 0xffffffff || ip_addr == broadcast_addr) {
         /* return Ethernet broadcast address */
         memset(out_ethaddr, 0xff, ETH_ALEN);
         return 1;

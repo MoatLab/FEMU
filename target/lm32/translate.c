@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -23,7 +23,7 @@
 #include "exec/helper-proto.h"
 #include "exec/exec-all.h"
 #include "exec/translator.h"
-#include "tcg-op.h"
+#include "tcg/tcg-op.h"
 #include "qemu/qemu-print.h"
 
 #include "exec/cpu_ldst.h"
@@ -885,9 +885,6 @@ static void dec_wcsr(DisasContext *dc)
         }
         gen_helper_wcsr_im(cpu_env, cpu_R[dc->r1]);
         tcg_gen_movi_tl(cpu_pc, dc->pc + 4);
-        if (tb_cflags(dc->tb) & CF_USE_ICOUNT) {
-            gen_io_end();
-        }
         dc->is_jmp = DISAS_UPDATE;
         break;
     case CSR_IP:
@@ -897,9 +894,6 @@ static void dec_wcsr(DisasContext *dc)
         }
         gen_helper_wcsr_ip(cpu_env, cpu_R[dc->r1]);
         tcg_gen_movi_tl(cpu_pc, dc->pc + 4);
-        if (tb_cflags(dc->tb) & CF_USE_ICOUNT) {
-            gen_io_end();
-        }
         dc->is_jmp = DISAS_UPDATE;
         break;
     case CSR_ICC:
@@ -1111,9 +1105,6 @@ void gen_intermediate_code(CPUState *cs, TranslationBlock *tb, int max_insns)
          && (dc->pc - page_start < TARGET_PAGE_SIZE)
          && num_insns < max_insns);
 
-    if (tb_cflags(tb) & CF_LAST_IO) {
-        gen_io_end();
-    }
 
     if (unlikely(cs->singlestep_enabled)) {
         if (dc->is_jmp == DISAS_NEXT) {
@@ -1146,10 +1137,10 @@ void gen_intermediate_code(CPUState *cs, TranslationBlock *tb, int max_insns)
 #ifdef DEBUG_DISAS
     if (qemu_loglevel_mask(CPU_LOG_TB_IN_ASM)
         && qemu_log_in_addr_range(pc_start)) {
-        qemu_log_lock();
+        FILE *logfile = qemu_log_lock();
         qemu_log("\n");
         log_target_disas(cs, pc_start, dc->pc - pc_start);
-        qemu_log_unlock();
+        qemu_log_unlock(logfile);
     }
 #endif
 }

@@ -62,13 +62,15 @@ typedef enum {
  * The following attributes are available:
  *
  * QEMU_TIMER_ATTR_EXTERNAL: drives external subsystem
+ * QEMU_TIMER_ATTR_ALL: mask for all existing attributes
  *
  * Timers with this attribute do not recorded in rr mode, therefore it could be
  * used for the subsystems that operate outside the guest core. Applicable only
  * with virtual clock type.
  */
 
-#define QEMU_TIMER_ATTR_EXTERNAL BIT(0)
+#define QEMU_TIMER_ATTR_EXTERNAL ((int)BIT(0))
+#define QEMU_TIMER_ATTR_ALL      0xffffffff
 
 typedef struct QEMUTimerList QEMUTimerList;
 
@@ -164,8 +166,8 @@ bool qemu_clock_expired(QEMUClockType type);
  *
  * Determine whether a clock should be used for deadline
  * calculations. Some clocks, for instance vm_clock with
- * use_icount set, do not count in nanoseconds. Such clocks
- * are not used for deadline calculations, and are presumed
+ * icount_enabled() set, do not count in nanoseconds.
+ * Such clocks are not used for deadline calculations, and are presumed
  * to interrupt any poll using qemu_notify/aio_notify
  * etc.
  *
@@ -177,6 +179,8 @@ bool qemu_clock_use_for_deadline(QEMUClockType type);
 /**
  * qemu_clock_deadline_ns_all:
  * @type: the clock type
+ * @attr_mask: mask for the timer attributes that are included
+ *             in deadline calculation
  *
  * Calculate the deadline across all timer lists associated
  * with a clock (as opposed to just the default one)
@@ -184,7 +188,7 @@ bool qemu_clock_use_for_deadline(QEMUClockType type);
  *
  * Returns: time until expiry in nanoseconds or -1
  */
-int64_t qemu_clock_deadline_ns_all(QEMUClockType type);
+int64_t qemu_clock_deadline_ns_all(QEMUClockType type, int attr_mask);
 
 /**
  * qemu_clock_get_main_loop_timerlist:
@@ -221,35 +225,6 @@ void qemu_clock_notify(QEMUClockType type);
 void qemu_clock_enable(QEMUClockType type, bool enabled);
 
 /**
- * qemu_start_warp_timer:
- *
- * Starts a timer for virtual clock update
- */
-void qemu_start_warp_timer(void);
-
-/**
- * qemu_clock_register_reset_notifier:
- * @type: the clock type
- * @notifier: the notifier function
- *
- * Register a notifier function to call when the clock
- * concerned is reset.
- */
-void qemu_clock_register_reset_notifier(QEMUClockType type,
-                                        Notifier *notifier);
-
-/**
- * qemu_clock_unregister_reset_notifier:
- * @type: the clock type
- * @notifier: the notifier function
- *
- * Unregister a notifier function to call when the clock
- * concerned is reset.
- */
-void qemu_clock_unregister_reset_notifier(QEMUClockType type,
-                                          Notifier *notifier);
-
-/**
  * qemu_clock_run_timers:
  * @type: clock on which to operate
  *
@@ -269,19 +244,6 @@ bool qemu_clock_run_timers(QEMUClockType type);
  * Returns: true if any timer ran.
  */
 bool qemu_clock_run_all_timers(void);
-
-/**
- * qemu_clock_get_last:
- *
- * Returns last clock query time.
- */
-uint64_t qemu_clock_get_last(QEMUClockType type);
-/**
- * qemu_clock_set_last:
- *
- * Sets last clock query time.
- */
-void qemu_clock_set_last(QEMUClockType type, uint64_t last);
 
 
 /*
@@ -710,7 +672,7 @@ void timer_mod(QEMUTimer *ts, int64_t expire_timer);
 /**
  * timer_mod_anticipate:
  * @ts: the timer
- * @expire_time: the expiry time in nanoseconds
+ * @expire_time: the expire time in the units associated with the timer
  *
  * Modify a timer to expire at @expire_time or the current time, whichever
  * comes earlier, taking into account the scale associated with the timer.
@@ -822,12 +784,6 @@ static inline int64_t qemu_soonest_timeout(int64_t timeout1, int64_t timeout2)
  */
 void init_clocks(QEMUTimerListNotifyCB *notify_cb);
 
-int64_t cpu_get_ticks(void);
-/* Caller must hold BQL */
-void cpu_enable_ticks(void);
-/* Caller must hold BQL */
-void cpu_disable_ticks(void);
-
 static inline int64_t get_max_clock_jump(void)
 {
     /* This should be small enough to prevent excessive interrupts from being
@@ -869,27 +825,17 @@ extern int use_rt_clock;
 
 static inline int64_t get_clock(void)
 {
-#ifdef CLOCK_MONOTONIC
     if (use_rt_clock) {
         struct timespec ts;
         clock_gettime(CLOCK_MONOTONIC, &ts);
         return ts.tv_sec * 1000000000LL + ts.tv_nsec;
-    } else
-#endif
-    {
+    } else {
         /* XXX: using gettimeofday leads to problems if the date
            changes, so it should be avoided. */
         return get_clock_realtime();
     }
 }
 #endif
-
-/* icount */
-int64_t cpu_get_icount_raw(void);
-int64_t cpu_get_icount(void);
-int64_t cpu_get_clock(void);
-int64_t cpu_icount_to_ns(int64_t icount);
-void    cpu_update_icount(CPUState *cpu);
 
 /*******************************************/
 /* host CPU ticks (if available) */

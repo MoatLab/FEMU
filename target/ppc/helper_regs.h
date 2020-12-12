@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -22,6 +22,7 @@
 
 #include "qemu/main-loop.h"
 #include "exec/exec-all.h"
+#include "sysemu/kvm.h"
 
 /* Swap temporary saved registers with GPRs */
 static inline void hreg_swap_gpr_tgpr(CPUPPCState *env)
@@ -102,6 +103,10 @@ static inline void hreg_compute_hflags(CPUPPCState *env)
 
 static inline void cpu_interrupt_exittb(CPUState *cs)
 {
+    if (!kvm_enabled()) {
+        return;
+    }
+
     if (!qemu_mutex_iothread_locked()) {
         qemu_mutex_lock_iothread();
         cpu_interrupt(cs, CPU_INTERRUPT_EXITTB);

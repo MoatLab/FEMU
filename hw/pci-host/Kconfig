@@ -1,9 +1,15 @@
 config PAM
     bool
 
-config PREP_PCI
-    select PCI
+config XEN_IGD_PASSTHROUGH
     bool
+    default y
+    depends on XEN && PCI_I440FX
+
+config PREP_PCI
+    bool
+    select PCI
+    select OR_IRQ
 
 config GRACKLE_PCI
     select PCI
@@ -27,11 +33,10 @@ config PCI_SABRE
     select PCI
     bool
 
-config PCI_PIIX
+config PCI_I440FX
     bool
     select PCI
     select PAM
-    select ISA_BUS
 
 config PCI_EXPRESS_Q35
     bool
@@ -50,3 +55,8 @@ config PCI_EXPRESS_DESIGNWARE
     bool
     select PCI_EXPRESS
     select MSI_NONBROKEN
+
+config PCI_BONITO
+    select PCI
+    select UNIMP
+    bool

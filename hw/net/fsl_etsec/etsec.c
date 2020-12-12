@@ -27,11 +27,13 @@
  */
 
 #include "qemu/osdep.h"
-#include "sysemu/sysemu.h"
 #include "hw/sysbus.h"
+#include "hw/irq.h"
 #include "hw/ptimer.h"
+#include "hw/qdev-properties.h"
 #include "etsec.h"
 #include "registers.h"
+#include "qapi/error.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
 
@@ -193,9 +195,11 @@ static void write_dmactrl(eTSEC          *etsec,
 
     if (!(value & DMACTRL_WOP)) {
         /* Start polling */
+        ptimer_transaction_begin(etsec->ptimer);
         ptimer_stop(etsec->ptimer);
         ptimer_set_count(etsec->ptimer, 1);
         ptimer_run(etsec->ptimer, 1);
+        ptimer_transaction_commit(etsec->ptimer);
     }
 }
 
@@ -353,7 +357,7 @@ static ssize_t etsec_receive(NetClientState *nc,
 
 #if defined(HEX_DUMP)
     fprintf(stderr, "%s receive size:%zd\n", nc->name, size);
-    qemu_hexdump((void *)buf, stderr, "", size);
+    qemu_hexdump(stderr, "", buf, size);
 #endif
     /* Flush is unnecessary as are already in receiving path */
     etsec->need_flush = false;
@@ -389,10 +393,10 @@ static void etsec_realize(DeviceState *dev, Error **errp)
                               object_get_typename(OBJECT(dev)), dev->id, etsec);
     qemu_format_nic_info_str(qemu_get_queue(etsec->nic), etsec->conf.macaddr.a);
 
-
-    etsec->bh     = qemu_bh_new(etsec_timer_hit, etsec);
-    etsec->ptimer = ptimer_init(etsec->bh, PTIMER_POLICY_DEFAULT);
+    etsec->ptimer = ptimer_init(etsec_timer_hit, etsec, PTIMER_POLICY_DEFAULT);
+    ptimer_transaction_begin(etsec->ptimer);
     ptimer_set_freq(etsec->ptimer, 100);
+    ptimer_transaction_commit(etsec->ptimer);
 }
 
 static void etsec_instance_init(Object *obj)
@@ -420,13 +424,13 @@ static void etsec_class_init(ObjectClass *klass, void *data)
 
     dc->realize = etsec_realize;
     dc->reset = etsec_reset;
-    dc->props = etsec_properties;
+    device_class_set_props(dc, etsec_properties);
     /* Supported by ppce500 machine */
     dc->user_creatable = true;
 }
 
 static TypeInfo etsec_info = {
-    .name                  = "eTSEC",
+    .name                  = TYPE_ETSEC_COMMON,
     .parent                = TYPE_SYS_BUS_DEVICE,
     .instance_size         = sizeof(eTSEC),
     .class_init            = etsec_class_init,
@@ -449,9 +453,9 @@ DeviceState *etsec_create(hwaddr         base,
 {
     DeviceState *dev;
 
-    dev = qdev_create(NULL, "eTSEC");
+    dev = qdev_new("eTSEC");
     qdev_set_nic_properties(dev, nd);
-    qdev_init_nofail(dev);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
 
     sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0, tx_irq);
     sysbus_connect_irq(SYS_BUS_DEVICE(dev), 1, rx_irq);

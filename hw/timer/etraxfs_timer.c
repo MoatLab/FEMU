@@ -24,10 +24,13 @@
 
 #include "qemu/osdep.h"
 #include "hw/sysbus.h"
-#include "sysemu/sysemu.h"
+#include "sysemu/reset.h"
+#include "sysemu/runstate.h"
 #include "qemu/module.h"
 #include "qemu/timer.h"
+#include "hw/irq.h"
 #include "hw/ptimer.h"
+#include "qom/object.h"
 
 #define D(x)
 
@@ -46,19 +49,17 @@
 #define R_MASKED_INTR 0x54
 
 #define TYPE_ETRAX_FS_TIMER "etraxfs,timer"
-#define ETRAX_TIMER(obj) \
-    OBJECT_CHECK(ETRAXTimerState, (obj), TYPE_ETRAX_FS_TIMER)
+typedef struct ETRAXTimerState ETRAXTimerState;
+DECLARE_INSTANCE_CHECKER(ETRAXTimerState, ETRAX_TIMER,
+                         TYPE_ETRAX_FS_TIMER)
 
-typedef struct ETRAXTimerState {
+struct ETRAXTimerState {
     SysBusDevice parent_obj;
 
     MemoryRegion mmio;
     qemu_irq irq;
     qemu_irq nmi;
 
-    QEMUBH *bh_t0;
-    QEMUBH *bh_t1;
-    QEMUBH *bh_wd;
     ptimer_state *ptimer_t0;
     ptimer_state *ptimer_t1;
     ptimer_state *ptimer_wd;
@@ -80,7 +81,7 @@ typedef struct ETRAXTimerState {
     uint32_t rw_ack_intr;
     uint32_t r_intr;
     uint32_t r_masked_intr;
-} ETRAXTimerState;
+};
 
 static uint64_t
 timer_read(void *opaque, hwaddr addr, unsigned int size)
@@ -152,6 +153,7 @@ static void update_ctrl(ETRAXTimerState *t, int tnum)
     }
 
     D(printf ("freq_hz=%d div=%d\n", freq_hz, div));
+    ptimer_transaction_begin(timer);
     ptimer_set_freq(timer, freq_hz);
     ptimer_set_limit(timer, div, 0);
 
@@ -173,6 +175,7 @@ static void update_ctrl(ETRAXTimerState *t, int tnum)
             abort();
             break;
     }
+    ptimer_transaction_commit(timer);
 }
 
 static void timer_update_irq(ETRAXTimerState *t)
@@ -237,6 +240,7 @@ static inline void timer_watchdog_update(ETRAXTimerState *t, uint32_t value)
 
     t->wd_hits = 0;
 
+    ptimer_transaction_begin(t->ptimer_wd);
     ptimer_set_freq(t->ptimer_wd, 760);
     if (wd_cnt == 0)
         wd_cnt = 256;
@@ -247,6 +251,7 @@ static inline void timer_watchdog_update(ETRAXTimerState *t, uint32_t value)
         ptimer_stop(t->ptimer_wd);
 
     t->rw_wd_ctrl = value;
+    ptimer_transaction_commit(t->ptimer_wd);
 }
 
 static void
@@ -308,9 +313,15 @@ static void etraxfs_timer_reset(void *opaque)
 {
     ETRAXTimerState *t = opaque;
 
+    ptimer_transaction_begin(t->ptimer_t0);
     ptimer_stop(t->ptimer_t0);
+    ptimer_transaction_commit(t->ptimer_t0);
+    ptimer_transaction_begin(t->ptimer_t1);
     ptimer_stop(t->ptimer_t1);
+    ptimer_transaction_commit(t->ptimer_t1);
+    ptimer_transaction_begin(t->ptimer_wd);
     ptimer_stop(t->ptimer_wd);
+    ptimer_transaction_commit(t->ptimer_wd);
     t->rw_wd_ctrl = 0;
     t->r_intr = 0;
     t->rw_intr_mask = 0;
@@ -322,12 +333,9 @@ static void etraxfs_timer_realize(DeviceState *dev, Error **errp)
     ETRAXTimerState *t = ETRAX_TIMER(dev);
     SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
 
-    t->bh_t0 = qemu_bh_new(timer0_hit, t);
-    t->bh_t1 = qemu_bh_new(timer1_hit, t);
-    t->bh_wd = qemu_bh_new(watchdog_hit, t);
-    t->ptimer_t0 = ptimer_init(t->bh_t0, PTIMER_POLICY_DEFAULT);
-    t->ptimer_t1 = ptimer_init(t->bh_t1, PTIMER_POLICY_DEFAULT);
-    t->ptimer_wd = ptimer_init(t->bh_wd, PTIMER_POLICY_DEFAULT);
+    t->ptimer_t0 = ptimer_init(timer0_hit, t, PTIMER_POLICY_DEFAULT);
+    t->ptimer_t1 = ptimer_init(timer1_hit, t, PTIMER_POLICY_DEFAULT);
+    t->ptimer_wd = ptimer_init(watchdog_hit, t, PTIMER_POLICY_DEFAULT);
 
     sysbus_init_irq(sbd, &t->irq);
     sysbus_init_irq(sbd, &t->nmi);

@@ -26,10 +26,14 @@
 #ifndef MACIO_GPIO_H
 #define MACIO_GPIO_H
 
-#define TYPE_MACIO_GPIO "macio-gpio"
-#define MACIO_GPIO(obj) OBJECT_CHECK(MacIOGPIOState, (obj), TYPE_MACIO_GPIO)
+#include "hw/ppc/openpic.h"
+#include "hw/sysbus.h"
+#include "qom/object.h"
 
-typedef struct MacIOGPIOState {
+#define TYPE_MACIO_GPIO "macio-gpio"
+OBJECT_DECLARE_SIMPLE_TYPE(MacIOGPIOState, MACIO_GPIO)
+
+struct MacIOGPIOState {
     /*< private >*/
     SysBusDevice parent;
     /*< public >*/
@@ -40,7 +44,7 @@ typedef struct MacIOGPIOState {
     qemu_irq gpio_extirqs[10];
     uint8_t gpio_levels[8];
     uint8_t gpio_regs[36]; /* XXX Check count */
-} MacIOGPIOState;
+};
 
 void macio_set_gpio(MacIOGPIOState *s, uint32_t gpio, bool state);
 

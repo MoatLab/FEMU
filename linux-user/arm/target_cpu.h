@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -19,16 +19,39 @@
 #ifndef ARM_TARGET_CPU_H
 #define ARM_TARGET_CPU_H
 
-/* We need to be able to map the commpage.
-   See validate_guest_space in linux-user/elfload.c.  */
-#define MAX_RESERVED_VA  0xffff0000ul
+static inline unsigned long arm_max_reserved_va(CPUState *cs)
+{
+    ARMCPU *cpu = ARM_CPU(cs);
 
-static inline void cpu_clone_regs(CPUARMState *env, target_ulong newsp)
+    if (arm_feature(&cpu->env, ARM_FEATURE_M)) {
+        /*
+         * There are magic return addresses above 0xfe000000,
+         * and in general a lot of M-profile system stuff in
+         * the high addresses.  Restrict linux-user to the
+         * cached write-back RAM in the system map.
+         */
+        return 0x80000000ul;
+    } else {
+        /*
+         * We need to be able to map the commpage.
+         * See validate_guest_space in linux-user/elfload.c.
+         */
+        return 0xffff0000ul;
+    }
+}
+#define MAX_RESERVED_VA  arm_max_reserved_va
+
+static inline void cpu_clone_regs_child(CPUARMState *env, target_ulong newsp,
+                                        unsigned flags)
 {
     if (newsp) {
         env->regs[13] = newsp;
     }
     env->regs[0] = 0;
+}
+
+static inline void cpu_clone_regs_parent(CPUARMState *env, unsigned flags)
+{
 }
 
 static inline void cpu_set_tls(CPUARMState *env, target_ulong newtls)

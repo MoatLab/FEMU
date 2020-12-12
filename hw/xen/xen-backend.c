@@ -41,6 +41,12 @@ static void xen_backend_table_add(XenBackendImpl *impl)
     g_hash_table_insert(xen_backend_table_get(), (void *)impl->type, impl);
 }
 
+static const char **xen_backend_table_keys(unsigned int *count)
+{
+    return (const char **)g_hash_table_get_keys_as_array(
+        xen_backend_table_get(), count);
+}
+
 static const XenBackendImpl *xen_backend_table_lookup(const char *type)
 {
     return g_hash_table_lookup(xen_backend_table_get(), type);
@@ -68,6 +74,11 @@ void xen_backend_register(const XenBackendInfo *info)
     impl->destroy = info->destroy;
 
     xen_backend_table_add(impl);
+}
+
+const char **xen_backend_get_types(unsigned int *count)
+{
+    return xen_backend_table_keys(count);
 }
 
 static QLIST_HEAD(, XenBackendInstance) backend_list;
@@ -98,9 +109,9 @@ static void xen_backend_list_remove(XenBackendInstance *backend)
 void xen_backend_device_create(XenBus *xenbus, const char *type,
                                const char *name, QDict *opts, Error **errp)
 {
+    ERRP_GUARD();
     const XenBackendImpl *impl = xen_backend_table_lookup(type);
     XenBackendInstance *backend;
-    Error *local_error = NULL;
 
     if (!impl) {
         return;
@@ -110,9 +121,8 @@ void xen_backend_device_create(XenBus *xenbus, const char *type,
     backend->xenbus = xenbus;
     backend->name = g_strdup(name);
 
-    impl->create(backend, opts, &local_error);
-    if (local_error) {
-        error_propagate(errp, local_error);
+    impl->create(backend, opts, errp);
+    if (*errp) {
         g_free(backend->name);
         g_free(backend);
         return;

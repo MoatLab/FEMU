@@ -23,9 +23,12 @@
 #include "qemu/module.h"
 #include "qemu/filemonitor.h"
 #include "trace.h"
+#include "hw/qdev-properties.h"
 #include "hw/usb.h"
+#include "migration/vmstate.h"
 #include "desc.h"
 #include "qemu/units.h"
+#include "qom/object.h"
 
 /* ----------------------------------------------------------------------- */
 
@@ -235,7 +238,7 @@ typedef struct {
 } QEMU_PACKED ObjectInfo;
 
 #define TYPE_USB_MTP "usb-mtp"
-#define USB_MTP(obj) OBJECT_CHECK(MTPState, (obj), TYPE_USB_MTP)
+OBJECT_DECLARE_SIMPLE_TYPE(MTPState, USB_MTP)
 
 #define QEMU_STORAGE_ID 0x00010001
 
@@ -629,9 +632,9 @@ static void usb_mtp_object_readdir(MTPState *s, MTPObject *o)
         int64_t id = qemu_file_monitor_add_watch(s->file_monitor, o->path, NULL,
                                                  file_monitor_event, s, &err);
         if (id == -1) {
-            error_report("usb-mtp: failed to add watch for %s: %s", o->path,
-                         error_get_pretty(err));
-            error_free(err);
+            error_reportf_err(err,
+                              "usb-mtp: failed to add watch for %s: ",
+                              o->path);
         } else {
             trace_usb_mtp_file_monitor_event(s->dev.addr, o->path,
                                              "Watch Added");
@@ -1274,9 +1277,8 @@ static void usb_mtp_command(MTPState *s, MTPControl *c)
 
         s->file_monitor = qemu_file_monitor_new(&err);
         if (err) {
-            error_report("usb-mtp: file monitoring init failed: %s",
-                         error_get_pretty(err));
-            error_free(err);
+            error_reportf_err(err,
+                              "usb-mtp: file monitoring init failed: ");
         } else {
             QTAILQ_INIT(&s->events);
         }
@@ -2036,25 +2038,35 @@ static void usb_mtp_realize(USBDevice *dev, Error **errp)
 {
     MTPState *s = USB_MTP(dev);
 
-    usb_desc_create_serial(dev);
-    usb_desc_init(dev);
-    QTAILQ_INIT(&s->objects);
-    if (s->desc == NULL) {
-        if (s->root == NULL) {
-            error_setg(errp, "usb-mtp: rootdir property must be configured");
-            return;
-        }
-        s->desc = strrchr(s->root, '/');
-        if (s->desc && s->desc[0]) {
-            s->desc = g_strdup(s->desc + 1);
-        } else {
-            s->desc = g_strdup("none");
-        }
+    if ((s->root == NULL) || !g_path_is_absolute(s->root)) {
+        error_setg(errp, "usb-mtp: rootdir must be configured and be an absolute path");
+        return;
     }
+
+    if (access(s->root, R_OK) != 0) {
+        error_setg(errp, "usb-mtp: rootdir does not exist/not readable");
+        return;
+    } else if (!s->readonly && access(s->root, W_OK) != 0) {
+        error_setg(errp, "usb-mtp: rootdir does not have write permissions");
+        return;
+    }
+
     /* Mark store as RW */
     if (!s->readonly) {
         s->flags |= (1 << MTP_FLAG_WRITABLE);
     }
+
+    if (s->desc == NULL) {
+        /*
+         * This does not check if path exists
+         * but we have the checks above
+         */
+        s->desc = g_path_get_basename(s->root);
+    }
+
+    usb_desc_create_serial(dev);
+    usb_desc_init(dev);
+    QTAILQ_INIT(&s->objects);
 
 }
 
@@ -2093,7 +2105,7 @@ static void usb_mtp_class_initfn(ObjectClass *klass, void *data)
     dc->desc = "USB Media Transfer Protocol device";
     dc->fw_name = "mtp";
     dc->vmsd = &vmstate_usb_mtp;
-    dc->props = mtp_properties;
+    device_class_set_props(dc, mtp_properties);
 }
 
 static TypeInfo mtp_info = {
