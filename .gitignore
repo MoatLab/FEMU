@@ -115,7 +115,6 @@ tags
 TAGS
 docker-src.*
 *~
-trace.h
 trace.c
 trace-ust.h
 trace-ust.h
