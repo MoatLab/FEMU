@@ -28,9 +28,14 @@ status=1	# failure is the default!
 
 _cleanup()
 {
-	_cleanup_test_img
-    rm -f "$TEST_IMG.base"
-    rm -f "$TEST_IMG.orig"
+    _cleanup_test_img
+    _rm_test_img "$TEST_IMG.base"
+    _rm_test_img "$TEST_IMG.orig"
+
+    _rm_test_img "$TEST_DIR/subdir/t.$IMGFMT.base"
+    _rm_test_img "$TEST_DIR/subdir/t.$IMGFMT.mid"
+    _rm_test_img "$TEST_DIR/subdir/t.$IMGFMT"
+    rmdir "$TEST_DIR/subdir" &> /dev/null
 }
 trap "_cleanup; exit \$status" 0 1 2 3 15
 
@@ -44,7 +49,8 @@ _supported_fmt qcow qcow2 vmdk qed
 _supported_proto file
 _unsupported_imgopts "subformat=monolithicFlat" \
                      "subformat=twoGbMaxExtentFlat" \
-                     "subformat=twoGbMaxExtentSparse"
+                     "subformat=twoGbMaxExtentSparse" \
+                     "subformat=streamOptimized"
 
 TEST_OFFSETS="0 4294967296"
 
@@ -69,7 +75,7 @@ echo "Creating test image with backing file"
 echo
 
 TEST_IMG="$TEST_IMG_SAVE"
-_make_test_img -b "$TEST_IMG.base" 6G
+_make_test_img -b "$TEST_IMG.base" -F $IMGFMT 6G
 
 echo "Filling test image"
 echo
@@ -114,24 +120,68 @@ TEST_IMG="$TEST_IMG.base" _make_test_img 1M
 # Create an image with a null backing file to which committing will fail (with
 # ENOSPC so we can distinguish the result from some generic EIO which may be
 # generated anywhere in the block layer)
-_make_test_img -b "json:{'driver': '$IMGFMT',
-                         'file': {
-                             'driver': 'blkdebug',
-                             'inject-error': [{
-                                 'event': 'write_aio',
-                                 'errno': 28,
-                                 'once': true
-                             }],
-                             'image': {
-                                 'driver': 'file',
-                                 'filename': '$TEST_IMG.base'
-                             }}}"
+backing="json:{'driver': '$IMGFMT',
+               'file': {
+                   'driver': 'blkdebug',
+                   'inject-error': [{
+                       'event': 'write_aio',
+                       'errno': 28,
+                       'once': true
+                   }],
+                   'image': {
+                       'driver': 'file',
+                       'filename': '$TEST_IMG.base'
+                   }}}"
+
+# Filter out newlines and collapse spaces
+backing=$(echo "$backing" | tr -d '\n' | tr -s ' ')
+
+_make_test_img -b "$backing" -F $IMGFMT
 
 # Just write anything so committing will not be a no-op
 $QEMU_IO -c 'writev 0 64k' "$TEST_IMG" | _filter_qemu_io
 
 $QEMU_IMG commit "$TEST_IMG"
 _cleanup
+
+
+echo
+echo 'Testing commit in sub-directory with relative filenames'
+echo
+
+pushd "$TEST_DIR" > /dev/null
+
+mkdir subdir
+
+TEST_IMG="subdir/t.$IMGFMT.base" _make_test_img 1M
+TEST_IMG="subdir/t.$IMGFMT.mid" _make_test_img -b "t.$IMGFMT.base" -F $IMGFMT
+TEST_IMG="subdir/t.$IMGFMT" _make_test_img -b "t.$IMGFMT.mid" -F $IMGFMT
+
+# Should work
+$QEMU_IMG commit -b "t.$IMGFMT.mid" "subdir/t.$IMGFMT"
+
+# Might theoretically work, but does not in practice (we have to
+# decide between this and the above; and since we always represent
+# backing file names as relative to the overlay, we go for the above)
+$QEMU_IMG commit -b "subdir/t.$IMGFMT.mid" "subdir/t.$IMGFMT" 2>&1 | \
+    _filter_imgfmt
+
+# This should work as well
+$QEMU_IMG commit -b "$TEST_DIR/subdir/t.$IMGFMT.mid" "subdir/t.$IMGFMT"
+
+popd > /dev/null
+
+# Now let's try with just absolute filenames
+# (This will not work with external data files, though, because when
+# using relative paths for those, qemu will always resolve them
+# relative to its CWD.  Therefore, it cannot find those data files now
+# that we left $TEST_DIR.)
+if _get_data_file '' > /dev/null; then
+    echo 'Image committed.' # Skip test
+else
+    $QEMU_IMG commit -b "$TEST_DIR/subdir/t.$IMGFMT.mid" \
+        "$TEST_DIR/subdir/t.$IMGFMT"
+fi
 
 # success, all done
 echo "*** done"

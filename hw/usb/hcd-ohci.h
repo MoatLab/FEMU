@@ -22,6 +22,8 @@
 #define HCD_OHCI_H
 
 #include "sysemu/dma.h"
+#include "hw/usb.h"
+#include "qom/object.h"
 
 /* Number of Downstream Ports on the root hub: */
 #define OHCI_MAX_PORTS 15
@@ -89,6 +91,21 @@ typedef struct OHCIState {
 
     void (*ohci_die)(struct OHCIState *ohci);
 } OHCIState;
+
+#define TYPE_SYSBUS_OHCI "sysbus-ohci"
+OBJECT_DECLARE_SIMPLE_TYPE(OHCISysBusState, SYSBUS_OHCI)
+
+struct OHCISysBusState {
+    /*< private >*/
+    SysBusDevice parent_obj;
+    /*< public >*/
+
+    OHCIState ohci;
+    char *masterbus;
+    uint32_t num_ports;
+    uint32_t firstport;
+    dma_addr_t dma_offset;
+};
 
 extern const VMStateDescription vmstate_ohci_state;
 

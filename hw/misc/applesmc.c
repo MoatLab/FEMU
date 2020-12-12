@@ -9,7 +9,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -31,11 +31,12 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
 #include "hw/isa/isa.h"
+#include "hw/qdev-properties.h"
 #include "ui/console.h"
 #include "qemu/module.h"
 #include "qemu/timer.h"
+#include "qom/object.h"
 
 /* #define DEBUG_SMC */
 
@@ -89,9 +90,8 @@ struct AppleSMCData {
     QLIST_ENTRY(AppleSMCData) node;
 };
 
-#define APPLE_SMC(obj) OBJECT_CHECK(AppleSMCState, (obj), TYPE_APPLE_SMC)
+OBJECT_DECLARE_SIMPLE_TYPE(AppleSMCState, APPLE_SMC)
 
-typedef struct AppleSMCState AppleSMCState;
 struct AppleSMCState {
     ISADevice parent_obj;
 
@@ -353,7 +353,7 @@ static void qdev_applesmc_class_init(ObjectClass *klass, void *data)
 
     dc->realize = applesmc_isa_realize;
     dc->reset = qdev_applesmc_isa_reset;
-    dc->props = applesmc_isa_properties;
+    device_class_set_props(dc, applesmc_isa_properties);
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
 }
 

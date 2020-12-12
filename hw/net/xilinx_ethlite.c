@@ -24,9 +24,11 @@
 
 #include "qemu/osdep.h"
 #include "qemu/module.h"
+#include "qom/object.h"
 #include "cpu.h" /* FIXME should not use tswap* */
 #include "hw/sysbus.h"
-#include "hw/hw.h"
+#include "hw/irq.h"
+#include "hw/qdev-properties.h"
 #include "net/net.h"
 
 #define D(x)
@@ -51,8 +53,8 @@
 #define CTRL_S     0x1
 
 #define TYPE_XILINX_ETHLITE "xlnx.xps-ethernetlite"
-#define XILINX_ETHLITE(obj) \
-    OBJECT_CHECK(struct xlx_ethlite, (obj), TYPE_XILINX_ETHLITE)
+DECLARE_INSTANCE_CHECKER(struct xlx_ethlite, XILINX_ETHLITE,
+                         TYPE_XILINX_ETHLITE)
 
 struct xlx_ethlite
 {
@@ -174,7 +176,7 @@ static const MemoryRegionOps eth_ops = {
     }
 };
 
-static int eth_can_rx(NetClientState *nc)
+static bool eth_can_rx(NetClientState *nc)
 {
     struct xlx_ethlite *s = qemu_get_nic_opaque(nc);
     unsigned int rxbase = s->rxbuf * (0x800 / 4);
@@ -261,7 +263,7 @@ static void xilinx_ethlite_class_init(ObjectClass *klass, void *data)
 
     dc->realize = xilinx_ethlite_realize;
     dc->reset = xilinx_ethlite_reset;
-    dc->props = xilinx_ethlite_properties;
+    device_class_set_props(dc, xilinx_ethlite_properties);
 }
 
 static const TypeInfo xilinx_ethlite_info = {

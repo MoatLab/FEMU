@@ -25,20 +25,18 @@
 #ifndef VIRTIO_BUS_H
 #define VIRTIO_BUS_H
 
-#include "hw/qdev.h"
-#include "sysemu/sysemu.h"
+#include "hw/qdev-core.h"
 #include "hw/virtio/virtio.h"
+#include "qom/object.h"
 
 #define TYPE_VIRTIO_BUS "virtio-bus"
-#define VIRTIO_BUS_GET_CLASS(obj) \
-        OBJECT_GET_CLASS(VirtioBusClass, obj, TYPE_VIRTIO_BUS)
-#define VIRTIO_BUS_CLASS(klass) \
-        OBJECT_CLASS_CHECK(VirtioBusClass, klass, TYPE_VIRTIO_BUS)
-#define VIRTIO_BUS(obj) OBJECT_CHECK(VirtioBusState, (obj), TYPE_VIRTIO_BUS)
-
+typedef struct VirtioBusClass VirtioBusClass;
 typedef struct VirtioBusState VirtioBusState;
+DECLARE_OBJ_CHECKERS(VirtioBusState, VirtioBusClass,
+                     VIRTIO_BUS, TYPE_VIRTIO_BUS)
 
-typedef struct VirtioBusClass {
+
+struct VirtioBusClass {
     /* This is what a VirtioBus must implement */
     BusClass parent;
     void (*notify)(DeviceState *d, uint16_t vector);
@@ -85,13 +83,17 @@ typedef struct VirtioBusClass {
     int (*ioeventfd_assign)(DeviceState *d, EventNotifier *notifier,
                             int n, bool assign);
     /*
+     * Whether queue number n is enabled.
+     */
+    bool (*queue_enabled)(DeviceState *d, int n);
+    /*
      * Does the transport have variable vring alignment?
      * (ie can it ever call virtio_queue_set_align()?)
      * Note that changing this will break migration for this transport.
      */
     bool has_variable_vring_alignment;
     AddressSpace *(*get_dma_as)(DeviceState *d);
-} VirtioBusClass;
+};
 
 struct VirtioBusState {
     BusState parent_obj;

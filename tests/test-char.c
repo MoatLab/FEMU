@@ -6,7 +6,6 @@
 #include "qemu/option.h"
 #include "qemu/sockets.h"
 #include "chardev/char-fe.h"
-#include "chardev/char-mux.h"
 #include "sysemu/sysemu.h"
 #include "qapi/error.h"
 #include "qapi/qapi-commands-char.h"
@@ -15,6 +14,7 @@
 #include "io/channel-socket.h"
 #include "qapi/qobject-input-visitor.h"
 #include "qapi/qapi-visit-sockets.h"
+#include "socket-helpers.h"
 
 static bool quit;
 
@@ -53,7 +53,7 @@ static void fe_read(void *opaque, const uint8_t *buf, int size)
     quit = true;
 }
 
-static void fe_event(void *opaque, int event)
+static void fe_event(void *opaque, QEMUChrEvent event)
 {
     FeHandler *h = opaque;
     bool new_open_state;
@@ -70,7 +70,7 @@ static void fe_event(void *opaque, int event)
             h->openclose_mismatch = true;
         }
         h->is_open = new_open_state;
-        /* no break */
+        /* fallthrough */
     default:
         quit = true;
         break;
@@ -624,18 +624,41 @@ static void char_udp_test(void)
 typedef struct {
     int event;
     bool got_pong;
+    CharBackend *be;
 } CharSocketTestData;
 
 
 #define SOCKET_PING "Hello"
 #define SOCKET_PONG "World"
 
+typedef void (*char_socket_cb)(void *opaque, QEMUChrEvent event);
 
 static void
-char_socket_event(void *opaque, int event)
+char_socket_event(void *opaque, QEMUChrEvent event)
 {
     CharSocketTestData *data = opaque;
     data->event = event;
+}
+
+static void
+char_socket_event_with_error(void *opaque, QEMUChrEvent event)
+{
+    static bool first_error;
+    CharSocketTestData *data = opaque;
+    CharBackend *be = data->be;
+    data->event = event;
+    switch (event) {
+    case CHR_EVENT_OPENED:
+        if (!first_error) {
+            first_error = true;
+            qemu_chr_fe_disconnect(be);
+        }
+        return;
+    case CHR_EVENT_CLOSED:
+        return;
+    default:
+        return;
+    }
 }
 
 
@@ -666,7 +689,7 @@ char_socket_addr_to_opt_str(SocketAddress *addr, bool fd_pass,
         char *optstr;
         g_assert(!reconnect);
         if (is_listen) {
-            qio_channel_socket_listen_sync(ioc, addr, &error_abort);
+            qio_channel_socket_listen_sync(ioc, addr, 1, &error_abort);
         } else {
             qio_channel_socket_connect_sync(ioc, addr, &error_abort);
         }
@@ -698,19 +721,24 @@ char_socket_addr_to_opt_str(SocketAddress *addr, bool fd_pass,
 }
 
 
-static void
-char_socket_ping_pong(QIOChannel *ioc)
+static int
+char_socket_ping_pong(QIOChannel *ioc, Error **errp)
 {
     char greeting[sizeof(SOCKET_PING)];
     const char *response = SOCKET_PONG;
 
-    qio_channel_read_all(ioc, greeting, sizeof(greeting), &error_abort);
+    int ret;
+    ret = qio_channel_read_all(ioc, greeting, sizeof(greeting), errp);
+    if (ret != 0) {
+        object_unref(OBJECT(ioc));
+        return -1;
+    }
 
     g_assert(memcmp(greeting, SOCKET_PING, sizeof(greeting)) == 0);
 
-    qio_channel_write_all(ioc, response, sizeof(SOCKET_PONG), &error_abort);
-
+    qio_channel_write_all(ioc, response, sizeof(SOCKET_PONG), errp);
     object_unref(OBJECT(ioc));
+    return 0;
 }
 
 
@@ -722,7 +750,7 @@ char_socket_server_client_thread(gpointer data)
 
     qio_channel_socket_connect_sync(ioc, addr, &error_abort);
 
-    char_socket_ping_pong(QIO_CHANNEL(ioc));
+    char_socket_ping_pong(QIO_CHANNEL(ioc), &error_abort);
 
     return NULL;
 }
@@ -782,6 +810,7 @@ static void char_socket_server_test(gconstpointer opaque)
 
  reconnect:
     data.event = -1;
+    data.be = &be;
     qemu_chr_fe_set_handlers(&be, NULL, NULL,
                              char_socket_event, NULL,
                              &data, NULL, true);
@@ -854,10 +883,13 @@ char_socket_client_server_thread(gpointer data)
     QIOChannelSocket *ioc = data;
     QIOChannelSocket *cioc;
 
+retry:
     cioc = qio_channel_socket_accept(ioc, &error_abort);
     g_assert_nonnull(cioc);
 
-    char_socket_ping_pong(QIO_CHANNEL(cioc));
+    if (char_socket_ping_pong(QIO_CHANNEL(cioc), NULL) != 0) {
+        goto retry;
+    }
 
     return NULL;
 }
@@ -868,12 +900,59 @@ typedef struct {
     const char *reconnect;
     bool wait_connected;
     bool fd_pass;
+    char_socket_cb event_cb;
 } CharSocketClientTestConfig;
 
+static void char_socket_client_dupid_test(gconstpointer opaque)
+{
+    const CharSocketClientTestConfig *config = opaque;
+    QIOChannelSocket *ioc;
+    char *optstr;
+    Chardev *chr1, *chr2;
+    SocketAddress *addr;
+    QemuOpts *opts;
+    Error *local_err = NULL;
+
+    /*
+     * Setup a listener socket and determine get its address
+     * so we know the TCP port for the client later
+     */
+    ioc = qio_channel_socket_new();
+    g_assert_nonnull(ioc);
+    qio_channel_socket_listen_sync(ioc, config->addr, 1, &error_abort);
+    addr = qio_channel_socket_get_local_address(ioc, &error_abort);
+    g_assert_nonnull(addr);
+
+    /*
+     * Populate the chardev address based on what the server
+     * is actually listening on
+     */
+    optstr = char_socket_addr_to_opt_str(addr,
+                                         config->fd_pass,
+                                         config->reconnect,
+                                         false);
+
+    opts = qemu_opts_parse_noisily(qemu_find_opts("chardev"),
+                                   optstr, true);
+    g_assert_nonnull(opts);
+    chr1 = qemu_chr_new_from_opts(opts, NULL, &error_abort);
+    g_assert_nonnull(chr1);
+
+    chr2 = qemu_chr_new_from_opts(opts, NULL, &local_err);
+    g_assert_null(chr2);
+    error_free_or_abort(&local_err);
+
+    object_unref(OBJECT(ioc));
+    qemu_opts_del(opts);
+    object_unparent(OBJECT(chr1));
+    qapi_free_SocketAddress(addr);
+    g_free(optstr);
+}
 
 static void char_socket_client_test(gconstpointer opaque)
 {
     const CharSocketClientTestConfig *config = opaque;
+    const char_socket_cb event_cb = config->event_cb;
     QIOChannelSocket *ioc;
     char *optstr;
     Chardev *chr;
@@ -891,7 +970,7 @@ static void char_socket_client_test(gconstpointer opaque)
      */
     ioc = qio_channel_socket_new();
     g_assert_nonnull(ioc);
-    qio_channel_socket_listen_sync(ioc, config->addr, &error_abort);
+    qio_channel_socket_listen_sync(ioc, config->addr, 1, &error_abort);
     addr = qio_channel_socket_get_local_address(ioc, &error_abort);
     g_assert_nonnull(addr);
 
@@ -937,8 +1016,9 @@ static void char_socket_client_test(gconstpointer opaque)
 
  reconnect:
     data.event = -1;
+    data.be = &be;
     qemu_chr_fe_set_handlers(&be, NULL, NULL,
-                             char_socket_event, NULL,
+                             event_cb, NULL,
                              &data, NULL, true);
     if (config->reconnect) {
         g_assert(data.event == -1);
@@ -976,7 +1056,7 @@ static void char_socket_client_test(gconstpointer opaque)
     /* Setup a callback to receive the reply to our greeting */
     qemu_chr_fe_set_handlers(&be, char_socket_can_read,
                              char_socket_read,
-                             char_socket_event, NULL,
+                             event_cb, NULL,
                              &data, NULL, true);
     g_assert(data.event == CHR_EVENT_OPENED);
     data.event = -1;
@@ -1005,7 +1085,7 @@ static void char_socket_client_test(gconstpointer opaque)
 }
 
 static void
-count_closed_event(void *opaque, int event)
+count_closed_event(void *opaque, QEMUChrEvent event)
 {
     int *count = opaque;
     if (event == CHR_EVENT_CLOSED) {
@@ -1102,7 +1182,7 @@ static void char_socket_server_two_clients_test(gconstpointer opaque)
 }
 
 
-#ifdef HAVE_CHARDEV_SERIAL
+#if defined(HAVE_CHARDEV_SERIAL) && !defined(WIN32)
 static void char_serial_test(void)
 {
     QemuOpts *opts;
@@ -1120,7 +1200,7 @@ static void char_serial_test(void)
 
     /* test tty alias */
     qemu_opt_set(opts, "backend", "tty", &error_abort);
-    chr = qemu_chr_new_from_opts(opts, NULL, NULL);
+    chr = qemu_chr_new_from_opts(opts, NULL, &error_abort);
     g_assert_nonnull(chr);
     object_unparent(OBJECT(chr));
 
@@ -1354,12 +1434,31 @@ static void char_hotswap_test(void)
     g_free(chr_args);
 }
 
+static SocketAddress tcpaddr = {
+    .type = SOCKET_ADDRESS_TYPE_INET,
+    .u.inet.host = (char *)"127.0.0.1",
+    .u.inet.port = (char *)"0",
+};
+#ifndef WIN32
+static SocketAddress unixaddr = {
+    .type = SOCKET_ADDRESS_TYPE_UNIX,
+    .u.q_unix.path = (char *)"test-char.sock",
+};
+#endif
+
 int main(int argc, char **argv)
 {
+    bool has_ipv4, has_ipv6;
+
     qemu_init_main_loop(&error_abort);
     socket_init();
 
     g_test_init(&argc, &argv, NULL);
+
+    if (socket_check_protocol_support(&has_ipv4, &has_ipv6) < 0) {
+        g_printerr("socket_check_protocol_support() failed\n");
+        goto end;
+    }
 
     module_call_init(MODULE_INIT_QOM);
     qemu_add_opts(&qemu_chardev_opts);
@@ -1382,26 +1481,14 @@ int main(int argc, char **argv)
     g_test_add_func("/char/file-fifo", char_file_fifo_test);
 #endif
 
-    SocketAddress tcpaddr = {
-        .type = SOCKET_ADDRESS_TYPE_INET,
-        .u.inet.host = (char *)"127.0.0.1",
-        .u.inet.port = (char *)"0",
-    };
-#ifndef WIN32
-    SocketAddress unixaddr = {
-        .type = SOCKET_ADDRESS_TYPE_UNIX,
-        .u.q_unix.path = (char *)"test-char.sock",
-    };
-#endif
-
 #define SOCKET_SERVER_TEST(name, addr)                                  \
-    CharSocketServerTestConfig server1 ## name =                        \
+    static CharSocketServerTestConfig server1 ## name =                 \
         { addr, false, false };                                         \
-    CharSocketServerTestConfig server2 ## name =                        \
+    static CharSocketServerTestConfig server2 ## name =                 \
         { addr, true, false };                                          \
-    CharSocketServerTestConfig server3 ## name =                        \
+    static CharSocketServerTestConfig server3 ## name =                 \
         { addr, false, true };                                          \
-    CharSocketServerTestConfig server4 ## name =                        \
+    static CharSocketServerTestConfig server4 ## name =                 \
         { addr, true, true };                                           \
     g_test_add_data_func("/char/socket/server/mainloop/" # name,        \
                          &server1 ##name, char_socket_server_test);     \
@@ -1413,18 +1500,23 @@ int main(int argc, char **argv)
                          &server4 ##name, char_socket_server_test)
 
 #define SOCKET_CLIENT_TEST(name, addr)                                  \
-    CharSocketClientTestConfig client1 ## name =                        \
-        { addr, NULL, false, false };                                   \
-    CharSocketClientTestConfig client2 ## name =                        \
-        { addr, NULL, true, false };                                    \
-    CharSocketClientTestConfig client3 ## name =                        \
-        { addr, ",reconnect=1", false };                                \
-    CharSocketClientTestConfig client4 ## name =                        \
-        { addr, ",reconnect=1", true };                                 \
-    CharSocketClientTestConfig client5 ## name =                        \
-        { addr, NULL, false, true };                                    \
-    CharSocketClientTestConfig client6 ## name =                        \
-        { addr, NULL, true, true };                                     \
+    static CharSocketClientTestConfig client1 ## name =                 \
+        { addr, NULL, false, false, char_socket_event };                \
+    static CharSocketClientTestConfig client2 ## name =                 \
+        { addr, NULL, true, false, char_socket_event };                 \
+    static CharSocketClientTestConfig client3 ## name =                 \
+        { addr, ",reconnect=1", false, false, char_socket_event };      \
+    static CharSocketClientTestConfig client4 ## name =                 \
+        { addr, ",reconnect=1", true, false, char_socket_event };       \
+    static CharSocketClientTestConfig client5 ## name =                 \
+        { addr, NULL, false, true, char_socket_event };                 \
+    static CharSocketClientTestConfig client6 ## name =                 \
+        { addr, NULL, true, true, char_socket_event };                  \
+    static CharSocketClientTestConfig client7 ## name =                 \
+        { addr, ",reconnect=1", true, false,                            \
+            char_socket_event_with_error };                             \
+    static CharSocketClientTestConfig client8 ## name =                 \
+        { addr, ",reconnect=1", false, false, char_socket_event };      \
     g_test_add_data_func("/char/socket/client/mainloop/" # name,        \
                          &client1 ##name, char_socket_client_test);     \
     g_test_add_data_func("/char/socket/client/wait-conn/" # name,       \
@@ -1436,12 +1528,18 @@ int main(int argc, char **argv)
     g_test_add_data_func("/char/socket/client/mainloop-fdpass/" # name, \
                          &client5 ##name, char_socket_client_test);     \
     g_test_add_data_func("/char/socket/client/wait-conn-fdpass/" # name, \
-                         &client6 ##name, char_socket_client_test)
+                         &client6 ##name, char_socket_client_test);     \
+    g_test_add_data_func("/char/socket/client/reconnect-error/" # name, \
+                         &client7 ##name, char_socket_client_test);     \
+    g_test_add_data_func("/char/socket/client/dupid-reconnect/" # name, \
+                         &client8 ##name, char_socket_client_dupid_test)
 
-    SOCKET_SERVER_TEST(tcp, &tcpaddr);
-    SOCKET_CLIENT_TEST(tcp, &tcpaddr);
-    g_test_add_data_func("/char/socket/server/two-clients/tcp", &tcpaddr,
-                         char_socket_server_two_clients_test);
+    if (has_ipv4) {
+        SOCKET_SERVER_TEST(tcp, &tcpaddr);
+        SOCKET_CLIENT_TEST(tcp, &tcpaddr);
+        g_test_add_data_func("/char/socket/server/two-clients/tcp", &tcpaddr,
+                             char_socket_server_two_clients_test);
+    }
 #ifndef WIN32
     SOCKET_SERVER_TEST(unix, &unixaddr);
     SOCKET_CLIENT_TEST(unix, &unixaddr);
@@ -1450,11 +1548,12 @@ int main(int argc, char **argv)
 #endif
 
     g_test_add_func("/char/udp", char_udp_test);
-#ifdef HAVE_CHARDEV_SERIAL
+#if defined(HAVE_CHARDEV_SERIAL) && !defined(WIN32)
     g_test_add_func("/char/serial", char_serial_test);
 #endif
     g_test_add_func("/char/hotswap", char_hotswap_test);
     g_test_add_func("/char/websocket", char_websock_test);
 
+end:
     return g_test_run();
 }

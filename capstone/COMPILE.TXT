@@ -7,6 +7,8 @@ To compile using CMake, see COMPILE_CMAKE.TXT.
 
 To compile using XCode on MacOSX, see xcode/README.md.
 
+To compile for Windows CE (a.k.a, Windows Embedded Compact), see windowsce/COMPILE.md.
+
                         *-*-*-*-*-*
 
 Capstone requires no prerequisite packages, so it is easy to compile & install.
@@ -15,15 +17,15 @@ Capstone requires no prerequisite packages, so it is easy to compile & install.
 
 (0) Tailor Capstone to your need.
 
-  Out of 8 archtitectures supported by Capstone (Arm, Arm64, Mips, PPC, Sparc,
-  SystemZ, XCore & X86), if you just need several selected archs, choose which
-  ones you want to compile in by editing "config.mk" before going to next steps.
+  Out of all archtitectures supported by Capstone, if you just need several
+  selected archs, choose the ones you want to compile in by editing "config.mk"
+  before going to next steps.
 
-  By default, all 8 architectures are compiled.
+  By default, all architectures are compiled.
 
   The other way of customize Capstone without having to edit config.mk is to
   pass the desired options on the commandline to ./make.sh. Currently,
-  Capstone supports 5 options, as followings.
+  Capstone supports 8 options, as followings.
 
   - CAPSTONE_ARCHS: specify list of architectures to compiled in.
   - CAPSTONE_USE_SYS_DYN_MEM: change this if you have your own dynamic memory management.
@@ -32,6 +34,7 @@ Capstone requires no prerequisite packages, so it is easy to compile & install.
   - CAPSTONE_X86_ATT_DISABLE: disables AT&T syntax on x86.
   - CAPSTONE_STATIC: build static library.
   - CAPSTONE_SHARED: build dynamic (shared) library.
+  - CAPSTONE_DEBUG: enable debug build supporting assert().
 
   By default, Capstone uses system dynamic memory management, both DIET and X86_REDUCE
   modes are disable, and builds all the static & shared libraries.
@@ -80,18 +83,25 @@ Capstone requires no prerequisite packages, so it is easy to compile & install.
   NOTE: The core framework installed by "./make.sh install" consist of
   following files:
 
-	/usr/include/capstone/capstone.h
-	/usr/include/capstone/x86.h
 	/usr/include/capstone/arm.h
 	/usr/include/capstone/arm64.h
+	/usr/include/capstone/bpf.h
+	/usr/include/capstone/capstone.h
+	/usr/include/capstone/evm.h
+	/usr/include/capstone/m680x.h
+	/usr/include/capstone/m68k.h
 	/usr/include/capstone/mips.h
+	/usr/include/capstone/mos65xx.h
+	/usr/include/capstone/platform.h
 	/usr/include/capstone/ppc.h
 	/usr/include/capstone/sparc.h
 	/usr/include/capstone/systemz.h
+	/usr/include/capstone/tms320c64x.h
+	/usr/include/capstone/wasm.h
+	/usr/include/capstone/x86.h
 	/usr/include/capstone/xcore.h
-	/usr/include/capstone/platform.h
-	/usr/lib/libcapstone.so (for Linux/*nix), or /usr/lib/libcapstone.dylib (OSX)
 	/usr/lib/libcapstone.a
+	/usr/lib/libcapstone.so (for Linux/*nix), or /usr/lib/libcapstone.dylib (OSX)
 
 
 
@@ -115,7 +125,7 @@ Capstone requires no prerequisite packages, so it is easy to compile & install.
 
 (4) Cross-compile for iOS from Mac OSX.
 
-  To cross-compile for iOS (iPhone/iPad/iPod), Mac OSX with XCode installed is required. 
+  To cross-compile for iOS (iPhone/iPad/iPod), Mac OSX with XCode installed is required.
 
 	- To cross-compile for ArmV7 (iPod 4, iPad 1/2/3, iPhone4, iPhone4S), run:
 		$ ./make.sh ios_armv7
@@ -139,9 +149,9 @@ Capstone requires no prerequisite packages, so it is easy to compile & install.
   To cross-compile for Android (smartphone/tablet), Android NDK is required.
   NOTE: Only ARM and ARM64 are currently supported.
 
-       $ NDK=/android/android-ndk-r10e ./make.sh cross-android arm
-       or
-       $ NDK=/android/android-ndk-r10e ./make.sh cross-android arm64
+	$ NDK=/android/android-ndk-r10e ./make.sh cross-android arm
+  or
+	$ NDK=/android/android-ndk-r10e ./make.sh cross-android arm64
 
   Resulted files libcapstone.so, libcapstone.a & tests/test* can then
   be used on Android devices.

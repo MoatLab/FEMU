@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,7 +24,7 @@
 #include "exec/cpu_ldst.h"
 #include "qemu/int128.h"
 #include "qemu/atomic128.h"
-#include "tcg.h"
+#include "tcg/tcg.h"
 
 void helper_cmpxchg8b_unlocked(CPUX86State *env, target_ulong a0)
 {
@@ -68,7 +68,7 @@ void helper_cmpxchg8b(CPUX86State *env, target_ulong a0)
         uint64_t *haddr = g2h(a0);
         cmpv = cpu_to_le64(cmpv);
         newv = cpu_to_le64(newv);
-        oldv = atomic_cmpxchg__nocheck(haddr, cmpv, newv);
+        oldv = qatomic_cmpxchg__nocheck(haddr, cmpv, newv);
         oldv = le64_to_cpu(oldv);
     }
 #else

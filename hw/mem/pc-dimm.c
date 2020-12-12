@@ -7,7 +7,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -19,12 +19,16 @@
  */
 
 #include "qemu/osdep.h"
+#include "hw/boards.h"
 #include "hw/mem/pc-dimm.h"
+#include "hw/qdev-properties.h"
+#include "migration/vmstate.h"
 #include "hw/mem/nvdimm.h"
 #include "hw/mem/memory-device.h"
 #include "qapi/error.h"
 #include "qapi/visitor.h"
 #include "qemu/module.h"
+#include "sysemu/hostmem.h"
 #include "sysemu/numa.h"
 #include "trace.h"
 
@@ -40,27 +44,27 @@ void pc_dimm_pre_plug(PCDIMMDevice *dimm, MachineState *machine,
                                    &error_abort);
     if ((slot < 0 || slot >= machine->ram_slots) &&
          slot != PC_DIMM_UNASSIGNED_SLOT) {
-        error_setg(&local_err, "invalid slot number, valid range is [0-%"
-                   PRIu64 "]", machine->ram_slots - 1);
-        goto out;
+        error_setg(errp,
+                   "invalid slot number %d, valid range is [0-%" PRIu64 "]",
+                   slot, machine->ram_slots - 1);
+        return;
     }
 
     slot = pc_dimm_get_free_slot(slot == PC_DIMM_UNASSIGNED_SLOT ? NULL : &slot,
                                  machine->ram_slots, &local_err);
     if (local_err) {
-        goto out;
+        error_propagate(errp, local_err);
+        return;
     }
-    object_property_set_int(OBJECT(dimm), slot, PC_DIMM_SLOT_PROP,
+    object_property_set_int(OBJECT(dimm), PC_DIMM_SLOT_PROP, slot,
                             &error_abort);
     trace_mhp_pc_dimm_assigned_slot(slot);
 
     memory_device_pre_plug(MEMORY_DEVICE(dimm), machine, legacy_align,
-                           &local_err);
-out:
-    error_propagate(errp, local_err);
+                           errp);
 }
 
-void pc_dimm_plug(PCDIMMDevice *dimm, MachineState *machine, Error **errp)
+void pc_dimm_plug(PCDIMMDevice *dimm, MachineState *machine)
 {
     PCDIMMDeviceClass *ddc = PC_DIMM_GET_CLASS(dimm);
     MemoryRegion *vmstate_mr = ddc->get_vmstate_memory_region(dimm,
@@ -161,21 +165,22 @@ static void pc_dimm_get_size(Object *obj, Visitor *v, const char *name,
 static void pc_dimm_init(Object *obj)
 {
     object_property_add(obj, PC_DIMM_SIZE_PROP, "uint64", pc_dimm_get_size,
-                        NULL, NULL, NULL, &error_abort);
+                        NULL, NULL, NULL);
 }
 
 static void pc_dimm_realize(DeviceState *dev, Error **errp)
 {
     PCDIMMDevice *dimm = PC_DIMM(dev);
     PCDIMMDeviceClass *ddc = PC_DIMM_GET_CLASS(dimm);
+    MachineState *ms = MACHINE(qdev_get_machine());
+    int nb_numa_nodes = ms->numa_state->num_nodes;
 
     if (!dimm->hostmem) {
         error_setg(errp, "'" PC_DIMM_MEMDEV_PROP "' property is not set");
         return;
     } else if (host_memory_backend_is_mapped(dimm->hostmem)) {
-        char *path = object_get_canonical_path_component(OBJECT(dimm->hostmem));
-        error_setg(errp, "can't use already busy memdev: %s", path);
-        g_free(path);
+        error_setg(errp, "can't use already busy memdev: %s",
+                   object_get_canonical_path_component(OBJECT(dimm->hostmem)));
         return;
     }
     if (((nb_numa_nodes > 0) && (dimm->node >= nb_numa_nodes)) ||
@@ -193,7 +198,7 @@ static void pc_dimm_realize(DeviceState *dev, Error **errp)
     host_memory_backend_set_mapped(dimm->hostmem, true);
 }
 
-static void pc_dimm_unrealize(DeviceState *dev, Error **errp)
+static void pc_dimm_unrealize(DeviceState *dev)
 {
     PCDIMMDevice *dimm = PC_DIMM(dev);
 
@@ -212,13 +217,14 @@ static MemoryRegion *pc_dimm_get_memory_region(PCDIMMDevice *dimm, Error **errp)
 
 static uint64_t pc_dimm_md_get_addr(const MemoryDeviceState *md)
 {
-    return object_property_get_uint(OBJECT(md), PC_DIMM_ADDR_PROP, &error_abort);
+    return object_property_get_uint(OBJECT(md), PC_DIMM_ADDR_PROP,
+                                    &error_abort);
 }
 
 static void pc_dimm_md_set_addr(MemoryDeviceState *md, uint64_t addr,
                                 Error **errp)
 {
-    object_property_set_uint(OBJECT(md), addr, PC_DIMM_ADDR_PROP, errp);
+    object_property_set_uint(OBJECT(md), PC_DIMM_ADDR_PROP, addr, errp);
 }
 
 static MemoryRegion *pc_dimm_md_get_memory_region(MemoryDeviceState *md,
@@ -265,7 +271,7 @@ static void pc_dimm_class_init(ObjectClass *oc, void *data)
 
     dc->realize = pc_dimm_realize;
     dc->unrealize = pc_dimm_unrealize;
-    dc->props = pc_dimm_properties;
+    device_class_set_props(dc, pc_dimm_properties);
     dc->desc = "DIMM memory module";
 
     ddc->get_vmstate_memory_region = pc_dimm_get_memory_region;

@@ -10,17 +10,18 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
 #include "hw/sysbus.h"
+#include "qom/object.h"
 
 #undef DEBUG_PUV3
 #include "hw/unicore32/puv3.h"
 #include "qemu/module.h"
+#include "qemu/log.h"
 
 #define TYPE_PUV3_GPIO "puv3_gpio"
-#define PUV3_GPIO(obj) OBJECT_CHECK(PUV3GPIOState, (obj), TYPE_PUV3_GPIO)
+OBJECT_DECLARE_SIMPLE_TYPE(PUV3GPIOState, PUV3_GPIO)
 
-typedef struct PUV3GPIOState {
+struct PUV3GPIOState {
     SysBusDevice parent_obj;
 
     MemoryRegion iomem;
@@ -29,7 +30,7 @@ typedef struct PUV3GPIOState {
     uint32_t reg_GPLR;
     uint32_t reg_GPDR;
     uint32_t reg_GPIR;
-} PUV3GPIOState;
+};
 
 static uint64_t puv3_gpio_read(void *opaque, hwaddr offset,
         unsigned size)
@@ -48,7 +49,9 @@ static uint64_t puv3_gpio_read(void *opaque, hwaddr offset,
         ret = s->reg_GPIR;
         break;
     default:
-        DPRINTF("Bad offset 0x%x\n", offset);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "%s: Bad read offset 0x%"HWADDR_PRIx"\n",
+                      __func__, offset);
     }
     DPRINTF("offset 0x%x, value 0x%x\n", offset, ret);
 
@@ -69,14 +72,16 @@ static void puv3_gpio_write(void *opaque, hwaddr offset,
         if (s->reg_GPDR & value) {
             s->reg_GPLR |= value;
         } else {
-            DPRINTF("Write gpio input port error!");
+            qemu_log_mask(LOG_GUEST_ERROR, "%s: Write gpio input port\n",
+                          __func__);
         }
         break;
     case 0x0c:
         if (s->reg_GPDR & value) {
             s->reg_GPLR &= ~value;
         } else {
-            DPRINTF("Write gpio input port error!");
+            qemu_log_mask(LOG_GUEST_ERROR, "%s: Write gpio input port\n",
+                          __func__);
         }
         break;
     case 0x10: /* GRER */
@@ -87,7 +92,9 @@ static void puv3_gpio_write(void *opaque, hwaddr offset,
         s->reg_GPIR = value;
         break;
     default:
-        DPRINTF("Bad offset 0x%x\n", offset);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "%s: Bad write offset 0x%"HWADDR_PRIx"\n",
+                      __func__, offset);
     }
 }
 

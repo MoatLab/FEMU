@@ -28,7 +28,10 @@
  */
 
 #include "qemu/osdep.h"
+#include "hw/irq.h"
 #include "hw/pci/pci.h"
+#include "hw/qdev-properties.h"
+#include "migration/vmstate.h"
 #include "net/net.h"
 #include "qemu/module.h"
 #include "qemu/timer.h"
@@ -37,6 +40,7 @@
 #include "trace.h"
 
 #include "pcnet.h"
+#include "qom/object.h"
 
 //#define PCNET_DEBUG
 //#define PCNET_DEBUG_IO
@@ -48,17 +52,16 @@
 
 #define TYPE_PCI_PCNET "pcnet"
 
-#define PCI_PCNET(obj) \
-     OBJECT_CHECK(PCIPCNetState, (obj), TYPE_PCI_PCNET)
+OBJECT_DECLARE_SIMPLE_TYPE(PCIPCNetState, PCI_PCNET)
 
-typedef struct {
+struct PCIPCNetState {
     /*< private >*/
     PCIDevice parent_obj;
     /*< public >*/
 
     PCNetState state;
     MemoryRegion io_bar;
-} PCIPCNetState;
+};
 
 static void pcnet_aprom_writeb(void *opaque, uint32_t addr, uint32_t val)
 {
@@ -228,7 +231,7 @@ static void pci_pcnet_realize(PCIDevice *pci_dev, Error **errp)
     s->irq = pci_allocate_irq(pci_dev);
     s->phys_mem_read = pci_physical_memory_read;
     s->phys_mem_write = pci_physical_memory_write;
-    s->dma_opaque = pci_dev;
+    s->dma_opaque = DEVICE(pci_dev);
 
     pcnet_common_init(DEVICE(pci_dev), s, &net_pci_pcnet_info);
 }
@@ -247,7 +250,7 @@ static void pcnet_instance_init(Object *obj)
 
     device_add_bootindex_property(obj, &s->conf.bootindex,
                                   "bootindex", "/ethernet-phy@0",
-                                  DEVICE(obj), NULL);
+                                  DEVICE(obj));
 }
 
 static Property pcnet_properties[] = {
@@ -269,7 +272,7 @@ static void pcnet_class_init(ObjectClass *klass, void *data)
     k->class_id = PCI_CLASS_NETWORK_ETHERNET;
     dc->reset = pci_reset;
     dc->vmsd = &vmstate_pci_pcnet;
-    dc->props = pcnet_properties;
+    device_class_set_props(dc, pcnet_properties);
     set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);
 }
 

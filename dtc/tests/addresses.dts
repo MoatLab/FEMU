@@ -13,6 +13,11 @@
 		#size-cells = <1>;
 	};
 
+	discrete-bus@2000000 {
+		#address-cells = <1>;
+		#size-cells = <0>;
+	};
+
 	c0@0 {
 		#address-cells = <1 1>;
 		#size-cells = <1 1>;
@@ -26,5 +31,10 @@
 	c2@0 {
 		#address-cells = <5>;
 		#size-cells = <5>;
+	};
+
+	c3@0 {
+		#address-cells = <0>;
+		#size-cells = <0>;
 	};
 };

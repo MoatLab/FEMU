@@ -24,20 +24,23 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
 #include "hw/isa/isa.h"
+#include "hw/qdev-properties.h"
+#include "migration/vmstate.h"
+#include "qapi/error.h"
 #include "qemu/module.h"
 #include "sysemu/dma.h"
 
 #include "hw/ide/internal.h"
+#include "qom/object.h"
 
 /***********************************************************/
 /* ISA IDE definitions */
 
 #define TYPE_ISA_IDE "isa-ide"
-#define ISA_IDE(obj) OBJECT_CHECK(ISAIDEState, (obj), TYPE_ISA_IDE)
+OBJECT_DECLARE_SIMPLE_TYPE(ISAIDEState, ISA_IDE)
 
-typedef struct ISAIDEState {
+struct ISAIDEState {
     ISADevice parent_obj;
 
     IDEBus    bus;
@@ -45,7 +48,7 @@ typedef struct ISAIDEState {
     uint32_t  iobase2;
     uint32_t  isairq;
     qemu_irq  irq;
-} ISAIDEState;
+};
 
 static void isa_ide_reset(DeviceState *d)
 {
@@ -74,7 +77,7 @@ static void isa_ide_realizefn(DeviceState *dev, Error **errp)
     ide_init_ioport(&s->bus, isadev, s->iobase, s->iobase2);
     isa_init_irq(isadev, &s->irq, s->isairq);
     ide_init2(&s->bus, s->irq);
-    vmstate_register(dev, 0, &vmstate_ide_isa, s);
+    vmstate_register(VMSTATE_IF(dev), 0, &vmstate_ide_isa, s);
     ide_register_restart_cb(&s->bus);
 }
 
@@ -85,12 +88,12 @@ ISADevice *isa_ide_init(ISABus *bus, int iobase, int iobase2, int isairq,
     ISADevice *isadev;
     ISAIDEState *s;
 
-    isadev = isa_create(bus, TYPE_ISA_IDE);
+    isadev = isa_new(TYPE_ISA_IDE);
     dev = DEVICE(isadev);
     qdev_prop_set_uint32(dev, "iobase",  iobase);
     qdev_prop_set_uint32(dev, "iobase2", iobase2);
     qdev_prop_set_uint32(dev, "irq",     isairq);
-    qdev_init_nofail(dev);
+    isa_realize_and_unref(isadev, bus, &error_fatal);
 
     s = ISA_IDE(dev);
     if (hd0) {
@@ -116,7 +119,7 @@ static void isa_ide_class_initfn(ObjectClass *klass, void *data)
     dc->realize = isa_ide_realizefn;
     dc->fw_name = "ide";
     dc->reset = isa_ide_reset;
-    dc->props = isa_ide_properties;
+    device_class_set_props(dc, isa_ide_properties);
     set_bit(DEVICE_CATEGORY_STORAGE, dc->categories);
 }
 

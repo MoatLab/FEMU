@@ -9,6 +9,9 @@
 
 #include "qemu/osdep.h"
 #include "hw/i2c/i2c.h"
+#include "hw/qdev-properties.h"
+#include "migration/vmstate.h"
+#include "qapi/error.h"
 #include "qemu/module.h"
 #include "trace.h"
 
@@ -59,7 +62,7 @@ I2CBus *i2c_init_bus(DeviceState *parent, const char *name)
 
     bus = I2C_BUS(qbus_create(TYPE_I2C_BUS, parent, name));
     QLIST_INIT(&bus->current_devs);
-    vmstate_register(NULL, -1, &vmstate_i2c_bus, bus);
+    vmstate_register(NULL, VMSTATE_INSTANCE_ID_ANY, &vmstate_i2c_bus, bus);
     return bus;
 }
 
@@ -264,13 +267,26 @@ const VMStateDescription vmstate_i2c_slave = {
     }
 };
 
-DeviceState *i2c_create_slave(I2CBus *bus, const char *name, uint8_t addr)
+I2CSlave *i2c_slave_new(const char *name, uint8_t addr)
 {
     DeviceState *dev;
 
-    dev = qdev_create(&bus->qbus, name);
+    dev = qdev_new(name);
     qdev_prop_set_uint8(dev, "address", addr);
-    qdev_init_nofail(dev);
+    return I2C_SLAVE(dev);
+}
+
+bool i2c_slave_realize_and_unref(I2CSlave *dev, I2CBus *bus, Error **errp)
+{
+    return qdev_realize_and_unref(&dev->qdev, &bus->qbus, errp);
+}
+
+I2CSlave *i2c_slave_create_simple(I2CBus *bus, const char *name, uint8_t addr)
+{
+    I2CSlave *dev = i2c_slave_new(name, addr);
+
+    i2c_slave_realize_and_unref(dev, bus, &error_abort);
+
     return dev;
 }
 
@@ -279,7 +295,7 @@ static void i2c_slave_class_init(ObjectClass *klass, void *data)
     DeviceClass *k = DEVICE_CLASS(klass);
     set_bit(DEVICE_CATEGORY_MISC, k->categories);
     k->bus_type = TYPE_I2C_BUS;
-    k->props = i2c_props;
+    device_class_set_props(k, i2c_props);
 }
 
 static const TypeInfo i2c_slave_type_info = {

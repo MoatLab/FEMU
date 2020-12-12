@@ -26,6 +26,7 @@
 #include "qemu/sockets.h"
 #include "qemu/base64.h"
 #include "qemu/cutils.h"
+#include "commands-common.h"
 
 #ifdef HAVE_UTMPX
 #include <utmpx.h>
@@ -156,6 +157,17 @@ void qmp_guest_set_time(bool has_time, int64_t time_ns, Error **errp)
     pid_t pid;
     Error *local_err = NULL;
     struct timeval tv;
+    static const char hwclock_path[] = "/sbin/hwclock";
+    static int hwclock_available = -1;
+
+    if (hwclock_available < 0) {
+        hwclock_available = (access(hwclock_path, X_OK) == 0);
+    }
+
+    if (!hwclock_available) {
+        error_setg(errp, QERR_UNSUPPORTED);
+        return;
+    }
 
     /* If user has passed a time, validate and set it. */
     if (has_time) {
@@ -195,7 +207,7 @@ void qmp_guest_set_time(bool has_time, int64_t time_ns, Error **errp)
 
         /* Use '/sbin/hwclock -w' to set RTC from the system time,
          * or '/sbin/hwclock -s' to set the system time from RTC. */
-        execle("/sbin/hwclock", "hwclock", has_time ? "-w" : "-s",
+        execle(hwclock_path, "hwclock", has_time ? "-w" : "-s",
                NULL, environ);
         _exit(EXIT_FAILURE);
     } else if (pid < 0) {
@@ -226,12 +238,12 @@ typedef enum {
     RW_STATE_WRITING,
 } RwState;
 
-typedef struct GuestFileHandle {
+struct GuestFileHandle {
     uint64_t id;
     FILE *fh;
     RwState state;
     QTAILQ_ENTRY(GuestFileHandle) next;
-} GuestFileHandle;
+};
 
 static struct {
     QTAILQ_HEAD(, GuestFileHandle) filehandles;
@@ -257,7 +269,7 @@ static int64_t guest_file_handle_add(FILE *fh, Error **errp)
     return handle;
 }
 
-static GuestFileHandle *guest_file_handle_find(int64_t id, Error **errp)
+GuestFileHandle *guest_file_handle_find(int64_t id, Error **errp)
 {
     GuestFileHandle *gfh;
 
@@ -449,28 +461,13 @@ void qmp_guest_file_close(int64_t handle, Error **errp)
     g_free(gfh);
 }
 
-struct GuestFileRead *qmp_guest_file_read(int64_t handle, bool has_count,
-                                          int64_t count, Error **errp)
+GuestFileRead *guest_file_read_unsafe(GuestFileHandle *gfh,
+                                      int64_t count, Error **errp)
 {
-    GuestFileHandle *gfh = guest_file_handle_find(handle, errp);
     GuestFileRead *read_data = NULL;
     guchar *buf;
-    FILE *fh;
+    FILE *fh = gfh->fh;
     size_t read_count;
-
-    if (!gfh) {
-        return NULL;
-    }
-
-    if (!has_count) {
-        count = QGA_READ_COUNT_DEFAULT;
-    } else if (count < 0 || count >= UINT32_MAX) {
-        error_setg(errp, "value '%" PRId64 "' is invalid for argument count",
-                   count);
-        return NULL;
-    }
-
-    fh = gfh->fh;
 
     /* explicitly flush when switching from writing to reading */
     if (gfh->state == RW_STATE_WRITING) {
@@ -486,7 +483,6 @@ struct GuestFileRead *qmp_guest_file_read(int64_t handle, bool has_count,
     read_count = fread(buf, 1, count, fh);
     if (ferror(fh)) {
         error_setg_errno(errp, errno, "failed to read file");
-        slog("guest-file-read failed, handle: %" PRId64, handle);
     } else {
         buf[read_count] = 0;
         read_data = g_new0(GuestFileRead, 1);
@@ -865,28 +861,26 @@ static int build_hosts(char const *syspath, char const *host, bool ata,
     return i;
 }
 
-/* Store disk device info specified by @sysfs into @fs */
-static void build_guest_fsinfo_for_real_device(char const *syspath,
-                                               GuestFilesystemInfo *fs,
-                                               Error **errp)
+/*
+ * Store disk device info for devices on the PCI bus.
+ * Returns true if information has been stored, or false for failure.
+ */
+static bool build_guest_fsinfo_for_pci_dev(char const *syspath,
+                                           GuestDiskAddress *disk,
+                                           Error **errp)
 {
     unsigned int pci[4], host, hosts[8], tgt[3];
     int i, nhosts = 0, pcilen;
-    GuestDiskAddress *disk;
-    GuestPCIAddress *pciaddr;
-    GuestDiskAddressList *list = NULL;
+    GuestPCIAddress *pciaddr = disk->pci_controller;
     bool has_ata = false, has_host = false, has_tgt = false;
     char *p, *q, *driver = NULL;
-#ifdef CONFIG_LIBUDEV
-    struct udev *udev = NULL;
-    struct udev_device *udevice = NULL;
-#endif
+    bool ret = false;
 
     p = strstr(syspath, "/devices/pci");
     if (!p || sscanf(p + 12, "%*x:%*x/%x:%x:%x.%x%n",
                      pci, pci + 1, pci + 2, pci + 3, &pcilen) < 4) {
         g_debug("only pci device is supported: sysfs path '%s'", syspath);
-        return;
+        return false;
     }
 
     p += 12 + pcilen;
@@ -907,7 +901,7 @@ static void build_guest_fsinfo_for_real_device(char const *syspath,
         }
 
         g_debug("unsupported driver or sysfs path '%s'", syspath);
-        return;
+        return false;
     }
 
     p = strstr(syspath, "/target");
@@ -933,37 +927,10 @@ static void build_guest_fsinfo_for_real_device(char const *syspath,
         }
     }
 
-    pciaddr = g_malloc0(sizeof(*pciaddr));
     pciaddr->domain = pci[0];
     pciaddr->bus = pci[1];
     pciaddr->slot = pci[2];
     pciaddr->function = pci[3];
-
-    disk = g_malloc0(sizeof(*disk));
-    disk->pci_controller = pciaddr;
-
-    list = g_malloc0(sizeof(*list));
-    list->value = disk;
-
-#ifdef CONFIG_LIBUDEV
-    udev = udev_new();
-    udevice = udev_device_new_from_syspath(udev, syspath);
-    if (udev == NULL || udevice == NULL) {
-        g_debug("failed to query udev");
-    } else {
-        const char *devnode, *serial;
-        devnode = udev_device_get_devnode(udevice);
-        if (devnode != NULL) {
-            disk->dev = g_strdup(devnode);
-            disk->has_dev = true;
-        }
-        serial = udev_device_get_property_value(udevice, "ID_SERIAL");
-        if (serial != NULL && *serial != 0) {
-            disk->serial = g_strdup(serial);
-            disk->has_serial = true;
-        }
-    }
-#endif
 
     if (strcmp(driver, "ata_piix") == 0) {
         /* a host per ide bus, target*:0:<unit>:0 */
@@ -1022,21 +989,111 @@ static void build_guest_fsinfo_for_real_device(char const *syspath,
         goto cleanup;
     }
 
-    list->next = fs->disk;
-    fs->disk = list;
-    goto out;
+    ret = true;
 
 cleanup:
-    if (list) {
-        qapi_free_GuestDiskAddressList(list);
-    }
-out:
     g_free(driver);
+    return ret;
+}
+
+/*
+ * Store disk device info for non-PCI virtio devices (for example s390x
+ * channel I/O devices). Returns true if information has been stored, or
+ * false for failure.
+ */
+static bool build_guest_fsinfo_for_nonpci_virtio(char const *syspath,
+                                                 GuestDiskAddress *disk,
+                                                 Error **errp)
+{
+    unsigned int tgt[3];
+    char *p;
+
+    if (!strstr(syspath, "/virtio") || !strstr(syspath, "/block")) {
+        g_debug("Unsupported virtio device '%s'", syspath);
+        return false;
+    }
+
+    p = strstr(syspath, "/target");
+    if (p && sscanf(p + 7, "%*u:%*u:%*u/%*u:%u:%u:%u",
+                    &tgt[0], &tgt[1], &tgt[2]) == 3) {
+        /* virtio-scsi: target*:0:<target>:<unit> */
+        disk->bus_type = GUEST_DISK_BUS_TYPE_SCSI;
+        disk->bus = tgt[0];
+        disk->target = tgt[1];
+        disk->unit = tgt[2];
+    } else {
+        /* virtio-blk: 1 disk per 1 device */
+        disk->bus_type = GUEST_DISK_BUS_TYPE_VIRTIO;
+    }
+
+    return true;
+}
+
+/* Store disk device info specified by @sysfs into @fs */
+static void build_guest_fsinfo_for_real_device(char const *syspath,
+                                               GuestFilesystemInfo *fs,
+                                               Error **errp)
+{
+    GuestDiskAddress *disk;
+    GuestPCIAddress *pciaddr;
+    GuestDiskAddressList *list = NULL;
+    bool has_hwinf;
 #ifdef CONFIG_LIBUDEV
+    struct udev *udev = NULL;
+    struct udev_device *udevice = NULL;
+#endif
+
+    pciaddr = g_new0(GuestPCIAddress, 1);
+    pciaddr->domain = -1;                       /* -1 means field is invalid */
+    pciaddr->bus = -1;
+    pciaddr->slot = -1;
+    pciaddr->function = -1;
+
+    disk = g_new0(GuestDiskAddress, 1);
+    disk->pci_controller = pciaddr;
+    disk->bus_type = GUEST_DISK_BUS_TYPE_UNKNOWN;
+
+    list = g_new0(GuestDiskAddressList, 1);
+    list->value = disk;
+
+#ifdef CONFIG_LIBUDEV
+    udev = udev_new();
+    udevice = udev_device_new_from_syspath(udev, syspath);
+    if (udev == NULL || udevice == NULL) {
+        g_debug("failed to query udev");
+    } else {
+        const char *devnode, *serial;
+        devnode = udev_device_get_devnode(udevice);
+        if (devnode != NULL) {
+            disk->dev = g_strdup(devnode);
+            disk->has_dev = true;
+        }
+        serial = udev_device_get_property_value(udevice, "ID_SERIAL");
+        if (serial != NULL && *serial != 0) {
+            disk->serial = g_strdup(serial);
+            disk->has_serial = true;
+        }
+    }
+
     udev_unref(udev);
     udev_device_unref(udevice);
 #endif
-    return;
+
+    if (strstr(syspath, "/devices/pci")) {
+        has_hwinf = build_guest_fsinfo_for_pci_dev(syspath, disk, errp);
+    } else if (strstr(syspath, "/virtio")) {
+        has_hwinf = build_guest_fsinfo_for_nonpci_virtio(syspath, disk, errp);
+    } else {
+        g_debug("Unsupported device type for '%s'", syspath);
+        has_hwinf = false;
+    }
+
+    if (has_hwinf || disk->has_dev || disk->has_serial) {
+        list->next = fs->disk;
+        fs->disk = list;
+    } else {
+        qapi_free_GuestDiskAddressList(list);
+    }
 }
 
 static void build_guest_fsinfo_for_device(char const *devpath,
@@ -1049,6 +1106,7 @@ static void build_guest_fsinfo_for_virtual_device(char const *syspath,
                                                   GuestFilesystemInfo *fs,
                                                   Error **errp)
 {
+    Error *err = NULL;
     DIR *dir;
     char *dirpath;
     struct dirent *entry;
@@ -1078,10 +1136,11 @@ static void build_guest_fsinfo_for_virtual_device(char const *syspath,
 
             g_debug(" slave device '%s'", entry->d_name);
             path = g_strdup_printf("%s/slaves/%s", syspath, entry->d_name);
-            build_guest_fsinfo_for_device(path, fs, errp);
+            build_guest_fsinfo_for_device(path, fs, &err);
             g_free(path);
 
-            if (*errp) {
+            if (err) {
+                error_propagate(errp, err);
                 break;
             }
         }
@@ -1091,13 +1150,27 @@ static void build_guest_fsinfo_for_virtual_device(char const *syspath,
     closedir(dir);
 }
 
+static bool is_disk_virtual(const char *devpath, Error **errp)
+{
+    g_autofree char *syspath = realpath(devpath, NULL);
+
+    if (!syspath) {
+        error_setg_errno(errp, errno, "realpath(\"%s\")", devpath);
+        return false;
+    }
+    return strstr(syspath, "/devices/virtual/block/") != NULL;
+}
+
 /* Dispatch to functions for virtual/real device */
 static void build_guest_fsinfo_for_device(char const *devpath,
                                           GuestFilesystemInfo *fs,
                                           Error **errp)
 {
-    char *syspath = realpath(devpath, NULL);
+    ERRP_GUARD();
+    g_autofree char *syspath = NULL;
+    bool is_virtual = false;
 
+    syspath = realpath(devpath, NULL);
     if (!syspath) {
         error_setg_errno(errp, errno, "realpath(\"%s\")", devpath);
         return;
@@ -1108,15 +1181,285 @@ static void build_guest_fsinfo_for_device(char const *devpath,
     }
 
     g_debug("  parse sysfs path '%s'", syspath);
-
-    if (strstr(syspath, "/devices/virtual/block/")) {
+    is_virtual = is_disk_virtual(syspath, errp);
+    if (*errp != NULL) {
+        return;
+    }
+    if (is_virtual) {
         build_guest_fsinfo_for_virtual_device(syspath, fs, errp);
     } else {
         build_guest_fsinfo_for_real_device(syspath, fs, errp);
     }
-
-    free(syspath);
 }
+
+#ifdef CONFIG_LIBUDEV
+
+/*
+ * Wrapper around build_guest_fsinfo_for_device() for getting just
+ * the disk address.
+ */
+static GuestDiskAddress *get_disk_address(const char *syspath, Error **errp)
+{
+    g_autoptr(GuestFilesystemInfo) fs = NULL;
+
+    fs = g_new0(GuestFilesystemInfo, 1);
+    build_guest_fsinfo_for_device(syspath, fs, errp);
+    if (fs->disk != NULL) {
+        return g_steal_pointer(&fs->disk->value);
+    }
+    return NULL;
+}
+
+static char *get_alias_for_syspath(const char *syspath)
+{
+    struct udev *udev = NULL;
+    struct udev_device *udevice = NULL;
+    char *ret = NULL;
+
+    udev = udev_new();
+    if (udev == NULL) {
+        g_debug("failed to query udev");
+        goto out;
+    }
+    udevice = udev_device_new_from_syspath(udev, syspath);
+    if (udevice == NULL) {
+        g_debug("failed to query udev for path: %s", syspath);
+        goto out;
+    } else {
+        const char *alias = udev_device_get_property_value(
+            udevice, "DM_NAME");
+        /*
+         * NULL means there was an error and empty string means there is no
+         * alias. In case of no alias we return NULL instead of empty string.
+         */
+        if (alias == NULL) {
+            g_debug("failed to query udev for device alias for: %s",
+                syspath);
+        } else if (*alias != 0) {
+            ret = g_strdup(alias);
+        }
+    }
+
+out:
+    udev_unref(udev);
+    udev_device_unref(udevice);
+    return ret;
+}
+
+static char *get_device_for_syspath(const char *syspath)
+{
+    struct udev *udev = NULL;
+    struct udev_device *udevice = NULL;
+    char *ret = NULL;
+
+    udev = udev_new();
+    if (udev == NULL) {
+        g_debug("failed to query udev");
+        goto out;
+    }
+    udevice = udev_device_new_from_syspath(udev, syspath);
+    if (udevice == NULL) {
+        g_debug("failed to query udev for path: %s", syspath);
+        goto out;
+    } else {
+        ret = g_strdup(udev_device_get_devnode(udevice));
+    }
+
+out:
+    udev_unref(udev);
+    udev_device_unref(udevice);
+    return ret;
+}
+
+static void get_disk_deps(const char *disk_dir, GuestDiskInfo *disk)
+{
+    g_autofree char *deps_dir = NULL;
+    const gchar *dep;
+    GDir *dp_deps = NULL;
+
+    /* List dependent disks */
+    deps_dir = g_strdup_printf("%s/slaves", disk_dir);
+    g_debug("  listing entries in: %s", deps_dir);
+    dp_deps = g_dir_open(deps_dir, 0, NULL);
+    if (dp_deps == NULL) {
+        g_debug("failed to list entries in %s", deps_dir);
+        return;
+    }
+    disk->has_dependencies = true;
+    while ((dep = g_dir_read_name(dp_deps)) != NULL) {
+        g_autofree char *dep_dir = NULL;
+        strList *dep_item = NULL;
+        char *dev_name;
+
+        /* Add dependent disks */
+        dep_dir = g_strdup_printf("%s/%s", deps_dir, dep);
+        dev_name = get_device_for_syspath(dep_dir);
+        if (dev_name != NULL) {
+            g_debug("  adding dependent device: %s", dev_name);
+            dep_item = g_new0(strList, 1);
+            dep_item->value = dev_name;
+            dep_item->next = disk->dependencies;
+            disk->dependencies = dep_item;
+        }
+    }
+    g_dir_close(dp_deps);
+}
+
+/*
+ * Detect partitions subdirectory, name is "<disk_name><number>" or
+ * "<disk_name>p<number>"
+ *
+ * @disk_name -- last component of /sys path (e.g. sda)
+ * @disk_dir -- sys path of the disk (e.g. /sys/block/sda)
+ * @disk_dev -- device node of the disk (e.g. /dev/sda)
+ */
+static GuestDiskInfoList *get_disk_partitions(
+    GuestDiskInfoList *list,
+    const char *disk_name, const char *disk_dir,
+    const char *disk_dev)
+{
+    GuestDiskInfoList *item, *ret = list;
+    struct dirent *de_disk;
+    DIR *dp_disk = NULL;
+    size_t len = strlen(disk_name);
+
+    dp_disk = opendir(disk_dir);
+    while ((de_disk = readdir(dp_disk)) != NULL) {
+        g_autofree char *partition_dir = NULL;
+        char *dev_name;
+        GuestDiskInfo *partition;
+
+        if (!(de_disk->d_type & DT_DIR)) {
+            continue;
+        }
+
+        if (!(strncmp(disk_name, de_disk->d_name, len) == 0 &&
+            ((*(de_disk->d_name + len) == 'p' &&
+            isdigit(*(de_disk->d_name + len + 1))) ||
+                isdigit(*(de_disk->d_name + len))))) {
+            continue;
+        }
+
+        partition_dir = g_strdup_printf("%s/%s",
+            disk_dir, de_disk->d_name);
+        dev_name = get_device_for_syspath(partition_dir);
+        if (dev_name == NULL) {
+            g_debug("Failed to get device name for syspath: %s",
+                disk_dir);
+            continue;
+        }
+        partition = g_new0(GuestDiskInfo, 1);
+        partition->name = dev_name;
+        partition->partition = true;
+        /* Add parent disk as dependent for easier tracking of hierarchy */
+        partition->dependencies = g_new0(strList, 1);
+        partition->dependencies->value = g_strdup(disk_dev);
+        partition->has_dependencies = true;
+
+        item = g_new0(GuestDiskInfoList, 1);
+        item->value = partition;
+        item->next = ret;
+        ret = item;
+
+    }
+    closedir(dp_disk);
+
+    return ret;
+}
+
+GuestDiskInfoList *qmp_guest_get_disks(Error **errp)
+{
+    GuestDiskInfoList *item, *ret = NULL;
+    GuestDiskInfo *disk;
+    DIR *dp = NULL;
+    struct dirent *de = NULL;
+
+    g_debug("listing /sys/block directory");
+    dp = opendir("/sys/block");
+    if (dp == NULL) {
+        error_setg_errno(errp, errno, "Can't open directory \"/sys/block\"");
+        return NULL;
+    }
+    while ((de = readdir(dp)) != NULL) {
+        g_autofree char *disk_dir = NULL, *line = NULL,
+            *size_path = NULL;
+        char *dev_name;
+        Error *local_err = NULL;
+        if (de->d_type != DT_LNK) {
+            g_debug("  skipping entry: %s", de->d_name);
+            continue;
+        }
+
+        /* Check size and skip zero-sized disks */
+        g_debug("  checking disk size");
+        size_path = g_strdup_printf("/sys/block/%s/size", de->d_name);
+        if (!g_file_get_contents(size_path, &line, NULL, NULL)) {
+            g_debug("  failed to read disk size");
+            continue;
+        }
+        if (g_strcmp0(line, "0\n") == 0) {
+            g_debug("  skipping zero-sized disk");
+            continue;
+        }
+
+        g_debug("  adding %s", de->d_name);
+        disk_dir = g_strdup_printf("/sys/block/%s", de->d_name);
+        dev_name = get_device_for_syspath(disk_dir);
+        if (dev_name == NULL) {
+            g_debug("Failed to get device name for syspath: %s",
+                disk_dir);
+            continue;
+        }
+        disk = g_new0(GuestDiskInfo, 1);
+        disk->name = dev_name;
+        disk->partition = false;
+        disk->alias = get_alias_for_syspath(disk_dir);
+        disk->has_alias = (disk->alias != NULL);
+        item = g_new0(GuestDiskInfoList, 1);
+        item->value = disk;
+        item->next = ret;
+        ret = item;
+
+        /* Get address for non-virtual devices */
+        bool is_virtual = is_disk_virtual(disk_dir, &local_err);
+        if (local_err != NULL) {
+            g_debug("  failed to check disk path, ignoring error: %s",
+                error_get_pretty(local_err));
+            error_free(local_err);
+            local_err = NULL;
+            /* Don't try to get the address */
+            is_virtual = true;
+        }
+        if (!is_virtual) {
+            disk->address = get_disk_address(disk_dir, &local_err);
+            if (local_err != NULL) {
+                g_debug("  failed to get device info, ignoring error: %s",
+                    error_get_pretty(local_err));
+                error_free(local_err);
+                local_err = NULL;
+            } else if (disk->address != NULL) {
+                disk->has_address = true;
+            }
+        }
+
+        get_disk_deps(disk_dir, disk);
+        ret = get_disk_partitions(ret, de->d_name, disk_dir, dev_name);
+    }
+
+    closedir(dp);
+
+    return ret;
+}
+
+#else
+
+GuestDiskInfoList *qmp_guest_get_disks(Error **errp)
+{
+    error_setg(errp, QERR_UNSUPPORTED);
+    return NULL;
+}
+
+#endif
 
 /* Return a list of the disk device(s)' info which @mount lies on */
 static GuestFilesystemInfo *build_guest_fsinfo(struct FsMount *mount,
@@ -1306,7 +1649,7 @@ int64_t qmp_guest_fsfreeze_freeze_list(bool has_mountpoints,
             }
         }
 
-        fd = qemu_open(mount->dirname, O_RDONLY);
+        fd = qemu_open_old(mount->dirname, O_RDONLY);
         if (fd == -1) {
             error_setg_errno(errp, errno, "failed to open %s", mount->dirname);
             goto error;
@@ -1373,7 +1716,7 @@ int64_t qmp_guest_fsfreeze_thaw(Error **errp)
 
     QTAILQ_FOREACH(mount, &mounts, next) {
         logged = false;
-        fd = qemu_open(mount->dirname, O_RDONLY);
+        fd = qemu_open_old(mount->dirname, O_RDONLY);
         if (fd == -1) {
             continue;
         }
@@ -1463,7 +1806,7 @@ qmp_guest_fstrim(bool has_minimum, int64_t minimum, Error **errp)
         list->next = response->paths;
         response->paths = list;
 
-        fd = qemu_open(mount->dirname, O_RDONLY);
+        fd = qemu_open_old(mount->dirname, O_RDONLY);
         if (fd == -1) {
             result->error = g_strdup_printf("failed to open: %s",
                                             strerror(errno));
@@ -1554,13 +1897,12 @@ static int run_process_child(const char *command[], Error **errp)
 
 static bool systemd_supports_mode(SuspendMode mode, Error **errp)
 {
-    Error *local_err = NULL;
     const char *systemctl_args[3] = {"systemd-hibernate", "systemd-suspend",
                                      "systemd-hybrid-sleep"};
     const char *cmd[4] = {"systemctl", "status", systemctl_args[mode], NULL};
     int status;
 
-    status = run_process_child(cmd, &local_err);
+    status = run_process_child(cmd, errp);
 
     /*
      * systemctl status uses LSB return codes so we can expect
@@ -1574,7 +1916,6 @@ static bool systemd_supports_mode(SuspendMode mode, Error **errp)
         return true;
     }
 
-    error_propagate(errp, local_err);
     return false;
 }
 
@@ -1760,6 +2101,7 @@ static void guest_suspend(SuspendMode mode, Error **errp)
     }
 
     error_free(local_err);
+    local_err = NULL;
 
     if (pmutils_supports_mode(mode, &local_err)) {
         mode_supported = true;
@@ -1771,6 +2113,7 @@ static void guest_suspend(SuspendMode mode, Error **errp)
     }
 
     error_free(local_err);
+    local_err = NULL;
 
     if (linux_sys_state_supports_mode(mode, &local_err)) {
         mode_supported = true;
@@ -1778,6 +2121,7 @@ static void guest_suspend(SuspendMode mode, Error **errp)
     }
 
     if (!mode_supported) {
+        error_free(local_err);
         error_setg(errp,
                    "the requested suspend mode is not supported by the guest");
     } else {
@@ -2420,6 +2764,7 @@ static void transfer_memory_block(GuestMemoryBlock *mem_blk, bool sys2memblk,
             if (sys2memblk) {
                 error_propagate(errp, local_err);
             } else {
+                error_free(local_err);
                 result->response =
                     GUEST_MEMORY_BLOCK_RESPONSE_TYPE_OPERATION_FAILED;
             }
@@ -2517,6 +2862,9 @@ GuestMemoryBlockList *qmp_guest_get_memory_blocks(Error **errp)
         mem_blk->phys_index = strtoul(&de->d_name[6], NULL, 10);
         mem_blk->has_can_offline = true; /* lolspeak ftw */
         transfer_memory_block(mem_blk, true, NULL, &local_err);
+        if (local_err) {
+            break;
+        }
 
         entry = g_malloc0(sizeof *entry);
         entry->value = mem_blk;
@@ -2709,6 +3057,13 @@ int64_t qmp_guest_fsfreeze_thaw(Error **errp)
 
     return 0;
 }
+
+GuestDiskInfoList *qmp_guest_get_disks(Error **errp)
+{
+    error_setg(errp, QERR_UNSUPPORTED);
+    return NULL;
+}
+
 #endif /* CONFIG_FSFREEZE */
 
 #if !defined(CONFIG_FSTRIM)
@@ -2730,7 +3085,8 @@ GList *ga_command_blacklist_init(GList *blacklist)
             "guest-suspend-hybrid", "guest-network-get-interfaces",
             "guest-get-vcpus", "guest-set-vcpus",
             "guest-get-memory-blocks", "guest-set-memory-blocks",
-            "guest-get-memory-block-size", NULL};
+            "guest-get-memory-block-size", "guest-get-memory-block-info",
+            NULL};
         char **p = (char **)list;
 
         while (*p) {
@@ -2744,7 +3100,8 @@ GList *ga_command_blacklist_init(GList *blacklist)
         const char *list[] = {
             "guest-get-fsinfo", "guest-fsfreeze-status",
             "guest-fsfreeze-freeze", "guest-fsfreeze-freeze-list",
-            "guest-fsfreeze-thaw", "guest-get-fsinfo", NULL};
+            "guest-fsfreeze-thaw", "guest-get-fsinfo",
+            "guest-get-disks", NULL};
         char **p = (char **)list;
 
         while (*p) {
@@ -2756,6 +3113,8 @@ GList *ga_command_blacklist_init(GList *blacklist)
 #if !defined(CONFIG_FSTRIM)
     blacklist = g_list_append(blacklist, g_strdup("guest-fstrim"));
 #endif
+
+    blacklist = g_list_append(blacklist, g_strdup("guest-get-devices"));
 
     return blacklist;
 }
@@ -2780,7 +3139,7 @@ static double ga_get_login_time(struct utmpx *user_info)
     return seconds + useconds;
 }
 
-GuestUserList *qmp_guest_get_users(Error **err)
+GuestUserList *qmp_guest_get_users(Error **errp)
 {
     GHashTable *cache = NULL;
     GuestUserList *head = NULL, *cur_item = NULL;
@@ -2976,4 +3335,11 @@ GuestOSInfo *qmp_guest_get_osinfo(Error **errp)
     }
 
     return info;
+}
+
+GuestDeviceInfoList *qmp_guest_get_devices(Error **errp)
+{
+    error_setg(errp, QERR_UNSUPPORTED);
+
+    return NULL;
 }

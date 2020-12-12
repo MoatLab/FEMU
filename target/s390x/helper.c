@@ -25,9 +25,10 @@
 #include "qemu/timer.h"
 #include "qemu/qemu-print.h"
 #include "hw/s390x/ioinst.h"
+#include "hw/s390x/pv.h"
 #include "sysemu/hw_accel.h"
+#include "sysemu/runstate.h"
 #ifndef CONFIG_USER_ONLY
-#include "sysemu/sysemu.h"
 #include "sysemu/tcg.h"
 #endif
 
@@ -41,9 +42,6 @@ void s390x_cpu_timer(void *opaque)
 {
     cpu_inject_cpu_timer((S390CPU *) opaque);
 }
-#endif
-
-#ifndef CONFIG_USER_ONLY
 
 hwaddr s390_cpu_get_phys_page_debug(CPUState *cs, vaddr vaddr)
 {
@@ -52,13 +50,23 @@ hwaddr s390_cpu_get_phys_page_debug(CPUState *cs, vaddr vaddr)
     target_ulong raddr;
     int prot;
     uint64_t asc = env->psw.mask & PSW_MASK_ASC;
+    uint64_t tec;
 
     /* 31-Bit mode */
     if (!(env->psw.mask & PSW_MASK_64)) {
         vaddr &= 0x7fffffff;
     }
 
-    if (mmu_translate(env, vaddr, MMU_INST_FETCH, asc, &raddr, &prot, false)) {
+    /* We want to read the code (e.g., see what we are single-stepping).*/
+    if (asc != PSW_ASC_HOME) {
+        asc = PSW_ASC_PRIMARY;
+    }
+
+    /*
+     * We want to read code even if IEP is active. Use MMU_DATA_LOAD instead
+     * of MMU_INST_FETCH.
+     */
+    if (mmu_translate(env, vaddr, MMU_DATA_LOAD, asc, &raddr, &prot, &tec)) {
         return -1;
     }
     return raddr;
@@ -79,7 +87,7 @@ hwaddr s390_cpu_get_phys_addr_debug(CPUState *cs, vaddr vaddr)
 static inline bool is_special_wait_psw(uint64_t psw_addr)
 {
     /* signal quiesce */
-    return psw_addr == 0xfffUL;
+    return (psw_addr & 0xfffUL) == 0xfffUL;
 }
 
 void s390_handle_wait(S390CPU *cpu)
@@ -87,14 +95,12 @@ void s390_handle_wait(S390CPU *cpu)
     CPUState *cs = CPU(cpu);
 
     if (s390_cpu_halt(cpu) == 0) {
-#ifndef CONFIG_USER_ONLY
         if (is_special_wait_psw(cpu->env.psw.addr)) {
             qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
         } else {
             cpu->env.crash_reason = S390_CRASH_REASON_DISABLED_WAIT;
             qemu_system_guest_panicked(cpu_get_crash_info(cs));
         }
-#endif
     }
 }
 
@@ -141,7 +147,7 @@ LowCore *cpu_map_lowcore(CPUS390XState *env)
     LowCore *lowcore;
     hwaddr len = sizeof(LowCore);
 
-    lowcore = cpu_physical_memory_map(env->psa, &len, 1);
+    lowcore = cpu_physical_memory_map(env->psa, &len, true);
 
     if (len < sizeof(LowCore)) {
         cpu_abort(env_cpu(env), "Could not map lowcore\n");
@@ -236,7 +242,12 @@ int s390_store_status(S390CPU *cpu, hwaddr addr, bool store_arch)
     hwaddr len = sizeof(*sa);
     int i;
 
-    sa = cpu_physical_memory_map(addr, &len, 1);
+    /* For PVMs storing will occur when this cpu enters SIE again */
+    if (s390_is_pv()) {
+        return 0;
+    }
+
+    sa = cpu_physical_memory_map(addr, &len, true);
     if (!sa) {
         return -EFAULT;
     }
@@ -288,7 +299,7 @@ int s390_store_adtl_status(S390CPU *cpu, hwaddr addr, hwaddr len)
     hwaddr save = len;
     int i;
 
-    sa = cpu_physical_memory_map(addr, &save, 1);
+    sa = cpu_physical_memory_map(addr, &save, true);
     if (!sa) {
         return -EFAULT;
     }
@@ -419,6 +430,8 @@ const char *cc_name(enum cc_op cc_op)
         [CC_OP_FLOGR]     = "CC_OP_FLOGR",
         [CC_OP_LCBB]      = "CC_OP_LCBB",
         [CC_OP_VC]        = "CC_OP_VC",
+        [CC_OP_MULS_32]   = "CC_OP_MULS_32",
+        [CC_OP_MULS_64]   = "CC_OP_MULS_64",
     };
 
     return cc_names[cc_op];

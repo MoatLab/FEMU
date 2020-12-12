@@ -19,7 +19,9 @@
 #ifndef HW_SIFIVE_E_H
 #define HW_SIFIVE_E_H
 
-#include "hw/riscv/sifive_gpio.h"
+#include "hw/riscv/riscv_hart.h"
+#include "hw/riscv/sifive_cpu.h"
+#include "hw/gpio/sifive_gpio.h"
 
 #define TYPE_RISCV_E_SOC "riscv.sifive.e.soc"
 #define RISCV_E_SOC(obj) \
@@ -27,7 +29,7 @@
 
 typedef struct SiFiveESoCState {
     /*< private >*/
-    SysBusDevice parent_obj;
+    DeviceState parent_obj;
 
     /*< public >*/
     RISCVHartArrayState cpus;
@@ -43,28 +45,33 @@ typedef struct SiFiveEState {
 
     /*< public >*/
     SiFiveESoCState soc;
+    bool revb;
 } SiFiveEState;
 
+#define TYPE_RISCV_E_MACHINE MACHINE_TYPE_NAME("sifive_e")
+#define RISCV_E_MACHINE(obj) \
+    OBJECT_CHECK(SiFiveEState, (obj), TYPE_RISCV_E_MACHINE)
+
 enum {
-    SIFIVE_E_DEBUG,
-    SIFIVE_E_MROM,
-    SIFIVE_E_OTP,
-    SIFIVE_E_CLINT,
-    SIFIVE_E_PLIC,
-    SIFIVE_E_AON,
-    SIFIVE_E_PRCI,
-    SIFIVE_E_OTP_CTRL,
-    SIFIVE_E_GPIO0,
-    SIFIVE_E_UART0,
-    SIFIVE_E_QSPI0,
-    SIFIVE_E_PWM0,
-    SIFIVE_E_UART1,
-    SIFIVE_E_QSPI1,
-    SIFIVE_E_PWM1,
-    SIFIVE_E_QSPI2,
-    SIFIVE_E_PWM2,
-    SIFIVE_E_XIP,
-    SIFIVE_E_DTIM
+    SIFIVE_E_DEV_DEBUG,
+    SIFIVE_E_DEV_MROM,
+    SIFIVE_E_DEV_OTP,
+    SIFIVE_E_DEV_CLINT,
+    SIFIVE_E_DEV_PLIC,
+    SIFIVE_E_DEV_AON,
+    SIFIVE_E_DEV_PRCI,
+    SIFIVE_E_DEV_OTP_CTRL,
+    SIFIVE_E_DEV_GPIO0,
+    SIFIVE_E_DEV_UART0,
+    SIFIVE_E_DEV_QSPI0,
+    SIFIVE_E_DEV_PWM0,
+    SIFIVE_E_DEV_UART1,
+    SIFIVE_E_DEV_QSPI1,
+    SIFIVE_E_DEV_PWM1,
+    SIFIVE_E_DEV_QSPI2,
+    SIFIVE_E_DEV_PWM2,
+    SIFIVE_E_DEV_XIP,
+    SIFIVE_E_DEV_DTIM
 };
 
 enum {
@@ -82,11 +89,5 @@ enum {
 #define SIFIVE_E_PLIC_ENABLE_STRIDE 0x80
 #define SIFIVE_E_PLIC_CONTEXT_BASE 0x200000
 #define SIFIVE_E_PLIC_CONTEXT_STRIDE 0x1000
-
-#if defined(TARGET_RISCV32)
-#define SIFIVE_E_CPU TYPE_RISCV_CPU_SIFIVE_E31
-#elif defined(TARGET_RISCV64)
-#define SIFIVE_E_CPU TYPE_RISCV_CPU_SIFIVE_E51
-#endif
 
 #endif

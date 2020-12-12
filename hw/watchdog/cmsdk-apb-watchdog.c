@@ -24,12 +24,14 @@
 #include "qemu/log.h"
 #include "trace.h"
 #include "qapi/error.h"
-#include "qemu/main-loop.h"
 #include "qemu/module.h"
 #include "sysemu/watchdog.h"
 #include "hw/sysbus.h"
+#include "hw/irq.h"
+#include "hw/qdev-properties.h"
 #include "hw/registerfields.h"
 #include "hw/watchdog/cmsdk-apb-watchdog.h"
+#include "migration/vmstate.h"
 
 REG32(WDOGLOAD, 0x0)
 REG32(WDOGVALUE, 0x4)
@@ -197,8 +199,10 @@ static void cmsdk_apb_watchdog_write(void *opaque, hwaddr offset,
          * Reset the load value and the current count, and make sure
          * we're counting.
          */
+        ptimer_transaction_begin(s->timer);
         ptimer_set_limit(s->timer, value, 1);
         ptimer_run(s->timer, 0);
+        ptimer_transaction_commit(s->timer);
         break;
     case A_WDOGCONTROL:
         if (s->is_luminary && 0 != (R_WDOGCONTROL_INTEN_MASK & s->control)) {
@@ -214,11 +218,14 @@ static void cmsdk_apb_watchdog_write(void *opaque, hwaddr offset,
         break;
     case A_WDOGINTCLR:
         s->intstatus = 0;
+        ptimer_transaction_begin(s->timer);
         ptimer_set_count(s->timer, ptimer_get_limit(s->timer));
+        ptimer_transaction_commit(s->timer);
         cmsdk_apb_watchdog_update(s);
         break;
     case A_WDOGLOCK:
         s->lock = (value != WDOG_UNLOCK_VALUE);
+        trace_cmsdk_apb_watchdog_lock(s->lock);
         break;
     case A_WDOGITCR:
         if (s->is_luminary) {
@@ -296,8 +303,10 @@ static void cmsdk_apb_watchdog_reset(DeviceState *dev)
     s->itop = 0;
     s->resetstatus = 0;
     /* Set the limit and the count */
+    ptimer_transaction_begin(s->timer);
     ptimer_set_limit(s->timer, 0xffffffff, 1);
     ptimer_run(s->timer, 0);
+    ptimer_transaction_commit(s->timer);
 }
 
 static void cmsdk_apb_watchdog_init(Object *obj)
@@ -317,7 +326,6 @@ static void cmsdk_apb_watchdog_init(Object *obj)
 static void cmsdk_apb_watchdog_realize(DeviceState *dev, Error **errp)
 {
     CMSDKAPBWatchdog *s = CMSDK_APB_WATCHDOG(dev);
-    QEMUBH *bh;
 
     if (s->wdogclk_frq == 0) {
         error_setg(errp,
@@ -325,14 +333,15 @@ static void cmsdk_apb_watchdog_realize(DeviceState *dev, Error **errp)
         return;
     }
 
-    bh = qemu_bh_new(cmsdk_apb_watchdog_tick, s);
-    s->timer = ptimer_init(bh,
+    s->timer = ptimer_init(cmsdk_apb_watchdog_tick, s,
                            PTIMER_POLICY_WRAP_AFTER_ONE_PERIOD |
                            PTIMER_POLICY_TRIGGER_ONLY_ON_DECREMENT |
                            PTIMER_POLICY_NO_IMMEDIATE_RELOAD |
                            PTIMER_POLICY_NO_COUNTER_ROUND_DOWN);
 
+    ptimer_transaction_begin(s->timer);
     ptimer_set_freq(s->timer, s->wdogclk_frq);
+    ptimer_transaction_commit(s->timer);
 }
 
 static const VMStateDescription cmsdk_apb_watchdog_vmstate = {
@@ -363,7 +372,7 @@ static void cmsdk_apb_watchdog_class_init(ObjectClass *klass, void *data)
     dc->realize = cmsdk_apb_watchdog_realize;
     dc->vmsd = &cmsdk_apb_watchdog_vmstate;
     dc->reset = cmsdk_apb_watchdog_reset;
-    dc->props = cmsdk_apb_watchdog_properties;
+    device_class_set_props(dc, cmsdk_apb_watchdog_properties);
 }
 
 static const TypeInfo cmsdk_apb_watchdog_info = {

@@ -5,10 +5,6 @@
 
 #define TYPE_IRQ "irq"
 
-typedef struct IRQState *qemu_irq;
-
-typedef void (*qemu_irq_handler)(void *opaque, int n, int level);
-
 void qemu_set_irq(qemu_irq irq, int level);
 
 static inline void qemu_irq_raise(qemu_irq irq)
@@ -55,13 +51,26 @@ qemu_irq qemu_irq_invert(qemu_irq irq);
  */
 qemu_irq qemu_irq_split(qemu_irq irq1, qemu_irq irq2);
 
-/* Returns a new IRQ set which connects 1:1 to another IRQ set, which
- * may be set later.
- */
-qemu_irq *qemu_irq_proxy(qemu_irq **target, int n);
-
 /* For internal use in qtest.  Similar to qemu_irq_split, but operating
    on an existing vector of qemu_irq.  */
 void qemu_irq_intercept_in(qemu_irq *gpio_in, qemu_irq_handler handler, int n);
+
+/**
+ * qemu_irq_is_connected: Return true if IRQ line is wired up
+ *
+ * If a qemu_irq has a device on the other (receiving) end of it,
+ * return true; otherwise return false.
+ *
+ * Usually device models don't need to care whether the machine model
+ * has wired up their outbound qemu_irq lines, because functions like
+ * qemu_set_irq() silently do nothing if there is nothing on the other
+ * end of the line. However occasionally a device model will want to
+ * provide default behaviour if its output is left floating, and
+ * it can use this function to identify when that is the case.
+ */
+static inline bool qemu_irq_is_connected(qemu_irq irq)
+{
+    return irq != NULL;
+}
 
 #endif

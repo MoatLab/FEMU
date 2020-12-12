@@ -104,15 +104,10 @@ The -device argument differs in detail for each type of drive:
 
 * if=floppy
 
-  -global isa-fdc.driveA=DRIVE-ID
-  -global isa-fdc.driveB=DRIVE-ID
+  -device floppy,unit=UNIT,drive=DRIVE-ID
 
-  This is -global instead of -device, because the floppy controller is
-  created automatically, and we want to configure that one, not create
-  a second one (which isn't possible anyway).
-
-  Without any -global isa-fdc,... you get an empty driveA and no
-  driveB.  You can use -nodefaults to suppress the default driveA, see
+  Without any -device floppy,... you get an empty unit 0 and no unit
+  1.  You can use -nodefaults to suppress the default unit 0, see
   "Default Devices".
 
 * if=virtio
@@ -130,12 +125,14 @@ The -device argument differs in detail for each type of drive:
 
 * if=pflash, if=mtd, if=sd, if=xen are not yet available with -device
 
-For USB devices, the old way is actually different:
+For USB devices, the old way was actually different:
 
     -usbdevice disk:format=FMT:FILENAME
 
-Provides much less control than -drive's OPTS...  The new way fixes
-that:
+"Was" because "disk:" is gone since v2.12.0.
+
+The old way provided much less control than -drive's OPTS...  The new
+way fixes that:
 
     -device usb-storage,drive=DRIVE-ID,removable=RMB
 
@@ -182,13 +179,14 @@ The appropriate DEVNAME depends on the machine type.  For type "pc":
 
   This lets you control I/O ports and IRQs.
 
-* -usbdevice serial::chardev becomes -device usb-serial,chardev=dev.
-
 * -usbdevice braille doesn't support LEGACY-CHARDEV syntax.  It always
   uses "braille".  With -device, this useful default is gone, so you
   have to use something like
 
   -device usb-braille,chardev=braille -chardev braille,id=braille
+
+* -usbdevice serial::chardev is gone since v2.12.0.  It became
+  -device usb-serial,chardev=dev.
 
 LEGACY-CHARDEV translates to -chardev HOST-OPTS... as follows:
 
@@ -243,9 +241,11 @@ The old way to define the guest part looks like this:
 
     -net nic,netdev=NET-ID,macaddr=MACADDR,model=MODEL,name=ID,addr=STR,vectors=V
 
-Except for USB it looks like this:
+Except for USB it looked like this:
 
     -usbdevice net:netdev=NET-ID,macaddr=MACADDR,name=ID
+
+"Looked" because "net:" is gone since v2.12.0.
 
 The new way is -device:
 
@@ -341,12 +341,15 @@ The new way is -device DEVNAME,DEV-OPTS...  Details depend on DRIVER:
 * mouse           -device usb-mouse
 * tablet          -device usb-tablet
 * wacom-tablet    -device usb-wacom-tablet
+* u2f             -device u2f-{emulated,passthru}
+* braille         See "Character Devices"
+
+Until v2.12.0, we additionally had
+
 * host:...        See "Host Device Assignment"
 * disk:...        See "Block Devices"
 * serial:...      See "Character Devices"
-* braille         See "Character Devices"
 * net:...         See "Network Devices"
-* bt:...          not yet available with -device
 
 === Watchdog Devices ===
 
@@ -363,17 +366,18 @@ and host USB devices.  PCI devices can only be assigned with -device:
 
     -device vfio-pci,host=ADDR,id=ID
 
-The old way to assign a host USB device is
+The old way to assign a USB host device
 
     -usbdevice host:auto:BUS.ADDR:VID:PRID
 
-where any of BUS, ADDR, VID, PRID can be the wildcard *.
+was removed in v2.12.0.  Any of BUS, ADDR, VID, PRID could be the
+wildcard *.
 
 The new way is
 
     -device usb-host,hostbus=BUS,hostaddr=ADDR,vendorid=VID,productid=PRID
 
-Omitted options match anything, just like the old way's wildcard.
+Omitted options match anything.
 
 === Default Devices ===
 
@@ -385,12 +389,12 @@ some DEVNAMEs:
 
     default device      suppressing DEVNAMEs
     CD-ROM              ide-cd, ide-drive, ide-hd, scsi-cd, scsi-hd
-    isa-fdc's driveA    floppy, isa-fdc
+    floppy              floppy, isa-fdc
     parallel            isa-parallel
     serial              isa-serial
     VGA                 VGA, cirrus-vga, isa-vga, isa-cirrus-vga,
-                        vmware-svga, qxl-vga, virtio-vga
-    virtioconsole       virtio-serial-pci, virtio-serial
+                        vmware-svga, qxl-vga, virtio-vga, ati-vga,
+                        vhost-user-vga
 
 The default NIC is connected to a default part created along with it.
 It is *not* suppressed by configuring a NIC with -device (you may call

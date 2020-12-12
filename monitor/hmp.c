@@ -35,7 +35,7 @@
 #include "qemu/option.h"
 #include "qemu/units.h"
 #include "sysemu/block-backend.h"
-#include "sysemu/sysemu.h"
+#include "sysemu/runstate.h"
 #include "trace.h"
 
 static void monitor_command_cb(void *opaque, const char *cmdline,
@@ -384,7 +384,7 @@ static int64_t expr_unary(Monitor *mon)
                 pch++;
             }
             *q = 0;
-            ret = get_monitor_def(&reg, buf);
+            ret = get_monitor_def(mon, &reg, buf);
             if (ret < 0) {
                 expr_error(mon, "unknown register");
             }
@@ -1056,6 +1056,21 @@ fail:
     return NULL;
 }
 
+typedef struct HandleHmpCommandCo {
+    Monitor *mon;
+    const HMPCommand *cmd;
+    QDict *qdict;
+    bool done;
+} HandleHmpCommandCo;
+
+static void handle_hmp_command_co(void *opaque)
+{
+    HandleHmpCommandCo *data = opaque;
+    data->cmd->cmd(data->mon, data->qdict);
+    monitor_set_cur(qemu_coroutine_self(), NULL);
+    data->done = true;
+}
+
 void handle_hmp_command(MonitorHMP *mon, const char *cmdline)
 {
     QDict *qdict;
@@ -1079,7 +1094,24 @@ void handle_hmp_command(MonitorHMP *mon, const char *cmdline)
         return;
     }
 
-    cmd->cmd(&mon->common, qdict);
+    if (!cmd->coroutine) {
+        /* old_mon is non-NULL when called from qmp_human_monitor_command() */
+        Monitor *old_mon = monitor_set_cur(qemu_coroutine_self(), &mon->common);
+        cmd->cmd(&mon->common, qdict);
+        monitor_set_cur(qemu_coroutine_self(), old_mon);
+    } else {
+        HandleHmpCommandCo data = {
+            .mon = &mon->common,
+            .cmd = cmd,
+            .qdict = qdict,
+            .done = false,
+        };
+        Coroutine *co = qemu_coroutine_create(handle_hmp_command_co, &data);
+        monitor_set_cur(co, &mon->common);
+        aio_co_enter(qemu_get_aio_context(), co);
+        AIO_WAIT_WHILE(qemu_get_aio_context(), !data.done);
+    }
+
     qobject_unref(qdict);
 }
 
@@ -1300,12 +1332,8 @@ cleanup:
 
 static void monitor_read(void *opaque, const uint8_t *buf, int size)
 {
-    MonitorHMP *mon;
-    Monitor *old_mon = cur_mon;
+    MonitorHMP *mon = container_of(opaque, MonitorHMP, common);
     int i;
-
-    cur_mon = opaque;
-    mon = container_of(cur_mon, MonitorHMP, common);
 
     if (mon->rs) {
         for (i = 0; i < size; i++) {
@@ -1313,16 +1341,14 @@ static void monitor_read(void *opaque, const uint8_t *buf, int size)
         }
     } else {
         if (size == 0 || buf[size - 1] != 0) {
-            monitor_printf(cur_mon, "corrupted command\n");
+            monitor_printf(&mon->common, "corrupted command\n");
         } else {
             handle_hmp_command(mon, (char *)buf);
         }
     }
-
-    cur_mon = old_mon;
 }
 
-static void monitor_event(void *opaque, int event)
+static void monitor_event(void *opaque, QEMUChrEvent event)
 {
     Monitor *mon = opaque;
     MonitorHMP *hmp_mon = container_of(mon, MonitorHMP, common);
@@ -1337,19 +1363,19 @@ static void monitor_event(void *opaque, int event)
             monitor_resume(mon);
             monitor_flush(mon);
         } else {
-            atomic_mb_set(&mon->suspend_cnt, 0);
+            qatomic_mb_set(&mon->suspend_cnt, 0);
         }
         break;
 
     case CHR_EVENT_MUX_OUT:
         if (mon->reset_seen) {
-            if (atomic_mb_read(&mon->suspend_cnt) == 0) {
+            if (qatomic_mb_read(&mon->suspend_cnt) == 0) {
                 monitor_printf(mon, "\n");
             }
             monitor_flush(mon);
             monitor_suspend(mon);
         } else {
-            atomic_inc(&mon->suspend_cnt);
+            qatomic_inc(&mon->suspend_cnt);
         }
         qemu_mutex_lock(&mon->mon_lock);
         mon->mux_out = 1;
@@ -1370,6 +1396,10 @@ static void monitor_event(void *opaque, int event)
     case CHR_EVENT_CLOSED:
         mon_refcount--;
         monitor_fdsets_cleanup();
+        break;
+
+    case CHR_EVENT_BREAK:
+        /* Ignored */
         break;
     }
 }
@@ -1395,12 +1425,16 @@ static void monitor_readline_flush(void *opaque)
     monitor_flush(&mon->common);
 }
 
-void monitor_init_hmp(Chardev *chr, bool use_readline)
+void monitor_init_hmp(Chardev *chr, bool use_readline, Error **errp)
 {
     MonitorHMP *mon = g_new0(MonitorHMP, 1);
 
+    if (!qemu_chr_fe_init(&mon->common.chr, chr, errp)) {
+        g_free(mon);
+        return;
+    }
+
     monitor_data_init(&mon->common, false, false, false);
-    qemu_chr_fe_init(&mon->common.chr, chr, &error_abort);
 
     mon->use_readline = use_readline;
     if (mon->use_readline) {

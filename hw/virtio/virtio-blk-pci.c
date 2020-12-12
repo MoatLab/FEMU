@@ -17,10 +17,12 @@
 
 #include "qemu/osdep.h"
 
+#include "hw/qdev-properties.h"
 #include "hw/virtio/virtio-blk.h"
 #include "virtio-pci.h"
 #include "qapi/error.h"
 #include "qemu/module.h"
+#include "qom/object.h"
 
 typedef struct VirtIOBlkPCI VirtIOBlkPCI;
 
@@ -28,8 +30,8 @@ typedef struct VirtIOBlkPCI VirtIOBlkPCI;
  * virtio-blk-pci: This extends VirtioPCIProxy.
  */
 #define TYPE_VIRTIO_BLK_PCI "virtio-blk-pci-base"
-#define VIRTIO_BLK_PCI(obj) \
-        OBJECT_CHECK(VirtIOBlkPCI, (obj), TYPE_VIRTIO_BLK_PCI)
+DECLARE_INSTANCE_CHECKER(VirtIOBlkPCI, VIRTIO_BLK_PCI,
+                         TYPE_VIRTIO_BLK_PCI)
 
 struct VirtIOBlkPCI {
     VirtIOPCIProxy parent_obj;
@@ -49,13 +51,17 @@ static void virtio_blk_pci_realize(VirtIOPCIProxy *vpci_dev, Error **errp)
 {
     VirtIOBlkPCI *dev = VIRTIO_BLK_PCI(vpci_dev);
     DeviceState *vdev = DEVICE(&dev->vdev);
+    VirtIOBlkConf *conf = &dev->vdev.conf;
 
-    if (vpci_dev->nvectors == DEV_NVECTORS_UNSPECIFIED) {
-        vpci_dev->nvectors = dev->vdev.conf.num_queues + 1;
+    if (conf->num_queues == VIRTIO_BLK_AUTO_NUM_QUEUES) {
+        conf->num_queues = virtio_pci_optimal_num_queues(0);
     }
 
-    qdev_set_parent_bus(vdev, BUS(&vpci_dev->bus));
-    object_property_set_bool(OBJECT(vdev), true, "realized", errp);
+    if (vpci_dev->nvectors == DEV_NVECTORS_UNSPECIFIED) {
+        vpci_dev->nvectors = conf->num_queues + 1;
+    }
+
+    qdev_realize(vdev, BUS(&vpci_dev->bus), errp);
 }
 
 static void virtio_blk_pci_class_init(ObjectClass *klass, void *data)
@@ -65,7 +71,7 @@ static void virtio_blk_pci_class_init(ObjectClass *klass, void *data)
     PCIDeviceClass *pcidev_k = PCI_DEVICE_CLASS(klass);
 
     set_bit(DEVICE_CATEGORY_STORAGE, dc->categories);
-    dc->props = virtio_blk_pci_properties;
+    device_class_set_props(dc, virtio_blk_pci_properties);
     k->realize = virtio_blk_pci_realize;
     pcidev_k->vendor_id = PCI_VENDOR_ID_REDHAT_QUMRANET;
     pcidev_k->device_id = PCI_DEVICE_ID_VIRTIO_BLOCK;
@@ -80,7 +86,7 @@ static void virtio_blk_pci_instance_init(Object *obj)
     virtio_instance_init_common(obj, &dev->vdev, sizeof(dev->vdev),
                                 TYPE_VIRTIO_BLK);
     object_property_add_alias(obj, "bootindex", OBJECT(&dev->vdev),
-                              "bootindex", &error_abort);
+                              "bootindex");
 }
 
 static const VirtioPCIDeviceTypeInfo virtio_blk_pci_info = {

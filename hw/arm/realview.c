@@ -25,6 +25,9 @@
 #include "hw/char/pl011.h"
 #include "hw/cpu/a9mpcore.h"
 #include "hw/intc/realview_gic.h"
+#include "hw/irq.h"
+#include "hw/i2c/arm_sbcon_i2c.h"
+#include "hw/sd/sd.h"
 
 #define SMP_BOOT_ADDR 0xe0000000
 #define SMP_BOOTREG_ADDR 0x10000030
@@ -67,6 +70,7 @@ static void realview_init(MachineState *machine,
     qemu_irq mmc_irq[2];
     PCIBus *pci_bus = NULL;
     NICInfo *nd;
+    DriveInfo *dinfo;
     I2CBus *i2c;
     int n;
     unsigned int smp_cpus = machine->smp.cpus;
@@ -104,16 +108,16 @@ static void realview_init(MachineState *machine,
          * does not currently support EL3 so the CPU EL3 property is disabled
          * before realization.
          */
-        if (object_property_find(cpuobj, "has_el3", NULL)) {
-            object_property_set_bool(cpuobj, false, "has_el3", &error_fatal);
+        if (object_property_find(cpuobj, "has_el3")) {
+            object_property_set_bool(cpuobj, "has_el3", false, &error_fatal);
         }
 
         if (is_pb && is_mpcore) {
-            object_property_set_int(cpuobj, periphbase, "reset-cbar",
+            object_property_set_int(cpuobj, "reset-cbar", periphbase,
                                     &error_fatal);
         }
 
-        object_property_set_bool(cpuobj, true, "realized", &error_fatal);
+        qdev_realize(DEVICE(cpuobj), NULL, &error_fatal);
 
         cpu_irq[n] = qdev_get_gpio_in(DEVICE(cpuobj), ARM_CPU_IRQ);
     }
@@ -160,17 +164,17 @@ static void realview_init(MachineState *machine,
     }
 
     sys_id = is_pb ? 0x01780500 : 0xc1400400;
-    sysctl = qdev_create(NULL, "realview_sysctl");
+    sysctl = qdev_new("realview_sysctl");
     qdev_prop_set_uint32(sysctl, "sys_id", sys_id);
     qdev_prop_set_uint32(sysctl, "proc_id", proc_id);
-    qdev_init_nofail(sysctl);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(sysctl), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(sysctl), 0, 0x10000000);
 
     if (is_mpcore) {
-        dev = qdev_create(NULL, is_pb ? TYPE_A9MPCORE_PRIV : "realview_mpcore");
+        dev = qdev_new(is_pb ? TYPE_A9MPCORE_PRIV : "realview_mpcore");
         qdev_prop_set_uint32(dev, "num-cpu", smp_cpus);
-        qdev_init_nofail(dev);
         busdev = SYS_BUS_DEVICE(dev);
+        sysbus_realize_and_unref(busdev, &error_fatal);
         sysbus_mmio_map(busdev, 0, periphbase);
         for (n = 0; n < smp_cpus; n++) {
             sysbus_connect_irq(busdev, n, cpu_irq[n]);
@@ -187,9 +191,9 @@ static void realview_init(MachineState *machine,
         pic[n] = qdev_get_gpio_in(dev, n);
     }
 
-    pl041 = qdev_create(NULL, "pl041");
+    pl041 = qdev_new("pl041");
     qdev_prop_set_uint32(pl041, "nc_fifo_depth", 512);
-    qdev_init_nofail(pl041);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(pl041), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(pl041), 0, 0x10004000);
     sysbus_connect_irq(SYS_BUS_DEVICE(pl041), 0, pic[19]);
 
@@ -202,11 +206,11 @@ static void realview_init(MachineState *machine,
     pl011_create(0x1000c000, pic[15], serial_hd(3));
 
     /* DMA controller is optional, apparently.  */
-    dev = qdev_create(NULL, "pl081");
-    object_property_set_link(OBJECT(dev), OBJECT(sysmem), "downstream",
+    dev = qdev_new("pl081");
+    object_property_set_link(OBJECT(dev), "downstream", OBJECT(sysmem),
                              &error_fatal);
-    qdev_init_nofail(dev);
     busdev = SYS_BUS_DEVICE(dev);
+    sysbus_realize_and_unref(busdev, &error_fatal);
     sysbus_mmio_map(busdev, 0, 0x10030000);
     sysbus_connect_irq(busdev, 0, pic[24]);
 
@@ -232,15 +236,25 @@ static void realview_init(MachineState *machine,
     mmc_irq[1] = qemu_irq_split(
         qdev_get_gpio_in(sysctl, ARM_SYSCTL_GPIO_MMC_CARDIN),
         qemu_irq_invert(qdev_get_gpio_in(gpio2, 0)));
-    qdev_connect_gpio_out(dev, 0, mmc_irq[0]);
-    qdev_connect_gpio_out(dev, 1, mmc_irq[1]);
+    qdev_connect_gpio_out_named(dev, "card-read-only", 0, mmc_irq[0]);
+    qdev_connect_gpio_out_named(dev, "card-inserted", 0, mmc_irq[1]);
+    dinfo = drive_get_next(IF_SD);
+    if (dinfo) {
+        DeviceState *card;
+
+        card = qdev_new(TYPE_SD_CARD);
+        qdev_prop_set_drive_err(card, "drive", blk_by_legacy_dinfo(dinfo),
+                                &error_fatal);
+        qdev_realize_and_unref(card, qdev_get_child_bus(dev, "sd-bus"),
+                               &error_fatal);
+    }
 
     sysbus_create_simple("pl031", 0x10017000, pic[10]);
 
     if (!is_pb) {
-        dev = qdev_create(NULL, "realview_pci");
+        dev = qdev_new("realview_pci");
         busdev = SYS_BUS_DEVICE(dev);
-        qdev_init_nofail(dev);
+        sysbus_realize_and_unref(busdev, &error_fatal);
         sysbus_mmio_map(busdev, 0, 0x10019000); /* PCI controller registers */
         sysbus_mmio_map(busdev, 1, 0x60000000); /* PCI self-config */
         sysbus_mmio_map(busdev, 2, 0x61000000); /* PCI config */
@@ -281,9 +295,9 @@ static void realview_init(MachineState *machine,
         }
     }
 
-    dev = sysbus_create_simple("versatile_i2c", 0x10002000, NULL);
+    dev = sysbus_create_simple(TYPE_VERSATILE_I2C, 0x10002000, NULL);
     i2c = (I2CBus *)qdev_get_child_bus(dev, "i2c");
-    i2c_create_slave(i2c, "ds1338", 0x68);
+    i2c_slave_create_simple(i2c, "ds1338", 0x68);
 
     /* Memory map for RealView Emulation Baseboard:  */
     /* 0x10000000 System registers.  */
@@ -350,13 +364,10 @@ static void realview_init(MachineState *machine,
     memory_region_add_subregion(sysmem, SMP_BOOT_ADDR, ram_hack);
 
     realview_binfo.ram_size = ram_size;
-    realview_binfo.kernel_filename = machine->kernel_filename;
-    realview_binfo.kernel_cmdline = machine->kernel_cmdline;
-    realview_binfo.initrd_filename = machine->initrd_filename;
     realview_binfo.nb_cpus = smp_cpus;
     realview_binfo.board_id = realview_board_id[board_type];
     realview_binfo.loader_start = (board_type == BOARD_PB_A8 ? 0x70000000 : 0);
-    arm_load_kernel(ARM_CPU(first_cpu), &realview_binfo);
+    arm_load_kernel(ARM_CPU(first_cpu), machine, &realview_binfo);
 }
 
 static void realview_eb_init(MachineState *machine)

@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -22,14 +22,16 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
+#include "hw/irq.h"
 #include "hw/sysbus.h"
+#include "migration/vmstate.h"
 #include "trace.h"
 #include "qemu/timer.h"
 #include "hw/ptimer.h"
+#include "hw/qdev-properties.h"
 #include "qemu/error-report.h"
-#include "qemu/main-loop.h"
 #include "qemu/module.h"
+#include "qom/object.h"
 
 #define DEFAULT_FREQUENCY (50*1000000)
 
@@ -54,14 +56,13 @@ enum {
 };
 
 #define TYPE_LM32_TIMER "lm32-timer"
-#define LM32_TIMER(obj) OBJECT_CHECK(LM32TimerState, (obj), TYPE_LM32_TIMER)
+OBJECT_DECLARE_SIMPLE_TYPE(LM32TimerState, LM32_TIMER)
 
 struct LM32TimerState {
     SysBusDevice parent_obj;
 
     MemoryRegion iomem;
 
-    QEMUBH *bh;
     ptimer_state *ptimer;
 
     qemu_irq irq;
@@ -69,7 +70,6 @@ struct LM32TimerState {
 
     uint32_t regs[R_MAX];
 };
-typedef struct LM32TimerState LM32TimerState;
 
 static void timer_update_irq(LM32TimerState *s)
 {
@@ -117,6 +117,7 @@ static void timer_write(void *opaque, hwaddr addr,
         s->regs[R_SR] &= ~SR_TO;
         break;
     case R_CR:
+        ptimer_transaction_begin(s->ptimer);
         s->regs[R_CR] = value;
         if (s->regs[R_CR] & CR_START) {
             ptimer_run(s->ptimer, 1);
@@ -124,10 +125,13 @@ static void timer_write(void *opaque, hwaddr addr,
         if (s->regs[R_CR] & CR_STOP) {
             ptimer_stop(s->ptimer);
         }
+        ptimer_transaction_commit(s->ptimer);
         break;
     case R_PERIOD:
         s->regs[R_PERIOD] = value;
+        ptimer_transaction_begin(s->ptimer);
         ptimer_set_count(s->ptimer, value);
+        ptimer_transaction_commit(s->ptimer);
         break;
     case R_SNAPSHOT:
         error_report("lm32_timer: write access to read only register 0x"
@@ -174,7 +178,9 @@ static void timer_reset(DeviceState *d)
     for (i = 0; i < R_MAX; i++) {
         s->regs[i] = 0;
     }
+    ptimer_transaction_begin(s->ptimer);
     ptimer_stop(s->ptimer);
+    ptimer_transaction_commit(s->ptimer);
 }
 
 static void lm32_timer_init(Object *obj)
@@ -183,9 +189,6 @@ static void lm32_timer_init(Object *obj)
     SysBusDevice *dev = SYS_BUS_DEVICE(obj);
 
     sysbus_init_irq(dev, &s->irq);
-
-    s->bh = qemu_bh_new(timer_hit, s);
-    s->ptimer = ptimer_init(s->bh, PTIMER_POLICY_DEFAULT);
 
     memory_region_init_io(&s->iomem, obj, &timer_ops, s,
                           "timer", R_MAX * 4);
@@ -196,7 +199,11 @@ static void lm32_timer_realize(DeviceState *dev, Error **errp)
 {
     LM32TimerState *s = LM32_TIMER(dev);
 
+    s->ptimer = ptimer_init(timer_hit, s, PTIMER_POLICY_DEFAULT);
+
+    ptimer_transaction_begin(s->ptimer);
     ptimer_set_freq(s->ptimer, s->freq_hz);
+    ptimer_transaction_commit(s->ptimer);
 }
 
 static const VMStateDescription vmstate_lm32_timer = {
@@ -223,7 +230,7 @@ static void lm32_timer_class_init(ObjectClass *klass, void *data)
     dc->realize = lm32_timer_realize;
     dc->reset = timer_reset;
     dc->vmsd = &vmstate_lm32_timer;
-    dc->props = lm32_timer_properties;
+    device_class_set_props(dc, lm32_timer_properties);
 }
 
 static const TypeInfo lm32_timer_info = {

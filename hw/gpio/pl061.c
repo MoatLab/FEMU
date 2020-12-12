@@ -9,9 +9,12 @@
  */
 
 #include "qemu/osdep.h"
+#include "hw/irq.h"
 #include "hw/sysbus.h"
+#include "migration/vmstate.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
+#include "qom/object.h"
 
 //#define DEBUG_PL061 1
 
@@ -32,9 +35,11 @@ static const uint8_t pl061_id_luminary[12] =
   { 0x00, 0x00, 0x00, 0x00, 0x61, 0x00, 0x18, 0x01, 0x0d, 0xf0, 0x05, 0xb1 };
 
 #define TYPE_PL061 "pl061"
-#define PL061(obj) OBJECT_CHECK(PL061State, (obj), TYPE_PL061)
+OBJECT_DECLARE_SIMPLE_TYPE(PL061State, PL061)
 
-typedef struct PL061State {
+#define N_GPIOS 8
+
+struct PL061State {
     SysBusDevice parent_obj;
 
     MemoryRegion iomem;
@@ -60,10 +65,10 @@ typedef struct PL061State {
     uint32_t cr;
     uint32_t amsel;
     qemu_irq irq;
-    qemu_irq out[8];
+    qemu_irq out[N_GPIOS];
     const unsigned char *id;
     uint32_t rsvd_start; /* reserved area: [rsvd_start, 0xfcc] */
-} PL061State;
+};
 
 static const VMStateDescription vmstate_pl061 = {
     .name = "pl061",
@@ -110,7 +115,7 @@ static void pl061_update(PL061State *s)
     changed = s->old_out_data ^ out;
     if (changed) {
         s->old_out_data = out;
-        for (i = 0; i < 8; i++) {
+        for (i = 0; i < N_GPIOS; i++) {
             mask = 1 << i;
             if (changed & mask) {
                 DPRINTF("Set output %d = %d\n", i, (out & mask) != 0);
@@ -123,7 +128,7 @@ static void pl061_update(PL061State *s)
     changed = (s->old_in_data ^ s->data) & ~s->dir;
     if (changed) {
         s->old_in_data = s->data;
-        for (i = 0; i < 8; i++) {
+        for (i = 0; i < N_GPIOS; i++) {
             mask = 1 << i;
             if (changed & mask) {
                 DPRINTF("Changed input %d = %d\n", i, (s->data & mask) != 0);
@@ -362,8 +367,8 @@ static void pl061_init(Object *obj)
     memory_region_init_io(&s->iomem, obj, &pl061_ops, s, "pl061", 0x1000);
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->irq);
-    qdev_init_gpio_in(dev, pl061_set_irq, 8);
-    qdev_init_gpio_out(dev, s->out, 8);
+    qdev_init_gpio_in(dev, pl061_set_irq, N_GPIOS);
+    qdev_init_gpio_out(dev, s->out, N_GPIOS);
 }
 
 static void pl061_class_init(ObjectClass *klass, void *data)

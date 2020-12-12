@@ -24,10 +24,12 @@
 
 #include "qemu/osdep.h"
 #include "hw/sysbus.h"
+#include "hw/irq.h"
 #include "hw/ptimer.h"
+#include "hw/qdev-properties.h"
 #include "qemu/log.h"
-#include "qemu/main-loop.h"
 #include "qemu/module.h"
+#include "qom/object.h"
 
 #define D(x)
 
@@ -50,7 +52,6 @@
 
 struct xlx_timer
 {
-    QEMUBH *bh;
     ptimer_state *ptimer;
     void *parent;
     int nr; /* for debug.  */
@@ -61,8 +62,8 @@ struct xlx_timer
 };
 
 #define TYPE_XILINX_TIMER "xlnx.xps-timer"
-#define XILINX_TIMER(obj) \
-    OBJECT_CHECK(struct timerblock, (obj), TYPE_XILINX_TIMER)
+DECLARE_INSTANCE_CHECKER(struct timerblock, XILINX_TIMER,
+                         TYPE_XILINX_TIMER)
 
 struct timerblock
 {
@@ -132,6 +133,7 @@ timer_read(void *opaque, hwaddr addr, unsigned int size)
     return r;
 }
 
+/* Must be called inside ptimer transaction block */
 static void timer_enable(struct xlx_timer *xt)
 {
     uint64_t count;
@@ -172,8 +174,11 @@ timer_write(void *opaque, hwaddr addr,
                 value &= ~TCSR_TINT;
 
             xt->regs[addr] = value & 0x7ff;
-            if (value & TCSR_ENT)
+            if (value & TCSR_ENT) {
+                ptimer_transaction_begin(xt->ptimer);
                 timer_enable(xt);
+                ptimer_transaction_commit(xt->ptimer);
+            }
             break;
  
         default:
@@ -218,9 +223,10 @@ static void xilinx_timer_realize(DeviceState *dev, Error **errp)
 
         xt->parent = t;
         xt->nr = i;
-        xt->bh = qemu_bh_new(timer_hit, xt);
-        xt->ptimer = ptimer_init(xt->bh, PTIMER_POLICY_DEFAULT);
+        xt->ptimer = ptimer_init(timer_hit, xt, PTIMER_POLICY_DEFAULT);
+        ptimer_transaction_begin(xt->ptimer);
         ptimer_set_freq(xt->ptimer, t->freq_hz);
+        ptimer_transaction_commit(xt->ptimer);
     }
 
     memory_region_init_io(&t->mmio, OBJECT(t), &timer_ops, t, "xlnx.xps-timer",
@@ -248,7 +254,7 @@ static void xilinx_timer_class_init(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = xilinx_timer_realize;
-    dc->props = xilinx_timer_properties;
+    device_class_set_props(dc, xilinx_timer_properties);
 }
 
 static const TypeInfo xilinx_timer_info = {

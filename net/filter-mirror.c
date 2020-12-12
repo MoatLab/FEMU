@@ -21,17 +21,18 @@
 #include "qemu/iov.h"
 #include "qemu/sockets.h"
 
-#define FILTER_MIRROR(obj) \
-    OBJECT_CHECK(MirrorState, (obj), TYPE_FILTER_MIRROR)
-
-#define FILTER_REDIRECTOR(obj) \
-    OBJECT_CHECK(MirrorState, (obj), TYPE_FILTER_REDIRECTOR)
-
 #define TYPE_FILTER_MIRROR "filter-mirror"
+typedef struct MirrorState MirrorState;
+DECLARE_INSTANCE_CHECKER(MirrorState, FILTER_MIRROR,
+                         TYPE_FILTER_MIRROR)
+
 #define TYPE_FILTER_REDIRECTOR "filter-redirector"
+DECLARE_INSTANCE_CHECKER(MirrorState, FILTER_REDIRECTOR,
+                         TYPE_FILTER_REDIRECTOR)
+
 #define REDIRECTOR_MAX_LEN NET_BUFSIZE
 
-typedef struct MirrorState {
+struct MirrorState {
     NetFilterState parent_obj;
     char *indev;
     char *outdev;
@@ -39,7 +40,7 @@ typedef struct MirrorState {
     CharBackend chr_out;
     SocketReadState rs;
     bool vnet_hdr;
-} MirrorState;
+};
 
 static int filter_send(MirrorState *s,
                        const struct iovec *iov,
@@ -132,7 +133,7 @@ static void redirector_chr_read(void *opaque, const uint8_t *buf, int size)
     }
 }
 
-static void redirector_chr_event(void *opaque, int event)
+static void redirector_chr_event(void *opaque, QEMUChrEvent event)
 {
     NetFilterState *nf = opaque;
     MirrorState *s = FILTER_REDIRECTOR(nf);
@@ -392,12 +393,12 @@ static void filter_mirror_init(Object *obj)
     MirrorState *s = FILTER_MIRROR(obj);
 
     object_property_add_str(obj, "outdev", filter_mirror_get_outdev,
-                            filter_mirror_set_outdev, NULL);
+                            filter_mirror_set_outdev);
 
     s->vnet_hdr = false;
     object_property_add_bool(obj, "vnet_hdr_support",
                              filter_mirror_get_vnet_hdr,
-                             filter_mirror_set_vnet_hdr, NULL);
+                             filter_mirror_set_vnet_hdr);
 }
 
 static void filter_redirector_init(Object *obj)
@@ -405,14 +406,14 @@ static void filter_redirector_init(Object *obj)
     MirrorState *s = FILTER_REDIRECTOR(obj);
 
     object_property_add_str(obj, "indev", filter_redirector_get_indev,
-                            filter_redirector_set_indev, NULL);
+                            filter_redirector_set_indev);
     object_property_add_str(obj, "outdev", filter_redirector_get_outdev,
-                            filter_redirector_set_outdev, NULL);
+                            filter_redirector_set_outdev);
 
     s->vnet_hdr = false;
     object_property_add_bool(obj, "vnet_hdr_support",
                              filter_redirector_get_vnet_hdr,
-                             filter_redirector_set_vnet_hdr, NULL);
+                             filter_redirector_set_vnet_hdr);
 }
 
 static void filter_mirror_fini(Object *obj)

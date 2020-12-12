@@ -1,21 +1,8 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 /*
  * libfdt - Flat Device Tree manipulation
  *	Testcase common utility functions
  * Copyright (C) 2006 David Gibson, IBM Corporation.
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public License
- * as published by the Free Software Foundation; either version 2.1 of
- * the License, or (at your option) any later version.
- *
- * This library is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 #define _GNU_SOURCE /* for strsignal() in glibc.  FreeBSD has it either way */
@@ -30,11 +17,22 @@
 #include <unistd.h>
 #include <fcntl.h>
 
+#if NO_VALGRIND
+static inline void VALGRIND_MAKE_MEM_UNDEFINED(void *p, size_t len)
+{
+}
+
+static inline void VALGRIND_MAKE_MEM_DEFINED(void *p, size_t len)
+{
+}
+#else
 #include <valgrind/memcheck.h>
+#endif
 
 #include <libfdt.h>
 
 #include "tests.h"
+#include "testdata.h"
 
 /* For FDT_SW_MAGIC */
 #include "libfdt_internal.h"
@@ -101,7 +99,7 @@ void check_property(void *fdt, int nodeoffset, const char *name,
 	prop = fdt_get_property(fdt, nodeoffset, name, &retlen);
 	verbose_printf("pointer %p\n", prop);
 	if (! prop)
-		FAIL("Error retreiving \"%s\" pointer: %s", name,
+		FAIL("Error retrieving \"%s\" pointer: %s", name,
 		     fdt_strerror(retlen));
 
 	tag = fdt32_to_cpu(prop->tag);
@@ -146,6 +144,88 @@ const void *check_getprop(void *fdt, int nodeoffset, const char *name,
 		     name, proplen, len);
 	if (len && memcmp(val, propval, len) != 0)
 		FAIL("Data mismatch on property \"%s\"", name);
+
+	return propval;
+}
+
+const void *check_get_prop_offset(void *fdt, int poffset, const char *exp_name,
+				  int exp_len, const void *exp_val)
+{
+	const void *propval;
+	const char *name;
+	int proplen;
+
+	propval = fdt_getprop_by_offset(fdt, poffset, &name, &proplen);
+	if (!propval)
+		FAIL("fdt_getprop(\"%s\"): %s", name, fdt_strerror(proplen));
+
+	/* Not testing for this field, so ignore */
+	if (strcmp(name, exp_name))
+		return NULL;
+
+	if (proplen != exp_len)
+		FAIL("Size mismatch on property \"%s\": %d insead of %d",
+		     name, proplen, exp_len);
+	if (exp_len && memcmp(exp_val, propval, exp_len))
+		FAIL("Data mismatch on property \"%s\"", name);
+
+	return propval;
+}
+
+const void *check_getprop_addrrange(void *fdt, int parent, int nodeoffset,
+				    const char *name, int num)
+{
+	const void *propval;
+	int xac, xsc, buf_size, cells, i;
+	char *buf, *p;
+	uint64_t addr, size;
+	fdt32_t val;
+
+	xac = fdt_address_cells(fdt, parent);
+	xsc = fdt_size_cells(fdt, parent);
+
+	if (xac <= 0)
+		FAIL("Couldn't identify #address-cells: %s",
+		     fdt_strerror(xac));
+	if (xsc <= 0)
+		FAIL("Couldn't identify #size-cells: %s",
+		     fdt_strerror(xsc));
+
+	buf_size = (xac + xsc) * sizeof(fdt32_t) * num;
+	buf = malloc(buf_size);
+	if (!buf)
+		FAIL("Couldn't allocate temporary buffer");
+
+	/* expected value */
+	addr = TEST_MEMREGION_ADDR;
+	if (xac > 1)
+		addr += TEST_MEMREGION_ADDR_HI;
+	size = TEST_MEMREGION_SIZE;
+	if (xsc > 1)
+		size += TEST_MEMREGION_SIZE_HI;
+	for (p = buf, i = 0; i < num; i++) {
+		cells = xac;
+		while (cells) {
+			val = cpu_to_fdt32(addr >> (32 * (--cells)));
+			memcpy(p, &val, sizeof(val));
+			p += sizeof(val);
+		}
+		cells = xsc;
+		while (cells) {
+			val = cpu_to_fdt32(size >> (32 * (--cells)));
+			memcpy(p, &val, sizeof(val));
+			p += sizeof(val);
+		}
+
+		addr += size;
+		size += TEST_MEMREGION_SIZE_INC;
+	}
+
+	/* check */
+	propval = check_getprop(fdt, nodeoffset, name, buf_size,
+				(const void *)buf);
+
+	free(buf);
 
 	return propval;
 }

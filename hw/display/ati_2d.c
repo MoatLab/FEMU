@@ -53,12 +53,20 @@ void ati_2d_blt(ATIVGAState *s)
             s->vga.vbe_start_addr, surface_data(ds), surface_stride(ds),
             surface_bits_per_pixel(ds),
             (s->regs.dp_mix & GMC_ROP3_MASK) >> 16);
-    int dst_x = (s->regs.dp_cntl & DST_X_LEFT_TO_RIGHT ?
-                 s->regs.dst_x : s->regs.dst_x + 1 - s->regs.dst_width);
-    int dst_y = (s->regs.dp_cntl & DST_Y_TOP_TO_BOTTOM ?
-                 s->regs.dst_y : s->regs.dst_y + 1 - s->regs.dst_height);
+    unsigned dst_x = (s->regs.dp_cntl & DST_X_LEFT_TO_RIGHT ?
+                      s->regs.dst_x : s->regs.dst_x + 1 - s->regs.dst_width);
+    unsigned dst_y = (s->regs.dp_cntl & DST_Y_TOP_TO_BOTTOM ?
+                      s->regs.dst_y : s->regs.dst_y + 1 - s->regs.dst_height);
     int bpp = ati_bpp_from_datatype(s);
+    if (!bpp) {
+        qemu_log_mask(LOG_GUEST_ERROR, "Invalid bpp\n");
+        return;
+    }
     int dst_stride = DEFAULT_CNTL ? s->regs.dst_pitch : s->regs.default_pitch;
+    if (!dst_stride) {
+        qemu_log_mask(LOG_GUEST_ERROR, "Zero dest pitch\n");
+        return;
+    }
     uint8_t *dst_bits = s->vga.vram_ptr + (DEFAULT_CNTL ?
                         s->regs.dst_offset : s->regs.default_offset);
 
@@ -67,8 +75,9 @@ void ati_2d_blt(ATIVGAState *s)
         dst_stride *= bpp;
     }
     uint8_t *end = s->vga.vram_ptr + s->vga.vram_size;
-    if (dst_bits >= end || dst_bits + dst_x + (dst_y + s->regs.dst_height) *
-        dst_stride >= end) {
+    if (dst_x > 0x3fff || dst_y > 0x3fff || dst_bits >= end
+        || dst_bits + dst_x
+         + (dst_y + s->regs.dst_height) * dst_stride >= end) {
         qemu_log_mask(LOG_UNIMP, "blt outside vram not implemented\n");
         return;
     }
@@ -82,12 +91,16 @@ void ati_2d_blt(ATIVGAState *s)
     switch (s->regs.dp_mix & GMC_ROP3_MASK) {
     case ROP3_SRCCOPY:
     {
-        int src_x = (s->regs.dp_cntl & DST_X_LEFT_TO_RIGHT ?
-                     s->regs.src_x : s->regs.src_x + 1 - s->regs.dst_width);
-        int src_y = (s->regs.dp_cntl & DST_Y_TOP_TO_BOTTOM ?
-                     s->regs.src_y : s->regs.src_y + 1 - s->regs.dst_height);
+        unsigned src_x = (s->regs.dp_cntl & DST_X_LEFT_TO_RIGHT ?
+                       s->regs.src_x : s->regs.src_x + 1 - s->regs.dst_width);
+        unsigned src_y = (s->regs.dp_cntl & DST_Y_TOP_TO_BOTTOM ?
+                       s->regs.src_y : s->regs.src_y + 1 - s->regs.dst_height);
         int src_stride = DEFAULT_CNTL ?
                          s->regs.src_pitch : s->regs.default_pitch;
+        if (!src_stride) {
+            qemu_log_mask(LOG_GUEST_ERROR, "Zero source pitch\n");
+            return;
+        }
         uint8_t *src_bits = s->vga.vram_ptr + (DEFAULT_CNTL ?
                             s->regs.src_offset : s->regs.default_offset);
 
@@ -95,8 +108,9 @@ void ati_2d_blt(ATIVGAState *s)
             src_bits += s->regs.crtc_offset & 0x07ffffff;
             src_stride *= bpp;
         }
-        if (src_bits >= end || src_bits + src_x +
-            (src_y + s->regs.dst_height) * src_stride >= end) {
+        if (src_x > 0x3fff || src_y > 0x3fff || src_bits >= end
+            || src_bits + src_x
+             + (src_y + s->regs.dst_height) * src_stride >= end) {
             qemu_log_mask(LOG_UNIMP, "blt outside vram not implemented\n");
             return;
         }
@@ -137,8 +151,10 @@ void ati_2d_blt(ATIVGAState *s)
                                     dst_y * surface_stride(ds),
                                     s->regs.dst_height * surface_stride(ds));
         }
-        s->regs.dst_x += s->regs.dst_width;
-        s->regs.dst_y += s->regs.dst_height;
+        s->regs.dst_x = (s->regs.dp_cntl & DST_X_LEFT_TO_RIGHT ?
+                         dst_x + s->regs.dst_width : dst_x);
+        s->regs.dst_y = (s->regs.dp_cntl & DST_Y_TOP_TO_BOTTOM ?
+                         dst_y + s->regs.dst_height : dst_y);
         break;
     }
     case ROP3_PATCOPY:
@@ -179,7 +195,8 @@ void ati_2d_blt(ATIVGAState *s)
                                     dst_y * surface_stride(ds),
                                     s->regs.dst_height * surface_stride(ds));
         }
-        s->regs.dst_y += s->regs.dst_height;
+        s->regs.dst_y = (s->regs.dp_cntl & DST_Y_TOP_TO_BOTTOM ?
+                         dst_y + s->regs.dst_height : dst_y);
         break;
     }
     default:

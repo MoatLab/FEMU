@@ -82,14 +82,22 @@ config IMX
 config STM32F2XX_SYSCFG
     bool
 
+config STM32F4XX_SYSCFG
+    bool
+
+config STM32F4XX_EXTI
+    bool
+
 config MIPS_ITU
     bool
 
 config MPS2_FPGAIO
     bool
+    select LED
 
 config MPS2_SCC
     bool
+    select LED
 
 config TZ_MPC
     bool
@@ -116,5 +124,40 @@ config PVPANIC
 config AUX
     bool
     select I2C
+
+config UNIMP
+    bool
+
+config LED
+    bool
+
+config MAC_VIA
+    bool
+    select MOS6522
+    select ADB
+
+config AVR_POWER
+    bool
+
+config MCHP_PFSOC_DMC
+    bool
+
+config MCHP_PFSOC_IOSCB
+    bool
+
+config MCHP_PFSOC_SYSREG
+    bool
+
+config SIFIVE_TEST
+    bool
+
+config SIFIVE_E_PRCI
+    bool
+
+config SIFIVE_U_OTP
+    bool
+
+config SIFIVE_U_PRCI
+    bool
 
 source macio/Kconfig

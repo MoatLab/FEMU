@@ -4,6 +4,7 @@
 *.patch
 *.so
 *~
+*.bak
 *.tab.[ch]
 lex.yy.c
 *.lex.c

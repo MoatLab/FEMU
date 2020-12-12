@@ -24,10 +24,12 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "chardev/char.h"
-#include "hw/hw.h"
+#include "hw/irq.h"
+#include "migration/vmstate.h"
 #include "net/can_emu.h"
 
 #include "can_sja1000.h"
@@ -245,8 +247,8 @@ int can_sja_accept_filter(CanSJA1000State *s,
 static void can_display_msg(const char *prefix, const qemu_can_frame *msg)
 {
     int i;
+    FILE *logfile = qemu_log_lock();
 
-    qemu_log_lock();
     qemu_log("%s%03X [%01d] %s %s",
              prefix,
              msg->can_id & QEMU_CAN_EFF_MASK,
@@ -259,13 +261,14 @@ static void can_display_msg(const char *prefix, const qemu_can_frame *msg)
     }
     qemu_log("\n");
     qemu_log_flush();
-    qemu_log_unlock();
+    qemu_log_unlock(logfile);
 }
 
 static void buff2frame_pel(const uint8_t *buff, qemu_can_frame *frame)
 {
     uint8_t i;
 
+    frame->flags = 0;
     frame->can_id = 0;
     if (buff[0] & 0x40) { /* RTR */
         frame->can_id = QEMU_CAN_RTR_FLAG;
@@ -301,6 +304,7 @@ static void buff2frame_bas(const uint8_t *buff, qemu_can_frame *frame)
 {
     uint8_t i;
 
+    frame->flags = 0;
     frame->can_id = ((buff[0] << 3) & (0xff << 3)) + ((buff[1] >> 5) & 0x07);
     if (buff[1] & 0x10) { /* RTR */
         frame->can_id = QEMU_CAN_RTR_FLAG;
@@ -319,8 +323,13 @@ static void buff2frame_bas(const uint8_t *buff, qemu_can_frame *frame)
 static int frame2buff_pel(const qemu_can_frame *frame, uint8_t *buff)
 {
     int i;
+    int dlen = frame->can_dlc;
 
     if (frame->can_id & QEMU_CAN_ERR_FLAG) { /* error frame, NOT support now. */
+        return -1;
+    }
+
+    if (dlen > 8) {
         return -1;
     }
 
@@ -334,18 +343,18 @@ static int frame2buff_pel(const qemu_can_frame *frame, uint8_t *buff)
         buff[2] = extract32(frame->can_id, 13, 8); /* ID.20~ID.13 */
         buff[3] = extract32(frame->can_id, 5, 8);  /* ID.12~ID.05 */
         buff[4] = extract32(frame->can_id, 0, 5) << 3; /* ID.04~ID.00,xxx */
-        for (i = 0; i < frame->can_dlc; i++) {
+        for (i = 0; i < dlen; i++) {
             buff[5 + i] = frame->data[i];
         }
-        return frame->can_dlc + 5;
+        return dlen + 5;
     } else { /* SFF */
         buff[1] = extract32(frame->can_id, 3, 8); /* ID.10~ID.03 */
         buff[2] = extract32(frame->can_id, 0, 3) << 5; /* ID.02~ID.00,xxxxx */
-        for (i = 0; i < frame->can_dlc; i++) {
+        for (i = 0; i < dlen; i++) {
             buff[3 + i] = frame->data[i];
         }
 
-        return frame->can_dlc + 3;
+        return dlen + 3;
     }
 
     return -1;
@@ -354,6 +363,7 @@ static int frame2buff_pel(const qemu_can_frame *frame, uint8_t *buff)
 static int frame2buff_bas(const qemu_can_frame *frame, uint8_t *buff)
 {
     int i;
+    int dlen = frame->can_dlc;
 
      /*
       * EFF, no support for BasicMode
@@ -365,17 +375,21 @@ static int frame2buff_bas(const qemu_can_frame *frame, uint8_t *buff)
         return -1;
     }
 
+    if (dlen > 8) {
+        return -1;
+    }
+
     buff[0] = extract32(frame->can_id, 3, 8); /* ID.10~ID.03 */
     buff[1] = extract32(frame->can_id, 0, 3) << 5; /* ID.02~ID.00,xxxxx */
     if (frame->can_id & QEMU_CAN_RTR_FLAG) { /* RTR */
         buff[1] |= (1 << 4);
     }
     buff[1] |= frame->can_dlc & 0x0f;
-    for (i = 0; i < frame->can_dlc; i++) {
+    for (i = 0; i < dlen; i++) {
         buff[2 + i] = frame->data[i];
     }
 
-    return frame->can_dlc + 2;
+    return dlen + 2;
 }
 
 static void can_sja_update_pel_irq(CanSJA1000State *s)
@@ -521,6 +535,7 @@ void can_sja_mem_write(CanSJA1000State *s, hwaddr addr, uint64_t val,
             break;
         case 16: /* RX frame information addr16-28. */
             s->status_pel |= (1 << 5); /* Set transmit status. */
+            /* fallthrough */
         case 17 ... 28:
             if (s->mode & 0x01) { /* Reset mode */
                 if (addr < 24) {
@@ -618,6 +633,7 @@ void can_sja_mem_write(CanSJA1000State *s, hwaddr addr, uint64_t val,
             break;
         case 10:
             s->status_bas |= (1 << 5); /* Set transmit status. */
+            /* fallthrough */
         case 11 ... 19:
             if ((s->control & 0x01) == 0) { /* Operation mode */
                 s->tx_buff[addr - 10] = val; /* Store to TX buffer directly. */
@@ -731,21 +747,21 @@ uint64_t can_sja_mem_read(CanSJA1000State *s, hwaddr addr, unsigned size)
     return temp;
 }
 
-int can_sja_can_receive(CanBusClientState *client)
+bool can_sja_can_receive(CanBusClientState *client)
 {
     CanSJA1000State *s = container_of(client, CanSJA1000State, bus_client);
 
     if (s->clock & 0x80) { /* PeliCAN Mode */
         if (s->mode & 0x01) { /* reset mode. */
-            return 0;
+            return false;
         }
     } else { /* BasicCAN mode */
         if (s->control & 0x01) {
-            return 0;
+            return false;
         }
     }
 
-    return 1; /* always return 1, when operation mode */
+    return true; /* always return true, when operation mode */
 }
 
 ssize_t can_sja_receive(CanBusClientState *client, const qemu_can_frame *frames,
@@ -760,6 +776,13 @@ ssize_t can_sja_receive(CanBusClientState *client, const qemu_can_frame *frames,
     if (frames_cnt <= 0) {
         return 0;
     }
+    if (frame->flags & QEMU_CAN_FRMF_TYPE_FD) {
+        if (DEBUG_FILTER) {
+            can_display_msg("[cansja]: ignor fd frame ", frame);
+        }
+        return 1;
+    }
+
     if (DEBUG_FILTER) {
         can_display_msg("[cansja]: receive ", frame);
     }

@@ -8,11 +8,12 @@
 # This work is licensed under the terms of the GNU GPL, version 2 or
 # later.  See the COPYING file in the top-level directory.
 
+import os
 import logging
 import tempfile
-from avocado.utils.process import run
 
 from avocado_qemu import Test
+from avocado import skipIf
 
 
 class LinuxInitrd(Test):
@@ -20,6 +21,7 @@ class LinuxInitrd(Test):
     Checks QEMU evaluates correctly the initrd file passed as -initrd option.
 
     :avocado: tags=arch:x86_64
+    :avocado: tags=machine:pc
     """
 
     timeout = 300
@@ -41,21 +43,25 @@ class LinuxInitrd(Test):
             initrd.seek(max_size)
             initrd.write(b'\0')
             initrd.flush()
-            cmd = "%s -kernel %s -initrd %s -m 4096" % (
-                  self.qemu_bin, kernel_path, initrd.name)
-            res = run(cmd, ignore_status=True)
-            self.assertEqual(res.exit_status, 1)
+            self.vm.add_args('-kernel', kernel_path, '-initrd', initrd.name,
+                             '-m', '4096')
+            self.vm.set_qmp_monitor(enabled=False)
+            self.vm.launch()
+            self.vm.wait()
+            self.assertEqual(self.vm.exitcode(), 1)
             expected_msg = r'.*initrd is too large.*max: \d+, need %s.*' % (
                 max_size + 1)
-            self.assertRegex(res.stderr_text, expected_msg)
+            self.assertRegex(self.vm.get_log(), expected_msg)
 
+    @skipIf(os.getenv('GITLAB_CI'), 'Running on GitLab')
     def test_with_2gib_file_should_work_with_linux_v4_16(self):
         """
         QEMU has supported up to 4 GiB initrd for recent kernel
         Expect guest can reach 'Unpacking initramfs...'
         """
-        kernel_url = ('https://mirrors.kernel.org/fedora/releases/28/'
-                      'Everything/x86_64/os/images/pxeboot/vmlinuz')
+        kernel_url = ('https://archives.fedoraproject.org/pub/archive/fedora'
+                      '/linux/releases/28/Everything/x86_64/os/images/pxeboot/'
+                      'vmlinuz')
         kernel_hash = '238e083e114c48200f80d889f7e32eeb2793e02a'
         kernel_path = self.fetch_asset(kernel_url, asset_hash=kernel_hash)
         max_size = 2 * (1024 ** 3) + 1
@@ -65,7 +71,6 @@ class LinuxInitrd(Test):
             initrd.write(b'\0')
             initrd.flush()
 
-            self.vm.set_machine('pc')
             self.vm.set_console()
             kernel_command_line = 'console=ttyS0'
             self.vm.add_args('-kernel', kernel_path,

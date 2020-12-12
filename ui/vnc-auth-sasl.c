@@ -111,7 +111,8 @@ size_t vnc_client_write_sasl(VncState *vs)
             g_source_remove(vs->ioc_tag);
         }
         vs->ioc_tag = qio_channel_add_watch(
-            vs->ioc, G_IO_IN, vnc_client_io, vs, NULL);
+            vs->ioc, G_IO_IN | G_IO_HUP | G_IO_ERR,
+            vnc_client_io, vs, NULL);
     }
 
     return ret;
@@ -522,6 +523,7 @@ vnc_socket_ip_addr_string(QIOChannelSocket *ioc,
 
     if (addr->type != SOCKET_ADDRESS_TYPE_INET) {
         error_setg(errp, "Not an inet socket type");
+        qapi_free_SocketAddress(addr);
         return NULL;
     }
     ret = g_strdup_printf("%s;%s", addr->u.inet.host, addr->u.inet.port);

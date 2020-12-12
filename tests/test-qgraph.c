@@ -5,7 +5,7 @@
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
- * License version 2 as published by the Free Software Foundation.
+ * License version 2.1 as published by the Free Software Foundation.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -17,9 +17,8 @@
  */
 
 #include "qemu/osdep.h"
-#include "libqtest.h"
-#include "libqos/qgraph.h"
-#include "libqos/qgraph_internal.h"
+#include "qtest/libqos/qgraph.h"
+#include "qtest/libqos/qgraph_internal.h"
 
 #define MACHINE_PC "x86_64/pc"
 #define MACHINE_RASPI2 "arm/raspi2"

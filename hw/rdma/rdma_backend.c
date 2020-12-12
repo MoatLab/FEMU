@@ -68,7 +68,7 @@ static void free_cqe_ctx(gpointer data, gpointer user_data)
     bctx = rdma_rm_get_cqe_ctx(rdma_dev_res, cqe_ctx_id);
     if (bctx) {
         rdma_rm_dealloc_cqe_ctx(rdma_dev_res, cqe_ctx_id);
-        atomic_dec(&rdma_dev_res->stats.missing_cqe);
+        qatomic_dec(&rdma_dev_res->stats.missing_cqe);
     }
     g_free(bctx);
 }
@@ -81,7 +81,7 @@ static void clean_recv_mads(RdmaBackendDev *backend_dev)
         cqe_ctx_id = rdma_protected_qlist_pop_int64(&backend_dev->
                                                     recv_mads_list);
         if (cqe_ctx_id != -ENOENT) {
-            atomic_inc(&backend_dev->rdma_dev_res->stats.missing_cqe);
+            qatomic_inc(&backend_dev->rdma_dev_res->stats.missing_cqe);
             free_cqe_ctx(GINT_TO_POINTER(cqe_ctx_id),
                          backend_dev->rdma_dev_res);
         }
@@ -95,36 +95,36 @@ static int rdma_poll_cq(RdmaDeviceResources *rdma_dev_res, struct ibv_cq *ibcq)
     struct ibv_wc wc[2];
     RdmaProtectedGSList *cqe_ctx_list;
 
-    qemu_mutex_lock(&rdma_dev_res->lock);
-    do {
-        ne = ibv_poll_cq(ibcq, ARRAY_SIZE(wc), wc);
+    WITH_QEMU_LOCK_GUARD(&rdma_dev_res->lock) {
+        do {
+            ne = ibv_poll_cq(ibcq, ARRAY_SIZE(wc), wc);
 
-        trace_rdma_poll_cq(ne, ibcq);
+            trace_rdma_poll_cq(ne, ibcq);
 
-        for (i = 0; i < ne; i++) {
-            bctx = rdma_rm_get_cqe_ctx(rdma_dev_res, wc[i].wr_id);
-            if (unlikely(!bctx)) {
-                rdma_error_report("No matching ctx for req %"PRId64,
-                                  wc[i].wr_id);
-                continue;
+            for (i = 0; i < ne; i++) {
+                bctx = rdma_rm_get_cqe_ctx(rdma_dev_res, wc[i].wr_id);
+                if (unlikely(!bctx)) {
+                    rdma_error_report("No matching ctx for req %"PRId64,
+                                      wc[i].wr_id);
+                    continue;
+                }
+
+                comp_handler(bctx->up_ctx, &wc[i]);
+
+                if (bctx->backend_qp) {
+                    cqe_ctx_list = &bctx->backend_qp->cqe_ctx_list;
+                } else {
+                    cqe_ctx_list = &bctx->backend_srq->cqe_ctx_list;
+                }
+
+                rdma_protected_gslist_remove_int32(cqe_ctx_list, wc[i].wr_id);
+                rdma_rm_dealloc_cqe_ctx(rdma_dev_res, wc[i].wr_id);
+                g_free(bctx);
             }
-
-            comp_handler(bctx->up_ctx, &wc[i]);
-
-            if (bctx->backend_qp) {
-                cqe_ctx_list = &bctx->backend_qp->cqe_ctx_list;
-            } else {
-                cqe_ctx_list = &bctx->backend_srq->cqe_ctx_list;
-            }
-
-            rdma_protected_gslist_remove_int32(cqe_ctx_list, wc[i].wr_id);
-            rdma_rm_dealloc_cqe_ctx(rdma_dev_res, wc[i].wr_id);
-            g_free(bctx);
-        }
-        total_ne += ne;
-    } while (ne > 0);
-    atomic_sub(&rdma_dev_res->stats.missing_cqe, total_ne);
-    qemu_mutex_unlock(&rdma_dev_res->lock);
+            total_ne += ne;
+        } while (ne > 0);
+        qatomic_sub(&rdma_dev_res->stats.missing_cqe, total_ne);
+    }
 
     if (ne < 0) {
         rdma_error_report("ibv_poll_cq fail, rc=%d, errno=%d", ne, errno);
@@ -195,17 +195,17 @@ static void *comp_handler_thread(void *arg)
 
 static inline void disable_rdmacm_mux_async(RdmaBackendDev *backend_dev)
 {
-    atomic_set(&backend_dev->rdmacm_mux.can_receive, 0);
+    qatomic_set(&backend_dev->rdmacm_mux.can_receive, 0);
 }
 
 static inline void enable_rdmacm_mux_async(RdmaBackendDev *backend_dev)
 {
-    atomic_set(&backend_dev->rdmacm_mux.can_receive, sizeof(RdmaCmMuxMsg));
+    qatomic_set(&backend_dev->rdmacm_mux.can_receive, sizeof(RdmaCmMuxMsg));
 }
 
 static inline int rdmacm_mux_can_process_async(RdmaBackendDev *backend_dev)
 {
-    return atomic_read(&backend_dev->rdmacm_mux.can_receive);
+    return qatomic_read(&backend_dev->rdmacm_mux.can_receive);
 }
 
 static int rdmacm_mux_check_op_status(CharBackend *mad_chr_be)
@@ -377,31 +377,42 @@ static void ah_cache_init(void)
                                     destroy_ah_hash_key, destroy_ah_hast_data);
 }
 
+#ifdef LEGACY_RDMA_REG_MR
 static int build_host_sge_array(RdmaDeviceResources *rdma_dev_res,
-                                struct ibv_sge *dsge, struct ibv_sge *ssge,
-                                uint8_t num_sge, uint64_t *total_length)
+                                struct ibv_sge *sge, uint8_t num_sge,
+                                uint64_t *total_length)
 {
     RdmaRmMR *mr;
-    int ssge_idx;
+    int idx;
 
-    for (ssge_idx = 0; ssge_idx < num_sge; ssge_idx++) {
-        mr = rdma_rm_get_mr(rdma_dev_res, ssge[ssge_idx].lkey);
+    for (idx = 0; idx < num_sge; idx++) {
+        mr = rdma_rm_get_mr(rdma_dev_res, sge[idx].lkey);
         if (unlikely(!mr)) {
-            rdma_error_report("Invalid lkey 0x%x", ssge[ssge_idx].lkey);
-            return VENDOR_ERR_INVLKEY | ssge[ssge_idx].lkey;
+            rdma_error_report("Invalid lkey 0x%x", sge[idx].lkey);
+            return VENDOR_ERR_INVLKEY | sge[idx].lkey;
         }
 
-        dsge->addr = (uintptr_t)mr->virt + ssge[ssge_idx].addr - mr->start;
-        dsge->length = ssge[ssge_idx].length;
-        dsge->lkey = rdma_backend_mr_lkey(&mr->backend_mr);
+        sge[idx].addr = (uintptr_t)mr->virt + sge[idx].addr - mr->start;
+        sge[idx].lkey = rdma_backend_mr_lkey(&mr->backend_mr);
 
-        *total_length += dsge->length;
-
-        dsge++;
+        *total_length += sge[idx].length;
     }
 
     return 0;
 }
+#else
+static inline int build_host_sge_array(RdmaDeviceResources *rdma_dev_res,
+                                       struct ibv_sge *sge, uint8_t num_sge,
+                                       uint64_t *total_length)
+{
+    int idx;
+
+    for (idx = 0; idx < num_sge; idx++) {
+        *total_length += sge[idx].length;
+    }
+    return 0;
+}
+#endif
 
 static void trace_mad_message(const char *title, char *buf, int len)
 {
@@ -480,7 +491,6 @@ void rdma_backend_post_send(RdmaBackendDev *backend_dev,
                             void *ctx)
 {
     BackendCtx *bctx;
-    struct ibv_sge new_sge[MAX_SGE];
     uint32_t bctx_id;
     int rc;
     struct ibv_send_wr wr = {}, *bad_wr;
@@ -514,7 +524,7 @@ void rdma_backend_post_send(RdmaBackendDev *backend_dev,
 
     rdma_protected_gslist_append_int32(&qp->cqe_ctx_list, bctx_id);
 
-    rc = build_host_sge_array(backend_dev->rdma_dev_res, new_sge, sge, num_sge,
+    rc = build_host_sge_array(backend_dev->rdma_dev_res, sge, num_sge,
                               &backend_dev->rdma_dev_res->stats.tx_len);
     if (rc) {
         complete_work(IBV_WC_GENERAL_ERR, rc, ctx);
@@ -534,7 +544,7 @@ void rdma_backend_post_send(RdmaBackendDev *backend_dev,
     wr.num_sge = num_sge;
     wr.opcode = IBV_WR_SEND;
     wr.send_flags = IBV_SEND_SIGNALED;
-    wr.sg_list = new_sge;
+    wr.sg_list = sge;
     wr.wr_id = bctx_id;
 
     rc = ibv_post_send(qp->ibqp, &wr, &bad_wr);
@@ -545,7 +555,7 @@ void rdma_backend_post_send(RdmaBackendDev *backend_dev,
         goto err_dealloc_cqe_ctx;
     }
 
-    atomic_inc(&backend_dev->rdma_dev_res->stats.missing_cqe);
+    qatomic_inc(&backend_dev->rdma_dev_res->stats.missing_cqe);
     backend_dev->rdma_dev_res->stats.tx++;
 
     return;
@@ -597,7 +607,6 @@ void rdma_backend_post_recv(RdmaBackendDev *backend_dev,
                             struct ibv_sge *sge, uint32_t num_sge, void *ctx)
 {
     BackendCtx *bctx;
-    struct ibv_sge new_sge[MAX_SGE];
     uint32_t bctx_id;
     int rc;
     struct ibv_recv_wr wr = {}, *bad_wr;
@@ -631,7 +640,7 @@ void rdma_backend_post_recv(RdmaBackendDev *backend_dev,
 
     rdma_protected_gslist_append_int32(&qp->cqe_ctx_list, bctx_id);
 
-    rc = build_host_sge_array(backend_dev->rdma_dev_res, new_sge, sge, num_sge,
+    rc = build_host_sge_array(backend_dev->rdma_dev_res, sge, num_sge,
                               &backend_dev->rdma_dev_res->stats.rx_bufs_len);
     if (rc) {
         complete_work(IBV_WC_GENERAL_ERR, rc, ctx);
@@ -639,7 +648,7 @@ void rdma_backend_post_recv(RdmaBackendDev *backend_dev,
     }
 
     wr.num_sge = num_sge;
-    wr.sg_list = new_sge;
+    wr.sg_list = sge;
     wr.wr_id = bctx_id;
     rc = ibv_post_recv(qp->ibqp, &wr, &bad_wr);
     if (rc) {
@@ -649,7 +658,7 @@ void rdma_backend_post_recv(RdmaBackendDev *backend_dev,
         goto err_dealloc_cqe_ctx;
     }
 
-    atomic_inc(&backend_dev->rdma_dev_res->stats.missing_cqe);
+    qatomic_inc(&backend_dev->rdma_dev_res->stats.missing_cqe);
     backend_dev->rdma_dev_res->stats.rx_bufs++;
 
     return;
@@ -667,7 +676,6 @@ void rdma_backend_post_srq_recv(RdmaBackendDev *backend_dev,
                                 uint32_t num_sge, void *ctx)
 {
     BackendCtx *bctx;
-    struct ibv_sge new_sge[MAX_SGE];
     uint32_t bctx_id;
     int rc;
     struct ibv_recv_wr wr = {}, *bad_wr;
@@ -684,7 +692,7 @@ void rdma_backend_post_srq_recv(RdmaBackendDev *backend_dev,
 
     rdma_protected_gslist_append_int32(&srq->cqe_ctx_list, bctx_id);
 
-    rc = build_host_sge_array(backend_dev->rdma_dev_res, new_sge, sge, num_sge,
+    rc = build_host_sge_array(backend_dev->rdma_dev_res, sge, num_sge,
                               &backend_dev->rdma_dev_res->stats.rx_bufs_len);
     if (rc) {
         complete_work(IBV_WC_GENERAL_ERR, rc, ctx);
@@ -692,7 +700,7 @@ void rdma_backend_post_srq_recv(RdmaBackendDev *backend_dev,
     }
 
     wr.num_sge = num_sge;
-    wr.sg_list = new_sge;
+    wr.sg_list = sge;
     wr.wr_id = bctx_id;
     rc = ibv_post_srq_recv(srq->ibsrq, &wr, &bad_wr);
     if (rc) {
@@ -702,7 +710,7 @@ void rdma_backend_post_srq_recv(RdmaBackendDev *backend_dev,
         goto err_dealloc_cqe_ctx;
     }
 
-    atomic_inc(&backend_dev->rdma_dev_res->stats.missing_cqe);
+    qatomic_inc(&backend_dev->rdma_dev_res->stats.missing_cqe);
     backend_dev->rdma_dev_res->stats.rx_bufs++;
     backend_dev->rdma_dev_res->stats.rx_srq++;
 
@@ -736,9 +744,13 @@ void rdma_backend_destroy_pd(RdmaBackendPD *pd)
 }
 
 int rdma_backend_create_mr(RdmaBackendMR *mr, RdmaBackendPD *pd, void *addr,
-                           size_t length, int access)
+                           size_t length, uint64_t guest_start, int access)
 {
+#ifdef LEGACY_RDMA_REG_MR
     mr->ibmr = ibv_reg_mr(pd->ibpd, addr, length, access);
+#else
+    mr->ibmr = ibv_reg_mr_iova(pd->ibpd, addr, length, guest_start, access);
+#endif
     if (!mr->ibmr) {
         rdma_error_report("ibv_reg_mr fail, errno=%d", errno);
         return -EIO;

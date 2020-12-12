@@ -27,7 +27,7 @@
 #include "qemu/cutils.h"
 #include "qemu/timer.h"
 #include "sysemu/qtest.h"
-#include "sysemu/cpus.h"
+#include "sysemu/cpu-timers.h"
 #include "sysemu/replay.h"
 #include "qemu/main-loop.h"
 #include "block/aio.h"
@@ -61,7 +61,8 @@ static void sigfd_handler(void *opaque)
         }
 
         if (len != sizeof(info)) {
-            printf("read from sigfd returned %zd: %m\n", len);
+            error_report("read from sigfd returned %zd: %s", len,
+                         g_strerror(errno));
             return;
         }
 
@@ -147,7 +148,6 @@ int qemu_init_main_loop(Error **errp)
 {
     int ret;
     GSource *src;
-    Error *local_error = NULL;
 
     init_clocks(qemu_timer_notify_cb);
 
@@ -156,9 +156,8 @@ int qemu_init_main_loop(Error **errp)
         return ret;
     }
 
-    qemu_aio_context = aio_context_new(&local_error);
+    qemu_aio_context = aio_context_new(errp);
     if (!qemu_aio_context) {
-        error_propagate(errp, local_error);
         return -EMFILE;
     }
     qemu_notify_bh = qemu_bh_new(notify_event_cb, NULL);
@@ -179,6 +178,10 @@ static int max_priority;
 #ifndef _WIN32
 static int glib_pollfds_idx;
 static int glib_n_poll_fds;
+
+void qemu_fd_register(int fd)
+{
+}
 
 static void glib_pollfds_fill(int64_t *cur_timeout)
 {
@@ -518,9 +521,13 @@ void main_loop_wait(int nonblocking)
     mlpoll.state = ret < 0 ? MAIN_LOOP_POLL_ERR : MAIN_LOOP_POLL_OK;
     notifier_list_notify(&main_loop_poll_notifiers, &mlpoll);
 
-    /* CPU thread can infinitely wait for event after
-       missing the warp */
-    qemu_start_warp_timer();
+    if (icount_enabled()) {
+        /*
+         * CPU thread can infinitely wait for event after
+         * missing the warp
+         */
+        icount_start_warp_timer();
+    }
     qemu_clock_run_all_timers();
 }
 

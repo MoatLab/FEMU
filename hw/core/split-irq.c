@@ -25,6 +25,8 @@
 
 #include "qemu/osdep.h"
 #include "hw/core/split-irq.h"
+#include "hw/irq.h"
+#include "hw/qdev-properties.h"
 #include "qapi/error.h"
 #include "qemu/module.h"
 
@@ -67,7 +69,7 @@ static void split_irq_class_init(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     /* No state to reset or migrate */
-    dc->props = split_irq_properties;
+    device_class_set_props(dc, split_irq_properties);
     dc->realize = split_irq_realize;
 
     /* Reason: Needs to be wired up to work */

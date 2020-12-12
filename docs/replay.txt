@@ -19,7 +19,7 @@ Deterministic replay has the following features:
    the memory, state of the hardware devices, clocks, and screen of the VM.
  * Writes execution log into the file for later replaying for multiple times
    on different machines.
- * Supports i386, x86_64, and ARM hardware platforms.
+ * Supports i386, x86_64, and Arm hardware platforms.
  * Performs deterministic replay of all operations with keyboard and mouse
    input devices.
 
@@ -27,7 +27,7 @@ Usage of the record/replay:
  * First, record the execution with the following command line:
     qemu-system-i386 \
      -icount shift=7,rr=record,rrfile=replay.bin \
-     -drive file=disk.qcow2,if=none,id=img-direct \
+     -drive file=disk.qcow2,if=none,snapshot,id=img-direct \
      -drive driver=blkreplay,if=none,image=img-direct,id=img-blkreplay \
      -device ide-hd,drive=img-blkreplay \
      -netdev user,id=net1 -device rtl8139,netdev=net1 \
@@ -35,7 +35,7 @@ Usage of the record/replay:
  * After recording, you can replay it by using another command line:
     qemu-system-i386 \
      -icount shift=7,rr=replay,rrfile=replay.bin \
-     -drive file=disk.qcow2,if=none,id=img-direct \
+     -drive file=disk.qcow2,if=none,snapshot,id=img-direct \
      -drive driver=blkreplay,if=none,image=img-direct,id=img-blkreplay \
      -device ide-hd,drive=img-blkreplay \
      -netdev user,id=net1 -device rtl8139,netdev=net1 \
@@ -67,6 +67,7 @@ Modifications of qemu include:
  * network filter for recording and replaying the packets
  * block driver for making block layer deterministic
  * serial port input record and replay
+ * recording of random numbers obtained from the external sources
 
 Locking and thread synchronisation
 ----------------------------------
@@ -183,11 +184,11 @@ is then incremented (which is called "warping" the virtual clock) as
 soon as the timer fires or the CPUs need to go out of the idle state.
 Two functions are used for this purpose; because these actions change
 virtual machine state and must be deterministic, each of them creates a
-checkpoint.  qemu_start_warp_timer checks if the CPUs are idle and if so
-starts accounting real time to virtual clock.  qemu_account_warp_timer
+checkpoint.  icount_start_warp_timer checks if the CPUs are idle and if so
+starts accounting real time to virtual clock.  icount_account_warp_timer
 is called when the CPUs get an interrupt or when the warp timer fires,
 and it warps the virtual clock by the amount of real time that has passed
-since qemu_start_warp_timer.
+since icount_start_warp_timer.
 
 Bottom halves
 -------------
@@ -223,7 +224,7 @@ Block devices record/replay module intercepts calls of
 bdrv coroutine functions at the top of block drivers stack.
 To record and replay block operations the drive must be configured
 as following:
- -drive file=disk.qcow2,if=none,id=img-direct
+ -drive file=disk.qcow2,if=none,snapshot,id=img-direct
  -drive driver=blkreplay,if=none,image=img-direct,id=img-blkreplay
  -device ide-hd,drive=img-blkreplay
 
@@ -252,11 +253,27 @@ This snapshot is created at start of recording and restored at start
 of replaying. It also can be loaded while replaying to roll back
 the execution.
 
+'snapshot' flag of the disk image must be removed to save the snapshots
+in the overlay (or original image) instead of using the temporary overlay.
+ -drive file=disk.ovl,if=none,id=img-direct
+ -drive driver=blkreplay,if=none,image=img-direct,id=img-blkreplay
+ -device ide-hd,drive=img-blkreplay
+
 Use QEMU monitor to create additional snapshots. 'savevm <name>' command
 created the snapshot and 'loadvm <name>' restores it. To prevent corruption
 of the original disk image, use overlay files linked to the original images.
 Therefore all new snapshots (including the starting one) will be saved in
 overlays and the original image remains unchanged.
+
+When you need to use snapshots with diskless virtual machine,
+it must be started with 'orphan' qcow2 image. This image will be used
+for storing VM snapshots. Here is the example of the command line for this:
+
+  qemu-system-i386 -icount shift=3,rr=replay,rrfile=record.bin,rrsnapshot=init \
+    -net none -drive file=empty.qcow2,if=none,id=rr
+
+empty.qcow2 drive does not connected to any virtual block device and used
+for VM snapshots only.
 
 Network devices
 ---------------
@@ -286,6 +303,42 @@ Serial ports input is recorded and replay automatically. The command lines
 for recording and replaying must contain identical number of ports in record
 and replay modes, but their backends may differ.
 E.g., '-serial stdio' in record mode, and '-serial null' in replay mode.
+
+Reverse debugging
+-----------------
+
+Reverse debugging allows "executing" the program in reverse direction.
+GDB remote protocol supports "reverse step" and "reverse continue"
+commands. The first one steps single instruction backwards in time,
+and the second one finds the last breakpoint in the past.
+
+Recorded executions may be used to enable reverse debugging. QEMU can't
+execute the code in backwards direction, but can load a snapshot and
+replay forward to find the desired position or breakpoint.
+
+The following GDB commands are supported:
+ - reverse-stepi (or rsi) - step one instruction backwards
+ - reverse-continue (or rc) - find last breakpoint in the past
+
+Reverse step loads the nearest snapshot and replays the execution until
+the required instruction is met.
+
+Reverse continue may include several passes of examining the execution
+between the snapshots. Each of the passes include the following steps:
+ 1. loading the snapshot
+ 2. replaying to examine the breakpoints
+ 3. if breakpoint or watchpoint was met
+    - loading the snapshot again
+    - replaying to the required breakpoint
+ 4. else
+    - proceeding to the p.1 with the earlier snapshot
+
+Therefore usage of the reverse debugging requires at least one snapshot
+created in advance. This can be done by omitting 'snapshot' option
+for the block drives and adding 'rrsnapshot' for both record and replay
+command lines.
+See the "Snapshotting" section to learn more about running record/replay
+and creating the snapshot in these modes.
 
 Replay log format
 -----------------

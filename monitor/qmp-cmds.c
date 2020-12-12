@@ -15,7 +15,6 @@
 
 #include "qemu/osdep.h"
 #include "qemu-common.h"
-#include "qemu-version.h"
 #include "qemu/cutils.h"
 #include "qemu/option.h"
 #include "monitor/monitor.h"
@@ -26,16 +25,18 @@
 #include "ui/qemu-spice.h"
 #include "ui/vnc.h"
 #include "sysemu/kvm.h"
+#include "sysemu/runstate.h"
 #include "sysemu/arch_init.h"
 #include "sysemu/blockdev.h"
 #include "sysemu/block-backend.h"
 #include "qapi/error.h"
-#include "qapi/qapi-commands-block-core.h"
+#include "qapi/qapi-commands-acpi.h"
+#include "qapi/qapi-commands-block.h"
+#include "qapi/qapi-commands-control.h"
 #include "qapi/qapi-commands-machine.h"
 #include "qapi/qapi-commands-misc.h"
 #include "qapi/qapi-commands-ui.h"
 #include "qapi/qmp/qerror.h"
-#include "hw/boards.h"
 #include "hw/mem/memory-device.h"
 #include "hw/acpi/acpi_dev_interface.h"
 
@@ -47,19 +48,6 @@ NameInfo *qmp_query_name(Error **errp)
         info->has_name = true;
         info->name = g_strdup(qemu_name);
     }
-
-    return info;
-}
-
-VersionInfo *qmp_query_version(Error **errp)
-{
-    VersionInfo *info = g_new0(VersionInfo, 1);
-
-    info->qemu = g_new0(VersionTriple, 1);
-    info->qemu->major = QEMU_VERSION_MAJOR;
-    info->qemu->minor = QEMU_VERSION_MINOR;
-    info->qemu->micro = QEMU_VERSION_MICRO;
-    info->package = g_strdup(QEMU_PKGVERSION);
 
     return info;
 }
@@ -109,7 +97,7 @@ void qmp_system_reset(Error **errp)
     qemu_system_reset_request(SHUTDOWN_CAUSE_HOST_QMP_SYSTEM_RESET);
 }
 
-void qmp_system_powerdown(Error **erp)
+void qmp_system_powerdown(Error **errp)
 {
     qemu_system_powerdown_request();
 }
@@ -209,7 +197,7 @@ void qmp_set_password(const char *protocol, const char *password,
         if (!qemu_using_spice(errp)) {
             return;
         }
-        rc = qemu_spice_set_passwd(password, fail_if_connected,
+        rc = qemu_spice.set_passwd(password, fail_if_connected,
                                    disconnect_if_connected);
         if (rc != 0) {
             error_setg(errp, QERR_SET_PASSWD_FAILED);
@@ -255,7 +243,7 @@ void qmp_expire_password(const char *protocol, const char *whenstr,
         if (!qemu_using_spice(errp)) {
             return;
         }
-        rc = qemu_spice_set_pw_expire(when);
+        rc = qemu_spice.set_pw_expire(when);
         if (rc != 0) {
             error_setg(errp, QERR_SET_PASSWD_FAILED);
         }
@@ -340,7 +328,7 @@ void qmp_add_client(const char *protocol, const char *fdname,
     Chardev *s;
     int fd;
 
-    fd = monitor_get_fd(cur_mon, fdname, errp);
+    fd = monitor_get_fd(monitor_cur(), fdname, errp);
     if (fd < 0) {
         return;
     }
@@ -352,7 +340,7 @@ void qmp_add_client(const char *protocol, const char *fdname,
         }
         skipauth = has_skipauth ? skipauth : false;
         tls = has_tls ? tls : false;
-        if (qemu_spice_display_add_client(fd, skipauth, tls) < 0) {
+        if (qemu_spice.display_add_client(fd, skipauth, tls) < 0) {
             error_setg(errp, "spice failed to add client");
             close(fd);
         }

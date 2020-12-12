@@ -24,25 +24,27 @@
 
 #include "qemu/osdep.h"
 
-#include "hw/qdev.h"
+#include "hw/qdev-properties.h"
 #include "qom/object.h"
+#include "qapi/error.h"
 #include "qapi/visitor.h"
 
 
 #define TYPE_STATIC_PROPS "static_prop_type"
-#define STATIC_TYPE(obj) \
-    OBJECT_CHECK(MyType, (obj), TYPE_STATIC_PROPS)
+typedef struct MyType MyType;
+DECLARE_INSTANCE_CHECKER(MyType, STATIC_TYPE,
+                         TYPE_STATIC_PROPS)
 
 #define TYPE_SUBCLASS "static_prop_subtype"
 
 #define PROP_DEFAULT 100
 
-typedef struct MyType {
+struct MyType {
     DeviceState parent_obj;
 
     uint32_t prop1;
     uint32_t prop2;
-} MyType;
+};
 
 static Property static_props[] = {
     DEFINE_PROP_UINT32("prop1", MyType, prop1, PROP_DEFAULT),
@@ -55,7 +57,7 @@ static void static_prop_class_init(ObjectClass *oc, void *data)
     DeviceClass *dc = DEVICE_CLASS(oc);
 
     dc->realize = NULL;
-    dc->props = static_props;
+    device_class_set_props(dc, static_props);
 }
 
 static const TypeInfo static_prop_type = {
@@ -76,7 +78,7 @@ static void test_static_prop_subprocess(void)
     MyType *mt;
 
     mt = STATIC_TYPE(object_new(TYPE_STATIC_PROPS));
-    qdev_init_nofail(DEVICE(mt));
+    qdev_realize(DEVICE(mt), NULL, &error_fatal);
 
     g_assert_cmpuint(mt->prop1, ==, PROP_DEFAULT);
 }
@@ -111,7 +113,7 @@ static void test_static_globalprop_subprocess(void)
     register_global_properties(props);
 
     mt = STATIC_TYPE(object_new(TYPE_STATIC_PROPS));
-    qdev_init_nofail(DEVICE(mt));
+    qdev_realize(DEVICE(mt), NULL, &error_fatal);
 
     g_assert_cmpuint(mt->prop1, ==, 200);
     g_assert_cmpuint(mt->prop2, ==, PROP_DEFAULT);
@@ -126,8 +128,8 @@ static void test_static_globalprop(void)
 }
 
 #define TYPE_DYNAMIC_PROPS "dynamic-prop-type"
-#define DYNAMIC_TYPE(obj) \
-    OBJECT_CHECK(MyType, (obj), TYPE_DYNAMIC_PROPS)
+DECLARE_INSTANCE_CHECKER(MyType, DYNAMIC_TYPE,
+                         TYPE_DYNAMIC_PROPS)
 
 #define TYPE_UNUSED_HOTPLUG   "hotplug-type"
 #define TYPE_UNUSED_NOHOTPLUG "nohotplug-type"
@@ -151,9 +153,9 @@ static void prop2_accessor(Object *obj, Visitor *v, const char *name,
 static void dynamic_instance_init(Object *obj)
 {
     object_property_add(obj, "prop1", "uint32", prop1_accessor, prop1_accessor,
-                        NULL, NULL, NULL);
+                        NULL, NULL);
     object_property_add(obj, "prop2", "uint32", prop2_accessor, prop2_accessor,
-                        NULL, NULL, NULL);
+                        NULL, NULL);
 }
 
 static void dynamic_class_init(ObjectClass *oc, void *data)
@@ -229,7 +231,7 @@ static void test_dynamic_globalprop_subprocess(void)
     register_global_properties(props);
 
     mt = DYNAMIC_TYPE(object_new(TYPE_DYNAMIC_PROPS));
-    qdev_init_nofail(DEVICE(mt));
+    qdev_realize(DEVICE(mt), NULL, &error_fatal);
 
     g_assert_cmpuint(mt->prop1, ==, 101);
     g_assert_cmpuint(mt->prop2, ==, 102);
@@ -249,10 +251,13 @@ static void test_dynamic_globalprop(void)
     g_test_trap_assert_passed();
     g_test_trap_assert_stderr_unmatched("*prop1*");
     g_test_trap_assert_stderr_unmatched("*prop2*");
-    g_test_trap_assert_stderr("*warning: global dynamic-prop-type-bad.prop3 has invalid class name\n*");
+    g_test_trap_assert_stderr(
+        "*warning: global dynamic-prop-type-bad.prop3 has invalid class name*");
     g_test_trap_assert_stderr_unmatched("*prop4*");
-    g_test_trap_assert_stderr("*warning: global nohotplug-type.prop5=105 not used\n*");
-    g_test_trap_assert_stderr("*warning: global nondevice-type.prop6 has invalid class name\n*");
+    g_test_trap_assert_stderr(
+        "*warning: global nohotplug-type.prop5=105 not used*");
+    g_test_trap_assert_stderr(
+        "*warning: global nondevice-type.prop6 has invalid class name*");
     g_test_trap_assert_stdout("");
 }
 
@@ -272,7 +277,7 @@ static void test_subclass_global_props(void)
     register_global_properties(props);
 
     mt = STATIC_TYPE(object_new(TYPE_SUBCLASS));
-    qdev_init_nofail(DEVICE(mt));
+    qdev_realize(DEVICE(mt), NULL, &error_fatal);
 
     g_assert_cmpuint(mt->prop1, ==, 102);
     g_assert_cmpuint(mt->prop2, ==, 104);

@@ -16,8 +16,8 @@ The usual way to run these tests is:
 
   make check
 
-which includes QAPI schema tests, unit tests, and QTests. Different sub-types
-of "make check" tests will be explained below.
+which includes QAPI schema tests, unit tests, QTests and some iotests.
+Different sub-types of "make check" tests will be explained below.
 
 Before running tests, it is best to build QEMU programs first. Some tests
 expect the executables to exist and will fail with obscure messages if they
@@ -41,15 +41,16 @@ add a new unit test:
    test. The test code should be organized with the glib testing framework.
    Copying and modifying an existing test is usually a good idea.
 
-3. Add the test to ``tests/Makefile.include``. First, name the unit test
-   program and add it to ``$(check-unit-y)``; then add a rule to build the
-   executable.  For example:
+3. Add the test to ``tests/meson.build``. The unit tests are listed in a
+   dictionary called ``tests``.  The values are any additional sources and
+   dependencies to be linked with the test.  For a simple test whose source
+   is in ``tests/foo-test.c``, it is enough to add an entry like::
 
-.. code::
-
-  check-unit-y += tests/foo-test$(EXESUF)
-  tests/foo-test$(EXESUF): tests/foo-test.o $(test-util-obj-y)
-  ...
+     {
+       ...
+       'foo-test': [],
+       ...
+     }
 
 Since unit tests don't require environment variables, the simplest way to debug
 a unit test failure is often directly invoking it or even running it under
@@ -70,57 +71,14 @@ QTest
 
 QTest is a device emulation testing framework.  It can be very useful to test
 device models; it could also control certain aspects of QEMU (such as virtual
-clock stepping), with a special purpose "qtest" protocol.  Refer to the
-documentation in ``qtest.c`` for more details of the protocol.
+clock stepping), with a special purpose "qtest" protocol.  Refer to
+:doc:`qtest` for more details.
 
 QTest cases can be executed with
 
 .. code::
 
    make check-qtest
-
-The QTest library is implemented by ``tests/libqtest.c`` and the API is defined
-in ``tests/libqtest.h``.
-
-Consider adding a new QTest case when you are introducing a new virtual
-hardware, or extending one if you are adding functionalities to an existing
-virtual device.
-
-On top of libqtest, a higher level library, ``libqos``, was created to
-encapsulate common tasks of device drivers, such as memory management and
-communicating with system buses or devices. Many virtual device tests use
-libqos instead of directly calling into libqtest.
-
-Steps to add a new QTest case are:
-
-1. Create a new source file for the test. (More than one file can be added as
-   necessary.) For example, ``tests/test-foo-device.c``.
-
-2. Write the test code with the glib and libqtest/libqos API. See also existing
-   tests and the library headers for reference.
-
-3. Register the new test in ``tests/Makefile.include``. Add the test executable
-   name to an appropriate ``check-qtest-*-y`` variable. For example:
-
-   ``check-qtest-generic-y = tests/test-foo-device$(EXESUF)``
-
-4. Add object dependencies of the executable in the Makefile, including the
-   test source file(s) and other interesting objects. For example:
-
-   ``tests/test-foo-device$(EXESUF): tests/test-foo-device.o $(libqos-obj-y)``
-
-Debugging a QTest failure is slightly harder than the unit test because the
-tests look up QEMU program names in the environment variables, such as
-``QTEST_QEMU_BINARY`` and ``QTEST_QEMU_IMG``, and also because it is not easy
-to attach gdb to the QEMU process spawned from the test. But manual invoking
-and using gdb on the test is still simple to do: find out the actual command
-from the output of
-
-.. code::
-
-  make check-qtest V=1
-
-which you can run manually.
 
 QAPI schema tests
 -----------------
@@ -152,8 +110,9 @@ parser (either fixing a bug or extending/modifying the syntax). To do this:
 check-block
 -----------
 
-``make check-block`` is a legacy command to invoke block layer iotests and is
-rarely used. See "QEMU iotests" section below for more information.
+``make check-block`` runs a subset of the block layer iotests (the tests that
+are in the "auto" group in ``tests/qemu-iotests/group``).
+See the "QEMU iotests" section below for more information.
 
 GCC gcov support
 ----------------
@@ -163,13 +122,12 @@ instrumenting the tested code. To use it, configure QEMU with
 ``--enable-gcov`` option and build. Then run ``make check`` as usual.
 
 If you want to gather coverage information on a single test the ``make
-clean-coverage`` target can be used to delete any existing coverage
+clean-gcda`` target can be used to delete any existing coverage
 information before running a single test.
 
 You can generate a HTML coverage report by executing ``make
-coverage-report`` which will create
-./reports/coverage/coverage-report.html. If you want to create it
-elsewhere simply execute ``make /foo/bar/baz/coverage-report.html``.
+coverage-html`` which will create
+``meson-logs/coveragereport/index.html``.
 
 Further analysis can be conducted by running the ``gcov`` command
 directly on the various .gcda output files. Please read the ``gcov``
@@ -265,6 +223,8 @@ Otherwise, image locking implications have to be considered.  For example,
 another application on the host may have locked the file, possibly leading to a
 test failure.  If using such devices are explicitly desired, consider adding
 ``locking=off`` option to disable image locking.
+
+.. _docker-ref:
 
 Docker based tests
 ==================
@@ -394,6 +354,113 @@ list is in the ``make docker`` help text. The frequently used ones are:
 * ``DEBUG=1``: enables debug. See the previous "Debugging a Docker test
   failure" section.
 
+Thread Sanitizer
+================
+
+Thread Sanitizer (TSan) is a tool which can detect data races.  QEMU supports
+building and testing with this tool.
+
+For more information on TSan:
+
+https://github.com/google/sanitizers/wiki/ThreadSanitizerCppManual
+
+Thread Sanitizer in Docker
+---------------------------
+TSan is currently supported in the ubuntu2004 docker.
+
+The test-tsan test will build using TSan and then run make check.
+
+.. code::
+
+  make docker-test-tsan@ubuntu2004
+
+TSan warnings under docker are placed in files located at build/tsan/.
+
+We recommend using DEBUG=1 to allow launching the test from inside the docker,
+and to allow review of the warnings generated by TSan.
+
+Building and Testing with TSan
+------------------------------
+
+It is possible to build and test with TSan, with a few additional steps.
+These steps are normally done automatically in the docker.
+
+There is a one time patch needed in clang-9 or clang-10 at this time:
+
+.. code::
+
+  sed -i 's/^const/static const/g' \
+      /usr/lib/llvm-10/lib/clang/10.0.0/include/sanitizer/tsan_interface.h
+
+To configure the build for TSan:
+
+.. code::
+
+  ../configure --enable-tsan --cc=clang-10 --cxx=clang++-10 \
+               --disable-werror --extra-cflags="-O0"
+
+The runtime behavior of TSAN is controlled by the TSAN_OPTIONS environment
+variable.
+
+More information on the TSAN_OPTIONS can be found here:
+
+https://github.com/google/sanitizers/wiki/ThreadSanitizerFlags
+
+For example:
+
+.. code::
+
+  export TSAN_OPTIONS=suppressions=<path to qemu>/tests/tsan/suppressions.tsan \
+                      detect_deadlocks=false history_size=7 exitcode=0 \
+                      log_path=<build path>/tsan/tsan_warning
+
+The above exitcode=0 has TSan continue without error if any warnings are found.
+This allows for running the test and then checking the warnings afterwards.
+If you want TSan to stop and exit with error on warnings, use exitcode=66.
+
+TSan Suppressions
+-----------------
+Keep in mind that for any data race warning, although there might be a data race
+detected by TSan, there might be no actual bug here.  TSan provides several
+different mechanisms for suppressing warnings.  In general it is recommended
+to fix the code if possible to eliminate the data race rather than suppress
+the warning.
+
+A few important files for suppressing warnings are:
+
+tests/tsan/suppressions.tsan - Has TSan warnings we wish to suppress at runtime.
+The comment on each suppression will typically indicate why we are
+suppressing it.  More information on the file format can be found here:
+
+https://github.com/google/sanitizers/wiki/ThreadSanitizerSuppressions
+
+tests/tsan/blacklist.tsan - Has TSan warnings we wish to disable
+at compile time for test or debug.
+Add flags to configure to enable:
+
+"--extra-cflags=-fsanitize-blacklist=<src path>/tests/tsan/blacklist.tsan"
+
+More information on the file format can be found here under "Blacklist Format":
+
+https://github.com/google/sanitizers/wiki/ThreadSanitizerFlags
+
+TSan Annotations
+----------------
+include/qemu/tsan.h defines annotations.  See this file for more descriptions
+of the annotations themselves.  Annotations can be used to suppress
+TSan warnings or give TSan more information so that it can detect proper
+relationships between accesses of data.
+
+Annotation examples can be found here:
+
+https://github.com/llvm/llvm-project/tree/master/compiler-rt/test/tsan/
+
+Good files to start with are: annotate_happens_before.cpp and ignore_race.cpp
+
+The full set of annotations can be found here:
+
+https://github.com/llvm/llvm-project/blob/master/compiler-rt/lib/tsan/rtl/tsan_interface_ann.cpp
+
 VM testing
 ==========
 
@@ -416,12 +483,14 @@ access, so they SHOULD NOT be exposed to external interfaces if you are
 concerned about attackers taking control of the guest and potentially
 exploiting a QEMU security bug to compromise the host.
 
-QEMU binary
------------
+QEMU binaries
+-------------
 
 By default, qemu-system-x86_64 is searched in $PATH to run the guest. If there
 isn't one, or if it is older than 2.10, the test won't work. In this case,
 provide the QEMU binary in env var: ``QEMU=/path/to/qemu-2.10+``.
+
+Likewise the path to qemu-img can be set in QEMU_IMG environment variable.
 
 Make jobs
 ---------
@@ -585,7 +654,7 @@ To manually install Avocado and its dependencies, run:
 
 Alternatively, follow the instructions on this link:
 
-  http://avocado-framework.readthedocs.io/en/latest/GetStartedGuide.html#installing-avocado
+  https://avocado-framework.readthedocs.io/en/latest/guides/user/chapters/installing.html
 
 Overview
 --------
@@ -708,7 +777,7 @@ the following approaches:
 1) Set ``qemu_bin``, and use the given binary
 
 2) Do not set ``qemu_bin``, and use a QEMU binary named like
-   "${arch}-softmmu/qemu-system-${arch}", either in the current
+   "qemu-system-${arch}", either in the current
    working directory, or in the current source tree.
 
 The resulting ``qemu_bin`` value will be preserved in the
@@ -744,6 +813,17 @@ name.  If one is not given explicitly, it will either be set to
 ``None``, or, if the test is tagged with one (and only one)
 ``:avocado: tags=arch:VALUE`` tag, it will be set to ``VALUE``.
 
+machine
+~~~~~~~
+
+The machine type that will be set to all QEMUMachine instances created
+by the test.
+
+The ``machine`` attribute will be set to the test parameter of the same
+name.  If one is not given explicitly, it will either be set to
+``None``, or, if the test is tagged with one (and only one)
+``:avocado: tags=machine:VALUE`` tag, it will be set to ``VALUE``.
+
 qemu_bin
 ~~~~~~~~
 
@@ -757,14 +837,14 @@ Parameter reference
 To understand how Avocado parameters are accessed by tests, and how
 they can be passed to tests, please refer to::
 
-  http://avocado-framework.readthedocs.io/en/latest/WritingTests.html#accessing-test-parameters
+  https://avocado-framework.readthedocs.io/en/latest/guides/writer/chapters/writing.html#accessing-test-parameters
 
 Parameter values can be easily seen in the log files, and will look
 like the following:
 
 .. code::
 
-  PARAMS (key=qemu_bin, path=*, default=x86_64-softmmu/qemu-system-x86_64) => 'x86_64-softmmu/qemu-system-x86_64
+  PARAMS (key=qemu_bin, path=*, default=./qemu-system-x86_64) => './qemu-system-x86_64
 
 arch
 ~~~~
@@ -778,6 +858,13 @@ architecture of a kernel or disk image to boot a VM with.
 
 This parameter has a direct relation with the ``arch`` attribute.  If
 not given, it will default to None.
+
+machine
+~~~~~~~
+
+The machine type that will be set to all QEMUMachine instances created
+by the test.
+
 
 qemu_bin
 ~~~~~~~~
@@ -799,3 +886,77 @@ And remove any package you want with::
 
 If you've used ``make check-acceptance``, the Python virtual environment where
 Avocado is installed will be cleaned up as part of ``make check-clean``.
+
+Testing with "make check-tcg"
+=============================
+
+The check-tcg tests are intended for simple smoke tests of both
+linux-user and softmmu TCG functionality. However to build test
+programs for guest targets you need to have cross compilers available.
+If your distribution supports cross compilers you can do something as
+simple as::
+
+  apt install gcc-aarch64-linux-gnu
+
+The configure script will automatically pick up their presence.
+Sometimes compilers have slightly odd names so the availability of
+them can be prompted by passing in the appropriate configure option
+for the architecture in question, for example::
+
+  $(configure) --cross-cc-aarch64=aarch64-cc
+
+There is also a ``--cross-cc-flags-ARCH`` flag in case additional
+compiler flags are needed to build for a given target.
+
+If you have the ability to run containers as the user you can also
+take advantage of the build systems "Docker" support. It will then use
+containers to build any test case for an enabled guest where there is
+no system compiler available. See :ref:`docker-ref` for details.
+
+Running subset of tests
+-----------------------
+
+You can build the tests for one architecture::
+
+  make build-tcg-tests-$TARGET
+
+And run with::
+
+  make run-tcg-tests-$TARGET
+
+Adding ``V=1`` to the invocation will show the details of how to
+invoke QEMU for the test which is useful for debugging tests.
+
+TCG test dependencies
+---------------------
+
+The TCG tests are deliberately very light on dependencies and are
+either totally bare with minimal gcc lib support (for softmmu tests)
+or just glibc (for linux-user tests). This is because getting a cross
+compiler to work with additional libraries can be challenging.
+
+Other TCG Tests
+---------------
+
+There are a number of out-of-tree test suites that are used for more
+extensive testing of processor features.
+
+KVM Unit Tests
+~~~~~~~~~~~~~~
+
+The KVM unit tests are designed to run as a Guest OS under KVM but
+there is no reason why they can't exercise the TCG as well. It
+provides a minimal OS kernel with hooks for enabling the MMU as well
+as reporting test results via a special device::
+
+  https://git.kernel.org/pub/scm/virt/kvm/kvm-unit-tests.git
+
+Linux Test Project
+~~~~~~~~~~~~~~~~~~
+
+The LTP is focused on exercising the syscall interface of a Linux
+kernel. It checks that syscalls behave as documented and strives to
+exercise as many corner cases as possible. It is a useful test suite
+to run to exercise QEMU's linux-user code::
+
+  https://linux-test-project.github.io/

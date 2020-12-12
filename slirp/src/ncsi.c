@@ -47,7 +47,7 @@ static uint32_t ncsi_calculate_checksum(uint16_t *data, int len)
      * 32-bit unsigned sum of the NC-SI packet header and NC-SI packet
      * payload interpreted as a series of 16-bit unsigned integer values.
      */
-    for (i = 0; i < len; i++) {
+    for (i = 0; i < len / 2; i++) {
         checksum += htons(data[i]);
     }
 
@@ -136,7 +136,8 @@ static const struct ncsi_rsp_handler {
 
 void ncsi_input(Slirp *slirp, const uint8_t *pkt, int pkt_len)
 {
-    struct ncsi_pkt_hdr *nh = (struct ncsi_pkt_hdr *)(pkt + ETH_HLEN);
+    const struct ncsi_pkt_hdr *nh =
+        (const struct ncsi_pkt_hdr *)(pkt + ETH_HLEN);
     uint8_t ncsi_reply[ETH_HLEN + NCSI_MAX_LEN];
     struct ethhdr *reh = (struct ethhdr *)ncsi_reply;
     struct ncsi_rsp_pkt_hdr *rnh =
@@ -146,6 +147,10 @@ void ncsi_input(Slirp *slirp, const uint8_t *pkt, int pkt_len)
     int ncsi_rsp_len = sizeof(*nh);
     uint32_t checksum;
     uint32_t *pchecksum;
+
+    if (pkt_len < ETH_HLEN + sizeof(struct ncsi_pkt_hdr)) {
+        return; /* packet too short */
+    }
 
     memset(ncsi_reply, 0, sizeof(ncsi_reply));
 

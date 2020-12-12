@@ -24,11 +24,12 @@
 #include "qapi/qmp/qjson.h"
 #include "qapi/qmp/qstring.h"
 #include "guest-agent-core.h"
-#include "qga-qapi-commands.h"
+#include "qga-qapi-init-commands.h"
 #include "qapi/qmp/qerror.h"
 #include "qapi/error.h"
 #include "channel.h"
 #include "qemu/bswap.h"
+#include "qemu/cutils.h"
 #include "qemu/help_option.h"
 #include "qemu/sockets.h"
 #include "qemu/systemd.h"
@@ -234,7 +235,9 @@ QEMU_COPYRIGHT "\n"
 "  -p, --path        device/socket path (the default for virtio-serial is:\n"
 "                    %s,\n"
 "                    the default for isa-serial is:\n"
-"                    %s)\n"
+"                    %s).\n"
+"                    Socket addresses for vsock-listen are written as\n"
+"                    <cid>:<port>.\n"
 "  -l, --logfile     set logfile path, logs to stderr by default\n"
 "  -f, --pidfile     specify pidfile (default is %s)\n"
 #ifdef CONFIG_FSFREEZE
@@ -359,7 +362,7 @@ static gint ga_strcmp(gconstpointer str1, gconstpointer str2)
 }
 
 /* disable commands that aren't safe for fsfreeze */
-static void ga_disable_non_whitelisted(QmpCommand *cmd, void *opaque)
+static void ga_disable_non_whitelisted(const QmpCommand *cmd, void *opaque)
 {
     bool whitelisted = false;
     int i = 0;
@@ -378,7 +381,7 @@ static void ga_disable_non_whitelisted(QmpCommand *cmd, void *opaque)
 }
 
 /* [re-]enable all commands, except those explicitly blacklisted by user */
-static void ga_enable_non_blacklisted(QmpCommand *cmd, void *opaque)
+static void ga_enable_non_blacklisted(const QmpCommand *cmd, void *opaque)
 {
     GList *blacklist = opaque;
     const char *name = qmp_command_name(cmd);
@@ -529,7 +532,11 @@ static int send_response(GAState *s, const QDict *rsp)
     QString *payload_qstr, *response_qstr;
     GIOStatus status;
 
-    g_assert(rsp && s->channel);
+    g_assert(s->channel);
+
+    if (!rsp) {
+        return 0;
+    }
 
     payload_qstr = qobject_to_json(QOBJECT(rsp));
     if (!payload_qstr) {
@@ -572,7 +579,7 @@ static void process_event(void *opaque, QObject *obj, Error *err)
     }
 
     g_debug("processing command");
-    rsp = qmp_dispatch(&ga_commands, obj, false);
+    rsp = qmp_dispatch(&ga_commands, obj, false, NULL);
 
 end:
     ret = send_response(s, rsp);
@@ -918,7 +925,7 @@ int64_t ga_get_fd_handle(GAState *s, Error **errp)
     return handle;
 }
 
-static void ga_print_cmd(QmpCommand *cmd, void *opaque)
+static void ga_print_cmd(const QmpCommand *cmd, void *opaque)
 {
     printf("%s\n", qmp_command_name(cmd));
 }
@@ -962,7 +969,7 @@ static void config_load(GAConfig *config)
 {
     GError *gerr = NULL;
     GKeyFile *keyfile;
-    const char *conf = g_getenv("QGA_CONF") ?: QGA_CONF_DEFAULT;
+    g_autofree char *conf = g_strdup(g_getenv("QGA_CONF")) ?: get_relocated_path(QGA_CONF_DEFAULT);
 
     /* read system config */
     keyfile = g_key_file_new();
@@ -1021,7 +1028,7 @@ end:
     if (gerr &&
         !(gerr->domain == G_FILE_ERROR && gerr->code == G_FILE_ERROR_NOENT)) {
         g_critical("error loading configuration from path: %s, %s",
-                   QGA_CONF_DEFAULT, gerr->message);
+                   conf, gerr->message);
         exit(EXIT_FAILURE);
     }
     g_clear_error(&gerr);
@@ -1135,7 +1142,7 @@ static void config_parse(GAConfig *config, int argc, char **argv)
 #ifdef CONFIG_FSFREEZE
         case 'F':
             g_free(config->fsfreeze_hook);
-            config->fsfreeze_hook = g_strdup(optarg ?: QGA_FSFREEZE_HOOK_DEFAULT);
+            config->fsfreeze_hook = optarg ? g_strdup(optarg) : get_relocated_path(QGA_FSFREEZE_HOOK_DEFAULT);
             break;
 #endif
         case 't':
@@ -1457,6 +1464,7 @@ int main(int argc, char **argv)
 
     config->log_level = G_LOG_LEVEL_ERROR | G_LOG_LEVEL_CRITICAL;
 
+    qemu_init_exec_dir(argv[0]);
     qga_qmp_init_marshal(&ga_commands);
 
     init_dfl_pathnames();

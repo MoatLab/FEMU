@@ -12,11 +12,10 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
-#include "hw/hw.h"
-#include "sysemu/sysemu.h"
 #include "sysemu/kvm.h"
 #include "net/net.h"
 #include "hw/virtio/virtio.h"
+#include "migration/qemu-file-types.h"
 #include "hw/virtio/virtio-net.h"
 #include "hw/sysbus.h"
 #include "qemu/bitops.h"
@@ -194,7 +193,7 @@ typedef struct VirtioThinintInfo {
 typedef struct VirtioRevInfo {
     uint16_t revision;
     uint16_t length;
-    uint8_t data[0];
+    uint8_t data[];
 } QEMU_PACKED VirtioRevInfo;
 
 /* Specify where the virtqueues for the subchannel are in guest memory. */
@@ -698,6 +697,7 @@ static void virtio_ccw_device_realize(VirtioCcwDevice *dev, Error **errp)
     CCWDeviceClass *ck = CCW_DEVICE_GET_CLASS(ccw_dev);
     SubchDev *sch;
     Error *err = NULL;
+    int i;
 
     sch = css_create_sch(ccw_dev->devno, errp);
     if (!sch) {
@@ -718,6 +718,9 @@ static void virtio_ccw_device_realize(VirtioCcwDevice *dev, Error **errp)
     ccw_dev->sch = sch;
     dev->indicators = NULL;
     dev->revision = -1;
+    for (i = 0; i < ADAPTER_ROUTES_MAX_GSI; i++) {
+        dev->routes.gsi[i] = -1;
+    }
     css_sch_build_virtual_schib(sch, 0, VIRTIO_CCW_CHPID_TYPE);
 
     trace_virtio_ccw_new_device(
@@ -749,14 +752,14 @@ out_err:
     g_free(sch);
 }
 
-static void virtio_ccw_device_unrealize(VirtioCcwDevice *dev, Error **errp)
+static void virtio_ccw_device_unrealize(VirtioCcwDevice *dev)
 {
     VirtIOCCWDeviceClass *dc = VIRTIO_CCW_DEVICE_GET_CLASS(dev);
     CcwDevice *ccw_dev = CCW_DEVICE(dev);
     SubchDev *sch = ccw_dev->sch;
 
     if (dc->unrealize) {
-        dc->unrealize(dev, errp);
+        dc->unrealize(dev);
     }
 
     if (sch) {
@@ -783,24 +786,26 @@ static inline VirtioCcwDevice *to_virtio_ccw_dev_fast(DeviceState *d)
 static uint8_t virtio_set_ind_atomic(SubchDev *sch, uint64_t ind_loc,
                                      uint8_t to_be_set)
 {
-    uint8_t ind_old, ind_new;
+    uint8_t expected, actual;
     hwaddr len = 1;
-    uint8_t *ind_addr;
+    /* avoid  multiple fetches */
+    uint8_t volatile *ind_addr;
 
-    ind_addr = cpu_physical_memory_map(ind_loc, &len, 1);
+    ind_addr = cpu_physical_memory_map(ind_loc, &len, true);
     if (!ind_addr) {
         error_report("%s(%x.%x.%04x): unable to access indicator",
                      __func__, sch->cssid, sch->ssid, sch->schid);
         return -1;
     }
+    actual = *ind_addr;
     do {
-        ind_old = *ind_addr;
-        ind_new = ind_old | to_be_set;
-    } while (atomic_cmpxchg(ind_addr, ind_old, ind_new) != ind_old);
-    trace_virtio_ccw_set_ind(ind_loc, ind_old, ind_new);
-    cpu_physical_memory_unmap(ind_addr, len, 1, len);
+        expected = actual;
+        actual = qatomic_cmpxchg(ind_addr, expected, expected | to_be_set);
+    } while (actual != expected);
+    trace_virtio_ccw_set_ind(ind_loc, actual, actual | to_be_set);
+    cpu_physical_memory_unmap((void *)ind_addr, len, 1, len);
 
-    return ind_old;
+    return actual;
 }
 
 static void virtio_ccw_notify(DeviceState *d, uint16_t vector)
@@ -1116,6 +1121,21 @@ static void virtio_ccw_device_plugged(DeviceState *d, Error **errp)
         dev->max_rev = 0;
     }
 
+    if (!virtio_ccw_rev_max(dev) && !virtio_legacy_allowed(vdev)) {
+        /*
+         * To avoid migration issues, we allow legacy mode when legacy
+         * check is disabled in the old machine types (< 5.1).
+         */
+        if (virtio_legacy_check_disabled(vdev)) {
+            warn_report("device requires revision >= 1, but for backward "
+                        "compatibility max_revision=0 is allowed");
+        } else {
+            error_setg(errp, "Invalid value of property max_rev "
+                       "(is %d expected >= 1)", virtio_ccw_rev_max(dev));
+            return;
+        }
+    }
+
     if (virtio_get_num_queues(vdev) > VIRTIO_QUEUE_MAX) {
         error_setg(errp, "The number of virtqueues %d "
                    "exceeds virtio limit %d", n,
@@ -1152,11 +1172,11 @@ static void virtio_ccw_busdev_realize(DeviceState *dev, Error **errp)
     virtio_ccw_device_realize(_dev, errp);
 }
 
-static void virtio_ccw_busdev_unrealize(DeviceState *dev, Error **errp)
+static void virtio_ccw_busdev_unrealize(DeviceState *dev)
 {
     VirtioCcwDevice *_dev = (VirtioCcwDevice *)dev;
 
-    virtio_ccw_device_unrealize(_dev, errp);
+    virtio_ccw_device_unrealize(_dev);
 }
 
 static void virtio_ccw_busdev_unplug(HotplugHandler *hotplug_dev,
@@ -1226,6 +1246,7 @@ static const TypeInfo virtio_ccw_bus_info = {
     .name = TYPE_VIRTIO_CCW_BUS,
     .parent = TYPE_VIRTIO_BUS,
     .instance_size = sizeof(VirtioCcwBusState),
+    .class_size = sizeof(VirtioCcwBusClass),
     .class_init = virtio_ccw_bus_class_init,
 };
 

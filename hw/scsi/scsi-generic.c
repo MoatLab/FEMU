@@ -17,6 +17,8 @@
 #include "qemu/error-report.h"
 #include "qemu/module.h"
 #include "hw/scsi/scsi.h"
+#include "migration/qemu-file-types.h"
+#include "hw/qdev-properties.h"
 #include "hw/scsi/emulation.h"
 #include "sysemu/block-backend.h"
 #include "trace.h"
@@ -160,7 +162,8 @@ static void scsi_handle_inquiry_reply(SCSIGenericReq *r, SCSIDevice *s)
         }
     }
 
-    if (s->type == TYPE_DISK && (r->req.cmd.buf[1] & 0x01)) {
+    if ((s->type == TYPE_DISK || s->type == TYPE_ZBC) &&
+        (r->req.cmd.buf[1] & 0x01)) {
         page = r->req.cmd.buf[2];
         if (page == 0xb0) {
             uint32_t max_transfer =
@@ -297,10 +300,11 @@ static void scsi_read_complete(void * opaque, int ret)
     }
     blk_set_guest_block_size(s->conf.blk, s->blocksize);
 
-    /* Patch MODE SENSE device specific parameters if the BDS is opened
+    /*
+     * Patch MODE SENSE device specific parameters if the BDS is opened
      * readonly.
      */
-    if ((s->type == TYPE_DISK || s->type == TYPE_TAPE) &&
+    if ((s->type == TYPE_DISK || s->type == TYPE_TAPE || s->type == TYPE_ZBC) &&
         blk_is_read_only(s->conf.blk) &&
         (r->req.cmd.buf[0] == MODE_SENSE ||
          r->req.cmd.buf[0] == MODE_SENSE_10) &&
@@ -615,7 +619,7 @@ static void scsi_generic_read_device_identification(SCSIDevice *s)
 void scsi_generic_read_device_inquiry(SCSIDevice *s)
 {
     scsi_generic_read_device_identification(s);
-    if (s->type == TYPE_DISK) {
+    if (s->type == TYPE_DISK || s->type == TYPE_ZBC) {
         scsi_generic_set_vpd_bl_emulation(s);
     } else {
         s->needs_vpd_bl_emulation = false;
@@ -766,7 +770,7 @@ static void scsi_generic_class_initfn(ObjectClass *klass, void *data)
     dc->fw_name = "disk";
     dc->desc = "pass through generic scsi device (/dev/sg*)";
     dc->reset = scsi_generic_reset;
-    dc->props = scsi_generic_properties;
+    device_class_set_props(dc, scsi_generic_properties);
     dc->vmsd  = &vmstate_scsi_device;
 }
 

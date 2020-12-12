@@ -34,7 +34,6 @@
 #include "qemu/module.h"
 #include "io/channel-file.h"
 
-static char temp_file[] = "/tmp/vmst.test.XXXXXX";
 static int temp_fd;
 
 
@@ -812,6 +811,586 @@ static void test_load_q(void)
     qemu_fclose(fload);
 }
 
+/* interval (key) */
+typedef struct TestGTreeInterval {
+    uint64_t low;
+    uint64_t high;
+} TestGTreeInterval;
+
+#define VMSTATE_INTERVAL                               \
+{                                                      \
+    .name = "interval",                                \
+    .version_id = 1,                                   \
+    .minimum_version_id = 1,                           \
+    .fields = (VMStateField[]) {                       \
+        VMSTATE_UINT64(low, TestGTreeInterval),        \
+        VMSTATE_UINT64(high, TestGTreeInterval),       \
+        VMSTATE_END_OF_LIST()                          \
+    }                                                  \
+}
+
+/* mapping (value) */
+typedef struct TestGTreeMapping {
+    uint64_t phys_addr;
+    uint32_t flags;
+} TestGTreeMapping;
+
+#define VMSTATE_MAPPING                               \
+{                                                     \
+    .name = "mapping",                                \
+    .version_id = 1,                                  \
+    .minimum_version_id = 1,                          \
+    .fields = (VMStateField[]) {                      \
+        VMSTATE_UINT64(phys_addr, TestGTreeMapping),  \
+        VMSTATE_UINT32(flags, TestGTreeMapping),      \
+        VMSTATE_END_OF_LIST()                         \
+    },                                                \
+}
+
+static const VMStateDescription vmstate_interval_mapping[2] = {
+    VMSTATE_MAPPING,   /* value */
+    VMSTATE_INTERVAL   /* key   */
+};
+
+typedef struct TestGTreeDomain {
+    int32_t  id;
+    GTree    *mappings;
+} TestGTreeDomain;
+
+typedef struct TestGTreeIOMMU {
+    int32_t  id;
+    GTree    *domains;
+} TestGTreeIOMMU;
+
+/* Interval comparison function */
+static gint interval_cmp(gconstpointer a, gconstpointer b, gpointer user_data)
+{
+    TestGTreeInterval *inta = (TestGTreeInterval *)a;
+    TestGTreeInterval *intb = (TestGTreeInterval *)b;
+
+    if (inta->high < intb->low) {
+        return -1;
+    } else if (intb->high < inta->low) {
+        return 1;
+    } else {
+        return 0;
+    }
+}
+
+/* ID comparison function */
+static gint int_cmp(gconstpointer a, gconstpointer b, gpointer user_data)
+{
+    guint ua = GPOINTER_TO_UINT(a);
+    guint ub = GPOINTER_TO_UINT(b);
+    return (ua > ub) - (ua < ub);
+}
+
+static void destroy_domain(gpointer data)
+{
+    TestGTreeDomain *domain = (TestGTreeDomain *)data;
+
+    g_tree_destroy(domain->mappings);
+    g_free(domain);
+}
+
+static int domain_preload(void *opaque)
+{
+    TestGTreeDomain *domain = opaque;
+
+    domain->mappings = g_tree_new_full((GCompareDataFunc)interval_cmp,
+                                       NULL, g_free, g_free);
+    return 0;
+}
+
+static int iommu_preload(void *opaque)
+{
+    TestGTreeIOMMU *iommu = opaque;
+
+    iommu->domains = g_tree_new_full((GCompareDataFunc)int_cmp,
+                                     NULL, NULL, destroy_domain);
+    return 0;
+}
+
+static const VMStateDescription vmstate_domain = {
+    .name = "domain",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .pre_load = domain_preload,
+    .fields = (VMStateField[]) {
+        VMSTATE_INT32(id, TestGTreeDomain),
+        VMSTATE_GTREE_V(mappings, TestGTreeDomain, 1,
+                        vmstate_interval_mapping,
+                        TestGTreeInterval, TestGTreeMapping),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+/* test QLIST Migration */
+
+typedef struct TestQListElement {
+    uint32_t  id;
+    QLIST_ENTRY(TestQListElement) next;
+} TestQListElement;
+
+typedef struct TestQListContainer {
+    uint32_t  id;
+    QLIST_HEAD(, TestQListElement) list;
+} TestQListContainer;
+
+static const VMStateDescription vmstate_qlist_element = {
+    .name = "test/queue list",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (VMStateField[]) {
+        VMSTATE_UINT32(id, TestQListElement),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static const VMStateDescription vmstate_iommu = {
+    .name = "iommu",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .pre_load = iommu_preload,
+    .fields = (VMStateField[]) {
+        VMSTATE_INT32(id, TestGTreeIOMMU),
+        VMSTATE_GTREE_DIRECT_KEY_V(domains, TestGTreeIOMMU, 1,
+                                   &vmstate_domain, TestGTreeDomain),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static const VMStateDescription vmstate_container = {
+    .name = "test/container/qlist",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (VMStateField[]) {
+        VMSTATE_UINT32(id, TestQListContainer),
+        VMSTATE_QLIST_V(list, TestQListContainer, 1, vmstate_qlist_element,
+                        TestQListElement, next),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+uint8_t first_domain_dump[] = {
+    /* id */
+    0x00, 0x0, 0x0, 0x6,
+    0x00, 0x0, 0x0, 0x2, /* 2 mappings */
+    0x1, /* start of a */
+    /* a */
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1F, 0xFF,
+    /* map_a */
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xa0, 0x00,
+    0x00, 0x00, 0x00, 0x01,
+    0x1, /* start of b */
+    /* b */
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x4F, 0xFF,
+    /* map_b */
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x0e, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x02,
+    0x0, /* end of gtree */
+    QEMU_VM_EOF, /* just to ensure we won't get EOF reported prematurely */
+};
+
+static TestGTreeDomain *create_first_domain(void)
+{
+    TestGTreeDomain *domain;
+    TestGTreeMapping *map_a, *map_b;
+    TestGTreeInterval *a, *b;
+
+    domain = g_malloc0(sizeof(TestGTreeDomain));
+    domain->id = 6;
+
+    a = g_malloc0(sizeof(TestGTreeInterval));
+    a->low = 0x1000;
+    a->high = 0x1FFF;
+
+    b = g_malloc0(sizeof(TestGTreeInterval));
+    b->low = 0x4000;
+    b->high = 0x4FFF;
+
+    map_a = g_malloc0(sizeof(TestGTreeMapping));
+    map_a->phys_addr = 0xa000;
+    map_a->flags = 1;
+
+    map_b = g_malloc0(sizeof(TestGTreeMapping));
+    map_b->phys_addr = 0xe0000;
+    map_b->flags = 2;
+
+    domain->mappings = g_tree_new_full((GCompareDataFunc)interval_cmp, NULL,
+                                        (GDestroyNotify)g_free,
+                                        (GDestroyNotify)g_free);
+    g_tree_insert(domain->mappings, a, map_a);
+    g_tree_insert(domain->mappings, b, map_b);
+    return domain;
+}
+
+static void test_gtree_save_domain(void)
+{
+    TestGTreeDomain *first_domain = create_first_domain();
+
+    save_vmstate(&vmstate_domain, first_domain);
+    compare_vmstate(first_domain_dump, sizeof(first_domain_dump));
+    destroy_domain(first_domain);
+}
+
+struct match_node_data {
+    GTree *tree;
+    gpointer key;
+    gpointer value;
+};
+
+struct tree_cmp_data {
+    GTree *tree1;
+    GTree *tree2;
+    GTraverseFunc match_node;
+};
+
+static gboolean match_interval_mapping_node(gpointer key,
+                                            gpointer value, gpointer data)
+{
+    TestGTreeMapping *map_a, *map_b;
+    TestGTreeInterval *a, *b;
+    struct match_node_data *d = (struct match_node_data *)data;
+    a = (TestGTreeInterval *)key;
+    b = (TestGTreeInterval *)d->key;
+
+    map_a = (TestGTreeMapping *)value;
+    map_b = (TestGTreeMapping *)d->value;
+
+    assert(a->low == b->low);
+    assert(a->high == b->high);
+    assert(map_a->phys_addr == map_b->phys_addr);
+    assert(map_a->flags == map_b->flags);
+    g_tree_remove(d->tree, key);
+    return true;
+}
+
+static gboolean diff_tree(gpointer key, gpointer value, gpointer data)
+{
+    struct tree_cmp_data *tp = (struct tree_cmp_data *)data;
+    struct match_node_data d = {tp->tree2, key, value};
+
+    g_tree_foreach(tp->tree2, tp->match_node, &d);
+    g_tree_remove(tp->tree1, key);
+    return false;
+}
+
+static void compare_trees(GTree *tree1, GTree *tree2,
+                          GTraverseFunc function)
+{
+    struct tree_cmp_data tp = {tree1, tree2, function};
+
+    g_tree_foreach(tree1, diff_tree, &tp);
+    assert(g_tree_nnodes(tree1) == 0);
+    assert(g_tree_nnodes(tree2) == 0);
+}
+
+static void diff_domain(TestGTreeDomain *d1, TestGTreeDomain *d2)
+{
+    assert(d1->id == d2->id);
+    compare_trees(d1->mappings, d2->mappings, match_interval_mapping_node);
+}
+
+static gboolean match_domain_node(gpointer key, gpointer value, gpointer data)
+{
+    uint64_t id1, id2;
+    TestGTreeDomain *d1, *d2;
+    struct match_node_data *d = (struct match_node_data *)data;
+
+    id1 = (uint64_t)(uintptr_t)key;
+    id2 = (uint64_t)(uintptr_t)d->key;
+    d1 = (TestGTreeDomain *)value;
+    d2 = (TestGTreeDomain *)d->value;
+    assert(id1 == id2);
+    diff_domain(d1, d2);
+    g_tree_remove(d->tree, key);
+    return true;
+}
+
+static void diff_iommu(TestGTreeIOMMU *iommu1, TestGTreeIOMMU *iommu2)
+{
+    assert(iommu1->id == iommu2->id);
+    compare_trees(iommu1->domains, iommu2->domains, match_domain_node);
+}
+
+static void test_gtree_load_domain(void)
+{
+    TestGTreeDomain *dest_domain = g_malloc0(sizeof(TestGTreeDomain));
+    TestGTreeDomain *orig_domain = create_first_domain();
+    QEMUFile *fload, *fsave;
+    char eof;
+
+    fsave = open_test_file(true);
+    qemu_put_buffer(fsave, first_domain_dump, sizeof(first_domain_dump));
+    g_assert(!qemu_file_get_error(fsave));
+    qemu_fclose(fsave);
+
+    fload = open_test_file(false);
+
+    vmstate_load_state(fload, &vmstate_domain, dest_domain, 1);
+    eof = qemu_get_byte(fload);
+    g_assert(!qemu_file_get_error(fload));
+    g_assert_cmpint(orig_domain->id, ==, dest_domain->id);
+    g_assert_cmpint(eof, ==, QEMU_VM_EOF);
+
+    diff_domain(orig_domain, dest_domain);
+    destroy_domain(orig_domain);
+    destroy_domain(dest_domain);
+    qemu_fclose(fload);
+}
+
+uint8_t iommu_dump[] = {
+    /* iommu id */
+    0x00, 0x0, 0x0, 0x7,
+    0x00, 0x0, 0x0, 0x2, /* 2 domains */
+    0x1,/* start of domain 5 */
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x0, 0x0, 0x5, /* key = 5 */
+        0x00, 0x0, 0x0, 0x5, /* domain1 id */
+        0x00, 0x0, 0x0, 0x1, /* 1 mapping */
+        0x1, /* start of mappings */
+            /* c */
+            0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x01, 0xFF, 0xFF, 0xFF,
+            /* map_c */
+            0x00, 0x00, 0x00, 0x00, 0x0F, 0x00, 0x00, 0x00,
+            0x00, 0x0, 0x0, 0x3,
+            0x0, /* end of domain1 mappings*/
+    0x1,/* start of domain 6 */
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x0, 0x0, 0x6, /* key = 6 */
+        0x00, 0x0, 0x0, 0x6, /* domain6 id */
+            0x00, 0x0, 0x0, 0x2, /* 2 mappings */
+            0x1, /* start of a */
+            /* a */
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1F, 0xFF,
+            /* map_a */
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xa0, 0x00,
+            0x00, 0x00, 0x00, 0x01,
+            0x1, /* start of b */
+            /* b */
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x4F, 0xFF,
+            /* map_b */
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x0e, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x02,
+            0x0, /* end of domain6 mappings*/
+    0x0, /* end of domains */
+    QEMU_VM_EOF, /* just to ensure we won't get EOF reported prematurely */
+};
+
+static TestGTreeIOMMU *create_iommu(void)
+{
+    TestGTreeIOMMU *iommu = g_malloc0(sizeof(TestGTreeIOMMU));
+    TestGTreeDomain *first_domain = create_first_domain();
+    TestGTreeDomain *second_domain;
+    TestGTreeMapping *map_c;
+    TestGTreeInterval *c;
+
+    iommu->id = 7;
+    iommu->domains = g_tree_new_full((GCompareDataFunc)int_cmp, NULL,
+                                     NULL,
+                                     destroy_domain);
+
+    second_domain = g_malloc0(sizeof(TestGTreeDomain));
+    second_domain->id = 5;
+    second_domain->mappings = g_tree_new_full((GCompareDataFunc)interval_cmp,
+                                              NULL,
+                                              (GDestroyNotify)g_free,
+                                              (GDestroyNotify)g_free);
+
+    g_tree_insert(iommu->domains, GUINT_TO_POINTER(6), first_domain);
+    g_tree_insert(iommu->domains, (gpointer)0x0000000000000005, second_domain);
+
+    c = g_malloc0(sizeof(TestGTreeInterval));
+    c->low = 0x1000000;
+    c->high = 0x1FFFFFF;
+
+    map_c = g_malloc0(sizeof(TestGTreeMapping));
+    map_c->phys_addr = 0xF000000;
+    map_c->flags = 0x3;
+
+    g_tree_insert(second_domain->mappings, c, map_c);
+    return iommu;
+}
+
+static void destroy_iommu(TestGTreeIOMMU *iommu)
+{
+    g_tree_destroy(iommu->domains);
+    g_free(iommu);
+}
+
+static void test_gtree_save_iommu(void)
+{
+    TestGTreeIOMMU *iommu = create_iommu();
+
+    save_vmstate(&vmstate_iommu, iommu);
+    compare_vmstate(iommu_dump, sizeof(iommu_dump));
+    destroy_iommu(iommu);
+}
+
+static void test_gtree_load_iommu(void)
+{
+    TestGTreeIOMMU *dest_iommu = g_malloc0(sizeof(TestGTreeIOMMU));
+    TestGTreeIOMMU *orig_iommu = create_iommu();
+    QEMUFile *fsave, *fload;
+    char eof;
+
+    fsave = open_test_file(true);
+    qemu_put_buffer(fsave, iommu_dump, sizeof(iommu_dump));
+    g_assert(!qemu_file_get_error(fsave));
+    qemu_fclose(fsave);
+
+    fload = open_test_file(false);
+    vmstate_load_state(fload, &vmstate_iommu, dest_iommu, 1);
+    eof = qemu_get_byte(fload);
+    g_assert(!qemu_file_get_error(fload));
+    g_assert_cmpint(orig_iommu->id, ==, dest_iommu->id);
+    g_assert_cmpint(eof, ==, QEMU_VM_EOF);
+
+    diff_iommu(orig_iommu, dest_iommu);
+    destroy_iommu(orig_iommu);
+    destroy_iommu(dest_iommu);
+    qemu_fclose(fload);
+}
+
+static uint8_t qlist_dump[] = {
+    0x00, 0x00, 0x00, 0x01, /* container id */
+    0x1, /* start of a */
+    0x00, 0x00, 0x00, 0x0a,
+    0x1, /* start of b */
+    0x00, 0x00, 0x0b, 0x00,
+    0x1, /* start of c */
+    0x00, 0x0c, 0x00, 0x00,
+    0x1, /* start of d */
+    0x0d, 0x00, 0x00, 0x00,
+    0x0, /* end of list */
+    QEMU_VM_EOF, /* just to ensure we won't get EOF reported prematurely */
+};
+
+static TestQListContainer *alloc_container(void)
+{
+    TestQListElement *a = g_malloc(sizeof(TestQListElement));
+    TestQListElement *b = g_malloc(sizeof(TestQListElement));
+    TestQListElement *c = g_malloc(sizeof(TestQListElement));
+    TestQListElement *d = g_malloc(sizeof(TestQListElement));
+    TestQListContainer *container = g_malloc(sizeof(TestQListContainer));
+
+    a->id = 0x0a;
+    b->id = 0x0b00;
+    c->id = 0xc0000;
+    d->id = 0xd000000;
+    container->id = 1;
+
+    QLIST_INIT(&container->list);
+    QLIST_INSERT_HEAD(&container->list, d, next);
+    QLIST_INSERT_HEAD(&container->list, c, next);
+    QLIST_INSERT_HEAD(&container->list, b, next);
+    QLIST_INSERT_HEAD(&container->list, a, next);
+    return container;
+}
+
+static void free_container(TestQListContainer *container)
+{
+    TestQListElement *iter, *tmp;
+
+    QLIST_FOREACH_SAFE(iter, &container->list, next, tmp) {
+        QLIST_REMOVE(iter, next);
+        g_free(iter);
+    }
+    g_free(container);
+}
+
+static void compare_containers(TestQListContainer *c1, TestQListContainer *c2)
+{
+    TestQListElement *first_item_c1, *first_item_c2;
+
+    while (!QLIST_EMPTY(&c1->list)) {
+        first_item_c1 = QLIST_FIRST(&c1->list);
+        first_item_c2 = QLIST_FIRST(&c2->list);
+        assert(first_item_c2);
+        assert(first_item_c1->id == first_item_c2->id);
+        QLIST_REMOVE(first_item_c1, next);
+        QLIST_REMOVE(first_item_c2, next);
+        g_free(first_item_c1);
+        g_free(first_item_c2);
+    }
+    assert(QLIST_EMPTY(&c2->list));
+}
+
+/*
+ * Check the prev & next fields are correct by doing list
+ * manipulations on the container. We will do that for both
+ * the source and the destination containers
+ */
+static void manipulate_container(TestQListContainer *c)
+{
+     TestQListElement *prev = NULL, *iter = QLIST_FIRST(&c->list);
+     TestQListElement *elem;
+
+     elem = g_malloc(sizeof(TestQListElement));
+     elem->id = 0x12;
+     QLIST_INSERT_AFTER(iter, elem, next);
+
+     elem = g_malloc(sizeof(TestQListElement));
+     elem->id = 0x13;
+     QLIST_INSERT_HEAD(&c->list, elem, next);
+
+     while (iter) {
+        prev = iter;
+        iter = QLIST_NEXT(iter, next);
+     }
+
+     elem = g_malloc(sizeof(TestQListElement));
+     elem->id = 0x14;
+     QLIST_INSERT_BEFORE(prev, elem, next);
+
+     elem = g_malloc(sizeof(TestQListElement));
+     elem->id = 0x15;
+     QLIST_INSERT_AFTER(prev, elem, next);
+
+     QLIST_REMOVE(prev, next);
+     g_free(prev);
+}
+
+static void test_save_qlist(void)
+{
+    TestQListContainer *container = alloc_container();
+
+    save_vmstate(&vmstate_container, container);
+    compare_vmstate(qlist_dump, sizeof(qlist_dump));
+    free_container(container);
+}
+
+static void test_load_qlist(void)
+{
+    QEMUFile *fsave, *fload;
+    TestQListContainer *orig_container = alloc_container();
+    TestQListContainer *dest_container = g_malloc0(sizeof(TestQListContainer));
+    char eof;
+
+    QLIST_INIT(&dest_container->list);
+
+    fsave = open_test_file(true);
+    qemu_put_buffer(fsave, qlist_dump, sizeof(qlist_dump));
+    g_assert(!qemu_file_get_error(fsave));
+    qemu_fclose(fsave);
+
+    fload = open_test_file(false);
+    vmstate_load_state(fload, &vmstate_container, dest_container, 1);
+    eof = qemu_get_byte(fload);
+    g_assert(!qemu_file_get_error(fload));
+    g_assert_cmpint(eof, ==, QEMU_VM_EOF);
+    manipulate_container(orig_container);
+    manipulate_container(dest_container);
+    compare_containers(orig_container, dest_container);
+    free_container(orig_container);
+    free_container(dest_container);
+    qemu_fclose(fload);
+}
+
 typedef struct TmpTestStruct {
     TestStruct *parent;
     int64_t diff;
@@ -904,11 +1483,13 @@ static void test_tmp_struct(void)
 
 int main(int argc, char **argv)
 {
+    g_autofree char *temp_file = g_strdup_printf("%s/vmst.test.XXXXXX",
+                                                 g_get_tmp_dir());
     temp_fd = mkstemp(temp_file);
 
     module_call_init(MODULE_INIT_QOM);
 
-    setenv("QTEST_SILENT_ERRORS", "1", 1);
+    g_setenv("QTEST_SILENT_ERRORS", "1", 1);
 
     g_test_init(&argc, &argv, NULL);
     g_test_add_func("/vmstate/simple/primitive", test_simple_primitive);
@@ -932,6 +1513,12 @@ int main(int argc, char **argv)
                     test_arr_ptr_prim_0_load);
     g_test_add_func("/vmstate/qtailq/save/saveq", test_save_q);
     g_test_add_func("/vmstate/qtailq/load/loadq", test_load_q);
+    g_test_add_func("/vmstate/gtree/save/savedomain", test_gtree_save_domain);
+    g_test_add_func("/vmstate/gtree/load/loaddomain", test_gtree_load_domain);
+    g_test_add_func("/vmstate/gtree/save/saveiommu", test_gtree_save_iommu);
+    g_test_add_func("/vmstate/gtree/load/loadiommu", test_gtree_load_iommu);
+    g_test_add_func("/vmstate/qlist/save/saveqlist", test_save_qlist);
+    g_test_add_func("/vmstate/qlist/load/loadqlist", test_load_qlist);
     g_test_add_func("/vmstate/tmp_struct", test_tmp_struct);
     g_test_run();
 

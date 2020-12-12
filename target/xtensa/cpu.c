@@ -31,6 +31,7 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "cpu.h"
+#include "fpu/softfloat.h"
 #include "qemu/module.h"
 #include "migration/vmstate.h"
 
@@ -53,14 +54,30 @@ static bool xtensa_cpu_has_work(CPUState *cs)
 #endif
 }
 
-/* CPUClass::reset() */
-static void xtensa_cpu_reset(CPUState *s)
+#ifdef CONFIG_USER_ONLY
+static bool abi_call0;
+
+void xtensa_set_abi_call0(void)
 {
+    abi_call0 = true;
+}
+
+bool xtensa_abi_call0(void)
+{
+    return abi_call0;
+}
+#endif
+
+static void xtensa_cpu_reset(DeviceState *dev)
+{
+    CPUState *s = CPU(dev);
     XtensaCPU *cpu = XTENSA_CPU(s);
     XtensaCPUClass *xcc = XTENSA_CPU_GET_CLASS(cpu);
     CPUXtensaState *env = &cpu->env;
+    bool dfpu = xtensa_option_enabled(env->config,
+                                      XTENSA_OPTION_DFP_COPROCESSOR);
 
-    xcc->parent_reset(s);
+    xcc->parent_reset(dev);
 
     env->exception_taken = 0;
     env->pc = env->config->exception_vector[EXC_RESET0 + env->static_vectors];
@@ -70,10 +87,13 @@ static void xtensa_cpu_reset(CPUState *s)
             XTENSA_OPTION_INTERRUPT) ? 0x1f : 0x10;
     env->pending_irq_level = 0;
 #else
-    env->sregs[PS] =
-        (xtensa_option_enabled(env->config,
-                               XTENSA_OPTION_WINDOWED_REGISTER) ? PS_WOE : 0) |
-        PS_UM | (3 << PS_RING_SHIFT);
+    env->sregs[PS] = PS_UM | (3 << PS_RING_SHIFT);
+    if (xtensa_option_enabled(env->config,
+                              XTENSA_OPTION_WINDOWED_REGISTER) &&
+        !xtensa_abi_call0()) {
+        env->sregs[PS] |= PS_WOE;
+    }
+    env->sregs[CPENABLE] = 0xff;
 #endif
     env->sregs[VECBASE] = env->config->vecbase;
     env->sregs[IBREAKENABLE] = 0;
@@ -88,6 +108,8 @@ static void xtensa_cpu_reset(CPUState *s)
     reset_mmu(env);
     s->halted = env->runstall;
 #endif
+    set_no_signaling_nans(!dfpu, &env->fp_status);
+    set_use_first_nan(!dfpu, &env->fp_status);
 }
 
 static ObjectClass *xtensa_cpu_class_by_name(const char *cpu_model)
@@ -168,8 +190,7 @@ static void xtensa_cpu_class_init(ObjectClass *oc, void *data)
     device_class_set_parent_realize(dc, xtensa_cpu_realizefn,
                                     &xcc->parent_realize);
 
-    xcc->parent_reset = cc->reset;
-    cc->reset = xtensa_cpu_reset;
+    device_class_set_parent_reset(dc, xtensa_cpu_reset, &xcc->parent_reset);
 
     cc->class_by_name = xtensa_cpu_class_by_name;
     cc->has_work = xtensa_cpu_has_work;

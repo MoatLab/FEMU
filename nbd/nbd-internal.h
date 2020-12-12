@@ -19,7 +19,7 @@
 #ifndef _WIN32
 #include <sys/ioctl.h>
 #endif
-#if defined(__sun__) || defined(__HAIKU__)
+#ifdef HAVE_SYS_IOCCOM_H
 #include <sys/ioccom.h>
 #endif
 
@@ -28,8 +28,6 @@
 #endif
 
 #include "qemu/bswap.h"
-#include "qemu/queue.h"
-#include "qemu/main-loop.h"
 
 /* This is all part of the "official" NBD API.
  *

@@ -21,17 +21,13 @@
 
 #ifndef INTEL_IOMMU_H
 #define INTEL_IOMMU_H
-#include "hw/qdev.h"
-#include "sysemu/dma.h"
+
 #include "hw/i386/x86-iommu.h"
-#include "hw/i386/ioapic.h"
-#include "hw/pci/msi.h"
-#include "hw/sysbus.h"
 #include "qemu/iova-tree.h"
+#include "qom/object.h"
 
 #define TYPE_INTEL_IOMMU_DEVICE "intel-iommu"
-#define INTEL_IOMMU_DEVICE(obj) \
-     OBJECT_CHECK(IntelIOMMUState, (obj), TYPE_INTEL_IOMMU_DEVICE)
+OBJECT_DECLARE_SIMPLE_TYPE(IntelIOMMUState, INTEL_IOMMU_DEVICE)
 
 #define TYPE_INTEL_IOMMU_MEMORY_REGION "intel-iommu-iommu-memory-region"
 
@@ -60,7 +56,6 @@
 
 typedef struct VTDContextEntry VTDContextEntry;
 typedef struct VTDContextCacheEntry VTDContextCacheEntry;
-typedef struct IntelIOMMUState IntelIOMMUState;
 typedef struct VTDAddressSpace VTDAddressSpace;
 typedef struct VTDIOTLBEntry VTDIOTLBEntry;
 typedef struct VTDBus VTDBus;
@@ -118,7 +113,8 @@ struct VTDAddressSpace {
 
 struct VTDBus {
     PCIBus* bus;		/* A reference to the bus to provide translation for */
-    VTDAddressSpace *dev_as[0];	/* A table of VTDAddressSpace objects indexed by devfn */
+    /* A table of VTDAddressSpace objects indexed by devfn */
+    VTDAddressSpace *dev_as[];
 };
 
 struct VTDIOTLBEntry {

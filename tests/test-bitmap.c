@@ -8,7 +8,6 @@
  * Author: Peter Xu <peterx@redhat.com>
  */
 
-#include <stdlib.h>
 #include "qemu/osdep.h"
 #include "qemu/bitmap.h"
 
@@ -22,10 +21,10 @@ static void check_bitmap_copy_with_offset(void)
     bmap2 = bitmap_new(BMAP_SIZE);
     bmap3 = bitmap_new(BMAP_SIZE);
 
-    bmap1[0] = random();
-    bmap1[1] = random();
-    bmap1[2] = random();
-    bmap1[3] = random();
+    bmap1[0] = g_test_rand_int();
+    bmap1[1] = g_test_rand_int();
+    bmap1[2] = g_test_rand_int();
+    bmap1[3] = g_test_rand_int();
     total = BITS_PER_LONG * 4;
 
     /* Shift 115 bits into bmap2 */
@@ -66,6 +65,18 @@ static void bitmap_set_case(bmap_set_func set_func)
     int offset;
 
     bmap = bitmap_new(BMAP_SIZE);
+
+    /* Set one bit at offset in second word */
+    for (offset = 0; offset <= BITS_PER_LONG; offset++) {
+        bitmap_clear(bmap, 0, BMAP_SIZE);
+        set_func(bmap, BITS_PER_LONG + offset, 1);
+        g_assert_cmpint(find_first_bit(bmap, 2 * BITS_PER_LONG),
+                        ==, BITS_PER_LONG + offset);
+        g_assert_cmpint(find_next_zero_bit(bmap,
+                                           3 * BITS_PER_LONG,
+                                           BITS_PER_LONG + offset),
+                        ==, BITS_PER_LONG + offset + 1);
+    }
 
     /* Both Aligned, set bits [BITS_PER_LONG, 3*BITS_PER_LONG] */
     set_func(bmap, BITS_PER_LONG, 2 * BITS_PER_LONG);

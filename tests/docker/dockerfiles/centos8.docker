@@ -1,0 +1,36 @@
+FROM centos:8.1.1911
+
+RUN dnf -y update
+ENV PACKAGES \
+    SDL2-devel \
+    bzip2 \
+    bzip2-devel \
+    dbus-daemon \
+    gcc \
+    gcc-c++ \
+    genisoimage \
+    gettext \
+    git \
+    glib2-devel \
+    libaio-devel \
+    libepoxy-devel \
+    libgcrypt-devel \
+    lzo-devel \
+    make \
+    mesa-libEGL-devel \
+    nmap-ncat \
+    nettle-devel \
+    ninja-build \
+    perl-Test-Harness \
+    pixman-devel \
+    python36 \
+    rdma-core-devel \
+    spice-glib-devel \
+    spice-server \
+    tar \
+    zlib-devel
+
+RUN dnf install -y dnf-plugins-core && \
+  dnf config-manager --set-enabled PowerTools && \
+  dnf install -y $PACKAGES
+RUN rpm -q $PACKAGES | sort > /packages.txt

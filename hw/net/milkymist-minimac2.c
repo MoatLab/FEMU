@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,9 +24,12 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
+#include "qom/object.h"
 #include "cpu.h" /* FIXME: why does this use TARGET_PAGE_ALIGN? */
-#include "hw/hw.h"
+#include "hw/irq.h"
+#include "hw/qdev-properties.h"
 #include "hw/sysbus.h"
+#include "migration/vmstate.h"
 #include "trace.h"
 #include "net/net.h"
 #include "qemu/log.h"
@@ -96,8 +99,7 @@ struct MilkymistMinimac2MdioState {
 typedef struct MilkymistMinimac2MdioState MilkymistMinimac2MdioState;
 
 #define TYPE_MILKYMIST_MINIMAC2 "milkymist-minimac2"
-#define MILKYMIST_MINIMAC2(obj) \
-    OBJECT_CHECK(MilkymistMinimac2State, (obj), TYPE_MILKYMIST_MINIMAC2)
+OBJECT_DECLARE_SIMPLE_TYPE(MilkymistMinimac2State, MILKYMIST_MINIMAC2)
 
 struct MilkymistMinimac2State {
     SysBusDevice parent_obj;
@@ -121,7 +123,6 @@ struct MilkymistMinimac2State {
     uint8_t *rx1_buf;
     uint8_t *tx_buf;
 };
-typedef struct MilkymistMinimac2State MilkymistMinimac2State;
 
 static const uint8_t preamble_sfd[] = {
         0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0xd5
@@ -528,7 +529,7 @@ static void milkymist_minimac2_class_init(ObjectClass *klass, void *data)
     dc->realize = milkymist_minimac2_realize;
     dc->reset = milkymist_minimac2_reset;
     dc->vmsd = &vmstate_milkymist_minimac2;
-    dc->props = milkymist_minimac2_properties;
+    device_class_set_props(dc, milkymist_minimac2_properties);
 }
 
 static const TypeInfo milkymist_minimac2_info = {

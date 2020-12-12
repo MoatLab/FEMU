@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
 """
@@ -11,7 +10,7 @@ __copyright__  = "Copyright 2016, Lluís Vilanova <vilanova@ac.upc.edu>"
 __license__    = "GPL version 2 or (at your option) any later version"
 
 __maintainer__ = "Stefan Hajnoczi"
-__email__      = "stefanha@linux.vnet.ibm.com"
+__email__      = "stefanha@redhat.com"
 
 
 from tracetool import Arguments, try_import
@@ -25,7 +24,7 @@ def transform_event(event):
         assert "tcg-trans" not in event.properties
         assert "tcg-exec" not in event.properties
 
-        event.args = Arguments([("CPUState *", "__cpu"), event.args])
+        event.args = Arguments([("void *", "__cpu"), event.args])
         if "tcg" in event.properties:
             fmt = "\"cpu=%p \""
             event.fmt = [fmt + event.fmt[0],

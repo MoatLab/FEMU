@@ -15,13 +15,16 @@
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "cpu.h"
-#include "hw/hw.h"
+#include "hw/irq.h"
 #include "exec/address-spaces.h"
 #include "exec/memory.h"
 #include "hw/ppc/ppc.h"
+#include "hw/qdev-properties.h"
 #include "hw/pci/pci.h"
 #include "sysemu/block-backend.h"
+#include "sysemu/reset.h"
 #include "ppc440.h"
+#include "qom/object.h"
 
 /*****************************************************************************/
 /* L2 Cache as SRAM */
@@ -906,8 +909,10 @@ static void dcr_write_dma(void *opaque, int dcrn, uint32_t val)
 
                     sidx = didx = 0;
                     width = 1 << ((val & DMA0_CR_PW) >> 25);
-                    rptr = cpu_physical_memory_map(dma->ch[chnl].sa, &rlen, 0);
-                    wptr = cpu_physical_memory_map(dma->ch[chnl].da, &wlen, 1);
+                    rptr = cpu_physical_memory_map(dma->ch[chnl].sa, &rlen,
+                                                   false);
+                    wptr = cpu_physical_memory_map(dma->ch[chnl].da, &wlen,
+                                                   true);
                     if (rptr && wptr) {
                         if (!(val & DMA0_CR_DEC) &&
                             val & DMA0_CR_SAI && val & DMA0_CR_DAI) {
@@ -1028,10 +1033,9 @@ void ppc4xx_dma_init(CPUPPCState *env, int dcr_base)
 #include "hw/pci/pcie_host.h"
 
 #define TYPE_PPC460EX_PCIE_HOST "ppc460ex-pcie-host"
-#define PPC460EX_PCIE_HOST(obj) \
-    OBJECT_CHECK(PPC460EXPCIEState, (obj), TYPE_PPC460EX_PCIE_HOST)
+OBJECT_DECLARE_SIMPLE_TYPE(PPC460EXPCIEState, PPC460EX_PCIE_HOST)
 
-typedef struct PPC460EXPCIEState {
+struct PPC460EXPCIEState {
     PCIExpressHost host;
 
     MemoryRegion iomem;
@@ -1052,7 +1056,7 @@ typedef struct PPC460EXPCIEState {
     uint32_t reg_mask;
     uint32_t special;
     uint32_t cfg;
-} PPC460EXPCIEState;
+};
 
 #define DCRN_PCIE0_BASE 0x100
 #define DCRN_PCIE1_BASE 0x120
@@ -1178,9 +1182,7 @@ static void dcr_write_pcie(void *opaque, int dcrn, uint32_t val)
     case PEGPL_CFGMSK:
         s->cfg_mask = val;
         size = ~(val & 0xfffffffe) + 1;
-        qemu_mutex_lock_iothread();
         pcie_host_mmcfg_update(PCIE_HOST_BRIDGE(s), val & 1, s->cfg_base, size);
-        qemu_mutex_unlock_iothread();
         break;
     case PEGPL_MSGBAH:
         s->msg_base = ((uint64_t)val << 32) | (s->msg_base & 0xffffffff);
@@ -1293,7 +1295,7 @@ static void ppc460ex_pcie_class_init(ObjectClass *klass, void *data)
 
     set_bit(DEVICE_CATEGORY_BRIDGE, dc->categories);
     dc->realize = ppc460ex_pcie_realize;
-    dc->props = ppc460ex_pcie_props;
+    device_class_set_props(dc, ppc460ex_pcie_props);
     dc->hotpluggable = false;
 }
 
@@ -1365,15 +1367,13 @@ void ppc460ex_pcie_init(CPUPPCState *env)
 {
     DeviceState *dev;
 
-    dev = qdev_create(NULL, TYPE_PPC460EX_PCIE_HOST);
+    dev = qdev_new(TYPE_PPC460EX_PCIE_HOST);
     qdev_prop_set_int32(dev, "dcrn-base", DCRN_PCIE0_BASE);
-    qdev_init_nofail(dev);
-    object_property_set_bool(OBJECT(dev), true, "realized", NULL);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
     ppc460ex_pcie_register_dcrs(PPC460EX_PCIE_HOST(dev), env);
 
-    dev = qdev_create(NULL, TYPE_PPC460EX_PCIE_HOST);
+    dev = qdev_new(TYPE_PPC460EX_PCIE_HOST);
     qdev_prop_set_int32(dev, "dcrn-base", DCRN_PCIE1_BASE);
-    qdev_init_nofail(dev);
-    object_property_set_bool(OBJECT(dev), true, "realized", NULL);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
     ppc460ex_pcie_register_dcrs(PPC460EX_PCIE_HOST(dev), env);
 }

@@ -37,16 +37,19 @@ extern MigrationStats ram_counters;
 extern XBZRLECacheStats xbzrle_counters;
 extern CompressionStats compression_counters;
 
+bool ramblock_is_ignored(RAMBlock *block);
+/* Should be holding either ram_list.mutex, or the RCU lock. */
+#define RAMBLOCK_FOREACH_NOT_IGNORED(block)            \
+    INTERNAL_RAMBLOCK_FOREACH(block)                   \
+        if (ramblock_is_ignored(block)) {} else
+
+#define RAMBLOCK_FOREACH_MIGRATABLE(block)             \
+    INTERNAL_RAMBLOCK_FOREACH(block)                   \
+        if (!qemu_ram_is_migratable(block)) {} else
+
 int xbzrle_cache_resize(int64_t new_size, Error **errp);
 uint64_t ram_bytes_remaining(void);
 uint64_t ram_bytes_total(void);
-
-int multifd_save_setup(void);
-void multifd_save_cleanup(void);
-int multifd_load_setup(void);
-int multifd_load_cleanup(Error **errp);
-bool multifd_recv_all_channels_created(void);
-bool multifd_recv_new_channel(QIOChannel *ioc, Error **errp);
 
 uint64_t ram_pagesize_summary(void);
 int ram_save_queue_pages(const char *rbname, ram_addr_t start, ram_addr_t len);
@@ -72,6 +75,8 @@ int ram_dirty_bitmap_reload(MigrationState *s, RAMBlock *rb);
 
 /* ram cache */
 int colo_init_ram_cache(void);
+void colo_flush_ram_cache(void);
 void colo_release_ram_cache(void);
+void colo_incoming_start_dirty_log(void);
 
 #endif

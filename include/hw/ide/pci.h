@@ -2,6 +2,8 @@
 #define HW_IDE_PCI_H
 
 #include "hw/ide/internal.h"
+#include "hw/pci/pci.h"
+#include "qom/object.h"
 
 #define BM_STATUS_DMAING 0x01
 #define BM_STATUS_ERROR  0x02
@@ -38,9 +40,9 @@ typedef struct BMDMAState {
 } BMDMAState;
 
 #define TYPE_PCI_IDE "pci-ide"
-#define PCI_IDE(obj) OBJECT_CHECK(PCIIDEState, (obj), TYPE_PCI_IDE)
+OBJECT_DECLARE_SIMPLE_TYPE(PCIIDEState, PCI_IDE)
 
-typedef struct PCIIDEState {
+struct PCIIDEState {
     /*< private >*/
     PCIDevice parent_obj;
     /*< public >*/
@@ -51,7 +53,7 @@ typedef struct PCIIDEState {
     MemoryRegion bmdma_bar;
     MemoryRegion cmd_bar[2];
     MemoryRegion data_bar[2];
-} PCIIDEState;
+};
 
 static inline IDEState *bmdma_active_if(BMDMAState *bmdma)
 {
@@ -62,7 +64,7 @@ static inline IDEState *bmdma_active_if(BMDMAState *bmdma)
 void bmdma_init(IDEBus *bus, BMDMAState *bm, PCIIDEState *d);
 void bmdma_cmd_writeb(BMDMAState *bm, uint32_t val);
 extern MemoryRegionOps bmdma_addr_ioport_ops;
-void pci_ide_create_devs(PCIDevice *dev, DriveInfo **hd_table);
+void pci_ide_create_devs(PCIDevice *dev);
 
 extern const VMStateDescription vmstate_ide_pci;
 extern const MemoryRegionOps pci_ide_cmd_le_ops;

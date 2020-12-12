@@ -13,10 +13,12 @@
 #include "qapi/error.h"
 #include "qemu/iov.h"
 #include "qemu/module.h"
-#include "hw/qdev.h"
+#include "qemu/timer.h"
 #include "hw/virtio/virtio.h"
+#include "hw/qdev-properties.h"
 #include "hw/virtio/virtio-rng.h"
 #include "sysemu/rng.h"
+#include "sysemu/runstate.h"
 #include "qom/object_interfaces.h"
 #include "trace.h"
 
@@ -174,7 +176,6 @@ static void virtio_rng_device_realize(DeviceState *dev, Error **errp)
 {
     VirtIODevice *vdev = VIRTIO_DEVICE(dev);
     VirtIORNG *vrng = VIRTIO_RNG(dev);
-    Error *local_err = NULL;
 
     if (vrng->conf.period_ms <= 0) {
         error_setg(errp, "'period' parameter expects a positive integer");
@@ -190,27 +191,22 @@ static void virtio_rng_device_realize(DeviceState *dev, Error **errp)
     }
 
     if (vrng->conf.rng == NULL) {
-        vrng->conf.default_backend = RNG_RANDOM(object_new(TYPE_RNG_RANDOM));
+        Object *default_backend = object_new(TYPE_RNG_BUILTIN);
 
-        user_creatable_complete(USER_CREATABLE(vrng->conf.default_backend),
-                                &local_err);
-        if (local_err) {
-            error_propagate(errp, local_err);
-            object_unref(OBJECT(vrng->conf.default_backend));
+        if (!user_creatable_complete(USER_CREATABLE(default_backend),
+                                     errp)) {
+            object_unref(default_backend);
             return;
         }
 
-        object_property_add_child(OBJECT(dev),
-                                  "default-backend",
-                                  OBJECT(vrng->conf.default_backend),
-                                  NULL);
+        object_property_add_child(OBJECT(dev), "default-backend",
+                                  default_backend);
 
         /* The child property took a reference, we can safely drop ours now */
-        object_unref(OBJECT(vrng->conf.default_backend));
+        object_unref(default_backend);
 
-        object_property_set_link(OBJECT(dev),
-                                 OBJECT(vrng->conf.default_backend),
-                                 "rng", NULL);
+        object_property_set_link(OBJECT(dev), "rng", default_backend,
+                                 &error_abort);
     }
 
     vrng->rng = vrng->conf.rng;
@@ -231,7 +227,7 @@ static void virtio_rng_device_realize(DeviceState *dev, Error **errp)
                                                      vrng);
 }
 
-static void virtio_rng_device_unrealize(DeviceState *dev, Error **errp)
+static void virtio_rng_device_unrealize(DeviceState *dev)
 {
     VirtIODevice *vdev = VIRTIO_DEVICE(dev);
     VirtIORNG *vrng = VIRTIO_RNG(dev);
@@ -239,6 +235,7 @@ static void virtio_rng_device_unrealize(DeviceState *dev, Error **errp)
     qemu_del_vm_change_state_handler(vrng->vmstate);
     timer_del(vrng->rate_limit_timer);
     timer_free(vrng->rate_limit_timer);
+    virtio_del_queue(vdev, 0);
     virtio_cleanup(vdev);
 }
 
@@ -269,7 +266,7 @@ static void virtio_rng_class_init(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
     VirtioDeviceClass *vdc = VIRTIO_DEVICE_CLASS(klass);
 
-    dc->props = virtio_rng_properties;
+    device_class_set_props(dc, virtio_rng_properties);
     dc->vmsd = &vmstate_virtio_rng;
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
     vdc->realize = virtio_rng_device_realize;

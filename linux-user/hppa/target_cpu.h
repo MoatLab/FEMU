@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -19,7 +19,8 @@
 #ifndef HPPA_TARGET_CPU_H
 #define HPPA_TARGET_CPU_H
 
-static inline void cpu_clone_regs(CPUHPPAState *env, target_ulong newsp)
+static inline void cpu_clone_regs_child(CPUHPPAState *env, target_ulong newsp,
+                                        unsigned flags)
 {
     if (newsp) {
         env->gr[30] = newsp;
@@ -29,6 +30,10 @@ static inline void cpu_clone_regs(CPUHPPAState *env, target_ulong newsp)
     /* Return from the syscall.  */
     env->iaoq_f = env->gr[31];
     env->iaoq_b = env->gr[31] + 4;
+}
+
+static inline void cpu_clone_regs_parent(CPUHPPAState *env, unsigned flags)
+{
 }
 
 static inline void cpu_set_tls(CPUHPPAState *env, target_ulong newtls)

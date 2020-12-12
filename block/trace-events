@@ -40,11 +40,14 @@ mirror_yield_in_flight(void *s, int64_t offset, int in_flight) "s %p offset %" P
 # backup.c
 backup_do_cow_enter(void *job, int64_t start, int64_t offset, uint64_t bytes) "job %p start %" PRId64 " offset %" PRId64 " bytes %" PRIu64
 backup_do_cow_return(void *job, int64_t offset, uint64_t bytes, int ret) "job %p offset %" PRId64 " bytes %" PRIu64 " ret %d"
-backup_do_cow_skip(void *job, int64_t start) "job %p start %"PRId64
-backup_do_cow_process(void *job, int64_t start) "job %p start %"PRId64
-backup_do_cow_read_fail(void *job, int64_t start, int ret) "job %p start %"PRId64" ret %d"
-backup_do_cow_write_fail(void *job, int64_t start, int ret) "job %p start %"PRId64" ret %d"
-backup_do_cow_copy_range_fail(void *job, int64_t start, int ret) "job %p start %"PRId64" ret %d"
+
+# block-copy.c
+block_copy_skip_range(void *bcs, int64_t start, uint64_t bytes) "bcs %p start %"PRId64" bytes %"PRId64
+block_copy_process(void *bcs, int64_t start) "bcs %p start %"PRId64
+block_copy_copy_range_fail(void *bcs, int64_t start, int ret) "bcs %p start %"PRId64" ret %d"
+block_copy_read_fail(void *bcs, int64_t start, int ret) "bcs %p start %"PRId64" ret %d"
+block_copy_write_fail(void *bcs, int64_t start, int ret) "bcs %p start %"PRId64" ret %d"
+block_copy_write_zeroes_fail(void *bcs, int64_t start, int ret) "bcs %p start %"PRId64" ret %d"
 
 # ../blockdev.c
 qmp_block_job_cancel(void *job) "job %p"
@@ -55,12 +58,23 @@ qmp_block_job_finalize(void *job) "job %p"
 qmp_block_job_dismiss(void *job) "job %p"
 qmp_block_stream(void *bs) "bs %p"
 
-# file-posix.c
 # file-win32.c
 file_paio_submit(void *acb, void *opaque, int64_t offset, int count, int type) "acb %p opaque %p offset %"PRId64" count %d type %d"
-file_copy_file_range(void *bs, int src, int64_t src_off, int dst, int64_t dst_off, int64_t bytes, int flags, int64_t ret) "bs %p src_fd %d offset %"PRIu64" dst_fd %d offset %"PRIu64" bytes %"PRIu64" flags %d ret %"PRId64
+
+# io_uring.c
+luring_init_state(void *s, size_t size) "s %p size %zu"
+luring_cleanup_state(void *s) "%p freed"
+luring_io_plug(void *s) "LuringState %p plug"
+luring_io_unplug(void *s, int blocked, int plugged, int queued, int inflight) "LuringState %p blocked %d plugged %d queued %d inflight %d"
+luring_do_submit(void *s, int blocked, int plugged, int queued, int inflight) "LuringState %p blocked %d plugged %d queued %d inflight %d"
+luring_do_submit_done(void *s, int ret) "LuringState %p submitted to kernel %d"
+luring_co_submit(void *bs, void *s, void *luringcb, int fd, uint64_t offset, size_t nbytes, int type) "bs %p s %p luringcb %p fd %d offset %" PRId64 " nbytes %zd type %d"
+luring_process_completion(void *s, void *aiocb, int ret) "LuringState %p luringcb %p ret %d"
+luring_io_uring_submit(void *s, int ret) "LuringState %p ret %d"
+luring_resubmit_short_read(void *s, void *luringcb, int nread) "LuringState %p luringcb %p nread %d"
 
 # qcow2.c
+qcow2_add_task(void *co, void *bs, void *pool, const char *action, int cluster_type, uint64_t host_offset, uint64_t offset, uint64_t bytes, void *qiov, size_t qiov_offset) "co %p bs %p pool %p: %s: cluster_type %d file_cluster_offset %" PRIu64 " offset %" PRIu64 " bytes %" PRIu64 " qiov %p qiov_offset %zu"
 qcow2_writev_start_req(void *co, int64_t offset, int bytes) "co %p offset 0x%" PRIx64 " bytes %d"
 qcow2_writev_done_req(void *co, int ret) "co %p ret %d"
 qcow2_writev_start_part(void *co) "co %p"
@@ -119,40 +133,30 @@ qed_aio_write_prefill(void *s, void *acb, uint64_t start, size_t len, uint64_t o
 qed_aio_write_postfill(void *s, void *acb, uint64_t start, size_t len, uint64_t offset) "s %p acb %p start %"PRIu64" len %zu offset %"PRIu64
 qed_aio_write_main(void *s, void *acb, int ret, uint64_t offset, size_t len) "s %p acb %p ret %d offset %"PRIu64" len %zu"
 
-# vxhs.c
-vxhs_iio_callback(int error) "ctx is NULL: error %d"
-vxhs_iio_callback_chnfail(int err, int error) "QNIO channel failed, no i/o %d, %d"
-vxhs_iio_callback_unknwn(int opcode, int err) "unexpected opcode %d, errno %d"
-vxhs_aio_rw_invalid(int req) "Invalid I/O request iodir %d"
-vxhs_aio_rw_ioerr(char *guid, int iodir, uint64_t size, uint64_t off, void *acb, int ret, int err) "IO ERROR (vDisk %s) FOR : Read/Write = %d size = %"PRIu64" offset = %"PRIu64" ACB = %p. Error = %d, errno = %d"
-vxhs_get_vdisk_stat_err(char *guid, int ret, int err) "vDisk (%s) stat ioctl failed, ret = %d, errno = %d"
-vxhs_get_vdisk_stat(char *vdisk_guid, uint64_t vdisk_size) "vDisk %s stat ioctl returned size %"PRIu64
-vxhs_complete_aio(void *acb, uint64_t ret) "aio failed acb %p ret %"PRIu64
-vxhs_parse_uri_filename(const char *filename) "URI passed via bdrv_parse_filename %s"
-vxhs_open_vdiskid(const char *vdisk_id) "Opening vdisk-id %s"
-vxhs_open_hostinfo(char *of_vsa_addr, int port) "Adding host %s:%d to BDRVVXHSState"
-vxhs_open_iio_open(const char *host) "Failed to connect to storage agent on host %s"
-vxhs_parse_uri_hostinfo(char *host, int port) "Host: IP %s, Port %d"
-vxhs_close(char *vdisk_guid) "Closing vdisk %s"
-vxhs_get_creds(const char *cacert, const char *client_key, const char *client_cert) "cacert %s, client_key %s, client_cert %s"
-
 # nvme.c
-nvme_kick(void *s, int queue) "s %p queue %d"
+nvme_controller_capability_raw(uint64_t value) "0x%08"PRIx64
+nvme_controller_capability(const char *desc, uint64_t value) "%s: %"PRIu64
+nvme_kick(void *s, unsigned q_index) "s %p q #%u"
 nvme_dma_flush_queue_wait(void *s) "s %p"
 nvme_error(int cmd_specific, int sq_head, int sqid, int cid, int status) "cmd_specific %d sq_head %d sqid %d cid %d status 0x%x"
-nvme_process_completion(void *s, int index, int inflight) "s %p queue %d inflight %d"
-nvme_process_completion_queue_busy(void *s, int index) "s %p queue %d"
-nvme_complete_command(void *s, int index, int cid) "s %p queue %d cid %d"
-nvme_submit_command(void *s, int index, int cid) "s %p queue %d cid %d"
+nvme_process_completion(void *s, unsigned q_index, int inflight) "s %p q #%u inflight %d"
+nvme_process_completion_queue_plugged(void *s, unsigned q_index) "s %p q #%u"
+nvme_complete_command(void *s, unsigned q_index, int cid) "s %p q #%u cid %d"
+nvme_submit_command(void *s, unsigned q_index, int cid) "s %p q #%u cid %d"
 nvme_submit_command_raw(int c0, int c1, int c2, int c3, int c4, int c5, int c6, int c7) "%02x %02x %02x %02x %02x %02x %02x %02x"
 nvme_handle_event(void *s) "s %p"
-nvme_poll_cb(void *s) "s %p"
-nvme_prw_aligned(void *s, int is_write, uint64_t offset, uint64_t bytes, int flags, int niov) "s %p is_write %d offset %"PRId64" bytes %"PRId64" flags %d niov %d"
+nvme_poll_queue(void *s, unsigned q_index) "s %p q #%u"
+nvme_prw_aligned(void *s, int is_write, uint64_t offset, uint64_t bytes, int flags, int niov) "s %p is_write %d offset 0x%"PRIx64" bytes %"PRId64" flags %d niov %d"
+nvme_write_zeroes(void *s, uint64_t offset, uint64_t bytes, int flags) "s %p offset 0x%"PRIx64" bytes %"PRId64" flags %d"
 nvme_qiov_unaligned(const void *qiov, int n, void *base, size_t size, int align) "qiov %p n %d base %p size 0x%zx align 0x%x"
-nvme_prw_buffered(void *s, uint64_t offset, uint64_t bytes, int niov, int is_write) "s %p offset %"PRId64" bytes %"PRId64" niov %d is_write %d"
-nvme_rw_done(void *s, int is_write, uint64_t offset, uint64_t bytes, int ret) "s %p is_write %d offset %"PRId64" bytes %"PRId64" ret %d"
+nvme_prw_buffered(void *s, uint64_t offset, uint64_t bytes, int niov, int is_write) "s %p offset 0x%"PRIx64" bytes %"PRId64" niov %d is_write %d"
+nvme_rw_done(void *s, int is_write, uint64_t offset, uint64_t bytes, int ret) "s %p is_write %d offset 0x%"PRIx64" bytes %"PRId64" ret %d"
+nvme_dsm(void *s, uint64_t offset, uint64_t bytes) "s %p offset 0x%"PRIx64" bytes %"PRId64""
+nvme_dsm_done(void *s, uint64_t offset, uint64_t bytes, int ret) "s %p offset 0x%"PRIx64" bytes %"PRId64" ret %d"
 nvme_dma_map_flush(void *s) "s %p"
-nvme_free_req_queue_wait(void *q) "q %p"
+nvme_free_req_queue_wait(void *s, unsigned q_index) "s %p q #%u"
+nvme_create_queue_pair(unsigned q_index, void *q, unsigned size, void *aio_context, int fd) "index %u q %p size %u aioctx %p fd %d"
+nvme_free_queue_pair(unsigned q_index, void *q) "index %u q %p"
 nvme_cmd_map_qiov(void *s, void *cmd, void *req, void *qiov, int entries) "s %p cmd %p req %p qiov %p entries %d"
 nvme_cmd_map_qiov_pages(void *s, int i, uint64_t page) "s %p page[%d] 0x%"PRIx64
 nvme_cmd_map_qiov_iov(void *s, int i, void *page, int pages) "s %p iov[%d] %p pages %d"
@@ -165,8 +169,8 @@ nbd_parse_blockstatus_compliance(const char *err) "ignoring extra data from non-
 nbd_structured_read_compliance(const char *type) "server sent non-compliant unaligned read %s chunk"
 nbd_read_reply_entry_fail(int ret, const char *err) "ret = %d, err: %s"
 nbd_co_request_fail(uint64_t from, uint32_t len, uint64_t handle, uint16_t flags, uint16_t type, const char *name, int ret, const char *err) "Request failed { .from = %" PRIu64", .len = %" PRIu32 ", .handle = %" PRIu64 ", .flags = 0x%" PRIx16 ", .type = %" PRIu16 " (%s) } ret = %d, err: %s"
-nbd_client_connect(const char *export_name) "export '%s'"
-nbd_client_connect_success(const char *export_name) "export '%s'"
+nbd_client_handshake(const char *export_name) "export '%s'"
+nbd_client_handshake_success(const char *export_name) "export '%s'"
 
 # ssh.c
 ssh_restart_coroutine(void *co) "co=%p"
@@ -197,8 +201,7 @@ curl_setup_preadv(uint64_t bytes, uint64_t start, const char *range) "reading %"
 curl_close(void) "close"
 
 # file-posix.c
-file_xfs_write_zeroes(const char *error) "cannot write zero range (%s)"
-file_xfs_discard(const char *error) "cannot punch hole (%s)"
+file_copy_file_range(void *bs, int src, int64_t src_off, int dst, int64_t dst_off, int64_t bytes, int flags, int64_t ret) "bs %p src_fd %d offset %"PRIu64" dst_fd %d offset %"PRIu64" bytes %"PRIu64" flags %d ret %"PRId64
 file_FindEjectableOpticalMedia(const char *media) "Matching using %s"
 file_setup_cdrom(const char *partition) "Using %s as optical disc"
 file_hdev_is_sg(int type, int version) "SG device found: type=%d, version=%d"

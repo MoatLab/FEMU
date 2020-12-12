@@ -18,15 +18,15 @@ refcount_table_offset     0x10000
 refcount_table_clusters   1
 nb_snapshots              0
 snapshot_offset           0x0
-incompatible_features     0x0
-compatible_features       0x1
-autoclear_features        0x0
+incompatible_features     []
+compatible_features       [0]
+autoclear_features        []
 refcount_order            4
-header_length             104
+header_length             112
 
 Header extension:
-magic                     0x6803f857
-length                    192
+magic                     0x6803f857 (Feature table)
+length                    384
 data                      <binary>
 
 magic                     0x514649fb
@@ -42,9 +42,9 @@ refcount_table_offset     0x10000
 refcount_table_clusters   1
 nb_snapshots              0
 snapshot_offset           0x0
-incompatible_features     0x0
-compatible_features       0x0
-autoclear_features        0x0
+incompatible_features     []
+compatible_features       []
+autoclear_features        []
 refcount_order            4
 header_length             72
 
@@ -76,15 +76,15 @@ refcount_table_offset     0x10000
 refcount_table_clusters   1
 nb_snapshots              0
 snapshot_offset           0x0
-incompatible_features     0x0
-compatible_features       0x1
-autoclear_features        0x0
+incompatible_features     []
+compatible_features       [0]
+autoclear_features        []
 refcount_order            4
-header_length             104
+header_length             112
 
 Header extension:
-magic                     0x6803f857
-length                    192
+magic                     0x6803f857 (Feature table)
+length                    384
 data                      <binary>
 
 magic                     0x514649fb
@@ -100,9 +100,9 @@ refcount_table_offset     0x10000
 refcount_table_clusters   1
 nb_snapshots              0
 snapshot_offset           0x0
-incompatible_features     0x0
-compatible_features       0x0
-autoclear_features        0x0
+incompatible_features     []
+compatible_features       []
+autoclear_features        []
 refcount_order            4
 header_length             72
 
@@ -118,11 +118,7 @@ No errors were found on the image.
 Formatting 'TEST_DIR/t.IMGFMT', fmt=IMGFMT size=67108864
 wrote 131072/131072 bytes at offset 0
 128 KiB, X ops; XX:XX:XX.X (XXX YYY/sec and XXX ops/sec)
-./common.rc: Killed                  ( if [ "${VALGRIND_QEMU}" == "y" ]; then
-    exec valgrind --log-file="${VALGRIND_LOGFILE}" --error-exitcode=99 "$QEMU_IO_PROG" $QEMU_IO_ARGS "$@";
-else
-    exec "$QEMU_IO_PROG" $QEMU_IO_ARGS "$@";
-fi )
+./common.rc: Killed                  ( VALGRIND_QEMU="${VALGRIND_QEMU_IO}" _qemu_proc_exec "${VALGRIND_LOGFILE}" "$QEMU_IO_PROG" $QEMU_IO_ARGS "$@" )
 magic                     0x514649fb
 version                   3
 backing_file_offset       0x0
@@ -136,15 +132,15 @@ refcount_table_offset     0x10000
 refcount_table_clusters   1
 nb_snapshots              0
 snapshot_offset           0x0
-incompatible_features     0x1
-compatible_features       0x1
-autoclear_features        0x0
+incompatible_features     [0]
+compatible_features       [0]
+autoclear_features        []
 refcount_order            4
-header_length             104
+header_length             112
 
 Header extension:
-magic                     0x6803f857
-length                    192
+magic                     0x6803f857 (Feature table)
+length                    384
 data                      <binary>
 
 ERROR cluster 5 refcount=0 reference=1
@@ -165,9 +161,9 @@ refcount_table_offset     0x80000
 refcount_table_clusters   1
 nb_snapshots              0
 snapshot_offset           0x0
-incompatible_features     0x0
-compatible_features       0x0
-autoclear_features        0x0
+incompatible_features     []
+compatible_features       []
+autoclear_features        []
 refcount_order            4
 header_length             72
 
@@ -191,15 +187,15 @@ refcount_table_offset     0x10000
 refcount_table_clusters   1
 nb_snapshots              0
 snapshot_offset           0x0
-incompatible_features     0x0
-compatible_features       0x40000000000
-autoclear_features        0x40000000000
+incompatible_features     []
+compatible_features       [42]
+autoclear_features        [42]
 refcount_order            4
-header_length             104
+header_length             112
 
 Header extension:
-magic                     0x6803f857
-length                    192
+magic                     0x6803f857 (Feature table)
+length                    384
 data                      <binary>
 
 magic                     0x514649fb
@@ -215,9 +211,9 @@ refcount_table_offset     0x10000
 refcount_table_clusters   1
 nb_snapshots              0
 snapshot_offset           0x0
-incompatible_features     0x0
-compatible_features       0x0
-autoclear_features        0x0
+incompatible_features     []
+compatible_features       []
+autoclear_features        []
 refcount_order            4
 header_length             72
 
@@ -241,9 +237,9 @@ refcount_table_offset     0x10000
 refcount_table_clusters   1
 nb_snapshots              0
 snapshot_offset           0x0
-incompatible_features     0x0
-compatible_features       0x0
-autoclear_features        0x0
+incompatible_features     []
+compatible_features       []
+autoclear_features        []
 refcount_order            4
 header_length             72
 
@@ -260,19 +256,47 @@ refcount_table_offset     0x10000
 refcount_table_clusters   1
 nb_snapshots              0
 snapshot_offset           0x0
-incompatible_features     0x0
-compatible_features       0x1
-autoclear_features        0x0
+incompatible_features     []
+compatible_features       [0]
+autoclear_features        []
 refcount_order            4
-header_length             104
+header_length             112
 
 Header extension:
-magic                     0x6803f857
-length                    192
+magic                     0x6803f857 (Feature table)
+length                    384
 data                      <binary>
 
 read 65536/65536 bytes at offset 44040192
 64 KiB, X ops; XX:XX:XX.X (XXX YYY/sec and XXX ops/sec)
+No errors were found on the image.
+
+=== Testing resize with snapshots ===
+
+Formatting 'TEST_DIR/t.IMGFMT', fmt=IMGFMT size=33554432
+wrote 65536/65536 bytes at offset 25165824
+64 KiB, X ops; XX:XX:XX.X (XXX YYY/sec and XXX ops/sec)
+qemu-img: Can't resize a v2 image which has snapshots
+version                   2
+size                      33554432
+nb_snapshots              1
+version                   3
+size                      134217728
+nb_snapshots              1
+Image resized.
+version                   3
+size                      67108864
+nb_snapshots              2
+qemu-img: Internal snapshots prevent downgrade of image
+version                   3
+size                      33554432
+nb_snapshots              2
+version                   3
+size                      134217728
+nb_snapshots              2
+version                   2
+size                      33554432
+nb_snapshots              1
 No errors were found on the image.
 
 === Testing dirty lazy_refcounts=off ===
@@ -280,11 +304,7 @@ No errors were found on the image.
 Formatting 'TEST_DIR/t.IMGFMT', fmt=IMGFMT size=67108864
 wrote 131072/131072 bytes at offset 0
 128 KiB, X ops; XX:XX:XX.X (XXX YYY/sec and XXX ops/sec)
-./common.rc: Killed                  ( if [ "${VALGRIND_QEMU}" == "y" ]; then
-    exec valgrind --log-file="${VALGRIND_LOGFILE}" --error-exitcode=99 "$QEMU_IO_PROG" $QEMU_IO_ARGS "$@";
-else
-    exec "$QEMU_IO_PROG" $QEMU_IO_ARGS "$@";
-fi )
+./common.rc: Killed                  ( VALGRIND_QEMU="${VALGRIND_QEMU_IO}" _qemu_proc_exec "${VALGRIND_LOGFILE}" "$QEMU_IO_PROG" $QEMU_IO_ARGS "$@" )
 magic                     0x514649fb
 version                   3
 backing_file_offset       0x0
@@ -298,15 +318,15 @@ refcount_table_offset     0x10000
 refcount_table_clusters   1
 nb_snapshots              0
 snapshot_offset           0x0
-incompatible_features     0x1
-compatible_features       0x1
-autoclear_features        0x0
+incompatible_features     [0]
+compatible_features       [0]
+autoclear_features        []
 refcount_order            4
-header_length             104
+header_length             112
 
 Header extension:
-magic                     0x6803f857
-length                    192
+magic                     0x6803f857 (Feature table)
+length                    384
 data                      <binary>
 
 ERROR cluster 5 refcount=0 reference=1
@@ -327,15 +347,15 @@ refcount_table_offset     0x80000
 refcount_table_clusters   1
 nb_snapshots              0
 snapshot_offset           0x0
-incompatible_features     0x0
-compatible_features       0x0
-autoclear_features        0x0
+incompatible_features     []
+compatible_features       []
+autoclear_features        []
 refcount_order            4
-header_length             104
+header_length             112
 
 Header extension:
-magic                     0x6803f857
-length                    192
+magic                     0x6803f857 (Feature table)
+length                    384
 data                      <binary>
 
 read 131072/131072 bytes at offset 0
@@ -350,6 +370,7 @@ wrote 131072/131072 bytes at offset 0
 128 KiB, X ops; XX:XX:XX.X (XXX YYY/sec and XXX ops/sec)
 read 131072/131072 bytes at offset 0
 128 KiB, X ops; XX:XX:XX.X (XXX YYY/sec and XXX ops/sec)
+qemu-img: warning: Deprecated use of amend to alter the backing file; use qemu-img rebase instead
 read 131072/131072 bytes at offset 0
 128 KiB, X ops; XX:XX:XX.X (XXX YYY/sec and XXX ops/sec)
 No errors were found on the image.
@@ -361,16 +382,20 @@ qemu-img: Lazy refcounts only supported with compatibility level 1.1 and above (
 qemu-img: Lazy refcounts only supported with compatibility level 1.1 and above (use compat=1.1 or greater)
 qemu-img: Unknown compatibility level 0.42
 qemu-img: Invalid parameter 'foo'
-qemu-img: Changing the cluster size is not supported
-qemu-img: Changing the encryption flag is not supported
-qemu-img: Cannot change preallocation mode
+qemu-img: Invalid parameter 'cluster_size'
+This option is only supported for image creation
+qemu-img: Invalid parameter 'encryption'
+This option is only supported for image creation
+qemu-img: Invalid parameter 'preallocation'
+This option is only supported for image creation
 
 === Testing correct handling of unset value ===
 
 Formatting 'TEST_DIR/t.IMGFMT', fmt=IMGFMT size=67108864
 Should work:
 Should not work:
-qemu-img: Changing the cluster size is not supported
+qemu-img: Invalid parameter 'cluster_size'
+This option is only supported for image creation
 
 === Testing zero expansion on inactive clusters ===
 
@@ -403,7 +428,7 @@ read 131072/131072 bytes at offset 0
 Formatting 'TEST_DIR/t.IMGFMT.base', fmt=IMGFMT size=67108864
 wrote 131072/131072 bytes at offset 0
 128 KiB, X ops; XX:XX:XX.X (XXX YYY/sec and XXX ops/sec)
-Formatting 'TEST_DIR/t.IMGFMT', fmt=IMGFMT size=67108864 backing_file=TEST_DIR/t.IMGFMT.base
+Formatting 'TEST_DIR/t.IMGFMT', fmt=IMGFMT size=67108864 backing_file=TEST_DIR/t.IMGFMT.base backing_fmt=IMGFMT
 read 131072/131072 bytes at offset 0
 128 KiB, X ops; XX:XX:XX.X (XXX YYY/sec and XXX ops/sec)
 wrote 65536/65536 bytes at offset 0
@@ -419,7 +444,7 @@ read 65536/65536 bytes at offset 65536
 Formatting 'TEST_DIR/t.IMGFMT.base', fmt=IMGFMT size=67108864
 wrote 131072/131072 bytes at offset 0
 128 KiB, X ops; XX:XX:XX.X (XXX YYY/sec and XXX ops/sec)
-Formatting 'TEST_DIR/t.IMGFMT', fmt=IMGFMT size=67108864 backing_file=TEST_DIR/t.IMGFMT.base
+Formatting 'TEST_DIR/t.IMGFMT', fmt=IMGFMT size=67108864 backing_file=TEST_DIR/t.IMGFMT.base backing_fmt=IMGFMT
 wrote 65536/65536 bytes at offset 0
 64 KiB, X ops; XX:XX:XX.X (XXX YYY/sec and XXX ops/sec)
 wrote 131072/131072 bytes at offset 0
@@ -438,7 +463,7 @@ read 65536/65536 bytes at offset 65536
 Formatting 'TEST_DIR/t.IMGFMT.base', fmt=IMGFMT size=67108864
 wrote 131072/131072 bytes at offset 0
 128 KiB, X ops; XX:XX:XX.X (XXX YYY/sec and XXX ops/sec)
-Formatting 'TEST_DIR/t.IMGFMT', fmt=IMGFMT size=67108864 backing_file=TEST_DIR/t.IMGFMT.base
+Formatting 'TEST_DIR/t.IMGFMT', fmt=IMGFMT size=67108864 backing_file=TEST_DIR/t.IMGFMT.base backing_fmt=IMGFMT
 wrote 131072/131072 bytes at offset 0
 128 KiB, X ops; XX:XX:XX.X (XXX YYY/sec and XXX ops/sec)
 No errors were found on the image.
@@ -462,7 +487,7 @@ read 67108864/67108864 bytes at offset 0
 === Testing progress report without snapshot ===
 
 Formatting 'TEST_DIR/t.IMGFMT.base', fmt=IMGFMT size=4294967296
-Formatting 'TEST_DIR/t.IMGFMT', fmt=IMGFMT size=4294967296 backing_file=TEST_DIR/t.IMGFMT.base
+Formatting 'TEST_DIR/t.IMGFMT', fmt=IMGFMT size=4294967296 backing_file=TEST_DIR/t.IMGFMT.base backing_fmt=IMGFMT
 wrote 65536/65536 bytes at offset 0
 64 KiB, X ops; XX:XX:XX.X (XXX YYY/sec and XXX ops/sec)
 wrote 65536/65536 bytes at offset 1073741824
@@ -477,7 +502,7 @@ No errors were found on the image.
 === Testing progress report with snapshot ===
 
 Formatting 'TEST_DIR/t.IMGFMT.base', fmt=IMGFMT size=4294967296
-Formatting 'TEST_DIR/t.IMGFMT', fmt=IMGFMT size=4294967296 backing_file=TEST_DIR/t.IMGFMT.base
+Formatting 'TEST_DIR/t.IMGFMT', fmt=IMGFMT size=4294967296 backing_file=TEST_DIR/t.IMGFMT.base backing_fmt=IMGFMT
 wrote 65536/65536 bytes at offset 0
 64 KiB, X ops; XX:XX:XX.X (XXX YYY/sec and XXX ops/sec)
 wrote 65536/65536 bytes at offset 1073741824
@@ -499,12 +524,19 @@ virtual size: 64 MiB (67108864 bytes)
 cluster_size: 65536
 Format specific information:
     compat: 1.1
+    compression type: zlib
     lazy refcounts: false
     refcount bits: 16
     data file: TEST_DIR/t.IMGFMT.data
     data file raw: false
     corrupt: false
+    extended l2: false
 No errors were found on the image.
+
+=== Testing version downgrade with extended L2 entries ===
+
+Formatting 'TEST_DIR/t.IMGFMT', fmt=IMGFMT size=67108864
+qemu-img: Cannot downgrade an image with incompatible features 0x10 set
 
 === Try changing the external data file ===
 
@@ -519,11 +551,13 @@ virtual size: 64 MiB (67108864 bytes)
 cluster_size: 65536
 Format specific information:
     compat: 1.1
+    compression type: zlib
     lazy refcounts: false
     refcount bits: 16
     data file: foo
     data file raw: false
     corrupt: false
+    extended l2: false
 
 qemu-img: Could not open 'TEST_DIR/t.IMGFMT': 'data-file' is required for this image
 image: TEST_DIR/t.IMGFMT
@@ -532,10 +566,12 @@ virtual size: 64 MiB (67108864 bytes)
 cluster_size: 65536
 Format specific information:
     compat: 1.1
+    compression type: zlib
     lazy refcounts: false
     refcount bits: 16
     data file raw: false
     corrupt: false
+    extended l2: false
 
 === Clearing and setting data-file-raw ===
 
@@ -546,11 +582,13 @@ virtual size: 64 MiB (67108864 bytes)
 cluster_size: 65536
 Format specific information:
     compat: 1.1
+    compression type: zlib
     lazy refcounts: false
     refcount bits: 16
     data file: TEST_DIR/t.IMGFMT.data
     data file raw: true
     corrupt: false
+    extended l2: false
 No errors were found on the image.
 image: TEST_DIR/t.IMGFMT
 file format: IMGFMT
@@ -558,11 +596,13 @@ virtual size: 64 MiB (67108864 bytes)
 cluster_size: 65536
 Format specific information:
     compat: 1.1
+    compression type: zlib
     lazy refcounts: false
     refcount bits: 16
     data file: TEST_DIR/t.IMGFMT.data
     data file raw: false
     corrupt: false
+    extended l2: false
 No errors were found on the image.
 qemu-img: data-file-raw cannot be set on existing images
 image: TEST_DIR/t.IMGFMT
@@ -571,10 +611,12 @@ virtual size: 64 MiB (67108864 bytes)
 cluster_size: 65536
 Format specific information:
     compat: 1.1
+    compression type: zlib
     lazy refcounts: false
     refcount bits: 16
     data file: TEST_DIR/t.IMGFMT.data
     data file raw: false
     corrupt: false
+    extended l2: false
 No errors were found on the image.
 *** done

@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -58,19 +58,35 @@ uint64_t helper_todouble(uint32_t arg)
     uint64_t ret;
 
     if (likely(abs_arg >= 0x00800000)) {
-        /* Normalized operand, or Inf, or NaN.  */
-        ret  = (uint64_t)extract32(arg, 30, 2) << 62;
-        ret |= ((extract32(arg, 30, 1) ^ 1) * (uint64_t)7) << 59;
-        ret |= (uint64_t)extract32(arg, 0, 30) << 29;
+        if (unlikely(extract32(arg, 23, 8) == 0xff)) {
+            /* Inf or NAN.  */
+            ret  = (uint64_t)extract32(arg, 31, 1) << 63;
+            ret |= (uint64_t)0x7ff << 52;
+            ret |= (uint64_t)extract32(arg, 0, 23) << 29;
+        } else {
+            /* Normalized operand.  */
+            ret  = (uint64_t)extract32(arg, 30, 2) << 62;
+            ret |= ((extract32(arg, 30, 1) ^ 1) * (uint64_t)7) << 59;
+            ret |= (uint64_t)extract32(arg, 0, 30) << 29;
+        }
     } else {
         /* Zero or Denormalized operand.  */
         ret = (uint64_t)extract32(arg, 31, 1) << 63;
         if (unlikely(abs_arg != 0)) {
-            /* Denormalized operand.  */
-            int shift = clz32(abs_arg) - 9;
-            int exp = -126 - shift + 1023;
+            /*
+             * Denormalized operand.
+             * Shift fraction so that the msb is in the implicit bit position.
+             * Thus, shift is in the range [1:23].
+             */
+            int shift = clz32(abs_arg) - 8;
+            /*
+             * The first 3 terms compute the float64 exponent.  We then bias
+             * this result by -1 so that we can swallow the implicit bit below.
+             */
+            int exp = -126 - shift + 1023 - 1;
+
             ret |= (uint64_t)exp << 52;
-            ret |= abs_arg << (shift + 29);
+            ret += (uint64_t)abs_arg << (52 - 23 + shift);
         }
     }
     return ret;
@@ -164,7 +180,7 @@ static void set_fprf_from_class(CPUPPCState *env, int class)
     };
     bool isneg = class & is_neg;
 
-    env->fpscr &= ~(0x1F << FPSCR_FPRF);
+    env->fpscr &= ~FP_FPRF;
     env->fpscr |= fprf[ctz32(class)][isneg] << FPSCR_FPRF;
 }
 
@@ -183,12 +199,12 @@ COMPUTE_FPRF(float128)
 static void finish_invalid_op_excp(CPUPPCState *env, int op, uintptr_t retaddr)
 {
     /* Update the floating-point invalid operation summary */
-    env->fpscr |= 1 << FPSCR_VX;
+    env->fpscr |= FP_VX;
     /* Update the floating-point exception summary */
     env->fpscr |= FP_FX;
     if (fpscr_ve != 0) {
         /* Update the floating-point enabled exception summary */
-        env->fpscr |= 1 << FPSCR_FEX;
+        env->fpscr |= FP_FEX;
         if (fp_exceptions_enabled(env)) {
             raise_exception_err_ra(env, POWERPC_EXCP_PROGRAM,
                                    POWERPC_EXCP_FP | op, retaddr);
@@ -199,11 +215,11 @@ static void finish_invalid_op_excp(CPUPPCState *env, int op, uintptr_t retaddr)
 static void finish_invalid_op_arith(CPUPPCState *env, int op,
                                     bool set_fpcc, uintptr_t retaddr)
 {
-    env->fpscr &= ~((1 << FPSCR_FR) | (1 << FPSCR_FI));
+    env->fpscr &= ~(FP_FR | FP_FI);
     if (fpscr_ve == 0) {
         if (set_fpcc) {
-            env->fpscr &= ~(0xF << FPSCR_FPCC);
-            env->fpscr |= 0x11 << FPSCR_FPCC;
+            env->fpscr &= ~FP_FPCC;
+            env->fpscr |= (FP_C | FP_FU);
         }
     }
     finish_invalid_op_excp(env, op, retaddr);
@@ -212,7 +228,7 @@ static void finish_invalid_op_arith(CPUPPCState *env, int op,
 /* Signalling NaN */
 static void float_invalid_op_vxsnan(CPUPPCState *env, uintptr_t retaddr)
 {
-    env->fpscr |= 1 << FPSCR_VXSNAN;
+    env->fpscr |= FP_VXSNAN;
     finish_invalid_op_excp(env, POWERPC_EXCP_FP_VXSNAN, retaddr);
 }
 
@@ -220,7 +236,7 @@ static void float_invalid_op_vxsnan(CPUPPCState *env, uintptr_t retaddr)
 static void float_invalid_op_vxisi(CPUPPCState *env, bool set_fpcc,
                                    uintptr_t retaddr)
 {
-    env->fpscr |= 1 << FPSCR_VXISI;
+    env->fpscr |= FP_VXISI;
     finish_invalid_op_arith(env, POWERPC_EXCP_FP_VXISI, set_fpcc, retaddr);
 }
 
@@ -228,7 +244,7 @@ static void float_invalid_op_vxisi(CPUPPCState *env, bool set_fpcc,
 static void float_invalid_op_vxidi(CPUPPCState *env, bool set_fpcc,
                                    uintptr_t retaddr)
 {
-    env->fpscr |= 1 << FPSCR_VXIDI;
+    env->fpscr |= FP_VXIDI;
     finish_invalid_op_arith(env, POWERPC_EXCP_FP_VXIDI, set_fpcc, retaddr);
 }
 
@@ -236,7 +252,7 @@ static void float_invalid_op_vxidi(CPUPPCState *env, bool set_fpcc,
 static void float_invalid_op_vxzdz(CPUPPCState *env, bool set_fpcc,
                                    uintptr_t retaddr)
 {
-    env->fpscr |= 1 << FPSCR_VXZDZ;
+    env->fpscr |= FP_VXZDZ;
     finish_invalid_op_arith(env, POWERPC_EXCP_FP_VXZDZ, set_fpcc, retaddr);
 }
 
@@ -244,7 +260,7 @@ static void float_invalid_op_vxzdz(CPUPPCState *env, bool set_fpcc,
 static void float_invalid_op_vximz(CPUPPCState *env, bool set_fpcc,
                                    uintptr_t retaddr)
 {
-    env->fpscr |= 1 << FPSCR_VXIMZ;
+    env->fpscr |= FP_VXIMZ;
     finish_invalid_op_arith(env, POWERPC_EXCP_FP_VXIMZ, set_fpcc, retaddr);
 }
 
@@ -252,7 +268,7 @@ static void float_invalid_op_vximz(CPUPPCState *env, bool set_fpcc,
 static void float_invalid_op_vxsqrt(CPUPPCState *env, bool set_fpcc,
                                     uintptr_t retaddr)
 {
-    env->fpscr |= 1 << FPSCR_VXSQRT;
+    env->fpscr |= FP_VXSQRT;
     finish_invalid_op_arith(env, POWERPC_EXCP_FP_VXSQRT, set_fpcc, retaddr);
 }
 
@@ -260,13 +276,13 @@ static void float_invalid_op_vxsqrt(CPUPPCState *env, bool set_fpcc,
 static void float_invalid_op_vxvc(CPUPPCState *env, bool set_fpcc,
                                   uintptr_t retaddr)
 {
-    env->fpscr |= 1 << FPSCR_VXVC;
+    env->fpscr |= FP_VXVC;
     if (set_fpcc) {
-        env->fpscr &= ~(0xF << FPSCR_FPCC);
-        env->fpscr |= 0x11 << FPSCR_FPCC;
+        env->fpscr &= ~FP_FPCC;
+        env->fpscr |= (FP_C | FP_FU);
     }
     /* Update the floating-point invalid operation summary */
-    env->fpscr |= 1 << FPSCR_VX;
+    env->fpscr |= FP_VX;
     /* Update the floating-point exception summary */
     env->fpscr |= FP_FX;
     /* We must update the target FPR before raising the exception */
@@ -276,8 +292,8 @@ static void float_invalid_op_vxvc(CPUPPCState *env, bool set_fpcc,
         cs->exception_index = POWERPC_EXCP_PROGRAM;
         env->error_code = POWERPC_EXCP_FP | POWERPC_EXCP_FP_VXVC;
         /* Update the floating-point enabled exception summary */
-        env->fpscr |= 1 << FPSCR_FEX;
-        /* Exception is differed */
+        env->fpscr |= FP_FEX;
+        /* Exception is deferred */
     }
 }
 
@@ -285,12 +301,12 @@ static void float_invalid_op_vxvc(CPUPPCState *env, bool set_fpcc,
 static void float_invalid_op_vxcvi(CPUPPCState *env, bool set_fpcc,
                                    uintptr_t retaddr)
 {
-    env->fpscr |= 1 << FPSCR_VXCVI;
-    env->fpscr &= ~((1 << FPSCR_FR) | (1 << FPSCR_FI));
+    env->fpscr |= FP_VXCVI;
+    env->fpscr &= ~(FP_FR | FP_FI);
     if (fpscr_ve == 0) {
         if (set_fpcc) {
-            env->fpscr &= ~(0xF << FPSCR_FPCC);
-            env->fpscr |= 0x11 << FPSCR_FPCC;
+            env->fpscr &= ~FP_FPCC;
+            env->fpscr |= (FP_C | FP_FU);
         }
     }
     finish_invalid_op_excp(env, POWERPC_EXCP_FP_VXCVI, retaddr);
@@ -298,13 +314,13 @@ static void float_invalid_op_vxcvi(CPUPPCState *env, bool set_fpcc,
 
 static inline void float_zero_divide_excp(CPUPPCState *env, uintptr_t raddr)
 {
-    env->fpscr |= 1 << FPSCR_ZX;
-    env->fpscr &= ~((1 << FPSCR_FR) | (1 << FPSCR_FI));
+    env->fpscr |= FP_ZX;
+    env->fpscr &= ~(FP_FR | FP_FI);
     /* Update the floating-point exception summary */
     env->fpscr |= FP_FX;
     if (fpscr_ze != 0) {
         /* Update the floating-point enabled exception summary */
-        env->fpscr |= 1 << FPSCR_FEX;
+        env->fpscr |= FP_FEX;
         if (fp_exceptions_enabled(env)) {
             raise_exception_err_ra(env, POWERPC_EXCP_PROGRAM,
                                    POWERPC_EXCP_FP | POWERPC_EXCP_FP_ZX,
@@ -317,19 +333,19 @@ static inline void float_overflow_excp(CPUPPCState *env)
 {
     CPUState *cs = env_cpu(env);
 
-    env->fpscr |= 1 << FPSCR_OX;
+    env->fpscr |= FP_OX;
     /* Update the floating-point exception summary */
     env->fpscr |= FP_FX;
     if (fpscr_oe != 0) {
         /* XXX: should adjust the result */
         /* Update the floating-point enabled exception summary */
-        env->fpscr |= 1 << FPSCR_FEX;
+        env->fpscr |= FP_FEX;
         /* We must update the target FPR before raising the exception */
         cs->exception_index = POWERPC_EXCP_PROGRAM;
         env->error_code = POWERPC_EXCP_FP | POWERPC_EXCP_FP_OX;
     } else {
-        env->fpscr |= 1 << FPSCR_XX;
-        env->fpscr |= 1 << FPSCR_FI;
+        env->fpscr |= FP_XX;
+        env->fpscr |= FP_FI;
     }
 }
 
@@ -337,13 +353,13 @@ static inline void float_underflow_excp(CPUPPCState *env)
 {
     CPUState *cs = env_cpu(env);
 
-    env->fpscr |= 1 << FPSCR_UX;
+    env->fpscr |= FP_UX;
     /* Update the floating-point exception summary */
     env->fpscr |= FP_FX;
     if (fpscr_ue != 0) {
         /* XXX: should adjust the result */
         /* Update the floating-point enabled exception summary */
-        env->fpscr |= 1 << FPSCR_FEX;
+        env->fpscr |= FP_FEX;
         /* We must update the target FPR before raising the exception */
         cs->exception_index = POWERPC_EXCP_PROGRAM;
         env->error_code = POWERPC_EXCP_FP | POWERPC_EXCP_FP_UX;
@@ -354,13 +370,13 @@ static inline void float_inexact_excp(CPUPPCState *env)
 {
     CPUState *cs = env_cpu(env);
 
-    env->fpscr |= 1 << FPSCR_FI;
-    env->fpscr |= 1 << FPSCR_XX;
+    env->fpscr |= FP_FI;
+    env->fpscr |= FP_XX;
     /* Update the floating-point exception summary */
     env->fpscr |= FP_FX;
     if (fpscr_xe != 0) {
         /* Update the floating-point enabled exception summary */
-        env->fpscr |= 1 << FPSCR_FEX;
+        env->fpscr |= FP_FEX;
         /* We must update the target FPR before raising the exception */
         cs->exception_index = POWERPC_EXCP_PROGRAM;
         env->error_code = POWERPC_EXCP_FP | POWERPC_EXCP_FP_XX;
@@ -403,7 +419,7 @@ void helper_fpscr_clrbit(CPUPPCState *env, uint32_t bit)
     if (prev == 1) {
         switch (bit) {
         case FPSCR_RN1:
-        case FPSCR_RN:
+        case FPSCR_RN0:
             fpscr_set_rounding_mode(env);
             break;
         case FPSCR_VXSNAN:
@@ -417,7 +433,7 @@ void helper_fpscr_clrbit(CPUPPCState *env, uint32_t bit)
         case FPSCR_VXCVI:
             if (!fpscr_ix) {
                 /* Set VX bit to zero */
-                env->fpscr &= ~(1 << FPSCR_VX);
+                env->fpscr &= ~FP_VX;
             }
             break;
         case FPSCR_OX:
@@ -431,7 +447,7 @@ void helper_fpscr_clrbit(CPUPPCState *env, uint32_t bit)
         case FPSCR_XE:
             if (!fpscr_eex) {
                 /* Set the FEX bit */
-                env->fpscr &= ~(1 << FPSCR_FEX);
+                env->fpscr &= ~FP_FEX;
             }
             break;
         default:
@@ -488,7 +504,7 @@ void helper_fpscr_setbit(CPUPPCState *env, uint32_t bit)
         case FPSCR_VXSOFT:
         case FPSCR_VXSQRT:
         case FPSCR_VXCVI:
-            env->fpscr |= 1 << FPSCR_VX;
+            env->fpscr |= FP_VX;
             env->fpscr |= FP_FX;
             if (fpscr_ve != 0) {
                 goto raise_ve;
@@ -557,14 +573,14 @@ void helper_fpscr_setbit(CPUPPCState *env, uint32_t bit)
             }
             break;
         case FPSCR_RN1:
-        case FPSCR_RN:
+        case FPSCR_RN0:
             fpscr_set_rounding_mode(env);
             break;
         default:
             break;
         raise_excp:
             /* Update the floating-point enabled exception summary */
-            env->fpscr |= 1 << FPSCR_FEX;
+            env->fpscr |= FP_FEX;
             /* We have to update Rc1 before raising the exception */
             cs->exception_index = POWERPC_EXCP_PROGRAM;
             break;
@@ -580,8 +596,8 @@ void helper_store_fpscr(CPUPPCState *env, uint64_t arg, uint32_t mask)
 
     prev = env->fpscr;
     new = (target_ulong)arg;
-    new &= ~0x60000000LL;
-    new |= prev & 0x60000000LL;
+    new &= ~(FP_FEX | FP_VX);
+    new |= prev & (FP_FEX | FP_VX);
     for (i = 0; i < sizeof(target_ulong) * 2; i++) {
         if (mask & (1 << i)) {
             env->fpscr &= ~(0xFLL << (4 * i));
@@ -590,17 +606,17 @@ void helper_store_fpscr(CPUPPCState *env, uint64_t arg, uint32_t mask)
     }
     /* Update VX and FEX */
     if (fpscr_ix != 0) {
-        env->fpscr |= 1 << FPSCR_VX;
+        env->fpscr |= FP_VX;
     } else {
-        env->fpscr &= ~(1 << FPSCR_VX);
+        env->fpscr &= ~FP_VX;
     }
     if ((fpscr_ex & fpscr_eex) != 0) {
-        env->fpscr |= 1 << FPSCR_FEX;
+        env->fpscr |= FP_FEX;
         cs->exception_index = POWERPC_EXCP_PROGRAM;
         /* XXX: we should compute it properly */
         env->error_code = POWERPC_EXCP_FP;
     } else {
-        env->fpscr &= ~(1 << FPSCR_FEX);
+        env->fpscr &= ~FP_FEX;
     }
     fpscr_set_rounding_mode(env);
 }
@@ -614,25 +630,21 @@ static void do_float_check_status(CPUPPCState *env, uintptr_t raddr)
 {
     CPUState *cs = env_cpu(env);
     int status = get_float_exception_flags(&env->fp_status);
-    bool inexact_happened = false;
 
     if (status & float_flag_overflow) {
         float_overflow_excp(env);
     } else if (status & float_flag_underflow) {
         float_underflow_excp(env);
-    } else if (status & float_flag_inexact) {
-        float_inexact_excp(env);
-        inexact_happened = true;
     }
-
-    /* if the inexact flag was not set */
-    if (inexact_happened == false) {
-        env->fpscr &= ~(1 << FPSCR_FI); /* clear the FPSCR[FI] bit */
+    if (status & float_flag_inexact) {
+        float_inexact_excp(env);
+    } else {
+        env->fpscr &= ~FP_FI; /* clear the FPSCR[FI] bit */
     }
 
     if (cs->exception_index == POWERPC_EXCP_PROGRAM &&
         (env->error_code & POWERPC_EXCP_FP)) {
-        /* Differred floating-point exception after target FPR update */
+        /* Deferred floating-point exception after target FPR update */
         if (fp_exceptions_enabled(env)) {
             raise_exception_err_ra(env, cs->exception_index,
                                    env->error_code, raddr);
@@ -1126,8 +1138,8 @@ void helper_fcmpu(CPUPPCState *env, uint64_t arg1, uint64_t arg2,
         ret = 0x02UL;
     }
 
-    env->fpscr &= ~(0x0F << FPSCR_FPRF);
-    env->fpscr |= ret << FPSCR_FPRF;
+    env->fpscr &= ~FP_FPCC;
+    env->fpscr |= ret << FPSCR_FPCC;
     env->crf[crfD] = ret;
     if (unlikely(ret == 0x01UL
                  && (float64_is_signaling_nan(farg1.d, &env->fp_status) ||
@@ -1157,9 +1169,9 @@ void helper_fcmpo(CPUPPCState *env, uint64_t arg1, uint64_t arg2,
         ret = 0x02UL;
     }
 
-    env->fpscr &= ~(0x0F << FPSCR_FPRF);
-    env->fpscr |= ret << FPSCR_FPRF;
-    env->crf[crfD] = ret;
+    env->fpscr &= ~FP_FPCC;
+    env->fpscr |= ret << FPSCR_FPCC;
+    env->crf[crfD] = (uint32_t) ret;
     if (unlikely(ret == 0x01UL)) {
         float_invalid_op_vxvc(env, 1, GETPC());
         if (float64_is_signaling_nan(farg1.d, &env->fp_status) ||
@@ -1792,7 +1804,7 @@ uint32_t helper_efdcmpeq(CPUPPCState *env, uint64_t op1, uint64_t op2)
 
 
 /*
- * VSX_ADD_SUB - VSX floating point add/subract
+ * VSX_ADD_SUB - VSX floating point add/subtract
  *   name  - instruction mnemonic
  *   op    - operation (add or sub)
  *   nels  - number of elements (1, 2 or 4)
@@ -2419,8 +2431,8 @@ void helper_xscmpexpdp(CPUPPCState *env, uint32_t opcode,
         }
     }
 
-    env->fpscr &= ~(0x0F << FPSCR_FPRF);
-    env->fpscr |= cc << FPSCR_FPRF;
+    env->fpscr &= ~FP_FPCC;
+    env->fpscr |= cc << FPSCR_FPCC;
     env->crf[BF(opcode)] = cc;
 
     do_float_check_status(env, GETPC());
@@ -2448,8 +2460,8 @@ void helper_xscmpexpqp(CPUPPCState *env, uint32_t opcode,
         }
     }
 
-    env->fpscr &= ~(0x0F << FPSCR_FPRF);
-    env->fpscr |= cc << FPSCR_FPRF;
+    env->fpscr &= ~FP_FPCC;
+    env->fpscr |= cc << FPSCR_FPCC;
     env->crf[BF(opcode)] = cc;
 
     do_float_check_status(env, GETPC());
@@ -2493,8 +2505,8 @@ void helper_##op(CPUPPCState *env, uint32_t opcode,                      \
         cc |= CRF_EQ;                                                    \
     }                                                                    \
                                                                          \
-    env->fpscr &= ~(0x0F << FPSCR_FPRF);                                 \
-    env->fpscr |= cc << FPSCR_FPRF;                                      \
+    env->fpscr &= ~FP_FPCC;                                              \
+    env->fpscr |= cc << FPSCR_FPCC;                                      \
     env->crf[BF(opcode)] = cc;                                           \
                                                                          \
     do_float_check_status(env, GETPC());                                 \
@@ -2541,8 +2553,8 @@ void helper_##op(CPUPPCState *env, uint32_t opcode,                     \
         cc |= CRF_EQ;                                                   \
     }                                                                   \
                                                                         \
-    env->fpscr &= ~(0x0F << FPSCR_FPRF);                                \
-    env->fpscr |= cc << FPSCR_FPRF;                                     \
+    env->fpscr &= ~FP_FPCC;                                             \
+    env->fpscr |= cc << FPSCR_FPCC;                                     \
     env->crf[BF(opcode)] = cc;                                          \
                                                                         \
     do_float_check_status(env, GETPC());                                \
@@ -2871,10 +2883,42 @@ void helper_xscvqpdp(CPUPPCState *env, uint32_t opcode,
 
 uint64_t helper_xscvdpspn(CPUPPCState *env, uint64_t xb)
 {
+    uint64_t result, sign, exp, frac;
+
     float_status tstat = env->fp_status;
     set_float_exception_flags(0, &tstat);
 
-    return (uint64_t)float64_to_float32(xb, &tstat) << 32;
+    sign = extract64(xb, 63,  1);
+    exp  = extract64(xb, 52, 11);
+    frac = extract64(xb,  0, 52) | 0x10000000000000ULL;
+
+    if (unlikely(exp == 0 && extract64(frac, 0, 52) != 0)) {
+        /* DP denormal operand.  */
+        /* Exponent override to DP min exp.  */
+        exp = 1;
+        /* Implicit bit override to 0.  */
+        frac = deposit64(frac, 53, 1, 0);
+    }
+
+    if (unlikely(exp < 897 && frac != 0)) {
+        /* SP tiny operand.  */
+        if (897 - exp > 63) {
+            frac = 0;
+        } else {
+            /* Denormalize until exp = SP min exp.  */
+            frac >>= (897 - exp);
+        }
+        /* Exponent override to SP min exp - 1.  */
+        exp = 896;
+    }
+
+    result = sign << 31;
+    result |= extract64(exp, 10, 1) << 30;
+    result |= extract64(exp, 0, 7) << 23;
+    result |= extract64(frac, 29, 23);
+
+    /* hardware replicates result to both words of the doubleword result.  */
+    return (result << 32) | result;
 }
 
 uint64_t helper_xscvspdpn(CPUPPCState *env, uint64_t xb)
@@ -3198,8 +3242,8 @@ void helper_##op(CPUPPCState *env, uint32_t opcode)         \
                                                             \
         if (scrf) {                                         \
             cc = sign << CRF_LT_BIT | match << CRF_EQ_BIT;  \
-            env->fpscr &= ~(0x0F << FPSCR_FPRF);            \
-            env->fpscr |= cc << FPSCR_FPRF;                 \
+            env->fpscr &= ~FP_FPCC;                         \
+            env->fpscr |= cc << FPSCR_FPCC;                 \
             env->crf[BF(opcode)] = cc;                      \
         } else {                                            \
             t.tfld = match ? fld_max : 0;                   \
@@ -3242,8 +3286,8 @@ void helper_xststdcsp(CPUPPCState *env, uint32_t opcode, ppc_vsr_t *xb)
                              &env->fp_status), &env->fp_status);
 
     cc = sign << CRF_LT_BIT | match << CRF_EQ_BIT | not_sp << CRF_SO_BIT;
-    env->fpscr &= ~(0x0F << FPSCR_FPRF);
-    env->fpscr |= cc << FPSCR_FPRF;
+    env->fpscr &= ~FP_FPCC;
+    env->fpscr |= cc << FPSCR_FPCC;
     env->crf[BF(opcode)] = cc;
 }
 

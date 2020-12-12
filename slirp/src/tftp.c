@@ -118,7 +118,9 @@ static int tftp_read_data(struct tftp_session *spt, uint32_t block_nr,
     }
 
     if (len) {
-        lseek(spt->fd, block_nr * spt->block_size, SEEK_SET);
+        if (lseek(spt->fd, block_nr * spt->block_size, SEEK_SET) == (off_t)-1) {
+            return -1;
+        }
 
         bytes_read = read(spt->fd, buf, len);
     }
@@ -185,16 +187,11 @@ static int tftp_send_oack(struct tftp_session *spt, const char *keys[],
 
     tp->tp_op = htons(TFTP_OACK);
     for (i = 0; i < nb; i++) {
-        n += snprintf(tp->x.tp_buf + n, sizeof(tp->x.tp_buf) - n, "%s",
-                      keys[i]) +
-             1;
-        n += snprintf(tp->x.tp_buf + n, sizeof(tp->x.tp_buf) - n, "%u",
-                      values[i]) +
-             1;
+        n += slirp_fmt0(tp->x.tp_buf + n, sizeof(tp->x.tp_buf) - n, "%s", keys[i]);
+        n += slirp_fmt0(tp->x.tp_buf + n, sizeof(tp->x.tp_buf) - n, "%u", values[i]);
     }
 
-    m->m_len = sizeof(struct tftp_t) - (TFTP_BLOCKSIZE_MAX + 2) + n -
-               sizeof(struct udphdr);
+    m->m_len = G_SIZEOF_MEMBER(struct tftp_t, tp_op) + n;
     tftp_udp_output(spt, m, recv_tp);
 
     return 0;
@@ -344,8 +341,13 @@ static void tftp_handle_rrq(Slirp *slirp, struct sockaddr_storage *srcsas,
     k += 6; /* skipping octet */
 
     /* do sanity checks on the filename */
-    if (!strncmp(req_fname, "../", 3) ||
-        req_fname[strlen(req_fname) - 1] == '/' || strstr(req_fname, "/../")) {
+    if (
+#ifdef G_OS_WIN32
+        strstr(req_fname, "..\\") ||
+        req_fname[strlen(req_fname) - 1] == '\\' ||
+#endif
+        strstr(req_fname, "../") ||
+        req_fname[strlen(req_fname) - 1] == '/') {
         tftp_send_error(spt, 2, "Access violation", tp);
         return;
     }

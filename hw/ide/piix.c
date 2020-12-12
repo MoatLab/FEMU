@@ -24,11 +24,10 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
 #include "hw/pci/pci.h"
+#include "migration/vmstate.h"
 #include "qemu/module.h"
 #include "sysemu/block-backend.h"
-#include "sysemu/sysemu.h"
 #include "sysemu/blockdev.h"
 #include "sysemu/dma.h"
 
@@ -103,9 +102,9 @@ static void bmdma_setup_bar(PCIIDEState *d)
     }
 }
 
-static void piix3_reset(void *opaque)
+static void piix_ide_reset(DeviceState *dev)
 {
-    PCIIDEState *d = opaque;
+    PCIIDEState *d = PCI_IDE(dev);
     PCIDevice *pd = PCI_DEVICE(d);
     uint8_t *pci_conf = pd->config;
     int i;
@@ -154,12 +153,10 @@ static void pci_piix_ide_realize(PCIDevice *dev, Error **errp)
 
     pci_conf[PCI_CLASS_PROG] = 0x80; // legacy ATA mode
 
-    qemu_register_reset(piix3_reset, d);
-
     bmdma_setup_bar(d);
     pci_register_bar(dev, 4, PCI_BASE_ADDRESS_SPACE_IO, &d->bmdma_bar);
 
-    vmstate_register(DEVICE(dev), 0, &vmstate_ide_pci, d);
+    vmstate_register(VMSTATE_IF(dev), 0, &vmstate_ide_pci, d);
 
     pci_piix_init_ports(d);
 }
@@ -167,46 +164,36 @@ static void pci_piix_ide_realize(PCIDevice *dev, Error **errp)
 int pci_piix3_xen_ide_unplug(DeviceState *dev, bool aux)
 {
     PCIIDEState *pci_ide;
-    DriveInfo *di;
     int i;
     IDEDevice *idedev;
+    IDEBus *idebus;
+    BlockBackend *blk;
 
     pci_ide = PCI_IDE(dev);
 
     for (i = aux ? 1 : 0; i < 4; i++) {
-        di = drive_get_by_index(IF_IDE, i);
-        if (di != NULL && !di->media_cd) {
-            BlockBackend *blk = blk_by_legacy_dinfo(di);
-            DeviceState *ds = blk_get_attached_dev(blk);
+        idebus = &pci_ide->bus[i / 2];
+        blk = idebus->ifs[i % 2].blk;
+
+        if (blk && idebus->ifs[i % 2].drive_kind != IDE_CD) {
+            if (!(i % 2)) {
+                idedev = idebus->master;
+            } else {
+                idedev = idebus->slave;
+            }
 
             blk_drain(blk);
             blk_flush(blk);
 
-            if (ds) {
-                blk_detach_dev(blk, ds);
-            }
-            pci_ide->bus[di->bus].ifs[di->unit].blk = NULL;
-            if (!(i % 2)) {
-                idedev = pci_ide->bus[di->bus].master;
-            } else {
-                idedev = pci_ide->bus[di->bus].slave;
-            }
+            blk_detach_dev(blk, DEVICE(idedev));
+            idebus->ifs[i % 2].blk = NULL;
             idedev->conf.blk = NULL;
             monitor_remove_blk(blk);
             blk_unref(blk);
         }
     }
-    qdev_reset_all(DEVICE(dev));
+    qdev_reset_all(dev);
     return 0;
-}
-
-PCIDevice *pci_piix3_xen_ide_init(PCIBus *bus, DriveInfo **hd_table, int devfn)
-{
-    PCIDevice *dev;
-
-    dev = pci_create_simple(bus, devfn, "piix3-ide-xen");
-    pci_ide_create_devs(dev, hd_table);
-    return dev;
 }
 
 static void pci_piix_ide_exitfn(PCIDevice *dev)
@@ -220,33 +207,13 @@ static void pci_piix_ide_exitfn(PCIDevice *dev)
     }
 }
 
-/* hd_table must contain 4 block drivers */
 /* NOTE: for the PIIX3, the IRQs and IOports are hardcoded */
-PCIDevice *pci_piix3_ide_init(PCIBus *bus, DriveInfo **hd_table, int devfn)
-{
-    PCIDevice *dev;
-
-    dev = pci_create_simple(bus, devfn, "piix3-ide");
-    pci_ide_create_devs(dev, hd_table);
-    return dev;
-}
-
-/* hd_table must contain 4 block drivers */
-/* NOTE: for the PIIX4, the IRQs and IOports are hardcoded */
-PCIDevice *pci_piix4_ide_init(PCIBus *bus, DriveInfo **hd_table, int devfn)
-{
-    PCIDevice *dev;
-
-    dev = pci_create_simple(bus, devfn, "piix4-ide");
-    pci_ide_create_devs(dev, hd_table);
-    return dev;
-}
-
 static void piix3_ide_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
 
+    dc->reset = piix_ide_reset;
     k->realize = pci_piix_ide_realize;
     k->exit = pci_piix_ide_exitfn;
     k->vendor_id = PCI_VENDOR_ID_INTEL;
@@ -268,11 +235,13 @@ static const TypeInfo piix3_ide_xen_info = {
     .class_init    = piix3_ide_class_init,
 };
 
+/* NOTE: for the PIIX4, the IRQs and IOports are hardcoded */
 static void piix4_ide_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
 
+    dc->reset = piix_ide_reset;
     k->realize = pci_piix_ide_realize;
     k->exit = pci_piix_ide_exitfn;
     k->vendor_id = PCI_VENDOR_ID_INTEL;

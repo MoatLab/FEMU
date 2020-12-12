@@ -1,15 +1,21 @@
 /*
  * Raspberry Pi emulation (c) 2012 Gregory Estrade
- * This code is licensed under the GNU GPLv2 and later.
+ *
+ * This work is licensed under the terms of the GNU GPL, version 2 or later.
+ * See the COPYING file in the top-level directory.
  */
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "hw/misc/bcm2835_property.h"
+#include "hw/qdev-properties.h"
+#include "migration/vmstate.h"
+#include "hw/irq.h"
 #include "hw/misc/bcm2835_mbox_defs.h"
 #include "sysemu/dma.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
+#include "trace.h"
 
 /* https://github.com/raspberrypi/firmware/wiki/Mailbox-property-interface */
 
@@ -53,7 +59,8 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s, uint32_t value)
             break;
         case 0x00010001: /* Get board model */
             qemu_log_mask(LOG_UNIMP,
-                          "bcm2835_property: %x get board model NYI\n", tag);
+                          "bcm2835_property: 0x%08x get board model NYI\n",
+                          tag);
             resplen = 4;
             break;
         case 0x00010002: /* Get board revision */
@@ -66,7 +73,8 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s, uint32_t value)
             break;
         case 0x00010004: /* Get board serial */
             qemu_log_mask(LOG_UNIMP,
-                          "bcm2835_property: %x get board serial NYI\n", tag);
+                          "bcm2835_property: 0x%08x get board serial NYI\n",
+                          tag);
             resplen = 8;
             break;
         case 0x00010005: /* Get ARM memory */
@@ -101,7 +109,8 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s, uint32_t value)
 
         case 0x00038001: /* Set clock state */
             qemu_log_mask(LOG_UNIMP,
-                          "bcm2835_property: %x set clock state NYI\n", tag);
+                          "bcm2835_property: 0x%08x set clock state NYI\n",
+                          tag);
             resplen = 8;
             break;
 
@@ -126,7 +135,8 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s, uint32_t value)
         case 0x00038004: /* Set max clock rate */
         case 0x00038007: /* Set min clock rate */
             qemu_log_mask(LOG_UNIMP,
-                          "bcm2835_property: %x set clock rates NYI\n", tag);
+                          "bcm2835_property: 0x%08x set clock rate NYI\n",
+                          tag);
             resplen = 8;
             break;
 
@@ -271,11 +281,12 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s, uint32_t value)
             break;
 
         default:
-            qemu_log_mask(LOG_GUEST_ERROR,
-                          "bcm2835_property: unhandled tag %08x\n", tag);
+            qemu_log_mask(LOG_UNIMP,
+                          "bcm2835_property: unhandled tag 0x%08x\n", tag);
             break;
         }
 
+        trace_bcm2835_mbox_property(tag, bufsize, resplen);
         if (tag == 0) {
             break;
         }
@@ -381,26 +392,13 @@ static void bcm2835_property_realize(DeviceState *dev, Error **errp)
 {
     BCM2835PropertyState *s = BCM2835_PROPERTY(dev);
     Object *obj;
-    Error *err = NULL;
 
-    obj = object_property_get_link(OBJECT(dev), "fb", &err);
-    if (obj == NULL) {
-        error_setg(errp, "%s: required fb link not found: %s",
-                   __func__, error_get_pretty(err));
-        return;
-    }
-
+    obj = object_property_get_link(OBJECT(dev), "fb", &error_abort);
     s->fbdev = BCM2835_FB(obj);
 
-    obj = object_property_get_link(OBJECT(dev), "dma-mr", &err);
-    if (obj == NULL) {
-        error_setg(errp, "%s: required dma-mr link not found: %s",
-                   __func__, error_get_pretty(err));
-        return;
-    }
-
+    obj = object_property_get_link(OBJECT(dev), "dma-mr", &error_abort);
     s->dma_mr = MEMORY_REGION(obj);
-    address_space_init(&s->dma_as, s->dma_mr, NULL);
+    address_space_init(&s->dma_as, s->dma_mr, TYPE_BCM2835_PROPERTY "-memory");
 
     /* TODO: connect to MAC address of USB NIC device, once we emulate it */
     qemu_macaddr_default_if_unset(&s->macaddr);
@@ -417,7 +415,7 @@ static void bcm2835_property_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    dc->props = bcm2835_property_props;
+    device_class_set_props(dc, bcm2835_property_props);
     dc->realize = bcm2835_property_realize;
     dc->vmsd = &vmstate_bcm2835_property;
 }

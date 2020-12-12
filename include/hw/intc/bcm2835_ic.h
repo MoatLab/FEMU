@@ -1,20 +1,23 @@
 /*
  * Raspberry Pi emulation (c) 2012 Gregory Estrade
- * This code is licensed under the GNU GPLv2 and later.
+ *
+ * This work is licensed under the terms of the GNU GPL, version 2 or later.
+ * See the COPYING file in the top-level directory.
  */
 
 #ifndef BCM2835_IC_H
 #define BCM2835_IC_H
 
 #include "hw/sysbus.h"
+#include "qom/object.h"
 
 #define TYPE_BCM2835_IC "bcm2835-ic"
-#define BCM2835_IC(obj) OBJECT_CHECK(BCM2835ICState, (obj), TYPE_BCM2835_IC)
+OBJECT_DECLARE_SIMPLE_TYPE(BCM2835ICState, BCM2835_IC)
 
 #define BCM2835_IC_GPU_IRQ "gpu-irq"
 #define BCM2835_IC_ARM_IRQ "arm-irq"
 
-typedef struct BCM2835ICState {
+struct BCM2835ICState {
     /*< private >*/
     SysBusDevice busdev;
     /*< public >*/
@@ -28,6 +31,6 @@ typedef struct BCM2835ICState {
     uint8_t arm_irq_level, arm_irq_enable;
     bool fiq_enable;
     uint8_t fiq_select;
-} BCM2835ICState;
+};
 
 #endif

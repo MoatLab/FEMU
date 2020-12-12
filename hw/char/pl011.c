@@ -20,7 +20,10 @@
 
 #include "qemu/osdep.h"
 #include "hw/char/pl011.h"
+#include "hw/irq.h"
 #include "hw/sysbus.h"
+#include "hw/qdev-clock.h"
+#include "migration/vmstate.h"
 #include "chardev/char-fe.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
@@ -167,6 +170,25 @@ static void pl011_set_read_trigger(PL011State *s)
         s->read_trigger = 1;
 }
 
+static unsigned int pl011_get_baudrate(const PL011State *s)
+{
+    uint64_t clk;
+
+    if (s->fbrd == 0) {
+        return 0;
+    }
+
+    clk = clock_get_hz(s->clk);
+    return (clk / ((s->ibrd << 6) + s->fbrd)) << 2;
+}
+
+static void pl011_trace_baudrate_change(const PL011State *s)
+{
+    trace_pl011_baudrate_change(pl011_get_baudrate(s),
+                                clock_get_hz(s->clk),
+                                s->ibrd, s->fbrd);
+}
+
 static void pl011_write(void *opaque, hwaddr offset,
                         uint64_t value, unsigned size)
 {
@@ -196,9 +218,11 @@ static void pl011_write(void *opaque, hwaddr offset,
         break;
     case 9: /* UARTIBRD */
         s->ibrd = value;
+        pl011_trace_baudrate_change(s);
         break;
     case 10: /* UARTFBRD */
         s->fbrd = value;
+        pl011_trace_baudrate_change(s);
         break;
     case 11: /* UARTLCR_H */
         /* Reset the FIFO state on FIFO enable or disable */
@@ -278,16 +302,33 @@ static void pl011_receive(void *opaque, const uint8_t *buf, int size)
     pl011_put_fifo(opaque, *buf);
 }
 
-static void pl011_event(void *opaque, int event)
+static void pl011_event(void *opaque, QEMUChrEvent event)
 {
     if (event == CHR_EVENT_BREAK)
         pl011_put_fifo(opaque, 0x400);
+}
+
+static void pl011_clock_update(void *opaque)
+{
+    PL011State *s = PL011(opaque);
+
+    pl011_trace_baudrate_change(s);
 }
 
 static const MemoryRegionOps pl011_ops = {
     .read = pl011_read,
     .write = pl011_write,
     .endianness = DEVICE_NATIVE_ENDIAN,
+};
+
+static const VMStateDescription vmstate_pl011_clock = {
+    .name = "pl011/clock",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (VMStateField[]) {
+        VMSTATE_CLOCK(clk, PL011State),
+        VMSTATE_END_OF_LIST()
+    }
 };
 
 static const VMStateDescription vmstate_pl011 = {
@@ -312,6 +353,10 @@ static const VMStateDescription vmstate_pl011 = {
         VMSTATE_INT32(read_count, PL011State),
         VMSTATE_INT32(read_trigger, PL011State),
         VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * []) {
+        &vmstate_pl011_clock,
+        NULL
     }
 };
 
@@ -331,6 +376,8 @@ static void pl011_init(Object *obj)
     for (i = 0; i < ARRAY_SIZE(s->irq); i++) {
         sysbus_init_irq(sbd, &s->irq[i]);
     }
+
+    s->clk = qdev_init_clock_in(DEVICE(obj), "clk", pl011_clock_update, s);
 
     s->read_trigger = 1;
     s->ifl = 0x12;
@@ -354,7 +401,7 @@ static void pl011_class_init(ObjectClass *oc, void *data)
 
     dc->realize = pl011_realize;
     dc->vmsd = &vmstate_pl011;
-    dc->props = pl011_properties;
+    device_class_set_props(dc, pl011_properties);
 }
 
 static const TypeInfo pl011_arm_info = {

@@ -27,10 +27,10 @@
 
 #include "hw/sysbus.h"
 #include "hw/ptimer.h"
+#include "qom/object.h"
 
 #define TYPE_MSS_TIMER     "mss-timer"
-#define MSS_TIMER(obj)     OBJECT_CHECK(MSSTimerState, \
-                              (obj), TYPE_MSS_TIMER)
+OBJECT_DECLARE_SIMPLE_TYPE(MSSTimerState, MSS_TIMER)
 
 /*
  * There are two 32-bit down counting timers.
@@ -46,19 +46,18 @@
 #define R_TIM1_MAX        6
 
 struct Msf2Timer {
-    QEMUBH *bh;
     ptimer_state *ptimer;
 
     uint32_t regs[R_TIM1_MAX];
     qemu_irq irq;
 };
 
-typedef struct MSSTimerState {
+struct MSSTimerState {
     SysBusDevice parent_obj;
 
     MemoryRegion mmio;
     uint32_t freq_hz;
     struct Msf2Timer timers[NUM_TIMERS];
-} MSSTimerState;
+};
 
 #endif /* HW_MSS_TIMER_H */

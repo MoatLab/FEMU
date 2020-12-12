@@ -45,11 +45,13 @@
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  */
+
 #include "qemu/osdep.h"
 #include "qemu-common.h"
 #include "qemu/error-report.h"
 
 #include "sysemu/hvf.h"
+#include "sysemu/runstate.h"
 #include "hvf-i386.h"
 #include "vmcs.h"
 #include "vmx.h"
@@ -66,11 +68,11 @@
 
 #include "exec/address-spaces.h"
 #include "hw/i386/apic_internal.h"
-#include "hw/boards.h"
 #include "qemu/main-loop.h"
 #include "sysemu/accel.h"
-#include "sysemu/sysemu.h"
 #include "target/i386/cpu.h"
+
+#include "hvf-cpus.h"
 
 HVFState *hvf_state;
 
@@ -107,14 +109,14 @@ static void assert_hvf_ok(hv_return_t ret)
 }
 
 /* Memory slots */
-hvf_slot *hvf_find_overlap_slot(uint64_t start, uint64_t end)
+hvf_slot *hvf_find_overlap_slot(uint64_t start, uint64_t size)
 {
     hvf_slot *slot;
     int x;
     for (x = 0; x < hvf_state->num_slots; ++x) {
         slot = &hvf_state->slots[x];
         if (slot->size && start < (slot->start + slot->size) &&
-            end > slot->start) {
+            (start + size) > slot->start) {
             return slot;
         }
     }
@@ -129,12 +131,10 @@ struct mac_slot {
 };
 
 struct mac_slot mac_slots[32];
-#define ALIGN(x, y)  (((x) + (y) - 1) & ~((y) - 1))
 
-static int do_hvf_set_memory(hvf_slot *slot)
+static int do_hvf_set_memory(hvf_slot *slot, hv_memory_flags_t flags)
 {
     struct mac_slot *macslot;
-    hv_memory_flags_t flags;
     hv_return_t ret;
 
     macslot = &mac_slots[slot->slot_id];
@@ -151,8 +151,6 @@ static int do_hvf_set_memory(hvf_slot *slot)
         return 0;
     }
 
-    flags = HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC;
-
     macslot->present = 1;
     macslot->gpa_start = slot->start;
     macslot->size = slot->size;
@@ -165,14 +163,24 @@ void hvf_set_phys_mem(MemoryRegionSection *section, bool add)
 {
     hvf_slot *mem;
     MemoryRegion *area = section->mr;
+    bool writeable = !area->readonly && !area->rom_device;
+    hv_memory_flags_t flags;
 
     if (!memory_region_is_ram(area)) {
-        return;
+        if (writeable) {
+            return;
+        } else if (!memory_region_is_romd(area)) {
+            /*
+             * If the memory device is not in romd_mode, then we actually want
+             * to remove the hvf memory slot so all accesses will trap.
+             */
+             add = false;
+        }
     }
 
     mem = hvf_find_overlap_slot(
             section->offset_within_address_space,
-            section->offset_within_address_space + int128_get64(section->size));
+            int128_get64(section->size));
 
     if (mem && add) {
         if (mem->size == int128_get64(section->size) &&
@@ -186,7 +194,7 @@ void hvf_set_phys_mem(MemoryRegionSection *section, bool add)
     /* Region needs to be reset. set the size to 0 and remap it. */
     if (mem) {
         mem->size = 0;
-        if (do_hvf_set_memory(mem)) {
+        if (do_hvf_set_memory(mem, 0)) {
             error_report("Failed to reset overlapping slot");
             abort();
         }
@@ -194,6 +202,13 @@ void hvf_set_phys_mem(MemoryRegionSection *section, bool add)
 
     if (!add) {
         return;
+    }
+
+    if (area->readonly ||
+        (!memory_region_is_ram(area) && memory_region_is_romd(area))) {
+        flags = HV_MEMORY_READ | HV_MEMORY_EXEC;
+    } else {
+        flags = HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC;
     }
 
     /* Now make a new slot. */
@@ -216,7 +231,7 @@ void hvf_set_phys_mem(MemoryRegionSection *section, bool add)
     mem->start = section->offset_within_address_space;
     mem->region = area;
 
-    if (do_hvf_set_memory(mem)) {
+    if (do_hvf_set_memory(mem, flags)) {
         error_report("Error registering new memory slot");
         abort();
     }
@@ -238,7 +253,7 @@ void vmx_update_tpr(CPUState *cpu)
     }
 }
 
-void update_apic_tpr(CPUState *cpu)
+static void update_apic_tpr(CPUState *cpu)
 {
     X86CPU *x86_cpu = X86_CPU(cpu);
     int tpr = rreg(cpu->hvf_fd, HV_X86_TPR) >> 4;
@@ -246,14 +261,6 @@ void update_apic_tpr(CPUState *cpu)
 }
 
 #define VECTORING_INFO_VECTOR_MASK     0xff
-
-static void hvf_handle_interrupt(CPUState * cpu, int mask)
-{
-    cpu->interrupt_request |= mask;
-    if (!qemu_cpu_is_self(cpu)) {
-        qemu_cpu_kick(cpu);
-    }
-}
 
 void hvf_handle_io(CPUArchState *env, uint16_t port, void *buffer,
                   int direction, int size, int count)
@@ -269,46 +276,54 @@ void hvf_handle_io(CPUArchState *env, uint16_t port, void *buffer,
     }
 }
 
-/* TODO: synchronize vcpu state */
 static void do_hvf_cpu_synchronize_state(CPUState *cpu, run_on_cpu_data arg)
 {
-    CPUState *cpu_state = cpu;
-    if (cpu_state->vcpu_dirty == 0) {
-        hvf_get_registers(cpu_state);
-    }
-
-    cpu_state->vcpu_dirty = 1;
-}
-
-void hvf_cpu_synchronize_state(CPUState *cpu_state)
-{
-    if (cpu_state->vcpu_dirty == 0) {
-        run_on_cpu(cpu_state, do_hvf_cpu_synchronize_state, RUN_ON_CPU_NULL);
+    if (!cpu->vcpu_dirty) {
+        hvf_get_registers(cpu);
+        cpu->vcpu_dirty = true;
     }
 }
 
-static void do_hvf_cpu_synchronize_post_reset(CPUState *cpu, run_on_cpu_data arg)
+void hvf_cpu_synchronize_state(CPUState *cpu)
 {
-    CPUState *cpu_state = cpu;
-    hvf_put_registers(cpu_state);
-    cpu_state->vcpu_dirty = false;
+    if (!cpu->vcpu_dirty) {
+        run_on_cpu(cpu, do_hvf_cpu_synchronize_state, RUN_ON_CPU_NULL);
+    }
 }
 
-void hvf_cpu_synchronize_post_reset(CPUState *cpu_state)
+static void do_hvf_cpu_synchronize_post_reset(CPUState *cpu,
+                                              run_on_cpu_data arg)
 {
-    run_on_cpu(cpu_state, do_hvf_cpu_synchronize_post_reset, RUN_ON_CPU_NULL);
+    hvf_put_registers(cpu);
+    cpu->vcpu_dirty = false;
 }
 
-void _hvf_cpu_synchronize_post_init(CPUState *cpu, run_on_cpu_data arg)
+void hvf_cpu_synchronize_post_reset(CPUState *cpu)
 {
-    CPUState *cpu_state = cpu;
-    hvf_put_registers(cpu_state);
-    cpu_state->vcpu_dirty = false;
+    run_on_cpu(cpu, do_hvf_cpu_synchronize_post_reset, RUN_ON_CPU_NULL);
 }
 
-void hvf_cpu_synchronize_post_init(CPUState *cpu_state)
+static void do_hvf_cpu_synchronize_post_init(CPUState *cpu,
+                                             run_on_cpu_data arg)
 {
-    run_on_cpu(cpu_state, _hvf_cpu_synchronize_post_init, RUN_ON_CPU_NULL);
+    hvf_put_registers(cpu);
+    cpu->vcpu_dirty = false;
+}
+
+void hvf_cpu_synchronize_post_init(CPUState *cpu)
+{
+    run_on_cpu(cpu, do_hvf_cpu_synchronize_post_init, RUN_ON_CPU_NULL);
+}
+
+static void do_hvf_cpu_synchronize_pre_loadvm(CPUState *cpu,
+                                              run_on_cpu_data arg)
+{
+    cpu->vcpu_dirty = true;
+}
+
+void hvf_cpu_synchronize_pre_loadvm(CPUState *cpu)
+{
+    run_on_cpu(cpu, do_hvf_cpu_synchronize_pre_loadvm, RUN_ON_CPU_NULL);
 }
 
 static bool ept_emulation_fault(hvf_slot *slot, uint64_t gpa, uint64_t ept_qual)
@@ -345,7 +360,14 @@ static bool ept_emulation_fault(hvf_slot *slot, uint64_t gpa, uint64_t ept_qual)
         return false;
     }
 
-    return !slot;
+    if (!slot) {
+        return true;
+    }
+    if (!memory_region_is_ram(slot->region) &&
+        !(read && memory_region_is_romd(slot->region))) {
+        return true;
+    }
+    return false;
 }
 
 static void hvf_set_dirty_tracking(MemoryRegionSection *section, bool on)
@@ -354,7 +376,7 @@ static void hvf_set_dirty_tracking(MemoryRegionSection *section, bool on)
 
     slot = hvf_find_overlap_slot(
             section->offset_within_address_space,
-            section->offset_within_address_space + int128_get64(section->size));
+            int128_get64(section->size));
 
     /* protect region against writes; begin tracking it */
     if (on) {
@@ -420,92 +442,13 @@ static MemoryListener hvf_memory_listener = {
     .log_sync = hvf_log_sync,
 };
 
-void hvf_reset_vcpu(CPUState *cpu) {
-
-    /* TODO: this shouldn't be needed; there is already a call to
-     * cpu_synchronize_all_post_reset in vl.c
-     */
-    wvmcs(cpu->hvf_fd, VMCS_ENTRY_CTLS, 0);
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_IA32_EFER, 0);
-    macvm_set_cr0(cpu->hvf_fd, 0x60000010);
-
-    wvmcs(cpu->hvf_fd, VMCS_CR4_MASK, CR4_VMXE_MASK);
-    wvmcs(cpu->hvf_fd, VMCS_CR4_SHADOW, 0x0);
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_CR4, CR4_VMXE_MASK);
-
-    /* set VMCS guest state fields */
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_CS_SELECTOR, 0xf000);
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_CS_LIMIT, 0xffff);
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_CS_ACCESS_RIGHTS, 0x9b);
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_CS_BASE, 0xffff0000);
-
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_DS_SELECTOR, 0);
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_DS_LIMIT, 0xffff);
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_DS_ACCESS_RIGHTS, 0x93);
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_DS_BASE, 0);
-
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_ES_SELECTOR, 0);
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_ES_LIMIT, 0xffff);
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_ES_ACCESS_RIGHTS, 0x93);
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_ES_BASE, 0);
-
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_FS_SELECTOR, 0);
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_FS_LIMIT, 0xffff);
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_FS_ACCESS_RIGHTS, 0x93);
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_FS_BASE, 0);
-
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_GS_SELECTOR, 0);
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_GS_LIMIT, 0xffff);
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_GS_ACCESS_RIGHTS, 0x93);
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_GS_BASE, 0);
-
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_SS_SELECTOR, 0);
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_SS_LIMIT, 0xffff);
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_SS_ACCESS_RIGHTS, 0x93);
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_SS_BASE, 0);
-
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_LDTR_SELECTOR, 0);
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_LDTR_LIMIT, 0);
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_LDTR_ACCESS_RIGHTS, 0x10000);
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_LDTR_BASE, 0);
-
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_TR_SELECTOR, 0);
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_TR_LIMIT, 0);
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_TR_ACCESS_RIGHTS, 0x83);
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_TR_BASE, 0);
-
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_GDTR_LIMIT, 0);
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_GDTR_BASE, 0);
-
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_IDTR_LIMIT, 0);
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_IDTR_BASE, 0);
-
-    /*wvmcs(cpu->hvf_fd, VMCS_GUEST_CR2, 0x0);*/
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_CR3, 0x0);
-
-    wreg(cpu->hvf_fd, HV_X86_RIP, 0xfff0);
-    wreg(cpu->hvf_fd, HV_X86_RDX, 0x623);
-    wreg(cpu->hvf_fd, HV_X86_RFLAGS, 0x2);
-    wreg(cpu->hvf_fd, HV_X86_RSP, 0x0);
-    wreg(cpu->hvf_fd, HV_X86_RAX, 0x0);
-    wreg(cpu->hvf_fd, HV_X86_RBX, 0x0);
-    wreg(cpu->hvf_fd, HV_X86_RCX, 0x0);
-    wreg(cpu->hvf_fd, HV_X86_RSI, 0x0);
-    wreg(cpu->hvf_fd, HV_X86_RDI, 0x0);
-    wreg(cpu->hvf_fd, HV_X86_RBP, 0x0);
-
-    for (int i = 0; i < 8; i++) {
-        wreg(cpu->hvf_fd, HV_X86_R8 + i, 0x0);
-    }
-
-    hv_vm_sync_tsc(0);
-    hv_vcpu_invalidate_tlb(cpu->hvf_fd);
-    hv_vcpu_flush(cpu->hvf_fd);
-}
-
 void hvf_vcpu_destroy(CPUState *cpu)
 {
+    X86CPU *x86_cpu = X86_CPU(cpu);
+    CPUX86State *env = &x86_cpu->env;
+
     hv_return_t ret = hv_vcpu_destroy((hv_vcpuid_t)cpu->hvf_fd);
+    g_free(env->hvf_mmio_buf);
     assert_hvf_ok(ret);
 }
 
@@ -535,7 +478,7 @@ int hvf_init_vcpu(CPUState *cpu)
     init_decoder();
 
     hvf_state->hvf_caps = g_new0(struct hvf_vcpu_caps, 1);
-    env->hvf_emul = g_new0(HVFX86EmulatorState, 1);
+    env->hvf_mmio_buf = g_new(char, 4096);
 
     r = hv_vcpu_create((hv_vcpuid_t *)&cpu->hvf_fd, HV_VCPU_DEFAULT);
     cpu->vcpu_dirty = 1;
@@ -592,7 +535,7 @@ int hvf_init_vcpu(CPUState *cpu)
     hv_vcpu_enable_native_msr(cpu->hvf_fd, MSR_GSBASE, 1);
     hv_vcpu_enable_native_msr(cpu->hvf_fd, MSR_KERNELGSBASE, 1);
     hv_vcpu_enable_native_msr(cpu->hvf_fd, MSR_TSC_AUX, 1);
-    /*hv_vcpu_enable_native_msr(cpu->hvf_fd, MSR_IA32_TSC, 1);*/
+    hv_vcpu_enable_native_msr(cpu->hvf_fd, MSR_IA32_TSC, 1);
     hv_vcpu_enable_native_msr(cpu->hvf_fd, MSR_IA32_SYSENTER_CS, 1);
     hv_vcpu_enable_native_msr(cpu->hvf_fd, MSR_IA32_SYSENTER_EIP, 1);
     hv_vcpu_enable_native_msr(cpu->hvf_fd, MSR_IA32_SYSENTER_ESP, 1);
@@ -610,6 +553,8 @@ static void hvf_store_events(CPUState *cpu, uint32_t ins_len, uint64_t idtvec_in
     env->exception_injected = 0;
     env->interrupt_injected = -1;
     env->nmi_injected = false;
+    env->ins_len = 0;
+    env->has_error_code = false;
     if (idtvec_info & VMCS_IDT_VEC_VALID) {
         switch (idtvec_info & VMCS_IDT_VEC_TYPE) {
         case VMCS_IDT_VEC_HWINTR:
@@ -632,7 +577,7 @@ static void hvf_store_events(CPUState *cpu, uint32_t ins_len, uint64_t idtvec_in
             (idtvec_info & VMCS_IDT_VEC_TYPE) == VMCS_IDT_VEC_SWINTR) {
             env->ins_len = ins_len;
         }
-        if (idtvec_info & VMCS_INTR_DEL_ERRCODE) {
+        if (idtvec_info & VMCS_IDT_VEC_ERRCODE_VALID) {
             env->has_error_code = true;
             env->error_code = rvmcs(cpu->hvf_fd, VMCS_IDT_VECTORING_ERROR);
         }
@@ -693,8 +638,7 @@ int hvf_vcpu_exec(CPUState *cpu)
 
         hvf_store_events(cpu, ins_len, idtvec_info);
         rip = rreg(cpu->hvf_fd, HV_X86_RIP);
-        RFLAGS(env) = rreg(cpu->hvf_fd, HV_X86_RFLAGS);
-        env->eflags = RFLAGS(env);
+        env->eflags = rreg(cpu->hvf_fd, HV_X86_RFLAGS);
 
         qemu_mutex_lock_iothread();
 
@@ -706,7 +650,7 @@ int hvf_vcpu_exec(CPUState *cpu)
         case EXIT_REASON_HLT: {
             macvm_set_rip(cpu, rip + ins_len);
             if (!((cpu->interrupt_request & CPU_INTERRUPT_HARD) &&
-                (EFLAGS(env) & IF_MASK))
+                (env->eflags & IF_MASK))
                 && !(cpu->interrupt_request & CPU_INTERRUPT_NMI) &&
                 !(idtvec_info & VMCS_IDT_VEC_VALID)) {
                 cpu->halted = 1;
@@ -720,7 +664,7 @@ int hvf_vcpu_exec(CPUState *cpu)
             ret = EXCP_INTERRUPT;
             break;
         }
-            /* Need to check if MMIO or unmmaped fault */
+        /* Need to check if MMIO or unmapped fault */
         case EXIT_REASON_EPT_FAULT:
         {
             hvf_slot *slot;
@@ -731,14 +675,12 @@ int hvf_vcpu_exec(CPUState *cpu)
                 vmx_set_nmi_blocking(cpu);
             }
 
-            slot = hvf_find_overlap_slot(gpa, gpa);
+            slot = hvf_find_overlap_slot(gpa, 1);
             /* mmio */
             if (ept_emulation_fault(slot, gpa, exit_qual)) {
                 struct x86_decode decode;
 
                 load_regs(cpu);
-                env->hvf_emul->fetch_rip = rip;
-
                 decode_instruction(env, &decode);
                 exec_instruction(env, &decode);
                 store_regs(cpu);
@@ -767,7 +709,7 @@ int hvf_vcpu_exec(CPUState *cpu)
                 } else {
                     RAX(env) = (uint64_t)val;
                 }
-                RIP(env) += ins_len;
+                env->eip += ins_len;
                 store_regs(cpu);
                 break;
             } else if (!string && !in) {
@@ -779,8 +721,6 @@ int hvf_vcpu_exec(CPUState *cpu)
             struct x86_decode decode;
 
             load_regs(cpu);
-            env->hvf_emul->fetch_rip = rip;
-
             decode_instruction(env, &decode);
             assert(ins_len == decode.len);
             exec_instruction(env, &decode);
@@ -841,7 +781,7 @@ int hvf_vcpu_exec(CPUState *cpu)
             } else {
                 simulate_wrmsr(cpu);
             }
-            RIP(env) += rvmcs(cpu->hvf_fd, VMCS_EXIT_INSTRUCTION_LENGTH);
+            env->eip += ins_len;
             store_regs(cpu);
             break;
         }
@@ -877,7 +817,7 @@ int hvf_vcpu_exec(CPUState *cpu)
                 error_report("Unrecognized CR %d", cr);
                 abort();
             }
-            RIP(env) += ins_len;
+            env->eip += ins_len;
             store_regs(cpu);
             break;
         }
@@ -885,8 +825,6 @@ int hvf_vcpu_exec(CPUState *cpu)
             struct x86_decode decode;
 
             load_regs(cpu);
-            env->hvf_emul->fetch_rip = rip;
-
             decode_instruction(env, &decode);
             exec_instruction(env, &decode);
             store_regs(cpu);
@@ -948,8 +886,8 @@ static int hvf_accel_init(MachineState *ms)
     }
   
     hvf_state = s;
-    cpu_interrupt_handler = hvf_handle_interrupt;
     memory_listener_register(&hvf_memory_listener, &address_space_memory);
+    cpus_register_accel(&hvf_cpus);
     return 0;
 }
 

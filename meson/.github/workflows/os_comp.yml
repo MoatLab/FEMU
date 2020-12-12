@@ -1,0 +1,50 @@
+name: OS Comp Tests
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+
+jobs:
+  xenial:
+    name: Ubuntu 16.04
+    runs-on: ubuntu-16.04
+    steps:
+    - uses: actions/checkout@v2
+    - name: Install Dependencies
+      run: |
+        sudo apt update -yq
+        sudo apt install -yq --no-install-recommends python3-setuptools python3-pip g++ gfortran gobjc gobjc++ zlib1g-dev python-dev python3-dev python3-jsonschema
+    - name: Install ninja-build tool
+      uses: seanmiddleditch/gha-setup-ninja@v1
+    - name: Python version
+      run: python3 --version
+    - name: Ninja version
+      run: ninja --version
+    - name: Run tests
+      run: LD_LIBRARY_PATH=/usr/local/share/boost/1.69.0/lib/:$(rustc --print sysroot)/lib:$LD_LIBRARY_PATH python3 run_tests.py
+      env:
+        CI: '1'
+        XENIAL: '1'
+
+  arch:
+    name: ${{ matrix.cfg.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cfg:
+          - { name: Arch Linux,       id: arch     }
+          - { name: CUDA (on Arch),   id: cuda     }
+          - { name: Fedora,           id: fedora   }
+          - { name: OpenSUSE,         id: opensuse }
+          - { name: Ubuntu Bionic,    id: bionic   }
+    container: mesonbuild/${{ matrix.cfg.id }}:latest
+    steps:
+    - uses: actions/checkout@v2
+    - name: Run tests
+      # All environment variables are stored inside the docker image in /ci/env_vars.sh
+      # They are defined in the `env` section in each image.json. CI_ARGS should be set
+      # via the `args` array ub the image.json
+      run: bash -c 'source /ci/env_vars.sh; cd $GITHUB_WORKSPACE; ./run_tests.py $CI_ARGS'

@@ -10,7 +10,7 @@
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
- * License version 2 as published by the Free Software Foundation.
+ * License version 2.1 as published by the Free Software Foundation.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -23,20 +23,23 @@
  * Contributions after 2012-01-13 are licensed under the terms of the
  * GNU GPL, version 2 or (at your option) any later version.
  */
+
 #include "qemu/osdep.h"
-#include "hw/hw.h"
 #include "qapi/error.h"
 #include "qapi/visitor.h"
-#include "hw/i386/pc.h"
 #include "hw/pci/pci.h"
+#include "migration/vmstate.h"
 #include "qemu/timer.h"
-#include "sysemu/sysemu.h"
+#include "hw/core/cpu.h"
+#include "sysemu/reset.h"
+#include "sysemu/runstate.h"
 #include "hw/acpi/acpi.h"
 #include "hw/acpi/tco.h"
 #include "exec/address-spaces.h"
 
 #include "hw/i386/ich9.h"
 #include "hw/mem/pc-dimm.h"
+#include "hw/mem/nvdimm.h"
 
 //#define DEBUG
 
@@ -198,7 +201,7 @@ static int vmstate_cpuhp_pre_load(void *opaque)
 {
     ICH9LPCPMRegs *s = opaque;
     Object *obj = OBJECT(s->gpe_cpu.device);
-    object_property_set_bool(obj, false, "cpu-hotplug-legacy", &error_abort);
+    object_property_set_bool(obj, "cpu-hotplug-legacy", false, &error_abort);
     return 0;
 }
 
@@ -354,81 +357,6 @@ static void ich9_pm_set_cpu_hotplug_legacy(Object *obj, bool value,
     s->pm.cpu_hotplug_legacy = value;
 }
 
-static void ich9_pm_get_disable_s3(Object *obj, Visitor *v, const char *name,
-                                   void *opaque, Error **errp)
-{
-    ICH9LPCPMRegs *pm = opaque;
-    uint8_t value = pm->disable_s3;
-
-    visit_type_uint8(v, name, &value, errp);
-}
-
-static void ich9_pm_set_disable_s3(Object *obj, Visitor *v, const char *name,
-                                   void *opaque, Error **errp)
-{
-    ICH9LPCPMRegs *pm = opaque;
-    Error *local_err = NULL;
-    uint8_t value;
-
-    visit_type_uint8(v, name, &value, &local_err);
-    if (local_err) {
-        goto out;
-    }
-    pm->disable_s3 = value;
-out:
-    error_propagate(errp, local_err);
-}
-
-static void ich9_pm_get_disable_s4(Object *obj, Visitor *v, const char *name,
-                                   void *opaque, Error **errp)
-{
-    ICH9LPCPMRegs *pm = opaque;
-    uint8_t value = pm->disable_s4;
-
-    visit_type_uint8(v, name, &value, errp);
-}
-
-static void ich9_pm_set_disable_s4(Object *obj, Visitor *v, const char *name,
-                                   void *opaque, Error **errp)
-{
-    ICH9LPCPMRegs *pm = opaque;
-    Error *local_err = NULL;
-    uint8_t value;
-
-    visit_type_uint8(v, name, &value, &local_err);
-    if (local_err) {
-        goto out;
-    }
-    pm->disable_s4 = value;
-out:
-    error_propagate(errp, local_err);
-}
-
-static void ich9_pm_get_s4_val(Object *obj, Visitor *v, const char *name,
-                               void *opaque, Error **errp)
-{
-    ICH9LPCPMRegs *pm = opaque;
-    uint8_t value = pm->s4_val;
-
-    visit_type_uint8(v, name, &value, errp);
-}
-
-static void ich9_pm_set_s4_val(Object *obj, Visitor *v, const char *name,
-                               void *opaque, Error **errp)
-{
-    ICH9LPCPMRegs *pm = opaque;
-    Error *local_err = NULL;
-    uint8_t value;
-
-    visit_type_uint8(v, name, &value, &local_err);
-    if (local_err) {
-        goto out;
-    }
-    pm->s4_val = value;
-out:
-    error_propagate(errp, local_err);
-}
-
 static bool ich9_pm_get_enable_tco(Object *obj, Error **errp)
 {
     ICH9LPCState *s = ICH9_LPC_DEVICE(obj);
@@ -441,7 +369,7 @@ static void ich9_pm_set_enable_tco(Object *obj, bool value, Error **errp)
     s->pm.enable_tco = value;
 }
 
-void ich9_pm_add_properties(Object *obj, ICH9LPCPMRegs *pm, Error **errp)
+void ich9_pm_add_properties(Object *obj, ICH9LPCPMRegs *pm)
 {
     static const uint32_t gpe0_len = ICH9_PMIO_GPE0_LEN;
     pm->acpi_memory_hotplug.is_enabled = true;
@@ -451,36 +379,27 @@ void ich9_pm_add_properties(Object *obj, ICH9LPCPMRegs *pm, Error **errp)
     pm->s4_val = 2;
 
     object_property_add_uint32_ptr(obj, ACPI_PM_PROP_PM_IO_BASE,
-                                   &pm->pm_io_base, errp);
+                                   &pm->pm_io_base, OBJ_PROP_FLAG_READ);
     object_property_add(obj, ACPI_PM_PROP_GPE0_BLK, "uint32",
                         ich9_pm_get_gpe0_blk,
-                        NULL, NULL, pm, NULL);
+                        NULL, NULL, pm);
     object_property_add_uint32_ptr(obj, ACPI_PM_PROP_GPE0_BLK_LEN,
-                                   &gpe0_len, errp);
+                                   &gpe0_len, OBJ_PROP_FLAG_READ);
     object_property_add_bool(obj, "memory-hotplug-support",
                              ich9_pm_get_memory_hotplug_support,
-                             ich9_pm_set_memory_hotplug_support,
-                             NULL);
+                             ich9_pm_set_memory_hotplug_support);
     object_property_add_bool(obj, "cpu-hotplug-legacy",
                              ich9_pm_get_cpu_hotplug_legacy,
-                             ich9_pm_set_cpu_hotplug_legacy,
-                             NULL);
-    object_property_add(obj, ACPI_PM_PROP_S3_DISABLED, "uint8",
-                        ich9_pm_get_disable_s3,
-                        ich9_pm_set_disable_s3,
-                        NULL, pm, NULL);
-    object_property_add(obj, ACPI_PM_PROP_S4_DISABLED, "uint8",
-                        ich9_pm_get_disable_s4,
-                        ich9_pm_set_disable_s4,
-                        NULL, pm, NULL);
-    object_property_add(obj, ACPI_PM_PROP_S4_VAL, "uint8",
-                        ich9_pm_get_s4_val,
-                        ich9_pm_set_s4_val,
-                        NULL, pm, NULL);
+                             ich9_pm_set_cpu_hotplug_legacy);
+    object_property_add_uint8_ptr(obj, ACPI_PM_PROP_S3_DISABLED,
+                                  &pm->disable_s3, OBJ_PROP_FLAG_READWRITE);
+    object_property_add_uint8_ptr(obj, ACPI_PM_PROP_S4_DISABLED,
+                                  &pm->disable_s4, OBJ_PROP_FLAG_READWRITE);
+    object_property_add_uint8_ptr(obj, ACPI_PM_PROP_S4_VAL,
+                                  &pm->s4_val, OBJ_PROP_FLAG_READWRITE);
     object_property_add_bool(obj, ACPI_PM_PROP_TCO_ENABLED,
                              ich9_pm_get_enable_tco,
-                             ich9_pm_set_enable_tco,
-                             NULL);
+                             ich9_pm_set_enable_tco);
 }
 
 void ich9_pm_device_pre_plug_cb(HotplugHandler *hotplug_dev, DeviceState *dev,
@@ -489,10 +408,20 @@ void ich9_pm_device_pre_plug_cb(HotplugHandler *hotplug_dev, DeviceState *dev,
     ICH9LPCState *lpc = ICH9_LPC_DEVICE(hotplug_dev);
 
     if (object_dynamic_cast(OBJECT(dev), TYPE_PC_DIMM) &&
-        !lpc->pm.acpi_memory_hotplug.is_enabled)
+        !lpc->pm.acpi_memory_hotplug.is_enabled) {
         error_setg(errp,
                    "memory hotplug is not enabled: %s.memory-hotplug-support "
                    "is not set", object_get_typename(OBJECT(lpc)));
+    } else if (object_dynamic_cast(OBJECT(dev), TYPE_CPU)) {
+        uint64_t negotiated = lpc->smi_negotiated_features;
+
+        if (negotiated & BIT_ULL(ICH9_LPC_SMI_F_BROADCAST_BIT) &&
+            !(negotiated & BIT_ULL(ICH9_LPC_SMI_F_CPU_HOTPLUG_BIT))) {
+            error_setg(errp, "cpu hotplug with SMI wasn't enabled by firmware");
+            error_append_hint(errp, "update machine type to newer than 5.1 "
+                "and firmware that suppors CPU hotplug with SMM");
+        }
+    }
 }
 
 void ich9_pm_device_plug_cb(HotplugHandler *hotplug_dev, DeviceState *dev,
@@ -531,6 +460,18 @@ void ich9_pm_device_unplug_request_cb(HotplugHandler *hotplug_dev,
                                       errp);
     } else if (object_dynamic_cast(OBJECT(dev), TYPE_CPU) &&
                !lpc->pm.cpu_hotplug_legacy) {
+        uint64_t negotiated = lpc->smi_negotiated_features;
+
+        if (negotiated & BIT_ULL(ICH9_LPC_SMI_F_BROADCAST_BIT) &&
+            !(negotiated & BIT_ULL(ICH9_LPC_SMI_F_CPU_HOT_UNPLUG_BIT))) {
+            error_setg(errp, "cpu hot-unplug with SMI wasn't enabled "
+                             "by firmware");
+            error_append_hint(errp, "update machine type to a version having "
+                                    "x-smi-cpu-hotunplug=on and firmware that "
+                                    "supports CPU hot-unplug with SMM");
+            return;
+        }
+
         acpi_cpu_unplug_request_cb(hotplug_dev, &lpc->pm.cpuhp_state,
                                    dev, errp);
     } else {

@@ -12,7 +12,6 @@
 
 
 #include "qemu/osdep.h"
-#include "hw/qdev.h"
 #include "qapi/error.h"
 #include "qapi/qmp/qerror.h"
 #include "qemu/error-report.h"
@@ -47,7 +46,7 @@ vhost_user_backend_dev_init(VhostUserBackend *b, VirtIODevice *vdev,
 
     b->vdev = vdev;
     b->dev.nvqs = nvqs;
-    b->dev.vqs = g_new(struct vhost_virtqueue, nvqs);
+    b->dev.vqs = g_new0(struct vhost_virtqueue, nvqs);
 
     ret = vhost_dev_init(&b->dev, &b->vhost_user, VHOST_BACKEND_TYPE_USER, 0);
     if (ret < 0) {
@@ -176,9 +175,9 @@ static char *get_chardev(Object *obj, Error **errp)
     return NULL;
 }
 
-static void vhost_user_backend_init(Object *obj)
+static void vhost_user_backend_class_init(ObjectClass *oc, void *data)
 {
-    object_property_add_str(obj, "chardev", get_chardev, set_chardev, NULL);
+    object_class_property_add_str(oc, "chardev", get_chardev, set_chardev);
 }
 
 static void vhost_user_backend_finalize(Object *obj)
@@ -196,9 +195,8 @@ static const TypeInfo vhost_user_backend_info = {
     .name = TYPE_VHOST_USER_BACKEND,
     .parent = TYPE_OBJECT,
     .instance_size = sizeof(VhostUserBackend),
-    .instance_init = vhost_user_backend_init,
+    .class_init = vhost_user_backend_class_init,
     .instance_finalize = vhost_user_backend_finalize,
-    .class_size = sizeof(VhostUserBackendClass),
 };
 
 static void register_types(void)

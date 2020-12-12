@@ -89,6 +89,7 @@ int load_image_gzipped(const char *filename, hwaddr addr, uint64_t max_sz);
 #define ELF_LOAD_NOT_ELF      -2
 #define ELF_LOAD_WRONG_ARCH   -3
 #define ELF_LOAD_WRONG_ENDIAN -4
+#define ELF_LOAD_TOO_BIG      -5
 const char *load_elf_strerror(int error);
 
 /** load_elf_ram_sym:
@@ -100,6 +101,7 @@ const char *load_elf_strerror(int error);
  * @pentry: Populated with program entry point. Ignored if NULL.
  * @lowaddr: Populated with lowest loaded address. Ignored if NULL.
  * @highaddr: Populated with highest loaded address. Ignored if NULL.
+ * @pflags: Populated with ELF processor-specific flags. Ignore if NULL.
  * @bigendian: Expected ELF endianness. 0 for LE otherwise BE
  * @elf_machine: Expected ELF machine type
  * @clear_lsb: Set to mask off LSB of addresses (Some architectures use
@@ -130,8 +132,9 @@ int load_elf_ram_sym(const char *filename,
                      uint64_t (*elf_note_fn)(void *, void *, bool),
                      uint64_t (*translate_fn)(void *, uint64_t),
                      void *translate_opaque, uint64_t *pentry,
-                     uint64_t *lowaddr, uint64_t *highaddr, int big_endian,
-                     int elf_machine, int clear_lsb, int data_swab,
+                     uint64_t *lowaddr, uint64_t *highaddr, uint32_t *pflags,
+                     int big_endian, int elf_machine,
+                     int clear_lsb, int data_swab,
                      AddressSpace *as, bool load_rom, symbol_fn_t sym_cb);
 
 /** load_elf_ram:
@@ -142,9 +145,9 @@ int load_elf_ram(const char *filename,
                  uint64_t (*elf_note_fn)(void *, void *, bool),
                  uint64_t (*translate_fn)(void *, uint64_t),
                  void *translate_opaque, uint64_t *pentry, uint64_t *lowaddr,
-                 uint64_t *highaddr, int big_endian, int elf_machine,
-                 int clear_lsb, int data_swab, AddressSpace *as,
-                 bool load_rom);
+                 uint64_t *highaddr, uint32_t *pflags, int big_endian,
+                 int elf_machine, int clear_lsb, int data_swab,
+                 AddressSpace *as, bool load_rom);
 
 /** load_elf_as:
  * Same as load_elf_ram(), but always loads the elf as ROM
@@ -153,8 +156,9 @@ int load_elf_as(const char *filename,
                 uint64_t (*elf_note_fn)(void *, void *, bool),
                 uint64_t (*translate_fn)(void *, uint64_t),
                 void *translate_opaque, uint64_t *pentry, uint64_t *lowaddr,
-                uint64_t *highaddr, int big_endian, int elf_machine,
-                int clear_lsb, int data_swab, AddressSpace *as);
+                uint64_t *highaddr, uint32_t *pflags, int big_endian,
+                int elf_machine, int clear_lsb, int data_swab,
+                AddressSpace *as);
 
 /** load_elf:
  * Same as load_elf_as(), but doesn't allow the caller to specify an
@@ -164,8 +168,8 @@ int load_elf(const char *filename,
              uint64_t (*elf_note_fn)(void *, void *, bool),
              uint64_t (*translate_fn)(void *, uint64_t),
              void *translate_opaque, uint64_t *pentry, uint64_t *lowaddr,
-             uint64_t *highaddr, int big_endian, int elf_machine,
-             int clear_lsb, int data_swab);
+             uint64_t *highaddr, uint32_t *pflags, int big_endian,
+             int elf_machine, int clear_lsb, int data_swab);
 
 /** load_elf_hdr:
  * @filename: Path of ELF file
@@ -258,8 +262,9 @@ MemoryRegion *rom_add_blob(const char *name, const void *blob, size_t len,
                            FWCfgCallback fw_callback,
                            void *callback_opaque, AddressSpace *as,
                            bool read_only);
-int rom_add_elf_program(const char *name, void *data, size_t datasize,
-                        size_t romsize, hwaddr addr, AddressSpace *as);
+int rom_add_elf_program(const char *name, GMappedFile *mapped_file, void *data,
+                        size_t datasize, size_t romsize, hwaddr addr,
+                        AddressSpace *as);
 int rom_check_and_register_reset(void);
 void rom_set_fw(FWCfgState *f);
 void rom_set_order_override(int order);

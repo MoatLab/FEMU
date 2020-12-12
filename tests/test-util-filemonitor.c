@@ -23,6 +23,8 @@
 #include "qapi/error.h"
 #include "qemu/filemonitor.h"
 
+#include <glib/gstdio.h>
+
 #include <utime.h>
 
 enum {
@@ -45,6 +47,11 @@ typedef struct {
     const char *filedst;
     int64_t *watchid;
     int eventid;
+    /*
+     * Only valid with OP_EVENT - this event might be
+     * swapped with the next OP_EVENT
+     */
+    bool swapnext;
 } QFileMonitorTestOp;
 
 typedef struct {
@@ -98,6 +105,10 @@ qemu_file_monitor_test_handler(int64_t id,
     QFileMonitorTestData *data = opaque;
     QFileMonitorTestRecord *rec = g_new0(QFileMonitorTestRecord, 1);
 
+    if (debug) {
+        g_printerr("Queue event id %" PRIx64 " event %d file %s\n",
+                   id, event, filename);
+    }
     rec->id = id;
     rec->event = event;
     rec->filename = g_strdup(filename);
@@ -125,7 +136,8 @@ qemu_file_monitor_test_record_free(QFileMonitorTestRecord *rec)
  * to wait for the event to be queued for us.
  */
 static QFileMonitorTestRecord *
-qemu_file_monitor_test_next_record(QFileMonitorTestData *data)
+qemu_file_monitor_test_next_record(QFileMonitorTestData *data,
+                                   QFileMonitorTestRecord *pushback)
 {
     GTimer *timer = g_timer_new();
     QFileMonitorTestRecord *record = NULL;
@@ -139,9 +151,15 @@ qemu_file_monitor_test_next_record(QFileMonitorTestData *data)
     }
     if (data->records) {
         record = data->records->data;
-        tmp = data->records;
-        data->records = g_list_remove_link(data->records, tmp);
-        g_list_free(tmp);
+        if (pushback) {
+            data->records->data = pushback;
+        } else {
+            tmp = data->records;
+            data->records = g_list_remove_link(data->records, tmp);
+            g_list_free(tmp);
+        }
+    } else if (pushback) {
+        qemu_file_monitor_test_record_free(pushback);
     }
     qemu_mutex_unlock(&data->lock);
 
@@ -158,13 +176,15 @@ static bool
 qemu_file_monitor_test_expect(QFileMonitorTestData *data,
                               int64_t id,
                               QFileMonitorEvent event,
-                              const char *filename)
+                              const char *filename,
+                              bool swapnext)
 {
     QFileMonitorTestRecord *rec;
     bool ret = false;
 
-    rec = qemu_file_monitor_test_next_record(data);
+    rec = qemu_file_monitor_test_next_record(data, NULL);
 
+ retry:
     if (!rec) {
         g_printerr("Missing event watch id %" PRIx64 " event %d file %s\n",
                    id, event, filename);
@@ -172,6 +192,11 @@ qemu_file_monitor_test_expect(QFileMonitorTestData *data,
     }
 
     if (id != rec->id) {
+        if (swapnext) {
+            rec = qemu_file_monitor_test_next_record(data, rec);
+            swapnext = false;
+            goto retry;
+        }
         g_printerr("Expected watch id %" PRIx64 " but got %" PRIx64 "\n",
                    id, rec->id);
         goto cleanup;
@@ -347,7 +372,8 @@ test_file_monitor_events(void)
           .filesrc = "fish", },
         { .type = QFILE_MONITOR_TEST_OP_EVENT,
           .filesrc = "", .watchid = &watch4,
-          .eventid = QFILE_MONITOR_EVENT_IGNORED },
+          .eventid = QFILE_MONITOR_EVENT_IGNORED,
+          .swapnext = true },
         { .type = QFILE_MONITOR_TEST_OP_EVENT,
           .filesrc = "fish", .watchid = &watch0,
           .eventid = QFILE_MONITOR_EVENT_DELETED },
@@ -382,9 +408,20 @@ test_file_monitor_events(void)
     char *pathdst = NULL;
     QFileMonitorTestData data;
     GHashTable *ids = g_hash_table_new(g_int64_hash, g_int64_equal);
+    char *travis_arch;
 
     qemu_mutex_init(&data.lock);
     data.records = NULL;
+
+    /*
+     * This test does not work on Travis LXD containers since some
+     * syscalls are blocked in that environment.
+     */
+    travis_arch = getenv("TRAVIS_ARCH");
+    if (travis_arch && !g_str_equal(travis_arch, "x86_64")) {
+        g_test_skip("Test does not work on non-x86 Travis containers.");
+        return;
+    }
 
     /*
      * The file monitor needs the main loop running in
@@ -460,6 +497,7 @@ test_file_monitor_events(void)
             if (*op->watchid < 0) {
                 g_printerr("Unable to add watch %s",
                            error_get_pretty(local_err));
+                error_free(local_err);
                 goto cleanup;
             }
             if (debug) {
@@ -493,8 +531,9 @@ test_file_monitor_events(void)
                 g_printerr("Event id=%" PRIx64 " event=%d file=%s\n",
                            *op->watchid, op->eventid, op->filesrc);
             }
-            if (!qemu_file_monitor_test_expect(
-                    &data, *op->watchid, op->eventid, op->filesrc))
+            if (!qemu_file_monitor_test_expect(&data, *op->watchid,
+                                               op->eventid, op->filesrc,
+                                               op->swapnext))
                 goto cleanup;
             break;
         case QFILE_MONITOR_TEST_OP_CREATE:
@@ -580,7 +619,7 @@ test_file_monitor_events(void)
             if (debug) {
                 g_printerr("Mkdir %s\n", pathsrc);
             }
-            if (mkdir(pathsrc, 0700) < 0) {
+            if (g_mkdir_with_parents(pathsrc, 0700) < 0) {
                 g_printerr("Unable to mkdir %s: %s",
                            pathsrc, strerror(errno));
                 goto cleanup;

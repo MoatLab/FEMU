@@ -23,25 +23,17 @@
 
 #include "qemu/osdep.h"
 #include "qemu/units.h"
-#include "hw/hw.h"
 #include "sysemu/block-backend.h"
+#include "hw/qdev-properties.h"
 #include "hw/ssi/ssi.h"
+#include "migration/vmstate.h"
 #include "qemu/bitops.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "qemu/error-report.h"
 #include "qapi/error.h"
-
-#ifndef M25P80_ERR_DEBUG
-#define M25P80_ERR_DEBUG 0
-#endif
-
-#define DB_PRINT_L(level, ...) do { \
-    if (M25P80_ERR_DEBUG > (level)) { \
-        fprintf(stderr,  ": %s: ", __func__); \
-        fprintf(stderr, ## __VA_ARGS__); \
-    } \
-} while (0)
+#include "trace.h"
+#include "qom/object.h"
 
 /* Fields for FlashPartInfo->flags */
 
@@ -226,8 +218,9 @@ static const FlashPartInfo known_devices[] = {
     { INFO("mx25l6405d",  0xc22017,      0,  64 << 10, 128, 0) },
     { INFO("mx25l12805d", 0xc22018,      0,  64 << 10, 256, 0) },
     { INFO("mx25l12855e", 0xc22618,      0,  64 << 10, 256, 0) },
-    { INFO("mx25l25635e", 0xc22019,      0,  64 << 10, 512, 0) },
+    { INFO6("mx25l25635e", 0xc22019,     0xc22019,  64 << 10, 512, 0) },
     { INFO("mx25l25655e", 0xc22619,      0,  64 << 10, 512, 0) },
+    { INFO("mx66l51235f", 0xc2201a,      0,  64 << 10, 1024, ER_4K | ER_32K) },
     { INFO("mx66u51235f", 0xc2253a,      0,  64 << 10, 1024, ER_4K | ER_32K) },
     { INFO("mx66u1g45g",  0xc2253b,      0,  64 << 10, 2048, ER_4K | ER_32K) },
     { INFO("mx66l1g45g",  0xc2201b,      0,  64 << 10, 2048, ER_4K | ER_32K) },
@@ -246,6 +239,8 @@ static const FlashPartInfo known_devices[] = {
     { INFO("n25q128",     0x20ba18,      0,  64 << 10, 256, 0) },
     { INFO("n25q256a",    0x20ba19,      0,  64 << 10, 512, ER_4K) },
     { INFO("n25q512a",    0x20ba20,      0,  64 << 10, 1024, ER_4K) },
+    { INFO("n25q512ax3",  0x20ba20,  0x1000,  64 << 10, 1024, ER_4K) },
+    { INFO("mt25ql512ab", 0x20ba20, 0x1044, 64 << 10, 1024, ER_4K | ER_32K) },
     { INFO_STACKED("n25q00",    0x20ba21, 0x1000, 64 << 10, 2048, ER_4K, 4) },
     { INFO_STACKED("n25q00a",   0x20bb21, 0x1000, 64 << 10, 2048, ER_4K, 4) },
     { INFO_STACKED("mt25ql01g", 0x20ba21, 0x1040, 64 << 10, 2048, ER_4K, 2) },
@@ -326,6 +321,7 @@ static const FlashPartInfo known_devices[] = {
     { INFO("w25q80",      0xef5014,      0,  64 << 10,  16, ER_4K) },
     { INFO("w25q80bl",    0xef4014,      0,  64 << 10,  16, ER_4K) },
     { INFO("w25q256",     0xef4019,      0,  64 << 10, 512, ER_4K) },
+    { INFO("w25q512jv",   0xef4020,      0,  64 << 10, 1024, ER_4K) },
 };
 
 typedef enum {
@@ -419,7 +415,7 @@ typedef enum {
 
 #define M25P80_INTERNAL_DATA_BUFFER_SZ 16
 
-typedef struct Flash {
+struct Flash {
     SSISlave parent_obj;
 
     BlockBackend *blk;
@@ -459,20 +455,15 @@ typedef struct Flash {
 
     const FlashPartInfo *pi;
 
-} Flash;
+};
 
-typedef struct M25P80Class {
+struct M25P80Class {
     SSISlaveClass parent_class;
     FlashPartInfo *pi;
-} M25P80Class;
+};
 
 #define TYPE_M25P80 "m25p80-generic"
-#define M25P80(obj) \
-     OBJECT_CHECK(Flash, (obj), TYPE_M25P80)
-#define M25P80_CLASS(klass) \
-     OBJECT_CLASS_CHECK(M25P80Class, (klass), TYPE_M25P80)
-#define M25P80_GET_CLASS(obj) \
-     OBJECT_GET_CLASS(M25P80Class, (obj), TYPE_M25P80)
+OBJECT_DECLARE_TYPE(Flash, M25P80Class, M25P80)
 
 static inline Manufacturer get_man(Flash *s)
 {
@@ -572,7 +563,8 @@ static void flash_erase(Flash *s, int offset, FlashCMD cmd)
         abort();
     }
 
-    DB_PRINT_L(0, "offset = %#x, len = %d\n", offset, len);
+    trace_m25p80_flash_erase(s, offset, len);
+
     if ((s->pi->flags & capa_to_assert) != capa_to_assert) {
         qemu_log_mask(LOG_GUEST_ERROR, "M25P80: %d erase size not supported by"
                       " device\n", len);
@@ -605,8 +597,7 @@ void flash_write8(Flash *s, uint32_t addr, uint8_t data)
     }
 
     if ((prev ^ data) & data) {
-        DB_PRINT_L(1, "programming zero to one! addr=%" PRIx32 "  %" PRIx8
-                   " -> %" PRIx8 "\n", addr, prev, data);
+        trace_m25p80_programming_zero_to_one(s, addr, prev, data);
     }
 
     if (s->pi->flags & EEPROM) {
@@ -659,6 +650,9 @@ static void complete_collecting_data(Flash *s)
     s->cur_addr &= s->size - 1;
 
     s->state = STATE_IDLE;
+
+    trace_m25p80_complete_collecting(s, s->cmd_in_progress, n, s->ear,
+                                     s->cur_addr);
 
     switch (s->cmd_in_progress) {
     case DPP:
@@ -823,7 +817,7 @@ static void reset_memory(Flash *s)
         break;
     }
 
-    DB_PRINT_L(0, "Reset done.\n");
+    trace_m25p80_reset_done(s);
 }
 
 static void decode_fast_read_cmd(Flash *s)
@@ -939,9 +933,10 @@ static void decode_qio_read_cmd(Flash *s)
 
 static void decode_new_cmd(Flash *s, uint32_t value)
 {
-    s->cmd_in_progress = value;
     int i;
-    DB_PRINT_L(0, "decoded new command:%x\n", value);
+
+    s->cmd_in_progress = value;
+    trace_m25p80_command_decoded(s, value);
 
     if (value != RESET_MEMORY) {
         s->reset_enable = false;
@@ -1040,12 +1035,15 @@ static void decode_new_cmd(Flash *s, uint32_t value)
         break;
 
     case JEDEC_READ:
-        DB_PRINT_L(0, "populated jedec code\n");
+        trace_m25p80_populated_jedec(s);
         for (i = 0; i < s->pi->id_len; i++) {
             s->data[i] = s->pi->id[i];
         }
+        for (; i < SPI_NOR_MAX_ID_LEN; i++) {
+            s->data[i] = 0;
+        }
 
-        s->len = s->pi->id_len;
+        s->len = SPI_NOR_MAX_ID_LEN;
         s->pos = 0;
         s->state = STATE_READING_DATA;
         break;
@@ -1061,7 +1059,7 @@ static void decode_new_cmd(Flash *s, uint32_t value)
     case BULK_ERASE_60:
     case BULK_ERASE:
         if (s->write_enable) {
-            DB_PRINT_L(0, "chip erase\n");
+            trace_m25p80_chip_erase(s);
             flash_erase(s, 0, BULK_ERASE);
         } else {
             qemu_log_mask(LOG_GUEST_ERROR, "M25P80: chip erase with write "
@@ -1162,6 +1160,11 @@ static void decode_new_cmd(Flash *s, uint32_t value)
         s->quad_enable = false;
         break;
     default:
+        s->pos = 0;
+        s->len = 1;
+        s->state = STATE_READING_DATA;
+        s->data_read_loop = true;
+        s->data[0] = 0;
         qemu_log_mask(LOG_GUEST_ERROR, "M25P80: Unknown cmd %x\n", value);
         break;
     }
@@ -1182,7 +1185,7 @@ static int m25p80_cs(SSISlave *ss, bool select)
         s->data_read_loop = false;
     }
 
-    DB_PRINT_L(0, "%sselect\n", select ? "de" : "");
+    trace_m25p80_select(s, select ? "de" : "");
 
     return 0;
 }
@@ -1192,19 +1195,20 @@ static uint32_t m25p80_transfer8(SSISlave *ss, uint32_t tx)
     Flash *s = M25P80(ss);
     uint32_t r = 0;
 
+    trace_m25p80_transfer(s, s->state, s->len, s->needed_bytes, s->pos,
+                          s->cur_addr, (uint8_t)tx);
+
     switch (s->state) {
 
     case STATE_PAGE_PROGRAM:
-        DB_PRINT_L(1, "page program cur_addr=%#" PRIx32 " data=%" PRIx8 "\n",
-                   s->cur_addr, (uint8_t)tx);
+        trace_m25p80_page_program(s, s->cur_addr, (uint8_t)tx);
         flash_write8(s, s->cur_addr, (uint8_t)tx);
         s->cur_addr = (s->cur_addr + 1) & (s->size - 1);
         break;
 
     case STATE_READ:
         r = s->storage[s->cur_addr];
-        DB_PRINT_L(1, "READ 0x%" PRIx32 "=%" PRIx8 "\n", s->cur_addr,
-                   (uint8_t)r);
+        trace_m25p80_read_byte(s, s->cur_addr, (uint8_t)r);
         s->cur_addr = (s->cur_addr + 1) & (s->size - 1);
         break;
 
@@ -1242,6 +1246,7 @@ static uint32_t m25p80_transfer8(SSISlave *ss, uint32_t tx)
         }
 
         r = s->data[s->pos];
+        trace_m25p80_read_data(s, s->pos, (uint8_t)r);
         s->pos++;
         if (s->pos == s->len) {
             s->pos = 0;
@@ -1279,7 +1284,7 @@ static void m25p80_realize(SSISlave *ss, Error **errp)
             return;
         }
 
-        DB_PRINT_L(0, "Binding to IF_MTD drive\n");
+        trace_m25p80_binding(s);
         s->storage = blk_blockalign(s->blk, s->size);
 
         if (blk_pread(s->blk, 0, s->storage, s->size) != s->size) {
@@ -1287,7 +1292,7 @@ static void m25p80_realize(SSISlave *ss, Error **errp)
             return;
         }
     } else {
-        DB_PRINT_L(0, "No BDRV - binding to RAM\n");
+        trace_m25p80_binding_no_bdrv(s);
         s->storage = blk_blockalign(NULL, s->size);
         memset(s->storage, 0xFF, s->size);
     }
@@ -1389,7 +1394,7 @@ static void m25p80_class_init(ObjectClass *klass, void *data)
     k->set_cs = m25p80_cs;
     k->cs_polarity = SSI_CS_LOW;
     dc->vmsd = &vmstate_m25p80;
-    dc->props = m25p80_properties;
+    device_class_set_props(dc, m25p80_properties);
     dc->reset = m25p80_reset;
     mc->pi = data;
 }

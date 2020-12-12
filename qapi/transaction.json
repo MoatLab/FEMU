@@ -1,11 +1,12 @@
 # -*- Mode: Python -*-
+# vim: filetype=python
 #
 
 ##
 # = Transactions
 ##
 
-{ 'include': 'block.json' }
+{ 'include': 'block-core.json' }
 
 ##
 # @Abort:
@@ -45,6 +46,7 @@
 #
 # - @abort: since 1.6
 # - @block-dirty-bitmap-add: since 2.5
+# - @block-dirty-bitmap-remove: since 4.2
 # - @block-dirty-bitmap-clear: since 2.5
 # - @block-dirty-bitmap-enable: since 4.0
 # - @block-dirty-bitmap-disable: since 4.0
@@ -61,6 +63,7 @@
   'data': {
        'abort': 'Abort',
        'block-dirty-bitmap-add': 'BlockDirtyBitmapAdd',
+       'block-dirty-bitmap-remove': 'BlockDirtyBitmap',
        'block-dirty-bitmap-clear': 'BlockDirtyBitmap',
        'block-dirty-bitmap-enable': 'BlockDirtyBitmap',
        'block-dirty-bitmap-disable': 'BlockDirtyBitmap',
@@ -130,8 +133,8 @@
 #          Errors depend on the operations of the transaction
 #
 # Note: The transaction aborts on the first failure.  Therefore, there will be
-# information on only one failed operation returned in an error condition, and
-# subsequent actions will not have been attempted.
+#       information on only one failed operation returned in an error condition, and
+#       subsequent actions will not have been attempted.
 #
 # Since: 1.1
 #

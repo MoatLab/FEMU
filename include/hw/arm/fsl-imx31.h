@@ -25,17 +25,20 @@
 #include "hw/timer/imx_epit.h"
 #include "hw/i2c/imx_i2c.h"
 #include "hw/gpio/imx_gpio.h"
+#include "hw/watchdog/wdt_imx2.h"
 #include "exec/memory.h"
+#include "target/arm/cpu.h"
+#include "qom/object.h"
 
 #define TYPE_FSL_IMX31 "fsl,imx31"
-#define FSL_IMX31(obj) OBJECT_CHECK(FslIMX31State, (obj), TYPE_FSL_IMX31)
+OBJECT_DECLARE_SIMPLE_TYPE(FslIMX31State, FSL_IMX31)
 
 #define FSL_IMX31_NUM_UARTS 2
 #define FSL_IMX31_NUM_EPITS 2
 #define FSL_IMX31_NUM_I2CS 3
 #define FSL_IMX31_NUM_GPIOS 3
 
-typedef struct FslIMX31State {
+struct FslIMX31State {
     /*< private >*/
     DeviceState parent_obj;
 
@@ -48,11 +51,12 @@ typedef struct FslIMX31State {
     IMXEPITState   epit[FSL_IMX31_NUM_EPITS];
     IMXI2CState    i2c[FSL_IMX31_NUM_I2CS];
     IMXGPIOState   gpio[FSL_IMX31_NUM_GPIOS];
+    IMX2WdtState   wdt;
     MemoryRegion   secure_rom;
     MemoryRegion   rom;
     MemoryRegion   iram;
     MemoryRegion   iram_alias;
-} FslIMX31State;
+};
 
 #define FSL_IMX31_SECURE_ROM_ADDR       0x00000000
 #define FSL_IMX31_SECURE_ROM_SIZE       0x4000
@@ -86,6 +90,8 @@ typedef struct FslIMX31State {
 #define FSL_IMX31_GPIO1_SIZE            0x4000
 #define FSL_IMX31_GPIO2_ADDR            0x53FD0000
 #define FSL_IMX31_GPIO2_SIZE            0x4000
+#define FSL_IMX31_WDT_ADDR              0x53FDC000
+#define FSL_IMX31_WDT_SIZE              0x4000
 #define FSL_IMX31_AVIC_ADDR             0x68000000
 #define FSL_IMX31_AVIC_SIZE             0x100
 #define FSL_IMX31_SDRAM0_ADDR           0x80000000

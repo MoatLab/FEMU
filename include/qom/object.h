@@ -15,13 +15,11 @@
 #define QEMU_OBJECT_H
 
 #include "qapi/qapi-builtin-types.h"
-#include "qemu/queue.h"
 #include "qemu/module.h"
+#include "qom/object.h"
 
 struct TypeImpl;
 typedef struct TypeImpl *Type;
-
-typedef struct Object Object;
 
 typedef struct TypeInfo TypeInfo;
 
@@ -30,282 +28,10 @@ typedef struct InterfaceInfo InterfaceInfo;
 
 #define TYPE_OBJECT "object"
 
-/**
- * SECTION:object.h
- * @title:Base Object Type System
- * @short_description: interfaces for creating new types and objects
- *
- * The QEMU Object Model provides a framework for registering user creatable
- * types and instantiating objects from those types.  QOM provides the following
- * features:
- *
- *  - System for dynamically registering types
- *  - Support for single-inheritance of types
- *  - Multiple inheritance of stateless interfaces
- *
- * <example>
- *   <title>Creating a minimal type</title>
- *   <programlisting>
- * #include "qdev.h"
- *
- * #define TYPE_MY_DEVICE "my-device"
- *
- * // No new virtual functions: we can reuse the typedef for the
- * // superclass.
- * typedef DeviceClass MyDeviceClass;
- * typedef struct MyDevice
- * {
- *     DeviceState parent;
- *
- *     int reg0, reg1, reg2;
- * } MyDevice;
- *
- * static const TypeInfo my_device_info = {
- *     .name = TYPE_MY_DEVICE,
- *     .parent = TYPE_DEVICE,
- *     .instance_size = sizeof(MyDevice),
- * };
- *
- * static void my_device_register_types(void)
- * {
- *     type_register_static(&my_device_info);
- * }
- *
- * type_init(my_device_register_types)
- *   </programlisting>
- * </example>
- *
- * In the above example, we create a simple type that is described by #TypeInfo.
- * #TypeInfo describes information about the type including what it inherits
- * from, the instance and class size, and constructor/destructor hooks.
- *
- * Alternatively several static types could be registered using helper macro
- * DEFINE_TYPES()
- *
- * <example>
- *   <programlisting>
- * static const TypeInfo device_types_info[] = {
- *     {
- *         .name = TYPE_MY_DEVICE_A,
- *         .parent = TYPE_DEVICE,
- *         .instance_size = sizeof(MyDeviceA),
- *     },
- *     {
- *         .name = TYPE_MY_DEVICE_B,
- *         .parent = TYPE_DEVICE,
- *         .instance_size = sizeof(MyDeviceB),
- *     },
- * };
- *
- * DEFINE_TYPES(device_types_info)
- *   </programlisting>
- * </example>
- *
- * Every type has an #ObjectClass associated with it.  #ObjectClass derivatives
- * are instantiated dynamically but there is only ever one instance for any
- * given type.  The #ObjectClass typically holds a table of function pointers
- * for the virtual methods implemented by this type.
- *
- * Using object_new(), a new #Object derivative will be instantiated.  You can
- * cast an #Object to a subclass (or base-class) type using
- * object_dynamic_cast().  You typically want to define macro wrappers around
- * OBJECT_CHECK() and OBJECT_CLASS_CHECK() to make it easier to convert to a
- * specific type:
- *
- * <example>
- *   <title>Typecasting macros</title>
- *   <programlisting>
- *    #define MY_DEVICE_GET_CLASS(obj) \
- *       OBJECT_GET_CLASS(MyDeviceClass, obj, TYPE_MY_DEVICE)
- *    #define MY_DEVICE_CLASS(klass) \
- *       OBJECT_CLASS_CHECK(MyDeviceClass, klass, TYPE_MY_DEVICE)
- *    #define MY_DEVICE(obj) \
- *       OBJECT_CHECK(MyDevice, obj, TYPE_MY_DEVICE)
- *   </programlisting>
- * </example>
- *
- * # Class Initialization #
- *
- * Before an object is initialized, the class for the object must be
- * initialized.  There is only one class object for all instance objects
- * that is created lazily.
- *
- * Classes are initialized by first initializing any parent classes (if
- * necessary).  After the parent class object has initialized, it will be
- * copied into the current class object and any additional storage in the
- * class object is zero filled.
- *
- * The effect of this is that classes automatically inherit any virtual
- * function pointers that the parent class has already initialized.  All
- * other fields will be zero filled.
- *
- * Once all of the parent classes have been initialized, #TypeInfo::class_init
- * is called to let the class being instantiated provide default initialize for
- * its virtual functions.  Here is how the above example might be modified
- * to introduce an overridden virtual function:
- *
- * <example>
- *   <title>Overriding a virtual function</title>
- *   <programlisting>
- * #include "qdev.h"
- *
- * void my_device_class_init(ObjectClass *klass, void *class_data)
- * {
- *     DeviceClass *dc = DEVICE_CLASS(klass);
- *     dc->reset = my_device_reset;
- * }
- *
- * static const TypeInfo my_device_info = {
- *     .name = TYPE_MY_DEVICE,
- *     .parent = TYPE_DEVICE,
- *     .instance_size = sizeof(MyDevice),
- *     .class_init = my_device_class_init,
- * };
- *   </programlisting>
- * </example>
- *
- * Introducing new virtual methods requires a class to define its own
- * struct and to add a .class_size member to the #TypeInfo.  Each method
- * will also have a wrapper function to call it easily:
- *
- * <example>
- *   <title>Defining an abstract class</title>
- *   <programlisting>
- * #include "qdev.h"
- *
- * typedef struct MyDeviceClass
- * {
- *     DeviceClass parent;
- *
- *     void (*frobnicate) (MyDevice *obj);
- * } MyDeviceClass;
- *
- * static const TypeInfo my_device_info = {
- *     .name = TYPE_MY_DEVICE,
- *     .parent = TYPE_DEVICE,
- *     .instance_size = sizeof(MyDevice),
- *     .abstract = true, // or set a default in my_device_class_init
- *     .class_size = sizeof(MyDeviceClass),
- * };
- *
- * void my_device_frobnicate(MyDevice *obj)
- * {
- *     MyDeviceClass *klass = MY_DEVICE_GET_CLASS(obj);
- *
- *     klass->frobnicate(obj);
- * }
- *   </programlisting>
- * </example>
- *
- * # Interfaces #
- *
- * Interfaces allow a limited form of multiple inheritance.  Instances are
- * similar to normal types except for the fact that are only defined by
- * their classes and never carry any state.  You can dynamically cast an object
- * to one of its #Interface types and vice versa.
- *
- * # Methods #
- *
- * A <emphasis>method</emphasis> is a function within the namespace scope of
- * a class. It usually operates on the object instance by passing it as a
- * strongly-typed first argument.
- * If it does not operate on an object instance, it is dubbed
- * <emphasis>class method</emphasis>.
- *
- * Methods cannot be overloaded. That is, the #ObjectClass and method name
- * uniquely identity the function to be called; the signature does not vary
- * except for trailing varargs.
- *
- * Methods are always <emphasis>virtual</emphasis>. Overriding a method in
- * #TypeInfo.class_init of a subclass leads to any user of the class obtained
- * via OBJECT_GET_CLASS() accessing the overridden function.
- * The original function is not automatically invoked. It is the responsibility
- * of the overriding class to determine whether and when to invoke the method
- * being overridden.
- *
- * To invoke the method being overridden, the preferred solution is to store
- * the original value in the overriding class before overriding the method.
- * This corresponds to |[ {super,base}.method(...) ]| in Java and C#
- * respectively; this frees the overriding class from hardcoding its parent
- * class, which someone might choose to change at some point.
- *
- * <example>
- *   <title>Overriding a virtual method</title>
- *   <programlisting>
- * typedef struct MyState MyState;
- *
- * typedef void (*MyDoSomething)(MyState *obj);
- *
- * typedef struct MyClass {
- *     ObjectClass parent_class;
- *
- *     MyDoSomething do_something;
- * } MyClass;
- *
- * static void my_do_something(MyState *obj)
- * {
- *     // do something
- * }
- *
- * static void my_class_init(ObjectClass *oc, void *data)
- * {
- *     MyClass *mc = MY_CLASS(oc);
- *
- *     mc->do_something = my_do_something;
- * }
- *
- * static const TypeInfo my_type_info = {
- *     .name = TYPE_MY,
- *     .parent = TYPE_OBJECT,
- *     .instance_size = sizeof(MyState),
- *     .class_size = sizeof(MyClass),
- *     .class_init = my_class_init,
- * };
- *
- * typedef struct DerivedClass {
- *     MyClass parent_class;
- *
- *     MyDoSomething parent_do_something;
- * } DerivedClass;
- *
- * static void derived_do_something(MyState *obj)
- * {
- *     DerivedClass *dc = DERIVED_GET_CLASS(obj);
- *
- *     // do something here
- *     dc->parent_do_something(obj);
- *     // do something else here
- * }
- *
- * static void derived_class_init(ObjectClass *oc, void *data)
- * {
- *     MyClass *mc = MY_CLASS(oc);
- *     DerivedClass *dc = DERIVED_CLASS(oc);
- *
- *     dc->parent_do_something = mc->do_something;
- *     mc->do_something = derived_do_something;
- * }
- *
- * static const TypeInfo derived_type_info = {
- *     .name = TYPE_DERIVED,
- *     .parent = TYPE_MY,
- *     .class_size = sizeof(DerivedClass),
- *     .class_init = derived_class_init,
- * };
- *   </programlisting>
- * </example>
- *
- * Alternatively, object_class_by_name() can be used to obtain the class and
- * its non-overridden methods for a specific type. This would correspond to
- * |[ MyClass::method(...) ]| in C++.
- *
- * The first example of such a QOM method was #CPUClass.reset,
- * another example is #DeviceClass.realize.
- */
-
+typedef struct ObjectProperty ObjectProperty;
 
 /**
- * ObjectPropertyAccessor:
+ * typedef ObjectPropertyAccessor:
  * @obj: the object that owns the property
  * @v: the visitor that contains the property data
  * @name: the name of the property
@@ -321,7 +47,7 @@ typedef void (ObjectPropertyAccessor)(Object *obj,
                                       Error **errp);
 
 /**
- * ObjectPropertyResolve:
+ * typedef ObjectPropertyResolve:
  * @obj: the object that owns the property
  * @opaque: the opaque registered with the property
  * @part: the name of the property
@@ -340,7 +66,7 @@ typedef Object *(ObjectPropertyResolve)(Object *obj,
                                         const char *part);
 
 /**
- * ObjectPropertyRelease:
+ * typedef ObjectPropertyRelease:
  * @obj: the object that owns the property
  * @name: the name of the property
  * @opaque: the opaque registered with the property
@@ -351,20 +77,31 @@ typedef void (ObjectPropertyRelease)(Object *obj,
                                      const char *name,
                                      void *opaque);
 
-typedef struct ObjectProperty
+/**
+ * typedef ObjectPropertyInit:
+ * @obj: the object that owns the property
+ * @prop: the property to set
+ *
+ * Called when a property is initialized.
+ */
+typedef void (ObjectPropertyInit)(Object *obj, ObjectProperty *prop);
+
+struct ObjectProperty
 {
-    gchar *name;
-    gchar *type;
-    gchar *description;
+    char *name;
+    char *type;
+    char *description;
     ObjectPropertyAccessor *get;
     ObjectPropertyAccessor *set;
     ObjectPropertyResolve *resolve;
     ObjectPropertyRelease *release;
+    ObjectPropertyInit *init;
     void *opaque;
-} ObjectProperty;
+    QObject *defval;
+};
 
 /**
- * ObjectUnparent:
+ * typedef ObjectUnparent:
  * @obj: the object that is being removed from the composition tree
  *
  * Called when an object is being removed from the QOM composition tree.
@@ -373,7 +110,7 @@ typedef struct ObjectProperty
 typedef void (ObjectUnparent)(Object *obj);
 
 /**
- * ObjectFree:
+ * typedef ObjectFree:
  * @obj: the object being freed
  *
  * Called when an object's last reference is removed.
@@ -383,14 +120,14 @@ typedef void (ObjectFree)(void *obj);
 #define OBJECT_CLASS_CAST_CACHE 4
 
 /**
- * ObjectClass:
+ * struct ObjectClass:
  *
  * The base for all classes.  The only thing that #ObjectClass contains is an
  * integer type handle.
  */
 struct ObjectClass
 {
-    /*< private >*/
+    /* private: */
     Type type;
     GSList *interfaces;
 
@@ -403,7 +140,7 @@ struct ObjectClass
 };
 
 /**
- * Object:
+ * struct Object:
  *
  * The base for all objects.  The first member of this object is a pointer to
  * a #ObjectClass.  Since C guarantees that the first member of a structure
@@ -416,7 +153,7 @@ struct ObjectClass
  */
 struct Object
 {
-    /*< private >*/
+    /* private: */
     ObjectClass *class;
     ObjectFree *free;
     GHashTable *properties;
@@ -425,12 +162,223 @@ struct Object
 };
 
 /**
- * TypeInfo:
+ * DECLARE_INSTANCE_CHECKER:
+ * @InstanceType: instance struct name
+ * @OBJ_NAME: the object name in uppercase with underscore separators
+ * @TYPENAME: type name
+ *
+ * Direct usage of this macro should be avoided, and the complete
+ * OBJECT_DECLARE_TYPE macro is recommended instead.
+ *
+ * This macro will provide the instance type cast functions for a
+ * QOM type.
+ */
+#define DECLARE_INSTANCE_CHECKER(InstanceType, OBJ_NAME, TYPENAME) \
+    static inline G_GNUC_UNUSED InstanceType * \
+    OBJ_NAME(const void *obj) \
+    { return OBJECT_CHECK(InstanceType, obj, TYPENAME); }
+
+/**
+ * DECLARE_CLASS_CHECKERS:
+ * @ClassType: class struct name
+ * @OBJ_NAME: the object name in uppercase with underscore separators
+ * @TYPENAME: type name
+ *
+ * Direct usage of this macro should be avoided, and the complete
+ * OBJECT_DECLARE_TYPE macro is recommended instead.
+ *
+ * This macro will provide the class type cast functions for a
+ * QOM type.
+ */
+#define DECLARE_CLASS_CHECKERS(ClassType, OBJ_NAME, TYPENAME) \
+    static inline G_GNUC_UNUSED ClassType * \
+    OBJ_NAME##_GET_CLASS(const void *obj) \
+    { return OBJECT_GET_CLASS(ClassType, obj, TYPENAME); } \
+    \
+    static inline G_GNUC_UNUSED ClassType * \
+    OBJ_NAME##_CLASS(const void *klass) \
+    { return OBJECT_CLASS_CHECK(ClassType, klass, TYPENAME); }
+
+/**
+ * DECLARE_OBJ_CHECKERS:
+ * @InstanceType: instance struct name
+ * @ClassType: class struct name
+ * @OBJ_NAME: the object name in uppercase with underscore separators
+ * @TYPENAME: type name
+ *
+ * Direct usage of this macro should be avoided, and the complete
+ * OBJECT_DECLARE_TYPE macro is recommended instead.
+ *
+ * This macro will provide the three standard type cast functions for a
+ * QOM type.
+ */
+#define DECLARE_OBJ_CHECKERS(InstanceType, ClassType, OBJ_NAME, TYPENAME) \
+    DECLARE_INSTANCE_CHECKER(InstanceType, OBJ_NAME, TYPENAME) \
+    \
+    DECLARE_CLASS_CHECKERS(ClassType, OBJ_NAME, TYPENAME)
+
+/**
+ * OBJECT_DECLARE_TYPE:
+ * @InstanceType: instance struct name
+ * @ClassType: class struct name
+ * @MODULE_OBJ_NAME: the object name in uppercase with underscore separators
+ *
+ * This macro is typically used in a header file, and will:
+ *
+ *   - create the typedefs for the object and class structs
+ *   - register the type for use with g_autoptr
+ *   - provide three standard type cast functions
+ *
+ * The object struct and class struct need to be declared manually.
+ */
+#define OBJECT_DECLARE_TYPE(InstanceType, ClassType, MODULE_OBJ_NAME) \
+    typedef struct InstanceType InstanceType; \
+    typedef struct ClassType ClassType; \
+    \
+    G_DEFINE_AUTOPTR_CLEANUP_FUNC(InstanceType, object_unref) \
+    \
+    DECLARE_OBJ_CHECKERS(InstanceType, ClassType, \
+                         MODULE_OBJ_NAME, TYPE_##MODULE_OBJ_NAME)
+
+/**
+ * OBJECT_DECLARE_SIMPLE_TYPE:
+ * @InstanceType: instance struct name
+ * @MODULE_OBJ_NAME: the object name in uppercase with underscore separators
+ *
+ * This does the same as OBJECT_DECLARE_TYPE(), but with no class struct
+ * declared.
+ *
+ * This macro should be used unless the class struct needs to have
+ * virtual methods declared.
+ */
+#define OBJECT_DECLARE_SIMPLE_TYPE(InstanceType, MODULE_OBJ_NAME) \
+    typedef struct InstanceType InstanceType; \
+    \
+    G_DEFINE_AUTOPTR_CLEANUP_FUNC(InstanceType, object_unref) \
+    \
+    DECLARE_INSTANCE_CHECKER(InstanceType, MODULE_OBJ_NAME, TYPE_##MODULE_OBJ_NAME)
+
+
+/**
+ * OBJECT_DEFINE_TYPE_EXTENDED:
+ * @ModuleObjName: the object name with initial caps
+ * @module_obj_name: the object name in lowercase with underscore separators
+ * @MODULE_OBJ_NAME: the object name in uppercase with underscore separators
+ * @PARENT_MODULE_OBJ_NAME: the parent object name in uppercase with underscore
+ *                          separators
+ * @ABSTRACT: boolean flag to indicate whether the object can be instantiated
+ * @...: list of initializers for "InterfaceInfo" to declare implemented interfaces
+ *
+ * This macro is typically used in a source file, and will:
+ *
+ *   - declare prototypes for _finalize, _class_init and _init methods
+ *   - declare the TypeInfo struct instance
+ *   - provide the constructor to register the type
+ *
+ * After using this macro, implementations of the _finalize, _class_init,
+ * and _init methods need to be written. Any of these can be zero-line
+ * no-op impls if no special logic is required for a given type.
+ *
+ * This macro should rarely be used, instead one of the more specialized
+ * macros is usually a better choice.
+ */
+#define OBJECT_DEFINE_TYPE_EXTENDED(ModuleObjName, module_obj_name, \
+                                    MODULE_OBJ_NAME, PARENT_MODULE_OBJ_NAME, \
+                                    ABSTRACT, ...) \
+    static void \
+    module_obj_name##_finalize(Object *obj); \
+    static void \
+    module_obj_name##_class_init(ObjectClass *oc, void *data); \
+    static void \
+    module_obj_name##_init(Object *obj); \
+    \
+    static const TypeInfo module_obj_name##_info = { \
+        .parent = TYPE_##PARENT_MODULE_OBJ_NAME, \
+        .name = TYPE_##MODULE_OBJ_NAME, \
+        .instance_size = sizeof(ModuleObjName), \
+        .instance_align = __alignof__(ModuleObjName), \
+        .instance_init = module_obj_name##_init, \
+        .instance_finalize = module_obj_name##_finalize, \
+        .class_size = sizeof(ModuleObjName##Class), \
+        .class_init = module_obj_name##_class_init, \
+        .abstract = ABSTRACT, \
+        .interfaces = (InterfaceInfo[]) { __VA_ARGS__ } , \
+    }; \
+    \
+    static void \
+    module_obj_name##_register_types(void) \
+    { \
+        type_register_static(&module_obj_name##_info); \
+    } \
+    type_init(module_obj_name##_register_types);
+
+/**
+ * OBJECT_DEFINE_TYPE:
+ * @ModuleObjName: the object name with initial caps
+ * @module_obj_name: the object name in lowercase with underscore separators
+ * @MODULE_OBJ_NAME: the object name in uppercase with underscore separators
+ * @PARENT_MODULE_OBJ_NAME: the parent object name in uppercase with underscore
+ *                          separators
+ *
+ * This is a specialization of OBJECT_DEFINE_TYPE_EXTENDED, which is suitable
+ * for the common case of a non-abstract type, without any interfaces.
+ */
+#define OBJECT_DEFINE_TYPE(ModuleObjName, module_obj_name, MODULE_OBJ_NAME, \
+                           PARENT_MODULE_OBJ_NAME) \
+    OBJECT_DEFINE_TYPE_EXTENDED(ModuleObjName, module_obj_name, \
+                                MODULE_OBJ_NAME, PARENT_MODULE_OBJ_NAME, \
+                                false, { NULL })
+
+/**
+ * OBJECT_DEFINE_TYPE_WITH_INTERFACES:
+ * @ModuleObjName: the object name with initial caps
+ * @module_obj_name: the object name in lowercase with underscore separators
+ * @MODULE_OBJ_NAME: the object name in uppercase with underscore separators
+ * @PARENT_MODULE_OBJ_NAME: the parent object name in uppercase with underscore
+ *                          separators
+ * @...: list of initializers for "InterfaceInfo" to declare implemented interfaces
+ *
+ * This is a specialization of OBJECT_DEFINE_TYPE_EXTENDED, which is suitable
+ * for the common case of a non-abstract type, with one or more implemented
+ * interfaces.
+ *
+ * Note when passing the list of interfaces, be sure to include the final
+ * NULL entry, e.g.  { TYPE_USER_CREATABLE }, { NULL }
+ */
+#define OBJECT_DEFINE_TYPE_WITH_INTERFACES(ModuleObjName, module_obj_name, \
+                                           MODULE_OBJ_NAME, \
+                                           PARENT_MODULE_OBJ_NAME, ...) \
+    OBJECT_DEFINE_TYPE_EXTENDED(ModuleObjName, module_obj_name, \
+                                MODULE_OBJ_NAME, PARENT_MODULE_OBJ_NAME, \
+                                false, __VA_ARGS__)
+
+/**
+ * OBJECT_DEFINE_ABSTRACT_TYPE:
+ * @ModuleObjName: the object name with initial caps
+ * @module_obj_name: the object name in lowercase with underscore separators
+ * @MODULE_OBJ_NAME: the object name in uppercase with underscore separators
+ * @PARENT_MODULE_OBJ_NAME: the parent object name in uppercase with underscore
+ *                          separators
+ *
+ * This is a specialization of OBJECT_DEFINE_TYPE_EXTENDED, which is suitable
+ * for defining an abstract type, without any interfaces.
+ */
+#define OBJECT_DEFINE_ABSTRACT_TYPE(ModuleObjName, module_obj_name, \
+                                    MODULE_OBJ_NAME, PARENT_MODULE_OBJ_NAME) \
+    OBJECT_DEFINE_TYPE_EXTENDED(ModuleObjName, module_obj_name, \
+                                MODULE_OBJ_NAME, PARENT_MODULE_OBJ_NAME, \
+                                true, { NULL })
+
+/**
+ * struct TypeInfo:
  * @name: The name of the type.
  * @parent: The name of the parent type.
  * @instance_size: The size of the object (derivative of #Object).  If
  *   @instance_size is 0, then the size of the object will be the size of the
  *   parent object.
+ * @instance_align: The required alignment of the object.  If @instance_align
+ *   is 0, then normal malloc alignment is sufficient; if non-zero, then we
+ *   must use qemu_memalign for allocation.
  * @instance_init: This function is called to initialize an object.  The parent
  *   class will have already been initialized so the type is only responsible
  *   for initializing its own members.
@@ -468,6 +416,7 @@ struct TypeInfo
     const char *parent;
 
     size_t instance_size;
+    size_t instance_align;
     void (*instance_init)(Object *obj);
     void (*instance_post_init)(Object *obj);
     void (*instance_finalize)(Object *obj);
@@ -547,7 +496,7 @@ struct TypeInfo
     OBJECT_CLASS_CHECK(class, object_get_class(OBJECT(obj)), name)
 
 /**
- * InterfaceInfo:
+ * struct InterfaceInfo:
  * @type: The name of the interface.
  *
  * The information associated with an interface.
@@ -557,7 +506,7 @@ struct InterfaceInfo {
 };
 
 /**
- * InterfaceClass:
+ * struct InterfaceClass:
  * @parent_class: the base class
  *
  * The class for all interfaces.  Subclasses of this class should only add
@@ -566,7 +515,7 @@ struct InterfaceInfo {
 struct InterfaceClass
 {
     ObjectClass parent_class;
-    /*< private >*/
+    /* private: */
     ObjectClass *concrete_class;
     Type interface_type;
 };
@@ -592,6 +541,18 @@ struct InterfaceClass
 #define INTERFACE_CHECK(interface, obj, name) \
     ((interface *)object_dynamic_cast_assert(OBJECT((obj)), (name), \
                                              __FILE__, __LINE__, __func__))
+
+/**
+ * object_new_with_class:
+ * @klass: The class to instantiate.
+ *
+ * This function will initialize a new object using heap allocated memory.
+ * The returned object has a reference count of 1, and will be freed when
+ * the last reference is dropped.
+ *
+ * Returns: The newly allocated and instantiated object.
+ */
+Object *object_new_with_class(ObjectClass *klass);
 
 /**
  * object_new:
@@ -626,28 +587,25 @@ Object *object_new(const char *typename);
  * object will be marked complete once all the properties have been
  * processed.
  *
- * <example>
- *   <title>Creating an object with properties</title>
- *   <programlisting>
- *   Error *err = NULL;
- *   Object *obj;
+ * .. code-block:: c
+ *    :caption: Creating an object with properties
  *
- *   obj = object_new_with_props(TYPE_MEMORY_BACKEND_FILE,
- *                               object_get_objects_root(),
- *                               "hostmem0",
- *                               &err,
- *                               "share", "yes",
- *                               "mem-path", "/dev/shm/somefile",
- *                               "prealloc", "yes",
- *                               "size", "1048576",
- *                               NULL);
+ *      Error *err = NULL;
+ *      Object *obj;
  *
- *   if (!obj) {
- *     g_printerr("Cannot create memory backend: %s\n",
- *                error_get_pretty(err));
- *   }
- *   </programlisting>
- * </example>
+ *      obj = object_new_with_props(TYPE_MEMORY_BACKEND_FILE,
+ *                                  object_get_objects_root(),
+ *                                  "hostmem0",
+ *                                  &err,
+ *                                  "share", "yes",
+ *                                  "mem-path", "/dev/shm/somefile",
+ *                                  "prealloc", "yes",
+ *                                  "size", "1048576",
+ *                                  NULL);
+ *
+ *      if (!obj) {
+ *        error_reportf_err(err, "Cannot create memory backend: ");
+ *      }
  *
  * The returned object will have one stable reference maintained
  * for as long as it is present in the object hierarchy.
@@ -676,10 +634,11 @@ Object *object_new_with_propv(const char *typename,
                               Error **errp,
                               va_list vargs);
 
-void object_apply_global_props(Object *obj, const GPtrArray *props,
+bool object_apply_global_props(Object *obj, const GPtrArray *props,
                                Error **errp);
 void object_set_machine_compat_props(GPtrArray *compat_props);
 void object_set_accelerator_compat_props(GPtrArray *compat_props);
+void object_register_sugar_prop(const char *driver, const char *prop, const char *value);
 void object_apply_compat_props(Object *obj);
 
 /**
@@ -695,35 +654,28 @@ void object_apply_compat_props(Object *obj);
  * strings. The propname of %NULL indicates the end of the property
  * list.
  *
- * <example>
- *   <title>Update an object's properties</title>
- *   <programlisting>
- *   Error *err = NULL;
- *   Object *obj = ...get / create object...;
+ * .. code-block:: c
+ *    :caption: Update an object's properties
  *
- *   obj = object_set_props(obj,
- *                          &err,
- *                          "share", "yes",
- *                          "mem-path", "/dev/shm/somefile",
- *                          "prealloc", "yes",
- *                          "size", "1048576",
- *                          NULL);
+ *      Error *err = NULL;
+ *      Object *obj = ...get / create object...;
  *
- *   if (!obj) {
- *     g_printerr("Cannot set properties: %s\n",
- *                error_get_pretty(err));
- *   }
- *   </programlisting>
- * </example>
+ *      if (!object_set_props(obj,
+ *                            &err,
+ *                            "share", "yes",
+ *                            "mem-path", "/dev/shm/somefile",
+ *                            "prealloc", "yes",
+ *                            "size", "1048576",
+ *                            NULL)) {
+ *        error_reportf_err(err, "Cannot set properties: ");
+ *      }
  *
  * The returned object will have one stable reference maintained
  * for as long as it is present in the object hierarchy.
  *
- * Returns: -1 on error, 0 on success
+ * Returns: %true on success, %false on error.
  */
-int object_set_props(Object *obj,
-                     Error **errp,
-                     ...) QEMU_SENTINEL;
+bool object_set_props(Object *obj, Error **errp, ...) QEMU_SENTINEL;
 
 /**
  * object_set_propv:
@@ -733,11 +685,9 @@ int object_set_props(Object *obj,
  *
  * See object_set_props() for documentation.
  *
- * Returns: -1 on error, 0 on success
+ * Returns: %true on success, %false on error.
  */
-int object_set_propv(Object *obj,
-                     Error **errp,
-                     va_list vargs);
+bool object_set_propv(Object *obj, Error **errp, va_list vargs);
 
 /**
  * object_initialize:
@@ -752,7 +702,7 @@ int object_set_propv(Object *obj,
 void object_initialize(void *obj, size_t size, const char *typename);
 
 /**
- * object_initialize_child:
+ * object_initialize_child_with_props:
  * @parentobj: The parent object to add a property to
  * @propname: The name of the property
  * @childobj: A pointer to the memory to be used for the object.
@@ -771,13 +721,16 @@ void object_initialize(void *obj, size_t size, const char *typename);
  * strings. The propname of %NULL indicates the end of the property list.
  * If the object implements the user creatable interface, the object will
  * be marked complete once all the properties have been processed.
+ *
+ * Returns: %true on success, %false on failure.
  */
-void object_initialize_child(Object *parentobj, const char *propname,
+bool object_initialize_child_with_props(Object *parentobj,
+                             const char *propname,
                              void *childobj, size_t size, const char *type,
                              Error **errp, ...) QEMU_SENTINEL;
 
 /**
- * object_initialize_childv:
+ * object_initialize_child_with_propsv:
  * @parentobj: The parent object to add a property to
  * @propname: The name of the property
  * @childobj: A pointer to the memory to be used for the object.
@@ -787,10 +740,34 @@ void object_initialize_child(Object *parentobj, const char *propname,
  * @vargs: list of property names and values
  *
  * See object_initialize_child() for documentation.
+ *
+ * Returns: %true on success, %false on failure.
  */
-void object_initialize_childv(Object *parentobj, const char *propname,
+bool object_initialize_child_with_propsv(Object *parentobj,
+                              const char *propname,
                               void *childobj, size_t size, const char *type,
                               Error **errp, va_list vargs);
+
+/**
+ * object_initialize_child:
+ * @parent: The parent object to add a property to
+ * @propname: The name of the property
+ * @child: A precisely typed pointer to the memory to be used for the
+ * object.
+ * @type: The name of the type of the object to instantiate.
+ *
+ * This is like::
+ *
+ *   object_initialize_child_with_props(parent, propname,
+ *                                      child, sizeof(*child), type,
+ *                                      &error_abort, NULL)
+ */
+#define object_initialize_child(parent, propname, child, type)          \
+    object_initialize_child_internal((parent), (propname),              \
+                                     (child), sizeof(*(child)), (type))
+void object_initialize_child_internal(Object *parent, const char *propname,
+                                      void *child, size_t size,
+                                      const char *type);
 
 /**
  * object_dynamic_cast:
@@ -806,6 +783,11 @@ Object *object_dynamic_cast(Object *obj, const char *typename);
 
 /**
  * object_dynamic_cast_assert:
+ * @obj: The object to cast.
+ * @typename: The @typename to cast to.
+ * @file: Source code file where function was called
+ * @line: Source code line where function was called
+ * @func: Name of function where this function was called
  *
  * See object_dynamic_cast() for a description of the parameters of this
  * function.  The only difference in behavior is that this function asserts
@@ -882,12 +864,15 @@ type_init(do_qemu_init_ ## type_array)
  * object_class_dynamic_cast_assert:
  * @klass: The #ObjectClass to attempt to cast.
  * @typename: The QOM typename of the class to cast to.
+ * @file: Source code file where function was called
+ * @line: Source code line where function was called
+ * @func: Name of function where this function was called
  *
  * See object_class_dynamic_cast() for a description of the parameters
  * of this function.  The only difference in behavior is that this function
  * asserts instead of returning #NULL on failure if QOM cast debugging is
  * enabled.  This function is not meant to be called directly, but only through
- * the wrapper macros OBJECT_CLASS_CHECK and INTERFACE_CHECK.
+ * the wrapper macro OBJECT_CLASS_CHECK.
  */
 ObjectClass *object_class_dynamic_cast_assert(ObjectClass *klass,
                                               const char *typename,
@@ -943,6 +928,18 @@ bool object_class_is_abstract(ObjectClass *klass);
  */
 ObjectClass *object_class_by_name(const char *typename);
 
+/**
+ * module_object_class_by_name:
+ * @typename: The QOM typename to obtain the class for.
+ *
+ * For objects which might be provided by a module.  Behaves like
+ * object_class_by_name, but additionally tries to load the module
+ * needed in case the class is not available.
+ *
+ * Returns: The class for @typename or %NULL if not found.
+ */
+ObjectClass *module_object_class_by_name(const char *typename);
+
 void object_class_foreach(void (*fn)(ObjectClass *klass, void *opaque),
                           const char *implements_type, bool include_abstract,
                           void *opaque);
@@ -974,8 +971,9 @@ GSList *object_class_get_list_sorted(const char *implements_type,
  *
  * Increase the reference count of a object.  A object cannot be freed as long
  * as its reference count is greater than zero.
+ * Returns: @obj
  */
-void object_ref(Object *obj);
+Object *object_ref(void *obj);
 
 /**
  * object_unref:
@@ -984,10 +982,10 @@ void object_ref(Object *obj);
  * Decrease the reference count of a object.  A object cannot be freed as long
  * as its reference count is greater than zero.
  */
-void object_unref(Object *obj);
+void object_unref(void *obj);
 
 /**
- * object_property_add:
+ * object_property_try_add:
  * @obj: the object to add a property to
  * @name: the name of the property.  This can contain any character except for
  *  a forward slash.  In general, you should use hyphens '-' instead of
@@ -1004,39 +1002,142 @@ void object_unref(Object *obj);
  *   meant to allow a property to free its opaque upon object
  *   destruction.  This may be NULL.
  * @opaque: an opaque pointer to pass to the callbacks for the property
- * @errp: returns an error if this function fails
+ * @errp: pointer to error object
  *
  * Returns: The #ObjectProperty; this can be used to set the @resolve
  * callback for child and link properties.
+ */
+ObjectProperty *object_property_try_add(Object *obj, const char *name,
+                                        const char *type,
+                                        ObjectPropertyAccessor *get,
+                                        ObjectPropertyAccessor *set,
+                                        ObjectPropertyRelease *release,
+                                        void *opaque, Error **errp);
+
+/**
+ * object_property_add:
+ * Same as object_property_try_add() with @errp hardcoded to
+ * &error_abort.
+ *
+ * @obj: the object to add a property to
+ * @name: the name of the property.  This can contain any character except for
+ *  a forward slash.  In general, you should use hyphens '-' instead of
+ *  underscores '_' when naming properties.
+ * @type: the type name of the property.  This namespace is pretty loosely
+ *   defined.  Sub namespaces are constructed by using a prefix and then
+ *   to angle brackets.  For instance, the type 'virtio-net-pci' in the
+ *   'link' namespace would be 'link<virtio-net-pci>'.
+ * @get: The getter to be called to read a property.  If this is NULL, then
+ *   the property cannot be read.
+ * @set: the setter to be called to write a property.  If this is NULL,
+ *   then the property cannot be written.
+ * @release: called when the property is removed from the object.  This is
+ *   meant to allow a property to free its opaque upon object
+ *   destruction.  This may be NULL.
+ * @opaque: an opaque pointer to pass to the callbacks for the property
  */
 ObjectProperty *object_property_add(Object *obj, const char *name,
                                     const char *type,
                                     ObjectPropertyAccessor *get,
                                     ObjectPropertyAccessor *set,
                                     ObjectPropertyRelease *release,
-                                    void *opaque, Error **errp);
+                                    void *opaque);
 
-void object_property_del(Object *obj, const char *name, Error **errp);
+void object_property_del(Object *obj, const char *name);
 
 ObjectProperty *object_class_property_add(ObjectClass *klass, const char *name,
                                           const char *type,
                                           ObjectPropertyAccessor *get,
                                           ObjectPropertyAccessor *set,
                                           ObjectPropertyRelease *release,
-                                          void *opaque, Error **errp);
+                                          void *opaque);
+
+/**
+ * object_property_set_default_bool:
+ * @prop: the property to set
+ * @value: the value to be written to the property
+ *
+ * Set the property default value.
+ */
+void object_property_set_default_bool(ObjectProperty *prop, bool value);
+
+/**
+ * object_property_set_default_str:
+ * @prop: the property to set
+ * @value: the value to be written to the property
+ *
+ * Set the property default value.
+ */
+void object_property_set_default_str(ObjectProperty *prop, const char *value);
+
+/**
+ * object_property_set_default_int:
+ * @prop: the property to set
+ * @value: the value to be written to the property
+ *
+ * Set the property default value.
+ */
+void object_property_set_default_int(ObjectProperty *prop, int64_t value);
+
+/**
+ * object_property_set_default_uint:
+ * @prop: the property to set
+ * @value: the value to be written to the property
+ *
+ * Set the property default value.
+ */
+void object_property_set_default_uint(ObjectProperty *prop, uint64_t value);
 
 /**
  * object_property_find:
  * @obj: the object
  * @name: the name of the property
+ *
+ * Look up a property for an object.
+ *
+ * Return its #ObjectProperty if found, or NULL.
+ */
+ObjectProperty *object_property_find(Object *obj, const char *name);
+
+/**
+ * object_property_find_err:
+ * @obj: the object
+ * @name: the name of the property
  * @errp: returns an error if this function fails
  *
- * Look up a property for an object and return its #ObjectProperty if found.
+ * Look up a property for an object.
+ *
+ * Return its #ObjectProperty if found, or NULL.
  */
-ObjectProperty *object_property_find(Object *obj, const char *name,
-                                     Error **errp);
-ObjectProperty *object_class_property_find(ObjectClass *klass, const char *name,
-                                           Error **errp);
+ObjectProperty *object_property_find_err(Object *obj,
+                                         const char *name,
+                                         Error **errp);
+
+/**
+ * object_class_property_find:
+ * @klass: the object class
+ * @name: the name of the property
+ *
+ * Look up a property for an object class.
+ *
+ * Return its #ObjectProperty if found, or NULL.
+ */
+ObjectProperty *object_class_property_find(ObjectClass *klass,
+                                           const char *name);
+
+/**
+ * object_class_property_find_err:
+ * @klass: the object class
+ * @name: the name of the property
+ * @errp: returns an error if this function fails
+ *
+ * Look up a property for an object class.
+ *
+ * Return its #ObjectProperty if found, or NULL.
+ */
+ObjectProperty *object_class_property_find_err(ObjectClass *klass,
+                                               const char *name,
+                                               Error **errp);
 
 typedef struct ObjectPropertyIterator {
     ObjectClass *nextclass;
@@ -1045,6 +1146,7 @@ typedef struct ObjectPropertyIterator {
 
 /**
  * object_property_iter_init:
+ * @iter: the iterator instance
  * @obj: the object
  *
  * Initializes an iterator for traversing all properties
@@ -1055,24 +1157,23 @@ typedef struct ObjectPropertyIterator {
  *
  * Typical usage pattern would be
  *
- * <example>
- *   <title>Using object property iterators</title>
- *   <programlisting>
- *   ObjectProperty *prop;
- *   ObjectPropertyIterator iter;
+ * .. code-block:: c
+ *    :caption: Using object property iterators
  *
- *   object_property_iter_init(&iter, obj);
- *   while ((prop = object_property_iter_next(&iter))) {
- *     ... do something with prop ...
- *   }
- *   </programlisting>
- * </example>
+ *      ObjectProperty *prop;
+ *      ObjectPropertyIterator iter;
+ *
+ *      object_property_iter_init(&iter, obj);
+ *      while ((prop = object_property_iter_next(&iter))) {
+ *        ... do something with prop ...
+ *      }
  */
 void object_property_iter_init(ObjectPropertyIterator *iter,
                                Object *obj);
 
 /**
  * object_class_property_iter_init:
+ * @iter: the iterator instance
  * @klass: the class
  *
  * Initializes an iterator for traversing all properties
@@ -1106,26 +1207,31 @@ void object_unparent(Object *obj);
 /**
  * object_property_get:
  * @obj: the object
+ * @name: the name of the property
  * @v: the visitor that will receive the property value.  This should be an
  *   Output visitor and the data will be written with @name as the name.
- * @name: the name of the property
  * @errp: returns an error if this function fails
  *
  * Reads a property from a object.
+ *
+ * Returns: %true on success, %false on failure.
  */
-void object_property_get(Object *obj, Visitor *v, const char *name,
+bool object_property_get(Object *obj, const char *name, Visitor *v,
                          Error **errp);
 
 /**
  * object_property_set_str:
- * @value: the value to be written to the property
+ * @obj: the object
  * @name: the name of the property
+ * @value: the value to be written to the property
  * @errp: returns an error if this function fails
  *
  * Writes a string value to a property.
+ *
+ * Returns: %true on success, %false on failure.
  */
-void object_property_set_str(Object *obj, const char *value,
-                             const char *name, Error **errp);
+bool object_property_set_str(Object *obj, const char *name,
+                             const char *value, Error **errp);
 
 /**
  * object_property_get_str:
@@ -1142,19 +1248,21 @@ char *object_property_get_str(Object *obj, const char *name,
 
 /**
  * object_property_set_link:
- * @value: the value to be written to the property
+ * @obj: the object
  * @name: the name of the property
+ * @value: the value to be written to the property
  * @errp: returns an error if this function fails
  *
  * Writes an object's canonical path to a property.
  *
  * If the link property was created with
- * <code>OBJ_PROP_LINK_STRONG</code> bit, the old target object is
+ * %OBJ_PROP_LINK_STRONG bit, the old target object is
  * unreferenced, and a reference is added to the new target object.
  *
+ * Returns: %true on success, %false on failure.
  */
-void object_property_set_link(Object *obj, Object *value,
-                              const char *name, Error **errp);
+bool object_property_set_link(Object *obj, const char *name,
+                              Object *value, Error **errp);
 
 /**
  * object_property_get_link:
@@ -1171,14 +1279,17 @@ Object *object_property_get_link(Object *obj, const char *name,
 
 /**
  * object_property_set_bool:
- * @value: the value to be written to the property
+ * @obj: the object
  * @name: the name of the property
+ * @value: the value to be written to the property
  * @errp: returns an error if this function fails
  *
  * Writes a bool value to a property.
+ *
+ * Returns: %true on success, %false on failure.
  */
-void object_property_set_bool(Object *obj, bool value,
-                              const char *name, Error **errp);
+bool object_property_set_bool(Object *obj, const char *name,
+                              bool value, Error **errp);
 
 /**
  * object_property_get_bool:
@@ -1186,7 +1297,7 @@ void object_property_set_bool(Object *obj, bool value,
  * @name: the name of the property
  * @errp: returns an error if this function fails
  *
- * Returns: the value of the property, converted to a boolean, or NULL if
+ * Returns: the value of the property, converted to a boolean, or false if
  * an error occurs (including when the property value is not a bool).
  */
 bool object_property_get_bool(Object *obj, const char *name,
@@ -1194,14 +1305,17 @@ bool object_property_get_bool(Object *obj, const char *name,
 
 /**
  * object_property_set_int:
- * @value: the value to be written to the property
+ * @obj: the object
  * @name: the name of the property
+ * @value: the value to be written to the property
  * @errp: returns an error if this function fails
  *
  * Writes an integer value to a property.
+ *
+ * Returns: %true on success, %false on failure.
  */
-void object_property_set_int(Object *obj, int64_t value,
-                             const char *name, Error **errp);
+bool object_property_set_int(Object *obj, const char *name,
+                             int64_t value, Error **errp);
 
 /**
  * object_property_get_int:
@@ -1209,7 +1323,7 @@ void object_property_set_int(Object *obj, int64_t value,
  * @name: the name of the property
  * @errp: returns an error if this function fails
  *
- * Returns: the value of the property, converted to an integer, or negative if
+ * Returns: the value of the property, converted to an integer, or -1 if
  * an error occurs (including when the property value is not an integer).
  */
 int64_t object_property_get_int(Object *obj, const char *name,
@@ -1217,14 +1331,17 @@ int64_t object_property_get_int(Object *obj, const char *name,
 
 /**
  * object_property_set_uint:
- * @value: the value to be written to the property
+ * @obj: the object
  * @name: the name of the property
+ * @value: the value to be written to the property
  * @errp: returns an error if this function fails
  *
  * Writes an unsigned integer value to a property.
+ *
+ * Returns: %true on success, %false on failure.
  */
-void object_property_set_uint(Object *obj, uint64_t value,
-                              const char *name, Error **errp);
+bool object_property_set_uint(Object *obj, const char *name,
+                              uint64_t value, Error **errp);
 
 /**
  * object_property_get_uint:
@@ -1245,52 +1362,42 @@ uint64_t object_property_get_uint(Object *obj, const char *name,
  * @typename: the name of the enum data type
  * @errp: returns an error if this function fails
  *
- * Returns: the value of the property, converted to an integer, or
- * undefined if an error occurs (including when the property value is not
- * an enum).
+ * Returns: the value of the property, converted to an integer (which
+ * can't be negative), or -1 on error (including when the property
+ * value is not an enum).
  */
 int object_property_get_enum(Object *obj, const char *name,
                              const char *typename, Error **errp);
 
 /**
- * object_property_get_uint16List:
- * @obj: the object
- * @name: the name of the property
- * @list: the returned int list
- * @errp: returns an error if this function fails
- *
- * Returns: the value of the property, converted to integers, or
- * undefined if an error occurs (including when the property value is not
- * an list of integers).
- */
-void object_property_get_uint16List(Object *obj, const char *name,
-                                    uint16List **list, Error **errp);
-
-/**
  * object_property_set:
  * @obj: the object
+ * @name: the name of the property
  * @v: the visitor that will be used to write the property value.  This should
  *   be an Input visitor and the data will be first read with @name as the
  *   name and then written as the property value.
- * @name: the name of the property
  * @errp: returns an error if this function fails
  *
  * Writes a property to a object.
+ *
+ * Returns: %true on success, %false on failure.
  */
-void object_property_set(Object *obj, Visitor *v, const char *name,
+bool object_property_set(Object *obj, const char *name, Visitor *v,
                          Error **errp);
 
 /**
  * object_property_parse:
  * @obj: the object
- * @string: the string that will be used to parse the property value.
  * @name: the name of the property
+ * @string: the string that will be used to parse the property value.
  * @errp: returns an error if this function fails
  *
  * Parses a string and writes the result into a property of an object.
+ *
+ * Returns: %true on success, %false on failure.
  */
-void object_property_parse(Object *obj, const char *string,
-                           const char *name, Error **errp);
+bool object_property_parse(Object *obj, const char *name,
+                           const char *string, Error **errp);
 
 /**
  * object_property_print:
@@ -1348,20 +1455,23 @@ Object *object_get_internal_root(void);
 
 /**
  * object_get_canonical_path_component:
+ * @obj: the object
  *
  * Returns: The final component in the object's canonical path.  The canonical
  * path is the path within the composition tree starting from the root.
  * %NULL if the object doesn't have a parent (and thus a canonical path).
  */
-gchar *object_get_canonical_path_component(Object *obj);
+const char *object_get_canonical_path_component(const Object *obj);
 
 /**
  * object_get_canonical_path:
+ * @obj: the object
  *
- * Returns: The canonical path for a object.  This is the path within the
- * composition tree starting from the root.
+ * Returns: The canonical path for a object, newly allocated.  This is
+ * the path within the composition tree starting from the root.  Use
+ * g_free() to free it.
  */
-gchar *object_get_canonical_path(Object *obj);
+char *object_get_canonical_path(const Object *obj);
 
 /**
  * object_resolve_path:
@@ -1419,14 +1529,14 @@ Object *object_resolve_path_type(const char *path, const char *typename,
  *
  * Returns: The resolved object or NULL on path lookup failure.
  */
-Object *object_resolve_path_component(Object *parent, const gchar *part);
+Object *object_resolve_path_component(Object *parent, const char *part);
 
 /**
- * object_property_add_child:
+ * object_property_try_add_child:
  * @obj: the object to add a property to
  * @name: the name of the property
  * @child: the child object
- * @errp: if an error occurs, a pointer to an area to store the error
+ * @errp: pointer to error object
  *
  * Child properties form the composition tree.  All objects need to be a child
  * of another object.  Objects can only be a child of one object.
@@ -1437,34 +1547,55 @@ Object *object_resolve_path_component(Object *parent, const gchar *part);
  * The value of a child property as a C string will be the child object's
  * canonical path. It can be retrieved using object_property_get_str().
  * The child object itself can be retrieved using object_property_get_link().
+ *
+ * Returns: The newly added property on success, or %NULL on failure.
  */
-void object_property_add_child(Object *obj, const char *name,
-                               Object *child, Error **errp);
+ObjectProperty *object_property_try_add_child(Object *obj, const char *name,
+                                              Object *child, Error **errp);
+
+/**
+ * object_property_add_child:
+ * @obj: the object to add a property to
+ * @name: the name of the property
+ * @child: the child object
+ *
+ * Same as object_property_try_add_child() with @errp hardcoded to
+ * &error_abort
+ */
+ObjectProperty *object_property_add_child(Object *obj, const char *name,
+                                          Object *child);
 
 typedef enum {
     /* Unref the link pointer when the property is deleted */
     OBJ_PROP_LINK_STRONG = 0x1,
+
+    /* private */
+    OBJ_PROP_LINK_DIRECT = 0x2,
+    OBJ_PROP_LINK_CLASS = 0x4,
 } ObjectPropertyLinkFlags;
 
 /**
  * object_property_allow_set_link:
+ * @obj: the object to add a property to
+ * @name: the name of the property
+ * @child: the child object
+ * @errp: pointer to error object
  *
  * The default implementation of the object_property_add_link() check()
  * callback function.  It allows the link property to be set and never returns
  * an error.
  */
-void object_property_allow_set_link(const Object *, const char *,
-                                    Object *, Error **);
+void object_property_allow_set_link(const Object *obj, const char *name,
+                                    Object *child, Error **errp);
 
 /**
  * object_property_add_link:
  * @obj: the object to add a property to
  * @name: the name of the property
  * @type: the qobj type of the link
- * @child: a pointer to where the link object reference is stored
+ * @targetp: a pointer to where the link object reference is stored
  * @check: callback to veto setting or NULL if the property is read-only
  * @flags: additional options for the link
- * @errp: if an error occurs, a pointer to an area to store the error
  *
  * Links establish relationships between objects.  Links are unidirectional
  * although two links can be combined to form a bidirectional relationship
@@ -1472,25 +1603,33 @@ void object_property_allow_set_link(const Object *, const char *,
  *
  * Links form the graph in the object model.
  *
- * The <code>@check()</code> callback is invoked when
+ * The @check() callback is invoked when
  * object_property_set_link() is called and can raise an error to prevent the
- * link being set.  If <code>@check</code> is NULL, the property is read-only
+ * link being set.  If @check is NULL, the property is read-only
  * and cannot be set.
  *
  * Ownership of the pointer that @child points to is transferred to the
- * link property.  The reference count for <code>*@child</code> is
+ * link property.  The reference count for *@child is
  * managed by the property from after the function returns till the
  * property is deleted with object_property_del().  If the
- * <code>@flags</code> <code>OBJ_PROP_LINK_STRONG</code> bit is set,
+ * @flags %OBJ_PROP_LINK_STRONG bit is set,
  * the reference count is decremented when the property is deleted or
  * modified.
+ *
+ * Returns: The newly added property on success, or %NULL on failure.
  */
-void object_property_add_link(Object *obj, const char *name,
-                              const char *type, Object **child,
+ObjectProperty *object_property_add_link(Object *obj, const char *name,
+                              const char *type, Object **targetp,
                               void (*check)(const Object *obj, const char *name,
                                             Object *val, Error **errp),
-                              ObjectPropertyLinkFlags flags,
-                              Error **errp);
+                              ObjectPropertyLinkFlags flags);
+
+ObjectProperty *object_class_property_add_link(ObjectClass *oc,
+                              const char *name,
+                              const char *type, ptrdiff_t offset,
+                              void (*check)(const Object *obj, const char *name,
+                                            Object *val, Error **errp),
+                              ObjectPropertyLinkFlags flags);
 
 /**
  * object_property_add_str:
@@ -1499,21 +1638,21 @@ void object_property_add_link(Object *obj, const char *name,
  * @get: the getter or NULL if the property is write-only.  This function must
  *   return a string to be freed by g_free().
  * @set: the setter or NULL if the property is read-only
- * @errp: if an error occurs, a pointer to an area to store the error
  *
  * Add a string property using getters/setters.  This function will add a
  * property of type 'string'.
+ *
+ * Returns: The newly added property on success, or %NULL on failure.
  */
-void object_property_add_str(Object *obj, const char *name,
+ObjectProperty *object_property_add_str(Object *obj, const char *name,
                              char *(*get)(Object *, Error **),
-                             void (*set)(Object *, const char *, Error **),
-                             Error **errp);
+                             void (*set)(Object *, const char *, Error **));
 
-void object_class_property_add_str(ObjectClass *klass, const char *name,
+ObjectProperty *object_class_property_add_str(ObjectClass *klass,
+                                   const char *name,
                                    char *(*get)(Object *, Error **),
                                    void (*set)(Object *, const char *,
-                                               Error **),
-                                   Error **errp);
+                                               Error **));
 
 /**
  * object_property_add_bool:
@@ -1521,124 +1660,158 @@ void object_class_property_add_str(ObjectClass *klass, const char *name,
  * @name: the name of the property
  * @get: the getter or NULL if the property is write-only.
  * @set: the setter or NULL if the property is read-only
- * @errp: if an error occurs, a pointer to an area to store the error
  *
  * Add a bool property using getters/setters.  This function will add a
  * property of type 'bool'.
+ *
+ * Returns: The newly added property on success, or %NULL on failure.
  */
-void object_property_add_bool(Object *obj, const char *name,
+ObjectProperty *object_property_add_bool(Object *obj, const char *name,
                               bool (*get)(Object *, Error **),
-                              void (*set)(Object *, bool, Error **),
-                              Error **errp);
+                              void (*set)(Object *, bool, Error **));
 
-void object_class_property_add_bool(ObjectClass *klass, const char *name,
+ObjectProperty *object_class_property_add_bool(ObjectClass *klass,
+                                    const char *name,
                                     bool (*get)(Object *, Error **),
-                                    void (*set)(Object *, bool, Error **),
-                                    Error **errp);
+                                    void (*set)(Object *, bool, Error **));
 
 /**
  * object_property_add_enum:
  * @obj: the object to add a property to
  * @name: the name of the property
  * @typename: the name of the enum data type
+ * @lookup: enum value namelookup table
  * @get: the getter or %NULL if the property is write-only.
  * @set: the setter or %NULL if the property is read-only
- * @errp: if an error occurs, a pointer to an area to store the error
  *
  * Add an enum property using getters/setters.  This function will add a
  * property of type '@typename'.
+ *
+ * Returns: The newly added property on success, or %NULL on failure.
  */
-void object_property_add_enum(Object *obj, const char *name,
+ObjectProperty *object_property_add_enum(Object *obj, const char *name,
                               const char *typename,
                               const QEnumLookup *lookup,
                               int (*get)(Object *, Error **),
-                              void (*set)(Object *, int, Error **),
-                              Error **errp);
+                              void (*set)(Object *, int, Error **));
 
-void object_class_property_add_enum(ObjectClass *klass, const char *name,
+ObjectProperty *object_class_property_add_enum(ObjectClass *klass,
+                                    const char *name,
                                     const char *typename,
                                     const QEnumLookup *lookup,
                                     int (*get)(Object *, Error **),
-                                    void (*set)(Object *, int, Error **),
-                                    Error **errp);
+                                    void (*set)(Object *, int, Error **));
 
 /**
  * object_property_add_tm:
  * @obj: the object to add a property to
  * @name: the name of the property
  * @get: the getter or NULL if the property is write-only.
- * @errp: if an error occurs, a pointer to an area to store the error
  *
  * Add a read-only struct tm valued property using a getter function.
  * This function will add a property of type 'struct tm'.
+ *
+ * Returns: The newly added property on success, or %NULL on failure.
  */
-void object_property_add_tm(Object *obj, const char *name,
-                            void (*get)(Object *, struct tm *, Error **),
-                            Error **errp);
+ObjectProperty *object_property_add_tm(Object *obj, const char *name,
+                            void (*get)(Object *, struct tm *, Error **));
 
-void object_class_property_add_tm(ObjectClass *klass, const char *name,
-                                  void (*get)(Object *, struct tm *, Error **),
-                                  Error **errp);
+ObjectProperty *object_class_property_add_tm(ObjectClass *klass,
+                            const char *name,
+                            void (*get)(Object *, struct tm *, Error **));
+
+typedef enum {
+    /* Automatically add a getter to the property */
+    OBJ_PROP_FLAG_READ = 1 << 0,
+    /* Automatically add a setter to the property */
+    OBJ_PROP_FLAG_WRITE = 1 << 1,
+    /* Automatically add a getter and a setter to the property */
+    OBJ_PROP_FLAG_READWRITE = (OBJ_PROP_FLAG_READ | OBJ_PROP_FLAG_WRITE),
+} ObjectPropertyFlags;
 
 /**
  * object_property_add_uint8_ptr:
  * @obj: the object to add a property to
  * @name: the name of the property
  * @v: pointer to value
- * @errp: if an error occurs, a pointer to an area to store the error
+ * @flags: bitwise-or'd ObjectPropertyFlags
  *
  * Add an integer property in memory.  This function will add a
  * property of type 'uint8'.
+ *
+ * Returns: The newly added property on success, or %NULL on failure.
  */
-void object_property_add_uint8_ptr(Object *obj, const char *name,
-                                   const uint8_t *v, Error **errp);
-void object_class_property_add_uint8_ptr(ObjectClass *klass, const char *name,
-                                         const uint8_t *v, Error **errp);
+ObjectProperty *object_property_add_uint8_ptr(Object *obj, const char *name,
+                                              const uint8_t *v,
+                                              ObjectPropertyFlags flags);
+
+ObjectProperty *object_class_property_add_uint8_ptr(ObjectClass *klass,
+                                         const char *name,
+                                         const uint8_t *v,
+                                         ObjectPropertyFlags flags);
 
 /**
  * object_property_add_uint16_ptr:
  * @obj: the object to add a property to
  * @name: the name of the property
  * @v: pointer to value
- * @errp: if an error occurs, a pointer to an area to store the error
+ * @flags: bitwise-or'd ObjectPropertyFlags
  *
  * Add an integer property in memory.  This function will add a
  * property of type 'uint16'.
+ *
+ * Returns: The newly added property on success, or %NULL on failure.
  */
-void object_property_add_uint16_ptr(Object *obj, const char *name,
-                                    const uint16_t *v, Error **errp);
-void object_class_property_add_uint16_ptr(ObjectClass *klass, const char *name,
-                                          const uint16_t *v, Error **errp);
+ObjectProperty *object_property_add_uint16_ptr(Object *obj, const char *name,
+                                    const uint16_t *v,
+                                    ObjectPropertyFlags flags);
+
+ObjectProperty *object_class_property_add_uint16_ptr(ObjectClass *klass,
+                                          const char *name,
+                                          const uint16_t *v,
+                                          ObjectPropertyFlags flags);
 
 /**
  * object_property_add_uint32_ptr:
  * @obj: the object to add a property to
  * @name: the name of the property
  * @v: pointer to value
- * @errp: if an error occurs, a pointer to an area to store the error
+ * @flags: bitwise-or'd ObjectPropertyFlags
  *
  * Add an integer property in memory.  This function will add a
  * property of type 'uint32'.
+ *
+ * Returns: The newly added property on success, or %NULL on failure.
  */
-void object_property_add_uint32_ptr(Object *obj, const char *name,
-                                    const uint32_t *v, Error **errp);
-void object_class_property_add_uint32_ptr(ObjectClass *klass, const char *name,
-                                          const uint32_t *v, Error **errp);
+ObjectProperty *object_property_add_uint32_ptr(Object *obj, const char *name,
+                                    const uint32_t *v,
+                                    ObjectPropertyFlags flags);
+
+ObjectProperty *object_class_property_add_uint32_ptr(ObjectClass *klass,
+                                          const char *name,
+                                          const uint32_t *v,
+                                          ObjectPropertyFlags flags);
 
 /**
  * object_property_add_uint64_ptr:
  * @obj: the object to add a property to
  * @name: the name of the property
  * @v: pointer to value
- * @errp: if an error occurs, a pointer to an area to store the error
+ * @flags: bitwise-or'd ObjectPropertyFlags
  *
  * Add an integer property in memory.  This function will add a
  * property of type 'uint64'.
+ *
+ * Returns: The newly added property on success, or %NULL on failure.
  */
-void object_property_add_uint64_ptr(Object *obj, const char *name,
-                                    const uint64_t *v, Error **Errp);
-void object_class_property_add_uint64_ptr(ObjectClass *klass, const char *name,
-                                          const uint64_t *v, Error **Errp);
+ObjectProperty *object_property_add_uint64_ptr(Object *obj, const char *name,
+                                    const uint64_t *v,
+                                    ObjectPropertyFlags flags);
+
+ObjectProperty *object_class_property_add_uint64_ptr(ObjectClass *klass,
+                                          const char *name,
+                                          const uint64_t *v,
+                                          ObjectPropertyFlags flags);
 
 /**
  * object_property_add_alias:
@@ -1646,26 +1819,25 @@ void object_class_property_add_uint64_ptr(ObjectClass *klass, const char *name,
  * @name: the name of the property
  * @target_obj: the object to forward property access to
  * @target_name: the name of the property on the forwarded object
- * @errp: if an error occurs, a pointer to an area to store the error
  *
  * Add an alias for a property on an object.  This function will add a property
  * of the same type as the forwarded property.
  *
- * The caller must ensure that <code>@target_obj</code> stays alive as long as
+ * The caller must ensure that @target_obj stays alive as long as
  * this property exists.  In the case of a child object or an alias on the same
  * object this will be the case.  For aliases to other objects the caller is
  * responsible for taking a reference.
+ *
+ * Returns: The newly added property on success, or %NULL on failure.
  */
-void object_property_add_alias(Object *obj, const char *name,
-                               Object *target_obj, const char *target_name,
-                               Error **errp);
+ObjectProperty *object_property_add_alias(Object *obj, const char *name,
+                               Object *target_obj, const char *target_name);
 
 /**
  * object_property_add_const_link:
  * @obj: the object to add a property to
  * @name: the name of the property
  * @target: the object to be referred by the link
- * @errp: if an error occurs, a pointer to an area to store the error
  *
  * Add an unmodifiable link for a property on an object.  This function will
  * add a property of type link<TYPE> where TYPE is the type of @target.
@@ -1674,25 +1846,26 @@ void object_property_add_alias(Object *obj, const char *name,
  * this property exists.  In the case @target is a child of @obj,
  * this will be the case.  Otherwise, the caller is responsible for
  * taking a reference.
+ *
+ * Returns: The newly added property on success, or %NULL on failure.
  */
-void object_property_add_const_link(Object *obj, const char *name,
-                                    Object *target, Error **errp);
+ObjectProperty *object_property_add_const_link(Object *obj, const char *name,
+                                               Object *target);
 
 /**
  * object_property_set_description:
  * @obj: the object owning the property
  * @name: the name of the property
  * @description: the description of the property on the object
- * @errp: if an error occurs, a pointer to an area to store the error
  *
  * Set an object property's description.
  *
+ * Returns: %true on success, %false on failure.
  */
 void object_property_set_description(Object *obj, const char *name,
-                                     const char *description, Error **errp);
+                                     const char *description);
 void object_class_property_set_description(ObjectClass *klass, const char *name,
-                                           const char *description,
-                                           Error **errp);
+                                           const char *description);
 
 /**
  * object_child_foreach:
@@ -1748,4 +1921,20 @@ Object *container_get(Object *root, const char *path);
  * Returns the instance_size of the given @typename.
  */
 size_t object_type_get_instance_size(const char *typename);
+
+/**
+ * object_property_help:
+ * @name: the name of the property
+ * @type: the type of the property
+ * @defval: the default value
+ * @description: description of the property
+ *
+ * Returns: a user-friendly formatted string describing the property
+ * for help purposes.
+ */
+char *object_property_help(const char *name, const char *type,
+                           QObject *defval, const char *description);
+
+G_DEFINE_AUTOPTR_CLEANUP_FUNC(Object, object_unref)
+
 #endif

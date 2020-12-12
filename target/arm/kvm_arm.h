@@ -15,6 +15,9 @@
 #include "exec/memory.h"
 #include "qemu/error-report.h"
 
+#define KVM_ARM_VGIC_V2   (1 << 0)
+#define KVM_ARM_VGIC_V3   (1 << 1)
+
 /**
  * kvm_arm_vcpu_init:
  * @cs: CPUState
@@ -26,6 +29,20 @@
  * Returns: 0 if success else < 0 error code
  */
 int kvm_arm_vcpu_init(CPUState *cs);
+
+/**
+ * kvm_arm_vcpu_finalize:
+ * @cs: CPUState
+ * @feature: feature to finalize
+ *
+ * Finalizes the configuration of the specified VCPU feature by
+ * invoking the KVM_ARM_VCPU_FINALIZE ioctl. Features requiring
+ * this are documented in the "KVM_ARM_VCPU_FINALIZE" section of
+ * KVM's API documentation.
+ *
+ * Returns: 0 if success else < 0 error code
+ */
+int kvm_arm_vcpu_finalize(CPUState *cs, int feature);
 
 /**
  * kvm_arm_register_device:
@@ -61,8 +78,8 @@ void kvm_arm_register_device(MemoryRegion *mr, uint64_t devid, uint64_t group,
 int kvm_arm_init_cpreg_list(ARMCPU *cpu);
 
 /**
- * kvm_arm_reg_syncs_via_cpreg_list
- * regidx: KVM register index
+ * kvm_arm_reg_syncs_via_cpreg_list:
+ * @regidx: KVM register index
  *
  * Return true if this KVM register should be synchronized via the
  * cpreg list of arbitrary system registers, false if it is synchronized
@@ -71,8 +88,8 @@ int kvm_arm_init_cpreg_list(ARMCPU *cpu);
 bool kvm_arm_reg_syncs_via_cpreg_list(uint64_t regidx);
 
 /**
- * kvm_arm_cpreg_level
- * regidx: KVM register index
+ * kvm_arm_cpreg_level:
+ * @regidx: KVM register index
  *
  * Return the level of this coprocessor/system register.  Return value is
  * either KVM_PUT_RUNTIME_STATE, KVM_PUT_RESET_STATE, or KVM_PUT_FULL_STATE.
@@ -114,6 +131,23 @@ bool write_list_to_kvmstate(ARMCPU *cpu, int level);
 bool write_kvmstate_to_list(ARMCPU *cpu);
 
 /**
+ * kvm_arm_cpu_pre_save:
+ * @cpu: ARMCPU
+ *
+ * Called after write_kvmstate_to_list() from cpu_pre_save() to update
+ * the cpreg list with KVM CPU state.
+ */
+void kvm_arm_cpu_pre_save(ARMCPU *cpu);
+
+/**
+ * kvm_arm_cpu_post_load:
+ * @cpu: ARMCPU
+ *
+ * Called from cpu_post_load() to update KVM CPU state from the cpreg list.
+ */
+void kvm_arm_cpu_post_load(ARMCPU *cpu);
+
+/**
  * kvm_arm_reset_vcpu:
  * @cpu: ARMCPU
  *
@@ -134,6 +168,8 @@ void kvm_arm_init_serror_injection(CPUState *cs);
  * @cpu: ARMCPU
  *
  * Get VCPU related state from kvm.
+ *
+ * Returns: 0 if success else < 0 error code
  */
 int kvm_get_vcpu_events(ARMCPU *cpu);
 
@@ -142,6 +178,8 @@ int kvm_get_vcpu_events(ARMCPU *cpu);
  * @cpu: ARMCPU
  *
  * Put VCPU related state to kvm.
+ *
+ * Returns: 0 if success else < 0 error code
  */
 int kvm_put_vcpu_events(ARMCPU *cpu);
 
@@ -191,12 +229,25 @@ typedef struct ARMHostCPUFeatures {
 
 /**
  * kvm_arm_get_host_cpu_features:
- * @ahcc: ARMHostCPUClass to fill in
+ * @ahcf: ARMHostCPUClass to fill in
  *
  * Probe the capabilities of the host kernel's preferred CPU and fill
  * in the ARMHostCPUClass struct accordingly.
+ *
+ * Returns true on success and false otherwise.
  */
 bool kvm_arm_get_host_cpu_features(ARMHostCPUFeatures *ahcf);
+
+/**
+ * kvm_arm_sve_get_vls:
+ * @cs: CPUState
+ * @map: bitmap to fill in
+ *
+ * Get all the SVE vector lengths supported by the KVM host, setting
+ * the bits corresponding to their length in quadwords minus one
+ * (vq - 1) in @map up to ARM_MAX_VQ.
+ */
+void kvm_arm_sve_get_vls(CPUState *cs, unsigned long *map);
 
 /**
  * kvm_arm_set_cpu_features_from_host:
@@ -208,57 +259,190 @@ bool kvm_arm_get_host_cpu_features(ARMHostCPUFeatures *ahcf);
 void kvm_arm_set_cpu_features_from_host(ARMCPU *cpu);
 
 /**
- * kvm_arm_get_max_vm_ipa_size - Returns the number of bits in the
- * IPA address space supported by KVM
+ * kvm_arm_add_vcpu_properties:
+ * @obj: The CPU object to add the properties to
  *
+ * Add all KVM specific CPU properties to the CPU object. These
+ * are the CPU properties with "kvm-" prefixed names.
+ */
+void kvm_arm_add_vcpu_properties(Object *obj);
+
+/**
+ * kvm_arm_steal_time_finalize:
+ * @cpu: ARMCPU for which to finalize kvm-steal-time
+ * @errp: Pointer to Error* for error propagation
+ *
+ * Validate the kvm-steal-time property selection and set its default
+ * based on KVM support and guest configuration.
+ */
+void kvm_arm_steal_time_finalize(ARMCPU *cpu, Error **errp);
+
+/**
+ * kvm_arm_steal_time_supported:
+ *
+ * Returns: true if KVM can enable steal time reporting
+ * and false otherwise.
+ */
+bool kvm_arm_steal_time_supported(void);
+
+/**
+ * kvm_arm_aarch32_supported:
+ *
+ * Returns: true if KVM can enable AArch32 mode
+ * and false otherwise.
+ */
+bool kvm_arm_aarch32_supported(void);
+
+/**
+ * kvm_arm_pmu_supported:
+ *
+ * Returns: true if KVM can enable the PMU
+ * and false otherwise.
+ */
+bool kvm_arm_pmu_supported(void);
+
+/**
+ * kvm_arm_sve_supported:
+ *
+ * Returns true if KVM can enable SVE and false otherwise.
+ */
+bool kvm_arm_sve_supported(void);
+
+/**
+ * kvm_arm_get_max_vm_ipa_size:
  * @ms: Machine state handle
+ *
+ * Returns the number of bits in the IPA address space supported by KVM
  */
 int kvm_arm_get_max_vm_ipa_size(MachineState *ms);
 
 /**
- * kvm_arm_sync_mpstate_to_kvm
+ * kvm_arm_sync_mpstate_to_kvm:
  * @cpu: ARMCPU
  *
  * If supported set the KVM MP_STATE based on QEMU's model.
+ *
+ * Returns 0 on success and -1 on failure.
  */
 int kvm_arm_sync_mpstate_to_kvm(ARMCPU *cpu);
 
 /**
- * kvm_arm_sync_mpstate_to_qemu
+ * kvm_arm_sync_mpstate_to_qemu:
  * @cpu: ARMCPU
  *
  * If supported get the MP_STATE from KVM and store in QEMU's model.
+ *
+ * Returns 0 on success and aborts on failure.
  */
 int kvm_arm_sync_mpstate_to_qemu(ARMCPU *cpu);
+
+/**
+ * kvm_arm_get_virtual_time:
+ * @cs: CPUState
+ *
+ * Gets the VCPU's virtual counter and stores it in the KVM CPU state.
+ */
+void kvm_arm_get_virtual_time(CPUState *cs);
+
+/**
+ * kvm_arm_put_virtual_time:
+ * @cs: CPUState
+ *
+ * Sets the VCPU's virtual counter to the value stored in the KVM CPU state.
+ */
+void kvm_arm_put_virtual_time(CPUState *cs);
+
+void kvm_arm_vm_state_change(void *opaque, int running, RunState state);
 
 int kvm_arm_vgic_probe(void);
 
 void kvm_arm_pmu_set_irq(CPUState *cs, int irq);
 void kvm_arm_pmu_init(CPUState *cs);
 
+/**
+ * kvm_arm_pvtime_init:
+ * @cs: CPUState
+ * @ipa: Per-vcpu guest physical base address of the pvtime structures
+ *
+ * Initializes PVTIME for the VCPU, setting the PVTIME IPA to @ipa.
+ */
+void kvm_arm_pvtime_init(CPUState *cs, uint64_t ipa);
+
+int kvm_arm_set_irq(int cpu, int irqtype, int irq, int level);
+
 #else
 
+/*
+ * It's safe to call these functions without KVM support.
+ * They should either do nothing or return "not supported".
+ */
+static inline bool kvm_arm_aarch32_supported(void)
+{
+    return false;
+}
+
+static inline bool kvm_arm_pmu_supported(void)
+{
+    return false;
+}
+
+static inline bool kvm_arm_sve_supported(void)
+{
+    return false;
+}
+
+static inline bool kvm_arm_steal_time_supported(void)
+{
+    return false;
+}
+
+/*
+ * These functions should never actually be called without KVM support.
+ */
 static inline void kvm_arm_set_cpu_features_from_host(ARMCPU *cpu)
 {
-    /* This should never actually be called in the "not KVM" case,
-     * but set up the fields to indicate an error anyway.
-     */
-    cpu->kvm_target = QEMU_KVM_ARM_TARGET_NONE;
-    cpu->host_cpu_probe_failed = true;
+    g_assert_not_reached();
+}
+
+static inline void kvm_arm_add_vcpu_properties(Object *obj)
+{
+    g_assert_not_reached();
 }
 
 static inline int kvm_arm_get_max_vm_ipa_size(MachineState *ms)
 {
-    return -ENOENT;
+    g_assert_not_reached();
 }
 
 static inline int kvm_arm_vgic_probe(void)
 {
-    return 0;
+    g_assert_not_reached();
 }
 
-static inline void kvm_arm_pmu_set_irq(CPUState *cs, int irq) {}
-static inline void kvm_arm_pmu_init(CPUState *cs) {}
+static inline void kvm_arm_pmu_set_irq(CPUState *cs, int irq)
+{
+    g_assert_not_reached();
+}
+
+static inline void kvm_arm_pmu_init(CPUState *cs)
+{
+    g_assert_not_reached();
+}
+
+static inline void kvm_arm_pvtime_init(CPUState *cs, uint64_t ipa)
+{
+    g_assert_not_reached();
+}
+
+static inline void kvm_arm_steal_time_finalize(ARMCPU *cpu, Error **errp)
+{
+    g_assert_not_reached();
+}
+
+static inline void kvm_arm_sve_get_vls(CPUState *cs, unsigned long *map)
+{
+    g_assert_not_reached();
+}
 
 #endif
 
@@ -278,13 +462,7 @@ static inline const char *gic_class_name(void)
 static inline const char *gicv3_class_name(void)
 {
     if (kvm_irqchip_in_kernel()) {
-#ifdef TARGET_AARCH64
         return "kvm-arm-gicv3";
-#else
-        error_report("KVM GICv3 acceleration is not supported on this "
-                     "platform");
-        exit(1);
-#endif
     } else {
         if (kvm_enabled()) {
             error_report("Userspace GICv3 is not supported with KVM");
@@ -309,23 +487,30 @@ bool kvm_arm_handle_debug(CPUState *cs, struct kvm_debug_exit_arch *debug_exit);
  *
  * Return: TRUE if any hardware breakpoints in use.
  */
-
 bool kvm_arm_hw_debug_active(CPUState *cs);
 
 /**
  * kvm_arm_copy_hw_debug_data:
- *
  * @ptr: kvm_guest_debug_arch structure
  *
  * Copy the architecture specific debug registers into the
  * kvm_guest_debug ioctl structure.
  */
 struct kvm_guest_debug_arch;
-
 void kvm_arm_copy_hw_debug_data(struct kvm_guest_debug_arch *ptr);
 
 /**
- * its_class_name
+ * kvm_arm_verify_ext_dabt_pending:
+ * @cs: CPUState
+ *
+ * Verify the fault status code wrt the Ext DABT injection
+ *
+ * Returns: true if the fault status code is as expected, false otherwise
+ */
+bool kvm_arm_verify_ext_dabt_pending(CPUState *cs);
+
+/**
+ * its_class_name:
  *
  * Return the ITS class name to use depending on whether KVM acceleration
  * and KVM CAP_SIGNAL_MSI are supported

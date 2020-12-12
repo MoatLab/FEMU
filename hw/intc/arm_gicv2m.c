@@ -8,7 +8,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -28,13 +28,16 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "hw/sysbus.h"
+#include "hw/irq.h"
 #include "hw/pci/msi.h"
+#include "hw/qdev-properties.h"
 #include "sysemu/kvm.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
+#include "qom/object.h"
 
 #define TYPE_ARM_GICV2M "arm-gicv2m"
-#define ARM_GICV2M(obj) OBJECT_CHECK(ARMGICv2mState, (obj), TYPE_ARM_GICV2M)
+OBJECT_DECLARE_SIMPLE_TYPE(ARMGICv2mState, ARM_GICV2M)
 
 #define GICV2M_NUM_SPI_MAX 128
 
@@ -46,7 +49,7 @@
 
 #define PRODUCT_ID_QEMU         0x51 /* ASCII code Q */
 
-typedef struct ARMGICv2mState {
+struct ARMGICv2mState {
     SysBusDevice parent_obj;
 
     MemoryRegion iomem;
@@ -54,7 +57,7 @@ typedef struct ARMGICv2mState {
 
     uint32_t base_spi;
     uint32_t num_spi;
-} ARMGICv2mState;
+};
 
 static void gicv2m_set_irq(void *opaque, int irq)
 {
@@ -177,7 +180,7 @@ static void gicv2m_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    dc->props = gicv2m_properties;
+    device_class_set_props(dc, gicv2m_properties);
     dc->realize = gicv2m_realize;
 }
 

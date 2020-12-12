@@ -55,12 +55,12 @@ without any sub-directory path prefix. eg io/channel-buffer.c would do
   #include "trace.h"
 
 To access the 'io/trace.h' file. While it is possible to include a trace.h
-file from outside a source files' own sub-directory, this is discouraged in
+file from outside a source file's own sub-directory, this is discouraged in
 general. It is strongly preferred that all events be declared directly in
 the sub-directory that uses them. The only exception is where there are some
 shared trace events defined in the top level directory trace-events file.
 The top level directory generates trace files with a filename prefix of
-"trace-root" instead of just "trace". This is to avoid ambiguity between
+"trace/trace-root" instead of just "trace". This is to avoid ambiguity between
 a trace.h in the current directory, vs the top level directory.
 
 === Using trace events ===
@@ -112,6 +112,8 @@ Trace events should use types as follows:
 Format strings should reflect the types defined in the trace event.  Take
 special care to use PRId64 and PRIu64 for int64_t and uint64_t types,
 respectively.  This ensures portability between 32- and 64-bit platforms.
+Format strings must not end with a newline character.  It is the responsibility
+of backends to adapt line ending for proper logging.
 
 Each event declaration will start with the event name, then its arguments,
 finally a format string for pretty-printing. For example:
@@ -315,7 +317,8 @@ probes:
                          --binary path/to/qemu-binary \
                          --target-type system \
                          --target-name x86_64 \
-                         <trace-events-all >qemu.stp
+                         --group=all \
+                         trace-events-all >qemu.stp
 
 To facilitate simple usage of systemtap where there merely needs to be printf
 logging of certain probes, a helper script "qemu-trace-stap" is provided.
@@ -339,8 +342,10 @@ edit the "trace-events-all" file).
 
 In addition, there might be cases where relatively complex computations must be
 performed to generate values that are only used as arguments for a trace
-function. In these cases you can use the macro 'TRACE_${EVENT_NAME}_ENABLED' to
-guard such computations and avoid its compilation when the event is disabled:
+function. In these cases you can use 'trace_event_get_state_backends()' to
+guard such computations, so they are skipped if the event has been either
+compile-time disabled or run-time disabled. If the event is compile-time
+disabled, this check will have no performance impact.
 
     #include "trace.h"  /* needed for trace event prototype */
     
@@ -353,17 +358,13 @@ guard such computations and avoid its compilation when the event is disabled:
             align = getpagesize();
         }
         ptr = qemu_memalign(align, size);
-        if (TRACE_QEMU_VMALLOC_ENABLED) { /* preprocessor macro */
+        if (trace_event_get_state_backends(TRACE_QEMU_VMALLOC)) {
             void *complex;
             /* some complex computations to produce the 'complex' value */
             trace_qemu_vmalloc(size, ptr, complex);
         }
         return ptr;
     }
-
-You can check both if the event has been disabled and is dynamically enabled at
-the same time using the 'trace_event_get_state_backends' routine (see header
-"trace/control.h" for more information).
 
 === "tcg" ===
 

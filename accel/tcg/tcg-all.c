@@ -24,46 +24,148 @@
  */
 
 #include "qemu/osdep.h"
-#include "sysemu/accel.h"
-#include "sysemu/sysemu.h"
+#include "qemu-common.h"
 #include "sysemu/tcg.h"
-#include "qom/object.h"
-#include "cpu.h"
-#include "sysemu/cpus.h"
-#include "qemu/main-loop.h"
+#include "sysemu/cpu-timers.h"
+#include "tcg/tcg.h"
+#include "qapi/error.h"
+#include "qemu/error-report.h"
+#include "hw/boards.h"
+#include "qapi/qapi-builtin-visit.h"
+#include "tcg-cpus.h"
 
-unsigned long tcg_tb_size;
+struct TCGState {
+    AccelState parent_obj;
 
-/* mask must never be zero, except for A20 change call */
-static void tcg_handle_interrupt(CPUState *cpu, int mask)
+    bool mttcg_enabled;
+    unsigned long tb_size;
+};
+typedef struct TCGState TCGState;
+
+#define TYPE_TCG_ACCEL ACCEL_CLASS_NAME("tcg")
+
+DECLARE_INSTANCE_CHECKER(TCGState, TCG_STATE,
+                         TYPE_TCG_ACCEL)
+
+/*
+ * We default to false if we know other options have been enabled
+ * which are currently incompatible with MTTCG. Otherwise when each
+ * guest (target) has been updated to support:
+ *   - atomic instructions
+ *   - memory ordering primitives (barriers)
+ * they can set the appropriate CONFIG flags in ${target}-softmmu.mak
+ *
+ * Once a guest architecture has been converted to the new primitives
+ * there are two remaining limitations to check.
+ *
+ * - The guest can't be oversized (e.g. 64 bit guest on 32 bit host)
+ * - The host must have a stronger memory order than the guest
+ *
+ * It may be possible in future to support strong guests on weak hosts
+ * but that will require tagging all load/stores in a guest with their
+ * implicit memory order requirements which would likely slow things
+ * down a lot.
+ */
+
+static bool check_tcg_memory_orders_compatible(void)
 {
-    int old_mask;
-    g_assert(qemu_mutex_iothread_locked());
+#if defined(TCG_GUEST_DEFAULT_MO) && defined(TCG_TARGET_DEFAULT_MO)
+    return (TCG_GUEST_DEFAULT_MO & ~TCG_TARGET_DEFAULT_MO) == 0;
+#else
+    return false;
+#endif
+}
 
-    old_mask = cpu->interrupt_request;
-    cpu->interrupt_request |= mask;
-
-    /*
-     * If called from iothread context, wake the target cpu in
-     * case its halted.
-     */
-    if (!qemu_cpu_is_self(cpu)) {
-        qemu_cpu_kick(cpu);
+static bool default_mttcg_enabled(void)
+{
+    if (icount_enabled() || TCG_OVERSIZED_GUEST) {
+        return false;
     } else {
-        atomic_set(&cpu_neg(cpu)->icount_decr.u16.high, -1);
-        if (use_icount &&
-            !cpu->can_do_io
-            && (mask & ~old_mask) != 0) {
-            cpu_abort(cpu, "Raised interrupt while not in I/O function");
-        }
+#ifdef TARGET_SUPPORTS_MTTCG
+        return check_tcg_memory_orders_compatible();
+#else
+        return false;
+#endif
     }
 }
 
+static void tcg_accel_instance_init(Object *obj)
+{
+    TCGState *s = TCG_STATE(obj);
+
+    s->mttcg_enabled = default_mttcg_enabled();
+}
+
+bool mttcg_enabled;
+
 static int tcg_init(MachineState *ms)
 {
-    tcg_exec_init(tcg_tb_size * 1024 * 1024);
-    cpu_interrupt_handler = tcg_handle_interrupt;
+    TCGState *s = TCG_STATE(current_accel());
+
+    tcg_exec_init(s->tb_size * 1024 * 1024);
+    mttcg_enabled = s->mttcg_enabled;
+    cpus_register_accel(&tcg_cpus);
+
     return 0;
+}
+
+static char *tcg_get_thread(Object *obj, Error **errp)
+{
+    TCGState *s = TCG_STATE(obj);
+
+    return g_strdup(s->mttcg_enabled ? "multi" : "single");
+}
+
+static void tcg_set_thread(Object *obj, const char *value, Error **errp)
+{
+    TCGState *s = TCG_STATE(obj);
+
+    if (strcmp(value, "multi") == 0) {
+        if (TCG_OVERSIZED_GUEST) {
+            error_setg(errp, "No MTTCG when guest word size > hosts");
+        } else if (icount_enabled()) {
+            error_setg(errp, "No MTTCG when icount is enabled");
+        } else {
+#ifndef TARGET_SUPPORTS_MTTCG
+            warn_report("Guest not yet converted to MTTCG - "
+                        "you may get unexpected results");
+#endif
+            if (!check_tcg_memory_orders_compatible()) {
+                warn_report("Guest expects a stronger memory ordering "
+                            "than the host provides");
+                error_printf("This may cause strange/hard to debug errors\n");
+            }
+            s->mttcg_enabled = true;
+        }
+    } else if (strcmp(value, "single") == 0) {
+        s->mttcg_enabled = false;
+    } else {
+        error_setg(errp, "Invalid 'thread' setting %s", value);
+    }
+}
+
+static void tcg_get_tb_size(Object *obj, Visitor *v,
+                            const char *name, void *opaque,
+                            Error **errp)
+{
+    TCGState *s = TCG_STATE(obj);
+    uint32_t value = s->tb_size;
+
+    visit_type_uint32(v, name, &value, errp);
+}
+
+static void tcg_set_tb_size(Object *obj, Visitor *v,
+                            const char *name, void *opaque,
+                            Error **errp)
+{
+    TCGState *s = TCG_STATE(obj);
+    uint32_t value;
+
+    if (!visit_type_uint32(v, name, &value, errp)) {
+        return;
+    }
+
+    s->tb_size = value;
 }
 
 static void tcg_accel_class_init(ObjectClass *oc, void *data)
@@ -72,14 +174,25 @@ static void tcg_accel_class_init(ObjectClass *oc, void *data)
     ac->name = "tcg";
     ac->init_machine = tcg_init;
     ac->allowed = &tcg_allowed;
-}
 
-#define TYPE_TCG_ACCEL ACCEL_CLASS_NAME("tcg")
+    object_class_property_add_str(oc, "thread",
+                                  tcg_get_thread,
+                                  tcg_set_thread);
+
+    object_class_property_add(oc, "tb-size", "int",
+        tcg_get_tb_size, tcg_set_tb_size,
+        NULL, NULL);
+    object_class_property_set_description(oc, "tb-size",
+        "TCG translation block cache size");
+
+}
 
 static const TypeInfo tcg_accel_type = {
     .name = TYPE_TCG_ACCEL,
     .parent = TYPE_ACCEL,
+    .instance_init = tcg_accel_instance_init,
     .class_init = tcg_accel_class_init,
+    .instance_size = sizeof(TCGState),
 };
 
 static void register_accel_types(void)

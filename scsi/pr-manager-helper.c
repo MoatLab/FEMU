@@ -21,16 +21,15 @@
 #include "qemu/module.h"
 
 #include <scsi/sg.h>
+#include "qom/object.h"
 
 #define PR_MAX_RECONNECT_ATTEMPTS 5
 
 #define TYPE_PR_MANAGER_HELPER "pr-manager-helper"
 
-#define PR_MANAGER_HELPER(obj) \
-     OBJECT_CHECK(PRManagerHelper, (obj), \
-                  TYPE_PR_MANAGER_HELPER)
+OBJECT_DECLARE_SIMPLE_TYPE(PRManagerHelper, PR_MANAGER_HELPER)
 
-typedef struct PRManagerHelper {
+struct PRManagerHelper {
     /* <private> */
     PRManager parent;
 
@@ -38,15 +37,14 @@ typedef struct PRManagerHelper {
 
     QemuMutex lock;
     QIOChannel *ioc;
-} PRManagerHelper;
+};
 
 static void pr_manager_send_status_changed_event(PRManagerHelper *pr_mgr)
 {
-    char *id = object_get_canonical_path_component(OBJECT(pr_mgr));
+    const char *id = object_get_canonical_path_component(OBJECT(pr_mgr));
 
     if (id) {
         qapi_event_send_pr_manager_status_changed(id, !!pr_mgr->ioc);
-        g_free(id);
     }
 }
 
@@ -127,7 +125,7 @@ static int pr_manager_helper_initialize(PRManagerHelper *pr_mgr,
     qio_channel_set_delay(QIO_CHANNEL(sioc), false);
     pr_mgr->ioc = QIO_CHANNEL(sioc);
 
-    /* A simple feature negotation protocol, even though there is
+    /* A simple feature negotiation protocol, even though there is
      * no optional feature right now.
      */
     r = pr_manager_helper_read(pr_mgr, &flags, sizeof(flags), errp);
@@ -307,8 +305,7 @@ static void pr_manager_helper_class_init(ObjectClass *klass,
     PRManagerClass *prmgr_klass = PR_MANAGER_CLASS(klass);
     UserCreatableClass *uc_klass = USER_CREATABLE_CLASS(klass);
 
-    object_class_property_add_str(klass, "path", get_path, set_path,
-                                  &error_abort);
+    object_class_property_add_str(klass, "path", get_path, set_path);
     uc_klass->complete = pr_manager_helper_complete;
     prmgr_klass->run = pr_manager_helper_run;
     prmgr_klass->is_connected = pr_manager_helper_is_connected;

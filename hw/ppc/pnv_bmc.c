@@ -17,8 +17,8 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
-#include "sysemu/sysemu.h"
+#include "qemu-common.h"
+#include "qapi/error.h"
 #include "target/ppc/cpu.h"
 #include "qemu/log.h"
 #include "hw/ipmi/ipmi.h"
@@ -79,13 +79,10 @@ void pnv_dt_bmc_sensors(IPMIBmc *bmc, void *fdt)
     const struct ipmi_sdr_compact *sdr;
     uint16_t nextrec;
 
-    offset = fdt_add_subnode(fdt, 0, "/bmc");
+    offset = fdt_add_subnode(fdt, 0, "bmc");
     _FDT(offset);
 
     _FDT((fdt_setprop_string(fdt, offset, "name", "bmc")));
-    _FDT((fdt_setprop_cell(fdt, offset, "#address-cells", 0x1)));
-    _FDT((fdt_setprop_cell(fdt, offset, "#size-cells", 0x0)));
-
     offset = fdt_add_subnode(fdt, offset, "sensors");
     _FDT(offset);
 
@@ -118,4 +115,191 @@ void pnv_dt_bmc_sensors(IPMIBmc *bmc, void *fdt)
         _FDT((fdt_setprop_cell(fdt, off, "ipmi-sensor-type",
                                sdr->sensor_type)));
     }
+}
+
+/*
+ * HIOMAP protocol handler
+ */
+#define HIOMAP_C_RESET                  1
+#define HIOMAP_C_GET_INFO               2
+#define HIOMAP_C_GET_FLASH_INFO         3
+#define HIOMAP_C_CREATE_READ_WINDOW     4
+#define HIOMAP_C_CLOSE_WINDOW           5
+#define HIOMAP_C_CREATE_WRITE_WINDOW    6
+#define HIOMAP_C_MARK_DIRTY             7
+#define HIOMAP_C_FLUSH                  8
+#define HIOMAP_C_ACK                    9
+#define HIOMAP_C_ERASE                  10
+#define HIOMAP_C_DEVICE_NAME            11
+#define HIOMAP_C_LOCK                   12
+
+#define BLOCK_SHIFT                     12 /* 4K */
+
+static uint16_t bytes_to_blocks(uint32_t bytes)
+{
+    return bytes >> BLOCK_SHIFT;
+}
+
+static uint32_t blocks_to_bytes(uint16_t blocks)
+{
+    return blocks << BLOCK_SHIFT;
+}
+
+static int hiomap_erase(PnvPnor *pnor, uint32_t offset, uint32_t size)
+{
+    MemTxResult result;
+    int i;
+
+    for (i = 0; i < size / 4; i++) {
+        result = memory_region_dispatch_write(&pnor->mmio, offset + i * 4,
+                                              0xFFFFFFFF, MO_32,
+                                              MEMTXATTRS_UNSPECIFIED);
+        if (result != MEMTX_OK) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static void hiomap_cmd(IPMIBmcSim *ibs, uint8_t *cmd, unsigned int cmd_len,
+                       RspBuffer *rsp)
+{
+    PnvPnor *pnor = PNV_PNOR(object_property_get_link(OBJECT(ibs), "pnor",
+                                                      &error_abort));
+    uint32_t pnor_size = pnor->size;
+    uint32_t pnor_addr = PNOR_SPI_OFFSET;
+    bool readonly = false;
+
+    rsp_buffer_push(rsp, cmd[2]);
+    rsp_buffer_push(rsp, cmd[3]);
+
+    switch (cmd[2]) {
+    case HIOMAP_C_MARK_DIRTY:
+    case HIOMAP_C_FLUSH:
+    case HIOMAP_C_ACK:
+        break;
+
+    case HIOMAP_C_ERASE:
+        if (hiomap_erase(pnor, blocks_to_bytes(cmd[5] << 8 | cmd[4]),
+                        blocks_to_bytes(cmd[7] << 8 | cmd[6]))) {
+            rsp_buffer_set_error(rsp, IPMI_CC_UNSPECIFIED);
+        }
+        break;
+
+    case HIOMAP_C_GET_INFO:
+        rsp_buffer_push(rsp, 2);  /* Version 2 */
+        rsp_buffer_push(rsp, BLOCK_SHIFT); /* block size */
+        rsp_buffer_push(rsp, 0);  /* Timeout */
+        rsp_buffer_push(rsp, 0);  /* Timeout */
+        break;
+
+    case HIOMAP_C_GET_FLASH_INFO:
+        rsp_buffer_push(rsp, bytes_to_blocks(pnor_size) & 0xFF);
+        rsp_buffer_push(rsp, bytes_to_blocks(pnor_size) >> 8);
+        rsp_buffer_push(rsp, 0x01);  /* erase size */
+        rsp_buffer_push(rsp, 0x00);  /* erase size */
+        break;
+
+    case HIOMAP_C_CREATE_READ_WINDOW:
+        readonly = true;
+        /* Fall through */
+
+    case HIOMAP_C_CREATE_WRITE_WINDOW:
+        memory_region_set_readonly(&pnor->mmio, readonly);
+        memory_region_set_enabled(&pnor->mmio, true);
+
+        rsp_buffer_push(rsp, bytes_to_blocks(pnor_addr) & 0xFF);
+        rsp_buffer_push(rsp, bytes_to_blocks(pnor_addr) >> 8);
+        rsp_buffer_push(rsp, bytes_to_blocks(pnor_size) & 0xFF);
+        rsp_buffer_push(rsp, bytes_to_blocks(pnor_size) >> 8);
+        rsp_buffer_push(rsp, 0x00); /* offset */
+        rsp_buffer_push(rsp, 0x00); /* offset */
+        break;
+
+    case HIOMAP_C_CLOSE_WINDOW:
+        memory_region_set_enabled(&pnor->mmio, false);
+        break;
+
+    case HIOMAP_C_DEVICE_NAME:
+    case HIOMAP_C_RESET:
+    case HIOMAP_C_LOCK:
+    default:
+        qemu_log_mask(LOG_GUEST_ERROR, "HIOMAP: unknow command %02X\n", cmd[2]);
+        break;
+    }
+}
+
+#define HIOMAP   0x5a
+
+static const IPMICmdHandler hiomap_cmds[] = {
+    [HIOMAP] = { hiomap_cmd, 3 },
+};
+
+static const IPMINetfn hiomap_netfn = {
+    .cmd_nums = ARRAY_SIZE(hiomap_cmds),
+    .cmd_handlers = hiomap_cmds
+};
+
+
+void pnv_bmc_set_pnor(IPMIBmc *bmc, PnvPnor *pnor)
+{
+    object_ref(OBJECT(pnor));
+    object_property_add_const_link(OBJECT(bmc), "pnor", OBJECT(pnor));
+
+    /* Install the HIOMAP protocol handlers to access the PNOR */
+    ipmi_sim_register_netfn(IPMI_BMC_SIMULATOR(bmc), IPMI_NETFN_OEM,
+                            &hiomap_netfn);
+}
+
+/*
+ * Instantiate the machine BMC. PowerNV uses the QEMU internal
+ * simulator but it could also be external.
+ */
+IPMIBmc *pnv_bmc_create(PnvPnor *pnor)
+{
+    Object *obj;
+
+    obj = object_new(TYPE_IPMI_BMC_SIMULATOR);
+    object_ref(OBJECT(pnor));
+    object_property_add_const_link(obj, "pnor", OBJECT(pnor));
+    qdev_realize(DEVICE(obj), NULL, &error_fatal);
+
+    /* Install the HIOMAP protocol handlers to access the PNOR */
+    ipmi_sim_register_netfn(IPMI_BMC_SIMULATOR(obj), IPMI_NETFN_OEM,
+                            &hiomap_netfn);
+
+    return IPMI_BMC(obj);
+}
+
+typedef struct ForeachArgs {
+    const char *name;
+    Object *obj;
+} ForeachArgs;
+
+static int bmc_find(Object *child, void *opaque)
+{
+    ForeachArgs *args = opaque;
+
+    if (object_dynamic_cast(child, args->name)) {
+        if (args->obj) {
+            return 1;
+        }
+        args->obj = child;
+    }
+    return 0;
+}
+
+IPMIBmc *pnv_bmc_find(Error **errp)
+{
+    ForeachArgs args = { TYPE_IPMI_BMC_SIMULATOR, NULL };
+    int ret;
+
+    ret = object_child_foreach_recursive(object_get_root(), bmc_find, &args);
+    if (ret) {
+        error_setg(errp, "machine should have only one BMC device. "
+                   "Use '-nodefaults'");
+        return NULL;
+    }
+
+    return args.obj ? IPMI_BMC(args.obj) : NULL;
 }

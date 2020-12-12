@@ -172,7 +172,7 @@ static QemuOptsList vpc_runtime_opts = {
 
 static QemuOptsList vpc_create_opts;
 
-static uint32_t vpc_checksum(uint8_t* buf, size_t size)
+static uint32_t vpc_checksum(uint8_t *buf, size_t size)
 {
     uint32_t res = 0;
     int i;
@@ -228,16 +228,14 @@ static int vpc_open(BlockDriverState *bs, QDict *options, int flags,
     int ret;
     int64_t bs_size;
 
-    bs->file = bdrv_open_child(NULL, options, "file", bs, &child_file,
-                               false, errp);
+    bs->file = bdrv_open_child(NULL, options, "file", bs, &child_of_bds,
+                               BDRV_CHILD_IMAGE, false, errp);
     if (!bs->file) {
         return -EINVAL;
     }
 
     opts = qemu_opts_create(&vpc_runtime_opts, NULL, 0, &error_abort);
-    qemu_opts_absorb_qdict(opts, options, &local_err);
-    if (local_err) {
-        error_propagate(errp, local_err);
+    if (!qemu_opts_absorb_qdict(opts, options, errp)) {
         ret = -EINVAL;
         goto fail;
     }
@@ -448,9 +446,8 @@ static int vpc_open(BlockDriverState *bs, QDict *options, int flags,
     error_setg(&s->migration_blocker, "The vpc format used by node '%s' "
                "does not support live migration",
                bdrv_get_device_or_node_name(bs));
-    ret = migrate_add_blocker(s->migration_blocker, &local_err);
-    if (local_err) {
-        error_propagate(errp, local_err);
+    ret = migrate_add_blocker(s->migration_blocker, errp);
+    if (ret < 0) {
         error_free(s->migration_blocker);
         goto fail;
     }
@@ -531,7 +528,7 @@ static inline int64_t get_image_offset(BlockDriverState *bs, uint64_t offset,
  *
  * Returns 0 on success and < 0 on error
  */
-static int rewrite_footer(BlockDriverState* bs)
+static int rewrite_footer(BlockDriverState *bs)
 {
     int ret;
     BDRVVPCState *s = bs->opaque;
@@ -551,7 +548,7 @@ static int rewrite_footer(BlockDriverState* bs)
  *
  * Returns the sectors' offset in the image file on success and < 0 on error
  */
-static int64_t alloc_block(BlockDriverState* bs, int64_t offset)
+static int64_t alloc_block(BlockDriverState *bs, int64_t offset)
 {
     BDRVVPCState *s = bs->opaque;
     int64_t bat_offset;
@@ -606,7 +603,6 @@ static int vpc_get_info(BlockDriverState *bs, BlockDriverInfo *bdi)
         bdi->cluster_size = s->block_size;
     }
 
-    bdi->unallocated_blocks_are_zero = true;
     return 0;
 }
 
@@ -737,7 +733,7 @@ static int coroutine_fn vpc_co_block_status(BlockDriverState *bs,
         *pnum = bytes;
         *map = offset;
         *file = bs->file->bs;
-        return BDRV_BLOCK_RAW | BDRV_BLOCK_OFFSET_VALID;
+        return BDRV_BLOCK_DATA | BDRV_BLOCK_OFFSET_VALID | BDRV_BLOCK_RECURSE;
     }
 
     qemu_co_mutex_lock(&s->lock);
@@ -745,7 +741,7 @@ static int coroutine_fn vpc_co_block_status(BlockDriverState *bs,
     image_offset = get_image_offset(bs, offset, false, NULL);
     allocated = (image_offset != -1);
     *pnum = 0;
-    ret = 0;
+    ret = BDRV_BLOCK_ZERO;
 
     do {
         /* All sectors in a block are contiguous (without using the bitmap) */
@@ -785,8 +781,8 @@ static int coroutine_fn vpc_co_block_status(BlockDriverState *bs,
  * the hardware EIDE and ATA-2 limit of 16 heads (max disk size of 127 GB)
  * and instead allow up to 255 heads.
  */
-static int calculate_geometry(int64_t total_sectors, uint16_t* cyls,
-    uint8_t* heads, uint8_t* secs_per_cyl)
+static int calculate_geometry(int64_t total_sectors, uint16_t *cyls,
+    uint8_t *heads, uint8_t *secs_per_cyl)
 {
     uint32_t cyls_times_heads;
 
@@ -835,7 +831,7 @@ static int create_dynamic_disk(BlockBackend *blk, uint8_t *buf,
 
     /* Write the footer (twice: at the beginning and at the end) */
     block_size = 0x200000;
-    num_bat_entries = (total_sectors + block_size / 512) / (block_size / 512);
+    num_bat_entries = DIV_ROUND_UP(total_sectors, block_size / 512);
 
     ret = blk_pwrite(blk, offset, buf, HEADER_SIZE, 0);
     if (ret < 0) {
@@ -885,6 +881,7 @@ static int create_dynamic_disk(BlockBackend *blk, uint8_t *buf,
         goto fail;
     }
 
+    ret = 0;
  fail:
     return ret;
 }
@@ -897,7 +894,7 @@ static int create_fixed_disk(BlockBackend *blk, uint8_t *buf,
     /* Add footer to total size */
     total_size += HEADER_SIZE;
 
-    ret = blk_truncate(blk, total_size, PREALLOC_MODE_OFF, errp);
+    ret = blk_truncate(blk, total_size, false, PREALLOC_MODE_OFF, 0, errp);
     if (ret < 0) {
         return ret;
     }
@@ -908,7 +905,7 @@ static int create_fixed_disk(BlockBackend *blk, uint8_t *buf,
         return ret;
     }
 
-    return ret;
+    return 0;
 }
 
 static int calculate_rounded_image_size(BlockdevCreateOptionsVpc *vpc_opts,
@@ -1011,10 +1008,10 @@ static int coroutine_fn vpc_co_create(BlockdevCreateOptions *opts,
         return -EIO;
     }
 
-    blk = blk_new(bdrv_get_aio_context(bs),
-                  BLK_PERM_WRITE | BLK_PERM_RESIZE, BLK_PERM_ALL);
-    ret = blk_insert_bs(blk, bs, errp);
-    if (ret < 0) {
+    blk = blk_new_with_bs(bs, BLK_PERM_WRITE | BLK_PERM_RESIZE, BLK_PERM_ALL,
+                          errp);
+    if (!blk) {
+        ret = -EPERM;
         goto out;
     }
     blk_set_allow_write_beyond_eof(blk, true);
@@ -1088,14 +1085,15 @@ out:
     return ret;
 }
 
-static int coroutine_fn vpc_co_create_opts(const char *filename,
-                                           QemuOpts *opts, Error **errp)
+static int coroutine_fn vpc_co_create_opts(BlockDriver *drv,
+                                           const char *filename,
+                                           QemuOpts *opts,
+                                           Error **errp)
 {
     BlockdevCreateOptions *create_options = NULL;
     QDict *qdict;
     Visitor *v;
     BlockDriverState *bs = NULL;
-    Error *local_err = NULL;
     int ret;
 
     static const QDictRenames opt_renames[] = {
@@ -1112,9 +1110,8 @@ static int coroutine_fn vpc_co_create_opts(const char *filename,
     }
 
     /* Create and open the file (protocol layer) */
-    ret = bdrv_create_file(filename, opts, &local_err);
+    ret = bdrv_create_file(filename, opts, errp);
     if (ret < 0) {
-        error_propagate(errp, local_err);
         goto fail;
     }
 
@@ -1135,11 +1132,9 @@ static int coroutine_fn vpc_co_create_opts(const char *filename,
         goto fail;
     }
 
-    visit_type_BlockdevCreateOptions(v, NULL, &create_options, &local_err);
+    visit_type_BlockdevCreateOptions(v, NULL, &create_options, errp);
     visit_free(v);
-
-    if (local_err) {
-        error_propagate(errp, local_err);
+    if (!create_options) {
         ret = -EINVAL;
         goto fail;
     }
@@ -1237,7 +1232,7 @@ static BlockDriver bdrv_vpc = {
     .bdrv_open              = vpc_open,
     .bdrv_close             = vpc_close,
     .bdrv_reopen_prepare    = vpc_reopen_prepare,
-    .bdrv_child_perm        = bdrv_format_default_perms,
+    .bdrv_child_perm        = bdrv_default_perms,
     .bdrv_co_create         = vpc_co_create,
     .bdrv_co_create_opts    = vpc_co_create_opts,
 
@@ -1247,6 +1242,7 @@ static BlockDriver bdrv_vpc = {
 
     .bdrv_get_info          = vpc_get_info,
 
+    .is_format              = true,
     .create_opts            = &vpc_create_opts,
     .bdrv_has_zero_init     = vpc_has_zero_init,
     .strong_runtime_opts    = vpc_strong_runtime_opts,

@@ -29,7 +29,6 @@
 #include "qapi/error.h"
 #include "qemu-common.h"
 #include "cpu.h"
-#include "hw/hw.h"
 #include "trace.h"
 #include "sysemu/kvm.h"
 #include "hw/ppc/spapr.h"
@@ -166,8 +165,15 @@ void icp_kvm_realize(DeviceState *dev, Error **errp)
 
     ret = kvm_vcpu_enable_cap(cs, KVM_CAP_IRQ_XICS, 0, kernel_xics_fd, vcpu_id);
     if (ret < 0) {
-        error_setg(errp, "Unable to connect CPU%ld to kernel XICS: %s", vcpu_id,
-                   strerror(errno));
+        Error *local_err = NULL;
+
+        error_setg(&local_err, "Unable to connect CPU%ld to kernel XICS: %s",
+                   vcpu_id, strerror(errno));
+        if (errno == ENOSPC) {
+            error_append_hint(&local_err, "Try -smp maxcpus=N with N < %u\n",
+                              MACHINE(qdev_get_machine())->smp.max_cpus);
+        }
+        error_propagate(errp, local_err);
         return;
     }
     enabled_icp = g_malloc(sizeof(*enabled_icp));
@@ -190,6 +196,10 @@ void ics_get_kvm_state(ICSState *ics)
 
     for (i = 0; i < ics->nr_irqs; i++) {
         ICSIRQState *irq = &ics->irqs[i];
+
+        if (ics_irq_free(ics, i)) {
+            continue;
+        }
 
         kvm_device_access(kernel_xics_fd, KVM_DEV_XICS_GRP_SOURCES,
                           i + ics->offset, &state, false, &error_fatal);
@@ -299,12 +309,14 @@ int ics_set_kvm_state(ICSState *ics, Error **errp)
     }
 
     for (i = 0; i < ics->nr_irqs; i++) {
-        Error *local_err = NULL;
         int ret;
 
-        ret = ics_set_kvm_state_one(ics, i, &local_err);
+        if (ics_irq_free(ics, i)) {
+            continue;
+        }
+
+        ret = ics_set_kvm_state_one(ics, i, errp);
         if (ret < 0) {
-            error_propagate(errp, local_err);
             return ret;
         }
     }
@@ -335,8 +347,10 @@ void ics_kvm_set_irq(ICSState *ics, int srcno, int val)
     }
 }
 
-int xics_kvm_connect(SpaprMachineState *spapr, Error **errp)
+int xics_kvm_connect(SpaprInterruptController *intc, uint32_t nr_servers,
+                     Error **errp)
 {
+    ICSState *ics = ICS_SPAPR(intc);
     int rc;
     CPUState *cs;
     Error *local_err = NULL;
@@ -390,6 +404,16 @@ int xics_kvm_connect(SpaprMachineState *spapr, Error **errp)
         goto fail;
     }
 
+    /* Tell KVM about the # of VCPUs we may have (POWER9 and newer only) */
+    if (kvm_device_check_attr(rc, KVM_DEV_XICS_GRP_CTRL,
+                              KVM_DEV_XICS_NR_SERVERS)) {
+        if (kvm_device_access(rc, KVM_DEV_XICS_GRP_CTRL,
+                              KVM_DEV_XICS_NR_SERVERS, &nr_servers, true,
+                              &local_err)) {
+            goto fail;
+        }
+    }
+
     kernel_xics_fd = rc;
     kvm_kernel_irqchip = true;
     kvm_msi_via_irqfd_allowed = true;
@@ -406,7 +430,7 @@ int xics_kvm_connect(SpaprMachineState *spapr, Error **errp)
     }
 
     /* Update the KVM sources */
-    ics_set_kvm_state(spapr->ics, &local_err);
+    ics_set_kvm_state(ics, &local_err);
     if (local_err) {
         goto fail;
     }
@@ -424,11 +448,11 @@ int xics_kvm_connect(SpaprMachineState *spapr, Error **errp)
 
 fail:
     error_propagate(errp, local_err);
-    xics_kvm_disconnect(spapr, NULL);
+    xics_kvm_disconnect(intc);
     return -1;
 }
 
-void xics_kvm_disconnect(SpaprMachineState *spapr, Error **errp)
+void xics_kvm_disconnect(SpaprInterruptController *intc)
 {
     /*
      * Only on P9 using the XICS-on XIVE KVM device:

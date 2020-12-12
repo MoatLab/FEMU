@@ -14,6 +14,8 @@
 #ifndef MIGRATION_REGISTER_H
 #define MIGRATION_REGISTER_H
 
+#include "hw/vmstate-if.h"
+
 typedef struct SaveVMHandlers {
     /* This runs inside the iothread lock.  */
     SaveStateHandler *save_state;
@@ -68,13 +70,12 @@ typedef struct SaveVMHandlers {
     int (*resume_prepare)(MigrationState *s, void *opaque);
 } SaveVMHandlers;
 
-int register_savevm_live(DeviceState *dev,
-                         const char *idstr,
-                         int instance_id,
+int register_savevm_live(const char *idstr,
+                         uint32_t instance_id,
                          int version_id,
                          const SaveVMHandlers *ops,
                          void *opaque);
 
-void unregister_savevm(DeviceState *dev, const char *idstr, void *opaque);
+void unregister_savevm(VMStateIf *obj, const char *idstr, void *opaque);
 
 #endif

@@ -21,6 +21,7 @@
 #include "qemu/osdep.h"
 #include "cpu.h"
 #include "internal.h"
+#include "tcg_s390x.h"
 #include "exec/exec-all.h"
 #include "exec/helper-proto.h"
 #include "qemu/host-utils.h"
@@ -416,6 +417,32 @@ static uint32_t cc_calc_vc(uint64_t low, uint64_t high)
     }
 }
 
+static uint32_t cc_calc_muls_32(int64_t res)
+{
+    const int64_t tmp = res >> 31;
+
+    if (!res) {
+        return 0;
+    } else if (tmp && tmp != -1) {
+        return 3;
+    } else if (res < 0) {
+        return 1;
+    }
+    return 2;
+}
+
+static uint64_t cc_calc_muls_64(int64_t res_high, uint64_t res_low)
+{
+    if (!res_high && !res_low) {
+        return 0;
+    } else if (res_high + (res_low >> 63) != 0) {
+        return 3;
+    } else if (res_high < 0) {
+        return 1;
+    }
+    return 2;
+}
+
 static uint32_t do_calc_cc(CPUS390XState *env, uint32_t cc_op,
                                   uint64_t src, uint64_t dst, uint64_t vr)
 {
@@ -483,6 +510,9 @@ static uint32_t do_calc_cc(CPUS390XState *env, uint32_t cc_op,
     case CC_OP_COMP_64:
         r =  cc_calc_comp_64(dst);
         break;
+    case CC_OP_MULS_64:
+        r = cc_calc_muls_64(src, dst);
+        break;
 
     case CC_OP_ADD_32:
         r =  cc_calc_add_32(src, dst, vr);
@@ -510,6 +540,9 @@ static uint32_t do_calc_cc(CPUS390XState *env, uint32_t cc_op,
         break;
     case CC_OP_COMP_32:
         r =  cc_calc_comp_32(dst);
+        break;
+    case CC_OP_MULS_32:
+        r = cc_calc_muls_32(dst);
         break;
 
     case CC_OP_ICM:
@@ -588,8 +621,7 @@ void HELPER(sacf)(CPUS390XState *env, uint64_t a1)
         break;
     default:
         HELPER_LOG("unknown sacf mode: %" PRIx64 "\n", a1);
-        s390_program_interrupt(env, PGM_SPECIFICATION, 2, GETPC());
-        break;
+        tcg_s390_program_interrupt(env, PGM_SPECIFICATION, GETPC());
     }
 }
 #endif

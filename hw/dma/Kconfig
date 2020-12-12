@@ -16,6 +16,10 @@ config I8257
 
 config ZYNQ_DEVCFG
     bool
+    select REGISTER
 
 config STP2000
+    bool
+
+config SIFIVE_PDMA
     bool

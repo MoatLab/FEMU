@@ -29,9 +29,14 @@
 
 #include "qemu/osdep.h"
 #include "hw/sysbus.h"
+#include "migration/vmstate.h"
 #include "qemu/module.h"
 
 #include "hw/arm/exynos4210.h"
+#include "hw/hw.h"
+#include "hw/irq.h"
+#include "hw/qdev-properties.h"
+#include "qom/object.h"
 
 //#define DEBUG_COMBINER
 
@@ -59,10 +64,9 @@ typedef struct CombinerGroupState {
 } CombinerGroupState;
 
 #define TYPE_EXYNOS4210_COMBINER "exynos4210.combiner"
-#define EXYNOS4210_COMBINER(obj) \
-    OBJECT_CHECK(Exynos4210CombinerState, (obj), TYPE_EXYNOS4210_COMBINER)
+OBJECT_DECLARE_SIMPLE_TYPE(Exynos4210CombinerState, EXYNOS4210_COMBINER)
 
-typedef struct Exynos4210CombinerState {
+struct Exynos4210CombinerState {
     SysBusDevice parent_obj;
 
     MemoryRegion iomem;
@@ -73,7 +77,7 @@ typedef struct Exynos4210CombinerState {
     uint32_t external;          /* 1 means that this combiner is external */
 
     qemu_irq output_irq[IIC_NGRP];
-} Exynos4210CombinerState;
+};
 
 static const VMStateDescription vmstate_exynos4210_combiner_group_state = {
     .name = "exynos4210.combiner.groupstate",
@@ -225,7 +229,6 @@ exynos4210_combiner_read(void *opaque, hwaddr offset, unsigned size)
                     TARGET_FMT_plx "offset\n", offset);
         }
         val = s->reg_set[offset >> 2];
-        return 0;
     }
     return val;
 }
@@ -438,7 +441,7 @@ static void exynos4210_combiner_class_init(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->reset = exynos4210_combiner_reset;
-    dc->props = exynos4210_combiner_properties;
+    device_class_set_props(dc, exynos4210_combiner_properties);
     dc->vmsd = &vmstate_exynos4210_combiner;
 }
 

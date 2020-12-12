@@ -1,6 +1,7 @@
 #! /bin/sh
 
-. ./tests.sh
+SRCDIR=`dirname "$0"`
+. "$SRCDIR/testutils.sh"
 
 for x; do
     shift

@@ -1,7 +1,6 @@
 #ifndef VHOST_H
 #define VHOST_H
 
-#include "hw/hw.h"
 #include "hw/virtio/vhost-backend.h"
 #include "hw/virtio/virtio.h"
 #include "exec/memory.h"
@@ -80,6 +79,7 @@ struct vhost_dev {
     uint64_t backend_features;
     uint64_t protocol_features;
     uint64_t max_queues;
+    uint64_t backend_cap;
     bool started;
     bool log_enabled;
     uint64_t log_size;
@@ -91,6 +91,13 @@ struct vhost_dev {
     QLIST_HEAD(, vhost_iommu) iommu_list;
     IOMMUNotifier n;
     const VhostDevConfigOps *config_ops;
+};
+
+struct vhost_net {
+    struct vhost_dev dev;
+    struct vhost_virtqueue vqs[2];
+    int backend;
+    NetClientState *nc;
 };
 
 int vhost_dev_init(struct vhost_dev *hdev, void *opaque,
@@ -134,6 +141,7 @@ void vhost_dev_reset_inflight(struct vhost_inflight *inflight);
 void vhost_dev_free_inflight(struct vhost_inflight *inflight);
 void vhost_dev_save_inflight(struct vhost_inflight *inflight, QEMUFile *f);
 int vhost_dev_load_inflight(struct vhost_inflight *inflight, QEMUFile *f);
+int vhost_dev_prepare_inflight(struct vhost_dev *hdev, VirtIODevice *vdev);
 int vhost_dev_set_inflight(struct vhost_dev *dev,
                            struct vhost_inflight *inflight);
 int vhost_dev_get_inflight(struct vhost_dev *dev, uint16_t queue_size,

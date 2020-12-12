@@ -21,21 +21,17 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+
 #include "qemu/osdep.h"
 #include "qemu/log.h"
-#include "hw/hw.h"
 #include "hw/input/ps2.h"
+#include "migration/vmstate.h"
 #include "ui/console.h"
 #include "ui/input.h"
-#include "sysemu/sysemu.h"
+#include "sysemu/reset.h"
+#include "sysemu/runstate.h"
 
 #include "trace.h"
-
-/* debug PC keyboard */
-//#define DEBUG_KBD
-
-/* debug PC keyboard : only mouse */
-//#define DEBUG_MOUSE
 
 /* Keyboard Commands */
 #define KBD_CMD_SET_LEDS	0xED	/* Set keyboard leds */
@@ -47,6 +43,8 @@
 #define KBD_CMD_RESET_DISABLE	0xF5	/* reset and disable scanning */
 #define KBD_CMD_RESET_ENABLE   	0xF6    /* reset and enable scanning */
 #define KBD_CMD_RESET		0xFF	/* Reset */
+#define KBD_CMD_SET_MAKE_BREAK  0xFC    /* Set Make and Break mode */
+#define KBD_CMD_SET_TYPEMATIC   0xFA    /* Set Typematic Make and Break mode */
 
 /* Keyboard Replies */
 #define KBD_REPLY_POR		0xAA	/* Power on reset */
@@ -186,6 +184,11 @@ static void ps2_reset_queue(PS2State *s)
     q->rptr = 0;
     q->wptr = 0;
     q->count = 0;
+}
+
+int ps2_queue_empty(PS2State *s)
+{
+    return s->queue.count == 0;
 }
 
 void ps2_queue_noirq(PS2State *s, int b)
@@ -571,6 +574,7 @@ void ps2_write_keyboard(void *opaque, int val)
         case KBD_CMD_SCANCODE:
         case KBD_CMD_SET_LEDS:
         case KBD_CMD_SET_RATE:
+        case KBD_CMD_SET_MAKE_BREAK:
             s->common.write_cmd = val;
             ps2_queue(&s->common, KBD_REPLY_ACK);
             break;
@@ -590,10 +594,17 @@ void ps2_write_keyboard(void *opaque, int val)
                 KBD_REPLY_ACK,
                 KBD_REPLY_POR);
             break;
+        case KBD_CMD_SET_TYPEMATIC:
+            ps2_queue(&s->common, KBD_REPLY_ACK);
+            break;
         default:
             ps2_queue(&s->common, KBD_REPLY_RESEND);
             break;
         }
+        break;
+    case KBD_CMD_SET_MAKE_BREAK:
+        ps2_queue(&s->common, KBD_REPLY_ACK);
+        s->common.write_cmd = -1;
         break;
     case KBD_CMD_SCANCODE:
         if (val == 0) {
@@ -773,9 +784,6 @@ void ps2_write_mouse(void *opaque, int val)
     PS2MouseState *s = (PS2MouseState *)opaque;
 
     trace_ps2_write_mouse(opaque, val);
-#ifdef DEBUG_MOUSE
-    printf("kbd: write mouse 0x%02x\n", val);
-#endif
     switch(s->common.write_cmd) {
     default:
     case -1:

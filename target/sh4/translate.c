@@ -23,7 +23,7 @@
 #include "cpu.h"
 #include "disas/disas.h"
 #include "exec/exec-all.h"
-#include "tcg-op.h"
+#include "tcg/tcg-op.h"
 #include "exec/cpu_ldst.h"
 #include "exec/helper-proto.h"
 #include "exec/helper-gen.h"
@@ -1542,7 +1542,6 @@ static void _decode_opc(DisasContext * ctx)
         tcg_gen_qemu_ld_i32(REG(0), REG(B11_8), ctx->memidx,
                             MO_TEUL | MO_UNALN);
         return;
-        break;
     case 0x40e9:                /* movua.l @Rm+,R0 */
         CHECK_SH4A
         /* Load non-boundary-aligned data */
@@ -1550,7 +1549,6 @@ static void _decode_opc(DisasContext * ctx)
                             MO_TEUL | MO_UNALN);
         tcg_gen_addi_i32(REG(B11_8), REG(B11_8), 4);
         return;
-        break;
     case 0x0029:		/* movt Rn */
         tcg_gen_mov_i32(REG(B11_8), cpu_sr_t);
 	return;
@@ -1638,7 +1636,6 @@ static void _decode_opc(DisasContext * ctx)
         CHECK_SH4A
         tcg_gen_mb(TCG_MO_ALL | TCG_BAR_SC);
         return;
-        break;
     case 0x4024:		/* rotcl Rn */
 	{
 	    TCGv tmp = tcg_temp_new();
@@ -1917,7 +1914,7 @@ static void decode_gusa(DisasContext *ctx, CPUSH4State *env)
 
     /* Read all of the insns for the region.  */
     for (i = 0; i < max_insns; ++i) {
-        insns[i] = cpu_lduw_code(env, pc + i * 2);
+        insns[i] = translator_lduw(env, pc + i * 2);
     }
 
     ld_adr = ld_dst = ld_mop = -1;
@@ -1962,9 +1959,11 @@ static void decode_gusa(DisasContext *ctx, CPUSH4State *env)
     NEXT_INSN;
     switch (ctx->opcode & 0xf00f) {
     case 0x6003: /* mov Rm,Rn */
-        /* Here we want to recognize ld_dst being saved for later consumtion,
-           or for another input register being copied so that ld_dst need not
-           be clobbered during the operation.  */
+        /*
+         * Here we want to recognize ld_dst being saved for later consumption,
+         * or for another input register being copied so that ld_dst need not
+         * be clobbered during the operation.
+         */
         op_dst = B11_8;
         mv_src = B7_4;
         if (op_dst == ld_dst) {
@@ -2332,7 +2331,7 @@ static void sh4_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
     }
 #endif
 
-    ctx->opcode = cpu_lduw_code(env, ctx->base.pc_next);
+    ctx->opcode = translator_lduw(env, ctx->base.pc_next);
     decode_opc(ctx);
     ctx->base.pc_next += 2;
 }

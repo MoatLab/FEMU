@@ -41,13 +41,12 @@ struct hax_state {
 };
 
 #define HAX_MAX_VCPU 0x10
-#define MAX_VM_ID 0x40
-#define MAX_VCPU_ID 0x40
 
 struct hax_vm {
     hax_fd fd;
     int id;
-    struct hax_vcpu_state *vcpus[HAX_MAX_VCPU];
+    int numvcpus;
+    struct hax_vcpu_state **vcpus;
 };
 
 #ifdef NEED_CPU_H
@@ -58,9 +57,11 @@ int valid_hax_tunnel_size(uint16_t size);
 /* Host specific functions */
 int hax_mod_version(struct hax_state *hax, struct hax_module_version *version);
 int hax_inject_interrupt(CPUArchState *env, int vector);
-struct hax_vm *hax_vm_create(struct hax_state *hax);
+struct hax_vm *hax_vm_create(struct hax_state *hax, int max_cpus);
 int hax_vcpu_run(struct hax_vcpu_state *vcpu);
 int hax_vcpu_create(int id);
+void hax_kick_vcpu_thread(CPUState *cpu);
+
 int hax_sync_vcpu_state(CPUArchState *env, struct vcpu_state_t *state,
                         int set);
 int hax_sync_msr(CPUArchState *env, struct hax_msr_data *msrs, int set);

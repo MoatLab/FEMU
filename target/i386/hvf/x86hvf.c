@@ -6,7 +6,7 @@
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -31,6 +31,8 @@
 
 #include <Hypervisor/hv.h>
 #include <Hypervisor/hv_vmx.h>
+
+#include "hvf-cpus.h"
 
 void hvf_set_segment(struct CPUState *cpu, struct vmx_segment *vmx_seg,
                      SegmentCache *qseg, bool is_tr)
@@ -152,10 +154,6 @@ void hvf_put_msrs(CPUState *cpu_state)
 
     hv_vcpu_write_msr(cpu_state->hvf_fd, MSR_GSBASE, env->segs[R_GS].base);
     hv_vcpu_write_msr(cpu_state->hvf_fd, MSR_FSBASE, env->segs[R_FS].base);
-
-    /* if (!osx_is_sierra())
-         wvmcs(cpu_state->hvf_fd, VMCS_TSC_OFFSET, env->tsc - rdtscp());*/
-    hv_vm_sync_tsc(env->tsc);
 }
 
 
@@ -349,8 +347,6 @@ void vmx_clear_int_window_exiting(CPUState *cpu)
              ~VMCS_PRI_PROC_BASED_CTLS_INT_WINDOW_EXITING);
 }
 
-#define NMI_VEC 2
-
 bool hvf_inject_interrupts(CPUState *cpu_state)
 {
     X86CPU *x86cpu = X86_CPU(cpu_state);
@@ -361,7 +357,11 @@ bool hvf_inject_interrupts(CPUState *cpu_state)
     bool have_event = true;
     if (env->interrupt_injected != -1) {
         vector = env->interrupt_injected;
-        intr_type = VMCS_INTR_T_SWINTR;
+        if (env->ins_len) {
+            intr_type = VMCS_INTR_T_SWINTR;
+        } else {
+            intr_type = VMCS_INTR_T_HWINTR;
+        }
     } else if (env->exception_nr != -1) {
         vector = env->exception_nr;
         if (vector == EXCP03_INT3 || vector == EXCP04_INTO) {
@@ -370,7 +370,7 @@ bool hvf_inject_interrupts(CPUState *cpu_state)
             intr_type = VMCS_INTR_T_HWEXCEPTION;
         }
     } else if (env->nmi_injected) {
-        vector = NMI_VEC;
+        vector = EXCP02_NMI;
         intr_type = VMCS_INTR_T_NMI;
     } else {
         have_event = false;
@@ -394,6 +394,8 @@ bool hvf_inject_interrupts(CPUState *cpu_state)
             if (env->has_error_code) {
                 wvmcs(cpu_state->hvf_fd, VMCS_ENTRY_EXCEPTION_ERROR,
                       env->error_code);
+                /* Indicate that VMCS_ENTRY_EXCEPTION_ERROR is valid */
+                info |= VMCS_INTR_DEL_ERRCODE;
             }
             /*printf("reinject  %lx err %d\n", info, err);*/
             wvmcs(cpu_state->hvf_fd, VMCS_ENTRY_INTR_INFO, info);
@@ -403,7 +405,7 @@ bool hvf_inject_interrupts(CPUState *cpu_state)
     if (cpu_state->interrupt_request & CPU_INTERRUPT_NMI) {
         if (!(env->hflags2 & HF2_NMI_MASK) && !(info & VMCS_INTR_VALID)) {
             cpu_state->interrupt_request &= ~CPU_INTERRUPT_NMI;
-            info = VMCS_INTR_VALID | VMCS_INTR_T_NMI | NMI_VEC;
+            info = VMCS_INTR_VALID | VMCS_INTR_T_NMI | EXCP02_NMI;
             wvmcs(cpu_state->hvf_fd, VMCS_ENTRY_INTR_INFO, info);
         } else {
             vmx_set_nmi_window_exiting(cpu_state);
@@ -412,7 +414,7 @@ bool hvf_inject_interrupts(CPUState *cpu_state)
 
     if (!(env->hflags & HF_INHIBIT_IRQ_MASK) &&
         (cpu_state->interrupt_request & CPU_INTERRUPT_HARD) &&
-        (EFLAGS(env) & IF_MASK) && !(info & VMCS_INTR_VALID)) {
+        (env->eflags & IF_MASK) && !(info & VMCS_INTR_VALID)) {
         int line = cpu_get_pic_interrupt(&x86cpu->env);
         cpu_state->interrupt_request &= ~CPU_INTERRUPT_HARD;
         if (line >= 0) {
@@ -432,7 +434,7 @@ int hvf_process_events(CPUState *cpu_state)
     X86CPU *cpu = X86_CPU(cpu_state);
     CPUX86State *env = &cpu->env;
 
-    EFLAGS(env) = rreg(cpu_state->hvf_fd, HV_X86_RFLAGS);
+    env->eflags = rreg(cpu_state->hvf_fd, HV_X86_RFLAGS);
 
     if (cpu_state->interrupt_request & CPU_INTERRUPT_INIT) {
         hvf_cpu_synchronize_state(cpu_state);
@@ -444,7 +446,7 @@ int hvf_process_events(CPUState *cpu_state)
         apic_poll_irq(cpu->apic_state);
     }
     if (((cpu_state->interrupt_request & CPU_INTERRUPT_HARD) &&
-        (EFLAGS(env) & IF_MASK)) ||
+        (env->eflags & IF_MASK)) ||
         (cpu_state->interrupt_request & CPU_INTERRUPT_NMI)) {
         cpu_state->halted = 0;
     }

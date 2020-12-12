@@ -13,9 +13,12 @@
 #include "qemu/osdep.h"
 #include "sysemu/blockdev.h"
 #include "hw/ssi/ssi.h"
+#include "migration/vmstate.h"
+#include "hw/qdev-properties.h"
 #include "hw/sd/sd.h"
 #include "qapi/error.h"
 #include "qemu/module.h"
+#include "qom/object.h"
 
 //#define DEBUG_SSI_SD 1
 
@@ -38,7 +41,7 @@ typedef enum {
     SSI_SD_DATA_READ,
 } ssi_sd_mode;
 
-typedef struct {
+struct ssi_sd_state {
     SSISlave ssidev;
     uint32_t mode;
     int cmd;
@@ -48,10 +51,10 @@ typedef struct {
     int32_t response_pos;
     int32_t stopping;
     SDBus sdbus;
-} ssi_sd_state;
+};
 
 #define TYPE_SSI_SD "ssi-sd"
-#define SSI_SD(obj) OBJECT_CHECK(ssi_sd_state, (obj), TYPE_SSI_SD)
+OBJECT_DECLARE_SIMPLE_TYPE(ssi_sd_state, SSI_SD)
 
 /* State word bits.  */
 #define SSI_SDR_LOCKED          0x0001
@@ -72,7 +75,7 @@ typedef struct {
 
 static uint32_t ssi_sd_transfer(SSISlave *dev, uint32_t val)
 {
-    ssi_sd_state *s = FROM_SSI_SLAVE(ssi_sd_state, dev);
+    ssi_sd_state *s = SSI_SD(dev);
 
     /* Special case: allow CMD12 (STOP TRANSMISSION) while reading data.  */
     if (s->mode == SSI_SD_DATA_READ && val == 0x4d) {
@@ -188,7 +191,7 @@ static uint32_t ssi_sd_transfer(SSISlave *dev, uint32_t val)
         s->mode = SSI_SD_DATA_READ;
         return 0xfe;
     case SSI_SD_DATA_READ:
-        val = sdbus_read_data(&s->sdbus);
+        val = sdbus_read_byte(&s->sdbus);
         if (!sdbus_data_ready(&s->sdbus)) {
             DPRINTF("Data read end\n");
             s->mode = SSI_SD_CMD;
@@ -239,10 +242,10 @@ static const VMStateDescription vmstate_ssi_sd = {
 
 static void ssi_sd_realize(SSISlave *d, Error **errp)
 {
-    ssi_sd_state *s = FROM_SSI_SLAVE(ssi_sd_state, d);
+    ERRP_GUARD();
+    ssi_sd_state *s = SSI_SD(d);
     DeviceState *carddev;
     DriveInfo *dinfo;
-    Error *err = NULL;
 
     qbus_create_inplace(&s->sdbus, sizeof(s->sdbus), TYPE_SD_BUS,
                         DEVICE(d), "sd-bus");
@@ -250,16 +253,26 @@ static void ssi_sd_realize(SSISlave *d, Error **errp)
     /* Create and plug in the sd card */
     /* FIXME use a qdev drive property instead of drive_get_next() */
     dinfo = drive_get_next(IF_SD);
-    carddev = qdev_create(BUS(&s->sdbus), TYPE_SD_CARD);
+    carddev = qdev_new(TYPE_SD_CARD);
     if (dinfo) {
-        qdev_prop_set_drive(carddev, "drive", blk_by_legacy_dinfo(dinfo), &err);
+        if (!qdev_prop_set_drive_err(carddev, "drive",
+                                     blk_by_legacy_dinfo(dinfo), errp)) {
+            goto fail;
+        }
     }
-    object_property_set_bool(OBJECT(carddev), true, "spi", &err);
-    object_property_set_bool(OBJECT(carddev), true, "realized", &err);
-    if (err) {
-        error_setg(errp, "failed to init SD card: %s", error_get_pretty(err));
-        return;
+
+    if (!object_property_set_bool(OBJECT(carddev), "spi", true, errp)) {
+        goto fail;
     }
+
+    if (!qdev_realize_and_unref(carddev, BUS(&s->sdbus), errp)) {
+        goto fail;
+    }
+
+    return;
+
+fail:
+    error_prepend(errp, "failed to init SD card: ");
 }
 
 static void ssi_sd_reset(DeviceState *dev)

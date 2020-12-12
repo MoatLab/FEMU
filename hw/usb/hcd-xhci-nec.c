@@ -8,7 +8,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -20,31 +20,50 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
 #include "hw/usb.h"
 #include "qemu/module.h"
 #include "hw/pci/pci.h"
+#include "hw/qdev-properties.h"
 
-#include "hcd-xhci.h"
+#include "hcd-xhci-pci.h"
+
+typedef struct XHCINecState {
+    /*< private >*/
+    XHCIPciState parent_obj;
+    /*< public >*/
+    uint32_t flags;
+    uint32_t intrs;
+    uint32_t slots;
+} XHCINecState;
 
 static Property nec_xhci_properties[] = {
-    DEFINE_PROP_ON_OFF_AUTO("msi", XHCIState, msi, ON_OFF_AUTO_AUTO),
-    DEFINE_PROP_ON_OFF_AUTO("msix", XHCIState, msix, ON_OFF_AUTO_AUTO),
-    DEFINE_PROP_BIT("superspeed-ports-first",
-                    XHCIState, flags, XHCI_FLAG_SS_FIRST, true),
-    DEFINE_PROP_BIT("force-pcie-endcap", XHCIState, flags,
+    DEFINE_PROP_ON_OFF_AUTO("msi", XHCIPciState, msi, ON_OFF_AUTO_AUTO),
+    DEFINE_PROP_ON_OFF_AUTO("msix", XHCIPciState, msix, ON_OFF_AUTO_AUTO),
+    DEFINE_PROP_BIT("superspeed-ports-first", XHCINecState, flags,
+                    XHCI_FLAG_SS_FIRST, true),
+    DEFINE_PROP_BIT("force-pcie-endcap", XHCINecState, flags,
                     XHCI_FLAG_FORCE_PCIE_ENDCAP, false),
-    DEFINE_PROP_UINT32("intrs", XHCIState, numintrs, MAXINTRS),
-    DEFINE_PROP_UINT32("slots", XHCIState, numslots, MAXSLOTS),
+    DEFINE_PROP_UINT32("intrs", XHCINecState, intrs, XHCI_MAXINTRS),
+    DEFINE_PROP_UINT32("slots", XHCINecState, slots, XHCI_MAXSLOTS),
     DEFINE_PROP_END_OF_LIST(),
 };
+
+static void nec_xhci_instance_init(Object *obj)
+{
+    XHCIPciState *pci = XHCI_PCI(obj);
+    XHCINecState *nec = container_of(pci, XHCINecState, parent_obj);
+
+    pci->xhci.flags    = nec->flags;
+    pci->xhci.numintrs = nec->intrs;
+    pci->xhci.numslots = nec->slots;
+}
 
 static void nec_xhci_class_init(ObjectClass *klass, void *data)
 {
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    dc->props       = nec_xhci_properties;
+    device_class_set_props(dc, nec_xhci_properties);
     k->vendor_id    = PCI_VENDOR_ID_NEC;
     k->device_id    = PCI_DEVICE_ID_NEC_UPD720200;
     k->revision     = 0x03;
@@ -52,7 +71,9 @@ static void nec_xhci_class_init(ObjectClass *klass, void *data)
 
 static const TypeInfo nec_xhci_info = {
     .name          = TYPE_NEC_XHCI,
-    .parent        = TYPE_XHCI,
+    .parent        = TYPE_XHCI_PCI,
+    .instance_size = sizeof(XHCINecState),
+    .instance_init = nec_xhci_instance_init,
     .class_init    = nec_xhci_class_init,
 };
 

@@ -98,7 +98,8 @@ typedef struct ArpTable {
     int next_victim;
 } ArpTable;
 
-void arp_table_add(Slirp *slirp, uint32_t ip_addr, uint8_t ethaddr[ETH_ALEN]);
+void arp_table_add(Slirp *slirp, uint32_t ip_addr,
+                   const uint8_t ethaddr[ETH_ALEN]);
 
 bool arp_table_search(Slirp *slirp, uint32_t ip_addr,
                       uint8_t out_ethaddr[ETH_ALEN]);
@@ -143,6 +144,11 @@ struct Slirp {
 
     int restricted;
     struct gfwd_list *guestfwd_list;
+
+    int if_mtu;
+    int if_mru;
+
+    bool disable_host_loopback;
 
     /* mbuf states */
     struct quehead m_freelist;
@@ -190,8 +196,13 @@ struct Slirp {
     GRand *grand;
     void *ra_timer;
 
+    bool enable_emu;
+
     const SlirpCb *cb;
     void *opaque;
+
+    struct sockaddr_in *outbound_addr;
+    struct sockaddr_in6 *outbound_addr6;
 };
 
 void if_start(Slirp *);
@@ -259,7 +270,7 @@ struct tcpcb *tcp_close(register struct tcpcb *);
 void tcp_sockclosed(struct tcpcb *);
 int tcp_fconnect(struct socket *, unsigned short af);
 void tcp_connect(struct socket *);
-int tcp_attach(struct socket *);
+void tcp_attach(struct socket *);
 uint8_t tcp_tos(struct socket *);
 int tcp_emu(struct socket *, struct mbuf *);
 int tcp_ctl(struct socket *);

@@ -15,6 +15,7 @@
 #include "qemu/atomic.h"
 #include "qemu/notify.h"
 #include "qemu-thread-common.h"
+#include "qemu/tsan.h"
 
 static bool name_threads;
 
@@ -34,6 +35,18 @@ static void error_exit(int err, const char *msg)
 {
     fprintf(stderr, "qemu: %s: %s\n", msg, strerror(err));
     abort();
+}
+
+static void compute_abs_deadline(struct timespec *ts, int ms)
+{
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    ts->tv_nsec = tv.tv_usec * 1000 + (ms % 1000) * 1000000;
+    ts->tv_sec = tv.tv_sec + ms / 1000;
+    if (ts->tv_nsec >= 1000000000) {
+        ts->tv_sec++;
+        ts->tv_nsec -= 1000000000;
+    }
 }
 
 void qemu_mutex_init(QemuMutex *mutex)
@@ -164,6 +177,23 @@ void qemu_cond_wait_impl(QemuCond *cond, QemuMutex *mutex, const char *file, con
         error_exit(err, __func__);
 }
 
+bool qemu_cond_timedwait_impl(QemuCond *cond, QemuMutex *mutex, int ms,
+                              const char *file, const int line)
+{
+    int err;
+    struct timespec ts;
+
+    assert(cond->initialized);
+    trace_qemu_mutex_unlock(mutex, file, line);
+    compute_abs_deadline(&ts, ms);
+    err = pthread_cond_timedwait(&cond->cond, &mutex->lock, &ts);
+    trace_qemu_mutex_locked(mutex, file, line);
+    if (err && err != ETIMEDOUT) {
+        error_exit(err, __func__);
+    }
+    return err != ETIMEDOUT;
+}
+
 void qemu_sem_init(QemuSemaphore *sem, int init)
 {
     int rc;
@@ -236,18 +266,6 @@ void qemu_sem_post(QemuSemaphore *sem)
         error_exit(errno, __func__);
     }
 #endif
-}
-
-static void compute_abs_deadline(struct timespec *ts, int ms)
-{
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    ts->tv_nsec = tv.tv_usec * 1000 + (ms % 1000) * 1000000;
-    ts->tv_sec = tv.tv_sec + ms / 1000;
-    if (ts->tv_nsec >= 1000000000) {
-        ts->tv_sec++;
-        ts->tv_nsec -= 1000000000;
-    }
 }
 
 int qemu_sem_timedwait(QemuSemaphore *sem, int ms)
@@ -396,8 +414,8 @@ void qemu_event_set(QemuEvent *ev)
      */
     assert(ev->initialized);
     smp_mb();
-    if (atomic_read(&ev->value) != EV_SET) {
-        if (atomic_xchg(&ev->value, EV_SET) == EV_BUSY) {
+    if (qatomic_read(&ev->value) != EV_SET) {
+        if (qatomic_xchg(&ev->value, EV_SET) == EV_BUSY) {
             /* There were waiters, wake them up.  */
             qemu_futex_wake(ev, INT_MAX);
         }
@@ -409,14 +427,14 @@ void qemu_event_reset(QemuEvent *ev)
     unsigned value;
 
     assert(ev->initialized);
-    value = atomic_read(&ev->value);
+    value = qatomic_read(&ev->value);
     smp_mb_acquire();
     if (value == EV_SET) {
         /*
          * If there was a concurrent reset (or even reset+wait),
          * do nothing.  Otherwise change EV_SET->EV_FREE.
          */
-        atomic_or(&ev->value, EV_FREE);
+        qatomic_or(&ev->value, EV_FREE);
     }
 }
 
@@ -425,7 +443,7 @@ void qemu_event_wait(QemuEvent *ev)
     unsigned value;
 
     assert(ev->initialized);
-    value = atomic_read(&ev->value);
+    value = qatomic_read(&ev->value);
     smp_mb_acquire();
     if (value != EV_SET) {
         if (value == EV_FREE) {
@@ -435,7 +453,7 @@ void qemu_event_wait(QemuEvent *ev)
              * a concurrent busy->free transition.  After the CAS, the
              * event will be either set or busy.
              */
-            if (atomic_cmpxchg(&ev->value, EV_FREE, EV_BUSY) == EV_SET) {
+            if (qatomic_cmpxchg(&ev->value, EV_FREE, EV_BUSY) == EV_SET) {
                 return;
             }
         }
@@ -496,6 +514,7 @@ static void *qemu_thread_start(void *args)
 # endif
     }
 #endif
+    QEMU_TSAN_ANNOTATE_THREAD_NAME(qemu_thread_args->name);
     g_free(qemu_thread_args->name);
     g_free(qemu_thread_args);
     pthread_cleanup_push(qemu_thread_atexit_notify, NULL);

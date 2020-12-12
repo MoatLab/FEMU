@@ -42,14 +42,13 @@
 #define NO_CPU_IO_DEFS
 #include "cpu.h"
 
-#include "exec/cpu-common.h"
 #include "exec/exec-all.h"
 
 #if !defined(CONFIG_USER_ONLY)
 #include "hw/boards.h"
 #endif
 
-#include "tcg-op.h"
+#include "tcg/tcg-op.h"
 
 #if UINTPTR_MAX == UINT32_MAX
 # define ELF_CLASS  ELFCLASS32
@@ -66,7 +65,7 @@
 #include "exec/log.h"
 #include "sysemu/sysemu.h"
 
-/* Forward declarations for functions declared in tcg-target.inc.c and
+/* Forward declarations for functions declared in tcg-target.c.inc and
    used here. */
 static void tcg_target_init(TCGContext *s);
 static const TCGTargetOpDef *tcg_target_op_def(TCGOpcode);
@@ -102,7 +101,7 @@ static void tcg_register_jit_int(void *buf, size_t size,
                                  size_t debug_frame_size)
     __attribute__((unused));
 
-/* Forward declarations for functions declared and used in tcg-target.inc.c. */
+/* Forward declarations for functions declared and used in tcg-target.c.inc. */
 static const char *target_parse_constraint(TCGArgConstraint *ct,
                                            const char *ct_str, TCGType type);
 static void tcg_out_ld(TCGContext *s, TCGType type, TCGReg ret, TCGReg arg1,
@@ -336,13 +335,14 @@ static bool tcg_resolve_relocs(TCGContext *s)
 
 static void set_jmp_reset_offset(TCGContext *s, int which)
 {
-    size_t off = tcg_current_code_size(s);
-    s->tb_jmp_reset_offset[which] = off;
-    /* Make sure that we didn't overflow the stored offset.  */
-    assert(s->tb_jmp_reset_offset[which] == off);
+    /*
+     * We will check for overflow at the end of the opcode loop in
+     * tcg_gen_code, where we bound tcg_current_code_size to UINT16_MAX.
+     */
+    s->tb_jmp_reset_offset[which] = tcg_current_code_size(s);
 }
 
-#include "tcg-target.inc.c"
+#include "tcg-target.c.inc"
 
 /* compare a pointer @ptr and a tb_tc @s */
 static int ptr_cmp_tb_tc(const void *ptr, const struct tb_tc *s)
@@ -503,6 +503,14 @@ size_t tcg_nb_tbs(void)
     return nb_tbs;
 }
 
+static gboolean tcg_region_tree_traverse(gpointer k, gpointer v, gpointer data)
+{
+    TranslationBlock *tb = v;
+
+    tb_destroy(tb);
+    return FALSE;
+}
+
 static void tcg_region_tree_reset_all(void)
 {
     size_t i;
@@ -511,6 +519,7 @@ static void tcg_region_tree_reset_all(void)
     for (i = 0; i < region.n; i++) {
         struct tcg_region_tree *rt = region_trees + i * tree_size;
 
+        g_tree_foreach(rt->tree, tcg_region_tree_traverse, NULL);
         /* Increment the refcount first so that destroy acts as a reset */
         g_tree_ref(rt->tree);
         g_tree_destroy(rt->tree);
@@ -589,7 +598,7 @@ static inline bool tcg_region_initial_alloc__locked(TCGContext *s)
 /* Call from a safe-work context */
 void tcg_region_reset_all(void)
 {
-    unsigned int n_ctxs = atomic_read(&n_tcg_ctxs);
+    unsigned int n_ctxs = qatomic_read(&n_tcg_ctxs);
     unsigned int i;
 
     qemu_mutex_lock(&region.lock);
@@ -597,7 +606,7 @@ void tcg_region_reset_all(void)
     region.agg_size_full = 0;
 
     for (i = 0; i < n_ctxs; i++) {
-        TCGContext *s = atomic_read(&tcg_ctxs[i]);
+        TCGContext *s = qatomic_read(&tcg_ctxs[i]);
         bool err = tcg_region_initial_alloc__locked(s);
 
         g_assert(!err);
@@ -737,6 +746,15 @@ void tcg_region_init(void)
 #endif
 }
 
+static void alloc_tcg_plugin_context(TCGContext *s)
+{
+#ifdef CONFIG_PLUGIN
+    s->plugin_tb = g_new0(struct qemu_plugin_tb, 1);
+    s->plugin_tb->insns =
+        g_ptr_array_new_with_free_func(qemu_plugin_insn_cleanup_fn);
+#endif
+}
+
 /*
  * All TCG threads except the parent (i.e. the one that called tcg_context_init
  * and registered the target's TCG globals) must register with this function
@@ -777,9 +795,13 @@ void tcg_register_thread(void)
     }
 
     /* Claim an entry in tcg_ctxs */
-    n = atomic_fetch_inc(&n_tcg_ctxs);
+    n = qatomic_fetch_inc(&n_tcg_ctxs);
     g_assert(n < ms->smp.max_cpus);
-    atomic_set(&tcg_ctxs[n], s);
+    qatomic_set(&tcg_ctxs[n], s);
+
+    if (n > 0) {
+        alloc_tcg_plugin_context(s);
+    }
 
     tcg_ctx = s;
     qemu_mutex_lock(&region.lock);
@@ -798,17 +820,17 @@ void tcg_register_thread(void)
  */
 size_t tcg_code_size(void)
 {
-    unsigned int n_ctxs = atomic_read(&n_tcg_ctxs);
+    unsigned int n_ctxs = qatomic_read(&n_tcg_ctxs);
     unsigned int i;
     size_t total;
 
     qemu_mutex_lock(&region.lock);
     total = region.agg_size_full;
     for (i = 0; i < n_ctxs; i++) {
-        const TCGContext *s = atomic_read(&tcg_ctxs[i]);
+        const TCGContext *s = qatomic_read(&tcg_ctxs[i]);
         size_t size;
 
-        size = atomic_read(&s->code_gen_ptr) - s->code_gen_buffer;
+        size = qatomic_read(&s->code_gen_ptr) - s->code_gen_buffer;
         g_assert(size <= s->code_gen_buffer_size);
         total += size;
     }
@@ -834,14 +856,14 @@ size_t tcg_code_capacity(void)
 
 size_t tcg_tb_phys_invalidate_count(void)
 {
-    unsigned int n_ctxs = atomic_read(&n_tcg_ctxs);
+    unsigned int n_ctxs = qatomic_read(&n_tcg_ctxs);
     unsigned int i;
     size_t total = 0;
 
     for (i = 0; i < n_ctxs; i++) {
-        const TCGContext *s = atomic_read(&tcg_ctxs[i]);
+        const TCGContext *s = qatomic_read(&tcg_ctxs[i]);
 
-        total += atomic_read(&s->tb_phys_invalidate_count);
+        total += qatomic_read(&s->tb_phys_invalidate_count);
     }
     return total;
 }
@@ -923,7 +945,6 @@ void tcg_context_init(TCGContext *s)
     int op, total_args, n, i;
     TCGOpDef *def;
     TCGArgConstraint *args_ct;
-    int *sorted_args;
     TCGTemp *ts;
 
     memset(s, 0, sizeof(*s));
@@ -938,15 +959,12 @@ void tcg_context_init(TCGContext *s)
         total_args += n;
     }
 
-    args_ct = g_malloc(sizeof(TCGArgConstraint) * total_args);
-    sorted_args = g_malloc(sizeof(int) * total_args);
+    args_ct = g_new0(TCGArgConstraint, total_args);
 
     for(op = 0; op < NB_OPS; op++) {
         def = &tcg_op_defs[op];
         def->args_ct = args_ct;
-        def->sorted_args = sorted_args;
         n = def->nb_iargs + def->nb_oargs;
-        sorted_args += n;
         args_ct += n;
     }
 
@@ -976,6 +994,8 @@ void tcg_context_init(TCGContext *s)
     for (; i < ARRAY_SIZE(tcg_target_reg_alloc_order); ++i) {
         indirect_reg_alloc_order[i] = tcg_target_reg_alloc_order[i];
     }
+
+    alloc_tcg_plugin_context(s);
 
     tcg_ctx = s;
     /*
@@ -1018,7 +1038,7 @@ TranslationBlock *tcg_tb_alloc(TCGContext *s)
         }
         goto retry;
     }
-    atomic_set(&s->code_gen_ptr, next);
+    qatomic_set(&s->code_gen_ptr, next);
     s->data_gen_ptr = NULL;
     return tb;
 }
@@ -1071,7 +1091,7 @@ void tcg_prologue_init(TCGContext *s)
 
 #ifdef DEBUG_DISAS
     if (qemu_loglevel_mask(CPU_LOG_TB_OUT_ASM)) {
-        qemu_log_lock();
+        FILE *logfile = qemu_log_lock();
         qemu_log("PROLOGUE: [size=%zu]\n", prologue_size);
         if (s->data_gen_ptr) {
             size_t code_size = s->data_gen_ptr - buf0;
@@ -1096,7 +1116,7 @@ void tcg_prologue_init(TCGContext *s)
         }
         qemu_log("\n");
         qemu_log_flush();
-        qemu_log_unlock();
+        qemu_log_unlock(logfile);
     }
 #endif
 
@@ -1647,6 +1667,13 @@ bool tcg_op_supported(TCGOpcode op)
     case INDEX_op_shrv_vec:
     case INDEX_op_sarv_vec:
         return have_vec && TCG_TARGET_HAS_shv_vec;
+    case INDEX_op_rotli_vec:
+        return have_vec && TCG_TARGET_HAS_roti_vec;
+    case INDEX_op_rotls_vec:
+        return have_vec && TCG_TARGET_HAS_rots_vec;
+    case INDEX_op_rotlv_vec:
+    case INDEX_op_rotrv_vec:
+        return have_vec && TCG_TARGET_HAS_rotv_vec;
     case INDEX_op_ssadd_vec:
     case INDEX_op_usadd_vec:
     case INDEX_op_sssub_vec:
@@ -1681,6 +1708,13 @@ void tcg_gen_callN(void *func, TCGTemp *ret, int nargs, TCGTemp **args)
     info = g_hash_table_lookup(helper_table, (gpointer)func);
     flags = info->flags;
     sizemask = info->sizemask;
+
+#ifdef CONFIG_PLUGIN
+    /* detect non-plugin helpers */
+    if (tcg_ctx->plugin_insn && unlikely(strncmp(info->name, "plugin_", 7))) {
+        tcg_ctx->plugin_insn->calls_helpers = true;
+    }
+#endif
 
 #if defined(__sparc__) && !defined(__arch64__) \
     && !defined(CONFIG_TCG_INTERPRETER)
@@ -1926,7 +1960,7 @@ static const char * const ldst_name[] =
 };
 
 static const char * const alignment_name[(MO_AMASK >> MO_ASHIFT) + 1] = {
-#ifdef ALIGNED_ONLY
+#ifdef TARGET_ALIGNED_ONLY
     [MO_UNALN >> MO_ASHIFT]    = "un+",
     [MO_ALIGN >> MO_ASHIFT]    = "",
 #else
@@ -2056,7 +2090,7 @@ static void tcg_dump_ops(TCGContext *s, bool have_prefs)
             case INDEX_op_qemu_st_i64:
                 {
                     TCGMemOpIdx oi = op->args[k++];
-                    TCGMemOp op = get_memop(oi);
+                    MemOp op = get_memop(oi);
                     unsigned ix = get_mmuidx(oi);
 
                     if (op & ~(MO_AMASK | MO_BSWAP | MO_SSIZE)) {
@@ -2093,9 +2127,17 @@ static void tcg_dump_ops(TCGContext *s, bool have_prefs)
         }
 
         if (have_prefs || op->life) {
-            for (; col < 40; ++col) {
-                putc(' ', qemu_logfile);
+
+            QemuLogFile *logfile;
+
+            rcu_read_lock();
+            logfile = qatomic_rcu_read(&qemu_logfile);
+            if (logfile) {
+                for (; col < 40; ++col) {
+                    putc(' ', logfile->fd);
+                }
             }
+            rcu_read_unlock();
         }
 
         if (op->life) {
@@ -2153,21 +2195,14 @@ static void tcg_dump_ops(TCGContext *s, bool have_prefs)
 /* we give more priority to constraints with less registers */
 static int get_constraint_priority(const TCGOpDef *def, int k)
 {
-    const TCGArgConstraint *arg_ct;
+    const TCGArgConstraint *arg_ct = &def->args_ct[k];
+    int n;
 
-    int i, n;
-    arg_ct = &def->args_ct[k];
-    if (arg_ct->ct & TCG_CT_ALIAS) {
+    if (arg_ct->oalias) {
         /* an alias is equivalent to a single register */
         n = 1;
     } else {
-        if (!(arg_ct->ct & TCG_CT_REG))
-            return 0;
-        n = 0;
-        for(i = 0; i < TCG_TARGET_NB_REGS; i++) {
-            if (tcg_regset_test_reg(arg_ct->u.regs, i))
-                n++;
-        }
+        n = ctpop64(arg_ct->regs);
     }
     return TCG_TARGET_NB_REGS - n + 1;
 }
@@ -2175,20 +2210,23 @@ static int get_constraint_priority(const TCGOpDef *def, int k)
 /* sort from highest priority to lowest */
 static void sort_constraints(TCGOpDef *def, int start, int n)
 {
-    int i, j, p1, p2, tmp;
+    int i, j;
+    TCGArgConstraint *a = def->args_ct;
 
-    for(i = 0; i < n; i++)
-        def->sorted_args[start + i] = start + i;
-    if (n <= 1)
+    for (i = 0; i < n; i++) {
+        a[start + i].sort_index = start + i;
+    }
+    if (n <= 1) {
         return;
-    for(i = 0; i < n - 1; i++) {
-        for(j = i + 1; j < n; j++) {
-            p1 = get_constraint_priority(def, def->sorted_args[start + i]);
-            p2 = get_constraint_priority(def, def->sorted_args[start + j]);
+    }
+    for (i = 0; i < n - 1; i++) {
+        for (j = i + 1; j < n; j++) {
+            int p1 = get_constraint_priority(def, a[start + i].sort_index);
+            int p2 = get_constraint_priority(def, a[start + j].sort_index);
             if (p1 < p2) {
-                tmp = def->sorted_args[start + i];
-                def->sorted_args[start + i] = def->sorted_args[start + j];
-                def->sorted_args[start + j] = tmp;
+                int tmp = a[start + i].sort_index;
+                a[start + i].sort_index = a[start + j].sort_index;
+                a[start + j].sort_index = tmp;
             }
         }
     }
@@ -2223,8 +2261,6 @@ static void process_op_defs(TCGContext *s)
             /* Incomplete TCGTargetOpDef entry. */
             tcg_debug_assert(ct_str != NULL);
 
-            def->args_ct[i].u.regs = 0;
-            def->args_ct[i].ct = 0;
             while (*ct_str != '\0') {
                 switch(*ct_str) {
                 case '0' ... '9':
@@ -2232,19 +2268,19 @@ static void process_op_defs(TCGContext *s)
                         int oarg = *ct_str - '0';
                         tcg_debug_assert(ct_str == tdefs->args_ct_str[i]);
                         tcg_debug_assert(oarg < def->nb_oargs);
-                        tcg_debug_assert(def->args_ct[oarg].ct & TCG_CT_REG);
-                        /* TCG_CT_ALIAS is for the output arguments.
-                           The input is tagged with TCG_CT_IALIAS. */
+                        tcg_debug_assert(def->args_ct[oarg].regs != 0);
                         def->args_ct[i] = def->args_ct[oarg];
-                        def->args_ct[oarg].ct |= TCG_CT_ALIAS;
+                        /* The output sets oalias.  */
+                        def->args_ct[oarg].oalias = true;
                         def->args_ct[oarg].alias_index = i;
-                        def->args_ct[i].ct |= TCG_CT_IALIAS;
+                        /* The input sets ialias. */
+                        def->args_ct[i].ialias = true;
                         def->args_ct[i].alias_index = oarg;
                     }
                     ct_str++;
                     break;
                 case '&':
-                    def->args_ct[i].ct |= TCG_CT_NEWREG;
+                    def->args_ct[i].newreg = true;
                     ct_str++;
                     break;
                 case 'i':
@@ -2296,7 +2332,7 @@ void tcg_op_remove(TCGContext *s, TCGOp *op)
     s->nb_ops--;
 
 #ifdef CONFIG_PROFILER
-    atomic_set(&s->prof.del_op_count, s->prof.del_op_count + 1);
+    qatomic_set(&s->prof.del_op_count, s->prof.del_op_count + 1);
 #endif
 }
 
@@ -2481,6 +2517,28 @@ static void la_global_sync(TCGContext *s, int ng)
             /* If the global was previously dead, reset prefs.  */
             la_reset_pref(&s->temps[i]);
         }
+    }
+}
+
+/*
+ * liveness analysis: conditional branch: all temps are dead,
+ * globals and local temps should be synced.
+ */
+static void la_bb_sync(TCGContext *s, int ng, int nt)
+{
+    la_global_sync(s, ng);
+
+    for (int i = ng; i < nt; ++i) {
+        if (s->temps[i].temp_local) {
+            int state = s->temps[i].state;
+            s->temps[i].state = state | TS_MEM;
+            if (state != TS_DEAD) {
+                continue;
+            }
+        } else {
+            s->temps[i].state = TS_DEAD;
+        }
+        la_reset_pref(&s->temps[i]);
     }
 }
 
@@ -2760,6 +2818,8 @@ static void liveness_pass_1(TCGContext *s)
             /* If end of basic block, update.  */
             if (def->flags & TCG_OPF_BB_EXIT) {
                 la_func_end(s, nb_globals, nb_temps);
+            } else if (def->flags & TCG_OPF_COND_BRANCH) {
+                la_bb_sync(s, nb_globals, nb_temps);
             } else if (def->flags & TCG_OPF_BB_END) {
                 la_bb_end(s, nb_globals, nb_temps);
             } else if (def->flags & TCG_OPF_SIDE_EFFECTS) {
@@ -2810,13 +2870,13 @@ static void liveness_pass_1(TCGContext *s)
                     pset = la_temp_pref(ts);
                     set = *pset;
 
-                    set &= ct->u.regs;
-                    if (ct->ct & TCG_CT_IALIAS) {
+                    set &= ct->regs;
+                    if (ct->ialias) {
                         set &= op->output_pref[ct->alias_index];
                     }
                     /* If the combination is not possible, restart.  */
                     if (set == 0) {
-                        set = ct->u.regs;
+                        set = ct->regs;
                     }
                     *pset = set;
                 }
@@ -2872,7 +2932,10 @@ static bool liveness_pass_2(TCGContext *s)
             nb_oargs = def->nb_oargs;
 
             /* Set flags similar to how calls require.  */
-            if (def->flags & TCG_OPF_BB_END) {
+            if (def->flags & TCG_OPF_COND_BRANCH) {
+                /* Like reading globals: sync_globals */
+                call_flags = TCG_CALL_NO_WRITE_GLOBALS;
+            } else if (def->flags & TCG_OPF_BB_END) {
                 /* Like writing globals: save_globals */
                 call_flags = 0;
             } else if (def->flags & TCG_OPF_SIDE_EFFECTS) {
@@ -2946,34 +3009,68 @@ static bool liveness_pass_2(TCGContext *s)
         }
 
         /* Outputs become available.  */
-        for (i = 0; i < nb_oargs; i++) {
-            arg_ts = arg_temp(op->args[i]);
+        if (opc == INDEX_op_mov_i32 || opc == INDEX_op_mov_i64) {
+            arg_ts = arg_temp(op->args[0]);
             dir_ts = arg_ts->state_ptr;
-            if (!dir_ts) {
-                continue;
+            if (dir_ts) {
+                op->args[0] = temp_arg(dir_ts);
+                changes = true;
+
+                /* The output is now live and modified.  */
+                arg_ts->state = 0;
+
+                if (NEED_SYNC_ARG(0)) {
+                    TCGOpcode sopc = (arg_ts->type == TCG_TYPE_I32
+                                      ? INDEX_op_st_i32
+                                      : INDEX_op_st_i64);
+                    TCGOp *sop = tcg_op_insert_after(s, op, sopc);
+                    TCGTemp *out_ts = dir_ts;
+
+                    if (IS_DEAD_ARG(0)) {
+                        out_ts = arg_temp(op->args[1]);
+                        arg_ts->state = TS_DEAD;
+                        tcg_op_remove(s, op);
+                    } else {
+                        arg_ts->state = TS_MEM;
+                    }
+
+                    sop->args[0] = temp_arg(out_ts);
+                    sop->args[1] = temp_arg(arg_ts->mem_base);
+                    sop->args[2] = arg_ts->mem_offset;
+                } else {
+                    tcg_debug_assert(!IS_DEAD_ARG(0));
+                }
             }
-            op->args[i] = temp_arg(dir_ts);
-            changes = true;
+        } else {
+            for (i = 0; i < nb_oargs; i++) {
+                arg_ts = arg_temp(op->args[i]);
+                dir_ts = arg_ts->state_ptr;
+                if (!dir_ts) {
+                    continue;
+                }
+                op->args[i] = temp_arg(dir_ts);
+                changes = true;
 
-            /* The output is now live and modified.  */
-            arg_ts->state = 0;
+                /* The output is now live and modified.  */
+                arg_ts->state = 0;
 
-            /* Sync outputs upon their last write.  */
-            if (NEED_SYNC_ARG(i)) {
-                TCGOpcode sopc = (arg_ts->type == TCG_TYPE_I32
-                                  ? INDEX_op_st_i32
-                                  : INDEX_op_st_i64);
-                TCGOp *sop = tcg_op_insert_after(s, op, sopc);
+                /* Sync outputs upon their last write.  */
+                if (NEED_SYNC_ARG(i)) {
+                    TCGOpcode sopc = (arg_ts->type == TCG_TYPE_I32
+                                      ? INDEX_op_st_i32
+                                      : INDEX_op_st_i64);
+                    TCGOp *sop = tcg_op_insert_after(s, op, sopc);
 
-                sop->args[0] = temp_arg(dir_ts);
-                sop->args[1] = temp_arg(arg_ts->mem_base);
-                sop->args[2] = arg_ts->mem_offset;
+                    sop->args[0] = temp_arg(dir_ts);
+                    sop->args[1] = temp_arg(arg_ts->mem_base);
+                    sop->args[2] = arg_ts->mem_offset;
 
-                arg_ts->state = TS_MEM;
-            }
-            /* Drop outputs that are dead.  */
-            if (IS_DEAD_ARG(i)) {
-                arg_ts->state = TS_DEAD;
+                    arg_ts->state = TS_MEM;
+                }
+                /* Drop outputs that are dead.  */
+                if (IS_DEAD_ARG(i)) {
+                    arg_ts->state = TS_DEAD;
+                }
             }
         }
     }
@@ -3311,6 +3408,28 @@ static void tcg_reg_alloc_bb_end(TCGContext *s, TCGRegSet allocated_regs)
 }
 
 /*
+ * At a conditional branch, we assume all temporaries are dead and
+ * all globals and local temps are synced to their location.
+ */
+static void tcg_reg_alloc_cbranch(TCGContext *s, TCGRegSet allocated_regs)
+{
+    sync_globals(s, allocated_regs);
+
+    for (int i = s->nb_globals; i < s->nb_temps; i++) {
+        TCGTemp *ts = &s->temps[i];
+        /*
+         * The liveness analysis already ensures that temps are dead.
+         * Keep tcg_debug_asserts for safety.
+         */
+        if (ts->temp_local) {
+            tcg_debug_assert(ts->val_type != TEMP_VAL_REG || ts->mem_coherent);
+        } else {
+            tcg_debug_assert(ts->val_type == TEMP_VAL_DEAD);
+        }
+    }
+}
+
+/*
  * Specialized code generation for INDEX_op_movi_*.
  */
 static void tcg_reg_alloc_do_movi(TCGContext *s, TCGTemp *ots,
@@ -3472,8 +3591,8 @@ static void tcg_reg_alloc_dup(TCGContext *s, const TCGOp *op)
         return;
     }
 
-    dup_out_regs = tcg_op_defs[INDEX_op_dup_vec].args_ct[0].u.regs;
-    dup_in_regs = tcg_op_defs[INDEX_op_dup_vec].args_ct[1].u.regs;
+    dup_out_regs = tcg_op_defs[INDEX_op_dup_vec].args_ct[0].regs;
+    dup_in_regs = tcg_op_defs[INDEX_op_dup_vec].args_ct[1].regs;
 
     /* Allocate the output register now.  */
     if (ots->val_type != TEMP_VAL_REG) {
@@ -3580,7 +3699,7 @@ static void tcg_reg_alloc_op(TCGContext *s, const TCGOp *op)
     for (k = 0; k < nb_iargs; k++) {
         TCGRegSet i_preferred_regs, o_preferred_regs;
 
-        i = def->sorted_args[nb_oargs + k];
+        i = def->args_ct[nb_oargs + k].sort_index;
         arg = op->args[i];
         arg_ct = &def->args_ct[i];
         ts = arg_temp(arg);
@@ -3594,7 +3713,7 @@ static void tcg_reg_alloc_op(TCGContext *s, const TCGOp *op)
         }
 
         i_preferred_regs = o_preferred_regs = 0;
-        if (arg_ct->ct & TCG_CT_IALIAS) {
+        if (arg_ct->ialias) {
             o_preferred_regs = op->output_pref[arg_ct->alias_index];
             if (ts->fixed_reg) {
                 /* if fixed register, we must allocate a new register
@@ -3616,9 +3735,8 @@ static void tcg_reg_alloc_op(TCGContext *s, const TCGOp *op)
                     int k2, i2;
                     reg = ts->reg;
                     for (k2 = 0 ; k2 < k ; k2++) {
-                        i2 = def->sorted_args[nb_oargs + k2];
-                        if ((def->args_ct[i2].ct & TCG_CT_IALIAS) &&
-                            reg == new_args[i2]) {
+                        i2 = def->args_ct[nb_oargs + k2].sort_index;
+                        if (def->args_ct[i2].ialias && reg == new_args[i2]) {
                             goto allocate_in_reg;
                         }
                     }
@@ -3627,10 +3745,10 @@ static void tcg_reg_alloc_op(TCGContext *s, const TCGOp *op)
             }
         }
 
-        temp_load(s, ts, arg_ct->u.regs, i_allocated_regs, i_preferred_regs);
+        temp_load(s, ts, arg_ct->regs, i_allocated_regs, i_preferred_regs);
         reg = ts->reg;
 
-        if (tcg_regset_test_reg(arg_ct->u.regs, reg)) {
+        if (tcg_regset_test_reg(arg_ct->regs, reg)) {
             /* nothing to do : the constraint is satisfied */
         } else {
         allocate_in_reg:
@@ -3638,7 +3756,7 @@ static void tcg_reg_alloc_op(TCGContext *s, const TCGOp *op)
                and move the temporary register into it */
             temp_load(s, ts, tcg_target_available_regs[ts->type],
                       i_allocated_regs, 0);
-            reg = tcg_reg_alloc(s, arg_ct->u.regs, i_allocated_regs,
+            reg = tcg_reg_alloc(s, arg_ct->regs, i_allocated_regs,
                                 o_preferred_regs, ts->indirect_base);
             if (!tcg_out_mov(s, ts->type, reg, ts->reg)) {
                 /*
@@ -3662,7 +3780,9 @@ static void tcg_reg_alloc_op(TCGContext *s, const TCGOp *op)
         }
     }
 
-    if (def->flags & TCG_OPF_BB_END) {
+    if (def->flags & TCG_OPF_COND_BRANCH) {
+        tcg_reg_alloc_cbranch(s, i_allocated_regs);
+    } else if (def->flags & TCG_OPF_BB_END) {
         tcg_reg_alloc_bb_end(s, i_allocated_regs);
     } else {
         if (def->flags & TCG_OPF_CALL_CLOBBER) {
@@ -3681,7 +3801,7 @@ static void tcg_reg_alloc_op(TCGContext *s, const TCGOp *op)
         
         /* satisfy the output constraints */
         for(k = 0; k < nb_oargs; k++) {
-            i = def->sorted_args[k];
+            i = def->args_ct[k].sort_index;
             arg = op->args[i];
             arg_ct = &def->args_ct[i];
             ts = arg_temp(arg);
@@ -3689,15 +3809,14 @@ static void tcg_reg_alloc_op(TCGContext *s, const TCGOp *op)
             /* ENV should not be modified.  */
             tcg_debug_assert(!ts->fixed_reg);
 
-            if ((arg_ct->ct & TCG_CT_ALIAS)
-                && !const_args[arg_ct->alias_index]) {
+            if (arg_ct->oalias && !const_args[arg_ct->alias_index]) {
                 reg = new_args[arg_ct->alias_index];
-            } else if (arg_ct->ct & TCG_CT_NEWREG) {
-                reg = tcg_reg_alloc(s, arg_ct->u.regs,
+            } else if (arg_ct->newreg) {
+                reg = tcg_reg_alloc(s, arg_ct->regs,
                                     i_allocated_regs | o_allocated_regs,
                                     op->output_pref[k], ts->indirect_base);
             } else {
-                reg = tcg_reg_alloc(s, arg_ct->u.regs, o_allocated_regs,
+                reg = tcg_reg_alloc(s, arg_ct->regs, o_allocated_regs,
                                     op->output_pref[k], ts->indirect_base);
             }
             tcg_regset_set_reg(o_allocated_regs, reg);
@@ -3885,12 +4004,12 @@ static void tcg_reg_alloc_call(TCGContext *s, TCGOp *op)
 /* avoid copy/paste errors */
 #define PROF_ADD(to, from, field)                       \
     do {                                                \
-        (to)->field += atomic_read(&((from)->field));   \
+        (to)->field += qatomic_read(&((from)->field));  \
     } while (0)
 
 #define PROF_MAX(to, from, field)                                       \
     do {                                                                \
-        typeof((from)->field) val__ = atomic_read(&((from)->field));    \
+        typeof((from)->field) val__ = qatomic_read(&((from)->field));   \
         if (val__ > (to)->field) {                                      \
             (to)->field = val__;                                        \
         }                                                               \
@@ -3900,11 +4019,11 @@ static void tcg_reg_alloc_call(TCGContext *s, TCGOp *op)
 static inline
 void tcg_profile_snapshot(TCGProfile *prof, bool counters, bool table)
 {
-    unsigned int n_ctxs = atomic_read(&n_tcg_ctxs);
+    unsigned int n_ctxs = qatomic_read(&n_tcg_ctxs);
     unsigned int i;
 
     for (i = 0; i < n_ctxs; i++) {
-        TCGContext *s = atomic_read(&tcg_ctxs[i]);
+        TCGContext *s = qatomic_read(&tcg_ctxs[i]);
         const TCGProfile *orig = &s->prof;
 
         if (counters) {
@@ -3963,15 +4082,15 @@ void tcg_dump_op_count(void)
 
 int64_t tcg_cpu_exec_time(void)
 {
-    unsigned int n_ctxs = atomic_read(&n_tcg_ctxs);
+    unsigned int n_ctxs = qatomic_read(&n_tcg_ctxs);
     unsigned int i;
     int64_t ret = 0;
 
     for (i = 0; i < n_ctxs; i++) {
-        const TCGContext *s = atomic_read(&tcg_ctxs[i]);
+        const TCGContext *s = qatomic_read(&tcg_ctxs[i]);
         const TCGProfile *prof = &s->prof;
 
-        ret += atomic_read(&prof->cpu_exec_time);
+        ret += qatomic_read(&prof->cpu_exec_time);
     }
     return ret;
 }
@@ -4004,15 +4123,15 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb)
         QTAILQ_FOREACH(op, &s->ops, link) {
             n++;
         }
-        atomic_set(&prof->op_count, prof->op_count + n);
+        qatomic_set(&prof->op_count, prof->op_count + n);
         if (n > prof->op_count_max) {
-            atomic_set(&prof->op_count_max, n);
+            qatomic_set(&prof->op_count_max, n);
         }
 
         n = s->nb_temps;
-        atomic_set(&prof->temp_count, prof->temp_count + n);
+        qatomic_set(&prof->temp_count, prof->temp_count + n);
         if (n > prof->temp_count_max) {
-            atomic_set(&prof->temp_count_max, n);
+            qatomic_set(&prof->temp_count_max, n);
         }
     }
 #endif
@@ -4020,11 +4139,11 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb)
 #ifdef DEBUG_DISAS
     if (unlikely(qemu_loglevel_mask(CPU_LOG_TB_OP)
                  && qemu_log_in_addr_range(tb->pc))) {
-        qemu_log_lock();
+        FILE *logfile = qemu_log_lock();
         qemu_log("OP:\n");
         tcg_dump_ops(s, false);
         qemu_log("\n");
-        qemu_log_unlock();
+        qemu_log_unlock(logfile);
     }
 #endif
 
@@ -4046,7 +4165,7 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb)
 #endif
 
 #ifdef CONFIG_PROFILER
-    atomic_set(&prof->opt_time, prof->opt_time - profile_getclock());
+    qatomic_set(&prof->opt_time, prof->opt_time - profile_getclock());
 #endif
 
 #ifdef USE_TCG_OPTIMIZATIONS
@@ -4054,8 +4173,8 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb)
 #endif
 
 #ifdef CONFIG_PROFILER
-    atomic_set(&prof->opt_time, prof->opt_time + profile_getclock());
-    atomic_set(&prof->la_time, prof->la_time - profile_getclock());
+    qatomic_set(&prof->opt_time, prof->opt_time + profile_getclock());
+    qatomic_set(&prof->la_time, prof->la_time - profile_getclock());
 #endif
 
     reachable_code_pass(s);
@@ -4065,11 +4184,11 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb)
 #ifdef DEBUG_DISAS
         if (unlikely(qemu_loglevel_mask(CPU_LOG_TB_OP_IND)
                      && qemu_log_in_addr_range(tb->pc))) {
-            qemu_log_lock();
+            FILE *logfile = qemu_log_lock();
             qemu_log("OP before indirect lowering:\n");
             tcg_dump_ops(s, false);
             qemu_log("\n");
-            qemu_log_unlock();
+            qemu_log_unlock(logfile);
         }
 #endif
         /* Replace indirect temps with direct temps.  */
@@ -4080,17 +4199,17 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb)
     }
 
 #ifdef CONFIG_PROFILER
-    atomic_set(&prof->la_time, prof->la_time + profile_getclock());
+    qatomic_set(&prof->la_time, prof->la_time + profile_getclock());
 #endif
 
 #ifdef DEBUG_DISAS
     if (unlikely(qemu_loglevel_mask(CPU_LOG_TB_OP_OPT)
                  && qemu_log_in_addr_range(tb->pc))) {
-        qemu_log_lock();
+        FILE *logfile = qemu_log_lock();
         qemu_log("OP after optimization and liveness analysis:\n");
         tcg_dump_ops(s, true);
         qemu_log("\n");
-        qemu_log_unlock();
+        qemu_log_unlock(logfile);
     }
 #endif
 
@@ -4111,7 +4230,7 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb)
         TCGOpcode opc = op->opc;
 
 #ifdef CONFIG_PROFILER
-        atomic_set(&prof->table_op_count[opc], prof->table_op_count[opc] + 1);
+        qatomic_set(&prof->table_op_count[opc], prof->table_op_count[opc] + 1);
 #endif
 
         switch (opc) {

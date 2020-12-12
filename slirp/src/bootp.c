@@ -254,9 +254,10 @@ static void bootp_reply(Slirp *slirp, const struct bootp_t *bp)
             *q++ = DHCPACK;
         }
 
-        if (slirp->bootp_filename)
-            snprintf((char *)rbp->bp_file, sizeof(rbp->bp_file), "%s",
-                     slirp->bootp_filename);
+        if (slirp->bootp_filename) {
+            g_assert(strlen(slirp->bootp_filename) < sizeof(rbp->bp_file));
+            strcpy(rbp->bp_file, slirp->bootp_filename);
+        }
 
         *q++ = RFC2132_SRV_ID;
         *q++ = 4;
@@ -350,14 +351,12 @@ static void bootp_reply(Slirp *slirp, const struct bootp_t *bp)
         q += sizeof(nak_msg) - 1;
     }
     assert(q < end);
-    *q =
-RFC1533_END
-;
+    *q = RFC1533_END;
 
-daddr.sin_addr.s_addr = 0xffffffffu;
+    daddr.sin_addr.s_addr = 0xffffffffu;
 
-m->m_len = sizeof(struct bootp_t) - sizeof(struct ip) - sizeof(struct udphdr);
-udp_output(NULL, m, &saddr, &daddr, IPTOS_LOWDELAY);
+    m->m_len = sizeof(struct bootp_t) - sizeof(struct ip) - sizeof(struct udphdr);
+    udp_output(NULL, m, &saddr, &daddr, IPTOS_LOWDELAY);
 }
 
 void bootp_input(struct mbuf *m)

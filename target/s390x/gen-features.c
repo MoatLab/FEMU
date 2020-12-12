@@ -412,7 +412,7 @@ static uint16_t base_GEN13_GA1[] = {
 
 static uint16_t base_GEN14_GA1[] = {
     S390_FEAT_ENTROPY_ENC_COMP,
-    S390_FEAT_MISC_INSTRUCTION_EXT,
+    S390_FEAT_MISC_INSTRUCTION_EXT2,
     S390_FEAT_SEMAPHORE_ASSIST,
     S390_FEAT_TIME_SLICE_INSTRUMENTATION,
     S390_FEAT_ORDER_PRESERVING_COMPRESSION,
@@ -522,6 +522,8 @@ static uint16_t full_GEN12_GA1[] = {
     S390_FEAT_AP_QUEUE_INTERRUPT_CONTROL,
     S390_FEAT_AP_FACILITIES_TEST,
     S390_FEAT_AP,
+    S390_FEAT_EXTENDED_LENGTH_SCCB,
+    S390_FEAT_DIAG_318,
 };
 
 static uint16_t full_GEN12_GA2[] = {
@@ -562,6 +564,7 @@ static uint16_t full_GEN15_GA1[] = {
     S390_FEAT_GROUP_MSA_EXT_9,
     S390_FEAT_GROUP_MSA_EXT_9_PCKMO,
     S390_FEAT_ETOKEN,
+    S390_FEAT_UNPACK,
 };
 
 /* Default features (in order of release)
@@ -698,15 +701,25 @@ static uint16_t qemu_V4_0[] = {
     S390_FEAT_ZPCI,
 };
 
-static uint16_t qemu_LATEST[] = {
+static uint16_t qemu_V4_1[] = {
     S390_FEAT_STFLE_53,
     S390_FEAT_VECTOR,
+};
+
+static uint16_t qemu_LATEST[] = {
+    S390_FEAT_ACCESS_EXCEPTION_FS_INDICATION,
+    S390_FEAT_SIDE_EFFECT_ACCESS_ESOP2,
+    S390_FEAT_ESOP,
 };
 
 /* add all new definitions before this point */
 static uint16_t qemu_MAX[] = {
     /* generates a dependency warning, leave it out for now */
     S390_FEAT_MSA_EXT_5,
+    /* features introduced after the z13 */
+    S390_FEAT_INSTRUCTION_EXEC_PROT,
+    S390_FEAT_MISC_INSTRUCTION_EXT2,
+    S390_FEAT_MSA_EXT_8,
 };
 
 /****** END FEATURE DEFS ******/
@@ -824,6 +837,7 @@ static FeatGroupDefSpec QemuFeatDef[] = {
     QEMU_FEAT_INITIALIZER(V2_11),
     QEMU_FEAT_INITIALIZER(V3_1),
     QEMU_FEAT_INITIALIZER(V4_0),
+    QEMU_FEAT_INITIALIZER(V4_1),
     QEMU_FEAT_INITIALIZER(LATEST),
     QEMU_FEAT_INITIALIZER(MAX),
 };

@@ -1,21 +1,8 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 /*
  * Testcase for dtc expression support
  *
  * Copyright (C) 2008 David Gibson, IBM Corporation.
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public License
- * as published by the Free Software Foundation; either version 2.1 of
- * the License, or (at your option) any later version.
- *
- * This library is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 #include <stdlib.h>
@@ -97,7 +84,7 @@ int main(int argc, char *argv[])
 		res = fdt_getprop(fdt, 0, "expressions", &reslen);
 
 		if (!res)
-			FAIL("Error retreiving expression results: %s\n",
+			FAIL("Error retrieving expression results: %s\n",
 		     fdt_strerror(reslen));
 
 		if (reslen != (ARRAY_SIZE(expr_table) * sizeof(uint32_t)))

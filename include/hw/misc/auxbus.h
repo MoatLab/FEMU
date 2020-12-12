@@ -25,13 +25,16 @@
 #ifndef HW_MISC_AUXBUS_H
 #define HW_MISC_AUXBUS_H
 
-#include "hw/qdev.h"
+#include "exec/memory.h"
+#include "hw/qdev-core.h"
+#include "qom/object.h"
 
-typedef struct AUXBus AUXBus;
 typedef struct AUXSlave AUXSlave;
 typedef enum AUXCommand AUXCommand;
 typedef enum AUXReply AUXReply;
-typedef struct AUXTOI2CState AUXTOI2CState;
+
+#define TYPE_AUXTOI2C "aux-to-i2c-bridge"
+OBJECT_DECLARE_SIMPLE_TYPE(AUXTOI2CState, AUXTOI2C)
 
 enum AUXCommand {
     WRITE_I2C = 0,
@@ -52,7 +55,7 @@ enum AUXReply {
 };
 
 #define TYPE_AUX_BUS "aux-bus"
-#define AUX_BUS(obj) OBJECT_CHECK(AUXBus, (obj), TYPE_AUX_BUS)
+OBJECT_DECLARE_SIMPLE_TYPE(AUXBus, AUX_BUS)
 
 struct AUXBus {
     /* < private > */
@@ -71,8 +74,7 @@ struct AUXBus {
 };
 
 #define TYPE_AUX_SLAVE "aux-slave"
-#define AUX_SLAVE(obj) \
-     OBJECT_CHECK(AUXSlave, (obj), TYPE_AUX_SLAVE)
+OBJECT_DECLARE_SIMPLE_TYPE(AUXSlave, AUX_SLAVE)
 
 struct AUXSlave {
     /* < private > */
@@ -83,14 +85,21 @@ struct AUXSlave {
 };
 
 /**
- * aux_init_bus: Initialize an AUX bus.
+ * aux_bus_init: Initialize an AUX bus.
  *
  * Returns the new AUX bus created.
  *
  * @parent The device where this bus is located.
  * @name The name of the bus.
  */
-AUXBus *aux_init_bus(DeviceState *parent, const char *name);
+AUXBus *aux_bus_init(DeviceState *parent, const char *name);
+
+/**
+ * aux_bus_realize: Realize an AUX bus.
+ *
+ * @bus: The AUX bus.
+ */
+void aux_bus_realize(AUXBus *bus);
 
 /*
  * aux_request: Make a request on the bus.
@@ -122,13 +131,6 @@ I2CBus *aux_get_i2c_bus(AUXBus *bus);
  * @mmio The mmio to be registered.
  */
 void aux_init_mmio(AUXSlave *aux_slave, MemoryRegion *mmio);
-
-/* aux_create_slave: Create a new device on an AUX bus
- *
- * @bus The AUX bus for the new device.
- * @name The type of the device to be created.
- */
-DeviceState *aux_create_slave(AUXBus *bus, const char *name);
 
 /* aux_map_slave: Map the mmio for an AUX slave on the bus.
  *

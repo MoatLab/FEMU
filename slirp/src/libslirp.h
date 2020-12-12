@@ -66,7 +66,54 @@ typedef struct SlirpCb {
     void (*notify)(void *opaque);
 } SlirpCb;
 
+#define SLIRP_CONFIG_VERSION_MIN 1
+#define SLIRP_CONFIG_VERSION_MAX 2
 
+typedef struct SlirpConfig {
+    /* Version must be provided */
+    uint32_t version;
+    /*
+     * Fields introduced in SlirpConfig version 1 begin
+     */
+    int restricted;
+    bool in_enabled;
+    struct in_addr vnetwork;
+    struct in_addr vnetmask;
+    struct in_addr vhost;
+    bool in6_enabled;
+    struct in6_addr vprefix_addr6;
+    uint8_t vprefix_len;
+    struct in6_addr vhost6;
+    const char *vhostname;
+    const char *tftp_server_name;
+    const char *tftp_path;
+    const char *bootfile;
+    struct in_addr vdhcp_start;
+    struct in_addr vnameserver;
+    struct in6_addr vnameserver6;
+    const char **vdnssearch;
+    const char *vdomainname;
+    /* Default: IF_MTU_DEFAULT */
+    size_t if_mtu;
+    /* Default: IF_MRU_DEFAULT */
+    size_t if_mru;
+    /* Prohibit connecting to 127.0.0.1:* */
+    bool disable_host_loopback;
+    /*
+     * Enable emulation code (*warning*: this code isn't safe, it is not
+     * recommended to enable it)
+     */
+    bool enable_emu;
+    /*
+     * Fields introduced in SlirpConfig version 2 begin
+     */
+    struct sockaddr_in *outbound_addr;
+    struct sockaddr_in6 *outbound_addr6;
+} SlirpConfig;
+
+Slirp *slirp_new(const SlirpConfig *cfg, const SlirpCb *callbacks,
+                 void *opaque);
+/* slirp_init is deprecated in favor of slirp_new */
 Slirp *slirp_init(int restricted, bool in_enabled, struct in_addr vnetwork,
                   struct in_addr vnetmask, struct in_addr vhost,
                   bool in6_enabled, struct in6_addr vprefix_addr6,
@@ -93,8 +140,13 @@ int slirp_remove_hostfwd(Slirp *slirp, int is_udp, struct in_addr host_addr,
                          int host_port);
 int slirp_add_exec(Slirp *slirp, const char *cmdline,
                    struct in_addr *guest_addr, int guest_port);
+int slirp_add_unix(Slirp *slirp, const char *unixsock,
+                   struct in_addr *guest_addr, int guest_port);
 int slirp_add_guestfwd(Slirp *slirp, SlirpWriteCb write_cb, void *opaque,
                        struct in_addr *guest_addr, int guest_port);
+/* remove entries added by slirp_add_exec, slirp_add_unix or slirp_add_guestfwd */
+int slirp_remove_guestfwd(Slirp *slirp, struct in_addr guest_addr,
+                          int guest_port);
 
 char *slirp_connection_info(Slirp *slirp);
 

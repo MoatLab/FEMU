@@ -14,7 +14,6 @@
 #include "qemu/osdep.h"
 #include "qemu/error-report.h"
 #include "qapi/error.h"
-#include "hw/hw.h"
 #include "hw/arm/pxa.h"
 #include "hw/arm/boot.h"
 #include "net/net.h"
@@ -120,39 +119,23 @@ static void mainstone_common_init(MemoryRegion *address_space_mem,
     DeviceState *mst_irq;
     DriveInfo *dinfo;
     int i;
-    int be;
     MemoryRegion *rom = g_new(MemoryRegion, 1);
 
     /* Setup CPU & memory */
     mpu = pxa270_init(address_space_mem, mainstone_binfo.ram_size,
                       machine->cpu_type);
-    memory_region_init_ram(rom, NULL, "mainstone.rom", MAINSTONE_ROM,
+    memory_region_init_rom(rom, NULL, "mainstone.rom", MAINSTONE_ROM,
                            &error_fatal);
-    memory_region_set_readonly(rom, true);
     memory_region_add_subregion(address_space_mem, 0, rom);
 
-#ifdef TARGET_WORDS_BIGENDIAN
-    be = 1;
-#else
-    be = 0;
-#endif
     /* There are two 32MiB flash devices on the board */
     for (i = 0; i < 2; i ++) {
         dinfo = drive_get(IF_PFLASH, 0, i);
-        if (!dinfo) {
-            if (qtest_enabled()) {
-                break;
-            }
-            error_report("Two flash images must be given with the "
-                         "'pflash' parameter");
-            exit(1);
-        }
-
         if (!pflash_cfi01_register(mainstone_flash_base[i],
                                    i ? "mainstone.flash1" : "mainstone.flash0",
                                    MAINSTONE_FLASH,
-                                   blk_by_legacy_dinfo(dinfo),
-                                   sector_len, 4, 0, 0, 0, 0, be)) {
+                                   dinfo ? blk_by_legacy_dinfo(dinfo) : NULL,
+                                   sector_len, 4, 0, 0, 0, 0, 0)) {
             error_report("Error registering flash memory");
             exit(1);
         }
@@ -177,11 +160,8 @@ static void mainstone_common_init(MemoryRegion *address_space_mem,
     smc91c111_init(&nd_table[0], MST_ETH_PHYS,
                     qdev_get_gpio_in(mst_irq, ETHERNET_IRQ));
 
-    mainstone_binfo.kernel_filename = machine->kernel_filename;
-    mainstone_binfo.kernel_cmdline = machine->kernel_cmdline;
-    mainstone_binfo.initrd_filename = machine->initrd_filename;
     mainstone_binfo.board_id = arm_id;
-    arm_load_kernel(mpu->cpu, &mainstone_binfo);
+    arm_load_kernel(mpu->cpu, machine, &mainstone_binfo);
 }
 
 static void mainstone_init(MachineState *machine)

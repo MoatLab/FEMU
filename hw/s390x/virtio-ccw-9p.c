@@ -10,6 +10,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "hw/qdev-properties.h"
 #include "hw/virtio/virtio.h"
 #include "qapi/error.h"
 #include "qemu/module.h"
@@ -20,8 +21,7 @@ static void virtio_ccw_9p_realize(VirtioCcwDevice *ccw_dev, Error **errp)
     V9fsCCWState *dev = VIRTIO_9P_CCW(ccw_dev);
     DeviceState *vdev = DEVICE(&dev->vdev);
 
-    qdev_set_parent_bus(vdev, BUS(&ccw_dev->bus));
-    object_property_set_bool(OBJECT(vdev), true, "realized", errp);
+    qdev_realize(vdev, BUS(&ccw_dev->bus), errp);
 }
 
 static void virtio_ccw_9p_instance_init(Object *obj)
@@ -46,7 +46,7 @@ static void virtio_ccw_9p_class_init(ObjectClass *klass, void *data)
     VirtIOCCWDeviceClass *k = VIRTIO_CCW_DEVICE_CLASS(klass);
 
     k->realize = virtio_ccw_9p_realize;
-    dc->props = virtio_ccw_9p_properties;
+    device_class_set_props(dc, virtio_ccw_9p_properties);
     set_bit(DEVICE_CATEGORY_STORAGE, dc->categories);
 }
 

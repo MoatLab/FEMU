@@ -19,8 +19,6 @@
 
 #include "qemu/osdep.h"
 #include "cpu.h"
-#include "hw/hw.h"
-#include "hw/boards.h"
 #include "migration/cpu.h"
 
 static const VMStateDescription vmstate_tlb_entry = {
@@ -123,10 +121,21 @@ static const VMStateDescription vmstate_env = {
     }
 };
 
+static int cpu_post_load(void *opaque, int version_id)
+{
+    OpenRISCCPU *cpu = opaque;
+    CPUOpenRISCState *env = &cpu->env;
+
+    /* Update env->fp_status to match env->fpcsr.  */
+    cpu_set_fpcsr(env, env->fpcsr);
+    return 0;
+}
+
 const VMStateDescription vmstate_openrisc_cpu = {
     .name = "cpu",
     .version_id = 1,
     .minimum_version_id = 1,
+    .post_load = cpu_post_load,
     .fields = (VMStateField[]) {
         VMSTATE_CPU(),
         VMSTATE_STRUCT(env, OpenRISCCPU, 1, vmstate_env, CPUOpenRISCState),

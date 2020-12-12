@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * fdtdump.c - Contributed by Pantelis Antoniou <pantelis.antoniou AT gmail.com>
  */
@@ -100,7 +101,7 @@ static void dump_blob(void *blob, bool debug)
 	p = p_struct;
 	while ((tag = fdt32_to_cpu(GET_CELL(p))) != FDT_END) {
 
-		dumpf("%04zx: tag: 0x%08"PRIx32" (%s)\n",
+		dumpf("%04"PRIxPTR": tag: 0x%08"PRIx32" (%s)\n",
 		        (uintptr_t)p - blob_off - 4, tag, tagname(tag));
 
 		if (tag == FDT_BEGIN_NODE) {
@@ -140,8 +141,8 @@ static void dump_blob(void *blob, bool debug)
 
 		p = PALIGN(p + sz, 4);
 
-		dumpf("%04zx: string: %s\n", (uintptr_t)s - blob_off, s);
-		dumpf("%04zx: value\n", (uintptr_t)t - blob_off);
+		dumpf("%04"PRIxPTR": string: %s\n", (uintptr_t)s - blob_off, s);
+		dumpf("%04"PRIxPTR": value\n", (uintptr_t)t - blob_off);
 		printf("%*s%s", depth * shift, "", s);
 		utilfdt_print_data(t, sz);
 		printf(";\n");
@@ -229,14 +230,14 @@ int main(int argc, char *argv[])
 				if (valid_header(p, this_len))
 					break;
 				if (debug)
-					printf("%s: skipping fdt magic at offset %#zx\n",
+					printf("%s: skipping fdt magic at offset %#tx\n",
 						file, p - buf);
 			}
 			++p;
 		}
 		if (!p || endp - p < sizeof(struct fdt_header))
 			die("%s: could not locate fdt magic\n", file);
-		printf("%s: found fdt at offset %#zx\n", file, p - buf);
+		printf("%s: found fdt at offset %#tx\n", file, p - buf);
 		buf = p;
 	} else if (!valid_header(buf, len))
 		die("%s: header is not valid\n", file);

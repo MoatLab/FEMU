@@ -8,7 +8,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -373,6 +373,8 @@ enum {
     CPU_POWERPC_POWER9_BASE        = 0x004E0000,
     CPU_POWERPC_POWER9_DD1         = 0x004E0100,
     CPU_POWERPC_POWER9_DD20        = 0x004E1200,
+    CPU_POWERPC_POWER10_BASE       = 0x00800000,
+    CPU_POWERPC_POWER10_DD1        = 0x00800100,
     CPU_POWERPC_970_v22            = 0x00390202,
     CPU_POWERPC_970FX_v10          = 0x00391100,
     CPU_POWERPC_970FX_v20          = 0x003C0200,
@@ -409,6 +411,7 @@ enum {
     CPU_POWERPC_LOGICAL_2_06_PLUS  = 0x0F100003,
     CPU_POWERPC_LOGICAL_2_07       = 0x0F000004,
     CPU_POWERPC_LOGICAL_3_00       = 0x0F000005,
+    CPU_POWERPC_LOGICAL_3_10       = 0x0F000006,
 };
 
 /* System version register (used on MPC 8xxx)                                */

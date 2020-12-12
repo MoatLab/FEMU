@@ -24,22 +24,14 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
 #include "hw/nvram/chrp_nvram.h"
 #include "hw/ppc/mac.h"
+#include "hw/qdev-properties.h"
+#include "migration/vmstate.h"
 #include "qemu/cutils.h"
 #include "qemu/module.h"
+#include "trace.h"
 #include <zlib.h>
-
-/* debug NVR */
-//#define DEBUG_NVR
-
-#ifdef DEBUG_NVR
-#define NVR_DPRINTF(fmt, ...)                                   \
-    do { printf("NVR: " fmt , ## __VA_ARGS__); } while (0)
-#else
-#define NVR_DPRINTF(fmt, ...)
-#endif
 
 #define DEF_SYSTEM_SIZE 0xc10
 
@@ -50,9 +42,8 @@ static void macio_nvram_writeb(void *opaque, hwaddr addr,
     MacIONVRAMState *s = opaque;
 
     addr = (addr >> s->it_shift) & (s->size - 1);
+    trace_macio_nvram_write(addr, value);
     s->data[addr] = value;
-    NVR_DPRINTF("writeb addr %04" HWADDR_PRIx " val %" PRIx64 "\n",
-                addr, value);
 }
 
 static uint64_t macio_nvram_readb(void *opaque, hwaddr addr,
@@ -63,8 +54,7 @@ static uint64_t macio_nvram_readb(void *opaque, hwaddr addr,
 
     addr = (addr >> s->it_shift) & (s->size - 1);
     value = s->data[addr];
-    NVR_DPRINTF("readb addr %04" HWADDR_PRIx " val %" PRIx32 "\n",
-                addr, value);
+    trace_macio_nvram_read(addr, value);
 
     return value;
 }
@@ -106,7 +96,7 @@ static void macio_nvram_realizefn(DeviceState *dev, Error **errp)
     sysbus_init_mmio(d, &s->mem);
 }
 
-static void macio_nvram_unrealizefn(DeviceState *dev, Error **errp)
+static void macio_nvram_unrealizefn(DeviceState *dev)
 {
     MacIONVRAMState *s = MACIO_NVRAM(dev);
 
@@ -127,7 +117,7 @@ static void macio_nvram_class_init(ObjectClass *oc, void *data)
     dc->unrealize = macio_nvram_unrealizefn;
     dc->reset = macio_nvram_reset;
     dc->vmsd = &vmstate_macio_nvram;
-    dc->props = macio_nvram_properties;
+    device_class_set_props(dc, macio_nvram_properties);
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
 }
 
@@ -151,7 +141,7 @@ static void pmac_format_nvram_partition_of(MacIONVRAMState *nvr, int off,
 
     /* OpenBIOS nvram variables partition */
     sysp_end = chrp_nvram_create_system_partition(&nvr->data[off],
-                                                  DEF_SYSTEM_SIZE) + off;
+                                                  DEF_SYSTEM_SIZE, len) + off;
 
     /* Free space partition */
     chrp_nvram_create_free_partition(&nvr->data[sysp_end], len - sysp_end);

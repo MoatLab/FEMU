@@ -34,8 +34,7 @@ trap "_cleanup; exit \$status" 0 1 2 3 15
 
 get_image_size_on_host()
 {
-    $QEMU_IMG info -f "$IMGFMT" "$TEST_IMG" | grep "disk size" \
-        | sed -e 's/^[^0-9]*\([0-9]\+\).*$/\1/'
+    echo $(($(stat -c '%b * %B' "$TEST_IMG_FILE")))
 }
 
 # get standard environment and filters
@@ -44,10 +43,54 @@ get_image_size_on_host()
 
 _supported_fmt qcow2
 _supported_proto file
+# Growing a file with a backing file (without preallocation=full or
+# =falloc) requires zeroing the newly added area, which is impossible
+# to do quickly for v2 images, and hence is unsupported.
+_unsupported_imgopts 'compat=0.10'
 
 if [ -z "$TEST_IMG_FILE" ]; then
     TEST_IMG_FILE=$TEST_IMG
 fi
+
+# Test whether we are running on a broken XFS version.  There is this
+# bug:
+
+# $ rm -f foo
+# $ touch foo
+# $ block_size=4096 # Your FS's block size
+# $ fallocate -o $((block_size / 2)) -l $block_size foo
+# $ LANG=C xfs_bmap foo | grep hole
+#         1: [8..15]: hole
+#
+# The problem is that the XFS driver rounds down the offset and
+# rounds up the length to the block size, but independently.  As
+# such, it only allocates the first block in the example above,
+# even though it should allocate the first two blocks (because our
+# request is to fallocate something that touches both the first
+# two blocks).
+#
+# This means that when you then write to the beginning of the
+# second block, the disk usage of the first two blocks grows.
+#
+# That is precisely what fallocate() promises, though: That when you
+# write to an area that you have fallocated, no new blocks will have
+# to be allocated.
+
+touch "$TEST_IMG_FILE"
+# Assuming there is no FS with a block size greater than 64k
+fallocate -o 65535 -l 2 "$TEST_IMG_FILE"
+len0=$(get_image_size_on_host)
+
+# Write to something that in theory we have just fallocated
+# (Thus, the on-disk size should not increase)
+poke_file "$TEST_IMG_FILE" 65536 42
+len1=$(get_image_size_on_host)
+
+if [ $len1 -gt $len0 ]; then
+    _notrun "the test filesystem's fallocate() is broken"
+fi
+
+rm -f "$TEST_IMG_FILE"
 
 # Generally, we create some image with or without existing preallocation and
 # then resize it. Then we write some data into the image and verify that its
@@ -75,7 +118,7 @@ for GROWTH_SIZE in 16 48 80; do
         for growth_mode in off metadata falloc full; do
             echo "--- cluster_size=$cluster_size growth_size=$GROWTH_SIZE create_mode=$create_mode growth_mode=$growth_mode ---"
 
-            IMGOPTS="preallocation=$create_mode,cluster_size=$cluster_size" _make_test_img ${CREATION_SIZE}
+            _make_test_img -o "preallocation=$create_mode,cluster_size=$cluster_size" ${CREATION_SIZE}
             $QEMU_IMG resize -f "$IMGFMT" --preallocation=$growth_mode "$TEST_IMG" +${GROWTH_SIZE}K
 
             host_size_0=$(get_image_size_on_host)
@@ -111,7 +154,7 @@ for GROWTH_SIZE in 16 48 80; do
                 if [ $file_length_2 -gt $file_length_1 ]; then
                     echo "ERROR (grow): Image length has grown from $file_length_1 to $file_length_2"
                 fi
-                if [ $create_mode != metadata ]; then
+                if [ $growth_mode != metadata ]; then
                     # The host size should not have grown either
                     if [ $host_size_2 -gt $host_size_1 ]; then
                         echo "ERROR (grow): Host size has grown from $host_size_1 to $host_size_2"
@@ -123,6 +166,34 @@ for GROWTH_SIZE in 16 48 80; do
         done
     done
 done
+done
+
+# Test image resizing using preallocation and unaligned offsets
+$QEMU_IMG create -f raw "$TEST_IMG.base" 128k | _filter_img_create
+$QEMU_IO -c 'write -q -P 1 0 128k' -f raw "$TEST_IMG.base"
+for orig_size in 31k 33k; do
+    for dst_size in 96k 128k; do
+        for prealloc in metadata full; do
+            echo "--- Resizing image from $orig_size to $dst_size (preallocation=$prealloc) ---"
+            _make_test_img -F raw -b "$TEST_IMG.base" -o cluster_size=64k "$orig_size"
+            $QEMU_IMG resize -f "$IMGFMT" --preallocation="$prealloc" "$TEST_IMG" "$dst_size"
+            # The first part of the image should contain data from the backing file
+            $QEMU_IO -c "read -q -P 1 0 ${orig_size}" "$TEST_IMG"
+            # The resized part of the image should contain zeroes
+            $QEMU_IO -c "read -q -P 0 ${orig_size} 63k" "$TEST_IMG"
+            # If the image does not have an external data file we can also verify its
+            # actual size. The resized image should have 7 clusters:
+            # header, L1 table, L2 table, refcount table, refcount block, 2 data clusters
+            if ! _get_data_file "$TEST_IMG" > /dev/null; then
+                expected_file_length=$((65536 * 7))
+                file_length=$(stat -c '%s' "$TEST_IMG_FILE")
+                if [ "$file_length" != "$expected_file_length" ]; then
+                    echo "ERROR: file length $file_length (expected $expected_file_length)"
+                fi
+            fi
+            echo
+        done
+    done
 done
 
 # success, all done

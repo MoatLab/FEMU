@@ -15,10 +15,12 @@
 #include "qemu/module.h"
 #include "hw/pci/msix.h"
 #include "hw/pci/pcie_port.h"
+#include "hw/qdev-properties.h"
+#include "migration/vmstate.h"
+#include "qom/object.h"
 
 #define TYPE_GEN_PCIE_ROOT_PORT                "pcie-root-port"
-#define GEN_PCIE_ROOT_PORT(obj) \
-        OBJECT_CHECK(GenPCIERootPort, (obj), TYPE_GEN_PCIE_ROOT_PORT)
+OBJECT_DECLARE_SIMPLE_TYPE(GenPCIERootPort, GEN_PCIE_ROOT_PORT)
 
 #define GEN_PCIE_ROOT_PORT_AER_OFFSET           0x100
 #define GEN_PCIE_ROOT_PORT_ACS_OFFSET \
@@ -26,7 +28,7 @@
 
 #define GEN_PCIE_ROOT_PORT_MSIX_NR_VECTOR       1
 
-typedef struct GenPCIERootPort {
+struct GenPCIERootPort {
     /*< private >*/
     PCIESlot parent_obj;
     /*< public >*/
@@ -35,7 +37,7 @@ typedef struct GenPCIERootPort {
 
     /* additional resources to reserve */
     PCIResReserve res_reserve;
-} GenPCIERootPort;
+};
 
 static uint8_t gen_rp_aer_vector(const PCIDevice *d)
 {
@@ -145,7 +147,7 @@ static void gen_rp_dev_class_init(ObjectClass *klass, void *data)
     k->device_id = PCI_DEVICE_ID_REDHAT_PCIE_RP;
     dc->desc = "PCI Express Root Port";
     dc->vmsd = &vmstate_rp_dev;
-    dc->props = gen_rp_props;
+    device_class_set_props(dc, gen_rp_props);
 
     device_class_set_parent_realize(dc, gen_rp_realize, &rpc->parent_realize);
 

@@ -1,9 +1,42 @@
 #! /bin/sh
 
-. ./tests.sh
+SRCDIR=`dirname "$0"`
+. "$SRCDIR/testutils.sh"
 
 if [ -z "$CC" ]; then
-    CC=gcc
+    CC=cc
+fi
+
+if [ -z "$PYTHON" ]; then
+    PYTHON=python3
+fi
+
+if [ -n "$NO_PYTHON" ]; then
+    if [ "$NO_PYTHON" != "0" ]; then
+        no_python=true
+    else
+        no_python=false
+    fi
+else
+    if [ -f ../pylibfdt/_libfdt.so ] || [ -f ../pylibfdt/_libfdt.cpython-3*.so ]; then
+        no_python=false
+    else
+        no_python=true
+    fi
+fi
+
+if [ -n "$NO_YAML" ]; then
+    if [ "$NO_YAML" != "0" ]; then
+        no_yaml=true
+    else
+        no_yaml=false
+    fi
+else
+    if pkg-config --exists yaml-0.1; then
+        no_yaml=false
+    else
+        no_yaml=true
+    fi
 fi
 
 # stat differs between platforms
@@ -17,6 +50,12 @@ if [ -z "$STATSZ" ]; then
 		STATSZ="stat -c %s"
 	fi
 fi
+
+# Help things find the libfdt shared object
+if [ -z "$TEST_LIBDIR" ]; then
+    TEST_LIBDIR=../libfdt
+fi
+export LD_LIBRARY_PATH="$TEST_LIBDIR"
 
 export QUIET_TEST=1
 STOP_ON_FAIL=0
@@ -88,6 +127,9 @@ wrap_test () {
 	    if [ "$ret" -gt 127 ]; then
 		signame=$(kill -l $((ret - 128)))
 		FAIL "Killed by SIG$signame"
+	    elif [ "$ret" -eq $VGCODE ]; then
+		echo "VALGRIND ERROR"
+		exit $VGCODE
 	    else
 		FAIL "Returned error code $ret"
 	    fi
@@ -143,7 +185,7 @@ run_dtc_test () {
 }
 
 asm_to_so () {
-    $CC -shared -o $1.test.so data.S $1.test.s
+    $CC -shared -o $1.test.so "$SRCDIR/data.S" $1.test.s
 }
 
 asm_to_so_test () {
@@ -154,7 +196,7 @@ run_fdtget_test () {
     expect="$1"
     shift
     printf "fdtget-runtest.sh %s $*:	" "$(echo $expect)"
-    base_run_test sh fdtget-runtest.sh "$expect" "$@"
+    base_run_test sh "$SRCDIR/fdtget-runtest.sh" "$expect" "$@"
 }
 
 run_fdtput_test () {
@@ -162,14 +204,14 @@ run_fdtput_test () {
     shift
     shorten_echo fdtput-runtest.sh "$expect" "$@"
     printf ":	"
-    base_run_test sh fdtput-runtest.sh "$expect" "$@"
+    base_run_test sh "$SRCDIR/fdtput-runtest.sh" "$expect" "$@"
 }
 
 run_fdtdump_test() {
     file="$1"
     shorten_echo fdtdump-runtest.sh "$file"
     printf ":	"
-    base_run_test sh fdtdump-runtest.sh "$file" 2>/dev/null
+    base_run_test sh "$SRCDIR/fdtdump-runtest.sh" "$file" 2>/dev/null
 }
 
 run_fdtoverlay_test() {
@@ -177,7 +219,7 @@ run_fdtoverlay_test() {
     shift
     shorten_echo fdtoverlay-runtest.sh "$expect" "$@"
     printf ":	"
-    base_run_test sh fdtoverlay-runtest.sh "$expect" "$@"
+    base_run_test sh "$SRCDIR/fdtoverlay-runtest.sh" "$expect" "$@"
 }
 
 BAD_FIXUP_TREES="bad_index \
@@ -192,12 +234,12 @@ BAD_FIXUP_TREES="bad_index \
 # Test to exercise libfdt overlay application without dtc's overlay support
 libfdt_overlay_tests () {
     # First test a doctored overlay which requires only local fixups
-    run_dtc_test -I dts -O dtb -o overlay_base_no_symbols.test.dtb overlay_base.dts
+    run_dtc_test -I dts -O dtb -o overlay_base_no_symbols.test.dtb "$SRCDIR/overlay_base.dts"
     run_test check_path overlay_base_no_symbols.test.dtb not-exists "/__symbols__"
     run_test check_path overlay_base_no_symbols.test.dtb not-exists "/__fixups__"
     run_test check_path overlay_base_no_symbols.test.dtb not-exists "/__local_fixups__"
 
-    run_dtc_test -I dts -O dtb -o overlay_overlay_no_fixups.test.dtb overlay_overlay_no_fixups.dts
+    run_dtc_test -I dts -O dtb -o overlay_overlay_no_fixups.test.dtb "$SRCDIR/overlay_overlay_no_fixups.dts"
     run_test check_path overlay_overlay_no_fixups.test.dtb not-exists "/__symbols__"
     run_test check_path overlay_overlay_no_fixups.test.dtb not-exists "/__fixups__"
     run_test check_path overlay_overlay_no_fixups.test.dtb exists "/__local_fixups__"
@@ -205,12 +247,12 @@ libfdt_overlay_tests () {
     run_test overlay overlay_base_no_symbols.test.dtb overlay_overlay_no_fixups.test.dtb
 
     # Then test with manually constructed fixups
-    run_dtc_test -I dts -O dtb -o overlay_base_manual_symbols.test.dtb overlay_base_manual_symbols.dts
+    run_dtc_test -I dts -O dtb -o overlay_base_manual_symbols.test.dtb "$SRCDIR/overlay_base_manual_symbols.dts"
     run_test check_path overlay_base_manual_symbols.test.dtb exists "/__symbols__"
     run_test check_path overlay_base_manual_symbols.test.dtb not-exists "/__fixups__"
     run_test check_path overlay_base_manual_symbols.test.dtb not-exists "/__local_fixups__"
 
-    run_dtc_test -I dts -O dtb -o overlay_overlay_manual_fixups.test.dtb overlay_overlay_manual_fixups.dts
+    run_dtc_test -I dts -O dtb -o overlay_overlay_manual_fixups.test.dtb "$SRCDIR/overlay_overlay_manual_fixups.dts"
     run_test check_path overlay_overlay_manual_fixups.test.dtb not-exists "/__symbols__"
     run_test check_path overlay_overlay_manual_fixups.test.dtb exists "/__fixups__"
     run_test check_path overlay_overlay_manual_fixups.test.dtb exists "/__local_fixups__"
@@ -218,7 +260,7 @@ libfdt_overlay_tests () {
     run_test overlay overlay_base_manual_symbols.test.dtb overlay_overlay_manual_fixups.test.dtb
 
     # test simplified plugin syntax
-    run_dtc_test -@ -I dts -O dtb -o overlay_overlay_simple.dtb overlay_overlay_simple.dts
+    run_dtc_test -@ -I dts -O dtb -o overlay_overlay_simple.dtb "$SRCDIR/overlay_overlay_simple.dts"
 
     # verify non-generation of local fixups
     run_test check_path overlay_overlay_simple.dtb not-exists "/__local_fixups__"
@@ -226,7 +268,7 @@ libfdt_overlay_tests () {
     # Bad fixup tests
     for test in $BAD_FIXUP_TREES; do
 	tree="overlay_bad_fixup_$test"
-	run_dtc_test -I dts -O dtb -o $tree.test.dtb $tree.dts
+	run_dtc_test -I dts -O dtb -o $tree.test.dtb "$SRCDIR/$tree.dts"
 	run_test overlay_bad_fixup overlay_base_no_symbols.test.dtb $tree.test.dtb
     done
 }
@@ -234,40 +276,45 @@ libfdt_overlay_tests () {
 # Tests to exercise dtc's overlay generation support
 dtc_overlay_tests () {
     # Overlay tests for dtc
-    run_dtc_test -@ -I dts -O dtb -o overlay_base.test.dtb overlay_base.dts
+    run_dtc_test -@ -I dts -O dtb -o overlay_base.test.dtb "$SRCDIR/overlay_base.dts"
     run_test check_path overlay_base.test.dtb exists "/__symbols__"
     run_test check_path overlay_base.test.dtb not-exists "/__fixups__"
     run_test check_path overlay_base.test.dtb not-exists "/__local_fixups__"
 
     # With syntactic sugar
-    run_dtc_test -I dts -O dtb -o overlay_overlay.test.dtb overlay_overlay.dts
+    run_dtc_test -I dts -O dtb -o overlay_overlay.test.dtb "$SRCDIR/overlay_overlay.dts"
     run_test check_path overlay_overlay.test.dtb not-exists "/__symbols__"
     run_test check_path overlay_overlay.test.dtb exists "/__fixups__"
     run_test check_path overlay_overlay.test.dtb exists "/__local_fixups__"
 
     # Without syntactic sugar
-    run_dtc_test -I dts -O dtb -o overlay_overlay_nosugar.test.dtb overlay_overlay.dts
+    run_dtc_test -I dts -O dtb -o overlay_overlay_nosugar.test.dtb "$SRCDIR/overlay_overlay.dts"
     run_test check_path overlay_overlay_nosugar.test.dtb not-exists "/__symbols__"
     run_test check_path overlay_overlay_nosugar.test.dtb exists "/__fixups__"
     run_test check_path overlay_overlay_nosugar.test.dtb exists "/__local_fixups__"
 
     # Using target-path
-    run_dtc_test -I dts -O dtb -o overlay_overlay_bypath.test.dtb overlay_overlay_bypath.dts
+    run_dtc_test -I dts -O dtb -o overlay_overlay_bypath.test.dtb "$SRCDIR/overlay_overlay_bypath.dts"
     run_test check_path overlay_overlay_bypath.test.dtb not-exists "/__symbols__"
     run_test check_path overlay_overlay_bypath.test.dtb not-exists "/__fixups__"
     run_test check_path overlay_overlay_bypath.test.dtb exists "/__local_fixups__"
 
+    # Make sure local target references are resolved and nodes are merged and that path references are not
+    run_dtc_test -I dts -O dtb -o overlay_overlay_local_merge.test.dtb "$SRCDIR/overlay_overlay_local_merge.dts"
+    run_test check_path overlay_overlay_local_merge.test.dtb exists "/fragment@0/__overlay__/new-node/new-merged-node"
+    run_test check_path overlay_overlay_local_merge.test.dtb exists "/fragment@1/__overlay__/new-root-node"
+
     # Check building works the same as manual constructions
     run_test dtbs_equal_ordered overlay_overlay.test.dtb overlay_overlay_nosugar.test.dtb
 
-    run_dtc_test -I dts -O dtb -o overlay_overlay_manual_fixups.test.dtb overlay_overlay_manual_fixups.dts
+    run_dtc_test -I dts -O dtb -o overlay_overlay_manual_fixups.test.dtb "$SRCDIR/overlay_overlay_manual_fixups.dts"
     run_test dtbs_equal_ordered overlay_overlay.test.dtb overlay_overlay_manual_fixups.test.dtb
 
-    run_dtc_test -I dts -O dtb -o overlay_overlay_no_fixups.test.dtb overlay_overlay_no_fixups.dts
+    run_dtc_test -I dts -O dtb -o overlay_overlay_no_fixups.test.dtb "$SRCDIR/overlay_overlay_no_fixups.dts"
     run_test dtbs_equal_ordered overlay_overlay_bypath.test.dtb overlay_overlay_no_fixups.test.dtb
 
     # Check we can actually apply the result
-    run_dtc_test -I dts -O dtb -o overlay_base_no_symbols.test.dtb overlay_base.dts
+    run_dtc_test -I dts -O dtb -o overlay_base_no_symbols.test.dtb "$SRCDIR/overlay_base.dts"
     run_test overlay overlay_base.test.dtb overlay_overlay.test.dtb
     run_test overlay overlay_base_no_symbols.test.dtb overlay_overlay_bypath.test.dtb
 
@@ -276,8 +323,8 @@ dtc_overlay_tests () {
     run_dtc_test -I dts -O dtb -o overlay_overlay_decompile.test.dtb overlay_overlay_decompile.test.dts
     run_test dtbs_equal_ordered overlay_overlay.test.dtb overlay_overlay_decompile.test.dtb
 
-    # Test generation of aliases insted of symbols
-    run_dtc_test -A -I dts -O dtb -o overlay_base_with_aliases.dtb overlay_base.dts
+    # Test generation of aliases instead of symbols
+    run_dtc_test -A -I dts -O dtb -o overlay_base_with_aliases.dtb "$SRCDIR/overlay_base.dts"
     run_test check_path overlay_base_with_aliases.dtb exists "/aliases"
     run_test check_path overlay_base_with_aliases.dtb not-exists "/__symbols__"
     run_test check_path overlay_base_with_aliases.dtb not-exists "/__fixups__"
@@ -295,6 +342,7 @@ tree1_tests () {
     run_test path_offset $TREE
     run_test get_name $TREE
     run_test getprop $TREE
+    run_test get_prop_offset $TREE
     run_test get_phandle $TREE
     run_test get_path $TREE
     run_test supernode_atdepth_offset $TREE
@@ -324,9 +372,9 @@ tree1_tests_rw () {
 check_tests () {
     tree="$1"
     shift
-    run_sh_test dtc-checkfails.sh "$@" -- -I dts -O dtb $tree
+    run_sh_test "$SRCDIR/dtc-checkfails.sh" "$@" -- -I dts -O dtb $tree
     run_dtc_test -I dts -O dtb -o $tree.test.dtb -f $tree
-    run_sh_test dtc-checkfails.sh "$@" -- -I dtb -O dtb $tree.test.dtb
+    run_sh_test "$SRCDIR/dtc-checkfails.sh" "$@" -- -I dtb -O dtb $tree.test.dtb
 }
 
 ALL_LAYOUTS="mts mst tms tsm smt stm"
@@ -334,27 +382,29 @@ ALL_LAYOUTS="mts mst tms tsm smt stm"
 libfdt_tests () {
     tree1_tests test_tree1.dtb
 
-    run_dtc_test -I dts -O dtb -o addresses.test.dtb addresses.dts
+    run_dtc_test -I dts -O dtb -o addresses.test.dtb "$SRCDIR/addresses.dts"
     run_test addr_size_cells addresses.test.dtb
-    run_dtc_test -I dts -O dtb -o addresses2.test.dtb empty.dts
+    run_dtc_test -I dts -O dtb -o addresses2.test.dtb "$SRCDIR/empty.dts"
     run_test addr_size_cells2 addresses2.test.dtb
 
-    run_dtc_test -I dts -O dtb -o stringlist.test.dtb stringlist.dts
+    run_dtc_test -I dts -O dtb -o stringlist.test.dtb "$SRCDIR/stringlist.dts"
     run_test stringlist stringlist.test.dtb
 
-    # Sequential write tests
-    run_test sw_tree1
-    tree1_tests sw_tree1.test.dtb
-    tree1_tests unfinished_tree1.test.dtb
-    run_test dtbs_equal_ordered test_tree1.dtb sw_tree1.test.dtb
-    run_test sw_states
+    for flags in default no_name_dedup; do
+        # Sequential write tests
+        run_test sw_tree1 fixed $flags
+        tree1_tests sw_tree1.test.dtb
+        tree1_tests unfinished_tree1.test.dtb
+        run_test dtbs_equal_ordered test_tree1.dtb sw_tree1.test.dtb
+        run_test sw_states
 
-    # Resizing tests
-    for mode in resize realloc newalloc; do
-	run_test sw_tree1 $mode
-	tree1_tests sw_tree1.test.dtb
-	tree1_tests unfinished_tree1.test.dtb
-	run_test dtbs_equal_ordered test_tree1.dtb sw_tree1.test.dtb
+        # Resizing tests
+        for mode in resize realloc newalloc; do
+            run_test sw_tree1 $mode $flags
+            tree1_tests sw_tree1.test.dtb
+            tree1_tests unfinished_tree1.test.dtb
+            run_test dtbs_equal_ordered test_tree1.dtb sw_tree1.test.dtb
+        done
     done
 
     # fdt_move tests
@@ -398,7 +448,7 @@ libfdt_tests () {
     tree1_tests_rw rw_tree1.test.dtb
     run_test appendprop1
     run_test appendprop2 appendprop1.test.dtb
-    run_dtc_test -I dts -O dtb -o appendprop.test.dtb appendprop.dts
+    run_dtc_test -I dts -O dtb -o appendprop.test.dtb "$SRCDIR/appendprop.dts"
     run_test dtbs_equal_ordered appendprop2.test.dtb appendprop.test.dtb
     libfdt_overlay_tests
 
@@ -409,11 +459,18 @@ libfdt_tests () {
 	tree1_tests_rw noppy.$basetree
     done
 
-    run_dtc_test -I dts -O dtb -o subnode_iterate.dtb subnode_iterate.dts
+    run_test rw_oom
+
+    run_dtc_test -I dts -O dtb -o subnode_iterate.dtb "$SRCDIR/subnode_iterate.dts"
     run_test subnode_iterate subnode_iterate.dtb
 
-    run_dtc_test -I dts -O dtb -o property_iterate.dtb property_iterate.dts
+    run_dtc_test -I dts -O dtb -o property_iterate.dtb "$SRCDIR/property_iterate.dts"
     run_test property_iterate property_iterate.dtb
+
+    run_dtc_test -I dts -O dtb -o unit-addr-without-reg.dtb "$SRCDIR/unit-addr-without-reg.dts"
+    run_test appendprop_addrrange unit-addr-without-reg.dtb 1 1 1
+    run_test appendprop_addrrange unit-addr-without-reg.dtb 2 2 2
+    run_test appendprop_addrrange unit-addr-without-reg.dtb 2 1 3
 
     # Tests for behaviour on various sorts of corrupted trees
     run_test truncated_property
@@ -421,32 +478,40 @@ libfdt_tests () {
     run_test truncated_memrsv
 
     # Check aliases support in fdt_path_offset
-    run_dtc_test -I dts -O dtb -o aliases.dtb aliases.dts
+    run_dtc_test -I dts -O dtb -o aliases.dtb "$SRCDIR/aliases.dts"
     run_test get_alias aliases.dtb
     run_test path_offset_aliases aliases.dtb
 
     # Specific bug tests
     run_test add_subnode_with_nops
-    run_dtc_test -I dts -O dts -o sourceoutput.test.dts sourceoutput.dts
-    run_dtc_test -I dts -O dtb -o sourceoutput.test.dtb sourceoutput.dts
+    run_dtc_test -I dts -O dts -o sourceoutput.test.dts "$SRCDIR/sourceoutput.dts"
+    run_dtc_test -I dts -O dtb -o sourceoutput.test.dtb "$SRCDIR/sourceoutput.dts"
     run_dtc_test -I dts -O dtb -o sourceoutput.test.dts.test.dtb sourceoutput.test.dts
     run_test dtbs_equal_ordered sourceoutput.test.dtb sourceoutput.test.dts.test.dtb
 
-    run_dtc_test -I dts -O dtb -o embedded_nul.test.dtb embedded_nul.dts
-    run_dtc_test -I dts -O dtb -o embedded_nul_equiv.test.dtb embedded_nul_equiv.dts
+    run_dtc_test -I dts -O dtb -o embedded_nul.test.dtb "$SRCDIR/embedded_nul.dts"
+    run_dtc_test -I dts -O dtb -o embedded_nul_equiv.test.dtb "$SRCDIR/embedded_nul_equiv.dts"
     run_test dtbs_equal_ordered embedded_nul.test.dtb embedded_nul_equiv.test.dtb
 
-    run_dtc_test -I dts -O dtb bad-size-cells.dts
+    run_dtc_test -I dts -O dtb "$SRCDIR/bad-size-cells.dts"
 
     run_wrap_error_test $DTC division-by-zero.dts
     run_wrap_error_test $DTC bad-octal-literal.dts
-    run_dtc_test -I dts -O dtb nul-in-escape.dts
+    run_dtc_test -I dts -O dtb "$SRCDIR/nul-in-escape.dts"
     run_wrap_error_test $DTC nul-in-line-info1.dts
     run_wrap_error_test $DTC nul-in-line-info2.dts
 
     run_wrap_error_test $DTC -I dtb -O dts -o /dev/null ovf_size_strings.dtb
 
     run_test check_header test_tree1.dtb
+
+    FSBASE=fs
+    rm -rf $FSBASE
+    mkdir -p $FSBASE
+    run_test fs_tree1 $FSBASE/test_tree1
+    run_dtc_test -I fs -O dts -o fs.test_tree1.test.dts $FSBASE/test_tree1
+    run_dtc_test -I fs -O dtb -o fs.test_tree1.test.dtb $FSBASE/test_tree1
+    run_test dtbs_equal_unordered -m fs.test_tree1.test.dtb test_tree1.dtb
 
     # check full tests
     for good in test_tree1.dtb; do
@@ -459,62 +524,62 @@ libfdt_tests () {
 }
 
 dtc_tests () {
-    run_dtc_test -I dts -O dtb -o dtc_tree1.test.dtb test_tree1.dts
+    run_dtc_test -I dts -O dtb -o dtc_tree1.test.dtb "$SRCDIR/test_tree1.dts"
     tree1_tests dtc_tree1.test.dtb
     tree1_tests_rw dtc_tree1.test.dtb
     run_test dtbs_equal_ordered dtc_tree1.test.dtb test_tree1.dtb
 
-    run_dtc_test -I dts -O dtb -o dtc_escapes.test.dtb propname_escapes.dts
+    run_dtc_test -I dts -O dtb -o dtc_escapes.test.dtb "$SRCDIR/propname_escapes.dts"
     run_test propname_escapes dtc_escapes.test.dtb
 
-    run_dtc_test -I dts -O dtb -o line_directives.test.dtb line_directives.dts
+    run_dtc_test -I dts -O dtb -o line_directives.test.dtb "$SRCDIR/line_directives.dts"
 
-    run_dtc_test -I dts -O dtb -o dtc_escapes.test.dtb escapes.dts
+    run_dtc_test -I dts -O dtb -o dtc_escapes.test.dtb "$SRCDIR/escapes.dts"
     run_test string_escapes dtc_escapes.test.dtb
 
-    run_dtc_test -I dts -O dtb -o dtc_char_literal.test.dtb char_literal.dts
+    run_dtc_test -I dts -O dtb -o dtc_char_literal.test.dtb "$SRCDIR/char_literal.dts"
     run_test char_literal dtc_char_literal.test.dtb
 
-    run_dtc_test -I dts -O dtb -o dtc_sized_cells.test.dtb sized_cells.dts
+    run_dtc_test -I dts -O dtb -o dtc_sized_cells.test.dtb "$SRCDIR/sized_cells.dts"
     run_test sized_cells dtc_sized_cells.test.dtb
 
-    run_dtc_test -I dts -O dtb -o dtc_extra-terminating-null.test.dtb extra-terminating-null.dts
+    run_dtc_test -I dts -O dtb -o dtc_extra-terminating-null.test.dtb "$SRCDIR/extra-terminating-null.dts"
     run_test extra-terminating-null dtc_extra-terminating-null.test.dtb
 
-    run_dtc_test -I dts -O dtb -o dtc_references.test.dtb references.dts
+    run_dtc_test -I dts -O dtb -o dtc_references.test.dtb "$SRCDIR/references.dts"
     run_test references dtc_references.test.dtb
 
-    run_dtc_test -I dts -O dtb -o dtc_path-references.test.dtb path-references.dts
+    run_dtc_test -I dts -O dtb -o dtc_path-references.test.dtb "$SRCDIR/path-references.dts"
     run_test path-references dtc_path-references.test.dtb
 
     run_test phandle_format dtc_references.test.dtb epapr
     for f in legacy epapr both; do
-	run_dtc_test -I dts -O dtb -H $f -o dtc_references.test.$f.dtb references.dts
+	    run_dtc_test -I dts -O dtb -H $f -o dtc_references.test.$f.dtb "$SRCDIR/references.dts"
 	run_test phandle_format dtc_references.test.$f.dtb $f
     done
 
-    run_dtc_test -I dts -O dtb -o multilabel.test.dtb multilabel.dts
+    run_dtc_test -I dts -O dtb -o multilabel.test.dtb "$SRCDIR/multilabel.dts"
     run_test references multilabel.test.dtb
 
-    run_dtc_test -I dts -O dtb -o label_repeated.test.dtb label_repeated.dts
+    run_dtc_test -I dts -O dtb -o label_repeated.test.dtb "$SRCDIR/label_repeated.dts"
 
-    run_dtc_test -I dts -O dtb -o dtc_comments.test.dtb comments.dts
-    run_dtc_test -I dts -O dtb -o dtc_comments-cmp.test.dtb comments-cmp.dts
+    run_dtc_test -I dts -O dtb -o dtc_comments.test.dtb "$SRCDIR/comments.dts"
+    run_dtc_test -I dts -O dtb -o dtc_comments-cmp.test.dtb "$SRCDIR/comments-cmp.dts"
     run_test dtbs_equal_ordered dtc_comments.test.dtb dtc_comments-cmp.test.dtb
 
     # Check /include/ directive
-    run_dtc_test -I dts -O dtb -o includes.test.dtb include0.dts
+    run_dtc_test -I dts -O dtb -o includes.test.dtb "$SRCDIR/include0.dts"
     run_test dtbs_equal_ordered includes.test.dtb test_tree1.dtb
 
     # Check /incbin/ directive
-    run_dtc_test -I dts -O dtb -o incbin.test.dtb incbin.dts
-    run_test incbin incbin.test.dtb
+    run_dtc_test -I dts -O dtb -o incbin.test.dtb "$SRCDIR/incbin.dts"
+    run_test incbin "$SRCDIR/incbin.bin" incbin.test.dtb
 
     # Check boot_cpuid_phys handling
-    run_dtc_test -I dts -O dtb -o boot_cpuid.test.dtb boot-cpuid.dts
+    run_dtc_test -I dts -O dtb -o boot_cpuid.test.dtb "$SRCDIR/boot-cpuid.dts"
     run_test boot-cpuid boot_cpuid.test.dtb 16
 
-    run_dtc_test -I dts -O dtb -b 17 -o boot_cpuid_17.test.dtb boot-cpuid.dts
+    run_dtc_test -I dts -O dtb -b 17 -o boot_cpuid_17.test.dtb "$SRCDIR/boot-cpuid.dts"
     run_test boot-cpuid boot_cpuid_17.test.dtb 17
 
     run_dtc_test -I dtb -O dtb -o preserve_boot_cpuid.test.dtb boot_cpuid.test.dtb
@@ -536,9 +601,9 @@ dtc_tests () {
     for tree in test_tree1.dts escapes.dts references.dts path-references.dts \
 	comments.dts aliases.dts include0.dts incbin.dts \
 	value-labels.dts ; do
-	run_dtc_test -I dts -O asm -o oasm_$tree.test.s $tree
+	run_dtc_test -I dts -O asm -o oasm_$tree.test.s "$SRCDIR/$tree"
 	asm_to_so_test oasm_$tree
-	run_dtc_test -I dts -O dtb -o $tree.test.dtb $tree
+	run_dtc_test -I dts -O dtb -o $tree.test.dtb "$SRCDIR/$tree"
 	run_test asm_tree_dump ./oasm_$tree.test.so oasm_$tree.test.dtb
 	run_wrap_test cmp oasm_$tree.test.dtb $tree.test.dtb
     done
@@ -555,10 +620,24 @@ dtc_tests () {
 
     # Check -Odts preserving type information
     for tree in type-preservation.dts; do
-        run_dtc_test -I dts -O dts -o $tree.test.dts $tree
+        run_dtc_test -I dts -O dts -o $tree.test.dts "$SRCDIR/$tree"
         run_dtc_test -I dts -O dts $tree.test.dts
-        run_wrap_test cmp $tree $tree.test.dts
+        run_wrap_test cmp "$SRCDIR/$tree" $tree.test.dts
     done
+    for tree in path-references; do
+        run_dtc_test -I dts -O dtb -o $tree.test.dtb "$SRCDIR/$tree.dts"
+        run_dtc_test -I dts -O dts -o $tree.test.dts "$SRCDIR/$tree.dts"
+        run_dtc_test -I dts -O dtb -o $tree.test.dts.test.dtb $tree.test.dts
+        run_test dtbs_equal_ordered $tree.test.dtb $tree.test.dts.test.dtb
+    done
+
+    # Check -Oyaml output
+    if ! $no_yaml; then
+            for tree in type-preservation; do
+                run_dtc_test -I dts -O yaml -o $tree.test.dt.yaml "$SRCDIR/$tree.dts"
+                run_wrap_test cmp "$SRCDIR/$tree.dt.yaml" $tree.test.dt.yaml
+            done
+    fi
 
     # Check version conversions
     for tree in test_tree1.dtb ; do
@@ -574,98 +653,103 @@ dtc_tests () {
     done
 
     # Check merge/overlay functionality
-    run_dtc_test -I dts -O dtb -o dtc_tree1_merge.test.dtb test_tree1_merge.dts
+    run_dtc_test -I dts -O dtb -o dtc_tree1_merge.test.dtb "$SRCDIR/test_tree1_merge.dts"
     tree1_tests dtc_tree1_merge.test.dtb test_tree1.dtb
-    run_dtc_test -I dts -O dtb -o dtc_tree1_merge_labelled.test.dtb test_tree1_merge_labelled.dts
+    run_dtc_test -I dts -O dtb -o dtc_tree1_merge_labelled.test.dtb "$SRCDIR/test_tree1_merge_labelled.dts"
     tree1_tests dtc_tree1_merge_labelled.test.dtb test_tree1.dtb
-    run_dtc_test -I dts -O dtb -o dtc_tree1_label_noderef.test.dtb test_tree1_label_noderef.dts
+    run_dtc_test -I dts -O dtb -o dtc_tree1_label_noderef.test.dtb "$SRCDIR/test_tree1_label_noderef.dts"
     run_test dtbs_equal_unordered dtc_tree1_label_noderef.test.dtb test_tree1.dtb
-    run_dtc_test -I dts -O dtb -o multilabel_merge.test.dtb multilabel_merge.dts
+    run_dtc_test -I dts -O dtb -o multilabel_merge.test.dtb "$SRCDIR/multilabel_merge.dts"
     run_test references multilabel.test.dtb
     run_test dtbs_equal_ordered multilabel.test.dtb multilabel_merge.test.dtb
-    run_dtc_test -I dts -O dtb -o dtc_tree1_merge_path.test.dtb test_tree1_merge_path.dts
+    run_dtc_test -I dts -O dtb -o dtc_tree1_merge_path.test.dtb "$SRCDIR/test_tree1_merge_path.dts"
     tree1_tests dtc_tree1_merge_path.test.dtb test_tree1.dtb
-    run_wrap_error_test $DTC -I dts -O dtb -o /dev/null test_label_ref.dts
+    run_wrap_error_test $DTC -I dts -O dtb -o /dev/null "$SRCDIR/test_label_ref.dts"
 
     # Check prop/node delete functionality
-    run_dtc_test -I dts -O dtb -o dtc_tree1_delete.test.dtb test_tree1_delete.dts
+    run_dtc_test -I dts -O dtb -o dtc_tree1_delete.test.dtb "$SRCDIR/test_tree1_delete.dts"
     tree1_tests dtc_tree1_delete.test.dtb
 
     # Check omit-if-no-ref functionality
-    run_dtc_test -I dts -O dtb -o omit-no-ref.test.dtb omit-no-ref.dts
+    run_dtc_test -I dts -O dtb -o omit-no-ref.test.dtb "$SRCDIR/omit-no-ref.dts"
     run_test check_path omit-no-ref.test.dtb not-exists "/node1"
     run_test check_path omit-no-ref.test.dtb not-exists "/node2"
     run_test check_path omit-no-ref.test.dtb exists "/node3"
     run_test check_path omit-no-ref.test.dtb exists "/node4"
 
-    run_dtc_test -I dts -O dts -o delete_reinstate_multilabel.dts.test.dts delete_reinstate_multilabel.dts
-    run_wrap_test cmp delete_reinstate_multilabel.dts.test.dts delete_reinstate_multilabel_ref.dts
+    run_dtc_test -I dts -O dts -o delete_reinstate_multilabel.dts.test.dts "$SRCDIR/delete_reinstate_multilabel.dts"
+    run_wrap_test cmp delete_reinstate_multilabel.dts.test.dts "$SRCDIR/delete_reinstate_multilabel_ref.dts"
 
     # Check some checks
-    check_tests dup-nodename.dts duplicate_node_names
-    check_tests dup-propname.dts duplicate_property_names
-    check_tests dup-phandle.dts explicit_phandles
-    check_tests zero-phandle.dts explicit_phandles
-    check_tests minusone-phandle.dts explicit_phandles
-    run_sh_test dtc-checkfails.sh phandle_references -- -I dts -O dtb nonexist-node-ref.dts
-    run_sh_test dtc-checkfails.sh phandle_references -- -I dts -O dtb nonexist-label-ref.dts
-    run_sh_test dtc-fatal.sh -I dts -O dtb nonexist-node-ref2.dts
-    check_tests bad-name-property.dts name_properties
+    check_tests "$SRCDIR/dup-nodename.dts" duplicate_node_names
+    check_tests "$SRCDIR/dup-propname.dts" duplicate_property_names
+    check_tests "$SRCDIR/dup-phandle.dts" explicit_phandles
+    check_tests "$SRCDIR/zero-phandle.dts" explicit_phandles
+    check_tests "$SRCDIR/minusone-phandle.dts" explicit_phandles
+    run_sh_test "$SRCDIR/dtc-checkfails.sh" phandle_references -- -I dts -O dtb "$SRCDIR/nonexist-node-ref.dts"
+    run_sh_test "$SRCDIR/dtc-checkfails.sh" phandle_references -- -I dts -O dtb "$SRCDIR/nonexist-label-ref.dts"
+    run_sh_test "$SRCDIR/dtc-fatal.sh" -I dts -O dtb "$SRCDIR/nonexist-node-ref2.dts"
+    check_tests "$SRCDIR/bad-name-property.dts" name_properties
 
-    check_tests bad-ncells.dts address_cells_is_cell size_cells_is_cell interrupt_cells_is_cell
-    check_tests bad-string-props.dts device_type_is_string model_is_string status_is_string label_is_string compatible_is_string_list names_is_string_list
-    check_tests bad-chosen.dts chosen_node_is_root
-    check_tests bad-chosen.dts chosen_node_bootargs
-    check_tests bad-chosen.dts chosen_node_stdout_path
-    check_tests bad-reg-ranges.dts reg_format ranges_format
-    check_tests bad-empty-ranges.dts ranges_format
-    check_tests reg-ranges-root.dts reg_format ranges_format
-    check_tests default-addr-size.dts avoid_default_addr_size
-    check_tests obsolete-chosen-interrupt-controller.dts obsolete_chosen_interrupt_controller
-    check_tests reg-without-unit-addr.dts unit_address_vs_reg
-    check_tests unit-addr-without-reg.dts unit_address_vs_reg
-    check_tests unit-addr-leading-0x.dts unit_address_format
-    check_tests unit-addr-leading-0s.dts unit_address_format
-    check_tests unit-addr-unique.dts unique_unit_address
-    check_tests bad-phandle-cells.dts interrupts_extended_property
-    check_tests bad-gpio.dts gpios_property
-    check_tests bad-graph.dts graph_child_address
-    check_tests bad-graph.dts graph_port
-    check_tests bad-graph.dts graph_endpoint
-    run_sh_test dtc-checkfails.sh deprecated_gpio_property -- -Wdeprecated_gpio_property -I dts -O dtb bad-gpio.dts
-    check_tests bad-interrupt-cells.dts interrupts_property
-    run_sh_test dtc-checkfails.sh node_name_chars -- -I dtb -O dtb bad_node_char.dtb
-    run_sh_test dtc-checkfails.sh node_name_format -- -I dtb -O dtb bad_node_format.dtb
-    run_sh_test dtc-checkfails.sh property_name_chars -- -I dtb -O dtb bad_prop_char.dtb
+    check_tests "$SRCDIR/bad-ncells.dts" address_cells_is_cell size_cells_is_cell interrupt_cells_is_cell
+    check_tests "$SRCDIR/bad-string-props.dts" device_type_is_string model_is_string status_is_string label_is_string compatible_is_string_list names_is_string_list
+    check_tests "$SRCDIR/bad-chosen.dts" chosen_node_is_root
+    check_tests "$SRCDIR/bad-chosen.dts" chosen_node_bootargs
+    check_tests "$SRCDIR/bad-chosen.dts" chosen_node_stdout_path
+    check_tests "$SRCDIR/bad-reg-ranges.dts" reg_format ranges_format
+    check_tests "$SRCDIR/bad-empty-ranges.dts" ranges_format
+    check_tests "$SRCDIR/reg-ranges-root.dts" reg_format ranges_format
+    check_tests "$SRCDIR/bad-dma-ranges.dts" dma_ranges_format
+    check_tests "$SRCDIR/default-addr-size.dts" avoid_default_addr_size
+    check_tests "$SRCDIR/obsolete-chosen-interrupt-controller.dts" obsolete_chosen_interrupt_controller
+    check_tests "$SRCDIR/reg-without-unit-addr.dts" unit_address_vs_reg
+    check_tests "$SRCDIR/unit-addr-without-reg.dts" unit_address_vs_reg
+    check_tests "$SRCDIR/unit-addr-leading-0x.dts" unit_address_format
+    check_tests "$SRCDIR/unit-addr-leading-0s.dts" unit_address_format
+    check_tests "$SRCDIR/unit-addr-unique.dts" unique_unit_address
+    check_tests "$SRCDIR/bad-phandle-cells.dts" interrupts_extended_property
+    check_tests "$SRCDIR/bad-gpio.dts" gpios_property
+    check_tests "$SRCDIR/bad-graph.dts" graph_child_address
+    check_tests "$SRCDIR/bad-graph.dts" graph_port
+    check_tests "$SRCDIR/bad-graph.dts" graph_endpoint
+    run_sh_test "$SRCDIR/dtc-checkfails.sh" deprecated_gpio_property -- -Wdeprecated_gpio_property -I dts -O dtb "$SRCDIR/bad-gpio.dts"
+    check_tests "$SRCDIR/bad-interrupt-cells.dts" interrupts_property
+    run_sh_test "$SRCDIR/dtc-checkfails.sh" node_name_chars -- -I dtb -O dtb bad_node_char.dtb
+    run_sh_test "$SRCDIR/dtc-checkfails.sh" node_name_format -- -I dtb -O dtb bad_node_format.dtb
+    run_sh_test "$SRCDIR/dtc-checkfails.sh" property_name_chars -- -I dtb -O dtb bad_prop_char.dtb
 
-    run_sh_test dtc-checkfails.sh duplicate_label -- -I dts -O dtb reuse-label1.dts
-    run_sh_test dtc-checkfails.sh duplicate_label -- -I dts -O dtb reuse-label2.dts
-    run_sh_test dtc-checkfails.sh duplicate_label -- -I dts -O dtb reuse-label3.dts
-    run_sh_test dtc-checkfails.sh duplicate_label -- -I dts -O dtb reuse-label4.dts
-    run_sh_test dtc-checkfails.sh duplicate_label -- -I dts -O dtb reuse-label5.dts
-    run_sh_test dtc-checkfails.sh duplicate_label -- -I dts -O dtb reuse-label6.dts
+    run_sh_test "$SRCDIR/dtc-checkfails.sh" duplicate_label -- -I dts -O dtb "$SRCDIR/reuse-label1.dts"
+    run_sh_test "$SRCDIR/dtc-checkfails.sh" duplicate_label -- -I dts -O dtb "$SRCDIR/reuse-label2.dts"
+    run_sh_test "$SRCDIR/dtc-checkfails.sh" duplicate_label -- -I dts -O dtb "$SRCDIR/reuse-label3.dts"
+    run_sh_test "$SRCDIR/dtc-checkfails.sh" duplicate_label -- -I dts -O dtb "$SRCDIR/reuse-label4.dts"
+    run_sh_test "$SRCDIR/dtc-checkfails.sh" duplicate_label -- -I dts -O dtb "$SRCDIR/reuse-label5.dts"
+    run_sh_test "$SRCDIR/dtc-checkfails.sh" duplicate_label -- -I dts -O dtb "$SRCDIR/reuse-label6.dts"
 
     run_test check_path test_tree1.dtb exists "/subnode@1"
     run_test check_path test_tree1.dtb not-exists "/subnode@10"
 
-    check_tests pci-bridge-ok.dts -n pci_bridge
-    check_tests pci-bridge-bad1.dts pci_bridge
-    check_tests pci-bridge-bad2.dts pci_bridge
+    check_tests "$SRCDIR/pci-bridge-ok.dts" -n pci_bridge
+    check_tests "$SRCDIR/pci-bridge-bad1.dts" pci_bridge
+    check_tests "$SRCDIR/pci-bridge-bad2.dts" pci_bridge
+
+    check_tests "$SRCDIR/unit-addr-simple-bus-reg-mismatch.dts" simple_bus_reg
+    check_tests "$SRCDIR/unit-addr-simple-bus-compatible.dts" simple_bus_reg
+
 
     # Check warning options
-    run_sh_test dtc-checkfails.sh address_cells_is_cell interrupt_cells_is_cell -n size_cells_is_cell -- -Wno_size_cells_is_cell -I dts -O dtb bad-ncells.dts
-    run_sh_test dtc-fails.sh -n test-warn-output.test.dtb -I dts -O dtb bad-ncells.dts
-    run_sh_test dtc-fails.sh test-error-output.test.dtb -I dts -O dtb bad-ncells.dts -Esize_cells_is_cell
-    run_sh_test dtc-checkfails.sh always_fail -- -Walways_fail -I dts -O dtb test_tree1.dts
-    run_sh_test dtc-checkfails.sh -n always_fail -- -Walways_fail -Wno_always_fail -I dts -O dtb test_tree1.dts
-    run_sh_test dtc-fails.sh test-negation-1.test.dtb -Ealways_fail -I dts -O dtb test_tree1.dts
-    run_sh_test dtc-fails.sh -n test-negation-2.test.dtb -Ealways_fail -Eno_always_fail -I dts -O dtb test_tree1.dts
-    run_sh_test dtc-fails.sh test-negation-3.test.dtb -Ealways_fail -Wno_always_fail -I dts -O dtb test_tree1.dts
-    run_sh_test dtc-fails.sh -n test-negation-4.test.dtb -Esize_cells_is_cell -Eno_size_cells_is_cell -I dts -O dtb bad-ncells.dts
-    run_sh_test dtc-checkfails.sh size_cells_is_cell -- -Esize_cells_is_cell -Eno_size_cells_is_cell -I dts -O dtb bad-ncells.dts
+    run_sh_test "$SRCDIR/dtc-checkfails.sh" address_cells_is_cell interrupt_cells_is_cell -n size_cells_is_cell -- -Wno_size_cells_is_cell -I dts -O dtb "$SRCDIR/bad-ncells.dts"
+    run_sh_test "$SRCDIR/dtc-fails.sh" -n test-warn-output.test.dtb -I dts -O dtb "$SRCDIR/bad-ncells.dts"
+    run_sh_test "$SRCDIR/dtc-fails.sh" test-error-output.test.dtb -I dts -O dtb bad-ncells.dts -Esize_cells_is_cell
+    run_sh_test "$SRCDIR/dtc-checkfails.sh" always_fail -- -Walways_fail -I dts -O dtb "$SRCDIR/test_tree1.dts"
+    run_sh_test "$SRCDIR/dtc-checkfails.sh" -n always_fail -- -Walways_fail -Wno_always_fail -I dts -O dtb "$SRCDIR/test_tree1.dts"
+    run_sh_test "$SRCDIR/dtc-fails.sh" test-negation-1.test.dtb -Ealways_fail -I dts -O dtb "$SRCDIR/test_tree1.dts"
+    run_sh_test "$SRCDIR/dtc-fails.sh" -n test-negation-2.test.dtb -Ealways_fail -Eno_always_fail -I dts -O dtb "$SRCDIR/test_tree1.dts"
+    run_sh_test "$SRCDIR/dtc-fails.sh" test-negation-3.test.dtb -Ealways_fail -Wno_always_fail -I dts -O dtb "$SRCDIR/test_tree1.dts"
+    run_sh_test "$SRCDIR/dtc-fails.sh" -n test-negation-4.test.dtb -Esize_cells_is_cell -Eno_size_cells_is_cell -I dts -O dtb "$SRCDIR/bad-ncells.dts"
+    run_sh_test "$SRCDIR/dtc-checkfails.sh" size_cells_is_cell -- -Esize_cells_is_cell -Eno_size_cells_is_cell -I dts -O dtb "$SRCDIR/bad-ncells.dts"
 
     # Check for proper behaviour reading from stdin
-    run_dtc_test -I dts -O dtb -o stdin_dtc_tree1.test.dtb - < test_tree1.dts
+    run_dtc_test -I dts -O dtb -o stdin_dtc_tree1.test.dtb - < "$SRCDIR/test_tree1.dts"
     run_wrap_test cmp stdin_dtc_tree1.test.dtb dtc_tree1.test.dtb
     run_dtc_test -I dtb -O dts -o stdin_odts_test_tree1.dtb.test.dts - < test_tree1.dtb
     run_wrap_test cmp stdin_odts_test_tree1.dtb.test.dts odts_test_tree1.dtb.test.dts
@@ -676,33 +760,34 @@ dtc_tests () {
     run_test integer-expressions integer-expressions.test.dtb
 
     # Check for graceful failure in some error conditions
-    run_sh_test dtc-fatal.sh -I dts -O dtb nosuchfile.dts
-    run_sh_test dtc-fatal.sh -I dtb -O dtb nosuchfile.dtb
-    run_sh_test dtc-fatal.sh -I fs -O dtb nosuchfile
+    run_sh_test "$SRCDIR/dtc-fatal.sh" -I dts -O dtb nosuchfile.dts
+    run_sh_test "$SRCDIR/dtc-fatal.sh" -I dtb -O dtb nosuchfile.dtb
+    run_sh_test "$SRCDIR/dtc-fatal.sh" -I fs -O dtb nosuchfile
 
     # Dependencies
-    run_dtc_test -I dts -O dtb -o dependencies.test.dtb -d dependencies.test.d dependencies.dts
-    run_wrap_test cmp dependencies.test.d dependencies.cmp
+    run_dtc_test -I dts -O dtb -o dependencies.test.dtb -d dependencies.test.d "$SRCDIR/dependencies.dts"
+    sed -i.bak "s,$SRCDIR/,,g" dependencies.test.d
+    run_wrap_test cmp dependencies.test.d "$SRCDIR/dependencies.cmp"
 
     # Search paths
-    run_wrap_error_test $DTC -I dts -O dtb -o search_paths.dtb search_paths.dts
-    run_dtc_test -i search_dir -I dts -O dtb -o search_paths.dtb \
-	search_paths.dts
-    run_wrap_error_test $DTC -i search_dir_b -I dts -O dtb \
-	-o search_paths_b.dtb search_paths_b.dts
-    run_dtc_test -i search_dir_b -i search_dir -I dts -O dtb \
-	-o search_paths_b.dtb search_paths_b.dts
+    run_wrap_error_test $DTC -I dts -O dtb -o search_paths.dtb "$SRCDIR/search_paths.dts"
+    run_dtc_test -i "$SRCDIR/search_dir" -I dts -O dtb -o search_paths.dtb \
+	"$SRCDIR/search_paths.dts"
+    run_wrap_error_test $DTC -i "$SRCDIR/search_dir_b" -I dts -O dtb \
+	-o search_paths_b.dtb "$SRCDIR/search_paths_b.dts"
+    run_dtc_test -i "$SRCDIR/search_dir_b" -i "$SRCDIR/search_dir" -I dts -O dtb \
+	-o search_paths_b.dtb "$SRCDIR/search_paths_b.dts"
     run_dtc_test -I dts -O dtb -o search_paths_subdir.dtb \
-	search_dir_b/search_paths_subdir.dts
+	"$SRCDIR/search_dir_b/search_paths_subdir.dts"
 
     # Check -a option
     for align in 2 4 8 16 32 64; do
 	# -p -a
-	run_dtc_test -O dtb -p 1000 -a $align -o align0.dtb subnode_iterate.dts
-	check_align align0.dtb $align
+	run_dtc_test -O dtb -p 1000 -a $align -o align0.dtb "$SRCDIR/subnode_iterate.dts"
+	base_run_test check_align align0.dtb $align
 	# -S -a
-	run_dtc_test -O dtb -S 1999 -a $align -o align1.dtb subnode_iterate.dts
-	check_align align1.dtb $align
+	run_dtc_test -O dtb -S 1999 -a $align -o align1.dtb "$SRCDIR/subnode_iterate.dts"
+	base_run_test check_align align1.dtb $align
     done
 
     # Tests for overlay/plugin generation
@@ -742,7 +827,7 @@ cmp_tests () {
 dtbs_equal_tests () {
     WRONG_TREE1=""
     for x in 1 2 3 4 5 6 7 8 9; do
-	run_dtc_test -I dts -O dtb -o test_tree1_wrong$x.test.dtb test_tree1_wrong$x.dts
+	run_dtc_test -I dts -O dtb -o test_tree1_wrong$x.test.dtb "$SRCDIR/test_tree1_wrong$x.dts"
 	WRONG_TREE1="$WRONG_TREE1 test_tree1_wrong$x.test.dtb"
     done
     cmp_tests test_tree1.dtb $WRONG_TREE1
@@ -751,7 +836,7 @@ dtbs_equal_tests () {
 fdtget_tests () {
     dts=label01.dts
     dtb=$dts.fdtget.test.dtb
-    run_dtc_test -O dtb -o $dtb $dts
+    run_dtc_test -O dtb -o $dtb "$SRCDIR/$dts"
 
     # run_fdtget_test <expected-result> [<flags>] <file> <node> <property>
     run_fdtget_test "MyBoardName" $dtb / model
@@ -785,10 +870,10 @@ fdtget_tests () {
 fdtput_tests () {
     dts=label01.dts
     dtb=$dts.fdtput.test.dtb
-    text=lorem.txt
+    text="$SRCDIR/lorem.txt"
 
     # Allow just enough space for $text
-    run_dtc_test -O dtb -p $($STATSZ $text) -o $dtb $dts
+    run_dtc_test -O dtb -p $($STATSZ $text) -o $dtb "$SRCDIR/$dts"
 
     # run_fdtput_test <expected-result> <file> <node> <property> <flags> <value>
     run_fdtput_test "a_model" $dtb / model -ts "a_model"
@@ -807,7 +892,7 @@ fdtput_tests () {
     run_fdtput_test "$(cat $text $text)" $dtb /randomnode blob -ts "$(cat $text $text)"
 
     # Start again with a fresh dtb
-    run_dtc_test -O dtb -p $($STATSZ $text) -o $dtb $dts
+    run_dtc_test -O dtb -p $($STATSZ $text) -o $dtb "$SRCDIR/$dts"
 
     # Node creation
     run_wrap_error_test $DTPUT $dtb -c /baldrick sod
@@ -827,7 +912,7 @@ fdtput_tests () {
 	"-ts" "fine wine"
     run_wrap_test $DTPUT $dtb -p /you/are/drunk/sir/winston slurp -ts twice
 
-    # Test expansion of the blob when insufficent room for a new node
+    # Test expansion of the blob when insufficient room for a new node
     run_wrap_test $DTPUT $dtb -cp "$(cat $text $text)/longish"
 
     # Allowed to create an existing node with -p
@@ -835,7 +920,7 @@ fdtput_tests () {
     run_wrap_test $DTPUT $dtb -cp /chosen/son
 
     # Start again with a fresh dtb
-    run_dtc_test -O dtb -p $($STATSZ $text) -o $dtb $dts
+    run_dtc_test -O dtb -p $($STATSZ $text) -o $dtb "$SRCDIR/$dts"
 
     # Node delete
     run_wrap_test $DTPUT $dtb -c /chosen/node1 /chosen/node2 /chosen/node3
@@ -864,13 +949,13 @@ utilfdt_tests () {
 }
 
 fdtdump_tests () {
-    run_fdtdump_test fdtdump.dts
+    run_fdtdump_test "$SRCDIR/fdtdump.dts"
 }
 
 fdtoverlay_tests() {
-    base=overlay_base.dts
+    base="$SRCDIR/overlay_base.dts"
     basedtb=overlay_base.fdoverlay.test.dtb
-    overlay=overlay_overlay_manual_fixups.dts
+    overlay="$SRCDIR/overlay_overlay_manual_fixups.dts"
     overlaydtb=overlay_overlay_manual_fixups.fdoverlay.test.dtb
     targetdtb=target.fdoverlay.test.dtb
 
@@ -880,11 +965,11 @@ fdtoverlay_tests() {
     # test that the new property is installed
     run_fdtoverlay_test foobar "/test-node" "test-str-property" "-ts" ${basedtb} ${targetdtb} ${overlaydtb}
 
-    stacked_base=stacked_overlay_base.dts
+    stacked_base="$SRCDIR/stacked_overlay_base.dts"
     stacked_basedtb=stacked_overlay_base.fdtoverlay.test.dtb
-    stacked_bar=stacked_overlay_bar.dts
+    stacked_bar="$SRCDIR/stacked_overlay_bar.dts"
     stacked_bardtb=stacked_overlay_bar.fdtoverlay.test.dtb
-    stacked_baz=stacked_overlay_baz.dts
+    stacked_baz="$SRCDIR/stacked_overlay_baz.dts"
     stacked_bazdtb=stacked_overlay_baz.fdtoverlay.test.dtb
     stacked_targetdtb=stacked_overlay_target.fdtoverlay.test.dtb
 
@@ -894,18 +979,42 @@ fdtoverlay_tests() {
 
     # test that baz correctly inserted the property
     run_fdtoverlay_test baz "/foonode/barnode/baznode" "baz-property" "-ts" ${stacked_basedtb} ${stacked_targetdtb} ${stacked_bardtb} ${stacked_bazdtb}
+
+    # test that bar and baz are correctly appended to __symbols__
+    run_fdtoverlay_test "/foonode/barnode" "/__symbols__"  "bar" "-ts" ${stacked_basedtb} ${stacked_targetdtb} ${stacked_bardtb}
+    run_fdtoverlay_test "/foonode/barnode/baznode" "/__symbols__"  "baz" "-ts" ${stacked_basedtb} ${stacked_targetdtb} ${stacked_bardtb} ${stacked_bazdtb}
+
+    overlay_long_path="$SRCDIR/overlay_overlay_long_path.dts"
+    overlay_long_pathdtb=overlay_overlay_long_path.fdoverlay.test.dtb
+    target_long_pathdtb=overlay_overlay_long_path_target.fdoverlay.test.dtb
+    run_dtc_test -@ -I dts -O dtb -o $overlay_long_pathdtb $overlay_long_path
+
+    # test that fdtoverlay manages to apply overlays with long target path
+    run_fdtoverlay_test lpath "/test-node/sub-test-node/sub-test-node-with-very-long-target-path/test-0" "prop" "-ts" ${basedtb} ${target_long_pathdtb} ${overlay_long_pathdtb}
+
+    # test adding a label to the root of a fragment
+    stacked_base_nolabel="$SRCDIR/stacked_overlay_base_nolabel.dts"
+    stacked_base_nolabeldtb=stacked_overlay_base_nolabel.test.dtb
+    stacked_addlabel="$SRCDIR/stacked_overlay_addlabel.dts"
+    stacked_addlabeldtb=stacked_overlay_addlabel.test.dtb
+    stacked_addlabel_targetdtb=stacked_overlay_target_nolabel.fdtoverlay.test.dtb
+
+    run_dtc_test -@ -I dts -O dtb -o $stacked_base_nolabeldtb $stacked_base_nolabel
+    run_dtc_test -@ -I dts -O dtb -o $stacked_addlabeldtb $stacked_addlabel
+
+    run_fdtoverlay_test baz "/foonode/barnode/baznode" "baz-property" "-ts" ${stacked_base_nolabeldtb} ${stacked_addlabel_targetdtb} ${stacked_addlabeldtb} ${stacked_bardtb} ${stacked_bazdtb}
 }
 
 pylibfdt_tests () {
-    run_dtc_test -I dts -O dtb -o test_props.dtb test_props.dts
+    run_dtc_test -I dts -O dtb -o test_props.dtb "$SRCDIR/test_props.dts"
     TMP=/tmp/tests.stderr.$$
-    python pylibfdt_tests.py -v 2> $TMP
+    $PYTHON "$SRCDIR/pylibfdt_tests.py" -v 2> $TMP
 
     # Use the 'ok' message meaning the test passed, 'ERROR' meaning it failed
     # and the summary line for total tests (e.g. 'Ran 17 tests in 0.002s').
     # We could add pass + fail to get total tests, but this provides a useful
     # sanity check.
-    pass_count=$(grep "\.\.\. ok$" $TMP | wc -l)
+    pass_count=$(grep "ok$" $TMP | wc -l)
     fail_count=$(grep "^ERROR: " $TMP | wc -l)
     total_tests=$(sed -n 's/^Ran \([0-9]*\) tests.*$/\1/p' $TMP)
     cat $TMP
@@ -938,7 +1047,7 @@ if [ -z "$TESTSETS" ]; then
     TESTSETS="libfdt utilfdt dtc dtbs_equal fdtget fdtput fdtdump fdtoverlay"
 
     # Test pylibfdt if the libfdt Python module is available.
-    if [ -f ../pylibfdt/_libfdt.so ]; then
+    if ! $no_python; then
         TESTSETS="$TESTSETS pylibfdt"
     fi
 fi

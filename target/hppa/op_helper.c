@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -22,8 +22,8 @@
 #include "exec/exec-all.h"
 #include "exec/helper-proto.h"
 #include "exec/cpu_ldst.h"
-#include "sysemu/sysemu.h"
 #include "qemu/timer.h"
+#include "sysemu/runstate.h"
 #include "fpu/softfloat.h"
 #include "trace.h"
 
@@ -67,7 +67,7 @@ static void atomic_store_3(CPUHPPAState *env, target_ulong addr, uint32_t val,
     old = *haddr;
     while (1) {
         new = (old & ~mask) | (val & mask);
-        cmp = atomic_cmpxchg(haddr, old, new);
+        cmp = qatomic_cmpxchg(haddr, old, new);
         if (cmp == old) {
             return;
         }
@@ -137,9 +137,7 @@ static void do_stby_e(CPUHPPAState *env, target_ulong addr, target_ureg val,
     default:
         /* Nothing is stored, but protection is checked and the
            cacheline is marked dirty.  */
-#ifndef CONFIG_USER_ONLY
         probe_write(env, addr, 0, cpu_mmu_index(env, 0), ra);
-#endif
         break;
     }
 }
@@ -153,6 +151,15 @@ void HELPER(stby_e_parallel)(CPUHPPAState *env, target_ulong addr,
                              target_ureg val)
 {
     do_stby_e(env, addr, val, true, GETPC());
+}
+
+void HELPER(ldc_check)(target_ulong addr)
+{
+    if (unlikely(addr & 0xf)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "Undefined ldc to unaligned address mod 16: "
+                      TARGET_FMT_lx "\n", addr);
+    }
 }
 
 target_ureg HELPER(probe)(CPUHPPAState *env, target_ulong addr,
@@ -516,7 +523,8 @@ uint64_t HELPER(fcnv_t_d_udw)(CPUHPPAState *env, float64 arg)
     return ret;
 }
 
-static void update_fr0_cmp(CPUHPPAState *env, uint32_t y, uint32_t c, int r)
+static void update_fr0_cmp(CPUHPPAState *env, uint32_t y,
+                           uint32_t c, FloatRelation r)
 {
     uint32_t shadow = env->fr0_shadow;
 
@@ -558,7 +566,7 @@ static void update_fr0_cmp(CPUHPPAState *env, uint32_t y, uint32_t c, int r)
 void HELPER(fcmp_s)(CPUHPPAState *env, float32 a, float32 b,
                     uint32_t y, uint32_t c)
 {
-    int r;
+    FloatRelation r;
     if (c & 1) {
         r = float32_compare(a, b, &env->fp_status);
     } else {
@@ -571,7 +579,7 @@ void HELPER(fcmp_s)(CPUHPPAState *env, float32 a, float32 b,
 void HELPER(fcmp_d)(CPUHPPAState *env, float64 a, float64 b,
                     uint32_t y, uint32_t c)
 {
-    int r;
+    FloatRelation r;
     if (c & 1) {
         r = float64_compare(a, b, &env->fp_status);
     } else {

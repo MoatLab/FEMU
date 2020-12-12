@@ -25,22 +25,23 @@
 #include "qemu/osdep.h"
 #include "hw/isa/isa.h"
 #include "hw/net/ne2000-isa.h"
-#include "hw/qdev.h"
+#include "migration/vmstate.h"
 #include "ne2000.h"
 #include "sysemu/sysemu.h"
 #include "qapi/error.h"
 #include "qapi/visitor.h"
 #include "qemu/module.h"
+#include "qom/object.h"
 
-#define ISA_NE2000(obj) OBJECT_CHECK(ISANE2000State, (obj), TYPE_ISA_NE2000)
+OBJECT_DECLARE_SIMPLE_TYPE(ISANE2000State, ISA_NE2000)
 
-typedef struct ISANE2000State {
+struct ISANE2000State {
     ISADevice parent_obj;
 
     uint32_t iobase;
     uint32_t isairq;
     NE2000State ne2000;
-} ISANE2000State;
+};
 
 static NetClientInfo net_ne2000_isa_info = {
     .type = NET_CLIENT_DRIVER_NIC,
@@ -89,7 +90,7 @@ static void isa_ne2000_class_initfn(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = isa_ne2000_realizefn;
-    dc->props = ne2000_isa_properties;
+    device_class_set_props(dc, ne2000_isa_properties);
     dc->vmsd = &vmstate_isa_ne2000;
     set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);
 }
@@ -113,9 +114,8 @@ static void isa_ne2000_set_bootindex(Object *obj, Visitor *v,
     int32_t boot_index;
     Error *local_err = NULL;
 
-    visit_type_int32(v, name, &boot_index, &local_err);
-    if (local_err) {
-        goto out;
+    if (!visit_type_int32(v, name, &boot_index, errp)) {
+        return;
     }
     /* check whether bootindex is present in fw_boot_order list  */
     check_boot_index(boot_index, &local_err);
@@ -133,8 +133,8 @@ static void isa_ne2000_instance_init(Object *obj)
 {
     object_property_add(obj, "bootindex", "int32",
                         isa_ne2000_get_bootindex,
-                        isa_ne2000_set_bootindex, NULL, NULL, NULL);
-    object_property_set_int(obj, -1, "bootindex", NULL);
+                        isa_ne2000_set_bootindex, NULL, NULL);
+    object_property_set_int(obj, "bootindex", -1, NULL);
 }
 static const TypeInfo ne2000_isa_info = {
     .name          = TYPE_ISA_NE2000,

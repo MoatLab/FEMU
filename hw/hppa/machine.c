@@ -6,22 +6,51 @@
 #include "qemu/osdep.h"
 #include "qemu-common.h"
 #include "cpu.h"
-#include "hw/hw.h"
 #include "elf.h"
 #include "hw/loader.h"
 #include "hw/boards.h"
 #include "qemu/error-report.h"
+#include "sysemu/reset.h"
 #include "sysemu/sysemu.h"
-#include "hw/timer/mc146818rtc.h"
-#include "hw/ide.h"
+#include "sysemu/runstate.h"
+#include "hw/rtc/mc146818rtc.h"
 #include "hw/timer/i8254.h"
 #include "hw/char/serial.h"
+#include "hw/net/lasi_82596.h"
 #include "hppa_sys.h"
 #include "qemu/units.h"
 #include "qapi/error.h"
+#include "net/net.h"
 #include "qemu/log.h"
+#include "net/net.h"
 
 #define MAX_IDE_BUS 2
+
+#define MIN_SEABIOS_HPPA_VERSION 1 /* require at least this fw version */
+
+#define HPA_POWER_BUTTON (FIRMWARE_END - 0x10)
+
+static void hppa_powerdown_req(Notifier *n, void *opaque)
+{
+    hwaddr soft_power_reg = HPA_POWER_BUTTON;
+    uint32_t val;
+
+    val = ldl_be_phys(&address_space_memory, soft_power_reg);
+    if ((val >> 8) == 0) {
+        /* immediately shut down when under hardware control */
+        qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
+        return;
+    }
+
+    /* clear bit 31 to indicate that the power switch was pressed. */
+    val &= ~1;
+    stl_be_phys(&address_space_memory, soft_power_reg, val);
+}
+
+static Notifier hppa_system_powerdown_notifier = {
+    .notify = hppa_powerdown_req
+};
+
 
 static ISABus *hppa_isa_bus(void)
 {
@@ -54,6 +83,44 @@ static uint64_t cpu_hppa_to_phys(void *opaque, uint64_t addr)
 static HPPACPU *cpu[HPPA_MAX_CPUS];
 static uint64_t firmware_entry;
 
+static void fw_cfg_boot_set(void *opaque, const char *boot_device,
+                            Error **errp)
+{
+    fw_cfg_modify_i16(opaque, FW_CFG_BOOT_DEVICE, boot_device[0]);
+}
+
+static FWCfgState *create_fw_cfg(MachineState *ms)
+{
+    FWCfgState *fw_cfg;
+    uint64_t val;
+
+    fw_cfg = fw_cfg_init_mem(FW_CFG_IO_BASE, FW_CFG_IO_BASE + 4);
+    fw_cfg_add_i16(fw_cfg, FW_CFG_NB_CPUS, ms->smp.cpus);
+    fw_cfg_add_i16(fw_cfg, FW_CFG_MAX_CPUS, HPPA_MAX_CPUS);
+    fw_cfg_add_i64(fw_cfg, FW_CFG_RAM_SIZE, ram_size);
+
+    val = cpu_to_le64(MIN_SEABIOS_HPPA_VERSION);
+    fw_cfg_add_file(fw_cfg, "/etc/firmware-min-version",
+                    g_memdup(&val, sizeof(val)), sizeof(val));
+
+    val = cpu_to_le64(HPPA_TLB_ENTRIES);
+    fw_cfg_add_file(fw_cfg, "/etc/cpu/tlb_entries",
+                    g_memdup(&val, sizeof(val)), sizeof(val));
+
+    val = cpu_to_le64(HPPA_BTLB_ENTRIES);
+    fw_cfg_add_file(fw_cfg, "/etc/cpu/btlb_entries",
+                    g_memdup(&val, sizeof(val)), sizeof(val));
+
+    val = cpu_to_le64(HPA_POWER_BUTTON);
+    fw_cfg_add_file(fw_cfg, "/etc/power-button-addr",
+                    g_memdup(&val, sizeof(val)), sizeof(val));
+
+    fw_cfg_add_i16(fw_cfg, FW_CFG_BOOT_DEVICE, ms->boot_order[0]);
+    qemu_register_boot_set(fw_cfg_boot_set, fw_cfg);
+
+    return fw_cfg;
+}
+
 static void machine_hppa_init(MachineState *machine)
 {
     const char *kernel_filename = machine->kernel_filename;
@@ -69,34 +136,34 @@ static void machine_hppa_init(MachineState *machine)
     uint64_t kernel_entry = 0, kernel_low, kernel_high;
     MemoryRegion *addr_space = get_system_memory();
     MemoryRegion *rom_region;
-    MemoryRegion *ram_region;
     MemoryRegion *cpu_region;
     long i;
     unsigned int smp_cpus = machine->smp.cpus;
-
-    ram_size = machine->ram_size;
+    SysBusDevice *s;
 
     /* Create CPUs.  */
     for (i = 0; i < smp_cpus; i++) {
+        char *name = g_strdup_printf("cpu%ld-io-eir", i);
         cpu[i] = HPPA_CPU(cpu_create(machine->cpu_type));
 
         cpu_region = g_new(MemoryRegion, 1);
         memory_region_init_io(cpu_region, OBJECT(cpu[i]), &hppa_io_eir_ops,
-                              cpu[i], g_strdup_printf("cpu%ld-io-eir", i), 4);
+                              cpu[i], name, 4);
         memory_region_add_subregion(addr_space, CPU_HPA + i * 0x1000,
                                     cpu_region);
-    }
-
-    /* Limit main memory. */
-    if (ram_size > FIRMWARE_START) {
-        machine->ram_size = ram_size = FIRMWARE_START;
+        g_free(name);
     }
 
     /* Main memory region. */
-    ram_region = g_new(MemoryRegion, 1);
-    memory_region_allocate_system_memory(ram_region, OBJECT(machine),
-                                         "ram", ram_size);
-    memory_region_add_subregion(addr_space, 0, ram_region);
+    if (machine->ram_size > 3 * GiB) {
+        error_report("RAM size is currently restricted to 3GB");
+        exit(EXIT_FAILURE);
+    }
+    memory_region_add_subregion_overlap(addr_space, 0, machine->ram, -1);
+
+
+    /* Init Lasi chip */
+    lasi_init(addr_space);
 
     /* Init Dino (PCI host bus chip).  */
     pci_bus = dino_init(addr_space, &rtc_irq, &serial_irq);
@@ -116,14 +183,31 @@ static void machine_hppa_init(MachineState *machine)
                        115200, serial_hd(0), DEVICE_BIG_ENDIAN);
     }
 
+    /* fw_cfg configuration interface */
+    create_fw_cfg(machine);
+
     /* SCSI disk setup. */
     dev = DEVICE(pci_create_simple(pci_bus, -1, "lsi53c895a"));
     lsi53c8xx_handle_legacy_cmdline(dev);
 
-    /* Network setup.  e1000 is good enough, failing Tulip support.  */
-    for (i = 0; i < nb_nics; i++) {
-        pci_nic_init_nofail(&nd_table[i], pci_bus, "e1000", NULL);
+    /* Graphics setup. */
+    if (machine->enable_graphics && vga_interface_type != VGA_NONE) {
+        dev = qdev_new("artist");
+        s = SYS_BUS_DEVICE(dev);
+        sysbus_realize_and_unref(s, &error_fatal);
+        sysbus_mmio_map(s, 0, LASI_GFX_HPA);
+        sysbus_mmio_map(s, 1, ARTIST_FB_ADDR);
     }
+
+    /* Network setup. */
+    for (i = 0; i < nb_nics; i++) {
+        if (!enable_lasi_lan()) {
+            pci_nic_init_nofail(&nd_table[i], pci_bus, "tulip", NULL);
+        }
+    }
+
+    /* register power switch emulation */
+    qemu_register_powerdown_notifier(&hppa_system_powerdown_notifier);
 
     /* Load firmware.  Given that this is not "real" firmware,
        but one explicitly written for the emulation, we might as
@@ -137,7 +221,7 @@ static void machine_hppa_init(MachineState *machine)
     }
 
     size = load_elf(firmware_filename, NULL, NULL, NULL,
-                    &firmware_entry, &firmware_low, &firmware_high,
+                    &firmware_entry, &firmware_low, &firmware_high, NULL,
                     true, EM_PARISC, 0, 0);
 
     /* Unfortunately, load_elf sign-extends reading elf32.  */
@@ -152,22 +236,21 @@ static void machine_hppa_init(MachineState *machine)
     qemu_log_mask(CPU_LOG_PAGE, "Firmware loaded at 0x%08" PRIx64
                   "-0x%08" PRIx64 ", entry at 0x%08" PRIx64 ".\n",
                   firmware_low, firmware_high, firmware_entry);
-    if (firmware_low < ram_size || firmware_high >= FIRMWARE_END) {
+    if (firmware_low < FIRMWARE_START || firmware_high >= FIRMWARE_END) {
         error_report("Firmware overlaps with memory or IO space");
         exit(1);
     }
     g_free(firmware_filename);
 
     rom_region = g_new(MemoryRegion, 1);
-    memory_region_allocate_system_memory(rom_region, OBJECT(machine),
-                                         "firmware",
-                                         (FIRMWARE_END - FIRMWARE_START));
+    memory_region_init_ram(rom_region, NULL, "firmware",
+                           (FIRMWARE_END - FIRMWARE_START), &error_fatal);
     memory_region_add_subregion(addr_space, FIRMWARE_START, rom_region);
 
     /* Load kernel */
     if (kernel_filename) {
         size = load_elf(kernel_filename, NULL, &cpu_hppa_to_phys,
-                        NULL, &kernel_entry, &kernel_low, &kernel_high,
+                        NULL, &kernel_entry, &kernel_low, &kernel_high, NULL,
                         true, EM_PARISC, 0, 0);
 
         /* Unfortunately, load_elf sign-extends reading elf32.  */
@@ -239,6 +322,9 @@ static void machine_hppa_init(MachineState *machine)
 
     /* tell firmware how many SMP CPUs to present in inventory table */
     cpu[0]->env.gr[21] = smp_cpus;
+
+    /* tell firmware fw_cfg port */
+    cpu[0]->env.gr[19] = FW_CFG_IO_BASE;
 }
 
 static void hppa_machine_reset(MachineState *ms)
@@ -266,6 +352,8 @@ static void hppa_machine_reset(MachineState *ms)
     cpu[0]->env.gr[24] = 'c';
     /* gr22/gr23 unused, no initrd while reboot. */
     cpu[0]->env.gr[21] = smp_cpus;
+    /* tell firmware fw_cfg port */
+    cpu[0]->env.gr[19] = FW_CFG_IO_BASE;
 }
 
 
@@ -278,9 +366,10 @@ static void machine_hppa_machine_init(MachineClass *mc)
     mc->block_default_type = IF_SCSI;
     mc->max_cpus = HPPA_MAX_CPUS;
     mc->default_cpus = 1;
-    mc->is_default = 1;
+    mc->is_default = true;
     mc->default_ram_size = 512 * MiB;
     mc->default_boot_order = "cd";
+    mc->default_ram_id = "ram";
 }
 
 DEFINE_MACHINE("hppa", machine_hppa_machine_init)

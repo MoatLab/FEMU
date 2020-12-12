@@ -8,19 +8,23 @@
  * Raspberry Pi 3 emulation Copyright (c) 2018 Zoltán Baldaszti
  * Upstream code cleanup (c) 2018 Pekka Enberg
  *
- * This code is licensed under the GNU GPLv2 and later.
+ * This work is licensed under the terms of the GNU GPL, version 2 or later.
+ * See the COPYING file in the top-level directory.
  */
 
 #include "qemu/osdep.h"
 #include "qemu/units.h"
+#include "qemu/cutils.h"
 #include "qapi/error.h"
 #include "cpu.h"
 #include "hw/arm/bcm2836.h"
+#include "hw/registerfields.h"
 #include "qemu/error-report.h"
 #include "hw/boards.h"
 #include "hw/loader.h"
 #include "hw/arm/boot.h"
 #include "sysemu/sysemu.h"
+#include "qom/object.h"
 
 #define SMPBOOT_ADDR    0x300 /* this should leave enough space for ATAGS */
 #define MVBAR_ADDR      0x400 /* secure vectors */
@@ -29,13 +33,96 @@
 #define FIRMWARE_ADDR_3 0x80000 /* Pi 3 loads kernel.img here by default */
 #define SPINTABLE_ADDR  0xd8 /* Pi 3 bootloader spintable */
 
-/* Table of Linux board IDs for different Pi versions */
-static const int raspi_boardid[] = {[1] = 0xc42, [2] = 0xc43, [3] = 0xc44};
+/* Registered machine type (matches RPi Foundation bootloader and U-Boot) */
+#define MACH_TYPE_BCM2708   3138
 
-typedef struct RasPiState {
+struct RaspiMachineState {
+    /*< private >*/
+    MachineState parent_obj;
+    /*< public >*/
     BCM283XState soc;
-    MemoryRegion ram;
-} RasPiState;
+    struct arm_boot_info binfo;
+};
+typedef struct RaspiMachineState RaspiMachineState;
+
+struct RaspiMachineClass {
+    /*< private >*/
+    MachineClass parent_obj;
+    /*< public >*/
+    uint32_t board_rev;
+};
+typedef struct RaspiMachineClass RaspiMachineClass;
+
+#define TYPE_RASPI_MACHINE       MACHINE_TYPE_NAME("raspi-common")
+DECLARE_OBJ_CHECKERS(RaspiMachineState, RaspiMachineClass,
+                     RASPI_MACHINE, TYPE_RASPI_MACHINE)
+
+
+/*
+ * Board revision codes:
+ * www.raspberrypi.org/documentation/hardware/raspberrypi/revision-codes/
+ */
+FIELD(REV_CODE, REVISION,           0, 4);
+FIELD(REV_CODE, TYPE,               4, 8);
+FIELD(REV_CODE, PROCESSOR,         12, 4);
+FIELD(REV_CODE, MANUFACTURER,      16, 4);
+FIELD(REV_CODE, MEMORY_SIZE,       20, 3);
+FIELD(REV_CODE, STYLE,             23, 1);
+
+typedef enum RaspiProcessorId {
+    PROCESSOR_ID_BCM2835 = 0,
+    PROCESSOR_ID_BCM2836 = 1,
+    PROCESSOR_ID_BCM2837 = 2,
+} RaspiProcessorId;
+
+static const struct {
+    const char *type;
+    int cores_count;
+} soc_property[] = {
+    [PROCESSOR_ID_BCM2835] = {TYPE_BCM2835, 1},
+    [PROCESSOR_ID_BCM2836] = {TYPE_BCM2836, BCM283X_NCPUS},
+    [PROCESSOR_ID_BCM2837] = {TYPE_BCM2837, BCM283X_NCPUS},
+};
+
+static uint64_t board_ram_size(uint32_t board_rev)
+{
+    assert(FIELD_EX32(board_rev, REV_CODE, STYLE)); /* Only new style */
+    return 256 * MiB << FIELD_EX32(board_rev, REV_CODE, MEMORY_SIZE);
+}
+
+static RaspiProcessorId board_processor_id(uint32_t board_rev)
+{
+    int proc_id = FIELD_EX32(board_rev, REV_CODE, PROCESSOR);
+
+    assert(FIELD_EX32(board_rev, REV_CODE, STYLE)); /* Only new style */
+    assert(proc_id < ARRAY_SIZE(soc_property) && soc_property[proc_id].type);
+
+    return proc_id;
+}
+
+static const char *board_soc_type(uint32_t board_rev)
+{
+    return soc_property[board_processor_id(board_rev)].type;
+}
+
+static int cores_count(uint32_t board_rev)
+{
+    return soc_property[board_processor_id(board_rev)].cores_count;
+}
+
+static const char *board_type(uint32_t board_rev)
+{
+    static const char *types[] = {
+        "A", "B", "A+", "B+", "2B", "Alpha", "CM1", NULL, "3B", "Zero",
+        "CM3", NULL, "Zero W", "3B+", "3A+", NULL, "CM3+", "4B",
+    };
+    assert(FIELD_EX32(board_rev, REV_CODE, STYLE)); /* Only new style */
+    int bt = FIELD_EX32(board_rev, REV_CODE, TYPE);
+    if (bt >= ARRAY_SIZE(types) || !types[bt]) {
+        return "Unknown";
+    }
+    return types[bt];
+}
 
 static void write_smpboot(ARMCPU *cpu, const struct arm_boot_info *info)
 {
@@ -60,12 +147,14 @@ static void write_smpboot(ARMCPU *cpu, const struct arm_boot_info *info)
     QEMU_BUILD_BUG_ON((BOARDSETUP_ADDR & 0xf) != 0
                       || (BOARDSETUP_ADDR >> 4) >= 0x100);
 
-    rom_add_blob_fixed("raspi_smpboot", smpboot, sizeof(smpboot),
-                       info->smp_loader_start);
+    rom_add_blob_fixed_as("raspi_smpboot", smpboot, sizeof(smpboot),
+                          info->smp_loader_start,
+                          arm_boot_address_space(cpu, info));
 }
 
 static void write_smpboot64(ARMCPU *cpu, const struct arm_boot_info *info)
 {
+    AddressSpace *as = arm_boot_address_space(cpu, info);
     /* Unlike the AArch32 version we don't need to call the board setup hook.
      * The mechanism for doing the spin-table is also entirely different.
      * We must have four 64-bit fields at absolute addresses
@@ -92,10 +181,10 @@ static void write_smpboot64(ARMCPU *cpu, const struct arm_boot_info *info)
         0, 0, 0, 0
     };
 
-    rom_add_blob_fixed("raspi_smpboot", smpboot, sizeof(smpboot),
-                       info->smp_loader_start);
-    rom_add_blob_fixed("raspi_spintables", spintables, sizeof(spintables),
-                       SPINTABLE_ADDR);
+    rom_add_blob_fixed_as("raspi_smpboot", smpboot, sizeof(smpboot),
+                          info->smp_loader_start, as);
+    rom_add_blob_fixed_as("raspi_spintables", spintables, sizeof(spintables),
+                          SPINTABLE_ADDR, as);
 }
 
 static void write_board_setup(ARMCPU *cpu, const struct arm_boot_info *info)
@@ -109,44 +198,47 @@ static void reset_secondary(ARMCPU *cpu, const struct arm_boot_info *info)
     cpu_set_pc(cs, info->smp_loader_start);
 }
 
-static void setup_boot(MachineState *machine, int version, size_t ram_size)
+static void setup_boot(MachineState *machine, RaspiProcessorId processor_id,
+                       size_t ram_size)
 {
-    static struct arm_boot_info binfo;
+    RaspiMachineState *s = RASPI_MACHINE(machine);
     int r;
 
-    binfo.board_id = raspi_boardid[version];
-    binfo.ram_size = ram_size;
-    binfo.nb_cpus = machine->smp.cpus;
+    s->binfo.board_id = MACH_TYPE_BCM2708;
+    s->binfo.ram_size = ram_size;
+    s->binfo.nb_cpus = machine->smp.cpus;
 
-    if (version <= 2) {
-        /* The rpi1 and 2 require some custom setup code to run in Secure
-         * mode before booting a kernel (to set up the SMC vectors so
-         * that we get a no-op SMC; this is used by Linux to call the
+    if (processor_id <= PROCESSOR_ID_BCM2836) {
+        /*
+         * The BCM2835 and BCM2836 require some custom setup code to run
+         * in Secure mode before booting a kernel (to set up the SMC vectors
+         * so that we get a no-op SMC; this is used by Linux to call the
          * firmware for some cache maintenance operations.
-         * The rpi3 doesn't need this.
+         * The BCM2837 doesn't need this.
          */
-        binfo.board_setup_addr = BOARDSETUP_ADDR;
-        binfo.write_board_setup = write_board_setup;
-        binfo.secure_board_setup = true;
-        binfo.secure_boot = true;
+        s->binfo.board_setup_addr = BOARDSETUP_ADDR;
+        s->binfo.write_board_setup = write_board_setup;
+        s->binfo.secure_board_setup = true;
+        s->binfo.secure_boot = true;
     }
 
-    /* Pi2 and Pi3 requires SMP setup */
-    if (version >= 2) {
-        binfo.smp_loader_start = SMPBOOT_ADDR;
-        if (version == 2) {
-            binfo.write_secondary_boot = write_smpboot;
+    /* BCM2836 and BCM2837 requires SMP setup */
+    if (processor_id >= PROCESSOR_ID_BCM2836) {
+        s->binfo.smp_loader_start = SMPBOOT_ADDR;
+        if (processor_id == PROCESSOR_ID_BCM2836) {
+            s->binfo.write_secondary_boot = write_smpboot;
         } else {
-            binfo.write_secondary_boot = write_smpboot64;
+            s->binfo.write_secondary_boot = write_smpboot64;
         }
-        binfo.secondary_cpu_reset_hook = reset_secondary;
+        s->binfo.secondary_cpu_reset_hook = reset_secondary;
     }
 
     /* If the user specified a "firmware" image (e.g. UEFI), we bypass
      * the normal Linux boot process
      */
     if (machine->firmware) {
-        hwaddr firmware_addr = version == 3 ? FIRMWARE_ADDR_3 : FIRMWARE_ADDR_2;
+        hwaddr firmware_addr = processor_id <= PROCESSOR_ID_BCM2836
+                             ? FIRMWARE_ADDR_2 : FIRMWARE_ADDR_3;
         /* load the firmware image (typically kernel.img) */
         r = load_image_targphys(machine->firmware, firmware_addr,
                                 ram_size - firmware_addr);
@@ -155,51 +247,43 @@ static void setup_boot(MachineState *machine, int version, size_t ram_size)
             exit(1);
         }
 
-        binfo.entry = firmware_addr;
-        binfo.firmware_loaded = true;
-    } else {
-        binfo.kernel_filename = machine->kernel_filename;
-        binfo.kernel_cmdline = machine->kernel_cmdline;
-        binfo.initrd_filename = machine->initrd_filename;
+        s->binfo.entry = firmware_addr;
+        s->binfo.firmware_loaded = true;
     }
 
-    arm_load_kernel(ARM_CPU(first_cpu), &binfo);
+    arm_load_kernel(&s->soc.cpu[0].core, machine, &s->binfo);
 }
 
-static void raspi_init(MachineState *machine, int version)
+static void raspi_machine_init(MachineState *machine)
 {
-    RasPiState *s = g_new0(RasPiState, 1);
+    RaspiMachineClass *mc = RASPI_MACHINE_GET_CLASS(machine);
+    RaspiMachineState *s = RASPI_MACHINE(machine);
+    uint32_t board_rev = mc->board_rev;
+    uint64_t ram_size = board_ram_size(board_rev);
     uint32_t vcram_size;
     DriveInfo *di;
     BlockBackend *blk;
     BusState *bus;
     DeviceState *carddev;
 
-    if (machine->ram_size > 1 * GiB) {
-        error_report("Requested ram size is too large for this machine: "
-                     "maximum is 1GB");
+    if (machine->ram_size != ram_size) {
+        char *size_str = size_to_str(ram_size);
+        error_report("Invalid RAM size, should be %s", size_str);
+        g_free(size_str);
         exit(1);
     }
 
-    object_initialize_child(OBJECT(machine), "soc", &s->soc, sizeof(s->soc),
-                            version == 3 ? TYPE_BCM2837 : TYPE_BCM2836,
-                            &error_abort, NULL);
-
-    /* Allocate and map RAM */
-    memory_region_allocate_system_memory(&s->ram, OBJECT(machine), "ram",
-                                         machine->ram_size);
     /* FIXME: Remove when we have custom CPU address space support */
-    memory_region_add_subregion_overlap(get_system_memory(), 0, &s->ram, 0);
+    memory_region_add_subregion_overlap(get_system_memory(), 0,
+                                        machine->ram, 0);
 
     /* Setup the SOC */
-    object_property_add_const_link(OBJECT(&s->soc), "ram", OBJECT(&s->ram),
-                                   &error_abort);
-    object_property_set_int(OBJECT(&s->soc), machine->smp.cpus, "enabled-cpus",
+    object_initialize_child(OBJECT(machine), "soc", &s->soc,
+                            board_soc_type(board_rev));
+    object_property_add_const_link(OBJECT(&s->soc), "ram", OBJECT(machine->ram));
+    object_property_set_int(OBJECT(&s->soc), "board-rev", board_rev,
                             &error_abort);
-    int board_rev = version == 3 ? 0xa02082 : 0xa21041;
-    object_property_set_int(OBJECT(&s->soc), board_rev, "board-rev",
-                            &error_abort);
-    object_property_set_bool(OBJECT(&s->soc), true, "realized", &error_abort);
+    qdev_realize(DEVICE(&s->soc), NULL, &error_abort);
 
     /* Create and plug in the SD cards */
     di = drive_get_next(IF_SD);
@@ -209,54 +293,111 @@ static void raspi_init(MachineState *machine, int version)
         error_report("No SD bus found in SOC object");
         exit(1);
     }
-    carddev = qdev_create(bus, TYPE_SD_CARD);
-    qdev_prop_set_drive(carddev, "drive", blk, &error_fatal);
-    object_property_set_bool(OBJECT(carddev), true, "realized", &error_fatal);
+    carddev = qdev_new(TYPE_SD_CARD);
+    qdev_prop_set_drive_err(carddev, "drive", blk, &error_fatal);
+    qdev_realize_and_unref(carddev, bus, &error_fatal);
 
     vcram_size = object_property_get_uint(OBJECT(&s->soc), "vcram-size",
                                           &error_abort);
-    setup_boot(machine, version, machine->ram_size - vcram_size);
+    setup_boot(machine, board_processor_id(mc->board_rev),
+               machine->ram_size - vcram_size);
 }
 
-static void raspi2_init(MachineState *machine)
+static void raspi_machine_class_common_init(MachineClass *mc,
+                                            uint32_t board_rev)
 {
-    raspi_init(machine, 2);
-}
-
-static void raspi2_machine_init(MachineClass *mc)
-{
-    mc->desc = "Raspberry Pi 2";
-    mc->init = raspi2_init;
+    mc->desc = g_strdup_printf("Raspberry Pi %s (revision 1.%u)",
+                               board_type(board_rev),
+                               FIELD_EX32(board_rev, REV_CODE, REVISION));
+    mc->init = raspi_machine_init;
     mc->block_default_type = IF_SD;
     mc->no_parallel = 1;
     mc->no_floppy = 1;
     mc->no_cdrom = 1;
-    mc->max_cpus = BCM283X_NCPUS;
-    mc->min_cpus = BCM283X_NCPUS;
-    mc->default_cpus = BCM283X_NCPUS;
-    mc->default_ram_size = 1024 * 1024 * 1024;
-    mc->ignore_memory_transaction_failures = true;
+    mc->default_cpus = mc->min_cpus = mc->max_cpus = cores_count(board_rev);
+    mc->default_ram_size = board_ram_size(board_rev);
+    mc->default_ram_id = "ram";
 };
-DEFINE_MACHINE("raspi2", raspi2_machine_init)
+
+static void raspi0_machine_class_init(ObjectClass *oc, void *data)
+{
+    MachineClass *mc = MACHINE_CLASS(oc);
+    RaspiMachineClass *rmc = RASPI_MACHINE_CLASS(oc);
+
+    rmc->board_rev = 0x920092; /* Revision 1.2 */
+    raspi_machine_class_common_init(mc, rmc->board_rev);
+};
+
+static void raspi1ap_machine_class_init(ObjectClass *oc, void *data)
+{
+    MachineClass *mc = MACHINE_CLASS(oc);
+    RaspiMachineClass *rmc = RASPI_MACHINE_CLASS(oc);
+
+    rmc->board_rev = 0x900021; /* Revision 1.1 */
+    raspi_machine_class_common_init(mc, rmc->board_rev);
+};
+
+static void raspi2b_machine_class_init(ObjectClass *oc, void *data)
+{
+    MachineClass *mc = MACHINE_CLASS(oc);
+    RaspiMachineClass *rmc = RASPI_MACHINE_CLASS(oc);
+
+    mc->alias = "raspi2";
+    rmc->board_rev = 0xa21041;
+    raspi_machine_class_common_init(mc, rmc->board_rev);
+};
 
 #ifdef TARGET_AARCH64
-static void raspi3_init(MachineState *machine)
+static void raspi3ap_machine_class_init(ObjectClass *oc, void *data)
 {
-    raspi_init(machine, 3);
-}
+    MachineClass *mc = MACHINE_CLASS(oc);
+    RaspiMachineClass *rmc = RASPI_MACHINE_CLASS(oc);
 
-static void raspi3_machine_init(MachineClass *mc)
+    rmc->board_rev = 0x9020e0; /* Revision 1.0 */
+    raspi_machine_class_common_init(mc, rmc->board_rev);
+};
+
+static void raspi3b_machine_class_init(ObjectClass *oc, void *data)
 {
-    mc->desc = "Raspberry Pi 3";
-    mc->init = raspi3_init;
-    mc->block_default_type = IF_SD;
-    mc->no_parallel = 1;
-    mc->no_floppy = 1;
-    mc->no_cdrom = 1;
-    mc->max_cpus = BCM283X_NCPUS;
-    mc->min_cpus = BCM283X_NCPUS;
-    mc->default_cpus = BCM283X_NCPUS;
-    mc->default_ram_size = 1024 * 1024 * 1024;
-}
-DEFINE_MACHINE("raspi3", raspi3_machine_init)
+    MachineClass *mc = MACHINE_CLASS(oc);
+    RaspiMachineClass *rmc = RASPI_MACHINE_CLASS(oc);
+
+    mc->alias = "raspi3";
+    rmc->board_rev = 0xa02082;
+    raspi_machine_class_common_init(mc, rmc->board_rev);
+};
+#endif /* TARGET_AARCH64 */
+
+static const TypeInfo raspi_machine_types[] = {
+    {
+        .name           = MACHINE_TYPE_NAME("raspi0"),
+        .parent         = TYPE_RASPI_MACHINE,
+        .class_init     = raspi0_machine_class_init,
+    }, {
+        .name           = MACHINE_TYPE_NAME("raspi1ap"),
+        .parent         = TYPE_RASPI_MACHINE,
+        .class_init     = raspi1ap_machine_class_init,
+    }, {
+        .name           = MACHINE_TYPE_NAME("raspi2b"),
+        .parent         = TYPE_RASPI_MACHINE,
+        .class_init     = raspi2b_machine_class_init,
+#ifdef TARGET_AARCH64
+    }, {
+        .name           = MACHINE_TYPE_NAME("raspi3ap"),
+        .parent         = TYPE_RASPI_MACHINE,
+        .class_init     = raspi3ap_machine_class_init,
+    }, {
+        .name           = MACHINE_TYPE_NAME("raspi3b"),
+        .parent         = TYPE_RASPI_MACHINE,
+        .class_init     = raspi3b_machine_class_init,
 #endif
+    }, {
+        .name           = TYPE_RASPI_MACHINE,
+        .parent         = TYPE_MACHINE,
+        .instance_size  = sizeof(RaspiMachineState),
+        .class_size     = sizeof(RaspiMachineClass),
+        .abstract       = true,
+    }
+};
+
+DEFINE_TYPES(raspi_machine_types)

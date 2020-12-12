@@ -24,11 +24,9 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
 #include "hw/isa/isa.h"
 #include "qemu/error-report.h"
 #include "qemu/timer.h"
-#include "sysemu/sysemu.h"
 #include "sysemu/blockdev.h"
 #include "sysemu/dma.h"
 #include "hw/block/block.h"
@@ -48,7 +46,7 @@ static const MemoryRegionPortio ide_portio_list[] = {
 };
 
 static const MemoryRegionPortio ide_portio2_list[] = {
-    { 0, 1, 1, .read = ide_status_read, .write = ide_cmd_write },
+    { 0, 1, 1, .read = ide_status_read, .write = ide_ctrl_write },
     PORTIO_END_OF_LIST(),
 };
 

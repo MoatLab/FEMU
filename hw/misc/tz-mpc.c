@@ -15,8 +15,11 @@
 #include "qapi/error.h"
 #include "trace.h"
 #include "hw/sysbus.h"
+#include "migration/vmstate.h"
 #include "hw/registerfields.h"
+#include "hw/irq.h"
 #include "hw/misc/tz-mpc.h"
+#include "hw/qdev-properties.h"
 
 /* Our IOMMU has two IOMMU indexes, one for secure transactions and one for
  * non-secure transactions.
@@ -593,7 +596,7 @@ static void tz_mpc_class_init(ObjectClass *klass, void *data)
     dc->realize = tz_mpc_realize;
     dc->vmsd = &tz_mpc_vmstate;
     dc->reset = tz_mpc_reset;
-    dc->props = tz_mpc_properties;
+    device_class_set_props(dc, tz_mpc_properties);
 }
 
 static const TypeInfo tz_mpc_info = {

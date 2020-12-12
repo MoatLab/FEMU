@@ -15,13 +15,16 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
+#include "hw/irq.h"
 #include "hw/ppc/e500-ccsr.h"
+#include "hw/qdev-properties.h"
+#include "migration/vmstate.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_host.h"
 #include "qemu/bswap.h"
 #include "qemu/module.h"
 #include "hw/pci-host/ppce500.h"
+#include "qom/object.h"
 
 #ifdef DEBUG_PCI
 #define pci_debug(fmt, ...) fprintf(stderr, fmt, ## __VA_ARGS__)
@@ -89,8 +92,7 @@ struct pci_inbound {
 
 #define TYPE_PPC_E500_PCI_HOST_BRIDGE "e500-pcihost"
 
-#define PPC_E500_PCI_HOST_BRIDGE(obj) \
-    OBJECT_CHECK(PPCE500PCIState, (obj), TYPE_PPC_E500_PCI_HOST_BRIDGE)
+OBJECT_DECLARE_SIMPLE_TYPE(PPCE500PCIState, PPC_E500_PCI_HOST_BRIDGE)
 
 struct PPCE500PCIState {
     PCIHostState parent_obj;
@@ -112,8 +114,7 @@ struct PPCE500PCIState {
 };
 
 #define TYPE_PPC_E500_PCI_BRIDGE "e500-host-bridge"
-#define PPC_E500_PCI_BRIDGE(obj) \
-    OBJECT_CHECK(PPCE500PCIBridgeState, (obj), TYPE_PPC_E500_PCI_BRIDGE)
+OBJECT_DECLARE_SIMPLE_TYPE(PPCE500PCIBridgeState, PPC_E500_PCI_BRIDGE)
 
 struct PPCE500PCIBridgeState {
     /*< private >*/
@@ -123,8 +124,6 @@ struct PPCE500PCIBridgeState {
     MemoryRegion bar0;
 };
 
-typedef struct PPCE500PCIBridgeState PPCE500PCIBridgeState;
-typedef struct PPCE500PCIState PPCE500PCIState;
 
 static uint64_t pci_reg_read4(void *opaque, hwaddr addr,
                               unsigned size)
@@ -507,7 +506,7 @@ static void e500_host_bridge_class_init(ObjectClass *klass, void *data)
 }
 
 static const TypeInfo e500_host_bridge_info = {
-    .name          = "e500-host-bridge",
+    .name          = TYPE_PPC_E500_PCI_BRIDGE,
     .parent        = TYPE_PCI_DEVICE,
     .instance_size = sizeof(PPCE500PCIBridgeState),
     .class_init    = e500_host_bridge_class_init,
@@ -529,7 +528,7 @@ static void e500_pcihost_class_init(ObjectClass *klass, void *data)
 
     dc->realize = e500_pcihost_realize;
     set_bit(DEVICE_CATEGORY_BRIDGE, dc->categories);
-    dc->props = pcihost_properties;
+    device_class_set_props(dc, pcihost_properties);
     dc->vmsd = &vmstate_ppce500_pci;
 }
 

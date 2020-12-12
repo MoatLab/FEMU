@@ -39,6 +39,26 @@
 #define XCHAL_HAVE_DEPBITS 0
 #endif
 
+#ifndef XCHAL_HAVE_DFP
+#define XCHAL_HAVE_DFP 0
+#endif
+
+#ifndef XCHAL_HAVE_DFPU_SINGLE_ONLY
+#define XCHAL_HAVE_DFPU_SINGLE_ONLY 0
+#endif
+
+#ifndef XCHAL_HAVE_DFPU_SINGLE_DOUBLE
+#define XCHAL_HAVE_DFPU_SINGLE_DOUBLE XCHAL_HAVE_DFP
+#endif
+
+/*
+ * We need to know the type of FP unit, not only its precision.
+ * Unfortunately XCHAL macros don't tell this explicitly.
+ */
+#define XCHAL_HAVE_DFPU (XCHAL_HAVE_DFP || \
+                         XCHAL_HAVE_DFPU_SINGLE_ONLY || \
+                         XCHAL_HAVE_DFPU_SINGLE_DOUBLE)
+
 #ifndef XCHAL_HAVE_DIV32
 #define XCHAL_HAVE_DIV32 0
 #endif
@@ -60,8 +80,9 @@
 #define XCHAL_RESET_VECTOR1_VADDR XCHAL_RESET_VECTOR_VADDR
 #endif
 
-#ifndef XCHAL_HW_MIN_VERSION
-#define XCHAL_HW_MIN_VERSION 0
+#ifndef XCHAL_HW_VERSION
+#define XCHAL_HW_VERSION (XCHAL_HW_VERSION_MAJOR * 100 \
+                          + XCHAL_HW_VERSION_MINOR)
 #endif
 
 #ifndef XCHAL_LOOP_BUFFER_SIZE
@@ -98,9 +119,12 @@
     XCHAL_OPTION(XCHAL_HAVE_CP, XTENSA_OPTION_COPROCESSOR) | \
     XCHAL_OPTION(XCHAL_HAVE_BOOLEANS, XTENSA_OPTION_BOOLEAN) | \
     XCHAL_OPTION(XCHAL_HAVE_FP, XTENSA_OPTION_FP_COPROCESSOR) | \
+    XCHAL_OPTION(XCHAL_HAVE_DFPU, XTENSA_OPTION_DFP_COPROCESSOR) | \
+    XCHAL_OPTION(XCHAL_HAVE_DFPU_SINGLE_ONLY, \
+                 XTENSA_OPTION_DFPU_SINGLE_ONLY) | \
     XCHAL_OPTION(XCHAL_HAVE_RELEASE_SYNC, XTENSA_OPTION_MP_SYNCHRO) | \
     XCHAL_OPTION(XCHAL_HAVE_S32C1I, XTENSA_OPTION_CONDITIONAL_STORE) | \
-    XCHAL_OPTION(((XCHAL_HAVE_S32C1I && XCHAL_HW_MIN_VERSION >= 230000) || \
+    XCHAL_OPTION(((XCHAL_HAVE_S32C1I && XCHAL_HW_VERSION >= 230000) || \
                   XCHAL_HAVE_EXCLUSIVE), XTENSA_OPTION_ATOMCTL) | \
     XCHAL_OPTION(XCHAL_HAVE_DEPBITS, XTENSA_OPTION_DEPBITS) | \
     /* Interrupts and exceptions */ \
@@ -215,6 +239,9 @@
 #define XTHAL_INTTYPE_IDMA_ERR INTTYPE_IDMA_ERR
 #define XTHAL_INTTYPE_GS_ERR INTTYPE_GS_ERR
 
+#ifndef XCHAL_NMILEVEL
+#define XCHAL_NMILEVEL (XCHAL_NUM_INTLEVELS + 1)
+#endif
 
 #define INTERRUPT(i) { \
         .level = XCHAL_INT ## i ## _LEVEL, \
@@ -304,7 +331,8 @@
 
 #define INTERRUPTS_SECTION \
     .ninterrupt = XCHAL_NUM_INTERRUPTS, \
-    .nlevel = XCHAL_NUM_INTLEVELS, \
+    .nlevel = XCHAL_NUM_INTLEVELS + XCHAL_HAVE_NMI, \
+    .nmi_level = XCHAL_NMILEVEL, \
     .interrupt_vector = INTERRUPT_VECTORS, \
     .level_mask = LEVEL_MASKS, \
     .inttype_mask = INTTYPE_MASKS, \
@@ -373,15 +401,28 @@
 #elif XCHAL_HAVE_MPU
 
 #ifndef XTENSA_MPU_BG_MAP
+#ifdef XCHAL_MPU_BACKGROUND_MAP
+#define XCHAL_MPU_BGMAP(s, vaddr_start, vaddr_last, rights, memtype, x...) \
+    { .vaddr = (vaddr_start), .attr = ((rights) << 8) | ((memtype) << 12), },
+
+#define XTENSA_MPU_BG_MAP (xtensa_mpu_entry []){\
+    XCHAL_MPU_BACKGROUND_MAP(0) \
+}
+
+#define XTENSA_MPU_BG_MAP_ENTRIES XCHAL_MPU_BACKGROUND_ENTRIES
+#else
 #define XTENSA_MPU_BG_MAP (xtensa_mpu_entry []){\
     { .vaddr = 0, .attr = 0x00006700, }, \
 }
+
+#define XTENSA_MPU_BG_MAP_ENTRIES 1
+#endif
 #endif
 
 #define TLB_SECTION \
     .mpu_align = XCHAL_MPU_ALIGN, \
     .n_mpu_fg_segments = XCHAL_MPU_ENTRIES, \
-    .n_mpu_bg_segments = 1, \
+    .n_mpu_bg_segments = XTENSA_MPU_BG_MAP_ENTRIES, \
     .mpu_bg = XTENSA_MPU_BG_MAP
 
 #ifndef XCHAL_SYSROM0_PADDR
@@ -485,6 +526,7 @@
     }
 
 #define CONFIG_SECTION \
+    .hw_version = XCHAL_HW_VERSION, \
     .configid = { \
         XCHAL_HW_CONFIGID0, \
         XCHAL_HW_CONFIGID1, \
@@ -496,6 +538,7 @@
     .ndepc = (XCHAL_XEA_VERSION >= 2), \
     .inst_fetch_width = XCHAL_INST_FETCH_WIDTH, \
     .max_insn_size = XCHAL_MAX_INSTRUCTION_SIZE, \
+    .use_first_nan = !XCHAL_HAVE_DFPU, \
     EXCEPTIONS_SECTION, \
     INTERRUPTS_SECTION, \
     TLB_SECTION, \

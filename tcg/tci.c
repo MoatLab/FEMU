@@ -30,7 +30,7 @@
 #include "qemu-common.h"
 #include "tcg/tcg.h"           /* MAX_OPC_PARAM_IARGS */
 #include "exec/cpu_ldst.h"
-#include "tcg-op.h"
+#include "tcg/tcg-op.h"
 
 /* Marker for missing code. */
 #define TODO() \
@@ -123,6 +123,12 @@ tci_write_reg32s(tcg_target_ulong *regs, TCGReg index, int32_t value)
 #endif
 
 static void tci_write_reg8(tcg_target_ulong *regs, TCGReg index, uint8_t value)
+{
+    tci_write_reg(regs, index, value);
+}
+
+static void
+tci_write_reg16(tcg_target_ulong *regs, TCGReg index, uint16_t value)
 {
     tci_write_reg(regs, index, value);
 }
@@ -585,6 +591,8 @@ uintptr_t tcg_qemu_tb_exec(CPUArchState *env, uint8_t *tb_ptr)
             tci_write_reg8(regs, t0, *(uint8_t *)(t1 + t2));
             break;
         case INDEX_op_ld8s_i32:
+            TODO();
+            break;
         case INDEX_op_ld16u_i32:
             TODO();
             break;
@@ -854,7 +862,14 @@ uintptr_t tcg_qemu_tb_exec(CPUArchState *env, uint8_t *tb_ptr)
             tci_write_reg8(regs, t0, *(uint8_t *)(t1 + t2));
             break;
         case INDEX_op_ld8s_i64:
+            TODO();
+            break;
         case INDEX_op_ld16u_i64:
+            t0 = *tb_ptr++;
+            t1 = tci_read_r(regs, &tb_ptr);
+            t2 = tci_read_s32(&tb_ptr);
+            tci_write_reg16(regs, t0, *(uint16_t *)(t1 + t2));
+            break;
         case INDEX_op_ld16s_i64:
             TODO();
             break;
@@ -1100,7 +1115,7 @@ uintptr_t tcg_qemu_tb_exec(CPUArchState *env, uint8_t *tb_ptr)
         case INDEX_op_goto_tb:
             /* Jump address is aligned */
             tb_ptr = QEMU_ALIGN_PTR_UP(tb_ptr, 4);
-            t0 = atomic_read((int32_t *)tb_ptr);
+            t0 = qatomic_read((int32_t *)tb_ptr);
             tb_ptr += sizeof(int32_t);
             tci_assert(tb_ptr == old_code_ptr + op_size);
             tb_ptr += (int32_t)t0;

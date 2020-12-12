@@ -16,16 +16,13 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "qemu/module.h"
-#include "hw/hw.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_ids.h"
 #include "hw/pci/msi.h"
 #include "hw/pci/msix.h"
-#include "hw/qdev-core.h"
 #include "hw/qdev-properties.h"
 #include "cpu.h"
 #include "trace.h"
-#include "sysemu/sysemu.h"
 #include "monitor/monitor.h"
 #include "hw/rdma/rdma.h"
 
@@ -36,6 +33,7 @@
 #include <infiniband/verbs.h>
 #include "pvrdma.h"
 #include "standard-headers/rdma/vmw_pvrdma-abi.h"
+#include "sysemu/runstate.h"
 #include "standard-headers/drivers/infiniband/hw/vmw_pvrdma/pvrdma_dev_api.h"
 #include "pvrdma_qp_ops.h"
 
@@ -603,7 +601,7 @@ static void pvrdma_realize(PCIDevice *pdev, Error **errp)
     rdma_info_report("Initializing device %s %x.%x", pdev->name,
                      PCI_SLOT(pdev->devfn), PCI_FUNC(pdev->devfn));
 
-    if (TARGET_PAGE_SIZE != getpagesize()) {
+    if (TARGET_PAGE_SIZE != qemu_real_host_page_size) {
         error_setg(errp, "Target page size must be the same as host page size");
         return;
     }
@@ -666,6 +664,12 @@ static void pvrdma_realize(PCIDevice *pdev, Error **errp)
     dev->shutdown_notifier.notify = pvrdma_shutdown_notifier;
     qemu_register_shutdown_notifier(&dev->shutdown_notifier);
 
+#ifdef LEGACY_RDMA_REG_MR
+    rdma_info_report("Using legacy reg_mr");
+#else
+    rdma_info_report("Using iova reg_mr");
+#endif
+
 out:
     if (rc) {
         pvrdma_fini(pdev);
@@ -677,7 +681,7 @@ static void pvrdma_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
-    RdmaProviderClass *ir = INTERFACE_RDMA_PROVIDER_CLASS(klass);
+    RdmaProviderClass *ir = RDMA_PROVIDER_CLASS(klass);
 
     k->realize = pvrdma_realize;
     k->vendor_id = PCI_VENDOR_ID_VMWARE;
@@ -686,7 +690,7 @@ static void pvrdma_class_init(ObjectClass *klass, void *data)
     k->class_id = PCI_CLASS_NETWORK_OTHER;
 
     dc->desc = "RDMA Device";
-    dc->props = pvrdma_dev_properties;
+    device_class_set_props(dc, pvrdma_dev_properties);
     set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);
 
     ir->print_statistics = pvrdma_print_statistics;

@@ -149,7 +149,7 @@ void cpu_m68k_set_fpcr(CPUM68KState *env, uint32_t val)
 
 void HELPER(fitrunc)(CPUM68KState *env, FPReg *res, FPReg *val)
 {
-    int rounding_mode = get_float_rounding_mode(&env->fp_status);
+    FloatRoundMode rounding_mode = get_float_rounding_mode(&env->fp_status);
     set_float_rounding_mode(float_round_to_zero, &env->fp_status);
     res->d = floatx80_round_to_int(val->d, &env->fp_status);
     set_float_rounding_mode(rounding_mode, &env->fp_status);
@@ -300,7 +300,7 @@ void HELPER(fdmul)(CPUM68KState *env, FPReg *res, FPReg *val0, FPReg *val1)
 
 void HELPER(fsglmul)(CPUM68KState *env, FPReg *res, FPReg *val0, FPReg *val1)
 {
-    int rounding_mode = get_float_rounding_mode(&env->fp_status);
+    FloatRoundMode rounding_mode = get_float_rounding_mode(&env->fp_status);
     floatx80 a, b;
 
     PREC_BEGIN(32);
@@ -333,7 +333,7 @@ void HELPER(fddiv)(CPUM68KState *env, FPReg *res, FPReg *val0, FPReg *val1)
 
 void HELPER(fsgldiv)(CPUM68KState *env, FPReg *res, FPReg *val0, FPReg *val1)
 {
-    int rounding_mode = get_float_rounding_mode(&env->fp_status);
+    FloatRoundMode rounding_mode = get_float_rounding_mode(&env->fp_status);
     floatx80 a, b;
 
     PREC_BEGIN(32);
@@ -396,14 +396,14 @@ typedef int (*float_access)(CPUM68KState *env, uint32_t addr, FPReg *fp,
                             uintptr_t ra);
 
 static uint32_t fmovem_predec(CPUM68KState *env, uint32_t addr, uint32_t mask,
-                               float_access access)
+                              float_access access_fn)
 {
     uintptr_t ra = GETPC();
     int i, size;
 
     for (i = 7; i >= 0; i--, mask <<= 1) {
         if (mask & 0x80) {
-            size = access(env, addr, &env->fregs[i], ra);
+            size = access_fn(env, addr, &env->fregs[i], ra);
             if ((mask & 0xff) != 0x80) {
                 addr -= size;
             }
@@ -414,14 +414,14 @@ static uint32_t fmovem_predec(CPUM68KState *env, uint32_t addr, uint32_t mask,
 }
 
 static uint32_t fmovem_postinc(CPUM68KState *env, uint32_t addr, uint32_t mask,
-                               float_access access)
+                               float_access access_fn)
 {
     uintptr_t ra = GETPC();
     int i, size;
 
     for (i = 0; i < 8; i++, mask <<= 1) {
         if (mask & 0x80) {
-            size = access(env, addr, &env->fregs[i], ra);
+            size = access_fn(env, addr, &env->fregs[i], ra);
             addr += size;
         }
     }
@@ -639,6 +639,11 @@ void HELPER(facos)(CPUM68KState *env, FPReg *res, FPReg *val)
 void HELPER(fatanh)(CPUM68KState *env, FPReg *res, FPReg *val)
 {
     res->d = floatx80_atanh(val->d, &env->fp_status);
+}
+
+void HELPER(fetoxm1)(CPUM68KState *env, FPReg *res, FPReg *val)
+{
+    res->d = floatx80_etoxm1(val->d, &env->fp_status);
 }
 
 void HELPER(ftanh)(CPUM68KState *env, FPReg *res, FPReg *val)

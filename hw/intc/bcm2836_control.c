@@ -4,7 +4,6 @@
  * Written by Andrew Baumann
  *
  * Based on bcm2835_ic.c (Raspberry Pi emulation) (c) 2012 Gregory Estrade
- * This code is licensed under the GNU GPLv2 and later.
  *
  * At present, only implements interrupt routing, and mailboxes (i.e.,
  * not PMU interrupt, or AXI counters).
@@ -13,10 +12,15 @@
  *
  * Ref:
  * https://www.raspberrypi.org/documentation/hardware/raspberrypi/bcm2836/QA7_rev3.4.pdf
+ *
+ * This work is licensed under the terms of the GNU GPL, version 2 or later.
+ * See the COPYING file in the top-level directory.
  */
 
 #include "qemu/osdep.h"
 #include "hw/intc/bcm2836_control.h"
+#include "hw/irq.h"
+#include "migration/vmstate.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
 
@@ -153,22 +157,22 @@ static void bcm2836_control_set_local_irq(void *opaque, int core, int local_irq,
 
 static void bcm2836_control_set_local_irq0(void *opaque, int core, int level)
 {
-    bcm2836_control_set_local_irq(opaque, core, 0, level);
+    bcm2836_control_set_local_irq(opaque, core, IRQ_CNTPSIRQ, level);
 }
 
 static void bcm2836_control_set_local_irq1(void *opaque, int core, int level)
 {
-    bcm2836_control_set_local_irq(opaque, core, 1, level);
+    bcm2836_control_set_local_irq(opaque, core, IRQ_CNTPNSIRQ, level);
 }
 
 static void bcm2836_control_set_local_irq2(void *opaque, int core, int level)
 {
-    bcm2836_control_set_local_irq(opaque, core, 2, level);
+    bcm2836_control_set_local_irq(opaque, core, IRQ_CNTHPIRQ, level);
 }
 
 static void bcm2836_control_set_local_irq3(void *opaque, int core, int level)
 {
-    bcm2836_control_set_local_irq(opaque, core, 3, level);
+    bcm2836_control_set_local_irq(opaque, core, IRQ_CNTVIRQ, level);
 }
 
 static void bcm2836_control_set_gpu_irq(void *opaque, int irq, int level)
@@ -262,7 +266,7 @@ static uint64_t bcm2836_control_read(void *opaque, hwaddr offset, unsigned size)
     } else if (offset >= REG_MBOX0_RDCLR && offset < REG_LIMIT) {
         return s->mailboxes[(offset - REG_MBOX0_RDCLR) >> 2];
     } else {
-        qemu_log_mask(LOG_GUEST_ERROR, "%s: Bad offset %"HWADDR_PRIx"\n",
+        qemu_log_mask(LOG_UNIMP, "%s: Unsupported offset 0x%"HWADDR_PRIx"\n",
                       __func__, offset);
         return 0;
     }
@@ -291,8 +295,9 @@ static void bcm2836_control_write(void *opaque, hwaddr offset,
     } else if (offset >= REG_MBOX0_RDCLR && offset < REG_LIMIT) {
         s->mailboxes[(offset - REG_MBOX0_RDCLR) >> 2] &= ~val;
     } else {
-        qemu_log_mask(LOG_GUEST_ERROR, "%s: Bad offset %"HWADDR_PRIx"\n",
-                      __func__, offset);
+        qemu_log_mask(LOG_UNIMP, "%s: Unsupported offset 0x%"HWADDR_PRIx
+                                 " value 0x%"PRIx64"\n",
+                      __func__, offset, val);
         return;
     }
 

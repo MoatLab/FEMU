@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -22,6 +22,8 @@
 #include "qemu/units.h"
 #include "qapi/error.h"
 #include "hw/pci/pci_bridge.h"
+#include "hw/qdev-properties.h"
+#include "hw/irq.h"
 #include "hw/pci-host/xilinx-pcie.h"
 
 enum root_cfg_reg {
@@ -135,8 +137,7 @@ static void xilinx_pcie_host_realize(DeviceState *dev, Error **errp)
                                      pci_swizzle_map_irq_fn, s, &s->mmio,
                                      &s->io, 0, 4, TYPE_PCIE_BUS);
 
-    qdev_set_parent_bus(DEVICE(&s->root), BUS(pci->bus));
-    qdev_init_nofail(DEVICE(&s->root));
+    qdev_realize(DEVICE(&s->root), BUS(pci->bus), &error_fatal);
 }
 
 static const char *xilinx_pcie_host_root_bus_path(PCIHostState *host_bridge,
@@ -150,8 +151,7 @@ static void xilinx_pcie_host_init(Object *obj)
     XilinxPCIEHost *s = XILINX_PCIE_HOST(obj);
     XilinxPCIERoot *root = &s->root;
 
-    object_initialize_child(obj, "root",  root, sizeof(*root),
-                            TYPE_XILINX_PCIE_ROOT, &error_abort, NULL);
+    object_initialize_child(obj, "root", root, TYPE_XILINX_PCIE_ROOT);
     qdev_prop_set_int32(DEVICE(root), "addr", PCI_DEVFN(0, 0));
     qdev_prop_set_bit(DEVICE(root), "multifunction", false);
 }
@@ -175,7 +175,7 @@ static void xilinx_pcie_host_class_init(ObjectClass *klass, void *data)
     dc->realize = xilinx_pcie_host_realize;
     set_bit(DEVICE_CATEGORY_BRIDGE, dc->categories);
     dc->fw_name = "pci";
-    dc->props = xilinx_pcie_host_props;
+    device_class_set_props(dc, xilinx_pcie_host_props);
 }
 
 static const TypeInfo xilinx_pcie_host_info = {

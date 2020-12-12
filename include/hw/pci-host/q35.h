@@ -22,27 +22,20 @@
 #ifndef HW_Q35_H
 #define HW_Q35_H
 
-#include "hw/hw.h"
-#include "hw/isa/isa.h"
-#include "hw/sysbus.h"
-#include "hw/i386/pc.h"
-#include "hw/isa/apm.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/pcie_host.h"
-#include "hw/acpi/acpi.h"
-#include "hw/acpi/ich9.h"
 #include "hw/pci-host/pam.h"
-#include "hw/i386/intel_iommu.h"
+#include "qemu/units.h"
+#include "qemu/range.h"
+#include "qom/object.h"
 
 #define TYPE_Q35_HOST_DEVICE "q35-pcihost"
-#define Q35_HOST_DEVICE(obj) \
-     OBJECT_CHECK(Q35PCIHost, (obj), TYPE_Q35_HOST_DEVICE)
+OBJECT_DECLARE_SIMPLE_TYPE(Q35PCIHost, Q35_HOST_DEVICE)
 
 #define TYPE_MCH_PCI_DEVICE "mch"
-#define MCH_PCI_DEVICE(obj) \
-     OBJECT_CHECK(MCHPCIState, (obj), TYPE_MCH_PCI_DEVICE)
+OBJECT_DECLARE_SIMPLE_TYPE(MCHPCIState, MCH_PCI_DEVICE)
 
-typedef struct MCHPCIState {
+struct MCHPCIState {
     /*< private >*/
     PCIDevice parent_obj;
     /*< public >*/
@@ -55,22 +48,24 @@ typedef struct MCHPCIState {
     MemoryRegion smram_region, open_high_smram;
     MemoryRegion smram, low_smram, high_smram;
     MemoryRegion tseg_blackhole, tseg_window;
+    MemoryRegion smbase_blackhole, smbase_window;
+    bool has_smram_at_smbase;
     Range pci_hole;
     uint64_t below_4g_mem_size;
     uint64_t above_4g_mem_size;
     uint64_t pci_hole64_size;
     uint32_t short_root_bus;
     uint16_t ext_tseg_mbytes;
-} MCHPCIState;
+};
 
-typedef struct Q35PCIHost {
+struct Q35PCIHost {
     /*< private >*/
     PCIExpressHost parent_obj;
     /*< public >*/
 
     bool pci_hole64_fix;
     MCHPCIState mch;
-} Q35PCIHost;
+};
 
 #define Q35_MASK(bit, ms_bit, ls_bit) \
 ((uint##bit##_t)(((1ULL << ((ms_bit) + 1)) - 1) & ~((1ULL << ls_bit) - 1)))
@@ -97,6 +92,13 @@ typedef struct Q35PCIHost {
 #define MCH_HOST_BRIDGE_EXT_TSEG_MBYTES_SIZE   2
 #define MCH_HOST_BRIDGE_EXT_TSEG_MBYTES_QUERY  0xffff
 #define MCH_HOST_BRIDGE_EXT_TSEG_MBYTES_MAX    0xfff
+
+#define MCH_HOST_BRIDGE_SMBASE_SIZE            (128 * KiB)
+#define MCH_HOST_BRIDGE_SMBASE_ADDR            0x30000
+#define MCH_HOST_BRIDGE_F_SMBASE               0x9c
+#define MCH_HOST_BRIDGE_F_SMBASE_QUERY         0xff
+#define MCH_HOST_BRIDGE_F_SMBASE_IN_RAM        0x01
+#define MCH_HOST_BRIDGE_F_SMBASE_LCK           0x02
 
 #define MCH_HOST_BRIDGE_PCIEXBAR               0x60    /* 64bit register */
 #define MCH_HOST_BRIDGE_PCIEXBAR_SIZE          8       /* 64bit register */

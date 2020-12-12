@@ -408,10 +408,7 @@ findso:
             goto dropwithreset;
 
         so = socreate(slirp);
-        if (tcp_attach(so) < 0) {
-            g_free(so); /* Not sofree (if it failed, it's not insqued) */
-            goto dropwithreset;
-        }
+        tcp_attach(so);
 
         sbreserve(&so->so_snd, TCP_SNDSPACE);
         sbreserve(&so->so_rcv, TCP_RCVSPACE);
@@ -1510,10 +1507,12 @@ int tcp_mss(struct tcpcb *tp, unsigned offer)
 
     switch (so->so_ffamily) {
     case AF_INET:
-        mss = MIN(IF_MTU, IF_MRU) - sizeof(struct tcphdr) - sizeof(struct ip);
+        mss = MIN(so->slirp->if_mtu, so->slirp->if_mru) -
+              sizeof(struct tcphdr) - sizeof(struct ip);
         break;
     case AF_INET6:
-        mss = MIN(IF_MTU, IF_MRU) - sizeof(struct tcphdr) - sizeof(struct ip6);
+        mss = MIN(so->slirp->if_mtu, so->slirp->if_mru) -
+              sizeof(struct tcphdr) - sizeof(struct ip6);
         break;
     default:
         g_assert_not_reached();
@@ -1523,7 +1522,7 @@ int tcp_mss(struct tcpcb *tp, unsigned offer)
         mss = MIN(mss, offer);
     mss = MAX(mss, 32);
     if (mss < tp->t_maxseg || offer != 0)
-        tp->t_maxseg = mss;
+        tp->t_maxseg = MIN(mss, TCP_MAXSEG_MAX);
 
     tp->snd_cwnd = mss;
 

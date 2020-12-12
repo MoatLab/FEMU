@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -49,13 +49,20 @@
     "Server: QEMU VNC\r\n"                       \
     "Date: %s\r\n"
 
+#define QIO_CHANNEL_WEBSOCK_HANDSHAKE_WITH_PROTO_RES_OK \
+    "HTTP/1.1 101 Switching Protocols\r\n"              \
+    QIO_CHANNEL_WEBSOCK_HANDSHAKE_RES_COMMON            \
+    "Upgrade: websocket\r\n"                            \
+    "Connection: Upgrade\r\n"                           \
+    "Sec-WebSocket-Accept: %s\r\n"                      \
+    "Sec-WebSocket-Protocol: binary\r\n"                \
+    "\r\n"
 #define QIO_CHANNEL_WEBSOCK_HANDSHAKE_RES_OK    \
     "HTTP/1.1 101 Switching Protocols\r\n"      \
     QIO_CHANNEL_WEBSOCK_HANDSHAKE_RES_COMMON    \
     "Upgrade: websocket\r\n"                    \
     "Connection: Upgrade\r\n"                   \
     "Sec-WebSocket-Accept: %s\r\n"              \
-    "Sec-WebSocket-Protocol: binary\r\n"        \
     "\r\n"
 #define QIO_CHANNEL_WEBSOCK_HANDSHAKE_RES_NOT_FOUND \
     "HTTP/1.1 404 Not Found\r\n"                    \
@@ -336,6 +343,7 @@ qio_channel_websock_find_header(QIOChannelWebsockHTTPHeader *hdrs,
 
 static void qio_channel_websock_handshake_send_res_ok(QIOChannelWebsock *ioc,
                                                       const char *key,
+                                                      const bool use_protocols,
                                                       Error **errp)
 {
     char combined_key[QIO_CHANNEL_WEBSOCK_CLIENT_KEY_LEN +
@@ -361,8 +369,14 @@ static void qio_channel_websock_handshake_send_res_ok(QIOChannelWebsock *ioc,
     }
 
     date = qio_channel_websock_date_str();
-    qio_channel_websock_handshake_send_res(
-        ioc, QIO_CHANNEL_WEBSOCK_HANDSHAKE_RES_OK, date, accept);
+    if (use_protocols) {
+            qio_channel_websock_handshake_send_res(
+                ioc, QIO_CHANNEL_WEBSOCK_HANDSHAKE_WITH_PROTO_RES_OK,
+                date, accept);
+    } else {
+            qio_channel_websock_handshake_send_res(
+                ioc, QIO_CHANNEL_WEBSOCK_HANDSHAKE_RES_OK, date, accept);
+    }
 
     g_free(date);
     g_free(accept);
@@ -387,10 +401,6 @@ static void qio_channel_websock_handshake_process(QIOChannelWebsock *ioc,
 
     protocols = qio_channel_websock_find_header(
         hdrs, nhdrs, QIO_CHANNEL_WEBSOCK_HEADER_PROTOCOL);
-    if (!protocols) {
-        error_setg(errp, "Missing websocket protocol header data");
-        goto bad_request;
-    }
 
     version = qio_channel_websock_find_header(
         hdrs, nhdrs, QIO_CHANNEL_WEBSOCK_HEADER_VERSION);
@@ -430,10 +440,12 @@ static void qio_channel_websock_handshake_process(QIOChannelWebsock *ioc,
     trace_qio_channel_websock_http_request(ioc, protocols, version,
                                            host, connection, upgrade, key);
 
-    if (!g_strrstr(protocols, QIO_CHANNEL_WEBSOCK_PROTOCOL_BINARY)) {
-        error_setg(errp, "No '%s' protocol is supported by client '%s'",
-                   QIO_CHANNEL_WEBSOCK_PROTOCOL_BINARY, protocols);
-        goto bad_request;
+    if (protocols) {
+            if (!g_strrstr(protocols, QIO_CHANNEL_WEBSOCK_PROTOCOL_BINARY)) {
+                error_setg(errp, "No '%s' protocol is supported by client '%s'",
+                           QIO_CHANNEL_WEBSOCK_PROTOCOL_BINARY, protocols);
+                goto bad_request;
+            }
     }
 
     if (!g_str_equal(version, QIO_CHANNEL_WEBSOCK_SUPPORTED_VERSION)) {
@@ -467,7 +479,7 @@ static void qio_channel_websock_handshake_process(QIOChannelWebsock *ioc,
         goto bad_request;
     }
 
-    qio_channel_websock_handshake_send_res_ok(ioc, key, errp);
+    qio_channel_websock_handshake_send_res_ok(ioc, key, !!protocols, errp);
     return;
 
  bad_request:
@@ -734,7 +746,7 @@ static int qio_channel_websock_decode_header(QIOChannelWebsock *ioc,
             opcode != QIO_CHANNEL_WEBSOCK_OPCODE_CLOSE &&
             opcode != QIO_CHANNEL_WEBSOCK_OPCODE_PING &&
             opcode != QIO_CHANNEL_WEBSOCK_OPCODE_PONG) {
-            error_setg(errp, "unsupported opcode: %#04x; only binary, close, "
+            error_setg(errp, "unsupported opcode: 0x%04x; only binary, close, "
                        "ping, and pong websocket frames are supported", opcode);
             qio_channel_websock_write_close(
                 ioc, QIO_CHANNEL_WEBSOCK_STATUS_INVALID_DATA ,

@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
 """
@@ -29,9 +28,6 @@ STATE_MACRO = 2
 def c_macro_to_format(macro):
     if macro.startswith("PRI"):
         return macro[3]
-
-    if macro == "TARGET_FMT_plx":
-        return "%016x"
 
     raise Exception("Unhandled macro '%s'" % macro)
 

@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -124,13 +124,12 @@ qauthz_list_class_init(ObjectClass *oc, void *data)
                                    "QAuthZListPolicy",
                                    &QAuthZListPolicy_lookup,
                                    qauthz_list_prop_get_policy,
-                                   qauthz_list_prop_set_policy,
-                                   NULL);
+                                   qauthz_list_prop_set_policy);
 
     object_class_property_add(oc, "rules", "QAuthZListRule",
                               qauthz_list_prop_get_rules,
                               qauthz_list_prop_set_rules,
-                              NULL, NULL, NULL);
+                              NULL, NULL);
 
     authz->is_allowed = qauthz_list_is_allowed;
 }
@@ -253,7 +252,6 @@ static const TypeInfo qauthz_list_info = {
     .name = TYPE_QAUTHZ_LIST,
     .instance_size = sizeof(QAuthZList),
     .instance_finalize = qauthz_list_finalize,
-    .class_size = sizeof(QAuthZListClass),
     .class_init = qauthz_list_class_init,
     .interfaces = (InterfaceInfo[]) {
         { TYPE_USER_CREATABLE },

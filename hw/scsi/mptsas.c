@@ -11,7 +11,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -23,26 +23,24 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
 #include "hw/pci/pci.h"
+#include "hw/qdev-properties.h"
 #include "sysemu/dma.h"
 #include "hw/pci/msi.h"
 #include "qemu/iov.h"
+#include "qemu/main-loop.h"
 #include "qemu/module.h"
 #include "hw/scsi/scsi.h"
 #include "scsi/constants.h"
 #include "trace.h"
 #include "qapi/error.h"
 #include "mptsas.h"
+#include "migration/qemu-file-types.h"
+#include "migration/vmstate.h"
 #include "mpi.h"
 
 #define NAA_LOCALLY_ASSIGNED_ID 0x3ULL
 #define IEEE_COMPANY_LOCALLY_ASSIGNED 0x525400
-
-#define TYPE_MPTSAS1068 "mptsas1068"
-
-#define MPT_SAS(obj) \
-    OBJECT_CHECK(MPTSASState, (obj), TYPE_MPTSAS1068)
 
 #define MPTSAS1068_PRODUCT_ID                  \
     (MPI_FW_HEADER_PID_FAMILY_1068_SAS |       \
@@ -1428,7 +1426,7 @@ static void mptsas1068_class_init(ObjectClass *oc, void *data)
     pc->subsystem_vendor_id = PCI_VENDOR_ID_LSI_LOGIC;
     pc->subsystem_id = 0x8000;
     pc->class_id = PCI_CLASS_STORAGE_SCSI;
-    dc->props = mptsas_properties;
+    device_class_set_props(dc, mptsas_properties);
     dc->reset = mptsas_reset;
     dc->vmsd = &vmstate_mptsas;
     dc->desc = "LSI SAS 1068";

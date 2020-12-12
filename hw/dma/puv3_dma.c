@@ -10,26 +10,27 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
 #include "hw/sysbus.h"
+#include "qom/object.h"
 
 #undef DEBUG_PUV3
 #include "hw/unicore32/puv3.h"
 #include "qemu/module.h"
+#include "qemu/log.h"
 
 #define PUV3_DMA_CH_NR          (6)
 #define PUV3_DMA_CH_MASK        (0xff)
 #define PUV3_DMA_CH(offset)     ((offset) >> 8)
 
 #define TYPE_PUV3_DMA "puv3_dma"
-#define PUV3_DMA(obj) OBJECT_CHECK(PUV3DMAState, (obj), TYPE_PUV3_DMA)
+OBJECT_DECLARE_SIMPLE_TYPE(PUV3DMAState, PUV3_DMA)
 
-typedef struct PUV3DMAState {
+struct PUV3DMAState {
     SysBusDevice parent_obj;
 
     MemoryRegion iomem;
     uint32_t reg_CFG[PUV3_DMA_CH_NR];
-} PUV3DMAState;
+};
 
 static uint64_t puv3_dma_read(void *opaque, hwaddr offset,
         unsigned size)
@@ -44,7 +45,9 @@ static uint64_t puv3_dma_read(void *opaque, hwaddr offset,
         ret = s->reg_CFG[PUV3_DMA_CH(offset)];
         break;
     default:
-        DPRINTF("Bad offset 0x%x\n", offset);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "%s: Bad read offset 0x%"HWADDR_PRIx"\n",
+                      __func__, offset);
     }
     DPRINTF("offset 0x%x, value 0x%x\n", offset, ret);
 
@@ -63,7 +66,9 @@ static void puv3_dma_write(void *opaque, hwaddr offset,
         s->reg_CFG[PUV3_DMA_CH(offset)] = value;
         break;
     default:
-        DPRINTF("Bad offset 0x%x\n", offset);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "%s: Bad write offset 0x%"HWADDR_PRIx"\n",
+                      __func__, offset);
     }
     DPRINTF("offset 0x%x, value 0x%x\n", offset, value);
 }

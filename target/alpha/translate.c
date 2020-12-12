@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -20,10 +20,11 @@
 #include "qemu/osdep.h"
 #include "cpu.h"
 #include "sysemu/cpus.h"
+#include "sysemu/cpu-timers.h"
 #include "disas/disas.h"
 #include "qemu/host-utils.h"
 #include "exec/exec-all.h"
-#include "tcg-op.h"
+#include "tcg/tcg-op.h"
 #include "exec/cpu_ldst.h"
 #include "exec/helper-proto.h"
 #include "exec/helper-gen.h"
@@ -403,7 +404,7 @@ static inline void gen_store_mem(DisasContext *ctx,
 
 static DisasJumpType gen_store_conditional(DisasContext *ctx, int ra, int rb,
                                            int32_t disp16, int mem_idx,
-                                           TCGMemOp op)
+                                           MemOp op)
 {
     TCGLabel *lab_fail, *lab_done;
     TCGv addr, val;
@@ -1329,10 +1330,9 @@ static DisasJumpType gen_mfpr(DisasContext *ctx, TCGv va, int regno)
     case 249: /* VMTIME */
         helper = gen_helper_get_vmtime;
     do_helper:
-        if (use_icount) {
+        if (icount_enabled()) {
             gen_io_start();
             helper(va);
-            gen_io_end();
             return DISAS_PC_STALE;
         } else {
             helper(va);
@@ -2398,7 +2398,6 @@ static DisasJumpType translate_one(DisasContext *ctx, uint32_t insn)
             if (tb_cflags(ctx->base.tb) & CF_USE_ICOUNT) {
                 gen_io_start();
                 gen_helper_load_pcc(va, cpu_env);
-                gen_io_end();
                 ret = DISAS_PC_STALE;
             } else {
                 gen_helper_load_pcc(va, cpu_env);
@@ -2989,7 +2988,7 @@ static void alpha_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
 {
     DisasContext *ctx = container_of(dcbase, DisasContext, base);
     CPUAlphaState *env = cpu->env_ptr;
-    uint32_t insn = cpu_ldl_code(env, ctx->base.pc_next);
+    uint32_t insn = translator_ldl(env, ctx->base.pc_next);
 
     ctx->base.pc_next += 4;
     ctx->base.is_jmp = translate_one(ctx, insn);

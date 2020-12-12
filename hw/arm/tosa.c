@@ -13,7 +13,7 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
-#include "hw/hw.h"
+#include "sysemu/runstate.h"
 #include "hw/arm/pxa.h"
 #include "hw/arm/boot.h"
 #include "hw/arm/sharpsl.h"
@@ -21,37 +21,39 @@
 #include "hw/boards.h"
 #include "hw/display/tc6393xb.h"
 #include "hw/i2c/i2c.h"
+#include "hw/irq.h"
 #include "hw/ssi/ssi.h"
 #include "hw/sysbus.h"
+#include "hw/misc/led.h"
 #include "exec/address-spaces.h"
-#include "sysemu/sysemu.h"
+#include "qom/object.h"
 
-#define TOSA_RAM    0x04000000
-#define TOSA_ROM	0x00800000
+#define TOSA_RAM 0x04000000
+#define TOSA_ROM 0x00800000
 
-#define TOSA_GPIO_USB_IN		(5)
-#define TOSA_GPIO_nSD_DETECT	(9)
-#define TOSA_GPIO_ON_RESET		(19)
-#define TOSA_GPIO_CF_IRQ		(21)	/* CF slot0 Ready */
-#define TOSA_GPIO_CF_CD			(13)
-#define TOSA_GPIO_TC6393XB_INT  (15)
-#define TOSA_GPIO_JC_CF_IRQ		(36)	/* CF slot1 Ready */
+#define TOSA_GPIO_USB_IN                (5)
+#define TOSA_GPIO_nSD_DETECT            (9)
+#define TOSA_GPIO_ON_RESET              (19)
+#define TOSA_GPIO_CF_IRQ                (21)    /* CF slot0 Ready */
+#define TOSA_GPIO_CF_CD                 (13)
+#define TOSA_GPIO_TC6393XB_INT          (15)
+#define TOSA_GPIO_JC_CF_IRQ             (36)    /* CF slot1 Ready */
 
-#define TOSA_SCOOP_GPIO_BASE	1
-#define TOSA_GPIO_IR_POWERDWN	(TOSA_SCOOP_GPIO_BASE + 2)
-#define TOSA_GPIO_SD_WP			(TOSA_SCOOP_GPIO_BASE + 3)
-#define TOSA_GPIO_PWR_ON		(TOSA_SCOOP_GPIO_BASE + 4)
+#define TOSA_SCOOP_GPIO_BASE            1
+#define TOSA_GPIO_IR_POWERDWN           (TOSA_SCOOP_GPIO_BASE + 2)
+#define TOSA_GPIO_SD_WP                 (TOSA_SCOOP_GPIO_BASE + 3)
+#define TOSA_GPIO_PWR_ON                (TOSA_SCOOP_GPIO_BASE + 4)
 
-#define TOSA_SCOOP_JC_GPIO_BASE		1
-#define TOSA_GPIO_BT_LED		(TOSA_SCOOP_JC_GPIO_BASE + 0)
-#define TOSA_GPIO_NOTE_LED		(TOSA_SCOOP_JC_GPIO_BASE + 1)
-#define TOSA_GPIO_CHRG_ERR_LED		(TOSA_SCOOP_JC_GPIO_BASE + 2)
-#define TOSA_GPIO_TC6393XB_L3V_ON	(TOSA_SCOOP_JC_GPIO_BASE + 5)
-#define TOSA_GPIO_WLAN_LED		(TOSA_SCOOP_JC_GPIO_BASE + 7)
+#define TOSA_SCOOP_JC_GPIO_BASE         1
+#define TOSA_GPIO_BT_LED                (TOSA_SCOOP_JC_GPIO_BASE + 0)
+#define TOSA_GPIO_NOTE_LED              (TOSA_SCOOP_JC_GPIO_BASE + 1)
+#define TOSA_GPIO_CHRG_ERR_LED          (TOSA_SCOOP_JC_GPIO_BASE + 2)
+#define TOSA_GPIO_TC6393XB_L3V_ON       (TOSA_SCOOP_JC_GPIO_BASE + 5)
+#define TOSA_GPIO_WLAN_LED              (TOSA_SCOOP_JC_GPIO_BASE + 7)
 
-#define	DAC_BASE	0x4e
-#define DAC_CH1		0
-#define DAC_CH2		1
+#define DAC_BASE 0x4e
+#define DAC_CH1 0
+#define DAC_CH2 1
 
 static void tosa_microdrive_attach(PXA2xxState *cpu)
 {
@@ -65,26 +67,20 @@ static void tosa_microdrive_attach(PXA2xxState *cpu)
     pxa2xx_pcmcia_attach(cpu->pcmcia[0], md);
 }
 
-static void tosa_out_switch(void *opaque, int line, int level)
-{
-    switch (line) {
-        case 0:
-            fprintf(stderr, "blue LED %s.\n", level ? "on" : "off");
-            break;
-        case 1:
-            fprintf(stderr, "green LED %s.\n", level ? "on" : "off");
-            break;
-        case 2:
-            fprintf(stderr, "amber LED %s.\n", level ? "on" : "off");
-            break;
-        case 3:
-            fprintf(stderr, "wlan LED %s.\n", level ? "on" : "off");
-            break;
-        default:
-            fprintf(stderr, "Uhandled out event: %d = %d\n", line, level);
-            break;
-    }
-}
+/*
+ * Encapsulation of some GPIO line behaviour for the Tosa board
+ *
+ * QEMU interface:
+ *  + named GPIO inputs "leds[0..3]": assert to light LEDs
+ *  + named GPIO input "reset": when asserted, resets the system
+ */
+
+#define TYPE_TOSA_MISC_GPIO "tosa-misc-gpio"
+OBJECT_DECLARE_SIMPLE_TYPE(TosaMiscGPIOState, TOSA_MISC_GPIO)
+
+struct TosaMiscGPIOState {
+    SysBusDevice parent_obj;
+};
 
 static void tosa_reset(void *opaque, int line, int level)
 {
@@ -93,13 +89,22 @@ static void tosa_reset(void *opaque, int line, int level)
     }
 }
 
+static void tosa_misc_gpio_init(Object *obj)
+{
+    DeviceState *dev = DEVICE(obj);
+
+    qdev_init_gpio_in_named(dev, tosa_reset, "reset", 1);
+}
+
 static void tosa_gpio_setup(PXA2xxState *cpu,
                 DeviceState *scp0,
                 DeviceState *scp1,
                 TC6393xbState *tmio)
 {
-    qemu_irq *outsignals = qemu_allocate_irqs(tosa_out_switch, cpu, 4);
-    qemu_irq reset;
+    DeviceState *misc_gpio;
+    LEDState *led[4];
+
+    misc_gpio = sysbus_create_simple(TYPE_TOSA_MISC_GPIO, -1, NULL);
 
     /* MMC/SD host */
     pxa2xx_mmci_handlers(cpu->mmc,
@@ -107,8 +112,8 @@ static void tosa_gpio_setup(PXA2xxState *cpu,
                     qemu_irq_invert(qdev_get_gpio_in(cpu->gpio, TOSA_GPIO_nSD_DETECT)));
 
     /* Handle reset */
-    reset = qemu_allocate_irq(tosa_reset, cpu, 0);
-    qdev_connect_gpio_out(cpu->gpio, TOSA_GPIO_ON_RESET, reset);
+    qdev_connect_gpio_out(cpu->gpio, TOSA_GPIO_ON_RESET,
+                          qdev_get_gpio_in_named(misc_gpio, "reset", 0));
 
     /* PCMCIA signals: card's IRQ and Card-Detect */
     pxa2xx_pcmcia_set_irq_cb(cpu->pcmcia[0],
@@ -119,10 +124,23 @@ static void tosa_gpio_setup(PXA2xxState *cpu,
                         qdev_get_gpio_in(cpu->gpio, TOSA_GPIO_JC_CF_IRQ),
                         NULL);
 
-    qdev_connect_gpio_out(scp1, TOSA_GPIO_BT_LED, outsignals[0]);
-    qdev_connect_gpio_out(scp1, TOSA_GPIO_NOTE_LED, outsignals[1]);
-    qdev_connect_gpio_out(scp1, TOSA_GPIO_CHRG_ERR_LED, outsignals[2]);
-    qdev_connect_gpio_out(scp1, TOSA_GPIO_WLAN_LED, outsignals[3]);
+    led[0] = led_create_simple(OBJECT(misc_gpio), GPIO_POLARITY_ACTIVE_HIGH,
+                               LED_COLOR_BLUE, "bluetooth");
+    led[1] = led_create_simple(OBJECT(misc_gpio), GPIO_POLARITY_ACTIVE_HIGH,
+                               LED_COLOR_GREEN, "note");
+    led[2] = led_create_simple(OBJECT(misc_gpio), GPIO_POLARITY_ACTIVE_HIGH,
+                               LED_COLOR_AMBER, "charger-error");
+    led[3] = led_create_simple(OBJECT(misc_gpio), GPIO_POLARITY_ACTIVE_HIGH,
+                               LED_COLOR_GREEN, "wlan");
+
+    qdev_connect_gpio_out(scp1, TOSA_GPIO_BT_LED,
+                          qdev_get_gpio_in(DEVICE(led[0]), 0));
+    qdev_connect_gpio_out(scp1, TOSA_GPIO_NOTE_LED,
+                          qdev_get_gpio_in(DEVICE(led[1]), 0));
+    qdev_connect_gpio_out(scp1, TOSA_GPIO_CHRG_ERR_LED,
+                          qdev_get_gpio_in(DEVICE(led[2]), 0));
+    qdev_connect_gpio_out(scp1, TOSA_GPIO_WLAN_LED,
+                          qdev_get_gpio_in(DEVICE(led[3]), 0));
 
     qdev_connect_gpio_out(scp1, TOSA_GPIO_TC6393XB_L3V_ON, tc6393xb_l3v_get(tmio));
 
@@ -132,7 +150,7 @@ static void tosa_gpio_setup(PXA2xxState *cpu,
 
 static uint32_t tosa_ssp_tansfer(SSISlave *dev, uint32_t value)
 {
-    fprintf(stderr, "TG: %d %02x\n", value >> 5, value & 0x1f);
+    fprintf(stderr, "TG: %u %02x\n", value >> 5, value & 0x1f);
     return 0;
 }
 
@@ -142,14 +160,14 @@ static void tosa_ssp_realize(SSISlave *dev, Error **errp)
 }
 
 #define TYPE_TOSA_DAC "tosa_dac"
-#define TOSA_DAC(obj) OBJECT_CHECK(TosaDACState, (obj), TYPE_TOSA_DAC)
+OBJECT_DECLARE_SIMPLE_TYPE(TosaDACState, TOSA_DAC)
 
-typedef struct {
+struct TosaDACState {
     I2CSlave parent_obj;
 
     int len;
     char buf[3];
-} TosaDACState;
+};
 
 static int tosa_dac_send(I2CSlave *i2c, uint8_t data)
 {
@@ -206,7 +224,7 @@ static uint8_t tosa_dac_recv(I2CSlave *s)
 static void tosa_tg_init(PXA2xxState *cpu)
 {
     I2CBus *bus = pxa2xx_i2c_bus(cpu->i2c[0]);
-    i2c_create_slave(bus, TYPE_TOSA_DAC, DAC_BASE);
+    i2c_slave_create_simple(bus, TYPE_TOSA_DAC, DAC_BASE);
     ssi_create_slave(cpu->ssp[1], "tosa-ssp");
 }
 
@@ -218,9 +236,6 @@ static struct arm_boot_info tosa_binfo = {
 
 static void tosa_init(MachineState *machine)
 {
-    const char *kernel_filename = machine->kernel_filename;
-    const char *kernel_cmdline = machine->kernel_cmdline;
-    const char *initrd_filename = machine->initrd_filename;
     MemoryRegion *address_space_mem = get_system_memory();
     MemoryRegion *rom = g_new(MemoryRegion, 1);
     PXA2xxState *mpu;
@@ -229,8 +244,7 @@ static void tosa_init(MachineState *machine)
 
     mpu = pxa255_init(address_space_mem, tosa_binfo.ram_size);
 
-    memory_region_init_ram(rom, NULL, "tosa.rom", TOSA_ROM, &error_fatal);
-    memory_region_set_readonly(rom, true);
+    memory_region_init_rom(rom, NULL, "tosa.rom", TOSA_ROM, &error_fatal);
     memory_region_add_subregion(address_space_mem, 0, rom);
 
     tmio = tc6393xb_init(address_space_mem, 0x10000000,
@@ -245,11 +259,8 @@ static void tosa_init(MachineState *machine)
 
     tosa_tg_init(mpu);
 
-    tosa_binfo.kernel_filename = kernel_filename;
-    tosa_binfo.kernel_cmdline = kernel_cmdline;
-    tosa_binfo.initrd_filename = initrd_filename;
     tosa_binfo.board_id = 0x208;
-    arm_load_kernel(mpu->cpu, &tosa_binfo);
+    arm_load_kernel(mpu->cpu, machine, &tosa_binfo);
     sl_bootparam_write(SL_PXA_PARAM_BASE);
 }
 
@@ -294,10 +305,22 @@ static const TypeInfo tosa_ssp_info = {
     .class_init    = tosa_ssp_class_init,
 };
 
+static const TypeInfo tosa_misc_gpio_info = {
+    .name          = TYPE_TOSA_MISC_GPIO,
+    .parent        = TYPE_SYS_BUS_DEVICE,
+    .instance_size = sizeof(TosaMiscGPIOState),
+    .instance_init = tosa_misc_gpio_init,
+    /*
+     * No class init required: device has no internal state so does not
+     * need to set up reset or vmstate, and has no realize method.
+     */
+};
+
 static void tosa_register_types(void)
 {
     type_register_static(&tosa_dac_info);
     type_register_static(&tosa_ssp_info);
+    type_register_static(&tosa_misc_gpio_info);
 }
 
 type_init(tosa_register_types)

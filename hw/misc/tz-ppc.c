@@ -15,8 +15,11 @@
 #include "qapi/error.h"
 #include "trace.h"
 #include "hw/sysbus.h"
+#include "migration/vmstate.h"
 #include "hw/registerfields.h"
+#include "hw/irq.h"
 #include "hw/misc/tz-ppc.h"
+#include "hw/qdev-properties.h"
 
 static void tz_ppc_update_irq(TZPPC *s)
 {
@@ -316,7 +319,7 @@ static void tz_ppc_class_init(ObjectClass *klass, void *data)
     dc->realize = tz_ppc_realize;
     dc->vmsd = &tz_ppc_vmstate;
     dc->reset = tz_ppc_reset;
-    dc->props = tz_ppc_properties;
+    device_class_set_props(dc, tz_ppc_properties);
 }
 
 static const TypeInfo tz_ppc_info = {

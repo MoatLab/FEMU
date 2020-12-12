@@ -45,9 +45,12 @@
 #include "qemu/osdep.h"
 #include "qemu-common.h"
 #include "qapi/error.h"
+#include "trace.h"
 #include "hw/hw.h"
 #include "disas/disas.h"
+#include "migration/vmstate.h"
 #include "monitor/monitor.h"
+#include "sysemu/reset.h"
 #include "sysemu/sysemu.h"
 #include "uboot_image.h"
 #include "hw/loader.h"
@@ -56,6 +59,7 @@
 #include "exec/address-spaces.h"
 #include "hw/boards.h"
 #include "qemu/cutils.h"
+#include "sysemu/runstate.h"
 
 #include <zlib.h>
 
@@ -335,6 +339,8 @@ const char *load_elf_strerror(int error)
         return "The image is from incompatible architecture";
     case ELF_LOAD_WRONG_ENDIAN:
         return "The image has incorrect endianness";
+    case ELF_LOAD_TOO_BIG:
+        return "The image segments are too big to load";
     default:
         return "Unknown error";
     }
@@ -400,12 +406,12 @@ int load_elf(const char *filename,
              uint64_t (*elf_note_fn)(void *, void *, bool),
              uint64_t (*translate_fn)(void *, uint64_t),
              void *translate_opaque, uint64_t *pentry, uint64_t *lowaddr,
-             uint64_t *highaddr, int big_endian, int elf_machine,
-             int clear_lsb, int data_swab)
+             uint64_t *highaddr, uint32_t *pflags, int big_endian,
+             int elf_machine, int clear_lsb, int data_swab)
 {
     return load_elf_as(filename, elf_note_fn, translate_fn, translate_opaque,
-                       pentry, lowaddr, highaddr, big_endian, elf_machine,
-                       clear_lsb, data_swab, NULL);
+                       pentry, lowaddr, highaddr, pflags, big_endian,
+                       elf_machine, clear_lsb, data_swab, NULL);
 }
 
 /* return < 0 if error, otherwise the number of bytes loaded in memory */
@@ -413,12 +419,12 @@ int load_elf_as(const char *filename,
                 uint64_t (*elf_note_fn)(void *, void *, bool),
                 uint64_t (*translate_fn)(void *, uint64_t),
                 void *translate_opaque, uint64_t *pentry, uint64_t *lowaddr,
-                uint64_t *highaddr, int big_endian, int elf_machine,
-                int clear_lsb, int data_swab, AddressSpace *as)
+                uint64_t *highaddr, uint32_t *pflags, int big_endian,
+                int elf_machine, int clear_lsb, int data_swab, AddressSpace *as)
 {
     return load_elf_ram(filename, elf_note_fn, translate_fn, translate_opaque,
-                        pentry, lowaddr, highaddr, big_endian, elf_machine,
-                        clear_lsb, data_swab, as, true);
+                        pentry, lowaddr, highaddr, pflags, big_endian,
+                        elf_machine, clear_lsb, data_swab, as, true);
 }
 
 /* return < 0 if error, otherwise the number of bytes loaded in memory */
@@ -426,13 +432,13 @@ int load_elf_ram(const char *filename,
                  uint64_t (*elf_note_fn)(void *, void *, bool),
                  uint64_t (*translate_fn)(void *, uint64_t),
                  void *translate_opaque, uint64_t *pentry, uint64_t *lowaddr,
-                 uint64_t *highaddr, int big_endian, int elf_machine,
-                 int clear_lsb, int data_swab, AddressSpace *as,
-                 bool load_rom)
+                 uint64_t *highaddr, uint32_t *pflags, int big_endian,
+                 int elf_machine, int clear_lsb, int data_swab,
+                 AddressSpace *as, bool load_rom)
 {
     return load_elf_ram_sym(filename, elf_note_fn,
                             translate_fn, translate_opaque,
-                            pentry, lowaddr, highaddr, big_endian,
+                            pentry, lowaddr, highaddr, pflags, big_endian,
                             elf_machine, clear_lsb, data_swab, as,
                             load_rom, NULL);
 }
@@ -442,8 +448,9 @@ int load_elf_ram_sym(const char *filename,
                      uint64_t (*elf_note_fn)(void *, void *, bool),
                      uint64_t (*translate_fn)(void *, uint64_t),
                      void *translate_opaque, uint64_t *pentry,
-                     uint64_t *lowaddr, uint64_t *highaddr, int big_endian,
-                     int elf_machine, int clear_lsb, int data_swab,
+                     uint64_t *lowaddr, uint64_t *highaddr, uint32_t *pflags,
+                     int big_endian, int elf_machine,
+                     int clear_lsb, int data_swab,
                      AddressSpace *as, bool load_rom, symbol_fn_t sym_cb)
 {
     int fd, data_order, target_data_order, must_swab, ret = ELF_LOAD_FAILED;
@@ -484,13 +491,13 @@ int load_elf_ram_sym(const char *filename,
     if (e_ident[EI_CLASS] == ELFCLASS64) {
         ret = load_elf64(filename, fd, elf_note_fn,
                          translate_fn, translate_opaque, must_swab,
-                         pentry, lowaddr, highaddr, elf_machine, clear_lsb,
-                         data_swab, as, load_rom, sym_cb);
+                         pentry, lowaddr, highaddr, pflags, elf_machine,
+                         clear_lsb, data_swab, as, load_rom, sym_cb);
     } else {
         ret = load_elf32(filename, fd, elf_note_fn,
                          translate_fn, translate_opaque, must_swab,
-                         pentry, lowaddr, highaddr, elf_machine, clear_lsb,
-                         data_swab, as, load_rom, sym_cb);
+                         pentry, lowaddr, highaddr, pflags, elf_machine,
+                         clear_lsb, data_swab, as, load_rom, sym_cb);
     }
 
  fail:
@@ -836,6 +843,7 @@ struct Rom {
     int isrom;
     char *fw_dir;
     char *fw_file;
+    GMappedFile *mapped_file;
 
     bool committed;
 
@@ -846,10 +854,25 @@ struct Rom {
 static FWCfgState *fw_cfg;
 static QTAILQ_HEAD(, Rom) roms = QTAILQ_HEAD_INITIALIZER(roms);
 
-/* rom->data must be heap-allocated (do not use with rom_add_elf_program()) */
+/*
+ * rom->data can be heap-allocated or memory-mapped (e.g. when added with
+ * rom_add_elf_program())
+ */
+static void rom_free_data(Rom *rom)
+{
+    if (rom->mapped_file) {
+        g_mapped_file_unref(rom->mapped_file);
+        rom->mapped_file = NULL;
+    } else {
+        g_free(rom->data);
+    }
+
+    rom->data = NULL;
+}
+
 static void rom_free(Rom *rom)
 {
-    g_free(rom->data);
+    rom_free_data(rom);
     g_free(rom->path);
     g_free(rom->name);
     g_free(rom->fw_dir);
@@ -1056,11 +1079,12 @@ MemoryRegion *rom_add_blob(const char *name, const void *blob, size_t len,
 
 /* This function is specific for elf program because we don't need to allocate
  * all the rom. We just allocate the first part and the rest is just zeros. This
- * is why romsize and datasize are different. Also, this function seize the
- * memory ownership of "data", so we don't have to allocate and copy the buffer.
+ * is why romsize and datasize are different. Also, this function takes its own
+ * reference to "mapped_file", so we don't have to allocate and copy the buffer.
  */
-int rom_add_elf_program(const char *name, void *data, size_t datasize,
-                        size_t romsize, hwaddr addr, AddressSpace *as)
+int rom_add_elf_program(const char *name, GMappedFile *mapped_file, void *data,
+                        size_t datasize, size_t romsize, hwaddr addr,
+                        AddressSpace *as)
 {
     Rom *rom;
 
@@ -1071,6 +1095,12 @@ int rom_add_elf_program(const char *name, void *data, size_t datasize,
     rom->romsize  = romsize;
     rom->data     = data;
     rom->as       = as;
+
+    if (mapped_file && data) {
+        g_mapped_file_ref(mapped_file);
+        rom->mapped_file = mapped_file;
+    }
+
     rom_insert(rom);
     return 0;
 }
@@ -1093,6 +1123,22 @@ static void rom_reset(void *unused)
         if (rom->fw_file) {
             continue;
         }
+        /*
+         * We don't need to fill in the RAM with ROM data because we'll fill
+         * the data in during the next incoming migration in all cases.  Note
+         * that some of those RAMs can actually be modified by the guest.
+         */
+        if (runstate_check(RUN_STATE_INMIGRATE)) {
+            if (rom->data && rom->isrom) {
+                /*
+                 * Free it so that a rom_reset after migration doesn't
+                 * overwrite a potentially modified 'rom'.
+                 */
+                rom_free_data(rom);
+            }
+            continue;
+        }
+
         if (rom->data == NULL) {
             continue;
         }
@@ -1105,8 +1151,7 @@ static void rom_reset(void *unused)
         }
         if (rom->isrom) {
             /* rom needs to be written only once */
-            g_free(rom->data);
-            rom->data = NULL;
+            rom_free_data(rom);
         }
         /*
          * The rom loader is really on the same level as firmware in the guest
@@ -1115,6 +1160,8 @@ static void rom_reset(void *unused)
          * CPU definitely fetches its instructions from the just written data.
          */
         cpu_flush_icache_range(rom->addr, rom->datasize);
+
+        trace_loader_write_rom(rom->name, rom->addr, rom->datasize, rom->isrom);
     }
 }
 
@@ -1242,7 +1289,7 @@ int rom_copy(uint8_t *dest, hwaddr addr, size_t size)
         if (rom->addr + rom->romsize < addr) {
             continue;
         }
-        if (rom->addr > end) {
+        if (rom->addr > end || rom->addr < addr) {
             break;
         }
 
@@ -1400,6 +1447,7 @@ typedef struct {
     uint32_t current_rom_index;
     uint32_t rom_start_address;
     AddressSpace *as;
+    bool complete;
 } HexParser;
 
 /* return size or -1 if error */
@@ -1437,6 +1485,7 @@ static int handle_record_type(HexParser *parser)
                                   parser->current_rom_index,
                                   parser->rom_start_address, parser->as);
         }
+        parser->complete = true;
         return parser->total_size;
     case EXT_SEG_ADDR_RECORD:
     case EXT_LINEAR_ADDR_RECORD:
@@ -1501,11 +1550,12 @@ static int parse_hex_blob(const char *filename, hwaddr *addr, uint8_t *hex_blob,
         .bin_buf = g_malloc(hex_blob_size),
         .start_addr = addr,
         .as = as,
+        .complete = false
     };
 
     rom_transaction_begin();
 
-    for (; hex_blob < end; ++hex_blob) {
+    for (; hex_blob < end && !parser.complete; ++hex_blob) {
         switch (*hex_blob) {
         case '\r':
         case '\n':

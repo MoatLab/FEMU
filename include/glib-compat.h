@@ -19,17 +19,22 @@
 /* Ask for warnings for anything that was marked deprecated in
  * the defined version, or before. It is a candidate for rewrite.
  */
-#define GLIB_VERSION_MIN_REQUIRED GLIB_VERSION_2_40
+#define GLIB_VERSION_MIN_REQUIRED GLIB_VERSION_2_48
 
 /* Ask for warnings if code tries to use function that did not
  * exist in the defined version. These risk breaking builds
  */
-#define GLIB_VERSION_MAX_ALLOWED GLIB_VERSION_2_40
+#define GLIB_VERSION_MAX_ALLOWED GLIB_VERSION_2_48
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 
 #include <glib.h>
+#if defined(G_OS_UNIX)
+#include <glib-unix.h>
+#include <sys/types.h>
+#include <pwd.h>
+#endif
 
 /*
  * Note that because of the GLIB_VERSION_MAX_ALLOWED constant above, allowing
@@ -63,26 +68,6 @@
  * without generating warnings.
  */
 
-static inline gboolean g_strv_contains_qemu(const gchar *const *strv,
-                                            const gchar *str)
-{
-#if GLIB_CHECK_VERSION(2, 44, 0)
-    return g_strv_contains(strv, str);
-#else
-    g_return_val_if_fail(strv != NULL, FALSE);
-    g_return_val_if_fail(str != NULL, FALSE);
-
-    for (; *strv != NULL; strv++) {
-        if (g_str_equal(str, *strv)) {
-            return TRUE;
-        }
-    }
-
-    return FALSE;
-#endif
-}
-#define g_strv_contains(a, b) g_strv_contains_qemu(a, b)
-
 #if defined(_WIN32) && !GLIB_CHECK_VERSION(2, 50, 0)
 /*
  * g_poll has a problem on Windows when using
@@ -92,23 +77,28 @@ static inline gboolean g_strv_contains_qemu(const gchar *const *strv,
 gint g_poll_fixed(GPollFD *fds, guint nfds, gint timeout);
 #endif
 
-
-#ifndef g_assert_cmpmem
-#define g_assert_cmpmem(m1, l1, m2, l2)                                        \
-    do {                                                                       \
-        gconstpointer __m1 = m1, __m2 = m2;                                    \
-        int __l1 = l1, __l2 = l2;                                              \
-        if (__l1 != __l2) {                                                    \
-            g_assertion_message_cmpnum(                                        \
-                G_LOG_DOMAIN, __FILE__, __LINE__, G_STRFUNC,                   \
-                #l1 " (len(" #m1 ")) == " #l2 " (len(" #m2 "))", __l1, "==",   \
-                __l2, 'i');                                                    \
-        } else if (memcmp(__m1, __m2, __l1) != 0) {                            \
-            g_assertion_message(G_LOG_DOMAIN, __FILE__, __LINE__, G_STRFUNC,   \
-                                "assertion failed (" #m1 " == " #m2 ")");      \
-        }                                                                      \
-    } while (0)
+#if defined(G_OS_UNIX)
+/*
+ * Note: The fallback implementation is not MT-safe, and it returns a copy of
+ * the libc passwd (must be g_free() after use) but not the content. Because of
+ * these important differences the caller must be aware of, it's not #define for
+ * GLib API substitution.
+ */
+static inline struct passwd *
+g_unix_get_passwd_entry_qemu(const gchar *user_name, GError **error)
+{
+#if GLIB_CHECK_VERSION(2, 64, 0)
+    return g_unix_get_passwd_entry(user_name, error);
+#else
+    struct passwd *p = getpwnam(user_name);
+    if (!p) {
+        g_set_error_literal(error, G_UNIX_ERROR, 0, g_strerror(errno));
+        return NULL;
+    }
+    return (struct passwd *)g_memdup(p, sizeof(*p));
 #endif
+}
+#endif /* G_OS_UNIX */
 
 #pragma GCC diagnostic pop
 

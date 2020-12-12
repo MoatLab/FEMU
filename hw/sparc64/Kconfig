@@ -12,8 +12,10 @@ config SUN4U
     select IDE_CMD646
     select PCKBD
     select SIMBA
+    select CHRP_NVRAM
 
 config NIAGARA
     bool
     select EMPTY_SLOT
     select SUN4V_RTC
+    select UNIMP

@@ -218,7 +218,7 @@ static gboolean net_vhost_user_watch(GIOChannel *chan, GIOCondition cond,
     return TRUE;
 }
 
-static void net_vhost_user_event(void *opaque, int event);
+static void net_vhost_user_event(void *opaque, QEMUChrEvent event);
 
 static void chr_closed_bh(void *opaque)
 {
@@ -226,7 +226,7 @@ static void chr_closed_bh(void *opaque)
     NetClientState *ncs[MAX_QUEUE_NUM];
     NetVhostUserState *s;
     Error *err = NULL;
-    int queues;
+    int queues, i;
 
     queues = qemu_find_net_clients_except(name, ncs,
                                           NET_CLIENT_DRIVER_NIC,
@@ -234,6 +234,14 @@ static void chr_closed_bh(void *opaque)
     assert(queues < MAX_QUEUE_NUM);
 
     s = DO_UPCAST(NetVhostUserState, nc, ncs[0]);
+
+    for (i = queues -1; i >= 0; i--) {
+        s = DO_UPCAST(NetVhostUserState, nc, ncs[i]);
+
+        if (s->vhost_net) {
+            s->acked_features = vhost_net_get_acked_features(s->vhost_net);
+        }
+    }
 
     qmp_set_link(name, false, &err);
 
@@ -245,7 +253,7 @@ static void chr_closed_bh(void *opaque)
     }
 }
 
-static void net_vhost_user_event(void *opaque, int event)
+static void net_vhost_user_event(void *opaque, QEMUChrEvent event)
 {
     const char *name = opaque;
     NetClientState *ncs[MAX_QUEUE_NUM];
@@ -289,6 +297,11 @@ static void net_vhost_user_event(void *opaque, int event)
 
             aio_bh_schedule_oneshot(ctx, chr_closed_bh, opaque);
         }
+        break;
+    case CHR_EVENT_BREAK:
+    case CHR_EVENT_MUX_IN:
+    case CHR_EVENT_MUX_OUT:
+        /* Ignore */
         break;
     }
 

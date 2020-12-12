@@ -10,16 +10,12 @@
 #define QEMU_NET_FILTER_H
 
 #include "qapi/qapi-types-net.h"
+#include "qemu/queue.h"
 #include "qom/object.h"
 #include "net/queue.h"
 
 #define TYPE_NETFILTER "netfilter"
-#define NETFILTER(obj) \
-    OBJECT_CHECK(NetFilterState, (obj), TYPE_NETFILTER)
-#define NETFILTER_GET_CLASS(obj) \
-    OBJECT_GET_CLASS(NetFilterClass, (obj), TYPE_NETFILTER)
-#define NETFILTER_CLASS(klass) \
-    OBJECT_CLASS_CHECK(NetFilterClass, (klass), TYPE_NETFILTER)
+OBJECT_DECLARE_TYPE(NetFilterState, NetFilterClass, NETFILTER)
 
 typedef void (FilterSetup) (NetFilterState *nf, Error **errp);
 typedef void (FilterCleanup) (NetFilterState *nf);
@@ -39,7 +35,7 @@ typedef void (FilterStatusChanged) (NetFilterState *nf, Error **errp);
 
 typedef void (FilterHandleEvent) (NetFilterState *nf, int event, Error **errp);
 
-typedef struct NetFilterClass {
+struct NetFilterClass {
     ObjectClass parent_class;
 
     /* optional */
@@ -49,7 +45,7 @@ typedef struct NetFilterClass {
     FilterHandleEvent *handle_event;
     /* mandatory */
     FilterReceiveIOV *receive_iov;
-} NetFilterClass;
+};
 
 
 struct NetFilterState {
@@ -61,6 +57,8 @@ struct NetFilterState {
     NetClientState *netdev;
     NetFilterDirection direction;
     bool on;
+    char *position;
+    bool insert_before_flag;
     QTAILQ_ENTRY(NetFilterState) next;
 };
 

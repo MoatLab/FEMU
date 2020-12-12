@@ -23,10 +23,13 @@
  */
 
 #include "qemu/osdep.h"
+#include "hw/irq.h"
+#include "hw/qdev-properties.h"
 #include "hw/sysbus.h"
 #include "chardev/char-fe.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
+#include "qom/object.h"
 
 #define D(x)
 
@@ -47,10 +50,11 @@
 #define STAT_TR_RDY  24
 
 #define TYPE_ETRAX_FS_SERIAL "etraxfs,serial"
-#define ETRAX_SERIAL(obj) \
-    OBJECT_CHECK(ETRAXSerial, (obj), TYPE_ETRAX_FS_SERIAL)
+typedef struct ETRAXSerial ETRAXSerial;
+DECLARE_INSTANCE_CHECKER(ETRAXSerial, ETRAX_SERIAL,
+                         TYPE_ETRAX_FS_SERIAL)
 
-typedef struct ETRAXSerial {
+struct ETRAXSerial {
     SysBusDevice parent_obj;
 
     MemoryRegion mmio;
@@ -65,7 +69,7 @@ typedef struct ETRAXSerial {
 
     /* Control registers.  */
     uint32_t regs[R_MAX];
-} ETRAXSerial;
+};
 
 static void ser_update_irq(ETRAXSerial *s)
 {
@@ -200,7 +204,7 @@ static int serial_can_receive(void *opaque)
     return sizeof(s->rx_fifo) - s->rx_fifo_len;
 }
 
-static void serial_event(void *opaque, int event)
+static void serial_event(void *opaque, QEMUChrEvent event)
 {
 
 }
@@ -242,7 +246,7 @@ static void etraxfs_ser_class_init(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->reset = etraxfs_ser_reset;
-    dc->props = etraxfs_ser_properties;
+    device_class_set_props(dc, etraxfs_ser_properties);
     dc->realize = etraxfs_ser_realize;
 }
 

@@ -3,7 +3,7 @@
  *
  * Copyright (c) 2018 Philippe Mathieu-Daudé
  *
- * This code is licensed under the GNU GPLv2 and later.
+ * This work is licensed under the terms of the GNU GPL, version 2 or later.
  * See the COPYING file in the top-level directory.
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -12,18 +12,17 @@
 
 #include "sysemu/sysemu.h"
 #include "hw/isa/isa.h"
+#include "qom/object.h"
 
 #define TYPE_ISA_SUPERIO "isa-superio"
-#define ISA_SUPERIO(obj) \
-    OBJECT_CHECK(ISASuperIODevice, (obj), TYPE_ISA_SUPERIO)
-#define ISA_SUPERIO_GET_CLASS(obj) \
-    OBJECT_GET_CLASS(ISASuperIOClass, (obj), TYPE_ISA_SUPERIO)
-#define ISA_SUPERIO_CLASS(klass) \
-    OBJECT_CLASS_CHECK(ISASuperIOClass, (klass), TYPE_ISA_SUPERIO)
+typedef struct ISASuperIOClass ISASuperIOClass;
+typedef struct ISASuperIODevice ISASuperIODevice;
+DECLARE_OBJ_CHECKERS(ISASuperIODevice, ISASuperIOClass,
+                     ISA_SUPERIO, TYPE_ISA_SUPERIO)
 
 #define SUPERIO_MAX_SERIAL_PORTS 4
 
-typedef struct ISASuperIODevice {
+struct ISASuperIODevice {
     /*< private >*/
     ISADevice parent_obj;
     /*< public >*/
@@ -33,7 +32,7 @@ typedef struct ISASuperIODevice {
     ISADevice *floppy;
     ISADevice *kbc;
     ISADevice *ide;
-} ISASuperIODevice;
+};
 
 typedef struct ISASuperIOFuncs {
     size_t count;
@@ -43,7 +42,7 @@ typedef struct ISASuperIOFuncs {
     unsigned int (*get_dma)(ISASuperIODevice *sio, uint8_t index);
 } ISASuperIOFuncs;
 
-typedef struct ISASuperIOClass {
+struct ISASuperIOClass {
     /*< private >*/
     ISADeviceClass parent_class;
     /*< public >*/
@@ -53,7 +52,7 @@ typedef struct ISASuperIOClass {
     ISASuperIOFuncs serial;
     ISASuperIOFuncs floppy;
     ISASuperIOFuncs ide;
-} ISASuperIOClass;
+};
 
 #define TYPE_FDC37M81X_SUPERIO  "fdc37m81x-superio"
 #define TYPE_SMC37C669_SUPERIO  "smc37c669-superio"

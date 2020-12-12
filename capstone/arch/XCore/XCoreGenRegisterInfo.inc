@@ -7,7 +7,7 @@
 \*===----------------------------------------------------------------------===*/
 
 /* Capstone Disassembly Engine */
-/* By Nguyen Anh Quynh <aquynh@gmail.com>, 2013-2014 */
+/* By Nguyen Anh Quynh <aquynh@gmail.com>, 2013-2019 */
 
 
 #ifdef GET_REGINFO_ENUM
@@ -63,48 +63,48 @@ static const uint16_t XCoreSubRegIdxLists[] = {
 };
 
 static const MCRegisterDesc XCoreRegDesc[] = { // Descriptors
-  { 3, 0, 0, 0, 0 },
-  { 38, 1, 1, 0, 1 },
-  { 41, 1, 1, 0, 1 },
-  { 47, 1, 1, 0, 1 },
-  { 44, 1, 1, 0, 1 },
-  { 4, 1, 1, 0, 1 },
-  { 11, 1, 1, 0, 1 },
-  { 14, 1, 1, 0, 1 },
-  { 17, 1, 1, 0, 1 },
-  { 20, 1, 1, 0, 1 },
-  { 23, 1, 1, 0, 1 },
-  { 26, 1, 1, 0, 1 },
-  { 29, 1, 1, 0, 1 },
-  { 32, 1, 1, 0, 1 },
-  { 35, 1, 1, 0, 1 },
-  { 0, 1, 1, 0, 1 },
-  { 7, 1, 1, 0, 1 },
+  { 3, 0, 0, 0, 0, 0 },
+  { 38, 1, 1, 0, 1, 0 },
+  { 41, 1, 1, 0, 1, 0 },
+  { 47, 1, 1, 0, 1, 0 },
+  { 44, 1, 1, 0, 1, 0 },
+  { 4, 1, 1, 0, 1, 0 },
+  { 11, 1, 1, 0, 1, 0 },
+  { 14, 1, 1, 0, 1, 0 },
+  { 17, 1, 1, 0, 1, 0 },
+  { 20, 1, 1, 0, 1, 0 },
+  { 23, 1, 1, 0, 1, 0 },
+  { 26, 1, 1, 0, 1, 0 },
+  { 29, 1, 1, 0, 1, 0 },
+  { 32, 1, 1, 0, 1, 0 },
+  { 35, 1, 1, 0, 1, 0 },
+  { 0, 1, 1, 0, 1, 0 },
+  { 7, 1, 1, 0, 1, 0 },
 };
 
   // RRegs Register Class...
   static const MCPhysReg RRegs[] = {
-    XCore_R0, XCore_R1, XCore_R2, XCore_R3, XCore_R4, XCore_R5, XCore_R6, XCore_R7, XCore_R8, XCore_R9, XCore_R10, XCore_R11, XCore_CP, XCore_DP, XCore_SP, XCore_LR, 
+    XCore_R0, XCore_R1, XCore_R2, XCore_R3, XCore_R4, XCore_R5, XCore_R6, XCore_R7, XCore_R8, XCore_R9, XCore_R10, XCore_R11, XCore_CP, XCore_DP, XCore_SP, XCore_LR,
   };
 
   // RRegs Bit set.
   static const uint8_t RRegsBits[] = {
-    0xfe, 0xff, 0x01, 
+    0xfe, 0xff, 0x01,
   };
 
   // GRRegs Register Class...
   static const MCPhysReg GRRegs[] = {
-    XCore_R0, XCore_R1, XCore_R2, XCore_R3, XCore_R4, XCore_R5, XCore_R6, XCore_R7, XCore_R8, XCore_R9, XCore_R10, XCore_R11, 
+    XCore_R0, XCore_R1, XCore_R2, XCore_R3, XCore_R4, XCore_R5, XCore_R6, XCore_R7, XCore_R8, XCore_R9, XCore_R10, XCore_R11,
   };
 
   // GRRegs Bit set.
   static const uint8_t GRRegsBits[] = {
-    0xe0, 0xff, 0x01, 
+    0xe0, 0xff, 0x01,
   };
 
 static const MCRegisterClass XCoreMCRegisterClasses[] = {
-  { "RRegs", RRegs, RRegsBits, 16, sizeof(RRegsBits), XCore_RRegsRegClassID, 4, 4, 1, 0 },
-  { "GRRegs", GRRegs, GRRegsBits, 12, sizeof(GRRegsBits), XCore_GRRegsRegClassID, 4, 4, 1, 1 },
+  { RRegs, RRegsBits, sizeof(RRegsBits) },
+  { GRRegs, GRRegsBits, sizeof(GRRegsBits) },
 };
 
 #endif // GET_REGINFO_MC_DESC

@@ -29,25 +29,27 @@
 #include "qapi/error.h"
 #include "qemu/module.h"
 #include "hw/char/serial.h"
+#include "hw/irq.h"
 #include "hw/pci/pci.h"
+#include "hw/qdev-properties.h"
+#include "migration/vmstate.h"
+#include "qom/object.h"
 
-typedef struct PCISerialState {
+struct PCISerialState {
     PCIDevice dev;
     SerialState state;
     uint8_t prog_if;
-} PCISerialState;
+};
 
+#define TYPE_PCI_SERIAL "pci-serial"
+OBJECT_DECLARE_SIMPLE_TYPE(PCISerialState, PCI_SERIAL)
 
 static void serial_pci_realize(PCIDevice *dev, Error **errp)
 {
     PCISerialState *pci = DO_UPCAST(PCISerialState, dev, dev);
     SerialState *s = &pci->state;
-    Error *err = NULL;
 
-    s->baudbase = 115200;
-    serial_realize_core(s, &err);
-    if (err != NULL) {
-        error_propagate(errp, err);
+    if (!qdev_realize(DEVICE(s), NULL, errp)) {
         return;
     }
 
@@ -64,7 +66,7 @@ static void serial_pci_exit(PCIDevice *dev)
     PCISerialState *pci = DO_UPCAST(PCISerialState, dev, dev);
     SerialState *s = &pci->state;
 
-    serial_exit_core(s);
+    qdev_unrealize(DEVICE(s));
     qemu_free_irq(s->irq);
 }
 
@@ -80,7 +82,6 @@ static const VMStateDescription vmstate_pci_serial = {
 };
 
 static Property serial_pci_properties[] = {
-    DEFINE_PROP_CHR("chardev",  PCISerialState, state.chr),
     DEFINE_PROP_UINT8("prog_if",  PCISerialState, prog_if, 0x02),
     DEFINE_PROP_END_OF_LIST(),
 };
@@ -96,14 +97,24 @@ static void serial_pci_class_initfn(ObjectClass *klass, void *data)
     pc->revision = 1;
     pc->class_id = PCI_CLASS_COMMUNICATION_SERIAL;
     dc->vmsd = &vmstate_pci_serial;
-    dc->props = serial_pci_properties;
+    device_class_set_props(dc, serial_pci_properties);
     set_bit(DEVICE_CATEGORY_INPUT, dc->categories);
 }
 
+static void serial_pci_init(Object *o)
+{
+    PCISerialState *ps = PCI_SERIAL(o);
+
+    object_initialize_child(o, "serial", &ps->state, TYPE_SERIAL);
+
+    qdev_alias_all_properties(DEVICE(&ps->state), o);
+}
+
 static const TypeInfo serial_pci_info = {
-    .name          = "pci-serial",
+    .name          = TYPE_PCI_SERIAL,
     .parent        = TYPE_PCI_DEVICE,
     .instance_size = sizeof(PCISerialState),
+    .instance_init = serial_pci_init,
     .class_init    = serial_pci_class_initfn,
     .interfaces = (InterfaceInfo[]) {
         { INTERFACE_CONVENTIONAL_PCI_DEVICE },

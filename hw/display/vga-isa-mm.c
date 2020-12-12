@@ -21,9 +21,11 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+
 #include "qemu/osdep.h"
+#include "qemu/bitops.h"
 #include "qemu/units.h"
-#include "hw/hw.h"
+#include "migration/vmstate.h"
 #include "hw/display/vga.h"
 #include "vga_int.h"
 #include "ui/pixel_ops.h"
@@ -104,6 +106,9 @@ int isa_vga_mm_init(hwaddr vram_base,
 
     s->vga.con = graphic_console_init(NULL, 0, s->vga.hw_ops, s);
 
-    vga_init_vbe(&s->vga, NULL, address_space);
+    memory_region_add_subregion(address_space,
+                                VBE_DISPI_LFB_PHYSICAL_ADDRESS,
+                                &s->vga.vram);
+
     return 0;
 }

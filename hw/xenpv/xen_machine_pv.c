@@ -24,11 +24,11 @@
 
 #include "qemu/osdep.h"
 #include "qemu/error-report.h"
-#include "hw/hw.h"
 #include "hw/boards.h"
 #include "hw/xen/xen-legacy-backend.h"
 #include "hw/xen/xen-bus.h"
 #include "sysemu/block-backend.h"
+#include "sysemu/sysemu.h"
 
 static void xen_init_pv(MachineState *machine)
 {
@@ -60,7 +60,7 @@ static void xen_init_pv(MachineState *machine)
     xen_be_register("qnic", &xen_netdev_ops);
 
     /* configure framebuffer */
-    if (xenfb_enabled) {
+    if (vga_interface_type == VGA_XENFB) {
         xen_config_dev_vfb(0, "vnc");
         xen_config_dev_vkbd(0);
     }

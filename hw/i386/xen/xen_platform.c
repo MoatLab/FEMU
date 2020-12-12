@@ -25,19 +25,19 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
-#include "hw/hw.h"
 #include "hw/ide.h"
 #include "hw/pci/pci.h"
 #include "hw/irq.h"
 #include "hw/xen/xen_common.h"
+#include "migration/vmstate.h"
 #include "hw/xen/xen-legacy-backend.h"
 #include "trace.h"
 #include "exec/address-spaces.h"
+#include "sysemu/xen.h"
 #include "sysemu/block-backend.h"
 #include "qemu/error-report.h"
 #include "qemu/module.h"
-
-#include <xenguest.h>
+#include "qom/object.h"
 
 //#define DEBUG_PLATFORM
 
@@ -51,7 +51,7 @@
 
 #define PFFLAG_ROM_LOCK 1 /* Sets whether ROM memory area is RW or RO */
 
-typedef struct PCIXenPlatformState {
+struct PCIXenPlatformState {
     /*< private >*/
     PCIDevice parent_obj;
     /*< public >*/
@@ -66,11 +66,10 @@ typedef struct PCIXenPlatformState {
     /* Log from guest drivers */
     char log_buffer[4096];
     int log_buffer_off;
-} PCIXenPlatformState;
+};
 
 #define TYPE_XEN_PLATFORM "xen-platform"
-#define XEN_PLATFORM(obj) \
-    OBJECT_CHECK(PCIXenPlatformState, (obj), TYPE_XEN_PLATFORM)
+OBJECT_DECLARE_SIMPLE_TYPE(PCIXenPlatformState, XEN_PLATFORM)
 
 #define XEN_PLATFORM_IOPORT 0x10
 

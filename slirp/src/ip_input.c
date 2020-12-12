@@ -292,6 +292,7 @@ static struct ip *ip_reass(Slirp *slirp, struct ip *ip, struct ipq *fp)
      */
     while (q != (struct ipasfrag *)&fp->frag_link &&
            ip->ip_off + ip->ip_len > q->ipf_off) {
+        struct ipasfrag *prev;
         i = (ip->ip_off + ip->ip_len) - q->ipf_off;
         if (i < q->ipf_len) {
             q->ipf_len -= i;
@@ -299,9 +300,10 @@ static struct ip *ip_reass(Slirp *slirp, struct ip *ip, struct ipq *fp)
             m_adj(dtom(slirp, q), i);
             break;
         }
+        prev = q;
         q = q->ipf_next;
-        m_free(dtom(slirp, q->ipf_prev));
-        ip_deq(q->ipf_prev);
+        ip_deq(prev);
+        m_free(dtom(slirp, prev));
     }
 
 insert:
@@ -325,8 +327,7 @@ insert:
      */
     q = fp->frag_link.next;
     m = dtom(slirp, q);
-
-    int was_ext = m->m_flags & M_EXT;
+    int delta = (char *)q - (m->m_flags & M_EXT ? m->m_ext : m->m_dat);
 
     q = (struct ipasfrag *)q->ipf_next;
     while (q != (struct ipasfrag *)&fp->frag_link) {
@@ -344,14 +345,12 @@ insert:
     q = fp->frag_link.next;
 
     /*
-     * If the fragments concatenated to an mbuf that's
-     * bigger than the total size of the fragment, then and
-     * m_ext buffer was alloced. But fp->ipq_next points to
-     * the old buffer (in the mbuf), so we must point ip
-     * into the new buffer.
+     * If the fragments concatenated to an mbuf that's bigger than the total
+     * size of the fragment and the mbuf was not already using an m_ext buffer,
+     * then an m_ext buffer was alloced. But fp->ipq_next points to the old
+     * buffer (in the mbuf), so we must point ip into the new buffer.
      */
-    if (!was_ext && m->m_flags & M_EXT) {
-        int delta = (char *)q - m->m_dat;
+    if (m->m_flags & M_EXT) {
         q = (struct ipasfrag *)(m->m_ext + delta);
     }
 
@@ -455,7 +454,7 @@ void ip_stripoptions(register struct mbuf *m, struct mbuf *mopt)
     olen = (ip->ip_hl << 2) - sizeof(struct ip);
     opts = (char *)(ip + 1);
     i = m->m_len - (sizeof(struct ip) + olen);
-    memcpy(opts, opts + olen, (unsigned)i);
+    memmove(opts, opts + olen, (unsigned)i);
     m->m_len -= olen;
 
     ip->ip_hl = sizeof(struct ip) >> 2;

@@ -28,8 +28,9 @@
 static int cor_open(BlockDriverState *bs, QDict *options, int flags,
                     Error **errp)
 {
-    bs->file = bdrv_open_child(NULL, options, "file", bs, &child_file, false,
-                               errp);
+    bs->file = bdrv_open_child(NULL, options, "file", bs, &child_of_bds,
+                               BDRV_CHILD_FILTERED | BDRV_CHILD_PRIMARY,
+                               false, errp);
     if (!bs->file) {
         return -EINVAL;
     }
@@ -51,7 +52,7 @@ static int cor_open(BlockDriverState *bs, QDict *options, int flags,
 #define PERM_UNCHANGED (BLK_PERM_ALL & ~PERM_PASSTHROUGH)
 
 static void cor_child_perm(BlockDriverState *bs, BdrvChild *c,
-                           const BdrvChildRole *role,
+                           BdrvChildRole role,
                            BlockReopenQueue *reopen_queue,
                            uint64_t perm, uint64_t shared,
                            uint64_t *nperm, uint64_t *nshared)
@@ -70,13 +71,6 @@ static void cor_child_perm(BlockDriverState *bs, BdrvChild *c,
 static int64_t cor_getlength(BlockDriverState *bs)
 {
     return bdrv_getlength(bs->file->bs);
-}
-
-
-static int coroutine_fn cor_co_truncate(BlockDriverState *bs, int64_t offset,
-                                        PreallocMode prealloc, Error **errp)
-{
-    return bdrv_co_truncate(bs->file, offset, prealloc, errp);
 }
 
 
@@ -113,6 +107,16 @@ static int coroutine_fn cor_co_pdiscard(BlockDriverState *bs,
 }
 
 
+static int coroutine_fn cor_co_pwritev_compressed(BlockDriverState *bs,
+                                                  uint64_t offset,
+                                                  uint64_t bytes,
+                                                  QEMUIOVector *qiov)
+{
+    return bdrv_co_pwritev(bs->file, offset, bytes, qiov,
+                           BDRV_REQ_WRITE_COMPRESSED);
+}
+
+
 static void cor_eject(BlockDriverState *bs, bool eject_flag)
 {
     bdrv_eject(bs->file->bs, eject_flag);
@@ -125,13 +129,6 @@ static void cor_lock_medium(BlockDriverState *bs, bool locked)
 }
 
 
-static bool cor_recurse_is_first_non_filter(BlockDriverState *bs,
-                                            BlockDriverState *candidate)
-{
-    return bdrv_recurse_is_first_non_filter(bs->file->bs, candidate);
-}
-
-
 static BlockDriver bdrv_copy_on_read = {
     .format_name                        = "copy-on-read",
 
@@ -139,19 +136,15 @@ static BlockDriver bdrv_copy_on_read = {
     .bdrv_child_perm                    = cor_child_perm,
 
     .bdrv_getlength                     = cor_getlength,
-    .bdrv_co_truncate                   = cor_co_truncate,
 
     .bdrv_co_preadv                     = cor_co_preadv,
     .bdrv_co_pwritev                    = cor_co_pwritev,
     .bdrv_co_pwrite_zeroes              = cor_co_pwrite_zeroes,
     .bdrv_co_pdiscard                   = cor_co_pdiscard,
+    .bdrv_co_pwritev_compressed         = cor_co_pwritev_compressed,
 
     .bdrv_eject                         = cor_eject,
     .bdrv_lock_medium                   = cor_lock_medium,
-
-    .bdrv_co_block_status               = bdrv_co_block_status_from_file,
-
-    .bdrv_recurse_is_first_non_filter   = cor_recurse_is_first_non_filter,
 
     .has_variable_length                = true,
     .is_filter                          = true,

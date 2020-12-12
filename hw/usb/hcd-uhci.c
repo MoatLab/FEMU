@@ -27,10 +27,11 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
 #include "hw/usb.h"
 #include "hw/usb/uhci-regs.h"
+#include "migration/vmstate.h"
 #include "hw/pci/pci.h"
+#include "hw/qdev-properties.h"
 #include "qapi/error.h"
 #include "qemu/timer.h"
 #include "qemu/iov.h"
@@ -38,6 +39,7 @@
 #include "trace.h"
 #include "qemu/main-loop.h"
 #include "qemu/module.h"
+#include "qom/object.h"
 
 #define FRAME_TIMER_FREQ 1000
 
@@ -159,7 +161,8 @@ static void uhci_queue_fill(UHCIQueue *q, UHCI_TD *td);
 static void uhci_resume(void *opaque);
 
 #define TYPE_UHCI "pci-uhci-usb"
-#define UHCI(obj) OBJECT_CHECK(UHCIState, (obj), TYPE_UHCI)
+DECLARE_INSTANCE_CHECKER(UHCIState, UHCI,
+                         TYPE_UHCI)
 
 static inline int32_t uhci_queue_token(UHCI_TD *td)
 {
@@ -1348,9 +1351,9 @@ static void uhci_data_class_init(ObjectClass *klass, void *data)
     if (!info->unplug) {
         /* uhci controllers in companion setups can't be hotplugged */
         dc->hotpluggable = false;
-        dc->props = uhci_properties_companion;
+        device_class_set_props(dc, uhci_properties_companion);
     } else {
-        dc->props = uhci_properties_standalone;
+        device_class_set_props(dc, uhci_properties_standalone);
     }
     u->info = *info;
 }

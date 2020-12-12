@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 #  Copyright (c) 2017 Red Hat Inc
 #
@@ -23,7 +23,6 @@
 Run QEMU with all combinations of -machine and -device types,
 check for crashes and unexpected errors.
 """
-from __future__ import print_function
 
 import os
 import sys
@@ -384,7 +383,9 @@ def binariesToTest(args, testcase):
     if args.qemu:
         r = args.qemu
     else:
-        r = glob.glob('./*-softmmu/qemu-system-*')
+        r = [f.path for f in os.scandir('.')
+             if f.name.startswith('qemu-system-') and
+                f.is_file() and os.access(f, os.X_OK)]
     return r
 
 

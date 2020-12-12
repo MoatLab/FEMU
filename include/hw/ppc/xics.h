@@ -28,7 +28,9 @@
 #ifndef XICS_H
 #define XICS_H
 
-#include "hw/qdev.h"
+#include "exec/memory.h"
+#include "hw/qdev-core.h"
+#include "qom/object.h"
 
 #define XICS_IPI        0x2
 #define XICS_BUID       0x1
@@ -39,8 +41,6 @@
  * (the kernel implementation supports more but we don't exploit
  *  that yet)
  */
-typedef struct ICPStateClass ICPStateClass;
-typedef struct ICPState ICPState;
 typedef struct PnvICPState PnvICPState;
 typedef struct ICSStateClass ICSStateClass;
 typedef struct ICSState ICSState;
@@ -48,15 +48,13 @@ typedef struct ICSIRQState ICSIRQState;
 typedef struct XICSFabric XICSFabric;
 
 #define TYPE_ICP "icp"
-#define ICP(obj) OBJECT_CHECK(ICPState, (obj), TYPE_ICP)
+OBJECT_DECLARE_TYPE(ICPState, ICPStateClass,
+                    ICP)
 
 #define TYPE_PNV_ICP "pnv-icp"
-#define PNV_ICP(obj) OBJECT_CHECK(PnvICPState, (obj), TYPE_PNV_ICP)
+DECLARE_INSTANCE_CHECKER(PnvICPState, PNV_ICP,
+                         TYPE_PNV_ICP)
 
-#define ICP_CLASS(klass) \
-     OBJECT_CLASS_CHECK(ICPStateClass, (klass), TYPE_ICP)
-#define ICP_GET_CLASS(obj) \
-     OBJECT_GET_CLASS(ICPStateClass, (obj), TYPE_ICP)
 
 struct ICPStateClass {
     DeviceClass parent_class;
@@ -88,17 +86,10 @@ struct PnvICPState {
     uint32_t links[3];
 };
 
-#define TYPE_ICS_BASE "ics-base"
-#define ICS_BASE(obj) OBJECT_CHECK(ICSState, (obj), TYPE_ICS_BASE)
+#define TYPE_ICS "ics"
+DECLARE_OBJ_CHECKERS(ICSState, ICSStateClass,
+                     ICS, TYPE_ICS)
 
-/* Retain ics for sPAPR for migration from existing sPAPR guests */
-#define TYPE_ICS_SIMPLE "ics"
-#define ICS_SIMPLE(obj) OBJECT_CHECK(ICSState, (obj), TYPE_ICS_SIMPLE)
-
-#define ICS_BASE_CLASS(klass) \
-     OBJECT_CLASS_CHECK(ICSStateClass, (klass), TYPE_ICS_BASE)
-#define ICS_BASE_GET_CLASS(obj) \
-     OBJECT_GET_CLASS(ICSStateClass, (obj), TYPE_ICS_BASE)
 
 struct ICSStateClass {
     DeviceClass parent_class;
@@ -108,7 +99,6 @@ struct ICSStateClass {
 
     void (*reject)(ICSState *s, uint32_t irq);
     void (*resend)(ICSState *s);
-    void (*eoi)(ICSState *s, uint32_t irq);
 };
 
 struct ICSState {
@@ -146,24 +136,19 @@ struct ICSIRQState {
     uint8_t flags;
 };
 
-struct XICSFabric {
-    Object parent;
-};
-
 #define TYPE_XICS_FABRIC "xics-fabric"
 #define XICS_FABRIC(obj)                                     \
-    OBJECT_CHECK(XICSFabric, (obj), TYPE_XICS_FABRIC)
-#define XICS_FABRIC_CLASS(klass)                                     \
-    OBJECT_CLASS_CHECK(XICSFabricClass, (klass), TYPE_XICS_FABRIC)
-#define XICS_FABRIC_GET_CLASS(obj)                                   \
-    OBJECT_GET_CLASS(XICSFabricClass, (obj), TYPE_XICS_FABRIC)
+    INTERFACE_CHECK(XICSFabric, (obj), TYPE_XICS_FABRIC)
+typedef struct XICSFabricClass XICSFabricClass;
+DECLARE_CLASS_CHECKERS(XICSFabricClass, XICS_FABRIC,
+                       TYPE_XICS_FABRIC)
 
-typedef struct XICSFabricClass {
+struct XICSFabricClass {
     InterfaceClass parent;
     ICSState *(*ics_get)(XICSFabric *xi, int irq);
     void (*ics_resend)(XICSFabric *xi);
     ICPState *(*icp_get)(XICSFabric *xi, int server);
-} XICSFabricClass;
+};
 
 ICPState *xics_icp_get(XICSFabric *xi, int server);
 
@@ -173,10 +158,17 @@ void icp_set_mfrr(ICPState *icp, uint8_t mfrr);
 uint32_t icp_accept(ICPState *ss);
 uint32_t icp_ipoll(ICPState *ss, uint32_t *mfrr);
 void icp_eoi(ICPState *icp, uint32_t xirr);
+void icp_irq(ICSState *ics, int server, int nr, uint8_t priority);
+void icp_reset(ICPState *icp);
 
-void ics_simple_write_xive(ICSState *ics, int nr, int server,
-                           uint8_t priority, uint8_t saved_priority);
-void ics_simple_set_irq(void *opaque, int srcno, int val);
+void ics_write_xive(ICSState *ics, int nr, int server,
+                    uint8_t priority, uint8_t saved_priority);
+void ics_set_irq(void *opaque, int srcno, int val);
+
+static inline bool ics_irq_free(ICSState *ics, uint32_t srcno)
+{
+    return !(ics->irqs[srcno].flags & XICS_FLAGS_IRQ_MASK);
+}
 
 void ics_set_irq_type(ICSState *ics, int srcno, bool lsi);
 void icp_pic_print_info(ICPState *icp, Monitor *mon);
@@ -187,6 +179,7 @@ void icp_resend(ICPState *ss);
 
 Object *icp_create(Object *cpu, const char *type, XICSFabric *xi,
                    Error **errp);
+void icp_destroy(ICPState *icp);
 
 /* KVM */
 void icp_get_kvm_state(ICPState *icp);

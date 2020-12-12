@@ -34,7 +34,10 @@ remainder:
 	larl	%r2,memsetxc
 	ex	%r3,0(%r2)
 done:
-	j      main		/* And call C */
+        /* set up a pgm exception disabled wait psw */
+        larl	%r2, disabled_wait_psw
+        mvc	0x01d0(16), 0(%r2)
+        j      main		/* And call C */
 
 memsetxc:
 	xc	0(1,%r1),0(%r1)
@@ -47,8 +50,9 @@ memsetxc:
  */
 	.globl disabled_wait
 disabled_wait:
-        larl %r1,disabled_wait_psw
-        lpswe   0(%r1)
+	larl	%r1,disabled_wait_psw
+	lpswe	0(%r1)
+1:	j	1b
 
 
 /*

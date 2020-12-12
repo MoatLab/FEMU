@@ -8,22 +8,24 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
+#include "hw/irq.h"
+#include "hw/qdev-properties.h"
 #include "qemu/timer.h"
+#include "sysemu/runstate.h"
 #include "qemu/bitops.h"
 #include "hw/sysbus.h"
+#include "migration/vmstate.h"
 #include "hw/arm/primecell.h"
-#include "sysemu/sysemu.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
+#include "qom/object.h"
 
 #define LOCK_VALUE 0xa05f
 
 #define TYPE_ARM_SYSCTL "realview_sysctl"
-#define ARM_SYSCTL(obj) \
-    OBJECT_CHECK(arm_sysctl_state, (obj), TYPE_ARM_SYSCTL)
+OBJECT_DECLARE_SIMPLE_TYPE(arm_sysctl_state, ARM_SYSCTL)
 
-typedef struct {
+struct arm_sysctl_state {
     SysBusDevice parent_obj;
 
     MemoryRegion iomem;
@@ -49,7 +51,7 @@ typedef struct {
     uint32_t *db_voltage;
     uint32_t db_num_clocks;
     uint32_t *db_clock_reset;
-} arm_sysctl_state;
+};
 
 static const VMStateDescription vmstate_arm_sysctl = {
     .name = "realview_sysctl",
@@ -640,7 +642,7 @@ static void arm_sysctl_class_init(ObjectClass *klass, void *data)
     dc->realize = arm_sysctl_realize;
     dc->reset = arm_sysctl_reset;
     dc->vmsd = &vmstate_arm_sysctl;
-    dc->props = arm_sysctl_properties;
+    device_class_set_props(dc, arm_sysctl_properties);
 }
 
 static const TypeInfo arm_sysctl_info = {

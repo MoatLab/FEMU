@@ -36,8 +36,8 @@
 #include "trace.h"
 #include "qapi/error.h"
 #include "qemu/sockets.h"
+#include "qemu/thread.h"
 #include <libgen.h>
-#include <sys/signal.h>
 #include "qemu/cutils.h"
 
 #ifdef CONFIG_LINUX
@@ -47,11 +47,21 @@
 #ifdef __FreeBSD__
 #include <sys/sysctl.h>
 #include <sys/user.h>
+#include <sys/thr.h>
 #include <libutil.h>
 #endif
 
 #ifdef __NetBSD__
 #include <sys/sysctl.h>
+#include <lwp.h>
+#endif
+
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
+
+#ifdef __HAIKU__
+#include <kernel/image.h>
 #endif
 
 #include "qemu/mmap-alloc.h"
@@ -75,10 +85,23 @@ static MemsetThread *memset_thread;
 static int memset_num_threads;
 static bool memset_thread_failed;
 
+static QemuMutex page_mutex;
+static QemuCond page_cond;
+static bool threads_created_flag;
+
 int qemu_get_thread_id(void)
 {
 #if defined(__linux__)
     return syscall(SYS_gettid);
+#elif defined(__FreeBSD__)
+    /* thread id is up to INT_MAX */
+    long tid;
+    thr_self(&tid);
+    return (int)tid;
+#elif defined(__NetBSD__)
+    return _lwp_self();
+#elif defined(__OpenBSD__)
+    return getthrid();
 #else
     return getpid();
 #endif
@@ -102,7 +125,7 @@ bool qemu_write_pidfile(const char *path, Error **errp)
             .l_len = 0,
         };
 
-        fd = qemu_open(path, O_CREAT | O_WRONLY, S_IRUSR | S_IWUSR);
+        fd = qemu_open_old(path, O_CREAT | O_WRONLY, S_IRUSR | S_IWUSR);
         if (fd == -1) {
             error_setg_errno(errp, errno, "Cannot open pid file");
             return false;
@@ -239,25 +262,35 @@ void qemu_set_block(int fd)
     assert(f != -1);
 }
 
-void qemu_set_nonblock(int fd)
+int qemu_try_set_nonblock(int fd)
 {
     int f;
     f = fcntl(fd, F_GETFL);
-    assert(f != -1);
-    f = fcntl(fd, F_SETFL, f | O_NONBLOCK);
-#ifdef __OpenBSD__
     if (f == -1) {
+        return -errno;
+    }
+    if (fcntl(fd, F_SETFL, f | O_NONBLOCK) == -1) {
+#ifdef __OpenBSD__
         /*
          * Previous to OpenBSD 6.3, fcntl(F_SETFL) is not permitted on
          * memory devices and sets errno to ENODEV.
          * It's OK if we fail to set O_NONBLOCK on devices like /dev/null,
          * because they will never block anyway.
          */
-        assert(errno == ENODEV);
-    }
-#else
-    assert(f != -1);
+        if (errno == ENODEV) {
+            return 0;
+        }
 #endif
+        return -errno;
+    }
+    return 0;
+}
+
+void qemu_set_nonblock(int fd)
+{
+    int f;
+    f = qemu_try_set_nonblock(fd);
+    assert(f == 0);
 }
 
 int socket_set_fast_reuse(int fd)
@@ -306,8 +339,10 @@ int qemu_pipe(int pipefd[2])
 char *
 qemu_get_local_state_pathname(const char *relative_pathname)
 {
-    return g_strdup_printf("%s/%s", CONFIG_QEMU_LOCALSTATEDIR,
-                           relative_pathname);
+    g_autofree char *dir = g_strdup_printf("%s/%s",
+                                           CONFIG_QEMU_LOCALSTATEDIR,
+                                           relative_pathname);
+    return get_relocated_path(dir);
 }
 
 void qemu_set_tty_echo(int fd, bool echo)
@@ -325,15 +360,16 @@ void qemu_set_tty_echo(int fd, bool echo)
     tcsetattr(fd, TCSANOW, &tty);
 }
 
-static char exec_dir[PATH_MAX];
+static const char *exec_dir;
 
 void qemu_init_exec_dir(const char *argv0)
 {
-    char *dir;
     char *p = NULL;
     char buf[PATH_MAX];
 
-    assert(!exec_dir[0]);
+    if (exec_dir) {
+        return;
+    }
 
 #if defined(__linux__)
     {
@@ -361,28 +397,48 @@ void qemu_init_exec_dir(const char *argv0)
             p = buf;
         }
     }
+#elif defined(__APPLE__)
+    {
+        char fpath[PATH_MAX];
+        uint32_t len = sizeof(fpath);
+        if (_NSGetExecutablePath(fpath, &len) == 0) {
+            p = realpath(fpath, buf);
+            if (!p) {
+                return;
+            }
+        }
+    }
+#elif defined(__HAIKU__)
+    {
+        image_info ii;
+        int32_t c = 0;
+
+        *buf = '\0';
+        while (get_next_image_info(0, &c, &ii) == B_OK) {
+            if (ii.type == B_APP_IMAGE) {
+                strncpy(buf, ii.name, sizeof(buf));
+                buf[sizeof(buf) - 1] = 0;
+                p = buf;
+                break;
+            }
+        }
+    }
 #endif
     /* If we don't have any way of figuring out the actual executable
        location then try argv[0].  */
-    if (!p) {
-        if (!argv0) {
-            return;
-        }
+    if (!p && argv0) {
         p = realpath(argv0, buf);
-        if (!p) {
-            return;
-        }
     }
-    dir = g_path_get_dirname(p);
-
-    pstrcpy(exec_dir, sizeof(exec_dir), dir);
-
-    g_free(dir);
+    if (p) {
+        exec_dir = g_path_get_dirname(p);
+    } else {
+        exec_dir = CONFIG_BINDIR;
+    }
 }
 
-char *qemu_get_exec_dir(void)
+const char *qemu_get_exec_dir(void)
 {
-    return g_strdup(exec_dir);
+    return exec_dir;
 }
 
 static void sigbus_handler(int signal)
@@ -401,6 +457,17 @@ static void *do_touch_pages(void *arg)
 {
     MemsetThread *memset_args = (MemsetThread *)arg;
     sigset_t set, oldset;
+
+    /*
+     * On Linux, the page faults from the loop below can cause mmap_sem
+     * contention with allocation of the thread stacks.  Do not start
+     * clearing until all threads have been created.
+     */
+    qemu_mutex_lock(&page_mutex);
+    while(!threads_created_flag){
+        qemu_cond_wait(&page_cond, &page_mutex);
+    }
+    qemu_mutex_unlock(&page_mutex);
 
     /* unblock SIGBUS */
     sigemptyset(&set);
@@ -450,27 +517,38 @@ static inline int get_memset_num_threads(int smp_cpus)
 static bool touch_all_pages(char *area, size_t hpagesize, size_t numpages,
                             int smp_cpus)
 {
-    size_t numpages_per_thread;
-    size_t size_per_thread;
+    static gsize initialized = 0;
+    size_t numpages_per_thread, leftover;
     char *addr = area;
     int i = 0;
 
+    if (g_once_init_enter(&initialized)) {
+        qemu_mutex_init(&page_mutex);
+        qemu_cond_init(&page_cond);
+        g_once_init_leave(&initialized, 1);
+    }
+
     memset_thread_failed = false;
+    threads_created_flag = false;
     memset_num_threads = get_memset_num_threads(smp_cpus);
     memset_thread = g_new0(MemsetThread, memset_num_threads);
-    numpages_per_thread = (numpages / memset_num_threads);
-    size_per_thread = (hpagesize * numpages_per_thread);
+    numpages_per_thread = numpages / memset_num_threads;
+    leftover = numpages % memset_num_threads;
     for (i = 0; i < memset_num_threads; i++) {
         memset_thread[i].addr = addr;
-        memset_thread[i].numpages = (i == (memset_num_threads - 1)) ?
-                                    numpages : numpages_per_thread;
+        memset_thread[i].numpages = numpages_per_thread + (i < leftover);
         memset_thread[i].hpagesize = hpagesize;
         qemu_thread_create(&memset_thread[i].pgthread, "touch_pages",
                            do_touch_pages, &memset_thread[i],
                            QEMU_THREAD_JOINABLE);
-        addr += size_per_thread;
-        numpages -= numpages_per_thread;
+        addr += memset_thread[i].numpages * hpagesize;
     }
+
+    qemu_mutex_lock(&page_mutex);
+    threads_created_flag = true;
+    qemu_cond_broadcast(&page_cond);
+    qemu_mutex_unlock(&page_mutex);
+
     for (i = 0; i < memset_num_threads; i++) {
         qemu_thread_join(&memset_thread[i].pgthread);
     }
@@ -511,60 +589,6 @@ void os_mem_prealloc(int fd, char *area, size_t memory, int smp_cpus,
         perror("os_mem_prealloc: failed to reinstall signal handler");
         exit(1);
     }
-}
-
-uint64_t qemu_get_pmem_size(const char *filename, Error **errp)
-{
-    struct stat st;
-
-    if (stat(filename, &st) < 0) {
-        error_setg(errp, "unable to stat pmem file \"%s\"", filename);
-        return 0;
-    }
-
-#if defined(__linux__)
-    /* Special handling for devdax character devices */
-    if (S_ISCHR(st.st_mode)) {
-        char *subsystem_path = NULL;
-        char *subsystem = NULL;
-        char *size_path = NULL;
-        char *size_str = NULL;
-        uint64_t ret = 0;
-
-        subsystem_path = g_strdup_printf("/sys/dev/char/%d:%d/subsystem",
-                                         major(st.st_rdev), minor(st.st_rdev));
-        subsystem = g_file_read_link(subsystem_path, NULL);
-        if (!subsystem) {
-            error_setg(errp, "unable to read subsystem for pmem file \"%s\"",
-                       filename);
-            goto devdax_err;
-        }
-
-        if (!g_str_has_suffix(subsystem, "/dax")) {
-            error_setg(errp, "pmem file \"%s\" is not a dax device", filename);
-            goto devdax_err;
-        }
-
-        size_path = g_strdup_printf("/sys/dev/char/%d:%d/size",
-                                    major(st.st_rdev), minor(st.st_rdev));
-        if (!g_file_get_contents(size_path, &size_str, NULL, NULL)) {
-            error_setg(errp, "unable to read size for pmem file \"%s\"",
-                       size_path);
-            goto devdax_err;
-        }
-
-        ret = g_ascii_strtoull(size_str, NULL, 0);
-
-devdax_err:
-        g_free(size_str);
-        g_free(size_path);
-        g_free(subsystem);
-        g_free(subsystem_path);
-        return ret;
-    }
-#endif /* defined(__linux__) */
-
-    return st.st_size;
 }
 
 char *qemu_get_pid_name(pid_t pid)
@@ -670,7 +694,7 @@ void *qemu_alloc_stack(size_t *sz)
 #ifdef CONFIG_DEBUG_STACK_USAGE
     void *ptr2;
 #endif
-    size_t pagesz = getpagesize();
+    size_t pagesz = qemu_real_host_page_size;
 #ifdef _SC_THREAD_STACK_MIN
     /* avoid stacks smaller than _SC_THREAD_STACK_MIN */
     long min_stack_sz = sysconf(_SC_THREAD_STACK_MIN);
@@ -732,7 +756,7 @@ void qemu_free_stack(void *stack, size_t sz)
     unsigned int usage;
     void *ptr;
 
-    for (ptr = stack + getpagesize(); ptr < stack + sz;
+    for (ptr = stack + qemu_real_host_page_size; ptr < stack + sz;
          ptr += sizeof(uint32_t)) {
         if (*(uint32_t *)ptr != 0xdeadbeaf) {
             break;
@@ -778,4 +802,54 @@ void sigaction_invoke(struct sigaction *action,
         si.si_uid = info->ssi_uid;
     }
     action->sa_sigaction(info->ssi_signo, &si, NULL);
+}
+
+#ifndef HOST_NAME_MAX
+# ifdef _POSIX_HOST_NAME_MAX
+#  define HOST_NAME_MAX _POSIX_HOST_NAME_MAX
+# else
+#  define HOST_NAME_MAX 255
+# endif
+#endif
+
+char *qemu_get_host_name(Error **errp)
+{
+    long len = -1;
+    g_autofree char *hostname = NULL;
+
+#ifdef _SC_HOST_NAME_MAX
+    len = sysconf(_SC_HOST_NAME_MAX);
+#endif /* _SC_HOST_NAME_MAX */
+
+    if (len < 0) {
+        len = HOST_NAME_MAX;
+    }
+
+    /* Unfortunately, gethostname() below does not guarantee a
+     * NULL terminated string. Therefore, allocate one byte more
+     * to be sure. */
+    hostname = g_new0(char, len + 1);
+
+    if (gethostname(hostname, len) < 0) {
+        error_setg_errno(errp, errno,
+                         "cannot get hostname");
+        return NULL;
+    }
+
+    return g_steal_pointer(&hostname);
+}
+
+size_t qemu_get_host_physmem(void)
+{
+#ifdef _SC_PHYS_PAGES
+    long pages = sysconf(_SC_PHYS_PAGES);
+    if (pages > 0) {
+        if (pages > SIZE_MAX / qemu_real_host_page_size) {
+            return SIZE_MAX;
+        } else {
+            return pages * qemu_real_host_page_size;
+        }
+    }
+#endif
+    return 0;
 }

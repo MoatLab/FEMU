@@ -9,6 +9,7 @@
  */
 
 #include "libc.h"
+#include "helper.h"
 #include "s390-arch.h"
 #include "s390-ccw.h"
 #include "cio.h"
@@ -17,12 +18,12 @@
 
 char stack[PAGE_SIZE * 8] __attribute__((__aligned__(PAGE_SIZE)));
 static SubChannelId blk_schid = { .one = 1 };
-static char loadparm_str[LOADPARM_LEN + 1] = { 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+static char loadparm_str[LOADPARM_LEN + 1];
 QemuIplParameters qipl;
 IplParameterBlock iplb __attribute__((__aligned__(PAGE_SIZE)));
 static bool have_iplb;
 static uint16_t cutype;
-LowCore const *lowcore; /* Yes, this *is* a pointer to address 0 */
+LowCore *lowcore; /* Yes, this *is* a pointer to address 0 */
 
 #define LOADPARM_PROMPT "PROMPT  "
 #define LOADPARM_EMPTY  "        "
@@ -35,23 +36,75 @@ LowCore const *lowcore; /* Yes, this *is* a pointer to address 0 */
  */
 void write_subsystem_identification(void)
 {
-    SubChannelId *schid = (SubChannelId *) 184;
-    uint32_t *zeroes = (uint32_t *) 188;
-
-    *schid = blk_schid;
-    *zeroes = 0;
+    lowcore->subchannel_id = blk_schid.sch_id;
+    lowcore->subchannel_nr = blk_schid.sch_no;
+    lowcore->io_int_parm = 0;
 }
 
-void panic(const char *string)
+void write_iplb_location(void)
 {
-    sclp_print(string);
-    disabled_wait();
-    while (1) { }
+    if (cutype == CU_TYPE_VIRTIO && virtio_get_device_type() != VIRTIO_ID_NET) {
+        lowcore->ptr_iplb = ptr2u32(&iplb);
+    }
 }
 
 unsigned int get_loadparm_index(void)
 {
     return atoui(loadparm_str);
+}
+
+static int is_dev_possibly_bootable(int dev_no, int sch_no)
+{
+    bool is_virtio;
+    Schib schib;
+    int r;
+
+    blk_schid.sch_no = sch_no;
+    r = stsch_err(blk_schid, &schib);
+    if (r == 3 || r == -EIO) {
+        return -ENODEV;
+    }
+    if (!schib.pmcw.dnv) {
+        return false;
+    }
+
+    enable_subchannel(blk_schid);
+    cutype = cu_type(blk_schid);
+
+    /*
+     * Note: we always have to run virtio_is_supported() here to make
+     * sure that the vdev.senseid data gets pre-initialized correctly
+     */
+    is_virtio = virtio_is_supported(blk_schid);
+
+    /* No specific devno given, just return whether the device is possibly bootable */
+    if (dev_no < 0) {
+        switch (cutype) {
+        case CU_TYPE_VIRTIO:
+            if (is_virtio) {
+                /*
+                 * Skip net devices since no IPLB is created and therefore
+                 * no network bootloader has been loaded
+                 */
+                if (virtio_get_device_type() != VIRTIO_ID_NET) {
+                    return true;
+                }
+            }
+            return false;
+        case CU_TYPE_DASD_3990:
+        case CU_TYPE_DASD_2107:
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    /* Caller asked for a specific devno */
+    if (schib.pmcw.dev == dev_no) {
+        return true;
+    }
+
+    return false;
 }
 
 /*
@@ -65,53 +118,14 @@ unsigned int get_loadparm_index(void)
  */
 static bool find_subch(int dev_no)
 {
-    Schib schib;
     int i, r;
-    bool is_virtio;
 
     for (i = 0; i < 0x10000; i++) {
-        blk_schid.sch_no = i;
-        r = stsch_err(blk_schid, &schib);
-        if ((r == 3) || (r == -EIO)) {
+        r = is_dev_possibly_bootable(dev_no, i);
+        if (r < 0) {
             break;
         }
-        if (!schib.pmcw.dnv) {
-            continue;
-        }
-
-        enable_subchannel(blk_schid);
-        cutype = cu_type(blk_schid);
-
-        /*
-         * Note: we always have to run virtio_is_supported() here to make
-         * sure that the vdev.senseid data gets pre-initialized correctly
-         */
-        is_virtio = virtio_is_supported(blk_schid);
-
-        /* No specific devno given, just return 1st possibly bootable device */
-        if (dev_no < 0) {
-            switch (cutype) {
-            case CU_TYPE_VIRTIO:
-                if (is_virtio) {
-                    /*
-                     * Skip net devices since no IPLB is created and therefore
-                     * no network bootloader has been loaded
-                     */
-                    if (virtio_get_device_type() != VIRTIO_ID_NET) {
-                        return true;
-                    }
-                }
-                continue;
-            case CU_TYPE_DASD_3990:
-            case CU_TYPE_DASD_2107:
-                return true;
-            default:
-                continue;
-            }
-        }
-
-        /* Caller asked for a specific devno */
-        if (schib.pmcw.dev == dev_no) {
+        if (r == true) {
             return true;
         }
     }
@@ -164,25 +178,19 @@ static void boot_setup(void)
     memcpy(lpmsg + 10, loadparm_str, 8);
     sclp_print(lpmsg);
 
+    /*
+     * Clear out any potential S390EP magic (see jump_to_low_kernel()),
+     * so we don't taint our decision-making process during a reboot.
+     */
+    memset((char *)S390EP, 0, 6);
+
     have_iplb = store_iplb(&iplb);
 }
 
 static void find_boot_device(void)
 {
     VDev *vdev = virtio_get_device();
-    int ssid;
     bool found;
-
-    if (!have_iplb) {
-        for (ssid = 0; ssid < 0x3; ssid++) {
-            blk_schid.ssid = ssid;
-            found = find_subch(-1);
-            if (found) {
-                return;
-            }
-        }
-        panic("Could not find a suitable boot device (none specified)\n");
-    }
 
     switch (iplb.pbt) {
     case S390_IPL_TYPE_CCW:
@@ -206,7 +214,7 @@ static void find_boot_device(void)
     IPL_assert(found, "Boot device not found\n");
 }
 
-static void virtio_setup(void)
+static int virtio_setup(void)
 {
     VDev *vdev = virtio_get_device();
     QemuIplParameters *early_qipl = (QemuIplParameters *)QIPL_ADDRESS;
@@ -221,9 +229,56 @@ static void virtio_setup(void)
         sclp_print("Network boot device detected\n");
         vdev->netboot_start_addr = qipl.netboot_start_addr;
     } else {
-        virtio_blk_setup_device(blk_schid);
+        int ret = virtio_blk_setup_device(blk_schid);
+        if (ret) {
+            return ret;
+        }
         IPL_assert(virtio_ipl_disk_is_valid(), "No valid IPL device detected");
     }
+
+    return 0;
+}
+
+static void ipl_boot_device(void)
+{
+    switch (cutype) {
+    case CU_TYPE_DASD_3990:
+    case CU_TYPE_DASD_2107:
+        dasd_ipl(blk_schid, cutype); /* no return */
+        break;
+    case CU_TYPE_VIRTIO:
+        if (virtio_setup() == 0) {
+            zipl_load();             /* Only returns in case of errors */
+        }
+        break;
+    default:
+        print_int("Attempting to boot from unexpected device type", cutype);
+        panic("\nBoot failed.\n");
+    }
+}
+
+/*
+ * No boot device has been specified, so we have to scan through the
+ * channels to find one.
+ */
+static void probe_boot_device(void)
+{
+    int ssid, sch_no, ret;
+
+    for (ssid = 0; ssid < 0x3; ssid++) {
+        blk_schid.ssid = ssid;
+        for (sch_no = 0; sch_no < 0x10000; sch_no++) {
+            ret = is_dev_possibly_bootable(-1, sch_no);
+            if (ret < 0) {
+                break;
+            }
+            if (ret == true) {
+                ipl_boot_device();      /* Only returns if unsuccessful */
+            }
+        }
+    }
+
+    sclp_print("Could not find a suitable boot device (none specified)\n");
 }
 
 int main(void)
@@ -231,21 +286,11 @@ int main(void)
     sclp_setup();
     css_setup();
     boot_setup();
-    find_boot_device();
-    enable_subchannel(blk_schid);
-
-    switch (cutype) {
-    case CU_TYPE_DASD_3990:
-    case CU_TYPE_DASD_2107:
-        dasd_ipl(blk_schid, cutype); /* no return */
-        break;
-    case CU_TYPE_VIRTIO:
-        virtio_setup();
-        zipl_load(); /* no return */
-        break;
-    default:
-        print_int("Attempting to boot from unexpected device type", cutype);
-        panic("");
+    if (have_iplb) {
+        find_boot_device();
+        ipl_boot_device();
+    } else {
+        probe_boot_device();
     }
 
     panic("Failed to load OS from hard disk\n");

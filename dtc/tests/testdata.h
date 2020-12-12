@@ -40,6 +40,12 @@
 #define TEST_CHAR4	'\''
 #define TEST_CHAR5	'\xff'
 
+#define TEST_MEMREGION_ADDR	0x12345678
+#define TEST_MEMREGION_ADDR_HI	0x8765432100000000
+#define TEST_MEMREGION_SIZE	0x9abcdef0
+#define TEST_MEMREGION_SIZE_HI	0x0fedcba900000000
+#define TEST_MEMREGION_SIZE_INC	0x1000
+
 #ifndef __ASSEMBLY__
 extern struct fdt_header test_tree1;
 extern struct fdt_header truncated_property;

@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2016-2019 Red Hat, Inc.
+ *  Copyright (C) 2016-2020 Red Hat, Inc.
  *  Copyright (C) 2005  Anthony Liguori <anthony@codemonkey.ws>
  *
  *  Network Block Device
@@ -20,10 +20,12 @@
 #ifndef NBD_H
 #define NBD_H
 
-#include "qapi/qapi-types-block.h"
+#include "block/export.h"
 #include "io/channel-socket.h"
 #include "crypto/tlscreds.h"
 #include "qapi/error.h"
+
+extern const BlockExportDriver blk_exp_nbd;
 
 /* Handshake phase structs - this struct is passed on the wire */
 
@@ -45,7 +47,7 @@ typedef struct NBDOptionReply NBDOptionReply;
 typedef struct NBDOptionReplyMetaContext {
     NBDOptionReply h; /* h.type = NBD_REP_META_CONTEXT, h.length > 4 */
     uint32_t context_id;
-    /* meta context name follows */
+    /* metadata context name follows */
 } QEMU_PACKED NBDOptionReplyMetaContext;
 
 /* Transmission phase structs
@@ -140,6 +142,7 @@ enum {
     NBD_FLAG_CAN_MULTI_CONN_BIT     =  8, /* Multi-client cache consistent */
     NBD_FLAG_SEND_RESIZE_BIT        =  9, /* Send resize */
     NBD_FLAG_SEND_CACHE_BIT         = 10, /* Send CACHE (prefetch) */
+    NBD_FLAG_SEND_FAST_ZERO_BIT     = 11, /* FAST_ZERO flag for WRITE_ZEROES */
 };
 
 #define NBD_FLAG_HAS_FLAGS         (1 << NBD_FLAG_HAS_FLAGS_BIT)
@@ -153,6 +156,7 @@ enum {
 #define NBD_FLAG_CAN_MULTI_CONN    (1 << NBD_FLAG_CAN_MULTI_CONN_BIT)
 #define NBD_FLAG_SEND_RESIZE       (1 << NBD_FLAG_SEND_RESIZE_BIT)
 #define NBD_FLAG_SEND_CACHE        (1 << NBD_FLAG_SEND_CACHE_BIT)
+#define NBD_FLAG_SEND_FAST_ZERO    (1 << NBD_FLAG_SEND_FAST_ZERO_BIT)
 
 /* New-style handshake (global) flags, sent from server to client, and
    control what will happen during handshake phase. */
@@ -205,6 +209,7 @@ enum {
 #define NBD_CMD_FLAG_DF         (1 << 2) /* don't fragment structured read */
 #define NBD_CMD_FLAG_REQ_ONE    (1 << 3) /* only one extent in BLOCK_STATUS
                                           * reply chunk */
+#define NBD_CMD_FLAG_FAST_ZERO  (1 << 4) /* fail if WRITE_ZEROES is not fast */
 
 /* Supported request types */
 enum {
@@ -223,12 +228,12 @@ enum {
 /* Maximum size of a single READ/WRITE data buffer */
 #define NBD_MAX_BUFFER_SIZE (32 * 1024 * 1024)
 
-/* Maximum size of an export name. The NBD spec requires 256 and
- * suggests that servers support up to 4096, but we stick to only the
- * required size so that we can stack-allocate the names, and because
- * going larger would require an audit of more code to make sure we
- * aren't overflowing some other buffer. */
-#define NBD_MAX_NAME_SIZE 256
+/*
+ * Maximum size of a protocol string (export name, metadata context name,
+ * etc.).  Use malloc rather than stack allocation for storage of a
+ * string.
+ */
+#define NBD_MAX_STRING_SIZE 4096
 
 /* Two types of reply structures */
 #define NBD_SIMPLE_REPLY_MAGIC      0x67446698
@@ -254,6 +259,8 @@ enum {
 /* Extent flags for qemu:dirty-bitmap in NBD_REPLY_TYPE_BLOCK_STATUS */
 #define NBD_STATE_DIRTY (1 << 0)
 
+/* No flags needed for qemu:allocation-depth in NBD_REPLY_TYPE_BLOCK_STATUS */
+
 static inline bool nbd_reply_type_is_error(int type)
 {
     return type & (1 << 15);
@@ -270,6 +277,7 @@ static inline bool nbd_reply_type_is_error(int type)
 #define NBD_EINVAL     22
 #define NBD_ENOSPC     28
 #define NBD_EOVERFLOW  75
+#define NBD_ENOTSUP    95
 #define NBD_ESHUTDOWN  108
 
 /* Details collected by NBD_OPT_EXPORT_NAME and NBD_OPT_GO */
@@ -304,7 +312,8 @@ struct NBDExportInfo {
 };
 typedef struct NBDExportInfo NBDExportInfo;
 
-int nbd_receive_negotiate(QIOChannel *ioc, QCryptoTLSCreds *tlscreds,
+int nbd_receive_negotiate(AioContext *aio_context, QIOChannel *ioc,
+                          QCryptoTLSCreds *tlscreds,
                           const char *hostname, QIOChannel **outioc,
                           NBDExportInfo *info, Error **errp);
 void nbd_free_export_list(NBDExportInfo *info, int count);
@@ -323,20 +332,10 @@ int nbd_errno_to_system_errno(int err);
 typedef struct NBDExport NBDExport;
 typedef struct NBDClient NBDClient;
 
-NBDExport *nbd_export_new(BlockDriverState *bs, uint64_t dev_offset,
-                          uint64_t size, const char *name, const char *desc,
-                          const char *bitmap, uint16_t nbdflags,
-                          void (*close)(NBDExport *), bool writethrough,
-                          BlockBackend *on_eject_blk, Error **errp);
-void nbd_export_close(NBDExport *exp);
-void nbd_export_remove(NBDExport *exp, NbdServerRemoveMode mode, Error **errp);
-void nbd_export_get(NBDExport *exp);
-void nbd_export_put(NBDExport *exp);
+void nbd_export_set_on_eject_blk(BlockExport *exp, BlockBackend *blk);
 
-BlockBackend *nbd_export_get_blockdev(NBDExport *exp);
-
+AioContext *nbd_export_aio_context(NBDExport *exp);
 NBDExport *nbd_export_find(const char *name);
-void nbd_export_close_all(void);
 
 void nbd_client_new(QIOChannelSocket *sioc,
                     QCryptoTLSCreds *tlscreds,
@@ -345,8 +344,12 @@ void nbd_client_new(QIOChannelSocket *sioc,
 void nbd_client_get(NBDClient *client);
 void nbd_client_put(NBDClient *client);
 
+void nbd_server_is_qemu_nbd(bool value);
+bool nbd_server_is_running(void);
 void nbd_server_start(SocketAddress *addr, const char *tls_creds,
-                      const char *tls_authz, Error **errp);
+                      const char *tls_authz, uint32_t max_connections,
+                      Error **errp);
+void nbd_server_start_options(NbdServerOptions *arg, Error **errp);
 
 /* nbd_read
  * Reads @size bytes from @ioc. Returns 0 on success.
@@ -354,6 +357,7 @@ void nbd_server_start(SocketAddress *addr, const char *tls_creds,
 static inline int nbd_read(QIOChannel *ioc, void *buffer, size_t size,
                            const char *desc, Error **errp)
 {
+    ERRP_GUARD();
     int ret = qio_channel_read_all(ioc, buffer, size, errp) < 0 ? -EIO : 0;
 
     if (ret < 0) {

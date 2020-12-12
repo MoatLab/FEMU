@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -16,10 +16,12 @@
  * You should have received a copy of the GNU Lesser General Public
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
+
 #include "qemu/osdep.h"
 #include "cpu.h"
 #include "internal.h"
 #include "qemu/host-utils.h"
+#include "qemu/main-loop.h"
 #include "exec/helper-proto.h"
 #include "crypto/aes.h"
 #include "fpu/softfloat.h"
@@ -396,7 +398,7 @@ target_ulong helper_divso(CPUPPCState *env, target_ulong arg1,
 target_ulong helper_602_mfrom(target_ulong arg)
 {
     if (likely(arg < 602)) {
-#include "mfrom_table.inc.c"
+#include "mfrom_table.c.inc"
         return mfrom_ROM_table[arg];
     } else {
         return 0;
@@ -456,24 +458,6 @@ SATCVT(sw, uh, int32_t, uint16_t, 0, UINT16_MAX)
 SATCVT(sd, uw, int64_t, uint32_t, 0, UINT32_MAX)
 #undef SATCVT
 #undef SATCVTU
-
-void helper_lvsl(ppc_avr_t *r, target_ulong sh)
-{
-    int i, j = (sh & 0xf);
-
-    for (i = 0; i < ARRAY_SIZE(r->u8); i++) {
-        r->VsrB(i) = j++;
-    }
-}
-
-void helper_lvsr(ppc_avr_t *r, target_ulong sh)
-{
-    int i, j = 0x10 - (sh & 0xf);
-
-    for (i = 0; i < ARRAY_SIZE(r->u8); i++) {
-        r->VsrB(i) = j++;
-    }
-}
 
 void helper_mtvscr(CPUPPCState *env, uint32_t vscr)
 {
@@ -538,19 +522,6 @@ void helper_vprtybq(ppc_avr_t *r, ppc_avr_t *b)
     r->VsrD(1) = res & 1;
     r->VsrD(0) = 0;
 }
-
-#define VARITH_DO(name, op, element)                                    \
-    void helper_v##name(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b)       \
-    {                                                                   \
-        int i;                                                          \
-                                                                        \
-        for (i = 0; i < ARRAY_SIZE(r->element); i++) {                  \
-            r->element[i] = a->element[i] op b->element[i];             \
-        }                                                               \
-    }
-VARITH_DO(muluwm, *, u32)
-#undef VARITH_DO
-#undef VARITH
 
 #define VARITHFP(suffix, func)                                          \
     void helper_v##suffix(CPUPPCState *env, ppc_avr_t *r, ppc_avr_t *a, \
@@ -786,8 +757,9 @@ VCMPNE(w, u32, uint32_t, 0)
                                                                         \
         for (i = 0; i < ARRAY_SIZE(r->f32); i++) {                      \
             uint32_t result;                                            \
-            int rel = float32_compare_quiet(a->f32[i], b->f32[i],       \
-                                            &env->vec_status);          \
+            FloatRelation rel =                                         \
+                float32_compare_quiet(a->f32[i], b->f32[i],             \
+                                      &env->vec_status);                \
             if (rel == float_relation_unordered) {                      \
                 result = 0;                                             \
             } else if (rel compare order) {                             \
@@ -819,15 +791,15 @@ static inline void vcmpbfp_internal(CPUPPCState *env, ppc_avr_t *r,
     int all_in = 0;
 
     for (i = 0; i < ARRAY_SIZE(r->f32); i++) {
-        int le_rel = float32_compare_quiet(a->f32[i], b->f32[i],
-                                           &env->vec_status);
+        FloatRelation le_rel = float32_compare_quiet(a->f32[i], b->f32[i],
+                                                     &env->vec_status);
         if (le_rel == float_relation_unordered) {
             r->u32[i] = 0xc0000000;
             all_in = 1;
         } else {
             float32 bneg = float32_chs(b->f32[i]);
-            int ge_rel = float32_compare_quiet(a->f32[i], bneg,
-                                               &env->vec_status);
+            FloatRelation ge_rel = float32_compare_quiet(a->f32[i], bneg,
+                                                         &env->vec_status);
             int le = le_rel != float_relation_greater;
             int ge = ge_rel != float_relation_less;
 
@@ -1114,6 +1086,41 @@ VMUL(uw, u32, VsrW, VsrD, uint64_t)
 #undef VMUL_DO_ODD
 #undef VMUL
 
+void helper_vmulhsw(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b)
+{
+    int i;
+
+    for (i = 0; i < 4; i++) {
+        r->s32[i] = (int32_t)(((int64_t)a->s32[i] * (int64_t)b->s32[i]) >> 32);
+    }
+}
+
+void helper_vmulhuw(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b)
+{
+    int i;
+
+    for (i = 0; i < 4; i++) {
+        r->u32[i] = (uint32_t)(((uint64_t)a->u32[i] *
+                               (uint64_t)b->u32[i]) >> 32);
+    }
+}
+
+void helper_vmulhsd(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b)
+{
+    uint64_t discard;
+
+    muls64(&discard, &r->u64[0], a->s64[0], b->s64[0]);
+    muls64(&discard, &r->u64[1], a->s64[1], b->s64[1]);
+}
+
+void helper_vmulhud(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b)
+{
+    uint64_t discard;
+
+    mulu64(&discard, &r->u64[0], a->u64[0], b->u64[0]);
+    mulu64(&discard, &r->u64[1], a->u64[1], b->u64[1]);
+}
+
 void helper_vperm(CPUPPCState *env, ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b,
                   ppc_avr_t *c)
 {
@@ -1202,282 +1209,6 @@ void helper_vbpermq(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b)
 
 #undef VBPERMQ_INDEX
 #undef VBPERMQ_DW
-
-static const uint64_t VGBBD_MASKS[256] = {
-    0x0000000000000000ull, /* 00 */
-    0x0000000000000080ull, /* 01 */
-    0x0000000000008000ull, /* 02 */
-    0x0000000000008080ull, /* 03 */
-    0x0000000000800000ull, /* 04 */
-    0x0000000000800080ull, /* 05 */
-    0x0000000000808000ull, /* 06 */
-    0x0000000000808080ull, /* 07 */
-    0x0000000080000000ull, /* 08 */
-    0x0000000080000080ull, /* 09 */
-    0x0000000080008000ull, /* 0A */
-    0x0000000080008080ull, /* 0B */
-    0x0000000080800000ull, /* 0C */
-    0x0000000080800080ull, /* 0D */
-    0x0000000080808000ull, /* 0E */
-    0x0000000080808080ull, /* 0F */
-    0x0000008000000000ull, /* 10 */
-    0x0000008000000080ull, /* 11 */
-    0x0000008000008000ull, /* 12 */
-    0x0000008000008080ull, /* 13 */
-    0x0000008000800000ull, /* 14 */
-    0x0000008000800080ull, /* 15 */
-    0x0000008000808000ull, /* 16 */
-    0x0000008000808080ull, /* 17 */
-    0x0000008080000000ull, /* 18 */
-    0x0000008080000080ull, /* 19 */
-    0x0000008080008000ull, /* 1A */
-    0x0000008080008080ull, /* 1B */
-    0x0000008080800000ull, /* 1C */
-    0x0000008080800080ull, /* 1D */
-    0x0000008080808000ull, /* 1E */
-    0x0000008080808080ull, /* 1F */
-    0x0000800000000000ull, /* 20 */
-    0x0000800000000080ull, /* 21 */
-    0x0000800000008000ull, /* 22 */
-    0x0000800000008080ull, /* 23 */
-    0x0000800000800000ull, /* 24 */
-    0x0000800000800080ull, /* 25 */
-    0x0000800000808000ull, /* 26 */
-    0x0000800000808080ull, /* 27 */
-    0x0000800080000000ull, /* 28 */
-    0x0000800080000080ull, /* 29 */
-    0x0000800080008000ull, /* 2A */
-    0x0000800080008080ull, /* 2B */
-    0x0000800080800000ull, /* 2C */
-    0x0000800080800080ull, /* 2D */
-    0x0000800080808000ull, /* 2E */
-    0x0000800080808080ull, /* 2F */
-    0x0000808000000000ull, /* 30 */
-    0x0000808000000080ull, /* 31 */
-    0x0000808000008000ull, /* 32 */
-    0x0000808000008080ull, /* 33 */
-    0x0000808000800000ull, /* 34 */
-    0x0000808000800080ull, /* 35 */
-    0x0000808000808000ull, /* 36 */
-    0x0000808000808080ull, /* 37 */
-    0x0000808080000000ull, /* 38 */
-    0x0000808080000080ull, /* 39 */
-    0x0000808080008000ull, /* 3A */
-    0x0000808080008080ull, /* 3B */
-    0x0000808080800000ull, /* 3C */
-    0x0000808080800080ull, /* 3D */
-    0x0000808080808000ull, /* 3E */
-    0x0000808080808080ull, /* 3F */
-    0x0080000000000000ull, /* 40 */
-    0x0080000000000080ull, /* 41 */
-    0x0080000000008000ull, /* 42 */
-    0x0080000000008080ull, /* 43 */
-    0x0080000000800000ull, /* 44 */
-    0x0080000000800080ull, /* 45 */
-    0x0080000000808000ull, /* 46 */
-    0x0080000000808080ull, /* 47 */
-    0x0080000080000000ull, /* 48 */
-    0x0080000080000080ull, /* 49 */
-    0x0080000080008000ull, /* 4A */
-    0x0080000080008080ull, /* 4B */
-    0x0080000080800000ull, /* 4C */
-    0x0080000080800080ull, /* 4D */
-    0x0080000080808000ull, /* 4E */
-    0x0080000080808080ull, /* 4F */
-    0x0080008000000000ull, /* 50 */
-    0x0080008000000080ull, /* 51 */
-    0x0080008000008000ull, /* 52 */
-    0x0080008000008080ull, /* 53 */
-    0x0080008000800000ull, /* 54 */
-    0x0080008000800080ull, /* 55 */
-    0x0080008000808000ull, /* 56 */
-    0x0080008000808080ull, /* 57 */
-    0x0080008080000000ull, /* 58 */
-    0x0080008080000080ull, /* 59 */
-    0x0080008080008000ull, /* 5A */
-    0x0080008080008080ull, /* 5B */
-    0x0080008080800000ull, /* 5C */
-    0x0080008080800080ull, /* 5D */
-    0x0080008080808000ull, /* 5E */
-    0x0080008080808080ull, /* 5F */
-    0x0080800000000000ull, /* 60 */
-    0x0080800000000080ull, /* 61 */
-    0x0080800000008000ull, /* 62 */
-    0x0080800000008080ull, /* 63 */
-    0x0080800000800000ull, /* 64 */
-    0x0080800000800080ull, /* 65 */
-    0x0080800000808000ull, /* 66 */
-    0x0080800000808080ull, /* 67 */
-    0x0080800080000000ull, /* 68 */
-    0x0080800080000080ull, /* 69 */
-    0x0080800080008000ull, /* 6A */
-    0x0080800080008080ull, /* 6B */
-    0x0080800080800000ull, /* 6C */
-    0x0080800080800080ull, /* 6D */
-    0x0080800080808000ull, /* 6E */
-    0x0080800080808080ull, /* 6F */
-    0x0080808000000000ull, /* 70 */
-    0x0080808000000080ull, /* 71 */
-    0x0080808000008000ull, /* 72 */
-    0x0080808000008080ull, /* 73 */
-    0x0080808000800000ull, /* 74 */
-    0x0080808000800080ull, /* 75 */
-    0x0080808000808000ull, /* 76 */
-    0x0080808000808080ull, /* 77 */
-    0x0080808080000000ull, /* 78 */
-    0x0080808080000080ull, /* 79 */
-    0x0080808080008000ull, /* 7A */
-    0x0080808080008080ull, /* 7B */
-    0x0080808080800000ull, /* 7C */
-    0x0080808080800080ull, /* 7D */
-    0x0080808080808000ull, /* 7E */
-    0x0080808080808080ull, /* 7F */
-    0x8000000000000000ull, /* 80 */
-    0x8000000000000080ull, /* 81 */
-    0x8000000000008000ull, /* 82 */
-    0x8000000000008080ull, /* 83 */
-    0x8000000000800000ull, /* 84 */
-    0x8000000000800080ull, /* 85 */
-    0x8000000000808000ull, /* 86 */
-    0x8000000000808080ull, /* 87 */
-    0x8000000080000000ull, /* 88 */
-    0x8000000080000080ull, /* 89 */
-    0x8000000080008000ull, /* 8A */
-    0x8000000080008080ull, /* 8B */
-    0x8000000080800000ull, /* 8C */
-    0x8000000080800080ull, /* 8D */
-    0x8000000080808000ull, /* 8E */
-    0x8000000080808080ull, /* 8F */
-    0x8000008000000000ull, /* 90 */
-    0x8000008000000080ull, /* 91 */
-    0x8000008000008000ull, /* 92 */
-    0x8000008000008080ull, /* 93 */
-    0x8000008000800000ull, /* 94 */
-    0x8000008000800080ull, /* 95 */
-    0x8000008000808000ull, /* 96 */
-    0x8000008000808080ull, /* 97 */
-    0x8000008080000000ull, /* 98 */
-    0x8000008080000080ull, /* 99 */
-    0x8000008080008000ull, /* 9A */
-    0x8000008080008080ull, /* 9B */
-    0x8000008080800000ull, /* 9C */
-    0x8000008080800080ull, /* 9D */
-    0x8000008080808000ull, /* 9E */
-    0x8000008080808080ull, /* 9F */
-    0x8000800000000000ull, /* A0 */
-    0x8000800000000080ull, /* A1 */
-    0x8000800000008000ull, /* A2 */
-    0x8000800000008080ull, /* A3 */
-    0x8000800000800000ull, /* A4 */
-    0x8000800000800080ull, /* A5 */
-    0x8000800000808000ull, /* A6 */
-    0x8000800000808080ull, /* A7 */
-    0x8000800080000000ull, /* A8 */
-    0x8000800080000080ull, /* A9 */
-    0x8000800080008000ull, /* AA */
-    0x8000800080008080ull, /* AB */
-    0x8000800080800000ull, /* AC */
-    0x8000800080800080ull, /* AD */
-    0x8000800080808000ull, /* AE */
-    0x8000800080808080ull, /* AF */
-    0x8000808000000000ull, /* B0 */
-    0x8000808000000080ull, /* B1 */
-    0x8000808000008000ull, /* B2 */
-    0x8000808000008080ull, /* B3 */
-    0x8000808000800000ull, /* B4 */
-    0x8000808000800080ull, /* B5 */
-    0x8000808000808000ull, /* B6 */
-    0x8000808000808080ull, /* B7 */
-    0x8000808080000000ull, /* B8 */
-    0x8000808080000080ull, /* B9 */
-    0x8000808080008000ull, /* BA */
-    0x8000808080008080ull, /* BB */
-    0x8000808080800000ull, /* BC */
-    0x8000808080800080ull, /* BD */
-    0x8000808080808000ull, /* BE */
-    0x8000808080808080ull, /* BF */
-    0x8080000000000000ull, /* C0 */
-    0x8080000000000080ull, /* C1 */
-    0x8080000000008000ull, /* C2 */
-    0x8080000000008080ull, /* C3 */
-    0x8080000000800000ull, /* C4 */
-    0x8080000000800080ull, /* C5 */
-    0x8080000000808000ull, /* C6 */
-    0x8080000000808080ull, /* C7 */
-    0x8080000080000000ull, /* C8 */
-    0x8080000080000080ull, /* C9 */
-    0x8080000080008000ull, /* CA */
-    0x8080000080008080ull, /* CB */
-    0x8080000080800000ull, /* CC */
-    0x8080000080800080ull, /* CD */
-    0x8080000080808000ull, /* CE */
-    0x8080000080808080ull, /* CF */
-    0x8080008000000000ull, /* D0 */
-    0x8080008000000080ull, /* D1 */
-    0x8080008000008000ull, /* D2 */
-    0x8080008000008080ull, /* D3 */
-    0x8080008000800000ull, /* D4 */
-    0x8080008000800080ull, /* D5 */
-    0x8080008000808000ull, /* D6 */
-    0x8080008000808080ull, /* D7 */
-    0x8080008080000000ull, /* D8 */
-    0x8080008080000080ull, /* D9 */
-    0x8080008080008000ull, /* DA */
-    0x8080008080008080ull, /* DB */
-    0x8080008080800000ull, /* DC */
-    0x8080008080800080ull, /* DD */
-    0x8080008080808000ull, /* DE */
-    0x8080008080808080ull, /* DF */
-    0x8080800000000000ull, /* E0 */
-    0x8080800000000080ull, /* E1 */
-    0x8080800000008000ull, /* E2 */
-    0x8080800000008080ull, /* E3 */
-    0x8080800000800000ull, /* E4 */
-    0x8080800000800080ull, /* E5 */
-    0x8080800000808000ull, /* E6 */
-    0x8080800000808080ull, /* E7 */
-    0x8080800080000000ull, /* E8 */
-    0x8080800080000080ull, /* E9 */
-    0x8080800080008000ull, /* EA */
-    0x8080800080008080ull, /* EB */
-    0x8080800080800000ull, /* EC */
-    0x8080800080800080ull, /* ED */
-    0x8080800080808000ull, /* EE */
-    0x8080800080808080ull, /* EF */
-    0x8080808000000000ull, /* F0 */
-    0x8080808000000080ull, /* F1 */
-    0x8080808000008000ull, /* F2 */
-    0x8080808000008080ull, /* F3 */
-    0x8080808000800000ull, /* F4 */
-    0x8080808000800080ull, /* F5 */
-    0x8080808000808000ull, /* F6 */
-    0x8080808000808080ull, /* F7 */
-    0x8080808080000000ull, /* F8 */
-    0x8080808080000080ull, /* F9 */
-    0x8080808080008000ull, /* FA */
-    0x8080808080008080ull, /* FB */
-    0x8080808080800000ull, /* FC */
-    0x8080808080800080ull, /* FD */
-    0x8080808080808000ull, /* FE */
-    0x8080808080808080ull, /* FF */
-};
-
-void helper_vgbbd(ppc_avr_t *r, ppc_avr_t *b)
-{
-    int i;
-    uint64_t t[2] = { 0, 0 };
-
-    VECTOR_FOR_INORDER_I(i, u8) {
-#if defined(HOST_WORDS_BIGENDIAN)
-        t[i >> 3] |= VGBBD_MASKS[b->u8[i]] >> (i & 7);
-#else
-        t[i >> 3] |= VGBBD_MASKS[b->u8[i]] >> (7 - (i & 7));
-#endif
-    }
-
-    r->u64[0] = t[0];
-    r->u64[1] = t[1];
-}
 
 #define PMSUM(name, srcfld, trgfld, trgtyp)                   \
 void helper_##name(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b)  \
@@ -1639,23 +1370,6 @@ VRFI(p, float_round_up)
 VRFI(z, float_round_to_zero)
 #undef VRFI
 
-#define VROTATE(suffix, element, mask)                                  \
-    void helper_vrl##suffix(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b)   \
-    {                                                                   \
-        int i;                                                          \
-                                                                        \
-        for (i = 0; i < ARRAY_SIZE(r->element); i++) {                  \
-            unsigned int shift = b->element[i] & mask;                  \
-            r->element[i] = (a->element[i] << shift) |                  \
-                (a->element[i] >> (sizeof(a->element[0]) * 8 - shift)); \
-        }                                                               \
-    }
-VROTATE(b, u8, 0x7)
-VROTATE(h, u16, 0xF)
-VROTATE(w, u32, 0x1F)
-VROTATE(d, u64, 0x3F)
-#undef VROTATE
-
 void helper_vrsqrtefp(CPUPPCState *env, ppc_avr_t *r, ppc_avr_t *b)
 {
     int i;
@@ -1755,41 +1469,6 @@ VEXTU_X_DO(vextubrx,  8, 0)
 VEXTU_X_DO(vextuhrx, 16, 0)
 VEXTU_X_DO(vextuwrx, 32, 0)
 #undef VEXTU_X_DO
-
-/*
- * The specification says that the results are undefined if all of the
- * shift counts are not identical.  We check to make sure that they
- * are to conform to what real hardware appears to do.
- */
-#define VSHIFT(suffix, leftp)                                           \
-    void helper_vs##suffix(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b)    \
-    {                                                                   \
-        int shift = b->VsrB(15) & 0x7;                                  \
-        int doit = 1;                                                   \
-        int i;                                                          \
-                                                                        \
-        for (i = 0; i < ARRAY_SIZE(r->u8); i++) {                       \
-            doit = doit && ((b->u8[i] & 0x7) == shift);                 \
-        }                                                               \
-        if (doit) {                                                     \
-            if (shift == 0) {                                           \
-                *r = *a;                                                \
-            } else if (leftp) {                                         \
-                uint64_t carry = a->VsrD(1) >> (64 - shift);            \
-                                                                        \
-                r->VsrD(0) = (a->VsrD(0) << shift) | carry;             \
-                r->VsrD(1) = a->VsrD(1) << shift;                       \
-            } else {                                                    \
-                uint64_t carry = a->VsrD(0) << (64 - shift);            \
-                                                                        \
-                r->VsrD(1) = (a->VsrD(1) >> shift) | carry;             \
-                r->VsrD(0) = a->VsrD(0) >> shift;                       \
-            }                                                           \
-        }                                                               \
-    }
-VSHIFT(l, 1)
-VSHIFT(r, 0)
-#undef VSHIFT
 
 void helper_vslv(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b)
 {
@@ -2146,18 +1825,12 @@ VUPK(lsw, s64, s32, UPKLO)
 
 #define clzb(v) ((v) ? clz32((uint32_t)(v) << 24) : 8)
 #define clzh(v) ((v) ? clz32((uint32_t)(v) << 16) : 16)
-#define clzw(v) clz32((v))
-#define clzd(v) clz64((v))
 
 VGENERIC_DO(clzb, u8)
 VGENERIC_DO(clzh, u16)
-VGENERIC_DO(clzw, u32)
-VGENERIC_DO(clzd, u64)
 
 #undef clzb
 #undef clzh
-#undef clzw
-#undef clzd
 
 #define ctzb(v) ((v) ? ctz32(v) : 8)
 #define ctzh(v) ((v) ? ctz32(v) : 16)
@@ -2385,15 +2058,11 @@ void helper_vsubecuq(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b, ppc_avr_t *c)
 #define NATIONAL_PLUS   0x2B
 #define NATIONAL_NEG    0x2D
 
-#if defined(HOST_WORDS_BIGENDIAN)
 #define BCD_DIG_BYTE(n) (15 - ((n) / 2))
-#else
-#define BCD_DIG_BYTE(n) ((n) / 2)
-#endif
 
 static int bcd_get_sgn(ppc_avr_t *bcd)
 {
-    switch (bcd->u8[BCD_DIG_BYTE(0)] & 0xF) {
+    switch (bcd->VsrB(BCD_DIG_BYTE(0)) & 0xF) {
     case BCD_PLUS_PREF_1:
     case BCD_PLUS_PREF_2:
     case BCD_PLUS_ALT_1:
@@ -2428,9 +2097,9 @@ static uint8_t bcd_get_digit(ppc_avr_t *bcd, int n, int *invalid)
 {
     uint8_t result;
     if (n & 1) {
-        result = bcd->u8[BCD_DIG_BYTE(n)] >> 4;
+        result = bcd->VsrB(BCD_DIG_BYTE(n)) >> 4;
     } else {
-       result = bcd->u8[BCD_DIG_BYTE(n)] & 0xF;
+       result = bcd->VsrB(BCD_DIG_BYTE(n)) & 0xF;
     }
 
     if (unlikely(result > 9)) {
@@ -2442,11 +2111,11 @@ static uint8_t bcd_get_digit(ppc_avr_t *bcd, int n, int *invalid)
 static void bcd_put_digit(ppc_avr_t *bcd, uint8_t digit, int n)
 {
     if (n & 1) {
-        bcd->u8[BCD_DIG_BYTE(n)] &= 0x0F;
-        bcd->u8[BCD_DIG_BYTE(n)] |= (digit << 4);
+        bcd->VsrB(BCD_DIG_BYTE(n)) &= 0x0F;
+        bcd->VsrB(BCD_DIG_BYTE(n)) |= (digit << 4);
     } else {
-        bcd->u8[BCD_DIG_BYTE(n)] &= 0xF0;
-        bcd->u8[BCD_DIG_BYTE(n)] |= digit;
+        bcd->VsrB(BCD_DIG_BYTE(n)) &= 0xF0;
+        bcd->VsrB(BCD_DIG_BYTE(n)) |= digit;
     }
 }
 
@@ -2561,21 +2230,21 @@ uint32_t helper_bcdadd(ppc_avr_t *r,  ppc_avr_t *a, ppc_avr_t *b, uint32_t ps)
 
     if (!invalid) {
         if (sgna == sgnb) {
-            result.u8[BCD_DIG_BYTE(0)] = bcd_preferred_sgn(sgna, ps);
+            result.VsrB(BCD_DIG_BYTE(0)) = bcd_preferred_sgn(sgna, ps);
             bcd_add_mag(&result, a, b, &invalid, &overflow);
             cr = bcd_cmp_zero(&result);
         } else {
             int magnitude = bcd_cmp_mag(a, b);
             if (magnitude > 0) {
-                result.u8[BCD_DIG_BYTE(0)] = bcd_preferred_sgn(sgna, ps);
+                result.VsrB(BCD_DIG_BYTE(0)) = bcd_preferred_sgn(sgna, ps);
                 bcd_sub_mag(&result, a, b, &invalid, &overflow);
                 cr = (sgna > 0) ? CRF_GT : CRF_LT;
             } else if (magnitude < 0) {
-                result.u8[BCD_DIG_BYTE(0)] = bcd_preferred_sgn(sgnb, ps);
+                result.VsrB(BCD_DIG_BYTE(0)) = bcd_preferred_sgn(sgnb, ps);
                 bcd_sub_mag(&result, b, a, &invalid, &overflow);
                 cr = (sgnb > 0) ? CRF_GT : CRF_LT;
             } else {
-                result.u8[BCD_DIG_BYTE(0)] = bcd_preferred_sgn(0, ps);
+                result.VsrB(BCD_DIG_BYTE(0)) = bcd_preferred_sgn(0, ps);
                 cr = CRF_EQ;
             }
         }
@@ -2686,15 +2355,15 @@ uint32_t helper_bcdcfz(ppc_avr_t *r, ppc_avr_t *b, uint32_t ps)
     int zone_lead = ps ? 0xF : 0x3;
     int digit = 0;
     ppc_avr_t ret = { .u64 = { 0, 0 } };
-    int sgnb = b->u8[BCD_DIG_BYTE(0)] >> 4;
+    int sgnb = b->VsrB(BCD_DIG_BYTE(0)) >> 4;
 
     if (unlikely((sgnb < 0xA) && ps)) {
         invalid = 1;
     }
 
     for (i = 0; i < 16; i++) {
-        zone_digit = i ? b->u8[BCD_DIG_BYTE(i * 2)] >> 4 : zone_lead;
-        digit = b->u8[BCD_DIG_BYTE(i * 2)] & 0xF;
+        zone_digit = i ? b->VsrB(BCD_DIG_BYTE(i * 2)) >> 4 : zone_lead;
+        digit = b->VsrB(BCD_DIG_BYTE(i * 2)) & 0xF;
         if (unlikely(zone_digit != zone_lead || digit > 0x9)) {
             invalid = 1;
             break;
@@ -2740,7 +2409,7 @@ uint32_t helper_bcdctz(ppc_avr_t *r, ppc_avr_t *b, uint32_t ps)
             break;
         }
 
-        ret.u8[BCD_DIG_BYTE(i * 2)] = zone_lead + digit;
+        ret.VsrB(BCD_DIG_BYTE(i * 2)) = zone_lead + digit;
     }
 
     if (ps) {
@@ -2852,7 +2521,7 @@ uint32_t helper_bcdcpsgn(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b, uint32_t ps)
     }
 
     *r = *a;
-    bcd_put_digit(r, b->u8[BCD_DIG_BYTE(0)] & 0xF, 0);
+    bcd_put_digit(r, b->VsrB(BCD_DIG_BYTE(0)) & 0xF, 0);
 
     for (i = 1; i < 32; i++) {
         bcd_get_digit(a, i, &invalid);
@@ -2882,11 +2551,7 @@ uint32_t helper_bcdsetsgn(ppc_avr_t *r, ppc_avr_t *b, uint32_t ps)
 uint32_t helper_bcds(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b, uint32_t ps)
 {
     int cr;
-#if defined(HOST_WORDS_BIGENDIAN)
-    int i = a->s8[7];
-#else
-    int i = a->s8[8];
-#endif
+    int i = a->VsrSB(7);
     bool ox_flag = false;
     int sgnb = bcd_get_sgn(b);
     ppc_avr_t ret = *b;
@@ -2935,11 +2600,7 @@ uint32_t helper_bcdus(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b, uint32_t ps)
         }
     }
 
-#if defined(HOST_WORDS_BIGENDIAN)
-    i = a->s8[7];
-#else
-    i = a->s8[8];
-#endif
+    i = a->VsrSB(7);
     if (i >= 32) {
         ox_flag = true;
         ret.VsrD(1) = ret.VsrD(0) = 0;
@@ -2970,13 +2631,11 @@ uint32_t helper_bcdsr(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b, uint32_t ps)
     ppc_avr_t ret = *b;
     ret.VsrD(1) &= ~0xf;
 
-#if defined(HOST_WORDS_BIGENDIAN)
-    int i = a->s8[7];
-    ppc_avr_t bcd_one = { .u64 = { 0, 0x10 } };
-#else
-    int i = a->s8[8];
-    ppc_avr_t bcd_one = { .u64 = { 0x10, 0 } };
-#endif
+    int i = a->VsrSB(7);
+    ppc_avr_t bcd_one;
+
+    bcd_one.VsrD(0) = 0;
+    bcd_one.VsrD(1) = 0x10;
 
     if (bcd_is_valid(b) == false) {
         return CRF_SO;
@@ -3012,11 +2671,7 @@ uint32_t helper_bcdtrunc(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b, uint32_t ps)
 {
     uint64_t mask;
     uint32_t ox_flag = 0;
-#if defined(HOST_WORDS_BIGENDIAN)
-    int i = a->s16[3] + 1;
-#else
-    int i = a->s16[4] + 1;
-#endif
+    int i = a->VsrSH(3) + 1;
     ppc_avr_t ret = *b;
 
     if (bcd_is_valid(b) == false) {
@@ -3061,11 +2716,7 @@ uint32_t helper_bcdutrunc(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b, uint32_t ps)
         }
     }
 
-#if defined(HOST_WORDS_BIGENDIAN)
-    i = a->s16[3];
-#else
-    i = a->s16[4];
-#endif
+    i = a->VsrSH(3);
     if (i > 16 && i < 33) {
         mask = (uint64_t)-1 >> (128 - i * 4);
         if (ret.VsrD(0) & ~mask) {

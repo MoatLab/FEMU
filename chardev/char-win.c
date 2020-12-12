@@ -23,6 +23,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/main-loop.h"
 #include "qemu/module.h"
 #include "qapi/error.h"
 #include "chardev/char-win.h"
@@ -95,7 +96,7 @@ int win_chr_serial_init(Chardev *chr, const char *filename, Error **errp)
     s->file = CreateFile(filename, GENERIC_READ | GENERIC_WRITE, 0, NULL,
                       OPEN_EXISTING, FILE_FLAG_OVERLAPPED, 0);
     if (s->file == INVALID_HANDLE_VALUE) {
-        error_setg(errp, "Failed CreateFile (%lu)", GetLastError());
+        error_setg_win32(errp, GetLastError(), "Failed CreateFile");
         s->file = NULL;
         goto fail;
     }

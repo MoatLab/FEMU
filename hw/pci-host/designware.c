@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,6 +25,9 @@
 #include "hw/pci/pci_bridge.h"
 #include "hw/pci/pci_host.h"
 #include "hw/pci/pcie_port.h"
+#include "hw/qdev-properties.h"
+#include "migration/vmstate.h"
+#include "hw/irq.h"
 #include "hw/pci-host/designware.h"
 
 #define DESIGNWARE_PCIE_PORT_LINK_CONTROL          0x710
@@ -179,7 +182,7 @@ designware_pcie_root_config_read(PCIDevice *d, uint32_t address, int len)
         break;
 
     case DESIGNWARE_PCIE_ATU_CR1:
-    case DESIGNWARE_PCIE_ATU_CR2:          /* FALLTHROUGH */
+    case DESIGNWARE_PCIE_ATU_CR2:
         val = viewport->cr[(address - DESIGNWARE_PCIE_ATU_CR1) /
                            sizeof(uint32_t)];
         break;
@@ -685,8 +688,7 @@ static void designware_pcie_host_realize(DeviceState *dev, Error **errp)
                        "pcie-bus-address-space");
     pci_setup_iommu(pci->bus, designware_pcie_host_set_iommu, s);
 
-    qdev_set_parent_bus(DEVICE(&s->root), BUS(pci->bus));
-    qdev_init_nofail(DEVICE(&s->root));
+    qdev_realize(DEVICE(&s->root), BUS(pci->bus), &error_fatal);
 }
 
 static const VMStateDescription vmstate_designware_pcie_host = {
@@ -720,8 +722,7 @@ static void designware_pcie_host_init(Object *obj)
     DesignwarePCIEHost *s = DESIGNWARE_PCIE_HOST(obj);
     DesignwarePCIERoot *root = &s->root;
 
-    object_initialize_child(obj, "root",  root, sizeof(*root),
-                            TYPE_DESIGNWARE_PCIE_ROOT, &error_abort, NULL);
+    object_initialize_child(obj, "root", root, TYPE_DESIGNWARE_PCIE_ROOT);
     qdev_prop_set_int32(DEVICE(root), "addr", PCI_DEVFN(0, 0));
     qdev_prop_set_bit(DEVICE(root), "multifunction", false);
 }

@@ -5,6 +5,7 @@
 #include "hw/pci/msi.h"
 #include "qapi/visitor.h"
 #include "qapi/error.h"
+#include "hw/qdev-properties.h"
 
 #include <immintrin.h>
 #include "nvme.h"
@@ -91,7 +92,7 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
             n->nr_tt_late_ios++;
             if (n->print_log) {
                 femu_debug("%s,diff,pq.count=%lu,%" PRId64 ", %lu/%lu\n",
-                        n->devname, pqueue_size(n->pq), now - req->expire_time,
+                        n->devname, pqueue_size(pq), now - req->expire_time,
                         n->nr_tt_late_ios, n->nr_tt_ios);
             }
         }
@@ -380,8 +381,7 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     uint32_t nsid = le32_to_cpu(cmd->nsid);
 
     if (nsid == 0 || nsid > n->num_namespaces) {
-		femu_err("%s, NVME_INVALID_NSID %lu\n",
-									__func__, nsid);
+		femu_err("%s, NVME_INVALID_NSID %" PRIu32 "\n", __func__, nsid);
         return NVME_INVALID_NSID | NVME_DNR;
     }
 
@@ -1212,7 +1212,8 @@ static void femu_class_init(ObjectClass *oc, void *data)
 
     set_bit(DEVICE_CATEGORY_STORAGE, dc->categories);
     dc->desc = "FEMU Non-Volatile Memory Express";
-    dc->props = femu_props;
+    //dc->props = femu_props;
+    device_class_set_props(dc, femu_props);
     dc->vmsd = &femu_vmstate;
 }
 

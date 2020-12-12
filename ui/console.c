@@ -33,6 +33,8 @@
 #include "chardev/char-fe.h"
 #include "trace.h"
 #include "exec/memory.h"
+#include "io/channel-file.h"
+#include "qom/object.h"
 
 #define DEFAULT_BACKSCROLL 512
 #define CONSOLE_CURSOR_PERIOD 500
@@ -166,6 +168,7 @@ struct QemuConsole {
     QEMUFIFO out_fifo;
     uint8_t out_fifo_buf[16];
     QEMUTimer *kbd_timer;
+    CoQueue dump_queue;
 
     QTAILQ_ENTRY(QemuConsole) next;
 };
@@ -259,13 +262,26 @@ static void gui_setup_refresh(DisplayState *ds)
     ds->have_text = have_text;
 }
 
+void graphic_hw_update_done(QemuConsole *con)
+{
+    if (con) {
+        qemu_co_queue_restart_all(&con->dump_queue);
+    }
+}
+
 void graphic_hw_update(QemuConsole *con)
 {
+    bool async = false;
+    con = con ? con : active_console;
     if (!con) {
-        con = active_console;
+        return;
     }
-    if (con && con->hw_ops->gfx_update) {
+    if (con->hw_ops->gfx_update) {
         con->hw_ops->gfx_update(con->hw);
+        async = con->hw_ops->gfx_update_async;
+    }
+    if (!async) {
+        graphic_hw_update_done(con);
     }
 }
 
@@ -299,59 +315,50 @@ void graphic_hw_invalidate(QemuConsole *con)
     }
 }
 
-static void ppm_save(const char *filename, DisplaySurface *ds,
-                     Error **errp)
+static bool ppm_save(int fd, pixman_image_t *image, Error **errp)
 {
-    int width = pixman_image_get_width(ds->image);
-    int height = pixman_image_get_height(ds->image);
-    int fd;
-    FILE *f;
+    int width = pixman_image_get_width(image);
+    int height = pixman_image_get_height(image);
+    g_autoptr(Object) ioc = OBJECT(qio_channel_file_new_fd(fd));
+    g_autofree char *header = NULL;
+    g_autoptr(pixman_image_t) linebuf = NULL;
     int y;
-    int ret;
-    pixman_image_t *linebuf;
 
-    trace_ppm_save(filename, ds);
-    fd = qemu_open(filename, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0666);
-    if (fd == -1) {
-        error_setg(errp, "failed to open file '%s': %s", filename,
-                   strerror(errno));
-        return;
+    trace_ppm_save(fd, image);
+
+    header = g_strdup_printf("P6\n%d %d\n%d\n", width, height, 255);
+    if (qio_channel_write_all(QIO_CHANNEL(ioc),
+                              header, strlen(header), errp) < 0) {
+        return false;
     }
-    f = fdopen(fd, "wb");
-    ret = fprintf(f, "P6\n%d %d\n%d\n", width, height, 255);
-    if (ret < 0) {
-        linebuf = NULL;
-        goto write_err;
-    }
+
     linebuf = qemu_pixman_linebuf_create(PIXMAN_BE_r8g8b8, width);
     for (y = 0; y < height; y++) {
-        qemu_pixman_linebuf_fill(linebuf, ds->image, width, 0, y);
-        clearerr(f);
-        ret = fwrite(pixman_image_get_data(linebuf), 1,
-                     pixman_image_get_stride(linebuf), f);
-        (void)ret;
-        if (ferror(f)) {
-            goto write_err;
+        qemu_pixman_linebuf_fill(linebuf, image, width, 0, y);
+        if (qio_channel_write_all(QIO_CHANNEL(ioc),
+                                  (char *)pixman_image_get_data(linebuf),
+                                  pixman_image_get_stride(linebuf), errp) < 0) {
+            return false;
         }
     }
 
-out:
-    qemu_pixman_image_unref(linebuf);
-    fclose(f);
-    return;
-
-write_err:
-    error_setg(errp, "failed to write to file '%s': %s", filename,
-               strerror(errno));
-    unlink(filename);
-    goto out;
+    return true;
 }
 
-void qmp_screendump(const char *filename, bool has_device, const char *device,
-                    bool has_head, int64_t head, Error **errp)
+static void graphic_hw_update_bh(void *con)
 {
+    graphic_hw_update(con);
+}
+
+/* Safety: coroutine-only, concurrent-coroutine safe, main thread only */
+void coroutine_fn
+qmp_screendump(const char *filename, bool has_device, const char *device,
+               bool has_head, int64_t head, Error **errp)
+{
+    g_autoptr(pixman_image_t) image = NULL;
     QemuConsole *con;
     DisplaySurface *surface;
+    int fd;
 
     if (has_device) {
         con = qemu_console_lookup_by_device_name(device, has_head ? head : 0,
@@ -371,14 +378,40 @@ void qmp_screendump(const char *filename, bool has_device, const char *device,
         }
     }
 
-    graphic_hw_update(con);
+    if (qemu_co_queue_empty(&con->dump_queue)) {
+        /* Defer the update, it will restart the pending coroutines */
+        aio_bh_schedule_oneshot(qemu_get_aio_context(),
+                                graphic_hw_update_bh, con);
+    }
+    qemu_co_queue_wait(&con->dump_queue, NULL);
+
+    /*
+     * All pending coroutines are woken up, while the BQL is held.  No
+     * further graphic update are possible until it is released.  Take
+     * an image ref before that.
+     */
     surface = qemu_console_surface(con);
     if (!surface) {
         error_setg(errp, "no surface");
         return;
     }
+    image = pixman_image_ref(surface->image);
 
-    ppm_save(filename, surface, errp);
+    fd = qemu_open_old(filename, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0666);
+    if (fd == -1) {
+        error_setg(errp, "failed to open file '%s': %s", filename,
+                   strerror(errno));
+        return;
+    }
+
+    /*
+     * The image content could potentially be updated as the coroutine
+     * yields and releases the BQL. It could produce corrupted dump, but
+     * it should be otherwise safe.
+     */
+    if (!ppm_save(fd, image, errp)) {
+        qemu_unlink(filename);
+    }
 }
 
 void graphic_hw_text_update(QemuConsole *con, console_ch_t *chardata)
@@ -1079,13 +1112,15 @@ void console_select(unsigned int index)
     }
 }
 
-typedef struct VCChardev {
+struct VCChardev {
     Chardev parent;
     QemuConsole *console;
-} VCChardev;
+};
+typedef struct VCChardev VCChardev;
 
 #define TYPE_CHARDEV_VC "chardev-vc"
-#define VC_CHARDEV(obj) OBJECT_CHECK(VCChardev, (obj), TYPE_CHARDEV_VC)
+DECLARE_INSTANCE_CHECKER(VCChardev, VC_CHARDEV,
+                         TYPE_CHARDEV_VC)
 
 static int vc_chr_write(Chardev *chr, const uint8_t *buf, int len)
 {
@@ -1290,14 +1325,14 @@ static QemuConsole *new_console(DisplayState *ds, console_type_t console_type,
 
     obj = object_new(TYPE_QEMU_CONSOLE);
     s = QEMU_CONSOLE(obj);
+    qemu_co_queue_init(&s->dump_queue);
     s->head = head;
     object_property_add_link(obj, "device", TYPE_DEVICE,
                              (Object **)&s->device,
                              object_property_allow_set_link,
-                             OBJ_PROP_LINK_STRONG,
-                             &error_abort);
-    object_property_add_uint32_ptr(obj, "head",
-                                   &s->head, &error_abort);
+                             OBJ_PROP_LINK_STRONG);
+    object_property_add_uint32_ptr(obj, "head", &s->head,
+                                   OBJ_PROP_FLAG_READ);
 
     if (!active_console || ((active_console->console_type != GRAPHIC_CONSOLE) &&
         (console_type == GRAPHIC_CONSOLE))) {
@@ -1305,6 +1340,7 @@ static QemuConsole *new_console(DisplayState *ds, console_type_t console_type,
     }
     s->ds = ds;
     s->console_type = console_type;
+    s->window_id = -1;
 
     if (QTAILQ_EMPTY(&consoles)) {
         s->index = 0;
@@ -1509,6 +1545,13 @@ static void dpy_set_ui_info_timer(void *opaque)
 bool dpy_ui_info_supported(QemuConsole *con)
 {
     return con->hw_ops->ui_info != NULL;
+}
+
+const QemuUIInfo *dpy_get_ui_info(const QemuConsole *con)
+{
+    assert(con != NULL);
+
+    return &con->ui_info;
 }
 
 int dpy_set_ui_info(QemuConsole *con, QemuUIInfo *info)
@@ -1865,7 +1908,7 @@ DisplayState *init_displaystate(void)
          * doesn't change any more */
         name = g_strdup_printf("console[%d]", con->index);
         object_property_add_child(container_get(object_get_root(), "/backend"),
-                                  name, OBJECT(con), &error_abort);
+                                  name, OBJECT(con));
         g_free(name);
     }
 
@@ -1908,7 +1951,7 @@ QemuConsole *graphic_console_init(DeviceState *dev, uint32_t head,
     }
     graphic_console_set_hwops(s, hw_ops, opaque);
     if (dev) {
-        object_property_set_link(OBJECT(s), OBJECT(dev), "device",
+        object_property_set_link(OBJECT(s), "device", OBJECT(dev),
                                  &error_abort);
     }
 
@@ -1935,7 +1978,7 @@ void graphic_console_close(QemuConsole *con)
     }
 
     trace_console_gfx_close(con->index);
-    object_property_set_link(OBJECT(con), NULL, "device", &error_abort);
+    object_property_set_link(OBJECT(con), "device", NULL, &error_abort);
     graphic_console_set_hwops(con, &unused_ops, NULL);
 
     if (con->gl) {
@@ -2182,12 +2225,12 @@ static void text_console_do_init(Chardev *chr, DisplayState *ds)
     text_console_resize(s);
 
     if (chr->label) {
-        char msg[128];
-        int len;
+        char *msg;
 
         s->t_attrib.bgcol = QEMU_COLOR_BLUE;
-        len = snprintf(msg, sizeof(msg), "%s console\r\n", chr->label);
-        vc_chr_write(chr, (uint8_t *)msg, len);
+        msg = g_strdup_printf("%s console\r\n", chr->label);
+        vc_chr_write(chr, (uint8_t *)msg, strlen(msg));
+        g_free(msg);
         s->t_attrib = s->t_attrib_default;
     }
 
@@ -2328,6 +2371,22 @@ void qemu_display_init(DisplayState *ds, DisplayOptions *opts)
     }
     assert(dpys[opts->type] != NULL);
     dpys[opts->type]->init(ds, opts);
+}
+
+void qemu_display_help(void)
+{
+    int idx;
+
+    printf("Available display backend types:\n");
+    printf("none\n");
+    for (idx = DISPLAY_TYPE_NONE; idx < DISPLAY_TYPE__MAX; idx++) {
+        if (!dpys[idx]) {
+            ui_module_load_one(DisplayType_str(idx));
+        }
+        if (dpys[idx]) {
+            printf("%s\n",  DisplayType_str(dpys[idx]->type));
+        }
+    }
 }
 
 void qemu_chr_parse_vc(QemuOpts *opts, ChardevBackend *backend, Error **errp)

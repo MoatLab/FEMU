@@ -106,7 +106,7 @@ void qemu_anon_ram_free(void *ptr, size_t size)
     }
 }
 
-#ifndef CONFIG_LOCALTIME_R
+#ifndef _POSIX_THREAD_SAFE_FUNCTIONS
 /* FIXME: add proper locking */
 struct tm *gmtime_r(const time_t *timep, struct tm *result)
 {
@@ -130,32 +130,7 @@ struct tm *localtime_r(const time_t *timep, struct tm *result)
     }
     return p;
 }
-#endif /* CONFIG_LOCALTIME_R */
-
-void qemu_set_block(int fd)
-{
-    unsigned long opt = 0;
-    WSAEventSelect(fd, NULL, 0);
-    ioctlsocket(fd, FIONBIO, &opt);
-}
-
-void qemu_set_nonblock(int fd)
-{
-    unsigned long opt = 1;
-    ioctlsocket(fd, FIONBIO, &opt);
-    qemu_fd_register(fd);
-}
-
-int socket_set_fast_reuse(int fd)
-{
-    /* Enabling the reuse of an endpoint that was used by a socket still in
-     * TIME_WAIT state is usually performed by setting SO_REUSEADDR. On Windows
-     * fast reuse is the default and SO_REUSEADDR does strange things. So we
-     * don't have to do anything here. More info can be found at:
-     * http://msdn.microsoft.com/en-us/library/windows/desktop/ms740621.aspx */
-    return 0;
-}
-
+#endif /* _POSIX_THREAD_SAFE_FUNCTIONS */
 
 static int socket_error(void)
 {
@@ -233,6 +208,38 @@ static int socket_error(void)
     }
 }
 
+void qemu_set_block(int fd)
+{
+    unsigned long opt = 0;
+    WSAEventSelect(fd, NULL, 0);
+    ioctlsocket(fd, FIONBIO, &opt);
+}
+
+int qemu_try_set_nonblock(int fd)
+{
+    unsigned long opt = 1;
+    if (ioctlsocket(fd, FIONBIO, &opt) != NO_ERROR) {
+        return -socket_error();
+    }
+    qemu_fd_register(fd);
+    return 0;
+}
+
+void qemu_set_nonblock(int fd)
+{
+    (void)qemu_try_set_nonblock(fd);
+}
+
+int socket_set_fast_reuse(int fd)
+{
+    /* Enabling the reuse of an endpoint that was used by a socket still in
+     * TIME_WAIT state is usually performed by setting SO_REUSEADDR. On Windows
+     * fast reuse is the default and SO_REUSEADDR does strange things. So we
+     * don't have to do anything here. More info can be found at:
+     * http://msdn.microsoft.com/en-us/library/windows/desktop/ms740621.aspx */
+    return 0;
+}
+
 int inet_aton(const char *cp, struct in_addr *ia)
 {
     uint32_t addr = inet_addr(cp);
@@ -308,7 +315,7 @@ void qemu_set_tty_echo(int fd, bool echo)
     }
 }
 
-static char exec_dir[PATH_MAX];
+static const char *exec_dir;
 
 void qemu_init_exec_dir(const char *argv0)
 {
@@ -316,6 +323,10 @@ void qemu_init_exec_dir(const char *argv0)
     char *p;
     char buf[MAX_PATH];
     DWORD len;
+
+    if (exec_dir) {
+        return;
+    }
 
     len = GetModuleFileName(NULL, buf, sizeof(buf) - 1);
     if (len == 0) {
@@ -329,13 +340,15 @@ void qemu_init_exec_dir(const char *argv0)
     }
     *p = 0;
     if (access(buf, R_OK) == 0) {
-        pstrcpy(exec_dir, sizeof(exec_dir), buf);
+        exec_dir = g_strdup(buf);
+    } else {
+        exec_dir = CONFIG_BINDIR;
     }
 }
 
-char *qemu_get_exec_dir(void)
+const char *qemu_get_exec_dir(void)
 {
-    return g_strdup(exec_dir);
+    return exec_dir;
 }
 
 #if !GLIB_CHECK_VERSION(2, 50, 0)
@@ -360,7 +373,7 @@ char *qemu_get_exec_dir(void)
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -554,18 +567,12 @@ void os_mem_prealloc(int fd, char *area, size_t memory, int smp_cpus,
                      Error **errp)
 {
     int i;
-    size_t pagesize = getpagesize();
+    size_t pagesize = qemu_real_host_page_size;
 
     memory = (memory + pagesize - 1) & -pagesize;
     for (i = 0; i < memory / pagesize; i++) {
         memset(area + pagesize * i, 0, 1);
     }
-}
-
-uint64_t qemu_get_pmem_size(const char *filename, Error **errp)
-{
-    error_setg(errp, "pmem support not available");
-    return 0;
 }
 
 char *qemu_get_pid_name(pid_t pid)
@@ -591,7 +598,11 @@ int qemu_connect_wrap(int sockfd, const struct sockaddr *addr,
     int ret;
     ret = connect(sockfd, addr, addrlen);
     if (ret < 0) {
-        errno = socket_error();
+        if (WSAGetLastError() == WSAEWOULDBLOCK) {
+            errno = EINPROGRESS;
+        } else {
+            errno = socket_error();
+        }
     }
     return ret;
 }
@@ -809,4 +820,28 @@ bool qemu_write_pidfile(const char *filename, Error **errp)
         return false;
     }
     return true;
+}
+
+char *qemu_get_host_name(Error **errp)
+{
+    wchar_t tmp[MAX_COMPUTERNAME_LENGTH + 1];
+    DWORD size = G_N_ELEMENTS(tmp);
+
+    if (GetComputerNameW(tmp, &size) == 0) {
+        error_setg_win32(errp, GetLastError(), "failed close handle");
+        return NULL;
+    }
+
+    return g_utf16_to_utf8(tmp, size, NULL, NULL, NULL);
+}
+
+size_t qemu_get_host_physmem(void)
+{
+    MEMORYSTATUSEX statex;
+    statex.dwLength = sizeof(statex);
+
+    if (GlobalMemoryStatusEx(&statex)) {
+        return statex.ullTotalPhys;
+    }
+    return 0;
 }

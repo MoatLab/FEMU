@@ -1,23 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (c) 2017 Konsulko Group Inc. All rights reserved.
  *
  * Author:
  *	 Pantelis Antoniou <pantelis.antoniou@konsulko.com>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 2 of
- * the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston,
- * MA 02111-1307 USA
  */
 
 #include <assert.h>
@@ -31,6 +17,8 @@
 #include <libfdt.h>
 
 #include "util.h"
+
+#define BUF_INCREMENT	65536
 
 /* Usage related data. */
 static const char usage_synopsis[] =
@@ -54,65 +42,110 @@ static const char * const usage_opts_help[] = {
 
 int verbose = 0;
 
+static void *apply_one(char *base, const char *overlay, size_t *buf_len,
+		       const char *name)
+{
+	char *tmp = NULL;
+	char *tmpo;
+	int ret;
+
+	/*
+	 * We take a copies first, because a a failed apply can trash
+	 * both the base blob and the overlay
+	 */
+	tmpo = xmalloc(fdt_totalsize(overlay));
+
+	do {
+		tmp = xrealloc(tmp, *buf_len);
+		ret = fdt_open_into(base, tmp, *buf_len);
+		if (ret) {
+			fprintf(stderr,
+				"\nFailed to make temporary copy: %s\n",
+				fdt_strerror(ret));
+			goto fail;
+		}
+
+		memcpy(tmpo, overlay, fdt_totalsize(overlay));
+
+		ret = fdt_overlay_apply(tmp, tmpo);
+		if (ret == -FDT_ERR_NOSPACE) {
+			*buf_len += BUF_INCREMENT;
+		}
+	} while (ret == -FDT_ERR_NOSPACE);
+
+	if (ret) {
+		fprintf(stderr, "\nFailed to apply '%s': %s\n",
+			name, fdt_strerror(ret));
+		goto fail;
+	}
+
+	free(base);
+	free(tmpo);
+	return tmp;
+
+fail:
+	free(tmpo);
+	if (tmp)
+		free(tmp);
+
+	return NULL;
+}
 static int do_fdtoverlay(const char *input_filename,
 			 const char *output_filename,
 			 int argc, char *argv[])
 {
 	char *blob = NULL;
 	char **ovblob = NULL;
-	size_t blob_len, ov_len, total_len;
+	size_t buf_len;
 	int i, ret = -1;
 
-	blob = utilfdt_read(input_filename, &blob_len);
+	blob = utilfdt_read(input_filename, &buf_len);
 	if (!blob) {
-		fprintf(stderr, "\nFailed to read base blob %s\n",
-				input_filename);
+		fprintf(stderr, "\nFailed to read '%s'\n", input_filename);
 		goto out_err;
 	}
-	if (fdt_totalsize(blob) > blob_len) {
+	if (fdt_totalsize(blob) > buf_len) {
 		fprintf(stderr,
  "\nBase blob is incomplete (%lu / %" PRIu32 " bytes read)\n",
-			(unsigned long)blob_len, fdt_totalsize(blob));
+			(unsigned long)buf_len, fdt_totalsize(blob));
 		goto out_err;
 	}
-	ret = 0;
 
 	/* allocate blob pointer array */
-	ovblob = malloc(sizeof(*ovblob) * argc);
+	ovblob = xmalloc(sizeof(*ovblob) * argc);
 	memset(ovblob, 0, sizeof(*ovblob) * argc);
 
 	/* read and keep track of the overlay blobs */
-	total_len = 0;
 	for (i = 0; i < argc; i++) {
+		size_t ov_len;
 		ovblob[i] = utilfdt_read(argv[i], &ov_len);
 		if (!ovblob[i]) {
-			fprintf(stderr, "\nFailed to read overlay %s\n",
-					argv[i]);
+			fprintf(stderr, "\nFailed to read '%s'\n", argv[i]);
 			goto out_err;
 		}
-		total_len += ov_len;
+		if (fdt_totalsize(ovblob[i]) > ov_len) {
+			fprintf(stderr,
+"\nOverlay '%s' is incomplete (%lu / %" PRIu32 " bytes read)\n",
+				argv[i], (unsigned long)ov_len,
+				fdt_totalsize(ovblob[i]));
+			goto out_err;
+		}
 	}
 
-	/* grow the blob to worst case */
-	blob_len = fdt_totalsize(blob) + total_len;
-	blob = xrealloc(blob, blob_len);
-	fdt_open_into(blob, blob, blob_len);
+	buf_len = fdt_totalsize(blob);
 
 	/* apply the overlays in sequence */
 	for (i = 0; i < argc; i++) {
-		ret = fdt_overlay_apply(blob, ovblob[i]);
-		if (ret) {
-			fprintf(stderr, "\nFailed to apply %s (%d)\n",
-					argv[i], ret);
+		blob = apply_one(blob, ovblob[i], &buf_len, argv[i]);
+		if (!blob)
 			goto out_err;
-		}
 	}
 
 	fdt_pack(blob);
 	ret = utilfdt_write(output_filename, blob);
 	if (ret)
-		fprintf(stderr, "\nFailed to write output blob %s\n",
-				output_filename);
+		fprintf(stderr, "\nFailed to write '%s'\n",
+			output_filename);
 
 out_err:
 	if (ovblob) {

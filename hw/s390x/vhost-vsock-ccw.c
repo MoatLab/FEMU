@@ -7,6 +7,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "hw/qdev-properties.h"
 #include "hw/virtio/virtio.h"
 #include "qapi/error.h"
 #include "qemu/module.h"
@@ -23,8 +24,7 @@ static void vhost_vsock_ccw_realize(VirtioCcwDevice *ccw_dev, Error **errp)
     VHostVSockCCWState *dev = VHOST_VSOCK_CCW(ccw_dev);
     DeviceState *vdev = DEVICE(&dev->vdev);
 
-    qdev_set_parent_bus(vdev, BUS(&ccw_dev->bus));
-    object_property_set_bool(OBJECT(vdev), true, "realized", errp);
+    qdev_realize(vdev, BUS(&ccw_dev->bus), errp);
 }
 
 static void vhost_vsock_ccw_class_init(ObjectClass *klass, void *data)
@@ -34,15 +34,27 @@ static void vhost_vsock_ccw_class_init(ObjectClass *klass, void *data)
 
     k->realize = vhost_vsock_ccw_realize;
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
-    dc->props = vhost_vsock_ccw_properties;
+    device_class_set_props(dc, vhost_vsock_ccw_properties);
 }
 
 static void vhost_vsock_ccw_instance_init(Object *obj)
 {
     VHostVSockCCWState *dev = VHOST_VSOCK_CCW(obj);
+    VirtioCcwDevice *ccw_dev = VIRTIO_CCW_DEVICE(obj);
+    VirtIODevice *virtio_dev;
 
     virtio_instance_init_common(obj, &dev->vdev, sizeof(dev->vdev),
                                 TYPE_VHOST_VSOCK);
+
+    virtio_dev = VIRTIO_DEVICE(&dev->vdev);
+
+    /*
+     * To avoid migration issues, we force virtio version 1 only when
+     * legacy check is enabled in the new machine types (>= 5.1).
+     */
+    if (!virtio_legacy_check_disabled(virtio_dev)) {
+        ccw_dev->force_revision_1 = true;
+    }
 }
 
 static const TypeInfo vhost_vsock_ccw_info = {

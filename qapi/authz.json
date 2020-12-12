@@ -1,6 +1,9 @@
 # -*- Mode: Python -*-
-#
-# QAPI authz definitions
+# vim: filetype=python
+
+##
+# = User authorization
+##
 
 ##
 # @QAuthZListPolicy:

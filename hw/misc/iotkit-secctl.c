@@ -15,7 +15,9 @@
 #include "qapi/error.h"
 #include "trace.h"
 #include "hw/sysbus.h"
+#include "migration/vmstate.h"
 #include "hw/registerfields.h"
+#include "hw/irq.h"
 #include "hw/misc/iotkit-secctl.h"
 
 /* Registers in the secure privilege control block */
@@ -338,7 +340,7 @@ static MemTxResult iotkit_secctl_s_write(void *opaque, hwaddr addr,
         qemu_set_irq(s->sec_resp_cfg, s->secrespcfg);
         break;
     case A_SECPPCINTCLR:
-        value &= 0x00f000f3;
+        s->secppcintstat &= ~(value & 0x00f000f3);
         foreach_ppc(s, iotkit_secctl_ppc_update_irq_clear);
         break;
     case A_SECPPCINTEN:

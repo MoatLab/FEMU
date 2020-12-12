@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -21,7 +21,6 @@
 #include "qemu/error-report.h"
 #include "qemu/module.h"
 #include "qapi/error.h"
-#include "hw/hw.h"
 #include "monitor/monitor.h"
 #include "hw/sysbus.h"
 #include "sysemu/sysemu.h"
@@ -61,8 +60,8 @@ ISABus *isa_bus_new(DeviceState *dev, MemoryRegion* address_space,
         return NULL;
     }
     if (!dev) {
-        dev = qdev_create(NULL, "isabus-bridge");
-        qdev_init_nofail(dev);
+        dev = qdev_new("isabus-bridge");
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
     }
 
     isabus = ISA_BUS(qbus_create(TYPE_ISA_BUS, dev, NULL));
@@ -82,24 +81,23 @@ void isa_bus_irqs(ISABus *bus, qemu_irq *irqs)
  * This function is only for special cases such as the 'ferr', and
  * temporary use for normal devices until they are converted to qdev.
  */
-qemu_irq isa_get_irq(ISADevice *dev, int isairq)
+qemu_irq isa_get_irq(ISADevice *dev, unsigned isairq)
 {
     assert(!dev || ISA_BUS(qdev_get_parent_bus(DEVICE(dev))) == isabus);
-    if (isairq < 0 || isairq > 15) {
-        hw_error("isa irq %d invalid", isairq);
-    }
+    assert(isairq < ISA_NUM_IRQS);
     return isabus->irqs[isairq];
 }
 
-void isa_init_irq(ISADevice *dev, qemu_irq *p, int isairq)
+void isa_init_irq(ISADevice *dev, qemu_irq *p, unsigned isairq)
 {
     assert(dev->nirqs < ARRAY_SIZE(dev->isairq));
+    assert(isairq < ISA_NUM_IRQS);
     dev->isairq[dev->nirqs] = isairq;
     *p = isa_get_irq(dev, isairq);
     dev->nirqs++;
 }
 
-void isa_connect_gpio_out(ISADevice *isadev, int gpioirq, int isairq)
+void isa_connect_gpio_out(ISADevice *isadev, int gpioirq, unsigned isairq)
 {
     qemu_irq irq;
     isa_init_irq(isadev, &irq, isairq);
@@ -157,29 +155,28 @@ static void isa_device_init(Object *obj)
     dev->isairq[1] = -1;
 }
 
-ISADevice *isa_create(ISABus *bus, const char *name)
+ISADevice *isa_new(const char *name)
 {
-    DeviceState *dev;
-
-    dev = qdev_create(BUS(bus), name);
-    return ISA_DEVICE(dev);
+    return ISA_DEVICE(qdev_new(name));
 }
 
-ISADevice *isa_try_create(ISABus *bus, const char *name)
+ISADevice *isa_try_new(const char *name)
 {
-    DeviceState *dev;
-
-    dev = qdev_try_create(BUS(bus), name);
-    return ISA_DEVICE(dev);
+    return ISA_DEVICE(qdev_try_new(name));
 }
 
 ISADevice *isa_create_simple(ISABus *bus, const char *name)
 {
     ISADevice *dev;
 
-    dev = isa_create(bus, name);
-    qdev_init_nofail(DEVICE(dev));
+    dev = isa_new(name);
+    isa_realize_and_unref(dev, bus, &error_fatal);
     return dev;
+}
+
+bool isa_realize_and_unref(ISADevice *dev, ISABus *bus, Error **errp)
+{
+    return qdev_realize_and_unref(&dev->parent_obj, &bus->parent_obj, errp);
 }
 
 ISADevice *isa_vga_init(ISABus *bus)
@@ -201,6 +198,21 @@ ISADevice *isa_vga_init(ISABus *bus)
     case VGA_NONE:
     default:
         return NULL;
+    }
+}
+
+void isa_build_aml(ISABus *bus, Aml *scope)
+{
+    BusChild *kid;
+    ISADevice *dev;
+    ISADeviceClass *dc;
+
+    QTAILQ_FOREACH(kid, &bus->parent_obj.children, sibling) {
+        dev = ISA_DEVICE(kid->child);
+        dc = ISA_DEVICE_GET_CLASS(dev);
+        if (dc->build_aml) {
+            dc->build_aml(dev, scope);
+        }
     }
 }
 

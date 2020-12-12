@@ -116,7 +116,7 @@ static void usage_complete(int argc, char *argv[])
 }
 
 /* keep wrappers separate but do not bother defining headers for all of them */
-#include "wrap.inc.c"
+#include "wrap.c.inc"
 
 static void not_implemented(void)
 {
@@ -989,7 +989,7 @@ static void QEMU_NORETURN run_test(void)
 
                     verCases_tininessCode = 0;
                     slowfloat_detectTininess = tmode;
-                    qsf.float_detect_tininess = sf_tininess_to_qemu(tmode);
+                    qsf.tininess_before_rounding = sf_tininess_to_qemu(tmode);
 
                     if (attrs & FUNC_EFF_TININESSMODE ||
                         ((attrs & FUNC_EFF_TININESSMODE_REDUCEDPREC) &&

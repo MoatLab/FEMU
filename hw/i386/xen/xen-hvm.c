@@ -9,19 +9,28 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/units.h"
 
 #include "cpu.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_host.h"
 #include "hw/i386/pc.h"
+#include "hw/southbridge/piix.h"
+#include "hw/irq.h"
+#include "hw/hw.h"
 #include "hw/i386/apic-msidef.h"
 #include "hw/xen/xen_common.h"
 #include "hw/xen/xen-legacy-backend.h"
 #include "hw/xen/xen-bus.h"
+#include "hw/xen/xen-x86.h"
 #include "qapi/error.h"
-#include "qapi/qapi-commands-misc.h"
+#include "qapi/qapi-commands-migration.h"
 #include "qemu/error-report.h"
+#include "qemu/main-loop.h"
 #include "qemu/range.h"
+#include "sysemu/runstate.h"
+#include "sysemu/sysemu.h"
+#include "sysemu/xen.h"
 #include "sysemu/xen-mapcache.h"
 #include "trace.h"
 #include "exec/address-spaces.h"
@@ -151,8 +160,8 @@ void xen_piix_pci_write_config_client(uint32_t address, uint32_t val, int len)
             v = 0;
         }
         v &= 0xf;
-        if (((address + i) >= 0x60) && ((address + i) <= 0x63)) {
-            xen_set_pci_link_route(xen_domid, address + i - 0x60, v);
+        if (((address + i) >= PIIX_PIRQCA) && ((address + i) <= PIIX_PIRQCD)) {
+            xen_set_pci_link_route(xen_domid, address + i - PIIX_PIRQCA, v);
         }
     }
 }
@@ -192,11 +201,13 @@ qemu_irq *xen_interrupt_controller_init(void)
 static void xen_ram_init(PCMachineState *pcms,
                          ram_addr_t ram_size, MemoryRegion **ram_memory_p)
 {
+    X86MachineState *x86ms = X86_MACHINE(pcms);
     MemoryRegion *sysmem = get_system_memory();
     ram_addr_t block_len;
-    uint64_t user_lowmem = object_property_get_uint(qdev_get_machine(),
-                                                    PC_MACHINE_MAX_RAM_BELOW_4G,
-                                                    &error_abort);
+    uint64_t user_lowmem =
+        object_property_get_uint(qdev_get_machine(),
+                                 PC_MACHINE_MAX_RAM_BELOW_4G,
+                                 &error_abort);
 
     /* Handle the machine opt max-ram-below-4g.  It is basically doing
      * min(xen limit, user limit).
@@ -209,20 +220,20 @@ static void xen_ram_init(PCMachineState *pcms,
     }
 
     if (ram_size >= user_lowmem) {
-        pcms->above_4g_mem_size = ram_size - user_lowmem;
-        pcms->below_4g_mem_size = user_lowmem;
+        x86ms->above_4g_mem_size = ram_size - user_lowmem;
+        x86ms->below_4g_mem_size = user_lowmem;
     } else {
-        pcms->above_4g_mem_size = 0;
-        pcms->below_4g_mem_size = ram_size;
+        x86ms->above_4g_mem_size = 0;
+        x86ms->below_4g_mem_size = ram_size;
     }
-    if (!pcms->above_4g_mem_size) {
+    if (!x86ms->above_4g_mem_size) {
         block_len = ram_size;
     } else {
         /*
          * Xen does not allocate the memory continuously, it keeps a
          * hole of the size computed above or passed in.
          */
-        block_len = (1ULL << 32) + pcms->above_4g_mem_size;
+        block_len = (4 * GiB) + x86ms->above_4g_mem_size;
     }
     memory_region_init_ram(&ram_memory, NULL, "xen.ram", block_len,
                            &error_fatal);
@@ -239,12 +250,12 @@ static void xen_ram_init(PCMachineState *pcms,
      */
     memory_region_init_alias(&ram_lo, NULL, "xen.ram.lo",
                              &ram_memory, 0xc0000,
-                             pcms->below_4g_mem_size - 0xc0000);
+                             x86ms->below_4g_mem_size - 0xc0000);
     memory_region_add_subregion(sysmem, 0xc0000, &ram_lo);
-    if (pcms->above_4g_mem_size > 0) {
+    if (x86ms->above_4g_mem_size > 0) {
         memory_region_init_alias(&ram_hi, NULL, "xen.ram.hi",
                                  &ram_memory, 0x100000000ULL,
-                                 pcms->above_4g_mem_size);
+                                 x86ms->above_4g_mem_size);
         memory_region_add_subregion(sysmem, 0x100000000ULL, &ram_hi);
     }
 }
@@ -260,7 +271,7 @@ void xen_ram_alloc(ram_addr_t ram_addr, ram_addr_t size, MemoryRegion *mr,
         /* RAM already populated in Xen */
         fprintf(stderr, "%s: do not alloc "RAM_ADDR_FMT
                 " bytes of ram at "RAM_ADDR_FMT" when runstate is INMIGRATE\n",
-                __func__, size, ram_addr); 
+                __func__, size, ram_addr);
         return;
     }
 
@@ -1130,7 +1141,7 @@ static int handle_buffered_iopage(XenIOState *state)
         assert(req.dir == IOREQ_WRITE);
         assert(!req.data_is_ptr);
 
-        atomic_add(&buf_page->read_pointer, qw + 1);
+        qatomic_add(&buf_page->read_pointer, qw + 1);
     }
 
     return req.count;
@@ -1241,6 +1252,8 @@ static void xen_hvm_change_state_handler(void *opaque, int running,
 static void xen_exit_notifier(Notifier *n, void *data)
 {
     XenIOState *state = container_of(n, XenIOState, exit);
+
+    xen_destroy_ioreq_server(xen_domid, state->ioservid);
 
     xenevtchn_close(state->xce_handle);
     xs_daemon_close(state->xenstore);
@@ -1383,7 +1396,7 @@ static int xen_map_ioreq_server(XenIOState *state)
     return 0;
 }
 
-void xen_hvm_init(PCMachineState *pcms, MemoryRegion **ram_memory)
+void xen_hvm_init_pc(PCMachineState *pcms, MemoryRegion **ram_memory)
 {
     MachineState *ms = MACHINE(pcms);
     unsigned int max_cpus = ms->smp.max_cpus;

@@ -19,15 +19,27 @@
 #ifndef HW_RISCV_SPIKE_H
 #define HW_RISCV_SPIKE_H
 
-typedef struct {
+#include "hw/riscv/riscv_hart.h"
+#include "hw/sysbus.h"
+#include "qom/object.h"
+
+#define SPIKE_CPUS_MAX 8
+#define SPIKE_SOCKETS_MAX 8
+
+#define TYPE_SPIKE_MACHINE MACHINE_TYPE_NAME("spike")
+typedef struct SpikeState SpikeState;
+DECLARE_INSTANCE_CHECKER(SpikeState, SPIKE_MACHINE,
+                         TYPE_SPIKE_MACHINE)
+
+struct SpikeState {
     /*< private >*/
-    SysBusDevice parent_obj;
+    MachineState parent;
 
     /*< public >*/
-    RISCVHartArrayState soc;
+    RISCVHartArrayState soc[SPIKE_SOCKETS_MAX];
     void *fdt;
     int fdt_size;
-} SpikeState;
+};
 
 enum {
     SPIKE_MROM,
@@ -35,16 +47,10 @@ enum {
     SPIKE_DRAM
 };
 
-enum {
-    SPIKE_CLOCK_FREQ = 1000000000
-};
-
 #if defined(TARGET_RISCV32)
-#define SPIKE_V1_09_1_CPU TYPE_RISCV_CPU_RV32GCSU_V1_09_1
-#define SPIKE_V1_10_0_CPU TYPE_RISCV_CPU_RV32GCSU_V1_10_0
+#define SPIKE_V1_10_0_CPU TYPE_RISCV_CPU_BASE32
 #elif defined(TARGET_RISCV64)
-#define SPIKE_V1_09_1_CPU TYPE_RISCV_CPU_RV64GCSU_V1_09_1
-#define SPIKE_V1_10_0_CPU TYPE_RISCV_CPU_RV64GCSU_V1_10_0
+#define SPIKE_V1_10_0_CPU TYPE_RISCV_CPU_BASE64
 #endif
 
 #endif

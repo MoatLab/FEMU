@@ -7,7 +7,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -37,12 +37,12 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
 #include "hw/block/block.h"
 #include "hw/block/flash.h"
+#include "hw/qdev-properties.h"
 #include "sysemu/block-backend.h"
 #include "qapi/error.h"
-#include "qemu/timer.h"
+#include "qemu/error-report.h"
 #include "qemu/bitops.h"
 #include "qemu/error-report.h"
 #include "qemu/host-utils.h"
@@ -50,8 +50,9 @@
 #include "qemu/module.h"
 #include "qemu/option.h"
 #include "hw/sysbus.h"
+#include "migration/vmstate.h"
 #include "sysemu/blockdev.h"
-#include "sysemu/sysemu.h"
+#include "sysemu/runstate.h"
 #include "trace.h"
 
 /* #define PFLASH_DEBUG */
@@ -90,7 +91,6 @@ struct PFlashCFI01 {
     uint8_t cfi_table[0x52];
     uint64_t counter;
     unsigned int writeblock_size;
-    QEMUTimer *timer;
     MemoryRegion mem;
     char *name;
     void *storage;
@@ -113,18 +113,6 @@ static const VMStateDescription vmstate_pflash = {
         VMSTATE_END_OF_LIST()
     }
 };
-
-static void pflash_timer (void *opaque)
-{
-    PFlashCFI01 *pfl = opaque;
-
-    trace_pflash_timer_expired(pfl->cmd);
-    /* Reset flash */
-    pfl->status ^= 0x80;
-    memory_region_rom_device_set_romd(&pfl->mem, true);
-    pfl->wcycle = 0;
-    pfl->cmd = 0;
-}
 
 /* Perform a CFI query based on the bank width of the flash.
  * If this code is called we know we have a device_width set for
@@ -225,7 +213,6 @@ static uint32_t pflash_devid_query(PFlashCFI01 *pfl, hwaddr offset)
     default:
         trace_pflash_device_info(offset);
         return 0;
-        break;
     }
     /* Replicate responses for each device in bank. */
     if (pfl->device_width < pfl->bank_width) {
@@ -275,7 +262,7 @@ static uint32_t pflash_data_read(PFlashCFI01 *pfl, hwaddr offset,
         DPRINTF("BUG in %s\n", __func__);
         abort();
     }
-    trace_pflash_data_read(offset, width << 1, ret);
+    trace_pflash_data_read(offset, width, ret);
     return ret;
 }
 
@@ -291,9 +278,13 @@ static uint32_t pflash_read(PFlashCFI01 *pfl, hwaddr offset,
         /* This should never happen : reset state & treat it as a read */
         DPRINTF("%s: unknown command state: %x\n", __func__, pfl->cmd);
         pfl->wcycle = 0;
-        pfl->cmd = 0;
+        /*
+         * The command 0x00 is not assigned by the CFI open standard,
+         * but QEMU historically uses it for the READ_ARRAY command (0xff).
+         */
+        pfl->cmd = 0x00;
         /* fall through to read code */
-    case 0x00:
+    case 0x00: /* This model reset value for READ_ARRAY (not CFI compliant) */
         /* Flash area read */
         ret = pflash_data_read(pfl, offset, width, be);
         break;
@@ -388,7 +379,7 @@ static uint32_t pflash_read(PFlashCFI01 *pfl, hwaddr offset,
 
         break;
     }
-    trace_pflash_io_read(offset, width, width << 1, ret, pfl->cmd, pfl->wcycle);
+    trace_pflash_io_read(offset, width, ret, pfl->cmd, pfl->wcycle);
 
     return ret;
 }
@@ -398,13 +389,18 @@ static void pflash_update(PFlashCFI01 *pfl, int offset,
                           int size)
 {
     int offset_end;
+    int ret;
     if (pfl->blk) {
         offset_end = offset + size;
         /* widen to sector boundaries */
         offset = QEMU_ALIGN_DOWN(offset, BDRV_SECTOR_SIZE);
         offset_end = QEMU_ALIGN_UP(offset_end, BDRV_SECTOR_SIZE);
-        blk_pwrite(pfl->blk, offset, pfl->storage + offset,
+        ret = blk_pwrite(pfl->blk, offset, pfl->storage + offset,
                    offset_end - offset, 0);
+        if (ret < 0) {
+            /* TODO set error bit in status */
+            error_report("Could not update PFLASH: %s", strerror(-ret));
+        }
     }
 }
 
@@ -413,7 +409,7 @@ static inline void pflash_data_write(PFlashCFI01 *pfl, hwaddr offset,
 {
     uint8_t *p = pfl->storage;
 
-    trace_pflash_data_write(offset, width << 1, value, pfl->counter);
+    trace_pflash_data_write(offset, width, value, pfl->counter);
     switch (width) {
     case 1:
         p[offset] = value;
@@ -452,7 +448,7 @@ static void pflash_write(PFlashCFI01 *pfl, hwaddr offset,
 
     cmd = value;
 
-    trace_pflash_io_write(offset, width, width << 1, value, pfl->wcycle);
+    trace_pflash_io_write(offset, width, value, pfl->wcycle);
     if (!pfl->wcycle) {
         /* Set the device in I/O access mode */
         memory_region_rom_device_set_romd(&pfl->mem, false);
@@ -462,8 +458,8 @@ static void pflash_write(PFlashCFI01 *pfl, hwaddr offset,
     case 0:
         /* read mode */
         switch (cmd) {
-        case 0x00: /* ??? */
-            goto reset_flash;
+        case 0x00: /* This model reset value for READ_ARRAY (not CFI) */
+            goto mode_read_array;
         case 0x10: /* Single Byte Program */
         case 0x40: /* Single Byte Program */
             DPRINTF("%s: Single Byte Program\n", __func__);
@@ -486,7 +482,7 @@ static void pflash_write(PFlashCFI01 *pfl, hwaddr offset,
         case 0x50: /* Clear status bits */
             DPRINTF("%s: Clear status bits\n", __func__);
             pfl->status = 0x0;
-            goto reset_flash;
+            goto mode_read_array;
         case 0x60: /* Block (un)lock */
             DPRINTF("%s: Block unlock\n", __func__);
             break;
@@ -511,10 +507,10 @@ static void pflash_write(PFlashCFI01 *pfl, hwaddr offset,
             break;
         case 0xf0: /* Probe for AMD flash */
             DPRINTF("%s: Probe for AMD flash\n", __func__);
-            goto reset_flash;
-        case 0xff: /* Read array mode */
+            goto mode_read_array;
+        case 0xff: /* Read Array */
             DPRINTF("%s: Read array mode\n", __func__);
-            goto reset_flash;
+            goto mode_read_array;
         default:
             goto error_flash;
         }
@@ -540,8 +536,8 @@ static void pflash_write(PFlashCFI01 *pfl, hwaddr offset,
             if (cmd == 0xd0) { /* confirm */
                 pfl->wcycle = 0;
                 pfl->status |= 0x80;
-            } else if (cmd == 0xff) { /* read array mode */
-                goto reset_flash;
+            } else if (cmd == 0xff) { /* Read Array */
+                goto mode_read_array;
             } else
                 goto error_flash;
 
@@ -567,16 +563,16 @@ static void pflash_write(PFlashCFI01 *pfl, hwaddr offset,
             } else if (cmd == 0x01) {
                 pfl->wcycle = 0;
                 pfl->status |= 0x80;
-            } else if (cmd == 0xff) {
-                goto reset_flash;
+            } else if (cmd == 0xff) { /* Read Array */
+                goto mode_read_array;
             } else {
                 DPRINTF("%s: Unknown (un)locking command\n", __func__);
-                goto reset_flash;
+                goto mode_read_array;
             }
             break;
         case 0x98:
-            if (cmd == 0xff) {
-                goto reset_flash;
+            if (cmd == 0xff) { /* Read Array */
+                goto mode_read_array;
             } else {
                 DPRINTF("%s: leaving query mode\n", __func__);
             }
@@ -636,7 +632,7 @@ static void pflash_write(PFlashCFI01 *pfl, hwaddr offset,
                     " the data is already written to storage!\n"
                     "Flash device reset into READ mode.\n",
                     __func__);
-                goto reset_flash;
+                goto mode_read_array;
             }
             break;
         default:
@@ -646,7 +642,7 @@ static void pflash_write(PFlashCFI01 *pfl, hwaddr offset,
     default:
         /* Should never happen */
         DPRINTF("%s: invalid write state\n",  __func__);
-        goto reset_flash;
+        goto mode_read_array;
     }
     return;
 
@@ -655,11 +651,11 @@ static void pflash_write(PFlashCFI01 *pfl, hwaddr offset,
                   "(offset " TARGET_FMT_plx ", wcycle 0x%x cmd 0x%x value 0x%x)"
                   "\n", __func__, offset, pfl->wcycle, pfl->cmd, value);
 
- reset_flash:
+ mode_read_array:
     trace_pflash_reset();
     memory_region_rom_device_set_romd(&pfl->mem, true);
     pfl->wcycle = 0;
-    pfl->cmd = 0;
+    pfl->cmd = 0x00; /* This model reset value for READ_ARRAY (not CFI) */
 }
 
 
@@ -699,12 +695,12 @@ static const MemoryRegionOps pflash_cfi01_ops = {
 
 static void pflash_cfi01_realize(DeviceState *dev, Error **errp)
 {
+    ERRP_GUARD();
     PFlashCFI01 *pfl = PFLASH_CFI01(dev);
     uint64_t total_len;
     int ret;
     uint64_t blocks_per_device, sector_len_per_device, device_len;
     int num_devices;
-    Error *local_err = NULL;
 
     if (pfl->sector_len == 0) {
         error_setg(errp, "attribute \"sector-length\" not specified or zero.");
@@ -738,9 +734,8 @@ static void pflash_cfi01_realize(DeviceState *dev, Error **errp)
         &pfl->mem, OBJECT(dev),
         &pflash_cfi01_ops,
         pfl,
-        pfl->name, total_len, &local_err);
-    if (local_err) {
-        error_propagate(errp, local_err);
+        pfl->name, total_len, errp);
+    if (*errp) {
         return;
     }
 
@@ -774,9 +769,12 @@ static void pflash_cfi01_realize(DeviceState *dev, Error **errp)
         pfl->max_device_width = pfl->device_width;
     }
 
-    pfl->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, pflash_timer, pfl);
     pfl->wcycle = 0;
-    pfl->cmd = 0;
+    /*
+     * The command 0x00 is not assigned by the CFI open standard,
+     * but QEMU historically uses it for the READ_ARRAY command (0xff).
+     */
+    pfl->cmd = 0x00;
     pfl->status = 0x80; /* WSM ready */
     /* Hardcoded CFI table */
     /* Standard "QRY" string */
@@ -929,7 +927,7 @@ static void pflash_cfi01_class_init(ObjectClass *klass, void *data)
 
     dc->reset = pflash_cfi01_system_reset;
     dc->realize = pflash_cfi01_realize;
-    dc->props = pflash_cfi01_properties;
+    device_class_set_props(dc, pflash_cfi01_properties);
     dc->vmsd = &vmstate_pflash;
     set_bit(DEVICE_CATEGORY_STORAGE, dc->categories);
 }
@@ -959,12 +957,12 @@ PFlashCFI01 *pflash_cfi01_register(hwaddr base,
                                    uint16_t id2, uint16_t id3,
                                    int be)
 {
-    DeviceState *dev = qdev_create(NULL, TYPE_PFLASH_CFI01);
+    DeviceState *dev = qdev_new(TYPE_PFLASH_CFI01);
 
     if (blk) {
-        qdev_prop_set_drive(dev, "drive", blk, &error_abort);
+        qdev_prop_set_drive(dev, "drive", blk);
     }
-    assert(size % sector_len == 0);
+    assert(QEMU_IS_ALIGNED(size, sector_len));
     qdev_prop_set_uint32(dev, "num-blocks", size / sector_len);
     qdev_prop_set_uint64(dev, "sector-length", sector_len);
     qdev_prop_set_uint8(dev, "width", bank_width);
@@ -974,7 +972,7 @@ PFlashCFI01 *pflash_cfi01_register(hwaddr base,
     qdev_prop_set_uint16(dev, "id2", id2);
     qdev_prop_set_uint16(dev, "id3", id3);
     qdev_prop_set_string(dev, "name", name);
-    qdev_init_nofail(dev);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
 
     sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, base);
     return PFLASH_CFI01(dev);
@@ -1010,8 +1008,8 @@ void pflash_cfi01_legacy_drive(PFlashCFI01 *fl, DriveInfo *dinfo)
         error_report("clashes with -machine");
         exit(1);
     }
-    qdev_prop_set_drive(DEVICE(fl), "drive",
-                        blk_by_legacy_dinfo(dinfo), &error_fatal);
+    qdev_prop_set_drive_err(DEVICE(fl), "drive", blk_by_legacy_dinfo(dinfo),
+                            &error_fatal);
     loc_pop(&loc);
 }
 
