@@ -147,7 +147,7 @@ $ sudo update-grub
 Run FEMU
 --------
 
-### 1. Run FEMU as blackbox SSDs (``device-managed FTL`` mode) ###
+### 1. Run FEMU as blackbox SSDs (``Device-managed FTL`` mode) ###
 
 **TODO:** currently blackbox SSD parameters are hard-coded in
 `hw/block/femu/ftl/ftl.c`, please change them accordingly and re-compile FEMU.
@@ -187,6 +187,5 @@ benchmarking, as well as fast storage-class memory (SCM) emulation.
 To be released!
 
 
-**For more details, please checkout the
-[Wiki](https://github.com/ucare-uchicago/femu/wiki)!**
+## For more details, please checkout the [Wiki](https://github.com/ucare-uchicago/femu/wiki)!
 
