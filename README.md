@@ -11,7 +11,7 @@
 Contact Information
 --------------------
 
-**Maintainer**: [Huaicheng Li](people.cs.uchicago.edu/~huaicheng/) (huaicheng@cs.uchicago.edu)
+**Maintainer**: [Huaicheng Li](https://people.cs.uchicago.edu/~huaicheng/) (huaicheng@cs.uchicago.edu)
 
 Please do not hesitate to contact Huaicheng for any suggestions/feedback, bug
 reports, or general discussions.
@@ -31,6 +31,8 @@ Year =  {2018}
 
 ```
 
+**For more information, please checkout the
+[Wiki](https://github.com/ucare-uchicago/femu/wiki)!**
 
 Project Description
 -------------------
