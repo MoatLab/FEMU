@@ -21,7 +21,7 @@ Please consider citing our FEMU paper if you use FEMU. The bib entry is
 ```
 @InProceedings{Li+18-FEMU, 
 Author = {Huaicheng Li and Mingzhe Hao and Michael Hao Tong 
-and Swaminathan Sundararaman and Matias Bjørling and Haryadi S. Gunawi},
+and Swaminathan Sundararaman and Matias Bj{\o}rling and Haryadi S. Gunawi},
 Title = "The CASE of FEMU: Cheap, Accurate, Scalable and Extensible Flash Emulator",
 Booktitle =  {Proceedings of 16th USENIX Conference on File and Storage Technologies (FAST)},
 Address = {Oakland, CA},
