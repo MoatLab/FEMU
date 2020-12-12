@@ -89,13 +89,13 @@ Installation
   gcc: 5.4.0
   Ninja: 1.8.2
   Python: 3.6 
-  
-  Notes: FEMU is now re-based on QEMU-5.2.0, which requires >=Python-3.6 and
-  >=Ninjia-1.7, check
-  [here](https://wiki.qemu.org/ChangeLog/5.2#Build_Dependencies) for installing
-  these dependencies if ``pkgdep.sh`` doesn't solve all the requirements.)
-
   ```
+  
+Notes: FEMU is now re-based on QEMU-5.2.0, which requires >=Python-3.6 and
+>=Ninjia-1.7, check
+[here](https://wiki.qemu.org/ChangeLog/5.2#Build_Dependencies) for installing
+these dependencies if ``pkgdep.sh`` doesn't solve all the requirements.)
+
 
 3. Prepare the VM image (For performance reasons, we suggest to use a server
    version guest OS [e.g. Ubuntu Server 16.04, 14.04])
