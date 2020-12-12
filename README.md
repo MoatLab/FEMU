@@ -91,10 +91,9 @@ Installation
   Python: 3.6 
   ```
   
-Notes: FEMU is now re-based on QEMU-5.2.0, which requires >=Python-3.6 and
->=Ninjia-1.7, check
-[here](https://wiki.qemu.org/ChangeLog/5.2#Build_Dependencies) for installing
-these dependencies if ``pkgdep.sh`` doesn't solve all the requirements.)
+> Notes: FEMU is now re-based on QEMU-5.2.0, which requires >=Python-3.6 and >=Ninjia-1.7 to build, 
+> check [here](https://wiki.qemu.org/ChangeLog/5.2#Build_Dependencies) for installing
+> these dependencies if ``pkgdep.sh`` doesn't solve all the requirements.)
 
 
 3. Prepare the VM image (For performance reasons, we suggest to use a server
@@ -207,17 +206,6 @@ In this ``nossd`` mode, no SSD emulation logic (either blackbox or whitebox
 emulation) will be executed.  Base NVMe specification is supported, and FEMU in
 this case handles IOs as fast as possible. It can be used for basic performance
 benchmarking.
-
-Tuning
-------
-
-
-Debugging
----------
-
-FEMU Design
------------
-Please refer to our FAST paper and design document (to come) ...
 
 
 Additional (**Optional**) Tweaks
