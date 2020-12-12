@@ -180,8 +180,7 @@ the newer 2.0 spec support in work-in-progress and will be added soon.
 In this ``nossd`` mode, no SSD emulation logic (either blackbox or whitebox
 emulation) will be executed.  Base NVMe specification is supported, and FEMU in
 this case handles IOs as fast as possible. It can be used for basic performance
-benchmarking, as well as fast storage-class memory (SCM) emulation. FEMU can
-deliver sub-10us latency in this mode.
+benchmarking, as well as fast storage-class memory (SCM) emulation. 
 
 ### 4. Run FEMU as ZNS (Zoned-Namespace) SSDs (``ZNS-SSDs`` mode) ###
 
