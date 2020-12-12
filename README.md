@@ -4,7 +4,7 @@
  | |__  | |__  | \  / | |  | |
  |  __| |  __| | |\/| | |  | |
  | |    | |____| |  | | |__| |
- |_|    |______|_|  |_|\____/    -- an NVMe SSD Emulator by Huaicheng Li
+ |_|    |______|_|  |_|\____/  -- A QEMU-based and DRAM-backed NVMe SSD Emulator
 
 ```
                               
