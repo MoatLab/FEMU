@@ -5,8 +5,11 @@
 
 #include "../nvme.h"
 
-int64_t chip_next_avail_time[128]; /* Coperd: when chip will be not busy */
-int64_t chnl_next_avail_time[16]; /* Coperd: when chnl will be free */
+#define FEMU_MAX_CHNLS (32)
+#define FEMU_MAX_CHIPS (256)
+
+int64_t chip_next_avail_time[FEMU_MAX_CHIPS]; /* Coperd: when chip will be not busy */
+int64_t chnl_next_avail_time[FEMU_MAX_CHNLS]; /* Coperd: when chnl will be free */
 
 #define LOWER_NAND_PAGE_READ_TIME   48000
 #define UPPER_NAND_PAGE_READ_TIME   64000
@@ -945,6 +948,8 @@ int femu_oc12_init(FemuCtrl *n)
         c->num_ch = lps->num_ch;
         c->num_lun = lps->num_lun;
         c->num_pln = lps->num_pln;
+
+		assert(c->num_ch <= FEMU_MAX_CHNLS && c->num_lun <= FEMU_MAX_CHIPS);
 
         c->num_blk = cpu_to_le16(chnl_blks) / (c->num_lun * c->num_pln);
         c->num_pg = cpu_to_le16(lps->pgs_per_blk);
