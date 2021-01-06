@@ -8,8 +8,11 @@
 #define FEMU_MAX_CHNLS (32)
 #define FEMU_MAX_CHIPS (256)
 
-int64_t chip_next_avail_time[FEMU_MAX_CHIPS]; /* Coperd: when chip will be not busy */
-int64_t chnl_next_avail_time[FEMU_MAX_CHNLS]; /* Coperd: when chnl will be free */
+volatile int64_t chip_next_avail_time[FEMU_MAX_CHIPS]; /* Coperd: when chip will be not busy */
+pthread_spinlock_t chip_locks[FEMU_MAX_CHIPS]; /* QHW: for chip_next_avail_time[] */
+volatile int64_t chnl_next_avail_time[FEMU_MAX_CHNLS]; /* Coperd: when chnl will be free */
+pthread_spinlock_t chnl_locks[FEMU_MAX_CHNLS]; /* QHW: for chnl_next_avail_time[] */
+
 
 #define LOWER_NAND_PAGE_READ_TIME   48000
 #define UPPER_NAND_PAGE_READ_TIME   64000
@@ -324,6 +327,7 @@ uint16_t femu_oc12_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint16_t err;
     uint8_t i;
     int64_t now;
+	int lockret;
 
     memset(secs_layout, 0, sizeof(int) * ln->params.max_sec_per_rq);
 
@@ -390,6 +394,8 @@ uint16_t femu_oc12_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     //printf("Coperd,opcode=%d,n_pages=%d\n", req->cmd_opcode, n_pages);
 
     if (is_write) {
+        int64_t data_ready_time; /* QHW: When will data be ready for the chips */
+
         /* Coperd: LightNVM only issues 32KB I/O writes */
         ppa = psl[0];
         ch = (ppa & ln->ppaf.ch_mask) >> ln->ppaf.ch_offset;
@@ -405,14 +411,22 @@ uint16_t femu_oc12_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         /* Coperd: for writes, transfer data through channel first and then do
          * NAND write by moving data from data register to NAND
          */
+        lockret = pthread_spin_lock(&chnl_locks[ch]);
+        assert(lockret == 0);
         if (now < chnl_next_avail_time[ch]) {
             start_data_transfer_ts = chnl_next_avail_time[ch];
         } else {
             start_data_transfer_ts = now;
         }
-        chnl_next_avail_time[ch] = start_data_transfer_ts + chnl_page_tr_t * 2;
+        data_ready_time = chnl_next_avail_time[ch] = start_data_transfer_ts + chnl_page_tr_t * 2;
 
-        if (chnl_next_avail_time[ch] < chip_next_avail_time[lunid]) {
+        lockret = pthread_spin_unlock(&chnl_locks[ch]);
+        assert(lockret == 0);
+
+        lockret = pthread_spin_lock(&chip_locks[lunid]);
+        assert(lockret == 0);
+
+        if (data_ready_time < chip_next_avail_time[lunid]) {
             if (is_upper_page(pg)) {
                 chip_next_avail_time[lunid] += nand_write_upper_t;
             } else {
@@ -420,13 +434,16 @@ uint16_t femu_oc12_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             }
         } else {
             if (is_upper_page(pg)) {
-                chip_next_avail_time[lunid] = chnl_next_avail_time[ch] + nand_write_upper_t;
+                chip_next_avail_time[lunid] = data_ready_time + nand_write_upper_t;
             } else {
-                chip_next_avail_time[lunid] = chnl_next_avail_time[ch] + nand_write_lower_t;
+                chip_next_avail_time[lunid] = data_ready_time + nand_write_lower_t;
             }
         }
 
         io_done_ts = chip_next_avail_time[lunid];
+
+        lockret = pthread_spin_unlock(&chip_locks[lunid]);
+        assert(lockret == 0);
 
         /* Coperd: the time need to emulate is (io_done_ts - now) */
         need_to_emulate_tt = io_done_ts - now;
@@ -470,6 +487,10 @@ uint16_t femu_oc12_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             io_done_ts = 0;
             start_data_transfer_ts = 0;
             assert(ch < c->num_ch && lun < c->num_lun);
+
+            lockret = pthread_spin_lock(&chip_locks[lunid]);
+            assert(lockret == 0);
+
             if (now < chip_next_avail_time[lunid]) {
                 /* Coperd: need to wait for target chip to be free */
                 if (is_upper_page(pg)) {
@@ -490,6 +511,8 @@ uint16_t femu_oc12_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             assert(nb_secs_to_read <= 8 && nb_secs_to_read >= 1);
             int chnl_transfer_time = chnl_page_tr_t * nb_secs_to_read / 4;
 
+            lockret = pthread_spin_lock(&chnl_locks[ch]);
+            assert(lockret == 0);
             if (start_data_transfer_ts < chnl_next_avail_time[ch]) {
                 /* Coperd: need to wait for channel to be free */
                 chnl_next_avail_time[ch] += chnl_transfer_time;
@@ -500,6 +523,11 @@ uint16_t femu_oc12_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
             chip_next_avail_time[lunid] = chnl_next_avail_time[ch];
             io_done_ts = chnl_next_avail_time[ch];
+
+            lockret = pthread_spin_unlock(&chnl_locks[ch]);
+            assert(lockret == 0);
+            lockret = pthread_spin_unlock(&chip_locks[lunid]);
+            assert(lockret == 0);
 
             /* Coperd: the time need to emulate is (io_done_ts - now) */
             need_to_emulate_tt = io_done_ts - now;
@@ -801,7 +829,10 @@ uint16_t femu_oc12_erase_async(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     int num_lun = ln->id_ctrl.groups[0].num_lun;
     int lunid = ch * num_lun + lun;
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+	int lockret;
 
+	lockret = pthread_spin_lock(&chip_locks[lunid]);
+	assert(lockret == 0);
     if (now < chip_next_avail_time[lunid]) {
         chip_next_avail_time[lunid] += nand_erase_t;
     } else {
@@ -809,6 +840,8 @@ uint16_t femu_oc12_erase_async(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
 
     req->expire_time = chip_next_avail_time[lunid];
+	lockret = pthread_spin_unlock(&chip_locks[lunid]);
+	assert(lockret == 0);
 
     req->status = NVME_SUCCESS;
 
@@ -913,6 +946,44 @@ fail_bbt:
     return ret;
 }
 
+static void femu_oc12_destroy_global_variables(void)
+{
+        int i;
+        int ret;
+
+        for (i = 0; i < FEMU_MAX_CHNLS; i++) {
+                ret = pthread_spin_destroy(&chnl_locks[i]);
+                assert(ret == 0);
+        }
+
+        for (i = 0; i < FEMU_MAX_CHIPS; i++) {
+                ret = pthread_spin_destroy(&chip_locks[i]);
+                assert(ret == 0);
+        }
+}
+
+static void femu_oc12_init_global_variables(void)
+{
+        int i;
+        int ret;
+
+        for (i = 0; i < FEMU_MAX_CHNLS; i++) {
+                chnl_next_avail_time[i] = 0;
+
+                /* FIXME: Can we use PTHREAD_PROCESS_PRIVATE here? */
+                ret = pthread_spin_init(&chnl_locks[i], PTHREAD_PROCESS_SHARED);
+                assert(ret == 0);
+        }
+
+        for (i = 0; i < FEMU_MAX_CHIPS; i++) {
+                chip_next_avail_time[i] = 0;
+
+                /* FIXME: Can we use PTHREAD_PROCESS_PRIVATE here? */
+                ret = pthread_spin_init(&chip_locks[i], PTHREAD_PROCESS_SHARED);
+                assert(ret == 0);
+        }
+}
+
 int femu_oc12_init(FemuCtrl *n)
 {
     FEMU_OC12_Ctrl *ln;
@@ -934,6 +1005,8 @@ int femu_oc12_init(FemuCtrl *n)
     if ((lps->num_pln > 4) || (lps->num_pln == 3))
         error_report("FEMU: Only 1/2/4-plane modes supported\n");
 
+	femu_oc12_init_global_variables();
+
     for (i = 0; i < n->num_namespaces; i++) {
         ns = &n->namespaces[i];
         chnl_blks = ns->ns_blks / (lps->sec_per_pg * lps->pgs_per_blk) / lps->num_ch;
@@ -949,7 +1022,7 @@ int femu_oc12_init(FemuCtrl *n)
         c->num_lun = lps->num_lun;
         c->num_pln = lps->num_pln;
 
-		assert(c->num_ch <= FEMU_MAX_CHNLS && c->num_lun <= FEMU_MAX_CHIPS);
+        assert(c->num_ch <= FEMU_MAX_CHNLS && c->num_lun <= FEMU_MAX_CHIPS);
 
         c->num_blk = cpu_to_le16(chnl_blks) / (c->num_lun * c->num_pln);
         c->num_pg = cpu_to_le16(lps->pgs_per_blk);
@@ -1056,4 +1129,6 @@ void femu_oc12_exit(FemuCtrl *n)
 
     /* Coperd: TODO */
     ln->metadata = NULL;
+
+	femu_oc12_destroy_global_variables();
 }
