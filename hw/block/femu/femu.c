@@ -103,60 +103,61 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
         return;
 
     switch (n->multipoller_enabled) {
-        case 1:
-            nvme_isr_notify_io(n->cq[index_poller]);
-            break;
+    case 1:
+        nvme_isr_notify_io(n->cq[index_poller]);
+        break;
 
-        default:
-            for (i = 1; i <= n->num_io_queues; i++) {
-                if (n->should_isr[i]) {
-                    nvme_isr_notify_io(n->cq[i]);
-                    n->should_isr[i] = false;
-                }
+    default:
+        for (i = 1; i <= n->num_io_queues; i++) {
+            if (n->should_isr[i]) {
+                nvme_isr_notify_io(n->cq[i]);
+                n->should_isr[i] = false;
             }
-            break;
+        }
+        break;
     }
 }
 
 static void *nvme_poller(void *arg)
 {
+    int i;
     FemuCtrl *n = ((NvmePollerThreadArgument *)arg)->n;
     int index = ((NvmePollerThreadArgument *)arg)->index;
 
     switch (n->multipoller_enabled) {
-        case 1:
-            while (1) {
-                if ((!n->dataplane_started)) {
-                    usleep(1000);
-                    continue;
-                }
+    case 1:
+        while (1) {
+            if ((!n->dataplane_started)) {
+                usleep(1000);
+                continue;
+            }
 
-                NvmeSQueue *sq = n->sq[index];
-                NvmeCQueue *cq = n->cq[index];
+            NvmeSQueue *sq = n->sq[index];
+            NvmeCQueue *cq = n->cq[index];
+            if (sq && sq->is_active && cq && cq->is_active) {
+                nvme_process_sq_io(sq, index);
+            }
+            nvme_process_cq_cpl(n, index);
+        }
+        break;
+
+    default:
+        while (1) {
+            if ((!n->dataplane_started)) {
+                usleep(1000);
+                continue;
+            }
+
+            for (i = 1; i <= n->num_io_queues; i++) {
+                NvmeSQueue *sq = n->sq[i];
+                NvmeCQueue *cq = n->cq[i];
                 if (sq && sq->is_active && cq && cq->is_active) {
                     nvme_process_sq_io(sq, index);
                 }
-                nvme_process_cq_cpl(n, index);
             }
-            break;
-
-        default:
-            while (1) {
-                if ((!n->dataplane_started)) {
-                    usleep(1000);
-                    continue;
-                }
-
-                for (int i = 1; i <= n->num_io_queues; i++) {
-                    NvmeSQueue *sq = n->sq[i];
-                    NvmeCQueue *cq = n->cq[i];
-                    if (sq && sq->is_active && cq && cq->is_active) {
-                        nvme_process_sq_io(sq, index);
-                    }
-                }
-                nvme_process_cq_cpl(n, index);
-            }
-            break;
+            nvme_process_cq_cpl(n, index);
+        }
+        break;
     }
 
     return NULL;
@@ -189,12 +190,13 @@ static void set_pos(void *a, size_t pos)
 
 void femu_create_nvme_poller(FemuCtrl *n)
 {
+    int i;
     n->should_isr = g_malloc0(sizeof(bool) * (n->num_io_queues + 1));
 
     n->num_poller = n->multipoller_enabled ? n->num_io_queues : 1;
     /* Coperd: we put NvmeRequest into these rings */
     n->to_ftl = malloc(sizeof(struct rte_ring *) * (n->num_poller + 1));
-    for (int i = 1; i <= n->num_poller; i++) {
+    for (i = 1; i <= n->num_poller; i++) {
         n->to_ftl[i] = femu_ring_create(FEMU_RING_TYPE_MP_SC, FEMU_MAX_INF_REQS);
         if (!n->to_ftl[i]) {
             femu_err("failed to create ring (n->to_ftl) ...\n");
@@ -208,7 +210,7 @@ void femu_create_nvme_poller(FemuCtrl *n)
 #endif
 
     n->to_poller = malloc(sizeof(struct rte_ring *) * (n->num_poller + 1));
-    for (int i = 1; i <= n->num_poller; i++) {
+    for (i = 1; i <= n->num_poller; i++) {
         n->to_poller[i] = femu_ring_create(FEMU_RING_TYPE_MP_SC, FEMU_MAX_INF_REQS);
         if (!n->to_poller[i]) {
             femu_err("failed to create ring (n->to_poller) ...\n");
@@ -222,7 +224,7 @@ void femu_create_nvme_poller(FemuCtrl *n)
 #endif
 
     n->pq = malloc(sizeof(pqueue_t *) * (n->num_poller + 1));
-    for (int i = 1; i <= n->num_poller; i++) {
+    for (i = 1; i <= n->num_poller; i++) {
         n->pq[i] = pqueue_init(FEMU_MAX_INF_REQS, cmp_pri, get_pri, set_pri, get_pos, set_pos);
         if (!n->pq[i]) {
             femu_err("failed to create pqueue (n->pq) ...\n");
@@ -232,7 +234,7 @@ void femu_create_nvme_poller(FemuCtrl *n)
 
     n->poller = malloc(sizeof(QemuThread) * (n->num_poller + 1));
     NvmePollerThreadArgument *args = malloc(sizeof(NvmePollerThreadArgument) * (n->num_poller + 1));
-    for (int i = 1; i <= n->num_poller; i++) {
+    for (i = 1; i <= n->num_poller; i++) {
         args[i].n = n;
         args[i].index = i;
         qemu_thread_create(&n->poller[i], "nvme-poller", nvme_poller, &args[i], QEMU_THREAD_JOINABLE);
@@ -242,11 +244,13 @@ void femu_create_nvme_poller(FemuCtrl *n)
 
 static void femu_destroy_nvme_poller(FemuCtrl *n)
 {
+    int i;
+
     femu_debug("destroying NVMe poller !!\n");
-    for (int i = 1; i <= n->num_poller; i++) {
+    for (i = 1; i <= n->num_poller; i++) {
         qemu_thread_join(&n->poller[i]);
     }
-    for (int i = 1; i <= n->num_poller; i++) {
+    for (i = 1; i <= n->num_poller; i++) {
         pqueue_free(n->pq[i]);
         femu_ring_free(n->to_poller[i]);
         femu_ring_free(n->to_ftl[i]);
@@ -256,6 +260,7 @@ static void femu_destroy_nvme_poller(FemuCtrl *n)
 
 static int femu_rw_mem_backend_nossd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
 {
+    int i;
     NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
     uint32_t nlb  = le16_to_cpu(rw->nlb) + 1;
     uint64_t slba = le64_to_cpu(rw->slba);
@@ -279,7 +284,7 @@ static int femu_rw_mem_backend_nossd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cm
     } else if (iteration > 2) {
         uint64_t prp_list[n->max_prp_ents];
         femu_nvme_addr_read(n, prp2, (void *)prp_list, (iteration - 1) * sizeof(uint64_t));
-        for (int i = 0; i < iteration - 1; i++) {
+        for (i = 0; i < iteration - 1; i++) {
             buf += len;
             address_space_rw(&address_space_memory, prp_list[0], MEMTXATTRS_UNSPECIFIED, buf, len, is_write);
         }

@@ -133,8 +133,7 @@ int64_t femu_oc12_ppa_to_off(FEMU_OC12_Ctrl *ln, uint64_t r)
 }
 #endif
 
-static int femu_oc12_meta_state_get(FEMU_OC12_Ctrl *ln, uint64_t ppa,
-        uint32_t *state)
+static int femu_oc12_meta_state_get(FEMU_OC12_Ctrl *ln, uint64_t ppa, uint32_t *state)
 {
     uint32_t oft = ppa * ln->meta_len;
 
@@ -293,8 +292,7 @@ static void *femu_oc12_meta_index(FEMU_OC12_Ctrl *ln, void *meta, uint32_t index
     return meta + (index * ln->params.sos);
 }
 
-uint16_t femu_oc12_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
-    NvmeRequest *req)
+uint16_t femu_oc12_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
 {
     FEMU_OC12_Ctrl *ln = &n->femu_oc12_ctrl;
     FEMU_OC12_IdGroup *c = &ln->id_ctrl.groups[0];
@@ -859,7 +857,7 @@ static int femu_oc12_init_meta(FEMU_OC12_Ctrl *ln)
     memset(ln->meta_buf, FEMU_OC12_SEC_UNKNOWN, ln->meta_tbytes);
 
     return 0;
- }
+}
 
 static int femu_oc12_bbtbl_init(FemuCtrl *n, NvmeNamespace *ns)
 {
@@ -993,8 +991,8 @@ int femu_oc12_init(FemuCtrl *n)
         lps->total_secs = lps->sec_per_ch * c->num_ch;
 
         femu_debug("sec_per_pl=%d,sec_per_blk=%d,sec_per_lun=%d,total_secs=%d\n",
-                lps->sec_per_pl, lps->sec_per_blk,
-                lps->sec_per_lun, lps->total_secs);
+                lps->sec_per_pl, lps->sec_per_blk, lps->sec_per_lun,
+                lps->total_secs);
 
         /* Calculated unit values for ordering */
         lps->pl_units = lps->sec_per_pg;
@@ -1005,9 +1003,9 @@ int femu_oc12_init(FemuCtrl *n)
         lps->total_units = lps->ch_units * c->num_ch;
 
         femu_debug("pl_units=%d,pg_units=%d,blk_units=%d,lun_units=%d,"
-                "ch_units=%d,total_units=%d\n",
-                lps->pl_units, lps->pg_units, lps->blk_units,
-                lps->lun_units, lps->ch_units, lps->total_units);
+                "ch_units=%d,total_units=%d\n", lps->pl_units, lps->pg_units,
+                lps->blk_units, lps->lun_units, lps->ch_units,
+                lps->total_units);
 
         femu_oc12_init_id_ctrl(ln);
 
