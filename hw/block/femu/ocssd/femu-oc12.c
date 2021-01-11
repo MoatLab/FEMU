@@ -401,7 +401,7 @@ uint16_t femu_oc12_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         memset(secs_layout, 0, sizeof(int) * 64);
         for (i = 0; i < n_pages; i++) {
             ppa = psl[i];
-	    cur_pg_addr = (ppa & (~(ln->ppaf.sec_mask)) & (~(ln->ppaf.pln_mask)));
+            cur_pg_addr = (ppa & (~(ln->ppaf.sec_mask)) & (~(ln->ppaf.pln_mask)));
             if (cur_pg_addr == prev_pg_addr) {
                 secs_layout[secs_idx]++;
             } else {
