@@ -14,117 +14,6 @@
  *  http://www.nvmexpress.org/resources/
  */
 
-/**
- * Usage: add options:
- *      -drive file=<file>,if=none,id=<drive_id>
- *      -device nvme,drive=<drive_id>,serial=<serial>,id=<id[optional]>
- *
- * The "file" option must point to a path to a real file that you will use as
- * the backing storage for your NVMe device. It must be a non-zero length, as
- * this will be the disk image that your nvme controller will use to carve up
- * namespaces for storage.
- *
- * Note the "drive" option's "id" name must match the "device nvme" drive's
- * name to link the block device used for backing storage to the nvme
- * interface.
- *
- * Advanced optional options:
- *
- *  namespaces=<int> : Namespaces to make out of the backing storage, Default:1
- *  queues=<int>     : Number of possible IO Queues, Default:64
- *  entries=<int>    : Maximum number of Queue entires possible, Default:0x7ff
- *  max_cqes=<int>   : Maximum completion queue entry size, Default:0x4
- *  max_sqes=<int>   : Maximum submission queue entry size, Default:0x6
- *  mpsmin=<int>     : Minimum page size supported, Default:0
- *  mpsmax=<int>     : Maximum page size supported, Default:0
- *  stride=<int>     : Doorbell stride, Default:0
- *  aerl=<int>       : Async event request limit, Default:3
- *  acl=<int>        : Abort command limit, Default:3
- *  elpe=<int>       : Error log page entries, Default:3
- *  mdts=<int>       : Maximum data transfer size, Default:5
- *  cqr=<int>        : Contiguous queues required, Default:1
- *  vwc=<int>        : Volatile write cache enabled, Default:0
- *  intc=<int>       : Interrupt configuration disabled, Default:0
- *  intc_thresh=<int>: Interrupt coalesce threshold, Default:0
- *  intc_ttime=<int> : Interrupt coalesce time 100's of usecs, Default:0
- *  nlbaf=<int>      : Number of logical block formats, Default:1
- *  lba_index=<int>  : Default namespace block format index, Default:0
- *  extended=<int>   : Use extended-lba for meta-data, Default:0
- *  dpc=<int>        : Data protection capabilities, Default:0
- *  dps=<int>        : Data protection settings, Default:0
- *  mc=<int>         : Meta-data capabilities, Default:0
- *  meta=<int>       : Meta-data size, Default:0
- *  oncs=<oncs>      : Optional NVMe command support, Default:DSM
- *  oacs=<oacs>      : Optional Admin command support, Default:Format
- *  cmbsz=<cmbsz>    : Controller Memory Buffer CMBSZ register, Default:0
- *  cmbloc=<cmbloc>  : Controller Memory Buffer CMBLOC register, Default:0
- *  lver=<int>         : version of the LightNVM standard to use, Default:1
- *  ll2pmode=<int>     : LightNVM op. mode. 1: hybrid, 0: full host-based. Default: 1
- *  lsec_size=<int>    : Controller Sector Size. Default: 4096
- *  lsecs_per_pg=<int> : Number of sectors in a flash page. Default: 1
- *  lpgs_per_blk=<int> : Number of pages per flash block. Default: 256
- *  lmax_sec_per_rq=<int> : Maximum number of sectors per I/O request. Default: 64
- *  lmtype=<int>       : Media type. Default: 0 (NAND Flash Memory)
- *  lfmtype=<int>      : Flash media type. Default: 0 (SLC)
- *  lnum_ch=<int>      : Number of controller channels. Default: 1
- *  lnum_lun=<int>     : Number of LUNs per channel, Default:1
- *  lnum_pln=<int>     : Number of flash planes per LUN. Supported single (1),
- *  dual (2) and quad (4) plane modes. Defult: 1
- *  lreadl2ptbl=<int>  : Load logical to physical table. 1: yes, 0: no. Default: 1
- *  lbbtable=<file>    : Load bad block table from file destination (Provide path
- *  to file. If no file is provided a bad block table will be generated. Look
- *  at lbbfrequency. Default: Null (no file).
- *  lbbfrequency:<int> : Bad block frequency for generating bad block table. If
- *  no frequency is provided LNVM_DEFAULT_BB_FREQ will be used.
- *  lmetadata=<file>   : Load metadata from file destination
- *  lmetasize=<int>    : LightNVM metadata (OOB) size. Default: 16
- *  lb_err_write       : First ppa to inject write error. Default: 0 (disabled)
- *  ln_err_write       : Number of ppas affected by write error injection
- *  ldebug             : Enable LightNVM debugging. Default: 0 (disabled)
- *  lstrict            : Enable strict checks. Necessary for pblk (disabled)
- *
- * The logical block formats all start at 512 byte blocks and double for the
- * next index. If meta-data is non-zero, half the logical block formats will
- * have 0 meta-data, the remaining will start the block size over at 512, but
- * with the meta-data size set accordingly. Multiple meta-data sizes are not
- * supported.
- *
- * Parameters will be verified against conflicting capabilities and attributes
- * and fail to load if there is a conflict or a configuration the emulated
- * device is unable to handle.
- *
- * Note that when a CMB is requested the NVMe version is set to 1.2,
- * for all other cases it is set to 1.1.
- *
- */
-
-/**
- * Hot-plug support
- *
- * To hot add a new nvme device, startup the qemu monitor. The easiest way is
- * to add '-monitor stdio' option on your startup. At the monitor command line,
- * run:
- *
- * (qemu) drive_add "" if=none,id=<new_drive_id>,file=</path/to/backing/file>
- * (qemu) device_add nvme,drive=<new_drive_id>,serial=<serial>,id=<new_id>[,<optional options>]
- *
- * To hot remove the device, run:
- *
- * (qemu) device_del <id>
- *
- * You must have provided the "id" field for device_del to work. You may query
- * the available devices by running "info pci" from the qemu monitor.
- *
- * To query what disks are available to be used as a backing storage, run "info
- * block". You cannot assign the same block device to more than one storage
- * interface.
- */
-
-/**
- * Controller Memory Buffer: For now, you can only turn it on or off, but can't
- * tune the exact settings.
- */
-
 #include "qemu/osdep.h"
 #include "hw/block/block.h"
 #include "sysemu/kvm.h"
@@ -133,7 +22,6 @@
 #include "qemu/error-report.h"
 
 #include "nvme.h"
-
 
 void femu_nvme_addr_read(FemuCtrl *n, hwaddr addr, void *buf, int size)
 {
