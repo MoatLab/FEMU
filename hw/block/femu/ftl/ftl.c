@@ -802,16 +802,16 @@ static void *ftl_thread(void *arg)
                 printf("FEMU: FTL to_ftl dequeue failed\n");
             }
 
-            //ftl_assert(req);
+            ftl_assert(req);
             switch (req->is_write) {
-                case 1:
-                    lat = ssd_write(ssd, req);
-                    break;
-                case 0:
-                    lat = ssd_read(ssd, req);
-                    break;
-                default:
-                    ftl_err("FTL received unkown request type, ERROR\n");
+            case 1:
+                lat = ssd_write(ssd, req);
+                break;
+            case 0:
+                lat = ssd_read(ssd, req);
+                break;
+            default:
+                ftl_err("FTL received unkown request type, ERROR\n");
             }
 
             req->reqlat = lat;
