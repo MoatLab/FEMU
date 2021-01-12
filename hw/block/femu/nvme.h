@@ -1349,20 +1349,20 @@ extern int64_t nand_write_lower_t;
 extern int64_t nand_erase_t;
 extern int64_t chnl_page_tr_t;
 
-#define DEBUG_FEMU_FTL
-#ifdef DEBUG_FEMU_FTL
+//#define FEMU_DEBUG_NVME
+#ifdef FEMU_DEBUG_NVME
 #define femu_debug(fmt, ...) \
-    do { printf("FEMU: " fmt, ## __VA_ARGS__); } while (0)
+    do { printf("[FEMU] Dbg: " fmt, ## __VA_ARGS__); } while (0)
 #else
 #define femu_debug(fmt, ...) \
     do { } while (0)
 #endif
 
 #define femu_err(fmt, ...) \
-    do { fprintf(stderr, "FEMU: " fmt, ## __VA_ARGS__); } while (0)
+    do { fprintf(stderr, "[FEMU] Err: " fmt, ## __VA_ARGS__); } while (0)
 
 #define femu_log(fmt, ...) \
-    do { printf("FEMU: " fmt, ## __VA_ARGS__); } while (0)
+    do { printf("[FEMU] Log: " fmt, ## __VA_ARGS__); } while (0)
 
 
 #endif /* __FEMU_NVME_H */
