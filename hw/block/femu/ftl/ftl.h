@@ -198,5 +198,19 @@ struct ssd {
     QemuThread ftl_thread;
 };
 
+#ifdef FEMU_DEBUG_FTL
+#define ftl_debug(fmt, ...) \
+    do { printf("[FEMU] FTL-Dbg: " fmt, ## __VA_ARGS__); } while (0)
+#else
+#define ftl_debug(fmt, ...) \
+    do { } while (0)
+#endif
+
+#define ftl_err(fmt, ...) \
+    do { fprintf(stderr, "[FEMU] FTL-Err: " fmt, ## __VA_ARGS__); } while (0)
+
+#define ftl_log(fmt, ...) \
+    do { printf("[FEMU] FTL-Log: " fmt, ## __VA_ARGS__); } while (0)
+
 
 #endif
