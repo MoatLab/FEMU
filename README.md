@@ -83,17 +83,14 @@ Installation
 ```
   FEMU binary will appear as ``x86_64-softmmu/qemu-system-x86_64``
 
-  Tested host environment: 
-
-  ```
+  Tested host environment:  
   
-  | Distribution   | Kernel | Gcc   | Ninja  | Python |
-  | :---           | :---:  | ---   | ---    | ---    |
-  | Ubuntu 16.04.5 | 4.15.0 | 5.4.0 | 1.8.2  | 3.6    |
-  | Ubuntu 20.04.1 | 5.4.0  | 9.3.0 | 1.10.0 | 3.8.2  | 
+  | Linux Distribution   | Kernel | Gcc   | Ninja  | Python |
+  | :---                 | :---:  | ---   | ---    | ---    |
+  | Gentoo               | 5.10   | 9.3.0 | 1.10.1 | 3.7.9  |
+  | Ubuntu 16.04.5       | 4.15.0 | 5.4.0 | 1.8.2  | 3.6.0  |
+  | Ubuntu 20.04.1       | 5.4.0  | 9.3.0 | 1.10.0 | 3.8.2  | 
 
-  ```
-  
 > Notes: FEMU is now re-based on QEMU-5.2.0, which requires >=Python-3.6 and >=Ninjia-1.7 to build, 
 > check [here](https://wiki.qemu.org/ChangeLog/5.2#Build_Dependencies) for installing
 > these dependencies if ``pkgdep.sh`` doesn't solve all the requirements.)
