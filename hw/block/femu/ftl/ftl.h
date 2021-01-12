@@ -213,4 +213,11 @@ struct ssd {
     do { printf("[FEMU] FTL-Log: " fmt, ## __VA_ARGS__); } while (0)
 
 
+/* FEMU assert() */
+#ifdef FEMU_DEBUG_FTL
+#define ftl_assert(expression) assert(expression)
+#else
+#define ftl_assert(expression)
+#endif
+
 #endif
