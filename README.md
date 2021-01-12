@@ -86,10 +86,12 @@ Installation
   Tested host environment: 
 
   ```
-  OS: Ubuntu 16.04.5 LTS
-  gcc: 5.4.0
-  Ninja: 1.8.2
-  Python: 3.6 
+  
+  | Distribution   | Kernel | Gcc   | Ninja  | Python |
+  | :---           | :---:  | ---   | ---    | ---    |
+  | Ubuntu 16.04.5 | 4.15.0 | 5.4.0 | 1.8.2  | 3.6    |
+  | Ubuntu 20.04.1 | 5.4.0  | 9.3.0 | 1.10.0 | 3.8.2  | 
+
   ```
   
 > Notes: FEMU is now re-based on QEMU-5.2.0, which requires >=Python-3.6 and >=Ninjia-1.7 to build, 
