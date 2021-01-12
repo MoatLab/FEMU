@@ -1,3 +1,5 @@
+[![Build Status](https://travis-ci.com/ucare-uchicago/FEMU.svg?branch=master)](https://travis-ci.com/ucare-uchicago/FEMU)
+
 ```
   ______ ______ __  __ _    _ 
  |  ____|  ____|  \/  | |  | |

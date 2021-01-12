@@ -11,4 +11,3 @@ addons:
 
 script:
   - ./femu-compile.sh
-  - ninja -v
