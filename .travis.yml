@@ -1,0 +1,14 @@
+before_install:
+  - mkdir build-femu && cd build-femu && cp ../femu-scripts/femu-copy-scripts.sh . && ./femu-copy-scripts.sh && sudo ./pkgdep.sh
+
+dist: focal
+language: c
+compiler: gcc
+addons:
+  apt:
+    sources: [ 'ubuntu-toolchain-r-test' ]
+    packages: [ 'ninja-build' ]
+
+script:
+  - ./femu-compile.sh
+  - ninja -v
