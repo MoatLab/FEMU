@@ -1,4 +1,7 @@
+[![FEMU Version](https://img.shields.io/badge/FEMU-v5.2-brightgreen)](https://img.shields.io/badge/FEMU-v5.2-brightgreen)
 [![Build Status](https://travis-ci.com/ucare-uchicago/FEMU.svg?branch=master)](https://travis-ci.com/ucare-uchicago/FEMU)
+[![License: GPL v2](https://img.shields.io/badge/License-GPL%20v2-blue.svg)](https://www.gnu.org/licenses/old-licenses/gpl-2.0.en.html)
+[![Platform](https://img.shields.io/badge/Platform-x86--64-brightgreen)](https://shields.io/)
 
 ```
   ______ ______ __  __ _    _ 
