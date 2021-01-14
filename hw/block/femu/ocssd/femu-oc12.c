@@ -6,20 +6,19 @@
 #include "../nvme.h"
 
 #define FEMU_MAX_CHNLS (32)
-#define FEMU_MAX_CHIPS (256)
+#define FEMU_MAX_CHIPS (128)
+
+#define LOWER_NAND_PAGE_READ_TIME   (48000)
+#define UPPER_NAND_PAGE_READ_TIME   (64000)
+#define LOWER_NAND_PAGE_WRITE_TIME  (850000)
+#define UPPER_NAND_PAGE_WRITE_TIME  (2300000)
+#define CHNL_PAGE_TRANSFER_TIME     (52433)
+#define NAND_BLOCK_ERASE_TIME       (5000000)
 
 volatile int64_t chip_next_avail_time[FEMU_MAX_CHIPS]; /* Coperd: when chip will be not busy */
 pthread_spinlock_t chip_locks[FEMU_MAX_CHIPS]; /* QHW: for chip_next_avail_time[] */
 volatile int64_t chnl_next_avail_time[FEMU_MAX_CHNLS]; /* Coperd: when chnl will be free */
 pthread_spinlock_t chnl_locks[FEMU_MAX_CHNLS]; /* QHW: for chnl_next_avail_time[] */
-
-
-#define LOWER_NAND_PAGE_READ_TIME   48000
-#define UPPER_NAND_PAGE_READ_TIME   64000
-#define LOWER_NAND_PAGE_WRITE_TIME  850000
-#define UPPER_NAND_PAGE_WRITE_TIME  2300000
-#define CHNL_PAGE_TRANSFER_TIME     52433
-#define NAND_BLOCK_ERASE_TIME       5000000
 
 int64_t nand_read_upper_t = UPPER_NAND_PAGE_READ_TIME;
 int64_t nand_read_lower_t = LOWER_NAND_PAGE_READ_TIME;
@@ -386,10 +385,8 @@ uint16_t femu_oc12_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest 
      */
     int64_t max = 0;
     int ch, lun, pg, lunid;
-    //int pl, blk, sec;
     int64_t io_done_ts = 0, start_data_transfer_ts = 0;
     int64_t need_to_emulate_tt = 0;
-    //printf("Coperd,iswrite=%d,n_pages=%d\n", is_write, n_pages);
 
     if (is_write) {
         int64_t data_ready_time; /* QHW: When will data be ready for the chips */
@@ -416,7 +413,6 @@ uint16_t femu_oc12_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest 
         for (i = 0; i <= secs_idx; i++) {
             ppa = psl[si];
             nb_secs_to_write = secs_layout[i];
-            //printf("Coperd,secs_layout[%d]=%d,si=%d\n", i, nb_secs_to_write, si);
             si += nb_secs_to_write;
 
             ch = (ppa & ln->ppaf.ch_mask) >> ln->ppaf.ch_offset;
@@ -493,7 +489,6 @@ uint16_t femu_oc12_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest 
         for (i = 0; i <= secs_idx; i++) {
             ppa = psl[si];
             nb_secs_to_read = secs_layout[i];
-            //printf("Coperd,secs_layout[%d]=%d,si=%d\n", i, nb_secs_to_read, si);
             si += nb_secs_to_read;
 
             ch = (ppa & ln->ppaf.ch_mask) >> ln->ppaf.ch_offset;
@@ -549,7 +544,7 @@ uint16_t femu_oc12_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest 
             lockret = pthread_spin_unlock(&chip_locks[lunid]);
             assert(lockret == 0);
 
-            /* Coperd: the time need to emulate is (io_done_ts - now) */
+            /* Coperd: the IO delay to emulate */
             need_to_emulate_tt = io_done_ts - now;
             if (need_to_emulate_tt > max)
                 max = need_to_emulate_tt;
@@ -565,7 +560,6 @@ uint16_t femu_oc12_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest 
         pg = (ppa & ln->ppaf.pg_mask) >> ln->ppaf.pg_offset;
         //sec = (ppa & ln->ppaf.sec_mask) >> ln->ppaf.sec_offset;
         lunid = ch * c->num_lun + lun;
-        //printf("    Coperd,ppa[%d],ch:%d,lun:%d,pl:%d,blk:%d,pg:%d,sec:%d\n", i, ch, lun, pl, blk, pg, sec);
 
         req->lunid = lunid;
         req->chnl = ch;
@@ -609,7 +603,6 @@ uint16_t femu_oc12_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest 
                     femu_nvme_addr_write(n, meta, (void *)msl,
                             n_pages * ln->params.sos);
                 err = 0x42ff;
-                //printf("Coperd,%s,reading unwritten LBA\n", __func__);
                 goto fail_free_msl;
             }
 
@@ -703,7 +696,7 @@ uint16_t femu_oc12_get_l2p_tbl(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     }
 
     if (nvme_dma_read_prp(n, (uint8_t *)&ns->tbl[slba], xfer_len,
-                          prp1, prp2)) {
+                prp1, prp2)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
@@ -810,15 +803,13 @@ int femu_oc12_flush_tbls(FemuCtrl *n)
     return 0;
 }
 
-uint16_t femu_oc12_erase_async(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
-    NvmeRequest *req)
+uint16_t femu_oc12_erase_async(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
 {
     FEMU_OC12_Ctrl *ln = &n->femu_oc12_ctrl;
     FEMU_OC12_RwCmd *dm = (FEMU_OC12_RwCmd *)cmd;
     uint64_t spba = le64_to_cpu(dm->spba);
     uint64_t psl[ln->params.max_sec_per_rq];
     uint32_t nlb = le16_to_cpu(dm->nlb) + 1;
-    //int pmode = le16_to_cpu(dm->control) & (FEMU_OC12_PMODE_DUAL | FEMU_OC12_PMODE_QUAD);
 
     if (nlb > 1) {
         femu_nvme_addr_read(n, spba, (void *)psl, nlb * sizeof(void *));
@@ -879,7 +870,6 @@ static void femu_oc12_init_id_ctrl(FEMU_OC12_Ctrl *ln)
     ln_id->cap = cpu_to_le32(0x3);
 
     /* format: CHANNEL | LUN | BLOCK | PAGE | PLANE | SECTOR */
-
     ln_id->ppaf.sect_offset = 0;
     ln_id->ppaf.sect_len = qemu_fls(cpu_to_le16(ln->params.sec_per_pg) - 1);
     ln_id->ppaf.pln_offset = ln_id->ppaf.sect_offset + ln_id->ppaf.sect_len;
@@ -968,40 +958,40 @@ fail_bbt:
 
 static void femu_oc12_destroy_global_variables(void)
 {
-        int i;
-        int ret;
+    int i;
+    int ret;
 
-        for (i = 0; i < FEMU_MAX_CHNLS; i++) {
-                ret = pthread_spin_destroy(&chnl_locks[i]);
-                assert(ret == 0);
-        }
+    for (i = 0; i < FEMU_MAX_CHNLS; i++) {
+        ret = pthread_spin_destroy(&chnl_locks[i]);
+        assert(ret == 0);
+    }
 
-        for (i = 0; i < FEMU_MAX_CHIPS; i++) {
-                ret = pthread_spin_destroy(&chip_locks[i]);
-                assert(ret == 0);
-        }
+    for (i = 0; i < FEMU_MAX_CHIPS; i++) {
+        ret = pthread_spin_destroy(&chip_locks[i]);
+        assert(ret == 0);
+    }
 }
 
 static void femu_oc12_init_global_variables(void)
 {
-        int i;
-        int ret;
+    int i;
+    int ret;
 
-        for (i = 0; i < FEMU_MAX_CHNLS; i++) {
-                chnl_next_avail_time[i] = 0;
+    for (i = 0; i < FEMU_MAX_CHNLS; i++) {
+        chnl_next_avail_time[i] = 0;
 
-                /* FIXME: Can we use PTHREAD_PROCESS_PRIVATE here? */
-                ret = pthread_spin_init(&chnl_locks[i], PTHREAD_PROCESS_SHARED);
-                assert(ret == 0);
-        }
+        /* FIXME: Can we use PTHREAD_PROCESS_PRIVATE here? */
+        ret = pthread_spin_init(&chnl_locks[i], PTHREAD_PROCESS_SHARED);
+        assert(ret == 0);
+    }
 
-        for (i = 0; i < FEMU_MAX_CHIPS; i++) {
-                chip_next_avail_time[i] = 0;
+    for (i = 0; i < FEMU_MAX_CHIPS; i++) {
+        chip_next_avail_time[i] = 0;
 
-                /* FIXME: Can we use PTHREAD_PROCESS_PRIVATE here? */
-                ret = pthread_spin_init(&chip_locks[i], PTHREAD_PROCESS_SHARED);
-                assert(ret == 0);
-        }
+        /* FIXME: Can we use PTHREAD_PROCESS_PRIVATE here? */
+        ret = pthread_spin_init(&chip_locks[i], PTHREAD_PROCESS_SHARED);
+        assert(ret == 0);
+    }
 }
 
 int femu_oc12_init(FemuCtrl *n)
