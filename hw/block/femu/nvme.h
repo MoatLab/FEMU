@@ -1107,6 +1107,10 @@ typedef struct NvmeNamespace {
 #define TYPE_NVME "femu"
 #define FEMU(obj) OBJECT_CHECK(FemuCtrl, (obj), TYPE_NVME)
 
+/* do NOT go beyound 256 (uint8_t) */
+#define FEMU_MAX_NUM_CHNLS (32)
+#define FEMU_MAX_NUM_CHIPS (128)
+
 typedef struct FemuCtrl {
     PCIDevice    parent_obj;
     MemoryRegion iomem;
@@ -1187,6 +1191,19 @@ typedef struct FemuCtrl {
     uint8_t         femu_mode;
     uint32_t        memsz;
     FEMU_OC12_Ctrl  femu_oc12_ctrl;
+    volatile int64_t chip_next_avail_time[FEMU_MAX_NUM_CHIPS];  /* Coperd: when chip will be not busy */
+    pthread_spinlock_t chip_locks[FEMU_MAX_NUM_CHIPS];          /* QHW: for chip_next_avail_time[] */
+    volatile int64_t chnl_next_avail_time[FEMU_MAX_NUM_CHNLS];  /* Coperd: when chnl will be free */
+    pthread_spinlock_t chnl_locks[FEMU_MAX_NUM_CHNLS];          /* QHW: for chnl_next_avail_time[] */
+
+    /* Latency numbers for whitebox-mode only */
+    int64_t upper_pg_rd_lat_ns;
+    int64_t lower_pg_rd_lat_ns;
+    int64_t upper_pg_wr_lat_ns;
+    int64_t lower_pg_wr_lat_ns;
+    int64_t blk_er_lat_ns;
+    int64_t chnl_pg_xfer_lat_ns;
+
     struct ssd      ssd;
     struct femu_mbe mbe;
     int             completed;
