@@ -5,12 +5,13 @@
 
 #include "../nvme.h"
 
-#define NAND_LOWER_PAGE_READ_TIME   (48000)
-#define NAND_UPPER_PAGE_READ_TIME   (64000)
-#define NAND_LOWER_PAGE_WRITE_TIME  (850000)
-#define NAND_UPPER_PAGE_WRITE_TIME  (2300000)
-#define CHNL_PAGE_TRANSFER_TIME     (52433)
-#define NAND_BLOCK_ERASE_TIME       (5000000)
+/* In nanoseconds */
+#define NAND_LOWER_PAGE_READ_LATENCY_NS   (48000)
+#define NAND_UPPER_PAGE_READ_LATENCY_NS   (64000)
+#define NAND_LOWER_PAGE_WRITE_LATENCY_NS  (850000)
+#define NAND_UPPER_PAGE_WRITE_LATENCY_NS  (2300000)
+#define CHNL_PAGE_TRANSFER_LATENCY_NS     (52433)
+#define NAND_BLOCK_ERASE_LATENCY_NS       (5000000)
 
 int mlc_tbl[511];
 #define MLC_LOWER_PAGE  0
@@ -418,7 +419,7 @@ uint16_t femu_oc12_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest 
             } else {
                 start_data_transfer_ts = now;
             }
-            data_ready_time = n->chnl_next_avail_time[ch] = start_data_transfer_ts + CHNL_PAGE_TRANSFER_TIME * 2;
+            data_ready_time = n->chnl_next_avail_time[ch] = start_data_transfer_ts + n->chnl_pg_xfer_lat_ns * 2;
 
             lockret = pthread_spin_unlock(&n->chnl_locks[ch]);
             assert(lockret == 0);
@@ -428,15 +429,15 @@ uint16_t femu_oc12_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest 
 
             if (data_ready_time < n->chip_next_avail_time[lunid]) {
                 if (is_upper_page(pg)) {
-                    n->chip_next_avail_time[lunid] += NAND_UPPER_PAGE_WRITE_TIME;
+                    n->chip_next_avail_time[lunid] += n->upg_wr_lat_ns;
                 } else {
-                    n->chip_next_avail_time[lunid] += NAND_LOWER_PAGE_WRITE_TIME;
+                    n->chip_next_avail_time[lunid] += n->lpg_wr_lat_ns;
                 }
             } else {
                 if (is_upper_page(pg)) {
-                    n->chip_next_avail_time[lunid] = data_ready_time + NAND_UPPER_PAGE_WRITE_TIME;
+                    n->chip_next_avail_time[lunid] = data_ready_time + n->upg_wr_lat_ns;
                 } else {
-                    n->chip_next_avail_time[lunid] = data_ready_time + NAND_LOWER_PAGE_WRITE_TIME;
+                    n->chip_next_avail_time[lunid] = data_ready_time + n->lpg_wr_lat_ns;
                 }
             }
 
@@ -494,22 +495,22 @@ uint16_t femu_oc12_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest 
             if (now < n->chip_next_avail_time[lunid]) {
                 /* Coperd: need to wait for target chip to be free */
                 if (is_upper_page(pg)) {
-                    n->chip_next_avail_time[lunid] += NAND_UPPER_PAGE_READ_TIME;
+                    n->chip_next_avail_time[lunid] += n->upg_rd_lat_ns;
                 } else {
-                    n->chip_next_avail_time[lunid] += NAND_LOWER_PAGE_READ_TIME;
+                    n->chip_next_avail_time[lunid] += n->lpg_rd_lat_ns;
                 }
             } else {
                 /* Coperd: target chip is free */
                 if (is_upper_page(pg)) {
-                    n->chip_next_avail_time[lunid] = now + NAND_UPPER_PAGE_READ_TIME;
+                    n->chip_next_avail_time[lunid] = now + n->upg_rd_lat_ns;
                 } else {
-                    n->chip_next_avail_time[lunid] = now + NAND_LOWER_PAGE_READ_TIME;
+                    n->chip_next_avail_time[lunid] = now + n->lpg_rd_lat_ns;
                 }
             }
             start_data_transfer_ts = n->chip_next_avail_time[lunid];
             /* Coperd: TODO: replace 4 with a calculated value (c->num_sec) */
             assert(nb_secs_to_read <= 8 && nb_secs_to_read >= 1);
-            int chnl_transfer_time = CHNL_PAGE_TRANSFER_TIME * nb_secs_to_read / 4;
+            int chnl_transfer_time = n->chnl_pg_xfer_lat_ns * nb_secs_to_read / 4;
 
             lockret = pthread_spin_lock(&n->chnl_locks[ch]);
             assert(lockret == 0);
@@ -830,9 +831,9 @@ uint16_t femu_oc12_erase_async(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, Nvm
     lockret = pthread_spin_lock(&n->chip_locks[lunid]);
     assert(lockret == 0);
     if (now < n->chip_next_avail_time[lunid]) {
-        n->chip_next_avail_time[lunid] += NAND_BLOCK_ERASE_TIME;
+        n->chip_next_avail_time[lunid] += n->blk_er_lat_ns;
     } else {
-        n->chip_next_avail_time[lunid] = now + NAND_BLOCK_ERASE_TIME;
+        n->chip_next_avail_time[lunid] = now + n->blk_er_lat_ns;
     }
 
     req->expire_time = n->chip_next_avail_time[lunid];
@@ -962,11 +963,11 @@ static void femu_oc12_init_misc(FemuCtrl *n)
     int i;
     int ret;
 
-    n->upper_pg_rd_lat_ns = NAND_UPPER_PAGE_READ_TIME;
-    n->lower_pg_rd_lat_ns = NAND_LOWER_PAGE_READ_TIME;
-    n->upper_pg_wr_lat_ns = NAND_UPPER_PAGE_WRITE_TIME;
-    n->lower_pg_wr_lat_ns = NAND_LOWER_PAGE_WRITE_TIME;
-    n->blk_er_lat_ns      = NAND_BLOCK_ERASE_TIME;
+    n->upg_rd_lat_ns = NAND_UPPER_PAGE_READ_LATENCY_NS;
+    n->lpg_rd_lat_ns = NAND_LOWER_PAGE_READ_LATENCY_NS;
+    n->upg_wr_lat_ns = NAND_UPPER_PAGE_WRITE_LATENCY_NS;
+    n->lpg_wr_lat_ns = NAND_LOWER_PAGE_WRITE_LATENCY_NS;
+    n->blk_er_lat_ns = NAND_BLOCK_ERASE_LATENCY_NS;
 
     for (i = 0; i < FEMU_MAX_NUM_CHNLS; i++) {
         n->chnl_next_avail_time[i] = 0;
@@ -1012,9 +1013,8 @@ int femu_oc12_init(FemuCtrl *n)
         ns = &n->namespaces[i];
         chnl_blks = ns->ns_blks / (lps->sec_per_pg * lps->pgs_per_blk) / lps->num_ch;
 
-        femu_debug("chnl_blks=%" PRIu64 ",ns_blks=%" PRIu64
-                ",sec_per_pg=%d,pgs_per_blk=%d\n", chnl_blks, ns->ns_blks,
-                lps->sec_per_pg, lps->pgs_per_blk);
+        femu_debug("chnl_blks=%"PRIu64",ns_blks=%"PRIu64",sec_per_pg=%d,pgs_per_blk=%d\n",
+                chnl_blks, ns->ns_blks, lps->sec_per_pg, lps->pgs_per_blk);
 
         c = &ln->id_ctrl.groups[0];
         c->mtype = lps->mtype;
@@ -1032,9 +1032,8 @@ int femu_oc12_init(FemuCtrl *n)
         c->sos = cpu_to_le16(lps->sos);
 
         femu_debug("num_ch=%d,num_lun=%d,num_pln=%d,num_blk=%d,num_pg=%d,"
-                "pg_sz=%d,sos=%d,csecs=%d\n",
-                c->num_ch, c->num_lun, c->num_pln, c->num_blk, c->num_pg,
-                c->fpg_sz, c->sos, c->csecs);
+                "pg_sz=%d,sos=%d,csecs=%d\n", c->num_ch, c->num_lun, c->num_pln,
+                c->num_blk, c->num_pg, c->fpg_sz, c->sos, c->csecs);
 
         c->trdt = cpu_to_le32(40000);
         c->trdm = cpu_to_le32(80000);
