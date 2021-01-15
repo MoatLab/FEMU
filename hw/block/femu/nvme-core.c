@@ -790,16 +790,16 @@ static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         femu_flip_cmd(n, cmd);
         return NVME_SUCCESS;
     case NVME_ADM_CMD_FEMU_DEBUG:
-        n->upper_pg_rd_lat_ns = le64_to_cpu(cmd->cdw10);
-        n->lower_pg_rd_lat_ns = le64_to_cpu(cmd->cdw11);
-        n->upper_pg_wr_lat_ns = le64_to_cpu(cmd->cdw12);
-        n->lower_pg_wr_lat_ns = le64_to_cpu(cmd->cdw13);
+        n->upg_rd_lat_ns = le64_to_cpu(cmd->cdw10);
+        n->lpg_rd_lat_ns = le64_to_cpu(cmd->cdw11);
+        n->upg_wr_lat_ns = le64_to_cpu(cmd->cdw12);
+        n->lpg_wr_lat_ns = le64_to_cpu(cmd->cdw13);
         n->blk_er_lat_ns = le64_to_cpu(cmd->cdw14);
         n->chnl_pg_xfer_lat_ns = le64_to_cpu(cmd->cdw15);
         femu_log("tRu=%" PRId64 ", tRl=%" PRId64 ", tWu=%" PRId64 ", "
                 "tWl=%" PRId64 ", tBERS=%" PRId64 ", tCHNL=%" PRId64 "\n",
-                n->upper_pg_rd_lat_ns, n->lower_pg_rd_lat_ns, n->upper_pg_wr_lat_ns,
-                n->lower_pg_wr_lat_ns, n->blk_er_lat_ns, n->chnl_pg_xfer_lat_ns);
+                n->upg_rd_lat_ns, n->lpg_rd_lat_ns, n->upg_wr_lat_ns,
+                n->lpg_wr_lat_ns, n->blk_er_lat_ns, n->chnl_pg_xfer_lat_ns);
         return NVME_SUCCESS;
     case NVME_ADM_CMD_DELETE_SQ:
         femu_debug("admin cmd,del_sq\n");
