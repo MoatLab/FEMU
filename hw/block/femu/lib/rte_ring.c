@@ -78,7 +78,7 @@
 #include <errno.h>
 #include <sys/queue.h>
 
-#include "../include/rte_ring.h"
+#include "../inc/rte_ring.h"
 
 /* true if x is a power of 2 */
 #define POWEROF2(x) ((((x)-1) & (x)) == 0)

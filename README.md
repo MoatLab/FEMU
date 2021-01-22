@@ -21,7 +21,8 @@ Contact Information
 Please do not hesitate to contact Huaicheng for any suggestions/feedback, bug
 reports, or general discussions.
 
-Please consider citing our FEMU paper if you use FEMU. The bib entry is
+Please consider citing our FEMU paper at FAST 2018 if you use FEMU. The bib
+entry is
 
 ```
 @InProceedings{Li+18-FEMU, 
@@ -39,12 +40,12 @@ Year =  {2018}
 Project Description
 -------------------
 
-Briefly speaking, FEMU is an NVMe SSD Emulator. Based upon QEMU/KVM, FEMU is
-exposed to Guest OS (Linux) as an NVMe block device (e.g. /dev/nvme0nX). It can
-be used as an emulated whitebox or blackbox SSD: (1). whitebox mode (a.k.a.
-Software-Defined Flash (SDF), or OpenChannel-SSD) with FTL residing in the host
-side (e.g. LightNVM) (2). blackbox mode with FTL managed by the device
-(like most of current commercial SSDs).
+Briefly speaking, FEMU is a fast, accurate, and scalable NVMe SSD Emulator.
+Based upon QEMU/KVM, FEMU is exposed to Guest OS (Linux) as an NVMe block
+device (e.g. /dev/nvme0nX). It can be used as an emulated whitebox or blackbox
+SSD: (1). whitebox mode (a.k.a.  Software-Defined Flash (SDF), or
+OpenChannel-SSD) with host side FTL (e.g. LightNVM) (2). blackbox mode with
+FTL managed by the device (like most of current commercial SSDs).
 
 FEMU tries to achieve benefits of both SSD Hardware platforms (e.g. CNEX
 OpenChannel SSD, OpenSSD, etc.) and SSD simulators (e.g. DiskSim+SSD, FlashSim,
@@ -90,6 +91,8 @@ Installation
   | Gentoo               | 5.10   | 9.3.0 | 1.10.1 | 3.7.9  |
   | Ubuntu 16.04.5       | 4.15.0 | 5.4.0 | 1.8.2  | 3.6.0  |
   | Ubuntu 20.04.1       | 5.4.0  | 9.3.0 | 1.10.0 | 3.8.2  | 
+
+  Tested VM environment: ``Guest Linux kernel 5.10``
 
 > Notes: FEMU is now re-based on QEMU-5.2.0, which requires >=Python-3.6 and >=Ninjia-1.7 to build, 
 > check [here](https://wiki.qemu.org/ChangeLog/5.2#Build_Dependencies) for installing
@@ -151,7 +154,7 @@ $ sudo update-grub
 Run FEMU
 --------
 
-### 1. Run FEMU as blackbox SSDs (``Device-managed FTL`` mode) ###
+### 1. Run FEMU as blackbox SSDs (``Device-managed FTL`` or ``BBSSD`` mode) ###
 
 **TODO:** currently blackbox SSD parameters are hard-coded in
 `hw/block/femu/ftl/ftl.c`, please change them accordingly and re-compile FEMU.
@@ -163,17 +166,23 @@ script:
 ./run-blackbox.sh
 ```
 
-### 2. Run FEMU as whitebox SSDs (``OpenChannel-SSDs`` mode) ###
+### 2. Run FEMU as whitebox SSDs (ak.a. ``OpenChannel-SSD`` or ``OCSSD`` mode) ###
+
+Both OCSSD [Specification
+1.2](http://lightnvm.io/docs/Open-ChannelSSDInterfaceSpecification12-final.pdf)
+and [Specification 2.0](http://lightnvm.io/docs/OCSSD-2_0-20180129.pdf) are
+supported, to run FEMU OCSSD mode:
 
 ```Bash
+# Tested with Guest Linux Kernel 5.10.0 and newest nvme-cli compiled from source
 ./run-whitebox.sh
 ```
 
+By default, FEMU will run OCSSD in 2.0 mode. To run OCSSD in 1.2, make sure
+``OCVER=1`` is set in the ``run-whitebox.sh``
+
 Inside the VM, you can play with LightNVM.
 
-Currently FEMU only supports [OpenChannel Specification
-1.2](http://lightnvm.io/docs/Open-ChannelSSDInterfaceSpecification12-final.pdf),
-the newer 2.0 spec support in work-in-progress and will be added soon.
 
 ### 3. Run FEMU without SSD logic emulation (``NoSSD`` mode) ###
 
@@ -184,7 +193,8 @@ the newer 2.0 spec support in work-in-progress and will be added soon.
 In this ``nossd`` mode, no SSD emulation logic (either blackbox or whitebox
 emulation) will be executed.  Base NVMe specification is supported, and FEMU in
 this case handles IOs as fast as possible. It can be used for basic performance
-benchmarking, as well as fast storage-class memory (SCM) emulation. 
+benchmarking, as well as fast storage-class memory (SCM, or Intel Optane SSD)
+emulation. 
 
 ### 4. Run FEMU as ZNS (Zoned-Namespace) SSDs (``ZNS-SSDs`` mode) ###
 
