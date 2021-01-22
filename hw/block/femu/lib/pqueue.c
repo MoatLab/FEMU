@@ -28,7 +28,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "../include/pqueue.h"
+#include "../inc/pqueue.h"
 
 #define left(i)   ((i) << 1)
 #define right(i)  (((i) << 1) + 1)

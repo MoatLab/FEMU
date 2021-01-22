@@ -88,7 +88,6 @@ static inline void victim_line_set_pos(void *a, size_t pos)
 
 static void ssd_init_lines(struct ssd *ssd)
 {
-    int i;
     struct ssdparams *spp = &ssd->sp;
     struct line_mgmt *lm = &ssd->lm;
     struct line *line;
@@ -104,7 +103,7 @@ static void ssd_init_lines(struct ssd *ssd)
     QTAILQ_INIT(&lm->full_line_list);
 
     lm->free_line_cnt = 0;
-    for (i = 0; i < lm->tt_lines; i++) {
+    for (int i = 0; i < lm->tt_lines; i++) {
         line = &lm->lines[i];
         line->id = i;
         line->ipc = 0;
@@ -293,11 +292,9 @@ static void ssd_init_params(struct ssdparams *spp)
 
 static void ssd_init_nand_page(struct nand_page *pg, struct ssdparams *spp)
 {
-    int i;
-
     pg->nsecs = spp->secs_per_pg;
     pg->sec = g_malloc0(sizeof(nand_sec_status_t) * pg->nsecs);
-    for (i = 0; i < pg->nsecs; i++) {
+    for (int i = 0; i < pg->nsecs; i++) {
         pg->sec[i] = SEC_FREE;
     }
     pg->status = PG_FREE;
@@ -305,11 +302,9 @@ static void ssd_init_nand_page(struct nand_page *pg, struct ssdparams *spp)
 
 static void ssd_init_nand_blk(struct nand_block *blk, struct ssdparams *spp)
 {
-    int i;
-
     blk->npgs = spp->pgs_per_blk;
     blk->pg = g_malloc0(sizeof(struct nand_page) * blk->npgs);
-    for (i = 0; i < blk->npgs; i++) {
+    for (int i = 0; i < blk->npgs; i++) {
         ssd_init_nand_page(&blk->pg[i], spp);
     }
     blk->ipc = 0;
@@ -320,22 +315,18 @@ static void ssd_init_nand_blk(struct nand_block *blk, struct ssdparams *spp)
 
 static void ssd_init_nand_plane(struct nand_plane *pl, struct ssdparams *spp)
 {
-    int i;
-
     pl->nblks = spp->blks_per_pl;
     pl->blk = g_malloc0(sizeof(struct nand_block) * pl->nblks);
-    for (i = 0; i < pl->nblks; i++) {
+    for (int i = 0; i < pl->nblks; i++) {
         ssd_init_nand_blk(&pl->blk[i], spp);
     }
 }
 
 static void ssd_init_nand_lun(struct nand_lun *lun, struct ssdparams *spp)
 {
-    int i;
-
     lun->npls = spp->pls_per_lun;
     lun->pl = g_malloc0(sizeof(struct nand_plane) * lun->npls);
-    for (i = 0; i < lun->npls; i++) {
+    for (int i = 0; i < lun->npls; i++) {
         ssd_init_nand_plane(&lun->pl[i], spp);
     }
     lun->next_lun_avail_time = 0;
@@ -344,11 +335,9 @@ static void ssd_init_nand_lun(struct nand_lun *lun, struct ssdparams *spp)
 
 static void ssd_init_ch(struct ssd_channel *ch, struct ssdparams *spp)
 {
-    int i;
-
     ch->nluns = spp->luns_per_ch;
     ch->lun = g_malloc0(sizeof(struct nand_lun) * ch->nluns);
-    for (i = 0; i < ch->nluns; i++) {
+    for (int i = 0; i < ch->nluns; i++) {
         ssd_init_nand_lun(&ch->lun[i], spp);
     }
     ch->next_ch_avail_time = 0;
@@ -357,30 +346,27 @@ static void ssd_init_ch(struct ssd_channel *ch, struct ssdparams *spp)
 
 static void ssd_init_maptbl(struct ssd *ssd)
 {
-    int i;
     struct ssdparams *spp = &ssd->sp;
 
     ssd->maptbl = g_malloc0(sizeof(struct ppa) * spp->tt_pgs);
-    for (i = 0; i < spp->tt_pgs; i++) {
+    for (int i = 0; i < spp->tt_pgs; i++) {
         ssd->maptbl[i].ppa = UNMAPPED_PPA;
     }
 }
 
 static void ssd_init_rmap(struct ssd *ssd)
 {
-    int i;
     struct ssdparams *spp = &ssd->sp;
 
     ssd->rmap = g_malloc0(sizeof(uint64_t) * spp->tt_pgs);
-    for (i = 0; i < spp->tt_pgs; i++) {
+    for (int i = 0; i < spp->tt_pgs; i++) {
         ssd->rmap[i] = INVALID_LPN;
     }
 }
 
-void ssd_init(FemuCtrl *n)
+static void ssd_init(FemuCtrl *n)
 {
-    int i;
-    struct ssd *ssd = &n->ssd;
+    struct ssd *ssd = n->ssd;
     struct ssdparams *spp = &ssd->sp;
 
     ftl_assert(ssd);
@@ -389,7 +375,7 @@ void ssd_init(FemuCtrl *n)
 
     /* initialize ssd internal layout architecture */
     ssd->ch = g_malloc0(sizeof(struct ssd_channel) * spp->nchs);
-    for (i = 0; i < spp->nchs; i++) {
+    for (int i = 0; i < spp->nchs; i++) {
         ssd_init_ch(&ssd->ch[i], spp);
     }
 
@@ -406,7 +392,7 @@ void ssd_init(FemuCtrl *n)
     ssd_init_write_pointer(ssd);
 
     qemu_thread_create(&ssd->ftl_thread, "FEMU-FTL-Thread", ftl_thread, n,
-            QEMU_THREAD_JOINABLE);
+                       QEMU_THREAD_JOINABLE);
 }
 
 static inline bool valid_ppa(struct ssd *ssd, struct ppa *ppa)
@@ -419,10 +405,9 @@ static inline bool valid_ppa(struct ssd *ssd, struct ppa *ppa)
     int pg = ppa->g.pg;
     int sec = ppa->g.sec;
 
-    if (ch >= 0 && ch < spp->nchs && lun >= 0 && lun < spp->luns_per_ch &&
-            pl >= 0 && pl < spp->pls_per_lun && blk >= 0 &&
-            blk < spp->blks_per_pl && pg >= 0 && pg < spp->pgs_per_blk &&
-            sec >= 0 && sec < spp->secs_per_pg)
+    if (ch >= 0 && ch < spp->nchs && lun >= 0 && lun < spp->luns_per_ch && pl >=
+        0 && pl < spp->pls_per_lun && blk >= 0 && blk < spp->blks_per_pl && pg
+        >= 0 && pg < spp->pgs_per_blk && sec >= 0 && sec < spp->secs_per_pg)
         return true;
 
     return false;
@@ -611,9 +596,8 @@ static void mark_block_free(struct ssd *ssd, struct ppa *ppa)
     struct ssdparams *spp = &ssd->sp;
     struct nand_block *blk = get_blk(ssd, ppa);
     struct nand_page *pg = NULL;
-    int i;
 
-    for (i = 0; i < spp->pgs_per_blk; i++) {
+    for (int i = 0; i < spp->pgs_per_blk; i++) {
         /* reset page status */
         pg = &blk->pg[i];
         ftl_assert(pg->nsecs == spp->secs_per_pg);
@@ -705,9 +689,8 @@ static void clean_one_block(struct ssd *ssd, struct ppa *ppa)
     struct ssdparams *spp = &ssd->sp;
     struct nand_page *pg_iter = NULL;
     int cnt = 0;
-    int pg;
 
-    for (pg = 0; pg < spp->pgs_per_blk; pg++) {
+    for (int pg = 0; pg < spp->pgs_per_blk; pg++) {
         ppa->g.pg = pg;
         pg_iter = get_pg(ssd, ppa);
         /* there shouldn't be any free page in victim blocks */
@@ -749,8 +732,9 @@ static int do_gc(struct ssd *ssd, bool force)
 
     ppa.g.blk = victim_line->id;
     ftl_debug("GC-ing line:%d,ipc=%d,victim=%d,full=%d,free=%d\n", ppa.g.blk,
-            victim_line->ipc, ssd->lm.victim_line_cnt, ssd->lm.full_line_cnt,
-            ssd->lm.free_line_cnt);
+              victim_line->ipc, ssd->lm.victim_line_cnt, ssd->lm.full_line_cnt,
+              ssd->lm.free_line_cnt);
+
     /* copy back valid data */
     for (ch = 0; ch < spp->nchs; ch++) {
         for (lun = 0; lun < spp->luns_per_ch; lun++) {
@@ -779,60 +763,7 @@ static int do_gc(struct ssd *ssd, bool force)
     return 0;
 }
 
-static void *ftl_thread(void *arg)
-{
-    FemuCtrl *n = (FemuCtrl *)arg;
-    struct ssd *ssd = &n->ssd;
-    NvmeRequest *req = NULL;
-    uint64_t lat = 0;
-    int rc;
-    int i;
-
-    while (!*(ssd->dataplane_started_ptr)) {
-        usleep(100000);
-    }
-
-    while (1) {
-        for (i = 1; i <= n->num_poller; i++) {
-            if (!ssd->to_ftl[i] || !femu_ring_count(ssd->to_ftl[i]))
-                continue;
-
-            rc = femu_ring_dequeue(ssd->to_ftl[i], (void *)&req, 1);
-            if (rc != 1) {
-                printf("FEMU: FTL to_ftl dequeue failed\n");
-            }
-
-            ftl_assert(req);
-            switch (req->is_write) {
-            case 1:
-                lat = ssd_write(ssd, req);
-                break;
-            case 0:
-                lat = ssd_read(ssd, req);
-                break;
-            default:
-                ftl_err("FTL received unkown request type, ERROR\n");
-            }
-
-            req->reqlat = lat;
-            req->expire_time += lat;
-
-            rc = femu_ring_enqueue(ssd->to_poller[i], (void *)&req, 1);
-            if (rc != 1) {
-                ftl_err("FTL to_poller enqueue failed\n");
-            }
-
-            /* clean one line if needed (in the background) */
-            if (should_gc(ssd)) {
-                do_gc(ssd, false);
-            }
-        }
-    }
-
-    return NULL;
-}
-
-uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
+static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
 {
     struct ssdparams *spp = &ssd->sp;
     uint64_t lba = req->slba;
@@ -868,7 +799,7 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
     return maxlat;
 }
 
-uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
+static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 {
     uint64_t lba = req->slba;
     struct ssdparams *spp = &ssd->sp;
@@ -921,5 +852,146 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     }
 
     return maxlat;
+}
+
+static void *ftl_thread(void *arg)
+{
+    FemuCtrl *n = (FemuCtrl *)arg;
+    struct ssd *ssd = n->ssd;
+    NvmeRequest *req = NULL;
+    uint64_t lat = 0;
+    int rc;
+    int i;
+
+    while (!*(ssd->dataplane_started_ptr)) {
+        usleep(100000);
+    }
+
+    /* FIXME: not safe, to handle ->to_ftl and ->to_poller gracefully */
+    ssd->to_ftl = n->to_ftl;
+    ssd->to_poller = n->to_poller;
+
+    while (1) {
+        for (i = 1; i <= n->num_poller; i++) {
+            if (!ssd->to_ftl[i] || !femu_ring_count(ssd->to_ftl[i]))
+                continue;
+
+            rc = femu_ring_dequeue(ssd->to_ftl[i], (void *)&req, 1);
+            if (rc != 1) {
+                printf("FEMU: FTL to_ftl dequeue failed\n");
+            }
+
+            ftl_assert(req);
+            switch (req->is_write) {
+            case 1:
+                lat = ssd_write(ssd, req);
+                break;
+            case 0:
+                lat = ssd_read(ssd, req);
+                break;
+            default:
+                ftl_err("FTL received unkown request type, ERROR\n");
+            }
+
+            req->reqlat = lat;
+            req->expire_time += lat;
+
+            rc = femu_ring_enqueue(ssd->to_poller[i], (void *)&req, 1);
+            if (rc != 1) {
+                ftl_err("FTL to_poller enqueue failed\n");
+            }
+
+            /* clean one line if needed (in the background) */
+            if (should_gc(ssd)) {
+                do_gc(ssd, false);
+            }
+        }
+    }
+
+    return NULL;
+}
+
+/* bb <=> black-box */
+static void bb_init(FemuCtrl *n, Error **errp)
+{
+    struct ssd *ssd = n->ssd = g_malloc0(sizeof(struct ssd));
+    memset(ssd, 0, sizeof(struct ssd));
+    ssd->dataplane_started_ptr = &n->dataplane_started;
+    ssd->ssdname = (char *)n->devname;
+    femu_debug("Starting FEMU in Blackbox-SSD mode ...\n");
+    ssd_init(n);
+}
+
+static void bb_flip(FemuCtrl *n, NvmeCmd *cmd)
+{
+    struct ssd *ssd = n->ssd;
+    int64_t cdw10 = le64_to_cpu(cmd->cdw10);
+
+    switch (cdw10) {
+    case FEMU_ENABLE_GC_DELAY:
+        ssd->sp.enable_gc_delay = true;
+        femu_log("%s,FEMU GC Delay Emulation [Enabled]!\n", n->devname);
+        break;
+    case FEMU_DISABLE_GC_DELAY:
+        ssd->sp.enable_gc_delay = false;
+        femu_log("%s,FEMU GC Delay Emulation [Disabled]!\n", n->devname);
+        break;
+    case FEMU_ENABLE_DELAY_EMU:
+        ssd->sp.pg_rd_lat = NAND_READ_LATENCY;
+        ssd->sp.pg_wr_lat = NAND_PROG_LATENCY;
+        ssd->sp.blk_er_lat = NAND_ERASE_LATENCY;
+        ssd->sp.ch_xfer_lat = 0;
+        femu_log("%s,FEMU Delay Emulation [Enabled]!\n", n->devname);
+        break;
+    case FEMU_DISABLE_DELAY_EMU:
+        ssd->sp.pg_rd_lat = 0;
+        ssd->sp.pg_wr_lat = 0;
+        ssd->sp.blk_er_lat = 0;
+        ssd->sp.ch_xfer_lat = 0;
+        femu_log("%s,FEMU Delay Emulation [Disabled]!\n", n->devname);
+        break;
+    case FEMU_RESET_ACCT:
+        n->nr_tt_ios = 0;
+        n->nr_tt_late_ios = 0;
+        femu_log("%s,Reset tt_late_ios/tt_ios,%lu/%lu\n", n->devname,
+                n->nr_tt_late_ios, n->nr_tt_ios);
+        break;
+    case FEMU_ENABLE_LOG:
+        n->print_log = true;
+        femu_log("%s,Log print [Enabled]!\n", n->devname);
+        break;
+    case FEMU_DISABLE_LOG:
+        n->print_log = false;
+        femu_log("%s,Log print [Disabled]!\n", n->devname);
+        break;
+    default:
+        printf("FEMU:%s,Not implemented flip cmd (%lu)\n", n->devname, cdw10);
+    }
+}
+
+static uint16_t bb_admin_cmd(FemuCtrl *n, NvmeCmd *cmd)
+{
+    switch (cmd->opcode) {
+    case NVME_ADM_CMD_FEMU_FLIP:
+        bb_flip(n, cmd);
+        return NVME_SUCCESS;
+    default:
+        abort();
+    }
+}
+
+int nvme_register_bbssd(FemuCtrl *n)
+{
+    n->ext_ops = (FemuExtCtrlOps) {
+        .state            = NULL,
+        .init             = bb_init,
+        .exit             = NULL,
+        .rw_check_req     = NULL,
+        .admin_cmd        = bb_admin_cmd,
+        .io_cmd           = NULL,
+        .get_log          = NULL,
+    };
+
+    return 0;
 }
 
