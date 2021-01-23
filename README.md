@@ -58,6 +58,7 @@ experiment with new FTL algorithms or SSD performance models to explore new SSD
 architecture innovations as well as benchmark the new arch changes with real
 applications, instead of using decade-old disk trace files.
 
+
 Installation
 ------------
 
@@ -92,7 +93,7 @@ Installation
   | Ubuntu 16.04.5       | 4.15.0 | 5.4.0 | 1.8.2  | 3.6.0  |
   | Ubuntu 20.04.1       | 5.4.0  | 9.3.0 | 1.10.0 | 3.8.2  | 
 
-  Tested VM environment: ``Guest Linux kernel 5.10``
+  Tested VM environment: ``Guest Linux kernel 5.10 and 5.4``
 
 > Notes: FEMU is now re-based on QEMU-5.2.0, which requires >=Python-3.6 and >=Ninjia-1.7 to build, 
 > check [here](https://wiki.qemu.org/ChangeLog/5.2#Build_Dependencies) for installing
@@ -100,16 +101,14 @@ Installation
 
 
 3. Prepare the VM image (For performance reasons, we suggest to use a server
-   version guest OS [e.g. Ubuntu Server 16.04, 14.04])
+   version guest OS [e.g. Ubuntu Server 20.04, 18.04, 16.04])
 
   You can either build your own VM image, or use the VM image provided by us
 
-  **Option 1**: Use our VM image, please download it from our
-  [FEMU-VM-image-site](https://goo.gl/forms/NptPVEOy9EnwN70Y2) and save it as
-  `$HOME/images/u14s.qcow2`. After you fill in the query, VM image downloading
-  link will be sent to your email address shortly. ***Please make sure to provide
-  a correct email address when filling the above form. Contact
-  [Huaicheng Li](mailto:huaicheng@cs.uchicago.edu) upon any problems.***
+  **Option 1**: Use our VM image file, please download it from our
+  [FEMU-VM-image-site](https://forms.gle/nEZaEe2fkj5B1bxt9). After you fill in
+  the form, VM image downloading instructions will be sent to your email
+  address shortly.
 
   **Option 2**: Build your own VM image by following guides (e.g.
   [here](https://help.ubuntu.com/community/Installation/QemuEmulator#Installation_of_an_operating_system_from_ISO_to_the_QEMU_environment)).
@@ -153,6 +152,21 @@ $ sudo update-grub
 
 Run FEMU
 --------
+
+
+### 0. Minimum Requirement
+
+- Run FEMU on a physical machine, not inside a VM (if the VM has nested
+  virtualization enabled, you can also give it a try, but FEMU performance will
+  suffer, this is **not** recommended.)
+
+- At least 8 cores and 12GB DRAM in the physical machine to enable seamless run
+  of the following default FEMU scripts emulating a 4GB SSD in a VM with 4
+  vCPUs and 4GB DRAM.
+
+- If you intend to emulate a larger VM (more vCPUs and DRAM) and an SSD with
+  larger capacity, make sure refer to the resource provisioning tips
+  [here](https://github.com/ucare-uchicago/FEMU/wiki/Before-running-FEMU).
 
 ### 1. Run FEMU as blackbox SSDs (``Device-managed FTL`` or ``BBSSD`` mode) ###
 
