@@ -1,11 +1,11 @@
 #!/bin/bash
 # Huaicheng Li <huaicheng@cs.uchicago.edu>
-# Run VM with FEMU support: no SSD emulation logic, run as fast as possible
+# Run FEMU with no SSD emulation logic, (e.g., for SCM/Optane emulation)
 
-# image directory
+# Image directory
 IMGDIR=$HOME/images
-# virtual machine disk image
-OSIMGF=$IMGDIR/u14s.qcow2
+# Virtual machine disk image
+OSIMGF=$IMGDIR/u20s.qcow2
 
 
 if [[ ! -e "$OSIMGF" ]]; then
@@ -18,7 +18,7 @@ if [[ ! -e "$OSIMGF" ]]; then
 fi
 
 sudo x86_64-softmmu/qemu-system-x86_64 \
-    -name "FEMU-blackbox-SSD" \
+    -name "FEMU-NoSSD-VM" \
     -enable-kvm \
     -cpu host \
     -smp 4 \
@@ -26,8 +26,8 @@ sudo x86_64-softmmu/qemu-system-x86_64 \
     -device virtio-scsi-pci,id=scsi0 \
     -device scsi-hd,drive=hd0 \
     -drive file=$OSIMGF,if=none,aio=native,cache=none,format=qcow2,id=hd0 \
-    -device femu,devsz_mb=1024,id=nvme0 \
+    -device femu,devsz_mb=4096,id=nvme0 \
     -net user,hostfwd=tcp::8080-:22 \
     -net nic,model=virtio \
     -nographic \
-    -qmp unix:./qmp-sock,server,nowait 
+    -qmp unix:./qmp-sock,server,nowait
