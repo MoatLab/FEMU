@@ -923,8 +923,6 @@ static uint16_t oc20_set_log(FemuCtrl *n, NvmeCmd *cmd)
 
 static uint16_t oc20_admin_cmd(FemuCtrl *n, NvmeCmd *cmd)
 {
-    assert(is_oc20_admin_cmd(cmd->opcode));
-
     switch (cmd->opcode) {
     case OC20_ADM_CMD_IDENTIFY:
         femu_debug("oc20_identify\n");
@@ -932,7 +930,7 @@ static uint16_t oc20_admin_cmd(FemuCtrl *n, NvmeCmd *cmd)
     case OC20_ADM_CMD_SET_LOG_PAGE:
         return oc20_set_log(n, cmd);
     default:
-        abort();
+        return NVME_INVALID_OPCODE | NVME_DNR;
     }
 }
 
