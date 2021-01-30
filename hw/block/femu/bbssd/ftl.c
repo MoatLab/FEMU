@@ -976,7 +976,7 @@ static uint16_t bb_admin_cmd(FemuCtrl *n, NvmeCmd *cmd)
         bb_flip(n, cmd);
         return NVME_SUCCESS;
     default:
-        abort();
+        return NVME_INVALID_OPCODE | NVME_DNR;
     }
 }
 
