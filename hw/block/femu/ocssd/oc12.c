@@ -725,8 +725,6 @@ static int oc12_read_tbls(FemuCtrl *n)
 
 static uint16_t oc12_admin_cmd(FemuCtrl *n, NvmeCmd *cmd)
 {
-    assert(is_oc12_admin_cmd(cmd->opcode));
-
     switch (cmd->opcode) {
     case OC12_ADM_CMD_IDENTITY:
         femu_debug("oc12_cmd_identity\n");
@@ -741,7 +739,7 @@ static uint16_t oc12_admin_cmd(FemuCtrl *n, NvmeCmd *cmd)
         femu_debug("oc12_set_bb_tbl\n");
         return oc12_bbt_set(n, cmd);
     default:
-        abort();
+        return NVME_INVALID_OPCODE | NVME_DNR;
     }
 }
 
