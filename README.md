@@ -85,7 +85,7 @@ Installation
 ```
   FEMU binary will appear as ``x86_64-softmmu/qemu-system-x86_64``
 
-  Tested host environment:  
+  **Tested host environment** (For successful FEMU compilation):
   
   | Linux Distribution   | Kernel | Gcc   | Ninja  | Python |
   | :---                 | :---:  | ---   | ---    | ---    |
@@ -93,7 +93,16 @@ Installation
   | Ubuntu 16.04.5       | 4.15.0 | 5.4.0 | 1.8.2  | 3.6.0  |
   | Ubuntu 20.04.1       | 5.4.0  | 9.3.0 | 1.10.0 | 3.8.2  | 
 
-  Tested VM environment: ``Guest Linux kernel 5.10 and 5.4``
+  **Tested VM environment** (Whether a certain FEMU mode works under a certain
+  guest kernel version): 
+
+  | Mode \ Guest Kernel  | 4.16    | 4.20    | 5.4     | 5.10    |
+  | :---                 | :---:   | --      | --      | --      |
+  | NoSSD                | &check; | &check; | &check; | &check; |
+  | Black-box SSD        | &check; | &check; | &check; | &check; |
+  | OpenChannel-SSD v1.2 | &check; | &check; | &check; | &check; |
+  | OpenChannel-SSD v2.0 | &cross; | &check; | &check; | &check; |
+
 
 > Notes: FEMU is now re-based on QEMU-5.2.0, which requires >=Python-3.6 and >=Ninjia-1.7 to build, 
 > check [here](https://wiki.qemu.org/ChangeLog/5.2#Build_Dependencies) for installing
@@ -188,12 +197,13 @@ and [Specification 2.0](http://lightnvm.io/docs/OCSSD-2_0-20180129.pdf) are
 supported, to run FEMU OCSSD mode:
 
 ```Bash
-# Tested with Guest Linux Kernel 5.10.0 and newest nvme-cli compiled from source
 ./run-whitebox.sh
 ```
 
 By default, FEMU will run OCSSD in 2.0 mode. To run OCSSD in 1.2, make sure
 ``OCVER=1`` is set in the ``run-whitebox.sh``
+
+
 
 Inside the VM, you can play with LightNVM.
 
