@@ -346,7 +346,7 @@ static void parse_ppa_list(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             bucket[secs_idx].ch = PPA_CH(ln, ppa);
             bucket[secs_idx].lun = PPA_LUN(ln, ppa);
             bucket[secs_idx].pg = PPA_PG(ln, ppa);
-            bucket[secs_idx].is_upg = is_upg(bucket[secs_idx].pg);
+            bucket[secs_idx].page_type = get_page_type(n, bucket[secs_idx].pg);
 
             prev_pg_addr = cur_pg_addr;
         }
@@ -367,7 +367,7 @@ static int oc12_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     Oc12Ctrl *ln = n->oc12_ctrl;
     Oc12IdGroup *c = &ln->id_ctrl.groups[0];
     int max_sec_per_rq = ln->params.max_sec_per_rq;
-    bool is_upg;
+    uint8_t page_type;
 
     int64_t now = req->stime;
     uint64_t ppa;
@@ -400,7 +400,7 @@ static int oc12_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
         ch = addr_bucket[i].ch;
         lun = addr_bucket[i].lun;
-        is_upg = addr_bucket[i].is_upg;
+        page_type = addr_bucket[i].page_type;
         lunid = ch * c->num_lun + lun;
 
         io_done_ts = 0;
@@ -411,9 +411,9 @@ static int oc12_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             /* Write data needs to be transferred through the channel first */
             chnl_end_ts = advance_channel_timestamp(n, ch, now, opcode);
             /* Then issue NAND Program to the target flash chip */
-            io_done_ts = advance_chip_timestamp(n, lunid, chnl_end_ts, opcode, is_upg);
+            io_done_ts = advance_chip_timestamp(n, lunid, chnl_end_ts, opcode, page_type);
         } else {
-            chip_end_ts = advance_chip_timestamp(n, lunid, now, opcode, is_upg);
+            chip_end_ts = advance_chip_timestamp(n, lunid, now, opcode, page_type);
             io_done_ts = advance_channel_timestamp(n, ch, chip_end_ts, opcode);
         }
 
@@ -850,12 +850,7 @@ static int oc12_init_misc(FemuCtrl *n)
 {
     int ret;
 
-    n->upg_rd_lat_ns = NAND_UPPER_PAGE_READ_LATENCY_NS;
-    n->lpg_rd_lat_ns = NAND_LOWER_PAGE_READ_LATENCY_NS;
-    n->upg_wr_lat_ns = NAND_UPPER_PAGE_WRITE_LATENCY_NS;
-    n->lpg_wr_lat_ns = NAND_LOWER_PAGE_WRITE_LATENCY_NS;
-    n->blk_er_lat_ns = NAND_BLOCK_ERASE_LATENCY_NS;
-    n->chnl_pg_xfer_lat_ns = CHNL_PAGE_TRANSFER_LATENCY_NS;
+	set_latency(n);
 
     for (int i = 0; i < FEMU_MAX_NUM_CHNLS; i++) {
         n->chnl_next_avail_time[i] = 0;
@@ -1029,7 +1024,14 @@ static int oc12_init_more(FemuCtrl *n)
         oc12_tbl_initialize(ns);
     }
 
-    init_nand_page_pairing(n);
+    if (n->cell_type == TLC_CELL) {
+        init_tlc_page_pairing(n);
+    } else if (n->cell_type == QLC_CELL) {
+        init_qlc_page_pairing(n);
+    } else {
+        // default to MLC NAND configuration
+        init_nand_page_pairing(n);
+    }
 
     ret = oc12_init_meta(ln);
     if (ret) {

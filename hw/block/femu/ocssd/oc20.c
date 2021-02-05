@@ -1344,12 +1344,7 @@ static int oc20_init_misc(FemuCtrl *n)
 {
     int ret;
 
-    n->upg_rd_lat_ns = NAND_UPPER_PAGE_READ_LATENCY_NS;
-    n->lpg_rd_lat_ns = NAND_LOWER_PAGE_READ_LATENCY_NS;
-    n->upg_wr_lat_ns = NAND_UPPER_PAGE_WRITE_LATENCY_NS;
-    n->lpg_wr_lat_ns = NAND_LOWER_PAGE_WRITE_LATENCY_NS;
-    n->blk_er_lat_ns = NAND_BLOCK_ERASE_LATENCY_NS;
-    n->chnl_pg_xfer_lat_ns = CHNL_PAGE_TRANSFER_LATENCY_NS;
+	set_latency(n);
 
     for (int i = 0; i < FEMU_MAX_NUM_CHNLS; i++) {
         n->chnl_next_avail_time[i] = 0;

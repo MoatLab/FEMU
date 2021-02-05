@@ -541,6 +541,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
 
     init_dram_backend(&n->mbe, bs_size);
     n->mbe->femu_mode = n->femu_mode;
+    n->mbe->cell_type = n->cell_type;
 
     n->completed = 0;
     n->start_time = time(NULL);
@@ -649,6 +650,7 @@ static Property femu_props[] = {
     DEFINE_PROP_UINT16("vid", FemuCtrl, vid, 0x1d1d),
     DEFINE_PROP_UINT16("did", FemuCtrl, did, 0x1f1f),
     DEFINE_PROP_UINT8("femu_mode", FemuCtrl, femu_mode, FEMU_NOSSD_MODE),
+    DEFINE_PROP_UINT8("cell_type", FemuCtrl, cell_type, MLC_CELL),
     DEFINE_PROP_UINT8("lver", FemuCtrl, lver, 0x2),
     DEFINE_PROP_UINT16("lsec_size", FemuCtrl, oc_params.sec_size, 4096),
     DEFINE_PROP_UINT8("lsecs_per_pg", FemuCtrl, oc_params.secs_per_pg, 4),
