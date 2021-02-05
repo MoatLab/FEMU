@@ -820,6 +820,12 @@ typedef struct DMAOff {
     dma_addr_t len;
 } DMAOff;
 
+enum celltype {
+    MLC_CELL = 2,
+    TLC_CELL = 3,
+    QLC_CELL = 4,
+};
+
 typedef struct NvmeSQueue {
     struct FemuCtrl *ctrl;
     uint8_t     phys_contig;
@@ -1078,9 +1084,15 @@ typedef struct FemuCtrl {
     pthread_spinlock_t chnl_locks[FEMU_MAX_NUM_CHNLS];
 
     /* Latency numbers for whitebox-mode only */
-    int64_t upg_rd_lat_ns; /* upper page in MLC */
-    int64_t lpg_rd_lat_ns; /* lower page in MLC */
+    int64_t upg_rd_lat_ns; /* upper page in MLC/TLC/QLC */
+    int64_t cpg_rd_lat_ns; /* center page in TLC */
+    int64_t cupg_rd_lat_ns; /* center-upper page in QLC */
+    int64_t clpg_rd_lat_ns; /* center-lower page in QLC */
+    int64_t lpg_rd_lat_ns; /* lower page in MLC/TLC/QLC */
     int64_t upg_wr_lat_ns;
+    int64_t cpg_wr_lat_ns;
+    int64_t cupg_wr_lat_ns;
+    int64_t clpg_wr_lat_ns;
     int64_t lpg_wr_lat_ns;
     int64_t blk_er_lat_ns;
     int64_t chnl_pg_xfer_lat_ns;
@@ -1102,6 +1114,7 @@ typedef struct FemuCtrl {
 
     uint8_t         multipoller_enabled;
     uint32_t        num_poller;
+    celltype        cell_type;
 } FemuCtrl;
 
 typedef struct NvmePollerThreadArgument {

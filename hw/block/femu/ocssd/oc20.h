@@ -241,7 +241,7 @@ typedef struct Oc20AddrBucket {
     int  ch;
     int  lun;
     int  pg;
-    bool is_upg;
+    uint8_t page_type;
     int  cnt;
 } Oc20AddrBucket;
 
