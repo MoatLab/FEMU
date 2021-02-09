@@ -2,6 +2,7 @@
 
 #define NVME_IDENTIFY_DATA_SIZE 4096
 
+#if 0
 static const bool nvme_feature_support[NVME_FID_MAX] = {
     [NVME_ARBITRATION]              = true,
     [NVME_POWER_MANAGEMENT]         = true,
@@ -15,7 +16,9 @@ static const bool nvme_feature_support[NVME_FID_MAX] = {
     [NVME_ASYNCHRONOUS_EVENT_CONF]  = true,
     [NVME_TIMESTAMP]                = true,
 };
+#endif
 
+#if 0
 static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
     [NVME_TEMPERATURE_THRESHOLD]    = NVME_FEAT_CAP_CHANGE,
     [NVME_ERROR_RECOVERY]           = NVME_FEAT_CAP_CHANGE | NVME_FEAT_CAP_NS,
@@ -24,6 +27,7 @@ static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
     [NVME_ASYNCHRONOUS_EVENT_CONF]  = NVME_FEAT_CAP_CHANGE,
     [NVME_TIMESTAMP]                = NVME_FEAT_CAP_CHANGE,
 };
+#endif
 
 static const uint32_t nvme_cse_acs[256] = {
     [NVME_ADM_CMD_DELETE_SQ]        = NVME_CMD_EFF_CSUPP,
@@ -38,7 +42,7 @@ static const uint32_t nvme_cse_acs[256] = {
     [NVME_ADM_CMD_ASYNC_EV_REQ]     = NVME_CMD_EFF_CSUPP,
 };
 
-static const uint32_t nvme_cse_iocs_none[256];
+//static const uint32_t nvme_cse_iocs_none[256];
 
 static const uint32_t nvme_cse_iocs_nvm[256] = {
     [NVME_CMD_FLUSH]                = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
