@@ -37,20 +37,50 @@ Year =  {2018}
 
 ```
 
-Project Description
--------------------
+Project Description (What is FEMU?)
+-----------------------------------
 
-Briefly speaking, FEMU is a fast, accurate, and scalable NVMe SSD Emulator.
-Based upon QEMU/KVM, FEMU is exposed to Guest OS (Linux) as an NVMe block
-device (e.g. /dev/nvme0nX). It can be used as an emulated whitebox or blackbox
-SSD: (1). whitebox mode (a.k.a.  Software-Defined Flash (SDF), or
-OpenChannel-SSD) with host side FTL (e.g. LightNVM) (2). blackbox mode with
-FTL managed by the device (like most of current commercial SSDs).
 
-FEMU tries to achieve benefits of both SSD Hardware platforms (e.g. CNEX
-OpenChannel SSD, OpenSSD, etc.) and SSD simulators (e.g. DiskSim+SSD, FlashSim,
-SSDSim, etc.). Like hardware platforms, FEMU can support running full system
-stack (Applications + OS + NVMe interface) on top, thus enabling
+                            +--------------------+
+                            |    VM / Guest OS   |
+                            |                    |
+                            |                    |
+                            |  NVMe Block Device |
+                            +--------^^----------+
+                                     ||
+                                  PCIe/NVMe
+                                     ||
+      +------------------------------vv----------------------------+
+      |  +---------+ +---------+ +---------+ +---------+ +------+  |
+      |  | Blackbox| |  OCSSD  | | ZNS-SSD | |  NoSSD  | | ...  |  |
+      |  +---------+ +---------+ +---------+ +---------+ +------+  |
+      |                    FEMU NVMe SSD Controller                |
+      +------------------------------------------------------------+
+
+
+Briefly speaking, FEMU is a **fast**, **accurate**, **scalable**, and
+**extensible** NVMe SSD Emulator. Based upon QEMU/KVM, FEMU is exposed to Guest
+OS (Linux) as an NVMe block device (e.g. /dev/nvme0nX). It supports emulating different types of SSDs:
+
+- ``Whitebox mode`` (``OCSSD``) (a.k.a. Software-Defined Flash (SDF), or
+  OpenChannel-SSD) with host side FTL (e.g. LightNVM or SPDK FTL), both
+  OpenChannel Spec 1.2 and 2.0 are supported.
+
+- ``Blackbox mode`` (``BBSSD``) with FTL managed by the device (like most of
+  current commercial SSDs). A page-level mapping based FTL is included.
+
+- ``ZNS mode`` (``ZNSSD``), exposing NVMe Zone interface for the host to
+  directly read/write/append to the device following certain rules.
+
+- ``NoSSD mode``, emulating a as-fast-as-possible NVMe device with sub-10
+  microsecond latency. This is to emualte SCM-class block devices such as
+  Optane or Z-NAND SSDs.
+
+
+FEMU design aims to achieve the benefits of both SSD Hardware platforms (e.g.
+CNEX OpenChannel SSD, OpenSSD, etc.) and SSD simulators (e.g. DiskSim+SSD,
+FlashSim, SSDSim, etc.). Like hardware platforms, FEMU can support running full
+system stack (Applications + OS + NVMe interface) on top, thus enabling
 Software-Defined Flash (SDF) alike research with modifications at application,
 OS, interface or SSD controller architecture level. Like SSD simulators, FEMU
 can also support internal-SSD/FTL related research. Users can feel free to
@@ -96,12 +126,13 @@ Installation
   **Tested VM environment** (Whether a certain FEMU mode works under a certain
   guest kernel version): 
 
-  | Mode \ Guest Kernel  | 4.16    | 4.20    | 5.4     | 5.10    |
-  | :---                 | :---:   | --      | --      | --      |
-  | NoSSD                | &check; | &check; | &check; | &check; |
-  | Black-box SSD        | &check; | &check; | &check; | &check; |
-  | OpenChannel-SSD v1.2 | &check; | &check; | &check; | &check; |
-  | OpenChannel-SSD v2.0 | &cross; | &check; | &check; | &check; |
+  | Mode \ Guest Kernel       | 4.16    | 4.20    | 5.4     | 5.10    |
+  | :---                      | :---:   | --      | --      | --      |
+  | NoSSD                     | &check; | &check; | &check; | &check; |
+  | Black-box SSD             | &check; | &check; | &check; | &check; |
+  | OpenChannel-SSD v1.2      | &check; | &check; | &check; | &check; |
+  | OpenChannel-SSD v2.0      | &cross; | &check; | &check; | &check; |
+  | Zoned-Namespace (ZNS) SSD | &cross; | &cross; | &cross; | &check; |
 
 
 > Notes: FEMU is now re-based on QEMU-5.2.0, which requires >=Python-3.6 and >=Ninjia-1.7 to build, 
@@ -220,9 +251,26 @@ this case handles IOs as fast as possible. It can be used for basic performance
 benchmarking, as well as fast storage-class memory (SCM, or Intel Optane SSD)
 emulation. 
 
-### 4. Run FEMU as ZNS (Zoned-Namespace) SSDs (``ZNS-SSDs`` mode) ###
+### 4. Run FEMU as NVMe ZNS (Zoned-Namespace) SSDs (``ZNSSD`` mode) ###
 
-To be released!
+```Bash
+./run-zns.sh
+```
+
+### Contributing ###
+
+Github [``issue``](https://github.com/ucare-uchicago/FEMU/issues) and [``pull
+request``](https://github.com/ucare-uchicago/FEMU/pulls) are preferred. Do let
+us know if you have any thoughts!
+
+### Acknowledgement ###
+
+FEMU is inspired by many prior SSD simulators/emulators (SSDSim, FlashSim,
+VSSIM) as well as hardware development platforms (OpenSSD, DFC), but FEMU has
+gone far beyond what prior platforms can achieve in terms of ``performance``,
+``extensibility``, and ``usability``.
+
+FEMU's NVMe controller logic is based on QEMU/NVMe, LightNVM/QEMU and ZNS/QEMU.
 
 
 ## For more details, please checkout the [Wiki](https://github.com/ucare-uchicago/femu/wiki)!

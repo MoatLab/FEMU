@@ -1,7 +1,7 @@
 #ifndef __FEMU_OC12_H
 #define __FEMU_OC12_H
 
-#include "qapi/error.h"
+#include "../nvme.h"
 
 enum Oc12AdminCommands {
     OC12_ADM_CMD_IDENTITY    = 0xe2,

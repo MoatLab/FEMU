@@ -1,9 +1,4 @@
-#include "qemu/osdep.h"
-#include "hw/pci/pci.h"
-
 #include "./oc20.h"
-#include "./nand.h"
-#include "./timing.h"
 
 static inline bool is_oc20_admin_cmd(uint8_t opcode)
 {
@@ -17,7 +12,7 @@ static uint16_t oc20_dma_read(FemuCtrl *n, uint8_t *ptr, uint32_t len,
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
 
-    return femu_dma_read_prp(n, ptr, len, prp1, prp2);
+    return dma_read_prp(n, ptr, len, prp1, prp2);
 }
 
 static uint16_t oc20_dma_write(FemuCtrl *n, uint8_t *ptr, uint32_t len,
@@ -26,7 +21,7 @@ static uint16_t oc20_dma_write(FemuCtrl *n, uint8_t *ptr, uint32_t len,
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
 
-    return femu_dma_write_prp(n, ptr, len, prp1, prp2);
+    return dma_write_prp(n, ptr, len, prp1, prp2);
 }
 
 #ifdef DEBUG_OC20
@@ -135,7 +130,6 @@ static uint16_t oc20_advance_wp(FemuCtrl *n, NvmeNamespace *ns, uint64_t lba,
  *
  * Results are stored in @bucket and @n
  */
-
 static void oc20_parse_lba_list(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                                 NvmeRequest *req, Oc20AddrBucket *bucket,
                                 int *nr)
@@ -251,8 +245,9 @@ static int oc20_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     return 0;
 }
 
-static uint16_t oc20_rw_check_chunk_write(FemuCtrl *n, NvmeCmd *cmd, uint64_t
-                                          lba, uint32_t ws, NvmeRequest *req)
+static uint16_t oc20_rw_check_chunk_write(FemuCtrl *n, NvmeCmd *cmd,
+                                          uint64_t lba, uint32_t ws,
+                                          NvmeRequest *req)
 {
     Oc20Params *params = &n->params.oc20;
     NvmeNamespace *ns = req->ns;
@@ -419,8 +414,8 @@ static uint16_t oc20_rw_check_vector_req(FemuCtrl *n, NvmeCmd *cmd,
     return oc20_rw_check_read_req(n, cmd, req);
 }
 
-static uint16_t oc20_chunk_set_free(FemuCtrl *n, NvmeNamespace *ns, uint64_t lba,
-                             hwaddr mptr, NvmeRequest *req)
+static uint16_t oc20_chunk_set_free(FemuCtrl *n, NvmeNamespace *ns,
+                                    uint64_t lba, hwaddr mptr, NvmeRequest *req)
 {
     Oc20Params *params = &n->params.oc20;
     Oc20Namespace *lns = ns->state;
@@ -464,7 +459,7 @@ static uint16_t oc20_chunk_set_free(FemuCtrl *n, NvmeNamespace *ns, uint64_t lba
         chunk_meta->wp = 0;
 
         if (mptr) {
-            femu_addr_write(n, mptr, chunk_meta, sizeof(*chunk_meta));
+            nvme_addr_write(n, mptr, chunk_meta, sizeof(*chunk_meta));
         }
 
         return NVME_SUCCESS;
@@ -543,8 +538,9 @@ static int get_ch_lun_chk(char *chunkinfo, unsigned int *grp, unsigned int *lun,
     return 1;
 }
 
-static int get_chunk_meta_index(FemuCtrl *n, NvmeNamespace *ns, unsigned int
-                                grp, unsigned int lun, unsigned int chk)
+static int get_chunk_meta_index(FemuCtrl *n, NvmeNamespace *ns,
+                                unsigned int grp, unsigned int lun,
+                                unsigned int chk)
 {
     Oc20Namespace *lns = ns->state;
     Oc20IdGeo *geo = &lns->id_ctrl.geo;
@@ -638,13 +634,13 @@ static int oc20_resetfail_load(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 
     fp = fopen(params->resetfail_fname, "r");
     if (!fp) {
-        error_setg(errp, "could not open resetfail file");
+        femu_err("Could not open resetfail file");
         return 1;
     }
 
     while (fgets(line, sizeof(line), fp)) {
         if (set_resetfail_chunk(n, ns, line)) {
-            error_setg(errp, "could not parse resetfail line: %s", line);
+            femu_err("Could not parse resetfail line: %s", line);
             return 1;
         }
     }
@@ -665,13 +661,13 @@ static int oc20_writefail_load(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 
     fp = fopen(params->writefail_fname, "r");
     if (!fp) {
-        error_setg(errp, "could not open writefail file");
+        femu_err("Could not open writefail file");
         return 1;
     }
 
     while (fgets(line, sizeof(line), fp)) {
         if (set_writefail_sector(n, ns, line)) {
-            error_setg(errp, "could not parse writefail line: %s", line);
+            femu_err("Could not parse writefail line: %s", line);
             return 1;
         }
     }
@@ -724,7 +720,7 @@ static uint16_t oc20_rw(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 
     if (nlb > 1) {
         uint32_t len = nlb * sizeof(uint64_t);
-        femu_addr_read(n, lbal, (void *)req->slba, len);
+        nvme_addr_read(n, lbal, (void *)req->slba, len);
     } else {
         ((uint64_t *)req->slba)[0] = lbal;
     }
@@ -734,17 +730,7 @@ static uint16_t oc20_rw(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         goto fail_free;
     }
 
-#if 0
-    for (uint32_t i = 0; i < nlb; i++) {
-        if ((req->predef & (1 << i)) && !req->is_write) {
-            if (NVME_ERR_REC_DULBE(n->features.err_rec)) {
-                return NVME_DULB | NVME_DNR;
-            }
-        }
-    }
-#endif
-
-    if (femu_map_prp(&req->qsg, &req->iov, prp1, prp2, nlb << lbads, n)) {
+    if (nvme_map_prp(&req->qsg, &req->iov, prp1, prp2, nlb << lbads, n)) {
         femu_err("%s,malformed prp\n", __func__);
         err = NVME_INVALID_FIELD | NVME_DNR;
         goto fail_free;
@@ -800,7 +786,7 @@ static uint16_t oc20_erase(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     req->slba = (uint64_t)g_malloc0(nlb * sizeof(uint64_t));
 
     if (nlb > 1) {
-        femu_addr_read(n, lbal, (void *) req->slba, nlb * sizeof(void *));
+        nvme_addr_read(n, lbal, (void *) req->slba, nlb * sizeof(void *));
     } else {
         ((uint64_t *)req->slba)[0] = lbal;
     }
@@ -934,10 +920,20 @@ static uint16_t oc20_admin_cmd(FemuCtrl *n, NvmeCmd *cmd)
     }
 }
 
+static uint16_t oc20_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
+                             NvmeRequest *req)
+{
+    /* Note: this is not the read/write path for OCSSD */
+    return NVME_DNR;
+}
+
 static uint16_t oc20_io_cmd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                             NvmeRequest *req)
 {
     switch (cmd->opcode) {
+    case NVME_CMD_READ:
+    case NVME_CMD_WRITE:
+        return oc20_nvme_rw(n, ns, cmd, req);
     case OC20_CMD_VECT_READ:
     case OC20_CMD_VECT_WRITE:
         return oc20_rw(n, cmd, req);
@@ -967,8 +963,6 @@ static void oc20_nvme_ns_init_identify(FemuCtrl *n, NvmeIdNs *id_ns)
     id_ns->nsfeat = 0x4;
     id_ns->nlbaf = 0; /* 0's based value */
     id_ns->flbas = params->extended << 4;
-    //id_ns->mc = params->mc;
-    //id_ns->dlfeat = params->dlfeat;
     id_ns->vs[0] = 0x1;
     id_ns->lbaf[0].lbads = 12;
     id_ns->lbaf[0].ms = 0;
@@ -1227,18 +1221,13 @@ static int oc20_init_namespace(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
                  id_ctrl->lbaf.lun_len + id_ctrl->lbaf.grp_len);
 
     if (oc20_init_chunk_info(lns)) {
-        error_setg(errp, "nvme: could not load chunk info");
+        femu_err("Could not load chunk info");
         return 1;
     }
 
     lns->resetfail = NULL;
     if (params->resetfail_fname) {
         lns->resetfail = g_malloc0_n(lns->chks_total, sizeof(*lns->resetfail));
-        if (!lns->resetfail) {
-            error_setg(errp, "nvme: could not allocate memory");
-            return 1;
-        }
-
         if (oc20_resetfail_load(n, ns, errp)) {
             return 1;
         }
@@ -1248,11 +1237,6 @@ static int oc20_init_namespace(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     if (params->writefail_fname) {
         abort();
         lns->writefail = g_malloc0_n(ns->ns_blks, sizeof(*lns->writefail));
-        if (!lns->writefail) {
-            error_setg(errp, "nvme: could not allocate memory");
-            return 1;
-        }
-
         if (oc20_writefail_load(n, ns, errp)) {
             return 1;
         }
@@ -1296,33 +1280,13 @@ static int oc20_init_namespaces(FemuCtrl *n, Error **errp)
     return 0;
 }
 
-#define OCSSD20_MN_MAX_LEN (64)
-#define OCSSD20_ID_MAX_LEN (4)
-
 static void oc20_set_ctrl_str(FemuCtrl *n)
 {
-    NvmeIdCtrl *id = &n->id_ctrl;
-
     static int fsid_voc20 = 0;
     const char *vocssd20_mn = "FEMU OpenChannel-SSD Controller (v2.0)";
-    const char *vocssd_sn   = "vOCSSD";
+    const char *vocssd20_sn = "vOCSSD";
 
-    char serial[OCSSD20_MN_MAX_LEN], dev_id_str[OCSSD20_ID_MAX_LEN];
-
-    memset(serial, 0, OCSSD20_MN_MAX_LEN);
-    memset(dev_id_str, 0, OCSSD20_ID_MAX_LEN);
-    strcat(serial, vocssd_sn);
-
-    sprintf(dev_id_str, "%d", fsid_voc20);
-    strcat(serial, dev_id_str);
-    fsid_voc20++;
-    strpadcpy((char *)id->mn, sizeof(id->mn), vocssd20_mn, ' ');
-
-    memset(n->devname, 0, OCSSD20_MN_MAX_LEN);
-    g_strlcpy(n->devname, serial, sizeof(serial));
-
-    strpadcpy((char *)id->sn, sizeof(id->sn), serial, ' ');
-    strpadcpy((char *)id->fr, sizeof(id->fr), "1.0", ' ');
+    nvme_set_ctrl_name(n, vocssd20_mn, vocssd20_sn, &fsid_voc20);
 }
 
 static void oc20_release_locks(FemuCtrl *n)
@@ -1367,6 +1331,7 @@ static int oc20_init_misc(FemuCtrl *n)
 
 static void oc20_init(FemuCtrl *n, Error **errp)
 {
+    NVME_CAP_SET_OC(n->bar.cap, 1);
     oc20_set_ctrl_str(n);
     oc20_init_namespaces(n, errp);
 

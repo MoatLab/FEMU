@@ -1,9 +1,4 @@
-#include "qemu/osdep.h"
-#include "hw/pci/pci.h"
-#include "qemu/error-report.h"
-
 #include "../nvme.h"
-#include "dram.h"
 
 /* Coperd: FEMU Memory Backend (mbe) for emulated SSD */
 
@@ -60,7 +55,9 @@ int backend_rw(SsdDramBackend *b, QEMUSGList *qsg, uint64_t *lbal, bool is_write
 
         if (b->femu_mode == FEMU_OCSSD_MODE) {
             mb_oft = lbal[sg_cur_index];
-        } else if (b->femu_mode == FEMU_BBSSD_MODE || b->femu_mode == FEMU_NOSSD_MODE) {
+        } else if (b->femu_mode == FEMU_BBSSD_MODE ||
+                   b->femu_mode == FEMU_NOSSD_MODE ||
+                   b->femu_mode == FEMU_ZNSSD_MODE) {
             mb_oft += cur_len;
         } else {
             assert(0);

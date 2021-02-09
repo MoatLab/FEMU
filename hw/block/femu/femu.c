@@ -1,10 +1,9 @@
 #include "qemu/osdep.h"
-#include "hw/pci/msix.h"
-#include "hw/pci/msi.h"
 #include "hw/qdev-properties.h"
 
-#include <immintrin.h>
 #include "./nvme.h"
+
+#define NVME_SPEC_VER (0x00010400)
 
 static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
 {
@@ -19,7 +18,7 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
 
     if (shutdown) {
         femu_debug("%s,clear_guest_notifier\n", __func__);
-        femu_clear_virq(n);
+        nvme_clear_virq(n);
     }
 
     for (int i = 0; i <= n->num_io_queues; i++) {
@@ -70,6 +69,11 @@ static int nvme_start_ctrl(FemuCtrl *n)
                  1, 1, 1);
     nvme_init_sq(&n->admin_sq, n, n->bar.asq, 0, 0, NVME_AQA_ASQS(n->bar.aqa) +
                  1, NVME_Q_PRIO_HIGH, 1);
+
+    /* Currently only used by FEMU ZNS extension */
+    if (n->ext_ops.start_ctrl) {
+        n->ext_ops.start_ctrl(n);
+    }
 
     return 0;
 }
@@ -312,16 +316,21 @@ static int nvme_check_constraints(FemuCtrl *n)
 
 static void nvme_ns_init_identify(FemuCtrl *n, NvmeIdNs *id_ns)
 {
+    int npdg;
+
     /* NSFEAT Bit 3: Support the Deallocated or Unwritten Logical Block error */
-    id_ns->nsfeat        = 0x4;
+    id_ns->nsfeat        |= (0x4 | 0x10);
     id_ns->nlbaf         = n->nlbaf - 1;
     id_ns->flbas         = n->lba_index | (n->extended << 4);
     id_ns->mc            = n->mc;
     id_ns->dpc           = n->dpc;
     id_ns->dps           = n->dps;
-    id_ns->dlfeat        = n->dlfeat;
+    id_ns->dlfeat        = 0x9;
     id_ns->lbaf[0].lbads = 9;
     id_ns->lbaf[0].ms    = 0;
+
+    npdg = 1;
+    id_ns->npda = id_ns->npdg = npdg - 1;
 
     for (int i = 0; i < n->nlbaf; i++) {
         id_ns->lbaf[i].lbads = BDRV_SECTOR_BITS + i;
@@ -341,6 +350,7 @@ static int nvme_init_namespace(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     num_blks = n->ns_size / ((1 << id_ns->lbaf[lba_index].lbads));
     id_ns->nuse = id_ns->ncap = id_ns->nsze = cpu_to_le64(num_blks);
 
+    n->csi = NVME_CSI_NVM;
     ns->ctrl = n;
     ns->ns_blks = ns_blks(ns, lba_index);
     ns->util = bitmap_new(num_blks);
@@ -351,9 +361,12 @@ static int nvme_init_namespace(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 
 static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
 {
+    /* FIXME: FEMU only supports 1 namesapce now */
+    assert(n->num_namespaces == 1);
+
     for (int i = 0; i < n->num_namespaces; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
-        /* Coperd: FIXME, bug on multiple namespaces */
+        ns->size = n->ns_size;
         ns->start_block = i * n->ns_size >> BDRV_SECTOR_BITS;
         ns->id = i + 1;
 
@@ -365,39 +378,11 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
     return 0;
 }
 
-#define BBSSD_MN_MAX_LEN (64)
-#define BBSSD_ID_MAX_LEN (4)
-
-static void nvme_init_ctrl_str(FemuCtrl *n)
-{
-    NvmeIdCtrl *id = &n->id_ctrl;
-
-    static int fsid_vbb = 0;
-    const char *vbbssd_mn = "FEMU BlackBox-SSD Controller";
-    const char *vbbssd_sn = "vSSD";
-
-    char serial[BBSSD_MN_MAX_LEN], dev_id_str[BBSSD_ID_MAX_LEN];
-
-    memset(serial, 0, BBSSD_MN_MAX_LEN);
-    memset(dev_id_str, 0, BBSSD_ID_MAX_LEN);
-    strcat(serial, vbbssd_sn);
-
-    sprintf(dev_id_str, "%d", fsid_vbb);
-    strcat(serial, dev_id_str);
-    fsid_vbb++;
-    strpadcpy((char *)id->mn, sizeof(id->mn), vbbssd_mn, ' ');
-
-    memset(n->devname, 0, BBSSD_MN_MAX_LEN);
-    g_strlcpy(n->devname, serial, sizeof(serial));
-
-    strpadcpy((char *)id->sn, sizeof(id->sn), serial, ' ');
-    strpadcpy((char *)id->fr, sizeof(id->fr), "1.0", ' ');
-}
-
 static void nvme_init_ctrl(FemuCtrl *n)
 {
     NvmeIdCtrl *id = &n->id_ctrl;
     uint8_t *pci_conf = n->parent_obj.config;
+    char *subnqn;
     int i;
 
     id->vid = cpu_to_le16(pci_get_word(pci_conf + PCI_VENDOR_ID));
@@ -409,18 +394,20 @@ static void nvme_init_ctrl(FemuCtrl *n)
     id->ieee[2]      = 0xb3;
     id->cmic         = 0;
     id->mdts         = n->mdts;
-    id->ver          = 0x00010200;
+    id->ver          = 0x00010300;
     id->oacs         = cpu_to_le16(n->oacs | NVME_OACS_DBBUF);
     id->acl          = n->acl;
     id->aerl         = n->aerl;
     id->frmw         = 7 << 1 | 1;
-    id->lpa          = 0 << 0; /* Coperd: Log Page Attributes */
+    id->lpa          = NVME_LPA_NS_SMART | NVME_LPA_CSE | NVME_LPA_EXTENDED;
     id->elpe         = n->elpe;
     id->npss         = 0;
     id->sqes         = (n->max_sqes << 4) | 0x6;
     id->cqes         = (n->max_cqes << 4) | 0x4;
     id->nn           = cpu_to_le32(n->num_namespaces);
     id->oncs         = cpu_to_le16(n->oncs);
+    subnqn           = g_strdup_printf("nqn.2019-08.org.qemu:%s", "serial");
+    strpadcpy((char *)id->subnqn, sizeof(id->subnqn), subnqn, '\0');
     id->fuses        = cpu_to_le16(0);
     id->fna          = 0;
     id->vwc          = n->vwc;
@@ -454,17 +441,13 @@ static void nvme_init_ctrl(FemuCtrl *n)
     NVME_CAP_SET_DSTRD(n->bar.cap, n->db_stride);
     NVME_CAP_SET_NSSRS(n->bar.cap, 0);
     NVME_CAP_SET_CSS(n->bar.cap, 1);
-    if (OCSSD(n)) {
-        NVME_CAP_SET_OC12(n->bar.cap, 1);
-    }
+    NVME_CAP_SET_CSS(n->bar.cap, NVME_CAP_CSS_CSI_SUPP);
+    NVME_CAP_SET_CSS(n->bar.cap, NVME_CAP_CSS_ADMIN_ONLY);
 
     NVME_CAP_SET_MPSMIN(n->bar.cap, n->mpsmin);
     NVME_CAP_SET_MPSMAX(n->bar.cap, n->mpsmax);
 
-    if (n->cmbsz)
-        n->bar.vs = 0x00010200;
-    else
-        n->bar.vs = 0x00010100;
+    n->bar.vs = NVME_SPEC_VER;
     n->bar.intmc = n->bar.intms = 0;
     n->temperature = NVME_TEMPERATURE;
 }
@@ -497,7 +480,9 @@ static void nvme_init_pci(FemuCtrl *n)
                           n->reg_size);
     pci_register_bar(&n->parent_obj, 0, PCI_BASE_ADDRESS_SPACE_MEMORY |
                      PCI_BASE_ADDRESS_MEM_TYPE_64, &n->iomem);
-    msix_init_exclusive_bar(&n->parent_obj, n->num_io_queues, 4, NULL);
+    if (msix_init_exclusive_bar(&n->parent_obj, n->num_io_queues, 4, NULL)) {
+        return;
+    }
     msi_init(&n->parent_obj, 0x50, 32, true, false, NULL);
 
     if (n->cmbsz) {
@@ -518,8 +503,12 @@ static int nvme_register_extensions(FemuCtrl *n)
         default:
             break;
         }
+    } else if (NOSSD(n)) {
+        nvme_register_nossd(n);
     } else if (BBSSD(n)) {
         nvme_register_bbssd(n);
+    } else if (ZNSSD(n)) {
+        nvme_register_znssd(n);
     } else {
     }
 
@@ -541,7 +530,6 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
 
     init_dram_backend(&n->mbe, bs_size);
     n->mbe->femu_mode = n->femu_mode;
-    n->mbe->cell_type = n->cell_type;
 
     n->completed = 0;
     n->start_time = time(NULL);
@@ -559,7 +547,6 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     nvme_init_pci(n);
     nvme_init_ctrl(n);
     nvme_init_namespaces(n, errp);
-    nvme_init_ctrl_str(n);
 
     nvme_register_extensions(n);
 
@@ -568,19 +555,20 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     }
 }
 
-static void femu_destroy_nvme_poller(FemuCtrl *n)
+static void nvme_destroy_poller(FemuCtrl *n)
 {
-    int i;
+    femu_debug("Destroying NVMe poller !!\n");
 
-    femu_debug("destroying NVMe poller !!\n");
-    for (i = 1; i <= n->num_poller; i++) {
+    for (int i = 1; i <= n->num_poller; i++) {
         qemu_thread_join(&n->poller[i]);
     }
-    for (i = 1; i <= n->num_poller; i++) {
+
+    for (int i = 1; i <= n->num_poller; i++) {
         pqueue_free(n->pq[i]);
         femu_ring_free(n->to_poller[i]);
         femu_ring_free(n->to_ftl[i]);
     }
+
     g_free(n->should_isr);
 }
 
@@ -590,9 +578,12 @@ static void femu_exit(PCIDevice *pci_dev)
 
     femu_debug("femu_exit starting!\n");
 
-    nvme_clear_ctrl(n, true);
+    if (n->ext_ops.exit) {
+        n->ext_ops.exit(n);
+    }
 
-    femu_destroy_nvme_poller(n);
+    nvme_clear_ctrl(n, true);
+    nvme_destroy_poller(n);
     free_dram_backend(n->mbe);
 
     g_free(n->namespaces);
@@ -606,15 +597,11 @@ static void femu_exit(PCIDevice *pci_dev)
     if (n->cmbsz) {
         memory_region_unref(&n->ctrl_mem);
     }
-
-    if (n->ext_ops.exit) {
-        n->ext_ops.exit(n);
-    }
 }
 
 static Property femu_props[] = {
     DEFINE_PROP_STRING("serial", FemuCtrl, serial),
-    DEFINE_PROP_UINT32("devsz_mb", FemuCtrl, memsz, 1024), /* Coperd: in MB */
+    DEFINE_PROP_UINT32("devsz_mb", FemuCtrl, memsz, 1024), /* in MB */
     DEFINE_PROP_UINT32("namespaces", FemuCtrl, num_namespaces, 1),
     DEFINE_PROP_UINT32("queues", FemuCtrl, num_io_queues, 8),
     DEFINE_PROP_UINT32("entries", FemuCtrl, max_q_ents, 0x7ff),
@@ -650,7 +637,7 @@ static Property femu_props[] = {
     DEFINE_PROP_UINT16("vid", FemuCtrl, vid, 0x1d1d),
     DEFINE_PROP_UINT16("did", FemuCtrl, did, 0x1f1f),
     DEFINE_PROP_UINT8("femu_mode", FemuCtrl, femu_mode, FEMU_NOSSD_MODE),
-    DEFINE_PROP_UINT8("cell_type", FemuCtrl, cell_type, MLC_CELL),
+    DEFINE_PROP_UINT8("flash_type", FemuCtrl, flash_type, MLC),
     DEFINE_PROP_UINT8("lver", FemuCtrl, lver, 0x2),
     DEFINE_PROP_UINT16("lsec_size", FemuCtrl, oc_params.sec_size, 4096),
     DEFINE_PROP_UINT8("lsecs_per_pg", FemuCtrl, oc_params.secs_per_pg, 4),
@@ -676,9 +663,8 @@ static void femu_class_init(ObjectClass *oc, void *data)
     pc->realize = femu_realize;
     pc->exit = femu_exit;
     pc->class_id = PCI_CLASS_STORAGE_EXPRESS;
-    /* Coperd: change from PCI_VENDOR_ID_INTEL to 0x1d1d for OCSSD */
-    pc->vendor_id = 0x1d1d;
-    pc->device_id = 0x1f1f;
+    pc->vendor_id = PCI_VENDOR_ID_INTEL;
+    pc->device_id = 0x5845;
     pc->revision = 2;
 
     set_bit(DEVICE_CATEGORY_STORAGE, dc->categories);
