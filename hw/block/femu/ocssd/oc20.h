@@ -1,8 +1,6 @@
 #ifndef __FEMU_OC20_H
 #define __FEMU_OC20_H
 
-#include "qapi/error.h"
-
 #include "../nvme.h"
 
 #define OC20_VID            (0x1d1d)

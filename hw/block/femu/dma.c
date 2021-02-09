@@ -1,9 +1,6 @@
-#include "qemu/osdep.h"
-#include "hw/pci/msi.h"
-
 #include "./nvme.h"
 
-void femu_addr_read(FemuCtrl *n, hwaddr addr, void *buf, int size)
+void nvme_addr_read(FemuCtrl *n, hwaddr addr, void *buf, int size)
 {
     if (n->cmbsz && addr >= n->ctrl_mem.addr &&
         addr < (n->ctrl_mem.addr + int128_get64(n->ctrl_mem.size))) {
@@ -13,7 +10,7 @@ void femu_addr_read(FemuCtrl *n, hwaddr addr, void *buf, int size)
     }
 }
 
-void femu_addr_write(FemuCtrl *n, hwaddr addr, void *buf, int size)
+void nvme_addr_write(FemuCtrl *n, hwaddr addr, void *buf, int size)
 {
     if (n->cmbsz && addr >= n->ctrl_mem.addr &&
         addr < (n->ctrl_mem.addr + int128_get64(n->ctrl_mem.size))) {
@@ -23,7 +20,7 @@ void femu_addr_write(FemuCtrl *n, hwaddr addr, void *buf, int size)
     }
 }
 
-uint16_t femu_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
+uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
                       uint64_t prp2, uint32_t len, FemuCtrl *n)
 {
     hwaddr trans_len = n->page_size - (prp1 % n->page_size);
@@ -56,7 +53,7 @@ uint16_t femu_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
 
             nents = (len + n->page_size - 1) >> n->page_bits;
             prp_trans = MIN(n->max_prp_ents, nents) * sizeof(uint64_t);
-            femu_addr_read(n, prp2, (void *)prp_list, prp_trans);
+            nvme_addr_read(n, prp2, (void *)prp_list, prp_trans);
             while (len != 0) {
                 uint64_t prp_ent = le64_to_cpu(prp_list[i]);
 
@@ -68,7 +65,7 @@ uint16_t femu_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
                     i = 0;
                     nents = (len + n->page_size - 1) >> n->page_bits;
                     prp_trans = MIN(n->max_prp_ents, nents) * sizeof(uint64_t);
-                    femu_addr_read(n, prp_ent, (void *)prp_list,
+                    nvme_addr_read(n, prp_ent, (void *)prp_list,
                                    prp_trans);
                     prp_ent = le64_to_cpu(prp_list[i]);
                 }
@@ -81,7 +78,8 @@ uint16_t femu_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
                 if (!cmb){
                     qemu_sglist_add(qsg, prp_ent, trans_len);
                 } else {
-                    qemu_iovec_add(iov, (void *)&n->cmbuf[prp_ent - n->ctrl_mem.addr], trans_len);
+                    uint64_t off = prp_ent - n->ctrl_mem.addr;
+                    qemu_iovec_add(iov, (void *)&n->cmbuf[off], trans_len);
                 }
                 len -= trans_len;
                 i++;
@@ -93,7 +91,8 @@ uint16_t femu_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
             if (!cmb) {
                 qemu_sglist_add(qsg, prp2, len);
             } else {
-                qemu_iovec_add(iov, (void *)&n->cmbuf[prp2 - n->ctrl_mem.addr], trans_len);
+                uint64_t off = prp2 - n->ctrl_mem.addr;
+                qemu_iovec_add(iov, (void *)&n->cmbuf[off], trans_len);
             }
         }
     }
@@ -110,14 +109,14 @@ unmap:
     return NVME_INVALID_FIELD | NVME_DNR;
 }
 
-uint16_t femu_dma_write_prp(FemuCtrl *n, uint8_t *ptr, uint32_t len, uint64_t
-                            prp1, uint64_t prp2)
+uint16_t dma_write_prp(FemuCtrl *n, uint8_t *ptr, uint32_t len, uint64_t prp1,
+                       uint64_t prp2)
 {
     QEMUSGList qsg;
     QEMUIOVector iov;
     uint16_t status = NVME_SUCCESS;
 
-    if (femu_map_prp(&qsg, &iov, prp1, prp2, len, n)) {
+    if (nvme_map_prp(&qsg, &iov, prp1, prp2, len, n)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     if (qsg.nsg > 0) {
@@ -135,14 +134,14 @@ uint16_t femu_dma_write_prp(FemuCtrl *n, uint8_t *ptr, uint32_t len, uint64_t
     return status;
 }
 
-uint16_t femu_dma_read_prp(FemuCtrl *n, uint8_t *ptr, uint32_t len, uint64_t
-                           prp1, uint64_t prp2)
+uint16_t dma_read_prp(FemuCtrl *n, uint8_t *ptr, uint32_t len, uint64_t prp1,
+                      uint64_t prp2)
 {
     QEMUSGList qsg;
     QEMUIOVector iov;
     uint16_t status = NVME_SUCCESS;
 
-    if (femu_map_prp(&qsg, &iov, prp1, prp2, len, n)) {
+    if (nvme_map_prp(&qsg, &iov, prp1, prp2, len, n)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     if (qsg.nsg > 0) {

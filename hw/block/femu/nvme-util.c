@@ -1,23 +1,3 @@
-/*
- * QEMU NVM Express Controller
- *
- * Copyright (c) 2012, Intel Corporation
- *
- * Written by Keith Busch <keith.busch@intel.com>
- *
- * This code is licensed under the GNU GPL v2 or later.
- */
-
-/**
- * Reference Specs: http://www.nvmexpress.org, 1.3, 1.2, 1.1, 1.0e
- *
- *  http://www.nvmexpress.org/resources/
- */
-
-#include "qemu/osdep.h"
-#include "hw/pci/msix.h"
-#include "hw/pci/msi.h"
-
 #include "./nvme.h"
 
 int nvme_check_sqid(FemuCtrl *n, uint16_t sqid)
@@ -52,7 +32,7 @@ void nvme_update_sq_tail(NvmeSQueue *sq)
     }
 
     if (sq->db_addr) {
-        femu_addr_read(sq->ctrl, sq->db_addr, &sq->tail, sizeof(sq->tail));
+        nvme_addr_read(sq->ctrl, sq->db_addr, &sq->tail, sizeof(sq->tail));
     }
 }
 
@@ -64,7 +44,7 @@ void nvme_update_cq_head(NvmeCQueue *cq)
     }
 
     if (cq->db_addr) {
-        femu_addr_read(cq->ctrl, cq->db_addr, &cq->head, sizeof(cq->head));
+        nvme_addr_read(cq->ctrl, cq->db_addr, &cq->head, sizeof(cq->head));
     }
 }
 
@@ -94,7 +74,7 @@ uint64_t *nvme_setup_discontig(FemuCtrl *n, uint64_t prp_addr, uint16_t
                 g_free(prp_list);
                 return NULL;
             }
-            femu_addr_write(n, prp_addr, (uint8_t *)&prp, sizeof(prp));
+            nvme_addr_write(n, prp_addr, (uint8_t *)&prp, sizeof(prp));
             prp_addr = le64_to_cpu(prp[prps_per_page - 1]);
         }
         prp_list[i] = le64_to_cpu(prp[i % prps_per_page]);
@@ -298,3 +278,25 @@ void nvme_free_cq(NvmeCQueue *cq, FemuCtrl *n)
         g_free(cq);
     }
 }
+
+void nvme_set_ctrl_name(FemuCtrl *n, const char *mn, const char *sn, int *dev_id)
+{
+    NvmeIdCtrl *id = &n->id_ctrl;
+    char serial[MN_MAX_LEN], dev_id_str[ID_MAX_LEN];
+
+    memset(serial, 0, MN_MAX_LEN);
+    memset(dev_id_str, 0, ID_MAX_LEN);
+    strcat(serial, sn);
+
+    sprintf(dev_id_str, "%d", *dev_id);
+    strcat(serial, dev_id_str);
+    (*dev_id)++;
+    strpadcpy((char *)id->mn, sizeof(id->mn), mn, ' ');
+
+    memset(n->devname, 0, MN_MAX_LEN);
+    g_strlcpy(n->devname, serial, sizeof(serial));
+
+    strpadcpy((char *)id->sn, sizeof(id->sn), serial, ' ');
+    strpadcpy((char *)id->fr, sizeof(id->fr), "1.0", ' ');
+}
+

@@ -1,11 +1,4 @@
-#include "qemu/osdep.h"
-#include "hw/pci/msix.h"
-#include "qemu/error-report.h"
-
 #include "./oc12.h"
-#include "../nvme.h"
-#include "./nand.h"
-#include "./timing.h"
 
 static inline int qemu_fls(int i)
 {
@@ -117,8 +110,8 @@ static int oc12_meta_state_get(Oc12Ctrl *ln, uint64_t ppa, uint32_t *state)
  * Similar to oc12_meta_set_written, however, this function sets not a single
  * but multiple ppas, also checks if a block is marked bad
  */
-static int oc12_meta_blk_set_erased(NvmeNamespace *ns, Oc12Ctrl *ln, uint64_t
-                                    *psl, int nr_ppas)
+static int oc12_meta_blk_set_erased(NvmeNamespace *ns, Oc12Ctrl *ln,
+                                    uint64_t *psl, int nr_ppas)
 {
     Oc12IdGroup *c = &ln->id_ctrl.groups[0];
     uint64_t mask = 0;
@@ -288,12 +281,6 @@ static uint16_t oc12_rw_check_req(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     if (meta_size) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
-#if 0
-    if ((ctrl & NVME_RW_PRINFO_PRACT) && !(ns->id_ns.dps & DPS_TYPE_MASK)) {
-        /* Not contemplated in LightNVM for now */
-        return NVME_INVALID_FIELD | NVME_DNR;
-    }
-#endif
     if (!req->is_write && find_next_bit(ns->uncorrectable, elba, slba) < elba) {
         return NVME_UNRECOVERED_READ;
     }
@@ -307,7 +294,7 @@ static void oc12_read_ppa_list(FemuCtrl *n, Oc12RwCmd *cmd, uint64_t *ppa_list)
     uint32_t nlb = le16_to_cpu(cmd->nlb) + 1;
 
     if (nlb > 1) {
-        femu_addr_read(n, spba, (void *)ppa_list, nlb * sizeof(uint64_t));
+        nvme_addr_read(n, spba, (void *)ppa_list, nlb * sizeof(uint64_t));
     } else {
         ppa_list[0] = spba;
     }
@@ -346,7 +333,7 @@ static void parse_ppa_list(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             bucket[secs_idx].ch = PPA_CH(ln, ppa);
             bucket[secs_idx].lun = PPA_LUN(ln, ppa);
             bucket[secs_idx].pg = PPA_PG(ln, ppa);
-            bucket[secs_idx].page_type = get_page_type(n, bucket[secs_idx].pg);
+            bucket[secs_idx].page_type = get_page_type(n->flash_type, bucket[secs_idx].pg);
 
             prev_pg_addr = cur_pg_addr;
         }
@@ -477,11 +464,11 @@ static uint16_t oc12_read(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     /* DMA OOB metadata back to host first */
     if (meta) {
-        femu_addr_write(n, meta, (void *)msl, nlb * ln->params.sos);
+        nvme_addr_write(n, meta, (void *)msl, nlb * ln->params.sos);
     }
 
     /* DMA user data */
-    if (femu_map_prp(&req->qsg, &req->iov, prp1, prp2, data_size, n)) {
+    if (nvme_map_prp(&req->qsg, &req->iov, prp1, prp2, data_size, n)) {
         femu_err("oc12_read: malformed prp (sz:%lu)\n", data_size);
         err = NVME_INVALID_FIELD | NVME_DNR;
         goto fail_free;
@@ -541,7 +528,7 @@ static uint16_t oc12_write(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     /* Read host-passed metadata to a temporary buffer */
     if (meta) {
-        femu_addr_read(n, meta, (void *)msl, nlb * ln->params.sos);
+        nvme_addr_read(n, meta, (void *)msl, nlb * ln->params.sos);
     }
 
     for (int i = 0; i < nlb; i++) {
@@ -555,11 +542,11 @@ static uint16_t oc12_write(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     /* DMA OOB metadata back to host first */
     if (meta) {
-        femu_addr_write(n, meta, (void *)msl, nlb * ln->params.sos);
+        nvme_addr_write(n, meta, (void *)msl, nlb * ln->params.sos);
     }
 
     /* DMA user data */
-    if (femu_map_prp(&req->qsg, &req->iov, prp1, prp2, data_size, n)) {
+    if (nvme_map_prp(&req->qsg, &req->iov, prp1, prp2, data_size, n)) {
         femu_err("oc12_write: malformed prp (sz:%lu)\n", data_size);
         err = NVME_INVALID_FIELD | NVME_DNR;
         goto fail_free;
@@ -597,7 +584,7 @@ static uint16_t oc12_identity(FemuCtrl *n, NvmeCmd *cmd)
         return NVME_INVALID_NSID | NVME_DNR;
     }
 
-    return femu_dma_read_prp(n, (uint8_t *)&n->oc12_ctrl->id_ctrl,
+    return dma_read_prp(n, (uint8_t *)&n->oc12_ctrl->id_ctrl,
                              sizeof(Oc12IdCtrl), prp1, prp2);
 }
 
@@ -624,7 +611,7 @@ static uint16_t oc12_get_l2p_tbl(FemuCtrl *n, NvmeCmd *cmd)
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    if (femu_dma_read_prp(n, (uint8_t *)&ns->tbl[slba], xfer_len, prp1, prp2)) {
+    if (dma_read_prp(n, (uint8_t *)&ns->tbl[slba], xfer_len, prp1, prp2)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
@@ -657,7 +644,7 @@ static uint16_t oc12_bbt_get(FemuCtrl *n, NvmeCmd *cmd)
     lunid = ch * c->num_lun + lun;
     bbt = ns->bbtbl[lunid];
 
-    if (femu_dma_read_prp(n, (uint8_t*)bbt, sizeof(Oc12Bbt) + blks_per_lun,
+    if (dma_read_prp(n, (uint8_t*)bbt, sizeof(Oc12Bbt) + blks_per_lun,
                           prp1, prp2)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
@@ -695,7 +682,7 @@ static uint16_t oc12_bbt_set(FemuCtrl *n, NvmeCmd *cmd)
         ns->bbtbl[lunid]->blk[blk] = value;
 
     } else {
-        if (femu_dma_write_prp(n, (uint8_t *)ppas, nlb * 8, spba, prp2)) {
+        if (dma_write_prp(n, (uint8_t *)ppas, nlb * 8, spba, prp2)) {
             return NVME_INVALID_FIELD | NVME_DNR;
         }
 
@@ -909,10 +896,10 @@ static int oc12_init_more(FemuCtrl *n)
     oc12_init_params(n);
 
     if (lps->mtype != 0)
-        error_report("FEMU: Only NAND Flash Memory supported at the moment\n");
+        femu_err("FEMU: Only NAND Flash Memory supported at the moment\n");
 
     if ((lps->num_pln > 4) || (lps->num_pln == 3))
-        error_report("FEMU: Only 1/2/4-plane modes supported\n");
+        femu_err("FEMU: Only 1/2/4-plane modes supported\n");
 
     oc12_init_misc(n);
 
@@ -1024,14 +1011,7 @@ static int oc12_init_more(FemuCtrl *n)
         oc12_tbl_initialize(ns);
     }
 
-    if (n->cell_type == TLC_CELL) {
-        init_tlc_page_pairing(n);
-    } else if (n->cell_type == QLC_CELL) {
-        init_qlc_page_pairing(n);
-    } else {
-        // default to MLC NAND configuration
-        init_nand_page_pairing(n);
-    }
+    init_nand_flash(n);
 
     ret = oc12_init_meta(ln);
     if (ret) {
@@ -1053,10 +1033,20 @@ static void oc12_exit(FemuCtrl *n)
     oc12_release_locks(n);
 }
 
+static uint16_t oc12_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
+                             NvmeRequest *req)
+{
+    /* Note: this is not the read/write path for OCSSD */
+    return NVME_DNR;
+}
+
 static uint16_t oc12_io_cmd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                             NvmeRequest *req)
 {
     switch (cmd->opcode) {
+    case NVME_CMD_READ:
+    case NVME_CMD_WRITE:
+        return oc12_nvme_rw(n, ns, cmd, req);
     case OC12_CMD_READ:
         return oc12_read(n, ns, cmd, req);
     case OC12_CMD_WRITE:
@@ -1068,37 +1058,18 @@ static uint16_t oc12_io_cmd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
 }
 
-#define OCSSD12_MN_MAX_LEN (64)
-#define OCSSD12_ID_MAX_LEN (4)
-
 static void oc12_set_ctrl_str(FemuCtrl *n)
 {
-    NvmeIdCtrl *id = &n->id_ctrl;
-
     static int fsid_voc12 = 0;
     const char *vocssd12_mn = "FEMU OpenChannel-SSD Controller (v1.2)";
-    const char *vocssd_sn   = "vOCSSD";
+    const char *vocssd12_sn   = "vOCSSD";
 
-    char serial[OCSSD12_MN_MAX_LEN], dev_id_str[OCSSD12_ID_MAX_LEN];
-
-    memset(serial, 0, OCSSD12_MN_MAX_LEN);
-    memset(dev_id_str, 0, OCSSD12_ID_MAX_LEN);
-    strcat(serial, vocssd_sn);
-
-    sprintf(dev_id_str, "%d", fsid_voc12);
-    strcat(serial, dev_id_str);
-    fsid_voc12++;
-    strpadcpy((char *)id->mn, sizeof(id->mn), vocssd12_mn, ' ');
-
-    memset(n->devname, 0, OCSSD12_MN_MAX_LEN);
-    g_strlcpy(n->devname, serial, sizeof(serial));
-
-    strpadcpy((char *)id->sn, sizeof(id->sn), serial, ' ');
-    strpadcpy((char *)id->fr, sizeof(id->fr), "1.0", ' ');
+    nvme_set_ctrl_name(n, vocssd12_mn, vocssd12_sn, &fsid_voc12);
 }
 
 static void oc12_init(FemuCtrl *n, Error **errp)
 {
+    NVME_CAP_SET_OC(n->bar.cap, 1);
     oc12_set_ctrl_str(n);
 
     for (int i = 0; i < n->num_namespaces; i++) {

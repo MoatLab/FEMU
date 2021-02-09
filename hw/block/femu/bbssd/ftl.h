@@ -1,8 +1,7 @@
 #ifndef __FEMU_FTL_H
 #define __FEMU_FTL_H
 
-#include "qemu/osdep.h"
-#include "qemu/thread.h"
+#include "../nvme.h"
 
 #define INVALID_PPA     (~(0ULL))
 #define INVALID_LPN     (~(0ULL))
@@ -210,6 +209,8 @@ struct ssd {
     bool *dataplane_started_ptr;
     QemuThread ftl_thread;
 };
+
+void ssd_init(FemuCtrl *n);
 
 #ifdef FEMU_DEBUG_FTL
 #define ftl_debug(fmt, ...) \
