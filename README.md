@@ -253,6 +253,10 @@ emulation.
 
 ### 4. Run FEMU as NVMe ZNS (Zoned-Namespace) SSDs (``ZNSSD`` mode) ###
 
+**Notes:** Currently only basic ZNS interface is supported and it can be used
+for development purposes. More features like proper latency emulation,
+controller-level zone mappings to flash chips are work-in-progress.
+
 ```Bash
 ./run-zns.sh
 ```
