@@ -406,7 +406,7 @@ static void nvme_init_ctrl(FemuCtrl *n)
     id->cqes         = (n->max_cqes << 4) | 0x4;
     id->nn           = cpu_to_le32(n->num_namespaces);
     id->oncs         = cpu_to_le16(n->oncs);
-    subnqn           = g_strdup_printf("nqn.2019-08.org.qemu:%s", "serial");
+    subnqn           = g_strdup_printf("nqn.2019-08.org.qemu:%s", n->serial);
     strpadcpy((char *)id->subnqn, sizeof(id->subnqn), subnqn, '\0');
     id->fuses        = cpu_to_le16(0);
     id->fna          = 0;
