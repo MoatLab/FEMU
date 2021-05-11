@@ -282,6 +282,7 @@ void nvme_free_cq(NvmeCQueue *cq, FemuCtrl *n)
 void nvme_set_ctrl_name(FemuCtrl *n, const char *mn, const char *sn, int *dev_id)
 {
     NvmeIdCtrl *id = &n->id_ctrl;
+    char *subnqn;
     char serial[MN_MAX_LEN], dev_id_str[ID_MAX_LEN];
 
     memset(serial, 0, MN_MAX_LEN);
@@ -298,5 +299,8 @@ void nvme_set_ctrl_name(FemuCtrl *n, const char *mn, const char *sn, int *dev_id
 
     strpadcpy((char *)id->sn, sizeof(id->sn), serial, ' ');
     strpadcpy((char *)id->fr, sizeof(id->fr), "1.0", ' ');
+
+    subnqn = g_strdup_printf("nqn.2021-05.org.femu:%s", serial);
+    strpadcpy((char *)id->subnqn, sizeof(id->subnqn), subnqn, '\0');
 }
 
