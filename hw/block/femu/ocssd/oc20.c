@@ -210,7 +210,8 @@ static int oc20_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     oc20_parse_lba_list(n, ns, cmd, req, addr_bucket, &secs_idx);
 
     /* Read & Write */
-    assert(opcode == OC20_CMD_VECT_READ || opcode == OC20_CMD_VECT_WRITE);
+    assert(opcode == NVME_CMD_READ || opcode == OC20_CMD_VECT_READ ||
+           opcode == NVME_CMD_WRITE || opcode == OC20_CMD_VECT_WRITE);
     assert(secs_idx > 0);
     for (int i = 0; i < secs_idx; i++) {
         lba = ((uint64_t *)(req->slba))[si];
@@ -249,10 +250,8 @@ static uint16_t oc20_rw_check_chunk_write(FemuCtrl *n, NvmeCmd *cmd,
                                           uint64_t lba, uint32_t ws,
                                           NvmeRequest *req)
 {
-    Oc20Params *params = &n->params.oc20;
     NvmeNamespace *ns = req->ns;
     Oc20Namespace *lns = ns->state;
-    Oc20RwCmd *lrw = (Oc20RwCmd *) cmd;
 
     Oc20CS *cnk = oc20_chunk_get_state(n, ns, lba);
     if (!cnk) {
@@ -279,12 +278,17 @@ static uint16_t oc20_rw_check_chunk_write(FemuCtrl *n, NvmeCmd *cmd,
         return NVME_SUCCESS;
     }
 
+    /* Silent the ws vs. ws_min size check to make SPDK happy */
+#if 0
+    Oc20Params *params = &n->params.oc20;
     if (ws < params->ws_min || (ws % params->ws_min) != 0) {
+        Oc20RwCmd *lrw = (Oc20RwCmd *)cmd;
         nvme_set_error_page(n, req->sq->sqid, req->cqe.cid,
                             NVME_INVALID_FIELD, offsetof(Oc20RwCmd, lbal),
                             lrw->lbal + req->nlb, req->ns->id);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
+#endif
 
     if (start_sectr != cnk->wp) {
         return OC20_OUT_OF_ORDER_WRITE | NVME_DNR;
@@ -692,7 +696,7 @@ static inline NvmeNamespace *cmd_ns(FemuCtrl *n, NvmeCmd *cmd)
     return ns;
 }
 
-static uint16_t oc20_rw(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
+static uint16_t oc20_rw(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req, bool vector)
 {
     Oc20RwCmd *lrw = (Oc20RwCmd *)cmd;
     NvmeNamespace *ns = cmd_ns(n, cmd);
@@ -712,17 +716,19 @@ static uint16_t oc20_rw(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     req->predef = 0;
     req->nlb = nlb;
     req->slba = (uint64_t)g_malloc0(sizeof(uint64_t) * nlb);
-    if (oc20_rw_is_write(req)) {
-        req->is_write = true;
-    } else {
-        req->is_write = false;
-    }
+    req->is_write = oc20_rw_is_write(req) ? true : false;
 
-    if (nlb > 1) {
-        uint32_t len = nlb * sizeof(uint64_t);
-        nvme_addr_read(n, lbal, (void *)req->slba, len);
-    } else {
-        ((uint64_t *)req->slba)[0] = lbal;
+    if (vector) {
+        if (nlb > 1) {
+            uint32_t len = nlb * sizeof(uint64_t);
+            nvme_addr_read(n, lbal, (void *)req->slba, len);
+        } else {
+            ((uint64_t *)req->slba)[0] = lbal;
+        }
+    } else { /* For SPDK quirks */
+        for (int i = 0; i < nlb; i++) {
+            ((uint64_t *)req->slba)[i] = lbal + i;
+        }
     }
 
     err = oc20_rw_check_vector_req(n, cmd, req);
@@ -920,12 +926,14 @@ static uint16_t oc20_admin_cmd(FemuCtrl *n, NvmeCmd *cmd)
     }
 }
 
+#if 0
 static uint16_t oc20_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                              NvmeRequest *req)
 {
     /* Note: this is not the read/write path for OCSSD */
     return NVME_DNR;
 }
+#endif
 
 static uint16_t oc20_io_cmd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                             NvmeRequest *req)
@@ -933,10 +941,14 @@ static uint16_t oc20_io_cmd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     switch (cmd->opcode) {
     case NVME_CMD_READ:
     case NVME_CMD_WRITE:
-        return oc20_nvme_rw(n, ns, cmd, req);
+        /*
+         * SPDK quirk: Somehow SPDK relies on NVME_CMD_{READ,WRITE} for its
+         * libftl on OCSSD2.0, so let's enable it here
+         */
+        return oc20_rw(n, cmd, req, false);
     case OC20_CMD_VECT_READ:
     case OC20_CMD_VECT_WRITE:
-        return oc20_rw(n, cmd, req);
+        return oc20_rw(n, cmd, req, true);
     case OC20_CMD_VECT_ERASE:
         return oc20_erase(n, cmd, req);
     default:
