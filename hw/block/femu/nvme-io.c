@@ -99,6 +99,7 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
             }
         } else if (status == NVME_SUCCESS) {
             /* Normal I/Os that don't need delay emulation */
+            req->status = status;
         } else {
             femu_err("Error IO processed!\n");
         }
