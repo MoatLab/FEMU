@@ -36,6 +36,23 @@ static inline void nvme_copy_cmd(NvmeCmd *dst, NvmeCmd *src)
 #endif
 }
 
+/*
+ * For now, only the I/Os which needs delay emulation will be handled by the
+ * FEMU thread
+ */
+static bool should_emulate_delay(NvmeCmd *cmd)
+{
+    int opc = cmd->cid;
+
+    if (opc == NVME_CMD_READ || opc == NVME_CMD_WRITE ||
+        opc == NVME_CMD_OC_ERASE || opc == NVME_CMD_OC_WRITE ||
+        opc == NVME_CMD_OC_READ) {
+        return true;
+    }
+
+    return false;
+}
+
 static void nvme_process_sq_io(void *opaque, int index_poller)
 {
     NvmeSQueue *sq = opaque;
@@ -73,13 +90,15 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
         }
 
         status = nvme_io_cmd(n, &cmd, req);
-        if (1 || status == NVME_SUCCESS) {
+        if (should_emulate_delay(&cmd) && status == NVME_SUCCESS) {
             req->status = status;
 
             int rc = femu_ring_enqueue(n->to_ftl[index_poller], (void *)&req, 1);
             if (rc != 1) {
                 femu_err("enqueue failed, ret=%d\n", rc);
             }
+        } else if (status == NVME_SUCCESS) {
+            /* Normal I/Os that don't need delay emulation */
         } else {
             femu_err("Error IO processed!\n");
         }
