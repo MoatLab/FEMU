@@ -135,7 +135,7 @@ Installation
   | Zoned-Namespace (ZNS) SSD | &cross; | &cross; | &cross; | &check; |
 
 
-> Notes: FEMU is now re-based on QEMU-5.2.0, which requires >=Python-3.6 and >=Ninjia-1.7 to build, 
+> Note: FEMU is now re-based on QEMU-5.2.0, which requires >=Python-3.6 and >=Ninjia-1.7 to build, 
 > check [here](https://wiki.qemu.org/ChangeLog/5.2#Build_Dependencies) for installing
 > these dependencies if ``pkgdep.sh`` doesn't solve all the requirements.)
 
@@ -145,19 +145,43 @@ Installation
 
   You can either build your own VM image, or use the VM image provided by us
 
-  **Option 1**: Use our VM image file, please download it from our
-  [FEMU-VM-image-site](https://forms.gle/nEZaEe2fkj5B1bxt9). After you fill in
-  the form, VM image downloading instructions will be sent to your email
-  address shortly.
+	**Option 1**: This is the **recommended** way to get FEMU running quickly -
+	Use our VM image file. You can download it from our
+	[FEMU-VM-image-site](https://forms.gle/nEZaEe2fkj5B1bxt9). After you fill in
+	the form, VM image downloading instructions will be sent to your email address
+	shortly.
 
-  **Option 2**: Build your own VM image by following guides (e.g.
-  [here](https://help.ubuntu.com/community/Installation/QemuEmulator#Installation_of_an_operating_system_from_ISO_to_the_QEMU_environment)).
+  **Option 2**: Build your own VM image by following instructions:
   After the guest OS is installed, make following changes to redirect VM output
   to the console, instead of using a separate GUI window. (**Desktop version
   guest OS is not tested**)
 
-   - Inside your guest Ubuntu server, edit `/etc/default/grub`, make sure the
-     following options are set.
+> Note: Please ask for help from Google if any of the steps doesn't work. In general, It
+> gives you the basic idea to build your own VM image and make it run in a text console.
+
+```
+    # Download Ubuntu 16.04 server ISO file
+    $ mkdir -p ~/images/
+    $ cd ~/images
+    $ wget http://releases.ubuntu.com/20.04/ubuntu-20.04.3-live-server-amd64.iso
+    $ sudo apt-get install qemu-system-x86
+    $ qemu-img create -f qcow2 femu.qcow2 80G
+
+    # install guest OS to femu.qcow2 (You need a GUI environment to prepare the VM image)
+    $ qemu-system-x86_64 -cdrom ubuntu-20.04.3-live-server-amd64.iso -hda femu.qcow2 -boot d -net nic -net user -m 8192 -localtime -smp 8 -cpu host -enable-kvm
+
+```
+
+  - After guest OS is installed, boot it with
+
+```
+    $ qemu-system-x86_64 -hda femu.qcow2 -net nic -net user -m 8192 -localtime -smp 8 -cpu host -enable-kvm
+```
+
+If the OS is installed into ``femu.qcow2``, you should be able to enter the
+guest OS. Inside the VM, edit ``/etc/default/grub``, make sure the following
+options are set.
+
 
 ```
 GRUB_CMDLINE_LINUX="ip=dhcp console=ttyS0,115200 console=tty console=ttyS0"
@@ -165,10 +189,11 @@ GRUB_TERMINAL=serial
 GRUB_SERIAL_COMMAND="serial --unit=0 --speed=115200 --word=8 --parity=no --stop=1"
 ```
 
-   - Still in the VM, update the grub
+Still in the VM, update the grub
    
 ```
 $ sudo update-grub
+$ sudo shutdown -h now
 ```
   
   Now you're ready to `Run FEMU`. If you stick to a Desktop version guest OS,
