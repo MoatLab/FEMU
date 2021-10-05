@@ -16,9 +16,9 @@
 Contact Information
 --------------------
 
-**Maintainer**: [Huaicheng Li](https://people.cs.uchicago.edu/~huaicheng/) (huaicheng@cs.uchicago.edu)
+**Maintainer**: [Huaicheng Li](https://huaicheng.github.io), Email: ``hcli AT cmu dot edu``
 
-Please do not hesitate to contact Huaicheng for any suggestions/feedback, bug
+Feel free to contact Huaicheng for any suggestions/feedback, bug
 reports, or general discussions.
 
 Please consider citing our FEMU paper at FAST 2018 if you use FEMU. The bib
@@ -34,8 +34,15 @@ Address = {Oakland, CA},
 Month =  {February},
 Year =  {2018}
 }
-
 ```
+
+
+Research Papers using FEMU
+--------------------------
+
+**Please Check the growing list of research papers using FEMU [here](https://github.com/ucare-uchicago/FEMU/wiki/Research-Papers-using-FEMU), including papers at ASPLOS, OSDI, SOSP and FAST, etc.**
+
+
 
 Project Description (What is FEMU?)
 -----------------------------------
@@ -145,26 +152,27 @@ Installation
 
   You can either build your own VM image, or use the VM image provided by us
 
-	**Option 1**: This is the **recommended** way to get FEMU running quickly -
-	Use our VM image file. You can download it from our
-	[FEMU-VM-image-site](https://forms.gle/nEZaEe2fkj5B1bxt9). After you fill in
-	the form, VM image downloading instructions will be sent to your email address
-	shortly.
+  **Option 1**: This is the **recommended** way to get FEMU running quickly -
+  Use our VM image file. You can download it from our
+  [FEMU-VM-image-site](https://forms.gle/nEZaEe2fkj5B1bxt9). After you fill in
+  the form, VM image downloading instructions will be sent to your email address
+  shortly.
 
   **Option 2**: Build your own VM image by following instructions:
   After the guest OS is installed, make following changes to redirect VM output
   to the console, instead of using a separate GUI window. (**Desktop version
   guest OS is not tested**)
 
-> Note: Please ask for help from Google if any of the steps doesn't work. In general, It
-> gives you the basic idea to build your own VM image and make it run in a text console.
+> Note: Please ask for help from Google if any of the steps doesn't work. In general, it
+> gives you a basic idea to build your own VM image and make it run in text console.
 
 ```
-    # Download Ubuntu 16.04 server ISO file
+    # Download a Ubuntu server ISO file
     $ mkdir -p ~/images/
     $ cd ~/images
     $ wget http://releases.ubuntu.com/20.04/ubuntu-20.04.3-live-server-amd64.iso
     $ sudo apt-get install qemu-system-x86
+	# Create a QCOW2 disk image
     $ qemu-img create -f qcow2 femu.qcow2 80G
 
     # install guest OS to femu.qcow2 (You need a GUI environment to prepare the VM image)
@@ -302,5 +310,5 @@ gone far beyond what prior platforms can achieve in terms of ``performance``,
 FEMU's NVMe controller logic is based on QEMU/NVMe, LightNVM/QEMU and ZNS/QEMU.
 
 
-## For more details, please checkout the [Wiki](https://github.com/ucare-uchicago/femu/wiki)!
+### For more detail, please checkout the [Wiki](https://github.com/ucare-uchicago/femu/wiki)!
 
