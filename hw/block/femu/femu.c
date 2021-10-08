@@ -480,7 +480,7 @@ static void nvme_init_pci(FemuCtrl *n)
                           n->reg_size);
     pci_register_bar(&n->parent_obj, 0, PCI_BASE_ADDRESS_SPACE_MEMORY |
                      PCI_BASE_ADDRESS_MEM_TYPE_64, &n->iomem);
-    if (msix_init_exclusive_bar(&n->parent_obj, n->num_io_queues, 4, NULL)) {
+    if (msix_init_exclusive_bar(&n->parent_obj, n->num_io_queues + 1, 4, NULL)) {
         return;
     }
     msi_init(&n->parent_obj, 0x50, 32, true, false, NULL);
