@@ -42,7 +42,7 @@ static inline void nvme_copy_cmd(NvmeCmd *dst, NvmeCmd *src)
  */
 static bool should_emulate_delay(NvmeCmd *cmd)
 {
-    int opc = cmd->cid;
+    int opc = cmd->opcode;
 
     if (opc == NVME_CMD_READ || opc == NVME_CMD_WRITE ||
         opc == NVME_CMD_OC_ERASE || opc == NVME_CMD_OC_WRITE ||
