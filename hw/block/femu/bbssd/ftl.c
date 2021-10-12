@@ -884,15 +884,18 @@ static void *ftl_thread(void *arg)
             }
 
             ftl_assert(req);
-            switch (req->is_write) {
-            case 1:
+            switch (req->cmd.opcode) {
+            case NVME_CMD_WRITE:
                 lat = ssd_write(ssd, req);
                 break;
-            case 0:
+            case NVME_CMD_READ:
                 lat = ssd_read(ssd, req);
                 break;
+            case NVME_CMD_DSM:
+                break;
             default:
-                ftl_err("FTL received unkown request type, ERROR\n");
+                //ftl_err("FTL received unkown request type, ERROR\n");
+                ;
             }
 
             req->reqlat = lat;
