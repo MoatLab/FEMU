@@ -555,11 +555,11 @@ static void mark_page_invalid(struct ssd *ssd, struct ppa *ppa)
     }
     line->ipc++;
     ftl_assert(line->vpc > 0 && line->vpc <= spp->pgs_per_line);
+    /* Adjust the position of the victime line in the pq under over-writes */
     if (line->pos) {
         pqueue_change_priority(lm->victim_line_pq, line->vpc - 1, line);
-    } else {
-        line->vpc--;
     }
+    line->vpc--;
 
     if (was_full_line) {
         /* move line: "full" -> "victim" */
@@ -892,6 +892,7 @@ static void *ftl_thread(void *arg)
                 lat = ssd_read(ssd, req);
                 break;
             case NVME_CMD_DSM:
+                lat = 0;
                 break;
             default:
                 //ftl_err("FTL received unkown request type, ERROR\n");
