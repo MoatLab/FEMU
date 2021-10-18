@@ -557,9 +557,11 @@ static void mark_page_invalid(struct ssd *ssd, struct ppa *ppa)
     ftl_assert(line->vpc > 0 && line->vpc <= spp->pgs_per_line);
     /* Adjust the position of the victime line in the pq under over-writes */
     if (line->pos) {
+        /* Note that line->vpc will be updated by this call */
         pqueue_change_priority(lm->victim_line_pq, line->vpc - 1, line);
+    } else {
+        line->vpc--;
     }
-    line->vpc--;
 
     if (was_full_line) {
         /* move line: "full" -> "victim" */
