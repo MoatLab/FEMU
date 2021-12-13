@@ -1,8 +1,22 @@
 #include "ftl.h"
 
+#include <time.h>
+
 //#define FEMU_DEBUG_FTL
 
 static void *ftl_thread(void *arg);
+
+// rw_opcode: 1 - write, 2 - read
+static void log_request(NvmeRequest *req, FILE *raw_data_log, int rw_opcode);
+
+static void log_measure(struct timespec* tstart_slice, struct timespec* tstart_window, FILE *data_log);
+
+const double time_slice = 1.0;
+const double time_window = 3.0;
+
+int writes_for_slice = 0;
+int writes_for_window = 0;
+int cum_writes_lenght = 0;
 
 static inline bool should_gc(struct ssd *ssd)
 {
@@ -875,8 +889,24 @@ static void *ftl_thread(void *arg)
     ssd->to_ftl = n->to_ftl;
     ssd->to_poller = n->to_poller;
 
+    // printf("sector size is %d\nsectors in block %d\n", ssd->sp.secsz, ssd->sp.secs_per_blk);
+
+    FILE *raw_data_log = fopen("raw_data_log.txt","w+");
+    assert(raw_data_log != NULL);
+    fprintf(raw_data_log, "rw_opcode\tlba\tlen\ttime\n");
+    FILE *data_log = fopen("data_log.txt","w+");
+    assert(data_log != NULL);
+    fprintf(data_log, "OWIO\tOWST\tPWIO\tAVGWIO\n");
+
+    struct timespec tstart_slice = {0, 0};
+    struct timespec tstart_window = {0, 0};
+    clock_gettime(CLOCK_MONOTONIC, &tstart_slice);
+    clock_gettime(CLOCK_MONOTONIC, &tstart_window);
+
     while (1) {
         for (i = 1; i <= n->num_poller; i++) {
+            log_measure(&tstart_slice, &tstart_window, data_log);
+
             if (!ssd->to_ftl[i] || !femu_ring_count(ssd->to_ftl[i]))
                 continue;
 
@@ -887,12 +917,16 @@ static void *ftl_thread(void *arg)
 
             ftl_assert(req);
             switch (req->cmd.opcode) {
-            case NVME_CMD_WRITE:
+            case NVME_CMD_WRITE: {
+                log_request(req, raw_data_log, 1);
                 lat = ssd_write(ssd, req);
                 break;
-            case NVME_CMD_READ:
+            }
+            case NVME_CMD_READ: {
+                log_request(req, raw_data_log, 2);
                 lat = ssd_read(ssd, req);
                 break;
+            }
             case NVME_CMD_DSM:
                 lat = 0;
                 break;
@@ -916,6 +950,66 @@ static void *ftl_thread(void *arg)
         }
     }
 
+    fclose(raw_data_log);
+    fclose(data_log);
     return NULL;
 }
 
+static void log_request(NvmeRequest *req, FILE *raw_data_log, int rw_opcode)
+{
+    int len = req->nlb;
+    if (rw_opcode == 1) {
+        writes_for_slice++;
+        writes_for_window++;
+        cum_writes_lenght += len;
+    }
+
+    uint64_t lba = req->slba;
+    struct timespec cur_time = {0, 0};
+    clock_gettime(CLOCK_MONOTONIC, &cur_time);
+    double time = (double)cur_time.tv_sec + 1.0e-9*cur_time.tv_nsec;
+    fprintf(raw_data_log, "%d\t%lu\t%d\t%lf\n", rw_opcode, lba, len, time);
+    fflush(raw_data_log);
+}
+
+static void log_measure(struct timespec* tstart_slice, struct timespec* tstart_window, FILE *data_log)
+{
+    struct timespec tend = {0, 0};
+    clock_gettime(CLOCK_MONOTONIC, &tend);
+    double time_end = (double)tend.tv_sec + 1.0e-9*tend.tv_nsec;
+    double time_begin_slice = (double)tstart_slice->tv_sec + 1.0e-9*tstart_slice->tv_nsec;
+    double time_begin_window = (double)tstart_window->tv_sec + 1.0e-9*tstart_window->tv_nsec;
+
+    // owst measure is not impelemented
+    int owio = 0;
+    double owst = 0.0;
+    int pwio = 0;
+    double avgwio = 0.0;
+
+    if (time_end - time_begin_slice >= time_slice) {
+        owio = writes_for_slice;
+        writes_for_slice = 0;
+        clock_gettime(CLOCK_MONOTONIC, tstart_slice);
+    }
+
+    if (time_end - time_begin_window >= time_window) {
+        pwio = writes_for_window;
+        if (writes_for_window != 0) {
+            avgwio = cum_writes_lenght / writes_for_window;
+        }
+        writes_for_window = 0;
+        cum_writes_lenght = 0;
+        clock_gettime(CLOCK_MONOTONIC, tstart_window);
+    }
+
+    if (time_end - time_begin_slice >= time_slice && time_end - time_begin_window >= time_window) {
+        fprintf(data_log, "%d\t%lf\t%d\t%lf\n", owio, owst, pwio, avgwio);
+        fflush(data_log);
+    } else if (time_end - time_begin_slice >= time_slice) {
+        fprintf(data_log, "%d\t%lf\n", owio, owst);
+        fflush(data_log);
+    } else if (time_end - time_begin_window >= time_window) {
+        fprintf(data_log, "\t%lf\t%d\t%lf\n", owst, pwio, avgwio);
+        fflush(data_log);
+    }
+}
