@@ -14,9 +14,10 @@ static void log_measure(struct timespec* tstart_slice, struct timespec* tstart_w
 const double time_slice = 1.0;
 const double time_window = 3.0;
 
-int writes_for_slice = 0;
+int reads_for_slice = 0;
+int reads_for_window = 0;
 int writes_for_window = 0;
-int cum_writes_lenght = 0;
+int cum_reads_lenght = 0;
 
 static inline bool should_gc(struct ssd *ssd)
 {
@@ -958,10 +959,14 @@ static void *ftl_thread(void *arg)
 static void log_request(NvmeRequest *req, FILE *raw_data_log, int rw_opcode)
 {
     int len = req->nlb;
+    if (rw_opcode == 2) {
+        reads_for_slice++;
+        reads_for_window++;
+        cum_reads_lenght += len;
+    }
+
     if (rw_opcode == 1) {
-        writes_for_slice++;
         writes_for_window++;
-        cum_writes_lenght += len;
     }
 
     uint64_t lba = req->slba;
@@ -987,18 +992,23 @@ static void log_measure(struct timespec* tstart_slice, struct timespec* tstart_w
     double avgwio = 0.0;
 
     if (time_end - time_begin_slice >= time_slice) {
-        owio = writes_for_slice;
-        writes_for_slice = 0;
+        owio = reads_for_slice;
+        reads_for_slice = 0;
         clock_gettime(CLOCK_MONOTONIC, tstart_slice);
     }
 
     if (time_end - time_begin_window >= time_window) {
-        pwio = writes_for_window;
-        if (writes_for_window != 0) {
-            avgwio = cum_writes_lenght / writes_for_window;
+        pwio = reads_for_window;
+        if (reads_for_window != 0) {
+            avgwio = cum_reads_lenght / reads_for_window;
         }
+
+        if (writes_for_window != 0) {
+            owst = reads_for_window / writes_for_window;
+        }
+        reads_for_window = 0;
+        cum_reads_lenght = 0;
         writes_for_window = 0;
-        cum_writes_lenght = 0;
         clock_gettime(CLOCK_MONOTONIC, tstart_window);
     }
 
