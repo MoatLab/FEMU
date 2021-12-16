@@ -1002,7 +1002,7 @@ static void log_request(NvmeRequest *req, sliding_window *windows, FILE *raw_dat
     struct timespec cur_time = {0, 0};
     clock_gettime(CLOCK_MONOTONIC, &cur_time);
     double time = (double)cur_time.tv_sec + 1.0e-9*cur_time.tv_nsec;
-    fprintf(raw_data_log, "%c\t%lu\t%d\t%lf\n", rw_opcode, lba, len, time, gc_flag);
+    fprintf(raw_data_log, "%c\t%lu\t%d\t%lf\t%d\n", rw_opcode, lba, len, time, gc_flag);
     fflush(raw_data_log);
 }
 
