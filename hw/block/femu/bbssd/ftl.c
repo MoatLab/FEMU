@@ -928,7 +928,7 @@ static void *ftl_thread(void *arg)
 
     while (1) {
         for (i = 1; i <= n->num_poller; i++) {
-            log_measure(&tstart_slice, windows, data_log);
+            log_measure(windows, data_log);
 
             if (!ssd->to_ftl[i] || !femu_ring_count(ssd->to_ftl[i]))
                 continue;
