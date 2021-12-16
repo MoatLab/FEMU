@@ -1,23 +1,37 @@
 #include "ftl.h"
 
 #include <time.h>
+#include <signal.h>
 
 //#define FEMU_DEBUG_FTL
 
 static void *ftl_thread(void *arg);
 
-// rw_opcode: 1 - write, 2 - read
-static void log_request(NvmeRequest *req, FILE *raw_data_log, int rw_opcode);
+typedef struct sliding_window {
+    double reads_for_window;
+    double writes_for_window;
+    double cum_reads_lenght;
 
-static void log_measure(struct timespec* tstart_slice, struct timespec* tstart_window, FILE *data_log);
+    double live_time;
+} sliding_window;
+int inserter = 0;
+
+static void log_request(NvmeRequest *req, sliding_window *windows, FILE *raw_data_log, char rw_opcode);
+
+static void log_measure(struct timespec* tstart_slice, sliding_window *windows, FILE *data_log);
 
 const double time_slice = 1.0;
 const double time_window = 3.0;
-
 int reads_for_slice = 0;
-int reads_for_window = 0;
-int writes_for_window = 0;
-int cum_reads_lenght = 0;
+
+// for collect data for knn
+int is_virus_working = 0;
+
+// signal handler for SIGUSR1
+void virus_start(int signum);
+
+// signal handler for SIGUSR2
+void virus_finish(int signum);
 
 static inline bool should_gc(struct ssd *ssd)
 {
@@ -897,16 +911,22 @@ static void *ftl_thread(void *arg)
     fprintf(raw_data_log, "rw_opcode\tlba\tlen\ttime\n");
     FILE *data_log = fopen("data_log.txt","w+");
     assert(data_log != NULL);
-    fprintf(data_log, "OWIO\tOWST\tPWIO\tAVGWIO\n");
+    fprintf(data_log, "OWIO, OWST, PWIO, AVGWIO, TAG\n");
+
+    struct sigaction sigact_start, sigact_finish;
+    sigact_start.sa_handler = virus_start;
+    sigact_finish.sa_handler = virus_finish;
+    sigaction(SIGUSR1, &sigact_start, NULL);
+    sigaction(SIGUSR2, &sigact_finish, NULL);
 
     struct timespec tstart_slice = {0, 0};
-    struct timespec tstart_window = {0, 0};
     clock_gettime(CLOCK_MONOTONIC, &tstart_slice);
-    clock_gettime(CLOCK_MONOTONIC, &tstart_window);
+
+    sliding_window *windows = (sliding_window*)calloc((int)(time_window / time_slice), sizeof(sliding_window));
 
     while (1) {
         for (i = 1; i <= n->num_poller; i++) {
-            log_measure(&tstart_slice, &tstart_window, data_log);
+            log_measure(&tstart_slice, windows, data_log);
 
             if (!ssd->to_ftl[i] || !femu_ring_count(ssd->to_ftl[i]))
                 continue;
@@ -919,12 +939,12 @@ static void *ftl_thread(void *arg)
             ftl_assert(req);
             switch (req->cmd.opcode) {
             case NVME_CMD_WRITE: {
-                log_request(req, raw_data_log, 1);
+                log_request(req, windows, raw_data_log, 'w');
                 lat = ssd_write(ssd, req);
                 break;
             }
             case NVME_CMD_READ: {
-                log_request(req, raw_data_log, 2);
+                log_request(req, windows, raw_data_log, 'r');
                 lat = ssd_read(ssd, req);
                 break;
             }
@@ -956,17 +976,22 @@ static void *ftl_thread(void *arg)
     return NULL;
 }
 
-static void log_request(NvmeRequest *req, FILE *raw_data_log, int rw_opcode)
+static void log_request(NvmeRequest *req, sliding_window *windows, FILE *raw_data_log, char rw_opcode)
 {
     int len = req->nlb;
-    if (rw_opcode == 2) {
+    if (rw_opcode == 'r') {
         reads_for_slice++;
-        reads_for_window++;
-        cum_reads_lenght += len;
+
+        for (int i = 0; i <= inserter; ++i) {
+            windows[i].reads_for_window++;
+            windows[i].cum_reads_lenght += len;
+        }
     }
 
-    if (rw_opcode == 1) {
-        writes_for_window++;
+    if (rw_opcode == 'w') {
+        for (int i = 0; i <= inserter; ++i) {
+            windows[i].writes_for_window++;
+        }
     }
 
     uint64_t lba = req->slba;
@@ -977,49 +1002,62 @@ static void log_request(NvmeRequest *req, FILE *raw_data_log, int rw_opcode)
     fflush(raw_data_log);
 }
 
-static void log_measure(struct timespec* tstart_slice, struct timespec* tstart_window, FILE *data_log)
+static void log_measure(struct timespec* tstart_slice, sliding_window *windows, FILE *data_log)
 {
     struct timespec tend = {0, 0};
     clock_gettime(CLOCK_MONOTONIC, &tend);
     double time_end = (double)tend.tv_sec + 1.0e-9*tend.tv_nsec;
     double time_begin_slice = (double)tstart_slice->tv_sec + 1.0e-9*tstart_slice->tv_nsec;
-    double time_begin_window = (double)tstart_window->tv_sec + 1.0e-9*tstart_window->tv_nsec;
 
-    // owst measure is not impelemented
     int owio = 0;
     double owst = 0.0;
-    int pwio = 0;
+    double pwio = 0.0;
     double avgwio = 0.0;
 
     if (time_end - time_begin_slice >= time_slice) {
         owio = reads_for_slice;
         reads_for_slice = 0;
+
+        for (int i = 0; i <= inserter; ++i) {
+            windows[i].live_time += time_slice;
+        }
+        if (inserter < (int)(time_window / time_slice) - 1) {
+            inserter++;
+        }
+
         clock_gettime(CLOCK_MONOTONIC, tstart_slice);
     }
 
-    if (time_end - time_begin_window >= time_window) {
-        pwio = reads_for_window;
-        if (reads_for_window != 0) {
-            avgwio = cum_reads_lenght / reads_for_window;
-        }
+    for (int i = 0; i <= inserter; ++i) {
+        if (windows[i].live_time == time_window) {
+            pwio = windows[i].reads_for_window;
+            if (windows[i].reads_for_window != 0) {
+                avgwio = windows[i].cum_reads_lenght / windows[i].reads_for_window;
+            }
 
-        if (writes_for_window != 0) {
-            owst = reads_for_window / writes_for_window;
+            if (windows[i].writes_for_window != 0) {
+                owst = windows[i].reads_for_window / windows[i].writes_for_window;
+            }
+
+            windows[i].reads_for_window = 0.0;
+            windows[i].cum_reads_lenght = 0.0;
+            windows[i].writes_for_window = 0.0;
+            windows[i].live_time = 0.0;
         }
-        reads_for_window = 0;
-        cum_reads_lenght = 0;
-        writes_for_window = 0;
-        clock_gettime(CLOCK_MONOTONIC, tstart_window);
     }
 
-    if (time_end - time_begin_slice >= time_slice && time_end - time_begin_window >= time_window) {
-        fprintf(data_log, "%d\t%lf\t%d\t%lf\n", owio, owst, pwio, avgwio);
-        fflush(data_log);
-    } else if (time_end - time_begin_slice >= time_slice) {
-        fprintf(data_log, "%d\t%lf\n", owio, owst);
-        fflush(data_log);
-    } else if (time_end - time_begin_window >= time_window) {
-        fprintf(data_log, "\t%lf\t%d\t%lf\n", owst, pwio, avgwio);
+    if (time_end - time_begin_slice >= time_slice) {
+        fprintf(data_log, "%d, %lf, %lf, %lf, %d\n", owio, owst, pwio, avgwio, is_virus_working);
         fflush(data_log);
     }
+}
+
+void virus_start(int signum)
+{
+    is_virus_working = 1;
+}
+
+void virus_finish(int signum)
+{
+    is_virus_working = 0;
 }
