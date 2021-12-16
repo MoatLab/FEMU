@@ -1002,7 +1002,7 @@ static void log_request(NvmeRequest *req, sliding_window *windows, FILE *raw_dat
     struct timespec cur_time = {0, 0};
     double time = (double)cur_time.tv_sec + 1.0e-9*cur_time.tv_nsec;
     fprintf(raw_data_log, "%c\t%lu\t%d\t%lf\t%d\n", rw_opcode, lba, len, time, gc_flag);
-    // fflush(raw_data_log);
+    fflush(raw_data_log);
 }
 
 static void log_measure(sliding_window *windows, FILE *data_log)
@@ -1044,7 +1044,7 @@ static void log_measure(sliding_window *windows, FILE *data_log)
 
     if (io_calls_amount >= calls_slice) {
         fprintf(data_log, "%d, %lf, %lf, %lf, %d\n", owio, owst, pwio, avgwio, is_virus_working);
-        // fflush(data_log);
+        fflush(data_log);
         io_calls_amount = 0;
     }
 }
