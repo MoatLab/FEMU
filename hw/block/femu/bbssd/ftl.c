@@ -23,6 +23,7 @@ static void log_measure(struct timespec* tstart_slice, sliding_window *windows, 
 const double time_slice = 1.0;
 const double time_window = 3.0;
 int reads_for_slice = 0;
+int gc_flag = 0;
 
 // for collect data for knn
 int is_virus_working = 0;
@@ -853,6 +854,8 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         r = do_gc(ssd, true);
         if (r == -1)
             break;
+
+        gc_flag++;
     }
 
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
@@ -940,6 +943,7 @@ static void *ftl_thread(void *arg)
             switch (req->cmd.opcode) {
             case NVME_CMD_WRITE: {
                 log_request(req, windows, raw_data_log, 'w');
+                gc_flag = 0;
                 lat = ssd_write(ssd, req);
                 break;
             }
@@ -998,7 +1002,7 @@ static void log_request(NvmeRequest *req, sliding_window *windows, FILE *raw_dat
     struct timespec cur_time = {0, 0};
     clock_gettime(CLOCK_MONOTONIC, &cur_time);
     double time = (double)cur_time.tv_sec + 1.0e-9*cur_time.tv_nsec;
-    fprintf(raw_data_log, "%d\t%lu\t%d\t%lf\n", rw_opcode, lba, len, time);
+    fprintf(raw_data_log, "%c\t%lu\t%d\t%lf\n", rw_opcode, lba, len, time, gc_flag);
     fflush(raw_data_log);
 }
 
