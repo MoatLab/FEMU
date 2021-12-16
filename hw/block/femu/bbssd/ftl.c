@@ -12,18 +12,20 @@ typedef struct sliding_window {
     double writes_for_window;
     double cum_reads_lenght;
 
-    double live_time;
+    int live_time;
 } sliding_window;
 int inserter = 0;
 
 static void log_request(NvmeRequest *req, sliding_window *windows, FILE *raw_data_log, char rw_opcode);
 
-static void log_measure(struct timespec* tstart_slice, sliding_window *windows, FILE *data_log);
+static void log_measure(sliding_window *windows, FILE *data_log);
 
-const double time_slice = 1.0;
-const double time_window = 3.0;
+const int calls_slice = 20;
+const int calls_window = 100;
 int reads_for_slice = 0;
 int gc_flag = 0;
+
+int io_calls_amount = 0;
 
 // for collect data for knn
 int is_virus_working = 0;
@@ -922,10 +924,7 @@ static void *ftl_thread(void *arg)
     sigaction(SIGUSR1, &sigact_start, NULL);
     sigaction(SIGUSR2, &sigact_finish, NULL);
 
-    struct timespec tstart_slice = {0, 0};
-    clock_gettime(CLOCK_MONOTONIC, &tstart_slice);
-
-    sliding_window *windows = (sliding_window*)calloc((int)(time_window / time_slice), sizeof(sliding_window));
+    sliding_window *windows = (sliding_window*)calloc((int)(calls_window / calls_slice), sizeof(sliding_window));
 
     while (1) {
         for (i = 1; i <= n->num_poller; i++) {
@@ -997,43 +996,36 @@ static void log_request(NvmeRequest *req, sliding_window *windows, FILE *raw_dat
             windows[i].writes_for_window++;
         }
     }
+    io_calls_amount++;
 
     uint64_t lba = req->slba;
     struct timespec cur_time = {0, 0};
-    clock_gettime(CLOCK_MONOTONIC, &cur_time);
     double time = (double)cur_time.tv_sec + 1.0e-9*cur_time.tv_nsec;
     fprintf(raw_data_log, "%c\t%lu\t%d\t%lf\t%d\n", rw_opcode, lba, len, time, gc_flag);
-    fflush(raw_data_log);
+    // fflush(raw_data_log);
 }
 
-static void log_measure(struct timespec* tstart_slice, sliding_window *windows, FILE *data_log)
+static void log_measure(sliding_window *windows, FILE *data_log)
 {
-    struct timespec tend = {0, 0};
-    clock_gettime(CLOCK_MONOTONIC, &tend);
-    double time_end = (double)tend.tv_sec + 1.0e-9*tend.tv_nsec;
-    double time_begin_slice = (double)tstart_slice->tv_sec + 1.0e-9*tstart_slice->tv_nsec;
-
     int owio = 0;
     double owst = 0.0;
     double pwio = 0.0;
     double avgwio = 0.0;
 
-    if (time_end - time_begin_slice >= time_slice) {
+    if (io_calls_amount >= calls_slice) {
         owio = reads_for_slice;
         reads_for_slice = 0;
 
         for (int i = 0; i <= inserter; ++i) {
-            windows[i].live_time += time_slice;
+            windows[i].live_time += calls_slice;
         }
-        if (inserter < (int)(time_window / time_slice) - 1) {
+        if (inserter < (int)(calls_window / calls_slice) - 1) {
             inserter++;
         }
-
-        clock_gettime(CLOCK_MONOTONIC, tstart_slice);
     }
 
     for (int i = 0; i <= inserter; ++i) {
-        if (windows[i].live_time == time_window) {
+        if (windows[i].live_time == calls_window) {
             pwio = windows[i].reads_for_window;
             if (windows[i].reads_for_window != 0) {
                 avgwio = windows[i].cum_reads_lenght / windows[i].reads_for_window;
@@ -1050,9 +1042,10 @@ static void log_measure(struct timespec* tstart_slice, sliding_window *windows, 
         }
     }
 
-    if (time_end - time_begin_slice >= time_slice) {
+    if (io_calls_amount >= calls_slice) {
         fprintf(data_log, "%d, %lf, %lf, %lf, %d\n", owio, owst, pwio, avgwio, is_virus_working);
-        fflush(data_log);
+        // fflush(data_log);
+        io_calls_amount = 0;
     }
 }
 
