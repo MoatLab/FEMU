@@ -1441,7 +1441,7 @@ int nvme_register_nossd(FemuCtrl *n);
 int nvme_register_bbssd(FemuCtrl *n);
 int nvme_register_znssd(FemuCtrl *n);
 
-inline uint64_t ns_blks(NvmeNamespace *ns, uint8_t lba_idx)
+static inline uint64_t ns_blks(NvmeNamespace *ns, uint8_t lba_idx)
 {
     FemuCtrl *n = ns->ctrl;
     NvmeIdNs *id_ns = &ns->id_ns;
@@ -1453,7 +1453,7 @@ inline uint64_t ns_blks(NvmeNamespace *ns, uint8_t lba_idx)
     return ns_size / lba_sz;
 }
 
-inline hwaddr nvme_discontig(uint64_t *dma_addr, uint16_t page_size,
+static inline hwaddr nvme_discontig(uint64_t *dma_addr, uint16_t page_size,
     uint16_t queue_idx, uint16_t entry_size)
 {
     uint16_t entries_per_page = page_size / entry_size;
@@ -1463,7 +1463,7 @@ inline hwaddr nvme_discontig(uint64_t *dma_addr, uint16_t page_size,
     return dma_addr[prp_index] + index_in_prp * entry_size;
 }
 
-inline uint16_t nvme_check_mdts(FemuCtrl *n, size_t len)
+static inline uint16_t nvme_check_mdts(FemuCtrl *n, size_t len)
 {
     uint8_t mdts = n->mdts;
 
