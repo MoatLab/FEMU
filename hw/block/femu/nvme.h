@@ -17,6 +17,15 @@
 #include "nand/nand.h"
 #include "timing-model/timing.h"
 
+/**
+ * @brief 
+ * Code Tracing for all functions under dir '/femu'
+ * 
+ */
+#define INHOINNO_VERBOSE_SETTING    1
+
+
+
 #define NVME_ID_NS_LBADS(ns)                                                  \
     ((ns)->id_ns.lbaf[NVME_ID_NS_FLBAS_INDEX((ns)->id_ns.flbas)].lbads)
 
@@ -29,7 +38,6 @@
 
 #define NVME_ID_NS_LBAF_DS(ns, lba_index) (ns->id_ns.lbaf[lba_index].lbads)
 #define NVME_ID_NS_LBAF_MS(ns, lba_index) (ns->id_ns.lbaf[lba_index].ms)
-
 typedef struct NvmeBar {
     uint64_t    cap;
     uint32_t    vs;
@@ -428,7 +436,7 @@ typedef struct NvmeRwCmd {
     uint32_t    reftag;
     uint16_t    apptag;
     uint16_t    appmask;
-} NvmeRwCmd;
+}  NvmeRwCmd;
 
 enum {
     NVME_RW_LR                  = 1 << 15,
@@ -979,9 +987,9 @@ typedef struct NvmeRequest {
     QEMUIOVector            iov;
     QTAILQ_ENTRY(NvmeRequest)entry;
     int64_t                 stime;
-    int64_t                 reqlat;
+    int64_t                 reqlat;         //late here?
     int64_t                 gcrt;
-    int64_t                 expire_time;
+    int64_t                 expire_time;    //lat sum here?
 
     /* OC2.0: sector offset relative to slba where reads become invalid */
     uint64_t predef;

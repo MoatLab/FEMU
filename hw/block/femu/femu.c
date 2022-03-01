@@ -363,7 +363,9 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
 {
     /* FIXME: FEMU only supports 1 namesapce now */
     assert(n->num_namespaces == 1);
-
+    #ifdef INHOINNO_VERBOSE_SETTING
+    femu_err("femu.c : nvme_init_namespaces(), to inhoinno \n");
+    #endif
     for (int i = 0; i < n->num_namespaces; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
         ns->size = n->ns_size;
@@ -384,7 +386,9 @@ static void nvme_init_ctrl(FemuCtrl *n)
     uint8_t *pci_conf = n->parent_obj.config;
     char *subnqn;
     int i;
-
+    #ifdef INHOINNO_VERBOSE_SETTING
+    femu_err("femu.c : nvme_init_ctrl(), to inhoinno \n");
+    #endif
     id->vid = cpu_to_le16(pci_get_word(pci_conf + PCI_VENDOR_ID));
     id->ssvid = cpu_to_le16(pci_get_word(pci_conf + PCI_SUBSYSTEM_VENDOR_ID));
 
@@ -467,7 +471,9 @@ static void nvme_init_cmb(FemuCtrl *n)
 static void nvme_init_pci(FemuCtrl *n)
 {
     uint8_t *pci_conf = n->parent_obj.config;
-
+    #ifdef INHOINNO_VERBOSE_SETTING
+    femu_err("femu.c : nvme_init_pci(), to inhoinno \n");
+    #endif
     pci_conf[PCI_INTERRUPT_PIN] = 1;
     /* Coperd: QEMU-OCSSD(0x1d1d,0x1f1f), QEMU-NVMe(0x8086,0x5845) */
     pci_config_set_prog_interface(pci_conf, 0x2);
@@ -492,6 +498,9 @@ static void nvme_init_pci(FemuCtrl *n)
 
 static int nvme_register_extensions(FemuCtrl *n)
 {
+    #ifdef INHOINNO_VERBOSE_SETTING
+    femu_err("femu.c : nvme_register_extensions(), to inhoinno \n");
+    #endif
     if (OCSSD(n)) {
         switch (n->lver) {
         case OCSSD12:
@@ -519,7 +528,9 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
 {
     FemuCtrl *n = FEMU(pci_dev);
     int64_t bs_size;
-
+    #ifdef INHOINNO_VERBOSE_SETTING
+    femu_err("femu.c : femu_realize(), to inhoinno \n");
+    #endif
     nvme_check_size();
 
     if (nvme_check_constraints(n)) {
@@ -659,7 +670,9 @@ static void femu_class_init(ObjectClass *oc, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
     PCIDeviceClass *pc = PCI_DEVICE_CLASS(oc);
-
+    #ifdef INHOINNO_VERBOSE_SETTING
+    femu_err("femu.c : femu_class_init(), to inhoinno \n");
+    #endif
     pc->realize = femu_realize;
     pc->exit = femu_exit;
     pc->class_id = PCI_CLASS_STORAGE_EXPRESS;

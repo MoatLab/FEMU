@@ -153,6 +153,20 @@ static struct line *get_next_free_line(struct ssd *ssd)
     lm->free_line_cnt--;
     return curline;
 }
+/**
+ * @brief 
+ * ssd_advance_write_pointer 
+ * get write pointer from ssd sturcture and add +1 for each member respectively 
+ * write pointer has a member which indicates each component of ssd and exposed by it's number
+ * this function  
+ * struct line *curline;
+ * int ch;
+ * int lun;
+ * int pg;
+ * int blk;
+ * int pl;
+ * 
+ */
 
 static void ssd_advance_write_pointer(struct ssd *ssd)
 {
@@ -161,9 +175,13 @@ static void ssd_advance_write_pointer(struct ssd *ssd)
     struct line_mgmt *lm = &ssd->lm;
 
     check_addr(wpp->ch, spp->nchs);
-    wpp->ch++;
-    if (wpp->ch == spp->nchs) {
-        wpp->ch = 0;
+    wpp->ch++;      //wpp->ch means channel #(int) for current write pointer
+    if (wpp->ch == spp->nchs) { 
+        //spp->nchs means max # of channels in ssd
+        //so if wpp->ch += 1 equals ssd's max channel 
+        // then ssd is currently saturated
+        // so simply set wp's ch to 0, which means using channels in circular manner 
+        wpp->ch = 0;    
         check_addr(wpp->lun, spp->luns_per_ch);
         wpp->lun++;
         /* in this case, we should go to next lun */
@@ -423,13 +441,31 @@ static inline struct ssd_channel *get_ch(struct ssd *ssd, struct ppa *ppa)
 {
     return &(ssd->ch[ppa->g.ch]);
 }
-
+/**
+ * @brief 
+ * get logical unit in ssd according to physical-page address
+ *  (page<block<plane<die<chip, and # of chips per 1 channel)
+ * 
+ * returns  struct nand_lun * which is channel -> lun[ppa->g.lun] 
+ * arg      struct ssd * ,  struct ppa *
+ * 
+ * inhoinno!
+ */
 static inline struct nand_lun *get_lun(struct ssd *ssd, struct ppa *ppa)
 {
     struct ssd_channel *ch = get_ch(ssd, ppa);
     return &(ch->lun[ppa->g.lun]);
 }
-
+/**
+ * @brief 
+ * get plane int ssd according to physical-page address
+ * (page<block<plane<die<chip, and # of chips per 1 channel)
+ * 
+ * returns  struct nand_plane * which is logical unit -> pl[ppa->g.lun] 
+ * args     struct ssd *, struct ppa *
+ * 
+ * inhoinno!
+ */
 static inline struct nand_plane *get_pl(struct ssd *ssd, struct ppa *ppa)
 {
     struct nand_lun *lun = get_lun(ssd, ppa);
@@ -802,6 +838,16 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
 
     return maxlat;
 }
+/**
+ * @brief 
+ * ssd_write  
+ * static uint64_t ssd_write(sturct ssd * ssd, NvmeRequest *req)
+ * returns maxlat which means max latency.
+ * max latency is the hightest value of latency 
+ * which is calculated by ssd_advance_status per lpn(logical page number)
+ * and this value is not sum of total latency but just highest latency while ssd_write()
+ *  
+ */
 
 static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 {

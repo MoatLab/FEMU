@@ -2,14 +2,20 @@
 #define __FEMU_ZNS_H
 
 #include "../nvme.h"
-
+/**
+ * @brief 
+ * latency emulation with zns ssd, struct znsssd is needed
+ * 
+ * 
+ */
 typedef struct QEMU_PACKED NvmeZonedResult {
     uint64_t slba;
 } NvmeZonedResult;
 
 typedef struct NvmeIdCtrlZoned {
-    uint8_t     zasl;
-    uint8_t     rsvd1[4095];
+    //4KB 중 1byte
+    uint8_t     zasl;           //1byte : ""
+    uint8_t     rsvd1[4095];    //reserved : 
 } NvmeIdCtrlZoned;
 
 enum NvmeZoneAttr {
@@ -54,15 +60,15 @@ enum NvmeZoneSendAction {
     NVME_ZONE_ACTION_OFFLINE         = 0x05,
     NVME_ZONE_ACTION_SET_ZD_EXT      = 0x10,
 };
-
+//NvmeZoneDescripstor
 typedef struct QEMU_PACKED NvmeZoneDescr {
-    uint8_t     zt;
-    uint8_t     zs;
-    uint8_t     za;
+    uint8_t     zt;     //Zone Type(does sequential wirte required? NVME TP4053a section 2.3.1)
+    uint8_t     zs;     //Zone State 
+    uint8_t     za;     //??
     uint8_t     rsvd3[5];
     uint64_t    zcap;
-    uint64_t    zslba;
-    uint64_t    wp;
+    uint64_t    zslba;  //Zone Start Logical Block Address
+    uint64_t    wp;     //Write pointer
     uint8_t     rsvd32[32];
 } NvmeZoneDescr;
 

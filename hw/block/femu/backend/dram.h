@@ -10,9 +10,25 @@ typedef struct SsdDramBackend {
     int     femu_mode;
 } SsdDramBackend;
 
+/** 
+ * DRAM backend ZNS SSD address space 
+ * @@ 
+ * 
+ * */
+typedef struct ZnsSsdDramBackend {
+    void    *logical_space;
+    int64_t size; /* in bytes */
+    int     femu_mode;
+} ZnsSsdDramBackend;
+
+
+
+
 int init_dram_backend(SsdDramBackend **mbe, int64_t nbytes);
 void free_dram_backend(SsdDramBackend *);
 
 int backend_rw(SsdDramBackend *, QEMUSGList *, uint64_t *, bool);
+
+
 
 #endif

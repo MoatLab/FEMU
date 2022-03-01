@@ -100,7 +100,7 @@ struct nand_lun {
 };
 
 struct ssd_channel {
-    struct nand_lun *lun;
+    struct nand_lun *lun;       //logical unit
     int nluns;
     uint64_t next_ch_avail_time;
     bool busy;

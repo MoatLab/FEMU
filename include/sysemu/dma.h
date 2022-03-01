@@ -100,7 +100,7 @@ static inline int dma_memory_write_relaxed(AddressSpace *as, dma_addr_t addr,
     return dma_memory_rw_relaxed(as, addr, (void *)buf, len,
                                  DMA_DIRECTION_FROM_DEVICE);
 }
-
+ 
 static inline int dma_memory_rw(AddressSpace *as, dma_addr_t addr,
                                 void *buf, dma_addr_t len,
                                 DMADirection dir)
