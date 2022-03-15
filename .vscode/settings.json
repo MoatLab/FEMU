@@ -1,5 +1,8 @@
 {
     "files.associations": {
-        "*.inc": "cpp"
+        "*.inc": "cpp",
+        "*.tcc": "cpp",
+        "thread": "cpp",
+        "*.list": "cpp"
     }
 }

@@ -47,6 +47,10 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
     NvmeRequest *req;
     int processed = 0;
 
+    //#if INHOINNO_NVME_VERBOSE_SETTING ==1
+    //femu_err("nvme-io.c : nvme_process_sq_io(), to inhoinno \n");
+    //#endif
+
     nvme_update_sq_tail(sq);
     while (!(nvme_sq_empty(sq))) {
         if (sq->phys_contig) {
@@ -101,7 +105,9 @@ static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
     NvmeCqe *cqe = &req->cqe;
     uint8_t phase = cq->phase;
     hwaddr addr;
-
+    #if INHOINNO_NVME_VERBOSE_SETTING ==1
+    femu_err("nvme-io.c : nvme_post_cqe(), to inhoinno \n");
+    #endif
     if (n->print_log) {
         femu_debug("%s,req,lba:%lu,lat:%lu\n", n->devname, req->slba, req->reqlat);
     }
@@ -130,8 +136,15 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
     uint64_t now;
     int processed = 0;
     int rc;
+    //    #if INHOINNO_NVME_VERBOSE_SETTING ==1
+    //femu_err("nvme-io.c : nvme_process_cq_cpl(), to inhoinno \n");
+    //#endif
 
-    if (BBSSD(n)) {
+    //Commit #1 : After implement zns thread, i touch this condition, inhoinno
+    if (BBSSD(n) || ZNSSD(n)) {
+        //#    #if INHOINNO_NVME_VERBOSE_SETTING ==1
+        //femu_err(" nvme-io.c : nvme_post_cqe(), rp=n->to_poller[index_poller] to inhoinno \n");
+        //#endif
         rp = n->to_poller[index_poller];
     }
 
@@ -143,7 +156,7 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
         }
         assert(req);
 
-        pqueue_insert(pq, req);
+        pqueue_insert( pq, req);
     }
 
     while ((req = pqueue_peek(pq))) {
@@ -193,7 +206,7 @@ static void *nvme_poller(void *arg)
 {
     FemuCtrl *n = ((NvmePollerThreadArgument *)arg)->n;
     int index = ((NvmePollerThreadArgument *)arg)->index;
-
+    int i=0;
     switch (n->multipoller_enabled) {
     case 1:
         while (1) {
@@ -201,6 +214,14 @@ static void *nvme_poller(void *arg)
                 usleep(1000);
                 continue;
             }
+            i++;
+            //    #if INHOINNO_NVME_VERBOSE_SETTING ==1
+            //if (i == 10000){
+                //i=0;
+                //femu_err(" nvme-io.c nvme_poller thread : FemuCtrl->multipoller_enabled=1 inhoinno \n");
+            //}
+            //#endif
+
 
             NvmeSQueue *sq = n->sq[index];
             NvmeCQueue *cq = n->cq[index];
@@ -216,7 +237,13 @@ static void *nvme_poller(void *arg)
                 usleep(1000);
                 continue;
             }
-
+            i++;
+            //    #if INHOINNO_NVME_VERBOSE_SETTING ==1
+            //if (i == 10000){
+                //i=0;
+                //femu_err(" nvme-io.c nvme_poller thread : FemuCtrl->multipoller_enabled!=1 inhoinno \n");
+            //}
+            //#endif
             for (int i = 1; i <= n->num_io_queues; i++) {
                 NvmeSQueue *sq = n->sq[i];
                 NvmeCQueue *cq = n->cq[i];
@@ -259,6 +286,9 @@ static void set_pos(void *a, size_t pos)
 
 void nvme_create_poller(FemuCtrl *n)
 {
+    #if INHOINNO_NVME_VERBOSE_SETTING ==1
+    femu_err("nvme-io.c : nvme_create_poller(), to inhoinno \n");
+    #endif
     n->should_isr = g_malloc0(sizeof(bool) * (n->num_io_queues + 1));
 
     n->num_poller = n->multipoller_enabled ? n->num_io_queues : 1;
@@ -322,7 +352,9 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
     uint64_t elba = slba + nlb;
     uint16_t err;
     int ret;
-
+    #if INHOINNO_NVME_VERBOSE_SETTING ==1
+    femu_err("/femu/nvme-io.c : nvme_rw(), to inhoinno \n");
+    #endif
     req->is_write = (rw->opcode == NVME_CMD_WRITE) ? 1 : 0;
 
     err = femu_nvme_rw_check_req(n, ns, cmd, req, slba, elba, nlb, ctrl,
@@ -357,7 +389,9 @@ static uint16_t nvme_dsm(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint32_t dw11 = le32_to_cpu(cmd->cdw11);
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
-
+    #if INHOINNO_NVME_VERBOSE_SETTING ==1
+    femu_err("/femu/nvme-io.c : nvme_dsm(), to inhoinno \n");
+    #endif
     if (dw11 & NVME_DSMGMT_AD) {
         uint16_t nr = (dw10 & 0xff) + 1;
 
@@ -402,6 +436,10 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint8_t data_shift = ns->id_ns.lbaf[lba_index].lbads;
     uint64_t data_size = nlb << data_shift;
     uint64_t offset  = ns->start_block + (slba << data_shift);
+
+    #if INHOINNO_NVME_VERBOSE_SETTING ==1
+    femu_err("/femu/nvme-io.c : nvme_compare(), to inhoinno \n");
+    #endif
 
     if ((slba + nlb) > le64_to_cpu(ns->id_ns.nsze)) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
@@ -483,7 +521,9 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 {
     NvmeNamespace *ns;
     uint32_t nsid = le32_to_cpu(cmd->nsid);
-
+    #if INHOINNO_NVME_VERBOSE_SETTING ==1
+    femu_err("/femu/nvme-io.c : nvme_io_cmd(), to inhoinno \n");
+    #endif
     if (nsid == 0 || nsid > n->num_namespaces) {
         femu_err("%s, NVME_INVALID_NSID %" PRIu32 "\n", __func__, nsid);
         return NVME_INVALID_NSID | NVME_DNR;
@@ -493,31 +533,49 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 
     switch (cmd->opcode) {
     case NVME_CMD_FLUSH:
+        #if INHOINNO_NVME_VERBOSE_SETTING ==1
+        femu_err("/femu/nvme-io.c : nvme_io_cmd(): NVME_CMD_FLUSH, to inhoinno \n");
+        #endif
         if (!n->id_ctrl.vwc || !n->features.volatile_wc) {
             return NVME_SUCCESS;
         }
         return nvme_flush(n, ns, cmd, req);
     case NVME_CMD_DSM:
+        #if INHOINNO_NVME_VERBOSE_SETTING ==1
+        femu_err("/femu/nvme-io.c : nvme_io_cmd(): NVME_CMD_DSM, to inhoinno \n");
+        #endif
         if (NVME_ONCS_DSM & n->oncs) {
             return nvme_dsm(n, ns, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
     case NVME_CMD_COMPARE:
+        #if INHOINNO_NVME_VERBOSE_SETTING ==1
+        femu_err("/femu/nvme-io.c : nvme_io_cmd(): NVME_CMD_COMPARE, to inhoinno \n");
+        #endif
         if (NVME_ONCS_COMPARE & n->oncs) {
             return nvme_compare(n, ns, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
     case NVME_CMD_WRITE_ZEROES:
+        #if INHOINNO_NVME_VERBOSE_SETTING ==1
+        femu_err("/femu/nvme-io.c : nvme_io_cmd(): NVME_CMD_WRITE_ZEROES, to inhoinno \n");
+        #endif
         if (NVME_ONCS_WRITE_ZEROS & n->oncs) {
             return nvme_write_zeros(n, ns, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
     case NVME_CMD_WRITE_UNCOR:
+        #if INHOINNO_NVME_VERBOSE_SETTING ==1
+        femu_err("/femu/nvme-io.c : nvme_io_cmd(): NVME_CMD_WRITE_UNCOR, to inhoinno \n");
+        #endif
         if (NVME_ONCS_WRITE_UNCORR & n->oncs) {
             return nvme_write_uncor(n, ns, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
     default:
+        #if INHOINNO_NVME_VERBOSE_SETTING ==1
+        femu_err("/femu/nvme-io.c : nvme_io_cmd(): default, to inhoinno \n");
+        #endif
         if (n->ext_ops.io_cmd) {
             return n->ext_ops.io_cmd(n, ns, cmd, req);
         }
@@ -531,9 +589,11 @@ void nvme_post_cqes_io(void *opaque)
 {
     NvmeCQueue *cq = opaque;
     NvmeRequest *req, *next;
-    int64_t cur_time, ntt = 0;
+    int64_t cur_time, ntt = 0;  //NTT?
     int processed = 0;
-
+    #if INHOINNO_NVME_VERBOSE_SETTING ==1
+    femu_err("/femu/nvme-io.c : nvme_post_cqes_io(), to inhoinno \n");
+    #endif
     QTAILQ_FOREACH_SAFE(req, &cq->req_list, entry, next) {
         if (nvme_cq_full(cq)) {
             break;

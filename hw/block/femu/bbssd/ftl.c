@@ -935,9 +935,12 @@ static void *ftl_thread(void *arg)
             switch (req->cmd.opcode) {
             case NVME_CMD_WRITE:
                 lat = ssd_write(ssd, req);
+                //lat += 100000000; //IT WORKS AT CQ 1mil ms=100 000sec us=100sec ns=0.1sec
                 break;
             case NVME_CMD_READ:
                 lat = ssd_read(ssd, req);
+                //lat += 100000000; //IT WORKS AT CQ 1mil ms=100 000sec us=100sec ns=0.1sec
+
                 break;
             case NVME_CMD_DSM:
                 lat = 0;

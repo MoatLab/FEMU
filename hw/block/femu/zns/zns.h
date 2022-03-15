@@ -2,12 +2,68 @@
 #define __FEMU_ZNS_H
 
 #include "../nvme.h"
+
+
 /**
  * @brief 
- * latency emulation with zns ssd, struct znsssd is needed
- * 
+ * inhoinno: to implement controller-level zone mapping in zns ssd, 
+ * struct ssd_channel is neccesary
+ * extends 'struct ssd_channel' in ../bbssd/ftl.h:102
  * 
  */
+typedef struct zns_ssd_channel {
+    //struct NvmeZone *zone;
+    //int nluns;
+    int nzones;
+    uint64_t next_ch_avail_time; //(usec)
+    bool busy;
+    //uint64_t gc_endtime;
+}zns_ssd_channel;
+
+/**
+ * @brief 
+ * inhoinno: to emulate latency in zns ssd, struct znsssd is needed
+ * extends 'struct ssdparams' in ../bbssd/ftl.h:110
+ *  
+ */
+struct zns_ssdparams{
+    /*members from struct ssdparams*/
+    int nchs;         /* # of channels in the SSD */
+
+    int pg_rd_lat;    /* NAND page read latency in nanoseconds */
+    int pg_wr_lat;    /* NAND page program latency in nanoseconds */
+    int blk_er_lat;   /* NAND block erase latency in nanoseconds */
+    int ch_xfer_lat;  /* channel transfer latency for one page in nanoseconds
+                       * this defines the channel bandwith
+                       */
+
+    /*new members for zns*/
+    int zones;          /* # of zones in ZNS SSD */
+    int zones_per_ch;   /* # of zones per channel */
+};
+/**
+ * @brief 
+ * inhoinno: latency emulation with zns ssd, struct znsssd is needed
+ * extends 'struct ssd' in ../bbssd/ftl.h:197 
+ */
+typedef struct zns {
+    /*members from struct ssd*/
+    char                *ssdname;
+    struct zns_ssdparams    sp;
+    struct zns_ssd_channel *ch;
+    /* lockless ring for communication with NVMe IO thread */
+    struct rte_ring     **to_zone;
+    struct rte_ring     **to_poller;
+    bool                *dataplane_started_ptr;
+
+    /*new members for znsssd*/
+    struct NvmeNamespace    * namespaces;      //FEMU only support 1 namespace For now, 
+    struct NvmeZnsZone      * zone_array;                  
+    uint32_t            num_zones;
+    QemuThread          zns_thread;
+
+}ZNS;
+
 typedef struct QEMU_PACKED NvmeZonedResult {
     uint64_t slba;
 } NvmeZonedResult;
@@ -109,6 +165,13 @@ typedef struct NvmeZone {
     uint64_t        w_ptr;
     QTAILQ_ENTRY(NvmeZone) entry;
 } NvmeZone;
+
+typedef struct NvmeZnsZone {
+    NvmeZone        *zone;
+    zns_ssd_channel *chnl;
+    //bool            chnl_busy;
+    uint32_t        nchnls;
+} NvmeZnsZone;
 
 typedef struct NvmeNamespaceParams {
     uint32_t nsid;
@@ -234,4 +297,15 @@ static inline void zns_aor_dec_active(NvmeNamespace *ns)
 void zns_ns_shutdown(NvmeNamespace *ns);
 void zns_ns_cleanup(NvmeNamespace *ns);
 
+
+//get_zone(Namespace, req)
+//get_ch(Zone, req)
+
+void znsssd_init(FemuCtrl * n);
+
+#ifdef FEMU_DEBUG_FTL
+#define ftl_assert(expression) assert(expression)
+#else
+#define ftl_assert(expression)
+#endif
 #endif
