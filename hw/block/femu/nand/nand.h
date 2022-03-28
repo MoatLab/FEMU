@@ -11,6 +11,7 @@
 #define SLC_BLOCK_ERASE_LATENCY_NS        (2000000)
 #define SLC_CHNL_PAGE_TRANSFER_LATENCY_NS (20000)
 
+
 /*
  * MLC NAND latency numbers in nanoseconds
  *

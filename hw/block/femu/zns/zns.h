@@ -2,6 +2,19 @@
 #define __FEMU_ZNS_H
 
 #include "../nvme.h"
+#define ZONE_RESET_WHEN_ZONE_STATE_IS_FULL 0
+enum {
+    NAND_READ =  0,
+    NAND_WRITE = 1,
+    NAND_ERASE = 2,
+
+ /* In nand.h, SLC NAND latency numbers in nanoseconds*/
+    NAND_READ_LATENCY  =   40000,
+    NAND_PROG_LATENCY  =  500000,
+    NAND_ERASE_LATENCY = 2000000,
+/* In zns : ZONE RESET time */
+    ZONE_RESET_LATENCY =  200000,
+};
 
 
 /**
@@ -22,24 +35,37 @@ typedef struct zns_ssd_channel {
 
 /**
  * @brief 
+ * inhoinno: to implement Multi way in ZNS, ssd_chip structure is required.
+ * This zns_ssd_chip structure follows 'struct ssd_lun' in ../bbssd/ftl.h:94
+ * but differnce is ZNS does not do ftl jobs such as badblock management, GC 
+ * so this structure only contains minimum fields
+ */
+typedef struct zns_ssd_chip {
+    uint64_t next_avail_time; // in nanoseconds
+    bool busy;
+    //uint64_t gc_endtime;
+}zns_ssd_chip;
+
+/**
+ * @brief 
  * inhoinno: to emulate latency in zns ssd, struct znsssd is needed
  * extends 'struct ssdparams' in ../bbssd/ftl.h:110
  *  
  */
 struct zns_ssdparams{
-    /*members from struct ssdparams*/
-    int nchs;         /* # of channels in the SSD */
+    uint16_t register_model;    /* =1 single register =2 double register */
+    uint64_t nchnls;            /* # of channels in the SSD */
+    uint64_t ways;              /* # of ways in the SSD */
+    uint64_t zones;             /* # of zones in ZNS SSD */
+    uint64_t chnls_per_zone;    /* ZNS Association degree. # of zones per channel, must be divisor of nchnls */
+    uint64_t csze_pages;        /* #of Pages in Chip (Inhoinno:I guess lun in femu)*/
+    uint64_t nchips;            /* # of chips in SSD*/
 
-    int pg_rd_lat;    /* NAND page read latency in nanoseconds */
-    int pg_wr_lat;    /* NAND page program latency in nanoseconds */
-    int blk_er_lat;   /* NAND block erase latency in nanoseconds */
-    int ch_xfer_lat;  /* channel transfer latency for one page in nanoseconds
-                       * this defines the channel bandwith
-                       */
-
-    /*new members for zns*/
-    int zones;          /* # of zones in ZNS SSD */
-    int zones_per_ch;   /* # of zones per channel */
+    uint64_t pg_rd_lat;         /* NAND page read latency in nanoseconds */
+    uint64_t pg_wr_lat;         /* NAND page program latency in nanoseconds */
+    uint64_t blk_er_lat;        /* NAND block erase latency in nanoseconds */
+    uint64_t zone_reset_lat;    /* ZNS SSD ZONE reset latency in nanoseconds */
+    uint64_t ch_xfer_lat;       /* channel transfer latency for one page in nanoseconds*/
 };
 /**
  * @brief 
@@ -51,6 +77,8 @@ typedef struct zns {
     char                *ssdname;
     struct zns_ssdparams    sp;
     struct zns_ssd_channel *ch;
+    struct zns_ssd_chip *chips;
+
     /* lockless ring for communication with NVMe IO thread */
     struct rte_ring     **to_zone;
     struct rte_ring     **to_poller;
@@ -58,9 +86,11 @@ typedef struct zns {
 
     /*new members for znsssd*/
     struct NvmeNamespace    * namespaces;      //FEMU only support 1 namespace For now, 
-    struct NvmeZnsZone      * zone_array;                  
+    struct NvmeZone      * zone_array;                  
     uint32_t            num_zones;
+
     QemuThread          zns_thread;
+
 
 }ZNS;
 
@@ -120,7 +150,7 @@ enum NvmeZoneSendAction {
 typedef struct QEMU_PACKED NvmeZoneDescr {
     uint8_t     zt;     //Zone Type(does sequential wirte required? NVME TP4053a section 2.3.1)
     uint8_t     zs;     //Zone State 
-    uint8_t     za;     //??
+    uint8_t     za;
     uint8_t     rsvd3[5];
     uint64_t    zcap;
     uint64_t    zslba;  //Zone Start Logical Block Address

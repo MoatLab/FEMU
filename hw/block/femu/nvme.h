@@ -30,6 +30,13 @@
  * 
  */
 #define INHOINNO_NVME_VERBOSE_SETTING    0
+/**
+ * @brief 
+ * Advance Channel latency emulating
+ * BBSSD
+ * ZNS SSD
+ */
+#define ADVANCE_PER_CH_ENDTIME 0
 
 
 #define NVME_ID_NS_LBADS(ns)                                                  \
