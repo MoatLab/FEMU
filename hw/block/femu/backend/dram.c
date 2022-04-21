@@ -43,7 +43,7 @@ int backend_rw(SsdDramBackend *b, QEMUSGList *qsg, uint64_t *lbal, bool is_write
     while (sg_cur_index < qsg->nsg) {
         cur_addr = qsg->sg[sg_cur_index].base + sg_cur_byte;
         cur_len = qsg->sg[sg_cur_index].len - sg_cur_byte;
-        if (dma_memory_rw(qsg->as, cur_addr, mb + mb_oft, cur_len, dir)) {
+        if (dma_memory_rw(qsg->as, cur_addr, mb + mb_oft, cur_len, dir, MEMTXATTRS_UNSPECIFIED)) {
             error_report("FEMU: dma_memory_rw error");
         }
 

@@ -1,0 +1,51 @@
+export MAKE="{{ paths.make }}"
+export NINJA="{{ paths.ninja }}"
+export PYTHON="{{ paths.python }}"
+
+export MAKEFLAGS="-j$(getconf _NPROCESSORS_ONLN)"
+export CCACHE_MAXSIZE="2G"
+
+export VIRT_PREFIX="$HOME/build/libvirt"
+export PATH="$VIRT_PREFIX/bin:$PATH"
+export C_INCLUDE_PATH="$VIRT_PREFIX/include"
+export LD_LIBRARY_PATH="$VIRT_PREFIX/lib"
+export PKG_CONFIG_PATH="$VIRT_PREFIX/lib/pkgconfig"
+export XDG_DATA_DIRS="$VIRT_PREFIX/share:/usr/share:/usr/local/share"
+export GI_TYPELIB_PATH="$VIRT_PREFIX/lib/girepository-1.0"
+export OSINFO_SYSTEM_DIR="$VIRT_PREFIX/share/osinfo"
+
+# These search paths need to encode the OS architecture in some way
+# in order to work, so use the appropriate tool to obtain this
+# information and adjust them accordingly
+packaging_format="{{ packaging.format }}"
+if test "$packaging_format" = "deb"; then
+    multilib=$(dpkg-architecture -q DEB_TARGET_MULTIARCH)
+    export LD_LIBRARY_PATH="$VIRT_PREFIX/lib/$multilib:$LD_LIBRARY_PATH"
+    export PKG_CONFIG_PATH="$VIRT_PREFIX/lib/$multilib/pkgconfig:$PKG_CONFIG_PATH"
+    export GI_TYPELIB_PATH="$VIRT_PREFIX/lib/$multilib/girepository-1.0:$GI_TYPELIB_PATH"
+elif test "$packaging_format" = "rpm"; then
+    multilib=$(rpm --eval '%{_lib}')
+    export LD_LIBRARY_PATH="$VIRT_PREFIX/$multilib:$LD_LIBRARY_PATH"
+    export PKG_CONFIG_PATH="$VIRT_PREFIX/$multilib/pkgconfig:$PKG_CONFIG_PATH"
+    export GI_TYPELIB_PATH="$VIRT_PREFIX/$multilib/girepository-1.0:$GI_TYPELIB_PATH"
+fi
+
+# We need to ask Perl for this information, since it's used to
+# construct installation paths
+plarch=$(perl -e 'use Config; print $Config{archname}')
+export PERL5LIB="$VIRT_PREFIX/lib/perl5/$plarch"
+
+# For Python we need the version number (major and minor) and
+# to know whether "lib64" paths are searched
+pylib=lib
+if $PYTHON -c 'import sys; print("\n".join(sys.path))' | grep -q lib64; then
+    pylib=lib64
+fi
+pyver=$($PYTHON -c 'import sys; print(".".join(map(lambda x: str(sys.version_info[x]), [0,1])))')
+export PYTHONPATH="$VIRT_PREFIX/$pylib/python$pyver/site-packages"
+
+# Use ccache by default. The directory we're adding to $PATH contains
+# symlinks that make it possible to invoke the (cross) compiler using
+# the usual name and have it transparently go through ccache
+export CCACHE_WRAPPERSDIR="/usr/libexec/ccache-wrappers"
+export PATH="$CCACHE_WRAPPERSDIR:$PATH"

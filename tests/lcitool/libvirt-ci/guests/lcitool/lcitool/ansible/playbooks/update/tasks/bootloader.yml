@@ -1,0 +1,51 @@
+---
+- name: Look for GRUB2 configuration
+  stat:
+    path: /etc/default/grub
+  register: grubdefault
+
+- name: Look for GRUB2 configuration
+  stat:
+    path: /boot/grub/grub.cfg
+  register: grubcfg
+
+- name: Look for GRUB2 configuration
+  stat:
+    path: /boot/grub2/grub.cfg
+  register: grub2cfg
+
+- name: Configure GRUB2
+  lineinfile:
+    path: /etc/default/grub
+    regexp: '^{{ item.key }}=.*$'
+    line: '{{ item.key }}="{{ item.value }}"'
+  loop:
+    - { key: 'GRUB_TIMEOUT', value: '1' }
+    - { key: 'GRUB_CMDLINE_LINUX_DEFAULT', value: 'console=ttyS0' }
+    - { key: 'GRUB_CMDLINE_LINUX', value: 'console=ttyS0' }
+    - { key: 'GRUB_TERMINAL', value: 'serial' }
+    - { key: 'GRUB_SERIAL_COMMAND', value: 'serial' }
+  when:
+    - grubdefault.stat.exists
+
+- name: Apply GRUB2 configuration
+  command: 'grub-mkconfig -o /boot/grub/grub.cfg'
+  when:
+    - grubcfg.stat.exists
+
+- name: Apply GRUB2 configuration
+  command: 'grub2-mkconfig -o /boot/grub2/grub.cfg'
+  when:
+    - grub2cfg.stat.exists
+
+- name: Configure the FreeBSD bootloader
+  lineinfile:
+    path: /boot/loader.conf
+    regexp: '^{{ item.key }}=.*$'
+    line: '{{ item.key }}="{{ item.value }}"'
+    create: yes
+  loop:
+    - { key: 'console', value: 'comconsole' }
+    - { key: 'autoboot_delay', value: '1' }
+  when:
+    - os.name == 'FreeBSD'

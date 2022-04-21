@@ -27,7 +27,6 @@
 #include "qemu/osdep.h"
 #include "hw/irq.h"
 #include "hw/sysbus.h"
-#include "cpu.h"
 
 #include "hw/qdev-properties.h"
 #include "hw/sparc/grlib.h"
@@ -50,6 +49,8 @@
 #define MASK_OFFSET      0x40
 #define FORCE_OFFSET     0x80
 #define EXTENDED_OFFSET  0xC0
+
+#define MAX_PILS 16
 
 OBJECT_DECLARE_SIMPLE_TYPE(IRQMP, GRLIB_IRQMP)
 
@@ -126,7 +127,7 @@ void grlib_irqmp_ack(DeviceState *dev, int intno)
     grlib_irqmp_ack_mask(state, mask);
 }
 
-void grlib_irqmp_set_irq(void *opaque, int irq, int level)
+static void grlib_irqmp_set_irq(void *opaque, int irq, int level)
 {
     IRQMP      *irqmp = GRLIB_IRQMP(opaque);
     IRQMPState *s;
@@ -328,6 +329,7 @@ static void grlib_irqmp_init(Object *obj)
     IRQMP *irqmp = GRLIB_IRQMP(obj);
     SysBusDevice *dev = SYS_BUS_DEVICE(obj);
 
+    qdev_init_gpio_in(DEVICE(obj), grlib_irqmp_set_irq, MAX_PILS);
     qdev_init_gpio_out_named(DEVICE(obj), &irqmp->irq, "grlib-irq", 1);
     memory_region_init_io(&irqmp->iomem, obj, &grlib_irqmp_ops, irqmp,
                           "irqmp", IRQMP_REG_SIZE);

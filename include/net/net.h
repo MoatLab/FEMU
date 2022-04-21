@@ -4,6 +4,7 @@
 #include "qemu/queue.h"
 #include "qapi/qapi-types-net.h"
 #include "net/queue.h"
+#include "hw/qdev-properties-system.h"
 
 #define MAC_FMT "%02X:%02X:%02X:%02X:%02X:%02X"
 #define MAC_ARG(x) ((uint8_t *)(x))[0], ((uint8_t *)(x))[1], \
@@ -60,6 +61,8 @@ typedef int (SetVnetBE)(NetClientState *, bool);
 typedef struct SocketReadState SocketReadState;
 typedef void (SocketReadStateFinalize)(SocketReadState *rs);
 typedef void (NetAnnounce)(NetClientState *);
+typedef bool (SetSteeringEBPF)(NetClientState *, int);
+typedef bool (NetCheckPeerType)(NetClientState *, ObjectClass *, Error **);
 
 typedef struct NetClientInfo {
     NetClientDriver type;
@@ -81,6 +84,8 @@ typedef struct NetClientInfo {
     SetVnetLE *set_vnet_le;
     SetVnetBE *set_vnet_be;
     NetAnnounce *announce;
+    SetSteeringEBPF *set_steering_ebpf;
+    NetCheckPeerType *check_peer_type;
 } NetClientInfo;
 
 struct NetClientState {
@@ -99,6 +104,8 @@ struct NetClientState {
     int vring_enable;
     int vnet_hdr_len;
     bool is_netdev;
+    bool do_not_pad; /* do not pad to the minimum ethernet frame length */
+    bool is_datapath;
     QTAILQ_HEAD(, NetFilterState) filters;
 };
 
@@ -130,6 +137,10 @@ NetClientState *qemu_new_net_client(NetClientInfo *info,
                                     NetClientState *peer,
                                     const char *model,
                                     const char *name);
+NetClientState *qemu_new_net_control_client(NetClientInfo *info,
+                                        NetClientState *peer,
+                                        const char *model,
+                                        const char *name);
 NICState *qemu_new_nic(NetClientInfo *info,
                        NICConf *conf,
                        const char *model,
@@ -143,12 +154,17 @@ void *qemu_get_nic_opaque(NetClientState *nc);
 void qemu_del_net_client(NetClientState *nc);
 typedef void (*qemu_nic_foreach)(NICState *nic, void *opaque);
 void qemu_foreach_nic(qemu_nic_foreach func, void *opaque);
+int qemu_can_receive_packet(NetClientState *nc);
 int qemu_can_send_packet(NetClientState *nc);
 ssize_t qemu_sendv_packet(NetClientState *nc, const struct iovec *iov,
                           int iovcnt);
 ssize_t qemu_sendv_packet_async(NetClientState *nc, const struct iovec *iov,
                                 int iovcnt, NetPacketSent *sent_cb);
 ssize_t qemu_send_packet(NetClientState *nc, const uint8_t *buf, int size);
+ssize_t qemu_receive_packet(NetClientState *nc, const uint8_t *buf, int size);
+ssize_t qemu_receive_packet_iov(NetClientState *nc,
+                                const struct iovec *iov,
+                                int iovcnt);
 ssize_t qemu_send_packet_raw(NetClientState *nc, const uint8_t *buf, int size);
 ssize_t qemu_send_packet_async(NetClientState *nc, const uint8_t *buf,
                                int size, NetPacketSent *sent_cb);
@@ -232,6 +248,11 @@ uint32_t net_crc32_le(const uint8_t *p, int len);
     .info       = &vmstate_info_buffer,                              \
     .flags      = VMS_BUFFER,                                        \
     .offset     = vmstate_offset_macaddr(_state, _field),            \
+}
+
+static inline bool net_peer_needs_padding(NetClientState *nc)
+{
+  return nc->peer && !nc->peer->do_not_pad;
 }
 
 #endif

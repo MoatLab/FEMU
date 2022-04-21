@@ -12,6 +12,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/cutils.h"
 #include "hw/clock.h"
 #include "trace.h"
 
@@ -38,15 +39,17 @@ Clock *clock_new(Object *parent, const char *name)
     return clk;
 }
 
-void clock_set_callback(Clock *clk, ClockCallback *cb, void *opaque)
+void clock_set_callback(Clock *clk, ClockCallback *cb, void *opaque,
+                        unsigned int events)
 {
     clk->callback = cb;
     clk->callback_opaque = opaque;
+    clk->callback_events = events;
 }
 
 void clock_clear_callback(Clock *clk)
 {
-    clock_set_callback(clk, NULL, NULL);
+    clock_set_callback(clk, NULL, NULL, 0);
 }
 
 bool clock_set(Clock *clk, uint64_t period)
@@ -61,18 +64,42 @@ bool clock_set(Clock *clk, uint64_t period)
     return true;
 }
 
+static uint64_t clock_get_child_period(Clock *clk)
+{
+    /*
+     * Return the period to be used for child clocks, which is the parent
+     * clock period adjusted for for multiplier and divider effects.
+     */
+    return muldiv64(clk->period, clk->multiplier, clk->divider);
+}
+
+static void clock_call_callback(Clock *clk, ClockEvent event)
+{
+    /*
+     * Call the Clock's callback for this event, if it has one and
+     * is interested in this event.
+     */
+    if (clk->callback && (clk->callback_events & event)) {
+        clk->callback(clk->callback_opaque, event);
+    }
+}
+
 static void clock_propagate_period(Clock *clk, bool call_callbacks)
 {
     Clock *child;
+    uint64_t child_period = clock_get_child_period(clk);
 
     QLIST_FOREACH(child, &clk->children, sibling) {
-        if (child->period != clk->period) {
-            child->period = clk->period;
+        if (child->period != child_period) {
+            if (call_callbacks) {
+                clock_call_callback(child, ClockPreUpdate);
+            }
+            child->period = child_period;
             trace_clock_update(CLOCK_PATH(child), CLOCK_PATH(clk),
-                               CLOCK_PERIOD_TO_HZ(clk->period),
+                               CLOCK_PERIOD_TO_HZ(child->period),
                                call_callbacks);
-            if (call_callbacks && child->callback) {
-                child->callback(child->callback_opaque);
+            if (call_callbacks) {
+                clock_call_callback(child, ClockUpdate);
             }
             clock_propagate_period(child, call_callbacks);
         }
@@ -93,7 +120,7 @@ void clock_set_source(Clock *clk, Clock *src)
 
     trace_clock_set_source(CLOCK_PATH(clk), CLOCK_PATH(src));
 
-    clk->period = src->period;
+    clk->period = clock_get_child_period(src);
     QLIST_INSERT_HEAD(&src->children, clk, sibling);
     clk->source = src;
     clock_propagate_period(clk, false);
@@ -111,9 +138,27 @@ static void clock_disconnect(Clock *clk)
     QLIST_REMOVE(clk, sibling);
 }
 
+char *clock_display_freq(Clock *clk)
+{
+    return freq_to_str(clock_get_hz(clk));
+}
+
+void clock_set_mul_div(Clock *clk, uint32_t multiplier, uint32_t divider)
+{
+    assert(divider != 0);
+
+    trace_clock_set_mul_div(CLOCK_PATH(clk), clk->multiplier, multiplier,
+                            clk->divider, divider);
+    clk->multiplier = multiplier;
+    clk->divider = divider;
+}
+
 static void clock_initfn(Object *obj)
 {
     Clock *clk = CLOCK(obj);
+
+    clk->multiplier = 1;
+    clk->divider = 1;
 
     QLIST_INIT(&clk->children);
 }

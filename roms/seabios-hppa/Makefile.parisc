@@ -1,0 +1,192 @@
+# SeaBIOS build system for PA-RISC
+#
+# Copyright (C) 2017-2021  Helge Deller <deller@gmx.de> for PA-RISC
+#
+# This file may be distributed under the terms of the GNU LGPLv3 license.
+
+# Output directory
+OUT=out/
+
+# Common command definitions
+export HOSTCC             := $(CC)
+export CONFIG_SHELL       := sh
+export KCONFIG_AUTOHEADER := autoconf.h
+export KCONFIG_CONFIG     := $(CURDIR)/.config
+export LC_ALL             := C
+CROSS_PREFIX=hppa-linux-gnu-
+ifneq ($(CROSS_PREFIX),)
+CC=$(CROSS_PREFIX)gcc
+LIBGCC = $(shell $(CC) $(KBUILD_CFLAGS) -print-libgcc-file-name)
+endif
+AS=$(CROSS_PREFIX)as
+LD=$(CROSS_PREFIX)ld
+OBJCOPY=$(CROSS_PREFIX)objcopy
+OBJDUMP=$(CROSS_PREFIX)objdump
+STRIP=$(CROSS_PREFIX)strip
+PYTHON=python
+CPP=cpp
+IASL:=iasl
+LD32BIT_FLAG:=
+
+# Source files
+# misc.c stacks.c system.c resume.c pcibios.c hw/timer.c
+SRCBOTH=output.c string.c block.c cdrom.c disk.c kbd.c \
+    serial.c sercon.c clock.c vgahooks.c \
+    apm.c cp437.c \
+    hw/pci.c hw/rtc.c hw/dma.c hw/pic.c hw/serialio.c \
+    hw/usb.c hw/usb-uhci.c hw/usb-ohci.c hw/usb-ehci.c \
+    hw/usb-hid.c hw/usb-msc.c hw/usb-uas.c \
+    hw/blockcmd.c hw/floppy.c hw/ata.c hw/ramdisk.c \
+    hw/lsi-scsi.c hw/esp-scsi.c hw/megasas.c hw/mpt-scsi.c \
+    parisc/timer.c sha256.c sha512.c
+# x86.c fw/smp.c fw/mttr.c malloc.c
+SRC32FLAT=$(SRCBOTH) post.c e820map.c romfile.c optionroms.c \
+    pmm.c font.c boot.c bootsplash.c jpeg.c bmp.c tcgbios.c sha1.c \
+    hw/pcidevice.c hw/ahci.c hw/pvscsi.c hw/usb-xhci.c hw/usb-hub.c hw/sdcard.c \
+    fw/coreboot.c fw/lzmadecode.c fw/multiboot.c fw/csm.c fw/biostables.c \
+    fw/paravirt.c fw/shadow.c fw/pciinit.c fw/smm.c fw/xen.c \
+    fw/acpi.c fw/mptable.c fw/pirtable.c fw/smbios.c fw/romfile_loader.c \
+    hw/virtio-ring.c hw/virtio-pci.c hw/virtio-blk.c hw/virtio-scsi.c \
+    hw/tpm_drivers.c hw/nvme.c \
+    version.c parisc/malloc.c parisc/parisc.c parisc/sti.c parisc/lasips2.c parisc/stirom.c
+DIRS=src src/hw src/fw vgasrc src/parisc
+
+# VGA src files
+SRCVGA=vgasrc/vgainit.c vgasrc/vgabios.c vgasrc/vgafb.c vgasrc/swcursor.c \
+    vgasrc/vgafonts.c vgasrc/vbe.c \
+    vgasrc/stdvga.c vgasrc/stdvgamodes.c vgasrc/stdvgaio.c \
+    vgasrc/clext.c vgasrc/bochsvga.c  \
+    vgasrc/cbvga.c
+
+
+# Default compiler flags
+cc-option=$(shell if test -z "`$(1) $(2) -S -o /dev/null -xc /dev/null 2>&1`" \
+    ; then echo "$(2)"; else echo "$(3)"; fi ;)
+
+EXTRAVERSION=
+
+CPPFLAGS = -P -MD -MT $@
+
+COMMONCFLAGS := -I$(OUT) -Isrc -Ivgasrc -Os -MD -g \
+    -Wall -Wno-strict-aliasing -Wold-style-definition \
+    $(call cc-option,$(CC),-Wtype-limits,) \
+    -fomit-frame-pointer \
+    -freg-struct-return -ffreestanding -fno-delete-null-pointer-checks \
+    -fdata-sections -fno-common -fno-merge-constants -mdisable-fpregs \
+    -fno-builtin-printf -fno-ipa-sra
+COMMONCFLAGS += $(call cc-option,$(CC),-nopie,)
+COMMONCFLAGS += $(call cc-option,$(CC),-fno-pie,)
+COMMONCFLAGS += $(call cc-option,$(CC),-fno-stack-protector,)
+COMMONCFLAGS += $(call cc-option,$(CC),-fno-stack-protector-all,)
+COMMONCFLAGS += $(call cc-option,$(CC),-fstack-check=no,)
+COMMONCFLAGS += $(call cc-option,$(CC),-mfast-indirect-calls,)
+COMMA := ,
+
+CFLAGS32FLAT := $(COMMONCFLAGS) -DMODE16=0 -DMODESEGMENT=0
+CFLAGS16     := $(CFLAGS32FLAT) -I$(OUT)
+
+# Run with "make V=1" to see the actual compile commands
+ifdef V
+Q=
+else
+Q=@
+MAKEFLAGS += --no-print-directory
+endif
+
+# Default targets
+-include $(KCONFIG_CONFIG)
+
+target-y :=
+target-$(CONFIG_PARISC) += $(OUT)hppa-firmware.img
+
+all: $(target-y)
+
+# Make definitions
+.PHONY : all clean distclean FORCE
+.DELETE_ON_ERROR:
+
+
+################ Common build rules
+
+# Verify the build environment works.
+TESTGCC:=$(shell OUT="$(OUT)" CC="$(CC)" LD="$(LD)" IASL="$(IASL)" scripts/test-build.sh)
+ifeq "$(TESTGCC)" "-1"
+$(error "Please upgrade the build environment")
+endif
+
+ifeq "$(TESTGCC)" "0"
+# Use -fwhole-program
+CFLAGSWHOLE=-fwhole-program -DWHOLE_PROGRAM
+endif
+
+# Do a whole file compile by textually including all C code.
+define whole-compile
+@echo "  Compiling whole program $3"
+$(Q)printf '$(foreach i,$2,#include "$i"\n)' > $3.tmp.c
+$(Q)$(CC) -I. $1 $(CFLAGSWHOLE) -c $3.tmp.c -o $3
+endef
+
+%.strip.o: %.o
+	@echo "  Stripping $@"
+	$(Q)$(STRIP) $< -o $@
+
+$(OUT)%.s: %.c
+	@echo "  Compiling to assembler $@"
+	$(Q)$(CC) $(CFLAGS16) -S -c $< -o $@
+
+$(OUT)%.o: %.c $(OUT)autoconf.h
+	@echo "  Compile checking $@"
+	$(Q)$(CC) $(CFLAGS32FLAT) -c $< -o $@
+
+$(OUT)%.lds: %.lds.S
+	@echo "  Precompiling $@"
+	$(Q)$(CPP) $(CPPFLAGS) -D__ASSEMBLY__ $< -o $@
+
+$(OUT)head.o: src/parisc/head.S $(OUT)autoconf.h $(OUT)autoversion.h
+	@echo "  Compile checking $@"
+	$(Q)$(CC) $(CFLAGS32FLAT) -D__ASSEMBLY__ -c $< -o $@
+
+
+################ Main BIOS build rules
+
+$(OUT)asm-offsets.s: $(OUT)autoconf.h
+
+$(OUT)asm-offsets.h: $(OUT)src/asm-offsets.s
+	@echo "  Generating offset file $@"
+	$(Q)./scripts/gen-offsets.sh $< $@
+
+$(OUT)ccode32flat.o: $(OUT)autoversion.h $(OUT)autoconf.h $(patsubst %.c, $(OUT)src/%.o,$(SRC32FLAT)) ; $(call whole-compile, $(CFLAGS32FLAT), $(addprefix src/, $(SRC32FLAT)) $(SRCVGA),$@)
+
+$(OUT)autoversion.h:
+	$(Q)$(PYTHON) ./scripts/buildversion.py -e "$(EXTRAVERSION)" -t "$(CC);$(AS);$(LD);$(OBJCOPY);$(OBJDUMP);$(STRIP)" $(OUT)autoversion.h
+
+$(OUT)hppa-firmware.img: $(OUT)autoconf.h $(OUT)head.o $(OUT)ccode32flat.o src/version.c
+	@echo "  Linking $@"
+	$(Q)$(CPP) $(CPPFLAGS) -Isrc -D__ASSEMBLY__ src/parisc/pafirmware.lds.S -o $(OUT)pafirmware.lds
+	$(Q)$(CC) $(CFLAGS32FLAT) -c src/version.c -o $(OUT)version.o
+	$(Q)$(LD) -N -T $(OUT)pafirmware.lds $(OUT)head.o $(OUT)version.o -X -o $@ -e startup --as-needed $(OUT)ccode32flat.o $(LIBGCC)
+
+################ Kconfig rules
+
+define do-kconfig
+$(Q)mkdir -p $(OUT)/scripts/kconfig/lxdialog
+$(Q)mkdir -p $(OUT)/include/config
+$(Q)mkdir -p $(addprefix $(OUT), $(DIRS))
+$(Q)$(MAKE) -C $(OUT) -f $(CURDIR)/scripts/kconfig/Makefile srctree=$(CURDIR) src=scripts/kconfig obj=scripts/kconfig Q=$(Q) Kconfig=$(CURDIR)/src/Kconfig $1
+endef
+
+$(OUT)autoconf.h : $(KCONFIG_CONFIG) ; $(call do-kconfig, silentoldconfig)
+$(KCONFIG_CONFIG): src/Kconfig vgasrc/Kconfig ; $(call do-kconfig, olddefconfig)
+%onfig: ; $(call do-kconfig, $@)
+help: ; $(call do-kconfig, $@)
+
+
+################ Generic rules
+
+clean:
+	$(Q)rm -rf $(OUT)
+
+distclean: clean
+	$(Q)rm -f .config .config.old
+
+-include $(OUT)*.d $(patsubst %,$(OUT)%/*.d,$(DIRS))

@@ -25,28 +25,21 @@ config APIC
     select MSI_NONBROKEN
     select I8259
 
+config ARM_GICV3_TCG
+    bool
+    default y
+    depends on ARM_GIC && TCG
+
 config ARM_GIC_KVM
     bool
     default y
     depends on ARM_GIC && KVM
 
-config OPENPIC_KVM
-    bool
-    default y
-    depends on OPENPIC && KVM
-
 config XICS
     bool
-    depends on POWERNV || PSERIES
 
-config XICS_SPAPR
+config XIVE
     bool
-    select XICS
-
-config XICS_KVM
-    bool
-    default y
-    depends on XICS && KVM
 
 config ALLWINNER_A10_PIC
     bool
@@ -62,14 +55,32 @@ config S390_FLIC_KVM
 config OMPIC
     bool
 
+config PPC_UIC
+    bool
+
+config SH_INTC
+    bool
+
 config RX_ICU
     bool
 
 config LOONGSON_LIOINTC
     bool
 
-config SIFIVE_CLINT
+config RISCV_ACLINT
+    bool
+
+config RISCV_APLIC
+    bool
+
+config RISCV_IMSIC
     bool
 
 config SIFIVE_PLIC
+    bool
+
+config GOLDFISH_PIC
+    bool
+
+config M68K_IRQC
     bool

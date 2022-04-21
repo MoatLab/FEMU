@@ -1,0 +1,20 @@
+/*****************************************************************************
+ * Boot menu: Glue code to Forth
+ *
+ * Copyright 2017 Red Hat, Inc.
+ *
+ * This program and the accompanying materials
+ * are made available under the terms of the BSD License
+ * which accompanies this distribution, and is available at
+ * http://www.opensource.org/licenses/bsd-license.php
+ *
+ * Contributors:
+ *     Thomas Huth, Red Hat Inc. - initial implementation
+ *****************************************************************************/
+
+#include "bootmenu.h"
+
+// ( -- [str] len|0 )
+PRIM(boot_X2d_menu)
+	bootmenu();
+MIRP

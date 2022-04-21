@@ -48,7 +48,7 @@ class AstPrinter(AstVisitor):
         self.is_newline = False
 
     def append_padded(self, data: str, node: mparser.BaseNode) -> None:
-        if self.result[-1] not in [' ', '\n']:
+        if self.result and self.result[-1] not in [' ', '\n']:
             data = ' ' + data
         self.append(data + ' ', node)
 
@@ -69,6 +69,10 @@ class AstPrinter(AstVisitor):
     def visit_StringNode(self, node: mparser.StringNode) -> None:
         assert isinstance(node.value, str)
         self.append("'" + node.value + "'", node)
+
+    def visit_FormatStringNode(self, node: mparser.FormatStringNode) -> None:
+        assert isinstance(node.value, str)
+        self.append("f'" + node.value + "'", node)
 
     def visit_ContinueNode(self, node: mparser.ContinueNode) -> None:
         self.append('continue', node)
@@ -254,6 +258,9 @@ class AstJSONPrinter(AstVisitor):
         self.gen_ElementaryNode(node)
 
     def visit_StringNode(self, node: mparser.StringNode) -> None:
+        self.gen_ElementaryNode(node)
+
+    def visit_FormatStringNode(self, node: mparser.FormatStringNode) -> None:
         self.gen_ElementaryNode(node)
 
     def visit_ArrayNode(self, node: mparser.ArrayNode) -> None:

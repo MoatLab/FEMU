@@ -106,6 +106,18 @@ struct QemuConsoleClass {
 };
 
 #define QEMU_ALLOCATED_FLAG     0x01
+#define QEMU_PLACEHOLDER_FLAG   0x02
+
+typedef struct ScanoutTexture {
+    uint32_t backing_id;
+    bool backing_y_0_top;
+    uint32_t backing_width;
+    uint32_t backing_height;
+    uint32_t x;
+    uint32_t y;
+    uint32_t width;
+    uint32_t height;
+} ScanoutTexture;
 
 typedef struct DisplaySurface {
     pixman_format_code_t format;
@@ -166,44 +178,72 @@ typedef struct QemuDmaBuf {
     uint32_t  fourcc;
     uint64_t  modifier;
     uint32_t  texture;
+    uint32_t  x;
+    uint32_t  y;
+    uint32_t  scanout_width;
+    uint32_t  scanout_height;
     bool      y0_top;
+    void      *sync;
+    int       fence_fd;
+    bool      allow_fences;
+    bool      draw_submitted;
 } QemuDmaBuf;
 
+enum display_scanout {
+    SCANOUT_NONE,
+    SCANOUT_SURFACE,
+    SCANOUT_TEXTURE,
+    SCANOUT_DMABUF,
+};
+
+typedef struct DisplayScanout {
+    enum display_scanout kind;
+    union {
+        /* DisplaySurface *surface; is kept in QemuConsole */
+        ScanoutTexture texture;
+        QemuDmaBuf *dmabuf;
+    };
+} DisplayScanout;
+
 typedef struct DisplayState DisplayState;
+typedef struct DisplayGLCtx DisplayGLCtx;
 
 typedef struct DisplayChangeListenerOps {
     const char *dpy_name;
 
+    /* optional */
     void (*dpy_refresh)(DisplayChangeListener *dcl);
 
+    /* optional */
     void (*dpy_gfx_update)(DisplayChangeListener *dcl,
                            int x, int y, int w, int h);
+    /* optional */
     void (*dpy_gfx_switch)(DisplayChangeListener *dcl,
                            struct DisplaySurface *new_surface);
+    /* optional */
     bool (*dpy_gfx_check_format)(DisplayChangeListener *dcl,
                                  pixman_format_code_t format);
 
+    /* optional */
     void (*dpy_text_cursor)(DisplayChangeListener *dcl,
                             int x, int y);
+    /* optional */
     void (*dpy_text_resize)(DisplayChangeListener *dcl,
                             int w, int h);
+    /* optional */
     void (*dpy_text_update)(DisplayChangeListener *dcl,
                             int x, int y, int w, int h);
 
+    /* optional */
     void (*dpy_mouse_set)(DisplayChangeListener *dcl,
                           int x, int y, int on);
+    /* optional */
     void (*dpy_cursor_define)(DisplayChangeListener *dcl,
                               QEMUCursor *cursor);
 
-    QEMUGLContext (*dpy_gl_ctx_create)(DisplayChangeListener *dcl,
-                                       QEMUGLParams *params);
-    void (*dpy_gl_ctx_destroy)(DisplayChangeListener *dcl,
-                               QEMUGLContext ctx);
-    int (*dpy_gl_ctx_make_current)(DisplayChangeListener *dcl,
-                                   QEMUGLContext ctx);
-    QEMUGLContext (*dpy_gl_ctx_get_current)(DisplayChangeListener *dcl);
-
+    /* required if GL */
     void (*dpy_gl_scanout_disable)(DisplayChangeListener *dcl);
+    /* required if GL */
     void (*dpy_gl_scanout_texture)(DisplayChangeListener *dcl,
                                    uint32_t backing_id,
                                    bool backing_y_0_top,
@@ -211,15 +251,22 @@ typedef struct DisplayChangeListenerOps {
                                    uint32_t backing_height,
                                    uint32_t x, uint32_t y,
                                    uint32_t w, uint32_t h);
+    /* optional (default to true if has dpy_gl_scanout_dmabuf) */
+    bool (*dpy_has_dmabuf)(DisplayChangeListener *dcl);
+    /* optional */
     void (*dpy_gl_scanout_dmabuf)(DisplayChangeListener *dcl,
                                   QemuDmaBuf *dmabuf);
+    /* optional */
     void (*dpy_gl_cursor_dmabuf)(DisplayChangeListener *dcl,
                                  QemuDmaBuf *dmabuf, bool have_hot,
                                  uint32_t hot_x, uint32_t hot_y);
+    /* optional */
     void (*dpy_gl_cursor_position)(DisplayChangeListener *dcl,
                                    uint32_t pos_x, uint32_t pos_y);
+    /* optional */
     void (*dpy_gl_release_dmabuf)(DisplayChangeListener *dcl,
                                   QemuDmaBuf *dmabuf);
+    /* required if GL */
     void (*dpy_gl_update)(DisplayChangeListener *dcl,
                           uint32_t x, uint32_t y, uint32_t w, uint32_t h);
 
@@ -234,31 +281,51 @@ struct DisplayChangeListener {
     QLIST_ENTRY(DisplayChangeListener) next;
 };
 
+typedef struct DisplayGLCtxOps {
+    bool (*dpy_gl_ctx_is_compatible_dcl)(DisplayGLCtx *dgc,
+                                         DisplayChangeListener *dcl);
+    QEMUGLContext (*dpy_gl_ctx_create)(DisplayGLCtx *dgc,
+                                       QEMUGLParams *params);
+    void (*dpy_gl_ctx_destroy)(DisplayGLCtx *dgc,
+                               QEMUGLContext ctx);
+    int (*dpy_gl_ctx_make_current)(DisplayGLCtx *dgc,
+                                   QEMUGLContext ctx);
+    void (*dpy_gl_ctx_create_texture)(DisplayGLCtx *dgc,
+                                      DisplaySurface *surface);
+    void (*dpy_gl_ctx_destroy_texture)(DisplayGLCtx *dgc,
+                                      DisplaySurface *surface);
+    void (*dpy_gl_ctx_update_texture)(DisplayGLCtx *dgc,
+                                      DisplaySurface *surface,
+                                      int x, int y, int w, int h);
+} DisplayGLCtxOps;
+
+struct DisplayGLCtx {
+    const DisplayGLCtxOps *ops;
+#ifdef CONFIG_OPENGL
+    QemuGLShader *gls; /* optional shared shader */
+#endif
+};
+
 DisplayState *init_displaystate(void);
 DisplaySurface *qemu_create_displaysurface_from(int width, int height,
                                                 pixman_format_code_t format,
                                                 int linesize, uint8_t *data);
 DisplaySurface *qemu_create_displaysurface_pixman(pixman_image_t *image);
-DisplaySurface *qemu_create_message_surface(int w, int h,
-                                            const char *msg);
+DisplaySurface *qemu_create_placeholder_surface(int w, int h,
+                                                const char *msg);
 PixelFormat qemu_default_pixelformat(int bpp);
 
 DisplaySurface *qemu_create_displaysurface(int width, int height);
 void qemu_free_displaysurface(DisplaySurface *surface);
 
-static inline int is_surface_bgr(DisplaySurface *surface)
-{
-    if (PIXMAN_FORMAT_BPP(surface->format) == 32 &&
-        PIXMAN_FORMAT_TYPE(surface->format) == PIXMAN_TYPE_ABGR) {
-        return 1;
-    } else {
-        return 0;
-    }
-}
-
 static inline int is_buffer_shared(DisplaySurface *surface)
 {
     return !(surface->flags & QEMU_ALLOCATED_FLAG);
+}
+
+static inline int is_placeholder(DisplaySurface *surface)
+{
+    return surface->flags & QEMU_PLACEHOLDER_FLAG;
 }
 
 void register_displaychangelistener(DisplayChangeListener *dcl);
@@ -268,7 +335,7 @@ void unregister_displaychangelistener(DisplayChangeListener *dcl);
 
 bool dpy_ui_info_supported(QemuConsole *con);
 const QemuUIInfo *dpy_get_ui_info(const QemuConsole *con);
-int dpy_set_ui_info(QemuConsole *con, QemuUIInfo *info);
+int dpy_set_ui_info(QemuConsole *con, QemuUIInfo *info, bool delay);
 
 void dpy_gfx_update(QemuConsole *con, int x, int y, int w, int h);
 void dpy_gfx_update_full(QemuConsole *con);
@@ -303,10 +370,8 @@ QEMUGLContext dpy_gl_ctx_create(QemuConsole *con,
                                 QEMUGLParams *params);
 void dpy_gl_ctx_destroy(QemuConsole *con, QEMUGLContext ctx);
 int dpy_gl_ctx_make_current(QemuConsole *con, QEMUGLContext ctx);
-QEMUGLContext dpy_gl_ctx_get_current(QemuConsole *con);
 
 bool console_has_gl(QemuConsole *con);
-bool console_has_gl_dmabuf(QemuConsole *con);
 
 static inline int surface_stride(DisplaySurface *s)
 {
@@ -352,7 +417,16 @@ static inline void console_write_ch(console_ch_t *dest, uint32_t ch)
     *dest = ch;
 }
 
+enum {
+    GRAPHIC_FLAGS_NONE     = 0,
+    /* require a console/display with GL callbacks */
+    GRAPHIC_FLAGS_GL       = 1 << 0,
+    /* require a console/display with DMABUF import */
+    GRAPHIC_FLAGS_DMABUF   = 1 << 1,
+};
+
 typedef struct GraphicHwOps {
+    int (*get_flags)(void *opaque); /* optional, default 0 */
     void (*invalidate)(void *opaque);
     void (*gfx_update)(void *opaque);
     bool gfx_update_async; /* if true, calls graphic_hw_update_done() */
@@ -378,6 +452,8 @@ void graphic_hw_gl_block(QemuConsole *con, bool block);
 
 void qemu_console_early_init(void);
 
+void qemu_console_set_display_gl_ctx(QemuConsole *con, DisplayGLCtx *ctx);
+
 QemuConsole *qemu_console_lookup_by_index(unsigned int index);
 QemuConsole *qemu_console_lookup_by_device(DeviceState *dev, uint32_t head);
 QemuConsole *qemu_console_lookup_by_device_name(const char *device_id,
@@ -390,7 +466,6 @@ bool qemu_console_is_gl_blocked(QemuConsole *con);
 char *qemu_console_get_label(QemuConsole *con);
 int qemu_console_get_index(QemuConsole *con);
 uint32_t qemu_console_get_head(QemuConsole *con);
-QemuUIInfo *qemu_console_get_ui_info(QemuConsole *con);
 int qemu_console_get_width(QemuConsole *con, int fallback);
 int qemu_console_get_height(QemuConsole *con, int fallback);
 /* Return the low-level window id for the console */
@@ -440,10 +515,22 @@ void vnc_display_open(const char *id, Error **errp);
 void vnc_display_add_client(const char *id, int csock, bool skipauth);
 int vnc_display_password(const char *id, const char *password);
 int vnc_display_pw_expire(const char *id, time_t expires);
-QemuOpts *vnc_parse(const char *str, Error **errp);
+void vnc_parse(const char *str);
 int vnc_init_func(void *opaque, QemuOpts *opts, Error **errp);
+bool vnc_display_reload_certs(const char *id,  Error **errp);
 
 /* input.c */
 int index_from_key(const char *key, size_t key_length);
+
+#ifdef CONFIG_LINUX
+/* udmabuf.c */
+int udmabuf_fd(void);
+#endif
+
+/* util.c */
+bool qemu_console_fill_device_address(QemuConsole *con,
+                                      char *device_address,
+                                      size_t size,
+                                      Error **errp);
 
 #endif

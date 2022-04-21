@@ -20,8 +20,12 @@
 #include "qemu/osdep.h"
 #include "qemu-common.h"
 #include "qemu.h"
+#include "user-internals.h"
 #include "elf.h"
 #include "cpu_loop-common.h"
+#include "signal-common.h"
+#include "semihosting/common-semi.h"
+#include "target/arm/syndrome.h"
 
 #define get_user_code_u32(x, gaddr, env)                \
     ({ abi_long __r = get_user_u32((x), (gaddr));       \
@@ -71,10 +75,70 @@
         put_user_u16(__x, (gaddr));                     \
     })
 
-/* Commpage handling -- there is no commpage for AArch64 */
+/*
+ * Similar to code in accel/tcg/user-exec.c, but outside the execution loop.
+ * Must be called with mmap_lock.
+ * We get the PC of the entry address - which is as good as anything,
+ * on a real kernel what you get depends on which mode it uses.
+ */
+static void *atomic_mmu_lookup(CPUArchState *env, uint32_t addr, int size)
+{
+    int need_flags = PAGE_READ | PAGE_WRITE_ORG | PAGE_VALID;
+    int page_flags;
+
+    /* Enforce guest required alignment.  */
+    if (unlikely(addr & (size - 1))) {
+        force_sig_fault(TARGET_SIGBUS, TARGET_BUS_ADRALN, addr);
+        return NULL;
+    }
+
+    page_flags = page_get_flags(addr);
+    if (unlikely((page_flags & need_flags) != need_flags)) {
+        force_sig_fault(TARGET_SIGSEGV,
+                        page_flags & PAGE_VALID ?
+                        TARGET_SEGV_ACCERR : TARGET_SEGV_MAPERR, addr);
+        return NULL;
+    }
+
+    return g2h(env_cpu(env), addr);
+}
 
 /*
- * See the Linux kernel's Documentation/arm/kernel_user_helpers.txt
+ * See the Linux kernel's Documentation/arm/kernel_user_helpers.rst
+ * Input:
+ * r0 = oldval
+ * r1 = newval
+ * r2 = pointer to target value
+ *
+ * Output:
+ * r0 = 0 if *ptr was changed, non-0 if no exchange happened
+ * C set if *ptr was changed, clear if no exchange happened
+ */
+static void arm_kernel_cmpxchg32_helper(CPUARMState *env)
+{
+    uint32_t oldval, newval, val, addr, cpsr, *host_addr;
+
+    oldval = env->regs[0];
+    newval = env->regs[1];
+    addr = env->regs[2];
+
+    mmap_lock();
+    host_addr = atomic_mmu_lookup(env, addr, 4);
+    if (!host_addr) {
+        mmap_unlock();
+        return;
+    }
+
+    val = qatomic_cmpxchg__nocheck(host_addr, oldval, newval);
+    mmap_unlock();
+
+    cpsr = (val == oldval) * CPSR_C;
+    cpsr_write(env, cpsr, CPSR_C, CPSRWriteByInstr);
+    env->regs[0] = cpsr ? 0 : -1;
+}
+
+/*
+ * See the Linux kernel's Documentation/arm/kernel_user_helpers.rst
  * Input:
  * r0 = pointer to oldval
  * r1 = pointer to newval
@@ -91,61 +155,54 @@ static void arm_kernel_cmpxchg64_helper(CPUARMState *env)
 {
     uint64_t oldval, newval, val;
     uint32_t addr, cpsr;
-    target_siginfo_t info;
+    uint64_t *host_addr;
 
-    /* Based on the 32 bit code in do_kernel_trap */
+    addr = env->regs[0];
+    if (get_user_u64(oldval, addr)) {
+        goto segv;
+    }
 
-    /* XXX: This only works between threads, not between processes.
-       It's probably possible to implement this with native host
-       operations. However things like ldrex/strex are much harder so
-       there's not much point trying.  */
-    start_exclusive();
-    cpsr = cpsr_read(env);
+    addr = env->regs[1];
+    if (get_user_u64(newval, addr)) {
+        goto segv;
+    }
+
+    mmap_lock();
     addr = env->regs[2];
-
-    if (get_user_u64(oldval, env->regs[0])) {
-        env->exception.vaddress = env->regs[0];
-        goto segv;
-    };
-
-    if (get_user_u64(newval, env->regs[1])) {
-        env->exception.vaddress = env->regs[1];
-        goto segv;
-    };
-
-    if (get_user_u64(val, addr)) {
-        env->exception.vaddress = addr;
-        goto segv;
+    host_addr = atomic_mmu_lookup(env, addr, 8);
+    if (!host_addr) {
+        mmap_unlock();
+        return;
     }
 
+#ifdef CONFIG_ATOMIC64
+    val = qatomic_cmpxchg__nocheck(host_addr, oldval, newval);
+    cpsr = (val == oldval) * CPSR_C;
+#else
+    /*
+     * This only works between threads, not between processes, but since
+     * the host has no 64-bit cmpxchg, it is the best that we can do.
+     */
+    start_exclusive();
+    val = *host_addr;
     if (val == oldval) {
-        val = newval;
-
-        if (put_user_u64(val, addr)) {
-            env->exception.vaddress = addr;
-            goto segv;
-        };
-
-        env->regs[0] = 0;
-        cpsr |= CPSR_C;
+        *host_addr = newval;
+        cpsr = CPSR_C;
     } else {
-        env->regs[0] = -1;
-        cpsr &= ~CPSR_C;
+        cpsr = 0;
     }
-    cpsr_write(env, cpsr, CPSR_C, CPSRWriteByInstr);
     end_exclusive();
+#endif
+    mmap_unlock();
+
+    cpsr_write(env, cpsr, CPSR_C, CPSRWriteByInstr);
+    env->regs[0] = cpsr ? 0 : -1;
     return;
 
-segv:
-    end_exclusive();
-    /* We get the PC of the entry address - which is as good as anything,
-       on a real kernel what you get depends on which mode it uses. */
-    info.si_signo = TARGET_SIGSEGV;
-    info.si_errno = 0;
-    /* XXX: check env->error_code */
-    info.si_code = TARGET_SEGV_MAPERR;
-    info._sifields._sigfault._addr = env->exception.vaddress;
-    queue_signal(env, info.si_signo, QEMU_SI_FAULT, &info);
+ segv:
+    force_sig_fault(TARGET_SIGSEGV,
+                    page_get_flags(addr) & PAGE_VALID ?
+                    TARGET_SEGV_ACCERR : TARGET_SEGV_MAPERR, addr);
 }
 
 /* Handle a jump to the kernel code page.  */
@@ -153,36 +210,13 @@ static int
 do_kernel_trap(CPUARMState *env)
 {
     uint32_t addr;
-    uint32_t cpsr;
-    uint32_t val;
 
     switch (env->regs[15]) {
     case 0xffff0fa0: /* __kernel_memory_barrier */
-        /* ??? No-op. Will need to do better for SMP.  */
+        smp_mb();
         break;
     case 0xffff0fc0: /* __kernel_cmpxchg */
-         /* XXX: This only works between threads, not between processes.
-            It's probably possible to implement this with native host
-            operations. However things like ldrex/strex are much harder so
-            there's not much point trying.  */
-        start_exclusive();
-        cpsr = cpsr_read(env);
-        addr = env->regs[2];
-        /* FIXME: This should SEGV if the access fails.  */
-        if (get_user_u32(val, addr))
-            val = ~env->regs[0];
-        if (val == env->regs[0]) {
-            val = env->regs[1];
-            /* FIXME: Check for segfaults.  */
-            put_user_u32(val, addr);
-            env->regs[0] = 0;
-            cpsr |= CPSR_C;
-        } else {
-            env->regs[0] = -1;
-            cpsr &= ~CPSR_C;
-        }
-        cpsr_write(env, cpsr, CPSR_C, CPSRWriteByInstr);
-        end_exclusive();
+        arm_kernel_cmpxchg32_helper(env);
         break;
     case 0xffff0fe0: /* __kernel_get_tls */
         env->regs[0] = cpu_get_tls(env);
@@ -223,13 +257,66 @@ static bool insn_is_linux_bkpt(uint32_t opcode, bool is_thumb)
     }
 }
 
+static bool emulate_arm_fpa11(CPUARMState *env, uint32_t opcode)
+{
+    TaskState *ts = env_cpu(env)->opaque;
+    int rc = EmulateAll(opcode, &ts->fpa, env);
+    int raise, enabled;
+
+    if (rc == 0) {
+        /* Illegal instruction */
+        return false;
+    }
+    if (rc > 0) {
+        /* Everything ok. */
+        env->regs[15] += 4;
+        return true;
+    }
+
+    /* FP exception */
+    rc = -rc;
+    raise = 0;
+
+    /* Translate softfloat flags to FPSR flags */
+    if (rc & float_flag_invalid) {
+        raise |= BIT_IOC;
+    }
+    if (rc & float_flag_divbyzero) {
+        raise |= BIT_DZC;
+    }
+    if (rc & float_flag_overflow) {
+        raise |= BIT_OFC;
+    }
+    if (rc & float_flag_underflow) {
+        raise |= BIT_UFC;
+    }
+    if (rc & float_flag_inexact) {
+        raise |= BIT_IXC;
+    }
+
+    /* Accumulate unenabled exceptions */
+    enabled = ts->fpa.fpsr >> 16;
+    ts->fpa.fpsr |= raise & ~enabled;
+
+    if (raise & enabled) {
+        /*
+         * The kernel's nwfpe emulator does not pass a real si_code.
+         * It merely uses send_sig(SIGFPE, current, 1), which results in
+         * __send_signal() filling out SI_KERNEL with pid and uid 0 (under
+         * the "SEND_SIG_PRIV" case). That's what our force_sig() does.
+         */
+        force_sig(TARGET_SIGFPE);
+    } else {
+        env->regs[15] += 4;
+    }
+    return true;
+}
+
 void cpu_loop(CPUARMState *env)
 {
     CPUState *cs = env_cpu(env);
-    int trapnr;
+    int trapnr, si_signo, si_code;
     unsigned int n, insn;
-    target_siginfo_t info;
-    uint32_t addr;
     abi_ulong ret;
 
     for(;;) {
@@ -243,9 +330,7 @@ void cpu_loop(CPUARMState *env)
         case EXCP_NOCP:
         case EXCP_INVSTATE:
             {
-                TaskState *ts = cs->opaque;
                 uint32_t opcode;
-                int rc;
 
                 /* we handle the FPU emulation here, as Linux */
                 /* we get the opcode */
@@ -262,64 +347,12 @@ void cpu_loop(CPUARMState *env)
                     goto excp_debug;
                 }
 
-                rc = EmulateAll(opcode, &ts->fpa, env);
-                if (rc == 0) { /* illegal instruction */
-                    info.si_signo = TARGET_SIGILL;
-                    info.si_errno = 0;
-                    info.si_code = TARGET_ILL_ILLOPN;
-                    info._sifields._sigfault._addr = env->regs[15];
-                    queue_signal(env, info.si_signo, QEMU_SI_FAULT, &info);
-                } else if (rc < 0) { /* FP exception */
-                    int arm_fpe=0;
-
-                    /* translate softfloat flags to FPSR flags */
-                    if (-rc & float_flag_invalid)
-                      arm_fpe |= BIT_IOC;
-                    if (-rc & float_flag_divbyzero)
-                      arm_fpe |= BIT_DZC;
-                    if (-rc & float_flag_overflow)
-                      arm_fpe |= BIT_OFC;
-                    if (-rc & float_flag_underflow)
-                      arm_fpe |= BIT_UFC;
-                    if (-rc & float_flag_inexact)
-                      arm_fpe |= BIT_IXC;
-
-                    FPSR fpsr = ts->fpa.fpsr;
-                    //printf("fpsr 0x%x, arm_fpe 0x%x\n",fpsr,arm_fpe);
-
-                    if (fpsr & (arm_fpe << 16)) { /* exception enabled? */
-                      info.si_signo = TARGET_SIGFPE;
-                      info.si_errno = 0;
-
-                      /* ordered by priority, least first */
-                      if (arm_fpe & BIT_IXC) info.si_code = TARGET_FPE_FLTRES;
-                      if (arm_fpe & BIT_UFC) info.si_code = TARGET_FPE_FLTUND;
-                      if (arm_fpe & BIT_OFC) info.si_code = TARGET_FPE_FLTOVF;
-                      if (arm_fpe & BIT_DZC) info.si_code = TARGET_FPE_FLTDIV;
-                      if (arm_fpe & BIT_IOC) info.si_code = TARGET_FPE_FLTINV;
-
-                      info._sifields._sigfault._addr = env->regs[15];
-                      queue_signal(env, info.si_signo, QEMU_SI_FAULT, &info);
-                    } else {
-                      env->regs[15] += 4;
-                    }
-
-                    /* accumulate unenabled exceptions */
-                    if ((!(fpsr & BIT_IXE)) && (arm_fpe & BIT_IXC))
-                      fpsr |= BIT_IXC;
-                    if ((!(fpsr & BIT_UFE)) && (arm_fpe & BIT_UFC))
-                      fpsr |= BIT_UFC;
-                    if ((!(fpsr & BIT_OFE)) && (arm_fpe & BIT_OFC))
-                      fpsr |= BIT_OFC;
-                    if ((!(fpsr & BIT_DZE)) && (arm_fpe & BIT_DZC))
-                      fpsr |= BIT_DZC;
-                    if ((!(fpsr & BIT_IOE)) && (arm_fpe & BIT_IOC))
-                      fpsr |= BIT_IOC;
-                    ts->fpa.fpsr=fpsr;
-                } else { /* everything OK */
-                    /* increment PC */
-                    env->regs[15] += 4;
+                if (!env->thumb && emulate_arm_fpa11(env, opcode)) {
+                    break;
                 }
+
+                force_sig_fault(TARGET_SIGILL, TARGET_ILL_ILLOPN,
+                                env->regs[15]);
             }
             break;
         case EXCP_SWI:
@@ -387,18 +420,14 @@ void cpu_loop(CPUARMState *env)
                              * Otherwise SIGILL. This includes any SWI with
                              * immediate not originally 0x9fxxxx, because
                              * of the earlier XOR.
+                             * Like the real kernel, we report the addr of the
+                             * SWI in the siginfo si_addr but leave the PC
+                             * pointing at the insn after the SWI.
                              */
-                            info.si_signo = TARGET_SIGILL;
-                            info.si_errno = 0;
-                            info.si_code = TARGET_ILL_ILLTRP;
-                            info._sifields._sigfault._addr = env->regs[15];
-                            if (env->thumb) {
-                                info._sifields._sigfault._addr -= 2;
-                            } else {
-                                info._sifields._sigfault._addr -= 4;
-                            }
-                            queue_signal(env, info.si_signo,
-                                         QEMU_SI_FAULT, &info);
+                            abi_ulong faultaddr = env->regs[15];
+                            faultaddr -= env->thumb ? 2 : 4;
+                            force_sig_fault(TARGET_SIGILL, TARGET_ILL_ILLTRP,
+                                            faultaddr);
                         }
                         break;
                     }
@@ -412,16 +441,16 @@ void cpu_loop(CPUARMState *env)
                                      env->regs[4],
                                      env->regs[5],
                                      0, 0);
-                    if (ret == -TARGET_ERESTARTSYS) {
+                    if (ret == -QEMU_ERESTARTSYS) {
                         env->regs[15] -= env->thumb ? 2 : 4;
-                    } else if (ret != -TARGET_QEMU_ESIGRETURN) {
+                    } else if (ret != -QEMU_ESIGRETURN) {
                         env->regs[0] = ret;
                     }
                 }
             }
             break;
         case EXCP_SEMIHOST:
-            env->regs[0] = do_arm_semihosting(env);
+            env->regs[0] = do_common_semihosting(cs);
             env->regs[15] += env->thumb ? 2 : 4;
             break;
         case EXCP_INTERRUPT:
@@ -429,23 +458,35 @@ void cpu_loop(CPUARMState *env)
             break;
         case EXCP_PREFETCH_ABORT:
         case EXCP_DATA_ABORT:
-            addr = env->exception.vaddress;
-            {
-                info.si_signo = TARGET_SIGSEGV;
-                info.si_errno = 0;
-                /* XXX: check env->error_code */
-                info.si_code = TARGET_SEGV_MAPERR;
-                info._sifields._sigfault._addr = addr;
-                queue_signal(env, info.si_signo, QEMU_SI_FAULT, &info);
+            /* For user-only we don't set TTBCR_EAE, so look at the FSR. */
+            switch (env->exception.fsr & 0x1f) {
+            case 0x1: /* Alignment */
+                si_signo = TARGET_SIGBUS;
+                si_code = TARGET_BUS_ADRALN;
+                break;
+            case 0x3: /* Access flag fault, level 1 */
+            case 0x6: /* Access flag fault, level 2 */
+            case 0x9: /* Domain fault, level 1 */
+            case 0xb: /* Domain fault, level 2 */
+            case 0xd: /* Permission fault, level 1 */
+            case 0xf: /* Permission fault, level 2 */
+                si_signo = TARGET_SIGSEGV;
+                si_code = TARGET_SEGV_ACCERR;
+                break;
+            case 0x5: /* Translation fault, level 1 */
+            case 0x7: /* Translation fault, level 2 */
+                si_signo = TARGET_SIGSEGV;
+                si_code = TARGET_SEGV_MAPERR;
+                break;
+            default:
+                g_assert_not_reached();
             }
+            force_sig_fault(si_signo, si_code, env->exception.vaddress);
             break;
         case EXCP_DEBUG:
         case EXCP_BKPT:
         excp_debug:
-            info.si_signo = TARGET_SIGTRAP;
-            info.si_errno = 0;
-            info.si_code = TARGET_TRAP_BRKPT;
-            queue_signal(env, info.si_signo, QEMU_SI_FAULT, &info);
+            force_sig_fault(TARGET_SIGTRAP, TARGET_TRAP_BRKPT, env->regs[15]);
             break;
         case EXCP_KERNEL_TRAP:
             if (do_kernel_trap(env))

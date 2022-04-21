@@ -1,0 +1,74 @@
+.. _OPAL_NPU2:
+
+OPAL NPU2 calls
+================
+
+There are three OPAL calls for interacting with NPU2 devices: ::
+
+#define OPAL_NPU_INIT_CONTEXT			146
+#define OPAL_NPU_DESTROY_CONTEXT		147
+#define OPAL_NPU_MAP_LPAR			148
+
+These are used to setup and configure address translation services
+(ATS) for a given NVLink2 device. Note that in some documentation this
+is also referred to as extended translation services (XTS).
+
+Each NVLink2 supports multiple processes running on a GPU which issues
+requests for address translation. The NPU2 is responsible for
+completing the request by forwarding it to the Nest MMU (NMMU) along
+with the appropriate translation context (MSR/LPCR) bits. These bits
+are keyed off a 20-bit process ID (PASID/PID) which is identical to
+the PID used on the processor.
+
+The OPAL calls documented here are used to setup/destroy the
+appropriate context for a given process on a given NVLink2 device.
+
+.. _OPAL_NPU_INIT_CONTEXT:
+
+OPAL_NPU_INIT_CONTEXT
+---------------------
+
+Parameters: ::
+
+	uint64_t phb_id
+	int pasid
+	uint64_t msr
+	uint64_t lpid
+
+Allocates a new context ID and sets up the given PASID/PID to be
+associated with the supplied MSR on for the given LPID. MSR should
+only contain bits set requried for NPU2 address lookups - ie. MSR
+DR/HV/PR/SF.
+
+Returns the context ID on success or ``OPAL_RESOURCE`` if no more
+contexts are available or ``OPAL_UNSUPPORTED`` in the case of
+unsupported MSR bits.
+
+.. _OPAL_NPU_DESTROY_CONTEXT:
+
+OPAL_NPU_DESTROY_CONTEXT
+------------------------
+
+Parameters: ::
+
+	uint64_t phb_id
+	uint64_t id
+
+Destroys a previously allocated context ID. This may cause further
+translation requests from the GPU to fail.
+
+.. _OPAL_NPU_MAP_LPAR:
+
+OPAL_NPU_MAP_LPAR
+-----------------
+
+Parameters: ::
+
+	uint64_t phb_id
+	uint64_t bdf
+	uint64_t lparid
+	uint64_t lpcr
+
+Associates the given GPU BDF with a particular LPAR and LPCR
+bits. Hash mode ATS is currently unsupported so lpcr should be set
+to 0.

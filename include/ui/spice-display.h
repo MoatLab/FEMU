@@ -27,7 +27,7 @@
 #include "ui/qemu-pixman.h"
 #include "ui/console.h"
 
-#if defined(CONFIG_OPENGL_DMABUF)
+#if defined(CONFIG_OPENGL) && defined(CONFIG_GBM)
 # if SPICE_SERVER_VERSION >= 0x000d01 /* release 0.13.1 */
 #  define HAVE_SPICE_GL 1
 #  include "ui/egl-helpers.h"
@@ -86,6 +86,7 @@ typedef struct SimpleSpiceCursor SimpleSpiceCursor;
 
 struct SimpleSpiceDisplay {
     DisplaySurface *ds;
+    DisplayGLCtx dgc;
     DisplayChangeListener dcl;
     void *buf;
     int bufsize;
@@ -182,9 +183,5 @@ void qemu_spice_wakeup(SimpleSpiceDisplay *ssd);
 void qemu_spice_display_start(void);
 void qemu_spice_display_stop(void);
 int qemu_spice_display_is_running(SimpleSpiceDisplay *ssd);
-
-bool qemu_spice_fill_device_address(QemuConsole *con,
-                                    char *device_address,
-                                    size_t size);
 
 #endif

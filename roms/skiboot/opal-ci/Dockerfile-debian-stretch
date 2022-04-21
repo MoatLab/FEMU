@@ -1,0 +1,9 @@
+FROM debian:stretch
+ENV DEBIAN_FRONTEND    noninteractive
+RUN apt-get update -qq
+RUN if [ `arch` != "ppc64le" ]; then apt-get update -qq && apt-get install -y gcc-powerpc64le-linux-gnu; fi
+RUN apt-get update -qq && apt-get install -y gcc ccache expect libssl-dev wget xterm curl device-tree-compiler build-essential gcc python g++ pkg-config libz-dev libglib2.0-dev libpixman-1-dev libfdt-dev git libstdc++6 valgrind libtcl8.6 libmbedtls-dev
+RUN apt-get update -qq && apt-get install -y gcc-arm-linux-gnueabi || true
+RUN if [ `arch` = "x86_64" ]; then curl -L -O http://public.dhe.ibm.com/software/server/powerfuncsim/p9/packages/v1.0-0/systemsim-p9-1.0-0-trusty_amd64.deb; dpkg -i systemsim-p9-1.0-0-trusty_amd64.deb; fi
+COPY . /build/
+WORKDIR /build

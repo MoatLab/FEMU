@@ -1,0 +1,10 @@
+FROM fedora:33
+RUN dnf -y update
+RUN dnf -y install --allowerasing wget curl xterm gcc git xz make diffutils findutils expect valgrind valgrind-devel ccache dtc openssl openssl-devel gcc-powerpc64-linux-gnu mbedtls-devel
+# for building documentation and the coverage report
+RUN dnf -y install python-pip lcov
+# below packages are for building dtc
+RUN dnf -y install flex bison
+RUN if [ `arch` = "x86_64" ]; then dnf -y install http://public.dhe.ibm.com/software/server/powerfuncsim/p9/packages/v1.1-0/systemsim-p9-1.1-0.f22.x86_64.rpm; fi
+COPY . /build/
+WORKDIR /build

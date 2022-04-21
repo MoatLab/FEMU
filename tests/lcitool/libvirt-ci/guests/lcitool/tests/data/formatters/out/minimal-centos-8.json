@@ -1,0 +1,20 @@
+{
+  "ccache": "/usr/bin/ccache",
+  "cpan_pkgs": [],
+  "cross_pkgs": [],
+  "make": "/usr/bin/make",
+  "ninja": "/usr/bin/ninja",
+  "packaging_command": "dnf",
+  "pip3": "/usr/bin/pip3",
+  "pkgs": [
+    "ca-certificates",
+    "gcc",
+    "git",
+    "glib2-devel",
+    "glibc-langpack-en",
+    "gtk-doc",
+    "pkgconfig"
+  ],
+  "pypi_pkgs": [],
+  "python": "/usr/bin/python3"
+}

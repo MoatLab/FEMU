@@ -1,0 +1,11 @@
+---
+- name: '{{ name }}-check'
+  shell: |
+    set -e
+    cd {{ name }}
+
+    {{ global_env }}
+    {{ local_env }}
+    {{ command }}
+  when:
+    - target in machines

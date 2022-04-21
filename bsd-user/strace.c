@@ -20,14 +20,35 @@
 #include <sys/select.h>
 #include <sys/syscall.h>
 #include <sys/ioccom.h>
+#include <ctype.h>
 
 #include "qemu.h"
+
+#include "os-strace.h"  /* OS dependent strace print functions */
 
 int do_strace;
 
 /*
  * Utility functions
  */
+static const char *
+get_comma(int last)
+{
+    return (last) ? "" : ",";
+}
+
+/*
+ * Prints out raw parameter using given format.  Caller needs
+ * to do byte swapping if needed.
+ */
+static void
+print_raw_param(const char *fmt, abi_long param, int last)
+{
+    char format[64];
+
+    (void)snprintf(format, sizeof(format), "%s%s", fmt, get_comma(last));
+    gemu_log(format, param);
+}
 
 static void print_sysctl(const struct syscallname *name, abi_long arg1,
         abi_long arg2, abi_long arg3, abi_long arg4, abi_long arg5,
@@ -104,6 +125,14 @@ static void print_ioctl(const struct syscallname *name,
             arg3);
 }
 
+static void print_sysarch(const struct syscallname *name, abi_long arg1,
+        abi_long arg2, abi_long arg3, abi_long arg4, abi_long arg5,
+        abi_long arg6)
+{
+    /* This is os dependent. */
+    do_os_print_sysarch(name, arg1, arg2, arg3, arg4, arg5, arg6);
+}
+
 /*
  * Variants for the return value output function
  */
@@ -116,14 +145,6 @@ static void print_syscall_ret_addr(const struct syscallname *name, abi_long ret)
         gemu_log(" = 0x" TARGET_ABI_FMT_lx "\n", ret);
     }
 }
-
-#if 0 /* currently unused */
-static void
-print_syscall_ret_raw(struct syscallname *name, abi_long ret)
-{
-        gemu_log(" = 0x" TARGET_ABI_FMT_lx "\n", ret);
-}
-#endif
 
 /*
  * An array of all of the syscalls we know about
@@ -235,4 +256,83 @@ void print_openbsd_syscall_ret(int num, abi_long ret)
 {
 
     print_syscall_ret(num, ret, openbsd_scnames, ARRAY_SIZE(openbsd_scnames));
+}
+
+static void
+print_signal(abi_ulong arg, int last)
+{
+    const char *signal_name = NULL;
+    switch (arg) {
+    case TARGET_SIGHUP:
+        signal_name = "SIGHUP";
+        break;
+    case TARGET_SIGINT:
+        signal_name = "SIGINT";
+        break;
+    case TARGET_SIGQUIT:
+        signal_name = "SIGQUIT";
+        break;
+    case TARGET_SIGILL:
+        signal_name = "SIGILL";
+        break;
+    case TARGET_SIGABRT:
+        signal_name = "SIGABRT";
+        break;
+    case TARGET_SIGFPE:
+        signal_name = "SIGFPE";
+        break;
+    case TARGET_SIGKILL:
+        signal_name = "SIGKILL";
+        break;
+    case TARGET_SIGSEGV:
+        signal_name = "SIGSEGV";
+        break;
+    case TARGET_SIGPIPE:
+        signal_name = "SIGPIPE";
+        break;
+    case TARGET_SIGALRM:
+        signal_name = "SIGALRM";
+        break;
+    case TARGET_SIGTERM:
+        signal_name = "SIGTERM";
+        break;
+    case TARGET_SIGUSR1:
+        signal_name = "SIGUSR1";
+        break;
+    case TARGET_SIGUSR2:
+        signal_name = "SIGUSR2";
+        break;
+    case TARGET_SIGCHLD:
+        signal_name = "SIGCHLD";
+        break;
+    case TARGET_SIGCONT:
+        signal_name = "SIGCONT";
+        break;
+    case TARGET_SIGSTOP:
+        signal_name = "SIGSTOP";
+        break;
+    case TARGET_SIGTTIN:
+        signal_name = "SIGTTIN";
+        break;
+    case TARGET_SIGTTOU:
+        signal_name = "SIGTTOU";
+        break;
+    }
+    if (signal_name == NULL) {
+        print_raw_param("%ld", arg, last);
+        return;
+    }
+    gemu_log("%s%s", signal_name, get_comma(last));
+}
+
+void print_taken_signal(int target_signum, const target_siginfo_t *tinfo)
+{
+    /*
+     * Print the strace output for a signal being taken:
+     * --- SIGSEGV {si_signo=SIGSEGV, si_code=SI_KERNEL, si_addr=0} ---
+     */
+    gemu_log("%d ", getpid());
+    gemu_log("--- ");
+    print_signal(target_signum, 1);
+    gemu_log(" ---\n");
 }

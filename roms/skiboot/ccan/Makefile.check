@@ -1,0 +1,42 @@
+CCAN_TEST_SRC := $(wildcard ccan/*/test/run*.c)
+
+LCOV_EXCLUDE += $(CCAN_TEST_SRC) ccan/list/test/helper.c
+
+CCAN_TEST := $(CCAN_TEST_SRC:%.c=%)
+
+.PHONY: ccan-check
+
+ccan-check: $(CCAN_TEST:%=%-check)
+
+check: ccan-check
+
+.PHONY: ccan-coverage
+
+coverage: ccan-coverage
+
+ccan-coverage: $(CCAN_TEST:%=%-gcov-run)
+
+$(CCAN_TEST:%=%-gcov-run) : %-run: %
+	$(eval	LCOV_DIRS += -d $(dir $<) )
+	$(call Q, TEST-COVERAGE , (cd $(dir $<); GCOV_PREFIX_STRIP=`(c=0; while [ "\`pwd\`" != '/' ]; do cd ..; c=\`expr 1 + $$c\`; done; echo $$c)` ./$(notdir $<) ), $< )
+
+$(CCAN_TEST:%=%-check) : %-check: %
+	$(call Q, RUN-TEST , $(VALGRIND) $<, $<)
+
+$(CCAN_TEST) : % : %.c
+	$(call Q, HOSTCC ,$(HOSTCC) $(HOSTCFLAGS) -O0 -g -I . -Iccan/ -o $@ $<,$<)
+
+$(CCAN_TEST:%=%-gcov): %-gcov : %.c
+	$(call Q, HOSTCC , (cd $(dir $<); $(HOSTCC) $(HOSTCFLAGS) $(HOSTGCOVCFLAGS) -I $(shell pwd) -I$(shell pwd)/./ccan/ -o $(notdir $@) $(notdir $<) ), $<)
+
+-include $(wildcard ccan/*/test/*.d)
+
+clean: ccan-test-clean
+
+ccan-test-clean:
+	$(RM) -f $(CCAN_TEST) \
+		$(CCAN_TEST:%=%-gcov) \
+		$(CCAN_TEST:%=%.d) \
+		$(CCAN_TEST:%=%.o) \
+		$(CCAN_TEST:%=%.gcda) \
+		$(CCAN_TEST:%=%.gcno)

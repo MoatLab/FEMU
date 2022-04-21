@@ -28,3 +28,9 @@ SLIRP_4.2 {
     slirp_add_unix;
     slirp_remove_guestfwd;
 } SLIRP_4.1;
+
+SLIRP_4.5 {
+    slirp_add_hostxfwd;
+    slirp_remove_hostxfwd;
+    slirp_neighbor_info;
+} SLIRP_4.2;

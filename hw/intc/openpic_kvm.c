@@ -24,9 +24,7 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
-#include "cpu.h"
 #include <sys/ioctl.h>
-#include "exec/address-spaces.h"
 #include "hw/ppc/openpic.h"
 #include "hw/ppc/openpic_kvm.h"
 #include "hw/pci/msi.h"
@@ -236,6 +234,7 @@ static void kvm_openpic_realize(DeviceState *dev, Error **errp)
 
     opp->mem_listener.region_add = kvm_openpic_region_add;
     opp->mem_listener.region_del = kvm_openpic_region_del;
+    opp->mem_listener.name = "openpic-kvm";
     memory_listener_register(&opp->mem_listener, &address_space_memory);
 
     /* indicate pic capabilities */

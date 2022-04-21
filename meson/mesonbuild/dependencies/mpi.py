@@ -17,26 +17,31 @@ import typing as T
 import os
 import re
 
-from .base import (DependencyMethods, PkgConfigDependency, factory_methods,
-                   ConfigToolDependency, detect_compiler, ExternalDependency)
 from ..environment import detect_cpu_family
+from .base import DependencyMethods, detect_compiler, SystemDependency
+from .configtool import ConfigToolDependency
+from .factory import factory_methods
+from .pkgconfig import PkgConfigDependency
 
 if T.TYPE_CHECKING:
-    from .base import DependencyType
-    from ..compilers import Compiler
+    from .factory import DependencyGenerator
     from ..environment import Environment, MachineChoice
 
 
 @factory_methods({DependencyMethods.PKGCONFIG, DependencyMethods.CONFIG_TOOL, DependencyMethods.SYSTEM})
-def mpi_factory(env: 'Environment', for_machine: 'MachineChoice',
-                kwargs: T.Dict[str, T.Any], methods: T.List[DependencyMethods]) -> T.List['DependencyType']:
+def mpi_factory(env: 'Environment',
+                for_machine: 'MachineChoice',
+                kwargs: T.Dict[str, T.Any],
+                methods: T.List[DependencyMethods]) -> T.List['DependencyGenerator']:
     language = kwargs.get('language', 'c')
     if language not in {'c', 'cpp', 'fortran'}:
         # OpenMPI doesn't work without any other languages
         return []
 
-    candidates = []
+    candidates: T.List['DependencyGenerator'] = []
     compiler = detect_compiler('mpi', env, for_machine, language)
+    if compiler is None:
+        return []
     compiler_is_intel = compiler.get_id() in {'intel', 'intel-cl'}
 
     # Only OpenMPI has pkg-config, and it doesn't work with the intel compilers
@@ -103,7 +108,7 @@ class _MPIConfigToolDependency(ConfigToolDependency):
         Drop -O2 and everything that is not needed.
         """
         result = []
-        multi_args = ('-I', )
+        multi_args: T.Tuple[str, ...] = ('-I', )
         if self.language == 'fortran':
             fc = self.env.coredata.compilers[self.for_machine]['fortran']
             multi_args += fc.get_module_incdir_args()
@@ -195,7 +200,7 @@ class OpenMPIConfigToolDependency(_MPIConfigToolDependency):
         return out
 
 
-class MSMPIDependency(ExternalDependency):
+class MSMPIDependency(SystemDependency):
 
     """The Microsoft MPI."""
 

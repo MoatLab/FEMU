@@ -1,0 +1,34 @@
+# -*-Makefile-*-
+IPMI_TEST := hw/ipmi/test/run-fru
+
+LCOV_EXCLUDE += $(IPMI_TEST:%=%.c)
+
+.PHONY : hw-ipmi-check hw-ipmi-coverage
+hw-ipmi-check: $(IPMI_TEST:%=%-check)
+hw-ipmi-coverage: $(IPMI_TEST:%=%-gcov-run)
+
+check: hw-ipmi-check
+coverage: hw-ipmi-coverage
+
+$(IPMI_TEST:%=%-gcov-run) : %-run: %
+	$(call Q, TEST-COVERAGE ,$< , $<)
+
+$(IPMI_TEST:%=%-check) : %-check: %
+	$(call Q, RUN-TEST ,$(VALGRIND) $<, $<)
+
+$(IPMI_TEST) : % : %.c
+	$(call Q, HOSTCC ,$(HOSTCC) $(HOSTCFLAGS) -O0 -g -I include -I . -o $@ $<, $<)
+
+$(IPMI_TEST:%=%-gcov): %-gcov : %.c %
+	$(call Q, HOSTCC ,$(HOSTCC) $(HOSTCFLAGS) $(HOSTGCOVCFLAGS) -I include -I . -I libfdt -lgcov -o $@ $<, $<)
+
+$(IPMI_TEST:%=%-gcov): % : $(%.d:-gcov=)
+
+-include $(wildcard hw/ipmi/test/*.d)
+
+clean: ipmi-test-clean
+
+ipmi-test-clean:
+	$(RM) -f hw/ipmi/test/*.[od] $(IPMI_TEST) $(IPMI_TEST:%=%-gcov)
+	$(RM) -f *.gcda *.gcno skiboot.info
+	$(RM) -rf coverage-report

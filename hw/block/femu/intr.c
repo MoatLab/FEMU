@@ -191,6 +191,10 @@ void nvme_isr_notify_io(void *opaque)
 
 int nvme_setup_virq(FemuCtrl *n, NvmeCQueue *cq)
 {
+
+    /* Disable virq for now, TOFIX later on */
+    return 0;
+
     int ret;
 
     if (cq->irq_enabled) {
@@ -221,7 +225,9 @@ int nvme_setup_virq(FemuCtrl *n, NvmeCQueue *cq)
 
 int nvme_clear_virq(FemuCtrl *n)
 {
+#if 0
     nvme_clear_guest_notifier(n);
+#endif
 
     return 0;
 }

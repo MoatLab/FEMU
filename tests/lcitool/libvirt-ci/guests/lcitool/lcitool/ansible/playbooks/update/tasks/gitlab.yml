@@ -1,0 +1,59 @@
+---
+- name: Define gitlab-related facts
+  set_fact:
+    gitlab_runner_download_url: https://gitlab-runner-downloads.s3.amazonaws.com/latest/binaries/gitlab-runner-{{ ansible_system|lower }}-amd64
+    gitlab_runner_config_dir: '/etc/gitlab-runner'
+
+- name: Download gitlab-runner agent
+  get_url:
+    url: '{{ gitlab_runner_download_url }}'
+    dest: /usr/local/bin/gitlab-runner
+    mode: '0755'
+    force: yes
+
+- name: Register the gitlab-runner agent
+  shell: 'gitlab-runner register --non-interactive --config "{{ gitlab_runner_config_dir }}/config.toml" --registration-token "{{ gitlab.runner_secret }}" --url "{{ gitlab.url }}" --executor shell --tag-list "{{ os.name|lower }}-{{ os.version }}"'
+  args:
+    creates: '{{ gitlab_runner_config_dir }}/config.toml'
+
+- name: Make gitlab-runner configuration readable
+  file:
+    path: '{{ gitlab_runner_config_dir }}'
+    mode: '0755'
+
+- name: Make gitlab-runner configuration readable
+  file:
+    path: '{{ gitlab_runner_config_dir }}/config.toml'
+    owner: root
+    group: gitlab
+    mode: '0640'
+
+- block:
+    - name: Install the gitlab-runner service unit
+      template:
+        src: 'templates/gitlab-runner.service.j2'
+        dest: /etc/systemd/system/gitlab-runner.service
+
+    - name: Enable the gitlab-runner service
+      systemd:
+        name: gitlab-runner
+        state: started
+        enabled: yes
+        daemon_reload: yes
+  when:
+    - ansible_service_mgr == 'systemd'
+
+- block:
+    - name: Install the gitlab_runner rc service script
+      template:
+        src: 'templates/gitlab-runner.j2'
+        dest: '/usr/local/etc/rc.d/gitlab_runner'
+        mode: '0755'
+
+    - name: Enable the gitlab-runner rc service
+      service:
+        name: gitlab_runner
+        state: started
+        enabled: yes
+  when:
+    - ansible_service_mgr != 'systemd'

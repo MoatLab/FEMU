@@ -1,0 +1,7 @@
+---
+packages:
+  - ccache
+  - gcc
+  - glib2
+  - gtk-doc
+  - pkg-config

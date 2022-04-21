@@ -293,6 +293,7 @@ static struct audio_pcm_ops audio_callbacks = {
     .init_in  = line_in_init,
     .fini_in  = line_in_fini,
     .read     = line_in_read,
+    .run_buffer_in = audio_generic_run_buffer_in,
     .enable_in = line_in_enable,
 #if ((SPICE_INTERFACE_RECORD_MAJOR >= 2) && (SPICE_INTERFACE_RECORD_MINOR >= 2))
     .volume_in = line_in_volume,
@@ -316,3 +317,5 @@ static void register_audio_spice(void)
     audio_driver_register(&spice_audio_driver);
 }
 type_init(register_audio_spice);
+
+module_dep("ui-spice-core");

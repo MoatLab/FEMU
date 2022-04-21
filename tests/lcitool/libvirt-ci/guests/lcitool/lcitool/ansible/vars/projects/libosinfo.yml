@@ -1,0 +1,22 @@
+---
+packages:
+  - check
+  - ccache
+  - cppi
+  - gcc
+  - gettext
+  - glib2
+  - gobject-introspection
+  - gtk-doc
+  - libsoup
+  - libxml2
+  - libxslt
+  - meson
+  - ninja
+  - pci-ids
+  - pkg-config
+  - rpmbuild
+  - usb-ids
+  - vala
+  - wget
+  - xmllint

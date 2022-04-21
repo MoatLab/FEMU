@@ -21,15 +21,18 @@ topic](https://github.com/topics/meson).
  - [Budgie Desktop](https://github.com/budgie-desktop/budgie-desktop), a desktop environment built on GNOME technologies
  - [Bzip2](https://gitlab.com/federicomenaquintero/bzip2), the bzip2 compressor/decompressor
  - [Cage](https://github.com/Hjdskes/cage), a Wayland kiosk
+ - [canfigger](https://github.com/andy5995/canfigger), simple configuration file parser library
  - [casync](https://github.com/systemd/casync), Content-Addressable Data Synchronization Tool
  - [cinnamon-desktop](https://github.com/linuxmint/cinnamon-desktop), the cinnamon desktop library
  - [Cozy](https://github.com/geigi/cozy), a modern audio book player for Linux and macOS using GTK+ 3
  - [dav1d](https://code.videolan.org/videolan/dav1d), an AV1 decoder
  - [dbus-broker](https://github.com/bus1/dbus-broker), Linux D-Bus Message Broker
+ - [DOSBox Staging](https://github.com/dosbox-staging/dosbox-staging), DOS/x86 emulator
  - [DPDK](http://dpdk.org/browse/dpdk), Data Plane Development Kit, a set of libraries and drivers for fast packet processing
  - [DXVK](https://github.com/doitsujin/dxvk), a Vulkan-based Direct3D 11 implementation for Linux using Wine
  - [elementary OS](https://github.com/elementary/), Linux desktop oriented distribution
  - [Emeus](https://github.com/ebassi/emeus), constraint based layout manager for GTK+
+ - [Entangle](https://entangle-photo.org/), tethered camera control and capture desktop application
  - [ESP8266 Arduino sample project](https://github.com/trilader/arduino-esp8266-meson), sample project for using the ESP8266 Arduino port with Meson
  - [FeedReader](https://github.com/jangernert/FeedReader), a modern desktop application designed to complement existing web-based RSS accounts
  - [Flecs](https://github.com/SanderMertens/flecs), a Fast and Lightweight ECS (Entity Component System) C library
@@ -56,6 +59,7 @@ topic](https://github.com/topics/meson).
  - [GtkDApp](https://gitlab.com/csoriano/GtkDApp), an application template for developing Flatpak apps with Gtk+ and D
  - [GVfs](https://git.gnome.org/browse/gvfs/), a userspace virtual filesystem designed to work with the I/O abstraction of GIO
  - [Hardcode-Tray](https://github.com/bil-elmoussaoui/Hardcode-Tray), fixes hardcoded tray icons in Linux
+ - [HarfBuzz](https://github.com/harfbuzz/harfbuzz), a text shaping engine
  - [HelenOS](http://helenos.org), a portable microkernel-based multiserver operating system
  - [HexChat](https://github.com/hexchat/hexchat), a cross-platform IRC client in C
  - [IGT](https://gitlab.freedesktop.org/drm/igt-gpu-tools), Linux kernel graphics driver test suite
@@ -83,10 +87,11 @@ topic](https://github.com/topics/meson).
  - [Libosmscout](https://github.com/Framstag/libosmscout), a C++ library for offline map rendering, routing and location
 lookup based on OpenStreetMap data
  - [libratbag](https://github.com/libratbag/libratbag), provides a DBus daemon to configure input devices, mainly gaming mice.
- - [libspng](https://gitlab.com/randy408/libspng), a C library for reading and writing Portable Network Graphics (PNG)
+ - [libspng](https://github.com/randy408/libspng), a C library for reading and writing Portable Network Graphics (PNG)
 format files
  - [libui](https://github.com/andlabs/libui), a simple and portable (but not inflexible) GUI library in C that uses the native GUI technologies of each platform it supports
  - [Libva](https://github.com/intel/libva), an implementation for the VA (VIdeo Acceleration) API
+ - [Libvirt](https://libvirt.org), a toolkit to manage virtualization platforms
  - [Libzim](https://github.com/openzim/libzim), the reference implementation for the ZIM file format
  - [Marker](https://github.com/fabiocolacio/Marker), a GTK-3 markdown editor
  - [Mesa](https://gitlab.freedesktop.org/mesa/mesa/), an open source graphics driver project
@@ -101,19 +106,24 @@ format files
  - [OpenTitan](https://github.com/lowRISC/opentitan), an open source silicon Root of Trust (RoT) project.
  - [Orc](https://gitlab.freedesktop.org/gstreamer/orc), the Optimized Inner Loop Runtime Compiler
  - [OTS](https://github.com/khaledhosny/ots), the OpenType Sanitizer, parses and serializes OpenType files (OTF, TTF) and WOFF and WOFF2 font files, validating and sanitizing them as it goes. Used by Chromium and Firefox
- - [Outlier](https://github.com/kerolasa/outlier), a small Hello World style meson example project
- - [Pacman](https://git.archlinux.org/pacman.git/tree/), a package manager for Arch Linux
+ - [Outlier](https://github.com/kerolasa/outlier), a small Hello World style Meson example project
+ - [p11-kit](https://github.com/p11-glue/p11-kit), PKCS#11 module aggregator
+ - [Pacman](https://gitlab.archlinux.org/pacman/pacman.git), a package manager for Arch Linux
  - [Pango](https://git.gnome.org/browse/pango/), an Internationalized text layout and rendering library
  - [Parzip](https://github.com/jpakkane/parzip), a multithreaded reimplementation of Zip
  - [Peek](https://github.com/phw/peek), simple animated GIF screen recorder with an easy to use interface
  - [PicoLibc](https://github.com/keith-packard/picolibc), a standard C library for small embedded systems with limited RAM
  - [PipeWire](https://github.com/PipeWire/pipewire), a framework for video and audio for containerized applications
+ - [Paper Rock Scissors](https://github.com/michaelbrockus/paper_rock_scissors), a game with weapons themed at home paper rock scissors style.
  - [Pithos](https://github.com/pithos/pithos), a Pandora Radio client
  - [Pitivi](https://github.com/pitivi/pitivi/), a nonlinear video editor
  - [Playerctl](https://github.com/acrisci/playerctl), mpris command-line controller and library for spotify, vlc, audacious, bmp, cmus, and others
  - [Polari](https://gitlab.gnome.org/GNOME/polari), an IRC client
  - [qboot](https://github.com/bonzini/qboot), a minimal x86 firmware for booting Linux kernels
  - [radare2](https://github.com/radare/radare2), unix-like reverse engineering framework and commandline tools (not the default)
+ - [rmw](https://remove-to-waste.info), safe-remove utility for the command line
+ - [Rizin](https://rizin.re), Free and Open Source Reverse Engineering Framework
+ - [QEMU](https://qemu.org), a processor emulator and virtualizer
  - [RxDock](https://gitlab.com/rxdock/rxdock), a protein-ligand docking software designed for high throughput virtual screening (fork of rDock)
  - [scrcpy](https://github.com/Genymobile/scrcpy), a cross platform application that provides display and control of Android devices connected on USB or over TCP/IP
  - [Sequeler](https://github.com/Alecaddd/sequeler), a friendly SQL client for Linux, built with Vala and Gtk
@@ -127,6 +137,7 @@ format files
  - [Terminology](https://github.com/billiob/terminology), a terminal emulator based on the Enlightenment Foundation Libraries
  - [Tilix](https://github.com/gnunn1/tilix), a tiling terminal emulator for Linux using GTK+ 3
  - [Tizonia](https://github.com/tizonia/tizonia-openmax-il), a command-line cloud music player for Linux with support for Spotify, Google Play Music, YouTube, SoundCloud, TuneIn, Plex servers and Chromecast devices
+ - [UFJF-MLTK](https://github.com/mateus558/UFJF-Machine-Learning-Toolkit), A C++ cross-platform framework for machine learning algorithms development and testing
  - [Vala Language Server](https://github.com/benwaffle/vala-language-server), code intelligence engine for the Vala and Genie programming languages
  - [Valum](https://github.com/valum-framework/valum), a micro web framework written in Vala
  - [Venom](https://github.com/naxuroqa/Venom), a modern Tox client for the GNU/Linux desktop

@@ -35,9 +35,10 @@ dlang.generate_dub_file(meson.project_name().to_lower(), meson.source_root(),
 )
 ```
 
-You can manually edit a meson generated `dub.json` file or provide a
+You can manually edit a Meson generated `dub.json` file or provide a
 initial one. The module will only update the values specified in
 `generate_dub_file()`.
 
 Although not required, you will need to have a `description` and
-`license` if you want to publish the package in the [D package registry](https://code.dlang.org/).
+`license` if you want to publish the package in the [D package
+registry](https://code.dlang.org/).

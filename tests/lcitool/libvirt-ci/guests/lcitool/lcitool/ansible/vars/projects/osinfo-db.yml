@@ -1,0 +1,10 @@
+---
+packages:
+  - gettext
+  - make
+  - python3
+  - python3-lxml
+  - python3-pytest
+  - python3-requests
+  - rpmbuild
+  - xz

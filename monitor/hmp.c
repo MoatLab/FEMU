@@ -24,7 +24,9 @@
 
 #include "qemu/osdep.h"
 #include <dirent.h>
+#include "hw/qdev-core.h"
 #include "monitor-internal.h"
+#include "monitor/hmp.h"
 #include "qapi/error.h"
 #include "qapi/qmp/qdict.h"
 #include "qapi/qmp/qnum.h"
@@ -213,6 +215,11 @@ static bool cmd_can_preconfig(const HMPCommand *cmd)
     return strchr(cmd->flags, 'p');
 }
 
+static bool cmd_available(const HMPCommand *cmd)
+{
+    return phase_check(PHASE_MACHINE_READY) || cmd_can_preconfig(cmd);
+}
+
 static void help_cmd_dump_one(Monitor *mon,
                               const HMPCommand *cmd,
                               char **prefix_args,
@@ -220,7 +227,7 @@ static void help_cmd_dump_one(Monitor *mon,
 {
     int i;
 
-    if (runstate_check(RUN_STATE_PRECONFIG) && !cmd_can_preconfig(cmd)) {
+    if (!cmd_available(cmd)) {
         return;
     }
 
@@ -248,8 +255,7 @@ static void help_cmd_dump(Monitor *mon, const HMPCommand *cmds,
     /* Find one entry to dump */
     for (cmd = cmds; cmd->name != NULL; cmd++) {
         if (hmp_compare_cmd(args[arg_index], cmd->name) &&
-            ((!runstate_check(RUN_STATE_PRECONFIG) ||
-                cmd_can_preconfig(cmd)))) {
+            cmd_available(cmd)) {
             if (cmd->sub_table) {
                 /* continue with next arg */
                 help_cmd_dump(mon, cmd->sub_table,
@@ -302,7 +308,7 @@ void help_cmd(Monitor *mon, const char *name)
 static const char *pch;
 static sigjmp_buf expr_env;
 
-static void GCC_FMT_ATTR(2, 3) QEMU_NORETURN
+static void G_GNUC_PRINTF(2, 3) QEMU_NORETURN
 expr_error(Monitor *mon, const char *fmt, ...)
 {
     va_list ap;
@@ -653,9 +659,9 @@ static const HMPCommand *monitor_parse_command(MonitorHMP *hmp_mon,
                        (int)(p - cmdp_start), cmdp_start);
         return NULL;
     }
-    if (runstate_check(RUN_STATE_PRECONFIG) && !cmd_can_preconfig(cmd)) {
-        monitor_printf(mon, "Command '%.*s' not available with -preconfig "
-                            "until after exit_preconfig.\n",
+    if (!cmd_available(cmd)) {
+        monitor_printf(mon, "Command '%.*s' not available "
+                            "until machine initialization has completed.\n",
                        (int)(p - cmdp_start), cmdp_start);
         return NULL;
     }
@@ -975,6 +981,7 @@ static QDict *monitor_parse_arguments(Monitor *mon,
             {
                 const char *tmp = p;
                 int skip_key = 0;
+                int ret;
                 /* option */
 
                 c = *typestr++;
@@ -997,11 +1004,27 @@ static QDict *monitor_parse_arguments(Monitor *mon,
                     }
                     if (skip_key) {
                         p = tmp;
+                    } else if (*typestr == 's') {
+                        /* has option with string value */
+                        typestr++;
+                        tmp = p++;
+                        while (qemu_isspace(*p)) {
+                            p++;
+                        }
+                        ret = get_str(buf, sizeof(buf), &p);
+                        if (ret < 0) {
+                            monitor_printf(mon, "%s: value expected for -%c\n",
+                                           cmd->name, *tmp);
+                            goto fail;
+                        }
+                        qdict_put_str(qdict, key, buf);
                     } else {
-                        /* has option */
+                        /* has boolean option */
                         p++;
                         qdict_put_bool(qdict, key, true);
                     }
+                } else if (*typestr == 's') {
+                    typestr++;
                 }
             }
             break;
@@ -1056,6 +1079,31 @@ fail:
     return NULL;
 }
 
+static void hmp_info_human_readable_text(Monitor *mon,
+                                         HumanReadableText *(*handler)(Error **))
+{
+    Error *err = NULL;
+    g_autoptr(HumanReadableText) info = handler(&err);
+
+    if (hmp_handle_error(mon, err)) {
+        return;
+    }
+
+    monitor_printf(mon, "%s", info->human_readable_text);
+}
+
+static void handle_hmp_command_exec(Monitor *mon,
+                                    const HMPCommand *cmd,
+                                    QDict *qdict)
+{
+    if (cmd->cmd_info_hrt) {
+        hmp_info_human_readable_text(mon,
+                                     cmd->cmd_info_hrt);
+    } else {
+        cmd->cmd(mon, qdict);
+    }
+}
+
 typedef struct HandleHmpCommandCo {
     Monitor *mon;
     const HMPCommand *cmd;
@@ -1066,7 +1114,7 @@ typedef struct HandleHmpCommandCo {
 static void handle_hmp_command_co(void *opaque)
 {
     HandleHmpCommandCo *data = opaque;
-    data->cmd->cmd(data->mon, data->qdict);
+    handle_hmp_command_exec(data->mon, data->cmd, data->qdict);
     monitor_set_cur(qemu_coroutine_self(), NULL);
     data->done = true;
 }
@@ -1084,6 +1132,13 @@ void handle_hmp_command(MonitorHMP *mon, const char *cmdline)
         return;
     }
 
+    if (!cmd->cmd && !cmd->cmd_info_hrt) {
+        /* FIXME: is it useful to try autoload modules here ??? */
+        monitor_printf(&mon->common, "Command \"%.*s\" is not available.\n",
+                       (int)(cmdline - cmd_start), cmd_start);
+        return;
+    }
+
     qdict = monitor_parse_arguments(&mon->common, &cmdline, cmd);
     if (!qdict) {
         while (cmdline > cmd_start && qemu_isspace(cmdline[-1])) {
@@ -1097,7 +1152,7 @@ void handle_hmp_command(MonitorHMP *mon, const char *cmdline)
     if (!cmd->coroutine) {
         /* old_mon is non-NULL when called from qmp_human_monitor_command() */
         Monitor *old_mon = monitor_set_cur(qemu_coroutine_self(), &mon->common);
-        cmd->cmd(&mon->common, qdict);
+        handle_hmp_command_exec(&mon->common, cmd, qdict);
         monitor_set_cur(qemu_coroutine_self(), old_mon);
     } else {
         HandleHmpCommandCo data = {
@@ -1225,8 +1280,7 @@ static void monitor_find_completion_by_table(MonitorHMP *mon,
         }
         readline_set_completion_index(mon->rs, strlen(cmdname));
         for (cmd = cmd_table; cmd->name != NULL; cmd++) {
-            if (!runstate_check(RUN_STATE_PRECONFIG) ||
-                 cmd_can_preconfig(cmd)) {
+            if (cmd_available(cmd)) {
                 cmd_completion(mon, cmdname, cmd->name);
             }
         }
@@ -1234,8 +1288,7 @@ static void monitor_find_completion_by_table(MonitorHMP *mon,
         /* find the command */
         for (cmd = cmd_table; cmd->name != NULL; cmd++) {
             if (hmp_compare_cmd(args[0], cmd->name) &&
-                (!runstate_check(RUN_STATE_PRECONFIG) ||
-                 cmd_can_preconfig(cmd))) {
+                cmd_available(cmd)) {
                 break;
             }
         }
@@ -1409,7 +1462,7 @@ static void monitor_event(void *opaque, QEMUChrEvent event)
  * These functions just adapt the readline interface in a typesafe way.  We
  * could cast function pointers but that discards compiler checks.
  */
-static void GCC_FMT_ATTR(2, 3) monitor_readline_printf(void *opaque,
+static void G_GNUC_PRINTF(2, 3) monitor_readline_printf(void *opaque,
                                                        const char *fmt, ...)
 {
     MonitorHMP *mon = opaque;

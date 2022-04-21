@@ -20,7 +20,6 @@
 #include "hw/s390x/css.h"
 #include "ccw-device.h"
 #include "hw/s390x/css-bridge.h"
-#include "cpu.h"
 
 /*
  * Invoke device-specific unplug handler, disable the subchannel
@@ -107,7 +106,7 @@ VirtualCssBus *virtual_css_bus_init(void)
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
 
     /* Create bus on bridge device */
-    bus = qbus_create(TYPE_VIRTUAL_CSS_BUS, dev, "virtual-css");
+    bus = qbus_new(TYPE_VIRTUAL_CSS_BUS, dev, "virtual-css");
     cbus = VIRTUAL_CSS_BUS(bus);
 
     /* Enable hotplugging */

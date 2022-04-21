@@ -182,7 +182,7 @@ REG32(DDRIOB, 0xb40)
 #define ZYNQ_SLCR_MMIO_SIZE     0x1000
 #define ZYNQ_SLCR_NUM_REGS      (ZYNQ_SLCR_MMIO_SIZE / 4)
 
-#define TYPE_ZYNQ_SLCR "xilinx,zynq_slcr"
+#define TYPE_ZYNQ_SLCR "xilinx-zynq_slcr"
 OBJECT_DECLARE_SIMPLE_TYPE(ZynqSLCRState, ZYNQ_SLCR)
 
 struct ZynqSLCRState {
@@ -215,6 +215,11 @@ static uint64_t zynq_slcr_compute_pll(uint64_t input, uint32_t ctrl_reg)
     if (ctrl_reg & (R_xxx_PLL_CTRL_PLL_RESET_MASK |
                     R_xxx_PLL_CTRL_PLL_PWRDWN_MASK)) {
         return 0;
+    }
+
+    /* Consider zero feedback as maximum divide ratio possible */
+    if (!mult) {
+        mult = 1 << R_xxx_PLL_CTRL_PLL_FPDIV_LENGTH;
     }
 
     /* frequency multiplier -> period division */
@@ -264,20 +269,8 @@ static uint64_t zynq_slcr_compute_clock(const uint64_t periods[],
     zynq_slcr_compute_clock((plls), (state)->regs[reg], \
                             reg ## _ ## enable_field ## _SHIFT)
 
-/**
- * Compute and set the ouputs clocks periods.
- * But do not propagate them further. Connected clocks
- * will not receive any updates (See zynq_slcr_compute_clocks())
- */
-static void zynq_slcr_compute_clocks(ZynqSLCRState *s)
+static void zynq_slcr_compute_clocks_internal(ZynqSLCRState *s, uint64_t ps_clk)
 {
-    uint64_t ps_clk = clock_get(s->ps_clk);
-
-    /* consider outputs clocks are disabled while in reset */
-    if (device_is_in_reset(DEVICE(s))) {
-        ps_clk = 0;
-    }
-
     uint64_t io_pll = zynq_slcr_compute_pll(ps_clk, s->regs[R_IO_PLL_CTRL]);
     uint64_t arm_pll = zynq_slcr_compute_pll(ps_clk, s->regs[R_ARM_PLL_CTRL]);
     uint64_t ddr_pll = zynq_slcr_compute_pll(ps_clk, s->regs[R_DDR_PLL_CTRL]);
@@ -292,6 +285,23 @@ static void zynq_slcr_compute_clocks(ZynqSLCRState *s)
 }
 
 /**
+ * Compute and set the ouputs clocks periods.
+ * But do not propagate them further. Connected clocks
+ * will not receive any updates (See zynq_slcr_compute_clocks())
+ */
+static void zynq_slcr_compute_clocks(ZynqSLCRState *s)
+{
+    uint64_t ps_clk = clock_get(s->ps_clk);
+
+    /* consider outputs clocks are disabled while in reset */
+    if (device_is_in_reset(DEVICE(s))) {
+        ps_clk = 0;
+    }
+
+    zynq_slcr_compute_clocks_internal(s, ps_clk);
+}
+
+/**
  * Propagate the outputs clocks.
  * zynq_slcr_compute_clocks() should have been called before
  * to configure them.
@@ -302,9 +312,10 @@ static void zynq_slcr_propagate_clocks(ZynqSLCRState *s)
     clock_propagate(s->uart1_ref_clk);
 }
 
-static void zynq_slcr_ps_clk_callback(void *opaque)
+static void zynq_slcr_ps_clk_callback(void *opaque, ClockEvent event)
 {
     ZynqSLCRState *s = (ZynqSLCRState *) opaque;
+
     zynq_slcr_compute_clocks(s);
     zynq_slcr_propagate_clocks(s);
 }
@@ -410,7 +421,7 @@ static void zynq_slcr_reset_hold(Object *obj)
     ZynqSLCRState *s = ZYNQ_SLCR(obj);
 
     /* will disable all output clocks */
-    zynq_slcr_compute_clocks(s);
+    zynq_slcr_compute_clocks_internal(s, 0);
     zynq_slcr_propagate_clocks(s);
 }
 
@@ -419,7 +430,7 @@ static void zynq_slcr_reset_exit(Object *obj)
     ZynqSLCRState *s = ZYNQ_SLCR(obj);
 
     /* will compute output clocks according to ps_clk and registers */
-    zynq_slcr_compute_clocks(s);
+    zynq_slcr_compute_clocks_internal(s, clock_get(s->ps_clk));
     zynq_slcr_propagate_clocks(s);
 }
 
@@ -571,7 +582,7 @@ static const MemoryRegionOps slcr_ops = {
 };
 
 static const ClockPortInitArray zynq_slcr_clocks = {
-    QDEV_CLOCK_IN(ZynqSLCRState, ps_clk, zynq_slcr_ps_clk_callback),
+    QDEV_CLOCK_IN(ZynqSLCRState, ps_clk, zynq_slcr_ps_clk_callback, ClockUpdate),
     QDEV_CLOCK_OUT(ZynqSLCRState, uart0_ref_clk),
     QDEV_CLOCK_OUT(ZynqSLCRState, uart1_ref_clk),
     QDEV_CLOCK_END

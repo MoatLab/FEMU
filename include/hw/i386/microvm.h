@@ -18,7 +18,6 @@
 #ifndef HW_I386_MICROVM_H
 #define HW_I386_MICROVM_H
 
-#include "qemu-common.h"
 #include "exec/hwaddr.h"
 #include "qemu/notify.h"
 
@@ -52,7 +51,6 @@
 
 /* Platform virtio definitions */
 #define VIRTIO_MMIO_BASE      0xfeb00000
-#define VIRTIO_NUM_TRANSPORTS 8
 #define VIRTIO_CMDLINE_MAXLEN 64
 
 #define GED_MMIO_BASE         0xfea00000
@@ -67,13 +65,13 @@
 #define PCIE_MMIO_SIZE        0x20000000
 #define PCIE_ECAM_BASE        0xe0000000
 #define PCIE_ECAM_SIZE        0x10000000
-#define PCIE_IRQ_BASE         12
 
 /* Machine type options */
 #define MICROVM_MACHINE_PIT                 "pit"
 #define MICROVM_MACHINE_PIC                 "pic"
 #define MICROVM_MACHINE_RTC                 "rtc"
 #define MICROVM_MACHINE_PCIE                "pcie"
+#define MICROVM_MACHINE_IOAPIC2             "ioapic2"
 #define MICROVM_MACHINE_ISA_SERIAL          "isa-serial"
 #define MICROVM_MACHINE_OPTION_ROMS         "x-option-roms"
 #define MICROVM_MACHINE_AUTO_KERNEL_CMDLINE "auto-kernel-cmdline"
@@ -92,16 +90,23 @@ struct MicrovmMachineState {
     OnOffAuto pit;
     OnOffAuto rtc;
     OnOffAuto pcie;
+    OnOffAuto ioapic2;
     bool isa_serial;
     bool option_roms;
     bool auto_kernel_cmdline;
 
     /* Machine state */
+    uint32_t pcie_irq_base;
     uint32_t virtio_irq_base;
+    uint32_t virtio_num_transports;
     bool kernel_cmdline_fixed;
     Notifier machine_done;
     Notifier powerdown_req;
     struct GPEXConfig gpex;
+
+    /* device tree */
+    void *fdt;
+    uint32_t ioapic_phandle[2];
 };
 
 #define TYPE_MICROVM_MACHINE   MACHINE_TYPE_NAME("microvm")

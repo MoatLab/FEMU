@@ -1,0 +1,23 @@
+#! /bin/sh
+# SPDX-License-Identifier: Apache-2.0 OR GPL-2.0-or-later
+
+touch "$DATA_DIR/$CUR_TEST.pnor"
+
+# Don't record the output of ffspart
+../ffspart/ffspart -s 0x1000 -c 10 -i "$DATA_DIR/$CUR_TEST.ffs" \
+	-p "$DATA_DIR/$CUR_TEST.pnor" 2>&1 >/dev/null
+if [ "$?" -ne 0 ] ; then
+	fail_test
+fi
+
+run_binary "./pflash" "-F $DATA_DIR/$CUR_TEST.pnor --info"
+if [ "$?" -ne 0 ] ; then
+	fail_test
+fi
+
+#--info will print the name of the file which will change between runs
+sed -i "s|$DATA_DIR/$CUR_TEST.pnor|FILE|" "$STDOUT_OUT"
+
+diff_with_result
+
+pass_test

@@ -288,7 +288,7 @@ dtc_overlay_tests () {
     run_test check_path overlay_overlay.test.dtb exists "/__local_fixups__"
 
     # Without syntactic sugar
-    run_dtc_test -I dts -O dtb -o overlay_overlay_nosugar.test.dtb "$SRCDIR/overlay_overlay.dts"
+    run_dtc_test -I dts -O dtb -o overlay_overlay_nosugar.test.dtb "$SRCDIR/overlay_overlay_nosugar.dts"
     run_test check_path overlay_overlay_nosugar.test.dtb not-exists "/__symbols__"
     run_test check_path overlay_overlay_nosugar.test.dtb exists "/__fixups__"
     run_test check_path overlay_overlay_nosugar.test.dtb exists "/__local_fixups__"
@@ -518,7 +518,7 @@ libfdt_tests () {
 	run_test check_full $good
     done
     for bad in truncated_property.dtb truncated_string.dtb \
-				      truncated_memrsv.dtb; do
+		truncated_memrsv.dtb two_roots.dtb named_root.dtb; do
 	run_test check_full -n $bad
     done
 }
@@ -691,7 +691,7 @@ dtc_tests () {
     run_sh_test "$SRCDIR/dtc-fatal.sh" -I dts -O dtb "$SRCDIR/nonexist-node-ref2.dts"
     check_tests "$SRCDIR/bad-name-property.dts" name_properties
 
-    check_tests "$SRCDIR/bad-ncells.dts" address_cells_is_cell size_cells_is_cell interrupt_cells_is_cell
+    check_tests "$SRCDIR/bad-ncells.dts" address_cells_is_cell size_cells_is_cell interrupts_extended_is_cell
     check_tests "$SRCDIR/bad-string-props.dts" device_type_is_string model_is_string status_is_string label_is_string compatible_is_string_list names_is_string_list
     check_tests "$SRCDIR/bad-chosen.dts" chosen_node_is_root
     check_tests "$SRCDIR/bad-chosen.dts" chosen_node_bootargs
@@ -709,11 +709,14 @@ dtc_tests () {
     check_tests "$SRCDIR/unit-addr-unique.dts" unique_unit_address
     check_tests "$SRCDIR/bad-phandle-cells.dts" interrupts_extended_property
     check_tests "$SRCDIR/bad-gpio.dts" gpios_property
+    check_tests "$SRCDIR/good-gpio.dts" -n gpios_property
     check_tests "$SRCDIR/bad-graph.dts" graph_child_address
     check_tests "$SRCDIR/bad-graph.dts" graph_port
     check_tests "$SRCDIR/bad-graph.dts" graph_endpoint
     run_sh_test "$SRCDIR/dtc-checkfails.sh" deprecated_gpio_property -- -Wdeprecated_gpio_property -I dts -O dtb "$SRCDIR/bad-gpio.dts"
+    run_sh_test "$SRCDIR/dtc-checkfails.sh" -n deprecated_gpio_property -- -Wdeprecated_gpio_property -I dts -O dtb "$SRCDIR/good-gpio.dts"
     check_tests "$SRCDIR/bad-interrupt-cells.dts" interrupts_property
+    check_tests "$SRCDIR/bad-interrupt-controller.dts" interrupt_provider
     run_sh_test "$SRCDIR/dtc-checkfails.sh" node_name_chars -- -I dtb -O dtb bad_node_char.dtb
     run_sh_test "$SRCDIR/dtc-checkfails.sh" node_name_format -- -I dtb -O dtb bad_node_format.dtb
     run_sh_test "$SRCDIR/dtc-checkfails.sh" property_name_chars -- -I dtb -O dtb bad_prop_char.dtb
@@ -737,7 +740,7 @@ dtc_tests () {
 
 
     # Check warning options
-    run_sh_test "$SRCDIR/dtc-checkfails.sh" address_cells_is_cell interrupt_cells_is_cell -n size_cells_is_cell -- -Wno_size_cells_is_cell -I dts -O dtb "$SRCDIR/bad-ncells.dts"
+    run_sh_test "$SRCDIR/dtc-checkfails.sh" address_cells_is_cell interrupts_extended_is_cell -n size_cells_is_cell -- -Wno_size_cells_is_cell -I dts -O dtb "$SRCDIR/bad-ncells.dts"
     run_sh_test "$SRCDIR/dtc-fails.sh" -n test-warn-output.test.dtb -I dts -O dtb "$SRCDIR/bad-ncells.dts"
     run_sh_test "$SRCDIR/dtc-fails.sh" test-error-output.test.dtb -I dts -O dtb bad-ncells.dts -Esize_cells_is_cell
     run_sh_test "$SRCDIR/dtc-checkfails.sh" always_fail -- -Walways_fail -I dts -O dtb "$SRCDIR/test_tree1.dts"

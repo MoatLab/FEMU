@@ -1,0 +1,8 @@
+---
+- name: Bootstrap the pkgng package manager
+  raw: 'env ASSUME_ALWAYS_YES=YES {{ packaging.command }} bootstrap'
+  when:
+    - packaging.format == 'pkg'
+
+- name: Bootstrap Ansible
+  raw: '{{ packaging.command }} install -y {{ ansible_python_package }}'

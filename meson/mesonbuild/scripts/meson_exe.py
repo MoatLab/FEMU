@@ -16,29 +16,23 @@ import os
 import sys
 import argparse
 import pickle
-import platform
 import subprocess
+import typing as T
+import locale
 
 from .. import mesonlib
 from ..backend.backends import ExecutableSerialisation
 
 options = None
 
-def buildparser():
+def buildparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description='Custom executable wrapper for Meson. Do not run on your own, mmm\'kay?')
     parser.add_argument('--unpickle')
     parser.add_argument('--capture')
+    parser.add_argument('--feed')
     return parser
 
-def is_windows():
-    platname = platform.system().lower()
-    return platname == 'windows' or 'mingw' in platname
-
-def is_cygwin():
-    platname = platform.system().lower()
-    return 'cygwin' in platname
-
-def run_exe(exe):
+def run_exe(exe: ExecutableSerialisation, extra_env: T.Optional[dict] = None) -> int:
     if exe.exe_runner:
         if not exe.exe_runner.found():
             raise AssertionError('BUG: Can\'t run cross-compiled exe {!r} with not-found '
@@ -47,7 +41,10 @@ def run_exe(exe):
     else:
         cmd_args = exe.cmd_args
     child_env = os.environ.copy()
-    child_env.update(exe.env)
+    if extra_env:
+        child_env.update(extra_env)
+    if exe.env:
+        child_env = exe.env.get_env(child_env)
     if exe.extra_paths:
         child_env['PATH'] = (os.pathsep.join(exe.extra_paths + ['']) +
                              child_env['PATH'])
@@ -57,33 +54,53 @@ def run_exe(exe):
                 ['Z:' + p for p in exe.extra_paths] + child_env.get('WINEPATH', '').split(';')
             )
 
+    stdin = None
+    if exe.feed:
+        stdin = open(exe.feed, 'rb')
+
+    pipe = subprocess.PIPE
+    if exe.verbose:
+        assert not exe.capture, 'Cannot capture and print to console at the same time'
+        pipe = None
+
     p = subprocess.Popen(cmd_args, env=child_env, cwd=exe.workdir,
-                         close_fds=False,
-                         stdout=subprocess.PIPE,
-                         stderr=subprocess.PIPE)
+                         close_fds=False, stdin=stdin, stdout=pipe, stderr=pipe)
     stdout, stderr = p.communicate()
+
+    if stdin is not None:
+        stdin.close()
 
     if p.returncode == 0xc0000135:
         # STATUS_DLL_NOT_FOUND on Windows indicating a common problem that is otherwise hard to diagnose
-        raise FileNotFoundError('Missing DLLs on calling {!r}'.format(exe.name))
+        raise FileNotFoundError('due to missing DLLs')
 
-    if exe.capture and p.returncode == 0:
+    if p.returncode != 0:
+        if exe.pickled:
+            print(f'while executing {cmd_args!r}')
+        if exe.verbose:
+            return p.returncode
+        encoding = locale.getpreferredencoding()
+        if not exe.capture:
+            print('--- stdout ---')
+            print(stdout.decode(encoding=encoding, errors='replace'))
+        print('--- stderr ---')
+        print(stderr.decode(encoding=encoding, errors='replace'))
+        return p.returncode
+
+    if exe.capture:
         skip_write = False
         try:
             with open(exe.capture, 'rb') as cur:
                 skip_write = cur.read() == stdout
-        except IOError:
+        except OSError:
             pass
         if not skip_write:
             with open(exe.capture, 'wb') as output:
                 output.write(stdout)
-    else:
-        sys.stdout.buffer.write(stdout)
-    if stderr:
-        sys.stderr.buffer.write(stderr)
-    return p.returncode
 
-def run(args):
+    return 0
+
+def run(args: T.List[str]) -> int:
     global options
     parser = buildparser()
     options, cmd_args = parser.parse_known_args(args)
@@ -94,12 +111,13 @@ def run(args):
     if not options.unpickle and not cmd_args:
         parser.error('either --unpickle or executable and arguments are required')
     if options.unpickle:
-        if cmd_args or options.capture:
+        if cmd_args or options.capture or options.feed:
             parser.error('no other arguments can be used with --unpickle')
         with open(options.unpickle, 'rb') as f:
             exe = pickle.load(f)
+            exe.pickled = True
     else:
-        exe = ExecutableSerialisation(cmd_args, capture=options.capture)
+        exe = ExecutableSerialisation(cmd_args, capture=options.capture, feed=options.feed)
 
     return run_exe(exe)
 

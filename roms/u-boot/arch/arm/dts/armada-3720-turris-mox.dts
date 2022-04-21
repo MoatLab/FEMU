@@ -1,0 +1,232 @@
+// SPDX-License-Identifier: GPL-2.0+ or X11
+/*
+ * Device Tree file for CZ.NIC Turris Mox Board
+ * 2018 by Marek Behun <marek.behun@nic.cz>
+ *
+ * Based on armada-3720-espressobin.dts by:
+ *   Gregory CLEMENT <gregory.clement@free-electrons.com>
+ *   Konstantin Porotchkin <kostap@marvell.com>
+ */
+
+/dts-v1/;
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/leds/common.h>
+#include "armada-372x.dtsi"
+
+/ {
+	model = "CZ.NIC Turris Mox Board";
+	compatible = "cznic,turris-mox", "marvell,armada3720",
+		     "marvell,armada3710";
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+
+	aliases {
+		ethernet0 = &eth0;
+		ethernet1 = &eth1;
+		i2c0 = &i2c0;
+		spi0 = &spi0;
+	};
+
+	memory {
+		device_type = "memory";
+		reg = <0x00000000 0x00000000 0x00000000 0x20000000>;
+	};
+
+	leds {
+		compatible = "gpio-leds";
+
+		led {
+			gpios = <&gpiosb 21 GPIO_ACTIVE_LOW>;
+			color = <LED_COLOR_ID_RED>;
+			function = LED_FUNCTION_ACTIVITY;
+		};
+	};
+
+	gpio-keys {
+		compatible = "gpio-keys";
+
+		reset {
+			compatible = "gpio-keys";
+			label = "reset";
+			linux,code = <KEY_RESTART>;
+			gpios = <&gpiosb 20 GPIO_ACTIVE_LOW>;
+			debounce-interval = <60>;
+		};
+	};
+
+	reg_usb3_vbus: usb3_vbus@0 {
+		compatible = "regulator-fixed";
+		regulator-name = "usb3-vbus";
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		startup-delay-us = <2000000>;
+		shutdown-delay-us = <1000000>;
+		gpio = <&gpiosb 0 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		regulator-boot-on;
+	};
+
+	vsdc_reg: vsdc-reg {
+		compatible = "regulator-gpio";
+		regulator-name = "vsdc";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-boot-on;
+
+		gpios = <&gpiosb 23 GPIO_ACTIVE_HIGH>;
+		gpios-states = <0>;
+		states = <1800000 0x1
+			  3300000 0x0>;
+		enable-active-high;
+	};
+
+	mdio {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		eth_phy1: ethernet-phy@1 {
+			reg = <1>;
+		};
+	};
+};
+
+&comphy {
+	max-lanes = <3>;
+	phy0 {
+		phy-type = <COMPHY_TYPE_SGMII1>;
+		phy-speed = <COMPHY_SPEED_3_125G>;
+	};
+
+	phy1 {
+		phy-type = <COMPHY_TYPE_PEX0>;
+		phy-speed = <COMPHY_SPEED_5G>;
+	};
+
+	phy2 {
+		phy-type = <COMPHY_TYPE_USB3_HOST0>;
+		phy-speed = <COMPHY_SPEED_5G>;
+	};
+};
+
+&eth0 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&rgmii_pins>, <&smi_pins>;
+	phy-mode = "rgmii";
+	phy = <&eth_phy1>;
+};
+
+&i2c0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c1_pins>;
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	rtc@6f {
+		compatible = "microchip,mcp7941x";
+		reg = <0x6f>;
+	};
+};
+
+&sdhci1 {
+	wp-inverted;
+	bus-width = <4>;
+	cd-gpios = <&gpionb 10 GPIO_ACTIVE_HIGH>;
+	vqmmc-supply = <&vsdc_reg>;
+	marvell,pad-type = "sd";
+	status = "okay";
+};
+
+&pinctrl_nb {
+	spi_cs1_pins: spi-cs1-pins {
+		groups = "spi_cs1";
+		function = "spi";
+	};
+};
+
+&spi0 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&spi_cs1_pins>;
+	assigned-clocks = <&nb_periph_clk 7>;
+	assigned-clock-parents = <&tbg 1>;
+	assigned-clock-rates = <20000000>;
+
+	spi-flash@0 {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		compatible = "st,s25fl064l", "jedec,spi-nor";
+		reg = <0>;
+		spi-max-frequency = <20000000>;
+		m25p,fast-read;
+
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			partition@0 {
+				label = "secure-firmware";
+				reg = <0x0 0x20000>;
+			};
+
+			partition@20000 {
+				label = "a53-firmware";
+				reg = <0x20000 0x160000>;
+			};
+
+			partition@180000 {
+				label = "u-boot-env";
+				reg = <0x180000 0x10000>;
+			};
+
+			partition@190000 {
+				label = "Rescue system";
+				reg = <0x190000 0x660000>;
+			};
+
+			partition@7f0000 {
+				label = "dtb";
+				reg = <0x7f0000 0x10000>;
+			};
+		};
+	};
+
+	moxtet@1 {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		compatible = "cznic,moxtet";
+		reg = <1>;
+		reset-gpios = <&gpiosb 2 GPIO_ACTIVE_LOW>;
+		spi-max-frequency = <1000000>;
+		spi-cpol;
+		spi-cpha;
+	};
+};
+
+&uart0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart1_pins>;
+	status = "okay";
+};
+
+&usb2 {
+	status = "okay";
+};
+
+&usb3 {
+	vbus-supply = <&reg_usb3_vbus>;
+	status = "okay";
+};
+
+&pcie0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&pcie_pins>;
+	reset-gpios = <&gpiosb 3 GPIO_ACTIVE_LOW>;
+	status = "disabled";
+};

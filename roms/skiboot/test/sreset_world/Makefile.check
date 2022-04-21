@@ -1,0 +1,48 @@
+SRESET_WORLD_TEST := test/sreset_world/sreset_kernel/sreset_kernel
+SRESET_WORLD_STB_TEST := test/sreset_world/sreset_kernel/sreset_kernel.stb
+
+.PHONY: sreset_world-tests
+# We only do the SMT tests as we don't do OPAL re-entry
+sreset_world-tests: $(SRESET_WORLD_TEST:%=%-check-smt-mambo)
+sreset_world-tests: $(SRESET_WORLD_TEST:%=%-check-smt-p9-mambo)
+
+sreset_world-tests: $(SRESET_WORLD_STB_TEST:%=%-check-stb-smt-mambo)
+sreset_world-tests: $(SRESET_WORLD_STB_TEST:%=%-check-stb-smt-p9-mambo)
+
+boot-tests: sreset_world-tests
+check: sreset_world-tests
+
+cc-name := $(shell $(CC) -v 2>&1 | grep -q "clang version" && echo clang || echo gcc)
+
+ifeq ($(cc-name),clang)
+sreset_kernel_CFLAGS = --target=powerpc64-linux-gnu
+endif
+sreset_kernel_CFLAGS += -mbig-endian -m64
+
+$(SRESET_WORLD_TEST:%=%-check-smt-mambo): %-check-smt-mambo: % skiboot.lid
+	$(call Q , BOOT TEST , THREADS=2 ./test/sreset_world/run_mambo_sreset.sh , $@)
+
+$(SRESET_WORLD_TEST:%=%-check-smt-p9-mambo): %-check-smt-p9-mambo: % skiboot.lid
+	$(call Q , BOOT TEST , THREADS=2 ./test/sreset_world/run_mambo_p9_sreset.sh , $@)
+
+$(SRESET_WORLD_STB_TEST:%=%-check-stb-smt-mambo): %-check-stb-smt-mambo: % skiboot.lid.stb
+	$(call Q , BOOT TEST , SKIBOOT_ENABLE_MAMBO_STB=1 THREADS=2 ./test/sreset_world/run_mambo_sreset.sh , $@)
+
+$(SRESET_WORLD_STB_TEST:%=%-check-stb-smt-p9-mambo): %-check-stb-smt-p9-mambo: % skiboot.lid.stb
+	$(call Q , BOOT TEST , SKIBOOT_ENABLE_MAMBO_STB=1 THREADS=2 ./test/sreset_world/run_mambo_p9_sreset.sh , $@)
+
+test/sreset_world/sreset_kernel/sreset_kernel.o: test/sreset_world/sreset_kernel/sreset_kernel.S
+	$(call Q,CC, $(CC) $(sreset_kernel_CFLAGS) -c -o $@ $< ,$@)
+
+test/sreset_world/sreset_kernel/sreset_kernel: test/sreset_world/sreset_kernel/sreset_kernel.o
+	$(call Q,LD, $(LD) -EB -m elf64ppc -N -o $@ $^ , $@)
+
+test/sreset_world/sreset_kernel/sreset_kernel.stb: test/sreset_world/sreset_kernel/sreset_kernel libstb/create-container
+	$(call Q,STB-DEVELOPMENT-SIGNED-CONTAINER,$(SRC)/libstb/sign-with-local-keys.sh $< $@ $(SRC)/libstb/keys/,$@)
+
+
+clean: sreset_world-test-clean
+
+sreset_world-test-clean:
+	$(RM) test/sreset_world/sreset_kernel/sreset_kernel
+	$(RM) test/sreset_world/sreset_kernel/sreset_kernel.o

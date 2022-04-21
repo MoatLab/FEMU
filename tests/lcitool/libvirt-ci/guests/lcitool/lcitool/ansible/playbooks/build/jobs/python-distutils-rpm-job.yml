@@ -1,0 +1,14 @@
+---
+- name: '{{ name }}-rpm'
+  shell: |
+    set -e
+    cd {{ name }}
+
+    {{ global_env }}
+    {{ local_env }}
+    {{ strip_buildrequires }}
+    rm -f dist/*.tar.{{ archive_format }}
+    $PYTHON ./setup.py sdist
+    rpmbuild --clean --define "_topdir `pwd`/rpmbuild" -ta dist/*.tar.{{ archive_format }}
+  when:
+    - target in machines

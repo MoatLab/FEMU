@@ -3,6 +3,7 @@
 #include "qemu/error-report.h"
 #include "qemu/module.h"
 #include "qemu/option.h"
+#include "qemu/hw-version.h"
 #include "hw/qdev-properties.h"
 #include "hw/scsi/scsi.h"
 #include "migration/qemu-file-types.h"
@@ -134,10 +135,10 @@ void scsi_device_unit_attention_reported(SCSIDevice *s)
 }
 
 /* Create a scsi bus, and attach devices to it.  */
-void scsi_bus_new(SCSIBus *bus, size_t bus_size, DeviceState *host,
-                  const SCSIBusInfo *info, const char *bus_name)
+void scsi_bus_init_named(SCSIBus *bus, size_t bus_size, DeviceState *host,
+                         const SCSIBusInfo *info, const char *bus_name)
 {
-    qbus_create_inplace(bus, bus_size, TYPE_SCSI_BUS, host, bus_name);
+    qbus_init(bus, bus_size, TYPE_SCSI_BUS, host, bus_name);
     bus->busnr = next_scsi_bus++;
     bus->info = info;
     qbus_set_bus_hotplug_handler(BUS(bus));
@@ -170,6 +171,8 @@ static void scsi_dma_restart_bh(void *opaque)
         scsi_req_unref(req);
     }
     aio_context_release(blk_get_aio_context(s->conf.blk));
+    /* Drop the reference that was acquired in scsi_dma_restart_cb */
+    object_unref(OBJECT(s));
 }
 
 void scsi_req_retry(SCSIRequest *req)
@@ -179,7 +182,7 @@ void scsi_req_retry(SCSIRequest *req)
     req->retry = true;
 }
 
-static void scsi_dma_restart_cb(void *opaque, int running, RunState state)
+static void scsi_dma_restart_cb(void *opaque, bool running, RunState state)
 {
     SCSIDevice *s = opaque;
 
@@ -188,6 +191,8 @@ static void scsi_dma_restart_cb(void *opaque, int running, RunState state)
     }
     if (!s->bh) {
         AioContext *ctx = blk_get_aio_context(s->conf.blk);
+        /* The reference is dropped in scsi_dma_restart_bh.*/
+        object_ref(OBJECT(s));
         s->bh = aio_bh_new(ctx, scsi_dma_restart_bh, s);
         qemu_bh_schedule(s->bh);
     }
@@ -688,6 +693,7 @@ SCSIRequest *scsi_req_alloc(const SCSIReqOps *reqops, SCSIDevice *d,
     req->lun = lun;
     req->hba_private = hba_private;
     req->status = -1;
+    req->host_status = -1;
     req->ops = reqops;
     object_ref(OBJECT(d));
     object_ref(OBJECT(qbus->parent));
@@ -755,7 +761,7 @@ SCSIRequest *scsi_req_new(SCSIDevice *d, uint32_t tag, uint32_t lun,
     }
 
     req->cmd = cmd;
-    req->resid = req->cmd.xfer;
+    req->residual = req->cmd.xfer;
 
     switch (buf[0]) {
     case INQUIRY:
@@ -1403,7 +1409,7 @@ void scsi_req_data(SCSIRequest *req, int len)
     trace_scsi_req_data(req->dev->id, req->lun, req->tag, len);
     assert(req->cmd.mode != SCSI_XFER_NONE);
     if (!req->sg) {
-        req->resid -= len;
+        req->residual -= len;
         req->bus->info->transfer_data(req, len);
         return;
     }
@@ -1416,9 +1422,11 @@ void scsi_req_data(SCSIRequest *req, int len)
 
     buf = scsi_req_get_buf(req);
     if (req->cmd.mode == SCSI_XFER_FROM_DEV) {
-        req->resid = dma_buf_read(buf, len, req->sg);
+        dma_buf_read(buf, len, &req->residual, req->sg,
+                     MEMTXATTRS_UNSPECIFIED);
     } else {
-        req->resid = dma_buf_write(buf, len, req->sg);
+        dma_buf_write(buf, len, &req->residual, req->sg,
+                      MEMTXATTRS_UNSPECIFIED);
     }
     scsi_req_continue(req);
 }
@@ -1451,10 +1459,38 @@ void scsi_req_print(SCSIRequest *req)
     }
 }
 
+void scsi_req_complete_failed(SCSIRequest *req, int host_status)
+{
+    SCSISense sense;
+    int status;
+
+    assert(req->status == -1 && req->host_status == -1);
+    assert(req->ops != &reqops_unit_attention);
+
+    if (!req->bus->info->fail) {
+        status = scsi_sense_from_host_status(req->host_status, &sense);
+        if (status == CHECK_CONDITION) {
+            scsi_req_build_sense(req, sense);
+        }
+        scsi_req_complete(req, status);
+        return;
+    }
+
+    req->host_status = host_status;
+    scsi_req_ref(req);
+    scsi_req_dequeue(req);
+    req->bus->info->fail(req);
+
+    /* Cancelled requests might end up being completed instead of cancelled */
+    notifier_list_notify(&req->cancel_notifiers, req);
+    scsi_req_unref(req);
+}
+
 void scsi_req_complete(SCSIRequest *req, int status)
 {
-    assert(req->status == -1);
+    assert(req->status == -1 && req->host_status == -1);
     req->status = status;
+    req->host_status = SCSI_HOST_OK;
 
     assert(req->sense_len <= sizeof(req->sense));
     if (status == GOOD) {
@@ -1479,7 +1515,7 @@ void scsi_req_complete(SCSIRequest *req, int status)
 
     scsi_req_ref(req);
     scsi_req_dequeue(req);
-    req->bus->info->complete(req, req->status, req->resid);
+    req->bus->info->complete(req, req->residual);
 
     /* Cancelled requests might end up being completed instead of cancelled */
     notifier_list_notify(&req->cancel_notifiers, req);
@@ -1634,7 +1670,7 @@ static char *scsibus_get_fw_dev_path(DeviceState *dev)
 /* SCSI request list.  For simplicity, pv points to the whole device */
 
 static int put_scsi_requests(QEMUFile *f, void *pv, size_t size,
-                             const VMStateField *field, QJSON *vmdesc)
+                             const VMStateField *field, JSONWriter *vmdesc)
 {
     SCSIDevice *s = pv;
     SCSIBus *bus = DO_UPCAST(SCSIBus, qbus, s->qdev.parent_bus);
@@ -1642,7 +1678,7 @@ static int put_scsi_requests(QEMUFile *f, void *pv, size_t size,
 
     QTAILQ_FOREACH(req, &s->requests, next) {
         assert(!req->io_canceled);
-        assert(req->status == -1);
+        assert(req->status == -1 && req->host_status == -1);
         assert(req->enqueued);
 
         qemu_put_sbyte(f, req->retry ? 1 : 2);

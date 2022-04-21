@@ -19,7 +19,9 @@ import shutil
 import typing as T
 
 from ... import mesonlib
-from ...linkers import AppleDynamicLinker
+from ...linkers import AppleDynamicLinker, ClangClDynamicLinker, LLVMDynamicLinker, GnuGoldDynamicLinker
+from ...mesonlib import OptionKey
+from ..compilers import CompileCheckMode
 from .gnu import GnuLikeCompiler
 
 if T.TYPE_CHECKING:
@@ -27,13 +29,13 @@ if T.TYPE_CHECKING:
     from ...dependencies import Dependency  # noqa: F401
 
 clang_color_args = {
-    'auto': ['-Xclang', '-fcolor-diagnostics'],
-    'always': ['-Xclang', '-fcolor-diagnostics'],
-    'never': ['-Xclang', '-fno-color-diagnostics'],
+    'auto': ['-fcolor-diagnostics'],
+    'always': ['-fcolor-diagnostics'],
+    'never': ['-fno-color-diagnostics'],
 }  # type: T.Dict[str, T.List[str]]
 
 clang_optimization_args = {
-    '0': [],
+    '0': ['-O0'],
     'g': ['-Og'],
     '1': ['-O1'],
     '2': ['-O2'],
@@ -42,15 +44,18 @@ clang_optimization_args = {
 }  # type: T.Dict[str, T.List[str]]
 
 class ClangCompiler(GnuLikeCompiler):
+
     def __init__(self, defines: T.Optional[T.Dict[str, str]]):
         super().__init__()
         self.id = 'clang'
         self.defines = defines or {}
-        self.base_options.append('b_colorout')
+        self.base_options.update(
+            {OptionKey('b_colorout'), OptionKey('b_lto_threads'), OptionKey('b_lto_mode')})
+
         # TODO: this really should be part of the linker base_options, but
         # linkers don't have base_options.
         if isinstance(self.linker, AppleDynamicLinker):
-            self.base_options.append('b_bitcode')
+            self.base_options.add(OptionKey('b_bitcode'))
         # All Clang backends can also do LLVM IR
         self.can_compile_suffixes.add('ll')
 
@@ -75,17 +80,21 @@ class ClangCompiler(GnuLikeCompiler):
         # so it might change semantics at any time.
         return ['-include-pch', os.path.join(pch_dir, self.get_pch_name(header))]
 
-    def has_multi_arguments(self, args: T.List[str], env: 'Environment') -> T.List[str]:
-        myargs = ['-Werror=unknown-warning-option', '-Werror=unused-command-line-argument']
-        if mesonlib.version_compare(self.version, '>=3.6.0'):
-            myargs.append('-Werror=ignored-optimization-argument')
-        return super().has_multi_arguments(
-            myargs + args,
-            env)
+    def get_compiler_check_args(self, mode: CompileCheckMode) -> T.List[str]:
+        # Clang is different than GCC, it will return True when a symbol isn't
+        # defined in a header. Specifically this seems ot have something to do
+        # with functions that may be in a header on some systems, but not all of
+        # them. `strlcat` specifically with can trigger this.
+        myargs: T.List[str] = ['-Werror=implicit-function-declaration']
+        if mode is CompileCheckMode.COMPILE:
+            myargs.extend(['-Werror=unknown-warning-option', '-Werror=unused-command-line-argument'])
+            if mesonlib.version_compare(self.version, '>=3.6.0'):
+                myargs.append('-Werror=ignored-optimization-argument')
+        return super().get_compiler_check_args(mode) + myargs
 
     def has_function(self, funcname: str, prefix: str, env: 'Environment', *,
                      extra_args: T.Optional[T.List[str]] = None,
-                     dependencies: T.Optional[T.List['Dependency']] = None) -> bool:
+                     dependencies: T.Optional[T.List['Dependency']] = None) -> T.Tuple[bool, bool]:
         if extra_args is None:
             extra_args = []
         # Starting with XCode 8, we need to pass this to force linker
@@ -96,7 +105,7 @@ class ClangCompiler(GnuLikeCompiler):
         if isinstance(self.linker, AppleDynamicLinker) and mesonlib.version_compare(self.version, '>=8.0'):
             extra_args.append('-Wl,-no_weak_imports')
         return super().has_function(funcname, prefix, env, extra_args=extra_args,
-                                    dependencies=dependencies)
+                                   dependencies=dependencies)
 
     def openmp_flags(self) -> T.List[str]:
         if mesonlib.version_compare(self.version, '>=3.8.0'):
@@ -113,17 +122,41 @@ class ClangCompiler(GnuLikeCompiler):
         # (and other gcc-like compilers) cannot. This is becuse clang (being
         # llvm based) is retargetable, while GCC is not.
         #
+
+        # qcld: Qualcomm Snapdragon linker, based on LLVM
+        if linker == 'qcld':
+            return  ['-fuse-ld=qcld']
+
         if shutil.which(linker):
             if not shutil.which(linker):
                 raise mesonlib.MesonException(
-                    'Cannot find linker {}.'.format(linker))
-            return ['-fuse-ld={}'.format(linker)]
+                    f'Cannot find linker {linker}.')
+            return [f'-fuse-ld={linker}']
         return super().use_linker_args(linker)
 
-    def get_has_func_attribute_extra_args(self, name):
+    def get_has_func_attribute_extra_args(self, name: str) -> T.List[str]:
         # Clang only warns about unknown or ignored attributes, so force an
         # error.
         return ['-Werror=attributes']
 
     def get_coverage_link_args(self) -> T.List[str]:
         return ['--coverage']
+
+    def get_lto_compile_args(self, *, threads: int = 0, mode: str = 'default') -> T.List[str]:
+        args: T.List[str] = []
+        if mode == 'thin':
+            # Thin LTO requires the use of gold, lld, ld64, or lld-link
+            if not isinstance(self.linker, (AppleDynamicLinker, ClangClDynamicLinker, LLVMDynamicLinker, GnuGoldDynamicLinker)):
+                raise mesonlib.MesonException(f"LLVM's thinLTO only works with gnu gold, lld, lld-link, and ld64, not {self.linker.id}")
+            args.append(f'-flto={mode}')
+        else:
+            assert mode == 'default', 'someone forgot to wire something up'
+            args.extend(super().get_lto_compile_args(threads=threads))
+        return args
+
+    def get_lto_link_args(self, *, threads: int = 0, mode: str = 'default') -> T.List[str]:
+        args = self.get_lto_compile_args(threads=threads, mode=mode)
+        # In clang -flto=0 means auto
+        if threads >= 0:
+            args.append(f'-flto-jobs={threads}')
+        return args

@@ -1,0 +1,13 @@
+#! /bin/sh
+# SPDX-License-Identifier: Apache-2.0 OR GPL-2.0-or-later
+
+run_binary "./pflash" "-h"
+if [ "$?" -ne 0 ] ; then
+	fail_test
+fi
+
+strip_version_from_result "pflash"
+
+diff_with_result
+
+pass_test

@@ -1,0 +1,19 @@
+---
+- name: '{{ name }}-prepare'
+  git:
+    repo: '{{ git_url }}'
+    version: '{{ git_branch }}'
+    dest: '{{ name }}'
+    force: yes
+  when:
+    - target in machines
+
+- name: '{{ name }}-prepare'
+  shell: |
+    set -e
+    cd {{ name }}
+
+    git clean -xdf
+    git submodule update --init
+  when:
+    - target in machines

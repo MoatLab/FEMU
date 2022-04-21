@@ -71,9 +71,13 @@ struct vhost_dev {
     int n_tmp_sections;
     MemoryRegionSection *tmp_sections;
     struct vhost_virtqueue *vqs;
-    int nvqs;
+    unsigned int nvqs;
     /* the first virtqueue which would be used by this vhost dev */
     int vq_index;
+    /* one past the last vq index for the virtio device (not vhost) */
+    int vq_index_end;
+    /* if non-zero, minimum required value for max_queues */
+    int num_queues;
     uint64_t features;
     uint64_t acked_features;
     uint64_t backend_features;
@@ -93,6 +97,10 @@ struct vhost_dev {
     const VhostDevConfigOps *config_ops;
 };
 
+extern const VhostOps kernel_ops;
+extern const VhostOps user_ops;
+extern const VhostOps vdpa_ops;
+
 struct vhost_net {
     struct vhost_dev dev;
     struct vhost_virtqueue vqs[2];
@@ -102,7 +110,7 @@ struct vhost_net {
 
 int vhost_dev_init(struct vhost_dev *hdev, void *opaque,
                    VhostBackendType backend_type,
-                   uint32_t busyloop_timeout);
+                   uint32_t busyloop_timeout, Error **errp);
 void vhost_dev_cleanup(struct vhost_dev *hdev);
 int vhost_dev_start(struct vhost_dev *hdev, VirtIODevice *vdev);
 void vhost_dev_stop(struct vhost_dev *hdev, VirtIODevice *vdev);
@@ -128,8 +136,8 @@ int vhost_net_set_backend(struct vhost_dev *hdev,
                           struct vhost_vring_file *file);
 
 int vhost_device_iotlb_miss(struct vhost_dev *dev, uint64_t iova, int write);
-int vhost_dev_get_config(struct vhost_dev *dev, uint8_t *config,
-                         uint32_t config_len);
+int vhost_dev_get_config(struct vhost_dev *hdev, uint8_t *config,
+                         uint32_t config_len, Error **errp);
 int vhost_dev_set_config(struct vhost_dev *dev, const uint8_t *data,
                          uint32_t offset, uint32_t size, uint32_t flags);
 /* notifier callback in case vhost device config space changed

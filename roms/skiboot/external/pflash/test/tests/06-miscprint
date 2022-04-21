@@ -1,0 +1,46 @@
+#! /bin/sh
+# SPDX-License-Identifier: Apache-2.0 OR GPL-2.0-or-later
+
+touch "$DATA_DIR/$CUR_TEST.pnor"
+
+# Don't record the output of ffspart
+../ffspart/ffspart -s 0x1000 -c 10 -i "$DATA_DIR/$CUR_TEST.ffs" \
+	-p "$DATA_DIR/$CUR_TEST.pnor" 2>&1 >/dev/null
+if [ "$?" -ne 0 ] ; then
+	fail_test
+fi
+
+run_binary "./pflash" "--detail=1 -F $DATA_DIR/$CUR_TEST.pnor"
+if [ "$?" -ne 0 ] ; then
+	fail_test;
+fi
+run_binary "./pflash" "--detail=2 -F $DATA_DIR/$CUR_TEST.pnor"
+if [ "$?" -ne 0 ] ; then
+	fail_test;
+fi
+run_binary "./pflash" "--detail=3 -F $DATA_DIR/$CUR_TEST.pnor"
+if [ "$?" -ne 0 ] ; then
+	fail_test;
+fi
+run_binary "./pflash" "--detail=4 -F $DATA_DIR/$CUR_TEST.pnor"
+if [ "$?" -ne 0 ] ; then
+	fail_test;
+fi
+run_binary "./pflash" "--detail=5 -F $DATA_DIR/$CUR_TEST.pnor"
+if [ "$?" -ne 0 ] ; then
+	fail_test;
+fi
+run_binary "./pflash" "--detail=6 -F $DATA_DIR/$CUR_TEST.pnor"
+if [ "$?" -ne 0 ] ; then
+	fail_test;
+fi
+
+# The test infrastructure will clean up but lets no chew unnecessarily
+# though disk space
+rm "$DATA_DIR/$CUR_TEST.pnor"
+
+strip_version_from_result "pflash"
+
+diff_with_result
+
+pass_test

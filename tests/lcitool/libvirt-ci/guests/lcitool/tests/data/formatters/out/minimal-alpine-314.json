@@ -1,0 +1,19 @@
+{
+  "ccache": "/usr/bin/ccache",
+  "cpan_pkgs": [],
+  "cross_pkgs": [],
+  "make": "/usr/bin/make",
+  "ninja": "/usr/bin/ninja",
+  "packaging_command": "apk",
+  "pip3": "/usr/bin/pip3",
+  "pkgs": [
+    "ca-certificates",
+    "gcc",
+    "git",
+    "glib-dev",
+    "gtk-doc",
+    "pkgconf"
+  ],
+  "pypi_pkgs": [],
+  "python": "/usr/bin/python3"
+}

@@ -1,0 +1,46 @@
+---
+- hosts: all
+  remote_user: root
+  gather_facts: no
+
+  tasks:
+
+    # Bootstrap Ansible itself
+    - include: 'tasks/bootstrap.yml'
+
+- hosts: all
+  remote_user: root
+
+  tasks:
+
+    # Prepare environment. None of the actions performed here might
+    # depend on packages being installed
+    - include: 'tasks/base.yml'
+
+    # Install/Remove packages
+    - include: 'tasks/packages.yml'
+
+    # Configure environment. Needs to happen after installing packages
+    - include: 'tasks/kludges.yml'
+    - include: 'tasks/services.yml'
+    - include: 'tasks/users.yml'
+    - include: 'tasks/ccache.yml'
+      when:
+        - '"ccache" in packages'
+
+    # The following should only run on locally installed VMs
+    - block:
+      - include: 'tasks/bootloader.yml'
+      - include: 'tasks/hostname.yml'
+      when:
+        - fully_managed | default(False)
+
+    # Install the Gitlab runner agent
+    - include: 'tasks/gitlab.yml'
+      when:
+        - install.flavor == 'gitlab'
+
+    # Configure cloud-init
+    - include: 'tasks/cloud-init.yml'
+      when:
+        - install.cloud_init

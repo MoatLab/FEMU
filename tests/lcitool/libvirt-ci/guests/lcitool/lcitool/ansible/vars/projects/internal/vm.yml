@@ -1,0 +1,7 @@
+---
+packages:
+  - bash
+  - bash-completion
+  - chrony
+  - screen
+  - sudo

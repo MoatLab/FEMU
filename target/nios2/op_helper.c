@@ -21,28 +21,8 @@
 #include "qemu/osdep.h"
 #include "cpu.h"
 #include "exec/helper-proto.h"
-#include "exec/cpu_ldst.h"
 #include "exec/exec-all.h"
 #include "qemu/main-loop.h"
-
-#if !defined(CONFIG_USER_ONLY)
-void helper_mmu_read_debug(CPUNios2State *env, uint32_t rn)
-{
-    mmu_read_debug(env, rn);
-}
-
-void helper_mmu_write(CPUNios2State *env, uint32_t rn, uint32_t v)
-{
-    mmu_write(env, rn, v);
-}
-
-void helper_check_interrupts(CPUNios2State *env)
-{
-    qemu_mutex_lock_iothread();
-    nios2_check_interrupts(env);
-    qemu_mutex_unlock_iothread();
-}
-#endif /* !CONFIG_USER_ONLY */
 
 void helper_raise_exception(CPUNios2State *env, uint32_t index)
 {

@@ -1,0 +1,45 @@
+#! /bin/sh
+
+EXPECTED="ID=01           FIRST 0x00000400..0x00000500 (actual=0x00000100) [----------]"
+FFSIMG=$DATA_DIR/$CUR_TEST.gen
+
+command -v pflash > /dev/null || echo "skipping test: pflash required but not found in PATH" && exit 0
+
+
+# https://github.com/open-power/skiboot/issues/205
+touch $FFSIMG
+
+# Use a block size that works with the existing codebase
+run_binary "./ffspart" "-s 0x100 -c 10 -i $DATA_DIR/$CUR_TEST.in -p $FFSIMG"
+if [ "$?" -ne 0 ] ; then
+	fail_test
+fi
+
+CONTENTS=$(pflash -i -F $FFSIMG | grep FIRST)
+
+if [ "$CONTENTS" != "$EXPECTED" ]; then
+	echo "Actual:   $CONTENTS"
+	echo "Expected: $EXPECTED"
+	fail_test
+fi
+
+# Use a block size that fails with the existing codebase. This test is expected
+# to fail; change it to expect pass when the issue is fixed.
+# https://github.com/open-power/skiboot/issues/202
+run_binary "./ffspart" "-s 0x1000 -c 10 -i $DATA_DIR/$CUR_TEST.in -p $FFSIMG"
+if [ "$?" -ne 0 ] ; then
+	fail_test
+fi
+
+CONTENTS=$(pflash -i -F $FFSIMG | grep FIRST)
+
+if [ "$CONTENTS" != "$EXPECTED" ]; then
+	echo "This case should be marked as fail but ffspart has bugs"
+	echo "https://github.com/open-power/skiboot/issues/202"
+	echo "Actual:   $CONTENTS"
+	echo "Expected: $EXPECTED"
+	pass_test
+fi
+
+
+pass_test

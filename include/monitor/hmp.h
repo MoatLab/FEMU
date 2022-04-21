@@ -15,8 +15,9 @@
 #define HMP_H
 
 #include "qemu/readline.h"
+#include "qapi/qapi-types-common.h"
 
-void hmp_handle_error(Monitor *mon, Error *err);
+bool hmp_handle_error(Monitor *mon, Error *err);
 
 void hmp_info_name(Monitor *mon, const QDict *qdict);
 void hmp_info_version(Monitor *mon, const QDict *qdict);
@@ -28,7 +29,6 @@ void hmp_info_mice(Monitor *mon, const QDict *qdict);
 void hmp_info_migrate(Monitor *mon, const QDict *qdict);
 void hmp_info_migrate_capabilities(Monitor *mon, const QDict *qdict);
 void hmp_info_migrate_parameters(Monitor *mon, const QDict *qdict);
-void hmp_info_migrate_cache_size(Monitor *mon, const QDict *qdict);
 void hmp_info_cpus(Monitor *mon, const QDict *qdict);
 void hmp_info_vnc(Monitor *mon, const QDict *qdict);
 void hmp_info_spice(Monitor *mon, const QDict *qdict);
@@ -64,11 +64,8 @@ void hmp_migrate_continue(Monitor *mon, const QDict *qdict);
 void hmp_migrate_incoming(Monitor *mon, const QDict *qdict);
 void hmp_migrate_recover(Monitor *mon, const QDict *qdict);
 void hmp_migrate_pause(Monitor *mon, const QDict *qdict);
-void hmp_migrate_set_downtime(Monitor *mon, const QDict *qdict);
-void hmp_migrate_set_speed(Monitor *mon, const QDict *qdict);
 void hmp_migrate_set_capability(Monitor *mon, const QDict *qdict);
 void hmp_migrate_set_parameter(Monitor *mon, const QDict *qdict);
-void hmp_migrate_set_cache_size(Monitor *mon, const QDict *qdict);
 void hmp_client_migrate_info(Monitor *mon, const QDict *qdict);
 void hmp_migrate_start_postcopy(Monitor *mon, const QDict *qdict);
 void hmp_x_colo_lost_heartbeat(Monitor *mon, const QDict *qdict);
@@ -128,10 +125,13 @@ void hmp_info_ramblock(Monitor *mon, const QDict *qdict);
 void hmp_hotpluggable_cpus(Monitor *mon, const QDict *qdict);
 void hmp_info_vm_generation_id(Monitor *mon, const QDict *qdict);
 void hmp_info_memory_size_summary(Monitor *mon, const QDict *qdict);
-void hmp_info_sev(Monitor *mon, const QDict *qdict);
 void hmp_info_replay(Monitor *mon, const QDict *qdict);
 void hmp_replay_break(Monitor *mon, const QDict *qdict);
 void hmp_replay_delete_break(Monitor *mon, const QDict *qdict);
 void hmp_replay_seek(Monitor *mon, const QDict *qdict);
+void hmp_info_dirty_rate(Monitor *mon, const QDict *qdict);
+void hmp_calc_dirty_rate(Monitor *mon, const QDict *qdict);
+void hmp_human_readable_text_helper(Monitor *mon,
+                                    HumanReadableText *(*qmp_handler)(Error **));
 
 #endif

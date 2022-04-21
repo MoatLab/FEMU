@@ -14,7 +14,7 @@ SRC_PATH=.
 # we have explicit rules for everything
 MAKEFLAGS += -rR
 
-SHELL = /usr/bin/env bash -o pipefail
+SHELL = bash -o pipefail
 
 # Usage: $(call quiet-command,command and args,"NAME","args to print")
 # This will run "command and args", and either:
@@ -47,29 +47,11 @@ git-submodule-update:
 Makefile: .git-submodule-status
 
 .PHONY: git-submodule-update
-
-git_module_status := $(shell \
-  cd '$(SRC_PATH)' && \
-  GIT="$(GIT)" ./scripts/git-submodule.sh status $(GIT_SUBMODULES); \
-  echo $$?; \
-)
-
-ifeq (1,$(git_module_status))
-ifeq (no,$(GIT_UPDATE))
 git-submodule-update:
+ifneq ($(GIT_SUBMODULES_ACTION),ignore)
 	$(call quiet-command, \
-            echo && \
-            echo "GIT submodule checkout is out of date. Please run" && \
-            echo "  scripts/git-submodule.sh update $(GIT_SUBMODULES)" && \
-            echo "from the source directory checkout $(SRC_PATH)" && \
-            echo && \
-            exit 1)
-else
-git-submodule-update:
-	$(call quiet-command, \
-          (cd $(SRC_PATH) && GIT="$(GIT)" ./scripts/git-submodule.sh update $(GIT_SUBMODULES)), \
-          "GIT","$(GIT_SUBMODULES)")
-endif
+		(GIT="$(GIT)" "$(SRC_PATH)/scripts/git-submodule.sh" $(GIT_SUBMODULES_ACTION) $(GIT_SUBMODULES)), \
+		"GIT","$(GIT_SUBMODULES)")
 endif
 
 # 0. ensure the build tree is okay
@@ -105,7 +87,7 @@ x := $(shell rm -rf meson-private meson-info meson-logs)
 endif
 
 # 1. ensure config-host.mak is up-to-date
-config-host.mak: $(SRC_PATH)/configure $(SRC_PATH)/pc-bios $(SRC_PATH)/VERSION
+config-host.mak: $(SRC_PATH)/configure $(SRC_PATH)/scripts/meson-buildoptions.sh $(SRC_PATH)/pc-bios $(SRC_PATH)/VERSION
 	@echo config-host.mak is out-of-date, running configure
 	@if test -f meson-private/coredata.dat; then \
 	  ./config.status --skip-meson; \
@@ -133,6 +115,7 @@ Makefile.ninja: build.ninja
 
 # A separate rule is needed for Makefile dependencies to avoid -n
 build.ninja: build.ninja.stamp
+$(build-files):
 build.ninja.stamp: meson.stamp $(build-files)
 	$(NINJA) $(if $V,-v,) build.ninja && touch $@
 endif
@@ -141,20 +124,29 @@ ifneq ($(MESON),)
 Makefile.mtest: build.ninja scripts/mtest2make.py
 	$(MESON) introspect --targets --tests --benchmarks | $(PYTHON) scripts/mtest2make.py > $@
 -include Makefile.mtest
+
+.PHONY: update-buildoptions
+all update-buildoptions: $(SRC_PATH)/scripts/meson-buildoptions.sh
+$(SRC_PATH)/scripts/meson-buildoptions.sh: $(SRC_PATH)/meson_options.txt
+	$(MESON) introspect --buildoptions $(SRC_PATH)/meson.build | $(PYTHON) \
+	  scripts/meson-buildoptions.py > $@.tmp && mv $@.tmp $@
 endif
 
 # 4. Rules to bridge to other makefiles
 
 ifneq ($(NINJA),)
-MAKE.n = $(findstring n,$(firstword $(MAKEFLAGS)))
-MAKE.k = $(findstring k,$(firstword $(MAKEFLAGS)))
-MAKE.q = $(findstring q,$(firstword $(MAKEFLAGS)))
+# Filter out long options to avoid flags like --no-print-directory which
+# may result in false positive match for MAKE.n
+MAKE.n = $(findstring n,$(firstword $(filter-out --%,$(MAKEFLAGS))))
+MAKE.k = $(findstring k,$(firstword $(filter-out --%,$(MAKEFLAGS))))
+MAKE.q = $(findstring q,$(firstword $(filter-out --%,$(MAKEFLAGS))))
 MAKE.nq = $(if $(word 2, $(MAKE.n) $(MAKE.q)),nq)
 NINJAFLAGS = $(if $V,-v) $(if $(MAKE.n), -n) $(if $(MAKE.k), -k0) \
         $(filter-out -j, $(lastword -j1 $(filter -l% -j%, $(MAKEFLAGS)))) \
 
 ninja-cmd-goals = $(or $(MAKECMDGOALS), all)
-ninja-cmd-goals += $(foreach t, $(.tests), $(.test.deps.$t))
+ninja-cmd-goals += $(foreach t, $(.check.build-suites), $(.check-$t.deps))
+ninja-cmd-goals += $(foreach t, $(.bench.build-suites), $(.bench-$t.deps))
 
 makefile-targets := build.ninja ctags TAGS cscope dist clean uninstall
 # "ninja -t targets" also lists all prerequisites.  If build system
@@ -168,7 +160,7 @@ $(ninja-targets): run-ninja
 # --output-sync line.
 run-ninja: config-host.mak
 ifneq ($(filter $(ninja-targets), $(ninja-cmd-goals)),)
-	+$(quiet-@)$(if $(MAKE.nq),@:, $(NINJA) \
+	+$(quiet-@)$(if $(MAKE.nq),@:, $(NINJA) -d keepdepfile \
 	   $(NINJAFLAGS) $(sort $(filter $(ninja-targets), $(ninja-cmd-goals))) | cat)
 endif
 endif
@@ -214,14 +206,12 @@ recurse-clean: $(addsuffix /clean, $(ROM_DIRS))
 clean: recurse-clean
 	-$(quiet-@)test -f build.ninja && $(NINJA) $(NINJAFLAGS) -t clean || :
 	-$(quiet-@)test -f build.ninja && $(NINJA) $(NINJAFLAGS) clean-ctlist || :
-# avoid old build problems by removing potentially incorrect old files
-	rm -f config.mak op-i386.h opc-i386.h gen-op-i386.h op-arm.h opc-arm.h gen-op-arm.h
-	find . \( -name '*.so' -o -name '*.dll' -o -name '*.[oda]' \) -type f \
+	find . \( -name '*.so' -o -name '*.dll' -o \
+		  -name '*.[oda]' -o -name '*.gcno' \) -type f \
 		! -path ./roms/edk2/ArmPkg/Library/GccLto/liblto-aarch64.a \
 		! -path ./roms/edk2/ArmPkg/Library/GccLto/liblto-arm.a \
 		-exec rm {} +
-	rm -f TAGS cscope.* *.pod *~ */*~
-	rm -f fsdev/*.pod scsi/*.pod
+	rm -f TAGS cscope.* *~ */*~
 
 VERSION = $(shell cat $(SRC_PATH)/VERSION)
 
@@ -232,11 +222,10 @@ qemu-%.tar.bz2:
 
 distclean: clean
 	-$(quiet-@)test -f build.ninja && $(NINJA) $(NINJAFLAGS) -t clean -g || :
-	rm -f config-host.mak config-host.h*
+	rm -f config-host.mak
 	rm -f tests/tcg/config-*.mak
-	rm -f config-all-disas.mak config.status
-	rm -f tests/qemu-iotests/common.env
-	rm -f roms/seabios/config.mak roms/vgabios/config.mak
+	rm -f config.status
+	rm -f roms/seabios/config.mak
 	rm -f qemu-plugins-ld.symbols qemu-plugins-ld64.symbols
 	rm -f *-config-target.h *-config-devices.mak *-config-devices.h
 	rm -rf meson-private meson-logs meson-info compile_commands.json
@@ -245,27 +234,59 @@ distclean: clean
 	rm -f linux-headers/asm
 	rm -Rf .sdk
 
-find-src-path = find "$(SRC_PATH)/" -path "$(SRC_PATH)/meson" -prune -o \( -name "*.[chsS]" -o -name "*.[ch].inc" \)
+find-src-path = find "$(SRC_PATH)" -path "$(SRC_PATH)/meson" -prune -o \
+	-type l -prune -o \( -name "*.[chsS]" -o -name "*.[ch].inc" \)
 
 .PHONY: ctags
 ctags:
-	rm -f "$(SRC_PATH)/"tags
-	$(find-src-path) -exec ctags -f "$(SRC_PATH)/"tags --append {} +
+	$(call quiet-command, 			\
+		rm -f "$(SRC_PATH)/"tags, 	\
+		"CTAGS", "Remove old tags")
+	$(call quiet-command, \
+		$(find-src-path) -exec ctags 		\
+		-f "$(SRC_PATH)/"tags --append {} +,	\
+		"CTAGS", "Re-index $(SRC_PATH)")
+
+.PHONY: gtags
+gtags:
+	$(call quiet-command, 			\
+		rm -f "$(SRC_PATH)/"GTAGS; 	\
+		rm -f "$(SRC_PATH)/"GRTAGS; 	\
+		rm -f "$(SRC_PATH)/"GPATH, 	\
+		"GTAGS", "Remove old $@ files")
+	$(call quiet-command, 				\
+	        (cd $(SRC_PATH) && 			\
+		 $(find-src-path) -print | gtags -f -),	\
+		"GTAGS", "Re-index $(SRC_PATH)")
 
 .PHONY: TAGS
 TAGS:
-	rm -f "$(SRC_PATH)/"TAGS
-	$(find-src-path) -exec etags -f "$(SRC_PATH)/"TAGS --append {} +
+	$(call quiet-command, 			\
+		rm -f "$(SRC_PATH)/"TAGS,	\
+		"TAGS", "Remove old $@")
+	$(call quiet-command, 				\
+		$(find-src-path) -exec etags 		\
+		-f "$(SRC_PATH)/"TAGS --append {} +, 	\
+		"TAGS", "Re-index $(SRC_PATH)")
 
 .PHONY: cscope
 cscope:
-	rm -f "$(SRC_PATH)"/cscope.*
-	$(find-src-path) -print | sed -e 's,^\./,,' > "$(SRC_PATH)/cscope.files"
-	cscope -b -i"$(SRC_PATH)/cscope.files" -f"$(SRC_PATH)"/cscope.out
+	$(call quiet-command,			\
+		rm -f "$(SRC_PATH)/"cscope.* ,	\
+		"cscope", "Remove old $@ files")
+	$(call quiet-command, 					\
+		($(find-src-path) -print | sed -e 's,^\./,,'    \
+		> "$(SRC_PATH)/cscope.files"), 			\
+		"cscope", "Create file list")
+	$(call quiet-command, 				\
+		cscope -b -i"$(SRC_PATH)/cscope.files" 	\
+		-f"$(SRC_PATH)"/cscope.out, 		\
+		"cscope", "Re-index $(SRC_PATH)")
 
 # Needed by "meson install"
 export DESTDIR
 
+include $(SRC_PATH)/tests/lcitool/Makefile.include
 include $(SRC_PATH)/tests/docker/Makefile.include
 include $(SRC_PATH)/tests/vm/Makefile.include
 
@@ -278,7 +299,7 @@ help:
 	$(call print-help,all,Build all)
 	$(call print-help,dir/file.o,Build specified target only)
 	$(call print-help,install,Install QEMU, documentation and tools)
-	$(call print-help,ctags/TAGS,Generate tags file for editors)
+	$(call print-help,ctags/gtags/TAGS,Generate tags file for editors)
 	$(call print-help,cscope,Generate cscope index)
 	$(call print-help,sparse,Run sparse on the QEMU source)
 	@echo  ''
@@ -295,7 +316,8 @@ endif
 	@echo  'Test targets:'
 	$(call print-help,check,Run all tests (check-help for details))
 	$(call print-help,bench,Run all benchmarks)
-	$(call print-help,docker,Help about targets running tests inside containers)
+	$(call print-help,lcitool-help,Help about targets for managing build environment manifests)
+	$(call print-help,docker-help,Help about targets running tests inside containers)
 	$(call print-help,vm-help,Help about targets running tests inside VM)
 	@echo  ''
 	@echo  'Documentation targets:'
@@ -304,9 +326,7 @@ endif
 ifdef CONFIG_WIN32
 	@echo  'Windows targets:'
 	$(call print-help,installer,Build NSIS-based installer for QEMU)
-ifdef CONFIG_QGA_MSI
 	$(call print-help,msi,Build MSI-based installer for qemu-ga)
-endif
 	@echo  ''
 endif
 	$(call print-help,$(MAKE) [targets],(quiet build, default))

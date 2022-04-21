@@ -1,0 +1,19 @@
+---
+packages:
+  - cyrus-sasl
+  - ccache
+  - gcc
+  - gdk-pixbuf
+  - gettext
+  - glib2
+  - gnutls
+  - gobject-introspection
+  - gtk3
+  - intltool
+  - libgcrypt
+  - pkg-config
+  - python3
+  - meson
+  - ninja
+  - pulseaudio
+  - vala

@@ -1,0 +1,11 @@
+---
+packages:
+  - autoconf
+  - automake
+  - ccache
+  - gcc
+  - make
+  - net-snmp
+  - perl-Net-SNMP
+  - pkg-config
+  - rpmbuild

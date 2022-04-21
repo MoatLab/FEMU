@@ -18,13 +18,11 @@
  */
 
 #include "qemu/osdep.h"
-#include "exec/address-spaces.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
 #include "qemu/module.h"
 #include "qemu/units.h"
 #include "hw/qdev-core.h"
-#include "cpu.h"
 #include "hw/sysbus.h"
 #include "hw/char/serial.h"
 #include "hw/misc/unimp.h"
@@ -237,11 +235,10 @@ static void allwinner_h3_realize(DeviceState *dev, Error **errp)
     /* CPUs */
     for (i = 0; i < AW_H3_NUM_CPUS; i++) {
 
-        /* Provide Power State Coordination Interface */
-        qdev_prop_set_int32(DEVICE(&s->cpus[i]), "psci-conduit",
-                            QEMU_PSCI_CONDUIT_HVC);
-
-        /* Disable secondary CPUs */
+        /*
+         * Disable secondary CPUs. Guest EL3 firmware will start
+         * them via CPU reset control registers.
+         */
         qdev_prop_set_bit(DEVICE(&s->cpus[i]), "start-powered-off",
                           i > 0);
 

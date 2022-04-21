@@ -1,0 +1,16 @@
+---
+packages:
+  - ccache
+  - gcc
+  - perl
+  - perl-Archive-Tar
+  - perl-CPAN-Changes
+  - perl-Module-Build
+  - perl-Sys-Hostname
+  - perl-Test-Pod
+  - perl-Test-Pod-Coverage
+  - perl-Time-HiRes
+  - perl-XML-XPath
+  - perl-generators
+  - pkg-config
+  - rpmbuild

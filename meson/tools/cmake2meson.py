@@ -34,7 +34,7 @@ class Statement:
         self.args = args
 
 class Lexer:
-    def __init__(self):
+    def __init__(self) -> None:
         self.token_specification = [
             # Need to be sorted longest to shortest.
             ('ignore', re.compile(r'[ \t]')),
@@ -81,17 +81,17 @@ class Lexer:
                     elif tid == 'varexp':
                         yield(Token('varexp', match_text[2:-1]))
                     else:
-                        raise ValueError('lex: unknown element {}'.format(tid))
+                        raise ValueError(f'lex: unknown element {tid}')
                     break
             if not matched:
                 raise ValueError('Lexer got confused line %d column %d' % (lineno, col))
 
 class Parser:
-    def __init__(self, code: str):
+    def __init__(self, code: str) -> None:
         self.stream = Lexer().lex(code)
         self.getsym()
 
-    def getsym(self):
+    def getsym(self) -> None:
         try:
             self.current = next(self.stream)
         except StopIteration:
@@ -106,7 +106,7 @@ class Parser:
     def expect(self, s: str) -> bool:
         if self.accept(s):
             return True
-        raise ValueError('Expecting %s got %s.' % (s, self.current.tid), self.current.lineno, self.current.colno)
+        raise ValueError(f'Expecting {s} got {self.current.tid}.', self.current.lineno, self.current.colno)
 
     def statement(self) -> Statement:
         cur = self.current
@@ -118,8 +118,8 @@ class Parser:
         self.expect('rparen')
         return Statement(cur.value, args)
 
-    def arguments(self) -> list:
-        args = []
+    def arguments(self) -> T.List[T.Union[Token, T.Any]]:
+        args = []  # type: T.List[T.Union[Token, T.Any]]
         if self.accept('lparen'):
             args.append(self.arguments())
             self.expect('rparen')
@@ -139,7 +139,7 @@ class Parser:
         while not self.accept('eof'):
             yield(self.statement())
 
-def token_or_group(arg):
+def token_or_group(arg: T.Union[Token, T.List[Token]]) -> str:
     if isinstance(arg, Token):
         return ' ' + arg.value
     elif isinstance(arg, list):
@@ -148,6 +148,7 @@ def token_or_group(arg):
             line += ' ' + token_or_group(a)
         line += ' )'
         return line
+    raise RuntimeError('Conversion error in token_or_group')
 
 class Converter:
     ignored_funcs = {'cmake_minimum_required': True,
@@ -176,14 +177,14 @@ class Converter:
             elif i.tid == 'string':
                 res.append("'%s'" % i.value)
             else:
-                raise ValueError('Unknown arg type {}'.format(i.tid))
+                raise ValueError(f'Unknown arg type {i.tid}')
         if len(res) > 1:
             return start + ', '.join(res) + end
         if len(res) == 1:
             return res[0]
         return ''
 
-    def write_entry(self, outfile: T.TextIO, t: Statement):
+    def write_entry(self, outfile: T.TextIO, t: Statement) -> None:
         if t.name in Converter.ignored_funcs:
             return
         preincrement = 0
@@ -196,15 +197,15 @@ class Converter:
             varname = t.args[0].value.lower()
             mods = ["dependency('%s')" % i.value for i in t.args[1:]]
             if len(mods) == 1:
-                line = '%s = %s' % (varname, mods[0])
+                line = '{} = {}'.format(varname, mods[0])
             else:
-                line = '%s = [%s]' % (varname, ', '.join(["'%s'" % i for i in mods]))
+                line = '{} = [{}]'.format(varname, ', '.join(["'%s'" % i for i in mods]))
         elif t.name == 'find_package':
-            line = "%s_dep = dependency('%s')" % (t.args[0].value, t.args[0].value)
+            line = "{}_dep = dependency('{}')".format(t.args[0].value, t.args[0].value)
         elif t.name == 'find_library':
-            line = "%s = find_library('%s')" % (t.args[0].value.lower(), t.args[0].value)
+            line = "{} = find_library('{}')".format(t.args[0].value.lower(), t.args[0].value)
         elif t.name == 'add_executable':
-            line = '%s_exe = executable(%s)' % (t.args[0].value, self.convert_args(t.args, False))
+            line = '{}_exe = executable({})'.format(t.args[0].value, self.convert_args(t.args, False))
         elif t.name == 'add_library':
             if t.args[1].value == 'SHARED':
                 libcmd = 'shared_library'
@@ -215,7 +216,7 @@ class Converter:
             else:
                 libcmd = 'library'
                 args = t.args
-            line = '%s_lib = %s(%s)' % (t.args[0].value, libcmd, self.convert_args(args, False))
+            line = '{}_lib = {}({})'.format(t.args[0].value, libcmd, self.convert_args(args, False))
         elif t.name == 'add_test':
             line = 'test(%s)' % self.convert_args(t.args, False)
         elif t.name == 'option':
@@ -239,7 +240,7 @@ class Converter:
             line = 'project(' + ', '.join(args) + ", default_options : ['default_library=static'])"
         elif t.name == 'set':
             varname = t.args[0].value.lower()
-            line = '%s = %s\n' % (varname, self.convert_args(t.args[1:]))
+            line = '{} = {}\n'.format(varname, self.convert_args(t.args[1:]))
         elif t.name == 'if':
             postincrement = 1
             try:
@@ -265,7 +266,7 @@ class Converter:
             preincrement = -1
             line = 'endif'
         else:
-            line = '''# %s(%s)''' % (t.name, self.convert_args(t.args))
+            line = '''# {}({})'''.format(t.name, self.convert_args(t.args))
         self.indent_level += preincrement
         indent = self.indent_level * self.indent_unit
         outfile.write(indent)
@@ -274,18 +275,18 @@ class Converter:
             outfile.write('\n')
         self.indent_level += postincrement
 
-    def convert(self, subdir: Path = None):
+    def convert(self, subdir: Path = None) -> None:
         if not subdir:
             subdir = self.cmake_root
         cfile = Path(subdir).expanduser() / 'CMakeLists.txt'
         try:
-            with cfile.open() as f:
+            with cfile.open(encoding='utf-8') as f:
                 cmakecode = f.read()
         except FileNotFoundError:
             print('\nWarning: No CMakeLists.txt in', subdir, '\n', file=sys.stderr)
             return
         p = Parser(cmakecode)
-        with (subdir / 'meson.build').open('w') as outfile:
+        with (subdir / 'meson.build').open('w', encoding='utf-8') as outfile:
             for t in p.parse():
                 if t.name == 'add_subdirectory':
                     # print('\nRecursing to subdir',
@@ -297,9 +298,9 @@ class Converter:
         if subdir == self.cmake_root and len(self.options) > 0:
             self.write_options()
 
-    def write_options(self):
+    def write_options(self) -> None:
         filename = self.cmake_root / 'meson_options.txt'
-        with filename.open('w') as optfile:
+        with filename.open('w', encoding='utf-8') as optfile:
             for o in self.options:
                 (optname, description, default) = o
                 if default is None:
@@ -315,7 +316,7 @@ class Converter:
                     else:
                         typestr = ' type : \'string\','
                     defaultstr = ' value : %s,' % default
-                line = "option(%r,%s%s description : '%s')\n" % (optname,
+                line = "option({!r},{}{} description : '{}')\n".format(optname,
                                                                  typestr,
                                                                  defaultstr,
                                                                  description)

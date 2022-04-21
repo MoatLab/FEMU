@@ -1,0 +1,208 @@
+/******************************************************************************
+ * Copyright (c) 2015-2020 IBM Corporation
+ * All rights reserved.
+ * This program and the accompanying materials
+ * are made available under the terms of the BSD License
+ * which accompanies this distribution, and is available at
+ * http://www.opensource.org/licenses/bsd-license.php
+ *
+ * Contributors:
+ *     IBM Corporation - initial implementation
+ *****************************************************************************/
+/*
+ * libtpm bindings for SLOF - implementation
+ */
+
+#include <tcgbios.h>
+#include <stdbool.h>
+
+/************************************************/
+/* Startup TPM code                             */
+/* SLOF:   tpm-start  ( -- errcode )            */
+/* LIBTPM: tpm_start(void)                      */
+/************************************************/
+PRIM(tpm_X2d_start)
+	PUSH;
+	TOS.n = tpm_start();
+MIRP
+
+/************************************************/
+/* Shutdown TPM layer before OS takes over      */
+/* SLOF:   tpm-finalize  ( -- )                 */
+/* LIBTPM: tpm_finalize(void)                   */
+/************************************************/
+PRIM(tpm_X2d_finalize)
+	tpm_finalize();
+MIRP
+
+/***************************************************************/
+/* Prepare TPM state for bootloader                            */
+/* SLOF:   tpm-leave-firwmare  ( -- errcode )                  */
+/* LIBTPM: tpm_leave_firmware(void)                            */
+/***************************************************************/
+PRIM(tpm_X2d_leave_X2d_firmware)
+	PUSH;
+	TOS.n = tpm_leave_firmware();
+MIRP
+
+/*************************************************************/
+/* Convey log address and size                               */
+/* SLOF:   tpm-set-log-parameters  ( addr size -- )          */
+/* LIBTPM: tpm_set_log_parameters(void *addr, uint64_t size) */
+/*************************************************************/
+PRIM(tpm_X2d_set_X2d_log_X2d_parameters)
+	int size = TOS.u; POP;
+	void *addr = TOS.a; POP;
+	tpm_set_log_parameters(addr, size);
+MIRP
+
+/*********************************************************/
+/* Firmware API                                          */
+/* SLOF:   tpm-driver-get_failure-reason ( -- errcode)   */
+/* LIBTPM: errcode = tpm_driver_get_failure_reason(void) */
+/*********************************************************/
+PRIM(tpm_X2d_driver_X2d_get_X2d_failure_X2d_reason)
+	PUSH;
+	TOS.n = tpm_driver_get_failure_reason();
+MIRP
+
+/********************************************************/
+/* Firmware API                                         */
+/* SLOF:   tpm-driver-set-failure_reason ( errcode -- ) */
+/* LIBTPM: tpm_driver_set_failure_reason(errcode)       */
+/********************************************************/
+PRIM(tpm_X2d_driver_X2d_set_X2d_failure_X2d_reason)
+	int errcode = TOS.u; POP;
+	tpm_driver_set_failure_reason(errcode);
+MIRP
+
+/************************************************/
+/* Get the size of the log                      */
+/* SLOF:   tpm-get-logsize         ( -- size )  */
+/* LIBTPM: logsize = tpm_get_logsize(void)      */
+/************************************************/
+PRIM(tpm_X2d_get_X2d_logsize)
+	PUSH;
+	TOS.n = tpm_get_logsize();
+MIRP
+
+/**********************************************************************/
+/* Measure and log event separators                                   */
+/* SLOF:   tpm-add-event-separators  ( start-pcr end-pcr -- errcode)  */
+/* LIBTPM: errcode = tpm_add_event_separators(start_pcr, end_pcr)     */
+/**********************************************************************/
+PRIM(tpm_X2d_add_X2d_event_X2d_separators)
+	int end_pcr = TOS.u; POP;
+	int start_pcr = TOS.u;
+	TOS.n = tpm_add_event_separators(start_pcr, end_pcr);
+MIRP
+
+/*************************************************************************/
+/* Measure and log boot connect vector (bcv) device's master boot record */
+/* SLOF:   tpm-measure-bcv-mbr  ( bootdrv addr length -- errcode )       */
+/* LIBTPM: errcode = tpm_measure_bcv_mbr(bbotdrv, addr, length)          */
+/*************************************************************************/
+PRIM(tpm_X2d_measure_X2d_bcv_X2d_mbr)
+	int length = TOS.u; POP;
+	void *addr = TOS.a; POP;
+	int bootdrv = TOS.u;
+	TOS.n = tpm_measure_bcv_mbr(bootdrv, addr, length);
+MIRP
+
+/************************************************/
+/* Check whether the TPM is working             */
+/* SLOF:   tpm-is-working  ( -- true | false )  */
+/* LIBTPM: bool = tpm_is_working()              */
+/************************************************/
+PRIM(tpm_X2d_is_X2d_working)
+	PUSH;
+	TOS.n = tpm_is_working();
+MIRP
+
+/************************************************/
+/* Have the S-CRTM measured                     */
+/* SLOF:   tpm-measure-scrtm  ( -- errcode )    */
+/* LIBTPM: errcode = tpm_measure_scrtm          */
+/************************************************/
+PRIM(tpm_X2d_measure_X2d_scrtm)
+	PUSH;
+	TOS.n = tpm_measure_scrtm();
+MIRP
+
+/*******************************************************************/
+/* Firmware API                                                    */
+/* SLOF:   tpm20-menu ( -- tpm-version )                           */
+/* LIBTPM: tpm20_menu()                                            */
+/*******************************************************************/
+PRIM(tpm20_X2d_menu)
+	tpm20_menu();
+MIRP
+
+/*************************************************************************/
+/* Set the LBA1 of the GPT                                               */
+/* SLOF:   tpm-gpt-set-lba1 ( addr length -- )                       */
+/* LIBTPM: tpm_gpt_set_lba1(addr, length)                            */
+/*************************************************************************/
+PRIM(tpm_X2d_gpt_X2d_set_X2d_lba1)
+	int length = TOS.u; POP;
+	void *addr = TOS.a; POP;
+	tpm_gpt_set_lba1(addr, length);
+MIRP
+
+/*************************************************************************/
+/* Add a GPT table entry                                                 */
+/* SLOF:   tpm-gpt-add-entry  ( addr length -- )                         */
+/* LIBTPM: tpm_gpt_add_entry(addr, length)                               */
+/*************************************************************************/
+PRIM(tpm_X2d_gpt_X2d_add_X2d_entry)
+	int length = TOS.u; POP;
+	void *addr = TOS.a; POP;
+	tpm_gpt_add_entry(addr, length);
+MIRP
+
+/*************************************************************************/
+/* Measure and log GPT EVENT                                             */
+/* SLOF:   tpm-measure-gpt  ( -- errcode )                               */
+/* LIBTPM: errcode = tpm_measure_gpt()                                   */
+/*************************************************************************/
+PRIM(tpm_X2d_measure_X2d_gpt)
+	PUSH;
+	TOS.n = tpm_measure_gpt();
+MIRP
+
+/***********************************************************************************************************/
+/* Firmware API                                                                                            */
+/* SLOF:   tpm-hash-log-extend-event-buffer ( pcr evt data-ptr data-len desc-ptr desclen is_elf -- errcode ) */
+/* LIBTPM: errcode = tpm-hash-log-extend-event-buffer                                                        */
+/***********************************************************************************************************/
+PRIM(tpm_X2d_hash_X2d_log_X2d_extend_X2d_event_X2d_buffer)
+	uint32_t is_elf  = TOS.u; POP;
+	uint32_t desclen = TOS.u; POP;
+	const char *desc = TOS.a; POP;
+	uint64_t datalen = TOS.u; POP;
+	const void *data = TOS.a; POP;
+	uint32_t eventtype = TOS.u; POP;
+	uint32_t pcrindex = TOS.u;
+
+	TOS.n = tpm_hash_log_extend_event_buffer(pcrindex, eventtype,
+					         data, datalen,
+					         desc, desclen, is_elf);
+MIRP
+
+/****************************************************************************************/
+/* Firmware API                                                                         */
+/* SLOF:   tpm-2hash-ext-log ( pcr event-type info info-len data data-len -- success? ) */
+/* LIBTPM: success = tpm-2hash-ext-log                                                  */
+/****************************************************************************************/
+PRIM(tpm_X2d_2hash_X2d_ext_X2d_log)
+	uint32_t datalen = TOS.u; POP;
+	const void *data = TOS.a; POP;
+	uint64_t infolen = TOS.u; POP;
+	const char *info = TOS.a; POP;
+	uint32_t eventtype = TOS.u; POP;
+	uint32_t pcrindex = TOS.u;
+
+	TOS.u = tpm_2hash_ext_log(pcrindex, eventtype,
+				  info, infolen,
+				  data, datalen);
+MIRP

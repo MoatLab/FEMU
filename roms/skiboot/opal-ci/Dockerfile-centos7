@@ -1,0 +1,13 @@
+FROM centos:7
+RUN yum -y update && yum clean all
+RUN yum -y install wget curl xterm gcc git xz make diffutils findutils expect valgrind valgrind-devel ccache dtc openssl-devel openssl mbedtls-devel
+RUN mkdir /opt/cross
+RUN if [ `arch` = "x86_64" ]; then wget https://mirrors.edge.kernel.org/pub/tools/crosstool/files/bin/x86_64/8.1.0/x86_64-gcc-8.1.0-nolibc-powerpc64-linux.tar.xz; tar -C /opt/cross -xf x86_64-gcc-8.1.0-nolibc-powerpc64-linux.tar.xz; fi
+RUN if [ `arch` = "ppc64le" ]; then wget https://mirrors.edge.kernel.org/pub/tools/crosstool/files/bin/ppc64le/8.1.0/ppc64le-gcc-8.1.0-nolibc-powerpc64-linux.tar.xz; tar -C /opt/cross -xf ppc64le-gcc-8.1.0-nolibc-powerpc64-linux.tar.xz; fi
+RUN if [ `arch` = "x86_64" ]; then curl -L -O http://public.dhe.ibm.com/software/server/powerfuncsim/p8/packages/v1.0-2/systemsim-p8-1.0-2.el7.x86_64.rpm; yum install -y systemsim-p8-1.0-2.el7.x86_64.rpm; fi
+RUN if [ `arch` = "x86_64" ]; then curl -L -O http://public.dhe.ibm.com/software/server/powerfuncsim/p9/packages/v1.0-0/systemsim-p9-1.0-0.el7.x86_64.rpm; yum install -y systemsim-p9-1.0-0.el7.x86_64.rpm; fi
+RUN yum install -y flex bison
+RUN curl -L https://github.com/dgibson/dtc/archive/v1.4.2.tar.gz|tar xfz -
+RUN (cd dtc-1.4.2; make PREFIX=/usr/local install)
+COPY . /build/
+WORKDIR /build

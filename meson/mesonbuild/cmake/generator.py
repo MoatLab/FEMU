@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from .. import mesonlib
+import typing as T
 
 def parse_generator_expressions(raw: str) -> str:
     '''Parse CMake generator expressions
@@ -21,6 +22,10 @@ def parse_generator_expressions(raw: str) -> str:
     simplicety, however some are required for some common
     use cases.
     '''
+
+    # Early abort if no generator expression present
+    if '$<' not in raw:
+        return raw
 
     out = ''  # type: str
     i = 0     # type: int
@@ -73,7 +78,7 @@ def parse_generator_expressions(raw: str) -> str:
         'ANGLE-R': lambda x: '>',
         'COMMA': lambda x: ',',
         'SEMICOLON': lambda x: ';',
-    }
+    }  # type: T.Dict[str, T.Callable[[str], str]]
 
     # Recursively evaluate generator expressions
     def eval_generator_expressions() -> str:

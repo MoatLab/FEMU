@@ -279,3 +279,37 @@ truncated_memrsv_rsvmap:
 truncated_memrsv_rsvmap_end:
 
 truncated_memrsv_end:
+
+
+        /* two root nodes */
+        TREE_HDR(two_roots)
+	EMPTY_RSVMAP(two_roots)
+
+two_roots_struct:
+	BEGIN_NODE("")
+	END_NODE
+	BEGIN_NODE("")
+	END_NODE
+	FDTLONG(FDT_END)
+two_roots_struct_end:
+
+two_roots_strings:
+two_roots_strings_end:
+
+two_roots_end:
+
+
+        /* root node with a non-empty name */
+        TREE_HDR(named_root)
+	EMPTY_RSVMAP(named_root)
+
+named_root_struct:
+	BEGIN_NODE("fake")
+	END_NODE
+	FDTLONG(FDT_END)
+named_root_struct_end:
+
+named_root_strings:
+named_root_strings_end:
+
+named_root_end:

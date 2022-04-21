@@ -22,20 +22,18 @@
  * THE SOFTWARE.
  */
 /*
-   Shix 2.0 board by Alexis Polti, described at
-   https://web.archive.org/web/20070917001736/perso.enst.fr/~polti/realisations/shix20
-
-   More information in target/sh4/README.sh4
-*/
+ * Shix 2.0 board by Alexis Polti, described at
+ * https://web.archive.org/web/20070917001736/perso.enst.fr/~polti/realisations/shix20
+ *
+ * More information in target/sh4/README.sh4
+ */
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "cpu.h"
 #include "hw/sh4/sh.h"
-#include "sysemu/sysemu.h"
 #include "sysemu/qtest.h"
 #include "hw/boards.h"
 #include "hw/loader.h"
-#include "exec/address-spaces.h"
 #include "qemu/error-report.h"
 
 #define BIOS_FILENAME "shix_bios.bin"
@@ -49,7 +47,8 @@ static void shix_init(MachineState *machine)
     MemoryRegion *sysmem = get_system_memory();
     MemoryRegion *rom = g_new(MemoryRegion, 1);
     MemoryRegion *sdram = g_new(MemoryRegion, 2);
-    
+    const char *bios_name = machine->firmware ?: BIOS_FILENAME;
+
     cpu = SUPERH_CPU(cpu_create(machine->cpu_type));
 
     /* Allocate memory space */
@@ -63,8 +62,6 @@ static void shix_init(MachineState *machine)
     memory_region_add_subregion(sysmem, 0x0c000000, &sdram[1]);
 
     /* Load BIOS in 0 (and access it through P2, 0xA0000000) */
-    if (bios_name == NULL)
-        bios_name = BIOS_FILENAME;
     ret = load_image_targphys(bios_name, 0, 0x4000);
     if (ret < 0 && !qtest_enabled()) {
         error_report("Could not load SHIX bios '%s'", bios_name);

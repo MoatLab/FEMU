@@ -1,0 +1,42 @@
+# -*-Makefile-*-
+LIBSTB_TEST := libstb/test/run-stb-container
+
+HOSTCFLAGS+=-I . -I include
+
+libstb/test/print-stb-container-check: libstb/print-container libstb/test/print-stb-container-q
+
+libstb/test/print-stb-container-q: libstb/print-container
+	$(call Q, TEST , $(VALGRIND) libstb/print-container -I libstb/test/t.container |diff -u libstb/test/t.container.out -, $< t.container)
+
+.PHONY : libstb-check
+libstb-check: $(LIBSTB_TEST:%=%-check) libstb/test/print-stb-container-check
+libstb-check: $(LIBSTB_TEST_NOSTUB:%=%-check)
+
+.PHONY : libstb-coverage
+libstb-coverage: $(LIBSTB_TEST:%=%-gcov-run)
+libstb-coverage: $(LIBSTB_TEST_NOSTUB:%=%-gcov-run)
+
+check: libstb-check
+coverage: libstb-coverage
+
+$(LIBSTB_TEST:%=%-gcov-run) : %-run: %
+	$(call QTEST, TEST-COVERAGE ,$< , $<)
+
+$(LIBSTB_TEST:%=%-check) : %-check: %
+	$(call QTEST, RUN-TEST ,$(VALGRIND) $<, $<)
+
+$(LIBSTB_TEST) : core/test/stubs.o
+
+$(LIBSTB_TEST) : % : %.c
+	$(call Q, HOSTCC ,$(HOSTCC) $(HOSTCFLAGS) -O0 -g -I include -I . -I libfdt -o $@ $< core/test/stubs.o, $<)
+
+$(LIBSTB_TEST:%=%-gcov): %-gcov : %.c %
+	$(call Q, HOSTCC ,$(HOSTCC) $(HOSTCFLAGS) $(HOSTGCOVCFLAGS) -I include -I . -I libfdt -lgcov -o $@ $< core/test/stubs.o, $<)
+
+-include $(wildcard libstb/test/*.d)
+
+clean: libstb-test-clean
+
+libstb-test-clean:
+	$(RM) -f libstb/test/*.[od] $(LIBSTB_TEST) $(LIBSTB_TEST:%=%-gcov)
+	$(RM) -f libstb/test/*.gcda libstb/test/*.gcno

@@ -21,21 +21,11 @@
 #include "hw/irq.h"
 #include "hw/ppc/xive.h"
 #include "hw/ppc/xive_regs.h"
+#include "trace.h"
 
 /*
  * XIVE Thread Interrupt Management context
  */
-
-/*
- * Convert a priority number to an Interrupt Pending Buffer (IPB)
- * register, which indicates a pending interrupt at the priority
- * corresponding to the bit number
- */
-static uint8_t priority_to_ipb(uint8_t priority)
-{
-    return priority > XIVE_PRIORITY_MAX ?
-        0 : 1 << (XIVE_PRIORITY_MAX - priority);
-}
 
 /*
  * Convert an Interrupt Pending Buffer (IPB) register to a Pending
@@ -88,11 +78,15 @@ static uint64_t xive_tctx_accept(XiveTCTX *tctx, uint8_t ring)
         regs[TM_CPPR] = cppr;
 
         /* Reset the pending buffer bit */
-        regs[TM_IPB] &= ~priority_to_ipb(cppr);
+        regs[TM_IPB] &= ~xive_priority_to_ipb(cppr);
         regs[TM_PIPR] = ipb_to_pipr(regs[TM_IPB]);
 
         /* Drop Exception bit */
         regs[TM_NSR] &= ~mask;
+
+        trace_xive_tctx_accept(tctx->cs->cpu_index, ring,
+                               regs[TM_IPB], regs[TM_PIPR],
+                               regs[TM_CPPR], regs[TM_NSR]);
     }
 
     return (nsr << 8) | regs[TM_CPPR];
@@ -113,12 +107,21 @@ static void xive_tctx_notify(XiveTCTX *tctx, uint8_t ring)
         default:
             g_assert_not_reached();
         }
+        trace_xive_tctx_notify(tctx->cs->cpu_index, ring,
+                               regs[TM_IPB], regs[TM_PIPR],
+                               regs[TM_CPPR], regs[TM_NSR]);
         qemu_irq_raise(xive_tctx_output(tctx, ring));
     }
 }
 
 static void xive_tctx_set_cppr(XiveTCTX *tctx, uint8_t ring, uint8_t cppr)
 {
+    uint8_t *regs = &tctx->regs[ring];
+
+    trace_xive_tctx_set_cppr(tctx->cs->cpu_index, ring,
+                             regs[TM_IPB], regs[TM_PIPR],
+                             cppr, regs[TM_NSR]);
+
     if (cppr > XIVE_PRIORITY_MAX) {
         cppr = 0xff;
     }
@@ -136,11 +139,6 @@ void xive_tctx_ipb_update(XiveTCTX *tctx, uint8_t ring, uint8_t ipb)
     regs[TM_IPB] |= ipb;
     regs[TM_PIPR] = ipb_to_pipr(regs[TM_IPB]);
     xive_tctx_notify(tctx, ring);
-}
-
-static inline uint32_t xive_tctx_word2(uint8_t *ring)
-{
-    return *((uint32_t *) &ring[TM_WORD2]);
 }
 
 /*
@@ -339,7 +337,7 @@ static void xive_tm_set_os_cppr(XivePresenter *xptr, XiveTCTX *tctx,
 static void xive_tm_set_os_pending(XivePresenter *xptr, XiveTCTX *tctx,
                                    hwaddr offset, uint64_t value, unsigned size)
 {
-    xive_tctx_ipb_update(tctx, TM_QW1_OS, priority_to_ipb(value & 0xff));
+    xive_tctx_ipb_update(tctx, TM_QW1_OS, xive_priority_to_ipb(value & 0xff));
 }
 
 static void xive_os_cam_decode(uint32_t cam, uint8_t *nvt_blk,
@@ -508,6 +506,8 @@ void xive_tctx_tm_write(XivePresenter *xptr, XiveTCTX *tctx, hwaddr offset,
 {
     const XiveTmOp *xto;
 
+    trace_xive_tctx_tm_write(offset, size, value);
+
     /*
      * TODO: check V bit in Q[0-3]W2
      */
@@ -545,6 +545,7 @@ uint64_t xive_tctx_tm_read(XivePresenter *xptr, XiveTCTX *tctx, hwaddr offset,
                            unsigned size)
 {
     const XiveTmOp *xto;
+    uint64_t ret;
 
     /*
      * TODO: check V bit in Q[0-3]W2
@@ -560,7 +561,8 @@ uint64_t xive_tctx_tm_read(XivePresenter *xptr, XiveTCTX *tctx, hwaddr offset,
                           "@%"HWADDR_PRIx"\n", offset);
             return -1;
         }
-        return xto->read_handler(xptr, tctx, offset, size);
+        ret = xto->read_handler(xptr, tctx, offset, size);
+        goto out;
     }
 
     /*
@@ -568,13 +570,17 @@ uint64_t xive_tctx_tm_read(XivePresenter *xptr, XiveTCTX *tctx, hwaddr offset,
      */
     xto = xive_tm_find_op(offset, size, false);
     if (xto) {
-        return xto->read_handler(xptr, tctx, offset, size);
+        ret = xto->read_handler(xptr, tctx, offset, size);
+        goto out;
     }
 
     /*
      * Finish with raw access to the register values
      */
-    return xive_tm_raw_read(tctx, offset, size);
+    ret = xive_tm_raw_read(tctx, offset, size);
+out:
+    trace_xive_tctx_tm_read(offset, size, ret);
+    return ret;
 }
 
 static char *xive_tctx_ring_print(uint8_t *ring)
@@ -794,7 +800,7 @@ void xive_tctx_destroy(XiveTCTX *tctx)
  * XIVE ESB helpers
  */
 
-static uint8_t xive_esb_set(uint8_t *pq, uint8_t value)
+uint8_t xive_esb_set(uint8_t *pq, uint8_t value)
 {
     uint8_t old_pq = *pq & 0x3;
 
@@ -804,7 +810,7 @@ static uint8_t xive_esb_set(uint8_t *pq, uint8_t value)
     return old_pq;
 }
 
-static bool xive_esb_trigger(uint8_t *pq)
+bool xive_esb_trigger(uint8_t *pq)
 {
     uint8_t old_pq = *pq & 0x3;
 
@@ -824,7 +830,7 @@ static bool xive_esb_trigger(uint8_t *pq)
     }
 }
 
-static bool xive_esb_eoi(uint8_t *pq)
+bool xive_esb_eoi(uint8_t *pq)
 {
     uint8_t old_pq = *pq & 0x3;
 
@@ -869,7 +875,7 @@ static bool xive_source_lsi_trigger(XiveSource *xsrc, uint32_t srcno)
 {
     uint8_t old_pq = xive_source_esb_get(xsrc, srcno);
 
-    xsrc->status[srcno] |= XIVE_STATUS_ASSERTED;
+    xive_source_set_asserted(xsrc, srcno, true);
 
     switch (old_pq) {
     case XIVE_ESB_RESET:
@@ -881,6 +887,16 @@ static bool xive_source_lsi_trigger(XiveSource *xsrc, uint32_t srcno)
 }
 
 /*
+ * Sources can be configured with PQ offloading in which case the check
+ * on the PQ state bits of MSIs is disabled
+ */
+static bool xive_source_esb_disabled(XiveSource *xsrc, uint32_t srcno)
+{
+    return (xsrc->esb_flags & XIVE_SRC_PQ_DISABLE) &&
+        !xive_source_irq_is_lsi(xsrc, srcno);
+}
+
+/*
  * Returns whether the event notification should be forwarded.
  */
 static bool xive_source_esb_trigger(XiveSource *xsrc, uint32_t srcno)
@@ -888,6 +904,10 @@ static bool xive_source_esb_trigger(XiveSource *xsrc, uint32_t srcno)
     bool ret;
 
     assert(srcno < xsrc->nr_irqs);
+
+    if (xive_source_esb_disabled(xsrc, srcno)) {
+        return true;
+    }
 
     ret = xive_esb_trigger(&xsrc->status[srcno]);
 
@@ -909,6 +929,11 @@ static bool xive_source_esb_eoi(XiveSource *xsrc, uint32_t srcno)
 
     assert(srcno < xsrc->nr_irqs);
 
+    if (xive_source_esb_disabled(xsrc, srcno)) {
+        qemu_log_mask(LOG_GUEST_ERROR, "XIVE: invalid EOI for IRQ %d\n", srcno);
+        return false;
+    }
+
     ret = xive_esb_eoi(&xsrc->status[srcno]);
 
     /*
@@ -917,7 +942,7 @@ static bool xive_source_esb_eoi(XiveSource *xsrc, uint32_t srcno)
      * notification
      */
     if (xive_source_irq_is_lsi(xsrc, srcno) &&
-        xsrc->status[srcno] & XIVE_STATUS_ASSERTED) {
+        xive_source_is_asserted(xsrc, srcno)) {
         ret = xive_source_lsi_trigger(xsrc, srcno);
     }
 
@@ -930,9 +955,10 @@ static bool xive_source_esb_eoi(XiveSource *xsrc, uint32_t srcno)
 static void xive_source_notify(XiveSource *xsrc, int srcno)
 {
     XiveNotifierClass *xnc = XIVE_NOTIFIER_GET_CLASS(xsrc->xive);
+    bool pq_checked = !xive_source_esb_disabled(xsrc, srcno);
 
     if (xnc->notify) {
-        xnc->notify(xsrc->xive, srcno);
+        xnc->notify(xsrc->xive, srcno, pq_checked);
     }
 }
 
@@ -1005,6 +1031,8 @@ static uint64_t xive_source_esb_read(void *opaque, hwaddr addr, unsigned size)
                       offset);
     }
 
+    trace_xive_source_esb_read(addr, srcno, ret);
+
     return ret;
 }
 
@@ -1030,6 +1058,8 @@ static void xive_source_esb_write(void *opaque, hwaddr addr,
     uint32_t srcno = addr >> xsrc->esb_shift;
     bool notify = false;
 
+    trace_xive_source_esb_write(addr, srcno, value);
+
     /* In a two pages ESB MMIO setting, trigger page only triggers */
     if (xive_source_is_trigger_page(xsrc, addr)) {
         notify = xive_source_esb_trigger(xsrc, srcno);
@@ -1049,6 +1079,15 @@ static void xive_source_esb_write(void *opaque, hwaddr addr,
         }
 
         notify = xive_source_esb_eoi(xsrc, srcno);
+        break;
+
+    /*
+     * This is an internal offset used to inject triggers when the PQ
+     * state bits are not controlled locally. Such as for LSIs when
+     * under ABT mode.
+     */
+    case XIVE_ESB_INJECT ... XIVE_ESB_INJECT + 0x3FF:
+        notify = true;
         break;
 
     case XIVE_ESB_SET_PQ_00 ... XIVE_ESB_SET_PQ_00 + 0x0FF:
@@ -1094,7 +1133,7 @@ void xive_source_set_irq(void *opaque, int srcno, int val)
         if (val) {
             notify = xive_source_lsi_trigger(xsrc, srcno);
         } else {
-            xsrc->status[srcno] &= ~XIVE_STATUS_ASSERTED;
+            xive_source_set_asserted(xsrc, srcno, false);
         }
     } else {
         if (val) {
@@ -1123,7 +1162,7 @@ void xive_source_pic_print_info(XiveSource *xsrc, uint32_t offset, Monitor *mon)
                        xive_source_irq_is_lsi(xsrc, i) ? "LSI" : "MSI",
                        pq & XIVE_ESB_VAL_P ? 'P' : '-',
                        pq & XIVE_ESB_VAL_Q ? 'Q' : '-',
-                       xsrc->status[i] & XIVE_STATUS_ASSERTED ? 'A' : ' ');
+                       xive_source_is_asserted(xsrc, i) ? 'A' : ' ');
     }
 }
 
@@ -1236,8 +1275,8 @@ void xive_end_queue_pic_print_info(XiveEND *end, uint32_t width, Monitor *mon)
         uint64_t qaddr = qaddr_base + (qindex << 2);
         uint32_t qdata = -1;
 
-        if (dma_memory_read(&address_space_memory, qaddr, &qdata,
-                            sizeof(qdata))) {
+        if (dma_memory_read(&address_space_memory, qaddr,
+                            &qdata, sizeof(qdata), MEMTXATTRS_UNSPECIFIED)) {
             qemu_log_mask(LOG_GUEST_ERROR, "XIVE: failed to read EQ @0x%"
                           HWADDR_PRIx "\n", qaddr);
             return;
@@ -1268,7 +1307,7 @@ void xive_end_pic_print_info(XiveEND *end, uint32_t end_idx, Monitor *mon)
 
     pq = xive_get_field32(END_W1_ESn, end->w1);
 
-    monitor_printf(mon, "  %08x %c%c %c%c%c%c%c%c%c prio:%d nvt:%02x/%04x",
+    monitor_printf(mon, "  %08x %c%c %c%c%c%c%c%c%c%c prio:%d nvt:%02x/%04x",
                    end_idx,
                    pq & XIVE_ESB_VAL_P ? 'P' : '-',
                    pq & XIVE_ESB_VAL_Q ? 'Q' : '-',
@@ -1279,6 +1318,7 @@ void xive_end_pic_print_info(XiveEND *end, uint32_t end_idx, Monitor *mon)
                    xive_end_is_escalate(end) ? 'e' : '-',
                    xive_end_is_uncond_escalation(end)   ? 'u' : '-',
                    xive_end_is_silent_escalation(end)   ? 's' : '-',
+                   xive_end_is_firmware(end)   ? 'f' : '-',
                    priority, nvt_blk, nvt_idx);
 
     if (qaddr_base) {
@@ -1300,7 +1340,8 @@ static void xive_end_enqueue(XiveEND *end, uint32_t data)
     uint32_t qdata = cpu_to_be32((qgen << 31) | (data & 0x7fffffff));
     uint32_t qentries = 1 << (qsize + 10);
 
-    if (dma_memory_write(&address_space_memory, qaddr, &qdata, sizeof(qdata))) {
+    if (dma_memory_write(&address_space_memory, qaddr,
+                         &qdata, sizeof(qdata), MEMTXATTRS_UNSPECIFIED)) {
         qemu_log_mask(LOG_GUEST_ERROR, "XIVE: failed to write END data @0x%"
                       HWADDR_PRIx "\n", qaddr);
         return;
@@ -1347,6 +1388,24 @@ int xive_router_get_eas(XiveRouter *xrtr, uint8_t eas_blk, uint32_t eas_idx,
     XiveRouterClass *xrc = XIVE_ROUTER_GET_CLASS(xrtr);
 
     return xrc->get_eas(xrtr, eas_blk, eas_idx, eas);
+}
+
+static
+int xive_router_get_pq(XiveRouter *xrtr, uint8_t eas_blk, uint32_t eas_idx,
+                       uint8_t *pq)
+{
+    XiveRouterClass *xrc = XIVE_ROUTER_GET_CLASS(xrtr);
+
+    return xrc->get_pq(xrtr, eas_blk, eas_idx, pq);
+}
+
+static
+int xive_router_set_pq(XiveRouter *xrtr, uint8_t eas_blk, uint32_t eas_idx,
+                       uint8_t *pq)
+{
+    XiveRouterClass *xrc = XIVE_ROUTER_GET_CLASS(xrtr);
+
+    return xrc->set_pq(xrtr, eas_blk, eas_idx, pq);
 }
 
 int xive_router_get_end(XiveRouter *xrtr, uint8_t end_blk, uint32_t end_idx,
@@ -1487,10 +1546,10 @@ int xive_presenter_tctx_match(XivePresenter *xptr, XiveTCTX *tctx,
  *
  * The parameters represent what is sent on the PowerBus
  */
-static bool xive_presenter_notify(XiveFabric *xfb, uint8_t format,
-                                  uint8_t nvt_blk, uint32_t nvt_idx,
-                                  bool cam_ignore, uint8_t priority,
-                                  uint32_t logic_serv)
+bool xive_presenter_notify(XiveFabric *xfb, uint8_t format,
+                           uint8_t nvt_blk, uint32_t nvt_idx,
+                           bool cam_ignore, uint8_t priority,
+                           uint32_t logic_serv)
 {
     XiveFabricClass *xfc = XIVE_FABRIC_GET_CLASS(xfb);
     XiveTCTXMatch match = { .tctx = NULL, .ring = 0 };
@@ -1507,7 +1566,9 @@ static bool xive_presenter_notify(XiveFabric *xfb, uint8_t format,
 
     /* handle CPU exception delivery */
     if (count) {
-        xive_tctx_ipb_update(match.tctx, match.ring, priority_to_ipb(priority));
+        trace_xive_presenter_notify(nvt_blk, nvt_idx, match.ring);
+        xive_tctx_ipb_update(match.tctx, match.ring,
+                             xive_priority_to_ipb(priority));
     }
 
     return !!count;
@@ -1558,6 +1619,7 @@ static void xive_router_end_notify(XiveRouter *xrtr, uint8_t end_blk,
     }
 
     if (!xive_end_is_valid(&end)) {
+        trace_xive_router_end_notify(end_blk, end_idx, end_data);
         qemu_log_mask(LOG_GUEST_ERROR, "XIVE: END %x/%x is invalid\n",
                       end_blk, end_idx);
         return;
@@ -1653,7 +1715,8 @@ static void xive_router_end_notify(XiveRouter *xrtr, uint8_t end_blk,
          * use. The presenter will resend the interrupt when the vCPU
          * is dispatched again on a HW thread.
          */
-        ipb = xive_get_field32(NVT_W4_IPB, nvt.w4) | priority_to_ipb(priority);
+        ipb = xive_get_field32(NVT_W4_IPB, nvt.w4) |
+            xive_priority_to_ipb(priority);
         nvt.w4 = xive_set_field32(NVT_W4_IPB, nvt.w4, ipb);
         xive_router_write_nvt(xrtr, nvt_blk, nvt_idx, &nvt, 4);
 
@@ -1683,6 +1746,10 @@ do_escalation:
         }
     }
 
+    trace_xive_router_end_escalate(end_blk, end_idx,
+           (uint8_t) xive_get_field32(END_W4_ESC_END_BLOCK, end.w4),
+           (uint32_t) xive_get_field32(END_W4_ESC_END_INDEX, end.w4),
+           (uint32_t) xive_get_field32(END_W5_ESC_END_DATA,  end.w5));
     /*
      * The END trigger becomes an Escalation trigger
      */
@@ -1692,7 +1759,7 @@ do_escalation:
                            xive_get_field32(END_W5_ESC_END_DATA,  end.w5));
 }
 
-void xive_router_notify(XiveNotifier *xn, uint32_t lisn)
+void xive_router_notify(XiveNotifier *xn, uint32_t lisn, bool pq_checked)
 {
     XiveRouter *xrtr = XIVE_ROUTER(xn);
     uint8_t eas_blk = XIVE_EAS_BLOCK(lisn);
@@ -1705,11 +1772,27 @@ void xive_router_notify(XiveNotifier *xn, uint32_t lisn)
         return;
     }
 
-    /*
-     * The IVRE checks the State Bit Cache at this point. We skip the
-     * SBC lookup because the state bits of the sources are modeled
-     * internally in QEMU.
-     */
+    if (!pq_checked) {
+        bool notify;
+        uint8_t pq;
+
+        /* PQ cache lookup */
+        if (xive_router_get_pq(xrtr, eas_blk, eas_idx, &pq)) {
+            /* Set FIR */
+            g_assert_not_reached();
+        }
+
+        notify = xive_esb_trigger(&pq);
+
+        if (xive_router_set_pq(xrtr, eas_blk, eas_idx, &pq)) {
+            /* Set FIR */
+            g_assert_not_reached();
+        }
+
+        if (!notify) {
+            return;
+        }
+    }
 
     if (!xive_eas_is_valid(&eas)) {
         qemu_log_mask(LOG_GUEST_ERROR, "XIVE: invalid LISN %x\n", lisn);
@@ -1795,6 +1878,8 @@ static uint64_t xive_end_source_read(void *opaque, hwaddr addr, unsigned size)
      */
     end_blk = xive_router_get_block_id(xsrc->xrtr);
     end_idx = addr >> (xsrc->esb_shift + 1);
+
+    trace_xive_end_source_read(end_blk, end_idx, addr);
 
     if (xive_router_get_end(xsrc->xrtr, end_blk, end_idx, &end)) {
         qemu_log_mask(LOG_GUEST_ERROR, "XIVE: No END %x/%x\n", end_blk,

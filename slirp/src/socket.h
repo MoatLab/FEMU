@@ -7,15 +7,24 @@
 #define SLIRP_SOCKET_H
 
 #include "misc.h"
+#include "sbuf.h"
 
 #define SO_EXPIRE 240000
 #define SO_EXPIREFAST 10000
+
+/* Helps unify some in/in6 routines. */
+union in4or6_addr {
+    struct in_addr addr4;
+    struct in6_addr addr6;
+};
+typedef union in4or6_addr in4or6_addr;
 
 /*
  * Our socket structure
  */
 
 union slirp_sockaddr {
+    struct sockaddr sa;
     struct sockaddr_storage ss;
     struct sockaddr_in sin;
     struct sockaddr_in6 sin6;
@@ -97,9 +106,10 @@ struct socket {
 #define SS_HOSTFWD 0x1000 /* Socket describes host->guest forwarding */
 #define SS_INCOMING \
     0x2000 /* Connection was initiated by a host on the internet */
+#define SS_HOSTFWD_V6ONLY 0x4000 /* Only bind on v6 addresses */
 
-static inline int sockaddr_equal(struct sockaddr_storage *a,
-                                 struct sockaddr_storage *b)
+static inline int sockaddr_equal(const struct sockaddr_storage *a,
+                                 const struct sockaddr_storage *b)
 {
     if (a->ss_family != b->ss_family) {
         return 0;
@@ -107,14 +117,14 @@ static inline int sockaddr_equal(struct sockaddr_storage *a,
 
     switch (a->ss_family) {
     case AF_INET: {
-        struct sockaddr_in *a4 = (struct sockaddr_in *)a;
-        struct sockaddr_in *b4 = (struct sockaddr_in *)b;
+        const struct sockaddr_in *a4 = (const struct sockaddr_in *)a;
+        const struct sockaddr_in *b4 = (const struct sockaddr_in *)b;
         return a4->sin_addr.s_addr == b4->sin_addr.s_addr &&
                a4->sin_port == b4->sin_port;
     }
     case AF_INET6: {
-        struct sockaddr_in6 *a6 = (struct sockaddr_in6 *)a;
-        struct sockaddr_in6 *b6 = (struct sockaddr_in6 *)b;
+        const struct sockaddr_in6 *a6 = (const struct sockaddr_in6 *)a;
+        const struct sockaddr_in6 *b6 = (const struct sockaddr_in6 *)b;
         return (in6_equal(&a6->sin6_addr, &b6->sin6_addr) &&
                 a6->sin6_port == b6->sin6_port);
     }
@@ -125,7 +135,7 @@ static inline int sockaddr_equal(struct sockaddr_storage *a,
     return 0;
 }
 
-static inline socklen_t sockaddr_size(struct sockaddr_storage *a)
+static inline socklen_t sockaddr_size(const struct sockaddr_storage *a)
 {
     switch (a->ss_family) {
     case AF_INET:
@@ -135,6 +145,14 @@ static inline socklen_t sockaddr_size(struct sockaddr_storage *a)
     default:
         g_assert_not_reached();
     }
+}
+
+static inline void sockaddr_copy(struct sockaddr *dst, socklen_t dstlen, const struct sockaddr *src, socklen_t srclen)
+{
+    socklen_t len = sockaddr_size((const struct sockaddr_storage *) src);
+    g_assert(len <= srclen);
+    g_assert(len <= dstlen);
+    memcpy(dst, src, len);
 }
 
 struct socket *solookup(struct socket **, struct socket *,
@@ -148,6 +166,10 @@ int sowrite(struct socket *);
 void sorecvfrom(struct socket *);
 int sosendto(struct socket *, struct mbuf *);
 struct socket *tcp_listen(Slirp *, uint32_t, unsigned, uint32_t, unsigned, int);
+struct socket *tcpx_listen(Slirp *slirp,
+                           const struct sockaddr *haddr, socklen_t haddrlen,
+                           const struct sockaddr *laddr, socklen_t laddrlen,
+                           int flags);
 void soisfconnecting(register struct socket *);
 void soisfconnected(register struct socket *);
 void sofwdrain(struct socket *);
@@ -159,6 +181,6 @@ int sotranslate_out(struct socket *, struct sockaddr_storage *);
 void sotranslate_in(struct socket *, struct sockaddr_storage *);
 void sotranslate_accept(struct socket *);
 void sodrop(struct socket *, int num);
-
+int soassign_guest_addr_if_needed(struct socket *so);
 
 #endif /* SLIRP_SOCKET_H */

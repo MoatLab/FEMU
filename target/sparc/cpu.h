@@ -156,7 +156,9 @@ enum {
 #define PS_IE    (1<<1)
 #define PS_AG    (1<<0) /* v9, zero on UA2007 */
 
-#define FPRS_FEF (1<<2)
+#define FPRS_DL (1 << 0)
+#define FPRS_DU (1 << 1)
+#define FPRS_FEF (1 << 2)
 
 #define HS_PRIV  (1<<2)
 #endif
@@ -418,7 +420,7 @@ struct CPUTimer
 
 typedef struct CPUTimer CPUTimer;
 
-typedef struct CPUSPARCState CPUSPARCState;
+typedef struct CPUArchState CPUSPARCState;
 #if defined(TARGET_SPARC64)
 typedef union {
    uint64_t mmuregs[16];
@@ -437,7 +439,7 @@ typedef union {
    };
 } SparcV9MMU;
 #endif
-struct CPUSPARCState {
+struct CPUArchState {
     target_ulong gregs[8]; /* general registers */
     target_ulong *regwptr; /* pointer to current register window */
     target_ulong pc;       /* program counter */
@@ -554,7 +556,7 @@ struct CPUSPARCState {
  *
  * A SPARC CPU.
  */
-struct SPARCCPU {
+struct ArchCPU {
     /*< private >*/
     CPUState parent_obj;
     /*< public >*/
@@ -569,7 +571,6 @@ extern const VMStateDescription vmstate_sparc_cpu;
 #endif
 
 void sparc_cpu_do_interrupt(CPUState *cpu);
-void sparc_cpu_dump_state(CPUState *cpu, FILE *f, int flags);
 hwaddr sparc_cpu_get_phys_page_debug(CPUState *cpu, vaddr addr);
 int sparc_cpu_gdb_read_register(CPUState *cpu, GByteArray *buf, int reg);
 int sparc_cpu_gdb_write_register(CPUState *cpu, uint8_t *buf, int reg);
@@ -606,10 +607,6 @@ target_ulong cpu_get_psr(CPUSPARCState *env1);
 void cpu_put_psr(CPUSPARCState *env1, target_ulong val);
 void cpu_put_psr_raw(CPUSPARCState *env1, target_ulong val);
 #ifdef TARGET_SPARC64
-target_ulong cpu_get_ccr(CPUSPARCState *env1);
-void cpu_put_ccr(CPUSPARCState *env1, target_ulong val);
-target_ulong cpu_get_cwp64(CPUSPARCState *env1);
-void cpu_put_cwp64(CPUSPARCState *env1, int cwp);
 void cpu_change_pstate(CPUSPARCState *env1, uint32_t new_pstate);
 void cpu_gl_switch_gregs(CPUSPARCState *env, uint32_t new_gl);
 #endif
@@ -617,14 +614,8 @@ int cpu_cwp_inc(CPUSPARCState *env1, int cwp);
 int cpu_cwp_dec(CPUSPARCState *env1, int cwp);
 void cpu_set_cwp(CPUSPARCState *env1, int new_cwp);
 
-/* int_helper.c */
-void leon3_irq_manager(CPUSPARCState *env, void *irq_manager, int intno);
-
 /* sun4m.c, sun4u.c */
 void cpu_check_irqs(CPUSPARCState *env);
-
-/* leon3.c */
-void leon3_irq_ack(void *irq_manager, int intno);
 
 #if defined (TARGET_SPARC64)
 
@@ -657,13 +648,11 @@ hwaddr cpu_get_phys_page_nofault(CPUSPARCState *env, target_ulong addr,
                                            int mmu_idx);
 #endif
 #endif
-int cpu_sparc_signal_handler(int host_signum, void *pinfo, void *puc);
 
 #define SPARC_CPU_TYPE_SUFFIX "-" TYPE_SPARC_CPU
 #define SPARC_CPU_TYPE_NAME(model) model SPARC_CPU_TYPE_SUFFIX
 #define CPU_RESOLVING_TYPE TYPE_SPARC_CPU
 
-#define cpu_signal_handler cpu_sparc_signal_handler
 #define cpu_list sparc_cpu_list
 
 /* MMU modes definitions */
@@ -754,9 +743,6 @@ static inline int cpu_pil_allowed(CPUSPARCState *env1, int pil)
 #endif
 }
 
-typedef CPUSPARCState CPUArchState;
-typedef SPARCCPU ArchCPU;
-
 #include "exec/cpu-all.h"
 
 #ifdef TARGET_SPARC64
@@ -826,5 +812,25 @@ static inline bool tb_am_enabled(int tb_flags)
     return tb_flags & TB_FLAG_AM_ENABLED;
 #endif
 }
+
+#ifdef TARGET_SPARC64
+/* win_helper.c */
+target_ulong cpu_get_ccr(CPUSPARCState *env1);
+void cpu_put_ccr(CPUSPARCState *env1, target_ulong val);
+target_ulong cpu_get_cwp64(CPUSPARCState *env1);
+void cpu_put_cwp64(CPUSPARCState *env1, int cwp);
+
+static inline uint64_t sparc64_tstate(CPUSPARCState *env)
+{
+    uint64_t tstate = (cpu_get_ccr(env) << 32) |
+        ((env->asi & 0xff) << 24) | ((env->pstate & 0xf3f) << 8) |
+        cpu_get_cwp64(env);
+
+    if (env->def.features & CPU_FEATURE_GL) {
+        tstate |= (env->gl & 7ULL) << 40;
+    }
+    return tstate;
+}
+#endif
 
 #endif

@@ -21,7 +21,7 @@ import re
 
 from .gnu import GnuLikeCompiler
 from .gnu import gnu_optimization_args
-from ...mesonlib import Popen_safe
+from ...mesonlib import Popen_safe, OptionKey
 
 if T.TYPE_CHECKING:
     from ...environment import Environment
@@ -30,12 +30,11 @@ if T.TYPE_CHECKING:
 class ElbrusCompiler(GnuLikeCompiler):
     # Elbrus compiler is nearly like GCC, but does not support
     # PCH, LTO, sanitizers and color output as of version 1.21.x.
-    def __init__(self):
+
+    def __init__(self) -> None:
         super().__init__()
         self.id = 'lcc'
-        self.base_options = ['b_pgo', 'b_coverage',
-                             'b_ndebug', 'b_staticpic',
-                             'b_lundef', 'b_asneeded']
+        self.base_options = {OptionKey(o) for o in ['b_pgo', 'b_coverage', 'b_ndebug', 'b_staticpic', 'b_lundef', 'b_asneeded']}
 
     # FIXME: use _build_wrapper to call this so that linker flags from the env
     # get applied

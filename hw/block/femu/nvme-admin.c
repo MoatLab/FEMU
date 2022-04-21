@@ -223,8 +223,8 @@ static uint16_t nvme_set_db_memory(FemuCtrl *n, const NvmeCmd *cmd)
 
     n->dbs_addr = dbs_addr;
     n->eis_addr = eis_addr;
-    n->dbs_addr_hva = (uint64_t)dma_memory_map(as, dbs_addr, &dbs_tlen, 0);
-    n->eis_addr_hva = (uint64_t)dma_memory_map(as, eis_addr, &eis_tlen, 0);
+    n->dbs_addr_hva = (uint64_t)dma_memory_map(as, dbs_addr, &dbs_tlen, 0, MEMTXATTRS_UNSPECIFIED);
+    n->eis_addr_hva = (uint64_t)dma_memory_map(as, eis_addr, &eis_tlen, 0, MEMTXATTRS_UNSPECIFIED);
 
     for (int i = 1; i <= n->num_io_queues; i++) {
         NvmeSQueue *sq = n->sq[i];

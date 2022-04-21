@@ -945,7 +945,7 @@ static void ccid_on_apdu_from_guest(USBCCIDState *s, CCID_XferBlock *recv)
         return;
     }
     len = le32_to_cpu(recv->hdr.dwLength);
-    DPRINTF(s, 1, "%s: seq %d, len %d\n", __func__,
+    DPRINTF(s, 1, "%s: seq %d, len %u\n", __func__,
                 recv->hdr.bSeq, len);
     ccid_add_pending_answer(s, (CCID_Header *)recv);
     if (s->card && len <= BULK_OUT_DATA_SIZE) {
@@ -995,13 +995,13 @@ static void ccid_handle_bulk_out(USBCCIDState *s, USBPacket *p)
     if ((s->bulk_out_pos - 10 < ccid_header->dwLength) &&
         (p->iov.size == CCID_MAX_PACKET_SIZE)) {
         DPRINTF(s, D_VERBOSE,
-                "usb-ccid: bulk_in: expecting more packets (%d/%d)\n",
+                "usb-ccid: bulk_in: expecting more packets (%u/%u)\n",
                 s->bulk_out_pos - 10, ccid_header->dwLength);
         return;
     }
     if (s->bulk_out_pos - 10 != ccid_header->dwLength) {
         DPRINTF(s, 1,
-                "usb-ccid: bulk_in: message size mismatch (got %d, expected %d)\n",
+                "usb-ccid: bulk_in: message size mismatch (got %u, expected %u)\n",
                 s->bulk_out_pos - 10, ccid_header->dwLength);
         goto err;
     }
@@ -1202,7 +1202,7 @@ void ccid_card_send_apdu_to_guest(CCIDCardState *card,
         ccid_report_error_failed(s, ERROR_HW_ERROR);
         return;
     }
-    DPRINTF(s, 1, "APDU returned to guest %d (answer seq %d, slot %d)\n",
+    DPRINTF(s, 1, "APDU returned to guest %u (answer seq %d, slot %d)\n",
         len, answer->seq, answer->slot);
     ccid_write_data_block_answer(s, apdu, len);
 }
@@ -1320,8 +1320,7 @@ static void ccid_realize(USBDevice *dev, Error **errp)
 
     usb_desc_create_serial(dev);
     usb_desc_init(dev);
-    qbus_create_inplace(&s->bus, sizeof(s->bus), TYPE_CCID_BUS, DEVICE(dev),
-                        NULL);
+    qbus_init(&s->bus, sizeof(s->bus), TYPE_CCID_BUS, DEVICE(dev), NULL);
     qbus_set_hotplug_handler(BUS(&s->bus), OBJECT(dev));
     s->intr = usb_ep_get(dev, USB_TOKEN_IN, CCID_INT_IN_EP);
     s->bulk = usb_ep_get(dev, USB_TOKEN_IN, CCID_BULK_IN_EP);
@@ -1365,7 +1364,7 @@ static int ccid_pre_save(void *opaque)
     return 0;
 }
 
-static VMStateDescription bulk_in_vmstate = {
+static const VMStateDescription bulk_in_vmstate = {
     .name = "CCID BulkIn state",
     .version_id = 1,
     .minimum_version_id = 1,
@@ -1377,7 +1376,7 @@ static VMStateDescription bulk_in_vmstate = {
     }
 };
 
-static VMStateDescription answer_vmstate = {
+static const VMStateDescription answer_vmstate = {
     .name = "CCID Answer state",
     .version_id = 1,
     .minimum_version_id = 1,
@@ -1388,7 +1387,7 @@ static VMStateDescription answer_vmstate = {
     }
 };
 
-static VMStateDescription usb_device_vmstate = {
+static const VMStateDescription usb_device_vmstate = {
     .name = "usb_device",
     .version_id = 1,
     .minimum_version_id = 1,
@@ -1400,7 +1399,7 @@ static VMStateDescription usb_device_vmstate = {
     }
 };
 
-static VMStateDescription ccid_vmstate = {
+static const VMStateDescription ccid_vmstate = {
     .name = "usb-ccid",
     .version_id = 1,
     .minimum_version_id = 1,
@@ -1492,7 +1491,6 @@ static void ccid_register_types(void)
     type_register_static(&ccid_bus_info);
     type_register_static(&ccid_card_type_info);
     type_register_static(&ccid_info);
-    usb_legacy_register(TYPE_USB_CCID_DEV, "ccid", NULL);
 }
 
 type_init(ccid_register_types)

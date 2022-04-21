@@ -15,7 +15,6 @@
 #include "hw/arm/fsl-imx6.h"
 #include "hw/boards.h"
 #include "hw/qdev-properties.h"
-#include "sysemu/sysemu.h"
 #include "qemu/error-report.h"
 #include "sysemu/qtest.h"
 
@@ -51,6 +50,10 @@ static void sabrelite_init(MachineState *machine)
 
     s = FSL_IMX6(object_new(TYPE_FSL_IMX6));
     object_property_add_child(OBJECT(machine), "soc", OBJECT(s));
+
+    /* Ethernet PHY address is 6 */
+    object_property_set_int(OBJECT(s), "fec-phy-num", 6, &error_fatal);
+
     qdev_realize(DEVICE(s), NULL, &error_fatal);
 
     memory_region_add_subregion(get_system_memory(), FSL_IMX6_MMDC_ADDR,
@@ -73,7 +76,7 @@ static void sabrelite_init(MachineState *machine)
             if (spi_bus) {
                 DeviceState *flash_dev;
                 qemu_irq cs_line;
-                DriveInfo *dinfo = drive_get_next(IF_MTD);
+                DriveInfo *dinfo = drive_get(IF_MTD, 0, 0);
 
                 flash_dev = qdev_new("sst25vf016b");
                 if (dinfo) {
@@ -84,13 +87,12 @@ static void sabrelite_init(MachineState *machine)
                 qdev_realize_and_unref(flash_dev, BUS(spi_bus), &error_fatal);
 
                 cs_line = qdev_get_gpio_in_named(flash_dev, SSI_GPIO_CS, 0);
-                sysbus_connect_irq(SYS_BUS_DEVICE(spi_dev), 1, cs_line);
+                qdev_connect_gpio_out(DEVICE(&s->gpio[2]), 19, cs_line);
             }
         }
     }
 
     sabrelite_binfo.ram_size = machine->ram_size;
-    sabrelite_binfo.nb_cpus = machine->smp.cpus;
     sabrelite_binfo.secure_boot = true;
     sabrelite_binfo.write_secondary_boot = sabrelite_write_secondary;
     sabrelite_binfo.secondary_cpu_reset_hook = sabrelite_reset_secondary;
@@ -102,7 +104,7 @@ static void sabrelite_init(MachineState *machine)
 
 static void sabrelite_machine_init(MachineClass *mc)
 {
-    mc->desc = "Freescale i.MX6 Quad SABRE Lite Board (Cortex A9)";
+    mc->desc = "Freescale i.MX6 Quad SABRE Lite Board (Cortex-A9)";
     mc->init = sabrelite_init;
     mc->max_cpus = FSL_IMX6_NUM_CPUS;
     mc->ignore_memory_transaction_failures = true;

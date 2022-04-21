@@ -65,6 +65,8 @@ struct Chardev {
     char *filename;
     int logfd;
     int be_open;
+    /* used to coordinate the chardev-change special-case: */
+    bool handover_yank_instance;
     GSource *gsource;
     GMainContext *gcontext;
     DECLARE_BITMAP(features, QEMU_CHAR_FEATURE_LAST);
@@ -251,27 +253,59 @@ struct ChardevClass {
     ObjectClass parent_class;
 
     bool internal; /* TODO: eventually use TYPE_USER_CREATABLE */
+    bool supports_yank;
+
+    /* parse command line options and populate QAPI @backend */
     void (*parse)(QemuOpts *opts, ChardevBackend *backend, Error **errp);
 
+    /* called after construction, open/starts the backend */
     void (*open)(Chardev *chr, ChardevBackend *backend,
                  bool *be_opened, Error **errp);
 
+    /* write buf to the backend */
     int (*chr_write)(Chardev *s, const uint8_t *buf, int len);
+
+    /*
+     * Read from the backend (blocking). A typical front-end will instead rely
+     * on chr_can_read/chr_read being called when polling/looping.
+     */
     int (*chr_sync_read)(Chardev *s, const uint8_t *buf, int len);
+
+    /* create a watch on the backend */
     GSource *(*chr_add_watch)(Chardev *s, GIOCondition cond);
+
+    /* update the backend internal sources */
     void (*chr_update_read_handler)(Chardev *s);
+
+    /* send an ioctl to the backend */
     int (*chr_ioctl)(Chardev *s, int cmd, void *arg);
+
+    /* get ancillary-received fds during last read */
     int (*get_msgfds)(Chardev *s, int* fds, int num);
+
+    /* set ancillary fds to be sent with next write */
     int (*set_msgfds)(Chardev *s, int *fds, int num);
+
+    /* accept the given fd */
     int (*chr_add_client)(Chardev *chr, int fd);
+
+    /* wait for a connection */
     int (*chr_wait_connected)(Chardev *chr, Error **errp);
+
+    /* disconnect a connection */
     void (*chr_disconnect)(Chardev *chr);
+
+    /* called by frontend when it can read */
     void (*chr_accept_input)(Chardev *chr);
+
+    /* set terminal echo */
     void (*chr_set_echo)(Chardev *chr, bool echo);
+
+    /* notify the backend of frontend open state */
     void (*chr_set_fe_open)(Chardev *chr, int fe_open);
+
+    /* handle various events */
     void (*chr_be_event)(Chardev *s, QEMUChrEvent event);
-    /* Return 0 if succeeded, 1 if failed */
-    int (*chr_machine_done)(Chardev *chr);
 };
 
 Chardev *qemu_chardev_new(const char *id, const char *typename,
@@ -282,6 +316,9 @@ extern int term_escape_char;
 
 GSource *qemu_chr_timeout_add_ms(Chardev *chr, guint ms,
                                  GSourceFunc func, void *private);
+
+void suspend_mux_open(void);
+void resume_mux_open(void);
 
 /* console.c */
 void qemu_chr_parse_vc(QemuOpts *opts, ChardevBackend *backend, Error **errp);

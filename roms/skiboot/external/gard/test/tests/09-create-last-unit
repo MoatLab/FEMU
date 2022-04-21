@@ -1,0 +1,16 @@
+#! /bin/sh
+
+cp test/files/blank.bin $DATA_DIR/input
+run_binary "./opal-gard" "-9 -p -e -f $DATA_DIR/input create /MFREFCLK255/MFREFCLK255/MFREFCLK255/MFREFCLK255/MFREFCLK255/MFREFCLK255/MFREFCLK255/MFREFCLK255/MFREFCLK255/MFREFCLK255"
+if [ "$?" -ne 0 ]; then
+	fail_test
+fi
+
+run_binary "./opal-gard" "-9 -p -e -f $DATA_DIR/input list"
+if [ "$?" -ne 0 ]; then
+	fail_test
+fi
+
+diff_with_result
+
+pass_test

@@ -1,0 +1,73 @@
+---
+all_machines:
+  - almalinux-8
+  - centos-stream-8
+  - centos-stream-9
+  - debian-10
+  - debian-11
+  - debian-sid
+  - fedora-34
+  - fedora-35
+  - fedora-rawhide
+  - freebsd-12
+  - freebsd-13
+  - freebsd-current
+  - opensuse-leap-152
+  - opensuse-tumbleweed
+  - ubuntu-1804
+  - ubuntu-2004
+rpm_machines:
+  - almalinux-8
+  - centos-stream-8
+  - centos-stream-9
+  - fedora-34
+  - fedora-35
+  - fedora-rawhide
+global_env: |
+  . ~/lcitool_build_env
+local_env: ''
+autogen_args: ''
+meson_args: ''
+command: ''
+command_pre_build: ''
+strip_buildrequires: |
+  sed -i -e 's/BuildRequires: *libvirt.*//' *.spec*
+  sed -i -e 's/BuildRequires: *osinfo-db.*//' *.spec*
+  sed -i -e 's/BuildRequires: *perl(Sys::Virt).*//' *.spec*
+  sed -i -e 's/BuildRequires: *pkgconfig(gtk-vnc-.*).*//' *.spec*
+  sed -i -e 's/BuildRequires: *pkgconfig(libvirt.*).*//' *.spec*
+git_urls:
+  gtk-vnc:
+    default: https://gitlab.gnome.org/GNOME/gtk-vnc.git
+  libosinfo:
+    default: https://gitlab.com/libosinfo/libosinfo.git
+  libvirt-cim:
+    default: https://gitlab.com/libvirt/libvirt-cim.git
+  libvirt-dbus:
+    default: https://gitlab.com/libvirt/libvirt-dbus.git
+  libvirt-glib:
+    default: https://gitlab.com/libvirt/libvirt-glib.git
+  libvirt-go-xml:
+    default: https://gitlab.com/libvirt/libvirt-go-xml.git
+  libvirt-go:
+    default: https://gitlab.com/libvirt/libvirt-go.git
+  libvirt-ocaml:
+    default: https://gitlab.com/libvirt/libvirt-ocaml.git
+  libvirt-perl:
+    default: https://gitlab.com/libvirt/libvirt-perl.git
+  libvirt-python:
+    default: https://gitlab.com/libvirt/libvirt-python.git
+  libvirt-sandbox:
+    default: https://gitlab.com/libvirt/libvirt-sandbox.git
+  libvirt-tck:
+    default: https://gitlab.com/libvirt/libvirt-tck.git
+  libvirt:
+    default: https://gitlab.com/libvirt/libvirt.git
+  osinfo-db-tools:
+    default: https://gitlab.com/libosinfo/osinfo-db-tools.git
+  osinfo-db:
+    default: https://gitlab.com/libosinfo/osinfo-db.git
+  virt-manager:
+    default: https://github.com/virt-manager/virt-manager.git
+  virt-viewer:
+    default: https://gitlab.com/virt-viewer/virt-viewer.git

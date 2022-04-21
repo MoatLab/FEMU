@@ -137,8 +137,8 @@ static void swim_change_cb(void *opaque, bool load, Error **errp)
         blk_set_perm(drive->blk, 0, BLK_PERM_ALL, &error_abort);
     } else {
         if (!blkconf_apply_backend_options(drive->conf,
-                                           blk_is_read_only(drive->blk), false,
-                                           errp)) {
+                                           !blk_supports_write_perm(drive->blk),
+                                           false, errp)) {
             return;
         }
     }
@@ -210,7 +210,7 @@ static void swim_drive_realize(DeviceState *qdev, Error **errp)
     dev->conf.werror = BLOCKDEV_ON_ERROR_AUTO;
 
     if (!blkconf_apply_backend_options(&dev->conf,
-                                       blk_is_read_only(dev->conf.blk),
+                                       !blk_supports_write_perm(dev->conf.blk),
                                        false, errp)) {
         return;
     }
@@ -421,8 +421,7 @@ static void sysbus_swim_realize(DeviceState *dev, Error **errp)
     Swim *sys = SWIM(dev);
     SWIMCtrl *swimctrl = &sys->ctrl;
 
-    qbus_create_inplace(&swimctrl->bus, sizeof(SWIMBus), TYPE_SWIM_BUS, dev,
-                        NULL);
+    qbus_init(&swimctrl->bus, sizeof(SWIMBus), TYPE_SWIM_BUS, dev, NULL);
     swimctrl->bus.ctrl = swimctrl;
 }
 

@@ -214,8 +214,6 @@ bool kvm_arm_create_scratch_host_vcpu(const uint32_t *cpus_to_try,
  */
 void kvm_arm_destroy_scratch_host_vcpu(int *fdarray);
 
-#define TYPE_ARM_HOST_CPU "host-" TYPE_ARM_CPU
-
 /**
  * ARMHostCPUFeatures: information about the host CPU (identified
  * by asking the host kernel)
@@ -311,10 +309,12 @@ bool kvm_arm_sve_supported(void);
 /**
  * kvm_arm_get_max_vm_ipa_size:
  * @ms: Machine state handle
+ * @fixed_ipa: True when the IPA limit is fixed at 40. This is the case
+ * for legacy KVM.
  *
  * Returns the number of bits in the IPA address space supported by KVM
  */
-int kvm_arm_get_max_vm_ipa_size(MachineState *ms);
+int kvm_arm_get_max_vm_ipa_size(MachineState *ms, bool *fixed_ipa);
 
 /**
  * kvm_arm_sync_mpstate_to_kvm:
@@ -352,7 +352,7 @@ void kvm_arm_get_virtual_time(CPUState *cs);
  */
 void kvm_arm_put_virtual_time(CPUState *cs);
 
-void kvm_arm_vm_state_change(void *opaque, int running, RunState state);
+void kvm_arm_vm_state_change(void *opaque, bool running, RunState state);
 
 int kvm_arm_vgic_probe(void);
 
@@ -409,7 +409,7 @@ static inline void kvm_arm_add_vcpu_properties(Object *obj)
     g_assert_not_reached();
 }
 
-static inline int kvm_arm_get_max_vm_ipa_size(MachineState *ms)
+static inline int kvm_arm_get_max_vm_ipa_size(MachineState *ms, bool *fixed_ipa)
 {
     g_assert_not_reached();
 }
@@ -523,8 +523,8 @@ static inline const char *its_class_name(void)
         /* KVM implementation requires this capability */
         return kvm_direct_msi_enabled() ? "arm-its-kvm" : NULL;
     } else {
-        /* Software emulation is not implemented yet */
-        return NULL;
+        /* Software emulation based model */
+        return "arm-gicv3-its";
     }
 }
 

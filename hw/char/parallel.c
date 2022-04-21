@@ -32,6 +32,7 @@
 #include "hw/irq.h"
 #include "hw/isa/isa.h"
 #include "hw/qdev-properties.h"
+#include "hw/qdev-properties-system.h"
 #include "migration/vmstate.h"
 #include "hw/char/parallel.h"
 #include "sysemu/reset.h"
@@ -552,7 +553,7 @@ static void parallel_isa_realizefn(DeviceState *dev, Error **errp)
     index++;
 
     base = isa->iobase;
-    isa_init_irq(isadev, &s->irq, isa->isairq);
+    s->irq = isa_get_irq(isadev, isa->isairq);
     qemu_register_reset(parallel_reset, s);
 
     qemu_chr_fe_set_handlers(&s->chr, parallel_can_receive, NULL,
@@ -621,7 +622,7 @@ bool parallel_mm_init(MemoryRegion *address_space,
 {
     ParallelState *s;
 
-    s = g_malloc0(sizeof(ParallelState));
+    s = g_new0(ParallelState, 1);
     s->irq = irq;
     qemu_chr_fe_init(&s->chr, chr, &error_abort);
     s->it_shift = it_shift;

@@ -1,0 +1,4 @@
+WARNING: Attempting to parse a partition line without any TOCs created.
+         Generating a default TOC at zero
+WARNING: Long partition name will get truncated to 'This_is_more_tha'
+WARNING: Long partition name will get truncated to 'This_is_one_more'

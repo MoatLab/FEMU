@@ -20,9 +20,7 @@
 #include <iphlpapi.h>
 
 #else
-#if !defined(__HAIKU__)
 #define O_BINARY 0
-#endif
 #endif
 
 #ifndef _WIN32
@@ -85,9 +83,9 @@ struct slirp_arphdr {
     /*
      *  Ethernet looks like this : This bit is variable sized however...
      */
-    unsigned char ar_sha[ETH_ALEN]; /* sender hardware address */
+    uint8_t ar_sha[ETH_ALEN]; /* sender hardware address */
     uint32_t ar_sip; /* sender IP address       */
-    unsigned char ar_tha[ETH_ALEN]; /* target hardware address */
+    uint8_t ar_tha[ETH_ALEN]; /* target hardware address */
     uint32_t ar_tip; /* target IP address       */
 } SLIRP_PACKED;
 
@@ -105,7 +103,7 @@ bool arp_table_search(Slirp *slirp, uint32_t ip_addr,
                       uint8_t out_ethaddr[ETH_ALEN]);
 
 struct ndpentry {
-    unsigned char eth_addr[ETH_ALEN]; /* sender hardware address */
+    uint8_t eth_addr[ETH_ALEN]; /* sender hardware address */
     struct in6_addr ip_addr; /* sender IP address       */
 };
 
@@ -113,6 +111,12 @@ struct ndpentry {
 
 typedef struct NdpTable {
     struct ndpentry table[NDP_TABLE_SIZE];
+    /*
+     * The table is a cache with old entries overwritten when the table fills.
+     * Preserve the first entry: it is the guest, which is needed for lazy
+     * hostfwd guest address assignment.
+     */
+    struct in6_addr guest_in6_addr;
     int next_victim;
 } NdpTable;
 
@@ -203,6 +207,7 @@ struct Slirp {
 
     struct sockaddr_in *outbound_addr;
     struct sockaddr_in6 *outbound_addr6;
+    bool disable_dns; /* slirp will not redirect/serve any DNS packet */
 };
 
 void if_start(Slirp *);

@@ -18,17 +18,20 @@ from typing import List, Optional
 from .common import (
     c_enum_const,
     c_name,
-    gen_endif,
-    gen_if,
     indent,
     mcgen,
 )
-from .gen import QAPISchemaModularCVisitor, ifcontext
+from .gen import (
+    QAPISchemaModularCVisitor,
+    gen_special_features,
+    ifcontext,
+)
 from .schema import (
     QAPISchema,
     QAPISchemaEnumMember,
     QAPISchemaEnumType,
     QAPISchemaFeature,
+    QAPISchemaIfCond,
     QAPISchemaObjectType,
     QAPISchemaObjectTypeMember,
     QAPISchemaType,
@@ -77,12 +80,22 @@ bool visit_type_%(c_name)s_members(Visitor *v, %(c_name)s *obj, Error **errp)
                      c_type=base.c_name())
 
     for memb in members:
-        ret += gen_if(memb.ifcond)
+        ret += memb.ifcond.gen_if()
         if memb.optional:
             ret += mcgen('''
     if (visit_optional(v, "%(name)s", &obj->has_%(c_name)s)) {
 ''',
                          name=memb.name, c_name=c_name(memb.name))
+            indent.increase()
+        special_features = gen_special_features(memb.features)
+        if special_features != '0':
+            ret += mcgen('''
+    if (visit_policy_reject(v, "%(name)s", %(special_features)s, errp)) {
+        return false;
+    }
+    if (!visit_policy_skip(v, "%(name)s", %(special_features)s)) {
+''',
+                         name=memb.name, special_features=special_features)
             indent.increase()
         ret += mcgen('''
     if (!visit_type_%(c_type)s(v, "%(name)s", &obj->%(c_name)s, errp)) {
@@ -91,12 +104,17 @@ bool visit_type_%(c_name)s_members(Visitor *v, %(c_name)s *obj, Error **errp)
 ''',
                      c_type=memb.type.c_name(), name=memb.name,
                      c_name=c_name(memb.name))
+        if special_features != '0':
+            indent.decrease()
+            ret += mcgen('''
+    }
+''')
         if memb.optional:
             indent.decrease()
             ret += mcgen('''
     }
 ''')
-        ret += gen_endif(memb.ifcond)
+        ret += memb.ifcond.gen_endif()
 
     if variants:
         tag_member = variants.tag_member
@@ -110,7 +128,7 @@ bool visit_type_%(c_name)s_members(Visitor *v, %(c_name)s *obj, Error **errp)
         for var in variants.variants:
             case_str = c_enum_const(tag_member.type.name, var.name,
                                     tag_member.type.prefix)
-            ret += gen_if(var.ifcond)
+            ret += var.ifcond.gen_if()
             if var.type.name == 'q_empty':
                 # valid variant and nothing to do
                 ret += mcgen('''
@@ -126,7 +144,7 @@ bool visit_type_%(c_name)s_members(Visitor *v, %(c_name)s *obj, Error **errp)
                              case=case_str,
                              c_type=var.type.c_name(), c_name=c_name(var.name))
 
-            ret += gen_endif(var.ifcond)
+            ret += var.ifcond.gen_endif()
         ret += mcgen('''
     default:
         abort();
@@ -212,7 +230,7 @@ bool visit_type_%(c_name)s(Visitor *v, const char *name,
                 c_name=c_name(name))
 
     for var in variants.variants:
-        ret += gen_if(var.ifcond)
+        ret += var.ifcond.gen_if()
         ret += mcgen('''
     case %(case)s:
 ''',
@@ -238,7 +256,7 @@ bool visit_type_%(c_name)s(Visitor *v, const char *name,
         ret += mcgen('''
         break;
 ''')
-        ret += gen_endif(var.ifcond)
+        ret += var.ifcond.gen_endif()
 
     ret += mcgen('''
     case QTYPE_NONE:
@@ -305,7 +323,7 @@ class QAPISchemaGenVisitVisitor(QAPISchemaModularCVisitor):
             prefix, 'qapi-visit', ' * Schema-defined QAPI visitors',
             ' * Built-in QAPI visitors', __doc__)
 
-    def _begin_system_module(self, name: None) -> None:
+    def _begin_builtin_module(self) -> None:
         self._genc.preamble_add(mcgen('''
 #include "qemu/osdep.h"
 #include "qapi/error.h"
@@ -336,8 +354,8 @@ class QAPISchemaGenVisitVisitor(QAPISchemaModularCVisitor):
 
     def visit_enum_type(self,
                         name: str,
-                        info: QAPISourceInfo,
-                        ifcond: List[str],
+                        info: Optional[QAPISourceInfo],
+                        ifcond: QAPISchemaIfCond,
                         features: List[QAPISchemaFeature],
                         members: List[QAPISchemaEnumMember],
                         prefix: Optional[str]) -> None:
@@ -348,7 +366,7 @@ class QAPISchemaGenVisitVisitor(QAPISchemaModularCVisitor):
     def visit_array_type(self,
                          name: str,
                          info: Optional[QAPISourceInfo],
-                         ifcond: List[str],
+                         ifcond: QAPISchemaIfCond,
                          element_type: QAPISchemaType) -> None:
         with ifcontext(ifcond, self._genh, self._genc):
             self._genh.add(gen_visit_decl(name))
@@ -357,7 +375,7 @@ class QAPISchemaGenVisitVisitor(QAPISchemaModularCVisitor):
     def visit_object_type(self,
                           name: str,
                           info: Optional[QAPISourceInfo],
-                          ifcond: List[str],
+                          ifcond: QAPISchemaIfCond,
                           features: List[QAPISchemaFeature],
                           base: Optional[QAPISchemaObjectType],
                           members: List[QAPISchemaObjectTypeMember],
@@ -378,8 +396,8 @@ class QAPISchemaGenVisitVisitor(QAPISchemaModularCVisitor):
 
     def visit_alternate_type(self,
                              name: str,
-                             info: QAPISourceInfo,
-                             ifcond: List[str],
+                             info: Optional[QAPISourceInfo],
+                             ifcond: QAPISchemaIfCond,
                              features: List[QAPISchemaFeature],
                              variants: QAPISchemaVariants) -> None:
         with ifcontext(ifcond, self._genh, self._genc):

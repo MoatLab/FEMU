@@ -20,6 +20,7 @@
 #include "target/ppc/kvm_ppc.h"
 #include "hw/ppc/ppc.h"
 #include "target/ppc/mmu-hash64.h"
+#include "target/ppc/power8-pmu.h"
 #include "sysemu/numa.h"
 #include "sysemu/reset.h"
 #include "sysemu/hw_accel.h"
@@ -36,6 +37,11 @@ static void spapr_reset_vcpu(PowerPCCPU *cpu)
 
     cpu_reset(cs);
 
+    /*
+     * "PowerPC Processor binding to IEEE 1275" defines the initial MSR state
+     * as 32bit (MSR_SF=0) in "8.2.1. Initial Register Values".
+     */
+    env->msr &= ~(1ULL << MSR_SF);
     env->spr[SPR_HIOR] = 0;
 
     lpcr = env->spr[SPR_LPCR];
@@ -183,10 +189,13 @@ static const VMStateDescription vmstate_spapr_cpu_state = {
 
 static void spapr_unrealize_vcpu(PowerPCCPU *cpu, SpaprCpuCore *sc)
 {
+    CPUPPCState *env = &cpu->env;
+
     if (!sc->pre_3_0_migration) {
         vmstate_unregister(NULL, &vmstate_spapr_cpu_state, cpu->machine_data);
     }
     spapr_irq_cpu_intc_destroy(SPAPR_MACHINE(qdev_get_machine()), cpu);
+    cpu_ppc_tb_free(env);
     qdev_unrealize(DEVICE(cpu));
 }
 
@@ -255,11 +264,11 @@ static bool spapr_realize_vcpu(PowerPCCPU *cpu, SpaprMachineState *spapr,
         return false;
     }
 
-    /* Set time-base frequency to 512 MHz */
-    cpu_ppc_tb_init(env, SPAPR_TIMEBASE_FREQ);
-
     cpu_ppc_set_vhyp(cpu, PPC_VIRTUAL_HYPERVISOR(spapr));
     kvmppc_set_papr(cpu);
+
+    /* Set time-base frequency to 512 MHz. vhyp must be set first. */
+    cpu_ppc_tb_init(env, SPAPR_TIMEBASE_FREQ);
 
     if (spapr_irq_cpu_intc_create(spapr, cpu, errp) < 0) {
         qdev_unrealize(DEVICE(cpu));
@@ -277,8 +286,8 @@ static PowerPCCPU *spapr_create_vcpu(SpaprCpuCore *sc, int i, Error **errp)
 {
     SpaprCpuCoreClass *scc = SPAPR_CPU_CORE_GET_CLASS(sc);
     CPUCore *cc = CPU_CORE(sc);
-    Object *obj;
-    char *id;
+    g_autoptr(Object) obj = NULL;
+    g_autofree char *id = NULL;
     CPUState *cs;
     PowerPCCPU *cpu;
 
@@ -293,23 +302,17 @@ static PowerPCCPU *spapr_create_vcpu(SpaprCpuCore *sc, int i, Error **errp)
     cs->start_powered_off = true;
     cs->cpu_index = cc->core_id + i;
     if (!spapr_set_vcpu_id(cpu, cs->cpu_index, errp)) {
-        goto err;
+        return NULL;
     }
 
     cpu->node_id = sc->node_id;
 
     id = g_strdup_printf("thread[%d]", i);
     object_property_add_child(OBJECT(sc), id, obj);
-    g_free(id);
 
     cpu->machine_data = g_new0(SpaprCpuState, 1);
 
-    object_unref(obj);
     return cpu;
-
-err:
-    object_unref(obj);
-    return NULL;
 }
 
 static void spapr_cpu_core_realize(DeviceState *dev, Error **errp)
@@ -388,6 +391,7 @@ static const TypeInfo spapr_cpu_core_type_infos[] = {
     DEFINE_SPAPR_CPU_CORE_TYPE("power9_v1.0"),
     DEFINE_SPAPR_CPU_CORE_TYPE("power9_v2.0"),
     DEFINE_SPAPR_CPU_CORE_TYPE("power10_v1.0"),
+    DEFINE_SPAPR_CPU_CORE_TYPE("power10_v2.0"),
 #ifdef CONFIG_KVM
     DEFINE_SPAPR_CPU_CORE_TYPE("host"),
 #endif

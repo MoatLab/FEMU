@@ -1,0 +1,59 @@
+#! /bin/sh
+
+. test/test.sh
+
+get_part_start() {
+	#We want to fail the test if the caller passed garbage
+	if [ "$#" -ne 2 ] || ! grep -q "$2" "$1" ; then
+		fail_test;
+	fi
+	grep "$2" "$1" | cut -f2 -d, | xargs printf "%d";
+}
+
+get_part_len() {
+	#We want to fail the test if the caller passed garbage
+	if [ "$#" -ne 2 ] || ! grep -q "$2" "$1" ; then
+		fail_test;
+	fi
+	grep "$2" "$1" | cut -f3 -d, | xargs printf "%d";
+}
+
+get_part_end() {
+	start=$(get_part_start "$1" "$2");
+	len=$(get_part_len "$1" "$2");
+	expr "$start" \+ "$len";
+}
+
+cmp_with_ff() {
+	if [ "$#" -ne 3 ] ; then
+		fail_test;
+	fi
+	file="$1";
+	start="$2";
+	len="$3";
+
+	blank=$(mktemp --tmpdir="$DATA_DIR" blank.pnorXXXXXX);
+	dd status=none if=/dev/zero bs="$len" count=1 | tr '\000' '\377' > "$blank"
+	cmp --bytes="$len" --ignore-initial="$start:0" "$file" "$blank";
+	if [ "$?" -ne 0 ] ; then
+		fail_test;
+	fi
+	#fail_test; will trigger a cleanup straight away
+	rm $blank;
+}
+
+#The reason for it is that this way there is a completely independant
+#way of calculating checksums so if checksums fail, we can be
+#confident its because libflash/libffs changed
+update_checksum() {
+	if [ "$#" -ne 2 ] ; then
+		fail_test;
+	fi
+	file=$1;
+	part=$2;
+	dd if="$file" bs=1 skip="$part" count=124 status=none | perl -e 'use integer; binmode STDIN; binmode STDOUT; my $result=0; while (read	STDIN, $word, 4) {  $result = $result ^ unpack("N", $word); } print pack("N",$result)' | dd of="$file" seek="$(expr $part \+ 124)" bs=1 count=4 status=none conv=notrunc
+}
+
+run_tests "test/tests/*" "test/results" "test/files"
+
+

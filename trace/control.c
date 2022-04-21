@@ -40,6 +40,7 @@ static size_t nevent_groups;
 static uint32_t next_id;
 static uint32_t next_vcpu_id;
 static bool init_trace_on_startup;
+static char *trace_opts_file;
 
 QemuOptsList qemu_trace_opts = {
     .name = "trace",
@@ -81,6 +82,10 @@ void trace_event_register_group(TraceEvent **events)
     event_groups = g_renew(TraceEventGroup, event_groups, nevent_groups + 1);
     event_groups[nevent_groups].events = events;
     nevent_groups++;
+
+#ifdef CONFIG_TRACE_SIMPLE
+    st_init_group(nevent_groups - 1);
+#endif
 }
 
 
@@ -90,7 +95,7 @@ TraceEvent *trace_event_name(const char *name)
 
     TraceEventIter iter;
     TraceEvent *ev;
-    trace_event_iter_init(&iter, NULL);
+    trace_event_iter_init_all(&iter);
     while ((ev = trace_event_iter_next(&iter)) != NULL) {
         if (strcmp(trace_event_get_name(ev), name) == 0) {
             return ev;
@@ -99,11 +104,24 @@ TraceEvent *trace_event_name(const char *name)
     return NULL;
 }
 
-void trace_event_iter_init(TraceEventIter *iter, const char *pattern)
+void trace_event_iter_init_all(TraceEventIter *iter)
 {
     iter->event = 0;
     iter->group = 0;
+    iter->group_id = -1;
+    iter->pattern = NULL;
+}
+
+void trace_event_iter_init_pattern(TraceEventIter *iter, const char *pattern)
+{
+    trace_event_iter_init_all(iter);
     iter->pattern = pattern;
+}
+
+void trace_event_iter_init_group(TraceEventIter *iter, size_t group_id)
+{
+    trace_event_iter_init_all(iter);
+    iter->group_id = group_id;
 }
 
 TraceEvent *trace_event_iter_next(TraceEventIter *iter)
@@ -111,33 +129,39 @@ TraceEvent *trace_event_iter_next(TraceEventIter *iter)
     while (iter->group < nevent_groups &&
            event_groups[iter->group].events[iter->event] != NULL) {
         TraceEvent *ev = event_groups[iter->group].events[iter->event];
+        size_t group = iter->group;
         iter->event++;
         if (event_groups[iter->group].events[iter->event] == NULL) {
             iter->event = 0;
             iter->group++;
         }
-        if (!iter->pattern ||
-            g_pattern_match_simple(iter->pattern, trace_event_get_name(ev))) {
-            return ev;
+        if (iter->pattern &&
+            !g_pattern_match_simple(iter->pattern, trace_event_get_name(ev))) {
+            continue;
         }
+        if (iter->group_id != -1 &&
+            iter->group_id != group) {
+            continue;
+        }
+        return ev;
     }
 
     return NULL;
 }
 
-void trace_list_events(void)
+void trace_list_events(FILE *f)
 {
     TraceEventIter iter;
     TraceEvent *ev;
-    trace_event_iter_init(&iter, NULL);
+    trace_event_iter_init_all(&iter);
     while ((ev = trace_event_iter_next(&iter)) != NULL) {
-        fprintf(stderr, "%s\n", trace_event_get_name(ev));
+        fprintf(f, "%s\n", trace_event_get_name(ev));
     }
 #ifdef CONFIG_TRACE_DTRACE
-    fprintf(stderr, "This list of names of trace points may be incomplete "
-                    "when using the DTrace/SystemTap backends.\n"
-                    "Run 'qemu-trace-stap list %s' to print the full list.\n",
-            error_get_progname());
+    fprintf(f, "This list of names of trace points may be incomplete "
+               "when using the DTrace/SystemTap backends.\n"
+               "Run 'qemu-trace-stap list %s' to print the full list.\n",
+            g_get_prgname());
 #endif
 }
 
@@ -149,7 +173,7 @@ static void do_trace_enable_events(const char *line_buf)
     TraceEvent *ev;
     bool is_pattern = trace_event_is_pattern(line_ptr);
 
-    trace_event_iter_init(&iter, line_ptr);
+    trace_event_iter_init_pattern(&iter, line_ptr);
     while ((ev = trace_event_iter_next(&iter)) != NULL) {
         if (!trace_event_get_state_static(ev)) {
             if (!is_pattern) {
@@ -176,7 +200,7 @@ static void do_trace_enable_events(const char *line_buf)
 void trace_enable_events(const char *line_buf)
 {
     if (is_help_option(line_buf)) {
-        trace_list_events();
+        trace_list_events(stdout);
         if (monitor_cur() == NULL) {
             exit(0);
         }
@@ -224,10 +248,8 @@ static void trace_init_events(const char *fname)
 
 void trace_init_file(void)
 {
-    QemuOpts *opts = qemu_find_opts_singleton("trace");
-    const char *file = qemu_opt_get(opts, "file");
 #ifdef CONFIG_TRACE_SIMPLE
-    st_set_trace_file(file);
+    st_set_trace_file(trace_opts_file);
     if (init_trace_on_startup) {
         st_set_trace_file_enabled(true);
     }
@@ -238,11 +260,11 @@ void trace_init_file(void)
      * backend. However we should only override -D if we actually have
      * something to override it with.
      */
-    if (file) {
-        qemu_set_log_filename(file, &error_fatal);
+    if (trace_opts_file) {
+        qemu_set_log_filename(trace_opts_file, &error_fatal);
     }
 #else
-    if (file) {
+    if (trace_opts_file) {
         fprintf(stderr, "error: --trace file=...: "
                 "option not supported by the selected tracing backends\n");
         exit(1);
@@ -257,7 +279,7 @@ void trace_fini_vcpu(CPUState *vcpu)
 
     trace_guest_cpu_exit(vcpu);
 
-    trace_event_iter_init(&iter, NULL);
+    trace_event_iter_init_all(&iter);
     while ((ev = trace_event_iter_next(&iter)) != NULL) {
         if (trace_event_is_vcpu(ev) &&
             trace_event_get_state_static(ev) &&
@@ -303,6 +325,8 @@ void trace_opt_parse(const char *optarg)
     }
     trace_init_events(qemu_opt_get(opts, "events"));
     init_trace_on_startup = true;
+    g_free(trace_opts_file);
+    trace_opts_file = g_strdup(qemu_opt_get(opts, "file"));
     qemu_opts_del(opts);
 }
 

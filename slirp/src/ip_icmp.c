@@ -85,6 +85,9 @@ void icmp_cleanup(Slirp *slirp)
 
 static int icmp_send(struct socket *so, struct mbuf *m, int hlen)
 {
+    Slirp *slirp = m->slirp;
+    M_DUP_DEBUG(slirp, m, 0, 0);
+
     struct ip *ip = mtod(m, struct ip *);
     struct sockaddr_in addr;
 
@@ -92,6 +95,7 @@ static int icmp_send(struct socket *so, struct mbuf *m, int hlen)
     if (so->s == -1) {
         return -1;
     }
+    so->slirp->cb->register_poll_fd(so->s, so->slirp->opaque);
 
     if (slirp_bind_outbound(so, AF_INET) != 0) {
         // bind failed - close socket
@@ -136,10 +140,12 @@ void icmp_detach(struct socket *so)
  */
 void icmp_input(struct mbuf *m, int hlen)
 {
+    Slirp *slirp = m->slirp;
+    M_DUP_DEBUG(slirp, m, 0, 0);
+
     register struct icmp *icp;
     register struct ip *ip = mtod(m, struct ip *);
     int icmplen = ip->ip_len;
-    Slirp *slirp = m->slirp;
 
     DEBUG_CALL("icmp_input");
     DEBUG_ARG("m = %p", m);
@@ -176,10 +182,17 @@ void icmp_input(struct mbuf *m, int hlen)
         } else {
             struct socket *so;
             struct sockaddr_storage addr;
+            int ttl;
+
             so = socreate(slirp);
             if (icmp_send(so, m, hlen) == 0) {
+                /* We could send this as ICMP, good! */
                 return;
             }
+
+            /* We could not send this as ICMP, try to send it on UDP echo
+             * service (7), wishfully hoping that it is open there. */
+
             if (udp_attach(so, AF_INET) == -1) {
                 DEBUG_MISC("icmp_input udp_attach errno = %d-%s", errno,
                            strerror(errno));
@@ -207,6 +220,19 @@ void icmp_input(struct mbuf *m, int hlen)
                 return;
             }
 
+            /*
+             * Check for TTL
+             */
+            ttl = ip->ip_ttl-1;
+            if (ttl <= 0) {
+                DEBUG_MISC("udp ttl exceeded");
+                icmp_send_error(m, ICMP_TIMXCEED, ICMP_TIMXCEED_INTRANS, 0,
+                                NULL);
+                udp_detach(so);
+                break;
+            }
+            setsockopt(so->s, IPPROTO_IP, IP_TTL, &ttl, sizeof(ttl));
+
             if (sendto(so->s, icmp_ping_msg, strlen(icmp_ping_msg), 0,
                        (struct sockaddr *)&addr, sockaddr_size(&addr)) == -1) {
                 DEBUG_MISC("icmp_input udp sendto tx errno = %d-%s", errno,
@@ -230,7 +256,7 @@ void icmp_input(struct mbuf *m, int hlen)
 
     default:
         m_free(m);
-    } /* swith */
+    } /* switch */
 
 end_error:
     /* m is m_free()'d xor put in a socket xor or given to ip_send */
@@ -256,8 +282,8 @@ end_error:
  */
 
 #define ICMP_MAXDATALEN (IP_MSS - 28)
-void icmp_send_error(struct mbuf *msrc, uint8_t type, uint8_t code, int minsize,
-                     const char *message)
+void icmp_forward_error(struct mbuf *msrc, uint8_t type, uint8_t code, int minsize,
+                        const char *message, struct in_addr *src)
 {
     unsigned hlen, shlen, s_ip_len;
     register struct ip *ip;
@@ -372,14 +398,20 @@ void icmp_send_error(struct mbuf *msrc, uint8_t type, uint8_t code, int minsize,
     ip->ip_ttl = MAXTTL;
     ip->ip_p = IPPROTO_ICMP;
     ip->ip_dst = ip->ip_src; /* ip addresses */
-    ip->ip_src = m->slirp->vhost_addr;
+    ip->ip_src = *src;
 
-    (void)ip_output((struct socket *)NULL, m);
+    ip_output((struct socket *)NULL, m);
 
 end_error:
     return;
 }
 #undef ICMP_MAXDATALEN
+
+void icmp_send_error(struct mbuf *msrc, uint8_t type, uint8_t code, int minsize,
+                     const char *message)
+{
+    icmp_forward_error(msrc, type, code, minsize, message, &msrc->slirp->vhost_addr);
+}
 
 /*
  * Reflect the ip packet back to the source
@@ -428,7 +460,7 @@ void icmp_reflect(struct mbuf *m)
         ip->ip_src = icmp_dst;
     }
 
-    (void)ip_output((struct socket *)NULL, m);
+    ip_output((struct socket *)NULL, m);
 }
 
 void icmp_receive(struct socket *so)

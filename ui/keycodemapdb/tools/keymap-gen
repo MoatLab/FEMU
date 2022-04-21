@@ -317,9 +317,8 @@ class LanguageGenerator(object):
         raise NotImplementedError()
 
     def generate_header(self, database, args):
-        today = time.strftime("%Y-%m-%d %H:%M")
         self._boilerplate([
-            "This file is auto-generated from keymaps.csv on %s" % today,
+            "This file is auto-generated from keymaps.csv",
             "Database checksum sha256(%s)" % database.mapchecksum,
             "To re-generate, run:",
             "  %s" % args,
@@ -509,7 +508,7 @@ class LanguageDocGenerator(LanguageGenerator):
     def _array_code_entry(self, value, name):
         raise NotImplementedError()
 
-    def generate_name_docs(self, varname, database, mapname):
+    def generate_name_docs(self, title, subtitle, database, mapname):
         if mapname not in database.mapname:
             raise Exception("Unknown map %s, expected one of %s" % (
                             mapname, ", ".join(database.mapname.keys())))
@@ -518,10 +517,12 @@ class LanguageDocGenerator(LanguageGenerator):
         keys.sort()
         names = [database.mapname[Database.MAP_LINUX].get(key, "unnamed") for key in keys]
 
-        if varname is None:
-            varname = mapname
+        if title is None:
+            title = mapname
+        if subtitle is None:
+            subtitle = "Docs for %s" % mapname
 
-        self._array_start_name_doc(varname, mapname)
+        self._array_start_name_doc(title, subtitle, mapname)
 
         for i in range(len(keys)):
             key = keys[i]
@@ -531,7 +532,7 @@ class LanguageDocGenerator(LanguageGenerator):
         self._array_end()
 
 
-    def generate_code_docs(self, varname, database, mapname):
+    def generate_code_docs(self, title, subtitle, database, mapname):
         if mapname not in database.mapfrom:
             raise Exception("Unknown map %s, expected one of %s" % (
                             mapname, ", ".join(database.mapfrom.keys())))
@@ -546,10 +547,12 @@ class LanguageDocGenerator(LanguageGenerator):
             names = database.mapname[Database.MAP_LINUX]
             namemap = Database.MAP_LINUX
 
-        if varname is None:
-            varname = mapname
+        if title is None:
+            title = mapname
+        if subtitle is None:
+            subtitle = "Docs for %s" % mapname
 
-        self._array_start_code_doc(varname, mapname, namemap)
+        self._array_start_code_doc(title, subtitle, mapname, namemap)
 
         for i in range(len(keys)):
             key = keys[i]
@@ -623,6 +626,68 @@ class CLanguageGenerator(LanguageSrcGenerator):
         else:
             print(("  {" + indexfmt + ", " + valuefmt + "}, /* %s */") % (index, value, comment))
 
+class StdCLanguageGenerator(CLanguageGenerator):
+
+    def __init__(self):
+        super(StdCLanguageGenerator, self).__init__("unsigned short", "char *", "unsigned int")
+
+class GLib2LanguageGenerator(CLanguageGenerator):
+
+    def __init__(self):
+        super(GLib2LanguageGenerator, self).__init__("guint16", "gchar *", "guint")
+
+class CHeaderLanguageGenerator(LanguageSrcGenerator):
+
+    def __init__(self, inttypename, strtypename, lentypename):
+        self.inttypename = inttypename
+        self.strtypename = strtypename
+        self.lentypename = lentypename
+
+    def _boilerplate(self, lines):
+        print("/*")
+        for line in lines:
+            print(" * %s" % line)
+        print("*/")
+
+    def _array_start(self, varname, length, defvalue, fromtype, totype):
+        self._varname = varname
+        if fromtype == self.TYPE_STRING:
+            self._length = 0
+        else:
+            self._length = length
+
+    def _array_end(self, fromtype, totype):
+        totypename = self.strtypename if totype == self.TYPE_STRING else self.inttypename
+        if fromtype == self.TYPE_STRING:
+            vartypename = "struct _%s" % self._varname
+            print("%s {" % vartypename)
+            print("  const %s from;" % self.strtypename)
+            print("  const %s to;" % totypename)
+            print("};")
+        else:
+            vartypename = totypename
+        if type(self._length) == str:
+            print("extern const %s %s[%s];" % (vartypename, self._varname, self._length))
+        else:
+            print("extern const %s %s[%d];" % (vartypename, self._varname, self._length))
+        print("extern const %s %s_len;" % (self.lentypename, self._varname))
+
+    def _array_entry(self, index, value, comment, fromtype, totype):
+        if value is None:
+            return
+        if fromtype == self.TYPE_STRING:
+            self._length += 1
+
+class StdCHeaderLanguageGenerator(CHeaderLanguageGenerator):
+
+    def __init__(self):
+        super(StdCHeaderLanguageGenerator, self).__init__("unsigned short", "char *", "unsigned int")
+
+class GLib2HeaderLanguageGenerator(CHeaderLanguageGenerator):
+
+    def __init__(self):
+        super(GLib2HeaderLanguageGenerator, self).__init__("guint16", "gchar *", "guint")
+
 class CppLanguageGenerator(CLanguageGenerator):
 
     def _array_start(self, varname, length, defvalue, fromtype, totype):
@@ -631,10 +696,12 @@ class CppLanguageGenerator(CLanguageGenerator):
         totypename = "const " + self.strtypename if totype == self.TYPE_STRING else self.inttypename
         if fromtype == self.TYPE_INT:
             print("#include <vector>")
+            print("extern const std::vector<%s> %s;" % (totypename, varname));
             print("const std::vector<%s> %s = {" % (totypename, varname))
         else:
             print("#include <map>")
             print("#include <string>")
+            print("extern const std::map<const std::string, %s> %s;" % (totypename, varname))
             print("const std::map<const std::string, %s> %s = {" % (totypename, varname))
 
     def _array_end(self, fromtype, totype):
@@ -654,20 +721,84 @@ class CppLanguageGenerator(CLanguageGenerator):
         else:
             print("  \"%s\", /* %s */" % (value, comment))
 
-class StdCLanguageGenerator(CLanguageGenerator):
-
-    def __init__(self):
-        super(StdCLanguageGenerator, self).__init__("unsigned short", "char *", "unsigned int")
-
 class StdCppLanguageGenerator(CppLanguageGenerator):
 
     def __init__(self):
         super(StdCppLanguageGenerator, self).__init__("unsigned short", "char *", "unsigned int")
 
-class GLib2LanguageGenerator(CLanguageGenerator):
+class CppHeaderLanguageGenerator(CHeaderLanguageGenerator):
+
+    def _array_start(self, varname, length, defvalue, fromtype, totype):
+        if fromtype == self.TYPE_ENUM:
+            raise NotImplementedError("Enums not supported as source in C++ generator")
+        totypename = "const " + self.strtypename if totype == self.TYPE_STRING else self.inttypename
+        if fromtype == self.TYPE_INT:
+            print("#include <vector>")
+            print("extern const std::vector<%s> %s;" % (totypename, varname));
+        else:
+            print("#include <map>")
+            print("#include <string>")
+            print("extern const std::map<const std::string, %s> %s;" % (totypename, varname))
+
+    def _array_end(self, fromtype, totype):
+        pass
+
+    # designated initializers not available in C++
+    def _array_entry(self, index, value, comment, fromtype, totype):
+        pass
+
+class StdCppHeaderLanguageGenerator(CppHeaderLanguageGenerator):
 
     def __init__(self):
-        super(GLib2LanguageGenerator, self).__init__("guint16", "gchar *", "guint")
+        super(StdCppHeaderLanguageGenerator, self).__init__("unsigned short", "char *", "unsigned int")
+
+
+class RustLanguageGenerator(LanguageSrcGenerator):
+
+    def _boilerplate(self, lines):
+        print("//")
+        for line in lines:
+            print("// %s" % line)
+        print("//")
+
+    def _array_start(self, varname, length, defvalue, fromtype, totype):
+        if fromtype == self.TYPE_ENUM:
+            raise NotImplementedError("Enums not supported as source in Rust generator")
+
+        totypename = "&str" if totype == self.TYPE_STRING else "u16"
+        if fromtype != self.TYPE_STRING:
+            print("pub static %s: &[%s] = &[" % (varname.upper(), totypename))
+        else:
+            print("pub static %s: phf::Map<&str, %s> = phf::phf_map! {" %
+                  (varname.upper(), totypename))
+
+    def _array_end(self, fromtype, totype):
+        if fromtype != self.TYPE_STRING:
+            print("];")
+        else:
+            print("};")
+
+    def _array_entry(self, index, value, comment, fromtype, totype):
+        none = "\"\"" if totype == self.TYPE_STRING else "0"
+        if fromtype == self.TYPE_INT:
+            if value is None:
+                print("  %s, // %s" % (none, comment))
+            elif totype == self.TYPE_INT:
+                print("  0x%x, // %s" % (value, comment))
+            elif totype == self.TYPE_ENUM:
+                print("  %s, // %s" % (value, comment))
+            else:
+                print("  \"%s\", // %s" % (value, comment))
+        else:
+            if value is None:
+                print("  \"%s\" => %s, // %s" % (index, none, comment))
+            elif totype == self.TYPE_INT:
+                print("  \"%s\" => 0x%x, // %s" % (index, value, comment))
+            elif totype == self.TYPE_ENUM:
+                print("  \"%s\" => %s, // %s" % (index, value, comment))
+            else:
+                print("  \"%s\" => \"%s\", // %s" % (index, value, comment))
+
 
 class PythonLanguageGenerator(LanguageSrcGenerator):
 
@@ -793,16 +924,24 @@ class PodLanguageGenerator(LanguageDocGenerator):
             print("# %s" % line)
         print("#")
 
-    def _array_start_name_doc(self, varname, namemap):
-        print("=head1 %s" % varname)
+    def _array_start_name_doc(self, title, subtitle, namemap):
+        print("=head1 NAME")
+        print("")
+        print("%s - %s" % (title, subtitle))
+        print("")
+        print("=head1 DESCRIPTION")
         print("")
         print("List of %s key code names, with corresponding key code values" % namemap)
         print("")
         print("=over 4")
         print("")
 
-    def _array_start_code_doc(self, varname, codemap, namemap):
-        print("=head1 %s" % varname)
+    def _array_start_code_doc(self, title, subtitle, codemap, namemap):
+        print("=head1 NAME")
+        print("")
+        print("%s - %s" % (title, subtitle))
+        print("")
+        print("=head1 DESCRIPTION")
         print("")
         print("List of %s key code values, with corresponding %s key code names" % (codemap, namemap))
         print("")
@@ -825,27 +964,89 @@ class PodLanguageGenerator(LanguageDocGenerator):
         print("Key name %s" % name)
         print("")
 
+class RSTLanguageGenerator(LanguageDocGenerator):
+
+    def _boilerplate(self, lines):
+        print("..")
+        for line in lines:
+            print("   %s" % line)
+        print("")
+
+    def _array_start_name_doc(self, title, subtitle, namemap):
+        print("=" * len(title))
+        print(title)
+        print("=" * len(title))
+        print("")
+        print("-" * len(subtitle))
+        print(subtitle)
+        print("-" * len(subtitle))
+        print("")
+        print(":Manual section: 7")
+        print(":Manual group: Virtualization Support")
+        print("")
+        print("DESCRIPTION")
+        print("===========")
+        print("List of %s key code names, with corresponding key code values" % namemap)
+        print("")
+
+    def _array_start_code_doc(self, title, subtitle, codemap, namemap):
+        print("=" * len(title))
+        print(title)
+        print("=" * len(title))
+        print("")
+        print("-" * len(subtitle))
+        print(subtitle)
+        print("-" * len(subtitle))
+        print("")
+        print(":Manual section: 7")
+        print(":Manual group: Virtualization Support")
+        print("")
+        print("DESCRIPTION")
+        print("===========")
+        print("List of %s key code values, with corresponding %s key code names" % (codemap, namemap))
+        print("")
+
+    def _array_end(self):
+        print("")
+
+    def _array_name_entry(self, value, name):
+        print("* %s" % name)
+        print("")
+        print("  Key value %d (0x%x)" % (value, value))
+        print("")
+
+    def _array_code_entry(self, value, name):
+        print("* %d (0x%x)" % (value, value))
+        print("")
+        print("  Key name %s" % name)
+        print("")
+
 SRC_GENERATORS = {
     "stdc": StdCLanguageGenerator(),
+    "stdc-header": StdCHeaderLanguageGenerator(),
     "stdc++": StdCppLanguageGenerator(),
+    "stdc++-header": StdCppHeaderLanguageGenerator(),
     "glib2": GLib2LanguageGenerator(),
+    "glib2-header": GLib2HeaderLanguageGenerator(),
     "python2": PythonLanguageGenerator(),
     "python3": PythonLanguageGenerator(),
     "perl": PerlLanguageGenerator(),
     "js": JavaScriptLanguageGenerator(),
+    "rust": RustLanguageGenerator(),
 }
 DOC_GENERATORS = {
     "pod": PodLanguageGenerator(),
+    "rst": RSTLanguageGenerator(),
 }
 
 def code_map(args):
     database = Database()
     database.load(args.keymaps)
 
-    cliargs = ["keymap-gen", "--lang=%s" % args.lang]
+    cliargs = ["keymap-gen", "code-map", "--lang=%s" % args.lang]
     if args.varname is not None:
         cliargs.append("--varname=%s" % args.varname)
-    cliargs.extend(["code-map", "keymaps.csv", args.frommapname, args.tomapname])
+    cliargs.extend(["keymaps.csv", args.frommapname, args.tomapname])
     SRC_GENERATORS[args.lang].generate_header(database, " ".join(cliargs))
 
     SRC_GENERATORS[args.lang].generate_code_map(args.varname, database, args.frommapname, args.tomapname)
@@ -854,10 +1055,10 @@ def code_table(args):
     database = Database()
     database.load(args.keymaps)
 
-    cliargs = ["keymap-gen", "--lang=%s" % args.lang]
+    cliargs = ["keymap-gen", "code-table", "--lang=%s" % args.lang]
     if args.varname is not None:
         cliargs.append("--varname=%s" % args.varname)
-    cliargs.extend(["code-table", "keymaps.csv", args.mapname])
+    cliargs.extend(["keymaps.csv", args.mapname])
     SRC_GENERATORS[args.lang].generate_header(database, " ".join(cliargs))
 
     SRC_GENERATORS[args.lang].generate_code_table(args.varname, database, args.mapname)
@@ -866,10 +1067,10 @@ def name_map(args):
     database = Database()
     database.load(args.keymaps)
 
-    cliargs = ["keymap-gen", "--lang=%s" % args.lang]
+    cliargs = ["keymap-gen", "name-map", "--lang=%s" % args.lang]
     if args.varname is not None:
         cliargs.append("--varname=%s" % args.varname)
-    cliargs.extend(["name-map", "keymaps.csv", args.frommapname, args.tomapname])
+    cliargs.extend(["keymaps.csv", args.frommapname, args.tomapname])
     SRC_GENERATORS[args.lang].generate_header(database, " ".join(cliargs))
 
     SRC_GENERATORS[args.lang].generate_name_map(args.varname, database, args.frommapname, args.tomapname)
@@ -879,10 +1080,10 @@ def name_table(args):
     database.load(args.keymaps)
 
 
-    cliargs = ["keymap-gen", "--lang=%s" % args.lang]
+    cliargs = ["keymap-gen", "name-table", "--lang=%s" % args.lang]
     if args.varname is not None:
         cliargs.append("--varname=%s" % args.varname)
-    cliargs.extend(["name-table", "keymaps.csv", args.mapname])
+    cliargs.extend(["keymaps.csv", args.mapname])
     SRC_GENERATORS[args.lang].generate_header(database, " ".join(cliargs))
 
     SRC_GENERATORS[args.lang].generate_name_table(args.varname, database, args.mapname)
@@ -892,26 +1093,30 @@ def code_docs(args):
     database.load(args.keymaps)
 
 
-    cliargs = ["keymap-gen", "--lang=%s" % args.lang]
-    if args.varname is not None:
-        cliargs.append("--varname=%s" % args.varname)
-    cliargs.extend(["code-docs", "keymaps.csv", args.mapname])
+    cliargs = ["keymap-gen", "code-docs", "--lang=%s" % args.lang]
+    if args.title is not None:
+        cliargs.append("--title=%s" % args.title)
+    if args.subtitle is not None:
+        cliargs.append("--subtitle=%s" % args.subtitle)
+    cliargs.extend(["keymaps.csv", args.mapname])
     DOC_GENERATORS[args.lang].generate_header(database, " ".join(cliargs))
 
-    DOC_GENERATORS[args.lang].generate_code_docs(args.varname, database, args.mapname)
+    DOC_GENERATORS[args.lang].generate_code_docs(args.title, args.subtitle, database, args.mapname)
 
 def name_docs(args):
     database = Database()
     database.load(args.keymaps)
 
 
-    cliargs = ["keymap-gen", "--lang=%s" % args.lang]
-    if args.varname is not None:
-        cliargs.append("--varname=%s" % args.varname)
-    cliargs.extend(["name-docs", "keymaps.csv", args.mapname])
+    cliargs = ["keymap-gen", "name-docs", "--lang=%s" % args.lang]
+    if args.title is not None:
+        cliargs.append("--title=%s" % args.title)
+    if args.subtitle is not None:
+        cliargs.append("--subtitle=%s" % args.subtitle)
+    cliargs.extend(["keymaps.csv", args.mapname])
     DOC_GENERATORS[args.lang].generate_header(database, " ".join(cliargs))
 
-    DOC_GENERATORS[args.lang].generate_name_docs(args.varname, database, args.mapname)
+    DOC_GENERATORS[args.lang].generate_name_docs(args.title, args.subtitle, database, args.mapname)
 
 def usage():
     print ("Please select a command:")
@@ -921,43 +1126,62 @@ def usage():
 def main():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--lang", default="stdc",
-                        help="Output language, (src=%s, doc=%s)" % (
-                            ",".join(SRC_GENERATORS.keys()),
-                            ",".join(DOC_GENERATORS.keys())))
-    parser.add_argument("--varname", default=None,
-                        help="Data variable name")
-
     subparsers = parser.add_subparsers(help="sub-command help")
 
     codemapparser = subparsers.add_parser("code-map", help="Generate a mapping between code tables")
+    codemapparser.add_argument("--varname", default=None, help="Data variable name")
+    codemapparser.add_argument("--lang", default="stdc",
+                        help="Output language (%s)" % (
+                            ",".join(SRC_GENERATORS.keys())))
     codemapparser.add_argument("keymaps", help="Path to keymap CSV data file")
     codemapparser.add_argument("frommapname", help="Source code table name")
     codemapparser.add_argument("tomapname", help="Target code table name")
     codemapparser.set_defaults(func=code_map)
 
     codetableparser = subparsers.add_parser("code-table", help="Generate a flat code table")
+    codetableparser.add_argument("--lang", default="stdc",
+                        help="Output language (%s)" % (
+                            ",".join(SRC_GENERATORS.keys())))
+    codetableparser.add_argument("--varname", default=None, help="Data variable name")
     codetableparser.add_argument("keymaps", help="Path to keymap CSV data file")
     codetableparser.add_argument("mapname", help="Code table name")
     codetableparser.set_defaults(func=code_table)
 
     namemapparser = subparsers.add_parser("name-map", help="Generate a mapping to names")
+    namemapparser.add_argument("--lang", default="stdc",
+                        help="Output language (%s)" % (
+                            ",".join(SRC_GENERATORS.keys())))
+    namemapparser.add_argument("--varname", default=None, help="Data variable name")
     namemapparser.add_argument("keymaps", help="Path to keymap CSV data file")
     namemapparser.add_argument("frommapname", help="Source code table name")
     namemapparser.add_argument("tomapname", help="Target name table name")
     namemapparser.set_defaults(func=name_map)
 
     nametableparser = subparsers.add_parser("name-table", help="Generate a flat name table")
+    nametableparser.add_argument("--lang", default="stdc",
+                        help="Output language, (%s)" % (
+                            ",".join(SRC_GENERATORS.keys())))
+    nametableparser.add_argument("--varname", default=None, help="Data variable name")
     nametableparser.add_argument("keymaps", help="Path to keymap CSV data file")
     nametableparser.add_argument("mapname", help="Name table name")
     nametableparser.set_defaults(func=name_table)
 
     codedocsparser = subparsers.add_parser("code-docs", help="Generate code documentation")
+    codedocsparser.add_argument("--lang", default="pod",
+                        help="Output language (%s)" % (
+                            ",".join(DOC_GENERATORS.keys())))
+    codedocsparser.add_argument("--title", default=None, help="Document title")
+    codedocsparser.add_argument("--subtitle", default=None, help="Document subtitle")
     codedocsparser.add_argument("keymaps", help="Path to keymap CSV data file")
     codedocsparser.add_argument("mapname", help="Code table name")
     codedocsparser.set_defaults(func=code_docs)
 
     namedocsparser = subparsers.add_parser("name-docs", help="Generate name documentation")
+    namedocsparser.add_argument("--lang", default="pod",
+                        help="Output language (%s)" % (
+                            ",".join(DOC_GENERATORS.keys())))
+    namedocsparser.add_argument("--title", default=None, help="Document title")
+    namedocsparser.add_argument("--subtitle", default=None, help="Document subtitle")
     namedocsparser.add_argument("keymaps", help="Path to keymap CSV data file")
     namedocsparser.add_argument("mapname", help="Name table name")
     namedocsparser.set_defaults(func=name_docs)

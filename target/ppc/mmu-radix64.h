@@ -5,6 +5,7 @@
 
 /* Radix Quadrants */
 #define R_EADDR_MASK            0x3FFFFFFFFFFFFFFF
+#define R_EADDR_VALID_MASK      0xC00FFFFFFFFFFFFF
 #define R_EADDR_QUADRANT        0xC000000000000000
 #define R_EADDR_QUADRANT0       0x0000000000000000
 #define R_EADDR_QUADRANT1       0x4000000000000000
@@ -44,9 +45,9 @@
 
 #ifdef TARGET_PPC64
 
-int ppc_radix64_handle_mmu_fault(PowerPCCPU *cpu, vaddr eaddr, int rwx,
-                                 int mmu_idx);
-hwaddr ppc_radix64_get_phys_page_debug(PowerPCCPU *cpu, target_ulong addr);
+bool ppc_radix64_xlate(PowerPCCPU *cpu, vaddr eaddr, MMUAccessType access_type,
+                       hwaddr *raddr, int *psizep, int *protp, int mmu_idx,
+                       bool guest_visible);
 
 static inline int ppc_radix64_get_prot_eaa(uint64_t pte)
 {

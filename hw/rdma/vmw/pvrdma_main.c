@@ -21,6 +21,7 @@
 #include "hw/pci/msi.h"
 #include "hw/pci/msix.h"
 #include "hw/qdev-properties.h"
+#include "hw/qdev-properties-system.h"
 #include "cpu.h"
 #include "trace.h"
 #include "monitor/monitor.h"
@@ -57,24 +58,25 @@ static Property pvrdma_dev_properties[] = {
     DEFINE_PROP_END_OF_LIST(),
 };
 
-static void pvrdma_print_statistics(Monitor *mon, RdmaProvider *obj)
+static void pvrdma_format_statistics(RdmaProvider *obj, GString *buf)
 {
     PVRDMADev *dev = PVRDMA_DEV(obj);
     PCIDevice *pdev = PCI_DEVICE(dev);
 
-    monitor_printf(mon, "%s, %x.%x\n", pdev->name, PCI_SLOT(pdev->devfn),
-                   PCI_FUNC(pdev->devfn));
-    monitor_printf(mon, "\tcommands         : %" PRId64 "\n",
-                   dev->stats.commands);
-    monitor_printf(mon, "\tregs_reads       : %" PRId64 "\n",
-                   dev->stats.regs_reads);
-    monitor_printf(mon, "\tregs_writes      : %" PRId64 "\n",
-                   dev->stats.regs_writes);
-    monitor_printf(mon, "\tuar_writes       : %" PRId64 "\n",
-                   dev->stats.uar_writes);
-    monitor_printf(mon, "\tinterrupts       : %" PRId64 "\n",
-                   dev->stats.interrupts);
-    rdma_dump_device_counters(mon, &dev->rdma_dev_res);
+    g_string_append_printf(buf, "%s, %x.%x\n",
+                           pdev->name, PCI_SLOT(pdev->devfn),
+                           PCI_FUNC(pdev->devfn));
+    g_string_append_printf(buf, "\tcommands         : %" PRId64 "\n",
+                           dev->stats.commands);
+    g_string_append_printf(buf, "\tregs_reads       : %" PRId64 "\n",
+                           dev->stats.regs_reads);
+    g_string_append_printf(buf, "\tregs_writes      : %" PRId64 "\n",
+                           dev->stats.regs_writes);
+    g_string_append_printf(buf, "\tuar_writes       : %" PRId64 "\n",
+                           dev->stats.uar_writes);
+    g_string_append_printf(buf, "\tinterrupts       : %" PRId64 "\n",
+                           dev->stats.interrupts);
+    rdma_format_device_counters(&dev->rdma_dev_res, buf);
 }
 
 static void free_dev_ring(PCIDevice *pci_dev, PvrdmaRing *ring,
@@ -84,12 +86,17 @@ static void free_dev_ring(PCIDevice *pci_dev, PvrdmaRing *ring,
     rdma_pci_dma_unmap(pci_dev, ring_state, TARGET_PAGE_SIZE);
 }
 
-static int init_dev_ring(PvrdmaRing *ring, struct pvrdma_ring **ring_state,
+static int init_dev_ring(PvrdmaRing *ring, PvrdmaRingState **ring_state,
                          const char *name, PCIDevice *pci_dev,
                          dma_addr_t dir_addr, uint32_t num_pages)
 {
     uint64_t *dir, *tbl;
     int rc = 0;
+
+    if (!num_pages) {
+        rdma_error_report("Ring pages count must be strictly positive");
+        return -EINVAL;
+    }
 
     dir = rdma_pci_dma_map(pci_dev, dir_addr, TARGET_PAGE_SIZE);
     if (!dir) {
@@ -113,7 +120,7 @@ static int init_dev_ring(PvrdmaRing *ring, struct pvrdma_ring **ring_state,
     /* RX ring is the second */
     (*ring_state)++;
     rc = pvrdma_ring_init(ring, name, pci_dev,
-                          (struct pvrdma_ring *)*ring_state,
+                          (PvrdmaRingState *)*ring_state,
                           (num_pages - 1) * TARGET_PAGE_SIZE /
                           sizeof(struct pvrdma_cqne),
                           sizeof(struct pvrdma_cqne),
@@ -693,7 +700,7 @@ static void pvrdma_class_init(ObjectClass *klass, void *data)
     device_class_set_props(dc, pvrdma_dev_properties);
     set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);
 
-    ir->print_statistics = pvrdma_print_statistics;
+    ir->format_statistics = pvrdma_format_statistics;
 }
 
 static const TypeInfo pvrdma_info = {

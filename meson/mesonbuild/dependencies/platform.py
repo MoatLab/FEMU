@@ -15,12 +15,16 @@
 # This file contains the detection logic for external dependencies that are
 # platform-specific (generally speaking).
 
-from .base import ExternalDependency, DependencyException
+from .base import DependencyTypeName, ExternalDependency, DependencyException
 from ..mesonlib import MesonException
+import typing as T
+
+if T.TYPE_CHECKING:
+    from ..environment import Environment
 
 class AppleFrameworks(ExternalDependency):
-    def __init__(self, env, kwargs):
-        super().__init__('appleframeworks', env, kwargs)
+    def __init__(self, env: 'Environment', kwargs: T.Dict[str, T.Any]) -> None:
+        super().__init__(DependencyTypeName('appleframeworks'), env, kwargs)
         modules = kwargs.get('modules', [])
         if isinstance(modules, str):
             modules = [modules]
@@ -47,8 +51,8 @@ class AppleFrameworks(ExternalDependency):
             else:
                 self.is_found = False
 
-    def log_info(self):
+    def log_info(self) -> str:
         return ', '.join(self.frameworks)
 
-    def log_tried(self):
+    def log_tried(self) -> str:
         return 'framework'

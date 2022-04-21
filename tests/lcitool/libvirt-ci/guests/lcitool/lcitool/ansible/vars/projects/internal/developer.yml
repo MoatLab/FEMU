@@ -1,0 +1,7 @@
+---
+packages:
+  - gdb
+  - lsof
+  - net-tools
+  - strace
+  - vim

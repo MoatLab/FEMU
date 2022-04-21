@@ -173,7 +173,7 @@ uint16_t nvme_init_sq(NvmeSQueue *sq, FemuCtrl *n, uint64_t dma_addr, uint16_t
     sq->phys_contig = contig;
     if (sq->phys_contig) {
         sq->dma_addr = dma_addr;
-        sq->dma_addr_hva = (uint64_t)dma_memory_map(as, dma_addr, &sqsz, 0);
+        sq->dma_addr_hva = (uint64_t)dma_memory_map(as, dma_addr, &sqsz, 0, MEMTXATTRS_UNSPECIFIED);
     } else {
         sq->prp_list = nvme_setup_discontig(n, dma_addr, size, n->sqe_size);
         if (!sq->prp_list) {
@@ -242,7 +242,7 @@ uint16_t nvme_init_cq(NvmeCQueue *cq, FemuCtrl *n, uint64_t dma_addr, uint16_t
 
     if (cq->phys_contig) {
         cq->dma_addr = dma_addr;
-        cq->dma_addr_hva = (uint64_t)dma_memory_map(as, dma_addr, &cqsz, 1);
+        cq->dma_addr_hva = (uint64_t)dma_memory_map(as, dma_addr, &cqsz, 1, MEMTXATTRS_UNSPECIFIED);
     } else {
         cq->prp_list = nvme_setup_discontig(n, dma_addr, size,
                 n->cqe_size);

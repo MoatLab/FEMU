@@ -1,0 +1,10 @@
+skiboot/libfdt/ is a minimally modified version of upstream libfdt that is
+distributed with the dtc project hosted at github.com/dgibson/dtc.git.
+
+This version is taken from dtc commit 243176c ("Fix bogus error on rebuild")
+
+The modifications from upstream are the additions of this file, and
+Makefile.inc which has been derived from Makefile.libfdt.
+
+Local libfdt changes should be kept to a minimum, and submitted upstream if
+possible.

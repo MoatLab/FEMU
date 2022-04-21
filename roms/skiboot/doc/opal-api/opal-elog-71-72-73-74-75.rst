@@ -1,0 +1,125 @@
+.. _OPAL_ELOG:
+
+OPAL_ELOG: Error logging
+========================
+
+OPAL provides an abstraction to platform specific methods of storing and
+retrieving error logs. Some service processors may be able to store information
+in the Platform Error Log (PEL) format. These may be generated at runtime
+by the service processor or OPAL in reaction to certain events. For example,
+an IPL failure could be recorded in an error log, as could the reason and
+details of an unexpected shut-down/reboot (e.g. hard thermal limits, check-stop).
+
+There are five OPAL calls from host to OPAL on error log:
+
+.. code-block:: c
+
+	#define OPAL_ELOG_READ         71
+	#define OPAL_ELOG_WRITE        72
+	#define OPAL_ELOG_ACK          73
+	#define OPAL_ELOG_RESEND       74
+	#define OPAL_ELOG_SIZE         75
+
+Note: :ref:`OPAL_ELOG_WRITE` (72) Unused for now, might be supported in the
+future.
+
+Not all platforms support these calls, so it's important for a host Operating
+System to use the :ref:`OPAL_CHECK_TOKEN` call first. If :ref:`OPAL_ELOG_READ`,
+:ref:`OPAL_ELOG_ACK`, :ref:`OPAL_ELOG_RESEND`, or :ref:`OPAL_ELOG_SIZE` is present,
+then the rest of that group is also present. The presence of :ref:`OPAL_ELOG_WRITE`
+must be checked separately.
+
+**TODO**: we need a good explanation of the notification mechanism and in
+what order and *when* to call each of the OPAL APIs.
+
+.. _OPAL_ELOG_READ:
+
+OPAL_ELOG_READ
+--------------
+
+The :ref:`OPAL_ELOG_READ` call will copy the error log identified by ``id`` into
+the ``buffer`` of size ``size``.
+
+``OPAL_ELOG_READ`` accepts 3 parameters: ::
+
+	uint64_t *elog_buffer
+	uint64_t elog_size
+	uint64_t elog_id
+
+Returns:
+
+:ref:`OPAL_WRONG_STATE`
+  When there are no error logs to read, or ``OPAL_ELOG`` calls are done in the
+  wrong order.
+
+:ref:`OPAL_PARAMETER`
+  The ``id`` does not match the log id that is available.
+
+:ref:`OPAL_SUCCESS`
+  Error log is copied to ``buffer``.
+
+Other generic OPAL error codes may also be returned and should be treated
+like :ref:`OPAL_INTERNAL_ERROR`.
+
+.. _OPAL_ELOG_ACK:
+
+OPAL_ELOG_ACK
+-------------
+
+Acknowledging (ACKing) an error log tells OPAL and the service processor that
+the host operating system has dealt with the error log successfully. This allows
+OPAL and the service processor to delete the error log from their
+memory/storage.
+
+:ref:`OPAL_ELOG_ACK` accepts 1 parameter: ::
+
+	uint64_t ack_id
+
+Returns:
+
+:ref:`OPAL_INTERNAL_ERROR`
+  OPAL failed to send acknowledgement to the error log creator.
+:ref:`OPAL_SUCCESS`
+  Success!
+
+Other generic OPAL error codes may also be returned, and should be treated
+like :ref:`OPAL_INTERNAL_ERROR`.
+
+.. _OPAL_ELOG_RESEND:
+
+OPAL_ELOG_RESEND
+----------------
+
+The :ref:`OPAL_ELOG_RESEND` call will cause OPAL to resend notification to the
+host operating system of all outstanding error logs. This is commonly used
+(although doesn't have to be) in a kexec scenario.
+
+The call registered with this token accepts no parameter and returns type is
+void.
+
+.. _OPAL_ELOG_SIZE:
+
+OPAL_ELOG_SIZE
+--------------
+
+The :ref:`OPAL_ELOG_SIZE` call retrieves information about an error log.
+
+Here, ``type`` specifies error log format. Supported types are : ::
+
+	 0 -> Platform Error Log
+
+:ref:`OPAL_ELOG_SIZE` accepts 3 parameters: ::
+
+	uint64_t *elog_id
+	uint64_t *elog_size
+	uint64_t *elog_type
+
+Returns:
+
+:ref:`OPAL_WRONG_STATE`
+  There is no error log to fetch information about.
+
+:ref:`OPAL_SUCCESS`
+  Success.
+
+Other general OPAL errors may be returned.

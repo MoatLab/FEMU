@@ -24,12 +24,10 @@
  */
 
 #include "qemu/osdep.h"
-#include "cpu.h"
 #include "hw/rtc/m48t59.h"
 #include "hw/char/serial.h"
 #include "hw/block/fdc.h"
 #include "net/net.h"
-#include "sysemu/sysemu.h"
 #include "hw/isa/isa.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_host.h"
@@ -38,16 +36,12 @@
 #include "qapi/error.h"
 #include "qemu/error-report.h"
 #include "qemu/log.h"
-#include "hw/irq.h"
 #include "hw/loader.h"
 #include "hw/rtc/mc146818rtc.h"
 #include "hw/isa/pc87312.h"
 #include "hw/qdev-properties.h"
-#include "sysemu/arch_init.h"
 #include "sysemu/kvm.h"
-#include "sysemu/qtest.h"
 #include "sysemu/reset.h"
-#include "exec/address-spaces.h"
 #include "trace.h"
 #include "elf.h"
 #include "qemu/units.h"
@@ -237,6 +231,7 @@ static int prep_set_cmos_checksum(DeviceState *dev, void *opaque)
 
 static void ibm_40p_init(MachineState *machine)
 {
+    const char *bios_name = machine->firmware ?: "openbios-ppc";
     CPUPPCState *env = NULL;
     uint16_t cmos_checksum;
     PowerPCCPU *cpu;
@@ -260,20 +255,12 @@ static void ibm_40p_init(MachineState *machine)
         exit(1);
     }
 
-    if (env->flags & POWERPC_FLAG_RTC_CLK) {
-        /* POWER / PowerPC 601 RTC clock frequency is 7.8125 MHz */
-        cpu_ppc_tb_init(env, 7812500UL);
-    } else {
-        /* Set time-base frequency to 100 Mhz */
-        cpu_ppc_tb_init(env, 100UL * 1000UL * 1000UL);
-    }
+    /* Set time-base frequency to 100 Mhz */
+    cpu_ppc_tb_init(env, 100UL * 1000UL * 1000UL);
     qemu_register_reset(ppc_prep_reset, cpu);
 
     /* PCI host */
     dev = qdev_new("raven-pcihost");
-    if (!bios_name) {
-        bios_name = "openbios-ppc";
-    }
     qdev_prop_set_string(dev, "bios-name", bios_name);
     qdev_prop_set_uint32(dev, "elf-machine", PPC_ELF_MACHINE);
     pcihost = SYS_BUS_DEVICE(dev);
@@ -422,7 +409,7 @@ static void ibm_40p_init(MachineState *machine)
 
     /* Prepare firmware configuration for Open Hack'Ware */
     if (m48t59) {
-        PPC_NVRAM_set_params(m48t59, NVRAM_SIZE, "PREP", ram_size,
+        PPC_NVRAM_set_params(m48t59, NVRAM_SIZE, "PREP", machine->ram_size,
                              boot_device,
                              kernel_base, kernel_size,
                              machine->kernel_cmdline,

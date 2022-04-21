@@ -16,11 +16,13 @@
 #include "hw/acpi/aml-build.h"
 #include "hw/irq.h"
 
-static void xhci_sysbus_intr_raise(XHCIState *xhci, int n, bool level)
+static bool xhci_sysbus_intr_raise(XHCIState *xhci, int n, bool level)
 {
     XHCISysbusState *s = container_of(xhci, XHCISysbusState, xhci);
 
     qemu_set_irq(s->irq[n], level);
+
+    return false;
 }
 
 void xhci_sysbus_reset(DeviceState *dev)
@@ -33,12 +35,9 @@ void xhci_sysbus_reset(DeviceState *dev)
 static void xhci_sysbus_realize(DeviceState *dev, Error **errp)
 {
     XHCISysbusState *s = XHCI_SYSBUS(dev);
-    Error *err = NULL;
 
     object_property_set_link(OBJECT(&s->xhci), "host", OBJECT(s), NULL);
-    object_property_set_bool(OBJECT(&s->xhci), "realized", true, &err);
-    if (err) {
-        error_propagate(errp, err);
+    if (!qdev_realize(DEVICE(&s->xhci), NULL, errp)) {
         return;
     }
     s->irq = g_new0(qemu_irq, s->xhci.numintrs);

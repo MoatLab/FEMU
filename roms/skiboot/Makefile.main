@@ -1,0 +1,415 @@
+# SPDX-License-Identifier: Apache-2.0 OR GPL-2.0-or-later
+#
+# This is the main Makefile
+#
+# Copyright 2013-2019 IBM Corp
+
+# Target tools
+CC=$(CROSS)gcc$(POSTFIX)
+LD=$(CROSS)ld$(POSTFIX)
+AS=$(CROSS)as
+AR=$(CROSS)ar
+NM=$(CROSS)nm
+OBJCOPY=$(CROSS)objcopy
+OBJDUMP=$(CROSS)objdump
+SIZE=$(CROSS)size
+LD_TEXT=0x0
+NM += --synthetic
+
+try = $(shell set -e; if ($(1)) >/dev/null 2>&1; \
+	then echo "$(2)"; \
+	else echo "$(3)"; fi )
+
+try-cflag = $(call try,$(1) -Werror $(2) -x c -c /dev/null -o /dev/null,$(2))
+test_cflag = $(call try,$(1) -Werror $(2) -x c -c /dev/null -o /dev/null,1,0)
+
+cc-name := $(shell $(CC) -v 2>&1 | grep -q "clang version" && echo clang || echo gcc)
+
+# Base warnings
+CWARNS := -Wall -Wundef -Wstrict-prototypes -Wno-trigraphs \
+	  -Werror-implicit-function-declaration -Wdeclaration-after-statement \
+	  -Wno-pointer-sign -Wextra -Wno-sign-compare \
+	  -Wmissing-prototypes -Wmissing-declarations \
+	  -Wwrite-strings -Wcast-align \
+	  -Winit-self
+
+# Do not convert warnings to error on tagged/released version
+GIT_DIR ?= $(shell test -e $(SRC)/.git && echo 1 || echo 0)
+ifeq ($(GIT_DIR),1)	# Building from git tree
+GIT_SHA ?= $(shell cd $(SRC); git describe --tags 2>/dev/null)
+GIT_TAG ?= $(shell cd $(SRC); git tag -l 2>/dev/null | grep -x ${GIT_SHA} >/dev/null 2>&1 && echo 1 || echo 0)
+ifneq ($(GIT_TAG),1)	# Development branch
+CWARNS += -Werror
+endif
+endif
+
+# clang tends to emit more warnings so stop those breaking the build for now
+ifeq ($(cc-name),clang)
+CWARNS += -Wno-error
+endif
+
+# Host tools and options
+HOSTCC=gcc
+HOSTEND=$(shell uname -m | sed -e 's/^i.*86$$/LITTLE/' -e 's/^x86.*/LITTLE/' -e 's/^ppc64le/LITTLE/' -e 's/^ppc.*/BIG/')
+HOSTCFLAGS:=-O1 $(CWARNS) -DHAVE_$(HOSTEND)_ENDIAN -MMD
+HOSTCFLAGS += $(call try-cflag,$(HOSTCC),-std=gnu11)
+HOSTCFLAGS += $(call try-cflag,$(HOSTCC),-m64)
+HOSTCFLAGS += $(call try-cflag,$(HOSTCC),-Wjump-misses-init) \
+	  $(call try-cflag,$(HOSTCC),-Wsuggest-attribute=const) \
+	  $(call try-cflag,$(HOSTCC),-Wsuggest-attribute=noreturn) \
+	  $(call try-cflag,$(HOSTCC),-Wno-error=suggest-attribute=const) \
+	  $(call try-cflag,$(HOSTCC),-Wno-error=suggest-attribute=noreturn)
+HOSTCFLAGS += -DDEBUG -DCCAN_LIST_DEBUG
+
+# We want small stack usage for skiboot
+CWARNS += -Wframe-larger-than=1024
+
+HOSTGCOVCFLAGS = -fprofile-arcs -ftest-coverage -lgcov -O0 -g -pg
+
+VALGRIND := valgrind -q --show-reachable=yes --error-exitcode=99
+
+# Target options
+
+OPTS=-Os
+DBG=-g
+
+CPPFLAGS := -I$(SRC)/include -Iinclude -MMD -include $(SRC)/include/config.h
+CPPFLAGS += -I$(SRC)/libfdt -I$(SRC)/libflash -I$(SRC)/libxz -I$(SRC)/libc/include -I$(SRC)
+CPPFLAGS += -I$(SRC)/libpore
+CPPFLAGS += -D__SKIBOOT__ -nostdinc
+CPPFLAGS += -isystem $(shell $(CC) -print-file-name=include)
+CPPFLAGS += -DBITS_PER_LONG=64
+
+# We might want to remove our copy of stdint.h
+# but that means uint64_t becomes an ulong instead of an ullong
+# causing all our printf's to warn
+CPPFLAGS += -ffreestanding
+
+ifeq ($(LITTLE_ENDIAN),1)
+CPPFLAGS += -DHAVE_LITTLE_ENDIAN
+else
+CPPFLAGS += -DHAVE_BIG_ENDIAN
+endif
+
+ifeq ($(DEBUG),1)
+CPPFLAGS += -DDEBUG -DCCAN_LIST_DEBUG
+endif
+
+CFLAGS := -fno-strict-aliasing -pie -fpie -fno-pic -m64 -fno-asynchronous-unwind-tables
+CFLAGS += -mcpu=power8
+CFLAGS += -Wl,--oformat,elf64-powerpc -ggdb
+# r13,r14,r15 are preserved for OS to use as fixed registers.
+# These could be saved and restored in and out of skiboot, but it's more
+# robust to avoid touching them.
+CFLAGS += -ffixed-r13
+CFLAGS += -ffixed-r14
+CFLAGS += -ffixed-r15
+# r16 is skiboot's per-CPU data pointer.
+CFLAGS += -ffixed-r16
+CFLAGS += $(call try-cflag,$(CC),-std=gnu11)
+
+ifeq ($(LITTLE_ENDIAN),1)
+CFLAGS += -mlittle-endian
+else
+CFLAGS += -mbig-endian
+endif
+
+ifeq ($(ELF_ABI_v2),1)
+CFLAGS += $(call try-cflag,$(CC),-mabi=elfv2)
+else
+CFLAGS += $(call try-cflag,$(CC),-mabi=elfv1)
+endif
+
+ifeq ($(DEAD_CODE_ELIMINATION),1)
+CFLAGS += -ffunction-sections -fdata-sections
+endif
+
+ifeq ($(SKIBOOT_GCOV),1)
+CFLAGS += -fprofile-arcs -ftest-coverage -DSKIBOOT_GCOV=1
+endif
+
+ifeq ($(USE_VALGRIND),1)
+CFLAGS += -DUSE_VALGRIND=1
+else
+VALGRIND :=
+endif
+
+# Check if the new parametrized stack protector option is supported
+# by gcc, otherwise disable stack protector
+STACK_PROT_CFLAGS := -mstack-protector-guard=tls -mstack-protector-guard-reg=r16
+STACK_PROT_CFLAGS += -mstack-protector-guard-offset=0
+HAS_STACK_PROT := $(call test_cflag,$(CC),$(STACK_PROT_CFLAGS))
+
+ifeq ($(STACK_CHECK),1)
+STACK_PROT_CFLAGS += -fstack-protector-all
+CPPFLAGS += -DSTACK_CHECK_ENABLED
+CFLAGS += -pg
+else
+STACK_PROT_CFLAGS += -fstack-protector
+STACK_PROT_CFLAGS += $(call try-cflag,$(CC),-fstack-protector-strong)
+endif
+
+ifeq ($(HAS_STACK_PROT),1)
+CPPFLAGS += -DHAS_STACK_PROT
+CFLAGS += $(STACK_PROT_CFLAGS)
+else
+CFLAGS += -fno-stack-protector
+endif
+
+
+CFLAGS += $(call try-cflag,$(CC),-Wjump-misses-init) \
+	  $(call try-cflag,$(CC),-Wsuggest-attribute=const) \
+	  $(call try-cflag,$(CC),-Wsuggest-attribute=noreturn) \
+	  $(call try-cflag,$(CC),-Wno-error=suggest-attribute=const) \
+	  $(call try-cflag,$(CC),-Wno-error=suggest-attribute=noreturn) \
+	  $(call try-cflag,$(CC),-Wstack-usage=1024) \
+	  $(call try-cflag,$(CC),-Wno-error=array-bounds) \
+	  $(call try-cflag,$(CC),-Wno-error=stringop-overread) \
+	  $(call try-cflag,$(CC),-Wno-error=address-of-packed-member)
+
+CFLAGS += $(CWARNS) $(OPTS) $(DBG)
+
+LDFLAGS := -m64 -static -nostdlib -pie 
+LDFLAGS += -Wl,-pie
+LDFLAGS += -Wl,-Ttext-segment,$(LD_TEXT) -Wl,-N -Wl,--build-id=none
+LDFLAGS += -Wl,--no-multi-toc
+LDFLAGS += -mcpu=power8 -Wl,--oformat,elf64-powerpc
+LDFLAGS_FINAL = -m elf64lppc --no-multi-toc -N --build-id=none --whole-archive
+LDFLAGS_FINAL += -static -nostdlib -pie -Ttext-segment=$(LD_TEXT) --oformat=elf64-powerpc
+LDFLAGS_FINAL += --orphan-handling=warn
+
+LDRFLAGS=-melf64ppc
+# Debug stuff
+#LDFLAGS += -Wl,-v -Wl,-Map,foomap 
+
+ifeq ($(LITTLE_ENDIAN),1)
+LDFLAGS += -mlittle-endian
+LDFLAGS_FINAL += -EL
+else
+LDFLAGS += -mbig-endian
+LDFLAGS_FINAL += -EB
+endif
+
+ifeq ($(DEAD_CODE_ELIMINATION),1)
+LDFLAGS += -Wl,--gc-sections
+LDFLAGS_FINAL += --gc-sections
+endif
+
+AFLAGS := -D__ASSEMBLY__ -m64
+ifeq ($(LITTLE_ENDIAN),1)
+AFLAGS += -mlittle-endian
+else
+AFLAGS += -mbig-endian
+endif
+
+ifeq ($(ELF_ABI_v2),1)
+AFLAGS += $(call try-cflag,$(CC),-mabi=elfv2)
+else
+AFLAGS += $(call try-cflag,$(CC),-mabi=elfv1)
+endif
+
+ifeq ($(cc-name),clang)
+CLANG_TARGET    := --target=powerpc64-linux-gnu -mcpu=pwr8
+GCC_TOOLCHAIN   := $(realpath $(dir $(shell which $(LD)))/..)
+ifneq ($(GCC_TOOLCHAIN),)
+CLANG_GCC_TC    := --gcc-toolchain=$(GCC_TOOLCHAIN)
+endif
+CFLAGS += $(CLANG_TARGET) $(CLANG_GCC_TC)
+AFLAGS += $(CLANG_TARGET) $(CLANG_GCC_TC)
+LDFLAGS += $(CLANG_TARGET) $(CLANG_GCC_TC)
+
+# Workarounds
+# TODO: Fix the issues these hide, and remove them
+CFLAGS += -Wno-cast-align \
+	-Wno-unused-command-line-argument \
+	-Wno-unknown-warning-option \
+	-Wno-gnu-variable-sized-type-not-at-end \
+	-Wno-address-of-packed-member \
+	-Wno-error=ignored-attributes
+
+# pci_add_device_nodes is the largest, at 2048 with clang-7 (smaller with older
+# versions)
+CFLAGS += -Wframe-larger-than=2048
+endif
+
+# Special tool flags:
+# Do not use the floating point unit
+CFLAGS += -msoft-float
+# Do not use string instructions
+CFLAGS += $(call try-cflag,$(CC),-mno-string)
+# do not use load/store multiple word instrcutions
+CFLAGS += $(call try-cflag,$(CC),-mno-multiple)
+# Do not use any automatic vector foo. While it would be safe during boot, we
+# don't save/restore across OPAL calls
+CFLAGS += -mno-vsx -mno-altivec
+
+# Do not use load/store update. You REALLY do not want to use this!
+# The async safety of the ABI stack depends on the atomicity
+# of update on store.
+#CFLAGS += -mno-update
+
+ifneq ($(KERNEL),)
+CPPFLAGS += -DBUILTIN_KERNEL="\"$(KERNEL)\""
+endif
+
+CHECK		= sparse
+CHECKFLAGS     := $(CF)
+CHECK_CFLAGS_SKIP = -std=gnu11
+
+.SECONDARY:
+
+vpath %.c $(SRC)
+vpath %.C $(SRC)
+vpath %.S $(SRC)
+
+default: all
+
+include/asm-offsets.h: asm/asm-offsets.s
+	@mkdir -p include
+	$(call Q,GN, $(SRC)/make_offsets.sh $< >$@, $@)
+
+TARGET = skiboot
+
+include $(SRC)/asm/Makefile.inc
+include $(SRC)/core/Makefile.inc
+include $(SRC)/hw/Makefile.inc
+include $(SRC)/platforms/Makefile.inc
+include $(SRC)/libfdt/Makefile.inc
+include $(SRC)/libflash/Makefile.inc
+include $(SRC)/libxz/Makefile.inc
+include $(SRC)/libpore/Makefile.inc
+include $(SRC)/libc/Makefile.inc
+include $(SRC)/ccan/Makefile.inc
+include $(SRC)/$(DEVSRC)/Makefile.inc
+include $(SRC)/libstb/Makefile.inc
+
+# hack for travis-ci and coverity
+gard:
+	(cd external/gard; CROSS_COMPILE="" CFLAGS="$(HOSTCFLAGS) $(HOSTGCOVCFLAGS)" make)
+
+coverage: gard-coverage
+gard-coverage:
+	(cd external/gard; CROSS_COMPILE="" CFLAGS="$(HOSTCFLAGS) $(HOSTGCOVCFLAGS)" make coverage)
+
+pflash:
+	(cd external/pflash; CROSS_COMPILE="" CFLAGS="$(HOSTCFLAGS) $(HOSTGCOVCFLAGS)" make)
+
+coverage: pflash-coverage
+pflash-coverage:
+	(cd external/pflash; CROSS_COMPILE="" CFLAGS="$(HOSTCFLAGS) $(HOSTGCOVCFLAGS)" make coverage)
+
+pflash-coverity:
+	(cd external/pflash; ./build-all-arch.sh)
+
+all: $(SUBDIRS) $(TARGET).lid $(TARGET).lid.xz $(TARGET).map extract-gcov
+all: $(TARGET).lid.stb $(TARGET).lid.xz.stb
+
+OBJS := $(ASM) $(CORE) $(HW) $(PLATFORMS) $(LIBFDT) $(LIBXZ) $(LIBFLASH) $(LIBSTB)
+OBJS += $(LIBC) $(CCAN) $(DEVSRC_OBJ) $(LIBPORE)
+OBJS_NO_VER = $(OBJS)
+ALL_OBJS = $(OBJS) version.o
+
+ALL_OBJS_1 = $(TARGET).tmp.a asm/dummy_map.o
+ALL_OBJS_2 = $(TARGET).tmp.a asm/real_map.o
+
+%.lid.xz: %.lid
+	$(call Q,XZ, cat $^ | xz -9 -C crc32 > $@, $@)
+
+%.lid: %.elf
+	$(call Q,OBJCOPY, $(OBJCOPY) -O binary -S $^ $@, $@)
+
+$(TARGET).lid.stb: $(TARGET).lid libstb/create-container
+	$(call Q,STB-DEVELOPMENT-SIGNED-CONTAINER,$(SRC)/libstb/sign-with-local-keys.sh $< $@ $(SRC)/libstb/keys/ PAYLOAD,$@)
+
+$(TARGET).lid.xz.stb: $(TARGET).lid.xz libstb/create-container
+	$(call Q,STB-DEVELOPMENT-SIGNED-CONTAINER,$(SRC)/libstb/sign-with-local-keys.sh $< $@ $(SRC)/libstb/keys/ PAYLOAD,$@)
+
+$(TARGET).tmp.a: $(ALL_OBJS)
+	@rm -f $(TARGET).tmp.a
+	$(call Q,AR, $(AR) rcsTPD $@ $(ALL_OBJS), $@)
+
+$(TARGET).tmp.elf: $(ALL_OBJS_1) $(TARGET).lds $(KERNEL)
+	$(call Q,LD, $(LD) $(LDFLAGS_FINAL) -o $@ -T $(TARGET).lds $(ALL_OBJS_1), $@)
+
+asm/real_map.o : $(TARGET).tmp.map
+
+$(TARGET).elf: $(ALL_OBJS_2) $(TARGET).lds $(KERNEL)
+	$(call Q,LD, $(LD) $(LDFLAGS_FINAL) -o $@ -T $(TARGET).lds $(ALL_OBJS_2), $@)
+
+$(SUBDIRS):
+	$(call Q,MKDIR,mkdir -p $@, $@)
+
+-include $(wildcard *.d)
+-include $(wildcard $(SUBDIRS:%=%/*.d))
+
+# Set V=1 if you want to see everything.
+include $(SRC)/Makefile.rules
+
+VERSION ?= $(shell cd $(SRC); GIT_DIR=$(SRC)/.git $(SRC)/make_version.sh)
+
+.PHONY: VERSION-always
+.version: VERSION-always
+	@echo $(VERSION) > $@.tmp
+	@cmp -s $@ $@.tmp || cp $@.tmp $@
+	@rm -f $@.tmp
+
+version.c: $(SRC)/make_version.sh $(OBJS_NO_VER) .version
+	@(if [ "a$(VERSION)" = "a" ]; then \
+		echo "#error You need to set SKIBOOT_VERSION environment variable" > $@ ;\
+        else \
+		echo "extern const char version[];"; \
+                echo "const char version[] = \"$(VERSION)\";" ;\
+        fi) > $@
+
+.PHONY: coverage
+include $(shell find $(SRC)/* -name Makefile.check)
+
+extract-gcov: extract-gcov.c
+	$(call Q, HOSTCC ,$(HOSTCC) $(HOSTCFLAGS) \
+	-DTARGET__GNUC__=`echo '__GNUC__'|$(CC) -E -|grep -v '^#'` \
+	-DTARGET__GNUC_MINOR__=`echo '__GNUC_MINOR__'|$(CC) -E -|grep -v '^#'` \
+	-Wpadded -O0 -g -I$(SRC) -o $@ $<,$<)
+
+coverage-report: skiboot.info
+	genhtml --branch-coverage -q -o $@ $<
+
+# A rather nasty hack here that relies on the lcov file format
+external/pflash/pflash.info: coverage
+	(cd external/pflash; lcov -q -c -d . -o pflash.info --rc lcov_branch_coverage=1; sed -i -e 's%external/pflash/libflash%libflash%; s%external/pflash/ccan%ccan%' pflash.info)
+external/gard/gard.info: coverage
+	(cd external/gard; lcov -q -c -d . -o gard.info --rc lcov_branch_coverage=1; sed -i -e 's%external/gard/libflash%libflash%; s%external/gard/ccan%ccan%' gard.info)
+
+skiboot.info: coverage external/pflash/pflash.info external/gard/gard.info
+	lcov -q -c -d . $(LCOV_DIRS) -o $@ --rc lcov_branch_coverage=1
+	lcov -q -r $@ 'external/pflash/*' -o $@
+	lcov -q -r $@ 'external/gard/*' -o $@
+	lcov -q -a $@ -a external/pflash/pflash.info -o $@
+	lcov -q -a $@ -a external/gard/gard.info -o $@
+	lcov -q -r $@ $(LCOV_EXCLUDE) -o $@ --rc lcov_branch_coverage=1
+
+doc:
+	make -C doc html
+
+tags:
+	find . -name '*.[chS]' | xargs ctags
+
+TAGS:
+	find . -name '*.[chS]' | xargs etags
+
+.PHONY: tags TAGS check coverage doc
+
+cscope:
+	find . -name '*.[chS]' | xargs cscope
+
+clean:
+	$(RM) *.[odsa] $(SUBDIRS:%=%/*.[odsa])
+	$(RM) *.gcno $(SUBDIRS:%=%/*.gcno)
+	$(RM) *.gcda $(SUBDIRS:%=%/*.gcda)
+	$(RM) *.elf $(TARGET).lid *.map $(TARGET).lds $(TARGET).lid.xz
+	$(RM) include/asm-offsets.h version.c .version
+	$(RM) skiboot.info external/gard/gard.info external/pflash/pflash.info
+	$(RM) extract-gcov $(TARGET).lid.stb $(TARGET).lid.xz.stb
+
+distclean: clean
+	$(RM) *~ $(SUBDIRS:%=%/*~) include/*~
+

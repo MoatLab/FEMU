@@ -97,7 +97,7 @@ bool fd_is_socket(int fd)
 {
     int optval;
     socklen_t optlen = sizeof(optval);
-    return !qemu_getsockopt(fd, SOL_SOCKET, SO_TYPE, &optval, &optlen);
+    return !getsockopt(fd, SOL_SOCKET, SO_TYPE, &optval, &optlen);
 }
 
 
@@ -185,8 +185,8 @@ static int try_bind(int socket, InetSocketAddress *saddr, struct addrinfo *e)
 
  rebind:
     if (e->ai_family == PF_INET6) {
-        qemu_setsockopt(socket, IPPROTO_IPV6, IPV6_V6ONLY, &v6only,
-                        sizeof(v6only));
+        setsockopt(socket, IPPROTO_IPV6, IPV6_V6ONLY, &v6only,
+                   sizeof(v6only));
     }
 
     stat = bind(socket, e->ai_addr, e->ai_addrlen);
@@ -278,6 +278,11 @@ static int inet_listen_saddr(InetSocketAddress *saddr,
 
     /* create socket + bind/listen */
     for (e = res; e != NULL; e = e->ai_next) {
+#ifdef HAVE_IPPROTO_MPTCP
+        if (saddr->has_mptcp && saddr->mptcp) {
+            e->ai_protocol = IPPROTO_MPTCP;
+        }
+#endif
         getnameinfo((struct sockaddr*)e->ai_addr,e->ai_addrlen,
                         uaddr,INET6_ADDRSTRLEN,uport,32,
                         NI_NUMERICHOST | NI_NUMERICSERV);
@@ -456,6 +461,13 @@ int inet_connect_saddr(InetSocketAddress *saddr, Error **errp)
     for (e = res; e != NULL; e = e->ai_next) {
         error_free(local_err);
         local_err = NULL;
+
+#ifdef HAVE_IPPROTO_MPTCP
+        if (saddr->has_mptcp && saddr->mptcp) {
+            e->ai_protocol = IPPROTO_MPTCP;
+        }
+#endif
+
         sock = inet_connect_addr(saddr, e, &local_err);
         if (sock >= 0) {
             break;
@@ -471,8 +483,8 @@ int inet_connect_saddr(InetSocketAddress *saddr, Error **errp)
 
     if (saddr->keep_alive) {
         int val = 1;
-        int ret = qemu_setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE,
-                                  &val, sizeof(val));
+        int ret = setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE,
+                             &val, sizeof(val));
 
         if (ret < 0) {
             error_setg_errno(errp, errno, "Unable to set KEEPALIVE");
@@ -687,6 +699,17 @@ int inet_parse(InetSocketAddress *addr, const char *str, Error **errp)
         }
         addr->has_keep_alive = true;
     }
+#ifdef HAVE_IPPROTO_MPTCP
+    begin = strstr(optstr, ",mptcp");
+    if (begin) {
+        if (inet_parse_flag("mptcp", begin + strlen(",mptcp"),
+                            &addr->mptcp, errp) < 0)
+        {
+            return -1;
+        }
+        addr->has_mptcp = true;
+    }
+#endif
     return 0;
 }
 
@@ -1116,14 +1139,10 @@ fail:
     return NULL;
 }
 
-static int socket_get_fd(const char *fdstr, int num, Error **errp)
+static int socket_get_fd(const char *fdstr, Error **errp)
 {
     Monitor *cur_mon = monitor_cur();
     int fd;
-    if (num != 1) {
-        error_setg_errno(errp, EINVAL, "socket_get_fd: too many connections");
-        return -1;
-    }
     if (cur_mon) {
         fd = monitor_get_fd(cur_mon, fdstr, errp);
         if (fd < 0) {
@@ -1145,6 +1164,25 @@ static int socket_get_fd(const char *fdstr, int num, Error **errp)
     return fd;
 }
 
+int socket_address_parse_named_fd(SocketAddress *addr, Error **errp)
+{
+    int fd;
+
+    if (addr->type != SOCKET_ADDRESS_TYPE_FD) {
+        return 0;
+    }
+
+    fd = socket_get_fd(addr->u.fd.str, errp);
+    if (fd < 0) {
+        return fd;
+    }
+
+    g_free(addr->u.fd.str);
+    addr->u.fd.str = g_strdup_printf("%d", fd);
+
+    return 0;
+}
+
 int socket_connect(SocketAddress *addr, Error **errp)
 {
     int fd;
@@ -1159,7 +1197,7 @@ int socket_connect(SocketAddress *addr, Error **errp)
         break;
 
     case SOCKET_ADDRESS_TYPE_FD:
-        fd = socket_get_fd(addr->u.fd.str, 1, errp);
+        fd = socket_get_fd(addr->u.fd.str, errp);
         break;
 
     case SOCKET_ADDRESS_TYPE_VSOCK:
@@ -1187,7 +1225,26 @@ int socket_listen(SocketAddress *addr, int num, Error **errp)
         break;
 
     case SOCKET_ADDRESS_TYPE_FD:
-        fd = socket_get_fd(addr->u.fd.str, num, errp);
+        fd = socket_get_fd(addr->u.fd.str, errp);
+        if (fd < 0) {
+            return -1;
+        }
+
+        /*
+         * If the socket is not yet in the listen state, then transition it to
+         * the listen state now.
+         *
+         * If it's already listening then this updates the backlog value as
+         * requested.
+         *
+         * If this socket cannot listen because it's already in another state
+         * (e.g. unbound or connected) then we'll catch the error here.
+         */
+        if (listen(fd, num) != 0) {
+            error_setg_errno(errp, errno, "Failed to listen on fd socket");
+            closesocket(fd);
+            return -1;
+        }
         break;
 
     case SOCKET_ADDRESS_TYPE_VSOCK:
@@ -1290,20 +1347,20 @@ socket_sockaddr_to_address_unix(struct sockaddr_storage *sa,
 
     addr = g_new0(SocketAddress, 1);
     addr->type = SOCKET_ADDRESS_TYPE_UNIX;
+    salen -= offsetof(struct sockaddr_un, sun_path);
 #ifdef CONFIG_LINUX
-    if (!su->sun_path[0]) {
+    if (salen > 0 && !su->sun_path[0]) {
         /* Linux abstract socket */
-        addr->u.q_unix.path = g_strndup(su->sun_path + 1,
-                                        sizeof(su->sun_path) - 1);
+        addr->u.q_unix.path = g_strndup(su->sun_path + 1, salen - 1);
         addr->u.q_unix.has_abstract = true;
         addr->u.q_unix.abstract = true;
         addr->u.q_unix.has_tight = true;
-        addr->u.q_unix.tight = salen < sizeof(*su);
+        addr->u.q_unix.tight = salen < sizeof(su->sun_path);
         return addr;
     }
 #endif
 
-    addr->u.q_unix.path = g_strndup(su->sun_path, sizeof(su->sun_path));
+    addr->u.q_unix.path = g_strndup(su->sun_path, salen);
     return addr;
 }
 #endif /* WIN32 */
@@ -1398,22 +1455,22 @@ SocketAddress *socket_address_flatten(SocketAddressLegacy *addr_legacy)
     addr = g_new(SocketAddress, 1);
 
     switch (addr_legacy->type) {
-    case SOCKET_ADDRESS_LEGACY_KIND_INET:
+    case SOCKET_ADDRESS_TYPE_INET:
         addr->type = SOCKET_ADDRESS_TYPE_INET;
         QAPI_CLONE_MEMBERS(InetSocketAddress, &addr->u.inet,
                            addr_legacy->u.inet.data);
         break;
-    case SOCKET_ADDRESS_LEGACY_KIND_UNIX:
+    case SOCKET_ADDRESS_TYPE_UNIX:
         addr->type = SOCKET_ADDRESS_TYPE_UNIX;
         QAPI_CLONE_MEMBERS(UnixSocketAddress, &addr->u.q_unix,
                            addr_legacy->u.q_unix.data);
         break;
-    case SOCKET_ADDRESS_LEGACY_KIND_VSOCK:
+    case SOCKET_ADDRESS_TYPE_VSOCK:
         addr->type = SOCKET_ADDRESS_TYPE_VSOCK;
         QAPI_CLONE_MEMBERS(VsockSocketAddress, &addr->u.vsock,
                            addr_legacy->u.vsock.data);
         break;
-    case SOCKET_ADDRESS_LEGACY_KIND_FD:
+    case SOCKET_ADDRESS_TYPE_FD:
         addr->type = SOCKET_ADDRESS_TYPE_FD;
         QAPI_CLONE_MEMBERS(String, &addr->u.fd, addr_legacy->u.fd.data);
         break;

@@ -1,0 +1,39 @@
+---
+- set_fact:
+    name: libvirt
+    machines: '{{ all_machines }}'
+    archive_format: xz
+    git_url: '{{ git_urls["libvirt"][git_remote] }}'
+
+- include: 'jobs/prepare.yml'
+- include: 'jobs/meson-build-job.yml'
+- include: 'jobs/meson-syntax-check-job.yml'
+  vars:
+    # We limit syntax-check to Linux platforms because it calls some
+    # commands with more arguments than FreeBSD supports
+    machines:
+      - almalinux-8
+      - centos-stream-8
+      - centos-stream-9
+      - debian-10
+      - debian-11
+      - debian-sid
+      - fedora-34
+      - fedora-35
+      - fedora-rawhide
+      - opensuse-leap-152
+      - opensuse-tumbleweed
+      - ubuntu-1804
+      - ubuntu-2004
+- include: 'jobs/meson-check-job.yml'
+  vars:
+    local_env: |
+      # gnulib's test-poll is broken on FreeBSD, so disable expensive
+      # tests (which include gnulib's test suite) until it's fixed
+      if [ "$(uname)" != "FreeBSD" ]; then
+        export VIR_TEST_EXPENSIVE=1
+      fi
+      export VIR_TEST_DEBUG=2
+- include: 'jobs/meson-rpm-job.yml'
+  vars:
+    machines: '{{ rpm_machines }}'

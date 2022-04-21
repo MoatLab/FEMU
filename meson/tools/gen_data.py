@@ -43,12 +43,12 @@ def main() -> int:
     mesonbuild_dir = root_dir / 'mesonbuild'
     out_file = mesonbuild_dir / 'mesondata.py'
 
-    data_dirs = mesonbuild_dir.glob('**/data')
+    data_dirs = sorted(mesonbuild_dir.glob('**/data'))
 
     data_files: T.List[DataFile] = []
 
     for d in data_dirs:
-        for p in d.iterdir():
+        for p in sorted(d.iterdir()):
             data_files += [DataFile(p, mesonbuild_dir)]
 
     print(f'Found {len(data_files)} data files')
@@ -78,6 +78,7 @@ def main() -> int:
         ####
 
 
+        # TODO: Remember to remove this also from tools/gen_data.py
         from pathlib import Path
         import typing as T
 
@@ -106,7 +107,7 @@ def main() -> int:
 
             def write_once(self, path: Path) -> None:
                 if not path.exists():
-                    path.write_text(self.data)
+                    path.write_text(self.data, encoding='utf-8')
 
             def write_to_private(self, env: 'Environment') -> Path:
                 out_file = Path(env.scratch_dir) / 'data' / self.path.name
@@ -132,7 +133,7 @@ def main() -> int:
     ''')
 
     print(f'Updating {out_file}')
-    out_file.write_text(data)
+    out_file.write_text(data, encoding='utf-8')
     return 0
 
 if __name__ == '__main__':

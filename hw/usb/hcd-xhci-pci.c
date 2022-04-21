@@ -57,7 +57,7 @@ static void xhci_pci_intr_update(XHCIState *xhci, int n, bool enable)
     }
 }
 
-static void xhci_pci_intr_raise(XHCIState *xhci, int n, bool level)
+static bool xhci_pci_intr_raise(XHCIState *xhci, int n, bool level)
 {
     XHCIPciState *s = container_of(xhci, XHCIPciState, xhci);
     PCIDevice *pci_dev = PCI_DEVICE(s);
@@ -67,15 +67,18 @@ static void xhci_pci_intr_raise(XHCIState *xhci, int n, bool level)
          msi_enabled(pci_dev))) {
         pci_set_irq(pci_dev, level);
     }
-    if (msix_enabled(pci_dev)) {
+
+    if (msix_enabled(pci_dev) && level) {
         msix_notify(pci_dev, n);
-        return;
+        return true;
     }
 
-    if (msi_enabled(pci_dev)) {
+    if (msi_enabled(pci_dev) && level) {
         msi_notify(pci_dev, n);
-        return;
+        return true;
     }
+
+    return false;
 }
 
 static void xhci_pci_reset(DeviceState *dev)
@@ -115,9 +118,7 @@ static void usb_xhci_pci_realize(struct PCIDevice *dev, Error **errp)
     object_property_set_link(OBJECT(&s->xhci), "host", OBJECT(s), NULL);
     s->xhci.intr_update = xhci_pci_intr_update;
     s->xhci.intr_raise = xhci_pci_intr_raise;
-    object_property_set_bool(OBJECT(&s->xhci), "realized", true, &err);
-    if (err) {
-        error_propagate(errp, err);
+    if (!qdev_realize(DEVICE(&s->xhci), NULL, errp)) {
         return;
     }
     if (strcmp(object_get_typename(OBJECT(dev)), TYPE_NEC_XHCI) == 0) {

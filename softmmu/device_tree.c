@@ -21,8 +21,8 @@
 #include "qemu/error-report.h"
 #include "qemu/option.h"
 #include "qemu/bswap.h"
+#include "qemu/cutils.h"
 #include "sysemu/device_tree.h"
-#include "sysemu/sysemu.h"
 #include "hw/loader.h"
 #include "hw/boards.h"
 #include "qemu/config-file.h"
@@ -60,7 +60,8 @@ void *create_device_tree(int *sizep)
     }
     ret = fdt_open_into(fdt, fdt, *sizep);
     if (ret) {
-        error_report("Unable to copy device tree in memory");
+        error_report("%s: Unable to copy device tree into memory: %s",
+                     __func__, fdt_strerror(ret));
         exit(1);
     }
 
@@ -104,7 +105,8 @@ void *load_device_tree(const char *filename_path, int *sizep)
 
     ret = fdt_open_into(fdt, fdt, dt_size);
     if (ret) {
-        error_report("Unable to copy device tree in memory");
+        error_report("%s: Unable to copy device tree into memory: %s",
+                     __func__, fdt_strerror(ret));
         goto fail;
     }
 
@@ -397,6 +399,31 @@ int qemu_fdt_setprop_string(void *fdt, const char *node_path,
     return r;
 }
 
+/*
+ * libfdt doesn't allow us to add string arrays directly but they are
+ * test a series of null terminated strings with a length. We build
+ * the string up here so we can calculate the final length.
+ */
+int qemu_fdt_setprop_string_array(void *fdt, const char *node_path,
+                                  const char *prop, char **array, int len)
+{
+    int ret, i, total_len = 0;
+    char *str, *p;
+    for (i = 0; i < len; i++) {
+        total_len += strlen(array[i]) + 1;
+    }
+    p = str = g_malloc0(total_len);
+    for (i = 0; i < len; i++) {
+        int len = strlen(array[i]) + 1;
+        pstrcpy(p, len, array[i]);
+        p += len;
+    }
+
+    ret = qemu_fdt_setprop(fdt, node_path, prop, str, total_len);
+    g_free(str);
+    return ret;
+}
+
 const void *qemu_fdt_getprop(void *fdt, const char *node_path,
                              const char *property, int *lenp, Error **errp)
 {
@@ -515,8 +542,8 @@ int qemu_fdt_add_subnode(void *fdt, const char *name)
 
     retval = fdt_add_subnode(fdt, parent, basename);
     if (retval < 0) {
-        error_report("FDT: Failed to create subnode %s: %s", name,
-                     fdt_strerror(retval));
+        error_report("%s: Failed to create subnode %s: %s",
+                     __func__, name, fdt_strerror(retval));
         exit(1);
     }
 
@@ -524,9 +551,48 @@ int qemu_fdt_add_subnode(void *fdt, const char *name)
     return retval;
 }
 
+/*
+ * qemu_fdt_add_path: Like qemu_fdt_add_subnode(), but will add
+ * all missing subnodes from the given path.
+ */
+int qemu_fdt_add_path(void *fdt, const char *path)
+{
+    const char *name;
+    int namelen, retval;
+    int parent = 0;
+
+    if (path[0] != '/') {
+        return -1;
+    }
+
+    do {
+        name = path + 1;
+        path = strchr(name, '/');
+        namelen = path != NULL ? path - name : strlen(name);
+
+        retval = fdt_subnode_offset_namelen(fdt, parent, name, namelen);
+        if (retval < 0 && retval != -FDT_ERR_NOTFOUND) {
+            error_report("%s: Unexpected error in finding subnode %.*s: %s",
+                         __func__, namelen, name, fdt_strerror(retval));
+            exit(1);
+        } else if (retval == -FDT_ERR_NOTFOUND) {
+            retval = fdt_add_subnode_namelen(fdt, parent, name, namelen);
+            if (retval < 0) {
+                error_report("%s: Failed to create subnode %.*s: %s",
+                             __func__, namelen, name, fdt_strerror(retval));
+                exit(1);
+            }
+        }
+
+        parent = retval;
+    } while (path);
+
+    return retval;
+}
+
 void qemu_fdt_dumpdtb(void *fdt, int size)
 {
-    const char *dumpdtb = qemu_opt_get(qemu_get_machine_opts(), "dumpdtb");
+    const char *dumpdtb = current_machine->dumpdtb;
 
     if (dumpdtb) {
         /* Dump the dtb to a file and quit */

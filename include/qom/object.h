@@ -616,7 +616,7 @@ Object *object_new_with_props(const char *typename,
                               Object *parent,
                               const char *id,
                               Error **errp,
-                              ...) QEMU_SENTINEL;
+                              ...) G_GNUC_NULL_TERMINATED;
 
 /**
  * object_new_with_propv:
@@ -638,7 +638,8 @@ bool object_apply_global_props(Object *obj, const GPtrArray *props,
                                Error **errp);
 void object_set_machine_compat_props(GPtrArray *compat_props);
 void object_set_accelerator_compat_props(GPtrArray *compat_props);
-void object_register_sugar_prop(const char *driver, const char *prop, const char *value);
+void object_register_sugar_prop(const char *driver, const char *prop,
+                                const char *value, bool optional);
 void object_apply_compat_props(Object *obj);
 
 /**
@@ -675,7 +676,7 @@ void object_apply_compat_props(Object *obj);
  *
  * Returns: %true on success, %false on error.
  */
-bool object_set_props(Object *obj, Error **errp, ...) QEMU_SENTINEL;
+bool object_set_props(Object *obj, Error **errp, ...) G_GNUC_NULL_TERMINATED;
 
 /**
  * object_set_propv:
@@ -727,7 +728,7 @@ void object_initialize(void *obj, size_t size, const char *typename);
 bool object_initialize_child_with_props(Object *parentobj,
                              const char *propname,
                              void *childobj, size_t size, const char *type,
-                             Error **errp, ...) QEMU_SENTINEL;
+                             Error **errp, ...) G_GNUC_NULL_TERMINATED;
 
 /**
  * object_initialize_child_with_propsv:
@@ -859,6 +860,29 @@ static void do_qemu_init_ ## type_array(void)                               \
     type_register_static_array(type_array, ARRAY_SIZE(type_array));         \
 }                                                                           \
 type_init(do_qemu_init_ ## type_array)
+
+/**
+ * type_print_class_properties:
+ * @type: a QOM class name
+ *
+ * Print the object's class properties to stdout or the monitor.
+ * Return whether an object was found.
+ */
+bool type_print_class_properties(const char *type);
+
+/**
+ * object_set_properties_from_keyval:
+ * @obj: a QOM object
+ * @qdict: a dictionary with the properties to be set
+ * @from_json: true if leaf values of @qdict are typed, false if they
+ * are strings
+ * @errp: pointer to error object
+ *
+ * For each key in the dictionary, parse the value string if needed,
+ * then set the corresponding property in @obj.
+ */
+void object_set_properties_from_keyval(Object *obj, const QDict *qdict,
+                                       bool from_json, Error **errp);
 
 /**
  * object_class_dynamic_cast_assert:
@@ -1518,6 +1542,18 @@ Object *object_resolve_path(const char *path, bool *ambiguous);
  */
 Object *object_resolve_path_type(const char *path, const char *typename,
                                  bool *ambiguous);
+
+/**
+ * object_resolve_path_at:
+ * @parent: the object in which to resolve the path
+ * @path: the path to resolve
+ *
+ * This is like object_resolve_path(), except paths not starting with
+ * a slash are relative to @parent.
+ *
+ * Returns: The resolved object or NULL on path lookup failure.
+ */
+Object *object_resolve_path_at(Object *parent, const char *path);
 
 /**
  * object_resolve_path_component:

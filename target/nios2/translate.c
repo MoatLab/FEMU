@@ -37,7 +37,6 @@
 /* is_jmp field values */
 #define DISAS_JUMP    DISAS_TARGET_0 /* only pc was modified dynamically */
 #define DISAS_UPDATE  DISAS_TARGET_1 /* cpu state was modified dynamically */
-#define DISAS_TB_JUMP DISAS_TARGET_2 /* only pc was modified statically */
 
 #define INSTRUCTION_FLG(func, flags) { (func), (flags) }
 #define INSTRUCTION(func)                  \
@@ -98,15 +97,13 @@
     }
 
 typedef struct DisasContext {
-    TCGv_ptr          cpu_env;
-    TCGv             *cpu_R;
+    DisasContextBase  base;
     TCGv_i32          zero;
-    int               is_jmp;
     target_ulong      pc;
-    TranslationBlock *tb;
     int               mem_idx;
-    bool              singlestep_enabled;
 } DisasContext;
+
+static TCGv cpu_R[NUM_CORE_REGS];
 
 typedef struct Nios2Instruction {
     void     (*handler)(DisasContext *dc, uint32_t code, uint32_t flags);
@@ -136,7 +133,7 @@ static TCGv load_zero(DisasContext *dc)
 static TCGv load_gpr(DisasContext *dc, uint8_t reg)
 {
     if (likely(reg != R_ZERO)) {
-        return dc->cpu_R[reg];
+        return cpu_R[reg];
     } else {
         return load_zero(dc);
     }
@@ -147,35 +144,22 @@ static void t_gen_helper_raise_exception(DisasContext *dc,
 {
     TCGv_i32 tmp = tcg_const_i32(index);
 
-    tcg_gen_movi_tl(dc->cpu_R[R_PC], dc->pc);
-    gen_helper_raise_exception(dc->cpu_env, tmp);
+    tcg_gen_movi_tl(cpu_R[R_PC], dc->pc);
+    gen_helper_raise_exception(cpu_env, tmp);
     tcg_temp_free_i32(tmp);
-    dc->is_jmp = DISAS_NORETURN;
-}
-
-static bool use_goto_tb(DisasContext *dc, uint32_t dest)
-{
-    if (unlikely(dc->singlestep_enabled)) {
-        return false;
-    }
-
-#ifndef CONFIG_USER_ONLY
-    return (dc->tb->pc & TARGET_PAGE_MASK) == (dest & TARGET_PAGE_MASK);
-#else
-    return true;
-#endif
+    dc->base.is_jmp = DISAS_NORETURN;
 }
 
 static void gen_goto_tb(DisasContext *dc, int n, uint32_t dest)
 {
-    TranslationBlock *tb = dc->tb;
+    const TranslationBlock *tb = dc->base.tb;
 
-    if (use_goto_tb(dc, dest)) {
+    if (translator_use_goto_tb(&dc->base, dest)) {
         tcg_gen_goto_tb(n);
-        tcg_gen_movi_tl(dc->cpu_R[R_PC], dest);
+        tcg_gen_movi_tl(cpu_R[R_PC], dest);
         tcg_gen_exit_tb(tb, n);
     } else {
-        tcg_gen_movi_tl(dc->cpu_R[R_PC], dest);
+        tcg_gen_movi_tl(cpu_R[R_PC], dest);
         tcg_gen_exit_tb(NULL, 0);
     }
 }
@@ -187,7 +171,7 @@ static void gen_excp(DisasContext *dc, uint32_t code, uint32_t flags)
 
 static void gen_check_supervisor(DisasContext *dc)
 {
-    if (dc->tb->flags & CR_STATUS_U) {
+    if (dc->base.tb->flags & CR_STATUS_U) {
         /* CPU in user mode, privileged instruction called, stop. */
         t_gen_helper_raise_exception(dc, EXCP_SUPERI);
     }
@@ -209,12 +193,12 @@ static void jmpi(DisasContext *dc, uint32_t code, uint32_t flags)
 {
     J_TYPE(instr, code);
     gen_goto_tb(dc, 0, (dc->pc & 0xF0000000) | (instr.imm26 << 2));
-    dc->is_jmp = DISAS_TB_JUMP;
+    dc->base.is_jmp = DISAS_NORETURN;
 }
 
 static void call(DisasContext *dc, uint32_t code, uint32_t flags)
 {
-    tcg_gen_movi_tl(dc->cpu_R[R_RA], dc->pc + 4);
+    tcg_gen_movi_tl(cpu_R[R_RA], dc->base.pc_next);
     jmpi(dc, code, flags);
 }
 
@@ -236,7 +220,7 @@ static void gen_ldx(DisasContext *dc, uint32_t code, uint32_t flags)
      *          the Nios2 CPU.
      */
     if (likely(instr.b != R_ZERO)) {
-        data = dc->cpu_R[instr.b];
+        data = cpu_R[instr.b];
     } else {
         data = tcg_temp_new();
     }
@@ -268,8 +252,8 @@ static void br(DisasContext *dc, uint32_t code, uint32_t flags)
 {
     I_TYPE(instr, code);
 
-    gen_goto_tb(dc, 0, dc->pc + 4 + (instr.imm16.s & -4));
-    dc->is_jmp = DISAS_TB_JUMP;
+    gen_goto_tb(dc, 0, dc->base.pc_next + (instr.imm16.s & -4));
+    dc->base.is_jmp = DISAS_NORETURN;
 }
 
 static void gen_bxx(DisasContext *dc, uint32_t code, uint32_t flags)
@@ -277,11 +261,11 @@ static void gen_bxx(DisasContext *dc, uint32_t code, uint32_t flags)
     I_TYPE(instr, code);
 
     TCGLabel *l1 = gen_new_label();
-    tcg_gen_brcond_tl(flags, dc->cpu_R[instr.a], dc->cpu_R[instr.b], l1);
-    gen_goto_tb(dc, 0, dc->pc + 4);
+    tcg_gen_brcond_tl(flags, cpu_R[instr.a], cpu_R[instr.b], l1);
+    gen_goto_tb(dc, 0, dc->base.pc_next);
     gen_set_label(l1);
-    gen_goto_tb(dc, 1, dc->pc + 4 + (instr.imm16.s & -4));
-    dc->is_jmp = DISAS_TB_JUMP;
+    gen_goto_tb(dc, 1, dc->base.pc_next + (instr.imm16.s & -4));
+    dc->base.is_jmp = DISAS_NORETURN;
 }
 
 /* Comparison instructions */
@@ -289,8 +273,7 @@ static void gen_bxx(DisasContext *dc, uint32_t code, uint32_t flags)
 static void (fname)(DisasContext *dc, uint32_t code, uint32_t flags)         \
 {                                                                            \
     I_TYPE(instr, (code));                                                   \
-    tcg_gen_setcondi_tl(flags, (dc)->cpu_R[instr.b], (dc)->cpu_R[instr.a],   \
-                        (op3));                                              \
+    tcg_gen_setcondi_tl(flags, cpu_R[instr.b], cpu_R[instr.a], (op3));       \
 }
 
 gen_i_cmpxx(gen_cmpxxsi, instr.imm16.s)
@@ -304,10 +287,9 @@ static void (fname)(DisasContext *dc, uint32_t code, uint32_t flags)        \
     if (unlikely(instr.b == R_ZERO)) { /* Store to R_ZERO is ignored */     \
         return;                                                             \
     } else if (instr.a == R_ZERO) { /* MOVxI optimizations */               \
-        tcg_gen_movi_tl(dc->cpu_R[instr.b], (resimm) ? (op3) : 0);          \
+        tcg_gen_movi_tl(cpu_R[instr.b], (resimm) ? (op3) : 0);              \
     } else {                                                                \
-        tcg_gen_##insn##_tl((dc)->cpu_R[instr.b], (dc)->cpu_R[instr.a],     \
-                            (op3));                                         \
+        tcg_gen_##insn##_tl(cpu_R[instr.b], cpu_R[instr.a], (op3));         \
     }                                                                       \
 }
 
@@ -402,26 +384,26 @@ static const Nios2Instruction i_type_instructions[] = {
  */
 static void eret(DisasContext *dc, uint32_t code, uint32_t flags)
 {
-    tcg_gen_mov_tl(dc->cpu_R[CR_STATUS], dc->cpu_R[CR_ESTATUS]);
-    tcg_gen_mov_tl(dc->cpu_R[R_PC], dc->cpu_R[R_EA]);
+    tcg_gen_mov_tl(cpu_R[CR_STATUS], cpu_R[CR_ESTATUS]);
+    tcg_gen_mov_tl(cpu_R[R_PC], cpu_R[R_EA]);
 
-    dc->is_jmp = DISAS_JUMP;
+    dc->base.is_jmp = DISAS_JUMP;
 }
 
 /* PC <- ra */
 static void ret(DisasContext *dc, uint32_t code, uint32_t flags)
 {
-    tcg_gen_mov_tl(dc->cpu_R[R_PC], dc->cpu_R[R_RA]);
+    tcg_gen_mov_tl(cpu_R[R_PC], cpu_R[R_RA]);
 
-    dc->is_jmp = DISAS_JUMP;
+    dc->base.is_jmp = DISAS_JUMP;
 }
 
 /* PC <- ba */
 static void bret(DisasContext *dc, uint32_t code, uint32_t flags)
 {
-    tcg_gen_mov_tl(dc->cpu_R[R_PC], dc->cpu_R[R_BA]);
+    tcg_gen_mov_tl(cpu_R[R_PC], cpu_R[R_BA]);
 
-    dc->is_jmp = DISAS_JUMP;
+    dc->base.is_jmp = DISAS_JUMP;
 }
 
 /* PC <- rA */
@@ -429,9 +411,9 @@ static void jmp(DisasContext *dc, uint32_t code, uint32_t flags)
 {
     R_TYPE(instr, code);
 
-    tcg_gen_mov_tl(dc->cpu_R[R_PC], load_gpr(dc, instr.a));
+    tcg_gen_mov_tl(cpu_R[R_PC], load_gpr(dc, instr.a));
 
-    dc->is_jmp = DISAS_JUMP;
+    dc->base.is_jmp = DISAS_JUMP;
 }
 
 /* rC <- PC + 4 */
@@ -440,7 +422,7 @@ static void nextpc(DisasContext *dc, uint32_t code, uint32_t flags)
     R_TYPE(instr, code);
 
     if (likely(instr.c != R_ZERO)) {
-        tcg_gen_movi_tl(dc->cpu_R[instr.c], dc->pc + 4);
+        tcg_gen_movi_tl(cpu_R[instr.c], dc->base.pc_next);
     }
 }
 
@@ -452,10 +434,10 @@ static void callr(DisasContext *dc, uint32_t code, uint32_t flags)
 {
     R_TYPE(instr, code);
 
-    tcg_gen_mov_tl(dc->cpu_R[R_PC], load_gpr(dc, instr.a));
-    tcg_gen_movi_tl(dc->cpu_R[R_RA], dc->pc + 4);
+    tcg_gen_mov_tl(cpu_R[R_PC], load_gpr(dc, instr.a));
+    tcg_gen_movi_tl(cpu_R[R_RA], dc->base.pc_next);
 
-    dc->is_jmp = DISAS_JUMP;
+    dc->base.is_jmp = DISAS_JUMP;
 }
 
 /* rC <- ctlN */
@@ -465,28 +447,24 @@ static void rdctl(DisasContext *dc, uint32_t code, uint32_t flags)
 
     gen_check_supervisor(dc);
 
-    switch (instr.imm5 + CR_BASE) {
-    case CR_PTEADDR:
-    case CR_TLBACC:
-    case CR_TLBMISC:
-    {
-#if !defined(CONFIG_USER_ONLY)
-        if (likely(instr.c != R_ZERO)) {
-            tcg_gen_mov_tl(dc->cpu_R[instr.c], dc->cpu_R[instr.imm5 + CR_BASE]);
-#ifdef DEBUG_MMU
-            TCGv_i32 tmp = tcg_const_i32(instr.imm5 + CR_BASE);
-            gen_helper_mmu_read_debug(dc->cpu_R[instr.c], dc->cpu_env, tmp);
-            tcg_temp_free_i32(tmp);
-#endif
-        }
-#endif
-        break;
+    if (unlikely(instr.c == R_ZERO)) {
+        return;
     }
 
+    switch (instr.imm5 + CR_BASE) {
+    case CR_IPENDING:
+        /*
+         * The value of the ipending register is synthetic.
+         * In hw, this is the AND of a set of hardware irq lines
+         * with the ienable register.  In qemu, we re-use the space
+         * of CR_IPENDING to store the set of irq lines, and so we
+         * must perform the AND here, and anywhere else we need the
+         * guest value of ipending.
+         */
+        tcg_gen_and_tl(cpu_R[instr.c], cpu_R[CR_IPENDING], cpu_R[CR_IENABLE]);
+        break;
     default:
-        if (likely(instr.c != R_ZERO)) {
-            tcg_gen_mov_tl(dc->cpu_R[instr.c], dc->cpu_R[instr.imm5 + CR_BASE]);
-        }
+        tcg_gen_mov_tl(cpu_R[instr.c], cpu_R[instr.imm5 + CR_BASE]);
         break;
     }
 }
@@ -494,36 +472,33 @@ static void rdctl(DisasContext *dc, uint32_t code, uint32_t flags)
 /* ctlN <- rA */
 static void wrctl(DisasContext *dc, uint32_t code, uint32_t flags)
 {
-    R_TYPE(instr, code);
-
     gen_check_supervisor(dc);
+
+#ifndef CONFIG_USER_ONLY
+    R_TYPE(instr, code);
+    TCGv v = load_gpr(dc, instr.a);
 
     switch (instr.imm5 + CR_BASE) {
     case CR_PTEADDR:
+        gen_helper_mmu_write_pteaddr(cpu_env, v);
+        break;
     case CR_TLBACC:
+        gen_helper_mmu_write_tlbacc(cpu_env, v);
+        break;
     case CR_TLBMISC:
-    {
-#if !defined(CONFIG_USER_ONLY)
-        TCGv_i32 tmp = tcg_const_i32(instr.imm5 + CR_BASE);
-        gen_helper_mmu_write(dc->cpu_env, tmp, load_gpr(dc, instr.a));
-        tcg_temp_free_i32(tmp);
-#endif
+        gen_helper_mmu_write_tlbmisc(cpu_env, v);
         break;
-    }
-
+    case CR_IPENDING:
+        /* ipending is read only, writes ignored. */
+        break;
+    case CR_STATUS:
+    case CR_IENABLE:
+        /* If interrupts were enabled using WRCTL, trigger them. */
+        dc->base.is_jmp = DISAS_UPDATE;
+        /* fall through */
     default:
-        tcg_gen_mov_tl(dc->cpu_R[instr.imm5 + CR_BASE], load_gpr(dc, instr.a));
+        tcg_gen_mov_tl(cpu_R[instr.imm5 + CR_BASE], v);
         break;
-    }
-
-    /* If interrupts were enabled using WRCTL, trigger them. */
-#if !defined(CONFIG_USER_ONLY)
-    if ((instr.imm5 + CR_BASE) == CR_STATUS) {
-        if (tb_cflags(dc->tb) & CF_USE_ICOUNT) {
-            gen_io_start();
-        }
-        gen_helper_check_interrupts(dc->cpu_env);
-        dc->is_jmp = DISAS_UPDATE;
     }
 #endif
 }
@@ -533,8 +508,8 @@ static void gen_cmpxx(DisasContext *dc, uint32_t code, uint32_t flags)
 {
     R_TYPE(instr, code);
     if (likely(instr.c != R_ZERO)) {
-        tcg_gen_setcond_tl(flags, dc->cpu_R[instr.c], dc->cpu_R[instr.a],
-                           dc->cpu_R[instr.b]);
+        tcg_gen_setcond_tl(flags, cpu_R[instr.c], cpu_R[instr.a],
+                           cpu_R[instr.b]);
     }
 }
 
@@ -544,8 +519,7 @@ static void (fname)(DisasContext *dc, uint32_t code, uint32_t flags)       \
 {                                                                          \
     R_TYPE(instr, (code));                                                 \
     if (likely(instr.c != R_ZERO)) {                                       \
-        tcg_gen_##insn((dc)->cpu_R[instr.c], load_gpr((dc), instr.a),      \
-                       (op3));                                             \
+        tcg_gen_##insn(cpu_R[instr.c], load_gpr((dc), instr.a), (op3));    \
     }                                                                      \
 }
 
@@ -569,8 +543,8 @@ static void (fname)(DisasContext *dc, uint32_t code, uint32_t flags)   \
     R_TYPE(instr, (code));                                             \
     if (likely(instr.c != R_ZERO)) {                                   \
         TCGv t0 = tcg_temp_new();                                      \
-        tcg_gen_##insn(t0, dc->cpu_R[instr.c],                         \
-                       load_gpr(dc, instr.a), load_gpr(dc, instr.b)); \
+        tcg_gen_##insn(t0, cpu_R[instr.c],                             \
+                       load_gpr(dc, instr.a), load_gpr(dc, instr.b));  \
         tcg_temp_free(t0);                                             \
     }                                                                  \
 }
@@ -586,7 +560,7 @@ static void (fname)(DisasContext *dc, uint32_t code, uint32_t flags)       \
     if (likely(instr.c != R_ZERO)) {                                       \
         TCGv t0 = tcg_temp_new();                                          \
         tcg_gen_andi_tl(t0, load_gpr((dc), instr.b), 31);                  \
-        tcg_gen_##insn((dc)->cpu_R[instr.c], load_gpr((dc), instr.a), t0); \
+        tcg_gen_##insn(cpu_R[instr.c], load_gpr((dc), instr.a), t0);       \
         tcg_temp_free(t0);                                                 \
     }                                                                      \
 }
@@ -620,8 +594,8 @@ static void divs(DisasContext *dc, uint32_t code, uint32_t flags)
     tcg_gen_or_tl(t2, t2, t3);
     tcg_gen_movi_tl(t3, 0);
     tcg_gen_movcond_tl(TCG_COND_NE, t1, t2, t3, t2, t1);
-    tcg_gen_div_tl(dc->cpu_R[instr.c], t0, t1);
-    tcg_gen_ext32s_tl(dc->cpu_R[instr.c], dc->cpu_R[instr.c]);
+    tcg_gen_div_tl(cpu_R[instr.c], t0, t1);
+    tcg_gen_ext32s_tl(cpu_R[instr.c], cpu_R[instr.c]);
 
     tcg_temp_free(t3);
     tcg_temp_free(t2);
@@ -646,13 +620,28 @@ static void divu(DisasContext *dc, uint32_t code, uint32_t flags)
     tcg_gen_ext32u_tl(t0, load_gpr(dc, instr.a));
     tcg_gen_ext32u_tl(t1, load_gpr(dc, instr.b));
     tcg_gen_movcond_tl(TCG_COND_EQ, t1, t1, t2, t3, t1);
-    tcg_gen_divu_tl(dc->cpu_R[instr.c], t0, t1);
-    tcg_gen_ext32s_tl(dc->cpu_R[instr.c], dc->cpu_R[instr.c]);
+    tcg_gen_divu_tl(cpu_R[instr.c], t0, t1);
+    tcg_gen_ext32s_tl(cpu_R[instr.c], cpu_R[instr.c]);
 
     tcg_temp_free(t3);
     tcg_temp_free(t2);
     tcg_temp_free(t1);
     tcg_temp_free(t0);
+}
+
+static void trap(DisasContext *dc, uint32_t code, uint32_t flags)
+{
+#ifdef CONFIG_USER_ONLY
+    /*
+     * The imm5 field is not stored anywhere on real hw; the kernel
+     * has to load the insn and extract the field.  But we can make
+     * things easier for cpu_loop if we pop this into env->error_code.
+     */
+    R_TYPE(instr, code);
+    tcg_gen_st_i32(tcg_constant_i32(instr.imm5), cpu_env,
+                   offsetof(CPUNios2State, error_code));
+#endif
+    t_gen_helper_raise_exception(dc, EXCP_TRAP);
 }
 
 static const Nios2Instruction r_type_instructions[] = {
@@ -701,7 +690,7 @@ static const Nios2Instruction r_type_instructions[] = {
     INSTRUCTION_ILLEGAL(),
     INSTRUCTION_ILLEGAL(),
     INSTRUCTION_ILLEGAL(),
-    INSTRUCTION_FLG(gen_excp, EXCP_TRAP),             /* trap */
+    INSTRUCTION(trap),                                /* trap */
     INSTRUCTION(wrctl),                               /* wrctl */
     INSTRUCTION_ILLEGAL(),
     INSTRUCTION_FLG(gen_cmpxx, TCG_COND_LTU),         /* cmpltu */
@@ -741,41 +730,6 @@ illegal_op:
     t_gen_helper_raise_exception(dc, EXCP_ILLEGAL);
 }
 
-static void handle_instruction(DisasContext *dc, CPUNios2State *env)
-{
-    uint32_t code;
-    uint8_t op;
-    const Nios2Instruction *instr;
-#if defined(CONFIG_USER_ONLY)
-    /* FIXME: Is this needed ? */
-    if (dc->pc >= 0x1000 && dc->pc < 0x2000) {
-        env->regs[R_PC] = dc->pc;
-        t_gen_helper_raise_exception(dc, 0xaa);
-        return;
-    }
-#endif
-    code = cpu_ldl_code(env, dc->pc);
-    op = get_opcode(code);
-
-    if (unlikely(op >= ARRAY_SIZE(i_type_instructions))) {
-        goto illegal_op;
-    }
-
-    dc->zero = NULL;
-
-    instr = &i_type_instructions[op];
-    instr->handler(dc, code, instr->flags);
-
-    if (dc->zero) {
-        tcg_temp_free(dc->zero);
-    }
-
-    return;
-
-illegal_op:
-    t_gen_helper_raise_exception(dc, EXCP_ILLEGAL);
-}
-
 static const char * const regnames[] = {
     "zero",       "at",         "r2",         "r3",
     "r4",         "r5",         "r6",         "r7",
@@ -796,115 +750,108 @@ static const char * const regnames[] = {
     "rpc"
 };
 
-static TCGv cpu_R[NUM_CORE_REGS];
-
 #include "exec/gen-icount.h"
 
-static void gen_exception(DisasContext *dc, uint32_t excp)
+/* generate intermediate code for basic block 'tb'.  */
+static void nios2_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
 {
-    TCGv_i32 tmp = tcg_const_i32(excp);
+    DisasContext *dc = container_of(dcbase, DisasContext, base);
+    CPUNios2State *env = cs->env_ptr;
+    int page_insns;
 
-    tcg_gen_movi_tl(cpu_R[R_PC], dc->pc);
-    gen_helper_raise_exception(cpu_env, tmp);
-    tcg_temp_free_i32(tmp);
-    dc->is_jmp = DISAS_NORETURN;
+    dc->mem_idx = cpu_mmu_index(env, false);
+
+    /* Bound the number of insns to execute to those left on the page.  */
+    page_insns = -(dc->base.pc_first | TARGET_PAGE_MASK) / 4;
+    dc->base.max_insns = MIN(page_insns, dc->base.max_insns);
 }
 
-/* generate intermediate code for basic block 'tb'.  */
-void gen_intermediate_code(CPUState *cs, TranslationBlock *tb, int max_insns)
+static void nios2_tr_tb_start(DisasContextBase *db, CPUState *cs)
 {
+}
+
+static void nios2_tr_insn_start(DisasContextBase *dcbase, CPUState *cs)
+{
+    tcg_gen_insn_start(dcbase->pc_next);
+}
+
+static void nios2_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
+{
+    DisasContext *dc = container_of(dcbase, DisasContext, base);
     CPUNios2State *env = cs->env_ptr;
-    DisasContext dc1, *dc = &dc1;
-    int num_insns;
+    const Nios2Instruction *instr;
+    uint32_t code, pc;
+    uint8_t op;
 
-    /* Initialize DC */
-    dc->cpu_env = cpu_env;
-    dc->cpu_R   = cpu_R;
-    dc->is_jmp  = DISAS_NEXT;
-    dc->pc      = tb->pc;
-    dc->tb      = tb;
-    dc->mem_idx = cpu_mmu_index(env, false);
-    dc->singlestep_enabled = cs->singlestep_enabled;
+    pc = dc->base.pc_next;
+    dc->pc = pc;
+    dc->base.pc_next = pc + 4;
 
-    /* Set up instruction counts */
-    num_insns = 0;
-    if (max_insns > 1) {
-        int page_insns = (TARGET_PAGE_SIZE - (tb->pc & TARGET_PAGE_MASK)) / 4;
-        if (max_insns > page_insns) {
-            max_insns = page_insns;
-        }
+    /* Decode an instruction */
+    code = cpu_ldl_code(env, pc);
+    op = get_opcode(code);
+
+    if (unlikely(op >= ARRAY_SIZE(i_type_instructions))) {
+        t_gen_helper_raise_exception(dc, EXCP_ILLEGAL);
+        return;
     }
 
-    gen_tb_start(tb);
-    do {
-        tcg_gen_insn_start(dc->pc);
-        num_insns++;
+    dc->zero = NULL;
 
-        if (unlikely(cpu_breakpoint_test(cs, dc->pc, BP_ANY))) {
-            gen_exception(dc, EXCP_DEBUG);
-            /* The address covered by the breakpoint must be included in
-               [tb->pc, tb->pc + tb->size) in order to for it to be
-               properly cleared -- thus we increment the PC here so that
-               the logic setting tb->size below does the right thing.  */
-            dc->pc += 4;
-            break;
-        }
+    instr = &i_type_instructions[op];
+    instr->handler(dc, code, instr->flags);
 
-        if (num_insns == max_insns && (tb_cflags(tb) & CF_LAST_IO)) {
-            gen_io_start();
-        }
+    if (dc->zero) {
+        tcg_temp_free(dc->zero);
+    }
+}
 
-        /* Decode an instruction */
-        handle_instruction(dc, env);
-
-        dc->pc += 4;
-
-        /* Translation stops when a conditional branch is encountered.
-         * Otherwise the subsequent code could get translated several times.
-         * Also stop translation when a page boundary is reached.  This
-         * ensures prefetch aborts occur at the right place.  */
-    } while (!dc->is_jmp &&
-             !tcg_op_buf_full() &&
-             num_insns < max_insns);
+static void nios2_tr_tb_stop(DisasContextBase *dcbase, CPUState *cs)
+{
+    DisasContext *dc = container_of(dcbase, DisasContext, base);
 
     /* Indicate where the next block should start */
-    switch (dc->is_jmp) {
-    case DISAS_NEXT:
+    switch (dc->base.is_jmp) {
+    case DISAS_TOO_MANY:
     case DISAS_UPDATE:
         /* Save the current PC back into the CPU register */
-        tcg_gen_movi_tl(cpu_R[R_PC], dc->pc);
+        tcg_gen_movi_tl(cpu_R[R_PC], dc->base.pc_next);
         tcg_gen_exit_tb(NULL, 0);
         break;
 
-    default:
     case DISAS_JUMP:
         /* The jump will already have updated the PC register */
         tcg_gen_exit_tb(NULL, 0);
         break;
 
     case DISAS_NORETURN:
-    case DISAS_TB_JUMP:
         /* nothing more to generate */
         break;
+
+    default:
+        g_assert_not_reached();
     }
+}
 
-    /* End off the block */
-    gen_tb_end(tb, num_insns);
+static void nios2_tr_disas_log(const DisasContextBase *dcbase, CPUState *cpu)
+{
+    qemu_log("IN: %s\n", lookup_symbol(dcbase->pc_first));
+    log_target_disas(cpu, dcbase->pc_first, dcbase->tb->size);
+}
 
-    /* Mark instruction starts for the final generated instruction */
-    tb->size = dc->pc - tb->pc;
-    tb->icount = num_insns;
+static const TranslatorOps nios2_tr_ops = {
+    .init_disas_context = nios2_tr_init_disas_context,
+    .tb_start           = nios2_tr_tb_start,
+    .insn_start         = nios2_tr_insn_start,
+    .translate_insn     = nios2_tr_translate_insn,
+    .tb_stop            = nios2_tr_tb_stop,
+    .disas_log          = nios2_tr_disas_log,
+};
 
-#ifdef DEBUG_DISAS
-    if (qemu_loglevel_mask(CPU_LOG_TB_IN_ASM)
-        && qemu_log_in_addr_range(tb->pc)) {
-        FILE *logfile = qemu_log_lock();
-        qemu_log("IN: %s\n", lookup_symbol(tb->pc));
-        log_target_disas(cs, tb->pc, dc->pc - tb->pc);
-        qemu_log("\n");
-        qemu_log_unlock(logfile);
-    }
-#endif
+void gen_intermediate_code(CPUState *cs, TranslationBlock *tb, int max_insns)
+{
+    DisasContext dc;
+    translator_loop(&nios2_tr_ops, &dc.base, cs, tb, max_insns);
 }
 
 void nios2_cpu_dump_state(CPUState *cs, FILE *f, int flags)

@@ -20,7 +20,6 @@
 #include "qemu/osdep.h"
 #include "cpu.h"
 #include "sysemu/cpus.h"
-#include "sysemu/cpu-timers.h"
 #include "disas/disas.h"
 #include "qemu/host-utils.h"
 #include "exec/exec-all.h"
@@ -28,7 +27,6 @@
 #include "exec/cpu_ldst.h"
 #include "exec/helper-proto.h"
 #include "exec/helper-gen.h"
-#include "trace-tcg.h"
 #include "exec/translator.h"
 #include "exec/log.h"
 
@@ -46,7 +44,9 @@ typedef struct DisasContext DisasContext;
 struct DisasContext {
     DisasContextBase base;
 
-#ifndef CONFIG_USER_ONLY
+#ifdef CONFIG_USER_ONLY
+    MemOp unalign;
+#else
     uint64_t palbr;
 #endif
     uint32_t tbflags;
@@ -67,9 +67,13 @@ struct DisasContext {
     /* Temporaries for $31 and $f31 as source and destination.  */
     TCGv zero;
     TCGv sink;
-    /* Temporary for immediate constants.  */
-    TCGv lit;
 };
+
+#ifdef CONFIG_USER_ONLY
+#define UNALIGN(C)  (C)->unalign
+#else
+#define UNALIGN(C)  0
+#endif
 
 /* Target-specific return values from translate_one, indicating the
    state of the TB.  Note that DISAS_NEXT indicates that we are not
@@ -158,7 +162,7 @@ void alpha_translate_init(void)
 static TCGv load_zero(DisasContext *ctx)
 {
     if (!ctx->zero) {
-        ctx->zero = tcg_const_i64(0);
+        ctx->zero = tcg_constant_i64(0);
     }
     return ctx->zero;
 }
@@ -178,14 +182,6 @@ static void free_context_temps(DisasContext *ctx)
         tcg_temp_free(ctx->sink);
         ctx->sink = NULL;
     }
-    if (ctx->zero) {
-        tcg_temp_free(ctx->zero);
-        ctx->zero = NULL;
-    }
-    if (ctx->lit) {
-        tcg_temp_free(ctx->lit);
-        ctx->lit = NULL;
-    }
 }
 
 static TCGv load_gpr(DisasContext *ctx, unsigned reg)
@@ -201,8 +197,7 @@ static TCGv load_gpr_lit(DisasContext *ctx, unsigned reg,
                          uint8_t lit, bool islit)
 {
     if (islit) {
-        ctx->lit = tcg_const_i64(lit);
-        return ctx->lit;
+        return tcg_constant_i64(lit);
     } else if (likely(reg < 31)) {
         return ctx->ir[reg];
     } else {
@@ -262,11 +257,9 @@ static void gen_excp_1(int exception, int error_code)
 {
     TCGv_i32 tmp1, tmp2;
 
-    tmp1 = tcg_const_i32(exception);
-    tmp2 = tcg_const_i32(error_code);
+    tmp1 = tcg_constant_i32(exception);
+    tmp2 = tcg_constant_i32(error_code);
     gen_helper_excp(cpu_env, tmp1, tmp2);
-    tcg_temp_free_i32(tmp2);
-    tcg_temp_free_i32(tmp1);
 }
 
 static DisasJumpType gen_excp(DisasContext *ctx, int exception, int error_code)
@@ -281,51 +274,51 @@ static inline DisasJumpType gen_invalid(DisasContext *ctx)
     return gen_excp(ctx, EXCP_OPCDEC, 0);
 }
 
-static inline void gen_qemu_ldf(TCGv t0, TCGv t1, int flags)
+static void gen_ldf(DisasContext *ctx, TCGv dest, TCGv addr)
 {
     TCGv_i32 tmp32 = tcg_temp_new_i32();
-    tcg_gen_qemu_ld_i32(tmp32, t1, flags, MO_LEUL);
-    gen_helper_memory_to_f(t0, tmp32);
+    tcg_gen_qemu_ld_i32(tmp32, addr, ctx->mem_idx, MO_LEUL | UNALIGN(ctx));
+    gen_helper_memory_to_f(dest, tmp32);
     tcg_temp_free_i32(tmp32);
 }
 
-static inline void gen_qemu_ldg(TCGv t0, TCGv t1, int flags)
+static void gen_ldg(DisasContext *ctx, TCGv dest, TCGv addr)
 {
     TCGv tmp = tcg_temp_new();
-    tcg_gen_qemu_ld_i64(tmp, t1, flags, MO_LEQ);
-    gen_helper_memory_to_g(t0, tmp);
+    tcg_gen_qemu_ld_i64(tmp, addr, ctx->mem_idx, MO_LEUQ | UNALIGN(ctx));
+    gen_helper_memory_to_g(dest, tmp);
     tcg_temp_free(tmp);
 }
 
-static inline void gen_qemu_lds(TCGv t0, TCGv t1, int flags)
+static void gen_lds(DisasContext *ctx, TCGv dest, TCGv addr)
 {
     TCGv_i32 tmp32 = tcg_temp_new_i32();
-    tcg_gen_qemu_ld_i32(tmp32, t1, flags, MO_LEUL);
-    gen_helper_memory_to_s(t0, tmp32);
+    tcg_gen_qemu_ld_i32(tmp32, addr, ctx->mem_idx, MO_LEUL | UNALIGN(ctx));
+    gen_helper_memory_to_s(dest, tmp32);
     tcg_temp_free_i32(tmp32);
 }
 
-static inline void gen_qemu_ldl_l(TCGv t0, TCGv t1, int flags)
+static void gen_ldt(DisasContext *ctx, TCGv dest, TCGv addr)
 {
-    tcg_gen_qemu_ld_i64(t0, t1, flags, MO_LESL);
-    tcg_gen_mov_i64(cpu_lock_addr, t1);
-    tcg_gen_mov_i64(cpu_lock_value, t0);
+    tcg_gen_qemu_ld_i64(dest, addr, ctx->mem_idx, MO_LEUQ | UNALIGN(ctx));
 }
 
-static inline void gen_qemu_ldq_l(TCGv t0, TCGv t1, int flags)
+static void gen_load_fp(DisasContext *ctx, int ra, int rb, int32_t disp16,
+                        void (*func)(DisasContext *, TCGv, TCGv))
 {
-    tcg_gen_qemu_ld_i64(t0, t1, flags, MO_LEQ);
-    tcg_gen_mov_i64(cpu_lock_addr, t1);
-    tcg_gen_mov_i64(cpu_lock_value, t0);
+    /* Loads to $f31 are prefetches, which we can treat as nops. */
+    if (likely(ra != 31)) {
+        TCGv addr = tcg_temp_new();
+        tcg_gen_addi_i64(addr, load_gpr(ctx, rb), disp16);
+        func(ctx, cpu_fir[ra], addr);
+        tcg_temp_free(addr);
+    }
 }
 
-static inline void gen_load_mem(DisasContext *ctx,
-                                void (*tcg_gen_qemu_load)(TCGv t0, TCGv t1,
-                                                          int flags),
-                                int ra, int rb, int32_t disp16, bool fp,
-                                bool clear)
+static void gen_load_int(DisasContext *ctx, int ra, int rb, int32_t disp16,
+                         MemOp op, bool clear, bool locked)
 {
-    TCGv tmp, addr, va;
+    TCGv addr, dest;
 
     /* LDQ_U with ra $31 is UNOP.  Other various loads are forms of
        prefetches, which we can treat as nops.  No worries about
@@ -334,72 +327,79 @@ static inline void gen_load_mem(DisasContext *ctx,
         return;
     }
 
-    tmp = tcg_temp_new();
-    addr = load_gpr(ctx, rb);
-
-    if (disp16) {
-        tcg_gen_addi_i64(tmp, addr, disp16);
-        addr = tmp;
-    }
+    addr = tcg_temp_new();
+    tcg_gen_addi_i64(addr, load_gpr(ctx, rb), disp16);
     if (clear) {
-        tcg_gen_andi_i64(tmp, addr, ~0x7);
-        addr = tmp;
+        tcg_gen_andi_i64(addr, addr, ~0x7);
+    } else if (!locked) {
+        op |= UNALIGN(ctx);
     }
 
-    va = (fp ? cpu_fir[ra] : ctx->ir[ra]);
-    tcg_gen_qemu_load(va, addr, ctx->mem_idx);
+    dest = ctx->ir[ra];
+    tcg_gen_qemu_ld_i64(dest, addr, ctx->mem_idx, op);
 
-    tcg_temp_free(tmp);
+    if (locked) {
+        tcg_gen_mov_i64(cpu_lock_addr, addr);
+        tcg_gen_mov_i64(cpu_lock_value, dest);
+    }
+    tcg_temp_free(addr);
 }
 
-static inline void gen_qemu_stf(TCGv t0, TCGv t1, int flags)
+static void gen_stf(DisasContext *ctx, TCGv src, TCGv addr)
 {
     TCGv_i32 tmp32 = tcg_temp_new_i32();
-    gen_helper_f_to_memory(tmp32, t0);
-    tcg_gen_qemu_st_i32(tmp32, t1, flags, MO_LEUL);
+    gen_helper_f_to_memory(tmp32, addr);
+    tcg_gen_qemu_st_i32(tmp32, addr, ctx->mem_idx, MO_LEUL | UNALIGN(ctx));
     tcg_temp_free_i32(tmp32);
 }
 
-static inline void gen_qemu_stg(TCGv t0, TCGv t1, int flags)
+static void gen_stg(DisasContext *ctx, TCGv src, TCGv addr)
 {
     TCGv tmp = tcg_temp_new();
-    gen_helper_g_to_memory(tmp, t0);
-    tcg_gen_qemu_st_i64(tmp, t1, flags, MO_LEQ);
+    gen_helper_g_to_memory(tmp, src);
+    tcg_gen_qemu_st_i64(tmp, addr, ctx->mem_idx, MO_LEUQ | UNALIGN(ctx));
     tcg_temp_free(tmp);
 }
 
-static inline void gen_qemu_sts(TCGv t0, TCGv t1, int flags)
+static void gen_sts(DisasContext *ctx, TCGv src, TCGv addr)
 {
     TCGv_i32 tmp32 = tcg_temp_new_i32();
-    gen_helper_s_to_memory(tmp32, t0);
-    tcg_gen_qemu_st_i32(tmp32, t1, flags, MO_LEUL);
+    gen_helper_s_to_memory(tmp32, src);
+    tcg_gen_qemu_st_i32(tmp32, addr, ctx->mem_idx, MO_LEUL | UNALIGN(ctx));
     tcg_temp_free_i32(tmp32);
 }
 
-static inline void gen_store_mem(DisasContext *ctx,
-                                 void (*tcg_gen_qemu_store)(TCGv t0, TCGv t1,
-                                                            int flags),
-                                 int ra, int rb, int32_t disp16, bool fp,
-                                 bool clear)
+static void gen_stt(DisasContext *ctx, TCGv src, TCGv addr)
 {
-    TCGv tmp, addr, va;
+    tcg_gen_qemu_st_i64(src, addr, ctx->mem_idx, MO_LEUQ | UNALIGN(ctx));
+}
 
-    tmp = tcg_temp_new();
-    addr = load_gpr(ctx, rb);
+static void gen_store_fp(DisasContext *ctx, int ra, int rb, int32_t disp16,
+                         void (*func)(DisasContext *, TCGv, TCGv))
+{
+    TCGv addr = tcg_temp_new();
+    tcg_gen_addi_i64(addr, load_gpr(ctx, rb), disp16);
+    func(ctx, load_fpr(ctx, ra), addr);
+    tcg_temp_free(addr);
+}
 
-    if (disp16) {
-        tcg_gen_addi_i64(tmp, addr, disp16);
-        addr = tmp;
-    }
+static void gen_store_int(DisasContext *ctx, int ra, int rb, int32_t disp16,
+                          MemOp op, bool clear)
+{
+    TCGv addr, src;
+
+    addr = tcg_temp_new();
+    tcg_gen_addi_i64(addr, load_gpr(ctx, rb), disp16);
     if (clear) {
-        tcg_gen_andi_i64(tmp, addr, ~0x7);
-        addr = tmp;
+        tcg_gen_andi_i64(addr, addr, ~0x7);
+    } else {
+        op |= UNALIGN(ctx);
     }
 
-    va = (fp ? load_fpr(ctx, ra) : load_gpr(ctx, ra));
-    tcg_gen_qemu_store(va, addr, ctx->mem_idx);
+    src = load_gpr(ctx, ra);
+    tcg_gen_qemu_st_i64(src, addr, ctx->mem_idx, op);
 
-    tcg_temp_free(tmp);
+    tcg_temp_free(addr);
 }
 
 static DisasJumpType gen_store_conditional(DisasContext *ctx, int ra, int rb,
@@ -439,40 +439,9 @@ static DisasJumpType gen_store_conditional(DisasContext *ctx, int ra, int rb,
     return DISAS_NEXT;
 }
 
-static bool in_superpage(DisasContext *ctx, int64_t addr)
-{
-#ifndef CONFIG_USER_ONLY
-    return ((ctx->tbflags & ENV_FLAG_PS_USER) == 0
-            && addr >> TARGET_VIRT_ADDR_SPACE_BITS == -1
-            && ((addr >> 41) & 3) == 2);
-#else
-    return false;
-#endif
-}
-
-static bool use_exit_tb(DisasContext *ctx)
-{
-    return ((tb_cflags(ctx->base.tb) & CF_LAST_IO)
-            || ctx->base.singlestep_enabled
-            || singlestep);
-}
-
 static bool use_goto_tb(DisasContext *ctx, uint64_t dest)
 {
-    /* Suppress goto_tb in the case of single-steping and IO.  */
-    if (unlikely(use_exit_tb(ctx))) {
-        return false;
-    }
-#ifndef CONFIG_USER_ONLY
-    /* If the destination is in the superpage, the page perms can't change.  */
-    if (in_superpage(ctx, dest)) {
-        return true;
-    }
-    /* Check for the dest on the same page as the start of the TB.  */
-    return ((ctx->base.tb->pc ^ dest) & TARGET_PAGE_MASK) == 0;
-#else
-    return true;
-#endif
+    return translator_use_goto_tb(&ctx->base, dest);
 }
 
 static DisasJumpType gen_bdirect(DisasContext *ctx, int ra, int32_t disp)
@@ -517,15 +486,11 @@ static DisasJumpType gen_bcond_internal(DisasContext *ctx, TCGCond cond,
 
         return DISAS_NORETURN;
     } else {
-        TCGv_i64 z = tcg_const_i64(0);
-        TCGv_i64 d = tcg_const_i64(dest);
-        TCGv_i64 p = tcg_const_i64(ctx->base.pc_next);
+        TCGv_i64 z = load_zero(ctx);
+        TCGv_i64 d = tcg_constant_i64(dest);
+        TCGv_i64 p = tcg_constant_i64(ctx->base.pc_next);
 
         tcg_gen_movcond_i64(cond, cpu_pc, cmp, z, d, p);
-
-        tcg_temp_free_i64(z);
-        tcg_temp_free_i64(d);
-        tcg_temp_free_i64(p);
         return DISAS_PC_UPDATED;
     }
 }
@@ -727,22 +692,19 @@ static void gen_fp_exc_raise(int rc, int fn11)
     if (!(fn11 & QUAL_I)) {
         ignore |= FPCR_INE;
     }
-    ign = tcg_const_i32(ignore);
+    ign = tcg_constant_i32(ignore);
 
     /* ??? Pass in the regno of the destination so that the helper can
        set EXC_MASK, which contains a bitmask of destination registers
        that have caused arithmetic traps.  A simple userspace emulation
        does not require this.  We do need it for a guest kernel's entArith,
        or if we were to do something clever with imprecise exceptions.  */
-    reg = tcg_const_i32(rc + 32);
+    reg = tcg_constant_i32(rc + 32);
     if (fn11 & QUAL_S) {
         gen_helper_fp_exc_raise_s(cpu_env, ign, reg);
     } else {
         gen_helper_fp_exc_raise(cpu_env, ign, reg);
     }
-
-    tcg_temp_free_i32(reg);
-    tcg_temp_free_i32(ign);
 }
 
 static void gen_cvtlq(TCGv vc, TCGv vb)
@@ -835,7 +797,7 @@ IEEE_INTCVT(cvtqt)
 
 static void gen_cpy_mask(TCGv vc, TCGv va, TCGv vb, bool inv_a, uint64_t mask)
 {
-    TCGv vmask = tcg_const_i64(mask);
+    TCGv vmask = tcg_constant_i64(mask);
     TCGv tmp = tcg_temp_new_i64();
 
     if (inv_a) {
@@ -847,7 +809,6 @@ static void gen_cpy_mask(TCGv vc, TCGv va, TCGv vb, bool inv_a, uint64_t mask)
     tcg_gen_andc_i64(vc, vb, vmask);
     tcg_gen_or_i64(vc, vc, tmp);
 
-    tcg_temp_free(vmask);
     tcg_temp_free(tmp);
 }
 
@@ -1116,15 +1077,11 @@ static void gen_msk_l(DisasContext *ctx, TCGv vc, TCGv va, int rb, bool islit,
 
 static void gen_rx(DisasContext *ctx, int ra, int set)
 {
-    TCGv tmp;
-
     if (ra != 31) {
         ld_flag_byte(ctx->ir[ra], ENV_FLAG_RX_SHIFT);
     }
 
-    tmp = tcg_const_i64(set);
-    st_flag_byte(ctx->ir[ra], ENV_FLAG_RX_SHIFT);
-    tcg_temp_free(tmp);
+    st_flag_byte(tcg_constant_i64(set), ENV_FLAG_RX_SHIFT);
 }
 
 static DisasJumpType gen_call_pal(DisasContext *ctx, int palcode)
@@ -1225,12 +1182,9 @@ static DisasJumpType gen_call_pal(DisasContext *ctx, int palcode)
 
         case 0x3E:
             /* WTINT */
-            {
-                TCGv_i32 tmp = tcg_const_i32(1);
-                tcg_gen_st_i32(tmp, cpu_env, -offsetof(AlphaCPU, env) +
-                                             offsetof(CPUState, halted));
-                tcg_temp_free_i32(tmp);
-            }
+            tcg_gen_st_i32(tcg_constant_i32(1), cpu_env,
+                           -offsetof(AlphaCPU, env) +
+                           offsetof(CPUState, halted));
             tcg_gen_movi_i64(ctx->ir[IR_V0], 0);
             return gen_excp(ctx, EXCP_HALTED, 0);
 
@@ -1267,19 +1221,8 @@ static DisasJumpType gen_call_pal(DisasContext *ctx, int palcode)
                   ? 0x2000 + (palcode - 0x80) * 64
                   : 0x1000 + palcode * 64);
 
-        /* Since the destination is running in PALmode, we don't really
-           need the page permissions check.  We'll see the existence of
-           the page when we create the TB, and we'll flush all TBs if
-           we change the PAL base register.  */
-        if (!use_exit_tb(ctx)) {
-            tcg_gen_goto_tb(0);
-            tcg_gen_movi_i64(cpu_pc, entry);
-            tcg_gen_exit_tb(ctx->base.tb, 0);
-            return DISAS_NORETURN;
-        } else {
-            tcg_gen_movi_i64(cpu_pc, entry);
-            return DISAS_PC_UPDATED;
-        }
+        tcg_gen_movi_i64(cpu_pc, entry);
+        return DISAS_PC_UPDATED;
     }
 #endif
 }
@@ -1330,7 +1273,7 @@ static DisasJumpType gen_mfpr(DisasContext *ctx, TCGv va, int regno)
     case 249: /* VMTIME */
         helper = gen_helper_get_vmtime;
     do_helper:
-        if (icount_enabled()) {
+        if (tb_cflags(ctx->base.tb) & CF_USE_ICOUNT) {
             gen_io_start();
             helper(va);
             return DISAS_PC_STALE;
@@ -1366,6 +1309,7 @@ static DisasJumpType gen_mfpr(DisasContext *ctx, TCGv va, int regno)
 static DisasJumpType gen_mtpr(DisasContext *ctx, TCGv vb, int regno)
 {
     int data;
+    DisasJumpType ret = DISAS_NEXT;
 
     switch (regno) {
     case 255:
@@ -1380,12 +1324,8 @@ static DisasJumpType gen_mtpr(DisasContext *ctx, TCGv vb, int regno)
 
     case 253:
         /* WAIT */
-        {
-            TCGv_i32 tmp = tcg_const_i32(1);
-            tcg_gen_st_i32(tmp, cpu_env, -offsetof(AlphaCPU, env) +
-                                         offsetof(CPUState, halted));
-            tcg_temp_free_i32(tmp);
-        }
+        tcg_gen_st_i32(tcg_constant_i32(1), cpu_env,
+                       -offsetof(AlphaCPU, env) + offsetof(CPUState, halted));
         return gen_excp(ctx, EXCP_HALTED, 0);
 
     case 252:
@@ -1395,6 +1335,10 @@ static DisasJumpType gen_mtpr(DisasContext *ctx, TCGv vb, int regno)
 
     case 251:
         /* ALARM */
+        if (tb_cflags(ctx->base.tb) & CF_USE_ICOUNT) {
+            gen_io_start();
+            ret = DISAS_PC_STALE;
+        }
         gen_helper_set_alarm(cpu_env, vb);
         break;
 
@@ -1434,7 +1378,7 @@ static DisasJumpType gen_mtpr(DisasContext *ctx, TCGv vb, int regno)
         break;
     }
 
-    return DISAS_NEXT;
+    return ret;
 }
 #endif /* !USER_ONLY*/
 
@@ -1463,6 +1407,13 @@ static DisasJumpType gen_mtpr(DisasContext *ctx, TCGv vb, int regno)
     do {                                        \
         if (WHICH != 31) {                      \
             goto invalid_opc;                   \
+        }                                       \
+    } while (0)
+
+#define REQUIRE_FEN                             \
+    do {                                        \
+        if (!(ctx->tbflags & ENV_FLAG_FEN)) {   \
+            goto raise_fen;                     \
         }                                       \
     } while (0)
 
@@ -1543,30 +1494,30 @@ static DisasJumpType translate_one(DisasContext *ctx, uint32_t insn)
     case 0x0A:
         /* LDBU */
         REQUIRE_AMASK(BWX);
-        gen_load_mem(ctx, &tcg_gen_qemu_ld8u, ra, rb, disp16, 0, 0);
+        gen_load_int(ctx, ra, rb, disp16, MO_UB, 0, 0);
         break;
     case 0x0B:
         /* LDQ_U */
-        gen_load_mem(ctx, &tcg_gen_qemu_ld64, ra, rb, disp16, 0, 1);
+        gen_load_int(ctx, ra, rb, disp16, MO_LEUQ, 1, 0);
         break;
     case 0x0C:
         /* LDWU */
         REQUIRE_AMASK(BWX);
-        gen_load_mem(ctx, &tcg_gen_qemu_ld16u, ra, rb, disp16, 0, 0);
+        gen_load_int(ctx, ra, rb, disp16, MO_LEUW, 0, 0);
         break;
     case 0x0D:
         /* STW */
         REQUIRE_AMASK(BWX);
-        gen_store_mem(ctx, &tcg_gen_qemu_st16, ra, rb, disp16, 0, 0);
+        gen_store_int(ctx, ra, rb, disp16, MO_LEUW, 0);
         break;
     case 0x0E:
         /* STB */
         REQUIRE_AMASK(BWX);
-        gen_store_mem(ctx, &tcg_gen_qemu_st8, ra, rb, disp16, 0, 0);
+        gen_store_int(ctx, ra, rb, disp16, MO_UB, 0);
         break;
     case 0x0F:
         /* STQ_U */
-        gen_store_mem(ctx, &tcg_gen_qemu_st64, ra, rb, disp16, 0, 1);
+        gen_store_int(ctx, ra, rb, disp16, MO_LEUQ, 1);
         break;
 
     case 0x10:
@@ -2061,6 +2012,7 @@ static DisasJumpType translate_one(DisasContext *ctx, uint32_t insn)
         case 0x04:
             /* ITOFS */
             REQUIRE_REG_31(rb);
+            REQUIRE_FEN;
             t32 = tcg_temp_new_i32();
             va = load_gpr(ctx, ra);
             tcg_gen_extrl_i64_i32(t32, va);
@@ -2070,17 +2022,20 @@ static DisasJumpType translate_one(DisasContext *ctx, uint32_t insn)
         case 0x0A:
             /* SQRTF */
             REQUIRE_REG_31(ra);
+            REQUIRE_FEN;
             vb = load_fpr(ctx, rb);
             gen_helper_sqrtf(vc, cpu_env, vb);
             break;
         case 0x0B:
             /* SQRTS */
             REQUIRE_REG_31(ra);
+            REQUIRE_FEN;
             gen_sqrts(ctx, rb, rc, fn11);
             break;
         case 0x14:
             /* ITOFF */
             REQUIRE_REG_31(rb);
+            REQUIRE_FEN;
             t32 = tcg_temp_new_i32();
             va = load_gpr(ctx, ra);
             tcg_gen_extrl_i64_i32(t32, va);
@@ -2090,18 +2045,21 @@ static DisasJumpType translate_one(DisasContext *ctx, uint32_t insn)
         case 0x24:
             /* ITOFT */
             REQUIRE_REG_31(rb);
+            REQUIRE_FEN;
             va = load_gpr(ctx, ra);
             tcg_gen_mov_i64(vc, va);
             break;
         case 0x2A:
             /* SQRTG */
             REQUIRE_REG_31(ra);
+            REQUIRE_FEN;
             vb = load_fpr(ctx, rb);
             gen_helper_sqrtg(vc, cpu_env, vb);
             break;
         case 0x02B:
             /* SQRTT */
             REQUIRE_REG_31(ra);
+            REQUIRE_FEN;
             gen_sqrtt(ctx, rb, rc, fn11);
             break;
         default:
@@ -2118,18 +2076,22 @@ static DisasJumpType translate_one(DisasContext *ctx, uint32_t insn)
         switch (fpfn) { /* fn11 & 0x3F */
         case 0x00:
             /* ADDF */
+            REQUIRE_FEN;
             gen_helper_addf(vc, cpu_env, va, vb);
             break;
         case 0x01:
             /* SUBF */
+            REQUIRE_FEN;
             gen_helper_subf(vc, cpu_env, va, vb);
             break;
         case 0x02:
             /* MULF */
+            REQUIRE_FEN;
             gen_helper_mulf(vc, cpu_env, va, vb);
             break;
         case 0x03:
             /* DIVF */
+            REQUIRE_FEN;
             gen_helper_divf(vc, cpu_env, va, vb);
             break;
         case 0x1E:
@@ -2138,35 +2100,43 @@ static DisasJumpType translate_one(DisasContext *ctx, uint32_t insn)
             goto invalid_opc;
         case 0x20:
             /* ADDG */
+            REQUIRE_FEN;
             gen_helper_addg(vc, cpu_env, va, vb);
             break;
         case 0x21:
             /* SUBG */
+            REQUIRE_FEN;
             gen_helper_subg(vc, cpu_env, va, vb);
             break;
         case 0x22:
             /* MULG */
+            REQUIRE_FEN;
             gen_helper_mulg(vc, cpu_env, va, vb);
             break;
         case 0x23:
             /* DIVG */
+            REQUIRE_FEN;
             gen_helper_divg(vc, cpu_env, va, vb);
             break;
         case 0x25:
             /* CMPGEQ */
+            REQUIRE_FEN;
             gen_helper_cmpgeq(vc, cpu_env, va, vb);
             break;
         case 0x26:
             /* CMPGLT */
+            REQUIRE_FEN;
             gen_helper_cmpglt(vc, cpu_env, va, vb);
             break;
         case 0x27:
             /* CMPGLE */
+            REQUIRE_FEN;
             gen_helper_cmpgle(vc, cpu_env, va, vb);
             break;
         case 0x2C:
             /* CVTGF */
             REQUIRE_REG_31(ra);
+            REQUIRE_FEN;
             gen_helper_cvtgf(vc, cpu_env, vb);
             break;
         case 0x2D:
@@ -2176,16 +2146,19 @@ static DisasJumpType translate_one(DisasContext *ctx, uint32_t insn)
         case 0x2F:
             /* CVTGQ */
             REQUIRE_REG_31(ra);
+            REQUIRE_FEN;
             gen_helper_cvtgq(vc, cpu_env, vb);
             break;
         case 0x3C:
             /* CVTQF */
             REQUIRE_REG_31(ra);
+            REQUIRE_FEN;
             gen_helper_cvtqf(vc, cpu_env, vb);
             break;
         case 0x3E:
             /* CVTQG */
             REQUIRE_REG_31(ra);
+            REQUIRE_FEN;
             gen_helper_cvtqg(vc, cpu_env, vb);
             break;
         default:
@@ -2198,54 +2171,67 @@ static DisasJumpType translate_one(DisasContext *ctx, uint32_t insn)
         switch (fpfn) { /* fn11 & 0x3F */
         case 0x00:
             /* ADDS */
+            REQUIRE_FEN;
             gen_adds(ctx, ra, rb, rc, fn11);
             break;
         case 0x01:
             /* SUBS */
+            REQUIRE_FEN;
             gen_subs(ctx, ra, rb, rc, fn11);
             break;
         case 0x02:
             /* MULS */
+            REQUIRE_FEN;
             gen_muls(ctx, ra, rb, rc, fn11);
             break;
         case 0x03:
             /* DIVS */
+            REQUIRE_FEN;
             gen_divs(ctx, ra, rb, rc, fn11);
             break;
         case 0x20:
             /* ADDT */
+            REQUIRE_FEN;
             gen_addt(ctx, ra, rb, rc, fn11);
             break;
         case 0x21:
             /* SUBT */
+            REQUIRE_FEN;
             gen_subt(ctx, ra, rb, rc, fn11);
             break;
         case 0x22:
             /* MULT */
+            REQUIRE_FEN;
             gen_mult(ctx, ra, rb, rc, fn11);
             break;
         case 0x23:
             /* DIVT */
+            REQUIRE_FEN;
             gen_divt(ctx, ra, rb, rc, fn11);
             break;
         case 0x24:
             /* CMPTUN */
+            REQUIRE_FEN;
             gen_cmptun(ctx, ra, rb, rc, fn11);
             break;
         case 0x25:
             /* CMPTEQ */
+            REQUIRE_FEN;
             gen_cmpteq(ctx, ra, rb, rc, fn11);
             break;
         case 0x26:
             /* CMPTLT */
+            REQUIRE_FEN;
             gen_cmptlt(ctx, ra, rb, rc, fn11);
             break;
         case 0x27:
             /* CMPTLE */
+            REQUIRE_FEN;
             gen_cmptle(ctx, ra, rb, rc, fn11);
             break;
         case 0x2C:
             REQUIRE_REG_31(ra);
+            REQUIRE_FEN;
             if (fn11 == 0x2AC || fn11 == 0x6AC) {
                 /* CVTST */
                 gen_cvtst(ctx, rb, rc, fn11);
@@ -2257,16 +2243,19 @@ static DisasJumpType translate_one(DisasContext *ctx, uint32_t insn)
         case 0x2F:
             /* CVTTQ */
             REQUIRE_REG_31(ra);
+            REQUIRE_FEN;
             gen_cvttq(ctx, rb, rc, fn11);
             break;
         case 0x3C:
             /* CVTQS */
             REQUIRE_REG_31(ra);
+            REQUIRE_FEN;
             gen_cvtqs(ctx, rb, rc, fn11);
             break;
         case 0x3E:
             /* CVTQT */
             REQUIRE_REG_31(ra);
+            REQUIRE_FEN;
             gen_cvtqt(ctx, rb, rc, fn11);
             break;
         default:
@@ -2279,12 +2268,14 @@ static DisasJumpType translate_one(DisasContext *ctx, uint32_t insn)
         case 0x010:
             /* CVTLQ */
             REQUIRE_REG_31(ra);
+            REQUIRE_FEN;
             vc = dest_fpr(ctx, rc);
             vb = load_fpr(ctx, rb);
             gen_cvtlq(vc, vb);
             break;
         case 0x020:
             /* CPYS */
+            REQUIRE_FEN;
             if (rc == 31) {
                 /* Special case CPYS as FNOP.  */
             } else {
@@ -2301,6 +2292,7 @@ static DisasJumpType translate_one(DisasContext *ctx, uint32_t insn)
             break;
         case 0x021:
             /* CPYSN */
+            REQUIRE_FEN;
             vc = dest_fpr(ctx, rc);
             vb = load_fpr(ctx, rb);
             va = load_fpr(ctx, ra);
@@ -2308,6 +2300,7 @@ static DisasJumpType translate_one(DisasContext *ctx, uint32_t insn)
             break;
         case 0x022:
             /* CPYSE */
+            REQUIRE_FEN;
             vc = dest_fpr(ctx, rc);
             vb = load_fpr(ctx, rb);
             va = load_fpr(ctx, ra);
@@ -2315,6 +2308,7 @@ static DisasJumpType translate_one(DisasContext *ctx, uint32_t insn)
             break;
         case 0x024:
             /* MT_FPCR */
+            REQUIRE_FEN;
             va = load_fpr(ctx, ra);
             gen_helper_store_fpcr(cpu_env, va);
             if (ctx->tb_rm == QUAL_RM_D) {
@@ -2325,37 +2319,45 @@ static DisasJumpType translate_one(DisasContext *ctx, uint32_t insn)
             break;
         case 0x025:
             /* MF_FPCR */
+            REQUIRE_FEN;
             va = dest_fpr(ctx, ra);
             gen_helper_load_fpcr(va, cpu_env);
             break;
         case 0x02A:
             /* FCMOVEQ */
+            REQUIRE_FEN;
             gen_fcmov(ctx, TCG_COND_EQ, ra, rb, rc);
             break;
         case 0x02B:
             /* FCMOVNE */
+            REQUIRE_FEN;
             gen_fcmov(ctx, TCG_COND_NE, ra, rb, rc);
             break;
         case 0x02C:
             /* FCMOVLT */
+            REQUIRE_FEN;
             gen_fcmov(ctx, TCG_COND_LT, ra, rb, rc);
             break;
         case 0x02D:
             /* FCMOVGE */
+            REQUIRE_FEN;
             gen_fcmov(ctx, TCG_COND_GE, ra, rb, rc);
             break;
         case 0x02E:
             /* FCMOVLE */
+            REQUIRE_FEN;
             gen_fcmov(ctx, TCG_COND_LE, ra, rb, rc);
             break;
         case 0x02F:
             /* FCMOVGT */
+            REQUIRE_FEN;
             gen_fcmov(ctx, TCG_COND_GT, ra, rb, rc);
             break;
         case 0x030: /* CVTQL */
         case 0x130: /* CVTQL/V */
         case 0x530: /* CVTQL/SV */
             REQUIRE_REG_31(ra);
+            REQUIRE_FEN;
             vc = dest_fpr(ctx, rc);
             vb = load_fpr(ctx, rb);
             gen_helper_cvtql(vc, cpu_env, vb);
@@ -2466,15 +2468,19 @@ static DisasJumpType translate_one(DisasContext *ctx, uint32_t insn)
                 break;
             case 0x1:
                 /* Quadword physical access (hw_ldq/p) */
-                tcg_gen_qemu_ld_i64(va, addr, MMU_PHYS_IDX, MO_LEQ);
+                tcg_gen_qemu_ld_i64(va, addr, MMU_PHYS_IDX, MO_LEUQ);
                 break;
             case 0x2:
                 /* Longword physical access with lock (hw_ldl_l/p) */
-                gen_qemu_ldl_l(va, addr, MMU_PHYS_IDX);
+                tcg_gen_qemu_ld_i64(va, addr, MMU_PHYS_IDX, MO_LESL);
+                tcg_gen_mov_i64(cpu_lock_addr, addr);
+                tcg_gen_mov_i64(cpu_lock_value, va);
                 break;
             case 0x3:
                 /* Quadword physical access with lock (hw_ldq_l/p) */
-                gen_qemu_ldq_l(va, addr, MMU_PHYS_IDX);
+                tcg_gen_qemu_ld_i64(va, addr, MMU_PHYS_IDX, MO_LEUQ);
+                tcg_gen_mov_i64(cpu_lock_addr, addr);
+                tcg_gen_mov_i64(cpu_lock_value, va);
                 break;
             case 0x4:
                 /* Longword virtual PTE fetch (hw_ldl/v) */
@@ -2501,7 +2507,7 @@ static DisasJumpType translate_one(DisasContext *ctx, uint32_t insn)
                 break;
             case 0xB:
                 /* Quadword virtual access with protection check (hw_ldq/w) */
-                tcg_gen_qemu_ld_i64(va, addr, MMU_KERNEL_IDX, MO_LEQ);
+                tcg_gen_qemu_ld_i64(va, addr, MMU_KERNEL_IDX, MO_LEUQ);
                 break;
             case 0xC:
                 /* Longword virtual access with alt access mode (hw_ldl/a)*/
@@ -2517,7 +2523,7 @@ static DisasJumpType translate_one(DisasContext *ctx, uint32_t insn)
             case 0xF:
                 /* Quadword virtual access with alternate access mode and
                    protection checks (hw_ldq/wa) */
-                tcg_gen_qemu_ld_i64(va, addr, MMU_USER_IDX, MO_LEQ);
+                tcg_gen_qemu_ld_i64(va, addr, MMU_USER_IDX, MO_LEUQ);
                 break;
             }
             tcg_temp_free(addr);
@@ -2690,15 +2696,14 @@ static DisasJumpType translate_one(DisasContext *ctx, uint32_t insn)
             /* Pre-EV6 CPUs interpreted this as HW_REI, loading the return
                address from EXC_ADDR.  This turns out to be useful for our
                emulation PALcode, so continue to accept it.  */
-            ctx->lit = vb = tcg_temp_new();
+            vb = dest_sink(ctx);
             tcg_gen_ld_i64(vb, cpu_env, offsetof(CPUAlphaState, exc_addr));
         } else {
             vb = load_gpr(ctx, rb);
         }
         tcg_gen_movi_i64(cpu_lock_addr, -1);
+        st_flag_byte(load_zero(ctx), ENV_FLAG_RX_SHIFT);
         tmp = tcg_temp_new();
-        tcg_gen_movi_i64(tmp, 0);
-        st_flag_byte(tmp, ENV_FLAG_RX_SHIFT);
         tcg_gen_andi_i64(tmp, vb, 1);
         st_flag_byte(tmp, ENV_FLAG_PAL_SHIFT);
         tcg_temp_free(tmp);
@@ -2731,7 +2736,7 @@ static DisasJumpType translate_one(DisasContext *ctx, uint32_t insn)
                 vb = load_gpr(ctx, rb);
                 tmp = tcg_temp_new();
                 tcg_gen_addi_i64(tmp, vb, disp12);
-                tcg_gen_qemu_st_i64(va, tmp, MMU_PHYS_IDX, MO_LEQ);
+                tcg_gen_qemu_st_i64(va, tmp, MMU_PHYS_IDX, MO_LEUQ);
                 tcg_temp_free(tmp);
                 break;
             case 0x2:
@@ -2742,7 +2747,7 @@ static DisasJumpType translate_one(DisasContext *ctx, uint32_t insn)
             case 0x3:
                 /* Quadword physical access with lock */
                 ret = gen_store_conditional(ctx, ra, rb, disp12,
-                                            MMU_PHYS_IDX, MO_LEQ);
+                                            MMU_PHYS_IDX, MO_LEUQ);
                 break;
             case 0x4:
                 /* Longword virtual access */
@@ -2788,59 +2793,67 @@ static DisasJumpType translate_one(DisasContext *ctx, uint32_t insn)
 #endif
     case 0x20:
         /* LDF */
-        gen_load_mem(ctx, &gen_qemu_ldf, ra, rb, disp16, 1, 0);
+        REQUIRE_FEN;
+        gen_load_fp(ctx, ra, rb, disp16, gen_ldf);
         break;
     case 0x21:
         /* LDG */
-        gen_load_mem(ctx, &gen_qemu_ldg, ra, rb, disp16, 1, 0);
+        REQUIRE_FEN;
+        gen_load_fp(ctx, ra, rb, disp16, gen_ldg);
         break;
     case 0x22:
         /* LDS */
-        gen_load_mem(ctx, &gen_qemu_lds, ra, rb, disp16, 1, 0);
+        REQUIRE_FEN;
+        gen_load_fp(ctx, ra, rb, disp16, gen_lds);
         break;
     case 0x23:
         /* LDT */
-        gen_load_mem(ctx, &tcg_gen_qemu_ld64, ra, rb, disp16, 1, 0);
+        REQUIRE_FEN;
+        gen_load_fp(ctx, ra, rb, disp16, gen_ldt);
         break;
     case 0x24:
         /* STF */
-        gen_store_mem(ctx, &gen_qemu_stf, ra, rb, disp16, 1, 0);
+        REQUIRE_FEN;
+        gen_store_fp(ctx, ra, rb, disp16, gen_stf);
         break;
     case 0x25:
         /* STG */
-        gen_store_mem(ctx, &gen_qemu_stg, ra, rb, disp16, 1, 0);
+        REQUIRE_FEN;
+        gen_store_fp(ctx, ra, rb, disp16, gen_stg);
         break;
     case 0x26:
         /* STS */
-        gen_store_mem(ctx, &gen_qemu_sts, ra, rb, disp16, 1, 0);
+        REQUIRE_FEN;
+        gen_store_fp(ctx, ra, rb, disp16, gen_sts);
         break;
     case 0x27:
         /* STT */
-        gen_store_mem(ctx, &tcg_gen_qemu_st64, ra, rb, disp16, 1, 0);
+        REQUIRE_FEN;
+        gen_store_fp(ctx, ra, rb, disp16, gen_stt);
         break;
     case 0x28:
         /* LDL */
-        gen_load_mem(ctx, &tcg_gen_qemu_ld32s, ra, rb, disp16, 0, 0);
+        gen_load_int(ctx, ra, rb, disp16, MO_LESL, 0, 0);
         break;
     case 0x29:
         /* LDQ */
-        gen_load_mem(ctx, &tcg_gen_qemu_ld64, ra, rb, disp16, 0, 0);
+        gen_load_int(ctx, ra, rb, disp16, MO_LEUQ, 0, 0);
         break;
     case 0x2A:
         /* LDL_L */
-        gen_load_mem(ctx, &gen_qemu_ldl_l, ra, rb, disp16, 0, 0);
+        gen_load_int(ctx, ra, rb, disp16, MO_LESL, 0, 1);
         break;
     case 0x2B:
         /* LDQ_L */
-        gen_load_mem(ctx, &gen_qemu_ldq_l, ra, rb, disp16, 0, 0);
+        gen_load_int(ctx, ra, rb, disp16, MO_LEUQ, 0, 1);
         break;
     case 0x2C:
         /* STL */
-        gen_store_mem(ctx, &tcg_gen_qemu_st32, ra, rb, disp16, 0, 0);
+        gen_store_int(ctx, ra, rb, disp16, MO_LEUL, 0);
         break;
     case 0x2D:
         /* STQ */
-        gen_store_mem(ctx, &tcg_gen_qemu_st64, ra, rb, disp16, 0, 0);
+        gen_store_int(ctx, ra, rb, disp16, MO_LEUQ, 0);
         break;
     case 0x2E:
         /* STL_C */
@@ -2850,19 +2863,22 @@ static DisasJumpType translate_one(DisasContext *ctx, uint32_t insn)
     case 0x2F:
         /* STQ_C */
         ret = gen_store_conditional(ctx, ra, rb, disp16,
-                                    ctx->mem_idx, MO_LEQ);
+                                    ctx->mem_idx, MO_LEUQ);
         break;
     case 0x30:
         /* BR */
         ret = gen_bdirect(ctx, ra, disp21);
         break;
     case 0x31: /* FBEQ */
+        REQUIRE_FEN;
         ret = gen_fbcond(ctx, TCG_COND_EQ, ra, disp21);
         break;
     case 0x32: /* FBLT */
+        REQUIRE_FEN;
         ret = gen_fbcond(ctx, TCG_COND_LT, ra, disp21);
         break;
     case 0x33: /* FBLE */
+        REQUIRE_FEN;
         ret = gen_fbcond(ctx, TCG_COND_LE, ra, disp21);
         break;
     case 0x34:
@@ -2870,12 +2886,15 @@ static DisasJumpType translate_one(DisasContext *ctx, uint32_t insn)
         ret = gen_bdirect(ctx, ra, disp21);
         break;
     case 0x35: /* FBNE */
+        REQUIRE_FEN;
         ret = gen_fbcond(ctx, TCG_COND_NE, ra, disp21);
         break;
     case 0x36: /* FBGE */
+        REQUIRE_FEN;
         ret = gen_fbcond(ctx, TCG_COND_GE, ra, disp21);
         break;
     case 0x37: /* FBGT */
+        REQUIRE_FEN;
         ret = gen_fbcond(ctx, TCG_COND_GT, ra, disp21);
         break;
     case 0x38:
@@ -2913,6 +2932,9 @@ static DisasJumpType translate_one(DisasContext *ctx, uint32_t insn)
     invalid_opc:
         ret = gen_invalid(ctx);
         break;
+    raise_fen:
+        ret = gen_excp(ctx, EXCP_FEN, 0);
+        break;
     }
 
     return ret;
@@ -2922,7 +2944,7 @@ static void alpha_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cpu)
 {
     DisasContext *ctx = container_of(dcbase, DisasContext, base);
     CPUAlphaState *env = cpu->env_ptr;
-    int64_t bound, mask;
+    int64_t bound;
 
     ctx->tbflags = ctx->base.tb->flags;
     ctx->mem_idx = cpu_mmu_index(env, false);
@@ -2931,6 +2953,7 @@ static void alpha_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cpu)
 
 #ifdef CONFIG_USER_ONLY
     ctx->ir = cpu_std_ir;
+    ctx->unalign = (ctx->tbflags & TB_FLAG_UNALIGN ? MO_UNALN : MO_ALIGN);
 #else
     ctx->palbr = env->palbr;
     ctx->ir = (ctx->tbflags & ENV_FLAG_PAL_MODE ? cpu_pal_ir : cpu_std_ir);
@@ -2948,15 +2971,9 @@ static void alpha_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cpu)
 
     ctx->zero = NULL;
     ctx->sink = NULL;
-    ctx->lit = NULL;
 
     /* Bound the number of insns to execute to those left on the page.  */
-    if (in_superpage(ctx, ctx->base.pc_first)) {
-        mask = -1ULL << 41;
-    } else {
-        mask = TARGET_PAGE_MASK;
-    }
-    bound = -(ctx->base.pc_first | mask) / 4;
+    bound = -(ctx->base.pc_first | TARGET_PAGE_MASK) / 4;
     ctx->base.max_insns = MIN(ctx->base.max_insns, bound);
 }
 
@@ -2969,26 +2986,11 @@ static void alpha_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
     tcg_gen_insn_start(dcbase->pc_next);
 }
 
-static bool alpha_tr_breakpoint_check(DisasContextBase *dcbase, CPUState *cpu,
-                                      const CPUBreakpoint *bp)
-{
-    DisasContext *ctx = container_of(dcbase, DisasContext, base);
-
-    ctx->base.is_jmp = gen_excp(ctx, EXCP_DEBUG, 0);
-
-    /* The address covered by the breakpoint must be included in
-       [tb->pc, tb->pc + tb->size) in order to for it to be
-       properly cleared -- thus we increment the PC here so that
-       the logic setting tb->size below does the right thing.  */
-    ctx->base.pc_next += 4;
-    return true;
-}
-
 static void alpha_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
 {
     DisasContext *ctx = container_of(dcbase, DisasContext, base);
     CPUAlphaState *env = cpu->env_ptr;
-    uint32_t insn = translator_ldl(env, ctx->base.pc_next);
+    uint32_t insn = translator_ldl(env, &ctx->base, ctx->base.pc_next);
 
     ctx->base.pc_next += 4;
     ctx->base.is_jmp = translate_one(ctx, insn);
@@ -3015,17 +3017,10 @@ static void alpha_tr_tb_stop(DisasContextBase *dcbase, CPUState *cpu)
         tcg_gen_movi_i64(cpu_pc, ctx->base.pc_next);
         /* FALLTHRU */
     case DISAS_PC_UPDATED:
-        if (!use_exit_tb(ctx)) {
-            tcg_gen_lookup_and_goto_ptr();
-            break;
-        }
-        /* FALLTHRU */
+        tcg_gen_lookup_and_goto_ptr();
+        break;
     case DISAS_PC_UPDATED_NOCHAIN:
-        if (ctx->base.singlestep_enabled) {
-            gen_excp_1(EXCP_DEBUG, 0);
-        } else {
-            tcg_gen_exit_tb(NULL, 0);
-        }
+        tcg_gen_exit_tb(NULL, 0);
         break;
     default:
         g_assert_not_reached();
@@ -3042,7 +3037,6 @@ static const TranslatorOps alpha_tr_ops = {
     .init_disas_context = alpha_tr_init_disas_context,
     .tb_start           = alpha_tr_tb_start,
     .insn_start         = alpha_tr_insn_start,
-    .breakpoint_check   = alpha_tr_breakpoint_check,
     .translate_insn     = alpha_tr_translate_insn,
     .tb_stop            = alpha_tr_tb_stop,
     .disas_log          = alpha_tr_disas_log,

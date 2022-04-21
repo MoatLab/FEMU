@@ -41,7 +41,7 @@
 #include "cpu.h"
 #include "qom/object.h"
 
-#define TYPE_FSL_IMX7 "fsl,imx7"
+#define TYPE_FSL_IMX7 "fsl-imx7"
 OBJECT_DECLARE_SIMPLE_TYPE(FslIMX7State, FSL_IMX7)
 
 enum FslIMX7Configuration {
@@ -173,6 +173,11 @@ enum FslIMX7MemoryMap {
     FSL_IMX7_UART5_ADDR           = 0x30A70000,
     FSL_IMX7_UART6_ADDR           = 0x30A80000,
     FSL_IMX7_UART7_ADDR           = 0x30A90000,
+
+    FSL_IMX7_SAI1_ADDR            = 0x308A0000,
+    FSL_IMX7_SAI2_ADDR            = 0x308B0000,
+    FSL_IMX7_SAI3_ADDR            = 0x308C0000,
+    FSL_IMX7_SAIn_SIZE            = 0x10000,
 
     FSL_IMX7_ENET1_ADDR           = 0x30BE0000,
     FSL_IMX7_ENET2_ADDR           = 0x30BF0000,

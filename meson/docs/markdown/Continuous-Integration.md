@@ -42,8 +42,8 @@ script:
 
 ## CircleCi for Linux (with Docker)
 
-[CircleCi](https://circleci.com/) can work for spinning all of the Linux images you wish.
-Here's a sample `yml` file for use with that.
+[CircleCi](https://circleci.com/) can work for spinning all of the
+Linux images you wish. Here's a sample `yml` file for use with that.
 
 ```yaml
 version: 2.1
@@ -99,11 +99,14 @@ workflows:
 
 ## AppVeyor for Windows
 
-For CI on Windows, [AppVeyor](https://www.appveyor.com/) has a wide selection of
-[default configurations](https://www.appveyor.com/docs/windows-images-software/).
-AppVeyor also has [MacOS](https://www.appveyor.com/docs/macos-images-software/) and
-[Linux](https://www.appveyor.com/docs/linux-images-software/) CI images.
-This is a sample `appveyor.yml` file for Windows with Visual Studio 2015 and 2017.
+For CI on Windows, [AppVeyor](https://www.appveyor.com/) has a wide
+selection of [default
+configurations](https://www.appveyor.com/docs/windows-images-software/).
+AppVeyor also has
+[MacOS](https://www.appveyor.com/docs/macos-images-software/) and
+[Linux](https://www.appveyor.com/docs/linux-images-software/) CI
+images. This is a sample `appveyor.yml` file for Windows with Visual
+Studio 2015 and 2017.
 
 ```yaml
 image: Visual Studio 2017
@@ -154,11 +157,14 @@ For Qt 5, add the following line near the `PYTHON_ROOT` assignment:
 
 And afterwards add `%QT_ROOT%\bin` to the `PATH` variable.
 
-You might have to adjust your build matrix as there are, for example, no msvc2017 32-bit builds. Visit the [Build Environment](https://www.appveyor.com/docs/build-environment/) page in the AppVeyor docs for more details.
+You might have to adjust your build matrix as there are, for example,
+no msvc2017 32-bit builds. Visit the [Build
+Environment](https://www.appveyor.com/docs/build-environment/) page in
+the AppVeyor docs for more details.
 
 ### Boost
 
-The following statement is sufficient for meson to find Boost:
+The following statement is sufficient for Meson to find Boost:
 
 ```yaml
  - cmd: set BOOST_ROOT=C:\Libraries\boost_1_67_0
@@ -193,10 +199,13 @@ script:
 
 ## GitHub Actions
 
-GitHub Actions are distinct from Azure Pipelines in their workflow syntax.
-It can be easier to setup specific CI tasks in Actions than Pipelines, depending on the particular task.
-This is an example file: .github/workflows/ci_meson.yml  supposing the project is C-based, using GCC on Linux, Mac and Windows.
-The optional `on:` parameters only run this CI when the C code is changed--corresponding ci_python.yml might run only on "**.py" file changes.
+GitHub Actions are distinct from Azure Pipelines in their workflow
+syntax. It can be easier to setup specific CI tasks in Actions than
+Pipelines, depending on the particular task. This is an example file:
+.github/workflows/ci_meson.yml supposing the project is C-based, using
+GCC on Linux, Mac and Windows. The optional `on:` parameters only run
+this CI when the C code is changed--corresponding ci_python.yml might
+run only on "**.py" file changes.
 
 ```yml
 name: ci_meson
@@ -208,7 +217,7 @@ on:
       - "**.h"
   pull_request:
     paths:
-      - "**.h"
+      - "**.c"
       - "**.h"
 
 jobs:
@@ -221,15 +230,15 @@ jobs:
       with:
         python-version: '3.x'
     - run: pip install meson ninja
-    - run: meson setup build
+    - run: meson setup builddir/
       env:
         CC: gcc
-    - run: meson test -C build -v
+    - run: meson test -C builddir/ -v
     - uses: actions/upload-artifact@v1
       if: failure()
       with:
         name: Linux_Meson_Testlog
-        path: build/meson-logs/testlog.txt
+        path: builddir/meson-logs/testlog.txt
 
   macos:
     runs-on: macos-latest
@@ -240,15 +249,15 @@ jobs:
         python-version: '3.x'
     - run: brew install gcc
     - run: pip install meson ninja
-    - run: meson setup build
+    - run: meson setup builddir/
       env:
         CC: gcc
-    - run: meson test -C build -v
+    - run: meson test -C builddir/ -v
     - uses: actions/upload-artifact@v1
       if: failure()
       with:
         name: MacOS_Meson_Testlog
-        path: build/meson-logs/testlog.txt
+        path: builddir/meson-logs/testlog.txt
 
   windows:
     runs-on: windows-latest
@@ -258,13 +267,13 @@ jobs:
       with:
         python-version: '3.x'
     - run: pip install meson ninja
-    - run: meson setup build
+    - run: meson setup builddir/
       env:
         CC: gcc
-    - run: meson test -C build -v
+    - run: meson test -C builddir/ -v
     - uses: actions/upload-artifact@v1
       if: failure()
       with:
         name: Windows_Meson_Testlog
-        path: build/meson-logs/testlog.txt
+        path: builddir/meson-logs/testlog.txt
 ```

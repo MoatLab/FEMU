@@ -28,11 +28,10 @@
  */
 
 #include "qemu/osdep.h"
-#include "qemu-common.h"
 #include "cpu.h"
-#include "hw/boards.h"
 #include "hw/irq.h"
 #include "hw/qdev-properties.h"
+#include "hw/qdev-properties-system.h"
 #include "hw/sysbus.h"
 #include "migration/vmstate.h"
 #include "strongarm.h"
@@ -41,6 +40,7 @@
 #include "chardev/char-fe.h"
 #include "chardev/char-serial.h"
 #include "sysemu/sysemu.h"
+#include "sysemu/rtc.h"
 #include "hw/ssi/ssi.h"
 #include "qapi/error.h"
 #include "qemu/cutils.h"
@@ -206,7 +206,7 @@ static int strongarm_pic_post_load(void *opaque, int version_id)
     return 0;
 }
 
-static VMStateDescription vmstate_strongarm_pic_regs = {
+static const VMStateDescription vmstate_strongarm_pic_regs = {
     .name = "strongarm_pic",
     .version_id = 0,
     .minimum_version_id = 0,

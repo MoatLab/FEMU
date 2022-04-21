@@ -1,0 +1,90 @@
+OPAL Flash calls
+================
+
+There are three OPAL calls for interacting with flash devices:
+
+.. code-block:: c
+
+ #define OPAL_FLASH_READ	110
+ #define OPAL_FLASH_WRITE	111
+ #define OPAL_FLASH_ERASE	112
+
+Multiple flash devices are supported by OPAL - each of these calls takes an id
+parameter, which must match an ID found in the corresponding ``ibm,opal/flash@n``
+device tree node. See :ref:`device-tree/ibm,opal/flash` for details of
+the device tree bindings.
+
+All operations on the flash device must be aligned to the block size of the
+flash. This applies to both offset and size arguments.
+
+This interface is asynchronous; all calls require a 'token' argument. On
+success, the calls will return :ref:`OPAL_ASYNC_COMPLETION`, and an
+opal_async_completion message will be sent (with the appropriate token
+argument) when the operation completes.
+
+.. note:: These calls can have higher than normal latency, spending many
+	  **milliseconds** inside OPAL. This is due to the OPAL_FLASH_* calls
+	  typically being backed by flash on the other side of the LPC bus,
+	  which has a maximum transfer rate of 5MB/sec, or to/from flash attached
+	  to the ast2400/ast2500 (the typical setup for OpenPOWER systems) of
+	  only 1.75MB/sec.
+
+All calls share the same return values:
+
+:ref:`OPAL_ASYNC_COMPLETION`
+  operation started, an async completion will be triggered with the ``token`` argument
+:ref:`OPAL_PARAMETER`
+  invalid flash id
+:ref:`OPAL_PARAMETER`
+  invalid size or offset (alignment, or access beyond end of device)
+:ref:`OPAL_BUSY`
+  flash in use
+:ref:`OPAL_HARDWARE`
+  error accessing flash device
+
+.. _OPAL_FLASH_READ:
+
+OPAL_FLASH_READ
+---------------
+
+.. code-block:: c
+
+    #define OPAL_FLASH_READ	110
+
+    int64_t opal_flash_read(uint64_t id, uint64_t offset, uint64_t buf,
+                            uint64_t size, uint64_t token);
+
+Reads from the specified flash id, at the specified offset, into the buffer.
+Will trigger an async completion with token when completed.
+
+.. _OPAL_FLASH_ERASE:
+
+OPAL_FLASH_ERASE
+----------------
+
+.. code-block:: c
+
+   #define OPAL_FLASH_ERASE	112
+
+   int64_t opal_flash_erase(uint64_t id, uint64_t offset, uint64_t size,
+                            uint64_t token);
+
+Erases the specified flash id, at the specified offset and size.  Will trigger
+an async completion with token when completed.
+
+.. _OPAL_FLASH_WRITE:
+
+OPAL_FLASH_WRITE
+----------------
+
+.. code-block:: c
+
+   #define OPAL_FLASH_WRITE	111
+
+   int64_t opal_flash_write(uint64_t id, uint64_t offset, uint64_t buf,
+                            uint64_t size, uint64_t token);
+
+Writes buffer to the specified flash id, at the specified offset and size. The
+flash must be erased before being written. Will trigger an async completion with
+token when completed.
+

@@ -29,7 +29,6 @@
 #include "exec/translator.h"
 #include "qemu/qemu-print.h"
 
-#include "trace-tcg.h"
 #include "exec/log.h"
 
 #define EXTRACT_FIELD(src, start, end) \
@@ -125,23 +124,9 @@ static void gen_raise_hw_excp(DisasContext *dc, uint32_t esr_ec)
     gen_raise_exception_sync(dc, EXCP_HW_EXCP);
 }
 
-static inline bool use_goto_tb(DisasContext *dc, target_ulong dest)
-{
-#ifndef CONFIG_USER_ONLY
-    return (dc->base.pc_first & TARGET_PAGE_MASK) == (dest & TARGET_PAGE_MASK);
-#else
-    return true;
-#endif
-}
-
 static void gen_goto_tb(DisasContext *dc, int n, target_ulong dest)
 {
-    if (dc->base.singlestep_enabled) {
-        TCGv_i32 tmp = tcg_const_i32(EXCP_DEBUG);
-        tcg_gen_movi_i32(cpu_pc, dest);
-        gen_helper_raise_exception(cpu_env, tmp);
-        tcg_temp_free_i32(tmp);
-    } else if (use_goto_tb(dc, dest)) {
+    if (translator_use_goto_tb(&dc->base, dest)) {
         tcg_gen_goto_tb(n);
         tcg_gen_movi_i32(cpu_pc, dest);
         tcg_gen_exit_tb(dc->base.tb, n);
@@ -737,6 +722,7 @@ static TCGv compute_ldst_addr_ea(DisasContext *dc, int ra, int rb)
 }
 #endif
 
+#ifndef CONFIG_USER_ONLY
 static void record_unaligned_ess(DisasContext *dc, int rd,
                                  MemOp size, bool store)
 {
@@ -749,6 +735,7 @@ static void record_unaligned_ess(DisasContext *dc, int rd,
 
     tcg_set_insn_start_param(dc->insn_start, 1, iflags);
 }
+#endif
 
 static bool do_load(DisasContext *dc, int rd, TCGv addr, MemOp mop,
                     int mem_index, bool rev)
@@ -770,12 +757,19 @@ static bool do_load(DisasContext *dc, int rd, TCGv addr, MemOp mop,
         }
     }
 
+    /*
+     * For system mode, enforce alignment if the cpu configuration
+     * requires it.  For user-mode, the Linux kernel will have fixed up
+     * any unaligned access, so emulate that by *not* setting MO_ALIGN.
+     */
+#ifndef CONFIG_USER_ONLY
     if (size > MO_8 &&
         (dc->tb_flags & MSR_EE) &&
         dc->cfg->unaligned_exceptions) {
         record_unaligned_ess(dc, rd, size, false);
         mop |= MO_ALIGN;
     }
+#endif
 
     tcg_gen_qemu_ld_i32(reg_for_write(dc, rd), addr, mem_index, mop);
 
@@ -916,12 +910,19 @@ static bool do_store(DisasContext *dc, int rd, TCGv addr, MemOp mop,
         }
     }
 
+    /*
+     * For system mode, enforce alignment if the cpu configuration
+     * requires it.  For user-mode, the Linux kernel will have fixed up
+     * any unaligned access, so emulate that by *not* setting MO_ALIGN.
+     */
+#ifndef CONFIG_USER_ONLY
     if (size > MO_8 &&
         (dc->tb_flags & MSR_EE) &&
         dc->cfg->unaligned_exceptions) {
         record_unaligned_ess(dc, rd, size, true);
         mop |= MO_ALIGN;
     }
+#endif
 
     tcg_gen_qemu_st_i32(reg_for_read(dc, rd), addr, mem_index, mop);
 
@@ -1683,23 +1684,6 @@ static void mb_tr_insn_start(DisasContextBase *dcb, CPUState *cs)
     dc->insn_start = tcg_last_op();
 }
 
-static bool mb_tr_breakpoint_check(DisasContextBase *dcb, CPUState *cs,
-                                   const CPUBreakpoint *bp)
-{
-    DisasContext *dc = container_of(dcb, DisasContext, base);
-
-    gen_raise_exception_sync(dc, EXCP_DEBUG);
-
-    /*
-     * The address covered by the breakpoint must be included in
-     * [tb->pc, tb->pc + tb->size) in order to for it to be
-     * properly cleared -- thus we increment the PC here so that
-     * the logic setting tb->size below does the right thing.
-     */
-    dc->base.pc_next += 4;
-    return true;
-}
-
 static void mb_tr_translate_insn(DisasContextBase *dcb, CPUState *cs)
 {
     DisasContext *dc = container_of(dcb, DisasContext, base);
@@ -1806,7 +1790,7 @@ static void mb_tr_tb_stop(DisasContextBase *dcb, CPUState *cs)
         break;
 
     case DISAS_JUMP:
-        if (dc->jmp_dest != -1 && !cs->singlestep_enabled) {
+        if (dc->jmp_dest != -1 && !(tb_cflags(dc->base.tb) & CF_NO_GOTO_TB)) {
             /* Direct jump. */
             tcg_gen_discard_i32(cpu_btarget);
 
@@ -1831,15 +1815,10 @@ static void mb_tr_tb_stop(DisasContextBase *dcb, CPUState *cs)
             return;
         }
 
-        /* Indirect jump (or direct jump w/ singlestep) */
+        /* Indirect jump (or direct jump w/ goto_tb disabled) */
         tcg_gen_mov_i32(cpu_pc, cpu_btarget);
         tcg_gen_discard_i32(cpu_btarget);
-
-        if (unlikely(cs->singlestep_enabled)) {
-            gen_raise_exception(dc, EXCP_DEBUG);
-        } else {
-            tcg_gen_lookup_and_goto_ptr();
-        }
+        tcg_gen_lookup_and_goto_ptr();
         return;
 
     default:
@@ -1864,7 +1843,6 @@ static const TranslatorOps mb_tr_ops = {
     .init_disas_context = mb_tr_init_disas_context,
     .tb_start           = mb_tr_tb_start,
     .insn_start         = mb_tr_insn_start,
-    .breakpoint_check   = mb_tr_breakpoint_check,
     .translate_insn     = mb_tr_translate_insn,
     .tb_stop            = mb_tr_tb_stop,
     .disas_log          = mb_tr_disas_log,

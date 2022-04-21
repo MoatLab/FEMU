@@ -1,0 +1,15 @@
+Flash info:
+-----------
+Name          = FILE
+Total size    = 0MB	 Flags E:ECC, P:PRESERVED, R:READONLY, B:BACKUP
+Erase granule =  0KB           F:REPROVISION, V:VOLATILE, C:CLEARECC
+
+TOC@0x00000000 Partitions:
+-----------
+ID=00            part 0x00000000..0x00001000 (actual=0x00001000) [----------]
+ID=01             ONE 0x00003000..0x00004000 (actual=0x00001000) [E--------V]
+ID=02             TWO 0x00004000..0x00005000 (actual=0x00001000) [E-----F---]
+ID=03           THREE 0x00005000..0x00006000 (actual=0x00001000) [E-----F---]
+ID=04            FOUR 0x00006000..0x00007000 (actual=0x00001000) [E-----F---]
+ID=05            FIVE 0x00007000..0x00008000 (actual=0x00001000) [-L--------]
+ID=06             SIX 0x00008000..0x00009000 (actual=0x00001000) [--------C-]

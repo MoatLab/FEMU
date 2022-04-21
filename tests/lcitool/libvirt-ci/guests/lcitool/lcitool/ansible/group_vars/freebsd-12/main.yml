@@ -1,0 +1,28 @@
+---
+os:
+  name: 'FreeBSD'
+  version: '12'
+
+target: 'freebsd-12'
+
+packaging:
+  format: 'pkg'
+  command: 'pkg'
+
+paths:
+  bash: /usr/local/bin/bash
+  cc: /usr/bin/clang
+  ccache: /usr/local/bin/ccache
+  make: /usr/local/bin/gmake
+  ninja: /usr/local/bin/ninja
+  pip3: /usr/local/bin/pip-3.8
+  python: /usr/local/bin/python3
+  sudoers: /usr/local/etc/sudoers
+
+ansible_python_package: python3
+ansible_python_interpreter: /usr/local/bin/python3
+
+cirrus:
+  instance_type: freebsd_instance
+  image_selector: image_family
+  image_name: freebsd-12-2

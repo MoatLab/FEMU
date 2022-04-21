@@ -1,0 +1,11 @@
+[binaries]
+c = '/usr/bin/mipsel-linux-gnu-gcc'
+ar = '/usr/bin/mipsel-linux-gnu-gcc-ar'
+strip = '/usr/bin/mipsel-linux-gnu-strip'
+pkgconfig = '/usr/bin/mipsel-linux-gnu-pkg-config'
+
+[host_machine]
+system = 'linux'
+cpu_family = 'mips'
+cpu = 'mipsel'
+endian = 'little'

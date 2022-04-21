@@ -101,6 +101,16 @@ Options
     Enable/disable extended attributes (xattr) on files and directories.  The
     default is ``no_xattr``.
 
+  * posix_acl|no_posix_acl -
+    Enable/disable posix acl support.  Posix ACLs are disabled by default.
+
+  * security_label|no_security_label -
+    Enable/disable security label support. Security labels are disabled by
+    default. This will allow client to send a MAC label of file during
+    file creation. Typically this is expected to be SELinux security
+    label. Server will try to set that label on newly created file
+    atomically wherever possible.
+
 .. option:: --socket-path=PATH
 
   Listen on vhost-user UNIX domain socket at PATH.
@@ -127,14 +137,17 @@ Options
   timeout.  ``always`` sets a long cache lifetime at the expense of coherency.
   The default is ``auto``.
 
-xattr-mapping
--------------
+Extended attribute (xattr) mapping
+----------------------------------
 
 By default the name of xattr's used by the client are passed through to the server
 file system.  This can be a problem where either those xattr names are used
 by something on the server (e.g. selinux client/server confusion) or if the
-virtiofsd is running in a container with restricted privileges where it cannot
-access some attributes.
+``virtiofsd`` is running in a container with restricted privileges where it
+cannot access some attributes.
+
+Mapping syntax
+~~~~~~~~~~~~~~
 
 A mapping of xattr names can be made using -o xattrmap=mapping where the ``mapping``
 string consists of a series of rules.
@@ -173,6 +186,12 @@ Using ':' as the separator a rule is of the form:
 
 - 'bad' - If a client tries to use a name matching 'key' it's
   denied using EPERM; when the server passes an attribute
+  name matching 'prepend' it's hidden.  In many ways it's use is very like
+  'ok' as either an explicit terminator or for special handling of certain
+  patterns.
+
+- 'unsupported' - If a client tries to use a name matching 'key' it's
+  denied using ENOTSUP; when the server passes an attribute
   name matching 'prepend' it's hidden.  In many ways it's use is very like
   'ok' as either an explicit terminator or for special handling of certain
   patterns.
@@ -228,14 +247,58 @@ The 'map' type adds a number of separate rules to add **prepend** as a prefix
 to the matched **key** (or all attributes if **key** is empty).
 There may be at most one 'map' rule and it must be the last rule in the set.
 
-xattr-mapping Examples
-----------------------
+Note: When the 'security.capability' xattr is remapped, the daemon has to do
+extra work to remove it during many operations, which the host kernel normally
+does itself.
+
+Security considerations
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Operating systems typically partition the xattr namespace using
+well defined name prefixes. Each partition may have different
+access controls applied. For example, on Linux there are multiple
+partitions
+
+ * ``system.*`` - access varies depending on attribute & filesystem
+ * ``security.*`` - only processes with CAP_SYS_ADMIN
+ * ``trusted.*`` - only processes with CAP_SYS_ADMIN
+ * ``user.*`` - any process granted by file permissions / ownership
+
+While other OS such as FreeBSD have different name prefixes
+and access control rules.
+
+When remapping attributes on the host, it is important to
+ensure that the remapping does not allow a guest user to
+evade the guest access control rules.
+
+Consider if ``trusted.*`` from the guest was remapped to
+``user.virtiofs.trusted*`` in the host. An unprivileged
+user in a Linux guest has the ability to write to xattrs
+under ``user.*``. Thus the user can evade the access
+control restriction on ``trusted.*`` by instead writing
+to ``user.virtiofs.trusted.*``.
+
+As noted above, the partitions used and access controls
+applied, will vary across guest OS, so it is not wise to
+try to predict what the guest OS will use.
+
+The simplest way to avoid an insecure configuration is
+to remap all xattrs at once, to a given fixed prefix.
+This is shown in example (1) below.
+
+If selectively mapping only a subset of xattr prefixes,
+then rules must be added to explicitly block direct
+access to the target of the remapping. This is shown
+in example (2) below.
+
+Mapping examples
+~~~~~~~~~~~~~~~~
 
 1) Prefix all attributes with 'user.virtiofs.'
 
 ::
 
--o xattrmap=":prefix:all::user.virtiofs.::bad:all:::"
+ -o xattrmap=":prefix:all::user.virtiofs.::bad:all:::"
 
 
 This uses two rules, using : as the field separator;
@@ -246,7 +309,8 @@ the host set.
 This is equivalent to the 'map' rule:
 
 ::
--o xattrmap=":map::user.virtiofs.:"
+
+ -o xattrmap=":map::user.virtiofs.:"
 
 2) Prefix 'trusted.' attributes, allow others through
 
@@ -266,14 +330,17 @@ stripping of 'user.virtiofs.'.
 The second rule hides unprefixed 'trusted.' attributes
 on the host.
 The third rule stops a guest from explicitly setting
-the 'user.virtiofs.' path directly.
+the 'user.virtiofs.' path directly to prevent access
+control bypass on the target of the earlier prefix
+remapping.
 Finally, the fourth rule lets all remaining attributes
 through.
 
 This is equivalent to the 'map' rule:
 
 ::
--o xattrmap="/map/trusted./user.virtiofs./"
+
+ -o xattrmap="/map/trusted./user.virtiofs./"
 
 3) Hide 'security.' attributes, and allow everything else
 
@@ -288,19 +355,44 @@ client arguments or lists returned from the host.  This stops
 the client seeing any 'security.' attributes on the server and
 stops it setting any.
 
+SELinux support
+---------------
+One can enable support for SELinux by running virtiofsd with option
+"-o security_label". But this will try to save guest's security context
+in xattr security.selinux on host and it might fail if host's SELinux
+policy does not permit virtiofsd to do this operation.
+
+Hence, it is preferred to remap guest's "security.selinux" xattr to say
+"trusted.virtiofs.security.selinux" on host.
+
+"-o xattrmap=:map:security.selinux:trusted.virtiofs.:"
+
+This will make sure that guest and host's SELinux xattrs on same file
+remain separate and not interfere with each other. And will allow both
+host and guest to implement their own separate SELinux policies.
+
+Setting trusted xattr on host requires CAP_SYS_ADMIN. So one will need
+add this capability to daemon.
+
+"-o modcaps=+sys_admin"
+
+Giving CAP_SYS_ADMIN increases the risk on system. Now virtiofsd is more
+powerful and if gets compromised, it can do lot of damage to host system.
+So keep this trade-off in my mind while making a decision.
+
 Examples
 --------
 
 Export ``/var/lib/fs/vm001/`` on vhost-user UNIX domain socket
 ``/var/run/vm001-vhost-fs.sock``:
 
-::
+.. parsed-literal::
 
   host# virtiofsd --socket-path=/var/run/vm001-vhost-fs.sock -o source=/var/lib/fs/vm001
-  host# qemu-system-x86_64 \
-      -chardev socket,id=char0,path=/var/run/vm001-vhost-fs.sock \
-      -device vhost-user-fs-pci,chardev=char0,tag=myfs \
-      -object memory-backend-memfd,id=mem,size=4G,share=on \
-      -numa node,memdev=mem \
-      ...
+  host# |qemu_system| \\
+        -chardev socket,id=char0,path=/var/run/vm001-vhost-fs.sock \\
+        -device vhost-user-fs-pci,chardev=char0,tag=myfs \\
+        -object memory-backend-memfd,id=mem,size=4G,share=on \\
+        -numa node,memdev=mem \\
+        ...
   guest# mount -t virtiofs myfs /mnt

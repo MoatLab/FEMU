@@ -15,7 +15,6 @@
 
 #include "sysemu/runstate.h"
 #include "hw/vfio/vfio-common.h"
-#include "cpu.h"
 #include "migration/migration.h"
 #include "migration/vmstate.h"
 #include "migration/qemu-file.h"
@@ -395,39 +394,9 @@ static int vfio_load_device_config_state(QEMUFile *f, void *opaque)
     return qemu_file_get_error(f);
 }
 
-static int vfio_set_dirty_page_tracking(VFIODevice *vbasedev, bool start)
-{
-    int ret;
-    VFIOMigration *migration = vbasedev->migration;
-    VFIOContainer *container = vbasedev->group->container;
-    struct vfio_iommu_type1_dirty_bitmap dirty = {
-        .argsz = sizeof(dirty),
-    };
-
-    if (start) {
-        if (migration->device_state & VFIO_DEVICE_STATE_SAVING) {
-            dirty.flags = VFIO_IOMMU_DIRTY_PAGES_FLAG_START;
-        } else {
-            return -EINVAL;
-        }
-    } else {
-            dirty.flags = VFIO_IOMMU_DIRTY_PAGES_FLAG_STOP;
-    }
-
-    ret = ioctl(container->fd, VFIO_IOMMU_DIRTY_PAGES, &dirty);
-    if (ret) {
-        error_report("Failed to set dirty tracking flag 0x%x errno: %d",
-                     dirty.flags, errno);
-        return -errno;
-    }
-    return ret;
-}
-
 static void vfio_migration_cleanup(VFIODevice *vbasedev)
 {
     VFIOMigration *migration = vbasedev->migration;
-
-    vfio_set_dirty_page_tracking(vbasedev, false);
 
     if (migration->region.mmaps) {
         vfio_region_unmap(&migration->region);
@@ -466,11 +435,6 @@ static int vfio_save_setup(QEMUFile *f, void *opaque)
                                    VFIO_DEVICE_STATE_SAVING);
     if (ret) {
         error_report("%s: Failed to set state SAVING", vbasedev->name);
-        return ret;
-    }
-
-    ret = vfio_set_dirty_page_tracking(vbasedev, true);
-    if (ret) {
         return ret;
     }
 
@@ -575,11 +539,6 @@ static int vfio_save_complete_precopy(QEMUFile *f, void *opaque)
         return ret;
     }
 
-    ret = vfio_save_device_config_state(f, opaque);
-    if (ret) {
-        return ret;
-    }
-
     ret = vfio_update_pending(vbasedev);
     if (ret) {
         return ret;
@@ -618,6 +577,19 @@ static int vfio_save_complete_precopy(QEMUFile *f, void *opaque)
 
     trace_vfio_save_complete_precopy(vbasedev->name);
     return ret;
+}
+
+static void vfio_save_state(QEMUFile *f, void *opaque)
+{
+    VFIODevice *vbasedev = opaque;
+    int ret;
+
+    ret = vfio_save_device_config_state(f, opaque);
+    if (ret) {
+        error_report("%s: Failed to save device config space",
+                     vbasedev->name);
+        qemu_file_set_error(f, ret);
+    }
 }
 
 static int vfio_load_setup(QEMUFile *f, void *opaque)
@@ -670,11 +642,7 @@ static int vfio_load_state(QEMUFile *f, void *opaque, int version_id)
         switch (data) {
         case VFIO_MIG_FLAG_DEV_CONFIG_STATE:
         {
-            ret = vfio_load_device_config_state(f, opaque);
-            if (ret) {
-                return ret;
-            }
-            break;
+            return vfio_load_device_config_state(f, opaque);
         }
         case VFIO_MIG_FLAG_DEV_SETUP_STATE:
         {
@@ -720,6 +688,7 @@ static SaveVMHandlers savevm_vfio_handlers = {
     .save_live_pending = vfio_save_pending,
     .save_live_iterate = vfio_save_iterate,
     .save_live_complete_precopy = vfio_save_complete_precopy,
+    .save_state = vfio_save_state,
     .load_setup = vfio_load_setup,
     .load_cleanup = vfio_load_cleanup,
     .load_state = vfio_load_state,
@@ -727,7 +696,7 @@ static SaveVMHandlers savevm_vfio_handlers = {
 
 /* ---------------------------------------------------------------------- */
 
-static void vfio_vmstate_change(void *opaque, int running, RunState state)
+static void vfio_vmstate_change(void *opaque, bool running, RunState state)
 {
     VFIODevice *vbasedev = opaque;
     VFIOMigration *migration = vbasedev->migration;
@@ -755,7 +724,16 @@ static void vfio_vmstate_change(void *opaque, int running, RunState state)
          * _RUNNING bit
          */
         mask = ~VFIO_DEVICE_STATE_RUNNING;
-        value = 0;
+
+        /*
+         * When VM state transition to stop for savevm command, device should
+         * start saving data.
+         */
+        if (state == RUN_STATE_SAVE_VM) {
+            value = VFIO_DEVICE_STATE_SAVING;
+        } else {
+            value = 0;
+        }
     }
 
     ret = vfio_migration_set_state(vbasedev, mask, value);
@@ -857,7 +835,8 @@ static int vfio_migration_init(VFIODevice *vbasedev,
     register_savevm_live(id, VMSTATE_INSTANCE_ID_ANY, 1, &savevm_vfio_handlers,
                          vbasedev);
 
-    migration->vm_state = qemu_add_vm_change_state_handler(vfio_vmstate_change,
+    migration->vm_state = qdev_add_vm_change_state_handler(vbasedev->dev,
+                                                           vfio_vmstate_change,
                                                            vbasedev);
     migration->migration_state.notify = vfio_migration_state_notifier;
     add_migration_state_change_notifier(&migration->migration_state);
@@ -879,7 +858,6 @@ int vfio_migration_probe(VFIODevice *vbasedev, Error **errp)
 {
     VFIOContainer *container = vbasedev->group->container;
     struct vfio_region_info *info = NULL;
-    Error *local_err = NULL;
     int ret = -ENOTSUP;
 
     if (!vbasedev->enable_migration || !container->dirty_pages_supported) {
@@ -906,9 +884,8 @@ add_blocker:
                "VFIO device doesn't support migration");
     g_free(info);
 
-    ret = migrate_add_blocker(vbasedev->migration_blocker, &local_err);
-    if (local_err) {
-        error_propagate(errp, local_err);
+    ret = migrate_add_blocker(vbasedev->migration_blocker, errp);
+    if (ret < 0) {
         error_free(vbasedev->migration_blocker);
         vbasedev->migration_blocker = NULL;
     }
@@ -922,6 +899,7 @@ void vfio_migration_finalize(VFIODevice *vbasedev)
 
         remove_migration_state_change_notifier(&migration->migration_state);
         qemu_del_vm_change_state_handler(migration->vm_state);
+        unregister_savevm(VMSTATE_IF(vbasedev->dev), "vfio", vbasedev);
         vfio_migration_exit(vbasedev);
     }
 

@@ -570,7 +570,7 @@ static inline int pa_range(STE *ste)
 
 /* CD fields */
 
-#define CD_VALID(x)   extract32((x)->word[0], 30, 1)
+#define CD_VALID(x)   extract32((x)->word[0], 31, 1)
 #define CD_ASID(x)    extract32((x)->word[1], 16, 16)
 #define CD_TTB(x, sel)                                      \
     ({                                                      \
@@ -594,13 +594,6 @@ static inline int pa_range(STE *ste)
 #define CD_R(x)          extract32((x)->word[1], 13, 1)
 #define CD_A(x)          extract32((x)->word[1], 14, 1)
 #define CD_AARCH64(x)    extract32((x)->word[1], 9 , 1)
-
-#define CDM_VALID(x)    ((x)->word[0] & 0x1)
-
-static inline int is_cd_valid(SMMUv3State *s, STE *ste, CD *cd)
-{
-    return CD_VALID(cd);
-}
 
 /**
  * tg2granule - Decodes the CD translation granule size field according
@@ -633,6 +626,6 @@ static inline uint64_t l1std_l2ptr(STEDesc *desc)
     return hi << 32 | lo;
 }
 
-#define L1STD_SPAN(stm) (extract32((stm)->word[0], 0, 4))
+#define L1STD_SPAN(stm) (extract32((stm)->word[0], 0, 5))
 
 #endif

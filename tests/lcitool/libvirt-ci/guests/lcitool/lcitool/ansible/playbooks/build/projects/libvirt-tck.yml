@@ -1,0 +1,19 @@
+---
+- set_fact:
+    name: libvirt-tck
+    machines: '{{ all_machines }}'
+    archive_format: gz
+    git_url: '{{ git_urls["libvirt-tck"][git_remote] }}'
+
+- include: 'jobs/prepare.yml'
+- include: 'jobs/perl-modulebuild-build-job.yml'
+- include: 'jobs/perl-modulebuild-check-job.yml'
+
+  # CentOS releases are missing a number of RPM Perl modules, so we
+  # can't do the rpmbuild there
+- include: 'jobs/perl-modulebuild-rpm-job.yml'
+  vars:
+    machines:
+      - fedora-34
+      - fedora-35
+      - fedora-rawhide

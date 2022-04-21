@@ -27,6 +27,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu-common.h"
 #include "hw/sysbus.h"
 #include "hw/irq.h"
 #include "hw/ptimer.h"
@@ -429,7 +430,7 @@ static void etsec_class_init(ObjectClass *klass, void *data)
     dc->user_creatable = true;
 }
 
-static TypeInfo etsec_info = {
+static const TypeInfo etsec_info = {
     .name                  = TYPE_ETSEC_COMMON,
     .parent                = TYPE_SYS_BUS_DEVICE,
     .instance_size         = sizeof(eTSEC),

@@ -303,7 +303,7 @@ struct tcpcb *tcp_drop(struct tcpcb *tp, int err)
 
     if (TCPS_HAVERCVDSYN(tp->t_state)) {
         tp->t_state = TCPS_CLOSED;
-        (void)tcp_output(tp);
+        tcp_output(tp);
     }
     return (tcp_close(tp));
 }
@@ -421,7 +421,7 @@ int tcp_fconnect(struct socket *so, unsigned short af)
         struct sockaddr_storage addr;
 
         slirp_set_nonblock(s);
-        so->slirp->cb->register_poll_fd(so->s, so->slirp->opaque);
+        so->slirp->cb->register_poll_fd(s, so->slirp->opaque);
         slirp_socket_set_fast_reuse(s);
         opt = 1;
         setsockopt(s, SOL_SOCKET, SO_OOBINLINE, &opt, sizeof(opt));
@@ -466,10 +466,41 @@ void tcp_connect(struct socket *inso)
     struct sockaddr_storage addr;
     socklen_t addrlen = sizeof(struct sockaddr_storage);
     struct tcpcb *tp;
-    int s, opt;
+    int s, opt, ret;
+    /* AF_INET6 addresses are bigger than AF_INET, so this is big enough. */
+    char addrstr[INET6_ADDRSTRLEN];
+    char portstr[6];
 
     DEBUG_CALL("tcp_connect");
     DEBUG_ARG("inso = %p", inso);
+    ret = getnameinfo((const struct sockaddr *) &inso->lhost.ss, sizeof(inso->lhost.ss), addrstr, sizeof(addrstr), portstr, sizeof(portstr), NI_NUMERICHOST|NI_NUMERICSERV);
+    g_assert(ret == 0);
+    DEBUG_ARG("ip = [%s]:%s", addrstr, portstr);
+    DEBUG_ARG("so_state = 0x%x", inso->so_state);
+
+    /* Perform lazy guest IP address resolution if needed. */
+    if (inso->so_state & SS_HOSTFWD) {
+        /*
+         * We can only reject the connection request by accepting it and
+         * then immediately closing it. Note that SS_FACCEPTONCE sockets can't
+         * get here.
+         */
+        if (soassign_guest_addr_if_needed(inso) < 0) {
+            /*
+             * Guest address isn't available yet. We could either try to defer
+             * completing this connection request until the guest address is
+             * available, or punt. It's easier to punt. Otherwise we need to
+             * complicate the mechanism by which we're called to defer calling
+             * us again until the guest address is available.
+             */
+            DEBUG_MISC(" guest address not available yet");
+            s = accept(inso->s, (struct sockaddr *)&addr, &addrlen);
+            if (s >= 0) {
+                close(s);
+            }
+            return;
+        }
+    }
 
     /*
      * If it's an SS_ACCEPTONCE socket, no need to socreate()
@@ -493,7 +524,7 @@ void tcp_connect(struct socket *inso)
         return;
     }
     slirp_set_nonblock(s);
-    so->slirp->cb->register_poll_fd(so->s, so->slirp->opaque);
+    so->slirp->cb->register_poll_fd(s, so->slirp->opaque);
     slirp_socket_set_fast_reuse(s);
     opt = 1;
     setsockopt(s, SOL_SOCKET, SO_OOBINLINE, &opt, sizeof(int));

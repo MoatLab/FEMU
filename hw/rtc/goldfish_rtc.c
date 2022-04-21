@@ -20,7 +20,6 @@
  */
 
 #include "qemu/osdep.h"
-#include "qemu-common.h"
 #include "hw/rtc/goldfish_rtc.h"
 #include "migration/vmstate.h"
 #include "hw/irq.h"
@@ -29,6 +28,7 @@
 #include "qemu/bitops.h"
 #include "qemu/timer.h"
 #include "sysemu/sysemu.h"
+#include "sysemu/rtc.h"
 #include "qemu/cutils.h"
 #include "qemu/log.h"
 
@@ -210,6 +210,8 @@ static int goldfish_rtc_post_load(void *opaque, int version_id)
     delta = qemu_clock_get_ns(rtc_clock) -
             qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     s->tick_offset = s->tick_offset_vmstate - delta;
+
+    goldfish_rtc_set_alarm(s);
 
     return 0;
 }

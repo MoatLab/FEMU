@@ -16,6 +16,7 @@
 #define QAPI_VISITOR_H
 
 #include "qapi/qapi-builtin-types.h"
+#include "qapi/qapi-types-compat.h"
 
 /*
  * The QAPI schema defines both a set of C data types, and a QMP wire
@@ -458,6 +459,41 @@ void visit_end_alternate(Visitor *v, void **obj);
  * convenience.
  */
 bool visit_optional(Visitor *v, const char *name, bool *present);
+
+/*
+ * Should we reject member @name due to policy?
+ *
+ * @special_features is the member's special features encoded as a
+ * bitset of QapiSpecialFeature.
+ *
+ * @name must not be NULL.  This function is only useful between
+ * visit_start_struct() and visit_end_struct(), since only objects
+ * have deprecated members.
+ */
+bool visit_policy_reject(Visitor *v, const char *name,
+                         unsigned special_features, Error **errp);
+
+/*
+ *
+ * Should we skip member @name due to policy?
+ *
+ * @special_features is the member's special features encoded as a
+ * bitset of QapiSpecialFeature.
+ *
+ * @name must not be NULL.  This function is only useful between
+ * visit_start_struct() and visit_end_struct(), since only objects
+ * have deprecated members.
+ */
+bool visit_policy_skip(Visitor *v, const char *name,
+                       unsigned special_features);
+
+/*
+ * Set policy for handling deprecated management interfaces.
+ *
+ * Intended use: call visit_set_policy(v, &compat_policy) when
+ * visiting management interface input or output.
+ */
+void visit_set_policy(Visitor *v, CompatPolicy *policy);
 
 /*
  * Visit an enum value.

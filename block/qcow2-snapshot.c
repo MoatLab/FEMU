@@ -29,6 +29,7 @@
 #include "qemu/bswap.h"
 #include "qemu/error-report.h"
 #include "qemu/cutils.h"
+#include "qemu/memalign.h"
 
 static void qcow2_free_single_snapshot(BlockDriverState *bs, int i)
 {
@@ -1026,7 +1027,7 @@ int qcow2_snapshot_load_tmp(BlockDriverState *bs,
     int new_l1_bytes;
     int ret;
 
-    assert(bs->read_only);
+    assert(bdrv_is_read_only(bs));
 
     /* Search the snapshot */
     snapshot_index = find_snapshot_by_id_and_name(bs, snapshot_id, name);

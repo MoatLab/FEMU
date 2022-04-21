@@ -1,0 +1,7 @@
+---
+- name: '{{ install.flavor }}: Copy build env source file'
+  template:
+    src: 'templates/build_env.j2'
+    dest: /home/{{ install.flavor }}/lcitool_build_env
+    owner: '{{ install.flavor }}'
+    group: '{{ install.flavor }}'

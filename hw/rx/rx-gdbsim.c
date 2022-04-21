@@ -21,12 +21,8 @@
 #include "qemu/error-report.h"
 #include "qapi/error.h"
 #include "qemu-common.h"
-#include "cpu.h"
-#include "hw/hw.h"
-#include "hw/sysbus.h"
 #include "hw/loader.h"
 #include "hw/rx/rx62n.h"
-#include "sysemu/sysemu.h"
 #include "sysemu/qtest.h"
 #include "sysemu/device_tree.h"
 #include "hw/boards.h"
@@ -93,6 +89,7 @@ static void rx_gdbsim_init(MachineState *machine)
         char *sz = size_to_str(mc->default_ram_size);
         error_report("Invalid RAM size, should be more than %s", sz);
         g_free(sz);
+        exit(1);
     }
 
     /* Allocate memory space */
@@ -106,6 +103,16 @@ static void rx_gdbsim_init(MachineState *machine)
                              rxc->xtal_freq_hz, &error_abort);
     object_property_set_bool(OBJECT(&s->mcu), "load-kernel",
                              kernel_filename != NULL, &error_abort);
+
+    if (!kernel_filename) {
+        if (machine->firmware) {
+            rom_add_file_fixed(machine->firmware, RX62N_CFLASH_BASE, 0);
+        } else if (!qtest_enabled()) {
+            error_report("No bios or kernel specified");
+            exit(1);
+        }
+    }
+
     qdev_realize(DEVICE(&s->mcu), NULL, &error_abort);
 
     /* Load kernel and dtb */

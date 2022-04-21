@@ -1,0 +1,31 @@
+#!/bin/sh
+# PROVIDE: gitlab_runner
+# REQUIRE: DAEMON NETWORKING
+# BEFORE:
+# KEYWORD:
+
+. /etc/rc.subr
+
+name="gitlab_runner"
+rcvar="gitlab_runner_enable"
+
+user="gitlab"
+user_home="/home/gitlab"
+command="/usr/local/bin/gitlab-runner"
+command_args="run --config /etc/gitlab-runner/config.toml"
+pidfile="/var/run/${name}.pid"
+
+start_cmd="gitlab_runner_start"
+
+gitlab_runner_start()
+{
+    export USER=${user}
+    export HOME=${user_home}
+    if checkyesno ${rcvar}; then
+        cd ${user_home}
+    /usr/sbin/daemon -u ${user} -p ${pidfile} ${command} ${command_args} > /var/log/gitlab-runner.log 2>&1
+        fi
+}
+
+load_rc_config $name
+run_rc_command $1
