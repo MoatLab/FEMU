@@ -1,0 +1,612 @@
+#!/usr/bin/python3
+# -*- python -*-
+#
+# quayadmin - client for quay.io
+#
+# Copyright (C) 2019 Red Hat, Inc.
+#
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+import argparse
+import configparser
+import os
+import pprint
+import requests
+import sys
+
+def get_config():
+    try:
+        path = os.environ["XDG_CONFIG_HOME"]
+    except KeyError:
+        path = os.path.join(os.environ["HOME"], ".config")
+    path = os.path.join(os.path.join(path, "quayadmin"), "config.ini")
+
+    try:
+        parser = configparser.ConfigParser()
+        parser.read_file(open(path))
+    except Exception as ex:
+        raise Exception("Cannot load config: {}".format(ex))
+
+    try:
+        config = {
+            "baseurl": "https://quay.io/api/v1",
+            "token": parser["DEFAULT"]["token"],
+        }
+    except KeyError:
+        raise Exception("Token not found in {}".format(path))
+
+    return config
+
+
+def request(config, endpoint, method, payload=None, params=None, debug=False):
+    url = config["baseurl"] + endpoint
+
+    headers = {
+        "Authorization": "Bearer {}".format(config["token"])
+    }
+
+    if debug:
+        print("=> {")
+        print("  url={}".format(url))
+        print("  params={}".format(pprint.pformat(params)))
+        print("  payload={}".format(pprint.pformat(payload)))
+        print("}")
+
+    res = method(url, headers=headers, json=payload, params=params)
+
+    if debug:
+        print("<= {")
+        print("  status_code={}".format(res.status_code))
+        if res.text is not None and len(res.text) > 0:
+            print("  json={}".format(pprint.pformat(res.json())))
+        print("}")
+
+    return res
+
+
+def get(config, endpoint, params=None, debug=False):
+    return request(config, endpoint, method=requests.get, params=params, debug=debug)
+
+
+def delete(config, endpoint, payload=None, debug=False):
+    return request(config, endpoint, method=requests.delete, payload=payload, debug=debug)
+
+
+def post(config, endpoint, payload=None, debug=False):
+    return request(config, endpoint, method=requests.post, payload=payload, debug=debug)
+
+
+def put(config, endpoint, payload=None, debug=False):
+    return request(config, endpoint, method=requests.put, payload=payload, debug=debug)
+
+
+def has_error(quiet, res, expected, message):
+    if res.status_code == expected:
+        return False
+
+    if res.status_code >= 400 and res.status_code < 500:
+        info = res.json()
+        err = info["error_message"]
+    else:
+        err = res.content
+
+    if not quiet:
+        print("{}: {} ({})".format(message, err, res.status_code))
+    return True
+
+
+def run_list_repos(config, args):
+    endpoint = "/repository"
+    params = {
+        "namespace": args.namespace,
+    }
+
+    res = get(config, endpoint, params=params, debug=args.debug)
+
+    if has_error(args.quiet, res, 200, "Cannot list repositories"):
+        return 1
+
+    info = res.json()
+
+    for repo in info["repositories"]:
+        print ("{}".format(repo["name"]))
+
+
+def run_show_repo(config, args):
+    endpoint = "/repository/{}/{}".format(args.namespace, args.repo)
+
+    res = get(config, endpoint, debug=args.debug)
+
+    if has_error(args.quiet, res, 200, "Cannot query repository {}/{}"
+                 .format(args.namespace, args.repo)):
+        return 1
+
+    if args.quiet:
+        return 0
+
+    info = res.json()
+
+    print("repo:")
+    print("  namespace: {}".format(args.namespace))
+    print("  repo: {}".format(args.repo))
+    print("  description: {}".format(info["description"]))
+
+
+def run_create_repo(config, args):
+    endpoint = "/repository"
+    payload = {
+        "repo_kind": "image",
+        "namespace": args.namespace,
+        "visibility": "public",
+        "repository": args.repo,
+        "description": args.desc,
+    }
+
+    res = post(config, endpoint, payload=payload, debug=args.debug)
+
+    if has_error(args.quiet, res, 201, "Cannot create repository {}/{}"
+                 .format(args.namespace, args.repo)):
+        return 1
+
+    if args.quiet:
+        return 0
+
+    print("Repository {}/{} created".format(args.namespace, args.repo))
+
+
+def run_delete_repo(config, args):
+    endpoint = "/repository/{}/{}".format(args.namespace, args.repo)
+
+    res = delete(config, endpoint, debug=args.debug)
+
+    if has_error(args.quiet, res, 204, "Cannot delete repository {}/{}"
+                 .format(args.namespace, args.repo)):
+        return 1
+
+    if args.quiet:
+        return 0
+
+    print("Repository {}/{} deleted".format(args.namespace, args.repo))
+
+
+def run_list_tags(config, args):
+    endpoint = "/repository/{}/{}/tag/".format(args.namespace, args.repo)
+    params = {
+        "onlyActiveTags": True,
+        "limit": 100,
+    }
+
+    res = get(config, endpoint, params=params, debug=args.debug)
+
+    if has_error(args.quiet, res, 200,
+                 "Cannot list tags for repository {}/{}"
+                 .format(args.namespace, args.repo)):
+        return 1
+
+    info = res.json()
+
+    for tag in info["tags"]:
+        print ("{}".format(tag["name"]))
+
+
+def run_show_tag(config, args):
+    endpoint = "/repository/{}/{}/tag/".format(args.namespace, args.repo)
+    params = {
+        "onlyActiveTags": True,
+        "limit": 100,
+    }
+
+    res = get(config, endpoint, params=params, debug=args.debug)
+
+    if has_error(args.quiet, res, 200,
+                 "Cannot list tags for repository {}/{}"
+                 .format(args.namespace, args.repo)):
+        return 1
+
+    info = res.json()
+
+    image = None
+    for tag in info["tags"]:
+        if tag["name"] == args.tag:
+            image = tag["image_id"]
+            break
+
+    if image is None:
+        print("Cannot query tag {} for repository {}/{}: Not Found (404)"
+              .format(args.tag, args.namespace, args.repo))
+        return 1
+
+    if args.quiet:
+        return 0
+
+    print("tag:")
+    print("  namespace: {}".format(args.namespace))
+    print("  repo: {}".format(args.repo))
+    print("  id: {}".format(args.tag))
+    print("  image: {}".format(image))
+
+
+def run_create_tag(config, args):
+    endpoint = "/repository/{}/{}/tag/{}".format(args.namespace, args.repo,
+                                                 args.tag)
+    payload = {
+        "image": args.image,
+    }
+
+    res = put(config, endpoint, payload=payload, debug=args.debug)
+
+    if has_error(args.quiet, res, 201,
+                 "Cannot create tag {} for repository {}/{}"
+                 .format(args.tag, args.namespace, args.repo)):
+        return 1
+
+    if args.quiet:
+        return 0
+
+    print("Tag {} created in repository {}/{}".format(args.tag,
+                                                      args.namespace,
+                                                      args.repo))
+
+
+def run_delete_tag(config, args):
+    endpoint = "/repository/{}/{}/tag/{}".format(args.namespace, args.repo,
+                                                 args.tag)
+
+    res = delete(config, endpoint, debug=args.debug)
+
+    if has_error(args.quiet, res, 204,
+                 "Cannot delete tag {} from repository {}/{}"
+                 .format(args.tag, args.namespace, args.repo)):
+        return 1
+
+    if args.quiet:
+        return 0
+
+    print("Tag {} deleted from repository {}/{}".format(args.tag,
+                                                        args.namespace,
+                                                        args.repo))
+
+
+def run_list_builds(config, args):
+    endpoint = "/repository/{}/{}/build/".format(args.namespace, args.repo)
+
+    res = get(config, endpoint, debug=args.debug)
+
+    if has_error(args.quiet, res, 200,
+                 "Cannot list builds for repository {}/{}"
+                 .format(args.namespace, args.repo)):
+        return 1
+
+    info = res.json()
+
+    for build in info["builds"]:
+        print(build["id"])
+
+
+def run_show_build(config, args):
+    endpoint = "/repository/{}/{}/build/{}".format(args.namespace,
+                                                   args.repo, args.build)
+
+    res = get(config, endpoint, debug=args.debug)
+
+    if has_error(args.quiet, res, 200,
+                 "Cannot query build {} for repository {}/{}"
+                 .format(args.build, args.namespace, args.repo)):
+        return 1
+
+    if args.quiet:
+        return 0
+
+    info = res.json()
+
+    print("build:")
+    print("  namespace: {}".format(args.namespace))
+    print("  repo: {}".format(args.repo))
+    print("  id: {}".format(args.build))
+    print("  phase: {}".format(info["phase"]))
+    print("  started: {}".format(info["started"]))
+
+
+def run_create_build(config, args):
+    endpoint = "/repository/{}/{}/build/".format(args.namespace, args.repo)
+    payload = {
+        "archive_url": args.archive_url,
+    }
+
+    res = post(config, endpoint, payload=payload, debug=args.debug)
+
+    if has_error(args.quiet, res, 201,
+                 "Cannot create build for repository {}/{}"
+                 .format(args.namespace, args.repo)):
+        return 1
+
+    if args.quiet:
+        return 0
+
+    info = res.json()
+
+    print("Build {} created in repository {}/{}".format(info["id"],
+                                                        args.namespace,
+                                                        args.repo))
+
+
+def run_list_triggers(config, args):
+    endpoint = "/repository/{}/{}/trigger/".format(args.namespace, args.repo)
+
+    res = get(config, endpoint, debug=args.debug)
+
+    if has_error(args.quiet, res, 200,
+                 "Cannot list triggers for repository {}/{}"
+                 .format(args.namespace, args.repo)):
+        return 1
+
+    info = res.json()
+
+    for trigger in info["triggers"]:
+        print(trigger["id"])
+
+
+def run_show_trigger(config, args):
+    endpoint = "/repository/{}/{}/trigger/{}".format(args.namespace,
+                                                     args.repo, args.trigger)
+
+    res = get(config, endpoint, debug=args.debug)
+
+    if has_error(args.quiet, res, 200,
+                 "Cannot query trigger {} for repository {}/{}"
+                 .format(args.trigger, args.namespace, args.repo)):
+        return 1
+
+    if args.quiet:
+        return 0
+
+    info = res.json()
+
+    print("trigger:")
+    print("  namespace: {}".format(args.namespace))
+    print("  repo: {}".format(args.repo))
+    print("  id: {}".format(args.trigger))
+    print("  source_repo: {}".format(info["config"]["build_source"]))
+    print("  source_path: {}".format(info["config"]["dockerfile_path"]))
+    print("  activatable: {}".format(info["can_invoke"]))
+
+
+def run_activate_trigger(config, args):
+    endpoint = "/repository/{}/{}/trigger/{}/start".format(args.namespace,
+                                                           args.repo,
+                                                           args.trigger)
+    payload = {
+        "commit_sha": args.commit,
+    }
+
+    res = post(config, endpoint, payload=payload, debug=args.debug)
+
+    if has_error(args.quiet, res, 201,
+                 "Cannot activate trigger {} for repository {}/{}"
+                 .format(args.trigger, args.namespace, args.repo)):
+        return 1
+
+    if args.quiet:
+        return 0
+
+    info = res.json()
+
+    print("Build {} for {}/{} created".format(info["id"],
+                                              args.namespace, args.repo))
+
+
+def add_arg_namespace(parser):
+    parser.add_argument("namespace", help="Organization or user name")
+
+
+def add_arg_repo(parser):
+    parser.add_argument("repo", help="Repository name")
+
+
+def add_arg_desc(parser):
+    parser.add_argument("desc", help="Repository description")
+
+
+def add_arg_trigger(parser):
+    parser.add_argument("trigger", help="Trigger ID")
+
+
+def add_arg_commit(parser):
+    parser.add_argument("commit", help="Git commit hash")
+
+
+def add_arg_build(parser):
+    parser.add_argument("build", help="Build ID")
+
+
+def add_arg_tag(parser):
+    parser.add_argument("tag", help="Tag ID")
+
+
+def add_arg_image(parser):
+    parser.add_argument("image", help="Image ID")
+
+
+def add_arg_archive_url(parser):
+    parser.add_argument("archive_url", help="Archive URL")
+
+
+def build_parser_list_repos(subparser):
+    parser = subparser.add_parser("list-repos", help="List container repositories")
+
+    parser.set_defaults(func=run_list_repos)
+
+    add_arg_namespace(parser)
+
+
+def build_parser_create_repo(subparser):
+    parser = subparser.add_parser("create-repo", help="Create a new repository")
+
+    parser.set_defaults(func=run_create_repo)
+
+    add_arg_namespace(parser)
+    add_arg_repo(parser)
+    add_arg_desc(parser)
+
+
+def build_parser_show_repo(subparser):
+    parser = subparser.add_parser("show-repo", help="Show repository info")
+
+    parser.set_defaults(func=run_show_repo)
+
+    add_arg_namespace(parser)
+    add_arg_repo(parser)
+
+
+def build_parser_delete_repo(subparser):
+    parser = subparser.add_parser("delete-repo", help="Delete an existing repository")
+
+    parser.set_defaults(func=run_delete_repo)
+
+    add_arg_namespace(parser)
+    add_arg_repo(parser)
+
+
+def build_parser_list_tags(subparser):
+    parser = subparser.add_parser("list-tags", help="List repository tags")
+
+    parser.set_defaults(func=run_list_tags)
+
+    add_arg_namespace(parser)
+    add_arg_repo(parser)
+
+
+def build_parser_show_tag(subparser):
+    parser = subparser.add_parser("show-tag", help="Show tag information")
+
+    parser.set_defaults(func=run_show_tag)
+
+    add_arg_namespace(parser)
+    add_arg_repo(parser)
+    add_arg_tag(parser)
+
+
+def build_parser_create_tag(subparser):
+    parser = subparser.add_parser("create-tag", help="Create a new tag")
+
+    parser.set_defaults(func=run_create_tag)
+
+    add_arg_namespace(parser)
+    add_arg_repo(parser)
+    add_arg_tag(parser)
+    add_arg_image(parser)
+
+
+def build_parser_delete_tag(subparser):
+    parser = subparser.add_parser("delete-tag", help="Delete an existing tag")
+
+    parser.set_defaults(func=run_delete_tag)
+
+    add_arg_namespace(parser)
+    add_arg_repo(parser)
+    add_arg_tag(parser)
+
+
+def build_parser_list_builds(subparser):
+    parser = subparser.add_parser("list-builds", help="List repository builds")
+
+    parser.set_defaults(func=run_list_builds)
+
+    add_arg_namespace(parser)
+    add_arg_repo(parser)
+
+
+def build_parser_show_build(subparser):
+    parser = subparser.add_parser("show-build", help="Show build info")
+
+    parser.set_defaults(func=run_show_build)
+
+    add_arg_namespace(parser)
+    add_arg_repo(parser)
+    add_arg_build(parser)
+
+
+def build_parser_create_build(subparser):
+    parser = subparser.add_parser("create-build", help="Create a new build")
+
+    parser.set_defaults(func=run_create_build)
+
+    add_arg_namespace(parser)
+    add_arg_repo(parser)
+    add_arg_archive_url(parser)
+
+
+def build_parser_list_triggers(subparser):
+    parser = subparser.add_parser("list-triggers", help="List repository triggers")
+
+    parser.set_defaults(func=run_list_triggers)
+
+    add_arg_namespace(parser)
+    add_arg_repo(parser)
+
+
+def build_parser_show_trigger(subparser):
+    parser = subparser.add_parser("show-trigger", help="Show trigger information")
+
+    parser.set_defaults(func=run_show_trigger)
+
+    add_arg_namespace(parser)
+    add_arg_repo(parser)
+    add_arg_trigger(parser)
+
+
+def build_parser_activate_trigger(subparser):
+    parser = subparser.add_parser("activate-trigger", help="Start build from trigger")
+
+    parser.set_defaults(func=run_activate_trigger)
+
+    add_arg_namespace(parser)
+    add_arg_repo(parser)
+    add_arg_trigger(parser)
+    add_arg_commit(parser)
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        description="quay.io client admin tool"
+    )
+
+    parser.add_argument("--debug", '-d', action="store_true", help="Print debugging information")
+    parser.add_argument("--quiet", '-q', action="store_true", help="Display minimal information")
+
+    subparser = parser.add_subparsers(metavar="COMMAND")
+    subparser.required = True
+
+    build_parser_list_repos(subparser)
+    build_parser_show_repo(subparser)
+    build_parser_create_repo(subparser)
+    build_parser_delete_repo(subparser)
+
+    build_parser_list_tags(subparser)
+    build_parser_show_tag(subparser)
+    build_parser_create_tag(subparser)
+    build_parser_delete_tag(subparser)
+
+    build_parser_list_builds(subparser)
+    build_parser_show_build(subparser)
+    build_parser_create_build(subparser)
+
+    build_parser_list_triggers(subparser)
+    build_parser_show_trigger(subparser)
+    build_parser_activate_trigger(subparser)
+
+    return parser
+
+def main():
+    parser = build_parser()
+    args = parser.parse_args()
+
+    try:
+        res = args.func(get_config(), args)
+        sys.exit(res)
+    except Exception as ex:
+        sys.stderr.write("{}: {}\n".format(sys.argv[0], ex))
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()

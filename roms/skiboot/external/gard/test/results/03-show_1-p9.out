@@ -1,0 +1,10 @@
+Record ID:    0x00000001
+========================
+Error ID:     0x90000007
+Error Type:   Fatal (0xe3)
+Path Type: physical
+>Sys, Instance #0
+ >Node, Instance #0
+  >Proc, Instance #0
+   >EQ, Instance #1
+    >EX, Instance #0

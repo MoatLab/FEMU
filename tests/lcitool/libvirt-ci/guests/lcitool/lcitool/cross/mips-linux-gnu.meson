@@ -1,0 +1,11 @@
+[binaries]
+c = '/usr/bin/mips-linux-gnu-gcc'
+ar = '/usr/bin/mips-linux-gnu-gcc-ar'
+strip = '/usr/bin/mips-linux-gnu-strip'
+pkgconfig = '/usr/bin/mips-linux-gnu-pkg-config'
+
+[host_machine]
+system = 'linux'
+cpu_family = 'mips'
+cpu = 'mips'
+endian = 'big'

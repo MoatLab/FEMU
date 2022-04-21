@@ -1,0 +1,11 @@
+[binaries]
+c = '/usr/bin/s390x-linux-gnu-gcc'
+ar = '/usr/bin/s390x-linux-gnu-gcc-ar'
+strip = '/usr/bin/s390x-linux-gnu-strip'
+pkgconfig = '/usr/bin/s390x-linux-gnu-pkg-config'
+
+[host_machine]
+system = 'linux'
+cpu_family = 's390x'
+cpu = 's390x'
+endian = 'big'

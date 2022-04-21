@@ -1,0 +1,227 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0 OR GPL-2.0-or-later
+#
+# Copyright 2016 Jeremy Kerr <jk@ozlabs.org>
+
+import os.path
+import re
+import sys
+import string
+import json
+import argparse
+import subprocess
+from pyparsing import Regex, Literal, Word, Combine, OneOrMore, QuotedString, \
+         lineno
+
+json_params = {
+    'indent': 1,
+    'sort_keys': True,
+    'separators': (',', ': '),
+}
+
+def create_parser():
+    # Match a C-style comment starting with two *s
+    comment = Regex(r'/\*\*(?P<content>.*?)\*/', re.DOTALL)
+
+    # Match an @fwts-<tag> annotation (within the comment), plus the proceeding
+    # text
+    annotation = Regex(r'@fwts-(?P<tag>\w+)\W+(?P<text>.*?)(?=@fwts-|\Z)',
+                re.DOTALL)
+
+    # Match the following prlog() call
+    log_call = (((Literal("prerror") + Literal('(').suppress()) |
+                 (Literal("prlog")   + Literal('(').suppress() +
+                  Word(string.ascii_letters + string.digits + '_') +
+                  Literal(',').suppress())) +
+                Combine(OneOrMore(QuotedString('"')), adjacent=False) +
+                (Literal(')') | Literal(',')).suppress()
+               )
+
+    pattern = comment + log_call
+    pattern.setWhitespaceChars(string.whitespace + '\n')
+
+    def comment_action(tok):
+        patterns = {}
+        for result in annotation.scanString(tok['content']):
+            patterns.update(result[0][0])
+        return patterns
+
+    def annotation_action(tok):
+        return {
+            tok['tag']: cleanup_content(tok['text'])
+        }
+
+    comment.setParseAction(comment_action)
+    annotation.setParseAction(annotation_action)
+    pattern.parseWithTabs()
+
+    return pattern
+
+def find_sources(dirname):
+    sources = []
+
+    def is_source(fname):
+        return fname.endswith('.c')
+
+    for directory, dirnames, filenames in os.walk(dirname):
+        sources.extend([ os.path.join(directory, fname)
+                         for fname in filenames if is_source(fname) ])
+    return sources
+
+def cleanup_content(content):
+    comment_prefix_re = re.compile(r'^\s*\*\s*', re.MULTILINE)
+    whitespace_re = re.compile(r'\s+')
+
+    content = comment_prefix_re.sub(' ', content)
+    content = whitespace_re.sub(' ', content)
+    return content.strip()
+
+def warn(loc, message):
+    print >>sys.stderr, 'WARNING:%s:%d: %s' % (loc[0], loc[1], message)
+
+def log_level_to_fwts(level):
+    level_map = {
+        'PR_EMERG':     'LOG_LEVEL_CRITICAL',
+        'PR_ALERT':     'LOG_LEVEL_CRITICAL',
+        'PR_CRIT':      'LOG_LEVEL_CRITICAL',
+        'PR_ERR':       'LOG_LEVEL_CRITICAL',
+        'PR_WARNING':   'LOG_LEVEL_HIGH',
+        'PR_NOTICE':    'LOG_LEVEL_MEDIUM',
+        'PR_PRINTF':    'LOG_LEVEL_MEDIUM',
+    }
+    return level_map.get(level, 'LOG_LEVEL_LOW')
+
+def message_to_pattern(loc, msg):
+    """ Convert a C printf()-style template to a pattern suitable for fwts """
+
+    # Somewhat-simplified match for a %-template
+    template_re = re.compile(
+            '%(?P<flag>[-#0 +]*)'
+            '(?P<width>(?:[0-9]*|\*))?'
+            '(?P<precision>\.*(?:[1-9][0-9]*|\*))?'
+            '(?:hh|h|ll|l|L|j|z|t)?'
+            '(?P<conversion>[a-zA-Z%])')
+    global is_regex
+    is_regex = False
+
+    def expand_template(match):
+        global is_regex
+        c = match.group('conversion').lower()
+        if c == '%':
+            return '%'
+        is_regex = True
+        if c in ['d', 'i', 'u']:
+            return '[0-9]+'
+        elif c == 'o':
+            return '[0-7]+'
+        elif c == 'x':
+            return '[0-9a-f]+'
+        elif c == 'p':
+            return '(0x[0-9a-f]+|nil)'
+        elif c == 's':
+            return '.*'
+        else:
+            warn(loc, "Unknown template conversion '%s'" % match.group(0))
+            return '.*'
+
+    escape_re = re.compile(r'\\(?P<char>.)', re.DOTALL)
+    def expand_escape(match):
+        global is_regex
+        c = match.group('char')
+        if c == 'n':
+            return '\n'
+        elif c in ['\\', '"']:
+            return c
+        else:
+            warn(loc, "Unhandled escape sequence '%s'" % match.group(0))
+            is_regex = True
+            return '.'
+
+    pattern = template_re.sub(expand_template, msg)
+    pattern = escape_re.sub(expand_escape, pattern)
+    pattern = pattern.strip()
+
+    compare_mode = "string"
+    if is_regex:
+        compare_mode = "regex"
+
+    return (compare_mode, pattern)
+
+def parse_patterns(parser, fname, tag):
+    patterns = []
+    data = open(fname).read()
+    i = 1
+    for result in parser.scanString(data):
+        (token, loc, _) = result
+        if token[1] == 'prlog':
+            (annotations, logfn, level, msg) = token
+        else:
+            (annotations, logfn, msg) = token
+            level = 'PR_ERR'
+
+        loc = (fname, lineno(loc, data))
+
+        if logfn != 'prlog' and logfn != 'prerror':
+            warn(loc, "unknown log output function '%s'" % logfn)
+
+        compare_mode, pattern_str = message_to_pattern(loc, msg)
+
+        pattern = {
+            'log_level': log_level_to_fwts(level),
+            'compare_mode': compare_mode,
+            'pattern': pattern_str,
+            'last_tag': tag,
+        }
+
+        pattern.update(annotations)
+
+        if not 'label' in pattern:
+            warn(loc, "missing label")
+            pattern['label'] = '%s:%d' % (fname, i)
+            i += 1
+
+        if not 'advice' in pattern:
+            warn(loc, "missing advice")
+
+        allowed_data = ['compare_mode', 'log_level',
+                        'pattern', 'advice', 'label', 'last_tag']
+        extras = set(pattern.keys()) - set(allowed_data)
+        if extras:
+            warn(loc, "unknown pattern annotation: %s" %
+                    ','.join([ "'%s'" % e for e in extras]))
+            for e in extras:
+                del pattern[e]
+
+        patterns.append(pattern)
+
+    return patterns
+
+if __name__ == '__main__':
+    argparser = argparse.ArgumentParser(
+            description='Generate FWTS olog definitions from the skiboot '
+                        'source tree')
+    argparser.add_argument('directories', metavar='DIR', nargs='*',
+            help='path to source files (default .)', default=['.'])
+    argparser.add_argument('--output', '-o', metavar='FILE',
+            type=argparse.FileType('w'), default=sys.stdout,
+            help='output to FILE (default to stdout)', nargs='?')
+    args = argparser.parse_args()
+
+    sources = []
+    for directory in args.directories:
+        try:
+            git_tag = subprocess.check_output(["git","-C", directory, "describe", "--abbrev=0" ], text=True)
+        except:
+            git_tag = "???"
+        git_tag = git_tag.replace("\n", "")
+        sources.extend([ (x, git_tag) for x in find_sources(directory)])
+
+    parser = create_parser()
+    patterns = []
+    for source, tag in sources:
+        patterns.extend(parse_patterns(parser, source, tag))
+
+    data = {'olog_error_warning_patterns': patterns}
+
+    args.output.write(json.dumps(data, **json_params) + '\n')
+

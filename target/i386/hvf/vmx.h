@@ -30,6 +30,8 @@
 #include "vmcs.h"
 #include "cpu.h"
 #include "x86.h"
+#include "sysemu/hvf.h"
+#include "sysemu/hvf_int.h"
 
 #include "exec/address-spaces.h"
 
@@ -122,10 +124,11 @@ static inline void macvm_set_cr0(hv_vcpuid_t vcpu, uint64_t cr0)
     uint64_t efer = rvmcs(vcpu, VMCS_GUEST_IA32_EFER);
     uint64_t old_cr0 = rvmcs(vcpu, VMCS_GUEST_CR0);
     uint64_t changed_cr0 = old_cr0 ^ cr0;
-    uint64_t mask = CR0_PG | CR0_CD | CR0_NW | CR0_NE | CR0_ET;
+    uint64_t mask = CR0_PG_MASK | CR0_CD_MASK | CR0_NW_MASK |
+                    CR0_NE_MASK | CR0_ET_MASK;
     uint64_t entry_ctls;
 
-    if ((cr0 & CR0_PG) && (rvmcs(vcpu, VMCS_GUEST_CR4) & CR4_PAE) &&
+    if ((cr0 & CR0_PG_MASK) && (rvmcs(vcpu, VMCS_GUEST_CR4) & CR4_PAE_MASK) &&
         !(efer & MSR_EFER_LME)) {
         address_space_read(&address_space_memory,
                            rvmcs(vcpu, VMCS_GUEST_CR3) & ~0x1f,
@@ -140,8 +143,8 @@ static inline void macvm_set_cr0(hv_vcpuid_t vcpu, uint64_t cr0)
     wvmcs(vcpu, VMCS_CR0_SHADOW, cr0);
 
     if (efer & MSR_EFER_LME) {
-        if (changed_cr0 & CR0_PG) {
-            if (cr0 & CR0_PG) {
+        if (changed_cr0 & CR0_PG_MASK) {
+            if (cr0 & CR0_PG_MASK) {
                 enter_long_mode(vcpu, cr0, efer);
             } else {
                 exit_long_mode(vcpu, cr0, efer);
@@ -153,23 +156,21 @@ static inline void macvm_set_cr0(hv_vcpuid_t vcpu, uint64_t cr0)
     }
 
     /* Filter new CR0 after we are finished examining it above. */
-    cr0 = (cr0 & ~(mask & ~CR0_PG));
-    wvmcs(vcpu, VMCS_GUEST_CR0, cr0 | CR0_NE | CR0_ET);
+    cr0 = (cr0 & ~(mask & ~CR0_PG_MASK));
+    wvmcs(vcpu, VMCS_GUEST_CR0, cr0 | CR0_NE_MASK | CR0_ET_MASK);
 
     hv_vcpu_invalidate_tlb(vcpu);
-    hv_vcpu_flush(vcpu);
 }
 
 static inline void macvm_set_cr4(hv_vcpuid_t vcpu, uint64_t cr4)
 {
-    uint64_t guest_cr4 = cr4 | CR4_VMXE;
+    uint64_t guest_cr4 = cr4 | CR4_VMXE_MASK;
 
     wvmcs(vcpu, VMCS_GUEST_CR4, guest_cr4);
     wvmcs(vcpu, VMCS_CR4_SHADOW, cr4);
-    wvmcs(vcpu, VMCS_CR4_MASK, CR4_VMXE);
+    wvmcs(vcpu, VMCS_CR4_MASK, CR4_VMXE_MASK);
 
     hv_vcpu_invalidate_tlb(vcpu);
-    hv_vcpu_flush(vcpu);
 }
 
 static inline void macvm_set_rip(CPUState *cpu, uint64_t rip)
@@ -179,15 +180,15 @@ static inline void macvm_set_rip(CPUState *cpu, uint64_t rip)
     uint64_t val;
 
     /* BUG, should take considering overlap.. */
-    wreg(cpu->hvf_fd, HV_X86_RIP, rip);
+    wreg(cpu->hvf->fd, HV_X86_RIP, rip);
     env->eip = rip;
 
     /* after moving forward in rip, we need to clean INTERRUPTABILITY */
-   val = rvmcs(cpu->hvf_fd, VMCS_GUEST_INTERRUPTIBILITY);
+   val = rvmcs(cpu->hvf->fd, VMCS_GUEST_INTERRUPTIBILITY);
    if (val & (VMCS_INTERRUPTIBILITY_STI_BLOCKING |
                VMCS_INTERRUPTIBILITY_MOVSS_BLOCKING)) {
         env->hflags &= ~HF_INHIBIT_IRQ_MASK;
-        wvmcs(cpu->hvf_fd, VMCS_GUEST_INTERRUPTIBILITY,
+        wvmcs(cpu->hvf->fd, VMCS_GUEST_INTERRUPTIBILITY,
                val & ~(VMCS_INTERRUPTIBILITY_STI_BLOCKING |
                VMCS_INTERRUPTIBILITY_MOVSS_BLOCKING));
    }
@@ -199,9 +200,9 @@ static inline void vmx_clear_nmi_blocking(CPUState *cpu)
     CPUX86State *env = &x86_cpu->env;
 
     env->hflags2 &= ~HF2_NMI_MASK;
-    uint32_t gi = (uint32_t) rvmcs(cpu->hvf_fd, VMCS_GUEST_INTERRUPTIBILITY);
+    uint32_t gi = (uint32_t) rvmcs(cpu->hvf->fd, VMCS_GUEST_INTERRUPTIBILITY);
     gi &= ~VMCS_INTERRUPTIBILITY_NMI_BLOCKING;
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_INTERRUPTIBILITY, gi);
+    wvmcs(cpu->hvf->fd, VMCS_GUEST_INTERRUPTIBILITY, gi);
 }
 
 static inline void vmx_set_nmi_blocking(CPUState *cpu)
@@ -210,16 +211,16 @@ static inline void vmx_set_nmi_blocking(CPUState *cpu)
     CPUX86State *env = &x86_cpu->env;
 
     env->hflags2 |= HF2_NMI_MASK;
-    uint32_t gi = (uint32_t)rvmcs(cpu->hvf_fd, VMCS_GUEST_INTERRUPTIBILITY);
+    uint32_t gi = (uint32_t)rvmcs(cpu->hvf->fd, VMCS_GUEST_INTERRUPTIBILITY);
     gi |= VMCS_INTERRUPTIBILITY_NMI_BLOCKING;
-    wvmcs(cpu->hvf_fd, VMCS_GUEST_INTERRUPTIBILITY, gi);
+    wvmcs(cpu->hvf->fd, VMCS_GUEST_INTERRUPTIBILITY, gi);
 }
 
 static inline void vmx_set_nmi_window_exiting(CPUState *cpu)
 {
     uint64_t val;
-    val = rvmcs(cpu->hvf_fd, VMCS_PRI_PROC_BASED_CTLS);
-    wvmcs(cpu->hvf_fd, VMCS_PRI_PROC_BASED_CTLS, val |
+    val = rvmcs(cpu->hvf->fd, VMCS_PRI_PROC_BASED_CTLS);
+    wvmcs(cpu->hvf->fd, VMCS_PRI_PROC_BASED_CTLS, val |
           VMCS_PRI_PROC_BASED_CTLS_NMI_WINDOW_EXITING);
 
 }
@@ -228,8 +229,8 @@ static inline void vmx_clear_nmi_window_exiting(CPUState *cpu)
 {
 
     uint64_t val;
-    val = rvmcs(cpu->hvf_fd, VMCS_PRI_PROC_BASED_CTLS);
-    wvmcs(cpu->hvf_fd, VMCS_PRI_PROC_BASED_CTLS, val &
+    val = rvmcs(cpu->hvf->fd, VMCS_PRI_PROC_BASED_CTLS);
+    wvmcs(cpu->hvf->fd, VMCS_PRI_PROC_BASED_CTLS, val &
           ~VMCS_PRI_PROC_BASED_CTLS_NMI_WINDOW_EXITING);
 }
 

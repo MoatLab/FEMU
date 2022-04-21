@@ -625,9 +625,9 @@
  * Definitions for Icom Inc. devices
  */
 #define ICOM_VID		0x0C26 /* Icom vendor ID */
-/* Note: ID-1 is a communications tranceiver for HAM-radio operators */
+/* Note: ID-1 is a communications transceiver for HAM-radio operators */
 #define ICOM_ID_1_PID		0x0004 /* ID-1 USB to RS-232 */
-/* Note: OPC is an Optional cable to connect an Icom Tranceiver */
+/* Note: OPC is an Optional cable to connect an Icom Transceiver */
 #define ICOM_OPC_U_UC_PID	0x0018 /* OPC-478UC, OPC-1122U cloning cable */
 /* Note: ID-RP* devices are Icom Repeater Devices for HAM-radio */
 #define ICOM_ID_RP2C1_PID	0x0009 /* ID-RP2C Asset 1 to RS-232 */
@@ -1220,12 +1220,6 @@
 #define FTDI_SCIENCESCOPE_LOGBOOKML_PID		0xFF18
 #define FTDI_SCIENCESCOPE_LS_LOGBOOK_PID	0xFF1C
 #define FTDI_SCIENCESCOPE_HS_LOGBOOK_PID	0xFF1D
-
-/*
- * Milkymist One JTAG/Serial
- */
-#define QIHARDWARE_VID			0x20B7
-#define MILKYMISTONE_JTAGSERIAL_PID	0x0713
 
 /*
  * CTI GmbH RS485 Converter http://www.cti-lean.com/

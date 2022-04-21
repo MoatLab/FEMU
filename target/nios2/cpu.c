@@ -64,6 +64,23 @@ static void nios2_cpu_reset(DeviceState *dev)
 #endif
 }
 
+#ifndef CONFIG_USER_ONLY
+static void nios2_cpu_set_irq(void *opaque, int irq, int level)
+{
+    Nios2CPU *cpu = opaque;
+    CPUNios2State *env = &cpu->env;
+    CPUState *cs = CPU(cpu);
+
+    env->regs[CR_IPENDING] = deposit32(env->regs[CR_IPENDING], irq, 1, !!level);
+
+    if (env->regs[CR_IPENDING]) {
+        cpu_interrupt(cs, CPU_INTERRUPT_HARD);
+    } else {
+        cpu_reset_interrupt(cs, CPU_INTERRUPT_HARD);
+    }
+}
+#endif
+
 static void nios2_cpu_initfn(Object *obj)
 {
     Nios2CPU *cpu = NIOS2_CPU(obj);
@@ -72,6 +89,15 @@ static void nios2_cpu_initfn(Object *obj)
 
 #if !defined(CONFIG_USER_ONLY)
     mmu_init(&cpu->env);
+
+    /*
+     * These interrupt lines model the IIC (internal interrupt
+     * controller). QEMU does not currently support the EIC
+     * (external interrupt controller) -- if we did it would be
+     * a separate device in hw/intc with a custom interface to
+     * the CPU, and boards using it would not wire up these IRQ lines.
+     */
+    qdev_init_gpio_in_named(DEVICE(cpu), nios2_cpu_set_irq, "IRQ", 32);
 #endif
 }
 
@@ -98,30 +124,28 @@ static void nios2_cpu_realizefn(DeviceState *dev, Error **errp)
     ncc->parent_realize(dev, errp);
 }
 
+#ifndef CONFIG_USER_ONLY
 static bool nios2_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 {
     Nios2CPU *cpu = NIOS2_CPU(cs);
     CPUNios2State *env = &cpu->env;
 
     if ((interrupt_request & CPU_INTERRUPT_HARD) &&
-        (env->regs[CR_STATUS] & CR_STATUS_PIE)) {
+        (env->regs[CR_STATUS] & CR_STATUS_PIE) &&
+        (env->regs[CR_IPENDING] & env->regs[CR_IENABLE])) {
         cs->exception_index = EXCP_IRQ;
         nios2_cpu_do_interrupt(cs);
         return true;
     }
     return false;
 }
-
+#endif /* !CONFIG_USER_ONLY */
 
 static void nios2_cpu_disas_set_info(CPUState *cpu, disassemble_info *info)
 {
     /* NOTE: NiosII R2 is not supported yet. */
     info->mach = bfd_arch_nios2;
-#ifdef TARGET_WORDS_BIGENDIAN
-    info->print_insn = print_insn_big_nios2;
-#else
-    info->print_insn = print_insn_little_nios2;
-#endif
+    info->print_insn = print_insn_nios2;
 }
 
 static int nios2_cpu_gdb_read_register(CPUState *cs, GByteArray *mem_buf, int n)
@@ -178,6 +202,28 @@ static Property nios2_properties[] = {
     DEFINE_PROP_END_OF_LIST(),
 };
 
+#ifndef CONFIG_USER_ONLY
+#include "hw/core/sysemu-cpu-ops.h"
+
+static const struct SysemuCPUOps nios2_sysemu_ops = {
+    .get_phys_page_debug = nios2_cpu_get_phys_page_debug,
+};
+#endif
+
+#include "hw/core/tcg-cpu-ops.h"
+
+static const struct TCGCPUOps nios2_tcg_ops = {
+    .initialize = nios2_tcg_init,
+
+#ifdef CONFIG_USER_ONLY
+    .record_sigsegv = nios2_cpu_record_sigsegv,
+#else
+    .tlb_fill = nios2_cpu_tlb_fill,
+    .cpu_exec_interrupt = nios2_cpu_exec_interrupt,
+    .do_interrupt = nios2_cpu_do_interrupt,
+    .do_unaligned_access = nios2_cpu_do_unaligned_access,
+#endif /* !CONFIG_USER_ONLY */
+};
 
 static void nios2_cpu_class_init(ObjectClass *oc, void *data)
 {
@@ -192,20 +238,16 @@ static void nios2_cpu_class_init(ObjectClass *oc, void *data)
 
     cc->class_by_name = nios2_cpu_class_by_name;
     cc->has_work = nios2_cpu_has_work;
-    cc->do_interrupt = nios2_cpu_do_interrupt;
-    cc->cpu_exec_interrupt = nios2_cpu_exec_interrupt;
     cc->dump_state = nios2_cpu_dump_state;
     cc->set_pc = nios2_cpu_set_pc;
     cc->disas_set_info = nios2_cpu_disas_set_info;
-    cc->tlb_fill = nios2_cpu_tlb_fill;
 #ifndef CONFIG_USER_ONLY
-    cc->do_unaligned_access = nios2_cpu_do_unaligned_access;
-    cc->get_phys_page_debug = nios2_cpu_get_phys_page_debug;
+    cc->sysemu_ops = &nios2_sysemu_ops;
 #endif
     cc->gdb_read_register = nios2_cpu_gdb_read_register;
     cc->gdb_write_register = nios2_cpu_gdb_write_register;
     cc->gdb_num_core_regs = 49;
-    cc->tcg_initialize = nios2_tcg_init;
+    cc->tcg_ops = &nios2_tcg_ops;
 }
 
 static const TypeInfo nios2_cpu_type_info = {

@@ -1,0 +1,13 @@
+---
+- set_fact:
+    name: libvirt-go-xml
+    machines: '{{ all_machines }}'
+    archive_format: gz
+    git_url: '{{ git_urls["libvirt-go-xml"][git_remote] }}'
+
+- include: 'jobs/prepare.yml'
+- include: 'jobs/go-build-job.yml'
+- include: 'jobs/go-check-job.yml'
+  vars:
+    local_env: |
+      export TEST_ARGS="-tags xmlroundtrip"

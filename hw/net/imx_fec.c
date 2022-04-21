@@ -283,9 +283,8 @@ static uint32_t imx_phy_read(IMXFECState *s, int reg)
     uint32_t phy = reg / 32;
 
     if (phy != s->phy_num) {
-        qemu_log_mask(LOG_GUEST_ERROR, "[%s.phy]%s: Bad phy num %u\n",
-                      TYPE_IMX_FEC, __func__, phy);
-        return 0;
+        trace_imx_phy_read_num(phy, s->phy_num);
+        return 0xffff;
     }
 
     reg %= 32;
@@ -345,8 +344,7 @@ static void imx_phy_write(IMXFECState *s, int reg, uint32_t val)
     uint32_t phy = reg / 32;
 
     if (phy != s->phy_num) {
-        qemu_log_mask(LOG_GUEST_ERROR, "[%s.phy]%s: Bad phy num %u\n",
-                      TYPE_IMX_FEC, __func__, phy);
+        trace_imx_phy_write_num(phy, s->phy_num);
         return;
     }
 
@@ -389,19 +387,22 @@ static void imx_phy_write(IMXFECState *s, int reg, uint32_t val)
 
 static void imx_fec_read_bd(IMXFECBufDesc *bd, dma_addr_t addr)
 {
-    dma_memory_read(&address_space_memory, addr, bd, sizeof(*bd));
+    dma_memory_read(&address_space_memory, addr, bd, sizeof(*bd),
+                    MEMTXATTRS_UNSPECIFIED);
 
     trace_imx_fec_read_bd(addr, bd->flags, bd->length, bd->data);
 }
 
 static void imx_fec_write_bd(IMXFECBufDesc *bd, dma_addr_t addr)
 {
-    dma_memory_write(&address_space_memory, addr, bd, sizeof(*bd));
+    dma_memory_write(&address_space_memory, addr, bd, sizeof(*bd),
+                     MEMTXATTRS_UNSPECIFIED);
 }
 
 static void imx_enet_read_bd(IMXENETBufDesc *bd, dma_addr_t addr)
 {
-    dma_memory_read(&address_space_memory, addr, bd, sizeof(*bd));
+    dma_memory_read(&address_space_memory, addr, bd, sizeof(*bd),
+                    MEMTXATTRS_UNSPECIFIED);
 
     trace_imx_enet_read_bd(addr, bd->flags, bd->length, bd->data,
                    bd->option, bd->status);
@@ -409,7 +410,8 @@ static void imx_enet_read_bd(IMXENETBufDesc *bd, dma_addr_t addr)
 
 static void imx_enet_write_bd(IMXENETBufDesc *bd, dma_addr_t addr)
 {
-    dma_memory_write(&address_space_memory, addr, bd, sizeof(*bd));
+    dma_memory_write(&address_space_memory, addr, bd, sizeof(*bd),
+                     MEMTXATTRS_UNSPECIFIED);
 }
 
 static void imx_eth_update(IMXFECState *s)
@@ -476,7 +478,8 @@ static void imx_fec_do_tx(IMXFECState *s)
             len = ENET_MAX_FRAME_SIZE - frame_size;
             s->regs[ENET_EIR] |= ENET_INT_BABT;
         }
-        dma_memory_read(&address_space_memory, bd.data, ptr, len);
+        dma_memory_read(&address_space_memory, bd.data, ptr, len,
+                        MEMTXATTRS_UNSPECIFIED);
         ptr += len;
         frame_size += len;
         if (bd.flags & ENET_BD_L) {
@@ -557,26 +560,23 @@ static void imx_enet_do_tx(IMXFECState *s, uint32_t index)
             len = ENET_MAX_FRAME_SIZE - frame_size;
             s->regs[ENET_EIR] |= ENET_INT_BABT;
         }
-        dma_memory_read(&address_space_memory, bd.data, ptr, len);
+        dma_memory_read(&address_space_memory, bd.data, ptr, len,
+                        MEMTXATTRS_UNSPECIFIED);
         ptr += len;
         frame_size += len;
         if (bd.flags & ENET_BD_L) {
+            int csum = 0;
+
             if (bd.option & ENET_BD_PINS) {
-                struct ip_header *ip_hd = PKT_GET_IP_HDR(s->frame);
-                if (IP_HEADER_VERSION(ip_hd) == 4) {
-                    net_checksum_calculate(s->frame, frame_size);
-                }
+                csum |= (CSUM_TCP | CSUM_UDP);
             }
             if (bd.option & ENET_BD_IINS) {
-                struct ip_header *ip_hd = PKT_GET_IP_HDR(s->frame);
-                /* We compute checksum only for IPv4 frames */
-                if (IP_HEADER_VERSION(ip_hd) == 4) {
-                    uint16_t csum;
-                    ip_hd->ip_sum = 0;
-                    csum = net_raw_checksum((uint8_t *)ip_hd, sizeof(*ip_hd));
-                    ip_hd->ip_sum = cpu_to_be16(csum);
-                }
+                csum |= CSUM_IP;
             }
+            if (csum) {
+                net_checksum_calculate(s->frame, frame_size, csum);
+            }
+
             /* Last buffer in frame.  */
 
             qemu_send_packet(qemu_get_queue(s->nic), s->frame, frame_size);
@@ -1109,11 +1109,12 @@ static ssize_t imx_fec_receive(NetClientState *nc, const uint8_t *buf,
             buf_len += size - 4;
         }
         buf_addr = bd.data;
-        dma_memory_write(&address_space_memory, buf_addr, buf, buf_len);
+        dma_memory_write(&address_space_memory, buf_addr, buf, buf_len,
+                         MEMTXATTRS_UNSPECIFIED);
         buf += buf_len;
         if (size < 4) {
             dma_memory_write(&address_space_memory, buf_addr + buf_len,
-                             crc_ptr, 4 - size);
+                             crc_ptr, 4 - size, MEMTXATTRS_UNSPECIFIED);
             crc_ptr += 4 - size;
         }
         bd.flags &= ~ENET_BD_E;
@@ -1216,8 +1217,8 @@ static ssize_t imx_enet_receive(NetClientState *nc, const uint8_t *buf,
              */
             const uint8_t zeros[2] = { 0 };
 
-            dma_memory_write(&address_space_memory, buf_addr,
-                             zeros, sizeof(zeros));
+            dma_memory_write(&address_space_memory, buf_addr, zeros,
+                             sizeof(zeros), MEMTXATTRS_UNSPECIFIED);
 
             buf_addr += sizeof(zeros);
             buf_len  -= sizeof(zeros);
@@ -1226,11 +1227,12 @@ static ssize_t imx_enet_receive(NetClientState *nc, const uint8_t *buf,
             shift16 = false;
         }
 
-        dma_memory_write(&address_space_memory, buf_addr, buf, buf_len);
+        dma_memory_write(&address_space_memory, buf_addr, buf, buf_len,
+                         MEMTXATTRS_UNSPECIFIED);
         buf += buf_len;
         if (size < 4) {
             dma_memory_write(&address_space_memory, buf_addr + buf_len,
-                             crc_ptr, 4 - size);
+                             crc_ptr, 4 - size, MEMTXATTRS_UNSPECIFIED);
             crc_ptr += 4 - size;
         }
         bd.flags &= ~ENET_BD_E;

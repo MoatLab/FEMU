@@ -1,0 +1,101 @@
+# -*-Makefile-*-
+CORE_TEST := \
+	core/test/run-bitmap \
+	core/test/run-cpufeatures \
+	core/test/run-device \
+	core/test/run-flash-subpartition \
+	core/test/run-flash-firmware-versions \
+	core/test/run-mem_region \
+	core/test/run-malloc \
+	core/test/run-malloc-speed \
+	core/test/run-mem_region_init \
+	core/test/run-mem_region_next \
+	core/test/run-mem_region_release_unused \
+	core/test/run-mem_region_release_unused_noalloc \
+	core/test/run-mem_region_reservations \
+	core/test/run-mem_range_is_reserved \
+	core/test/run-nvram-format \
+	core/test/run-trace core/test/run-msg \
+	core/test/run-pel \
+	core/test/run-pool \
+	core/test/run-time-utils \
+	core/test/run-timebase \
+	core/test/run-timer \
+	core/test/run-buddy \
+	core/test/run-pci-quirk
+
+HOSTCFLAGS+=-I . -I include -Wno-error=attributes
+
+CORE_TEST_NOSTUB := core/test/run-console-log
+CORE_TEST_NOSTUB += core/test/run-console-log-buf-overrun
+CORE_TEST_NOSTUB += core/test/run-console-log-pr_fmt
+CORE_TEST_NOSTUB += core/test/run-api-test
+
+LCOV_EXCLUDE += $(CORE_TEST:%=%.c) core/test/stubs.c
+LCOV_EXCLUDE += $(CORE_TEST_NOSTUB:%=%.c) /usr/include/*
+
+.PHONY : core-check
+core-check: $(CORE_TEST:%=%-check) $(CORE_TEST_NOSTUB:%=%-check)
+
+.PHONY : core-coverage
+core-coverage: $(CORE_TEST:%=%-gcov-run)
+core-coverage: $(CORE_TEST_NOSTUB:%=%-gcov-run)
+
+check: core-check
+coverage: core-coverage
+
+$(CORE_TEST:%=%-gcov-run) : %-run: %
+	$(call QTEST, TEST-COVERAGE ,$< , $<)
+
+$(CORE_TEST_NOSTUB:%=%-gcov-run) : %-run: %
+	$(call QTEST, TEST-COVERAGE ,$< , $<)
+
+$(CORE_TEST:%=%-check) : %-check: %
+	$(call QTEST, RUN-TEST ,$(VALGRIND) $<, $<)
+
+$(CORE_TEST_NOSTUB:%=%-check) : %-check: %
+	$(call QTEST, RUN-TEST ,$(VALGRIND) $<, $<)
+
+core/test/stubs.o: core/test/stubs.c
+	$(call Q, HOSTCC ,$(HOSTCC) $(HOSTCFLAGS) -g -c -o $@ $<, $<)
+
+$(CORE_TEST) : core/test/stubs.o
+
+$(CORE_TEST) : % : %.c
+	$(call Q, HOSTCC ,$(HOSTCC) $(HOSTCFLAGS) -O0 -g -I include -I . -I libfdt -o $@ $< core/test/stubs.o, $<)
+
+$(CORE_TEST_NOSTUB) : % : %.c
+	$(call Q, HOSTCC ,$(HOSTCC) $(HOSTCFLAGS) -O0 -g -I include -I . -I libfdt -o $@ $< , $<)
+
+$(CORE_TEST:%=%-gcov): %-gcov : %.c %
+	$(call Q, HOSTCC ,$(HOSTCC) $(HOSTCFLAGS) $(HOSTGCOVCFLAGS) -I include -I . -I libfdt -lgcov -o $@ $< core/test/stubs.o, $<)
+
+$(CORE_TEST_NOSTUB:%=%-gcov) : %-gcov : %.c %
+	$(call Q, HOSTCC ,$(HOSTCC) $(HOSTCFLAGS) $(HOSTGCOVCFLAGS) -I include -I . -I libfdt -lgcov -o $@ $< , $<)
+
+core/test/run-flash-firmware-versions-gcov-run: core/test/run-flash-firmware-versions-inputs-gcov-run
+
+core/test/run-flash-firmware-versions-inputs-gcov-run: core/test/run-flash-firmware-versions-gcov
+	$(call Q, TEST-COVERAGE , ./core/test/run-flash-firmware-versions-gcov core/test/firmware-versions-input/version-0 > /dev/null, $< version-0)
+	$(call Q, TEST-COVERAGE , ./core/test/run-flash-firmware-versions-gcov core/test/firmware-versions-input/version-1 > /dev/null, $< version-1)
+	$(call Q, TEST-COVERAGE , ./core/test/run-flash-firmware-versions-gcov core/test/firmware-versions-input/version-2 > /dev/null, $< version-2)
+	$(call Q, TEST-COVERAGE , ./core/test/run-flash-firmware-versions-gcov core/test/firmware-versions-input/version-10 > /dev/null, $< version-10)
+	$(call Q, TEST-COVERAGE , ./core/test/run-flash-firmware-versions-gcov core/test/firmware-versions-input/version-11 > /dev/null, $< version-11)
+	$(call Q, TEST-COVERAGE , ./core/test/run-flash-firmware-versions-gcov core/test/firmware-versions-input/version-16 > /dev/null, $< version-16)
+	$(call Q, TEST-COVERAGE , ./core/test/run-flash-firmware-versions-gcov core/test/firmware-versions-input/version-26 > /dev/null, $< version-26)
+	$(call Q, TEST-COVERAGE , ./core/test/run-flash-firmware-versions-gcov core/test/firmware-versions-input/version-27 > /dev/null, $< version-27)
+	$(call Q, TEST-COVERAGE , ./core/test/run-flash-firmware-versions-gcov core/test/firmware-versions-input/version-29 > /dev/null, $< version-29)
+	$(call Q, TEST-COVERAGE , ./core/test/run-flash-firmware-versions-gcov core/test/firmware-versions-input/version-trunc > /dev/null, $< version-trunc)
+	$(call Q, TEST-COVERAGE , ./core/test/run-flash-firmware-versions-gcov core/test/firmware-versions-input/version-long > /dev/null, $< version-long)
+	$(call Q, TEST-COVERAGE , ./core/test/run-flash-firmware-versions-gcov core/test/firmware-versions-input/version-nodash > /dev/null, $< version-nodash)
+
+
+-include $(wildcard core/test/*.d)
+
+clean: core-test-clean
+
+core-test-clean:
+	$(RM) -f core/test/*.[od] $(CORE_TEST) $(CORE_TEST:%=%-gcov)
+	$(RM) -f $(CORE_TEST_NOSTUB) $(CORE_TEST_NOSTUB:%=%-gcov)
+	$(RM) -f *.gcda *.gcno skiboot.info
+	$(RM) -rf coverage-report

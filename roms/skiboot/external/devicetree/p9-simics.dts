@@ -1,0 +1,21 @@
+// SPDX-License-Identifier: Apache-2.0 OR GPL-2.0-or-later
+/*
+ * POWER9 Simics Device Tree
+ */
+
+/include/ "p9.dts"
+
+/ {
+	simics {
+	};
+
+	/*
+	 * This isn't part of our Simics model (yet).
+	 * [system_cmp0.cosimulator error] write error to physical address 0x60300d00100e6
+	 */
+	lpcm-opb@6030000000000 {
+		lpc@f0000000 {
+			/delete-node/ ipmi@ie4;
+		};
+	};
+};

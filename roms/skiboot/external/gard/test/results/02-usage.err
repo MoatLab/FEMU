@@ -1,0 +1,24 @@
+Usage: ./opal-gard [-a -e -f <file> -p] <command> [<args>]
+
+-8 --p8
+-9 --p9
+-0 --p10
+	Set the processor generation
+
+-e --ecc
+	Force reading/writing with ECC bytes.
+
+-f --file <file>
+	Don't search for MTD device, read from <file>.
+
+-p --part
+	Used in conjunction with -f to specify that just
+	the GUARD partition is in <file> and libffs
+	shouldn't be used.
+
+Where <command> is one of:
+
+	list   	List current GARD records
+	show   	Show details of a GARD record
+	clear  	Clear GARD records
+	create 	Create a GARD record

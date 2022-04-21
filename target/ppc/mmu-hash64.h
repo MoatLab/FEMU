@@ -7,20 +7,16 @@
 void dump_slb(PowerPCCPU *cpu);
 int ppc_store_slb(PowerPCCPU *cpu, target_ulong slot,
                   target_ulong esid, target_ulong vsid);
-hwaddr ppc_hash64_get_phys_page_debug(PowerPCCPU *cpu, target_ulong addr);
-int ppc_hash64_handle_mmu_fault(PowerPCCPU *cpu, vaddr address, int rw,
-                                int mmu_idx);
+bool ppc_hash64_xlate(PowerPCCPU *cpu, vaddr eaddr, MMUAccessType access_type,
+                      hwaddr *raddrp, int *psizep, int *protp, int mmu_idx,
+                      bool guest_visible);
 void ppc_hash64_tlb_flush_hpte(PowerPCCPU *cpu,
                                target_ulong pte_index,
                                target_ulong pte0, target_ulong pte1);
 unsigned ppc_hash64_hpte_page_shift_noslb(PowerPCCPU *cpu,
                                           uint64_t pte0, uint64_t pte1);
-void ppc_store_lpcr(PowerPCCPU *cpu, target_ulong val);
 void ppc_hash64_init(PowerPCCPU *cpu);
 void ppc_hash64_finalize(PowerPCCPU *cpu);
-void ppc_hash64_filter_pagesizes(PowerPCCPU *cpu,
-                                 bool (*cb)(void *, uint32_t, uint32_t),
-                                 void *opaque);
 #endif
 
 /*
@@ -100,6 +96,11 @@ void ppc_hash64_filter_pagesizes(PowerPCCPU *cpu,
 
 #define HPTE64_V_1TB_SEG        0x4000000000000000ULL
 #define HPTE64_V_VRMA_MASK      0x4001ffffff000000ULL
+
+/* PTE offsets */
+#define HPTE64_DW1              (HASH_PTE_SIZE_64 / 2)
+#define HPTE64_DW1_R            (HPTE64_DW1 + 6)
+#define HPTE64_DW1_C            (HPTE64_DW1 + 7)
 
 /* Format changes for ARCH v3 */
 #define HPTE64_V_COMMON_BITS    0x000fffffffffffffULL

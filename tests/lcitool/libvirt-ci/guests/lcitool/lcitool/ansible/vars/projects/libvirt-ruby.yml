@@ -1,0 +1,11 @@
+---
+packages:
+  - ccache
+  - gcc
+  - glibc
+  - make
+  - pkg-config
+  - rake
+  - rpmbuild
+  - ruby
+  - zip

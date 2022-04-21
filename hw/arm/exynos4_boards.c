@@ -25,8 +25,6 @@
 #include "qemu/units.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
-#include "cpu.h"
-#include "sysemu/sysemu.h"
 #include "hw/sysbus.h"
 #include "net/net.h"
 #include "hw/arm/boot.h"
@@ -69,7 +67,6 @@ static unsigned long exynos4_board_ram_size[EXYNOS4_NUM_OF_BOARDS] = {
 static struct arm_boot_info exynos4_board_binfo = {
     .loader_start     = EXYNOS4210_BASE_BOOT_ADDR,
     .smp_loader_start = EXYNOS4210_SMP_BOOT_ADDR,
-    .nb_cpus          = EXYNOS4210_NCPUS,
     .write_secondary_boot = exynos4210_write_secondary,
 };
 

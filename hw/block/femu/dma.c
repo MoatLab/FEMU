@@ -120,7 +120,7 @@ uint16_t dma_write_prp(FemuCtrl *n, uint8_t *ptr, uint32_t len, uint64_t prp1,
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     if (qsg.nsg > 0) {
-        if (dma_buf_write(ptr, len, &qsg)) {
+        if (dma_buf_write(ptr, len, NULL, &qsg, MEMTXATTRS_UNSPECIFIED)) {
             status = NVME_INVALID_FIELD | NVME_DNR;
         }
         qemu_sglist_destroy(&qsg);
@@ -145,7 +145,7 @@ uint16_t dma_read_prp(FemuCtrl *n, uint8_t *ptr, uint32_t len, uint64_t prp1,
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     if (qsg.nsg > 0) {
-        if (dma_buf_read(ptr, len, &qsg)) {
+        if (dma_buf_read(ptr, len, NULL, &qsg, MEMTXATTRS_UNSPECIFIED)) {
             status = NVME_INVALID_FIELD | NVME_DNR;
         }
         qemu_sglist_destroy(&qsg);

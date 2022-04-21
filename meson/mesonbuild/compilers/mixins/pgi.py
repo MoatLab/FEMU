@@ -19,6 +19,17 @@ import os
 from pathlib import Path
 
 from ..compilers import clike_debug_args, clike_optimization_args
+from ...mesonlib import OptionKey
+
+if T.TYPE_CHECKING:
+    from ...environment import Environment
+    from ...compilers.compilers import Compiler
+else:
+    # This is a bit clever, for mypy we pretend that these mixins descend from
+    # Compiler, so we get all of the methods and attributes defined for us, but
+    # for runtime we make them descend from object (which all classes normally
+    # do). This gives up DRYer type checking, with no runtime impact
+    Compiler = object
 
 pgi_buildtype_args = {
     'plain': [],
@@ -30,16 +41,18 @@ pgi_buildtype_args = {
 }  # type: T.Dict[str, T.List[str]]
 
 
-class PGICompiler:
-    def __init__(self):
-        self.base_options = ['b_pch']
+class PGICompiler(Compiler):
+
+    def __init__(self) -> None:
+        self.base_options = {OptionKey('b_pch')}
         self.id = 'pgi'
 
         default_warn_args = ['-Minform=inform']
         self.warn_args = {'0': [],
                           '1': default_warn_args,
                           '2': default_warn_args,
-                          '3': default_warn_args}
+                          '3': default_warn_args
+        }  # type: T.Dict[str, T.List[str]]
 
     def get_module_incdir_args(self) -> T.Tuple[str]:
         return ('-module', )
@@ -74,9 +87,6 @@ class PGICompiler:
                 parameter_list[idx] = i[:2] + os.path.normpath(os.path.join(build_dir, i[2:]))
         return parameter_list
 
-    def get_dependency_gen_args(self, outtarget: str, outfile: str) -> T.List[str]:
-        return []
-
     def get_always_args(self) -> T.List[str]:
         return []
 
@@ -90,10 +100,10 @@ class PGICompiler:
         if self.language == 'cpp':
             return ['--pch',
                     '--pch_dir', str(hdr.parent),
-                    '-I{}'.format(hdr.parent)]
+                    f'-I{hdr.parent}']
         else:
             return []
 
-    def thread_flags(self, env):
+    def thread_flags(self, env: 'Environment') -> T.List[str]:
         # PGI cannot accept -pthread, it's already threaded
         return []

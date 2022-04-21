@@ -1,14 +1,9 @@
 xtensa_ss = ss.source_set()
+
+xtensa_cores = fs.read('cores.list')
+xtensa_ss.add(files(xtensa_cores.strip().split('\n')))
+
 xtensa_ss.add(files(
-  'core-dc232b.c',
-  'core-dc233c.c',
-  'core-de212.c',
-  'core-de233_fpu.c',
-  'core-dsp3400.c',
-  'core-fsf.c',
-  'core-sample_controller.c',
-  'core-test_kc705_be.c',
-  'core-test_mmuhifi_c3.c',
   'cpu.c',
   'exc_helper.c',
   'fpu_helper.c',

@@ -11,9 +11,15 @@
 #ifndef QAPI_UTIL_H
 #define QAPI_UTIL_H
 
+typedef enum {
+    QAPI_DEPRECATED,
+    QAPI_UNSTABLE,
+} QapiSpecialFeature;
+
 typedef struct QEnumLookup {
     const char *const *array;
-    int size;
+    const unsigned char *const special_features;
+    const int size;
 } QEnumLookup;
 
 const char *qapi_enum_lookup(const QEnumLookup *lookup, int val);
@@ -35,6 +41,19 @@ int parse_qapi_name(const char *name, bool complete);
     _tmp->value = (element); \
     _tmp->next = (list); \
     (list) = _tmp; \
+} while (0)
+
+/*
+ * For any pointer to a GenericList @tail (usually the 'next' member of a
+ * list element), insert @element at the back and update the tail.
+ *
+ * Note that this macro evaluates @element exactly once, so it is safe
+ * to have side-effects with that argument.
+ */
+#define QAPI_LIST_APPEND(tail, element) do { \
+    *(tail) = g_malloc0(sizeof(**(tail))); \
+    (*(tail))->value = (element); \
+    (tail) = &(*(tail))->next; \
 } while (0)
 
 #endif

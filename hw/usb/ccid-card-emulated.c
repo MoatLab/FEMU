@@ -301,7 +301,7 @@ static void *event_thread(void *arg)
             } else {
                 if (event->reader != card->reader) {
                     fprintf(stderr,
-                        "ERROR: wrong reader: quiting event_thread\n");
+                        "ERROR: wrong reader: quitting event_thread\n");
                     break;
                 }
             }
@@ -612,6 +612,7 @@ static const TypeInfo emulated_card_info = {
     .instance_size = sizeof(EmulatedState),
     .class_init    = emulated_class_initfn,
 };
+module_obj(TYPE_EMULATED_CCID);
 
 static void ccid_card_emulated_register_types(void)
 {

@@ -34,7 +34,8 @@ from sphinx.errors import ExtensionError
 from sphinx.util.nodes import nested_parse_with_titles
 import sphinx
 from qapi.gen import QAPISchemaVisitor
-from qapi.schema import QAPIError, QAPISemError, QAPISchema
+from qapi.error import QAPIError, QAPISemError
+from qapi.schema import QAPISchema
 
 
 # Sphinx up to 1.6 uses AutodocReporter; 1.7 and later
@@ -111,17 +112,19 @@ class QAPISchemaGenRSTVisitor(QAPISchemaVisitor):
     def _nodes_for_ifcond(self, ifcond, with_if=True):
         """Return list of Text, literal nodes for the ifcond
 
-        Return a list which gives text like ' (If: cond1, cond2, cond3)', where
-        the conditions are in literal-text and the commas are not.
+        Return a list which gives text like ' (If: condition)'.
         If with_if is False, we don't return the "(If: " and ")".
         """
-        condlist = intersperse([nodes.literal('', c) for c in ifcond],
-                               nodes.Text(', '))
+
+        doc = ifcond.docgen()
+        if not doc:
+            return []
+        doc = nodes.literal('', doc)
         if not with_if:
-            return condlist
+            return [doc]
 
         nodelist = [nodes.Text(' ('), nodes.strong('', 'If: ')]
-        nodelist.extend(condlist)
+        nodelist.append(doc)
         nodelist.append(nodes.Text(')'))
         return nodelist
 
@@ -138,7 +141,7 @@ class QAPISchemaGenRSTVisitor(QAPISchemaVisitor):
             term.append(nodes.literal('', member.type.doc_type()))
         if member.optional:
             term.append(nodes.Text(' (optional)'))
-        if member.ifcond:
+        if member.ifcond.is_present():
             term.extend(self._nodes_for_ifcond(member.ifcond))
         return term
 
@@ -153,7 +156,7 @@ class QAPISchemaGenRSTVisitor(QAPISchemaVisitor):
                 nodes.literal('', variants.tag_member.name),
                 nodes.Text(' is '),
                 nodes.literal('', '"%s"' % variant.name)]
-        if variant.ifcond:
+        if variant.ifcond.is_present():
             term.extend(self._nodes_for_ifcond(variant.ifcond))
         return term
 
@@ -208,7 +211,7 @@ class QAPISchemaGenRSTVisitor(QAPISchemaVisitor):
         dlnode = nodes.definition_list()
         for section in doc.args.values():
             termtext = [nodes.literal('', section.member.name)]
-            if section.member.ifcond:
+            if section.member.ifcond.is_present():
                 termtext.extend(self._nodes_for_ifcond(section.member.ifcond))
             # TODO drop fallbacks when undocumented members are outlawed
             if section.text:
@@ -276,9 +279,11 @@ class QAPISchemaGenRSTVisitor(QAPISchemaVisitor):
     def _nodes_for_if_section(self, ifcond):
         """Return list of doctree nodes for the "If" section"""
         nodelist = []
-        if ifcond:
+        if ifcond.is_present():
             snode = self._make_section('If')
-            snode += self._nodes_for_ifcond(ifcond, with_if=False)
+            snode += nodes.paragraph(
+                '', '', *self._nodes_for_ifcond(ifcond, with_if=False)
+            )
             nodelist.append(snode)
         return nodelist
 
@@ -464,7 +469,7 @@ class QAPISchemaGenDepVisitor(QAPISchemaVisitor):
         self._qapidir = qapidir
 
     def visit_module(self, name):
-        if name is not None:
+        if name != "./builtin":
             qapifile = self._qapidir + '/' + name
             self._env.note_dependency(os.path.abspath(qapifile))
         super().visit_module(name)

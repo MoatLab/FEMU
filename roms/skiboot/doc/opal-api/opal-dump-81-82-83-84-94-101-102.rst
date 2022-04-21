@@ -1,0 +1,293 @@
+.. _opal-dumps:
+
+==========
+OPAL Dumps
+==========
+
+.. code-block:: c
+
+   #define OPAL_REGISTER_DUMP_REGION		101
+   #define OPAL_UNREGISTER_DUMP_REGION		102
+
+   int64_t opal_register_dump_region(uint32_t id, uint64_t addr, uint64_t size);
+   int64_t opal_unregister_dump_region(uint32_t id);
+
+In the event of crashes, some service processors and firmware support gathering
+a limited amount of memory from a limited number of memory regions to save into
+a debug dump that can be useful for firmware and operating system developers
+in diagnosing problems. Typically, firmware and kernel log buffers are useful to
+save in a dump.
+
+An OS can register a memory region with :ref:`OPAL_REGISTER_DUMP_REGION` and should,
+when the region is no longer valid (e.g. when kexec()ing), it should unregister the
+region with :ref:`OPAL_UNREGISTER_DUMP_REGION`.
+
+An OS will be made aware of a dump being available through :ref:`OPAL_EVENT_DUMP_AVAIL`
+being set from a :ref:`OPAL_POLL_EVENTS` call.
+
+Retreiving dumps from a service processor can also be performed using the
+:ref:`OPAL_DUMP_INFO`, :ref:`OPAL_DUMP_INFO2`, :ref:`OPAL_DUMP_READ`,
+and :ref:`OPAL_DUMP_RESEND` calls. Dumps are identified by a ``uint32_t``, and
+once a dump is acknowledged, this ID can be re-used.
+
+Dumps can also be initiated by OPAL through the :ref:`OPAL_DUMP_INIT` call, which
+will request that the service processor performs the requested type of dump.
+
+A call to :ref:`OPAL_DUMP_ACK` indicates to the service processor that we have
+retreived/acknowledged the dump and the service processor can free up the storage
+used by it.
+
+.. code-block:: c
+
+   #define OPAL_DUMP_INIT				81
+   #define OPAL_DUMP_INFO				82
+   #define OPAL_DUMP_READ				83
+   #define OPAL_DUMP_ACK				84
+   #define OPAL_DUMP_RESEND				91
+   #define OPAL_DUMP_INFO2				94
+
+   int64_t opal_dump_init(uint8_t dump_type);
+   int64_t opal_dump_info(uint32_t *dump_id, uint32_t *dump_size);
+   int64_t opal_dump_read(uint32_t dump_id, struct opal_sg_list *list);
+   int64_t opal_dump_ack(uint32_t dump_id);
+   int64_t opal_dump_resend_notification(void);
+   int64_t opal_dump_info2(uint32_t *dump_id, uint32_t *dump_size, uint32_t *dump_type);
+
+
+.. _OPAL_REGISTER_DUMP_REGION:
+
+OPAL_REGISTER_DUMP_REGION
+=========================
+
+.. code-block:: c
+
+   #define OPAL_REGISTER_DUMP_REGION		101
+
+   int64_t opal_register_dump_region(uint32_t id, uint64_t addr, uint64_t size);
+
+This call is used to register regions of memory for a service processor to capture
+when the host crashes.
+
+e.g. if an assert is hit in OPAL, a service processor will copy the region of
+memory into some kind of crash dump for further analysis.
+
+This is an OPTIONAL feature that may be unsupported, the host OS should use an
+:ref:`OPAL_CHECK_TOKEN` call to find out if :ref:`OPAL_REGISTER_DUMP_REGION` is supported.
+
+:ref:`OPAL_REGISTER_DUMP_REGION` accepts 3 parameters:
+
+- region ID
+- address
+- length
+
+There is a range of region IDs that can be used by the host OS. A host OS should
+start from OPAL_DUMP_REGION_HOST_END and work down if it wants to add a not well
+defined region to dump. Currently the only well defined region is for the host
+OS log buffer (e.g. dmesg on linux). ::
+
+  /*
+   * Dump region ID range usable by the OS
+   */
+   #define OPAL_DUMP_REGION_HOST_START		0x80
+   #define OPAL_DUMP_REGION_LOG_BUF		0x80
+   #define OPAL_DUMP_REGION_HOST_END		0xFF
+
+:ref:`OPAL_REGISTER_DUMP_REGION` will return :ref:`OPAL_UNSUPPORTED` if the call is present but
+the system doesn't support registering regions to be dumped.
+
+In the event of being passed an invalid region ID, :ref:`OPAL_REGISTER_DUMP_REGION` will
+return :ref:`OPAL_PARAMETER`.
+
+Systems likely have a limit as to how many regions they can support being dumped. If
+this limit is reached, :ref:`OPAL_REGISTER_DUMP_REGION` will return :ref:`OPAL_INTERNAL_ERROR`.
+
+BUGS
+----
+Some skiboot versions incorrectly returned :ref:`OPAL_SUCCESS` in the case of
+:ref:`OPAL_REGISTER_DUMP_REGION` being supported on a platform (so the call was present)
+but the call being unsupported for some reason (e.g. on an IBM POWER7 machine).
+
+See also: :ref:`OPAL_UNREGISTER_DUMP_REGION`
+
+.. _OPAL_UNREGISTER_DUMP_REGION:
+
+OPAL_UNREGISTER_DUMP_REGION
+===========================
+
+.. code-block:: c
+
+   #define OPAL_UNREGISTER_DUMP_REGION		102
+
+   int64_t opal_unregister_dump_region(uint32_t id);
+
+While :ref:`OPAL_REGISTER_DUMP_REGION` registers a region, :ref:`OPAL_UNREGISTER_DUMP_REGION`
+will unregister a region by region ID.
+
+:ref:`OPAL_UNREGISTER_DUMP_REGION` takes one argument: the region ID.
+
+A host OS should check :ref:`OPAL_UNREGISTER_DUMP_REGION` is supported through a call to
+:ref:`OPAL_CHECK_TOKEN`.
+
+If :ref:`OPAL_UNREGISTER_DUMP_REGION` is called on a system where the call is present but
+unsupported, it will return :ref:`OPAL_UNSUPPORTED`.
+
+BUGS
+----
+Some skiboot versions incorrectly returned :ref:`OPAL_SUCCESS` in the case of
+:ref:`OPAL_UNREGISTER_DUMP_REGION` being supported on a platform (so the call was present)
+but the call being unsupported for some reason (e.g. on an IBM POWER7 machine).
+
+.. _OPAL_DUMP_INIT:
+
+OPAL_DUMP_INIT
+==============
+
+.. code-block:: c
+
+   #define OPAL_DUMP_INIT				81
+
+   #define DUMP_TYPE_FSP		0x01
+   #define DUMP_TYPE_SYS		0x02
+   #define DUMP_TYPE_SMA		0x03
+
+   int64_t opal_dump_init(uint8_t dump_type);
+
+Ask the service processor to initiate a dump. Currently, only ``DUMP_TYPE_FSP``
+is supported.
+
+Currently only implemented on FSP based systems. Use :ref:`OPAL_CHECK_TOKEN` to
+ensure the call is valid.
+
+Returns
+-------
+:ref:`OPAL_SUCCESS`
+     Dump initiated
+:ref:`OPAL_PARAMETER`
+     Unsupported dump type. Currently only ``DUMP_TYPE_FSP`` is supported and
+     only on FSP based platforms.
+:ref:`OPAL_INTERNAL_ERROR`
+     Failed to ask service processor to initiated dump.
+
+.. _OPAL_DUMP_INFO:
+
+OPAL_DUMP_INFO
+==============
+
+.. code-block:: c
+
+   #define OPAL_DUMP_INFO				82
+
+   int64_t opal_dump_info(uint32_t *dump_id, uint32_t *dump_size);
+
+Obsolete, use :ref:`OPAL_DUMP_INFO2` instead.
+
+No upstream Linux code ever used :ref:`OPAL_DUMP_INFO`, although early PowerKVM
+trees did. :ref:`OPAL_DUMP_INFO` is implemented as a wrapper around
+:ref:`OPAL_DUMP_INFO2`.
+
+.. _OPAL_DUMP_READ:
+
+OPAL_DUMP_READ
+==============
+
+.. code-block:: c
+
+   #define OPAL_DUMP_READ				83
+
+   int64_t opal_dump_read(uint32_t dump_id, struct opal_sg_list *list);
+
+Read ``dump_id`` dump from the service processor into memory.
+
+
+Returns
+-------
+:ref:`OPAL_INTERNAL_ERROR`
+     Invalid Dump ID or internal error.
+:ref:`OPAL_PARAMETER`
+     Insuffcient space to store dump.
+:ref:`OPAL_BUSY_EVENT`
+     Fetching dump, call :ref:`OPAL_POLL_EVENTS` to crank the state machine,
+     and call :ref:`OPAL_DUMP_READ` again until neither :ref:`OPAL_BUSY_EVENT`
+     nor :ref:`OPAL_BUSY` are returned.
+:ref:`OPAL_PARTIAL`
+     Only part of the dump was read.
+:ref:`OPAL_SUCCESS`
+     Dump successfully read.
+
+.. _OPAL_DUMP_ACK:
+
+OPAL_DUMP_ACK
+=============
+
+.. code-block:: c
+
+   #define OPAL_DUMP_ACK				84
+
+   int64_t opal_dump_ack(uint32_t dump_id);
+
+Acknowledge the dump to the service processor. This means the service processor
+can re-claim the storage space used by the dump. Effectively, this is an
+``unlink`` style operation.
+
+Returns
+-------
+:ref:`OPAL_SUCCESS`
+     Dump successfully acknowledged.
+:ref:`OPAL_INTERNAL_ERROR`
+     Failed to acknowledge the dump, e.g. could not communicate with service
+     processor.
+:ref:`OPAL_PARAMETER`
+     Invalid dump ID.
+
+
+.. _OPAL_DUMP_RESEND:
+
+OPAL_DUMP_RESEND
+================
+
+.. code-block:: c
+
+   #define OPAL_DUMP_RESEND				91
+
+   int64_t opal_dump_resend_notification(void);
+
+Resend notification to the OS if there is a dump available. This will
+cause OPAL to check if a dump is available and set the
+:ref:`OPAL_EVENT_DUMP_AVAIL` bit in the next :ref:`OPAL_POLL_EVENTS` call.
+
+Returns
+-------
+:ref:`OPAL_SUCCESS`
+     Successfully reset :ref:`OPAL_EVENT_DUMP_AVAIL` bit.
+
+In future, this may return other standard OPAL error codes.
+
+.. _OPAL_DUMP_INFO2:
+
+OPAL_DUMP_INFO2
+===============
+
+.. code-block:: c
+
+   #define OPAL_DUMP_INFO2				94
+
+   #define DUMP_TYPE_FSP		0x01
+   #define DUMP_TYPE_SYS		0x02
+   #define DUMP_TYPE_SMA		0x03
+
+   int64_t opal_dump_info2(uint32_t *dump_id, uint32_t *dump_size, uint32_t *dump_type);
+
+Retreives information about a dump, notably it's ``dump_id``, size, and type.
+Call this after the :ref:`OPAL_EVENT_DUMP_AVAIL` bit is set from a
+:ref:`OPAL_POLL_EVENTS` call. It will retreive the information on the *next*
+dump to be retreived and/or ACKed, even though there may be more than one dump
+available for retreiving.
+
+This call replaces :ref:`OPAL_DUMP_INFO`.
+
+Returns
+-------
+:ref:`OPAL_SUCCESS`
+     Information retreived.
+:ref:`OPAL_INTERNAL_ERROR`
+     No dump available or internal error.

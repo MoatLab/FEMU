@@ -1,0 +1,54 @@
+Detailed partition information
+Name:
+PRESERVED (ID=01)
+
+Start       End         Actual    
+0x00003000  0x00004000  0x00001000
+
+Flags:
+PRESERVED [P]
+Detailed partition information
+Name:
+READONLY (ID=02)
+
+Start       End         Actual    
+0x00004000  0x00005000  0x00001000
+
+Flags:
+READONLY [R]
+Detailed partition information
+Name:
+REPROVISION (ID=03)
+
+Start       End         Actual    
+0x00005000  0x00006000  0x00001000
+
+Flags:
+REPROVISION [F]
+Detailed partition information
+Name:
+BACKUP (ID=04)
+
+Start       End         Actual    
+0x00006000  0x00007000  0x00000000
+
+Flags:
+BACKUP [B]
+Detailed partition information
+Name:
+VOLATILE (ID=05)
+
+Start       End         Actual    
+0x00007000  0x00008000  0x00001000
+
+Flags:
+VOLATILE [V]
+Detailed partition information
+Name:
+CLEARECC (ID=06)
+
+Start       End         Actual    
+0x00008000  0x00009000  0x00001000
+
+Flags:
+CLEARECC [C]

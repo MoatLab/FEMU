@@ -17,6 +17,7 @@
 import abc
 import functools
 import os
+import multiprocessing
 import pathlib
 import re
 import subprocess
@@ -24,10 +25,18 @@ import typing as T
 
 from ... import mesonlib
 from ... import mlog
+from ...mesonlib import OptionKey
 
 if T.TYPE_CHECKING:
-    from ...coredata import UserOption  # noqa: F401
+    from ..._typing import ImmutableListProtocol
     from ...environment import Environment
+    from ..compilers import Compiler
+else:
+    # This is a bit clever, for mypy we pretend that these mixins descend from
+    # Compiler, so we get all of the methods and attributes defined for us, but
+    # for runtime we make them descend from object (which all classes normally
+    # do). This gives up DRYer type checking, with no runtime impact
+    Compiler = object
 
 # XXX: prevent circular references.
 # FIXME: this really is a posix interface not a c-like interface
@@ -84,7 +93,7 @@ gnu_color_args = {
 
 
 @functools.lru_cache(maxsize=None)
-def gnulike_default_include_dirs(compiler: T.Tuple[str], lang: str) -> T.List[str]:
+def gnulike_default_include_dirs(compiler: T.Tuple[str, ...], lang: str) -> 'ImmutableListProtocol[str]':
     lang_map = {
         'c': 'c',
         'cpp': 'c++',
@@ -96,7 +105,7 @@ def gnulike_default_include_dirs(compiler: T.Tuple[str], lang: str) -> T.List[st
     lang = lang_map[lang]
     env = os.environ.copy()
     env["LC_ALL"] = 'C'
-    cmd = list(compiler) + ['-x{}'.format(lang), '-E', '-v', '-']
+    cmd = list(compiler) + [f'-x{lang}', '-E', '-v', '-']
     p = subprocess.Popen(
         cmd,
         stdin=subprocess.DEVNULL,
@@ -106,7 +115,7 @@ def gnulike_default_include_dirs(compiler: T.Tuple[str], lang: str) -> T.List[st
     )
     stdout = p.stdout.read().decode('utf-8', errors='replace')
     parse_state = 0
-    paths = []
+    paths = []  # type: T.List[str]
     for line in stdout.split('\n'):
         line = line.strip(' \n\r\t')
         if parse_state == 0:
@@ -129,7 +138,7 @@ def gnulike_default_include_dirs(compiler: T.Tuple[str], lang: str) -> T.List[st
     return paths
 
 
-class GnuLikeCompiler(metaclass=abc.ABCMeta):
+class GnuLikeCompiler(Compiler, metaclass=abc.ABCMeta):
     """
     GnuLikeCompiler is a common interface to all compilers implementing
     the GNU-style commandline interface. This includes GCC, Clang
@@ -139,15 +148,16 @@ class GnuLikeCompiler(metaclass=abc.ABCMeta):
 
     LINKER_PREFIX = '-Wl,'
 
-    def __init__(self):
-        self.base_options = ['b_pch', 'b_lto', 'b_pgo', 'b_coverage',
-                             'b_ndebug', 'b_staticpic', 'b_pie']
+    def __init__(self) -> None:
+        self.base_options = {
+            OptionKey(o) for o in ['b_pch', 'b_lto', 'b_pgo', 'b_coverage',
+                                   'b_ndebug', 'b_staticpic', 'b_pie']}
         if not (self.info.is_windows() or self.info.is_cygwin() or self.info.is_openbsd()):
-            self.base_options.append('b_lundef')
+            self.base_options.add(OptionKey('b_lundef'))
         if not self.info.is_windows() or self.info.is_cygwin():
-            self.base_options.append('b_asneeded')
+            self.base_options.add(OptionKey('b_asneeded'))
         if not self.info.is_hurd():
-            self.base_options.append('b_sanitize')
+            self.base_options.add(OptionKey('b_sanitize'))
         # All GCC-like backends can do assembly
         self.can_compile_suffixes.add('s')
 
@@ -164,14 +174,14 @@ class GnuLikeCompiler(metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
     def get_optimization_args(self, optimization_level: str) -> T.List[str]:
-        raise NotImplementedError("get_optimization_args not implemented")
+        pass
 
     def get_debug_args(self, is_debug: bool) -> T.List[str]:
         return clike_debug_args[is_debug]
 
     @abc.abstractmethod
     def get_pch_suffix(self) -> str:
-        raise NotImplementedError("get_pch_suffix not implemented")
+        pass
 
     def split_shlib_to_parts(self, fname: str) -> T.Tuple[str, str]:
         return os.path.dirname(fname), fname
@@ -180,11 +190,11 @@ class GnuLikeCompiler(metaclass=abc.ABCMeta):
         return gnulike_instruction_set_args.get(instruction_set, None)
 
     def get_default_include_dirs(self) -> T.List[str]:
-        return gnulike_default_include_dirs(tuple(self.exelist), self.language)
+        return gnulike_default_include_dirs(tuple(self.exelist), self.language).copy()
 
     @abc.abstractmethod
     def openmp_flags(self) -> T.List[str]:
-        raise NotImplementedError("openmp_flags not implemented")
+        pass
 
     def gnu_symbol_visibility_args(self, vistype: str) -> T.List[str]:
         return gnu_symbol_visibility_args[vistype]
@@ -209,9 +219,7 @@ class GnuLikeCompiler(metaclass=abc.ABCMeta):
         return ['-fprofile-use', '-fprofile-correction']
 
     def get_gui_app_args(self, value: bool) -> T.List[str]:
-        if self.info.is_windows() or self.info.is_cygwin():
-            return ['-mwindows' if value else '-mconsole']
-        return []
+        return ['-mwindows' if value else '-mconsole']
 
     def compute_parameters_with_absolute_paths(self, parameter_list: T.List[str], build_dir: str) -> T.List[str]:
         for idx, i in enumerate(parameter_list):
@@ -223,12 +231,10 @@ class GnuLikeCompiler(metaclass=abc.ABCMeta):
     @functools.lru_cache()
     def _get_search_dirs(self, env: 'Environment') -> str:
         extra_args = ['--print-search-dirs']
-        stdo = None
         with self._build_wrapper('', env, extra_args=extra_args,
                                  dependencies=None, mode='compile',
                                  want_output=True) as p:
-            stdo = p.stdo
-        return stdo
+            return p.stdout
 
     def _split_fetch_real_dirs(self, pathstr: str) -> T.List[str]:
         # We need to use the path separator used by the compiler for printing
@@ -277,7 +283,9 @@ class GnuLikeCompiler(metaclass=abc.ABCMeta):
                 return self._split_fetch_real_dirs(line.split('=', 1)[1])
         return []
 
-    def get_lto_compile_args(self) -> T.List[str]:
+    def get_lto_compile_args(self, *, threads: int = 0, mode: str = 'default') -> T.List[str]:
+        # This provides a base for many compilers, GCC and Clang override this
+        # for their specific arguments
         return ['-flto']
 
     def sanitizer_compile_args(self, value: str) -> T.List[str]:
@@ -291,7 +299,7 @@ class GnuLikeCompiler(metaclass=abc.ABCMeta):
     def get_output_args(self, target: str) -> T.List[str]:
         return ['-o', target]
 
-    def get_dependency_gen_args(self, outtarget, outfile):
+    def get_dependency_gen_args(self, outtarget: str, outfile: str) -> T.List[str]:
         return ['-MD', '-MQ', outtarget, '-MF', outfile]
 
     def get_compile_only_args(self) -> T.List[str]:
@@ -308,9 +316,8 @@ class GnuLikeCompiler(metaclass=abc.ABCMeta):
     def use_linker_args(cls, linker: str) -> T.List[str]:
         if linker not in {'gold', 'bfd', 'lld'}:
             raise mesonlib.MesonException(
-                'Unsupported linker, only bfd, gold, and lld are supported, '
-                'not {}.'.format(linker))
-        return ['-fuse-ld={}'.format(linker)]
+                f'Unsupported linker, only bfd, gold, and lld are supported, not {linker}.')
+        return [f'-fuse-ld={linker}']
 
     def get_coverage_args(self) -> T.List[str]:
         return ['--coverage']
@@ -322,11 +329,11 @@ class GnuCompiler(GnuLikeCompiler):
     Compilers imitating GCC (Clang/Intel) should use the GnuLikeCompiler ABC.
     """
 
-    def __init__(self, defines: T.Dict[str, str]):
+    def __init__(self, defines: T.Optional[T.Dict[str, str]]):
         super().__init__()
         self.id = 'gcc'
         self.defines = defines or {}
-        self.base_options.append('b_colorout')
+        self.base_options.update({OptionKey('b_colorout'), OptionKey('b_lto_threads')})
 
     def get_colorout_args(self, colortype: str) -> T.List[str]:
         if mesonlib.version_compare(self.version, '>=4.9.0'):
@@ -334,6 +341,7 @@ class GnuCompiler(GnuLikeCompiler):
         return []
 
     def get_warn_args(self, level: str) -> T.List[str]:
+        # Mypy doesn't understand cooperative inheritance
         args = super().get_warn_args(level)
         if mesonlib.version_compare(self.version, '<4.8.0') and '-Wpedantic' in args:
             # -Wpedantic was added in 4.8.0
@@ -358,19 +366,33 @@ class GnuCompiler(GnuLikeCompiler):
     def openmp_flags(self) -> T.List[str]:
         return ['-fopenmp']
 
-    def has_arguments(self, args, env, code, mode):
+    def has_arguments(self, args: T.List[str], env: 'Environment', code: str,
+                      mode: str) -> T.Tuple[bool, bool]:
         # For some compiler command line arguments, the GNU compilers will
         # emit a warning on stderr indicating that an option is valid for a
         # another language, but still complete with exit_success
         with self._build_wrapper(code, env, args, None, mode) as p:
             result = p.returncode == 0
-            if self.language in {'cpp', 'objcpp'} and 'is valid for C/ObjC' in p.stde:
+            if self.language in {'cpp', 'objcpp'} and 'is valid for C/ObjC' in p.stderr:
                 result = False
-            if self.language in {'c', 'objc'} and 'is valid for C++/ObjC++' in p.stde:
+            if self.language in {'c', 'objc'} and 'is valid for C++/ObjC++' in p.stderr:
                 result = False
         return result, p.cached
 
-    def get_has_func_attribute_extra_args(self, name):
+    def get_has_func_attribute_extra_args(self, name: str) -> T.List[str]:
         # GCC only warns about unknown or ignored attributes, so force an
         # error.
         return ['-Werror=attributes']
+
+    def get_prelink_args(self, prelink_name: str, obj_list: T.List[str]) -> T.List[str]:
+        return ['-r', '-o', prelink_name] + obj_list
+
+    def get_lto_compile_args(self, *, threads: int = 0, mode: str = 'default') -> T.List[str]:
+        if threads == 0:
+            if mesonlib.version_compare(self.version, '>= 10.0'):
+                return ['-flto=auto']
+            # This matches clang's behavior of using the number of cpus
+            return [f'-flto={multiprocessing.cpu_count()}']
+        elif threads > 0:
+            return [f'-flto={threads}']
+        return super().get_lto_compile_args(threads=threads)

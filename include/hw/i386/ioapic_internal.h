@@ -27,7 +27,7 @@
 #include "qemu/notify.h"
 #include "qom/object.h"
 
-#define MAX_IOAPICS                     1
+#define MAX_IOAPICS                     2
 
 #define IOAPIC_LVT_DEST_SHIFT           56
 #define IOAPIC_LVT_DEST_IDX_SHIFT       48
@@ -112,7 +112,6 @@ struct IOAPICCommonState {
 
 void ioapic_reset_common(DeviceState *dev);
 
-void ioapic_print_redtbl(Monitor *mon, IOAPICCommonState *s);
 void ioapic_stat_update_irq(IOAPICCommonState *s, int irq, int level);
 
 #endif /* QEMU_IOAPIC_INTERNAL_H */

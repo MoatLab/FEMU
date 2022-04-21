@@ -11,7 +11,7 @@
 #
 VERSION = 1
 PATCHLEVEL = 6
-SUBLEVEL = 0
+SUBLEVEL = 1
 EXTRAVERSION =
 LOCAL_VERSION =
 CONFIG_LOCALVERSION =
@@ -59,6 +59,7 @@ ifeq ($(NO_YAML),1)
 	CFLAGS += -DNO_YAML
 else
 	LDLIBS_dtc += $(shell $(PKG_CONFIG) --libs yaml-0.1)
+	CFLAGS += $(shell $(PKG_CONFIG) --cflags yaml-0.1)
 endif
 
 ifeq ($(HOSTOS),darwin)

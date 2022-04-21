@@ -25,7 +25,6 @@ static const VMStateDescription vmstate_tlb_entry = {
     .name = "tlb_entry",
     .version_id = 1,
     .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
     .fields = (VMStateField[]) {
         VMSTATE_UINTTL(mr, OpenRISCTLBEntry),
         VMSTATE_UINTTL(tr, OpenRISCTLBEntry),
@@ -55,7 +54,7 @@ static int get_sr(QEMUFile *f, void *opaque, size_t size,
 }
 
 static int put_sr(QEMUFile *f, void *opaque, size_t size,
-                  const VMStateField *field, QJSON *vmdesc)
+                  const VMStateField *field, JSONWriter *vmdesc)
 {
     CPUOpenRISCState *env = opaque;
     qemu_put_be32(f, cpu_get_sr(env));

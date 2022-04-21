@@ -24,14 +24,24 @@
 
 int hax_sync_vcpus(void);
 
-#ifdef CONFIG_HAX
+#ifdef NEED_CPU_H
+# ifdef CONFIG_HAX
+#  define CONFIG_HAX_IS_POSSIBLE
+# endif
+#else /* !NEED_CPU_H */
+# define CONFIG_HAX_IS_POSSIBLE
+#endif
 
-int hax_enabled(void);
+#ifdef CONFIG_HAX_IS_POSSIBLE
 
-#else /* CONFIG_HAX */
+extern bool hax_allowed;
 
-#define hax_enabled() (0)
+#define hax_enabled()               (hax_allowed)
 
-#endif /* CONFIG_HAX */
+#else /* !CONFIG_HAX_IS_POSSIBLE */
+
+#define hax_enabled()               (0)
+
+#endif /* CONFIG_HAX_IS_POSSIBLE */
 
 #endif /* QEMU_HAX_H */

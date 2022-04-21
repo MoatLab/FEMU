@@ -1,0 +1,19 @@
+Open-Power FFS format tool VERSION
+Usage: ./ffspart [options] -e -s size -c num -i layout_file -p pnor_file ...
+
+ Options:
+	-e, --allow_empty
+		Create partition as blank if not specified (sets ECC if flag set)
+
+	-s, --block_size=size
+		Size (in hex with leading 0x) of the blocks on the flash in bytes
+
+	-c, --block_count=num
+		Number of blocks on the flash
+
+	-i, --input=file
+		File containing the required partition data
+
+	-p, --pnor=file
+		Output file to write data
+

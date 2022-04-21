@@ -33,7 +33,6 @@
 #include "sysemu/xen.h"
 #include "qapi/error.h"
 #include "qemu/range.h"
-#include "exec/address-spaces.h"
 #include "hw/acpi/pcihp.h"
 #include "hw/acpi/cpu_hotplug.h"
 #include "hw/acpi/cpu.h"
@@ -49,6 +48,8 @@
 
 #define GPE_BASE 0xafe0
 #define GPE_LEN 4
+
+#define ACPI_PCIHP_ADDR_PIIX4 0xae00
 
 struct pci_status {
     uint32_t up; /* deprecated, maintained for migration compatibility */
@@ -74,12 +75,14 @@ struct PIIX4PMState {
     qemu_irq irq;
     qemu_irq smi_irq;
     int smm_enabled;
+    bool smm_compat;
     Notifier machine_ready;
     Notifier powerdown_notifier;
 
     AcpiPciHpState acpi_pci_hotplug;
     bool use_acpi_hotplug_bridge;
     bool use_acpi_root_pci_hotplug;
+    bool not_migrate_acpi_index;
 
     uint8_t disable_s3;
     uint8_t disable_s4;
@@ -228,7 +231,6 @@ static const VMStateDescription vmstate_memhp_state = {
     .name = "piix4_pm/memhp",
     .version_id = 1,
     .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
     .needed = vmstate_test_use_memhp,
     .fields      = (VMStateField[]) {
         VMSTATE_MEMORY_HOTPLUG(acpi_memory_hotplug, PIIX4PMState),
@@ -253,7 +255,6 @@ static const VMStateDescription vmstate_cpuhp_state = {
     .name = "piix4_pm/cpuhp",
     .version_id = 1,
     .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
     .needed = vmstate_test_use_cpuhp,
     .pre_load = vmstate_cpuhp_pre_load,
     .fields      = (VMStateField[]) {
@@ -265,6 +266,16 @@ static const VMStateDescription vmstate_cpuhp_state = {
 static bool piix4_vmstate_need_smbus(void *opaque, int version_id)
 {
     return pm_smbus_vmstate_needed();
+}
+
+/*
+ * This is a fudge to turn off the acpi_index field,
+ * whose test was always broken on piix4 with 6.2 and older machine types.
+ */
+static bool vmstate_test_migrate_acpi_index(void *opaque, int version_id)
+{
+    PIIX4PMState *s = PIIX4_PM(opaque);
+    return s->use_acpi_hotplug_bridge && !s->not_migrate_acpi_index;
 }
 
 /* qemu-kvm 1.2 uses version 3 but advertised as 2
@@ -296,7 +307,8 @@ static const VMStateDescription vmstate_acpi = {
             2, vmstate_pci_status,
             struct AcpiPciHpPciStatus),
         VMSTATE_PCI_HOTPLUG(acpi_pci_hotplug, PIIX4PMState,
-                            vmstate_test_use_acpi_hotplug_bridge),
+                            vmstate_test_use_acpi_hotplug_bridge,
+                            vmstate_test_migrate_acpi_index),
         VMSTATE_END_OF_LIST()
     },
     .subsections = (const VMStateDescription*[]) {
@@ -324,6 +336,13 @@ static void piix4_pm_reset(DeviceState *dev)
         /* Mark SMM as already inited (until KVM supports SMM). */
         pci_conf[0x5B] = 0x02;
     }
+
+    acpi_pm1_evt_reset(&s->ar);
+    acpi_pm1_cnt_reset(&s->ar);
+    acpi_pm_tmr_reset(&s->ar);
+    acpi_gpe_reset(&s->ar);
+    acpi_update_sci(&s->ar, s->irq);
+
     pm_io_space_update(s);
     acpi_pcihp_reset(&s->acpi_pci_hotplug, !s->use_acpi_root_pci_hotplug);
 }
@@ -496,7 +515,8 @@ static void piix4_pm_realize(PCIDevice *dev, Error **errp)
 
     acpi_pm_tmr_init(&s->ar, pm_tmr_timer, &s->io);
     acpi_pm1_evt_init(&s->ar, pm_tmr_timer, &s->io);
-    acpi_pm1_cnt_init(&s->ar, &s->io, s->disable_s3, s->disable_s4, s->s4_val);
+    acpi_pm1_cnt_init(&s->ar, &s->io, s->disable_s3, s->disable_s4, s->s4_val,
+                      !s->smm_compat && !s->smm_enabled);
     acpi_gpe_init(&s->ar, GPE_LEN);
 
     s->powerdown_notifier.notify = piix4_pm_powerdown_req;
@@ -598,7 +618,7 @@ static void piix4_acpi_system_hot_add_init(MemoryRegion *parent,
 
     if (s->use_acpi_hotplug_bridge || s->use_acpi_root_pci_hotplug) {
         acpi_pcihp_init(OBJECT(s), &s->acpi_pci_hotplug, bus, parent,
-                        s->use_acpi_hotplug_bridge);
+                        s->use_acpi_hotplug_bridge, ACPI_PCIHP_ADDR_PIIX4);
     }
 
     s->cpu_hotplug_legacy = true;
@@ -636,12 +656,15 @@ static Property piix4_pm_properties[] = {
     DEFINE_PROP_UINT8(ACPI_PM_PROP_S3_DISABLED, PIIX4PMState, disable_s3, 0),
     DEFINE_PROP_UINT8(ACPI_PM_PROP_S4_DISABLED, PIIX4PMState, disable_s4, 0),
     DEFINE_PROP_UINT8(ACPI_PM_PROP_S4_VAL, PIIX4PMState, s4_val, 2),
-    DEFINE_PROP_BOOL("acpi-pci-hotplug-with-bridge-support", PIIX4PMState,
+    DEFINE_PROP_BOOL(ACPI_PM_PROP_ACPI_PCIHP_BRIDGE, PIIX4PMState,
                      use_acpi_hotplug_bridge, true),
-    DEFINE_PROP_BOOL("acpi-root-pci-hotplug", PIIX4PMState,
+    DEFINE_PROP_BOOL(ACPI_PM_PROP_ACPI_PCI_ROOTHP, PIIX4PMState,
                      use_acpi_root_pci_hotplug, true),
     DEFINE_PROP_BOOL("memory-hotplug-support", PIIX4PMState,
                      acpi_memory_hotplug.is_enabled, true),
+    DEFINE_PROP_BOOL("smm-compat", PIIX4PMState, smm_compat, false),
+    DEFINE_PROP_BOOL("x-not-migrate-acpi-index", PIIX4PMState,
+                      not_migrate_acpi_index, false),
     DEFINE_PROP_END_OF_LIST(),
 };
 

@@ -1,11 +1,9 @@
 project('libslirp', 'c',
-  version : run_command('build-aux/git-version-gen', '@0@/.tarball-version'.format(meson.source_root()), check : true).stdout().strip(),
+  version : '4.6.1',
   license : 'BSD-3-Clause',
   default_options : ['warning_level=1', 'c_std=gnu99'],
-  meson_version : '>= 0.49',
+  meson_version : '>= 0.50',
 )
-
-meson.add_dist_script('build-aux/meson-dist', meson.project_version(), meson.source_root())
 
 version = meson.project_version()
 varr = version.split('.')
@@ -17,7 +15,17 @@ conf = configuration_data()
 conf.set('SLIRP_MAJOR_VERSION', major_version)
 conf.set('SLIRP_MINOR_VERSION', minor_version)
 conf.set('SLIRP_MICRO_VERSION', micro_version)
-conf.set_quoted('SLIRP_VERSION_STRING', version)
+
+full_version = run_command('build-aux/git-version-gen',
+                           '@0@/.tarball-version'.format(meson.current_source_dir()),
+                           check : true).stdout().strip()
+if full_version.startswith('UNKNOWN')
+  full_version = meson.project_version()
+elif not full_version.startswith(meson.project_version())
+  error('meson.build project version @0@ does not match git-describe output @1@'
+        .format(meson.project_version(), full_version))
+endif
+conf.set_quoted('SLIRP_VERSION_STRING', full_version + get_option('version_suffix'))
 
 # libtool versioning - this applies to libslirp
 #
@@ -36,9 +44,9 @@ conf.set_quoted('SLIRP_VERSION_STRING', version)
 # - If the interface is the same as the previous version, but bugs are
 #   fixed, change:
 #      REVISION += 1
-lt_current = 2
-lt_revision = 0
-lt_age = 2
+lt_current = 3
+lt_revision = 1
+lt_age = 3
 lt_version = '@0@.@1@.@2@'.format(lt_current - lt_age, lt_age, lt_revision)
 
 host_system = host_machine.system()
@@ -54,11 +62,19 @@ if host_system == 'windows'
     cc.find_library('ws2_32'),
     cc.find_library('iphlpapi')
   ]
+elif host_system == 'darwin'
+  platform_deps += [
+    cc.find_library('resolv')
+  ]
 endif
 
 cargs = [
   '-DG_LOG_DOMAIN="Slirp"',
 ]
+
+if cc.check_header('valgrind/valgrind.h')
+  cargs += [ '-DHAVE_VALGRIND=1' ]
+endif
 
 sources = [
   'src/arp_table.c',
@@ -95,11 +111,18 @@ sources = [
 ]
 
 mapfile = 'src/libslirp.map'
-vflag = '-Wl,--version-script,@0@/@1@'.format(meson.current_source_dir(), mapfile)
+vflag = []
+vflag_test = '-Wl,--version-script,@0@/@1@'.format(meson.current_source_dir(), mapfile)
+if cc.has_link_argument(vflag_test)
+  vflag += vflag_test
+endif
+
+install_devel = not meson.is_subproject()
 
 configure_file(
   input : 'src/libslirp-version.h.in',
   output : 'libslirp-version.h',
+  install : install_devel,
   install_dir : join_paths(get_option('includedir'), 'slirp'),
   configuration : conf
 )
@@ -110,25 +133,30 @@ lib = library('slirp', sources,
   link_args : vflag,
   link_depends : mapfile,
   dependencies : [glib_dep, platform_deps],
-  install : true
+  install : install_devel or get_option('default_library') == 'shared',
 )
 
-libslirp_dep = declare_dependency(
-  include_directories: include_directories('.', 'src'),
-  link_with: lib)
+if install_devel
+  install_headers(['src/libslirp.h'], subdir : 'slirp')
 
-install_headers(['src/libslirp.h'], subdir : 'slirp')
+  pkg = import('pkgconfig')
 
-pkg = import('pkgconfig')
-
-pkg.generate(
-  version : version,
-  libraries : lib,
-  requires : [
-    'glib-2.0',
-  ],
-  name : 'slirp',
-  description : 'User-space network stack',
-  filebase : 'slirp',
-  subdirs : 'slirp',
-)
+  pkg.generate(
+    version : version,
+    libraries : lib,
+    requires : [
+      'glib-2.0',
+    ],
+    name : 'slirp',
+    description : 'User-space network stack',
+    filebase : 'slirp',
+    subdirs : 'slirp',
+  )
+else
+  if get_option('default_library') == 'both'
+    lib = lib.get_static_lib()
+  endif
+  libslirp_dep = declare_dependency(
+    include_directories: include_directories('.', 'src'),
+    link_with: lib)
+endif

@@ -1,0 +1,16 @@
+---
+- name: '{{ name }}-check'
+  shell: |
+    set -e
+    cd {{ name }}
+
+    {{ global_env }}
+    {{ local_env }}
+    cd build
+    if ! $NINJA test
+    then
+        cat meson-logs/testlog.txt || true
+        exit 1
+    fi
+  when:
+    - target in machines

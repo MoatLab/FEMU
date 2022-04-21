@@ -61,13 +61,6 @@ static const uint8_t kernel_plml605[] = {
     0xfc, 0xff, 0x00, 0xb8                  /* bri   -4  loop */
 };
 
-static const uint8_t bios_moxiesim[] = {
-    0x20, 0x10, 0x00, 0x00, 0x03, 0xf8,     /* ldi.s r1,0x3f8 */
-    0x1b, 0x20, 0x00, 0x00, 0x00, 0x54,     /* ldi.b r2,'T' */
-    0x1e, 0x12,                             /* st.b  r1,r2 */
-    0x1a, 0x00, 0x00, 0x00, 0x10, 0x00      /* jmpa  0x1000 */
-};
-
 static const uint8_t bios_raspi2[] = {
     0x08, 0x30, 0x9f, 0xe5,                 /* ldr   r3,[pc,#8]    Get base */
     0x54, 0x20, 0xa0, 0xe3,                 /* mov     r2,#'T' */
@@ -101,6 +94,41 @@ static const uint8_t kernel_nrf51[] = {
     0x1c, 0x25, 0x00, 0x40                  /* 0x4000251c = UART TXD */
 };
 
+static const uint8_t kernel_stm32vldiscovery[] = {
+    0x00, 0x00, 0x00, 0x00,                 /* Stack top address */
+    0x1d, 0x00, 0x00, 0x00,                 /* Reset handler address */
+    0x00, 0x00, 0x00, 0x00,                 /* NMI */
+    0x00, 0x00, 0x00, 0x00,                 /* Hard fault */
+    0x00, 0x00, 0x00, 0x00,                 /* Memory management fault */
+    0x00, 0x00, 0x00, 0x00,                 /* Bus fault */
+    0x00, 0x00, 0x00, 0x00,                 /* Usage fault */
+    0x0b, 0x4b,                             /* ldr  r3, [pc, #44] Get RCC */
+    0x44, 0xf2, 0x04, 0x02,                 /* movw r2, #16388 */
+    0x1a, 0x60,                             /* str  r2, [r3] */
+    0x0a, 0x4b,                             /* ldr  r3, [pc, #40] Get GPIOA */
+    0x1a, 0x68,                             /* ldr  r2, [r3] */
+    0x22, 0xf0, 0xf0, 0x02,                 /* bic  r2, r2, #240 */
+    0x1a, 0x60,                             /* str  r2, [r3] */
+    0x1a, 0x68,                             /* ldr  r2, [r3] */
+    0x42, 0xf0, 0xb0, 0x02,                 /* orr  r2, r2, #176 */
+    0x1a, 0x60,                             /* str  r2, [r3] */
+    0x07, 0x4b,                             /* ldr  r3, [pc, #26] Get BAUD */
+    0x45, 0x22,                             /* movs r2, #69 */
+    0x1a, 0x60,                             /* str  r2, [r3] */
+    0x06, 0x4b,                             /* ldr  r3, [pc, #24] Get ENABLE */
+    0x42, 0xf2, 0x08, 0x02,                 /* movw r2, #8200 */
+    0x1a, 0x60,                             /* str  r2, [r3] */
+    0x05, 0x4b,                             /* ldr  r3, [pc, #20] Get TXD */
+    0x54, 0x22,                             /* movs r2, 'T' */
+    0x1a, 0x60,                             /* str  r2, [r3] */
+    0xfe, 0xe7,                             /* b    . */
+    0x18, 0x10, 0x02, 0x40,                 /* 0x40021018 = RCC */
+    0x04, 0x08, 0x01, 0x40,                 /* 0x40010804 = GPIOA */
+    0x08, 0x38, 0x01, 0x40,                 /* 0x40013808 = USART1 BAUD */
+    0x0c, 0x38, 0x01, 0x40,                 /* 0x4001380c = USART1 ENABLE */
+    0x04, 0x38, 0x01, 0x40                  /* 0x40013804 = USART1 TXD */
+};
+
 typedef struct testdef {
     const char *arch;       /* Target architecture */
     const char *machine;    /* Name of the machine */
@@ -129,11 +157,11 @@ static testdef_t tests[] = {
     { "ppc64", "powernv8", "", "OPAL" },
     { "ppc64", "powernv9", "", "OPAL" },
     { "ppc64", "sam460ex", "-device e1000", "8086  100e" },
-    { "i386", "isapc", "-cpu qemu32 -device sga", "SGABIOS" },
-    { "i386", "pc", "-device sga", "SGABIOS" },
-    { "i386", "q35", "-device sga", "SGABIOS" },
-    { "x86_64", "isapc", "-cpu qemu32 -device sga", "SGABIOS" },
-    { "x86_64", "q35", "-device sga", "SGABIOS" },
+    { "i386", "isapc", "-cpu qemu32 -M graphics=off", "SeaBIOS" },
+    { "i386", "pc", "-M graphics=off", "SeaBIOS" },
+    { "i386", "q35", "-M graphics=off", "SeaBIOS" },
+    { "x86_64", "isapc", "-cpu qemu32 -M graphics=off", "SeaBIOS" },
+    { "x86_64", "q35", "-M graphics=off", "SeaBIOS" },
     { "sparc", "LX", "", "TMS390S10" },
     { "sparc", "SS-4", "", "MB86904" },
     { "sparc", "SS-600MP", "", "TMS390Z55" },
@@ -145,13 +173,14 @@ static testdef_t tests[] = {
       sizeof(kernel_pls3adsp1800), kernel_pls3adsp1800 },
     { "microblazeel", "petalogix-ml605", "", "TT",
       sizeof(kernel_plml605), kernel_plml605 },
-    { "moxie", "moxiesim", "", "TT", sizeof(bios_moxiesim), 0, bios_moxiesim },
-    { "arm", "raspi2", "", "TT", sizeof(bios_raspi2), 0, bios_raspi2 },
+    { "arm", "raspi2b", "", "TT", sizeof(bios_raspi2), 0, bios_raspi2 },
     /* For hppa, force bios to output to serial by disabling graphics. */
     { "hppa", "hppa", "-vga none", "SeaBIOS wants SYSTEM HALT" },
-    { "aarch64", "virt", "-cpu cortex-a57", "TT", sizeof(kernel_aarch64),
+    { "aarch64", "virt", "-cpu max", "TT", sizeof(kernel_aarch64),
       kernel_aarch64 },
     { "arm", "microbit", "", "T", sizeof(kernel_nrf51), kernel_nrf51 },
+    { "arm", "stm32vldiscovery", "", "T",
+      sizeof(kernel_stm32vldiscovery), kernel_stm32vldiscovery },
 
     { NULL }
 };
@@ -256,7 +285,8 @@ int main(int argc, char *argv[])
     g_test_init(&argc, &argv, NULL);
 
     for (i = 0; tests[i].arch != NULL; i++) {
-        if (strcmp(arch, tests[i].arch) == 0) {
+        if (g_str_equal(arch, tests[i].arch) &&
+            qtest_has_machine(tests[i].machine)) {
             char *name = g_strdup_printf("boot-serial/%s", tests[i].machine);
             qtest_add_data_func(name, &tests[i], test_machine);
             g_free(name);

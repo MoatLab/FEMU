@@ -70,30 +70,6 @@ enum pvrdma_mtu {
 	PVRDMA_MTU_4096 = 5,
 };
 
-static inline int pvrdma_mtu_enum_to_int(enum pvrdma_mtu mtu)
-{
-	switch (mtu) {
-	case PVRDMA_MTU_256:	return  256;
-	case PVRDMA_MTU_512:	return  512;
-	case PVRDMA_MTU_1024:	return 1024;
-	case PVRDMA_MTU_2048:	return 2048;
-	case PVRDMA_MTU_4096:	return 4096;
-	default:		return   -1;
-	}
-}
-
-static inline enum pvrdma_mtu pvrdma_mtu_int_to_enum(int mtu)
-{
-	switch (mtu) {
-	case 256:	return PVRDMA_MTU_256;
-	case 512:	return PVRDMA_MTU_512;
-	case 1024:	return PVRDMA_MTU_1024;
-	case 2048:	return PVRDMA_MTU_2048;
-	case 4096:
-	default:	return PVRDMA_MTU_4096;
-	}
-}
-
 enum pvrdma_port_state {
 	PVRDMA_PORT_NOP			= 0,
 	PVRDMA_PORT_DOWN		= 1,
@@ -138,17 +114,6 @@ enum pvrdma_port_width {
 	PVRDMA_WIDTH_12X	= 8,
 };
 
-static inline int pvrdma_width_enum_to_int(enum pvrdma_port_width width)
-{
-	switch (width) {
-	case PVRDMA_WIDTH_1X:	return  1;
-	case PVRDMA_WIDTH_4X:	return  4;
-	case PVRDMA_WIDTH_8X:	return  8;
-	case PVRDMA_WIDTH_12X:	return 12;
-	default:		return -1;
-	}
-}
-
 enum pvrdma_port_speed {
 	PVRDMA_SPEED_SDR	= 1,
 	PVRDMA_SPEED_DDR	= 2,
@@ -176,7 +141,7 @@ struct pvrdma_port_attr {
 	uint8_t			subnet_timeout;
 	uint8_t			init_type_reply;
 	uint8_t			active_width;
-	uint16_t			active_speed;
+	uint8_t			active_speed;
 	uint8_t			phys_state;
 	uint8_t			reserved[2];
 };

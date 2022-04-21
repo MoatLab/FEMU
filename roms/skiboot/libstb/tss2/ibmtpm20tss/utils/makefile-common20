@@ -1,0 +1,180 @@
+#################################################################################
+#										#
+#										#
+#	TPM 2.0 Library and Utilities makefile - Common to all variations	#
+#			     Written by Ken Goldman				#
+#		       IBM Thomas J. Watson Research Center			#
+#										#
+# (c) Copyright IBM Corporation 2014 - 2019					#
+# 										#
+# All rights reserved.								#
+# 										#
+# Redistribution and use in source and binary forms, with or without		#
+# modification, are permitted provided that the following conditions are	#
+# met:										#
+# 										#
+# Redistributions of source code must retain the above copyright notice,	#
+# this list of conditions and the following disclaimer.				#
+# 										#
+# Redistributions in binary form must reproduce the above copyright		#
+# notice, this list of conditions and the following disclaimer in the		#
+# documentation and/or other materials provided with the distribution.		#
+# 										#
+# Neither the names of the IBM Corporation nor the names of its			#
+# contributors may be used to endorse or promote products derived from		#
+# this software without specific prior written permission.			#
+# 										#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS		#
+# "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT		#
+# LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR		#
+# A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT		#
+# HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,	#
+# SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT		#
+# LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,		#
+# DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY		#
+# THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT		#
+# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE		#
+# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.		#
+#										#
+#################################################################################
+
+# link - common flags for Posix and Windows, for TSS library and applications
+
+#LNFLAGS += 	-ggdb
+
+ALL += 	activatecredential$(EXE)		\
+	eventextend$(EXE)			\
+	imaextend$(EXE)				\
+	certify$(EXE)				\
+	certifycreation$(EXE)			\
+	certifyx509$(EXE)			\
+	changeeps$(EXE)				\
+	changepps$(EXE)				\
+	clear$(EXE)				\
+	clearcontrol$(EXE)			\
+	clockrateadjust$(EXE)			\
+	clockset$(EXE)				\
+	commit$(EXE)				\
+	contextload$(EXE)			\
+	contextsave$(EXE)			\
+	create$(EXE)				\
+	createloaded$(EXE)			\
+	createprimary$(EXE)			\
+	dictionaryattacklockreset$(EXE) 	\
+	dictionaryattackparameters$(EXE) 	\
+	duplicate$(EXE)				\
+	eccparameters$(EXE)			\
+	ecephemeral$(EXE)			\
+	encryptdecrypt$(EXE)			\
+	evictcontrol$(EXE)			\
+	eventsequencecomplete$(EXE)		\
+	flushcontext$(EXE)			\
+	getcommandauditdigest$(EXE)		\
+	getcapability$(EXE)			\
+	getrandom$(EXE)				\
+	gettestresult$(EXE)			\
+	getsessionauditdigest$(EXE)		\
+	gettime$(EXE)				\
+	hash$(EXE)				\
+	hashsequencestart$(EXE) 		\
+	hierarchycontrol$(EXE) 			\
+	hierarchychangeauth$(EXE) 		\
+	hmac$(EXE)				\
+	hmacstart$(EXE)				\
+	import$(EXE)				\
+	importpem$(EXE)				\
+	load$(EXE)				\
+	loadexternal$(EXE)			\
+	makecredential$(EXE)			\
+	nvcertify$(EXE)				\
+	nvchangeauth$(EXE)			\
+	nvdefinespace$(EXE)			\
+	nvextend$(EXE) 				\
+	nvglobalwritelock$(EXE)			\
+	nvincrement$(EXE) 			\
+	nvread$(EXE)				\
+	nvreadlock$(EXE)			\
+	nvreadpublic$(EXE)			\
+	nvsetbits$(EXE)				\
+	nvundefinespace$(EXE)			\
+	nvundefinespacespecial$(EXE)		\
+	nvwrite$(EXE)				\
+	nvwritelock$(EXE)			\
+	objectchangeauth$(EXE) 			\
+	pcrallocate$(EXE)			\
+	pcrevent$(EXE)				\
+	pcrextend$(EXE)				\
+	pcrread$(EXE)				\
+	pcrreset$(EXE)				\
+	policyauthorize$(EXE)			\
+	policyauthvalue$(EXE)			\
+	policycommandcode$(EXE) 		\
+	policycphash$(EXE)	 		\
+	policynamehash$(EXE)	 		\
+	policycountertimer$(EXE)		\
+	policyduplicationselect$(EXE)		\
+	policygetdigest$(EXE)			\
+	policymaker$(EXE)			\
+	policymakerpcr$(EXE)			\
+	policynv$(EXE)				\
+	policyauthorizenv$(EXE)			\
+	policynvwritten$(EXE)			\
+	policypassword$(EXE)			\
+	policypcr$(EXE)				\
+	policyor$(EXE)				\
+	policyrestart$(EXE)			\
+	policysigned$(EXE)			\
+	policysecret$(EXE)			\
+	policytemplate$(EXE)			\
+	policyticket$(EXE)			\
+	powerup$(EXE)				\
+	quote$(EXE)				\
+	readclock$(EXE)				\
+	readpublic$(EXE)			\
+	returncode$(EXE)			\
+	rewrap$(EXE)				\
+	rsadecrypt$(EXE)			\
+	rsaencrypt$(EXE)			\
+	sequencecomplete$(EXE)			\
+	sequenceupdate$(EXE)			\
+	setcommandcodeauditstatus$(EXE)		\
+	setprimarypolicy$(EXE) 			\
+	shutdown$(EXE) 				\
+	sign$(EXE)				\
+	startauthsession$(EXE)			\
+	startup$(EXE) 				\
+	stirrandom$(EXE)			\
+	unseal$(EXE)				\
+	verifysignature$(EXE)			\
+	zgen2phase$(EXE)			\
+						\
+	signapp$(EXE)				\
+	writeapp$(EXE)				\
+	timepacket$(EXE)			\
+	createek$(EXE)				\
+	createekcert$(EXE)			\
+	tpm2pem$(EXE)				\
+	tpmpublic2eccpoint$(EXE)		\
+	publicname$(EXE)			\
+	getcryptolibrary$(EXE)			\
+	printattr$(EXE)				\
+	tpmcmd$(EXE)
+
+ALL	+= 					\
+	ntc2getconfig$(EXE)			\
+	ntc2preconfig$(EXE)			\
+	ntc2lockconfig$(EXE)
+
+# TSS shared library headers 
+
+TSS_HEADERS +=				\
+		tss20.h  		\
+		tssauth20.h
+
+# TSS shared library object files
+
+TSS_OBJS +=	tss20.o		\
+		tssauth20.o	\
+		Commands.o 	\
+		ntc2lib.o	\
+		tssntc.o

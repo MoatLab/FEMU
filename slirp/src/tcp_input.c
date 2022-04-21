@@ -82,6 +82,9 @@ static void tcp_xmit_timer(register struct tcpcb *tp, int rtt);
 static int tcp_reass(register struct tcpcb *tp, register struct tcpiphdr *ti,
                      struct mbuf *m)
 {
+    if (m)
+        M_DUP_DEBUG(m->slirp, m, 0, 0);
+
     register struct tcpiphdr *q;
     struct socket *so = tp->t_socket;
     int flags;
@@ -233,6 +236,16 @@ void tcp_input(struct mbuf *m, int iphlen, struct socket *inso,
         goto cont_conn;
     }
     slirp = m->slirp;
+    switch (af) {
+    case AF_INET:
+        M_DUP_DEBUG(slirp, m, 0,
+            sizeof(struct tcpiphdr) - sizeof(struct ip) - sizeof(struct tcphdr));
+        break;
+    case AF_INET6:
+        M_DUP_DEBUG(slirp, m, 0,
+            sizeof(struct tcpiphdr) - sizeof(struct ip6) - sizeof(struct tcphdr));
+        break;
+    }
 
     ip = mtod(m, struct ip *);
     ip6 = mtod(m, struct ip6 *);
@@ -524,7 +537,7 @@ findso:
                  * we don't need this.. XXX???
                  */
                 if (so->so_snd.sb_cc)
-                    (void)tcp_output(tp);
+                    tcp_output(tp);
 
                 return;
             }
@@ -775,7 +788,7 @@ findso:
             soisfconnected(so);
             tp->t_state = TCPS_ESTABLISHED;
 
-            (void)tcp_reass(tp, (struct tcpiphdr *)0, (struct mbuf *)0);
+            tcp_reass(tp, (struct tcpiphdr *)0, (struct mbuf *)0);
             /*
              * if we didn't have to retransmit the SYN,
              * use its rtt as our initial srtt & rtt var.
@@ -977,7 +990,7 @@ findso:
             soisfconnected(so);
         }
 
-        (void)tcp_reass(tp, (struct tcpiphdr *)0, (struct mbuf *)0);
+        tcp_reass(tp, (struct tcpiphdr *)0, (struct mbuf *)0);
         tp->snd_wl1 = ti->ti_seq - 1;
         /* Avoid ack processing; snd_una==ti_ack  =>  dup ack */
         goto synrx_to_est;
@@ -1040,7 +1053,7 @@ findso:
                     tp->t_rtt = 0;
                     tp->snd_nxt = ti->ti_ack;
                     tp->snd_cwnd = tp->t_maxseg;
-                    (void)tcp_output(tp);
+                    tcp_output(tp);
                     tp->snd_cwnd =
                         tp->snd_ssthresh + tp->t_maxseg * tp->t_dupacks;
                     if (SEQ_GT(onxt, tp->snd_nxt))
@@ -1048,7 +1061,7 @@ findso:
                     goto drop;
                 } else if (tp->t_dupacks > TCPREXMTTHRESH) {
                     tp->snd_cwnd += tp->t_maxseg;
-                    (void)tcp_output(tp);
+                    tcp_output(tp);
                     goto drop;
                 }
             } else
@@ -1332,7 +1345,7 @@ dodata:
      * Return any desired output.
      */
     if (needoutput || (tp->t_flags & TF_ACKNOW)) {
-        (void)tcp_output(tp);
+        tcp_output(tp);
     }
     return;
 
@@ -1345,7 +1358,7 @@ dropafterack:
         goto drop;
     m_free(m);
     tp->t_flags |= TF_ACKNOW;
-    (void)tcp_output(tp);
+    tcp_output(tp);
     return;
 
 dropwithreset:
@@ -1399,7 +1412,7 @@ static void tcp_dooptions(struct tcpcb *tp, uint8_t *cp, int cnt,
                 continue;
             memcpy((char *)&mss, (char *)cp + 2, sizeof(mss));
             NTOHS(mss);
-            (void)tcp_mss(tp, mss); /* sets t_maxseg */
+            tcp_mss(tp, mss); /* sets t_maxseg */
             break;
         }
     }

@@ -12,10 +12,12 @@
 
 #include "hw/sysbus.h"
 #include "hw/intc/armv7m_nvic.h"
+#include "hw/misc/armv7m_ras.h"
 #include "target/arm/idau.h"
 #include "qom/object.h"
+#include "hw/clock.h"
 
-#define TYPE_BITBAND "ARM,bitband-memory"
+#define TYPE_BITBAND "ARM-bitband-memory"
 OBJECT_DECLARE_SIMPLE_TYPE(BitBandState, BITBAND)
 
 struct BitBandState {
@@ -46,9 +48,12 @@ OBJECT_DECLARE_SIMPLE_TYPE(ARMv7MState, ARMV7M)
  *   devices will be automatically layered on top of this view.)
  * + Property "idau": IDAU interface (forwarded to CPU object)
  * + Property "init-svtor": secure VTOR reset value (forwarded to CPU object)
+ * + Property "init-nsvtor": non-secure VTOR reset value (forwarded to CPU object)
  * + Property "vfp": enable VFP (forwarded to CPU object)
  * + Property "dsp": enable DSP (forwarded to CPU object)
  * + Property "enable-bitband": expose bitbanded IO
+ * + Clock input "refclk" is the external reference clock for the systick timers
+ * + Clock input "cpuclk" is the main CPU clock
  */
 struct ARMv7MState {
     /*< private >*/
@@ -57,11 +62,31 @@ struct ARMv7MState {
     NVICState nvic;
     BitBandState bitband[ARMV7M_NUM_BITBANDS];
     ARMCPU *cpu;
+    ARMv7MRAS ras;
+    SysTickState systick[M_REG_NUM_BANKS];
 
     /* MemoryRegion we pass to the CPU, with our devices layered on
      * top of the ones the board provides in board_memory.
      */
     MemoryRegion container;
+    /*
+     * MemoryRegion which passes the transaction to either the S or the
+     * NS systick device depending on the transaction attributes
+     */
+    MemoryRegion systickmem;
+    /*
+     * MemoryRegion which enforces the S/NS handling of the systick
+     * device NS alias region and passes the transaction to the
+     * NS systick device if appropriate.
+     */
+    MemoryRegion systick_ns_mem;
+    /* Ditto, for the sysregs region provided by the NVIC */
+    MemoryRegion sysreg_ns_mem;
+    /* MR providing default PPB behaviour */
+    MemoryRegion defaultmem;
+
+    Clock *refclk;
+    Clock *cpuclk;
 
     /* Properties */
     char *cpu_type;
@@ -69,6 +94,7 @@ struct ARMv7MState {
     MemoryRegion *board_memory;
     Object *idau;
     uint32_t init_svtor;
+    uint32_t init_nsvtor;
     bool enable_bitband;
     bool start_powered_off;
     bool vfp;

@@ -29,6 +29,7 @@
 import os
 import sys
 import sphinx
+from distutils.version import LooseVersion
 from sphinx.errors import ConfigError
 
 # Make Sphinx fail cleanly if using an old Python, rather than obscurely
@@ -72,8 +73,14 @@ needs_sphinx = '1.6'
 # ones.
 extensions = ['kerneldoc', 'qmp_lexer', 'hxtool', 'depfile', 'qapidoc']
 
+if sphinx.version_info[:3] > (4, 0, 0):
+    tags.add('sphinx4')
+    extensions += ['dbusdoc']
+else:
+    extensions += ['fakedbusdoc']
+
 # Add any paths that contain templates here, relative to this directory.
-templates_path = ['_templates']
+templates_path = [os.path.join(qemu_docdir, '_templates')]
 
 # The suffix(es) of source filenames.
 # You can specify multiple suffix as a list of string:
@@ -84,9 +91,14 @@ source_suffix = '.rst'
 # The master toctree document.
 master_doc = 'index'
 
+# Interpret `single-backticks` to be a cross-reference to any kind of
+# referenceable object. Unresolvable or ambiguous references will emit a
+# warning at build time.
+default_role = 'any'
+
 # General information about the project.
 project = u'QEMU'
-copyright = u'2020, The QEMU Project Developers'
+copyright = u'2022, The QEMU Project Developers'
 author = u'The QEMU Project Developers'
 
 # The version info for the project you're documenting, acts as replacement for
@@ -150,38 +162,52 @@ with open(os.path.join(qemu_docdir, 'defs.rst.inc')) as f:
 # The theme to use for HTML and HTML Help pages.  See the documentation for
 # a list of builtin themes.
 #
-html_theme = 'alabaster'
+try:
+    import sphinx_rtd_theme
+except ImportError:
+    raise ConfigError(
+        'The Sphinx \'sphinx_rtd_theme\' HTML theme was not found.\n'
+    )
+
+html_theme = 'sphinx_rtd_theme'
 
 # Theme options are theme-specific and customize the look and feel of a theme
 # further.  For a list of options available for each theme, see the
 # documentation.
-# We initialize this to empty here, so the per-manual conf.py can just
-# add individual key/value entries.
-html_theme_options = {
-}
+if LooseVersion(sphinx_rtd_theme.__version__) >= LooseVersion("0.4.3"):
+    html_theme_options = {
+        "style_nav_header_background": "#802400",
+        "navigation_with_keys": True,
+    }
+
+html_logo = os.path.join(qemu_docdir, "../ui/icons/qemu_128x128.png")
+
+html_favicon = os.path.join(qemu_docdir, "../ui/icons/qemu_32x32.png")
 
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
 # so a file named "default.css" will overwrite the builtin "default.css".
-# QEMU doesn't yet have any static files, so comment this out so we don't
-# get a warning about a missing directory.
-# If we do ever add this then it would probably be better to call the
-# subdirectory sphinx_static, as the Linux kernel does.
-# html_static_path = ['_static']
+html_static_path = [os.path.join(qemu_docdir, "sphinx-static")]
+
+html_css_files = [
+    'theme_overrides.css',
+]
+
+html_js_files = [
+    'custom.js',
+]
+
+html_context = {
+    "display_gitlab": True,
+    "gitlab_user": "qemu-project",
+    "gitlab_repo": "qemu",
+    "gitlab_version": "master",
+    "conf_py_path": "/docs/", # Path in the checkout to the docs root
+}
 
 # Custom sidebar templates, must be a dictionary that maps document names
 # to template names.
-#
-# This is required for the alabaster theme
-# refs: http://alabaster.readthedocs.io/en/latest/installation.html#sidebars
-html_sidebars = {
-    '**': [
-        'about.html',
-        'editpage.html',
-        'navigation.html',
-        'searchbox.html',
-    ]
-}
+#html_sidebars = {}
 
 # Don't copy the rST source files to the HTML output directory,
 # and don't put links to the sources into the output HTML.
@@ -224,7 +250,52 @@ latex_documents = [
 
 # -- Options for manual page output ---------------------------------------
 # Individual manual/conf.py can override this to create man pages
-man_pages = []
+man_pages = [
+    ('interop/qemu-ga', 'qemu-ga',
+     'QEMU Guest Agent',
+     ['Michael Roth <mdroth@linux.vnet.ibm.com>'], 8),
+    ('interop/qemu-ga-ref', 'qemu-ga-ref',
+     'QEMU Guest Agent Protocol Reference',
+     [], 7),
+    ('interop/qemu-qmp-ref', 'qemu-qmp-ref',
+     'QEMU QMP Reference Manual',
+     [], 7),
+    ('interop/qemu-storage-daemon-qmp-ref', 'qemu-storage-daemon-qmp-ref',
+     'QEMU Storage Daemon QMP Reference Manual',
+     [], 7),
+    ('system/qemu-manpage', 'qemu',
+     'QEMU User Documentation',
+     ['Fabrice Bellard'], 1),
+    ('system/qemu-block-drivers', 'qemu-block-drivers',
+     'QEMU block drivers reference',
+     ['Fabrice Bellard and the QEMU Project developers'], 7),
+    ('system/qemu-cpu-models', 'qemu-cpu-models',
+     'QEMU CPU Models',
+     ['The QEMU Project developers'], 7),
+    ('tools/qemu-img', 'qemu-img',
+     'QEMU disk image utility',
+     ['Fabrice Bellard'], 1),
+    ('tools/qemu-nbd', 'qemu-nbd',
+     'QEMU Disk Network Block Device Server',
+     ['Anthony Liguori <anthony@codemonkey.ws>'], 8),
+    ('tools/qemu-pr-helper', 'qemu-pr-helper',
+     'QEMU persistent reservation helper',
+     [], 8),
+    ('tools/qemu-storage-daemon', 'qemu-storage-daemon',
+     'QEMU storage daemon',
+     [], 1),
+    ('tools/qemu-trace-stap', 'qemu-trace-stap',
+     'QEMU SystemTap trace tool',
+     [], 1),
+    ('tools/virtfs-proxy-helper', 'virtfs-proxy-helper',
+     'QEMU 9p virtfs proxy filesystem helper',
+     ['M. Mohan Kumar'], 1),
+    ('tools/virtiofsd', 'virtiofsd',
+     'QEMU virtio-fs shared file system daemon',
+     ['Stefan Hajnoczi <stefanha@redhat.com>',
+      'Masayoshi Mizuma <m.mizuma@jp.fujitsu.com>'], 1),
+]
+man_make_section_directory = False
 
 # -- Options for Texinfo output -------------------------------------------
 
@@ -246,3 +317,5 @@ kerneldoc_bin = ['perl', os.path.join(qemu_docdir, '../scripts/kernel-doc')]
 kerneldoc_srctree = os.path.join(qemu_docdir, '..')
 hxtool_srctree = os.path.join(qemu_docdir, '..')
 qapidoc_srctree = os.path.join(qemu_docdir, '..')
+dbusdoc_srctree = os.path.join(qemu_docdir, '..')
+dbus_index_common_prefix = ["org.qemu."]

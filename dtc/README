@@ -5,7 +5,7 @@ utility library for reading and manipulating the binary format.
 DTC and LIBFDT are maintained by:
 
 David Gibson <david@gibson.dropbear.id.au>
-Jon Loeliger <jdl@jdl.com>
+Jon Loeliger <loeliger@gmail.com>
 
 
 Python library

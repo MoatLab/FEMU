@@ -68,7 +68,16 @@ static void virtio_vga_base_gl_block(void *opaque, bool block)
     }
 }
 
+static int virtio_vga_base_get_flags(void *opaque)
+{
+    VirtIOVGABase *vvga = opaque;
+    VirtIOGPUBase *g = vvga->vgpu;
+
+    return g->hw_ops->get_flags(g);
+}
+
 static const GraphicHwOps virtio_vga_base_ops = {
+    .get_flags = virtio_vga_base_get_flags,
     .invalidate = virtio_vga_base_invalidate_display,
     .gfx_update = virtio_vga_base_update_display,
     .text_update = virtio_vga_base_text_update,
@@ -99,7 +108,9 @@ static void virtio_vga_base_realize(VirtIOPCIProxy *vpci_dev, Error **errp)
 
     /* init vga compat bits */
     vga->vram_size_mb = 8;
-    vga_common_init(vga, OBJECT(vpci_dev));
+    if (!vga_common_init(vga, OBJECT(vpci_dev), errp)) {
+        return;
+    }
     vga_init(vga, OBJECT(vpci_dev), pci_address_space(&vpci_dev->pci_dev),
              pci_address_space_io(&vpci_dev->pci_dev), true);
     pci_register_bar(&vpci_dev->pci_dev, 0,
@@ -211,7 +222,7 @@ static void virtio_vga_base_class_init(ObjectClass *klass, void *data)
                                    virtio_vga_set_big_endian_fb);
 }
 
-static TypeInfo virtio_vga_base_info = {
+static const TypeInfo virtio_vga_base_info = {
     .name          = TYPE_VIRTIO_VGA_BASE,
     .parent        = TYPE_VIRTIO_PCI,
     .instance_size = sizeof(VirtIOVGABase),
@@ -219,6 +230,7 @@ static TypeInfo virtio_vga_base_info = {
     .class_init    = virtio_vga_base_class_init,
     .abstract      = true,
 };
+module_obj(TYPE_VIRTIO_VGA_BASE);
 
 #define TYPE_VIRTIO_VGA "virtio-vga"
 
@@ -248,6 +260,7 @@ static VirtioPCIDeviceTypeInfo virtio_vga_info = {
     .instance_size = sizeof(VirtIOVGA),
     .instance_init = virtio_vga_inst_initfn,
 };
+module_obj(TYPE_VIRTIO_VGA);
 
 static void virtio_vga_register_types(void)
 {

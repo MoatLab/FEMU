@@ -27,7 +27,6 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
-#include "cpu.h"
 #include "sysemu/device_tree.h"
 #include "sysemu/runstate.h"
 
@@ -480,9 +479,8 @@ static SpaprEventLogEntry *rtas_event_log_dequeue(SpaprMachineState *spapr,
     return entry;
 }
 
-static bool rtas_event_log_contains(uint32_t event_mask)
+static bool rtas_event_log_contains(SpaprMachineState *spapr, uint32_t event_mask)
 {
-    SpaprMachineState *spapr = SPAPR_MACHINE(qdev_get_machine());
     SpaprEventLogEntry *entry = NULL;
 
     QTAILQ_FOREACH(entry, &spapr->pending_events, next) {
@@ -509,10 +507,10 @@ static void spapr_init_v6hdr(struct rtas_event_log_v6 *v6hdr)
     v6hdr->company = cpu_to_be32(RTAS_LOG_V6_COMPANY_IBM);
 }
 
-static void spapr_init_maina(struct rtas_event_log_v6_maina *maina,
+static void spapr_init_maina(SpaprMachineState *spapr,
+                             struct rtas_event_log_v6_maina *maina,
                              int section_count)
 {
-    SpaprMachineState *spapr = SPAPR_MACHINE(qdev_get_machine());
     struct tm tm;
     int year;
 
@@ -560,7 +558,7 @@ static void spapr_powerdown_req(Notifier *n, void *opaque)
     entry->extended_length = sizeof(*new_epow);
 
     spapr_init_v6hdr(v6hdr);
-    spapr_init_maina(maina, 3 /* Main-A, Main-B and EPOW */);
+    spapr_init_maina(spapr, maina, 3 /* Main-A, Main-B and EPOW */);
 
     mainb->hdr.section_id = cpu_to_be16(RTAS_LOG_V6_SECTION_ID_MAINB);
     mainb->hdr.section_length = cpu_to_be16(sizeof(*mainb));
@@ -596,7 +594,7 @@ static void spapr_hotplug_req_event(uint8_t hp_id, uint8_t hp_action,
     struct rtas_event_log_v6_hp *hp;
 
     entry = g_new(SpaprEventLogEntry, 1);
-    new_hp = g_malloc0(sizeof(struct hp_extended_log));
+    new_hp = g_new0(struct hp_extended_log, 1);
     entry->extended_log = new_hp;
 
     v6hdr = &new_hp->v6hdr;
@@ -613,7 +611,7 @@ static void spapr_hotplug_req_event(uint8_t hp_id, uint8_t hp_action,
     entry->extended_length = sizeof(*new_hp);
 
     spapr_init_v6hdr(v6hdr);
-    spapr_init_maina(maina, 3 /* Main-A, Main-B, HP */);
+    spapr_init_maina(spapr, maina, 3 /* Main-A, Main-B, HP */);
 
     mainb->hdr.section_id = cpu_to_be16(RTAS_LOG_V6_SECTION_ID_MAINB);
     mainb->hdr.section_length = cpu_to_be16(sizeof(*mainb));
@@ -659,7 +657,7 @@ static void spapr_hotplug_req_event(uint8_t hp_id, uint8_t hp_action,
         /* we should not be using count_indexed value unless the guest
          * supports dedicated hotplug event source
          */
-        g_assert(spapr_ovec_test(spapr->ov5_cas, OV5_HP_EVT));
+        g_assert(spapr_memory_hot_unplug_supported(spapr));
         hp->drc_id.count_indexed.count =
             cpu_to_be32(drc_id->count_indexed.count);
         hp->drc_id.count_indexed.index =
@@ -808,9 +806,9 @@ static uint32_t spapr_mce_get_elog_type(PowerPCCPU *cpu, bool recovered,
     return summary;
 }
 
-static void spapr_mce_dispatch_elog(PowerPCCPU *cpu, bool recovered)
+static void spapr_mce_dispatch_elog(SpaprMachineState *spapr, PowerPCCPU *cpu,
+                                    bool recovered)
 {
-    SpaprMachineState *spapr = SPAPR_MACHINE(qdev_get_machine());
     CPUState *cs = CPU(cpu);
     CPUPPCState *env = &cpu->env;
     uint64_t rtas_addr;
@@ -874,7 +872,6 @@ void spapr_mce_req_event(PowerPCCPU *cpu, bool recovered)
     SpaprMachineState *spapr = SPAPR_MACHINE(qdev_get_machine());
     CPUState *cs = CPU(cpu);
     int ret;
-    Error *local_err = NULL;
 
     if (spapr->fwnmi_machine_check_addr == -1) {
         /* Non-FWNMI case, deliver it like an architected CPU interrupt. */
@@ -914,20 +911,21 @@ void spapr_mce_req_event(PowerPCCPU *cpu, bool recovered)
         }
     }
 
-    ret = migrate_add_blocker(spapr->fwnmi_migration_blocker, &local_err);
+    /*
+     * Try to block migration while FWNMI is being handled, so the
+     * machine check handler runs where the information passed to it
+     * actually makes sense.  This shouldn't actually block migration,
+     * only delay it slightly, assuming migration is retried.  If the
+     * attempt to block fails, carry on.  Unfortunately, it always
+     * fails when running with -only-migrate.  A proper interface to
+     * delay migration completion for a bit could avoid that.
+     */
+    ret = migrate_add_blocker(spapr->fwnmi_migration_blocker, NULL);
     if (ret == -EBUSY) {
-        /*
-         * We don't want to abort so we let the migration to continue.
-         * In a rare case, the machine check handler will run on the target.
-         * Though this is not preferable, it is better than aborting
-         * the migration or killing the VM. It is okay to call
-         * migrate_del_blocker on a blocker that was not added (which the
-         * nmi-interlock handler would do when it's called after this).
-         */
         warn_report("Received a fwnmi while migration was in progress");
     }
 
-    spapr_mce_dispatch_elog(cpu, recovered);
+    spapr_mce_dispatch_elog(spapr, cpu, recovered);
 }
 
 static void check_exception(PowerPCCPU *cpu, SpaprMachineState *spapr,
@@ -936,7 +934,6 @@ static void check_exception(PowerPCCPU *cpu, SpaprMachineState *spapr,
                             uint32_t nret, target_ulong rets)
 {
     uint32_t mask, buf, len, event_len;
-    uint64_t xinfo;
     SpaprEventLogEntry *event;
     struct rtas_error_log header;
     int i;
@@ -946,13 +943,9 @@ static void check_exception(PowerPCCPU *cpu, SpaprMachineState *spapr,
         return;
     }
 
-    xinfo = rtas_ld(args, 1);
     mask = rtas_ld(args, 2);
     buf = rtas_ld(args, 4);
     len = rtas_ld(args, 5);
-    if (nargs == 7) {
-        xinfo |= (uint64_t)rtas_ld(args, 6) << 32;
-    }
 
     event = rtas_event_log_dequeue(spapr, mask);
     if (!event) {
@@ -980,7 +973,7 @@ static void check_exception(PowerPCCPU *cpu, SpaprMachineState *spapr,
      * interrupts.
      */
     for (i = 0; i < EVENT_CLASS_MAX; i++) {
-        if (rtas_event_log_contains(EVENT_CLASS_MASK(i))) {
+        if (rtas_event_log_contains(spapr, EVENT_CLASS_MASK(i))) {
             const SpaprEventSource *source =
                 spapr_event_sources_get_source(spapr->event_sources, i);
 
@@ -1007,7 +1000,7 @@ static void event_scan(PowerPCCPU *cpu, SpaprMachineState *spapr,
     }
 
     for (i = 0; i < EVENT_CLASS_MAX; i++) {
-        if (rtas_event_log_contains(EVENT_CLASS_MASK(i))) {
+        if (rtas_event_log_contains(spapr, EVENT_CLASS_MASK(i))) {
             const SpaprEventSource *source =
                 spapr_event_sources_get_source(spapr->event_sources, i);
 

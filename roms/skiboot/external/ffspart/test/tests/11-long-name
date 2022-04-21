@@ -1,0 +1,11 @@
+#! /bin/sh
+touch $DATA_DIR/$CUR_TEST.gen
+
+run_binary "./ffspart" "-s 0x100 -c 10 -i $DATA_DIR/$CUR_TEST.in -p $DATA_DIR/$CUR_TEST.gen"
+if [ "$?" -ne 0 ] ; then
+	fail_test
+fi
+
+diff_with_result
+
+pass_test

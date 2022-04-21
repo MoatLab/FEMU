@@ -19,10 +19,13 @@
 
 #include "qemu/osdep.h"
 #include "qemu.h"
+#include "user-internals.h"
 #include "cpu_loop-common.h"
+#include "signal-common.h"
 
 static abi_ulong hppa_lws(CPUHPPAState *env)
 {
+    CPUState *cs = env_cpu(env);
     uint32_t which = env->gr[20];
     abi_ulong addr = env->gr[26];
     abi_ulong old = env->gr[25];
@@ -34,12 +37,12 @@ static abi_ulong hppa_lws(CPUHPPAState *env)
         return -TARGET_ENOSYS;
 
     case 0: /* elf32 atomic 32bit cmpxchg */
-        if ((addr & 3) || !access_ok(VERIFY_WRITE, addr, 4)) {
+        if ((addr & 3) || !access_ok(cs, VERIFY_WRITE, addr, 4)) {
             return -TARGET_EFAULT;
         }
         old = tswap32(old);
         new = tswap32(new);
-        ret = qatomic_cmpxchg((uint32_t *)g2h(addr), old, new);
+        ret = qatomic_cmpxchg((uint32_t *)g2h(cs, addr), old, new);
         ret = tswap32(ret);
         break;
 
@@ -49,47 +52,47 @@ static abi_ulong hppa_lws(CPUHPPAState *env)
             return -TARGET_ENOSYS;
         }
         if (((addr | old | new) & ((1 << size) - 1))
-            || !access_ok(VERIFY_WRITE, addr, 1 << size)
-            || !access_ok(VERIFY_READ, old, 1 << size)
-            || !access_ok(VERIFY_READ, new, 1 << size)) {
+            || !access_ok(cs, VERIFY_WRITE, addr, 1 << size)
+            || !access_ok(cs, VERIFY_READ, old, 1 << size)
+            || !access_ok(cs, VERIFY_READ, new, 1 << size)) {
             return -TARGET_EFAULT;
         }
         /* Note that below we use host-endian loads so that the cmpxchg
            can be host-endian as well.  */
         switch (size) {
         case 0:
-            old = *(uint8_t *)g2h(old);
-            new = *(uint8_t *)g2h(new);
-            ret = qatomic_cmpxchg((uint8_t *)g2h(addr), old, new);
+            old = *(uint8_t *)g2h(cs, old);
+            new = *(uint8_t *)g2h(cs, new);
+            ret = qatomic_cmpxchg((uint8_t *)g2h(cs, addr), old, new);
             ret = ret != old;
             break;
         case 1:
-            old = *(uint16_t *)g2h(old);
-            new = *(uint16_t *)g2h(new);
-            ret = qatomic_cmpxchg((uint16_t *)g2h(addr), old, new);
+            old = *(uint16_t *)g2h(cs, old);
+            new = *(uint16_t *)g2h(cs, new);
+            ret = qatomic_cmpxchg((uint16_t *)g2h(cs, addr), old, new);
             ret = ret != old;
             break;
         case 2:
-            old = *(uint32_t *)g2h(old);
-            new = *(uint32_t *)g2h(new);
-            ret = qatomic_cmpxchg((uint32_t *)g2h(addr), old, new);
+            old = *(uint32_t *)g2h(cs, old);
+            new = *(uint32_t *)g2h(cs, new);
+            ret = qatomic_cmpxchg((uint32_t *)g2h(cs, addr), old, new);
             ret = ret != old;
             break;
         case 3:
             {
                 uint64_t o64, n64, r64;
-                o64 = *(uint64_t *)g2h(old);
-                n64 = *(uint64_t *)g2h(new);
+                o64 = *(uint64_t *)g2h(cs, old);
+                n64 = *(uint64_t *)g2h(cs, new);
 #ifdef CONFIG_ATOMIC64
-                r64 = qatomic_cmpxchg__nocheck((uint64_t *)g2h(addr),
+                r64 = qatomic_cmpxchg__nocheck((aligned_uint64_t *)g2h(cs, addr),
                                                o64, n64);
                 ret = r64 != o64;
 #else
                 start_exclusive();
-                r64 = *(uint64_t *)g2h(addr);
+                r64 = *(uint64_t *)g2h(cs, addr);
                 ret = 1;
                 if (r64 == o64) {
-                    *(uint64_t *)g2h(addr) = n64;
+                    *(uint64_t *)g2h(cs, addr) = n64;
                     ret = 0;
                 }
                 end_exclusive();
@@ -107,7 +110,6 @@ static abi_ulong hppa_lws(CPUHPPAState *env)
 void cpu_loop(CPUHPPAState *env)
 {
     CPUState *cs = env_cpu(env);
-    target_siginfo_t info;
     abi_ulong ret;
     int trapnr;
 
@@ -130,8 +132,8 @@ void cpu_loop(CPUHPPAState *env)
                 env->iaoq_f = env->gr[31];
                 env->iaoq_b = env->gr[31] + 4;
                 break;
-            case -TARGET_ERESTARTSYS:
-            case -TARGET_QEMU_ESIGRETURN:
+            case -QEMU_ERESTARTSYS:
+            case -QEMU_ESIGRETURN:
                 break;
             }
             break;
@@ -141,52 +143,26 @@ void cpu_loop(CPUHPPAState *env)
             env->iaoq_f = env->gr[31];
             env->iaoq_b = env->gr[31] + 4;
             break;
-        case EXCP_ITLB_MISS:
-        case EXCP_DTLB_MISS:
-        case EXCP_NA_ITLB_MISS:
-        case EXCP_NA_DTLB_MISS:
-        case EXCP_IMP:
-        case EXCP_DMP:
-        case EXCP_DMB:
-        case EXCP_PAGE_REF:
-        case EXCP_DMAR:
-        case EXCP_DMPI:
-            info.si_signo = TARGET_SIGSEGV;
-            info.si_errno = 0;
-            info.si_code = TARGET_SEGV_ACCERR;
-            info._sifields._sigfault._addr = env->cr[CR_IOR];
-            queue_signal(env, info.si_signo, QEMU_SI_FAULT, &info);
-            break;
-        case EXCP_UNALIGN:
-            info.si_signo = TARGET_SIGBUS;
-            info.si_errno = 0;
-            info.si_code = 0;
-            info._sifields._sigfault._addr = env->cr[CR_IOR];
-            queue_signal(env, info.si_signo, QEMU_SI_FAULT, &info);
-            break;
         case EXCP_ILL:
+            force_sig_fault(TARGET_SIGILL, TARGET_ILL_ILLOPN, env->iaoq_f);
+            break;
         case EXCP_PRIV_OPR:
+            force_sig_fault(TARGET_SIGILL, TARGET_ILL_PRVOPC, env->iaoq_f);
+            break;
         case EXCP_PRIV_REG:
-            info.si_signo = TARGET_SIGILL;
-            info.si_errno = 0;
-            info.si_code = TARGET_ILL_ILLOPN;
-            info._sifields._sigfault._addr = env->iaoq_f;
-            queue_signal(env, info.si_signo, QEMU_SI_FAULT, &info);
+            force_sig_fault(TARGET_SIGILL, TARGET_ILL_PRVREG, env->iaoq_f);
             break;
         case EXCP_OVERFLOW:
+            force_sig_fault(TARGET_SIGFPE, TARGET_FPE_INTOVF, env->iaoq_f);
+            break;
         case EXCP_COND:
+            force_sig_fault(TARGET_SIGFPE, TARGET_FPE_CONDTRAP, env->iaoq_f);
+            break;
         case EXCP_ASSIST:
-            info.si_signo = TARGET_SIGFPE;
-            info.si_errno = 0;
-            info.si_code = 0;
-            info._sifields._sigfault._addr = env->iaoq_f;
-            queue_signal(env, info.si_signo, QEMU_SI_FAULT, &info);
+            force_sig_fault(TARGET_SIGFPE, 0, env->iaoq_f);
             break;
         case EXCP_DEBUG:
-            info.si_signo = TARGET_SIGTRAP;
-            info.si_errno = 0;
-            info.si_code = TARGET_TRAP_BRKPT;
-            queue_signal(env, info.si_signo, QEMU_SI_FAULT, &info);
+            force_sig_fault(TARGET_SIGTRAP, TARGET_TRAP_BRKPT, env->iaoq_f);
             break;
         case EXCP_INTERRUPT:
             /* just indicate that signals should be handled asap */

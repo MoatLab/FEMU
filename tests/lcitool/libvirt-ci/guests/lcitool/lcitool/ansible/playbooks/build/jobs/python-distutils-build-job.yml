@@ -1,0 +1,13 @@
+---
+- name: '{{ name }}-build'
+  shell: |
+    set -e
+    cd {{ name }}
+
+    {{ global_env }}
+    {{ local_env }}
+    {{ command_pre_build }}
+    $PYTHON ./setup.py build
+    $PYTHON ./setup.py install --prefix=$VIRT_PREFIX
+  when:
+    - target in machines

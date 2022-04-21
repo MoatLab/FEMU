@@ -32,7 +32,9 @@ LIB_TESTS_L = get_mem_rsv \
 	fs_tree1
 LIB_TESTS = $(LIB_TESTS_L:%=$(TESTS_PREFIX)%)
 
-LIBTREE_TESTS_L = truncated_property truncated_string truncated_memrsv
+LIBTREE_TESTS_L = truncated_property truncated_string truncated_memrsv \
+	two_roots named_root
+
 LIBTREE_TESTS = $(LIBTREE_TESTS_L:%=$(TESTS_PREFIX)%)
 
 DL_LIB_TESTS_L = asm_tree_dump value-labels

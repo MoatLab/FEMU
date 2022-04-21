@@ -69,7 +69,7 @@ static void icmp6_send_echoreply(struct mbuf *m, Slirp *slirp, struct ip6 *ip,
     ip6_output(NULL, t, 0);
 }
 
-void icmp6_send_error(struct mbuf *m, uint8_t type, uint8_t code)
+void icmp6_forward_error(struct mbuf *m, uint8_t type, uint8_t code, struct in6_addr *src)
 {
     Slirp *slirp = m->slirp;
     struct mbuf *t;
@@ -88,7 +88,7 @@ void icmp6_send_error(struct mbuf *m, uint8_t type, uint8_t code)
 
     /* IPv6 packet */
     struct ip6 *rip = mtod(t, struct ip6 *);
-    rip->ip_src = (struct in6_addr)LINKLOCAL_ADDR;
+    rip->ip_src = *src;
     rip->ip_dst = ip->ip_src;
     inet_ntop(AF_INET6, &rip->ip_dst, addrstr, INET6_ADDRSTRLEN);
     DEBUG_ARG("target = %s", addrstr);
@@ -129,6 +129,12 @@ void icmp6_send_error(struct mbuf *m, uint8_t type, uint8_t code)
     ricmp->icmp6_cksum = ip6_cksum(t);
 
     ip6_output(NULL, t, 0);
+}
+
+void icmp6_send_error(struct mbuf *m, uint8_t type, uint8_t code)
+{
+    struct in6_addr src = LINKLOCAL_ADDR;
+    icmp6_forward_error(m, type, code, &src);
 }
 
 /*
@@ -315,6 +321,8 @@ static void ndp_send_na(Slirp *slirp, struct ip6 *ip, struct icmp6 *icmp)
 static void ndp_input(struct mbuf *m, Slirp *slirp, struct ip6 *ip,
                       struct icmp6 *icmp)
 {
+    g_assert(M_ROOMBEFORE(m) >= ETH_HLEN);
+
     m->m_len += ETH_HLEN;
     m->m_data -= ETH_HLEN;
     struct ethhdr *eth = mtod(m, struct ethhdr *);
@@ -377,9 +385,12 @@ static void ndp_input(struct mbuf *m, Slirp *slirp, struct ip6 *ip,
  */
 void icmp6_input(struct mbuf *m)
 {
+    Slirp *slirp = m->slirp;
+    /* NDP reads the ethernet header for gratuitous NDP */
+    M_DUP_DEBUG(slirp, m, 1, ETH_HLEN);
+
     struct icmp6 *icmp;
     struct ip6 *ip = mtod(m, struct ip6 *);
-    Slirp *slirp = m->slirp;
     int hlen = sizeof(struct ip6);
 
     DEBUG_CALL("icmp6_input");

@@ -1,0 +1,11 @@
+[binaries]
+c = '/usr/bin/powerpc64le-linux-gnu-gcc'
+ar = '/usr/bin/powerpc64le-linux-gnu-gcc-ar'
+strip = '/usr/bin/powerpc64le-linux-gnu-strip'
+pkgconfig = '/usr/bin/powerpc64le-linux-gnu-pkg-config'
+
+[host_machine]
+system = 'linux'
+cpu_family = 'ppc64'
+cpu = 'powerpc64le'
+endian = 'little'

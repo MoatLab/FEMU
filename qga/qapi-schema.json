@@ -19,8 +19,12 @@
 # Whitelists to permit QAPI rule violations; think twice before you
 # add to them!
 { 'pragma': {
+    # Types whose member names may use '_'
+    'member-name-exceptions': [
+        'GuestAgentInfo'
+    ],
     # Commands allowed to return a non-dictionary:
-    'returns-whitelist': [
+    'command-returns-exceptions': [
         'guest-file-open',
         'guest-fsfreeze-freeze',
         'guest-fsfreeze-freeze-list',
@@ -847,6 +851,22 @@
            'slot': 'int', 'function': 'int'} }
 
 ##
+# @GuestCCWAddress:
+#
+# @cssid: channel subsystem image id
+# @ssid: subchannel set id
+# @subchno: subchannel number
+# @devno: device number
+#
+# Since: 6.0
+##
+{ 'struct': 'GuestCCWAddress',
+  'data': {'cssid': 'int',
+           'ssid': 'int',
+           'subchno': 'int',
+           'devno': 'int'} }
+
+##
 # @GuestDiskAddress:
 #
 # @pci-controller: controller's PCI address (fields are set to -1 if invalid)
@@ -856,6 +876,7 @@
 # @unit: unit id
 # @serial: serial number (since: 3.1)
 # @dev: device node (POSIX) or device UNC (Windows) (since: 3.1)
+# @ccw-address: CCW address on s390x (since: 6.0)
 #
 # Since: 2.2
 ##
@@ -863,7 +884,8 @@
   'data': {'pci-controller': 'GuestPCIAddress',
            'bus-type': 'GuestDiskBusType',
            'bus': 'int', 'target': 'int', 'unit': 'int',
-           '*serial': 'str', '*dev': 'str'} }
+           '*serial': 'str', '*dev': 'str',
+           '*ccw-address': 'GuestCCWAddress'} }
 
 ##
 # @GuestDiskInfo:
@@ -1118,6 +1140,7 @@
 
 ##
 # @GuestExec:
+#
 # @pid: pid of child process in guest OS
 #
 # Since: 2.5
@@ -1149,6 +1172,7 @@
 
 ##
 # @GuestHostName:
+#
 # @host-name: Fully qualified domain name of the guest OS
 #
 # Since: 2.10
@@ -1175,6 +1199,7 @@
 
 ##
 # @GuestUser:
+#
 # @user: Username
 # @domain: Logon domain (windows only)
 # @login-time: Time of login of this user on the computer. If multiple
@@ -1358,7 +1383,7 @@
   'data': {
       'keys': ['str']
   },
-  'if': 'defined(CONFIG_POSIX)' }
+  'if': 'CONFIG_POSIX' }
 
 
 ##
@@ -1376,7 +1401,7 @@
 { 'command': 'guest-ssh-get-authorized-keys',
   'data': { 'username': 'str' },
   'returns': 'GuestAuthorizedKeys',
-  'if': 'defined(CONFIG_POSIX)' }
+  'if': 'CONFIG_POSIX' }
 
 ##
 # @guest-ssh-add-authorized-keys:
@@ -1394,7 +1419,7 @@
 ##
 { 'command': 'guest-ssh-add-authorized-keys',
   'data': { 'username': 'str', 'keys': ['str'], '*reset': 'bool' },
-  'if': 'defined(CONFIG_POSIX)' }
+  'if': 'CONFIG_POSIX' }
 
 ##
 # @guest-ssh-remove-authorized-keys:
@@ -1412,4 +1437,4 @@
 ##
 { 'command': 'guest-ssh-remove-authorized-keys',
   'data': { 'username': 'str', 'keys': ['str'] },
-  'if': 'defined(CONFIG_POSIX)' }
+  'if': 'CONFIG_POSIX' }

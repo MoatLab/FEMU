@@ -1,0 +1,16 @@
+---
+- name: '{{ name }}-build'
+  shell: |
+    set -e
+    cd {{ name }}
+
+    {{ global_env }}
+    {{ local_env }}
+    rm -rf build
+    mkdir build
+    cd build
+    ../autogen.sh --prefix=$VIRT_PREFIX {{ autogen_args }}
+    $MAKE
+    $MAKE install
+  when:
+    - target in machines

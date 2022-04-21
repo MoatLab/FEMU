@@ -1,0 +1,4 @@
+---
+packages:
+  - cloud-init
+  - cloud-init-growpart

@@ -218,6 +218,25 @@ typedef struct {
     bool write_aofs;
 } GVecGen4;
 
+typedef struct {
+    /*
+     * Expand inline as a 64-bit or 32-bit integer. Only one of these will be
+     * non-NULL.
+     */
+    void (*fni8)(TCGv_i64, TCGv_i64, TCGv_i64, TCGv_i64, int64_t);
+    void (*fni4)(TCGv_i32, TCGv_i32, TCGv_i32, TCGv_i32, int32_t);
+    /* Expand inline with a host vector type.  */
+    void (*fniv)(unsigned, TCGv_vec, TCGv_vec, TCGv_vec, TCGv_vec, int64_t);
+    /* Expand out-of-line helper w/descriptor, data in descriptor.  */
+    gen_helper_gvec_4 *fno;
+    /* The optional opcodes, if any, utilized by .fniv.  */
+    const TCGOpcode *opt_opc;
+    /* The vector element size, if applicable.  */
+    uint8_t vece;
+    /* Prefer i64 to v64.  */
+    bool prefer_i64;
+} GVecGen4i;
+
 void tcg_gen_gvec_2(uint32_t dofs, uint32_t aofs,
                     uint32_t oprsz, uint32_t maxsz, const GVecGen2 *);
 void tcg_gen_gvec_2i(uint32_t dofs, uint32_t aofs, uint32_t oprsz,
@@ -231,6 +250,9 @@ void tcg_gen_gvec_3i(uint32_t dofs, uint32_t aofs, uint32_t bofs,
                      const GVecGen3i *);
 void tcg_gen_gvec_4(uint32_t dofs, uint32_t aofs, uint32_t bofs, uint32_t cofs,
                     uint32_t oprsz, uint32_t maxsz, const GVecGen4 *);
+void tcg_gen_gvec_4i(uint32_t dofs, uint32_t aofs, uint32_t bofs, uint32_t cofs,
+                     uint32_t oprsz, uint32_t maxsz, int64_t c,
+                     const GVecGen4i *);
 
 /* Expand a specific vector operation.  */
 
@@ -400,5 +422,48 @@ void tcg_gen_vec_sar8i_i64(TCGv_i64 d, TCGv_i64 a, int64_t);
 void tcg_gen_vec_sar16i_i64(TCGv_i64 d, TCGv_i64 a, int64_t);
 void tcg_gen_vec_rotl8i_i64(TCGv_i64 d, TCGv_i64 a, int64_t c);
 void tcg_gen_vec_rotl16i_i64(TCGv_i64 d, TCGv_i64 a, int64_t c);
+
+/* 32-bit vector operations. */
+void tcg_gen_vec_add8_i32(TCGv_i32 d, TCGv_i32 a, TCGv_i32 b);
+void tcg_gen_vec_add16_i32(TCGv_i32 d, TCGv_i32 a, TCGv_i32 b);
+
+void tcg_gen_vec_sub8_i32(TCGv_i32 d, TCGv_i32 a, TCGv_i32 b);
+void tcg_gen_vec_sub16_i32(TCGv_i32 d, TCGv_i32 a, TCGv_i32 b);
+
+void tcg_gen_vec_shl8i_i32(TCGv_i32 d, TCGv_i32 a, int32_t);
+void tcg_gen_vec_shl16i_i32(TCGv_i32 d, TCGv_i32 a, int32_t);
+void tcg_gen_vec_shr8i_i32(TCGv_i32 d, TCGv_i32 a, int32_t);
+void tcg_gen_vec_shr16i_i32(TCGv_i32 d, TCGv_i32 a, int32_t);
+void tcg_gen_vec_sar8i_i32(TCGv_i32 d, TCGv_i32 a, int32_t);
+void tcg_gen_vec_sar16i_i32(TCGv_i32 d, TCGv_i32 a, int32_t);
+
+#if TARGET_LONG_BITS == 64
+#define tcg_gen_vec_add8_tl  tcg_gen_vec_add8_i64
+#define tcg_gen_vec_sub8_tl  tcg_gen_vec_sub8_i64
+#define tcg_gen_vec_add16_tl tcg_gen_vec_add16_i64
+#define tcg_gen_vec_sub16_tl tcg_gen_vec_sub16_i64
+#define tcg_gen_vec_add32_tl tcg_gen_vec_add32_i64
+#define tcg_gen_vec_sub32_tl tcg_gen_vec_sub32_i64
+#define tcg_gen_vec_shl8i_tl tcg_gen_vec_shl8i_i64
+#define tcg_gen_vec_shr8i_tl tcg_gen_vec_shr8i_i64
+#define tcg_gen_vec_sar8i_tl tcg_gen_vec_sar8i_i64
+#define tcg_gen_vec_shl16i_tl tcg_gen_vec_shl16i_i64
+#define tcg_gen_vec_shr16i_tl tcg_gen_vec_shr16i_i64
+#define tcg_gen_vec_sar16i_tl tcg_gen_vec_sar16i_i64
+
+#else
+#define tcg_gen_vec_add8_tl  tcg_gen_vec_add8_i32
+#define tcg_gen_vec_sub8_tl  tcg_gen_vec_sub8_i32
+#define tcg_gen_vec_add16_tl tcg_gen_vec_add16_i32
+#define tcg_gen_vec_sub16_tl tcg_gen_vec_sub16_i32
+#define tcg_gen_vec_add32_tl tcg_gen_add_i32
+#define tcg_gen_vec_sub32_tl tcg_gen_sub_i32
+#define tcg_gen_vec_shl8i_tl tcg_gen_vec_shl8i_i32
+#define tcg_gen_vec_shr8i_tl tcg_gen_vec_shr8i_i32
+#define tcg_gen_vec_sar8i_tl tcg_gen_vec_sar8i_i32
+#define tcg_gen_vec_shl16i_tl tcg_gen_vec_shl16i_i32
+#define tcg_gen_vec_shr16i_tl tcg_gen_vec_shr16i_i32
+#define tcg_gen_vec_sar16i_tl tcg_gen_vec_sar16i_i32
+#endif
 
 #endif

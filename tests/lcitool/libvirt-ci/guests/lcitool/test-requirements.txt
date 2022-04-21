@@ -1,0 +1,5 @@
+-r requirements.txt
+-r vm-requirements.txt
+
+flake8
+pytest

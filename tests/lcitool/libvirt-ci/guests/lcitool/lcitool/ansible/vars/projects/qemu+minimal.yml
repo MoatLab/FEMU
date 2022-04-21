@@ -1,0 +1,20 @@
+---
+packages:
+ - bzip2
+ - capstone
+ - ccache
+ - diffutils
+ - findutils
+ - g++
+ - gcc
+ - glib2
+ - libfdt
+ - libslirp
+ - ninja
+ - make
+ - meson
+ - perl
+ - perl-Test-Harness
+ - pixman
+ - pkg-config
+ - zlib

@@ -18,7 +18,7 @@
 from .. import mparser
 
 class AstVisitor:
-    def __init__(self):
+    def __init__(self) -> None:
         pass
 
     def visit_default_func(self, node: mparser.BaseNode) -> None:
@@ -34,6 +34,9 @@ class AstVisitor:
         self.visit_default_func(node)
 
     def visit_StringNode(self, node: mparser.StringNode) -> None:
+        self.visit_default_func(node)
+
+    def visit_FormatStringNode(self, node: mparser.FormatStringNode) -> None:
         self.visit_default_func(node)
 
     def visit_ContinueNode(self, node: mparser.ContinueNode) -> None:

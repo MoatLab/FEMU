@@ -36,17 +36,21 @@
 
 #include "qemu/osdep.h"
 #include "qemu/plugin.h"
-#include "cpu.h"
-#include "sysemu/sysemu.h"
+#include "qemu/log.h"
 #include "tcg/tcg.h"
 #include "exec/exec-all.h"
+#include "exec/ram_addr.h"
 #include "disas/disas.h"
 #include "plugin.h"
 #ifndef CONFIG_USER_ONLY
 #include "qemu/plugin-memory.h"
 #include "hw/boards.h"
+#else
+#include "qemu.h"
+#ifdef CONFIG_LINUX
+#include "loader.h"
 #endif
-#include "trace/mem.h"
+#endif
 
 /* Uninstall and Reset handlers */
 
@@ -84,15 +88,19 @@ void qemu_plugin_register_vcpu_tb_exec_cb(struct qemu_plugin_tb *tb,
                                           enum qemu_plugin_cb_flags flags,
                                           void *udata)
 {
-    plugin_register_dyn_cb__udata(&tb->cbs[PLUGIN_CB_REGULAR],
-                                  cb, flags, udata);
+    if (!tb->mem_only) {
+        plugin_register_dyn_cb__udata(&tb->cbs[PLUGIN_CB_REGULAR],
+                                      cb, flags, udata);
+    }
 }
 
 void qemu_plugin_register_vcpu_tb_exec_inline(struct qemu_plugin_tb *tb,
                                               enum qemu_plugin_op op,
                                               void *ptr, uint64_t imm)
 {
-    plugin_register_inline_op(&tb->cbs[PLUGIN_CB_INLINE], 0, op, ptr, imm);
+    if (!tb->mem_only) {
+        plugin_register_inline_op(&tb->cbs[PLUGIN_CB_INLINE], 0, op, ptr, imm);
+    }
 }
 
 void qemu_plugin_register_vcpu_insn_exec_cb(struct qemu_plugin_insn *insn,
@@ -100,20 +108,27 @@ void qemu_plugin_register_vcpu_insn_exec_cb(struct qemu_plugin_insn *insn,
                                             enum qemu_plugin_cb_flags flags,
                                             void *udata)
 {
-    plugin_register_dyn_cb__udata(&insn->cbs[PLUGIN_CB_INSN][PLUGIN_CB_REGULAR],
-        cb, flags, udata);
+    if (!insn->mem_only) {
+        plugin_register_dyn_cb__udata(&insn->cbs[PLUGIN_CB_INSN][PLUGIN_CB_REGULAR],
+                                      cb, flags, udata);
+    }
 }
 
 void qemu_plugin_register_vcpu_insn_exec_inline(struct qemu_plugin_insn *insn,
                                                 enum qemu_plugin_op op,
                                                 void *ptr, uint64_t imm)
 {
-    plugin_register_inline_op(&insn->cbs[PLUGIN_CB_INSN][PLUGIN_CB_INLINE],
-                              0, op, ptr, imm);
+    if (!insn->mem_only) {
+        plugin_register_inline_op(&insn->cbs[PLUGIN_CB_INSN][PLUGIN_CB_INLINE],
+                                  0, op, ptr, imm);
+    }
 }
 
 
-
+/*
+ * We always plant memory instrumentation because they don't finalise until
+ * after the operation has complete.
+ */
 void qemu_plugin_register_vcpu_mem_cb(struct qemu_plugin_insn *insn,
                                       qemu_plugin_vcpu_mem_cb_t cb,
                                       enum qemu_plugin_cb_flags flags,
@@ -121,7 +136,7 @@ void qemu_plugin_register_vcpu_mem_cb(struct qemu_plugin_insn *insn,
                                       void *udata)
 {
     plugin_register_vcpu_mem_cb(&insn->cbs[PLUGIN_CB_MEM][PLUGIN_CB_REGULAR],
-                                cb, flags, rw, udata);
+                                    cb, flags, rw, udata);
 }
 
 void qemu_plugin_register_vcpu_mem_inline(struct qemu_plugin_insn *insn,
@@ -130,7 +145,7 @@ void qemu_plugin_register_vcpu_mem_inline(struct qemu_plugin_insn *insn,
                                           uint64_t imm)
 {
     plugin_register_inline_op(&insn->cbs[PLUGIN_CB_MEM][PLUGIN_CB_INLINE],
-        rw, op, ptr, imm);
+                              rw, op, ptr, imm);
 }
 
 void qemu_plugin_register_vcpu_tb_trans_cb(qemu_plugin_id_t id,
@@ -181,10 +196,13 @@ uint64_t qemu_plugin_tb_vaddr(const struct qemu_plugin_tb *tb)
 struct qemu_plugin_insn *
 qemu_plugin_tb_get_insn(const struct qemu_plugin_tb *tb, size_t idx)
 {
+    struct qemu_plugin_insn *insn;
     if (unlikely(idx >= tb->n)) {
         return NULL;
     }
-    return g_ptr_array_index(tb->insns, idx);
+    insn = g_ptr_array_index(tb->insns, idx);
+    insn->mem_only = tb->mem_only;
+    return insn;
 }
 
 /*
@@ -220,6 +238,12 @@ char *qemu_plugin_insn_disas(const struct qemu_plugin_insn *insn)
     return plugin_disas(cpu, insn->vaddr, insn->data->len);
 }
 
+const char *qemu_plugin_insn_symbol(const struct qemu_plugin_insn *insn)
+{
+    const char *sym = lookup_symbol(insn->vaddr);
+    return sym[0] != 0 ? sym : NULL;
+}
+
 /*
  * The memory queries allow the plugin to query information about a
  * memory access.
@@ -227,22 +251,25 @@ char *qemu_plugin_insn_disas(const struct qemu_plugin_insn *insn)
 
 unsigned qemu_plugin_mem_size_shift(qemu_plugin_meminfo_t info)
 {
-    return info & TRACE_MEM_SZ_SHIFT_MASK;
+    MemOp op = get_memop(info);
+    return op & MO_SIZE;
 }
 
 bool qemu_plugin_mem_is_sign_extended(qemu_plugin_meminfo_t info)
 {
-    return !!(info & TRACE_MEM_SE);
+    MemOp op = get_memop(info);
+    return op & MO_SIGN;
 }
 
 bool qemu_plugin_mem_is_big_endian(qemu_plugin_meminfo_t info)
 {
-    return !!(info & TRACE_MEM_BE);
+    MemOp op = get_memop(info);
+    return (op & MO_BSWAP) == MO_BE;
 }
 
 bool qemu_plugin_mem_is_store(qemu_plugin_meminfo_t info)
 {
-    return !!(info & TRACE_MEM_ST);
+    return get_plugin_meminfo_rw(info) & QEMU_PLUGIN_MEM_W;
 }
 
 /*
@@ -251,29 +278,28 @@ bool qemu_plugin_mem_is_store(qemu_plugin_meminfo_t info)
 
 #ifdef CONFIG_SOFTMMU
 static __thread struct qemu_plugin_hwaddr hwaddr_info;
+#endif
 
 struct qemu_plugin_hwaddr *qemu_plugin_get_hwaddr(qemu_plugin_meminfo_t info,
                                                   uint64_t vaddr)
 {
+#ifdef CONFIG_SOFTMMU
     CPUState *cpu = current_cpu;
-    unsigned int mmu_idx = info >> TRACE_MEM_MMU_SHIFT;
-    hwaddr_info.is_store = info & TRACE_MEM_ST;
+    unsigned int mmu_idx = get_mmuidx(info);
+    enum qemu_plugin_mem_rw rw = get_plugin_meminfo_rw(info);
+    hwaddr_info.is_store = (rw & QEMU_PLUGIN_MEM_W) != 0;
 
     if (!tlb_plugin_lookup(cpu, vaddr, mmu_idx,
-                           info & TRACE_MEM_ST, &hwaddr_info)) {
+                           hwaddr_info.is_store, &hwaddr_info)) {
         error_report("invalid use of qemu_plugin_get_hwaddr");
         return NULL;
     }
 
     return &hwaddr_info;
-}
 #else
-struct qemu_plugin_hwaddr *qemu_plugin_get_hwaddr(qemu_plugin_meminfo_t info,
-                                                  uint64_t vaddr)
-{
     return NULL;
-}
 #endif
+}
 
 bool qemu_plugin_hwaddr_is_io(const struct qemu_plugin_hwaddr *haddr)
 {
@@ -284,23 +310,49 @@ bool qemu_plugin_hwaddr_is_io(const struct qemu_plugin_hwaddr *haddr)
 #endif
 }
 
-uint64_t qemu_plugin_hwaddr_device_offset(const struct qemu_plugin_hwaddr *haddr)
+uint64_t qemu_plugin_hwaddr_phys_addr(const struct qemu_plugin_hwaddr *haddr)
 {
 #ifdef CONFIG_SOFTMMU
     if (haddr) {
         if (!haddr->is_io) {
-            ram_addr_t ram_addr = qemu_ram_addr_from_host((void *) haddr->v.ram.hostaddr);
-            if (ram_addr == RAM_ADDR_INVALID) {
-                error_report("Bad ram pointer %"PRIx64"", haddr->v.ram.hostaddr);
+            RAMBlock *block;
+            ram_addr_t offset;
+            void *hostaddr = haddr->v.ram.hostaddr;
+
+            block = qemu_ram_block_from_host(hostaddr, false, &offset);
+            if (!block) {
+                error_report("Bad host ram pointer %p", haddr->v.ram.hostaddr);
                 abort();
             }
-            return ram_addr;
+
+            return block->offset + offset + block->mr->addr;
         } else {
-            return haddr->v.io.offset;
+            MemoryRegionSection *mrs = haddr->v.io.section;
+            return mrs->offset_within_address_space + haddr->v.io.offset;
         }
     }
 #endif
     return 0;
+}
+
+const char *qemu_plugin_hwaddr_device_name(const struct qemu_plugin_hwaddr *h)
+{
+#ifdef CONFIG_SOFTMMU
+    if (h && h->is_io) {
+        MemoryRegionSection *mrs = h->v.io.section;
+        if (!mrs->mr->name) {
+            unsigned long maddr = 0xffffffff & (uintptr_t) mrs->mr;
+            g_autofree char *temp = g_strdup_printf("anon%08lx", maddr);
+            return g_intern_string(temp);
+        } else {
+            return g_intern_string(mrs->mr->name);
+        }
+    } else {
+        return g_intern_static_string("RAM");
+    }
+#else
+    return g_intern_static_string("Invalid");
+#endif
 }
 
 /*
@@ -339,4 +391,52 @@ int qemu_plugin_n_max_vcpus(void)
 void qemu_plugin_outs(const char *string)
 {
     qemu_log_mask(CPU_LOG_PLUGIN, "%s", string);
+}
+
+bool qemu_plugin_bool_parse(const char *name, const char *value, bool *ret)
+{
+    return name && value && qapi_bool_parse(name, value, ret, NULL);
+}
+
+/*
+ * Binary path, start and end locations
+ */
+const char *qemu_plugin_path_to_binary(void)
+{
+    char *path = NULL;
+#ifdef CONFIG_USER_ONLY
+    TaskState *ts = (TaskState *) current_cpu->opaque;
+    path = g_strdup(ts->bprm->filename);
+#endif
+    return path;
+}
+
+uint64_t qemu_plugin_start_code(void)
+{
+    uint64_t start = 0;
+#ifdef CONFIG_USER_ONLY
+    TaskState *ts = (TaskState *) current_cpu->opaque;
+    start = ts->info->start_code;
+#endif
+    return start;
+}
+
+uint64_t qemu_plugin_end_code(void)
+{
+    uint64_t end = 0;
+#ifdef CONFIG_USER_ONLY
+    TaskState *ts = (TaskState *) current_cpu->opaque;
+    end = ts->info->end_code;
+#endif
+    return end;
+}
+
+uint64_t qemu_plugin_entry_code(void)
+{
+    uint64_t entry = 0;
+#ifdef CONFIG_USER_ONLY
+    TaskState *ts = (TaskState *) current_cpu->opaque;
+    entry = ts->info->entry;
+#endif
+    return entry;
 }

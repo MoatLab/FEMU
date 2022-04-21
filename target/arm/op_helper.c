@@ -17,7 +17,6 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
 #include "qemu/osdep.h"
-#include "qemu/log.h"
 #include "qemu/main-loop.h"
 #include "cpu.h"
 #include "exec/helper-proto.h"
@@ -28,8 +27,8 @@
 #define SIGNBIT (uint32_t)0x80000000
 #define SIGNBIT64 ((uint64_t)1 << 63)
 
-static CPUState *do_raise_exception(CPUARMState *env, uint32_t excp,
-                                    uint32_t syndrome, uint32_t target_el)
+void raise_exception(CPUARMState *env, uint32_t excp,
+                     uint32_t syndrome, uint32_t target_el)
 {
     CPUState *cs = env_cpu(env);
 
@@ -50,22 +49,21 @@ static CPUState *do_raise_exception(CPUARMState *env, uint32_t excp,
     cs->exception_index = excp;
     env->exception.syndrome = syndrome;
     env->exception.target_el = target_el;
-
-    return cs;
-}
-
-void raise_exception(CPUARMState *env, uint32_t excp,
-                     uint32_t syndrome, uint32_t target_el)
-{
-    CPUState *cs = do_raise_exception(env, excp, syndrome, target_el);
     cpu_loop_exit(cs);
 }
 
 void raise_exception_ra(CPUARMState *env, uint32_t excp, uint32_t syndrome,
                         uint32_t target_el, uintptr_t ra)
 {
-    CPUState *cs = do_raise_exception(env, excp, syndrome, target_el);
-    cpu_loop_exit_restore(cs, ra);
+    CPUState *cs = env_cpu(env);
+
+    /*
+     * restore_state_to_opc() will set env->exception.syndrome, so
+     * we must restore CPU state here before setting the syndrome
+     * the caller passed us, and cannot use cpu_loop_exit_restore().
+     */
+    cpu_restore_state(cs, ra, true);
+    raise_exception(env, excp, syndrome, target_el);
 }
 
 uint64_t HELPER(neon_tbl)(CPUARMState *env, uint32_t desc,
@@ -97,15 +95,12 @@ void HELPER(v8m_stackcheck)(CPUARMState *env, uint32_t newvalue)
      * raising an exception if the limit is breached.
      */
     if (newvalue < v7m_sp_limit(env)) {
-        CPUState *cs = env_cpu(env);
-
         /*
          * Stack limit exceptions are a rare case, so rather than syncing
-         * PC/condbits before the call, we use cpu_restore_state() to
-         * get them right before raising the exception.
+         * PC/condbits before the call, we use raise_exception_ra() so
+         * that cpu_restore_state() will sort them out.
          */
-        cpu_restore_state(cs, GETPC(), true);
-        raise_exception(env, EXCP_STKOF, 0, 1);
+        raise_exception_ra(env, EXCP_STKOF, 0, 1, GETPC());
     }
 }
 
@@ -229,6 +224,23 @@ void HELPER(setend)(CPUARMState *env)
     arm_rebuild_hflags(env);
 }
 
+void HELPER(check_bxj_trap)(CPUARMState *env, uint32_t rm)
+{
+    /*
+     * Only called if in NS EL0 or EL1 for a BXJ for a v7A CPU;
+     * check if HSTR.TJDBX means we need to trap to EL2.
+     */
+    if (env->cp15.hstr_el2 & HSTR_TJDBX) {
+        /*
+         * We know the condition code check passed, so take the IMPDEF
+         * choice to always report CV=1 COND 0xe
+         */
+        uint32_t syn = syn_bxjtrap(1, 0xe, rm);
+        raise_exception_ra(env, EXCP_HYP_TRAP, syn, 2, GETPC());
+    }
+}
+
+#ifndef CONFIG_USER_ONLY
 /* Function checks whether WFx (WFI/WFE) instructions are set up to be trapped.
  * The function returns the target EL (1-3) if the instruction is to be trapped;
  * otherwise it returns 0 indicating it is not trapped.
@@ -283,9 +295,21 @@ static inline int check_wfx_trap(CPUARMState *env, bool is_wfe)
 
     return 0;
 }
+#endif
 
 void HELPER(wfi)(CPUARMState *env, uint32_t insn_len)
 {
+#ifdef CONFIG_USER_ONLY
+    /*
+     * WFI in the user-mode emulator is technically permitted but not
+     * something any real-world code would do. AArch64 Linux kernels
+     * trap it via SCTRL_EL1.nTWI and make it an (expensive) NOP;
+     * AArch32 kernels don't trap it so it will delay a bit.
+     * For QEMU, make it NOP here, because trying to raise EXCP_HLT
+     * would trigger an abort.
+     */
+    return;
+#else
     CPUState *cs = env_cpu(env);
     int target_el = check_wfx_trap(env, false);
 
@@ -310,6 +334,7 @@ void HELPER(wfi)(CPUARMState *env, uint32_t insn_len)
     cs->exception_index = EXCP_HLT;
     cs->halted = 1;
     cpu_loop_exit(cs);
+#endif
 }
 
 void HELPER(wfe)(CPUARMState *env)
@@ -389,14 +414,7 @@ void HELPER(exception_bkpt_insn)(CPUARMState *env, uint32_t syndrome)
 
 uint32_t HELPER(cpsr_read)(CPUARMState *env)
 {
-    /*
-     * We store the ARMv8 PSTATE.SS bit in env->uncached_cpsr.
-     * This is convenient for populating SPSR_ELx, but must be
-     * hidden from aarch32 mode, where it is not visible.
-     *
-     * TODO: ARMv8.4-DIT -- need to move SS somewhere else.
-     */
-    return cpsr_read(env) & ~(CPSR_EXEC | PSTATE_SS);
+    return cpsr_read(env) & ~CPSR_EXEC;
 }
 
 void HELPER(cpsr_write)(CPUARMState *env, uint32_t val, uint32_t mask)
@@ -652,10 +670,10 @@ void HELPER(access_check_cp_reg)(CPUARMState *env, void *rip, uint32_t syndrome,
         target_el = exception_target_el(env);
         break;
     case CP_ACCESS_TRAP_EL2:
-        /* Requesting a trap to EL2 when we're in EL3 or S-EL0/1 is
+        /* Requesting a trap to EL2 when we're in EL3 is
          * a bug in the access function.
          */
-        assert(!arm_is_secure(env) && arm_current_el(env) != 3);
+        assert(arm_current_el(env) != 3);
         target_el = 2;
         break;
     case CP_ACCESS_TRAP_EL3:

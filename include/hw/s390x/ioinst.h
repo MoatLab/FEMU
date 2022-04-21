@@ -107,7 +107,7 @@ QEMU_BUILD_BUG_MSG(sizeof(PMCW) != 28, "size of PMCW is wrong");
 #define PMCW_FLAGS_MASK_MP 0x0004
 #define PMCW_FLAGS_MASK_TF 0x0002
 #define PMCW_FLAGS_MASK_DNV 0x0001
-#define PMCW_FLAGS_MASK_INVALID 0x0700
+#define PMCW_FLAGS_MASK_INVALID 0xc300
 
 #define PMCW_CHARS_MASK_ST 0x00e00000
 #define PMCW_CHARS_MASK_MBFC 0x00000004
@@ -123,10 +123,20 @@ typedef struct SCHIB {
     uint8_t mda[4];
 } QEMU_PACKED SCHIB;
 
+/* format-0 extended-status word */
+typedef struct ESW {
+    uint32_t word0;      /* subchannel logout for format 0 */
+    uint32_t erw;
+    uint64_t word2;     /* failing-storage address for format 0 */
+    uint32_t word4;     /* secondary-CCW address for format 0 */
+} QEMU_PACKED ESW;
+
+#define ESW_ERW_SENSE 0x01000000
+
 /* interruption response block */
 typedef struct IRB {
     SCSW scsw;
-    uint32_t esw[5];
+    ESW esw;
     uint32_t ecw[8];
     uint32_t emw[8];
 } IRB;

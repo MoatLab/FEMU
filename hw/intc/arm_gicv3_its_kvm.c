@@ -71,7 +71,7 @@ static int kvm_its_send_msi(GICv3ITSState *s, uint32_t value, uint16_t devid)
  *
  * The tables get flushed to guest RAM whenever the VM gets stopped.
  */
-static void vm_change_state_handler(void *opaque, int running,
+static void vm_change_state_handler(void *opaque, bool running,
                                     RunState state)
 {
     GICv3ITSState *s = (GICv3ITSState *)opaque;
@@ -106,7 +106,7 @@ static void kvm_arm_its_realize(DeviceState *dev, Error **errp)
     kvm_arm_register_device(&s->iomem_its_cntrl, -1, KVM_DEV_ARM_VGIC_GRP_ADDR,
                             KVM_VGIC_ITS_ADDR_TYPE, s->dev_fd, 0);
 
-    gicv3_its_init_mmio(s, NULL);
+    gicv3_its_init_mmio(s, NULL, NULL);
 
     if (!kvm_device_check_attr(s->dev_fd, KVM_DEV_ARM_VGIC_GRP_ITS_REGS,
         GITS_CTLR)) {

@@ -26,7 +26,6 @@
  */
 
 #include "qemu/osdep.h"
-#include "cpu.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "net/net.h"
@@ -363,7 +362,6 @@ static void spapr_vlan_instance_finalize(Object *obj)
     }
 
     if (dev->rxp_timer) {
-        timer_del(dev->rxp_timer);
         timer_free(dev->rxp_timer);
     }
 }

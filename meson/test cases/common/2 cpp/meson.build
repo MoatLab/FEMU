@@ -1,4 +1,4 @@
-project('c++ test', 'cpp')
+project('c++ test', 'cpp', version: files('VERSIONFILE'))
 
 cpp = meson.get_compiler('cpp')
 if cpp.get_id() == 'intel'
@@ -32,3 +32,10 @@ else
 endif
 
 assert(exe_disabled, 'Executable was not disabled.')
+
+if cpp.get_id() == 'msvc'
+  exe = executable('cppprog', 'cpp.C', cpp_args : '/TP')
+else
+  exe = executable('cppprog', 'cpp.C')
+endif
+test('cpptest', exe)

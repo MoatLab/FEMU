@@ -23,6 +23,7 @@
 #include "net/checksum.h"
 #include "sysemu/sysemu.h"
 #include "qemu/bswap.h"
+#include "qemu/log.h"
 #include "qemu/module.h"
 #include "hw/pci/msix.h"
 #include "hw/pci/msi.h"
@@ -1093,8 +1094,12 @@ vmxnet3_io_bar0_write(void *opaque, hwaddr addr,
         int tx_queue_idx =
             VMW_MULTIREG_IDX_BY_ADDR(addr, VMXNET3_REG_TXPROD,
                                      VMXNET3_REG_ALIGN);
-        assert(tx_queue_idx <= s->txq_num);
-        vmxnet3_process_tx_queue(s, tx_queue_idx);
+        if (tx_queue_idx <= s->txq_num) {
+            vmxnet3_process_tx_queue(s, tx_queue_idx);
+        } else {
+            qemu_log_mask(LOG_GUEST_ERROR, "vmxnet3: Illegal TX queue %d/%d\n",
+                          tx_queue_idx, s->txq_num);
+        }
         return;
     }
 
@@ -1376,7 +1381,7 @@ static void vmxnet3_validate_interrupts(VMXNET3State *s)
     }
 }
 
-static void vmxnet3_validate_queues(VMXNET3State *s)
+static bool vmxnet3_validate_queues(VMXNET3State *s)
 {
     /*
     * txq_num and rxq_num are total number of queues
@@ -1385,12 +1390,18 @@ static void vmxnet3_validate_queues(VMXNET3State *s)
     */
 
     if (s->txq_num > VMXNET3_DEVICE_MAX_TX_QUEUES) {
-        hw_error("Bad TX queues number: %d\n", s->txq_num);
+        qemu_log_mask(LOG_GUEST_ERROR, "vmxnet3: Bad TX queues number: %d\n",
+                      s->txq_num);
+        return false;
     }
 
     if (s->rxq_num > VMXNET3_DEVICE_MAX_RX_QUEUES) {
-        hw_error("Bad RX queues number: %d\n", s->rxq_num);
+        qemu_log_mask(LOG_GUEST_ERROR, "vmxnet3: Bad RX queues number: %d\n",
+                      s->rxq_num);
+        return false;
     }
+
+    return true;
 }
 
 static void vmxnet3_activate_device(VMXNET3State *s)
@@ -1414,12 +1425,23 @@ static void vmxnet3_activate_device(VMXNET3State *s)
         return;
     }
 
+    s->txq_num =
+        VMXNET3_READ_DRV_SHARED8(d, s->drv_shmem, devRead.misc.numTxQueues);
+    s->rxq_num =
+        VMXNET3_READ_DRV_SHARED8(d, s->drv_shmem, devRead.misc.numRxQueues);
+
+    VMW_CFPRN("Number of TX/RX queues %u/%u", s->txq_num, s->rxq_num);
+    if (!vmxnet3_validate_queues(s)) {
+        return;
+    }
+
     vmxnet3_adjust_by_guest_type(s);
     vmxnet3_update_features(s);
     vmxnet3_update_pm_state(s);
     vmxnet3_setup_rx_filtering(s);
     /* Cache fields from shared memory */
     s->mtu = VMXNET3_READ_DRV_SHARED32(d, s->drv_shmem, devRead.misc.mtu);
+    assert(VMXNET3_MIN_MTU <= s->mtu && s->mtu < VMXNET3_MAX_MTU);
     VMW_CFPRN("MTU is %u", s->mtu);
 
     s->max_rx_frags =
@@ -1439,14 +1461,6 @@ static void vmxnet3_activate_device(VMXNET3State *s)
     s->auto_int_masking =
         VMXNET3_READ_DRV_SHARED8(d, s->drv_shmem, devRead.intrConf.autoMask);
     VMW_CFPRN("Automatic interrupt masking is %d", (int)s->auto_int_masking);
-
-    s->txq_num =
-        VMXNET3_READ_DRV_SHARED8(d, s->drv_shmem, devRead.misc.numTxQueues);
-    s->rxq_num =
-        VMXNET3_READ_DRV_SHARED8(d, s->drv_shmem, devRead.misc.numRxQueues);
-
-    VMW_CFPRN("Number of TX/RX queues %u/%u", s->txq_num, s->rxq_num);
-    vmxnet3_validate_queues(s);
 
     qdescr_table_pa =
         VMXNET3_READ_DRV_SHARED64(d, s->drv_shmem, devRead.misc.queueDescPA);
@@ -1473,6 +1487,9 @@ static void vmxnet3_activate_device(VMXNET3State *s)
         /* Read rings memory locations for TX queues */
         pa = VMXNET3_READ_TX_QUEUE_DESCR64(d, qdescr_pa, conf.txRingBasePA);
         size = VMXNET3_READ_TX_QUEUE_DESCR32(d, qdescr_pa, conf.txRingSize);
+        if (size > VMXNET3_TX_RING_MAX_SIZE) {
+            size = VMXNET3_TX_RING_MAX_SIZE;
+        }
 
         vmxnet3_ring_init(d, &s->txq_descr[i].tx_ring, pa, size,
                           sizeof(struct Vmxnet3_TxDesc), false);
@@ -1483,6 +1500,9 @@ static void vmxnet3_activate_device(VMXNET3State *s)
         /* TXC ring */
         pa = VMXNET3_READ_TX_QUEUE_DESCR64(d, qdescr_pa, conf.compRingBasePA);
         size = VMXNET3_READ_TX_QUEUE_DESCR32(d, qdescr_pa, conf.compRingSize);
+        if (size > VMXNET3_TC_RING_MAX_SIZE) {
+            size = VMXNET3_TC_RING_MAX_SIZE;
+        }
         vmxnet3_ring_init(d, &s->txq_descr[i].comp_ring, pa, size,
                           sizeof(struct Vmxnet3_TxCompDesc), true);
         VMXNET3_RING_DUMP(VMW_CFPRN, "TXC", i, &s->txq_descr[i].comp_ring);
@@ -1524,6 +1544,9 @@ static void vmxnet3_activate_device(VMXNET3State *s)
             /* RX rings */
             pa = VMXNET3_READ_RX_QUEUE_DESCR64(d, qd_pa, conf.rxRingBasePA[j]);
             size = VMXNET3_READ_RX_QUEUE_DESCR32(d, qd_pa, conf.rxRingSize[j]);
+            if (size > VMXNET3_RX_RING_MAX_SIZE) {
+                size = VMXNET3_RX_RING_MAX_SIZE;
+            }
             vmxnet3_ring_init(d, &s->rxq_descr[i].rx_ring[j], pa, size,
                               sizeof(struct Vmxnet3_RxDesc), false);
             VMW_CFPRN("RX queue %d:%d: Base: %" PRIx64 ", Size: %d",
@@ -1533,6 +1556,9 @@ static void vmxnet3_activate_device(VMXNET3State *s)
         /* RXC ring */
         pa = VMXNET3_READ_RX_QUEUE_DESCR64(d, qd_pa, conf.compRingBasePA);
         size = VMXNET3_READ_RX_QUEUE_DESCR32(d, qd_pa, conf.compRingSize);
+        if (size > VMXNET3_RC_RING_MAX_SIZE) {
+            size = VMXNET3_RC_RING_MAX_SIZE;
+        }
         vmxnet3_ring_init(d, &s->rxq_descr[i].comp_ring, pa, size,
                           sizeof(struct Vmxnet3_RxCompDesc), true);
         VMW_CFPRN("RXC queue %d: Base: %" PRIx64 ", Size: %d", i, pa, size);
@@ -1790,7 +1816,9 @@ vmxnet3_io_bar1_write(void *opaque,
     case VMXNET3_REG_ICR:
         VMW_CBPRN("Write BAR1 [VMXNET3_REG_ICR] = %" PRIx64 ", size %d",
                   val, size);
-        g_assert_not_reached();
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "%s: write to read-only register VMXNET3_REG_ICR\n",
+                      TYPE_VMXNET3);
         break;
 
     /* Event Cause Register */
@@ -2399,7 +2427,9 @@ static int vmxnet3_post_load(void *opaque, int version_id)
         }
     }
 
-    vmxnet3_validate_queues(s);
+    if (!vmxnet3_validate_queues(s)) {
+        return -1;
+    }
     vmxnet3_validate_interrupts(s);
 
     return 0;

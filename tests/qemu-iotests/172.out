@@ -12,18 +12,15 @@ Testing:
             iobase = 1008 (0x3f0)
             irq = 6 (0x6)
             dma = 2 (0x2)
-            driveA = ""
-            driveB = ""
-            check_media_rate = true
             fdtypeA = "auto"
             fdtypeB = "auto"
             fallback = "288"
-            isa irq 6
             bus: floppy-bus.0
               type floppy-bus
               dev: floppy, id ""
                 unit = 0 (0x0)
                 drive = "floppy0"
+                backend_defaults = "auto"
                 logical_block_size = 512 (512 B)
                 physical_block_size = 512 (512 B)
                 min_io_size = 0 (0 B)
@@ -42,18 +39,15 @@ Testing: -fda TEST_DIR/t.qcow2
             iobase = 1008 (0x3f0)
             irq = 6 (0x6)
             dma = 2 (0x2)
-            driveA = ""
-            driveB = ""
-            check_media_rate = true
             fdtypeA = "auto"
             fdtypeB = "auto"
             fallback = "288"
-            isa irq 6
             bus: floppy-bus.0
               type floppy-bus
               dev: floppy, id ""
                 unit = 0 (0x0)
                 drive = "floppy0"
+                backend_defaults = "auto"
                 logical_block_size = 512 (512 B)
                 physical_block_size = 512 (512 B)
                 min_io_size = 0 (0 B)
@@ -63,12 +57,12 @@ Testing: -fda TEST_DIR/t.qcow2
                 share-rw = false
                 drive-type = "144"
 floppy0 (NODE_NAME): TEST_DIR/t.qcow2 (qcow2)
-    Attached to:      /machine/unattached/device[15]
+    Attached to:      /machine/unattached/device[N]
     Removable device: not locked, tray closed
     Cache mode:       writeback
 
 ide1-cd0: [not inserted]
-    Attached to:      /machine/unattached/device[22]
+    Attached to:      /machine/unattached/device[N]
     Removable device: not locked, tray closed
 
 sd0: [not inserted]
@@ -82,18 +76,15 @@ Testing: -fdb TEST_DIR/t.qcow2
             iobase = 1008 (0x3f0)
             irq = 6 (0x6)
             dma = 2 (0x2)
-            driveA = ""
-            driveB = ""
-            check_media_rate = true
             fdtypeA = "auto"
             fdtypeB = "auto"
             fallback = "288"
-            isa irq 6
             bus: floppy-bus.0
               type floppy-bus
               dev: floppy, id ""
                 unit = 1 (0x1)
                 drive = "floppy1"
+                backend_defaults = "auto"
                 logical_block_size = 512 (512 B)
                 physical_block_size = 512 (512 B)
                 min_io_size = 0 (0 B)
@@ -105,6 +96,7 @@ Testing: -fdb TEST_DIR/t.qcow2
               dev: floppy, id ""
                 unit = 0 (0x0)
                 drive = "floppy0"
+                backend_defaults = "auto"
                 logical_block_size = 512 (512 B)
                 physical_block_size = 512 (512 B)
                 min_io_size = 0 (0 B)
@@ -114,16 +106,16 @@ Testing: -fdb TEST_DIR/t.qcow2
                 share-rw = false
                 drive-type = "288"
 floppy1 (NODE_NAME): TEST_DIR/t.qcow2 (qcow2)
-    Attached to:      /machine/unattached/device[16]
+    Attached to:      /machine/unattached/device[N]
     Removable device: not locked, tray closed
     Cache mode:       writeback
 
 ide1-cd0: [not inserted]
-    Attached to:      /machine/unattached/device[23]
+    Attached to:      /machine/unattached/device[N]
     Removable device: not locked, tray closed
 
 floppy0: [not inserted]
-    Attached to:      /machine/unattached/device[15]
+    Attached to:      /machine/unattached/device[N]
     Removable device: not locked, tray closed
 
 sd0: [not inserted]
@@ -137,18 +129,15 @@ Testing: -fda TEST_DIR/t.qcow2 -fdb TEST_DIR/t.qcow2.2
             iobase = 1008 (0x3f0)
             irq = 6 (0x6)
             dma = 2 (0x2)
-            driveA = ""
-            driveB = ""
-            check_media_rate = true
             fdtypeA = "auto"
             fdtypeB = "auto"
             fallback = "288"
-            isa irq 6
             bus: floppy-bus.0
               type floppy-bus
               dev: floppy, id ""
                 unit = 1 (0x1)
                 drive = "floppy1"
+                backend_defaults = "auto"
                 logical_block_size = 512 (512 B)
                 physical_block_size = 512 (512 B)
                 min_io_size = 0 (0 B)
@@ -160,6 +149,7 @@ Testing: -fda TEST_DIR/t.qcow2 -fdb TEST_DIR/t.qcow2.2
               dev: floppy, id ""
                 unit = 0 (0x0)
                 drive = "floppy0"
+                backend_defaults = "auto"
                 logical_block_size = 512 (512 B)
                 physical_block_size = 512 (512 B)
                 min_io_size = 0 (0 B)
@@ -169,17 +159,17 @@ Testing: -fda TEST_DIR/t.qcow2 -fdb TEST_DIR/t.qcow2.2
                 share-rw = false
                 drive-type = "144"
 floppy0 (NODE_NAME): TEST_DIR/t.qcow2 (qcow2)
-    Attached to:      /machine/unattached/device[15]
+    Attached to:      /machine/unattached/device[N]
     Removable device: not locked, tray closed
     Cache mode:       writeback
 
 floppy1 (NODE_NAME): TEST_DIR/t.qcow2.2 (qcow2)
-    Attached to:      /machine/unattached/device[16]
+    Attached to:      /machine/unattached/device[N]
     Removable device: not locked, tray closed
     Cache mode:       writeback
 
 ide1-cd0: [not inserted]
-    Attached to:      /machine/unattached/device[23]
+    Attached to:      /machine/unattached/device[N]
     Removable device: not locked, tray closed
 
 sd0: [not inserted]
@@ -193,18 +183,15 @@ Testing: -fdb
             iobase = 1008 (0x3f0)
             irq = 6 (0x6)
             dma = 2 (0x2)
-            driveA = ""
-            driveB = ""
-            check_media_rate = true
             fdtypeA = "auto"
             fdtypeB = "auto"
             fallback = "288"
-            isa irq 6
             bus: floppy-bus.0
               type floppy-bus
               dev: floppy, id ""
                 unit = 1 (0x1)
                 drive = "floppy1"
+                backend_defaults = "auto"
                 logical_block_size = 512 (512 B)
                 physical_block_size = 512 (512 B)
                 min_io_size = 0 (0 B)
@@ -216,6 +203,7 @@ Testing: -fdb
               dev: floppy, id ""
                 unit = 0 (0x0)
                 drive = "floppy0"
+                backend_defaults = "auto"
                 logical_block_size = 512 (512 B)
                 physical_block_size = 512 (512 B)
                 min_io_size = 0 (0 B)
@@ -234,18 +222,15 @@ Testing: -drive if=floppy,file=TEST_DIR/t.qcow2
             iobase = 1008 (0x3f0)
             irq = 6 (0x6)
             dma = 2 (0x2)
-            driveA = ""
-            driveB = ""
-            check_media_rate = true
             fdtypeA = "auto"
             fdtypeB = "auto"
             fallback = "288"
-            isa irq 6
             bus: floppy-bus.0
               type floppy-bus
               dev: floppy, id ""
                 unit = 0 (0x0)
                 drive = "floppy0"
+                backend_defaults = "auto"
                 logical_block_size = 512 (512 B)
                 physical_block_size = 512 (512 B)
                 min_io_size = 0 (0 B)
@@ -255,12 +240,12 @@ Testing: -drive if=floppy,file=TEST_DIR/t.qcow2
                 share-rw = false
                 drive-type = "144"
 floppy0 (NODE_NAME): TEST_DIR/t.qcow2 (qcow2)
-    Attached to:      /machine/unattached/device[15]
+    Attached to:      /machine/unattached/device[N]
     Removable device: not locked, tray closed
     Cache mode:       writeback
 
 ide1-cd0: [not inserted]
-    Attached to:      /machine/unattached/device[22]
+    Attached to:      /machine/unattached/device[N]
     Removable device: not locked, tray closed
 
 sd0: [not inserted]
@@ -274,18 +259,15 @@ Testing: -drive if=floppy,file=TEST_DIR/t.qcow2,index=1
             iobase = 1008 (0x3f0)
             irq = 6 (0x6)
             dma = 2 (0x2)
-            driveA = ""
-            driveB = ""
-            check_media_rate = true
             fdtypeA = "auto"
             fdtypeB = "auto"
             fallback = "288"
-            isa irq 6
             bus: floppy-bus.0
               type floppy-bus
               dev: floppy, id ""
                 unit = 1 (0x1)
                 drive = "floppy1"
+                backend_defaults = "auto"
                 logical_block_size = 512 (512 B)
                 physical_block_size = 512 (512 B)
                 min_io_size = 0 (0 B)
@@ -297,6 +279,7 @@ Testing: -drive if=floppy,file=TEST_DIR/t.qcow2,index=1
               dev: floppy, id ""
                 unit = 0 (0x0)
                 drive = "floppy0"
+                backend_defaults = "auto"
                 logical_block_size = 512 (512 B)
                 physical_block_size = 512 (512 B)
                 min_io_size = 0 (0 B)
@@ -306,16 +289,16 @@ Testing: -drive if=floppy,file=TEST_DIR/t.qcow2,index=1
                 share-rw = false
                 drive-type = "288"
 floppy1 (NODE_NAME): TEST_DIR/t.qcow2 (qcow2)
-    Attached to:      /machine/unattached/device[16]
+    Attached to:      /machine/unattached/device[N]
     Removable device: not locked, tray closed
     Cache mode:       writeback
 
 ide1-cd0: [not inserted]
-    Attached to:      /machine/unattached/device[23]
+    Attached to:      /machine/unattached/device[N]
     Removable device: not locked, tray closed
 
 floppy0: [not inserted]
-    Attached to:      /machine/unattached/device[15]
+    Attached to:      /machine/unattached/device[N]
     Removable device: not locked, tray closed
 
 sd0: [not inserted]
@@ -329,18 +312,15 @@ Testing: -drive if=floppy,file=TEST_DIR/t.qcow2 -drive if=floppy,file=TEST_DIR/t
             iobase = 1008 (0x3f0)
             irq = 6 (0x6)
             dma = 2 (0x2)
-            driveA = ""
-            driveB = ""
-            check_media_rate = true
             fdtypeA = "auto"
             fdtypeB = "auto"
             fallback = "288"
-            isa irq 6
             bus: floppy-bus.0
               type floppy-bus
               dev: floppy, id ""
                 unit = 1 (0x1)
                 drive = "floppy1"
+                backend_defaults = "auto"
                 logical_block_size = 512 (512 B)
                 physical_block_size = 512 (512 B)
                 min_io_size = 0 (0 B)
@@ -352,6 +332,7 @@ Testing: -drive if=floppy,file=TEST_DIR/t.qcow2 -drive if=floppy,file=TEST_DIR/t
               dev: floppy, id ""
                 unit = 0 (0x0)
                 drive = "floppy0"
+                backend_defaults = "auto"
                 logical_block_size = 512 (512 B)
                 physical_block_size = 512 (512 B)
                 min_io_size = 0 (0 B)
@@ -361,164 +342,17 @@ Testing: -drive if=floppy,file=TEST_DIR/t.qcow2 -drive if=floppy,file=TEST_DIR/t
                 share-rw = false
                 drive-type = "144"
 floppy0 (NODE_NAME): TEST_DIR/t.qcow2 (qcow2)
-    Attached to:      /machine/unattached/device[15]
+    Attached to:      /machine/unattached/device[N]
     Removable device: not locked, tray closed
     Cache mode:       writeback
 
 floppy1 (NODE_NAME): TEST_DIR/t.qcow2.2 (qcow2)
-    Attached to:      /machine/unattached/device[16]
+    Attached to:      /machine/unattached/device[N]
     Removable device: not locked, tray closed
     Cache mode:       writeback
 
 ide1-cd0: [not inserted]
-    Attached to:      /machine/unattached/device[23]
-    Removable device: not locked, tray closed
-
-sd0: [not inserted]
-    Removable device: not locked, tray closed
-(qemu) quit
-
-
-
-=== Using -drive if=none and -global ===
-
-Testing: -drive if=none,file=TEST_DIR/t.qcow2 -global isa-fdc.driveA=none0
-QEMU_PROG: warning: warning: property isa-fdc.driveA is deprecated
-Use -device floppy,unit=0,drive=... instead.
-
-          dev: isa-fdc, id ""
-            iobase = 1008 (0x3f0)
-            irq = 6 (0x6)
-            dma = 2 (0x2)
-            driveA = ""
-            driveB = ""
-            check_media_rate = true
-            fdtypeA = "auto"
-            fdtypeB = "auto"
-            fallback = "288"
-            isa irq 6
-            bus: floppy-bus.0
-              type floppy-bus
-              dev: floppy, id ""
-                unit = 0 (0x0)
-                drive = "none0"
-                logical_block_size = 512 (512 B)
-                physical_block_size = 512 (512 B)
-                min_io_size = 0 (0 B)
-                opt_io_size = 0 (0 B)
-                discard_granularity = 4294967295 (4 GiB)
-                write-cache = "auto"
-                share-rw = false
-                drive-type = "144"
-none0 (NODE_NAME): TEST_DIR/t.qcow2 (qcow2)
-    Attached to:      /machine/unattached/device[15]
-    Removable device: not locked, tray closed
-    Cache mode:       writeback
-
-ide1-cd0: [not inserted]
-    Attached to:      /machine/unattached/device[22]
-    Removable device: not locked, tray closed
-
-sd0: [not inserted]
-    Removable device: not locked, tray closed
-(qemu) quit
-
-
-Testing: -drive if=none,file=TEST_DIR/t.qcow2 -global isa-fdc.driveB=none0
-QEMU_PROG: warning: warning: property isa-fdc.driveB is deprecated
-Use -device floppy,unit=1,drive=... instead.
-
-          dev: isa-fdc, id ""
-            iobase = 1008 (0x3f0)
-            irq = 6 (0x6)
-            dma = 2 (0x2)
-            driveA = ""
-            driveB = ""
-            check_media_rate = true
-            fdtypeA = "auto"
-            fdtypeB = "auto"
-            fallback = "288"
-            isa irq 6
-            bus: floppy-bus.0
-              type floppy-bus
-              dev: floppy, id ""
-                unit = 1 (0x1)
-                drive = "none0"
-                logical_block_size = 512 (512 B)
-                physical_block_size = 512 (512 B)
-                min_io_size = 0 (0 B)
-                opt_io_size = 0 (0 B)
-                discard_granularity = 4294967295 (4 GiB)
-                write-cache = "auto"
-                share-rw = false
-                drive-type = "144"
-none0 (NODE_NAME): TEST_DIR/t.qcow2 (qcow2)
-    Attached to:      /machine/unattached/device[15]
-    Removable device: not locked, tray closed
-    Cache mode:       writeback
-
-ide1-cd0: [not inserted]
-    Attached to:      /machine/unattached/device[22]
-    Removable device: not locked, tray closed
-
-sd0: [not inserted]
-    Removable device: not locked, tray closed
-(qemu) quit
-
-
-Testing: -drive if=none,file=TEST_DIR/t.qcow2 -drive if=none,file=TEST_DIR/t.qcow2.2 -global isa-fdc.driveA=none0 -global isa-fdc.driveB=none1
-QEMU_PROG: warning: warning: property isa-fdc.driveA is deprecated
-Use -device floppy,unit=0,drive=... instead.
-QEMU_PROG: warning: warning: property isa-fdc.driveB is deprecated
-Use -device floppy,unit=1,drive=... instead.
-
-          dev: isa-fdc, id ""
-            iobase = 1008 (0x3f0)
-            irq = 6 (0x6)
-            dma = 2 (0x2)
-            driveA = ""
-            driveB = ""
-            check_media_rate = true
-            fdtypeA = "auto"
-            fdtypeB = "auto"
-            fallback = "288"
-            isa irq 6
-            bus: floppy-bus.0
-              type floppy-bus
-              dev: floppy, id ""
-                unit = 1 (0x1)
-                drive = "none1"
-                logical_block_size = 512 (512 B)
-                physical_block_size = 512 (512 B)
-                min_io_size = 0 (0 B)
-                opt_io_size = 0 (0 B)
-                discard_granularity = 4294967295 (4 GiB)
-                write-cache = "auto"
-                share-rw = false
-                drive-type = "144"
-              dev: floppy, id ""
-                unit = 0 (0x0)
-                drive = "none0"
-                logical_block_size = 512 (512 B)
-                physical_block_size = 512 (512 B)
-                min_io_size = 0 (0 B)
-                opt_io_size = 0 (0 B)
-                discard_granularity = 4294967295 (4 GiB)
-                write-cache = "auto"
-                share-rw = false
-                drive-type = "144"
-none0 (NODE_NAME): TEST_DIR/t.qcow2 (qcow2)
-    Attached to:      /machine/unattached/device[15]
-    Removable device: not locked, tray closed
-    Cache mode:       writeback
-
-none1 (NODE_NAME): TEST_DIR/t.qcow2.2 (qcow2)
-    Attached to:      /machine/unattached/device[16]
-    Removable device: not locked, tray closed
-    Cache mode:       writeback
-
-ide1-cd0: [not inserted]
-    Attached to:      /machine/unattached/device[23]
+    Attached to:      /machine/unattached/device[N]
     Removable device: not locked, tray closed
 
 sd0: [not inserted]
@@ -535,18 +369,15 @@ Testing: -drive if=none,file=TEST_DIR/t.qcow2 -device floppy,drive=none0
             iobase = 1008 (0x3f0)
             irq = 6 (0x6)
             dma = 2 (0x2)
-            driveA = ""
-            driveB = ""
-            check_media_rate = true
             fdtypeA = "auto"
             fdtypeB = "auto"
             fallback = "288"
-            isa irq 6
             bus: floppy-bus.0
               type floppy-bus
               dev: floppy, id ""
                 unit = 0 (0x0)
                 drive = "none0"
+                backend_defaults = "auto"
                 logical_block_size = 512 (512 B)
                 physical_block_size = 512 (512 B)
                 min_io_size = 0 (0 B)
@@ -556,12 +387,12 @@ Testing: -drive if=none,file=TEST_DIR/t.qcow2 -device floppy,drive=none0
                 share-rw = false
                 drive-type = "144"
 none0 (NODE_NAME): TEST_DIR/t.qcow2 (qcow2)
-    Attached to:      /machine/peripheral-anon/device[0]
+    Attached to:      /machine/peripheral-anon/device[N]
     Removable device: not locked, tray closed
     Cache mode:       writeback
 
 ide1-cd0: [not inserted]
-    Attached to:      /machine/unattached/device[21]
+    Attached to:      /machine/unattached/device[N]
     Removable device: not locked, tray closed
 
 sd0: [not inserted]
@@ -575,18 +406,15 @@ Testing: -drive if=none,file=TEST_DIR/t.qcow2 -device floppy,drive=none0,unit=1
             iobase = 1008 (0x3f0)
             irq = 6 (0x6)
             dma = 2 (0x2)
-            driveA = ""
-            driveB = ""
-            check_media_rate = true
             fdtypeA = "auto"
             fdtypeB = "auto"
             fallback = "288"
-            isa irq 6
             bus: floppy-bus.0
               type floppy-bus
               dev: floppy, id ""
                 unit = 1 (0x1)
                 drive = "none0"
+                backend_defaults = "auto"
                 logical_block_size = 512 (512 B)
                 physical_block_size = 512 (512 B)
                 min_io_size = 0 (0 B)
@@ -596,12 +424,12 @@ Testing: -drive if=none,file=TEST_DIR/t.qcow2 -device floppy,drive=none0,unit=1
                 share-rw = false
                 drive-type = "144"
 none0 (NODE_NAME): TEST_DIR/t.qcow2 (qcow2)
-    Attached to:      /machine/peripheral-anon/device[0]
+    Attached to:      /machine/peripheral-anon/device[N]
     Removable device: not locked, tray closed
     Cache mode:       writeback
 
 ide1-cd0: [not inserted]
-    Attached to:      /machine/unattached/device[21]
+    Attached to:      /machine/unattached/device[N]
     Removable device: not locked, tray closed
 
 sd0: [not inserted]
@@ -615,18 +443,15 @@ Testing: -drive if=none,file=TEST_DIR/t.qcow2 -drive if=none,file=TEST_DIR/t.qco
             iobase = 1008 (0x3f0)
             irq = 6 (0x6)
             dma = 2 (0x2)
-            driveA = ""
-            driveB = ""
-            check_media_rate = true
             fdtypeA = "auto"
             fdtypeB = "auto"
             fallback = "288"
-            isa irq 6
             bus: floppy-bus.0
               type floppy-bus
               dev: floppy, id ""
                 unit = 1 (0x1)
                 drive = "none1"
+                backend_defaults = "auto"
                 logical_block_size = 512 (512 B)
                 physical_block_size = 512 (512 B)
                 min_io_size = 0 (0 B)
@@ -638,6 +463,7 @@ Testing: -drive if=none,file=TEST_DIR/t.qcow2 -drive if=none,file=TEST_DIR/t.qco
               dev: floppy, id ""
                 unit = 0 (0x0)
                 drive = "none0"
+                backend_defaults = "auto"
                 logical_block_size = 512 (512 B)
                 physical_block_size = 512 (512 B)
                 min_io_size = 0 (0 B)
@@ -647,17 +473,17 @@ Testing: -drive if=none,file=TEST_DIR/t.qcow2 -drive if=none,file=TEST_DIR/t.qco
                 share-rw = false
                 drive-type = "144"
 none0 (NODE_NAME): TEST_DIR/t.qcow2 (qcow2)
-    Attached to:      /machine/peripheral-anon/device[0]
+    Attached to:      /machine/peripheral-anon/device[N]
     Removable device: not locked, tray closed
     Cache mode:       writeback
 
 none1 (NODE_NAME): TEST_DIR/t.qcow2.2 (qcow2)
-    Attached to:      /machine/peripheral-anon/device[1]
+    Attached to:      /machine/peripheral-anon/device[N]
     Removable device: not locked, tray closed
     Cache mode:       writeback
 
 ide1-cd0: [not inserted]
-    Attached to:      /machine/unattached/device[21]
+    Attached to:      /machine/unattached/device[N]
     Removable device: not locked, tray closed
 
 sd0: [not inserted]
@@ -667,132 +493,6 @@ sd0: [not inserted]
 
 
 === Mixing -fdX and -global ===
-
-Testing: -fda TEST_DIR/t.qcow2 -drive if=none,file=TEST_DIR/t.qcow2.2 -global isa-fdc.driveB=none0
-QEMU_PROG: warning: warning: property isa-fdc.driveB is deprecated
-Use -device floppy,unit=1,drive=... instead.
-
-          dev: isa-fdc, id ""
-            iobase = 1008 (0x3f0)
-            irq = 6 (0x6)
-            dma = 2 (0x2)
-            driveA = ""
-            driveB = ""
-            check_media_rate = true
-            fdtypeA = "auto"
-            fdtypeB = "auto"
-            fallback = "288"
-            isa irq 6
-            bus: floppy-bus.0
-              type floppy-bus
-              dev: floppy, id ""
-                unit = 0 (0x0)
-                drive = "floppy0"
-                logical_block_size = 512 (512 B)
-                physical_block_size = 512 (512 B)
-                min_io_size = 0 (0 B)
-                opt_io_size = 0 (0 B)
-                discard_granularity = 4294967295 (4 GiB)
-                write-cache = "auto"
-                share-rw = false
-                drive-type = "144"
-              dev: floppy, id ""
-                unit = 1 (0x1)
-                drive = "none0"
-                logical_block_size = 512 (512 B)
-                physical_block_size = 512 (512 B)
-                min_io_size = 0 (0 B)
-                opt_io_size = 0 (0 B)
-                discard_granularity = 4294967295 (4 GiB)
-                write-cache = "auto"
-                share-rw = false
-                drive-type = "144"
-floppy0 (NODE_NAME): TEST_DIR/t.qcow2 (qcow2)
-    Attached to:      /machine/unattached/device[16]
-    Removable device: not locked, tray closed
-    Cache mode:       writeback
-
-none0 (NODE_NAME): TEST_DIR/t.qcow2.2 (qcow2)
-    Attached to:      /machine/unattached/device[15]
-    Removable device: not locked, tray closed
-    Cache mode:       writeback
-
-ide1-cd0: [not inserted]
-    Attached to:      /machine/unattached/device[23]
-    Removable device: not locked, tray closed
-
-sd0: [not inserted]
-    Removable device: not locked, tray closed
-(qemu) quit
-
-
-Testing: -fdb TEST_DIR/t.qcow2 -drive if=none,file=TEST_DIR/t.qcow2.2 -global isa-fdc.driveA=none0
-QEMU_PROG: warning: warning: property isa-fdc.driveA is deprecated
-Use -device floppy,unit=0,drive=... instead.
-
-          dev: isa-fdc, id ""
-            iobase = 1008 (0x3f0)
-            irq = 6 (0x6)
-            dma = 2 (0x2)
-            driveA = ""
-            driveB = ""
-            check_media_rate = true
-            fdtypeA = "auto"
-            fdtypeB = "auto"
-            fallback = "288"
-            isa irq 6
-            bus: floppy-bus.0
-              type floppy-bus
-              dev: floppy, id ""
-                unit = 1 (0x1)
-                drive = "floppy1"
-                logical_block_size = 512 (512 B)
-                physical_block_size = 512 (512 B)
-                min_io_size = 0 (0 B)
-                opt_io_size = 0 (0 B)
-                discard_granularity = 4294967295 (4 GiB)
-                write-cache = "auto"
-                share-rw = false
-                drive-type = "144"
-              dev: floppy, id ""
-                unit = 0 (0x0)
-                drive = "none0"
-                logical_block_size = 512 (512 B)
-                physical_block_size = 512 (512 B)
-                min_io_size = 0 (0 B)
-                opt_io_size = 0 (0 B)
-                discard_granularity = 4294967295 (4 GiB)
-                write-cache = "auto"
-                share-rw = false
-                drive-type = "144"
-floppy1 (NODE_NAME): TEST_DIR/t.qcow2 (qcow2)
-    Attached to:      /machine/unattached/device[16]
-    Removable device: not locked, tray closed
-    Cache mode:       writeback
-
-none0 (NODE_NAME): TEST_DIR/t.qcow2.2 (qcow2)
-    Attached to:      /machine/unattached/device[15]
-    Removable device: not locked, tray closed
-    Cache mode:       writeback
-
-ide1-cd0: [not inserted]
-    Attached to:      /machine/unattached/device[23]
-    Removable device: not locked, tray closed
-
-sd0: [not inserted]
-    Removable device: not locked, tray closed
-(qemu) quit
-
-
-Testing: -fda TEST_DIR/t.qcow2 -drive if=none,file=TEST_DIR/t.qcow2.2 -global isa-fdc.driveA=none0
-QEMU_PROG: warning: warning: property isa-fdc.driveA is deprecated
-Use -device floppy,unit=0,drive=... instead.
-QEMU_PROG: Floppy unit 0 is in use
-
-Testing: -fdb TEST_DIR/t.qcow2 -drive if=none,file=TEST_DIR/t.qcow2.2 -global isa-fdc.driveB=none0
-QEMU_PROG: warning: warning: property isa-fdc.driveB is deprecated
-Use -device floppy,unit=1,drive=... instead.
-QEMU_PROG: Floppy unit 1 is in use
 
 Testing: -fda TEST_DIR/t.qcow2 -drive if=none,file=TEST_DIR/t.qcow2.2 -global floppy.drive=none0
 QEMU_PROG: -global floppy.drive=... conflicts with drive=floppy0
@@ -806,18 +506,15 @@ Testing: -fda TEST_DIR/t.qcow2 -drive if=none,file=TEST_DIR/t.qcow2.2 -device fl
             iobase = 1008 (0x3f0)
             irq = 6 (0x6)
             dma = 2 (0x2)
-            driveA = ""
-            driveB = ""
-            check_media_rate = true
             fdtypeA = "auto"
             fdtypeB = "auto"
             fallback = "288"
-            isa irq 6
             bus: floppy-bus.0
               type floppy-bus
               dev: floppy, id ""
                 unit = 1 (0x1)
                 drive = "none0"
+                backend_defaults = "auto"
                 logical_block_size = 512 (512 B)
                 physical_block_size = 512 (512 B)
                 min_io_size = 0 (0 B)
@@ -829,6 +526,7 @@ Testing: -fda TEST_DIR/t.qcow2 -drive if=none,file=TEST_DIR/t.qcow2.2 -device fl
               dev: floppy, id ""
                 unit = 0 (0x0)
                 drive = "floppy0"
+                backend_defaults = "auto"
                 logical_block_size = 512 (512 B)
                 physical_block_size = 512 (512 B)
                 min_io_size = 0 (0 B)
@@ -838,17 +536,17 @@ Testing: -fda TEST_DIR/t.qcow2 -drive if=none,file=TEST_DIR/t.qcow2.2 -device fl
                 share-rw = false
                 drive-type = "144"
 floppy0 (NODE_NAME): TEST_DIR/t.qcow2 (qcow2)
-    Attached to:      /machine/unattached/device[15]
+    Attached to:      /machine/unattached/device[N]
     Removable device: not locked, tray closed
     Cache mode:       writeback
 
 none0 (NODE_NAME): TEST_DIR/t.qcow2.2 (qcow2)
-    Attached to:      /machine/peripheral-anon/device[0]
+    Attached to:      /machine/peripheral-anon/device[N]
     Removable device: not locked, tray closed
     Cache mode:       writeback
 
 ide1-cd0: [not inserted]
-    Attached to:      /machine/unattached/device[22]
+    Attached to:      /machine/unattached/device[N]
     Removable device: not locked, tray closed
 
 sd0: [not inserted]
@@ -862,18 +560,15 @@ Testing: -fda TEST_DIR/t.qcow2 -drive if=none,file=TEST_DIR/t.qcow2.2 -device fl
             iobase = 1008 (0x3f0)
             irq = 6 (0x6)
             dma = 2 (0x2)
-            driveA = ""
-            driveB = ""
-            check_media_rate = true
             fdtypeA = "auto"
             fdtypeB = "auto"
             fallback = "288"
-            isa irq 6
             bus: floppy-bus.0
               type floppy-bus
               dev: floppy, id ""
                 unit = 1 (0x1)
                 drive = "none0"
+                backend_defaults = "auto"
                 logical_block_size = 512 (512 B)
                 physical_block_size = 512 (512 B)
                 min_io_size = 0 (0 B)
@@ -885,6 +580,7 @@ Testing: -fda TEST_DIR/t.qcow2 -drive if=none,file=TEST_DIR/t.qcow2.2 -device fl
               dev: floppy, id ""
                 unit = 0 (0x0)
                 drive = "floppy0"
+                backend_defaults = "auto"
                 logical_block_size = 512 (512 B)
                 physical_block_size = 512 (512 B)
                 min_io_size = 0 (0 B)
@@ -894,17 +590,17 @@ Testing: -fda TEST_DIR/t.qcow2 -drive if=none,file=TEST_DIR/t.qcow2.2 -device fl
                 share-rw = false
                 drive-type = "144"
 floppy0 (NODE_NAME): TEST_DIR/t.qcow2 (qcow2)
-    Attached to:      /machine/unattached/device[15]
+    Attached to:      /machine/unattached/device[N]
     Removable device: not locked, tray closed
     Cache mode:       writeback
 
 none0 (NODE_NAME): TEST_DIR/t.qcow2.2 (qcow2)
-    Attached to:      /machine/peripheral-anon/device[0]
+    Attached to:      /machine/peripheral-anon/device[N]
     Removable device: not locked, tray closed
     Cache mode:       writeback
 
 ide1-cd0: [not inserted]
-    Attached to:      /machine/unattached/device[22]
+    Attached to:      /machine/unattached/device[N]
     Removable device: not locked, tray closed
 
 sd0: [not inserted]
@@ -918,18 +614,15 @@ Testing: -fdb TEST_DIR/t.qcow2 -drive if=none,file=TEST_DIR/t.qcow2.2 -device fl
             iobase = 1008 (0x3f0)
             irq = 6 (0x6)
             dma = 2 (0x2)
-            driveA = ""
-            driveB = ""
-            check_media_rate = true
             fdtypeA = "auto"
             fdtypeB = "auto"
             fallback = "288"
-            isa irq 6
             bus: floppy-bus.0
               type floppy-bus
               dev: floppy, id ""
                 unit = 0 (0x0)
                 drive = "none0"
+                backend_defaults = "auto"
                 logical_block_size = 512 (512 B)
                 physical_block_size = 512 (512 B)
                 min_io_size = 0 (0 B)
@@ -941,6 +634,7 @@ Testing: -fdb TEST_DIR/t.qcow2 -drive if=none,file=TEST_DIR/t.qcow2.2 -device fl
               dev: floppy, id ""
                 unit = 1 (0x1)
                 drive = "floppy1"
+                backend_defaults = "auto"
                 logical_block_size = 512 (512 B)
                 physical_block_size = 512 (512 B)
                 min_io_size = 0 (0 B)
@@ -950,17 +644,17 @@ Testing: -fdb TEST_DIR/t.qcow2 -drive if=none,file=TEST_DIR/t.qcow2.2 -device fl
                 share-rw = false
                 drive-type = "144"
 floppy1 (NODE_NAME): TEST_DIR/t.qcow2 (qcow2)
-    Attached to:      /machine/unattached/device[15]
+    Attached to:      /machine/unattached/device[N]
     Removable device: not locked, tray closed
     Cache mode:       writeback
 
 none0 (NODE_NAME): TEST_DIR/t.qcow2.2 (qcow2)
-    Attached to:      /machine/peripheral-anon/device[0]
+    Attached to:      /machine/peripheral-anon/device[N]
     Removable device: not locked, tray closed
     Cache mode:       writeback
 
 ide1-cd0: [not inserted]
-    Attached to:      /machine/unattached/device[22]
+    Attached to:      /machine/unattached/device[N]
     Removable device: not locked, tray closed
 
 sd0: [not inserted]
@@ -974,18 +668,15 @@ Testing: -fdb TEST_DIR/t.qcow2 -drive if=none,file=TEST_DIR/t.qcow2.2 -device fl
             iobase = 1008 (0x3f0)
             irq = 6 (0x6)
             dma = 2 (0x2)
-            driveA = ""
-            driveB = ""
-            check_media_rate = true
             fdtypeA = "auto"
             fdtypeB = "auto"
             fallback = "288"
-            isa irq 6
             bus: floppy-bus.0
               type floppy-bus
               dev: floppy, id ""
                 unit = 0 (0x0)
                 drive = "none0"
+                backend_defaults = "auto"
                 logical_block_size = 512 (512 B)
                 physical_block_size = 512 (512 B)
                 min_io_size = 0 (0 B)
@@ -997,6 +688,7 @@ Testing: -fdb TEST_DIR/t.qcow2 -drive if=none,file=TEST_DIR/t.qcow2.2 -device fl
               dev: floppy, id ""
                 unit = 1 (0x1)
                 drive = "floppy1"
+                backend_defaults = "auto"
                 logical_block_size = 512 (512 B)
                 physical_block_size = 512 (512 B)
                 min_io_size = 0 (0 B)
@@ -1006,17 +698,17 @@ Testing: -fdb TEST_DIR/t.qcow2 -drive if=none,file=TEST_DIR/t.qcow2.2 -device fl
                 share-rw = false
                 drive-type = "144"
 floppy1 (NODE_NAME): TEST_DIR/t.qcow2 (qcow2)
-    Attached to:      /machine/unattached/device[15]
+    Attached to:      /machine/unattached/device[N]
     Removable device: not locked, tray closed
     Cache mode:       writeback
 
 none0 (NODE_NAME): TEST_DIR/t.qcow2.2 (qcow2)
-    Attached to:      /machine/peripheral-anon/device[0]
+    Attached to:      /machine/peripheral-anon/device[N]
     Removable device: not locked, tray closed
     Cache mode:       writeback
 
 ide1-cd0: [not inserted]
-    Attached to:      /machine/unattached/device[22]
+    Attached to:      /machine/unattached/device[N]
     Removable device: not locked, tray closed
 
 sd0: [not inserted]
@@ -1039,18 +731,15 @@ Testing: -drive if=floppy,file=TEST_DIR/t.qcow2 -drive if=none,file=TEST_DIR/t.q
             iobase = 1008 (0x3f0)
             irq = 6 (0x6)
             dma = 2 (0x2)
-            driveA = ""
-            driveB = ""
-            check_media_rate = true
             fdtypeA = "auto"
             fdtypeB = "auto"
             fallback = "288"
-            isa irq 6
             bus: floppy-bus.0
               type floppy-bus
               dev: floppy, id ""
                 unit = 1 (0x1)
                 drive = "none0"
+                backend_defaults = "auto"
                 logical_block_size = 512 (512 B)
                 physical_block_size = 512 (512 B)
                 min_io_size = 0 (0 B)
@@ -1062,6 +751,7 @@ Testing: -drive if=floppy,file=TEST_DIR/t.qcow2 -drive if=none,file=TEST_DIR/t.q
               dev: floppy, id ""
                 unit = 0 (0x0)
                 drive = "floppy0"
+                backend_defaults = "auto"
                 logical_block_size = 512 (512 B)
                 physical_block_size = 512 (512 B)
                 min_io_size = 0 (0 B)
@@ -1071,17 +761,17 @@ Testing: -drive if=floppy,file=TEST_DIR/t.qcow2 -drive if=none,file=TEST_DIR/t.q
                 share-rw = false
                 drive-type = "144"
 floppy0 (NODE_NAME): TEST_DIR/t.qcow2 (qcow2)
-    Attached to:      /machine/unattached/device[15]
+    Attached to:      /machine/unattached/device[N]
     Removable device: not locked, tray closed
     Cache mode:       writeback
 
 none0 (NODE_NAME): TEST_DIR/t.qcow2.2 (qcow2)
-    Attached to:      /machine/peripheral-anon/device[0]
+    Attached to:      /machine/peripheral-anon/device[N]
     Removable device: not locked, tray closed
     Cache mode:       writeback
 
 ide1-cd0: [not inserted]
-    Attached to:      /machine/unattached/device[22]
+    Attached to:      /machine/unattached/device[N]
     Removable device: not locked, tray closed
 
 sd0: [not inserted]
@@ -1095,18 +785,15 @@ Testing: -drive if=floppy,file=TEST_DIR/t.qcow2 -drive if=none,file=TEST_DIR/t.q
             iobase = 1008 (0x3f0)
             irq = 6 (0x6)
             dma = 2 (0x2)
-            driveA = ""
-            driveB = ""
-            check_media_rate = true
             fdtypeA = "auto"
             fdtypeB = "auto"
             fallback = "288"
-            isa irq 6
             bus: floppy-bus.0
               type floppy-bus
               dev: floppy, id ""
                 unit = 1 (0x1)
                 drive = "none0"
+                backend_defaults = "auto"
                 logical_block_size = 512 (512 B)
                 physical_block_size = 512 (512 B)
                 min_io_size = 0 (0 B)
@@ -1118,6 +805,7 @@ Testing: -drive if=floppy,file=TEST_DIR/t.qcow2 -drive if=none,file=TEST_DIR/t.q
               dev: floppy, id ""
                 unit = 0 (0x0)
                 drive = "floppy0"
+                backend_defaults = "auto"
                 logical_block_size = 512 (512 B)
                 physical_block_size = 512 (512 B)
                 min_io_size = 0 (0 B)
@@ -1127,17 +815,17 @@ Testing: -drive if=floppy,file=TEST_DIR/t.qcow2 -drive if=none,file=TEST_DIR/t.q
                 share-rw = false
                 drive-type = "144"
 floppy0 (NODE_NAME): TEST_DIR/t.qcow2 (qcow2)
-    Attached to:      /machine/unattached/device[15]
+    Attached to:      /machine/unattached/device[N]
     Removable device: not locked, tray closed
     Cache mode:       writeback
 
 none0 (NODE_NAME): TEST_DIR/t.qcow2.2 (qcow2)
-    Attached to:      /machine/peripheral-anon/device[0]
+    Attached to:      /machine/peripheral-anon/device[N]
     Removable device: not locked, tray closed
     Cache mode:       writeback
 
 ide1-cd0: [not inserted]
-    Attached to:      /machine/unattached/device[22]
+    Attached to:      /machine/unattached/device[N]
     Removable device: not locked, tray closed
 
 sd0: [not inserted]
@@ -1151,256 +839,21 @@ QEMU_PROG: -device floppy,drive=none0,unit=0: Floppy unit 0 is in use
 
 === Mixing -global and -device ===
 
-Testing: -drive if=none,file=TEST_DIR/t.qcow2 -drive if=none,file=TEST_DIR/t.qcow2.2 -global isa-fdc.driveA=none0 -device floppy,drive=none1
-QEMU_PROG: warning: warning: property isa-fdc.driveA is deprecated
-Use -device floppy,unit=0,drive=... instead.
-
-          dev: isa-fdc, id ""
-            iobase = 1008 (0x3f0)
-            irq = 6 (0x6)
-            dma = 2 (0x2)
-            driveA = ""
-            driveB = ""
-            check_media_rate = true
-            fdtypeA = "auto"
-            fdtypeB = "auto"
-            fallback = "288"
-            isa irq 6
-            bus: floppy-bus.0
-              type floppy-bus
-              dev: floppy, id ""
-                unit = 1 (0x1)
-                drive = "none1"
-                logical_block_size = 512 (512 B)
-                physical_block_size = 512 (512 B)
-                min_io_size = 0 (0 B)
-                opt_io_size = 0 (0 B)
-                discard_granularity = 4294967295 (4 GiB)
-                write-cache = "auto"
-                share-rw = false
-                drive-type = "144"
-              dev: floppy, id ""
-                unit = 0 (0x0)
-                drive = "none0"
-                logical_block_size = 512 (512 B)
-                physical_block_size = 512 (512 B)
-                min_io_size = 0 (0 B)
-                opt_io_size = 0 (0 B)
-                discard_granularity = 4294967295 (4 GiB)
-                write-cache = "auto"
-                share-rw = false
-                drive-type = "144"
-none0 (NODE_NAME): TEST_DIR/t.qcow2 (qcow2)
-    Attached to:      /machine/unattached/device[15]
-    Removable device: not locked, tray closed
-    Cache mode:       writeback
-
-none1 (NODE_NAME): TEST_DIR/t.qcow2.2 (qcow2)
-    Attached to:      /machine/peripheral-anon/device[0]
-    Removable device: not locked, tray closed
-    Cache mode:       writeback
-
-ide1-cd0: [not inserted]
-    Attached to:      /machine/unattached/device[22]
-    Removable device: not locked, tray closed
-
-sd0: [not inserted]
-    Removable device: not locked, tray closed
-(qemu) quit
-
-
-Testing: -drive if=none,file=TEST_DIR/t.qcow2 -drive if=none,file=TEST_DIR/t.qcow2.2 -global isa-fdc.driveA=none0 -device floppy,drive=none1,unit=1
-QEMU_PROG: warning: warning: property isa-fdc.driveA is deprecated
-Use -device floppy,unit=0,drive=... instead.
-
-          dev: isa-fdc, id ""
-            iobase = 1008 (0x3f0)
-            irq = 6 (0x6)
-            dma = 2 (0x2)
-            driveA = ""
-            driveB = ""
-            check_media_rate = true
-            fdtypeA = "auto"
-            fdtypeB = "auto"
-            fallback = "288"
-            isa irq 6
-            bus: floppy-bus.0
-              type floppy-bus
-              dev: floppy, id ""
-                unit = 1 (0x1)
-                drive = "none1"
-                logical_block_size = 512 (512 B)
-                physical_block_size = 512 (512 B)
-                min_io_size = 0 (0 B)
-                opt_io_size = 0 (0 B)
-                discard_granularity = 4294967295 (4 GiB)
-                write-cache = "auto"
-                share-rw = false
-                drive-type = "144"
-              dev: floppy, id ""
-                unit = 0 (0x0)
-                drive = "none0"
-                logical_block_size = 512 (512 B)
-                physical_block_size = 512 (512 B)
-                min_io_size = 0 (0 B)
-                opt_io_size = 0 (0 B)
-                discard_granularity = 4294967295 (4 GiB)
-                write-cache = "auto"
-                share-rw = false
-                drive-type = "144"
-none0 (NODE_NAME): TEST_DIR/t.qcow2 (qcow2)
-    Attached to:      /machine/unattached/device[15]
-    Removable device: not locked, tray closed
-    Cache mode:       writeback
-
-none1 (NODE_NAME): TEST_DIR/t.qcow2.2 (qcow2)
-    Attached to:      /machine/peripheral-anon/device[0]
-    Removable device: not locked, tray closed
-    Cache mode:       writeback
-
-ide1-cd0: [not inserted]
-    Attached to:      /machine/unattached/device[22]
-    Removable device: not locked, tray closed
-
-sd0: [not inserted]
-    Removable device: not locked, tray closed
-(qemu) quit
-
-
-Testing: -drive if=none,file=TEST_DIR/t.qcow2 -drive if=none,file=TEST_DIR/t.qcow2.2 -global isa-fdc.driveB=none0 -device floppy,drive=none1
-QEMU_PROG: warning: warning: property isa-fdc.driveB is deprecated
-Use -device floppy,unit=1,drive=... instead.
-
-          dev: isa-fdc, id ""
-            iobase = 1008 (0x3f0)
-            irq = 6 (0x6)
-            dma = 2 (0x2)
-            driveA = ""
-            driveB = ""
-            check_media_rate = true
-            fdtypeA = "auto"
-            fdtypeB = "auto"
-            fallback = "288"
-            isa irq 6
-            bus: floppy-bus.0
-              type floppy-bus
-              dev: floppy, id ""
-                unit = 0 (0x0)
-                drive = "none1"
-                logical_block_size = 512 (512 B)
-                physical_block_size = 512 (512 B)
-                min_io_size = 0 (0 B)
-                opt_io_size = 0 (0 B)
-                discard_granularity = 4294967295 (4 GiB)
-                write-cache = "auto"
-                share-rw = false
-                drive-type = "144"
-              dev: floppy, id ""
-                unit = 1 (0x1)
-                drive = "none0"
-                logical_block_size = 512 (512 B)
-                physical_block_size = 512 (512 B)
-                min_io_size = 0 (0 B)
-                opt_io_size = 0 (0 B)
-                discard_granularity = 4294967295 (4 GiB)
-                write-cache = "auto"
-                share-rw = false
-                drive-type = "144"
-none0 (NODE_NAME): TEST_DIR/t.qcow2 (qcow2)
-    Attached to:      /machine/unattached/device[15]
-    Removable device: not locked, tray closed
-    Cache mode:       writeback
-
-none1 (NODE_NAME): TEST_DIR/t.qcow2.2 (qcow2)
-    Attached to:      /machine/peripheral-anon/device[0]
-    Removable device: not locked, tray closed
-    Cache mode:       writeback
-
-ide1-cd0: [not inserted]
-    Attached to:      /machine/unattached/device[22]
-    Removable device: not locked, tray closed
-
-sd0: [not inserted]
-    Removable device: not locked, tray closed
-(qemu) quit
-
-
-Testing: -drive if=none,file=TEST_DIR/t.qcow2 -drive if=none,file=TEST_DIR/t.qcow2.2 -global isa-fdc.driveB=none0 -device floppy,drive=none1,unit=0
-QEMU_PROG: warning: warning: property isa-fdc.driveB is deprecated
-Use -device floppy,unit=1,drive=... instead.
-
-          dev: isa-fdc, id ""
-            iobase = 1008 (0x3f0)
-            irq = 6 (0x6)
-            dma = 2 (0x2)
-            driveA = ""
-            driveB = ""
-            check_media_rate = true
-            fdtypeA = "auto"
-            fdtypeB = "auto"
-            fallback = "288"
-            isa irq 6
-            bus: floppy-bus.0
-              type floppy-bus
-              dev: floppy, id ""
-                unit = 0 (0x0)
-                drive = "none1"
-                logical_block_size = 512 (512 B)
-                physical_block_size = 512 (512 B)
-                min_io_size = 0 (0 B)
-                opt_io_size = 0 (0 B)
-                discard_granularity = 4294967295 (4 GiB)
-                write-cache = "auto"
-                share-rw = false
-                drive-type = "144"
-              dev: floppy, id ""
-                unit = 1 (0x1)
-                drive = "none0"
-                logical_block_size = 512 (512 B)
-                physical_block_size = 512 (512 B)
-                min_io_size = 0 (0 B)
-                opt_io_size = 0 (0 B)
-                discard_granularity = 4294967295 (4 GiB)
-                write-cache = "auto"
-                share-rw = false
-                drive-type = "144"
-none0 (NODE_NAME): TEST_DIR/t.qcow2 (qcow2)
-    Attached to:      /machine/unattached/device[15]
-    Removable device: not locked, tray closed
-    Cache mode:       writeback
-
-none1 (NODE_NAME): TEST_DIR/t.qcow2.2 (qcow2)
-    Attached to:      /machine/peripheral-anon/device[0]
-    Removable device: not locked, tray closed
-    Cache mode:       writeback
-
-ide1-cd0: [not inserted]
-    Attached to:      /machine/unattached/device[22]
-    Removable device: not locked, tray closed
-
-sd0: [not inserted]
-    Removable device: not locked, tray closed
-(qemu) quit
-
-
 Testing: -drive if=none,file=TEST_DIR/t.qcow2 -global floppy.drive=none0 -device floppy,unit=0
 
           dev: isa-fdc, id ""
             iobase = 1008 (0x3f0)
             irq = 6 (0x6)
             dma = 2 (0x2)
-            driveA = ""
-            driveB = ""
-            check_media_rate = true
             fdtypeA = "auto"
             fdtypeB = "auto"
             fallback = "288"
-            isa irq 6
             bus: floppy-bus.0
               type floppy-bus
               dev: floppy, id ""
                 unit = 0 (0x0)
                 drive = "none0"
+                backend_defaults = "auto"
                 logical_block_size = 512 (512 B)
                 physical_block_size = 512 (512 B)
                 min_io_size = 0 (0 B)
@@ -1410,28 +863,18 @@ Testing: -drive if=none,file=TEST_DIR/t.qcow2 -global floppy.drive=none0 -device
                 share-rw = false
                 drive-type = "144"
 none0 (NODE_NAME): TEST_DIR/t.qcow2 (qcow2)
-    Attached to:      /machine/peripheral-anon/device[0]
+    Attached to:      /machine/peripheral-anon/device[N]
     Removable device: not locked, tray closed
     Cache mode:       writeback
 
 ide1-cd0: [not inserted]
-    Attached to:      /machine/unattached/device[21]
+    Attached to:      /machine/unattached/device[N]
     Removable device: not locked, tray closed
 
 sd0: [not inserted]
     Removable device: not locked, tray closed
 (qemu) quit
 
-
-Testing: -drive if=none,file=TEST_DIR/t.qcow2 -drive if=none,file=TEST_DIR/t.qcow2.2 -global isa-fdc.driveA=none0 -device floppy,drive=none1,unit=0
-QEMU_PROG: warning: warning: property isa-fdc.driveA is deprecated
-Use -device floppy,unit=0,drive=... instead.
-QEMU_PROG: -device floppy,drive=none1,unit=0: Floppy unit 0 is in use
-
-Testing: -drive if=none,file=TEST_DIR/t.qcow2 -drive if=none,file=TEST_DIR/t.qcow2.2 -global isa-fdc.driveB=none0 -device floppy,drive=none1,unit=1
-QEMU_PROG: warning: warning: property isa-fdc.driveB is deprecated
-Use -device floppy,unit=1,drive=... instead.
-QEMU_PROG: -device floppy,drive=none1,unit=1: Floppy unit 1 is in use
 
 Testing: -drive if=none,file=TEST_DIR/t.qcow2 -drive if=none,file=TEST_DIR/t.qcow2.2 -global floppy.drive=none0 -device floppy,drive=none1,unit=0
 QEMU_PROG: -device floppy,drive=none1,unit=0: -global floppy.drive=... conflicts with drive=none1
@@ -1457,9 +900,7 @@ QEMU_PROG: -device floppy,drive=floppy0: Property 'floppy.drive' can't find valu
 
 === Too many floppy drives ===
 
-Testing: -drive if=floppy,file=TEST_DIR/t.qcow2 -drive if=none,file=TEST_DIR/t.qcow2.2 -drive if=none,file=TEST_DIR/t.qcow2.3 -global isa-fdc.driveB=none0 -device floppy,drive=none1
-QEMU_PROG: warning: warning: property isa-fdc.driveB is deprecated
-Use -device floppy,unit=1,drive=... instead.
+Testing: -drive if=floppy,file=TEST_DIR/t.qcow2 -drive if=none,file=TEST_DIR/t.qcow2.2 -drive if=none,file=TEST_DIR/t.qcow2.3 -device floppy,drive=none0 -device floppy,drive=none1
 QEMU_PROG: -device floppy,drive=none1: Can't create floppy unit 2, bus supports only 2 units
 
 
@@ -1471,18 +912,15 @@ Testing: -device floppy
             iobase = 1008 (0x3f0)
             irq = 6 (0x6)
             dma = 2 (0x2)
-            driveA = ""
-            driveB = ""
-            check_media_rate = true
             fdtypeA = "auto"
             fdtypeB = "auto"
             fallback = "288"
-            isa irq 6
             bus: floppy-bus.0
               type floppy-bus
               dev: floppy, id ""
                 unit = 0 (0x0)
                 drive = ""
+                backend_defaults = "auto"
                 logical_block_size = 512 (512 B)
                 physical_block_size = 512 (512 B)
                 min_io_size = 0 (0 B)
@@ -1498,18 +936,15 @@ Testing: -device floppy,drive-type=120
             iobase = 1008 (0x3f0)
             irq = 6 (0x6)
             dma = 2 (0x2)
-            driveA = ""
-            driveB = ""
-            check_media_rate = true
             fdtypeA = "auto"
             fdtypeB = "auto"
             fallback = "288"
-            isa irq 6
             bus: floppy-bus.0
               type floppy-bus
               dev: floppy, id ""
                 unit = 0 (0x0)
                 drive = ""
+                backend_defaults = "auto"
                 logical_block_size = 512 (512 B)
                 physical_block_size = 512 (512 B)
                 min_io_size = 0 (0 B)
@@ -1525,18 +960,15 @@ Testing: -device floppy,drive-type=144
             iobase = 1008 (0x3f0)
             irq = 6 (0x6)
             dma = 2 (0x2)
-            driveA = ""
-            driveB = ""
-            check_media_rate = true
             fdtypeA = "auto"
             fdtypeB = "auto"
             fallback = "288"
-            isa irq 6
             bus: floppy-bus.0
               type floppy-bus
               dev: floppy, id ""
                 unit = 0 (0x0)
                 drive = ""
+                backend_defaults = "auto"
                 logical_block_size = 512 (512 B)
                 physical_block_size = 512 (512 B)
                 min_io_size = 0 (0 B)
@@ -1552,18 +984,15 @@ Testing: -device floppy,drive-type=288
             iobase = 1008 (0x3f0)
             irq = 6 (0x6)
             dma = 2 (0x2)
-            driveA = ""
-            driveB = ""
-            check_media_rate = true
             fdtypeA = "auto"
             fdtypeB = "auto"
             fallback = "288"
-            isa irq 6
             bus: floppy-bus.0
               type floppy-bus
               dev: floppy, id ""
                 unit = 0 (0x0)
                 drive = ""
+                backend_defaults = "auto"
                 logical_block_size = 512 (512 B)
                 physical_block_size = 512 (512 B)
                 min_io_size = 0 (0 B)
@@ -1582,18 +1011,15 @@ Testing: -drive if=none,file=TEST_DIR/t.qcow2 -device floppy,drive=none0,drive-t
             iobase = 1008 (0x3f0)
             irq = 6 (0x6)
             dma = 2 (0x2)
-            driveA = ""
-            driveB = ""
-            check_media_rate = true
             fdtypeA = "auto"
             fdtypeB = "auto"
             fallback = "288"
-            isa irq 6
             bus: floppy-bus.0
               type floppy-bus
               dev: floppy, id ""
                 unit = 0 (0x0)
                 drive = "none0"
+                backend_defaults = "auto"
                 logical_block_size = 512 (512 B)
                 physical_block_size = 512 (512 B)
                 min_io_size = 0 (0 B)
@@ -1603,12 +1029,12 @@ Testing: -drive if=none,file=TEST_DIR/t.qcow2 -device floppy,drive=none0,drive-t
                 share-rw = false
                 drive-type = "120"
 none0 (NODE_NAME): TEST_DIR/t.qcow2 (qcow2)
-    Attached to:      /machine/peripheral-anon/device[0]
+    Attached to:      /machine/peripheral-anon/device[N]
     Removable device: not locked, tray closed
     Cache mode:       writeback
 
 ide1-cd0: [not inserted]
-    Attached to:      /machine/unattached/device[21]
+    Attached to:      /machine/unattached/device[N]
     Removable device: not locked, tray closed
 
 sd0: [not inserted]
@@ -1622,18 +1048,15 @@ Testing: -drive if=none,file=TEST_DIR/t.qcow2 -device floppy,drive=none0,drive-t
             iobase = 1008 (0x3f0)
             irq = 6 (0x6)
             dma = 2 (0x2)
-            driveA = ""
-            driveB = ""
-            check_media_rate = true
             fdtypeA = "auto"
             fdtypeB = "auto"
             fallback = "288"
-            isa irq 6
             bus: floppy-bus.0
               type floppy-bus
               dev: floppy, id ""
                 unit = 0 (0x0)
                 drive = "none0"
+                backend_defaults = "auto"
                 logical_block_size = 512 (512 B)
                 physical_block_size = 512 (512 B)
                 min_io_size = 0 (0 B)
@@ -1643,12 +1066,12 @@ Testing: -drive if=none,file=TEST_DIR/t.qcow2 -device floppy,drive=none0,drive-t
                 share-rw = false
                 drive-type = "288"
 none0 (NODE_NAME): TEST_DIR/t.qcow2 (qcow2)
-    Attached to:      /machine/peripheral-anon/device[0]
+    Attached to:      /machine/peripheral-anon/device[N]
     Removable device: not locked, tray closed
     Cache mode:       writeback
 
 ide1-cd0: [not inserted]
-    Attached to:      /machine/unattached/device[21]
+    Attached to:      /machine/unattached/device[N]
     Removable device: not locked, tray closed
 
 sd0: [not inserted]
@@ -1665,18 +1088,15 @@ Testing: -drive if=none,file=TEST_DIR/t.qcow2 -device floppy,drive=none0,logical
             iobase = 1008 (0x3f0)
             irq = 6 (0x6)
             dma = 2 (0x2)
-            driveA = ""
-            driveB = ""
-            check_media_rate = true
             fdtypeA = "auto"
             fdtypeB = "auto"
             fallback = "288"
-            isa irq 6
             bus: floppy-bus.0
               type floppy-bus
               dev: floppy, id ""
                 unit = 0 (0x0)
                 drive = "none0"
+                backend_defaults = "auto"
                 logical_block_size = 512 (512 B)
                 physical_block_size = 512 (512 B)
                 min_io_size = 0 (0 B)
@@ -1686,12 +1106,12 @@ Testing: -drive if=none,file=TEST_DIR/t.qcow2 -device floppy,drive=none0,logical
                 share-rw = false
                 drive-type = "144"
 none0 (NODE_NAME): TEST_DIR/t.qcow2 (qcow2)
-    Attached to:      /machine/peripheral-anon/device[0]
+    Attached to:      /machine/peripheral-anon/device[N]
     Removable device: not locked, tray closed
     Cache mode:       writeback
 
 ide1-cd0: [not inserted]
-    Attached to:      /machine/unattached/device[21]
+    Attached to:      /machine/unattached/device[N]
     Removable device: not locked, tray closed
 
 sd0: [not inserted]
@@ -1705,18 +1125,15 @@ Testing: -drive if=none,file=TEST_DIR/t.qcow2 -device floppy,drive=none0,physica
             iobase = 1008 (0x3f0)
             irq = 6 (0x6)
             dma = 2 (0x2)
-            driveA = ""
-            driveB = ""
-            check_media_rate = true
             fdtypeA = "auto"
             fdtypeB = "auto"
             fallback = "288"
-            isa irq 6
             bus: floppy-bus.0
               type floppy-bus
               dev: floppy, id ""
                 unit = 0 (0x0)
                 drive = "none0"
+                backend_defaults = "auto"
                 logical_block_size = 512 (512 B)
                 physical_block_size = 512 (512 B)
                 min_io_size = 0 (0 B)
@@ -1726,12 +1143,12 @@ Testing: -drive if=none,file=TEST_DIR/t.qcow2 -device floppy,drive=none0,physica
                 share-rw = false
                 drive-type = "144"
 none0 (NODE_NAME): TEST_DIR/t.qcow2 (qcow2)
-    Attached to:      /machine/peripheral-anon/device[0]
+    Attached to:      /machine/peripheral-anon/device[N]
     Removable device: not locked, tray closed
     Cache mode:       writeback
 
 ide1-cd0: [not inserted]
-    Attached to:      /machine/unattached/device[21]
+    Attached to:      /machine/unattached/device[N]
     Removable device: not locked, tray closed
 
 sd0: [not inserted]

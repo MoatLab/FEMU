@@ -1,0 +1,10 @@
+gmon.out
+run-ctype
+run-ctype-gcov
+run-memops
+run-memops-gcov
+run-snprintf
+run-snprintf-gcov
+run-stdlib
+run-stdlib-gcov
+

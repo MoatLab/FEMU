@@ -15,7 +15,6 @@
 #include "qemu-common.h"
 #include "qemu/cutils.h"
 #include "elf.h"
-#include "cpu.h"
 #include "exec/hwaddr.h"
 #include "monitor/monitor.h"
 #include "sysemu/kvm.h"
@@ -30,6 +29,7 @@
 #include "qemu/error-report.h"
 #include "qemu/main-loop.h"
 #include "hw/misc/vmcoreinfo.h"
+#include "migration/blocker.h"
 
 #ifdef TARGET_X86_64
 #include "win_dump.h"
@@ -47,6 +47,8 @@
 #endif
 
 #define MAX_GUEST_NOTE_SIZE (1 << 20) /* 1MB should be enough */
+
+static Error *dump_migration_blocker;
 
 #define ELF_NOTE_SIZE(hdr_size, name_size, desc_size)   \
     ((DIV_ROUND_UP((hdr_size), 4) +                     \
@@ -102,6 +104,7 @@ static int dump_cleanup(DumpState *s)
             qemu_mutex_unlock_iothread();
         }
     }
+    migrate_del_blocker(dump_migration_blocker);
 
     return 0;
 }
@@ -1290,14 +1293,6 @@ static size_t get_len_buf_out(size_t page_size, uint32_t flag_compress)
     return 0;
 }
 
-/*
- * check if the page is all 0
- */
-static inline bool is_zero_page(const uint8_t *buf, size_t page_size)
-{
-    return buffer_is_zero(buf, page_size);
-}
-
 static void write_dump_pages(DumpState *s, Error **errp)
 {
     int ret = 0;
@@ -1354,7 +1349,7 @@ static void write_dump_pages(DumpState *s, Error **errp)
      */
     while (get_next_page(&block_iter, &pfn_iter, &buf, s)) {
         /* check zero page */
-        if (is_zero_page(buf, s->dump_info.page_size)) {
+        if (buffer_is_zero(buf, s->dump_info.page_size)) {
             ret = write_cache(&page_desc, &pd_zero, sizeof(PageDescriptor),
                               false);
             if (ret < 0) {
@@ -2006,6 +2001,21 @@ void qmp_dump_guest_memory(bool paging, const char *file,
         return;
     }
 
+    if (!dump_migration_blocker) {
+        error_setg(&dump_migration_blocker,
+                   "Live migration disabled: dump-guest-memory in progress");
+    }
+
+    /*
+     * Allows even for -only-migratable, but forbid migration during the
+     * process of dump guest memory.
+     */
+    if (migrate_add_blocker_internal(dump_migration_blocker, errp)) {
+        /* Remember to release the fd before passing it over to dump state */
+        close(fd);
+        return;
+    }
+
     s = &dump_state_global;
     dump_state_prepare(s);
 
@@ -2030,39 +2040,29 @@ void qmp_dump_guest_memory(bool paging, const char *file,
 
 DumpGuestMemoryCapability *qmp_query_dump_guest_memory_capability(Error **errp)
 {
-    DumpGuestMemoryFormatList *item;
     DumpGuestMemoryCapability *cap =
-                                  g_malloc0(sizeof(DumpGuestMemoryCapability));
+                                  g_new0(DumpGuestMemoryCapability, 1);
+    DumpGuestMemoryFormatList **tail = &cap->formats;
 
     /* elf is always available */
-    item = g_malloc0(sizeof(DumpGuestMemoryFormatList));
-    cap->formats = item;
-    item->value = DUMP_GUEST_MEMORY_FORMAT_ELF;
+    QAPI_LIST_APPEND(tail, DUMP_GUEST_MEMORY_FORMAT_ELF);
 
     /* kdump-zlib is always available */
-    item->next = g_malloc0(sizeof(DumpGuestMemoryFormatList));
-    item = item->next;
-    item->value = DUMP_GUEST_MEMORY_FORMAT_KDUMP_ZLIB;
+    QAPI_LIST_APPEND(tail, DUMP_GUEST_MEMORY_FORMAT_KDUMP_ZLIB);
 
     /* add new item if kdump-lzo is available */
 #ifdef CONFIG_LZO
-    item->next = g_malloc0(sizeof(DumpGuestMemoryFormatList));
-    item = item->next;
-    item->value = DUMP_GUEST_MEMORY_FORMAT_KDUMP_LZO;
+    QAPI_LIST_APPEND(tail, DUMP_GUEST_MEMORY_FORMAT_KDUMP_LZO);
 #endif
 
     /* add new item if kdump-snappy is available */
 #ifdef CONFIG_SNAPPY
-    item->next = g_malloc0(sizeof(DumpGuestMemoryFormatList));
-    item = item->next;
-    item->value = DUMP_GUEST_MEMORY_FORMAT_KDUMP_SNAPPY;
+    QAPI_LIST_APPEND(tail, DUMP_GUEST_MEMORY_FORMAT_KDUMP_SNAPPY);
 #endif
 
     /* Windows dump is available only if target is x86_64 */
 #ifdef TARGET_X86_64
-    item->next = g_malloc0(sizeof(DumpGuestMemoryFormatList));
-    item = item->next;
-    item->value = DUMP_GUEST_MEMORY_FORMAT_WIN_DMP;
+    QAPI_LIST_APPEND(tail, DUMP_GUEST_MEMORY_FORMAT_WIN_DMP);
 #endif
 
     return cap;

@@ -61,10 +61,10 @@ Instead of specifying files explicitly, people seem to want to do this:
 executable('myprog', sources : '*.cpp') # This does NOT work!
 ```
 
-Meson does not support this syntax and the reason for this is
-simple. This can not be made both reliable and fast. By reliable we
-mean that if the user adds a new source file to the subdirectory,
-Meson should detect that and make it part of the build automatically.
+Meson does not support this syntax and the reason for this is simple.
+This can not be made both reliable and fast. By reliable we mean that
+if the user adds a new source file to the subdirectory, Meson should
+detect that and make it part of the build automatically.
 
 One of the main requirements of Meson is that it must be fast. This
 means that a no-op build in a tree of 10 000 source files must take no
@@ -290,7 +290,7 @@ downloads altogether with `--wrap-mode=nodownload`. You can also
 disable dependency fallbacks altogether with `--wrap-mode=nofallback`,
 which also implies the `nodownload` option.
 
-If on the other hand, you want meson to always use the fallback
+If on the other hand, you want Meson to always use the fallback
 for dependencies, even when an external dependency exists and could
 satisfy the version requirements, for example in order to make
 sure your project builds when fallbacks are used, you can use
@@ -396,12 +396,14 @@ advantages:
    so specifying `libfoo.a` instead of `foo.lib` does not change the workflow,
    and is an improvement since it's less ambiguous.
 
-If, for some reason, you really need your project to output static libraries of
-the form `foo.lib` when building with MSVC, you can set the
+If, for some reason, you really need your project to output static
+libraries of the form `foo.lib` when building with MSVC, you can set
+the
 [`name_prefix:`](https://mesonbuild.com/Reference-manual.html#library)
-kwarg to `''` and the [`name_suffix:`](https://mesonbuild.com/Reference-manual.html#library)
-kwarg to `'lib'`. To get the default behaviour for each, you can either not
-specify the kwarg, or pass `[]` (an empty array) to it.
+kwarg to `''` and the
+[`name_suffix:`](https://mesonbuild.com/Reference-manual.html#library)
+kwarg to `'lib'`. To get the default behaviour for each, you can
+either not specify the kwarg, or pass `[]` (an empty array) to it.
 
 ## Do I need to add my headers to the sources list like in Autotools?
 
@@ -500,3 +502,130 @@ meson -Dcpp_eh=none -Dcpp_rtti=false <other options>
 ```
 
 The RTTI option is only available since Meson version 0.53.0.
+
+## Should I check for `buildtype` or individual options like `debug` in my build files?
+
+This depends highly on what you actually need to happen. The
+´buildtype` option is meant do describe the current build's
+_intent_. That is, what it will be used for. Individual options are
+for determining what the exact state is. This becomes clearer with a
+few examples.
+
+Suppose you have a source file that is known to miscompile when using
+`-O3` and requires a workaround. Then you'd write something like this:
+
+```meson
+if get_option('optimization') == '3'
+    add_project_arguments('-DOPTIMIZATION_WORKAROUND', ...)
+endif
+```
+
+On the other hand if your project has extra logging and sanity checks
+that you would like to be enabled during the day to day development
+work (which uses the `debug` buildtype), you'd do this instead:
+
+```meson
+if get_option('buildtype') == 'debug'
+    add_project_arguments('-DENABLE_EXTRA_CHECKS', ...)
+endif
+```
+
+In this way the extra options are automatically used during
+development but are not compiled in release builds. Note that (since
+Meson 0.57.0) you can set optimization to, say, 2 in your debug builds
+if you want to. If you tried to set this flag based on optimization
+level, it would fail in this case.
+
+## How do I use a library before declaring it?
+
+This is valid (and good) code:
+```
+libA = library('libA', 'fileA.cpp', link_with : [])
+libB = library('libB', 'fileB.cpp', link_with : [libA])
+```
+But there is currently no way to get something like this to work:
+```
+libB = library('libB', 'fileB.cpp', link_with : [libA])
+libA = library('libA', 'fileA.cpp', link_with : [])
+```
+This means that you HAVE to write your `library(...)` calls in the order that the
+dependencies flow. While ideas to make arbitrary orders possible exist, they were
+rejected because reordering the `library(...)` calls was considered the "proper"
+way. See [here](https://github.com/mesonbuild/meson/issues/8178) for the discussion.
+
+## Why doesn't meson have user defined functions/macros?
+
+The tl;dr answer to this is that meson's design is focused on solving specific
+problems rather than providing a general purpose language to write complex
+code solutions in build files. Build systems should be quick to write and
+quick to understand, functions muddle this simplicity.
+
+The long answer is twofold:
+
+First, Meson aims to provide a rich set of tools that solve specific problems
+simply out of the box. This is similar to the "batteries included" mentality of
+Python. By providing tools that solve common problems in the simplest way
+possible *in* Meson we are solving that problem for everyone instead of forcing
+everyone to solve that problem for themselves over and over again, often
+badly. One example of this are Meson's dependency wrappers around various
+config-tool executables (sdl-config, llvm-config, etc). In other build
+systems each user of that dependency writes a wrapper and deals with the
+corner cases (or doesn't, as is often the case), in Meson we handle them
+internally, everyone gets fixes and the corner cases are ironed out for
+*everyone*. Providing user defined functions or macros goes directly against
+this design goal.
+
+Second, functions and macros makes the build system more difficult to reason
+about. When you encounter some function call, you can refer to the reference
+manual to see that function and its signature. Instead of spending
+frustrating hours trying to interpret some bit of m4 or follow long include
+paths to figure out what `function1` (which calls `function2`, which calls
+`function3`, ad infinitum), you know what the build system is doing. Unless
+you're actively developing Meson itself, it's just a tool to orchestrate
+building the thing you actually care about. We want you to spend as little
+time worrying about build systems as possible so you can spend more time on
+*your code*.
+
+Many times user defined functions are used due to a lack of loops or
+because loops are tedious to use in the language. Meson has both arrays/lists
+and hashes/dicts natively. Compare the following pseudo code:
+
+```meson
+func(name, sources, extra_args)
+  executable(
+    name,
+    sources,
+    c_args : extra_args
+  )
+endfunc
+
+func(exe1, ['1.c', 'common.c'], [])
+func(exe2, ['2.c', 'common.c'], [])
+func(exe2_a, ['2.c', 'common.c'], ['-arg'])
+```
+
+```meson
+foreach e : [['1', '1.c', []],
+             ['2', '2.c', []],
+             ['2', '2.c', ['-arg']]]
+  executable(
+    'exe' + e[0],
+    e[1],
+    c_args : e[2],
+  )
+endforeach
+```
+
+The loop is both less code and is much easier to reason about than the function
+version is, especially if the function were to live in a separate file, as is
+common in other popular build systems.
+
+Build system DSLs also tend to be badly thought out as generic programming
+languages, Meson tries to make it easy to use external scripts or programs
+for handling complex problems. While one can't always convert build logic
+into a scripting language (or compiled language), when it can be done this is
+often a better solution. External languages tend to be well-thought-out and
+tested, generally don't regress, and users are more likely to have domain
+knowledge about them. They also tend to have better tooling (such as
+autocompletion, linting, testing solutions), which make them a lower
+maintenance burden over time.

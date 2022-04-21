@@ -31,7 +31,7 @@ typedef struct QTestState QTestState;
  *
  * Returns: #QTestState instance.
  */
-QTestState *qtest_initf(const char *fmt, ...) GCC_FMT_ATTR(1, 2);
+QTestState *qtest_initf(const char *fmt, ...) G_GNUC_PRINTF(1, 2);
 
 /**
  * qtest_vinitf:
@@ -43,7 +43,7 @@ QTestState *qtest_initf(const char *fmt, ...) GCC_FMT_ATTR(1, 2);
  *
  * Returns: #QTestState instance.
  */
-QTestState *qtest_vinitf(const char *fmt, va_list ap) GCC_FMT_ATTR(1, 0);
+QTestState *qtest_vinitf(const char *fmt, va_list ap) G_GNUC_PRINTF(1, 0);
 
 /**
  * qtest_init:
@@ -75,6 +75,17 @@ QTestState *qtest_init_without_qmp_handshake(const char *extra_args);
 QTestState *qtest_init_with_serial(const char *extra_args, int *sock_fd);
 
 /**
+ * qtest_kill_qemu:
+ * @s: #QTestState instance to operate on.
+ *
+ * Kill the QEMU process and wait for it to terminate. It is safe to call this
+ * function multiple times. Normally qtest_quit() is used instead because it
+ * also frees QTestState. Use qtest_kill_qemu() when you just want to kill QEMU
+ * and qtest_quit() will be called later.
+ */
+void qtest_kill_qemu(QTestState *s);
+
+/**
  * qtest_quit:
  * @s: #QTestState instance to operate on.
  *
@@ -95,7 +106,7 @@ void qtest_quit(QTestState *s);
  */
 QDict *qtest_qmp_fds(QTestState *s, int *fds, size_t fds_num,
                      const char *fmt, ...)
-    GCC_FMT_ATTR(4, 5);
+    G_GNUC_PRINTF(4, 5);
 
 /**
  * qtest_qmp:
@@ -107,7 +118,7 @@ QDict *qtest_qmp_fds(QTestState *s, int *fds, size_t fds_num,
  * Sends a QMP message to QEMU and returns the response.
  */
 QDict *qtest_qmp(QTestState *s, const char *fmt, ...)
-    GCC_FMT_ATTR(2, 3);
+    G_GNUC_PRINTF(2, 3);
 
 /**
  * qtest_qmp_send:
@@ -119,7 +130,7 @@ QDict *qtest_qmp(QTestState *s, const char *fmt, ...)
  * Sends a QMP message to QEMU and leaves the response in the stream.
  */
 void qtest_qmp_send(QTestState *s, const char *fmt, ...)
-    GCC_FMT_ATTR(2, 3);
+    G_GNUC_PRINTF(2, 3);
 
 /**
  * qtest_qmp_send_raw:
@@ -130,7 +141,15 @@ void qtest_qmp_send(QTestState *s, const char *fmt, ...)
  * this is useful for negative tests.
  */
 void qtest_qmp_send_raw(QTestState *s, const char *fmt, ...)
-    GCC_FMT_ATTR(2, 3);
+    G_GNUC_PRINTF(2, 3);
+
+/**
+ * qtest_socket_server:
+ * @socket_path: the UNIX domain socket path
+ *
+ * Create and return a listen socket file descriptor, or abort on failure.
+ */
+int qtest_socket_server(const char *socket_path);
 
 /**
  * qtest_vqmp_fds:
@@ -146,7 +165,7 @@ void qtest_qmp_send_raw(QTestState *s, const char *fmt, ...)
  */
 QDict *qtest_vqmp_fds(QTestState *s, int *fds, size_t fds_num,
                       const char *fmt, va_list ap)
-    GCC_FMT_ATTR(4, 0);
+    G_GNUC_PRINTF(4, 0);
 
 /**
  * qtest_vqmp:
@@ -159,7 +178,7 @@ QDict *qtest_vqmp_fds(QTestState *s, int *fds, size_t fds_num,
  * Sends a QMP message to QEMU and returns the response.
  */
 QDict *qtest_vqmp(QTestState *s, const char *fmt, va_list ap)
-    GCC_FMT_ATTR(2, 0);
+    G_GNUC_PRINTF(2, 0);
 
 /**
  * qtest_qmp_vsend_fds:
@@ -175,7 +194,7 @@ QDict *qtest_vqmp(QTestState *s, const char *fmt, va_list ap)
  */
 void qtest_qmp_vsend_fds(QTestState *s, int *fds, size_t fds_num,
                          const char *fmt, va_list ap)
-    GCC_FMT_ATTR(4, 0);
+    G_GNUC_PRINTF(4, 0);
 
 /**
  * qtest_qmp_vsend:
@@ -188,7 +207,7 @@ void qtest_qmp_vsend_fds(QTestState *s, int *fds, size_t fds_num,
  * Sends a QMP message to QEMU and leaves the response in the stream.
  */
 void qtest_qmp_vsend(QTestState *s, const char *fmt, va_list ap)
-    GCC_FMT_ATTR(2, 0);
+    G_GNUC_PRINTF(2, 0);
 
 /**
  * qtest_qmp_receive_dict:
@@ -250,7 +269,7 @@ QDict *qtest_qmp_event_ref(QTestState *s, const char *event);
  *
  * Returns: the command's output.  The caller should g_free() it.
  */
-char *qtest_hmp(QTestState *s, const char *fmt, ...) GCC_FMT_ATTR(2, 3);
+char *qtest_hmp(QTestState *s, const char *fmt, ...) G_GNUC_PRINTF(2, 3);
 
 /**
  * qtest_hmpv:
@@ -264,7 +283,7 @@ char *qtest_hmp(QTestState *s, const char *fmt, ...) GCC_FMT_ATTR(2, 3);
  * Returns: the command's output.  The caller should g_free() it.
  */
 char *qtest_vhmp(QTestState *s, const char *fmt, va_list ap)
-    GCC_FMT_ATTR(2, 0);
+    G_GNUC_PRINTF(2, 0);
 
 void qtest_module_load(QTestState *s, const char *prefix, const char *libname);
 
@@ -570,6 +589,14 @@ bool qtest_big_endian(QTestState *s);
 const char *qtest_get_arch(void);
 
 /**
+ * qtest_has_accel:
+ * @accel_name: Accelerator name to check for.
+ *
+ * Returns: true if the accelerator is built in.
+ */
+bool qtest_has_accel(const char *accel_name);
+
+/**
  * qtest_add_func:
  * @str: Test case path.
  * @fn: Test case function
@@ -630,7 +657,25 @@ void qtest_add_data_func_full(const char *str, void *data,
         g_free(path); \
     } while (0)
 
+/**
+ * qtest_add_abrt_handler:
+ * @fn: Handler function
+ * @data: Argument that is passed to the handler
+ *
+ * Add a handler function that is invoked on SIGABRT. This can be used to
+ * terminate processes and perform other cleanup. The handler can be removed
+ * with qtest_remove_abrt_handler().
+ */
 void qtest_add_abrt_handler(GHookFunc fn, const void *data);
+
+/**
+ * qtest_remove_abrt_handler:
+ * @data: Argument previously passed to qtest_add_abrt_handler()
+ *
+ * Remove an abrt handler that was previously added with
+ * qtest_add_abrt_handler().
+ */
+void qtest_remove_abrt_handler(void *data);
 
 /**
  * qtest_qmp_assert_success:
@@ -643,17 +688,17 @@ void qtest_add_abrt_handler(GHookFunc fn, const void *data);
  * the response.
  */
 void qtest_qmp_assert_success(QTestState *qts, const char *fmt, ...)
-    GCC_FMT_ATTR(2, 3);
+    G_GNUC_PRINTF(2, 3);
 
 QDict *qmp_fd_receive(int fd);
 void qmp_fd_vsend_fds(int fd, int *fds, size_t fds_num,
-                      const char *fmt, va_list ap) GCC_FMT_ATTR(4, 0);
-void qmp_fd_vsend(int fd, const char *fmt, va_list ap) GCC_FMT_ATTR(2, 0);
-void qmp_fd_send(int fd, const char *fmt, ...) GCC_FMT_ATTR(2, 3);
-void qmp_fd_send_raw(int fd, const char *fmt, ...) GCC_FMT_ATTR(2, 3);
-void qmp_fd_vsend_raw(int fd, const char *fmt, va_list ap) GCC_FMT_ATTR(2, 0);
-QDict *qmp_fdv(int fd, const char *fmt, va_list ap) GCC_FMT_ATTR(2, 0);
-QDict *qmp_fd(int fd, const char *fmt, ...) GCC_FMT_ATTR(2, 3);
+                      const char *fmt, va_list ap) G_GNUC_PRINTF(4, 0);
+void qmp_fd_vsend(int fd, const char *fmt, va_list ap) G_GNUC_PRINTF(2, 0);
+void qmp_fd_send(int fd, const char *fmt, ...) G_GNUC_PRINTF(2, 3);
+void qmp_fd_send_raw(int fd, const char *fmt, ...) G_GNUC_PRINTF(2, 3);
+void qmp_fd_vsend_raw(int fd, const char *fmt, va_list ap) G_GNUC_PRINTF(2, 0);
+QDict *qmp_fdv(int fd, const char *fmt, va_list ap) G_GNUC_PRINTF(2, 0);
+QDict *qmp_fd(int fd, const char *fmt, ...) G_GNUC_PRINTF(2, 3);
 
 /**
  * qtest_cb_for_every_machine:
@@ -664,6 +709,22 @@ QDict *qmp_fd(int fd, const char *fmt, ...) GCC_FMT_ATTR(2, 3);
  */
 void qtest_cb_for_every_machine(void (*cb)(const char *machine),
                                 bool skip_old_versioned);
+
+/**
+ * qtest_has_machine:
+ * @machine: The machine to look for
+ *
+ * Returns: true if the machine is available in the target binary.
+ */
+bool qtest_has_machine(const char *machine);
+
+/**
+ * qtest_has_device:
+ * @device: The device to look for
+ *
+ * Returns: true if the device is available in the target binary.
+ */
+bool qtest_has_device(const char *device);
 
 /**
  * qtest_qmp_device_add_qdict:
@@ -689,7 +750,17 @@ void qtest_qmp_device_add_qdict(QTestState *qts, const char *drv,
  * Generic hot-plugging test via the device_add QMP command.
  */
 void qtest_qmp_device_add(QTestState *qts, const char *driver, const char *id,
-                          const char *fmt, ...) GCC_FMT_ATTR(4, 5);
+                          const char *fmt, ...) G_GNUC_PRINTF(4, 5);
+
+/**
+ * qtest_qmp_add_client:
+ * @qts: QTestState instance to operate on
+ * @protocol: the protocol to add to
+ * @fd: the client file-descriptor
+ *
+ * Call QMP ``getfd`` followed by ``add_client`` with the given @fd.
+ */
+void qtest_qmp_add_client(QTestState *qts, const char *protocol, int fd);
 
 /**
  * qtest_qmp_device_del:

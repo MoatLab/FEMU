@@ -72,8 +72,7 @@
 
 #if defined(TARGET_I386) || defined(TARGET_ARM) || defined(TARGET_SH4) \
     || defined(TARGET_M68K) || defined(TARGET_CRIS) \
-    || defined(TARGET_S390X) \
-    || defined(TARGET_OPENRISC) || defined(TARGET_TILEGX) \
+    || defined(TARGET_S390X) || defined(TARGET_OPENRISC) \
     || defined(TARGET_NIOS2) || defined(TARGET_RISCV) \
     || defined(TARGET_XTENSA)
 
@@ -103,6 +102,14 @@
 #define TARGET_IOC_NONE   0U
 #define TARGET_IOC_WRITE  2U
 #define TARGET_IOC_READ   1U
+
+#elif defined(TARGET_HEXAGON)
+
+#define TARGET_IOC_SIZEBITS     14
+
+#define TARGET_IOC_NONE   0U
+#define TARGET_IOC_WRITE  1U
+#define TARGET_IOC_READ          2U
 
 #else
 #error unsupported CPU
@@ -430,11 +437,11 @@ struct target_dirent {
 };
 
 struct target_dirent64 {
-	uint64_t	d_ino;
-	int64_t		d_off;
-	unsigned short	d_reclen;
+	abi_ullong      d_ino;
+	abi_llong       d_off;
+	abi_ushort      d_reclen;
 	unsigned char	d_type;
-	char		d_name[256];
+	char		d_name[];
 };
 
 
@@ -485,7 +492,7 @@ void target_to_host_old_sigset(sigset_t *sigset,
                                const abi_ulong *old_sigset);
 struct target_sigaction;
 int do_sigaction(int sig, const struct target_sigaction *act,
-                 struct target_sigaction *oact);
+                 struct target_sigaction *oact, abi_ulong ka_restorer);
 
 #include "target_signal.h"
 
@@ -494,27 +501,12 @@ int do_sigaction(int sig, const struct target_sigaction *act,
 #endif
 
 #if defined(TARGET_ALPHA)
-struct target_old_sigaction {
-    abi_ulong _sa_handler;
-    abi_ulong sa_mask;
-    int32_t sa_flags;
-};
+typedef int32_t target_old_sa_flags;
+#else
+typedef abi_ulong target_old_sa_flags;
+#endif
 
-struct target_rt_sigaction {
-    abi_ulong _sa_handler;
-    abi_ulong sa_flags;
-    target_sigset_t sa_mask;
-};
-
-/* This is the struct used inside the kernel.  The ka_restorer
-   field comes from the 5th argument to sys_rt_sigaction.  */
-struct target_sigaction {
-    abi_ulong _sa_handler;
-    abi_ulong sa_flags;
-    target_sigset_t sa_mask;
-    abi_ulong sa_restorer;
-};
-#elif defined(TARGET_MIPS)
+#if defined(TARGET_MIPS)
 struct target_sigaction {
 	uint32_t	sa_flags;
 #if defined(TARGET_ABI_MIPSN32)
@@ -532,7 +524,7 @@ struct target_sigaction {
 struct target_old_sigaction {
         abi_ulong _sa_handler;
         abi_ulong sa_mask;
-        abi_ulong sa_flags;
+        target_old_sa_flags sa_flags;
 #ifdef TARGET_ARCH_HAS_SA_RESTORER
         abi_ulong sa_restorer;
 #endif
@@ -683,10 +675,6 @@ typedef struct target_siginfo {
 #define TARGET_ILL_PRVREG	(6)	/* privileged register */
 #define TARGET_ILL_COPROC	(7)	/* coprocessor error */
 #define TARGET_ILL_BADSTK	(8)	/* internal stack error */
-#ifdef TARGET_TILEGX
-#define TARGET_ILL_DBLFLT       (9)     /* double fault */
-#define TARGET_ILL_HARDWALL     (10)    /* user networks hardwall violation */
-#endif
 
 /*
  * SIGFPE si_codes
@@ -700,7 +688,7 @@ typedef struct target_siginfo {
 #define TARGET_FPE_FLTINV      (7)  /* floating point invalid operation */
 #define TARGET_FPE_FLTSUB      (8)  /* subscript out of range */
 #define TARGET_FPE_FLTUNK      (14) /* undiagnosed fp exception */
-#define TARGET_NSIGFPE         15
+#define TARGET_FPE_CONDTRAP    (15) /* trap on condition */
 
 /*
  * SIGSEGV si_codes
@@ -727,58 +715,9 @@ typedef struct target_siginfo {
 #define TARGET_TRAP_TRACE	(2)	/* process trace trap */
 #define TARGET_TRAP_BRANCH      (3)     /* process taken branch trap */
 #define TARGET_TRAP_HWBKPT      (4)     /* hardware breakpoint/watchpoint */
+#define TARGET_TRAP_UNK         (5)     /* undiagnosed trap */
 
-struct target_rlimit {
-        abi_ulong   rlim_cur;
-        abi_ulong   rlim_max;
-};
-
-#if defined(TARGET_ALPHA)
-#define TARGET_RLIM_INFINITY	0x7fffffffffffffffull
-#elif defined(TARGET_MIPS) || (defined(TARGET_SPARC) && TARGET_ABI_BITS == 32)
-#define TARGET_RLIM_INFINITY	0x7fffffffUL
-#else
-#define TARGET_RLIM_INFINITY	((abi_ulong)-1)
-#endif
-
-#if defined(TARGET_MIPS)
-#define TARGET_RLIMIT_CPU		0
-#define TARGET_RLIMIT_FSIZE		1
-#define TARGET_RLIMIT_DATA		2
-#define TARGET_RLIMIT_STACK		3
-#define TARGET_RLIMIT_CORE		4
-#define TARGET_RLIMIT_RSS		7
-#define TARGET_RLIMIT_NPROC		8
-#define TARGET_RLIMIT_NOFILE		5
-#define TARGET_RLIMIT_MEMLOCK		9
-#define TARGET_RLIMIT_AS		6
-#define TARGET_RLIMIT_LOCKS		10
-#define TARGET_RLIMIT_SIGPENDING	11
-#define TARGET_RLIMIT_MSGQUEUE		12
-#define TARGET_RLIMIT_NICE		13
-#define TARGET_RLIMIT_RTPRIO		14
-#else
-#define TARGET_RLIMIT_CPU		0
-#define TARGET_RLIMIT_FSIZE		1
-#define TARGET_RLIMIT_DATA		2
-#define TARGET_RLIMIT_STACK		3
-#define TARGET_RLIMIT_CORE		4
-#define TARGET_RLIMIT_RSS		5
-#if defined(TARGET_SPARC)
-#define TARGET_RLIMIT_NOFILE		6
-#define TARGET_RLIMIT_NPROC		7
-#else
-#define TARGET_RLIMIT_NPROC		6
-#define TARGET_RLIMIT_NOFILE		7
-#endif
-#define TARGET_RLIMIT_MEMLOCK		8
-#define TARGET_RLIMIT_AS		9
-#define TARGET_RLIMIT_LOCKS		10
-#define TARGET_RLIMIT_SIGPENDING	11
-#define TARGET_RLIMIT_MSGQUEUE		12
-#define TARGET_RLIMIT_NICE		13
-#define TARGET_RLIMIT_RTPRIO		14
-#endif
+#include "target_resource.h"
 
 struct target_pollfd {
     int fd;           /* file descriptor */
@@ -929,6 +868,38 @@ struct target_rtc_pll_info {
 
 #define TARGET_SIOCGIWNAME     0x8B01          /* get name == wireless protocol */
 
+/* From <linux/if_tun.h> */
+
+#define TARGET_TUNSETDEBUG        TARGET_IOW('T', 201, int)
+#define TARGET_TUNSETIFF          TARGET_IOW('T', 202, int)
+#define TARGET_TUNSETPERSIST      TARGET_IOW('T', 203, int)
+#define TARGET_TUNSETOWNER        TARGET_IOW('T', 204, int)
+#define TARGET_TUNSETLINK         TARGET_IOW('T', 205, int)
+#define TARGET_TUNSETGROUP        TARGET_IOW('T', 206, int)
+#define TARGET_TUNGETFEATURES     TARGET_IOR('T', 207, unsigned int)
+#define TARGET_TUNSETOFFLOAD      TARGET_IOW('T', 208, unsigned int)
+#define TARGET_TUNSETTXFILTER     TARGET_IOW('T', 209, unsigned int)
+#define TARGET_TUNGETIFF          TARGET_IOR('T', 210, unsigned int)
+#define TARGET_TUNGETSNDBUF       TARGET_IOR('T', 211, int)
+#define TARGET_TUNSETSNDBUF       TARGET_IOW('T', 212, int)
+/*
+ * TUNATTACHFILTER and TUNDETACHFILTER are not supported. Linux kernel keeps a
+ * user pointer in TUNATTACHFILTER, which we are not able to correctly handle.
+ */
+#define TARGET_TUNGETVNETHDRSZ    TARGET_IOR('T', 215, int)
+#define TARGET_TUNSETVNETHDRSZ    TARGET_IOW('T', 216, int)
+#define TARGET_TUNSETQUEUE        TARGET_IOW('T', 217, int)
+#define TARGET_TUNSETIFINDEX      TARGET_IOW('T', 218, unsigned int)
+/* TUNGETFILTER is not supported: see TUNATTACHFILTER. */
+#define TARGET_TUNSETVNETLE       TARGET_IOW('T', 220, int)
+#define TARGET_TUNGETVNETLE       TARGET_IOR('T', 221, int)
+#define TARGET_TUNSETVNETBE       TARGET_IOW('T', 222, int)
+#define TARGET_TUNGETVNETBE       TARGET_IOR('T', 223, int)
+#define TARGET_TUNSETSTEERINGEBPF TARGET_IOR('T', 224, int)
+#define TARGET_TUNSETFILTEREBPF   TARGET_IOR('T', 225, int)
+#define TARGET_TUNSETCARRIER      TARGET_IOW('T', 226, int)
+#define TARGET_TUNGETDEVNETNS     TARGET_IO('T', 227)
+
 /* From <linux/random.h> */
 
 #define TARGET_RNDGETENTCNT    TARGET_IOR('R', 0x00, int)
@@ -1006,7 +977,7 @@ struct target_rtc_pll_info {
 #define TARGET_FS_IOC32_SETVERSION TARGET_IOW('v', 2, int)
 
 /* btrfs ioctls */
-#ifdef CONFIG_BTRFS
+#ifdef HAVE_BTRFS_H
 #define TARGET_BTRFS_IOC_SNAP_CREATE            TARGET_IOWU(BTRFS_IOCTL_MAGIC, 1)
 #define TARGET_BTRFS_IOC_SCAN_DEV               TARGET_IOWU(BTRFS_IOCTL_MAGIC, 4)
 #define TARGET_BTRFS_IOC_FORGET_DEV             TARGET_IOWU(BTRFS_IOCTL_MAGIC, 5)
@@ -1199,6 +1170,10 @@ struct target_rtc_pll_info {
 #define TARGET_LOOP_SET_STATUS64      0x4C04
 #define TARGET_LOOP_GET_STATUS64      0x4C05
 #define TARGET_LOOP_CHANGE_FD         0x4C06
+#define TARGET_LOOP_SET_CAPACITY      0x4C07
+#define TARGET_LOOP_SET_DIRECT_IO     0x4C08
+#define TARGET_LOOP_SET_BLOCK_SIZE    0x4C09
+#define TARGET_LOOP_CONFIGURE         0x4C0A
 
 #define TARGET_LOOP_CTL_ADD           0x4C80
 #define TARGET_LOOP_CTL_REMOVE        0x4C81
@@ -1279,6 +1254,7 @@ struct target_winsize {
 
 #ifdef TARGET_AARCH64
 #define TARGET_PROT_BTI         0x10
+#define TARGET_PROT_MTE         0x20
 #endif
 
 /* Common */
@@ -1582,7 +1558,7 @@ struct target_stat64 {
 struct target_stat {
 	abi_ulong st_dev;
 	abi_ulong st_ino;
-#if defined(TARGET_PPC64) && !defined(TARGET_ABI32)
+#if defined(TARGET_PPC64)
 	abi_ulong st_nlink;
 	unsigned int st_mode;
 #else
@@ -1603,12 +1579,12 @@ struct target_stat {
 	abi_ulong  target_st_ctime_nsec;
 	abi_ulong  __unused4;
 	abi_ulong  __unused5;
-#if defined(TARGET_PPC64) && !defined(TARGET_ABI32)
+#if defined(TARGET_PPC64)
 	abi_ulong  __unused6;
 #endif
 };
 
-#if !defined(TARGET_PPC64) || defined(TARGET_ABI32)
+#if !defined(TARGET_PPC64)
 #define TARGET_HAS_STRUCT_STAT64
 struct QEMU_PACKED target_stat64 {
 	unsigned long long st_dev;
@@ -2108,8 +2084,8 @@ struct target_stat64  {
     abi_ulong __unused5;
 };
 
-#elif defined(TARGET_OPENRISC) || defined(TARGET_TILEGX) || \
-      defined(TARGET_NIOS2) || defined(TARGET_RISCV)
+#elif defined(TARGET_OPENRISC) || defined(TARGET_NIOS2) \
+        || defined(TARGET_RISCV) || defined(TARGET_HEXAGON)
 
 /* These are the asm-generic versions of the stat and stat64 structures */
 
@@ -2376,12 +2352,14 @@ struct target_statfs64 {
 #endif
 
 #define TARGET_F_LINUX_SPECIFIC_BASE 1024
-#define TARGET_F_SETLEASE (TARGET_F_LINUX_SPECIFIC_BASE + 0)
-#define TARGET_F_GETLEASE (TARGET_F_LINUX_SPECIFIC_BASE + 1)
-#define TARGET_F_DUPFD_CLOEXEC (TARGET_F_LINUX_SPECIFIC_BASE + 6)
-#define TARGET_F_SETPIPE_SZ (TARGET_F_LINUX_SPECIFIC_BASE + 7)
-#define TARGET_F_GETPIPE_SZ (TARGET_F_LINUX_SPECIFIC_BASE + 8)
-#define TARGET_F_NOTIFY  (TARGET_F_LINUX_SPECIFIC_BASE+2)
+#define TARGET_F_SETLEASE            (TARGET_F_LINUX_SPECIFIC_BASE + 0)
+#define TARGET_F_GETLEASE            (TARGET_F_LINUX_SPECIFIC_BASE + 1)
+#define TARGET_F_DUPFD_CLOEXEC       (TARGET_F_LINUX_SPECIFIC_BASE + 6)
+#define TARGET_F_NOTIFY              (TARGET_F_LINUX_SPECIFIC_BASE + 2)
+#define TARGET_F_SETPIPE_SZ          (TARGET_F_LINUX_SPECIFIC_BASE + 7)
+#define TARGET_F_GETPIPE_SZ          (TARGET_F_LINUX_SPECIFIC_BASE + 8)
+#define TARGET_F_ADD_SEALS           (TARGET_F_LINUX_SPECIFIC_BASE + 9)
+#define TARGET_F_GET_SEALS           (TARGET_F_LINUX_SPECIFIC_BASE + 10)
 
 #include "target_fcntl.h"
 
@@ -2667,7 +2645,7 @@ struct linux_dirent {
     long            d_ino;
     unsigned long   d_off;
     unsigned short  d_reclen;
-    char            d_name[256]; /* We must not include limits.h! */
+    char            d_name[];
 };
 
 struct linux_dirent64 {
@@ -2675,7 +2653,7 @@ struct linux_dirent64 {
     int64_t         d_off;
     unsigned short  d_reclen;
     unsigned char   d_type;
-    char            d_name[256];
+    char            d_name[];
 };
 
 struct target_mq_attr {
@@ -2704,7 +2682,7 @@ struct target_drm_i915_getparam {
 
 #include "socket.h"
 
-#include "errno_defs.h"
+#include "target_errno_defs.h"
 
 #define FUTEX_WAIT              0
 #define FUTEX_WAKE              1
@@ -2744,10 +2722,6 @@ struct target_epoll_event {
 #define TARGET_EP_MAX_EVENTS (INT_MAX / sizeof(struct target_epoll_event))
 
 #endif
-struct target_rlimit64 {
-    uint64_t rlim_cur;
-    uint64_t rlim_max;
-};
 
 struct target_ucred {
     uint32_t pid;
@@ -2861,6 +2835,24 @@ struct target_statx {
    /* 0x90 */
    uint64_t __spare2[14];  /* Spare space for future expansion */
    /* 0x100 */
+};
+
+/* from kernel's include/linux/sched/types.h */
+struct target_sched_attr {
+    abi_uint size;
+    abi_uint sched_policy;
+    abi_ullong sched_flags;
+    abi_int sched_nice;
+    abi_uint sched_priority;
+    abi_ullong sched_runtime;
+    abi_ullong sched_deadline;
+    abi_ullong sched_period;
+    abi_uint sched_util_min;
+    abi_uint sched_util_max;
+};
+
+struct target_sched_param {
+    abi_int sched_priority;
 };
 
 #endif

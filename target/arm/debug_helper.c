@@ -216,9 +216,11 @@ static bool check_watchpoints(ARMCPU *cpu)
     return false;
 }
 
-static bool check_breakpoints(ARMCPU *cpu)
+bool arm_debug_check_breakpoint(CPUState *cs)
 {
+    ARMCPU *cpu = ARM_CPU(cs);
     CPUARMState *env = &cpu->env;
+    target_ulong pc;
     int n;
 
     /*
@@ -230,21 +232,34 @@ static bool check_breakpoints(ARMCPU *cpu)
         return false;
     }
 
+    /*
+     * Single-step exceptions have priority over breakpoint exceptions.
+     * If single-step state is active-pending, suppress the bp.
+     */
+    if (arm_singlestep_active(env) && !(env->pstate & PSTATE_SS)) {
+        return false;
+    }
+
+    /*
+     * PC alignment faults have priority over breakpoint exceptions.
+     */
+    pc = is_a64(env) ? env->pc : env->regs[15];
+    if ((is_a64(env) || !env->thumb) && (pc & 3) != 0) {
+        return false;
+    }
+
+    /*
+     * Instruction aborts have priority over breakpoint exceptions.
+     * TODO: We would need to look up the page for PC and verify that
+     * it is present and executable.
+     */
+
     for (n = 0; n < ARRAY_SIZE(env->cpu_breakpoint); n++) {
         if (bp_wp_matches(cpu, n, false)) {
             return true;
         }
     }
     return false;
-}
-
-void HELPER(check_breakpoints)(CPUARMState *env)
-{
-    ARMCPU *cpu = env_archcpu(env);
-
-    if (check_breakpoints(cpu)) {
-        HELPER(exception_internal(env, EXCP_DEBUG));
-    }
 }
 
 bool arm_debug_check_watchpoint(CPUState *cs, CPUWatchpoint *wp)

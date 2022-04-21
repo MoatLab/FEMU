@@ -1,0 +1,16 @@
+---
+- hosts: all
+  remote_user: '{{ install.flavor }}'
+
+  vars_files:
+    - 'jobs/defaults.yml'
+
+  tasks:
+    - name: Pre-build setup
+      include_tasks: 'tasks/pre-build/main.yml'
+
+    - include: 'projects/{{ project }}.yml'
+      loop:
+        '{{ selected_projects }}'
+      loop_control:
+        loop_var: project

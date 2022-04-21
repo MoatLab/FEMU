@@ -14,9 +14,10 @@
 
 from mesonbuild import environment, mesonlib
 
-import argparse, sys, os, subprocess, pathlib, stat
+import argparse, re, sys, os, subprocess, pathlib, stat
+import typing as T
 
-def coverage(outputs, source_root, subproject_root, build_root, log_dir, use_llvm_cov):
+def coverage(outputs: T.List[str], source_root: str, subproject_root: str, build_root: str, log_dir: str, use_llvm_cov: bool) -> int:
     outfiles = []
     exitcode = 0
 
@@ -37,7 +38,7 @@ def coverage(outputs, source_root, subproject_root, build_root, log_dir, use_llv
         if gcovr_exe:
             subprocess.check_call(gcovr_base_cmd +
                                   ['-x',
-                                   '-e', subproject_root,
+                                   '-e', re.escape(subproject_root),
                                    '-o', os.path.join(log_dir, 'coverage.xml')
                                    ] + gcov_exe_args)
             outfiles.append(('Xml', pathlib.Path(log_dir, 'coverage.xml')))
@@ -48,7 +49,7 @@ def coverage(outputs, source_root, subproject_root, build_root, log_dir, use_llv
     if not outputs or 'text' in outputs:
         if gcovr_exe:
             subprocess.check_call(gcovr_base_cmd +
-                                  ['-e', subproject_root,
+                                  ['-e', re.escape(subproject_root),
                                    '-o', os.path.join(log_dir, 'coverage.txt')
                                    ] + gcov_exe_args)
             outfiles.append(('Text', pathlib.Path(log_dir, 'coverage.txt')))
@@ -67,12 +68,12 @@ def coverage(outputs, source_root, subproject_root, build_root, log_dir, use_llv
                 # Create a shim to allow using llvm-cov as a gcov tool.
                 if mesonlib.is_windows():
                     llvm_cov_shim_path = os.path.join(log_dir, 'llvm-cov.bat')
-                    with open(llvm_cov_shim_path, 'w') as llvm_cov_bat:
-                        llvm_cov_bat.write('@"{}" gcov %*'.format(llvm_cov_exe))
+                    with open(llvm_cov_shim_path, 'w', encoding='utf-8') as llvm_cov_bat:
+                        llvm_cov_bat.write(f'@"{llvm_cov_exe}" gcov %*')
                 else:
                     llvm_cov_shim_path = os.path.join(log_dir, 'llvm-cov.sh')
-                    with open(llvm_cov_shim_path, 'w') as llvm_cov_sh:
-                        llvm_cov_sh.write('#!/usr/bin/env sh\nexec "{}" gcov $@'.format(llvm_cov_exe))
+                    with open(llvm_cov_shim_path, 'w', encoding='utf-8') as llvm_cov_sh:
+                        llvm_cov_sh.write(f'#!/usr/bin/env sh\nexec "{llvm_cov_exe}" gcov $@')
                     os.chmod(llvm_cov_shim_path, os.stat(llvm_cov_shim_path).st_mode | stat.S_IEXEC)
                 gcov_tool_args = ['--gcov-tool', llvm_cov_shim_path]
             else:
@@ -127,7 +128,7 @@ def coverage(outputs, source_root, subproject_root, build_root, log_dir, use_llv
                                   ['--html',
                                    '--html-details',
                                    '--print-summary',
-                                   '-e', subproject_root,
+                                   '-e', re.escape(subproject_root),
                                    '-o', os.path.join(htmloutdir, 'index.html'),
                                    ])
             outfiles.append(('Html', pathlib.Path(htmloutdir, 'index.html')))
@@ -146,7 +147,7 @@ def coverage(outputs, source_root, subproject_root, build_root, log_dir, use_llv
 
     return exitcode
 
-def run(args):
+def run(args: T.List[str]) -> int:
     if not os.path.isfile('build.ninja'):
         print('Coverage currently only works with the Ninja backend.')
         return 1

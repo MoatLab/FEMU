@@ -1,0 +1,138 @@
+#################################################################################
+#										#
+#			TPM2 regression test Directory of files			#
+#			     Written by Ken Goldman				#
+#		       IBM Thomas J. Watson Research Center			#
+#										#
+# (c) Copyright IBM Corporation 2015 - 2019					#
+# 										#
+# All rights reserved.								#
+# 										#
+# Redistribution and use in source and binary forms, with or without		#
+# modification, are permitted provided that the following conditions are	#
+# met:										#
+# 										#
+# Redistributions of source code must retain the above copyright notice,	#
+# this list of conditions and the following disclaimer.				#
+# 										#
+# Redistributions in binary form must reproduce the above copyright		#
+# notice, this list of conditions and the following disclaimer in the		#
+# documentation and/or other materials provided with the distribution.		#
+# 										#
+# Neither the names of the IBM Corporation nor the names of its			#
+# contributors may be used to endorse or promote products derived from		#
+# this software without specific prior written permission.			#
+# 										#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS		#
+# "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT		#
+# LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR		#
+# A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT		#
+# HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,	#
+# SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT		#
+# LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,		#
+# DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY		#
+# THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT		#
+# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE		#
+# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.		#
+#										#
+#################################################################################
+
+Note that PolicySecret uses a double hash, with the second hash being
+the policyRef.  An empty policyRef is represented by a blank line.
+
+aaa					the characters aaa
+bits48321601.bin			uint64 with those bits set
+msgtpmgen.bin				message with TPM_GENERATED
+policyauthorizesha1.txt			policyauthorize using rsapubkey.pem
+policyauthorizesha256.txt		"
+policyauthorizesha384.txt		"
+policyauthorizesha512.txt		"
+policyauthorizenv.txt			policy authorize NV
+policyauthorizenv-unseal.txt		policyauthorizenv + policyccunseal
+policyccactivate.txt			policy command code activate credential
+policycccertify.txt			policy command code certify
+policycccreate-auth.txt			policy command code create + policy authvalue
+policyccduplicate.txt			policy command code duplicate
+policyccnvchangeauth-auth.txt		policy command code nvchangeauth + policy authvalue
+policyccquote.txt			policy command code quote
+policyccsign.txt			policy command code sign
+policyccsign-auth.txt			policy command code sign + policy authvalue
+policyccundefinespacespecial-auth	policy command code undefinespacespecial + policy authvalue
+policycountertimer.txt			policy counter timer
+policycphash.txt			policy cphash
+policycphashhash.txt			policy cphash data
+policydupsel-no.txt			policy duplicatation select no includeObject
+policydupsel-yes.txt			policy duplicatation select with includeObject
+policyiwgek.txt				standard IWG EK policy, and IWG PolicyA (EH auth)
+policyiwgekcsha256.txt			standard IWG EK policyC (auth NV)
+policyiwgekcsha384.txt			standard IWG EK policyC
+policyiwgekcsha512.txt			standard IWG EK policyC
+policyiwgekbsha256.txt			standard IWG EK policyB (policy OR)
+policyiwgekbsha384.txt			standard IWG EK policyB (policy OR)
+policyiwgekbsha512.txt			standard IWG EK policyB (policy OR)
+policynvargs.txt			policy nv arguments
+policynvnv.txt				policy nv has name and args			
+policyor.txt				policy command code sign | quote
+policypcr.txt				policy pcr intermediate file
+policypcr0.txt				20 zeros
+policypcr16aaasha1.txt			sha1   PCR 16 extend of aaa
+policypcr16aaasha256.txt		sha256 PCR 16 extend of aaa
+policypcr16aaasha384.txt		sha384 PCR 16 extend of aaa
+policypcr16aaasha512.txt		sha512 PCR 16 extend of aaa
+policysecretnv.txt			policy secret using nv index
+policysecretnvpf.txt			policy secret using NV PIN fail index
+policysecretnvpp.txt			policy secret using NV PIN pass index
+policysecretp.txt			policy secret using platform auth
+policysecretsha256.txt			policy secret using loaded object
+policysignedsha1.txt			policy signed using pubkey.pem Name
+policysignedsha256.txt			policy signed using pubkey.pem Name
+policysignedsha384.txt			policy signed using pubkey.pem Name
+policysignedsha512.txt			policy signed using pubkey.pem Name
+policytemplate.txt			template hash input to policytemplatehash
+policytemplatehash.txt			policy template for signing key
+policywrittenset.txt			policy nv written with written set
+
+policywrittenclrsigned.txt		policy nv written with written clear + policy signed
+policywrittensetsigned.txt		policy nv written with written set + policy signed
+policyorwrittensigned.txt		policy OR of the above two policies
+
+pnhnamehash.txt				name hash
+
+nvwritecphasha.txt			intermediate value
+nvwriteahasha.txt			intermediate value externally signed	
+nvwritecphashb.txt			intermediate value
+nvwriteahashb.txt			intermediate value externally signed	
+
+privkey.pem				RSA private key for policy signed
+pubkey.pem				RSA public key for policy signed
+p256privkey.pem				ECC private key for policy signed
+p256pubkey.pem				ECC public key for policy signed
+
+sha1.bin		big endian sha1   algorithm ID, for policyAuthorizeNV
+sha256.bin		big endian sha256 algorithm ID, for policyAuthorizeNV
+sha384.bin		big endian sha384 algorithm ID, for policyAuthorizeNV
+sha512.bin		big endian sha512 algorithm ID, for policyAuthorizeNV
+
+sha1aaa.bin		sha1   of aaa
+sha1extaaa.bin		sha1   extend of aaa
+sha1extaaa0.bin		sha1   extend of aaa zero padded	
+sha1exthaaa.bin		sha1   extend of hash of aaa
+
+sha256aaa.bin		sha256 of aaa
+sha256extaaa.bin	sha256 extend of aaa
+sha256extaaa0.bin	sha256 extend of aaa zero padded
+sha256exthaaa.bin	sha256 extend of hash of aaa
+
+sha384aaa.bin		sha384 of aaa
+sha384extaaa.bin	sha384 extend of aaa
+sha384exthaaa.bin	sha384 extend of hash of aaa
+sha384extaaa0.bin	sha384 extend of aaa zero padded
+
+sha512aaa.bin		sha512 of aaa
+sha512extaaa.bin	sha512 extend of aaa
+sha512exthaaa.bin	sha512 extend of hash of aaa
+sha512extaaa0.bin	sha512 extend of aaa zero padded
+
+zero4.bin		4 bytes of zero (e.g., just expiration data for policysigned)
+zero8.bin		8 bytes of zero
+zerosha256.bin		32 bytes of zero

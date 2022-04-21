@@ -1,0 +1,24 @@
+memboot
+=======
+
+This is a small utility designed to be run on the ASPEED BMC used in
+some OpenPower systems. It allows you to boot the P8 host from the
+main system memory of the BMC rather than from the flash memory.
+
+This is mainly useful for firmware development as it makes it possible
+to try new firmware images without first having to write the new image
+to flash memory which can be a lengthy process.
+
+Building:
+---------
+
+CC=<arm toolchain> make
+
+Usage:
+-----
+
+./memboot <flash image> - Will cause the P8 host to boot from BMC
+	  	 	  system memory at next power on.
+
+./memboot 		- Will boot the system from flash memory at next
+			  power on.

@@ -37,7 +37,8 @@ struct vhost_scsi_target;
 struct vhost_iotlb_msg;
 struct vhost_virtqueue;
 
-typedef int (*vhost_backend_init)(struct vhost_dev *dev, void *opaque);
+typedef int (*vhost_backend_init)(struct vhost_dev *dev, void *opaque,
+                                  Error **errp);
 typedef int (*vhost_backend_cleanup)(struct vhost_dev *dev);
 typedef int (*vhost_backend_memslots_limit)(struct vhost_dev *dev);
 
@@ -97,7 +98,7 @@ typedef int (*vhost_set_config_op)(struct vhost_dev *dev, const uint8_t *data,
                                    uint32_t offset, uint32_t size,
                                    uint32_t flags);
 typedef int (*vhost_get_config_op)(struct vhost_dev *dev, uint8_t *config,
-                                   uint32_t config_len);
+                                   uint32_t config_len, Error **errp);
 
 typedef int (*vhost_crypto_create_session_op)(struct vhost_dev *dev,
                                               void *session_info,
@@ -171,12 +172,6 @@ typedef struct VhostOps {
     vhost_get_device_id_op vhost_get_device_id;
     vhost_force_iommu_op vhost_force_iommu;
 } VhostOps;
-
-extern const VhostOps user_ops;
-extern const VhostOps vdpa_ops;
-
-int vhost_set_backend_type(struct vhost_dev *dev,
-                           VhostBackendType backend_type);
 
 int vhost_backend_update_device_iotlb(struct vhost_dev *dev,
                                              uint64_t iova, uint64_t uaddr,

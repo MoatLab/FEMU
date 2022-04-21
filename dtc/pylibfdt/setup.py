@@ -19,23 +19,33 @@ import sys
 VERSION_PATTERN = '^#define DTC_VERSION "DTC ([^"]*)"$'
 
 
+def get_top_builddir():
+    if '--top-builddir' in sys.argv:
+        index = sys.argv.index('--top-builddir')
+        sys.argv.pop(index)
+        return sys.argv.pop(index)
+    else:
+        return os.getcwd()
+
+
+srcdir = os.path.dirname(os.path.abspath(sys.argv[0]))
+top_builddir = get_top_builddir()
+
+
 def get_version():
-    version_file = "../version_gen.h"
+    version_file = os.path.join(top_builddir, 'version_gen.h')
     f = open(version_file, 'rt')
     m = re.match(VERSION_PATTERN, f.readline())
     return m.group(1)
 
 
-setupdir = os.path.dirname(os.path.abspath(sys.argv[0]))
-os.chdir(setupdir)
-
 libfdt_module = Extension(
     '_libfdt',
-    sources=['libfdt.i'],
-    include_dirs=['../libfdt'],
+    sources=[os.path.join(srcdir, 'libfdt.i')],
+    include_dirs=[os.path.join(srcdir, '../libfdt')],
     libraries=['fdt'],
-    library_dirs=['../libfdt'],
-    swig_opts=['-I../libfdt'],
+    library_dirs=[os.path.join(top_builddir, 'libfdt')],
+    swig_opts=['-I' + os.path.join(srcdir, '../libfdt')],
 )
 
 setup(
@@ -44,5 +54,6 @@ setup(
     author='Simon Glass <sjg@chromium.org>',
     description='Python binding for libfdt',
     ext_modules=[libfdt_module],
+    package_dir={'': srcdir},
     py_modules=['libfdt'],
 )

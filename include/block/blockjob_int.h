@@ -39,6 +39,13 @@ struct BlockJobDriver {
     JobDriver job_driver;
 
     /*
+     * I/O API functions. These functions are thread-safe.
+     *
+     * See include/block/block-io.h for more information about
+     * the I/O API.
+     */
+
+    /*
      * Returns whether the job has pending requests for the child or will
      * submit new requests before the next pause point. This callback is polled
      * in the context of draining a job node after requesting that the job be
@@ -47,12 +54,28 @@ struct BlockJobDriver {
     bool (*drained_poll)(BlockJob *job);
 
     /*
+     * Global state (GS) API. These functions run under the BQL.
+     *
+     * See include/block/block-global-state.h for more information about
+     * the GS API.
+     */
+
+    /*
      * If the callback is not NULL, it will be invoked before the job is
      * resumed in a new AioContext.  This is the place to move any resources
      * besides job->blk to the new AioContext.
      */
     void (*attached_aio_context)(BlockJob *job, AioContext *new_context);
+
+    void (*set_speed)(BlockJob *job, int64_t speed);
 };
+
+/*
+ * Global state (GS) API. These functions run under the BQL.
+ *
+ * See include/block/block-global-state.h for more information about
+ * the GS API.
+ */
 
 /**
  * block_job_create:
@@ -95,6 +118,13 @@ void block_job_free(Job *job);
  * iostatus when the user resumes @job.
  */
 void block_job_user_resume(Job *job);
+
+/*
+ * I/O API functions. These functions are thread-safe.
+ *
+ * See include/block/block-io.h for more information about
+ * the I/O API.
+ */
 
 /**
  * block_job_ratelimit_get_delay:

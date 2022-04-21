@@ -1,4 +1,4 @@
-# See docs/devel/tracing.txt for syntax documentation.
+# See docs/devel/tracing.rst for syntax documentation.
 
 # jazz_led.c
 jazz_led_read(uint64_t addr, uint8_t val) "read addr=0x%"PRIx64": 0x%x"
@@ -13,16 +13,6 @@ xenfb_input_connected(void *xendev, int abs_pointer_wanted) "%p abs %d"
 g364fb_read(uint64_t addr, uint32_t val) "read addr=0x%"PRIx64": 0x%x"
 g364fb_write(uint64_t addr, uint32_t new) "write addr=0x%"PRIx64": 0x%x"
 
-# milkymist-tmu2.c
-milkymist_tmu2_memory_read(uint32_t addr, uint32_t value) "addr 0x%08x value 0x%08x"
-milkymist_tmu2_memory_write(uint32_t addr, uint32_t value) "addr 0x%08x value 0x%08x"
-milkymist_tmu2_start(void) "Start TMU"
-milkymist_tmu2_pulse_irq(void) "Pulse IRQ"
-
-# milkymist-vgafb.c
-milkymist_vgafb_memory_read(uint32_t addr, uint32_t value) "addr 0x%08x value 0x%08x"
-milkymist_vgafb_memory_write(uint32_t addr, uint32_t value) "addr 0x%08x value 0x%08x"
-
 # vmware_vga.c
 vmware_value_read(uint32_t index, uint32_t value) "index %d, value 0x%x"
 vmware_value_write(uint32_t index, uint32_t value) "index %d, value 0x%x"
@@ -31,6 +21,9 @@ vmware_palette_write(uint32_t index, uint32_t value) "index %d, value 0x%x"
 vmware_scratch_read(uint32_t index, uint32_t value) "index %d, value 0x%x"
 vmware_scratch_write(uint32_t index, uint32_t value) "index %d, value 0x%x"
 vmware_setmode(uint32_t w, uint32_t h, uint32_t bpp) "%dx%d @ %d bpp"
+vmware_verify_rect_less_than_zero(const char *name, const char *param, int x) "%s: %s was < 0 (%d)"
+vmware_verify_rect_greater_than_bound(const char *name, const char *param, int bound, int x) "%s: %s was > %d (%d)"
+vmware_verify_rect_surface_bound_exceeded(const char *name, const char *component, int bound, const char *param1, int value1, const char *param2, int value2) "%s: %s > %d (%s: %d, %s: %d)"
 
 # virtio-gpu-base.c
 virtio_gpu_features(bool virgl) "virgl %d"
@@ -40,8 +33,10 @@ virtio_gpu_features(bool virgl) "virgl %d"
 virtio_gpu_cmd_get_display_info(void) ""
 virtio_gpu_cmd_get_edid(uint32_t scanout) "scanout %d"
 virtio_gpu_cmd_set_scanout(uint32_t id, uint32_t res, uint32_t w, uint32_t h, uint32_t x, uint32_t y) "id %d, res 0x%x, w %d, h %d, x %d, y %d"
+virtio_gpu_cmd_set_scanout_blob(uint32_t id, uint32_t res, uint32_t w, uint32_t h, uint32_t x, uint32_t y) "id %d, res 0x%x, w %d, h %d, x %d, y %d"
 virtio_gpu_cmd_res_create_2d(uint32_t res, uint32_t fmt, uint32_t w, uint32_t h) "res 0x%x, fmt 0x%x, w %d, h %d"
 virtio_gpu_cmd_res_create_3d(uint32_t res, uint32_t fmt, uint32_t w, uint32_t h, uint32_t d) "res 0x%x, fmt 0x%x, w %d, h %d, d %d"
+virtio_gpu_cmd_res_create_blob(uint32_t res, uint64_t size) "res 0x%x, size %" PRId64
 virtio_gpu_cmd_res_unref(uint32_t res) "res 0x%x"
 virtio_gpu_cmd_res_back_attach(uint32_t res) "res 0x%x"
 virtio_gpu_cmd_res_back_detach(uint32_t res) "res 0x%x"
@@ -148,10 +143,10 @@ ati_mm_read(unsigned int size, uint64_t addr, const char *name, uint64_t val) "%
 ati_mm_write(unsigned int size, uint64_t addr, const char *name, uint64_t val) "%u 0x%"PRIx64 " %s <- 0x%"PRIx64
 
 # artist.c
-artist_reg_read(unsigned int size, uint64_t addr, const char *name, uint64_t val) "%u 0x%"PRIx64 "%s -> 0x%"PRIx64
-artist_reg_write(unsigned int size, uint64_t addr, const char *name, uint64_t val) "%u 0x%"PRIx64 "%s <- 0x%"PRIx64
-artist_vram_read(unsigned int size, uint64_t addr, int posx, int posy, uint64_t val) "%u 0x%"PRIx64 " %ux%u-> 0x%"PRIx64
-artist_vram_write(unsigned int size, uint64_t addr, uint64_t val) "%u 0x%"PRIx64 " <- 0x%"PRIx64
+artist_reg_read(unsigned int size, uint64_t addr, const char *name, uint64_t val) "%u 0x%"PRIx64 "%s -> 0x%08"PRIx64
+artist_reg_write(unsigned int size, uint64_t addr, const char *name, uint64_t val) "%u 0x%"PRIx64 "%s <- 0x%08"PRIx64
+artist_vram_read(unsigned int size, uint64_t addr, uint64_t val) "%u 0x%08"PRIx64 " -> 0x%08"PRIx64
+artist_vram_write(unsigned int size, uint64_t addr, uint64_t val) "%u 0x%08"PRIx64 " <- 0x%08"PRIx64
 artist_fill_window(unsigned int start_x, unsigned int start_y, unsigned int width, unsigned int height, uint32_t op, uint32_t ctlpln) "start=%ux%u length=%ux%u op=0x%08x ctlpln=0x%08x"
 artist_block_move(unsigned int start_x, unsigned int start_y, unsigned int dest_x, unsigned int dest_y, unsigned int width, unsigned int height) "source %ux%u -> dest %ux%u size %ux%u"
 artist_draw_line(unsigned int start_x, unsigned int start_y, unsigned int end_x, unsigned int end_y) "%ux%u %ux%u"
@@ -175,3 +170,10 @@ sm501_disp_ctrl_read(uint32_t addr, uint32_t val) "addr=0x%x, val=0x%x"
 sm501_disp_ctrl_write(uint32_t addr, uint32_t val) "addr=0x%x, val=0x%x"
 sm501_2d_engine_read(uint32_t addr, uint32_t val) "addr=0x%x, val=0x%x"
 sm501_2d_engine_write(uint32_t addr, uint32_t val) "addr=0x%x, val=0x%x"
+
+# macfb.c
+macfb_ctrl_read(uint64_t addr, uint64_t value, unsigned int size) "addr 0x%"PRIx64 " value 0x%"PRIx64 " size %u"
+macfb_ctrl_write(uint64_t addr, uint64_t value, unsigned int size) "addr 0x%"PRIx64 " value 0x%"PRIx64 " size %u"
+macfb_sense_read(uint32_t value) "video sense: 0x%"PRIx32
+macfb_sense_write(uint32_t value) "video sense: 0x%"PRIx32
+macfb_update_mode(uint32_t width, uint32_t height, uint8_t depth) "setting mode to width %"PRId32 " height %"PRId32 " size %d"

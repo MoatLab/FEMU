@@ -49,7 +49,7 @@ struct PCIVGAState {
     qemu_edid_info edid_info;
     MemoryRegion mmio;
     MemoryRegion mrs[4];
-    uint8_t edid[256];
+    uint8_t edid[384];
 };
 
 #define TYPE_PCI_VGA "pci-vga"
@@ -239,7 +239,9 @@ static void pci_std_vga_realize(PCIDevice *dev, Error **errp)
     bool edid = false;
 
     /* vga + console init */
-    vga_common_init(s, OBJECT(dev));
+    if (!vga_common_init(s, OBJECT(dev), errp)) {
+        return;
+    }
     vga_init(s, OBJECT(dev), pci_address_space(dev), pci_address_space_io(dev),
              true);
 
@@ -275,7 +277,9 @@ static void pci_secondary_vga_realize(PCIDevice *dev, Error **errp)
     bool edid = false;
 
     /* vga + console init */
-    vga_common_init(s, OBJECT(dev));
+    if (!vga_common_init(s, OBJECT(dev), errp)) {
+        return;
+    }
     s->con = graphic_console_init(DEVICE(dev), 0, s->hw_ops, s);
 
     /* mmio bar */

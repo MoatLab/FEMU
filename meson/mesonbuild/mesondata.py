@@ -1,4 +1,4 @@
-# Copyright 2020 The Meson development team
+# Copyright 2021 The Meson development team
 
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@
 ####
 
 
+# TODO: Remember to remove this also from tools/gen_data.py
 from pathlib import Path
 import typing as T
 
@@ -29,7 +30,193 @@ if T.TYPE_CHECKING:
 # BEGIN Data section #
 ######################
 
-file_0_data_CMakeListsLLVM_txt = '''\
+file_0_data_preload_cmake = '''\
+if(MESON_PS_LOADED)
+  return()
+endif()
+
+set(MESON_PS_LOADED ON)
+
+cmake_policy(PUSH)
+cmake_policy(SET CMP0054 NEW) # https://cmake.org/cmake/help/latest/policy/CMP0054.html
+
+# Dummy macros that have a special meaning in the meson code
+macro(meson_ps_execute_delayed_calls)
+endmacro()
+
+macro(meson_ps_reload_vars)
+endmacro()
+
+macro(meson_ps_disabled_function)
+  message(WARNING "The function '${ARGV0}' is disabled in the context of CMake subprojects.\n"
+                  "This should not be an issue but may lead to compilation errors.")
+endmacro()
+
+# Helper macro to inspect the current CMake state
+macro(meson_ps_inspect_vars)
+  set(MESON_PS_CMAKE_CURRENT_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}")
+  set(MESON_PS_CMAKE_CURRENT_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+  meson_ps_execute_delayed_calls()
+endmacro()
+
+
+# Override some system functions with custom code and forward the args
+# to the original function
+macro(add_custom_command)
+  meson_ps_inspect_vars()
+  _add_custom_command(${ARGV})
+endmacro()
+
+macro(add_custom_target)
+  meson_ps_inspect_vars()
+  _add_custom_target(${ARGV})
+endmacro()
+
+macro(set_property)
+  meson_ps_inspect_vars()
+  _set_property(${ARGV})
+endmacro()
+
+function(set_source_files_properties)
+  set(FILES)
+  set(I 0)
+  set(PROPERTIES OFF)
+
+  while(I LESS ARGC)
+    if(NOT PROPERTIES)
+      if("${ARGV${I}}" STREQUAL "PROPERTIES")
+        set(PROPERTIES ON)
+      else()
+        list(APPEND FILES "${ARGV${I}}")
+      endif()
+
+      math(EXPR I "${I} + 1")
+    else()
+      set(ID_IDX ${I})
+      math(EXPR PROP_IDX "${ID_IDX} + 1")
+
+      set(ID   "${ARGV${ID_IDX}}")
+      set(PROP "${ARGV${PROP_IDX}}")
+
+      set_property(SOURCE ${FILES} PROPERTY "${ID}" "${PROP}")
+      math(EXPR I "${I} + 2")
+    endif()
+  endwhile()
+endfunction()
+
+# Disable some functions that would mess up the CMake meson integration
+macro(target_precompile_headers)
+  meson_ps_disabled_function(target_precompile_headers)
+endmacro()
+
+set(MESON_PS_DELAYED_CALLS add_custom_command;add_custom_target;set_property)
+meson_ps_reload_vars()
+
+cmake_policy(POP)
+'''
+
+file_1_data_CMakeLists_txt = '''\
+# fail noisily if attempt to use this file without setting:
+# cmake_minimum_required(VERSION ${CMAKE_VERSION})
+# project(... LANGUAGES ...)
+
+cmake_policy(SET CMP0000 NEW)
+
+set(PACKAGE_FOUND FALSE)
+set(_packageName "${NAME}")
+string(TOUPPER "${_packageName}" PACKAGE_NAME)
+
+while(TRUE)
+  if ("${VERSION}" STREQUAL "")
+    find_package("${NAME}" QUIET COMPONENTS ${COMPS})
+  else()
+    find_package("${NAME}" "${VERSION}" QUIET COMPONENTS ${COMPS})
+  endif()
+
+  # ARCHS has to be set via the CMD interface
+  if(${_packageName}_FOUND OR ${PACKAGE_NAME}_FOUND OR "${ARCHS}" STREQUAL "")
+    break()
+  endif()
+
+  list(GET       ARCHS 0 CMAKE_LIBRARY_ARCHITECTURE)
+  list(REMOVE_AT ARCHS 0)
+endwhile()
+
+if(${_packageName}_FOUND  OR  ${PACKAGE_NAME}_FOUND)
+  set(PACKAGE_FOUND TRUE)
+
+  # Check the following variables:
+  # FOO_VERSION
+  # Foo_VERSION
+  # FOO_VERSION_STRING
+  # Foo_VERSION_STRING
+  if(NOT DEFINED PACKAGE_VERSION)
+    if(DEFINED ${_packageName}_VERSION)
+      set(PACKAGE_VERSION "${${_packageName}_VERSION}")
+    elseif(DEFINED ${PACKAGE_NAME}_VERSION)
+      set(PACKAGE_VERSION "${${PACKAGE_NAME}_VERSION}")
+    elseif(DEFINED ${_packageName}_VERSION_STRING)
+      set(PACKAGE_VERSION "${${_packageName}_VERSION_STRING}")
+    elseif(DEFINED ${PACKAGE_NAME}_VERSION_STRING)
+      set(PACKAGE_VERSION "${${PACKAGE_NAME}_VERSION_STRING}")
+    endif()
+  endif()
+
+  # Check the following variables:
+  # FOO_LIBRARIES
+  # Foo_LIBRARIES
+  # FOO_LIBS
+  # Foo_LIBS
+  set(libs)
+  if(DEFINED ${_packageName}_LIBRARIES)
+    set(libs ${_packageName}_LIBRARIES)
+  elseif(DEFINED ${PACKAGE_NAME}_LIBRARIES)
+    set(libs ${PACKAGE_NAME}_LIBRARIES)
+  elseif(DEFINED ${_packageName}_LIBS)
+    set(libs ${_packageName}_LIBS)
+  elseif(DEFINED ${PACKAGE_NAME}_LIBS)
+    set(libs ${PACKAGE_NAME}_LIBS)
+  endif()
+
+  # Check the following variables:
+  # FOO_INCLUDE_DIRS
+  # Foo_INCLUDE_DIRS
+  # FOO_INCLUDES
+  # Foo_INCLUDES
+  # FOO_INCLUDE_DIR
+  # Foo_INCLUDE_DIR
+  set(includes)
+  if(DEFINED ${_packageName}_INCLUDE_DIRS)
+    set(includes ${_packageName}_INCLUDE_DIRS)
+  elseif(DEFINED ${PACKAGE_NAME}_INCLUDE_DIRS)
+    set(includes ${PACKAGE_NAME}_INCLUDE_DIRS)
+  elseif(DEFINED ${_packageName}_INCLUDES)
+    set(includes ${_packageName}_INCLUDES)
+  elseif(DEFINED ${PACKAGE_NAME}_INCLUDES)
+    set(includes ${PACKAGE_NAME}_INCLUDES)
+  elseif(DEFINED ${_packageName}_INCLUDE_DIR)
+    set(includes ${_packageName}_INCLUDE_DIR)
+  elseif(DEFINED ${PACKAGE_NAME}_INCLUDE_DIR)
+    set(includes ${PACKAGE_NAME}_INCLUDE_DIR)
+  endif()
+
+  # Check the following variables:
+  # FOO_DEFINITIONS
+  # Foo_DEFINITIONS
+  set(definitions)
+  if(DEFINED ${_packageName}_DEFINITIONS)
+    set(definitions ${_packageName}_DEFINITIONS)
+  elseif(DEFINED ${PACKAGE_NAME}_DEFINITIONS)
+    set(definitions ${PACKAGE_NAME}_DEFINITIONS)
+  endif()
+
+  set(PACKAGE_INCLUDE_DIRS "${${includes}}")
+  set(PACKAGE_DEFINITIONS  "${${definitions}}")
+  set(PACKAGE_LIBRARIES    "${${libs}}")
+endif()
+'''
+
+file_2_data_CMakeListsLLVM_txt = '''\
 cmake_minimum_required(VERSION ${CMAKE_MAJOR_VERSION}.${CMAKE_MINOR_VERSION}.${CMAKE_PATCH_VERSION} )
 
 set(PACKAGE_FOUND FALSE)
@@ -127,7 +314,7 @@ if(LLVM_FOUND)
 endif()
 '''
 
-file_1_data_CMakePathInfo_txt = '''\
+file_3_data_CMakePathInfo_txt = '''\
 cmake_minimum_required(VERSION ${CMAKE_MAJOR_VERSION}.${CMAKE_MINOR_VERSION}.${CMAKE_PATCH_VERSION})
 
 set(TMP_PATHS_LIST)
@@ -161,173 +348,6 @@ set(MESON_FIND_ROOT_PATH ${CMAKE_FIND_ROOT_PATH})
 message(STATUS ${TMP_PATHS_LIST})
 '''
 
-file_2_data_CMakeLists_txt = '''\
-# fail noisily if attempt to use this file without setting:
-# cmake_minimum_required(VERSION ${CMAKE_VERSION})
-# project(... LANGUAGES ...)
-
-cmake_policy(SET CMP0000 NEW)
-
-set(PACKAGE_FOUND FALSE)
-set(_packageName "${NAME}")
-string(TOUPPER "${_packageName}" PACKAGE_NAME)
-
-while(TRUE)
-  find_package("${NAME}" QUIET COMPONENTS ${COMPS})
-
-  # ARCHS has to be set via the CMD interface
-  if(${_packageName}_FOUND OR ${PACKAGE_NAME}_FOUND OR "${ARCHS}" STREQUAL "")
-    break()
-  endif()
-
-  list(GET       ARCHS 0 CMAKE_LIBRARY_ARCHITECTURE)
-  list(REMOVE_AT ARCHS 0)
-endwhile()
-
-if(${_packageName}_FOUND  OR  ${PACKAGE_NAME}_FOUND)
-  set(PACKAGE_FOUND TRUE)
-
-  # Check the following variables:
-  # FOO_VERSION
-  # Foo_VERSION
-  # FOO_VERSION_STRING
-  # Foo_VERSION_STRING
-  if(NOT DEFINED PACKAGE_VERSION)
-    if(DEFINED ${_packageName}_VERSION)
-      set(PACKAGE_VERSION "${${_packageName}_VERSION}")
-    elseif(DEFINED ${PACKAGE_NAME}_VERSION)
-      set(PACKAGE_VERSION "${${PACKAGE_NAME}_VERSION}")
-    elseif(DEFINED ${_packageName}_VERSION_STRING)
-      set(PACKAGE_VERSION "${${_packageName}_VERSION_STRING}")
-    elseif(DEFINED ${PACKAGE_NAME}_VERSION_STRING)
-      set(PACKAGE_VERSION "${${PACKAGE_NAME}_VERSION_STRING}")
-    endif()
-  endif()
-
-  # Check the following variables:
-  # FOO_LIBRARIES
-  # Foo_LIBRARIES
-  # FOO_LIBS
-  # Foo_LIBS
-  set(libs)
-  if(DEFINED ${_packageName}_LIBRARIES)
-    set(libs ${_packageName}_LIBRARIES)
-  elseif(DEFINED ${PACKAGE_NAME}_LIBRARIES)
-    set(libs ${PACKAGE_NAME}_LIBRARIES)
-  elseif(DEFINED ${_packageName}_LIBS)
-    set(libs ${_packageName}_LIBS)
-  elseif(DEFINED ${PACKAGE_NAME}_LIBS)
-    set(libs ${PACKAGE_NAME}_LIBS)
-  endif()
-
-  # Check the following variables:
-  # FOO_INCLUDE_DIRS
-  # Foo_INCLUDE_DIRS
-  # FOO_INCLUDES
-  # Foo_INCLUDES
-  # FOO_INCLUDE_DIR
-  # Foo_INCLUDE_DIR
-  set(includes)
-  if(DEFINED ${_packageName}_INCLUDE_DIRS)
-    set(includes ${_packageName}_INCLUDE_DIRS)
-  elseif(DEFINED ${PACKAGE_NAME}_INCLUDE_DIRS)
-    set(includes ${PACKAGE_NAME}_INCLUDE_DIRS)
-  elseif(DEFINED ${_packageName}_INCLUDES)
-    set(includes ${_packageName}_INCLUDES)
-  elseif(DEFINED ${PACKAGE_NAME}_INCLUDES)
-    set(includes ${PACKAGE_NAME}_INCLUDES)
-  elseif(DEFINED ${_packageName}_INCLUDE_DIR)
-    set(includes ${_packageName}_INCLUDE_DIR)
-  elseif(DEFINED ${PACKAGE_NAME}_INCLUDE_DIR)
-    set(includes ${PACKAGE_NAME}_INCLUDE_DIR)
-  endif()
-
-  # Check the following variables:
-  # FOO_DEFINITIONS
-  # Foo_DEFINITIONS
-  set(definitions)
-  if(DEFINED ${_packageName}_DEFINITIONS)
-    set(definitions ${_packageName}_DEFINITIONS)
-  elseif(DEFINED ${PACKAGE_NAME}_DEFINITIONS)
-    set(definitions ${PACKAGE_NAME}_DEFINITIONS)
-  endif()
-
-  set(PACKAGE_INCLUDE_DIRS "${${includes}}")
-  set(PACKAGE_DEFINITIONS  "${${definitions}}")
-  set(PACKAGE_LIBRARIES    "${${libs}}")
-endif()
-'''
-
-file_3_data_preload_cmake = '''\
-if(MESON_PS_LOADED)
-  return()
-endif()
-
-set(MESON_PS_LOADED ON)
-
-# Dummy macros that have a special meaning in the meson code
-macro(meson_ps_execute_delayed_calls)
-endmacro()
-
-macro(meson_ps_reload_vars)
-endmacro()
-
-# Helper macro to inspect the current CMake state
-macro(meson_ps_inspect_vars)
-  set(MESON_PS_CMAKE_CURRENT_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}")
-  set(MESON_PS_CMAKE_CURRENT_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
-  meson_ps_execute_delayed_calls()
-endmacro()
-
-
-# Override some system functions with custom code and forward the args
-# to the original function
-macro(add_custom_command)
-  meson_ps_inspect_vars()
-  _add_custom_command(${ARGV})
-endmacro()
-
-macro(add_custom_target)
-  meson_ps_inspect_vars()
-  _add_custom_target(${ARGV})
-endmacro()
-
-macro(set_property)
-  meson_ps_inspect_vars()
-  _set_property(${ARGV})
-endmacro()
-
-function(set_source_files_properties)
-  set(FILES)
-  set(I 0)
-  set(PROPERTIES OFF)
-
-  while(I LESS ARGC)
-    if(NOT PROPERTIES)
-      if("${ARGV${I}}" STREQUAL "PROPERTIES")
-        set(PROPERTIES ON)
-      else()
-        list(APPEND FILES "${ARGV${I}}")
-      endif()
-
-      math(EXPR I "${I} + 1")
-    else()
-      set(ID_IDX ${I})
-      math(EXPR PROP_IDX "${ID_IDX} + 1")
-
-      set(ID   "${ARGV${ID_IDX}}")
-      set(PROP "${ARGV${PROP_IDX}}")
-
-      set_property(SOURCE ${FILES} PROPERTY "${ID}" "${PROP}")
-      math(EXPR I "${I} + 2")
-    endif()
-  endwhile()
-endfunction()
-
-set(MESON_PS_DELAYED_CALLS add_custom_command;add_custom_target;set_property)
-meson_ps_reload_vars()
-'''
-
 
 ####################
 # END Data section #
@@ -341,7 +361,7 @@ class DataFile:
 
     def write_once(self, path: Path) -> None:
         if not path.exists():
-            path.write_text(self.data)
+            path.write_text(self.data, encoding='utf-8')
 
     def write_to_private(self, env: 'Environment') -> Path:
         out_file = Path(env.scratch_dir) / 'data' / self.path.name
@@ -351,24 +371,24 @@ class DataFile:
 
 
 mesondata = {
+    'cmake/data/preload.cmake': DataFile(
+        Path('cmake/data/preload.cmake'),
+        'ce8f30159aab25b92c26c58a219a427d47838bfa0739475221d6c8993b4946e5',
+        file_0_data_preload_cmake,
+    ),
+    'dependencies/data/CMakeLists.txt': DataFile(
+        Path('dependencies/data/CMakeLists.txt'),
+        '4dca24afa13e9311f0598a6ac29690490819bd7d82cfdaa0a2fe5eea3c0fa0d5',
+        file_1_data_CMakeLists_txt,
+    ),
     'dependencies/data/CMakeListsLLVM.txt': DataFile(
         Path('dependencies/data/CMakeListsLLVM.txt'),
         '412cec3315597041a978d018cdaca282dcd47693793540da88ae2f80d0cbd7cd',
-        file_0_data_CMakeListsLLVM_txt,
+        file_2_data_CMakeListsLLVM_txt,
     ),
     'dependencies/data/CMakePathInfo.txt': DataFile(
         Path('dependencies/data/CMakePathInfo.txt'),
         '90da8b443982d9c87139b7dc84228eb58cab4315764949637208f25e2bda7db2',
-        file_1_data_CMakePathInfo_txt,
-    ),
-    'dependencies/data/CMakeLists.txt': DataFile(
-        Path('dependencies/data/CMakeLists.txt'),
-        '71a2d58381f912bbfb1c8709884d34d721f682edf2fca001e1f582f0bffd0da7',
-        file_2_data_CMakeLists_txt,
-    ),
-    'cmake/data/preload.cmake': DataFile(
-        Path('cmake/data/preload.cmake'),
-        '064d047b18a5c919ad016b838bed50c5d40aebe9e53da0e70eff9d52a2c1ca1f',
-        file_3_data_preload_cmake,
+        file_3_data_CMakePathInfo_txt,
     ),
 }

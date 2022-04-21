@@ -24,6 +24,8 @@ static struct {
 	TREE(ovf_size_strings),
 	TREE(truncated_property), TREE(truncated_string),
 	TREE(truncated_memrsv),
+	TREE(two_roots),
+	TREE(named_root)
 };
 
 #define NUM_TREES	(sizeof(trees) / sizeof(trees[0]))

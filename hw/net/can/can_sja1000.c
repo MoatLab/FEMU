@@ -275,6 +275,10 @@ static void buff2frame_pel(const uint8_t *buff, qemu_can_frame *frame)
     }
     frame->can_dlc = buff[0] & 0x0f;
 
+    if (frame->can_dlc > 8) {
+        frame->can_dlc = 8;
+    }
+
     if (buff[0] & 0x80) { /* Extended */
         frame->can_id |= QEMU_CAN_EFF_FLAG;
         frame->can_id |= buff[1] << 21; /* ID.28~ID.21 */
@@ -310,6 +314,10 @@ static void buff2frame_bas(const uint8_t *buff, qemu_can_frame *frame)
         frame->can_id = QEMU_CAN_RTR_FLAG;
     }
     frame->can_dlc = buff[1] & 0x0f;
+
+    if (frame->can_dlc > 8) {
+        frame->can_dlc = 8;
+    }
 
     for (i = 0; i < frame->can_dlc; i++) {
         frame->data[i] = buff[2 + i];
@@ -920,7 +928,6 @@ const VMStateDescription vmstate_qemu_can_filter = {
     .name = "qemu_can_filter",
     .version_id = 1,
     .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
     .fields = (VMStateField[]) {
         VMSTATE_UINT32(can_id, qemu_can_filter),
         VMSTATE_UINT32(can_mask, qemu_can_filter),
@@ -944,7 +951,6 @@ const VMStateDescription vmstate_can_sja = {
     .name = "can_sja",
     .version_id = 1,
     .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
     .post_load = can_sja_post_load,
     .fields = (VMStateField[]) {
         VMSTATE_UINT8(mode, CanSJA1000State),

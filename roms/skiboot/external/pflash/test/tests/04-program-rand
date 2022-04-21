@@ -1,0 +1,55 @@
+#! /bin/sh
+# SPDX-License-Identifier: Apache-2.0 OR GPL-2.0-or-later
+
+touch "$DATA_DIR/$CUR_TEST.pnor"
+
+# Don't record the output of ffspart
+../ffspart/ffspart -s 0x100 -c 10 -i "$DATA_DIR/$CUR_TEST.ffs" \
+	-p "$DATA_DIR/$CUR_TEST.pnor" 2>&1 >/dev/null
+if [ "$?" -ne 0 ] ; then
+	fail_test
+fi
+
+cp "$DATA_DIR/$CUR_TEST.pnor" "$DATA_DIR/$CUR_TEST.bk"
+if [ "$?" -ne 0 ] ; then
+	fail_test
+fi
+
+one_len=$(get_part_len "$DATA_DIR/$CUR_TEST.ffs" "ONE");
+one_start=$(get_part_start "$DATA_DIR/$CUR_TEST.ffs" "ONE");
+one_end=$(get_part_end "$DATA_DIR/$CUR_TEST.ffs" "ONE");
+dd if=/dev/urandom bs="$one_len" count=1 of="$DATA_DIR/random" status=none
+
+yes yes | run_binary "./pflash" \
+	"-F $DATA_DIR/$CUR_TEST.pnor -e -P ONE -p $DATA_DIR/random"
+if [ "$?" -ne 0 ] ; then
+	fail_test;
+fi
+
+cmp --ignore-initial="$one_start:0" --bytes="$one_len" \
+	"$DATA_DIR/$CUR_TEST.pnor" "$DATA_DIR/random"
+if [ "$?" -ne 0 ] ; then
+	fail_test;
+fi
+
+cmp --bytes="$one_start" "$DATA_DIR/$CUR_TEST.pnor" \
+	"$DATA_DIR/$CUR_TEST.bk";
+if [ "$?" -ne 0 ] ; then
+	fail_test;
+fi
+
+cmp --ignore-initial="$one_end" \
+	--bytes="$(expr $(stat --printf="%s" "$DATA_DIR/$CUR_TEST.pnor") - "$one_end")" \
+	"$DATA_DIR/$CUR_TEST.pnor" "$DATA_DIR/$CUR_TEST.bk"
+if [ "$?" -ne 0 ] ; then
+	fail_test;
+fi
+sed -i "s|$DATA_DIR/random|FILE|" "$STDOUT_OUT"
+
+# The test infrastructure will clean up but lets no chew unnecessarily
+# though disk space
+rm "$DATA_DIR/$CUR_TEST.pnor" "$DATA_DIR/$CUR_TEST.bk" "$DATA_DIR/random"
+
+diff_with_result
+
+pass_test

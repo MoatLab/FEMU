@@ -1,0 +1,5 @@
+- PCI backend for host
+- Use proper GPIO APIs on ARM
+- Use IPMI for lock/unlock on host
+- Timeouts and flashing errors handling
+- Lock handling

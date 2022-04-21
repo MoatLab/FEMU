@@ -17,26 +17,36 @@ import re
 from typing import (
     Dict,
     Iterator,
-    List,
     Optional,
+    Sequence,
     Tuple,
 )
 
 from .common import (
     c_fname,
     c_name,
-    gen_endif,
-    gen_if,
     guardend,
     guardstart,
     mcgen,
 )
-from .schema import QAPISchemaObjectType, QAPISchemaVisitor
+from .schema import (
+    QAPISchemaFeature,
+    QAPISchemaIfCond,
+    QAPISchemaModule,
+    QAPISchemaObjectType,
+    QAPISchemaVisitor,
+)
 from .source import QAPISourceInfo
 
 
+def gen_special_features(features: Sequence[QAPISchemaFeature]) -> str:
+    special_features = [f"1u << QAPI_{feat.name.upper()}"
+                        for feat in features if feat.is_special()]
+    return ' | '.join(special_features) or '0'
+
+
 class QAPIGen:
-    def __init__(self, fname: Optional[str]):
+    def __init__(self, fname: str):
         self.fname = fname
         self._preamble = ''
         self._body = ''
@@ -81,7 +91,7 @@ class QAPIGen:
                 fp.write(text)
 
 
-def _wrap_ifcond(ifcond: List[str], before: str, after: str) -> str:
+def _wrap_ifcond(ifcond: QAPISchemaIfCond, before: str, after: str) -> str:
     if before == after:
         return after   # suppress empty #if ... #endif
 
@@ -91,9 +101,9 @@ def _wrap_ifcond(ifcond: List[str], before: str, after: str) -> str:
     if added[0] == '\n':
         out += '\n'
         added = added[1:]
-    out += gen_if(ifcond)
+    out += ifcond.gen_if()
     out += added
-    out += gen_endif(ifcond)
+    out += ifcond.gen_endif()
     return out
 
 
@@ -121,24 +131,21 @@ def build_params(arg_type: Optional[QAPISchemaObjectType],
 
 
 class QAPIGenCCode(QAPIGen):
-    def __init__(self, fname: Optional[str]):
+    def __init__(self, fname: str):
         super().__init__(fname)
-        self._start_if: Optional[Tuple[List[str], str, str]] = None
+        self._start_if: Optional[Tuple[QAPISchemaIfCond, str, str]] = None
 
-    def start_if(self, ifcond: List[str]) -> None:
+    def start_if(self, ifcond: QAPISchemaIfCond) -> None:
         assert self._start_if is None
         self._start_if = (ifcond, self._body, self._preamble)
 
     def end_if(self) -> None:
-        assert self._start_if
-        self._wrap_ifcond()
-        self._start_if = None
-
-    def _wrap_ifcond(self) -> None:
+        assert self._start_if is not None
         self._body = _wrap_ifcond(self._start_if[0],
                                   self._start_if[1], self._body)
         self._preamble = _wrap_ifcond(self._start_if[0],
                                       self._start_if[2], self._preamble)
+        self._start_if = None
 
     def get_content(self) -> str:
         assert self._start_if is None
@@ -185,12 +192,17 @@ class QAPIGenH(QAPIGenC):
         return guardend(self.fname)
 
 
+class QAPIGenTrace(QAPIGen):
+    def _top(self) -> str:
+        return super()._top() + '# AUTOMATICALLY GENERATED, DO NOT MODIFY\n\n'
+
+
 @contextmanager
-def ifcontext(ifcond: List[str], *args: QAPIGenCCode) -> Iterator[None]:
+def ifcontext(ifcond: QAPISchemaIfCond, *args: QAPIGenCCode) -> Iterator[None]:
     """
     A with-statement context manager that wraps with `start_if()` / `end_if()`.
 
-    :param ifcond: A list of conditionals, passed to `start_if()`.
+    :param ifcond: A sequence of conditionals, passed to `start_if()`.
     :param args: any number of `QAPIGenCCode`.
 
     Example::
@@ -237,91 +249,111 @@ class QAPISchemaModularCVisitor(QAPISchemaVisitor):
                  what: str,
                  user_blurb: str,
                  builtin_blurb: Optional[str],
-                 pydoc: str):
+                 pydoc: str,
+                 gen_tracing: bool = False):
         self._prefix = prefix
         self._what = what
         self._user_blurb = user_blurb
         self._builtin_blurb = builtin_blurb
         self._pydoc = pydoc
-        self._genc: Optional[QAPIGenC] = None
-        self._genh: Optional[QAPIGenH] = None
-        self._module: Dict[Optional[str], Tuple[QAPIGenC, QAPIGenH]] = {}
+        self._current_module: Optional[str] = None
+        self._module: Dict[str, Tuple[QAPIGenC, QAPIGenH,
+                                      Optional[QAPIGenTrace]]] = {}
         self._main_module: Optional[str] = None
+        self._gen_tracing = gen_tracing
+
+    @property
+    def _genc(self) -> QAPIGenC:
+        assert self._current_module is not None
+        return self._module[self._current_module][0]
+
+    @property
+    def _genh(self) -> QAPIGenH:
+        assert self._current_module is not None
+        return self._module[self._current_module][1]
+
+    @property
+    def _gen_trace_events(self) -> QAPIGenTrace:
+        assert self._gen_tracing
+        assert self._current_module is not None
+        gent = self._module[self._current_module][2]
+        assert gent is not None
+        return gent
 
     @staticmethod
-    def _is_user_module(name: Optional[str]) -> bool:
-        return bool(name and not name.startswith('./'))
-
-    @staticmethod
-    def _is_builtin_module(name: Optional[str]) -> bool:
-        return not name
-
-    def _module_dirname(self, name: Optional[str]) -> str:
-        if self._is_user_module(name):
+    def _module_dirname(name: str) -> str:
+        if QAPISchemaModule.is_user_module(name):
             return os.path.dirname(name)
         return ''
 
-    def _module_basename(self, what: str, name: Optional[str]) -> str:
-        ret = '' if self._is_builtin_module(name) else self._prefix
-        if self._is_user_module(name):
+    def _module_basename(self, what: str, name: str) -> str:
+        ret = '' if QAPISchemaModule.is_builtin_module(name) else self._prefix
+        if QAPISchemaModule.is_user_module(name):
             basename = os.path.basename(name)
             ret += what
             if name != self._main_module:
                 ret += '-' + os.path.splitext(basename)[0]
         else:
-            name = name[2:] if name else 'builtin'
-            ret += re.sub(r'-', '-' + name + '-', what)
+            assert QAPISchemaModule.is_system_module(name)
+            ret += re.sub(r'-', '-' + name[2:] + '-', what)
         return ret
 
-    def _module_filename(self, what: str, name: Optional[str]) -> str:
+    def _module_filename(self, what: str, name: str) -> str:
         return os.path.join(self._module_dirname(name),
                             self._module_basename(what, name))
 
-    def _add_module(self, name: Optional[str], blurb: str) -> None:
+    def _add_module(self, name: str, blurb: str) -> None:
+        if QAPISchemaModule.is_user_module(name):
+            if self._main_module is None:
+                self._main_module = name
         basename = self._module_filename(self._what, name)
         genc = QAPIGenC(basename + '.c', blurb, self._pydoc)
         genh = QAPIGenH(basename + '.h', blurb, self._pydoc)
-        self._module[name] = (genc, genh)
-        self._genc, self._genh = self._module[name]
 
-    def _add_user_module(self, name: str, blurb: str) -> None:
-        assert self._is_user_module(name)
-        if self._main_module is None:
-            self._main_module = name
-        self._add_module(name, blurb)
+        gent: Optional[QAPIGenTrace] = None
+        if self._gen_tracing:
+            gent = QAPIGenTrace(basename + '.trace-events')
 
-    def _add_system_module(self, name: Optional[str], blurb: str) -> None:
-        self._add_module(name and './' + name, blurb)
+        self._module[name] = (genc, genh, gent)
+        self._current_module = name
+
+    @contextmanager
+    def _temp_module(self, name: str) -> Iterator[None]:
+        old_module = self._current_module
+        self._current_module = name
+        yield
+        self._current_module = old_module
 
     def write(self, output_dir: str, opt_builtins: bool = False) -> None:
-        for name in self._module:
-            if self._is_builtin_module(name) and not opt_builtins:
+        for name, (genc, genh, gent) in self._module.items():
+            if QAPISchemaModule.is_builtin_module(name) and not opt_builtins:
                 continue
-            (genc, genh) = self._module[name]
             genc.write(output_dir)
             genh.write(output_dir)
+            if gent is not None:
+                gent.write(output_dir)
 
-    def _begin_system_module(self, name: None) -> None:
+    def _begin_builtin_module(self) -> None:
         pass
 
     def _begin_user_module(self, name: str) -> None:
         pass
 
-    def visit_module(self, name: Optional[str]) -> None:
-        if name is None:
+    def visit_module(self, name: str) -> None:
+        if QAPISchemaModule.is_builtin_module(name):
             if self._builtin_blurb:
-                self._add_system_module(None, self._builtin_blurb)
-                self._begin_system_module(name)
+                self._add_module(name, self._builtin_blurb)
+                self._begin_builtin_module()
             else:
                 # The built-in module has not been created.  No code may
                 # be generated.
-                self._genc = None
-                self._genh = None
+                self._current_module = None
         else:
-            self._add_user_module(name, self._user_blurb)
+            assert QAPISchemaModule.is_user_module(name)
+            self._add_module(name, self._user_blurb)
             self._begin_user_module(name)
 
-    def visit_include(self, name: str, info: QAPISourceInfo) -> None:
+    def visit_include(self, name: str, info: Optional[QAPISourceInfo]) -> None:
         relname = os.path.relpath(self._module_filename(self._what, name),
                                   os.path.dirname(self._genh.fname))
         self._genh.preamble_add(mcgen('''

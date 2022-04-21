@@ -63,7 +63,7 @@ struct oss_params {
     int fragsize;
 };
 
-static void GCC_FMT_ATTR (2, 3) oss_logerr (int err, const char *fmt, ...)
+static void G_GNUC_PRINTF (2, 3) oss_logerr (int err, const char *fmt, ...)
 {
     va_list ap;
 
@@ -74,7 +74,7 @@ static void GCC_FMT_ATTR (2, 3) oss_logerr (int err, const char *fmt, ...)
     AUD_log (AUDIO_CAP, "Reason: %s\n", strerror (err));
 }
 
-static void GCC_FMT_ATTR (3, 4) oss_logerr2 (
+static void G_GNUC_PRINTF (3, 4) oss_logerr2 (
     int err,
     const char *typ,
     const char *fmt,
@@ -142,16 +142,14 @@ static int aud_to_ossfmt (AudioFormat fmt, int endianness)
     case AUDIO_FORMAT_S16:
         if (endianness) {
             return AFMT_S16_BE;
-        }
-        else {
+        } else {
             return AFMT_S16_LE;
         }
 
     case AUDIO_FORMAT_U16:
         if (endianness) {
             return AFMT_U16_BE;
-        }
-        else {
+        } else {
             return AFMT_U16_LE;
         }
 
@@ -391,11 +389,23 @@ static void oss_run_buffer_out(HWVoiceOut *hw)
     }
 }
 
+static size_t oss_buffer_get_free(HWVoiceOut *hw)
+{
+    OSSVoiceOut *oss = (OSSVoiceOut *)hw;
+
+    if (oss->mmapped) {
+        return oss_get_available_bytes(oss);
+    } else {
+        return audio_generic_buffer_get_free(hw);
+    }
+}
+
 static void *oss_get_buffer_out(HWVoiceOut *hw, size_t *size)
 {
-    OSSVoiceOut *oss = (OSSVoiceOut *) hw;
+    OSSVoiceOut *oss = (OSSVoiceOut *)hw;
+
     if (oss->mmapped) {
-        *size = MIN(oss_get_available_bytes(oss), hw->size_emul - hw->pos_emul);
+        *size = hw->size_emul - hw->pos_emul;
         return hw->buf_emul + hw->pos_emul;
     } else {
         return audio_generic_get_buffer_out(hw, size);
@@ -542,16 +552,14 @@ static int oss_init_out(HWVoiceOut *hw, struct audsettings *as,
             int trig = 0;
             if (ioctl (fd, SNDCTL_DSP_SETTRIGGER, &trig) < 0) {
                 oss_logerr (errno, "SNDCTL_DSP_SETTRIGGER 0 failed\n");
-            }
-            else {
+            } else {
                 trig = PCM_ENABLE_OUTPUT;
                 if (ioctl (fd, SNDCTL_DSP_SETTRIGGER, &trig) < 0) {
                     oss_logerr (
                         errno,
                         "SNDCTL_DSP_SETTRIGGER PCM_ENABLE_OUTPUT failed\n"
                         );
-                }
-                else {
+                } else {
                     oss->mmapped = 1;
                 }
             }
@@ -754,6 +762,7 @@ static struct audio_pcm_ops oss_pcm_ops = {
     .init_out = oss_init_out,
     .fini_out = oss_fini_out,
     .write    = oss_write,
+    .buffer_get_free = oss_buffer_get_free,
     .run_buffer_out = oss_run_buffer_out,
     .get_buffer_out = oss_get_buffer_out,
     .put_buffer_out = oss_put_buffer_out,
@@ -762,6 +771,7 @@ static struct audio_pcm_ops oss_pcm_ops = {
     .init_in  = oss_init_in,
     .fini_in  = oss_fini_in,
     .read     = oss_read,
+    .run_buffer_in = audio_generic_run_buffer_in,
     .enable_in = oss_enable_in
 };
 

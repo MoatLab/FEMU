@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# group: rw auto quick
 #
 # Test that sub-cluster allocating writes zero the rest of the cluster
 #
@@ -19,7 +20,7 @@
 #
 
 # creator
-owner=stefanha@linux.vnet.ibm.com
+owner=stefanha@redhat.com
 
 seq=`basename $0`
 echo "QA output created by $seq"

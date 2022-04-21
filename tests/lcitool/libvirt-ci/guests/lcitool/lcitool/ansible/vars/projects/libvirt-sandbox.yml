@@ -1,0 +1,27 @@
+---
+packages:
+  - autoconf
+  - automake
+  - autopoint
+  - ccache
+  - cpp
+  - gcc
+  - gettext
+  - glib2
+  - glibc-static
+  - gobject-introspection
+  - gtk-doc
+  - libcap-ng
+  - liblzma
+  - liblzma-static
+  - libselinux
+  - libtirpc
+  - libtool
+  - libtoolize
+  - libxml2
+  - make
+  - pkg-config
+  - rpcgen
+  - rpmbuild
+  - zlib
+  - zlib-static

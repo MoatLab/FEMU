@@ -12,6 +12,7 @@
       "type": "array",
       "items": {
         "type": "object",
+        "additionalProperties": false,
         "properties": {
           "file": {
             "type": "string"
@@ -20,11 +21,14 @@
             "type": "string",
             "enum": [
               "file",
+              "python_file",
               "dir",
               "exe",
               "shared_lib",
+              "python_lib",
               "pdb",
               "implib",
+              "py_implib",
               "implibempty",
               "expr"
             ]
@@ -53,15 +57,19 @@
     },
     "matrix": {
       "type": "object",
-      "additionalProperties": {
-        "properties": {
-          "options": {
+      "properties": {
+        "options": {
+          "additionalProperties": {
             "type": "array",
             "items": {
               "type": "object",
+              "additionalProperties": false,
               "properties": {
                 "val": {
-                  "type": "string"
+                  "type": ["string", "boolean", "null", "array"],
+                  "items": {
+                    "type": "string"
+                  }
                 },
                 "compilers": {
                   "type": "object",
@@ -70,6 +78,18 @@
                   }
                 },
                 "skip_on_env": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "skip_on_jobname": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "skip_on_os": {
                   "type": "array",
                   "items": {
                     "type": "string"
@@ -86,7 +106,10 @@
             "items": {
               "type": "object",
               "additionalProperties": {
-                "type": "string"
+                "type": ["string", "boolean", "array"],
+                "items": {
+                  "type": "string"
+                }
               }
             }
           }
@@ -110,6 +133,7 @@
       "type": "array",
       "items": {
         "type": "object",
+        "additionalProperties": false,
         "properties": {
           "line": {
             "type": "string"
@@ -120,11 +144,35 @@
               "literal",
               "re"
             ]
+          },
+          "count": {
+            "type": "integer"
+          },
+          "comment": {
+            "type": "string"
           }
         },
         "required": [
           "line"
         ]
+      }
+    },
+    "skip_on_env": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "skip_on_jobname": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "skip_on_os": {
+      "type": "array",
+      "items": {
+        "type": "string"
       }
     }
   }

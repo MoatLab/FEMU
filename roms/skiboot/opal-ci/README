@@ -1,0 +1,36 @@
+OPAL-CI
+-------
+
+Magic scripts for doing CI regression testing.
+
+Dockerfiles/build scripts for doing builds in Docker (focused on CI only,
+used by Travis-ci - see .travis.yml)
+
+
+building op-build for skiboot CI
+--------------------------------
+Currently the makefile targets building op-build firmware (targeted at Mambo
+simulator) for all current op-build releases.
+
+Since skiboot maintains compatibility, these binaries should *ALWAYS* boot
+and work.
+
+The provided makefile to recreate the various zImage.epapr images should be
+a good starting point.
+
+I run it like this:
+cd opal-ci
+export BUILDROOT_GIT=~/op-build/.git/modules/buildroot/
+export OP_BUILD_GIT=~/op-build/
+export DL_CACHE=~/op-build/dl
+export SCRATCH=/scratch/stewart/op-build/
+make -j2 images
+
+DL_CACHE points to an existing op-build tree, so we don't have to download
+all the source tarballs again
+
+SCRATCH is where all compilation will happen, must have >20GB free space
+
+BUILDROOT_GIT and OP_BUILD_GIT exist to prevent you having to clone from
+github.
+

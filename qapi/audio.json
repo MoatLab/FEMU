@@ -1,4 +1,5 @@
 # -*- mode: python -*-
+# vim: filetype=python
 #
 # Copyright (C) 2015-2019 Zoltán Kővágó <DirtY.iCE.hu@gmail.com>
 #
@@ -302,6 +303,37 @@
     '*server': 'str' } }
 
 ##
+# @AudiodevSdlPerDirectionOptions:
+#
+# Options of the SDL audio backend that are used for both playback and
+# recording.
+#
+# @buffer-count: number of buffers (default 4)
+#
+# Since: 6.0
+##
+{ 'struct': 'AudiodevSdlPerDirectionOptions',
+  'base': 'AudiodevPerDirectionOptions',
+  'data': {
+    '*buffer-count': 'uint32' } }
+
+##
+# @AudiodevSdlOptions:
+#
+# Options of the SDL audio backend.
+#
+# @in: options of the recording stream
+#
+# @out: options of the playback stream
+#
+# Since: 6.0
+##
+{ 'struct': 'AudiodevSdlOptions',
+  'data': {
+    '*in':  'AudiodevSdlPerDirectionOptions',
+    '*out': 'AudiodevSdlPerDirectionOptions' } }
+
+##
 # @AudiodevWavOptions:
 #
 # Options of the wav audio backend.
@@ -355,7 +387,7 @@
 # Since: 4.0
 ##
 { 'enum': 'AudiodevDriver',
-  'data': [ 'none', 'alsa', 'coreaudio', 'dsound', 'jack', 'oss', 'pa',
+  'data': [ 'none', 'alsa', 'coreaudio', 'dbus', 'dsound', 'jack', 'oss', 'pa',
             'sdl', 'spice', 'wav' ] }
 
 ##
@@ -381,10 +413,11 @@
     'none':      'AudiodevGenericOptions',
     'alsa':      'AudiodevAlsaOptions',
     'coreaudio': 'AudiodevCoreaudioOptions',
+    'dbus':      'AudiodevGenericOptions',
     'dsound':    'AudiodevDsoundOptions',
     'jack':      'AudiodevJackOptions',
     'oss':       'AudiodevOssOptions',
     'pa':        'AudiodevPaOptions',
-    'sdl':       'AudiodevGenericOptions',
+    'sdl':       'AudiodevSdlOptions',
     'spice':     'AudiodevGenericOptions',
     'wav':       'AudiodevWavOptions' } }

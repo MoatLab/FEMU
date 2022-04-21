@@ -1,0 +1,5 @@
+WARNING: Attempting to parse a partition line without any TOCs created.
+         Generating a default TOC at zero
+Adding partition 'THREE' would cause partition 'ONE' at 0x00000200 to overlap with the header
+Couldn't add 'THREE' partition to default TOC: 107
+Failed to parse input file 'FILE' at line 3

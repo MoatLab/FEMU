@@ -64,7 +64,7 @@ static unsigned dns6_addr_time;
 /* for the aging of certain requests like DNS */
 #define TIMEOUT_DEFAULT 1000 /* milliseconds */
 
-#ifdef _WIN32
+#if defined(_WIN32)
 
 int get_dns_addr(struct in_addr *pdns_addr)
 {
@@ -121,7 +121,108 @@ static void winsock_cleanup(void)
     WSACleanup();
 }
 
+#elif defined(__APPLE__)
+
+#include <resolv.h>
+
+static int get_dns_addr_cached(void *pdns_addr, void *cached_addr,
+                               socklen_t addrlen, unsigned *cached_time)
+{
+    if (curtime - *cached_time < TIMEOUT_DEFAULT) {
+        memcpy(pdns_addr, cached_addr, addrlen);
+        return 0;
+    }
+    return 1;
+}
+
+static int get_dns_addr_libresolv(int af, void *pdns_addr, void *cached_addr,
+                                  socklen_t addrlen, uint32_t *scope_id,
+                                  unsigned *cached_time)
+{
+    struct __res_state state;
+    union res_sockaddr_union servers[NI_MAXSERV];
+    int count;
+    int found;
+
+    if (res_ninit(&state) != 0) {
+        return -1;
+    }
+
+    count = res_getservers(&state, servers, NI_MAXSERV);
+    found = 0;
+    DEBUG_MISC("IP address of your DNS(s):");
+    for (int i = 0; i < count; i++) {
+        if (af == servers[i].sin.sin_family) {
+            found++;
+        }
+
+        // we use the first found entry
+        if (found == 1) {
+            memcpy(pdns_addr, &servers[i].sin.sin_addr, addrlen);
+            memcpy(cached_addr, &servers[i].sin.sin_addr, addrlen);
+            if (scope_id) {
+                *scope_id = 0;
+            }
+            *cached_time = curtime;
+        }
+
+        if (found > 3) {
+            DEBUG_MISC("  (more)");
+            break;
+        } else if (slirp_debug & DBG_MISC) {
+            char s[INET6_ADDRSTRLEN];
+            const char *res = inet_ntop(servers[i].sin.sin_family,
+                                        &servers[i].sin.sin_addr,
+                                        s,
+                                        sizeof(s));
+            if (!res) {
+                res = "  (string conversion error)";
+            }
+            DEBUG_MISC("  %s", res);
+        }
+    }
+
+    res_nclose(&state);
+    if (!found)
+        return -1;
+    return 0;
+}
+
+int get_dns_addr(struct in_addr *pdns_addr)
+{
+    if (dns_addr.s_addr != 0) {
+        int ret;
+        ret = get_dns_addr_cached(pdns_addr, &dns_addr, sizeof(dns_addr),
+                                  &dns_addr_time);
+        if (ret <= 0) {
+            return ret;
+        }
+    }
+    return get_dns_addr_libresolv(AF_INET, pdns_addr, &dns_addr,
+                                  sizeof(dns_addr), NULL, &dns_addr_time);
+}
+
+int get_dns6_addr(struct in6_addr *pdns6_addr, uint32_t *scope_id)
+{
+    if (!in6_zero(&dns6_addr)) {
+        int ret;
+        ret = get_dns_addr_cached(pdns6_addr, &dns6_addr, sizeof(dns6_addr),
+                                  &dns6_addr_time);
+        if (ret <= 0) {
+            return ret;
+        }
+    }
+    return get_dns_addr_libresolv(AF_INET6, pdns6_addr, &dns6_addr,
+                                  sizeof(dns6_addr), scope_id, &dns6_addr_time);
+}
+
+#else // !defined(_WIN32) && !defined(__APPLE__)
+
+#if defined(__HAIKU__)
+#define RESOLV_CONF_PATH "/boot/system/settings/network/resolv.conf"
 #else
+#define RESOLV_CONF_PATH "/etc/resolv.conf"
+#endif
 
 static int get_dns_addr_cached(void *pdns_addr, void *cached_addr,
                                socklen_t addrlen, struct stat *cached_stat,
@@ -133,7 +234,7 @@ static int get_dns_addr_cached(void *pdns_addr, void *cached_addr,
         return 0;
     }
     old_stat = *cached_stat;
-    if (stat("/etc/resolv.conf", cached_stat) != 0) {
+    if (stat(RESOLV_CONF_PATH, cached_stat) != 0) {
         return -1;
     }
     if (cached_stat->st_dev == old_stat.st_dev &&
@@ -154,10 +255,14 @@ static int get_dns_addr_resolv_conf(int af, void *pdns_addr, void *cached_addr,
     char buff2[257];
     FILE *f;
     int found = 0;
-    void *tmp_addr = alloca(addrlen);
+    union {
+        struct in_addr dns_addr;
+        struct in6_addr dns6_addr;
+    } tmp_addr;
     unsigned if_index;
 
-    f = fopen("/etc/resolv.conf", "r");
+    assert(sizeof(tmp_addr) >= addrlen);
+    f = fopen(RESOLV_CONF_PATH, "r");
     if (!f)
         return -1;
 
@@ -172,13 +277,13 @@ static int get_dns_addr_resolv_conf(int af, void *pdns_addr, void *cached_addr,
                 if_index = 0;
             }
 
-            if (!inet_pton(af, buff2, tmp_addr)) {
+            if (!inet_pton(af, buff2, &tmp_addr)) {
                 continue;
             }
             /* If it's the first one, set it to dns_addr */
             if (!found) {
-                memcpy(pdns_addr, tmp_addr, addrlen);
-                memcpy(cached_addr, tmp_addr, addrlen);
+                memcpy(pdns_addr, &tmp_addr, addrlen);
+                memcpy(cached_addr, &tmp_addr, addrlen);
                 if (scope_id) {
                     *scope_id = if_index;
                 }
@@ -190,7 +295,7 @@ static int get_dns_addr_resolv_conf(int af, void *pdns_addr, void *cached_addr,
                 break;
             } else if (slirp_debug & DBG_MISC) {
                 char s[INET6_ADDRSTRLEN];
-                const char *res = inet_ntop(af, tmp_addr, s, sizeof(s));
+                const char *res = inet_ntop(af, &tmp_addr, s, sizeof(s));
                 if (!res) {
                     res = "  (string conversion error)";
                 }
@@ -267,6 +372,7 @@ static void slirp_init_once(void)
             { "misc", DBG_MISC },
             { "error", DBG_ERROR },
             { "tftp", DBG_TFTP },
+            { "verbose_call", DBG_VERBOSE_CALL },
         };
         slirp_debug = g_parse_debug_string(debug, keys, G_N_ELEMENTS(keys));
     }
@@ -338,6 +444,13 @@ Slirp *slirp_new(const SlirpConfig *cfg, const SlirpCb *callbacks, void *opaque)
         slirp->outbound_addr = NULL;
         slirp->outbound_addr6 = NULL;
     }
+
+    if (cfg->version >= 3) {
+        slirp->disable_dns = cfg->disable_dns;
+    } else {
+        slirp->disable_dns = false;
+    }
+
     return slirp;
 }
 
@@ -616,10 +729,16 @@ void slirp_pollfds_poll(Slirp *slirp, int select_error,
                 continue;
             }
 
+#ifndef __APPLE__
             /*
              * Check for URG data
              * This will soread as well, so no need to
-             * test for SLIRP_POLL_IN below if this succeeds
+             * test for SLIRP_POLL_IN below if this succeeds.
+             *
+             * This is however disabled on MacOS, which apparently always
+             * reports data as PRI when it is the last data of the
+             * connection. We would then report it out of band, which the guest
+             * would most probably not be ready for.
              */
             if (revents & SLIRP_POLL_PRI) {
                 ret = sorecvoob(so);
@@ -632,8 +751,10 @@ void slirp_pollfds_poll(Slirp *slirp, int select_error,
             /*
              * Check sockets for reading
              */
-            else if (revents &
-                     (SLIRP_POLL_IN | SLIRP_POLL_HUP | SLIRP_POLL_ERR)) {
+            else
+#endif
+                if (revents &
+                     (SLIRP_POLL_IN | SLIRP_POLL_HUP | SLIRP_POLL_ERR | SLIRP_POLL_PRI)) {
                 /*
                  * Check for incoming connections
                  */
@@ -950,6 +1071,7 @@ int if_encap(Slirp *slirp, struct mbuf *ifm)
     uint8_t ethaddr[ETH_ALEN];
     const struct ip *iph = (const struct ip *)ifm->m_data;
     int ret;
+    char ethaddr_str[ETH_ADDRSTRLEN];
 
     if (ifm->m_len + ETH_HLEN > sizeof(buf)) {
         return 1;
@@ -975,19 +1097,16 @@ int if_encap(Slirp *slirp, struct mbuf *ifm)
     }
 
     memcpy(eh->h_dest, ethaddr, ETH_ALEN);
-    DEBUG_ARG("src = %02x:%02x:%02x:%02x:%02x:%02x", eh->h_source[0],
-              eh->h_source[1], eh->h_source[2], eh->h_source[3],
-              eh->h_source[4], eh->h_source[5]);
-    DEBUG_ARG("dst = %02x:%02x:%02x:%02x:%02x:%02x", eh->h_dest[0],
-              eh->h_dest[1], eh->h_dest[2], eh->h_dest[3], eh->h_dest[4],
-              eh->h_dest[5]);
+    DEBUG_ARG("src = %s", slirp_ether_ntoa(eh->h_source, ethaddr_str,
+                                           sizeof(ethaddr_str)));
+    DEBUG_ARG("dst = %s", slirp_ether_ntoa(eh->h_dest, ethaddr_str,
+                                           sizeof(ethaddr_str)));
     memcpy(buf + sizeof(struct ethhdr), ifm->m_data, ifm->m_len);
     slirp_send_packet_all(slirp, buf, ifm->m_len + ETH_HLEN);
     return 1;
 }
 
 /* Drop host forwarding rule, return 0 if found. */
-/* TODO: IPv6 */
 int slirp_remove_hostfwd(Slirp *slirp, int is_udp, struct in_addr host_addr,
                          int host_port)
 {
@@ -1001,7 +1120,10 @@ int slirp_remove_hostfwd(Slirp *slirp, int is_udp, struct in_addr host_addr,
         addr_len = sizeof(addr);
         if ((so->so_state & SS_HOSTFWD) &&
             getsockname(so->s, (struct sockaddr *)&addr, &addr_len) == 0 &&
-            addr.sin_addr.s_addr == host_addr.s_addr && addr.sin_port == port) {
+            addr_len == sizeof(addr) &&
+            addr.sin_family == AF_INET &&
+            addr.sin_addr.s_addr == host_addr.s_addr &&
+            addr.sin_port == port) {
             so->slirp->cb->unregister_poll_fd(so->s, so->slirp->opaque);
             closesocket(so->s);
             sofree(so);
@@ -1012,7 +1134,6 @@ int slirp_remove_hostfwd(Slirp *slirp, int is_udp, struct in_addr host_addr,
     return -1;
 }
 
-/* TODO: IPv6 */
 int slirp_add_hostfwd(Slirp *slirp, int is_udp, struct in_addr host_addr,
                       int host_port, struct in_addr guest_addr, int guest_port)
 {
@@ -1026,6 +1147,83 @@ int slirp_add_hostfwd(Slirp *slirp, int is_udp, struct in_addr host_addr,
     } else {
         if (!tcp_listen(slirp, host_addr.s_addr, htons(host_port),
                         guest_addr.s_addr, htons(guest_port), SS_HOSTFWD))
+            return -1;
+    }
+    return 0;
+}
+
+int slirp_remove_hostxfwd(Slirp *slirp,
+                          const struct sockaddr *haddr, socklen_t haddrlen,
+                          int flags)
+{
+    struct socket *so;
+    struct socket *head = (flags & SLIRP_HOSTFWD_UDP ? &slirp->udb : &slirp->tcb);
+    struct sockaddr_storage addr;
+    socklen_t addr_len;
+
+    for (so = head->so_next; so != head; so = so->so_next) {
+        addr_len = sizeof(addr);
+        if ((so->so_state & SS_HOSTFWD) &&
+            getsockname(so->s, (struct sockaddr *)&addr, &addr_len) == 0 &&
+            sockaddr_equal(&addr, (const struct sockaddr_storage *) haddr)) {
+            so->slirp->cb->unregister_poll_fd(so->s, so->slirp->opaque);
+            closesocket(so->s);
+            sofree(so);
+            return 0;
+        }
+    }
+
+    return -1;
+}
+
+int slirp_add_hostxfwd(Slirp *slirp,
+                       const struct sockaddr *haddr, socklen_t haddrlen,
+                       const struct sockaddr *gaddr, socklen_t gaddrlen,
+                       int flags)
+{
+    struct sockaddr_in gdhcp_addr;
+    int fwd_flags = SS_HOSTFWD;
+
+    if (flags & SLIRP_HOSTFWD_V6ONLY)
+        fwd_flags |= SS_HOSTFWD_V6ONLY;
+
+    if (gaddr->sa_family == AF_INET) {
+        const struct sockaddr_in *gaddr_in = (const struct sockaddr_in *) gaddr;
+
+        if (gaddrlen < sizeof(struct sockaddr_in)) {
+            errno = EINVAL;
+            return -1;
+        }
+
+        if (!gaddr_in->sin_addr.s_addr) {
+            gdhcp_addr = *gaddr_in;
+            gdhcp_addr.sin_addr = slirp->vdhcp_startaddr;
+            gaddr = (struct sockaddr *) &gdhcp_addr;
+            gaddrlen = sizeof(gdhcp_addr);
+        }
+    } else {
+        if (gaddrlen < sizeof(struct sockaddr_in6)) {
+            errno = EINVAL;
+            return -1;
+        }
+
+        /*
+         * Libslirp currently only provides a stateless DHCPv6 server, thus
+         * we can't translate "addr-any" to the guest here. Instead, we defer
+         * performing the translation to when it's needed. See
+         * soassign_guest_addr_if_needed().
+         */
+    }
+
+    if (flags & SLIRP_HOSTFWD_UDP) {
+        if (!udpx_listen(slirp, haddr, haddrlen,
+                                gaddr, gaddrlen,
+                                fwd_flags))
+            return -1;
+    } else {
+        if (!tcpx_listen(slirp, haddr, haddrlen,
+                                gaddr, gaddrlen,
+                                fwd_flags))
             return -1;
     }
     return 0;

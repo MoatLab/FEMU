@@ -9,7 +9,6 @@
  */
 
 #include "qemu/osdep.h"
-#include "cpu.h"
 #include <sys/ioctl.h>
 #include <linux/vfio.h>
 
@@ -137,6 +136,7 @@ static void vfio_prereg_listener_region_del(MemoryListener *listener,
 }
 
 const MemoryListener vfio_prereg_listener = {
+    .name = "vfio-pre-reg",
     .region_add = vfio_prereg_listener_region_add,
     .region_del = vfio_prereg_listener_region_del,
 };

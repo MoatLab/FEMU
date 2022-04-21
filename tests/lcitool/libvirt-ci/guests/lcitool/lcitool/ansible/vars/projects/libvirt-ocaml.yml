@@ -1,0 +1,15 @@
+---
+packages:
+  - autoconf
+  - automake
+  - autopoint
+  - ccache
+  - diffutils
+  - gcc
+  - libtool
+  - libtoolize
+  - make
+  - ocaml
+  - ocaml-findlib
+  - perl
+  - pkg-config

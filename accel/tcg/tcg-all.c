@@ -30,14 +30,19 @@
 #include "tcg/tcg.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
-#include "hw/boards.h"
+#include "qemu/accel.h"
 #include "qapi/qapi-builtin-visit.h"
-#include "tcg-cpus.h"
+#include "qemu/units.h"
+#if !defined(CONFIG_USER_ONLY)
+#include "hw/boards.h"
+#endif
+#include "internal.h"
 
 struct TCGState {
     AccelState parent_obj;
 
     bool mttcg_enabled;
+    int splitwx_enabled;
     unsigned long tb_size;
 };
 typedef struct TCGState TCGState;
@@ -94,17 +99,40 @@ static void tcg_accel_instance_init(Object *obj)
     TCGState *s = TCG_STATE(obj);
 
     s->mttcg_enabled = default_mttcg_enabled();
+
+    /* If debugging enabled, default "auto on", otherwise off. */
+#if defined(CONFIG_DEBUG_TCG) && !defined(CONFIG_USER_ONLY)
+    s->splitwx_enabled = -1;
+#else
+    s->splitwx_enabled = 0;
+#endif
 }
 
 bool mttcg_enabled;
 
-static int tcg_init(MachineState *ms)
+static int tcg_init_machine(MachineState *ms)
 {
     TCGState *s = TCG_STATE(current_accel());
+#ifdef CONFIG_USER_ONLY
+    unsigned max_cpus = 1;
+#else
+    unsigned max_cpus = ms->smp.max_cpus;
+#endif
 
-    tcg_exec_init(s->tb_size * 1024 * 1024);
+    tcg_allowed = true;
     mttcg_enabled = s->mttcg_enabled;
-    cpus_register_accel(&tcg_cpus);
+
+    page_init();
+    tb_htable_init();
+    tcg_init(s->tb_size * MiB, s->splitwx_enabled, max_cpus);
+
+#if defined(CONFIG_SOFTMMU)
+    /*
+     * There's no guest base to take into account, so go ahead and
+     * initialize the prologue now.
+     */
+    tcg_prologue_init(tcg_ctx);
+#endif
 
     return 0;
 }
@@ -168,11 +196,23 @@ static void tcg_set_tb_size(Object *obj, Visitor *v,
     s->tb_size = value;
 }
 
+static bool tcg_get_splitwx(Object *obj, Error **errp)
+{
+    TCGState *s = TCG_STATE(obj);
+    return s->splitwx_enabled;
+}
+
+static void tcg_set_splitwx(Object *obj, bool value, Error **errp)
+{
+    TCGState *s = TCG_STATE(obj);
+    s->splitwx_enabled = value;
+}
+
 static void tcg_accel_class_init(ObjectClass *oc, void *data)
 {
     AccelClass *ac = ACCEL_CLASS(oc);
     ac->name = "tcg";
-    ac->init_machine = tcg_init;
+    ac->init_machine = tcg_init_machine;
     ac->allowed = &tcg_allowed;
 
     object_class_property_add_str(oc, "thread",
@@ -185,6 +225,10 @@ static void tcg_accel_class_init(ObjectClass *oc, void *data)
     object_class_property_set_description(oc, "tb-size",
         "TCG translation block cache size");
 
+    object_class_property_add_bool(oc, "split-wx",
+        tcg_get_splitwx, tcg_set_splitwx);
+    object_class_property_set_description(oc, "split-wx",
+        "Map jit pages into separate RW and RX regions");
 }
 
 static const TypeInfo tcg_accel_type = {
@@ -194,6 +238,7 @@ static const TypeInfo tcg_accel_type = {
     .class_init = tcg_accel_class_init,
     .instance_size = sizeof(TCGState),
 };
+module_obj(TYPE_TCG_ACCEL);
 
 static void register_accel_types(void)
 {

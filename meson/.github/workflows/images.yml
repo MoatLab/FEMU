@@ -1,5 +1,9 @@
 name: CI image builder
 
+concurrency:
+  group: img_builder-${{ github.head_ref }}
+  cancel-in-progress: true
+
 on:
   push:
     branches:
@@ -21,6 +25,8 @@ on:
 
 jobs:
   build:
+    env:
+      HAS_DOCKER_CREDENTIALS: ${{ secrets.DOCKER_PASSWORD != '' }}
     name: ${{ matrix.cfg.name }}
     runs-on: ubuntu-latest
     strategy:
@@ -32,13 +38,13 @@ jobs:
           - { name: Fedora,           id: fedora   }
           - { name: OpenSUSE,         id: opensuse }
           - { name: Ubuntu Bionic,    id: bionic   }
-          - { name: Ubuntu Eoan,      id: eoan     }
+          - { name: Ubuntu Rolling,   id: ubuntu-rolling  }
     steps:
       - uses: actions/checkout@v2
 
       # Login to dockerhub
       - name: Docker login
-        if:   github.event_name == 'push' || github.event_name == 'schedule'
+        if:   (github.event_name == 'push' || github.event_name == 'schedule') && env.HAS_DOCKER_CREDENTIALS == 'true'
         uses: azure/docker-login@v1
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
@@ -52,5 +58,5 @@ jobs:
 
       # Publish
       - name: Push the ${{ matrix.cfg.id }} image
-        if:   github.event_name == 'push' || github.event_name == 'schedule'
         run:  docker push mesonbuild/${{ matrix.cfg.id }}
+        if:   (github.event_name == 'push' || github.event_name == 'schedule') && env.HAS_DOCKER_CREDENTIALS == 'true'

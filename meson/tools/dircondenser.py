@@ -48,20 +48,20 @@ def get_entries() -> T.List[T.Tuple[int, str]]:
         try:
             numstr = int(number)
         except ValueError:
-            raise SystemExit('Dir name {} does not start with a number.'.format(e))
+            raise SystemExit(f'Dir name {e} does not start with a number.')
         entries.append((numstr, rest))
     entries.sort()
     return entries
 
-def replace_source(sourcefile: str, replacements: T.List[T.Tuple[str, str]]):
-    with open(sourcefile, 'r') as f:
+def replace_source(sourcefile: str, replacements: T.List[T.Tuple[str, str]]) -> None:
+    with open(sourcefile, encoding='utf-8') as f:
         contents = f.read()
     for old_name, new_name in replacements:
         contents = contents.replace(old_name, new_name)
-    with open(sourcefile, 'w') as f:
+    with open(sourcefile, 'w', encoding='utf-8') as f:
         f.write(contents)
 
-def condense(dirname: str):
+def condense(dirname: str) -> None:
     curdir = os.getcwd()
     os.chdir(dirname)
     entries = get_entries()

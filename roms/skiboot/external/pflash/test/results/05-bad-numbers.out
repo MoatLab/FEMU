@@ -1,0 +1,224 @@
+Open-Power Flash tool VERSION
+Usage: ./pflash [options] commands...
+
+ Options:
+	-a address, --address=address
+		Specify the start address for erasing, reading
+		or flashing
+
+	-s size, --size=size
+		Specify the size in bytes for erasing, reading
+		or flashing
+
+	-P part_name, --partition=part_name
+		Specify the partition whose content is to be erased
+		programmed or read. This is an alternative to -a and -s
+		if both -P and -s are specified, the smallest of the
+		two will be used
+
+	-f, --force
+		Don't ask for confirmation before erasing or flashing
+
+	-d, --dummy
+		Don't write to flash
+
+	--direct
+		Bypass all safety provided to you by the kernel driver
+		and use the flash driver built into pflash.
+		If you have mtd devices and you use this command, the
+		system may become unstable.
+		If you are reading this sentence then this flag is not
+		what you want! Using this feature without knowing
+		what it does can and likely will result in a bricked
+		machine
+
+	-b, --bmc
+		Target BMC flash instead of host flash.
+		Note: This carries a high chance of bricking your BMC if you
+		don't know what you're doing. Consider --mtd to be safe(r)
+
+	-F filename, --flash-file filename
+		Target filename instead of actual flash.
+
+	-S, --side
+		Side of the flash on which to operate, 0 (default) or 1
+
+	--skip=N
+		Skip N number of bytes from the start when reading
+
+	-T, --toc
+		libffs TOC on which to operate, defaults to 0.
+		leading 0x is required for interpretation of a hex value
+
+	-g
+		Enable verbose libflash debugging
+
+ Commands:
+	-4, --enable-4B
+		Switch the flash and controller to 4-bytes address
+		mode (no confirmation needed).
+
+	-3, --disable-4B
+		Switch the flash and controller to 3-bytes address
+		mode (no confirmation needed).
+
+	-r file, --read=file
+		Read flash content from address into file, use -s
+		to specify the size to read (or it will use the source
+		file size if used in conjunction with -p and -s is not
+		specified). When using -r together with -e or -p, the
+		read will be performed first
+
+	-E, --erase-all
+		Erase entire flash chip
+		(Not supported on all chips/controllers)
+
+	-e, --erase
+		Erase the specified region. If size or address are not
+		specified, but '--program' is used, then the file
+		size will be used (rounded to an erase block) and the
+		address defaults to 0.
+
+	-p file, --program=file
+		Will program the file to flash. If the address is not
+		specified, it will use 0. If the size is not specified
+		it will use the file size. Otherwise it will limit to
+		the specified size (whatever is smaller). If used in
+		conjunction with any erase command, the erase will
+		take place first.
+
+	-t, --tune
+		Just tune the flash controller & access size
+		Must be used in conjuction with --direct
+		(Implicit for all other operations)
+
+	-c --clear
+		Used to ECC clear a partition of the flash
+		Must be used in conjunction with -P. Will erase the
+		partition and then set all the ECC bits as they should be
+
+	-9 --ecc
+		Encode/Decode ECC where specified in the FFS header.
+		This 9 byte ECC method is used for some OpenPOWER
+		partitions.
+	-i, --info
+		Display some information about the flash.
+
+	--detail
+		Displays detailed info about a particular partition.
+		Accepts a numeric partition or can be used in conjuction
+		with the -P flag.
+
+	-h, --help
+		This message.
+
+About to erase 0x00000300..0x00000400 !
+WARNING ! This will modify your HOST flash chip content !
+Enter "yes" to confirm:Erasing...
+
+[                                                  ] 0%
+[=                                                 ] 1%
+[=                                                 ] 2%
+[==                                                ] 3%
+[==                                                ] 4%
+[===                                               ] 5%
+[===                                               ] 6%
+[====                                              ] 7%
+[====                                              ] 8%
+[=====                                             ] 9%
+[=====                                             ] 10%
+[======                                            ] 11%
+[======                                            ] 12%
+[=======                                           ] 13%
+[=======                                           ] 14%
+[========                                          ] 15%
+[========                                          ] 16%
+[=========                                         ] 17%
+[=========                                         ] 18%
+[==========                                        ] 19%
+[==========                                        ] 20%
+[===========                                       ] 21%
+[===========                                       ] 22%
+[============                                      ] 23%
+[============                                      ] 24%
+[=============                                     ] 25%
+[=============                                     ] 26%
+[==============                                    ] 27%
+[==============                                    ] 28%
+[===============                                   ] 29%
+[===============                                   ] 30%
+[================                                  ] 31%
+[================                                  ] 32%
+[=================                                 ] 33%
+[=================                                 ] 34%
+[==================                                ] 35%
+[==================                                ] 36%
+[===================                               ] 37%
+[===================                               ] 38%
+[====================                              ] 39%
+[====================                              ] 40%
+[=====================                             ] 41%
+[=====================                             ] 42%
+[======================                            ] 43%
+[======================                            ] 44%
+[=======================                           ] 45%
+[=======================                           ] 46%
+[========================                          ] 47%
+[========================                          ] 48%
+[=========================                         ] 49%
+[=========================                         ] 50%
+[==========================                        ] 51%
+[==========================                        ] 52%
+[===========================                       ] 53%
+[===========================                       ] 54%
+[============================                      ] 55%
+[============================                      ] 56%
+[=============================                     ] 57%
+[=============================                     ] 58%
+[==============================                    ] 59%
+[==============================                    ] 60%
+[===============================                   ] 61%
+[===============================                   ] 62%
+[================================                  ] 63%
+[================================                  ] 64%
+[=================================                 ] 65%
+[=================================                 ] 66%
+[==================================                ] 67%
+[==================================                ] 68%
+[===================================               ] 69%
+[===================================               ] 70%
+[====================================              ] 71%
+[====================================              ] 72%
+[=====================================             ] 73%
+[=====================================             ] 74%
+[======================================            ] 75%
+[======================================            ] 76%
+[=======================================           ] 77%
+[=======================================           ] 78%
+[========================================          ] 79%
+[========================================          ] 80%
+[=========================================         ] 81%
+[=========================================         ] 82%
+[==========================================        ] 83%
+[==========================================        ] 84%
+[===========================================       ] 85%
+[===========================================       ] 86%
+[============================================      ] 87%
+[============================================      ] 88%
+[=============================================     ] 89%
+[=============================================     ] 90%
+[==============================================    ] 91%
+[==============================================    ] 92%
+[===============================================   ] 93%
+[===============================================   ] 94%
+[================================================  ] 95%
+[================================================  ] 96%
+[================================================= ] 97%
+[================================================= ] 98%
+[==================================================] 99%
+[==================================================] 100%
+About to program "FILE" at 0x00000300..0x00000400 !
+Programming & Verifying...
+
+[                                                  ] 0%
+[==================================================] 100%

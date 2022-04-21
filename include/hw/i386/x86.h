@@ -17,7 +17,6 @@
 #ifndef HW_I386_X86_H
 #define HW_I386_X86_H
 
-#include "qemu-common.h"
 #include "exec/hwaddr.h"
 #include "qemu/notify.h"
 
@@ -36,8 +35,8 @@ struct X86MachineClass {
 
     /* TSC rate migration: */
     bool save_tsc_khz;
-    /* Enables contiguous-apic-ID mode */
-    bool compat_apic_id_mode;
+    /* use DMA capable linuxboot option rom */
+    bool fwcfg_dma_enabled;
 };
 
 struct X86MachineState {
@@ -50,6 +49,7 @@ struct X86MachineState {
     ISADevice *rtc;
     FWCfgState *fw_cfg;
     qemu_irq *gsi;
+    DeviceState *ioapic2;
     GMappedFile *initrd_mapped_file;
     HotplugHandler *acpi_dev;
 
@@ -61,20 +61,32 @@ struct X86MachineState {
     unsigned pci_irq_mask;
     unsigned apic_id_limit;
     uint16_t boot_cpus;
-    unsigned smp_dies;
+    SgxEPCList *sgx_epc_list;
 
     OnOffAuto smm;
     OnOffAuto acpi;
 
+    char *oem_id;
+    char *oem_table_id;
     /*
      * Address space used by IOAPIC device. All IOAPIC interrupts
      * will be translated to MSI messages in the address space.
      */
     AddressSpace *ioapic_as;
+
+    /*
+     * Ratelimit enforced on detected bus locks in guest.
+     * The default value of the bus_lock_ratelimit is 0 per second,
+     * which means no limitation on the guest's bus locks.
+     */
+    uint64_t bus_lock_ratelimit;
 };
 
 #define X86_MACHINE_SMM              "smm"
 #define X86_MACHINE_ACPI             "acpi"
+#define X86_MACHINE_OEM_ID           "x-oem-id"
+#define X86_MACHINE_OEM_TABLE_ID     "x-oem-table-id"
+#define X86_MACHINE_BUS_LOCK_RATELIMIT  "bus-lock-ratelimit"
 
 #define TYPE_X86_MACHINE   MACHINE_TYPE_NAME("x86")
 OBJECT_DECLARE_TYPE(X86MachineState, X86MachineClass, X86_MACHINE)
@@ -101,13 +113,13 @@ void x86_cpu_unplug_request_cb(HotplugHandler *hotplug_dev,
 void x86_cpu_unplug_cb(HotplugHandler *hotplug_dev,
                        DeviceState *dev, Error **errp);
 
-void x86_bios_rom_init(MemoryRegion *rom_memory, bool isapc_ram_fw);
+void x86_bios_rom_init(MachineState *ms, const char *default_firmware,
+                       MemoryRegion *rom_memory, bool isapc_ram_fw);
 
 void x86_load_linux(X86MachineState *x86ms,
                     FWCfgState *fw_cfg,
                     int acpi_data_size,
-                    bool pvh_enabled,
-                    bool linuxboot_dma_enabled);
+                    bool pvh_enabled);
 
 bool x86_machine_is_smm_enabled(const X86MachineState *x86ms);
 bool x86_machine_is_acpi_enabled(const X86MachineState *x86ms);
@@ -120,10 +132,12 @@ bool x86_machine_is_acpi_enabled(const X86MachineState *x86ms);
 typedef struct GSIState {
     qemu_irq i8259_irq[ISA_NUM_IRQS];
     qemu_irq ioapic_irq[IOAPIC_NUM_PINS];
+    qemu_irq ioapic2_irq[IOAPIC_NUM_PINS];
 } GSIState;
 
 qemu_irq x86_allocate_cpu_irq(void);
 void gsi_handler(void *opaque, int n, int level);
 void ioapic_init_gsi(GSIState *gsi_state, const char *parent_name);
+DeviceState *ioapic_init_secondary(GSIState *gsi_state);
 
 #endif

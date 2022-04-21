@@ -511,13 +511,13 @@ of an inet socket:
 
   |qemu_system| linux.img -hdb nbd+unix://?socket=/tmp/my_socket
 
-In this case, the block device must be exported using qemu-nbd:
+In this case, the block device must be exported using ``qemu-nbd``:
 
 .. parsed-literal::
 
   qemu-nbd --socket=/tmp/my_socket my_disk.qcow2
 
-The use of qemu-nbd allows sharing of a disk between several guests:
+The use of ``qemu-nbd`` allows sharing of a disk between several guests:
 
 .. parsed-literal::
 
@@ -530,7 +530,7 @@ and then you can use it with two guests:
   |qemu_system| linux1.img -hdb nbd+unix://?socket=/tmp/my_socket
   |qemu_system| linux2.img -hdb nbd+unix://?socket=/tmp/my_socket
 
-If the nbd-server uses named exports (supported since NBD 2.9.18, or with QEMU's
+If the ``nbd-server`` uses named exports (supported since NBD 2.9.18, or with QEMU's
 own embedded NBD server), you must specify an export name in the URI:
 
 .. parsed-literal::
@@ -546,75 +546,6 @@ also available.  Here are some example of the older syntax:
   |qemu_system| linux.img -hdb nbd:my_nbd_server.mydomain.org:1024
   |qemu_system| linux2.img -hdb nbd:unix:/tmp/my_socket
   |qemu_system| -cdrom nbd:localhost:10809:exportname=debian-500-ppc-netinst
-
-
-
-Sheepdog disk images
-~~~~~~~~~~~~~~~~~~~~
-
-Sheepdog is a distributed storage system for QEMU.  It provides highly
-available block level storage volumes that can be attached to
-QEMU-based virtual machines.
-
-You can create a Sheepdog disk image with the command:
-
-.. parsed-literal::
-
-  qemu-img create sheepdog:///IMAGE SIZE
-
-where *IMAGE* is the Sheepdog image name and *SIZE* is its
-size.
-
-To import the existing *FILENAME* to Sheepdog, you can use a
-convert command.
-
-.. parsed-literal::
-
-  qemu-img convert FILENAME sheepdog:///IMAGE
-
-You can boot from the Sheepdog disk image with the command:
-
-.. parsed-literal::
-
-  |qemu_system| sheepdog:///IMAGE
-
-You can also create a snapshot of the Sheepdog image like qcow2.
-
-.. parsed-literal::
-
-  qemu-img snapshot -c TAG sheepdog:///IMAGE
-
-where *TAG* is a tag name of the newly created snapshot.
-
-To boot from the Sheepdog snapshot, specify the tag name of the
-snapshot.
-
-.. parsed-literal::
-
-  |qemu_system| sheepdog:///IMAGE#TAG
-
-You can create a cloned image from the existing snapshot.
-
-.. parsed-literal::
-
-  qemu-img create -b sheepdog:///BASE#TAG sheepdog:///IMAGE
-
-where *BASE* is an image name of the source snapshot and *TAG*
-is its tag name.
-
-You can use an unix socket instead of an inet socket:
-
-.. parsed-literal::
-
-  |qemu_system| sheepdog+unix:///IMAGE?socket=PATH
-
-If the Sheepdog daemon doesn't run on the local host, you need to
-specify one of the Sheepdog servers to connect to.
-
-.. parsed-literal::
-
-  qemu-img create sheepdog://HOSTNAME:PORT/IMAGE SIZE
-  |qemu_system| sheepdog://HOSTNAME:PORT/IMAGE
 
 iSCSI LUNs
 ~~~~~~~~~~
@@ -847,10 +778,32 @@ The optional *HOST_KEY_CHECK* parameter controls how the remote
 host's key is checked.  The default is ``yes`` which means to use
 the local ``.ssh/known_hosts`` file.  Setting this to ``no``
 turns off known-hosts checking.  Or you can check that the host key
-matches a specific fingerprint:
-``host_key_check=md5:78:45:8e:14:57:4f:d5:45:83:0a:0e:f3:49:82:c9:c8``
-(``sha1:`` can also be used as a prefix, but note that OpenSSH
-tools only use MD5 to print fingerprints).
+matches a specific fingerprint. The fingerprint can be provided in
+``md5``, ``sha1``, or ``sha256`` format, however, it is strongly
+recommended to only use ``sha256``, since the other options are
+considered insecure by modern standards. The fingerprint value
+must be given as a hex encoded string::
+
+  host_key_check=sha256:04ce2ae89ff4295a6b9c4111640bdcb3297858ee55cb434d9dd88796e93aa795
+
+The key string may optionally contain ":" separators between
+each pair of hex digits.
+
+The ``$HOME/.ssh/known_hosts`` file contains the base64 encoded
+host keys. These can be converted into the format needed for
+QEMU using a command such as::
+
+   $ for key in `grep 10.33.8.112 known_hosts | awk '{print $3}'`
+     do
+       echo $key | base64 -d | sha256sum
+     done
+     6c3aa525beda9dc83eadfbd7e5ba7d976ecb59575d1633c87cd06ed2ed6e366f  -
+     12214fd9ea5b408086f98ecccd9958609bd9ac7c0ea316734006bc7818b45dc8  -
+     d36420137bcbd101209ef70c3b15dc07362fbe0fa53c5b135eba6e6afa82f0ce  -
+
+Note that there can be multiple keys present per host, each with
+different key ciphers. Care is needed to pick the key fingerprint
+that matches the cipher QEMU will negotiate with the remote server.
 
 Currently authentication must be done using ssh-agent.  Other
 authentication methods may be supported in future.
@@ -952,3 +905,29 @@ on host and see if there are locks held by the QEMU process on the image file.
 More than one byte could be locked by the QEMU instance, each byte of which
 reflects a particular permission that is acquired or protected by the running
 block driver.
+
+Filter drivers
+~~~~~~~~~~~~~~
+
+QEMU supports several filter drivers, which don't store any data, but perform
+some additional tasks, hooking io requests.
+
+.. program:: filter-drivers
+.. option:: preallocate
+
+  The preallocate filter driver is intended to be inserted between format
+  and protocol nodes and preallocates some additional space
+  (expanding the protocol file) when writing past the file’s end. This can be
+  useful for file-systems with slow allocation.
+
+  Supported options:
+
+  .. program:: preallocate
+  .. option:: prealloc-align
+
+    On preallocation, align the file length to this value (in bytes), default 1M.
+
+  .. program:: preallocate
+  .. option:: prealloc-size
+
+    How much to preallocate (in bytes), default 128M.

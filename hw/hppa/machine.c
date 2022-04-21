@@ -5,10 +5,10 @@
 
 #include "qemu/osdep.h"
 #include "qemu-common.h"
+#include "qemu/datadir.h"
 #include "cpu.h"
 #include "elf.h"
 #include "hw/loader.h"
-#include "hw/boards.h"
 #include "qemu/error-report.h"
 #include "sysemu/reset.h"
 #include "sysemu/sysemu.h"
@@ -17,6 +17,7 @@
 #include "hw/timer/i8254.h"
 #include "hw/char/serial.h"
 #include "hw/net/lasi_82596.h"
+#include "hw/nmi.h"
 #include "hppa_sys.h"
 #include "qemu/units.h"
 #include "qapi/error.h"
@@ -97,7 +98,7 @@ static FWCfgState *create_fw_cfg(MachineState *ms)
     fw_cfg = fw_cfg_init_mem(FW_CFG_IO_BASE, FW_CFG_IO_BASE + 4);
     fw_cfg_add_i16(fw_cfg, FW_CFG_NB_CPUS, ms->smp.cpus);
     fw_cfg_add_i16(fw_cfg, FW_CFG_MAX_CPUS, HPPA_MAX_CPUS);
-    fw_cfg_add_i64(fw_cfg, FW_CFG_RAM_SIZE, ram_size);
+    fw_cfg_add_i64(fw_cfg, FW_CFG_RAM_SIZE, ms->ram_size);
 
     val = cpu_to_le64(MIN_SEABIOS_HPPA_VERSION);
     fw_cfg_add_file(fw_cfg, "/etc/firmware-min-version",
@@ -213,8 +214,7 @@ static void machine_hppa_init(MachineState *machine)
        but one explicitly written for the emulation, we might as
        well load it directly from an ELF image.  */
     firmware_filename = qemu_find_file(QEMU_FILE_TYPE_BIOS,
-                                       bios_name ? bios_name :
-                                       "hppa-firmware.img");
+                                       machine->firmware ?: "hppa-firmware.img");
     if (firmware_filename == NULL) {
         error_report("no firmware provided");
         exit(1);
@@ -289,7 +289,7 @@ static void machine_hppa_init(MachineState *machine)
                (1) Due to sign-extension problems and PDC,
                put the initrd no higher than 1G.
                (2) Reserve 64k for stack.  */
-            initrd_base = MIN(ram_size, 1 * GiB);
+            initrd_base = MIN(machine->ram_size, 1 * GiB);
             initrd_base = initrd_base - 64 * KiB;
             initrd_base = (initrd_base - initrd_size) & TARGET_PAGE_MASK;
 
@@ -317,7 +317,7 @@ static void machine_hppa_init(MachineState *machine)
      * various parameters in registers. After firmware initialization,
      * firmware will start the Linux kernel with ramdisk and cmdline.
      */
-    cpu[0]->env.gr[26] = ram_size;
+    cpu[0]->env.gr[26] = machine->ram_size;
     cpu[0]->env.gr[25] = kernel_entry;
 
     /* tell firmware how many SMP CPUs to present in inventory table */
@@ -343,11 +343,11 @@ static void hppa_machine_reset(MachineState *ms)
     }
 
     /* already initialized by machine_hppa_init()? */
-    if (cpu[0]->env.gr[26] == ram_size) {
+    if (cpu[0]->env.gr[26] == ms->ram_size) {
         return;
     }
 
-    cpu[0]->env.gr[26] = ram_size;
+    cpu[0]->env.gr[26] = ms->ram_size;
     cpu[0]->env.gr[25] = 0; /* no firmware boot menu */
     cpu[0]->env.gr[24] = 'c';
     /* gr22/gr23 unused, no initrd while reboot. */
@@ -356,6 +356,14 @@ static void hppa_machine_reset(MachineState *ms)
     cpu[0]->env.gr[19] = FW_CFG_IO_BASE;
 }
 
+static void hppa_nmi(NMIState *n, int cpu_index, Error **errp)
+{
+    CPUState *cs;
+
+    CPU_FOREACH(cs) {
+        cpu_interrupt(cs, CPU_INTERRUPT_NMI);
+    }
+}
 
 static void machine_hppa_machine_init(MachineClass *mc)
 {
@@ -372,4 +380,28 @@ static void machine_hppa_machine_init(MachineClass *mc)
     mc->default_ram_id = "ram";
 }
 
-DEFINE_MACHINE("hppa", machine_hppa_machine_init)
+static void machine_hppa_machine_init_class_init(ObjectClass *oc, void *data)
+{
+    MachineClass *mc = MACHINE_CLASS(oc);
+    machine_hppa_machine_init(mc);
+
+    NMIClass *nc = NMI_CLASS(oc);
+    nc->nmi_monitor_handler = hppa_nmi;
+}
+
+static const TypeInfo machine_hppa_machine_init_typeinfo = {
+    .name = ("hppa" "-machine"),
+    .parent = "machine",
+    .class_init = machine_hppa_machine_init_class_init,
+    .interfaces = (InterfaceInfo[]) {
+        { TYPE_NMI },
+        { }
+    },
+};
+
+static void machine_hppa_machine_init_register_types(void)
+{
+    type_register_static(&machine_hppa_machine_init_typeinfo);
+}
+
+type_init(machine_hppa_machine_init_register_types)

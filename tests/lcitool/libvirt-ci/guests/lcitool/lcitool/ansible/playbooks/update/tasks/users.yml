@@ -1,0 +1,70 @@
+---
+- name: 'root: Set password'
+  user:
+    name: root
+    password: '{{ install.root_password|password_hash("sha512") }}'
+
+- name: 'root: Configure ssh access'
+  authorized_key:
+    user: root
+    key: '{{ lookup("file", lookup("env", "HOME") + "/.ssh/id_rsa.pub") }}'
+    state: present
+
+- name: 'root: Disable ssh password authentication'
+  lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^#*\s*PermitRootLogin\s*.*$'
+    line: 'PermitRootLogin without-password'
+    state: present
+
+- name: '{{ install.flavor }}: Create group'
+  group:
+    name: '{{ install.flavor }}'
+    state: present
+
+- name: '{{ install.flavor }}: Create user account'
+  user:
+    name: '{{ install.flavor }}'
+    group: '{{ install.flavor }}'
+    comment: '{{ install.flavor }}'
+    password: '*'
+    shell: '{{ paths.bash }}'
+
+- name: '{{ install.flavor }}: Set password'
+  user:
+    name: '{{ install.flavor }}'
+    password: '{{ "test"|password_hash("sha512") }}'
+  when:
+    - install.flavor == 'test'
+
+- name: '{{ install.flavor }}: Configure ssh access'
+  authorized_key:
+    user: '{{ install.flavor }}'
+    key: '{{ lookup("file", lookup("env", "HOME") + "/.ssh/id_rsa.pub") }}'
+    state: present
+
+- name: '{{ install.flavor }}: Grant passwordless sudo access'
+  lineinfile:
+    path: '{{ paths.sudoers }}'
+    line: '{{ install.flavor }} ALL=(ALL) NOPASSWD: ALL'
+    state: present
+    validate: 'visudo -cf %s'
+  when:
+    - install.flavor == 'test'
+
+- name: '{{ install.flavor }}: Remove unnecessary bash_logout'
+  file:
+    path: /home/{{ install.flavor }}/.bash_logout
+    state: absent
+  when:
+    - install.flavor == 'gitlab'
+
+
+- name: '{{ install.flavor }}: Install global gitconfig'
+  template:
+    src: 'templates/gitconfig.j2'
+    dest: /home/{{ install.flavor }}/.gitconfig
+    owner: '{{ install.flavor }}'
+    group: '{{ install.flavor }}'
+  when:
+    - install.flavor == 'test'

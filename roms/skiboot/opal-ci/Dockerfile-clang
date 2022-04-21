@@ -1,0 +1,6 @@
+FROM ubuntu:rolling
+ENV DEBIAN_FRONTEND    noninteractive
+RUN apt-get update -qq
+RUN apt-get install -y clang device-tree-compiler
+COPY . /build/
+WORKDIR /build

@@ -1,0 +1,243 @@
+#################################################################################
+#										#
+#		Linux TPM2 Utilities Makefile for TSS without files		#
+#			     Written by Ken Goldman				#
+#		       IBM Thomas J. Watson Research Center			#
+#										#
+# (c) Copyright IBM Corporation 2016 - 2019					#
+# 										#
+# All rights reserved.								#
+# 										#
+# Redistribution and use in source and binary forms, with or without		#
+# modification, are permitted provided that the following conditions are	#
+# met:										#
+# 										#
+# Redistributions of source code must retain the above copyright notice,	#
+# this list of conditions and the following disclaimer.				#
+# 										#
+# Redistributions in binary form must reproduce the above copyright		#
+# notice, this list of conditions and the following disclaimer in the		#
+# documentation and/or other materials provided with the distribution.		#
+# 										#
+# Neither the names of the IBM Corporation nor the names of its			#
+# contributors may be used to endorse or promote products derived from		#
+# this software without specific prior written permission.			#
+# 										#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS		#
+# "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT		#
+# LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR		#
+# A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT		#
+# HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,	#
+# SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT		#
+# LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,		#
+# DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY		#
+# THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT		#
+# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE		#
+# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.		#
+#										#
+#################################################################################
+
+# makefile to build a TSS library that does not require file read/write.
+#
+# See the documentation for limitations.
+
+# C compiler
+
+CC = /usr/bin/gcc
+
+# compile - common flags for TSS library and applications
+
+CCFLAGS  += 	-DTPM_POSIX			\
+		-DTPM_TSS_NOFILE
+
+# -DTPM_NOSOCKET
+
+# compile - for TSS library
+
+# include the hardening flag PIC needed for compiling for dynamic
+# linking
+
+CCLFLAGS += 	-I. 		\
+		-fPIC		\
+		-DTPM_TPM20
+
+# compile - for applications
+
+# include the hardening flag PIE needed for compiling for
+# static linking
+
+CCAFLAGS += 	-I.		\
+		-DTPM_TPM20	\
+		-fPIE
+
+# link - common flags flags TSS library and applications
+
+LNFLAGS += 	-DTPM_POSIX	\
+		-L.
+
+# link - for TSS library
+
+# hardening flags for linking shared objects
+LNLFLAGS += -shared -Wl,-z,now
+
+#	This is an alternative to using the bfd linker on Ubuntu
+LNLLIBS += -lcrypto
+
+# link - for applications, TSS path, TSS and OpenSSl libraries
+
+LNAFLAGS += -pie -Wl,-z,now -Wl,-rpath,.
+
+LNALIBS +=  -libmtssutils -libmtssmin
+
+# versioned shared library
+LIBTSSVERSIONED=libibmtssmin.so.1.3
+
+# soname field of the shared library
+# which will be made symbolic link to the versioned shared library
+# this is used to provide version backward-compatibility information
+LIBTSSSONAME=libibmtssmin.so.1
+
+# symbolic link to the versioned shared library
+# this allows linking to the shared library with '-libmtss' 
+
+os := $(shell uname -o)
+ifeq ($(os),Cygwin)
+  LIBTSS=libibmtssmin.dll
+else
+  LIBTSS=libibmtssmin.so
+endif
+
+# TSS utilities shared library
+
+LIBTSSUTILSVERSIONED=libibmtssutils.so.1.3
+LIBTSSUTILSSONAME=libibmtssutils.so.1
+LIBTSSUTILS=libibmtssutils.so
+
+# executable extension
+
+EXE =
+
+ALL = signapp writeapp
+
+TSS_HEADERS = ibmtss/tssfile.h
+
+# default TSS library
+
+TSS_OBJS =  	tsscryptoh.o 		\
+		tsscrypto.o 		\
+		tssprintcmd.o
+
+TSSUTILS_OBJS = cryptoutils.o	\
+		ekutils.o	\
+		imalib.o	\
+		eventlib.o
+
+# common to all builds
+
+include makefile-common
+include makefile-common20
+
+# default build target
+
+all: 	signapp writeapp
+
+# TSS shared library source
+
+tss.o: 			$(TSS_HEADERS) tss.c
+			$(CC) $(CCFLAGS) $(CCLFLAGS) tss.c
+tssauth.o: 		$(TSS_HEADERS) tssauth.c
+			$(CC) $(CCFLAGS) $(CCLFLAGS) tssauth.c
+tssproperties.o: 	$(TSS_HEADERS) tssproperties.c
+			$(CC) $(CCFLAGS) $(CCLFLAGS) tssproperties.c
+tssmarshal.o: 		$(TSS_HEADERS) tssmarshal.c
+			$(CC) $(CCFLAGS) $(CCLFLAGS) tssmarshal.c
+tsscryptoh.o: 		$(TSS_HEADERS) tsscryptoh.c
+			$(CC) $(CCFLAGS) $(CCLFLAGS) tsscryptoh.c
+tsscrypto.o: 		$(TSS_HEADERS) tsscrypto.c
+			$(CC) $(CCFLAGS) $(CCLFLAGS) tsscrypto.c
+tssutils.o: 		$(TSS_HEADERS) tssutils.c
+			$(CC) $(CCFLAGS) $(CCLFLAGS) tssutils.c
+tsssocket.o: 		$(TSS_HEADERS) tsssocket.c
+			$(CC) $(CCFLAGS) $(CCLFLAGS) tsssocket.c
+tssdev.o: 		$(TSS_HEADERS) tssdev.c
+			$(CC) $(CCFLAGS) $(CCLFLAGS) tssdev.c
+tsstransmit.o: 		$(TSS_HEADERS) tsstransmit.c
+			$(CC) $(CCFLAGS) $(CCLFLAGS) tsstransmit.c
+tssresponsecode.o: 	$(TSS_HEADERS) tssresponsecode.c
+			$(CC) $(CCFLAGS) $(CCLFLAGS) tssresponsecode.c
+tssccattributes.o: 	$(TSS_HEADERS) tssccattributes.c
+			$(CC) $(CCFLAGS) $(CCLFLAGS) tssccattributes.c
+tssprint.o: 		$(TSS_HEADERS) tssprint.c
+			$(CC) $(CCFLAGS) $(CCLFLAGS) tssprint.c
+tssprintcmd.o: 		$(TSS_HEADERS) tssprintcmd.c
+			$(CC) $(CCFLAGS) $(CCLFLAGS) tssprintcmd.c
+Unmarshal.o: 		$(TSS_HEADERS) Unmarshal.c
+			$(CC) $(CCFLAGS) $(CCLFLAGS) Unmarshal.c
+Commands.o: 		$(TSS_HEADERS) Commands.c
+			$(CC) $(CCFLAGS) $(CCLFLAGS) Commands.c
+CommandAttributeData.o: $(TSS_HEADERS) CommandAttributeData.c
+			$(CC) $(CCFLAGS) $(CCLFLAGS) CommandAttributeData.c
+ntc2lib.o:		$(TSS_HEADERS) ntc2lib.c
+			$(CC) $(CCFLAGS) $(CCLFLAGS) ntc2lib.c
+tssntc.o:		$(TSS_HEADERS) tssntc.c
+			$(CC) $(CCFLAGS) $(CCLFLAGS) tssntc.c
+
+# TPM 2.0
+
+tss20.o: 	$(TSS_HEADERS) tss20.c
+		$(CC) $(CCFLAGS) $(CCLFLAGS) tss20.c
+tssauth20.o: 	$(TSS_HEADERS) tssauth20.c
+		$(CC) $(CCFLAGS) $(CCLFLAGS) tssauth20.c
+
+# TSS utilities shared library source
+
+cryptoutils.o: 	$(TSS_HEADERS) cryptoutils.c
+		$(CC) $(CCFLAGS) $(CCLFLAGS) cryptoutils.c
+ekutils.o: 	$(TSS_HEADERS) ekutils.c
+		$(CC) $(CCFLAGS) $(CCLFLAGS) ekutils.c
+imalib.o: 	$(TSS_HEADERS) imalib.c
+		$(CC) $(CCFLAGS) $(CCLFLAGS) imalib.c
+eventlib.o: 	$(TSS_HEADERS) eventlib.c
+		$(CC) $(CCFLAGS) $(CCLFLAGS) eventlib.c
+
+# TSS shared library build
+
+$(LIBTSS): 	$(TSS_OBJS)
+		$(CC) $(LNFLAGS) $(LNLFLAGS) -Wl,-soname,$(LIBTSSSONAME) -o $(LIBTSSVERSIONED) $(TSS_OBJS) $(LNLLIBS)
+		rm -f $(LIBTSSSONAME)
+		ln -sf $(LIBTSSVERSIONED) $(LIBTSSSONAME)
+		rm -f $(LIBTSS)
+		ln -sf $(LIBTSSSONAME) $(LIBTSS)
+
+# TSS utilities shared library
+
+$(LIBTSSUTILS):	$(TSSUTILS_OBJS)
+		$(CC) $(LNFLAGS) $(LNLFLAGS) -Wl,-soname,$(LIBTSSUTILSSONAME) -o $(LIBTSSUTILSVERSIONED) $(TSSUTILS_OBJS) $(LNLLIBS)
+		rm -f $(LIBTSSSUTILSONAME)
+		ln -sf $(LIBTSSUTILSVERSIONED) $(LIBTSSUTILSSONAME)
+		rm -f $(LIBTSSUTILS)
+		ln -sf $(LIBTSSUTILSSONAME) $(LIBTSSUTILS)
+
+.PHONY:		clean
+.PRECIOUS:	%.o
+
+clean:		
+		rm -f *.o 		\
+		$(LIBTSSSONAME)		\
+		$(LIBTSSVERSIONED) 	\
+		$(LIBTSSUTILSSONAME) 	\
+		$(LIBTSSUTILSVERSIONED)	\
+		$(ALL)
+
+# applications
+
+signapp:		ibmtss/tss.h signapp.o $(LIBTSS) $(LIBTSSUTILS)
+			$(CC) $(LNFLAGS) $(LNAFLAGS) signapp.o $(LNALIBS) -o signapp
+writeapp:		ibmtss/tss.h writeapp.o $(LIBTSS) $(LIBTSSUTILS) 
+			$(CC) $(LNFLAGS) $(LNAFLAGS) writeapp.o $(LNALIBS) -o writeapp
+
+# for applications, not for TSS library
+
+%.o:		%.c ibmtss/tss.h 
+		$(CC) $(CCFLAGS) $(CCAFLAGS) $< -o $@
+

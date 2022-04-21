@@ -32,6 +32,7 @@
 #include "hw/virtio/virtio-bus.h"
 #include "migration/qemu-file-types.h"
 #include "hw/virtio/virtio-access.h"
+#include "qemu/coroutine.h"
 
 /* Config size before the discard support (hide associated config fields) */
 #define VIRTIO_BLK_CFG_SIZE offsetof(struct virtio_blk_config, \
@@ -40,7 +41,7 @@
  * Starting from the discard feature, we can use this array to properly
  * set the config size depending on the features enabled.
  */
-static VirtIOFeature feature_sizes[] = {
+static const VirtIOFeature feature_sizes[] = {
     {.flags = 1ULL << VIRTIO_BLK_F_DISCARD,
      .end = endof(struct virtio_blk_config, discard_sector_alignment)},
     {.flags = 1ULL << VIRTIO_BLK_F_WRITE_ZEROES,
@@ -767,12 +768,11 @@ static int virtio_blk_handle_request(VirtIOBlockReq *req, MultiReqBuffer *mrb)
     return 0;
 }
 
-bool virtio_blk_handle_vq(VirtIOBlock *s, VirtQueue *vq)
+void virtio_blk_handle_vq(VirtIOBlock *s, VirtQueue *vq)
 {
     VirtIOBlockReq *req;
     MultiReqBuffer mrb = {};
     bool suppress_notifications = virtio_queue_get_notification(vq);
-    bool progress = false;
 
     aio_context_acquire(blk_get_aio_context(s->blk));
     blk_io_plug(s->blk);
@@ -783,7 +783,6 @@ bool virtio_blk_handle_vq(VirtIOBlock *s, VirtQueue *vq)
         }
 
         while ((req = virtio_blk_get_request(s, vq))) {
-            progress = true;
             if (virtio_blk_handle_request(req, &mrb)) {
                 virtqueue_detach_element(req->vq, &req->elem, 0);
                 virtio_blk_free_request(req);
@@ -802,19 +801,13 @@ bool virtio_blk_handle_vq(VirtIOBlock *s, VirtQueue *vq)
 
     blk_io_unplug(s->blk);
     aio_context_release(blk_get_aio_context(s->blk));
-    return progress;
-}
-
-static void virtio_blk_handle_output_do(VirtIOBlock *s, VirtQueue *vq)
-{
-    virtio_blk_handle_vq(s, vq);
 }
 
 static void virtio_blk_handle_output(VirtIODevice *vdev, VirtQueue *vq)
 {
     VirtIOBlock *s = (VirtIOBlock *)vdev;
 
-    if (s->dataplane) {
+    if (s->dataplane && !s->dataplane_started) {
         /* Some guests kick before setting VIRTIO_CONFIG_S_DRIVER_OK so start
          * dataplane here instead of waiting for .set_status().
          */
@@ -823,7 +816,7 @@ static void virtio_blk_handle_output(VirtIODevice *vdev, VirtQueue *vq)
             return;
         }
     }
-    virtio_blk_handle_output_do(s, vq);
+    virtio_blk_handle_vq(s, vq);
 }
 
 void virtio_blk_process_queued_requests(VirtIOBlock *s, bool is_bh)
@@ -870,7 +863,7 @@ static void virtio_blk_dma_restart_bh(void *opaque)
     virtio_blk_process_queued_requests(s, true);
 }
 
-static void virtio_blk_dma_restart_cb(void *opaque, int running,
+static void virtio_blk_dma_restart_cb(void *opaque, bool running,
                                       RunState state)
 {
     VirtIOBlock *s = opaque;
@@ -962,10 +955,14 @@ static void virtio_blk_update_config(VirtIODevice *vdev, uint8_t *config)
     blkcfg.wce = blk_enable_write_cache(s->blk);
     virtio_stw_p(vdev, &blkcfg.num_queues, s->conf.num_queues);
     if (virtio_has_feature(s->host_features, VIRTIO_BLK_F_DISCARD)) {
+        uint32_t discard_granularity = conf->discard_granularity;
+        if (discard_granularity == -1 || !s->conf.report_discard_granularity) {
+            discard_granularity = blk_size;
+        }
         virtio_stl_p(vdev, &blkcfg.max_discard_sectors,
                      s->conf.max_discard_sectors);
         virtio_stl_p(vdev, &blkcfg.discard_sector_alignment,
-                     blk_size >> BDRV_SECTOR_BITS);
+                     discard_granularity >> BDRV_SECTOR_BITS);
         /*
          * We support only one segment per request since multiple segments
          * are not widely used and there are no userspace APIs that allow
@@ -1021,7 +1018,7 @@ static uint64_t virtio_blk_get_features(VirtIODevice *vdev, uint64_t features,
          virtio_has_feature(features, VIRTIO_BLK_F_CONFIG_WCE))) {
         virtio_add_feature(&features, VIRTIO_BLK_F_WCE);
     }
-    if (blk_is_read_only(s->blk)) {
+    if (!blk_is_writable(s->blk)) {
         virtio_add_feature(&features, VIRTIO_BLK_F_RO);
     }
     if (s->conf.num_queues > 1) {
@@ -1175,8 +1172,8 @@ static void virtio_blk_device_realize(DeviceState *dev, Error **errp)
     }
 
     if (!blkconf_apply_backend_options(&conf->conf,
-                                       blk_is_read_only(conf->conf.blk), true,
-                                       errp)) {
+                                       !blk_supports_write_perm(conf->conf.blk),
+                                       true, errp)) {
         return;
     }
     s->original_wce = blk_enable_write_cache(conf->conf.blk);
@@ -1218,6 +1215,8 @@ static void virtio_blk_device_realize(DeviceState *dev, Error **errp)
     for (i = 0; i < conf->num_queues; i++) {
         virtio_add_queue(vdev, conf->queue_size, virtio_blk_handle_output);
     }
+    qemu_coroutine_increase_pool_batch_size(conf->num_queues * conf->queue_size
+                                            / 2);
     virtio_blk_data_plane_create(vdev, conf, &s->dataplane, &err);
     if (err != NULL) {
         error_propagate(errp, err);
@@ -1254,6 +1253,8 @@ static void virtio_blk_device_unrealize(DeviceState *dev)
     for (i = 0; i < conf->num_queues; i++) {
         virtio_del_queue(vdev, i);
     }
+    qemu_coroutine_decrease_pool_batch_size(conf->num_queues * conf->queue_size
+                                            / 2);
     qemu_del_vm_change_state_handler(s->change);
     blockdev_mark_auto_del(s->blk);
     virtio_cleanup(vdev);
@@ -1299,6 +1300,8 @@ static Property virtio_blk_properties[] = {
                      IOThread *),
     DEFINE_PROP_BIT64("discard", VirtIOBlock, host_features,
                       VIRTIO_BLK_F_DISCARD, true),
+    DEFINE_PROP_BOOL("report-discard-granularity", VirtIOBlock,
+                     conf.report_discard_granularity, true),
     DEFINE_PROP_BIT64("write-zeroes", VirtIOBlock, host_features,
                       VIRTIO_BLK_F_WRITE_ZEROES, true),
     DEFINE_PROP_UINT32("max-discard-sectors", VirtIOBlock,

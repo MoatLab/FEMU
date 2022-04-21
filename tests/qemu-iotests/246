@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# group: rw quick
 #
 # Test persistent bitmap resizing.
 #
@@ -22,14 +23,16 @@
 import iotests
 from iotests import log
 
-iotests.script_initialize(supported_fmts=['qcow2'])
+iotests.script_initialize(supported_fmts=['qcow2'],
+                          unsupported_imgopts=['compat'])
 size = 64 * 1024 * 1024 * 1024
 gran_small = 32 * 1024
 gran_large = 128 * 1024
 
 def query_bitmaps(vm):
     res = vm.qmp("query-block")
-    return { "bitmaps": { device['device']: device.get('dirty-bitmaps', []) for
+    return { "bitmaps": { device['device']: device.get('inserted', {})
+                          .get('dirty-bitmaps', []) for
                           device in res['return'] } }
 
 with iotests.FilePath('img') as img_path, \

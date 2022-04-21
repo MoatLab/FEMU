@@ -5,6 +5,7 @@ libqos_srcs = files('../libqtest.c',
         'fw_cfg.c',
         'malloc.c',
         'libqos.c',
+        'sdhci-cmd.c',
 
         # spapr
         'malloc-spapr.c',
@@ -32,6 +33,7 @@ libqos_srcs = files('../libqtest.c',
         'virtio-9p.c',
         'virtio-balloon.c',
         'virtio-blk.c',
+        'vhost-user-blk.c',
         'virtio-mmio.c',
         'virtio-net.c',
         'virtio-pci.c',
@@ -39,6 +41,7 @@ libqos_srcs = files('../libqtest.c',
         'virtio-rng.c',
         'virtio-scsi.c',
         'virtio-serial.c',
+        'virtio-iommu.c',
 
         # qgraph machines:
         'aarch64-xlnx-zcu102-machine.c',

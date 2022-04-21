@@ -1,0 +1,4 @@
+sphinx
+recommonmark
+# docutils 0.15 has a syntax error. fun.
+docutils == 0.14

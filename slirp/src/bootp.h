@@ -114,7 +114,7 @@ struct bootp_t {
     uint8_t bp_hwaddr[16];
     uint8_t bp_sname[64];
     char bp_file[128];
-    uint8_t bp_vend[DHCP_OPT_LEN];
+    uint8_t bp_vend[];
 };
 
 typedef struct {

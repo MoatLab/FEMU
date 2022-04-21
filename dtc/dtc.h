@@ -86,6 +86,16 @@ static inline uint64_t dtb_ld64(const void *p)
 #define streq(a, b)	(strcmp((a), (b)) == 0)
 #define strstarts(s, prefix)	(strncmp((s), (prefix), strlen(prefix)) == 0)
 #define strprefixeq(a, n, b)	(strlen(b) == (n) && (memcmp(a, b, n) == 0))
+static inline bool strends(const char *str, const char *suffix)
+{
+	unsigned int len, suffix_len;
+
+	len = strlen(str);
+	suffix_len = strlen(suffix);
+	if (len < suffix_len)
+		return false;
+	return streq(str + len - suffix_len, suffix);
+}
 
 #define ALIGN(x, a)	(((x) + (a) - 1) & ~((a) - 1))
 
@@ -105,13 +115,13 @@ extern const char *markername(enum markertype markertype);
 
 struct  marker {
 	enum markertype type;
-	int offset;
+	unsigned int offset;
 	char *ref;
 	struct marker *next;
 };
 
 struct data {
-	int len;
+	unsigned int len;
 	char *val;
 	struct marker *markers;
 };
@@ -129,7 +139,7 @@ size_t type_marker_length(struct marker *m);
 
 void data_free(struct data d);
 
-struct data data_grow_for(struct data d, int xlen);
+struct data data_grow_for(struct data d, unsigned int xlen);
 
 struct data data_copy_mem(const char *mem, int len);
 struct data data_copy_escape_string(const char *s, int len);
@@ -253,7 +263,7 @@ void append_to_property(struct node *node,
 const char *get_unitname(struct node *node);
 struct property *get_property(struct node *node, const char *propname);
 cell_t propval_cell(struct property *prop);
-cell_t propval_cell_n(struct property *prop, int n);
+cell_t propval_cell_n(struct property *prop, unsigned int n);
 struct property *get_property_by_label(struct node *tree, const char *label,
 				       struct node **node);
 struct marker *get_marker_label(struct node *tree, const char *label,

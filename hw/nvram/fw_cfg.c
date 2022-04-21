@@ -24,6 +24,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu-common.h"
+#include "qemu/datadir.h"
 #include "sysemu/sysemu.h"
 #include "sysemu/dma.h"
 #include "sysemu/reset.h"
@@ -40,6 +41,7 @@
 #include "qemu/cutils.h"
 #include "qapi/error.h"
 #include "hw/acpi/aml-build.h"
+#include "hw/pci/pci_bus.h"
 
 #define FW_CFG_FILE_SLOTS_DFLT 0x20
 
@@ -355,9 +357,10 @@ static void fw_cfg_dma_transfer(FWCfgState *s)
     dma_addr = s->dma_addr;
     s->dma_addr = 0;
 
-    if (dma_memory_read(s->dma_as, dma_addr, &dma, sizeof(dma))) {
+    if (dma_memory_read(s->dma_as, dma_addr,
+                        &dma, sizeof(dma), MEMTXATTRS_UNSPECIFIED)) {
         stl_be_dma(s->dma_as, dma_addr + offsetof(FWCfgDmaAccess, control),
-                   FW_CFG_DMA_CTL_ERROR);
+                   FW_CFG_DMA_CTL_ERROR, MEMTXATTRS_UNSPECIFIED);
         return;
     }
 
@@ -397,7 +400,8 @@ static void fw_cfg_dma_transfer(FWCfgState *s)
              * tested before.
              */
             if (read) {
-                if (dma_memory_set(s->dma_as, dma.address, 0, len)) {
+                if (dma_memory_set(s->dma_as, dma.address, 0, len,
+                                   MEMTXATTRS_UNSPECIFIED)) {
                     dma.control |= FW_CFG_DMA_CTL_ERROR;
                 }
             }
@@ -416,7 +420,8 @@ static void fw_cfg_dma_transfer(FWCfgState *s)
              */
             if (read) {
                 if (dma_memory_write(s->dma_as, dma.address,
-                                    &e->data[s->cur_offset], len)) {
+                                     &e->data[s->cur_offset], len,
+                                     MEMTXATTRS_UNSPECIFIED)) {
                     dma.control |= FW_CFG_DMA_CTL_ERROR;
                 }
             }
@@ -424,7 +429,8 @@ static void fw_cfg_dma_transfer(FWCfgState *s)
                 if (!e->allow_write ||
                     len != dma.length ||
                     dma_memory_read(s->dma_as, dma.address,
-                                    &e->data[s->cur_offset], len)) {
+                                    &e->data[s->cur_offset], len,
+                                    MEMTXATTRS_UNSPECIFIED)) {
                     dma.control |= FW_CFG_DMA_CTL_ERROR;
                 } else if (e->write_cb) {
                     e->write_cb(e->callback_opaque, s->cur_offset, len);
@@ -440,7 +446,7 @@ static void fw_cfg_dma_transfer(FWCfgState *s)
     }
 
     stl_be_dma(s->dma_as, dma_addr + offsetof(FWCfgDmaAccess, control),
-                dma.control);
+                dma.control, MEMTXATTRS_UNSPECIFIED);
 
     trace_fw_cfg_read(s, 0);
 }
@@ -581,7 +587,7 @@ static int get_uint32_as_uint16(QEMUFile *f, void *pv, size_t size,
 }
 
 static int put_unused(QEMUFile *f, void *pv, size_t size,
-                      const VMStateField *field, QJSON *vmdesc)
+                      const VMStateField *field, JSONWriter *vmdesc)
 {
     fprintf(stderr, "uint32_as_uint16 is only used for backward compatibility.\n");
     fprintf(stderr, "This functions shouldn't be called.\n");
@@ -876,6 +882,7 @@ static struct {
     { "etc/tpm/log", 150 },
     { "etc/acpi/rsdp", 160 },
     { "bootorder", 170 },
+    { "etc/msr_feature_control", 180 },
 
 #define FW_CFG_ORDER_OVERRIDE_LAST 200
 };
@@ -1059,6 +1066,28 @@ bool fw_cfg_add_from_generator(FWCfgState *s, const char *filename,
     fw_cfg_add_file(s, filename, g_byte_array_free(array, FALSE), size);
 
     return true;
+}
+
+void fw_cfg_add_extra_pci_roots(PCIBus *bus, FWCfgState *s)
+{
+    int extra_hosts = 0;
+
+    if (!bus) {
+        return;
+    }
+
+    QLIST_FOREACH(bus, &bus->child, sibling) {
+        /* look for expander root buses */
+        if (pci_bus_is_root(bus)) {
+            extra_hosts++;
+        }
+    }
+
+    if (extra_hosts && s) {
+        uint64_t *val = g_malloc(sizeof(*val));
+        *val = cpu_to_le64(extra_hosts);
+        fw_cfg_add_file(s, "etc/extra-pci-roots", val, sizeof(*val));
+    }
 }
 
 static void fw_cfg_machine_reset(void *opaque)

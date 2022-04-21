@@ -19,6 +19,7 @@
  */
 #include "qemu/osdep.h"
 #include "cpu.h"
+#include "internals.h"
 #include "exec/gdbstub.h"
 
 typedef struct RegisterSysregXmlParam {
@@ -76,14 +77,23 @@ int arm_cpu_gdb_write_register(CPUState *cs, uint8_t *mem_buf, int n)
 
     tmp = ldl_p(mem_buf);
 
-    /* Mask out low bit of PC to workaround gdb bugs.  This will probably
-       cause problems if we ever implement the Jazelle DBX extensions.  */
+    /*
+     * Mask out low bits of PC to workaround gdb bugs.
+     * This avoids an assert in thumb_tr_translate_insn, because it is
+     * architecturally impossible to misalign the pc.
+     * This will probably cause problems if we ever implement the
+     * Jazelle DBX extensions.
+     */
     if (n == 15) {
         tmp &= ~1;
     }
 
     if (n < 16) {
         /* Core integer register.  */
+        if (n == 13 && arm_feature(env, ARM_FEATURE_M)) {
+            /* M profile SP low bits are always 0 */
+            tmp &= ~3;
+        }
         env->regs[n] = tmp;
         return 4;
     }
@@ -117,6 +127,133 @@ int arm_cpu_gdb_write_register(CPUState *cs, uint8_t *mem_buf, int n)
         return 4;
     }
     /* Unknown register.  */
+    return 0;
+}
+
+static int vfp_gdb_get_reg(CPUARMState *env, GByteArray *buf, int reg)
+{
+    ARMCPU *cpu = env_archcpu(env);
+    int nregs = cpu_isar_feature(aa32_simd_r32, cpu) ? 32 : 16;
+
+    /* VFP data registers are always little-endian.  */
+    if (reg < nregs) {
+        return gdb_get_reg64(buf, *aa32_vfp_dreg(env, reg));
+    }
+    if (arm_feature(env, ARM_FEATURE_NEON)) {
+        /* Aliases for Q regs.  */
+        nregs += 16;
+        if (reg < nregs) {
+            uint64_t *q = aa32_vfp_qreg(env, reg - 32);
+            return gdb_get_reg128(buf, q[0], q[1]);
+        }
+    }
+    switch (reg - nregs) {
+    case 0:
+        return gdb_get_reg32(buf, vfp_get_fpscr(env));
+    }
+    return 0;
+}
+
+static int vfp_gdb_set_reg(CPUARMState *env, uint8_t *buf, int reg)
+{
+    ARMCPU *cpu = env_archcpu(env);
+    int nregs = cpu_isar_feature(aa32_simd_r32, cpu) ? 32 : 16;
+
+    if (reg < nregs) {
+        *aa32_vfp_dreg(env, reg) = ldq_le_p(buf);
+        return 8;
+    }
+    if (arm_feature(env, ARM_FEATURE_NEON)) {
+        nregs += 16;
+        if (reg < nregs) {
+            uint64_t *q = aa32_vfp_qreg(env, reg - 32);
+            q[0] = ldq_le_p(buf);
+            q[1] = ldq_le_p(buf + 8);
+            return 16;
+        }
+    }
+    switch (reg - nregs) {
+    case 0:
+        vfp_set_fpscr(env, ldl_p(buf));
+        return 4;
+    }
+    return 0;
+}
+
+static int vfp_gdb_get_sysreg(CPUARMState *env, GByteArray *buf, int reg)
+{
+    switch (reg) {
+    case 0:
+        return gdb_get_reg32(buf, env->vfp.xregs[ARM_VFP_FPSID]);
+    case 1:
+        return gdb_get_reg32(buf, env->vfp.xregs[ARM_VFP_FPEXC]);
+    }
+    return 0;
+}
+
+static int vfp_gdb_set_sysreg(CPUARMState *env, uint8_t *buf, int reg)
+{
+    switch (reg) {
+    case 0:
+        env->vfp.xregs[ARM_VFP_FPSID] = ldl_p(buf);
+        return 4;
+    case 1:
+        env->vfp.xregs[ARM_VFP_FPEXC] = ldl_p(buf) & (1 << 30);
+        return 4;
+    }
+    return 0;
+}
+
+static int mve_gdb_get_reg(CPUARMState *env, GByteArray *buf, int reg)
+{
+    switch (reg) {
+    case 0:
+        return gdb_get_reg32(buf, env->v7m.vpr);
+    default:
+        return 0;
+    }
+}
+
+static int mve_gdb_set_reg(CPUARMState *env, uint8_t *buf, int reg)
+{
+    switch (reg) {
+    case 0:
+        env->v7m.vpr = ldl_p(buf);
+        return 4;
+    default:
+        return 0;
+    }
+}
+
+/**
+ * arm_get/set_gdb_*: get/set a gdb register
+ * @env: the CPU state
+ * @buf: a buffer to copy to/from
+ * @reg: register number (offset from start of group)
+ *
+ * We return the number of bytes copied
+ */
+
+static int arm_gdb_get_sysreg(CPUARMState *env, GByteArray *buf, int reg)
+{
+    ARMCPU *cpu = env_archcpu(env);
+    const ARMCPRegInfo *ri;
+    uint32_t key;
+
+    key = cpu->dyn_sysreg_xml.data.cpregs.keys[reg];
+    ri = get_arm_cp_reginfo(cpu->cp_regs, key);
+    if (ri) {
+        if (cpreg_field_is_64bit(ri)) {
+            return gdb_get_reg64(buf, (uint64_t)read_raw_cp_reg(env, ri));
+        } else {
+            return gdb_get_reg32(buf, (uint32_t)read_raw_cp_reg(env, ri));
+        }
+    }
+    return 0;
+}
+
+static int arm_gdb_set_sysreg(CPUARMState *env, uint8_t *buf, int reg)
+{
     return 0;
 }
 
@@ -195,22 +332,17 @@ static const struct TypeSize vec_lanes[] = {
     { "uint128", 128, 'q', 'u' },
     { "int128", 128, 'q', 's' },
     /* 64 bit */
+    { "ieee_double", 64, 'd', 'f' },
     { "uint64", 64, 'd', 'u' },
     { "int64", 64, 'd', 's' },
-    { "ieee_double", 64, 'd', 'f' },
     /* 32 bit */
+    { "ieee_single", 32, 's', 'f' },
     { "uint32", 32, 's', 'u' },
     { "int32", 32, 's', 's' },
-    { "ieee_single", 32, 's', 'f' },
     /* 16 bit */
+    { "ieee_half", 16, 'h', 'f' },
     { "uint16", 16, 'h', 'u' },
     { "int16", 16, 'h', 's' },
-    /*
-     * TODO: currently there is no reliable way of telling
-     * if the remote gdb actually understands ieee_half so
-     * we don't expose it in the target description for now.
-     * { "ieee_half", 16, 'h', 'f' },
-     */
     /* bytes */
     { "uint8", 8, 'b', 'u' },
     { "int8", 8, 'b', 's' },
@@ -223,17 +355,16 @@ int arm_gen_dynamic_svereg_xml(CPUState *cs, int base_reg)
     GString *s = g_string_new(NULL);
     DynamicGDBXMLInfo *info = &cpu->dyn_svereg_xml;
     g_autoptr(GString) ts = g_string_new("");
-    int i, bits, reg_width = (cpu->sve_max_vq * 128);
+    int i, j, bits, reg_width = (cpu->sve_max_vq * 128);
     info->num = 0;
     g_string_printf(s, "<?xml version=\"1.0\"?>");
     g_string_append_printf(s, "<!DOCTYPE target SYSTEM \"gdb-target.dtd\">");
-    g_string_append_printf(s, "<feature name=\"org.qemu.gdb.aarch64.sve\">");
+    g_string_append_printf(s, "<feature name=\"org.gnu.gdb.aarch64.sve\">");
 
     /* First define types and totals in a whole VL */
     for (i = 0; i < ARRAY_SIZE(vec_lanes); i++) {
         int count = reg_width / vec_lanes[i].size;
-        g_string_printf(ts, "vq%d%c%c", count,
-                        vec_lanes[i].sz, vec_lanes[i].suffix);
+        g_string_printf(ts, "svev%c%c", vec_lanes[i].sz, vec_lanes[i].suffix);
         g_string_append_printf(s,
                                "<vector id=\"%s\" type=\"%s\" count=\"%d\"/>",
                                ts->str, vec_lanes[i].gdb_type, count);
@@ -243,39 +374,37 @@ int arm_gen_dynamic_svereg_xml(CPUState *cs, int base_reg)
      * signed and potentially float versions of each size from 128 to
      * 8 bits.
      */
-    for (bits = 128; bits >= 8; bits /= 2) {
-        int count = reg_width / bits;
-        g_string_append_printf(s, "<union id=\"vq%dn\">", count);
-        for (i = 0; i < ARRAY_SIZE(vec_lanes); i++) {
-            if (vec_lanes[i].size == bits) {
-                g_string_append_printf(s, "<field name=\"%c\" type=\"vq%d%c%c\"/>",
-                                       vec_lanes[i].suffix,
-                                       count,
-                                       vec_lanes[i].sz, vec_lanes[i].suffix);
+    for (bits = 128, i = 0; bits >= 8; bits /= 2, i++) {
+        const char suf[] = { 'q', 'd', 's', 'h', 'b' };
+        g_string_append_printf(s, "<union id=\"svevn%c\">", suf[i]);
+        for (j = 0; j < ARRAY_SIZE(vec_lanes); j++) {
+            if (vec_lanes[j].size == bits) {
+                g_string_append_printf(s, "<field name=\"%c\" type=\"svev%c%c\"/>",
+                                       vec_lanes[j].suffix,
+                                       vec_lanes[j].sz, vec_lanes[j].suffix);
             }
         }
         g_string_append(s, "</union>");
     }
     /* And now the final union of unions */
-    g_string_append(s, "<union id=\"vq\">");
-    for (bits = 128; bits >= 8; bits /= 2) {
-        int count = reg_width / bits;
-        for (i = 0; i < ARRAY_SIZE(vec_lanes); i++) {
-            if (vec_lanes[i].size == bits) {
-                g_string_append_printf(s, "<field name=\"%c\" type=\"vq%dn\"/>",
-                                       vec_lanes[i].sz, count);
-                break;
-            }
-        }
+    g_string_append(s, "<union id=\"svev\">");
+    for (bits = 128, i = 0; bits >= 8; bits /= 2, i++) {
+        const char suf[] = { 'q', 'd', 's', 'h', 'b' };
+        g_string_append_printf(s, "<field name=\"%c\" type=\"svevn%c\"/>",
+                               suf[i], suf[i]);
     }
     g_string_append(s, "</union>");
+
+    /* Finally the sve prefix type */
+    g_string_append_printf(s,
+                           "<vector id=\"svep\" type=\"uint8\" count=\"%d\"/>",
+                           reg_width / 8);
 
     /* Then define each register in parts for each vq */
     for (i = 0; i < 32; i++) {
         g_string_append_printf(s,
                                "<reg name=\"z%d\" bitsize=\"%d\""
-                               " regnum=\"%d\" group=\"vector\""
-                               " type=\"vq\"/>",
+                               " regnum=\"%d\" type=\"svev\"/>",
                                i, reg_width, base_reg++);
         info->num++;
     }
@@ -287,31 +416,22 @@ int arm_gen_dynamic_svereg_xml(CPUState *cs, int base_reg)
                            " regnum=\"%d\" group=\"float\""
                            " type=\"int\"/>", base_reg++);
     info->num += 2;
-    /*
-     * Predicate registers aren't so big they are worth splitting up
-     * but we do need to define a type to hold the array of quad
-     * references.
-     */
-    g_string_append_printf(s,
-                           "<vector id=\"vqp\" type=\"uint16\" count=\"%d\"/>",
-                           cpu->sve_max_vq);
+
     for (i = 0; i < 16; i++) {
         g_string_append_printf(s,
                                "<reg name=\"p%d\" bitsize=\"%d\""
-                               " regnum=\"%d\" group=\"vector\""
-                               " type=\"vqp\"/>",
+                               " regnum=\"%d\" type=\"svep\"/>",
                                i, cpu->sve_max_vq * 16, base_reg++);
         info->num++;
     }
     g_string_append_printf(s,
                            "<reg name=\"ffr\" bitsize=\"%d\""
                            " regnum=\"%d\" group=\"vector\""
-                           " type=\"vqp\"/>",
+                           " type=\"svep\"/>",
                            cpu->sve_max_vq * 16, base_reg++);
     g_string_append_printf(s,
                            "<reg name=\"vg\" bitsize=\"64\""
-                           " regnum=\"%d\" group=\"vector\""
-                           " type=\"uint32\"/>",
+                           " regnum=\"%d\" type=\"int\"/>",
                            base_reg++);
     info->num += 2;
     g_string_append_printf(s, "</feature>");
@@ -331,4 +451,55 @@ const char *arm_gdb_get_dynamic_xml(CPUState *cs, const char *xmlname)
         return cpu->dyn_svereg_xml.desc;
     }
     return NULL;
+}
+
+void arm_cpu_register_gdb_regs_for_features(ARMCPU *cpu)
+{
+    CPUState *cs = CPU(cpu);
+    CPUARMState *env = &cpu->env;
+
+    if (arm_feature(env, ARM_FEATURE_AARCH64)) {
+        /*
+         * The lower part of each SVE register aliases to the FPU
+         * registers so we don't need to include both.
+         */
+#ifdef TARGET_AARCH64
+        if (isar_feature_aa64_sve(&cpu->isar)) {
+            gdb_register_coprocessor(cs, arm_gdb_get_svereg, arm_gdb_set_svereg,
+                                     arm_gen_dynamic_svereg_xml(cs, cs->gdb_num_regs),
+                                     "sve-registers.xml", 0);
+        } else {
+            gdb_register_coprocessor(cs, aarch64_fpu_gdb_get_reg,
+                                     aarch64_fpu_gdb_set_reg,
+                                     34, "aarch64-fpu.xml", 0);
+        }
+#endif
+    } else {
+        if (arm_feature(env, ARM_FEATURE_NEON)) {
+            gdb_register_coprocessor(cs, vfp_gdb_get_reg, vfp_gdb_set_reg,
+                                     49, "arm-neon.xml", 0);
+        } else if (cpu_isar_feature(aa32_simd_r32, cpu)) {
+            gdb_register_coprocessor(cs, vfp_gdb_get_reg, vfp_gdb_set_reg,
+                                     33, "arm-vfp3.xml", 0);
+        } else if (cpu_isar_feature(aa32_vfp_simd, cpu)) {
+            gdb_register_coprocessor(cs, vfp_gdb_get_reg, vfp_gdb_set_reg,
+                                     17, "arm-vfp.xml", 0);
+        }
+        if (!arm_feature(env, ARM_FEATURE_M)) {
+            /*
+             * A and R profile have FP sysregs FPEXC and FPSID that we
+             * expose to gdb.
+             */
+            gdb_register_coprocessor(cs, vfp_gdb_get_sysreg, vfp_gdb_set_sysreg,
+                                     2, "arm-vfp-sysregs.xml", 0);
+        }
+    }
+    if (cpu_isar_feature(aa32_mve, cpu)) {
+        gdb_register_coprocessor(cs, mve_gdb_get_reg, mve_gdb_set_reg,
+                                 1, "arm-m-profile-mve.xml", 0);
+    }
+    gdb_register_coprocessor(cs, arm_gdb_get_sysreg, arm_gdb_set_sysreg,
+                             arm_gen_dynamic_sysreg_xml(cs, cs->gdb_num_regs),
+                             "system-registers.xml", 0);
+
 }

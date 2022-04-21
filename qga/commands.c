@@ -22,9 +22,9 @@
 #include "commands-common.h"
 
 /* Maximum captured guest-exec out_data/err_data - 16MB */
-#define GUEST_EXEC_MAX_OUTPUT (16*1024*1024)
+#define GUEST_EXEC_MAX_OUTPUT (16 * 1024 * 1024)
 /* Allocation and I/O buffer for reading guest-exec out_data/err_data - 4KB */
-#define GUEST_EXEC_IO_SIZE (4*1024)
+#define GUEST_EXEC_IO_SIZE (4 * 1024)
 /*
  * Maximum file size to read - 48MB
  *
@@ -66,17 +66,13 @@ static void qmp_command_info(const QmpCommand *cmd, void *opaque)
 {
     GuestAgentInfo *info = opaque;
     GuestAgentCommandInfo *cmd_info;
-    GuestAgentCommandInfoList *cmd_info_list;
 
     cmd_info = g_new0(GuestAgentCommandInfo, 1);
     cmd_info->name = g_strdup(qmp_command_name(cmd));
     cmd_info->enabled = qmp_command_is_enabled(cmd);
     cmd_info->success_response = qmp_has_success_response(cmd);
 
-    cmd_info_list = g_new0(GuestAgentCommandInfoList, 1);
-    cmd_info_list->value = cmd_info;
-    cmd_info_list->next = info->supported_commands;
-    info->supported_commands = cmd_info_list;
+    QAPI_LIST_PREPEND(info->supported_commands, cmd_info);
 }
 
 struct GuestAgentInfo *qmp_guest_info(Error **errp)
@@ -248,7 +244,7 @@ static char **guest_exec_get_args(const strList *entry, bool log)
 
     str = g_malloc(str_size);
     *str = 0;
-    args = g_malloc(count * sizeof(char *));
+    args = g_new(char *, count);
     for (it = entry; it != NULL; it = it->next) {
         args[i++] = it->value;
         pstrcat(str, str_size, it->value);
@@ -406,7 +402,7 @@ GuestExec *qmp_guest_exec(const char *path,
     GIOChannel *in_ch, *out_ch, *err_ch;
     GSpawnFlags flags;
     bool has_output = (has_capture_output && capture_output);
-    uint8_t *input = NULL;
+    g_autofree uint8_t *input = NULL;
     size_t ninput = 0;
 
     arglist.value = (char *)path;
@@ -445,7 +441,7 @@ GuestExec *qmp_guest_exec(const char *path,
     g_child_watch_add(pid, guest_exec_child_watch, gei);
 
     if (has_input_data) {
-        gei->in.data = input;
+        gei->in.data = g_steal_pointer(&input);
         gei->in.size = ninput;
 #ifdef G_OS_WIN32
         in_ch = g_io_channel_win32_new_fd(in_fd);

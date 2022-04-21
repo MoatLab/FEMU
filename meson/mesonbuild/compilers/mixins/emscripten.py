@@ -18,14 +18,22 @@ import os.path
 import typing as T
 
 from ... import coredata
+from ...mesonlib import OptionKey
 
 if T.TYPE_CHECKING:
-    from ..environment import Environment
+    from ...environment import Environment
+    from ...compilers.compilers import Compiler
+else:
+    # This is a bit clever, for mypy we pretend that these mixins descend from
+    # Compiler, so we get all of the methods and attributes defined for us, but
+    # for runtime we make them descend from object (which all classes normally
+    # do). This gives up DRYer type checking, with no runtime impact
+    Compiler = object
 
 
-class EmscriptenMixin:
+class EmscriptenMixin(Compiler):
 
-    def _get_compile_output(self, dirname, mode):
+    def _get_compile_output(self, dirname: str, mode: str) -> str:
         # In pre-processor mode, the output is sent to stdout and discarded
         if mode == 'preprocess':
             return None
@@ -35,16 +43,24 @@ class EmscriptenMixin:
         if mode == 'link':
             suffix = 'js'
         else:
-            suffix = 'wasm'
+            suffix = 'o'
         return os.path.join(dirname, 'output.' + suffix)
 
     def thread_flags(self, env: 'Environment') -> T.List[str]:
         return ['-s', 'USE_PTHREADS=1']
 
-    def get_options(self):
+    def thread_link_flags(self, env: 'Environment') -> T.List[str]:
+        args = ['-s', 'USE_PTHREADS=1']
+        count: int = env.coredata.options[OptionKey('thread_count', lang=self.language, machine=self.for_machine)].value
+        if count:
+            args.extend(['-s', f'PTHREAD_POOL_SIZE={count}'])
+        return args
+
+    def get_options(self) -> 'coredata.KeyedOptionDictType':
         opts = super().get_options()
+        key = OptionKey('thread_count', machine=self.for_machine, lang=self.language)
         opts.update({
-            '{}_thread_count'.format(self.language): coredata.UserIntegerOption(
+            key: coredata.UserIntegerOption(
                 'Number of threads to use in web assembly, set to 0 to disable',
                 (0, None, 4),  # Default was picked at random
             ),

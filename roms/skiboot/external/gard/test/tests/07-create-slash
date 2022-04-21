@@ -1,0 +1,10 @@
+#! /bin/sh
+
+run_binary "./opal-gard" "-p -e -f test/files/blank.bin create /"
+if [ "$?" -eq 0 ]; then
+	fail_test
+fi
+
+diff_with_result
+
+pass_test

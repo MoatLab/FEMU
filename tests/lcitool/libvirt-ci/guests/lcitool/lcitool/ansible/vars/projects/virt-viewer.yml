@@ -1,0 +1,24 @@
+---
+packages:
+  - bash-completion
+  - ccache
+  - cppi
+  - gcc
+  - glib2
+  - gstreamer-plugins-bad-free
+  - gstreamer-plugins-good
+  - gtk3
+  - icoutils
+  - libgovirt
+  - librest
+  - libtool
+  - libtoolize
+  - libxml2
+  - make
+  - meson
+  - ninja
+  - pkg-config
+  - spice-gtk3
+  - rpmbuild
+  - vte
+  - xmllint

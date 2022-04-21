@@ -18,8 +18,6 @@
 
 #include "fuse_log.h"
 #include "fuse_opt.h"
-#include <stdint.h>
-#include <sys/types.h>
 
 /** Major version of FUSE library interface */
 #define FUSE_MAJOR_VERSION 3
@@ -360,6 +358,31 @@ struct fuse_file_info {
 #define FUSE_CAP_SUBMOUNTS (1 << 27)
 
 /**
+ * Indicates that the filesystem is responsible for clearing
+ * security.capability xattr and clearing setuid and setgid bits. Following
+ * are the rules.
+ * - clear "security.capability" on write, truncate and chown unconditionally
+ * - clear suid/sgid if following is true. Note, sgid is cleared only if
+ *   group executable bit is set.
+ *    o setattr has FATTR_SIZE and FATTR_KILL_SUIDGID set.
+ *    o setattr has FATTR_UID or FATTR_GID
+ *    o open has O_TRUNC and FUSE_OPEN_KILL_SUIDGID
+ *    o create has O_TRUNC and FUSE_OPEN_KILL_SUIDGID flag set.
+ *    o write has FUSE_WRITE_KILL_SUIDGID
+ */
+#define FUSE_CAP_HANDLE_KILLPRIV_V2 (1 << 28)
+
+/**
+ * Indicates that file server supports extended struct fuse_setxattr_in
+ */
+#define FUSE_CAP_SETXATTR_EXT (1 << 29)
+
+/**
+ * Indicates that file server supports creating file security context
+ */
+#define FUSE_CAP_SECURITY_CTX (1ULL << 32)
+
+/**
  * Ioctl flags
  *
  * FUSE_IOCTL_COMPAT: 32bit compat ioctl on 64bit machine
@@ -421,7 +444,7 @@ struct fuse_conn_info {
     /**
      * Capability flags that the kernel supports (read-only)
      */
-    unsigned capable;
+    uint64_t capable;
 
     /**
      * Capability flags that the filesystem wants to enable.
@@ -429,7 +452,7 @@ struct fuse_conn_info {
      * libfuse attempts to initialize this field with
      * reasonable default values before calling the init() handler.
      */
-    unsigned want;
+    uint64_t want;
 
     /**
      * Maximum number of pending "background" requests. A
@@ -809,15 +832,6 @@ void fuse_remove_signal_handlers(struct fuse_session *se);
  *
  * On 32bit systems please add -D_FILE_OFFSET_BITS=64 to your compile flags!
  */
-
-#if defined(__GNUC__) &&                                      \
-    (__GNUC__ > 4 || __GNUC__ == 4 && __GNUC_MINOR__ >= 6) && \
-    !defined __cplusplus
-_Static_assert(sizeof(off_t) == 8, "fuse: off_t must be 64bit");
-#else
-struct _fuse_off_t_must_be_64bit_dummy_struct {
-    unsigned _fuse_off_t_must_be_64bit:((sizeof(off_t) == 8) ? 1 : -1);
-};
-#endif
+QEMU_BUILD_BUG_ON(sizeof(off_t) != 8);
 
 #endif /* FUSE_COMMON_H_ */

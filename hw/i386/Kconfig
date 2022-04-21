@@ -1,4 +1,12 @@
+config X86_FW_OVMF
+    bool
+
 config SEV
+    bool
+    select X86_FW_OVMF
+    depends on KVM
+
+config SGX
     bool
     depends on KVM
 
@@ -14,16 +22,18 @@ config PC
     imply ISA_DEBUG
     imply PARALLEL
     imply PCI_DEVICES
-    imply PVPANIC
+    imply PVPANIC_ISA
     imply QXL
     imply SEV
+    imply SGX
     imply SGA
     imply TEST_DEVICES
     imply TPM_CRB
     imply TPM_TIS_ISA
     imply VGA_PCI
     imply VIRTIO_VGA
-    select FDC
+    imply NVDIMM
+    select FDC_ISA
     select I8259
     select I8254
     select PCKBD
@@ -49,6 +59,7 @@ config PC_ACPI
     select ACPI_X86
     select ACPI_CPU_HOTPLUG
     select ACPI_MEMORY_HOTPLUG
+    select ACPI_VIOT
     select SMBUS_EEPROM
     select PFLASH_CFI01
     depends on ACPI_SMBUS
@@ -106,6 +117,7 @@ config MICROVM
     select ACPI_HW_REDUCED
     select PCI_EXPRESS_GENERIC_BRIDGE
     select USB_XHCI_SYSBUS
+    select I8254
 
 config X86_IOMMU
     bool

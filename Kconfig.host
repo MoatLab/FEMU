@@ -37,3 +37,11 @@ config VIRTFS
 
 config PVRDMA
     bool
+
+config MULTIPROCESS_ALLOWED
+    bool
+    imply MULTIPROCESS
+
+config FUZZ
+    bool
+    select SPARSE_MEM

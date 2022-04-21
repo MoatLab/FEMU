@@ -1,0 +1,10 @@
+#! /bin/sh
+
+run_binary "./opal-gard" "-p -e -8 -f test/files/data1.bin show 1"
+if [ "$?" -ne 0 ] ; then
+	fail_test
+fi
+
+diff_with_result
+
+pass_test

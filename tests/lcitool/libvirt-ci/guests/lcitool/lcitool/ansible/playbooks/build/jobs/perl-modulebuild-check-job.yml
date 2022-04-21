@@ -1,0 +1,11 @@
+---
+- name: '{{ name }}-check'
+  shell: |
+    set -e
+    cd {{ name }}
+
+    {{ global_env }}
+    {{ local_env }}
+    perl Build test
+  when:
+    - target in machines

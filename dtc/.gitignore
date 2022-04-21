@@ -8,6 +8,7 @@
 *.tab.[ch]
 lex.yy.c
 *.lex.c
+.*.swp
 /dtc
 /fdtdump
 /convert-dtsv0
@@ -17,3 +18,7 @@ lex.yy.c
 /fdtoverlay
 /patches
 /.pc
+
+# cscope files
+cscope.*
+ncscope.*

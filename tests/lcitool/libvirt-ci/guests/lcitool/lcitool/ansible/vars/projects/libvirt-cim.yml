@@ -1,0 +1,18 @@
+---
+packages:
+  - autoconf
+  - automake
+  - autopoint
+  - ccache
+  - gcc
+  - libcmpiutil
+  - libconfig
+  - libtool
+  - libtoolize
+  - libuuid
+  - libxml2
+  - libxslt
+  - make
+  - pkg-config
+  - rpmbuild
+  - wget

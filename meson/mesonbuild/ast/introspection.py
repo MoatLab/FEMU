@@ -19,21 +19,27 @@ from .interpreter import AstInterpreter
 from .visitor import AstVisitor
 from .. import compilers, environment, mesonlib, optinterpreter
 from .. import coredata as cdata
-from ..mesonlib import MachineChoice
+from ..mesonlib import MachineChoice, OptionKey
 from ..interpreterbase import InvalidArguments, TYPE_nvar
-from ..build import Executable, Jar, SharedLibrary, SharedModule, StaticLibrary
+from ..build import BuildTarget, Executable, Jar, SharedLibrary, SharedModule, StaticLibrary
 from ..mparser import BaseNode, ArithmeticNode, ArrayNode, ElementaryNode, IdNode, FunctionNode, StringNode
+from ..compilers import detect_compiler_for
 import typing as T
 import os
+import argparse
 
 build_target_functions = ['executable', 'jar', 'library', 'shared_library', 'shared_module', 'static_library', 'both_libraries']
 
-class IntrospectionHelper:
+class IntrospectionHelper(argparse.Namespace):
     # mimic an argparse namespace
     def __init__(self, cross_file: str):
+        super().__init__()
         self.cross_file = cross_file  # type: str
         self.native_file = None       # type: str
         self.cmd_line_options = {}    # type: T.Dict[str, str]
+
+    def __eq__(self, other: object) -> bool:
+        return NotImplemented
 
 class IntrospectionInterpreter(AstInterpreter):
     # Interpreter to detect the options without a build directory
@@ -60,7 +66,7 @@ class IntrospectionInterpreter(AstInterpreter):
         self.coredata = self.environment.get_coredata()
         self.option_file = os.path.join(self.source_root, self.subdir, 'meson_options.txt')
         self.backend = backend
-        self.default_options = {'backend': self.backend}
+        self.default_options = {OptionKey('backend'): self.backend}
         self.project_data = {}    # type: T.Dict[str, T.Any]
         self.targets = []         # type: T.List[T.Dict[str, T.Any]]
         self.dependencies = []    # type: T.List[T.Dict[str, T.Any]]
@@ -98,11 +104,11 @@ class IntrospectionInterpreter(AstInterpreter):
         if os.path.exists(self.option_file):
             oi = optinterpreter.OptionInterpreter(self.subproject)
             oi.process(self.option_file)
-            self.coredata.merge_user_options(oi.options)
+            self.coredata.update_project_options(oi.options)
 
         def_opts = self.flatten_args(kwargs.get('default_options', []))
         _project_default_options = mesonlib.stringlistify(def_opts)
-        self.project_default_options = cdata.create_options_dict(_project_default_options)
+        self.project_default_options = cdata.create_options_dict(_project_default_options, self.subproject)
         self.default_options.update(self.project_default_options)
         self.coredata.set_default_options(self.default_options, self.subproject, self.environment)
 
@@ -120,10 +126,11 @@ class IntrospectionInterpreter(AstInterpreter):
                         self.do_subproject(i)
 
         self.coredata.init_backend_options(self.backend)
-        options = {k: v for k, v in self.environment.cmd_line_options.items() if k.startswith('backend_')}
+        options = {k: v for k, v in self.environment.options.items() if k.is_backend()}
 
         self.coredata.set_options(options)
-        self.func_add_languages(None, proj_langs, None)
+        self._add_languages(proj_langs, MachineChoice.HOST)
+        self._add_languages(proj_langs, MachineChoice.BUILD)
 
     def do_subproject(self, dirname: str) -> None:
         subproject_dir_abs = os.path.join(self.environment.get_source_dir(), self.subproject_dir)
@@ -137,17 +144,26 @@ class IntrospectionInterpreter(AstInterpreter):
             return
 
     def func_add_languages(self, node: BaseNode, args: T.List[TYPE_nvar], kwargs: T.Dict[str, TYPE_nvar]) -> None:
-        args = self.flatten_args(args)
-        for for_machine in [MachineChoice.BUILD, MachineChoice.HOST]:
-            for lang in sorted(args, key=compilers.sort_clink):
-                if isinstance(lang, StringNode):
-                    assert isinstance(lang.value, str)
-                    lang = lang.value
-                if not isinstance(lang, str):
-                    continue
-                lang = lang.lower()
-                if lang not in self.coredata.compilers[for_machine]:
-                    self.environment.detect_compiler_for(lang, for_machine)
+        kwargs = self.flatten_kwargs(kwargs)
+        if 'native' in kwargs:
+            native = kwargs.get('native', False)
+            self._add_languages(args, MachineChoice.BUILD if native else MachineChoice.HOST)
+        else:
+            for for_machine in [MachineChoice.BUILD, MachineChoice.HOST]:
+                self._add_languages(args, for_machine)
+
+    def _add_languages(self, raw_langs: T.List[TYPE_nvar], for_machine: MachineChoice) -> None:
+        langs = []  # type: T.List[str]
+        for l in self.flatten_args(raw_langs):
+            if isinstance(l, str):
+                langs.append(l)
+            elif isinstance(l, StringNode):
+                langs.append(l.value)
+
+        for lang in sorted(langs, key=compilers.sort_clink):
+            lang = lang.lower()
+            if lang not in self.coredata.compilers[for_machine]:
+                detect_compiler_for(self.environment, lang, for_machine)
 
     def func_dependency(self, node: BaseNode, args: T.List[TYPE_nvar], kwargs: T.Dict[str, TYPE_nvar]) -> None:
         args = self.flatten_args(args)
@@ -173,48 +189,57 @@ class IntrospectionInterpreter(AstInterpreter):
             'node': node
         }]
 
-    def build_target(self, node: BaseNode, args: T.List[TYPE_nvar], kwargs_raw: T.Dict[str, TYPE_nvar], targetclass) -> T.Optional[T.Dict[str, T.Any]]:
+    def build_target(self, node: BaseNode, args: T.List[TYPE_nvar], kwargs_raw: T.Dict[str, TYPE_nvar], targetclass: T.Type[BuildTarget]) -> T.Optional[T.Dict[str, T.Any]]:
         args = self.flatten_args(args)
         if not args or not isinstance(args[0], str):
             return None
         name = args[0]
         srcqueue = [node]
+        extra_queue = []
 
         # Process the sources BEFORE flattening the kwargs, to preserve the original nodes
         if 'sources' in kwargs_raw:
             srcqueue += mesonlib.listify(kwargs_raw['sources'])
 
+        if 'extra_files' in kwargs_raw:
+            extra_queue += mesonlib.listify(kwargs_raw['extra_files'])
+
         kwargs = self.flatten_kwargs(kwargs_raw, True)
 
-        source_nodes = []  # type: T.List[BaseNode]
-        while srcqueue:
-            curr = srcqueue.pop(0)
-            arg_node = None
-            assert(isinstance(curr, BaseNode))
-            if isinstance(curr, FunctionNode):
-                arg_node = curr.args
-            elif isinstance(curr, ArrayNode):
-                arg_node = curr.args
-            elif isinstance(curr, IdNode):
-                # Try to resolve the ID and append the node to the queue
-                assert isinstance(curr.value, str)
-                var_name = curr.value
-                if var_name in self.assignments:
-                    tmp_node = self.assignments[var_name]
-                    if isinstance(tmp_node, (ArrayNode, IdNode, FunctionNode)):
-                        srcqueue += [tmp_node]
-            elif isinstance(curr, ArithmeticNode):
-                srcqueue += [curr.left, curr.right]
-            if arg_node is None:
-                continue
-            arg_nodes = arg_node.arguments.copy()
-            # Pop the first element if the function is a build target function
-            if isinstance(curr, FunctionNode) and curr.func_name in build_target_functions:
-                arg_nodes.pop(0)
-            elemetary_nodes = [x for x in arg_nodes if isinstance(x, (str, StringNode))]
-            srcqueue += [x for x in arg_nodes if isinstance(x, (FunctionNode, ArrayNode, IdNode, ArithmeticNode))]
-            if elemetary_nodes:
-                source_nodes += [curr]
+        def traverse_nodes(inqueue: T.List[BaseNode]) -> T.List[BaseNode]:
+            res = []  # type: T.List[BaseNode]
+            while inqueue:
+                curr = inqueue.pop(0)
+                arg_node = None
+                assert(isinstance(curr, BaseNode))
+                if isinstance(curr, FunctionNode):
+                    arg_node = curr.args
+                elif isinstance(curr, ArrayNode):
+                    arg_node = curr.args
+                elif isinstance(curr, IdNode):
+                    # Try to resolve the ID and append the node to the queue
+                    assert isinstance(curr.value, str)
+                    var_name = curr.value
+                    if var_name in self.assignments:
+                        tmp_node = self.assignments[var_name]
+                        if isinstance(tmp_node, (ArrayNode, IdNode, FunctionNode)):
+                            inqueue += [tmp_node]
+                elif isinstance(curr, ArithmeticNode):
+                    inqueue += [curr.left, curr.right]
+                if arg_node is None:
+                    continue
+                arg_nodes = arg_node.arguments.copy()
+                # Pop the first element if the function is a build target function
+                if isinstance(curr, FunctionNode) and curr.func_name in build_target_functions:
+                    arg_nodes.pop(0)
+                elemetary_nodes = [x for x in arg_nodes if isinstance(x, (str, StringNode))]
+                inqueue += [x for x in arg_nodes if isinstance(x, (FunctionNode, ArrayNode, IdNode, ArithmeticNode))]
+                if elemetary_nodes:
+                    res += [curr]
+            return res
+
+        source_nodes = traverse_nodes(srcqueue)
+        extraf_nodes = traverse_nodes(extra_queue)
 
         # Make sure nothing can crash when creating the build class
         kwargs_reduced = {k: v for k, v in kwargs.items() if k in targetclass.known_kwargs and k in ['install', 'build_by_default', 'build_always']}
@@ -236,6 +261,7 @@ class IntrospectionInterpreter(AstInterpreter):
             'installed': target.should_install(),
             'outputs': target.get_outputs(),
             'sources': source_nodes,
+            'extra_files': extraf_nodes,
             'kwargs': kwargs,
             'node': node,
         }
@@ -244,7 +270,7 @@ class IntrospectionInterpreter(AstInterpreter):
         return new_target
 
     def build_library(self, node: BaseNode, args: T.List[TYPE_nvar], kwargs: T.Dict[str, TYPE_nvar]) -> T.Optional[T.Dict[str, T.Any]]:
-        default_library = self.coredata.get_builtin_option('default_library')
+        default_library = self.coredata.get_option(OptionKey('default_library'))
         if default_library == 'shared':
             return self.build_target(node, args, kwargs, SharedLibrary)
         elif default_library == 'static':

@@ -1,0 +1,38 @@
+---
+# FreeBSD compiles bash without defining SSH_SOURCE_BASHRC, which means
+# it won't try to detect when it's spawned by ssh and source ~/.bashrc
+# when that's the case. Our workaround is setting $BASH_ENV globally
+- name: Enable ~/.bashrc
+  replace:
+    path: /etc/login.conf
+    regexp: '^(.*):setenv=(BASH_ENV=[^,]*,)?(.*):\\$'
+    replace: '\1:setenv=BASH_ENV=~/.bashrc,\3:\\'
+  register: loginconf
+  when:
+    - os.name == 'FreeBSD'
+
+- name: Enable ~/.bashrc
+  command: cap_mkdb /etc/login.conf
+  when:
+    - loginconf.changed
+
+# FreeBSD switched to Perl 5.26, which makes a long existing warning in
+# intltool-update turn into an error and causes jobs to fail. While we
+# wait for the port to be fixed, we can patch things up ourselves.
+#
+# See https://bugs.freebsd.org/bugzilla/show_bug.cgi?id=227444
+- name: Look for intltool-update
+  stat:
+    path: /usr/local/bin/intltool-update
+  register: intltoolupdate
+  when:
+    - os.name == 'FreeBSD'
+
+- name: Fix intltool-update
+  replace:
+    path: /usr/local/bin/intltool-update
+    regexp: '^(.*) !~ /\\\$\{\?\$2\}\?/;$'
+    replace: '\1 !~ /\\$\\{?$2}?/;'
+  when:
+    - os.name == 'FreeBSD'
+    - intltoolupdate.stat.exists

@@ -49,6 +49,7 @@ typedef struct SpaprOptionVector SpaprOptionVector;
 /* option vector 5 */
 #define OV5_DRCONF_MEMORY       OV_BIT(2, 2)
 #define OV5_FORM1_AFFINITY      OV_BIT(5, 0)
+#define OV5_FORM2_AFFINITY      OV_BIT(5, 2)
 #define OV5_HP_EVT              OV_BIT(6, 5)
 #define OV5_HPT_RESIZE          OV_BIT(6, 7)
 #define OV5_DRMEM_V2            OV_BIT(22, 0)
@@ -71,6 +72,7 @@ void spapr_ovec_cleanup(SpaprOptionVector *ov);
 void spapr_ovec_set(SpaprOptionVector *ov, long bitnr);
 void spapr_ovec_clear(SpaprOptionVector *ov, long bitnr);
 bool spapr_ovec_test(SpaprOptionVector *ov, long bitnr);
+bool spapr_ovec_empty(SpaprOptionVector *ov);
 SpaprOptionVector *spapr_ovec_parse_vector(target_ulong table_addr, int vector);
 int spapr_dt_ovec(void *fdt, int fdt_offset,
                   SpaprOptionVector *ov, const char *name);

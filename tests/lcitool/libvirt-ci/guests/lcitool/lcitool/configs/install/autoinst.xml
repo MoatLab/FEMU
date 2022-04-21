@@ -1,0 +1,76 @@
+<?xml version="1.0"?>
+<!DOCTYPE profile>
+<profile
+  xmlns="http://www.suse.com/1.0/yast2ns"
+  xmlns:config="http://www.suse.com/1.0/configns">
+  <general>
+    <mode>
+      <confirm config:type="boolean">false</confirm>
+      <second_stage config:type="boolean">false</second_stage>
+    </mode>
+  </general>
+  <partitioning config:type="list">
+    <drive>
+      <device>/dev/vda</device>
+      <use>all</use>
+      <partitions config:type="list">
+        <partition>
+          <filesystem config:type="symbol">swap</filesystem>
+          <size>256M</size>
+          <mount>swap</mount>
+        </partition>
+        <partition>
+          <filesystem config:type="symbol">ext4</filesystem>
+          <mount>/</mount>
+          <size>max</size>
+        </partition>
+      </partitions>
+    </drive>
+  </partitioning>
+  <bootloader>
+    <global>
+      <terminal>console serial</terminal>
+    </global>
+  </bootloader>
+  <timezone>
+    <hwclock>UTC</hwclock>
+    <timezone>UTC</timezone>
+  </timezone>
+  <software>
+    <install_recommended config:type="boolean">false</install_recommended>
+    <products config:type="list">
+      <product>openSUSE</product>
+    </products>
+    <patterns config:type="list">
+      <pattern>base</pattern>
+      <pattern>minimal_base</pattern>
+    </patterns>
+    <packages config:type="list">
+      <package>openssh</package>
+      <package>hostname</package>
+    </packages>
+  </software>
+  <networking>
+    <keep_install_network config:type="boolean">true</keep_install_network>
+  </networking>
+  <users config:type="list">
+    <user>
+      <username>root</username>
+      <user_password>root</user_password>
+      <encrypted config:type="boolean">false</encrypted>
+      <uid>0</uid>
+      <gid>0</gid>
+      <home>/root</home>
+      <shell>/bin/bash</shell>
+    </user>
+  </users>
+  <services-manager>
+    <default_target>multi-user</default_target>
+    <services config:type="list">
+      <service>
+        <service_name>sshd</service_name>
+        <service_status>enable</service_status>
+      </service>
+    </services>
+  </services-manager>
+</profile>

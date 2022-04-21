@@ -1,0 +1,463 @@
+/* IBM_PROLOG_BEGIN_TAG                                                   */
+/* This is an automatically generated prolog.                             */
+/*                                                                        */
+/* $Source: src/import/chips/p10/procedures/hwp/lib/p10_hcd_memmap_base.H $ */
+/*                                                                        */
+/* OpenPOWER HostBoot Project                                             */
+/*                                                                        */
+/* Contributors Listed Below - COPYRIGHT 2019,2020                        */
+/* [+] International Business Machines Corp.                              */
+/*                                                                        */
+/*                                                                        */
+/* Licensed under the Apache License, Version 2.0 (the "License");        */
+/* you may not use this file except in compliance with the License.       */
+/* You may obtain a copy of the License at                                */
+/*                                                                        */
+/*     http://www.apache.org/licenses/LICENSE-2.0                         */
+/*                                                                        */
+/* Unless required by applicable law or agreed to in writing, software    */
+/* distributed under the License is distributed on an "AS IS" BASIS,      */
+/* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or        */
+/* implied. See the License for the specific language governing           */
+/* permissions and limitations under the License.                         */
+/*                                                                        */
+/* IBM_PROLOG_END_TAG                                                     */
+///
+/// @file   p10_hcd_memmap_base.H
+/// @brief  defines region constants shared by different memory components.
+///
+
+// *HWP HWP Owner:        David Du   <daviddu@us.ibm.com>
+// *HWP Backup HWP Owner: Greg Still <stillgs@us.ibm.com>
+// *HWP FW Owner:         Prem S Jha <premjha2@in.ibm.com>
+// *HWP Team:             PM
+// *HWP Level:            2
+// *HWP Consumed by:      PM:Hostboot:Phyp
+
+#ifndef __HCD_MEMMAP_BASE_H__
+#define __HCD_MEMMAP_BASE_H__
+
+#include <p10_hcd_header_defs.H>
+
+// -------------------------------------------------------------------
+// Note: There can be NO semicolons(";") at end of macros in this file
+//       There can ONLY have HCD_CONST/HCD_CONST64 macros in this file
+// -------------------------------------------------------------------
+
+/// Image Magic Numbers
+
+HCD_CONST64(CPMR_MAGIC_NUMBER,                  ULL(0x43504d525f312e30))  // CPMR_1.0
+HCD_CONST64(QME_MAGIC_NUMBER ,                  ULL(0x514d455f5f312e30))  // QME__1.0
+
+HCD_CONST64(XPMR_MAGIC_NUMBER,                  ULL(0x58504d525f312e30))  // XPMR_1.0
+HCD_CONST64(XGPE_MAGIC_NUMBER,                  ULL(0x584750455f312e30))  // XGPE_1.0
+
+HCD_CONST64(PPMR_MAGIC_NUMBER,                  ULL(0x50504d525f312e30))  // PPMR_1.0
+HCD_CONST64(PGPE_MAGIC_NUMBER,                  ULL(0x504750455F312E30))  // PGPE_1.0
+
+HCD_CONST(QME_BUILD_VERSION,                    0x001) // QME__1.0
+HCD_CONST(XGPE_BUILD_VERSION,                   0x001) // XGPE_1.0
+HCD_CONST(PGPE_BUILD_VERSION,                   0x001) // PGPE_1.0
+
+
+HCD_CONST(CPMR_REGION_CHECK_WORD,               (0x43504d52))             // CPMR
+HCD_CONST(SCOM_REST_MAGIC_WORD,                 (0x5343))//SC
+HCD_CONST(CPMR_BUILD_VER,                       1)
+
+
+/// Size constants
+
+HCD_CONST(HALF_KB,                              512)
+HCD_CONST(ONE_KB,                               1024)
+HCD_CONST(HALF_MB,                              (1024 * 512))
+HCD_CONST(ONE_MB,                               (1024 * 1024))
+HCD_CONST(TWO_MB,                               (2 * 1024 * 1024))
+
+/// Memory constants
+
+HCD_CONST(QME_SRAM_SIZE,                        (64 * ONE_KB))
+
+HCD_CONST(HOMER_MEMORY_SIZE,                    (4 * ONE_MB))
+HCD_CONST(HOMER_OPMR_REGION_NUM,                0)
+HCD_CONST(HOMER_XPMR_REGION_NUM,                1)
+HCD_CONST(HOMER_CPMR_REGION_NUM,                2)
+HCD_CONST(HOMER_PPMR_REGION_NUM,                3)
+
+/// Chip constants
+HCD_CONST(OCC_HOST_AREA_SIZE,                  ONE_MB)
+
+HCD_CONST(MAX_THREADS_PER_CORE,                 4)
+HCD_CONST(MAX_CORES_PER_CHIP,                   32)
+
+HCD_CONST(MAX_QMES_PER_CHIP,                    8)
+HCD_CONST(MAX_EXES_PER_CHIP,                    16)
+
+HCD_CONST(MAX_QUADS_PER_CHIP,                   8)
+HCD_CONST(MAX_CACHES_PER_CHIP,                  32)
+
+HCD_CONST(MAX_CORES_PER_QME,                    4)
+HCD_CONST(MAX_CORES_PER_EX,                     2)
+
+HCD_CONST(MAX_QMES_PER_QUAD,                    1)
+HCD_CONST(MAX_EXES_PER_QUAD,                    2)
+HCD_CONST(MAX_CORES_PER_QUAD,                   4)
+HCD_CONST(MAX_L3_PER_QUAD,                      4)
+
+HCD_CONST(MAX_QUAD_ID_SUPPORTED,                7)
+HCD_CONST(MAX_CORE_ID_SUPPORTED,                31)
+HCD_CONST(MAX_THREAD_ID_SUPPORTED,              3)
+
+/// Image build constants
+
+HCD_CONST(HARDWARE_IMG_SIZE,                    ONE_MB)
+
+HCD_CONST(FUSED_CORE_MODE,                      0xBB)
+HCD_CONST(NONFUSED_CORE_MODE,                   0xAA)
+
+HCD_CONST(SELF_RESTORE_BLR_INST,                0x4e800020)
+HCD_CONST(CORE_RESTORE_PAD_OPCODE,              0x00000200) //ATTN Opcode
+
+HCD_CONST(SCOM_RESTORE_PAD_OPCODE,              0x00000000) //zero pads
+HCD_CONST(SCOM_RESTORE_ENTRY_SIZE,              12)         //4B address,8B data
+
+HCD_CONST(QME_BLOCK_READ_LEN,                   32)
+HCD_CONST(QME_BLK_SIZE_SHIFT,                   0x05)
+
+HCD_CONST(RING_ALIGN_BOUNDARY,                  0x08)
+HCD_CONST64(DARN_BAR_EN_POS,                    ULL(0x8000000000000000))
+
+//FFDC Region
+HCD_CONST(FFDC_REGION_XPMR_BASE_OFFSET, 0xE0000)    //Offset wrt to XPMR base
+HCD_CONST(FFDC_REGION_SIZE,  (80 * ONE_KB))
+//end offset of FFDC region wrt to XPMR base
+HCD_CONST(FFDC_REGION_XPMR_END_OFFSET, (FFDC_REGION_XPMR_BASE_OFFSET +
+                                        FFDC_REGION_SIZE ))
+//---------------------------------------------------------------------------------------
+
+//XPMR Header
+HCD_CONST(XGPE_BUILD_VER,                       1)
+HCD_CONST(XPMR_BUILD_VER,                       1)
+HCD_CONST(XPMR_HEADER_SIZE,                     512)
+HCD_CONST(XGPE_INT_VECTOR_SIZE,                 384)
+HCD_CONST(XGPE_HEADER_IMAGE_OFFSET,             XGPE_INT_VECTOR_SIZE)
+HCD_CONST(XGPE_BOOT_COPIER_OFFSET,              512)
+HCD_CONST(XGPE_BOOT_COPIER_LENGTH,              ONE_KB)
+HCD_CONST(XGPE_BOOT_LOADER_OFFSET,
+          XGPE_BOOT_COPIER_OFFSET + XGPE_BOOT_COPIER_LENGTH )
+HCD_CONST(XGPE_BOOT_LOADER_LENGTH,              ONE_KB)
+HCD_CONST(XGPE_HCODE_OFFSET,
+          XGPE_BOOT_LOADER_OFFSET + XGPE_BOOT_LOADER_LENGTH )
+HCD_CONST(XGPE_SRAM_SIZE,                       (64 * ONE_KB))
+HCD_CONST(XGPE_HCODE_SIZE,                       (64 * ONE_KB))
+HCD_CONST(XPMR_BOOT_REGION,             (XPMR_HEADER_SIZE + XGPE_BOOT_COPIER_LENGTH +
+          XGPE_BOOT_LOADER_LENGTH ))
+
+HCD_CONST(XGPE_HCODE_RESET_ADDR_VAL,            0x40)
+HCD_CONST(XGPE_DBG_PTR_AREA_SIZE,               64)
+
+HCD_CONST(XPMR_MAGIC_WORD_BYTE,                 0x00)
+HCD_CONST(XPMR_BOOT_COPIER_OFFSET_BYTE,         0x08)
+HCD_CONST(XPMR_BOOT_LOADER_OFFSET_BYTE,         0x10)
+HCD_CONST(XPMR_BOOT_LOADER_LENGTH_BYTE,         0x14)
+HCD_CONST(XPMR_BUILD_DATE_BYTE,                 0x18)
+HCD_CONST(XPMR_BUILD_VER_BYTE,                  0x1c)
+HCD_CONST(XPMR_XGPE_HCODE_OFFSET_BYTE,          0x28)
+HCD_CONST(XPMR_XGPE_HCODE_LENGTH_BYTE,          0x2c)
+HCD_CONST(XPMR_XGPE_BOOT_PROG_CODE_BYTE,        0x30)
+HCD_CONST(XPMR_XGPE_SRAM_IMAGE_SIZE_BYTE,       0x34)
+HCD_CONST(XGPE_IMAGE_XPMR_OFFSET,
+          (XGPE_BOOT_LOADER_OFFSET + XGPE_BOOT_LOADER_LENGTH))
+
+//---------------------------------------------------------------------------------------
+
+/// CPMR Header
+
+HCD_CONST(CPMR_HOMER_OFFSET,                    (HOMER_CPMR_REGION_NUM* ONE_MB))
+HCD_CONST(CPMR_HEADER_SIZE,                     256)
+
+HCD_CONST(CPMR_ATTN_WORD0_BYTE,                 0x00)
+HCD_CONST(CPMR_ATTN_WORD1_BYTE,                 0x04)
+HCD_CONST(CPMR_MAGIC_NUMBER_BYTE,               0x08)
+HCD_CONST(CPMR_BUILD_DATE_BYTE,                 0x10)
+HCD_CONST(CPMR_BUILD_VER_BYTE,                  0x14)
+HCD_CONST(CPMR_SELF_RESTORE_VER_BYTE,           0x1C)
+HCD_CONST(CPMR_STOP_API_VER_BYTE,               0x1D)
+HCD_CONST(CPMR_FUSED_CORE_FLAG,                 0x1F)
+HCD_CONST(CPMR_QME_HCODE_OFFSET_BYTE,           0x20)
+HCD_CONST(CPMR_QME_HCODE_LENGTH_BYTE,           0x24)
+HCD_CONST(CPMR_CORE_COMMON_RING_OFFSET_BYTE,    0x28)
+HCD_CONST(CPMR_CORE_COMMON_RING_LENGTH_BYTE,    0x2C)
+HCD_CONST(CPMR_QME_LOCAL_PSTATE_OFFSET_BYTE,    0x30)
+HCD_CONST(CPMR_QME_LOCAL_PSTATE_LENGTH_BYTE,    0x34)
+HCD_CONST(CPMR_CORE_SPECIFIC_RING_OFFSET_BYTE,  0x38)
+HCD_CONST(CPMR_CORE_SPECIFIC_RING_LENGTH_BYTE,  0x3C)
+HCD_CONST(CPMR_CORE_SCOM_RESTORE_OFFSET_BYTE,   0x40)
+HCD_CONST(CPMR_CORE_SCOM_RESTORE_LENGTH_BYTE,   0x44)
+HCD_CONST(CPMR_SELF_RESTORE_OFFSET_BYTE,        0x48)
+HCD_CONST(CPMR_SELF_RESTORE_LENGTH_BYTE,        0x4C)
+HCD_CONST(CPMR_MAX_CORE_L2_SCOM_ENTRIES,        0x50)
+HCD_CONST(CPMR_MAX_QUAD_L3_SCOM_ENTRIES,        0x54)
+HCD_CONST(CPMR_MAX_CORE_L2_SCOM_OFFSET,         0x58)
+HCD_CONST(CPMR_MAX_CORE_L2_SCOM_LENGTH,         0x5C)
+HCD_CONST(CPMR_MAX_QUAD_SCOM_OFFSET,            0x60)
+HCD_CONST(CPMR_MAX_QUAD_SCOM_LENGTH,            0x64)
+
+/// Self Restore without SMF Support
+
+HCD_CONST(SELF_RESTORE_CPMR_OFFSET,             CPMR_HEADER_SIZE)
+HCD_CONST(SELF_RESTORE_INT_SIZE,                (8 * ONE_KB))
+HCD_CONST(SELF_RESTORE_FFDC_OFFSET,             (224 * ONE_KB))
+HCD_CONST(SELF_RESTORE_FFDC_LENGTH,             (32 * ONE_KB))
+HCD_CONST(SELF_RESTORE_FFDC_PER_CORE,           864)
+HCD_CONST(SELF_RESTORE_FFDC_PER_CORE_IN_HOMER,  1024)
+HCD_CONST(SELF_RESTORE_FFDC_PER_QUAD_IN_HOMER,  (SELF_RESTORE_FFDC_PER_CORE_IN_HOMER * 4))
+HCD_CONST(SELF_RESTORE_FFDC_BLK_CNT,            27)
+
+// Self Restore Region With SMF Support
+HCD_CONST(SMF_THREAD_LAUNCHER_SIZE,         1024)
+HCD_CONST(SMF_SELF_RESTORE_CODE_SIZE,
+          (SELF_RESTORE_INT_SIZE + SMF_THREAD_LAUNCHER_SIZE))
+
+HCD_CONST(SMF_CORE_RESTORE_THREAD_AREA_SIZE,         HALF_KB)
+HCD_CONST(SMF_SELF_SAVE_THREAD_AREA_SIZE,            256)
+HCD_CONST(SMF_CORE_RESTORE_CORE_AREA_SIZE,           HALF_KB)
+HCD_CONST(SMF_CORE_SAVE_CORE_AREA_SIZE,              HALF_KB)
+
+HCD_CONST(SMF_SELF_RESTORE_CORE_REGS_SIZE,
+          MAX_CORES_PER_CHIP * ((SMF_CORE_RESTORE_THREAD_AREA_SIZE* MAX_THREADS_PER_CORE ) +
+                                (SMF_SELF_SAVE_THREAD_AREA_SIZE* MAX_THREADS_PER_CORE ) +
+                                SMF_CORE_RESTORE_CORE_AREA_SIZE +
+                                SMF_CORE_SAVE_CORE_AREA_SIZE ))
+
+HCD_CONST(SMF_SELF_RESTORE_SIZE_TOTAL,
+          (SMF_SELF_RESTORE_CODE_SIZE + SMF_SELF_RESTORE_CORE_REGS_SIZE))
+/// Core Scom
+
+HCD_CONST(SELF_SAVE_RESTORE_REGION_SIZE,        (256 * ONE_KB))
+HCD_CONST(SCOM_RESTORE_CPMR_OFFSET,        (256 * ONE_KB))
+HCD_CONST(SCOM_RESTORE_HOMER_OFFSET,
+          (SCOM_RESTORE_CPMR_OFFSET + CPMR_HOMER_OFFSET))
+
+HCD_CONST(MAX_CORE_SCOM_ENTRIES,                16)
+HCD_CONST(MAX_L2_SCOM_ENTRIES,                  32)
+HCD_CONST(MAX_L3_SCOM_ENTRIES,                  64)
+HCD_CONST(MAX_EQ_SCOM_ENTRIES,                  16)
+HCD_CONST(MAX_SCOM_RESTORE_ENTRIES_PER_CORE, (MAX_CORE_SCOM_ENTRIES +
+          MAX_L2_SCOM_ENTRIES + MAX_L3_SCOM_ENTRIES +
+          MAX_EQ_SCOM_ENTRIES))
+
+
+HCD_CONST(SCOM_RESTORE_SIZE_PER_CORE,
+          (SCOM_RESTORE_ENTRY_SIZE* MAX_SCOM_RESTORE_ENTRIES_PER_CORE)) // 128 * 16
+HCD_CONST(SCOM_RESTORE_SIZE_PER_QME,
+          (SCOM_RESTORE_SIZE_PER_CORE* MAX_CORES_PER_QME))       // 128 * 16 * 4
+
+HCD_CONST(SCOM_RESTORE_SIZE_TOTAL,  (96 * ONE_KB))
+
+HCD_CONST(SCOM_RESTORE_EL_AREA,
+          MAX_CORE_SCOM_ENTRIES* SCOM_RESTORE_ENTRY_SIZE)
+HCD_CONST(SCOM_RESTORE_L2_AREA,
+          MAX_L2_SCOM_ENTRIES* SCOM_RESTORE_ENTRY_SIZE)
+HCD_CONST(SCOM_RESTORE_L3_AREA,
+          MAX_L3_SCOM_ENTRIES* SCOM_RESTORE_ENTRY_SIZE)
+HCD_CONST(SCOM_RESTORE_EQ_AREA,
+          MAX_EQ_SCOM_ENTRIES* SCOM_RESTORE_ENTRY_SIZE)
+HCD_CONST(SCOM_RESTORE_VER,     1)
+HCD_CONST(SCOM_RESTORE_L2_CORE,
+          (MAX_CORE_SCOM_ENTRIES + MAX_L2_SCOM_ENTRIES))
+HCD_CONST(SCOM_RESTORE_L3_CACHE,
+          (MAX_EQ_SCOM_ENTRIES + MAX_L3_SCOM_ENTRIES))
+/// QME Image
+
+HCD_CONST(QME_IMAGE_CPMR_OFFSET,                0x58000) // assumes SCOMs take up the first 96KB of second 256KB
+//HCD_CONST(QME_IMAGE_SIZE,                       0)
+HCD_CONST(QME_INT_VECTOR_SIZE,                  384)     // 0x180
+HCD_CONST(QME_HCODE_OFFSET,                     (SELF_SAVE_RESTORE_REGION_SIZE + SCOM_RESTORE_SIZE_TOTAL))
+
+/// QME Header
+
+HCD_CONST(QME_HEADER_CPMR_OFFSET,
+          (QME_IMAGE_CPMR_OFFSET + QME_INT_VECTOR_SIZE))
+HCD_CONST(QME_HEADER_IMAGE_OFFSET,              QME_INT_VECTOR_SIZE)
+HCD_CONST(QME_HEADER_SIZE,                      128)     // 0x80, +0x180=0x200
+
+HCD_CONST(QME_MAGIC_NUMBER_BYTE,                0x00)
+HCD_CONST(QME_HCODE_OFFSET_BYTE,                0x08)
+HCD_CONST(QME_HCODE_LENGTH_BYTE,                0x0C)
+HCD_CONST(QME_COMMON_RING_OFFSET_BYTE,          0x10)
+HCD_CONST(QME_OVERRIDE_RING_OFFSET_BYTE,        0x14)
+HCD_CONST(QME_COMMON_RING_LENGTH_BYTE,          0x18)
+HCD_CONST(QME_LOCAL_PSTATE_OFFSET_BYTE,         0x1C)
+HCD_CONST(QME_LOCAL_PSTATE_LENGTH_BYTE,         0x20)
+HCD_CONST(QME_SPECIFIC_RING_OFFSET_BYTE,        0x24)
+HCD_CONST(QME_SPECIFIC_RING_LENGTH_BYTE,        0x28)
+HCD_CONST(QME_QUAD_SCOM_RESTORE_OFFSET_BYTE,    0x2C)
+HCD_CONST(QME_QUAD_SCOM_RESTORE_LENGTH_BYTE,    0x30)
+HCD_CONST(QME_ATTR_TANK_ADDRESS,                0x34)
+HCD_CONST(QME_LOCATION_ID_BYTE,                 0x38)
+HCD_CONST(QME_TIME_BASE,                        0x3C)
+HCD_CONST(QME_CPMR_HOMER_ADDRESS_BYTE,          0x40)
+
+HCD_CONST(QME_HCODE_OFF_IMAGE_OFFSET,           (QME_HEADER_IMAGE_OFFSET + QME_HCODE_OFFSET_BYTE))
+HCD_CONST(QME_HCODE_LEN_IMAGE_OFFSET,           (QME_HEADER_IMAGE_OFFSET + QME_HCODE_LENGTH_BYTE))
+
+/// QME Hcode
+
+HCD_CONST(QME_HCODE_IMAGE_OFFSET,               (QME_INT_VECTOR_SIZE + QME_HEADER_SIZE)) // 0x200
+HCD_CONST(QME_HCODE_SIZE,                       (43 * ONE_KB))
+HCD_CONST(QME_COMMON_RING_SIZE,                 (5 * ONE_KB))
+HCD_CONST(QME_INST_RING_SIZE,                   (5 * ONE_KB))
+HCD_CONST(QME_DEBUG_PTRS_OFFSET,                0x200)
+HCD_CONST(QME_DEBUG_PTRS_SIZE,                  0x10)
+HCD_CONST(QME_DUMP_PTRS_OFFSET,                 QME_DEBUG_PTRS_OFFSET + QME_DEBUG_PTRS_SIZE)
+HCD_CONST(QME_DUMP_PTRS_SIZE,                   0x300)
+HCD_CONST(QME_ATTR_PTRS_OFFSET,                 QME_DUMP_PTRS_OFFSET + QME_DUMP_PTRS_SIZE)
+HCD_CONST(QME_INSTRUMENTATION_SIZE,             HALF_KB)
+HCD_CONST(QME_SRAM_HCODE_OFFSET,                0)
+HCD_CONST(QME_OVERRIDE_RING_SIZE,               (2 * ONE_KB))
+
+// QME Hcode + Core Scan + Pstate
+HCD_CONST(QME_REGION_SIZE,                      (128 * ONE_KB))
+
+// Debug
+
+HCD_CONST(CPMR_TRACE_REGION_OFFSET,             (512 * ONE_KB))
+HCD_CONST(QME_TRACE_REGION_SIZE,                (16 * ONE_KB))
+HCD_CONST(CPMR_TRACE_REGION_SIZE,               (QME_TRACE_REGION_SIZE* MAX_QMES_PER_CHIP)) // 192K
+HCD_CONST(CPMR_DEBUG_REGION_OFFSET,             CPMR_TRACE_REGION_OFFSET + CPMR_TRACE_REGION_SIZE)
+HCD_CONST(CPMR_DEBUG_REGION_SIZE,               (64 * ONE_KB)) // 192K + 64K = 256K
+
+HCD_CONST(CACHE_CHIPLET_ID_MIN,                 0x20 )
+HCD_CONST(CACHE_CHIPLET_ID_MAX,                 0x27 )
+
+//---------------------------------------------------------------------------------------
+
+/// PPMR Header
+HCD_CONST(PPMR_BUILD_VERSION,                   1)
+HCD_CONST(PPMR_HEADER_SIZE,                     512)
+HCD_CONST(PGPE_INT_VECTOR_SIZE,                 384)
+HCD_CONST(PGPE_HEADER_IMAGE_OFFSET,             PGPE_INT_VECTOR_SIZE)
+HCD_CONST(PGPE_BOOT_COPIER_OFFSET,              PPMR_HEADER_SIZE)
+HCD_CONST(PGPE_BOOT_COPIER_LENGTH,              ONE_KB)
+HCD_CONST(PGPE_BOOT_LOADER_OFFSET,
+          (PGPE_BOOT_COPIER_OFFSET + PGPE_BOOT_COPIER_LENGTH) )
+
+HCD_CONST(PGPE_BOOT_LOADER_LENGTH,              ONE_KB)
+HCD_CONST(PGPE_HCODE_OFFSET,
+          PGPE_BOOT_LOADER_OFFSET + PGPE_BOOT_LOADER_LENGTH )
+HCD_CONST(PPMR_HOMER_OFFSET,                    (HOMER_PPMR_REGION_NUM* ONE_MB))
+
+HCD_CONST(PPMR_MAGIC_NUMBER_BYTE,               0x00)
+HCD_CONST(PPMR_BOOT_COPIER_OFFSET_BYTE,         0x08)
+HCD_CONST(PPMR_BOOT_LOADER_OFFSET_BYTE,         0x10)
+HCD_CONST(PPMR_BOOT_LOADER_LENGTH_BYTE,         0x14)
+HCD_CONST(PPMR_BUILD_DATE_BYTE,                 0x18)
+HCD_CONST(PPMR_BUILD_VER_BYTE,                  0x1C)
+HCD_CONST(PPMR_PGPE_HCODE_OFFSET_BYTE,          0x28)
+HCD_CONST(PPMR_PGPE_HCODE_LENGTH_BYTE,          0x2C)
+HCD_CONST(PPMR_GLOBAL_PSTATE_OFFSET_BYTE,       0x30)
+HCD_CONST(PPMR_GLOBAL_PSTATE_LENGTH_BYTE,       0x34)
+HCD_CONST(PPMR_LOCAL_PSTATE_OFFSET_BYTE,        0x38)
+HCD_CONST(PPMR_LOCAL_PSTATE_LENGTH_BYTE,        0x3C)
+HCD_CONST(PPMR_OCC_PSTATE_OFFSET_BYTE,          0x40)
+HCD_CONST(PPMR_OCC_PSTATE_LENGTH_BYTE,          0x44)
+HCD_CONST(PPMR_PSTATE_TABLE_OFFSET_BYTE,        0x48)
+HCD_CONST(PPMR_PSTATE_TABLE_LENGTH_BYTE,        0x4C)
+HCD_CONST(PPMR_PGPE_SRAM_IMAGE_SIZE_BYTE,       0x50)
+HCD_CONST(PPMR_PGPE_BOOT_PROG_CODE_BYTE,        0x54)
+HCD_CONST(PPMR_WOF_TABLE_OFFSET,                0x58)
+HCD_CONST(PPMR_WOF_TABLE_LENGTH,                0x5C)
+HCD_CONST(PPMR_AUX_TASK_OFFSET,                 0x60)
+HCD_CONST(PPMR_AUX_TASK_LENGTH,                 0x64)
+HCD_CONST(PPMR_DEEP_OP_TRACE_OFFSET,            0x68)
+HCD_CONST(PPMR_DEEP_OP_TRACE_LENGTH,            0x6C)
+
+/// PGPE Boot
+
+HCD_CONST(PGPE_BOOT_COPIER_PPMR_OFFSET,         PPMR_HEADER_SIZE)
+HCD_CONST(PGPE_BOOT_COPIER_SIZE,                ONE_KB)
+
+HCD_CONST(PGPE_BOOT_LOADER_PPMR_OFFSET,
+          (PGPE_BOOT_COPIER_PPMR_OFFSET + PGPE_BOOT_COPIER_SIZE))
+HCD_CONST(PGPE_BOOT_LOADER_SIZE,                ONE_KB)
+HCD_CONST(PGPE_BOOT_LOADER_RESET_ADDR_VAL,      0x40)
+HCD_CONST(XGPE_BOOT_LOADER_RESET_ADDR_VAL,      PGPE_BOOT_LOADER_RESET_ADDR_VAL)
+
+HCD_CONST(PGPE_INSTRUMENTATION_SIZE,            (2 * ONE_KB))
+/// PGPE Image
+HCD_CONST(PGPE_IMAGE_PPMR_OFFSET,
+          (PGPE_BOOT_LOADER_PPMR_OFFSET + PGPE_BOOT_LOADER_SIZE))
+
+HCD_CONST(PGPE_HCODE_RESET_ADDR_VAL,            0x40)
+HCD_CONST(PGPE_DBG_PTR_AREA_SIZE,               64)
+
+/// PGPE Header
+
+HCD_CONST(PGPE_HEADER_SIZE,                     128)
+
+HCD_CONST(PGPE_MAGIC_NUMBER_BYTE,                   0x00)
+HCD_CONST(PGPE_SYSTEM_RESET_ADDR_BYTE,              0x08)
+HCD_CONST(PGPE_SHARED_SRAM_ADDR_BYTE,               0x0C)
+HCD_CONST(PGPE_IVPR_ADDR_BYTE,                      0x10)
+HCD_CONST(PGPE_SHARED_SRAM_LENGTH_BYTE,             0x14)
+HCD_CONST(PGPE_BUILD_DATE_BYTE,                     0x18)
+HCD_CONST(PGPE_BUILD_VER_BYTE,                      0x1C)
+HCD_CONST(PGPE_PGPE_FLAGS_BYTE,                     0x20)
+HCD_CONST(PGPE_PGPE_TIMEBASE_HZ,                    0x24)
+HCD_CONST(PGPE_GLOBAL_PSTATE_SRAM_ADDR_BYTE,        0x28)
+HCD_CONST(PGPE_HCODE_LENGTH_BYTE,                   0x2C)
+HCD_CONST(PGPE_GLOBAL_PSTATE_MEM_OFFSET_BYTE,       0x30)
+HCD_CONST(PGPE_GLOBAL_PSTATE_PPB_SIZE_BYTE,         0x34)
+HCD_CONST(PGPE_GEN_PSTATE_TABLE_MEM_OFFSET_BYTE,    0x38)
+HCD_CONST(PGPE_GEN_PSTATE_TABLE_SIZE_BYTE,          0x3C)
+HCD_CONST(PGPE_OCC_PSTATE_TABLE_MEM_OFFSET_BYTE,    0x40)
+HCD_CONST(PGPE_OCC_PSTATE_TABLE_SIZE_BYTE,          0x44)
+HCD_CONST(PGPE_BEACON_ADDR_BYTE,                    0x48)
+HCD_CONST(PGPE_RESERVE_1,                           0x4C)
+HCD_CONST(PGPE_WOF_STATE_ADDR_BYTE,                 0x50)
+HCD_CONST(PGPE_RESERVE_2,                           0x54)
+HCD_CONST(PGPE_WOF_TABLE_ADDR_BYTE,                 0x58)
+HCD_CONST(PGPE_WOF_TABLE_LENGTH_BYTE,               0x5C)
+HCD_CONST(PGPE_RESERVE_3,                           0x60)
+HCD_CONST(PGPE_RESERVE_4,                           0x64)
+HCD_CONST(PGPE_RESERVE_5,                           0x68)
+HCD_CONST(PGPE_OP_TRACE_PTR_BYTE,                   0x6C)
+HCD_CONST(PGPE_DEEP_OP_TRACE_MEM_ADDR_BYTE,         0x70)
+HCD_CONST(PGPE_DEEP_OP_TRACE_LENGTH_BYTE,           0x74)
+
+HCD_CONST(PGPE_RESET_ADDR_IMAGE_OFFSET,         (PGPE_HEADER_IMAGE_OFFSET + PGPE_SYSTEM_RESET_ADDR_BYTE))
+HCD_CONST(PGPE_BUILD_DATE_IMAGE_OFFSET,         (PGPE_HEADER_IMAGE_OFFSET + PGPE_BUILD_DATE_BYTE))
+HCD_CONST(PGPE_BUILD_VER_IMAGE_OFFSET,          (PGPE_HEADER_IMAGE_OFFSET + PGPE_BUILD_VER_BYTE))
+
+//PPMR Misc
+HCD_CONST(PPMR_MEM_MASK,        0x80300000)
+
+/// PGPE Hcode
+HCD_CONST(PPMR_BOOT_REGION, (PPMR_HEADER_SIZE + PGPE_BOOT_COPIER_SIZE + PGPE_BOOT_LOADER_SIZE ))
+HCD_CONST(PGPE_SRAM_BOOT_REGION, (PPMR_HEADER_SIZE + PGPE_BOOT_LOADER_SIZE ))
+HCD_CONST(PGPE_GLOBAL_PSTATE_PARAM_BLOCK_SIZE,  (6 * ONE_KB))
+HCD_CONST(PGPE_OCC_SHARED_SRAM_SIZE,            (2 * ONE_KB))
+HCD_CONST(PGPE_DEBUG_PTRS_OFFSET,               0x200)
+HCD_CONST(PGPE_DEBUG_PTRS_SIZE,                 0x24)
+
+
+/// Pstate Parameter Block + Pstate Table
+
+HCD_CONST(OCC_PSTATE_PARAM_BLOCK_PPMR_OFFSET,   (128 * ONE_KB))
+HCD_CONST(OCC_PSTATE_PARAM_BLOCK_SIZE,          (8 * ONE_KB))   // this is over allocated
+HCD_CONST(OCC_PSTATE_PARAM_BLOCK_REGION_SIZE,   (16 * ONE_KB))
+
+HCD_CONST(PGPE_PSTATE_OUTPUT_TABLES_PPMR_OFFSET, (144 * ONE_KB))
+HCD_CONST(PGPE_PSTATE_OUTPUT_TABLES_SIZE,        (8 * ONE_KB))   // this is over allocated
+HCD_CONST(PGPE_PSTATE_OUTPUT_TABLES_REGION_SIZE, (16 * ONE_KB))
+
+HCD_CONST(OCC_WOF_TABLES_PPMR_OFFSET,           (768 * ONE_KB))
+HCD_CONST(OCC_WOF_TABLES_SIZE,                  (256 * ONE_KB))
+HCD_CONST(PPMR_RESERVE_PSTATE_TABLE_TO_WOF,
+          ( OCC_WOF_TABLES_PPMR_OFFSET - ( PGPE_PSTATE_OUTPUT_TABLES_PPMR_OFFSET + PGPE_PSTATE_OUTPUT_TABLES_REGION_SIZE ) ))
+
+HCD_CONST(WOF_TABLE_RESERVE,
+          OCC_WOF_TABLES_PPMR_OFFSET - (PGPE_PSTATE_OUTPUT_TABLES_PPMR_OFFSET + PGPE_PSTATE_OUTPUT_TABLES_REGION_SIZE))
+HCD_CONST(PGPE_AUX_TASK_SIZE, (2 * ONE_KB))
+
+#endif /* __HCD_MEMMAP_BASE_H__ */
