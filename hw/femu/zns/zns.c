@@ -506,10 +506,13 @@ static void zns_aio_zone_reset_cb(NvmeRequest *req, NvmeZone *zone)
     /* FIXME, We always assume reset SUCCESS */
     switch (zns_get_zone_state(zone)) {
     case NVME_ZONE_STATE_EXPLICITLY_OPEN:
+        /* fall through */
     case NVME_ZONE_STATE_IMPLICITLY_OPEN:
         zns_aor_dec_open(ns);
+        /* fall through */
     case NVME_ZONE_STATE_CLOSED:
         zns_aor_dec_active(ns);
+        /* fall through */
     case NVME_ZONE_STATE_FULL:
         zone->w_ptr = zone->d.zslba;
         zone->d.wp = zone->w_ptr;
@@ -542,6 +545,7 @@ static uint16_t zns_open_zone(NvmeNamespace *ns, NvmeZone *zone,
             return status;
         }
         zns_aor_inc_active(ns);
+        /* fall through */
     case NVME_ZONE_STATE_CLOSED:
         status = zns_aor_check(ns, 0, 1);
         if (status != NVME_SUCCESS) {
@@ -551,8 +555,10 @@ static uint16_t zns_open_zone(NvmeNamespace *ns, NvmeZone *zone,
             return status;
         }
         zns_aor_inc_open(ns);
+        /* fall through */
     case NVME_ZONE_STATE_IMPLICITLY_OPEN:
         zns_assign_zone_state(ns, zone, NVME_ZONE_STATE_EXPLICITLY_OPEN);
+        /* fall through */
     case NVME_ZONE_STATE_EXPLICITLY_OPEN:
         return NVME_SUCCESS;
     default:
@@ -565,9 +571,11 @@ static uint16_t zns_close_zone(NvmeNamespace *ns, NvmeZone *zone,
 {
     switch (state) {
     case NVME_ZONE_STATE_EXPLICITLY_OPEN:
+        /* fall through */
     case NVME_ZONE_STATE_IMPLICITLY_OPEN:
         zns_aor_dec_open(ns);
         zns_assign_zone_state(ns, zone, NVME_ZONE_STATE_CLOSED);
+        /* fall through */
     case NVME_ZONE_STATE_CLOSED:
         return NVME_SUCCESS;
     default:
@@ -580,14 +588,18 @@ static uint16_t zns_finish_zone(NvmeNamespace *ns, NvmeZone *zone,
 {
     switch (state) {
     case NVME_ZONE_STATE_EXPLICITLY_OPEN:
+        /* fall through */
     case NVME_ZONE_STATE_IMPLICITLY_OPEN:
         zns_aor_dec_open(ns);
+        /* fall through */
     case NVME_ZONE_STATE_CLOSED:
         zns_aor_dec_active(ns);
+        /* fall through */
     case NVME_ZONE_STATE_EMPTY:
         zone->w_ptr = zns_zone_wr_boundary(zone);
         zone->d.wp = zone->w_ptr;
         zns_assign_zone_state(ns, zone, NVME_ZONE_STATE_FULL);
+        /* fall through */
     case NVME_ZONE_STATE_FULL:
         return NVME_SUCCESS;
     default:
@@ -621,6 +633,7 @@ static uint16_t zns_offline_zone(NvmeNamespace *ns, NvmeZone *zone,
     switch (state) {
     case NVME_ZONE_STATE_READ_ONLY:
         zns_assign_zone_state(ns, zone, NVME_ZONE_STATE_OFFLINE);
+        /* fall through */
     case NVME_ZONE_STATE_OFFLINE:
         return NVME_SUCCESS;
     default:
