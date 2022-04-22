@@ -5,6 +5,7 @@
 #include "qemu/uuid.h"
 #include "qemu/units.h"
 #include "qemu/cutils.h"
+#include "qemu/memalign.h"
 #include "hw/pci/msix.h"
 #include "hw/pci/msi.h"
 #include "hw/virtio/vhost.h"
