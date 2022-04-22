@@ -1,0 +1,1 @@
+softmmu_ss.add(when: 'CONFIG_FEMU_PCI', if_true: files('dma.c', 'intr.c', 'nvme-util.c', 'nvme-admin.c', 'nvme-io.c', 'femu.c', 'nossd/nop.c', 'nand/nand.c', 'timing-model/timing.c', 'ocssd/oc12.c', 'ocssd/oc20.c', 'zns/zns.c', 'bbssd/bb.c', 'bbssd/ftl.c', 'lib/pqueue.c', 'lib/rte_ring.c', 'backend/dram.c'))
