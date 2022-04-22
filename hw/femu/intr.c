@@ -4,6 +4,7 @@ static int nvme_add_kvm_msi_virq(FemuCtrl *n, NvmeCQueue *cq)
 {
     int virq;
     int vector_n;
+    KVMRouteChange c;
 
     if (!msix_enabled(&(n->parent_obj))) {
         femu_err("MSIX is mandatory for the device");
@@ -18,12 +19,14 @@ static int nvme_add_kvm_msi_virq(FemuCtrl *n, NvmeCQueue *cq)
 
     vector_n = cq->vector;
 
-    virq = kvm_irqchip_add_msi_route(kvm_state, vector_n, &n->parent_obj);
+    c = kvm_irqchip_begin_route_changes(kvm_state);
+    virq = kvm_irqchip_add_msi_route(&c, vector_n, &n->parent_obj);
     if (virq < 0) {
         femu_err("Route MSIX vector to KVM failed");
         event_notifier_cleanup(&cq->guest_notifier);
         return -1;
     }
+    kvm_irqchip_commit_route_changes(&c);
     cq->virq = virq;
     femu_debug("%s,cq[%d]->virq=%d\n", __func__, cq->cqid, virq);
 
@@ -191,10 +194,6 @@ void nvme_isr_notify_io(void *opaque)
 
 int nvme_setup_virq(FemuCtrl *n, NvmeCQueue *cq)
 {
-
-    /* Disable virq for now, TOFIX later on */
-    return 0;
-
     int ret;
 
     if (cq->irq_enabled) {
@@ -225,9 +224,7 @@ int nvme_setup_virq(FemuCtrl *n, NvmeCQueue *cq)
 
 int nvme_clear_virq(FemuCtrl *n)
 {
-#if 0
     nvme_clear_guest_notifier(n);
-#endif
 
     return 0;
 }
