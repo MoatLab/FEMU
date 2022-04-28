@@ -1,0 +1,20 @@
+{
+    "files.associations": {
+        "zns.h": "c",
+        "nvme.h": "c",
+        "msix.h": "c",
+        "pci.h": "c",
+        "dma.h": "c",
+        "block.h": "c",
+        "block-global-state.h": "c",
+        "block-common.h": "c",
+        "transactions.h": "c",
+        "glib.h": "c",
+        "galloca.h": "c",
+        "gtypes.h": "c",
+        "ggettext.h": "c",
+        "gfileutils.h": "c",
+        "gerror.h": "c",
+        "gquark.h": "c"
+    }
+}

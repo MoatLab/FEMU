@@ -1,6 +1,8 @@
 #ifndef __FEMU_ZNS_H
 #define __FEMU_ZNS_H
 
+#define PARALLEL_ZONE (true)
+
 #include "../nvme.h"
 
 typedef struct QEMU_PACKED NvmeZonedResult {

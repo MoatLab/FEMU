@@ -1046,6 +1046,31 @@ static uint16_t zns_map_dptr(FemuCtrl *n, size_t len, NvmeRequest *req)
     }
 }
 
+// static uint64_t zns_eu_size(FemuCtrl *n)
+// {
+//     return 0;
+// }
+
+// static void zns_lba_get_eu(FemuCtrl *n, uint64_t lba)
+// {
+//     return;
+// }
+
+// static void zns_lba_get_plane(FemuCtrl *n, uint64_t lba)
+// {
+//     return;
+// }
+
+// static void zns_lba_get_chip(FemuCtrl *n, uint64_t lba)
+// {
+//     return;
+// }
+
+// static void zns_lba_get_channel(FemuCtrl *n, uint64_t lba)
+// {
+//     return;
+// }
+
 static uint16_t zns_do_write(FemuCtrl *n, NvmeRequest *req, bool append,
                              bool wrz)
 {
@@ -1297,6 +1322,29 @@ static int zns_start_ctrl(FemuCtrl *n)
         n->zasl = 31 - clz32(n->zasl_bs / n->page_size);
     }
 
+#ifdef HALTZ_DEBUG
+    if (unlikely(n->logf)) fclose(n->logf);
+
+    n->logf = fopen("/home/hd/logf", "a+");
+    fseek(n->logf, 0, SEEK_SET);
+
+    char logbuf[4096];
+    sprintf(logbuf, "\n******************\n");
+    /* eu size, eu per plane(always 1), plane per chip, chip per channel, num channel */
+    sprintf(logbuf + strlen(logbuf), "%16s", "EU Size");
+    sprintf(logbuf + strlen(logbuf), "%8s", "Num Plan");
+    sprintf(logbuf + strlen(logbuf), "%8s", "Num Chip");
+    sprintf(logbuf + strlen(logbuf), "%8s", "Num Channel");
+    sprintf(logbuf + strlen(logbuf), "\n");
+    sprintf(logbuf + strlen(logbuf), "%16d", n->zns_params.sec_size * n->zns_params.secs_per_pg * n->zns_params.pgs_per_blk);
+    sprintf(logbuf + strlen(logbuf), "%8d", n->zns_params.num_pln);
+    sprintf(logbuf + strlen(logbuf), "%8d", n->zns_params.num_lun);
+    sprintf(logbuf + strlen(logbuf), "%8d", n->zns_params.num_ch);
+    sprintf(logbuf + strlen(logbuf), "\n");
+
+    fprintf(n->logf, "%s", logbuf);
+    printf("%s",logbuf);
+#endif
     return 0;
 }
 
@@ -1320,6 +1368,7 @@ static void zns_exit(FemuCtrl *n)
     /*
      * Release any extra resource (zones) allocated for ZNS mode
      */
+    if (n->logf) fclose(n->logf);
 }
 
 int nvme_register_znssd(FemuCtrl *n)

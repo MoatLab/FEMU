@@ -31,6 +31,7 @@
 #define NVME_ID_NS_LBAF_DS(ns, lba_index) (ns->id_ns.lbaf[lba_index].lbads)
 #define NVME_ID_NS_LBAF_MS(ns, lba_index) (ns->id_ns.lbaf[lba_index].ms)
 
+#define HALTZ_DEBUG
 typedef struct NvmeBar {
     uint64_t    cap;
     uint32_t    vs;
@@ -1156,6 +1157,17 @@ typedef struct OcCtrlParams {
     uint16_t sos;
 } OcCtrlParams;
 
+typedef struct ZnsCtrlParams {
+    uint16_t sec_size;
+    uint8_t  secs_per_pg;
+    uint16_t pgs_per_blk;
+    uint8_t  max_sec_per_rq;
+    uint8_t  num_ch;
+    uint8_t  num_lun;
+    uint8_t  num_pln;
+    uint16_t sos;
+} ZnsCtrlParams;
+
 struct FemuCtrl;
 typedef struct FemuExtCtrlOps {
     void     *state;
@@ -1284,6 +1296,7 @@ typedef struct FemuCtrl {
     uint8_t         lver; /* Coperd: OCSSD version, 0x1 -> OC1.2, 0x2 -> OC2.0 */
     uint32_t        memsz;
     OcCtrlParams    oc_params;
+    ZnsCtrlParams   zns_params;
 
     Oc12Ctrl  *oc12_ctrl;
     volatile int64_t chip_next_avail_time[FEMU_MAX_NUM_CHIPS];
@@ -1325,6 +1338,9 @@ typedef struct FemuCtrl {
 
     /* Nand Flash Type: SLC/MLC/TLC/QLC/PLC */
     uint8_t         flash_type;
+
+
+    FILE            *logf;
 } FemuCtrl;
 
 typedef struct NvmePollerThreadArgument {
