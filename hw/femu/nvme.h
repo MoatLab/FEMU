@@ -31,7 +31,7 @@
 #define NVME_ID_NS_LBAF_DS(ns, lba_index) (ns->id_ns.lbaf[lba_index].lbads)
 #define NVME_ID_NS_LBAF_MS(ns, lba_index) (ns->id_ns.lbaf[lba_index].ms)
 
-#define HALTZ_DEBUG
+/* #define HALTZ_DEBUG */
 typedef struct NvmeBar {
     uint64_t    cap;
     uint32_t    vs;
@@ -1166,6 +1166,9 @@ typedef struct ZnsCtrlParams {
     uint8_t  num_lun;
     uint8_t  num_pln;
     uint16_t sos;
+
+    uint64_t eu_size;
+    uint64_t zone_eus;
 } ZnsCtrlParams;
 
 struct FemuCtrl;

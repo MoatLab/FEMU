@@ -152,6 +152,9 @@ static inline size_t zns_l2b(NvmeNamespace *ns, uint64_t lba)
     return lba << zns_ns_lbads(ns);
 }
 
+/* convert an LBA to the PBA */
+static inline size_t zns_l2p(NvmeNamespace *ns, uint64_t lba);
+
 static inline NvmeZoneState zns_get_zone_state(NvmeZone *zone)
 {
     return zone->d.zs >> 4;

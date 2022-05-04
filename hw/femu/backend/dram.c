@@ -26,6 +26,7 @@ void free_dram_backend(SsdDramBackend *b)
     }
 }
 
+/* cur_len is as large as possible in every loop, and the max size is 4KiB, the unit is sector size. */
 int backend_rw(SsdDramBackend *b, QEMUSGList *qsg, uint64_t *lbal, bool is_write)
 {
     int sg_cur_index = 0;
@@ -53,11 +54,11 @@ int backend_rw(SsdDramBackend *b, QEMUSGList *qsg, uint64_t *lbal, bool is_write
             ++sg_cur_index;
         }
 
-        if (b->femu_mode == FEMU_OCSSD_MODE) {
+        if (b->femu_mode == FEMU_OCSSD_MODE ||
+            b->femu_mode == FEMU_ZNSSD_MODE) {
             mb_oft = lbal[sg_cur_index];
         } else if (b->femu_mode == FEMU_BBSSD_MODE ||
-                   b->femu_mode == FEMU_NOSSD_MODE ||
-                   b->femu_mode == FEMU_ZNSSD_MODE) {
+                   b->femu_mode == FEMU_NOSSD_MODE) {
             mb_oft += cur_len;
         } else {
             assert(0);
@@ -67,4 +68,20 @@ int backend_rw(SsdDramBackend *b, QEMUSGList *qsg, uint64_t *lbal, bool is_write
     qemu_sglist_destroy(qsg);
 
     return 0;
+}
+
+void backend_print(FILE* f, SsdDramBackend *b, uint64_t addr, uint64_t len, const char *info)
+{
+    char *mb = b->logical_space;
+    char hex[len * 3 + 1];
+
+    for (size_t i = 0; i < len; i++)
+    {
+        sprintf(hex + i * 2, " %02x", mb[addr + i]);
+    }
+
+    hex[len * 3] = '\0';
+
+    fprintf(f, "/* ----------%14s %8s---------- */\n", __func__, info); 
+    fprintf(f, "%s\n", hex);
 }

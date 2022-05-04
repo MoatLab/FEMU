@@ -4,6 +4,9 @@
 #define NVME_DEFAULT_ZONE_SIZE      (128 * MiB)
 #define NVME_DEFAULT_MAX_AZ_SIZE    (128 * KiB)
 
+/* #define AIO_SECTOR_LIST_SIZE (req->qsg.nsg * sizeof(size_t)) */
+#define AIO_SECTOR_LIST_SIZE (4096 * sizeof(size_t)) /* TODO: 4096 is huge. Try to malloc size on demand. */
+
 static inline uint32_t zns_zone_idx(NvmeNamespace *ns, uint64_t slba)
 {
     FemuCtrl *n = ns->ctrl;
@@ -1046,30 +1049,70 @@ static uint16_t zns_map_dptr(FemuCtrl *n, size_t len, NvmeRequest *req)
     }
 }
 
-// static uint64_t zns_eu_size(FemuCtrl *n)
-// {
-//     return 0;
-// }
+static inline uint64_t zns_eu_size(FemuCtrl *n)
+{
+    return n->zns_params.eu_size;
+}
 
-// static void zns_lba_get_eu(FemuCtrl *n, uint64_t lba)
-// {
-//     return;
-// }
+/* Used only for parallel zone mapping. */
+static inline uint64_t zns_zone_eus(FemuCtrl *n)
+{
+    return n->zns_params.zone_eus;
+}
 
-// static void zns_lba_get_plane(FemuCtrl *n, uint64_t lba)
-// {
-//     return;
-// }
+static inline uint64_t zns_pba_get_eu(FemuCtrl *n, uint64_t pba)
+{
+    return pba / (n->zns_params.pgs_per_blk * n->zns_params.secs_per_pg);
+}
 
-// static void zns_lba_get_chip(FemuCtrl *n, uint64_t lba)
-// {
-//     return;
-// }
+static inline uint64_t zns_pba_get_plane(FemuCtrl *n, uint64_t pba)
+{
+    return zns_pba_get_eu(n, pba) % zns_zone_eus(n);
+}
 
-// static void zns_lba_get_channel(FemuCtrl *n, uint64_t lba)
-// {
-//     return;
-// }
+static inline uint64_t zns_pba_get_chip(FemuCtrl *n, uint64_t pba)
+{
+    return zns_pba_get_plane(n, pba) / n->zns_params.num_pln;
+}
+
+static inline uint64_t zns_pba_get_channel(FemuCtrl *n, uint64_t pba)
+{
+    return zns_pba_get_chip(n, pba) / n->zns_params.num_lun;
+}
+
+/* ---------- return the corresponding physical sector ---------- */
+static inline uint64_t zns_l2p(NvmeNamespace* ns, uint64_t lba)
+{
+    FemuCtrl *n = ns->ctrl;
+    uint64_t lpa = lba / n->zns_params.secs_per_pg, resident_sector_nr = lba % n->zns_params.secs_per_pg; /* translate from sectors to pages. */
+    uint64_t ppa_channel = lpa % n->zns_params.num_ch;
+    uint64_t ppa_chip = (lpa / n->zns_params.num_ch) % n->zns_params.num_lun + ppa_channel * n->zns_params.num_lun;
+    uint64_t ppa_plane = (lpa / (n->zns_params.num_ch * n->zns_params.num_lun)) % n->zns_params.num_pln + ppa_chip * n->zns_params.num_pln;
+    uint64_t stripe = lpa / (zns_zone_eus(n) * n->zns_params.pgs_per_blk);
+    uint64_t substripe = lpa / zns_zone_eus(n);
+    uint64_t ppa = stripe *  (zns_zone_eus(n) * n->zns_params.pgs_per_blk) + ppa_plane * n->zns_params.pgs_per_blk + substripe;
+    // if (lpa == 0)
+    // {
+    //     femu_log("/* -------------------- */\n");
+    //     femu_log("PPA Channel: %lu\n", ppa_channel);
+    //     femu_log("PPA Chip: %lu\n", ppa_chip);
+    //     femu_log("PPA Plane: %lu\n", ppa_plane);
+    //     femu_log("PPA Stripe: %lu\n", stripe);
+    //     femu_log("PPA Substripe: %lu\n", substripe);
+    //     femu_log("LPA: %lu, PPA: %lu\n", lpa, ppa);
+    //     femu_log("LBA: %lu, PBA: %lu\n", lba, ppa * n->zns_params.secs_per_pg + resident_sector_nr);
+    // }
+#ifdef HALTZ_DEBUG
+    // printf("/* -------------------- */\n");
+    // printf("PPA Channel: %lu\n", ppa_channel);
+    // printf("PPA Chip: %lu\n", ppa_chip);
+    // printf("PPA Plane: %lu\n", ppa_plane);
+    // printf("PPA Stripe: %lu\n", stripe);
+    // printf("PPA Substripe: %lu\n", substripe);
+    // printf("LPA: %lu, PPA: %lu\n", lpa, ppa);
+#endif
+    return ppa * n->zns_params.secs_per_pg + resident_sector_nr;
+}
 
 static uint16_t zns_do_write(FemuCtrl *n, NvmeRequest *req, bool append,
                              bool wrz)
@@ -1079,7 +1122,7 @@ static uint16_t zns_do_write(FemuCtrl *n, NvmeRequest *req, bool append,
     uint64_t slba = le64_to_cpu(rw->slba);
     uint32_t nlb = (uint32_t)le16_to_cpu(rw->nlb) + 1;
     uint64_t data_size = zns_l2b(ns, nlb);
-    uint64_t data_offset;
+    /* uint64_t data_offset; */
     NvmeZone *zone;
     NvmeZonedResult *res = (NvmeZonedResult *)&req->cqe;
     uint16_t status;
@@ -1114,7 +1157,16 @@ static uint16_t zns_do_write(FemuCtrl *n, NvmeRequest *req, bool append,
 
     res->slba = zns_advance_zone_wp(ns, zone, nlb);
 
-    data_offset = zns_l2b(ns, slba);
+    /* ---------- TODO(haltz) 256 should be MAX_REQ_SECTORS/PAGES, FIX IT ---------- */
+    size_t *aio_sector_list = (size_t *)g_malloc0(AIO_SECTOR_LIST_SIZE);
+    /* ---------- SG max length is 4KiB, and every sg is as large as possible. ---------- */
+    size_t secs_per_sg = (4 * KiB) / n->zns_params.sec_size;
+    for (size_t cnt = 0; cnt < nlb; cnt += secs_per_sg)
+    {
+      aio_sector_list[cnt / secs_per_sg] = zns_l2b(ns, zns_l2p(ns, slba + cnt));
+    }
+
+    g_free(aio_sector_list);
 
     if (!wrz) {
         status = zns_map_dptr(n, data_size, req);
@@ -1122,8 +1174,12 @@ static uint16_t zns_do_write(FemuCtrl *n, NvmeRequest *req, bool append,
             goto err;
         }
 
-        backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
+        backend_rw(n->mbe, &req->qsg, aio_sector_list, req->is_write);
     }
+
+#ifdef HALTZ_DEBUG
+    printf("\n/* ---------- %10s, LBADS: %d, NLB: %u ---------- */\n", __func__, NVME_ID_NS_LBADS(ns), nlb);
+#endif
 
     zns_finalize_zoned_write(ns, req, false);
     return NVME_SUCCESS;
@@ -1158,7 +1214,7 @@ static uint16_t zns_read(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t slba = le64_to_cpu(rw->slba);
     uint32_t nlb = (uint32_t)le16_to_cpu(rw->nlb) + 1;
     uint64_t data_size = zns_l2b(ns, nlb);
-    uint64_t data_offset;
+    // uint64_t data_offset;
     uint16_t status;
 
     assert(n->zoned);
@@ -1191,9 +1247,27 @@ static uint16_t zns_read(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         }
     }
 
-    data_offset = zns_l2b(ns, slba);
+    // data_offset = zns_l2b(ns, slba);
+    /* ---------- TODO(haltz) 256 should be MAX_REQ_SECTORS/PAGES, FIX IT ---------- */
+    size_t *aio_sector_list = (size_t *)g_malloc0(AIO_SECTOR_LIST_SIZE);
+    size_t secs_per_sg = (4 * KiB) / n->zns_params.sec_size;
+    for (size_t cnt = 0; cnt < nlb; cnt += secs_per_sg)
+    {
+      aio_sector_list[cnt / secs_per_sg] = zns_l2b(ns, zns_l2p(ns, slba + cnt));
+    }
 
-    backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
+    g_free(aio_sector_list);
+
+    backend_rw(n->mbe, &req->qsg, aio_sector_list, req->is_write);
+
+#ifdef HALTZ_DEBUG
+    // printf("\n/* ---------- %10s, LBADS: %d, NLB: %u, NSG: %d ---------- */\n", __func__, NVME_ID_NS_LBADS(ns), nlb, req->qsg.nsg);
+    char info[128];
+    sprintf(info, "READ ");
+    sprintf(info + 5, "%lu", slba);
+    backend_print(n->logf, n->mbe, aio_sector_list[0], 4096, info);
+#endif
+
     return NVME_SUCCESS;
 
 err:
@@ -1207,7 +1281,7 @@ static uint16_t zns_write(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t slba = le64_to_cpu(rw->slba);
     uint32_t nlb = (uint32_t)le16_to_cpu(rw->nlb) + 1;
     uint64_t data_size = zns_l2b(ns, nlb);
-    uint64_t data_offset;
+    // uint64_t data_offset;
     NvmeZone *zone;
     NvmeZonedResult *res = (NvmeZonedResult *)&req->cqe;
     uint16_t status;
@@ -1217,11 +1291,13 @@ static uint16_t zns_write(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     status = nvme_check_mdts(n, data_size);
     if (status) {
+        femu_err("*********CHECK FUNCTION %15s FAILED*********\n", "nvme_check_mdts");
         goto err;
     }
 
     status = zns_check_bounds(ns, slba, nlb);
     if (status) {
+        femu_err("*********CHECK FUNCTION %15s FAILED*********\n", "zns_check_bounds");
         goto err;
     }
 
@@ -1229,24 +1305,45 @@ static uint16_t zns_write(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     status = zns_check_zone_write(n, ns, zone, slba, nlb, false);
     if (status) {
+        femu_err("*********CHECK FUNCTION %15s FAILED*********\n", "zns_check_zone_write");
         goto err;
     }
 
     status = zns_auto_open_zone(ns, zone);
     if (status) {
+        femu_err("*********CHECK FUNCTION %15s FAILED*********\n", "zns_auto_open_zone");
         goto err;
     }
 
     res->slba = zns_advance_zone_wp(ns, zone, nlb);
 
-    data_offset = zns_l2b(ns, slba);
+    // data_offset = zns_l2b(ns, slba);
 
     status = zns_map_dptr(n, data_size, req);
     if (status) {
+        femu_err("*********CHECK FUNCTION %15s FAILED*********\n", "zns_map_dptr");
         goto err;
     }
 
-    backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
+    size_t *aio_sector_list = (size_t *)g_malloc0(AIO_SECTOR_LIST_SIZE);
+    size_t secs_per_sg = (4 * KiB) / n->zns_params.sec_size;
+    for (size_t cnt = 0; cnt < nlb; cnt += secs_per_sg)
+    {
+        aio_sector_list[cnt / secs_per_sg] = zns_l2b(ns, zns_l2p(ns, slba + cnt));
+    }
+
+    g_free(aio_sector_list);
+
+    backend_rw(n->mbe, &req->qsg, aio_sector_list, req->is_write);    
+
+#ifdef HALTZ_DEBUG
+    printf("\n/* ---------- %10s, LBADS: %d, NLB: %4u, SLBA: %4lu ---------- */\n", __func__, NVME_ID_NS_LBADS(ns), nlb, slba);
+    char info[128];
+    sprintf(info, "WRITE ");
+    sprintf(info + 6, "%lu", slba);
+    backend_print(n->logf, n->mbe, aio_sector_list[0], 4096, info);
+#endif
+
     zns_finalize_zoned_write(ns, req, false);
 
     return NVME_SUCCESS;
@@ -1297,7 +1394,8 @@ static int zns_init_zone_cap(FemuCtrl *n)
 {
     n->zoned = true;
     n->zasl_bs = NVME_DEFAULT_MAX_AZ_SIZE;
-    n->zone_size_bs = NVME_DEFAULT_ZONE_SIZE;
+    /* n->zone_size_bs = NVME_DEFAULT_ZONE_SIZE; */
+    n->zone_size_bs = zns_zone_eus(n) * zns_eu_size(n);
     n->zone_cap_bs = 0;
     n->cross_zone_read = false;
     n->max_active_zones = 0;
@@ -1332,14 +1430,14 @@ static int zns_start_ctrl(FemuCtrl *n)
     sprintf(logbuf, "\n******************\n");
     /* eu size, eu per plane(always 1), plane per chip, chip per channel, num channel */
     sprintf(logbuf + strlen(logbuf), "%16s", "EU Size");
-    sprintf(logbuf + strlen(logbuf), "%8s", "Num Plan");
-    sprintf(logbuf + strlen(logbuf), "%8s", "Num Chip");
-    sprintf(logbuf + strlen(logbuf), "%8s", "Num Channel");
+    sprintf(logbuf + strlen(logbuf), "%16s", "Num Plane");
+    sprintf(logbuf + strlen(logbuf), "%16s", "Num Chip");
+    sprintf(logbuf + strlen(logbuf), "%16s", "Num Channel");
     sprintf(logbuf + strlen(logbuf), "\n");
     sprintf(logbuf + strlen(logbuf), "%16d", n->zns_params.sec_size * n->zns_params.secs_per_pg * n->zns_params.pgs_per_blk);
-    sprintf(logbuf + strlen(logbuf), "%8d", n->zns_params.num_pln);
-    sprintf(logbuf + strlen(logbuf), "%8d", n->zns_params.num_lun);
-    sprintf(logbuf + strlen(logbuf), "%8d", n->zns_params.num_ch);
+    sprintf(logbuf + strlen(logbuf), "%16d", n->zns_params.num_pln);
+    sprintf(logbuf + strlen(logbuf), "%16d", n->zns_params.num_lun);
+    sprintf(logbuf + strlen(logbuf), "%16d", n->zns_params.num_ch);
     sprintf(logbuf + strlen(logbuf), "\n");
 
     fprintf(n->logf, "%s", logbuf);
@@ -1361,6 +1459,9 @@ static void zns_init(FemuCtrl *n, Error **errp)
     }
 
     zns_init_zone_identify(n, ns, 0);
+
+    n->zns_params.eu_size = n->zns_params.pgs_per_blk * n->zns_params.secs_per_pg * n->zns_params.sec_size;
+    n->zns_params.zone_eus = n->zns_params.num_ch * n->zns_params.num_lun * n->zns_params.num_pln;
 }
 
 static void zns_exit(FemuCtrl *n)
@@ -1368,7 +1469,11 @@ static void zns_exit(FemuCtrl *n)
     /*
      * Release any extra resource (zones) allocated for ZNS mode
      */
-    if (n->logf) fclose(n->logf);
+    if (n->logf) 
+    {
+        fclose(n->logf);
+        n->logf = NULL;
+    };
 }
 
 int nvme_register_znssd(FemuCtrl *n)
