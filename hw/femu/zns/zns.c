@@ -339,8 +339,13 @@ static uint16_t zns_check_zone_write(FemuCtrl *n, NvmeNamespace *ns,
                 status = NVME_INVALID_FIELD;
             }
         } else if (unlikely(slba != zone->w_ptr)) {
+            femu_err("/* slba: %lx, zone->w_ptr: %lx */\n", slba, zone->w_ptr);
             status = NVME_ZONE_INVALID_WRITE;
         }
+    }
+
+    if (status != NVME_SUCCESS) {
+        femu_err("*********Status %d*********\n", (int)status);
     }
 
     return status;
@@ -1089,20 +1094,18 @@ static inline uint64_t zns_l2p(NvmeNamespace* ns, uint64_t lba)
     uint64_t ppa_chip = (lpa / n->zns_params.num_ch) % n->zns_params.num_lun + ppa_channel * n->zns_params.num_lun;
     uint64_t ppa_plane = (lpa / (n->zns_params.num_ch * n->zns_params.num_lun)) % n->zns_params.num_pln + ppa_chip * n->zns_params.num_pln;
     uint64_t stripe = lpa / (zns_zone_eus(n) * n->zns_params.pgs_per_blk);
-    uint64_t substripe = lpa / zns_zone_eus(n);
-    uint64_t ppa = stripe *  (zns_zone_eus(n) * n->zns_params.pgs_per_blk) + ppa_plane * n->zns_params.pgs_per_blk + substripe;
-    // if (lpa == 0)
-    // {
-    //     femu_log("/* -------------------- */\n");
-    //     femu_log("PPA Channel: %lu\n", ppa_channel);
-    //     femu_log("PPA Chip: %lu\n", ppa_chip);
-    //     femu_log("PPA Plane: %lu\n", ppa_plane);
-    //     femu_log("PPA Stripe: %lu\n", stripe);
-    //     femu_log("PPA Substripe: %lu\n", substripe);
-    //     femu_log("LPA: %lu, PPA: %lu\n", lpa, ppa);
-    //     femu_log("LBA: %lu, PBA: %lu\n", lba, ppa * n->zns_params.secs_per_pg + resident_sector_nr);
-    // }
+    uint64_t substripe = (lpa / zns_zone_eus(n)) % n->zns_params.pgs_per_blk;
+    uint64_t ppa = stripe * (zns_zone_eus(n) * n->zns_params.pgs_per_blk) + ppa_plane * n->zns_params.pgs_per_blk + substripe;
+    uint64_t pba = ppa * n->zns_params.secs_per_pg + resident_sector_nr;
 #ifdef HALTZ_DEBUG
+    // femu_log("/* -------------------- */\n");
+    // femu_log("PPA Channel: %lu %lu\n", ppa_channel, zns_pba_get_channel(n, pba));
+    // femu_log("PPA Chip: %lu %lu\n", ppa_chip, zns_pba_get_chip(n, pba));
+    // femu_log("PPA Plane: %lu %lu\n", ppa_plane, zns_pba_get_plane(n, pba));
+    // femu_log("PPA Stripe: %lu\n", stripe);
+    // femu_log("PPA Substripe: %lu\n", substripe);
+    // femu_log("LPA: %lu, PPA: %lu\n", lpa, ppa);
+    // femu_log("LBA: %lu, PBA: %lu\n", lba, ppa * n->zns_params.secs_per_pg + resident_sector_nr);
     // printf("/* -------------------- */\n");
     // printf("PPA Channel: %lu\n", ppa_channel);
     // printf("PPA Chip: %lu\n", ppa_chip);
@@ -1111,7 +1114,45 @@ static inline uint64_t zns_l2p(NvmeNamespace* ns, uint64_t lba)
     // printf("PPA Substripe: %lu\n", substripe);
     // printf("LPA: %lu, PPA: %lu\n", lpa, ppa);
 #endif
-    return ppa * n->zns_params.secs_per_pg + resident_sector_nr;
+    return pba;
+}
+
+static int zns_advance_status(FemuCtrl* n, NvmeNamespace* ns, NvmeRequest *req, size_t *aio_sector_list, size_t num_pg)
+{
+    // NvmeRwCmd *rw = (NvmeRwCmd *)&req->cmd;
+    // uint64_t slba = le64_to_cpu(rw->slba);
+
+    int64_t now = req->stime;
+    int64_t io_done_ts, cur_time_need_to_emulate, total_time_need_to_emulate = 0;
+        
+    /* Based on the infomation got, advance the timestamps. */
+    for (uint64_t cnt = 0; cnt < num_pg; cnt++)
+    {
+        uint64_t pba = aio_sector_list[cnt] >> zns_ns_lbads(ns);
+        /* The page in on the (pln_offset)th plane. */
+        /* uint64_t pln_offset = zns_pba_get_plane(n, pba); */
+        /* The page in on the (chip_offset)th chip. */
+        uint64_t chip_offset = zns_pba_get_chip(n, pba);
+        /* The page in on the (channel_offset)th channel. */
+        uint64_t channel_offset = zns_pba_get_channel(n, pba);
+        // femu_log("/* ---------- %8s LBA: %8lu PBA %8lu CHANNEL %8lu CHIP %8lu  ---------- */\n", req->is_write ? "WRITE" : "READ", slba, pba, channel_offset, chip_offset);
+
+        if (req->is_write) {
+            int64_t chnl_end_ts = advance_channel_timestamp(n, channel_offset, now, req->cmd_opcode);
+            io_done_ts = advance_chip_timestamp(n, chip_offset, chnl_end_ts, req->cmd_opcode, 0);
+        } else {
+            int64_t chip_end_ts = advance_chip_timestamp(n, chip_offset, now, req->cmd_opcode, 0);
+            io_done_ts = advance_channel_timestamp(n, channel_offset, chip_end_ts, req->cmd_opcode);
+        }
+
+        cur_time_need_to_emulate = io_done_ts - now;
+        if (cur_time_need_to_emulate > total_time_need_to_emulate) {
+            total_time_need_to_emulate = cur_time_need_to_emulate;
+        }
+    }
+
+    req->expire_time = now + total_time_need_to_emulate;
+    return 0;
 }
 
 static uint16_t zns_do_write(FemuCtrl *n, NvmeRequest *req, bool append,
@@ -1122,7 +1163,7 @@ static uint16_t zns_do_write(FemuCtrl *n, NvmeRequest *req, bool append,
     uint64_t slba = le64_to_cpu(rw->slba);
     uint32_t nlb = (uint32_t)le16_to_cpu(rw->nlb) + 1;
     uint64_t data_size = zns_l2b(ns, nlb);
-    /* uint64_t data_offset; */
+    uint64_t data_offset;
     NvmeZone *zone;
     NvmeZonedResult *res = (NvmeZonedResult *)&req->cqe;
     uint16_t status;
@@ -1166,16 +1207,17 @@ static uint16_t zns_do_write(FemuCtrl *n, NvmeRequest *req, bool append,
       aio_sector_list[cnt / secs_per_sg] = zns_l2b(ns, zns_l2p(ns, slba + cnt));
     }
 
-    g_free(aio_sector_list);
-
+    data_offset = zns_l2b(ns, slba);
     if (!wrz) {
         status = zns_map_dptr(n, data_size, req);
         if (status) {
             goto err;
         }
 
-        backend_rw(n->mbe, &req->qsg, aio_sector_list, req->is_write);
+        backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
+        zns_advance_status(n, ns, req, aio_sector_list, (nlb + secs_per_sg - 1) / secs_per_sg);
     }
+    g_free(aio_sector_list);
 
 #ifdef HALTZ_DEBUG
     printf("\n/* ---------- %10s, LBADS: %d, NLB: %u ---------- */\n", __func__, NVME_ID_NS_LBADS(ns), nlb);
@@ -1214,7 +1256,7 @@ static uint16_t zns_read(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t slba = le64_to_cpu(rw->slba);
     uint32_t nlb = (uint32_t)le16_to_cpu(rw->nlb) + 1;
     uint64_t data_size = zns_l2b(ns, nlb);
-    // uint64_t data_offset;
+    uint64_t data_offset;
     uint16_t status;
 
     assert(n->zoned);
@@ -1256,9 +1298,10 @@ static uint16_t zns_read(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
       aio_sector_list[cnt / secs_per_sg] = zns_l2b(ns, zns_l2p(ns, slba + cnt));
     }
 
+    data_offset = zns_l2b(ns, slba);
+    backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
+    zns_advance_status(n, ns, req, aio_sector_list, (nlb + secs_per_sg - 1) / secs_per_sg);
     g_free(aio_sector_list);
-
-    backend_rw(n->mbe, &req->qsg, aio_sector_list, req->is_write);
 
 #ifdef HALTZ_DEBUG
     // printf("\n/* ---------- %10s, LBADS: %d, NLB: %u, NSG: %d ---------- */\n", __func__, NVME_ID_NS_LBADS(ns), nlb, req->qsg.nsg);
@@ -1281,7 +1324,7 @@ static uint16_t zns_write(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t slba = le64_to_cpu(rw->slba);
     uint32_t nlb = (uint32_t)le16_to_cpu(rw->nlb) + 1;
     uint64_t data_size = zns_l2b(ns, nlb);
-    // uint64_t data_offset;
+    uint64_t data_offset;
     NvmeZone *zone;
     NvmeZonedResult *res = (NvmeZonedResult *)&req->cqe;
     uint16_t status;
@@ -1317,8 +1360,6 @@ static uint16_t zns_write(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     res->slba = zns_advance_zone_wp(ns, zone, nlb);
 
-    // data_offset = zns_l2b(ns, slba);
-
     status = zns_map_dptr(n, data_size, req);
     if (status) {
         femu_err("*********CHECK FUNCTION %15s FAILED*********\n", "zns_map_dptr");
@@ -1332,9 +1373,11 @@ static uint16_t zns_write(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         aio_sector_list[cnt / secs_per_sg] = zns_l2b(ns, zns_l2p(ns, slba + cnt));
     }
 
+    data_offset = zns_l2b(ns, slba);
+    backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
+    // femu_log("/* now - req->stime: %lu */\n", qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - req->stime);
+    zns_advance_status(n, ns, req, aio_sector_list, (nlb + secs_per_sg - 1) / secs_per_sg);
     g_free(aio_sector_list);
-
-    backend_rw(n->mbe, &req->qsg, aio_sector_list, req->is_write);    
 
 #ifdef HALTZ_DEBUG
     printf("\n/* ---------- %10s, LBADS: %d, NLB: %4u, SLBA: %4lu ---------- */\n", __func__, NVME_ID_NS_LBADS(ns), nlb, slba);
@@ -1462,6 +1505,28 @@ static void zns_init(FemuCtrl *n, Error **errp)
 
     n->zns_params.eu_size = n->zns_params.pgs_per_blk * n->zns_params.secs_per_pg * n->zns_params.sec_size;
     n->zns_params.zone_eus = n->zns_params.num_ch * n->zns_params.num_lun * n->zns_params.num_pln;
+
+    init_nand_flash(n);
+
+    set_latency(n);
+
+    int ret = 0;
+
+    for (int i = 0; i < FEMU_MAX_NUM_CHNLS; i++) {
+        n->chnl_next_avail_time[i] = 0;
+
+        /* FIXME: Can we use PTHREAD_PROCESS_PRIVATE here? */
+        ret = pthread_spin_init(&n->chnl_locks[i], PTHREAD_PROCESS_SHARED);
+        assert(ret == 0);
+    }
+
+    for (int i = 0; i < FEMU_MAX_NUM_CHIPS; i++) {
+        n->chip_next_avail_time[i] = 0;
+
+        /* FIXME: Can we use PTHREAD_PROCESS_PRIVATE here? */
+        ret = pthread_spin_init(&n->chip_locks[i], PTHREAD_PROCESS_SHARED);
+        assert(ret == 0);
+    }
 }
 
 static void zns_exit(FemuCtrl *n)

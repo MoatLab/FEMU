@@ -648,14 +648,15 @@ static Property femu_props[] = {
     DEFINE_PROP_UINT8("lnum_pln", FemuCtrl, oc_params.num_pln, 2),
     DEFINE_PROP_UINT16("lmetasize", FemuCtrl, oc_params.sos, 16),
     /* ZNS physical geometry. It's just like the OCSSD as above. */
-    DEFINE_PROP_UINT16("zsec_size", FemuCtrl, zns_params.sec_size, 4096),
-    DEFINE_PROP_UINT8("zsecs_per_pg", FemuCtrl, zns_params.secs_per_pg, 4),
+    DEFINE_PROP_UINT16("zsec_size", FemuCtrl, zns_params.sec_size, 512),
+    DEFINE_PROP_UINT8("zsecs_per_pg", FemuCtrl, zns_params.secs_per_pg, 8),
     DEFINE_PROP_UINT16("zpgs_per_blk", FemuCtrl, zns_params.pgs_per_blk, 512),
     DEFINE_PROP_UINT8("zmax_sec_per_rq", FemuCtrl, zns_params.max_sec_per_rq, 64),
     DEFINE_PROP_UINT8("znum_ch", FemuCtrl, zns_params.num_ch, 2),
     DEFINE_PROP_UINT8("znum_lun", FemuCtrl, zns_params.num_lun, 8),
     DEFINE_PROP_UINT8("znum_pln", FemuCtrl, zns_params.num_pln, 2),
     DEFINE_PROP_UINT16("zmetasize", FemuCtrl, zns_params.sos, 16),
+    DEFINE_PROP_BOOL("latency_emulation", FemuCtrl, latency_emulation, false),
     DEFINE_PROP_END_OF_LIST(),
 };
 

@@ -15,6 +15,7 @@
         "ggettext.h": "c",
         "gfileutils.h": "c",
         "gerror.h": "c",
-        "gquark.h": "c"
+        "gquark.h": "c",
+        "*.code": "c"
     }
 }

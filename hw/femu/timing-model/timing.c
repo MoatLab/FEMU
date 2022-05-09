@@ -82,6 +82,7 @@ int64_t advance_chip_timestamp(FemuCtrl *n, int lunid, uint64_t now, int opcode,
         break;
     case NVME_CMD_OC_WRITE:
     case NVME_CMD_WRITE:
+    case NVME_CMD_ZONE_APPEND:
         lat = get_page_write_latency(n->flash_type, page_type);
         break;
     case NVME_CMD_OC_ERASE:

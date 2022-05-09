@@ -1344,6 +1344,7 @@ typedef struct FemuCtrl {
 
 
     FILE            *logf;
+    bool            latency_emulation;
 } FemuCtrl;
 
 typedef struct NvmePollerThreadArgument {

@@ -149,7 +149,10 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
     while ((req = pqueue_peek(pq))) {
         now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
         if (now < req->expire_time) {
+            // femu_log("/* Wait: expire_time - now = %lu(ns) */\n", (uint64_t)req->expire_time - now);
             break;
+        } else {
+            // femu_log("/* OK: now - expire_time = %lu(ns) */\n", now - (uint64_t)req->expire_time);
         }
 
         cq = n->cq[req->sq->sqid];
