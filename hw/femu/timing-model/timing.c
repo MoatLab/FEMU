@@ -1,5 +1,8 @@
 #include "../nvme.h"
 
+#define PAGE_READ_LATENCY (20000)
+#define PAGE_WRITE_LATENCY (80000)
+
 void set_latency(FemuCtrl *n)
 {
     if (n->flash_type == TLC) {
@@ -75,15 +78,18 @@ int64_t advance_chip_timestamp(FemuCtrl *n, int lunid, uint64_t now, int opcode,
     int64_t lat;
     int64_t io_done_ts;
 
+    /* FIXME: somehow lat is always 0, so I replace it manually with SLC latency. It should be fixed. */
     switch (opcode) {
     case NVME_CMD_OC_READ:
     case NVME_CMD_READ:
-        lat = get_page_read_latency(n->flash_type, page_type);
+        /* lat = get_page_read_latency(n->flash_type, page_type); */
+        lat = PAGE_READ_LATENCY;
         break;
     case NVME_CMD_OC_WRITE:
     case NVME_CMD_WRITE:
     case NVME_CMD_ZONE_APPEND:
-        lat = get_page_write_latency(n->flash_type, page_type);
+        /* lat = get_page_write_latency(n->flash_type, page_type); */
+        lat = PAGE_WRITE_LATENCY;
         break;
     case NVME_CMD_OC_ERASE:
         lat = get_blk_erase_latency(n->flash_type);

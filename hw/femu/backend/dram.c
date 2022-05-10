@@ -36,9 +36,10 @@ int backend_rw(SsdDramBackend *b, QEMUSGList *qsg, uint64_t *lbal, bool is_write
     dma_addr_t cur_addr, cur_len;
     uint64_t mb_oft = lbal[0];
     void *mb = b->logical_space;
-    uint64_t total_size = 0;
-    uint64_t start_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-
+    /**
+     * uint64_t total_size = 0;
+     * uint64_t start_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+     */
     DMADirection dir = DMA_DIRECTION_FROM_DEVICE;
 
     if (is_write) {
@@ -53,7 +54,7 @@ int backend_rw(SsdDramBackend *b, QEMUSGList *qsg, uint64_t *lbal, bool is_write
         }
 
         sg_cur_byte += cur_len;
-        total_size += cur_len;
+        /* total_size += cur_len; */
         if (sg_cur_byte == qsg->sg[sg_cur_index].len) {
             sg_cur_byte = 0;
             ++sg_cur_index;
@@ -72,8 +73,10 @@ int backend_rw(SsdDramBackend *b, QEMUSGList *qsg, uint64_t *lbal, bool is_write
 
     qemu_sglist_destroy(qsg);
 
-    uint64_t memory_rw_latency = ((total_size + 4 * KiB - 1) / (4 * KiB)) * MEMORY_RW_LATENCY_4KiB_BY_NS;
-    while (qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - start_ns < memory_rw_latency) { };
+    /** 
+     * uint64_t memory_rw_latency = ((total_size + 4 * KiB - 1) / (4 * KiB)) * MEMORY_RW_LATENCY_4KiB_BY_NS;
+     * while (qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - start_ns < memory_rw_latency) { };
+     */
 
     return 0;
 }

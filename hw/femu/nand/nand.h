@@ -7,8 +7,7 @@
  * SLC NAND latency numbers in naoseconds
  */
 #define SLC_PAGE_READ_LATENCY_NS          (40000)
-// #define SLC_PAGE_WRITE_LATENCY_NS         (800000)
-#define SLC_PAGE_WRITE_LATENCY_NS         (5000000)
+#define SLC_PAGE_WRITE_LATENCY_NS         (800000)
 #define SLC_BLOCK_ERASE_LATENCY_NS        (2000000)
 #define SLC_CHNL_PAGE_TRANSFER_LATENCY_NS (20000)
 

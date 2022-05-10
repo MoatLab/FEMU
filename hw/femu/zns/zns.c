@@ -1124,7 +1124,7 @@ static int zns_advance_status(FemuCtrl* n, NvmeNamespace* ns, NvmeRequest *req, 
 
     int64_t now = req->stime;
     int64_t io_done_ts, cur_time_need_to_emulate, total_time_need_to_emulate = 0;
-        
+
     /* Based on the infomation got, advance the timestamps. */
     for (uint64_t cnt = 0; cnt < num_pg; cnt++)
     {
@@ -1152,6 +1152,7 @@ static int zns_advance_status(FemuCtrl* n, NvmeNamespace* ns, NvmeRequest *req, 
     }
 
     req->expire_time = now + total_time_need_to_emulate;
+    // femu_log("Channel & Chip Latency Emulation: %lu\n", req->expire_time - qemu_clock_get_ns(QEMU_CLOCK_REALTIME));
     return 0;
 }
 
@@ -1539,6 +1540,23 @@ static void zns_exit(FemuCtrl *n)
         fclose(n->logf);
         n->logf = NULL;
     };
+
+    int ret = 0;
+    for (int i = 0; i < FEMU_MAX_NUM_CHNLS; i++) {
+        n->chnl_next_avail_time[i] = 0;
+
+        /* FIXME: Can we use PTHREAD_PROCESS_PRIVATE here? */
+        ret = pthread_spin_destroy(&n->chnl_locks[i]);
+        assert(ret == 0);
+    }
+
+    for (int i = 0; i < FEMU_MAX_NUM_CHIPS; i++) {
+        n->chip_next_avail_time[i] = 0;
+
+        /* FIXME: Can we use PTHREAD_PROCESS_PRIVATE here? */
+        ret = pthread_spin_destroy(&n->chip_locks[i]);
+        assert(ret == 0);
+    }
 }
 
 int nvme_register_znssd(FemuCtrl *n)
