@@ -363,9 +363,7 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
 {
     /* FIXME: FEMU only supports 1 namesapce now */
     assert(n->num_namespaces == 1);
-    #ifdef INHOINNO_VERBOSE_SETTING
-    femu_err("femu.c : nvme_init_namespaces(), to inhoinno \n");
-    #endif
+
     for (int i = 0; i < n->num_namespaces; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
         ns->size = n->ns_size;
@@ -386,9 +384,7 @@ static void nvme_init_ctrl(FemuCtrl *n)
     uint8_t *pci_conf = n->parent_obj.config;
     char *subnqn;
     int i;
-    #ifdef INHOINNO_VERBOSE_SETTING
-    femu_err("femu.c : nvme_init_ctrl(), to inhoinno \n");
-    #endif
+
     id->vid = cpu_to_le16(pci_get_word(pci_conf + PCI_VENDOR_ID));
     id->ssvid = cpu_to_le16(pci_get_word(pci_conf + PCI_SUBSYSTEM_VENDOR_ID));
 

@@ -657,6 +657,7 @@ static uint16_t zns_finish_zone(NvmeNamespace *ns, NvmeZone *zone,
         /* fall through */
     case NVME_ZONE_STATE_CLOSED:
         zns_aor_dec_active(ns);
+        /* fall through */
     case NVME_ZONE_STATE_EMPTY:
         zone->w_ptr = zns_zone_wr_boundary(zone);
         zone->d.wp = zone->w_ptr;
@@ -1412,10 +1413,7 @@ static uint16_t zns_write(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     return NVME_SUCCESS;
 
 err:
-    if (zone != NULL)
-        femu_err("ZONE STATE : %x", zns_get_zone_state(zone));
-    femu_err("*********ZONE WRITE FAILED*********, STATUS : %x\n",status);
-   
+    femu_err("*********ZONE WRITE FAILED*********, STATUS : %x\n",status);  
     return status | NVME_DNR;
 }
 
@@ -1492,8 +1490,6 @@ static int zns_start_ctrl(FemuCtrl *n)
 static void zns_init(FemuCtrl *n, Error **errp)
 {
     NvmeNamespace *ns = &n->namespaces[0];
-    struct zns *zns = n->zns = g_malloc0(sizeof(struct zns));
-
     zns_set_ctrl(n);
     zns_init_zone_cap(n);
     if (zns_init_zone_geometry(ns, errp) != 0) {
@@ -1501,7 +1497,6 @@ static void zns_init(FemuCtrl *n, Error **errp)
     }
 
     zns_init_zone_identify(n, ns, 0);
-    
     znsssd_init(n);
 }
 
@@ -1517,7 +1512,7 @@ static void znsssd_init_params(FemuCtrl * n, struct zns_ssdparams *spp){
     */
     spp->nchnls         = 32;           /* FIXME : = ZNS_MAX_CHANNEL channel configuration like this */
     spp->zones          = n->num_zones; /* FIXME : = MAX_STORAGE_CAPACITY / ZONE_SIZE*/
-    spp->chnls_per_zone = 32;
+    spp->chnls_per_zone = 8;
     spp->ways           = 4;
     
     /* TO REAL STORAGE SIZE */
@@ -1545,9 +1540,8 @@ static void zns_init_ch(struct zns_ssd_channel *ch, struct zns_ssdparams *spp)
 }
 
 void znsssd_init(FemuCtrl * n){
-    struct zns *zns = n->zns; 
+    struct zns *zns = n->zns = g_malloc0(sizeof(struct zns));
     struct zns_ssdparams *spp = &zns->sp; 
-    //znsssd_assert(ssd);
     zns->namespaces = n->namespaces;
     znsssd_init_params(n, spp);
     

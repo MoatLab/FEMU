@@ -106,12 +106,6 @@ static inline MemTxResult dma_memory_write_relaxed(AddressSpace *as,
                                  DMA_DIRECTION_FROM_DEVICE,
                                  MEMTXATTRS_UNSPECIFIED);
 }
-<<<<<<< HEAD
- 
-static inline int dma_memory_rw(AddressSpace *as, dma_addr_t addr,
-                                void *buf, dma_addr_t len,
-                                DMADirection dir)
-=======
 
 /**
  * dma_memory_rw: Read from or write to an address space from DMA controller.
@@ -130,7 +124,6 @@ static inline int dma_memory_rw(AddressSpace *as, dma_addr_t addr,
 static inline MemTxResult dma_memory_rw(AddressSpace *as, dma_addr_t addr,
                                         void *buf, dma_addr_t len,
                                         DMADirection dir, MemTxAttrs attrs)
->>>>>>> f27b74a159b27b009fcaea24c4cef971e05318e7
 {
     dma_barrier(as, dir);
 

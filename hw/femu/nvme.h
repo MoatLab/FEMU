@@ -31,6 +31,13 @@
 #define NVME_ID_NS_LBAF_DS(ns, lba_index) (ns->id_ns.lbaf[lba_index].lbads)
 #define NVME_ID_NS_LBAF_MS(ns, lba_index) (ns->id_ns.lbaf[lba_index].ms)
 
+/**
+ * @brief 
+ * Advance Channel latency emulating
+ * inhoinno 
+ */
+#define ADVANCE_PER_CH_ENDTIME 1
+
 typedef struct NvmeBar {
     uint64_t    cap;
     uint32_t    vs;
@@ -1175,6 +1182,7 @@ typedef struct FemuCtrl {
     NvmeBar         bar;
 
     /* Coperd: ZNS FIXME */
+    struct zns      *zns;   // for ZNS Latency emualting, Inhoinno
     QemuUUID        uuid;
     uint32_t        zasl_bs;
     uint8_t         zasl;
