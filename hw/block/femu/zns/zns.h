@@ -134,7 +134,11 @@ enum NvmeZoneReportType {
 
 enum NvmeZoneType {
     NVME_ZONE_TYPE_RESERVED          = 0x00,
+    //inhoinno , Cant we just simply add ZONE_TYPE_CONV_ZONE?
+    NVME_ZONE_TYPE_CONVENTIONAL      = 0x01,
     NVME_ZONE_TYPE_SEQ_WRITE         = 0x02,
+
+    
 };
 
 enum NvmeZoneSendAction {

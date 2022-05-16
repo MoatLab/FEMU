@@ -36,7 +36,7 @@
  * BBSSD
  * ZNS SSD
  */
-#define ADVANCE_PER_CH_ENDTIME 0
+#define ADVANCE_PER_CH_ENDTIME 1
 
 
 #define NVME_ID_NS_LBADS(ns)                                                  \

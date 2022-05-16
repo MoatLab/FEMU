@@ -500,6 +500,7 @@ static uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa, struct
     struct nand_lun *lun = get_lun(ssd, ppa);
 #if ADVANCE_PER_CH_ENDTIME
     struct ssd_channel *ch = get_ch(ssd, ppa);
+    uint64_t chnl_stime=0;
 #endif
     uint64_t lat = 0;
 
