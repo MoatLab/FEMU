@@ -1,0 +1,199 @@
+
+stages:
+  - containers
+  - sanity_checks
+
+.build_container_template: &build_container_definition
+  image: docker:stable
+  stage: containers
+  services:
+    - docker:dind
+  before_script:
+    - docker info
+    - docker login registry.gitlab.com -u ${CI_REGISTRY_USER} -p ${CI_REGISTRY_PASSWORD}
+  script:
+    - docker build --tag ${CI_REGISTRY_IMAGE}/${NAME}:${CI_COMMIT_REF_SLUG} containers/${NAME}
+    - docker push ${CI_REGISTRY_IMAGE}/${NAME}:${CI_COMMIT_REF_SLUG}
+  after_script:
+    - docker logout
+
+.check_container_template:
+  image: docker:stable
+  stage: sanity_checks
+  needs:
+    - check-prepare
+  services:
+    - name: registry.gitlab.com/libvirt/libvirt-ci/docker-dind:master
+      alias: docker
+  before_script:
+    - docker info
+    - docker login registry.gitlab.com -u ${CI_REGISTRY_USER} -p ${CI_REGISTRY_PASSWORD}
+  script:
+    - docker build -f build/${NAME}.Dockerfile build/
+  after_script:
+    - docker logout
+
+check-dco-container:
+  <<: *build_container_definition
+  variables:
+    NAME: check-dco
+
+go-fmt-container:
+  <<: *build_container_definition
+  variables:
+    NAME: go-fmt
+
+cargo-fmt-container:
+  <<: *build_container_definition
+  variables:
+    NAME: cargo-fmt
+
+clang-format-container:
+  <<: *build_container_definition
+  variables:
+    NAME: clang-format
+
+cirrus-run-container:
+  <<: *build_container_definition
+  variables:
+    NAME: cirrus-run
+
+docker-dind-container:
+  <<: *build_container_definition
+  variables:
+    NAME: docker-dind
+
+# Check that all commits are signed-off for the DCO. Skip
+# on master branch and -maint branches, since we only need
+# to test developer's personal branches.
+check-dco:
+  # In most projects we'd put an empty 'needs: []', but this
+  # repo is a special case as we need to actually build the
+  # container first!
+  stage: sanity_checks
+  image: ${CI_REGISTRY_IMAGE}/check-dco:${CI_COMMIT_REF_SLUG}
+  needs:
+    - check-dco-container
+  script:
+    - /check-dco
+  only:
+    - branches
+  except:
+    - master
+
+flake8:
+  stage: sanity_checks
+  image: python:3.8-alpine
+  needs: []
+  before_script:
+    - apk update
+  script:
+    - pip3 install flake8
+    - flake8 --format=pylint
+
+unittests:
+  stage: sanity_checks
+  image: python:3.8-alpine
+  needs: []
+  before_script:
+    - apk update
+    - apk add git
+  script:
+    - pip3 install setuptools pytest pyyaml
+    - cd guests/lcitool
+    - python3 -m pytest --verbose
+
+check-prepare:
+  stage: containers
+  image: python:3.8-alpine
+  needs: []
+  before_script:
+    - apk update
+    - apk add git
+  script:
+    - pip install setuptools pyyaml
+    - mkdir build
+    - for target in `./lcitool targets --containerized` ;
+      do
+        set -e ;
+        echo "Generate $target.Dockerfile" ;
+        ./lcitool dockerfile $target all > build/$target.Dockerfile ;
+      done
+  artifacts:
+    name: build
+    paths:
+      - build
+
+x86_64-check-almalinux-8:
+  extends: .check_container_template
+  variables:
+    NAME: almalinux-8
+
+x86_64-check-alpine-314:
+  extends: .check_container_template
+  variables:
+    NAME: alpine-314
+
+x86_64-check-alpine-edge:
+  extends: .check_container_template
+  allow_failure: true
+  variables:
+    NAME: alpine-edge
+
+x86_64-check-centos-stream-8:
+  extends: .check_container_template
+  variables:
+    NAME: centos-stream-8
+
+x86_64-check-centos-stream-9:
+  extends: .check_container_template
+  variables:
+    NAME: centos-stream-9
+
+x86_64-check-debian-10:
+  extends: .check_container_template
+  variables:
+    NAME: debian-10
+
+x86_64-check-debian-sid:
+  extends: .check_container_template
+  allow_failure: true
+  variables:
+    NAME: debian-sid
+
+x86_64-check-fedora-34:
+  extends: .check_container_template
+  variables:
+    NAME: fedora-34
+
+x86_64-check-fedora-35:
+  extends: .check_container_template
+  variables:
+    NAME: fedora-35
+
+x86_64-check-fedora-rawhide:
+  extends: .check_container_template
+  allow_failure: true
+  variables:
+    NAME: fedora-rawhide
+
+x86_64-check-opensuse-leap-152:
+  extends: .check_container_template
+  variables:
+    NAME: opensuse-leap-152
+
+x86_64-check-opensuse-tumbleweed:
+  extends: .check_container_template
+  allow_failure: true
+  variables:
+    NAME: opensuse-tumbleweed
+
+x86_64-check-ubuntu-1804:
+  extends: .check_container_template
+  variables:
+    NAME: ubuntu-1804
+
+x86_64-check-ubuntu-2004:
+  extends: .check_container_template
+  variables:
+    NAME: ubuntu-2004

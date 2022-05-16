@@ -1,0 +1,165 @@
+
+# The list of projects to include in the build
+# files, both the primary project and any other
+# needed projects that are build dependencies
+projects:
+  - libvirt
+  - libvirt-go
+
+
+# Whether to generate dockerfiles by default for hosts
+# where it is appropriate. Enabled by default.
+#containers:
+#  enabled: true
+
+# Whether to generate cirrus CI vars files by
+# default for hosts where it is appropriate. Enabled
+# by default
+#cirrus:
+#  enabled: true
+
+# Whether to generate GitLab CI rules. Enabled by
+# default
+gitlab:
+
+  # The Gitlab top level namespace, must be set
+  namespace: libvirt
+
+  # The GitLab repo within the namespace, must be set
+  project: libvirt-go
+
+#  enabled: true
+#
+#  # Whether to build containers image by default where
+#  # dockerfiles are present.
+#  containers: true
+#
+#  # Whether to run app builds by default where
+#  # containers or cirrus-run are present
+#  builds: true
+#
+#  # Common jobs to enable
+#  # check-dco is enabled by default, all others are
+#  # disabled.
+#  jobs:
+#    check-dco: true
+#    cargo-fmt: false
+#    go-fmt: false
+#    clang-format: false
+#
+#  templates:
+#    native-build: .native_build_job
+#    cross-build: .cross_build_job
+
+
+# Targets to generate CI rules for
+#
+# The key is a target OS name, while the value is one of
+#   - a scalar, whose value is a single arch to emit a job for
+#   - a dict, representing the target's jobs
+#
+# In the case of a dict for a target, the following keys
+# are permitted
+#
+#   - "enabled": bool, to temporarily skip a target
+#   - "jobs"
+#
+#     Value is
+#
+#       - a list, whose elements are job dicts
+#
+#     The job dict contains
+#
+#       - "arch": an architecture name
+#       - "enabled": bool, to temporarily skip a target
+#       - "allow-failure": bool, to ignore job failures
+#       - "builds": bool, used to skip build job
+#       - "template": override name of the build template
+#       - "variables": env variables to set for builds
+#
+#     Architecture names are
+#
+#       - "x86_64" for building natively
+#       - "aarch64", "armv6l", "armv7l", "i686", "mips",
+#         "mips64el", "mipsel", "mips64", "ppc64le", "s390x"
+#         for cross compiling for a Linux distro
+#       - "mingw32"/"mingw64"  cross compiling for Windows
+#
+#  - "projects" - overrides top level projects list
+#
+
+targets:
+  centos-stream-8: x86_64
+
+  centos-stream-9: x86_64
+
+  debian-10:
+    jobs:
+      - arch: x86_64
+      - arch: aarch64
+      - arch: armv6l
+      - arch: armv7l
+      - arch: i686
+        artifacts:
+          expire_in: 2 days
+          paths:
+            - build
+            - scratch
+      - arch: mips
+      - arch: mips64el
+      - arch: mipsel
+        allow-failure: true
+      - arch: ppc64le
+      - arch: s390x
+
+  debian-sid:
+    jobs:
+      - arch: x86_64
+      - arch: aarch64
+      - arch: armv6l
+      - arch: armv7l
+      - arch: i686
+        builds: false
+        allow-failure: true
+      - arch: mips64el
+      - arch: mipsel
+      - arch: ppc64le
+      - arch: s390x
+
+  fedora-34: x86_64
+
+  fedora-35: x86_64
+
+  fedora-rawhide:
+    jobs:
+      - arch: x86_64
+      - arch: x86_64
+        suffix: clang
+        variables:
+          CC: clang
+      - arch: mingw32
+      - arch: mingw64
+
+  freebsd-12: x86_64
+
+  freebsd-current: x86_64
+
+  macos-11: x86_64
+
+  macos-12: x86_64
+
+  opensuse-leap-152:
+    jobs:
+      - arch: x86_64
+
+  ubuntu-1804:
+    jobs:
+      - arch: x86_64
+
+  ubuntu-2004:
+    jobs:
+      - arch: x86_64
+        enabled: true
+        allow-failure: true
+        variables:
+          foo: bar2

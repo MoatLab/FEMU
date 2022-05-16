@@ -217,7 +217,7 @@ int main(int argc, char *argv[])
 		char *p = buf;
 		char *endp = buf + len;
 
-		fdt_set_magic(smagic, FDT_MAGIC);
+		fdt32_st(smagic, FDT_MAGIC);
 
 		/* poor man's memmem */
 		while ((endp - p) >= FDT_MAGIC_SIZE) {

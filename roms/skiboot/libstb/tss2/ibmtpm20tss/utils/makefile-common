@@ -1,0 +1,99 @@
+#################################################################################
+#										#
+#										#
+# TPM2 Library and Utilities makefile - Common to TPM 1.2 and 2.0 variations	#
+#			     Written by Ken Goldman				#
+#		       IBM Thomas J. Watson Research Center			#
+#	      $Id: makefile-common 1294 2018-08-09 19:08:34Z kgoldman $		#
+#										#
+# (c) Copyright IBM Corporation 2014, 2018					#
+# 										#
+# All rights reserved.								#
+# 										#
+# Redistribution and use in source and binary forms, with or without		#
+# modification, are permitted provided that the following conditions are	#
+# met:										#
+# 										#
+# Redistributions of source code must retain the above copyright notice,	#
+# this list of conditions and the following disclaimer.				#
+# 										#
+# Redistributions in binary form must reproduce the above copyright		#
+# notice, this list of conditions and the following disclaimer in the		#
+# documentation and/or other materials provided with the distribution.		#
+# 										#
+# Neither the names of the IBM Corporation nor the names of its			#
+# contributors may be used to endorse or promote products derived from		#
+# this software without specific prior written permission.			#
+# 										#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS		#
+# "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT		#
+# LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR		#
+# A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT		#
+# HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,	#
+# SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT		#
+# LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,		#
+# DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY		#
+# THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT		#
+# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE		#
+# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.		#
+#										#
+#################################################################################
+
+# compile - common flags for TSS library and applications
+
+CCFLAGS += 				\
+	-Wall -W -Wmissing-declarations -Wmissing-prototypes -Wnested-externs \
+	-Wformat=2 -Wold-style-definition -Wno-self-assign \
+	-Werror=declaration-after-statement -Wvla \
+	-ggdb -O0 -c 
+
+# to compile with optimizations on (warning will result)
+#	-O3 -c
+# to compile with plaintext session state (see documentation)
+#	-DTPM_ENCRYPT_SESSIONS_DEFAULT="\"0\""
+
+# link - common flags for Posix and Windows, for TSS library and applications
+
+#LNFLAGS += 	-ggdb
+
+ALL += 	$(LIBTSS)				\
+	$(LIBTSSA)				\
+	$(LIBTSSUTILS)
+
+# TSS shared library headers 
+
+TSS_HEADERS += 					\
+		tssauth.h 			\
+		tssccattributes.h 		\
+		tssdev.h  			\
+		tsssocket.h  			\
+		ibmtss/tss.h			\
+		ibmtss/tsscryptoh.h		\
+		ibmtss/tsscrypto.h		\
+		ibmtss/tsserror.h		\
+		ibmtss/tssfile.h		\
+		ibmtss/tssmarshal.h		\
+		ibmtss/tssprint.h		\
+		ibmtss/tssprintcmd.h		\
+		tssproperties.h			\
+		ibmtss/tsstransmit.h		\
+		ibmtss/tssresponsecode.h	\
+		ibmtss/tssutils.h		\
+		ibmtss/Unmarshal_fp.h		\
+		ibmtss/Implementation.h
+
+# TSS shared library object files
+
+TSS_OBJS += 	tss.o			\
+		tssproperties.o		\
+		tssmarshal.o		\
+		tssauth.o 		\
+		tssutils.o 		\
+		tsssocket.o 		\
+		tssdev.o 		\
+		tsstransmit.o 		\
+		tssresponsecode.o 	\
+		tssccattributes.o	\
+		tssprint.o		\
+		Unmarshal.o 		\
+		CommandAttributeData.o

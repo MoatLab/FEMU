@@ -1,0 +1,25 @@
+#! /bin/sh
+touch $DATA_DIR/$CUR_TEST.gen
+
+i=1;
+while [ $i -lt 5 ] ; do
+	j=0;
+	while [ $j -lt $((0xe0)) ] ; do
+		echo -n "$i" >> $DATA_DIR/$CUR_TEST.$i;
+		j=$(expr $j + 1);
+	done
+	sed -i "s|SEDCATCH_$i|$DATA_DIR\/$CUR_TEST.$i|" $DATA_DIR/$CUR_TEST.in
+	i=$(expr $i + 1);
+done
+
+run_binary "./ffspart" "-s 0x100 -c 10 -i $DATA_DIR/$CUR_TEST.in -p $DATA_DIR/$CUR_TEST.gen"
+if [ "$?" -ne 0 ] ; then
+	fail_test
+fi
+
+if ! cmp -n $((0x500)) $DATA_DIR/$CUR_TEST.out $DATA_DIR/$CUR_TEST.gen ; then
+	echo "Output differs"
+	fail_test
+fi
+
+pass_test

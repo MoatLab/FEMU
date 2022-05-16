@@ -4,13 +4,14 @@ short-description: Installing targets
 
 # Installing
 
-Invoked via the [following command](Commands.md#install) *(available since 0.47.0)*:
+Invoked via the [following command](Commands.md#install) *(available
+since 0.47.0)*:
 
 ```sh
 meson install
 ```
 
-or alternatively (on older meson versions with `ninja` backend):
+or alternatively (on older Meson versions with `ninja` backend):
 
 ```sh
 ninja install
@@ -114,8 +115,8 @@ $ DESTDIR=/path/to/staging/area meson install
 
 ## Custom install behaviour
 
-Installation behaviour can be further customized using 
-additional arguments.
+Installation behaviour can be further customized using additional
+arguments.
 
 For example, if you wish to install the current setup without
 rebuilding the code (which the default install target always does) and

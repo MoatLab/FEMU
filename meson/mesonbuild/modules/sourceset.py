@@ -14,25 +14,21 @@
 
 from collections import namedtuple
 from .. import mesonlib
-from ..mesonlib import listify
-from . import ExtensionModule
+from .. import build
+from ..mesonlib import listify, OrderedSet
+from . import ExtensionModule, ModuleObject, MutableModuleObject
 from ..interpreterbase import (
     noPosargs, noKwargs, permittedKwargs,
-    InterpreterObject, MutableInterpreterObject, ObjectHolder,
     InterpreterException, InvalidArguments, InvalidCode, FeatureNew,
-)
-from ..interpreter import (
-    GeneratedListHolder, CustomTargetHolder,
-    CustomTargetIndexHolder
 )
 
 SourceSetRule = namedtuple('SourceSetRule', 'keys sources if_false sourcesets dependencies extra_deps')
 SourceFiles = namedtuple('SourceFiles', 'sources dependencies')
 
-class SourceSetHolder(MutableInterpreterObject, ObjectHolder):
+class SourceSet(MutableModuleObject):
     def __init__(self, interpreter):
-        MutableInterpreterObject.__init__(self)
-        ObjectHolder.__init__(self, list())
+        super().__init__()
+        self.rules = []
         self.subproject = interpreter.subproject
         self.environment = interpreter.environment
         self.subdir = interpreter.subdir
@@ -50,8 +46,8 @@ class SourceSetHolder(MutableInterpreterObject, ObjectHolder):
         deps = []
         for x in arg:
             if isinstance(x, (str, mesonlib.File,
-                              GeneratedListHolder, CustomTargetHolder,
-                              CustomTargetIndexHolder)):
+                              build.GeneratedList, build.CustomTarget,
+                              build.CustomTargetIndex)):
                 sources.append(x)
             elif hasattr(x, 'found'):
                 if not allow_deps:
@@ -77,7 +73,7 @@ class SourceSetHolder(MutableInterpreterObject, ObjectHolder):
         return keys, deps
 
     @permittedKwargs(['when', 'if_false', 'if_true'])
-    def add_method(self, args, kwargs):
+    def add_method(self, state, args, kwargs):
         if self.frozen:
             raise InvalidCode('Tried to use \'add\' after querying the source set')
         when = listify(kwargs.get('when', []))
@@ -90,10 +86,10 @@ class SourceSetHolder(MutableInterpreterObject, ObjectHolder):
         keys, dependencies = self.check_conditions(when)
         sources, extra_deps = self.check_source_files(if_true, True)
         if_false, _ = self.check_source_files(if_false, False)
-        self.held_object.append(SourceSetRule(keys, sources, if_false, [], dependencies, extra_deps))
+        self.rules.append(SourceSetRule(keys, sources, if_false, [], dependencies, extra_deps))
 
     @permittedKwargs(['when', 'if_true'])
-    def add_all_method(self, args, kwargs):
+    def add_all_method(self, state, args, kwargs):
         if self.frozen:
             raise InvalidCode('Tried to use \'add_all\' after querying the source set')
         when = listify(kwargs.get('when', []))
@@ -104,15 +100,15 @@ class SourceSetHolder(MutableInterpreterObject, ObjectHolder):
             raise InterpreterException('add_all called with both positional and keyword arguments')
         keys, dependencies = self.check_conditions(when)
         for s in if_true:
-            if not isinstance(s, SourceSetHolder):
+            if not isinstance(s, SourceSet):
                 raise InvalidCode('Arguments to \'add_all\' after the first must be source sets')
             s.frozen = True
-        self.held_object.append(SourceSetRule(keys, [], [], if_true, dependencies, []))
+        self.rules.append(SourceSetRule(keys, [], [], if_true, dependencies, []))
 
     def collect(self, enabled_fn, all_sources, into=None):
         if not into:
-            into = SourceFiles(set(), set())
-        for entry in self.held_object:
+            into = SourceFiles(OrderedSet(), OrderedSet())
+        for entry in self.rules:
             if all(x.found() for x in entry.dependencies) and \
                all(enabled_fn(key) for key in entry.keys):
                 into.sources.update(entry.sources)
@@ -127,7 +123,7 @@ class SourceSetHolder(MutableInterpreterObject, ObjectHolder):
 
     @noKwargs
     @noPosargs
-    def all_sources_method(self, args, kwargs):
+    def all_sources_method(self, state, args, kwargs):
         self.frozen = True
         files = self.collect(lambda x: True, True)
         return list(files.sources)
@@ -135,13 +131,13 @@ class SourceSetHolder(MutableInterpreterObject, ObjectHolder):
     @noKwargs
     @noPosargs
     @FeatureNew('source_set.all_dependencies() method', '0.52.0')
-    def all_dependencies_method(self, args, kwargs):
+    def all_dependencies_method(self, state, args, kwargs):
         self.frozen = True
         files = self.collect(lambda x: True, True)
         return list(files.dependencies)
 
     @permittedKwargs(['strict'])
-    def apply_method(self, args, kwargs):
+    def apply_method(self, state, args, kwargs):
         if len(args) != 1:
             raise InterpreterException('Apply takes exactly one argument')
         config_data = args[0]
@@ -150,7 +146,7 @@ class SourceSetHolder(MutableInterpreterObject, ObjectHolder):
         if isinstance(config_data, dict):
             def _get_from_config_data(key):
                 if strict and key not in config_data:
-                    raise InterpreterException('Entry {} not in configuration dictionary.'.format(key))
+                    raise InterpreterException(f'Entry {key} not in configuration dictionary.')
                 return config_data.get(key, False)
         else:
             config_cache = dict()
@@ -163,13 +159,13 @@ class SourceSetHolder(MutableInterpreterObject, ObjectHolder):
                 return config_cache[key]
 
         files = self.collect(_get_from_config_data, False)
-        res = SourceFilesHolder(files)
+        res = SourceFilesObject(files)
         return res
 
-class SourceFilesHolder(InterpreterObject, ObjectHolder):
+class SourceFilesObject(ModuleObject):
     def __init__(self, files):
-        InterpreterObject.__init__(self)
-        ObjectHolder.__init__(self, files)
+        super().__init__()
+        self.files = files
         self.methods.update({
             'sources': self.sources_method,
             'dependencies': self.dependencies_method,
@@ -177,24 +173,26 @@ class SourceFilesHolder(InterpreterObject, ObjectHolder):
 
     @noPosargs
     @noKwargs
-    def sources_method(self, args, kwargs):
-        return list(self.held_object.sources)
+    def sources_method(self, state, args, kwargs):
+        return list(self.files.sources)
 
     @noPosargs
     @noKwargs
-    def dependencies_method(self, args, kwargs):
-        return list(self.held_object.dependencies)
+    def dependencies_method(self, state, args, kwargs):
+        return list(self.files.dependencies)
 
 class SourceSetModule(ExtensionModule):
     @FeatureNew('SourceSet module', '0.51.0')
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.snippets.add('source_set')
+        self.methods.update({
+            'source_set': self.source_set,
+        })
 
     @noKwargs
     @noPosargs
-    def source_set(self, interpreter, state, args, kwargs):
-        return SourceSetHolder(interpreter)
+    def source_set(self, state, args, kwargs):
+        return SourceSet(self.interpreter)
 
 def initialize(*args, **kwargs):
     return SourceSetModule(*args, **kwargs)

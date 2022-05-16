@@ -26,6 +26,7 @@
 #include "hw/sysbus.h"
 #include "sysemu/reset.h"
 #include "sysemu/runstate.h"
+#include "migration/vmstate.h"
 #include "qemu/module.h"
 #include "qemu/timer.h"
 #include "hw/irq.h"
@@ -48,7 +49,7 @@
 #define R_INTR        0x50
 #define R_MASKED_INTR 0x54
 
-#define TYPE_ETRAX_FS_TIMER "etraxfs,timer"
+#define TYPE_ETRAX_FS_TIMER "etraxfs-timer"
 typedef struct ETRAXTimerState ETRAXTimerState;
 DECLARE_INSTANCE_CHECKER(ETRAXTimerState, ETRAX_TIMER,
                          TYPE_ETRAX_FS_TIMER)
@@ -64,7 +65,7 @@ struct ETRAXTimerState {
     ptimer_state *ptimer_t1;
     ptimer_state *ptimer_wd;
 
-    int wd_hits;
+    uint32_t wd_hits;
 
     /* Control registers.  */
     uint32_t rw_tmr0_div;
@@ -81,6 +82,36 @@ struct ETRAXTimerState {
     uint32_t rw_ack_intr;
     uint32_t r_intr;
     uint32_t r_masked_intr;
+};
+
+static const VMStateDescription vmstate_etraxfs = {
+    .name = "etraxfs",
+    .version_id = 0,
+    .minimum_version_id = 0,
+    .fields = (VMStateField[]) {
+        VMSTATE_PTIMER(ptimer_t0, ETRAXTimerState),
+        VMSTATE_PTIMER(ptimer_t1, ETRAXTimerState),
+        VMSTATE_PTIMER(ptimer_wd, ETRAXTimerState),
+
+        VMSTATE_UINT32(wd_hits, ETRAXTimerState),
+
+        VMSTATE_UINT32(rw_tmr0_div, ETRAXTimerState),
+        VMSTATE_UINT32(r_tmr0_data, ETRAXTimerState),
+        VMSTATE_UINT32(rw_tmr0_ctrl, ETRAXTimerState),
+
+        VMSTATE_UINT32(rw_tmr1_div, ETRAXTimerState),
+        VMSTATE_UINT32(r_tmr1_data, ETRAXTimerState),
+        VMSTATE_UINT32(rw_tmr1_ctrl, ETRAXTimerState),
+
+        VMSTATE_UINT32(rw_wd_ctrl, ETRAXTimerState),
+
+        VMSTATE_UINT32(rw_intr_mask, ETRAXTimerState),
+        VMSTATE_UINT32(rw_ack_intr, ETRAXTimerState),
+        VMSTATE_UINT32(r_intr, ETRAXTimerState),
+        VMSTATE_UINT32(r_masked_intr, ETRAXTimerState),
+
+        VMSTATE_END_OF_LIST()
+    }
 };
 
 static uint64_t
@@ -309,9 +340,9 @@ static const MemoryRegionOps timer_ops = {
     }
 };
 
-static void etraxfs_timer_reset(void *opaque)
+static void etraxfs_timer_reset_enter(Object *obj, ResetType type)
 {
-    ETRAXTimerState *t = opaque;
+    ETRAXTimerState *t = ETRAX_TIMER(obj);
 
     ptimer_transaction_begin(t->ptimer_t0);
     ptimer_stop(t->ptimer_t0);
@@ -325,6 +356,12 @@ static void etraxfs_timer_reset(void *opaque)
     t->rw_wd_ctrl = 0;
     t->r_intr = 0;
     t->rw_intr_mask = 0;
+}
+
+static void etraxfs_timer_reset_hold(Object *obj)
+{
+    ETRAXTimerState *t = ETRAX_TIMER(obj);
+
     qemu_irq_lower(t->irq);
 }
 
@@ -343,14 +380,17 @@ static void etraxfs_timer_realize(DeviceState *dev, Error **errp)
     memory_region_init_io(&t->mmio, OBJECT(t), &timer_ops, t,
                           "etraxfs-timer", 0x5c);
     sysbus_init_mmio(sbd, &t->mmio);
-    qemu_register_reset(etraxfs_timer_reset, t);
 }
 
 static void etraxfs_timer_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
 
     dc->realize = etraxfs_timer_realize;
+    dc->vmsd = &vmstate_etraxfs;
+    rc->phases.enter = etraxfs_timer_reset_enter;
+    rc->phases.hold = etraxfs_timer_reset_hold;
 }
 
 static const TypeInfo etraxfs_timer_info = {

@@ -1,0 +1,15 @@
+---
+- set_fact:
+    chrony: chrony
+
+- set_fact:
+    chrony: chronyd
+  when:
+    - packaging.format != 'deb'
+
+- name: 'Enable services'
+  service:
+    name: '{{ item }}'
+    enabled: yes
+  loop:
+    - '{{ chrony }}'

@@ -14,7 +14,7 @@ vCPU hotplug
       $ qemu-system-x86_64 -display none -no-user-config -m 2048 \
           -nodefaults -monitor stdio -machine pc,accel=kvm,usb=off \
           -smp 1,maxcpus=2 -cpu IvyBridge-IBRS \
-          -qmp unix:/tmp/qmp-sock,server,nowait
+          -qmp unix:/tmp/qmp-sock,server=on,wait=off
 
 (2) Run 'qmp-shell' (located in the source tree, under: "scripts/qmp/)
     to connect to the just-launched QEMU::
@@ -78,7 +78,7 @@ vCPU hotplug
       }
       (QEMU)
 
-(5) Optionally, run QMP `query-cpus-fast` for some details about the
+(5) Optionally, run QMP ``query-cpus-fast`` for some details about the
     vCPUs::
 
       (QEMU) query-cpus-fast

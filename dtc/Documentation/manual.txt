@@ -45,7 +45,7 @@ The gitweb interface for the upstream repository is:
 
 Patches should be sent to the maintainers:
 	David Gibson <david@gibson.dropbear.id.au>
-	Jon Loeliger <jdl@jdl.com>
+	Jon Loeliger <loeliger@gmail.com>
 and CCed to <devicetree-compiler@vger.kernel.org>.
 
 2) Description

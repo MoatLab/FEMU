@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# group: rw auto quick
 #
 # Create, read, write big image
 #
@@ -19,7 +20,7 @@
 #
 
 # creator
-owner=famz@redhat.com
+owner=fam@euphon.net
 
 seq=`basename $0`
 echo "QA output created by $seq"

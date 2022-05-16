@@ -20,9 +20,13 @@
 #define TFTP_FILENAME_MAX 512
 #define TFTP_BLOCKSIZE_MAX 1428
 
-struct tftp_t {
+struct tftphdr {
     struct udphdr udp;
     uint16_t tp_op;
+} SLIRP_PACKED;
+
+struct tftp_t {
+    struct tftphdr hdr;
     union {
         struct {
             uint16_t tp_block_nr;

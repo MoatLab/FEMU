@@ -1,0 +1,103 @@
+name: Build OpenBIOS
+
+on:
+  push:
+    # Build for non-release tags only
+    branches:
+      - "*"
+    tags:
+      - "!v*"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    name: OpenBIOS build for amd64 ppc sparc32 sparc64 x86
+    container:
+      image: ghcr.io/openbios/openbios-builder:master
+    steps:
+      - name: Checkout OpenBIOS
+        uses: actions/checkout@v2
+
+      - name: Backup Makefile.target
+        run: cp Makefile.target Makefile.target.orig
+
+      - name: Configure debug
+        run: |
+          cat Makefile.target.orig | sed 's#CFLAGS+= -Os#CFLAGS+= -O0#g' > Makefile.target
+          ./config/scripts/switch-arch amd64 ppc sparc32 sparc64 x86
+
+      - name: Build debug
+        run: "make V=1"
+
+      - name: Move debug build
+        run: "mkdir -p debug && mv obj-* debug"
+
+      - name: Configure release
+        run: |
+          cp Makefile.target.orig Makefile.target
+          ./config/scripts/switch-arch amd64 ppc sparc32 sparc64 x86
+
+      - name: Build release
+        run: "make V=1"
+
+      - name: Move release build
+        run: "mkdir -p release && mv obj-* release"
+
+      - name: Store artifacts
+        uses: actions/upload-artifact@v2
+        with:
+          name: openbios-multiarch-latest
+          path: |
+            debug/obj-x86/*.dict
+            debug/obj-x86/openbios-builtin*
+            debug/obj-x86/openbios.multiboot*
+            debug/obj-x86/openbios-multiboot.syms
+            debug/obj-x86/QEMU,VGA.bin
+            debug/obj-amd64/openbios-unix
+            debug/obj-amd64/*.dict
+            debug/obj-ppc/*.dict
+            debug/obj-ppc/openbios-qemu*
+            debug/obj-ppc/QEMU,VGA.bin
+            debug/obj-sparc32/*.dict
+            debug/obj-sparc32/openbios-builtin*
+            debug/obj-sparc32/QEMU,cgthree.bin
+            debug/obj-sparc32/QEMU,tcx.bin
+            debug/obj-sparc64/*.dict
+            debug/obj-sparc64/openbios-builtin*
+            debug/obj-sparc64/QEMU,VGA.bin
+            release/obj-x86/*.dict
+            release/obj-x86/openbios-builtin*
+            release/obj-x86/openbios.multiboot*
+            release/obj-x86/openbios-multiboot.syms
+            release/obj-x86/QEMU,VGA.bin
+            release/obj-amd64/openbios-unix
+            release/obj-amd64/*.dict
+            release/obj-ppc/*.dict
+            release/obj-ppc/openbios-qemu*
+            release/obj-ppc/QEMU,VGA.bin
+            release/obj-sparc32/*.dict
+            release/obj-sparc32/openbios-builtin*
+            release/obj-sparc32/QEMU,cgthree.bin
+            release/obj-sparc32/QEMU,tcx.bin
+            release/obj-sparc64/*.dict
+            release/obj-sparc64/openbios-builtin*
+            release/obj-sparc64/QEMU,VGA.bin
+
+      - name: Prepare pre-release from artifacts
+        uses: actions/download-artifact@v2
+        with:
+          name: openbios-multiarch-latest
+          path: archive
+
+      - name: Archive pre-release
+        run: cd archive && zip -r ../openbios-multiarch-latest.zip debug release && cd ..
+
+      - name: Upload pre-release (upstream repository only)
+        if: "${{ github.repository_owner == 'openbios' }}"
+        uses: "marvinpinto/action-automatic-releases@latest"
+        with:
+          repo_token: "${{ secrets.GITHUB_TOKEN }}"
+          prerelease: true
+          automatic_release_tag: "latest"
+          title: "Development Build"
+          files: openbios-multiarch-latest.zip

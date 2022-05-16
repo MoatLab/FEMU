@@ -1,0 +1,12 @@
+---
+- name: '{{ name }}-syntax-check'
+  shell: |
+    set -e
+    cd {{ name }}
+
+    {{ global_env }}
+    {{ local_env }}
+    cd build
+    meson test --suite syntax-check
+  when:
+    - target in machines

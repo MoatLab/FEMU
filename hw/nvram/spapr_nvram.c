@@ -26,19 +26,18 @@
 #include "qemu/module.h"
 #include "qemu/units.h"
 #include "qapi/error.h"
-#include "cpu.h"
 #include <libfdt.h>
 
 #include "sysemu/block-backend.h"
 #include "sysemu/device_tree.h"
 #include "sysemu/sysemu.h"
 #include "sysemu/runstate.h"
-#include "hw/sysbus.h"
 #include "migration/vmstate.h"
 #include "hw/nvram/chrp_nvram.h"
 #include "hw/ppc/spapr.h"
 #include "hw/ppc/spapr_vio.h"
 #include "hw/qdev-properties.h"
+#include "hw/qdev-properties-system.h"
 #include "qom/object.h"
 
 struct SpaprNvram {
@@ -216,11 +215,11 @@ static int spapr_nvram_pre_load(void *opaque)
     return 0;
 }
 
-static void postload_update_cb(void *opaque, int running, RunState state)
+static void postload_update_cb(void *opaque, bool running, RunState state)
 {
     SpaprNvram *nvram = opaque;
 
-    /* This is called after bdrv_invalidate_cache_all.  */
+    /* This is called after bdrv_activate_all.  */
 
     qemu_del_vm_change_state_handler(nvram->vmstate);
     nvram->vmstate = NULL;

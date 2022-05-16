@@ -3,10 +3,13 @@ project('qt4 and 5 build test', 'cpp',
   default_options : ['cpp_std=c++11'])
 
 qt5_modules = ['Widgets']
-foreach qt : ['qt4', 'qt5']
+qt6_modules = ['Widgets']
+foreach qt : ['qt4', 'qt5', 'qt6']
   qt_modules = ['Core', 'Gui']
   if qt == 'qt5'
     qt_modules += qt5_modules
+  elif qt == 'qt6'
+    qt_modules += qt6_modules
   endif
 
   # Test that invalid modules are indeed not found
@@ -49,9 +52,14 @@ foreach qt : ['qt4', 'qt5']
 
     prep = qtmodule.preprocess(
       moc_headers : ['mainWindow.h'],           # These need to be fed through the moc tool before use. 
-      ui_files : 'mainWindow.ui',               # XML files that need to be compiled with the uic tol.
       method : get_option('method')
     )
+    # XML files that need to be compiled with the uic tol.
+    prep += qtmodule.compile_ui(sources : 'mainWindow.ui', method: get_option('method'))
+
+    qtmodule.preprocess(
+      ui_files : 'mainWindow.ui',
+      method: get_option('method'))
 
     # Resource file(s) for rcc compiler
     extra_cpp_args = []
@@ -63,16 +71,26 @@ foreach qt : ['qt4', 'qt5']
     endif
 
     # Test that setting a unique name with a positional argument works
-    qtmodule.preprocess(qt + 'teststuff', qresources : files(['stuff.qrc', 'stuff2.qrc']), method : get_option('method'))
+    qtmodule.compile_resources(
+      name : qt + 'teststuff',
+      sources : files(['stuff.qrc', 'stuff2.qrc']),
+      method : get_option('method')
+    )
 
     # Test that passing extra arguments to rcc works
     # qt4-rcc and qt5-rcc take different arguments, for example qt4: ['-compress', '3']; qt5: '--compress=3'
     qtmodule.preprocess(qt + 'testrccarg', qresources : files(['stuff.qrc', 'stuff2.qrc']), rcc_extra_arguments : '--compress=3', method : get_option('method'))
 
+    translations_cpp = qtmodule.compile_translations(qresource: qt+'_lang.qrc')
+    # unity builds suck and definitely cannot handle two qrc embeds in one compilation unit
+    unityproof_translations = static_library('unityproof_translations', translations_cpp)
+
+    extra_cpp_args += '-DQT="@0@"'.format(qt)
     qexe = executable(qt + 'app',
       sources : ['main.cpp', 'mainWindow.cpp', # Sources that don't need preprocessing.
       prep, prep_rcc],
       dependencies : qtdep,
+      link_with: unityproof_translations,
       cpp_args: extra_cpp_args,
       gui_app : true)
 
@@ -92,10 +110,16 @@ foreach qt : ['qt4', 'qt5']
     # The build system needs to include the cpp files from
     # headers but the user must manually include moc
     # files from sources.
-    manpreprocessed = qtmodule.preprocess(
-      moc_extra_arguments : ['-DMOC_EXTRA_FLAG'], # This is just a random macro to test `moc_extra_arguments`
+    qtmodule.preprocess(
+      moc_extra_arguments : ['-DMOC_EXTRA_FLAG'], # This is just a random macro to test `extra_arguments`
       moc_sources : 'manualinclude.cpp',
       moc_headers : 'manualinclude.h',
+      method : get_option('method'))
+
+    manpreprocessed = qtmodule.compile_moc(
+      extra_args : ['-DMOC_EXTRA_FLAG'], # This is just a random macro to test `extra_arguments`
+      sources : 'manualinclude.cpp',
+      headers : 'manualinclude.h',
       method : get_option('method'))
 
     qtmaninclude = executable(qt + 'maninclude',

@@ -57,6 +57,7 @@ struct PXBDev {
 
     uint8_t bus_nr;
     uint16_t numa_node;
+    bool bypass_iommu;
 };
 
 static PXBDev *convert_to_pxb(PCIDevice *dev)
@@ -192,6 +193,12 @@ static int pxb_map_irq_fn(PCIDevice *pci_dev, int pin)
     PCIDevice *pxb = pci_get_bus(pci_dev)->parent_dev;
 
     /*
+     * First carry out normal swizzle to handle
+     * multple root ports on a pxb instance.
+     */
+    pin = pci_swizzle_map_irq_fn(pci_dev, pin);
+
+    /*
      * The bios does not index the pxb slot number when
      * it computes the IRQ because it resides on bus 0
      * and not on the current bus.
@@ -244,7 +251,7 @@ static void pxb_dev_realize_common(PCIDevice *dev, bool pcie, Error **errp)
     } else {
         bus = pci_root_bus_new(ds, "pxb-internal", NULL, NULL, 0, TYPE_PXB_BUS);
         bds = qdev_new("pci-bridge");
-        bds->id = dev_name;
+        bds->id = g_strdup(dev_name);
         qdev_prop_set_uint8(bds, PCI_BRIDGE_DEV_PROP_CHASSIS_NR, pxb->bus_nr);
         qdev_prop_set_bit(bds, PCI_BRIDGE_DEV_PROP_SHPC, false);
     }
@@ -255,6 +262,7 @@ static void pxb_dev_realize_common(PCIDevice *dev, bool pcie, Error **errp)
     bus->map_irq = pxb_map_irq_fn;
 
     PCI_HOST_BRIDGE(ds)->bus = bus;
+    PCI_HOST_BRIDGE(ds)->bypass_iommu = pxb->bypass_iommu;
 
     pxb_register_bus(dev, bus, &local_err);
     if (local_err) {
@@ -301,6 +309,7 @@ static Property pxb_dev_properties[] = {
     /* Note: 0 is not a legal PXB bus number. */
     DEFINE_PROP_UINT8("bus_nr", PXBDev, bus_nr, 0),
     DEFINE_PROP_UINT16("numa_node", PXBDev, numa_node, NUMA_NODE_UNASSIGNED),
+    DEFINE_PROP_BOOL("bypass_iommu", PXBDev, bypass_iommu, false),
     DEFINE_PROP_END_OF_LIST(),
 };
 

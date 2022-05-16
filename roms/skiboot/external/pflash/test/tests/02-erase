@@ -1,0 +1,27 @@
+#! /bin/sh
+# SPDX-License-Identifier: Apache-2.0 OR GPL-2.0-or-later
+
+touch "$DATA_DIR/$CUR_TEST.pnor"
+
+# Don't record the output of ffspart
+../ffspart/ffspart -s 0x100 -c 10 -i "$DATA_DIR/$CUR_TEST.ffs" \
+	-p "$DATA_DIR/$CUR_TEST.pnor" 2>&1 >/dev/null
+if [ "$?" -ne 0 ] ; then
+	fail_test;
+fi
+
+yes yes | run_binary "./pflash" "-F $DATA_DIR/$CUR_TEST.pnor -E"
+if [ "$?" -ne 0 ] ; then
+	fail_test;
+fi
+
+cmp_with_ff "$DATA_DIR/$CUR_TEST.pnor" 0 \
+	"$(stat --printf="%s" "$DATA_DIR/$CUR_TEST.pnor")"
+
+# The test infrastructure will clean up but lets not chew unnecessarily
+# though disk space
+rm "$DATA_DIR/$CUR_TEST.pnor"
+
+diff_with_result
+
+pass_test

@@ -1,0 +1,57 @@
+This directory hosts (v)TPM related code.
+
+Background:
+-----------
+
+A TPM is a crypto chip that is found in many systems. Besides it offering
+a secure key store, among other functionality, it is also used to implement
+'trusted boot'. This is realized by code in the firmware measuring parts of the
+firmware's code and data as well as system data, such as the boot block, and
+logging these measurements and storing (extending) them in the TPM's platform
+configuration register (PCR).
+
+The benefits of having a TPM (or vTPM) in a system are:
+
+- enablement of trusted boot; this allow us to eventually extend the chain of
+  trust from the hypervisor to the guests
+- enablement of attestation so that one can verify what software is running on
+  a machine (OpenPTS, OpenAttestation)
+- provides TPM functionality to VMs, which includes a standardized mechanism
+  to store keys and other blobs (Linux trusted keys, GNU TLS's TPM extensions)
+
+
+QEMU/KVM + SLOF support:
+------------------------
+
+vTPM for QEMU/KVM pSeries virtual machines is support in QEMU 5.0.
+
+To start a QEMU VM with an attached vTPM (swtpm), run the below shown commands.
+The following will setup the vTPM so that its state will be stored in
+/tmp/myvtpm1. A unique directory for each VM instance with attached vTPM
+must be provided. Whenever QEMU is started, the swtpm has to be started
+before it. The file 'boot_rom.bin' is SLOF with vTPM extensions built-in.
+
+  #> mkdir -p /tmp/mytpm1
+  #> swtpm socket --tpm2 --tpmstate dir=/tmp/mytpm1 \
+       --ctrl type=unixio,path=/tmp/mytpm1/swtpm-sock
+
+  In another terminal:
+
+  #> sudo qemu-system-ppc64 -display sdl \
+       -machine pseries,accel=kvm \
+       -m 1024 -bios boot_rom.bin -boot menu=on \
+       -nodefaults -device VGA -device pci-ohci -device usb-kbd \
+       -chardev socket,id=chrtpm,path=/tmp/mytpm1/swtpm-sock \
+       -tpmdev emulator,id=tpm0,chardev=chrtpm \
+       -device tpm-spapr,tpmdev=tpm0 \
+       -device spapr-vscsi,id=scsi0,reg=0x00002000 \
+       -device virtio-blk-pci,scsi=off,bus=pci.0,addr=0x3,drive=drive-virtio-disk0,id=virtio-disk0 \
+       -drive file=test.img,format=raw,if=none,id=drive-virtio-disk0
+
+Notes:
+  - The Linux kernel in the VM must have the tpm_ibmvtpm module available
+    or built-in. A recent kernel is needed that enables TPM 2.0 support
+    in this module.
+
+  - 'swtpm_ioctl --unix /tmp/mytpm1/swtpm-sock -s' can be used to gracefully
+    shut down the vTPM.

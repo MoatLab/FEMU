@@ -7,7 +7,7 @@ containers or various tools.
 
 ### Prerequisites
 
-A C compiler, make/meson and glib2 development libraries.
+A C compiler, meson and glib2 development libraries.
 
 (see also [.gitlab-ci.yml](.gitlab-ci.yml) DEPS variable for the list
 of dependencies on Fedora)

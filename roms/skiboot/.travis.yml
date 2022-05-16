@@ -1,0 +1,71 @@
+language: c
+
+os:
+ - linux
+ - linux-ppc64le
+
+# NB: This is just the distro used for the container host
+dist: bionic
+services: docker
+
+cache: ccache
+
+env:
+    jobs:
+      - RUN_ON_CONTAINER=ubuntu-18.04
+      - RUN_ON_CONTAINER=ubuntu-20.04
+      - RUN_ON_CONTAINER=ubuntu-latest
+      - RUN_ON_CONTAINER=centos7
+      - RUN_ON_CONTAINER=fedora33
+      - RUN_ON_CONTAINER=fedora-rawhide
+      - RUN_ON_CONTAINER=debian-unstable
+      - RUN_ON_CONTAINER=docs
+
+jobs:
+  allow_failures:
+    - env: RUN_ON_CONTAINER=fedora-rawhide
+    - env: RUN_ON_CONTAINER=debian-unstable
+    - env: RUN_ON_CONTAINER=ubuntu-latest
+    - env: RUN_ON_CONTAINER=clang
+  exclude:
+    - os: linux-ppc64le
+      env: RUN_ON_CONTAINER=centos7
+    - os: linux-ppc64le
+      env: RUN_ON_CONTAINER=docs
+    - os: linux-ppc64le
+      env: RUN_ON_CONTAINER=clang
+
+install:
+    - docker build --pull -t ${RUN_ON_CONTAINER} -f opal-ci/Dockerfile-${RUN_ON_CONTAINER} .
+    - mkdir -p ci_build_cache/${RUN_ON_CONTAINER}
+
+script:
+    - >
+      docker run
+      --security-opt seccomp=unconfined
+      --volume $HOME/.ccache:/root/.ccache
+      --volume `pwd`:/build
+      --volume `pwd`/ci_build_cache/${RUN_ON_CONTAINER}:/root/ci_build_cache/
+      --tmpfs /tmp/
+      --rm -t $RUN_ON_CONTAINER
+      bash -c "./opal-ci/build-${RUN_ON_CONTAINER}.sh"
+
+
+# apparently this needs to be in the master branch in order for it to work on
+# other branches too.
+addons:
+  coverity_scan:
+    project:
+      name: "open-power/skiboot"
+      description: "Build submitted via Travis CI"
+    notification_email: hegdevasant@linux.ibm.com
+    branch_pattern: coverity_scan
+
+deploy:
+  provider: pages
+  skip_cleanup: true
+  github_token: $GITHUB_TOKEN # set in travis-ci.org dashboard, marked secure
+  local_dir: "doc/_build/ghpages"
+  on:
+    branch: master
+    condition: "$RUN_ON_CONTAINER = docs"

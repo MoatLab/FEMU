@@ -16,10 +16,20 @@
 # or an interpreter-based tool.
 
 from .visitor import AstVisitor
-from .. import interpreterbase, mparser, mesonlib
+from .. import mparser, mesonlib
 from .. import environment
 
-from ..interpreterbase import InvalidArguments, BreakRequest, ContinueRequest, TYPE_nvar, TYPE_nkwargs
+from ..interpreterbase import (
+    MesonInterpreterObject,
+    InterpreterBase,
+    InvalidArguments,
+    BreakRequest,
+    ContinueRequest,
+    default_resolve_key,
+    TYPE_nvar,
+    TYPE_nkwargs,
+)
+
 from ..mparser import (
     AndNode,
     ArgumentNode,
@@ -38,7 +48,6 @@ from ..mparser import (
     NotNode,
     OrNode,
     PlusAssignmentNode,
-    StringNode,
     TernaryNode,
     UMinusNode,
 )
@@ -46,35 +55,38 @@ from ..mparser import (
 import os, sys
 import typing as T
 
-class DontCareObject(interpreterbase.InterpreterObject):
+class DontCareObject(MesonInterpreterObject):
     pass
 
-class MockExecutable(interpreterbase.InterpreterObject):
+class MockExecutable(MesonInterpreterObject):
     pass
 
-class MockStaticLibrary(interpreterbase.InterpreterObject):
+class MockStaticLibrary(MesonInterpreterObject):
     pass
 
-class MockSharedLibrary(interpreterbase.InterpreterObject):
+class MockSharedLibrary(MesonInterpreterObject):
     pass
 
-class MockCustomTarget(interpreterbase.InterpreterObject):
+class MockCustomTarget(MesonInterpreterObject):
     pass
 
-class MockRunTarget(interpreterbase.InterpreterObject):
+class MockRunTarget(MesonInterpreterObject):
     pass
 
 ADD_SOURCE = 0
 REMOVE_SOURCE = 1
 
-class AstInterpreter(interpreterbase.InterpreterBase):
+_T = T.TypeVar('_T')
+_V = T.TypeVar('_V')
+
+class AstInterpreter(InterpreterBase):
     def __init__(self, source_root: str, subdir: str, subproject: str, visitors: T.Optional[T.List[AstVisitor]] = None):
         super().__init__(source_root, subdir, subproject)
         self.visitors = visitors if visitors is not None else []
-        self.visited_subdirs = {}     # type: T.Dict[str, bool]
-        self.assignments = {}         # type: T.Dict[str, BaseNode]
-        self.assign_vals = {}         # type: T.Dict[str, T.Any]
-        self.reverse_assignment = {}  # type: T.Dict[str, BaseNode]
+        self.processed_buildfiles = set() # type: T.Set[str]
+        self.assignments = {}             # type: T.Dict[str, BaseNode]
+        self.assign_vals = {}             # type: T.Dict[str, T.Any]
+        self.reverse_assignment = {}      # type: T.Dict[str, BaseNode]
         self.funcs.update({'project': self.func_do_nothing,
                            'test': self.func_do_nothing,
                            'benchmark': self.func_do_nothing,
@@ -129,7 +141,14 @@ class AstInterpreter(interpreterbase.InterpreterBase):
                            'subdir_done': self.func_do_nothing,
                            'alias_target': self.func_do_nothing,
                            'summary': self.func_do_nothing,
+                           'range': self.func_do_nothing,
                            })
+
+    def _unholder_args(self, args: _T, kwargs: _V) -> T.Tuple[_T, _V]:
+        return args, kwargs
+
+    def _holderify(self, res: _T) -> _T:
+        return res
 
     def func_do_nothing(self, node: BaseNode, args: T.List[TYPE_nvar], kwargs: T.Dict[str, TYPE_nvar]) -> bool:
         return True
@@ -142,7 +161,7 @@ class AstInterpreter(interpreterbase.InterpreterBase):
     def func_subdir(self, node: BaseNode, args: T.List[TYPE_nvar], kwargs: T.Dict[str, TYPE_nvar]) -> None:
         args = self.flatten_args(args)
         if len(args) != 1 or not isinstance(args[0], str):
-            sys.stderr.write('Unable to evaluate subdir({}) in AstInterpreter --> Skipping\n'.format(args))
+            sys.stderr.write(f'Unable to evaluate subdir({args}) in AstInterpreter --> Skipping\n')
             return
 
         prev_subdir = self.subdir
@@ -151,15 +170,16 @@ class AstInterpreter(interpreterbase.InterpreterBase):
         buildfilename = os.path.join(subdir, environment.build_filename)
         absname = os.path.join(self.source_root, buildfilename)
         symlinkless_dir = os.path.realpath(absdir)
-        if symlinkless_dir in self.visited_subdirs:
+        build_file = os.path.join(symlinkless_dir, 'meson.build')
+        if build_file in self.processed_buildfiles:
             sys.stderr.write('Trying to enter {} which has already been visited --> Skipping\n'.format(args[0]))
             return
-        self.visited_subdirs[symlinkless_dir] = True
+        self.processed_buildfiles.add(build_file)
 
         if not os.path.isfile(absname):
-            sys.stderr.write('Unable to find build file {} --> Skipping\n'.format(buildfilename))
+            sys.stderr.write(f'Unable to find build file {buildfilename} --> Skipping\n')
             return
-        with open(absname, encoding='utf8') as f:
+        with open(absname, encoding='utf-8') as f:
             code = f.read()
         assert(isinstance(code, str))
         try:
@@ -177,6 +197,10 @@ class AstInterpreter(interpreterbase.InterpreterBase):
     def method_call(self, node: BaseNode) -> bool:
         return True
 
+    def evaluate_fstring(self, node: mparser.FormatStringNode) -> str:
+        assert(isinstance(node, mparser.FormatStringNode))
+        return node.value
+
     def evaluate_arithmeticstatement(self, cur: ArithmeticNode) -> int:
         self.evaluate_statement(cur.left)
         self.evaluate_statement(cur.right)
@@ -193,7 +217,11 @@ class AstInterpreter(interpreterbase.InterpreterBase):
         self.evaluate_statement(node.falseblock)
 
     def evaluate_dictstatement(self, node: mparser.DictNode) -> TYPE_nkwargs:
-        (arguments, kwargs) = self.reduce_arguments(node.args, resolve_key_nodes=False)
+        def resolve_key(node: mparser.BaseNode) -> str:
+            if isinstance(node, mparser.StringNode):
+                return node.value
+            return '__AST_UNKNOWN__'
+        arguments, kwargs = self.reduce_arguments(node.args, key_resolver=resolve_key)
         assert (not arguments)
         self.argument_depth += 1
         for key, value in kwargs.items():
@@ -216,15 +244,16 @@ class AstInterpreter(interpreterbase.InterpreterBase):
     def unknown_function_called(self, func_name: str) -> None:
         pass
 
-    def reduce_arguments(self, args: ArgumentNode, resolve_key_nodes: bool = True) -> T.Tuple[T.List[TYPE_nvar], TYPE_nkwargs]:
+    def reduce_arguments(
+                self,
+                args: mparser.ArgumentNode,
+                key_resolver: T.Callable[[mparser.BaseNode], str] = default_resolve_key,
+                duplicate_key_error: T.Optional[str] = None,
+            ) -> T.Tuple[T.List[TYPE_nvar], TYPE_nkwargs]:
         if isinstance(args, ArgumentNode):
-            kwargs = {}  # type: T.Dict[T.Union[str, BaseNode], TYPE_nvar]
+            kwargs = {}  # type: T.Dict[str, TYPE_nvar]
             for key, val in args.kwargs.items():
-                if resolve_key_nodes and isinstance(key, (StringNode, IdNode)):
-                    assert isinstance(key.value, str)
-                    kwargs[key.value] = val
-                else:
-                    kwargs[key] = val
+                kwargs[key_resolver(key)] = val
             if args.incorrect_order():
                 raise InvalidArguments('All keyword arguments must be after positional arguments.')
             return self.flatten_args(args.arguments), kwargs

@@ -55,4 +55,6 @@ extern struct fdt_header bad_prop_char;
 extern struct fdt_header ovf_size_strings;
 extern struct fdt_header truncated_string;
 extern struct fdt_header truncated_memrsv;
+extern struct fdt_header two_roots;
+extern struct fdt_header named_root;
 #endif /* ! __ASSEMBLY */

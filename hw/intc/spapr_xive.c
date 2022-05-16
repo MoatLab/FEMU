@@ -24,6 +24,7 @@
 #include "hw/ppc/xive.h"
 #include "hw/ppc/xive_regs.h"
 #include "hw/qdev-properties.h"
+#include "trace.h"
 
 /*
  * XIVE Virtualization Controller BAR and Thread Managment BAR that we
@@ -155,7 +156,7 @@ static void spapr_xive_end_pic_print_info(SpaprXive *xive, XiveEND *end,
 #define spapr_xive_in_kernel(xive) \
     (kvm_irqchip_in_kernel() && (xive)->fd != -1)
 
-void spapr_xive_pic_print_info(SpaprXive *xive, Monitor *mon)
+static void spapr_xive_pic_print_info(SpaprXive *xive, Monitor *mon)
 {
     XiveSource *xsrc = &xive->source;
     int i;
@@ -184,7 +185,7 @@ void spapr_xive_pic_print_info(SpaprXive *xive, Monitor *mon)
                        xive_source_irq_is_lsi(xsrc, i) ? "LSI" : "MSI",
                        pq & XIVE_ESB_VAL_P ? 'P' : '-',
                        pq & XIVE_ESB_VAL_Q ? 'Q' : '-',
-                       xsrc->status[i] & XIVE_STATUS_ASSERTED ? 'A' : ' ',
+                       xive_source_is_asserted(xsrc, i) ? 'A' : ' ',
                        xive_eas_is_masked(eas) ? "M" : " ",
                        (int) xive_get_field64(EAS_END_DATA, eas->w));
 
@@ -296,19 +297,13 @@ static void spapr_xive_realize(DeviceState *dev, Error **errp)
     XiveENDSource *end_xsrc = &xive->end_source;
     Error *local_err = NULL;
 
+    /* Set by spapr_irq_init() */
+    g_assert(xive->nr_irqs);
+    g_assert(xive->nr_ends);
+
     sxc->parent_realize(dev, &local_err);
     if (local_err) {
         error_propagate(errp, local_err);
-        return;
-    }
-
-    if (!xive->nr_irqs) {
-        error_setg(errp, "Number of interrupt needs to be greater 0");
-        return;
-    }
-
-    if (!xive->nr_ends) {
-        error_setg(errp, "Number of interrupt needs to be greater 0");
         return;
     }
 
@@ -485,6 +480,29 @@ static uint8_t spapr_xive_get_block_id(XiveRouter *xrtr)
     return SPAPR_XIVE_BLOCK_ID;
 }
 
+static int spapr_xive_get_pq(XiveRouter *xrtr, uint8_t blk, uint32_t idx,
+                             uint8_t *pq)
+{
+    SpaprXive *xive = SPAPR_XIVE(xrtr);
+
+    assert(SPAPR_XIVE_BLOCK_ID == blk);
+
+    *pq = xive_source_esb_get(&xive->source, idx);
+    return 0;
+}
+
+static int spapr_xive_set_pq(XiveRouter *xrtr, uint8_t blk, uint32_t idx,
+                             uint8_t *pq)
+{
+    SpaprXive *xive = SPAPR_XIVE(xrtr);
+
+    assert(SPAPR_XIVE_BLOCK_ID == blk);
+
+    *pq = xive_source_esb_set(&xive->source, idx, *pq);
+    return 0;
+}
+
+
 static const VMStateDescription vmstate_spapr_xive_end = {
     .name = TYPE_SPAPR_XIVE "/end",
     .version_id = 1,
@@ -562,6 +580,8 @@ static int spapr_xive_claim_irq(SpaprInterruptController *intc, int lisn,
 
     assert(lisn < xive->nr_irqs);
 
+    trace_spapr_xive_claim_irq(lisn, lsi);
+
     if (xive_eas_is_valid(&xive->eat[lisn])) {
         error_setg(errp, "IRQ %d is not free", lisn);
         return -EBUSY;
@@ -586,6 +606,8 @@ static void spapr_xive_free_irq(SpaprInterruptController *intc, int lisn)
 {
     SpaprXive *xive = SPAPR_XIVE(intc);
     assert(lisn < xive->nr_irqs);
+
+    trace_spapr_xive_free_irq(lisn);
 
     xive->eat[lisn].w &= cpu_to_be64(~EAS_VALID);
 }
@@ -652,6 +674,8 @@ static void spapr_xive_cpu_intc_destroy(SpaprInterruptController *intc,
 static void spapr_xive_set_irq(SpaprInterruptController *intc, int irq, int val)
 {
     SpaprXive *xive = SPAPR_XIVE(intc);
+
+    trace_spapr_xive_set_irq(irq, val);
 
     if (spapr_xive_in_kernel(xive)) {
         kvmppc_xive_source_set_irq(&xive->source, irq, val);
@@ -787,6 +811,8 @@ static void spapr_xive_class_init(ObjectClass *klass, void *data)
     dc->vmsd    = &vmstate_spapr_xive;
 
     xrc->get_eas = spapr_xive_get_eas;
+    xrc->get_pq  = spapr_xive_get_pq;
+    xrc->set_pq  = spapr_xive_set_pq;
     xrc->get_end = spapr_xive_get_end;
     xrc->write_end = spapr_xive_write_end;
     xrc->get_nvt = spapr_xive_get_nvt;
@@ -899,6 +925,8 @@ static target_ulong h_int_get_source_info(PowerPCCPU *cpu,
     XiveSource *xsrc = &xive->source;
     target_ulong flags  = args[0];
     target_ulong lisn   = args[1];
+
+    trace_spapr_xive_get_source_info(flags, lisn);
 
     if (!spapr_ovec_test(spapr->ov5_cas, OV5_XIVE_EXPLOIT)) {
         return H_FUNCTION;
@@ -1015,6 +1043,8 @@ static target_ulong h_int_set_source_config(PowerPCCPU *cpu,
     uint8_t end_blk;
     uint32_t end_idx;
 
+    trace_spapr_xive_set_source_config(flags, lisn, target, priority, eisn);
+
     if (!spapr_ovec_test(spapr->ov5_cas, OV5_XIVE_EXPLOIT)) {
         return H_FUNCTION;
     }
@@ -1120,6 +1150,8 @@ static target_ulong h_int_get_source_config(PowerPCCPU *cpu,
     uint8_t nvt_blk;
     uint32_t end_idx, nvt_idx;
 
+    trace_spapr_xive_get_source_config(flags, lisn);
+
     if (!spapr_ovec_test(spapr->ov5_cas, OV5_XIVE_EXPLOIT)) {
         return H_FUNCTION;
     }
@@ -1193,6 +1225,8 @@ static target_ulong h_int_get_queue_info(PowerPCCPU *cpu,
     XiveEND *end;
     uint8_t end_blk;
     uint32_t end_idx;
+
+    trace_spapr_xive_get_queue_info(flags, target, priority);
 
     if (!spapr_ovec_test(spapr->ov5_cas, OV5_XIVE_EXPLOIT)) {
         return H_FUNCTION;
@@ -1280,6 +1314,8 @@ static target_ulong h_int_set_queue_config(PowerPCCPU *cpu,
     XiveEND end;
     uint8_t end_blk, nvt_blk;
     uint32_t end_idx, nvt_idx;
+
+    trace_spapr_xive_set_queue_config(flags, target, priority, qpage, qsize);
 
     if (!spapr_ovec_test(spapr->ov5_cas, OV5_XIVE_EXPLOIT)) {
         return H_FUNCTION;
@@ -1448,6 +1484,8 @@ static target_ulong h_int_get_queue_config(PowerPCCPU *cpu,
     uint8_t end_blk;
     uint32_t end_idx;
 
+    trace_spapr_xive_get_queue_config(flags, target, priority);
+
     if (!spapr_ovec_test(spapr->ov5_cas, OV5_XIVE_EXPLOIT)) {
         return H_FUNCTION;
     }
@@ -1541,6 +1579,10 @@ static target_ulong h_int_set_os_reporting_line(PowerPCCPU *cpu,
                                                 target_ulong opcode,
                                                 target_ulong *args)
 {
+    target_ulong flags   = args[0];
+
+    trace_spapr_xive_set_os_reporting_line(flags);
+
     if (!spapr_ovec_test(spapr->ov5_cas, OV5_XIVE_EXPLOIT)) {
         return H_FUNCTION;
     }
@@ -1577,6 +1619,10 @@ static target_ulong h_int_get_os_reporting_line(PowerPCCPU *cpu,
                                                 target_ulong opcode,
                                                 target_ulong *args)
 {
+    target_ulong flags   = args[0];
+
+    trace_spapr_xive_get_os_reporting_line(flags);
+
     if (!spapr_ovec_test(spapr->ov5_cas, OV5_XIVE_EXPLOIT)) {
         return H_FUNCTION;
     }
@@ -1629,6 +1675,8 @@ static target_ulong h_int_esb(PowerPCCPU *cpu,
     hwaddr mmio_addr;
     XiveSource *xsrc = &xive->source;
 
+    trace_spapr_xive_esb(flags, lisn, offset, data);
+
     if (!spapr_ovec_test(spapr->ov5_cas, OV5_XIVE_EXPLOIT)) {
         return H_FUNCTION;
     }
@@ -1661,7 +1709,8 @@ static target_ulong h_int_esb(PowerPCCPU *cpu,
         mmio_addr = xive->vc_base + xive_source_esb_mgmt(xsrc, lisn) + offset;
 
         if (dma_memory_rw(&address_space_memory, mmio_addr, &data, 8,
-                          (flags & SPAPR_XIVE_ESB_STORE))) {
+                          (flags & SPAPR_XIVE_ESB_STORE),
+                          MEMTXATTRS_UNSPECIFIED)) {
             qemu_log_mask(LOG_GUEST_ERROR, "XIVE: failed to access ESB @0x%"
                           HWADDR_PRIx "\n", mmio_addr);
             return H_HARDWARE;
@@ -1697,6 +1746,8 @@ static target_ulong h_int_sync(PowerPCCPU *cpu,
     XiveEAS eas;
     target_ulong flags = args[0];
     target_ulong lisn = args[1];
+
+    trace_spapr_xive_sync(flags, lisn);
 
     if (!spapr_ovec_test(spapr->ov5_cas, OV5_XIVE_EXPLOIT)) {
         return H_FUNCTION;
@@ -1763,6 +1814,8 @@ static target_ulong h_int_reset(PowerPCCPU *cpu,
     SpaprXive *xive = spapr->xive;
     target_ulong flags   = args[0];
 
+    trace_spapr_xive_reset(flags);
+
     if (!spapr_ovec_test(spapr->ov5_cas, OV5_XIVE_EXPLOIT)) {
         return H_FUNCTION;
     }
@@ -1771,7 +1824,7 @@ static target_ulong h_int_reset(PowerPCCPU *cpu,
         return H_PARAMETER;
     }
 
-    device_legacy_reset(DEVICE(xive));
+    device_cold_reset(DEVICE(xive));
 
     if (spapr_xive_in_kernel(xive)) {
         Error *local_err = NULL;

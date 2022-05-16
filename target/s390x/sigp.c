@@ -10,7 +10,7 @@
 
 #include "qemu/osdep.h"
 #include "cpu.h"
-#include "internal.h"
+#include "s390x-internal.h"
 #include "sysemu/hw_accel.h"
 #include "sysemu/runstate.h"
 #include "exec/address-spaces.h"
@@ -139,7 +139,7 @@ static void sigp_stop_and_store_status(CPUState *cs, run_on_cpu_data arg)
     case S390_CPU_STATE_OPERATING:
         cpu->env.sigp_order = SIGP_STOP_STORE_STATUS;
         cpu_inject_stop(cpu);
-        /* store will be performed in do_stop_interrup() */
+        /* store will be performed in do_stop_interrupt() */
         break;
     case S390_CPU_STATE_STOPPED:
         /* already stopped, just store the status */
@@ -235,7 +235,8 @@ static void sigp_restart(CPUState *cs, run_on_cpu_data arg)
         cpu_synchronize_state(cs);
         /*
          * Set OPERATING (and unhalting) before loading the restart PSW.
-         * load_psw() will then properly halt the CPU again if necessary (TCG).
+         * s390_cpu_set_psw() will then properly halt the CPU again if
+         * necessary (TCG).
          */
         s390_cpu_set_state(S390_CPU_STATE_OPERATING, cpu);
         do_restart_interrupt(&cpu->env);
@@ -427,26 +428,10 @@ static int handle_sigp_single_dst(S390CPU *cpu, S390CPU *dst_cpu, uint8_t order,
 static int sigp_set_architecture(S390CPU *cpu, uint32_t param,
                                  uint64_t *status_reg)
 {
-    CPUState *cur_cs;
-    S390CPU *cur_cpu;
-    bool all_stopped = true;
-
-    CPU_FOREACH(cur_cs) {
-        cur_cpu = S390_CPU(cur_cs);
-
-        if (cur_cpu == cpu) {
-            continue;
-        }
-        if (s390_cpu_get_state(cur_cpu) != S390_CPU_STATE_STOPPED) {
-            all_stopped = false;
-        }
-    }
-
     *status_reg &= 0xffffffff00000000ULL;
 
     /* Reject set arch order, with czam we're always in z/Arch mode. */
-    *status_reg |= (all_stopped ? SIGP_STAT_INVALID_PARAMETER :
-                    SIGP_STAT_INCORRECT_STATE);
+    *status_reg |= SIGP_STAT_INVALID_PARAMETER;
     return SIGP_CC_STATUS_STORED;
 }
 
@@ -494,13 +479,17 @@ void do_stop_interrupt(CPUS390XState *env)
 {
     S390CPU *cpu = env_archcpu(env);
 
-    if (s390_cpu_set_state(S390_CPU_STATE_STOPPED, cpu) == 0) {
-        qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
-    }
+    /*
+     * Complete the STOP operation before exposing the CPU as
+     * STOPPED to the system.
+     */
     if (cpu->env.sigp_order == SIGP_STOP_STORE_STATUS) {
         s390_store_status(cpu, S390_STORE_STATUS_DEF_ADDR, true);
     }
     env->sigp_order = 0;
+    if (s390_cpu_set_state(S390_CPU_STATE_STOPPED, cpu) == 0) {
+        qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
+    }
     env->pending_int &= ~INTERRUPT_STOP;
 }
 

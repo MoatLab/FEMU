@@ -353,7 +353,7 @@ class Rewriter:
         self.sourcedir = sourcedir
         self.interpreter = IntrospectionInterpreter(sourcedir, '', generator, visitors = [AstIDGenerator(), AstIndentationGenerator(), AstConditionLevel()])
         self.skip_errors = skip_errors
-        self.modefied_nodes = []
+        self.modified_nodes = []
         self.to_remove_nodes = []
         self.to_add_nodes = []
         self.functions = {
@@ -450,7 +450,7 @@ class Rewriter:
             'id': "/",
             'operation': 'remove_regex',
             'kwargs': {
-                'default_options': ['{}=.*'.format(x) for x in cmd['options'].keys()]
+                'default_options': [f'{x}=.*' for x in cmd['options'].keys()]
             }
         }
         self.process_kwargs(kwargs_cmd)
@@ -464,14 +464,11 @@ class Rewriter:
 
         cdata = self.interpreter.coredata
         options = {
-            **cdata.builtins,
-            **cdata.builtins_per_machine.host,
-            **{'build.' + k: o for k, o in cdata.builtins_per_machine.build.items()},
-            **cdata.backend_options,
-            **cdata.base_options,
-            **(dict(cdata.flatten_lang_iterator(cdata.compiler_options.host.items()))),
-            **{'build.' + k: o for k, o in cdata.flatten_lang_iterator(cdata.compiler_options.build.items())},
-            **cdata.user_options,
+            **{str(k): v for k, v in cdata.options.items()},
+            **{str(k): v for k, v in cdata.options.items()},
+            **{str(k): v for k, v in cdata.options.items()},
+            **{str(k): v for k, v in cdata.options.items()},
+            **{str(k): v for k, v in cdata.options.items()},
         }
 
         for key, val in sorted(cmd['options'].items()):
@@ -487,7 +484,7 @@ class Rewriter:
                 self.handle_error()
                 continue
 
-            kwargs_cmd['kwargs']['default_options'] += ['{}={}'.format(key, val)]
+            kwargs_cmd['kwargs']['default_options'] += [f'{key}={val}']
 
         self.process_kwargs(kwargs_cmd)
 
@@ -503,8 +500,12 @@ class Rewriter:
         node = None
         arg_node = None
         if cmd['function'] == 'project':
-            if cmd['id'] != '/':
-                mlog.error('The ID for the function type project must be "/"', *self.on_error())
+            # msys bash may expand '/' to a path. It will mangle '//' to '/'
+            # but in order to keep usage shell-agnostic, also allow `//` as
+            # the function ID such that it will work in both msys bash and
+            # other shells.
+            if {'/', '//'}.isdisjoint({cmd['id']}):
+                mlog.error('The ID for the function type project must be "/" or "//" not "' + cmd['id'] + '"', *self.on_error())
                 return self.handle_error()
             node = self.interpreter.project_node
             arg_node = node.args
@@ -589,8 +590,8 @@ class Rewriter:
 
         # Convert the keys back to IdNode's
         arg_node.kwargs = {IdNode(Token('', '', 0, 0, 0, None, k)): v for k, v in arg_node.kwargs.items()}
-        if num_changed > 0 and node not in self.modefied_nodes:
-            self.modefied_nodes += [node]
+        if num_changed > 0 and node not in self.modified_nodes:
+            self.modified_nodes += [node]
 
     def find_assignment_node(self, node: BaseNode) -> AssignmentNode:
         if node.ast_id and node.ast_id in self.interpreter.reverse_assignment:
@@ -655,7 +656,7 @@ class Rewriter:
                     mlog.log('  -- Source', mlog.green(i), 'is already defined for the target --> skipping')
                     continue
                 mlog.log('  -- Adding source', mlog.green(i), 'at',
-                         mlog.yellow('{}:{}'.format(node.filename, node.lineno)))
+                         mlog.yellow(f'{node.filename}:{node.lineno}'))
                 token = Token('string', node.filename, 0, 0, 0, None, i)
                 to_append += [StringNode(token)]
 
@@ -671,8 +672,8 @@ class Rewriter:
             # Mark the node as modified
             if arg_node not in to_sort_nodes and not isinstance(node, FunctionNode):
                 to_sort_nodes += [arg_node]
-            if node not in self.modefied_nodes:
-                self.modefied_nodes += [node]
+            if node not in self.modified_nodes:
+                self.modified_nodes += [node]
 
         elif cmd['operation'] == 'src_rm':
             # Helper to find the exact string node and its parent
@@ -699,14 +700,14 @@ class Rewriter:
                     arg_node = root
                 assert(arg_node is not None)
                 mlog.log('  -- Removing source', mlog.green(i), 'from',
-                         mlog.yellow('{}:{}'.format(string_node.filename, string_node.lineno)))
+                         mlog.yellow(f'{string_node.filename}:{string_node.lineno}'))
                 arg_node.arguments.remove(string_node)
 
                 # Mark the node as modified
                 if arg_node not in to_sort_nodes and not isinstance(root, FunctionNode):
                     to_sort_nodes += [arg_node]
-                if root not in self.modefied_nodes:
-                    self.modefied_nodes += [root]
+                if root not in self.modified_nodes:
+                    self.modified_nodes += [root]
 
         elif cmd['operation'] == 'target_add':
             if target is not None:
@@ -746,7 +747,7 @@ class Rewriter:
                 to_remove = target['node']
             self.to_remove_nodes += [to_remove]
             mlog.log('  -- Removing target', mlog.green(cmd['target']), 'at',
-                     mlog.yellow('{}:{}'.format(to_remove.filename, to_remove.lineno)))
+                     mlog.yellow(f'{to_remove.filename}:{to_remove.lineno}'))
 
         elif cmd['operation'] == 'info':
             # T.List all sources in the target
@@ -781,12 +782,12 @@ class Rewriter:
         self.functions[cmd['type']](cmd)
 
     def apply_changes(self):
-        assert(all(hasattr(x, 'lineno') and hasattr(x, 'colno') and hasattr(x, 'filename') for x in self.modefied_nodes))
+        assert(all(hasattr(x, 'lineno') and hasattr(x, 'colno') and hasattr(x, 'filename') for x in self.modified_nodes))
         assert(all(hasattr(x, 'lineno') and hasattr(x, 'colno') and hasattr(x, 'filename') for x in self.to_remove_nodes))
-        assert(all(isinstance(x, (ArrayNode, FunctionNode)) for x in self.modefied_nodes))
+        assert(all(isinstance(x, (ArrayNode, FunctionNode)) for x in self.modified_nodes))
         assert(all(isinstance(x, (ArrayNode, AssignmentNode, FunctionNode)) for x in self.to_remove_nodes))
         # Sort based on line and column in reversed order
-        work_nodes = [{'node': x, 'action': 'modify'} for x in self.modefied_nodes]
+        work_nodes = [{'node': x, 'action': 'modify'} for x in self.modified_nodes]
         work_nodes += [{'node': x, 'action': 'rm'} for x in self.to_remove_nodes]
         work_nodes = list(sorted(work_nodes, key=lambda x: (x['node'].lineno, x['node'].colno), reverse=True))
         work_nodes += [{'node': x, 'action': 'add'} for x in self.to_add_nodes]
@@ -817,9 +818,9 @@ class Rewriter:
             fdata = ''
             # Create an empty file if it does not exist
             if not os.path.exists(fpath):
-                with open(fpath, 'w'):
+                with open(fpath, 'w', encoding='utf-8'):
                     pass
-            with open(fpath, 'r') as fp:
+            with open(fpath, encoding='utf-8') as fp:
                 fdata = fp.read()
 
             # Generate line offsets numbers
@@ -870,7 +871,7 @@ class Rewriter:
         # Write the files back
         for key, val in files.items():
             mlog.log('Rewriting', mlog.yellow(key))
-            with open(val['path'], 'w') as fp:
+            with open(val['path'], 'w', encoding='utf-8') as fp:
                 fp.write(val['raw'])
 
 target_operation_map = {
@@ -920,9 +921,9 @@ def generate_def_opts(options) -> T.List[dict]:
         'options': list_to_dict(options.options),
     }]
 
-def genreate_cmd(options) -> T.List[dict]:
+def generate_cmd(options) -> T.List[dict]:
     if os.path.exists(options.json):
-        with open(options.json, 'r') as fp:
+        with open(options.json, encoding='utf-8') as fp:
             return json.load(fp)
     else:
         return json.loads(options.json)
@@ -934,8 +935,8 @@ cli_type_map = {
     'kwargs': generate_kwargs,
     'default-options': generate_def_opts,
     'def': generate_def_opts,
-    'command': genreate_cmd,
-    'cmd': genreate_cmd,
+    'command': generate_cmd,
+    'cmd': generate_cmd,
 }
 
 def run(options):

@@ -1,0 +1,13 @@
+---
+- name: '{{ name }}-build'
+  shell: |
+    set -e
+    cd {{ name }}
+
+    {{ global_env }}
+    {{ local_env }}
+    perl Build.PL install_base="$VIRT_PREFIX"
+    perl Build
+    perl Build install
+  when:
+    - target in machines

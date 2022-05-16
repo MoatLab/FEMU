@@ -1,0 +1,69 @@
+HELLO_WORLD_TEST := test/hello_world/hello_kernel/hello_kernel
+HELLO_WORLD_STB_TEST := test/hello_world/hello_kernel/hello_kernel.stb
+
+.PHONY: hello_world-tests
+hello_world-tests: $(HELLO_WORLD_TEST:%=%-check-smt-mambo)
+hello_world-tests: $(HELLO_WORLD_TEST:%=%-check-smt-p9-mambo)
+hello_world-tests: $(HELLO_WORLD_TEST:%=%-check-mambo)
+hello_world-tests: $(HELLO_WORLD_TEST:%=%-check-p9-mambo)
+hello_world-tests: $(HELLO_WORLD_TEST:%=%-check-qemu)
+
+hello_world-tests: $(HELLO_WORLD_STB_TEST:%=%-check-stb-smt-mambo)
+hello_world-tests: $(HELLO_WORLD_STB_TEST:%=%-check-stb-smt-p9-mambo)
+hello_world-tests: $(HELLO_WORLD_STB_TEST:%=%-check-stb-mambo)
+hello_world-tests: $(HELLO_WORLD_STB_TEST:%=%-check-stb-p9-mambo)
+
+boot-tests: hello_world-tests
+check: hello_world-tests
+
+cc-name := $(shell $(CC) -v 2>&1 | grep -q "clang version" && echo clang || echo gcc)
+
+ifeq ($(cc-name),clang)
+hello_kernel_CFLAGS = --target=powerpc64-linux-gnu
+endif
+hello_kernel_CFLAGS += -mbig-endian -m64
+
+$(HELLO_WORLD_TEST:%=%-check-smt-mambo): %-check-smt-mambo: % skiboot.lid
+	$(call Q , BOOT TEST , THREADS=2 ./test/hello_world/run_mambo_hello_world.sh , $@)
+
+$(HELLO_WORLD_TEST:%=%-check-smt-p9-mambo): %-check-smt-p9-mambo: % skiboot.lid
+	$(call Q , BOOT TEST , THREADS=2 ./test/hello_world/run_mambo_p9_hello_world.sh , $@)
+
+$(HELLO_WORLD_TEST:%=%-check-mambo): %-check-mambo: % skiboot.lid
+	$(call Q , BOOT TEST , ./test/hello_world/run_mambo_hello_world.sh, $@)
+
+$(HELLO_WORLD_TEST:%=%-check-p9-mambo): %-check-p9-mambo: % skiboot.lid
+	$(call Q , BOOT TEST , ./test/hello_world/run_mambo_p9_hello_world.sh, $@)
+
+# and now, with secure and trusted boot:
+$(HELLO_WORLD_STB_TEST:%=%-check-stb-smt-mambo): %-check-stb-smt-mambo: % skiboot.lid.stb
+	$(call Q , BOOT TEST , SKIBOOT_ENABLE_MAMBO_STB=1 THREADS=2 ./test/hello_world/run_mambo_hello_world.sh , $@)
+
+$(HELLO_WORLD_STB_TEST:%=%-check-stb-smt-p9-mambo): %-check-stb-smt-p9-mambo: % skiboot.lid.stb
+	$(call Q , BOOT TEST , SKIBOOT_ENABLE_MAMBO_STB=1 THREADS=2 ./test/hello_world/run_mambo_p9_hello_world.sh , $@)
+
+$(HELLO_WORLD_STB_TEST:%=%-check-stb-mambo): %-check-stb-mambo: % skiboot.lid.stb
+	$(call Q , BOOT TEST , SKIBOOT_ENABLE_MAMBO_STB=1 ./test/hello_world/run_mambo_hello_world.sh, $@)
+
+$(HELLO_WORLD_STB_TEST:%=%-check-stb-p9-mambo): %-check-stb-p9-mambo: % skiboot.lid.stb
+	$(call Q , BOOT TEST , SKIBOOT_ENABLE_MAMBO_STB=1 ./test/hello_world/run_mambo_p9_hello_world.sh, $@)
+
+# qemu
+
+$(HELLO_WORLD_TEST:%=%-check-qemu): %-check-qemu: % skiboot.lid
+	$(call Q , BOOT TEST , ./test/hello_world/run_qemu_hello_world.sh, $@)
+
+test/hello_world/hello_kernel/hello_kernel.o: test/hello_world/hello_kernel/hello_kernel.S
+	$(call Q,CC, $(CC) $(hello_kernel_CFLAGS) -c -o $@ $< ,$@)
+
+test/hello_world/hello_kernel/hello_kernel: test/hello_world/hello_kernel/hello_kernel.o
+	$(call Q,LD, $(LD) -EB -m elf64ppc -N -o $@ $^ , $@)
+
+test/hello_world/hello_kernel/hello_kernel.stb: test/hello_world/hello_kernel/hello_kernel libstb/create-container
+	$(call Q,STB-DEVELOPMENT-SIGNED-CONTAINER,$(SRC)/libstb/sign-with-local-keys.sh $< $@ $(SRC)/libstb/keys/,$@)
+
+clean: hello_world-test-clean
+
+hello_world-test-clean:
+	$(RM) test/hello_world/hello_kernel/hello_kernel
+	$(RM) test/hello_world/hello_kernel/hello_kernel.o

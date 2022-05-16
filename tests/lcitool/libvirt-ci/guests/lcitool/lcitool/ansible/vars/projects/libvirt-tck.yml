@@ -1,0 +1,26 @@
+---
+packages:
+  - perl
+  - perl-Archive-Tar
+  - perl-Digest
+  - perl-Digest-MD5
+  - perl-File-Slurp
+  - perl-IO-Compress-Bzip2
+  - perl-IO-String
+  - perl-Module-Build
+  - perl-NetAddr-IP
+  - perl-Sub-Uplevel
+  - perl-TAP-Formatter-HTML
+  - perl-TAP-Formatter-JUnit
+  - perl-TAP-Harness-Archive
+  - perl-Test-Exception
+  - perl-Test-LWP-UserAgent
+  - perl-Test-Pod
+  - perl-Test-Pod-Coverage
+  - perl-XML-Twig
+  - perl-XML-Writer
+  - perl-XML-XPath
+  - perl-YAML
+  - perl-accessors
+  - perl-generators
+  - rpmbuild

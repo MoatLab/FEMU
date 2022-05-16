@@ -1,0 +1,167 @@
+# -*-Makefile-*-
+libflash_test_test_ipmi_hiomap_SOURCES = \
+	libflash/test/test-ipmi-hiomap.c \
+	libflash/test/stubs.c \
+	libflash/ipmi-hiomap.c
+
+libflash_test_test_blocklevel_SOURCES = \
+	libflash/test/test-blocklevel.c \
+	libflash/test/stubs.c
+
+libflash_test_test_flash_SOURCES = \
+	libflash/test/test-flash.c \
+	libflash/test/stubs.c \
+	libflash/test/mbox-server.c
+
+libflash_test_test_ecc_SOURCES = \
+	libflash/test/test-ecc.c \
+	libflash/test/stubs.c \
+	libflash/test/mbox-server.c
+
+libflash_test_test_mbox_SOURCES = \
+	libflash/test/test-mbox.c \
+	libflash/test/stubs.c \
+	libflash/test/mbox-server.c
+
+check_PROGRAMS = \
+	libflash/test/test-ipmi-hiomap \
+	libflash/test/test-blocklevel \
+	libflash/test/test-flash \
+	libflash/test/test-ecc \
+	libflash/test/test-mbox
+
+TEST_FLAGS = -D__TEST__ -MMD -MP
+
+.PHONY: libflash-check libflash-coverage
+libflash-check: $(check_PROGRAMS:%=%-check)
+libflash-coverage: $(check_PROGRAMS:%=%-gcov-run)
+clean: libflash-test-clean
+check: libflash-check
+coverage: libflash-coverage
+strict-check: TEST_FLAGS += -D__STRICT_TEST__
+strict-check: check
+
+LCOV_EXCLUDE += $(check_PROGRAMS:%=%.c)
+
+$(check_PROGRAMS:%=%-check) : %-check : %
+	$(call QTEST, RUN-TEST , $(VALGRIND) $<, $<)
+
+# Transform a prerequisite into something approximating a variable name. This
+# is used to map check_PROGRAMS prerequisits to the corresponding _SOURCES
+# variable.
+#
+# For example:
+#
+#   $(call prereq2var,libflash/test/test-mbox)
+#
+# Will output:
+#
+#   'libflash_test_test_mbox'
+#
+prereq2var = $(subst /,_,$(subst -,_,$(1)))
+
+# Generate prerequisites from a target based on the target's corresponding
+# _SOURCES variable.
+#
+# For example, with:
+#
+#   libflash_test_test_mbox_SOURCES = \
+#       libflash/test/test-mbox.c \
+#       libflash/test/stubs.c \
+#       libflash/test/mbox-server.c
+#   HOST_TRIPLE = x86_64-linux-gnu
+#
+# A call to target2prereq where the target is libflash/test/test-mbox:
+#
+#   $(call target2prereq,$@,$(HOST_TRIPLE)/)
+#
+# Will output:
+#
+#   x86_64-linux-gnu/libflash/test/test-mbox.o
+#   x86_64-linux-gnu/libflash/test/stubs.o
+#   x86_64-linux-gnu/libflash/test/mbox-server.o
+target2prereq = $(patsubst %.c,%.o,$(addprefix $(2),$($(call prereq2var,$(1))_SOURCES)))
+
+# Generate path stems for all applications in check_PROGRAMS. This is usef
+#
+# For example, with:
+#
+#   libflash_test_test_mbox_SOURCES = \
+#       libflash/test/test-mbox.c \
+#       libflash/test/stubs.c \
+#       libflash/test/mbox-server.c
+#   libflash_test_test_ecc_SOURCES = \
+#       libflash/test/test-ecc.c \
+#       libflash/test/stubs.c \
+#       libflash/test/mbox-server.c
+#   check_PROGRAMS = libflash/test/test-mbox libflash/test/test-ecc
+#   HOST_TRIPLE = x86_64-linux-gnu
+#
+# A call to:
+#
+#   $(call objstem,$(check_PROGRAMS),$(HOST_TRIPLE)/)
+#
+# Will output:
+#
+#   x86_64-linux-gnu/libflash/test/test-mbox
+#   x86_64-linux-gnu/libflash/test/stubs
+#   x86_64-linux-gnu/libflash/test/mbox-server
+#   x86_64-linux-gnu/libflash/test/test-ecc
+#   x86_64-linux-gnu/libflash/test/stubs
+#   x86_64-linux-gnu/libflash/test/mbox-server
+objstem = $(patsubst %.c,%,$(addprefix $(2),$(foreach bin,$(1),$($(call prereq2var,$(bin))_SOURCES))))
+
+# Record the host platform triple to separate test vs production objects.
+HOST_TRIPLE = $(shell $(HOSTCC) -dumpmachine)
+
+# Mirror the skiboot directory structure under a directory named after the host
+# triple in the skiboot root directory, and place the built objects in this
+# mirrored structure.
+$(HOST_TRIPLE)/%.o : %.c
+	@mkdir -p $(dir $@)
+	$(call Q, HOSTCC ,$(HOSTCC) $(HOSTCFLAGS) $(TEST_FLAGS) -Wno-suggest-attribute=const -g -c -o $@ $<, $@)
+
+# Use GNU make metaprogramming dynamically define targets and prequisites for
+# binaries listed in check_PROGRAMS.
+#
+# Secondary expansion[1] allows us to use the target automatic variable ($@) in
+# the prequisite list. Knowing the target we can map to the corresponding
+# _SOURCES variable to learn what to build and link. Finally, make sure the
+# artifacts are output under the $(HOST_TRIPLE) directory to separate them from
+# objects intended for skiboot proper.
+#
+# [1] https://www.gnu.org/software/make/manual/html_node/Secondary-Expansion.html#Secondary-Expansion
+.SECONDEXPANSION:
+$(check_PROGRAMS) : $$(call target2prereq,$$@,$(HOST_TRIPLE)/)
+	$(call Q, HOSTCC , $(HOSTCC) $(HOSTCFLAGS) $(TEST_FLAGS) -Wno-suggest-attribute=const -O0 -g -o $@ $^, $@)
+
+.PHONY: libflash-test-clean
+libflash-test-clean: OBJ_STEMS = $(call objstem,$(check_PROGRAMS),$(HOST_TRIPLE)/)
+libflash-test-clean: libflash-test-gcov-clean
+	$(RM) $(check_PROGRAMS)
+	$(RM) $(OBJ_STEMS:%=%.o)
+	$(RM) $(OBJ_STEMS:%=%.d)
+
+# gcov support: Build objects under $(HOST_TRIPLE)/gcov/
+$(check_PROGRAMS:%=%-gcov-run) : %-run: %
+	$(call QTEST, TEST-COVERAGE ,$< , $<)
+
+$(HOST_TRIPLE)/gcov/%.o : %.c
+	@mkdir -p $(dir $@)
+	$(call Q, HOSTCC ,$(HOSTCC) $(HOSTCFLAGS) $(HOSTGCOVCFLAGS) $(TEST_FLAGS) -Wno-suggest-attribute=const -g -c -o $@ $<, $@)
+
+.SECONDEXPANSION:
+$(check_PROGRAMS:%=%-gcov) : $$(call target2prereq,$$(patsubst %-gcov,%,$$@),$(HOST_TRIPLE)/gcov/)
+	$(call Q, HOSTCC , $(HOSTCC) $(HOSTCFLAGS) $(HOSTGCOVCFLAGS) $(TEST_FLAGS) -Wno-suggest-attribute=const -O0 -g -o $@ $^, $@)
+
+.PHONY: libflash-test-gcov-clean
+libflash-test-gcov-clean: GCOV_OBJ_STEMS = $(call objstem,$(check_PROGRAMS),$(HOST_TRIPLE)/gcov/)
+libflash-test-gcov-clean:
+	$(RM) $(check_PROGRAMS:%=%-gcov)
+	$(RM) $(GCOV_OBJ_STEMS:%=%.o)
+	$(RM) $(GCOV_OBJ_STEMS:%=%.d)
+	$(RM) $(GCOV_OBJ_STEMS:%=%.gcda)
+	$(RM) $(GCOV_OBJ_STEMS:%=%.gcno)
+
+-include $(patsubst %,%.d,$(call objstem,$(check_PROGRAMS),$(HOST_TRIPLE)/))
+-include $(patsubst %,%.d,$(call objstem,$(check_PROGRAMS),$(HOST_TRIPLE)/gcov/))

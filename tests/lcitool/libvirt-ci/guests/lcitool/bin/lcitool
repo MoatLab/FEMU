@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+
+# lcitool - libvirt CI guest management tool
+#
+# Copyright (C) 2017-2020 Red Hat, Inc.
+#
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+import logging
+import sys
+
+from lcitool.application import Application
+from lcitool.commandline import CommandLine
+from lcitool.logger import LevelFormatter
+
+
+if __name__ == "__main__":
+    log_level_formats = {
+        logging.DEBUG: "[%(levelname)s] %(module)s:%(funcName)s:%(lineno)d: %(message)s",
+        logging.ERROR: "[%(levelname)s]: %(message)s",
+    }
+
+    custom_formatter = LevelFormatter(log_level_formats)
+    custom_handler = logging.StreamHandler(stream=sys.stderr)
+    custom_handler.setFormatter(custom_formatter)
+
+    log = logging.getLogger()
+    log.addHandler(custom_handler)
+
+    args = CommandLine().parse()
+
+    if args.debug:
+        log.setLevel(logging.DEBUG)
+
+    try:
+        Application().run(args)
+    except Exception:
+        log.exception("An unexpected error occurred")
+        sys.exit(1)

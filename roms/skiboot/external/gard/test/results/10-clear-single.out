@@ -1,0 +1,7 @@
+Clearing the entire gard partition...done
+ ID       | Error    | Type       | Path
+---------------------------------------------------------
+ 00000001 | 00000000 | Manual     | /Sys0/Node0/Proc1
+=========================================================
+Clearing gard record 0x00000001...done
+No GARD entries to display

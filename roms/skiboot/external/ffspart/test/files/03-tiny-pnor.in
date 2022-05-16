@@ -1,0 +1,4 @@
+ONE,0x00400,0x00000100,EL,,/dev/zero
+TWO,0x00500,0x00000100,EF,,/dev/zero
+THREE,0x600,0x00000100,EF,,/dev/zero
+FOUR,0x0700,0x00000100,EF,,/dev/zero

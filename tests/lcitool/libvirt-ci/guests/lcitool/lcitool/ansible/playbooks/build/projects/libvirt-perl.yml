@@ -1,0 +1,19 @@
+---
+- set_fact:
+    name: libvirt-perl
+    machines: '{{ all_machines }}'
+    archive_format: gz
+    git_url: '{{ git_urls["libvirt-perl"][git_remote] }}'
+
+- include: 'jobs/prepare.yml'
+- include: 'jobs/perl-modulebuild-build-job.yml'
+  vars:
+    local_env: |
+      export TEST_MAINTAINER=1
+- include: 'jobs/perl-modulebuild-check-job.yml'
+  vars:
+    local_env: |
+      export TEST_MAINTAINER=1
+- include: 'jobs/perl-modulebuild-rpm-job.yml'
+  vars:
+    machines: '{{ rpm_machines }}'

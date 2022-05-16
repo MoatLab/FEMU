@@ -1,0 +1,16 @@
+---
+- name: '{{ name }}-build'
+  shell: |
+    set -e
+    cd {{ name }}
+
+    {{ global_env }}
+    {{ local_env }}
+    rm -rf build
+    mkdir build
+    cd build
+    meson .. . --prefix=$VIRT_PREFIX {{ meson_args }}
+    $NINJA
+    $NINJA install
+  when:
+    - target in machines

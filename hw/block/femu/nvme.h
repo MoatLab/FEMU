@@ -19,22 +19,10 @@
 
 /**
  * @brief 
- * Code Tracing for all functions under dir '/femu'
- * 
- */
-//#define INHOINNO_VERBOSE_SETTING    1
-
-/**
- * @brief 
- * Code Tracing for all functions under dir '/femu/nvme*'
- * 
- */
-#define INHOINNO_NVME_VERBOSE_SETTING    0
-/**
- * @brief 
  * Advance Channel latency emulating
  * BBSSD
  * ZNS SSD
+ * @inhoinno
  */
 #define ADVANCE_PER_CH_ENDTIME 1
 

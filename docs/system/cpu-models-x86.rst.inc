@@ -1,5 +1,5 @@
 Recommendations for KVM CPU model configuration on x86 hosts
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+============================================================
 
 The information that follows provides recommendations for configuring
 CPU models on x86 hosts. The goals are to maximise performance, while
@@ -37,6 +37,28 @@ to approximate the host model as closely as possible. This does not
 guarantee the CPU family, stepping, etc will precisely match the host
 CPU, as they would with "Host passthrough", but gives much of the
 benefit of passthrough, while making live migration safe.
+
+
+ABI compatibility levels for CPU models
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The x86_64 architecture has a number of `ABI compatibility levels`_
+defined. Traditionally most operating systems and toolchains would
+only target the original baseline ABI. It is expected that in
+future OS and toolchains are likely to target newer ABIs. The
+table that follows illustrates which ABI compatibility levels
+can be satisfied by the QEMU CPU models. Note that the table only
+lists the long term stable CPU model versions (eg Haswell-v4).
+In addition to what is listed, there are also many CPU model
+aliases which resolve to a different CPU model version,
+depending on the machine type is in use.
+
+.. _ABI compatibility levels: https://gitlab.com/x86-psABIs/x86-64-ABI/
+
+.. csv-table:: x86-64 ABI compatibility levels
+   :file: cpu-models-x86-abi.csv
+   :widths: 40,15,15,15,15
+   :header-rows: 2
 
 
 Preferred CPU models for Intel x86 hosts
@@ -205,7 +227,7 @@ features are included if using "Host passthrough" or "Host model".
 Preferred CPU models for AMD x86 hosts
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-The following CPU models are preferred for use on Intel hosts.
+The following CPU models are preferred for use on AMD hosts.
 Administrators / applications are recommended to use the CPU model that
 matches the generation of the host CPUs in use. In a deployment with a
 mixture of host CPU models between machines, if live migration
@@ -346,7 +368,7 @@ featureset, which prevents guests having optimal performance.
 
 
 Syntax for configuring CPU models
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+=================================
 
 The examples below illustrate the approach to configuring the various
 CPU models / features in QEMU and libvirt.
@@ -364,7 +386,7 @@ Host passthrough with feature customization:
 
 .. parsed-literal::
 
-  |qemu_system| -cpu host,-vmx,...
+  |qemu_system| -cpu host,vmx=off,...
 
 Named CPU models:
 
@@ -376,7 +398,7 @@ Named CPU models with feature customization:
 
 .. parsed-literal::
 
-  |qemu_system| -cpu Westmere,+pcid,...
+  |qemu_system| -cpu Westmere,pcid=on,...
 
 Libvirt guest XML
 ^^^^^^^^^^^^^^^^^

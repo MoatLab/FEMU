@@ -1,0 +1,19 @@
+dist: focal
+language: c
+
+addons:
+  apt:
+    packages:
+      - libssl-dev
+
+script:
+  - export PATH="/opt/at14.0/bin:$PATH"
+  - make -j2 qemu
+  - ./lib/libtpm/test.sh
+  - make -j2 distclean
+  - make -j2 js2x
+
+jobs:
+  include:
+    - os: linux
+      arch: ppc64le

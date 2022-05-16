@@ -1,11 +1,9 @@
-.. This is the top level page for the 'specs' manual
+----------------------------------------------
+System Emulation Guest Hardware Specifications
+----------------------------------------------
 
-
-QEMU System Emulation Guest Hardware Specifications
-===================================================
-
-
-Contents:
+This section of the manual contains specifications of
+guest hardware that is specific to QEMU.
 
 .. toctree::
    :maxdepth: 2
@@ -16,3 +14,9 @@ Contents:
    acpi_hw_reduced_hotplug
    tpm
    acpi_hest_ghes
+   acpi_cpu_hotplug
+   acpi_mem_hotplug
+   acpi_pci_hotplug
+   acpi_nvdimm
+   acpi_erst
+   sev-guest-firmware

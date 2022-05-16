@@ -35,9 +35,7 @@ int backend_rw(SsdDramBackend *b, QEMUSGList *qsg, uint64_t *lbal, bool is_write
     void *mb = b->logical_space;
 
     DMADirection dir = DMA_DIRECTION_FROM_DEVICE;
-    #ifdef INHOINNO_VERBOSE_SETTING
-    femu_err("dram.c : backend_rw(), to inhoinno \n");
-    #endif
+
     if (is_write) {
         dir = DMA_DIRECTION_TO_DEVICE;
     }

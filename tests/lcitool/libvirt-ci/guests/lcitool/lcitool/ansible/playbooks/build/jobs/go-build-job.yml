@@ -1,0 +1,11 @@
+---
+- name: '{{ name }}-build'
+  shell: |
+    set -e
+    cd {{ name }}
+
+    {{ global_env }}
+    {{ local_env }}
+    go build -v
+  when:
+    - target in machines

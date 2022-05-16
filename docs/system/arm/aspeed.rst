@@ -5,7 +5,7 @@ The QEMU Aspeed machines model BMCs of various OpenPOWER systems and
 Aspeed evaluation boards. They are based on different releases of the
 Aspeed SoC : the AST2400 integrating an ARM926EJ-S CPU (400MHz), the
 AST2500 with an ARM1176JZS CPU (800MHz) and more recently the AST2600
-with dual cores ARM Cortex A7 CPUs (1.2GHz).
+with dual cores ARM Cortex-A7 CPUs (1.2GHz).
 
 The SoC comes with RAM, Gigabit ethernet, USB, SD/MMC, USB, SPI, I2C,
 etc.
@@ -13,6 +13,8 @@ etc.
 AST2400 SoC based machines :
 
 - ``palmetto-bmc``         OpenPOWER Palmetto POWER8 BMC
+- ``quanta-q71l-bmc``      OpenBMC Quanta BMC
+- ``supermicrox11-bmc``    Supermicro X11 BMC
 
 AST2500 SoC based machines :
 
@@ -20,12 +22,15 @@ AST2500 SoC based machines :
 - ``romulus-bmc``          OpenPOWER Romulus POWER9 BMC
 - ``witherspoon-bmc``      OpenPOWER Witherspoon POWER9 BMC
 - ``sonorapass-bmc``       OCP SonoraPass BMC
-- ``swift-bmc``            OpenPOWER Swift BMC POWER9
+- ``fp5280g2-bmc``         Inspur FP5280G2 BMC
+- ``g220a-bmc``            Bytedance G220A BMC
 
 AST2600 SoC based machines :
 
-- ``ast2600-evb``          Aspeed AST2600 Evaluation board (Cortex A7)
+- ``ast2600-evb``          Aspeed AST2600 Evaluation board (Cortex-A7)
 - ``tacoma-bmc``           OpenPOWER Witherspoon POWER9 AST2600 BMC
+- ``rainier-bmc``          IBM Rainier POWER10 BMC
+- ``fuji-bmc``             Facebook Fuji BMC
 
 Supported devices
 -----------------
@@ -48,18 +53,18 @@ Supported devices
  * UART
  * Ethernet controllers
  * Front LEDs (PCA9552 on I2C bus)
+ * LPC Peripheral Controller (a subset of subdevices are supported)
+ * Hash/Crypto Engine (HACE) - Hash support only. TODO: HMAC and RSA
+ * ADC
 
 
 Missing devices
 ---------------
 
  * Coprocessor support
- * ADC (out of tree implementation)
  * PWM and Fan Controller
- * LPC Bus Controller
  * Slave GPIO Controller
  * Super I/O Controller
- * Hash/Crypto Engine
  * PCI-Express 1 Controller
  * Graphic Display Controller
  * PECI Controller
@@ -72,18 +77,31 @@ Missing devices
 Boot options
 ------------
 
-The Aspeed machines can be started using the -kernel option to load a
-Linux kernel or from a firmware image which can be downloaded from the
-OpenPOWER jenkins :
+The Aspeed machines can be started using the ``-kernel`` and ``-dtb`` options
+to load a Linux kernel or from a firmware. Images can be downloaded from the
+OpenBMC jenkins :
 
-   https://openpower.xyz/
+   https://jenkins.openbmc.org/job/ci-openbmc/lastSuccessfulBuild/
+
+or directly from the OpenBMC GitHub release repository :
+
+   https://github.com/openbmc/openbmc/releases
+
+To boot a kernel directly from a Linux build tree:
+
+.. code-block:: bash
+
+  $ qemu-system-arm -M ast2600-evb -nographic \
+        -kernel arch/arm/boot/zImage \
+        -dtb arch/arm/boot/dts/aspeed-ast2600-evb.dtb \
+        -initrd rootfs.cpio
 
 The image should be attached as an MTD drive. Run :
 
 .. code-block:: bash
 
   $ qemu-system-arm -M romulus-bmc -nic user \
-	-drive file=flash-romulus,format=raw,if=mtd -nographic
+	-drive file=obmc-phosphor-image-romulus.static.mtd,format=raw,if=mtd -nographic
 
 Options specific to Aspeed machines are :
 

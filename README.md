@@ -1,4 +1,4 @@
-[![FEMU Version](https://img.shields.io/badge/FEMU-v5.2-brightgreen)](https://img.shields.io/badge/FEMU-v5.2-brightgreen)
+[![FEMU Version](https://img.shields.io/badge/FEMU-v7.0-brightgreen)](https://img.shields.io/badge/FEMU-v7.0-brightgreen)
 [![Build Status](https://travis-ci.com/ucare-uchicago/FEMU.svg?branch=master)](https://travis-ci.com/ucare-uchicago/FEMU)
 [![License: GPL v2](https://img.shields.io/badge/License-GPL%20v2-blue.svg)](https://www.gnu.org/licenses/old-licenses/gpl-2.0.en.html)
 [![Platform](https://img.shields.io/badge/Platform-x86--64-brightgreen)](https://shields.io/)
@@ -142,11 +142,6 @@ Installation
   | Zoned-Namespace (ZNS) SSD | &cross; | &cross; | &cross; | &check; |
 
 
-> Note: FEMU is now re-based on QEMU-5.2.0, which requires >=Python-3.6 and >=Ninjia-1.7 to build, 
-> check [here](https://wiki.qemu.org/ChangeLog/5.2#Build_Dependencies) for installing
-> these dependencies if ``pkgdep.sh`` doesn't solve all the requirements.)
-
-
 3. Prepare the VM image (For performance reasons, we suggest to use a server
    version guest OS [e.g. Ubuntu Server 20.04, 18.04, 16.04])
 
@@ -172,7 +167,7 @@ Installation
     $ cd ~/images
     $ wget http://releases.ubuntu.com/20.04/ubuntu-20.04.3-live-server-amd64.iso
     $ sudo apt-get install qemu-system-x86
-	# Create a QCOW2 disk image
+    # Create a QCOW2 disk image
     $ qemu-img create -f qcow2 femu.qcow2 80G
 
     # install guest OS to femu.qcow2 (You need a GUI environment to prepare the VM image)

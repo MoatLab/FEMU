@@ -48,7 +48,7 @@
 		};
 	};
 
-	fragment@5 {
+	fragment@4 {
 		target = <&test>;
 
 		__overlay__ {
@@ -58,7 +58,7 @@
 		};
 	};
 
-	fragment@6 {
+	fragment@5 {
 		target = <&test>;
 
 		__overlay__ {
@@ -66,7 +66,7 @@
 		};
 	};
 
-	fragment@7 {
+	fragment@6 {
 		target = <&test>;
 
 		__overlay__ {
@@ -74,7 +74,7 @@
 		};
 	};
 
-	fragment@8 {
+	fragment@7 {
 		target = <&test>;
 
 		__overlay__ {

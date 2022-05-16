@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0 OR GPL-2.0-or-later
+#
+# Copyright 2016 IBM Corp.
+
+import json
+import sys
+
+json_params = {
+    'indent': 1,
+    'sort_keys': True,
+    'separators': (',', ': '),
+}
+
+def get_input():
+    while True:
+        resp = input("Update pattern to match both? (y/n): ")
+        if resp in [ "y", "Y" ]:
+            break
+        elif resp in [ "n", "N" ]:
+            print("New entry will be added.")
+            return False
+        else:
+            print("???")
+            continue
+
+    return input("New pattern: ")
+
+def main():
+    if len(sys.argv) != 4:
+        print("USAGE: merge.py old_olog new_olog output")
+        sys.exit(-1)
+
+    old_olog = sys.argv[1]
+    cur_olog = sys.argv[2]
+    out_olog = sys.argv[3]
+
+    try:
+        old_file = open(old_olog, "r")
+        old_json = json.load(old_file)
+        old_file.close()
+    except Exception as e:
+        print("Failed to parse old olog: %s" % e)
+        sys.exit(-1)
+
+    try:
+        cur_file = open(cur_olog, "r")
+        cur_json = json.load(cur_file)
+        cur_file.close()
+    except Exception as e:
+        print("Failed to parse new olog: %s" % e)
+        sys.exit(-1)
+
+    try:
+        out_file = open(out_olog, "w")
+    except Exception as e:
+        print("Failed to open output file: %s" % e)
+        sys.exit(-1)
+
+    cur_patterns = cur_json["olog_error_warning_patterns"]
+    old_patterns = old_json["olog_error_warning_patterns"]
+
+    # Match current patterns to old definitions, detect when pattern is
+    # different.
+
+    for cp in cur_patterns:
+        for op in old_patterns:
+            if cp["label"] != op["label"]:
+                continue
+
+            if cp["pattern"] != op["pattern"]:
+                print("Pattern update detected.")
+                print("Label: %s" % cp["label"])
+                print("")
+                print("Cur Pattern: %s" % cp["pattern"])
+                print("New Pattern: %s" % op["pattern"])
+                print("")
+
+                user_pattern = get_input()
+
+                if user_pattern == False:
+                    continue
+
+                cp["pattern"] = user_pattern
+
+            op["found"] = True
+            break
+
+    # Take any old patterns that are no longer current and move them over
+
+    for op in old_patterns:
+        if "found" in op:
+            continue
+
+        cur_patterns.append(op)
+
+    json.dump(cur_json, out_file, **json_params)
+    out_file.close()
+
+    print("OK")
+
+if __name__ == "__main__":
+    main()

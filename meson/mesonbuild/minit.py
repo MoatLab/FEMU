@@ -25,6 +25,10 @@ from glob import glob
 from mesonbuild import mesonlib
 from mesonbuild.environment import detect_ninja
 from mesonbuild.templates.samplefactory import sameple_generator
+import typing as T
+
+if T.TYPE_CHECKING:
+    import argparse
 
 '''
 we currently have one meson template at this time.
@@ -49,7 +53,7 @@ meson compile -C builddir
 '''
 
 
-def create_sample(options) -> None:
+def create_sample(options: 'argparse.Namespace') -> None:
     '''
     Based on what arguments are passed we check for a match in language
     then check for project type and create new Meson samples project.
@@ -63,7 +67,7 @@ def create_sample(options) -> None:
         raise RuntimeError('Unreachable code')
     print(INFO_MESSAGE)
 
-def autodetect_options(options, sample: bool = False) -> None:
+def autodetect_options(options: 'argparse.Namespace', sample: bool = False) -> None:
     '''
     Here we autodetect options for args not passed in so don't have to
     think about it.
@@ -101,7 +105,7 @@ def autodetect_options(options, sample: bool = False) -> None:
             if f.suffix in ('.cc', '.cpp'):
                 options.language = 'cpp'
                 break
-            if f.suffix in '.cs':
+            if f.suffix == '.cs':
                 options.language = 'cs'
                 break
             if f.suffix == '.cu':
@@ -129,13 +133,14 @@ def autodetect_options(options, sample: bool = False) -> None:
             raise SystemExit("Can't autodetect language, please specify it with -l.")
         print("Detected language: " + options.language)
 
-def add_arguments(parser):
+def add_arguments(parser: 'argparse.ArgumentParser') -> None:
     '''
     Here we add args for that the user can passed when making a new
     Meson project.
     '''
     parser.add_argument("srcfiles", metavar="sourcefile", nargs="*", help="source files. default: all recognized files in current directory")
-    parser.add_argument('-C', default='.', dest='wd', help='directory to cd into before running')
+    parser.add_argument('-C', dest='wd', action=mesonlib.RealPathAction,
+                        help='directory to cd into before running')
     parser.add_argument("-n", "--name", help="project name. default: name of current directory")
     parser.add_argument("-e", "--executable", help="executable name. default: project name")
     parser.add_argument("-d", "--deps", help="dependencies, comma-separated")
@@ -143,10 +148,10 @@ def add_arguments(parser):
     parser.add_argument("-b", "--build", action='store_true', help="build after generation")
     parser.add_argument("--builddir", default='build', help="directory for build")
     parser.add_argument("-f", "--force", action="store_true", help="force overwrite of existing files and directories.")
-    parser.add_argument('--type', default=DEFAULT_PROJECT, choices=('executable', 'library'), help="project type. default: {} based project".format(DEFAULT_PROJECT))
-    parser.add_argument('--version', default=DEFAULT_VERSION, help="project version. default: {}".format(DEFAULT_VERSION))
+    parser.add_argument('--type', default=DEFAULT_PROJECT, choices=('executable', 'library'), help=f"project type. default: {DEFAULT_PROJECT} based project")
+    parser.add_argument('--version', default=DEFAULT_VERSION, help=f"project version. default: {DEFAULT_VERSION}")
 
-def run(options) -> int:
+def run(options: 'argparse.Namespace') -> int:
     '''
     Here we generate the new Meson sample project.
     '''
@@ -170,7 +175,7 @@ def run(options) -> int:
             print('Build directory already exists, deleting it.')
             shutil.rmtree(options.builddir)
         print('Building...')
-        cmd = mesonlib.meson_command + [options.builddir]
+        cmd = mesonlib.get_meson_command() + [options.builddir]
         ret = subprocess.run(cmd)
         if ret.returncode:
             raise SystemExit

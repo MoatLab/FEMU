@@ -41,6 +41,8 @@ void if_init(Slirp *slirp)
 void if_output(struct socket *so, struct mbuf *ifm)
 {
     Slirp *slirp = ifm->slirp;
+    M_DUP_DEBUG(slirp, ifm, 0, 0);
+
     struct mbuf *ifq;
     int on_fastq = 1;
 
@@ -143,7 +145,7 @@ void if_start(Slirp *slirp)
     bool from_batchq = false;
     struct mbuf *ifm, *ifm_next, *ifqt;
 
-    DEBUG_CALL("if_start");
+    DEBUG_VERBOSE_CALL("if_start");
 
     if (slirp->if_start_busy) {
         return;

@@ -1,0 +1,5 @@
+#! /bin/sh
+
+. test/test.sh
+
+run_tests "test/tests/*" "test/results"

@@ -25,6 +25,7 @@
 #include "crypto/tlscredsx509.h"
 #include "qapi/error.h"
 #include "authz/base.h"
+#include "tlscredspriv.h"
 #include "trace.h"
 
 #ifdef CONFIG_GNUTLS
@@ -370,6 +371,12 @@ qcrypto_tls_session_check_certificate(QCryptoTLSSession *session,
                     error_setg(errp,
                                "Certificate does not match the hostname %s",
                                session->hostname);
+                    goto error;
+                }
+            } else {
+                if (session->creds->endpoint ==
+                    QCRYPTO_TLS_CREDS_ENDPOINT_CLIENT) {
+                    error_setg(errp, "No hostname for certificate validation");
                     goto error;
                 }
             }

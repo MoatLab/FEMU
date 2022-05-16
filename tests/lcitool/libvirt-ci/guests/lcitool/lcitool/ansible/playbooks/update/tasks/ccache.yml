@@ -1,0 +1,14 @@
+---
+- name: 'Create ccache wrappers'
+  file:
+    path: /usr/libexec/ccache-wrappers
+    state: directory
+
+- name: 'Create ccache wrappers'
+  file:
+    src: '{{ paths.ccache }}'
+    dest: /usr/libexec/ccache-wrappers/{{ item }}
+    state: link
+  loop:
+    - cc
+    - '{{ paths.cc | basename }}'

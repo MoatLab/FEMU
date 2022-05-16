@@ -1,0 +1,74 @@
+# -*-Makefile-*-
+LIBC_TEST := libc/test/run-time
+
+# We have some tricky tests that have system libc and skiboot libc,
+# so that we can test parts of skiboot libc but in userspace.
+
+LIBC_DUALLIB_TEST := libc/test/run-snprintf \
+	libc/test/run-memops \
+	libc/test/run-stdlib \
+	libc/test/run-ctype
+
+LCOV_EXCLUDE += $(LIBC_TEST:%=%.c) $(LIBC_DUALLIB_TEST:%=%.c) $(LIBC_DUALLIB_TEST:%=%-test.c)
+
+.PHONY : libc-check libc-coverage
+libc-check: $(LIBC_TEST:%=%-check) $(LIBC_DUALLIB_TEST:%=%-check)
+libc-coverage: $(LIBC_TEST:%=%-gcov-run) $(LIBC_DUALLIB_TEST:%=%-gcov-run)
+
+check: libc-check
+coverage: libc-coverage
+
+$(LIBC_TEST:%=%-gcov-run) : %-run: %
+	$(call Q, TEST-COVERAGE ,$< , $<)
+
+$(LIBC_DUALLIB_TEST:%=%-gcov-run) : %-run: %
+	$(eval	LCOV_DIRS += -d $(dir $<) )
+	$(call Q, TEST-COVERAGE , (cd $(dir $<); GCOV_PREFIX_STRIP=`(c=0; while [ "\`pwd\`" != '/' ]; do cd ..; c=\`expr 1 + $$c\`; done; echo $$c)` ./$(notdir $<) ), $< )
+
+$(LIBC_TEST:%=%-check) : %-check: %
+	$(call Q, RUN-TEST ,$(VALGRIND) $<, $<)
+
+$(LIBC_DUALLIB_TEST:%=%-check) : %-check: %
+	$(call Q, RUN-TEST ,$(VALGRIND) $<, $<)
+
+$(LIBC_TEST) : % : %.c
+	$(call Q, HOSTCC ,$(HOSTCC) $(HOSTCFLAGS) -O0 -g -I include -I . -I libfdt -I libc/include -o $@ $<, $<)
+
+$(LIBC_TEST:%=%-gcov): %-gcov : %.c %
+	$(call Q, HOSTCC ,(cd $(dir $<); $(HOSTCC) $(HOSTCFLAGS) $(HOSTGCOVCFLAGS) -I$(shell pwd)/include -I$(shell pwd) -I$(shell pwd)/libfdt -I$(shell pwd)/libc/include -o $(notdir $@) $(notdir $<)), $<)
+
+$(LIBC_DUALLIB_TEST) : % : %.o %-test.o
+	$(call Q, HOSTCC ,$(HOSTCC) $(HOSTCFLAGS) -O0 -g -I include -I . -I libfdt  -o $@ $@-test.o $<, $<)
+
+$(LIBC_DUALLIB_TEST:%=%-gcov) : %-gcov : %-gcov.o %-gcov-test.o
+	$(call Q, HOSTCC ,(cd $(dir $<); $(HOSTCC) $(HOSTCFLAGS) $(HOSTGCOVCFLAGS) -I$(shell pwd)/include -I$(shell pwd)/. -I$(shell pwd)/libfdt  -o $(notdir $@) $(notdir $@)-test.o $(notdir $<)), $<)
+
+$(LIBC_DUALLIB_TEST:%=%-test.o): %-test.o : %-test.c 
+	$(call Q, HOSTCC ,$(HOSTCC) $(HOSTCFLAGS) -O0 -g -I include -I . -I libfdt -I libc/include -ffreestanding -o $@ -c $<, $<)
+
+$(LIBC_DUALLIB_TEST:%=%.o): %.o : %.c 
+	$(call Q, HOSTCC ,$(HOSTCC) $(HOSTCFLAGS) -O0 -g -o $@ -c $<, $<)
+
+$(LIBC_DUALLIB_TEST:%=%-gcov.o): %-gcov.o : %.c 
+	$(call Q, HOSTCC ,(cd $(dir $<); $(HOSTCC) $(HOSTCFLAGS) -fprofile-arcs -ftest-coverage -lgcov -pg -O0 -g -o $(notdir $@) -c $(notdir $<)), $<)
+
+$(LIBC_DUALLIB_TEST:%=%-gcov-test.o): %-gcov-test.o : %-test.c %
+	$(call Q, HOSTCC ,(cd $(dir $<); $(HOSTCC) $(HOSTCFLAGS) -fprofile-arcs -ftest-coverage -lgcov -pg -O0 -g -I$(shell pwd)/include -I$(shell pwd)/. -I$(shell pwd)/libfdt -I$(shell pwd)/libc/include -ffreestanding -o $(notdir $@) -c $(notdir $<) ), $<)
+
+-include $(wildcard libc/test/*.d)
+
+clean: libc-test-clean
+
+libc-test-clean:
+	$(RM) -f libc/test/*.[od]
+	$(RM) -f $(LIBC_TEST) \
+		$(LIBC_TEST:%=%-gcov) \
+		$(LIBC_TEST:%=%.gcda) \
+		$(LIBC_TEST:%=%.gcno)
+	$(RM) -f $(LIBC_DUALLIB_TEST) \
+		$(LIBC_DUALLIB_TEST:%=%-gcov) \
+		$(LIBC_DUALLIB_TEST:%=%-gcov.gcda) \
+		$(LIBC_DUALLIB_TEST:%=%-gcov.gcno) \
+		$(LIBC_DUALLIB_TEST:%=%-gcov-test.gcda) \
+		$(LIBC_DUALLIB_TEST:%=%-gcov-test.gcno) \
+		$(LIBC_DUALLIB_TEST:%=%-test.o)

@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import re
 import functools
 import typing as T
@@ -22,8 +21,12 @@ from .. import mlog
 from .. import mesonlib
 from ..environment import Environment
 
-from .base import DependencyException, ExternalDependency, PkgConfigDependency
+from .base import DependencyException, SystemDependency
+from .pkgconfig import PkgConfigDependency
 from .misc import threads_factory
+
+if T.TYPE_CHECKING:
+    from ..environment import Properties
 
 # On windows 3 directory layouts are supported:
 # * The default layout (versioned) installed:
@@ -88,13 +91,13 @@ class BoostIncludeDir():
         major = int(self.version_int / 100000)
         minor = int((self.version_int / 100) % 1000)
         patch = int(self.version_int % 100)
-        self.version = '{}.{}.{}'.format(major, minor, patch)
-        self.version_lib = '{}_{}'.format(major, minor)
+        self.version = f'{major}.{minor}.{patch}'
+        self.version_lib = f'{major}_{minor}'
 
     def __repr__(self) -> str:
-        return '<BoostIncludeDir: {} -- {}>'.format(self.version, self.path)
+        return f'<BoostIncludeDir: {self.version} -- {self.path}>'
 
-    def __lt__(self, other: T.Any) -> bool:
+    def __lt__(self, other: object) -> bool:
         if isinstance(other, BoostIncludeDir):
             return (self.version_int, self.path) < (other.version_int, other.path)
         return NotImplemented
@@ -149,7 +152,7 @@ class BoostLibraryFile():
         elif self.nvsuffix in ['a', 'lib']:
             self.static = True
         else:
-            raise DependencyException('Unable to process library extension "{}" ({})'.format(self.nvsuffix, self.path))
+            raise DependencyException(f'Unable to process library extension "{self.nvsuffix}" ({self.path})')
 
         # boost_.lib is the dll import library
         if self.basename.startswith('boost_') and self.nvsuffix == 'lib':
@@ -163,8 +166,8 @@ class BoostLibraryFile():
         if not tags:
             return
 
-        # Without any tags mt is assumed, however, an absents of mt in the name
-        # with tags present indicates that the lib was build without mt support
+        # Without any tags mt is assumed, however, an absence of mt in the name
+        # with tags present indicates that the lib was built without mt support
         self.mt = False
         for i in tags:
             if i == 'mt':
@@ -184,9 +187,9 @@ class BoostLibraryFile():
                 self.toolset = i
 
     def __repr__(self) -> str:
-        return '<LIB: {} {:<32} {}>'.format(self.abitag, self.mod_name, self.path)
+        return f'<LIB: {self.abitag} {self.mod_name:<32} {self.path}>'
 
-    def __lt__(self, other: T.Any) -> bool:
+    def __lt__(self, other: object) -> bool:
         if isinstance(other, BoostLibraryFile):
             return (
                 self.mod_name, self.static, self.version_lib, self.arch,
@@ -203,7 +206,7 @@ class BoostLibraryFile():
             )
         return NotImplemented
 
-    def __eq__(self, other: T.Any) -> bool:
+    def __eq__(self, other: object) -> bool:
         if isinstance(other, BoostLibraryFile):
             return self.name == other.name
         return NotImplemented
@@ -317,7 +320,7 @@ class BoostLibraryFile():
         elif vscrt in ['/MTd', '-MTd']:
             return (self.runtime_static or not self.static) and self.runtime_debug
 
-        mlog.warning('Boost: unknow vscrt tag {}. This may cause the compilation to fail. Please consider reporting this as a bug.'.format(vscrt), once=True)
+        mlog.warning(f'Boost: unknow vscrt tag {vscrt}. This may cause the compilation to fail. Please consider reporting this as a bug.', once=True)
         return True
 
     def get_compiler_args(self) -> T.List[str]:
@@ -337,13 +340,15 @@ class BoostLibraryFile():
     def get_link_args(self) -> T.List[str]:
         return [self.path.as_posix()]
 
-class BoostDependency(ExternalDependency):
-    def __init__(self, environment: Environment, kwargs):
+class BoostDependency(SystemDependency):
+    def __init__(self, environment: Environment, kwargs: T.Dict[str, T.Any]) -> None:
         super().__init__('boost', environment, kwargs, language='cpp')
-        self.debug = environment.coredata.get_builtin_option('buildtype').startswith('debug')
+        buildtype = environment.coredata.get_option(mesonlib.OptionKey('buildtype'))
+        assert isinstance(buildtype, str)
+        self.debug = buildtype.startswith('debug')
         self.multithreading = kwargs.get('threading', 'multi') == 'multi'
 
-        self.boost_root = None
+        self.boost_root = None  # type: T.Optional[Path]
         self.explicit_static = 'static' in kwargs
 
         # Extract and validate modules
@@ -367,37 +372,21 @@ class BoostDependency(ExternalDependency):
         self.arch = environment.machines[self.for_machine].cpu_family
         self.arch = boost_arch_map.get(self.arch, None)
 
-        # Prefere BOOST_INCLUDEDIR and BOOST_LIBRARYDIR if preset
-        boost_manual_env = [x in os.environ for x in ['BOOST_INCLUDEDIR', 'BOOST_LIBRARYDIR']]
-        if all(boost_manual_env):
-            inc_dir = Path(os.environ['BOOST_INCLUDEDIR'])
-            lib_dir = Path(os.environ['BOOST_LIBRARYDIR'])
-            mlog.debug('Trying to find boost with:')
-            mlog.debug('  - BOOST_INCLUDEDIR = {}'.format(inc_dir))
-            mlog.debug('  - BOOST_LIBRARYDIR = {}'.format(lib_dir))
-
-            boost_inc_dir = None
-            for j in [inc_dir / 'version.hpp', inc_dir / 'boost' / 'version.hpp']:
-                if j.is_file():
-                    boost_inc_dir = self._include_dir_from_version_header(j)
-                    break
-            if not boost_inc_dir:
-                self.is_found = False
-                return
-
-            self.is_found = self.run_check([boost_inc_dir], [lib_dir])
+        # First, look for paths specified in a machine file
+        props = self.env.properties[self.for_machine]
+        if any(x in self.env.properties[self.for_machine] for x in
+               ['boost_includedir', 'boost_librarydir', 'boost_root']):
+            self.detect_boost_machine_file(props)
             return
-        elif any(boost_manual_env):
-            mlog.warning('Both BOOST_INCLUDEDIR *and* BOOST_LIBRARYDIR have to be set (one is not enough). Ignoring.')
 
-        # A) Detect potential boost root directories (uses also BOOST_ROOT env var)
-        roots = self.detect_roots()
+        # Finally, look for paths from .pc files and from searching the filesystem
+        self.detect_roots()
+
+    def check_and_set_roots(self, roots: T.List[Path]) -> None:
         roots = list(mesonlib.OrderedSet(roots))
-
-        # B) Foreach candidate
         for j in roots:
-            #   1. Look for the boost headers (boost/version.pp)
-            mlog.debug('Checking potential boost root {}'.format(j.as_posix()))
+            #   1. Look for the boost headers (boost/version.hpp)
+            mlog.debug(f'Checking potential boost root {j.as_posix()}')
             inc_dirs = self.detect_inc_dirs(j)
             inc_dirs = sorted(inc_dirs, reverse=True)  # Prefer the newer versions
 
@@ -411,6 +400,44 @@ class BoostDependency(ExternalDependency):
                 self.boost_root = j
                 break
 
+    def detect_boost_machine_file(self, props: 'Properties') -> None:
+        """Detect boost with values in the machine file or environment.
+
+        The machine file values are defaulted to the environment values.
+        """
+        # XXX: if we had a TypedDict we woudn't need this
+        incdir = props.get('boost_includedir')
+        assert incdir is None or isinstance(incdir, str)
+        libdir = props.get('boost_librarydir')
+        assert libdir is None or isinstance(libdir, str)
+
+        if incdir and libdir:
+            inc_dir = Path(incdir)
+            lib_dir = Path(libdir)
+
+            if not inc_dir.is_absolute() or not lib_dir.is_absolute():
+                raise DependencyException('Paths given for boost_includedir and boost_librarydir in machine file must be absolute')
+
+            mlog.debug('Trying to find boost with:')
+            mlog.debug(f'  - boost_includedir = {inc_dir}')
+            mlog.debug(f'  - boost_librarydir = {lib_dir}')
+
+            return self.detect_split_root(inc_dir, lib_dir)
+
+        elif incdir or libdir:
+            raise DependencyException('Both boost_includedir *and* boost_librarydir have to be set in your machine file (one is not enough)')
+
+        rootdir = props.get('boost_root')
+        # It shouldn't be possible to get here without something in boost_root
+        assert(rootdir)
+
+        raw_paths = mesonlib.stringlistify(rootdir)
+        paths = [Path(x) for x in raw_paths]
+        if paths and any([not x.is_absolute() for x in paths]):
+            raise DependencyException('boost_root path given in machine file must be absolute')
+
+        self.check_and_set_roots(paths)
+
     def run_check(self, inc_dirs: T.List[BoostIncludeDir], lib_dirs: T.List[Path]) -> bool:
         mlog.debug('  - potential library dirs: {}'.format([x.as_posix() for x in lib_dirs]))
         mlog.debug('  - potential include dirs: {}'.format([x.path.as_posix() for x in inc_dirs]))
@@ -420,7 +447,7 @@ class BoostDependency(ExternalDependency):
         for i in lib_dirs:
             libs = self.detect_libraries(i)
             if libs:
-                mlog.debug('  - found boost library dir: {}'.format(i))
+                mlog.debug(f'  - found boost library dir: {i}')
                 # mlog.debug('  - raw library list:')
                 # for j in libs:
                 #     mlog.debug('    - {}'.format(j))
@@ -429,12 +456,12 @@ class BoostDependency(ExternalDependency):
 
         modules = ['boost_' + x for x in self.modules]
         for inc in inc_dirs:
-            mlog.debug('  - found boost {} include dir: {}'.format(inc.version, inc.path))
+            mlog.debug(f'  - found boost {inc.version} include dir: {inc.path}')
             f_libs = self.filter_libraries(libs, inc.version_lib)
 
             mlog.debug('  - filtered library list:')
             for j in f_libs:
-                mlog.debug('    - {}'.format(j))
+                mlog.debug(f'    - {j}')
 
             #   3. Select the libraries matching the requested modules
             not_found = []  # type: T.List[str]
@@ -478,14 +505,14 @@ class BoostDependency(ExternalDependency):
                 self.compile_args += self._extra_compile_args()
                 self.compile_args = list(mesonlib.OrderedSet(self.compile_args))
                 self.link_args = link_args
-                mlog.debug('  - final compile args: {}'.format(self.compile_args))
-                mlog.debug('  - final link args:    {}'.format(self.link_args))
+                mlog.debug(f'  - final compile args: {self.compile_args}')
+                mlog.debug(f'  - final link args:    {self.link_args}')
                 return True
 
             # in case we missed something log it and try again
             mlog.debug('  - NOT found:')
             for mod in not_found:
-                mlog.debug('    - {}'.format(mod))
+                mlog.debug(f'    - {mod}')
 
         return False
 
@@ -554,12 +581,18 @@ class BoostDependency(ExternalDependency):
         # MSVC is very picky with the library tags
         vscrt = ''
         try:
-            crt_val = self.env.coredata.base_options['b_vscrt'].value
-            buildtype = self.env.coredata.builtins['buildtype'].value
+            crt_val = self.env.coredata.options[mesonlib.OptionKey('b_vscrt')].value
+            buildtype = self.env.coredata.options[mesonlib.OptionKey('buildtype')].value
             vscrt = self.clib_compiler.get_crt_compile_args(crt_val, buildtype)[0]
         except (KeyError, IndexError, AttributeError):
             pass
 
+        # mlog.debug('    - static: {}'.format(self.static))
+        # mlog.debug('    - not explicit static: {}'.format(not self.explicit_static))
+        # mlog.debug('    - mt: {}'.format(self.multithreading))
+        # mlog.debug('    - version: {}'.format(lib_vers))
+        # mlog.debug('    - arch: {}'.format(self.arch))
+        # mlog.debug('    - vscrt: {}'.format(vscrt))
         libs = [x for x in libs if x.static == self.static or not self.explicit_static]
         libs = [x for x in libs if x.mt == self.multithreading]
         libs = [x for x in libs if x.version_matches(lib_vers)]
@@ -568,7 +601,7 @@ class BoostDependency(ExternalDependency):
         libs = [x for x in libs if x.nvsuffix != 'dll']  # Only link to import libraries
 
         # Only filter by debug when we are building in release mode. Debug
-        # libraries are automatically prefered through sorting otherwise.
+        # libraries are automatically preferred through sorting otherwise.
         if not self.debug:
             libs = [x for x in libs if not x.debug]
 
@@ -592,20 +625,22 @@ class BoostDependency(ExternalDependency):
             libs += [BoostLibraryFile(i)]
         return [x for x in libs if x.is_boost()]  # Filter out no boost libraries
 
-    def detect_roots(self) -> T.List[Path]:
+    def detect_split_root(self, inc_dir: Path, lib_dir: Path) -> None:
+        boost_inc_dir = None
+        for j in [inc_dir / 'version.hpp', inc_dir / 'boost' / 'version.hpp']:
+            if j.is_file():
+                boost_inc_dir = self._include_dir_from_version_header(j)
+                break
+        if not boost_inc_dir:
+            self.is_found = False
+            return
+
+        self.is_found = self.run_check([boost_inc_dir], [lib_dir])
+
+    def detect_roots(self) -> None:
         roots = []  # type: T.List[Path]
 
-        # Add roots from the environment
-        for i in ['BOOST_ROOT', 'BOOSTROOT']:
-            if i in os.environ:
-                raw_paths = os.environ[i].split(os.pathsep)
-                paths = [Path(x) for x in raw_paths]
-                if paths and any([not x.is_absolute() for x in paths]):
-                    raise DependencyException('Paths in {} must be absolute'.format(i))
-                roots += paths
-                return roots  # Do not add system paths if BOOST_ROOT is present
-
-        # Try getting the BOOST_ROOT from a boost.pc if it exists. This primarely
+        # Try getting the BOOST_ROOT from a boost.pc if it exists. This primarily
         # allows BoostDependency to find boost from Conan. See #5438
         try:
             boost_pc = PkgConfigDependency('boost', self.env, {'required': False})
@@ -660,7 +695,7 @@ class BoostDependency(ExternalDependency):
             tmp = [x.resolve() for x in tmp]
             roots += tmp
 
-        return roots
+        self.check_and_set_roots(roots)
 
     def log_details(self) -> str:
         res = ''
@@ -682,10 +717,10 @@ class BoostDependency(ExternalDependency):
         # also work, however, this is slower (since it the compiler has to be
         # invoked) and overkill since the layout of the header is always the same.
         assert hfile.exists()
-        raw = hfile.read_text()
+        raw = hfile.read_text(encoding='utf-8')
         m = re.search(r'#define\s+BOOST_VERSION\s+([0-9]+)', raw)
         if not m:
-            mlog.debug('Failed to extract version information from {}'.format(hfile))
+            mlog.debug(f'Failed to extract version information from {hfile}')
             return BoostIncludeDir(hfile.parents[1], 0)
         return BoostIncludeDir(hfile.parents[1], int(m.group(1)))
 

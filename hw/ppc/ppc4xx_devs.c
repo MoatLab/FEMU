@@ -29,18 +29,13 @@
 #include "hw/irq.h"
 #include "hw/ppc/ppc.h"
 #include "hw/ppc/ppc4xx.h"
-#include "hw/boards.h"
+#include "hw/intc/ppc-uic.h"
+#include "hw/qdev-properties.h"
 #include "qemu/log.h"
 #include "exec/address-spaces.h"
 #include "qemu/error-report.h"
-
-/*#define DEBUG_UIC*/
-
-#ifdef DEBUG_UIC
-#  define LOG_UIC(...) qemu_log_mask(CPU_LOG_INT, ## __VA_ARGS__)
-#else
-#  define LOG_UIC(...) do { } while (0)
-#endif
+#include "qapi/error.h"
+#include "trace.h"
 
 static void ppc4xx_reset(void *opaque)
 {
@@ -72,249 +67,6 @@ PowerPCCPU *ppc4xx_init(const char *cpu_type,
     qemu_register_reset(ppc4xx_reset, cpu);
 
     return cpu;
-}
-
-/*****************************************************************************/
-/* "Universal" Interrupt controller */
-enum {
-    DCR_UICSR  = 0x000,
-    DCR_UICSRS = 0x001,
-    DCR_UICER  = 0x002,
-    DCR_UICCR  = 0x003,
-    DCR_UICPR  = 0x004,
-    DCR_UICTR  = 0x005,
-    DCR_UICMSR = 0x006,
-    DCR_UICVR  = 0x007,
-    DCR_UICVCR = 0x008,
-    DCR_UICMAX = 0x009,
-};
-
-#define UIC_MAX_IRQ 32
-typedef struct ppcuic_t ppcuic_t;
-struct ppcuic_t {
-    uint32_t dcr_base;
-    int use_vectors;
-    uint32_t level;  /* Remembers the state of level-triggered interrupts. */
-    uint32_t uicsr;  /* Status register */
-    uint32_t uicer;  /* Enable register */
-    uint32_t uiccr;  /* Critical register */
-    uint32_t uicpr;  /* Polarity register */
-    uint32_t uictr;  /* Triggering register */
-    uint32_t uicvcr; /* Vector configuration register */
-    uint32_t uicvr;
-    qemu_irq *irqs;
-};
-
-static void ppcuic_trigger_irq (ppcuic_t *uic)
-{
-    uint32_t ir, cr;
-    int start, end, inc, i;
-
-    /* Trigger interrupt if any is pending */
-    ir = uic->uicsr & uic->uicer & (~uic->uiccr);
-    cr = uic->uicsr & uic->uicer & uic->uiccr;
-    LOG_UIC("%s: uicsr %08" PRIx32 " uicer %08" PRIx32
-                " uiccr %08" PRIx32 "\n"
-                "   %08" PRIx32 " ir %08" PRIx32 " cr %08" PRIx32 "\n",
-                __func__, uic->uicsr, uic->uicer, uic->uiccr,
-                uic->uicsr & uic->uicer, ir, cr);
-    if (ir != 0x0000000) {
-        LOG_UIC("Raise UIC interrupt\n");
-        qemu_irq_raise(uic->irqs[PPCUIC_OUTPUT_INT]);
-    } else {
-        LOG_UIC("Lower UIC interrupt\n");
-        qemu_irq_lower(uic->irqs[PPCUIC_OUTPUT_INT]);
-    }
-    /* Trigger critical interrupt if any is pending and update vector */
-    if (cr != 0x0000000) {
-        qemu_irq_raise(uic->irqs[PPCUIC_OUTPUT_CINT]);
-        if (uic->use_vectors) {
-            /* Compute critical IRQ vector */
-            if (uic->uicvcr & 1) {
-                start = 31;
-                end = 0;
-                inc = -1;
-            } else {
-                start = 0;
-                end = 31;
-                inc = 1;
-            }
-            uic->uicvr = uic->uicvcr & 0xFFFFFFFC;
-            for (i = start; i <= end; i += inc) {
-                if (cr & (1 << i)) {
-                    uic->uicvr += (i - start) * 512 * inc;
-                    break;
-                }
-            }
-        }
-        LOG_UIC("Raise UIC critical interrupt - "
-                    "vector %08" PRIx32 "\n", uic->uicvr);
-    } else {
-        LOG_UIC("Lower UIC critical interrupt\n");
-        qemu_irq_lower(uic->irqs[PPCUIC_OUTPUT_CINT]);
-        uic->uicvr = 0x00000000;
-    }
-}
-
-static void ppcuic_set_irq (void *opaque, int irq_num, int level)
-{
-    ppcuic_t *uic;
-    uint32_t mask, sr;
-
-    uic = opaque;
-    mask = 1U << (31-irq_num);
-    LOG_UIC("%s: irq %d level %d uicsr %08" PRIx32
-                " mask %08" PRIx32 " => %08" PRIx32 " %08" PRIx32 "\n",
-                __func__, irq_num, level,
-                uic->uicsr, mask, uic->uicsr & mask, level << irq_num);
-    if (irq_num < 0 || irq_num > 31)
-        return;
-    sr = uic->uicsr;
-
-    /* Update status register */
-    if (uic->uictr & mask) {
-        /* Edge sensitive interrupt */
-        if (level == 1)
-            uic->uicsr |= mask;
-    } else {
-        /* Level sensitive interrupt */
-        if (level == 1) {
-            uic->uicsr |= mask;
-            uic->level |= mask;
-        } else {
-            uic->uicsr &= ~mask;
-            uic->level &= ~mask;
-        }
-    }
-    LOG_UIC("%s: irq %d level %d sr %" PRIx32 " => "
-                "%08" PRIx32 "\n", __func__, irq_num, level, uic->uicsr, sr);
-    if (sr != uic->uicsr)
-        ppcuic_trigger_irq(uic);
-}
-
-static uint32_t dcr_read_uic (void *opaque, int dcrn)
-{
-    ppcuic_t *uic;
-    uint32_t ret;
-
-    uic = opaque;
-    dcrn -= uic->dcr_base;
-    switch (dcrn) {
-    case DCR_UICSR:
-    case DCR_UICSRS:
-        ret = uic->uicsr;
-        break;
-    case DCR_UICER:
-        ret = uic->uicer;
-        break;
-    case DCR_UICCR:
-        ret = uic->uiccr;
-        break;
-    case DCR_UICPR:
-        ret = uic->uicpr;
-        break;
-    case DCR_UICTR:
-        ret = uic->uictr;
-        break;
-    case DCR_UICMSR:
-        ret = uic->uicsr & uic->uicer;
-        break;
-    case DCR_UICVR:
-        if (!uic->use_vectors)
-            goto no_read;
-        ret = uic->uicvr;
-        break;
-    case DCR_UICVCR:
-        if (!uic->use_vectors)
-            goto no_read;
-        ret = uic->uicvcr;
-        break;
-    default:
-    no_read:
-        ret = 0x00000000;
-        break;
-    }
-
-    return ret;
-}
-
-static void dcr_write_uic (void *opaque, int dcrn, uint32_t val)
-{
-    ppcuic_t *uic;
-
-    uic = opaque;
-    dcrn -= uic->dcr_base;
-    LOG_UIC("%s: dcr %d val 0x%x\n", __func__, dcrn, val);
-    switch (dcrn) {
-    case DCR_UICSR:
-        uic->uicsr &= ~val;
-        uic->uicsr |= uic->level;
-        ppcuic_trigger_irq(uic);
-        break;
-    case DCR_UICSRS:
-        uic->uicsr |= val;
-        ppcuic_trigger_irq(uic);
-        break;
-    case DCR_UICER:
-        uic->uicer = val;
-        ppcuic_trigger_irq(uic);
-        break;
-    case DCR_UICCR:
-        uic->uiccr = val;
-        ppcuic_trigger_irq(uic);
-        break;
-    case DCR_UICPR:
-        uic->uicpr = val;
-        break;
-    case DCR_UICTR:
-        uic->uictr = val;
-        ppcuic_trigger_irq(uic);
-        break;
-    case DCR_UICMSR:
-        break;
-    case DCR_UICVR:
-        break;
-    case DCR_UICVCR:
-        uic->uicvcr = val & 0xFFFFFFFD;
-        ppcuic_trigger_irq(uic);
-        break;
-    }
-}
-
-static void ppcuic_reset (void *opaque)
-{
-    ppcuic_t *uic;
-
-    uic = opaque;
-    uic->uiccr = 0x00000000;
-    uic->uicer = 0x00000000;
-    uic->uicpr = 0x00000000;
-    uic->uicsr = 0x00000000;
-    uic->uictr = 0x00000000;
-    if (uic->use_vectors) {
-        uic->uicvcr = 0x00000000;
-        uic->uicvr = 0x0000000;
-    }
-}
-
-qemu_irq *ppcuic_init (CPUPPCState *env, qemu_irq *irqs,
-                       uint32_t dcr_base, int has_ssr, int has_vr)
-{
-    ppcuic_t *uic;
-    int i;
-
-    uic = g_malloc0(sizeof(ppcuic_t));
-    uic->dcr_base = dcr_base;
-    uic->irqs = irqs;
-    if (has_vr)
-        uic->use_vectors = 1;
-    for (i = 0; i < DCR_UICMAX; i++) {
-        ppc_dcr_register(env, dcr_base + i, uic,
-                         &dcr_read_uic, &dcr_write_uic);
-    }
-    qemu_register_reset(ppcuic_reset, uic);
-
-    return qemu_allocate_irqs(&ppcuic_set_irq, uic, UIC_MAX_IRQ);
 }
 
 /*****************************************************************************/
@@ -378,8 +130,9 @@ static uint32_t sdram_bcr (hwaddr ram_base,
         bcr = 0x000C0000;
         break;
     default:
-        printf("%s: invalid RAM size " TARGET_FMT_plx "\n", __func__,
-               ram_size);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "%s: invalid RAM size 0x%" HWADDR_PRIx "\n", __func__,
+                      ram_size);
         return 0x00000000;
     }
     bcr |= ram_base & 0xFF800000;
@@ -412,10 +165,8 @@ static void sdram_set_bcr(ppc4xx_sdram_t *sdram, int i,
 {
     if (sdram->bcr[i] & 0x00000001) {
         /* Unmap RAM */
-#ifdef DEBUG_SDRAM
-        printf("%s: unmap RAM area " TARGET_FMT_plx " " TARGET_FMT_lx "\n",
-               __func__, sdram_base(sdram->bcr[i]), sdram_size(sdram->bcr[i]));
-#endif
+        trace_ppc4xx_sdram_unmap(sdram_base(sdram->bcr[i]),
+                                 sdram_size(sdram->bcr[i]));
         memory_region_del_subregion(get_system_memory(),
                                     &sdram->containers[i]);
         memory_region_del_subregion(&sdram->containers[i],
@@ -424,10 +175,7 @@ static void sdram_set_bcr(ppc4xx_sdram_t *sdram, int i,
     }
     sdram->bcr[i] = bcr & 0xFFDEE001;
     if (enabled && (bcr & 0x00000001)) {
-#ifdef DEBUG_SDRAM
-        printf("%s: Map RAM area " TARGET_FMT_plx " " TARGET_FMT_lx "\n",
-               __func__, sdram_base(bcr), sdram_size(bcr));
-#endif
+        trace_ppc4xx_sdram_unmap(sdram_base(bcr), sdram_size(bcr));
         memory_region_init(&sdram->containers[i], NULL, "sdram-containers",
                            sdram_size(bcr));
         memory_region_add_subregion(&sdram->containers[i], 0,
@@ -457,10 +205,8 @@ static void sdram_unmap_bcr (ppc4xx_sdram_t *sdram)
     int i;
 
     for (i = 0; i < sdram->nbanks; i++) {
-#ifdef DEBUG_SDRAM
-        printf("%s: Unmap RAM area " TARGET_FMT_plx " " TARGET_FMT_lx "\n",
-               __func__, sdram_base(sdram->bcr[i]), sdram_size(sdram->bcr[i]));
-#endif
+        trace_ppc4xx_sdram_unmap(sdram_base(sdram->bcr[i]),
+                                 sdram_size(sdram->bcr[i]));
         memory_region_del_subregion(get_system_memory(),
                                     &sdram->ram_memories[i]);
     }
@@ -557,16 +303,12 @@ static void dcr_write_sdram (void *opaque, int dcrn, uint32_t val)
         case 0x20: /* SDRAM_CFG */
             val &= 0xFFE00000;
             if (!(sdram->cfg & 0x80000000) && (val & 0x80000000)) {
-#ifdef DEBUG_SDRAM
-                printf("%s: enable SDRAM controller\n", __func__);
-#endif
+                trace_ppc4xx_sdram_enable("enable");
                 /* validate all RAM mappings */
                 sdram_map_bcr(sdram);
                 sdram->status &= ~0x80000000;
             } else if ((sdram->cfg & 0x80000000) && !(val & 0x80000000)) {
-#ifdef DEBUG_SDRAM
-                printf("%s: disable SDRAM controller\n", __func__);
-#endif
+                trace_ppc4xx_sdram_enable("disable");
                 /* invalidate all RAM mappings */
                 sdram_unmap_bcr(sdram);
                 sdram->status |= 0x80000000;
@@ -647,7 +389,7 @@ void ppc4xx_sdram_init (CPUPPCState *env, qemu_irq irq, int nbanks,
 {
     ppc4xx_sdram_t *sdram;
 
-    sdram = g_malloc0(sizeof(ppc4xx_sdram_t));
+    sdram = g_new0(ppc4xx_sdram_t, 1);
     sdram->irq = irq;
     sdram->nbanks = nbanks;
     sdram->ram_memories = ram_memories;

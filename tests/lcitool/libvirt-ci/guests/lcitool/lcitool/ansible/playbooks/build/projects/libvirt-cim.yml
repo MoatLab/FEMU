@@ -1,0 +1,10 @@
+---
+- set_fact:
+    name: libvirt-cim
+    machines: '{{ rpm_machines }}'
+    archive_format: gz
+    git_url: '{{ git_urls["libvirt-cim"][git_remote] }}'
+
+- include: 'jobs/prepare.yml'
+- include: 'jobs/autotools-build-job.yml'
+- include: 'jobs/autotools-rpm-job.yml'

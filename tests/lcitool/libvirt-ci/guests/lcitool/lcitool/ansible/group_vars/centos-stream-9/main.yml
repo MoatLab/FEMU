@@ -1,0 +1,29 @@
+---
+os:
+  name: 'CentOS'
+  version: 'Stream9'
+
+target: 'centos-stream-9'
+
+packaging:
+  format: 'rpm'
+  command: 'dnf'
+
+paths:
+  bash: /bin/bash
+  cc: /usr/bin/gcc
+  ccache: /usr/bin/ccache
+  make: /usr/bin/make
+  ninja: /usr/bin/ninja
+  pip3: /usr/bin/pip3
+  python: /usr/bin/python3
+  sudoers: /etc/sudoers
+
+ansible_python_package: python3
+ansible_python_interpreter: /usr/bin/python3
+
+install:
+  url: http://mirror.stream.centos.org/9-stream/BaseOS/x86_64/os/
+
+containers:
+  base: quay.io/centos/centos:stream9

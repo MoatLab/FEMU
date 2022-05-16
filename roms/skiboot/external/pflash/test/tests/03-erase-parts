@@ -1,0 +1,56 @@
+#! /bin/sh
+# SPDX-License-Identifier: Apache-2.0 OR GPL-2.0-or-later
+
+touch "$DATA_DIR/$CUR_TEST.pnor"
+
+# Don't record the output of ffspart
+../ffspart/ffspart -s 0x100 -c 10 -i "$DATA_DIR/$CUR_TEST.ffs" \
+	-p "$DATA_DIR/$CUR_TEST.pnor" 2>&1 >/dev/null
+if [ "$?" -ne 0 ] ; then
+	fail_test
+fi
+
+cp "$DATA_DIR/$CUR_TEST.pnor" "$DATA_DIR/$CUR_TEST.bk"
+if [ "$?" -ne 0 ] ; then
+	fail_test
+fi
+
+#Let us all take a second to appreciate the fragility of this.
+#The reason we need is that pflash -e will set the actual size of the
+#partition to zero, which we'll do here. Examination determined that
+#it will be at byte 216 in the file
+dd if=/dev/zero of="$DATA_DIR/$CUR_TEST.bk" \
+	bs=1 seek=216 count=4 conv=notrunc status=none
+
+#176 Should be where the FFS header for partition ONE starts
+update_checksum "$DATA_DIR/$CUR_TEST.bk" "176";
+
+yes yes | run_binary "./pflash" "-F $DATA_DIR/$CUR_TEST.pnor -e -P ONE"
+if [ "$?" -ne 0 ] ; then
+	fail_test;
+fi
+
+one_start=$(get_part_start "$DATA_DIR/$CUR_TEST.ffs" "ONE");
+one_len=$(get_part_len "$DATA_DIR/$CUR_TEST.ffs" "ONE");
+one_end=$(get_part_end "$DATA_DIR/$CUR_TEST.ffs" "ONE");
+cmp_with_ff "$DATA_DIR/$CUR_TEST.pnor" "$one_start" "$one_len"
+
+cmp --bytes="$one_start" "$DATA_DIR/$CUR_TEST.pnor" \
+	"$DATA_DIR/$CUR_TEST.bk";
+if [ "$?" -ne 0 ] ; then
+	fail_test;
+fi
+
+cmp --ignore-initial="$one_end" \
+	--bytes="$(expr $(stat --printf="%s" "$DATA_DIR/$CUR_TEST.pnor") - "$one_end")" \
+	"$DATA_DIR/$CUR_TEST.pnor" "$DATA_DIR/$CUR_TEST.bk"
+if [ "$?" -ne 0 ] ; then
+	fail_test;
+fi
+# The test infrastructure will clean up but lets no chew unnecessarily
+# though disk space
+rm "$DATA_DIR/$CUR_TEST.pnor" "$DATA_DIR/$CUR_TEST.bk"
+
+diff_with_result
+
+pass_test

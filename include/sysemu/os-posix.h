@@ -38,6 +38,10 @@
 #include <sys/sysmacros.h>
 #endif
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void os_set_line_buffering(void);
 void os_set_proc_name(const char *s);
 void os_setup_signal_handling(void);
@@ -51,6 +55,7 @@ int os_mlock(void);
 typedef struct timeval qemu_timeval;
 #define qemu_gettimeofday(tp) gettimeofday(tp, NULL)
 
+int os_set_daemonize(bool d);
 bool is_daemonized(void);
 
 /**
@@ -91,5 +96,9 @@ static inline void qemu_funlockfile(FILE *f)
 {
     funlockfile(f);
 }
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

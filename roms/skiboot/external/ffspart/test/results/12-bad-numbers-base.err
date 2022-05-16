@@ -1,0 +1,4 @@
+WARNING: Attempting to parse a partition line without any TOCs created.
+         Generating a default TOC at zero
+Couldn't parse 'ONE' partition base address
+Failed to parse input file 'FILE' at line 1

@@ -1,0 +1,22 @@
+---
+- name: 'Install packages'
+  package:
+    name: '{{ packages }}'
+    state: present
+
+- name: 'Remove packages'
+  package:
+    name: '{{ unwanted_packages }}'
+    state: absent
+
+- name: 'Install PyPI packages'
+  command: '{{ paths.pip3 }} install {{ item }}'
+  args:
+    warn: no
+  loop: '{{ pypi_packages }}'
+
+- name: 'Install CPAN packages'
+  command: 'cpanm --notest {{ item }}'
+  args:
+    warn: no
+  loop: '{{ cpan_packages }}'

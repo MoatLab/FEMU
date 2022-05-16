@@ -36,6 +36,9 @@
 #include "qemu/osdep.h"
 
 #include "qemu.h"
+#include "user-internals.h"
+#include "loader.h"
+#include "user-mmap.h"
 #include "flat.h"
 #include "target_flat.h"
 
@@ -668,7 +671,7 @@ static int load_flat_file(struct linux_binprm * bprm,
     }
 
     /* zero the BSS.  */
-    memset(g2h(datapos + data_len), 0, bss_len);
+    memset(g2h_untagged(datapos + data_len), 0, bss_len);
 
     return 0;
 }

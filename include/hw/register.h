@@ -87,7 +87,7 @@ struct RegisterInfo {
     void *opaque;
 };
 
-#define TYPE_REGISTER "qemu,register"
+#define TYPE_REGISTER "qemu-register"
 DECLARE_INSTANCE_CHECKER(RegisterInfo, REGISTER,
                          TYPE_REGISTER)
 
@@ -200,6 +200,14 @@ RegisterInfoArray *register_init_block32(DeviceState *owner,
                                          const RegisterAccessInfo *rae,
                                          int num, RegisterInfo *ri,
                                          uint32_t *data,
+                                         const MemoryRegionOps *ops,
+                                         bool debug_enabled,
+                                         uint64_t memory_size);
+
+RegisterInfoArray *register_init_block64(DeviceState *owner,
+                                         const RegisterAccessInfo *rae,
+                                         int num, RegisterInfo *ri,
+                                         uint64_t *data,
                                          const MemoryRegionOps *ops,
                                          bool debug_enabled,
                                          uint64_t memory_size);

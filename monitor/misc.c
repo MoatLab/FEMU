@@ -24,7 +24,6 @@
 
 #include "qemu/osdep.h"
 #include "monitor-internal.h"
-#include "cpu.h"
 #include "monitor/qdev.h"
 #include "hw/usb.h"
 #include "hw/pci/pci.h"
@@ -42,6 +41,7 @@
 #include "disas/disas.h"
 #include "sysemu/balloon.h"
 #include "qemu/timer.h"
+#include "qemu/log.h"
 #include "sysemu/hw_accel.h"
 #include "sysemu/runstate.h"
 #include "authz/list.h"
@@ -71,13 +71,14 @@
 #include "qapi/qapi-commands-migration.h"
 #include "qapi/qapi-commands-misc.h"
 #include "qapi/qapi-commands-qom.h"
+#include "qapi/qapi-commands-run-state.h"
 #include "qapi/qapi-commands-trace.h"
+#include "qapi/qapi-commands-machine.h"
 #include "qapi/qapi-init-commands.h"
 #include "qapi/error.h"
 #include "qapi/qmp-event.h"
 #include "sysemu/cpus.h"
 #include "qemu/cutils.h"
-#include "tcg/tcg.h"
 
 #if defined(TARGET_S390X)
 #include "hw/s390x/storage-keys.h"
@@ -136,11 +137,7 @@ char *qmp_human_monitor_command(const char *command_line, bool has_cpu_index,
     handle_hmp_command(&hmp, command_line);
 
     WITH_QEMU_LOCK_GUARD(&hmp.common.mon_lock) {
-        if (qstring_get_length(hmp.common.outbuf) > 0) {
-            output = g_strdup(qstring_get_str(hmp.common.outbuf));
-        } else {
-            output = g_strdup("");
-        }
+        output = g_strdup(hmp.common.outbuf->str);
     }
 
 out:
@@ -236,16 +233,13 @@ static void monitor_init_qmp_commands(void)
 
     qmp_init_marshal(&qmp_commands);
 
-    qmp_register_command(&qmp_commands, "query-qmp-schema",
-                         qmp_query_qmp_schema, QCO_ALLOW_PRECONFIG);
-    qmp_register_command(&qmp_commands, "device_add", qmp_device_add,
-                         QCO_NO_OPTIONS);
-    qmp_register_command(&qmp_commands, "object-add", qmp_object_add,
-                         QCO_NO_OPTIONS);
+    qmp_register_command(&qmp_commands, "device_add",
+                         qmp_device_add, 0, 0);
 
     QTAILQ_INIT(&qmp_cap_negotiation_commands);
     qmp_register_command(&qmp_cap_negotiation_commands, "qmp_capabilities",
-                         qmp_marshal_qmp_capabilities, QCO_ALLOW_PRECONFIG);
+                         qmp_marshal_qmp_capabilities,
+                         QCO_ALLOW_PRECONFIG, 0);
 }
 
 /* Set the current CPU defined by the user. Callers must hold BQL. */
@@ -330,24 +324,6 @@ static void hmp_info_registers(Monitor *mon, const QDict *qdict)
     }
 }
 
-#ifdef CONFIG_TCG
-static void hmp_info_jit(Monitor *mon, const QDict *qdict)
-{
-    if (!tcg_enabled()) {
-        error_report("JIT information is only available with accel=tcg");
-        return;
-    }
-
-    dump_exec_info();
-    dump_drift_info();
-}
-
-static void hmp_info_opcount(Monitor *mon, const QDict *qdict)
-{
-    dump_opcount_info();
-}
-#endif
-
 static void hmp_info_sync_profile(Monitor *mon, const QDict *qdict)
 {
     int64_t max = qdict_get_try_int(qdict, "max", 10);
@@ -377,17 +353,6 @@ static void hmp_info_history(Monitor *mon, const QDict *qdict)
         monitor_printf(mon, "%d: '%s'\n", i, str);
         i++;
     }
-}
-
-static void hmp_info_cpustats(Monitor *mon, const QDict *qdict)
-{
-    CPUState *cs = mon_get_cpu(mon);
-
-    if (!cs) {
-        monitor_printf(mon, "No CPU available\n");
-        return;
-    }
-    cpu_dump_statistics(cs, 0);
 }
 
 static void hmp_info_trace_events(Monitor *mon, const QDict *qdict)
@@ -441,13 +406,13 @@ void qmp_client_migrate_info(const char *protocol, const char *hostname,
                                     has_port ? port : -1,
                                     has_tls_port ? tls_port : -1,
                                     cert_subject)) {
-            error_setg(errp, QERR_UNDEFINED_ERROR);
+            error_setg(errp, "Could not set up display for migration");
             return;
         }
         return;
     }
 
-    error_setg(errp, QERR_INVALID_PARAMETER_VALUE, "protocol", "spice");
+    error_setg(errp, QERR_INVALID_PARAMETER_VALUE, "protocol", "'spice'");
 }
 
 static void hmp_logfile(Monitor *mon, const QDict *qdict)
@@ -492,8 +457,10 @@ static void hmp_singlestep(Monitor *mon, const QDict *qdict)
 static void hmp_gdbserver(Monitor *mon, const QDict *qdict)
 {
     const char *device = qdict_get_try_str(qdict, "device");
-    if (!device)
+    if (!device) {
         device = "tcp::" DEFAULT_GDBSTUB_PORT;
+    }
+
     if (gdbserver_start(device) < 0) {
         monitor_printf(mon, "Could not open gdbserver on device '%s'\n",
                        device);
@@ -507,10 +474,18 @@ static void hmp_gdbserver(Monitor *mon, const QDict *qdict)
 
 static void hmp_watchdog_action(Monitor *mon, const QDict *qdict)
 {
-    const char *action = qdict_get_str(qdict, "action");
-    if (select_watchdog_action(action) == -1) {
-        monitor_printf(mon, "Unknown watchdog action '%s'\n", action);
+    Error *err = NULL;
+    WatchdogAction action;
+    char *qapi_value;
+
+    qapi_value = g_ascii_strdown(qdict_get_str(qdict, "action"), -1);
+    action = qapi_enum_parse(&WatchdogAction_lookup, qapi_value, -1, &err);
+    g_free(qapi_value);
+    if (err) {
+        hmp_handle_error(mon, err);
+        return;
     }
+    qmp_watchdog_set_action(action, &error_abort);
 }
 
 static void monitor_printc(Monitor *mon, int c)
@@ -559,10 +534,11 @@ static void memory_dump(Monitor *mon, int count, int format, int wsize,
     }
 
     len = wsize * count;
-    if (wsize == 1)
+    if (wsize == 1) {
         line_size = 8;
-    else
+    } else {
         line_size = 16;
+    }
     max_digits = 0;
 
     switch(format) {
@@ -583,10 +559,11 @@ static void memory_dump(Monitor *mon, int count, int format, int wsize,
     }
 
     while (len > 0) {
-        if (is_physical)
+        if (is_physical) {
             monitor_printf(mon, TARGET_FMT_plx ":", addr);
-        else
+        } else {
             monitor_printf(mon, TARGET_FMT_lx ":", (target_ulong)addr);
+        }
         l = len;
         if (l > line_size)
             l = line_size;
@@ -667,10 +644,11 @@ static void hmp_physical_memory_dump(Monitor *mon, const QDict *qdict)
     memory_dump(mon, count, format, size, addr, 1);
 }
 
-static void *gpa2hva(MemoryRegion **p_mr, hwaddr addr, Error **errp)
+void *gpa2hva(MemoryRegion **p_mr, hwaddr addr, uint64_t size, Error **errp)
 {
+    Int128 gpa_region_size;
     MemoryRegionSection mrs = memory_region_find(get_system_memory(),
-                                                 addr, 1);
+                                                 addr, size);
 
     if (!mrs.mr) {
         error_setg(errp, "No memory is mapped at address 0x%" HWADDR_PRIx, addr);
@@ -679,6 +657,14 @@ static void *gpa2hva(MemoryRegion **p_mr, hwaddr addr, Error **errp)
 
     if (!memory_region_is_ram(mrs.mr) && !memory_region_is_romd(mrs.mr)) {
         error_setg(errp, "Memory at address 0x%" HWADDR_PRIx "is not RAM", addr);
+        memory_region_unref(mrs.mr);
+        return NULL;
+    }
+
+    gpa_region_size = int128_make64(size);
+    if (int128_lt(mrs.size, gpa_region_size)) {
+        error_setg(errp, "Size of memory region at 0x%" HWADDR_PRIx
+                   " exceeded.", addr);
         memory_region_unref(mrs.mr);
         return NULL;
     }
@@ -694,7 +680,7 @@ static void hmp_gpa2hva(Monitor *mon, const QDict *qdict)
     MemoryRegion *mr = NULL;
     void *ptr;
 
-    ptr = gpa2hva(&mr, addr, &local_err);
+    ptr = gpa2hva(&mr, addr, 1, &local_err);
     if (local_err) {
         error_report_err(local_err);
         return;
@@ -770,7 +756,7 @@ static void hmp_gpa2hpa(Monitor *mon, const QDict *qdict)
     void *ptr;
     uint64_t physaddr;
 
-    ptr = gpa2hva(&mr, addr, &local_err);
+    ptr = gpa2hva(&mr, addr, 1, &local_err);
     if (local_err) {
         error_report_err(local_err);
         return;
@@ -906,7 +892,7 @@ static void hmp_ioport_read(Monitor *mon, const QDict *qdict)
         suffix = 'l';
         break;
     }
-    monitor_printf(mon, "port%c[0x%04x] = %#0*x\n",
+    monitor_printf(mon, "port%c[0x%04x] = 0x%0*x\n",
                    suffix, addr, size * 2, val);
 }
 
@@ -954,33 +940,6 @@ static void hmp_info_mtree(Monitor *mon, const QDict *qdict)
 
     mtree_info(flatview, dispatch_tree, owner, disabled);
 }
-
-#ifdef CONFIG_PROFILER
-
-int64_t dev_time;
-
-static void hmp_info_profile(Monitor *mon, const QDict *qdict)
-{
-    static int64_t last_cpu_exec_time;
-    int64_t cpu_exec_time;
-    int64_t delta;
-
-    cpu_exec_time = tcg_cpu_exec_time();
-    delta = cpu_exec_time - last_cpu_exec_time;
-
-    monitor_printf(mon, "async time  %" PRId64 " (%0.3f)\n",
-                   dev_time, dev_time / (double)NANOSECONDS_PER_SECOND);
-    monitor_printf(mon, "qemu time   %" PRId64 " (%0.3f)\n",
-                   delta, delta / (double)NANOSECONDS_PER_SECOND);
-    last_cpu_exec_time = cpu_exec_time;
-    dev_time = 0;
-}
-#else
-static void hmp_info_profile(Monitor *mon, const QDict *qdict)
-{
-    monitor_printf(mon, "Internal profiler not compiled\n");
-}
-#endif
 
 /* Capture support */
 static QLIST_HEAD (capture_list_head, CaptureState) capture_head;
@@ -1037,193 +996,6 @@ static void hmp_wavcapture(Monitor *mon, const QDict *qdict)
     QLIST_INSERT_HEAD (&capture_head, s, entries);
 }
 
-static QAuthZList *find_auth(Monitor *mon, const char *name)
-{
-    Object *obj;
-    Object *container;
-
-    container = object_get_objects_root();
-    obj = object_resolve_path_component(container, name);
-    if (!obj) {
-        monitor_printf(mon, "acl: unknown list '%s'\n", name);
-        return NULL;
-    }
-
-    return QAUTHZ_LIST(obj);
-}
-
-static bool warn_acl;
-static void hmp_warn_acl(void)
-{
-    if (warn_acl) {
-        return;
-    }
-    error_report("The acl_show, acl_reset, acl_policy, acl_add, acl_remove "
-                 "commands are deprecated with no replacement. Authorization "
-                 "for VNC should be performed using the pluggable QAuthZ "
-                 "objects");
-    warn_acl = true;
-}
-
-static void hmp_acl_show(Monitor *mon, const QDict *qdict)
-{
-    const char *aclname = qdict_get_str(qdict, "aclname");
-    QAuthZList *auth = find_auth(mon, aclname);
-    QAuthZListRuleList *rules;
-    size_t i = 0;
-
-    hmp_warn_acl();
-
-    if (!auth) {
-        return;
-    }
-
-    monitor_printf(mon, "policy: %s\n",
-                   QAuthZListPolicy_str(auth->policy));
-
-    rules = auth->rules;
-    while (rules) {
-        QAuthZListRule *rule = rules->value;
-        i++;
-        monitor_printf(mon, "%zu: %s %s\n", i,
-                       QAuthZListPolicy_str(rule->policy),
-                       rule->match);
-        rules = rules->next;
-    }
-}
-
-static void hmp_acl_reset(Monitor *mon, const QDict *qdict)
-{
-    const char *aclname = qdict_get_str(qdict, "aclname");
-    QAuthZList *auth = find_auth(mon, aclname);
-
-    hmp_warn_acl();
-
-    if (!auth) {
-        return;
-    }
-
-    auth->policy = QAUTHZ_LIST_POLICY_DENY;
-    qapi_free_QAuthZListRuleList(auth->rules);
-    auth->rules = NULL;
-    monitor_printf(mon, "acl: removed all rules\n");
-}
-
-static void hmp_acl_policy(Monitor *mon, const QDict *qdict)
-{
-    const char *aclname = qdict_get_str(qdict, "aclname");
-    const char *policy = qdict_get_str(qdict, "policy");
-    QAuthZList *auth = find_auth(mon, aclname);
-    int val;
-    Error *err = NULL;
-
-    hmp_warn_acl();
-
-    if (!auth) {
-        return;
-    }
-
-    val = qapi_enum_parse(&QAuthZListPolicy_lookup,
-                          policy,
-                          QAUTHZ_LIST_POLICY_DENY,
-                          &err);
-    if (err) {
-        error_free(err);
-        monitor_printf(mon, "acl: unknown policy '%s', "
-                       "expected 'deny' or 'allow'\n", policy);
-    } else {
-        auth->policy = val;
-        if (auth->policy == QAUTHZ_LIST_POLICY_ALLOW) {
-            monitor_printf(mon, "acl: policy set to 'allow'\n");
-        } else {
-            monitor_printf(mon, "acl: policy set to 'deny'\n");
-        }
-    }
-}
-
-static QAuthZListFormat hmp_acl_get_format(const char *match)
-{
-    if (strchr(match, '*')) {
-        return QAUTHZ_LIST_FORMAT_GLOB;
-    } else {
-        return QAUTHZ_LIST_FORMAT_EXACT;
-    }
-}
-
-static void hmp_acl_add(Monitor *mon, const QDict *qdict)
-{
-    const char *aclname = qdict_get_str(qdict, "aclname");
-    const char *match = qdict_get_str(qdict, "match");
-    const char *policystr = qdict_get_str(qdict, "policy");
-    int has_index = qdict_haskey(qdict, "index");
-    int index = qdict_get_try_int(qdict, "index", -1);
-    QAuthZList *auth = find_auth(mon, aclname);
-    Error *err = NULL;
-    QAuthZListPolicy policy;
-    QAuthZListFormat format;
-    size_t i = 0;
-
-    hmp_warn_acl();
-
-    if (!auth) {
-        return;
-    }
-
-    policy = qapi_enum_parse(&QAuthZListPolicy_lookup,
-                             policystr,
-                             QAUTHZ_LIST_POLICY_DENY,
-                             &err);
-    if (err) {
-        error_free(err);
-        monitor_printf(mon, "acl: unknown policy '%s', "
-                       "expected 'deny' or 'allow'\n", policystr);
-        return;
-    }
-
-    format = hmp_acl_get_format(match);
-
-    if (has_index && index == 0) {
-        monitor_printf(mon, "acl: unable to add acl entry\n");
-        return;
-    }
-
-    if (has_index) {
-        i = qauthz_list_insert_rule(auth, match, policy,
-                                    format, index - 1, &err);
-    } else {
-        i = qauthz_list_append_rule(auth, match, policy,
-                                    format, &err);
-    }
-    if (err) {
-        monitor_printf(mon, "acl: unable to add rule: %s",
-                       error_get_pretty(err));
-        error_free(err);
-    } else {
-        monitor_printf(mon, "acl: added rule at position %zu\n", i + 1);
-    }
-}
-
-static void hmp_acl_remove(Monitor *mon, const QDict *qdict)
-{
-    const char *aclname = qdict_get_str(qdict, "aclname");
-    const char *match = qdict_get_str(qdict, "match");
-    QAuthZList *auth = find_auth(mon, aclname);
-    ssize_t i = 0;
-
-    hmp_warn_acl();
-
-    if (!auth) {
-        return;
-    }
-
-    i = qauthz_list_delete_rule(auth, match);
-    if (i >= 0) {
-        monitor_printf(mon, "acl: removed rule at position %zu\n", i + 1);
-    } else {
-        monitor_printf(mon, "acl: no matching acl entry\n");
-    }
-}
-
 void qmp_getfd(const char *fdname, Error **errp)
 {
     Monitor *cur_mon = monitor_cur();
@@ -1232,7 +1004,7 @@ void qmp_getfd(const char *fdname, Error **errp)
 
     fd = qemu_chr_fe_get_msgfd(&cur_mon->chr);
     if (fd == -1) {
-        error_setg(errp, QERR_FD_NOT_SUPPLIED);
+        error_setg(errp, "No file descriptor supplied via SCM_RIGHTS");
         return;
     }
 
@@ -1256,7 +1028,7 @@ void qmp_getfd(const char *fdname, Error **errp)
         return;
     }
 
-    monfd = g_malloc0(sizeof(mon_fd_t));
+    monfd = g_new0(mon_fd_t, 1);
     monfd->name = g_strdup(fdname);
     monfd->fd = fd;
 
@@ -1286,7 +1058,7 @@ void qmp_closefd(const char *fdname, Error **errp)
     }
 
     qemu_mutex_unlock(&cur_mon->mon_lock);
-    error_setg(errp, QERR_FD_NOT_FOUND, fdname);
+    error_setg(errp, "File descriptor named '%s' not found", fdname);
 }
 
 int monitor_get_fd(Monitor *mon, const char *fdname, Error **errp)
@@ -1357,7 +1129,7 @@ AddfdInfo *qmp_add_fd(bool has_fdset_id, int64_t fdset_id, bool has_opaque,
 
     fd = qemu_chr_fe_get_msgfd(&mon->chr);
     if (fd == -1) {
-        error_setg(errp, QERR_FD_NOT_SUPPLIED);
+        error_setg(errp, "No file descriptor supplied via SCM_RIGHTS");
         goto error;
     }
 
@@ -1410,7 +1182,7 @@ error:
     } else {
         snprintf(fd_str, sizeof(fd_str), "fdset-id:%" PRId64, fdset_id);
     }
-    error_setg(errp, QERR_FD_NOT_FOUND, fd_str);
+    error_setg(errp, "File descriptor named '%s' not found", fd_str);
 }
 
 FdsetInfoList *qmp_query_fdsets(Error **errp)
@@ -1421,33 +1193,26 @@ FdsetInfoList *qmp_query_fdsets(Error **errp)
 
     QEMU_LOCK_GUARD(&mon_fdsets_lock);
     QLIST_FOREACH(mon_fdset, &mon_fdsets, next) {
-        FdsetInfoList *fdset_info = g_malloc0(sizeof(*fdset_info));
-        FdsetFdInfoList *fdsetfd_list = NULL;
+        FdsetInfo *fdset_info = g_malloc0(sizeof(*fdset_info));
 
-        fdset_info->value = g_malloc0(sizeof(*fdset_info->value));
-        fdset_info->value->fdset_id = mon_fdset->id;
+        fdset_info->fdset_id = mon_fdset->id;
 
         QLIST_FOREACH(mon_fdset_fd, &mon_fdset->fds, next) {
-            FdsetFdInfoList *fdsetfd_info;
+            FdsetFdInfo *fdsetfd_info;
 
             fdsetfd_info = g_malloc0(sizeof(*fdsetfd_info));
-            fdsetfd_info->value = g_malloc0(sizeof(*fdsetfd_info->value));
-            fdsetfd_info->value->fd = mon_fdset_fd->fd;
+            fdsetfd_info->fd = mon_fdset_fd->fd;
             if (mon_fdset_fd->opaque) {
-                fdsetfd_info->value->has_opaque = true;
-                fdsetfd_info->value->opaque = g_strdup(mon_fdset_fd->opaque);
+                fdsetfd_info->has_opaque = true;
+                fdsetfd_info->opaque = g_strdup(mon_fdset_fd->opaque);
             } else {
-                fdsetfd_info->value->has_opaque = false;
+                fdsetfd_info->has_opaque = false;
             }
 
-            fdsetfd_info->next = fdsetfd_list;
-            fdsetfd_list = fdsetfd_info;
+            QAPI_LIST_PREPEND(fdset_info->fds, fdsetfd_info);
         }
 
-        fdset_info->value->fds = fdsetfd_list;
-
-        fdset_info->next = fdset_list;
-        fdset_list = fdset_info;
+        QAPI_LIST_PREPEND(fdset_list, fdset_info);
     }
 
     return fdset_list;
@@ -2024,7 +1789,7 @@ void info_trace_events_completion(ReadLineState *rs, int nb_args, const char *st
         TraceEventIter iter;
         TraceEvent *ev;
         char *pattern = g_strdup_printf("%s*", str);
-        trace_event_iter_init(&iter, pattern);
+        trace_event_iter_init_pattern(&iter, pattern);
         while ((ev = trace_event_iter_next(&iter)) != NULL) {
             readline_add_completion(rs, trace_event_get_name(ev));
         }
@@ -2042,7 +1807,7 @@ void trace_event_completion(ReadLineState *rs, int nb_args, const char *str)
         TraceEventIter iter;
         TraceEvent *ev;
         char *pattern = g_strdup_printf("%s*", str);
-        trace_event_iter_init(&iter, pattern);
+        trace_event_iter_init_pattern(&iter, pattern);
         while ((ev = trace_event_iter_next(&iter)) != NULL) {
             readline_add_completion(rs, trace_event_get_name(ev));
         }
@@ -2174,6 +1939,38 @@ static void sortcmdlist(void)
     qsort(hmp_info_cmds, ARRAY_SIZE(hmp_info_cmds) - 1,
           sizeof(*hmp_info_cmds),
           compare_mon_cmd);
+}
+
+void monitor_register_hmp(const char *name, bool info,
+                          void (*cmd)(Monitor *mon, const QDict *qdict))
+{
+    HMPCommand *table = info ? hmp_info_cmds : hmp_cmds;
+
+    while (table->name != NULL) {
+        if (strcmp(table->name, name) == 0) {
+            g_assert(table->cmd == NULL && table->cmd_info_hrt == NULL);
+            table->cmd = cmd;
+            return;
+        }
+        table++;
+    }
+    g_assert_not_reached();
+}
+
+void monitor_register_hmp_info_hrt(const char *name,
+                                   HumanReadableText *(*handler)(Error **errp))
+{
+    HMPCommand *table = hmp_info_cmds;
+
+    while (table->name != NULL) {
+        if (strcmp(table->name, name) == 0) {
+            g_assert(table->cmd == NULL && table->cmd_info_hrt == NULL);
+            table->cmd_info_hrt = handler;
+            return;
+        }
+        table++;
+    }
+    g_assert_not_reached();
 }
 
 void monitor_init_globals(void)

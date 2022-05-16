@@ -62,7 +62,6 @@ typedef struct target_sigaltstack {
 #define TARGET_SA_SIGINFO       0x00000040
 
 #define TARGET_MINSIGSTKSZ	4096
-#define TARGET_SIGSTKSZ		16384
 
 /* From <asm/gentrap.h>.  */
 #define TARGET_GEN_INTOVF      -1      /* integer overflow */
@@ -92,4 +91,12 @@ typedef struct target_sigaltstack {
 #define TARGET_GEN_SUBRNG7     -25
 
 #define TARGET_ARCH_HAS_SETUP_FRAME
+#define TARGET_ARCH_HAS_KA_RESTORER
+#define TARGET_ARCH_HAS_SIGTRAMP_PAGE 1
+
+/* bit-flags */
+#define TARGET_SS_AUTODISARM (1U << 31) /* disable sas during sighandling */
+/* mask for all SS_xxx flags */
+#define TARGET_SS_FLAG_BITS  TARGET_SS_AUTODISARM
+
 #endif /* ALPHA_TARGET_SIGNAL_H */

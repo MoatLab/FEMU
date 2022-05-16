@@ -24,27 +24,16 @@
 #include "qemu/host-utils.h"
 #include "exec/log.h"
 
-#if defined(CONFIG_USER_ONLY)
-
-void mb_cpu_do_interrupt(CPUState *cs)
+#ifndef CONFIG_USER_ONLY
+static bool mb_cpu_access_is_secure(MicroBlazeCPU *cpu,
+                                    MMUAccessType access_type)
 {
-    MicroBlazeCPU *cpu = MICROBLAZE_CPU(cs);
-    CPUMBState *env = &cpu->env;
-
-    cs->exception_index = -1;
-    env->res_addr = RES_ADDR_NONE;
-    env->regs[14] = env->pc;
+    if (access_type == MMU_INST_FETCH) {
+        return !cpu->ns_axi_ip;
+    } else {
+        return !cpu->ns_axi_dp;
+    }
 }
-
-bool mb_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
-                     MMUAccessType access_type, int mmu_idx,
-                     bool probe, uintptr_t retaddr)
-{
-    cs->exception_index = 0xaa;
-    cpu_loop_exit_restore(cs, retaddr);
-}
-
-#else /* !CONFIG_USER_ONLY */
 
 bool mb_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
                      MMUAccessType access_type, int mmu_idx,
@@ -55,12 +44,16 @@ bool mb_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
     MicroBlazeMMULookup lu;
     unsigned int hit;
     int prot;
+    MemTxAttrs attrs = {};
+
+    attrs.secure = mb_cpu_access_is_secure(cpu, access_type);
 
     if (mmu_idx == MMU_NOMMU_IDX) {
         /* MMU disabled or not available.  */
         address &= TARGET_PAGE_MASK;
         prot = PAGE_BITS;
-        tlb_set_page(cs, address, address, prot, mmu_idx, TARGET_PAGE_SIZE);
+        tlb_set_page_with_attrs(cs, address, address, attrs, prot, mmu_idx,
+                                TARGET_PAGE_SIZE);
         return true;
     }
 
@@ -71,7 +64,8 @@ bool mb_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
 
         qemu_log_mask(CPU_LOG_MMU, "MMU map mmu=%d v=%x p=%x prot=%x\n",
                       mmu_idx, vaddr, paddr, lu.prot);
-        tlb_set_page(cs, vaddr, paddr, lu.prot, mmu_idx, TARGET_PAGE_SIZE);
+        tlb_set_page_with_attrs(cs, vaddr, paddr, attrs, lu.prot, mmu_idx,
+                                TARGET_PAGE_SIZE);
         return true;
     }
 
@@ -230,7 +224,8 @@ void mb_cpu_do_interrupt(CPUState *cs)
     }
 }
 
-hwaddr mb_cpu_get_phys_page_debug(CPUState *cs, vaddr addr)
+hwaddr mb_cpu_get_phys_page_attrs_debug(CPUState *cs, vaddr addr,
+                                        MemTxAttrs *attrs)
 {
     MicroBlazeCPU *cpu = MICROBLAZE_CPU(cs);
     CPUMBState *env = &cpu->env;
@@ -238,6 +233,10 @@ hwaddr mb_cpu_get_phys_page_debug(CPUState *cs, vaddr addr)
     MicroBlazeMMULookup lu;
     int mmu_idx = cpu_mmu_index(env, false);
     unsigned int hit;
+
+    /* Caller doesn't initialize */
+    *attrs = (MemTxAttrs) {};
+    attrs->secure = mb_cpu_access_is_secure(cpu, MMU_DATA_LOAD);
 
     if (mmu_idx != MMU_NOMMU_IDX) {
         hit = mmu_translate(cpu, &lu, addr, 0, 0);
@@ -251,7 +250,6 @@ hwaddr mb_cpu_get_phys_page_debug(CPUState *cs, vaddr addr)
 
     return paddr;
 }
-#endif
 
 bool mb_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 {
@@ -268,6 +266,8 @@ bool mb_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     }
     return false;
 }
+
+#endif /* !CONFIG_USER_ONLY */
 
 void mb_cpu_do_unaligned_access(CPUState *cs, vaddr addr,
                                 MMUAccessType access_type,

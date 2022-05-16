@@ -85,6 +85,7 @@ programming languages / environments
  - GLib2 (standard C, but with GLib2 data types)
  - Python
  - Perl
+ - Rust
 
 
 Usage

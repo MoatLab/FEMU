@@ -1,0 +1,13 @@
+[Unit]
+Description=GitLab Runner
+After=network.target
+ConditionFileIsExecutable=/usr/local/bin/gitlab-runner
+
+[Service]
+User=gitlab
+WorkingDirectory=/home/gitlab
+ExecStart=/usr/local/bin/gitlab-runner run --config /etc/gitlab-runner/config.toml
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

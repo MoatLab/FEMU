@@ -40,15 +40,16 @@ SRST
 ERST
 
     {
-        .name       = "q|quit",
+        .name       = "quit|q",
         .args_type  = "",
         .params     = "",
         .help       = "quit the emulator",
         .cmd        = hmp_quit,
+        .flags      = "p",
     },
 
 SRST
-``q`` or ``quit``
+``quit`` or ``q``
   Quit the emulator.
 ERST
 
@@ -230,12 +231,6 @@ SRST
     read-write
       Makes the device writable.
 
-  ``change vnc`` *display*,\ *options*
-    Change the configuration of the VNC server. The valid syntax for *display*
-    and *options* are described at :ref:`sec_005finvocation`. eg::
-
-      (qemu) change vnc localhost:1
-
   ``change vnc password`` [*password*]
 
     Change the password associated with the VNC server. If the new password
@@ -387,7 +382,7 @@ SRST
 ERST
 
     {
-        .name       = "stop",
+        .name       = "stop|s",
         .args_type  = "",
         .params     = "",
         .help       = "stop emulation",
@@ -395,12 +390,12 @@ ERST
     },
 
 SRST
-``stop``
+``stop`` or ``s``
   Stop emulation.
 ERST
 
     {
-        .name       = "c|cont",
+        .name       = "cont|c",
         .args_type  = "",
         .params     = "",
         .help       = "resume emulation",
@@ -408,7 +403,7 @@ ERST
     },
 
 SRST
-``c`` or ``cont``
+``cont`` or ``c``
   Resume emulation.
 ERST
 
@@ -553,7 +548,7 @@ SRST
 ERST
 
     {
-        .name       = "p|print",
+        .name       = "print|p",
         .args_type  = "fmt:/,val:l",
         .params     = "/fmt expr",
         .help       = "print expression value (use $reg for CPU register access)",
@@ -561,7 +556,7 @@ ERST
     },
 
 SRST
-``p`` or ``print/``\ *fmt* *expr*
+``print`` or ``p/``\ *fmt* *expr*
   Print expression value. Only the *format* part of *fmt* is
   used.
 ERST
@@ -985,51 +980,6 @@ SRST
 ERST
 
     {
-        .name       = "migrate_set_cache_size",
-        .args_type  = "value:o",
-        .params     = "value",
-        .help       = "set cache size (in bytes) for XBZRLE migrations,"
-                      "the cache size will be rounded down to the nearest "
-                      "power of 2.\n"
-                      "The cache size affects the number of cache misses."
-                      "In case of a high cache miss ratio you need to increase"
-                      " the cache size",
-        .cmd        = hmp_migrate_set_cache_size,
-    },
-
-SRST
-``migrate_set_cache_size`` *value*
-  Set cache size to *value* (in bytes) for xbzrle migrations.
-ERST
-
-    {
-        .name       = "migrate_set_speed",
-        .args_type  = "value:o",
-        .params     = "value",
-        .help       = "set maximum speed (in bytes) for migrations. "
-	"Defaults to MB if no size suffix is specified, ie. B/K/M/G/T",
-        .cmd        = hmp_migrate_set_speed,
-    },
-
-SRST
-``migrate_set_speed`` *value*
-  Set maximum speed to *value* (in bytes) for migrations.
-ERST
-
-    {
-        .name       = "migrate_set_downtime",
-        .args_type  = "value:T",
-        .params     = "value",
-        .help       = "set maximum tolerated downtime (in seconds) for migrations",
-        .cmd        = hmp_migrate_set_downtime,
-    },
-
-SRST
-``migrate_set_downtime`` *second*
-  Set maximum tolerated downtime (in seconds) for migration.
-ERST
-
-    {
         .name       = "migrate_set_capability",
         .args_type  = "capability:s,state:b",
         .params     = "capability state",
@@ -1302,8 +1252,8 @@ ERST
 	              " -c for correctable error\n\t\t\t"
                       "<id> = qdev device id\n\t\t\t"
                       "<error_status> = error string or 32bit\n\t\t\t"
-                      "<tlb header> = 32bit x 4\n\t\t\t"
-                      "<tlb header prefix> = 32bit x 4",
+                      "<tlp header> = 32bit x 4\n\t\t\t"
+                      "<tlp header prefix> = 32bit x 4",
         .cmd        = hmp_pcie_aer_inject_error,
     },
 
@@ -1319,6 +1269,7 @@ ERST
         .help       = "add host network device",
         .cmd        = hmp_netdev_add,
         .command_completion = netdev_add_completion,
+        .flags      = "p",
     },
 
 SRST
@@ -1333,6 +1284,7 @@ ERST
         .help       = "remove host network device",
         .cmd        = hmp_netdev_del,
         .command_completion = netdev_del_completion,
+        .flags      = "p",
     },
 
 SRST
@@ -1342,11 +1294,12 @@ ERST
 
     {
         .name       = "object_add",
-        .args_type  = "object:O",
+        .args_type  = "object:S",
         .params     = "[qom-type=]type,id=str[,prop=value][,...]",
         .help       = "create QOM object",
         .cmd        = hmp_object_add,
         .command_completion = object_add_completion,
+        .flags      = "p",
     },
 
 SRST
@@ -1361,6 +1314,7 @@ ERST
         .help       = "destroy QOM object",
         .cmd        = hmp_object_del,
         .command_completion = object_del_completion,
+        .flags      = "p",
     },
 
 SRST
@@ -1436,82 +1390,6 @@ ERST
 SRST
 ``watchdog_action``
   Change watchdog action.
-ERST
-
-    {
-        .name       = "acl_show",
-        .args_type  = "aclname:s",
-        .params     = "aclname",
-        .help       = "list rules in the access control list",
-        .cmd        = hmp_acl_show,
-    },
-
-SRST
-``acl_show`` *aclname*
-  List all the matching rules in the access control list, and the default
-  policy. There are currently two named access control lists,
-  *vnc.x509dname* and *vnc.username* matching on the x509 client
-  certificate distinguished name, and SASL username respectively.
-ERST
-
-    {
-        .name       = "acl_policy",
-        .args_type  = "aclname:s,policy:s",
-        .params     = "aclname allow|deny",
-        .help       = "set default access control list policy",
-        .cmd        = hmp_acl_policy,
-    },
-
-SRST
-``acl_policy`` *aclname* ``allow|deny``
-  Set the default access control list policy, used in the event that
-  none of the explicit rules match. The default policy at startup is
-  always ``deny``.
-ERST
-
-    {
-        .name       = "acl_add",
-        .args_type  = "aclname:s,match:s,policy:s,index:i?",
-        .params     = "aclname match allow|deny [index]",
-        .help       = "add a match rule to the access control list",
-        .cmd        = hmp_acl_add,
-    },
-
-SRST
-``acl_add`` *aclname* *match* ``allow|deny`` [*index*]
-  Add a match rule to the access control list, allowing or denying access.
-  The match will normally be an exact username or x509 distinguished name,
-  but can optionally include wildcard globs. eg ``*@EXAMPLE.COM`` to
-  allow all users in the ``EXAMPLE.COM`` kerberos realm. The match will
-  normally be appended to the end of the ACL, but can be inserted
-  earlier in the list if the optional *index* parameter is supplied.
-ERST
-
-    {
-        .name       = "acl_remove",
-        .args_type  = "aclname:s,match:s",
-        .params     = "aclname match",
-        .help       = "remove a match rule from the access control list",
-        .cmd        = hmp_acl_remove,
-    },
-
-SRST
-``acl_remove`` *aclname* *match*
-  Remove the specified match rule from the access control list.
-ERST
-
-    {
-        .name       = "acl_reset",
-        .args_type  = "aclname:s",
-        .params     = "aclname",
-        .help       = "reset the access control list",
-        .cmd        = hmp_acl_reset,
-    },
-
-SRST
-``acl_reset`` *aclname*
-  Remove all matches from the access control list, and set the default
-  policy back to ``deny``.
 ERST
 
     {
@@ -1620,21 +1498,6 @@ SRST
 ERST
 
     {
-        .name       = "block_passwd",
-        .args_type  = "device:B,password:s",
-        .params     = "block_passwd device password",
-        .help       = "set the password of encrypted block devices",
-        .cmd        = hmp_block_passwd,
-    },
-
-SRST
-``block_passwd`` *device* *password*
-  Set the encrypted device *device* password to *password*
-
-  This command is now obsolete and will always return an error since 2.10
-ERST
-
-    {
         .name       = "block_set_io_throttle",
         .args_type  = "device:B,bps:l,bps_rd:l,bps_wr:l,iops:l,iops_rd:l,iops_wr:l",
         .params     = "device bps bps_rd bps_wr iops iops_rd iops_wr",
@@ -1651,34 +1514,35 @@ ERST
 
     {
         .name       = "set_password",
-        .args_type  = "protocol:s,password:s,connected:s?",
-        .params     = "protocol password action-if-connected",
+        .args_type  = "protocol:s,password:s,display:-ds,connected:s?",
+        .params     = "protocol password [-d display] [action-if-connected]",
         .help       = "set spice/vnc password",
         .cmd        = hmp_set_password,
     },
 
 SRST
-``set_password [ vnc | spice ] password [ action-if-connected ]``
-  Change spice/vnc password.  Use zero to make the password stay valid
-  forever.  *action-if-connected* specifies what should happen in
-  case a connection is established: *fail* makes the password change
-  fail.  *disconnect* changes the password and disconnects the
-  client.  *keep* changes the password and keeps the connection up.
-  *keep* is the default.
+``set_password [ vnc | spice ] password [ -d display ] [ action-if-connected ]``
+  Change spice/vnc password.  *display* can be used with 'vnc' to specify
+  which display to set the password on.  *action-if-connected* specifies
+  what should happen in case a connection is established: *fail* makes
+  the password change fail.  *disconnect* changes the password and
+  disconnects the client.  *keep* changes the password and keeps the
+  connection up.  *keep* is the default.
 ERST
 
     {
         .name       = "expire_password",
-        .args_type  = "protocol:s,time:s",
-        .params     = "protocol time",
+        .args_type  = "protocol:s,time:s,display:-ds",
+        .params     = "protocol time [-d display]",
         .help       = "set spice/vnc password expire-time",
         .cmd        = hmp_expire_password,
     },
 
 SRST
-``expire_password [ vnc | spice ]`` *expire-time*
-  Specify when a password for spice/vnc becomes
-  invalid. *expire-time* accepts:
+``expire_password [ vnc | spice ] expire-time [ -d display ]``
+  Specify when a password for spice/vnc becomes invalid.
+  *display* behaves the same as in ``set_password``.
+  *expire-time* accepts:
 
   ``now``
     Invalidate password instantly.
@@ -1808,7 +1672,7 @@ ERST
 
     {
         .name       = "replay_break",
-        .args_type  = "icount:i",
+        .args_type  = "icount:l",
         .params     = "icount",
         .help       = "set breakpoint at the specified instruction count",
         .cmd        = hmp_replay_break,
@@ -1840,7 +1704,7 @@ ERST
 
     {
         .name       = "replay_seek",
-        .args_type  = "icount:i",
+        .args_type  = "icount:l",
         .params     = "icount",
         .help       = "replay execution to the specified instruction count",
         .cmd        = hmp_replay_seek,
@@ -1866,3 +1730,19 @@ ERST
         .flags      = "p",
     },
 
+SRST
+``calc_dirty_rate`` *second*
+  Start a round of dirty rate measurement with the period specified in *second*.
+  The result of the dirty rate measurement may be observed with ``info
+  dirty_rate`` command.
+ERST
+
+    {
+        .name       = "calc_dirty_rate",
+        .args_type  = "dirty_ring:-r,dirty_bitmap:-b,second:l,sample_pages_per_GB:l?",
+        .params     = "[-r] [-b] second [sample_pages_per_GB]",
+        .help       = "start a round of guest dirty rate measurement (using -r to"
+                      "\n\t\t\t specify dirty ring as the method of calculation and"
+                      "\n\t\t\t -b to specify dirty bitmap as method of calculation)",
+        .cmd        = hmp_calc_dirty_rate,
+    },

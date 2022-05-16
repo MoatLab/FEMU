@@ -23,10 +23,8 @@
 #include "qemu/osdep.h"
 #include "qemu/bitops.h"
 #include "qemu/error-report.h"
-#include "qemu/log.h"
 #include "qapi/error.h"
 #include "migration/vmstate.h"
-#include "hw/irq.h"
 #include "hw/sd/cadence_sdhci.h"
 #include "sdhci-internal.h"
 
@@ -177,7 +175,7 @@ static void cadence_sdhci_class_init(ObjectClass *classp, void *data)
     dc->vmsd = &vmstate_cadence_sdhci;
 }
 
-static TypeInfo cadence_sdhci_info = {
+static const TypeInfo cadence_sdhci_info = {
     .name          = TYPE_CADENCE_SDHCI,
     .parent        = TYPE_SYS_BUS_DEVICE,
     .instance_size = sizeof(CadenceSDHCIState),

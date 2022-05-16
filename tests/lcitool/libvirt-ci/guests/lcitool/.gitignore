@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+
+build/
+
+# We need to include the following back, as this is a directory we want to track
+!lcitool/ansible/playbooks/build/
+
+dist/
+eggs/
+.eggs/
+sdist/
+*.egg-info/
+*.egg

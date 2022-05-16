@@ -410,43 +410,27 @@ static void tc6393xb_nand_writeb(TC6393xbState *s, hwaddr addr, uint32_t value) 
                                         (uint32_t) addr, value & 0xff);
 }
 
-#define BITS 8
-#include "tc6393xb_template.h"
-#define BITS 15
-#include "tc6393xb_template.h"
-#define BITS 16
-#include "tc6393xb_template.h"
-#define BITS 24
-#include "tc6393xb_template.h"
-#define BITS 32
-#include "tc6393xb_template.h"
-
 static void tc6393xb_draw_graphic(TC6393xbState *s, int full_update)
 {
     DisplaySurface *surface = qemu_console_surface(s->con);
+    int i;
+    uint16_t *data_buffer;
+    uint8_t *data_display;
 
-    switch (surface_bits_per_pixel(surface)) {
-        case 8:
-            tc6393xb_draw_graphic8(s);
-            break;
-        case 15:
-            tc6393xb_draw_graphic15(s);
-            break;
-        case 16:
-            tc6393xb_draw_graphic16(s);
-            break;
-        case 24:
-            tc6393xb_draw_graphic24(s);
-            break;
-        case 32:
-            tc6393xb_draw_graphic32(s);
-            break;
-        default:
-            printf("tc6393xb: unknown depth %d\n",
-                   surface_bits_per_pixel(surface));
-            return;
+    data_buffer = s->vram_ptr;
+    data_display = surface_data(surface);
+    for (i = 0; i < s->scr_height; i++) {
+        int j;
+        for (j = 0; j < s->scr_width; j++, data_display += 4, data_buffer++) {
+            uint16_t color = *data_buffer;
+            uint32_t dest_color = rgb_to_pixel32(
+                           ((color & 0xf800) * 0x108) >> 11,
+                           ((color & 0x7e0) * 0x41) >> 9,
+                           ((color & 0x1f) * 0x21) >> 2
+                           );
+            *(uint32_t *)data_display = dest_color;
+        }
     }
-
     dpy_gfx_update_full(s->con);
 }
 
@@ -556,7 +540,7 @@ TC6393xbState *tc6393xb_init(MemoryRegion *sysmem, uint32_t base, qemu_irq irq)
         },
     };
 
-    s = (TC6393xbState *) g_malloc0(sizeof(TC6393xbState));
+    s = g_new0(TC6393xbState, 1);
     s->irq = irq;
     s->gpio_in = qemu_allocate_irqs(tc6393xb_gpio_set, s, TC6393XB_GPIOS);
 

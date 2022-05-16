@@ -11,9 +11,9 @@ options provided in your `meson_options.txt` file and so on.
 
 The main tool for this is the `meson configure` command.
 
-You invoke `meson configure` by giving it the location of your build dir. If
-omitted, the current working directory is used instead. Here's a
-sample output for a simple project.
+You invoke `meson configure` by giving it the location of your build
+dir. If omitted, the current working directory is used instead. Here's
+a sample output for a simple project.
 
     Core properties
 
@@ -60,11 +60,11 @@ sample output for a simple project.
       ------        ------------- ---------------                                                                                               -----------
       c_args        []                                                                                                                          Extra arguments passed to the C compiler
       c_link_args   []                                                                                                                          Extra arguments passed to the C linker
-      c_std         c99           [none, c89, c99, c11, c17, c18, gnu89, gnu99, gnu11, gnu17, gnu18]                                                                    C language standard to use
+      c_std         c99           [none, c89, c99, c11, c17, c18, c2x, gnu89, gnu99, gnu11, gnu17, gnu18, gnu2x]                                C language standard to use
       cpp_args      []                                                                                                                          Extra arguments passed to the C++ compiler
       cpp_debugstl  false         [true, false]                                                                                                 STL debug mode
       cpp_link_args []                                                                                                                          Extra arguments passed to the C++ linker
-      cpp_std       c++11         [none, c++98, c++03, c++11, c++14, c++17, c++1z, c++2a, gnu++03, gnu++11, gnu++14, gnu++17, gnu++1z, gnu++2a] C++ language standard to use
+      cpp_std       c++11         [none, c++98, c++03, c++11, c++14, c++17, c++1z, c++2a, c++20, gnu++03, gnu++11, gnu++14, gnu++17, gnu++1z, gnu++2a, gnu++20] C++ language standard to use
       fortran_std   []            [none, legacy, f95, f2003, f2008, f2018]                                                                      language standard to use
 
     Directories:
@@ -109,11 +109,12 @@ you would issue the following command.
 
     meson configure -Dprefix=/tmp/testroot
 
-Then you would run your build command (usually `meson compile`), which would
-cause Meson to detect that the build setup has changed and do all the
-work required to bring your build tree up to date.
+Then you would run your build command (usually `meson compile`), which
+would cause Meson to detect that the build setup has changed and do
+all the work required to bring your build tree up to date.
 
 Since 0.50.0, it is also possible to get a list of all build options
-by invoking [`meson configure`](Commands.md#configure) with the project source directory or
-the path to the root `meson.build`. In this case, meson will print the
-default values of all options similar to the example output from above.
+by invoking [`meson configure`](Commands.md#configure) with the
+project source directory or the path to the root `meson.build`. In
+this case, Meson will print the default values of all options similar
+to the example output from above.

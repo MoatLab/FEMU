@@ -70,6 +70,8 @@ void ip_cleanup(Slirp *slirp)
 void ip_input(struct mbuf *m)
 {
     Slirp *slirp = m->slirp;
+    M_DUP_DEBUG(slirp, m, 0, TCPIPHDR_DELTA);
+
     register struct ip *ip;
     int hlen;
 
@@ -347,7 +349,7 @@ insert:
     /*
      * If the fragments concatenated to an mbuf that's bigger than the total
      * size of the fragment and the mbuf was not already using an m_ext buffer,
-     * then an m_ext buffer was alloced. But fp->ipq_next points to the old
+     * then an m_ext buffer was allocated. But fp->ipq_next points to the old
      * buffer (in the mbuf), so we must point ip into the new buffer.
      */
     if (m->m_flags & M_EXT) {
@@ -360,7 +362,7 @@ insert:
     ip->ip_src = fp->ipq_src;
     ip->ip_dst = fp->ipq_dst;
     remque(&fp->ip_link);
-    (void)m_free(dtom(slirp, fp));
+    m_free(dtom(slirp, fp));
     m->m_len += (ip->ip_hl << 2);
     m->m_data -= (ip->ip_hl << 2);
 
@@ -386,7 +388,7 @@ static void ip_freef(Slirp *slirp, struct ipq *fp)
         m_free(dtom(slirp, q));
     }
     remque(&fp->ip_link);
-    (void)m_free(dtom(slirp, fp));
+    m_free(dtom(slirp, fp));
 }
 
 /*

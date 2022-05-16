@@ -64,7 +64,7 @@ interactive prompts from certtool::
    cert_signing_key
    EOF
    # certtool --generate-self-signed \
-              --load-privkey ca-key.pem
+              --load-privkey ca-key.pem \
               --template ca.info \
               --outfile ca-cert.pem
 
@@ -311,7 +311,7 @@ containing one or more usernames and random keys::
    mkdir -m 0700 /tmp/keys
    psktool -u rich -p /tmp/keys/keys.psk
 
-TLS-enabled servers such as qemu-nbd can use this directory like so::
+TLS-enabled servers such as ``qemu-nbd`` can use this directory like so::
 
    qemu-nbd \
      -t -x / \

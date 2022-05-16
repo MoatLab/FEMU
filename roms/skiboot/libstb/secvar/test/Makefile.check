@@ -1,0 +1,58 @@
+# SPDX-License-Identifier: Apache-2.0 OR GPL-2.0-or-later
+# -*-Makefile-*-
+SECVAR_TEST_DIR = libstb/secvar/test
+#SUBDIRS = $(SECVAR_TEST_DIR)
+
+SECVAR_TEST = $(patsubst %.c, %, $(wildcard $(SECVAR_TEST_DIR)/secvar-test-*.c))
+
+HOSTCFLAGS+=-I . -I include -I libstb/tss2 -I libstb/tss2/ibmtpm20tss/utils
+HOSTCFLAGS += -I$(SRC)/$(LIBSTB_DIR)/crypto/mbedtls/include
+# Needed because x86 and POWER disagree on the type for uint64_t, causes printf issues
+HOSTCFLAGS+= -Wno-format
+
+# we want to test for leaks too:
+SECVAR_VALGRIND := $(VALGRIND) --leak-check=full
+
+.PHONY : secvar-check
+secvar-check: $(SECVAR_TEST:%=%-check) $(SECVAR_TEST_NOSTUB:%=%-check)
+
+.PHONY : secvar-coverage
+secvar-coverage: $(SECVAR_TEST:%=%-gcov-run) $(SECVAR_TEST_NOSTUB:%=%-gcov-run)
+
+check: secvar-check
+coverage: secvar-coverage
+
+# TODO: create pnor image for only tests that need it
+$(SECVAR_TEST:%=%-gcov-run) : %-run: %
+	@dd if=/dev/zero of=secboot.img bs=128k count=1 2> /dev/null
+	$(call QTEST, TEST-COVERAGE ,$< , $<)
+	@$(RM) -f secboot.img
+
+$(SECVAR_TEST:%=%-check) : %-check: %
+	@dd if=/dev/zero of=secboot.img bs=128k count=1 2> /dev/null
+	$(call QTEST, RUN-TEST ,$(SECVAR_VALGRIND) $<, $<)
+	@$(RM) -f secboot.img
+
+HOST_MBEDTLS_OBJS=$(MBEDTLS_OBJS:%.o=$(CRYPTO_DIR)/%.host.o)
+HOST_MBEDTLS_CFLAGS=-I$(SRC)/$(LIBSTB_DIR)/crypto -DMBEDTLS_CONFIG_FILE='<mbedtls-config.h>'
+HOST_MBEDTLS_CFLAGS+= -Wno-unused-function -Wno-suggest-attribute=const
+%.host.o: %.c
+	$(call Q, HOSTCC , $(HOSTCC) $(HOSTCFLAGS) $(HOST_MBEDTLS_CFLAGS) -O0 -g -c -o $@ $<, $<)
+
+
+$(SECVAR_TEST) : core/test/stubs.o
+
+$(SECVAR_TEST) : % : %.c $(HOST_MBEDTLS_OBJS)
+	$(call Q, HOSTCC ,$(HOSTCC) $(HOSTCFLAGS) $(HOST_MBEDTLS_CFLAGS) -O0 -g -I include -I . -I libfdt -o $@ $< $(HOST_MBEDTLS_OBJS) core/test/stubs.o, $<)
+
+$(SECVAR_TEST:%=%-gcov): %-gcov : %.c % $(HOST_MBEDTLS_OBJS)
+	$(call Q, HOSTCC ,$(HOSTCC) $(HOSTCFLAGS) $(HOSTGCOVCFLAGS) $(HOST_MBEDTLS_CFLAGS) -I include -I . -I libfdt -lgcov -o $@ $< $(HOST_MBEDTLS_OBJS) core/test/stubs.o, $<)
+
+-include $(wildcard libstb/secvar/test/*.d)
+
+clean: secvar-test-clean
+
+secvar-test-clean:
+	$(RM) -f libstb/secvar/test/*.[od] $(SECVAR_TEST) $(SECVAR_TEST:%=%-gcov)
+	$(RM) -f libstb/secvar/test/*.gcda libstb/secvar/test/*.gcno
+	$(RM) -f secboot.img

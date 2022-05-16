@@ -13,6 +13,7 @@
 #include "qapi/error.h"
 #include "migration/vmstate.h"
 #include "hw/qdev-properties.h"
+#include "hw/qdev-properties-system.h"
 #include "hw/hyperv/hyperv.h"
 #include "hw/hyperv/vmbus.h"
 #include "hw/hyperv/vmbus-bridge.h"
@@ -372,7 +373,8 @@ static ssize_t gpadl_iter_io(GpadlIter *iter, void *buf, uint32_t len)
 
             maddr = (iter->gpadl->gfns[idx] << TARGET_PAGE_BITS) | off_in_page;
 
-            iter->map = dma_memory_map(iter->as, maddr, &mlen, iter->dir);
+            iter->map = dma_memory_map(iter->as, maddr, &mlen, iter->dir,
+                                       MEMTXATTRS_UNSPECIFIED);
             if (mlen != pgleft) {
                 dma_memory_unmap(iter->as, iter->map, mlen, iter->dir, 0);
                 iter->map = NULL;
@@ -489,7 +491,8 @@ int vmbus_map_sgl(VMBusChanReq *req, DMADirection dir, struct iovec *iov,
                 goto err;
             }
 
-            iov[ret_cnt].iov_base = dma_memory_map(sgl->as, a, &l, dir);
+            iov[ret_cnt].iov_base = dma_memory_map(sgl->as, a, &l, dir,
+                                                   MEMTXATTRS_UNSPECIFIED);
             if (!l) {
                 ret = -EFAULT;
                 goto err;
@@ -565,7 +568,7 @@ static vmbus_ring_buffer *ringbuf_map_hdr(VMBusRingBufCommon *ringbuf)
     dma_addr_t mlen = sizeof(*rb);
 
     rb = dma_memory_map(ringbuf->as, ringbuf->rb_addr, &mlen,
-                        DMA_DIRECTION_FROM_DEVICE);
+                        DMA_DIRECTION_FROM_DEVICE, MEMTXATTRS_UNSPECIFIED);
     if (mlen != sizeof(*rb)) {
         dma_memory_unmap(ringbuf->as, rb, mlen,
                          DMA_DIRECTION_FROM_DEVICE, 0);
@@ -2371,6 +2374,14 @@ static void vmbus_dev_realize(DeviceState *dev, Error **errp)
 
     assert(!qemu_uuid_is_null(&vdev->instanceid));
 
+    if (!qemu_uuid_is_null(&vdc->instanceid)) {
+        /* Class wants to only have a single instance with a fixed UUID */
+        if (!qemu_uuid_is_equal(&vdev->instanceid, &vdc->instanceid)) {
+            error_setg(&err, "instance id can't be changed");
+            goto error_out;
+        }
+    }
+
     /* Check for instance id collision for this class id */
     QTAILQ_FOREACH(child, &BUS(vmbus)->children, sibling) {
         VMBusDevice *child_dev = VMBUS_DEVICE(child->child);
@@ -2437,17 +2448,21 @@ static void vmbus_dev_unrealize(DeviceState *dev)
     free_channels(vdev);
 }
 
+static Property vmbus_dev_props[] = {
+    DEFINE_PROP_UUID("instanceid", VMBusDevice, instanceid),
+    DEFINE_PROP_END_OF_LIST()
+};
+
+
 static void vmbus_dev_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *kdev = DEVICE_CLASS(klass);
+    device_class_set_props(kdev, vmbus_dev_props);
     kdev->bus_type = TYPE_VMBUS;
     kdev->realize = vmbus_dev_realize;
     kdev->unrealize = vmbus_dev_unrealize;
     kdev->reset = vmbus_dev_reset;
 }
-
-static Property vmbus_dev_instanceid =
-                        DEFINE_PROP_UUID("instanceid", VMBusDevice, instanceid);
 
 static void vmbus_dev_instance_init(Object *obj)
 {
@@ -2457,8 +2472,6 @@ static void vmbus_dev_instance_init(Object *obj)
     if (!qemu_uuid_is_null(&vdc->instanceid)) {
         /* Class wants to only have a single instance with a fixed UUID */
         vdev->instanceid = vdc->instanceid;
-    } else {
-        qdev_property_add_static(DEVICE(vdev), &vmbus_dev_instanceid);
     }
 }
 
@@ -2718,7 +2731,7 @@ static void vmbus_bridge_realize(DeviceState *dev, Error **errp)
         return;
     }
 
-    bridge->bus = VMBUS(qbus_create(TYPE_VMBUS, dev, "vmbus"));
+    bridge->bus = VMBUS(qbus_new(TYPE_VMBUS, dev, "vmbus"));
 }
 
 static char *vmbus_bridge_ofw_unit_address(const SysBusDevice *dev)

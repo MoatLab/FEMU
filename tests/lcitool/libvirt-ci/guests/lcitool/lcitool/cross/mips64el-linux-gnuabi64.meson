@@ -1,0 +1,11 @@
+[binaries]
+c = '/usr/bin/mips64el-linux-gnuabi64-gcc'
+ar = '/usr/bin/mips64el-linux-gnuabi64-gcc-ar'
+strip = '/usr/bin/mips64el-linux-gnuabi64-strip'
+pkgconfig = '/usr/bin/mips64el-linux-gnuabi64-pkg-config'
+
+[host_machine]
+system = 'linux'
+cpu_family = 'mips64'
+cpu = 'mips64el'
+endian = 'little'

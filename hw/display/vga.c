@@ -39,6 +39,8 @@
 //#define DEBUG_VGA_MEM
 //#define DEBUG_VGA_REG
 
+bool have_vga = true;
+
 /* 16 state changes per vertical frame @60 Hz */
 #define VGA_TEXT_CURSOR_PERIOD_MS       (1000 * 2 * 16 / 60)
 
@@ -750,7 +752,8 @@ void vbe_ioport_write_data(void *opaque, uint32_t addr, uint32_t val)
                 val == VBE_DISPI_ID1 ||
                 val == VBE_DISPI_ID2 ||
                 val == VBE_DISPI_ID3 ||
-                val == VBE_DISPI_ID4) {
+                val == VBE_DISPI_ID4 ||
+                val == VBE_DISPI_ID5) {
                 s->vbe_regs[s->vbe_index] = val;
             }
             break;
@@ -2165,9 +2168,10 @@ static inline uint32_t uint_clamp(uint32_t val, uint32_t vmin, uint32_t vmax)
     return val;
 }
 
-void vga_common_init(VGACommonState *s, Object *obj)
+bool vga_common_init(VGACommonState *s, Object *obj, Error **errp)
 {
     int i, j, v, b;
+    Error *local_err = NULL;
 
     for(i = 0;i < 256; i++) {
         v = 0;
@@ -2202,8 +2206,18 @@ void vga_common_init(VGACommonState *s, Object *obj)
     s->vbe_size_mask = s->vbe_size - 1;
 
     s->is_vbe_vmstate = 1;
+
+    if (s->global_vmstate && qemu_ram_block_by_name("vga.vram")) {
+        error_setg(errp, "Only one global VGA device can be used at a time");
+        return false;
+    }
+
     memory_region_init_ram_nomigrate(&s->vram, obj, "vga.vram", s->vram_size,
-                           &error_fatal);
+                                     &local_err);
+    if (local_err) {
+        error_propagate(errp, local_err);
+        return false;
+    }
     vmstate_register_ram(&s->vram, s->global_vmstate ? NULL : DEVICE(obj));
     xen_register_framebuffer(&s->vram);
     s->vram_ptr = memory_region_get_ram_ptr(&s->vram);
@@ -2234,6 +2248,8 @@ void vga_common_init(VGACommonState *s, Object *obj)
     s->default_endian_fb = false;
 #endif
     vga_dirty_log_start(s);
+
+    return true;
 }
 
 static const MemoryRegionPortio vga_portio_list[] = {

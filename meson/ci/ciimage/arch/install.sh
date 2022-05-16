@@ -2,22 +2,23 @@
 
 set -e
 
+source /ci/common.sh
+
 # Inspired by https://github.com/greyltc/docker-archlinux-aur/blob/master/add-aur.sh
 
 pkgs=(
-  python python-setuptools python-wheel python-pip python-pytest-xdist python-gobject python-jsonschema
+  python python-pip
   ninja make git sudo fakeroot autoconf automake patch
   libelf gcc gcc-fortran gcc-objc vala rust bison flex cython go dlang-dmd
-  mono boost qt5-base gtkmm3 gtest gmock protobuf wxgtk gobject-introspection
+  mono boost qt5-base gtkmm3 gtest gmock protobuf wxgtk2 gobject-introspection
   itstool gtk3 java-environment=8 gtk-doc llvm clang sdl2 graphviz
   doxygen vulkan-validation-layers openssh mercurial gtk-sharp-2 qt5-tools
   libwmf valgrind cmake netcdf-fortran openmpi nasm gnustep-base gettext
-  python-jsonschema python-lxml
+  python-lxml hotdoc rust-bindgen qt6-base qt6-tools
   # cuda
 )
 
 aur_pkgs=(scalapack)
-pip_pkgs=(hotdoc gcovr)
 cleanup_pkgs=(go)
 
 AUR_USER=docker
@@ -26,11 +27,11 @@ PACMAN_OPTS='--needed --noprogressbar --noconfirm'
 # Patch config files
 sed -i 's/#Color/Color/g'                            /etc/pacman.conf
 sed -i 's,#MAKEFLAGS="-j2",MAKEFLAGS="-j$(nproc)",g' /etc/makepkg.conf
-sed -i "s,PKGEXT='.pkg.tar.xz',PKGEXT='.pkg.tar',g"  /etc/makepkg.conf
+sed -i "s,PKGEXT='.pkg.tar.zst',PKGEXT='.pkg.tar',g" /etc/makepkg.conf
 
 # Install packages
 pacman -Syu $PACMAN_OPTS "${pkgs[@]}"
-python -m pip install "${pip_pkgs[@]}"
+install_python_packages
 
 # Setup the user
 useradd -m $AUR_USER

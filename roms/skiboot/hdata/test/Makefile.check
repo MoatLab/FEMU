@@ -1,0 +1,56 @@
+# SPDX-License-Identifier: Apache-2.0 OR GPL-2.0-or-later
+# -*-Makefile-*-
+
+HDATA_TEST := hdata/test/hdata_to_dt
+
+.PHONY : hdata-check hdata-coverage
+hdata-check: $(HDATA_TEST:%=%-check)
+hdata-coverage: $(HDATA_TEST:%=%-gcov-run)
+
+check: hdata-check hdata-coverage
+coverage: hdata-coverage
+
+LCOV_EXCLUDE += $(HDATA_TEST:%=%.c) hdata/test/stubs.c
+LCOV_EXCLUDE += /usr/include/valgrind/memcheck.h
+
+hdata/test/hdata_to_dt-check: hdata/test/hdata_to_dt-check-q
+hdata/test/hdata_to_dt-check: hdata/test/hdata_to_dt-check-dt
+
+# Add some test ntuples for open source version...
+hdata/test/hdata_to_dt-check-q: hdata/test/hdata_to_dt
+	$(call Q, TEST , $(VALGRIND) hdata/test/hdata_to_dt -8E -q hdata/test/p81-811.spira hdata/test/p81-811.spira.heap, $<)
+	$(call Q, TEST , $(VALGRIND) hdata/test/hdata_to_dt -8E -s -q hdata/test/p8-840-spira.spirah hdata/test/p8-840-spira.spiras, $<)
+	$(call Q, TEST , $(VALGRIND) hdata/test/hdata_to_dt -9 -s -q hdata/test/p8-840-spira.spirah hdata/test/op920.wsp.heap, $<)
+
+hdata/test/hdata_to_dt-check-dt: hdata/test/hdata_to_dt
+	$(call Q, TEST , $(VALGRIND) hdata/test/hdata_to_dt -8E hdata/test/p81-811.spira hdata/test/p81-811.spira.heap 2>/dev/null | hdata/test/dtdiff_wrap.sh hdata/test/p81-811.spira.dts, $< device-tree)
+	$(call Q, TEST , $(VALGRIND) hdata/test/hdata_to_dt -8E -s hdata/test/p8-840-spira.spirah hdata/test/p8-840-spira.spiras 2>/dev/null | hdata/test/dtdiff_wrap.sh hdata/test/p8-840-spira.dts, $< device-tree)
+	$(call Q, TEST , $(VALGRIND) hdata/test/hdata_to_dt -9 -s hdata/test/p8-840-spira.spirah hdata/test/op920.wsp.heap 2>/dev/null | hdata/test/dtdiff_wrap.sh hdata/test/op920.wsp.dts, $< device-tree)
+
+hdata/test/hdata_to_dt-gcov-run: hdata/test/hdata_to_dt-check-dt-gcov-run
+
+hdata/test/hdata_to_dt-check-dt-gcov-run: hdata/test/hdata_to_dt-gcov
+	$(call Q, TEST-COVERAGE , ./hdata/test/hdata_to_dt-gcov -8E hdata/test/p81-811.spira hdata/test/p81-811.spira.heap 2>/dev/null | hdata/test/dtdiff_wrap.sh hdata/test/p81-811.spira.dts, $< device-tree)
+	$(call Q, TEST-COVERAGE , ./hdata/test/hdata_to_dt-gcov -8E -s hdata/test/p8-840-spira.spirah hdata/test/p8-840-spira.spiras 2>/dev/null | hdata/test/dtdiff_wrap.sh hdata/test/p8-840-spira.dts, $< device-tree)
+	$(call Q, TEST-COVERAGE , ./hdata/test/hdata_to_dt -9 -s hdata/test/p8-840-spira.spirah hdata/test/op920.wsp.heap 2>/dev/null | hdata/test/dtdiff_wrap.sh hdata/test/op920.wsp.dts, $< device-tree)
+
+hdata/test/stubs.o: hdata/test/stubs.c
+	$(call Q, HOSTCC , $(HOSTCC) $(HOSTCFLAGS) -g -c -o $@ $<, $<)
+
+$(HDATA_TEST) : hdata/test/stubs.o
+
+$(CORE_TEST:%=%-gcov): hdata/test/stubs.o
+
+$(HDATA_TEST) : % : %.c
+	$(call Q, HOSTCC , $(HOSTCC) $(HOSTCFLAGS) -DTEST -O0 -g -I hdata -I include -I . -I libfdt -o $@ $< hdata/test/stubs.o, $<)
+
+$(HDATA_TEST:%=%-gcov): %-gcov : %.c %
+	$(call Q, HOSTCC ,$(HOSTCC) $(HOSTCFLAGS) $(HOSTGCOVCFLAGS) -DTEST -I include -I . -I data -I libfdt -lgcov -o $@ $< hdata/test/stubs.o, $<)
+
+-include $(wildcard hdata/test/*.d)
+
+clean: hdata-test-clean
+
+hdata-test-clean:
+	$(RM) hdata/test/*.[od] hdata/test/hdata_to_dt
+	$(RM) $(HDATA_TEST) $(HDATA_TEST:%=%-gcov)

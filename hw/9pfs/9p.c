@@ -11,7 +11,17 @@
  *
  */
 
+/*
+ * Not so fast! You might want to read the 9p developer docs first:
+ * https://wiki.qemu.org/Documentation/9p
+ */
+
 #include "qemu/osdep.h"
+#ifdef CONFIG_LINUX
+#include <linux/limits.h>
+#else
+#include <limits.h>
+#endif
 #include <glib/gprintf.h>
 #include "hw/virtio/virtio.h"
 #include "qapi/error.h"
@@ -22,13 +32,12 @@
 #include "virtio-9p.h"
 #include "fsdev/qemu-fsdev.h"
 #include "9p-xattr.h"
+#include "9p-util.h"
 #include "coth.h"
 #include "trace.h"
 #include "migration/blocker.h"
-#include "sysemu/qtest.h"
 #include "qemu/xxhash.h"
 #include <math.h>
-#include <linux/limits.h>
 
 int open_fd_hw;
 int total_open_fd;
@@ -45,6 +54,8 @@ enum {
     Orclose = 0x40,
     Oappend = 0x80,
 };
+
+P9ARRAY_DEFINE_TYPE(V9fsPath, v9fs_path_free);
 
 static ssize_t pdu_marshal(V9fsPDU *pdu, size_t offset, const char *fmt, ...)
 {
@@ -127,11 +138,20 @@ static int dotl_to_open_flags(int flags)
         { P9_DOTL_NONBLOCK, O_NONBLOCK } ,
         { P9_DOTL_DSYNC, O_DSYNC },
         { P9_DOTL_FASYNC, FASYNC },
+#ifndef CONFIG_DARWIN
+        { P9_DOTL_NOATIME, O_NOATIME },
+        /*
+         *  On Darwin, we could map to F_NOCACHE, which is
+         *  similar, but doesn't quite have the same
+         *  semantics. However, we don't support O_DIRECT
+         *  even on linux at the moment, so we just ignore
+         *  it here.
+         */
         { P9_DOTL_DIRECT, O_DIRECT },
+#endif
         { P9_DOTL_LARGEFILE, O_LARGEFILE },
         { P9_DOTL_DIRECTORY, O_DIRECTORY },
         { P9_DOTL_NOFOLLOW, O_NOFOLLOW },
-        { P9_DOTL_NOATIME, O_NOATIME },
         { P9_DOTL_SYNC, O_SYNC },
     };
 
@@ -160,10 +180,12 @@ static int get_dotl_openflags(V9fsState *s, int oflags)
      */
     flags = dotl_to_open_flags(oflags);
     flags &= ~(O_NOCTTY | O_ASYNC | O_CREAT);
+#ifndef CONFIG_DARWIN
     /*
      * Ignore direct disk access hint until the server supports it.
      */
     flags &= ~O_DIRECT;
+#endif
     return flags;
 }
 
@@ -181,7 +203,7 @@ void v9fs_path_free(V9fsPath *path)
 }
 
 
-void GCC_FMT_ATTR(2, 3)
+void G_GNUC_PRINTF(2, 3)
 v9fs_path_sprintf(V9fsPath *path, const char *fmt, ...)
 {
     va_list ap;
@@ -260,7 +282,7 @@ static V9fsFidState *coroutine_fn get_fid(V9fsPDU *pdu, int32_t fid)
     V9fsFidState *f;
     V9fsState *s = pdu->s;
 
-    for (f = s->fid_list; f; f = f->next) {
+    QSIMPLEQ_FOREACH(f, &s->fid_list, next) {
         BUG_ON(f->clunked);
         if (f->fid == fid) {
             /*
@@ -295,14 +317,14 @@ static V9fsFidState *alloc_fid(V9fsState *s, int32_t fid)
 {
     V9fsFidState *f;
 
-    for (f = s->fid_list; f; f = f->next) {
+    QSIMPLEQ_FOREACH(f, &s->fid_list, next) {
         /* If fid is already there return NULL */
         BUG_ON(f->clunked);
         if (f->fid == fid) {
             return NULL;
         }
     }
-    f = g_malloc0(sizeof(V9fsFidState));
+    f = g_new0(V9fsFidState, 1);
     f->fid = fid;
     f->fid_type = P9_FID_NONE;
     f->ref = 1;
@@ -311,8 +333,7 @@ static V9fsFidState *alloc_fid(V9fsState *s, int32_t fid)
      * reclaim won't close the file descriptor
      */
     f->flags |= FID_REFERENCED;
-    f->next = s->fid_list;
-    s->fid_list = f;
+    QSIMPLEQ_INSERT_TAIL(&s->fid_list, f, next);
 
     v9fs_readdir_init(s->proto_version, &f->fs.dir);
     v9fs_readdir_init(s->proto_version, &f->fs_reclaim.dir);
@@ -401,29 +422,27 @@ static int coroutine_fn put_fid(V9fsPDU *pdu, V9fsFidState *fidp)
 
 static V9fsFidState *clunk_fid(V9fsState *s, int32_t fid)
 {
-    V9fsFidState **fidpp, *fidp;
+    V9fsFidState *fidp;
 
-    for (fidpp = &s->fid_list; *fidpp; fidpp = &(*fidpp)->next) {
-        if ((*fidpp)->fid == fid) {
-            break;
+    QSIMPLEQ_FOREACH(fidp, &s->fid_list, next) {
+        if (fidp->fid == fid) {
+            QSIMPLEQ_REMOVE(&s->fid_list, fidp, V9fsFidState, next);
+            fidp->clunked = true;
+            return fidp;
         }
     }
-    if (*fidpp == NULL) {
-        return NULL;
-    }
-    fidp = *fidpp;
-    *fidpp = fidp->next;
-    fidp->clunked = 1;
-    return fidp;
+    return NULL;
 }
 
 void coroutine_fn v9fs_reclaim_fd(V9fsPDU *pdu)
 {
     int reclaim_count = 0;
     V9fsState *s = pdu->s;
-    V9fsFidState *f, *reclaim_list = NULL;
+    V9fsFidState *f;
+    QSLIST_HEAD(, V9fsFidState) reclaim_list =
+        QSLIST_HEAD_INITIALIZER(reclaim_list);
 
-    for (f = s->fid_list; f; f = f->next) {
+    QSIMPLEQ_FOREACH(f, &s->fid_list, next) {
         /*
          * Unlink fids cannot be reclaimed. Check
          * for them and skip them. Also skip fids
@@ -453,8 +472,7 @@ void coroutine_fn v9fs_reclaim_fd(V9fsPDU *pdu)
                  * a clunk request won't free this fid
                  */
                 f->ref++;
-                f->rclm_lst = reclaim_list;
-                reclaim_list = f;
+                QSLIST_INSERT_HEAD(&reclaim_list, f, reclaim_next);
                 f->fs_reclaim.fd = f->fs.fd;
                 f->fs.fd = -1;
                 reclaim_count++;
@@ -466,8 +484,7 @@ void coroutine_fn v9fs_reclaim_fd(V9fsPDU *pdu)
                  * a clunk request won't free this fid
                  */
                 f->ref++;
-                f->rclm_lst = reclaim_list;
-                reclaim_list = f;
+                QSLIST_INSERT_HEAD(&reclaim_list, f, reclaim_next);
                 f->fs_reclaim.dir.stream = f->fs.dir.stream;
                 f->fs.dir.stream = NULL;
                 reclaim_count++;
@@ -481,15 +498,14 @@ void coroutine_fn v9fs_reclaim_fd(V9fsPDU *pdu)
      * Now close the fid in reclaim list. Free them if they
      * are already clunked.
      */
-    while (reclaim_list) {
-        f = reclaim_list;
-        reclaim_list = f->rclm_lst;
+    while (!QSLIST_EMPTY(&reclaim_list)) {
+        f = QSLIST_FIRST(&reclaim_list);
+        QSLIST_REMOVE(&reclaim_list, f, V9fsFidState, reclaim_next);
         if (f->fid_type == P9_FID_FILE) {
             v9fs_co_close(pdu, &f->fs_reclaim);
         } else if (f->fid_type == P9_FID_DIR) {
             v9fs_co_closedir(pdu, &f->fs_reclaim);
         }
-        f->rclm_lst = NULL;
         /*
          * Now drop the fid reference, free it
          * if clunked.
@@ -502,32 +518,50 @@ static int coroutine_fn v9fs_mark_fids_unreclaim(V9fsPDU *pdu, V9fsPath *path)
 {
     int err;
     V9fsState *s = pdu->s;
-    V9fsFidState *fidp, head_fid;
+    V9fsFidState *fidp, *fidp_next;
 
-    head_fid.next = s->fid_list;
-    for (fidp = s->fid_list; fidp; fidp = fidp->next) {
-        if (fidp->path.size != path->size) {
-            continue;
-        }
-        if (!memcmp(fidp->path.data, path->data, path->size)) {
+    fidp = QSIMPLEQ_FIRST(&s->fid_list);
+    if (!fidp) {
+        return 0;
+    }
+
+    /*
+     * v9fs_reopen_fid() can yield : a reference on the fid must be held
+     * to ensure its pointer remains valid and we can safely pass it to
+     * QSIMPLEQ_NEXT(). The corresponding put_fid() can also yield so
+     * we must keep a reference on the next fid as well. So the logic here
+     * is to get a reference on a fid and only put it back during the next
+     * iteration after we could get a reference on the next fid. Start with
+     * the first one.
+     */
+    for (fidp->ref++; fidp; fidp = fidp_next) {
+        if (fidp->path.size == path->size &&
+            !memcmp(fidp->path.data, path->data, path->size)) {
             /* Mark the fid non reclaimable. */
             fidp->flags |= FID_NON_RECLAIMABLE;
 
             /* reopen the file/dir if already closed */
             err = v9fs_reopen_fid(pdu, fidp);
             if (err < 0) {
+                put_fid(pdu, fidp);
                 return err;
             }
-            /*
-             * Go back to head of fid list because
-             * the list could have got updated when
-             * switched to the worker thread
-             */
-            if (err == 0) {
-                fidp = &head_fid;
-            }
         }
+
+        fidp_next = QSIMPLEQ_NEXT(fidp, next);
+
+        if (fidp_next) {
+            /*
+             * Ensure the next fid survives a potential clunk request during
+             * put_fid() below and v9fs_reopen_fid() in the next iteration.
+             */
+            fidp_next->ref++;
+        }
+
+        /* We're done with this fid */
+        put_fid(pdu, fidp);
     }
+
     return 0;
 }
 
@@ -537,14 +571,14 @@ static void coroutine_fn virtfs_reset(V9fsPDU *pdu)
     V9fsFidState *fidp;
 
     /* Free all fids */
-    while (s->fid_list) {
+    while (!QSIMPLEQ_EMPTY(&s->fid_list)) {
         /* Get fid */
-        fidp = s->fid_list;
+        fidp = QSIMPLEQ_FIRST(&s->fid_list);
         fidp->ref++;
 
         /* Clunk fid */
-        s->fid_list = fidp->next;
-        fidp->clunked = 1;
+        QSIMPLEQ_REMOVE(&s->fid_list, fidp, V9fsFidState, next);
+        fidp->clunked = true;
 
         put_fid(pdu, fidp);
     }
@@ -594,8 +628,8 @@ static inline uint64_t mirror64bit(uint64_t value)
            ((uint64_t)mirror8bit((value >> 56) & 0xff));
 }
 
-/**
- * @brief Parameter k for the Exponential Golomb algorihm to be used.
+/*
+ * Parameter k for the Exponential Golomb algorihm to be used.
  *
  * The smaller this value, the smaller the minimum bit count for the Exp.
  * Golomb generated affixes will be (at lowest index) however for the
@@ -608,28 +642,30 @@ static inline uint64_t mirror64bit(uint64_t value)
  * should be small, for a large amount of devices k might be increased
  * instead. The default of k=0 should be fine for most users though.
  *
- * @b IMPORTANT: In case this ever becomes a runtime parameter; the value of
+ * IMPORTANT: In case this ever becomes a runtime parameter; the value of
  * k should not change as long as guest is still running! Because that would
  * cause completely different inode numbers to be generated on guest.
  */
 #define EXP_GOLOMB_K    0
 
 /**
- * @brief Exponential Golomb algorithm for arbitrary k (including k=0).
+ * expGolombEncode() - Exponential Golomb algorithm for arbitrary k
+ *                     (including k=0).
  *
- * The Exponential Golomb algorithm generates @b prefixes (@b not suffixes!)
+ * @n: natural number (or index) of the prefix to be generated
+ *     (1, 2, 3, ...)
+ * @k: parameter k of Exp. Golomb algorithm to be used
+ *     (see comment on EXP_GOLOMB_K macro for details about k)
+ * Return: prefix for given @n and @k
+ *
+ * The Exponential Golomb algorithm generates prefixes (NOT suffixes!)
  * with growing length and with the mathematical property of being
  * "prefix-free". The latter means the generated prefixes can be prepended
  * in front of arbitrary numbers and the resulting concatenated numbers are
  * guaranteed to be always unique.
  *
  * This is a minor adjustment to the original Exp. Golomb algorithm in the
- * sense that lowest allowed index (@param n) starts with 1, not with zero.
- *
- * @param n - natural number (or index) of the prefix to be generated
- *            (1, 2, 3, ...)
- * @param k - parameter k of Exp. Golomb algorithm to be used
- *            (see comment on EXP_GOLOMB_K macro for details about k)
+ * sense that lowest allowed index (@n) starts with 1, not with zero.
  */
 static VariLenAffix expGolombEncode(uint64_t n, int k)
 {
@@ -643,7 +679,9 @@ static VariLenAffix expGolombEncode(uint64_t n, int k)
 }
 
 /**
- * @brief Converts a suffix into a prefix, or a prefix into a suffix.
+ * invertAffix() - Converts a suffix into a prefix, or a prefix into a suffix.
+ * @affix: either suffix or prefix to be inverted
+ * Return: inversion of passed @affix
  *
  * Simply mirror all bits of the affix value, for the purpose to preserve
  * respectively the mathematical "prefix-free" or "suffix-free" property
@@ -667,16 +705,16 @@ static VariLenAffix invertAffix(const VariLenAffix *affix)
 }
 
 /**
- * @brief Generates suffix numbers with "suffix-free" property.
+ * affixForIndex() - Generates suffix numbers with "suffix-free" property.
+ * @index: natural number (or index) of the suffix to be generated
+ *         (1, 2, 3, ...)
+ * Return: Suffix suitable to assemble unique number.
  *
  * This is just a wrapper function on top of the Exp. Golomb algorithm.
  *
  * Since the Exp. Golomb algorithm generates prefixes, but we need suffixes,
  * this function converts the Exp. Golomb prefixes into appropriate suffixes
  * which are still suitable for generating unique numbers.
- *
- * @param n - natural number (or index) of the suffix to be generated
- *            (1, 2, 3, ...)
  */
 static VariLenAffix affixForIndex(uint64_t index)
 {
@@ -766,7 +804,7 @@ static int qid_inode_prefix_hash_bits(V9fsPDU *pdu, dev_t dev)
 
     val = qht_lookup(&pdu->s->qpd_table, &lookup, hash);
     if (!val) {
-        val = g_malloc0(sizeof(QpdEntry));
+        val = g_new0(QpdEntry, 1);
         *val = lookup;
         affix = affixForIndex(pdu->s->qp_affix_next);
         val->prefix_bits = affix.bits;
@@ -776,8 +814,8 @@ static int qid_inode_prefix_hash_bits(V9fsPDU *pdu, dev_t dev)
     return val->prefix_bits;
 }
 
-/**
- * @brief Slow / full mapping host inode nr -> guest inode nr.
+/*
+ * Slow / full mapping host inode nr -> guest inode nr.
  *
  * This function performs a slower and much more costly remapping of an
  * original file inode number on host to an appropriate different inode
@@ -789,7 +827,7 @@ static int qid_inode_prefix_hash_bits(V9fsPDU *pdu, dev_t dev)
  * qid_path_suffixmap() failed. In practice this slow / full mapping is not
  * expected ever to be used at all though.
  *
- * @see qid_path_suffixmap() for details
+ * See qid_path_suffixmap() for details
  *
  */
 static int qid_path_fullmap(V9fsPDU *pdu, const struct stat *stbuf,
@@ -814,7 +852,7 @@ static int qid_path_fullmap(V9fsPDU *pdu, const struct stat *stbuf,
             return -ENFILE;
         }
 
-        val = g_malloc0(sizeof(QppEntry));
+        val = g_new0(QpfEntry, 1);
         *val = lookup;
 
         /* new unique inode and device combo */
@@ -830,8 +868,8 @@ static int qid_path_fullmap(V9fsPDU *pdu, const struct stat *stbuf,
     return 0;
 }
 
-/**
- * @brief Quick mapping host inode nr -> guest inode nr.
+/*
+ * Quick mapping host inode nr -> guest inode nr.
  *
  * This function performs quick remapping of an original file inode number
  * on host to an appropriate different inode number on guest. This remapping
@@ -890,7 +928,7 @@ static int qid_path_suffixmap(V9fsPDU *pdu, const struct stat *stbuf,
             return -ENFILE;
         }
 
-        val = g_malloc0(sizeof(QppEntry));
+        val = g_new0(QppEntry, 1);
         *val = lookup;
 
         /* new unique inode affix and device combo */
@@ -952,23 +990,6 @@ static int stat_to_qid(V9fsPDU *pdu, const struct stat *stbuf, V9fsQID *qidp)
         qidp->type |= P9_QID_TYPE_SYMLINK;
     }
 
-    return 0;
-}
-
-static int coroutine_fn fid_to_qid(V9fsPDU *pdu, V9fsFidState *fidp,
-                                   V9fsQID *qidp)
-{
-    struct stat stbuf;
-    int err;
-
-    err = v9fs_co_lstat(pdu, &fidp->path, &stbuf);
-    if (err < 0) {
-        return err;
-    }
-    err = stat_to_qid(pdu, &stbuf, qidp);
-    if (err < 0) {
-        return err;
-    }
     return 0;
 }
 
@@ -1263,6 +1284,40 @@ static int coroutine_fn stat_to_v9stat(V9fsPDU *pdu, V9fsPath *path,
 #define P9_STATS_ALL           0x00003fffULL /* Mask for All fields above */
 
 
+/**
+ * blksize_to_iounit() - Block size exposed to 9p client.
+ * Return: block size
+ *
+ * @pdu: 9p client request
+ * @blksize: host filesystem's block size
+ *
+ * Convert host filesystem's block size into an appropriate block size for
+ * 9p client (guest OS side). The value returned suggests an "optimum" block
+ * size for 9p I/O, i.e. to maximize performance.
+ */
+static int32_t blksize_to_iounit(const V9fsPDU *pdu, int32_t blksize)
+{
+    int32_t iounit = 0;
+    V9fsState *s = pdu->s;
+
+    /*
+     * iounit should be multiples of blksize (host filesystem block size)
+     * as well as less than (client msize - P9_IOHDRSZ)
+     */
+    if (blksize) {
+        iounit = QEMU_ALIGN_DOWN(s->msize - P9_IOHDRSZ, blksize);
+    }
+    if (!iounit) {
+        iounit = s->msize - P9_IOHDRSZ;
+    }
+    return iounit;
+}
+
+static int32_t stat_to_iounit(const V9fsPDU *pdu, const struct stat *stbuf)
+{
+    return blksize_to_iounit(pdu, stbuf->st_blksize);
+}
+
 static int stat_to_v9stat_dotl(V9fsPDU *pdu, const struct stat *stbuf,
                                 V9fsStatDotl *v9lstat)
 {
@@ -1274,14 +1329,20 @@ static int stat_to_v9stat_dotl(V9fsPDU *pdu, const struct stat *stbuf,
     v9lstat->st_gid = stbuf->st_gid;
     v9lstat->st_rdev = stbuf->st_rdev;
     v9lstat->st_size = stbuf->st_size;
-    v9lstat->st_blksize = stbuf->st_blksize;
+    v9lstat->st_blksize = stat_to_iounit(pdu, stbuf);
     v9lstat->st_blocks = stbuf->st_blocks;
     v9lstat->st_atime_sec = stbuf->st_atime;
-    v9lstat->st_atime_nsec = stbuf->st_atim.tv_nsec;
     v9lstat->st_mtime_sec = stbuf->st_mtime;
-    v9lstat->st_mtime_nsec = stbuf->st_mtim.tv_nsec;
     v9lstat->st_ctime_sec = stbuf->st_ctime;
+#ifdef CONFIG_DARWIN
+    v9lstat->st_atime_nsec = stbuf->st_atimespec.tv_nsec;
+    v9lstat->st_mtime_nsec = stbuf->st_mtimespec.tv_nsec;
+    v9lstat->st_ctime_nsec = stbuf->st_ctimespec.tv_nsec;
+#else
+    v9lstat->st_atime_nsec = stbuf->st_atim.tv_nsec;
+    v9lstat->st_mtime_nsec = stbuf->st_mtim.tv_nsec;
     v9lstat->st_ctime_nsec = stbuf->st_ctim.tv_nsec;
+#endif
     /* Currently we only support BASIC fields in stat */
     v9lstat->st_result_mask = P9_STATS_BASIC;
 
@@ -1384,6 +1445,7 @@ static void coroutine_fn v9fs_attach(void *opaque)
     size_t offset = 7;
     V9fsQID qid;
     ssize_t err;
+    struct stat stbuf;
 
     v9fs_string_init(&uname);
     v9fs_string_init(&aname);
@@ -1406,7 +1468,13 @@ static void coroutine_fn v9fs_attach(void *opaque)
         clunk_fid(s, fid);
         goto out;
     }
-    err = fid_to_qid(pdu, fidp, &qid);
+    err = v9fs_co_lstat(pdu, &fidp->path, &stbuf);
+    if (err < 0) {
+        err = -EINVAL;
+        clunk_fid(s, fid);
+        goto out;
+    }
+    err = stat_to_qid(pdu, &stbuf, &qid);
     if (err < 0) {
         err = -EINVAL;
         clunk_fid(s, fid);
@@ -1438,7 +1506,7 @@ static void coroutine_fn v9fs_attach(void *opaque)
     }
     err += offset;
 
-    memcpy(&s->root_qid, &qid, sizeof(qid));
+    memcpy(&s->root_st, &stbuf, sizeof(stbuf));
     trace_v9fs_attach_return(pdu->tag, pdu->id,
                              qid.type, qid.version, qid.path);
 out:
@@ -1689,25 +1757,24 @@ static bool name_is_illegal(const char *name)
     return !*name || strchr(name, '/') != NULL;
 }
 
-static bool not_same_qid(const V9fsQID *qid1, const V9fsQID *qid2)
+static bool same_stat_id(const struct stat *a, const struct stat *b)
 {
-    return
-        qid1->type != qid2->type ||
-        qid1->version != qid2->version ||
-        qid1->path != qid2->path;
+    return a->st_dev == b->st_dev && a->st_ino == b->st_ino;
 }
 
 static void coroutine_fn v9fs_walk(void *opaque)
 {
     int name_idx;
-    V9fsQID *qids = NULL;
+    g_autofree V9fsQID *qids = NULL;
     int i, err = 0;
     V9fsPath dpath, path;
+    P9ARRAY_REF(V9fsPath) pathes = NULL;
     uint16_t nwnames;
-    struct stat stbuf;
+    struct stat stbuf, fidst;
+    g_autofree struct stat *stbufs = NULL;
     size_t offset = 7;
     int32_t fid, newfid;
-    V9fsString *wnames = NULL;
+    P9ARRAY_REF(V9fsString) wnames = NULL;
     V9fsFidState *fidp;
     V9fsFidState *newfidp = NULL;
     V9fsPDU *pdu = opaque;
@@ -1723,9 +1790,15 @@ static void coroutine_fn v9fs_walk(void *opaque)
 
     trace_v9fs_walk(pdu->tag, pdu->id, fid, newfid, nwnames);
 
-    if (nwnames && nwnames <= P9_MAXWELEM) {
-        wnames = g_new0(V9fsString, nwnames);
+    if (nwnames > P9_MAXWELEM) {
+        err = -EINVAL;
+        goto out_nofid;
+    }
+    if (nwnames) {
+        P9ARRAY_NEW(V9fsString, wnames, nwnames);
         qids   = g_new0(V9fsQID, nwnames);
+        stbufs = g_new0(struct stat, nwnames);
+        P9ARRAY_NEW(V9fsPath, pathes, nwnames);
         for (i = 0; i < nwnames; i++) {
             err = pdu_unmarshal(pdu, offset, "s", &wnames[i]);
             if (err < 0) {
@@ -1737,9 +1810,6 @@ static void coroutine_fn v9fs_walk(void *opaque)
             }
             offset += err;
         }
-    } else if (nwnames > P9_MAXWELEM) {
-        err = -EINVAL;
-        goto out_nofid;
     }
     fidp = get_fid(pdu, fid);
     if (fidp == NULL) {
@@ -1749,35 +1819,85 @@ static void coroutine_fn v9fs_walk(void *opaque)
 
     v9fs_path_init(&dpath);
     v9fs_path_init(&path);
-
-    err = fid_to_qid(pdu, fidp, &qid);
-    if (err < 0) {
-        goto out;
-    }
-
     /*
-     * Both dpath and path initially poin to fidp.
+     * Both dpath and path initially point to fidp.
      * Needed to handle request with nwnames == 0
      */
     v9fs_path_copy(&dpath, &fidp->path);
     v9fs_path_copy(&path, &fidp->path);
-    for (name_idx = 0; name_idx < nwnames; name_idx++) {
-        if (not_same_qid(&pdu->s->root_qid, &qid) ||
-            strcmp("..", wnames[name_idx].data)) {
-            err = v9fs_co_name_to_path(pdu, &dpath, wnames[name_idx].data,
-                                       &path);
-            if (err < 0) {
-                goto out;
-            }
 
-            err = v9fs_co_lstat(pdu, &path, &stbuf);
-            if (err < 0) {
-                goto out;
+    /*
+     * To keep latency (i.e. overall execution time for processing this
+     * Twalk client request) as small as possible, run all the required fs
+     * driver code altogether inside the following block.
+     */
+    v9fs_co_run_in_worker({
+        if (v9fs_request_cancelled(pdu)) {
+            err = -EINTR;
+            break;
+        }
+        err = s->ops->lstat(&s->ctx, &dpath, &fidst);
+        if (err < 0) {
+            err = -errno;
+            break;
+        }
+        stbuf = fidst;
+        for (name_idx = 0; name_idx < nwnames; name_idx++) {
+            if (v9fs_request_cancelled(pdu)) {
+                err = -EINTR;
+                break;
             }
+            if (!same_stat_id(&pdu->s->root_st, &stbuf) ||
+                strcmp("..", wnames[name_idx].data))
+            {
+                err = s->ops->name_to_path(&s->ctx, &dpath,
+                                           wnames[name_idx].data,
+                                           &pathes[name_idx]);
+                if (err < 0) {
+                    err = -errno;
+                    break;
+                }
+                if (v9fs_request_cancelled(pdu)) {
+                    err = -EINTR;
+                    break;
+                }
+                err = s->ops->lstat(&s->ctx, &pathes[name_idx], &stbuf);
+                if (err < 0) {
+                    err = -errno;
+                    break;
+                }
+                stbufs[name_idx] = stbuf;
+                v9fs_path_copy(&dpath, &pathes[name_idx]);
+            }
+        }
+    });
+    /*
+     * Handle all the rest of this Twalk request on main thread ...
+     */
+    if (err < 0) {
+        goto out;
+    }
+
+    err = stat_to_qid(pdu, &fidst, &qid);
+    if (err < 0) {
+        goto out;
+    }
+    stbuf = fidst;
+
+    /* reset dpath and path */
+    v9fs_path_copy(&dpath, &fidp->path);
+    v9fs_path_copy(&path, &fidp->path);
+
+    for (name_idx = 0; name_idx < nwnames; name_idx++) {
+        if (!same_stat_id(&pdu->s->root_st, &stbuf) ||
+            strcmp("..", wnames[name_idx].data))
+        {
+            stbuf = stbufs[name_idx];
             err = stat_to_qid(pdu, &stbuf, &qid);
             if (err < 0) {
                 goto out;
             }
+            v9fs_path_copy(&path, &pathes[name_idx]);
             v9fs_path_copy(&dpath, &path);
         }
         memcpy(&qids[name_idx], &qid, sizeof(qid));
@@ -1810,35 +1930,14 @@ out:
     v9fs_path_free(&path);
 out_nofid:
     pdu_complete(pdu, err);
-    if (nwnames && nwnames <= P9_MAXWELEM) {
-        for (name_idx = 0; name_idx < nwnames; name_idx++) {
-            v9fs_string_free(&wnames[name_idx]);
-        }
-        g_free(wnames);
-        g_free(qids);
-    }
 }
 
 static int32_t coroutine_fn get_iounit(V9fsPDU *pdu, V9fsPath *path)
 {
     struct statfs stbuf;
-    int32_t iounit = 0;
-    V9fsState *s = pdu->s;
+    int err = v9fs_co_statfs(pdu, path, &stbuf);
 
-    /*
-     * iounit should be multiples of f_bsize (host filesystem block size
-     * and as well as less than (client msize - P9_IOHDRSZ))
-     */
-    if (!v9fs_co_statfs(pdu, path, &stbuf)) {
-        if (stbuf.f_bsize) {
-            iounit = stbuf.f_bsize;
-            iounit *= (s->msize - P9_IOHDRSZ) / stbuf.f_bsize;
-        }
-    }
-    if (!iounit) {
-        iounit = s->msize - P9_IOHDRSZ;
-    }
-    return iounit;
+    return blksize_to_iounit(pdu, (err >= 0) ? stbuf.f_bsize : 0);
 }
 
 static void coroutine_fn v9fs_open(void *opaque)
@@ -2201,7 +2300,7 @@ static int coroutine_fn v9fs_do_readdir_with_stat(V9fsPDU *pdu,
         count += len;
         v9fs_stat_free(&v9stat);
         v9fs_path_free(&path);
-        saved_dir_pos = dent->d_off;
+        saved_dir_pos = qemu_dirent_off(dent);
     }
 
     v9fs_readdir_unlock(&fidp->fs.dir);
@@ -2306,10 +2405,11 @@ out_nofid:
 }
 
 /**
- * Returns size required in Rreaddir response for the passed dirent @p name.
+ * v9fs_readdir_response_size() - Returns size required in Rreaddir response
+ * for the passed dirent @name.
  *
- * @param name - directory entry's name (i.e. file name, directory name)
- * @returns required size in bytes
+ * @name: directory entry's name (i.e. file name, directory name)
+ * Return: required size in bytes
  */
 size_t v9fs_readdir_response_size(V9fsString *name)
 {
@@ -2340,6 +2440,7 @@ static int coroutine_fn v9fs_do_readdir(V9fsPDU *pdu, V9fsFidState *fidp,
     V9fsString name;
     int len, err = 0;
     int32_t count = 0;
+    off_t off;
     struct dirent *dent;
     struct stat *st;
     struct V9fsDirEnt *entries = NULL;
@@ -2400,12 +2501,13 @@ static int coroutine_fn v9fs_do_readdir(V9fsPDU *pdu, V9fsFidState *fidp,
             qid.version = 0;
         }
 
+        off = qemu_dirent_off(dent);
         v9fs_string_init(&name);
         v9fs_string_sprintf(&name, "%s", dent->d_name);
 
         /* 11 = 7 + 4 (7 = start offset, 4 = space for storing count) */
         len = pdu_marshal(pdu, 11 + count, "Qqbs",
-                          &qid, dent->d_off,
+                          &qid, off,
                           dent->d_type, &name);
 
         v9fs_string_free(&name);
@@ -3121,7 +3223,7 @@ static int coroutine_fn v9fs_complete_rename(V9fsPDU *pdu, V9fsFidState *fidp,
      * Fixup fid's pointing to the old name to
      * start pointing to the new name
      */
-    for (tfidp = s->fid_list; tfidp; tfidp = tfidp->next) {
+    QSIMPLEQ_FOREACH(tfidp, &s->fid_list, next) {
         if (v9fs_path_is_ancestor(&fidp->path, &tfidp->path)) {
             /* replace the name */
             v9fs_fix_path(&tfidp->path, &new_path, strlen(fidp->path.data));
@@ -3215,7 +3317,7 @@ static int coroutine_fn v9fs_fix_fid_paths(V9fsPDU *pdu, V9fsPath *olddir,
      * Fixup fid's pointing to the old name to
      * start pointing to the new name
      */
-    for (tfidp = s->fid_list; tfidp; tfidp = tfidp->next) {
+    QSIMPLEQ_FOREACH(tfidp, &s->fid_list, next) {
         if (v9fs_path_is_ancestor(&oldpath, &tfidp->path)) {
             /* replace the name */
             v9fs_fix_path(&tfidp->path, &newpath, strlen(oldpath.data));
@@ -3445,9 +3547,15 @@ static int v9fs_fill_statfs(V9fsState *s, V9fsPDU *pdu, struct statfs *stbuf)
     f_bavail = stbuf->f_bavail / bsize_factor;
     f_files  = stbuf->f_files;
     f_ffree  = stbuf->f_ffree;
+#ifdef CONFIG_DARWIN
+    fsid_val = (unsigned int)stbuf->f_fsid.val[0] |
+               (unsigned long long)stbuf->f_fsid.val[1] << 32;
+    f_namelen = NAME_MAX;
+#else
     fsid_val = (unsigned int) stbuf->f_fsid.__val[0] |
                (unsigned long long)stbuf->f_fsid.__val[1] << 32;
     f_namelen = stbuf->f_namelen;
+#endif
 
     return pdu_marshal(pdu, offset, "ddqqqqqqd",
                        f_type, f_bsize, f_blocks, f_bfree,
@@ -3817,6 +3925,24 @@ out_nofid:
     v9fs_string_free(&name);
 }
 
+#if defined(CONFIG_LINUX)
+/* Currently, only Linux has XATTR_SIZE_MAX */
+#define P9_XATTR_SIZE_MAX XATTR_SIZE_MAX
+#elif defined(CONFIG_DARWIN)
+/*
+ * Darwin doesn't seem to define a maximum xattr size in its user
+ * space header, so manually configure it across platforms as 64k.
+ *
+ * Having no limit at all can lead to QEMU crashing during large g_malloc()
+ * calls. Because QEMU does not currently support macOS guests, the below
+ * preliminary solution only works due to its being a reflection of the limit of
+ * Linux guests.
+ */
+#define P9_XATTR_SIZE_MAX 65536
+#else
+#error Missing definition for P9_XATTR_SIZE_MAX for this host system
+#endif
+
 static void coroutine_fn v9fs_xattrcreate(void *opaque)
 {
     int flags, rflags = 0;
@@ -3849,7 +3975,7 @@ static void coroutine_fn v9fs_xattrcreate(void *opaque)
         rflags |= XATTR_REPLACE;
     }
 
-    if (size > XATTR_SIZE_MAX) {
+    if (size > P9_XATTR_SIZE_MAX) {
         err = -E2BIG;
         goto out_nofid;
     }
@@ -4081,7 +4207,7 @@ int v9fs_device_realize_common(V9fsState *s, const V9fsTransport *t,
     s->ctx.fmode = fse->fmode;
     s->ctx.dmode = fse->dmode;
 
-    s->fid_list = NULL;
+    QSIMPLEQ_INIT(&s->fid_list);
     qemu_co_rwlock_init(&s->rename_lock);
 
     if (s->ops->init(&s->ctx, errp) < 0) {

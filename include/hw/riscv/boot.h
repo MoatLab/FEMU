@@ -22,10 +22,16 @@
 
 #include "exec/cpu-defs.h"
 #include "hw/loader.h"
+#include "hw/riscv/riscv_hart.h"
 
-bool riscv_is_32_bit(MachineState *machine);
+#define RISCV32_BIOS_BIN    "opensbi-riscv32-generic-fw_dynamic.bin"
+#define RISCV64_BIOS_BIN    "opensbi-riscv64-generic-fw_dynamic.bin"
 
-target_ulong riscv_calc_kernel_start_addr(MachineState *machine,
+bool riscv_is_32bit(RISCVHartArrayState *harts);
+
+char *riscv_plic_hart_config_string(int hart_count);
+
+target_ulong riscv_calc_kernel_start_addr(RISCVHartArrayState *harts,
                                           target_ulong firmware_end_addr);
 target_ulong riscv_find_and_load_firmware(MachineState *machine,
                                           const char *default_machine_firmware,
@@ -41,11 +47,15 @@ target_ulong riscv_load_kernel(const char *kernel_filename,
 hwaddr riscv_load_initrd(const char *filename, uint64_t mem_size,
                          uint64_t kernel_entry, hwaddr *start);
 uint32_t riscv_load_fdt(hwaddr dram_start, uint64_t dram_size, void *fdt);
-void riscv_setup_rom_reset_vec(hwaddr saddr, hwaddr rom_base,
-                               hwaddr rom_size, uint64_t kernel_entry,
+void riscv_setup_rom_reset_vec(MachineState *machine, RISCVHartArrayState *harts,
+                               hwaddr saddr,
+                               hwaddr rom_base, hwaddr rom_size,
+                               uint64_t kernel_entry,
                                uint32_t fdt_load_addr, void *fdt);
-void riscv_rom_copy_firmware_info(hwaddr rom_base, hwaddr rom_size,
+void riscv_rom_copy_firmware_info(MachineState *machine, hwaddr rom_base,
+                                  hwaddr rom_size,
                                   uint32_t reset_vec_size,
                                   uint64_t kernel_entry);
+void riscv_setup_direct_kernel(hwaddr kernel_addr, hwaddr fdt_addr);
 
 #endif /* RISCV_BOOT_H */

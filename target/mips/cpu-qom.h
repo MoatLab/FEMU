@@ -29,8 +29,7 @@
 #define TYPE_MIPS_CPU "mips-cpu"
 #endif
 
-OBJECT_DECLARE_TYPE(MIPSCPU, MIPSCPUClass,
-                    MIPS_CPU)
+OBJECT_DECLARE_CPU_TYPE(MIPSCPU, MIPSCPUClass, MIPS_CPU)
 
 /**
  * MIPSCPUClass:
@@ -47,6 +46,9 @@ struct MIPSCPUClass {
     DeviceRealize parent_realize;
     DeviceReset parent_reset;
     const struct mips_def_t *cpu_def;
+
+    /* Used for the jazz board to modify mips_cpu_do_transaction_failed. */
+    bool no_data_aborts;
 };
 
 

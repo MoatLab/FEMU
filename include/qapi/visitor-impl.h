@@ -113,8 +113,19 @@ struct Visitor
        The core takes care of the return type in the public interface. */
     void (*optional)(Visitor *v, const char *name, bool *present);
 
+    /* Optional */
+    bool (*policy_reject)(Visitor *v, const char *name,
+                          unsigned special_features, Error **errp);
+
+    /* Optional */
+    bool (*policy_skip)(Visitor *v, const char *name,
+                        unsigned special_features);
+
     /* Must be set */
     VisitorType type;
+
+    /* Optional */
+    struct CompatPolicy compat_policy;
 
     /* Must be set for output visitors, optional otherwise. */
     void (*complete)(Visitor *v, void *opaque);

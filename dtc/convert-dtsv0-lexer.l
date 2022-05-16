@@ -94,7 +94,7 @@ static const struct {
 <INITIAL>[0-9a-fA-F]+	{
 			unsigned long long val;
 			int obase = 16, width = 0;
-			int i;
+			unsigned int i;
 
 			val = strtoull(yytext, NULL, cbase);
 

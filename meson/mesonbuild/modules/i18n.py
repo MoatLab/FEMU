@@ -57,11 +57,16 @@ PRESET_ARGS = {
 
 
 class I18nModule(ExtensionModule):
+    def __init__(self, interpreter):
+        super().__init__(interpreter)
+        self.methods.update({
+            'merge_file': self.merge_file,
+            'gettext': self.gettext,
+        })
 
     @staticmethod
     def nogettext_warning():
         mlog.warning('Gettext not found, all translation targets will be ignored.', once=True)
-        return ModuleReturnValue(None, [])
 
     @staticmethod
     def _get_data_dirs(state, dirs):
@@ -74,7 +79,8 @@ class I18nModule(ExtensionModule):
     @permittedKwargs(build.CustomTarget.known_kwargs | {'data_dirs', 'po_dir', 'type', 'args'})
     def merge_file(self, state, args, kwargs):
         if not shutil.which('xgettext'):
-            return self.nogettext_warning()
+            self.nogettext_warning()
+            return
         podir = kwargs.pop('po_dir', None)
         if not podir:
             raise MesonException('i18n: po_dir is a required kwarg')
@@ -83,7 +89,7 @@ class I18nModule(ExtensionModule):
         file_type = kwargs.pop('type', 'xml')
         VALID_TYPES = ('xml', 'desktop')
         if file_type not in VALID_TYPES:
-            raise MesonException('i18n: "{}" is not a valid type {}'.format(file_type, VALID_TYPES))
+            raise MesonException(f'i18n: "{file_type}" is not a valid type {VALID_TYPES}')
 
         datadirs = self._get_data_dirs(state, mesonlib.stringlistify(kwargs.pop('data_dirs', [])))
         datadirs = '--datadirs=' + ':'.join(datadirs) if datadirs else None
@@ -101,17 +107,15 @@ class I18nModule(ExtensionModule):
 
         kwargs['command'] = command
 
-        inputfile = kwargs['input']
-        if hasattr(inputfile, 'held_object'):
-            ct = build.CustomTarget(kwargs['output'] + '_merge', state.subdir, state.subproject, kwargs)
-        else:
-            if isinstance(inputfile, list):
-                # We only use this input file to create a name of the custom target.
-                # Thus we can ignore the other entries.
-                inputfile = inputfile[0]
-            if isinstance(inputfile, str):
-                inputfile = mesonlib.File.from_source_file(state.environment.source_dir,
-                                                           state.subdir, inputfile)
+        # We only use this input file to create a name of the custom target.
+        # Thus we can ignore the other entries.
+        inputfile = mesonlib.extract_as_list(kwargs, 'input')[0]
+        if isinstance(inputfile, str):
+            inputfile = mesonlib.File.from_source_file(state.environment.source_dir,
+                                                       state.subdir, inputfile)
+        if isinstance(inputfile, mesonlib.File):
+            # output could be '@BASENAME@' in which case we need to do substitutions
+            # to get a unique target name.
             output = kwargs['output']
             ifile_abs = inputfile.absolute_path(state.environment.source_dir,
                                                 state.environment.build_dir)
@@ -119,6 +123,9 @@ class I18nModule(ExtensionModule):
             outputs = mesonlib.substitute_values([output], values)
             output = outputs[0]
             ct = build.CustomTarget(output + '_' + state.subdir.replace('/', '@').replace('\\', '@') + '_merge', state.subdir, state.subproject, kwargs)
+        else:
+            ct = build.CustomTarget(kwargs['output'] + '_merge', state.subdir, state.subproject, kwargs)
+
         return ModuleReturnValue(ct, [ct])
 
     @FeatureNewKwargs('i18n.gettext', '0.37.0', ['preset'])
@@ -128,7 +135,8 @@ class I18nModule(ExtensionModule):
         if len(args) != 1:
             raise coredata.MesonException('Gettext requires one positional argument (package name).')
         if not shutil.which('xgettext'):
-            return self.nogettext_warning()
+            self.nogettext_warning()
+            return
         packagename = args[0]
         languages = mesonlib.stringlistify(kwargs.get('languages', []))
         datadirs = self._get_data_dirs(state, mesonlib.stringlistify(kwargs.get('data_dirs', [])))
@@ -152,12 +160,12 @@ class I18nModule(ExtensionModule):
             potargs.append(datadirs)
         if extra_args:
             potargs.append(extra_args)
-        pottarget = build.RunTarget(packagename + '-pot', potargs[0], potargs[1:], [], state.subdir, state.subproject)
+        pottarget = build.RunTarget(packagename + '-pot', potargs, [], state.subdir, state.subproject)
 
         gmoargs = state.environment.get_build_command() + ['--internal', 'gettext', 'gen_gmo']
         if lang_arg:
             gmoargs.append(lang_arg)
-        gmotarget = build.RunTarget(packagename + '-gmo', gmoargs[0], gmoargs[1:], [], state.subdir, state.subproject)
+        gmotarget = build.RunTarget(packagename + '-gmo', gmoargs, [], state.subdir, state.subproject)
 
         updatepoargs = state.environment.get_build_command() + ['--internal', 'gettext', 'update_po', pkg_arg]
         if lang_arg:
@@ -166,13 +174,13 @@ class I18nModule(ExtensionModule):
             updatepoargs.append(datadirs)
         if extra_args:
             updatepoargs.append(extra_args)
-        updatepotarget = build.RunTarget(packagename + '-update-po', updatepoargs[0], updatepoargs[1:], [], state.subdir, state.subproject)
+        updatepotarget = build.RunTarget(packagename + '-update-po', updatepoargs, [], state.subdir, state.subproject)
 
         targets = [pottarget, gmotarget, updatepotarget]
 
         install = kwargs.get('install', True)
         if install:
-            install_dir = kwargs.get('install_dir', state.environment.coredata.get_builtin_option('localedir'))
+            install_dir = kwargs.get('install_dir', state.environment.coredata.get_option(mesonlib.OptionKey('localedir')))
             script = state.environment.get_build_command()
             args = ['--internal', 'gettext', 'install',
                     '--subdir=' + state.subdir,
@@ -180,7 +188,7 @@ class I18nModule(ExtensionModule):
                     pkg_arg]
             if lang_arg:
                 args.append(lang_arg)
-            iscript = build.RunScript(script, args)
+            iscript = state.backend.get_executable_serialisation(script + args)
             targets.append(iscript)
 
         return ModuleReturnValue(None, targets)

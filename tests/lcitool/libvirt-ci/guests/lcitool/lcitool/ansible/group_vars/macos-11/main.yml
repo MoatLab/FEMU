@@ -1,0 +1,28 @@
+---
+os:
+  name: 'MacOS'
+  version: '11'
+
+target: 'macos-11'
+
+packaging:
+  format: 'brew'
+  command: 'brew'
+
+paths:
+  bash: /usr/local/bin/bash
+  cc: /usr/bin/clang
+  ccache: /usr/local/bin/ccache
+  make: /usr/local/bin/gmake
+  ninja: /usr/local/bin/ninja
+  pip3: /usr/local/bin/pip3
+  python: /usr/local/bin/python3
+  sudoers: /etc/sudoers
+
+ansible_python_package: python3
+ansible_python_interpreter: /usr/local/bin/python3
+
+cirrus:
+  instance_type: osx_instance
+  image_selector: image
+  image_name: big-sur-base

@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import argparse
+
 meson_executable_template = '''project('{project_name}', '{language}',
   version : '{version}',
   default_options : [{default_options}])
@@ -33,7 +35,7 @@ jar('{executable}',
 '''
 
 
-def create_meson_build(options):
+def create_meson_build(options: argparse.Namespace) -> None:
     if options.type != 'executable':
         raise SystemExit('\nGenerating a meson.build file from existing sources is\n'
                          'supported only for project type "executable".\n'
@@ -44,12 +46,12 @@ def create_meson_build(options):
         default_options += ['cpp_std=c++14']
     # If we get a meson.build autoformatter one day, this code could
     # be simplified quite a bit.
-    formatted_default_options = ', '.join("'{}'".format(x) for x in default_options)
-    sourcespec = ',\n           '.join("'{}'".format(x) for x in options.srcfiles)
+    formatted_default_options = ', '.join(f"'{x}'" for x in default_options)
+    sourcespec = ',\n           '.join(f"'{x}'" for x in options.srcfiles)
     depspec = ''
     if options.deps:
         depspec = '\n           dependencies : [\n              '
-        depspec += ',\n              '.join("dependency('{}')".format(x)
+        depspec += ',\n              '.join(f"dependency('{x}')"
                                             for x in options.deps.split(','))
         depspec += '],'
     if options.language != 'java':
@@ -69,5 +71,5 @@ def create_meson_build(options):
                                             sourcespec=sourcespec,
                                             depspec=depspec,
                                             default_options=formatted_default_options)
-    open('meson.build', 'w').write(content)
+    open('meson.build', 'w', encoding='utf-8').write(content)
     print('Generated meson.build file:\n\n' + content)

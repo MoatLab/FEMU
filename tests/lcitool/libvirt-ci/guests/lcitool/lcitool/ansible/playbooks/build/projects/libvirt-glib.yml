@@ -1,0 +1,13 @@
+---
+- set_fact:
+    name: libvirt-glib
+    machines: '{{ all_machines }}'
+    archive_format: gz
+    git_url: '{{ git_urls["libvirt-glib"][git_remote] }}'
+
+- include: 'jobs/prepare.yml'
+- include: 'jobs/meson-build-job.yml'
+- include: 'jobs/meson-check-job.yml'
+- include: 'jobs/meson-rpm-job.yml'
+  vars:
+    machines: '{{ rpm_machines }}'
