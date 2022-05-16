@@ -4,7 +4,7 @@
 #define NVME_DEFAULT_ZONE_SIZE      (128 * MiB)
 #define NVME_DEFAULT_MAX_AZ_SIZE    (128 * KiB)
 
-static void *zns_thread(void *arg);
+//static void *zns_thread(void *arg);
 
 static inline uint32_t zns_zone_idx(NvmeNamespace *ns, uint64_t slba)
 {
@@ -947,6 +947,7 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
         }
         *resets = 1;
         status = zns_do_zone_op(ns, zone, proc_mask, zns_reset_zone, req);
+        req->expire_time += zns_advance_status(n, ns, cmd, req);
         (*resets)--;
         return NVME_SUCCESS;
     case NVME_ZONE_ACTION_OFFLINE:
@@ -1207,8 +1208,10 @@ static uint16_t zns_do_write(FemuCtrl *n, NvmeRequest *req, bool append,
         if (status) {
             goto err;
         }
-
+        
+        req->expire_time += zns_advance_status(n,ns,&req->cmd,req);
         backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
+
     }
 
     zns_finalize_zoned_write(ns, req, false);
@@ -1236,6 +1239,134 @@ static inline uint16_t zns_zone_append(FemuCtrl *n, NvmeRequest *req)
 static uint16_t zns_check_dulbe(NvmeNamespace *ns, uint64_t slba, uint32_t nlb)
 {
     return NVME_SUCCESS;
+}
+static uint64_t znsssd_write(ZNS *zns, NvmeRequest *req){
+    //FEMU only supports 1 namespace for now (see femu.c:365)
+    //and FEMU ZNS Extension use a single thread which mean lockless operations(ch->available_time += ~~) if thread increased
+    
+    NvmeRwCmd *rw = (NvmeRwCmd *)&req->cmd;
+    struct NvmeNamespace *ns = req->ns;
+    struct zns_ssdparams * spp = &zns->sp; 
+    uint64_t slba = le64_to_cpu(rw->slba);
+    uint32_t nlb = (uint32_t)le16_to_cpu(rw->nlb) + 1;
+    zns_ssd_chip *chip = NULL;
+    uint64_t currlat = 0, maxlat= 0;
+    uint32_t my_chip_idx = 0;
+    uint64_t nand_stime =0;
+    uint64_t cmd_stime = (req->stime == 0) ? qemu_clock_get_ns(QEMU_CLOCK_REALTIME) : req->stime ;
+#if ADVANCE_PER_CH_ENDTIME
+    zns_ssd_channel *chnl =NULL;
+    uint32_t my_chnl_idx = 0;
+    uint64_t chnl_stime =0;
+#endif
+    
+#if ZONE_RESET_WHEN_ZONE_STATE_IS_FULL
+    //femu_err("In znsssd_write(N : %ld), req->slba %ld , slba >> 3 : %ld my_chnl_idx %d to inhoinno \n",zns->sp.chnls_per_zone ,slba, slba>>3, my_chnl_idx);
+    //femu_err("In znsssd_write, start_zone_idx, %ld end_zone_idx, %ld, to inhoinno \n",start_zone_idx, end_zone_idx );
+#endif
+
+    for (uint32_t i = 0; i<nlb ; i+=8){
+        //Inhoinno : Interleaving per 4KB
+        slba += i;
+        my_chip_idx=zns_get_multiway_chip_idx(ns, slba);
+        chip = &(zns->chips[my_chip_idx]);
+#if !(ADVANCE_PER_CH_ENDTIME)
+        //Inhoinno:  Single thread emulation so assume we dont need lock per chnl
+        nand_stime = (chip->next_avail_time < cmd_stime) ? cmd_stime : \
+                     chip->next_avail_time;
+        chip->next_avail_time = nand_stime + spp->pg_wr_lat;
+        currlat= chip->next_avail_time - cmd_stime ; //Inhoinno : = T_channel + T_chip(=chnl->next_available_time) - stime; // FIXME like this 
+        maxlat = (maxlat < currlat)? currlat : maxlat;
+#endif
+#if ADVANCE_PER_CH_ENDTIME
+        my_chnl_idx=zns_get_multiway_chnl_idx(ns, slba);
+        chnl = &(zns->ch[my_chnl_idx]);
+        chnl_stime = (chnl->next_ch_avail_time < cmd_stime) ? cmd_stime : \
+                     chnl->next_ch_avail_time;
+        chnl->next_ch_avail_time = chnl_stime + spp->ch_xfer_lat;
+
+        // write: then do NAND program 
+        nand_stime = (chip->next_avail_time < chnl->next_ch_avail_time) ? \
+            chnl->next_ch_avail_time : chip->next_avail_time;
+        chip->next_avail_time = nand_stime + spp->pg_wr_lat;
+        currlat = chip->next_avail_time - cmd_stime;
+        maxlat = (maxlat < currlat)? currlat : maxlat;
+#endif
+
+    }
+    return maxlat;
+
+}
+static uint64_t znsssd_read(ZNS *zns, NvmeRequest *req){
+    // FEMU only supports 1 namespace for now (see femu.c:365) 
+    // and FEMU ZNS Extension use a single thread which mean lockless operations(ch->available_time += ~~) if thread increased 
+
+    NvmeRwCmd *rw = (NvmeRwCmd *)&req->cmd;
+    uint64_t slba = le64_to_cpu(rw->slba);
+    uint32_t nlb = (uint32_t)le16_to_cpu(rw->nlb) + 1;
+    struct NvmeNamespace *ns = req->ns;
+    struct zns_ssdparams * spp = &zns->sp; 
+    zns_ssd_chip *chip = NULL;
+    uint64_t currlat = 0, maxlat= 0;
+    uint32_t my_chip_idx = 0;
+    uint64_t nand_stime =0;
+    uint64_t cmd_stime = (req->stime == 0) ? qemu_clock_get_ns(QEMU_CLOCK_REALTIME) : req->stime ;
+#if ADVANCE_PER_CH_ENDTIME
+    zns_ssd_channel *chnl =NULL;
+    uint32_t my_chnl_idx = 0;
+    uint64_t chnl_stime =0;
+#endif
+    
+    for (uint64_t i = 0; i<nlb ; i+=8){
+        //Inhoinno : Interleaving per 4KB
+        slba += i;
+        my_chip_idx=zns_get_multiway_chip_idx(ns, slba);
+        chip = &(zns->chips[my_chip_idx]);
+        //Inhoinno:  Single thread emulation so assume we dont need lock per chnl
+        nand_stime = (chip->next_avail_time < cmd_stime) ? cmd_stime : \
+                     chip->next_avail_time;
+#if !(ADVANCE_PER_CH_ENDTIME)
+
+        chip->next_avail_time = nand_stime + spp->pg_rd_lat;
+        currlat= chip->next_avail_time - cmd_stime ; //Inhoinno : = T_channel + T_chip(=chnl->next_available_time) - stime; // FIXME like this 
+        maxlat = (maxlat < currlat)? currlat : maxlat;
+#endif
+#if ADVANCE_PER_CH_ENDTIME
+        my_chnl_idx=zns_get_multiway_chnl_idx(ns, slba);
+        chnl = &(zns->ch[my_chnl_idx]);
+        
+        chip->next_avail_time = nand_stime + spp->pg_rd_lat;
+
+        //read: then data transfer through channel
+        chnl_stime = (chnl->next_ch_avail_time < chip->next_avail_time) ? \
+            chip->next_avail_time : chnl->next_ch_avail_time;
+        chnl->next_ch_avail_time = chnl_stime + spp->ch_xfer_lat;
+
+        currlat = chnl->next_ch_avail_time - cmd_stime;
+        maxlat = (maxlat < currlat)? currlat : maxlat;
+#endif
+
+    }
+    return maxlat;
+}
+
+static int zns_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req){
+    
+    NvmeRwCmd *rw = (NvmeRwCmd *)&req->cmd;
+    uint8_t opcode = rw->opcode;
+    uint32_t dw13 = le32_to_cpu(cmd->cdw13);
+    uint8_t action;
+    action = dw13 & 0xff;
+    // Zone Reset 
+    if (action == NVME_ZONE_ACTION_RESET){
+        //reset zone->wp and zone->status=Empty
+        return ZONE_RESET_LATENCY;
+    }
+    // Read, Write 
+    assert(opcode == NVME_CMD_WRITE || opcode == NVME_CMD_READ || opcode == NVME_CMD_ZONE_APPEND);
+    if(req->is_write)
+        return znsssd_write(n->zns, req);
+    return znsssd_read(n->zns, req);
 }
 
 static uint16_t zns_read(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
@@ -1283,7 +1414,7 @@ static uint16_t zns_read(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
 
     data_offset = zns_l2b(ns, slba);
-
+    req->expire_time += zns_advance_status(n,ns,cmd,req);
     backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
     return NVME_SUCCESS;
 
@@ -1335,26 +1466,17 @@ static uint16_t zns_write(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     if (status) {
         goto err;
     }
-    
-    //femu_err("*********ZONE WRITE :: zns_map_dptr *********\n");
-    //sprintf(msg1, "status : %d \n", status);
-    //fprintf(stderr,"%s", msg1);
-
+    req->expire_time += zns_advance_status(n,ns,cmd,req);
     backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write); //dram.c:backend_rw()
     zns_finalize_zoned_write(ns, req, false);
 
-    //femu_err("*********ZONE WRITE :: NVME_SUCCESS!! *********\n");
-    //sprintf(msg1, "status : %d \n", status);
-    //fprintf(stderr,"%s", msg1);
     return NVME_SUCCESS;
 
 err:
-    //sprintf(bf, "status : %x\n", status);
     if (zone != NULL)
         femu_err("ZONE STATE : %x", zns_get_zone_state(zone));
     femu_err("*********ZONE WRITE FAILED*********, STATUS : %x\n",status);
-    //femu_err(bf);
-    
+   
     return status | NVME_DNR;
 }
 
@@ -1466,8 +1588,8 @@ static void znsssd_init_params(FemuCtrl * n, struct zns_ssdparams *spp){
      * @brief Inhoinno : To show difference between 1-to-1 mapping, and 1-to-N mapping,
      * at least one param among these four should be configured in zns ssd.
      * 1. SSD size  2. zone size 3. # of chnls 4. # of chnls per zone
-     */
-    spp->nchnls         = 32;           /* FIXME : = ZNS_MAX_CHANNEL channel configuration*/
+    */
+    spp->nchnls         = 32;           /* FIXME : = ZNS_MAX_CHANNEL channel configuration like this */
     spp->zones          = n->num_zones; /* FIXME : = MAX_STORAGE_CAPACITY / ZONE_SIZE*/
     spp->chnls_per_zone = 32;
     spp->ways           = 4;
@@ -1519,7 +1641,7 @@ void znsssd_init(FemuCtrl * n){
     for (int i = 0; i < spp->nchnls; i++) {
         zns_init_ch(&zns->ch[i], spp);
     }
-    qemu_thread_create(&zns->zns_thread, "FEMU ZNS Thread", zns_thread, n, QEMU_THREAD_JOINABLE);
+    //qemu_thread_create(&zns->zns_thread, "FEMU ZNS Thread", zns_thread, n, QEMU_THREAD_JOINABLE);
 }
 
 static void zns_exit(FemuCtrl *n)
@@ -1547,122 +1669,11 @@ int nvme_register_znssd(FemuCtrl *n)
 
     return 0;
 }
-
-static uint64_t znsssd_write(ZNS *zns, NvmeRequest *req){
-    //FEMU only supports 1 namespace for now (see femu.c:365)
-    //and FEMU ZNS Extension use a single thread which mean lockless operations(ch->available_time += ~~) if thread increased
-    
-    NvmeRwCmd *rw = (NvmeRwCmd *)&req->cmd;
-    struct NvmeNamespace *ns = req->ns;
-    struct zns_ssdparams * spp = &zns->sp; 
-    uint64_t slba = le64_to_cpu(rw->slba);
-    uint32_t nlb = (uint32_t)le16_to_cpu(rw->nlb) + 1;
-    zns_ssd_chip *chip = NULL;
-    uint64_t currlat = 0, maxlat= 0;
-    uint32_t my_chip_idx = 0;
-    uint64_t nand_stime =0;
-    uint64_t cmd_stime = (req->stime == 0) ? qemu_clock_get_ns(QEMU_CLOCK_REALTIME) : req->stime ;
-#if ADVANCE_PER_CH_ENDTIME
-    zns_ssd_channel *chnl =NULL;
-    uint32_t my_chnl_idx = 0;
-    uint64_t chnl_stime =0;
-#endif
-    
-#if ZONE_RESET_WHEN_ZONE_STATE_IS_FULL
-    //femu_err("In znsssd_write(N : %ld), req->slba %ld , slba >> 3 : %ld my_chnl_idx %d to inhoinno \n",zns->sp.chnls_per_zone ,slba, slba>>3, my_chnl_idx);
-    //femu_err("In znsssd_write, start_zone_idx, %ld end_zone_idx, %ld, to inhoinno \n",start_zone_idx, end_zone_idx );
-#endif
-
-    for (uint32_t i = 0; i<nlb ; i+=8){
-        //Inhoinno : Interleaving per 4KB
-        slba += i;
-        my_chip_idx=zns_get_multiway_chip_idx(ns, slba);
-        chip = &(zns->chips[my_chip_idx]);
-#if !(ADVANCE_PER_CH_ENDTIME)
-        //Inhoinno:  Single thread emulation so assume we dont need lock per chnl
-        nand_stime = (chip->next_avail_time < cmd_stime) ? cmd_stime : \
-                     chip->next_avail_time;
-        chip->next_avail_time = nand_stime + spp->pg_wr_lat;
-        currlat= chip->next_avail_time - cmd_stime ; //Inhoinno : = T_channel + T_chip(=chnl->next_available_time) - stime; // FIXME like this 
-        maxlat = (maxlat < currlat)? currlat : maxlat;
-#endif
-#if ADVANCE_PER_CH_ENDTIME
-        my_chnl_idx=zns_get_multiway_chnl_idx(ns, slba);
-        chnl = &(zns->ch[my_chnl_idx]);
-        chnl_stime = (chnl->next_ch_avail_time < cmd_stime) ? cmd_stime : \
-                     chnl->next_ch_avail_time;
-        chnl->next_ch_avail_time = chnl_stime + spp->ch_xfer_lat;
-
-        // write: then do NAND program 
-        nand_stime = (chip->next_avail_time < chnl->next_ch_avail_time) ? \
-            chnl->next_ch_avail_time : chip->next_avail_time;
-        chip->next_avail_time = nand_stime + spp->pg_wr_lat;
-        currlat = chip->next_avail_time - cmd_stime;
-        maxlat = (maxlat < currlat)? currlat : maxlat;
-#endif
-
-    }
-    return maxlat;
-
-}
-static uint64_t znsssd_read(ZNS *zns, NvmeRequest *req){
-    // FEMU only supports 1 namespace for now (see femu.c:365) 
-    // and FEMU ZNS Extension use a single thread which mean lockless operations(ch->available_time += ~~) if thread increased 
-
-    NvmeRwCmd *rw = (NvmeRwCmd *)&req->cmd;
-    uint64_t slba = le64_to_cpu(rw->slba);
-    uint32_t nlb = (uint32_t)le16_to_cpu(rw->nlb) + 1;
-    struct NvmeNamespace *ns = req->ns;
-    struct zns_ssdparams * spp = &zns->sp; 
-    zns_ssd_chip *chip = NULL;
-    uint64_t currlat = 0, maxlat= 0;
-    uint32_t my_chip_idx = 0;
-    uint64_t nand_stime =0;
-    uint64_t cmd_stime = (req->stime == 0) ? qemu_clock_get_ns(QEMU_CLOCK_REALTIME) : req->stime ;
-#if ADVANCE_PER_CH_ENDTIME
-    zns_ssd_channel *chnl =NULL;
-    uint32_t my_chnl_idx = 0;
-    uint64_t chnl_stime =0;
-#endif
-    
-    for (uint64_t i = 0; i<nlb ; i+=8){
-        //Inhoinno : Interleaving per 4KB
-        slba += i;
-        my_chip_idx=zns_get_multiway_chip_idx(ns, slba);
-        chip = &(zns->chips[my_chip_idx]);
-        //Inhoinno:  Single thread emulation so assume we dont need lock per chnl
-        nand_stime = (chip->next_avail_time < cmd_stime) ? cmd_stime : \
-                     chip->next_avail_time;
-#if !(ADVANCE_PER_CH_ENDTIME)
-
-        chip->next_avail_time = nand_stime + spp->pg_rd_lat;
-        currlat= chip->next_avail_time - cmd_stime ; //Inhoinno : = T_channel + T_chip(=chnl->next_available_time) - stime; // FIXME like this 
-        maxlat = (maxlat < currlat)? currlat : maxlat;
-#endif
-#if ADVANCE_PER_CH_ENDTIME
-        my_chnl_idx=zns_get_multiway_chnl_idx(ns, slba);
-        chnl = &(zns->ch[my_chnl_idx]);
-        
-        chip->next_avail_time = nand_stime + spp->pg_rd_lat;
-
-        //read: then data transfer through channel
-        chnl_stime = (chnl->next_ch_avail_time < chip->next_avail_time) ? \
-            chip->next_avail_time : chnl->next_ch_avail_time;
-        chnl->next_ch_avail_time = chnl_stime + spp->ch_xfer_lat;
-
-        currlat = chnl->next_ch_avail_time - cmd_stime;
-        maxlat = (maxlat < currlat)? currlat : maxlat;
-#endif
-
-    }
-    return maxlat;
-}
 /**
  * @brief 
  * @Inhoinno: in order to emulate latency in zns ssd,
  * make a qemu thread and polling request in sq and 
  * emulate latency time, then update req->time related member
-*/
 static void *zns_thread(void *arg){
     FemuCtrl *n = (FemuCtrl *)arg;
     struct zns *zns = n->zns;
@@ -1699,7 +1710,7 @@ static void *zns_thread(void *arg){
                 //zns_write(n,n->namespaces,&(req->cmd),req);
                 lat = znsssd_write(zns, req);
                 break;
-            //case NVME_CMD_ZONE_APPEND:
+            case NVME_CMD_ZONE_APPEND:
                 //lat = znsssd_dowrite(zns, req);
                 //break;
             case NVME_CMD_READ:
@@ -1710,7 +1721,7 @@ static void *zns_thread(void *arg){
                 lat = 0;
                 break;
             default:
-                //ftl_err("ZNS SSD received unkown request type, ERROR\n");
+                //femu_err("ZNS SSD received unkown request type, ERROR\n");
                 ;
             }
 
@@ -1729,4 +1740,4 @@ static void *zns_thread(void *arg){
     }
 
     return NULL;
-}
+}*/

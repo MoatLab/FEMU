@@ -2,6 +2,7 @@
 #define __FEMU_ZNS_H
 
 #include "../nvme.h"
+
 #define ZONE_RESET_WHEN_ZONE_STATE_IS_FULL 0
 enum {
     NAND_READ =  0,
@@ -99,9 +100,8 @@ typedef struct QEMU_PACKED NvmeZonedResult {
 } NvmeZonedResult;
 
 typedef struct NvmeIdCtrlZoned {
-    //4KB 중 1byte
-    uint8_t     zasl;           //1byte : ""
-    uint8_t     rsvd1[4095];    //reserved : 
+    uint8_t     zasl;           
+    uint8_t     rsvd1[4095];   
 } NvmeIdCtrlZoned;
 
 enum NvmeZoneAttr {
@@ -134,11 +134,7 @@ enum NvmeZoneReportType {
 
 enum NvmeZoneType {
     NVME_ZONE_TYPE_RESERVED          = 0x00,
-    //inhoinno , Cant we just simply add ZONE_TYPE_CONV_ZONE?
-    NVME_ZONE_TYPE_CONVENTIONAL      = 0x01,
-    NVME_ZONE_TYPE_SEQ_WRITE         = 0x02,
-
-    
+    NVME_ZONE_TYPE_SEQ_WRITE         = 0x02,    
 };
 
 enum NvmeZoneSendAction {
@@ -336,6 +332,7 @@ void zns_ns_cleanup(NvmeNamespace *ns);
 //get_ch(Zone, req)
 
 void znsssd_init(FemuCtrl * n);
+static int zns_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req);
 
 #ifdef FEMU_DEBUG_FTL
 #define ftl_assert(expression) assert(expression)

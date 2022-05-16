@@ -136,15 +136,8 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
     uint64_t now;
     int processed = 0;
     int rc;
-    //    #if INHOINNO_NVME_VERBOSE_SETTING ==1
-    //femu_err("nvme-io.c : nvme_process_cq_cpl(), to inhoinno \n");
-    //#endif
 
-    //Commit #1 : After implement zns thread, i touch this condition, inhoinno
-    if (BBSSD(n) || ZNSSD(n)) {
-        //#    #if INHOINNO_NVME_VERBOSE_SETTING ==1
-        //femu_err(" nvme-io.c : nvme_post_cqe(), rp=n->to_poller[index_poller] to inhoinno \n");
-        //#endif
+    if (BBSSD(n)) { //|| ZNSSD(n)
         rp = n->to_poller[index_poller];
     }
 
@@ -215,14 +208,6 @@ static void *nvme_poller(void *arg)
                 continue;
             }
             i++;
-            //    #if INHOINNO_NVME_VERBOSE_SETTING ==1
-            //if (i == 10000){
-                //i=0;
-                //femu_err(" nvme-io.c nvme_poller thread : FemuCtrl->multipoller_enabled=1 inhoinno \n");
-            //}
-            //#endif
-
-
             NvmeSQueue *sq = n->sq[index];
             NvmeCQueue *cq = n->cq[index];
             if (sq && sq->is_active && cq && cq->is_active) {
@@ -238,12 +223,7 @@ static void *nvme_poller(void *arg)
                 continue;
             }
             i++;
-            //    #if INHOINNO_NVME_VERBOSE_SETTING ==1
-            //if (i == 10000){
-                //i=0;
-                //femu_err(" nvme-io.c nvme_poller thread : FemuCtrl->multipoller_enabled!=1 inhoinno \n");
-            //}
-            //#endif
+
             for (int i = 1; i <= n->num_io_queues; i++) {
                 NvmeSQueue *sq = n->sq[i];
                 NvmeCQueue *cq = n->cq[i];
