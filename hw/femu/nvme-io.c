@@ -76,6 +76,17 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
         if (1 && status == NVME_SUCCESS) {
             req->status = status;
 
+            /**
+             * @brief Consider PCIe Channel bound Here(PCIe Genx4 : )
+             * IOSIZE(1KB) = le16_to_cpu((req->nlb-1)/2)+1;
+             * LATtime(ns) = request->expired_time - request->stime 
+             * if (Interface_minlat_PCIeGen3x4 > LATtime)
+             *      req->expired_time = req->stime += Interface_lat_PCIeGen3x4
+             */
+            if ((req->expire_time - req->stime) < Interface_min_read_lat_PCIeGen3x4_ns){
+                req->expire_time = req->stime + Interface_min_read_lat_PCIeGen3x4_ns;
+            }
+
             int rc = femu_ring_enqueue(n->to_ftl[index_poller], (void *)&req, 1);
             if (rc != 1) {
                 femu_err("enqueue failed, ret=%d\n", rc);

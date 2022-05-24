@@ -3,6 +3,8 @@
         "*.inc": "cpp",
         "*.tcc": "cpp",
         "thread": "cpp",
-        "*.list": "cpp"
+        "*.list": "cpp",
+        "*.idef": "c",
+        "*.def": "c"
     }
 }

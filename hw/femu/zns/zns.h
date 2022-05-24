@@ -2,6 +2,8 @@
 #define __FEMU_ZNS_H
 
 #include "../nvme.h"
+#define SK_HYNIX_VALIDATION 1
+#define MK_ZONE_CONVENTIONAL 0
 
 enum {
     NAND_READ =  0,
@@ -9,9 +11,15 @@ enum {
     NAND_ERASE = 2,
 
  /* FIXME: Just simply add SLC NAND latency numbers in nanoseconds in nand.h for now,(Inhoinno) */
-    NAND_READ_LATENCY  =   40000,
-    NAND_PROG_LATENCY  =  500000,
-    NAND_ERASE_LATENCY = 2000000,
+    NAND_READ_LATENCY  = 65000/4,  //65us TLC_tREAD(65us : 16K page time)   =16.25
+    NAND_PROG_LATENCY  = 450000/12,//450us TLC_tProg(450us: 16K page(/4),TLC(/3) time)  =37.5
+    //NAND_ERASE_LATENCY = SLC_BLOCK_ERASE_LATENCY_NS,
+    NAND_CHNL_PAGE_TRANSFER_LATENCY = 2441, // =2.5?
+    //SK Hynix read : 400Mb/s for 1 chip..
+    //ZEMU read     : 
+    //SK Hynix write: 100Mb/s for 1 chip..
+    //ZEMU write    : 5Mb/s for 1 chip...
+
 /* As best I know, ZONE RESET time is way more faster than ERASE_LAT (Inhoinno) */
     ZONE_RESET_LATENCY =  200000,
 };
@@ -122,6 +130,8 @@ enum NvmeZoneReportType {
 
 enum NvmeZoneType {
     NVME_ZONE_TYPE_RESERVED          = 0x00,
+    //for test, inhoinno
+    NVME_ZONE_TYPE_CONVENTIONAL      = 0x01,
     NVME_ZONE_TYPE_SEQ_WRITE         = 0x02,    
 };
 

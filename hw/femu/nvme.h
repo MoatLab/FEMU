@@ -38,6 +38,10 @@
  */
 #define ADVANCE_PER_CH_ENDTIME 1
 
+#define Interface_min_read_lat_PCIeGen3x4_ns 30518 
+#define Interface_min_write_lat_PCIeGen3x4_ns 30518
+
+
 typedef struct NvmeBar {
     uint64_t    cap;
     uint32_t    vs;

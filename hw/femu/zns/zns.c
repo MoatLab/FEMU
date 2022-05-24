@@ -1,7 +1,7 @@
 #include "./zns.h"
 #define MIN_DISCARD_GRANULARITY     (4 * KiB)
-#define NVME_DEFAULT_ZONE_SIZE      (128 * MiB)
-#define NVME_DEFAULT_MAX_AZ_SIZE    (128 * KiB)
+#define NVME_DEFAULT_ZONE_SIZE      (72 * MiB)
+#define NVME_DEFAULT_MAX_AZ_SIZE    (192 * KiB)
 
 static inline uint32_t zns_zone_idx(NvmeNamespace *ns, uint64_t slba)
 {
@@ -10,32 +10,36 @@ static inline uint32_t zns_zone_idx(NvmeNamespace *ns, uint64_t slba)
             n->zone_size);
 }
 /**
- * @brief Inhoinno, get slba, return chnl index considerring controller-level zone mapping(static zone mapping)
- *  
- * @param ns        namespace
- * @param slba      start lba
- * @param association    1-to-N, N is zone-channel association
- * @return chnl_idx
+ * @brief 
+ * Inhoinno , Like SK Hynix ZNS 
+ * 1-to-1
+ * zsze = 72M
+ * transmit size=4K
+ * 16chnl 2way 
  */
-static inline uint64_t zns_advanced_chnl_idx(NvmeNamespace *ns, uint64_t slba)
-{
+static inline uint64_t hynix_zns_get_ppn(NvmeNamespace *ns, uint64_t slba){
     FemuCtrl *n = ns->ctrl;
     struct zns * zns = n->zns;
     struct zns_ssdparams *spp = &zns->sp;
-    uint64_t factor = spp->chnls_per_zone;  /* Now factor = N w.r.t 1-to-N mapping */
-    uint64_t zone_idx = zns_zone_idx(ns, slba);
+    uint64_t zsze = NVME_DEFAULT_ZONE_SIZE / MIN_DISCARD_GRANULARITY;
     uint64_t slpa = slba >> 3;
-    //            = slpa << 3 >> (22) >> (19)
-    uint64_t zone_size = NVME_DEFAULT_ZONE_SIZE / MIN_DISCARD_GRANULARITY;
-    uint64_t zperrow = spp->nchnls / factor ; /* zones per row */
-
-    uint64_t base = (zone_idx / zperrow)*(zperrow*zone_size) + ((zone_idx % zperrow)*(spp->nchnls/zperrow));
-    uint64_t iter = (slpa / factor) % (zone_size/factor);
-    uint64_t iter_value = spp->nchnls;
-    uint64_t mod = slpa%factor;
-    //femu_err("In zns_advanced_chnl_idx (zidx : %ld, zsz : %ld, spla : %ld) base(%ld)+ iter(%ld)*iter_value(%ld) + mod(%ld) = %ld \n",zone_idx,zone_size,slpa, base,iter,iter_value,mod,(base + iter*iter_value + mod));
-    
-    return (base + iter*iter_value + mod) % spp->nchnls;
+    uint64_t zidx= zns_zone_idx(ns, slba);
+    uint64_t s_iter = zidx / (spp->ways * spp->nchnls);
+    uint64_t s_iterval = spp->ways * spp->nchnls * spp->ways;
+    uint64_t s_base = s_iter* s_iterval;
+    uint64_t s_mod = zidx % (spp->ways * spp->nchnls);
+    uint64_t start = s_base + s_mod;
+    uint64_t iter = (slpa/spp->chnls_per_zone) % zsze;
+    uint64_t iterval = spp->nchnls * spp->ways;
+    uint64_t increment = slpa % spp->chnls_per_zone;
+    return (start + iter*iterval + increment);
+}
+static inline uint64_t hynix_zns_get_chnl_idx(NvmeNamespace *ns, uint64_t slba){
+    return (hynix_zns_get_ppn(ns,slba) % (ns->ctrl->zns->sp.nchnls));
+}
+static inline uint64_t hynix_zns_get_lun_idx(NvmeNamespace *ns, uint64_t slba){
+    struct zns_ssdparams *spp = &(ns->ctrl->zns->sp);
+    return ( hynix_zns_get_ppn(ns,slba) % (spp->nchnls * spp->ways) );
 }
 
 static inline uint64_t zns_get_multiway_ppn_idx(NvmeNamespace *ns, uint64_t slba){
@@ -69,16 +73,21 @@ static inline uint64_t zns_get_multiway_chip_idx(NvmeNamespace *ns, uint64_t slb
     struct zns_ssdparams *spp = &zns->sp;
     return (zns_get_multiway_ppn_idx(ns,slba)/spp->csze_pages);
 }
-
-static inline uint64_t zns_get_multiway_chnl_idx(NvmeNamespace *ns, uint64_t slba)
-{
+/**
+ * @brief Inhoinno, get slba, return chnl index considerring controller-level zone mapping(static zone mapping)
+ *  
+ * @param ns        namespace
+ * @param slba      start lba
+ * @param association    1-to-N, N is zone-channel association
+ * @return chnl_idx
+ */
+static inline uint64_t zns_advanced_chnl_idx(NvmeNamespace *ns, uint64_t slba)
+{    
     FemuCtrl *n = ns->ctrl;
     struct zns * zns = n->zns;
     struct zns_ssdparams *spp = &zns->sp;
-    return zns_get_multiway_chip_idx(ns, slba) % spp->nchnls;
+    return zns_get_multiway_ppn_idx(ns,slba) % spp->nchnls;
 }
-
-
 static inline NvmeZone *zns_get_zone_by_slba(NvmeNamespace *ns, uint64_t slba)
 {
     FemuCtrl *n = ns->ctrl;
@@ -151,7 +160,7 @@ static void zns_init_zoned_state(NvmeNamespace *ns)
     uint64_t start = 0, zone_size = n->zone_size;
     uint64_t capacity = n->num_zones * zone_size;
     NvmeZone *zone;
-    int i;
+    uint32_t i;
     n->zone_array = g_new0(NvmeZone, n->num_zones);
     if (n->zd_extension_size) {
         n->zd_extensions = g_malloc0(n->zd_extension_size * n->num_zones);
@@ -168,6 +177,10 @@ static void zns_init_zoned_state(NvmeNamespace *ns)
             zone_size = capacity - start;
         }
         zone->d.zt = NVME_ZONE_TYPE_SEQ_WRITE;
+#if MK_ZONE_CONVENTIONAL
+        if( (i & (UINT32_MAX << MK_ZONE_CONVENTIONAL)) == 0){
+            zone->d.zt = NVME_ZONE_TYPE_CONVENTIONAL;}
+#endif
         zns_set_zone_state(zone, NVME_ZONE_STATE_EMPTY);
         zone->d.za = 0;
         zone->d.zcap = n->zone_capacity;
@@ -382,7 +395,7 @@ static uint16_t zns_check_zone_write(FemuCtrl *n, NvmeNamespace *ns,
                                       uint32_t nlb, bool append)
 {
     uint16_t status;
-
+    uint32_t zidx = zns_zone_idx(ns, slba);
     if (unlikely((slba + nlb) > zns_zone_wr_boundary(zone))) {
         status = NVME_ZONE_BOUNDARY_ERROR;
     } else {
@@ -394,13 +407,27 @@ static uint16_t zns_check_zone_write(FemuCtrl *n, NvmeNamespace *ns,
         assert(zns_wp_is_valid(zone));
         if (append) {
             if (unlikely(slba != zone->d.zslba)) {
+                //Zone Start Logical Block Address
                 status = NVME_INVALID_FIELD;
             }
             if (zns_l2b(ns, nlb) > (n->page_size << n->zasl)) {
                 status = NVME_INVALID_FIELD;
             }
+            if((zidx == 0) || (zidx == 1) || (zidx == 2) || (zidx == 3)){
+                femu_err("[inho] zns.c:406 append wp error(%d) in zidx=%d",status, zidx);
+            }
         } else if (unlikely(slba != zone->w_ptr)) {
+            
             status = NVME_ZONE_INVALID_WRITE;   
+#if MK_ZONE_CONVENTIONAL
+            if((zidx & (UINT32_MAX << MK_ZONE_CONVENTIONAL))==0){
+                //zidx & (UINT32_MAX << 3) == 0 //2^3 convs
+                //(zidx == 0) || (zidx == 1) || (zidx == 2) || (zidx == 3)
+                //NVME_ZONE_TYPE_CONVENTIONAL;
+                zone->w_ptr = slba;
+                status = NVME_SUCCESS;
+            }
+#endif
         }
     }
     return status;
@@ -1215,7 +1242,12 @@ static uint64_t znsssd_write(ZNS *zns, NvmeRequest *req){
     for (uint32_t i = 0; i<nlb ; i+=8){
         //Inhoinno : Interleaving per 4KB
         slba += i;
-        my_chip_idx=zns_get_multiway_chip_idx(ns, slba);
+#if SK_HYNIX_VALIDATION
+        my_chip_idx=hynix_zns_get_lun_idx(ns,slba); //SK Hynix
+#endif
+#if !(SK_HYNIX_VALIDATION)
+        my_chip_idx=zns_get_multiway_chip_idx(ns, slba);  
+#endif
         chip = &(zns->chips[my_chip_idx]);
 #if !(ADVANCE_PER_CH_ENDTIME)
         //Inhoinno:  Single thread emulation so assume we dont need lock per chnl
@@ -1226,7 +1258,12 @@ static uint64_t znsssd_write(ZNS *zns, NvmeRequest *req){
         maxlat = (maxlat < currlat)? currlat : maxlat;
 #endif
 #if ADVANCE_PER_CH_ENDTIME
-        my_chnl_idx=zns_get_multiway_chnl_idx(ns, slba);
+#if SK_HYNIX_VALIDATION
+        my_chnl_idx = hynix_zns_get_chnl_idx(ns, slba); //SK Hynix
+#endif
+#if !(SK_HYNIX_VALIDATION)
+        my_chnl_idx=zns_advanced_chnl_idx(ns, slba); 
+#endif
         chnl = &(zns->ch[my_chnl_idx]);
         chnl_stime = (chnl->next_ch_avail_time < cmd_stime) ? cmd_stime : \
                      chnl->next_ch_avail_time;
@@ -1267,7 +1304,12 @@ static uint64_t znsssd_read(ZNS *zns, NvmeRequest *req){
     for (uint64_t i = 0; i<nlb ; i+=8){
         //Inhoinno : Interleaving per 4KB
         slba += i;
-        my_chip_idx=zns_get_multiway_chip_idx(ns, slba);
+#if SK_HYNIX_VALIDATION
+        my_chip_idx=hynix_zns_get_lun_idx(ns,slba); //SK Hynix
+#endif
+#if !(SK_HYNIX_VALIDATION)
+        my_chip_idx=zns_get_multiway_chip_idx(ns, slba);  
+#endif
         chip = &(zns->chips[my_chip_idx]);
         //Inhoinno:  Single thread emulation so assume we dont need lock per chnl
         nand_stime = (chip->next_avail_time < cmd_stime) ? cmd_stime : \
@@ -1279,7 +1321,13 @@ static uint64_t znsssd_read(ZNS *zns, NvmeRequest *req){
         maxlat = (maxlat < currlat)? currlat : maxlat;
 #endif
 #if ADVANCE_PER_CH_ENDTIME
-        my_chnl_idx=zns_get_multiway_chnl_idx(ns, slba);
+    #if SK_HYNIX_VALIDATION
+            my_chnl_idx = hynix_zns_get_chnl_idx(ns, slba); //SK Hynix
+    #endif
+    #if !(SK_HYNIX_VALIDATION)
+            my_chnl_idx=zns_advanced_chnl_idx(ns, slba); 
+    #endif        
+
         chnl = &(zns->ch[my_chnl_idx]);
         
         chip->next_avail_time = nand_stime + spp->pg_rd_lat;
@@ -1503,17 +1551,17 @@ static void zns_init(FemuCtrl *n, Error **errp)
 static void znsssd_init_params(FemuCtrl * n, struct zns_ssdparams *spp){
     spp->pg_rd_lat = NAND_READ_LATENCY;
     spp->pg_wr_lat = NAND_PROG_LATENCY;
-    spp->blk_er_lat = NAND_ERASE_LATENCY;
-    spp->ch_xfer_lat = NAND_PROG_LATENCY/4;
+    //spp->blk_er_lat = NAND_ERASE_LATENCY;
+    spp->ch_xfer_lat = NAND_CHNL_PAGE_TRANSFER_LATENCY;
     /**
      * @brief Inhoinno : To show difference between 1-to-1 mapping, and 1-to-N mapping,
      * at least one param among these four should be configured in zns ssd.
      * 1. SSD size  2. zone size 3. # of chnls 4. # of chnls per zone
     */
-    spp->nchnls         = 32;           /* FIXME : = ZNS_MAX_CHANNEL channel configuration like this */
-    spp->zones          = n->num_zones; /* FIXME : = MAX_STORAGE_CAPACITY / ZONE_SIZE*/
-    spp->chnls_per_zone = 8;
-    spp->ways           = 4;
+    spp->nchnls         = 16;           /* FIXME : = ZNS_MAX_CHANNEL channel configuration like this */
+    spp->zones          = n->num_zones; 
+    spp->chnls_per_zone = 1;
+    spp->ways           = 2;
     
     /* TO REAL STORAGE SIZE */
     spp->csze_pages     = (((int64_t)n->memsz) * 1024 * 1024) / MIN_DISCARD_GRANULARITY / spp->nchnls / spp->ways;
