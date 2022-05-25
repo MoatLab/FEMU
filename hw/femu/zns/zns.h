@@ -9,10 +9,9 @@ enum {
     NAND_ERASE = 2,
 
  /* FIXME: Just simply add SLC NAND latency numbers in nanoseconds in nand.h for now,(Inhoinno) */
-    NAND_READ_LATENCY  = 65000/6,  //65us TLC_tREAD(65us : 16K page time)   =16.25
+    NAND_READ_LATENCY  = 65000/4,  //65us TLC_tREAD(65us : 16K page time)   =16.25
     NAND_PROG_LATENCY  = 450000/12,//450us TLC_tProg(450us: 16K page(/4),TLC(/3) time)  =37.5
-    //NAND_ERASE_LATENCY = SLC_BLOCK_ERASE_LATENCY_NS,
-
+    NAND_ERASE_LATENCY = SLC_BLOCK_ERASE_LATENCY_NS,//2000000
     NAND_CHNL_PAGE_TRANSFER_LATENCY = 2441, // =2.5? 1200MT
     //SK Hynix read : 400Mb/s for 1 chip..
     //ZEMU read     : 

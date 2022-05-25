@@ -2,7 +2,7 @@
 #include <math.h>
 #define MIN_DISCARD_GRANULARITY     (4 * KiB)
 #define NVME_DEFAULT_ZONE_SIZE      (64 * MiB)
-#define NVME_DEFAULT_MAX_AZ_SIZE    (4 * KiB)
+#define NVME_DEFAULT_MAX_AZ_SIZE    (128 * KiB)
 uint64_t lag = 0;
 
 static inline uint32_t zns_zone_idx(NvmeNamespace *ns, uint64_t slba)
@@ -43,7 +43,7 @@ static inline uint64_t hynix_zns_get_lun_idx(NvmeNamespace *ns, uint64_t slba){
     struct zns_ssdparams *spp = &(ns->ctrl->zns->sp);
     return ( hynix_zns_get_ppn(ns,slba) % (spp->nchnls * spp->ways) );
 }
-static inline uint64_t zns_get_multiway_ppn_idx(NvmeNamespace *ns, uint64_t slba){
+static inline uint64_t bak_zns_get_multiway_ppn_idx(NvmeNamespace *ns, uint64_t slba){
     FemuCtrl *n = ns->ctrl;
     struct zns * zns = n->zns;
     struct zns_ssdparams *spp = &zns->sp;
@@ -65,8 +65,8 @@ static inline uint64_t zns_get_multiway_ppn_idx(NvmeNamespace *ns, uint64_t slba
     uint64_t incre = slpa % spp->chnls_per_zone;
     return(start + iter*iterval + incre);
 }
-/*
-static inline uint64_t old_zns_get_multiway_ppn_idx(NvmeNamespace *ns, uint64_t slba){
+
+static inline uint64_t zns_get_multiway_ppn_idx(NvmeNamespace *ns, uint64_t slba){
     FemuCtrl *n = ns->ctrl;
     struct zns * zns = n->zns;
     struct zns_ssdparams *spp = &zns->sp;
@@ -90,20 +90,20 @@ static inline uint64_t old_zns_get_multiway_ppn_idx(NvmeNamespace *ns, uint64_t 
     // return ppa % nchnls
     return (base + iter*iter_value + mod + mod_zpn);
 }
-*/
-static inline uint64_t zns_get_multiway_chip_idx(NvmeNamespace *ns, uint64_t slba){
+/*
+static inline uint64_t bak_zns_get_multiway_chip_idx(NvmeNamespace *ns, uint64_t slba){
     FemuCtrl *n = ns->ctrl;
     struct zns * zns = n->zns;
     struct zns_ssdparams *spp = &zns->sp; 
     return (zns_get_multiway_ppn_idx(ns,slba) % (spp->ways * spp->nchnls));
-}
-/*
-static inline uint64_t old_zns_get_multiway_chip_idx(NvmeNamespace *ns, uint64_t slba){
+}*/
+
+static inline uint64_t zns_get_multiway_chip_idx(NvmeNamespace *ns, uint64_t slba){
     FemuCtrl *n = ns->ctrl;
     struct zns * zns = n->zns;
     struct zns_ssdparams *spp = &zns->sp;
     return (zns_get_multiway_ppn_idx(ns,slba)/spp->csze_pages);
-}*/
+}
 /**
  * @brief Inhoinno, get slba, return chnl index considerring controller-level zone mapping(static zone mapping)
  *  
@@ -112,21 +112,22 @@ static inline uint64_t old_zns_get_multiway_chip_idx(NvmeNamespace *ns, uint64_t
  * @param association    1-to-N, N is zone-channel association
  * @return chnl_idx
  */
+/*
+static inline uint64_t bak_zns_advanced_chnl_idx(NvmeNamespace *ns, uint64_t slba)
+{    
+    FemuCtrl *n = ns->ctrl;
+    struct zns * zns = n->zns;
+    struct zns_ssdparams *spp = &zns->sp;
+    return bak_zns_get_multiway_ppn_idx(ns,slba) % spp->nchnls;
+}*/
+
 static inline uint64_t zns_advanced_chnl_idx(NvmeNamespace *ns, uint64_t slba)
 {    
     FemuCtrl *n = ns->ctrl;
     struct zns * zns = n->zns;
     struct zns_ssdparams *spp = &zns->sp;
-    return zns_get_multiway_ppn_idx(ns,slba) % spp->nchnls;
-}
-/*
-static inline uint64_t old_zns_advanced_chnl_idx(NvmeNamespace *ns, uint64_t slba)
-{    
-    FemuCtrl *n = ns->ctrl;
-    struct zns * zns = n->zns;
-    struct zns_ssdparams *spp = &zns->sp;
     return zns_get_multiway_chip_idx(ns,slba) % spp->nchnls;
-}*/
+}
 static inline NvmeZone *zns_get_zone_by_slba(NvmeNamespace *ns, uint64_t slba)
 {
     FemuCtrl *n = ns->ctrl;

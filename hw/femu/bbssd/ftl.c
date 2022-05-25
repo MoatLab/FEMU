@@ -255,12 +255,12 @@ static void check_params(struct ssdparams *spp)
 static void ssd_init_params(struct ssdparams *spp)
 {
     spp->secsz = 512;
-    spp->secs_per_pg = 8;   //page size : 4KB       OK
-    spp->pgs_per_blk = 256; //block size : 1MB      OK
-    spp->blks_per_pl = 32; //plane size = 32MB    (default256MB)  
-    spp->pls_per_lun = 1;   //lun size = 32MB      (default 256MB) 
-    spp->luns_per_ch = 4;   //per channel, 128MB       >> 1 Inhoinno : same chnl as zns (default 8)
-    spp->nchs = 32;         //ssd, 4GB              >> 32 Inhoinno : same chnl as zns (default 8)
+    spp->secs_per_pg = 8;   //page size : 4KB  
+    spp->pgs_per_blk = 256; //block size : 1MB   
+    spp->blks_per_pl = 32; //plane size = 32MB  
+    spp->pls_per_lun = 16;   //lun size = 512MB     
+    spp->luns_per_ch = 2;   //2way      >> 1 Inhoinno
+    spp->nchs = 16;         //ssd, 16GB          
 
     spp->pg_rd_lat = NAND_READ_LATENCY;
     spp->pg_wr_lat = NAND_PROG_LATENCY;
