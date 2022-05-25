@@ -1,6 +1,7 @@
 #ifndef BLOCK_NVME_H
 #define BLOCK_NVME_H
 
+
 typedef struct QEMU_PACKED NvmeBar {
     uint64_t    cap;
     uint32_t    vs;

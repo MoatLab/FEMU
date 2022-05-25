@@ -1,8 +1,11 @@
 #include "./zns.h"
+#include <math.h>
 #define MIN_DISCARD_GRANULARITY     (4 * KiB)
 #define NVME_DEFAULT_ZONE_SIZE      (72 * MiB)
 #define NVME_DEFAULT_MAX_AZ_SIZE    (192 * KiB)
-
+uint64_t lag = 0;
+uint64_t r_count =0;
+uint64_t MAX_MB = 4096;
 static inline uint32_t zns_zone_idx(NvmeNamespace *ns, uint64_t slba)
 {
     FemuCtrl *n = ns->ctrl;
@@ -1373,7 +1376,11 @@ static uint16_t zns_read(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t data_size = zns_l2b(ns, nlb);
     uint64_t data_offset;
     uint16_t status;
-
+    uint64_t nk = nlb/2;
+    uint64_t delta_time = (uint64_t)nk*pow(10,9);   //n KB > 4096*1KB*2^10:10^9ns = 1KB : (10^9 / 2^10 / 4096)ns
+    //femu_err("[Inho ] delt : %lx            ",delta_time);
+    delta_time = delta_time/pow(2,10)/(Interface_PCIeGen3x4_bw);
+    PCIe_Gen3_x4 * pcie = n->pci_simulation;
     assert(n->zoned);
     req->is_write = false;
 
@@ -1406,6 +1413,32 @@ static uint16_t zns_read(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     data_offset = zns_l2b(ns, slba);
     req->expire_time += zns_advance_status(n,ns,cmd,req);
+    /*PCI latency model here*/
+
+#if 1
+    //lock
+    pthread_spin_lock(&n->pci_lock);
+    if(pcie->ntime + 2000 <  req->stime ){
+        lag=0;
+        pcie->stime = req->stime;
+        pcie->ntime = pcie->stime + Interface_PCIeGen3x4_bwmb/NVME_DEFAULT_MAX_AZ_SIZE/1000 * delta_time;
+    }else if(pcie->ntime < (pcie->stime + delta_time)){
+        //update lag
+        lag = (pcie->ntime - req->stime);
+        pcie->stime = pcie->ntime;
+        pcie->ntime = pcie->stime + Interface_PCIeGen3x4_bwmb/NVME_DEFAULT_MAX_AZ_SIZE/1000 * delta_time; //1ms
+        req->expire_time += lag;
+        pcie->stime += delta_time;
+    }else if (req->stime < pcie->ntime && lag != 0 ){
+        req->expire_time+=lag;
+    }
+    
+    pcie->stime += delta_time;
+    femu_err("[inho] lag : %lx\n", lag);
+    
+    pthread_spin_unlock(&n->pci_lock);
+#endif
+    //unlock
     backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
     return NVME_SUCCESS;
 

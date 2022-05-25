@@ -38,9 +38,18 @@
  */
 #define ADVANCE_PER_CH_ENDTIME 1
 
-#define Interface_min_read_lat_PCIeGen3x4_ns 30518 
-#define Interface_min_write_lat_PCIeGen3x4_ns 30518
+#define SK_HYNIX_VALIDATION 1
+#define MK_ZONE_CONVENTIONAL 0
 
+#define Interface_PCIeGen3x4_bwmb (3500 * MiB) //MB.s
+#define Interface_PCIeGen3x4_bw 3500
+typedef struct _PCIe_Gen3_x4 {
+    //lock
+    uint64_t bw;
+    uint64_t stime;
+    uint64_t ntime; 
+    bool busy;
+}PCIe_Gen3_x4; //FOR real zns
 
 typedef struct NvmeBar {
     uint64_t    cap;
@@ -1197,6 +1206,8 @@ typedef struct FemuCtrl {
     uint32_t        max_active_zones;
     uint32_t        max_open_zones;
     uint32_t        zd_extension_size;
+    PCIe_Gen3_x4    *pci_simulation;
+    pthread_spinlock_t pci_lock;
 
     const uint32_t  *iocs;
     uint8_t         csi;
