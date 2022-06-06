@@ -1,3 +1,4 @@
+#!/usr/bin/python2
 # QEMU Monitor Protocol Python class
 #
 # Copyright (C) 2009, 2010 Red Hat Inc.
