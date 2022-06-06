@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python2
 # QEMU vCPU pinning tool
 #
 # Copyright (C) 2016 Red Hat Inc.
@@ -29,9 +29,9 @@ devnull = open(os.devnull, 'w')
 srv = QEMUMonitorProtocol(args.server)
 srv.connect()
 
-for vcpu in srv.command('query-cpus'):
-    vcpuid = vcpu['CPU']
-    tid = vcpu['thread_id']
+for vcpu in srv.command('query-cpus-fast'):
+    vcpuid = vcpu['cpu-index']
+    tid = vcpu['thread-id']
     if tid in pinned:
         print 'vCPU{}\'s tid {} already pinned, skipping'.format(vcpuid, tid)
         continue
