@@ -16,7 +16,7 @@
 Contact Information
 --------------------
 
-**Maintainer**: [Huaicheng Li](https://huaicheng.github.io), Email: ``hcli AT cmu dot edu``
+**Maintainer**: [Huaicheng Li](https://huaicheng.github.io), Email: ``huaicheng@cs.vt.edu``
 
 Feel free to contact Huaicheng for any suggestions/feedback, bug
 reports, or general discussions.
