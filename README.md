@@ -18,6 +18,8 @@ Contact Information
 
 **Maintainer**: [Huaicheng Li](https://huaicheng.github.io), Email: ``huaicheng@cs.vt.edu``
 
+> **Research opportunities:** Huaicheng Li is hiring Ph.D. students to join his group, feel free to contact him for details!
+
 Feel free to contact Huaicheng for any suggestions/feedback, bug
 reports, or general discussions.
 
