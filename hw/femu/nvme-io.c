@@ -40,6 +40,7 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
 {
     NvmeSQueue *sq = opaque;
     FemuCtrl *n = sq->ctrl;
+
     uint16_t status;
     hwaddr addr;
     NvmeCmd cmd;
@@ -74,6 +75,7 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
         status = nvme_io_cmd(n, &cmd, req);
         if (1 && status == NVME_SUCCESS) {
             req->status = status;
+
             int rc = femu_ring_enqueue(n->to_ftl[index_poller], (void *)&req, 1);
             if (rc != 1) {
                 femu_err("enqueue failed, ret=%d\n", rc);
@@ -129,7 +131,7 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
     int processed = 0;
     int rc;
 
-    if (BBSSD(n)) { //|| ZNSSD(n)
+    if (BBSSD(n)) {
         rp = n->to_poller[index_poller];
     }
 
@@ -141,7 +143,7 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
         }
         assert(req);
 
-        pqueue_insert( pq, req);
+        pqueue_insert(pq, req);
     }
 
     while ((req = pqueue_peek(pq))) {
@@ -191,7 +193,7 @@ static void *nvme_poller(void *arg)
 {
     FemuCtrl *n = ((NvmePollerThreadArgument *)arg)->n;
     int index = ((NvmePollerThreadArgument *)arg)->index;
-    int i=0;
+
     switch (n->multipoller_enabled) {
     case 1:
         while (1) {
@@ -199,7 +201,7 @@ static void *nvme_poller(void *arg)
                 usleep(1000);
                 continue;
             }
-            i++;
+
             NvmeSQueue *sq = n->sq[index];
             NvmeCQueue *cq = n->cq[index];
             if (sq && sq->is_active && cq && cq->is_active) {
@@ -214,7 +216,6 @@ static void *nvme_poller(void *arg)
                 usleep(1000);
                 continue;
             }
-            i++;
 
             for (int i = 1; i <= n->num_io_queues; i++) {
                 NvmeSQueue *sq = n->sq[i];
@@ -258,7 +259,6 @@ static void set_pos(void *a, size_t pos)
 
 void nvme_create_poller(FemuCtrl *n)
 {
-
     n->should_isr = g_malloc0(sizeof(bool) * (n->num_io_queues + 1));
 
     n->num_poller = n->multipoller_enabled ? n->num_io_queues : 1;
@@ -493,37 +493,31 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 
     switch (cmd->opcode) {
     case NVME_CMD_FLUSH:
-
         if (!n->id_ctrl.vwc || !n->features.volatile_wc) {
             return NVME_SUCCESS;
         }
         return nvme_flush(n, ns, cmd, req);
     case NVME_CMD_DSM:
-
         if (NVME_ONCS_DSM & n->oncs) {
             return nvme_dsm(n, ns, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
     case NVME_CMD_COMPARE:
-
         if (NVME_ONCS_COMPARE & n->oncs) {
             return nvme_compare(n, ns, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
     case NVME_CMD_WRITE_ZEROES:
-
         if (NVME_ONCS_WRITE_ZEROS & n->oncs) {
             return nvme_write_zeros(n, ns, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
     case NVME_CMD_WRITE_UNCOR:
-
         if (NVME_ONCS_WRITE_UNCORR & n->oncs) {
             return nvme_write_uncor(n, ns, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
     default:
-
         if (n->ext_ops.io_cmd) {
             return n->ext_ops.io_cmd(n, ns, cmd, req);
         }
@@ -537,7 +531,7 @@ void nvme_post_cqes_io(void *opaque)
 {
     NvmeCQueue *cq = opaque;
     NvmeRequest *req, *next;
-    int64_t cur_time, ntt = 0;  //NTT?
+    int64_t cur_time, ntt = 0;
     int processed = 0;
 
     QTAILQ_FOREACH_SAFE(req, &cq->req_list, entry, next) {

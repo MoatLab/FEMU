@@ -31,12 +31,10 @@ static void bb_flip(FemuCtrl *n, NvmeCmd *cmd)
     switch (cdw10) {
     case FEMU_ENABLE_GC_DELAY:
         ssd->sp.enable_gc_delay = true;
-        femu_err("%s,FEMU GC Delay Emulation [Enabled]!\n", n->devname);
         femu_log("%s,FEMU GC Delay Emulation [Enabled]!\n", n->devname);
         break;
     case FEMU_DISABLE_GC_DELAY:
         ssd->sp.enable_gc_delay = false;
-        femu_err("%s,FEMU GC Delay Emulation [Disabled]!\n", n->devname);
         femu_log("%s,FEMU GC Delay Emulation [Disabled]!\n", n->devname);
         break;
     case FEMU_ENABLE_DELAY_EMU:

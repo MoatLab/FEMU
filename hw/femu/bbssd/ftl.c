@@ -153,20 +153,6 @@ static struct line *get_next_free_line(struct ssd *ssd)
     lm->free_line_cnt--;
     return curline;
 }
-/**
- * @brief 
- * ssd_advance_write_pointer 
- * get write pointer from ssd sturcture and add +1 for each member respectively 
- * write pointer has a member which indicates each component of ssd and exposed by it's number
- * this function  
- * struct line *curline;
- * int ch;
- * int lun;
- * int pg;
- * int blk;
- * int pl;
- * 
- */
 
 static void ssd_advance_write_pointer(struct ssd *ssd)
 {
@@ -175,13 +161,9 @@ static void ssd_advance_write_pointer(struct ssd *ssd)
     struct line_mgmt *lm = &ssd->lm;
 
     check_addr(wpp->ch, spp->nchs);
-    wpp->ch++;      //wpp->ch means channel #(int) for current write pointer
-    if (wpp->ch == spp->nchs) { 
-        //spp->nchs means max # of channels in ssd
-        //so if wpp->ch += 1 equals ssd's max channel 
-        // then ssd is currently saturated
-        // so simply set wp's ch to 0, which means using channels in circular manner 
-        wpp->ch = 0;    
+    wpp->ch++;
+    if (wpp->ch == spp->nchs) {
+        wpp->ch = 0;
         check_addr(wpp->lun, spp->luns_per_ch);
         wpp->lun++;
         /* in this case, we should go to next lun */
@@ -255,12 +237,12 @@ static void check_params(struct ssdparams *spp)
 static void ssd_init_params(struct ssdparams *spp)
 {
     spp->secsz = 512;
-    spp->secs_per_pg = 8;   //page size : 4KB  
-    spp->pgs_per_blk = 256; //block size : 1MB   
-    spp->blks_per_pl = 32; //plane size = 32MB  
-    spp->pls_per_lun = 16;   //lun size = 512MB     
-    spp->luns_per_ch = 2;   //2way      >> 1 Inhoinno
-    spp->nchs = 16;         //ssd, 16GB          
+    spp->secs_per_pg = 8;
+    spp->pgs_per_blk = 256;
+    spp->blks_per_pl = 256; /* 16GB */
+    spp->pls_per_lun = 1;
+    spp->luns_per_ch = 8;
+    spp->nchs = 8;
 
     spp->pg_rd_lat = NAND_READ_LATENCY;
     spp->pg_wr_lat = NAND_PROG_LATENCY;
@@ -441,31 +423,13 @@ static inline struct ssd_channel *get_ch(struct ssd *ssd, struct ppa *ppa)
 {
     return &(ssd->ch[ppa->g.ch]);
 }
-/**
- * @brief 
- * get logical unit in ssd according to physical-page address
- *  (page<block<plane<die<chip, and # of chips per 1 channel)
- * 
- * returns  struct nand_lun * which is channel -> lun[ppa->g.lun] 
- * arg      struct ssd * ,  struct ppa *
- * 
- * inhoinno!
- */
+
 static inline struct nand_lun *get_lun(struct ssd *ssd, struct ppa *ppa)
 {
     struct ssd_channel *ch = get_ch(ssd, ppa);
     return &(ch->lun[ppa->g.lun]);
 }
-/**
- * @brief 
- * get plane int ssd according to physical-page address
- * (page<block<plane<die<chip, and # of chips per 1 channel)
- * 
- * returns  struct nand_plane * which is logical unit -> pl[ppa->g.lun] 
- * args     struct ssd *, struct ppa *
- * 
- * inhoinno!
- */
+
 static inline struct nand_plane *get_pl(struct ssd *ssd, struct ppa *ppa)
 {
     struct nand_lun *lun = get_lun(ssd, ppa);
@@ -498,10 +462,6 @@ static uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa, struct
     uint64_t nand_stime;
     struct ssdparams *spp = &ssd->sp;
     struct nand_lun *lun = get_lun(ssd, ppa);
-#if ADVANCE_PER_CH_ENDTIME
-    struct ssd_channel *ch = get_ch(ssd, ppa);
-    uint64_t chnl_stime=0;
-#endif
     uint64_t lat = 0;
 
     switch (c) {
@@ -511,7 +471,7 @@ static uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa, struct
                      lun->next_lun_avail_time;
         lun->next_lun_avail_time = nand_stime + spp->pg_rd_lat;
         lat = lun->next_lun_avail_time - cmd_stime;
-#if ADVANCE_PER_CH_ENDTIME
+#if 0
         lun->next_lun_avail_time = nand_stime + spp->pg_rd_lat;
 
         /* read: then data transfer through channel */
@@ -534,7 +494,7 @@ static uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa, struct
         }
         lat = lun->next_lun_avail_time - cmd_stime;
 
-#if ADVANCE_PER_CH_ENDTIME
+#if 0
         chnl_stime = (ch->next_ch_avail_time < cmd_stime) ? cmd_stime : \
                      ch->next_ch_avail_time;
         ch->next_ch_avail_time = chnl_stime + spp->ch_xfer_lat;
@@ -771,7 +731,6 @@ static int do_gc(struct ssd *ssd, bool force)
 
     victim_line = select_victim_line(ssd, force);
     if (!victim_line) {
-        femu_err("FTL.c : 770 but GC doesn't happend to Inhoinno\n");
         return -1;
     }
 
@@ -791,7 +750,6 @@ static int do_gc(struct ssd *ssd, bool force)
             mark_block_free(ssd, &ppa);
 
             if (spp->enable_gc_delay) {
-                femu_err("FTL.c : 790 GC happend to Inhoinno\n");
                 struct nand_cmd gce;
                 gce.type = GC_IO;
                 gce.cmd = NAND_ERASE;
@@ -844,16 +802,6 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
 
     return maxlat;
 }
-/**
- * @brief 
- * ssd_write  
- * static uint64_t ssd_write(sturct ssd * ssd, NvmeRequest *req)
- * returns maxlat which means max latency.
- * max latency is the hightest value of latency 
- * which is calculated by ssd_advance_status per lpn(logical page number)
- * and this value is not sum of total latency but just highest latency while ssd_write()
- *  
- */
 
 static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 {
@@ -873,7 +821,6 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 
     while (should_gc_high(ssd)) {
         /* perform GC here until !should_gc(ssd) */
-        femu_err("In FTL.c :870 in ssd_write, GC triggered, to inhoinno");
         r = do_gc(ssd, true);
         if (r == -1)
             break;
@@ -919,7 +866,6 @@ static void *ftl_thread(void *arg)
     uint64_t lat = 0;
     int rc;
     int i;
-    /*FIXME : inhoinno: set "always GC"*/
 
     while (!*(ssd->dataplane_started_ptr)) {
         usleep(100000);
@@ -938,19 +884,14 @@ static void *ftl_thread(void *arg)
             if (rc != 1) {
                 printf("FEMU: FTL to_ftl dequeue failed\n");
             }
-            ssd->sp.enable_gc_delay=true;
+
             ftl_assert(req);
-            if(!ssd->sp.enable_gc_delay)
-                femu_err("In FTL.c :937 ssd->sp.enable_gc_delay=false, to inhoinno");
             switch (req->cmd.opcode) {
             case NVME_CMD_WRITE:
                 lat = ssd_write(ssd, req);
-                //lat += 100000000; //IT WORKS AT CQ 1mil ms=100 000sec us=100sec ns=0.1sec
                 break;
             case NVME_CMD_READ:
                 lat = ssd_read(ssd, req);
-                //lat += 100000000; //IT WORKS AT CQ 1mil ms=100 000sec us=100sec ns=0.1sec
-
                 break;
             case NVME_CMD_DSM:
                 lat = 0;
@@ -970,7 +911,6 @@ static void *ftl_thread(void *arg)
 
             /* clean one line if needed (in the background) */
             if (should_gc(ssd)) {
-                femu_err("In ftl.c:965 gc processed, to Inhoinno\n");
                 do_gc(ssd, false);
             }
         }

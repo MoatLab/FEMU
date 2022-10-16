@@ -39,9 +39,7 @@ int64_t advance_channel_timestamp(FemuCtrl *n, int ch, uint64_t now, int opcode)
 {
     uint64_t start_data_xfer_ts;
     uint64_t data_ready_ts;
-    #ifdef INHOINNO_VERBOSE_SETTING
-    femu_err("timing.c : advance_channel_timestamp(), to inhoinno \n");
-    #endif
+
     /* TODO: Considering channel-level timing */
     return now;
 
@@ -76,9 +74,7 @@ int64_t advance_chip_timestamp(FemuCtrl *n, int lunid, uint64_t now, int opcode,
 {
     int64_t lat;
     int64_t io_done_ts;
-    #ifdef INHOINNO_VERBOSE_SETTING
-    femu_err("timing.c : advance_chip_timestamp(), to inhoinno \n");
-    #endif
+
     switch (opcode) {
     case NVME_CMD_OC_READ:
     case NVME_CMD_READ:

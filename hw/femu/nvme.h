@@ -31,26 +31,6 @@
 #define NVME_ID_NS_LBAF_DS(ns, lba_index) (ns->id_ns.lbaf[lba_index].lbads)
 #define NVME_ID_NS_LBAF_MS(ns, lba_index) (ns->id_ns.lbaf[lba_index].ms)
 
-/**
- * @brief 
- * Advance Channel latency emulating
- * inhoinno 
- */
-#define ADVANCE_PER_CH_ENDTIME 1
-
-#define SK_HYNIX_VALIDATION 0
-#define MK_ZONE_CONVENTIONAL 0
-
-#define Interface_PCIeGen3x4_bwmb (3500 * MiB) //MB.s
-#define Interface_PCIeGen3x4_bw 3500
-typedef struct _PCIe_Gen3_x4 {
-    //lock
-    uint64_t bw;
-    uint64_t stime;
-    uint64_t ntime; 
-    bool busy;
-}PCIe_Gen3_x4; //FOR real zns
-
 typedef struct NvmeBar {
     uint64_t    cap;
     uint32_t    vs;
@@ -1195,7 +1175,6 @@ typedef struct FemuCtrl {
     NvmeBar         bar;
 
     /* Coperd: ZNS FIXME */
-    struct zns      *zns;   // for ZNS Latency emualting, Inhoinno
     QemuUUID        uuid;
     uint32_t        zasl_bs;
     uint8_t         zasl;
@@ -1206,8 +1185,6 @@ typedef struct FemuCtrl {
     uint32_t        max_active_zones;
     uint32_t        max_open_zones;
     uint32_t        zd_extension_size;
-    PCIe_Gen3_x4    *pci_simulation;
-    pthread_spinlock_t pci_lock;
 
     const uint32_t  *iocs;
     uint8_t         csi;

@@ -1,7 +1,6 @@
 #ifndef BLOCK_NVME_H
 #define BLOCK_NVME_H
 
-
 typedef struct QEMU_PACKED NvmeBar {
     uint64_t    cap;
     uint32_t    vs;
@@ -1498,8 +1497,6 @@ enum NvmeZoneReportType {
 
 enum NvmeZoneType {
     NVME_ZONE_TYPE_RESERVED          = 0x00,
-        //for test, inhoinno
-    NVME_ZONE_TYPE_CONVENTIONAL      = 0x01,
     NVME_ZONE_TYPE_SEQ_WRITE         = 0x02,
 };
 
