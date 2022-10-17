@@ -1,5 +1,5 @@
 [![FEMU Version](https://img.shields.io/badge/FEMU-v7.0-brightgreen)](https://img.shields.io/badge/FEMU-v7.0-brightgreen)
-[![Build Status](https://travis-ci.com/ucare-uchicago/FEMU.svg?branch=master)](https://travis-ci.com/ucare-uchicago/FEMU)
+[![Build Status](https://travis-ci.com/vtess/FEMU.svg?branch=master)](https://travis-ci.com/vtess/FEMU)
 [![License: GPL v2](https://img.shields.io/badge/License-GPL%20v2-blue.svg)](https://www.gnu.org/licenses/old-licenses/gpl-2.0.en.html)
 [![Platform](https://img.shields.io/badge/Platform-x86--64-brightgreen)](https://shields.io/)
 
@@ -16,7 +16,9 @@
 Contact Information
 --------------------
 
-**Maintainer**: [Huaicheng Li](https://huaicheng.github.io), Email: ``hcli AT cmu dot edu``
+**Maintainer**: [Huaicheng Li](https://huaicheng.github.io), Email: ``huaicheng@cs.vt.edu``
+
+> **Research opportunities:** Huaicheng Li is hiring Ph.D. students to join his group, feel free to contact him for details!
 
 Feel free to contact Huaicheng for any suggestions/feedback, bug
 reports, or general discussions.
@@ -40,7 +42,7 @@ Year =  {2018}
 Research Papers using FEMU
 --------------------------
 
-**Please Check the growing list of research papers using FEMU [here](https://github.com/ucare-uchicago/FEMU/wiki/Research-Papers-using-FEMU), including papers at ASPLOS, OSDI, SOSP and FAST, etc.**
+**Please Check the growing list of research papers using FEMU [here](https://github.com/vtess/FEMU/wiki/Research-Papers-using-FEMU), including papers at ASPLOS, OSDI, SOSP and FAST, etc.**
 
 
 
@@ -103,7 +105,7 @@ Installation
    dependencies can be installed by following instructions below:
 
 ```bash
-  git clone https://github.com/ucare-uchicago/femu.git
+  git clone https://github.com/vtess/femu.git
   cd femu
   mkdir build-femu
   # Switch to the FEMU building directory
@@ -234,12 +236,12 @@ Run FEMU
 
 - If you intend to emulate a larger VM (more vCPUs and DRAM) and an SSD with
   larger capacity, make sure refer to the resource provisioning tips
-  [here](https://github.com/ucare-uchicago/FEMU/wiki/Before-running-FEMU).
+  [here](https://github.com/vtess/FEMU/wiki/Before-running-FEMU).
 
 ### 1. Run FEMU as blackbox SSDs (``Device-managed FTL`` or ``BBSSD`` mode) ###
 
 **TODO:** currently blackbox SSD parameters are hard-coded in
-`hw/block/femu/ftl/ftl.c`, please change them accordingly and re-compile FEMU.
+`hw/femu/ftl/ftl.c`, please change them accordingly and re-compile FEMU.
 
 Boot the VM using the following
 script:
@@ -285,14 +287,15 @@ emulation.
 for development purposes. More features like proper latency emulation,
 controller-level zone mappings to flash chips are work-in-progress.
 
+
 ```Bash
 ./run-zns.sh
 ```
 
 ### Contributing ###
 
-Github [``issue``](https://github.com/ucare-uchicago/FEMU/issues) and [``pull
-request``](https://github.com/ucare-uchicago/FEMU/pulls) are preferred. Do let
+Github [``issue``](https://github.com/vtess/FEMU/issues) and [``pull
+request``](https://github.com/vtess/FEMU/pulls) are preferred. Do let
 us know if you have any thoughts!
 
 ### Acknowledgement ###
@@ -305,5 +308,5 @@ gone far beyond what prior platforms can achieve in terms of ``performance``,
 FEMU's NVMe controller logic is based on QEMU/NVMe, LightNVM/QEMU and ZNS/QEMU.
 
 
-### For more detail, please checkout the [Wiki](https://github.com/ucare-uchicago/femu/wiki)!
+### For more detail, please checkout the [Wiki](https://github.com/vtess/femu/wiki)!
 
