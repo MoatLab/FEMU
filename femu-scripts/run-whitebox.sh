@@ -71,7 +71,7 @@ FEMU_OPTIONS=${FEMU_OPTIONS}",lsec_size=${hw_sector_size}"
 FEMU_OPTIONS=${FEMU_OPTIONS}",lsecs_per_pg=${num_sectors_per_page}"
 FEMU_OPTIONS=${FEMU_OPTIONS}",lpgs_per_blk=${num_pages_per_block}"
 FEMU_OPTIONS=${FEMU_OPTIONS}",femu_mode=0"
-#FEMU_OPTIONS=${FEMU_OPTIONS}",cell_type=3" # 3 for TLC, 4 for QLC, 2 (default) for MLC
+#FEMU_OPTIONS=${FEMU_OPTIONS}",flash_type=3" # 3 for TLC, 4 for QLC, 2 (default) for MLC
 
 #echo ${FEMU_OPTIONS}
 
