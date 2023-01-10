@@ -1059,6 +1059,9 @@ static uint16_t zns_do_write(FemuCtrl *n, NvmeRequest *req, bool append,
     NvmeZonedResult *res = (NvmeZonedResult *)&req->cqe;
     uint16_t status;
 
+    assert(n->zoned);
+    req->is_write = true;
+
     if (!wrz) {
         status = nvme_check_mdts(n, data_size);
         if (status) {
