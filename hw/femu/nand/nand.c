@@ -55,10 +55,10 @@ static void init_tlc_page_pairing(FemuCtrl *n)
 /* QLC-NAND Flash Mapping with Shadow-Page programming Sequence */
 static void init_qlc_page_pairing(FemuCtrl *n)
 {
-	int i, j;
+    int i, j;
     int rows = (MAX_SUPPORTED_PAGES_PER_BLOCK + 7) / 8;
     int lpflag = QLC_LOWER_PAGE;
-	int page_per_row=8;
+    int page_per_row=8;
 
     int lowp[] = {0, 1, 2, 3, 4, 5, 8, 9};
     int centerlp[] = {6, 7, 10, 11};
@@ -76,7 +76,7 @@ static void init_qlc_page_pairing(FemuCtrl *n)
     for (i = 0; i < rows - 3; i++) {
         for (j = 0; j < page_per_row; j += 2) {
             int idx = 8 + (i * page_per_row) + j;
-            tlc_tbl[idx] = tlc_tbl[idx+1] = lpflag;
+            qlc_tbl[idx] = qlc_tbl[idx+1] = lpflag;
             lpflag = (lpflag == QLC_UPPER_PAGE) ? QLC_LOWER_PAGE : lpflag + 1;
         }
     }
