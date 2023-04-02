@@ -1,6 +1,10 @@
 #ifndef __FEMU_ZNS_H
 #define __FEMU_ZNS_H
 
+#define BLK_BITS    (32)
+#define FC_BITS     (4)
+#define CH_BITS     (2)
+
 #include "../nvme.h"
 
 typedef struct QEMU_PACKED NvmeZonedResult {
@@ -11,6 +15,33 @@ typedef struct NvmeIdCtrlZoned {
     uint8_t     zasl;
     uint8_t     rsvd1[4095];
 } NvmeIdCtrlZoned;
+
+struct ppa {
+    union {
+        struct {
+	    uint64_t blk : BLK_BITS;
+	    uint64_t fc  : FC_BITS;
+	    uint64_t ch  : CH_BITS;
+	    uint64_t rsv : 1;
+        } g;
+
+	uint64_t ppa;
+    };
+};
+
+struct zns_blk {
+    uint64_t next_blk_avail_time;
+};
+
+struct zns_fc {
+    struct zns_blk *blk;
+    uint64_t next_fc_avail_time;
+};
+
+struct zns_ch {
+    struct zns_fc *fc;
+    uint64_t next_ch_avail_time;
+};
 
 enum NvmeZoneAttr {
     NVME_ZA_FINISHED_BY_CTLR         = 1 << 0,
@@ -115,6 +146,8 @@ typedef struct NvmeNamespaceParams {
     uint32_t max_active_zones;
     uint32_t max_open_zones;
     uint32_t zd_extension_size;
+
+    struct zns_ch *ch;
 } NvmeNamespaceParams;
 
 static inline uint32_t zns_nsid(NvmeNamespace *ns)

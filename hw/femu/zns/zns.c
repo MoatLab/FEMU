@@ -1046,6 +1046,81 @@ static uint16_t zns_map_dptr(FemuCtrl *n, size_t len, NvmeRequest *req)
     }
 }
 
+// Add some function
+// --------------------------------
+static inline struct zns_ch *get_ch(FemuCtrl *n, struct ppa *ppa)
+{
+    return &(n->ch[ppa->g.ch]);
+}
+
+static inline struct zns_fc *get_fc(FemuCtrl *n, struct ppa *ppa)
+{
+    struct zns_ch *ch = get_ch(n, ppa);
+    return &(ch->fc[ppa->g.fc]);
+}
+
+static inline struct zns_blk *get_blk(FemuCtrl *n, struct ppa *ppa)
+{
+    struct zns_fc *fc = get_fc(n, ppa);
+    return &(fc->blk[ppa->g.blk]);
+}
+
+static inline struct ppa lpn_to_ppa(NvmeNamespace *ns, uint64_t lpn)
+{
+
+	NvmeZone *zone = zns_get_zone_by_slba(ns, lpn);
+    uint64_t zone_idx = lpn / zone->d.zcap;
+
+	uint64_t channel = lpn % 2;
+    uint64_t chip = (lpn / 2) % 4;
+	struct ppa ppa = {0};
+
+	ppa.g.ch = channel;
+    ppa.g.fc = chip;
+	ppa.g.blk = zone_idx;
+
+    return ppa;
+}
+
+static uint64_t zns_advance_status(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req,
+		struct ppa *ppa)
+{
+    NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
+    uint8_t opcode = rw->opcode;
+    //uint64_t mod_slba = slba % 7;
+
+    uint64_t nand_stime;
+    uint64_t req_stime = (req->stime == 0) ? \
+        qemu_clock_get_ns(QEMU_CLOCK_REALTIME) : req->stime;
+
+    struct zns_fc *fc = get_fc(n, ppa);
+
+    uint64_t lat = 0;
+
+    switch (opcode) {
+    case NVME_CMD_READ:
+        nand_stime = (fc->next_fc_avail_time < req_stime) ? req_stime : \
+                    fc->next_fc_avail_time;
+
+	    fc->next_fc_avail_time = nand_stime + 40000;
+        lat = fc->next_fc_avail_time - req_stime;
+
+	    break;
+    case NVME_CMD_WRITE:
+	    nand_stime = (fc->next_fc_avail_time < req_stime) ? req_stime : \
+		            fc->next_fc_avail_time;
+	    fc->next_fc_avail_time = nand_stime + 40000;
+	    lat = fc->next_fc_avail_time - req_stime;
+
+	    break;
+    default:
+	//lat = 0;
+	;
+    }
+    return lat;
+}
+//----------------------------------
+
 static uint16_t zns_do_write(FemuCtrl *n, NvmeRequest *req, bool append,
                              bool wrz)
 {
@@ -1172,6 +1247,35 @@ static uint16_t zns_read(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     data_offset = zns_l2b(ns, slba);
 
     backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
+    
+    uint64_t slpn = (rw->slba) / 8; //LBA / SECTOR PER PAGE
+    uint64_t elpn = (rw->slba + rw->nlb - 1) / 8;
+    //printf("SLPN NUMBER: %"PRIu64"\n", slpn);
+    //printf("ELPN NUMBER: %"PRIu64"\n", elpn);
+    uint64_t lpn;
+    struct ppa ppa;
+    uint64_t sublat,maxlat=0;
+
+    for (lpn = slpn; lpn <= elpn; lpn++) {
+        ppa = lpn_to_ppa(ns, lpn);
+        //printf("CHANNEL NUMBER: %d\n", ppa.g.ch);
+        //printf("CHIP NUMBER: %d\n", ppa.g.fc);
+        //printf("BLOCK NUMBER: %d\n", ppa.g.blk);
+
+	//printf("LPN NUMBER: %"PRIu64"\n", lpn);
+        //printf("\n\n");
+	sublat = zns_advance_status(n, cmd, req, &ppa);
+        maxlat = (sublat > maxlat) ? sublat : maxlat;
+    }
+    //printf("MAX LATENCY: %"PRIu64"\n", maxlat);
+    //FILE *f;
+    //f = fopen("latency.log", "a+"); // a+ (create + append)
+    //fprintf(f, "%"PRIu64"\n", maxlat);
+
+    //fclose(f);
+    req->reqlat = maxlat;
+    req->expire_time += maxlat;
+    
     return NVME_SUCCESS;
 
 err:
@@ -1271,6 +1375,32 @@ static void zns_set_ctrl(FemuCtrl *n)
     pci_config_set_device_id(pci_conf, 0x5845);
 }
 
+// Add zns init ch, zns init flash and zns init block
+// ----------------------------
+static void zns_init_blk(struct zns_blk *blk)
+{
+    blk->next_blk_avail_time = 0;
+}
+
+static void zns_init_fc(struct zns_fc *fc)
+{
+    fc->blk = g_malloc0(sizeof(struct zns_blk) * 32);
+    for (int i = 0; i < 32; i++) {
+        zns_init_blk(&fc->blk[i]);
+    }
+    fc->next_fc_avail_time = 0;
+}
+
+static void zns_init_ch(struct zns_ch *ch)
+{
+    ch->fc = g_malloc0(sizeof(struct zns_fc) * 4);
+    for (int i = 0; i < 4; i++) {
+        zns_init_fc(&ch->fc[i]);
+    }
+    ch->next_ch_avail_time = 0;
+}
+// ---------------------------------------
+
 static int zns_init_zone_cap(FemuCtrl *n)
 {
     n->zoned = true;
@@ -1281,7 +1411,13 @@ static int zns_init_zone_cap(FemuCtrl *n)
     n->max_active_zones = 0;
     n->max_open_zones = 0;
     n->zd_extension_size = 0;
-
+    
+    // Add for channel
+    // --------------------------------------
+    n->ch = g_malloc0(sizeof(struct zns_ch) * 2);
+    for (int i =0; i < 2; i++) {
+        zns_init_ch(&n->ch[i]);
+    }
     return 0;
 }
 

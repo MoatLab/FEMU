@@ -1202,6 +1202,7 @@ typedef struct FemuCtrl {
     int32_t         nr_open_zones;
     int32_t         nr_active_zones;
 
+    struct zns_ch *ch;
     /* Coperd: OC2.0 FIXME */
     NvmeParams  params;
     FemuExtCtrlOps ext_ops;
