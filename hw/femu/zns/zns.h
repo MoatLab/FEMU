@@ -2,8 +2,8 @@
 #define __FEMU_ZNS_H
 
 #define BLK_BITS    (32)
-#define FC_BITS     (4)
-#define CH_BITS     (2)
+#define FC_BITS     (8)
+#define CH_BITS     (8)
 
 #include "../nvme.h"
 
@@ -29,6 +29,11 @@ struct ppa {
     };
 };
 
+struct write_pointer {
+    uint64_t ch;
+    uint64_t lun;
+};
+
 struct zns_blk {
     uint64_t next_blk_avail_time;
 };
@@ -41,6 +46,13 @@ struct zns_fc {
 struct zns_ch {
     struct zns_fc *fc;
     uint64_t next_ch_avail_time;
+};
+
+struct zns_ssd {
+    uint64_t num_ch;
+    uint64_t num_lun;
+    struct zns_ch *ch;
+    struct write_pointer wp;
 };
 
 enum NvmeZoneAttr {
@@ -147,7 +159,7 @@ typedef struct NvmeNamespaceParams {
     uint32_t max_open_zones;
     uint32_t zd_extension_size;
 
-    struct zns_ch *ch;
+    struct zns_ssd *zns;
 } NvmeNamespaceParams;
 
 static inline uint32_t zns_nsid(NvmeNamespace *ns)

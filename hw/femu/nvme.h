@@ -1145,6 +1145,11 @@ typedef struct NvmeParams {
 #define FEMU_MAX_NUM_CHNLS (32)
 #define FEMU_MAX_NUM_CHIPS (128)
 
+typedef struct ZNSCtrlParams {
+    uint8_t  zns_num_ch;
+    uint8_t  zns_num_lun;
+} ZNSCtrlParams;
+
 typedef struct OcCtrlParams {
     uint16_t sec_size;
     uint8_t  secs_per_pg;
@@ -1202,7 +1207,9 @@ typedef struct FemuCtrl {
     int32_t         nr_open_zones;
     int32_t         nr_active_zones;
 
-    struct zns_ch *ch;
+    struct zns_ssd *zns;
+    ZNSCtrlParams zns_params;
+
     /* Coperd: OC2.0 FIXME */
     NvmeParams  params;
     FemuExtCtrlOps ext_ops;

@@ -1048,35 +1048,69 @@ static uint16_t zns_map_dptr(FemuCtrl *n, size_t len, NvmeRequest *req)
 
 // Add some function
 // --------------------------------
-static inline struct zns_ch *get_ch(FemuCtrl *n, struct ppa *ppa)
+static inline struct zns_ch *get_ch(struct zns_ssd *zns, struct ppa *ppa)
 {
-    return &(n->ch[ppa->g.ch]);
+    return &(zns->ch[ppa->g.ch]);
 }
 
-static inline struct zns_fc *get_fc(FemuCtrl *n, struct ppa *ppa)
+static inline struct zns_fc *get_fc(struct zns_ssd *zns, struct ppa *ppa)
 {
-    struct zns_ch *ch = get_ch(n, ppa);
+    struct zns_ch *ch = get_ch(zns, ppa);
     return &(ch->fc[ppa->g.fc]);
 }
 
-static inline struct zns_blk *get_blk(FemuCtrl *n, struct ppa *ppa)
+static inline struct zns_blk *get_blk(struct zns_ssd *zns, struct ppa *ppa)
 {
-    struct zns_fc *fc = get_fc(n, ppa);
+    struct zns_fc *fc = get_fc(zns, ppa);
     return &(fc->blk[ppa->g.blk]);
 }
 
-static inline struct ppa lpn_to_ppa(NvmeNamespace *ns, uint64_t lpn)
+static inline uint64_t zone_slba(FemuCtrl *n, uint32_t zone_idx)
+{
+    return (zone_idx) * n->zone_size;
+}
+
+static inline void check_addr(int a, int max)
+{
+   assert(a >= 0 && a < max);
+}
+
+static void advance_read_pointer(FemuCtrl *n)
+{
+    struct zns_ssd *zns = n->zns;
+    struct write_pointer *wpp = &zns->wp;
+    uint8_t num_ch = zns->num_ch;
+    uint8_t num_lun = zns->num_lun;
+
+    //printf("NUM CH: %"PRIu64"\n", wpp->ch);
+    check_addr(wpp->ch, num_ch);
+    wpp->ch++;
+    if (wpp->ch == num_ch) {
+        wpp->ch = 0;
+	check_addr(wpp->lun, num_lun);
+	wpp->lun++;
+	if(wpp->lun == num_lun) {
+	    wpp->lun = 0;
+
+	    assert(wpp->ch == 0);
+	    assert(wpp->lun == 0);
+	}
+    }
+}
+
+static inline struct ppa lpn_to_ppa(FemuCtrl *n, NvmeNamespace *ns, uint64_t lpn)
 {
 
-	NvmeZone *zone = zns_get_zone_by_slba(ns, lpn);
-    uint64_t zone_idx = lpn / zone->d.zcap;
-
-	uint64_t channel = lpn % 2;
-    uint64_t chip = (lpn / 2) % 4;
+	uint32_t zone_idx = zns_zone_idx(ns, lpn);
+	//uint64_t off = lpn - zone_slba(n, zone_idx);
+	 
+	struct zns_ssd *zns = n->zns;
+	struct write_pointer *wpp = &zns->wp;
 	struct ppa ppa = {0};
 
-	ppa.g.ch = channel;
-    ppa.g.fc = chip;
+	//printf("NUM CH: %"PRIu64"\n", wpp->ch);
+	ppa.g.ch = wpp->ch;
+	ppa.g.fc = wpp->lun;
 	ppa.g.blk = zone_idx;
 
     return ppa;
@@ -1087,13 +1121,13 @@ static uint64_t zns_advance_status(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req,
 {
     NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
     uint8_t opcode = rw->opcode;
-    //uint64_t mod_slba = slba % 7;
 
+    struct zns_ssd *zns = n->zns;
     uint64_t nand_stime;
     uint64_t req_stime = (req->stime == 0) ? \
         qemu_clock_get_ns(QEMU_CLOCK_REALTIME) : req->stime;
 
-    struct zns_fc *fc = get_fc(n, ppa);
+    struct zns_fc *fc = get_fc(zns, ppa);
 
     uint64_t lat = 0;
 
@@ -1250,20 +1284,22 @@ static uint16_t zns_read(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     
     uint64_t slpn = (rw->slba) / 8; //LBA / SECTOR PER PAGE
     uint64_t elpn = (rw->slba + rw->nlb - 1) / 8;
-    //printf("SLPN NUMBER: %"PRIu64"\n", slpn);
-    //printf("ELPN NUMBER: %"PRIu64"\n", elpn);
+    
     uint64_t lpn;
     struct ppa ppa;
     uint64_t sublat,maxlat=0;
 
     for (lpn = slpn; lpn <= elpn; lpn++) {
-        ppa = lpn_to_ppa(ns, lpn);
-        //printf("CHANNEL NUMBER: %d\n", ppa.g.ch);
-        //printf("CHIP NUMBER: %d\n", ppa.g.fc);
-        //printf("BLOCK NUMBER: %d\n", ppa.g.blk);
+        ppa = lpn_to_ppa(n, ns, lpn);
+	advance_read_pointer(n);
+	
+	/*
+        printf("CHANNEL NUMBER: %d\n", ppa.g.ch);
+        printf("CHIP NUMBER: %d\n", ppa.g.fc);
+        printf("BLOCK NUMBER: %d\n", ppa.g.blk);
+        printf("\n\n");
+	*/
 
-	//printf("LPN NUMBER: %"PRIu64"\n", lpn);
-        //printf("\n\n");
 	sublat = zns_advance_status(n, cmd, req, &ppa);
         maxlat = (sublat > maxlat) ? sublat : maxlat;
     }
@@ -1391,15 +1427,34 @@ static void zns_init_fc(struct zns_fc *fc)
     fc->next_fc_avail_time = 0;
 }
 
-static void zns_init_ch(struct zns_ch *ch)
+static void zns_init_ch(struct zns_ch *ch, uint8_t num_lun)
 {
-    ch->fc = g_malloc0(sizeof(struct zns_fc) * 4);
-    for (int i = 0; i < 4; i++) {
+    ch->fc = g_malloc0(sizeof(struct zns_fc) * num_lun);
+    for (int i = 0; i < num_lun; i++) {
         zns_init_fc(&ch->fc[i]);
     }
     ch->next_ch_avail_time = 0;
 }
+
+static void zns_init_params(FemuCtrl *n)
+{
+    struct zns_ssd *id_zns;
+    
+    id_zns = g_malloc0(sizeof(struct zns_ssd));
+    id_zns->num_ch = n->zns_params.zns_num_ch;
+    id_zns->num_lun = n->zns_params.zns_num_lun;
+    id_zns->ch = g_malloc0(sizeof(struct zns_ch) * id_zns->num_ch);
+    for (int i =0; i < id_zns->num_ch; i++) {
+        zns_init_ch(&id_zns->ch[i], id_zns->num_lun);
+    }
+    
+    id_zns->wp.ch = 0;
+    id_zns->wp.lun = 0;
+    n->zns = id_zns;
+}
+
 // ---------------------------------------
+
 
 static int zns_init_zone_cap(FemuCtrl *n)
 {
@@ -1412,12 +1467,6 @@ static int zns_init_zone_cap(FemuCtrl *n)
     n->max_open_zones = 0;
     n->zd_extension_size = 0;
     
-    // Add for channel
-    // --------------------------------------
-    n->ch = g_malloc0(sizeof(struct zns_ch) * 2);
-    for (int i =0; i < 2; i++) {
-        zns_init_ch(&n->ch[i]);
-    }
     return 0;
 }
 
@@ -1452,6 +1501,8 @@ static void zns_init(FemuCtrl *n, Error **errp)
     }
 
     zns_init_zone_identify(n, ns, 0);
+    
+    zns_init_params(n);
 }
 
 static void zns_exit(FemuCtrl *n)
