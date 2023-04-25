@@ -10,7 +10,7 @@ the following snippet to ``.gitlab-ci.yml``
 
    go-fmt:
      stage: prebuild
-     image: registry.gitlab.com/libvirt/libvirt-ci/go-fmt:master
+     image: registry.gitlab.com/libvirt/libvirt-ci/go-fmt:latest
      script:
        - /go-fmt
      artifacts:

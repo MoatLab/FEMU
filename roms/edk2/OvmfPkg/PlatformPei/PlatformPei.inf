@@ -25,14 +25,13 @@
 [Sources]
   AmdSev.c
   ClearCache.c
-  Cmos.c
-  Cmos.h
   FeatureControl.c
   Fv.c
   MemDetect.c
   MemTypeInfo.c
   Platform.c
   Platform.h
+  IntelTdx.c
 
 [Packages]
   EmbeddedPkg/EmbeddedPkg.dec
@@ -45,6 +44,7 @@
 [Guids]
   gEfiMemoryTypeInformationGuid
   gFdtHobGuid
+  gUefiOvmfPkgPlatformInfoGuid
 
 [LibraryClasses]
   BaseLib
@@ -63,7 +63,8 @@
   MtrrLib
   MemEncryptSevLib
   PcdLib
-  VmgExitLib
+  CcExitLib
+  PlatformInitLib
 
 [Pcd]
   gUefiOvmfPkgTokenSpaceGuid.PcdOvmfPeiMemFvBase
@@ -91,7 +92,10 @@
   gUefiOvmfPkgTokenSpaceGuid.PcdOvmfDecompressionScratchEnd
   gUefiOvmfPkgTokenSpaceGuid.PcdQ35TsegMbytes
   gUefiOvmfPkgTokenSpaceGuid.PcdQ35SmramAtDefaultSmbase
+  gUefiOvmfPkgTokenSpaceGuid.PcdXenPvhStartOfDayStructPtr
+  gUefiOvmfPkgTokenSpaceGuid.PcdXenPvhStartOfDayStructPtrSize
   gEfiMdePkgTokenSpaceGuid.PcdGuidedExtractHandlerTableAddress
+  gEfiMdePkgTokenSpaceGuid.PcdPciExpressBaseAddress
   gEfiMdeModulePkgTokenSpaceGuid.PcdFlashNvStorageFtwSpareSize
   gEfiMdeModulePkgTokenSpaceGuid.PcdFlashNvStorageVariableSize
   gEfiMdeModulePkgTokenSpaceGuid.PcdEmuVariableNvStoreReserved
@@ -110,11 +114,11 @@
   gUefiCpuPkgTokenSpaceGuid.PcdSevEsIsEnabled
   gEfiMdePkgTokenSpaceGuid.PcdConfidentialComputingGuestAttr
   gUefiCpuPkgTokenSpaceGuid.PcdGhcbHypervisorFeatures
+  gEfiMdeModulePkgTokenSpaceGuid.PcdTdxSharedBitMask
 
 [FixedPcd]
   gUefiOvmfPkgTokenSpaceGuid.PcdOvmfCpuidBase
   gUefiOvmfPkgTokenSpaceGuid.PcdOvmfCpuidSize
-  gEfiMdePkgTokenSpaceGuid.PcdPciExpressBaseAddress
   gEmbeddedTokenSpaceGuid.PcdMemoryTypeEfiACPIMemoryNVS
   gEmbeddedTokenSpaceGuid.PcdMemoryTypeEfiACPIReclaimMemory
   gEmbeddedTokenSpaceGuid.PcdMemoryTypeEfiReservedMemoryType

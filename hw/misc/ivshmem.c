@@ -179,7 +179,7 @@ static void ivshmem_io_write(void *opaque, hwaddr addr,
 
     addr &= 0xfc;
 
-    IVSHMEM_DPRINTF("writing to addr " TARGET_FMT_plx "\n", addr);
+    IVSHMEM_DPRINTF("writing to addr " HWADDR_FMT_plx "\n", addr);
     switch (addr)
     {
         case INTRMASK:
@@ -207,7 +207,7 @@ static void ivshmem_io_write(void *opaque, hwaddr addr,
             }
             break;
         default:
-            IVSHMEM_DPRINTF("Unhandled write " TARGET_FMT_plx "\n", addr);
+            IVSHMEM_DPRINTF("Unhandled write " HWADDR_FMT_plx "\n", addr);
     }
 }
 
@@ -233,7 +233,7 @@ static uint64_t ivshmem_io_read(void *opaque, hwaddr addr,
             break;
 
         default:
-            IVSHMEM_DPRINTF("why are we reading " TARGET_FMT_plx "\n", addr);
+            IVSHMEM_DPRINTF("why are we reading " HWADDR_FMT_plx "\n", addr);
             ret = 0;
     }
 
@@ -537,7 +537,7 @@ static void process_msg_connect(IVShmemState *s, uint16_t posn, int fd,
 
     IVSHMEM_DPRINTF("eventfds[%d][%d] = %d\n", posn, vector, fd);
     event_notifier_init_fd(&peer->eventfds[vector], fd);
-    fcntl_setfl(fd, O_NONBLOCK); /* msix/irqfd poll non block */
+    g_unix_set_fd_nonblocking(fd, true, NULL); /* msix/irqfd poll non block */
 
     if (posn == s->vm_id) {
         setup_interrupt(s, vector, errp);

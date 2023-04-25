@@ -45,11 +45,11 @@ if T.TYPE_CHECKING:
     from ..environment import Environment
     from ..linkers import DynamicLinker
     from ..programs import ExternalProgram
+    from .compilers import CompileCheckMode
 
     CompilerMixinBase = Compiler
 else:
     CompilerMixinBase = object
-
 
 
 class CCompiler(CLikeCompiler, Compiler):
@@ -81,7 +81,7 @@ class CCompiler(CLikeCompiler, Compiler):
 
     def has_header_symbol(self, hname: str, symbol: str, prefix: str,
                           env: 'Environment', *,
-                          extra_args: T.Optional[T.List[str]] = None,
+                          extra_args: T.Union[None, T.List[str], T.Callable[['CompileCheckMode'], T.List[str]]] = None,
                           dependencies: T.Optional[T.List['Dependency']] = None) -> T.Tuple[bool, bool]:
         fargs = {'prefix': prefix, 'header': hname, 'symbol': symbol}
         t = '''{prefix}
@@ -245,6 +245,7 @@ class GnuCCompiler(GnuCompiler, CCompiler):
 
     _C18_VERSION = '>=8.0.0'
     _C2X_VERSION = '>=9.0.0'
+    _INVALID_PCH_VERSION = ">=3.4.0"
 
     def __init__(self, exelist: T.List[str], version: str, for_machine: MachineChoice, is_cross: bool,
                  info: 'MachineInfo', exe_wrapper: T.Optional['ExternalProgram'] = None,
@@ -253,7 +254,9 @@ class GnuCCompiler(GnuCompiler, CCompiler):
                  full_version: T.Optional[str] = None):
         CCompiler.__init__(self, exelist, version, for_machine, is_cross, info, exe_wrapper, linker=linker, full_version=full_version)
         GnuCompiler.__init__(self, defines)
-        default_warn_args = ['-Wall', '-Winvalid-pch']
+        default_warn_args = ['-Wall']
+        if version_compare(self.version, self._INVALID_PCH_VERSION):
+            default_warn_args += ['-Winvalid-pch']
         self.warn_args = {'0': [],
                           '1': default_warn_args,
                           '2': default_warn_args + ['-Wextra'],
@@ -322,25 +325,29 @@ class NvidiaHPC_CCompiler(PGICompiler, CCompiler):
         self.id = 'nvidia_hpc'
 
 
-class ElbrusCCompiler(GnuCCompiler, ElbrusCompiler):
+class ElbrusCCompiler(ElbrusCompiler, CCompiler):
     def __init__(self, exelist: T.List[str], version: str, for_machine: MachineChoice, is_cross: bool,
                  info: 'MachineInfo', exe_wrapper: T.Optional['ExternalProgram'] = None,
                  linker: T.Optional['DynamicLinker'] = None,
                  defines: T.Optional[T.Dict[str, str]] = None,
                  full_version: T.Optional[str] = None):
-        GnuCCompiler.__init__(self, exelist, version, for_machine, is_cross,
-                              info, exe_wrapper, defines=defines,
-                              linker=linker, full_version=full_version)
+        CCompiler.__init__(self, exelist, version, for_machine, is_cross,
+                           info, exe_wrapper, linker=linker, full_version=full_version)
         ElbrusCompiler.__init__(self)
 
-    # It does support some various ISO standards and c/gnu 90, 9x, 1x in addition to those which GNU CC supports.
     def get_options(self) -> 'KeyedOptionDictType':
         opts = CCompiler.get_options(self)
-        opts[OptionKey('std', machine=self.for_machine, lang=self.language)].choices = [
-            'none', 'c89', 'c90', 'c9x', 'c99', 'c1x', 'c11',
-            'gnu89', 'gnu90', 'gnu9x', 'gnu99', 'gnu1x', 'gnu11',
-            'iso9899:2011', 'iso9899:1990', 'iso9899:199409', 'iso9899:1999',
-        ]
+        stds = ['c89', 'c9x', 'c99', 'gnu89', 'gnu9x', 'gnu99']
+        stds += ['iso9899:1990', 'iso9899:199409', 'iso9899:1999']
+        if version_compare(self.version, '>=1.20.00'):
+            stds += ['c11', 'gnu11']
+        if version_compare(self.version, '>=1.21.00') and version_compare(self.version, '<1.22.00'):
+            stds += ['c90', 'c1x', 'gnu90', 'gnu1x', 'iso9899:2011']
+        if version_compare(self.version, '>=1.23.00'):
+            stds += ['c90', 'c1x', 'gnu90', 'gnu1x', 'iso9899:2011']
+        if version_compare(self.version, '>=1.26.00'):
+            stds += ['c17', 'c18', 'iso9899:2017', 'iso9899:2018', 'gnu17', 'gnu18']
+        opts[OptionKey('std', machine=self.for_machine, lang=self.language)].choices = ['none'] + stds
         return opts
 
     # Elbrus C compiler does not have lchmod, but there is only linker warning, not compiler error.
@@ -430,9 +437,9 @@ class VisualStudioCCompiler(MSVCCompiler, VisualStudioLikeCCompilerMixin, CCompi
     def get_options(self) -> 'KeyedOptionDictType':
         opts = super().get_options()
         c_stds = ['c89', 'c99']
-                  # Need to have these to be compatible with projects
-                  # that set c_std to e.g. gnu99.
-                  # https://github.com/mesonbuild/meson/issues/7611
+        # Need to have these to be compatible with projects
+        # that set c_std to e.g. gnu99.
+        # https://github.com/mesonbuild/meson/issues/7611
         g_stds = ['gnu89', 'gnu90', 'gnu9x', 'gnu99']
         if version_compare(self.version, self._C11_VERSION):
             c_stds += ['c11']

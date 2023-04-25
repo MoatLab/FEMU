@@ -12,10 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+import os
 import pathlib
 import pickle
 import re
-import os
 import sys
 import typing as T
 
@@ -72,7 +73,7 @@ class DependencyScanner:
                         self.needs[fname] = [needed]
             if export_match:
                 exported_module = export_match.group(1).lower()
-                assert(exported_module not in modules_in_this_file)
+                assert exported_module not in modules_in_this_file
                 modules_in_this_file.add(exported_module)
                 if exported_module in self.provided_by:
                     raise RuntimeError(f'Multiple files provide module {exported_module}.')
@@ -105,7 +106,6 @@ class DependencyScanner:
                 else:
                     self.needs[fname] = [parent_module_name_full]
 
-
     def scan_cpp_file(self, fname: str) -> None:
         fpath = pathlib.Path(fname)
         for line in fpath.read_text(encoding='utf-8').split('\n'):
@@ -127,7 +127,7 @@ class DependencyScanner:
 
     def objname_for(self, src: str) -> str:
         objname = self.target_data.source2object[src]
-        assert(isinstance(objname, str))
+        assert isinstance(objname, str)
         return objname
 
     def module_name_for(self, src: str) -> str:
@@ -184,7 +184,7 @@ class DependencyScanner:
                 else:
                     mod_gen = ''
                 if quoted_module_files_needed:
-                    mod_dep = '| '  + ' '.join(quoted_module_files_needed)
+                    mod_dep = '| ' + ' '.join(quoted_module_files_needed)
                 else:
                     mod_dep = ''
                 build_line = 'build {} {}: dyndep {}'.format(quoted_objfilename,
@@ -194,8 +194,9 @@ class DependencyScanner:
         return 0
 
 def run(args: T.List[str]) -> int:
-    pickle_file = args[0]
-    outfile = args[1]
-    sources = args[2:]
+    assert len(args) == 3, 'got wrong number of arguments!'
+    pickle_file, outfile, jsonfile = args
+    with open(jsonfile, encoding='utf-8') as f:
+        sources = json.load(f)
     scanner = DependencyScanner(pickle_file, outfile, sources)
     return scanner.scan()

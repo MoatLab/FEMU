@@ -25,6 +25,7 @@ from ...mesonlib import Popen_safe, OptionKey
 
 if T.TYPE_CHECKING:
     from ...environment import Environment
+    from ...coredata import KeyedOptionDictType
 
 
 class ElbrusCompiler(GnuLikeCompiler):
@@ -35,6 +36,11 @@ class ElbrusCompiler(GnuLikeCompiler):
         super().__init__()
         self.id = 'lcc'
         self.base_options = {OptionKey(o) for o in ['b_pgo', 'b_coverage', 'b_ndebug', 'b_staticpic', 'b_lundef', 'b_asneeded']}
+        default_warn_args = ['-Wall']
+        self.warn_args = {'0': [],
+                          '1': default_warn_args,
+                          '2': default_warn_args + ['-Wextra'],
+                          '3': default_warn_args + ['-Wextra', '-Wpedantic']}
 
     # FIXME: use _build_wrapper to call this so that linker flags from the env
     # get applied
@@ -74,9 +80,19 @@ class ElbrusCompiler(GnuLikeCompiler):
     def get_optimization_args(self, optimization_level: str) -> T.List[str]:
         return gnu_optimization_args[optimization_level]
 
+    def get_prelink_args(self, prelink_name: str, obj_list: T.List[str]) -> T.List[str]:
+        return ['-r', '-nodefaultlibs', '-nostartfiles', '-o', prelink_name] + obj_list
+
     def get_pch_suffix(self) -> str:
         # Actually it's not supported for now, but probably will be supported in future
         return 'pch'
+
+    def get_option_compile_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
+        args = []
+        std = options[OptionKey('std', lang=self.language, machine=self.for_machine)]
+        if std.value != 'none':
+            args.append('-std=' + std.value)
+        return args
 
     def openmp_flags(self) -> T.List[str]:
         return ['-fopenmp']

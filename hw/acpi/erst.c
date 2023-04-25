@@ -14,7 +14,7 @@
 #include "hw/qdev-core.h"
 #include "exec/memory.h"
 #include "qom/object.h"
-#include "hw/pci/pci.h"
+#include "hw/pci/pci_device.h"
 #include "qom/object_interfaces.h"
 #include "qemu/error-report.h"
 #include "migration/vmstate.h"
@@ -440,6 +440,7 @@ static void check_erst_backend_storage(ERSTDeviceState *s, Error **errp)
         (record_size >= 4096) /* PAGE_SIZE */
         )) {
         error_setg(errp, "ERST record_size %u is invalid", record_size);
+        return;
     }
 
     /* Validity check header */
@@ -450,6 +451,7 @@ static void check_erst_backend_storage(ERSTDeviceState *s, Error **errp)
         (le16_to_cpu(header->reserved) == 0)
         )) {
         error_setg(errp, "ERST backend storage header is invalid");
+        return;
     }
 
     /* Check storage_size against record_size */
@@ -457,6 +459,7 @@ static void check_erst_backend_storage(ERSTDeviceState *s, Error **errp)
          (record_size > s->storage_size)) {
         error_setg(errp, "ACPI ERST requires storage size be multiple of "
             "record size (%uKiB)", record_size);
+        return;
     }
 
     /* Compute offset of first and last record storage slot */
@@ -632,7 +635,7 @@ static unsigned read_erst_record(ERSTDeviceState *s)
         if (record_length < UEFI_CPER_RECORD_MIN_SIZE) {
             rc = STATUS_FAILED;
         }
-        if ((s->record_offset + record_length) > exchange_length) {
+        if (record_length > exchange_length - s->record_offset) {
             rc = STATUS_FAILED;
         }
         /* If all is ok, copy the record to the exchange buffer */
@@ -681,7 +684,7 @@ static unsigned write_erst_record(ERSTDeviceState *s)
     if (record_length < UEFI_CPER_RECORD_MIN_SIZE) {
         return STATUS_FAILED;
     }
-    if ((s->record_offset + record_length) > exchange_length) {
+    if (record_length > exchange_length - s->record_offset) {
         return STATUS_FAILED;
     }
 
@@ -713,7 +716,7 @@ static unsigned write_erst_record(ERSTDeviceState *s)
     if (nvram) {
         /* Write the record into the slot */
         memcpy(nvram, exchange, record_length);
-        memset(nvram + record_length, exchange_length - record_length, 0xFF);
+        memset(nvram + record_length, 0xFF, exchange_length - record_length);
         /* If a new record, increment the record_count */
         if (!record_found) {
             uint32_t record_count;

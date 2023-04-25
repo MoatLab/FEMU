@@ -1,0 +1,17 @@
+---
+packages:
+  - ccache
+  - cppi
+  - gcc
+  - gettext
+  - glib-mkenums
+  - glib2
+  - gobject-introspection
+  - gtk-doc
+  - libxml2
+  - make
+  - meson
+  - ninja
+  - pkg-config
+  - rpmbuild
+  - vala

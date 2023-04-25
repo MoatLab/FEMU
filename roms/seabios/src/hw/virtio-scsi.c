@@ -239,6 +239,19 @@ init_virtio_scsi_mmio(void *mmio)
     vp_init_mmio(vp, mmio);
     u8 status = VIRTIO_CONFIG_S_ACKNOWLEDGE | VIRTIO_CONFIG_S_DRIVER;
 
+    u64 features = vp_get_features(vp);
+    u64 version1 = 1ull << VIRTIO_F_VERSION_1;
+    if (features & version1) {
+        u64 iommu_platform = 1ull << VIRTIO_F_IOMMU_PLATFORM;
+
+        vp_set_features(vp, features & (version1 | iommu_platform));
+        vp_set_status(vp, VIRTIO_CONFIG_S_FEATURES_OK);
+        if (!(vp_get_status(vp) & VIRTIO_CONFIG_S_FEATURES_OK)) {
+            dprintf(1, "device didn't accept features: %pP\n", mmio);
+            goto fail;
+        }
+    }
+
     if (vp_find_vq(vp, 2, &vq) < 0 ) {
         dprintf(1, "fail to find vq for virtio-scsi-mmio %p\n", mmio);
         goto fail;

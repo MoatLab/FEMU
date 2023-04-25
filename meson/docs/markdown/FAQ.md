@@ -103,7 +103,7 @@ Then you need to run this script in your Meson file, convert the
 output into a string array and use the result in a target.
 
 ```meson
-c = run_command('grabber.sh')
+c = run_command('grabber.sh', check: true)
 sources = c.stdout().strip().split('\n')
 e = executable('prog', sources)
 ```
@@ -181,7 +181,7 @@ problem that has caused complications for GNU Autotools and SCons.
 Either by using [GCC symbol
 visibility](https://gcc.gnu.org/wiki/Visibility) or by writing a
 [linker
-script](https://ftp.gnu.org/old-gnu/Manuals/ld-2.9.1/html_mono/ld.html). This
+script](https://sourceware.org/binutils/docs/ld.html). This
 has the added benefit that your symbol definitions are in a standalone
 file instead of being buried inside your build definitions. An example
 can be found
@@ -332,6 +332,16 @@ that could fulfill these requirements:
 
 Out of these we have chosen Python because it is the best fit for our
 needs.
+
+## But I really want a version of Meson that doesn't use python!
+
+Ecosystem diversity is good. We encourage interested users to write this
+competing implementation of Meson themselves. As of September 2021, there are 3
+projects attempting to do just this:
+
+ - [muon](https://git.sr.ht/~lattis/muon)
+ - [Meson++](https://github.com/dcbaker/meson-plus-plus)
+ - [boson](https://git.sr.ht/~bl4ckb0ne/boson)
 
 ## I have proprietary compiler toolchain X that does not work with Meson, how can I make it work?
 
@@ -629,3 +639,47 @@ tested, generally don't regress, and users are more likely to have domain
 knowledge about them. They also tend to have better tooling (such as
 autocompletion, linting, testing solutions), which make them a lower
 maintenance burden over time.
+
+## Why don't the arguments passed to `add_project_link_arguments` affect anything?
+
+Given code like this:
+```meson
+add_project_link_arguments(['-Wl,-foo'], language : ['c'])
+executable(
+  'main',
+  'main.c',
+  'helper.cpp',
+)
+```
+
+One might be surprised to find that `-Wl,-foo` is *not* applied to the linkage
+of the `main` executable. In this Meson is working as expected, since meson will
+attempt to determine the correct linker to use automatically. This avoids
+situations like in autotools where dummy C++ sources have to be added to some
+compilation targets to get correct linkage. So in the above case the C++ linker
+is used, instead of the C linker, as `helper.cpp` likely cannot be linked using
+the C linker.
+
+Generally the best way to resolve this is to add the `cpp` language to the
+`add_project_link_arguments` call.
+```meson
+add_project_link_arguments(['-Wl,-foo'], language : ['c', 'cpp'])
+executable(
+  'main',
+  'main.c',
+  'helper.cpp',
+)
+```
+
+To force the use of the C linker anyway the `link_language` keyword argument can
+be used. Note that this can result in a compilation failure if there are symbols
+that the C linker cannot resolve.
+```meson
+add_project_link_arguments(['-Wl,-foo'], language : ['c'])
+executable(
+  'main',
+  'main.c',
+  'helper.cpp',
+  link_language : 'c',
+)
+```

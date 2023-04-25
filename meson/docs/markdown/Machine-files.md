@@ -250,7 +250,7 @@ list of strings.
 **Note:** All occurrences of `\` in the value of all keys will be replaced with
           a `/` since CMake has a lot of issues with correctly escaping `\` when
           dealing with variables (even in cases where a path in `CMAKE_C_COMPILER`
-          is correctly escaped, CMake will still trip up internaly for instance)
+          is correctly escaped, CMake will still trip up internally for instance)
 
           A custom toolchain file should be used (via the `cmake_toolchain_file`
           property) if `\` support is required.
@@ -296,6 +296,8 @@ build-tests = false
 ```
 
 ### Meson built-in options
+
+*Before 0.56.0, `<lang>_args` and `<lang>_link_args` must be put in the `properties` section instead, else they will be ignored.*
 
 Meson built-in options can be set the same way:
 
@@ -346,7 +348,7 @@ overriding, but to allow composing files. This composition is done by
 passing the command line argument multiple times:
 
 ```console
-meson setup builddir/ --cross-file first.ini --cross-file second.ini --cross-file thrid.ini
+meson setup builddir/ --cross-file first.ini --cross-file second.ini --cross-file third.ini
 ```
 
 In this case `first.ini` will be loaded, then `second.ini`, with

@@ -748,7 +748,8 @@ static void rescan_slot_devices(struct pci_slot *slot)
 	 * prepare_link_change() is called (if needed) by the state
 	 * machine during the slot reset or link polling
 	 */
-	if (phb->phb_type != phb_type_npu_v2_opencapi) {
+	if ((phb->phb_type != phb_type_npu_v2_opencapi) &&
+	    (phb->phb_type != phb_type_pau_opencapi)) {
 		pci_scan_bus(phb, pd->secondary_bus,
 			     pd->subordinate_bus, &pd->children, pd, true);
 		pci_add_device_nodes(phb, &pd->children, pd->dn,
@@ -766,7 +767,8 @@ static void remove_slot_devices(struct pci_slot *slot)
 	struct phb *phb = slot->phb;
 	struct pci_device *pd = slot->pd;
 
-	if (phb->phb_type != phb_type_npu_v2_opencapi)
+	if ((phb->phb_type != phb_type_npu_v2_opencapi) &&
+	    (phb->phb_type != phb_type_pau_opencapi))
 		pci_remove_bus(phb, &pd->children);
 	else
 		pci_remove_bus(phb, &phb->devices);
@@ -817,7 +819,8 @@ static bool training_needed(struct pci_slot *slot)
 	struct pci_device *pd = slot->pd;
 
 	/* only for opencapi slots for now */
-	if (!pd && phb->phb_type == phb_type_npu_v2_opencapi)
+	if (!pd && ((phb->phb_type == phb_type_npu_v2_opencapi) ||
+		    (phb->phb_type == phb_type_pau_opencapi)))
 		return true;
 	return false;
 }

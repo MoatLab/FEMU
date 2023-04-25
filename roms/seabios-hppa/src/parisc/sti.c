@@ -13,8 +13,7 @@
 #include "parisc/hppa_hardware.h"
 #include "output.h"
 #include "pdc.h"
-
-#define PAGE0 ((volatile struct zeropage *) 0UL)
+#include "hppa.h"
 
 static int sti_enabled;
 
@@ -85,7 +84,7 @@ static void sti_putchar(struct sti_rom *rom, int row, int column, const char c)
     sti_font_inptr.dest_x = column * font->width;
     sti_font_inptr.dest_y = row * font->height;
     sti_font_inptr.index = c;
-    sti_font_inptr.font_start_addr = (u32)rom + rom->font_start;
+    sti_font_inptr.font_start_addr = (u32) font;
 
     sti_unpmv(&sti_font_flags, &sti_font_inptr,
         &sti_font_outptr, &sti_glob_cfg);

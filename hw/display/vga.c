@@ -31,6 +31,7 @@
 #include "vga_int.h"
 #include "vga_regs.h"
 #include "ui/pixel_ops.h"
+#include "ui/console.h"
 #include "qemu/timer.h"
 #include "hw/xen/xen.h"
 #include "migration/vmstate.h"
@@ -94,19 +95,19 @@ const uint8_t gr_mask[16] = {
                 (((uint32_t)(__x) & (uint32_t)0x00ff0000UL) >>  8) | \
                 (((uint32_t)(__x) & (uint32_t)0xff000000UL) >> 24) ))
 
-#ifdef HOST_WORDS_BIGENDIAN
+#if HOST_BIG_ENDIAN
 #define PAT(x) cbswap_32(x)
 #else
 #define PAT(x) (x)
 #endif
 
-#ifdef HOST_WORDS_BIGENDIAN
+#if HOST_BIG_ENDIAN
 #define BIG 1
 #else
 #define BIG 0
 #endif
 
-#ifdef HOST_WORDS_BIGENDIAN
+#if HOST_BIG_ENDIAN
 #define GET_PLANE(data, p) (((data) >> (24 - (p) * 8)) & 0xff)
 #else
 #define GET_PLANE(data, p) (((data) >> ((p) * 8)) & 0xff)
@@ -133,7 +134,7 @@ static const uint32_t mask16[16] = {
 
 #undef PAT
 
-#ifdef HOST_WORDS_BIGENDIAN
+#if HOST_BIG_ENDIAN
 #define PAT(x) (x)
 #else
 #define PAT(x) cbswap_32(x)
@@ -874,7 +875,7 @@ void vga_mem_writeb(VGACommonState *s, hwaddr addr, uint32_t val)
     uint32_t write_mask, bit_mask, set_mask;
 
 #ifdef DEBUG_VGA_MEM
-    printf("vga: [0x" TARGET_FMT_plx "] = 0x%02x\n", addr, val);
+    printf("vga: [0x" HWADDR_FMT_plx "] = 0x%02x\n", addr, val);
 #endif
     /* convert to VGA memory offset */
     memory_map_mode = (s->gr[VGA_GFX_MISC] >> 2) & 3;
@@ -908,7 +909,7 @@ void vga_mem_writeb(VGACommonState *s, hwaddr addr, uint32_t val)
             assert(addr < s->vram_size);
             s->vram_ptr[addr] = val;
 #ifdef DEBUG_VGA_MEM
-            printf("vga: chain4: [0x" TARGET_FMT_plx "]\n", addr);
+            printf("vga: chain4: [0x" HWADDR_FMT_plx "]\n", addr);
 #endif
             s->plane_updated |= mask; /* only used to detect font change */
             memory_region_set_dirty(&s->vram, addr, 1);
@@ -924,7 +925,7 @@ void vga_mem_writeb(VGACommonState *s, hwaddr addr, uint32_t val)
             }
             s->vram_ptr[addr] = val;
 #ifdef DEBUG_VGA_MEM
-            printf("vga: odd/even: [0x" TARGET_FMT_plx "]\n", addr);
+            printf("vga: odd/even: [0x" HWADDR_FMT_plx "]\n", addr);
 #endif
             s->plane_updated |= mask; /* only used to detect font change */
             memory_region_set_dirty(&s->vram, addr, 1);
@@ -1002,7 +1003,7 @@ void vga_mem_writeb(VGACommonState *s, hwaddr addr, uint32_t val)
             (((uint32_t *)s->vram_ptr)[addr] & ~write_mask) |
             (val & write_mask);
 #ifdef DEBUG_VGA_MEM
-        printf("vga: latch: [0x" TARGET_FMT_plx "] mask=0x%08x val=0x%08x\n",
+        printf("vga: latch: [0x" HWADDR_FMT_plx "] mask=0x%08x val=0x%08x\n",
                addr * 4, write_mask, val);
 #endif
         memory_region_set_dirty(&s->vram, addr << 2, sizeof(uint32_t));
@@ -1296,7 +1297,7 @@ static void vga_draw_text(VGACommonState *s, int full_update)
                 if (cx > cx_max)
                     cx_max = cx;
                 *ch_attr_ptr = ch_attr;
-#ifdef HOST_WORDS_BIGENDIAN
+#if HOST_BIG_ENDIAN
                 ch = ch_attr >> 8;
                 cattr = ch_attr & 0xff;
 #else
@@ -1477,7 +1478,7 @@ static void vga_draw_graphic(VGACommonState *s, int full_update)
     vga_draw_line_func *vga_draw_line = NULL;
     bool share_surface, force_shadow = false;
     pixman_format_code_t format;
-#ifdef HOST_WORDS_BIGENDIAN
+#if HOST_BIG_ENDIAN
     bool byteswap = !s->big_endian_fb;
 #else
     bool byteswap = s->big_endian_fb;
@@ -1514,9 +1515,10 @@ static void vga_draw_graphic(VGACommonState *s, int full_update)
         force_shadow = true;
     }
 
+    /* bits 5-6: 0 = 16-color mode, 1 = 4-color mode, 2 = 256-color mode.  */
     shift_control = (s->gr[VGA_GFX_MODE] >> 5) & 3;
     double_scan = (s->cr[VGA_CRTC_MAX_SCAN] >> 7);
-    if (shift_control != 1) {
+    if (s->cr[VGA_CRTC_MODE] & 1) {
         multi_scan = (((s->cr[VGA_CRTC_MAX_SCAN] & 0x1f) + 1) << double_scan)
             - 1;
     } else {
@@ -2242,7 +2244,7 @@ bool vga_common_init(VGACommonState *s, Object *obj, Error **errp)
      * into a device attribute set by the machine/platform to remove
      * all target endian dependencies from this file.
      */
-#ifdef TARGET_WORDS_BIGENDIAN
+#if TARGET_BIG_ENDIAN
     s->default_endian_fb = true;
 #else
     s->default_endian_fb = false;

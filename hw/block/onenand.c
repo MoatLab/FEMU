@@ -35,10 +35,10 @@
 #include "qom/object.h"
 
 /* 11 for 2kB-page OneNAND ("2nd generation") and 10 for 1kB-page chips */
-#define PAGE_SHIFT	11
+#define PAGE_SHIFT 11
 
 /* Fixed */
-#define BLOCK_SHIFT	(PAGE_SHIFT + 6)
+#define BLOCK_SHIFT (PAGE_SHIFT + 6)
 
 #define TYPE_ONE_NAND "onenand"
 OBJECT_DECLARE_SIMPLE_TYPE(OneNANDState, ONE_NAND)
@@ -229,8 +229,8 @@ static void onenand_reset(OneNANDState *s, int cold)
         /* Lock the whole flash */
         memset(s->blockwp, ONEN_LOCK_LOCKED, s->blocks);
 
-        if (s->blk_cur && blk_pread(s->blk_cur, 0, s->boot[0],
-                                    8 << BDRV_SECTOR_BITS) < 0) {
+        if (s->blk_cur && blk_pread(s->blk_cur, 0, 8 << BDRV_SECTOR_BITS,
+                                    s->boot[0], 0) < 0) {
             hw_error("%s: Loading the BootRAM failed.\n", __func__);
         }
     }
@@ -249,8 +249,8 @@ static inline int onenand_load_main(OneNANDState *s, int sec, int secn,
     assert(UINT32_MAX >> BDRV_SECTOR_BITS > sec);
     assert(UINT32_MAX >> BDRV_SECTOR_BITS > secn);
     if (s->blk_cur) {
-        return blk_pread(s->blk_cur, sec << BDRV_SECTOR_BITS, dest,
-                         secn << BDRV_SECTOR_BITS) < 0;
+        return blk_pread(s->blk_cur, sec << BDRV_SECTOR_BITS,
+                         secn << BDRV_SECTOR_BITS, dest, 0) < 0;
     } else if (sec + secn > s->secs_cur) {
         return 1;
     }
@@ -274,7 +274,7 @@ static inline int onenand_prog_main(OneNANDState *s, int sec, int secn,
         uint8_t *dp = 0;
         if (s->blk_cur) {
             dp = g_malloc(size);
-            if (!dp || blk_pread(s->blk_cur, offset, dp, size) < 0) {
+            if (!dp || blk_pread(s->blk_cur, offset, size, dp, 0) < 0) {
                 result = 1;
             }
         } else {
@@ -290,7 +290,7 @@ static inline int onenand_prog_main(OneNANDState *s, int sec, int secn,
                 dp[i] &= sp[i];
             }
             if (s->blk_cur) {
-                result = blk_pwrite(s->blk_cur, offset, dp, size, 0) < 0;
+                result = blk_pwrite(s->blk_cur, offset, size, dp, 0) < 0;
             }
         }
         if (dp && s->blk_cur) {
@@ -308,7 +308,7 @@ static inline int onenand_load_spare(OneNANDState *s, int sec, int secn,
 
     if (s->blk_cur) {
         uint32_t offset = (s->secs_cur + (sec >> 5)) << BDRV_SECTOR_BITS;
-        if (blk_pread(s->blk_cur, offset, buf, BDRV_SECTOR_SIZE) < 0) {
+        if (blk_pread(s->blk_cur, offset, BDRV_SECTOR_SIZE, buf, 0) < 0) {
             return 1;
         }
         memcpy(dest, buf + ((sec & 31) << 4), secn << 4);
@@ -333,7 +333,7 @@ static inline int onenand_prog_spare(OneNANDState *s, int sec, int secn,
         if (s->blk_cur) {
             dp = g_malloc(512);
             if (!dp
-                || blk_pread(s->blk_cur, offset, dp, BDRV_SECTOR_SIZE) < 0) {
+                || blk_pread(s->blk_cur, offset, BDRV_SECTOR_SIZE, dp, 0) < 0) {
                 result = 1;
             } else {
                 dpp = dp + ((sec & 31) << 4);
@@ -351,8 +351,8 @@ static inline int onenand_prog_spare(OneNANDState *s, int sec, int secn,
                 dpp[i] &= sp[i];
             }
             if (s->blk_cur) {
-                result = blk_pwrite(s->blk_cur, offset, dp,
-                                    BDRV_SECTOR_SIZE, 0) < 0;
+                result = blk_pwrite(s->blk_cur, offset, BDRV_SECTOR_SIZE, dp,
+                                    0) < 0;
             }
         }
         g_free(dp);
@@ -370,17 +370,17 @@ static inline int onenand_erase(OneNANDState *s, int sec, int num)
     for (; num > 0; num--, sec++) {
         if (s->blk_cur) {
             int erasesec = s->secs_cur + (sec >> 5);
-            if (blk_pwrite(s->blk_cur, sec << BDRV_SECTOR_BITS, blankbuf,
-                           BDRV_SECTOR_SIZE, 0) < 0) {
+            if (blk_pwrite(s->blk_cur, sec << BDRV_SECTOR_BITS,
+                           BDRV_SECTOR_SIZE, blankbuf, 0) < 0) {
                 goto fail;
             }
-            if (blk_pread(s->blk_cur, erasesec << BDRV_SECTOR_BITS, tmpbuf,
-                          BDRV_SECTOR_SIZE) < 0) {
+            if (blk_pread(s->blk_cur, erasesec << BDRV_SECTOR_BITS,
+                          BDRV_SECTOR_SIZE, tmpbuf, 0) < 0) {
                 goto fail;
             }
             memcpy(tmpbuf + ((sec & 31) << 4), blankbuf, 1 << 4);
-            if (blk_pwrite(s->blk_cur, erasesec << BDRV_SECTOR_BITS, tmpbuf,
-                           BDRV_SECTOR_SIZE, 0) < 0) {
+            if (blk_pwrite(s->blk_cur, erasesec << BDRV_SECTOR_BITS,
+                           BDRV_SECTOR_SIZE, tmpbuf, 0) < 0) {
                 goto fail;
             }
         } else {
@@ -408,23 +408,23 @@ static void onenand_command(OneNANDState *s)
     int b;
     int sec;
     void *buf;
-#define SETADDR(block, page)			\
-    sec = (s->addr[page] & 3) +			\
-            ((((s->addr[page] >> 2) & 0x3f) +	\
-              (((s->addr[block] & 0xfff) |	\
-                (s->addr[block] >> 15 ?		\
-                 s->density_mask : 0)) << 6)) << (PAGE_SHIFT - 9));
-#define SETBUF_M()				\
-    buf = (s->bufaddr & 8) ?			\
-            s->data[(s->bufaddr >> 2) & 1][0] : s->boot[0];	\
+#define SETADDR(block, page)                                \
+    sec = (s->addr[page] & 3) +                             \
+          ((((s->addr[page] >> 2) & 0x3f) +                 \
+            (((s->addr[block] & 0xfff) |                    \
+              (s->addr[block] >> 15 ? s->density_mask : 0)) \
+             << 6))                                         \
+           << (PAGE_SHIFT - 9));
+#define SETBUF_M()                                                           \
+    buf = (s->bufaddr & 8) ? s->data[(s->bufaddr >> 2) & 1][0] : s->boot[0]; \
     buf += (s->bufaddr & 3) << 9;
-#define SETBUF_S()				\
-    buf = (s->bufaddr & 8) ?			\
-            s->data[(s->bufaddr >> 2) & 1][1] : s->boot[1];	\
+#define SETBUF_S()                                          \
+    buf = (s->bufaddr & 8) ?                                \
+            s->data[(s->bufaddr >> 2) & 1][1] : s->boot[1]; \
     buf += (s->bufaddr & 3) << 4;
 
     switch (s->command) {
-    case 0x00:	/* Load single/multiple sector data unit into buffer */
+    case 0x00:  /* Load single/multiple sector data unit into buffer */
         SETADDR(ONEN_BUF_BLOCK, ONEN_BUF_PAGE)
 
         SETBUF_M()
@@ -443,7 +443,7 @@ static void onenand_command(OneNANDState *s)
          */
         s->intstatus |= ONEN_INT | ONEN_INT_LOAD;
         break;
-    case 0x13:	/* Load single/multiple spare sector into buffer */
+    case 0x13:  /* Load single/multiple spare sector into buffer */
         SETADDR(ONEN_BUF_BLOCK, ONEN_BUF_PAGE)
 
         SETBUF_S()
@@ -456,7 +456,7 @@ static void onenand_command(OneNANDState *s)
          */
         s->intstatus |= ONEN_INT | ONEN_INT_LOAD;
         break;
-    case 0x80:	/* Program single/multiple sector data unit from buffer */
+    case 0x80:  /* Program single/multiple sector data unit from buffer */
         SETADDR(ONEN_BUF_BLOCK, ONEN_BUF_PAGE)
 
         SETBUF_M()
@@ -475,7 +475,7 @@ static void onenand_command(OneNANDState *s)
          */
         s->intstatus |= ONEN_INT | ONEN_INT_PROG;
         break;
-    case 0x1a:	/* Program single/multiple spare area sector from buffer */
+    case 0x1a:  /* Program single/multiple spare area sector from buffer */
         SETADDR(ONEN_BUF_BLOCK, ONEN_BUF_PAGE)
 
         SETBUF_S()
@@ -488,7 +488,7 @@ static void onenand_command(OneNANDState *s)
          */
         s->intstatus |= ONEN_INT | ONEN_INT_PROG;
         break;
-    case 0x1b:	/* Copy-back program */
+    case 0x1b:  /* Copy-back program */
         SETBUF_S()
 
         SETADDR(ONEN_BUF_BLOCK, ONEN_BUF_PAGE)
@@ -504,7 +504,7 @@ static void onenand_command(OneNANDState *s)
         s->intstatus |= ONEN_INT | ONEN_INT_PROG;
         break;
 
-    case 0x23:	/* Unlock NAND array block(s) */
+    case 0x23:  /* Unlock NAND array block(s) */
         s->intstatus |= ONEN_INT;
 
         /* XXX the previous (?) area should be locked automatically */
@@ -519,7 +519,7 @@ static void onenand_command(OneNANDState *s)
             s->wpstatus = s->blockwp[b] = ONEN_LOCK_UNLOCKED;
         }
         break;
-    case 0x27:	/* Unlock All NAND array blocks */
+    case 0x27:  /* Unlock All NAND array blocks */
         s->intstatus |= ONEN_INT;
 
         for (b = 0; b < s->blocks; b ++) {
@@ -530,7 +530,7 @@ static void onenand_command(OneNANDState *s)
         }
         break;
 
-    case 0x2a:	/* Lock NAND array block(s) */
+    case 0x2a:  /* Lock NAND array block(s) */
         s->intstatus |= ONEN_INT;
 
         for (b = s->unladdr[0]; b <= s->unladdr[1]; b ++) {
@@ -544,7 +544,7 @@ static void onenand_command(OneNANDState *s)
             s->wpstatus = s->blockwp[b] = ONEN_LOCK_LOCKED;
         }
         break;
-    case 0x2c:	/* Lock-tight NAND array block(s) */
+    case 0x2c:  /* Lock-tight NAND array block(s) */
         s->intstatus |= ONEN_INT;
 
         for (b = s->unladdr[0]; b <= s->unladdr[1]; b ++) {
@@ -559,13 +559,13 @@ static void onenand_command(OneNANDState *s)
         }
         break;
 
-    case 0x71:	/* Erase-Verify-Read */
+    case 0x71:  /* Erase-Verify-Read */
         s->intstatus |= ONEN_INT;
         break;
-    case 0x95:	/* Multi-block erase */
+    case 0x95:  /* Multi-block erase */
         qemu_irq_pulse(s->intr);
         /* Fall through.  */
-    case 0x94:	/* Block erase */
+    case 0x94:  /* Block erase */
         sec = ((s->addr[ONEN_BUF_BLOCK] & 0xfff) |
                         (s->addr[ONEN_BUF_BLOCK] >> 15 ? s->density_mask : 0))
                 << (BLOCK_SHIFT - 9);
@@ -574,20 +574,20 @@ static void onenand_command(OneNANDState *s)
 
         s->intstatus |= ONEN_INT | ONEN_INT_ERASE;
         break;
-    case 0xb0:	/* Erase suspend */
+    case 0xb0:  /* Erase suspend */
         break;
-    case 0x30:	/* Erase resume */
+    case 0x30:  /* Erase resume */
         s->intstatus |= ONEN_INT | ONEN_INT_ERASE;
         break;
 
-    case 0xf0:	/* Reset NAND Flash core */
+    case 0xf0:  /* Reset NAND Flash core */
         onenand_reset(s, 0);
         break;
-    case 0xf3:	/* Reset OneNAND */
+    case 0xf3:  /* Reset OneNAND */
         onenand_reset(s, 0);
         break;
 
-    case 0x65:	/* OTP Access */
+    case 0x65:  /* OTP Access */
         s->intstatus |= ONEN_INT;
         s->blk_cur = NULL;
         s->current = s->otp;
@@ -616,52 +616,52 @@ static uint64_t onenand_read(void *opaque, hwaddr addr,
     case 0x0000 ... 0xbffe:
         return lduw_le_p(s->boot[0] + addr);
 
-    case 0xf000:	/* Manufacturer ID */
+    case 0xf000:  /* Manufacturer ID */
         return s->id.man;
-    case 0xf001:	/* Device ID */
+    case 0xf001:  /* Device ID */
         return s->id.dev;
-    case 0xf002:	/* Version ID */
+    case 0xf002:  /* Version ID */
         return s->id.ver;
     /* TODO: get the following values from a real chip!  */
-    case 0xf003:	/* Data Buffer size */
+    case 0xf003:  /* Data Buffer size */
         return 1 << PAGE_SHIFT;
-    case 0xf004:	/* Boot Buffer size */
+    case 0xf004:  /* Boot Buffer size */
         return 0x200;
-    case 0xf005:	/* Amount of buffers */
+    case 0xf005:  /* Amount of buffers */
         return 1 | (2 << 8);
-    case 0xf006:	/* Technology */
+    case 0xf006:  /* Technology */
         return 0;
 
-    case 0xf100 ... 0xf107:	/* Start addresses */
+    case 0xf100 ... 0xf107:  /* Start addresses */
         return s->addr[offset - 0xf100];
 
-    case 0xf200:	/* Start buffer */
+    case 0xf200:  /* Start buffer */
         return (s->bufaddr << 8) | ((s->count - 1) & (1 << (PAGE_SHIFT - 10)));
 
-    case 0xf220:	/* Command */
+    case 0xf220:  /* Command */
         return s->command;
-    case 0xf221:	/* System Configuration 1 */
+    case 0xf221:  /* System Configuration 1 */
         return s->config[0] & 0xffe0;
-    case 0xf222:	/* System Configuration 2 */
+    case 0xf222:  /* System Configuration 2 */
         return s->config[1];
 
-    case 0xf240:	/* Controller Status */
+    case 0xf240:  /* Controller Status */
         return s->status;
-    case 0xf241:	/* Interrupt */
+    case 0xf241:  /* Interrupt */
         return s->intstatus;
-    case 0xf24c:	/* Unlock Start Block Address */
+    case 0xf24c:  /* Unlock Start Block Address */
         return s->unladdr[0];
-    case 0xf24d:	/* Unlock End Block Address */
+    case 0xf24d:  /* Unlock End Block Address */
         return s->unladdr[1];
-    case 0xf24e:	/* Write Protection Status */
+    case 0xf24e:  /* Write Protection Status */
         return s->wpstatus;
 
-    case 0xff00:	/* ECC Status */
+    case 0xff00:  /* ECC Status */
         return 0x00;
-    case 0xff01:	/* ECC Result of main area data */
-    case 0xff02:	/* ECC Result of spare area data */
-    case 0xff03:	/* ECC Result of main area data */
-    case 0xff04:	/* ECC Result of spare area data */
+    case 0xff01:  /* ECC Result of main area data */
+    case 0xff02:  /* ECC Result of spare area data */
+    case 0xff03:  /* ECC Result of main area data */
+    case 0xff04:  /* ECC Result of spare area data */
         qemu_log_mask(LOG_UNIMP,
                       "onenand: ECC result registers unimplemented\n");
         return 0x0000;
@@ -696,15 +696,15 @@ static void onenand_write(void *opaque, hwaddr addr,
         }
 
         switch (value) {
-        case 0x00f0:	/* Reset OneNAND */
+        case 0x00f0:  /* Reset OneNAND */
             onenand_reset(s, 0);
             break;
 
-        case 0x00e0:	/* Load Data into Buffer */
+        case 0x00e0:  /* Load Data into Buffer */
             s->cycle = 1;
             break;
 
-        case 0x0090:	/* Read Identification Data */
+        case 0x0090:  /* Read Identification Data */
             memset(s->boot[0], 0, 3 << s->shift);
             s->boot[0][0 << s->shift] = s->id.man & 0xff;
             s->boot[0][1 << s->shift] = s->id.dev & 0xff;
@@ -718,11 +718,11 @@ static void onenand_write(void *opaque, hwaddr addr,
         }
         break;
 
-    case 0xf100 ... 0xf107:	/* Start addresses */
+    case 0xf100 ... 0xf107:  /* Start addresses */
         s->addr[offset - 0xf100] = value;
         break;
 
-    case 0xf200:	/* Start buffer */
+    case 0xf200:  /* Start buffer */
         s->bufaddr = (value >> 8) & 0xf;
         if (PAGE_SHIFT == 11)
             s->count = (value & 3) ?: 4;
@@ -730,36 +730,36 @@ static void onenand_write(void *opaque, hwaddr addr,
             s->count = (value & 1) ?: 2;
         break;
 
-    case 0xf220:	/* Command */
+    case 0xf220:  /* Command */
         if (s->intstatus & (1 << 15))
             break;
         s->command = value;
         onenand_command(s);
         break;
-    case 0xf221:	/* System Configuration 1 */
+    case 0xf221:  /* System Configuration 1 */
         s->config[0] = value;
         onenand_intr_update(s);
         qemu_set_irq(s->rdy, (s->config[0] >> 7) & 1);
         break;
-    case 0xf222:	/* System Configuration 2 */
+    case 0xf222:  /* System Configuration 2 */
         s->config[1] = value;
         break;
 
-    case 0xf241:	/* Interrupt */
+    case 0xf241:  /* Interrupt */
         s->intstatus &= value;
         if ((1 << 15) & ~s->intstatus)
             s->status &= ~(ONEN_ERR_CMD | ONEN_ERR_ERASE |
                             ONEN_ERR_PROG | ONEN_ERR_LOAD);
         onenand_intr_update(s);
         break;
-    case 0xf24c:	/* Unlock Start Block Address */
+    case 0xf24c:  /* Unlock Start Block Address */
         s->unladdr[0] = value & (s->blocks - 1);
         /* For some reason we have to set the end address to by default
          * be same as start because the software forgets to write anything
          * in there.  */
         s->unladdr[1] = value & (s->blocks - 1);
         break;
-    case 0xf24d:	/* Unlock End Block Address */
+    case 0xf24d:  /* Unlock End Block Address */
         s->unladdr[1] = value & (s->blocks - 1);
         break;
 

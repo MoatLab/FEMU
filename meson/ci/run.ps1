@@ -13,6 +13,10 @@ if ($env:arch -eq 'x64') {
 } elseif ($env:arch -eq 'x86') {
     # Switch to the x86 Rust toolchain
     rustup default stable-i686-pc-windows-msvc
+
+    # Also install clippy
+    rustup component add clippy
+
     # Rust puts its shared stdlib in a secret place, but it is needed to run tests.
     $env:Path += ";$HOME/.rustup/toolchains/stable-i686-pc-windows-msvc/bin"
     # Need 32-bit Python for tests that need the Python dependency
@@ -77,7 +81,7 @@ python --version
 
 # Needed for running unit tests in parallel.
 echo ""
-python -m pip --disable-pip-version-check install --upgrade pefile pytest-xdist jsonschema coverage
+python -m pip --disable-pip-version-check install --upgrade pefile pytest-xdist pytest-subtests jsonschema coverage
 
 echo ""
 echo "=== Start running tests ==="
@@ -98,7 +102,7 @@ python3 -m coverage xml
 python3 -m coverage report
 
 # Currently codecov.py does not handle Azure, use this fork of a fork to get it
-# working without requireing a token
+# working without requiring a token
 git clone https://github.com/mensinda/codecov-python
 python3 -m pip install --ignore-installed ./codecov-python
 python3 -m codecov -f .coverage/coverage.xml -n "VS$env:compiler $env:arch $env:backend" -c $env:SOURCE_VERSION

@@ -11,7 +11,7 @@
 
 #include <Library/UefiRuntimeLib.h>
 #include <Library/MemEncryptSevLib.h>
-#include <Library/VmgExitLib.h>
+#include <Library/CcExitLib.h>
 #include <Register/Amd/Msr.h>
 
 #include "QemuFlash.h"
@@ -79,15 +79,15 @@ QemuFlashPtrWrite (
     // Writing to flash is emulated by the hypervisor through the use of write
     // protection. This won't work for an SEV-ES guest because the write won't
     // be recognized as a true MMIO write, which would result in the required
-    // #VC exception. Instead, use the the VMGEXIT MMIO write support directly
+    // #VC exception. Instead, use the VMGEXIT MMIO write support directly
     // to perform the update.
     //
-    VmgInit (Ghcb, &InterruptState);
+    CcExitVmgInit (Ghcb, &InterruptState);
     Ghcb->SharedBuffer[0]    = Value;
     Ghcb->SaveArea.SwScratch = (UINT64)(UINTN)Ghcb->SharedBuffer;
-    VmgSetOffsetValid (Ghcb, GhcbSwScratch);
-    VmgExit (Ghcb, SVM_EXIT_MMIO_WRITE, PhysAddr, 1);
-    VmgDone (Ghcb, InterruptState);
+    CcExitVmgSetOffsetValid (Ghcb, GhcbSwScratch);
+    CcExitVmgExit (Ghcb, SVM_EXIT_MMIO_WRITE, PhysAddr, 1);
+    CcExitVmgDone (Ghcb, InterruptState);
   } else {
     *Ptr = Value;
   }

@@ -23,6 +23,7 @@
 STATIC CONST COMPATIBILITY_STR  CpuCompatibleStr[] = {
   { "arm,arm-v7"     },
   { "arm,arm-v8"     },
+  { "arm,armv8"      },
   { "arm,cortex-a15" },
   { "arm,cortex-a7"  },
   { "arm,cortex-a57" }
@@ -784,9 +785,6 @@ GicCPmuNodeParser (
     UINT32  ClockDomain;                      // {default = 0}
     UINT32  AffinityFlags;                    // {default = 0}
   } CM_ARM_GICC_INFO;
-
-  The pmu information can be found in the pmu node. There is no support
-  for now.
 
   A parser parses a Device Tree to populate a specific CmObj type. None,
   one or many CmObj can be created by the parser.

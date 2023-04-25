@@ -51,6 +51,10 @@ enum phys_map_type {
 	XIVE_NVPG,
 	XIVE_ESB,
 	XIVE_END,
+	PAU_OCAPI_MMIO,
+	PAU_REGS,
+	PAU_GENID,
+	PAU_NTL,
 };
 
 extern void phys_map_get(uint64_t gcid, enum phys_map_type type,

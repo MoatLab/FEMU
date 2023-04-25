@@ -526,8 +526,13 @@ void object_initialize(void *data, size_t size, const char *typename)
 
 #ifdef CONFIG_MODULES
     if (!type) {
-        module_load_qom_one(typename);
-        type = type_get_by_name(typename);
+        int rv = module_load_qom(typename, &error_fatal);
+        if (rv > 0) {
+            type = type_get_by_name(typename);
+        } else {
+            error_report("missing object type '%s'", typename);
+            exit(1);
+        }
     }
 #endif
     if (!type) {
@@ -1033,8 +1038,13 @@ ObjectClass *module_object_class_by_name(const char *typename)
     oc = object_class_by_name(typename);
 #ifdef CONFIG_MODULES
     if (!oc) {
-        module_load_qom_one(typename);
-        oc = object_class_by_name(typename);
+        Error *local_err = NULL;
+        int rv = module_load_qom(typename, &local_err);
+        if (rv > 0) {
+            oc = object_class_by_name(typename);
+        } else if (rv < 0) {
+            error_report_err(local_err);
+        }
     }
 #endif
     return oc;
@@ -1383,7 +1393,8 @@ bool object_property_get(Object *obj, const char *name, Visitor *v,
     }
 
     if (!prop->get) {
-        error_setg(errp, QERR_PERMISSION_DENIED);
+        error_setg(errp, "Property '%s.%s' is not readable",
+                   object_get_typename(obj), name);
         return false;
     }
     prop->get(obj, v, name, prop->opaque, &err);
@@ -1402,7 +1413,8 @@ bool object_property_set(Object *obj, const char *name, Visitor *v,
     }
 
     if (!prop->set) {
-        error_setg(errp, QERR_PERMISSION_DENIED);
+        error_setg(errp, "Property '%s.%s' is not writable",
+                   object_get_typename(obj), name);
         return false;
     }
     prop->set(obj, v, name, prop->opaque, errp);

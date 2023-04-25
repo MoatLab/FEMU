@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .base import ExternalDependency, DependencyException, DependencyMethods, sort_libpaths, DependencyTypeName
-from ..mesonlib import LibType, MachineChoice, OptionKey, OrderedSet, PerMachine, Popen_safe
+from .base import ExternalDependency, DependencyException, sort_libpaths, DependencyTypeName
+from ..mesonlib import MachineChoice, OptionKey, OrderedSet, PerMachine, Popen_safe
 from ..programs import find_external_program, ExternalProgram
 from .. import mlog
 from pathlib import PurePath
@@ -46,12 +46,12 @@ class PkgConfigDependency(ExternalDependency):
         # Only search for pkg-config for each machine the first time and store
         # the result in the class definition
         if PkgConfigDependency.class_pkgbin[self.for_machine] is False:
-            mlog.debug('Pkg-config binary for %s is cached as not found.' % self.for_machine)
+            mlog.debug(f'Pkg-config binary for {self.for_machine} is cached as not found.')
         elif PkgConfigDependency.class_pkgbin[self.for_machine] is not None:
-            mlog.debug('Pkg-config binary for %s is cached.' % self.for_machine)
+            mlog.debug(f'Pkg-config binary for {self.for_machine} is cached.')
         else:
             assert PkgConfigDependency.class_pkgbin[self.for_machine] is None
-            mlog.debug('Pkg-config binary for %s is not cached.' % self.for_machine)
+            mlog.debug(f'Pkg-config binary for {self.for_machine} is not cached.')
             for potential_pkgbin in find_external_program(
                     self.env, self.for_machine, 'pkgconfig', 'Pkg-config',
                     environment.default_pkgconfig, allow_default_for_cross=False):
@@ -60,7 +60,7 @@ class PkgConfigDependency(ExternalDependency):
                     continue
                 if not self.silent:
                     mlog.log('Found pkg-config:', mlog.bold(potential_pkgbin.get_path()),
-                             '(%s)' % version_if_ok)
+                             f'({version_if_ok})')
                 PkgConfigDependency.class_pkgbin[self.for_machine] = potential_pkgbin
                 break
             else:
@@ -73,7 +73,7 @@ class PkgConfigDependency(ExternalDependency):
         self.pkgbin = PkgConfigDependency.class_pkgbin[self.for_machine]
         if self.pkgbin is False:
             self.pkgbin = None
-            msg = 'Pkg-config binary for machine %s not found. Giving up.' % self.for_machine
+            msg = f'Pkg-config binary for machine {self.for_machine} not found. Giving up.'
             if self.required:
                 raise DependencyException(msg)
             else:
@@ -202,8 +202,7 @@ class PkgConfigDependency(ExternalDependency):
             env['PKG_CONFIG_ALLOW_SYSTEM_CFLAGS'] = '1'
         ret, out, err = self._call_pkgbin(['--cflags', self.name], env=env)
         if ret != 0:
-            raise DependencyException('Could not generate cargs for %s:\n%s\n' %
-                                      (self.name, err))
+            raise DependencyException(f'Could not generate cargs for {self.name}:\n{err}\n')
         self.compile_args = self._convert_mingw_paths(self._split_args(out))
 
     def _search_libs(self, out: str, out_raw: str) -> T.Tuple[T.List[str], T.List[str]]:
@@ -267,7 +266,6 @@ class PkgConfigDependency(ExternalDependency):
         libs_found: OrderedSet[str] = OrderedSet()
         # Track not-found libraries to know whether to add library paths
         libs_notfound = []
-        libtype = LibType.STATIC if self.static else LibType.PREFER_SHARED
         # Generate link arguments for this library
         link_args = []
         for lib in full_args:
@@ -279,9 +277,9 @@ class PkgConfigDependency(ExternalDependency):
                 continue
             elif lib.startswith('-l:'):
                 # see: https://stackoverflow.com/questions/48532868/gcc-library-option-with-a-colon-llibevent-a
-                # also : See the documentation of -lnamespec | --library=namespec in the linker manual  
+                # also : See the documentation of -lnamespec | --library=namespec in the linker manual
                 #                     https://sourceware.org/binutils/docs-2.18/ld/Options.html
-                
+
                 # Don't resolve the same -l:libfoo.a argument again
                 if lib in libs_found:
                     continue
@@ -307,7 +305,7 @@ class PkgConfigDependency(ExternalDependency):
                     continue
                 if self.clib_compiler:
                     args = self.clib_compiler.find_library(lib[2:], self.env,
-                                                           libpaths, libtype)
+                                                           libpaths, self.libtype)
                 # If the project only uses a non-clib language such as D, Rust,
                 # C#, Python, etc, all we can do is limp along by adding the
                 # arguments as-is and then adding the libpaths at the end.
@@ -343,9 +341,9 @@ class PkgConfigDependency(ExternalDependency):
                     shared_lib = os.path.join(os.path.dirname(lib), ".libs", shared_libname)
 
                 if not os.path.exists(shared_lib):
-                    raise DependencyException('Got a libtools specific "%s" dependencies'
+                    raise DependencyException(f'Got a libtools specific "{lib}" dependencies'
                                               'but we could not compute the actual shared'
-                                              'library path' % lib)
+                                              'library path')
                 self.is_libtool = True
                 lib = shared_lib
                 if lib in link_args:
@@ -373,15 +371,13 @@ class PkgConfigDependency(ExternalDependency):
         env['PKG_CONFIG_ALLOW_SYSTEM_LIBS'] = '1'
         ret, out, err = self._call_pkgbin(libcmd, env=env)
         if ret != 0:
-            raise DependencyException('Could not generate libs for %s:\n%s\n' %
-                                      (self.name, err))
+            raise DependencyException(f'Could not generate libs for {self.name}:\n{err}\n')
         # Also get the 'raw' output without -Lfoo system paths for adding -L
         # args with -lfoo when a library can't be found, and also in
         # gnome.generate_gir + gnome.gtkdoc which need -L -l arguments.
         ret, out_raw, err_raw = self._call_pkgbin(libcmd)
         if ret != 0:
-            raise DependencyException('Could not generate libs for %s:\n\n%s' %
-                                      (self.name, out_raw))
+            raise DependencyException(f'Could not generate libs for {self.name}:\n\n{out_raw}')
         self.link_args, self.raw_link_args = self._search_libs(out, out_raw)
 
     def get_pkgconfig_variable(self, variable_name: str, kwargs: T.Dict[str, T.Union[str, T.List[str]]]) -> str:
@@ -401,8 +397,7 @@ class PkgConfigDependency(ExternalDependency):
         variable = ''
         if ret != 0:
             if self.required:
-                raise DependencyException('dependency %s not found:\n%s\n' %
-                                          (self.name, err))
+                raise DependencyException(f'dependency {self.name} not found:\n{err}\n')
         else:
             variable = out.strip()
 
@@ -420,26 +415,25 @@ class PkgConfigDependency(ExternalDependency):
         mlog.debug(f'Got pkgconfig variable {variable_name} : {variable}')
         return variable
 
-    @staticmethod
-    def get_methods() -> T.List[DependencyMethods]:
-        return [DependencyMethods.PKGCONFIG]
-
     def check_pkgconfig(self, pkgbin: ExternalProgram) -> T.Optional[str]:
         if not pkgbin.found():
             mlog.log(f'Did not find pkg-config by name {pkgbin.name!r}')
             return None
+        command_as_string = ' '.join(pkgbin.get_command())
         try:
+            helptext = Popen_safe(pkgbin.get_command() + ['--help'])[1]
+            if 'Pure-Perl' in helptext:
+                mlog.log(f'found pkg-config {command_as_string!r} but it is Strawberry Perl and thus broken. Ignoring...')
+                return None
             p, out = Popen_safe(pkgbin.get_command() + ['--version'])[0:2]
             if p.returncode != 0:
-                mlog.warning('Found pkg-config {!r} but it failed when run'
-                             ''.format(' '.join(pkgbin.get_command())))
+                mlog.warning(f'Found pkg-config {command_as_string!r} but it failed when run')
                 return None
         except FileNotFoundError:
-            mlog.warning('We thought we found pkg-config {!r} but now it\'s not there. How odd!'
-                         ''.format(' '.join(pkgbin.get_command())))
+            mlog.warning(f'We thought we found pkg-config {command_as_string!r} but now it\'s not there. How odd!')
             return None
         except PermissionError:
-            msg = 'Found pkg-config {!r} but didn\'t have permissions to run it.'.format(' '.join(pkgbin.get_command()))
+            msg = f'Found pkg-config {command_as_string!r} but didn\'t have permissions to run it.'
             if not self.env.machines.build.is_windows():
                 msg += '\n\nOn Unix-like systems this is often caused by scripts that are not executable.'
             mlog.warning(msg)

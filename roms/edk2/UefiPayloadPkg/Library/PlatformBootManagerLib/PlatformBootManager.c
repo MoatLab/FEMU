@@ -9,11 +9,8 @@ SPDX-License-Identifier: BSD-2-Clause-Patent
 
 #include "PlatformBootManager.h"
 #include "PlatformConsole.h"
-#include <Protocol/PlatformBootManagerOverride.h>
 #include <Guid/BootManagerMenu.h>
 #include <Library/HobLib.h>
-
-UNIVERSAL_PAYLOAD_PLATFORM_BOOT_MANAGER_OVERRIDE_PROTOCOL  *mUniversalPayloadPlatformBootManagerOverrideInstance = NULL;
 
 /**
   Signal EndOfDxe event and install SMM Ready to lock protocol.
@@ -164,20 +161,9 @@ PlatformBootManagerBeforeConsole (
   )
 {
   EFI_INPUT_KEY                 Enter;
-  EFI_INPUT_KEY                 F2;
+  EFI_INPUT_KEY                 CustomKey;
   EFI_INPUT_KEY                 Down;
   EFI_BOOT_MANAGER_LOAD_OPTION  BootOption;
-  EFI_STATUS                    Status;
-
-  Status = gBS->LocateProtocol (&gUniversalPayloadPlatformBootManagerOverrideProtocolGuid, NULL, (VOID **)&mUniversalPayloadPlatformBootManagerOverrideInstance);
-  if (EFI_ERROR (Status)) {
-    mUniversalPayloadPlatformBootManagerOverrideInstance = NULL;
-  }
-
-  if (mUniversalPayloadPlatformBootManagerOverrideInstance != NULL) {
-    mUniversalPayloadPlatformBootManagerOverrideInstance->BeforeConsole ();
-    return;
-  }
 
   //
   // Register ENTER as CONTINUE key
@@ -186,13 +172,22 @@ PlatformBootManagerBeforeConsole (
   Enter.UnicodeChar = CHAR_CARRIAGE_RETURN;
   EfiBootManagerRegisterContinueKeyOption (0, &Enter, NULL);
 
-  //
-  // Map F2 to Boot Manager Menu
-  //
-  F2.ScanCode    = SCAN_F2;
-  F2.UnicodeChar = CHAR_NULL;
+  if (FixedPcdGetBool (PcdBootManagerEscape)) {
+    //
+    // Map Esc to Boot Manager Menu
+    //
+    CustomKey.ScanCode    = SCAN_ESC;
+    CustomKey.UnicodeChar = CHAR_NULL;
+  } else {
+    //
+    // Map Esc to Boot Manager Menu
+    //
+    CustomKey.ScanCode    = SCAN_F2;
+    CustomKey.UnicodeChar = CHAR_NULL;
+  }
+
   EfiBootManagerGetBootManagerMenu (&BootOption);
-  EfiBootManagerAddKeyOptionVariable (NULL, (UINT16)BootOption.OptionNumber, 0, &F2, NULL);
+  EfiBootManagerAddKeyOptionVariable (NULL, (UINT16)BootOption.OptionNumber, 0, &CustomKey, NULL);
 
   //
   // Also add Down key to Boot Manager Menu since some serial terminals don't support F2 key.
@@ -234,14 +229,18 @@ PlatformBootManagerAfterConsole (
 {
   EFI_GRAPHICS_OUTPUT_BLT_PIXEL  Black;
   EFI_GRAPHICS_OUTPUT_BLT_PIXEL  White;
-
-  if (mUniversalPayloadPlatformBootManagerOverrideInstance != NULL) {
-    mUniversalPayloadPlatformBootManagerOverrideInstance->AfterConsole ();
-    return;
-  }
+  EDKII_PLATFORM_LOGO_PROTOCOL   *PlatformLogo;
+  EFI_STATUS                     Status;
 
   Black.Blue = Black.Green = Black.Red = Black.Reserved = 0;
   White.Blue = White.Green = White.Red = White.Reserved = 0xFF;
+
+  Status = gBS->LocateProtocol (&gEdkiiPlatformLogoProtocolGuid, NULL, (VOID **)&PlatformLogo);
+
+  if (!EFI_ERROR (Status)) {
+    gST->ConOut->ClearScreen (gST->ConOut);
+    BootLogoEnableLogo ();
+  }
 
   EfiBootManagerConnectAll ();
   EfiBootManagerRefreshAllBootOption ();
@@ -251,12 +250,21 @@ PlatformBootManagerAfterConsole (
   //
   PlatformRegisterFvBootOption (PcdGetPtr (PcdShellFile), L"UEFI Shell", LOAD_OPTION_ACTIVE);
 
-  Print (
-    L"\n"
-    L"F2 or Down      to enter Boot Manager Menu.\n"
-    L"ENTER           to boot directly.\n"
-    L"\n"
-    );
+  if (FixedPcdGetBool (PcdBootManagerEscape)) {
+    Print (
+      L"\n"
+      L"    Esc or Down      to enter Boot Manager Menu.\n"
+      L"    ENTER            to boot directly.\n"
+      L"\n"
+      );
+  } else {
+    Print (
+      L"\n"
+      L"    F2 or Down      to enter Boot Manager Menu.\n"
+      L"    ENTER           to boot directly.\n"
+      L"\n"
+      );
+  }
 }
 
 /**
@@ -270,10 +278,6 @@ PlatformBootManagerWaitCallback (
   UINT16  TimeoutRemain
   )
 {
-  if (mUniversalPayloadPlatformBootManagerOverrideInstance != NULL) {
-    mUniversalPayloadPlatformBootManagerOverrideInstance->WaitCallback (TimeoutRemain);
-  }
-
   return;
 }
 
@@ -290,10 +294,6 @@ PlatformBootManagerUnableToBoot (
   VOID
   )
 {
-  if (mUniversalPayloadPlatformBootManagerOverrideInstance != NULL) {
-    mUniversalPayloadPlatformBootManagerOverrideInstance->UnableToBoot ();
-  }
-
   return;
 }
 

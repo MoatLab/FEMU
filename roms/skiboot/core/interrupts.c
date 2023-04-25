@@ -18,6 +18,7 @@
 #include <timer.h>
 #include <sbe-p8.h>
 #include <sbe-p9.h>
+#include <xive.h>
 
 /* ICP registers */
 #define ICP_XIRR		0x4	/* 32-bit access */
@@ -157,9 +158,14 @@ uint32_t get_psi_interrupt(uint32_t chip_id)
 
 struct dt_node *add_ics_node(void)
 {
-	struct dt_node *ics = dt_new_addr(dt_root, "interrupt-controller", 0);
+	struct dt_node *ics;
 	bool has_xive;
+	bool has_xive_only = proc_gen >= proc_gen_p10;
 
+	if (has_xive_only)
+		return NULL;
+
+	ics = dt_new_addr(dt_root, "interrupt-controller", 0);
 	if (!ics)
 		return NULL;
 
@@ -181,6 +187,10 @@ struct dt_node *add_ics_node(void)
 uint32_t get_ics_phandle(void)
 {
 	struct dt_node *i;
+	bool has_xive_only = proc_gen >= proc_gen_p10;
+
+	if (has_xive_only)
+		return xive2_get_phandle();
 
 	for (i = dt_first(dt_root); i; i = dt_next(dt_root, i)) {
 		if (streq(i->name, "interrupt-controller@0")) {
@@ -194,9 +204,14 @@ void add_opal_interrupts(void)
 {
 	struct irq_source *is;
 	unsigned int i, ns, tns = 0, count = 0;
+	uint32_t parent;
 	uint32_t isn;
 	__be32 *irqs = NULL;
 	char *names = NULL;
+
+	parent = get_ics_phandle();
+	if (!parent)
+		return;
 
 	lock(&irq_lock);
 	list_for_each(&irq_sources, is, link) {
@@ -241,7 +256,7 @@ void add_opal_interrupts(void)
 	/* First create the standard "interrupts" property and the
 	 * corresponding names property
 	 */
-	dt_add_property_cells(opal_node, "interrupt-parent", get_ics_phandle());
+	dt_add_property_cells(opal_node, "interrupt-parent", parent);
 	dt_add_property(opal_node, "interrupts", irqs, count * 8);
 	dt_add_property(opal_node, "opal-interrupts-names", names, tns);
 	dt_add_property(opal_node, "interrupt-names", names, tns);

@@ -17,10 +17,14 @@
 #include "trace.h"
 #include "qapi/error.h"
 #include "block/block-copy.h"
+#include "block/block_int-io.h"
+#include "block/dirty-bitmap.h"
 #include "block/reqlist.h"
 #include "sysemu/block-backend.h"
 #include "qemu/units.h"
+#include "qemu/co-shared-resource.h"
 #include "qemu/coroutine.h"
+#include "qemu/ratelimit.h"
 #include "block/aio_task.h"
 #include "qemu/error-report.h"
 #include "qemu/memalign.h"
@@ -465,10 +469,9 @@ static coroutine_fn int block_copy_task_run(AioTaskPool *pool,
  * value of @method should be used for subsequent tasks.
  * Returns 0 on success.
  */
-static int coroutine_fn block_copy_do_copy(BlockCopyState *s,
-                                           int64_t offset, int64_t bytes,
-                                           BlockCopyMethod *method,
-                                           bool *error_is_read)
+static int coroutine_fn GRAPH_RDLOCK
+block_copy_do_copy(BlockCopyState *s, int64_t offset, int64_t bytes,
+                   BlockCopyMethod *method, bool *error_is_read)
 {
     int ret;
     int64_t nbytes = MIN(offset + bytes, s->len) - offset;
@@ -554,8 +557,10 @@ static coroutine_fn int block_copy_task_entry(AioTask *task)
     BlockCopyMethod method = t->method;
     int ret;
 
-    ret = block_copy_do_copy(s, t->req.offset, t->req.bytes, &method,
-                             &error_is_read);
+    WITH_GRAPH_RDLOCK_GUARD() {
+        ret = block_copy_do_copy(s, t->req.offset, t->req.bytes, &method,
+                                 &error_is_read);
+    }
 
     WITH_QEMU_LOCK_GUARD(&s->lock) {
         if (s->method == t->method) {
@@ -577,8 +582,9 @@ static coroutine_fn int block_copy_task_entry(AioTask *task)
     return ret;
 }
 
-static int block_copy_block_status(BlockCopyState *s, int64_t offset,
-                                   int64_t bytes, int64_t *pnum)
+static coroutine_fn GRAPH_RDLOCK
+int block_copy_block_status(BlockCopyState *s, int64_t offset, int64_t bytes,
+                            int64_t *pnum)
 {
     int64_t num;
     BlockDriverState *base;
@@ -590,8 +596,8 @@ static int block_copy_block_status(BlockCopyState *s, int64_t offset,
         base = NULL;
     }
 
-    ret = bdrv_block_status_above(s->source->bs, base, offset, bytes, &num,
-                                  NULL, NULL);
+    ret = bdrv_co_block_status_above(s->source->bs, base, offset, bytes, &num,
+                                     NULL, NULL);
     if (ret < 0 || num < s->cluster_size) {
         /*
          * On error or if failed to obtain large enough chunk just fallback to
@@ -613,8 +619,9 @@ static int block_copy_block_status(BlockCopyState *s, int64_t offset,
  * Check if the cluster starting at offset is allocated or not.
  * return via pnum the number of contiguous clusters sharing this allocation.
  */
-static int block_copy_is_cluster_allocated(BlockCopyState *s, int64_t offset,
-                                           int64_t *pnum)
+static int coroutine_fn GRAPH_RDLOCK
+block_copy_is_cluster_allocated(BlockCopyState *s, int64_t offset,
+                                int64_t *pnum)
 {
     BlockDriverState *bs = s->source->bs;
     int64_t count, total_count = 0;
@@ -624,7 +631,8 @@ static int block_copy_is_cluster_allocated(BlockCopyState *s, int64_t offset,
     assert(QEMU_IS_ALIGNED(offset, s->cluster_size));
 
     while (true) {
-        ret = bdrv_is_allocated(bs, offset, bytes, &count);
+        /* protected in backup_run() */
+        ret = bdrv_co_is_allocated(bs, offset, bytes, &count);
         if (ret < 0) {
             return ret;
         }
@@ -669,8 +677,9 @@ void block_copy_reset(BlockCopyState *s, int64_t offset, int64_t bytes)
  * @return 0 when the cluster at @offset was unallocated,
  *         1 otherwise, and -ret on error.
  */
-int64_t block_copy_reset_unallocated(BlockCopyState *s,
-                                     int64_t offset, int64_t *count)
+int64_t coroutine_fn block_copy_reset_unallocated(BlockCopyState *s,
+                                                  int64_t offset,
+                                                  int64_t *count)
 {
     int ret;
     int64_t clusters, bytes;
@@ -697,7 +706,7 @@ int64_t block_copy_reset_unallocated(BlockCopyState *s,
  * Returns 1 if dirty clusters found and successfully copied, 0 if no dirty
  * clusters found and -errno on failure.
  */
-static int coroutine_fn
+static int coroutine_fn GRAPH_RDLOCK
 block_copy_dirty_clusters(BlockCopyCallState *call_state)
 {
     BlockCopyState *s = call_state->s;
@@ -820,7 +829,8 @@ void block_copy_kick(BlockCopyCallState *call_state)
  * it means that some I/O operation failed in context of _this_ block_copy call,
  * not some parallel operation.
  */
-static int coroutine_fn block_copy_common(BlockCopyCallState *call_state)
+static int coroutine_fn GRAPH_RDLOCK
+block_copy_common(BlockCopyCallState *call_state)
 {
     int ret;
     BlockCopyState *s = call_state->s;
@@ -883,23 +893,43 @@ static int coroutine_fn block_copy_common(BlockCopyCallState *call_state)
     return ret;
 }
 
-int coroutine_fn block_copy(BlockCopyState *s, int64_t start, int64_t bytes,
-                            bool ignore_ratelimit)
+static void coroutine_fn block_copy_async_co_entry(void *opaque)
 {
-    BlockCopyCallState call_state = {
+    GRAPH_RDLOCK_GUARD();
+    block_copy_common(opaque);
+}
+
+int coroutine_fn block_copy(BlockCopyState *s, int64_t start, int64_t bytes,
+                            bool ignore_ratelimit, uint64_t timeout_ns,
+                            BlockCopyAsyncCallbackFunc cb,
+                            void *cb_opaque)
+{
+    int ret;
+    BlockCopyCallState *call_state = g_new(BlockCopyCallState, 1);
+
+    *call_state = (BlockCopyCallState) {
         .s = s,
         .offset = start,
         .bytes = bytes,
         .ignore_ratelimit = ignore_ratelimit,
         .max_workers = BLOCK_COPY_MAX_WORKERS,
+        .cb = cb,
+        .cb_opaque = cb_opaque,
     };
 
-    return block_copy_common(&call_state);
-}
+    ret = qemu_co_timeout(block_copy_async_co_entry, call_state, timeout_ns,
+                          g_free);
+    if (ret < 0) {
+        assert(ret == -ETIMEDOUT);
+        block_copy_call_cancel(call_state);
+        /* call_state will be freed by running coroutine. */
+        return ret;
+    }
 
-static void coroutine_fn block_copy_async_co_entry(void *opaque)
-{
-    block_copy_common(opaque);
+    ret = call_state->ret;
+    g_free(call_state);
+
+    return ret;
 }
 
 BlockCopyCallState *block_copy_async(BlockCopyState *s,

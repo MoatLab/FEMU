@@ -48,7 +48,8 @@
   CpuLib
   DebugLib
   PcdLib
-  VmgExitLib
+  CcExitLib
 
 [FixedPcd]
   gUefiCpuPkgTokenSpaceGuid.PcdSevEsWorkAreaBase
+  gUefiOvmfPkgTokenSpaceGuid.PcdOvmfWorkAreaBase

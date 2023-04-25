@@ -60,7 +60,7 @@
 !include MdePkg/MdeLibs.dsc.inc
 
 [LibraryClasses.common.PEIM]
-  ArmVirtMemInfoLib|ArmVirtPkg/Library/QemuVirtMemInfoLib/QemuVirtMemInfoPeiLib.inf
+  ArmVirtMemInfoLib|ArmVirtPkg/Library/CloudHvVirtMemInfoLib/CloudHvVirtMemInfoPeiLib.inf
 
 [LibraryClasses.common.DXE_DRIVER]
   ReportStatusCodeLib|MdeModulePkg/Library/DxeReportStatusCodeLib/DxeReportStatusCodeLib.inf
@@ -198,7 +198,7 @@
   gEfiSecurityPkgTokenSpaceGuid.PcdTpmBaseAddress|0x0
 
 [PcdsDynamicHii]
-  gArmVirtTokenSpaceGuid.PcdForceNoAcpi|L"ForceNoAcpi"|gArmVirtVariableGuid|0x0|FALSE|NV,BS
+  gUefiOvmfPkgTokenSpaceGuid.PcdForceNoAcpi|L"ForceNoAcpi"|gOvmfVariableGuid|0x0|FALSE|NV,BS
 
 ################################################################################
 #

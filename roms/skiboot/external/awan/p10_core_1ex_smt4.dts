@@ -1,0 +1,69 @@
+/dts-v1/;
+
+/ {
+	compatible = "ibm,powernv";
+	model = "BML";
+	#size-cells = <0x2>;
+	#address-cells = <0x2>;
+
+	reserved-names = "ibm,fake-nvram";
+	reserved-ranges = <0x0 0x28100000 0x0 0x100000>;
+
+	chosen {
+		kernel-base-address = <0x00 0x00>;
+		linux,initrd-start = <0x28200000>;
+		linux,initrd-end = <0x28200800>;
+		linux,stdout-path = "/chosen/stdout";
+	};
+
+	awan {
+		device_type = "core";
+	};
+
+	memory@0 {
+		reg = <0x0 0x0 0x0 0x80000000>;
+		ibm,chip-id = <0x0>;
+		device_type = "memory";
+	};
+
+	cpus {
+		#address-cells = <0x01>;
+		#size-cells = <0x00>;
+
+		PowerPC,POWER10@0 {
+			name = "PowerPC,POWER10";
+			device_type = "cpu";
+			status = "okay";
+			ibm,chip-id = <0x0>;
+			ibm,pir = <0x0>;
+			reg = <0x0>;
+			timebase-frequency = <512000000>;
+			clock-frequency = <3400000000>;
+			ibm,segment-page-sizes = <0x0c 0x00 0x3 0xc 0x0 0x10 0x7 0x18 0x38 0x10 0x110 0x2 0x10 0x1 0x18 0x08 0x18 0x100 0x1 0x18 0x00 0x22 0x120 0x1 0x22 0x03>;
+			ibm,processor-segment-sizes = <0x0000001c 0x28 0xffffffff 0xffffffff>;
+			ibm,vmx = <0x2>;
+			i-cache-size = <0x8000>;
+			d-cache-size = <0x8000>;
+			i-cache-line-size = <0x80>;
+			d-cache-line-size = <0x80>;
+			ibm,slb-size = <0x20>;
+			ibm,ppc-interrupt-server#s = <0x0 0x1 0x2 0x3>;
+			ibm,pa-features = <0x4000f63f 0xc7c080d0 0x80000000 0x00000000 0x00008000 0x80008000 0x00008000 0x80008000 0x00008000 0x80000000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80000000 0x80000000 0x00000000>;
+			ibm,processor-radix-AP-encodings = <0x0000000c 0xa0000010 0x20000015 0x4000001e>;
+			ibm,dfp = <0x2>;
+		};
+	};
+
+	pmem {
+		#address-cells = <0x2>;
+		#size-cells = <0x2>;
+		ranges;
+
+		pmem@80000000 {
+			reg = <0x0 0x80000000 0x0 0x8000000>;
+			ibm,chip-id = <0x00>;
+			compatible = "pmem-region";
+			volatile;
+		};
+	};
+};

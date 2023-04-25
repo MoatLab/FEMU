@@ -63,6 +63,10 @@ directory and executable. Note that if a bootstrap script is required
 (e.g. `autogen.sh` when building from git instead of tarball), it can
 be done using `run_command()` before calling `add_project()` method.
 
+*Since 0.60.0* If the first positional argument is `'waf'`, special treatment
+is done for the [waf](https://waf.io/) build system. The waf executable must be
+found either in the current directory, or in system `PATH`.
+
 Keyword arguments:
 
 - `configure_options`: An array of strings to be passed as arguments to the
@@ -82,7 +86,7 @@ Keyword arguments:
 - `verbose`: If set to `true` the output of sub-commands ran to configure, build
   and install the project will be printed onto Meson's stdout.
 - `env` : environment variables to set, such as `['NAME1=value1', 'NAME2=value2']`,
-  a dictionary, or an [`environment()` object](Reference-manual.md#environment-object).
+  a dictionary, or an [[@env]] object.
 
 Returns an [`ExternalProject`](#ExternalProject_object) object
 

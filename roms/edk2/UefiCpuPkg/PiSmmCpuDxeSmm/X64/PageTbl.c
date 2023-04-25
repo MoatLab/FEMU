@@ -1,7 +1,7 @@
 /** @file
 Page Fault (#PF) handler for X64 processors
 
-Copyright (c) 2009 - 2019, Intel Corporation. All rights reserved.<BR>
+Copyright (c) 2009 - 2022, Intel Corporation. All rights reserved.<BR>
 Copyright (c) 2017, AMD Incorporated. All rights reserved.<BR>
 
 SPDX-License-Identifier: BSD-2-Clause-Patent
@@ -18,26 +18,7 @@ extern UINTN  mSmmShadowStackSize;
 LIST_ENTRY                mPagePool           = INITIALIZE_LIST_HEAD_VARIABLE (mPagePool);
 BOOLEAN                   m1GPageTableSupport = FALSE;
 BOOLEAN                   mCpuSmmRestrictedMemoryAccess;
-BOOLEAN                   m5LevelPagingNeeded;
 X86_ASSEMBLY_PATCH_LABEL  gPatch5LevelPagingNeeded;
-
-/**
-  Disable CET.
-**/
-VOID
-EFIAPI
-DisableCet (
-  VOID
-  );
-
-/**
-  Enable CET.
-**/
-VOID
-EFIAPI
-EnableCet (
-  VOID
-  );
 
 /**
   Check if 1-GByte pages is supported by processor or not.
@@ -105,41 +86,12 @@ Is5LevelPagingNeeded (
     ExtFeatureEcx.Bits.FiveLevelPage
     ));
 
-  if (VirPhyAddressSize.Bits.PhysicalAddressBits > 4 * 9 + 12) {
-    ASSERT (ExtFeatureEcx.Bits.FiveLevelPage == 1);
+  if ((VirPhyAddressSize.Bits.PhysicalAddressBits > 4 * 9 + 12) &&
+      (ExtFeatureEcx.Bits.FiveLevelPage == 1))
+  {
     return TRUE;
   } else {
     return FALSE;
-  }
-}
-
-/**
-  Get page table base address and the depth of the page table.
-
-  @param[out] Base        Page table base address.
-  @param[out] FiveLevels  TRUE means 5 level paging. FALSE means 4 level paging.
-**/
-VOID
-GetPageTable (
-  OUT UINTN    *Base,
-  OUT BOOLEAN  *FiveLevels OPTIONAL
-  )
-{
-  IA32_CR4  Cr4;
-
-  if (mInternalCr3 == 0) {
-    *Base = AsmReadCr3 () & PAGING_4K_ADDRESS_MASK_64;
-    if (FiveLevels != NULL) {
-      Cr4.UintN   = AsmReadCr4 ();
-      *FiveLevels = (BOOLEAN)(Cr4.Bits.LA57 == 1);
-    }
-
-    return;
-  }
-
-  *Base = mInternalCr3;
-  if (FiveLevels != NULL) {
-    *FiveLevels = m5LevelPagingNeeded;
   }
 }
 
@@ -1185,154 +1137,6 @@ SmiPFHandler (
 
 Exit:
   ReleaseSpinLock (mPFLock);
-}
-
-/**
-  This function sets memory attribute for page table.
-**/
-VOID
-SetPageTableAttributes (
-  VOID
-  )
-{
-  UINTN    Index2;
-  UINTN    Index3;
-  UINTN    Index4;
-  UINTN    Index5;
-  UINT64   *L1PageTable;
-  UINT64   *L2PageTable;
-  UINT64   *L3PageTable;
-  UINT64   *L4PageTable;
-  UINT64   *L5PageTable;
-  UINTN    PageTableBase;
-  BOOLEAN  IsSplitted;
-  BOOLEAN  PageTableSplitted;
-  BOOLEAN  CetEnabled;
-  BOOLEAN  Enable5LevelPaging;
-
-  //
-  // Don't mark page table memory as read-only if
-  //  - no restriction on access to non-SMRAM memory; or
-  //  - SMM heap guard feature enabled; or
-  //      BIT2: SMM page guard enabled
-  //      BIT3: SMM pool guard enabled
-  //  - SMM profile feature enabled
-  //
-  if (!mCpuSmmRestrictedMemoryAccess ||
-      ((PcdGet8 (PcdHeapGuardPropertyMask) & (BIT3 | BIT2)) != 0) ||
-      FeaturePcdGet (PcdCpuSmmProfileEnable))
-  {
-    //
-    // Restriction on access to non-SMRAM memory and heap guard could not be enabled at the same time.
-    //
-    ASSERT (
-      !(mCpuSmmRestrictedMemoryAccess &&
-        (PcdGet8 (PcdHeapGuardPropertyMask) & (BIT3 | BIT2)) != 0)
-      );
-
-    //
-    // Restriction on access to non-SMRAM memory and SMM profile could not be enabled at the same time.
-    //
-    ASSERT (!(mCpuSmmRestrictedMemoryAccess && FeaturePcdGet (PcdCpuSmmProfileEnable)));
-    return;
-  }
-
-  DEBUG ((DEBUG_INFO, "SetPageTableAttributes\n"));
-
-  //
-  // Disable write protection, because we need mark page table to be write protected.
-  // We need *write* page table memory, to mark itself to be *read only*.
-  //
-  CetEnabled = ((AsmReadCr4 () & CR4_CET_ENABLE) != 0) ? TRUE : FALSE;
-  if (CetEnabled) {
-    //
-    // CET must be disabled if WP is disabled.
-    //
-    DisableCet ();
-  }
-
-  AsmWriteCr0 (AsmReadCr0 () & ~CR0_WP);
-
-  do {
-    DEBUG ((DEBUG_INFO, "Start...\n"));
-    PageTableSplitted = FALSE;
-    L5PageTable       = NULL;
-
-    GetPageTable (&PageTableBase, &Enable5LevelPaging);
-
-    if (Enable5LevelPaging) {
-      L5PageTable = (UINT64 *)PageTableBase;
-      SmmSetMemoryAttributesEx ((EFI_PHYSICAL_ADDRESS)PageTableBase, SIZE_4KB, EFI_MEMORY_RO, &IsSplitted);
-      PageTableSplitted = (PageTableSplitted || IsSplitted);
-    }
-
-    for (Index5 = 0; Index5 < (Enable5LevelPaging ? SIZE_4KB/sizeof (UINT64) : 1); Index5++) {
-      if (Enable5LevelPaging) {
-        L4PageTable = (UINT64 *)(UINTN)(L5PageTable[Index5] & ~mAddressEncMask & PAGING_4K_ADDRESS_MASK_64);
-        if (L4PageTable == NULL) {
-          continue;
-        }
-      } else {
-        L4PageTable = (UINT64 *)PageTableBase;
-      }
-
-      SmmSetMemoryAttributesEx ((EFI_PHYSICAL_ADDRESS)(UINTN)L4PageTable, SIZE_4KB, EFI_MEMORY_RO, &IsSplitted);
-      PageTableSplitted = (PageTableSplitted || IsSplitted);
-
-      for (Index4 = 0; Index4 < SIZE_4KB/sizeof (UINT64); Index4++) {
-        L3PageTable = (UINT64 *)(UINTN)(L4PageTable[Index4] & ~mAddressEncMask & PAGING_4K_ADDRESS_MASK_64);
-        if (L3PageTable == NULL) {
-          continue;
-        }
-
-        SmmSetMemoryAttributesEx ((EFI_PHYSICAL_ADDRESS)(UINTN)L3PageTable, SIZE_4KB, EFI_MEMORY_RO, &IsSplitted);
-        PageTableSplitted = (PageTableSplitted || IsSplitted);
-
-        for (Index3 = 0; Index3 < SIZE_4KB/sizeof (UINT64); Index3++) {
-          if ((L3PageTable[Index3] & IA32_PG_PS) != 0) {
-            // 1G
-            continue;
-          }
-
-          L2PageTable = (UINT64 *)(UINTN)(L3PageTable[Index3] & ~mAddressEncMask & PAGING_4K_ADDRESS_MASK_64);
-          if (L2PageTable == NULL) {
-            continue;
-          }
-
-          SmmSetMemoryAttributesEx ((EFI_PHYSICAL_ADDRESS)(UINTN)L2PageTable, SIZE_4KB, EFI_MEMORY_RO, &IsSplitted);
-          PageTableSplitted = (PageTableSplitted || IsSplitted);
-
-          for (Index2 = 0; Index2 < SIZE_4KB/sizeof (UINT64); Index2++) {
-            if ((L2PageTable[Index2] & IA32_PG_PS) != 0) {
-              // 2M
-              continue;
-            }
-
-            L1PageTable = (UINT64 *)(UINTN)(L2PageTable[Index2] & ~mAddressEncMask & PAGING_4K_ADDRESS_MASK_64);
-            if (L1PageTable == NULL) {
-              continue;
-            }
-
-            SmmSetMemoryAttributesEx ((EFI_PHYSICAL_ADDRESS)(UINTN)L1PageTable, SIZE_4KB, EFI_MEMORY_RO, &IsSplitted);
-            PageTableSplitted = (PageTableSplitted || IsSplitted);
-          }
-        }
-      }
-    }
-  } while (PageTableSplitted);
-
-  //
-  // Enable write protection, after page table updated.
-  //
-  AsmWriteCr0 (AsmReadCr0 () | CR0_WP);
-  if (CetEnabled) {
-    //
-    // re-enable CET.
-    //
-    EnableCet ();
-  }
-
-  return;
 }
 
 /**

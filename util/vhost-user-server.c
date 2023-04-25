@@ -8,6 +8,7 @@
  * later.  See the COPYING file in the top-level directory.
  */
 #include "qemu/osdep.h"
+#include "qemu/error-report.h"
 #include "qemu/main-loop.h"
 #include "qemu/vhost-user-server.h"
 #include "block/aio-wait.h"
@@ -65,7 +66,7 @@ static void vmsg_unblock_fds(VhostUserMsg *vmsg)
 {
     int i;
     for (i = 0; i < vmsg->fd_num; i++) {
-        qemu_set_nonblock(vmsg->fds[i]);
+        qemu_socket_set_nonblock(vmsg->fds[i]);
     }
 }
 
@@ -116,7 +117,7 @@ vu_message_read(VuDev *vu_dev, int conn_fd, VhostUserMsg *vmsg)
          * qio_channel_readv_full may have short reads, keeping calling it
          * until getting VHOST_USER_HDR_SIZE or 0 bytes in total
          */
-        rc = qio_channel_readv_full(ioc, &iov, 1, &fds, &nfds, &local_err);
+        rc = qio_channel_readv_full(ioc, &iov, 1, &fds, &nfds, 0, &local_err);
         if (rc < 0) {
             if (rc == QIO_CHANNEL_ERR_BLOCK) {
                 assert(local_err == NULL);
@@ -270,7 +271,7 @@ set_watch(VuDev *vu_dev, int fd, int vu_evt,
 
         vu_fd_watch->fd = fd;
         vu_fd_watch->cb = cb;
-        qemu_set_nonblock(fd);
+        qemu_socket_set_nonblock(fd);
         aio_set_fd_handler(server->ioc->ctx, fd, true, kick_handler,
                            NULL, NULL, NULL, vu_fd_watch);
         vu_fd_watch->vu_dev = vu_dev;
@@ -345,10 +346,9 @@ static void vu_accept(QIONetListener *listener, QIOChannelSocket *sioc,
     aio_context_release(server->ctx);
 }
 
+/* server->ctx acquired by caller */
 void vhost_user_server_stop(VuServer *server)
 {
-    aio_context_acquire(server->ctx);
-
     qemu_bh_delete(server->restart_listener_bh);
     server->restart_listener_bh = NULL;
 
@@ -364,8 +364,6 @@ void vhost_user_server_stop(VuServer *server)
 
         AIO_WAIT_WHILE(server->ctx, server->co_trip);
     }
-
-    aio_context_release(server->ctx);
 
     if (server->listener) {
         qio_net_listener_disconnect(server->listener);

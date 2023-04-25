@@ -25,7 +25,7 @@
 #define MSTATUS_MPP			(_UL(3) << MSTATUS_MPP_SHIFT)
 #define MSTATUS_FS			_UL(0x00006000)
 #define MSTATUS_XS			_UL(0x00018000)
-#define MSTATUS_VS			_UL(0x01800000)
+#define MSTATUS_VS			_UL(0x00000600)
 #define MSTATUS_MPRV			_UL(0x00020000)
 #define MSTATUS_SUM			_UL(0x00040000)
 #define MSTATUS_MXR			_UL(0x00080000)
@@ -38,10 +38,14 @@
 #define MSTATUS_SXL			_ULL(0x0000000C00000000)
 #define MSTATUS_SBE			_ULL(0x0000001000000000)
 #define MSTATUS_MBE			_ULL(0x0000002000000000)
+#define MSTATUS_GVA			_ULL(0x0000004000000000)
+#define MSTATUS_GVA_SHIFT		38
 #define MSTATUS_MPV			_ULL(0x0000008000000000)
 #else
 #define MSTATUSH_SBE			_UL(0x00000010)
 #define MSTATUSH_MBE			_UL(0x00000020)
+#define MSTATUSH_GVA			_UL(0x00000040)
+#define MSTATUSH_GVA_SHIFT		6
 #define MSTATUSH_MPV			_UL(0x00000080)
 #endif
 #define MSTATUS32_SD			_UL(0x80000000)
@@ -173,6 +177,10 @@
 #define HGATP_MODE_SHIFT		HGATP32_MODE_SHIFT
 #endif
 
+#define TOPI_IID_SHIFT			16
+#define TOPI_IID_MASK			0xfff
+#define TOPI_IPRIO_MASK		0xff
+
 #if __riscv_xlen == 64
 #define MHPMEVENT_OF			(_UL(1) << 63)
 #define MHPMEVENT_MINH			(_UL(1) << 62)
@@ -181,13 +189,14 @@
 #define MHPMEVENT_VSINH			(_UL(1) << 59)
 #define MHPMEVENT_VUINH			(_UL(1) << 58)
 #else
-#define MHPMEVENTH_OF			(_UL(1) << 31)
+#define MHPMEVENTH_OF			(_ULL(1) << 31)
 #define MHPMEVENTH_MINH			(_ULL(1) << 30)
 #define MHPMEVENTH_SINH			(_ULL(1) << 29)
 #define MHPMEVENTH_UINH			(_ULL(1) << 28)
 #define MHPMEVENTH_VSINH		(_ULL(1) << 27)
 #define MHPMEVENTH_VUINH		(_ULL(1) << 26)
 
+#define MHPMEVENT_OF			(MHPMEVENTH_OF << 32)
 #define MHPMEVENT_MINH			(MHPMEVENTH_MINH << 32)
 #define MHPMEVENT_SINH			(MHPMEVENTH_SINH << 32)
 #define MHPMEVENT_UINH			(MHPMEVENTH_UINH << 32)
@@ -197,6 +206,22 @@
 #endif
 
 #define MHPMEVENT_SSCOF_MASK		_ULL(0xFFFF000000000000)
+
+#if __riscv_xlen > 32
+#define ENVCFG_STCE			(_ULL(1) << 63)
+#define ENVCFG_PBMTE			(_ULL(1) << 62)
+#else
+#define ENVCFGH_STCE			(_UL(1) << 31)
+#define ENVCFGH_PBMTE			(_UL(1) << 30)
+#endif
+#define ENVCFG_CBZE			(_UL(1) << 7)
+#define ENVCFG_CBCFE			(_UL(1) << 6)
+#define ENVCFG_CBIE_SHIFT		4
+#define ENVCFG_CBIE			(_UL(0x3) << ENVCFG_CBIE_SHIFT)
+#define ENVCFG_CBIE_ILL			_UL(0x0)
+#define ENVCFG_CBIE_FLUSH		_UL(0x1)
+#define ENVCFG_CBIE_INV			_UL(0x3)
+#define ENVCFG_FIOM			_UL(0x1)
 
 /* ===== User-level CSRs ===== */
 
@@ -287,11 +312,12 @@
 
 /* Supervisor Trap Setup */
 #define CSR_SSTATUS			0x100
-#define CSR_SEDELEG			0x102
-#define CSR_SIDELEG			0x103
 #define CSR_SIE				0x104
 #define CSR_STVEC			0x105
 #define CSR_SCOUNTEREN			0x106
+
+/* Supervisor Configuration */
+#define CSR_SENVCFG			0x10a
 
 /* Supervisor Trap Handling */
 #define CSR_SSCRATCH			0x140
@@ -300,8 +326,30 @@
 #define CSR_STVAL			0x143
 #define CSR_SIP				0x144
 
+/* Sstc extension */
+#define CSR_STIMECMP			0x14D
+#define CSR_STIMECMPH			0x15D
+
 /* Supervisor Protection and Translation */
 #define CSR_SATP			0x180
+
+/* Supervisor-Level Window to Indirectly Accessed Registers (AIA) */
+#define CSR_SISELECT			0x150
+#define CSR_SIREG			0x151
+
+/* Supervisor-Level Interrupts (AIA) */
+#define CSR_STOPEI			0x15c
+#define CSR_STOPI			0xdb0
+
+/* Supervisor-Level High-Half CSRs (AIA) */
+#define CSR_SIEH			0x114
+#define CSR_SIPH			0x154
+
+/* Supervisor stateen CSRs */
+#define CSR_SSTATEEN0			0x10C
+#define CSR_SSTATEEN1			0x10D
+#define CSR_SSTATEEN2			0x10E
+#define CSR_SSTATEEN3			0x10F
 
 /* ===== Hypervisor-level CSRs ===== */
 
@@ -312,6 +360,10 @@
 #define CSR_HIE				0x604
 #define CSR_HCOUNTEREN			0x606
 #define CSR_HGEIE			0x607
+
+/* Hypervisor Configuration */
+#define CSR_HENVCFG			0x60a
+#define CSR_HENVCFGH			0x61a
 
 /* Hypervisor Trap Handling (H-extension) */
 #define CSR_HTVAL			0x643
@@ -338,6 +390,39 @@
 #define CSR_VSIP			0x244
 #define CSR_VSATP			0x280
 
+/* Virtual Interrupts and Interrupt Priorities (H-extension with AIA) */
+#define CSR_HVIEN			0x608
+#define CSR_HVICTL			0x609
+#define CSR_HVIPRIO1			0x646
+#define CSR_HVIPRIO2			0x647
+
+/* VS-Level Window to Indirectly Accessed Registers (H-extension with AIA) */
+#define CSR_VSISELECT			0x250
+#define CSR_VSIREG			0x251
+
+/* VS-Level Interrupts (H-extension with AIA) */
+#define CSR_VSTOPEI			0x25c
+#define CSR_VSTOPI			0xeb0
+
+/* Hypervisor and VS-Level High-Half CSRs (H-extension with AIA) */
+#define CSR_HIDELEGH			0x613
+#define CSR_HVIENH			0x618
+#define CSR_HVIPH			0x655
+#define CSR_HVIPRIO1H			0x656
+#define CSR_HVIPRIO2H			0x657
+#define CSR_VSIEH			0x214
+#define CSR_VSIPH			0x254
+
+/* Hypervisor stateen CSRs */
+#define CSR_HSTATEEN0			0x60C
+#define CSR_HSTATEEN0H			0x61C
+#define CSR_HSTATEEN1			0x60D
+#define CSR_HSTATEEN1H			0x61D
+#define CSR_HSTATEEN2			0x60E
+#define CSR_HSTATEEN2H			0x61E
+#define CSR_HSTATEEN3			0x60F
+#define CSR_HSTATEEN3H			0x61F
+
 /* ===== Machine-level CSRs ===== */
 
 /* Machine Information Registers */
@@ -355,6 +440,10 @@
 #define CSR_MTVEC			0x305
 #define CSR_MCOUNTEREN			0x306
 #define CSR_MSTATUSH			0x310
+
+/* Machine Configuration */
+#define CSR_MENVCFG			0x30a
+#define CSR_MENVCFGH			0x31a
 
 /* Machine Trap Handling */
 #define CSR_MSCRATCH			0x340
@@ -589,6 +678,36 @@
 #define CSR_DSCRATCH0			0x7b2
 #define CSR_DSCRATCH1			0x7b3
 
+/* Machine-Level Window to Indirectly Accessed Registers (AIA) */
+#define CSR_MISELECT			0x350
+#define CSR_MIREG			0x351
+
+/* Machine-Level Interrupts (AIA) */
+#define CSR_MTOPEI			0x35c
+#define CSR_MTOPI			0xfb0
+
+/* Virtual Interrupts for Supervisor Level (AIA) */
+#define CSR_MVIEN			0x308
+#define CSR_MVIP			0x309
+
+/* Smstateen extension registers */
+/* Machine stateen CSRs */
+#define CSR_MSTATEEN0			0x30C
+#define CSR_MSTATEEN0H			0x31C
+#define CSR_MSTATEEN1			0x30D
+#define CSR_MSTATEEN1H			0x31D
+#define CSR_MSTATEEN2			0x30E
+#define CSR_MSTATEEN2H			0x31E
+#define CSR_MSTATEEN3			0x30F
+#define CSR_MSTATEEN3H			0x31F
+
+/* Machine-Level High-Half CSRs (AIA) */
+#define CSR_MIDELEGH			0x313
+#define CSR_MIEH			0x314
+#define CSR_MVIENH			0x318
+#define CSR_MVIPH			0x319
+#define CSR_MIPH			0x354
+
 /* ===== Trap/Exception Causes ===== */
 
 #define CAUSE_MISALIGNED_FETCH		0x0
@@ -610,6 +729,23 @@
 #define CAUSE_LOAD_GUEST_PAGE_FAULT	0x15
 #define CAUSE_VIRTUAL_INST_FAULT	0x16
 #define CAUSE_STORE_GUEST_PAGE_FAULT	0x17
+
+/* Common defines for all smstateen */
+#define SMSTATEEN_MAX_COUNT		4
+#define SMSTATEEN0_CS_SHIFT		0
+#define SMSTATEEN0_CS			(_ULL(1) << SMSTATEEN0_CS_SHIFT)
+#define SMSTATEEN0_FCSR_SHIFT		1
+#define SMSTATEEN0_FCSR			(_ULL(1) << SMSTATEEN0_FCSR_SHIFT)
+#define SMSTATEEN0_IMSIC_SHIFT		58
+#define SMSTATEEN0_IMSIC		(_ULL(1) << SMSTATEEN0_IMSIC_SHIFT)
+#define SMSTATEEN0_AIA_SHIFT		59
+#define SMSTATEEN0_AIA			(_ULL(1) << SMSTATEEN0_AIA_SHIFT)
+#define SMSTATEEN0_SVSLCT_SHIFT		60
+#define SMSTATEEN0_SVSLCT		(_ULL(1) << SMSTATEEN0_SVSLCT_SHIFT)
+#define SMSTATEEN0_HSENVCFG_SHIFT	62
+#define SMSTATEEN0_HSENVCFG		(_ULL(1) << SMSTATEEN0_HSENVCFG_SHIFT)
+#define SMSTATEEN_STATEN_SHIFT		63
+#define SMSTATEEN_STATEN		(_ULL(1) << SMSTATEEN_STATEN_SHIFT)
 
 /* ===== Instruction Encodings ===== */
 
@@ -685,6 +821,29 @@
 
 #define INSN_MASK_WFI			0xffffff00
 #define INSN_MATCH_WFI			0x10500000
+
+#define INSN_MASK_FENCE_TSO		0xffffffff
+#define INSN_MATCH_FENCE_TSO		0x8330000f
+
+#if __riscv_xlen == 64
+
+/* 64-bit read for VS-stage address translation (RV64) */
+#define INSN_PSEUDO_VS_LOAD		0x00003000
+
+/* 64-bit write for VS-stage address translation (RV64) */
+#define INSN_PSEUDO_VS_STORE	0x00003020
+
+#elif __riscv_xlen == 32
+
+/* 32-bit read for VS-stage address translation (RV32) */
+#define INSN_PSEUDO_VS_LOAD		0x00002000
+
+/* 32-bit write for VS-stage address translation (RV32) */
+#define INSN_PSEUDO_VS_STORE	0x00002020
+
+#else
+#error "Unexpected __riscv_xlen"
+#endif
 
 #define INSN_16BIT_MASK			0x3
 #define INSN_32BIT_MASK			0x1c

@@ -134,7 +134,7 @@ static int64_t phb3_pcicfg_check(struct phb3 *p, uint32_t bdfn,
 		return OPAL_HARDWARE;
 
 	/* Fetch the PE# from cache */
-	*pe = p->rte_cache[bdfn];
+	*pe = be16_to_cpu(p->rte_cache[bdfn]);
 
 	return OPAL_SUCCESS;
 }
@@ -444,7 +444,6 @@ static void phb3_switch_port_init(struct phb *phb,
 				  struct pci_device *dev,
 				  int ecap, int aercap)
 {
-	struct phb3 *p = phb_to_phb3(phb);
 	uint16_t bdfn = dev->bdfn;
 	uint16_t val16;
 	uint32_t val32;
@@ -498,17 +497,8 @@ static void phb3_switch_port_init(struct phb *phb,
 			 PCIECAP_AER_UE_SEVERITY_INTERNAL);
 	pci_cfg_write32(phb, bdfn, aercap + PCIECAP_AER_UE_SEVERITY, val32);
 
-	/*
-	 * Mask various correctable errors
-	 *
-         * On Murano and Venice DD1.0 we disable emission of corrected
-         * error messages to the PHB completely to workaround errata
-         * HW257476 causing the loss of tags.
-	 */
-	if (p->rev < PHB3_REV_MURANO_DD20)
-		val32 = 0xffffffff;
-	else
-		val32 = PCIECAP_AER_CE_MASK_ADV_NONFATAL;
+	/* Mask various correctable errors */
+	val32 = PCIECAP_AER_CE_MASK_ADV_NONFATAL;
 	pci_cfg_write32(phb, bdfn, aercap + PCIECAP_AER_CE_MASK, val32);
 
 	/* Enable ECRC generation and disable ECRC check */
@@ -522,7 +512,6 @@ static void phb3_endpoint_init(struct phb *phb,
 			       struct pci_device *dev,
 			       int ecap, int aercap)
 {
-	struct phb3 *p = phb_to_phb3(phb);
 	uint16_t bdfn = dev->bdfn;
 	uint16_t val16;
 	uint32_t val32;
@@ -543,15 +532,6 @@ static void phb3_endpoint_init(struct phb *phb,
 	/* HW279570 - Disable reporting of correctable errors */
 	val16 &= ~PCICAP_EXP_DEVCTL_CE_REPORT;
 	pci_cfg_write16(phb, bdfn, ecap + PCICAP_EXP_DEVCTL, val16);
-
-	/*
-	 * On Murano and Venice DD1.0 we disable emission of corrected
-	 * error messages to the PHB completely to workaround errata
-	 * HW257476 causing the loss of tags.
-	 */
-	if (p->rev < PHB3_REV_MURANO_DD20)
-		pci_cfg_write32(phb, bdfn, aercap + PCIECAP_AER_CE_MASK,
-				0xffffffff);
 
 	/* Enable ECRC generation and check */
 	pci_cfg_read32(phb, bdfn, aercap + PCIECAP_AER_CAPCTL, &val32);
@@ -734,7 +714,6 @@ static int64_t phb3_pci_reinit(struct phb *phb, uint64_t scope, uint64_t data)
 static void phb3_init_ioda_cache(struct phb3 *p)
 {
 	uint32_t i;
-	uint64_t *data64;
 
 	/*
 	 * RTT and PELTV. RTE should be 0xFF's to indicate
@@ -757,21 +736,26 @@ static void phb3_init_ioda_cache(struct phb3 *p)
 	 * for EEH etc... (HW278969).
 	 */
 	for (i = 0; i < ARRAY_SIZE(p->rte_cache); i++)
-		p->rte_cache[i] = PHB3_RESERVED_PE_NUM;
+		p->rte_cache[i] = cpu_to_be16(PHB3_RESERVED_PE_NUM);
 	memset(p->peltv_cache, 0x0,  sizeof(p->peltv_cache));
 
 	/* Disable all LSI */
 	for (i = 0; i < ARRAY_SIZE(p->lxive_cache); i++) {
-		data64 = &p->lxive_cache[i];
-		*data64 = SETFIELD(IODA2_LXIVT_PRIORITY, 0ul, 0xff);
-		*data64 = SETFIELD(IODA2_LXIVT_SERVER, *data64, 0x0);
+		uint64_t val;
+
+		val = SETFIELD(IODA2_LXIVT_PRIORITY, 0ul, 0xff);
+		val = SETFIELD(IODA2_LXIVT_SERVER, val, 0x0);
+		p->lxive_cache[i] = val;
 	}
 
 	/* Diable all MSI */
 	for (i = 0; i < ARRAY_SIZE(p->ive_cache); i++) {
-		data64 = &p->ive_cache[i];
-		*data64 = SETFIELD(IODA2_IVT_PRIORITY, 0ul, 0xff);
-		*data64 = SETFIELD(IODA2_IVT_SERVER, *data64, 0x0);
+		uint64_t val;
+
+		val = SETFIELD(IODA2_IVT_PRIORITY, 0ul, 0xff);
+		val = SETFIELD(IODA2_IVT_SERVER, val, 0x0);
+
+		p->ive_cache[i] = cpu_to_be64(val);
 	}
 
 	/* Clear TVT */
@@ -796,7 +780,7 @@ static int64_t phb3_ioda_reset(struct phb *phb, bool purge)
 {
 	struct phb3 *p = phb_to_phb3(phb);
 	uint64_t server, prio;
-	uint64_t *pdata64, data64;
+	uint64_t data64;
 	uint32_t i;
 
 	if (purge) {
@@ -838,15 +822,14 @@ static int64_t phb3_ioda_reset(struct phb *phb, bool purge)
 
 	/* Load RTE, PELTV */
 	if (p->tbl_rtt)
-		memcpy((void *)p->tbl_rtt, p->rte_cache, RTT_TABLE_SIZE);
+		memcpy(p->tbl_rtt, p->rte_cache, RTT_TABLE_SIZE);
 	if (p->tbl_peltv)
-		memcpy((void *)p->tbl_peltv, p->peltv_cache, PELTV_TABLE_SIZE);
+		memcpy(p->tbl_peltv, p->peltv_cache, PELTV_TABLE_SIZE);
 
 	/* Load IVT */
 	if (p->tbl_ivt) {
-		pdata64 = (uint64_t *)p->tbl_ivt;
 		for (i = 0; i < IVT_TABLE_ENTRIES; i++)
-			pdata64[i * IVT_TABLE_STRIDE] = p->ive_cache[i];
+			p->tbl_ivt[i * IVT_TABLE_STRIDE] = p->ive_cache[i];
 	}
 
 	/* Invalidate RTE, IVE, TCE cache */
@@ -855,11 +838,9 @@ static int64_t phb3_ioda_reset(struct phb *phb, bool purge)
 	out_be64(p->regs + PHB_TCE_KILL, PHB_TCE_KILL_ALL);
 
 	/* Clear RBA */
-	if (p->rev >= PHB3_REV_MURANO_DD20) {
-		phb3_ioda_sel(p, IODA2_TBL_RBA, 0, true);
-		for (i = 0; i < 32; i++)
-			out_be64(p->regs + PHB_IODA_DATA0, 0x0ul);
-	}
+	phb3_ioda_sel(p, IODA2_TBL_RBA, 0, true);
+	for (i = 0; i < 32; i++)
+		out_be64(p->regs + PHB_IODA_DATA0, 0x0ul);
 
 	/* Clear PEST & PEEV */
 	for (i = 0; i < PHB3_MAX_PE_NUM; i++) {
@@ -1234,11 +1215,12 @@ static int64_t phb3_map_pe_dma_window_real(struct phb *phb,
 
 static bool phb3_pci_msi_check_q(struct phb3 *p, uint32_t ive_num)
 {
-	uint64_t ive, ivc, ffi, state;
+	uint64_t ivc, ffi, state;
+	void *ive;
 	uint8_t *q_byte;
 
 	/* Each IVE has 16-bytes or 128-bytes */
-	ive = p->tbl_ivt + (ive_num * IVT_TABLE_STRIDE * 8);
+	ive = p->tbl_ivt + (ive_num * IVT_TABLE_STRIDE);
 	q_byte = (uint8_t *)(ive + 5);
 
 	/*
@@ -1295,8 +1277,9 @@ static int64_t phb3_pci_msi_eoi(struct phb *phb,
 				uint32_t hwirq)
 {
 	struct phb3 *p = phb_to_phb3(phb);
+	void *ive;
 	uint32_t ive_num = PHB3_IRQ_NUM(hwirq);
-	uint64_t ive, ivc;
+	uint64_t ivc;
 	uint8_t *p_byte, gp, gen, newgen;
 
 	/* OS might not configure IVT yet */
@@ -1304,7 +1287,7 @@ static int64_t phb3_pci_msi_eoi(struct phb *phb,
 		return OPAL_HARDWARE;
 
 	/* Each IVE has 16-bytes or 128-bytes */
-	ive = p->tbl_ivt + (ive_num * IVT_TABLE_STRIDE * 8);
+	ive = p->tbl_ivt + (ive_num * IVT_TABLE_STRIDE);
 	p_byte = (uint8_t *)(ive + 4);
 
 	/* Read generation and P */
@@ -1358,8 +1341,9 @@ static int64_t phb3_set_ive_pe(struct phb *phb,
 			       uint32_t ive_num)
 {
 	struct phb3 *p = phb_to_phb3(phb);
-	uint64_t *cache, ivep, data64;
-	uint16_t *pe_word;
+	void *ivep;
+	uint64_t data64;
+	__be16 *pe_word;
 
 	/* OS should enable the BAR in advance */
 	if (!p->tbl_ivt)
@@ -1371,13 +1355,14 @@ static int64_t phb3_set_ive_pe(struct phb *phb,
 		return OPAL_PARAMETER;
 
 	/* Update IVE cache */
-	cache = &p->ive_cache[ive_num];
-	*cache = SETFIELD(IODA2_IVT_PE, *cache, pe_number);
+	data64 = be64_to_cpu(p->ive_cache[ive_num]);
+	data64 = SETFIELD(IODA2_IVT_PE, data64, pe_number);
+	p->ive_cache[ive_num] = cpu_to_be64(data64);
 
 	/* Update in-memory IVE without clobbering P and Q */
-	ivep = p->tbl_ivt + (ive_num * IVT_TABLE_STRIDE * 8);
-	pe_word = (uint16_t *)(ivep + 6);
-	*pe_word = pe_number;
+	ivep = p->tbl_ivt + (ive_num * IVT_TABLE_STRIDE);
+	pe_word = ivep + 6;
+	*pe_word = cpu_to_be16(pe_number);
 
 	/* Invalidate IVC */
 	data64 = SETFIELD(PHB_IVC_INVALIDATE_SID, 0ul, ive_num);
@@ -1650,17 +1635,18 @@ static void phb3_err_ER_clear(struct phb3 *p)
 static void phb3_read_phb_status(struct phb3 *p,
 				 struct OpalIoPhb3ErrorData *stat)
 {
-	uint16_t val;
-	uint64_t *pPEST;
 	uint64_t val64 = 0;
 	uint32_t i;
+	uint16_t __16;
+	uint32_t __32;
+	uint64_t __64;
 
 	memset(stat, 0, sizeof(struct OpalIoPhb3ErrorData));
 
 	/* Error data common part */
-	stat->common.version = OPAL_PHB_ERROR_DATA_VERSION_1;
-	stat->common.ioType  = OPAL_PHB_ERROR_DATA_TYPE_PHB3;
-	stat->common.len     = sizeof(struct OpalIoPhb3ErrorData);
+	stat->common.version = cpu_to_be32(OPAL_PHB_ERROR_DATA_VERSION_1);
+	stat->common.ioType  = cpu_to_be32(OPAL_PHB_ERROR_DATA_TYPE_PHB3);
+	stat->common.len     = cpu_to_be32(sizeof(struct OpalIoPhb3ErrorData));
 
 	/*
 	 * We read some registers using config space through AIB.
@@ -1673,104 +1659,107 @@ static void phb3_read_phb_status(struct phb3 *p,
 	p->flags |= PHB3_CFG_USE_ASB;
 
 	/* Grab RC bridge control, make it 32-bit */
-	phb3_pcicfg_read16(&p->phb, 0, PCI_CFG_BRCTL, &val);
-	stat->brdgCtl = val;
+	phb3_pcicfg_read16(&p->phb, 0, PCI_CFG_BRCTL, &__16);
+	stat->brdgCtl = cpu_to_be32(__16);
 
 	/* Grab UTL status registers */
-	stat->portStatusReg = hi32(phb3_read_reg_asb(p, UTL_PCIE_PORT_STATUS));
-	stat->rootCmplxStatus = hi32(phb3_read_reg_asb(p, UTL_RC_STATUS));
-	stat->busAgentStatus = hi32(phb3_read_reg_asb(p, UTL_SYS_BUS_AGENT_STATUS));
+	stat->portStatusReg = cpu_to_be32(hi32(phb3_read_reg_asb(p, UTL_PCIE_PORT_STATUS)));
+	stat->rootCmplxStatus = cpu_to_be32(hi32(phb3_read_reg_asb(p, UTL_RC_STATUS)));
+	stat->busAgentStatus = cpu_to_be32(hi32(phb3_read_reg_asb(p, UTL_SYS_BUS_AGENT_STATUS)));
 
 	/*
 	 * Grab various RC PCIe capability registers. All device, slot
 	 * and link status are 16-bit, so we grab the pair control+status
 	 * for each of them
 	 */
-	phb3_pcicfg_read32(&p->phb, 0, p->ecap + PCICAP_EXP_DEVCTL,
-			   &stat->deviceStatus);
-	phb3_pcicfg_read32(&p->phb, 0, p->ecap + PCICAP_EXP_SLOTCTL,
-			   &stat->slotStatus);
-	phb3_pcicfg_read32(&p->phb, 0, p->ecap + PCICAP_EXP_LCTL,
-			   &stat->linkStatus);
+	phb3_pcicfg_read32(&p->phb, 0, p->ecap + PCICAP_EXP_DEVCTL, &__32);
+	stat->deviceStatus = cpu_to_be32(__32);
+	phb3_pcicfg_read32(&p->phb, 0, p->ecap + PCICAP_EXP_SLOTCTL, &__32);
+	stat->slotStatus = cpu_to_be32(__32);
+	phb3_pcicfg_read32(&p->phb, 0, p->ecap + PCICAP_EXP_LCTL, &__32);
+	stat->linkStatus = cpu_to_be32(__32);
 
 	/*
 	 * I assume those are the standard config space header, cmd & status
 	 * together makes 32-bit. Secondary status is 16-bit so I'll clear
 	 * the top on that one
 	 */
-	phb3_pcicfg_read32(&p->phb, 0, PCI_CFG_CMD, &stat->devCmdStatus);
-	phb3_pcicfg_read16(&p->phb, 0, PCI_CFG_SECONDARY_STATUS, &val);
-	stat->devSecStatus = val;
+	phb3_pcicfg_read32(&p->phb, 0, PCI_CFG_CMD, &__32);
+	stat->devCmdStatus = cpu_to_be32(__32);
+	phb3_pcicfg_read16(&p->phb, 0, PCI_CFG_SECONDARY_STATUS, &__16);
+	stat->devSecStatus = cpu_to_be32(__16);
 
 	/* Grab a bunch of AER regs */
-	phb3_pcicfg_read32(&p->phb, 0, p->aercap + PCIECAP_AER_RERR_STA,
-			   &stat->rootErrorStatus);
-	phb3_pcicfg_read32(&p->phb, 0, p->aercap + PCIECAP_AER_UE_STATUS,
-			   &stat->uncorrErrorStatus);
-	phb3_pcicfg_read32(&p->phb, 0, p->aercap + PCIECAP_AER_CE_STATUS,
-			   &stat->corrErrorStatus);
-	phb3_pcicfg_read32(&p->phb, 0, p->aercap + PCIECAP_AER_HDR_LOG0,
-			   &stat->tlpHdr1);
-	phb3_pcicfg_read32(&p->phb, 0, p->aercap + PCIECAP_AER_HDR_LOG1,
-			   &stat->tlpHdr2);
-	phb3_pcicfg_read32(&p->phb, 0, p->aercap + PCIECAP_AER_HDR_LOG2,
-			   &stat->tlpHdr3);
-	phb3_pcicfg_read32(&p->phb, 0, p->aercap + PCIECAP_AER_HDR_LOG3,
-			   &stat->tlpHdr4);
-	phb3_pcicfg_read32(&p->phb, 0, p->aercap + PCIECAP_AER_SRCID,
-			   &stat->sourceId);
+	phb3_pcicfg_read32(&p->phb, 0, p->aercap + PCIECAP_AER_RERR_STA, &__32);
+	stat->rootErrorStatus = cpu_to_be32(__32);
+	phb3_pcicfg_read32(&p->phb, 0, p->aercap + PCIECAP_AER_UE_STATUS, &__32);
+	stat->uncorrErrorStatus = cpu_to_be32(__32);
+	phb3_pcicfg_read32(&p->phb, 0, p->aercap + PCIECAP_AER_CE_STATUS, &__32);
+	stat->corrErrorStatus = cpu_to_be32(__32);
+	phb3_pcicfg_read32(&p->phb, 0, p->aercap + PCIECAP_AER_HDR_LOG0, &__32);
+	stat->tlpHdr1 = cpu_to_be32(__32);
+	phb3_pcicfg_read32(&p->phb, 0, p->aercap + PCIECAP_AER_HDR_LOG1, &__32);
+	stat->tlpHdr2 = cpu_to_be32(__32);
+	phb3_pcicfg_read32(&p->phb, 0, p->aercap + PCIECAP_AER_HDR_LOG2, &__32);
+	stat->tlpHdr3 = cpu_to_be32(__32);
+	phb3_pcicfg_read32(&p->phb, 0, p->aercap + PCIECAP_AER_HDR_LOG3, &__32);
+	stat->tlpHdr4 = cpu_to_be32(__32);
+	phb3_pcicfg_read32(&p->phb, 0, p->aercap + PCIECAP_AER_SRCID, &__32);
+	stat->sourceId = cpu_to_be32(__32);
 
 	/* Restore to AIB */
 	p->flags &= ~PHB3_CFG_USE_ASB;
 
 	/* PEC NFIR */
-	xscom_read(p->chip_id, p->pe_xscom + 0x0, &stat->nFir);
-	xscom_read(p->chip_id, p->pe_xscom + 0x3, &stat->nFirMask);
-	xscom_read(p->chip_id, p->pe_xscom + 0x8, &stat->nFirWOF);
+	xscom_read(p->chip_id, p->pe_xscom + 0x0, &__64);
+	stat->nFir = cpu_to_be64(__64);
+	xscom_read(p->chip_id, p->pe_xscom + 0x3, &__64);
+	stat->nFirMask = cpu_to_be64(__64);
+	xscom_read(p->chip_id, p->pe_xscom + 0x8, &__64);
+	stat->nFirWOF = cpu_to_be64(__64);
 
 	/* PHB3 inbound and outbound error Regs */
-	stat->phbPlssr = phb3_read_reg_asb(p, PHB_CPU_LOADSTORE_STATUS);
-	stat->phbCsr = phb3_read_reg_asb(p, PHB_DMA_CHAN_STATUS);
-	stat->lemFir = phb3_read_reg_asb(p, PHB_LEM_FIR_ACCUM);
-	stat->lemErrorMask = phb3_read_reg_asb(p, PHB_LEM_ERROR_MASK);
-	stat->lemWOF = phb3_read_reg_asb(p, PHB_LEM_WOF);
-	stat->phbErrorStatus = phb3_read_reg_asb(p, PHB_ERR_STATUS);
-	stat->phbFirstErrorStatus = phb3_read_reg_asb(p, PHB_ERR1_STATUS);
-	stat->phbErrorLog0 = phb3_read_reg_asb(p, PHB_ERR_LOG_0);
-	stat->phbErrorLog1 = phb3_read_reg_asb(p, PHB_ERR_LOG_1);
-	stat->mmioErrorStatus = phb3_read_reg_asb(p, PHB_OUT_ERR_STATUS);
-	stat->mmioFirstErrorStatus = phb3_read_reg_asb(p, PHB_OUT_ERR1_STATUS);
-	stat->mmioErrorLog0 = phb3_read_reg_asb(p, PHB_OUT_ERR_LOG_0);
-	stat->mmioErrorLog1 = phb3_read_reg_asb(p, PHB_OUT_ERR_LOG_1);
-	stat->dma0ErrorStatus = phb3_read_reg_asb(p, PHB_INA_ERR_STATUS);
-	stat->dma0FirstErrorStatus = phb3_read_reg_asb(p, PHB_INA_ERR1_STATUS);
-	stat->dma0ErrorLog0 = phb3_read_reg_asb(p, PHB_INA_ERR_LOG_0);
-	stat->dma0ErrorLog1 = phb3_read_reg_asb(p, PHB_INA_ERR_LOG_1);
-	stat->dma1ErrorStatus = phb3_read_reg_asb(p, PHB_INB_ERR_STATUS);
-	stat->dma1FirstErrorStatus = phb3_read_reg_asb(p, PHB_INB_ERR1_STATUS);
-	stat->dma1ErrorLog0 = phb3_read_reg_asb(p, PHB_INB_ERR_LOG_0);
-	stat->dma1ErrorLog1 = phb3_read_reg_asb(p, PHB_INB_ERR_LOG_1);
+	stat->phbPlssr = cpu_to_be64(phb3_read_reg_asb(p, PHB_CPU_LOADSTORE_STATUS));
+	stat->phbCsr = cpu_to_be64(phb3_read_reg_asb(p, PHB_DMA_CHAN_STATUS));
+	stat->lemFir = cpu_to_be64(phb3_read_reg_asb(p, PHB_LEM_FIR_ACCUM));
+	stat->lemErrorMask = cpu_to_be64(phb3_read_reg_asb(p, PHB_LEM_ERROR_MASK));
+	stat->lemWOF = cpu_to_be64(phb3_read_reg_asb(p, PHB_LEM_WOF));
+	stat->phbErrorStatus = cpu_to_be64(phb3_read_reg_asb(p, PHB_ERR_STATUS));
+	stat->phbFirstErrorStatus = cpu_to_be64(phb3_read_reg_asb(p, PHB_ERR1_STATUS));
+	stat->phbErrorLog0 = cpu_to_be64(phb3_read_reg_asb(p, PHB_ERR_LOG_0));
+	stat->phbErrorLog1 = cpu_to_be64(phb3_read_reg_asb(p, PHB_ERR_LOG_1));
+	stat->mmioErrorStatus = cpu_to_be64(phb3_read_reg_asb(p, PHB_OUT_ERR_STATUS));
+	stat->mmioFirstErrorStatus = cpu_to_be64(phb3_read_reg_asb(p, PHB_OUT_ERR1_STATUS));
+	stat->mmioErrorLog0 = cpu_to_be64(phb3_read_reg_asb(p, PHB_OUT_ERR_LOG_0));
+	stat->mmioErrorLog1 = cpu_to_be64(phb3_read_reg_asb(p, PHB_OUT_ERR_LOG_1));
+	stat->dma0ErrorStatus = cpu_to_be64(phb3_read_reg_asb(p, PHB_INA_ERR_STATUS));
+	stat->dma0FirstErrorStatus = cpu_to_be64(phb3_read_reg_asb(p, PHB_INA_ERR1_STATUS));
+	stat->dma0ErrorLog0 = cpu_to_be64(phb3_read_reg_asb(p, PHB_INA_ERR_LOG_0));
+	stat->dma0ErrorLog1 = cpu_to_be64(phb3_read_reg_asb(p, PHB_INA_ERR_LOG_1));
+	stat->dma1ErrorStatus = cpu_to_be64(phb3_read_reg_asb(p, PHB_INB_ERR_STATUS));
+	stat->dma1FirstErrorStatus = cpu_to_be64(phb3_read_reg_asb(p, PHB_INB_ERR1_STATUS));
+	stat->dma1ErrorLog0 = cpu_to_be64(phb3_read_reg_asb(p, PHB_INB_ERR_LOG_0));
+	stat->dma1ErrorLog1 = cpu_to_be64(phb3_read_reg_asb(p, PHB_INB_ERR_LOG_1));
 
 	/*
 	 * Grab PESTA & B content. The error bit (bit#0) should
 	 * be fetched from IODA and the left content from memory
 	 * resident tables.
 	 */
-	pPEST = (uint64_t *)p->tbl_pest;
 	val64 = PHB_IODA_AD_AUTOINC;
 	val64 = SETFIELD(PHB_IODA_AD_TSEL, val64, IODA2_TBL_PESTA);
 	phb3_write_reg_asb(p, PHB_IODA_ADDR, val64);
 	for (i = 0; i < OPAL_PHB3_NUM_PEST_REGS; i++) {
-		stat->pestA[i] = phb3_read_reg_asb(p, PHB_IODA_DATA0);
-		stat->pestA[i] |= pPEST[2 * i];
+		stat->pestA[i] = cpu_to_be64(phb3_read_reg_asb(p, PHB_IODA_DATA0));
+		stat->pestA[i] |= p->tbl_pest[2 * i];
 	}
 
 	val64 = PHB_IODA_AD_AUTOINC;
 	val64 = SETFIELD(PHB_IODA_AD_TSEL, val64, IODA2_TBL_PESTB);
 	phb3_write_reg_asb(p, PHB_IODA_ADDR, val64);
 	for (i = 0; i < OPAL_PHB3_NUM_PEST_REGS; i++) {
-		stat->pestB[i] = phb3_read_reg_asb(p, PHB_IODA_DATA0);
-		stat->pestB[i] |= pPEST[2 * i + 1];
+		stat->pestB[i] = cpu_to_be64(phb3_read_reg_asb(p, PHB_IODA_DATA0));
+		stat->pestB[i] |= p->tbl_pest[2 * i + 1];
 	}
 }
 
@@ -1814,10 +1803,10 @@ static void phb3_eeh_dump_regs(struct phb3 *p, struct OpalIoPhb3ErrorData *regs)
 	PHBERR(p, "   uncorrErrorStatus = %08x\n", s->uncorrErrorStatus);
 
 	/* Byte swap TLP headers so they are the same as the PCIe spec */
-	PHBERR(p, "             tlpHdr1 = %08x\n", bswap_32(s->tlpHdr1));
-	PHBERR(p, "             tlpHdr2 = %08x\n", bswap_32(s->tlpHdr2));
-	PHBERR(p, "             tlpHdr3 = %08x\n", bswap_32(s->tlpHdr3));
-	PHBERR(p, "             tlpHdr4 = %08x\n", bswap_32(s->tlpHdr4));
+	PHBERR(p, "             tlpHdr1 = %08x\n", cpu_to_le32(be32_to_cpu((s->tlpHdr1))));
+	PHBERR(p, "             tlpHdr2 = %08x\n", cpu_to_le32(be32_to_cpu((s->tlpHdr2))));
+	PHBERR(p, "             tlpHdr3 = %08x\n", cpu_to_le32(be32_to_cpu((s->tlpHdr3))));
+	PHBERR(p, "             tlpHdr4 = %08x\n", cpu_to_le32(be32_to_cpu((s->tlpHdr4))));
 	PHBERR(p, "            sourceId = %08x\n", s->sourceId);
 
 	PHBERR(p, "                nFir = %016llx\n", s->nFir);
@@ -1880,7 +1869,7 @@ static int64_t phb3_msi_get_xive(struct irq_source *is, uint32_t isn,
 	 * Each IVE has 16 bytes in cache. Note that the kernel
 	 * should strip the link bits from server field.
 	 */
-	ive = p->ive_cache[irq];
+	ive = be64_to_cpu(p->ive_cache[irq]);
 	*server = GETFIELD(IODA2_IVT_SERVER, ive);
 	*prio = GETFIELD(IODA2_IVT_PRIORITY, ive);
 
@@ -1892,8 +1881,8 @@ static int64_t phb3_msi_set_xive(struct irq_source *is, uint32_t isn,
 {
 	struct phb3 *p = is->data;
 	uint32_t chip, index;
-	uint64_t *cache, ive_num, data64, m_server, m_prio, ivc;
-	uint32_t *ive;
+	uint64_t ive_num, data64, m_server, m_prio, ivc;
+	__be32 *ive;
 
 	chip = p8_irq_to_chip(isn);
 	index = p8_irq_to_phb(isn);
@@ -1918,15 +1907,16 @@ static int64_t phb3_msi_set_xive(struct irq_source *is, uint32_t isn,
 	m_server = server;
 	m_prio = prio;
 
-	cache = &p->ive_cache[ive_num];
-	*cache = SETFIELD(IODA2_IVT_SERVER,   *cache, m_server);
-	*cache = SETFIELD(IODA2_IVT_PRIORITY, *cache, m_prio);
+	data64 = be64_to_cpu(p->ive_cache[ive_num]);
+	data64 = SETFIELD(IODA2_IVT_SERVER,   data64, m_server);
+	data64 = SETFIELD(IODA2_IVT_PRIORITY, data64, m_prio);
+	p->ive_cache[ive_num] = cpu_to_be64(data64);;
 
 	/*
 	 * Update IVT and IVC. We need use IVC update register
 	 * to do that. Each IVE in the table has 128 bytes
 	 */
-	ive = (uint32_t *)(p->tbl_ivt + ive_num * IVT_TABLE_STRIDE * 8);
+	ive = (__be32 *)(p->tbl_ivt + ive_num * IVT_TABLE_STRIDE);
 	data64 = PHB_IVC_UPDATE_ENABLE_SERVER | PHB_IVC_UPDATE_ENABLE_PRI;
 	data64 = SETFIELD(PHB_IVC_UPDATE_SID, data64, ive_num);
 	data64 = SETFIELD(PHB_IVC_UPDATE_SERVER, data64, m_server);
@@ -1936,7 +1926,7 @@ static int64_t phb3_msi_set_xive(struct irq_source *is, uint32_t isn,
 	 * We don't use SETFIELD because we are doing a 32-bit access
 	 * in order to avoid touching the P and Q bits
 	 */
-	*ive = (m_server << 8) | m_prio;
+	*ive = cpu_to_be32((m_server << 8) | m_prio);
 	out_be64(p->regs + PHB_IVC_UPDATE, data64);
 
 	if (prio != 0xff) {
@@ -1955,7 +1945,7 @@ static int64_t phb3_msi_set_xive(struct irq_source *is, uint32_t isn,
 		sync();
 
 		/* Clear P, Q and Gen, preserve PE# */
-		ive[1] &= 0x0000ffff;
+		ive[1] &= cpu_to_be32(0x0000ffff);
 
 		/*
 		 * Update the IVC with a match against the old gen
@@ -2101,7 +2091,6 @@ static int64_t phb3_set_pe(struct phb *phb,
 	struct phb3 *p = phb_to_phb3(phb);
 	uint64_t mask, val, tmp, idx;
 	int32_t all = 0;
-	uint16_t *rte;
 
 	/* Sanity check */
 	if (!p->tbl_rtt)
@@ -2143,22 +2132,21 @@ static int64_t phb3_set_pe(struct phb *phb,
 	if (all == 0x7) {
 		if (action == OPAL_MAP_PE) {
 			for (idx = 0; idx < RTT_TABLE_ENTRIES; idx++)
-				p->rte_cache[idx] = pe_number;
+				p->rte_cache[idx] = cpu_to_be16(pe_number);
 		} else {
-			for ( idx = 0; idx < ARRAY_SIZE(p->rte_cache); idx++)
-				p->rte_cache[idx] = PHB3_RESERVED_PE_NUM;
+			for (idx = 0; idx < ARRAY_SIZE(p->rte_cache); idx++)
+				p->rte_cache[idx] = cpu_to_be16(PHB3_RESERVED_PE_NUM);
 		}
-		memcpy((void *)p->tbl_rtt, p->rte_cache, RTT_TABLE_SIZE);
+		memcpy(p->tbl_rtt, p->rte_cache, RTT_TABLE_SIZE);
 	} else {
-		rte = (uint16_t *)p->tbl_rtt;
-		for (idx = 0; idx < RTT_TABLE_ENTRIES; idx++, rte++) {
+		for (idx = 0; idx < RTT_TABLE_ENTRIES; idx++) {
 			if ((idx & mask) != val)
 				continue;
 			if (action == OPAL_MAP_PE)
-				p->rte_cache[idx] = pe_number;
+				p->rte_cache[idx] = cpu_to_be16(pe_number);
 			else
-				p->rte_cache[idx] = PHB3_RESERVED_PE_NUM;
-			*rte = p->rte_cache[idx];
+				p->rte_cache[idx] = cpu_to_be16(PHB3_RESERVED_PE_NUM);
+			p->tbl_rtt[idx] = p->rte_cache[idx];
 		}
 	}
 
@@ -2174,7 +2162,6 @@ static int64_t phb3_set_peltv(struct phb *phb,
 			      uint8_t state)
 {
 	struct phb3 *p = phb_to_phb3(phb);
-	uint8_t *peltv;
 	uint32_t idx, mask;
 
 	/* Sanity check */
@@ -2188,13 +2175,11 @@ static int64_t phb3_set_peltv(struct phb *phb,
 	idx += (child_pe / 8);
 	mask = 0x1 << (7 - (child_pe % 8));
 
-	peltv = (uint8_t *)p->tbl_peltv;
-	peltv += idx;
 	if (state) {
-		*peltv |= mask;
+		p->tbl_peltv[idx] |= mask;
 		p->peltv_cache[idx] |= mask;
 	} else {
-		*peltv &= ~mask;
+		p->tbl_peltv[idx] &= ~mask;
 		p->peltv_cache[idx] &= ~mask;
 	}
 
@@ -3170,14 +3155,14 @@ static int64_t phb3_err_inject_mem64(struct phb3 *p, uint64_t pe_number,
 	s_index = 0;
 	e_index = ARRAY_SIZE(p->m64b_cache) - 2;
 	for (index = 0; index < RTT_TABLE_ENTRIES; index++) {
-		if (p->rte_cache[index] != pe_number)
+		if (be16_to_cpu(p->rte_cache[index]) != pe_number)
 			continue;
 
 		if (index + 8 >= RTT_TABLE_ENTRIES)
 			break;
 
 		/* PCI bus dependent PE */
-		if (p->rte_cache[index + 8] == pe_number) {
+		if (be16_to_cpu(p->rte_cache[index + 8]) == pe_number) {
 			s_index = e_index = ARRAY_SIZE(p->m64b_cache) - 1;
 			break;
 		}
@@ -3255,13 +3240,13 @@ static int64_t phb3_err_inject_cfg(struct phb3 *p, uint64_t pe_number,
 	prefer = 0xffffull;
 	m = PHB_PAPR_ERR_INJ_MASK_CFG_ALL;
 	for (bdfn = 0; bdfn < RTT_TABLE_ENTRIES; bdfn++) {
-		if (p->rte_cache[bdfn] != pe_number)
+		if (be16_to_cpu(p->rte_cache[bdfn]) != pe_number)
 			continue;
 
 		/* The PE can be associated with PCI bus or device */
 		is_bus_pe = false;
 		if ((bdfn + 8) < RTT_TABLE_ENTRIES &&
-		    p->rte_cache[bdfn + 8] == pe_number)
+		    be16_to_cpu(p->rte_cache[bdfn + 8]) == pe_number)
 			is_bus_pe = true;
 
 		/* Figure out the PCI config address */
@@ -3917,20 +3902,16 @@ static void phb3_init_ioda2(struct phb3 *p)
 	 * Init_17 - PELT-V BAR
 	 */
 	out_be64(p->regs + PHB_RTT_BAR,
-		 p->tbl_rtt | PHB_RTT_BAR_ENABLE);
+		 (u64)p->tbl_rtt | PHB_RTT_BAR_ENABLE);
 	out_be64(p->regs + PHB_PELTV_BAR,
-		 p->tbl_peltv | PHB_PELTV_BAR_ENABLE);
+		 (u64)p->tbl_peltv | PHB_PELTV_BAR_ENABLE);
 	out_be64(p->regs + PHB_IVT_BAR,
-		 p->tbl_ivt | 0x800 | PHB_IVT_BAR_ENABLE);
+		 (u64)p->tbl_ivt | 0x800 | PHB_IVT_BAR_ENABLE);
 
 	/* DD2.0 or the subsequent chips don't have memory
 	 * resident RBA.
 	 */
-	if (p->rev >= PHB3_REV_MURANO_DD20)
-		out_be64(p->regs + PHB_RBA_BAR, 0x0ul);
-	else
-		out_be64(p->regs + PHB_RBA_BAR,
-			 p->tbl_rba | PHB_RBA_BAR_ENABLE);
+	out_be64(p->regs + PHB_RBA_BAR, 0x0ul);
 
 	/* Init_18..21 - Setup M32 */
 	out_be64(p->regs + PHB_M32_BASE_ADDR, p->mm1_base);
@@ -3939,7 +3920,7 @@ static void phb3_init_ioda2(struct phb3 *p)
 
 	/* Init_22 - Setup PEST BAR */
 	out_be64(p->regs + PHB_PEST_BAR,
-		 p->tbl_pest | PHB_PEST_BAR_ENABLE);
+		 (u64)p->tbl_pest | PHB_PEST_BAR_ENABLE);
 
 	/* Init_23 - PCIE Outbound upper address */
 	out_be64(p->regs + PHB_M64_UPPER_BITS, 0);
@@ -3952,7 +3933,7 @@ static void phb3_init_ioda2(struct phb3 *p)
 	else if (p->rev >= PHB3_REV_MURANO_DD20)
 		out_be64(p->regs + PHB_INTREP_TIMER, 0x0004000000000000UL);
 	else
-		out_be64(p->regs + PHB_INTREP_TIMER, 0);
+		assert(0); // DD1 not supported
 
 	/* Init_25 - PHB3 Configuration Register. Clear TCE cache then
 	 *           configure the PHB
@@ -4225,16 +4206,7 @@ static void phb3_init_errors(struct phb3 *p)
 	out_be64(p->regs + PHB_INB_ERR1_STATUS,		   0x0000000000000000UL);
 	out_be64(p->regs + PHB_INB_ERR_LEM_ENABLE,	   0xffffffffffffffffUL);
 
-	/*
-	 * Workaround for errata HW257476, turn correctable messages into
-	 * ER freezes on Murano and Venice DD1.0
-	 */
-	if (p->rev < PHB3_REV_MURANO_DD20)
-		out_be64(p->regs + PHB_INB_ERR_FREEZE_ENABLE,
-			                                   0x0000600000000070UL);
-	else
-		out_be64(p->regs + PHB_INB_ERR_FREEZE_ENABLE,
-			                                   0x0000600000000060UL);
+	out_be64(p->regs + PHB_INB_ERR_FREEZE_ENABLE,	   0x0000600000000060UL);
 
 	out_be64(p->regs + PHB_INB_ERR_AIB_FENCE_ENABLE,   0xfcff80fbff7ff08cUL);
 	out_be64(p->regs + PHB_INB_ERR_LOG_0,		   0x0000000000000000UL);
@@ -4381,12 +4353,10 @@ static void phb3_init_hw(struct phb3 *p, bool first_init)
 	 *          Enable IVC for Murano DD2.0 or later one
 	 */
 #ifdef IVT_TABLE_IVE_16B
-	val = 0xf3a80e4b00000000UL;
+	val = 0xf3a80e5b00000000UL;
 #else
-	val = 0xf3a80ecb00000000UL;
+	val = 0xf3a80edb00000000UL;
 #endif
-	if (p->rev >= PHB3_REV_MURANO_DD20)
-		val |= 0x0000010000000000UL;
 	if (first_init && p->rev >= PHB3_REV_NAPLES_DD10) {
 		/* Enable 32-bit bypass support on Naples and tell the OS
 		 * about it
@@ -4451,10 +4421,7 @@ static void phb3_init_hw(struct phb3 *p, bool first_init)
 	 * Murano DD2.0 and later but lacks sufficient testing. We will re-enable
 	 * it once that has been done.
 	 */
-	if (p->rev >= PHB3_REV_MURANO_DD20)
-		out_be64(p->regs + PHB_TCE_SPEC_CTL,		0xf000000000000000UL);
-	else
-		out_be64(p->regs + PHB_TCE_SPEC_CTL,		0x0ul);
+	out_be64(p->regs + PHB_TCE_SPEC_CTL,			0xf000000000000000UL);
 
 	/* Errata#20131017: avoid TCE queue overflow */
 	if (p->rev == PHB3_REV_MURANO_DD20)
@@ -4482,7 +4449,6 @@ static void phb3_init_hw(struct phb3 *p, bool first_init)
 
 static void phb3_allocate_tables(struct phb3 *p)
 {
-	uint16_t *rte;
 	uint32_t i;
 
 	/* XXX Our current memalign implementation sucks,
@@ -4491,27 +4457,22 @@ static void phb3_allocate_tables(struct phb3 *p)
 	 * the memory and wastes space by always allocating twice
 	 * as much as requested (size + alignment)
 	 */
-	p->tbl_rtt = (uint64_t)local_alloc(p->chip_id, RTT_TABLE_SIZE, RTT_TABLE_SIZE);
+	p->tbl_rtt = local_alloc(p->chip_id, RTT_TABLE_SIZE, RTT_TABLE_SIZE);
 	assert(p->tbl_rtt);
-	rte = (uint16_t *)(p->tbl_rtt);
-	for (i = 0; i < RTT_TABLE_ENTRIES; i++, rte++)
-		*rte = PHB3_RESERVED_PE_NUM;
+	for (i = 0; i < RTT_TABLE_ENTRIES; i++)
+		p->tbl_rtt[i] = cpu_to_be16(PHB3_RESERVED_PE_NUM);
 
-	p->tbl_peltv = (uint64_t)local_alloc(p->chip_id, PELTV_TABLE_SIZE, PELTV_TABLE_SIZE);
+	p->tbl_peltv = local_alloc(p->chip_id, PELTV_TABLE_SIZE, PELTV_TABLE_SIZE);
 	assert(p->tbl_peltv);
-	memset((void *)p->tbl_peltv, 0, PELTV_TABLE_SIZE);
+	memset(p->tbl_peltv, 0, PELTV_TABLE_SIZE);
 
-	p->tbl_pest = (uint64_t)local_alloc(p->chip_id, PEST_TABLE_SIZE, PEST_TABLE_SIZE);
+	p->tbl_pest = local_alloc(p->chip_id, PEST_TABLE_SIZE, PEST_TABLE_SIZE);
 	assert(p->tbl_pest);
-	memset((void *)p->tbl_pest, 0, PEST_TABLE_SIZE);
+	memset(p->tbl_pest, 0, PEST_TABLE_SIZE);
 
-	p->tbl_ivt = (uint64_t)local_alloc(p->chip_id, IVT_TABLE_SIZE, IVT_TABLE_SIZE);
+	p->tbl_ivt = local_alloc(p->chip_id, IVT_TABLE_SIZE, IVT_TABLE_SIZE);
 	assert(p->tbl_ivt);
-	memset((void *)p->tbl_ivt, 0, IVT_TABLE_SIZE);
-
-	p->tbl_rba = (uint64_t)local_alloc(p->chip_id, RBA_TABLE_SIZE, RBA_TABLE_SIZE);
-	assert(p->tbl_rba);
-	memset((void *)p->tbl_rba, 0, RBA_TABLE_SIZE);
+	memset(p->tbl_ivt, 0, IVT_TABLE_SIZE);
 }
 
 static void phb3_add_properties(struct phb3 *p)
@@ -4600,17 +4561,17 @@ static void phb3_add_properties(struct phb3 *p)
 
 	/* Indicators for variable tables */
 	dt_add_property_cells(np, "ibm,opal-rtt-table",
-		hi32(p->tbl_rtt), lo32(p->tbl_rtt), RTT_TABLE_SIZE);
+		hi32((u64)p->tbl_rtt), lo32((u64)p->tbl_rtt), RTT_TABLE_SIZE);
 	dt_add_property_cells(np, "ibm,opal-peltv-table",
-		hi32(p->tbl_peltv), lo32(p->tbl_peltv), PELTV_TABLE_SIZE);
+		hi32((u64)p->tbl_peltv), lo32((u64)p->tbl_peltv), PELTV_TABLE_SIZE);
 	dt_add_property_cells(np, "ibm,opal-pest-table",
-		hi32(p->tbl_pest), lo32(p->tbl_pest), PEST_TABLE_SIZE);
+		hi32((u64)p->tbl_pest), lo32((u64)p->tbl_pest), PEST_TABLE_SIZE);
 	dt_add_property_cells(np, "ibm,opal-ivt-table",
-		hi32(p->tbl_ivt), lo32(p->tbl_ivt), IVT_TABLE_SIZE);
+		hi32((u64)p->tbl_ivt), lo32((u64)p->tbl_ivt), IVT_TABLE_SIZE);
 	dt_add_property_cells(np, "ibm,opal-ive-stride",
 		IVT_TABLE_STRIDE);
 	dt_add_property_cells(np, "ibm,opal-rba-table",
-		hi32(p->tbl_rba), lo32(p->tbl_rba), RBA_TABLE_SIZE);
+		0, 0, 0);
 
 	dt_add_property_cells(np, "ibm,phb-diag-data-size",
 			      sizeof(struct OpalIoPhb3ErrorData));
@@ -4625,11 +4586,11 @@ static bool phb3_calculate_windows(struct phb3 *p)
 				   "ibm,mmio-window", -1);
 	assert(prop->len >= (2 * sizeof(uint64_t)));
 
-	p->mm0_base = ((const uint64_t *)prop->prop)[0];
-	p->mm0_size = ((const uint64_t *)prop->prop)[1];
+	p->mm0_base = be64_to_cpu(((__be64 *)prop->prop)[0]);
+	p->mm0_size = be64_to_cpu(((__be64 *)prop->prop)[1]);
 	if (prop->len > 16) {
-		p->mm1_base = ((const uint64_t *)prop->prop)[2];
-		p->mm1_size = ((const uint64_t *)prop->prop)[3];
+		p->mm1_base = be64_to_cpu(((__be64 *)prop->prop)[2]);
+		p->mm1_size = be64_to_cpu(((__be64 *)prop->prop)[3]);
 	}
 
 	/* Sort them so that 0 is big and 1 is small */
@@ -4727,9 +4688,9 @@ static void phb3_create(struct dt_node *np)
 
 	/* Get the various XSCOM register bases from the device-tree */
 	prop = dt_require_property(np, "ibm,xscom-bases", 3 * sizeof(uint32_t));
-	p->pe_xscom = ((const uint32_t *)prop->prop)[0];
-	p->spci_xscom = ((const uint32_t *)prop->prop)[1];
-	p->pci_xscom = ((const uint32_t *)prop->prop)[2];
+	p->pe_xscom = be32_to_cpu(((__be32 *)prop->prop)[0]);
+	p->spci_xscom = be32_to_cpu(((__be32 *)prop->prop)[1]);
+	p->pci_xscom = be32_to_cpu(((__be32 *)prop->prop)[2]);
 
 	/*
 	 * We skip the initial PERST assertion requested by the generic code
@@ -4853,8 +4814,7 @@ static void phb3_probe_pbcq(struct dt_node *pbcq)
 	uint64_t val, phb_bar, bar_en;
 	uint64_t mmio0_bar, mmio0_bmask, mmio0_sz;
 	uint64_t mmio1_bar, mmio1_bmask, mmio1_sz;
-	uint64_t reg[2];
-	uint64_t mmio_win[4];
+	__be64 mmio_win[4];
 	unsigned int mmio_win_sz;
 	struct dt_node *np;
 	char *path;
@@ -4939,13 +4899,13 @@ static void phb3_probe_pbcq(struct dt_node *pbcq)
 	/* Build MMIO windows list */
 	mmio_win_sz = 0;
 	if (mmio0_bar) {
-		mmio_win[mmio_win_sz++] = mmio0_bar;
-		mmio_win[mmio_win_sz++] = mmio0_sz;
+		mmio_win[mmio_win_sz++] = cpu_to_be64(mmio0_bar);
+		mmio_win[mmio_win_sz++] = cpu_to_be64(mmio0_sz);
 		bar_en |= 0x8000000000000000ul;
 	}
 	if (mmio1_bar) {
-		mmio_win[mmio_win_sz++] = mmio1_bar;
-		mmio_win[mmio_win_sz++] = mmio1_sz;
+		mmio_win[mmio_win_sz++] = cpu_to_be64(mmio1_bar);
+		mmio_win[mmio_win_sz++] = cpu_to_be64(mmio1_sz);
 		bar_en |= 0x4000000000000000ul;
 	}
 
@@ -4984,17 +4944,14 @@ static void phb3_probe_pbcq(struct dt_node *pbcq)
 	      gcid, pno, val);
 
 	/* Create PHB node */
-	reg[0] = phb_bar;
-	reg[1] = 0x1000;
-
-	np = dt_new_addr(dt_root, "pciex", reg[0]);
+	np = dt_new_addr(dt_root, "pciex", phb_bar);
 	if (!np)
 		return;
 
 	dt_add_property_strings(np, "compatible", "ibm,power8-pciex",
 				"ibm,ioda2-phb");
 	dt_add_property_strings(np, "device_type", "pciex");
-	dt_add_property(np, "reg", reg, sizeof(reg));
+	dt_add_property_u64s(np, "reg", phb_bar, 0x1000);
 
 	/* Everything else is handled later by skiboot, we just
 	 * stick a few hints here

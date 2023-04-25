@@ -46,7 +46,7 @@ def add_arguments(parser, formatter=None):
     tgt_parser.add_argument('--type', dest='tgt_type', choices=rewriter_keys['target']['target_type'][2], default='executable',
                             help='Type of the target to add (only for the "add_target" action)')
     tgt_parser.add_argument('target', help='Name or ID of the target')
-    tgt_parser.add_argument('operation', choices=['add', 'rm', 'add_target', 'rm_target', 'info'],
+    tgt_parser.add_argument('operation', choices=['add', 'rm', 'add_target', 'rm_target', 'add_extra_files', 'rm_extra_files', 'info'],
                             help='Action to execute')
     tgt_parser.add_argument('sources', nargs='*', help='Sources to add/remove')
 
@@ -76,7 +76,7 @@ class RequiredKeys:
     def __call__(self, f):
         @wraps(f)
         def wrapped(*wrapped_args, **wrapped_kwargs):
-            assert(len(wrapped_args) >= 2)
+            assert len(wrapped_args) >= 2
             cmd = wrapped_args[1]
             for key, val in self.keys.items():
                 typ = val[0] # The type of the value
@@ -92,7 +92,7 @@ class RequiredKeys:
                     raise RewriterException('Invalid type of "{}". Required is {} but provided was {}'
                                             .format(key, typ.__name__, type(cmd[key]).__name__))
                 if choices is not None:
-                    assert(isinstance(choices, list))
+                    assert isinstance(choices, list)
                     if cmd[key] not in choices:
                         raise RewriterException('Invalid value of "{}": Possible values are {} but provided was "{}"'
                                                 .format(key, choices, cmd[key]))
@@ -308,7 +308,7 @@ rewriter_keys = {
     },
     'target': {
         'target': (str, None, None),
-        'operation': (str, None, ['src_add', 'src_rm', 'target_rm', 'target_add', 'info']),
+        'operation': (str, None, ['src_add', 'src_rm', 'target_rm', 'target_add', 'extra_files_add', 'extra_files_rm', 'info']),
         'sources': (list, [], None),
         'subdir': (str, '', None),
         'target_type': (str, 'executable', ['both_libraries', 'executable', 'jar', 'library', 'shared_library', 'shared_module', 'static_library']),
@@ -521,8 +521,8 @@ class Rewriter:
                 arg_node = node.args
         if not node:
             mlog.error('Unable to find the function node')
-        assert(isinstance(node, FunctionNode))
-        assert(isinstance(arg_node, ArgumentNode))
+        assert isinstance(node, FunctionNode)
+        assert isinstance(arg_node, ArgumentNode)
         # Transform the key nodes to plain strings
         arg_node.kwargs = {k.value: v for k, v in arg_node.kwargs.items()}
 
@@ -640,7 +640,7 @@ class Rewriter:
                 node = target['sources'][0]
             else:
                 node = target['node']
-            assert(node is not None)
+            assert node is not None
 
             # Generate the current source list
             src_list = []
@@ -666,7 +666,7 @@ class Rewriter:
                 arg_node = node.args
             elif isinstance(node, ArgumentNode):
                 arg_node = node
-            assert(arg_node is not None)
+            assert arg_node is not None
             arg_node.arguments += to_append
 
             # Mark the node as modified
@@ -698,8 +698,93 @@ class Rewriter:
                     arg_node = root.args
                 elif isinstance(root, ArgumentNode):
                     arg_node = root
-                assert(arg_node is not None)
+                assert arg_node is not None
                 mlog.log('  -- Removing source', mlog.green(i), 'from',
+                         mlog.yellow(f'{string_node.filename}:{string_node.lineno}'))
+                arg_node.arguments.remove(string_node)
+
+                # Mark the node as modified
+                if arg_node not in to_sort_nodes and not isinstance(root, FunctionNode):
+                    to_sort_nodes += [arg_node]
+                if root not in self.modified_nodes:
+                    self.modified_nodes += [root]
+
+        elif cmd['operation'] == 'extra_files_add':
+            tgt_function: FunctionNode = target['node']
+            mark_array = True
+            try:
+                node = target['extra_files'][0]
+            except IndexError:
+                # Specifying `extra_files` with a list that flattens to empty gives an empty
+                # target['extra_files'] list, account for that.
+                try:
+                    extra_files_key = next(k for k in tgt_function.args.kwargs.keys() if isinstance(k, IdNode) and k.value == 'extra_files')
+                    node = tgt_function.args.kwargs[extra_files_key]
+                except StopIteration:
+                    # Target has no extra_files kwarg, create one
+                    node = ArrayNode(ArgumentNode(Token('', tgt_function.filename, 0, 0, 0, None, '[]')), tgt_function.end_lineno, tgt_function.end_colno, tgt_function.end_lineno, tgt_function.end_colno)
+                    tgt_function.args.kwargs[IdNode(Token('string', tgt_function.filename, 0, 0, 0, None, 'extra_files'))] = node
+                    mark_array = False
+                    if tgt_function not in self.modified_nodes:
+                        self.modified_nodes += [tgt_function]
+                target['extra_files'] = [node]
+            if isinstance(node, IdNode):
+                node = self.interpreter.assignments[node.value]
+                target['extra_files'] = [node]
+            if not isinstance(node, ArrayNode):
+                mlog.error('Target', mlog.bold(cmd['target']), 'extra_files argument must be a list', *self.on_error())
+                return self.handle_error()
+
+            # Generate the current extra files list
+            extra_files_list = []
+            for i in target['extra_files']:
+                for j in arg_list_from_node(i):
+                    if isinstance(j, StringNode):
+                        extra_files_list += [j.value]
+
+            # Generate the new String nodes
+            to_append = []
+            for i in sorted(set(cmd['sources'])):
+                if i in extra_files_list:
+                    mlog.log('  -- Extra file', mlog.green(i), 'is already defined for the target --> skipping')
+                    continue
+                mlog.log('  -- Adding extra file', mlog.green(i), 'at',
+                         mlog.yellow(f'{node.filename}:{node.lineno}'))
+                token = Token('string', node.filename, 0, 0, 0, None, i)
+                to_append += [StringNode(token)]
+
+            # Append to the AST at the right place
+            arg_node = node.args
+            arg_node.arguments += to_append
+
+            # Mark the node as modified
+            if arg_node not in to_sort_nodes:
+                to_sort_nodes += [arg_node]
+            # If the extra_files array is newly created, don't mark it as its parent function node already is,
+            # otherwise this would cause double modification.
+            if mark_array and node not in self.modified_nodes:
+                self.modified_nodes += [node]
+
+        elif cmd['operation'] == 'extra_files_rm':
+            # Helper to find the exact string node and its parent
+            def find_node(src):
+                for i in target['extra_files']:
+                    for j in arg_list_from_node(i):
+                        if isinstance(j, StringNode):
+                            if j.value == src:
+                                return i, j
+                return None, None
+
+            for i in cmd['sources']:
+                # Try to find the node with the source string
+                root, string_node = find_node(i)
+                if root is None:
+                    mlog.warning('  -- Unable to find extra file', mlog.green(i), 'in the target')
+                    continue
+
+                # Remove the found string node from the argument list
+                arg_node = root.args
+                mlog.log('  -- Removing extra file', mlog.green(i), 'from',
                          mlog.yellow(f'{string_node.filename}:{string_node.lineno}'))
                 arg_node.arguments.remove(string_node)
 
@@ -756,9 +841,15 @@ class Rewriter:
                 for j in arg_list_from_node(i):
                     if isinstance(j, StringNode):
                         src_list += [j.value]
+            extra_files_list = []
+            for i in target['extra_files']:
+                for j in arg_list_from_node(i):
+                    if isinstance(j, StringNode):
+                        extra_files_list += [j.value]
             test_data = {
                 'name': target['name'],
-                'sources': src_list
+                'sources': src_list,
+                'extra_files': extra_files_list
             }
             self.add_info('target', target['id'], test_data)
 
@@ -782,10 +873,10 @@ class Rewriter:
         self.functions[cmd['type']](cmd)
 
     def apply_changes(self):
-        assert(all(hasattr(x, 'lineno') and hasattr(x, 'colno') and hasattr(x, 'filename') for x in self.modified_nodes))
-        assert(all(hasattr(x, 'lineno') and hasattr(x, 'colno') and hasattr(x, 'filename') for x in self.to_remove_nodes))
-        assert(all(isinstance(x, (ArrayNode, FunctionNode)) for x in self.modified_nodes))
-        assert(all(isinstance(x, (ArrayNode, AssignmentNode, FunctionNode)) for x in self.to_remove_nodes))
+        assert all(hasattr(x, 'lineno') and hasattr(x, 'colno') and hasattr(x, 'filename') for x in self.modified_nodes)
+        assert all(hasattr(x, 'lineno') and hasattr(x, 'colno') and hasattr(x, 'filename') for x in self.to_remove_nodes)
+        assert all(isinstance(x, (ArrayNode, FunctionNode)) for x in self.modified_nodes)
+        assert all(isinstance(x, (ArrayNode, AssignmentNode, FunctionNode)) for x in self.to_remove_nodes)
         # Sort based on line and column in reversed order
         work_nodes = [{'node': x, 'action': 'modify'} for x in self.modified_nodes]
         work_nodes += [{'node': x, 'action': 'rm'} for x in self.to_remove_nodes]
@@ -879,6 +970,8 @@ target_operation_map = {
     'rm': 'src_rm',
     'add_target': 'target_add',
     'rm_target': 'target_rm',
+    'add_extra_files': 'extra_files_add',
+    'rm_extra_files': 'extra_files_rm',
     'info': 'info',
 }
 

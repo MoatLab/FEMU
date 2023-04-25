@@ -10,14 +10,8 @@
 #ifndef __OVMF_WORK_AREA_H__
 #define __OVMF_WORK_AREA_H__
 
-//
-// Guest type for the work area
-//
-typedef enum {
-  GUEST_TYPE_NON_ENCRYPTED,
-  GUEST_TYPE_AMD_SEV,
-  GUEST_TYPE_INTEL_TDX,
-} GUEST_TYPE;
+#include <ConfidentialComputingGuestAttr.h>
+#include <IndustryStandard/Tpm20.h>
 
 //
 // Confidential computing work area header definition. Any change
@@ -28,7 +22,7 @@ typedef enum {
 //   sizeof (CONFIDENTIAL_COMPUTING_WORK_AREA_HEADER)
 // PcdOvmfConfidentialComputingWorkAreaHeader defined in:
 //   OvmfPkg/OvmfPkg.dec
-//   OvmfPkg/OvmfPkgDefines.fdf.inc
+//   OvmfPkg/Include/Fdf/OvmfPkgDefines.fdf.inc
 typedef struct _CONFIDENTIAL_COMPUTING_WORK_AREA_HEADER {
   UINT8    GuestType;
   UINT8    Reserved1[3];
@@ -46,12 +40,20 @@ typedef struct _CONFIDENTIAL_COMPUTING_WORK_AREA_HEADER {
 // any changes must stay in sync with its usage.
 //
 typedef struct _SEC_SEV_ES_WORK_AREA {
-  UINT8     SevEsEnabled;
-  UINT8     Reserved1[7];
+  //
+  // Hold the SevStatus MSR value read by OvmfPkg/ResetVector/Ia32/AmdSev.c
+  //
+  UINT64    SevStatusMsrValue;
 
   UINT64    RandomData;
 
   UINT64    EncryptionMask;
+
+  //
+  // Indicator that the VC handler is called. It is used during the SevFeature
+  // detection in OvmfPkg/ResetVector/Ia32/AmdSev.c
+  //
+  UINT8     ReceivedVc;
 } SEC_SEV_ES_WORK_AREA;
 
 //
@@ -63,9 +65,42 @@ typedef struct _SEV_WORK_AREA {
   SEC_SEV_ES_WORK_AREA                       SevEsWorkArea;
 } SEV_WORK_AREA;
 
+//
+// Start of TDX Specific WorkArea definition
+//
+
+#define TDX_MEASUREMENT_TDHOB_BITMASK   0x1
+#define TDX_MEASUREMENT_CFVIMG_BITMASK  0x2
+
+typedef struct _TDX_MEASUREMENTS_DATA {
+  UINT32    MeasurementsBitmap;
+  UINT8     TdHobHashValue[SHA384_DIGEST_SIZE];
+  UINT8     CfvImgHashValue[SHA384_DIGEST_SIZE];
+} TDX_MEASUREMENTS_DATA;
+
+//
+// The TDX work area definition
+//
+typedef struct _SEC_TDX_WORK_AREA {
+  UINT32                   PageTableReady;
+  UINT32                   Gpaw;
+  UINT64                   HobList;
+  TDX_MEASUREMENTS_DATA    TdxMeasurementsData;
+} SEC_TDX_WORK_AREA;
+
+typedef struct _TDX_WORK_AREA {
+  CONFIDENTIAL_COMPUTING_WORK_AREA_HEADER    Header;
+  SEC_TDX_WORK_AREA                          SecTdxWorkArea;
+} TDX_WORK_AREA;
+
+//
+// End of TDX Specific WorkArea definition
+//
+
 typedef union {
   CONFIDENTIAL_COMPUTING_WORK_AREA_HEADER    Header;
   SEV_WORK_AREA                              SevWorkArea;
+  TDX_WORK_AREA                              TdxWorkArea;
 } OVMF_WORK_AREA;
 
 #endif

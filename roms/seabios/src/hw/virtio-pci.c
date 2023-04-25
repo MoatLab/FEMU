@@ -193,7 +193,8 @@ u64 vp_get_features(struct vp_device *vp)
     if (vp->use_mmio) {
         vp_write(&vp->common, virtio_mmio_cfg, device_feature_select, 0);
         f0 = vp_read(&vp->common, virtio_mmio_cfg, device_feature);
-        f1 = 0;
+        vp_write(&vp->common, virtio_mmio_cfg, device_feature_select, 1);
+        f1 = vp_read(&vp->common, virtio_mmio_cfg, device_feature);
     } else if (vp->use_modern) {
         vp_write(&vp->common, virtio_pci_common_cfg, device_feature_select, 0);
         f0 = vp_read(&vp->common, virtio_pci_common_cfg, device_feature);
@@ -214,8 +215,10 @@ void vp_set_features(struct vp_device *vp, u64 features)
     f1 = features >> 32;
 
     if (vp->use_mmio) {
-        vp_write(&vp->common, virtio_mmio_cfg, guest_feature_select, f0);
+        vp_write(&vp->common, virtio_mmio_cfg, guest_feature_select, 0);
         vp_write(&vp->common, virtio_mmio_cfg, guest_feature, f0);
+        vp_write(&vp->common, virtio_mmio_cfg, guest_feature_select, 1);
+        vp_write(&vp->common, virtio_mmio_cfg, guest_feature, f1);
     } else if (vp->use_modern) {
         vp_write(&vp->common, virtio_pci_common_cfg, guest_feature_select, 0);
         vp_write(&vp->common, virtio_pci_common_cfg, guest_feature, f0);

@@ -18,7 +18,6 @@
  */
 
 #include "qemu/osdep.h"
-#include "qemu-common.h"
 #include "qemu.h"
 #include "qemu/timer.h"
 #include "user-internals.h"
@@ -138,7 +137,7 @@ static void emulate_vsyscall(CPUX86State *env)
     }
 
     /*
-     * Validate the the pointer arguments.
+     * Validate the pointer arguments.
      */
     switch (syscall) {
     case TARGET_NR_gettimeofday:
@@ -202,7 +201,6 @@ void cpu_loop(CPUX86State *env)
 {
     CPUState *cs = env_cpu(env);
     int trapnr;
-    abi_ulong pc;
     abi_ulong ret;
 
     for(;;) {
@@ -308,17 +306,25 @@ void cpu_loop(CPUX86State *env)
             cpu_exec_step_atomic(cs);
             break;
         default:
-            pc = env->segs[R_CS].base + env->eip;
-            EXCP_DUMP(env, "qemu: 0x%08lx: unhandled CPU exception 0x%x - aborting\n",
-                      (long)pc, trapnr);
+            EXCP_DUMP(env, "qemu: unhandled CPU exception 0x%x - aborting\n",
+                      trapnr);
             abort();
         }
         process_pending_signals(env);
     }
 }
 
+static void target_cpu_free(void *obj)
+{
+    CPUArchState *env = ((CPUState *)obj)->env_ptr;
+    target_munmap(env->gdt.base, sizeof(uint64_t) * TARGET_GDT_ENTRIES);
+    g_free(obj);
+}
+
 void target_cpu_copy_regs(CPUArchState *env, struct target_pt_regs *regs)
 {
+    CPUState *cpu = env_cpu(env);
+    OBJECT(cpu)->free = target_cpu_free;
     env->cr[0] = CR0_PG_MASK | CR0_WP_MASK | CR0_PE_MASK;
     env->hflags |= HF_PE_MASK | HF_CPL_MASK;
     if (env->features[FEAT_1_EDX] & CPUID_SSE) {

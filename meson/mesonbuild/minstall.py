@@ -18,17 +18,22 @@ import argparse
 import errno
 import os
 import pickle
+import platform
 import shlex
 import shutil
 import subprocess
 import sys
 import typing as T
 
+from . import build
 from . import environment
-from .backend.backends import InstallData
+from .backend.backends import (
+    InstallData, InstallDataBase, InstallEmptyDir, InstallSymlinkData,
+    TargetInstallData, ExecutableSerialisation
+)
 from .coredata import major_versions_differ, MesonVersionMismatchException
 from .coredata import version as coredata_version
-from .mesonlib import Popen_safe, RealPathAction, is_windows
+from .mesonlib import MesonException, Popen_safe, RealPathAction, is_windows, setup_vsenv
 from .scripts import depfixer, destdir_join
 from .scripts.meson_exe import run_exe
 try:
@@ -56,6 +61,7 @@ if T.TYPE_CHECKING:
         destdir: str
         dry_run: bool
         skip_subprojects: str
+        tags: str
 
 
 symlink_warning = '''Warning: trying to copy a symlink that points to a file. This will copy the file,
@@ -81,15 +87,19 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
                         help='Doesn\'t actually install, but print logs. (Since 0.57.0)')
     parser.add_argument('--skip-subprojects', nargs='?', const='*', default='',
                         help='Do not install files from given subprojects. (Since 0.58.0)')
+    parser.add_argument('--tags', default=None,
+                        help='Install only targets having one of the given tags. (Since 0.60.0)')
 
 class DirMaker:
     def __init__(self, lf: T.TextIO, makedirs: T.Callable[..., None]):
         self.lf = lf
         self.dirs: T.List[str] = []
+        self.all_dirs: T.Set[str] = set()
         self.makedirs_impl = makedirs
 
     def makedirs(self, path: str, exist_ok: bool = False) -> None:
         dirname = os.path.normpath(path)
+        self.all_dirs.add(dirname)
         dirs = []
         while dirname != os.path.dirname(dirname):
             if dirname in self.dirs:
@@ -169,7 +179,7 @@ def set_chmod(path: str, mode: int, dir_fd: T.Optional[int] = None,
 
 def sanitize_permissions(path: str, umask: T.Union[str, int]) -> None:
     # TODO: with python 3.8 or typing_extensions we could replace this with
-    # `umask: T.Union[T.Literal['preserve'], int]`, which would be mroe correct
+    # `umask: T.Union[T.Literal['preserve'], int]`, which would be more correct
     if umask == 'preserve':
         return
     assert isinstance(umask, int), 'umask should only be "preserver" or an integer'
@@ -178,8 +188,7 @@ def sanitize_permissions(path: str, umask: T.Union[str, int]) -> None:
     try:
         set_chmod(path, new_perms, follow_symlinks=False)
     except PermissionError as e:
-        msg = '{!r}: Unable to set permissions {!r}: {}, ignoring...'
-        print(msg.format(path, new_perms, e.strerror))
+        print(f'{path!r}: Unable to set permissions {new_perms!r}: {e.strerror}, ignoring...')
 
 
 def set_mode(path: str, mode: T.Optional['FileMode'], default_umask: T.Union[str, int]) -> None:
@@ -192,15 +201,12 @@ def set_mode(path: str, mode: T.Optional['FileMode'], default_umask: T.Union[str
         try:
             set_chown(path, mode.owner, mode.group, follow_symlinks=False)
         except PermissionError as e:
-            msg = '{!r}: Unable to set owner {!r} and group {!r}: {}, ignoring...'
-            print(msg.format(path, mode.owner, mode.group, e.strerror))
+            print(f'{path!r}: Unable to set owner {mode.owner!r} and group {mode.group!r}: {e.strerror}, ignoring...')
         except LookupError:
-            msg = '{!r}: Non-existent owner {!r} or group {!r}: ignoring...'
-            print(msg.format(path, mode.owner, mode.group))
+            print(f'{path!r}: Non-existent owner {mode.owner!r} or group {mode.group!r}: ignoring...')
         except OSError as e:
             if e.errno == errno.EINVAL:
-                msg = '{!r}: Non-existent numeric owner {!r} or group {!r}: ignoring...'
-                print(msg.format(path, mode.owner, mode.group))
+                print(f'{path!r}: Non-existent numeric owner {mode.owner!r} or group {mode.group!r}: ignoring...')
             else:
                 raise
     # Must set permissions *after* setting owner/group otherwise the
@@ -210,8 +216,7 @@ def set_mode(path: str, mode: T.Optional['FileMode'], default_umask: T.Union[str
         try:
             set_chmod(path, mode.perms, follow_symlinks=False)
         except PermissionError as e:
-            msg = '{!r}: Unable to set permissions {!r}: {}, ignoring...'
-            print(msg.format(path, mode.perms_s, e.strerror))
+            print('{path!r}: Unable to set permissions {mode.perms_s!r}: {e.strerror}, ignoring...')
     else:
         sanitize_permissions(path, default_umask)
 
@@ -237,14 +242,46 @@ def restore_selinux_contexts() -> None:
         # If the list of files is empty, do not try to call restorecon.
         return
 
-    with subprocess.Popen(['restorecon', '-F', '-f-', '-0'],
-                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc:
-        out, err = proc.communicate(input=b'\0'.join(os.fsencode(f) for f in selinux_updates) + b'\0')
-        if proc.returncode != 0 and not os.environ.get('DESTDIR'):
-            print('Failed to restore SELinux context of installed files...',
-                  'Standard output:', out.decode(),
-                  'Standard error:', err.decode(), sep='\n')
+    proc, out, err = Popen_safe(['restorecon', '-F', '-f-', '-0'], ('\0'.join(f for f in selinux_updates) + '\0'))
+    if proc.returncode != 0:
+        print('Failed to restore SELinux context of installed files...',
+              'Standard output:', out,
+              'Standard error:', err, sep='\n')
 
+def apply_ldconfig(dm: DirMaker, libdir: str) -> None:
+    '''
+    Apply ldconfig to update the ld.so.cache.
+    '''
+    if not shutil.which('ldconfig'):
+        # If we don't have ldconfig, failure is ignored quietly.
+        return
+
+    platlower = platform.system().lower()
+    if platlower == 'dragonfly' or 'bsd' in platlower:
+        if libdir in dm.all_dirs:
+            proc, out, err = Popen_safe(['ldconfig', '-m', libdir])
+            if proc.returncode != 0:
+                print('Failed to apply ldconfig ...',
+                      'Standard output:', out,
+                      'Standard error:', err, sep='\n')
+        return
+
+    # Try to update ld cache, it could fail if we don't have permission.
+    proc, out, err = Popen_safe(['ldconfig', '-v'])
+    if proc.returncode == 0:
+        return
+
+    # ldconfig failed, print the error only if we actually installed files in
+    # any of the directories it lookup for libraries. Otherwise quietly ignore
+    # the error.
+    for l in out.splitlines():
+        # Lines that start with a \t are libraries, not directories.
+        if not l or l[0].isspace():
+            continue
+        # Example: `/usr/lib/i386-linux-gnu/i686: (hwcap: 0x0002000000000000)`
+        if l[:l.find(':')] in dm.all_dirs:
+            print(f'Failed to apply ldconfig:\n{err}')
+            break
 
 def get_destdir_path(destdir: str, fullprefix: str, path: str) -> str:
     if os.path.isabs(path):
@@ -284,6 +321,7 @@ class Installer:
 
     def __init__(self, options: 'ArgumentType', lf: T.TextIO):
         self.did_install_something = False
+        self.printed_symlink_error = False
         self.options = options
         self.lf = lf
         self.preserved_file_count = 0
@@ -292,6 +330,7 @@ class Installer:
         # ['*'] means skip all,
         # ['sub1', ...] means skip only those.
         self.skip_subprojects = [i.strip() for i in options.skip_subprojects.split(',')]
+        self.tags = [i.strip() for i in options.tags.split(',')] if options.tags else None
 
     def remove(self, *args: T.Any, **kwargs: T.Any) -> None:
         if not self.dry_run:
@@ -341,9 +380,14 @@ class Installer:
         if not self.dry_run:
             set_mode(*args, **kwargs)
 
-    def restore_selinux_contexts(self) -> None:
-        if not self.dry_run:
+    def restore_selinux_contexts(self, destdir: str) -> None:
+        if not self.dry_run and not destdir:
             restore_selinux_contexts()
+
+    def apply_ldconfig(self, dm: DirMaker, destdir: str, is_cross_build: bool, libdir: str) -> None:
+        if any([self.dry_run, destdir, is_cross_build]):
+            return
+        apply_ldconfig(dm, libdir)
 
     def Popen_safe(self, *args: T.Any, **kwargs: T.Any) -> T.Tuple[int, str, str]:
         if not self.dry_run:
@@ -356,8 +400,12 @@ class Installer:
             return run_exe(*args, **kwargs)
         return 0
 
-    def install_subproject(self, subproject: str) -> bool:
-        if subproject and (subproject in self.skip_subprojects or '*' in self.skip_subprojects):
+    def should_install(self, d: T.Union[TargetInstallData, InstallEmptyDir,
+                                        InstallDataBase, InstallSymlinkData,
+                                        ExecutableSerialisation]) -> bool:
+        if d.subproject and (d.subproject in self.skip_subprojects or '*' in self.skip_subprojects):
+            return False
+        if self.tags and d.tag not in self.tags:
             return False
         return True
 
@@ -379,15 +427,13 @@ class Installer:
                     makedirs: T.Optional[T.Tuple[T.Any, str]] = None) -> bool:
         outdir = os.path.split(to_file)[0]
         if not os.path.isfile(from_file) and not os.path.islink(from_file):
-            raise RuntimeError('Tried to install something that isn\'t a file:'
-                               '{!r}'.format(from_file))
+            raise MesonException(f'Tried to install something that isn\'t a file: {from_file!r}')
         # copyfile fails if the target file already exists, so remove it to
         # allow overwriting a previous install. If the target is not a file, we
         # want to give a readable error.
         if os.path.exists(to_file):
             if not os.path.isfile(to_file):
-                raise RuntimeError('Destination {!r} already exists and is not '
-                                   'a file'.format(to_file))
+                raise MesonException(f'Destination {to_file!r} already exists and is not a file')
             if self.should_preserve_existing_file(from_file, to_file):
                 append_to_log(self.lf, f'# Preserving old file {to_file}\n')
                 self.preserved_file_count += 1
@@ -412,6 +458,31 @@ class Installer:
             self.copy2(from_file, to_file)
         selinux_updates.append(to_file)
         append_to_log(self.lf, to_file)
+        return True
+
+    def do_symlink(self, target: str, link: str, destdir: str, full_dst_dir: str) -> bool:
+        abs_target = target
+        if not os.path.isabs(target):
+            abs_target = os.path.join(full_dst_dir, target)
+        elif not os.path.exists(abs_target):
+            abs_target = destdir_join(destdir, abs_target)
+        if not os.path.exists(abs_target):
+            raise MesonException(f'Tried to install symlink to missing file {abs_target}')
+        if os.path.exists(link):
+            if not os.path.islink(link):
+                raise MesonException(f'Destination {link!r} already exists and is not a symlink')
+            self.remove(link)
+        if not self.printed_symlink_error:
+            self.log(f'Installing symlink pointing to {target} to {link}')
+        try:
+            self.symlink(target, link, target_is_directory=os.path.isdir(abs_target))
+        except (NotImplementedError, OSError):
+            if not self.printed_symlink_error:
+                print("Symlink creation does not work on this platform. "
+                      "Skipping all symlinking.")
+                self.printed_symlink_error = True
+            return False
+        append_to_log(self.lf, link)
         return True
 
     def do_copydir(self, data: InstallData, src_dir: str, dst_dir: str,
@@ -494,12 +565,18 @@ class Installer:
         with open(datafilename, 'rb') as ifile:
             d = self.check_installdata(pickle.load(ifile))
 
-        # Override in the env because some scripts could be relying on it.
-        if self.options.destdir is not None:
-            os.environ['DESTDIR'] = self.options.destdir
-
-        destdir = os.environ.get('DESTDIR', '')
+        destdir = self.options.destdir
+        if destdir is None:
+            destdir = os.environ.get('DESTDIR')
+        if destdir and not os.path.isabs(destdir):
+            destdir = os.path.join(d.build_dir, destdir)
+        # Override in the env because some scripts could use it and require an
+        # absolute path.
+        if destdir is not None:
+            os.environ['DESTDIR'] = destdir
+        destdir = destdir or ''
         fullprefix = destdir_join(destdir, d.prefix)
+        libdir = os.path.join(d.prefix, d.libdir)
 
         if d.install_umask != 'preserve':
             assert isinstance(d.install_umask, int)
@@ -512,8 +589,11 @@ class Installer:
                 self.install_targets(d, dm, destdir, fullprefix)
                 self.install_headers(d, dm, destdir, fullprefix)
                 self.install_man(d, dm, destdir, fullprefix)
+                self.install_emptydir(d, dm, destdir, fullprefix)
                 self.install_data(d, dm, destdir, fullprefix)
-                self.restore_selinux_contexts()
+                self.install_symlinks(d, dm, destdir, fullprefix)
+                self.restore_selinux_contexts(destdir)
+                self.apply_ldconfig(dm, destdir, d.is_cross_build, libdir)
                 self.run_install_script(d, destdir, fullprefix)
                 if not self.did_install_something:
                     self.log('Nothing to install.')
@@ -531,7 +611,7 @@ class Installer:
 
     def install_subdirs(self, d: InstallData, dm: DirMaker, destdir: str, fullprefix: str) -> None:
         for i in d.install_subdirs:
-            if not self.install_subproject(i.subproject):
+            if not self.should_install(i):
                 continue
             self.did_install_something = True
             full_dst_dir = get_destdir_path(destdir, fullprefix, i.install_path)
@@ -541,7 +621,7 @@ class Installer:
 
     def install_data(self, d: InstallData, dm: DirMaker, destdir: str, fullprefix: str) -> None:
         for i in d.data:
-            if not self.install_subproject(i.subproject):
+            if not self.should_install(i):
                 continue
             fullfilename = i.path
             outfilename = get_destdir_path(destdir, fullprefix, i.install_path)
@@ -550,9 +630,19 @@ class Installer:
                 self.did_install_something = True
             self.set_mode(outfilename, i.install_mode, d.install_umask)
 
+    def install_symlinks(self, d: InstallData, dm: DirMaker, destdir: str, fullprefix: str) -> None:
+        for s in d.symlinks:
+            if not self.should_install(s):
+                continue
+            full_dst_dir = get_destdir_path(destdir, fullprefix, s.install_path)
+            full_link_name = get_destdir_path(destdir, fullprefix, s.name)
+            dm.makedirs(full_dst_dir, exist_ok=True)
+            if self.do_symlink(s.target, full_link_name, destdir, full_dst_dir):
+                self.did_install_something = True
+
     def install_man(self, d: InstallData, dm: DirMaker, destdir: str, fullprefix: str) -> None:
         for m in d.man:
-            if not self.install_subproject(m.subproject):
+            if not self.should_install(m):
                 continue
             full_source_filename = m.path
             outfilename = get_destdir_path(destdir, fullprefix, m.install_path)
@@ -561,9 +651,22 @@ class Installer:
                 self.did_install_something = True
             self.set_mode(outfilename, m.install_mode, d.install_umask)
 
+    def install_emptydir(self, d: InstallData, dm: DirMaker, destdir: str, fullprefix: str) -> None:
+        for e in d.emptydir:
+            if not self.should_install(e):
+                continue
+            self.did_install_something = True
+            full_dst_dir = get_destdir_path(destdir, fullprefix, e.path)
+            self.log(f'Installing new directory {full_dst_dir}')
+            if os.path.isfile(full_dst_dir):
+                print(f'Tried to create directory {full_dst_dir} but a file of that name already exists.')
+                sys.exit(1)
+            dm.makedirs(full_dst_dir, exist_ok=True)
+            self.set_mode(full_dst_dir, e.install_mode, d.install_umask)
+
     def install_headers(self, d: InstallData, dm: DirMaker, destdir: str, fullprefix: str) -> None:
         for t in d.headers:
-            if not self.install_subproject(t.subproject):
+            if not self.should_install(t):
                 continue
             fullfilename = t.path
             fname = os.path.basename(fullfilename)
@@ -584,7 +687,7 @@ class Installer:
             env['MESON_INSTALL_QUIET'] = '1'
 
         for i in d.install_scripts:
-            if not self.install_subproject(i.subproject):
+            if not self.should_install(i):
                 continue
             name = ' '.join(i.cmd_args)
             if i.skip_if_destdir and destdir:
@@ -604,7 +707,7 @@ class Installer:
 
     def install_targets(self, d: InstallData, dm: DirMaker, destdir: str, fullprefix: str) -> None:
         for t in d.targets:
-            if not self.install_subproject(t.subproject):
+            if not self.should_install(t):
                 continue
             if not os.path.exists(t.fname):
                 # For example, import libraries of shared modules are optional
@@ -612,7 +715,7 @@ class Installer:
                     self.log(f'File {t.fname!r} not found, skipping')
                     continue
                 else:
-                    raise RuntimeError(f'File {t.fname!r} could not be found')
+                    raise MesonException(f'File {t.fname!r} could not be found')
             file_copied = False # not set when a directory is copied
             fname = check_for_stampfile(t.fname)
             outdir = get_destdir_path(destdir, fullprefix, t.outdir)
@@ -624,7 +727,7 @@ class Installer:
             install_name_mappings = t.install_name_mappings
             install_mode = t.install_mode
             if not os.path.exists(fname):
-                raise RuntimeError(f'File {fname!r} could not be found')
+                raise MesonException(f'File {fname!r} could not be found')
             elif os.path.isfile(fname):
                 file_copied = self.do_copyfile(fname, outname, makedirs=(dm, outdir))
                 self.set_mode(outname, install_mode, d.install_umask)
@@ -653,26 +756,14 @@ class Installer:
                 self.do_copydir(d, fname, outname, None, install_mode, dm)
             else:
                 raise RuntimeError(f'Unknown file type for {fname!r}')
-            printed_symlink_error = False
-            for alias, to in aliases.items():
-                try:
-                    symlinkfilename = os.path.join(outdir, alias)
-                    try:
-                        self.remove(symlinkfilename)
-                    except FileNotFoundError:
-                        pass
-                    self.symlink(to, symlinkfilename)
-                    append_to_log(self.lf, symlinkfilename)
-                except (NotImplementedError, OSError):
-                    if not printed_symlink_error:
-                        print("Symlink creation does not work on this platform. "
-                              "Skipping all symlinking.")
-                        printed_symlink_error = True
+            for alias, target in aliases.items():
+                symlinkfilename = os.path.join(outdir, alias)
+                self.do_symlink(target, symlinkfilename, destdir, outdir)
             if file_copied:
                 self.did_install_something = True
                 try:
                     self.fix_rpath(outname, t.rpath_dirs_to_remove, install_rpath, final_path,
-                                         install_name_mappings, verbose=False)
+                                   install_name_mappings, verbose=False)
                 except SystemExit as e:
                     if isinstance(e.code, int) and e.code == 0:
                         pass
@@ -705,6 +796,8 @@ def run(opts: 'ArgumentType') -> int:
     if not os.path.exists(os.path.join(opts.wd, datafilename)):
         sys.exit('Install data not found. Run this command in build directory root.')
     if not opts.no_rebuild:
+        b = build.load(opts.wd)
+        setup_vsenv(b.need_vsenv)
         if not rebuild_all(opts.wd):
             sys.exit(-1)
     os.chdir(opts.wd)

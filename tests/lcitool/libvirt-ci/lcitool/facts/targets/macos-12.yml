@@ -1,0 +1,27 @@
+---
+os:
+  name: 'MacOS'
+  version: '12'
+
+packaging:
+  format: 'brew'
+  command: 'brew'
+
+paths:
+  bash: /opt/homebrew/bin/bash
+  cc: /usr/bin/clang
+  ccache: /opt/homebrew/bin/ccache
+  make: /opt/homebrew/bin/gmake
+  ninja: /opt/homebrew/bin/ninja
+  pip3: /opt/homebrew/bin/pip3
+  python: /opt/homebrew/bin/python3
+  sudoers: /etc/sudoers
+
+ansible_python_package: python3
+ansible_python_interpreter: /opt/homebrew/bin/python3
+
+cirrus:
+  instance_type: macos_instance
+  image_selector: image
+  image_name: ghcr.io/cirruslabs/macos-monterey-base:latest
+  arch: aarch64

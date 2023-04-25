@@ -1,4 +1,4 @@
-FROM docker.io/library/rust:1.49-alpine
+FROM docker.io/library/rust:1.59-alpine
 
 RUN rustup component add rustfmt
 

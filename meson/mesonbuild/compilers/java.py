@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import os.path
 import shutil
 import subprocess
@@ -39,10 +40,13 @@ class JavaCompiler(BasicLinkerIsCompilerMixin, Compiler):
     def get_werror_args(self) -> T.List[str]:
         return ['-Werror']
 
-    def get_output_args(self, subdir: str) -> T.List[str]:
-        if subdir == '':
-            subdir = './'
-        return ['-d', subdir, '-s', subdir]
+    def get_no_warn_args(self) -> T.List[str]:
+        return ['-nowarn']
+
+    def get_output_args(self, outputname: str) -> T.List[str]:
+        if outputname == '':
+            outputname = './'
+        return ['-d', outputname, '-s', outputname]
 
     def get_pic_args(self) -> T.List[str]:
         return []
@@ -102,3 +106,8 @@ class JavaCompiler(BasicLinkerIsCompilerMixin, Compiler):
 
     def get_optimization_args(self, optimization_level: str) -> T.List[str]:
         return []
+
+    def get_debug_args(self, is_debug: bool) -> T.List[str]:
+        if is_debug:
+            return ['-g']
+        return ['-g:none']

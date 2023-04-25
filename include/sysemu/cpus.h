@@ -1,11 +1,13 @@
 #ifndef QEMU_CPUS_H
 #define QEMU_CPUS_H
 
-#include "qemu/timer.h"
 #include "sysemu/accel-ops.h"
 
 /* register accel-specific operations */
 void cpus_register_accel(const AccelOpsClass *i);
+
+/* return registers ops */
+const AccelOpsClass *cpus_get_accel(void);
 
 /* accel/dummy-cpus.c */
 

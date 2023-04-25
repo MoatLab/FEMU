@@ -800,7 +800,6 @@ enum {
 enum {
 	OPAL_PHB_ERROR_DATA_TYPE_PHB3 = 2,
 	OPAL_PHB_ERROR_DATA_TYPE_PHB4 = 3,
-	OPAL_PHB_ERROR_DATA_TYPE_PHB5 = 3 /* TODO change this */
 };
 
 enum {

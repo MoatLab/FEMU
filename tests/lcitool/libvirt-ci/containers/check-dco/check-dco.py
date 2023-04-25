@@ -16,23 +16,38 @@ if len(sys.argv) >= 2:
     namespace = sys.argv[1]
 
 
+def get_default_branch(remote):
+    info = subprocess.check_output(["git", "remote", "show", remote],
+                                   universal_newlines=True)
+    head = "HEAD branch: "
+    for line in info.split("\n"):
+        offset = line.find(head)
+        if offset != -1:
+            offset += len(head)
+            return line[offset:]
+
+    raise Exception("Cannot find default branch")
+
+
 def get_branch_commits():
     cwd = os.getcwd()
     reponame = os.path.basename(cwd)
     repourl = "https://gitlab.com/%s/%s.git" % (namespace, reponame)
 
     subprocess.check_call(["git", "remote", "add", "check-dco", repourl])
-    subprocess.check_call(["git", "fetch", "check-dco", "master"],
-                          stdout=subprocess.DEVNULL,
-                          stderr=subprocess.DEVNULL)
+    try:
+        main = get_default_branch("check-dco")
+        subprocess.check_call(["git", "fetch", "check-dco", main],
+                              stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL)
 
-    ancestor = subprocess.check_output(["git", "merge-base", "check-dco/master", "HEAD"],
-                                       universal_newlines=True)
-    ancestor = ancestor.strip()
+        ancestor = subprocess.check_output(["git", "merge-base", "check-dco/" + main, "HEAD"],
+                                           universal_newlines=True)
+        ancestor = ancestor.strip()
 
-    subprocess.check_call(["git", "remote", "rm", "check-dco"])
-
-    return (ancestor, "HEAD")
+        return (ancestor, "HEAD")
+    finally:
+        subprocess.check_call(["git", "remote", "rm", "check-dco"])
 
 
 def get_mergereq_commits():

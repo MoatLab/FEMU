@@ -3,6 +3,9 @@
 #
 # Device Path Library that layers on top of the Memory Allocation Library.
 #
+# This library instances is deprecated and should no longer be used.  Ue
+# MdePkg/Library/UefiDevicePathLib/UefiDevicePathLibBase.inf instead.
+#
 # Copyright (c) 2007 - 2018, Intel Corporation. All rights reserved.<BR>
 # Copyright (c) Microsoft Corporation.
 #
@@ -13,13 +16,13 @@
 
 [Defines]
   INF_VERSION                    = 0x00010005
-  BASE_NAME                      = UefiDevicePathLib
+  BASE_NAME                      = UefiDevicePathLibStandaloneMm
   MODULE_UNI_FILE                = UefiDevicePathLib.uni
-  FILE_GUID                      = D8E58437-44D3-4154-B7A7-EB794923EF12
-  MODULE_TYPE                    = MM_STANDALONE
+  FILE_GUID                      = 7B60A2BC-9259-48A8-8279-971412EECAB3
+  MODULE_TYPE                    = BASE
   PI_SPECIFICATION_VERSION       = 0x00010032
   VERSION_STRING                 = 1.0
-  LIBRARY_CLASS                  = DevicePathLib | MM_STANDALONE MM_CORE_STANDALONE
+  LIBRARY_CLASS                  = DevicePathLib
 
 
 #
@@ -28,7 +31,7 @@
 
 [Sources]
   DevicePathUtilities.c
-  DevicePathUtilitiesStandaloneMm.c
+  DevicePathUtilitiesBase.c
   DevicePathToText.c
   DevicePathFromText.c
   UefiDevicePathLib.c

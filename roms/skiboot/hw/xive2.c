@@ -25,7 +25,6 @@
 
 /* Verbose debug */
 #undef XIVE_VERBOSE_DEBUG
-#undef DEBUG
 
 /* Extra debug options used in debug builds */
 #ifdef DEBUG
@@ -1167,6 +1166,9 @@ static bool xive_check_endc_update(struct xive *x, uint32_t idx, struct xive_end
 
 	assert(end_p);
 	end2 = *end_p;
+	end2.w0 &= ~END_W0_RESERVED;
+	end2.w1 &= ~END_W1_RESERVED;
+	end2.w7 &= ~END_W7_F0_RESERVED;
 	if (memcmp(end, &end2, sizeof(struct xive_end)) != 0) {
 		xive_err(x, "END update mismatch idx %d\n", idx);
 		xive_err(x, "want: %08x %08x %08x %08x\n",
@@ -1953,7 +1955,12 @@ static void xive_create_mmio_dt_node(struct xive *x)
 			     tb + 3 * stride, stride);
 
 	dt_add_property_strings(xive_dt_node, "compatible",
-				"ibm,opal-xive-pe", "ibm,opal-intc");
+				"ibm,opal-xive-pe", "ibm,opal-xive-vc",
+				"ibm,opal-intc");
+
+	dt_add_property(xive_dt_node, "interrupt-controller", NULL, 0);
+	dt_add_property_cells(xive_dt_node, "#address-cells", 0);
+	dt_add_property_cells(xive_dt_node, "#interrupt-cells", 2);
 
 	dt_add_property_cells(xive_dt_node, "ibm,xive-eq-sizes",
 			      12, 16, 21, 24);
@@ -1971,6 +1978,14 @@ static void xive_create_mmio_dt_node(struct xive *x)
 
 	xive_add_provisioning_properties();
 
+}
+
+uint32_t xive2_get_phandle(void)
+{
+	if (!xive_dt_node)
+		return 0;
+
+	return xive_dt_node->phandle;
 }
 
 static void xive_setup_forward_ports(struct xive *x, struct proc_chip *remote_chip)
@@ -2938,6 +2953,7 @@ static void xive_special_cache_check(struct xive *x, uint32_t blk, uint32_t idx)
 		struct xive_nvp *vp_m = xive_get_vp(x, idx);
 
 		memset(vp_m, (~i) & 0xff, sizeof(*vp_m));
+		vp_m->w0 = xive_set_field32(NVP_W0_VALID, vp_m->w0, 0);
 		sync();
 		vp.w1 = (i << 16) | i;
 		assert(!xive_nxc_cache_update(x, blk, idx, &vp, true));

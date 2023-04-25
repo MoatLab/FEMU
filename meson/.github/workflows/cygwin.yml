@@ -28,6 +28,8 @@ jobs:
         include:
           - NAME: gccx64ninja
             ARCH: x86_64
+    env:
+      MESON_CI_JOBNAME: cygwin-${{ matrix.NAME }}
 
     steps:
       # cache should be saved on failure, but the action doesn't support that
@@ -64,15 +66,15 @@ jobs:
             python3-devel
             python3-libxml2
             python3-libxslt
-            python38-pip
-            python38-wheel
+            python39-pip
+            python39-wheel
             vala
             zlib-devel
 
       - name: Run pip
         run: |
           export PATH=/usr/bin:/usr/local/bin:$(cygpath ${SYSTEMROOT})/system32
-          python3 -m pip --disable-pip-version-check install gcovr jsonschema pefile pytest pytest-xdist coverage codecov
+          python3 -m pip --disable-pip-version-check install gcovr jsonschema pefile pytest pytest-subtests pytest-xdist coverage codecov
         shell: C:\cygwin\bin\bash.exe --noprofile --norc -o igncr -eo pipefail '{0}'
 
       - name: Run tests

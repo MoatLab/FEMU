@@ -59,7 +59,6 @@ size_t sbi_strnlen(const char *str, size_t count)
 	while (*str != '\0' && ret < count) {
 		ret++;
 		str++;
-		count--;
 	}
 
 	return ret;
@@ -149,8 +148,8 @@ void *sbi_memmove(void *dest, const void *src, size_t count)
 			count--;
 		}
 	} else {
-		temp1 = dest + count - 1;
-		temp2 = src + count - 1;
+		temp1 = (char *)dest + count - 1;
+		temp2 = (char *)src + count - 1;
 
 		while (count > 0) {
 			*temp1-- = *temp2--;

@@ -7,7 +7,7 @@
  */
 
 #include "qemu/osdep.h"
-#include "libqos/libqtest.h"
+#include "libqtest.h"
 
 /*
  * https://gitlab.com/qemu-project/qemu/-/issues/450
@@ -18,7 +18,7 @@ static void oss_fuzz_29225(void)
 {
     QTestState *s;
 
-    s = qtest_init(" -display none -m 512m -nodefaults -nographic"
+    s = qtest_init(" -m 512m -nodefaults -nographic"
                    " -device sdhci-pci,sd-spec-version=3"
                    " -device sd-card,drive=d0"
                    " -drive if=none,index=0,file=null-co://,format=raw,id=d0");
@@ -61,7 +61,7 @@ static void oss_fuzz_36217(void)
 {
     QTestState *s;
 
-    s = qtest_init(" -display none -m 32 -nodefaults -nographic"
+    s = qtest_init(" -m 32 -nodefaults -nographic"
                    " -device sdhci-pci,sd-spec-version=3 "
                    "-device sd-card,drive=d0 "
                    "-drive if=none,index=0,file=null-co://,format=raw,id=d0");
@@ -95,7 +95,7 @@ static void oss_fuzz_36391(void)
 {
     QTestState *s;
 
-    s = qtest_init(" -display none -m 512M -nodefaults -nographic"
+    s = qtest_init(" -m 512M -nodefaults -nographic"
                    " -device sdhci-pci,sd-spec-version=3"
                    " -device sd-card,drive=drv"
                    " -drive if=none,index=0,file=null-co://,format=raw,id=drv");
@@ -164,15 +164,11 @@ static void oss_fuzz_36391(void)
 
 int main(int argc, char **argv)
 {
-    const char *arch = qtest_get_arch();
-
     g_test_init(&argc, &argv, NULL);
 
-   if (strcmp(arch, "i386") == 0) {
-        qtest_add_func("fuzz/sdcard/oss_fuzz_29225", oss_fuzz_29225);
-        qtest_add_func("fuzz/sdcard/oss_fuzz_36217", oss_fuzz_36217);
-        qtest_add_func("fuzz/sdcard/oss_fuzz_36391", oss_fuzz_36391);
-   }
+    qtest_add_func("fuzz/sdcard/oss_fuzz_29225", oss_fuzz_29225);
+    qtest_add_func("fuzz/sdcard/oss_fuzz_36217", oss_fuzz_36217);
+    qtest_add_func("fuzz/sdcard/oss_fuzz_36391", oss_fuzz_36391);
 
-   return g_test_run();
+    return g_test_run();
 }

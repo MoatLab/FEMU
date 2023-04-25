@@ -9,7 +9,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/units.h"
-#include "qemu-common.h"
+#include "qemu/guest-random.h"
 #include "sysemu/sysemu.h"
 #include "cpu.h"
 #include "hw/boards.h"
@@ -23,6 +23,7 @@
 #include "bootinfo.h"
 #include "net/net.h"
 #include "qapi/error.h"
+#include "qemu/error-report.h"
 #include "sysemu/qtest.h"
 #include "sysemu/runstate.h"
 #include "sysemu/reset.h"
@@ -102,6 +103,13 @@ static void main_cpu_reset(void *opaque)
     cpu->env.pc = reset_info->initial_pc;
 }
 
+static void rerandomize_rng_seed(void *opaque)
+{
+    struct bi_record *rng_seed = opaque;
+    qemu_guest_getrandom_nofail((void *)rng_seed->data + 2,
+                                be16_to_cpu(*(uint16_t *)rng_seed->data));
+}
+
 static void virt_init(MachineState *machine)
 {
     M68kCPU *cpu = NULL;
@@ -121,6 +129,7 @@ static void virt_init(MachineState *machine)
     hwaddr io_base;
     int i;
     ResetInfo *reset_info;
+    uint8_t rng_seed[32];
 
     if (ram_size > 3399672 * KiB) {
         /*
@@ -172,6 +181,7 @@ static void virt_init(MachineState *machine)
     io_base = VIRT_GF_RTC_MMIO_BASE;
     for (i = 0; i < VIRT_GF_RTC_NB; i++) {
         dev = qdev_new(TYPE_GOLDFISH_RTC);
+        qdev_prop_set_bit(dev, "big-endian", true);
         sysbus = SYS_BUS_DEVICE(dev);
         sysbus_realize_and_unref(sysbus, &error_fatal);
         sysbus_mmio_map(sysbus, 0, io_base);
@@ -210,6 +220,13 @@ static void virt_init(MachineState *machine)
     if (kernel_filename) {
         CPUState *cs = CPU(cpu);
         uint64_t high;
+        void *param_blob, *param_ptr, *param_rng_seed;
+
+        if (kernel_cmdline) {
+            param_blob = g_malloc(strlen(kernel_cmdline) + 1024);
+        } else {
+            param_blob = g_malloc(1024);
+        }
 
         kernel_size = load_elf(kernel_filename, NULL, NULL, NULL,
                                &elf_entry, NULL, &high, NULL, 1,
@@ -220,31 +237,38 @@ static void virt_init(MachineState *machine)
         }
         reset_info->initial_pc = elf_entry;
         parameters_base = (high + 1) & ~1;
+        param_ptr = param_blob;
 
-        BOOTINFO1(cs->as, parameters_base, BI_MACHTYPE, MACH_VIRT);
-        BOOTINFO1(cs->as, parameters_base, BI_FPUTYPE, FPU_68040);
-        BOOTINFO1(cs->as, parameters_base, BI_MMUTYPE, MMU_68040);
-        BOOTINFO1(cs->as, parameters_base, BI_CPUTYPE, CPU_68040);
-        BOOTINFO2(cs->as, parameters_base, BI_MEMCHUNK, 0, ram_size);
+        BOOTINFO1(param_ptr, BI_MACHTYPE, MACH_VIRT);
+        BOOTINFO1(param_ptr, BI_FPUTYPE, FPU_68040);
+        BOOTINFO1(param_ptr, BI_MMUTYPE, MMU_68040);
+        BOOTINFO1(param_ptr, BI_CPUTYPE, CPU_68040);
+        BOOTINFO2(param_ptr, BI_MEMCHUNK, 0, ram_size);
 
-        BOOTINFO1(cs->as, parameters_base, BI_VIRT_QEMU_VERSION,
+        BOOTINFO1(param_ptr, BI_VIRT_QEMU_VERSION,
                   ((QEMU_VERSION_MAJOR << 24) | (QEMU_VERSION_MINOR << 16) |
                    (QEMU_VERSION_MICRO << 8)));
-        BOOTINFO2(cs->as, parameters_base, BI_VIRT_GF_PIC_BASE,
+        BOOTINFO2(param_ptr, BI_VIRT_GF_PIC_BASE,
                   VIRT_GF_PIC_MMIO_BASE, VIRT_GF_PIC_IRQ_BASE);
-        BOOTINFO2(cs->as, parameters_base, BI_VIRT_GF_RTC_BASE,
+        BOOTINFO2(param_ptr, BI_VIRT_GF_RTC_BASE,
                   VIRT_GF_RTC_MMIO_BASE, VIRT_GF_RTC_IRQ_BASE);
-        BOOTINFO2(cs->as, parameters_base, BI_VIRT_GF_TTY_BASE,
+        BOOTINFO2(param_ptr, BI_VIRT_GF_TTY_BASE,
                   VIRT_GF_TTY_MMIO_BASE, VIRT_GF_TTY_IRQ_BASE);
-        BOOTINFO2(cs->as, parameters_base, BI_VIRT_CTRL_BASE,
+        BOOTINFO2(param_ptr, BI_VIRT_CTRL_BASE,
                   VIRT_CTRL_MMIO_BASE, VIRT_CTRL_IRQ_BASE);
-        BOOTINFO2(cs->as, parameters_base, BI_VIRT_VIRTIO_BASE,
+        BOOTINFO2(param_ptr, BI_VIRT_VIRTIO_BASE,
                   VIRT_VIRTIO_MMIO_BASE, VIRT_VIRTIO_IRQ_BASE);
 
         if (kernel_cmdline) {
-            BOOTINFOSTR(cs->as, parameters_base, BI_COMMAND_LINE,
+            BOOTINFOSTR(param_ptr, BI_COMMAND_LINE,
                         kernel_cmdline);
         }
+
+        /* Pass seed to RNG. */
+        param_rng_seed = param_ptr;
+        qemu_guest_getrandom_nofail(rng_seed, sizeof(rng_seed));
+        BOOTINFODATA(param_ptr, BI_RNG_SEED,
+                     rng_seed, sizeof(rng_seed));
 
         /* load initrd */
         if (initrd_filename) {
@@ -258,13 +282,20 @@ static void virt_init(MachineState *machine)
             initrd_base = (ram_size - initrd_size) & TARGET_PAGE_MASK;
             load_image_targphys(initrd_filename, initrd_base,
                                 ram_size - initrd_base);
-            BOOTINFO2(cs->as, parameters_base, BI_RAMDISK, initrd_base,
+            BOOTINFO2(param_ptr, BI_RAMDISK, initrd_base,
                       initrd_size);
         } else {
             initrd_base = 0;
             initrd_size = 0;
         }
-        BOOTINFO0(cs->as, parameters_base, BI_LAST);
+        BOOTINFO0(param_ptr, BI_LAST);
+        rom_add_blob_fixed_as("bootinfo", param_blob, param_ptr - param_blob,
+                              parameters_base, cs->as);
+        qemu_register_reset_nosnapshotload(rerandomize_rng_seed,
+                            rom_ptr_for_as(cs->as, parameters_base,
+                                           param_ptr - param_blob) +
+                            (param_rng_seed - param_blob));
+        g_free(param_blob);
     }
 }
 
@@ -316,10 +347,31 @@ type_init(virt_machine_register_types)
     } \
     type_init(machvirt_machine_##major##_##minor##_init);
 
-static void virt_machine_7_0_options(MachineClass *mc)
+static void virt_machine_8_0_options(MachineClass *mc)
 {
 }
-DEFINE_VIRT_MACHINE(7, 0, true)
+DEFINE_VIRT_MACHINE(8, 0, true)
+
+static void virt_machine_7_2_options(MachineClass *mc)
+{
+    virt_machine_8_0_options(mc);
+    compat_props_add(mc->compat_props, hw_compat_7_2, hw_compat_7_2_len);
+}
+DEFINE_VIRT_MACHINE(7, 2, false)
+
+static void virt_machine_7_1_options(MachineClass *mc)
+{
+    virt_machine_7_2_options(mc);
+    compat_props_add(mc->compat_props, hw_compat_7_1, hw_compat_7_1_len);
+}
+DEFINE_VIRT_MACHINE(7, 1, false)
+
+static void virt_machine_7_0_options(MachineClass *mc)
+{
+    virt_machine_7_1_options(mc);
+    compat_props_add(mc->compat_props, hw_compat_7_0, hw_compat_7_0_len);
+}
+DEFINE_VIRT_MACHINE(7, 0, false)
 
 static void virt_machine_6_2_options(MachineClass *mc)
 {

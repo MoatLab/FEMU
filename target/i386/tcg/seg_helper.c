@@ -882,7 +882,7 @@ static void do_interrupt64(CPUX86State *env, int intno, int is_int,
 
     dt = &env->idt;
     if (intno * 16 + 15 > dt->limit) {
-        raise_exception_err(env, EXCP0D_GPF, intno * 16 + 2);
+        raise_exception_err(env, EXCP0D_GPF, intno * 8 + 2);
     }
     ptr = dt->base + intno * 16;
     e1 = cpu_ldl_kernel(env, ptr);
@@ -895,18 +895,18 @@ static void do_interrupt64(CPUX86State *env, int intno, int is_int,
     case 15: /* 386 trap gate */
         break;
     default:
-        raise_exception_err(env, EXCP0D_GPF, intno * 16 + 2);
+        raise_exception_err(env, EXCP0D_GPF, intno * 8 + 2);
         break;
     }
     dpl = (e2 >> DESC_DPL_SHIFT) & 3;
     cpl = env->hflags & HF_CPL_MASK;
     /* check privilege if software int */
     if (is_int && dpl < cpl) {
-        raise_exception_err(env, EXCP0D_GPF, intno * 16 + 2);
+        raise_exception_err(env, EXCP0D_GPF, intno * 8 + 2);
     }
     /* check valid bit */
     if (!(e2 & DESC_P_MASK)) {
-        raise_exception_err(env, EXCP0B_NOSEG, intno * 16 + 2);
+        raise_exception_err(env, EXCP0B_NOSEG, intno * 8 + 2);
     }
     selector = e1 >> 16;
     offset = ((target_ulong)e3 << 32) | (e2 & 0xffff0000) | (e1 & 0x0000ffff);
@@ -1504,14 +1504,12 @@ void helper_ljmp_protected(CPUX86State *env, int new_cs, target_ulong new_eip,
 }
 
 /* real mode call */
-void helper_lcall_real(CPUX86State *env, int new_cs, target_ulong new_eip1,
-                       int shift, int next_eip)
+void helper_lcall_real(CPUX86State *env, uint32_t new_cs, uint32_t new_eip,
+                       int shift, uint32_t next_eip)
 {
-    int new_eip;
     uint32_t esp, esp_mask;
     target_ulong ssp;
 
-    new_eip = new_eip1;
     esp = env->regs[R_ESP];
     esp_mask = get_sp_mask(env->segs[R_SS].flags);
     ssp = env->segs[R_SS].base;

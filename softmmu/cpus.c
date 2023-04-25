@@ -23,7 +23,6 @@
  */
 
 #include "qemu/osdep.h"
-#include "qemu-common.h"
 #include "monitor/monitor.h"
 #include "qemu/coroutine-tls.h"
 #include "qapi/error.h"
@@ -35,6 +34,7 @@
 #include "sysemu/hw_accel.h"
 #include "exec/cpu-common.h"
 #include "qemu/thread.h"
+#include "qemu/main-loop.h"
 #include "qemu/plugin.h"
 #include "sysemu/cpus.h"
 #include "qemu/guest-random.h"
@@ -355,7 +355,7 @@ static void qemu_init_sigbus(void)
 
     /*
      * ALERT: when modifying this, take care that SIGBUS forwarding in
-     * os_mem_prealloc() will continue working as expected.
+     * qemu_prealloc_mem() will continue working as expected.
      */
     memset(&action, 0, sizeof(action));
     action.sa_flags = SA_SIGINFO;
@@ -438,18 +438,19 @@ void qemu_wait_io_event(CPUState *cpu)
 
 void cpus_kick_thread(CPUState *cpu)
 {
-#ifndef _WIN32
-    int err;
-
     if (cpu->thread_kicked) {
         return;
     }
     cpu->thread_kicked = true;
-    err = pthread_kill(cpu->thread->thread, SIG_IPI);
+
+#ifndef _WIN32
+    int err = pthread_kill(cpu->thread->thread, SIG_IPI);
     if (err && err != ESRCH) {
         fprintf(stderr, "qemu:%s: %s", __func__, strerror(err));
         exit(1);
     }
+#else
+    qemu_sem_post(&cpu->sem);
 #endif
 }
 
@@ -618,6 +619,13 @@ void cpus_register_accel(const AccelOpsClass *ops)
     cpus_accel = ops;
 }
 
+const AccelOpsClass *cpus_get_accel(void)
+{
+    /* broken if we call this early */
+    assert(cpus_accel);
+    return cpus_accel;
+}
+
 void qemu_init_vcpu(CPUState *cpu)
 {
     MachineState *ms = MACHINE(qdev_get_machine());
@@ -673,7 +681,7 @@ int vm_stop(RunState state)
  * Returns -1 if the vCPUs are not to be restarted (e.g. if they are already
  * running or in case of an error condition), 0 otherwise.
  */
-int vm_prepare_start(void)
+int vm_prepare_start(bool step_pending)
 {
     RunState requested;
 
@@ -693,6 +701,14 @@ int vm_prepare_start(void)
         return -1;
     }
 
+    /*
+     * WHPX accelerator needs to know whether we are going to step
+     * any CPUs, before starting the first one.
+     */
+    if (cpus_accel->synchronize_pre_resume) {
+        cpus_accel->synchronize_pre_resume(step_pending);
+    }
+
     /* We are sending this now, but the CPUs will be resumed shortly later */
     qapi_event_send_resume();
 
@@ -704,7 +720,7 @@ int vm_prepare_start(void)
 
 void vm_start(void)
 {
-    if (!vm_prepare_start()) {
+    if (!vm_prepare_start(false)) {
         resume_all_vcpus();
     }
 }

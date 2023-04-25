@@ -18,9 +18,10 @@
 #include "vgahw.h" // vgahw_setup
 #include "vgautil.h" // swcursor_check_event
 
+#if CONFIG_X86
 // Type of emulator platform - for dprintf with certain compile options.
 int PlatformRunningOn VAR16;
-
+#endif
 
 /****************************************************************
  * PCI Data

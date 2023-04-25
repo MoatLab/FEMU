@@ -1,0 +1,3 @@
+install:
+  cloud_init: false
+  flavor: gitlab

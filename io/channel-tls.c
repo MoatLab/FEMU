@@ -74,6 +74,9 @@ qio_channel_tls_new_server(QIOChannel *master,
     ioc = QIO_CHANNEL_TLS(object_new(TYPE_QIO_CHANNEL_TLS));
 
     ioc->master = master;
+    if (qio_channel_has_feature(master, QIO_CHANNEL_FEATURE_SHUTDOWN)) {
+        qio_channel_set_feature(QIO_CHANNEL(ioc), QIO_CHANNEL_FEATURE_SHUTDOWN);
+    }
     object_ref(OBJECT(master));
 
     ioc->session = qcrypto_tls_session_new(
@@ -260,6 +263,7 @@ static ssize_t qio_channel_tls_readv(QIOChannel *ioc,
                                      size_t niov,
                                      int **fds,
                                      size_t *nfds,
+                                     int flags,
                                      Error **errp)
 {
     QIOChannelTLS *tioc = QIO_CHANNEL_TLS(ioc);
@@ -301,6 +305,7 @@ static ssize_t qio_channel_tls_writev(QIOChannel *ioc,
                                       size_t niov,
                                       int *fds,
                                       size_t nfds,
+                                      int flags,
                                       Error **errp)
 {
     QIOChannelTLS *tioc = QIO_CHANNEL_TLS(ioc);
@@ -387,12 +392,77 @@ static void qio_channel_tls_set_aio_fd_handler(QIOChannel *ioc,
     qio_channel_set_aio_fd_handler(tioc->master, ctx, io_read, io_write, opaque);
 }
 
+typedef struct QIOChannelTLSSource QIOChannelTLSSource;
+struct QIOChannelTLSSource {
+    GSource parent;
+    QIOChannelTLS *tioc;
+};
+
+static gboolean
+qio_channel_tls_source_check(GSource *source)
+{
+    QIOChannelTLSSource *tsource = (QIOChannelTLSSource *)source;
+
+    return qcrypto_tls_session_check_pending(tsource->tioc->session) > 0;
+}
+
+static gboolean
+qio_channel_tls_source_prepare(GSource *source, gint *timeout)
+{
+    *timeout = -1;
+    return qio_channel_tls_source_check(source);
+}
+
+static gboolean
+qio_channel_tls_source_dispatch(GSource *source, GSourceFunc callback,
+                                gpointer user_data)
+{
+    return G_SOURCE_CONTINUE;
+}
+
+static void
+qio_channel_tls_source_finalize(GSource *source)
+{
+    QIOChannelTLSSource *tsource = (QIOChannelTLSSource *)source;
+
+    object_unref(OBJECT(tsource->tioc));
+}
+
+static GSourceFuncs qio_channel_tls_source_funcs = {
+    qio_channel_tls_source_prepare,
+    qio_channel_tls_source_check,
+    qio_channel_tls_source_dispatch,
+    qio_channel_tls_source_finalize
+};
+
+static void
+qio_channel_tls_read_watch(QIOChannelTLS *tioc, GSource *source)
+{
+    GSource *child;
+    QIOChannelTLSSource *tlssource;
+
+    child = g_source_new(&qio_channel_tls_source_funcs,
+                          sizeof(QIOChannelTLSSource));
+    tlssource = (QIOChannelTLSSource *)child;
+
+    tlssource->tioc = tioc;
+    object_ref(OBJECT(tioc));
+
+    g_source_add_child_source(source, child);
+    g_source_unref(child);
+}
+
 static GSource *qio_channel_tls_create_watch(QIOChannel *ioc,
                                              GIOCondition condition)
 {
     QIOChannelTLS *tioc = QIO_CHANNEL_TLS(ioc);
+    GSource *source = qio_channel_create_watch(tioc->master, condition);
 
-    return qio_channel_create_watch(tioc->master, condition);
+    if (condition & G_IO_IN) {
+        qio_channel_tls_read_watch(tioc, source);
+    }
+
+    return source;
 }
 
 QCryptoTLSSession *

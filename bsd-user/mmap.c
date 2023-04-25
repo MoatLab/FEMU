@@ -19,7 +19,6 @@
 #include "qemu/osdep.h"
 
 #include "qemu.h"
-#include "qemu-common.h"
 
 static pthread_mutex_t mmap_mutex = PTHREAD_MUTEX_INITIALIZER;
 static __thread int mmap_lock_count;
@@ -119,7 +118,7 @@ int target_mprotect(abi_ulong start, abi_ulong len, int prot)
         if (ret != 0)
             goto error;
     }
-    page_set_flags(start, start + len, prot | PAGE_VALID);
+    page_set_flags(start, start + len - 1, prot | PAGE_VALID);
     mmap_unlock();
     return 0;
 error:
@@ -235,7 +234,7 @@ static abi_ulong mmap_find_vma_reserved(abi_ulong start, abi_ulong size,
     size = HOST_PAGE_ALIGN(size) + alignment;
     end_addr = start + size;
     if (end_addr > reserved_va) {
-        end_addr = reserved_va;
+        end_addr = reserved_va + 1;
     }
     addr = end_addr - qemu_host_page_size;
 
@@ -244,7 +243,7 @@ static abi_ulong mmap_find_vma_reserved(abi_ulong start, abi_ulong size,
             if (looped) {
                 return (abi_ulong)-1;
             }
-            end_addr = reserved_va;
+            end_addr = reserved_va + 1;
             addr = end_addr - qemu_host_page_size;
             looped = 1;
             continue;
@@ -515,7 +514,7 @@ abi_long target_mmap(abi_ulong start, abi_ulong len, int prot,
      * up to the targets page boundary.
      */
 
-    if ((qemu_real_host_page_size < qemu_host_page_size) && fd != -1) {
+    if ((qemu_real_host_page_size() < qemu_host_page_size) && fd != -1) {
         struct stat sb;
 
         if (fstat(fd, &sb) == -1) {
@@ -657,14 +656,13 @@ abi_long target_mmap(abi_ulong start, abi_ulong len, int prot,
         }
     }
  the_end1:
-    page_set_flags(start, start + len, prot | PAGE_VALID);
+    page_set_flags(start, start + len - 1, prot | PAGE_VALID);
  the_end:
 #ifdef DEBUG_MMAP
     printf("ret=0x" TARGET_ABI_FMT_lx "\n", start);
     page_dump(stdout);
     printf("\n");
 #endif
-    tb_invalidate_phys_range(start, start + len);
     mmap_unlock();
     return start;
 fail:
@@ -769,8 +767,7 @@ int target_munmap(abi_ulong start, abi_ulong len)
     }
 
     if (ret == 0) {
-        page_set_flags(start, start + len, 0);
-        tb_invalidate_phys_range(start, start + len);
+        page_set_flags(start, start + len - 1, 0);
     }
     mmap_unlock();
     return ret;

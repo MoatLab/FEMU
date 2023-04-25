@@ -25,9 +25,9 @@
  */
 
 #include "qemu/osdep.h"
-#include "qemu-common.h"
 #include "qemu/datadir.h"
 #include "qemu/memalign.h"
+#include "qemu/guest-random.h"
 #include "qapi/error.h"
 #include "qapi/qapi-events-machine.h"
 #include "qapi/qapi-events-qdev.h"
@@ -62,6 +62,7 @@
 #include "hw/ppc/fdt.h"
 #include "hw/ppc/spapr.h"
 #include "hw/ppc/spapr_vio.h"
+#include "hw/ppc/vof.h"
 #include "hw/qdev-properties.h"
 #include "hw/pci-host/spapr.h"
 #include "hw/pci/msi.h"
@@ -177,8 +178,8 @@ static int spapr_fixup_cpu_smt_dt(void *fdt, int offset, PowerPCCPU *cpu,
                                   int smt_threads)
 {
     int i, ret = 0;
-    uint32_t servers_prop[smt_threads];
-    uint32_t gservers_prop[smt_threads * 2];
+    g_autofree uint32_t *servers_prop = g_new(uint32_t, smt_threads);
+    g_autofree uint32_t *gservers_prop = g_new(uint32_t, smt_threads * 2);
     int index = spapr_get_vcpu_id(cpu);
 
     if (cpu->compat_pvr) {
@@ -196,12 +197,12 @@ static int spapr_fixup_cpu_smt_dt(void *fdt, int offset, PowerPCCPU *cpu,
         gservers_prop[i*2 + 1] = 0;
     }
     ret = fdt_setprop(fdt, offset, "ibm,ppc-interrupt-server#s",
-                      servers_prop, sizeof(servers_prop));
+                      servers_prop, sizeof(*servers_prop) * smt_threads);
     if (ret < 0) {
         return ret;
     }
     ret = fdt_setprop(fdt, offset, "ibm,ppc-interrupt-gserver#s",
-                      gservers_prop, sizeof(gservers_prop));
+                      gservers_prop, sizeof(*gservers_prop) * smt_threads * 2);
 
     return ret;
 }
@@ -899,6 +900,8 @@ static void spapr_dt_rtas(SpaprMachineState *spapr, void *fdt)
         add_str(hypertas, "hcall-hpt-resize");
     }
 
+    add_str(hypertas, "hcall-watchdog");
+
     _FDT(fdt_setprop(fdt, rtas, "ibm,hypertas-functions",
                      hypertas->str, hypertas->len));
     g_string_free(hypertas, TRUE);
@@ -1013,6 +1016,7 @@ static void spapr_dt_chosen(SpaprMachineState *spapr, void *fdt, bool reset)
 {
     MachineState *machine = MACHINE(spapr);
     SpaprMachineClass *smc = SPAPR_MACHINE_GET_CLASS(machine);
+    uint8_t rng_seed[32];
     int chosen;
 
     _FDT(chosen = fdt_add_subnode(fdt, 0, "chosen"));
@@ -1045,8 +1049,8 @@ static void spapr_dt_chosen(SpaprMachineState *spapr, void *fdt, bool reset)
                 _FDT(fdt_setprop(fdt, chosen, "qemu,boot-kernel-le", NULL, 0));
             }
         }
-        if (boot_menu) {
-            _FDT((fdt_setprop_cell(fdt, chosen, "qemu,boot-menu", boot_menu)));
+        if (machine->boot_config.has_menu && machine->boot_config.menu) {
+            _FDT((fdt_setprop_cell(fdt, chosen, "qemu,boot-menu", true)));
         }
         _FDT(fdt_setprop_cell(fdt, chosen, "qemu,graphic-width", graphic_width));
         _FDT(fdt_setprop_cell(fdt, chosen, "qemu,graphic-height", graphic_height));
@@ -1067,7 +1071,7 @@ static void spapr_dt_chosen(SpaprMachineState *spapr, void *fdt, bool reset)
             _FDT(fdt_setprop_string(fdt, chosen, "qemu,boot-device", boot_device));
         }
 
-        if (!spapr->has_graphics && stdout_path) {
+        if (spapr->want_stdout_path && stdout_path) {
             /*
              * "linux,stdout-path" and "stdout" properties are
              * deprecated by linux kernel. New platforms should only
@@ -1089,6 +1093,9 @@ static void spapr_dt_chosen(SpaprMachineState *spapr, void *fdt, bool reset)
 
         spapr_dt_ov5_platform_support(spapr, fdt, chosen);
     }
+
+    qemu_guest_getrandom_nofail(rng_seed, sizeof(rng_seed));
+    _FDT(fdt_setprop(fdt, chosen, "rng-seed", rng_seed, sizeof(rng_seed)));
 
     _FDT(spapr_dt_ovec(fdt, chosen, spapr->ov5_cas, "ibm,architecture-vec-5"));
 }
@@ -1270,7 +1277,7 @@ static void emulate_spapr_hypercall(PPCVirtualHypervisor *vhyp,
 
     g_assert(!vhyp_cpu_in_nested(cpu));
 
-    if (msr_pr) {
+    if (FIELD_EX64(env->msr, MSR, PR)) {
         hcall_dprintf("Hypercall made with MSR[PR]=1\n");
         env->gpr[3] = H_PRIVILEGE;
     } else {
@@ -1329,6 +1336,11 @@ static bool spapr_get_pate(PPCVirtualHypervisor *vhyp, PowerPCCPU *cpu,
 
         patb = spapr->nested_ptcr & PTCR_PATB;
         pats = spapr->nested_ptcr & PTCR_PATS;
+
+        /* Check if partition table is properly aligned */
+        if (patb & MAKE_64BIT_MASK(0, pats + 12)) {
+            return false;
+        }
 
         /* Calculate number of entries */
         pats = 1ull << (pats + 12 - 4);
@@ -1511,7 +1523,7 @@ int spapr_hpt_shift_for_ramsize(uint64_t ramsize)
 
 void spapr_free_hpt(SpaprMachineState *spapr)
 {
-    g_free(spapr->htab);
+    qemu_vfree(spapr->htab);
     spapr->htab = NULL;
     spapr->htab_shift = 0;
     close_htab_fd(spapr);
@@ -1612,7 +1624,7 @@ void spapr_check_mmu_mode(bool guest_radix)
     }
 }
 
-static void spapr_machine_reset(MachineState *machine)
+static void spapr_machine_reset(MachineState *machine, ShutdownCause reason)
 {
     SpaprMachineState *spapr = SPAPR_MACHINE(machine);
     PowerPCCPU *first_ppc_cpu;
@@ -1638,7 +1650,7 @@ static void spapr_machine_reset(MachineState *machine)
         spapr_setup_hpt(spapr);
     }
 
-    qemu_devices_reset();
+    qemu_devices_reset(reason);
 
     spapr_ovec_cleanup(spapr->ov5_cas);
     spapr->ov5_cas = spapr_ovec_new();
@@ -1702,6 +1714,9 @@ static void spapr_machine_reset(MachineState *machine)
     spapr->fdt_initial_size = spapr->fdt_size;
     spapr->fdt_blob = fdt;
 
+    /* Set machine->fdt for 'dumpdtb' QMP/HMP command */
+    machine->fdt = fdt;
+
     /* Set up the entry state */
     first_ppc_cpu->env.gpr[5] = 0;
 
@@ -1743,6 +1758,7 @@ static void spapr_rtc_create(SpaprMachineState *spapr)
 /* Returns whether we want to use VGA or not */
 static bool spapr_vga_init(PCIBus *pci_bus, Error **errp)
 {
+    vga_interface_created = true;
     switch (vga_interface_type) {
     case VGA_NONE:
         return false;
@@ -2712,6 +2728,7 @@ static void spapr_machine_init(MachineState *machine)
     const char *kernel_filename = machine->kernel_filename;
     const char *initrd_filename = machine->initrd_filename;
     PCIHostState *phb;
+    bool has_vga;
     int i;
     MemoryRegion *sysmem = get_system_memory();
     long load_limit, fw_size;
@@ -2950,9 +2967,12 @@ static void spapr_machine_init(MachineState *machine)
     }
 
     /* Graphics */
-    if (spapr_vga_init(phb->bus, &error_fatal)) {
-        spapr->has_graphics = true;
+    has_vga = spapr_vga_init(phb->bus, &error_fatal);
+    if (has_vga) {
+        spapr->want_stdout_path = !machine->enable_graphics;
         machine->usb |= defaults_enabled() && !machine->usb_disabled;
+    } else {
+        spapr->want_stdout_path = true;
     }
 
     if (machine->usb) {
@@ -2962,7 +2982,7 @@ static void spapr_machine_init(MachineState *machine)
             pci_create_simple(phb->bus, -1, "nec-usb-xhci");
         }
 
-        if (spapr->has_graphics) {
+        if (has_vga) {
             USBBus *usb_bus = usb_bus_find(-1);
 
             usb_create_simple(usb_bus, "usb-kbd");
@@ -2971,14 +2991,16 @@ static void spapr_machine_init(MachineState *machine)
     }
 
     if (kernel_filename) {
+        uint64_t loaded_addr = 0;
+
         spapr->kernel_size = load_elf(kernel_filename, NULL,
                                       translate_kernel_address, spapr,
-                                      NULL, NULL, NULL, NULL, 1,
+                                      NULL, &loaded_addr, NULL, NULL, 1,
                                       PPC_ELF_MACHINE, 0, 0);
         if (spapr->kernel_size == ELF_LOAD_WRONG_ENDIAN) {
             spapr->kernel_size = load_elf(kernel_filename, NULL,
                                           translate_kernel_address, spapr,
-                                          NULL, NULL, NULL, NULL, 0,
+                                          NULL, &loaded_addr, NULL, NULL, 0,
                                           PPC_ELF_MACHINE, 0, 0);
             spapr->kernel_le = spapr->kernel_size > 0;
         }
@@ -2986,6 +3008,13 @@ static void spapr_machine_init(MachineState *machine)
             error_report("error loading %s: %s", kernel_filename,
                          load_elf_strerror(spapr->kernel_size));
             exit(1);
+        }
+
+        if (spapr->kernel_addr != loaded_addr) {
+            warn_report("spapr: kernel_addr changed from 0x%"PRIx64
+                        " to 0x%"PRIx64,
+                        spapr->kernel_addr, loaded_addr);
+            spapr->kernel_addr = loaded_addr;
         }
 
         /* load initrd */
@@ -3038,6 +3067,8 @@ static void spapr_machine_init(MachineState *machine)
         spapr->vof->fw_size = fw_size; /* for claim() on itself */
         spapr_register_hypercall(KVMPPC_H_VOF_CLIENT, spapr_h_vof_client);
     }
+
+    spapr_watchdog_init(spapr);
 }
 
 #define DEFAULT_KVM_TYPE "auto"
@@ -3698,7 +3729,7 @@ void spapr_memory_unplug_rollback(SpaprMachineState *spapr, DeviceState *dev)
 
     qapi_event_send_mem_unplug_error(dev->id ? : "", qapi_error);
 
-    qapi_event_send_device_unplug_guest_error(!!dev->id, dev->id,
+    qapi_event_send_device_unplug_guest_error(dev->id,
                                               dev->canonical_path);
 }
 
@@ -4704,14 +4735,47 @@ static void spapr_machine_latest_class_options(MachineClass *mc)
     type_init(spapr_machine_register_##suffix)
 
 /*
- * pseries-7.0
+ * pseries-8.0
  */
-static void spapr_machine_7_0_class_options(MachineClass *mc)
+static void spapr_machine_8_0_class_options(MachineClass *mc)
 {
     /* Defaults for the latest behaviour inherited from the base class */
 }
 
-DEFINE_SPAPR_MACHINE(7_0, "7.0", true);
+DEFINE_SPAPR_MACHINE(8_0, "8.0", true);
+
+/*
+ * pseries-7.2
+ */
+static void spapr_machine_7_2_class_options(MachineClass *mc)
+{
+    spapr_machine_8_0_class_options(mc);
+    compat_props_add(mc->compat_props, hw_compat_7_2, hw_compat_7_2_len);
+}
+
+DEFINE_SPAPR_MACHINE(7_2, "7.2", false);
+
+/*
+ * pseries-7.1
+ */
+static void spapr_machine_7_1_class_options(MachineClass *mc)
+{
+    spapr_machine_7_2_class_options(mc);
+    compat_props_add(mc->compat_props, hw_compat_7_1, hw_compat_7_1_len);
+}
+
+DEFINE_SPAPR_MACHINE(7_1, "7.1", false);
+
+/*
+ * pseries-7.0
+ */
+static void spapr_machine_7_0_class_options(MachineClass *mc)
+{
+    spapr_machine_7_1_class_options(mc);
+    compat_props_add(mc->compat_props, hw_compat_7_0, hw_compat_7_0_len);
+}
+
+DEFINE_SPAPR_MACHINE(7_0, "7.0", false);
 
 /*
  * pseries-6.2

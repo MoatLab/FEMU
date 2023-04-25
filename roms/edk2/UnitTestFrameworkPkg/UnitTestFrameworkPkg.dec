@@ -16,17 +16,26 @@
   PACKAGE_VERSION   = 1.00
 
 [Includes]
+  Include
   Library/CmockaLib/cmocka/include
+  Library/GoogleTestLib/googletest/googletest/include
+  Library/GoogleTestLib/googletest/googlemock/include
 
 [Includes.Common.Private]
   PrivateInclude
   Library/CmockaLib/cmocka/include/cmockery
+  Library/GoogleTestLib/googletest/googletest
 
-[LibraryClasses.Common.Private]
+[LibraryClasses]
   ## @libraryclass Allows save and restore unit test internal state
   #
-  UnitTestPersistenceLib|PrivateInclude/Library/UnitTestPersistenceLib.h
+  UnitTestPersistenceLib|Include/Library/UnitTestPersistenceLib.h
 
+  ## @libraryclass GoogleTest infrastructure
+  #
+  GoogleTestLib|Include/Library/GoogleTestLib.h
+
+[LibraryClasses.Common.Private]
   ## @libraryclass Provides a unit test result report
   #
   UnitTestResultReportLib|PrivateInclude/Library/UnitTestResultReportLib.h

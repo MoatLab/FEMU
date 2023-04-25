@@ -12,5 +12,14 @@
     {"type": "file", "file": "usr/share/applications/test4.desktop"},
     {"type": "file", "file": "usr/share/applications/test5.desktop"},
     {"type": "file", "file": "usr/share/applications/test6.desktop"}
-  ]
+  ],
+  "matrix": {
+    "options": {
+      "static": [
+        { "val": "true"  },
+        { "val": "false" }
+      ]
+    }
+  },
+  "skip_on_jobname": ["azure", "cygwin"]
 }

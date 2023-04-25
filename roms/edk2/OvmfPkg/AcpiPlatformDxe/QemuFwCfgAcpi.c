@@ -10,6 +10,7 @@
 
 #include <IndustryStandard/Acpi.h>            // EFI_ACPI_DESCRIPTION_HEADER
 #include <IndustryStandard/QemuLoader.h>      // QEMU_LOADER_FNAME_SIZE
+#include <IndustryStandard/UefiTcgPlatform.h>
 #include <Library/BaseLib.h>                  // AsciiStrCmp()
 #include <Library/BaseMemoryLib.h>            // CopyMem()
 #include <Library/DebugLib.h>                 // DEBUG()
@@ -18,6 +19,7 @@
 #include <Library/QemuFwCfgLib.h>             // QemuFwCfgFindFile()
 #include <Library/QemuFwCfgS3Lib.h>           // QemuFwCfgS3Enabled()
 #include <Library/UefiBootServicesTableLib.h> // gBS
+#include <Library/TpmMeasurementLib.h>
 
 #include "AcpiPlatform.h"
 
@@ -415,6 +417,21 @@ ProcessCmdAllocate (
     (UINT64)Blob->Size,
     (UINT64)(UINTN)Blob->Base
     ));
+
+  //
+  // Measure the data which is downloaded from QEMU.
+  // It has to be done before it is consumed. Because the data will
+  // be updated in the following operations.
+  //
+  TpmMeasureAndLogData (
+    1,
+    EV_PLATFORM_CONFIG_FLAGS,
+    EV_POSTCODE_INFO_ACPI_DATA,
+    ACPI_DATA_LEN,
+    (VOID *)(UINTN)Blob->Base,
+    Blob->Size
+    );
+
   return EFI_SUCCESS;
 
 FreeBlob:
@@ -1100,6 +1117,7 @@ InstallQemuFwCfgTables (
   ORDERED_COLLECTION_ENTRY  *TrackerEntry, *TrackerEntry2;
   ORDERED_COLLECTION        *SeenPointers;
   ORDERED_COLLECTION_ENTRY  *SeenPointerEntry, *SeenPointerEntry2;
+  EFI_HANDLE                QemuAcpiHandle;
 
   Status = QemuFwCfgFindFile ("etc/table-loader", &FwCfgItem, &FwCfgSize);
   if (EFI_ERROR (Status)) {
@@ -1125,6 +1143,21 @@ InstallQemuFwCfgTables (
   QemuFwCfgSelectItem (FwCfgItem);
   QemuFwCfgReadBytes (FwCfgSize, LoaderStart);
   RestorePciDecoding (OriginalPciAttributes, OriginalPciAttributesCount);
+
+  //
+  // Measure the "etc/table-loader" which is downloaded from QEMU.
+  // It has to be done before it is consumed. Because it would be
+  // updated in the following operations.
+  //
+  TpmMeasureAndLogData (
+    1,
+    EV_PLATFORM_CONFIG_FLAGS,
+    EV_POSTCODE_INFO_ACPI_DATA,
+    ACPI_DATA_LEN,
+    (VOID *)(UINTN)LoaderStart,
+    FwCfgSize
+    );
+
   LoaderEnd = LoaderStart + FwCfgSize / sizeof *LoaderEntry;
 
   AllocationsRestrictedTo32Bit = NULL;
@@ -1247,6 +1280,21 @@ InstallQemuFwCfgTables (
   }
 
   //
+  // Install a protocol to notify that the ACPI table provided by Qemu is
+  // ready.
+  //
+  QemuAcpiHandle = NULL;
+  Status         = gBS->InstallProtocolInterface (
+                          &QemuAcpiHandle,
+                          &gQemuAcpiTableNotifyProtocolGuid,
+                          EFI_NATIVE_INTERFACE,
+                          NULL
+                          );
+  if (EFI_ERROR (Status)) {
+    goto UninstallAcpiTables;
+  }
+
+  //
   // Translating the condensed QEMU_LOADER_WRITE_POINTER commands to ACPI S3
   // Boot Script opcodes has to be the last operation in this function, because
   // if it succeeds, it cannot be undone.
@@ -1254,13 +1302,24 @@ InstallQemuFwCfgTables (
   if (S3Context != NULL) {
     Status = TransferS3ContextToBootScript (S3Context);
     if (EFI_ERROR (Status)) {
-      goto UninstallAcpiTables;
+      goto UninstallQemuAcpiTableNotifyProtocol;
     }
 
     //
     // Ownership of S3Context has been transferred.
     //
     S3Context = NULL;
+  }
+
+  DEBUG ((DEBUG_INFO, "%a: installed %d tables\n", __FUNCTION__, Installed));
+
+UninstallQemuAcpiTableNotifyProtocol:
+  if (EFI_ERROR (Status)) {
+    gBS->UninstallProtocolInterface (
+           QemuAcpiHandle,
+           &gQemuAcpiTableNotifyProtocolGuid,
+           NULL
+           );
   }
 
 UninstallAcpiTables:
@@ -1272,8 +1331,6 @@ UninstallAcpiTables:
       --Installed;
       AcpiProtocol->UninstallAcpiTable (AcpiProtocol, InstalledKey[Installed]);
     }
-  } else {
-    DEBUG ((DEBUG_INFO, "%a: installed %d tables\n", __FUNCTION__, Installed));
   }
 
   for (SeenPointerEntry = OrderedCollectionMin (SeenPointers);

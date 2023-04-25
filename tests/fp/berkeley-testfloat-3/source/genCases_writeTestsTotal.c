@@ -38,13 +38,14 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <stdio.h>
 #include "platform.h"
 #include "genCases.h"
+#include "verCases.h"
 
 void genCases_writeTestsTotal( bool forever )
 {
 
     if ( forever ) {
         fputs( "Unbounded tests.\n", stderr );
-    } else {
+    } else if (verCases_verbosity) {
         if ( 2000000000 <= genCases_total ) {
             fprintf(
                 stderr,

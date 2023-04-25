@@ -36,8 +36,8 @@ we currently have one meson template at this time.
 from mesonbuild.templates.mesontemplates import create_meson_build
 
 FORTRAN_SUFFIXES = {'.f', '.for', '.F', '.f90', '.F90'}
-LANG_SUFFIXES = {'.c', '.cc', '.cpp', '.cs', '.cu', '.d', '.m', '.mm', '.rs', '.java'} | FORTRAN_SUFFIXES
-LANG_SUPPORTED = {'c', 'cpp', 'cs', 'cuda', 'd', 'fortran', 'java', 'rust', 'objc', 'objcpp'}
+LANG_SUFFIXES = {'.c', '.cc', '.cpp', '.cs', '.cu', '.d', '.m', '.mm', '.rs', '.java', '.vala'} | FORTRAN_SUFFIXES
+LANG_SUPPORTED = {'c', 'cpp', 'cs', 'cuda', 'd', 'fortran', 'java', 'rust', 'objc', 'objcpp', 'vala'}
 
 DEFAULT_PROJECT = 'executable'
 DEFAULT_VERSION = '0.1'
@@ -75,14 +75,12 @@ def autodetect_options(options: 'argparse.Namespace', sample: bool = False) -> N
     if not options.name:
         options.name = Path().resolve().stem
         if not re.match('[a-zA-Z_][a-zA-Z0-9]*', options.name) and sample:
-            raise SystemExit('Name of current directory "{}" is not usable as a sample project name.\n'
-                             'Specify a project name with --name.'.format(options.name))
-        print('Using "{}" (name of current directory) as project name.'
-              .format(options.name))
+            raise SystemExit(f'Name of current directory "{options.name}" is not usable as a sample project name.\n'
+                             'Specify a project name with --name.')
+        print(f'Using "{options.name}" (name of current directory) as project name.')
     if not options.executable:
         options.executable = options.name
-        print('Using "{}" (project name) as name of executable to build.'
-              .format(options.executable))
+        print(f'Using "{options.executable}" (project name) as name of executable to build.')
     if sample:
         # The rest of the autodetection is not applicable to generating sample projects.
         return
@@ -128,6 +126,9 @@ def autodetect_options(options: 'argparse.Namespace', sample: bool = False) -> N
                 break
             if f.suffix == '.java':
                 options.language = 'java'
+                break
+            if f.suffix == '.vala':
+                options.language = 'vala'
                 break
         if not options.language:
             raise SystemExit("Can't autodetect language, please specify it with -l.")

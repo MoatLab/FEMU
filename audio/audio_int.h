@@ -58,7 +58,7 @@ typedef struct SWVoiceCap SWVoiceCap;
 
 typedef struct STSampleBuffer {
     size_t pos, size;
-    st_sample samples[];
+    st_sample *buffer;
 } STSampleBuffer;
 
 typedef struct HWVoiceOut {
@@ -71,7 +71,7 @@ typedef struct HWVoiceOut {
     f_sample *clip;
     uint64_t ts_helper;
 
-    STSampleBuffer *mix_buf;
+    STSampleBuffer mix_buf;
     void *buf_emul;
     size_t pos_emul, pending_emul, size_emul;
 
@@ -93,7 +93,7 @@ typedef struct HWVoiceIn {
     size_t total_samples_captured;
     uint64_t ts_helper;
 
-    STSampleBuffer *conv_buf;
+    STSampleBuffer conv_buf;
     void *buf_emul;
     size_t pos_emul, pending_emul, size_emul;
 
@@ -108,8 +108,7 @@ struct SWVoiceOut {
     AudioState *s;
     struct audio_pcm_info info;
     t_sample *conv;
-    int64_t ratio;
-    struct st_sample *buf;
+    STSampleBuffer resample_buf;
     void *rate;
     size_t total_hw_samples_mixed;
     int active;
@@ -126,10 +125,9 @@ struct SWVoiceIn {
     AudioState *s;
     int active;
     struct audio_pcm_info info;
-    int64_t ratio;
     void *rate;
     size_t total_hw_samples_acquired;
-    struct st_sample *buf;
+    STSampleBuffer resample_buf;
     f_sample *clip;
     HWVoiceIn *hw;
     char *name;
@@ -145,14 +143,14 @@ struct audio_driver {
     void *(*init) (Audiodev *);
     void (*fini) (void *);
 #ifdef CONFIG_GIO
-    void (*set_dbus_server) (AudioState *s, GDBusObjectManagerServer *manager);
+    void (*set_dbus_server) (AudioState *s, GDBusObjectManagerServer *manager, bool p2p);
 #endif
     struct audio_pcm_ops *pcm_ops;
     int can_be_default;
     int max_voices_out;
     int max_voices_in;
-    int voice_size_out;
-    int voice_size_in;
+    size_t voice_size_out;
+    size_t voice_size_in;
     QLIST_ENTRY(audio_driver) next;
 };
 
@@ -251,7 +249,6 @@ void audio_pcm_init_info (struct audio_pcm_info *info, struct audsettings *as);
 void audio_pcm_info_clear_buf (struct audio_pcm_info *info, void *buf, int len);
 
 int audio_bug (const char *funcname, int cond);
-void *audio_calloc (const char *funcname, int nmemb, size_t size);
 
 void audio_run(AudioState *s, const char *msg);
 
@@ -263,7 +260,9 @@ typedef struct RateCtl {
 } RateCtl;
 
 void audio_rate_start(RateCtl *rate);
-size_t audio_rate_get_bytes(struct audio_pcm_info *info, RateCtl *rate,
+size_t audio_rate_peek_bytes(RateCtl *rate, struct audio_pcm_info *info);
+void audio_rate_add_bytes(RateCtl *rate, size_t bytes_used);
+size_t audio_rate_get_bytes(RateCtl *rate, struct audio_pcm_info *info,
                             size_t bytes_avail);
 
 static inline size_t audio_ring_dist(size_t dst, size_t src, size_t len)
@@ -291,9 +290,6 @@ static inline size_t audio_ring_posb(size_t pos, size_t dist, size_t len)
 #else
 #define ldebug(fmt, ...) (void)0
 #endif
-
-#define AUDIO_STRINGIFY_(n) #n
-#define AUDIO_STRINGIFY(n) AUDIO_STRINGIFY_(n)
 
 typedef struct AudiodevListEntry {
     Audiodev *dev;

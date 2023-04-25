@@ -28,6 +28,7 @@
 #include "hw/loader.h"
 #include "hw/boards.h"
 #include "hw/pci/pci_bus.h"
+#include "hw/pci/pci_device.h"
 #include "smbios_build.h"
 
 /* legacy structures and constants for <= 2.0 machines */
@@ -110,6 +111,13 @@ static struct {
     .current_speed = DEFAULT_CPU_SPEED,
     .processor_id = 0,
 };
+
+struct type8_instance {
+    const char *internal_reference, *external_reference;
+    uint8_t connector_type, port_type;
+    QTAILQ_ENTRY(type8_instance) next;
+};
+static QTAILQ_HEAD(, type8_instance) type8 = QTAILQ_HEAD_INITIALIZER(type8);
 
 static struct {
     size_t nvalues;
@@ -335,6 +343,29 @@ static const QemuOptDesc qemu_smbios_type4_opts[] = {
         .help = "processor id",
     },
     { /* end of list */ }
+};
+
+static const QemuOptDesc qemu_smbios_type8_opts[] = {
+    {
+        .name = "internal_reference",
+        .type = QEMU_OPT_STRING,
+        .help = "internal reference designator",
+    },
+    {
+        .name = "external_reference",
+        .type = QEMU_OPT_STRING,
+        .help = "external reference designator",
+    },
+    {
+        .name = "connector_type",
+        .type = QEMU_OPT_NUMBER,
+        .help = "connector type",
+    },
+    {
+        .name = "port_type",
+        .type = QEMU_OPT_NUMBER,
+        .help = "port type",
+    },
 };
 
 static const QemuOptDesc qemu_smbios_type11_opts[] = {
@@ -681,8 +712,14 @@ static void smbios_build_type_3_table(void)
 static void smbios_build_type_4_table(MachineState *ms, unsigned instance)
 {
     char sock_str[128];
+    size_t tbl_len = SMBIOS_TYPE_4_LEN_V28;
 
-    SMBIOS_BUILD_TABLE_PRE(4, T4_BASE + instance, true); /* required */
+    if (smbios_ep_type == SMBIOS_ENTRY_POINT_TYPE_64) {
+        tbl_len = SMBIOS_TYPE_4_LEN_V30;
+    }
+
+    SMBIOS_BUILD_TABLE_PRE_SIZE(4, T4_BASE + instance,
+                                true, tbl_len); /* required */
 
     snprintf(sock_str, sizeof(sock_str), "%s%2x", type4.sock_pfx, instance);
     SMBIOS_TABLE_SET_STR(4, socket_designation_str, sock_str);
@@ -709,13 +746,42 @@ static void smbios_build_type_4_table(MachineState *ms, unsigned instance)
     SMBIOS_TABLE_SET_STR(4, serial_number_str, type4.serial);
     SMBIOS_TABLE_SET_STR(4, asset_tag_number_str, type4.asset);
     SMBIOS_TABLE_SET_STR(4, part_number_str, type4.part);
-    t->core_count = t->core_enabled = ms->smp.cores;
-    t->thread_count = ms->smp.threads;
+
+    t->core_count = (ms->smp.cores > 255) ? 0xFF : ms->smp.cores;
+    t->core_enabled = t->core_count;
+
+    t->thread_count = (ms->smp.threads > 255) ? 0xFF : ms->smp.threads;
+
     t->processor_characteristics = cpu_to_le16(0x02); /* Unknown */
     t->processor_family2 = cpu_to_le16(0x01); /* Other */
 
+    if (tbl_len == SMBIOS_TYPE_4_LEN_V30) {
+        t->core_count2 = t->core_enabled2 = cpu_to_le16(ms->smp.cores);
+        t->thread_count2 = cpu_to_le16(ms->smp.threads);
+    }
+
     SMBIOS_BUILD_TABLE_POST;
     smbios_type4_count++;
+}
+
+static void smbios_build_type_8_table(void)
+{
+    unsigned instance = 0;
+    struct type8_instance *t8;
+
+    QTAILQ_FOREACH(t8, &type8, next) {
+        SMBIOS_BUILD_TABLE_PRE(8, T0_BASE + instance, true);
+
+        SMBIOS_TABLE_SET_STR(8, internal_reference_str, t8->internal_reference);
+        SMBIOS_TABLE_SET_STR(8, external_reference_str, t8->external_reference);
+        /* most vendors seem to set this to None */
+        t->internal_connector_type = 0x0;
+        t->external_connector_type = t8->connector_type;
+        t->port_type = t8->port_type;
+
+        SMBIOS_BUILD_TABLE_POST;
+        instance++;
+    }
 }
 
 static void smbios_build_type_11_table(void)
@@ -1030,6 +1096,7 @@ void smbios_get_tables(MachineState *ms,
             smbios_build_type_4_table(ms, i);
         }
 
+        smbios_build_type_8_table();
         smbios_build_type_11_table();
 
 #define MAX_DIMM_SZ (16 * GiB)
@@ -1205,13 +1272,15 @@ void smbios_entry_add(QemuOpts *opts, Error **errp)
             return;
         }
 
-        if (test_bit(header->type, have_fields_bitmap)) {
-            error_setg(errp,
-                       "can't load type %d struct, fields already specified!",
-                       header->type);
-            return;
+        if (header->type <= SMBIOS_MAX_TYPE) {
+            if (test_bit(header->type, have_fields_bitmap)) {
+                error_setg(errp,
+                           "can't load type %d struct, fields already specified!",
+                           header->type);
+                return;
+            }
+            set_bit(header->type, have_binfile_bitmap);
         }
-        set_bit(header->type, have_binfile_bitmap);
 
         if (header->type == 4) {
             smbios_type4_count++;
@@ -1345,6 +1414,18 @@ void smbios_entry_add(QemuOpts *opts, Error **errp)
                 error_setg(errp, "SMBIOS CPU speed is too large (> %d)",
                            UINT16_MAX);
             }
+            return;
+        case 8:
+            if (!qemu_opts_validate(opts, qemu_smbios_type8_opts, errp)) {
+                return;
+            }
+            struct type8_instance *t;
+            t = g_new0(struct type8_instance, 1);
+            save_opt(&t->internal_reference, opts, "internal_reference");
+            save_opt(&t->external_reference, opts, "external_reference");
+            t->connector_type = qemu_opt_get_number(opts, "connector_type", 0);
+            t->port_type = qemu_opt_get_number(opts, "port_type", 0);
+            QTAILQ_INSERT_TAIL(&type8, t, next);
             return;
         case 11:
             if (!qemu_opts_validate(opts, qemu_smbios_type11_opts, errp)) {

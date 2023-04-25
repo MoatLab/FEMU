@@ -12,16 +12,25 @@ parameters:
   build_pkgs: ''
   build_targets: ''
   build_archs: ''
+  usePythonVersion: ''
+  extra_install_step: []
 
 steps:
+- bash: |
+    echo "##vso[task.prependpath]${HOME}/.local/bin"
+    echo "new PATH=${PATH}"
+  displayName: Set PATH
+  condition: eq('${{ parameters.tool_chain_tag }}', 'GCC5')
+
 - checkout: self
   clean: true
   fetchDepth: 1
 
 - task: UsePythonVersion@0
   inputs:
-    versionSpec: '3.8.x'
-    architecture: 'x64'
+    versionSpec: ${{ parameters.usePythonVersion }}
+    architecture: "x64"
+  condition: ne('${{ parameters.usePythonVersion }}', '')
 
 - script: pip install -r pip-requirements.txt --upgrade
   displayName: 'Install/Upgrade pip modules'
@@ -36,6 +45,8 @@ steps:
 - script: git fetch origin $(System.PullRequest.targetBranch)
   displayName: fetch target branch
   condition: eq(variables['Build.Reason'], 'PullRequest')
+
+- ${{ parameters.extra_install_step }}
 
 # trim the package list if this is a PR
 - task: CmdLine@1
@@ -125,6 +136,7 @@ steps:
       TestSuites.xml
       **/BUILD_TOOLS_REPORT.html
       **/OVERRIDELOG.TXT
+      coverage.xml
     flattenFolders: true
   condition: succeededOrFailed()
 

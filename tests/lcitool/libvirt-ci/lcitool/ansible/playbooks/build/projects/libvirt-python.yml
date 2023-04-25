@@ -1,0 +1,13 @@
+---
+- set_fact:
+    name: libvirt-python
+    machines: '{{ all_machines }}'
+    archive_format: gz
+    git_url: '{{ git_urls["libvirt-python"][git_remote] }}'
+
+- import_tasks: 'jobs/prepare.yml'
+- import_tasks: 'jobs/python-distutils-build-job.yml'
+- import_tasks: 'jobs/python-distutils-check-job.yml'
+- import_tasks: 'jobs/python-distutils-rpm-job.yml'
+  vars:
+    machines: '{{ rpm_machines }}'

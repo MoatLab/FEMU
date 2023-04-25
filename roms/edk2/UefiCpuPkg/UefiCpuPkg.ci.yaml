@@ -15,9 +15,19 @@
         ##     "<ErrorID>", "<KeyWord>"
         ## ]
         "ExceptionList": [
+          "8006", "main",
+          "8005", "GENERAL_REGISTER.R8",
+          "8005", "GENERAL_REGISTER.R9",
+          "8005", "GENERAL_REGISTER.R10",
+          "8005", "GENERAL_REGISTER.R11",
+          "8005", "GENERAL_REGISTER.R12",
+          "8005", "GENERAL_REGISTER.R13",
+          "8005", "GENERAL_REGISTER.R14",
+          "8005", "GENERAL_REGISTER.R15"
         ],
         ## Both file path and directory path are accepted.
         "IgnoreFiles": [
+          "Library/BaseRiscV64CpuExceptionHandlerLib/CpuExceptionHandlerLib.h"
         ]
     },
     "CompilerPlugin": {
@@ -38,7 +48,8 @@
         ],
         # For host based unit tests
         "AcceptableDependencies-HOST_APPLICATION":[
-            "UnitTestFrameworkPkg/UnitTestFrameworkPkg.dec"
+            "UnitTestFrameworkPkg/UnitTestFrameworkPkg.dec",
+            "CryptoPkg/CryptoPkg.dec"
         ],
         # For UEFI shell based apps
         "AcceptableDependencies-UEFI_APPLICATION":[],

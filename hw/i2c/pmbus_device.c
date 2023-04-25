@@ -8,7 +8,6 @@
 
 #include "qemu/osdep.h"
 #include <math.h>
-#include <string.h>
 #include "hw/i2c/pmbus_device.h"
 #include "migration/vmstate.h"
 #include "qemu/module.h"
@@ -95,6 +94,13 @@ void pmbus_send64(PMBusDevice *pmdev, uint64_t data)
 
 void pmbus_send_string(PMBusDevice *pmdev, const char *data)
 {
+    if (!data) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "%s: %s: uninitialised read from 0x%02x\n",
+                      __func__, DEVICE(pmdev)->canonical_path, pmdev->code);
+        return;
+    }
+
     size_t len = strlen(data);
     g_assert(len > 0);
     g_assert(len + pmdev->out_buf_len < SMBUS_DATA_MAX_LEN);
@@ -261,6 +267,11 @@ void pmbus_check_limits(PMBusDevice *pmdev)
     }
 }
 
+void pmbus_idle(PMBusDevice *pmdev)
+{
+    pmdev->code = PMBUS_IDLE_STATE;
+}
+
 /* assert the status_cml error upon receipt of malformed command */
 static void pmbus_cml_error(PMBusDevice *pmdev)
 {
@@ -284,14 +295,10 @@ static uint8_t pmbus_receive_byte(SMBusDevice *smd)
 
     /*
      * Reading from all pages will return the value from page 0,
-     * this is unspecified behaviour in general.
+     * means that all subsequent commands are to be applied to all output.
      */
     if (pmdev->page == PB_ALL_PAGES) {
         index = 0;
-        qemu_log_mask(LOG_GUEST_ERROR,
-                      "%s: tried to read from all pages\n",
-                      __func__);
-        pmbus_cml_error(pmdev);
     } else if (pmdev->page > pmdev->num_pages - 1) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "%s: page %d is out of range\n",
@@ -982,6 +989,10 @@ static uint8_t pmbus_receive_byte(SMBusDevice *smd)
         } else {
             goto passthough;
         }
+        break;
+
+    case PMBUS_IDLE_STATE:
+        pmbus_send8(pmdev, PMBUS_ERR_BYTE);
         break;
 
     case PMBUS_CLEAR_FAULTS:              /* Send Byte */

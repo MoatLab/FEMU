@@ -1517,7 +1517,9 @@ static void __noinline pci_add_one_device_node(struct phb *phb,
 	 * device has a 4KB config space. It's got nothing to do with the
 	 * standard Type 0/1 config spaces defined by PCI.
 	 */
-	if (is_pcie || phb->phb_type == phb_type_npu_v2_opencapi) {
+	if (is_pcie ||
+		(phb->phb_type == phb_type_npu_v2_opencapi) ||
+		(phb->phb_type == phb_type_pau_opencapi)) {
 		snprintf(compat, MAX_NAME, "pciex%x,%x",
 			 PCI_VENDOR_ID(pd->vdid), PCI_DEVICE_ID(pd->vdid));
 		dt_add_property_cells(np, "ibm,pci-config-space-type", 1);

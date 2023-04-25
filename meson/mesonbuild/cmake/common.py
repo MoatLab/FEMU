@@ -44,6 +44,7 @@ backend_generator_map = {
     'vs2015': 'Visual Studio 14 2015',
     'vs2017': 'Visual Studio 15 2017',
     'vs2019': 'Visual Studio 16 2019',
+    'vs2022': 'Visual Studio 17 2022',
 }
 
 blacklist_cmake_defs = [
@@ -59,6 +60,18 @@ blacklist_cmake_defs = [
     'MESON_PATHS_LIST',
     'MESON_CMAKE_ROOT',
 ]
+
+def cmake_is_debug(env: 'Environment') -> bool:
+    if OptionKey('b_vscrt') in env.coredata.options:
+        is_debug = env.coredata.get_option(OptionKey('buildtype')) == 'debug'
+        if env.coredata.options[OptionKey('b_vscrt')].value in {'mdd', 'mtd'}:
+            is_debug = True
+        return is_debug
+    else:
+        # Don't directly assign to is_debug to make mypy happy
+        debug_opt = env.coredata.get_option(OptionKey('debug'))
+        assert isinstance(debug_opt, bool)
+        return debug_opt
 
 class CMakeException(MesonException):
     pass

@@ -4,14 +4,18 @@ HELLO_WORLD_STB_TEST := test/hello_world/hello_kernel/hello_kernel.stb
 .PHONY: hello_world-tests
 hello_world-tests: $(HELLO_WORLD_TEST:%=%-check-smt-mambo)
 hello_world-tests: $(HELLO_WORLD_TEST:%=%-check-smt-p9-mambo)
+hello_world-tests: $(HELLO_WORLD_TEST:%=%-check-smt-p10-mambo)
 hello_world-tests: $(HELLO_WORLD_TEST:%=%-check-mambo)
 hello_world-tests: $(HELLO_WORLD_TEST:%=%-check-p9-mambo)
+hello_world-tests: $(HELLO_WORLD_TEST:%=%-check-p10-mambo)
 hello_world-tests: $(HELLO_WORLD_TEST:%=%-check-qemu)
 
 hello_world-tests: $(HELLO_WORLD_STB_TEST:%=%-check-stb-smt-mambo)
 hello_world-tests: $(HELLO_WORLD_STB_TEST:%=%-check-stb-smt-p9-mambo)
+hello_world-tests: $(HELLO_WORLD_STB_TEST:%=%-check-stb-smt-p10-mambo)
 hello_world-tests: $(HELLO_WORLD_STB_TEST:%=%-check-stb-mambo)
 hello_world-tests: $(HELLO_WORLD_STB_TEST:%=%-check-stb-p9-mambo)
+hello_world-tests: $(HELLO_WORLD_STB_TEST:%=%-check-stb-p10-mambo)
 
 boot-tests: hello_world-tests
 check: hello_world-tests
@@ -29,11 +33,17 @@ $(HELLO_WORLD_TEST:%=%-check-smt-mambo): %-check-smt-mambo: % skiboot.lid
 $(HELLO_WORLD_TEST:%=%-check-smt-p9-mambo): %-check-smt-p9-mambo: % skiboot.lid
 	$(call Q , BOOT TEST , THREADS=2 ./test/hello_world/run_mambo_p9_hello_world.sh , $@)
 
+$(HELLO_WORLD_TEST:%=%-check-smt-p10-mambo): %-check-smt-p10-mambo: % skiboot.lid
+	$(call Q , BOOT TEST , THREADS=2 ./test/hello_world/run_mambo_p10_hello_world.sh , $@)
+
 $(HELLO_WORLD_TEST:%=%-check-mambo): %-check-mambo: % skiboot.lid
 	$(call Q , BOOT TEST , ./test/hello_world/run_mambo_hello_world.sh, $@)
 
 $(HELLO_WORLD_TEST:%=%-check-p9-mambo): %-check-p9-mambo: % skiboot.lid
 	$(call Q , BOOT TEST , ./test/hello_world/run_mambo_p9_hello_world.sh, $@)
+
+$(HELLO_WORLD_TEST:%=%-check-p10-mambo): %-check-p10-mambo: % skiboot.lid
+	$(call Q , BOOT TEST , ./test/hello_world/run_mambo_p10_hello_world.sh, $@)
 
 # and now, with secure and trusted boot:
 $(HELLO_WORLD_STB_TEST:%=%-check-stb-smt-mambo): %-check-stb-smt-mambo: % skiboot.lid.stb
@@ -42,11 +52,17 @@ $(HELLO_WORLD_STB_TEST:%=%-check-stb-smt-mambo): %-check-stb-smt-mambo: % skiboo
 $(HELLO_WORLD_STB_TEST:%=%-check-stb-smt-p9-mambo): %-check-stb-smt-p9-mambo: % skiboot.lid.stb
 	$(call Q , BOOT TEST , SKIBOOT_ENABLE_MAMBO_STB=1 THREADS=2 ./test/hello_world/run_mambo_p9_hello_world.sh , $@)
 
+$(HELLO_WORLD_STB_TEST:%=%-check-stb-smt-p10-mambo): %-check-stb-smt-p10-mambo: % skiboot.lid.stb
+	$(call Q , BOOT TEST , SKIBOOT_ENABLE_MAMBO_STB=1 THREADS=2 ./test/hello_world/run_mambo_p10_hello_world.sh , $@)
+
 $(HELLO_WORLD_STB_TEST:%=%-check-stb-mambo): %-check-stb-mambo: % skiboot.lid.stb
 	$(call Q , BOOT TEST , SKIBOOT_ENABLE_MAMBO_STB=1 ./test/hello_world/run_mambo_hello_world.sh, $@)
 
 $(HELLO_WORLD_STB_TEST:%=%-check-stb-p9-mambo): %-check-stb-p9-mambo: % skiboot.lid.stb
 	$(call Q , BOOT TEST , SKIBOOT_ENABLE_MAMBO_STB=1 ./test/hello_world/run_mambo_p9_hello_world.sh, $@)
+
+$(HELLO_WORLD_STB_TEST:%=%-check-stb-p10-mambo): %-check-stb-p10-mambo: % skiboot.lid.stb
+	$(call Q , BOOT TEST , SKIBOOT_ENABLE_MAMBO_STB=1 ./test/hello_world/run_mambo_p10_hello_world.sh, $@)
 
 # qemu
 

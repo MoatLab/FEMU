@@ -50,6 +50,7 @@ static inline bool host_signal_write(siginfo_t *info, host_sigcontext *uc)
     case 0x50: /* ST */
     case 0x42: /* STC */
     case 0x40: /* STH */
+    case 0x44: /* EX */
     case 0xba: /* CS */
     case 0xbb: /* CDS */
         return true;
@@ -58,6 +59,12 @@ static inline bool host_signal_write(siginfo_t *info, host_sigcontext *uc)
         case 0xf: /* STRL */
         case 0xb: /* STGRL */
         case 0x7: /* STHRL */
+            return true;
+        }
+        break;
+    case 0xc6: /* RIL-b format insns */
+        switch (pinsn[0] & 0xf) {
+        case 0x0: /* EXRL */
             return true;
         }
         break;
@@ -77,6 +84,31 @@ static inline bool host_signal_write(siginfo_t *info, host_sigcontext *uc)
         case 0x3f: /* STRVH */
         case 0x3e: /* STRV */
         case 0x2f: /* STRVG */
+            return true;
+        }
+        break;
+    case 0xe6:
+        switch (pinsn[2] & 0xff) {
+        case 0x09: /* VSTEBRH */
+        case 0x0a: /* VSTEBRG */
+        case 0x0b: /* VSTEBRF */
+        case 0x0e: /* VSTBR */
+        case 0x0f: /* VSTER */
+        case 0x3f: /* VSTRLR */
+            return true;
+        }
+        break;
+    case 0xe7:
+        switch (pinsn[2] & 0xff) {
+        case 0x08: /* VSTEB */
+        case 0x09: /* VSTEH */
+        case 0x0a: /* VSTEG */
+        case 0x0b: /* VSTEF */
+        case 0x0e: /* VST */
+        case 0x1a: /* VSCEG */
+        case 0x1b: /* VSCEF */
+        case 0x3e: /* VSTM */
+        case 0x3f: /* VSTL */
             return true;
         }
         break;

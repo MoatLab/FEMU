@@ -22,8 +22,6 @@ import xml.etree.ElementTree as ET
 sys.path.append(os.getcwd())
 from mesonbuild import coredata
 
-from createmsi import get_modules
-
 class PkgGenerator:
 
     def __init__(self):
@@ -34,7 +32,7 @@ class PkgGenerator:
         self.identifier = 'com.mesonbuild.meson'
         self.version = coredata.version.replace('dev', '')
         self.mesonstashdir = os.path.join(self.sharedir, f'meson-{self.version}')
-        self.pkgname = f'meson.pkg'
+        self.pkgname = 'meson.pkg'
         self.productname = f'meson-{self.version}.pkg'
         self.distribution_file = 'meson-distribution.xml'
         self.resourcedir = 'packaging/macpages'
@@ -46,29 +44,28 @@ class PkgGenerator:
         pyinstaller_bin = '/Users/jpakkane/Library/Python/3.8/bin/pyinstaller'
         pyinst_cmd = [pyinstaller_bin,
                       '--clean',
+                      '--additional-hooks-dir=packaging',
                       '--distpath',
                       self.pkg_dir]
-        for m in get_modules():
-            pyinst_cmd += ['--hidden-import', m]
         pyinst_cmd += ['meson.py']
-        subprocess.check_call(pyinst_cmd    )
+        subprocess.check_call(pyinst_cmd)
         tmpdir = os.path.join(self.pkg_dir, 'meson')
         shutil.move(tmpdir, self.mesonstashdir)
         os.makedirs(self.bindir)
         ln_base = os.path.relpath(self.mesonstashdir, self.bindir)
         ninja_bin = shutil.which('ninja')
-        assert(ninja_bin)
+        assert ninja_bin
         shutil.copy(ninja_bin, self.bindir)
         subprocess.check_call(['strip', os.path.join(self.bindir, 'ninja')])
         os.symlink(os.path.join(ln_base, 'meson'), os.path.join(self.bindir, 'meson'))
 
     def build_package(self):
         subprocess.check_call(['pkgbuild',
-                                '--root',
-                                self.pkg_dir,
-                                '--identifier',
-                                self.identifier,
-                                self.pkgname])
+                               '--root',
+                               self.pkg_dir,
+                               '--identifier',
+                               self.identifier,
+                               self.pkgname])
         self.generate_distribution()
         subprocess.check_call(['productbuild',
                                '--distribution',
@@ -96,7 +93,7 @@ class PkgGenerator:
         choice = ET.SubElement(root, 'choice', {'id': self.identifier, 'visible': 'false'})
         ET.SubElement(choice, 'pkg-ref', {'id': self.identifier})
         ET.SubElement(root, 'pkg-ref', {'id': self.identifier,
-                                        'version': '0',#self.version,
+                                        'version': '0', # self.version,
                                         'onConclusion': 'none'}).text = self.pkgname
         ET.ElementTree(root).write(self.distribution_file, encoding='utf-8', xml_declaration=True)
         # ElementTree can not do prettyprinting so do it manually
@@ -105,6 +102,11 @@ class PkgGenerator:
         with open(self.distribution_file, 'w') as open_file:
             open_file.write(doc.toprettyxml())
 
+    def remove_tempfiles(self):
+        shutil.rmtree('macpkg')
+        os.unlink('meson-distribution.xml')
+        os.unlink('meson.pkg')
+        os.unlink('meson.spec')
 
 if __name__ == '__main__':
     if not os.path.exists('meson.py'):
@@ -114,4 +116,4 @@ if __name__ == '__main__':
     pg = PkgGenerator()
     pg.build_dist()
     pg.build_package()
-
+    pg.remove_tempfiles()

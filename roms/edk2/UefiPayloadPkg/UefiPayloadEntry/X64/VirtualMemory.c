@@ -218,16 +218,8 @@ ToSplitPageTable (
     return TRUE;
   }
 
-  if (PcdGetBool (PcdCpuStackGuard)) {
-    if ((StackBase >= Address) && (StackBase < (Address + Size))) {
-      return TRUE;
-    }
-  }
-
-  if (PcdGetBool (PcdSetNxForStack)) {
-    if ((Address < StackBase + StackSize) && ((Address + Size) > StackBase)) {
-      return TRUE;
-    }
+  if ((Address < StackBase + StackSize) && ((Address + Size) > StackBase)) {
+    return TRUE;
   }
 
   if (GhcbBase != 0) {
@@ -630,12 +622,7 @@ EnablePageTableProtection (
   }
 
   //
-  // Disable write protection, because we need to mark page table to be write
-  // protected.
-  //
-  AsmWriteCr0 (AsmReadCr0 () & ~CR0_WP);
-
-  //
+  // No need to clear CR0.WP since PageTableBase has't been written to CR3 yet.
   // SetPageTablePoolReadOnly might update mPageTablePool. It's safer to
   // remember original one in advance.
   //
@@ -791,9 +778,9 @@ CreateIdentityMappingPageTables (
   // Pre-allocate big pages to avoid later allocations.
   //
   if (!Page1GSupport) {
-    TotalPagesNum = ((NumberOfPdpEntriesNeeded + 1) * NumberOfPml4EntriesNeeded + 1) * NumberOfPml5EntriesNeeded + 1;
+    TotalPagesNum = (UINTN)((NumberOfPdpEntriesNeeded + 1) * NumberOfPml4EntriesNeeded + 1) * NumberOfPml5EntriesNeeded + 1;
   } else {
-    TotalPagesNum = (NumberOfPml4EntriesNeeded + 1) * NumberOfPml5EntriesNeeded + 1;
+    TotalPagesNum = (UINTN)(NumberOfPml4EntriesNeeded + 1) * NumberOfPml5EntriesNeeded + 1;
   }
 
   //

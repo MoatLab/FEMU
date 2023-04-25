@@ -966,21 +966,38 @@ static void add_nx(void)
 static void add_nmmu(void)
 {
 	struct dt_node *xscom, *nmmu;
-	u32 scom;
+	u32 scom1, scom2;
+	u32 chip_id;
 
 	/* Nest MMU only exists on POWER9 or later */
 	if (proc_gen < proc_gen_p9)
 		return;
 
-	if (proc_gen == proc_gen_p9)
-		scom = 0x5012c40;
-	else
-		scom = 0x2010c40;
+	if (proc_gen == proc_gen_p10) {
+		scom1 = 0x2010c40;
+		scom2 = 0x3010c40;
+	} else
+		scom1 = 0x5012c40;
 
 	dt_for_each_compatible(dt_root, xscom, "ibm,xscom") {
-		nmmu = dt_new_addr(xscom, "nmmu", scom);
+		nmmu = dt_new_addr(xscom, "nmmu", scom1);
 		dt_add_property_strings(nmmu, "compatible", "ibm,power9-nest-mmu");
-		dt_add_property_cells(nmmu, "reg", scom, 0x20);
+		dt_add_property_cells(nmmu, "reg", scom1, 0x20);
+
+		/*
+		 * P10 has a second nMMU, a.k.a "south" nMMU.
+		 * It exists only on P1 and P3
+		 */
+		if (proc_gen == proc_gen_p10) {
+
+			chip_id = __dt_get_chip_id(xscom);
+			if (chip_id != 2 && chip_id != 6)
+				continue;
+
+			nmmu = dt_new_addr(xscom, "nmmu", scom2);
+			dt_add_property_strings(nmmu, "compatible", "ibm,power9-nest-mmu");
+			dt_add_property_cells(nmmu, "reg", scom2, 0x20);
+		}
 	}
 }
 

@@ -4,13 +4,22 @@ Container for running clang-format code style check
 
 This container provides a simple way to invoke ``clang-format`` to validate
 code style across a C codebase. It should be integrated into a CI by adding
-the following snippet to ``.gitlab-ci.yml``
+the following flag in ``ci/manifest.yml``
+
+::
+
+   gitlab:
+     jobs:
+       clang-format: true
+
+or adding the following snippet to ``.gitlab-ci.yml``
 
 ::
 
    clang-format:
-     stage: prebuild
-     image: registry.gitlab.com/libvirt/libvirt-ci/clang-format:master
+     stage: sanity_checks
+     image: registry.gitlab.com/libvirt/libvirt-ci/clang-format:latest
+     needs: []
      script:
        - /clang-format
      artifacts:

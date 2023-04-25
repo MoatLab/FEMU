@@ -3,12 +3,14 @@ packages:
  - alsa
  - bash
  - bc
+ - bison
  - brlapi
  - bzip2
  - bzip2-libs
  - capstone
  - ccache
  - clang
+ - cmocka
  - column
  - ctags
  - cyrus-sasl
@@ -18,6 +20,7 @@ packages:
  - diffutils
  - dtrace
  - findutils
+ - flex
  - fuse3
  - g++
  - gcc
@@ -25,16 +28,18 @@ packages:
  - gettext
  - genisoimage
  - glib2
+ - glib2-native
  - glib2-static
- - glibc-static
  - glusterfs
  - gnutls
  - gtk3
  - hostname
+ - json-c
  - libaio
  - libattr
  - libasan
  - libbpf
+ - libc-static
  - libcacard
  - libcap-ng
  - libcurl
@@ -78,8 +83,6 @@ packages:
  - ncursesw
  - pam
  - pcre-static
- - perl
- - perl-Test-Harness
  - pixman
  - pkg-config
  - pulseaudio
@@ -91,12 +94,14 @@ packages:
  - python3-pip
  - python3-sphinx
  - python3-sphinx-rtd-theme
- - python3-virtualenv
+ - python3-venv
  - rpm2cpio
  - sdl2
  - sdl2-image
  - sed
  - snappy
+ - sndio
+ - socat
  - sparse
  - spice-protocol
  - spice-server
@@ -105,12 +110,12 @@ packages:
  - tar
  - tesseract
  - tesseract-eng
- - texinfo
  - usbredir
  - virglrenderer
  - vte
  - which
  - xen
  - xfsprogs
+ - zstdtools
  - zlib
  - zlib-static

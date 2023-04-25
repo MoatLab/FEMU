@@ -92,10 +92,10 @@ virtio_blk_op(struct disk_op_s *op, int write)
     u16 blk_num_max;
 
     if (vdrive->drive.blksize != 0 && max_io_size != 0)
-        blk_num_max = (u16)max_io_size / vdrive->drive.blksize;
+        blk_num_max = (u16)(max_io_size / vdrive->drive.blksize);
     else
         /* default blk_num_max if hardware doesnot advise a proper value */
-        blk_num_max = 8;
+        blk_num_max = 64;
 
     if (op->count <= blk_num_max) {
         virtio_blk_op_one_segment(vdrive, write, sg);
@@ -151,10 +151,6 @@ init_virtio_blk(void *data)
     vdrive->drive.cntl_id = pci->bdf;
 
     vp_init_simple(&vdrive->vp, pci);
-    if (vp_find_vq(&vdrive->vp, 0, &vdrive->vq) < 0 ) {
-        dprintf(1, "fail to find vq for virtio-blk %pP\n", pci);
-        goto fail;
-    }
 
     if (vdrive->vp.use_modern) {
         struct vp_device *vp = &vdrive->vp;
@@ -212,7 +208,14 @@ init_virtio_blk(void *data)
             vp_read(&vp->device, struct virtio_blk_config, heads);
         vdrive->drive.pchs.sector =
             vp_read(&vp->device, struct virtio_blk_config, sectors);
-    } else {
+    }
+
+    if (vp_find_vq(&vdrive->vp, 0, &vdrive->vq) < 0 ) {
+        dprintf(1, "fail to find vq for virtio-blk %pP\n", pci);
+        goto fail;
+    }
+
+    if (!vdrive->vp.use_modern) {
         struct virtio_blk_config cfg;
         vp_get_legacy(&vdrive->vp, 0, &cfg, sizeof(cfg));
 
@@ -272,10 +275,6 @@ init_virtio_blk_mmio(void *mmio)
     vdrive->drive.cntl_id = (u32)mmio;
 
     vp_init_mmio(&vdrive->vp, mmio);
-    if (vp_find_vq(&vdrive->vp, 0, &vdrive->vq) < 0 ) {
-        dprintf(1, "fail to find vq for virtio-blk-mmio %p\n", mmio);
-        goto fail;
-    }
 
     struct vp_device *vp = &vdrive->vp;
     u64 features = vp_get_features(vp);
@@ -291,6 +290,11 @@ init_virtio_blk_mmio(void *mmio)
     vp_set_status(vp, status);
     if (!(vp_get_status(vp) & VIRTIO_CONFIG_S_FEATURES_OK)) {
         dprintf(1, "device didn't accept features: %p\n", mmio);
+        goto fail;
+    }
+
+    if (vp_find_vq(&vdrive->vp, 0, &vdrive->vq) < 0 ) {
+        dprintf(1, "fail to find vq for virtio-blk-mmio %p\n", mmio);
         goto fail;
     }
 

@@ -1,7 +1,7 @@
 /** @file
   Common header file for MP Initialize Library.
 
-  Copyright (c) 2016 - 2021, Intel Corporation. All rights reserved.<BR>
+  Copyright (c) 2016 - 2022, Intel Corporation. All rights reserved.<BR>
   Copyright (c) 2020, AMD Inc. All rights reserved.<BR>
 
   SPDX-License-Identifier: BSD-2-Clause-Patent
@@ -69,13 +69,30 @@ typedef struct {
 } MICROCODE_PATCH_INFO;
 
 //
+// CPU volatile registers around INIT-SIPI-SIPI
+//
+typedef struct {
+  UINTN              Cr0;
+  UINTN              Cr3;
+  UINTN              Cr4;
+  UINTN              Dr0;
+  UINTN              Dr1;
+  UINTN              Dr2;
+  UINTN              Dr3;
+  UINTN              Dr6;
+  UINTN              Dr7;
+  IA32_DESCRIPTOR    Gdtr;
+  IA32_DESCRIPTOR    Idtr;
+  UINT16             Tr;
+} CPU_VOLATILE_REGISTERS;
+
+//
 // CPU exchange information for switch BSP
 //
 typedef struct {
-  UINT8              State;        // offset 0
-  UINTN              StackPointer; // offset 4 / 8
-  IA32_DESCRIPTOR    Gdtr;         // offset 8 / 16
-  IA32_DESCRIPTOR    Idtr;         // offset 14 / 26
+  UINT8                     State;             // offset 0
+  UINTN                     StackPointer;      // offset 4 / 8
+  CPU_VOLATILE_REGISTERS    VolatileRegisters; // offset 8 / 16
 } CPU_EXCHANGE_ROLE_INFO;
 
 //
@@ -111,24 +128,6 @@ typedef enum {
   CpuStateFinished,
   CpuStateDisabled
 } CPU_STATE;
-
-//
-// CPU volatile registers around INIT-SIPI-SIPI
-//
-typedef struct {
-  UINTN              Cr0;
-  UINTN              Cr3;
-  UINTN              Cr4;
-  UINTN              Dr0;
-  UINTN              Dr1;
-  UINTN              Dr2;
-  UINTN              Dr3;
-  UINTN              Dr6;
-  UINTN              Dr7;
-  IA32_DESCRIPTOR    Gdtr;
-  IA32_DESCRIPTOR    Idtr;
-  UINT16             Tr;
-} CPU_VOLATILE_REGISTERS;
 
 //
 // AP related data
@@ -181,8 +180,6 @@ typedef struct {
   UINT8    *RelocateApLoopFuncAddress;
   UINTN    RelocateApLoopFuncSize;
   UINTN    ModeTransitionOffset;
-  UINTN    SwitchToRealSize;
-  UINTN    SwitchToRealOffset;
   UINTN    SwitchToRealNoNxOffset;
   UINTN    SwitchToRealPM16ModeOffset;
   UINTN    SwitchToRealPM16ModeSize;
@@ -303,6 +300,14 @@ struct _CPU_MP_DATA {
 
   UINT64         GhcbBase;
 };
+
+//
+// AP_STACK_DATA is stored at the top of each AP stack.
+//
+typedef struct {
+  UINTN          Bist;
+  CPU_MP_DATA    *MpData;
+} AP_STACK_DATA;
 
 #define AP_SAFE_STACK_SIZE   128
 #define AP_RESET_STACK_SIZE  AP_SAFE_STACK_SIZE
@@ -442,7 +447,7 @@ GetWakeupBuffer (
   @retval 0       Cannot find free memory below 4GB.
 **/
 UINTN
-GetModeTransitionBuffer (
+AllocateCodeBuffer (
   IN UINTN  BufferSize
   );
 
@@ -477,7 +482,7 @@ WakeUpAP (
   IN UINTN             ProcessorNumber,
   IN EFI_AP_PROCEDURE  Procedure               OPTIONAL,
   IN VOID              *ProcedureArgument      OPTIONAL,
-  IN BOOLEAN           WakeUpDisabledAps       OPTIONAL
+  IN BOOLEAN           WakeUpDisabledAps
   );
 
 /**

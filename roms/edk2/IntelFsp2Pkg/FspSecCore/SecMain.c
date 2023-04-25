@@ -1,6 +1,6 @@
 /** @file
 
-  Copyright (c) 2014 - 2021, Intel Corporation. All rights reserved.<BR>
+  Copyright (c) 2014 - 2022, Intel Corporation. All rights reserved.<BR>
   SPDX-License-Identifier: BSD-2-Clause-Patent
 
 **/
@@ -54,17 +54,17 @@ SecStartup (
   IN UINT32          TempRamBase,
   IN VOID            *BootFirmwareVolume,
   IN PEI_CORE_ENTRY  PeiCore,
-  IN UINT32          BootLoaderStack,
+  IN UINTN           BootLoaderStack,
   IN UINT32          ApiIdx
   )
 {
-  EFI_SEC_PEI_HAND_OFF  SecCoreData;
-  IA32_DESCRIPTOR       IdtDescriptor;
-  SEC_IDT_TABLE         IdtTableInStack;
-  UINT32                Index;
-  FSP_GLOBAL_DATA       PeiFspData;
-  UINT64                ExceptionHandler;
-  UINTN                 IdtSize;
+  EFI_SEC_PEI_HAND_OFF      SecCoreData;
+  IA32_DESCRIPTOR           IdtDescriptor;
+  SEC_IDT_TABLE             IdtTableInStack;
+  UINT32                    Index;
+  FSP_GLOBAL_DATA           PeiFspData;
+  IA32_IDT_GATE_DESCRIPTOR  ExceptionHandler;
+  UINTN                     IdtSize;
 
   //
   // Process all libraries constructor function linked to SecCore.
@@ -119,7 +119,7 @@ SecStartup (
   if (IdtDescriptor.Base == 0) {
     ExceptionHandler = FspGetExceptionHandler (mIdtEntryTemplate);
     for (Index = 0; Index < FixedPcdGet8 (PcdFspMaxInterruptSupported); Index++) {
-      CopyMem ((VOID *)&IdtTableInStack.IdtTable[Index], (VOID *)&ExceptionHandler, sizeof (UINT64));
+      CopyMem ((VOID *)&IdtTableInStack.IdtTable[Index], (VOID *)&ExceptionHandler, sizeof (IA32_IDT_GATE_DESCRIPTOR));
     }
 
     IdtSize = sizeof (IdtTableInStack.IdtTable);
@@ -233,7 +233,7 @@ SecTemporaryRamSupport (
   GetFspGlobalDataPointer ()->OnSeparateStack = 1;
 
   if (PcdGet8 (PcdFspHeapSizePercentage) == 0) {
-    CurrentStack = AsmReadEsp ();
+    CurrentStack = AsmReadStackPointer ();
     FspStackBase = (UINTN)GetFspEntryStack ();
 
     StackSize = FspStackBase - CurrentStack;
@@ -292,8 +292,8 @@ SecTemporaryRamSupport (
   // permanent memory.
   //
   SecSwitchStack (
-    (UINT32)(UINTN)OldStack,
-    (UINT32)(UINTN)NewStack
+    (UINTN)OldStack,
+    (UINTN)NewStack
     );
 
   return EFI_SUCCESS;

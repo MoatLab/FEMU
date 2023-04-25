@@ -303,10 +303,9 @@ set-default-console
 : (boot-ram)
     direct-ram-boot-size 0<> IF
         ." Booting from memory..." cr
-        s" go-args 2@ " evaluate
-        direct-ram-boot-base 0
+        s" direct-ram-boot-base to go-entry" evaluate
         s" true state-valid ! " evaluate
-        s" disable-watchdog go-64" evaluate
+        s" disable-watchdog go-direct" evaluate
     THEN
 ;
 

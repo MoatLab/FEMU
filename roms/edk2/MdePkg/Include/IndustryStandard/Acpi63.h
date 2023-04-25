@@ -1,7 +1,7 @@
 /** @file
   ACPI 6.3 definitions from the ACPI Specification Revision 6.3 Jan, 2019.
 
-  Copyright (c) 2017, Intel Corporation. All rights reserved.<BR>
+  Copyright (c) 2017 - 2022, Intel Corporation. All rights reserved.<BR>
   Copyright (c) 2019 - 2020, ARM Ltd. All rights reserved.<BR>
 
   SPDX-License-Identifier: BSD-2-Clause-Patent
@@ -1450,6 +1450,7 @@ typedef struct {
 #define EFI_ACPI_6_3_NFIT_NVDIMM_CONTROL_REGION_STRUCTURE_TYPE            4
 #define EFI_ACPI_6_3_NFIT_NVDIMM_BLOCK_DATA_WINDOW_REGION_STRUCTURE_TYPE  5
 #define EFI_ACPI_6_3_NFIT_FLUSH_HINT_ADDRESS_STRUCTURE_TYPE               6
+#define EFI_ACPI_6_3_NFIT_PLATFORM_CAPABILITIES_STRUCTURE_TYPE            7
 
 //
 // Definition for NFIT Structure Header
@@ -1602,6 +1603,22 @@ typedef struct {
   // UINT64                                      FlushHintAddress[NumberOfFlushHintAddresses];
 } EFI_ACPI_6_3_NFIT_FLUSH_HINT_ADDRESS_STRUCTURE;
 
+//
+// Definition for Platform Capabilities Structure
+//
+typedef struct {
+  UINT16    Type;
+  UINT16    Length;
+  UINT8     HighestValidCapability;
+  UINT8     Reserved_5[3];
+  UINT32    Capabilities;
+  UINT8     Reserved_12[4];
+} EFI_ACPI_6_3_NFIT_PLATFORM_CAPABILITIES_STRUCTURE;
+
+#define EFI_ACPI_6_3_NFIT_PLATFORM_CAPABILITY_CPU_CACHE_FLUSH_TO_NVDIMM_DURABILITY_ON_POWER_LOSS          BIT0
+#define EFI_ACPI_6_3_NFIT_PLATFORM_CAPABILITY_MEMORY_CONTROLLER_FLUSH_TO_NVDIMM_DURABILITY_ON_POWER_LOSS  BIT1
+#define EFI_ACPI_6_3_NFIT_PLATFORM_CAPABILITY_BYTE_ADDRESSABLE_PERSISTENT_MEMORY_HARDWARE_MIRRORING       BIT2
+
 ///
 /// Secure DEVices Table (SDEV)
 ///
@@ -1702,10 +1719,16 @@ typedef struct {
 //
 // Boot Error Severity types
 //
-#define EFI_ACPI_6_3_ERROR_SEVERITY_CORRECTABLE  0x00
+#define EFI_ACPI_6_3_ERROR_SEVERITY_RECOVERABLE  0x00
 #define EFI_ACPI_6_3_ERROR_SEVERITY_FATAL        0x01
 #define EFI_ACPI_6_3_ERROR_SEVERITY_CORRECTED    0x02
 #define EFI_ACPI_6_3_ERROR_SEVERITY_NONE         0x03
+//
+// The term 'Correctable' is no longer being used as an error severity of the
+// reported error since ACPI Specification Version 5.1 Errata B.
+// The below macro is considered as deprecated and should no longer be used.
+//
+#define EFI_ACPI_6_3_ERROR_SEVERITY_CORRECTABLE  0x00
 
 ///
 /// Generic Error Data Entry Definition

@@ -19,6 +19,9 @@ typedef uint64_t vaddr;
 #define VADDR_PRIX PRIX64
 #define VADDR_MAX UINT64_MAX
 
+void cpu_exec_init_all(void);
+void cpu_exec_step_atomic(CPUState *cpu);
+
 /* Using intptr_t ensures that qemu_*_page_mask is sign-extended even
  * when intptr_t is 32-bit and we are aligning a long long.
  */
@@ -26,14 +29,16 @@ extern uintptr_t qemu_host_page_size;
 extern intptr_t qemu_host_page_mask;
 
 #define HOST_PAGE_ALIGN(addr) ROUND_UP((addr), qemu_host_page_size)
-#define REAL_HOST_PAGE_ALIGN(addr) ROUND_UP((addr), qemu_real_host_page_size)
+#define REAL_HOST_PAGE_ALIGN(addr) ROUND_UP((addr), qemu_real_host_page_size())
 
 /* The CPU list lock nests outside page_(un)lock or mmap_(un)lock */
 void qemu_init_cpu_list(void);
 void cpu_list_lock(void);
 void cpu_list_unlock(void);
+unsigned int cpu_list_generation_id_get(void);
 
 void tcg_flush_softmmu_tlb(CPUState *cs);
+void tcg_flush_jmp_cache(CPUState *cs);
 
 void tcg_iommu_init_notifier_list(CPUState *cpu);
 void tcg_iommu_free_notifier_list(CPUState *cpu);
@@ -46,7 +51,7 @@ enum device_endian {
     DEVICE_LITTLE_ENDIAN,
 };
 
-#if defined(HOST_WORDS_BIGENDIAN)
+#if HOST_BIG_ENDIAN
 #define DEVICE_HOST_ENDIAN DEVICE_BIG_ENDIAN
 #else
 #define DEVICE_HOST_ENDIAN DEVICE_LITTLE_ENDIAN
@@ -68,6 +73,7 @@ typedef uintptr_t ram_addr_t;
 void qemu_ram_remap(ram_addr_t addr, ram_addr_t length);
 /* This should not be used by devices.  */
 ram_addr_t qemu_ram_addr_from_host(void *ptr);
+ram_addr_t qemu_ram_addr_from_host_nofail(void *ptr);
 RAMBlock *qemu_ram_block_by_name(const char *name);
 RAMBlock *qemu_ram_block_from_host(void *ptr, bool round_offset,
                                    ram_addr_t *offset);
@@ -86,6 +92,7 @@ void qemu_ram_set_uf_zeroable(RAMBlock *rb);
 bool qemu_ram_is_migratable(RAMBlock *rb);
 void qemu_ram_set_migratable(RAMBlock *rb);
 void qemu_ram_unset_migratable(RAMBlock *rb);
+int qemu_ram_get_fd(RAMBlock *rb);
 
 size_t qemu_ram_pagesize(RAMBlock *block);
 size_t qemu_ram_pagesize_largest(void);

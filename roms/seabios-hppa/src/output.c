@@ -90,7 +90,7 @@ screenc(char c)
     br.bl = 0x07;
     call16_int(0x10, &br);
 #else
-    parisc_screenc(c);
+    parisc_putchar(c);
 #endif
 }
 

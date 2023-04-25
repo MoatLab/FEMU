@@ -29,9 +29,13 @@
 #include <Library/AcpiHelperLib.h>
 #include <Library/TableHelperLib.h>
 #include <Library/AmlLib/AmlLib.h>
+#include <Library/SsdtPcieSupportLib.h>
 #include <Protocol/ConfigurationManagerProtocol.h>
 
 #include "SsdtPcieGenerator.h"
+
+#define PCI_MAX_DEVICE_COUNT_PER_BUS       32
+#define PCI_MAX_FUNCTION_COUNT_PER_DEVICE  8
 
 /** ARM standard SSDT Pcie Table Generator.
 
@@ -280,100 +284,15 @@ GeneratePciDeviceInfo (
   return Status;
 }
 
-/** Generate Pci slots devices.
-
-  PCI Firmware Specification - Revision 3.3,
-  s4.8 "Generic ACPI PCI Slot Description" requests to describe the PCI slot
-  used. It should be possible to enumerate them, but this is additional
-  information.
-
-  @param [in]  MappingTable  The mapping table structure.
-  @param [in, out]  PciNode     Pci node to amend.
-
-  @retval EFI_SUCCESS            Success.
-  @retval EFI_INVALID_PARAMETER  Invalid parameter.
-  @retval EFI_OUT_OF_RESOURCES   Failed to allocate memory.
-**/
-STATIC
-EFI_STATUS
-EFIAPI
-GeneratePciSlots (
-  IN      CONST MAPPING_TABLE           *MappingTable,
-  IN  OUT       AML_OBJECT_NODE_HANDLE  PciNode
-  )
-{
-  EFI_STATUS              Status;
-  UINT32                  Index;
-  UINT32                  LastIndex;
-  UINT32                  DeviceId;
-  CHAR8                   AslName[AML_NAME_SEG_SIZE + 1];
-  AML_OBJECT_NODE_HANDLE  DeviceNode;
-
-  ASSERT (MappingTable != NULL);
-  ASSERT (PciNode != NULL);
-
-  // Generic device name is "Dxx".
-  CopyMem (AslName, "Dxx_", AML_NAME_SEG_SIZE + 1);
-
-  LastIndex = MappingTable->LastIndex;
-
-  // There are at most 32 devices on a Pci bus.
-  if (LastIndex >= 32) {
-    ASSERT (0);
-    return EFI_INVALID_PARAMETER;
-  }
-
-  for (Index = 0; Index < LastIndex; Index++) {
-    DeviceId                       = MappingTable->Table[Index];
-    AslName[AML_NAME_SEG_SIZE - 3] = AsciiFromHex (DeviceId & 0xF);
-    AslName[AML_NAME_SEG_SIZE - 2] = AsciiFromHex ((DeviceId >> 4) & 0xF);
-
-    // ASL:
-    // Device (Dxx) {
-    //   Name (_ADR, <address value>)
-    // }
-    Status = AmlCodeGenDevice (AslName, PciNode, &DeviceNode);
-    if (EFI_ERROR (Status)) {
-      ASSERT (0);
-      return Status;
-    }
-
-    /* ACPI 6.4 specification, Table 6.2: "ADR Object Address Encodings"
-       High word-Device #, Low word-Function #. (for example, device 3,
-       function 2 is 0x00030002). To refer to all the functions on a device #,
-       use a function number of FFFF).
-    */
-    Status = AmlCodeGenNameInteger (
-               "_ADR",
-               (DeviceId << 16) | 0xFFFF,
-               DeviceNode,
-               NULL
-               );
-    if (EFI_ERROR (Status)) {
-      ASSERT (0);
-      return Status;
-    }
-
-    // _SUN object is not generated as we don't know which slot will be used.
-  }
-
-  return Status;
-}
-
 /** Generate a _PRT object (Pci Routing Table) for the Pci device.
 
   Cf. ACPI 6.4 specification, s6.2.13 "_PRT (PCI Routing Table)"
-
-  The first model (defining a _CRS object) is used. This is necessary because
-  PCI legacy interrupts are active low and GICv2 SPI interrupts are active
-  high.
-  Even though PCI interrupts cannot be re-routed, only the first model allows
-  to specify the activation state (low/high).
 
   @param [in]       Generator       The SSDT Pci generator.
   @param [in]       CfgMgrProtocol  Pointer to the Configuration Manager
                                     Protocol interface.
   @param [in]       PciInfo         Pci device information.
+  @param [in]       Uid             Unique Id of the Pci device.
   @param [in, out]  PciNode         Pci node to amend.
 
   @retval EFI_SUCCESS             The function completed successfully.
@@ -387,6 +306,7 @@ GeneratePrt (
   IN            ACPI_PCI_GENERATOR                            *Generator,
   IN      CONST EDKII_CONFIGURATION_MANAGER_PROTOCOL  *CONST  CfgMgrProtocol,
   IN      CONST CM_ARM_PCI_CONFIG_SPACE_INFO                  *PciInfo,
+  IN            UINT32                                        Uid,
   IN  OUT       AML_OBJECT_NODE_HANDLE                        PciNode
   )
 {
@@ -449,7 +369,7 @@ GeneratePrt (
     if ((Index > 0)   &&
         (IrqMapInfo->IntcInterrupt.Interrupt >= 32)   &&
         (IrqMapInfo->IntcInterrupt.Interrupt < 1020)  &&
-        ((IrqMapInfo->IntcInterrupt.Flags & 0x3) != BIT0))
+        ((IrqMapInfo->IntcInterrupt.Flags & 0xB) != 0))
     {
       Status = EFI_INVALID_PARAMETER;
       ASSERT_EFI_ERROR (Status);
@@ -471,6 +391,8 @@ GeneratePrt (
        High word-Device #, Low word-Function #. (for example, device 3,
        function 2 is 0x00030002). To refer to all the functions on a device #,
        use a function number of FFFF).
+
+      Use the second model for _PRT object and describe a hardwired interrupt.
     */
     Status = AmlAddPrtEntry (
                (IrqMapInfo->PciDevice << 16) | 0xFFFF,
@@ -495,7 +417,7 @@ GeneratePrt (
   PrtNode = NULL;
 
   // Generate the Pci slots once all the device have been added.
-  Status = GeneratePciSlots (&Generator->DeviceTable, PciNode);
+  Status = GeneratePciSlots (PciInfo, &Generator->DeviceTable, Uid, PciNode);
   if (EFI_ERROR (Status)) {
     ASSERT (0);
     goto exit_handler;
@@ -540,6 +462,7 @@ GeneratePciCrs (
   UINT32                       RefCount;
   CM_ARM_PCI_ADDRESS_MAP_INFO  *AddrMapInfo;
   AML_OBJECT_NODE_HANDLE       CrsNode;
+  BOOLEAN                      IsPosDecode;
 
   ASSERT (Generator != NULL);
   ASSERT (CfgMgrProtocol != NULL);
@@ -609,6 +532,11 @@ GeneratePciCrs (
     }
 
     Translation = (AddrMapInfo->CpuAddress != AddrMapInfo->PciAddress);
+    if (AddrMapInfo->CpuAddress >= AddrMapInfo->PciAddress) {
+      IsPosDecode = TRUE;
+    } else {
+      IsPosDecode = FALSE;
+    }
 
     switch (AddrMapInfo->SpaceCode) {
       case PCI_SS_IO:
@@ -616,12 +544,12 @@ GeneratePciCrs (
                    FALSE,
                    TRUE,
                    TRUE,
-                   TRUE,
+                   IsPosDecode,
                    3,
                    0,
                    AddrMapInfo->PciAddress,
                    AddrMapInfo->PciAddress + AddrMapInfo->AddressSize - 1,
-                   Translation ? AddrMapInfo->CpuAddress : 0,
+                   Translation ? AddrMapInfo->CpuAddress - AddrMapInfo->PciAddress : 0,
                    AddrMapInfo->AddressSize,
                    0,
                    NULL,
@@ -635,7 +563,7 @@ GeneratePciCrs (
       case PCI_SS_M32:
         Status = AmlCodeGenRdDWordMemory (
                    FALSE,
-                   TRUE,
+                   IsPosDecode,
                    TRUE,
                    TRUE,
                    TRUE,
@@ -643,7 +571,7 @@ GeneratePciCrs (
                    0,
                    AddrMapInfo->PciAddress,
                    AddrMapInfo->PciAddress + AddrMapInfo->AddressSize - 1,
-                   Translation ? AddrMapInfo->CpuAddress : 0,
+                   Translation ? AddrMapInfo->CpuAddress - AddrMapInfo->PciAddress : 0,
                    AddrMapInfo->AddressSize,
                    0,
                    NULL,
@@ -657,7 +585,7 @@ GeneratePciCrs (
       case PCI_SS_M64:
         Status = AmlCodeGenRdQWordMemory (
                    FALSE,
-                   TRUE,
+                   IsPosDecode,
                    TRUE,
                    TRUE,
                    TRUE,
@@ -665,7 +593,7 @@ GeneratePciCrs (
                    0,
                    AddrMapInfo->PciAddress,
                    AddrMapInfo->PciAddress + AddrMapInfo->AddressSize - 1,
-                   Translation ? AddrMapInfo->CpuAddress : 0,
+                   Translation ? AddrMapInfo->CpuAddress - AddrMapInfo->PciAddress : 0,
                    AddrMapInfo->AddressSize,
                    0,
                    NULL,
@@ -689,12 +617,71 @@ GeneratePciCrs (
   return Status;
 }
 
-/** Add an _OSC template method to the PciNode.
+/** Generate a RES0 device node to reserve PNP motherboard resources
+  for a given PCI node.
 
-  The _OSC method is provided as an AML blob. The blob is
-  parsed and attached at the end of the PciNode list of variable elements.
+  @param [in]   PciNode       Parent PCI node handle of the generated
+                              resource object.
+  @param [out]  CrsNode       CRS node of the AML tree to populate.
 
-  @param [in, out]  PciNode     Pci node to amend.
+  @retval EFI_SUCCESS             The function completed successfully.
+  @retval EFI_INVALID_PARAMETER   Invalid input parameter.
+  @retval EFI_OUT_OF_RESOURCES    Could not allocate memory.
+**/
+STATIC
+EFI_STATUS
+EFIAPI
+GenerateMotherboardDevice (
+  IN  AML_OBJECT_NODE_HANDLE  PciNode,
+  OUT AML_OBJECT_NODE_HANDLE  *CrsNode
+  )
+{
+  EFI_STATUS              Status;
+  UINT32                  EisaId;
+  AML_OBJECT_NODE_HANDLE  ResNode;
+
+  if (CrsNode == NULL) {
+    ASSERT (0);
+    return EFI_INVALID_PARAMETER;
+  }
+
+  // ASL: Device (RES0) {}
+  Status = AmlCodeGenDevice ("RES0", PciNode, &ResNode);
+  if (EFI_ERROR (Status)) {
+    ASSERT (0);
+    return Status;
+  }
+
+  // ASL: Name (_HID, EISAID ("PNP0C02"))
+  Status = AmlGetEisaIdFromString ("PNP0C02", &EisaId); /* PNP Motherboard Resources */
+  if (EFI_ERROR (Status)) {
+    ASSERT (0);
+    return Status;
+  }
+
+  Status = AmlCodeGenNameInteger ("_HID", EisaId, ResNode, NULL);
+  if (EFI_ERROR (Status)) {
+    ASSERT (0);
+    return Status;
+  }
+
+  // ASL: Name (_CRS, ResourceTemplate () {})
+  Status = AmlCodeGenNameResourceTemplate ("_CRS", ResNode, CrsNode);
+  if (EFI_ERROR (Status)) {
+    ASSERT (0);
+    return Status;
+  }
+
+  return Status;
+}
+
+/** Reserves ECAM space for PCI config space
+
+  @param [in]       Generator       The SSDT Pci generator.
+  @param [in]       CfgMgrProtocol  Pointer to the Configuration Manager
+                                    Protocol interface.
+  @param [in]       PciInfo         Pci device information.
+  @param [in, out]  PciNode         RootNode of the AML tree to populate.
 
   @retval EFI_SUCCESS             The function completed successfully.
   @retval EFI_INVALID_PARAMETER   Invalid parameter.
@@ -703,70 +690,52 @@ GeneratePciCrs (
 STATIC
 EFI_STATUS
 EFIAPI
-AddOscMethod (
-  IN  OUT   AML_OBJECT_NODE_HANDLE  PciNode
+ReserveEcamSpace (
+  IN            ACPI_PCI_GENERATOR                            *Generator,
+  IN      CONST EDKII_CONFIGURATION_MANAGER_PROTOCOL  *CONST  CfgMgrProtocol,
+  IN      CONST CM_ARM_PCI_CONFIG_SPACE_INFO                  *PciInfo,
+  IN  OUT       AML_OBJECT_NODE_HANDLE                        PciNode
   )
 {
-  EFI_STATUS                   Status;
-  EFI_STATUS                   Status1;
-  EFI_ACPI_DESCRIPTION_HEADER  *SsdtPcieOscTemplate;
-  AML_ROOT_NODE_HANDLE         OscTemplateRoot;
-  AML_OBJECT_NODE_HANDLE       OscNode;
+  EFI_STATUS              Status;
+  AML_OBJECT_NODE_HANDLE  CrsNode;
+  UINT64                  AddressMinimum;
+  UINT64                  AddressMaximum;
 
-  ASSERT (PciNode != NULL);
-
-  // Parse the Ssdt Pci Osc Template.
-  SsdtPcieOscTemplate = (EFI_ACPI_DESCRIPTION_HEADER *)
-                        ssdtpcieosctemplate_aml_code;
-
-  OscNode         = NULL;
-  OscTemplateRoot = NULL;
-  Status          = AmlParseDefinitionBlock (
-                      SsdtPcieOscTemplate,
-                      &OscTemplateRoot
-                      );
+  Status = GenerateMotherboardDevice (PciNode, &CrsNode);
   if (EFI_ERROR (Status)) {
-    DEBUG ((
-      DEBUG_ERROR,
-      "ERROR: SSDT-PCI-OSC: Failed to parse SSDT PCI OSC Template."
-      " Status = %r\n",
-      Status
-      ));
+    ASSERT (0);
     return Status;
   }
 
-  Status = AmlFindNode (OscTemplateRoot, "\\_OSC", &OscNode);
-  if (EFI_ERROR (Status)) {
-    goto error_handler;
-  }
+  AddressMinimum = PciInfo->BaseAddress + (PciInfo->StartBusNumber *
+                                           PCI_MAX_DEVICE_COUNT_PER_BUS * PCI_MAX_FUNCTION_COUNT_PER_DEVICE * SIZE_4KB);
+  AddressMaximum = PciInfo->BaseAddress + ((PciInfo->EndBusNumber + 1) *
+                                           PCI_MAX_DEVICE_COUNT_PER_BUS * PCI_MAX_FUNCTION_COUNT_PER_DEVICE * SIZE_4KB) - 1;
 
-  Status = AmlDetachNode (OscNode);
-  if (EFI_ERROR (Status)) {
-    goto error_handler;
-  }
+  Status = AmlCodeGenRdQWordMemory (
+             FALSE,
+             TRUE,
+             TRUE,
+             TRUE,
+             FALSE,  // non-cacheable
+             TRUE,
+             0,
+             AddressMinimum,
+             AddressMaximum,
+             0,  // no translation
+             AddressMaximum - AddressMinimum + 1,
+             0,
+             NULL,
+             0,
+             TRUE,
+             CrsNode,
+             NULL
+             );
 
-  Status = AmlAttachNode (PciNode, OscNode);
   if (EFI_ERROR (Status)) {
-    // Free the detached node.
-    AmlDeleteTree (OscNode);
-    goto error_handler;
-  }
-
-error_handler:
-  // Cleanup
-  Status1 = AmlDeleteTree (OscTemplateRoot);
-  if (EFI_ERROR (Status1)) {
-    DEBUG ((
-      DEBUG_ERROR,
-      "ERROR: SSDT-PCI-OSC: Failed to cleanup AML tree."
-      " Status = %r\n",
-      Status1
-      ));
-    // If Status was success but we failed to delete the AML Tree
-    // return Status1 else return the original error code, i.e. Status.
-    if (!EFI_ERROR (Status)) {
-      return Status1;
-    }
+    ASSERT (0);
+    return Status;
   }
 
   return Status;
@@ -818,7 +787,10 @@ GeneratePciDevice (
 
   // Write the name of the PCI device.
   CopyMem (AslName, "PCIx", AML_NAME_SEG_SIZE + 1);
-  AslName[AML_NAME_SEG_SIZE - 1] = AsciiFromHex (Uid);
+  AslName[AML_NAME_SEG_SIZE - 1] = AsciiFromHex (Uid & 0xF);
+  if (Uid > 0xF) {
+    AslName[AML_NAME_SEG_SIZE - 2] = AsciiFromHex ((Uid >> 4) & 0xF);
+  }
 
   // ASL: Device (PCIx) {}
   Status = AmlCodeGenDevice (AslName, ScopeNode, &PciNode);
@@ -840,6 +812,7 @@ GeneratePciDevice (
                Generator,
                CfgMgrProtocol,
                PciInfo,
+               Uid,
                PciNode
                );
     if (EFI_ERROR (Status)) {
@@ -855,9 +828,17 @@ GeneratePciDevice (
     return Status;
   }
 
+  // Add the PNP Motherboard Resources Device to reserve ECAM space
+  Status = ReserveEcamSpace (Generator, CfgMgrProtocol, PciInfo, PciNode);
+  if (EFI_ERROR (Status)) {
+    ASSERT (0);
+    return Status;
+  }
+
   // Add the template _OSC method.
-  Status = AddOscMethod (PciNode);
+  Status = AddOscMethod (PciInfo, PciNode);
   ASSERT_EFI_ERROR (Status);
+
   return Status;
 }
 
@@ -996,6 +977,7 @@ BuildSsdtPciTableEx (
   UINTN                         Index;
   EFI_ACPI_DESCRIPTION_HEADER   **TableList;
   ACPI_PCI_GENERATOR            *Generator;
+  UINT32                        Uid;
 
   ASSERT (This != NULL);
   ASSERT (AcpiTableInfo != NULL);
@@ -1051,13 +1033,29 @@ BuildSsdtPciTableEx (
   *Table = TableList;
 
   for (Index = 0; Index < PciCount; Index++) {
+    if (PcdGetBool (PcdPciUseSegmentAsUid)) {
+      Uid = PciInfo[Index].PciSegmentGroupNumber;
+      if (Uid > MAX_PCI_ROOT_COMPLEXES_SUPPORTED) {
+        DEBUG ((
+          DEBUG_ERROR,
+          "ERROR: SSDT-PCI: Pci root complexes segment number: %d."
+          " Greater than maximum number of Pci root complexes supported = %d.\n",
+          Uid,
+          MAX_PCI_ROOT_COMPLEXES_SUPPORTED
+          ));
+        return EFI_INVALID_PARAMETER;
+      }
+    } else {
+      Uid = Index;
+    }
+
     // Build a SSDT table describing the Pci devices.
     Status = BuildSsdtPciTable (
                Generator,
                CfgMgrProtocol,
                AcpiTableInfo,
                &PciInfo[Index],
-               Index,
+               Uid,
                &TableList[Index]
                );
     if (EFI_ERROR (Status)) {

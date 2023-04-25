@@ -6,7 +6,7 @@
  */
 
 #ifndef ARM_CPU_PARAM_H
-#define ARM_CPU_PARAM_H 1
+#define ARM_CPU_PARAM_H
 
 #ifdef TARGET_AARCH64
 # define TARGET_LONG_BITS             64
@@ -30,8 +30,19 @@
  */
 # define TARGET_PAGE_BITS_VARY
 # define TARGET_PAGE_BITS_MIN  10
-#endif
 
-#define NB_MMU_MODES 15
+/*
+ * Cache the attrs and shareability fields from the page table entry.
+ *
+ * For ARMMMUIdx_Stage2*, pte_attrs is the S2 descriptor bits [5:2].
+ * Otherwise, pte_attrs is the same as the MAIR_EL1 8-bit format.
+ * For shareability and guarded, as in the SH and GP fields respectively
+ * of the VMSAv8-64 PTEs.
+ */
+# define TARGET_PAGE_ENTRY_EXTRA  \
+    uint8_t pte_attrs;            \
+    uint8_t shareability;         \
+    bool guarded;
+#endif
 
 #endif

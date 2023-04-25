@@ -186,6 +186,7 @@ enum proc_chip_quirks {
 	QUIRK_NO_DIRECT_CTL	= 0x00000080,
 	QUIRK_NO_RNG		= 0x00000100,
 	QUIRK_QEMU              = 0x00000200,
+	QUIRK_AWAN		= 0x00000400,
 };
 
 extern enum proc_chip_quirks proc_chip_quirks;

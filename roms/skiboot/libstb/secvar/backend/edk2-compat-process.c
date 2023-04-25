@@ -643,7 +643,7 @@ static char *get_hash_to_verify(const char *key, const char *new_data,
 	    || key_equals(key, "dbx"))
 		guid = EFI_IMAGE_SECURITY_DATABASE_GUID;
 	else
-		return NULL;
+		goto out;
 
 	/* Expand char name to wide character width */
 	varlen = strlen(key) * 2;
@@ -672,7 +672,7 @@ static char *get_hash_to_verify(const char *key, const char *new_data,
 
 	hash = zalloc(32);
 	if (!hash)
-		return NULL;
+		goto out;
 	rc = mbedtls_md_finish(&ctx, hash);
 	if (rc) {
 		free(hash);

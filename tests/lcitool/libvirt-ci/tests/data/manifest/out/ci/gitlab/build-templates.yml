@@ -1,0 +1,312 @@
+#
+# We use pre-built containers for any pipelines that are:
+#
+#  - Validating code committed on default upstream branch
+#  - Validating patches targeting default upstream branch
+#    which do not have CI changes
+#
+# We use a local build env for any pipelines that are:
+#
+#  - Validating code committed to a non-default upstream branch
+#  - Validating patches targeting a non-default upstream branch
+#  - Validating patches targeting default upstream branch which
+#    include CI changes
+#  - Validating code committed to a fork branch
+#
+# Note: the rules across the prebuilt_env and local_env templates
+# should be logical inverses, such that jobs are mutually exclusive
+#
+.gitlab_native_build_job_prebuilt_env:
+  image: $CI_REGISTRY/$RUN_UPSTREAM_NAMESPACE/libvirt-go-xml-module/ci-$NAME:latest
+  stage: builds
+  interruptible: true
+  before_script:
+    - cat /packages.txt
+  rules:
+    # upstream: pushes to the default branch
+    - if: '$CI_PROJECT_NAMESPACE == $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $JOB_OPTIONAL'
+      when: manual
+      allow_failure: true
+    - if: '$CI_PROJECT_NAMESPACE == $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      when: on_success
+
+    # forks: pushes to a branch when a pipeline run in upstream env is explicitly requested
+    - if: '$CI_PROJECT_NAMESPACE != $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE == "push" && $RUN_PIPELINE_UPSTREAM_ENV && $JOB_OPTIONAL'
+      when: manual
+      allow_failure: true
+    - if: '$CI_PROJECT_NAMESPACE != $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE == "push" && $RUN_PIPELINE_UPSTREAM_ENV'
+      when: on_success
+
+    # upstream: other web/api/scheduled pipelines targeting the default branch
+    - if: '$CI_PROJECT_NAMESPACE == $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE =~ /(web|api|schedule)/ && $CI_COMMIT_REF_NAME == $CI_DEFAULT_BRANCH && $JOB_OPTIONAL'
+      when: manual
+      allow_failure: true
+    - if: '$CI_PROJECT_NAMESPACE == $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE =~ /(web|api|schedule)/ && $CI_COMMIT_REF_NAME == $CI_DEFAULT_BRANCH'
+      when: on_success
+
+    # upstream+forks: merge requests targeting the default branch, without CI changes
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == $CI_DEFAULT_BRANCH'
+      changes:
+        - ci/gitlab/container-templates.yml
+        - ci/containers/$NAME.Dockerfile
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == $CI_DEFAULT_BRANCH && $JOB_OPTIONAL'
+      when: manual
+      allow_failure: true
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == $CI_DEFAULT_BRANCH'
+      when: on_success
+
+    # upstream+forks: that's all folks
+    - when: never
+
+.gitlab_native_build_job_local_env:
+  image: $IMAGE
+  stage: builds
+  interruptible: true
+  before_script:
+    - source ci/buildenv/$NAME.sh
+    - install_buildenv
+    - cat /packages.txt
+  rules:
+    # upstream: pushes to a non-default branch
+    - if: '$CI_PROJECT_NAMESPACE == $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH && $JOB_OPTIONAL'
+      when: manual
+      allow_failure: true
+    - if: '$CI_PROJECT_NAMESPACE == $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH'
+      when: on_success
+
+    # forks: avoid build in local env when job requests run in upstream containers
+    - if: '$CI_PROJECT_NAMESPACE != $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE == "push" && $RUN_PIPELINE_UPSTREAM_ENV'
+      when: never
+
+    # forks: pushes to branches with pipeline requested
+    - if: '$CI_PROJECT_NAMESPACE != $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE == "push" && $RUN_PIPELINE && $JOB_OPTIONAL'
+      when: manual
+      allow_failure: true
+    - if: '$CI_PROJECT_NAMESPACE != $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE == "push" && $RUN_PIPELINE'
+      when: on_success
+
+    # upstream: other web/api/scheduled pipelines targeting non-default branches
+    - if: '$CI_PROJECT_NAMESPACE == $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE =~ /(web|api|schedule)/ && $CI_COMMIT_REF_NAME != $CI_DEFAULT_BRANCH && $JOB_OPTIONAL'
+      when: manual
+      allow_failure: true
+    - if: '$CI_PROJECT_NAMESPACE == $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE =~ /(web|api|schedule)/ && $CI_COMMIT_REF_NAME != $CI_DEFAULT_BRANCH'
+      when: on_success
+
+    # forks: other web/api/scheduled pipelines
+    - if: '$CI_PROJECT_NAMESPACE != $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE =~ /(web|api|schedule)/ && $JOB_OPTIONAL'
+      when: manual
+      allow_failure: true
+    - if: '$CI_PROJECT_NAMESPACE != $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE =~ /(web|api|schedule)/'
+      when: on_success
+
+    # upstream+forks: merge requests targeting the default branch, with CI changes
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == $CI_DEFAULT_BRANCH && $JOB_OPTIONAL'
+      changes:
+        - ci/gitlab/container-templates.yml
+        - ci/containers/$NAME.Dockerfile
+      when: manual
+      allow_failure: true
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == $CI_DEFAULT_BRANCH'
+      changes:
+        - ci/gitlab/container-templates.yml
+        - ci/containers/$NAME.Dockerfile
+      when: on_success
+
+    # upstream+forks: merge requests targeting non-default branches
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME != $CI_DEFAULT_BRANCH && $JOB_OPTIONAL'
+      when: manual
+      allow_failure: true
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME != $CI_DEFAULT_BRANCH'
+      when: on_success
+
+    # upstream+forks: that's all folks
+    - when: never
+
+
+#
+# We use pre-built containers for any pipelines that are:
+#
+#  - Validating code committed on default upstream branch
+#  - Validating patches targeting default upstream branch
+#    which do not have CI changes
+#
+# We use a local build env for any pipelines that are:
+#
+#  - Validating code committed to a non-default upstream branch
+#  - Validating patches targeting a non-default upstream branch
+#  - Validating patches targeting default upstream branch which
+#    include CI changes
+#  - Validating code committed to a fork branch
+#
+# Note: the rules across the prebuilt_env and local_env templates
+# should be logical inverses, such that jobs are mutually exclusive
+#
+.gitlab_cross_build_job_prebuilt_env:
+  image: $CI_REGISTRY/$RUN_UPSTREAM_NAMESPACE/libvirt-go-xml-module/ci-$NAME-cross-$CROSS:latest
+  stage: builds
+  interruptible: true
+  before_script:
+    - cat /packages.txt
+  rules:
+    # upstream: pushes to the default branch
+    - if: '$CI_PROJECT_NAMESPACE == $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $JOB_OPTIONAL'
+      when: manual
+      allow_failure: true
+    - if: '$CI_PROJECT_NAMESPACE == $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      when: on_success
+
+    # forks: pushes to a branch when a pipeline run in upstream env is explicitly requested
+    - if: '$CI_PROJECT_NAMESPACE != $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE == "push" && $RUN_PIPELINE_UPSTREAM_ENV && $JOB_OPTIONAL'
+      when: manual
+      allow_failure: true
+    - if: '$CI_PROJECT_NAMESPACE != $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE == "push" && $RUN_PIPELINE_UPSTREAM_ENV'
+      when: on_success
+
+    # upstream: other web/api/scheduled pipelines targeting the default branch
+    - if: '$CI_PROJECT_NAMESPACE == $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE =~ /(web|api|schedule)/ && $CI_COMMIT_REF_NAME == $CI_DEFAULT_BRANCH && $JOB_OPTIONAL'
+      when: manual
+      allow_failure: true
+    - if: '$CI_PROJECT_NAMESPACE == $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE =~ /(web|api|schedule)/ && $CI_COMMIT_REF_NAME == $CI_DEFAULT_BRANCH'
+      when: on_success
+
+    # upstream+forks: merge requests targeting the default branch, without CI changes
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == $CI_DEFAULT_BRANCH'
+      changes:
+        - ci/gitlab/container-templates.yml
+        - ci/containers/$NAME.Dockerfile
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == $CI_DEFAULT_BRANCH && $JOB_OPTIONAL'
+      when: manual
+      allow_failure: true
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == $CI_DEFAULT_BRANCH'
+      when: on_success
+
+    # upstream+forks: that's all folks
+    - when: never
+
+.gitlab_cross_build_job_local_env:
+  image: $IMAGE
+  stage: builds
+  interruptible: true
+  before_script:
+    - source ci/buildenv/$NAME.sh
+    - install_buildenv
+    - cat /packages.txt
+  rules:
+    # upstream: pushes to a non-default branch
+    - if: '$CI_PROJECT_NAMESPACE == $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH && $JOB_OPTIONAL'
+      when: manual
+      allow_failure: true
+    - if: '$CI_PROJECT_NAMESPACE == $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH'
+      when: on_success
+
+    # forks: avoid build in local env when job requests run in upstream containers
+    - if: '$CI_PROJECT_NAMESPACE != $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE == "push" && $RUN_PIPELINE_UPSTREAM_ENV'
+      when: never
+
+    # forks: pushes to branches with pipeline requested
+    - if: '$CI_PROJECT_NAMESPACE != $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE == "push" && $RUN_PIPELINE && $JOB_OPTIONAL'
+      when: manual
+      allow_failure: true
+    - if: '$CI_PROJECT_NAMESPACE != $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE == "push" && $RUN_PIPELINE'
+      when: on_success
+
+    # upstream: other web/api/scheduled pipelines targeting non-default branches
+    - if: '$CI_PROJECT_NAMESPACE == $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE =~ /(web|api|schedule)/ && $CI_COMMIT_REF_NAME != $CI_DEFAULT_BRANCH && $JOB_OPTIONAL'
+      when: manual
+      allow_failure: true
+    - if: '$CI_PROJECT_NAMESPACE == $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE =~ /(web|api|schedule)/ && $CI_COMMIT_REF_NAME != $CI_DEFAULT_BRANCH'
+      when: on_success
+
+    # forks: other web/api/scheduled pipelines
+    - if: '$CI_PROJECT_NAMESPACE != $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE =~ /(web|api|schedule)/ && $JOB_OPTIONAL'
+      when: manual
+      allow_failure: true
+    - if: '$CI_PROJECT_NAMESPACE != $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE =~ /(web|api|schedule)/'
+      when: on_success
+
+    # upstream+forks: merge requests targeting the default branch, with CI changes
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == $CI_DEFAULT_BRANCH && $JOB_OPTIONAL'
+      changes:
+        - ci/gitlab/container-templates.yml
+        - ci/containers/$NAME.Dockerfile
+      when: manual
+      allow_failure: true
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == $CI_DEFAULT_BRANCH'
+      changes:
+        - ci/gitlab/container-templates.yml
+        - ci/containers/$NAME.Dockerfile
+      when: on_success
+
+    # upstream+forks: merge requests targeting non-default branches
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME != $CI_DEFAULT_BRANCH && $JOB_OPTIONAL'
+      when: manual
+      allow_failure: true
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME != $CI_DEFAULT_BRANCH'
+      when: on_success
+
+    # upstream+forks: that's all folks
+    - when: never
+
+
+.cirrus_build_job:
+  stage: builds
+  image: registry.gitlab.com/libvirt/libvirt-ci/cirrus-run:latest
+  interruptible: true
+  needs: []
+  script:
+    - source ci/cirrus/$NAME.vars
+    - sed -e "s|[@]CI_REPOSITORY_URL@|$CI_REPOSITORY_URL|g"
+          -e "s|[@]CI_COMMIT_REF_NAME@|$CI_COMMIT_REF_NAME|g"
+          -e "s|[@]CI_COMMIT_SHA@|$CI_COMMIT_SHA|g"
+          -e "s|[@]CIRRUS_VM_INSTANCE_TYPE@|$CIRRUS_VM_INSTANCE_TYPE|g"
+          -e "s|[@]CIRRUS_VM_IMAGE_SELECTOR@|$CIRRUS_VM_IMAGE_SELECTOR|g"
+          -e "s|[@]CIRRUS_VM_IMAGE_NAME@|$CIRRUS_VM_IMAGE_NAME|g"
+          -e "s|[@]UPDATE_COMMAND@|$UPDATE_COMMAND|g"
+          -e "s|[@]UPGRADE_COMMAND@|$UPGRADE_COMMAND|g"
+          -e "s|[@]INSTALL_COMMAND@|$INSTALL_COMMAND|g"
+          -e "s|[@]PATH@|$PATH_EXTRA${PATH_EXTRA:+:}\$PATH|g"
+          -e "s|[@]PKG_CONFIG_PATH@|$PKG_CONFIG_PATH|g"
+          -e "s|[@]PKGS@|$PKGS|g"
+          -e "s|[@]MAKE@|$MAKE|g"
+          -e "s|[@]PYTHON@|$PYTHON|g"
+          -e "s|[@]PIP3@|$PIP3|g"
+          -e "s|[@]PYPI_PKGS@|$PYPI_PKGS|g"
+          -e "s|[@]XML_CATALOG_FILES@|$XML_CATALOG_FILES|g"
+      <ci/cirrus/build.yml >ci/cirrus/$NAME.yml
+    - cat ci/cirrus/$NAME.yml
+    - cirrus-run -v --show-build-log always ci/cirrus/$NAME.yml
+  rules:
+    # upstream+forks: Can't run unless Cirrus is configured
+    - if: '$CIRRUS_GITHUB_REPO == null || $CIRRUS_API_TOKEN == null'
+      when: never
+
+    # upstream: pushes to branches
+    - if: '$CI_PROJECT_NAMESPACE == $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE == "push" && $JOB_OPTIONAL'
+      when: manual
+      allow_failure: true
+    - if: '$CI_PROJECT_NAMESPACE == $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE == "push"'
+      when: on_success
+
+    # forks: pushes to branches with pipeline requested (including pipeline in upstream environment)
+    - if: '$CI_PROJECT_NAMESPACE != $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE == "push" && $RUN_PIPELINE && $JOB_OPTIONAL'
+      when: manual
+      allow_failure: true
+    - if: '$CI_PROJECT_NAMESPACE != $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE == "push" && $RUN_PIPELINE'
+      when: on_success
+    - if: '$CI_PROJECT_NAMESPACE != $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE == "push" && $RUN_PIPELINE_UPSTREAM_ENV && $JOB_OPTIONAL'
+      when: manual
+      allow_failure: true
+    - if: '$CI_PROJECT_NAMESPACE != $RUN_UPSTREAM_NAMESPACE && $CI_PIPELINE_SOURCE == "push" && $RUN_PIPELINE_UPSTREAM_ENV'
+      when: on_success
+
+    # upstream+forks: Run pipelines on MR, web, api & scheduled
+    - if: '$CI_PIPELINE_SOURCE =~ /(web|api|schedule|merge_request_event)/ && $JOB_OPTIONAL'
+      when: manual
+      allow_failure: true
+    - if: '$CI_PIPELINE_SOURCE =~ /(web|api|schedule|merge_request_event)/'
+      when: on_success
+
+    # upstream+forks: that's all folks
+    - when: never

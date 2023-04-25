@@ -1,0 +1,24 @@
+---
+os:
+  name: 'Alpine'
+  version: '316'
+
+packaging:
+  format: 'apk'
+  command: 'apk'
+
+paths:
+  bash: /bin/bash
+  cc: /usr/bin/gcc
+  ccache: /usr/bin/ccache
+  make: /usr/bin/make
+  ninja: /usr/bin/ninja
+  pip3: /usr/bin/pip3
+  python: /usr/bin/python3
+  sudoers: /etc/sudoers
+
+ansible_python_package: python3
+ansible_python_interpreter: /usr/bin/python3
+
+containers:
+  base: docker.io/library/alpine:3.16

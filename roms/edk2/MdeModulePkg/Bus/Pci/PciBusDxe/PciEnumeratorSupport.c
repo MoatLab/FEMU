@@ -3,6 +3,7 @@
 
 Copyright (c) 2006 - 2021, Intel Corporation. All rights reserved.<BR>
 (C) Copyright 2015 Hewlett Packard Enterprise Development LP<BR>
+Copyright (C) 2023 Advanced Micro Devices, Inc. All rights reserved.<BR>
 SPDX-License-Identifier: BSD-2-Clause-Patent
 
 **/
@@ -220,18 +221,22 @@ PciSearchDevice (
   )
 {
   PCI_IO_DEVICE  *PciIoDevice;
+  BOOLEAN        IgnoreOptionRom;
 
-  PciIoDevice = NULL;
+  PciIoDevice     = NULL;
+  IgnoreOptionRom = FALSE;
 
   DEBUG ((
     DEBUG_INFO,
-    "PciBus: Discovered %s @ [%02x|%02x|%02x]\n",
+    "PciBus: Discovered %s @ [%02x|%02x|%02x]  [VID = 0x%x, DID = 0x%0x]\n",
     IS_PCI_BRIDGE (Pci) ?     L"PPB" :
     IS_CARDBUS_BRIDGE (Pci) ? L"P2C" :
     L"PCI",
     Bus,
     Device,
-    Func
+    Func,
+    Pci->Hdr.VendorId,
+    Pci->Hdr.DeviceId
     ));
 
   if (!IS_PCI_BRIDGE (Pci)) {
@@ -285,7 +290,7 @@ PciSearchDevice (
   //
   // Update the bar information for this PCI device so as to support some specific device
   //
-  UpdatePciInfo (PciIoDevice);
+  UpdatePciInfo (PciIoDevice, &IgnoreOptionRom);
 
   if (PciIoDevice->DevicePath == NULL) {
     return EFI_OUT_OF_RESOURCES;
@@ -295,7 +300,7 @@ PciSearchDevice (
   // Detect this function has option rom
   //
   if (gFullEnumeration) {
-    if (!IS_CARDBUS_BRIDGE (Pci)) {
+    if (!IS_CARDBUS_BRIDGE (Pci) && !IgnoreOptionRom) {
       GetOpRomInfo (PciIoDevice);
     }
 
@@ -1310,6 +1315,7 @@ DetermineDeviceAttribute (
 
   @param PciIoDevice      Input Pci device instance. Output Pci device instance with updated
                           Bar information.
+  @param IgnoreOptionRom  Output If the option rom of incompatible device need to be ignored.
 
   @retval EFI_SUCCESS     Successfully updated bar information.
   @retval EFI_UNSUPPORTED Given PCI device doesn't belong to incompatible PCI device list.
@@ -1317,7 +1323,8 @@ DetermineDeviceAttribute (
 **/
 EFI_STATUS
 UpdatePciInfo (
-  IN OUT PCI_IO_DEVICE  *PciIoDevice
+  IN OUT PCI_IO_DEVICE  *PciIoDevice,
+  OUT BOOLEAN           *IgnoreOptionRom
   )
 {
   EFI_STATUS                         Status;
@@ -1372,6 +1379,17 @@ UpdatePciInfo (
       // The format is not support
       //
       break;
+    }
+
+    //
+    // According to "Table 20. ACPI 2.0 & 3.0 QWORD Address Space Descriptor Usage"
+    // in PI Spec 1.7, Type-specific flags can be set to 0 when Address Translation
+    // Offset == 6 to skip device option ROM (do not probe option rom BAR).
+    //
+    if (((Ptr->AddrTranslationOffset == PCI_MAX_BAR) && (Ptr->SpecificFlag == 0))) {
+      *IgnoreOptionRom = TRUE;
+      Ptr++;
+      continue;
     }
 
     for (BarIndex = 0; BarIndex < PCI_MAX_BAR; BarIndex++) {
@@ -2271,6 +2289,7 @@ CreatePciIoDevice (
                          &Data32
                          );
       if ((Data32 & EFI_PCIE_CAPABILITY_DEVICE_CAPABILITIES_2_ARI_FORWARDING) != 0) {
+        PciIoDevice->IsAriEnabled = TRUE;
         //
         // ARI forward support in bridge, so enable it.
         //
@@ -2401,13 +2420,17 @@ CreatePciIoDevice (
       //
       // Calculate LastVF
       //
-      PFRid  = EFI_PCI_RID (Bus, Device, Func);
-      LastVF = PFRid + FirstVFOffset + (PciIoDevice->InitialVFs - 1) * VFStride;
+      if (PciIoDevice->InitialVFs == 0) {
+        PciIoDevice->ReservedBusNum = 0;
+      } else {
+        PFRid  = EFI_PCI_RID (Bus, Device, Func);
+        LastVF = PFRid + FirstVFOffset + (PciIoDevice->InitialVFs - 1) * VFStride;
 
-      //
-      // Calculate ReservedBusNum for this PF
-      //
-      PciIoDevice->ReservedBusNum = (UINT16)(EFI_PCI_BUS_OF_RID (LastVF) - Bus + 1);
+        //
+        // Calculate ReservedBusNum for this PF
+        //
+        PciIoDevice->ReservedBusNum = (UINT16)(EFI_PCI_BUS_OF_RID (LastVF) - Bus);
+      }
 
       DEBUG ((
         DEBUG_INFO,

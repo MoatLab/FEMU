@@ -53,6 +53,7 @@ extern bool verCases_usesExact, verCases_exact;
 extern bool verCases_checkNaNs, verCases_checkInvInts;
 extern uint_fast32_t verCases_maxErrorCount;
 extern bool verCases_errorStop;
+extern int verCases_verbosity;
 
 void verCases_writeFunctionName( FILE * );
 

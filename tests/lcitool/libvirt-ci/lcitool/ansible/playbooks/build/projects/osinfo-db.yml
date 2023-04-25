@@ -1,0 +1,23 @@
+---
+- set_fact:
+    name: osinfo-db
+    machines: '{{ all_machines }}'
+    archive_format: xz
+    git_url: '{{ git_urls["osinfo-db"][git_remote] }}'
+
+- import_tasks: 'jobs/prepare.yml'
+- import_tasks: 'jobs/generic-build-job.yml'
+  vars:
+    command: |
+      $MAKE all
+      $MAKE install OSINFO_DB_TARGET="--system"
+- import_tasks: 'jobs/generic-check-job.yml'
+  vars:
+    command: |
+      $MAKE check
+- import_tasks: 'jobs/generic-rpm-job.yml'
+  vars:
+    machines: '{{ rpm_machines }}'
+    command: |
+      {{ strip_buildrequires }}
+      rpmbuild --clean --define "_topdir `pwd`/rpmbuild" --define "_sourcedir `pwd`" -ba osinfo-db.spec

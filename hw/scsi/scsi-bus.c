@@ -102,15 +102,15 @@ static void scsi_device_unrealize(SCSIDevice *s)
 }
 
 int scsi_bus_parse_cdb(SCSIDevice *dev, SCSICommand *cmd, uint8_t *buf,
-                       void *hba_private)
+                       size_t buf_len, void *hba_private)
 {
     SCSIBus *bus = DO_UPCAST(SCSIBus, qbus, dev->qdev.parent_bus);
     int rc;
 
     assert(cmd->len == 0);
-    rc = scsi_req_parse_cdb(dev, cmd, buf);
+    rc = scsi_req_parse_cdb(dev, cmd, buf, buf_len);
     if (bus->info->parse_cdb) {
-        rc = bus->info->parse_cdb(dev, cmd, buf, hba_private);
+        rc = bus->info->parse_cdb(dev, cmd, buf, buf_len, hba_private);
     }
     return rc;
 }
@@ -199,8 +199,8 @@ static void scsi_dma_restart_cb(void *opaque, bool running, RunState state)
 }
 
 static bool scsi_bus_is_address_free(SCSIBus *bus,
-				     int channel, int target, int lun,
-				     SCSIDevice **p_dev)
+                                     int channel, int target, int lun,
+                                     SCSIDevice **p_dev)
 {
     SCSIDevice *d;
 
@@ -703,7 +703,7 @@ SCSIRequest *scsi_req_alloc(const SCSIReqOps *reqops, SCSIDevice *d,
 }
 
 SCSIRequest *scsi_req_new(SCSIDevice *d, uint32_t tag, uint32_t lun,
-                          uint8_t *buf, void *hba_private)
+                          uint8_t *buf, size_t buf_len, void *hba_private)
 {
     SCSIBus *bus = DO_UPCAST(SCSIBus, qbus, d->qdev.parent_bus);
     const SCSIReqOps *ops;
@@ -711,6 +711,11 @@ SCSIRequest *scsi_req_new(SCSIDevice *d, uint32_t tag, uint32_t lun,
     SCSIRequest *req;
     SCSICommand cmd = { .len = 0 };
     int ret;
+
+    if (buf_len == 0) {
+        trace_scsi_req_parse_bad(d->id, lun, tag, 0);
+        goto invalid_opcode;
+    }
 
     if ((d->unit_attention.key == UNIT_ATTENTION ||
          bus->unit_attention.key == UNIT_ATTENTION) &&
@@ -734,13 +739,14 @@ SCSIRequest *scsi_req_new(SCSIDevice *d, uint32_t tag, uint32_t lun,
     }
 
     if (ops != NULL || !sc->parse_cdb) {
-        ret = scsi_req_parse_cdb(d, &cmd, buf);
+        ret = scsi_req_parse_cdb(d, &cmd, buf, buf_len);
     } else {
-        ret = sc->parse_cdb(d, &cmd, buf, hba_private);
+        ret = sc->parse_cdb(d, &cmd, buf, buf_len, hba_private);
     }
 
     if (ret != 0) {
         trace_scsi_req_parse_bad(d->id, lun, tag, buf[0]);
+invalid_opcode:
         req = scsi_req_alloc(&reqops_invalid_opcode, d, tag, lun, hba_private);
     } else {
         assert(cmd.len != 0);
@@ -1308,14 +1314,15 @@ static void scsi_cmd_xfer_mode(SCSICommand *cmd)
     }
 }
 
-int scsi_req_parse_cdb(SCSIDevice *dev, SCSICommand *cmd, uint8_t *buf)
+int scsi_req_parse_cdb(SCSIDevice *dev, SCSICommand *cmd, uint8_t *buf,
+                       size_t buf_len)
 {
     int rc;
     int len;
 
     cmd->lba = -1;
     len = scsi_cdb_length(buf);
-    if (len < 0) {
+    if (len < 0 || len > buf_len) {
         return -1;
     }
 
@@ -1609,6 +1616,24 @@ static int scsi_ua_precedence(SCSISense sense)
     return (sense.asc << 8) | sense.ascq;
 }
 
+void scsi_bus_set_ua(SCSIBus *bus, SCSISense sense)
+{
+    int prec1, prec2;
+    if (sense.key != UNIT_ATTENTION) {
+        return;
+    }
+
+    /*
+     * Override a pre-existing unit attention condition, except for a more
+     * important reset condition.
+     */
+    prec1 = scsi_ua_precedence(bus->unit_attention);
+    prec2 = scsi_ua_precedence(sense);
+    if (prec2 < prec1) {
+        bus->unit_attention = sense;
+    }
+}
+
 void scsi_device_set_ua(SCSIDevice *sdev, SCSISense sense)
 {
     int prec1, prec2;
@@ -1713,7 +1738,11 @@ static int get_scsi_requests(QEMUFile *f, void *pv, size_t size,
         qemu_get_buffer(f, buf, sizeof(buf));
         qemu_get_be32s(f, &tag);
         qemu_get_be32s(f, &lun);
-        req = scsi_req_new(s, tag, lun, buf, NULL);
+        /*
+         * A too-short CDB would have been rejected by scsi_req_new, so just use
+         * SCSI_CMD_BUF_SIZE as the CDB length.
+         */
+        req = scsi_req_new(s, tag, lun, buf, sizeof(buf), NULL);
         req->retry = (sbyte == 1);
         if (bus->info->load_request) {
             req->hba_private = bus->info->load_request(f, req);

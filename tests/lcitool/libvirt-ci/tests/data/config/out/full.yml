@@ -1,0 +1,17 @@
+gitlab:
+  runner_secret: 1234567890abcdef
+  url: https://gitlab.com
+install:
+  arch: x86_64
+  cloud_init: false
+  cpu_model: host-passthrough
+  disk_size: 15
+  flavor: gitlab
+  machine: pc
+  memory_size: 8
+  network: default
+  root_password: foo
+  ssh_key: ~/.ssh/id_rsa.pub
+  storage_pool: default
+  vcpus: 4
+  virt_type: kvm

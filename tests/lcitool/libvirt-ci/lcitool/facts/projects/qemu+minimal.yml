@@ -1,0 +1,18 @@
+---
+packages:
+ - bzip2
+ - capstone
+ - ccache
+ - diffutils
+ - findutils
+ - g++
+ - gcc
+ - glib2
+ - libfdt
+ - libslirp
+ - make
+ - meson
+ - ninja
+ - pixman
+ - pkg-config
+ - zlib

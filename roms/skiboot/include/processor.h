@@ -71,6 +71,7 @@
 #define SPR_USRR1	0x1fb   /* RW: Ultravisor Save/Restore Register 1 */
 #define SPR_SMFCTRL	0x1ff   /* RW: Secure Memory Facility Control */
 #define SPR_PSSCR	0x357   /* RW: Stop status and control (ISA 3) */
+#define SPR_PPR32	0x382
 #define SPR_TSCR	0x399
 #define SPR_HID0	0x3f0
 #define SPR_HID1	0x3f1

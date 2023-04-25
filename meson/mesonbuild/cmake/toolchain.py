@@ -27,7 +27,6 @@ from textwrap import dedent
 
 if T.TYPE_CHECKING:
     from .executor import CMakeExecutor
-    from ..envconfig import MachineInfo, Properties, CMakeVariables
     from ..environment import Environment
     from ..compilers import Compiler
 

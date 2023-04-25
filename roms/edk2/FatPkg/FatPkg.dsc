@@ -5,6 +5,7 @@
 #  for EDK II Prime release.
 #  Copyright (c) 2007 - 2021, Intel Corporation. All rights reserved.<BR>
 #  Copyright (c) 2020, Hewlett Packard Enterprise Development LP. All rights reserved.<BR>
+#  Copyright (c) 2022, Loongson Technology Corporation Limited. All rights reserved.<BR>
 #
 #  SPDX-License-Identifier: BSD-2-Clause-Patent
 #
@@ -15,7 +16,7 @@
   PLATFORM_GUID                  = 25b55dbc-9d0b-4a32-80da-46e1273d622c
   PLATFORM_VERSION               = 0.3
   DSC_SPECIFICATION              = 0x00010005
-  SUPPORTED_ARCHITECTURES        = IA32|X64|EBC|ARM|AARCH64|RISCV64
+  SUPPORTED_ARCHITECTURES        = IA32|X64|EBC|ARM|AARCH64|RISCV64|LOONGARCH64
   OUTPUT_DIRECTORY               = Build/Fat
   BUILD_TARGETS                  = DEBUG|RELEASE|NOOPT
   SKUID_IDENTIFIER               = DEFAULT
@@ -24,7 +25,6 @@
   GCC:RELEASE_*_*_CC_FLAGS             = -DMDEPKG_NDEBUG
   INTEL:RELEASE_*_*_CC_FLAGS           = /D MDEPKG_NDEBUG
   MSFT:RELEASE_*_*_CC_FLAGS            = /D MDEPKG_NDEBUG
-  RVCT:RELEASE_*_*_CC_FLAGS            = -DMDEPKG_NDEBUG
   *_*_*_CC_FLAGS                       = -D DISABLE_NEW_DEPRECATED_INTERFACES
 
 !include MdePkg/MdeLibs.dsc.inc

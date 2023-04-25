@@ -12,7 +12,6 @@
 #include "hw/ppc/spapr_xive.h"  /* For SpaprXive */
 #include "hw/ppc/xics.h"        /* For ICSState */
 #include "hw/ppc/spapr_tpm_proxy.h"
-#include "hw/ppc/vof.h"
 
 struct SpaprVioBus;
 struct SpaprPhbState;
@@ -21,6 +20,8 @@ struct SpaprNvram;
 typedef struct SpaprEventLogEntry SpaprEventLogEntry;
 typedef struct SpaprEventSource SpaprEventSource;
 typedef struct SpaprPendingHpt SpaprPendingHpt;
+
+typedef struct Vof Vof;
 
 #define HPTE64_V_HPTE_DIRTY     0x0000000000000040ULL
 #define SPAPR_ENTRY_POINT       0x100
@@ -164,6 +165,21 @@ struct SpaprMachineClass {
     SpaprIrq *irq;
 };
 
+#define WDT_MAX_WATCHDOGS       4      /* Maximum number of watchdog devices */
+
+#define TYPE_SPAPR_WDT "spapr-wdt"
+OBJECT_DECLARE_SIMPLE_TYPE(SpaprWatchdog, SPAPR_WDT)
+
+typedef struct SpaprWatchdog {
+    /*< private >*/
+    DeviceState parent_obj;
+    /*< public >*/
+
+    QEMUTimer timer;
+    uint8_t action;         /* One of PSERIES_WDTF_ACTION_xxx */
+    uint8_t leave_others;   /* leaveOtherWatchdogsRunningOnTimeout */
+} SpaprWatchdog;
+
 /**
  * SpaprMachineState:
  */
@@ -194,7 +210,7 @@ struct SpaprMachineState {
     Vof *vof;
     uint64_t rtc_offset; /* Now used only during incoming migration */
     struct PPCTimebase tb;
-    bool has_graphics;
+    bool want_stdout_path;
     uint32_t vsmt;       /* Virtual SMT mode (KVM's "core stride") */
 
     /* Nested HV support (TCG only) */
@@ -264,6 +280,8 @@ struct SpaprMachineState {
     uint32_t FORM2_assoc_array[NUMA_NODES_MAX_NUM][FORM2_NUMA_ASSOC_SIZE];
 
     Error *fwnmi_migration_blocker;
+
+    SpaprWatchdog wds[WDT_MAX_WATCHDOGS];
 };
 
 #define H_SUCCESS         0
@@ -344,6 +362,7 @@ struct SpaprMachineState {
 #define H_P7              -60
 #define H_P8              -61
 #define H_P9              -62
+#define H_NOOP            -63
 #define H_UNSUPPORTED     -67
 #define H_OVERLAP         -68
 #define H_UNSUPPORTED_FLAG -256
@@ -564,8 +583,9 @@ struct SpaprMachineState {
 #define H_SCM_HEALTH            0x400
 #define H_RPT_INVALIDATE        0x448
 #define H_SCM_FLUSH             0x44C
+#define H_WATCHDOG              0x45C
 
-#define MAX_HCALL_OPCODE        H_SCM_FLUSH
+#define MAX_HCALL_OPCODE        H_WATCHDOG
 
 /* The hcalls above are standardized in PAPR and implemented by pHyp
  * as well.
@@ -745,6 +765,7 @@ void push_sregs_to_kvm_pr(SpaprMachineState *spapr);
 #define RTAS_DDW_PGSIZE_128M     0x20
 #define RTAS_DDW_PGSIZE_256M     0x40
 #define RTAS_DDW_PGSIZE_16G      0x80
+#define RTAS_DDW_PGSIZE_2M       0x100
 
 /* RTAS tokens */
 #define RTAS_TOKEN_BASE      0x2000
@@ -828,7 +849,8 @@ static inline uint64_t ppc64_phys_to_real(uint64_t addr)
 
 static inline uint32_t rtas_ld(target_ulong phys, int n)
 {
-    return ldl_be_phys(&address_space_memory, ppc64_phys_to_real(phys + 4*n));
+    return ldl_be_phys(&address_space_memory,
+                       ppc64_phys_to_real(phys + 4 * n));
 }
 
 static inline uint64_t rtas_ldq(target_ulong phys, int n)
@@ -838,7 +860,7 @@ static inline uint64_t rtas_ldq(target_ulong phys, int n)
 
 static inline void rtas_st(target_ulong phys, int n, uint32_t val)
 {
-    stl_be_phys(&address_space_memory, ppc64_phys_to_real(phys + 4*n), val);
+    stl_be_phys(&address_space_memory, ppc64_phys_to_real(phys + 4 * n), val);
 }
 
 typedef void (*spapr_rtas_fn)(PowerPCCPU *cpu, SpaprMachineState *sm,
@@ -901,6 +923,7 @@ struct SpaprTceTable {
     bool bypass;
     bool need_vfio;
     bool skipping_replay;
+    bool def_win;
     int fd;
     MemoryRegion root;
     IOMMUMemoryRegion iommu;
@@ -1026,6 +1049,7 @@ extern const VMStateDescription vmstate_spapr_cap_large_decr;
 extern const VMStateDescription vmstate_spapr_cap_ccf_assist;
 extern const VMStateDescription vmstate_spapr_cap_fwnmi;
 extern const VMStateDescription vmstate_spapr_cap_rpt_invalidate;
+extern const VMStateDescription vmstate_spapr_wdt;
 
 static inline uint8_t spapr_get_cap(SpaprMachineState *spapr, int cap)
 {
@@ -1061,5 +1085,8 @@ target_ulong spapr_vof_client_architecture_support(MachineState *ms,
                                                    CPUState *cs,
                                                    target_ulong ovec_addr);
 void spapr_vof_client_dt_finalize(SpaprMachineState *spapr, void *fdt);
+
+/* H_WATCHDOG */
+void spapr_watchdog_init(SpaprMachineState *spapr);
 
 #endif /* HW_SPAPR_H */

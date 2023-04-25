@@ -6,6 +6,8 @@ SPDX-License-Identifier: BSD-2-Clause-Patent
 
 **/
 
+#include <Library/NestedInterruptTplLib.h>
+
 #include "Timer.h"
 
 //
@@ -76,9 +78,12 @@ TimerInterruptHandler (
   IN EFI_SYSTEM_CONTEXT  SystemContext
   )
 {
-  EFI_TPL  OriginalTPL;
+  STATIC NESTED_INTERRUPT_STATE  NestedInterruptState;
+  EFI_TPL                        OriginalTPL;
 
-  OriginalTPL = gBS->RaiseTPL (TPL_HIGH_LEVEL);
+  OriginalTPL = NestedInterruptRaiseTPL ();
+
+  mLegacy8259->EndOfInterrupt (mLegacy8259, Efi8259Irq0);
 
   if (mTimerNotifyFunction != NULL) {
     //
@@ -87,10 +92,7 @@ TimerInterruptHandler (
     mTimerNotifyFunction (mTimerPeriod);
   }
 
-  gBS->RestoreTPL (OriginalTPL);
-
-  DisableInterrupts ();
-  mLegacy8259->EndOfInterrupt (mLegacy8259, Efi8259Irq0);
+  NestedInterruptRestoreTPL (OriginalTPL, SystemContext, &NestedInterruptState);
 }
 
 /**

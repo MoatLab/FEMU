@@ -1,0 +1,17 @@
+---
+# FreeBSD compiles bash without defining SSH_SOURCE_BASHRC, which means
+# it won't try to detect when it's spawned by ssh and source ~/.bashrc
+# when that's the case. Our workaround is setting $BASH_ENV globally
+- name: Enable ~/.bashrc
+  replace:
+    path: /etc/login.conf
+    regexp: '^(.*):setenv=(BASH_ENV=[^,]*,)?(.*):\\$'
+    replace: '\1:setenv=BASH_ENV=~/.bashrc,\3:\\'
+  register: loginconf
+  when:
+    - os.name == 'FreeBSD'
+
+- name: Enable ~/.bashrc
+  command: cap_mkdb /etc/login.conf
+  when:
+    - loginconf.changed

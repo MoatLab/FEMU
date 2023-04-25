@@ -1,6 +1,0 @@
-#!/bin/sh
-
-source_path=$(cd "$(dirname -- "$0")"; pwd)
-
-export PYTHONPATH="$source_path/guests/lcitool:$PYTHONPATH"
-"$source_path/guests/lcitool/bin/lcitool" "$@"

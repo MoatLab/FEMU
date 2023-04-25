@@ -1,0 +1,27 @@
+---
+os:
+  name: 'Debian'
+  version: '11'
+
+packaging:
+  format: 'deb'
+  command: 'apt-get'
+
+paths:
+  bash: /bin/bash
+  cc: /usr/bin/gcc
+  ccache: /usr/bin/ccache
+  make: /usr/bin/make
+  ninja: /usr/bin/ninja
+  pip3: /usr/bin/pip3
+  python: /usr/bin/python3
+  sudoers: /etc/sudoers
+
+ansible_python_package: python3
+ansible_python_interpreter: /usr/bin/python3
+
+install:
+  url: http://deb.debian.org/debian/dists/bullseye/main/installer-amd64/
+
+containers:
+  base: docker.io/library/debian:11-slim

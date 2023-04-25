@@ -1,7 +1,7 @@
 ## @file
 # Provides drivers and definitions to support fsp in EDKII bios.
 #
-# Copyright (c) 2014 - 2021, Intel Corporation. All rights reserved.<BR>
+# Copyright (c) 2014 - 2022, Intel Corporation. All rights reserved.<BR>
 # SPDX-License-Identifier: BSD-2-Clause-Patent
 #
 ##
@@ -28,6 +28,14 @@
 
   ##  @libraryclass  Provide FSP TPM measurement related function.
   FspMeasurementLib|Include/Library/FspMeasurementLib.h
+
+  ##  @libraryclass  Provide MultiPhase handling related functions.
+  FspWrapperMultiPhaseProcessLib|Include/Library/FspWrapperMultiPhaseProcessLib.h
+
+  ##  @libraryclass  Provide MultiPhase platform actions related functions.
+  FspWrapperPlatformMultiPhaseLib|Include/Library/FspWrapperPlatformMultiPhaseLib.h
+
+
 [Guids]
   #
   # GUID defined in package
@@ -87,7 +95,7 @@
   # We need a flag (PCD) to indicate if there is need to do such FSP measurement or NOT.
   # 2) The FSP binary includes FSP code and FSP UPD region. The UPD region is considered
   # as configuration block, and it may be updated by OEM by design.
-  # This flag (PCD) is to indicate if we need isolate the the UPD region from the FSP code region.
+  # This flag (PCD) is to indicate if we need isolate the UPD region from the FSP code region.
   # BIT0: Need measure FSP. (for FSP1.x) - reserved in FSP2.
   # BIT1: Need measure FSPT. (for FSP 2.x)
   # BIT2: Need measure FSPM. (for FSP 2.x)

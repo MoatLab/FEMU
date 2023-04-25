@@ -159,7 +159,7 @@ joined = 'C:\\foo\\bar' / 'builddir'     # => C:/foo/bar/builddir
 joined = 'C:\\foo\\bar' / 'D:\\builddir' # => D:/builddir
 ```
 
-Note that this is equivalent to using [`join_paths()`](Reference-manual.md#join_paths),
+Note that this is equivalent to using [[join_paths]],
 which was obsoleted by this operator.
 
 ### Strings running over multiple lines
@@ -177,6 +177,18 @@ int main (int argc, char ** argv) {
 These are raw strings that do not support the escape sequences listed
 above.  These strings can also be combined with the string formatting
 functionality described below.
+
+### String index
+
+Strings support the indexing (`[<num>]`) operator. This operator allows (read
+only) accessing a specific character. The returned value is guaranteed to be
+a string of length 1.
+
+```meson
+foo = 'abcd'
+message(foo[1])  # Will print 'b'
+foo[2] = 'C'     # ERROR: Meson objects are immutable!
+```
 
 ### String formatting
 
@@ -241,7 +253,15 @@ s = s.replace('as', 'are')
 define = ' -Dsomedefine '
 stripped_define = define.strip()
 # 'stripped_define' now has the value '-Dsomedefine'
+
+# You may also pass a string to strip, which specifies the set of characters to
+# be removed.
+string = 'xyxHelloxyx'.strip('xy')
+# 'string' now has the value 'Hello'
 ```
+
+Since 0.43.0, you can specify one positional string argument,
+and all characters in that string will be stripped.
 
 #### .to_upper(), .to_lower()
 
@@ -435,7 +455,7 @@ Dictionaries are immutable and do not have a guaranteed order.
 
 Dictionaries are available since 0.47.0.
 
-Visit the [Reference Manual](Reference-manual.md#dictionary-object) to read
+Visit the [[@dict]] objects page in the Reference Manual to read
 about the methods exposed by dictionaries.
 
 Since 0.49.0, you can check if a dictionary contains a key like this:
@@ -493,7 +513,7 @@ executable('progname',
   kwargs: d)
 ```
 
-A single function can take keyword argumets both directly in the
+A single function can take keyword arguments both directly in the
 function call and indirectly via the `kwargs` keyword argument. The
 only limitation is that it is a hard error to pass any particular key
 both as a direct and indirect argument.
@@ -695,7 +715,7 @@ additive_expression: multiplicative_expression | (additive_expression additive_o
 additive_operator: "+" | "-"
 argument_list: positional_arguments ["," keyword_arguments] | keyword_arguments
 array_literal: "[" [expression_list] "]"
-assignment_expression: conditional_expression | (logical_or_expression assignment_operator assignment_expression)
+assignment_statement: expression asssignment_operator expression
 assignment_operator: "=" | "*=" | "/=" | "%=" | "+=" | "-="
 boolean_literal: "true" | "false"
 build_definition: (NEWLINE | statement)*
@@ -706,7 +726,7 @@ DECIMAL_NUMBER: /[1-9][0-9]*/
 dictionary_literal: "{" [key_value_list] "}"
 equality_expression: relational_expression | (equality_expression equality_operator relational_expression)
 equality_operator: "==" | "!="
-expression: assignment_expression
+expression: conditional_expression | logical_or_expression
 expression_list: expression ("," expression)*
 expression_statement: expression
 function_expression: id_expression "(" [argument_list] ")"
@@ -736,7 +756,7 @@ primary_expression: literal | ("(" expression ")") | id_expression
 relational_expression: additive_expression | (relational_expression relational_operator additive_expression)
 relational_operator: ">" | "<" | ">=" | "<=" | "in" | ("not" "in")
 selection_statement: "if" condition NEWLINE (statement)* ("elif" condition NEWLINE (statement)*)* ["else" (statement)*] "endif"
-statement: (expression_statement | selection_statement | iteration_statement) NEWLINE
+statement: (expression_statement | selection_statement | iteration_statement | assignment_statement) NEWLINE
 string_literal: ("'" STRING_SIMPLE_VALUE "'") | ("'''" STRING_MULTILINE_VALUE "'''")
 STRING_MULTILINE_VALUE: \.*?(''')\
 STRING_SIMPLE_VALUE: \.*?(?<!\\)(\\\\)*?'\

@@ -22,6 +22,7 @@
 #define OPENPITON_DEFAULT_UART_BAUDRATE		115200
 #define OPENPITON_DEFAULT_UART_REG_SHIFT	0
 #define OPENPITON_DEFAULT_UART_REG_WIDTH	1
+#define OPENPITON_DEFAULT_UART_REG_OFFSET	0
 #define OPENPITON_DEFAULT_PLIC_ADDR		0xfff1100000
 #define OPENPITON_DEFAULT_PLIC_NUM_SOURCES	2
 #define OPENPITON_DEFAULT_HART_COUNT		3
@@ -68,7 +69,7 @@ static struct aclint_mtimer_data mtimer = {
 static int openpiton_early_init(bool cold_boot)
 {
 	void *fdt;
-	struct platform_uart_data uart_data;
+	struct platform_uart_data uart_data = { 0 };
 	struct plic_data plic_data;
 	unsigned long aclint_freq;
 	uint64_t clint_addr;
@@ -127,29 +128,27 @@ static int openpiton_console_init(void)
 			     uart.freq,
 			     uart.baud,
 			     OPENPITON_DEFAULT_UART_REG_SHIFT,
-			     OPENPITON_DEFAULT_UART_REG_WIDTH);
+			     OPENPITON_DEFAULT_UART_REG_WIDTH,
+			     OPENPITON_DEFAULT_UART_REG_OFFSET);
 }
 
 static int plic_openpiton_warm_irqchip_init(int m_cntx_id, int s_cntx_id)
 {
-	size_t i, ie_words = plic.num_src / 32 + 1;
+	int ret;
 
 	/* By default, enable all IRQs for M-mode of target HART */
 	if (m_cntx_id > -1) {
-		for (i = 0; i < ie_words; i++)
-			plic_set_ie(&plic, m_cntx_id, i, 1);
+		ret = plic_context_init(&plic, m_cntx_id, true, 0x1);
+		if (ret)
+			return ret;
 	}
+
 	/* Enable all IRQs for S-mode of target HART */
 	if (s_cntx_id > -1) {
-		for (i = 0; i < ie_words; i++)
-			plic_set_ie(&plic, s_cntx_id, i, 1);
+		ret = plic_context_init(&plic, s_cntx_id, true, 0x0);
+		if (ret)
+			return ret;
 	}
-	/* By default, enable M-mode threshold */
-	if (m_cntx_id > -1)
-		plic_set_thresh(&plic, m_cntx_id, 1);
-	/* By default, disable S-mode threshold */
-	if (s_cntx_id > -1)
-		plic_set_thresh(&plic, s_cntx_id, 0);
 
 	return 0;
 }

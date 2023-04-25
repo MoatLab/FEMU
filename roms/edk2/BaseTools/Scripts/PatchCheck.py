@@ -366,7 +366,6 @@ class GitDiffCheck:
                 if self.filename.endswith('.sh') or \
                     self.filename.startswith('BaseTools/BinWrappers/PosixLike/') or \
                     self.filename.startswith('BaseTools/BinPipWrappers/PosixLike/') or \
-                    self.filename.startswith('BaseTools/Bin/CYGWIN_NT-5.1-i686/') or \
                     self.filename == 'BaseTools/BuildEnv':
                     #
                     # Do not enforce CR/LF line endings for linux shell scripts.
@@ -382,6 +381,9 @@ class GitDiffCheck:
                     # do not enforce CR/LF line endings.
                     #
                     self.force_crlf = False
+                    self.force_notabs = False
+                if os.path.basename(self.filename) == 'GNUmakefile' or \
+                   os.path.basename(self.filename) == 'Makefile':
                     self.force_notabs = False
             elif len(line.rstrip()) != 0:
                 self.format_error("didn't find diff command")

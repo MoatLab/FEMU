@@ -186,7 +186,7 @@ struct phb4 {
 	__be16			*tbl_rtt;
 	uint8_t			*tbl_peltv;
 	uint64_t		tbl_peltv_size;
-	uint64_t		tbl_pest;
+	__be64			*tbl_pest;
 	uint64_t		tbl_pest_size;
 
 	bool			skip_perst; /* Skip first perst */

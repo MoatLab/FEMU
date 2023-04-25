@@ -51,11 +51,12 @@ static int ipi_mswi_cold_init(void *fdt, int nodeoff,
 	return 0;
 }
 
-static unsigned long clint_offset = CLINT_MSWI_OFFSET;
+static const unsigned long clint_offset = CLINT_MSWI_OFFSET;
 
 static const struct fdt_match ipi_mswi_match[] = {
 	{ .compatible = "riscv,clint0", .data = &clint_offset },
 	{ .compatible = "sifive,clint0", .data = &clint_offset },
+	{ .compatible = "thead,c900-clint", .data = &clint_offset },
 	{ .compatible = "riscv,aclint-mswi" },
 	{ },
 };

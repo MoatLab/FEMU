@@ -40,6 +40,8 @@ static struct sdl2_console *sdl2_console;
 
 static SDL_Surface *guest_sprite_surface;
 static int gui_grab; /* if true, all keyboard/mouse events are grabbed */
+static bool alt_grab;
+static bool ctrl_grab;
 
 static int gui_saved_grab;
 static int gui_fullscreen;
@@ -55,6 +57,11 @@ static Notifier mouse_mode_notifier;
 #define SDL2_REFRESH_INTERVAL_BUSY 10
 #define SDL2_MAX_IDLE_COUNT (2 * GUI_REFRESH_INTERVAL_DEFAULT \
                              / SDL2_REFRESH_INTERVAL_BUSY + 1)
+
+/* introduced in SDL 2.0.10 */
+#ifndef SDL_HINT_RENDER_BATCHING
+#define SDL_HINT_RENDER_BATCHING "SDL_RENDER_BATCHING"
+#endif
 
 static void sdl_update_caption(struct sdl2_console *scon);
 
@@ -97,9 +104,20 @@ void sdl2_window_create(struct sdl2_console *scon)
                                          surface_width(scon->surface),
                                          surface_height(scon->surface),
                                          flags);
-    scon->real_renderer = SDL_CreateRenderer(scon->real_window, -1, 0);
     if (scon->opengl) {
-        scon->winctx = SDL_GL_GetCurrentContext();
+        const char *driver = "opengl";
+
+        if (scon->opts->gl == DISPLAYGL_MODE_ES) {
+            driver = "opengles2";
+        }
+
+        SDL_SetHint(SDL_HINT_RENDER_DRIVER, driver);
+        SDL_SetHint(SDL_HINT_RENDER_BATCHING, "1");
+    }
+    scon->real_renderer = SDL_CreateRenderer(scon->real_window, -1, 0);
+
+    if (scon->opengl) {
+        scon->winctx = SDL_GL_CreateContext(scon->real_window);
     }
     sdl_update_caption(scon);
 }
@@ -110,6 +128,8 @@ void sdl2_window_destroy(struct sdl2_console *scon)
         return;
     }
 
+    SDL_GL_DeleteContext(scon->winctx);
+    scon->winctx = NULL;
     SDL_DestroyRenderer(scon->real_renderer);
     scon->real_renderer = NULL;
     SDL_DestroyWindow(scon->real_window);
@@ -823,21 +843,9 @@ static void sdl2_display_init(DisplayState *ds, DisplayOptions *o)
 
     assert(o->type == DISPLAY_TYPE_SDL);
 
-#ifdef __linux__
-    /* on Linux, SDL may use fbcon|directfb|svgalib when run without
-     * accessible $DISPLAY to open X11 window.  This is often the case
-     * when qemu is run using sudo.  But in this case, and when actually
-     * run in X11 environment, SDL fights with X11 for the video card,
-     * making current display unavailable, often until reboot.
-     * So make x11 the default SDL video driver if this variable is unset.
-     * This is a bit hackish but saves us from bigger problem.
-     * Maybe it's a good idea to fix this in SDL instead.
-     */
-    if (!g_setenv("SDL_VIDEODRIVER", "x11", 0)) {
-        fprintf(stderr, "Could not set SDL_VIDEODRIVER environment variable\n");
-        exit(1);
+    if (SDL_GetHintBoolean("QEMU_ENABLE_SDL_LOGGING", SDL_FALSE)) {
+        SDL_LogSetAllPriority(SDL_LOG_PRIORITY_VERBOSE);
     }
-#endif
 
     if (SDL_Init(SDL_INIT_VIDEO)) {
         fprintf(stderr, "Could not initialize SDL(%s) - exiting\n",
@@ -852,6 +860,14 @@ static void sdl2_display_init(DisplayState *ds, DisplayOptions *o)
     SDL_VERSION(&info.version);
 
     gui_fullscreen = o->has_full_screen && o->full_screen;
+
+    if (o->u.sdl.has_grab_mod) {
+        if (o->u.sdl.grab_mod == HOT_KEY_MOD_LSHIFT_LCTRL_LALT) {
+            alt_grab = true;
+        } else if (o->u.sdl.grab_mod == HOT_KEY_MOD_RCTRL) {
+            ctrl_grab = true;
+        }
+    }
 
     for (i = 0;; i++) {
         QemuConsole *con = qemu_console_lookup_by_index(i);

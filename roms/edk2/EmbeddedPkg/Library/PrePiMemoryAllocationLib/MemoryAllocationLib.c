@@ -14,6 +14,46 @@
 #include <Library/PrePiLib.h>
 #include <Library/DebugLib.h>
 
+STATIC
+VOID *
+EFIAPI
+InternalAllocatePages (
+  IN UINTN            Pages,
+  IN EFI_MEMORY_TYPE  MemoryType
+  )
+{
+  EFI_PEI_HOB_POINTERS  Hob;
+  EFI_PHYSICAL_ADDRESS  NewTop;
+
+  Hob.Raw = GetHobList ();
+
+  NewTop  = Hob.HandoffInformationTable->EfiFreeMemoryTop & ~(EFI_PHYSICAL_ADDRESS)EFI_PAGE_MASK;
+  NewTop -= Pages * EFI_PAGE_SIZE;
+
+  //
+  // Verify that there is sufficient memory to satisfy the allocation
+  //
+  if (NewTop < (Hob.HandoffInformationTable->EfiFreeMemoryBottom + sizeof (EFI_HOB_MEMORY_ALLOCATION))) {
+    return NULL;
+  }
+
+  //
+  // Update the PHIT to reflect the memory usage
+  //
+  Hob.HandoffInformationTable->EfiFreeMemoryTop = NewTop;
+
+  //
+  // Create a memory allocation HOB.
+  //
+  BuildMemoryAllocationHob (
+    Hob.HandoffInformationTable->EfiFreeMemoryTop,
+    Pages * EFI_PAGE_SIZE,
+    MemoryType
+    );
+
+  return (VOID *)(UINTN)Hob.HandoffInformationTable->EfiFreeMemoryTop;
+}
+
 /**
   Allocates one or more 4KB pages of type EfiBootServicesData.
 
@@ -33,42 +73,29 @@ AllocatePages (
   IN UINTN  Pages
   )
 {
-  EFI_PEI_HOB_POINTERS  Hob;
-  EFI_PHYSICAL_ADDRESS  Offset;
+  return InternalAllocatePages (Pages, EfiBootServicesData);
+}
 
-  Hob.Raw = GetHobList ();
+/**
+  Allocates one or more 4KB pages of type EfiRuntimeServicesData.
 
-  // Check to see if on 4k boundary
-  Offset = Hob.HandoffInformationTable->EfiFreeMemoryTop & 0xFFF;
-  if (Offset != 0) {
-    // If not aligned, make the allocation aligned.
-    Hob.HandoffInformationTable->EfiFreeMemoryTop -= Offset;
-  }
+  Allocates the number of 4KB pages of type EfiRuntimeServicesData and returns a pointer to the
+  allocated buffer.  The buffer returned is aligned on a 4KB boundary.  If Pages is 0, then NULL
+  is returned.  If there is not enough memory remaining to satisfy the request, then NULL is
+  returned.
 
-  //
-  // Verify that there is sufficient memory to satisfy the allocation
-  //
-  if (Hob.HandoffInformationTable->EfiFreeMemoryTop - ((Pages * EFI_PAGE_SIZE) + sizeof (EFI_HOB_MEMORY_ALLOCATION)) < Hob.HandoffInformationTable->EfiFreeMemoryBottom) {
-    return 0;
-  } else {
-    //
-    // Update the PHIT to reflect the memory usage
-    //
-    Hob.HandoffInformationTable->EfiFreeMemoryTop -= Pages * EFI_PAGE_SIZE;
+  @param  Pages                 The number of 4 KB pages to allocate.
 
-    // This routine used to create a memory allocation HOB a la PEI, but that's not
-    // necessary for us.
+  @return A pointer to the allocated buffer or NULL if allocation fails.
 
-    //
-    // Create a memory allocation HOB.
-    //
-    BuildMemoryAllocationHob (
-      Hob.HandoffInformationTable->EfiFreeMemoryTop,
-      Pages * EFI_PAGE_SIZE,
-      EfiBootServicesData
-      );
-    return (VOID *)(UINTN)Hob.HandoffInformationTable->EfiFreeMemoryTop;
-  }
+**/
+VOID *
+EFIAPI
+AllocateRuntimePages (
+  IN UINTN  Pages
+  )
+{
+  return InternalAllocatePages (Pages, EfiRuntimeServicesData);
 }
 
 /**

@@ -17,13 +17,24 @@ struct plic_data {
 	unsigned long num_src;
 };
 
-int plic_warm_irqchip_init(struct plic_data *plic,
+/* So far, priorities on all consumers of these functions fit in 8 bits. */
+void plic_priority_save(const struct plic_data *plic, u8 *priority, u32 num);
+
+void plic_priority_restore(const struct plic_data *plic, const u8 *priority,
+			   u32 num);
+
+void plic_context_save(const struct plic_data *plic, int context_id,
+		       u32 *enable, u32 *threshold, u32 num);
+
+void plic_context_restore(const struct plic_data *plic, int context_id,
+			  const u32 *enable, u32 threshold, u32 num);
+
+int plic_context_init(const struct plic_data *plic, int context_id,
+		      bool enable, u32 threshold);
+
+int plic_warm_irqchip_init(const struct plic_data *plic,
 			   int m_cntx_id, int s_cntx_id);
 
-int plic_cold_irqchip_init(struct plic_data *plic);
-
-void plic_set_thresh(struct plic_data *plic, u32 cntxid, u32 val);
-
-void plic_set_ie(struct plic_data *plic, u32 cntxid, u32 word_index, u32 val);
+int plic_cold_irqchip_init(const struct plic_data *plic);
 
 #endif

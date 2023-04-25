@@ -50,13 +50,6 @@ class GLDependencySystem(SystemDependency):
             # FIXME: Detect version using self.clib_compiler
             return
 
-    @staticmethod
-    def get_methods() -> T.List[DependencyMethods]:
-        if mesonlib.is_osx() or mesonlib.is_windows():
-            return [DependencyMethods.PKGCONFIG, DependencyMethods.SYSTEM]
-        else:
-            return [DependencyMethods.PKGCONFIG]
-
     def log_tried(self) -> str:
         return 'system'
 
@@ -149,17 +142,10 @@ class SDL2DependencyConfigTool(ConfigToolDependency):
         self.compile_args = self.get_config_value(['--cflags'], 'compile_args')
         self.link_args = self.get_config_value(['--libs'], 'link_args')
 
-    @staticmethod
-    def get_methods() -> T.List[DependencyMethods]:
-        if mesonlib.is_osx():
-            return [DependencyMethods.PKGCONFIG, DependencyMethods.CONFIG_TOOL, DependencyMethods.EXTRAFRAMEWORK]
-        else:
-            return [DependencyMethods.PKGCONFIG, DependencyMethods.CONFIG_TOOL]
-
 
 class WxDependency(ConfigToolDependency):
 
-    tools = ['wx-config-3.0', 'wx-config', 'wx-config-gtk3']
+    tools = ['wx-config-3.0', 'wx-config-3.1', 'wx-config', 'wx-config-gtk3']
     tool_name = 'wx-config'
 
     def __init__(self, environment: 'Environment', kwargs: T.Dict[str, T.Any]):
@@ -250,10 +236,6 @@ class VulkanDependencySystem(SystemDependency):
                 for lib in libs:
                     self.link_args.append(lib)
                 return
-
-    @staticmethod
-    def get_methods() -> T.List[DependencyMethods]:
-        return [DependencyMethods.SYSTEM]
 
     def log_tried(self) -> str:
         return 'system'

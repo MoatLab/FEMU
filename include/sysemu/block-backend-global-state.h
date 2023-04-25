@@ -10,8 +10,8 @@
  * or later.  See the COPYING.LIB file in the top-level directory.
  */
 
-#ifndef BLOCK_BACKEND_GS_H
-#define BLOCK_BACKEND_GS_H
+#ifndef BLOCK_BACKEND_GLOBAL_STATE_H
+#define BLOCK_BACKEND_GLOBAL_STATE_H
 
 #include "block-backend-common.h"
 
@@ -23,10 +23,23 @@
  */
 
 BlockBackend *blk_new(AioContext *ctx, uint64_t perm, uint64_t shared_perm);
-BlockBackend *blk_new_with_bs(BlockDriverState *bs, uint64_t perm,
-                              uint64_t shared_perm, Error **errp);
-BlockBackend *blk_new_open(const char *filename, const char *reference,
-                           QDict *options, int flags, Error **errp);
+
+BlockBackend * no_coroutine_fn
+blk_new_with_bs(BlockDriverState *bs, uint64_t perm, uint64_t shared_perm,
+                Error **errp);
+
+BlockBackend * coroutine_fn no_co_wrapper
+blk_co_new_with_bs(BlockDriverState *bs, uint64_t perm, uint64_t shared_perm,
+                   Error **errp);
+
+BlockBackend * no_coroutine_fn
+blk_new_open(const char *filename, const char *reference, QDict *options,
+             int flags, Error **errp);
+
+BlockBackend * coroutine_fn no_co_wrapper
+blk_co_new_open(const char *filename, const char *reference, QDict *options,
+                int flags, Error **errp);
+
 int blk_get_refcnt(BlockBackend *blk);
 void blk_ref(BlockBackend *blk);
 void blk_unref(BlockBackend *blk);
@@ -106,11 +119,11 @@ void blk_io_limits_enable(BlockBackend *blk, const char *group);
 void blk_io_limits_update_group(BlockBackend *blk, const char *group);
 void blk_set_force_allow_inactivate(BlockBackend *blk);
 
-void blk_register_buf(BlockBackend *blk, void *host, size_t size);
-void blk_unregister_buf(BlockBackend *blk, void *host);
+bool blk_register_buf(BlockBackend *blk, void *host, size_t size, Error **errp);
+void blk_unregister_buf(BlockBackend *blk, void *host, size_t size);
 
 const BdrvChild *blk_root(BlockBackend *blk);
 
 int blk_make_empty(BlockBackend *blk, Error **errp);
 
-#endif /* BLOCK_BACKEND_GS_H */
+#endif /* BLOCK_BACKEND_GLOBAL_STATE_H */

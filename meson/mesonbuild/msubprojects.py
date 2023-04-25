@@ -7,20 +7,61 @@ import shutil
 from concurrent.futures.thread import ThreadPoolExecutor
 from pathlib import Path
 import typing as T
+import tarfile
+import zipfile
 
 from . import mlog
 from .mesonlib import quiet_git, GitException, Popen_safe, MesonException, windows_proof_rmtree
 from .wrap.wrap import PackageDefinition, Resolver, WrapException, ALL_TYPES
 from .wrap import wraptool
 
+if T.TYPE_CHECKING:
+    from typing_extensions import Protocol
+
+    class Arguments(Protocol):
+        sourcedir: str
+        num_processes: int
+        subprojects: T.List[str]
+        types: str
+        subprojects_func: T.Callable[[], bool]
+
+    class UpdateArguments(Arguments):
+        rebase: bool
+        reset: bool
+
+    class CheckoutArguments(Arguments):
+        b: bool
+        branch_name: str
+
+    class ForeachArguments(Arguments):
+        command: str
+        args: T.List[str]
+
+    class PurgeArguments(Arguments):
+        confirm: bool
+        include_cache: bool
+
+    class PackagefilesArguments(Arguments):
+        apply: bool
+        save: bool
+
 ALL_TYPES_STRING = ', '.join(ALL_TYPES)
+
+def read_archive_files(path: Path, base_path: Path) -> T.Set[Path]:
+    if path.suffix == '.zip':
+        with zipfile.ZipFile(path, 'r') as zip_archive:
+            archive_files = set(base_path / i.filename for i in zip_archive.infolist())
+    else:
+        with tarfile.open(path) as tar_archive: # [ignore encoding]
+            archive_files = set(base_path / i.name for i in tar_archive)
+    return archive_files
 
 class Logger:
     def __init__(self, total_tasks: int) -> None:
         self.lock = threading.Lock()
         self.total_tasks = total_tasks
         self.completed_tasks = 0
-        self.running_tasks = set()
+        self.running_tasks: T.Set[str] = set()
         self.should_erase_line = ''
 
     def flush(self) -> None:
@@ -54,21 +95,22 @@ class Logger:
 
 
 class Runner:
-    def __init__(self, logger: Logger, r: Resolver, wrap: PackageDefinition, repo_dir: str, options: argparse.Namespace) -> None:
+    def __init__(self, logger: Logger, r: Resolver, wrap: PackageDefinition, repo_dir: str, options: 'Arguments') -> None:
         # FIXME: Do a copy because Resolver.resolve() is stateful method that
         # cannot be called from multiple threads.
         self.wrap_resolver = copy.copy(r)
-        self.wrap = wrap
+        self.wrap_resolver.dirname = os.path.join(r.subdir_root, wrap.directory)
+        self.wrap = self.wrap_resolver.wrap = wrap
         self.repo_dir = repo_dir
         self.options = options
-        self.run_method = options.subprojects_func.__get__(self)
-        self.log_queue = []
+        self.run_method: T.Callable[[], bool] = options.subprojects_func.__get__(self) # type: ignore
+        self.log_queue: T.List[T.Tuple[mlog.TV_LoggableList, T.Any]] = []
         self.logger = logger
 
-    def log(self, *args, **kwargs):
-        self.log_queue.append((args, kwargs))
+    def log(self, *args: mlog.TV_Loggable, **kwargs: T.Any) -> None:
+        self.log_queue.append((list(args), kwargs))
 
-    def run(self):
+    def run(self) -> bool:
         self.logger.start(self.wrap.name)
         try:
             result = self.run_method()
@@ -78,7 +120,7 @@ class Runner:
         self.logger.done(self.wrap.name, self.log_queue)
         return result
 
-    def update_wrapdb_file(self):
+    def update_wrapdb_file(self) -> None:
         try:
             patch_url = self.wrap.get('patch_url')
             branch, revision = wraptool.parse_patch_url(patch_url)
@@ -89,7 +131,9 @@ class Runner:
             wraptool.update_wrap_file(self.wrap.filename, self.wrap.name, new_branch, new_revision)
             self.log('  -> New wrap file downloaded.')
 
-    def update_file(self):
+    def update_file(self) -> bool:
+        options = T.cast('UpdateArguments', self.options)
+
         self.update_wrapdb_file()
         if not os.path.isdir(self.repo_dir):
             # The subproject is not needed, or it is a tarball extracted in
@@ -98,7 +142,7 @@ class Runner:
             # reconfigure will download and use the new tarball.
             self.log('  -> Not used.')
             return True
-        elif self.options.reset:
+        elif options.reset:
             # Delete existing directory and redownload. It is possible that nothing
             # changed but we have no way to know. Hopefully tarballs are still
             # cached.
@@ -118,13 +162,13 @@ class Runner:
             self.log('     Pass --reset option to delete directory and redownload.')
             return False
 
-    def git_output(self, cmd):
+    def git_output(self, cmd: T.List[str]) -> str:
         return quiet_git(cmd, self.repo_dir, check=True)[1]
 
-    def git_verbose(self, cmd):
+    def git_verbose(self, cmd: T.List[str]) -> None:
         self.log(self.git_output(cmd))
 
-    def git_stash(self):
+    def git_stash(self) -> None:
         # That git command return 1 (failure) when there is something to stash.
         # We don't want to stash when there is nothing to stash because that would
         # print spurious "No local changes to save".
@@ -133,12 +177,12 @@ class Runner:
             # been saved.
             self.git_verbose(['stash'])
 
-    def git_show(self):
+    def git_show(self) -> None:
         commit_message = self.git_output(['show', '--quiet', '--pretty=format:%h%n%d%n%s%n[%an]'])
         parts = [s.strip() for s in commit_message.split('\n')]
         self.log('  ->', mlog.yellow(parts[0]), mlog.red(parts[1]), parts[2], mlog.blue(parts[3]))
 
-    def git_rebase(self, revision):
+    def git_rebase(self, revision: str) -> bool:
         try:
             self.git_output(['-c', 'rebase.autoStash=true', 'rebase', 'FETCH_HEAD'])
         except GitException as e:
@@ -148,23 +192,24 @@ class Runner:
             return False
         return True
 
-    def git_reset(self, revision):
+    def git_reset(self, revision: str) -> bool:
         try:
             # Stash local changes, commits can always be found back in reflog, to
             # avoid any data lost by mistake.
             self.git_stash()
             self.git_output(['reset', '--hard', 'FETCH_HEAD'])
+            self.wrap_resolver.apply_patch()
         except GitException as e:
-            self.log('  -> Could not reset', mlog.bold(repo_dir), 'to', mlog.bold(revision))
+            self.log('  -> Could not reset', mlog.bold(self.repo_dir), 'to', mlog.bold(revision))
             self.log(mlog.red(e.output))
             self.log(mlog.red(str(e)))
             return False
         return True
 
-    def git_checkout(self, revision, create=False):
+    def git_checkout(self, revision: str, create: bool = False) -> bool:
         cmd = ['checkout', '--ignore-other-worktrees', revision, '--']
         if create:
-            cmd.insert('-b', 1)
+            cmd.insert(1, '-b')
         try:
             # Stash local changes, commits can always be found back in reflog, to
             # avoid any data lost by mistake.
@@ -177,7 +222,7 @@ class Runner:
             return False
         return True
 
-    def git_checkout_and_reset(self, revision):
+    def git_checkout_and_reset(self, revision: str) -> bool:
         # revision could be a branch that already exists but is outdated, so we still
         # have to reset after the checkout.
         success = self.git_checkout(revision)
@@ -185,7 +230,7 @@ class Runner:
             success = self.git_reset(revision)
         return success
 
-    def git_checkout_and_rebase(self, revision):
+    def git_checkout_and_rebase(self, revision: str) -> bool:
         # revision could be a branch that already exists but is outdated, so we still
         # have to rebase after the checkout.
         success = self.git_checkout(revision)
@@ -193,12 +238,14 @@ class Runner:
             success = self.git_rebase(revision)
         return success
 
-    def update_git(self):
+    def update_git(self) -> bool:
+        options = T.cast('UpdateArguments', self.options)
+
         if not os.path.isdir(self.repo_dir):
             self.log('  -> Not used.')
             return True
         if not os.path.exists(os.path.join(self.repo_dir, '.git')):
-            if self.options.reset:
+            if options.reset:
                 # Delete existing directory and redownload
                 windows_proof_rmtree(self.repo_dir)
                 try:
@@ -226,7 +273,7 @@ class Runner:
             self.log(mlog.red(e.output))
             self.log(mlog.red(str(e)))
             return False
-        if self.options.reset:
+        if options.reset:
             try:
                 self.git_output(['remote', 'set-url', 'origin', url])
                 if push_url:
@@ -248,32 +295,39 @@ class Runner:
             self.log(mlog.red(e.output))
             self.log(mlog.red(str(e)))
             return False
-        try:
-            # Fetch only the revision we need, this avoids fetching useless branches.
-            # revision can be either a branch, tag or commit id. In all cases we want
-            # FETCH_HEAD to be set to the desired commit and "git checkout <revision>"
-            # to to either switch to existing/new branch, or detach to tag/commit.
-            # It is more complicated than it first appear, see discussion there:
-            # https://github.com/mesonbuild/meson/pull/7723#discussion_r488816189.
-            heads_refmap = '+refs/heads/*:refs/remotes/origin/*'
-            tags_refmap = '+refs/tags/*:refs/tags/*'
-            self.git_output(['fetch', '--refmap', heads_refmap, '--refmap', tags_refmap, 'origin', revision])
-        except GitException as e:
-            self.log('  -> Could not fetch revision', mlog.bold(revision), 'in', mlog.bold(self.repo_dir))
-            self.log(mlog.red(e.output))
-            self.log(mlog.red(str(e)))
-            return False
+        if self.wrap_resolver.is_git_full_commit_id(revision) and \
+                quiet_git(['rev-parse', '--verify', revision + '^{commit}'], self.repo_dir)[0]:
+            # The revision we need is both a commit and available. So we do not
+            # need to fetch it because it cannot be updated.  Instead, trick
+            # git into setting FETCH_HEAD just in case, from the local commit.
+            self.git_output(['fetch', '.', revision])
+        else:
+            try:
+                # Fetch only the revision we need, this avoids fetching useless branches.
+                # revision can be either a branch, tag or commit id. In all cases we want
+                # FETCH_HEAD to be set to the desired commit and "git checkout <revision>"
+                # to to either switch to existing/new branch, or detach to tag/commit.
+                # It is more complicated than it first appear, see discussion there:
+                # https://github.com/mesonbuild/meson/pull/7723#discussion_r488816189.
+                heads_refmap = '+refs/heads/*:refs/remotes/origin/*'
+                tags_refmap = '+refs/tags/*:refs/tags/*'
+                self.git_output(['fetch', '--refmap', heads_refmap, '--refmap', tags_refmap, 'origin', revision])
+            except GitException as e:
+                self.log('  -> Could not fetch revision', mlog.bold(revision), 'in', mlog.bold(self.repo_dir))
+                self.log(mlog.red(e.output))
+                self.log(mlog.red(str(e)))
+                return False
 
         if branch == '':
             # We are currently in detached mode
-            if self.options.reset:
+            if options.reset:
                 success = self.git_checkout_and_reset(revision)
             else:
                 success = self.git_checkout_and_rebase(revision)
         elif branch == revision:
             # We are in the same branch. A reset could still be needed in the case
             # a force push happened on remote repository.
-            if self.options.reset:
+            if options.reset:
                 success = self.git_reset(revision)
             else:
                 success = self.git_rebase(revision)
@@ -281,7 +335,7 @@ class Runner:
             # We are in another branch, either the user created their own branch and
             # we should rebase it, or revision changed in the wrap file and we need
             # to checkout the new branch.
-            if self.options.reset:
+            if options.reset:
                 success = self.git_checkout_and_reset(revision)
             else:
                 success = self.git_rebase(revision)
@@ -289,11 +343,11 @@ class Runner:
             self.update_git_done()
         return success
 
-    def update_git_done(self):
+    def update_git_done(self) -> None:
         self.git_output(['submodule', 'update', '--checkout', '--recursive'])
         self.git_show()
 
-    def update_hg(self):
+    def update_hg(self) -> bool:
         if not os.path.isdir(self.repo_dir):
             self.log('  -> Not used.')
             return True
@@ -309,12 +363,12 @@ class Runner:
                 subprocess.check_call(['hg', 'checkout', revno], cwd=self.repo_dir)
         return True
 
-    def update_svn(self):
+    def update_svn(self) -> bool:
         if not os.path.isdir(self.repo_dir):
             self.log('  -> Not used.')
             return True
         revno = self.wrap.get('revision')
-        p, out, _ = Popen_safe(['svn', 'info', '--show-item', 'revision', self.repo_dir])
+        _, out, _ = Popen_safe(['svn', 'info', '--show-item', 'revision', self.repo_dir])
         current_revno = out
         if current_revno == revno:
             return True
@@ -327,7 +381,7 @@ class Runner:
             subprocess.check_call(['svn', 'update', '-r', revno], cwd=self.repo_dir)
         return True
 
-    def update(self):
+    def update(self) -> bool:
         self.log(f'Updating {self.wrap.name}...')
         if self.wrap.type == 'file':
             return self.update_file()
@@ -343,20 +397,22 @@ class Runner:
             self.log('  -> Cannot update', self.wrap.type, 'subproject')
         return True
 
-    def checkout(self):
+    def checkout(self) -> bool:
+        options = T.cast('CheckoutArguments', self.options)
+
         if self.wrap.type != 'git' or not os.path.isdir(self.repo_dir):
             return True
-        branch_name = self.options.branch_name if self.options.branch_name else self.wrap.get('revision')
+        branch_name = options.branch_name if options.branch_name else self.wrap.get('revision')
         if not branch_name:
             # It could be a detached git submodule for example.
             return True
         self.log(f'Checkout {branch_name} in {self.wrap.name}...')
-        if self.git_checkout(branch_name, create=self.options.b):
+        if self.git_checkout(branch_name, create=options.b):
             self.git_show()
             return True
         return False
 
-    def download(self):
+    def download(self) -> bool:
         self.log(f'Download {self.wrap.name}...')
         if os.path.isdir(self.repo_dir):
             self.log('  -> Already downloaded')
@@ -369,12 +425,14 @@ class Runner:
             return False
         return True
 
-    def foreach(self):
+    def foreach(self) -> bool:
+        options = T.cast('ForeachArguments', self.options)
+
         self.log(f'Executing command in {self.repo_dir}')
         if not os.path.isdir(self.repo_dir):
             self.log('  -> Not downloaded yet')
             return True
-        cmd = [self.options.command] + self.options.args
+        cmd = [options.command] + options.args
         p, out, _ = Popen_safe(cmd, stderr=subprocess.STDOUT, cwd=self.repo_dir)
         if p.returncode != 0:
             err_message = "Command '{}' returned non-zero exit status {}.".format(" ".join(cmd), p.returncode)
@@ -386,28 +444,30 @@ class Runner:
         return True
 
     def purge(self) -> bool:
+        options = T.cast('PurgeArguments', self.options)
+
         # if subproject is not wrap-based, then don't remove it
         if not self.wrap.type:
             return True
 
         if self.wrap.redirected:
             redirect_file = Path(self.wrap.original_filename).resolve()
-            if self.options.confirm:
+            if options.confirm:
                 redirect_file.unlink()
             mlog.log(f'Deleting {redirect_file}')
 
         if self.wrap.type == 'redirect':
             redirect_file = Path(self.wrap.filename).resolve()
-            if self.options.confirm:
+            if options.confirm:
                 redirect_file.unlink()
             self.log(f'Deleting {redirect_file}')
 
-        if self.options.include_cache:
+        if options.include_cache:
             packagecache = Path(self.wrap_resolver.cachedir).resolve()
             try:
                 subproject_cache_file = packagecache / self.wrap.get("source_filename")
                 if subproject_cache_file.is_file():
-                    if self.options.confirm:
+                    if options.confirm:
                         subproject_cache_file.unlink()
                     self.log(f'Deleting {subproject_cache_file}')
             except WrapException:
@@ -416,7 +476,7 @@ class Runner:
             try:
                 subproject_patch_file = packagecache / self.wrap.get("patch_filename")
                 if subproject_patch_file.is_file():
-                    if self.options.confirm:
+                    if options.confirm:
                         subproject_patch_file.unlink()
                     self.log(f'Deleting {subproject_patch_file}')
             except WrapException:
@@ -430,12 +490,15 @@ class Runner:
             except FileNotFoundError:
                 pass
 
-        subproject_source_dir = Path(self.repo_dir).resolve()
+        # NOTE: Do not use .resolve() here; the subproject directory may be a symlink
+        subproject_source_dir = Path(self.repo_dir)
+        # Resolve just the parent, just to print out the full path
+        subproject_source_dir = subproject_source_dir.parent.resolve() / subproject_source_dir.name
 
         # Don't follow symlink. This is covered by the next if statement, but why
         # not be doubly sure.
         if subproject_source_dir.is_symlink():
-            if self.options.confirm:
+            if options.confirm:
                 subproject_source_dir.unlink()
             self.log(f'Deleting {subproject_source_dir}')
             return True
@@ -443,7 +506,7 @@ class Runner:
             return True
 
         try:
-            if self.options.confirm:
+            if options.confirm:
                 windows_proof_rmtree(str(subproject_source_dir))
             self.log(f'Deleting {subproject_source_dir}')
         except OSError as e:
@@ -453,12 +516,54 @@ class Runner:
         return True
 
     @staticmethod
-    def post_purge(options):
+    def post_purge(options: 'PurgeArguments') -> None:
         if not options.confirm:
             mlog.log('')
             mlog.log('Nothing has been deleted, run again with --confirm to apply.')
 
-def add_common_arguments(p):
+    def packagefiles(self) -> bool:
+        options = T.cast('PackagefilesArguments', self.options)
+
+        if options.apply and options.save:
+            # not quite so nice as argparse failure
+            print('error: --apply and --save are mutually exclusive')
+            return False
+        if options.apply:
+            self.log(f'Re-applying patchfiles overlay for {self.wrap.name}...')
+            if not os.path.isdir(self.repo_dir):
+                self.log('  -> Not downloaded yet')
+                return True
+            self.wrap_resolver.apply_patch()
+            return True
+        if options.save:
+            if 'patch_directory' not in self.wrap.values:
+                mlog.error('can only save packagefiles to patch_directory')
+                return False
+            if 'source_filename' not in self.wrap.values:
+                mlog.error('can only save packagefiles from a [wrap-file]')
+                return False
+            archive_path = Path(self.wrap_resolver.cachedir, self.wrap.values['source_filename'])
+            lead_directory_missing = bool(self.wrap.values.get('lead_directory_missing', False))
+            directory = Path(self.repo_dir)
+            packagefiles = Path(self.wrap.filesdir, self.wrap.values['patch_directory'])
+
+            base_path = directory if lead_directory_missing else directory.parent
+            archive_files = read_archive_files(archive_path, base_path)
+            directory_files = set(directory.glob('**/*'))
+
+            self.log(f'Saving {self.wrap.name} to {packagefiles}...')
+            shutil.rmtree(packagefiles)
+            for src_path in directory_files - archive_files:
+                if not src_path.is_file():
+                    continue
+                rel_path = src_path.relative_to(directory)
+                dst_path = packagefiles / rel_path
+                dst_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(src_path, dst_path)
+        return True
+
+
+def add_common_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument('--sourcedir', default='.',
                    help='Path to source directory')
     p.add_argument('--types', default='',
@@ -466,11 +571,11 @@ def add_common_arguments(p):
     p.add_argument('--num-processes', default=None, type=int,
                    help='How many parallel processes to use (Since 0.59.0).')
 
-def add_subprojects_argument(p):
+def add_subprojects_argument(p: argparse.ArgumentParser) -> None:
     p.add_argument('subprojects', nargs='*',
                    help='List of subprojects (default: all)')
 
-def add_arguments(parser):
+def add_arguments(parser: argparse.ArgumentParser) -> None:
     subparsers = parser.add_subparsers(title='Commands', dest='command')
     subparsers.required = True
 
@@ -517,7 +622,14 @@ def add_arguments(parser):
     p.set_defaults(subprojects_func=Runner.purge)
     p.set_defaults(post_func=Runner.post_purge)
 
-def run(options):
+    p = subparsers.add_parser('packagefiles', help='Manage the packagefiles overlay')
+    add_common_arguments(p)
+    add_subprojects_argument(p)
+    p.add_argument('--apply', action='store_true', default=False, help='Apply packagefiles to the subproject')
+    p.add_argument('--save', action='store_true', default=False, help='Save packagefiles from the subproject')
+    p.set_defaults(subprojects_func=Runner.packagefiles)
+
+def run(options: 'Arguments') -> int:
     src_dir = os.path.relpath(os.path.realpath(options.sourcedir))
     if not os.path.isfile(os.path.join(src_dir, 'meson.build')):
         mlog.error('Directory', mlog.bold(src_dir), 'does not seem to be a Meson source directory.')
@@ -530,13 +642,13 @@ def run(options):
     if options.subprojects:
         wraps = [wrap for name, wrap in r.wraps.items() if name in options.subprojects]
     else:
-        wraps = r.wraps.values()
+        wraps = list(r.wraps.values())
     types = [t.strip() for t in options.types.split(',')] if options.types else []
     for t in types:
         if t not in ALL_TYPES:
             raise MesonException(f'Unknown subproject type {t!r}, supported types are: {ALL_TYPES_STRING}')
-    tasks = []
-    task_names = []
+    tasks: T.List[T.Awaitable[bool]] = []
+    task_names: T.List[str] = []
     loop = asyncio.get_event_loop()
     executor = ThreadPoolExecutor(options.num_processes)
     if types:

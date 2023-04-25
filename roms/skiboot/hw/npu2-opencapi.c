@@ -41,7 +41,6 @@
 #define NPU_IRQ_LEVELS_XSL	23
 #define MAX_PE_HANDLE		((1 << 15) - 1)
 #define TL_MAX_TEMPLATE		63
-#define TL_RATE_BUF_SIZE	32
 
 #define OCAPI_SLOT_NORMAL                   PCI_SLOT_STATE_NORMAL
 #define OCAPI_SLOT_LINK                     PCI_SLOT_STATE_LINK
@@ -1957,23 +1956,12 @@ void npu2_opencapi_set_broken(struct npu2 *npu, int brick)
 	}
 }
 
-static int64_t opal_npu_spa_setup(uint64_t phb_id, uint32_t __unused bdfn,
+int64_t npu2_opencapi_spa_setup(struct phb *phb, uint32_t __unused bdfn,
 				uint64_t addr, uint64_t PE_mask)
 {
 	uint64_t stack, block, offset, reg;
-	struct phb *phb = pci_get_phb(phb_id);
 	struct npu2_dev *dev;
 	int rc;
-
-	if (!phb || phb->phb_type != phb_type_npu_v2_opencapi)
-		return OPAL_PARAMETER;
-
-	/* 4k aligned */
-	if (addr & 0xFFF)
-		return OPAL_PARAMETER;
-
-	if (PE_mask > 15)
-		return OPAL_PARAMETER;
 
 	dev = phb_to_npu2_dev_ocapi(phb);
 	if (!dev)
@@ -1985,7 +1973,6 @@ static int64_t opal_npu_spa_setup(uint64_t phb_id, uint32_t __unused bdfn,
 		offset = NPU2_XSL_PSL_SPAP_A1;
 	else
 		offset = NPU2_XSL_PSL_SPAP_A0;
-
 
 	lock(&dev->npu->lock);
 	/*
@@ -2024,21 +2011,13 @@ out:
 	unlock(&dev->npu->lock);
 	return rc;
 }
-opal_call(OPAL_NPU_SPA_SETUP, opal_npu_spa_setup, 4);
 
-static int64_t opal_npu_spa_clear_cache(uint64_t phb_id, uint32_t __unused bdfn,
-					uint64_t PE_handle)
+int64_t npu2_opencapi_spa_clear_cache(struct phb *phb, uint32_t __unused bdfn,
+				      uint64_t PE_handle)
 {
 	uint64_t cc_inv, stack, block, reg, rc;
 	uint32_t retries = 5;
-	struct phb *phb = pci_get_phb(phb_id);
 	struct npu2_dev *dev;
-
-	if (!phb || phb->phb_type != phb_type_npu_v2_opencapi)
-		return OPAL_PARAMETER;
-
-	if (PE_handle > MAX_PE_HANDLE)
-		return OPAL_PARAMETER;
 
 	dev = phb_to_npu2_dev_ocapi(phb);
 	if (!dev)
@@ -2077,7 +2056,6 @@ out:
 	unlock(&dev->npu->lock);
 	return rc;
 }
-opal_call(OPAL_NPU_SPA_CLEAR_CACHE, opal_npu_spa_clear_cache, 3);
 
 static int get_template_rate(unsigned int templ, char *rate_buf)
 {
@@ -2101,19 +2079,12 @@ static bool is_template_supported(unsigned int templ, long capabilities)
 	return !!(capabilities & (1ull << templ));
 }
 
-static int64_t opal_npu_tl_set(uint64_t phb_id, uint32_t __unused bdfn,
-			long capabilities, uint64_t rate_phys, int rate_sz)
+int64_t npu2_opencapi_tl_set(struct phb *phb, uint32_t __unused bdfn,
+		    long capabilities, char *rate)
 {
-	struct phb *phb = pci_get_phb(phb_id);
 	struct npu2_dev *dev;
 	uint64_t stack, block, reg, templ_rate;
 	int i, rate_pos;
-	char *rate = (char *) rate_phys;
-
-	if (!phb || phb->phb_type != phb_type_npu_v2_opencapi)
-		return OPAL_PARAMETER;
-	if (!opal_addr_valid(rate) || rate_sz != TL_RATE_BUF_SIZE)
-		return OPAL_PARAMETER;
 
 	dev = phb_to_npu2_dev_ocapi(phb);
 	if (!dev)
@@ -2157,7 +2128,6 @@ static int64_t opal_npu_tl_set(uint64_t phb_id, uint32_t __unused bdfn,
 	OCAPIDBG(dev, "OTL configuration 1 register set to %llx\n", reg);
 	return OPAL_SUCCESS;
 }
-opal_call(OPAL_NPU_TL_SET, opal_npu_tl_set, 5);
 
 static void set_mem_bar(struct npu2_dev *dev, uint64_t base, uint64_t size)
 {
@@ -2325,17 +2295,12 @@ out:
 	return rc;
 }
 
-static int64_t opal_npu_mem_alloc(uint64_t phb_id, uint32_t __unused bdfn,
-				  uint64_t size, __be64 *__bar)
+int64_t npu2_opencapi_mem_alloc(struct phb *phb, uint32_t __unused bdfn,
+				uint64_t size, uint64_t *__bar)
 {
-	struct phb *phb = pci_get_phb(phb_id);
 	struct npu2_dev *dev;
 	uint64_t bar;
 	int64_t rc;
-
-
-	if (!phb || phb->phb_type != phb_type_npu_v2_opencapi)
-		return OPAL_PARAMETER;
 
 	dev = phb_to_npu2_dev_ocapi(phb);
 	if (!dev)
@@ -2350,16 +2315,10 @@ static int64_t opal_npu_mem_alloc(uint64_t phb_id, uint32_t __unused bdfn,
 
 	return rc;
 }
-opal_call(OPAL_NPU_MEM_ALLOC, opal_npu_mem_alloc, 4);
 
-static int64_t opal_npu_mem_release(uint64_t phb_id, uint32_t __unused bdfn)
+int64_t npu2_opencapi_mem_release(struct phb *phb, uint32_t __unused bdfn)
 {
-	struct phb *phb = pci_get_phb(phb_id);
 	struct npu2_dev *dev;
-
-
-	if (!phb || phb->phb_type != phb_type_npu_v2_opencapi)
-		return OPAL_PARAMETER;
 
 	dev = phb_to_npu2_dev_ocapi(phb);
 	if (!dev)
@@ -2367,4 +2326,3 @@ static int64_t opal_npu_mem_release(uint64_t phb_id, uint32_t __unused bdfn)
 
 	return release_mem_bar(dev);
 }
-opal_call(OPAL_NPU_MEM_RELEASE, opal_npu_mem_release, 2);

@@ -21,6 +21,7 @@
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "qemu.h"
+#include "gdbstub/user.h"
 #include "signal-common.h"
 #include "trace.h"
 #include "hw/core/tcg-cpu-ops.h"
@@ -347,7 +348,8 @@ static int core_dump_signal(int sig)
 }
 
 /* Abort execution with signal. */
-static void QEMU_NORETURN dump_core_and_abort(int target_sig)
+static G_NORETURN
+void dump_core_and_abort(int target_sig)
 {
     CPUArchState *env = thread_cpu->env_ptr;
     CPUState *cpu = env_cpu(env);

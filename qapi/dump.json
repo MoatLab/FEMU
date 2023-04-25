@@ -186,8 +186,8 @@
 #
 # Returns the available formats for dump-guest-memory
 #
-# Returns:  A @DumpGuestMemoryCapability object listing available formats for
-#           dump-guest-memory
+# Returns: A @DumpGuestMemoryCapability object listing available formats for
+#          dump-guest-memory
 #
 # Since: 2.0
 #
@@ -195,7 +195,7 @@
 #
 # -> { "execute": "query-dump-guest-memory-capability" }
 # <- { "return": { "formats":
-#                  ["elf", "kdump-zlib", "kdump-lzo", "kdump-snappy"] }
+#                  ["elf", "kdump-zlib", "kdump-lzo", "kdump-snappy"] } }
 #
 ##
 { 'command': 'query-dump-guest-memory-capability',

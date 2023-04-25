@@ -29,10 +29,6 @@
 #include <p8_pore_table_gen_api.H>
 #include <sbe_xip_image.h>
 
-static uint32_t slw_saved_reset[0x100];
-
-static bool slw_current_le = false;
-
 enum wakeup_engine_states wakeup_engine_state = WAKEUP_ENGINE_NOT_PRESENT;
 bool has_deep_states = false;
 
@@ -51,125 +47,6 @@ DEFINE_LOG_ENTRY(OPAL_RC_SLW_GET, OPAL_PLATFORM_ERR_EVT, OPAL_SLW,
 DEFINE_LOG_ENTRY(OPAL_RC_SLW_REG, OPAL_PLATFORM_ERR_EVT, OPAL_SLW,
 		 OPAL_PLATFORM_FIRMWARE, OPAL_INFO,
 		 OPAL_NA);
-
-static void slw_do_rvwinkle(void *data)
-{
-	struct cpu_thread *cpu = this_cpu();
-	struct cpu_thread *master = data;
-	uint64_t lpcr = mfspr(SPR_LPCR);
-	struct proc_chip *chip;
-
-	/* Setup our ICP to receive IPIs */
-	icp_prep_for_pm();
-
-	/* Setup LPCR to wakeup on external interrupts only */
-	mtspr(SPR_LPCR, ((lpcr & ~SPR_LPCR_P8_PECE) | SPR_LPCR_P8_PECE2));
-	isync();
-
-	prlog(PR_DEBUG, "SLW: CPU PIR 0x%04x going to rvwinkle...\n",
-	      cpu->pir);
-
-	/* Tell that we got it */
-	cpu->state = cpu_state_rvwinkle;
-
-	enter_p8_pm_state(1);
-
-	/* Restore SPRs */
-	init_shared_sprs();
-	init_replicated_sprs();
-
-	/* Ok, it's ours again */
-	cpu->state = cpu_state_active;
-
-	prlog(PR_DEBUG, "SLW: CPU PIR 0x%04x woken up !\n", cpu->pir);
-
-	/* Cleanup our ICP */
-	reset_cpu_icp();
-
-	/* Resync timebase */
-	chiptod_wakeup_resync();
-
-	/* Restore LPCR */
-	mtspr(SPR_LPCR, lpcr);
-	isync();
-
-	/* If we are passed a master pointer we are the designated
-	 * waker, let's proceed. If not, return, we are finished.
-	 */
-	if (!master)
-		return;
-
-	prlog(PR_DEBUG, "SLW: CPU PIR 0x%04x waiting for master...\n",
-	      cpu->pir);
-
-	/* Allriiiight... now wait for master to go down */
-	while(master->state != cpu_state_rvwinkle)
-		sync();
-
-	/* XXX Wait one second ! (should check xscom state ? ) */
-	time_wait_ms(1000);
-
-	for_each_chip(chip) {
-		struct cpu_thread *c;
-		uint64_t tmp;
-		for_each_available_core_in_chip(c, chip->id) {
-			xscom_read(chip->id,
-				 XSCOM_ADDR_P8_EX_SLAVE(pir_to_core_id(c->pir),
-							EX_PM_IDLE_STATE_HISTORY_PHYP),
-				   &tmp);	
-			prlog(PR_TRACE, "SLW: core %x:%x"
-			      " history: 0x%016llx (mid2)\n",
-			      chip->id, pir_to_core_id(c->pir),
-			      tmp);
-		}
-	}
-
-	prlog(PR_DEBUG, "SLW: Waking master (PIR 0x%04x)...\n", master->pir);
-
-	/* Now poke all the secondary threads on the master's core */
-	for_each_cpu(cpu) {
-		if (!cpu_is_sibling(cpu, master) || (cpu == master))
-			continue;
-		icp_kick_cpu(cpu);
-
-		/* Wait for it to claim to be back (XXX ADD TIMEOUT) */
-		while(cpu->state != cpu_state_active)
-			sync();
-	}
-
-	/* Now poke the master and be gone */
-	icp_kick_cpu(master);
-}
-
-static void slw_patch_reset(void)
-{
-	uint32_t *src, *dst, *sav;
-
-	src = &reset_patch_start;
-	dst = (uint32_t *)0x100;
-	sav = slw_saved_reset;
-	while(src < &reset_patch_end) {
-		*(sav++) = *(dst);
-		*(dst++) = *(src++);
-	}
-	sync_icache();
-}
-
-static void slw_unpatch_reset(void)
-{
-	extern uint32_t reset_patch_start;
-	extern uint32_t reset_patch_end;
-	uint32_t *src, *dst, *sav;
-
-	src = &reset_patch_start;
-	dst = (uint32_t *)0x100;
-	sav = slw_saved_reset;
-	while(src < &reset_patch_end) {
-		*(dst++) = *(sav++);
-		src++;
-	}
-	sync_icache();
-}
 
 static bool slw_general_init(struct proc_chip *chip, struct cpu_thread *c)
 {
@@ -271,15 +148,6 @@ static bool slw_set_overrides_p9(struct proc_chip *chip, struct cpu_thread *c)
 		prlog(PR_WARNING,
 			"SLW: core %d EC_PPM_SPECIAL_WKUP_OTR read  0x%016llx\n",
 		      core, tmp);
-	return true;
-}
-
-static bool slw_unset_overrides(struct proc_chip *chip, struct cpu_thread *c)
-{
-	uint32_t core = pir_to_core_id(c->pir);
-
-	/* XXX FIXME: Save and restore the overrides */
-	prlog(PR_DEBUG, "SLW: slw_unset_overrides %x:%x\n", chip->id, core);
 	return true;
 }
 
@@ -1201,197 +1069,6 @@ void add_cpu_idle_state_properties(void)
 	free(pm_ctrl_reg_mask_buf);
 }
 
-static void slw_cleanup_core(struct proc_chip *chip, struct cpu_thread *c)
-{
-	uint64_t tmp;
-	int rc;
-
-	/* Display history to check transition */
-	rc = xscom_read(chip->id,
-			XSCOM_ADDR_P8_EX_SLAVE(pir_to_core_id(c->pir),
-					       EX_PM_IDLE_STATE_HISTORY_PHYP),
-			&tmp);
-	if (rc) {
-		log_simple_error(&e_info(OPAL_RC_SLW_GET),
-			"SLW: Failed to read PM_IDLE_STATE_HISTORY\n");
-		/* XXX error handling ? return false; */
-	}
-
-	prlog(PR_DEBUG, "SLW: core %x:%x history: 0x%016llx (new1)\n",
-	       chip->id, pir_to_core_id(c->pir), tmp);
-
-	rc = xscom_read(chip->id,
-			XSCOM_ADDR_P8_EX_SLAVE(pir_to_core_id(c->pir),
-					       EX_PM_IDLE_STATE_HISTORY_PHYP),
-			&tmp);
-	if (rc) {
-		log_simple_error(&e_info(OPAL_RC_SLW_GET),
-			"SLW: Failed to read PM_IDLE_STATE_HISTORY\n");
-		/* XXX error handling ? return false; */
-	}
-
-	prlog(PR_DEBUG, "SLW: core %x:%x history: 0x%016llx (new2)\n",
-	       chip->id, pir_to_core_id(c->pir), tmp);
-
-	/*
-	 * XXX FIXME: Error out if the transition didn't reach rvwinkle ?
-	 */
-
-	/*
-	 * XXX FIXME: We should restore a bunch of the EX bits we
-	 * overwrite to sane values here
-	 */
-	slw_unset_overrides(chip, c);
-}
-
-static void slw_cleanup_chip(struct proc_chip *chip)
-{
-	struct cpu_thread *c;
-
-	for_each_available_core_in_chip(c, chip->id)
-		slw_cleanup_core(chip, c);
-}
-
-static void slw_patch_scans(struct proc_chip *chip, bool le_mode)
-{
-	int64_t rc;
-	uint64_t old_val, new_val;
-
-	rc = sbe_xip_get_scalar((void *)chip->slw_base,
-				"skip_ex_override_ring_scans", &old_val);
-	if (rc) {
-		log_simple_error(&e_info(OPAL_RC_SLW_REG),
-			"SLW: Failed to read scan override on chip %d\n",
-			chip->id);
-		return;
-	}
-
-	new_val = le_mode ? 0 : 1;
-
-	prlog(PR_TRACE, "SLW: Chip %d, LE value was: %lld, setting to %lld\n",
-	    chip->id, old_val, new_val);
-
-	rc = sbe_xip_set_scalar((void *)chip->slw_base,
-				"skip_ex_override_ring_scans", new_val);
-	if (rc) {
-		log_simple_error(&e_info(OPAL_RC_SLW_REG),
-			"SLW: Failed to set LE mode on chip %d\n", chip->id);
-		return;
-	}
-}
-
-int64_t slw_reinit(uint64_t flags)
-{
-	struct proc_chip *chip;
-	struct cpu_thread *cpu;
-	bool has_waker = false;
-	bool target_le = slw_current_le;
-
-	if (flags & OPAL_REINIT_CPUS_HILE_BE)
-		target_le = false;
-	if (flags & OPAL_REINIT_CPUS_HILE_LE)
-		target_le = true;
-
-	prlog(PR_TRACE, "SLW Reinit from CPU PIR 0x%04x,"
-	      " HILE set to %s endian...\n",
-	      this_cpu()->pir,
-	      target_le ? "little" : "big");
-
-	/* Prepare chips/cores for rvwinkle */
-	for_each_chip(chip) {
-		if (!chip->slw_base) {
-			log_simple_error(&e_info(OPAL_RC_SLW_INIT),
-				"SLW: Not found on chip %d\n", chip->id);
-			return OPAL_HARDWARE;
-		}
-
-		slw_patch_scans(chip, target_le);
-	}
-	slw_current_le = target_le;
-
-	/* XXX Save HIDs ? Or do that in head.S ... */
-
-	slw_patch_reset();
-
-	/* rvwinkle everybody and pick one to wake me once I rvwinkle myself */
-	for_each_available_cpu(cpu) {
-		struct cpu_thread *master = NULL;
-
-		if (cpu == this_cpu())
-			continue;
-
-		/* Pick up a waker for myself: it must not be a sibling of
-		 * the current CPU and must be a thread 0 (so it gets to
-		 * sync its timebase before doing time_wait_ms()
-		 */
-		if (!has_waker && !cpu_is_sibling(cpu, this_cpu()) &&
-		    cpu_is_thread0(cpu)) {
-			has_waker = true;
-			master = this_cpu();
-		}
-		__cpu_queue_job(cpu, "slw_do_rvwinkle",
-				slw_do_rvwinkle, master, true);
-
-		/* Wait for it to claim to be down */
-		while(cpu->state != cpu_state_rvwinkle)
-			sync();		
-	}
-
-	/* XXX Wait one second ! (should check xscom state ? ) */
-	prlog(PR_TRACE, "SLW: Waiting one second...\n");
-	time_wait_ms(1000);
-	prlog(PR_TRACE, "SLW: Done.\n");
-
-	for_each_chip(chip) {
-		struct cpu_thread *c;
-		uint64_t tmp;
-		for_each_available_core_in_chip(c, chip->id) {
-			xscom_read(chip->id,
-				 XSCOM_ADDR_P8_EX_SLAVE(pir_to_core_id(c->pir),
-							EX_PM_IDLE_STATE_HISTORY_PHYP),
-				   &tmp);
-			prlog(PR_DEBUG, "SLW: core %x:%x"
-			      " history: 0x%016llx (mid)\n",
-			      chip->id, pir_to_core_id(c->pir), tmp);
-		}
-	}
-
-
-	/* Wake everybody except on my core */
-	for_each_cpu(cpu) {
-		if (cpu->state != cpu_state_rvwinkle ||
-		    cpu_is_sibling(cpu, this_cpu()))
-			continue;
-		icp_kick_cpu(cpu);
-
-		/* Wait for it to claim to be back (XXX ADD TIMEOUT) */
-		while(cpu->state != cpu_state_active)
-			sync();
-	}
-
-	/* Did we find a waker ? If we didn't, that means we had no
-	 * other core in the system, we can't do it
-	 */
-	if (!has_waker) {
-		prlog(PR_TRACE, "SLW: No candidate waker, giving up !\n");
-		return OPAL_HARDWARE;
-	}
-
-	/* Our siblings are rvwinkling, and our waker is waiting for us
-	 * so let's just go down now
-	 */
-	slw_do_rvwinkle(NULL);
-
-	slw_unpatch_reset();
-
-	for_each_chip(chip)
-		slw_cleanup_chip(chip);
-
-	prlog(PR_TRACE, "SLW Reinit complete !\n");
-
-	return OPAL_SUCCESS;
-}
-
 static void slw_patch_regs(struct proc_chip *chip)
 {
 	struct cpu_thread *c;
@@ -1695,11 +1372,14 @@ void slw_init(void)
 {
 	struct proc_chip *chip;
 
-	if (proc_chip_quirks & QUIRK_MAMBO_CALLOUTS) {
-		wakeup_engine_state = WAKEUP_ENGINE_NOT_PRESENT;
+	wakeup_engine_state = WAKEUP_ENGINE_NOT_PRESENT;
+	if (chip_quirk(QUIRK_AWAN))
+		return;
+	if (chip_quirk(QUIRK_MAMBO_CALLOUTS)) {
 		add_cpu_idle_state_properties();
 		return;
 	}
+
 	if (proc_gen == proc_gen_p8) {
 		for_each_chip(chip) {
 			slw_init_chip_p8(chip);

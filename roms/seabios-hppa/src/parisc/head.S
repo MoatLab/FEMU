@@ -122,6 +122,16 @@ ENTRY(enter_smp_idle_loop)
 	/* IDLE LOOP for SMP CPUs - wait for rendenzvous. */
 	mfctl   CPU_HPA_CR_REG, %r25 /* get CPU HPA from cr7 */
 
+#define PSW_I 1
+	rsm	PSW_I, %r0	/* disable local irqs */
+
+	/* EIRR : clear all pending external intr */
+#define CR_EIRR 23
+	load32	-1,%r1
+	mtctl	%r1, CR_EIRR
+	mfctl	CR_EIRR, %r0
+	mtctl	%r0, CR_EIRR
+
 	/* Load IVT for SMT tiny loop exit */
 #define CR_IVA 14
 	load32	BOOTADDR(smp_ivt),%r1
@@ -129,10 +139,9 @@ ENTRY(enter_smp_idle_loop)
 
 	/* enable CPU local interrupts */
 #define CR_EIEM 15
-#define PSW_I 1
 	load32	1<<31, %r1	/* allow IRQ0 (Timer) */
 	mtctl	%r1, CR_EIEM
-	ssm	PSW_I, %r9
+	ssm	PSW_I, %r0	/* enable local irqs */
 
 	/* endless idle loop, exits to $smp_exit_loop by IRQ only */
 $smp_idle_loop:
@@ -141,6 +150,10 @@ $smp_idle_loop:
 
 $smp_exit_loop:
 	mtctl	%r0, CR_EIEM
+	rsm	PSW_I, %r0	/* disable local irqs */
+
+	/* tell QEMU to drop all local TLB entries. */
+	pdtlbe	%r0(%sr1,%r0)
 
 	/* on 64bit: Address of PDCE_PROC for each non-monarch processor in GR26. */
 	load32	BOOTADDR(pdc_entry), %r26
@@ -148,8 +161,8 @@ $smp_exit_loop:
 	/* jump to rendevouz */
 	ldw	0x10(%r0),%r3	/* MEM_RENDEZ */
 	/* ldw	0x28(%r0),%r0	MEM_RENDEZ_HI - assume addr < 4GB */
-	bv	0(%r3)
-	copy	%r0,%r2
+	load32	enter_smp_idle_loop, %rp
+	bv,n	0(%r3)
 
 
 $is_monarch_cpu:

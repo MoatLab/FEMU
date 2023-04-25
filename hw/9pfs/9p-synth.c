@@ -72,14 +72,13 @@ static V9fsSynthNode *v9fs_add_dir_node(V9fsSynthNode *parent, int mode,
 int qemu_v9fs_synth_mkdir(V9fsSynthNode *parent, int mode,
                           const char *name, V9fsSynthNode **result)
 {
-    int ret;
     V9fsSynthNode *node, *tmp;
 
     if (!synth_fs) {
-        return EAGAIN;
+        return -EAGAIN;
     }
     if (!name || (strlen(name) >= NAME_MAX)) {
-        return EINVAL;
+        return -EINVAL;
     }
     if (!parent) {
         parent = &synth_root;
@@ -87,33 +86,30 @@ int qemu_v9fs_synth_mkdir(V9fsSynthNode *parent, int mode,
     QEMU_LOCK_GUARD(&synth_mutex);
     QLIST_FOREACH(tmp, &parent->child, sibling) {
         if (!strcmp(tmp->name, name)) {
-            ret = EEXIST;
-            return ret;
+            return -EEXIST;
         }
     }
     /* Add the name */
-    node = v9fs_add_dir_node(parent, mode, name, NULL, synth_node_count++);
+    node = v9fs_add_dir_node(parent, mode, name, NULL, ++synth_node_count);
     v9fs_add_dir_node(node, parent->attr->mode, "..",
                       parent->attr, parent->attr->inode);
     v9fs_add_dir_node(node, node->attr->mode, ".",
                       node->attr, node->attr->inode);
     *result = node;
-    ret = 0;
-    return ret;
+    return 0;
 }
 
 int qemu_v9fs_synth_add_file(V9fsSynthNode *parent, int mode,
                              const char *name, v9fs_synth_read read,
                              v9fs_synth_write write, void *arg)
 {
-    int ret;
     V9fsSynthNode *node, *tmp;
 
     if (!synth_fs) {
-        return EAGAIN;
+        return -EAGAIN;
     }
     if (!name || (strlen(name) >= NAME_MAX)) {
-        return EINVAL;
+        return -EINVAL;
     }
     if (!parent) {
         parent = &synth_root;
@@ -122,15 +118,14 @@ int qemu_v9fs_synth_add_file(V9fsSynthNode *parent, int mode,
     QEMU_LOCK_GUARD(&synth_mutex);
     QLIST_FOREACH(tmp, &parent->child, sibling) {
         if (!strcmp(tmp->name, name)) {
-            ret = EEXIST;
-            return ret;
+            return -EEXIST;
         }
     }
     /* Add file type and remove write bits */
     mode = ((mode & 0777) | S_IFREG);
     node = g_new0(V9fsSynthNode, 1);
     node->attr         = &node->actual_attr;
-    node->attr->inode  = synth_node_count++;
+    node->attr->inode  = ++synth_node_count;
     node->attr->nlink  = 1;
     node->attr->read   = read;
     node->attr->write  = write;
@@ -138,8 +133,7 @@ int qemu_v9fs_synth_add_file(V9fsSynthNode *parent, int mode,
     node->private      = arg;
     pstrcpy(node->name, sizeof(node->name), name);
     QLIST_INSERT_HEAD_RCU(&parent->child, node, sibling);
-    ret = 0;
-    return ret;
+    return 0;
 }
 
 static void synth_fill_statbuf(V9fsSynthNode *node, struct stat *stbuf)

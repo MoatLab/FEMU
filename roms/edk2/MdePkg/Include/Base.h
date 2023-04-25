@@ -204,15 +204,7 @@ SPDX-License-Identifier: BSD-2-Clause-Patent
 #define ASM_FUNCTION_REMOVE_IF_UNREFERENCED
 #endif
 
-#ifdef __CC_ARM
-//
-// Older RVCT ARM compilers don't fully support #pragma pack and require __packed
-// as a prefix for the structure.
-//
-#define PACKED  __packed
-#else
 #define PACKED
-#endif
 
 ///
 /// 128 bit buffer containing a unique identifier value.
@@ -317,7 +309,15 @@ struct _LIST_ENTRY {
 ///
 /// NULL pointer (VOID *)
 ///
+#if defined (__cplusplus)
+  #if defined (_MSC_EXTENSIONS)
+#define NULL  nullptr
+  #else
+#define NULL  __null
+  #endif
+#else
 #define NULL  ((VOID *) 0)
+#endif
 
 //
 // Null character
@@ -578,39 +578,7 @@ struct _LIST_ENTRY {
 **/
 #define _INT_SIZE_OF(n)  ((sizeof (n) + sizeof (UINTN) - 1) &~(sizeof (UINTN) - 1))
 
-#if defined (__CC_ARM)
-//
-// RVCT ARM variable argument list support.
-//
-
-///
-/// Variable used to traverse the list of arguments. This type can vary by
-/// implementation and could be an array or structure.
-///
-  #ifdef __APCS_ADSABI
-typedef int *va_list[1];
-#define VA_LIST  va_list
-  #else
-typedef struct __va_list {
-  void    *__ap;
-} va_list;
-#define VA_LIST  va_list
-  #endif
-
-#define VA_START(Marker, Parameter)  __va_start(Marker, Parameter)
-
-#define VA_ARG(Marker, TYPE)  __va_arg(Marker, TYPE)
-
-#define VA_END(Marker)  ((void)0)
-
-// For some ARM RVCT compilers, __va_copy is not defined
-  #ifndef __va_copy
-#define __va_copy(dest, src)  ((void)((dest) = (src)))
-  #endif
-
-#define VA_COPY(Dest, Start)  __va_copy (Dest, Start)
-
-#elif defined (_M_ARM) || defined (_M_ARM64)
+#if defined (_M_ARM) || defined (_M_ARM64)
 //
 // MSFT ARM variable argument list support.
 //
@@ -800,7 +768,7 @@ typedef UINTN *BASE_LIST;
 **/
 #ifdef MDE_CPU_EBC
 #define STATIC_ASSERT(Expression, Message)
-#elif defined (_MSC_EXTENSIONS)
+#elif defined (_MSC_EXTENSIONS) || defined (__cplusplus)
 #define STATIC_ASSERT  static_assert
 #else
 #define STATIC_ASSERT  _Static_assert
@@ -999,7 +967,7 @@ typedef UINTN RETURN_STATUS;
 ///
 /// The operation completed successfully.
 ///
-#define RETURN_SUCCESS  0
+#define RETURN_SUCCESS  (RETURN_STATUS)(0)
 
 ///
 /// The image failed to load.

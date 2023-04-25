@@ -37,9 +37,9 @@
 static inline void helper_update_ov_legacy(CPUPPCState *env, int ov)
 {
     if (unlikely(ov)) {
-        env->so = env->ov = 1;
+        env->so = env->ov = env->ov32 = 1;
     } else {
-        env->ov = 0;
+        env->ov = env->ov32 = 0;
     }
 }
 
@@ -425,7 +425,7 @@ uint64_t helper_PEXTD(uint64_t src, uint64_t mask)
 
 /*****************************************************************************/
 /* Altivec extension helpers */
-#if defined(HOST_WORDS_BIGENDIAN)
+#if HOST_BIG_ENDIAN
 #define VECTOR_FOR_INORDER_I(index, element)                    \
     for (index = 0; index < ARRAY_SIZE(r->element); index++)
 #else
@@ -492,40 +492,8 @@ static inline void set_vscr_sat(CPUPPCState *env)
     env->vscr_sat.u32[0] = 1;
 }
 
-void helper_vaddcuw(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b)
-{
-    int i;
-
-    for (i = 0; i < ARRAY_SIZE(r->u32); i++) {
-        r->u32[i] = ~a->u32[i] < b->u32[i];
-    }
-}
-
-/* vprtybw */
-void helper_vprtybw(ppc_avr_t *r, ppc_avr_t *b)
-{
-    int i;
-    for (i = 0; i < ARRAY_SIZE(r->u32); i++) {
-        uint64_t res = b->u32[i] ^ (b->u32[i] >> 16);
-        res ^= res >> 8;
-        r->u32[i] = res & 1;
-    }
-}
-
-/* vprtybd */
-void helper_vprtybd(ppc_avr_t *r, ppc_avr_t *b)
-{
-    int i;
-    for (i = 0; i < ARRAY_SIZE(r->u64); i++) {
-        uint64_t res = b->u64[i] ^ (b->u64[i] >> 32);
-        res ^= res >> 16;
-        res ^= res >> 8;
-        r->u64[i] = res & 1;
-    }
-}
-
 /* vprtybq */
-void helper_vprtybq(ppc_avr_t *r, ppc_avr_t *b)
+void helper_VPRTYBQ(ppc_avr_t *r, ppc_avr_t *b, uint32_t v)
 {
     uint64_t res = b->u64[0] ^ b->u64[1];
     res ^= res >> 32;
@@ -602,29 +570,27 @@ VARITHSAT_UNSIGNED(w, u32, uint64_t, cvtsduw)
 #undef VARITHSAT_SIGNED
 #undef VARITHSAT_UNSIGNED
 
-#define VAVG_DO(name, element, etype)                                   \
-    void helper_v##name(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b)       \
-    {                                                                   \
-        int i;                                                          \
-                                                                        \
-        for (i = 0; i < ARRAY_SIZE(r->element); i++) {                  \
-            etype x = (etype)a->element[i] + (etype)b->element[i] + 1;  \
-            r->element[i] = x >> 1;                                     \
-        }                                                               \
+#define VAVG(name, element, etype)                                          \
+    void helper_##name(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b, uint32_t v)\
+    {                                                                       \
+        int i;                                                              \
+                                                                            \
+        for (i = 0; i < ARRAY_SIZE(r->element); i++) {                      \
+            etype x = (etype)a->element[i] + (etype)b->element[i] + 1;      \
+            r->element[i] = x >> 1;                                         \
+        }                                                                   \
     }
 
-#define VAVG(type, signed_element, signed_type, unsigned_element,       \
-             unsigned_type)                                             \
-    VAVG_DO(avgs##type, signed_element, signed_type)                    \
-    VAVG_DO(avgu##type, unsigned_element, unsigned_type)
-VAVG(b, s8, int16_t, u8, uint16_t)
-VAVG(h, s16, int32_t, u16, uint32_t)
-VAVG(w, s32, int64_t, u32, uint64_t)
-#undef VAVG_DO
+VAVG(VAVGSB, s8, int16_t)
+VAVG(VAVGUB, u8, uint16_t)
+VAVG(VAVGSH, s16, int32_t)
+VAVG(VAVGUH, u16, uint32_t)
+VAVG(VAVGSW, s32, int64_t)
+VAVG(VAVGUW, u32, uint64_t)
 #undef VAVG
 
-#define VABSDU_DO(name, element)                                        \
-void helper_v##name(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b)           \
+#define VABSDU(name, element)                                           \
+void helper_##name(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b, uint32_t v)\
 {                                                                       \
     int i;                                                              \
                                                                         \
@@ -640,12 +606,9 @@ void helper_v##name(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b)           \
  *   name    - instruction mnemonic suffix (b: byte, h: halfword, w: word)
  *   element - element type to access from vector
  */
-#define VABSDU(type, element)                   \
-    VABSDU_DO(absdu##type, element)
-VABSDU(b, u8)
-VABSDU(h, u16)
-VABSDU(w, u32)
-#undef VABSDU_DO
+VABSDU(VABSDUB, u8)
+VABSDU(VABSDUH, u16)
+VABSDU(VABSDUW, u32)
 #undef VABSDU
 
 #define VCF(suffix, cvt, element)                                       \
@@ -782,6 +745,137 @@ VCT(uxs, cvtsduw, u32)
 VCT(sxs, cvtsdsw, s32)
 #undef VCT
 
+typedef int64_t do_ger(uint32_t, uint32_t, uint32_t);
+
+static int64_t ger_rank8(uint32_t a, uint32_t b, uint32_t mask)
+{
+    int64_t psum = 0;
+    for (int i = 0; i < 8; i++, mask >>= 1) {
+        if (mask & 1) {
+            psum += (int64_t)sextract32(a, 4 * i, 4) * sextract32(b, 4 * i, 4);
+        }
+    }
+    return psum;
+}
+
+static int64_t ger_rank4(uint32_t a, uint32_t b, uint32_t mask)
+{
+    int64_t psum = 0;
+    for (int i = 0; i < 4; i++, mask >>= 1) {
+        if (mask & 1) {
+            psum += sextract32(a, 8 * i, 8) * (int64_t)extract32(b, 8 * i, 8);
+        }
+    }
+    return psum;
+}
+
+static int64_t ger_rank2(uint32_t a, uint32_t b, uint32_t mask)
+{
+    int64_t psum = 0;
+    for (int i = 0; i < 2; i++, mask >>= 1) {
+        if (mask & 1) {
+            psum += (int64_t)sextract32(a, 16 * i, 16) *
+                             sextract32(b, 16 * i, 16);
+        }
+    }
+    return psum;
+}
+
+static void xviger(CPUPPCState *env, ppc_vsr_t *a, ppc_vsr_t *b, ppc_acc_t  *at,
+                   uint32_t mask, bool sat, bool acc, do_ger ger)
+{
+    uint8_t pmsk = FIELD_EX32(mask, GER_MSK, PMSK),
+            xmsk = FIELD_EX32(mask, GER_MSK, XMSK),
+            ymsk = FIELD_EX32(mask, GER_MSK, YMSK);
+    uint8_t xmsk_bit, ymsk_bit;
+    int64_t psum;
+    int i, j;
+    for (i = 0, xmsk_bit = 1 << 3; i < 4; i++, xmsk_bit >>= 1) {
+        for (j = 0, ymsk_bit = 1 << 3; j < 4; j++, ymsk_bit >>= 1) {
+            if ((xmsk_bit & xmsk) && (ymsk_bit & ymsk)) {
+                psum = ger(a->VsrW(i), b->VsrW(j), pmsk);
+                if (acc) {
+                    psum += at[i].VsrSW(j);
+                }
+                if (sat && psum > INT32_MAX) {
+                    set_vscr_sat(env);
+                    at[i].VsrSW(j) = INT32_MAX;
+                } else if (sat && psum < INT32_MIN) {
+                    set_vscr_sat(env);
+                    at[i].VsrSW(j) = INT32_MIN;
+                } else {
+                    at[i].VsrSW(j) = (int32_t) psum;
+                }
+            } else {
+                at[i].VsrSW(j) = 0;
+            }
+        }
+    }
+}
+
+QEMU_FLATTEN
+void helper_XVI4GER8(CPUPPCState *env, ppc_vsr_t *a, ppc_vsr_t *b,
+                     ppc_acc_t *at, uint32_t mask)
+{
+    xviger(env, a, b, at, mask, false, false, ger_rank8);
+}
+
+QEMU_FLATTEN
+void helper_XVI4GER8PP(CPUPPCState *env, ppc_vsr_t *a, ppc_vsr_t *b,
+                       ppc_acc_t *at, uint32_t mask)
+{
+    xviger(env, a, b, at, mask, false, true, ger_rank8);
+}
+
+QEMU_FLATTEN
+void helper_XVI8GER4(CPUPPCState *env, ppc_vsr_t *a, ppc_vsr_t *b,
+                     ppc_acc_t *at, uint32_t mask)
+{
+    xviger(env, a, b, at, mask, false, false, ger_rank4);
+}
+
+QEMU_FLATTEN
+void helper_XVI8GER4PP(CPUPPCState *env, ppc_vsr_t *a, ppc_vsr_t *b,
+                       ppc_acc_t *at, uint32_t mask)
+{
+    xviger(env, a, b, at, mask, false, true, ger_rank4);
+}
+
+QEMU_FLATTEN
+void helper_XVI8GER4SPP(CPUPPCState *env, ppc_vsr_t *a, ppc_vsr_t *b,
+                        ppc_acc_t *at, uint32_t mask)
+{
+    xviger(env, a, b, at, mask, true, true, ger_rank4);
+}
+
+QEMU_FLATTEN
+void helper_XVI16GER2(CPUPPCState *env, ppc_vsr_t *a, ppc_vsr_t *b,
+                      ppc_acc_t *at, uint32_t mask)
+{
+    xviger(env, a, b, at, mask, false, false, ger_rank2);
+}
+
+QEMU_FLATTEN
+void helper_XVI16GER2S(CPUPPCState *env, ppc_vsr_t *a, ppc_vsr_t *b,
+                       ppc_acc_t *at, uint32_t mask)
+{
+    xviger(env, a, b, at, mask, true, false, ger_rank2);
+}
+
+QEMU_FLATTEN
+void helper_XVI16GER2PP(CPUPPCState *env, ppc_vsr_t *a, ppc_vsr_t *b,
+                        ppc_acc_t *at, uint32_t mask)
+{
+    xviger(env, a, b, at, mask, false, true, ger_rank2);
+}
+
+QEMU_FLATTEN
+void helper_XVI16GER2SPP(CPUPPCState *env, ppc_vsr_t *a, ppc_vsr_t *b,
+                         ppc_acc_t *at, uint32_t mask)
+{
+    xviger(env, a, b, at, mask, true, true, ger_rank2);
+}
+
 target_ulong helper_vclzlsbb(ppc_avr_t *r)
 {
     target_ulong count = 0;
@@ -808,7 +902,7 @@ target_ulong helper_vctzlsbb(ppc_avr_t *r)
     return count;
 }
 
-void helper_vmhaddshs(CPUPPCState *env, ppc_avr_t *r, ppc_avr_t *a,
+void helper_VMHADDSHS(CPUPPCState *env, ppc_avr_t *r, ppc_avr_t *a,
                       ppc_avr_t *b, ppc_avr_t *c)
 {
     int sat = 0;
@@ -826,7 +920,7 @@ void helper_vmhaddshs(CPUPPCState *env, ppc_avr_t *r, ppc_avr_t *a,
     }
 }
 
-void helper_vmhraddshs(CPUPPCState *env, ppc_avr_t *r, ppc_avr_t *a,
+void helper_VMHRADDSHS(CPUPPCState *env, ppc_avr_t *r, ppc_avr_t *a,
                        ppc_avr_t *b, ppc_avr_t *c)
 {
     int sat = 0;
@@ -843,7 +937,8 @@ void helper_vmhraddshs(CPUPPCState *env, ppc_avr_t *r, ppc_avr_t *a,
     }
 }
 
-void helper_vmladduhm(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b, ppc_avr_t *c)
+void helper_VMLADDUHM(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b, ppc_avr_t *c,
+                      uint32_t v)
 {
     int i;
 
@@ -875,8 +970,7 @@ VMRG(w, u32, VsrW)
 #undef VMRG_DO
 #undef VMRG
 
-void helper_vmsummbm(CPUPPCState *env, ppc_avr_t *r, ppc_avr_t *a,
-                     ppc_avr_t *b, ppc_avr_t *c)
+void helper_VMSUMMBM(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b, ppc_avr_t *c)
 {
     int32_t prod[16];
     int i;
@@ -891,8 +985,7 @@ void helper_vmsummbm(CPUPPCState *env, ppc_avr_t *r, ppc_avr_t *a,
     }
 }
 
-void helper_vmsumshm(CPUPPCState *env, ppc_avr_t *r, ppc_avr_t *a,
-                     ppc_avr_t *b, ppc_avr_t *c)
+void helper_VMSUMSHM(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b, ppc_avr_t *c)
 {
     int32_t prod[8];
     int i;
@@ -906,7 +999,7 @@ void helper_vmsumshm(CPUPPCState *env, ppc_avr_t *r, ppc_avr_t *a,
     }
 }
 
-void helper_vmsumshs(CPUPPCState *env, ppc_avr_t *r, ppc_avr_t *a,
+void helper_VMSUMSHS(CPUPPCState *env, ppc_avr_t *r, ppc_avr_t *a,
                      ppc_avr_t *b, ppc_avr_t *c)
 {
     int32_t prod[8];
@@ -928,8 +1021,7 @@ void helper_vmsumshs(CPUPPCState *env, ppc_avr_t *r, ppc_avr_t *a,
     }
 }
 
-void helper_vmsumubm(CPUPPCState *env, ppc_avr_t *r, ppc_avr_t *a,
-                     ppc_avr_t *b, ppc_avr_t *c)
+void helper_VMSUMUBM(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b, ppc_avr_t *c)
 {
     uint16_t prod[16];
     int i;
@@ -944,8 +1036,7 @@ void helper_vmsumubm(CPUPPCState *env, ppc_avr_t *r, ppc_avr_t *a,
     }
 }
 
-void helper_vmsumuhm(CPUPPCState *env, ppc_avr_t *r, ppc_avr_t *a,
-                     ppc_avr_t *b, ppc_avr_t *c)
+void helper_VMSUMUHM(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b, ppc_avr_t *c)
 {
     uint32_t prod[8];
     int i;
@@ -959,7 +1050,7 @@ void helper_vmsumuhm(CPUPPCState *env, ppc_avr_t *r, ppc_avr_t *a,
     }
 }
 
-void helper_vmsumuhs(CPUPPCState *env, ppc_avr_t *r, ppc_avr_t *a,
+void helper_VMSUMUHS(CPUPPCState *env, ppc_avr_t *r, ppc_avr_t *a,
                      ppc_avr_t *b, ppc_avr_t *c)
 {
     uint32_t prod[8];
@@ -1034,6 +1125,112 @@ void helper_XXPERMX(ppc_vsr_t *t, ppc_vsr_t *s0, ppc_vsr_t *s1, ppc_vsr_t *pcv,
     }
 
     *t = tmp;
+}
+
+void helper_VDIVSQ(ppc_avr_t *t, ppc_avr_t *a, ppc_avr_t *b)
+{
+    Int128 neg1 = int128_makes64(-1);
+    Int128 int128_min = int128_make128(0, INT64_MIN);
+    if (likely(int128_nz(b->s128) &&
+              (int128_ne(a->s128, int128_min) || int128_ne(b->s128, neg1)))) {
+        t->s128 = int128_divs(a->s128, b->s128);
+    } else {
+        t->s128 = a->s128; /* Undefined behavior */
+    }
+}
+
+void helper_VDIVUQ(ppc_avr_t *t, ppc_avr_t *a, ppc_avr_t *b)
+{
+    if (int128_nz(b->s128)) {
+        t->s128 = int128_divu(a->s128, b->s128);
+    } else {
+        t->s128 = a->s128; /* Undefined behavior */
+    }
+}
+
+void helper_VDIVESD(ppc_avr_t *t, ppc_avr_t *a, ppc_avr_t *b)
+{
+    int i;
+    int64_t high;
+    uint64_t low;
+    for (i = 0; i < 2; i++) {
+        high = a->s64[i];
+        low = 0;
+        if (unlikely((high == INT64_MIN && b->s64[i] == -1) || !b->s64[i])) {
+            t->s64[i] = a->s64[i]; /* Undefined behavior */
+        } else {
+            divs128(&low, &high, b->s64[i]);
+            t->s64[i] = low;
+        }
+    }
+}
+
+void helper_VDIVEUD(ppc_avr_t *t, ppc_avr_t *a, ppc_avr_t *b)
+{
+    int i;
+    uint64_t high, low;
+    for (i = 0; i < 2; i++) {
+        high = a->u64[i];
+        low = 0;
+        if (unlikely(!b->u64[i])) {
+            t->u64[i] = a->u64[i]; /* Undefined behavior */
+        } else {
+            divu128(&low, &high, b->u64[i]);
+            t->u64[i] = low;
+        }
+    }
+}
+
+void helper_VDIVESQ(ppc_avr_t *t, ppc_avr_t *a, ppc_avr_t *b)
+{
+    Int128 high, low;
+    Int128 int128_min = int128_make128(0, INT64_MIN);
+    Int128 neg1 = int128_makes64(-1);
+
+    high = a->s128;
+    low = int128_zero();
+    if (unlikely(!int128_nz(b->s128) ||
+                 (int128_eq(b->s128, neg1) && int128_eq(high, int128_min)))) {
+        t->s128 = a->s128; /* Undefined behavior */
+    } else {
+        divs256(&low, &high, b->s128);
+        t->s128 = low;
+    }
+}
+
+void helper_VDIVEUQ(ppc_avr_t *t, ppc_avr_t *a, ppc_avr_t *b)
+{
+    Int128 high, low;
+
+    high = a->s128;
+    low = int128_zero();
+    if (unlikely(!int128_nz(b->s128))) {
+        t->s128 = a->s128; /* Undefined behavior */
+    } else {
+        divu256(&low, &high, b->s128);
+        t->s128 = low;
+    }
+}
+
+void helper_VMODSQ(ppc_avr_t *t, ppc_avr_t *a, ppc_avr_t *b)
+{
+    Int128 neg1 = int128_makes64(-1);
+    Int128 int128_min = int128_make128(0, INT64_MIN);
+    if (likely(int128_nz(b->s128) &&
+              (int128_ne(a->s128, int128_min) || int128_ne(b->s128, neg1)))) {
+        t->s128 = int128_rems(a->s128, b->s128);
+    } else {
+        t->s128 = int128_zero(); /* Undefined behavior */
+    }
+}
+
+void helper_VMODUQ(ppc_avr_t *t, ppc_avr_t *a, ppc_avr_t *b)
+{
+    if (likely(int128_nz(b->s128))) {
+        t->s128 = int128_remu(a->s128, b->s128);
+    } else {
+        t->s128 = int128_zero(); /* Undefined behavior */
+    }
 }
 
 void helper_VPERM(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b, ppc_avr_t *c)
@@ -1177,18 +1374,17 @@ XXGENPCV(XXGENPCVDM, 8)
 #undef XXGENPCV_LE_COMP
 #undef XXGENPCV
 
-#if defined(HOST_WORDS_BIGENDIAN)
+#if HOST_BIG_ENDIAN
 #define VBPERMQ_INDEX(avr, i) ((avr)->u8[(i)])
 #define VBPERMD_INDEX(i) (i)
 #define VBPERMQ_DW(index) (((index) & 0x40) != 0)
-#define EXTRACT_BIT(avr, i, index) (extract64((avr)->u64[i], index, 1))
 #else
 #define VBPERMQ_INDEX(avr, i) ((avr)->u8[15 - (i)])
 #define VBPERMD_INDEX(i) (1 - i)
 #define VBPERMQ_DW(index) (((index) & 0x40) == 0)
-#define EXTRACT_BIT(avr, i, index) \
-        (extract64((avr)->u64[1 - i], 63 - index, 1))
 #endif
+#define EXTRACT_BIT(avr, i, index) \
+        (extract64((avr)->VsrD(i), 63 - index, 1))
 
 void helper_vbpermd(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b)
 {
@@ -1252,53 +1448,25 @@ PMSUM(vpmsumb, u8, u16, uint16_t)
 PMSUM(vpmsumh, u16, u32, uint32_t)
 PMSUM(vpmsumw, u32, u64, uint64_t)
 
-void helper_vpmsumd(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b)
+void helper_VPMSUMD(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b)
 {
-
-#ifdef CONFIG_INT128
     int i, j;
-    __uint128_t prod[2];
+    Int128 tmp, prod[2] = {int128_zero(), int128_zero()};
 
-    VECTOR_FOR_INORDER_I(i, u64) {
-        prod[i] = 0;
-        for (j = 0; j < 64; j++) {
-            if (a->u64[i] & (1ull << j)) {
-                prod[i] ^= (((__uint128_t)b->u64[i]) << j);
+    for (j = 0; j < 64; j++) {
+        for (i = 0; i < ARRAY_SIZE(r->u64); i++) {
+            if (a->VsrD(i) & (1ull << j)) {
+                tmp = int128_make64(b->VsrD(i));
+                tmp = int128_lshift(tmp, j);
+                prod[i] = int128_xor(prod[i], tmp);
             }
         }
     }
 
-    r->u128 = prod[0] ^ prod[1];
-
-#else
-    int i, j;
-    ppc_avr_t prod[2];
-
-    VECTOR_FOR_INORDER_I(i, u64) {
-        prod[i].VsrD(1) = prod[i].VsrD(0) = 0;
-        for (j = 0; j < 64; j++) {
-            if (a->u64[i] & (1ull << j)) {
-                ppc_avr_t bshift;
-                if (j == 0) {
-                    bshift.VsrD(0) = 0;
-                    bshift.VsrD(1) = b->u64[i];
-                } else {
-                    bshift.VsrD(0) = b->u64[i] >> (64 - j);
-                    bshift.VsrD(1) = b->u64[i] << j;
-                }
-                prod[i].VsrD(1) ^= bshift.VsrD(1);
-                prod[i].VsrD(0) ^= bshift.VsrD(0);
-            }
-        }
-    }
-
-    r->VsrD(1) = prod[0].VsrD(1) ^ prod[1].VsrD(1);
-    r->VsrD(0) = prod[0].VsrD(0) ^ prod[1].VsrD(0);
-#endif
+    r->s128 = int128_xor(prod[0], prod[1]);
 }
 
-
-#if defined(HOST_WORDS_BIGENDIAN)
+#if HOST_BIG_ENDIAN
 #define PKBIG 1
 #else
 #define PKBIG 0
@@ -1307,7 +1475,7 @@ void helper_vpkpx(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b)
 {
     int i, j;
     ppc_avr_t result;
-#if defined(HOST_WORDS_BIGENDIAN)
+#if HOST_BIG_ENDIAN
     const ppc_avr_t *x[2] = { a, b };
 #else
     const ppc_avr_t *x[2] = { b, a };
@@ -1516,7 +1684,7 @@ void helper_vslo(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b)
 {
     int sh = (b->VsrB(0xf) >> 3) & 0xf;
 
-#if defined(HOST_WORDS_BIGENDIAN)
+#if HOST_BIG_ENDIAN
     memmove(&r->u8[0], &a->u8[sh], 16 - sh);
     memset(&r->u8[16 - sh], 0, sh);
 #else
@@ -1525,7 +1693,7 @@ void helper_vslo(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b)
 #endif
 }
 
-#if defined(HOST_WORDS_BIGENDIAN)
+#if HOST_BIG_ENDIAN
 #define ELEM_ADDR(VEC, IDX, SIZE) (&(VEC)->u8[IDX])
 #else
 #define ELEM_ADDR(VEC, IDX, SIZE) (&(VEC)->u8[15 - (IDX)] - (SIZE) + 1)
@@ -1554,7 +1722,7 @@ VINSX(W, uint32_t)
 VINSX(D, uint64_t)
 #undef ELEM_ADDR
 #undef VINSX
-#if defined(HOST_WORDS_BIGENDIAN)
+#if HOST_BIG_ENDIAN
 #define VEXTDVLX(NAME, SIZE) \
 void helper_##NAME(CPUPPCState *env, ppc_avr_t *t, ppc_avr_t *a, ppc_avr_t *b, \
                    target_ulong index)                                         \
@@ -1593,7 +1761,7 @@ VEXTDVLX(VEXTDUHVLX, 2)
 VEXTDVLX(VEXTDUWVLX, 4)
 VEXTDVLX(VEXTDDVLX, 8)
 #undef VEXTDVLX
-#if defined(HOST_WORDS_BIGENDIAN)
+#if HOST_BIG_ENDIAN
 #define VEXTRACT(suffix, element)                                            \
     void helper_vextract##suffix(ppc_avr_t *r, ppc_avr_t *b, uint32_t index) \
     {                                                                        \
@@ -1647,8 +1815,7 @@ VSTRI(VSTRIHL, H, 8, true)
 VSTRI(VSTRIHR, H, 8, false)
 #undef VSTRI
 
-void helper_xxextractuw(CPUPPCState *env, ppc_vsr_t *xt,
-                        ppc_vsr_t *xb, uint32_t index)
+void helper_XXEXTRACTUW(ppc_vsr_t *xt, ppc_vsr_t *xb, uint32_t index)
 {
     ppc_vsr_t t = { };
     size_t es = sizeof(uint32_t);
@@ -1663,8 +1830,7 @@ void helper_xxextractuw(CPUPPCState *env, ppc_vsr_t *xt,
     *xt = t;
 }
 
-void helper_xxinsertw(CPUPPCState *env, ppc_vsr_t *xt,
-                      ppc_vsr_t *xb, uint32_t index)
+void helper_XXINSERTW(ppc_vsr_t *xt, ppc_vsr_t *xb, uint32_t index)
 {
     ppc_vsr_t t = *xt;
     size_t es = sizeof(uint32_t);
@@ -1734,38 +1900,17 @@ XXBLEND(W, 32)
 XXBLEND(D, 64)
 #undef XXBLEND
 
-#define VNEG(name, element)                                         \
-void helper_##name(ppc_avr_t *r, ppc_avr_t *b)                      \
-{                                                                   \
-    int i;                                                          \
-    for (i = 0; i < ARRAY_SIZE(r->element); i++) {                  \
-        r->element[i] = -b->element[i];                             \
-    }                                                               \
-}
-VNEG(vnegw, s32)
-VNEG(vnegd, s64)
-#undef VNEG
-
 void helper_vsro(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b)
 {
     int sh = (b->VsrB(0xf) >> 3) & 0xf;
 
-#if defined(HOST_WORDS_BIGENDIAN)
+#if HOST_BIG_ENDIAN
     memmove(&r->u8[sh], &a->u8[0], 16 - sh);
     memset(&r->u8[0], 0, sh);
 #else
     memmove(&r->u8[0], &a->u8[sh], 16 - sh);
     memset(&r->u8[16 - sh], 0, sh);
 #endif
-}
-
-void helper_vsubcuw(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b)
-{
-    int i;
-
-    for (i = 0; i < ARRAY_SIZE(r->u32); i++) {
-        r->u32[i] = a->u32[i] >= b->u32[i];
-    }
 }
 
 void helper_vsumsws(CPUPPCState *env, ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b)
@@ -1867,7 +2012,7 @@ void helper_vsum4ubs(CPUPPCState *env, ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b)
     }
 }
 
-#if defined(HOST_WORDS_BIGENDIAN)
+#if HOST_BIG_ENDIAN
 #define UPKHI 1
 #define UPKLO 0
 #else
@@ -1974,189 +2119,66 @@ VGENERIC_DO(popcntd, u64)
 
 #undef VGENERIC_DO
 
-#if defined(HOST_WORDS_BIGENDIAN)
-#define QW_ONE { .u64 = { 0, 1 } }
-#else
-#define QW_ONE { .u64 = { 1, 0 } }
-#endif
-
-#ifndef CONFIG_INT128
-
-static inline void avr_qw_not(ppc_avr_t *t, ppc_avr_t a)
+void helper_VADDUQM(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b)
 {
-    t->u64[0] = ~a.u64[0];
-    t->u64[1] = ~a.u64[1];
+    r->s128 = int128_add(a->s128, b->s128);
 }
 
-static int avr_qw_cmpu(ppc_avr_t a, ppc_avr_t b)
+void helper_VADDEUQM(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b, ppc_avr_t *c)
 {
-    if (a.VsrD(0) < b.VsrD(0)) {
-        return -1;
-    } else if (a.VsrD(0) > b.VsrD(0)) {
-        return 1;
-    } else if (a.VsrD(1) < b.VsrD(1)) {
-        return -1;
-    } else if (a.VsrD(1) > b.VsrD(1)) {
-        return 1;
-    } else {
-        return 0;
-    }
+    r->s128 = int128_add(int128_add(a->s128, b->s128),
+                         int128_make64(int128_getlo(c->s128) & 1));
 }
 
-static void avr_qw_add(ppc_avr_t *t, ppc_avr_t a, ppc_avr_t b)
+void helper_VADDCUQ(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b)
 {
-    t->VsrD(1) = a.VsrD(1) + b.VsrD(1);
-    t->VsrD(0) = a.VsrD(0) + b.VsrD(0) +
-                     (~a.VsrD(1) < b.VsrD(1));
-}
-
-static int avr_qw_addc(ppc_avr_t *t, ppc_avr_t a, ppc_avr_t b)
-{
-    ppc_avr_t not_a;
-    t->VsrD(1) = a.VsrD(1) + b.VsrD(1);
-    t->VsrD(0) = a.VsrD(0) + b.VsrD(0) +
-                     (~a.VsrD(1) < b.VsrD(1));
-    avr_qw_not(&not_a, a);
-    return avr_qw_cmpu(not_a, b) < 0;
-}
-
-#endif
-
-void helper_vadduqm(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b)
-{
-#ifdef CONFIG_INT128
-    r->u128 = a->u128 + b->u128;
-#else
-    avr_qw_add(r, *a, *b);
-#endif
-}
-
-void helper_vaddeuqm(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b, ppc_avr_t *c)
-{
-#ifdef CONFIG_INT128
-    r->u128 = a->u128 + b->u128 + (c->u128 & 1);
-#else
-
-    if (c->VsrD(1) & 1) {
-        ppc_avr_t tmp;
-
-        tmp.VsrD(0) = 0;
-        tmp.VsrD(1) = c->VsrD(1) & 1;
-        avr_qw_add(&tmp, *a, tmp);
-        avr_qw_add(r, tmp, *b);
-    } else {
-        avr_qw_add(r, *a, *b);
-    }
-#endif
-}
-
-void helper_vaddcuq(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b)
-{
-#ifdef CONFIG_INT128
-    r->u128 = (~a->u128 < b->u128);
-#else
-    ppc_avr_t not_a;
-
-    avr_qw_not(&not_a, *a);
-
+    r->VsrD(1) = int128_ult(int128_not(a->s128), b->s128);
     r->VsrD(0) = 0;
-    r->VsrD(1) = (avr_qw_cmpu(not_a, *b) < 0);
-#endif
 }
 
-void helper_vaddecuq(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b, ppc_avr_t *c)
+void helper_VADDECUQ(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b, ppc_avr_t *c)
 {
-#ifdef CONFIG_INT128
-    int carry_out = (~a->u128 < b->u128);
-    if (!carry_out && (c->u128 & 1)) {
-        carry_out = ((a->u128 + b->u128 + 1) == 0) &&
-                    ((a->u128 != 0) || (b->u128 != 0));
-    }
-    r->u128 = carry_out;
-#else
-
-    int carry_in = c->VsrD(1) & 1;
-    int carry_out = 0;
-    ppc_avr_t tmp;
-
-    carry_out = avr_qw_addc(&tmp, *a, *b);
+    bool carry_out = int128_ult(int128_not(a->s128), b->s128),
+         carry_in = int128_getlo(c->s128) & 1;
 
     if (!carry_out && carry_in) {
-        ppc_avr_t one = QW_ONE;
-        carry_out = avr_qw_addc(&tmp, tmp, one);
-    }
-    r->VsrD(0) = 0;
-    r->VsrD(1) = carry_out;
-#endif
-}
-
-void helper_vsubuqm(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b)
-{
-#ifdef CONFIG_INT128
-    r->u128 = a->u128 - b->u128;
-#else
-    ppc_avr_t tmp;
-    ppc_avr_t one = QW_ONE;
-
-    avr_qw_not(&tmp, *b);
-    avr_qw_add(&tmp, *a, tmp);
-    avr_qw_add(r, tmp, one);
-#endif
-}
-
-void helper_vsubeuqm(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b, ppc_avr_t *c)
-{
-#ifdef CONFIG_INT128
-    r->u128 = a->u128 + ~b->u128 + (c->u128 & 1);
-#else
-    ppc_avr_t tmp, sum;
-
-    avr_qw_not(&tmp, *b);
-    avr_qw_add(&sum, *a, tmp);
-
-    tmp.VsrD(0) = 0;
-    tmp.VsrD(1) = c->VsrD(1) & 1;
-    avr_qw_add(r, sum, tmp);
-#endif
-}
-
-void helper_vsubcuq(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b)
-{
-#ifdef CONFIG_INT128
-    r->u128 = (~a->u128 < ~b->u128) ||
-                 (a->u128 + ~b->u128 == (__uint128_t)-1);
-#else
-    int carry = (avr_qw_cmpu(*a, *b) > 0);
-    if (!carry) {
-        ppc_avr_t tmp;
-        avr_qw_not(&tmp, *b);
-        avr_qw_add(&tmp, *a, tmp);
-        carry = ((tmp.VsrSD(0) == -1ull) && (tmp.VsrSD(1) == -1ull));
-    }
-    r->VsrD(0) = 0;
-    r->VsrD(1) = carry;
-#endif
-}
-
-void helper_vsubecuq(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b, ppc_avr_t *c)
-{
-#ifdef CONFIG_INT128
-    r->u128 =
-        (~a->u128 < ~b->u128) ||
-        ((c->u128 & 1) && (a->u128 + ~b->u128 == (__uint128_t)-1));
-#else
-    int carry_in = c->VsrD(1) & 1;
-    int carry_out = (avr_qw_cmpu(*a, *b) > 0);
-    if (!carry_out && carry_in) {
-        ppc_avr_t tmp;
-        avr_qw_not(&tmp, *b);
-        avr_qw_add(&tmp, *a, tmp);
-        carry_out = ((tmp.VsrD(0) == -1ull) && (tmp.VsrD(1) == -1ull));
+        carry_out = (int128_nz(a->s128) || int128_nz(b->s128)) &&
+                    int128_eq(int128_add(a->s128, b->s128), int128_makes64(-1));
     }
 
     r->VsrD(0) = 0;
     r->VsrD(1) = carry_out;
-#endif
+}
+
+void helper_VSUBUQM(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b)
+{
+    r->s128 = int128_sub(a->s128, b->s128);
+}
+
+void helper_VSUBEUQM(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b, ppc_avr_t *c)
+{
+    r->s128 = int128_add(int128_add(a->s128, int128_not(b->s128)),
+                         int128_make64(int128_getlo(c->s128) & 1));
+}
+
+void helper_VSUBCUQ(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b)
+{
+    Int128 tmp = int128_not(b->s128);
+
+    r->VsrD(1) = int128_ult(int128_not(a->s128), tmp) ||
+                 int128_eq(int128_add(a->s128, tmp), int128_makes64(-1));
+    r->VsrD(0) = 0;
+}
+
+void helper_VSUBECUQ(ppc_avr_t *r, ppc_avr_t *a, ppc_avr_t *b, ppc_avr_t *c)
+{
+    Int128 tmp = int128_not(b->s128);
+    bool carry_out = int128_ult(int128_not(a->s128), tmp),
+         carry_in = int128_getlo(c->s128) & 1;
+
+    r->VsrD(1) = carry_out || (carry_in && int128_eq(int128_add(a->s128, tmp),
+                                                     int128_makes64(-1)));
+    r->VsrD(0) = 0;
 }
 
 #define BCD_PLUS_PREF_1 0xC

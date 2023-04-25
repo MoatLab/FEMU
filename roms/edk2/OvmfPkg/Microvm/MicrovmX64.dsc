@@ -47,8 +47,8 @@
   #
   # Device drivers
   #
-  DEFINE PVSCSI_ENABLE           = TRUE
-  DEFINE MPT_SCSI_ENABLE         = TRUE
+  DEFINE PVSCSI_ENABLE           = FALSE
+  DEFINE MPT_SCSI_ENABLE         = FALSE
   DEFINE LSI_SCSI_ENABLE         = FALSE
 
   #
@@ -90,6 +90,15 @@
   MSFT:*_*_*_CC_FLAGS = /D DISABLE_NEW_DEPRECATED_INTERFACES
   INTEL:*_*_*_CC_FLAGS = /D DISABLE_NEW_DEPRECATED_INTERFACES
   GCC:*_*_*_CC_FLAGS = -D DISABLE_NEW_DEPRECATED_INTERFACES
+
+  #
+  # SECURE_BOOT_FEATURE_ENABLED
+  #
+!if $(SECURE_BOOT_ENABLE) == TRUE
+  MSFT:*_*_*_CC_FLAGS = /D SECURE_BOOT_FEATURE_ENABLED
+  INTEL:*_*_*_CC_FLAGS = /D SECURE_BOOT_FEATURE_ENABLED
+  GCC:*_*_*_CC_FLAGS = -D SECURE_BOOT_FEATURE_ENABLED
+!endif
 
 !include NetworkPkg/NetworkBuildOptions.dsc.inc
 
@@ -156,6 +165,7 @@
   PciCapLib|OvmfPkg/Library/BasePciCapLib/BasePciCapLib.inf
   PciCapPciSegmentLib|OvmfPkg/Library/BasePciCapPciSegmentLib/BasePciCapPciSegmentLib.inf
   PciCapPciIoLib|OvmfPkg/Library/UefiPciCapPciIoLib/UefiPciCapPciIoLib.inf
+  CcProbeLib|MdePkg/Library/CcProbeLibNull/CcProbeLibNull.inf
   IoLib|MdePkg/Library/BaseIoLibIntrinsic/BaseIoLibIntrinsicSev.inf
   OemHookStatusCodeLib|MdeModulePkg/Library/OemHookStatusCodeLibNull/OemHookStatusCodeLibNull.inf
   SerialPortLib|PcAtChipsetPkg/Library/SerialIoLib/SerialIoLib.inf
@@ -181,6 +191,9 @@
   LockBoxLib|OvmfPkg/Library/LockBoxLib/LockBoxBaseLib.inf
   CustomizedDisplayLib|MdeModulePkg/Library/CustomizedDisplayLib/CustomizedDisplayLib.inf
   FrameBufferBltLib|MdeModulePkg/Library/FrameBufferBltLib/FrameBufferBltLib.inf
+  MemEncryptTdxLib|OvmfPkg/Library/BaseMemEncryptTdxLib/BaseMemEncryptTdxLib.inf
+  PeiHardwareInfoLib|OvmfPkg/Library/HardwareInfoLib/PeiHardwareInfoLib.inf
+  DxeHardwareInfoLib|OvmfPkg/Library/HardwareInfoLib/DxeHardwareInfoLib.inf
 
 !if $(SOURCE_DEBUG_ENABLE) == TRUE
   PeCoffExtraActionLib|SourceLevelDebugPkg/Library/PeCoffExtraActionLibDebug/PeCoffExtraActionLibDebug.inf
@@ -201,10 +214,19 @@
 !endif
   RngLib|MdePkg/Library/BaseRngLibTimerLib/BaseRngLibTimerLib.inf
 
+!if $(SECURE_BOOT_ENABLE) == TRUE
+  PlatformSecureLib|OvmfPkg/Library/PlatformSecureLib/PlatformSecureLib.inf
+  AuthVariableLib|SecurityPkg/Library/AuthVariableLib/AuthVariableLib.inf
+  SecureBootVariableLib|SecurityPkg/Library/SecureBootVariableLib/SecureBootVariableLib.inf
+  PlatformPKProtectionLib|SecurityPkg/Library/PlatformPKProtectionLibVarPolicy/PlatformPKProtectionLibVarPolicy.inf
+  SecureBootVariableProvisionLib|SecurityPkg/Library/SecureBootVariableProvisionLib/SecureBootVariableProvisionLib.inf
+!else
   AuthVariableLib|MdeModulePkg/Library/AuthVariableLibNull/AuthVariableLibNull.inf
+!endif
   VarCheckLib|MdeModulePkg/Library/VarCheckLib/VarCheckLib.inf
   VariablePolicyLib|MdeModulePkg/Library/VariablePolicyLib/VariablePolicyLib.inf
   VariablePolicyHelperLib|MdeModulePkg/Library/VariablePolicyHelperLib/VariablePolicyHelperLib.inf
+  VariableFlashInfoLib|MdeModulePkg/Library/BaseVariableFlashInfoLib/BaseVariableFlashInfoLib.inf
 
 
   #
@@ -227,11 +249,13 @@
 
 [LibraryClasses.common]
   BaseCryptLib|CryptoPkg/Library/BaseCryptLib/BaseCryptLib.inf
-  VmgExitLib|OvmfPkg/Library/VmgExitLib/VmgExitLib.inf
+  CcExitLib|OvmfPkg/Library/CcExitLib/CcExitLib.inf
   SerialPortLib|MdeModulePkg/Library/BaseSerialPortLib16550/BaseSerialPortLib16550.inf
   PlatformHookLib|MdeModulePkg/Library/BasePlatformHookLibNull/BasePlatformHookLibNull.inf
   FdtLib|EmbeddedPkg/Library/FdtLib/FdtLib.inf
   VirtioMmioDeviceLib|OvmfPkg/Library/VirtioMmioDeviceLib/VirtioMmioDeviceLib.inf
+  TdxLib|MdePkg/Library/TdxLib/TdxLib.inf
+  TdxMailboxLib|OvmfPkg/Library/TdxMailboxLib/TdxMailboxLibNull.inf
 
 [LibraryClasses.common.SEC]
   QemuFwCfgLib|OvmfPkg/Library/QemuFwCfgLib/QemuFwCfgSecLib.inf
@@ -254,7 +278,7 @@
 !else
   CpuExceptionHandlerLib|UefiCpuPkg/Library/CpuExceptionHandlerLib/SecPeiCpuExceptionHandlerLib.inf
 !endif
-  VmgExitLib|OvmfPkg/Library/VmgExitLib/SecVmgExitLib.inf
+  CcExitLib|OvmfPkg/Library/CcExitLib/SecCcExitLib.inf
   MemEncryptSevLib|OvmfPkg/Library/BaseMemEncryptSevLib/SecMemEncryptSevLib.inf
 
 [LibraryClasses.common.PEI_CORE]
@@ -269,7 +293,7 @@
 !ifdef $(DEBUG_ON_SERIAL_PORT)
   DebugLib|MdePkg/Library/BaseDebugLibSerialPort/BaseDebugLibSerialPort.inf
 !else
-  DebugLib|OvmfPkg/Library/PlatformDebugLibIoPort/PlatformDebugLibIoPort.inf
+  DebugLib|OvmfPkg/Library/PlatformDebugLibIoPort/PlatformRomDebugLibIoPort.inf
 !endif
   PeCoffLib|MdePkg/Library/BasePeCoffLib/BasePeCoffLib.inf
 
@@ -285,7 +309,7 @@
 !ifdef $(DEBUG_ON_SERIAL_PORT)
   DebugLib|MdePkg/Library/BaseDebugLibSerialPort/BaseDebugLibSerialPort.inf
 !else
-  DebugLib|OvmfPkg/Library/PlatformDebugLibIoPort/PlatformDebugLibIoPort.inf
+  DebugLib|OvmfPkg/Library/PlatformDebugLibIoPort/PlatformRomDebugLibIoPort.inf
 !endif
   PeCoffLib|MdePkg/Library/BasePeCoffLib/BasePeCoffLib.inf
   ResourcePublicationLib|MdePkg/Library/PeiResourcePublicationLib/PeiResourcePublicationLib.inf
@@ -300,6 +324,7 @@
   QemuFwCfgLib|OvmfPkg/Library/QemuFwCfgLib/QemuFwCfgPeiLib.inf
 
   MemEncryptSevLib|OvmfPkg/Library/BaseMemEncryptSevLib/PeiMemEncryptSevLib.inf
+  PlatformInitLib|OvmfPkg/Library/PlatformInitLib/PlatformInitLib.inf
 
 [LibraryClasses.common.DXE_CORE]
   HobLib|MdePkg/Library/DxeCoreHobLib/DxeCoreHobLib.inf
@@ -332,7 +357,9 @@
 !endif
   UefiRuntimeLib|MdePkg/Library/UefiRuntimeLib/UefiRuntimeLib.inf
   BaseCryptLib|CryptoPkg/Library/BaseCryptLib/RuntimeCryptLib.inf
-  PciLib|OvmfPkg/Library/DxePciLibI440FxQ35/DxePciLibI440FxQ35.inf
+#  PciLib|MdePkg/Library/BasePciLibPciExpress/BasePciLibPciExpress.inf
+#  PciPcdProducerLib|OvmfPkg/Fdt/FdtPciPcdProducerLib/FdtPciPcdProducerLib.inf
+#  PciExpressLib|OvmfPkg/Library/BaseCachingPciExpressLib/BaseCachingPciExpressLib.inf
   QemuFwCfgS3Lib|OvmfPkg/Library/QemuFwCfgS3Lib/DxeQemuFwCfgS3LibFwCfg.inf
   VariablePolicyLib|MdeModulePkg/Library/VariablePolicyLib/VariablePolicyLibRuntimeDxe.inf
 
@@ -349,7 +376,9 @@
   DebugLib|OvmfPkg/Library/PlatformDebugLibIoPort/PlatformDebugLibIoPort.inf
 !endif
   UefiScsiLib|MdePkg/Library/UefiScsiLib/UefiScsiLib.inf
-  PciLib|OvmfPkg/Library/DxePciLibI440FxQ35/DxePciLibI440FxQ35.inf
+  PciLib|MdePkg/Library/BasePciLibPciExpress/BasePciLibPciExpress.inf
+  PciPcdProducerLib|OvmfPkg/Fdt/FdtPciPcdProducerLib/FdtPciPcdProducerLib.inf
+  PciExpressLib|OvmfPkg/Library/BaseCachingPciExpressLib/BaseCachingPciExpressLib.inf
 
 [LibraryClasses.common.DXE_DRIVER]
   PcdLib|MdePkg/Library/DxePcdLib/DxePcdLib.inf
@@ -371,8 +400,11 @@
 !if $(SOURCE_DEBUG_ENABLE) == TRUE
   DebugAgentLib|SourceLevelDebugPkg/Library/DebugAgent/DxeDebugAgentLib.inf
 !endif
-  PciLib|OvmfPkg/Library/DxePciLibI440FxQ35/DxePciLibI440FxQ35.inf
+  PciLib|MdePkg/Library/BasePciLibPciExpress/BasePciLibPciExpress.inf
+  PciPcdProducerLib|OvmfPkg/Fdt/FdtPciPcdProducerLib/FdtPciPcdProducerLib.inf
+  PciExpressLib|OvmfPkg/Library/BaseCachingPciExpressLib/BaseCachingPciExpressLib.inf
   MpInitLib|UefiCpuPkg/Library/MpInitLib/DxeMpInitLib.inf
+  NestedInterruptTplLib|OvmfPkg/Library/NestedInterruptTplLib/NestedInterruptTplLib.inf
   QemuFwCfgS3Lib|OvmfPkg/Library/QemuFwCfgS3Lib/DxeQemuFwCfgS3LibFwCfg.inf
   QemuLoadImageLib|OvmfPkg/Library/X86QemuLoadImageLib/X86QemuLoadImageLib.inf
 
@@ -387,7 +419,9 @@
 !else
   DebugLib|OvmfPkg/Library/PlatformDebugLibIoPort/PlatformDebugLibIoPort.inf
 !endif
-  PciLib|OvmfPkg/Library/DxePciLibI440FxQ35/DxePciLibI440FxQ35.inf
+  PciLib|MdePkg/Library/BasePciLibPciExpress/BasePciLibPciExpress.inf
+  PciPcdProducerLib|OvmfPkg/Fdt/FdtPciPcdProducerLib/FdtPciPcdProducerLib.inf
+  PciExpressLib|OvmfPkg/Library/BaseCachingPciExpressLib/BaseCachingPciExpressLib.inf
 
 [LibraryClasses.common.DXE_SMM_DRIVER]
   PcdLib|MdePkg/Library/DxePcdLib/DxePcdLib.inf
@@ -408,7 +442,9 @@
   DebugAgentLib|SourceLevelDebugPkg/Library/DebugAgent/SmmDebugAgentLib.inf
 !endif
   BaseCryptLib|CryptoPkg/Library/BaseCryptLib/SmmCryptLib.inf
-  PciLib|OvmfPkg/Library/DxePciLibI440FxQ35/DxePciLibI440FxQ35.inf
+  PciLib|MdePkg/Library/BasePciLibPciExpress/BasePciLibPciExpress.inf
+  PciPcdProducerLib|OvmfPkg/Fdt/FdtPciPcdProducerLib/FdtPciPcdProducerLib.inf
+  PciExpressLib|OvmfPkg/Library/BaseCachingPciExpressLib/BaseCachingPciExpressLib.inf
 
 [LibraryClasses.common.SMM_CORE]
   PcdLib|MdePkg/Library/DxePcdLib/DxePcdLib.inf
@@ -424,7 +460,9 @@
 !else
   DebugLib|OvmfPkg/Library/PlatformDebugLibIoPort/PlatformDebugLibIoPort.inf
 !endif
-  PciLib|OvmfPkg/Library/DxePciLibI440FxQ35/DxePciLibI440FxQ35.inf
+  PciLib|MdePkg/Library/BasePciLibPciExpress/BasePciLibPciExpress.inf
+  PciPcdProducerLib|OvmfPkg/Fdt/FdtPciPcdProducerLib/FdtPciPcdProducerLib.inf
+  PciExpressLib|OvmfPkg/Library/BaseCachingPciExpressLib/BaseCachingPciExpressLib.inf
 
 ################################################################################
 #
@@ -438,6 +476,9 @@
   gEfiMdeModulePkgTokenSpaceGuid.PcdConOutGopSupport|TRUE
   gEfiMdeModulePkgTokenSpaceGuid.PcdConOutUgaSupport|FALSE
   gEfiMdeModulePkgTokenSpaceGuid.PcdInstallAcpiSdtProtocol|TRUE
+!if $(SECURE_BOOT_ENABLE) == TRUE
+  gEfiMdeModulePkgTokenSpaceGuid.PcdRequireSelfSignedPk|TRUE
+!endif
 
 [PcdsFixedAtBuild]
   gEfiMdeModulePkgTokenSpaceGuid.PcdStatusCodeMemorySize|1
@@ -499,14 +540,6 @@
   gEfiMdePkgTokenSpaceGuid.PcdDebugPropertyMask|0x2F
 !endif
 
-  # This PCD is used to set the base address of the PCI express hierarchy. It
-  # is only consulted when OVMF runs on Q35. In that case it is programmed into
-  # the PCIEXBAR register.
-  #
-  # On Q35 machine types that QEMU intends to support in the long term, QEMU
-  # never lets the RAM below 4 GB exceed 2816 MB.
-  gEfiMdePkgTokenSpaceGuid.PcdPciExpressBaseAddress|0xB0000000
-
 !if $(SOURCE_DEBUG_ENABLE) == TRUE
   gEfiSourceLevelDebugPkgTokenSpaceGuid.PcdDebugLoadImageMethod|0x2
 !endif
@@ -559,6 +592,8 @@
   gEfiMdeModulePkgTokenSpaceGuid.PcdFlashNvStorageFtwSpareBase|0
   gEfiMdeModulePkgTokenSpaceGuid.PcdVideoHorizontalResolution|1280
   gEfiMdeModulePkgTokenSpaceGuid.PcdVideoVerticalResolution|800
+  gEfiMdeModulePkgTokenSpaceGuid.PcdConOutRow|0
+  gEfiMdeModulePkgTokenSpaceGuid.PcdConOutColumn|0
   gEfiMdeModulePkgTokenSpaceGuid.PcdAcpiS3Enable|FALSE
   gUefiOvmfPkgTokenSpaceGuid.PcdVideoResolutionSource|0
   gUefiOvmfPkgTokenSpaceGuid.PcdOvmfHostBridgePciDevId|0
@@ -571,6 +606,12 @@
 
   gEfiMdePkgTokenSpaceGuid.PcdFSBClock|1000000000
   gEfiMdePkgTokenSpaceGuid.PcdPlatformBootTimeOut|0
+
+  # set PcdPciExpressBaseAddress to MAX_UINT64, which signifies that this
+  # PCD and PcdPciDisableBusEnumeration below have not been assigned yet
+  gEfiMdePkgTokenSpaceGuid.PcdPciExpressBaseAddress|0xFFFFFFFFFFFFFFFF
+  gEfiMdePkgTokenSpaceGuid.PcdPciIoTranslation|0x0
+  gEfiMdeModulePkgTokenSpaceGuid.PcdPciDisableBusEnumeration|TRUE
 
   # Set video resolution for text setup.
   gEfiMdeModulePkgTokenSpaceGuid.PcdSetupVideoHorizontalResolution|640
@@ -589,6 +630,9 @@
 
   # Set memory encryption mask
   gEfiMdeModulePkgTokenSpaceGuid.PcdPteMemoryEncryptionAddressOrMask|0x0
+
+  # Set Tdx shared bit mask
+  gEfiMdeModulePkgTokenSpaceGuid.PcdTdxSharedBitMask|0x0
 
   # Set SEV-ES defaults
   gEfiMdeModulePkgTokenSpaceGuid.PcdGhcbBase|0
@@ -638,7 +682,10 @@
   }
   MdeModulePkg/Core/DxeIplPeim/DxeIpl.inf
 
-  OvmfPkg/PlatformPei/PlatformPei.inf
+  OvmfPkg/PlatformPei/PlatformPei.inf {
+    <LibraryClasses>
+      NULL|OvmfPkg/IntelTdx/TdxHelperLib/TdxHelperLibNull.inf
+  }
   UefiCpuPkg/Universal/Acpi/S3Resume2Pei/S3Resume2Pei.inf
   UefiCpuPkg/CpuMpPei/CpuMpPei.inf
 
@@ -660,16 +707,23 @@
 
   MdeModulePkg/Core/RuntimeDxe/RuntimeDxe.inf
 
-  MdeModulePkg/Universal/SecurityStubDxe/SecurityStubDxe.inf
+  MdeModulePkg/Universal/SecurityStubDxe/SecurityStubDxe.inf {
+    <LibraryClasses>
+!if $(SECURE_BOOT_ENABLE) == TRUE
+      NULL|SecurityPkg/Library/DxeImageVerificationLib/DxeImageVerificationLib.inf
+!endif
+!include OvmfPkg/Include/Dsc/OvmfTpmSecurityStub.dsc.inc
+  }
+
   MdeModulePkg/Universal/EbcDxe/EbcDxe.inf
-  OvmfPkg/XenTimerDxe/XenTimerDxe.inf
+  OvmfPkg/LocalApicTimerDxe/LocalApicTimerDxe.inf
   UefiCpuPkg/CpuIo2Dxe/CpuIo2Dxe.inf
   UefiCpuPkg/CpuDxe/CpuDxe.inf
   OvmfPkg/IncompatiblePciDeviceSupportDxe/IncompatiblePciDeviceSupport.inf
   OvmfPkg/PciHotPlugInitDxe/PciHotPlugInit.inf
   MdeModulePkg/Bus/Pci/PciHostBridgeDxe/PciHostBridgeDxe.inf {
     <LibraryClasses>
-      PciHostBridgeLib|MdeModulePkg/Library/PciHostBridgeLibNull/PciHostBridgeLibNull.inf
+      PciHostBridgeLib|OvmfPkg/Fdt/FdtPciHostBridgeLib/FdtPciHostBridgeLib.inf
       PciHostBridgeUtilityLib|OvmfPkg/Library/PciHostBridgeUtilityLib/PciHostBridgeUtilityLib.inf
       NULL|OvmfPkg/Library/PlatformHasIoMmuLib/PlatformHasIoMmuLib.inf
   }
@@ -771,18 +825,8 @@
   # Network Support
   #
 !include NetworkPkg/NetworkComponents.dsc.inc
+!include OvmfPkg/Include/Dsc/NetworkComponents.dsc.inc
 
-  NetworkPkg/UefiPxeBcDxe/UefiPxeBcDxe.inf {
-    <LibraryClasses>
-      NULL|OvmfPkg/Library/PxeBcPcdProducerLib/PxeBcPcdProducerLib.inf
-  }
-
-!if $(NETWORK_TLS_ENABLE) == TRUE
-  NetworkPkg/TlsAuthConfigDxe/TlsAuthConfigDxe.inf {
-    <LibraryClasses>
-      NULL|OvmfPkg/Library/TlsAuthConfigLib/TlsAuthConfigLib.inf
-  }
-!endif
   OvmfPkg/VirtioNetDxe/VirtioNet.inf
 
   #
@@ -831,6 +875,11 @@
       gEfiShellPkgTokenSpaceGuid.PcdShellLibAutoInitialize|FALSE
       gEfiMdePkgTokenSpaceGuid.PcdUefiLibMaxPrintBufferSize|8000
   }
+
+!if $(SECURE_BOOT_ENABLE) == TRUE
+  SecurityPkg/VariableAuthenticated/SecureBootConfigDxe/SecureBootConfigDxe.inf
+  OvmfPkg/EnrollDefaultKeys/EnrollDefaultKeys.inf
+!endif
 
   OvmfPkg/PlatformDxe/Platform.inf
   OvmfPkg/IoMmuDxe/IoMmuDxe.inf

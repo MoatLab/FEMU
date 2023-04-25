@@ -25,6 +25,9 @@ from ..interpreterbase import (
     InvalidArguments, FeatureNew
 )
 
+if T.TYPE_CHECKING:
+    from . import ModuleState
+
 class CudaModule(NewExtensionModule):
 
     @FeatureNew('CUDA module', '0.50.0')
@@ -263,7 +266,7 @@ class CudaModule(NewExtensionModule):
         elif isinstance(cuda_arch_list, str):
             cuda_arch_list = self._break_arch_string(cuda_arch_list)
 
-        cuda_arch_list = sorted([x for x in set(cuda_arch_list) if x])
+        cuda_arch_list = sorted(x for x in set(cuda_arch_list) if x)
 
         cuda_arch_bin = []
         cuda_arch_ptx = []
@@ -293,8 +296,7 @@ class CudaModule(NewExtensionModule):
                 }.get(arch_name, (None, None))
 
             if arch_bin is None:
-                raise InvalidArguments('Unknown CUDA Architecture Name {}!'
-                                       .format(arch_name))
+                raise InvalidArguments(f'Unknown CUDA Architecture Name {arch_name}!')
 
             cuda_arch_bin += arch_bin
 

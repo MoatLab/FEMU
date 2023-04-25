@@ -4,6 +4,7 @@
 
 Copyright (c) 2011 - 2020, Intel Corporation. All rights reserved.<BR>
 Copyright (c) Microsoft Corporation.<BR>
+Copyright (C) 2022 Advanced Micro Devices, Inc. All rights reserved.<BR>
 SPDX-License-Identifier: BSD-2-Clause-Patent
 
 **/
@@ -506,7 +507,7 @@ XhcInitSched (
   // Software shall set Device Context Base Address Array entries for unallocated Device Slots to '0'.
   //
   Entries = (Xhc->MaxSlotsEn + 1) * sizeof (UINT64);
-  Dcbaa   = UsbHcAllocateMem (Xhc->MemPool, Entries);
+  Dcbaa   = UsbHcAllocateMem (Xhc->MemPool, Entries, FALSE);
   ASSERT (Dcbaa != NULL);
   ZeroMem (Dcbaa, Entries);
 
@@ -734,7 +735,7 @@ XhcDequeueTrbFromEndpoint (
   Dci = XhcEndpointToDci (Urb->Ep.EpAddr, (UINT8)(Urb->Ep.Direction));
   ASSERT (Dci < 32);
 
-  DEBUG ((DEBUG_INFO, "Stop Slot = %x,Dci = %x\n", SlotId, Dci));
+  DEBUG ((DEBUG_VERBOSE, "Stop Slot = %x,Dci = %x\n", SlotId, Dci));
 
   //
   // 1) Send Stop endpoint command to stop xHC from executing of the TDs on the endpoint
@@ -795,7 +796,7 @@ CreateEventRing (
   ASSERT (EventRing != NULL);
 
   Size = sizeof (TRB_TEMPLATE) * EVENT_RING_TRB_NUMBER;
-  Buf  = UsbHcAllocateMem (Xhc->MemPool, Size);
+  Buf  = UsbHcAllocateMem (Xhc->MemPool, Size, TRUE);
   ASSERT (Buf != NULL);
   ASSERT (((UINTN)Buf & 0x3F) == 0);
   ZeroMem (Buf, Size);
@@ -814,7 +815,7 @@ CreateEventRing (
   EventRing->EventRingCCS = 1;
 
   Size = sizeof (EVENT_RING_SEG_TABLE_ENTRY) * ERST_NUMBER;
-  Buf  = UsbHcAllocateMem (Xhc->MemPool, Size);
+  Buf  = UsbHcAllocateMem (Xhc->MemPool, Size, FALSE);
   ASSERT (Buf != NULL);
   ASSERT (((UINTN)Buf & 0x3F) == 0);
   ZeroMem (Buf, Size);
@@ -892,7 +893,7 @@ CreateTransferRing (
   LINK_TRB              *EndTrb;
   EFI_PHYSICAL_ADDRESS  PhyAddr;
 
-  Buf = UsbHcAllocateMem (Xhc->MemPool, sizeof (TRB_TEMPLATE) * TrbNum);
+  Buf = UsbHcAllocateMem (Xhc->MemPool, sizeof (TRB_TEMPLATE) * TrbNum, TRUE);
   ASSERT (Buf != NULL);
   ASSERT (((UINTN)Buf & 0x3F) == 0);
   ZeroMem (Buf, sizeof (TRB_TEMPLATE) * TrbNum);
@@ -2182,7 +2183,7 @@ XhcInitializeDeviceSlot (
   // 4.3.3 Device Slot Initialization
   // 1) Allocate an Input Context data structure (6.2.5) and initialize all fields to '0'.
   //
-  InputContext = UsbHcAllocateMem (Xhc->MemPool, sizeof (INPUT_CONTEXT));
+  InputContext = UsbHcAllocateMem (Xhc->MemPool, sizeof (INPUT_CONTEXT), FALSE);
   ASSERT (InputContext != NULL);
   ASSERT (((UINTN)InputContext & 0x3F) == 0);
   ZeroMem (InputContext, sizeof (INPUT_CONTEXT));
@@ -2284,7 +2285,7 @@ XhcInitializeDeviceSlot (
   //
   // 6) Allocate the Output Device Context data structure (6.2.1) and initialize it to '0'.
   //
-  OutputContext = UsbHcAllocateMem (Xhc->MemPool, sizeof (DEVICE_CONTEXT));
+  OutputContext = UsbHcAllocateMem (Xhc->MemPool, sizeof (DEVICE_CONTEXT), FALSE);
   ASSERT (OutputContext != NULL);
   ASSERT (((UINTN)OutputContext & 0x3F) == 0);
   ZeroMem (OutputContext, sizeof (DEVICE_CONTEXT));
@@ -2398,7 +2399,7 @@ XhcInitializeDeviceSlot64 (
   // 4.3.3 Device Slot Initialization
   // 1) Allocate an Input Context data structure (6.2.5) and initialize all fields to '0'.
   //
-  InputContext = UsbHcAllocateMem (Xhc->MemPool, sizeof (INPUT_CONTEXT_64));
+  InputContext = UsbHcAllocateMem (Xhc->MemPool, sizeof (INPUT_CONTEXT_64), FALSE);
   ASSERT (InputContext != NULL);
   ASSERT (((UINTN)InputContext & 0x3F) == 0);
   ZeroMem (InputContext, sizeof (INPUT_CONTEXT_64));
@@ -2500,7 +2501,7 @@ XhcInitializeDeviceSlot64 (
   //
   // 6) Allocate the Output Device Context data structure (6.2.1) and initialize it to '0'.
   //
-  OutputContext = UsbHcAllocateMem (Xhc->MemPool, sizeof (DEVICE_CONTEXT_64));
+  OutputContext = UsbHcAllocateMem (Xhc->MemPool, sizeof (DEVICE_CONTEXT_64), FALSE);
   ASSERT (OutputContext != NULL);
   ASSERT (((UINTN)OutputContext & 0x3F) == 0);
   ZeroMem (OutputContext, sizeof (DEVICE_CONTEXT_64));
@@ -2807,6 +2808,9 @@ XhcInitializeEndpointContext (
   MaxDci = 0;
 
   NumEp = IfDesc->NumEndpoints;
+  if (NumEp == 0) {
+    MaxDci = 1;
+  }
 
   EpDesc = (USB_ENDPOINT_DESCRIPTOR *)(IfDesc + 1);
   for (EpIndex = 0; EpIndex < NumEp; EpIndex++) {
@@ -3006,6 +3010,9 @@ XhcInitializeEndpointContext64 (
   MaxDci = 0;
 
   NumEp = IfDesc->NumEndpoints;
+  if (NumEp == 0) {
+    MaxDci = 1;
+  }
 
   EpDesc = (USB_ENDPOINT_DESCRIPTOR *)(IfDesc + 1);
   for (EpIndex = 0; EpIndex < NumEp; EpIndex++) {
@@ -3376,7 +3383,7 @@ XhcStopEndpoint (
   EVT_TRB_COMMAND_COMPLETION  *EvtTrb;
   CMD_TRB_STOP_ENDPOINT       CmdTrbStopED;
 
-  DEBUG ((DEBUG_INFO, "XhcStopEndpoint: Slot = 0x%x, Dci = 0x%x\n", SlotId, Dci));
+  DEBUG ((DEBUG_VERBOSE, "XhcStopEndpoint: Slot = 0x%x, Dci = 0x%x\n", SlotId, Dci));
 
   //
   // When XhcCheckUrbResult waits for the Stop_Endpoint completion, it also checks
@@ -3497,7 +3504,7 @@ XhcSetTrDequeuePointer (
   CMD_SET_TR_DEQ_POINTER      CmdSetTRDeq;
   EFI_PHYSICAL_ADDRESS        PhyAddr;
 
-  DEBUG ((DEBUG_INFO, "XhcSetTrDequeuePointer: Slot = 0x%x, Dci = 0x%x, Urb = 0x%x\n", SlotId, Dci, Urb));
+  DEBUG ((DEBUG_VERBOSE, "XhcSetTrDequeuePointer: Slot = 0x%x, Dci = 0x%x, Urb = 0x%x\n", SlotId, Dci, Urb));
 
   //
   // Send stop endpoint command to transit Endpoint from running to stop state
@@ -3957,6 +3964,7 @@ XhcEvaluateContext (
   CMD_TRB_EVALUATE_CONTEXT    CmdTrbEvalu;
   EVT_TRB_COMMAND_COMPLETION  *EvtTrb;
   INPUT_CONTEXT               *InputContext;
+  DEVICE_CONTEXT              *OutputContext;
   EFI_PHYSICAL_ADDRESS        PhyAddr;
 
   ASSERT (Xhc->UsbDevContext[SlotId].SlotId != 0);
@@ -3964,11 +3972,15 @@ XhcEvaluateContext (
   //
   // 4.6.7 Evaluate Context
   //
-  InputContext = Xhc->UsbDevContext[SlotId].InputContext;
+  InputContext  = Xhc->UsbDevContext[SlotId].InputContext;
+  OutputContext = Xhc->UsbDevContext[SlotId].OutputContext;
   ZeroMem (InputContext, sizeof (INPUT_CONTEXT));
+
+  CopyMem (&InputContext->EP[0], &OutputContext->EP[0], sizeof (ENDPOINT_CONTEXT));
 
   InputContext->InputControlContext.Dword2 |= BIT1;
   InputContext->EP[0].MaxPacketSize         = MaxPacketSize;
+  InputContext->EP[0].EPState               = 0;
 
   ZeroMem (&CmdTrbEvalu, sizeof (CmdTrbEvalu));
   PhyAddr              = UsbHcGetPciAddrForHostAddr (Xhc->MemPool, InputContext, sizeof (INPUT_CONTEXT));
@@ -4013,6 +4025,7 @@ XhcEvaluateContext64 (
   CMD_TRB_EVALUATE_CONTEXT    CmdTrbEvalu;
   EVT_TRB_COMMAND_COMPLETION  *EvtTrb;
   INPUT_CONTEXT_64            *InputContext;
+  DEVICE_CONTEXT_64           *OutputContext;
   EFI_PHYSICAL_ADDRESS        PhyAddr;
 
   ASSERT (Xhc->UsbDevContext[SlotId].SlotId != 0);
@@ -4020,11 +4033,15 @@ XhcEvaluateContext64 (
   //
   // 4.6.7 Evaluate Context
   //
-  InputContext = Xhc->UsbDevContext[SlotId].InputContext;
+  InputContext  = Xhc->UsbDevContext[SlotId].InputContext;
+  OutputContext = Xhc->UsbDevContext[SlotId].OutputContext;
   ZeroMem (InputContext, sizeof (INPUT_CONTEXT_64));
+
+  CopyMem (&InputContext->EP[0], &OutputContext->EP[0], sizeof (ENDPOINT_CONTEXT_64));
 
   InputContext->InputControlContext.Dword2 |= BIT1;
   InputContext->EP[0].MaxPacketSize         = MaxPacketSize;
+  InputContext->EP[0].EPState               = 0;
 
   ZeroMem (&CmdTrbEvalu, sizeof (CmdTrbEvalu));
   PhyAddr              = UsbHcGetPciAddrForHostAddr (Xhc->MemPool, InputContext, sizeof (INPUT_CONTEXT_64));

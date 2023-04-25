@@ -38,6 +38,7 @@ static const int kernel_feature_bits[] = {
     VIRTIO_RING_F_INDIRECT_DESC,
     VIRTIO_RING_F_EVENT_IDX,
     VIRTIO_SCSI_F_HOTPLUG,
+    VIRTIO_F_RING_RESET,
     VHOST_INVALID_FEATURE_BIT
 };
 
@@ -120,7 +121,7 @@ static void vhost_scsi_set_status(VirtIODevice *vdev, uint8_t val)
         start = false;
     }
 
-    if (vsc->dev.started == start) {
+    if (vhost_dev_is_started(&vsc->dev) == start) {
         return;
     }
 
@@ -147,7 +148,7 @@ static int vhost_scsi_pre_save(void *opaque)
 
     /* At this point, backend must be stopped, otherwise
      * it might keep writing to memory. */
-    assert(!vsc->dev.started);
+    assert(!vhost_dev_is_started(&vsc->dev));
 
     return 0;
 }
@@ -273,6 +274,13 @@ static void vhost_scsi_unrealize(DeviceState *dev)
     virtio_scsi_common_unrealize(dev);
 }
 
+static struct vhost_dev *vhost_scsi_get_vhost(VirtIODevice *vdev)
+{
+    VHostSCSI *s = VHOST_SCSI(vdev);
+    VHostSCSICommon *vsc = VHOST_SCSI_COMMON(s);
+    return &vsc->dev;
+}
+
 static Property vhost_scsi_properties[] = {
     DEFINE_PROP_STRING("vhostfd", VirtIOSCSICommon, conf.vhostfd),
     DEFINE_PROP_STRING("wwpn", VirtIOSCSICommon, conf.wwpn),
@@ -307,6 +315,7 @@ static void vhost_scsi_class_init(ObjectClass *klass, void *data)
     vdc->get_features = vhost_scsi_common_get_features;
     vdc->set_config = vhost_scsi_common_set_config;
     vdc->set_status = vhost_scsi_set_status;
+    vdc->get_vhost = vhost_scsi_get_vhost;
     fwc->get_dev_path = vhost_scsi_common_get_fw_dev_path;
 }
 

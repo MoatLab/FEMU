@@ -70,11 +70,15 @@ def list_projects(options: 'argparse.Namespace') -> None:
 def search(options: 'argparse.Namespace') -> None:
     name = options.name
     releases = get_releases()
-    for p in releases.keys():
-        if p.startswith(name):
+    for p, info in releases.items():
+        if p.find(name) != -1:
             print(p)
+        else:
+            for dep in info.get('dependency_names', []):
+                if dep.find(name) != -1:
+                    print(f'Dependency {dep} found in wrap {p}')
 
-def get_latest_version(name: str) -> tuple:
+def get_latest_version(name: str) -> T.Tuple[str, str]:
     releases = get_releases()
     info = releases.get(name)
     if not info:
@@ -109,7 +113,7 @@ def parse_patch_url(patch_url: str) -> T.Tuple[str, str]:
     elif arr[0] == 'v2':
         # e.g. https://wrapdb.mesonbuild.com/v2/zlib_1.2.11-5/get_patch
         tag = arr[-2]
-        name, version = tag.rsplit('_', 1)
+        _, version = tag.rsplit('_', 1)
         version, revision = version.rsplit('-', 1)
         return version, revision
     else:
@@ -164,7 +168,7 @@ def info(options: 'argparse.Namespace') -> None:
 
 def do_promotion(from_path: str, spdir_name: str) -> None:
     if os.path.isfile(from_path):
-        assert(from_path.endswith('.wrap'))
+        assert from_path.endswith('.wrap')
         shutil.copy(from_path, spdir_name)
     elif os.path.isdir(from_path):
         sproj_name = os.path.basename(from_path)

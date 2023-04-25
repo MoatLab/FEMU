@@ -12,6 +12,9 @@ parameters:
   tool_chain_tag: ''
   vm_image: ''
   arch_list: ''
+  extra_install_step: []
+  usePythonVersion: ''
+  container: ''
 
 # Build step
 jobs:
@@ -21,6 +24,10 @@ jobs:
   #Use matrix to speed up the build process
   strategy:
     matrix:
+      ${{ if eq(parameters.tool_chain_tag, 'GCC5') }}:
+        TARGET_GCC_ONLY:
+          Build.Pkgs: 'EmbeddedPkg'
+          Build.Targets: 'DEBUG,RELEASE,NO-TARGET,NOOPT'
       TARGET_ARM_ARMPLATFORM:
         Build.Pkgs: 'ArmPkg,ArmPlatformPkg'
         Build.Targets: 'DEBUG,RELEASE,NO-TARGET,NOOPT'
@@ -35,33 +42,39 @@ jobs:
         Build.Targets: 'RELEASE,NO-TARGET'
       TARGET_NETWORK:
         Build.Pkgs: 'NetworkPkg,RedfishPkg'
-        Build.Targets: 'DEBUG,RELEASE,NO-TARGET'
+        Build.Targets: 'DEBUG,RELEASE,NO-TARGET,NOOPT'
       TARGET_OTHER:
-        Build.Pkgs: 'PcAtChipsetPkg,ShellPkg,StandaloneMmPkg'
-        Build.Targets: 'DEBUG,RELEASE,NO-TARGET'
+        Build.Pkgs: 'PcAtChipsetPkg,PrmPkg,ShellPkg,SourceLevelDebugPkg,StandaloneMmPkg,SignedCapsulePkg'
+        Build.Targets: 'DEBUG,RELEASE,NO-TARGET,NOOPT'
       TARGET_FMP_FAT_TEST:
         Build.Pkgs: 'FmpDevicePkg,FatPkg,UnitTestFrameworkPkg,DynamicTablesPkg'
         Build.Targets: 'DEBUG,RELEASE,NO-TARGET,NOOPT'
       TARGET_CRYPTO:
         Build.Pkgs: 'CryptoPkg'
         Build.Targets: 'DEBUG,RELEASE,NO-TARGET,NOOPT'
+      TARGET_FSP:
+        Build.Pkgs: 'IntelFsp2Pkg,IntelFsp2WrapperPkg'
+        Build.Targets: 'DEBUG,RELEASE,NO-TARGET,NOOPT'
       TARGET_SECURITY:
         Build.Pkgs: 'SecurityPkg'
-        Build.Targets: 'DEBUG,RELEASE,NO-TARGET'
+        Build.Targets: 'DEBUG,RELEASE,NO-TARGET,NOOPT'
       TARGET_UEFIPAYLOAD:
         Build.Pkgs: 'UefiPayloadPkg'
-        Build.Targets: 'DEBUG,RELEASE,NO-TARGET'
+        Build.Targets: 'DEBUG,RELEASE,NO-TARGET,NOOPT'
       TARGET_PLATFORMS:
         # For Platforms only check code. Leave it to Platform CI
         # to build them.
         Build.Pkgs: 'ArmVirtPkg,EmulatorPkg,OvmfPkg'
-        Build.Targets: 'NO-TARGET'
+        Build.Targets: 'NO-TARGET,NOOPT'
 
   workspace:
     clean: all
 
   pool:
     vmImage: ${{ parameters.vm_image }}
+
+  ${{ if not(eq(parameters.container, '')) }}:
+    container: ${{ parameters.container }}
 
   steps:
   - template: pr-gate-steps.yml
@@ -70,3 +83,47 @@ jobs:
       build_pkgs: $(Build.Pkgs)
       build_targets: $(Build.Targets)
       build_archs: ${{ parameters.arch_list }}
+      usePythonVersion: ${{ parameters.usePythonVersion }}
+      extra_install_step: ${{ parameters.extra_install_step }}
+
+- job: Build_${{ parameters.tool_chain_tag }}_TARGET_CODE_COVERAGE
+  dependsOn: Build_${{ parameters.tool_chain_tag }}
+  workspace:
+    clean: all
+
+  pool:
+    vmImage: 'windows-2019'
+
+  steps:
+    - checkout: self
+      clean: true
+      fetchDepth: 1
+      submodules: true
+
+    - task: DownloadPipelineArtifact@2
+      displayName: 'Download Build Artifacts'
+      inputs:
+        buildType: 'current'
+        targetPath: '$(Build.ArtifactStagingDirectory)'
+
+    - powershell: Write-Host "##vso[task.setvariable variable=is_code_coverage]0"
+      displayName: Give default value for whether CodeCoverage or not
+
+    - powershell: if (Test-Path -Path $(Build.ArtifactStagingDirectory)/**/coverage.xml) {Write-Host "##vso[task.setvariable variable=is_code_coverage]1"}
+      displayName: Check coverage.xml exist or not
+
+    - task: CmdLine@2
+      displayName: Create code coverage report
+      inputs:
+        script: |
+          dotnet tool install -g dotnet-reportgenerator-globaltool
+          reportgenerator -reports:$(Build.ArtifactStagingDirectory)/**/coverage.xml -targetdir:$(Build.ArtifactStagingDirectory)/Coverage -reporttypes:Cobertura -filefilters:-*Build*;-*UnitTest*;-*Mock*;-*usr*
+      condition: eq(variables.is_code_coverage, 1)
+
+    - task: PublishCodeCoverageResults@1
+      displayName: 'Publish code coverage'
+      inputs:
+        codeCoverageTool: Cobertura
+        summaryFileLocation: '$(Build.ArtifactStagingDirectory)/Coverage/Cobertura.xml'
+      condition: eq(variables.is_code_coverage, 1)
+

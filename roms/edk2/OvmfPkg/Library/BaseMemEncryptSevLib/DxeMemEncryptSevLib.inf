@@ -51,10 +51,11 @@
   DebugLib
   MemoryAllocationLib
   PcdLib
-  VmgExitLib
+  CcExitLib
 
 [FeaturePcd]
   gUefiOvmfPkgTokenSpaceGuid.PcdSmmSmramRequire
 
 [Pcd]
   gEfiMdeModulePkgTokenSpaceGuid.PcdPteMemoryEncryptionAddressOrMask
+  gEfiMdePkgTokenSpaceGuid.PcdConfidentialComputingGuestAttr

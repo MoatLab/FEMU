@@ -44,7 +44,7 @@ from . import mlog
 from .coredata import major_versions_differ, MesonVersionMismatchException
 from .coredata import version as coredata_version
 from .mesonlib import (MesonException, OrderedSet, RealPathAction,
-                       get_wine_shortpath, join_args, split_args)
+                       get_wine_shortpath, join_args, split_args, setup_vsenv)
 from .mintro import get_infodir, load_info_file
 from .programs import ExternalProgram
 from .backend.backends import TestProtocol, TestSerialisation
@@ -430,7 +430,7 @@ class TAPParser:
             if not line:
                 return
 
-            yield self.Error('unexpected input at line {}'.format((self.lineno,)))
+            yield self.Error(f'unexpected input at line {self.lineno}')
         else:
             # end of file
             if self.state == self._YAML:
@@ -477,8 +477,9 @@ class TestFileLogger(TestLogger):
 
 
 class ConsoleLogger(TestLogger):
-    SPINNER = "\U0001f311\U0001f312\U0001f313\U0001f314" + \
-              "\U0001f315\U0001f316\U0001f317\U0001f318"
+    ASCII_SPINNER = ['..', ':.', '.:']
+    SPINNER = ["\U0001f311", "\U0001f312", "\U0001f313", "\U0001f314",
+               "\U0001f315", "\U0001f316", "\U0001f317", "\U0001f318"]
 
     SCISSORS = "\u2700 "
     HLINE = "\u2015"
@@ -506,12 +507,14 @@ class ConsoleLogger(TestLogger):
         self.output_start = dashes(self.SCISSORS, self.HLINE, self.cols - 2)
         self.output_end = dashes('', self.HLINE, self.cols - 2)
         self.sub = self.RTRI
+        self.spinner = self.SPINNER
         try:
             self.output_start.encode(sys.stdout.encoding or 'ascii')
         except UnicodeEncodeError:
             self.output_start = dashes('8<', '-', self.cols - 2)
             self.output_end = dashes('', '-', self.cols - 2)
             self.sub = '| '
+            self.spinner = self.ASCII_SPINNER
 
     def flush(self) -> None:
         if self.should_erase_line:
@@ -536,8 +539,8 @@ class ConsoleLogger(TestLogger):
             count = '{}-{}/{}'.format(self.started_tests - len(self.running_tests) + 1,
                                       self.started_tests, self.test_count)
 
-        left = '[{}] {} '.format(count, self.SPINNER[self.spinner_index])
-        self.spinner_index = (self.spinner_index + 1) % len(self.SPINNER)
+        left = '[{}] {} '.format(count, self.spinner[self.spinner_index])
+        self.spinner_index = (self.spinner_index + 1) % len(self.spinner)
 
         right = '{spaces} {dur:{durlen}}'.format(
             spaces=' ' * TestResult.maxlen(),
@@ -662,9 +665,8 @@ class ConsoleLogger(TestLogger):
 
         if not harness.options.quiet or not result.res.is_ok():
             self.flush()
-            if harness.options.verbose and not result.is_parallel and result.cmdline:
-                if not result.needs_parsing:
-                    print(self.output_end)
+            if harness.options.verbose and not result.is_parallel and result.cmdline and not result.needs_parsing:
+                print(self.output_end)
                 print(harness.format(result, mlog.colorize_console(), max_left_width=self.max_left_width))
             else:
                 print(harness.format(result, mlog.colorize_console(), max_left_width=self.max_left_width),
@@ -1092,7 +1094,14 @@ async def read_decode(reader: asyncio.StreamReader, console_mode: ConsoleUser) -
     stdo_lines = []
     try:
         while not reader.at_eof():
-            line = decode(await reader.readline())
+            # Prefer splitting by line, as that produces nicer output
+            try:
+                line_bytes = await reader.readuntil(b'\n')
+            except asyncio.IncompleteReadError as e:
+                line_bytes = e.partial
+            except asyncio.LimitOverrunError as e:
+                line_bytes = await reader.readexactly(e.consumed)
+            line = decode(line_bytes)
             stdo_lines.append(line)
             if console_mode is ConsoleUser.STDOUT:
                 print(line, end='', flush=True)
@@ -1340,18 +1349,18 @@ class SingleTestRunner:
         elif not self.test.is_cross_built and run_with_mono(self.test.fname[0]):
             return ['mono'] + self.test.fname
         elif self.test.cmd_is_built and self.test.is_cross_built and self.test.needs_exe_wrapper:
-            if self.test.exe_runner is None:
+            if self.test.exe_wrapper is None:
                 # Can not run test on cross compiled executable
                 # because there is no execute wrapper.
                 return None
             elif self.test.cmd_is_built:
                 # If the command is not built (ie, its a python script),
                 # then we don't check for the exe-wrapper
-                if not self.test.exe_runner.found():
+                if not self.test.exe_wrapper.found():
                     msg = ('The exe_wrapper defined in the cross file {!r} was not '
                            'found. Please check the command and/or add it to PATH.')
-                    raise TestException(msg.format(self.test.exe_runner.name))
-                return self.test.exe_runner.get_command() + self.test.fname
+                    raise TestException(msg.format(self.test.exe_wrapper.name))
+                return self.test.exe_wrapper.get_command() + self.test.fname
         return self.test.fname
 
     def _get_cmd(self) -> T.Optional[T.List[str]]:
@@ -1565,8 +1574,8 @@ class TestHarness:
         test_env = test.env.get_env(env)
         env.update(test_env)
         if (test.is_cross_built and test.needs_exe_wrapper and
-                test.exe_runner and test.exe_runner.found()):
-            env['MESON_EXE_WRAPPER'] = join_args(test.exe_runner.get_command())
+                test.exe_wrapper and test.exe_wrapper.found()):
+            env['MESON_EXE_WRAPPER'] = join_args(test.exe_wrapper.get_command())
         return SingleTestRunner(test, env, name, options)
 
     def process_test_result(self, result: TestRun) -> None:
@@ -1660,7 +1669,7 @@ class TestHarness:
             # wrapper script.
             sys.exit(125)
 
-        self.name_max_len = max([uniwidth(self.get_pretty_suite(test)) for test in tests])
+        self.name_max_len = max(uniwidth(self.get_pretty_suite(test)) for test in tests)
         startdir = os.getcwd()
         try:
             os.chdir(self.options.wd)
@@ -1668,11 +1677,11 @@ class TestHarness:
             for i in range(self.options.repeat):
                 runners.extend(self.get_test_runner(test) for test in tests)
                 if i == 0:
-                    self.duration_max_len = max([len(str(int(runner.timeout or 99)))
-                                                 for runner in runners])
+                    self.duration_max_len = max(len(str(int(runner.timeout or 99)))
+                                                for runner in runners)
                     # Disable the progress report if it gets in the way
                     self.need_console = any(runner.console_mode is not ConsoleUser.LOGGER
-                                             for runner in runners)
+                                            for runner in runners)
 
             self.test_count = len(runners)
             self.run_tests(runners)
@@ -1790,7 +1799,7 @@ class TestHarness:
     def get_wrapper(options: argparse.Namespace) -> T.List[str]:
         wrap = []  # type: T.List[str]
         if options.gdb:
-            wrap = [options.gdb_path, '--quiet', '--nh']
+            wrap = [options.gdb_path, '--quiet']
             if options.repeat > 1:
                 wrap += ['-ex', 'run', '-ex', 'quit']
             # Signal the end of arguments to gdb
@@ -1990,6 +1999,9 @@ def run(options: argparse.Namespace) -> int:
         if not exe.found():
             print(f'Could not find requested program: {check_bin!r}')
             return 1
+
+    b = build.load(options.wd)
+    setup_vsenv(b.need_vsenv)
 
     with TestHarness(options) as th:
         try:

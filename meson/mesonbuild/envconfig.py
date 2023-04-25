@@ -45,6 +45,7 @@ known_cpu_families = (
     'csky',
     'dspic',
     'e2k',
+    'ft32',
     'ia64',
     'loongarch64',
     'm68k',
@@ -118,6 +119,7 @@ ENV_VAR_PROG_MAP: T.Mapping[str, str] = {
     'qmake': 'QMAKE',
     'pkgconfig': 'PKG_CONFIG',
     'make': 'MAKE',
+    'vapigen': 'VAPIGEN',
 }
 
 # Deprecated environment variables mapped from the new variable to the old one
@@ -385,6 +387,22 @@ class BinaryTable:
             return []
         return ['ccache']
 
+    @staticmethod
+    def detect_sccache() -> T.List[str]:
+        try:
+            subprocess.check_call(['sccache', '--version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except (OSError, subprocess.CalledProcessError):
+            return []
+        return ['sccache']
+
+    @staticmethod
+    def detect_compiler_cache() -> T.List[str]:
+        # Sccache is "newer" so it is assumed that people would prefer it by default.
+        cache = BinaryTable.detect_sccache()
+        if cache:
+            return cache
+        return BinaryTable.detect_ccache()
+
     @classmethod
     def parse_entry(cls, entry: T.Union[str, T.List[str]]) -> T.Tuple[T.List[str], T.List[str]]:
         compiler = mesonlib.stringlistify(entry)
@@ -392,6 +410,9 @@ class BinaryTable:
         if compiler[0] == 'ccache':
             compiler = compiler[1:]
             ccache = cls.detect_ccache()
+        elif compiler[0] == 'sccache':
+            compiler = compiler[1:]
+            ccache = cls.detect_sccache()
         else:
             ccache = []
         # Return value has to be a list of compiler 'choices'

@@ -7,7 +7,9 @@
 #include <pci.h>
 #include <phb4.h>
 #include <npu2.h>
-#include <npu3.h>
+#include <pau.h>
+
+#define TL_RATE_BUF_SIZE	32
 
 static int64_t opal_npu_init_context(uint64_t phb_id, int pid __unused,
 				     uint64_t msr, uint64_t bdf)
@@ -19,9 +21,6 @@ static int64_t opal_npu_init_context(uint64_t phb_id, int pid __unused,
 
 	if (phb->phb_type == phb_type_npu_v2)
 		return npu2_init_context(phb, msr, bdf);
-
-	if (phb->phb_type == phb_type_npu_v3)
-		return npu3_init_context(phb, msr, bdf);
 
 	return OPAL_PARAMETER;
 }
@@ -38,9 +37,6 @@ static int64_t opal_npu_destroy_context(uint64_t phb_id, uint64_t pid __unused,
 	if (phb->phb_type == phb_type_npu_v2)
 		return npu2_destroy_context(phb, bdf);
 
-	if (phb->phb_type == phb_type_npu_v3)
-		return npu3_destroy_context(phb, bdf);
-
 	return OPAL_PARAMETER;
 }
 opal_call(OPAL_NPU_DESTROY_CONTEXT, opal_npu_destroy_context, 3);
@@ -56,8 +52,8 @@ static int64_t opal_npu_map_lpar(uint64_t phb_id, uint64_t bdf, uint64_t lparid,
 	if (phb->phb_type == phb_type_npu_v2)
 		return npu2_map_lpar(phb, bdf, lparid, lpcr);
 
-	if (phb->phb_type == phb_type_npu_v3)
-		return npu3_map_lpar(phb, bdf, lparid, lpcr);
+	if (phb->phb_type == phb_type_pau_opencapi)
+		return pau_opencapi_map_atsd_lpar(phb, bdf, lparid, lpcr);
 
 	return OPAL_PARAMETER;
 }
@@ -89,13 +85,10 @@ static int64_t npu_set_relaxed_order(uint32_t gcid, int pec, bool enable)
 	int64_t rc;
 
 	for_each_phb(phb) {
-		if (phb->phb_type == phb_type_npu_v2)
-			rc = npu2_set_relaxed_order(phb, gcid, pec, enable);
-		else if (phb->phb_type == phb_type_npu_v3)
-			rc = npu3_set_relaxed_order(phb, gcid, pec, enable);
-		else
+		if (phb->phb_type != phb_type_npu_v2)
 			continue;
 
+		rc = npu2_set_relaxed_order(phb, gcid, pec, enable);
 		if (rc)
 			return rc;
 	}
@@ -174,3 +167,110 @@ static int64_t opal_npu_get_relaxed_order(uint64_t phb_id,
 	return phb4->ro_state;
 }
 opal_call(OPAL_NPU_GET_RELAXED_ORDER, opal_npu_get_relaxed_order, 2);
+
+#define MAX_PE_HANDLE	((1 << 15) - 1)
+
+static int64_t opal_npu_spa_setup(uint64_t phb_id, uint32_t bdfn,
+				  uint64_t addr, uint64_t PE_mask)
+{
+	struct phb *phb = pci_get_phb(phb_id);
+
+	if (!phb)
+		return OPAL_PARAMETER;
+
+	/* 4k aligned */
+	if (addr & 0xFFF)
+		return OPAL_PARAMETER;
+
+	if (PE_mask > 15)
+		return OPAL_PARAMETER;
+
+	if (phb->phb_type == phb_type_npu_v2_opencapi)
+		return npu2_opencapi_spa_setup(phb, bdfn, addr, PE_mask);
+
+	if (phb->phb_type == phb_type_pau_opencapi)
+		return pau_opencapi_spa_setup(phb, bdfn, addr, PE_mask);
+
+	return OPAL_PARAMETER;
+}
+opal_call(OPAL_NPU_SPA_SETUP, opal_npu_spa_setup, 4);
+
+static int64_t opal_npu_spa_clear_cache(uint64_t phb_id, uint32_t bdfn,
+					uint64_t PE_handle)
+{
+	struct phb *phb = pci_get_phb(phb_id);
+
+	if (!phb)
+		return OPAL_PARAMETER;
+
+	if (PE_handle > MAX_PE_HANDLE)
+		return OPAL_PARAMETER;
+
+	if (phb->phb_type == phb_type_npu_v2_opencapi)
+		return npu2_opencapi_spa_clear_cache(phb, bdfn, PE_handle);
+
+	if (phb->phb_type == phb_type_pau_opencapi)
+		return pau_opencapi_spa_clear_cache(phb, bdfn, PE_handle);
+
+	return OPAL_PARAMETER;
+}
+opal_call(OPAL_NPU_SPA_CLEAR_CACHE, opal_npu_spa_clear_cache, 3);
+
+static int64_t opal_npu_tl_set(uint64_t phb_id, uint32_t bdfn,
+		    long capabilities, uint64_t rate_phys, int rate_sz)
+{
+	struct phb *phb = pci_get_phb(phb_id);
+	char *rate = (char *) rate_phys;
+
+	if (!phb)
+		return OPAL_PARAMETER;
+
+	if (!opal_addr_valid(rate) || rate_sz != TL_RATE_BUF_SIZE)
+		return OPAL_PARAMETER;
+
+	if (phb->phb_type == phb_type_npu_v2_opencapi)
+		return npu2_opencapi_tl_set(phb, bdfn, capabilities,
+					    rate);
+
+	if (phb->phb_type == phb_type_pau_opencapi)
+		return pau_opencapi_tl_set(phb, bdfn, capabilities,
+					   rate);
+
+	return OPAL_PARAMETER;
+}
+opal_call(OPAL_NPU_TL_SET, opal_npu_tl_set, 5);
+
+static int64_t opal_npu_mem_alloc(uint64_t phb_id, uint32_t bdfn,
+				  uint64_t size, uint64_t *bar)
+{
+	struct phb *phb = pci_get_phb(phb_id);
+
+	if (!phb)
+		return OPAL_PARAMETER;
+
+	if (phb->phb_type == phb_type_npu_v2_opencapi)
+		return npu2_opencapi_mem_alloc(phb, bdfn, size, bar);
+
+	if (phb->phb_type == phb_type_pau_opencapi)
+		return pau_opencapi_mem_alloc(phb, bdfn, size, bar);
+
+	return OPAL_PARAMETER;
+}
+opal_call(OPAL_NPU_MEM_ALLOC, opal_npu_mem_alloc, 4);
+
+static int64_t opal_npu_mem_release(uint64_t phb_id, uint32_t bdfn)
+{
+	struct phb *phb = pci_get_phb(phb_id);;
+
+	if (!phb)
+		return OPAL_PARAMETER;
+
+	if (phb->phb_type == phb_type_npu_v2_opencapi)
+		return npu2_opencapi_mem_release(phb, bdfn);
+
+	if (phb->phb_type == phb_type_pau_opencapi)
+		return pau_opencapi_mem_release(phb, bdfn);
+
+	return OPAL_PARAMETER;
+}
+opal_call(OPAL_NPU_MEM_RELEASE, opal_npu_mem_release, 2);

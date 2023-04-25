@@ -8,7 +8,7 @@
   This code produces 128 K of temporary memory for the SEC stack by directly
   allocate memory space with ReadWrite and Execute attribute.
 
-Copyright (c) 2006 - 2018, Intel Corporation. All rights reserved.<BR>
+Copyright (c) 2006 - 2022, Intel Corporation. All rights reserved.<BR>
 (C) Copyright 2016-2020 Hewlett Packard Enterprise Development LP<BR>
 SPDX-License-Identifier: BSD-2-Clause-Patent
 **/
@@ -56,6 +56,14 @@ NT_FD_INFO  *gFdInfo;
 UINTN             gSystemMemoryCount = 0;
 NT_SYSTEM_MEMORY  *gSystemMemory;
 
+BASE_LIBRARY_JUMP_BUFFER  mResetJumpBuffer;
+CHAR8                     *mResetTypeStr[] = {
+  "EfiResetCold",
+  "EfiResetWarm",
+  "EfiResetShutdown",
+  "EfiResetPlatformSpecific"
+};
+
 /*++
 
 Routine Description:
@@ -85,14 +93,6 @@ WinPeiAutoScan (
 {
   if (Index >= gSystemMemoryCount) {
     return EFI_UNSUPPORTED;
-  }
-
-  //
-  // Allocate enough memory space for emulator
-  //
-  gSystemMemory[Index].Memory = (EFI_PHYSICAL_ADDRESS)(UINTN)VirtualAlloc (NULL, (SIZE_T)(gSystemMemory[Index].Size), MEM_COMMIT, PAGE_EXECUTE_READWRITE);
-  if (gSystemMemory[Index].Memory == 0) {
-    return EFI_OUT_OF_RESOURCES;
   }
 
   *MemoryBase = gSystemMemory[Index].Memory;
@@ -203,6 +203,59 @@ SecPrint (
     NULL
     );
 }
+
+/**
+  Resets the entire platform.
+
+  @param[in] ResetType      The type of reset to perform.
+  @param[in] ResetStatus    The status code for the reset.
+  @param[in] DataSize       The size, in bytes, of ResetData.
+  @param[in] ResetData      For a ResetType of EfiResetCold, EfiResetWarm, or EfiResetShutdown
+                            the data buffer starts with a Null-terminated string, optionally
+                            followed by additional binary data. The string is a description
+                            that the caller may use to further indicate the reason for the
+                            system reset.
+
+**/
+VOID
+EFIAPI
+WinReset (
+  IN EFI_RESET_TYPE  ResetType,
+  IN EFI_STATUS      ResetStatus,
+  IN UINTN           DataSize,
+  IN VOID            *ResetData OPTIONAL
+  )
+{
+  UINTN  Index;
+
+  ASSERT (ResetType <= EfiResetPlatformSpecific);
+  SecPrint ("  Emu ResetSystem is called: ResetType = %s\n", mResetTypeStr[ResetType]);
+
+  if (ResetType == EfiResetShutdown) {
+    exit (0);
+  } else {
+    //
+    // Unload all DLLs
+    //
+    for (Index = 0; Index < mPdbNameModHandleArraySize; Index++) {
+      if (mPdbNameModHandleArray[Index].PdbPointer != NULL) {
+        SecPrint ("  Emu Unload DLL: %s\n", mPdbNameModHandleArray[Index].PdbPointer);
+        FreeLibrary (mPdbNameModHandleArray[Index].ModHandle);
+        HeapFree (GetProcessHeap (), 0, mPdbNameModHandleArray[Index].PdbPointer);
+        mPdbNameModHandleArray[Index].PdbPointer = NULL;
+      }
+    }
+
+    //
+    // Jump back to SetJump with jump code = ResetType + 1
+    //
+    LongJump (&mResetJumpBuffer, ResetType + 1);
+  }
+}
+
+EFI_PEI_RESET2_PPI  mEmuReset2Ppi = {
+  WinReset
+};
 
 /*++
 
@@ -396,6 +449,8 @@ Returns:
   UINTN                ProcessAffinityMask;
   UINTN                SystemAffinityMask;
   INT32                LowBit;
+  UINTN                ResetJumpCode;
+  EMU_THUNK_PPI        *SecEmuThunkPpi;
 
   //
   // Enable the privilege so that RTC driver can successfully run SetTime()
@@ -437,7 +492,19 @@ Returns:
   //
   // PPIs pased into PEI_CORE
   //
-  AddThunkPpi (EFI_PEI_PPI_DESCRIPTOR_PPI, &gEmuThunkPpiGuid, &mSecEmuThunkPpi);
+  SecEmuThunkPpi = AllocateZeroPool (sizeof (EMU_THUNK_PPI) + FixedPcdGet32 (PcdPersistentMemorySize));
+  if (SecEmuThunkPpi == NULL) {
+    SecPrint ("ERROR : Can not allocate memory for SecEmuThunkPpi.  Exiting.\n");
+    exit (1);
+  }
+
+  CopyMem (SecEmuThunkPpi, &mSecEmuThunkPpi, sizeof (EMU_THUNK_PPI));
+  SecEmuThunkPpi->Argc                 = Argc;
+  SecEmuThunkPpi->Argv                 = Argv;
+  SecEmuThunkPpi->Envp                 = Envp;
+  SecEmuThunkPpi->PersistentMemorySize = FixedPcdGet32 (PcdPersistentMemorySize);
+  AddThunkPpi (EFI_PEI_PPI_DESCRIPTOR_PPI, &gEmuThunkPpiGuid, SecEmuThunkPpi);
+  AddThunkPpi (EFI_PEI_PPI_DESCRIPTOR_PPI, &gEfiPeiReset2PpiGuid, &mEmuReset2Ppi);
 
   //
   // Emulator Bus Driver Thunks
@@ -455,6 +522,30 @@ Returns:
   if (gSystemMemory == NULL) {
     SecPrint ("ERROR : Can not allocate memory for %S.  Exiting.\n\r", MemorySizeStr);
     exit (1);
+  }
+
+  //
+  // Allocate "physical" memory space for emulator. It will be reported out later throuth MemoryAutoScan()
+  //
+  for (Index = 0, Done = FALSE; !Done; Index++) {
+    ASSERT (Index < gSystemMemoryCount);
+    gSystemMemory[Index].Size   = ((UINT64)_wtoi (MemorySizeStr)) * ((UINT64)SIZE_1MB);
+    gSystemMemory[Index].Memory = (EFI_PHYSICAL_ADDRESS)(UINTN)VirtualAlloc (NULL, (SIZE_T)(gSystemMemory[Index].Size), MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    if (gSystemMemory[Index].Memory == 0) {
+      return EFI_OUT_OF_RESOURCES;
+    }
+
+    //
+    // Find the next region
+    //
+    for (Index1 = 0; MemorySizeStr[Index1] != '!' && MemorySizeStr[Index1] != 0; Index1++) {
+    }
+
+    if (MemorySizeStr[Index1] == 0) {
+      Done = TRUE;
+    }
+
+    MemorySizeStr = MemorySizeStr + Index1 + 1;
   }
 
   //
@@ -483,14 +574,6 @@ Returns:
     SecPrint ("ERROR : Can not allocate enough space for SecStack\n\r");
     exit (1);
   }
-
-  SetMem32 (TemporaryRam, TemporaryRamSize, PcdGet32 (PcdInitValueInTempStack));
-
-  SecPrint (
-    "  OS Emulator passing in %u KB of temp RAM at 0x%08lx to SEC\n\r",
-    TemporaryRamSize / SIZE_1KB,
-    TemporaryRam
-    );
 
   //
   // If enabled use the magic page to communicate between modules
@@ -575,32 +658,24 @@ Returns:
     SecPrint ("\n\r");
   }
 
+  ResetJumpCode = SetJump (&mResetJumpBuffer);
+
   //
-  // Calculate memory regions and store the information in the gSystemMemory
-  //  global for later use. The autosizing code will use this data to
-  //  map this memory into the SEC process memory space.
+  // Do not clear memory content for warm reset.
   //
-  for (Index = 0, Done = FALSE; !Done; Index++) {
-    //
-    // Save the size of the memory and make a Unicode filename SystemMemory00, ...
-    //
-    gSystemMemory[Index].Size = ((UINT64)_wtoi (MemorySizeStr)) * ((UINT64)SIZE_1MB);
-
-    //
-    // Find the next region
-    //
-    for (Index1 = 0; MemorySizeStr[Index1] != '!' && MemorySizeStr[Index1] != 0; Index1++) {
+  if (ResetJumpCode != EfiResetWarm + 1) {
+    SecPrint ("  OS Emulator clearing temp RAM and physical RAM (to be discovered later)......\n\r");
+    SetMem32 (TemporaryRam, TemporaryRamSize, PcdGet32 (PcdInitValueInTempStack));
+    for (Index = 0; Index < gSystemMemoryCount; Index++) {
+      SetMem32 ((VOID *)(UINTN)gSystemMemory[Index].Memory, (UINTN)gSystemMemory[Index].Size, PcdGet32 (PcdInitValueInTempStack));
     }
-
-    if (MemorySizeStr[Index1] == 0) {
-      Done = TRUE;
-    }
-
-    MemorySizeStr = MemorySizeStr + Index1 + 1;
   }
 
-  SecPrint ("\n\r");
-
+  SecPrint (
+    "  OS Emulator passing in %u KB of temp RAM at 0x%08lx to SEC\n\r",
+    TemporaryRamSize / SIZE_1KB,
+    TemporaryRam
+    );
   //
   // Hand off to SEC Core
   //
@@ -728,19 +803,9 @@ SecPeCoffGetEntryPoint (
   }
 
   //
-  // Allocate space in NT (not emulator) memory with ReadWrite and Execute attribute.
-  // Extra space is for alignment
+  // XIP for SEC and PEI_CORE
   //
-  ImageContext.ImageAddress = (EFI_PHYSICAL_ADDRESS)(UINTN)VirtualAlloc (NULL, (SIZE_T)(ImageContext.ImageSize + (ImageContext.SectionAlignment * 2)), MEM_COMMIT, PAGE_EXECUTE_READWRITE);
-  if (ImageContext.ImageAddress == 0) {
-    return EFI_OUT_OF_RESOURCES;
-  }
-
-  //
-  // Align buffer on section boundary
-  //
-  ImageContext.ImageAddress += ImageContext.SectionAlignment - 1;
-  ImageContext.ImageAddress &= ~((EFI_PHYSICAL_ADDRESS)ImageContext.SectionAlignment - 1);
+  ImageContext.ImageAddress = (EFI_PHYSICAL_ADDRESS)(UINTN)Pe32Data;
 
   Status = PeCoffLoaderLoadImage (&ImageContext);
   if (EFI_ERROR (Status)) {

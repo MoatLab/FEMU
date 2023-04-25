@@ -135,8 +135,11 @@ if { $default_config == "PEGASUS" } {
 
 if { $default_config == "P9" } {
     # PVR configured for POWER9 DD2.3 Scale out 24 Core (ie SMT4)
+    # This still is not configured with LPAR-per-thread, which will make
+    # multi-thread KVM not work properly. And possibly even small-core is
+    # not set correctly either.
     myconf config processor/initial/PVR 0x4e1203
-    myconf config processor/initial/SIM_CTRL1 0x4228301710000000
+    myconf config processor/initial/SIM_CTRL1 0x42283c1710000000
 
     if { $mconf(numa) } {
         myconf config memory_region_id_shift 45
@@ -144,9 +147,28 @@ if { $default_config == "P9" } {
 }
 
 if { $default_config == "P10" } {
-    # PVR configured for POWER10 DD1.0
-    myconf config processor/initial/PVR 0x800100
-    myconf config processor/initial/SIM_CTRL1 0xc228100400000000
+    # PVR configured for POWER10 DD2.0, LPAR-per-thread
+    myconf config processor/initial/SIM_CTRL  0x0c1dd60000000000
+    if { $mconf(threads) == 8 } {
+        # Big-core mode.
+        myconf config processor/initial/PVR 0x00800200
+        myconf config processor/initial/SIM_CTRL1 0xc0400c0400040a40
+	puts "Set P10 big-core mode"
+    } else {
+        # Small-core mode.
+        myconf config processor/initial/PVR 0x00801200
+        myconf config processor/initial/SIM_CTRL1 0xc0400c0401040a40
+        if { $mconf(threads) != 1 && $mconf(threads) != 2 && $mconf(threads) != 4 } {
+            puts "ERROR: Bad threads configuration"
+            exit
+        }
+        if { $mconf(threads) != 4 && $mconf(cpus) != 1 } {
+            puts "ERROR: Bad threads, cpus configuration"
+            exit
+        }
+
+	puts "Set P10 small-core mode"
+    }
 
     if { $mconf(numa) } {
         myconf config memory_region_id_shift 44
@@ -163,6 +185,16 @@ if { [info exists env(SKIBOOT_SIMCONF)] } {
 }
 
 define machine myconf mysim
+
+# Some mambo does not expose SIM_CTRL as a config option. Also set the SPRs
+# after machine is defined.
+if { $default_config == "P10" } {
+    for { set c 0 } { $c < $mconf(cpus) } { incr c } {
+        for { set t 0 } { $t < $mconf(threads) } { incr t } {
+	    mysim mcm 0 cpu $c thread $t set spr ctrl 0x0c1dd60000000000
+        }
+    }
+}
 
 #
 # Include various utilities
@@ -705,8 +737,10 @@ mysim memory fread $mconf(boot_load) $boot_size $mconf(boot_image)
 set payload_size [file size $mconf(payload)]
 mysim memory fread $mconf(payload_addr) $payload_size $mconf(payload)
 
-if { $payload_size > [expr $mconf(boot_load) - $mconf(payload_addr)] } {
-	error "vmlinux is too large, consider adjusting PAYLOAD_ADDR"
+set available_space [expr $mconf(boot_load) - $mconf(payload_addr)]
+if { $payload_size > $available_space } {
+    set overflow [expr $payload_size - $available_space]
+    error "vmlinux is too large by $overflow bytes ($payload_size > $available_space), consider adjusting PAYLOAD_ADDR"
 }
 
 # Flatten it

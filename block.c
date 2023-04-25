@@ -27,6 +27,7 @@
 #include "block/trace.h"
 #include "block/block_int.h"
 #include "block/blockjob.h"
+#include "block/dirty-bitmap.h"
 #include "block/fuse.h"
 #include "block/nbd.h"
 #include "block/qdict.h"
@@ -90,15 +91,9 @@ static BlockDriverState *bdrv_open_inherit(const char *filename,
 static bool bdrv_recurse_has_child(BlockDriverState *bs,
                                    BlockDriverState *child);
 
-static void bdrv_child_free(BdrvChild *child);
-static void bdrv_replace_child_noperm(BdrvChild **child,
-                                      BlockDriverState *new_bs,
-                                      bool free_empty_child);
-static void bdrv_remove_file_or_backing_child(BlockDriverState *bs,
-                                              BdrvChild *child,
-                                              Transaction *tran);
-static void bdrv_remove_filter_or_cow_child(BlockDriverState *bs,
-                                            Transaction *tran);
+static void bdrv_replace_child_noperm(BdrvChild *child,
+                                      BlockDriverState *new_bs);
+static void bdrv_remove_child(BdrvChild *child, Transaction *tran);
 
 static int bdrv_reopen_prepare(BDRVReopenState *reopen_state,
                                BlockReopenQueue *queue,
@@ -107,6 +102,10 @@ static void bdrv_reopen_commit(BDRVReopenState *reopen_state);
 static void bdrv_reopen_abort(BDRVReopenState *reopen_state);
 
 static bool bdrv_backing_overridden(BlockDriverState *bs);
+
+static bool bdrv_change_aio_context(BlockDriverState *bs, AioContext *ctx,
+                                    GHashTable *visited, Transaction *tran,
+                                    Error **errp);
 
 /* If non-zero, use only whitelisted block drivers */
 static int use_bdrv_whitelist;
@@ -135,7 +134,7 @@ size_t bdrv_opt_mem_align(BlockDriverState *bs)
 {
     if (!bs || !bs->drv) {
         /* page size or 4k (hdd sector size) should be on the safe side */
-        return MAX(4096, qemu_real_host_page_size);
+        return MAX(4096, qemu_real_host_page_size());
     }
     IO_CODE();
 
@@ -146,7 +145,7 @@ size_t bdrv_min_mem_align(BlockDriverState *bs)
 {
     if (!bs || !bs->drv) {
         /* page size or 4k (hdd sector size) should be on the safe side */
-        return MAX(4096, qemu_real_host_page_size);
+        return MAX(4096, qemu_real_host_page_size());
     }
     IO_CODE();
 
@@ -278,8 +277,8 @@ bool bdrv_is_read_only(BlockDriverState *bs)
     return !(bs->open_flags & BDRV_O_RDWR);
 }
 
-int bdrv_can_set_read_only(BlockDriverState *bs, bool read_only,
-                           bool ignore_allow_rdw, Error **errp)
+static int bdrv_can_set_read_only(BlockDriverState *bs, bool read_only,
+                                  bool ignore_allow_rdw, Error **errp)
 {
     IO_CODE();
 
@@ -464,12 +463,18 @@ BlockDriver *bdrv_find_format(const char *format_name)
     /* The driver isn't registered, maybe we need to load a module */
     for (i = 0; i < (int)ARRAY_SIZE(block_driver_modules); ++i) {
         if (!strcmp(block_driver_modules[i].format_name, format_name)) {
-            block_module_load_one(block_driver_modules[i].library_name);
+            Error *local_err = NULL;
+            int rv = block_module_load(block_driver_modules[i].library_name,
+                                       &local_err);
+            if (rv > 0) {
+                return bdrv_do_find_format(format_name);
+            } else if (rv < 0) {
+                error_report_err(local_err);
+            }
             break;
         }
     }
-
-    return bdrv_do_find_format(format_name);
+    return NULL;
 }
 
 static int bdrv_format_is_whitelisted(const char *format_name, bool read_only)
@@ -522,65 +527,25 @@ typedef struct CreateCo {
     Error *err;
 } CreateCo;
 
-static void coroutine_fn bdrv_create_co_entry(void *opaque)
-{
-    Error *local_err = NULL;
-    int ret;
-
-    CreateCo *cco = opaque;
-    assert(cco->drv);
-    GLOBAL_STATE_CODE();
-
-    ret = cco->drv->bdrv_co_create_opts(cco->drv,
-                                        cco->filename, cco->opts, &local_err);
-    error_propagate(&cco->err, local_err);
-    cco->ret = ret;
-}
-
-int bdrv_create(BlockDriver *drv, const char* filename,
-                QemuOpts *opts, Error **errp)
+int coroutine_fn bdrv_co_create(BlockDriver *drv, const char *filename,
+                                QemuOpts *opts, Error **errp)
 {
     int ret;
-
     GLOBAL_STATE_CODE();
-
-    Coroutine *co;
-    CreateCo cco = {
-        .drv = drv,
-        .filename = g_strdup(filename),
-        .opts = opts,
-        .ret = NOT_DONE,
-        .err = NULL,
-    };
+    ERRP_GUARD();
+    assert_bdrv_graph_readable();
 
     if (!drv->bdrv_co_create_opts) {
-        error_setg(errp, "Driver '%s' does not support image creation", drv->format_name);
-        ret = -ENOTSUP;
-        goto out;
+        error_setg(errp, "Driver '%s' does not support image creation",
+                   drv->format_name);
+        return -ENOTSUP;
     }
 
-    if (qemu_in_coroutine()) {
-        /* Fast-path if already in coroutine context */
-        bdrv_create_co_entry(&cco);
-    } else {
-        co = qemu_coroutine_create(bdrv_create_co_entry, &cco);
-        qemu_coroutine_enter(co);
-        while (cco.ret == NOT_DONE) {
-            aio_poll(qemu_get_aio_context(), true);
-        }
+    ret = drv->bdrv_co_create_opts(drv, filename, opts, errp);
+    if (ret < 0 && !*errp) {
+        error_setg_errno(errp, -ret, "Could not create image");
     }
 
-    ret = cco.ret;
-    if (ret < 0) {
-        if (cco.err) {
-            error_propagate(errp, cco.err);
-        } else {
-            error_setg_errno(errp, -ret, "Could not create image");
-        }
-    }
-
-out:
-    g_free(cco.filename);
     return ret;
 }
 
@@ -631,9 +596,10 @@ static int64_t create_file_fallback_truncate(BlockBackend *blk,
  * Helper function for bdrv_create_file_fallback(): Zero the first
  * sector to remove any potentially pre-existing image header.
  */
-static int create_file_fallback_zero_first_sector(BlockBackend *blk,
-                                                  int64_t current_size,
-                                                  Error **errp)
+static int coroutine_fn
+create_file_fallback_zero_first_sector(BlockBackend *blk,
+                                       int64_t current_size,
+                                       Error **errp)
 {
     int64_t bytes_to_clear;
     int ret;
@@ -642,7 +608,7 @@ static int create_file_fallback_zero_first_sector(BlockBackend *blk,
 
     bytes_to_clear = MIN(current_size, BDRV_SECTOR_SIZE);
     if (bytes_to_clear) {
-        ret = blk_pwrite_zeroes(blk, 0, bytes_to_clear, BDRV_REQ_MAY_UNMAP);
+        ret = blk_co_pwrite_zeroes(blk, 0, bytes_to_clear, BDRV_REQ_MAY_UNMAP);
         if (ret < 0) {
             error_setg_errno(errp, -ret,
                              "Failed to clear the new image's first sector");
@@ -692,8 +658,8 @@ int coroutine_fn bdrv_co_create_opts_simple(BlockDriver *drv,
     options = qdict_new();
     qdict_put_str(options, "driver", drv->format_name);
 
-    blk = blk_new_open(filename, NULL, options,
-                       BDRV_O_RDWR | BDRV_O_RESIZE, errp);
+    blk = blk_co_new_open(filename, NULL, options,
+                          BDRV_O_RDWR | BDRV_O_RESIZE, errp);
     if (!blk) {
         error_prepend(errp, "Protocol driver '%s' does not support image "
                       "creation, and opening the image failed: ",
@@ -718,7 +684,8 @@ out:
     return ret;
 }
 
-int bdrv_create_file(const char *filename, QemuOpts *opts, Error **errp)
+int coroutine_fn bdrv_co_create_file(const char *filename, QemuOpts *opts,
+                                     Error **errp)
 {
     QemuOpts *protocol_opts;
     BlockDriver *drv;
@@ -759,7 +726,7 @@ int bdrv_create_file(const char *filename, QemuOpts *opts, Error **errp)
         goto out;
     }
 
-    ret = bdrv_create(drv, filename, protocol_opts, errp);
+    ret = bdrv_co_create(drv, filename, protocol_opts, errp);
 out:
     qemu_opts_del(protocol_opts);
     qobject_unref(qdict);
@@ -773,6 +740,7 @@ int coroutine_fn bdrv_co_delete_file(BlockDriverState *bs, Error **errp)
 
     IO_CODE();
     assert(bs != NULL);
+    assert_bdrv_graph_readable();
 
     if (!bs->drv) {
         error_setg(errp, "Block node '%s' is not opened", bs->filename);
@@ -860,38 +828,42 @@ int bdrv_probe_geometry(BlockDriverState *bs, HDGeometry *geo)
 
 /*
  * Create a uniquely-named empty temporary file.
- * Return 0 upon success, otherwise a negative errno value.
+ * Return the actual file name used upon success, otherwise NULL.
+ * This string should be freed with g_free() when not needed any longer.
+ *
+ * Note: creating a temporary file for the caller to (re)open is
+ * inherently racy. Use g_file_open_tmp() instead whenever practical.
  */
-int get_tmp_filename(char *filename, int size)
+char *create_tmp_file(Error **errp)
 {
-#ifdef _WIN32
-    char temp_dir[MAX_PATH];
-    /* GetTempFileName requires that its output buffer (4th param)
-       have length MAX_PATH or greater.  */
-    assert(size >= MAX_PATH);
-    return (GetTempPath(MAX_PATH, temp_dir)
-            && GetTempFileName(temp_dir, "qem", 0, filename)
-            ? 0 : -GetLastError());
-#else
     int fd;
     const char *tmpdir;
-    tmpdir = getenv("TMPDIR");
-    if (!tmpdir) {
+    g_autofree char *filename = NULL;
+
+    tmpdir = g_get_tmp_dir();
+#ifndef _WIN32
+    /*
+     * See commit 69bef79 ("block: use /var/tmp instead of /tmp for -snapshot")
+     *
+     * This function is used to create temporary disk images (like -snapshot),
+     * so the files can become very large. /tmp is often a tmpfs where as
+     * /var/tmp is usually on a disk, so more appropriate for disk images.
+     */
+    if (!g_strcmp0(tmpdir, "/tmp")) {
         tmpdir = "/var/tmp";
     }
-    if (snprintf(filename, size, "%s/vl.XXXXXX", tmpdir) >= size) {
-        return -EOVERFLOW;
-    }
-    fd = mkstemp(filename);
-    if (fd < 0) {
-        return -errno;
-    }
-    if (close(fd) != 0) {
-        unlink(filename);
-        return -errno;
-    }
-    return 0;
 #endif
+
+    filename = g_strdup_printf("%s/vl.XXXXXX", tmpdir);
+    fd = g_mkstemp(filename);
+    if (fd < 0) {
+        error_setg_errno(errp, errno, "Could not open temporary file '%s'",
+                         filename);
+        return NULL;
+    }
+    close(fd);
+
+    return g_steal_pointer(&filename);
 }
 
 /*
@@ -976,12 +948,16 @@ BlockDriver *bdrv_find_protocol(const char *filename,
     for (i = 0; i < (int)ARRAY_SIZE(block_driver_modules); ++i) {
         if (block_driver_modules[i].protocol_name &&
             !strcmp(block_driver_modules[i].protocol_name, protocol)) {
-            block_module_load_one(block_driver_modules[i].library_name);
+            int rv = block_module_load(block_driver_modules[i].library_name, errp);
+            if (rv > 0) {
+                drv1 = bdrv_do_find_protocol(protocol);
+            } else if (rv < 0) {
+                return NULL;
+            }
             break;
         }
     }
 
-    drv1 = bdrv_do_find_protocol(protocol);
     if (!drv1) {
         error_setg(errp, "Unknown protocol '%s'", protocol);
     }
@@ -1037,7 +1013,7 @@ static int find_image_format(BlockBackend *file, const char *filename,
         return ret;
     }
 
-    ret = blk_pread(file, 0, buf, sizeof(buf));
+    ret = blk_pread(file, 0, sizeof(buf), buf, 0);
     if (ret < 0) {
         error_setg_errno(errp, -ret, "Could not read image for determining its "
                          "format");
@@ -1045,36 +1021,40 @@ static int find_image_format(BlockBackend *file, const char *filename,
         return ret;
     }
 
-    drv = bdrv_probe_all(buf, ret, filename);
+    drv = bdrv_probe_all(buf, sizeof(buf), filename);
     if (!drv) {
         error_setg(errp, "Could not determine image format: No compatible "
                    "driver found");
-        ret = -ENOENT;
+        *pdrv = NULL;
+        return -ENOENT;
     }
+
     *pdrv = drv;
-    return ret;
+    return 0;
 }
 
 /**
  * Set the current 'total_sectors' value
  * Return 0 on success, -errno on error.
  */
-int refresh_total_sectors(BlockDriverState *bs, int64_t hint)
+int coroutine_fn bdrv_co_refresh_total_sectors(BlockDriverState *bs,
+                                               int64_t hint)
 {
     BlockDriver *drv = bs->drv;
     IO_CODE();
+    assert_bdrv_graph_readable();
 
     if (!drv) {
         return -ENOMEDIUM;
     }
 
-    /* Do not attempt drv->bdrv_getlength() on scsi-generic devices */
+    /* Do not attempt drv->bdrv_co_getlength() on scsi-generic devices */
     if (bdrv_is_sg(bs))
         return 0;
 
     /* query actual device if possible, otherwise just trust the hint */
-    if (drv->bdrv_getlength) {
-        int64_t length = drv->bdrv_getlength(bs);
+    if (drv->bdrv_co_getlength) {
+        int64_t length = drv->bdrv_co_getlength(bs);
         if (length < 0) {
             return length;
         }
@@ -1211,20 +1191,19 @@ static char *bdrv_child_get_parent_desc(BdrvChild *c)
 static void bdrv_child_cb_drained_begin(BdrvChild *child)
 {
     BlockDriverState *bs = child->opaque;
-    bdrv_do_drained_begin_quiesce(bs, NULL, false);
+    bdrv_do_drained_begin_quiesce(bs, NULL);
 }
 
 static bool bdrv_child_cb_drained_poll(BdrvChild *child)
 {
     BlockDriverState *bs = child->opaque;
-    return bdrv_drain_poll(bs, false, NULL, false);
+    return bdrv_drain_poll(bs, NULL, false);
 }
 
-static void bdrv_child_cb_drained_end(BdrvChild *child,
-                                      int *drained_end_counter)
+static void bdrv_child_cb_drained_end(BdrvChild *child)
 {
     BlockDriverState *bs = child->opaque;
-    bdrv_drained_end_no_poll(bs, drained_end_counter);
+    bdrv_drained_end(bs);
 }
 
 static int bdrv_child_cb_inactivate(BdrvChild *child)
@@ -1235,18 +1214,12 @@ static int bdrv_child_cb_inactivate(BdrvChild *child)
     return 0;
 }
 
-static bool bdrv_child_cb_can_set_aio_ctx(BdrvChild *child, AioContext *ctx,
-                                          GSList **ignore, Error **errp)
+static bool bdrv_child_cb_change_aio_ctx(BdrvChild *child, AioContext *ctx,
+                                         GHashTable *visited, Transaction *tran,
+                                         Error **errp)
 {
     BlockDriverState *bs = child->opaque;
-    return bdrv_can_set_aio_context(bs, ctx, ignore, errp);
-}
-
-static void bdrv_child_cb_set_aio_ctx(BdrvChild *child, AioContext *ctx,
-                                      GSList **ignore)
-{
-    BlockDriverState *bs = child->opaque;
-    return bdrv_set_aio_context_ignore(bs, ctx, ignore);
+    return bdrv_change_aio_context(bs, ctx, visited, tran, errp);
 }
 
 /*
@@ -1434,21 +1407,49 @@ static void bdrv_inherited_options(BdrvChildRole role, bool parent_is_format,
     *child_flags = flags;
 }
 
-static void bdrv_child_cb_attach(BdrvChild *child)
+static void GRAPH_WRLOCK bdrv_child_cb_attach(BdrvChild *child)
 {
     BlockDriverState *bs = child->opaque;
 
-    assert_bdrv_graph_writable(bs);
+    assert_bdrv_graph_writable();
     QLIST_INSERT_HEAD(&bs->children, child, next);
+    if (bs->drv->is_filter || (child->role & BDRV_CHILD_FILTERED)) {
+        /*
+         * Here we handle filters and block/raw-format.c when it behave like
+         * filter. They generally have a single PRIMARY child, which is also the
+         * FILTERED child, and that they may have multiple more children, which
+         * are neither PRIMARY nor FILTERED. And never we have a COW child here.
+         * So bs->file will be the PRIMARY child, unless the PRIMARY child goes
+         * into bs->backing on exceptional cases; and bs->backing will be
+         * nothing else.
+         */
+        assert(!(child->role & BDRV_CHILD_COW));
+        if (child->role & BDRV_CHILD_PRIMARY) {
+            assert(child->role & BDRV_CHILD_FILTERED);
+            assert(!bs->backing);
+            assert(!bs->file);
 
-    if (child->role & BDRV_CHILD_COW) {
+            if (bs->drv->filtered_child_is_backing) {
+                bs->backing = child;
+            } else {
+                bs->file = child;
+            }
+        } else {
+            assert(!(child->role & BDRV_CHILD_FILTERED));
+        }
+    } else if (child->role & BDRV_CHILD_COW) {
+        assert(bs->drv->supports_backing);
+        assert(!(child->role & BDRV_CHILD_PRIMARY));
+        assert(!bs->backing);
+        bs->backing = child;
         bdrv_backing_attach(child);
+    } else if (child->role & BDRV_CHILD_PRIMARY) {
+        assert(!bs->file);
+        bs->file = child;
     }
-
-    bdrv_apply_subtree_drain(child, bs);
 }
 
-static void bdrv_child_cb_detach(BdrvChild *child)
+static void GRAPH_WRLOCK bdrv_child_cb_detach(BdrvChild *child)
 {
     BlockDriverState *bs = child->opaque;
 
@@ -1456,10 +1457,14 @@ static void bdrv_child_cb_detach(BdrvChild *child)
         bdrv_backing_detach(child);
     }
 
-    bdrv_unapply_subtree_drain(child, bs);
-
-    assert_bdrv_graph_writable(bs);
+    assert_bdrv_graph_writable();
     QLIST_REMOVE(child, next);
+    if (child == bs->backing) {
+        assert(child != bs->file);
+        bs->backing = NULL;
+    } else if (child == bs->file) {
+        bs->file = NULL;
+    }
 }
 
 static int bdrv_child_cb_update_filename(BdrvChild *c, BlockDriverState *base,
@@ -1489,15 +1494,14 @@ const BdrvChildClass child_of_bds = {
     .attach          = bdrv_child_cb_attach,
     .detach          = bdrv_child_cb_detach,
     .inactivate      = bdrv_child_cb_inactivate,
-    .can_set_aio_ctx = bdrv_child_cb_can_set_aio_ctx,
-    .set_aio_ctx     = bdrv_child_cb_set_aio_ctx,
+    .change_aio_ctx  = bdrv_child_cb_change_aio_ctx,
     .update_filename = bdrv_child_cb_update_filename,
     .get_parent_aio_context = child_of_bds_get_parent_aio_context,
 };
 
 AioContext *bdrv_child_get_parent_aio_context(BdrvChild *c)
 {
-    GLOBAL_STATE_CODE();
+    IO_CODE();
     return c->klass->get_parent_aio_context(c);
 }
 
@@ -1601,6 +1605,11 @@ out:
     g_free(gen_node_name);
 }
 
+/*
+ * The caller must always hold @bs AioContext lock, because this function calls
+ * bdrv_refresh_total_sectors() which polls when called from non-coroutine
+ * context.
+ */
 static int bdrv_open_driver(BlockDriverState *bs, BlockDriver *drv,
                             const char *node_name, QDict *options,
                             int open_flags, Error **errp)
@@ -1638,7 +1647,21 @@ static int bdrv_open_driver(BlockDriverState *bs, BlockDriver *drv,
         goto open_failed;
     }
 
-    ret = refresh_total_sectors(bs, bs->total_sectors);
+    assert(!(bs->supported_read_flags & ~BDRV_REQ_MASK));
+    assert(!(bs->supported_write_flags & ~BDRV_REQ_MASK));
+
+    /*
+     * Always allow the BDRV_REQ_REGISTERED_BUF optimization hint. This saves
+     * drivers that pass read/write requests through to a child the trouble of
+     * declaring support explicitly.
+     *
+     * Drivers must not propagate this flag accidentally when they initiate I/O
+     * to a bounce buffer. That case should be rare though.
+     */
+    bs->supported_read_flags |= BDRV_REQ_REGISTERED_BUF;
+    bs->supported_write_flags |= BDRV_REQ_REGISTERED_BUF;
+
+    ret = bdrv_refresh_total_sectors(bs, bs->total_sectors);
     if (ret < 0) {
         error_setg_errno(errp, -ret, "Could not refresh total sector count");
         return ret;
@@ -1655,8 +1678,8 @@ static int bdrv_open_driver(BlockDriverState *bs, BlockDriver *drv,
     assert(is_power_of_2(bs->bl.request_alignment));
 
     for (i = 0; i < bs->quiesce_counter; i++) {
-        if (drv->bdrv_co_drain_begin) {
-            drv->bdrv_co_drain_begin(bs);
+        if (drv->bdrv_drain_begin) {
+            drv->bdrv_drain_begin(bs);
         }
     }
 
@@ -1665,7 +1688,7 @@ open_failed:
     bs->drv = NULL;
     if (bs->file != NULL) {
         bdrv_unref_child(bs, bs->file);
-        bs->file = NULL;
+        assert(!bs->file);
     }
     g_free(bs->opaque);
     bs->opaque = NULL;
@@ -2336,9 +2359,7 @@ static int bdrv_drv_set_perm(BlockDriverState *bs, uint64_t perm,
 
 typedef struct BdrvReplaceChildState {
     BdrvChild *child;
-    BdrvChild **childp;
     BlockDriverState *old_bs;
-    bool free_empty_child;
 } BdrvReplaceChildState;
 
 static void bdrv_replace_child_commit(void *opaque)
@@ -2346,9 +2367,6 @@ static void bdrv_replace_child_commit(void *opaque)
     BdrvReplaceChildState *s = opaque;
     GLOBAL_STATE_CODE();
 
-    if (s->free_empty_child && !s->child->bs) {
-        bdrv_child_free(s->child);
-    }
     bdrv_unref(s->old_bs);
 }
 
@@ -2358,34 +2376,22 @@ static void bdrv_replace_child_abort(void *opaque)
     BlockDriverState *new_bs = s->child->bs;
 
     GLOBAL_STATE_CODE();
-    /*
-     * old_bs reference is transparently moved from @s to s->child.
-     *
-     * Pass &s->child here instead of s->childp, because:
-     * (1) s->old_bs must be non-NULL, so bdrv_replace_child_noperm() will not
-     *     modify the BdrvChild * pointer we indirectly pass to it, i.e. it
-     *     will not modify s->child.  From that perspective, it does not matter
-     *     whether we pass s->childp or &s->child.
-     * (2) If new_bs is not NULL, s->childp will be NULL.  We then cannot use
-     *     it here.
-     * (3) If new_bs is NULL, *s->childp will have been NULLed by
-     *     bdrv_replace_child_tran()'s bdrv_replace_child_noperm() call, and we
-     *     must not pass a NULL *s->childp here.
-     *
-     * So whether new_bs was NULL or not, we cannot pass s->childp here; and in
-     * any case, there is no reason to pass it anyway.
-     */
-    bdrv_replace_child_noperm(&s->child, s->old_bs, true);
-    /*
-     * The child was pre-existing, so s->old_bs must be non-NULL, and
-     * s->child thus must not have been freed
-     */
-    assert(s->child != NULL);
-    if (!new_bs) {
-        /* As described above, *s->childp was cleared, so restore it */
-        assert(s->childp != NULL);
-        *s->childp = s->child;
+    /* old_bs reference is transparently moved from @s to @s->child */
+    if (!s->child->bs) {
+        /*
+         * The parents were undrained when removing old_bs from the child. New
+         * requests can't have been made, though, because the child was empty.
+         *
+         * TODO Make bdrv_replace_child_noperm() transactionable to avoid
+         * undraining the parent in the first place. Once this is done, having
+         * new_bs drained when calling bdrv_replace_child_tran() is not a
+         * requirement any more.
+         */
+        bdrv_parent_drained_begin_single(s->child);
+        assert(!bdrv_parent_drained_poll_single(s->child));
     }
+    assert(s->child->quiesced_parent);
+    bdrv_replace_child_noperm(s->child, s->old_bs);
     bdrv_unref(new_bs);
 }
 
@@ -2400,47 +2406,30 @@ static TransactionActionDrv bdrv_replace_child_drv = {
  *
  * Note: real unref of old_bs is done only on commit.
  *
+ * Both @child->bs and @new_bs (if non-NULL) must be drained. @new_bs must be
+ * kept drained until the transaction is completed.
+ *
  * The function doesn't update permissions, caller is responsible for this.
- *
- * (*childp)->bs must not be NULL.
- *
- * Note that if new_bs == NULL, @childp is stored in a state object attached
- * to @tran, so that the old child can be reinstated in the abort handler.
- * Therefore, if @new_bs can be NULL, @childp must stay valid until the
- * transaction is committed or aborted.
- *
- * If @free_empty_child is true and @new_bs is NULL, the BdrvChild is
- * freed (on commit).  @free_empty_child should only be false if the
- * caller will free the BDrvChild themselves (which may be important
- * if this is in turn called in another transactional context).
  */
-static void bdrv_replace_child_tran(BdrvChild **childp,
-                                    BlockDriverState *new_bs,
-                                    Transaction *tran,
-                                    bool free_empty_child)
+static void bdrv_replace_child_tran(BdrvChild *child, BlockDriverState *new_bs,
+                                    Transaction *tran)
 {
     BdrvReplaceChildState *s = g_new(BdrvReplaceChildState, 1);
+
+    assert(child->quiesced_parent);
+    assert(!new_bs || new_bs->quiesce_counter);
+
     *s = (BdrvReplaceChildState) {
-        .child = *childp,
-        .childp = new_bs == NULL ? childp : NULL,
-        .old_bs = (*childp)->bs,
-        .free_empty_child = free_empty_child,
+        .child = child,
+        .old_bs = child->bs,
     };
     tran_add(tran, &bdrv_replace_child_drv, s);
-
-    /* The abort handler relies on this */
-    assert(s->old_bs != NULL);
 
     if (new_bs) {
         bdrv_ref(new_bs);
     }
-    /*
-     * Pass free_empty_child=false, we will free the child (if
-     * necessary) in bdrv_replace_child_commit() (if our
-     * @free_empty_child parameter was true).
-     */
-    bdrv_replace_child_noperm(childp, new_bs, false);
-    /* old_bs reference is transparently moved from *childp to @s */
+    bdrv_replace_child_noperm(child, new_bs);
+    /* old_bs reference is transparently moved from @child to @s */
 }
 
 /*
@@ -2518,8 +2507,12 @@ static int bdrv_node_refresh_perm(BlockDriverState *bs, BlockReopenQueue *q,
     return 0;
 }
 
-static int bdrv_list_refresh_perms(GSList *list, BlockReopenQueue *q,
-                                   Transaction *tran, Error **errp)
+/*
+ * @list is a product of bdrv_topological_dfs() (may be called several times) -
+ * a topologically sorted subgraph.
+ */
+static int bdrv_do_refresh_perms(GSList *list, BlockReopenQueue *q,
+                                 Transaction *tran, Error **errp)
 {
     int ret;
     BlockDriverState *bs;
@@ -2539,6 +2532,24 @@ static int bdrv_list_refresh_perms(GSList *list, BlockReopenQueue *q,
     }
 
     return 0;
+}
+
+/*
+ * @list is any list of nodes. List is completed by all subtrees and
+ * topologically sorted. It's not a problem if some node occurs in the @list
+ * several times.
+ */
+static int bdrv_list_refresh_perms(GSList *list, BlockReopenQueue *q,
+                                   Transaction *tran, Error **errp)
+{
+    g_autoptr(GHashTable) found = g_hash_table_new(NULL, NULL);
+    g_autoptr(GSList) refresh_list = NULL;
+
+    for ( ; list; list = list->next) {
+        refresh_list = bdrv_topological_dfs(refresh_list, found, list->data);
+    }
+
+    return bdrv_do_refresh_perms(refresh_list, q, tran, errp);
 }
 
 void bdrv_get_cumulative_perm(BlockDriverState *bs, uint64_t *perm,
@@ -2588,15 +2599,24 @@ char *bdrv_perm_names(uint64_t perm)
 }
 
 
-static int bdrv_refresh_perms(BlockDriverState *bs, Error **errp)
+/* @tran is allowed to be NULL. In this case no rollback is possible */
+static int bdrv_refresh_perms(BlockDriverState *bs, Transaction *tran,
+                              Error **errp)
 {
     int ret;
-    Transaction *tran = tran_new();
+    Transaction *local_tran = NULL;
     g_autoptr(GSList) list = bdrv_topological_dfs(NULL, NULL, bs);
     GLOBAL_STATE_CODE();
 
-    ret = bdrv_list_refresh_perms(list, NULL, tran, errp);
-    tran_finalize(tran, ret);
+    if (!tran) {
+        tran = local_tran = tran_new();
+    }
+
+    ret = bdrv_do_refresh_perms(list, NULL, tran, errp);
+
+    if (local_tran) {
+        tran_finalize(local_tran, ret);
+    }
 
     return ret;
 }
@@ -2612,7 +2632,7 @@ int bdrv_child_try_set_perm(BdrvChild *c, uint64_t perm, uint64_t shared,
 
     bdrv_child_set_perm(c, perm, shared, tran);
 
-    ret = bdrv_refresh_perms(c->bs, &local_err);
+    ret = bdrv_refresh_perms(c->bs, tran, &local_err);
 
     tran_finalize(tran, ret);
 
@@ -2821,29 +2841,41 @@ uint64_t bdrv_qapi_perm_to_blk_perm(BlockPermission qapi_perm)
     return permissions[qapi_perm];
 }
 
-/**
- * Replace (*childp)->bs by @new_bs.
+/*
+ * Replaces the node that a BdrvChild points to without updating permissions.
  *
- * If @new_bs is NULL, *childp will be set to NULL, too: BDS parents
- * generally cannot handle a BdrvChild with .bs == NULL, so clearing
- * BdrvChild.bs should generally immediately be followed by the
- * BdrvChild pointer being cleared as well.
- *
- * If @free_empty_child is true and @new_bs is NULL, the BdrvChild is
- * freed.  @free_empty_child should only be false if the caller will
- * free the BdrvChild themselves (this may be important in a
- * transactional context, where it may only be freed on commit).
+ * If @new_bs is non-NULL, the parent of @child must already be drained through
+ * @child.
  */
-static void bdrv_replace_child_noperm(BdrvChild **childp,
-                                      BlockDriverState *new_bs,
-                                      bool free_empty_child)
+static void bdrv_replace_child_noperm(BdrvChild *child,
+                                      BlockDriverState *new_bs)
 {
-    BdrvChild *child = *childp;
     BlockDriverState *old_bs = child->bs;
     int new_bs_quiesce_counter;
-    int drain_saldo;
 
     assert(!child->frozen);
+
+    /*
+     * If we want to change the BdrvChild to point to a drained node as its new
+     * child->bs, we need to make sure that its new parent is drained, too. In
+     * other words, either child->quiesce_parent must already be true or we must
+     * be able to set it and keep the parent's quiesce_counter consistent with
+     * that, but without polling or starting new requests (this function
+     * guarantees that it doesn't poll, and starting new requests would be
+     * against the invariants of drain sections).
+     *
+     * To keep things simple, we pick the first option (child->quiesce_parent
+     * must already be true). We also generalise the rule a bit to make it
+     * easier to verify in callers and more likely to be covered in test cases:
+     * The parent must be quiesced through this child even if new_bs isn't
+     * currently drained.
+     *
+     * The only exception is for callers that always pass new_bs == NULL. In
+     * this case, we obviously never need to consider the case of a drained
+     * new_bs, so we can keep the callers simpler by allowing them not to drain
+     * the parent.
+     */
+    assert(!new_bs || child->quiesced_parent);
     assert(old_bs != new_bs);
     GLOBAL_STATE_CODE();
 
@@ -2851,66 +2883,33 @@ static void bdrv_replace_child_noperm(BdrvChild **childp,
         assert(bdrv_get_aio_context(old_bs) == bdrv_get_aio_context(new_bs));
     }
 
-    new_bs_quiesce_counter = (new_bs ? new_bs->quiesce_counter : 0);
-    drain_saldo = new_bs_quiesce_counter - child->parent_quiesce_counter;
-
-    /*
-     * If the new child node is drained but the old one was not, flush
-     * all outstanding requests to the old child node.
-     */
-    while (drain_saldo > 0 && child->klass->drained_begin) {
-        bdrv_parent_drained_begin_single(child, true);
-        drain_saldo--;
-    }
-
+    /* TODO Pull this up into the callers to avoid polling here */
+    bdrv_graph_wrlock();
     if (old_bs) {
-        /* Detach first so that the recursive drain sections coming from @child
-         * are already gone and we only end the drain sections that came from
-         * elsewhere. */
         if (child->klass->detach) {
             child->klass->detach(child);
         }
-        assert_bdrv_graph_writable(old_bs);
         QLIST_REMOVE(child, next_parent);
     }
 
     child->bs = new_bs;
-    if (!new_bs) {
-        *childp = NULL;
-    }
 
     if (new_bs) {
-        assert_bdrv_graph_writable(new_bs);
         QLIST_INSERT_HEAD(&new_bs->parents, child, next_parent);
-
-        /*
-         * Detaching the old node may have led to the new node's
-         * quiesce_counter having been decreased.  Not a problem, we
-         * just need to recognize this here and then invoke
-         * drained_end appropriately more often.
-         */
-        assert(new_bs->quiesce_counter <= new_bs_quiesce_counter);
-        drain_saldo += new_bs->quiesce_counter - new_bs_quiesce_counter;
-
-        /* Attach only after starting new drained sections, so that recursive
-         * drain sections coming from @child don't get an extra .drained_begin
-         * callback. */
         if (child->klass->attach) {
             child->klass->attach(child);
         }
     }
+    bdrv_graph_wrunlock();
 
     /*
-     * If the old child node was drained but the new one is not, allow
-     * requests to come in only after the new node has been attached.
+     * If the parent was drained through this BdrvChild previously, but new_bs
+     * is not drained, allow requests to come in only after the new node has
+     * been attached.
      */
-    while (drain_saldo < 0 && child->klass->drained_end) {
+    new_bs_quiesce_counter = (new_bs ? new_bs->quiesce_counter : 0);
+    if (!new_bs_quiesce_counter && child->quiesced_parent) {
         bdrv_parent_drained_end_single(child);
-        drain_saldo++;
-    }
-
-    if (free_empty_child && !child->bs) {
-        bdrv_child_free(child);
     }
 }
 
@@ -2931,7 +2930,7 @@ static void bdrv_child_free(BdrvChild *child)
 }
 
 typedef struct BdrvAttachChildCommonState {
-    BdrvChild **child;
+    BdrvChild *child;
     AioContext *old_parent_ctx;
     AioContext *old_child_ctx;
 } BdrvAttachChildCommonState;
@@ -2939,39 +2938,35 @@ typedef struct BdrvAttachChildCommonState {
 static void bdrv_attach_child_common_abort(void *opaque)
 {
     BdrvAttachChildCommonState *s = opaque;
-    BdrvChild *child = *s->child;
-    BlockDriverState *bs = child->bs;
+    BlockDriverState *bs = s->child->bs;
 
     GLOBAL_STATE_CODE();
-    /*
-     * Pass free_empty_child=false, because we still need the child
-     * for the AioContext operations on the parent below; those
-     * BdrvChildClass methods all work on a BdrvChild object, so we
-     * need to keep it as an empty shell (after this function, it will
-     * not be attached to any parent, and it will not have a .bs).
-     */
-    bdrv_replace_child_noperm(s->child, NULL, false);
+    bdrv_replace_child_noperm(s->child, NULL);
 
     if (bdrv_get_aio_context(bs) != s->old_child_ctx) {
-        bdrv_try_set_aio_context(bs, s->old_child_ctx, &error_abort);
+        bdrv_try_change_aio_context(bs, s->old_child_ctx, NULL, &error_abort);
     }
 
-    if (bdrv_child_get_parent_aio_context(child) != s->old_parent_ctx) {
-        GSList *ignore;
+    if (bdrv_child_get_parent_aio_context(s->child) != s->old_parent_ctx) {
+        Transaction *tran;
+        GHashTable *visited;
+        bool ret;
 
-        /* No need to ignore `child`, because it has been detached already */
-        ignore = NULL;
-        child->klass->can_set_aio_ctx(child, s->old_parent_ctx, &ignore,
-                                      &error_abort);
-        g_slist_free(ignore);
+        tran = tran_new();
 
-        ignore = NULL;
-        child->klass->set_aio_ctx(child, s->old_parent_ctx, &ignore);
-        g_slist_free(ignore);
+        /* No need to visit `child`, because it has been detached already */
+        visited = g_hash_table_new(NULL, NULL);
+        ret = s->child->klass->change_aio_ctx(s->child, s->old_parent_ctx,
+                                              visited, tran, &error_abort);
+        g_hash_table_destroy(visited);
+
+        /* transaction is supposed to always succeed */
+        assert(ret == true);
+        tran_commit(tran);
     }
 
     bdrv_unref(bs);
-    bdrv_child_free(child);
+    bdrv_child_free(s->child);
 }
 
 static TransactionActionDrv bdrv_attach_child_common_drv = {
@@ -2982,28 +2977,22 @@ static TransactionActionDrv bdrv_attach_child_common_drv = {
 /*
  * Common part of attaching bdrv child to bs or to blk or to job
  *
- * Resulting new child is returned through @child.
- * At start *@child must be NULL.
- * @child is saved to a new entry of @tran, so that *@child could be reverted to
- * NULL on abort(). So referenced variable must live at least until transaction
- * end.
- *
  * Function doesn't update permissions, caller is responsible for this.
+ *
+ * Returns new created child.
  */
-static int bdrv_attach_child_common(BlockDriverState *child_bs,
-                                    const char *child_name,
-                                    const BdrvChildClass *child_class,
-                                    BdrvChildRole child_role,
-                                    uint64_t perm, uint64_t shared_perm,
-                                    void *opaque, BdrvChild **child,
-                                    Transaction *tran, Error **errp)
+static BdrvChild *bdrv_attach_child_common(BlockDriverState *child_bs,
+                                           const char *child_name,
+                                           const BdrvChildClass *child_class,
+                                           BdrvChildRole child_role,
+                                           uint64_t perm, uint64_t shared_perm,
+                                           void *opaque,
+                                           Transaction *tran, Error **errp)
 {
     BdrvChild *new_child;
     AioContext *parent_ctx;
     AioContext *child_ctx = bdrv_get_aio_context(child_bs);
 
-    assert(child);
-    assert(*child == NULL);
     assert(child_class->get_parent_desc);
     GLOBAL_STATE_CODE();
 
@@ -3026,63 +3015,75 @@ static int bdrv_attach_child_common(BlockDriverState *child_bs,
     parent_ctx = bdrv_child_get_parent_aio_context(new_child);
     if (child_ctx != parent_ctx) {
         Error *local_err = NULL;
-        int ret = bdrv_try_set_aio_context(child_bs, parent_ctx, &local_err);
+        int ret = bdrv_try_change_aio_context(child_bs, parent_ctx, NULL,
+                                              &local_err);
 
-        if (ret < 0 && child_class->can_set_aio_ctx) {
-            GSList *ignore = g_slist_prepend(NULL, new_child);
-            if (child_class->can_set_aio_ctx(new_child, child_ctx, &ignore,
-                                             NULL))
-            {
+        if (ret < 0 && child_class->change_aio_ctx) {
+            Transaction *tran = tran_new();
+            GHashTable *visited = g_hash_table_new(NULL, NULL);
+            bool ret_child;
+
+            g_hash_table_add(visited, new_child);
+            ret_child = child_class->change_aio_ctx(new_child, child_ctx,
+                                                    visited, tran, NULL);
+            if (ret_child == true) {
                 error_free(local_err);
                 ret = 0;
-                g_slist_free(ignore);
-                ignore = g_slist_prepend(NULL, new_child);
-                child_class->set_aio_ctx(new_child, child_ctx, &ignore);
             }
-            g_slist_free(ignore);
+            tran_finalize(tran, ret_child == true ? 0 : -1);
+            g_hash_table_destroy(visited);
         }
 
         if (ret < 0) {
             error_propagate(errp, local_err);
             bdrv_child_free(new_child);
-            return ret;
+            return NULL;
         }
     }
 
     bdrv_ref(child_bs);
-    bdrv_replace_child_noperm(&new_child, child_bs, true);
-    /* child_bs was non-NULL, so new_child must not have been freed */
-    assert(new_child != NULL);
-
-    *child = new_child;
+    /*
+     * Let every new BdrvChild start with a drained parent. Inserting the child
+     * in the graph with bdrv_replace_child_noperm() will undrain it if
+     * @child_bs is not drained.
+     *
+     * The child was only just created and is not yet visible in global state
+     * until bdrv_replace_child_noperm() inserts it into the graph, so nobody
+     * could have sent requests and polling is not necessary.
+     *
+     * Note that this means that the parent isn't fully drained yet, we only
+     * stop new requests from coming in. This is fine, we don't care about the
+     * old requests here, they are not for this child. If another place enters a
+     * drain section for the same parent, but wants it to be fully quiesced, it
+     * will not run most of the the code in .drained_begin() again (which is not
+     * a problem, we already did this), but it will still poll until the parent
+     * is fully quiesced, so it will not be negatively affected either.
+     */
+    bdrv_parent_drained_begin_single(new_child);
+    bdrv_replace_child_noperm(new_child, child_bs);
 
     BdrvAttachChildCommonState *s = g_new(BdrvAttachChildCommonState, 1);
     *s = (BdrvAttachChildCommonState) {
-        .child = child,
+        .child = new_child,
         .old_parent_ctx = parent_ctx,
         .old_child_ctx = child_ctx,
     };
     tran_add(tran, &bdrv_attach_child_common_drv, s);
 
-    return 0;
+    return new_child;
 }
 
 /*
- * Variable referenced by @child must live at least until transaction end.
- * (see bdrv_attach_child_common() doc for details)
- *
  * Function doesn't update permissions, caller is responsible for this.
  */
-static int bdrv_attach_child_noperm(BlockDriverState *parent_bs,
-                                    BlockDriverState *child_bs,
-                                    const char *child_name,
-                                    const BdrvChildClass *child_class,
-                                    BdrvChildRole child_role,
-                                    BdrvChild **child,
-                                    Transaction *tran,
-                                    Error **errp)
+static BdrvChild *bdrv_attach_child_noperm(BlockDriverState *parent_bs,
+                                           BlockDriverState *child_bs,
+                                           const char *child_name,
+                                           const BdrvChildClass *child_class,
+                                           BdrvChildRole child_role,
+                                           Transaction *tran,
+                                           Error **errp)
 {
-    int ret;
     uint64_t perm, shared_perm;
 
     assert(parent_bs->drv);
@@ -3091,44 +3092,16 @@ static int bdrv_attach_child_noperm(BlockDriverState *parent_bs,
     if (bdrv_recurse_has_child(child_bs, parent_bs)) {
         error_setg(errp, "Making '%s' a %s child of '%s' would create a cycle",
                    child_bs->node_name, child_name, parent_bs->node_name);
-        return -EINVAL;
+        return NULL;
     }
 
     bdrv_get_cumulative_perm(parent_bs, &perm, &shared_perm);
     bdrv_child_perm(parent_bs, child_bs, NULL, child_role, NULL,
                     perm, shared_perm, &perm, &shared_perm);
 
-    ret = bdrv_attach_child_common(child_bs, child_name, child_class,
-                                   child_role, perm, shared_perm, parent_bs,
-                                   child, tran, errp);
-    if (ret < 0) {
-        return ret;
-    }
-
-    return 0;
-}
-
-static void bdrv_detach_child(BdrvChild **childp)
-{
-    BlockDriverState *old_bs = (*childp)->bs;
-
-    GLOBAL_STATE_CODE();
-    bdrv_replace_child_noperm(childp, NULL, true);
-
-    if (old_bs) {
-        /*
-         * Update permissions for old node. We're just taking a parent away, so
-         * we're loosening restrictions. Errors of permission update are not
-         * fatal in this case, ignore them.
-         */
-        bdrv_refresh_perms(old_bs, NULL);
-
-        /*
-         * When the parent requiring a non-default AioContext is removed, the
-         * node moves back to the main AioContext
-         */
-        bdrv_try_set_aio_context(old_bs, qemu_get_aio_context(), NULL);
-    }
+    return bdrv_attach_child_common(child_bs, child_name, child_class,
+                                    child_role, perm, shared_perm, parent_bs,
+                                    tran, errp);
 }
 
 /*
@@ -3149,27 +3122,27 @@ BdrvChild *bdrv_root_attach_child(BlockDriverState *child_bs,
                                   void *opaque, Error **errp)
 {
     int ret;
-    BdrvChild *child = NULL;
+    BdrvChild *child;
     Transaction *tran = tran_new();
 
     GLOBAL_STATE_CODE();
 
-    ret = bdrv_attach_child_common(child_bs, child_name, child_class,
+    child = bdrv_attach_child_common(child_bs, child_name, child_class,
                                    child_role, perm, shared_perm, opaque,
-                                   &child, tran, errp);
-    if (ret < 0) {
+                                   tran, errp);
+    if (!child) {
+        ret = -EINVAL;
         goto out;
     }
 
-    ret = bdrv_refresh_perms(child_bs, errp);
+    ret = bdrv_refresh_perms(child_bs, tran, errp);
 
 out:
     tran_finalize(tran, ret);
-    /* child is unset on failure by bdrv_attach_child_common_abort() */
-    assert((ret < 0) == !child);
 
     bdrv_unref(child_bs);
-    return child;
+
+    return ret < 0 ? NULL : child;
 }
 
 /*
@@ -3191,41 +3164,56 @@ BdrvChild *bdrv_attach_child(BlockDriverState *parent_bs,
                              Error **errp)
 {
     int ret;
-    BdrvChild *child = NULL;
+    BdrvChild *child;
     Transaction *tran = tran_new();
 
     GLOBAL_STATE_CODE();
 
-    ret = bdrv_attach_child_noperm(parent_bs, child_bs, child_name, child_class,
-                                   child_role, &child, tran, errp);
-    if (ret < 0) {
+    child = bdrv_attach_child_noperm(parent_bs, child_bs, child_name,
+                                     child_class, child_role, tran, errp);
+    if (!child) {
+        ret = -EINVAL;
         goto out;
     }
 
-    ret = bdrv_refresh_perms(parent_bs, errp);
+    ret = bdrv_refresh_perms(parent_bs, tran, errp);
     if (ret < 0) {
         goto out;
     }
 
 out:
     tran_finalize(tran, ret);
-    /* child is unset on failure by bdrv_attach_child_common_abort() */
-    assert((ret < 0) == !child);
 
     bdrv_unref(child_bs);
 
-    return child;
+    return ret < 0 ? NULL : child;
 }
 
 /* Callers must ensure that child->frozen is false. */
 void bdrv_root_unref_child(BdrvChild *child)
 {
-    BlockDriverState *child_bs;
+    BlockDriverState *child_bs = child->bs;
 
     GLOBAL_STATE_CODE();
+    bdrv_replace_child_noperm(child, NULL);
+    bdrv_child_free(child);
 
-    child_bs = child->bs;
-    bdrv_detach_child(&child);
+    if (child_bs) {
+        /*
+         * Update permissions for old node. We're just taking a parent away, so
+         * we're loosening restrictions. Errors of permission update are not
+         * fatal in this case, ignore them.
+         */
+        bdrv_refresh_perms(child_bs, NULL, NULL);
+
+        /*
+         * When the parent requiring a non-default AioContext is removed, the
+         * node moves back to the main AioContext
+         */
+        bdrv_try_change_aio_context(child_bs, qemu_get_aio_context(), NULL,
+                                    NULL);
+    }
+
     bdrv_unref(child_bs);
 }
 
@@ -3356,7 +3344,6 @@ static int bdrv_set_file_or_backing_noperm(BlockDriverState *parent_bs,
                                            bool is_backing,
                                            Transaction *tran, Error **errp)
 {
-    int ret = 0;
     bool update_inherits_from =
         bdrv_inherits_from_recursive(child_bs, parent_bs);
     BdrvChild *child = is_backing ? parent_bs->backing : parent_bs->file;
@@ -3407,21 +3394,19 @@ static int bdrv_set_file_or_backing_noperm(BlockDriverState *parent_bs,
 
     if (child) {
         bdrv_unset_inherits_from(parent_bs, child, tran);
-        bdrv_remove_file_or_backing_child(parent_bs, child, tran);
+        bdrv_remove_child(child, tran);
     }
 
     if (!child_bs) {
         goto out;
     }
 
-    ret = bdrv_attach_child_noperm(parent_bs, child_bs,
-                                   is_backing ? "backing" : "file",
-                                   &child_of_bds, role,
-                                   is_backing ? &parent_bs->backing :
-                                                &parent_bs->file,
-                                   tran, errp);
-    if (ret < 0) {
-        return ret;
+    child = bdrv_attach_child_noperm(parent_bs, child_bs,
+                                     is_backing ? "backing" : "file",
+                                     &child_of_bds, role,
+                                     tran, errp);
+    if (!child) {
+        return -EINVAL;
     }
 
 
@@ -3447,24 +3432,35 @@ static int bdrv_set_backing_noperm(BlockDriverState *bs,
     return bdrv_set_file_or_backing_noperm(bs, backing_hd, true, tran, errp);
 }
 
-int bdrv_set_backing_hd(BlockDriverState *bs, BlockDriverState *backing_hd,
-                        Error **errp)
+int bdrv_set_backing_hd_drained(BlockDriverState *bs,
+                                BlockDriverState *backing_hd,
+                                Error **errp)
 {
     int ret;
     Transaction *tran = tran_new();
 
     GLOBAL_STATE_CODE();
-    bdrv_drained_begin(bs);
+    assert(bs->quiesce_counter > 0);
 
     ret = bdrv_set_backing_noperm(bs, backing_hd, tran, errp);
     if (ret < 0) {
         goto out;
     }
 
-    ret = bdrv_refresh_perms(bs, errp);
+    ret = bdrv_refresh_perms(bs, tran, errp);
 out:
     tran_finalize(tran, ret);
+    return ret;
+}
 
+int bdrv_set_backing_hd(BlockDriverState *bs, BlockDriverState *backing_hd,
+                        Error **errp)
+{
+    int ret;
+    GLOBAL_STATE_CODE();
+
+    bdrv_drained_begin(bs);
+    ret = bdrv_set_backing_hd_drained(bs, backing_hd, errp);
     bdrv_drained_end(bs);
 
     return ret;
@@ -3667,6 +3663,29 @@ BdrvChild *bdrv_open_child(const char *filename,
 }
 
 /*
+ * Wrapper on bdrv_open_child() for most popular case: open primary child of bs.
+ */
+int bdrv_open_file_child(const char *filename,
+                         QDict *options, const char *bdref_key,
+                         BlockDriverState *parent, Error **errp)
+{
+    BdrvChildRole role;
+
+    /* commit_top and mirror_top don't use this function */
+    assert(!parent->drv->filtered_child_is_backing);
+    role = parent->drv->is_filter ?
+        (BDRV_CHILD_FILTERED | BDRV_CHILD_PRIMARY) : BDRV_CHILD_IMAGE;
+
+    if (!bdrv_open_child(filename, options, bdref_key, parent,
+                         &child_of_bds, role, false, errp))
+    {
+        return -EINVAL;
+    }
+
+    return 0;
+}
+
+/*
  * TODO Future callers may need to specify parent/child_class in order for
  * option inheritance to work. Existing callers use it for the root node.
  */
@@ -3715,8 +3734,7 @@ static BlockDriverState *bdrv_append_temp_snapshot(BlockDriverState *bs,
                                                    QDict *snapshot_options,
                                                    Error **errp)
 {
-    /* TODO: extra byte is a hack to ensure MAX_PATH space on Windows. */
-    char *tmp_filename = g_malloc0(PATH_MAX + 1);
+    g_autofree char *tmp_filename = NULL;
     int64_t total_size;
     QemuOpts *opts = NULL;
     BlockDriverState *bs_snapshot = NULL;
@@ -3735,9 +3753,8 @@ static BlockDriverState *bdrv_append_temp_snapshot(BlockDriverState *bs,
     }
 
     /* Create the temporary image */
-    ret = get_tmp_filename(tmp_filename, PATH_MAX + 1);
-    if (ret < 0) {
-        error_setg_errno(errp, -ret, "Could not get temporary filename");
+    tmp_filename = create_tmp_file(errp);
+    if (!tmp_filename) {
         goto out;
     }
 
@@ -3771,7 +3788,6 @@ static BlockDriverState *bdrv_append_temp_snapshot(BlockDriverState *bs,
 
 out:
     qobject_unref(snapshot_options);
-    g_free(tmp_filename);
     return bs_snapshot;
 }
 
@@ -3789,14 +3805,16 @@ out:
  * The reference parameter may be used to specify an existing block device which
  * should be opened. If specified, neither options nor a filename may be given,
  * nor can an existing BDS be reused (that is, *pbs has to be NULL).
+ *
+ * The caller must always hold @filename AioContext lock, because this
+ * function eventually calls bdrv_refresh_total_sectors() which polls
+ * when called from non-coroutine context.
  */
-static BlockDriverState *bdrv_open_inherit(const char *filename,
-                                           const char *reference,
-                                           QDict *options, int flags,
-                                           BlockDriverState *parent,
-                                           const BdrvChildClass *child_class,
-                                           BdrvChildRole child_role,
-                                           Error **errp)
+static BlockDriverState * no_coroutine_fn
+bdrv_open_inherit(const char *filename, const char *reference, QDict *options,
+                  int flags, BlockDriverState *parent,
+                  const BdrvChildClass *child_class, BdrvChildRole child_role,
+                  Error **errp)
 {
     int ret;
     BlockBackend *file = NULL;
@@ -3812,6 +3830,7 @@ static BlockDriverState *bdrv_open_inherit(const char *filename,
     assert(!child_class || !flags);
     assert(!child_class == !parent);
     GLOBAL_STATE_CODE();
+    assert(!qemu_in_coroutine());
 
     if (reference) {
         bool options_non_empty = options ? qdict_size(options) : false;
@@ -4077,6 +4096,11 @@ close_and_fail:
     return NULL;
 }
 
+/*
+ * The caller must always hold @filename AioContext lock, because this
+ * function eventually calls bdrv_refresh_total_sectors() which polls
+ * when called from non-coroutine context.
+ */
 BlockDriverState *bdrv_open(const char *filename, const char *reference,
                             QDict *options, int flags, Error **errp)
 {
@@ -4174,7 +4198,9 @@ static bool bdrv_recurse_has_child(BlockDriverState *bs,
  * returns a pointer to bs_queue, which is either the newly allocated
  * bs_queue, or the existing bs_queue being used.
  *
- * bs must be drained between bdrv_reopen_queue() and bdrv_reopen_multiple().
+ * bs is drained here and undrained by bdrv_reopen_queue_free().
+ *
+ * To be called with bs->aio_context locked.
  */
 static BlockReopenQueue *bdrv_reopen_queue_child(BlockReopenQueue *bs_queue,
                                                  BlockDriverState *bs,
@@ -4194,11 +4220,9 @@ static BlockReopenQueue *bdrv_reopen_queue_child(BlockReopenQueue *bs_queue,
     int flags;
     QemuOpts *opts;
 
-    /* Make sure that the caller remembered to use a drained section. This is
-     * important to avoid graph changes between the recursive queuing here and
-     * bdrv_reopen_multiple(). */
-    assert(bs->quiesce_counter > 0);
     GLOBAL_STATE_CODE();
+
+    bdrv_drained_begin(bs);
 
     if (bs_queue == NULL) {
         bs_queue = g_new0(BlockReopenQueue, 1);
@@ -4333,6 +4357,7 @@ static BlockReopenQueue *bdrv_reopen_queue_child(BlockReopenQueue *bs_queue,
     return bs_queue;
 }
 
+/* To be called with bs->aio_context locked */
 BlockReopenQueue *bdrv_reopen_queue(BlockReopenQueue *bs_queue,
                                     BlockDriverState *bs,
                                     QDict *options, bool keep_old_opts)
@@ -4349,6 +4374,12 @@ void bdrv_reopen_queue_free(BlockReopenQueue *bs_queue)
     if (bs_queue) {
         BlockReopenQueueEntry *bs_entry, *next;
         QTAILQ_FOREACH_SAFE(bs_entry, bs_queue, entry, next) {
+            AioContext *ctx = bdrv_get_aio_context(bs_entry->state.bs);
+
+            aio_context_acquire(ctx);
+            bdrv_drained_end(bs_entry->state.bs);
+            aio_context_release(ctx);
+
             qobject_unref(bs_entry->state.explicit_options);
             qobject_unref(bs_entry->state.options);
             g_free(bs_entry);
@@ -4382,7 +4413,6 @@ int bdrv_reopen_multiple(BlockReopenQueue *bs_queue, Error **errp)
     BlockReopenQueueEntry *bs_entry, *next;
     AioContext *ctx;
     Transaction *tran = tran_new();
-    g_autoptr(GHashTable) found = NULL;
     g_autoptr(GSList) refresh_list = NULL;
 
     assert(qemu_get_current_aio_context() == qemu_get_aio_context());
@@ -4412,18 +4442,15 @@ int bdrv_reopen_multiple(BlockReopenQueue *bs_queue, Error **errp)
         bs_entry->prepared = true;
     }
 
-    found = g_hash_table_new(NULL, NULL);
     QTAILQ_FOREACH(bs_entry, bs_queue, entry) {
         BDRVReopenState *state = &bs_entry->state;
 
-        refresh_list = bdrv_topological_dfs(refresh_list, found, state->bs);
+        refresh_list = g_slist_prepend(refresh_list, state->bs);
         if (state->old_backing_bs) {
-            refresh_list = bdrv_topological_dfs(refresh_list, found,
-                                                state->old_backing_bs);
+            refresh_list = g_slist_prepend(refresh_list, state->old_backing_bs);
         }
         if (state->old_file_bs) {
-            refresh_list = bdrv_topological_dfs(refresh_list, found,
-                                                state->old_file_bs);
+            refresh_list = g_slist_prepend(refresh_list, state->old_file_bs);
         }
     }
 
@@ -4496,18 +4523,16 @@ int bdrv_reopen(BlockDriverState *bs, QDict *opts, bool keep_old_opts,
 
     GLOBAL_STATE_CODE();
 
-    bdrv_subtree_drained_begin(bs);
+    queue = bdrv_reopen_queue(NULL, bs, opts, keep_old_opts);
+
     if (ctx != qemu_get_aio_context()) {
         aio_context_release(ctx);
     }
-
-    queue = bdrv_reopen_queue(NULL, bs, opts, keep_old_opts);
     ret = bdrv_reopen_multiple(queue, errp);
 
     if (ctx != qemu_get_aio_context()) {
         aio_context_acquire(ctx);
     }
-    bdrv_subtree_drained_end(bs);
 
     return ret;
 }
@@ -4893,6 +4918,7 @@ static void bdrv_reopen_commit(BDRVReopenState *reopen_state)
     qdict_del(bs->options, "backing");
 
     bdrv_refresh_limits(bs, NULL, NULL);
+    bdrv_refresh_total_sectors(bs, bs->total_sectors);
 }
 
 /*
@@ -4938,8 +4964,8 @@ static void bdrv_close(BlockDriverState *bs)
         bdrv_unref_child(bs, child);
     }
 
-    bs->backing = NULL;
-    bs->file = NULL;
+    assert(!bs->backing);
+    assert(!bs->file);
     g_free(bs->opaque);
     bs->opaque = NULL;
     qatomic_set(&bs->copy_on_read, 0);
@@ -4978,8 +5004,8 @@ static void bdrv_close(BlockDriverState *bs)
 
 void bdrv_close_all(void)
 {
-    assert(job_next(NULL) == NULL);
     GLOBAL_STATE_CODE();
+    assert(job_next(NULL) == NULL);
 
     /* Drop references from requests still in flight, such as canceled block
      * jobs whose AIO context has not been polled yet */
@@ -5070,108 +5096,41 @@ static bool should_update_child(BdrvChild *c, BlockDriverState *to)
     return ret;
 }
 
-typedef struct BdrvRemoveFilterOrCowChild {
-    BdrvChild *child;
-    BlockDriverState *bs;
-    bool is_backing;
-} BdrvRemoveFilterOrCowChild;
-
-static void bdrv_remove_filter_or_cow_child_abort(void *opaque)
+static void bdrv_remove_child_commit(void *opaque)
 {
-    BdrvRemoveFilterOrCowChild *s = opaque;
-    BlockDriverState *parent_bs = s->child->opaque;
-
-    if (s->is_backing) {
-        parent_bs->backing = s->child;
-    } else {
-        parent_bs->file = s->child;
-    }
-
-    /*
-     * We don't have to restore child->bs here to undo bdrv_replace_child_tran()
-     * because that function is transactionable and it registered own completion
-     * entries in @tran, so .abort() for bdrv_replace_child_safe() will be
-     * called automatically.
-     */
-}
-
-static void bdrv_remove_filter_or_cow_child_commit(void *opaque)
-{
-    BdrvRemoveFilterOrCowChild *s = opaque;
     GLOBAL_STATE_CODE();
-    bdrv_child_free(s->child);
+    bdrv_child_free(opaque);
 }
 
-static void bdrv_remove_filter_or_cow_child_clean(void *opaque)
-{
-    BdrvRemoveFilterOrCowChild *s = opaque;
-
-    /* Drop the bs reference after the transaction is done */
-    bdrv_unref(s->bs);
-    g_free(s);
-}
-
-static TransactionActionDrv bdrv_remove_filter_or_cow_child_drv = {
-    .abort = bdrv_remove_filter_or_cow_child_abort,
-    .commit = bdrv_remove_filter_or_cow_child_commit,
-    .clean = bdrv_remove_filter_or_cow_child_clean,
+static TransactionActionDrv bdrv_remove_child_drv = {
+    .commit = bdrv_remove_child_commit,
 };
 
-/*
- * A function to remove backing or file child of @bs.
- * Function doesn't update permissions, caller is responsible for this.
- */
-static void bdrv_remove_file_or_backing_child(BlockDriverState *bs,
-                                              BdrvChild *child,
-                                              Transaction *tran)
+/* Function doesn't update permissions, caller is responsible for this. */
+static void bdrv_remove_child(BdrvChild *child, Transaction *tran)
 {
-    BdrvChild **childp;
-    BdrvRemoveFilterOrCowChild *s;
-
     if (!child) {
         return;
     }
 
-    /*
-     * Keep a reference to @bs so @childp will stay valid throughout the
-     * transaction (required by bdrv_replace_child_tran())
-     */
-    bdrv_ref(bs);
-    if (child == bs->backing) {
-        childp = &bs->backing;
-    } else if (child == bs->file) {
-        childp = &bs->file;
-    } else {
-        g_assert_not_reached();
-    }
-
     if (child->bs) {
-        /*
-         * Pass free_empty_child=false, we will free the child in
-         * bdrv_remove_filter_or_cow_child_commit()
-         */
-        bdrv_replace_child_tran(childp, NULL, tran, false);
+        BlockDriverState *bs = child->bs;
+        bdrv_drained_begin(bs);
+        bdrv_replace_child_tran(child, NULL, tran);
+        bdrv_drained_end(bs);
     }
 
-    s = g_new(BdrvRemoveFilterOrCowChild, 1);
-    *s = (BdrvRemoveFilterOrCowChild) {
-        .child = child,
-        .bs = bs,
-        .is_backing = (childp == &bs->backing),
-    };
-    tran_add(tran, &bdrv_remove_filter_or_cow_child_drv, s);
+    tran_add(tran, &bdrv_remove_child_drv, child);
 }
 
-/*
- * A function to remove backing-chain child of @bs if exists: cow child for
- * format nodes (always .backing) and filter child for filters (may be .file or
- * .backing)
- */
-static void bdrv_remove_filter_or_cow_child(BlockDriverState *bs,
-                                            Transaction *tran)
+static void undrain_on_clean_cb(void *opaque)
 {
-    bdrv_remove_file_or_backing_child(bs, bdrv_filter_or_cow_child(bs), tran);
+    bdrv_drained_end(opaque);
 }
+
+static TransactionActionDrv undrain_on_clean = {
+    .clean = undrain_on_clean_cb,
+};
 
 static int bdrv_replace_node_noperm(BlockDriverState *from,
                                     BlockDriverState *to,
@@ -5180,8 +5139,12 @@ static int bdrv_replace_node_noperm(BlockDriverState *from,
 {
     BdrvChild *c, *next;
 
-    assert(to != NULL);
     GLOBAL_STATE_CODE();
+
+    bdrv_drained_begin(from);
+    bdrv_drained_begin(to);
+    tran_add(tran, &undrain_on_clean, from);
+    tran_add(tran, &undrain_on_clean, to);
 
     QLIST_FOREACH_SAFE(c, &from->parents, next_parent, next) {
         assert(c->bs == from);
@@ -5198,12 +5161,7 @@ static int bdrv_replace_node_noperm(BlockDriverState *from,
                        c->name, from->node_name);
             return -EPERM;
         }
-
-        /*
-         * Passing a pointer to the local variable @c is fine here, because
-         * @to is not NULL, and so &c will not be attached to the transaction.
-         */
-        bdrv_replace_child_tran(&c, to, tran, true);
+        bdrv_replace_child_tran(c, to, tran);
     }
 
     return 0;
@@ -5218,8 +5176,6 @@ static int bdrv_replace_node_noperm(BlockDriverState *from,
  *
  * With @detach_subchain=true @to must be in a backing chain of @from. In this
  * case backing link of the cow-parent of @to is removed.
- *
- * @to must not be NULL.
  */
 static int bdrv_replace_node_common(BlockDriverState *from,
                                     BlockDriverState *to,
@@ -5227,13 +5183,11 @@ static int bdrv_replace_node_common(BlockDriverState *from,
                                     Error **errp)
 {
     Transaction *tran = tran_new();
-    g_autoptr(GHashTable) found = NULL;
     g_autoptr(GSList) refresh_list = NULL;
     BlockDriverState *to_cow_parent = NULL;
     int ret;
 
     GLOBAL_STATE_CODE();
-    assert(to != NULL);
 
     if (detach_subchain) {
         assert(bdrv_chain_contains(from, to));
@@ -5266,13 +5220,11 @@ static int bdrv_replace_node_common(BlockDriverState *from,
     }
 
     if (detach_subchain) {
-        bdrv_remove_filter_or_cow_child(to_cow_parent, tran);
+        bdrv_remove_child(bdrv_filter_or_cow_child(to_cow_parent), tran);
     }
 
-    found = g_hash_table_new(NULL, NULL);
-
-    refresh_list = bdrv_topological_dfs(refresh_list, found, to);
-    refresh_list = bdrv_topological_dfs(refresh_list, found, from);
+    refresh_list = g_slist_prepend(refresh_list, to);
+    refresh_list = g_slist_prepend(refresh_list, from);
 
     ret = bdrv_list_refresh_perms(refresh_list, NULL, tran, errp);
     if (ret < 0) {
@@ -5290,9 +5242,6 @@ out:
     return ret;
 }
 
-/**
- * Replace node @from by @to (where neither may be NULL).
- */
 int bdrv_replace_node(BlockDriverState *from, BlockDriverState *to,
                       Error **errp)
 {
@@ -5320,22 +5269,42 @@ int bdrv_drop_filter(BlockDriverState *bs, Error **errp)
  * child.
  *
  * This function does not create any image files.
+ *
+ * The caller must hold the AioContext lock for @bs_top.
  */
 int bdrv_append(BlockDriverState *bs_new, BlockDriverState *bs_top,
                 Error **errp)
 {
     int ret;
+    BdrvChild *child;
     Transaction *tran = tran_new();
+    AioContext *old_context, *new_context = NULL;
 
     GLOBAL_STATE_CODE();
 
     assert(!bs_new->backing);
 
-    ret = bdrv_attach_child_noperm(bs_new, bs_top, "backing",
-                                   &child_of_bds, bdrv_backing_role(bs_new),
-                                   &bs_new->backing, tran, errp);
-    if (ret < 0) {
+    old_context = bdrv_get_aio_context(bs_top);
+
+    child = bdrv_attach_child_noperm(bs_new, bs_top, "backing",
+                                     &child_of_bds, bdrv_backing_role(bs_new),
+                                     tran, errp);
+    if (!child) {
+        ret = -EINVAL;
         goto out;
+    }
+
+    /*
+     * bdrv_attach_child_noperm could change the AioContext of bs_top.
+     * bdrv_replace_node_noperm calls bdrv_drained_begin, so let's temporarily
+     * hold the new AioContext, since bdrv_drained_begin calls BDRV_POLL_WHILE
+     * that assumes the new lock is taken.
+     */
+    new_context = bdrv_get_aio_context(bs_top);
+
+    if (old_context != new_context) {
+        aio_context_release(old_context);
+        aio_context_acquire(new_context);
     }
 
     ret = bdrv_replace_node_noperm(bs_top, bs_new, true, tran, errp);
@@ -5343,11 +5312,16 @@ int bdrv_append(BlockDriverState *bs_new, BlockDriverState *bs_top,
         goto out;
     }
 
-    ret = bdrv_refresh_perms(bs_new, errp);
+    ret = bdrv_refresh_perms(bs_new, tran, errp);
 out:
     tran_finalize(tran, ret);
 
     bdrv_refresh_limits(bs_top, NULL, NULL);
+
+    if (new_context && old_context != new_context) {
+        aio_context_release(new_context);
+        aio_context_acquire(old_context);
+    }
 
     return ret;
 }
@@ -5358,7 +5332,6 @@ int bdrv_replace_child_bs(BdrvChild *child, BlockDriverState *new_bs,
 {
     int ret;
     Transaction *tran = tran_new();
-    g_autoptr(GHashTable) found = NULL;
     g_autoptr(GSList) refresh_list = NULL;
     BlockDriverState *old_bs = child->bs;
 
@@ -5368,13 +5341,10 @@ int bdrv_replace_child_bs(BdrvChild *child, BlockDriverState *new_bs,
     bdrv_drained_begin(old_bs);
     bdrv_drained_begin(new_bs);
 
-    bdrv_replace_child_tran(&child, new_bs, tran, true);
-    /* @new_bs must have been non-NULL, so @child must not have been freed */
-    assert(child != NULL);
+    bdrv_replace_child_tran(child, new_bs, tran);
 
-    found = g_hash_table_new(NULL, NULL);
-    refresh_list = bdrv_topological_dfs(refresh_list, found, old_bs);
-    refresh_list = bdrv_topological_dfs(refresh_list, found, new_bs);
+    refresh_list = g_slist_prepend(refresh_list, old_bs);
+    refresh_list = g_slist_prepend(refresh_list, new_bs);
 
     ret = bdrv_list_refresh_perms(refresh_list, NULL, tran, errp);
 
@@ -5474,6 +5444,7 @@ int coroutine_fn bdrv_co_check(BlockDriverState *bs,
                                BdrvCheckResult *res, BdrvCheckMode fix)
 {
     IO_CODE();
+    assert_bdrv_graph_readable();
     if (bs->drv == NULL) {
         return -ENOMEDIUM;
     }
@@ -5696,7 +5667,7 @@ int bdrv_drop_intermediate(BlockDriverState *top, BlockDriverState *base,
     GLOBAL_STATE_CODE();
 
     bdrv_ref(top);
-    bdrv_subtree_drained_begin(top);
+    bdrv_drained_begin(base);
 
     if (!top->drv || !base->drv) {
         goto exit;
@@ -5769,13 +5740,13 @@ int bdrv_drop_intermediate(BlockDriverState *top, BlockDriverState *base,
 
     ret = 0;
 exit:
-    bdrv_subtree_drained_end(top);
+    bdrv_drained_end(base);
     bdrv_unref(top);
     return ret;
 }
 
 /**
- * Implementation of BlockDriver.bdrv_get_allocated_file_size() that
+ * Implementation of BlockDriver.bdrv_co_get_allocated_file_size() that
  * sums the size of all data-bearing children.  (This excludes backing
  * children.)
  */
@@ -5788,7 +5759,7 @@ static int64_t bdrv_sum_allocated_file_size(BlockDriverState *bs)
         if (child->role & (BDRV_CHILD_DATA | BDRV_CHILD_METADATA |
                            BDRV_CHILD_FILTERED))
         {
-            child_size = bdrv_get_allocated_file_size(child->bs);
+            child_size = bdrv_co_get_allocated_file_size(child->bs);
             if (child_size < 0) {
                 return child_size;
             }
@@ -5803,7 +5774,7 @@ static int64_t bdrv_sum_allocated_file_size(BlockDriverState *bs)
  * Length of a allocated file in bytes. Sparse files are counted by actual
  * allocated space. Return < 0 if error or unknown.
  */
-int64_t bdrv_get_allocated_file_size(BlockDriverState *bs)
+int64_t coroutine_fn bdrv_co_get_allocated_file_size(BlockDriverState *bs)
 {
     BlockDriver *drv = bs->drv;
     IO_CODE();
@@ -5811,8 +5782,8 @@ int64_t bdrv_get_allocated_file_size(BlockDriverState *bs)
     if (!drv) {
         return -ENOMEDIUM;
     }
-    if (drv->bdrv_get_allocated_file_size) {
-        return drv->bdrv_get_allocated_file_size(bs);
+    if (drv->bdrv_co_get_allocated_file_size) {
+        return drv->bdrv_co_get_allocated_file_size(bs);
     }
 
     if (drv->bdrv_file_open) {
@@ -5824,7 +5795,7 @@ int64_t bdrv_get_allocated_file_size(BlockDriverState *bs)
         return -ENOTSUP;
     } else if (drv->is_filter) {
         /* Filter drivers default to the size of their filtered child */
-        return bdrv_get_allocated_file_size(bdrv_filter_bs(bs));
+        return bdrv_co_get_allocated_file_size(bdrv_filter_bs(bs));
     } else {
         /* Other drivers default to summing their children's sizes */
         return bdrv_sum_allocated_file_size(bs);
@@ -5870,16 +5841,17 @@ BlockMeasureInfo *bdrv_measure(BlockDriver *drv, QemuOpts *opts,
 /**
  * Return number of sectors on success, -errno on error.
  */
-int64_t bdrv_nb_sectors(BlockDriverState *bs)
+int64_t coroutine_fn bdrv_co_nb_sectors(BlockDriverState *bs)
 {
     BlockDriver *drv = bs->drv;
     IO_CODE();
+    assert_bdrv_graph_readable();
 
     if (!drv)
         return -ENOMEDIUM;
 
-    if (drv->has_variable_length) {
-        int ret = refresh_total_sectors(bs, bs->total_sectors);
+    if (bs->bl.has_variable_length) {
+        int ret = bdrv_co_refresh_total_sectors(bs, bs->total_sectors);
         if (ret < 0) {
             return ret;
         }
@@ -5887,15 +5859,39 @@ int64_t bdrv_nb_sectors(BlockDriverState *bs)
     return bs->total_sectors;
 }
 
+/*
+ * This wrapper is written by hand because this function is in the hot I/O path,
+ * via blk_get_geometry.
+ */
+int64_t coroutine_mixed_fn bdrv_nb_sectors(BlockDriverState *bs)
+{
+    BlockDriver *drv = bs->drv;
+    IO_CODE();
+
+    if (!drv)
+        return -ENOMEDIUM;
+
+    if (bs->bl.has_variable_length) {
+        int ret = bdrv_refresh_total_sectors(bs, bs->total_sectors);
+        if (ret < 0) {
+            return ret;
+        }
+    }
+
+    return bs->total_sectors;
+}
+
 /**
  * Return length in bytes on success, -errno on error.
  * The length is always a multiple of BDRV_SECTOR_SIZE.
  */
-int64_t bdrv_getlength(BlockDriverState *bs)
+int64_t coroutine_fn bdrv_co_getlength(BlockDriverState *bs)
 {
-    int64_t ret = bdrv_nb_sectors(bs);
+    int64_t ret;
     IO_CODE();
+    assert_bdrv_graph_readable();
 
+    ret = bdrv_co_nb_sectors(bs);
     if (ret < 0) {
         return ret;
     }
@@ -5903,15 +5899,6 @@ int64_t bdrv_getlength(BlockDriverState *bs)
         return -EFBIG;
     }
     return ret * BDRV_SECTOR_SIZE;
-}
-
-/* return 0 as number of sectors if no device present or error */
-void bdrv_get_geometry(BlockDriverState *bs, uint64_t *nb_sectors_ptr)
-{
-    int64_t nb_sectors = bdrv_nb_sectors(bs);
-    IO_CODE();
-
-    *nb_sectors_ptr = nb_sectors < 0 ? 0 : nb_sectors;
 }
 
 bool bdrv_is_sg(BlockDriverState *bs)
@@ -6165,13 +6152,16 @@ XDbgBlockGraph *bdrv_get_xdbg_block_graph(Error **errp)
         }
     }
 
-    for (job = block_job_next(NULL); job; job = block_job_next(job)) {
-        GSList *el;
+    WITH_JOB_LOCK_GUARD() {
+        for (job = block_job_next_locked(NULL); job;
+             job = block_job_next_locked(job)) {
+            GSList *el;
 
-        xdbg_graph_add_node(gr, job, X_DBG_BLOCK_GRAPH_NODE_TYPE_BLOCK_JOB,
-                           job->job.id);
-        for (el = job->nodes; el; el = el->next) {
-            xdbg_graph_add_edge(gr, job, (BdrvChild *)el->data);
+            xdbg_graph_add_node(gr, job, X_DBG_BLOCK_GRAPH_NODE_TYPE_BLOCK_JOB,
+                                job->job.id);
+            for (el = job->nodes; el; el = el->next) {
+                xdbg_graph_add_edge(gr, job, (BdrvChild *)el->data);
+            }
         }
     }
 
@@ -6298,7 +6288,7 @@ const char *bdrv_get_device_or_node_name(const BlockDriverState *bs)
 
 int bdrv_get_flags(BlockDriverState *bs)
 {
-    GLOBAL_STATE_CODE();
+    IO_CODE();
     return bs->open_flags;
 }
 
@@ -6352,7 +6342,7 @@ void bdrv_get_backing_filename(BlockDriverState *bs,
     pstrcpy(filename, filename_size, bs->backing_file);
 }
 
-int bdrv_get_info(BlockDriverState *bs, BlockDriverInfo *bdi)
+int coroutine_fn bdrv_co_get_info(BlockDriverState *bs, BlockDriverInfo *bdi)
 {
     int ret;
     BlockDriver *drv = bs->drv;
@@ -6361,15 +6351,15 @@ int bdrv_get_info(BlockDriverState *bs, BlockDriverInfo *bdi)
     if (!drv) {
         return -ENOMEDIUM;
     }
-    if (!drv->bdrv_get_info) {
+    if (!drv->bdrv_co_get_info) {
         BlockDriverState *filtered = bdrv_filter_bs(bs);
         if (filtered) {
-            return bdrv_get_info(filtered, bdi);
+            return bdrv_co_get_info(filtered, bdi);
         }
         return -ENOTSUP;
     }
     memset(bdi, 0, sizeof(*bdi));
-    ret = drv->bdrv_get_info(bs, bdi);
+    ret = drv->bdrv_co_get_info(bs, bdi);
     if (ret < 0) {
         return ret;
     }
@@ -6402,14 +6392,14 @@ BlockStatsSpecific *bdrv_get_specific_stats(BlockDriverState *bs)
     return drv->bdrv_get_specific_stats(bs);
 }
 
-void bdrv_debug_event(BlockDriverState *bs, BlkdebugEvent event)
+void coroutine_fn bdrv_co_debug_event(BlockDriverState *bs, BlkdebugEvent event)
 {
     IO_CODE();
-    if (!bs || !bs->drv || !bs->drv->bdrv_debug_event) {
+    if (!bs || !bs->drv || !bs->drv->bdrv_co_debug_event) {
         return;
     }
 
-    bs->drv->bdrv_debug_event(bs, event);
+    bs->drv->bdrv_co_debug_event(bs, event);
 }
 
 static BlockDriverState *bdrv_find_debug_node(BlockDriverState *bs)
@@ -6642,7 +6632,7 @@ int bdrv_activate(BlockDriverState *bs, Error **errp)
      */
     if (bs->open_flags & BDRV_O_INACTIVE) {
         bs->open_flags &= ~BDRV_O_INACTIVE;
-        ret = bdrv_refresh_perms(bs, errp);
+        ret = bdrv_refresh_perms(bs, NULL, errp);
         if (ret < 0) {
             bs->open_flags |= BDRV_O_INACTIVE;
             return ret;
@@ -6658,7 +6648,7 @@ int bdrv_activate(BlockDriverState *bs, Error **errp)
             bdrv_dirty_bitmap_skip_store(bm, false);
         }
 
-        ret = refresh_total_sectors(bs, bs->total_sectors);
+        ret = bdrv_refresh_total_sectors(bs, bs->total_sectors);
         if (ret < 0) {
             bs->open_flags |= BDRV_O_INACTIVE;
             error_setg_errno(errp, -ret, "Could not refresh total sector count");
@@ -6686,6 +6676,7 @@ int coroutine_fn bdrv_co_invalidate_cache(BlockDriverState *bs, Error **errp)
     IO_CODE();
 
     assert(!(bs->open_flags & BDRV_O_INACTIVE));
+    assert_bdrv_graph_readable();
 
     if (bs->drv->bdrv_co_invalidate_cache) {
         bs->drv->bdrv_co_invalidate_cache(bs, &local_err);
@@ -6787,7 +6778,7 @@ static int bdrv_inactivate_recurse(BlockDriverState *bs)
      * We only tried to loosen restrictions, so errors are not fatal, ignore
      * them.
      */
-    bdrv_refresh_perms(bs, NULL);
+    bdrv_refresh_perms(bs, NULL, NULL);
 
     /* Recursively inactivate children */
     QLIST_FOREACH(child, &bs->children, next) {
@@ -6848,20 +6839,21 @@ out:
 /**
  * Return TRUE if the media is present
  */
-bool bdrv_is_inserted(BlockDriverState *bs)
+bool coroutine_fn bdrv_co_is_inserted(BlockDriverState *bs)
 {
     BlockDriver *drv = bs->drv;
     BdrvChild *child;
     IO_CODE();
+    assert_bdrv_graph_readable();
 
     if (!drv) {
         return false;
     }
-    if (drv->bdrv_is_inserted) {
-        return drv->bdrv_is_inserted(bs);
+    if (drv->bdrv_co_is_inserted) {
+        return drv->bdrv_co_is_inserted(bs);
     }
     QLIST_FOREACH(child, &bs->children, next) {
-        if (!bdrv_is_inserted(child->bs)) {
+        if (!bdrv_co_is_inserted(child->bs)) {
             return false;
         }
     }
@@ -6871,13 +6863,14 @@ bool bdrv_is_inserted(BlockDriverState *bs)
 /**
  * If eject_flag is TRUE, eject the media. Otherwise, close the tray
  */
-void bdrv_eject(BlockDriverState *bs, bool eject_flag)
+void coroutine_fn bdrv_co_eject(BlockDriverState *bs, bool eject_flag)
 {
     BlockDriver *drv = bs->drv;
     IO_CODE();
+    assert_bdrv_graph_readable();
 
-    if (drv && drv->bdrv_eject) {
-        drv->bdrv_eject(bs, eject_flag);
+    if (drv && drv->bdrv_co_eject) {
+        drv->bdrv_co_eject(bs, eject_flag);
     }
 }
 
@@ -6885,14 +6878,15 @@ void bdrv_eject(BlockDriverState *bs, bool eject_flag)
  * Lock or unlock the media (if it is locked, the user won't be able
  * to eject it manually).
  */
-void bdrv_lock_medium(BlockDriverState *bs, bool locked)
+void coroutine_fn bdrv_co_lock_medium(BlockDriverState *bs, bool locked)
 {
     BlockDriver *drv = bs->drv;
     IO_CODE();
+    assert_bdrv_graph_readable();
     trace_bdrv_lock_medium(bs, locked);
 
-    if (drv && drv->bdrv_lock_medium) {
-        drv->bdrv_lock_medium(bs, locked);
+    if (drv && drv->bdrv_co_lock_medium) {
+        drv->bdrv_co_lock_medium(bs, locked);
     }
 }
 
@@ -6992,6 +6986,10 @@ bool bdrv_op_blocker_is_empty(BlockDriverState *bs)
     return true;
 }
 
+/*
+ * Must not be called while holding the lock of an AioContext other than the
+ * current one.
+ */
 void bdrv_img_create(const char *filename, const char *fmt,
                      const char *base_filename, const char *base_fmt,
                      char *options, uint64_t img_size, int flags, bool quiet,
@@ -7240,12 +7238,6 @@ void coroutine_fn bdrv_co_unlock(BlockDriverState *bs)
     }
 }
 
-void bdrv_coroutine_enter(BlockDriverState *bs, Coroutine *co)
-{
-    IO_CODE();
-    aio_co_enter(bdrv_get_aio_context(bs), co);
-}
-
 static void bdrv_do_remove_aio_context_notifier(BdrvAioNotifier *ban)
 {
     GLOBAL_STATE_CODE();
@@ -7310,6 +7302,90 @@ static void bdrv_attach_aio_context(BlockDriverState *bs,
     bs->walking_aio_notifiers = false;
 }
 
+typedef struct BdrvStateSetAioContext {
+    AioContext *new_ctx;
+    BlockDriverState *bs;
+} BdrvStateSetAioContext;
+
+static bool bdrv_parent_change_aio_context(BdrvChild *c, AioContext *ctx,
+                                           GHashTable *visited,
+                                           Transaction *tran,
+                                           Error **errp)
+{
+    GLOBAL_STATE_CODE();
+    if (g_hash_table_contains(visited, c)) {
+        return true;
+    }
+    g_hash_table_add(visited, c);
+
+    /*
+     * A BdrvChildClass that doesn't handle AioContext changes cannot
+     * tolerate any AioContext changes
+     */
+    if (!c->klass->change_aio_ctx) {
+        char *user = bdrv_child_user_desc(c);
+        error_setg(errp, "Changing iothreads is not supported by %s", user);
+        g_free(user);
+        return false;
+    }
+    if (!c->klass->change_aio_ctx(c, ctx, visited, tran, errp)) {
+        assert(!errp || *errp);
+        return false;
+    }
+    return true;
+}
+
+bool bdrv_child_change_aio_context(BdrvChild *c, AioContext *ctx,
+                                   GHashTable *visited, Transaction *tran,
+                                   Error **errp)
+{
+    GLOBAL_STATE_CODE();
+    if (g_hash_table_contains(visited, c)) {
+        return true;
+    }
+    g_hash_table_add(visited, c);
+    return bdrv_change_aio_context(c->bs, ctx, visited, tran, errp);
+}
+
+static void bdrv_set_aio_context_clean(void *opaque)
+{
+    BdrvStateSetAioContext *state = (BdrvStateSetAioContext *) opaque;
+    BlockDriverState *bs = (BlockDriverState *) state->bs;
+
+    /* Paired with bdrv_drained_begin in bdrv_change_aio_context() */
+    bdrv_drained_end(bs);
+
+    g_free(state);
+}
+
+static void bdrv_set_aio_context_commit(void *opaque)
+{
+    BdrvStateSetAioContext *state = (BdrvStateSetAioContext *) opaque;
+    BlockDriverState *bs = (BlockDriverState *) state->bs;
+    AioContext *new_context = state->new_ctx;
+    AioContext *old_context = bdrv_get_aio_context(bs);
+
+    /*
+     * Take the old AioContex when detaching it from bs.
+     * At this point, new_context lock is already acquired, and we are now
+     * also taking old_context. This is safe as long as bdrv_detach_aio_context
+     * does not call AIO_POLL_WHILE().
+     */
+    if (old_context != qemu_get_aio_context()) {
+        aio_context_acquire(old_context);
+    }
+    bdrv_detach_aio_context(bs);
+    if (old_context != qemu_get_aio_context()) {
+        aio_context_release(old_context);
+    }
+    bdrv_attach_aio_context(bs, new_context);
+}
+
+static TransactionActionDrv set_aio_context = {
+    .commit = bdrv_set_aio_context_commit,
+    .clean = bdrv_set_aio_context_clean,
+};
+
 /*
  * Changes the AioContext used for fd handlers, timers, and BHs by this
  * BlockDriverState and all its children and parents.
@@ -7320,181 +7396,127 @@ static void bdrv_attach_aio_context(BlockDriverState *bs,
  * must not own the AioContext lock for new_context (unless new_context is the
  * same as the current context of bs).
  *
- * @ignore will accumulate all visited BdrvChild object. The caller is
+ * @visited will accumulate all visited BdrvChild objects. The caller is
  * responsible for freeing the list afterwards.
  */
-void bdrv_set_aio_context_ignore(BlockDriverState *bs,
-                                 AioContext *new_context, GSList **ignore)
-{
-    AioContext *old_context = bdrv_get_aio_context(bs);
-    GSList *children_to_process = NULL;
-    GSList *parents_to_process = NULL;
-    GSList *entry;
-    BdrvChild *child, *parent;
-
-    g_assert(qemu_get_current_aio_context() == qemu_get_aio_context());
-    GLOBAL_STATE_CODE();
-
-    if (old_context == new_context) {
-        return;
-    }
-
-    bdrv_drained_begin(bs);
-
-    QLIST_FOREACH(child, &bs->children, next) {
-        if (g_slist_find(*ignore, child)) {
-            continue;
-        }
-        *ignore = g_slist_prepend(*ignore, child);
-        children_to_process = g_slist_prepend(children_to_process, child);
-    }
-
-    QLIST_FOREACH(parent, &bs->parents, next_parent) {
-        if (g_slist_find(*ignore, parent)) {
-            continue;
-        }
-        *ignore = g_slist_prepend(*ignore, parent);
-        parents_to_process = g_slist_prepend(parents_to_process, parent);
-    }
-
-    for (entry = children_to_process;
-         entry != NULL;
-         entry = g_slist_next(entry)) {
-        child = entry->data;
-        bdrv_set_aio_context_ignore(child->bs, new_context, ignore);
-    }
-    g_slist_free(children_to_process);
-
-    for (entry = parents_to_process;
-         entry != NULL;
-         entry = g_slist_next(entry)) {
-        parent = entry->data;
-        assert(parent->klass->set_aio_ctx);
-        parent->klass->set_aio_ctx(parent, new_context, ignore);
-    }
-    g_slist_free(parents_to_process);
-
-    bdrv_detach_aio_context(bs);
-
-    /* Acquire the new context, if necessary */
-    if (qemu_get_aio_context() != new_context) {
-        aio_context_acquire(new_context);
-    }
-
-    bdrv_attach_aio_context(bs, new_context);
-
-    /*
-     * If this function was recursively called from
-     * bdrv_set_aio_context_ignore(), there may be nodes in the
-     * subtree that have not yet been moved to the new AioContext.
-     * Release the old one so bdrv_drained_end() can poll them.
-     */
-    if (qemu_get_aio_context() != old_context) {
-        aio_context_release(old_context);
-    }
-
-    bdrv_drained_end(bs);
-
-    if (qemu_get_aio_context() != old_context) {
-        aio_context_acquire(old_context);
-    }
-    if (qemu_get_aio_context() != new_context) {
-        aio_context_release(new_context);
-    }
-}
-
-static bool bdrv_parent_can_set_aio_context(BdrvChild *c, AioContext *ctx,
-                                            GSList **ignore, Error **errp)
-{
-    GLOBAL_STATE_CODE();
-    if (g_slist_find(*ignore, c)) {
-        return true;
-    }
-    *ignore = g_slist_prepend(*ignore, c);
-
-    /*
-     * A BdrvChildClass that doesn't handle AioContext changes cannot
-     * tolerate any AioContext changes
-     */
-    if (!c->klass->can_set_aio_ctx) {
-        char *user = bdrv_child_user_desc(c);
-        error_setg(errp, "Changing iothreads is not supported by %s", user);
-        g_free(user);
-        return false;
-    }
-    if (!c->klass->can_set_aio_ctx(c, ctx, ignore, errp)) {
-        assert(!errp || *errp);
-        return false;
-    }
-    return true;
-}
-
-bool bdrv_child_can_set_aio_context(BdrvChild *c, AioContext *ctx,
-                                    GSList **ignore, Error **errp)
-{
-    GLOBAL_STATE_CODE();
-    if (g_slist_find(*ignore, c)) {
-        return true;
-    }
-    *ignore = g_slist_prepend(*ignore, c);
-    return bdrv_can_set_aio_context(c->bs, ctx, ignore, errp);
-}
-
-/* @ignore will accumulate all visited BdrvChild object. The caller is
- * responsible for freeing the list afterwards. */
-bool bdrv_can_set_aio_context(BlockDriverState *bs, AioContext *ctx,
-                              GSList **ignore, Error **errp)
+static bool bdrv_change_aio_context(BlockDriverState *bs, AioContext *ctx,
+                                    GHashTable *visited, Transaction *tran,
+                                    Error **errp)
 {
     BdrvChild *c;
+    BdrvStateSetAioContext *state;
+
+    GLOBAL_STATE_CODE();
 
     if (bdrv_get_aio_context(bs) == ctx) {
         return true;
     }
 
-    GLOBAL_STATE_CODE();
-
     QLIST_FOREACH(c, &bs->parents, next_parent) {
-        if (!bdrv_parent_can_set_aio_context(c, ctx, ignore, errp)) {
+        if (!bdrv_parent_change_aio_context(c, ctx, visited, tran, errp)) {
             return false;
         }
     }
+
     QLIST_FOREACH(c, &bs->children, next) {
-        if (!bdrv_child_can_set_aio_context(c, ctx, ignore, errp)) {
+        if (!bdrv_child_change_aio_context(c, ctx, visited, tran, errp)) {
             return false;
         }
     }
+
+    state = g_new(BdrvStateSetAioContext, 1);
+    *state = (BdrvStateSetAioContext) {
+        .new_ctx = ctx,
+        .bs = bs,
+    };
+
+    /* Paired with bdrv_drained_end in bdrv_set_aio_context_clean() */
+    bdrv_drained_begin(bs);
+
+    tran_add(tran, &set_aio_context, state);
 
     return true;
 }
 
-int bdrv_child_try_set_aio_context(BlockDriverState *bs, AioContext *ctx,
-                                   BdrvChild *ignore_child, Error **errp)
+/*
+ * Change bs's and recursively all of its parents' and children's AioContext
+ * to the given new context, returning an error if that isn't possible.
+ *
+ * If ignore_child is not NULL, that child (and its subgraph) will not
+ * be touched.
+ *
+ * This function still requires the caller to take the bs current
+ * AioContext lock, otherwise draining will fail since AIO_WAIT_WHILE
+ * assumes the lock is always held if bs is in another AioContext.
+ * For the same reason, it temporarily also holds the new AioContext, since
+ * bdrv_drained_end calls BDRV_POLL_WHILE that assumes the lock is taken too.
+ * Therefore the new AioContext lock must not be taken by the caller.
+ */
+int bdrv_try_change_aio_context(BlockDriverState *bs, AioContext *ctx,
+                                BdrvChild *ignore_child, Error **errp)
 {
-    GSList *ignore;
-    bool ret;
-
+    Transaction *tran;
+    GHashTable *visited;
+    int ret;
+    AioContext *old_context = bdrv_get_aio_context(bs);
     GLOBAL_STATE_CODE();
 
-    ignore = ignore_child ? g_slist_prepend(NULL, ignore_child) : NULL;
-    ret = bdrv_can_set_aio_context(bs, ctx, &ignore, errp);
-    g_slist_free(ignore);
+    /*
+     * Recursion phase: go through all nodes of the graph.
+     * Take care of checking that all nodes support changing AioContext
+     * and drain them, builing a linear list of callbacks to run if everything
+     * is successful (the transaction itself).
+     */
+    tran = tran_new();
+    visited = g_hash_table_new(NULL, NULL);
+    if (ignore_child) {
+        g_hash_table_add(visited, ignore_child);
+    }
+    ret = bdrv_change_aio_context(bs, ctx, visited, tran, errp);
+    g_hash_table_destroy(visited);
+
+    /*
+     * Linear phase: go through all callbacks collected in the transaction.
+     * Run all callbacks collected in the recursion to switch all nodes
+     * AioContext lock (transaction commit), or undo all changes done in the
+     * recursion (transaction abort).
+     */
 
     if (!ret) {
+        /* Just run clean() callbacks. No AioContext changed. */
+        tran_abort(tran);
         return -EPERM;
     }
 
-    ignore = ignore_child ? g_slist_prepend(NULL, ignore_child) : NULL;
-    bdrv_set_aio_context_ignore(bs, ctx, &ignore);
-    g_slist_free(ignore);
+    /*
+     * Release old AioContext, it won't be needed anymore, as all
+     * bdrv_drained_begin() have been called already.
+     */
+    if (qemu_get_aio_context() != old_context) {
+        aio_context_release(old_context);
+    }
+
+    /*
+     * Acquire new AioContext since bdrv_drained_end() is going to be called
+     * after we switched all nodes in the new AioContext, and the function
+     * assumes that the lock of the bs is always taken.
+     */
+    if (qemu_get_aio_context() != ctx) {
+        aio_context_acquire(ctx);
+    }
+
+    tran_commit(tran);
+
+    if (qemu_get_aio_context() != ctx) {
+        aio_context_release(ctx);
+    }
+
+    /* Re-acquire the old AioContext, since the caller takes and releases it. */
+    if (qemu_get_aio_context() != old_context) {
+        aio_context_acquire(old_context);
+    }
 
     return 0;
-}
-
-int bdrv_try_set_aio_context(BlockDriverState *bs, AioContext *ctx,
-                             Error **errp)
-{
-    GLOBAL_STATE_CODE();
-    return bdrv_child_try_set_aio_context(bs, ctx, NULL, errp);
 }
 
 void bdrv_add_aio_context_notifier(BlockDriverState *bs,

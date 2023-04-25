@@ -3,6 +3,8 @@
 #
 # Copyright (c) 2009 - 2021, Intel Corporation. All rights reserved.<BR>
 # (C) Copyright 2015-2020 Hewlett Packard Enterprise Development LP<BR>
+# Copyright (c) 2022, Loongson Technology Corporation Limited. All rights reserved.<BR>
+# Copyright (c) 2021 - 2022, Arm Limited. All rights reserved.<BR>
 # SPDX-License-Identifier: BSD-2-Clause-Patent
 #
 ##
@@ -13,7 +15,7 @@
   PLATFORM_VERSION               = 0.98
   DSC_SPECIFICATION              = 0x00010005
   OUTPUT_DIRECTORY               = Build/SecurityPkg
-  SUPPORTED_ARCHITECTURES        = IA32|X64|EBC|ARM|AARCH64|RISCV64
+  SUPPORTED_ARCHITECTURES        = IA32|X64|EBC|ARM|AARCH64|RISCV64|LOONGARCH64
   BUILD_TARGETS                  = DEBUG|RELEASE|NOOPT
   SKUID_IDENTIFIER               = DEFAULT
 
@@ -66,12 +68,12 @@
   TcgStorageCoreLib|SecurityPkg/Library/TcgStorageCoreLib/TcgStorageCoreLib.inf
   TcgStorageOpalLib|SecurityPkg/Library/TcgStorageOpalLib/TcgStorageOpalLib.inf
   ResetSystemLib|MdeModulePkg/Library/BaseResetSystemLibNull/BaseResetSystemLibNull.inf
-  VariableKeyLib|SecurityPkg/Library/VariableKeyLibNull/VariableKeyLibNull.inf
-  RpmcLib|SecurityPkg/Library/RpmcLibNull/RpmcLibNull.inf
   TcgEventLogRecordLib|SecurityPkg/Library/TcgEventLogRecordLib/TcgEventLogRecordLib.inf
   MmUnblockMemoryLib|MdePkg/Library/MmUnblockMemoryLib/MmUnblockMemoryLibNull.inf
   SecureBootVariableLib|SecurityPkg/Library/SecureBootVariableLib/SecureBootVariableLib.inf
+  PlatformPKProtectionLib|SecurityPkg/Library/PlatformPKProtectionLibVarPolicy/PlatformPKProtectionLibVarPolicy.inf
   SecureBootVariableProvisionLib|SecurityPkg/Library/SecureBootVariableProvisionLib/SecureBootVariableProvisionLib.inf
+  TdxLib|MdePkg/Library/TdxLib/TdxLib.inf
 
 [LibraryClasses.ARM, LibraryClasses.AARCH64]
   #
@@ -86,11 +88,20 @@
 
   ArmSoftFloatLib|ArmPkg/Library/ArmSoftFloatLib/ArmSoftFloatLib.inf
 
+  ArmTrngLib|MdePkg/Library/BaseArmTrngLibNull/BaseArmTrngLibNull.inf
+
 [LibraryClasses.ARM]
   RngLib|MdePkg/Library/BaseRngLibTimerLib/BaseRngLibTimerLib.inf
 
 [LibraryClasses.RISCV64]
   RngLib|MdePkg/Library/BaseRngLibTimerLib/BaseRngLibTimerLib.inf
+
+[LibraryClasses.X64.SEC]
+  HashLib|SecurityPkg/Library/HashLibTdx/HashLibTdx.inf
+  TpmMeasurementLib|SecurityPkg/Library/SecTpmMeasurementLib/SecTpmMeasurementLibTdx.inf
+
+[LibraryClasses.X64.DXE_DRIVER]
+  HashLib|SecurityPkg/Library/HashLibTdx/HashLibTdx.inf
 
 [LibraryClasses.common.PEIM]
   PeimEntryPoint|MdePkg/Library/PeimEntryPoint/PeimEntryPoint.inf
@@ -251,8 +262,7 @@
   #
   # Variable Confidentiality & Integrity
   #
-  SecurityPkg/Library/VariableKeyLibNull/VariableKeyLibNull.inf
-  SecurityPkg/Library/RpmcLibNull/RpmcLibNull.inf
+  SecurityPkg/Library/PlatformPKProtectionLibVarPolicy/PlatformPKProtectionLibVarPolicy.inf
 
   #
   # Other
@@ -277,11 +287,20 @@
   SecurityPkg/EnrollFromDefaultKeysApp/EnrollFromDefaultKeysApp.inf
   SecurityPkg/VariableAuthenticated/SecureBootDefaultKeysDxe/SecureBootDefaultKeysDxe.inf
 
-[Components.IA32, Components.X64, Components.AARCH64]
+[Components.IA32, Components.X64, Components.AARCH64, Components.ARM]
   #
   # Random Number Generator
   #
   SecurityPkg/RandomNumberGenerator/RngDxe/RngDxe.inf
+
+[Components.X64]
+  SecurityPkg/Library/HashLibTdx/HashLibTdx.inf
+  SecurityPkg/Library/SecTpmMeasurementLib/SecTpmMeasurementLibTdx.inf
+  SecurityPkg/Tcg/TdTcg2Dxe/TdTcg2Dxe.inf {
+    <LibraryClasses>
+      HashLib|SecurityPkg/Library/HashLibTdx/HashLibTdx.inf
+      NULL|SecurityPkg/Library/HashInstanceLibSha384/HashInstanceLibSha384.inf
+  }
 
 [Components.IA32, Components.X64]
   SecurityPkg/VariableAuthenticated/SecureBootConfigDxe/SecureBootConfigDxe.inf

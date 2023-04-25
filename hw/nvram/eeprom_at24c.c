@@ -12,6 +12,7 @@
 #include "qapi/error.h"
 #include "qemu/module.h"
 #include "hw/i2c/i2c.h"
+#include "hw/nvram/eeprom_at24c.h"
 #include "hw/qdev-properties.h"
 #include "hw/qdev-properties-system.h"
 #include "sysemu/block-backend.h"
@@ -40,6 +41,13 @@ struct EEPROMState {
     uint16_t cur;
     /* total size in bytes */
     uint32_t rsize;
+    /*
+     * address byte number
+     *  for  24c01, 24c02 size <= 256 byte, use only 1 byte
+     *  otherwise size > 256, use 2 byte
+     */
+    uint8_t asize;
+
     bool writable;
     /* cells changed since last START? */
     bool changed;
@@ -49,6 +57,9 @@ struct EEPROMState {
     uint8_t *mem;
 
     BlockBackend *blk;
+
+    const uint8_t *init_rom;
+    uint32_t init_rom_size;
 };
 
 static
@@ -64,8 +75,8 @@ int at24c_eeprom_event(I2CSlave *s, enum i2c_event event)
     case I2C_START_RECV:
         DPRINTK("clear\n");
         if (ee->blk && ee->changed) {
-            int len = blk_pwrite(ee->blk, 0, ee->mem, ee->rsize, 0);
-            if (len != ee->rsize) {
+            int ret = blk_pwrite(ee->blk, 0, ee->rsize, ee->mem, 0);
+            if (ret < 0) {
                 ERR(TYPE_AT24C_EE
                         " : failed to write backing file\n");
             }
@@ -75,6 +86,8 @@ int at24c_eeprom_event(I2CSlave *s, enum i2c_event event)
         break;
     case I2C_NACK:
         break;
+    default:
+        return -1;
     }
     return 0;
 }
@@ -85,7 +98,11 @@ uint8_t at24c_eeprom_recv(I2CSlave *s)
     EEPROMState *ee = AT24C_EE(s);
     uint8_t ret;
 
-    if (ee->haveaddr == 1) {
+    /*
+     * If got the byte address but not completely with address size
+     * will return the invalid value
+     */
+    if (ee->haveaddr > 0 && ee->haveaddr < ee->asize) {
         return 0xff;
     }
 
@@ -102,11 +119,11 @@ int at24c_eeprom_send(I2CSlave *s, uint8_t data)
 {
     EEPROMState *ee = AT24C_EE(s);
 
-    if (ee->haveaddr < 2) {
+    if (ee->haveaddr < ee->asize) {
         ee->cur <<= 8;
         ee->cur |= data;
         ee->haveaddr++;
-        if (ee->haveaddr == 2) {
+        if (ee->haveaddr == ee->asize) {
             ee->cur %= ee->rsize;
             DPRINTK("Set pointer %04x\n", ee->cur);
         }
@@ -126,9 +143,38 @@ int at24c_eeprom_send(I2CSlave *s, uint8_t data)
     return 0;
 }
 
+I2CSlave *at24c_eeprom_init(I2CBus *bus, uint8_t address, uint32_t rom_size)
+{
+    return at24c_eeprom_init_rom(bus, address, rom_size, NULL, 0);
+}
+
+I2CSlave *at24c_eeprom_init_rom(I2CBus *bus, uint8_t address, uint32_t rom_size,
+                                const uint8_t *init_rom, uint32_t init_rom_size)
+{
+    EEPROMState *s;
+
+    s = AT24C_EE(i2c_slave_new(TYPE_AT24C_EE, address));
+
+    qdev_prop_set_uint32(DEVICE(s), "rom-size", rom_size);
+
+    /* TODO: Model init_rom with QOM properties. */
+    s->init_rom = init_rom;
+    s->init_rom_size = init_rom_size;
+
+    i2c_slave_realize_and_unref(I2C_SLAVE(s), bus, &error_abort);
+
+    return I2C_SLAVE(s);
+}
+
 static void at24c_eeprom_realize(DeviceState *dev, Error **errp)
 {
     EEPROMState *ee = AT24C_EE(dev);
+
+    if (ee->init_rom_size > ee->rsize) {
+        error_setg(errp, "%s: init rom is larger than rom: %u > %u",
+                   TYPE_AT24C_EE, ee->init_rom_size, ee->rsize);
+        return;
+    }
 
     if (ee->blk) {
         int64_t len = blk_getlength(ee->blk);
@@ -149,6 +195,33 @@ static void at24c_eeprom_realize(DeviceState *dev, Error **errp)
     }
 
     ee->mem = g_malloc0(ee->rsize);
+    memset(ee->mem, 0, ee->rsize);
+
+    if (ee->init_rom) {
+        memcpy(ee->mem, ee->init_rom, MIN(ee->init_rom_size, ee->rsize));
+    }
+
+    if (ee->blk) {
+        int ret = blk_pread(ee->blk, 0, ee->rsize, ee->mem, 0);
+
+        if (ret < 0) {
+            ERR(TYPE_AT24C_EE
+                    " : Failed initial sync with backing file\n");
+        }
+        DPRINTK("Reset read backing file\n");
+    }
+
+    /*
+     * If address size didn't define with property set
+     *   value is 0 as default, setting it by Rom size detecting.
+     */
+    if (ee->asize == 0) {
+        if (ee->rsize <= 256) {
+            ee->asize = 1;
+        } else {
+            ee->asize = 2;
+        }
+    }
 }
 
 static
@@ -159,22 +232,11 @@ void at24c_eeprom_reset(DeviceState *state)
     ee->changed = false;
     ee->cur = 0;
     ee->haveaddr = 0;
-
-    memset(ee->mem, 0, ee->rsize);
-
-    if (ee->blk) {
-        int len = blk_pread(ee->blk, 0, ee->mem, ee->rsize);
-
-        if (len != ee->rsize) {
-            ERR(TYPE_AT24C_EE
-                    " : Failed initial sync with backing file\n");
-        }
-        DPRINTK("Reset read backing file\n");
-    }
 }
 
 static Property at24c_eeprom_props[] = {
     DEFINE_PROP_UINT32("rom-size", EEPROMState, rsize, 0),
+    DEFINE_PROP_UINT8("address-size", EEPROMState, asize, 0),
     DEFINE_PROP_BOOL("writable", EEPROMState, writable, true),
     DEFINE_PROP_DRIVE("drive", EEPROMState, blk),
     DEFINE_PROP_END_OF_LIST()

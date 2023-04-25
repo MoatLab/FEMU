@@ -296,31 +296,10 @@ static void show_all_regs(struct npu2 *npu, int brick_index)
 	}
 }
 
-void npu2_dump_scoms(int chip_id)
+void npu2_dump_scoms(struct npu2 *npu, int chip_id)
 {
-	struct npu2 *npu;
-	struct phb *phb;
-	struct npu2_dev *dev;
-
-	/*
-	 * Look for the npu2 structure for that chip ID. We can access it
-	 * through the array of phbs, looking for a nvlink or opencapi
-	 * phb. We can have several entries, but they all point
-	 * to the same npu2 structure
-	 */
-	for_each_phb(phb) {
-		npu = NULL;
-		if (phb->phb_type == phb_type_npu_v2) {
-			npu = phb_to_npu2_nvlink(phb);
-		} else if (phb->phb_type == phb_type_npu_v2_opencapi) {
-			dev = phb_to_npu2_dev_ocapi(phb);
-			npu = dev->npu;
-		}
-		if (npu && npu->chip_id == chip_id) {
-			show_all_regs(npu, -1 /* all bricks */);
-			break;
-		}
-	}
+	if (npu && npu->chip_id == chip_id)
+		show_all_regs(npu, -1 /* all bricks */);
 }
 
 static uint64_t npu2_ipi_attributes(struct irq_source *is __unused, uint32_t isn __unused)

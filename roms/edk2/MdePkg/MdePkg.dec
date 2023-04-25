@@ -4,9 +4,11 @@
 # It also provides the definitions(including PPIs/PROTOCOLs/GUIDs) of
 # EFI1.10/UEFI2.7/PI1.7 and some Industry Standards.
 #
-# Copyright (c) 2007 - 2021, Intel Corporation. All rights reserved.<BR>
+# Copyright (c) 2007 - 2022, Intel Corporation. All rights reserved.<BR>
 # Portions copyright (c) 2008 - 2009, Apple Inc. All rights reserved.<BR>
 # (C) Copyright 2016 - 2021 Hewlett Packard Enterprise Development LP<BR>
+# Copyright (c) 2022, Loongson Technology Corporation Limited. All rights reserved.<BR>
+# Copyright (c) 2021 - 2022, Arm Limited. All rights reserved.<BR>
 #
 # SPDX-License-Identifier: BSD-2-Clause-Patent
 #
@@ -42,6 +44,9 @@
 
 [Includes.RISCV64]
   Include/RiscV64
+
+[Includes.LOONGARCH64]
+  Include/LoongArch64
 
 [LibraryClasses]
   ##  @libraryclass  Provides most usb APIs to support the Hid requests defined in Usb Hid 1.1 spec
@@ -267,6 +272,18 @@
   #
   RegisterFilterLib|Include/Library/RegisterFilterLib.h
 
+  ##  @libraryclass  This library provides interfances to probe ConfidentialComputing guest type.
+  #
+  #
+  CcProbeLib|Include/Library/CcProbeLib.h
+
+  ## @libraryclass  Provides function for SMM CPU Rendezvous Library.
+  SmmCpuRendezvousLib|Include/Library/SmmCpuRendezvousLib.h
+
+  ##  @libraryclass  Provides services to generate Entropy using a TRNG.
+  #
+  ArmTrngLib|Include/Library/ArmTrngLib.h
+
 [LibraryClasses.IA32, LibraryClasses.X64, LibraryClasses.AARCH64]
   ##  @libraryclass  Provides services to generate random number.
   #
@@ -295,6 +312,13 @@
 
   ##  @libraryclass  Provides services to log the SMI handler registration.
   SmiHandlerProfileLib|Include/Library/SmiHandlerProfileLib.h
+
+  ##  @libraryclass  Provides function to support TDX processing.
+  TdxLib|Include/Library/TdxLib.h
+
+[LibraryClasses.RISCV64]
+  ##  @libraryclass  Provides function to make ecalls to SBI
+  BaseRiscVSbiLib|Include/Library/BaseRiscVSbiLib.h
 
 [Guids]
   #
@@ -394,10 +418,16 @@
   gEfiEventReadyToBootGuid       = { 0x7CE88FB3, 0x4BD7, 0x4679, { 0x87, 0xA8, 0xA8, 0xD8, 0xDE, 0xE5, 0x0D, 0x2B }}
 
   ## Include/Guid/EventGroup.h
+  gEfiEventAfterReadyToBootGuid  = { 0x3a2a00ad, 0x98b9, 0x4cdf, { 0xa4, 0x78, 0x70, 0x27, 0x77, 0xf1, 0xc1, 0x0b }}
+
+  ## Include/Guid/EventGroup.h
   gEfiEventMemoryMapChangeGuid   = { 0x78BEE926, 0x692F, 0x48FD, { 0x9E, 0xDB, 0x01, 0x42, 0x2E, 0xF0, 0xD7, 0xAB }}
 
   ## Include/Guid/EventGroup.h
-  gEfiEventVirtualAddressChangeGuid = { 0x13FA7698, 0xC831, 0x49C7, { 0x87, 0xEA, 0x8F, 0x43, 0xFC, 0xC2, 0x51, 0x96 }}
+  gEfiEventVirtualAddressChangeGuid   = { 0x13FA7698, 0xC831, 0x49C7, { 0x87, 0xEA, 0x8F, 0x43, 0xFC, 0xC2, 0x51, 0x96 }}
+
+  ## Include/Guid/EventGroup.h
+  gEfiEventBeforeExitBootServicesGuid = { 0x8BE0E274, 0x3970, 0x4B44, { 0x80, 0xC5, 0x1A, 0xB9, 0x50, 0x2F, 0x3B, 0xFC }}
 
   ## Include/Guid/EventGroup.h
   gEfiEventExitBootServicesGuid  = { 0x27ABF055, 0xB1B8, 0x4C26, { 0x80, 0x48, 0x74, 0x8F, 0x37, 0xBA, 0xA2, 0xDF }}
@@ -1008,6 +1038,9 @@
   gEfiPeiDelayedDispatchPpiGuid  = { 0x869c711d, 0x649c, 0x44fe, { 0x8b, 0x9e, 0x2c, 0xbb, 0x29, 0x11, 0xc3, 0xe6 }}
 
 [Protocols]
+  ## Include/Protocol/MemoryAccept.h
+  gEdkiiMemoryAcceptProtocolGuid = { 0x38c74800, 0x5590, 0x4db4, { 0xa0, 0xf3, 0x67, 0x5d, 0x9b, 0x8e, 0x80, 0x26 }}
+
   ## Include/Protocol/Pcd.h
   gPcdProtocolGuid               = { 0x11B34006, 0xD85B, 0x4D0A, { 0xA2, 0x90, 0xD5, 0xA5, 0x71, 0x31, 0x0E, 0xF7 }}
 

@@ -1,0 +1,10 @@
+mappings:
+  meson:
+    CentOSStream8:
+
+  python3:
+    CentOSStream8: python38
+
+pypi_mappings:
+  meson:
+    default: meson==0.63.2

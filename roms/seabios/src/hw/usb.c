@@ -372,17 +372,19 @@ configure_usb_device(struct usbdevice_s *usbdev)
     void *config_end = (void*)config + config->wTotalLength;
     struct usb_interface_descriptor *iface = (void*)(&config[1]);
     for (;;) {
-        if (!num_iface-- || (void*)iface + iface->bLength > config_end)
+        if (!num_iface || (void*)iface + iface->bLength > config_end)
             // Not a supported device.
             goto fail;
-        if (iface->bDescriptorType == USB_DT_INTERFACE
-            && (iface->bInterfaceClass == USB_CLASS_HUB
+        if (iface->bDescriptorType == USB_DT_INTERFACE) {
+            num_iface--;
+            if (iface->bInterfaceClass == USB_CLASS_HUB
                 || (iface->bInterfaceClass == USB_CLASS_MASS_STORAGE
                     && (iface->bInterfaceProtocol == US_PR_BULK
                         || iface->bInterfaceProtocol == US_PR_UAS))
                 || (iface->bInterfaceClass == USB_CLASS_HID
-                    && iface->bInterfaceSubClass == USB_INTERFACE_SUBCLASS_BOOT)))
-            break;
+                    && iface->bInterfaceSubClass == USB_INTERFACE_SUBCLASS_BOOT))
+                break;
+        }
         iface = (void*)iface + iface->bLength;
     }
 

@@ -1,6 +1,6 @@
 ## @ SplitFspBin.py
 #
-# Copyright (c) 2015 - 2021, Intel Corporation. All rights reserved.<BR>
+# Copyright (c) 2015 - 2022, Intel Corporation. All rights reserved.<BR>
 # SPDX-License-Identifier: BSD-2-Clause-Patent
 #
 ##
@@ -103,29 +103,31 @@ class FSP_COMMON_HEADER(Structure):
 
 class FSP_INFORMATION_HEADER(Structure):
      _fields_ = [
-        ('Signature',                      ARRAY(c_char, 4)),
-        ('HeaderLength',                   c_uint32),
-        ('Reserved1',                      c_uint16),
-        ('SpecVersion',                    c_uint8),
-        ('HeaderRevision',                 c_uint8),
-        ('ImageRevision',                  c_uint32),
-        ('ImageId',                        ARRAY(c_char, 8)),
-        ('ImageSize',                      c_uint32),
-        ('ImageBase',                      c_uint32),
-        ('ImageAttribute',                 c_uint16),
-        ('ComponentAttribute',             c_uint16),
-        ('CfgRegionOffset',                c_uint32),
-        ('CfgRegionSize',                  c_uint32),
-        ('Reserved2',                      c_uint32),
-        ('TempRamInitEntryOffset',         c_uint32),
-        ('Reserved3',                      c_uint32),
-        ('NotifyPhaseEntryOffset',         c_uint32),
-        ('FspMemoryInitEntryOffset',       c_uint32),
-        ('TempRamExitEntryOffset',         c_uint32),
-        ('FspSiliconInitEntryOffset',      c_uint32),
-        ('FspMultiPhaseSiInitEntryOffset', c_uint32),
-        ('ExtendedImageRevision',          c_uint16),
-        ('Reserved4',                      c_uint16)
+        ('Signature',                       ARRAY(c_char, 4)),
+        ('HeaderLength',                    c_uint32),
+        ('Reserved1',                       c_uint16),
+        ('SpecVersion',                     c_uint8),
+        ('HeaderRevision',                  c_uint8),
+        ('ImageRevision',                   c_uint32),
+        ('ImageId',                         ARRAY(c_char, 8)),
+        ('ImageSize',                       c_uint32),
+        ('ImageBase',                       c_uint32),
+        ('ImageAttribute',                  c_uint16),
+        ('ComponentAttribute',              c_uint16),
+        ('CfgRegionOffset',                 c_uint32),
+        ('CfgRegionSize',                   c_uint32),
+        ('Reserved2',                       c_uint32),
+        ('TempRamInitEntryOffset',          c_uint32),
+        ('Reserved3',                       c_uint32),
+        ('NotifyPhaseEntryOffset',          c_uint32),
+        ('FspMemoryInitEntryOffset',        c_uint32),
+        ('TempRamExitEntryOffset',          c_uint32),
+        ('FspSiliconInitEntryOffset',       c_uint32),
+        ('FspMultiPhaseSiInitEntryOffset',  c_uint32),
+        ('ExtendedImageRevision',           c_uint16),
+        ('Reserved4',                       c_uint16),
+        ('FspMultiPhaseMemInitEntryOffset', c_uint32),
+        ('FspSmmInitEntryOffset',           c_uint32)
     ]
 
 class FSP_PATCH_TABLE(Structure):
@@ -492,7 +494,7 @@ class FspImage:
         self.FihOffset = fihoff
         self.Offset    = offset
         self.FvIdxList = []
-        self.Type      = "XTMSXXXXOXXXXXXX"[(fih.ComponentAttribute >> 12) & 0x0F]
+        self.Type      = "XTMSIXXXOXXXXXXX"[(fih.ComponentAttribute >> 12) & 0x0F]
         self.PatchList = patch
         self.PatchList.append(fihoff + 0x1C)
 
@@ -869,7 +871,7 @@ def main ():
     parser_rebase  = subparsers.add_parser('rebase',  help='rebase a FSP into a new base address')
     parser_rebase.set_defaults(which='rebase')
     parser_rebase.add_argument('-f',  '--fspbin' , dest='FspBinary',  type=str, help='FSP binary file path', required = True)
-    parser_rebase.add_argument('-c',  '--fspcomp', choices=['t','m','s','o'],  nargs='+', dest='FspComponent', type=str, help='FSP component to rebase', default = "['t']", required = True)
+    parser_rebase.add_argument('-c',  '--fspcomp', choices=['t','m','s','o','i'],  nargs='+', dest='FspComponent', type=str, help='FSP component to rebase', default = "['t']", required = True)
     parser_rebase.add_argument('-b',  '--newbase', dest='FspBase', nargs='+', type=str, help='Rebased FSP binary file name', default = '', required = True)
     parser_rebase.add_argument('-o',  '--outdir' , dest='OutputDir',  type=str, help='Output directory path', default = '.')
     parser_rebase.add_argument('-n',  '--outfile', dest='OutputFile', type=str, help='Rebased FSP binary file name', default = '')

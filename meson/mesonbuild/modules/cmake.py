@@ -34,7 +34,6 @@ from ..interpreterbase import (
     InvalidArguments,
     InterpreterException,
 )
-from ..programs import ExternalProgram
 
 
 COMPATIBILITIES = ['AnyNewerVersion', 'SameMajorVersion', 'SameMinorVersion', 'ExactVersion']
@@ -71,8 +70,8 @@ endmacro()
 
 class CMakeSubproject(ModuleObject):
     def __init__(self, subp, pv):
-        assert(isinstance(subp, SubprojectHolder))
-        assert(hasattr(subp, 'cm_interpreter'))
+        assert isinstance(subp, SubprojectHolder)
+        assert hasattr(subp, 'cm_interpreter')
         super().__init__()
         self.subp = subp
         self.methods.update({'get_variable': self.get_variable,
@@ -96,7 +95,7 @@ class CMakeSubproject(ModuleObject):
                                        '    message(\'CMaket targets:\\n - \' + \'\\n - \'.join(<cmake_subproject>.target_list()))')
 
         # Make sure that all keys are present (if not this is a bug)
-        assert(all([x in res for x in ['inc', 'src', 'dep', 'tgt', 'func']]))
+        assert all([x in res for x in ['inc', 'src', 'dep', 'tgt', 'func']])
         return res
 
     @noKwargs
@@ -213,6 +212,7 @@ class CmakeModule(ExtensionModule):
     cmake_detected = False
     cmake_root = None
 
+    @FeatureNew('CMake Module', '0.50.0')
     def __init__(self, interpreter):
         super().__init__(interpreter)
         self.methods.update({
@@ -233,11 +233,14 @@ class CmakeModule(ExtensionModule):
 
         return compiler.sizeof('void *', '', env)
 
-    def detect_cmake(self):
+    def detect_cmake(self, state):
         if self.cmake_detected:
             return True
 
-        cmakebin = ExternalProgram('cmake', silent=False)
+        cmakebin = state.find_program('cmake', silent=False)
+        if not cmakebin.found():
+            return False
+
         p, stdout, stderr = mesonlib.Popen_safe(cmakebin.get_command() + ['--system-information', '-G', 'Ninja'])[0:3]
         if p.returncode != 0:
             mlog.log(f'error retrieving cmake information: returnCode={p.returncode} stdout={stdout} stderr={stderr}')
@@ -269,12 +272,13 @@ class CmakeModule(ExtensionModule):
         if compatibility not in COMPATIBILITIES:
             raise mesonlib.MesonException('compatibility must be either AnyNewerVersion, SameMajorVersion or ExactVersion.')
 
-        if not self.detect_cmake():
+        if not self.detect_cmake(state):
             raise mesonlib.MesonException('Unable to find cmake')
 
-        pkgroot = kwargs.get('install_dir', None)
+        pkgroot = pkgroot_name = kwargs.get('install_dir', None)
         if pkgroot is None:
             pkgroot = os.path.join(state.environment.coredata.get_option(mesonlib.OptionKey('libdir')), 'cmake', name)
+            pkgroot_name = os.path.join('{libdir}', 'cmake', name)
         if not isinstance(pkgroot, str):
             raise mesonlib.MesonException('Install_dir must be a string.')
 
@@ -290,12 +294,12 @@ class CmakeModule(ExtensionModule):
         }
         mesonlib.do_conf_file(template_file, version_file, conf, 'meson')
 
-        res = build.Data([mesonlib.File(True, state.environment.get_scratch_dir(), version_file)], pkgroot, None, state.subproject)
+        res = build.Data([mesonlib.File(True, state.environment.get_scratch_dir(), version_file)], pkgroot, pkgroot_name, None, state.subproject)
         return ModuleReturnValue(res, [res])
 
     def create_package_file(self, infile, outfile, PACKAGE_RELATIVE_PATH, extra, confdata):
         package_init = PACKAGE_INIT_BASE.replace('@PACKAGE_RELATIVE_PATH@', PACKAGE_RELATIVE_PATH)
-        package_init = package_init.replace('@inputFileName@', infile)
+        package_init = package_init.replace('@inputFileName@', os.path.basename(infile))
         package_init += extra
         package_init += PACKAGE_INIT_SET_AND_CHECK
 
@@ -303,13 +307,13 @@ class CmakeModule(ExtensionModule):
             with open(infile, encoding='utf-8') as fin:
                 data = fin.readlines()
         except Exception as e:
-            raise mesonlib.MesonException('Could not read input file {}: {}'.format(infile, str(e)))
+            raise mesonlib.MesonException(f'Could not read input file {infile}: {e!s}')
 
         result = []
-        regex = re.compile(r'(?:\\\\)+(?=\\?@)|\\@|@([-a-zA-Z0-9_]+)@')
+        regex = mesonlib.get_variable_regex('cmake@')
         for line in data:
             line = line.replace('@PACKAGE_INIT@', package_init)
-            line, _missing = mesonlib.do_replacement(regex, line, 'meson', confdata)
+            line, _missing = mesonlib.do_replacement(regex, line, 'cmake@', confdata)
 
             result.append(line)
 
@@ -375,7 +379,7 @@ class CmakeModule(ExtensionModule):
         if conffile not in self.interpreter.build_def_files:
             self.interpreter.build_def_files.append(conffile)
 
-        res = build.Data([mesonlib.File(True, ofile_path, ofile_fname)], install_dir, None, state.subproject)
+        res = build.Data([mesonlib.File(True, ofile_path, ofile_fname)], install_dir, install_dir, None, state.subproject)
         self.interpreter.build.data.append(res)
 
         return res

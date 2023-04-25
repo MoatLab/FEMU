@@ -1,0 +1,17 @@
+{
+  "ccache": "/usr/bin/ccache",
+  "cpan_pkgs": [],
+  "cross_pkgs": [],
+  "make": "/usr/bin/make",
+  "ninja": "/usr/bin/ninja",
+  "packaging_command": "zypper",
+  "pip3": "/usr/bin/pip3",
+  "pkgs": [
+    "ca-certificates",
+    "git",
+    "glibc-locale",
+    "go"
+  ],
+  "pypi_pkgs": [],
+  "python": "/usr/bin/python3"
+}

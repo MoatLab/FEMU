@@ -1,0 +1,7 @@
+-r requirements.txt
+
+ansible
+ansible-runner
+
+flake8
+pytest

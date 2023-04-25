@@ -29,6 +29,8 @@ config ARM_VIRT
     select ACPI_APEI
     select ACPI_VIOT
     select VIRTIO_MEM_SUPPORTED
+    select ACPI_CXL
+    select ACPI_HMAT
 
 config CHEETAH
     bool
@@ -114,6 +116,10 @@ config NETDUINO2
     select STM32F205_SOC
 
 config NETDUINOPLUS2
+    bool
+    select STM32F405_SOC
+
+config OLIMEX_STM32_H405
     bool
     select STM32F405_SOC
 
@@ -205,7 +211,7 @@ config REALVIEW
     select PL110
     select PL181  # display
     select PL310  # cache controller
-    select VERSATILE_I2C
+    select ARM_SBCON_I2C
     select DS1338 # I2C RTC+NVRAM
     select USB_OHCI
 
@@ -317,7 +323,11 @@ config ALLWINNER_A10
     select AHCI
     select ALLWINNER_A10_PIT
     select ALLWINNER_A10_PIC
+    select ALLWINNER_A10_CCM
+    select ALLWINNER_A10_DRAMC
     select ALLWINNER_EMAC
+    select ALLWINNER_I2C
+    select AXP209_PMU
     select SERIAL
     select UNIMP
 
@@ -325,6 +335,7 @@ config ALLWINNER_H3
     bool
     select ALLWINNER_A10_PIT
     select ALLWINNER_SUN8I_EMAC
+    select ALLWINNER_I2C
     select SERIAL
     select ARM_TIMER
     select ARM_GIC
@@ -378,6 +389,7 @@ config XLNX_ZYNQMP_ARM
     select XLNX_CSU_DMA
     select XLNX_ZYNQMP
     select XLNX_ZDMA
+    select USB_DWC3
 
 config XLNX_VERSAL
     bool
@@ -454,6 +466,8 @@ config ASPEED_SOC
     select EMC141X
     select UNIMP
     select LED
+    select PMBUS
+    select MAX31785
 
 config MPS2
     bool
@@ -468,7 +482,7 @@ config MPS2
     select SPLIT_IRQ
     select UNIMP
     select CMSDK_APB_WATCHDOG
-    select VERSATILE_I2C
+    select ARM_SBCON_I2C
 
 config FSL_IMX7
     bool

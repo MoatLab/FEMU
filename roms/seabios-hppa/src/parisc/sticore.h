@@ -321,6 +321,6 @@ void sti_putc(const char c);
 extern struct sti_rom sti_proc_rom;
 extern char _sti_rom_end[];
 extern char _sti_rom_start[];
-extern void parisc_screenc(char c);
+extern void parisc_putchar(char c);
 
 #endif  /* STICORE_H */

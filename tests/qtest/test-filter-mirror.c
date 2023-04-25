@@ -9,8 +9,7 @@
  */
 
 #include "qemu/osdep.h"
-#include "qemu-common.h"
-#include "libqos/libqtest.h"
+#include "libqtest.h"
 #include "qapi/qmp/qdict.h"
 #include "qemu/iov.h"
 #include "qemu/sockets.h"
@@ -77,12 +76,8 @@ static void test_mirror(void)
 
 int main(int argc, char **argv)
 {
-    int ret;
-
     g_test_init(&argc, &argv, NULL);
 
     qtest_add_func("/netfilter/mirror", test_mirror);
-    ret = g_test_run();
-
-    return ret;
+    return g_test_run();
 }

@@ -91,6 +91,9 @@
   ## Include/Protocol/HttpCallback.h
   gEdkiiHttpCallbackProtocolGuid  = {0x611114f1, 0xa37b, 0x4468, {0xa4, 0x36, 0x5b, 0xdd, 0xa1, 0x6a, 0xa2, 0x40}}
 
+  ## Include/Protocol/WiFiProfileSyncProtocol.h
+  gEdkiiWiFiProfileSyncProtocolGuid = {0x399a2b8a, 0xc267, 0x44aa, {0x9a, 0xb4, 0x30, 0x58, 0x8c, 0xd2, 0x2d, 0xcc}}
+
 [PcdsFixedAtBuild]
   ## The max attempt number will be created by iSCSI driver.
   # @Prompt Max attempt number.
@@ -162,6 +165,15 @@
   ## The Timeout value of HTTP IO.
   # @Prompt The Timeout value of HTTP Io. Default value is 5000.
   gEfiNetworkPkgTokenSpaceGuid.PcdHttpIoTimeout|5000|UINT32|0x0000000F
+
+  ## The Retry Interval of HTTP DNS in seconds. If the Retry Interval is less than
+  # DNS_DEFAULT_TIMEOUT, then use the DNS_DEFAULT_TIMEOUT.
+  # @Prompt The value of Retry Interval. Default value is 0
+  gEfiNetworkPkgTokenSpaceGuid.PcdHttpDnsRetryInterval|0|UINT32|0x00000010
+
+  ## The Retry Count of HTTP DNS if no DNS response received after Retry Interval.
+  # @Prompt The value of Retry Count,  Default value is 0.
+  gEfiNetworkPkgTokenSpaceGuid.PcdHttpDnsRetryCount|0|UINT32|0x00000011
 
 [UserExtensions.TianoCore."ExtraFiles"]
   NetworkPkgExtra.uni

@@ -3,6 +3,7 @@
 #
 # Copyright (c) 2019 - 2021, Intel Corporation. All rights reserved.<BR>
 # Copyright (c) 2020, Hewlett Packard Enterprise Development LP. All rights reserved.<BR>
+# Copyright (c) 2022, Loongson Technology Corporation Limited. All rights reserved.<BR>
 #
 # SPDX-License-Identifier: BSD-2-Clause-Patent
 #
@@ -14,7 +15,7 @@
   PLATFORM_VERSION        = 1.00
   DSC_SPECIFICATION       = 0x00010005
   OUTPUT_DIRECTORY        = Build/UnitTestFrameworkPkg
-  SUPPORTED_ARCHITECTURES = IA32|X64|ARM|AARCH64|RISCV64
+  SUPPORTED_ARCHITECTURES = IA32|X64|ARM|AARCH64|RISCV64|LOONGARCH64
   BUILD_TARGETS           = DEBUG|RELEASE|NOOPT
   SKUID_IDENTIFIER        = DEFAULT
 
@@ -33,6 +34,7 @@
   UnitTestFrameworkPkg/Library/UnitTestBootLibUsbClass/UnitTestBootLibUsbClass.inf
   UnitTestFrameworkPkg/Library/UnitTestPersistenceLibSimpleFileSystem/UnitTestPersistenceLibSimpleFileSystem.inf
   UnitTestFrameworkPkg/Library/UnitTestDebugAssertLib/UnitTestDebugAssertLib.inf
+  UnitTestFrameworkPkg/Library/UnitTestUefiBootServicesTableLib/UnitTestUefiBootServicesTableLib.inf
 
   UnitTestFrameworkPkg/Test/UnitTest/Sample/SampleUnitTest/SampleUnitTestDxe.inf
   UnitTestFrameworkPkg/Test/UnitTest/Sample/SampleUnitTest/SampleUnitTestPei.inf

@@ -6,7 +6,6 @@
 #include "exec/memory.h"
 #include "sysemu/hostmem.h"
 #include "sysemu/blockdev.h"
-#include "qemu/accel.h"
 #include "qapi/qapi-types-machine.h"
 #include "qemu/module.h"
 #include "qom/object.h"
@@ -25,7 +24,7 @@ OBJECT_DECLARE_TYPE(MachineState, MachineClass, MACHINE)
 
 extern MachineState *current_machine;
 
-void machine_run_board_init(MachineState *machine);
+void machine_run_board_init(MachineState *machine, const char *mem_path, Error **errp);
 bool machine_usb(MachineState *machine);
 int machine_phandle_start(MachineState *machine);
 bool machine_dump_guest_core(MachineState *machine);
@@ -130,11 +129,14 @@ typedef struct {
  * @prefer_sockets - whether sockets are preferred over cores in smp parsing
  * @dies_supported - whether dies are supported by the machine
  * @clusters_supported - whether clusters are supported by the machine
+ * @has_clusters - whether clusters are explicitly specified in the user
+ *                 provided SMP configuration
  */
 typedef struct {
     bool prefer_sockets;
     bool dies_supported;
     bool clusters_supported;
+    bool has_clusters;
 } SMPCompatProps;
 
 /**
@@ -231,7 +233,7 @@ struct MachineClass {
     const char *deprecation_reason;
 
     void (*init)(MachineState *state);
-    void (*reset)(MachineState *state);
+    void (*reset)(MachineState *state, ShutdownCause reason);
     void (*wakeup)(MachineState *state);
     int (*kvm_type)(MachineState *machine, const char *arg);
 
@@ -339,7 +341,7 @@ struct MachineState {
     bool suppress_vmdesc;
     bool enable_graphics;
     ConfidentialGuestSupport *cgs;
-    char *ram_memdev_id;
+    HostMemoryBackend *memdev;
     /*
      * convenience alias to ram_memdev_id backend memory region
      * or to numa container memory region
@@ -350,8 +352,7 @@ struct MachineState {
     ram_addr_t ram_size;
     ram_addr_t maxram_size;
     uint64_t   ram_slots;
-    const char *boot_order;
-    const char *boot_once;
+    BootConfiguration boot_config;
     char *kernel_filename;
     char *kernel_cmdline;
     char *initrd_filename;
@@ -379,6 +380,15 @@ struct MachineState {
         type_register_static(&machine_initfn##_typeinfo); \
     } \
     type_init(machine_initfn##_register_types)
+
+extern GlobalProperty hw_compat_7_2[];
+extern const size_t hw_compat_7_2_len;
+
+extern GlobalProperty hw_compat_7_1[];
+extern const size_t hw_compat_7_1_len;
+
+extern GlobalProperty hw_compat_7_0[];
+extern const size_t hw_compat_7_0_len;
 
 extern GlobalProperty hw_compat_6_2[];
 extern const size_t hw_compat_6_2_len;

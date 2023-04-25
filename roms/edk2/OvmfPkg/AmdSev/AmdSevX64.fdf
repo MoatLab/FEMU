@@ -11,7 +11,7 @@
 ################################################################################
 
 [Defines]
-!include OvmfPkg/OvmfPkgDefines.fdf.inc
+!include OvmfPkg/Include/Fdf/OvmfPkgDefines.fdf.inc
 
 #
 # Build the variable store and the firmware code as one unified flash device
@@ -24,7 +24,7 @@ ErasePolarity = 1
 BlockSize     = $(BLOCK_SIZE)
 NumBlocks     = $(FW_BLOCKS)
 
-!include OvmfPkg/VarStore.fdf.inc
+!include OvmfPkg/Include/Fdf/VarStore.fdf.inc
 
 $(VARS_SIZE)|$(FVMAIN_SIZE)
 FV = FVMAIN_COMPACT
@@ -67,6 +67,12 @@ gUefiOvmfPkgTokenSpaceGuid.PcdQemuHashTableBase|gUefiOvmfPkgTokenSpaceGuid.PcdQe
 
 0x00D000|0x001000
 gUefiOvmfPkgTokenSpaceGuid.PcdOvmfSecGhcbBackupBase|gUefiOvmfPkgTokenSpaceGuid.PcdOvmfSecGhcbBackupSize
+
+0x00E000|0x001000
+gUefiOvmfPkgTokenSpaceGuid.PcdOvmfSnpSecretsBase|gUefiOvmfPkgTokenSpaceGuid.PcdOvmfSnpSecretsSize
+
+0x00F000|0x001000
+gUefiOvmfPkgTokenSpaceGuid.PcdOvmfCpuidBase|gUefiOvmfPkgTokenSpaceGuid.PcdOvmfCpuidSize
 
 0x010000|0x010000
 gUefiOvmfPkgTokenSpaceGuid.PcdOvmfSecPeiTempRamBase|gUefiOvmfPkgTokenSpaceGuid.PcdOvmfSecPeiTempRamSize
@@ -200,10 +206,9 @@ INF  MdeModulePkg/Universal/PCD/Dxe/Pcd.inf
 INF  MdeModulePkg/Core/RuntimeDxe/RuntimeDxe.inf
 INF  MdeModulePkg/Universal/SecurityStubDxe/SecurityStubDxe.inf
 INF  MdeModulePkg/Universal/EbcDxe/EbcDxe.inf
-INF  OvmfPkg/8259InterruptControllerDxe/8259.inf
 INF  UefiCpuPkg/CpuIo2Dxe/CpuIo2Dxe.inf
 INF  UefiCpuPkg/CpuDxe/CpuDxe.inf
-INF  OvmfPkg/8254TimerDxe/8254Timer.inf
+INF  OvmfPkg/LocalApicTimerDxe/LocalApicTimerDxe.inf
 INF  OvmfPkg/IncompatiblePciDeviceSupportDxe/IncompatiblePciDeviceSupport.inf
 INF  OvmfPkg/PciHotPlugInitDxe/PciHotPlugInit.inf
 INF  MdeModulePkg/Bus/Pci/PciHostBridgeDxe/PciHostBridgeDxe.inf
@@ -346,7 +351,7 @@ FILE FV_IMAGE = 9E21FD93-9C72-4c15-8C4B-E77F1DB2D792 {
    }
  }
 
-!include OvmfPkg/FvmainCompactScratchEnd.fdf.inc
+!include OvmfPkg/Include/Fdf/FvmainCompactScratchEnd.fdf.inc
 
 ################################################################################
 
@@ -430,19 +435,4 @@ FILE FV_IMAGE = 9E21FD93-9C72-4c15-8C4B-E77F1DB2D792 {
 [Rule.Common.SEC.RESET_VECTOR]
   FILE RAW = $(NAMED_GUID) {
     RAW BIN   Align = 16   |.bin
-  }
-
-[Rule.Common.SMM_CORE]
-  FILE SMM_CORE = $(NAMED_GUID) {
-    PE32     PE32           $(INF_OUTPUT)/$(MODULE_NAME).efi
-    UI       STRING="$(MODULE_NAME)" Optional
-    VERSION  STRING="$(INF_VERSION)" Optional BUILD_NUM=$(BUILD_NUMBER)
-  }
-
-[Rule.Common.DXE_SMM_DRIVER]
-  FILE SMM = $(NAMED_GUID) {
-    SMM_DEPEX    SMM_DEPEX Optional      $(INF_OUTPUT)/$(MODULE_NAME).depex
-    PE32     PE32                    $(INF_OUTPUT)/$(MODULE_NAME).efi
-    UI       STRING="$(MODULE_NAME)" Optional
-    VERSION  STRING="$(INF_VERSION)" Optional BUILD_NUM=$(BUILD_NUMBER)
   }

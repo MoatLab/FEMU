@@ -1,0 +1,17 @@
+---
+packages:
+  - autoconf
+  - automake
+  - autopoint
+  - ccache
+  - gcc
+  - libtool
+  - libtoolize
+  - libxml2
+  - make
+  - php
+  - pkg-config
+  - rpmbuild
+  - xmllint
+  - xsltproc
+  - xz

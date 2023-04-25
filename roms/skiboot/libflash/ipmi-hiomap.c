@@ -620,7 +620,7 @@ static int lpc_window_write(struct ipmi_hiomap *ctx, uint32_t pos,
 		uint32_t chunk;
 
 		if (len > 3 && !(off & 3)) {
-			/* endian swap: see lpc_window_write */
+			/* endian swap: see lpc_window_read */
 			uint32_t dat = be32_to_cpu(*(__be32 *)buf);
 
 			rc = lpc_write(OPAL_LPC_FW, off, dat, 4);

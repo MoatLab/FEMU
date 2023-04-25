@@ -39,48 +39,6 @@ def gen_guid():
     '''
     return str(uuid.uuid4()).upper()
 
-def get_all_modules_from_dir(dirname):
-    '''
-    Get all modules required for Meson build MSI package
-    from directories.
-    '''
-    modname = os.path.basename(dirname)
-    modules = [os.path.splitext(os.path.split(x)[1])[0] for x in glob(os.path.join(dirname, '*'))]
-    modules = ['mesonbuild.' + modname + '.' + x for x in modules if not x.startswith('_')]
-    return modules
-
-def get_more_modules():
-    '''
-        Getter for missing Modules.
-        Python packagers want to be minimal and only copy the things
-        that they can see that being used. They are blind to many things.
-    '''
-    return ['distutils.archive_util',
-            'distutils.cmd',
-            'distutils.config',
-            'distutils.core',
-            'distutils.debug',
-            'distutils.dep_util',
-            'distutils.dir_util',
-            'distutils.dist',
-            'distutils.errors',
-            'distutils.extension',
-            'distutils.fancy_getopt',
-            'distutils.file_util',
-            'distutils.spawn',
-            'distutils.util',
-            'distutils.version',
-            'distutils.command.build_ext',
-            'distutils.command.build',
-            'filecmp',
-            ]
-
-def get_modules():
-    modules = get_all_modules_from_dir('mesonbuild/modules')
-    modules += get_all_modules_from_dir('mesonbuild/scripts')
-    modules += get_more_modules()
-    return modules
-
 class Node:
     '''
        Node to hold path and directory values
@@ -109,7 +67,7 @@ class Node:
 
 class PackageGenerator:
     '''
-       Package generator for MSI pacakges
+       Package generator for MSI packages
     '''
 
     def __init__(self):
@@ -124,11 +82,19 @@ class PackageGenerator:
         self.final_output = f'meson-{self.version}-64.msi'
         self.staging_dirs = ['dist', 'dist2']
         self.progfile_dir = 'ProgramFiles64Folder'
-        redist_glob = 'C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Community\\VC\\Redist\\MSVC\\v*\\MergeModules\\Microsoft_VC142_CRT_x64.msm'
-        trials = glob(redist_glob)
-        if len(trials) != 1:
-            sys.exit('Could not find unique MSM setup:' + '\n'.join(trials))
-        self.redist_path = trials[0]
+        redist_globs = ['C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Community\\VC\\Redist\\MSVC\\v*\\MergeModules\\Microsoft_VC142_CRT_x64.msm',
+                        'C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Redist\\MSVC\\v*\\MergeModules\\Microsoft_VC143_CRT_x64.msm']
+        redist_path = None
+        for g in redist_globs:
+            trials = glob(g)
+            if len(trials) > 1:
+                sys.exit('MSM glob matched multiple entries:' + '\n'.join(trials))
+            if len(trials) == 1:
+                redist_path = trials[0]
+                break
+        if redist_path is None:
+            sys.exit('No MSMs found.')
+        self.redist_path = redist_path
         self.component_num = 0
         self.feature_properties = {
             self.staging_dirs[0]: {
@@ -157,7 +123,6 @@ class PackageGenerator:
             if os.path.exists(sdir):
                 shutil.rmtree(sdir)
         main_stage, ninja_stage = self.staging_dirs
-        modules = get_modules()
 
         pyinstaller = shutil.which('pyinstaller')
         if not pyinstaller:
@@ -169,10 +134,9 @@ class PackageGenerator:
             shutil.rmtree(pyinstaller_tmpdir)
         pyinst_cmd = [pyinstaller,
                       '--clean',
+                      '--additional-hooks-dir=packaging',
                       '--distpath',
                       pyinstaller_tmpdir]
-        for m in modules:
-            pyinst_cmd += ['--hidden-import', m]
         pyinst_cmd += ['meson.py']
         subprocess.check_call(pyinst_cmd)
         shutil.move(pyinstaller_tmpdir + '/meson', main_stage)

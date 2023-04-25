@@ -1152,7 +1152,7 @@ struct sppcrd_smp_link {
 	__be16 pci_sideband_slot_idx;
 
 	__be16 slca_idx; /* SLCA index of the *external* port */
-	__be16 reserved;
+	__be16 opt_id;
 
 	/* nvlink/ocapi detection devices */
 	__be32 i2c_link_cable;

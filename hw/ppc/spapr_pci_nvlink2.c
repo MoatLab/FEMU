@@ -23,7 +23,6 @@
  */
 #include "qemu/osdep.h"
 #include "qapi/error.h"
-#include "qemu-common.h"
 #include "hw/pci/pci.h"
 #include "hw/pci-host/spapr.h"
 #include "hw/ppc/spapr_numa.h"
@@ -398,7 +397,7 @@ void spapr_phb_nvgpu_populate_pcidev_dt(PCIDevice *dev, void *fdt, int offset,
             continue;
         }
         if (dev == nvslot->gpdev) {
-            uint32_t npus[nvslot->linknum];
+            g_autofree uint32_t *npus = g_new(uint32_t, nvslot->linknum);
 
             for (j = 0; j < nvslot->linknum; ++j) {
                 PCIDevice *npdev = nvslot->links[j].npdev;

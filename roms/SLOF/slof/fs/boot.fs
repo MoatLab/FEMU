@@ -112,6 +112,12 @@ defer go ( -- )
     claim-list elf-release 0 to claim-list
 ;
 
+: go-direct ( -- )
+    0 ciregs >r3 ! 0 ciregs >r4 ! 0 ciregs >r2 !
+    msr@ 7fffffffffffffff and 2000 or ciregs >srr1 !
+    go-args 2@ go-entry call-client
+;
+
 : set-le ( -- )
     1 ciregs >r13 !
 ;

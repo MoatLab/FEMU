@@ -47,7 +47,7 @@ if T.TYPE_CHECKING:
     from ..environment import Environment
     from ..linkers import DynamicLinker
     from ..programs import ExternalProgram
-    from .mixins.clike import CLikeCompiler as CompilerMixinBase
+    CompilerMixinBase = CLikeCompiler
 else:
     CompilerMixinBase = object
 
@@ -76,8 +76,8 @@ class CPPCompiler(CLikeCompiler, Compiler):
                  full_version: T.Optional[str] = None):
         # If a child ObjCPP class has already set it, don't set it ourselves
         Compiler.__init__(self, exelist, version, for_machine, info,
-                         is_cross=is_cross, linker=linker,
-                         full_version=full_version)
+                          is_cross=is_cross, linker=linker,
+                          full_version=full_version)
         CLikeCompiler.__init__(self, exe_wrapper)
 
     @staticmethod
@@ -99,7 +99,7 @@ class CPPCompiler(CLikeCompiler, Compiler):
 
     def has_header_symbol(self, hname: str, symbol: str, prefix: str,
                           env: 'Environment', *,
-                          extra_args: T.Optional[T.List[str]] = None,
+                          extra_args: T.Union[None, T.List[str], T.Callable[[CompileCheckMode], T.List[str]]] = None,
                           dependencies: T.Optional[T.List['Dependency']] = None) -> T.Tuple[bool, bool]:
         # Check if it's a C-like symbol
         found, cached = super().has_header_symbol(hname, symbol, prefix, env,
@@ -119,7 +119,7 @@ class CPPCompiler(CLikeCompiler, Compiler):
 
     def _test_cpp_std_arg(self, cpp_std_value: str) -> bool:
         # Test whether the compiler understands a -std=XY argument
-        assert(cpp_std_value.startswith('-std='))
+        assert cpp_std_value.startswith('-std=')
 
         # This test does not use has_multi_arguments() for two reasons:
         # 1. has_multi_arguments() requires an env argument, which the compiler
@@ -155,7 +155,7 @@ class CPPCompiler(CLikeCompiler, Compiler):
         }
 
         # Currently, remapping is only supported for Clang, Elbrus and GCC
-        assert(self.id in frozenset(['clang', 'lcc', 'gcc', 'emscripten']))
+        assert self.id in frozenset(['clang', 'lcc', 'gcc', 'emscripten'])
 
         if cpp_std not in CPP_FALLBACKS:
             # 'c++03' and 'c++98' don't have fallback types
@@ -246,13 +246,27 @@ class ClangCPPCompiler(ClangCompiler, CPPCompiler):
             return libs
         return []
 
-    def language_stdlib_only_link_flags(self) -> T.List[str]:
-        return ['-lstdc++']
+    def language_stdlib_only_link_flags(self, env: 'Environment') -> T.List[str]:
+        # We need to apply the search prefix here, as these link arguments may
+        # be passed to a different compiler with a different set of default
+        # search paths, such as when using Clang for C/C++ and gfortran for
+        # fortran,
+        search_dirs: T.List[str] = []
+        for d in self.get_compiler_dirs(env, 'libraries'):
+            search_dirs.append(f'-L{d}')
+        return search_dirs + ['-lstdc++']
 
 
 class AppleClangCPPCompiler(ClangCPPCompiler):
-    def language_stdlib_only_link_flags(self) -> T.List[str]:
-        return ['-lc++']
+    def language_stdlib_only_link_flags(self, env: 'Environment') -> T.List[str]:
+        # We need to apply the search prefix here, as these link arguments may
+        # be passed to a different compiler with a different set of default
+        # search paths, such as when using Clang for C/C++ and gfortran for
+        # fortran,
+        search_dirs: T.List[str] = []
+        for d in self.get_compiler_dirs(env, 'libraries'):
+            search_dirs.append(f'-L{d}')
+        return search_dirs + ['-lc++']
 
 
 class EmscriptenCPPCompiler(EmscriptenMixin, ClangCPPCompiler):
@@ -396,7 +410,14 @@ class GnuCPPCompiler(GnuCompiler, CPPCompiler):
     def get_pch_use_args(self, pch_dir: str, header: str) -> T.List[str]:
         return ['-fpch-preprocess', '-include', os.path.basename(header)]
 
-    def language_stdlib_only_link_flags(self) -> T.List[str]:
+    def language_stdlib_only_link_flags(self, env: 'Environment') -> T.List[str]:
+        # We need to apply the search prefix here, as these link arguments may
+        # be passed to a different compiler with a different set of default
+        # search paths, such as when using Clang for C/C++ and gfortran for
+        # fortran,
+        search_dirs: T.List[str] = []
+        for d in self.get_compiler_dirs(env, 'libraries'):
+            search_dirs.append(f'-L{d}')
         return ['-lstdc++']
 
 
@@ -422,30 +443,34 @@ class NvidiaHPC_CPPCompiler(PGICompiler, CPPCompiler):
         self.id = 'nvidia_hpc'
 
 
-class ElbrusCPPCompiler(GnuCPPCompiler, ElbrusCompiler):
+class ElbrusCPPCompiler(ElbrusCompiler, CPPCompiler):
     def __init__(self, exelist: T.List[str], version: str, for_machine: MachineChoice, is_cross: bool,
                  info: 'MachineInfo', exe_wrapper: T.Optional['ExternalProgram'] = None,
                  linker: T.Optional['DynamicLinker'] = None,
                  defines: T.Optional[T.Dict[str, str]] = None,
                  full_version: T.Optional[str] = None):
-        GnuCPPCompiler.__init__(self, exelist, version, for_machine, is_cross,
-                                info, exe_wrapper, linker=linker,
-                                full_version=full_version, defines=defines)
+        CPPCompiler.__init__(self, exelist, version, for_machine, is_cross,
+                             info, exe_wrapper, linker=linker, full_version=full_version)
         ElbrusCompiler.__init__(self)
 
     def get_options(self) -> 'KeyedOptionDictType':
         opts = CPPCompiler.get_options(self)
 
-        cpp_stds = [
-            'none', 'c++98', 'c++03', 'c++0x', 'c++11', 'c++14', 'c++1y',
-            'gnu++98', 'gnu++03', 'gnu++0x', 'gnu++11', 'gnu++14', 'gnu++1y',
-        ]
-
+        cpp_stds = ['none', 'c++98', 'gnu++98']
+        if version_compare(self.version, '>=1.20.00'):
+            cpp_stds += ['c++03', 'c++0x', 'c++11', 'gnu++03', 'gnu++0x', 'gnu++11']
+        if version_compare(self.version, '>=1.21.00') and version_compare(self.version, '<1.22.00'):
+            cpp_stds += ['c++14', 'gnu++14', 'c++1y', 'gnu++1y']
+        if version_compare(self.version, '>=1.22.00'):
+            cpp_stds += ['c++14', 'gnu++14']
+        if version_compare(self.version, '>=1.23.00'):
+            cpp_stds += ['c++1y', 'gnu++1y']
         if version_compare(self.version, '>=1.24.00'):
-            cpp_stds += [ 'c++1z', 'c++17', 'gnu++1z', 'gnu++17' ]
-
+            cpp_stds += ['c++1z', 'c++17', 'gnu++1z', 'gnu++17']
         if version_compare(self.version, '>=1.25.00'):
-            cpp_stds += [ 'c++2a', 'gnu++2a' ]
+            cpp_stds += ['c++2a', 'gnu++2a']
+        if version_compare(self.version, '>=1.26.00'):
+            cpp_stds += ['c++20', 'gnu++20']
 
         key = OptionKey('std', machine=self.for_machine, lang=self.language)
         opts.update({
@@ -523,7 +548,6 @@ class IntelCPPCompiler(IntelGnuLikeCompiler, CPPCompiler):
             c_stds += ['c++2a']
             g_stds += ['gnu++2a']
 
-
         key = OptionKey('std', machine=self.for_machine, lang=self.language)
         opts.update({
             key.evolve('eh'): coredata.UserComboOption(
@@ -568,10 +592,12 @@ class VisualStudioLikeCPPCompilerMixin(CompilerMixinBase):
         'vc++11': (True, 11),
         'vc++14': (True, 14),
         'vc++17': (True, 17),
+        'vc++20': (True, 20),
         'vc++latest': (True, "latest"),
         'c++11': (False, 11),
         'c++14': (False, 14),
         'c++17': (False, 17),
+        'c++20': (False, 20),
         'c++latest': (False, "latest"),
     }
 
@@ -673,6 +699,8 @@ class VisualStudioCPPCompiler(CPP11AsCPP14Mixin, VisualStudioLikeCPPCompilerMixi
         # Visual Studio 2017 and later
         if version_compare(self.version, '>=19.11'):
             cpp_stds.extend(['vc++14', 'c++17', 'vc++17'])
+        if version_compare(self.version, '>=19.29'):
+            cpp_stds.extend(['c++20', 'vc++20'])
         return self._get_options_impl(super().get_options(), cpp_stds)
 
     def get_option_compile_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
@@ -781,7 +809,7 @@ class CcrxCPPCompiler(CcrxCompiler, CPPCompiler):
         return []
 
     def get_output_args(self, target: str) -> T.List[str]:
-        return ['-output=obj=%s' % target]
+        return [f'-output=obj={target}']
 
     def get_option_link_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
         return []
@@ -804,20 +832,21 @@ class C2000CPPCompiler(C2000Compiler, CPPCompiler):
         opts[key].choices = ['none', 'c++03']
         return opts
 
-    def get_always_args(self) -> T.List[str]:
-        return ['-nologo', '-lang=cpp']
-
     def get_option_compile_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
-        return []
+        args = []
+        key = OptionKey('std', machine=self.for_machine, lang=self.language)
+        std = options[key]
+        if std.value != 'none':
+            args.append('--' + std.value)
+        return args
 
-    def get_compile_only_args(self) -> T.List[str]:
-        return []
+    def get_no_optimization_args(self) -> T.List[str]:
+        return ['-Ooff']
 
     def get_output_args(self, target: str) -> T.List[str]:
-        return ['-output=obj=%s' % target]
+        return [f'--output_file={target}']
 
-    def get_option_link_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
-        return []
-
-    def get_compiler_check_args(self, mode: CompileCheckMode) -> T.List[str]:
-        return []
+    def get_include_args(self, path: str, is_system: bool) -> T.List[str]:
+        if path == '':
+            path = '.'
+        return ['--include_path=' + path]

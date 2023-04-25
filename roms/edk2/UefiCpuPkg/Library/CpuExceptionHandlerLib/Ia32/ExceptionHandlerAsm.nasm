@@ -1,5 +1,5 @@
 ;------------------------------------------------------------------------------ ;
-; Copyright (c) 2016, Intel Corporation. All rights reserved.<BR>
+; Copyright (c) 2016 - 2022, Intel Corporation. All rights reserved.<BR>
 ; SPDX-License-Identifier: BSD-2-Clause-Patent
 ;
 ; Module Name:
@@ -32,19 +32,19 @@ ALIGN   8
 ; exception handler stub table
 ;
 AsmIdtVectorBegin:
-%rep  32
-    db      0x6a        ; push  #VectorNum
-    db      ($ - AsmIdtVectorBegin) / ((AsmIdtVectorEnd - AsmIdtVectorBegin) / 32) ; VectorNum
+%assign Vector 0
+%rep  256
+    push    strict dword %[Vector];
     push    eax
     mov     eax, ASM_PFX(CommonInterruptEntry)
     jmp     eax
+%assign Vector Vector+1
 %endrep
 AsmIdtVectorEnd:
 
 HookAfterStubBegin:
-    db      0x6a        ; push
+    push    strict dword 0  ; 0 will be fixed
 VectorNum:
-    db      0          ; 0 will be fixed
     push    eax
     mov     eax, HookAfterStubHeaderEnd
     jmp     eax
@@ -287,7 +287,7 @@ ErrorCodeAndVectorOnStack:
     test    edx, BIT24  ; Test for FXSAVE/FXRESTOR support.
                         ; edx still contains result from CPUID above
     jz      .3
-    db      0xf, 0xae, 0x7 ;fxsave [edi]
+    fxsave  [edi]
 .3:
 
 ;; UEFI calling convention for IA32 requires that Direction flag in EFLAGs is clear
@@ -320,7 +320,7 @@ ErrorCodeAndVectorOnStack:
                         ; are supported
     test    edx, BIT24  ; Test for FXSAVE/FXRESTOR support
     jz      .4
-    db      0xf, 0xae, 0xe ; fxrstor [esi]
+    fxrstor [esi]
 .4:
     add     esp, 512
 
@@ -438,7 +438,7 @@ ASM_PFX(AsmGetTemplateAddressMap):
 
     mov ebx, dword [ebp + 0x8]
     mov dword [ebx],      AsmIdtVectorBegin
-    mov dword [ebx + 0x4], (AsmIdtVectorEnd - AsmIdtVectorBegin) / 32
+    mov dword [ebx + 0x4], (AsmIdtVectorEnd - AsmIdtVectorBegin) / 256
     mov dword [ebx + 0x8], HookAfterStubBegin
 
     popad
@@ -452,5 +452,5 @@ global ASM_PFX(AsmVectorNumFixup)
 ASM_PFX(AsmVectorNumFixup):
     mov     eax, dword [esp + 8]
     mov     ecx, [esp + 4]
-    mov     [ecx + (VectorNum - HookAfterStubBegin)], al
+    mov     [ecx + (VectorNum - 4 - HookAfterStubBegin)], al
     ret

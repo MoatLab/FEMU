@@ -16,11 +16,14 @@ pr:
   - master
   - stable/*
 
+variables:
+  - template: ../../../.azurepipelines/templates/defaults.yml
+
 jobs:
   - job: Platform_CI
     variables:
       package: 'EmulatorPkg'
-      vm_image: 'windows-latest'
+      vm_image: 'windows-2019'
       should_run: true
       run_flags: "MAKE_STARTUP_NSH=TRUE"
 
@@ -128,3 +131,4 @@ jobs:
         build_file: $(Build.File)
         build_flags: $(Build.Flags)
         run_flags: $(Run.Flags)
+        usePythonVersion: ${{ variables.default_python_version }}

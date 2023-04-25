@@ -2,10 +2,12 @@
   Intel FSP Header File definition from Intel Firmware Support Package External
   Architecture Specification v2.0 and above.
 
-  Copyright (c) 2014 - 2021, Intel Corporation. All rights reserved.<BR>
+  Copyright (c) 2014 - 2022, Intel Corporation. All rights reserved.<BR>
   SPDX-License-Identifier: BSD-2-Clause-Patent
 
 **/
+
+#include <Base.h>
 
 #ifndef __FSP_HEADER_FILE_H__
 #define __FSP_HEADER_FILE_H__
@@ -24,7 +26,13 @@
 
 #define FSP_INFO_HEADER_SIGNATURE  SIGNATURE_32 ('F', 'S', 'P', 'H')
 
-#pragma pack(1)
+#define IMAGE_ATTRIBUTE_GRAPHICS_SUPPORT       BIT0
+#define IMAGE_ATTRIBUTE_DISPATCH_MODE_SUPPORT  BIT1
+#define IMAGE_ATTRIBUTE_64BIT_MODE_SUPPORT     BIT2
+#define FSP_IA32                               0
+#define FSP_X64                                1
+
+  #pragma pack(1)
 
 ///
 /// FSP Information Header as described in FSP v2.0 Spec section 5.1.1.
@@ -44,12 +52,12 @@ typedef struct {
   UINT8     Reserved1[2];
   ///
   /// Byte 0x0A: Indicates compliance with a revision of this specification in the BCD format.
-  ///            For revision v2.3 the value will be 0x23.
+  ///            For revision v2.4 the value will be 0x24.
   ///
   UINT8     SpecVersion;
   ///
   /// Byte 0x0B: Revision of the FSP Information Header.
-  ///            The Current value for this field is 0x6.
+  ///            The Current value for this field is 0x7.
   ///
   UINT8     HeaderRevision;
   ///
@@ -82,10 +90,31 @@ typedef struct {
   UINT32    ImageBase;
   ///
   /// Byte 0x20: Attribute for the FSP binary.
+  ///   Bit 0: Graphics Support - Set to 1 when FSP supports enabling Graphics Display.
+  ///   Bit 1: Dispatch Mode Support - Set to 1 when FSP supports the optional Dispatch Mode API defined in Section 7.2 and 9. This bit is only valid if FSP HeaderRevision is >= 4.
+  ///   Bit 2: 64-bit mode support - Set to 1 to indicate FSP supports 64-bit long mode interfaces. Set to 0 to indicate FSP supports 32-bit mode interfaces. This bit is only valid if FSP HeaderRevision is >= 7.
+  ///   Bit 3: FSP Variable Services Support - Set to 1 to indicate FSP utilizes the FSP Variable Services defined in Section 9.6 to store non-volatile data. This bit is only valid if FSP HeaderRevision is >= 7.
+  ///   Bits 15:4 - Reserved
   ///
   UINT16    ImageAttribute;
   ///
   /// Byte 0x22: Attributes of the FSP Component.
+  ///   Bit 0 - Build Type
+  ///     0 - Debug Build
+  ///     1 - Release Build
+  ///   Bit 1 - Release Type
+  ///     0 - Test Release
+  ///     1 - Official Release
+  ///   Bit 11:2 - Reserved
+  ///   Bits 15:12 - Component Type
+  ///     0000 - Reserved
+  ///     0001 - FSP-T
+  ///     0010 - FSP-M
+  ///     0011 - FSP-S
+  ///     0100 - FSP-I (FSP SMM)
+  ///     0101 to 0111 - Reserved
+  ///     1000 - FSP-O
+  ///     1001 to 1111 - Reserved
   ///
   UINT16    ComponentAttribute;
   ///
@@ -147,6 +176,14 @@ typedef struct {
   /// Byte 0x4E: Reserved4.
   ///
   UINT16    Reserved4;
+  ///
+  /// Byte 0x50: Offset for the API for the Multi-Phase memory initialization.
+  ///
+  UINT32    FspMultiPhaseMemInitEntryOffset;
+  ///
+  /// Byte 0x54: Offset for the API to initialize SMM.
+  ///
+  UINT32    FspSmmInitEntryOffset;
 } FSP_INFO_HEADER;
 
 ///
@@ -228,7 +265,7 @@ typedef struct {
   // UINT32  PatchData[];
 } FSP_PATCH_TABLE;
 
-#pragma pack()
+  #pragma pack()
 
 extern EFI_GUID  gFspHeaderFileGuid;
 

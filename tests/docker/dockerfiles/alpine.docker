@@ -1,10 +1,10 @@
 # THIS FILE WAS AUTO-GENERATED
 #
-#  $ lcitool dockerfile --layers all alpine-edge qemu
+#  $ lcitool dockerfile --layers all alpine-316 qemu
 #
 # https://gitlab.com/libvirt/libvirt-ci
 
-FROM docker.io/library/alpine:edge
+FROM docker.io/library/alpine:3.16
 
 RUN apk update && \
     apk upgrade && \
@@ -13,6 +13,7 @@ RUN apk update && \
         attr-dev \
         bash \
         bc \
+        bison \
         bzip2 \
         bzip2-dev \
         ca-certificates \
@@ -21,6 +22,7 @@ RUN apk update && \
         cdrkit \
         ceph-dev \
         clang \
+        cmocka-dev \
         ctags \
         curl-dev \
         cyrus-sasl-dev \
@@ -29,6 +31,7 @@ RUN apk update && \
         dtc-dev \
         eudev-dev \
         findutils \
+        flex \
         fuse3-dev \
         g++ \
         gcc \
@@ -39,6 +42,7 @@ RUN apk update && \
         glib-static \
         gnutls-dev \
         gtk+3.0-dev \
+        json-c-dev \
         libaio-dev \
         libbpf-dev \
         libcap-ng-dev \
@@ -57,13 +61,14 @@ RUN apk update && \
         liburing-dev \
         libusb-dev \
         linux-pam-dev \
-        llvm11 \
+        llvm \
         lttng-ust-dev \
         lzo-dev \
         make \
         mesa-dev \
         meson \
         multipath-tools \
+        musl-dev \
         ncurses-dev \
         ndctl-dev \
         net-tools \
@@ -72,8 +77,6 @@ RUN apk update && \
         numactl-dev \
         openssh-client \
         pcre-dev \
-        perl \
-        perl-test-harness \
         pixman-dev \
         pkgconf \
         pulseaudio-dev \
@@ -82,7 +85,6 @@ RUN apk update && \
         py3-pip \
         py3-sphinx \
         py3-sphinx_rtd_theme \
-        py3-virtualenv \
         py3-yaml \
         python3 \
         rpm2cpio \
@@ -91,12 +93,13 @@ RUN apk update && \
         sdl2_image-dev \
         sed \
         snappy-dev \
+        sndio-dev \
+        socat \
         sparse \
         spice-dev \
         spice-protocol \
         tar \
         tesseract-ocr \
-        texinfo \
         usbredir-dev \
         util-linux \
         vde2-dev \
@@ -107,6 +110,7 @@ RUN apk update && \
         xfsprogs-dev \
         zlib-dev \
         zlib-static \
+        zstd \
         zstd-dev && \
     apk list | sort > /packages.txt && \
     mkdir -p /usr/libexec/ccache-wrappers && \
@@ -116,8 +120,13 @@ RUN apk update && \
     ln -s /usr/bin/ccache /usr/libexec/ccache-wrappers/g++ && \
     ln -s /usr/bin/ccache /usr/libexec/ccache-wrappers/gcc
 
+ENV CCACHE_WRAPPERSDIR "/usr/libexec/ccache-wrappers"
 ENV LANG "en_US.UTF-8"
 ENV MAKE "/usr/bin/make"
 ENV NINJA "/usr/bin/ninja"
 ENV PYTHON "/usr/bin/python3"
-ENV CCACHE_WRAPPERSDIR "/usr/libexec/ccache-wrappers"
+# As a final step configure the user (if env is defined)
+ARG USER
+ARG UID
+RUN if [ "${USER}" ]; then \
+  id ${USER} 2>/dev/null || useradd -u ${UID} -U ${USER}; fi

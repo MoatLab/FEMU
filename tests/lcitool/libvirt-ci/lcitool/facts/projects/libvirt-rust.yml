@@ -1,0 +1,9 @@
+---
+packages:
+  - cargo
+  - ccache
+  - clippy
+  - gcc
+  - libclang
+  - pkg-config
+  - rust

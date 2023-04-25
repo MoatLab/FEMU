@@ -498,6 +498,118 @@ static void test_vsubuwsat_dv(void)
     check_output_w(__LINE__, 2);
 }
 
+static void test_vshuff(void)
+{
+    /* Test that vshuff works when the two operands are the same register */
+    const uint32_t splat = 0x089be55c;
+    const uint32_t shuff = 0x454fa926;
+    MMVector v0, v1;
+
+    memset(expect, 0x12, sizeof(MMVector));
+    memset(output, 0x34, sizeof(MMVector));
+
+    asm volatile("v25 = vsplat(%0)\n\t"
+                 "vshuff(v25, v25, %1)\n\t"
+                 "vmem(%2 + #0) = v25\n\t"
+                 : /* no outputs */
+                 : "r"(splat), "r"(shuff), "r"(output)
+                 : "v25", "memory");
+
+    /*
+     * The semantics of Hexagon are the operands are pass-by-value, so create
+     * two copies of the vsplat result.
+     */
+    for (int i = 0; i < MAX_VEC_SIZE_BYTES / 4; i++) {
+        v0.uw[i] = splat;
+        v1.uw[i] = splat;
+    }
+    /* Do the vshuff operation */
+    for (int offset = 1; offset < MAX_VEC_SIZE_BYTES; offset <<= 1) {
+        if (shuff & offset) {
+            for (int k = 0; k < MAX_VEC_SIZE_BYTES; k++) {
+                if (!(k & offset)) {
+                    uint8_t tmp = v0.ub[k];
+                    v0.ub[k] = v1.ub[k + offset];
+                    v1.ub[k + offset] = tmp;
+                }
+            }
+        }
+    }
+    /* Put the result in the expect buffer for verification */
+    expect[0] = v1;
+
+    check_output_b(__LINE__, 1);
+}
+
+static void test_load_tmp_predicated(void)
+{
+    void *p0 = buffer0;
+    void *p1 = buffer1;
+    void *pout = output;
+    bool pred = true;
+
+    for (int i = 0; i < BUFSIZE; i++) {
+        /*
+         * Load into v12 as .tmp with a predicate
+         * When the predicate is true, we get the vector from buffer1[i]
+         * When the predicate is false, we get a vector of all 1's
+         * Regardless of the predicate, the next packet should have
+         * a vector of all 1's
+         */
+        asm("v3 = vmem(%0 + #0)\n\t"
+            "r1 = #1\n\t"
+            "v12 = vsplat(r1)\n\t"
+            "p1 = !cmp.eq(%3, #0)\n\t"
+            "{\n\t"
+            "    if (p1) v12.tmp = vmem(%1 + #0)\n\t"
+            "    v4.w = vadd(v12.w, v3.w)\n\t"
+            "}\n\t"
+            "v4.w = vadd(v4.w, v12.w)\n\t"
+            "vmem(%2 + #0) = v4\n\t"
+            : : "r"(p0), "r"(p1), "r"(pout), "r"(pred)
+            : "r1", "p1", "v12", "v3", "v4", "v6", "memory");
+        p0 += sizeof(MMVector);
+        p1 += sizeof(MMVector);
+        pout += sizeof(MMVector);
+
+        for (int j = 0; j < MAX_VEC_SIZE_BYTES / 4; j++) {
+            expect[i].w[j] =
+                pred ? buffer0[i].w[j] + buffer1[i].w[j] + 1
+                     : buffer0[i].w[j] + 2;
+        }
+        pred = !pred;
+    }
+
+    check_output_w(__LINE__, BUFSIZE);
+}
+
+static void test_load_cur_predicated(void)
+{
+    bool pred = true;
+    for (int i = 0; i < BUFSIZE; i++) {
+        asm volatile("p0 = !cmp.eq(%3, #0)\n\t"
+                     "v3 = vmem(%0+#0)\n\t"
+                     /*
+                      * Preload v4 to make sure that the assignment from the
+                      * packet below is not being ignored when pred is false.
+                      */
+                     "r0 = #0x01237654\n\t"
+                     "v4 = vsplat(r0)\n\t"
+                     "{\n\t"
+                     "    if (p0) v3.cur = vmem(%1+#0)\n\t"
+                     "    v4 = v3\n\t"
+                     "}\n\t"
+                     "vmem(%2+#0) = v4\n\t"
+                     :
+                     : "r"(&buffer0[i]), "r"(&buffer1[i]),
+                       "r"(&output[i]), "r"(pred)
+                     : "r0", "p0", "v3", "v4", "memory");
+        expect[i] = pred ? buffer1[i] : buffer0[i];
+        pred = !pred;
+    }
+    check_output_w(__LINE__, BUFSIZE);
+}
+
 int main()
 {
     init_buffers();
@@ -532,6 +644,11 @@ int main()
 
     test_vadduwsat();
     test_vsubuwsat_dv();
+
+    test_vshuff();
+
+    test_load_tmp_predicated();
+    test_load_cur_predicated();
 
     puts(err ? "FAIL" : "PASS");
     return err ? 1 : 0;

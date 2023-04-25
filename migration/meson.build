@@ -4,7 +4,6 @@ migration_files = files(
   'xbzrle.c',
   'vmstate-types.c',
   'vmstate.c',
-  'qemu-file-channel.c',
   'qemu-file.c',
   'yank_functions.c',
 )
@@ -13,11 +12,13 @@ softmmu_ss.add(migration_files)
 softmmu_ss.add(files(
   'block-dirty-bitmap.c',
   'channel.c',
+  'channel-block.c',
   'colo-failover.c',
   'colo.c',
   'exec.c',
   'fd.c',
   'global_state.c',
+  'migration-hmp-cmds.c',
   'migration.c',
   'multifd.c',
   'multifd-zlib.c',
@@ -25,9 +26,10 @@ softmmu_ss.add(files(
   'savevm.c',
   'socket.c',
   'tls.c',
+  'threadinfo.c',
 ), gnutls)
 
-softmmu_ss.add(when: ['CONFIG_RDMA', rdma], if_true: files('rdma.c'))
+softmmu_ss.add(when: rdma, if_true: files('rdma.c'))
 if get_option('live_block_migration').allowed()
   softmmu_ss.add(files('block.c'))
 endif

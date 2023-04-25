@@ -26,6 +26,7 @@ from ... import mlog
 
 if T.TYPE_CHECKING:
     from ...environment import Environment
+    from ...dependencies import Dependency
     from .clike import CLikeCompiler as Compiler
 else:
     # This is a bit clever, for mypy we pretend that these mixins descend from
@@ -100,7 +101,9 @@ class VisualStudioLikeCompiler(Compiler, metaclass=abc.ABCMeta):
 
     # /showIncludes is needed for build dependency tracking in Ninja
     # See: https://ninja-build.org/manual.html#_deps
-    always_args = ['/nologo', '/showIncludes']
+    # Assume UTF-8 sources by default, but self.unix_args_to_native() removes it
+    # if `/source-charset` is set too.
+    always_args = ['/nologo', '/showIncludes', '/utf-8']
     warn_args = {
         '0': [],
         '1': ['/W2'],
@@ -127,6 +130,10 @@ class VisualStudioLikeCompiler(Compiler, metaclass=abc.ABCMeta):
             self.machine = target
         if mesonlib.version_compare(self.version, '>=19.28.29910'): # VS 16.9.0 includes cl 19.28.29910
             self.base_options.add(mesonlib.OptionKey('b_sanitize'))
+        # Exclude /utf-8 in self.always_args in VS2013 and earlier
+        if not isinstance(self, ClangClCompiler):
+            if mesonlib.version_compare(self.version, '<19.00'):
+                self.always_args.remove('/utf-8')
         assert self.linker is not None
         self.linker.machine = self.machine
 
@@ -144,7 +151,7 @@ class VisualStudioLikeCompiler(Compiler, metaclass=abc.ABCMeta):
         return pchname
 
     def get_pch_base_name(self, header: str) -> str:
-        # This needs to be implemented by inherting classes
+        # This needs to be implemented by inheriting classes
         raise NotImplementedError
 
     def get_pch_use_args(self, pch_dir: str, header: str) -> T.List[str]:
@@ -159,7 +166,7 @@ class VisualStudioLikeCompiler(Compiler, metaclass=abc.ABCMeta):
         return ['/c']
 
     def get_no_optimization_args(self) -> T.List[str]:
-        return ['/Od','/Oi-']
+        return ['/Od', '/Oi-']
 
     def sanitizer_compile_args(self, value: str) -> T.List[str]:
         if value == 'none':
@@ -214,7 +221,7 @@ class VisualStudioLikeCompiler(Compiler, metaclass=abc.ABCMeta):
 
     @classmethod
     def unix_args_to_native(cls, args: T.List[str]) -> T.List[str]:
-        result = []
+        result: T.List[str] = []
         for i in args:
             # -mms-bitfields is specific to MinGW-GCC
             # -pthread is only valid for GCC
@@ -248,6 +255,13 @@ class VisualStudioLikeCompiler(Compiler, metaclass=abc.ABCMeta):
             # -pthread in link flags is only used on Linux
             elif i == '-pthread':
                 continue
+            # cl.exe does not allow specifying both, so remove /utf-8 that we
+            # added automatically in the case the user overrides it manually.
+            elif i.startswith('/source-charset:') or i.startswith('/execution-charset:'):
+                try:
+                    result.remove('/utf-8')
+                except ValueError:
+                    pass
             result.append(i)
         return result
 
@@ -323,6 +337,8 @@ class VisualStudioLikeCompiler(Compiler, metaclass=abc.ABCMeta):
             return '14.1' # (Visual Studio 2017)
         elif version < 1930:
             return '14.2' # (Visual Studio 2019)
+        elif version < 1940:
+            return '14.3' # (Visual Studio 2022)
         mlog.warning(f'Could not find toolset for version {self.version!r}')
         return None
 
@@ -342,7 +358,7 @@ class VisualStudioLikeCompiler(Compiler, metaclass=abc.ABCMeta):
     def get_crt_compile_args(self, crt_val: str, buildtype: str) -> T.List[str]:
         if crt_val in self.crt_args:
             return self.crt_args[crt_val]
-        assert(crt_val in ['from_buildtype', 'static_from_buildtype'])
+        assert crt_val in ['from_buildtype', 'static_from_buildtype']
         dbg = 'mdd'
         rel = 'md'
         if crt_val == 'static_from_buildtype':
@@ -360,7 +376,7 @@ class VisualStudioLikeCompiler(Compiler, metaclass=abc.ABCMeta):
         elif buildtype == 'minsize':
             return self.crt_args[rel]
         else:
-            assert(buildtype == 'custom')
+            assert buildtype == 'custom'
             raise mesonlib.EnvironmentException('Requested C runtime based on buildtype, but buildtype is "custom".')
 
     def has_func_attribute(self, name: str, env: 'Environment') -> T.Tuple[bool, bool]:
@@ -374,7 +390,7 @@ class VisualStudioLikeCompiler(Compiler, metaclass=abc.ABCMeta):
 
 class MSVCCompiler(VisualStudioLikeCompiler):
 
-    """Spcific to the Microsoft Compilers."""
+    """Specific to the Microsoft Compilers."""
 
     def __init__(self, target: str):
         super().__init__(target)
@@ -406,7 +422,7 @@ class MSVCCompiler(VisualStudioLikeCompiler):
 
 class ClangClCompiler(VisualStudioLikeCompiler):
 
-    """Spcific to Clang-CL."""
+    """Specific to Clang-CL."""
 
     def __init__(self, target: str):
         super().__init__(target)
@@ -426,3 +442,20 @@ class ClangClCompiler(VisualStudioLikeCompiler):
 
     def get_pch_base_name(self, header: str) -> str:
         return header
+
+    def get_include_args(self, path: str, is_system: bool) -> T.List[str]:
+        if path == '':
+            path = '.'
+        return ['/clang:-isystem' + path] if is_system else ['-I' + path]
+
+    def get_dependency_compile_args(self, dep: 'Dependency') -> T.List[str]:
+        if dep.get_include_type() == 'system':
+            converted = []
+            for i in dep.get_compile_args():
+                if i.startswith('-isystem'):
+                    converted += ['/clang:' + i]
+                else:
+                    converted += [i]
+            return converted
+        else:
+            return dep.get_compile_args()

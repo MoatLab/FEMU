@@ -96,6 +96,14 @@ variable keyboard-phandle 0 keyboard-phandle !
 ; PREPOST-initializer
 
 \ -------------------------------------------------------------------------
+\ Mac OF specific words
+\ -------------------------------------------------------------------------
+
+: parse-1hex 1 parse-nhex ;
+: parse-2hex 2 parse-nhex ;
+: parse-3hex 3 parse-nhex ;
+
+\ -------------------------------------------------------------------------
 \ copyright property handling
 \ -------------------------------------------------------------------------
 

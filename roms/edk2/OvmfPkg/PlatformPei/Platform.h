@@ -10,86 +10,67 @@
 #define _PLATFORM_PEI_H_INCLUDED_
 
 #include <IndustryStandard/E820.h>
-
-VOID
-AddIoMemoryBaseSizeHob (
-  EFI_PHYSICAL_ADDRESS  MemoryBase,
-  UINT64                MemorySize
-  );
-
-VOID
-AddIoMemoryRangeHob (
-  EFI_PHYSICAL_ADDRESS  MemoryBase,
-  EFI_PHYSICAL_ADDRESS  MemoryLimit
-  );
-
-VOID
-AddMemoryBaseSizeHob (
-  EFI_PHYSICAL_ADDRESS  MemoryBase,
-  UINT64                MemorySize
-  );
-
-VOID
-AddMemoryRangeHob (
-  EFI_PHYSICAL_ADDRESS  MemoryBase,
-  EFI_PHYSICAL_ADDRESS  MemoryLimit
-  );
-
-VOID
-AddReservedMemoryBaseSizeHob (
-  EFI_PHYSICAL_ADDRESS  MemoryBase,
-  UINT64                MemorySize,
-  BOOLEAN               Cacheable
-  );
+#include <Library/PlatformInitLib.h>
+#include <IndustryStandard/IntelTdx.h>
 
 VOID
 AddressWidthInitialization (
-  VOID
+  IN OUT EFI_HOB_PLATFORM_INFO  *PlatformInfoHob
   );
 
 VOID
 Q35TsegMbytesInitialization (
-  VOID
+  IN OUT EFI_HOB_PLATFORM_INFO  *PlatformInfoHob
   );
 
 VOID
 Q35SmramAtDefaultSmbaseInitialization (
-  VOID
+  IN OUT EFI_HOB_PLATFORM_INFO  *PlatformInfoHob
   );
 
 EFI_STATUS
 PublishPeiMemory (
-  VOID
-  );
-
-UINT32
-GetSystemMemorySizeBelow4gb (
-  VOID
-  );
-
-VOID
-QemuUc32BaseInitialization (
-  VOID
+  IN OUT EFI_HOB_PLATFORM_INFO  *PlatformInfoHob
   );
 
 VOID
 InitializeRamRegions (
-  VOID
+  IN EFI_HOB_PLATFORM_INFO  *PlatformInfoHob
+  );
+
+VOID
+MemMapInitialization (
+  IN OUT EFI_HOB_PLATFORM_INFO  *PlatformInfoHob
+  );
+
+VOID
+MiscInitialization (
+  IN EFI_HOB_PLATFORM_INFO  *PlatformInfoHob
+  );
+
+VOID
+BootModeInitialization (
+  IN OUT EFI_HOB_PLATFORM_INFO  *PlatformInfoHob
+  );
+
+VOID
+MaxCpuCountInitialization (
+  IN OUT EFI_HOB_PLATFORM_INFO  *PlatformInfoHob
   );
 
 EFI_STATUS
 PeiFvInitialization (
-  VOID
+  IN EFI_HOB_PLATFORM_INFO  *PlatformInfoHob
   );
 
 VOID
 MemTypeInfoInitialization (
-  VOID
+  IN OUT EFI_HOB_PLATFORM_INFO  *PlatformInfoHob
   );
 
 VOID
 InstallFeatureControlCallback (
-  VOID
+  IN OUT EFI_HOB_PLATFORM_INFO  *PlatformInfoHob
   );
 
 VOID
@@ -99,26 +80,30 @@ InstallClearCacheCallback (
 
 VOID
 AmdSevInitialize (
+  IN EFI_HOB_PLATFORM_INFO  *PlatformInfoHob
+  );
+
+/**
+  This Function checks if TDX is available, if present then it sets
+  the dynamic PCDs for Tdx guest. It also builds Guid hob which contains
+  the Host Bridge DevId.
+  **/
+VOID
+IntelTdxInitialize (
   VOID
   );
 
-extern EFI_BOOT_MODE  mBootMode;
+/**
+ * @brief Builds PlatformInfo Hob
+ */
+EFI_HOB_PLATFORM_INFO *
+BuildPlatformInfoHob (
+  VOID
+  );
 
 VOID
 SevInitializeRam (
   VOID
   );
-
-extern BOOLEAN  mS3Supported;
-
-extern UINT8  mPhysMemAddressWidth;
-
-extern UINT32  mMaxCpuCount;
-
-extern UINT16  mHostBridgeDevId;
-
-extern BOOLEAN  mQ35SmramAtDefaultSmbase;
-
-extern UINT32  mQemuUc32Base;
 
 #endif // _PLATFORM_PEI_H_INCLUDED_

@@ -44,7 +44,7 @@ int backend_rw(SsdDramBackend *b, QEMUSGList *qsg, uint64_t *lbal, bool is_write
         cur_addr = qsg->sg[sg_cur_index].base + sg_cur_byte;
         cur_len = qsg->sg[sg_cur_index].len - sg_cur_byte;
         if (dma_memory_rw(qsg->as, cur_addr, mb + mb_oft, cur_len, dir, MEMTXATTRS_UNSPECIFIED)) {
-            error_report("FEMU: dma_memory_rw error");
+            femu_err("dma_memory_rw error\n");
         }
 
         sg_cur_byte += cur_len;

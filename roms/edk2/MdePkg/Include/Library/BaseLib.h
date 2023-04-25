@@ -6,6 +6,7 @@ Copyright (c) 2006 - 2021, Intel Corporation. All rights reserved.<BR>
 Portions copyright (c) 2008 - 2009, Apple Inc. All rights reserved.<BR>
 Copyright (c) Microsoft Corporation.<BR>
 Portions Copyright (c) 2020, Hewlett Packard Enterprise Development LP. All rights reserved.<BR>
+Portions Copyright (c) 2022, Loongson Technology Corporation Limited. All rights reserved.<BR>
 
 SPDX-License-Identifier: BSD-2-Clause-Patent
 
@@ -150,7 +151,80 @@ typedef struct {
 
 #define BASE_LIBRARY_JUMP_BUFFER_ALIGNMENT  8
 
+VOID
+RiscVSetSupervisorScratch (
+  IN UINT64
+  );
+
+UINT64
+RiscVGetSupervisorScratch (
+  VOID
+  );
+
+VOID
+RiscVSetSupervisorStvec (
+  IN UINT64
+  );
+
+UINT64
+RiscVGetSupervisorStvec (
+  VOID
+  );
+
+UINT64
+RiscVGetSupervisorTrapCause (
+  VOID
+  );
+
+VOID
+RiscVSetSupervisorAddressTranslationRegister (
+  IN UINT64
+  );
+
+UINT64
+RiscVReadTimer (
+  VOID
+  );
+
+VOID
+RiscVEnableTimerInterrupt (
+  VOID
+  );
+
+VOID
+RiscVDisableTimerInterrupt (
+  VOID
+  );
+
+VOID
+RiscVClearPendingTimerInterrupt (
+  VOID
+  );
+
 #endif // defined (MDE_CPU_RISCV64)
+
+#if defined (MDE_CPU_LOONGARCH64)
+///
+/// The LoongArch architecture context buffer used by SetJump() and LongJump()
+///
+typedef struct {
+  UINT64    S0;
+  UINT64    S1;
+  UINT64    S2;
+  UINT64    S3;
+  UINT64    S4;
+  UINT64    S5;
+  UINT64    S6;
+  UINT64    S7;
+  UINT64    S8;
+  UINT64    SP;
+  UINT64    FP;
+  UINT64    RA;
+} BASE_LIBRARY_JUMP_BUFFER;
+
+#define BASE_LIBRARY_JUMP_BUFFER_ALIGNMENT  8
+
+#endif // defined (MDE_CPU_LOONGARCH64)
 
 //
 // String Services
@@ -4503,6 +4577,40 @@ CalculateCrc32 (
   IN  UINTN  Length
   );
 
+/**
+   Calculates the CRC16-ANSI checksum of the given buffer.
+
+   @param[in]      Buffer        Pointer to the buffer.
+   @param[in]      Length        Length of the buffer, in bytes.
+   @param[in]      InitialValue  Initial value of the CRC.
+
+   @return The CRC16-ANSI checksum.
+**/
+UINT16
+EFIAPI
+CalculateCrc16Ansi (
+  IN  CONST VOID  *Buffer,
+  IN  UINTN       Length,
+  IN  UINT16      InitialValue
+  );
+
+/**
+   Calculates the CRC32c checksum of the given buffer.
+
+   @param[in]      Buffer        Pointer to the buffer.
+   @param[in]      Length        Length of the buffer, in bytes.
+   @param[in]      InitialValue  Initial value of the CRC.
+
+   @return The CRC32c checksum.
+**/
+UINT32
+EFIAPI
+CalculateCrc32c (
+  IN CONST VOID  *Buffer,
+  IN UINTN       Length,
+  IN UINT32      InitialValue
+  );
+
 //
 // Base Library CPU Functions
 //
@@ -4512,7 +4620,6 @@ CalculateCrc32 (
 
   @param  Context1        Context1 parameter passed into SwitchStack().
   @param  Context2        Context2 parameter passed into SwitchStack().
-
 **/
 typedef
 VOID
@@ -4758,6 +4865,72 @@ EFIAPI
 SpeculationBarrier (
   VOID
   );
+
+#if defined (MDE_CPU_X64) || defined (MDE_CPU_IA32)
+
+/**
+  The TDCALL instruction causes a VM exit to the Intel TDX module.  It is
+  used to call guest-side Intel TDX functions, either local or a TD exit
+  to the host VMM, as selected by Leaf.
+
+  @param[in]      Leaf        Leaf number of TDCALL instruction
+  @param[in]      Arg1        Arg1
+  @param[in]      Arg2        Arg2
+  @param[in]      Arg3        Arg3
+  @param[in,out]  Results  Returned result of the Leaf function
+
+  @return 0               A successful call
+  @return Other           See individual leaf functions
+**/
+UINTN
+EFIAPI
+TdCall (
+  IN UINT64    Leaf,
+  IN UINT64    Arg1,
+  IN UINT64    Arg2,
+  IN UINT64    Arg3,
+  IN OUT VOID  *Results
+  );
+
+/**
+  TDVMALL is a leaf function 0 for TDCALL. It helps invoke services from the
+  host VMM to pass/receive information.
+
+  @param[in]     Leaf        Number of sub-functions
+  @param[in]     Arg1        Arg1
+  @param[in]     Arg2        Arg2
+  @param[in]     Arg3        Arg3
+  @param[in]     Arg4        Arg4
+  @param[in,out] Results     Returned result of the sub-function
+
+  @return 0               A successful call
+  @return Other           See individual sub-functions
+
+**/
+UINTN
+EFIAPI
+TdVmCall (
+  IN UINT64    Leaf,
+  IN UINT64    Arg1,
+  IN UINT64    Arg2,
+  IN UINT64    Arg3,
+  IN UINT64    Arg4,
+  IN OUT VOID  *Results
+  );
+
+/**
+  Probe if TD is enabled.
+
+  @return TRUE    TD is enabled.
+  @return FALSE   TD is not enabled.
+**/
+BOOLEAN
+EFIAPI
+TdIsEnabled (
+  VOID
+  );
+
+#endif
 
 #if defined (MDE_CPU_X64)
 //

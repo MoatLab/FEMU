@@ -162,3 +162,28 @@ The minimal QEMU commands to run U-Boot SPL are:
 To test 32-bit U-Boot images, switch to use qemu-riscv32_smode_defconfig and
 riscv32_spl_defconfig builds, and replace ``qemu-system-riscv64`` with
 ``qemu-system-riscv32`` in the command lines above to boot the 32-bit U-Boot.
+
+Enabling TPM
+------------
+
+A TPM device can be connected to the virt board by following the steps below.
+
+First launch the TPM emulator:
+
+.. code-block:: bash
+
+  $ swtpm socket --tpm2 -t -d --tpmstate dir=/tmp/tpm \
+        --ctrl type=unixio,path=swtpm-sock
+
+Then launch QEMU with some additional arguments to link a TPM device to the backend:
+
+.. code-block:: bash
+
+  $ qemu-system-riscv64 \
+    ... other args .... \
+    -chardev socket,id=chrtpm,path=swtpm-sock \
+    -tpmdev emulator,id=tpm0,chardev=chrtpm \
+    -device tpm-tis-device,tpmdev=tpm0
+
+The TPM device can be seen in the memory tree and the generated device
+tree and should be accessible from the guest software.

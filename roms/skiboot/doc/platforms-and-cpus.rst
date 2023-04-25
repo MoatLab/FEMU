@@ -42,16 +42,25 @@ rhesus   n/a          Power8E                        "ibm,powernv"              
 ======== ============ =========== ================== ========================== ============================= =======
 Platform Sub platform Host CPU(s) Manufacturer       compatible                 Other names/Notes             Link(s)
 ======== ============ =========== ================== ========================== ============================= =======
-astbmc   p9sdu        Power9      Supermicro         "supermicro,p9dsu"         Boston, LC921/LC922           [#]_
-astbmc   romulus      Power9                         "ibm,romulus"              Romulus
-astbmc   talos        Power9      Raptor             "rcs,talos"                Talos II, similar to Romulus
-astbmc   blackbird    Power9      Raptor             "rcs,blackbird"            Blackbrid
-astbmc   witherspoon  Power9                         "ibm,witherspoon"          Witherspoon, Newell, AC922    [#]_
-astbmc   zaius        Power9      Ingrasys (Foxconn) "ingrasys,zaius"           Zaius, Barreleye Gen2
-astbmc   mihawk       Power9                         "{wistron,ibm},mihawk"     Mihawk, IC922
-astbmc   nicole       Power9      Yadro              "YADRO,nicole"             Nicole
-ibm-fsp  zz           Power9                         "ibm,zz-(1|2)s(2|4)u"
+astbmc   p9sdu        Power9N     Supermicro         "supermicro,p9dsu"         Boston, LC921/LC922           [#]_
+astbmc   romulus      Power9N                        "ibm,romulus"              Romulus
+astbmc   talos        Power9N     Raptor             "rcs,talos"                Talos II, similar to Romulus
+astbmc   blackbird    Power9N     Raptor             "rcs,blackbird"            Blackbrid
+astbmc   witherspoon  Power9N                        "ibm,witherspoon"          Witherspoon, Newell, AC922    [#]_
+astbmc   zaius        Power9N     Ingrasys (Foxconn) "ingrasys,zaius"           Zaius, Barreleye Gen2
+astbmc   mihawk       Power9N                        "{wistron,ibm},mihawk"     Mihawk, IC922
+astbmc   nicole       Power9N     Yadro              "YADRO,nicole"             Nicole
+ibm-fsp  zz           Power9N                        "ibm,zz-(1|2)s(2|4)u"
+astbmc   swift        Power9P                        "ibm,swift"                Swift
+astbmc   mowgli       Power9N     Wistron            "ibm,mowgli"               Mowgli
 ======== ============ =========== ================== ========================== ============================= =======
+
+======== ============ =========== ================== ========================== ============================= =======
+Platform Sub platform Host CPU(s) Manufacturer       compatible                 Other names/Notes             Link(s)
+======== ============ =========== ================== ========================== ============================= =======
+astbmc   rainier      Power10                        "ibm,rainier"              Rainier
+======== ============ =========== ================== ========================== ============================= =======
+
 
 
 Dropped Platforms

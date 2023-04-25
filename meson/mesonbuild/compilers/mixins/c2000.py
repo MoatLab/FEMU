@@ -49,7 +49,7 @@ c2000_optimization_args = {
 
 c2000_debug_args = {
     False: [],
-    True: []
+    True: ['-g']
 }  # type: T.Dict[bool, T.List[str]]
 
 
@@ -59,8 +59,10 @@ class C2000Compiler(Compiler):
         if not self.is_cross:
             raise EnvironmentException('c2000 supports only cross-compilation.')
         self.id = 'c2000'
-        # Assembly
-        self.can_compile_suffixes.add('asm')
+
+        self.can_compile_suffixes.add('asm')    # Assembly
+        self.can_compile_suffixes.add('cla')    # Control Law Accelerator (CLA)
+
         default_warn_args = []  # type: T.List[str]
         self.warn_args = {'0': [],
                           '1': default_warn_args,
@@ -104,9 +106,9 @@ class C2000Compiler(Compiler):
         result = []
         for i in args:
             if i.startswith('-D'):
-                i = '-define=' + i[2:]
+                i = '--define=' + i[2:]
             if i.startswith('-I'):
-                i = '-include=' + i[2:]
+                i = '--include_path=' + i[2:]
             if i.startswith('-Wl,-rpath='):
                 continue
             elif i == '--print-search-dirs':
@@ -118,7 +120,12 @@ class C2000Compiler(Compiler):
 
     def compute_parameters_with_absolute_paths(self, parameter_list: T.List[str], build_dir: str) -> T.List[str]:
         for idx, i in enumerate(parameter_list):
-            if i[:9] == '-include=':
-                parameter_list[idx] = i[:9] + os.path.normpath(os.path.join(build_dir, i[9:]))
+            if i[:14] == '--include_path':
+                parameter_list[idx] = i[:14] + os.path.normpath(os.path.join(build_dir, i[14:]))
+            if i[:2] == '-I':
+                parameter_list[idx] = i[:2] + os.path.normpath(os.path.join(build_dir, i[2:]))
 
         return parameter_list
+
+    def get_dependency_gen_args(self, outtarget: str, outfile: str) -> T.List[str]:
+        return ['--preproc_with_compile', f'--preproc_dependency={outfile}']

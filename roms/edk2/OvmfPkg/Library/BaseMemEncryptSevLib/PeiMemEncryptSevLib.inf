@@ -51,13 +51,14 @@
   DebugLib
   MemoryAllocationLib
   PcdLib
-  VmgExitLib
+  CcExitLib
 
 [FeaturePcd]
   gUefiOvmfPkgTokenSpaceGuid.PcdSmmSmramRequire
 
 [FixedPcd]
   gUefiCpuPkgTokenSpaceGuid.PcdSevEsWorkAreaBase
+  gUefiOvmfPkgTokenSpaceGuid.PcdOvmfWorkAreaBase
   gUefiOvmfPkgTokenSpaceGuid.PcdOvmfPeiMemFvBase
   gUefiOvmfPkgTokenSpaceGuid.PcdOvmfSecPageTablesBase
   gUefiOvmfPkgTokenSpaceGuid.PcdOvmfSecValidatedEnd

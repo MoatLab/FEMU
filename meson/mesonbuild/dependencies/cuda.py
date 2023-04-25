@@ -199,7 +199,7 @@ class CudaDependency(SystemDependency):
         return None
 
     def _read_toolkit_version_txt(self, path: str) -> T.Optional[str]:
-        # Read 'version.txt' at the root of the CUDA Toolkit directory to determine the tookit version
+        # Read 'version.txt' at the root of the CUDA Toolkit directory to determine the toolkit version
         version_file_path = os.path.join(path, 'version.txt')
         try:
             with open(version_file_path, encoding='utf-8') as version_file:
@@ -259,9 +259,9 @@ class CudaDependency(SystemDependency):
     def _report_dependency_error(self, msg: str) -> None: ...
 
     @T.overload
-    def _report_dependency_error(self, msg: str, ret_val: TV_ResultTuple) -> TV_ResultTuple: ...
+    def _report_dependency_error(self, msg: str, ret_val: TV_ResultTuple) -> TV_ResultTuple: ... # noqa: F811
 
-    def _report_dependency_error(self, msg: str, ret_val: T.Optional[TV_ResultTuple] = None) -> T.Optional[TV_ResultTuple]:
+    def _report_dependency_error(self, msg: str, ret_val: T.Optional[TV_ResultTuple] = None) -> T.Optional[TV_ResultTuple]: # noqa: F811
         if self.required:
             raise DependencyException(msg)
 
