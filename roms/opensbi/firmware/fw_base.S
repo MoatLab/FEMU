@@ -128,9 +128,9 @@ _relocate:
 	REG_L	t1, 0(t1)
 	lla	t2, _load_start
 	REG_L	t2, 0(t2)
+	beq	t0, t2, _relocate_done
 	sub	t3, t1, t0
 	add	t3, t3, t2
-	beq	t0, t2, _relocate_done
 	lla	t4, _relocate_done
 	sub	t4, t4, t2
 	add	t4, t4, t0
@@ -259,7 +259,7 @@ _bss_zero:
 	 * s8 -> HART Stack Size
 	 */
 	lla	a4, platform
-#if __riscv_xlen == 64
+#if __riscv_xlen > 32
 	lwu	s7, SBI_PLATFORM_HART_COUNT_OFFSET(a4)
 	lwu	s8, SBI_PLATFORM_HART_STACK_SIZE_OFFSET(a4)
 #else

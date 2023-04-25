@@ -18,9 +18,10 @@
   ENTRY_POINT                    = IoMmuDxeEntryPoint
 
 [Sources]
-  AmdSevIoMmu.c
-  AmdSevIoMmu.h
+  CcIoMmu.c
+  CcIoMmu.h
   IoMmuDxe.c
+  IoMmuBuffer.c
 
 [Packages]
   MdePkg/MdePkg.dec
@@ -32,9 +33,13 @@
   BaseMemoryLib
   DebugLib
   MemEncryptSevLib
+  MemEncryptTdxLib
   MemoryAllocationLib
   UefiBootServicesTableLib
   UefiDriverEntryPoint
+
+[Pcd]
+  gEfiMdePkgTokenSpaceGuid.PcdConfidentialComputingGuestAttr
 
 [Protocols]
   gEdkiiIoMmuProtocolGuid                     ## SOMETIME_PRODUCES

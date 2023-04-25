@@ -89,7 +89,7 @@ EnableDebugAgent (
 /**
   Get pointer to CPU MP Data structure.
   For BSP, the pointer is retrieved from HOB.
-  For AP, the structure is just after IDT.
+  For AP, the structure is stored in the top of each AP's stack.
 
   @return  The pointer to CPU MP Data structure.
 **/
@@ -100,15 +100,17 @@ GetCpuMpData (
 {
   CPU_MP_DATA                  *CpuMpData;
   MSR_IA32_APIC_BASE_REGISTER  ApicBaseMsr;
-  IA32_DESCRIPTOR              Idtr;
+  UINTN                        ApTopOfStack;
+  AP_STACK_DATA                *ApStackData;
 
   ApicBaseMsr.Uint64 = AsmReadMsr64 (MSR_IA32_APIC_BASE);
   if (ApicBaseMsr.Bits.BSP == 1) {
     CpuMpData = GetCpuMpDataFromGuidedHob ();
     ASSERT (CpuMpData != NULL);
   } else {
-    AsmReadIdtr (&Idtr);
-    CpuMpData = (CPU_MP_DATA *)(Idtr.Base + Idtr.Limit + 1);
+    ApTopOfStack = ALIGN_VALUE ((UINTN)&ApTopOfStack, (UINTN)PcdGet32 (PcdCpuApStackSize));
+    ApStackData  = (AP_STACK_DATA *)((UINTN)ApTopOfStack- sizeof (AP_STACK_DATA));
+    CpuMpData    = (CPU_MP_DATA *)ApStackData->MpData;
   }
 
   return CpuMpData;
@@ -299,14 +301,19 @@ GetWakeupBuffer (
   @retval 0       Cannot find free memory below 4GB.
 **/
 UINTN
-GetModeTransitionBuffer (
+AllocateCodeBuffer (
   IN UINTN  BufferSize
   )
 {
-  //
-  // PEI phase doesn't need to do such transition. So simply return 0.
-  //
-  return 0;
+  EFI_STATUS            Status;
+  EFI_PHYSICAL_ADDRESS  Address;
+
+  Status = PeiServicesAllocatePages (EfiBootServicesCode, EFI_SIZE_TO_PAGES (BufferSize), &Address);
+  if (EFI_ERROR (Status)) {
+    Address = 0;
+  }
+
+  return (UINTN)Address;
 }
 
 /**

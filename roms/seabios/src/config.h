@@ -17,7 +17,8 @@
 // Maximum number of map entries in the e820 map
 #define BUILD_MAX_E820 32
 // Space to reserve in high-memory for tables
-#define BUILD_MAX_HIGHTABLE (256*1024)
+#define BUILD_MIN_HIGHTABLE (256*1024)
+#define BUILD_MAX_HIGHTABLE (16*1024*1024)
 // Largest supported externaly facing drive id
 #define BUILD_MAX_EXTDRIVE 16
 // Number of bytes the smbios may be and still live in the f-segment

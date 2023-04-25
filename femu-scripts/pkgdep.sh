@@ -7,7 +7,7 @@ SYSTEM=`uname -s`
 if [[ -f /etc/debian_version ]]; then
 	# Includes Ubuntu, Debian
     apt-get install -y gcc pkg-config git libglib2.0-dev libfdt-dev libpixman-1-dev zlib1g-dev
-    apt-get install -y libaio-dev
+    apt-get install -y libaio-dev libslirp-dev
 
 	# Additional dependencies
 	apt-get install -y libnuma-dev

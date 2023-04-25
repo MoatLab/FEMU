@@ -18,7 +18,6 @@
 #ifndef HEXAGON_MMVEC_MACROS_H
 #define HEXAGON_MMVEC_MACROS_H
 
-#include "qemu/osdep.h"
 #include "qemu/host-utils.h"
 #include "arch.h"
 #include "mmvec/system_ext_mmvec.h"
@@ -288,7 +287,7 @@
 #endif
 #ifdef QEMU_GENERATE
 #define fSTOREMMV(EA, SRC) \
-    gen_vreg_store(ctx, insn, pkt, EA, SRC##_off, insn->slot, true)
+    gen_vreg_store(ctx, EA, SRC##_off, insn->slot, true)
 #endif
 #ifdef QEMU_GENERATE
 #define fSTOREMMVQ(EA, SRC, MASK) \
@@ -300,7 +299,7 @@
 #endif
 #ifdef QEMU_GENERATE
 #define fSTOREMMVU(EA, SRC) \
-    gen_vreg_store(ctx, insn, pkt, EA, SRC##_off, insn->slot, false)
+    gen_vreg_store(ctx, EA, SRC##_off, insn->slot, false)
 #endif
 #define fVFOREACH(WIDTH, VAR) for (VAR = 0; VAR < fVELEM(WIDTH); VAR++)
 #define fVARRAY_ELEMENT_ACCESS(ARRAY, TYPE, INDEX) \

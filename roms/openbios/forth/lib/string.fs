@@ -122,10 +122,42 @@
 \ string to number conversion
 \ -----------------------------------------------------
 
-: parse-hex ( str len -- value )
-  base @ hex -rot $number if 0 then swap base !
+\ parse ints "hi,...,lo" separated by comma
+: parse-ints ( str len num -- val.lo .. val.hi )
+  -rot 2 pick -rot
+  begin
+    rot 1- -rot 2 pick 0>=
+  while
+    ( num n str len )
+    2dup ascii , strchr ?dup if
+      ( num n str len p )
+      1+ -rot
+      2 pick 2 pick -    ( num n p str len len1+1 )
+      dup -rot -         ( num n p str len1+1 len2 )
+      -rot 1-            ( num n p len2 str len1 )
+    else
+      0 0 2swap
+    then
+    $number if 0 then >r
+  repeat
+  3drop
+
+  ( num )
+  begin 1- dup 0>= while r> swap repeat
+  drop
 ;
 
+: parse-2int ( str len -- val.lo val.hi )
+  2 parse-ints
+;
+
+: parse-nhex ( str len num -- values )
+  base @ >r hex parse-ints r> base !
+;
+
+: parse-hex ( str len -- value )
+  1 parse-nhex
+;
 
 \ -----------------------------------------------------
 \ miscellaneous functions

@@ -1,0 +1,2354 @@
+---
+# Mappings are used to map the generic packages name used to define projects
+# to the specific package names used by each OS. They implement inheritance,
+# so you can define them without repeating yourself too much.
+#
+# Inheritance works the way you'd expect, that is, in order of increasing
+# priority:
+#
+#   - default
+#   - package format
+#   - OS name
+#   - OS version
+#   - arch with default
+#   - arch with package format
+#   - arch with OS name
+#   - arch with OS version
+#
+# Valid package formats are:
+#
+#   - apk  (Alpine)
+#   - brew (MacOS)
+#   - deb  (Debian, Ubuntu)
+#   - pkg  (FreeBSD)
+#   - rpm  (CentOS, Fedora, OpenSUSE)
+#
+# Valid OS names are:
+#
+#   - Alpine
+#   - CentOS
+#   - Debian
+#   - Fedora
+#   - FreeBSD
+#   - MacOS
+#   - OpenSUSE
+#   - Ubuntu
+#
+# Valid OS versions are:
+#
+#   - CentOS7
+#   - Debian9
+#   - FedoraRawhide
+#   - OpenSUSELeap152
+#   - Ubuntu1804
+#
+# and so on.
+#
+# The arch specific rules use a prefix "$ARCH-" where $ARCH
+# is a libvirt arch name.
+#
+# So something like
+#
+#   make:
+#     default: make
+#     FreeBSD: gmake
+#
+# will result in the 'make' package being installed everywhere except
+# for FreeBSD, where 'gmake' will be used instead. Clearing out existing
+# mappings is possible as well, so
+#
+#   ccache:
+#     default: ccache
+#     CentOS:
+#
+# will result in the 'ccache' package being installed everywhere except
+# for CentOS, where nothing will be installed.
+#
+# For example to prevent Xen being installed on s390x
+#
+#  xen:
+#    deb: libxen-dev
+#    Fedora: xen-devel
+#    s390x-default:
+#
+# Or the inverse to only install Xen on x86_64 only on Debian-based
+# distros or Fedora
+#
+#  xen:
+#    x86_64-deb: libxen-dev
+#    x86_64-Fedora: xen-devel
+#
+# In parallel with this 'cross-policy-XXX:' entries can used to set the
+# installation policy when setting up a cross-architecture build env,
+# taking one of the values:
+#
+#   - 'native': use the native architecture package (default if omitted)
+#   - 'foreign: use the foreign archtiecture package
+#   -   'skip': don't install the package
+#
+# When cross-compiling on a Debian-based distro, the name of the foreign
+# package usually matches that of the native one, so no additional mappings
+# are necessary; on RPM-based distros, however, that's not usually the case,
+# so specific entries are needed: these look like
+#
+#   glib2:
+#     rpm: glib2-devel
+#     cross-mingw32-rpm: mingw32-glib2
+#     cross-mingw64-rpm: mingw64-glib2
+#
+# and follow all the usual rules.
+
+mappings:
+
+  alsa:
+    default: alsa-lib
+    apk: alsa-lib-dev
+    deb: libasound2-dev
+    rpm: alsa-lib-devel
+    MacOS:
+    cross-policy-default: foreign
+
+  ant:
+    default: ant
+    apk: apache-ant
+    pkg: apache-ant
+
+  ant-junit:
+    apk: apache-ant
+    deb: ant-optional
+    pkg: apache-ant
+    rpm: ant-junit
+    AlmaLinux8:
+    CentOSStream8:
+
+  apparmor:
+    deb: libapparmor-dev
+    OpenSUSE: libapparmor-devel
+    cross-policy-default: foreign
+
+  augeas:
+    default: augeas
+    deb: augeas-tools
+
+  augeas-lenses:
+    default: augeas
+    deb: augeas-lenses
+    OpenSUSE: augeas-lenses
+
+  autoconf:
+    default: autoconf
+
+  automake:
+    default: automake
+
+  autopoint:
+    apk: gettext
+    deb: autopoint
+    pkg: gettext-tools
+    rpm: gettext-devel
+    MacOS: gettext
+
+  bash:
+    default: bash
+
+  bash-completion:
+    default: bash-completion
+
+  bc:
+    default: bc
+    pkg:
+
+  bison:
+    default: bison
+
+  brlapi:
+    deb: libbrlapi-dev
+    rpm: brlapi-devel
+    cross-policy-default: foreign
+
+  column:
+    apk: util-linux
+    deb: bsdextrautils
+    rpm: util-linux
+    Debian10: bsdmainutils
+    Ubuntu1804: bsdmainutils
+    Ubuntu2004: bsdmainutils
+
+  bzip2:
+    default: bzip2
+
+  bzip2-libs:
+    apk: bzip2-dev
+    deb: libbz2-dev
+    pkg: bzip2
+    rpm: bzip2-devel
+    MacOS: bzip2
+    OpenSUSE: libbz2-devel
+    cross-mingw32-rpm: mingw32-bzip2
+    cross-mingw64-rpm: mingw64-bzip2
+    cross-policy-default: foreign
+
+  ca-certificates:
+    default: ca-certificates
+    pkg: ca_root_nss
+    MacOS:
+
+  capstone:
+    apk: capstone-dev
+    deb: libcapstone-dev
+    pkg: capstone4
+    rpm: capstone-devel
+    MacOS: capstone
+    OpenSUSE:
+    # EPEL9 retired capstone as soon as it was added to c9s for
+    # the future RHEL-9.2 release. This dooms anyone still using
+    # RHEL < 9.2 who still needs capstone from EPEL, so we
+    # workaround by manually picking the most recent version
+    AlmaLinux9:
+    aarch64-AlmaLinux9: https://kojipkgs.fedoraproject.org/packages/capstone/4.0.2/9.el9/aarch64/capstone-4.0.2-9.el9.aarch64.rpm
+    ppc64le-AlmaLinux9: https://kojipkgs.fedoraproject.org/packages/capstone/4.0.2/9.el9/ppc64le/capstone-4.0.2-9.el9.ppc64le.rpm
+    s390x-AlmaLinux9: https://kojipkgs.fedoraproject.org/packages/capstone/4.0.2/9.el9/s390x/capstone-4.0.2-9.el9.s390x.rpm
+    x86_64-AlmaLinux9: https://kojipkgs.fedoraproject.org/packages/capstone/4.0.2/9.el9/x86_64/capstone-4.0.2-9.el9.x86_64.rpm
+    cross-policy-default: foreign
+
+  cargo:
+    default: cargo
+    pkg: rust
+    MacOS: rust
+
+  ccache:
+    default: ccache
+
+  check:
+    default: check
+    rpm: check-devel
+
+  chrony:
+    default: chrony
+    MacOS:
+
+  clang:
+    default: clang
+    pkg:
+    MacOS:
+    cross-policy-default: skip
+
+  clippy:
+    apk: rust-clippy
+    deb: rust-clippy
+    pkg: rust
+    rpm: clippy
+    OpenSUSE:
+    Alpine315:
+    Debian10:
+    Debian11:
+
+  cloud-init:
+    default: cloud-init
+    pkg: py39-cloud-init
+    MacOS:
+
+  cloud-init-growpart:
+    apk: cloud-utils-growpart
+    deb: cloud-guest-utils
+    rpm: cloud-utils-growpart
+
+  cmocka:
+    apk: cmocka-dev
+    deb: libcmocka-dev
+    pkg: cmocka
+    rpm: libcmocka-devel
+    MacOS: cmocka
+    cross-policy-default: foreign
+
+  codespell:
+    default: codespell
+    apk:
+    AlmaLinux:
+    CentOS:
+
+  cpp:
+    default: cpp
+    apk: gcc
+    pkg:
+    MacOS:
+
+  cppi:
+    pkg: cppi
+    Fedora: cppi
+    MacOS: cppi
+    OpenSUSE: cppi
+
+  ctags:
+    default: ctags
+    deb: exuberant-ctags
+    AlmaLinux:
+    CentOS:
+    AlmaLinux8: ctags
+    CentOSStream8: ctags
+
+  cyrus-sasl:
+    apk: cyrus-sasl-dev
+    deb: libsasl2-dev
+    pkg: cyrus-sasl
+    rpm: cyrus-sasl-devel
+    cross-policy-default: foreign
+
+  daxctl:
+    apk: ndctl-dev
+    deb: libdaxctl-dev
+    rpm: daxctl-devel
+    OpenSUSE: libndctl-devel
+    cross-policy-default: foreign
+
+  dbus-daemon:
+    default: dbus
+    rpm: dbus-daemon
+    OpenSUSE: dbus-1
+
+  device-mapper:
+    apk: lvm2-dev
+    deb: libdevmapper-dev
+    rpm: device-mapper-devel
+    cross-policy-default: foreign
+
+  device-mapper-multipath:
+    apk: multipath-tools
+    deb: multipath-tools
+    rpm: device-mapper-multipath-devel
+    OpenSUSE:
+    cross-policy-default: skip
+
+  diffutils:
+    default: diffutils
+
+  dlfcn:
+    cross-mingw32-rpm: mingw32-dlfcn
+    cross-mingw64-rpm: mingw64-dlfcn
+    cross-policy-default: foreign
+
+  dnsmasq:
+    default: dnsmasq
+    deb: dnsmasq-base
+
+  dtrace:
+    deb: systemtap-sdt-dev
+    rpm: systemtap-sdt-devel
+    cross-policy-default: foreign
+
+  dwarves:
+    default: dwarves
+    apk:
+    pkg:
+    MacOS:
+
+  e2fsprogs:
+    default: e2fsprogs
+
+  ebtables:
+    default: ebtables
+    apk: iptables
+    pkg:
+    MacOS:
+
+  expect:
+    default: expect
+
+  findutils:
+    default: findutils
+    pkg:
+    MacOS:
+
+  firewalld-filesystem:
+    rpm: firewalld-filesystem
+    OpenSUSE:
+
+  flake8:
+    default: flake8
+    apk: py3-flake8
+    pkg: py39-flake8
+    rpm: python3-flake8
+    # FIXME Drop once EPEL for AlmaLinux 9 / CentOS Stream 9 adds the package
+    AlmaLinux9:
+    CentOSStream9:
+    OpenSUSETumbleweed: python39-flake8
+
+  flex:
+    default: flex
+
+  fuse:
+    apk: fuse-dev
+    deb: libfuse-dev
+    pkg: fusefs-libs
+    rpm: fuse-devel
+    cross-policy-default: foreign
+
+  fuse3:
+    apk: fuse3-dev
+    deb: libfuse3-dev
+    pkg: fusefs-libs3
+    rpm: fuse3-devel
+    Ubuntu1804:
+    cross-policy-default: foreign
+
+  fusermount:
+    default: fuse3
+    pkg: fusefs-libs3
+    MacOS:
+    Ubuntu1804:
+
+  g++:
+    apk: g++
+    deb: g++
+    rpm: gcc-c++
+    cross-aarch64-deb: g++-aarch64-linux-gnu
+    cross-armv6l-deb: g++-arm-linux-gnueabi
+    cross-armv7l-deb: g++-arm-linux-gnueabihf
+    cross-i686-deb: g++-i686-linux-gnu
+    cross-mingw32-rpm: mingw32-gcc-c++
+    cross-mingw64-rpm: mingw64-gcc-c++
+    cross-mips-deb: g++-mips-linux-gnu
+    cross-mips64el-deb: g++-mips64el-linux-gnuabi64
+    cross-mipsel-deb: g++-mipsel-linux-gnu
+    cross-ppc64le-deb: g++-powerpc64le-linux-gnu
+    cross-s390x-deb: g++-s390x-linux-gnu
+    cross-x86_64-deb: g++-x86-64-linux-gnu
+    cross-policy-default: foreign
+
+  gcc:
+    default: gcc
+    pkg:
+    MacOS:
+    cross-aarch64-deb: gcc-aarch64-linux-gnu
+    cross-armv6l-deb: gcc-arm-linux-gnueabi
+    cross-armv7l-deb: gcc-arm-linux-gnueabihf
+    cross-i686-deb: gcc-i686-linux-gnu
+    cross-mingw32-rpm: mingw32-gcc
+    cross-mingw64-rpm: mingw64-gcc
+    cross-mips-deb: gcc-mips-linux-gnu
+    cross-mips64el-deb: gcc-mips64el-linux-gnuabi64
+    cross-mipsel-deb: gcc-mipsel-linux-gnu
+    cross-ppc64le-deb: gcc-powerpc64le-linux-gnu
+    cross-s390x-deb: gcc-s390x-linux-gnu
+    cross-x86_64-deb: gcc-x86-64-linux-gnu
+    cross-policy-default: foreign
+
+  gcovr:
+    default: gcovr
+    pkg:
+    AlmaLinux:
+    CentOS:
+
+  gdb:
+    default: gdb
+
+  gdk-pixbuf:
+    apk: gdk-pixbuf-dev
+    deb: libgdk-pixbuf2.0-dev
+    pkg: gdk-pixbuf2
+    rpm: gdk-pixbuf2-devel
+    MacOS: gdk-pixbuf
+    OpenSUSE: gdk-pixbuf-devel
+    cross-mingw32-rpm: mingw32-gdk-pixbuf
+    cross-mingw64-rpm: mingw64-gdk-pixbuf
+    cross-policy-default: foreign
+
+  genisoimage:
+    apk: cdrkit
+    deb: genisoimage
+    pkg: cdrkit-genisoimage
+    Fedora: genisoimage
+    OpenSUSE: mkisofs
+    AlmaLinux8: genisoimage
+    CentOSStream8: genisoimage
+
+  gettext:
+    default: gettext
+    OpenSUSE: gettext-runtime
+    cross-mingw32-rpm: mingw32-gettext
+    cross-mingw64-rpm: mingw64-gettext
+    cross-policy-rpm: foreign
+
+  git:
+    default: git
+
+  glib-mkenums:
+    default: glib
+    apk: glib-dev
+    deb: libglib2.0-dev-bin
+    rpm: glib2-devel
+    MacOS: glib-utils
+
+  glib2:
+    default: glib
+    apk: glib-dev
+    deb: libglib2.0-dev
+    rpm: glib2-devel
+    cross-mingw32-rpm: mingw32-glib2
+    cross-mingw64-rpm: mingw64-glib2
+    cross-policy-default: foreign
+
+  glib2-native:
+    default: glib
+    apk: glib-dev
+    deb: libglib2.0-dev
+    rpm: glib2-devel
+
+  glib2-static:
+    apk: glib-static
+    deb: libglib2.0-dev
+    rpm: glib2-static
+    OpenSUSE:
+    cross-policy-default: foreign
+
+  glusterfs:
+    deb: libglusterfs-dev
+    Fedora: glusterfs-api-devel
+    OpenSUSE: glusterfs-devel
+    AlmaLinux8: glusterfs-api-devel
+    CentOSStream8: glusterfs-api-devel
+    Ubuntu1804: glusterfs-common
+    cross-policy-default: foreign
+
+  gnutls:
+    default: gnutls
+    apk: gnutls-dev
+    deb: libgnutls28-dev
+    rpm: gnutls-devel
+    OpenSUSE: libgnutls-devel
+    cross-mingw32-rpm: mingw32-gnutls
+    cross-mingw64-rpm: mingw64-gnutls
+    cross-policy-default: foreign
+
+  gnutls-utils:
+    default: gnutls
+    apk: gnutls-utils
+    deb: gnutls-bin
+    rpm: gnutls-utils
+    OpenSUSE: gnutls
+
+  go:
+    default: golang
+    apk: go
+    pkg: go
+    OpenSUSE: go
+
+  gobject-introspection:
+    default: gobject-introspection
+    apk: gobject-introspection-dev
+    deb: libgirepository1.0-dev
+    rpm: gobject-introspection-devel
+    cross-policy-default: foreign
+
+  grep:
+    default: grep
+    pkg: gnugrep
+
+  gstreamer-plugins-bad-free:
+    cross-mingw32-rpm: mingw32-gstreamer1-plugins-bad-free
+    cross-mingw64-rpm: mingw64-gstreamer1-plugins-bad-free
+    cross-policy-default: foreign
+
+  gstreamer-plugins-good:
+    cross-mingw32-rpm: mingw32-gstreamer1-plugins-good
+    cross-mingw64-rpm: mingw64-gstreamer1-plugins-good
+    cross-policy-default: foreign
+
+  gtk3:
+    apk: gtk+3.0-dev
+    deb: libgtk-3-dev
+    pkg: gtk3
+    rpm: gtk3-devel
+    MacOS: gtk+3
+    cross-mingw32-rpm: mingw32-gtk3
+    cross-mingw64-rpm: mingw64-gtk3
+    cross-policy-default: foreign
+
+  gtk-doc:
+    default: gtk-doc
+    deb: gtk-doc-tools
+
+  gtk-update-icon-cache:
+    default: gtk-update-icon-cache
+    MacOS: gtk+3
+    OpenSUSE: gtk3-tools
+
+  gtk-vnc:
+    default: gtk-vnc
+    apk: gtk-vnc-dev
+    deb: libgtk-vnc-2.0-dev
+    rpm: gtk-vnc2-devel
+    AlmaLinux:
+    CentOS:
+    OpenSUSE: gtk-vnc-devel
+
+  gzip:
+    default: gzip
+
+  hexdump:
+    apk: hexdump
+    deb: bsdextrautils
+    rpm: util-linux
+    Debian10: bsdmainutils
+    Ubuntu1804: bsdmainutils
+    Ubuntu2004: bsdmainutils
+
+  hostname:
+    default: hostname
+    apk: net-tools
+    pkg:
+    MacOS:
+
+  icoutils:
+    default: icoutils
+
+  intltool:
+    default: intltool
+
+  ip:
+    apk: iproute2
+    deb: iproute2
+    rpm: iproute
+    OpenSUSE: iproute2
+
+  iptables:
+    default: iptables
+    pkg:
+    MacOS:
+
+  iscsiadm:
+    apk: open-iscsi
+    deb: open-iscsi
+    rpm: iscsi-initiator-utils
+    OpenSUSE: open-iscsi
+
+  isoinfo:
+    apk: cdrkit
+    deb: genisoimage
+    pkg: cdrkit
+    Fedora: genisoimage
+    MacOS: cdrtools
+    OpenSUSE: mkisofs
+    AlmaLinux8: genisoimage
+    CentOSStream8: genisoimage
+
+  java:
+    apk: openjdk11-jdk
+    deb: openjdk-11-jdk-headless
+    pkg: openjdk11
+    rpm: java-11-openjdk-headless
+    MacOS: openjdk
+
+  jna:
+    default: jna
+    apk: java-jna
+    deb: libjna-java
+    MacOS:
+
+  jq:
+    default: jq
+
+  json-c:
+    apk: json-c-dev
+    deb: libjson-c-dev
+    pkg: json-c
+    rpm: json-c-devel
+    MacOS: json-c
+    OpenSUSE: libjson-c-devel
+    cross-policy-default: foreign
+
+  json-glib:
+    default: json-glib
+    apk: json-glib-dev
+    deb: libjson-glib-dev
+    rpm: json-glib-devel
+    cross-mingw32-rpm: mingw32-json-glib
+    cross-mingw64-rpm: mingw64-json-glib
+    cross-policy-default: foreign
+
+  junit:
+    default: junit
+    MacOS:
+    AlmaLinux8:
+    CentOSStream8:
+
+  libacl:
+    apk: acl-dev
+    deb: libacl1-dev
+    rpm: libacl-devel
+    cross-policy-default: foreign
+
+  libaio:
+    apk: libaio-dev
+    deb: libaio-dev
+    rpm: libaio-devel
+    cross-policy-default: foreign
+
+  libarchive:
+    default: libarchive
+    apk: libarchive-dev
+    deb: libarchive-dev
+    rpm: libarchive-devel
+    cross-mingw32-rpm: mingw32-libarchive
+    cross-mingw64-rpm: mingw64-libarchive
+    cross-policy-default: foreign
+
+  libasan:
+    deb: libasan5
+    rpm: libasan
+    OpenSUSE: libasan6
+    mips-deb:
+    mips64el-deb:
+    mipsel-deb:
+    cross-policy-default: foreign
+
+  libattr:
+    apk: attr-dev
+    deb: libattr1-dev
+    rpm: libattr-devel
+    cross-policy-default: foreign
+
+  libaudit:
+    apk: audit-dev
+    deb: libaudit-dev
+    rpm: audit-libs-devel
+    OpenSUSE: audit-devel
+    cross-policy-default: foreign
+
+  libblkid:
+    apk: util-linux-dev
+    deb: libblkid-dev
+    rpm: libblkid-devel
+    cross-policy-default: foreign
+
+  libbpf:
+    apk: libbpf-dev
+    deb: libbpf-dev
+    rpm: libbpf-devel
+    Ubuntu1804:
+    Ubuntu2004:
+    cross-policy-default: foreign
+
+  libc:
+    apk: musl-dev
+    deb: libc6-dev
+    rpm: glibc-devel
+    cross-mingw32-rpm: mingw32-headers
+    cross-mingw64-rpm: mingw64-headers
+    cross-policy-default: foreign
+
+  libc-static:
+    apk: musl-dev
+    deb: libc6-dev
+    rpm: glibc-static
+    cross-policy-default: foreign
+
+  libcacard:
+    deb: libcacard-dev
+    rpm: libcacard-devel
+    AlmaLinux:
+    CentOS:
+    AlmaLinux8: libcacard-devel
+    CentOSStream8: libcacard-devel
+    cross-policy-default: foreign
+
+  libcap-ng:
+    apk: libcap-ng-dev
+    deb: libcap-ng-dev
+    rpm: libcap-ng-devel
+    cross-policy-default: foreign
+
+  libclang:
+    apk: clang-dev
+    deb: libclang-dev
+    rpm: clang-devel
+
+  libcmpiutil:
+    rpm: libcmpiutil-devel
+    AlmaLinux:
+    CentOS:
+
+  libconfig:
+    default: libconfig
+    apk: libconfig-dev
+    deb: libconfig-dev
+    rpm: libconfig-devel
+    cross-policy-default: foreign
+
+  libcurl:
+    default: curl
+    apk: curl-dev
+    deb: libcurl4-gnutls-dev
+    rpm: libcurl-devel
+    cross-mingw32-rpm: mingw32-curl
+    cross-mingw64-rpm: mingw64-curl
+    cross-policy-default: foreign
+
+  libdrm:
+    apk: libdrm-dev
+    deb: libdrm-dev
+    rpm: libdrm-devel
+    cross-policy-default: foreign
+
+  libepoxy:
+    default: libepoxy
+    apk: libepoxy-dev
+    deb: libepoxy-dev
+    rpm: libepoxy-devel
+    cross-mingw32-rpm: mingw32-libepoxy
+    cross-mingw64-rpm: mingw64-libepoxy
+    cross-policy-default: foreign
+
+  libev:
+    default: libev
+    apk: libev-dev
+    deb: libev-dev
+    rpm: libev-devel
+    AlmaLinux:
+    CentOS:
+    AlmaLinux8: libev-devel
+    CentOSStream8: libev-devel
+    cross-policy-default: foreign
+
+  libfdt:
+    apk: dtc-dev
+    deb: libfdt-dev
+    pkg: dtc
+    rpm: libfdt-devel
+    MacOS: dtc
+    cross-policy-default: foreign
+
+  libffi:
+    default: libffi
+    apk: libffi-dev
+    deb: libffi-dev
+    rpm: libffi-devel
+    cross-policy-default: foreign
+
+  libgcrypt:
+    default: libgcrypt
+    apk: libgcrypt-dev
+    deb: libgcrypt20-dev
+    rpm: libgcrypt-devel
+    cross-mingw32-rpm: mingw32-libgcrypt
+    cross-mingw64-rpm: mingw64-libgcrypt
+    cross-policy-default: foreign
+
+  libgovirt:
+    rpm: libgovirt-devel
+    AlmaLinux:
+    CentOS:
+    Debian: libgovirt-dev
+    cross-mingw32-rpm: mingw32-libgovirt
+    cross-mingw64-rpm: mingw64-libgovirt
+    cross-policy-default: foreign
+
+  libibumad:
+    deb: libibumad-dev
+    rpm: rdma-core-devel
+    cross-policy-default: foreign
+
+  libguestfs:
+    deb: libguestfs-dev
+    rpm: libguestfs-devel
+    cross-policy-default: foreign
+
+  libibverbs:
+    deb: libibverbs-dev
+    rpm: rdma-core-devel
+    cross-policy-default: foreign
+
+  libiscsi:
+    deb: libiscsi-dev
+    rpm: libiscsi-devel
+    AlmaLinux:
+    CentOS:
+    MacOS: libiscsi
+    AlmaLinux8: libiscsi-devel
+    CentOSStream8: libiscsi-devel
+    cross-policy-default: foreign
+
+  libjemalloc:
+    deb: libjemalloc-dev
+    rpm: jemalloc-devel
+    MacOS: jemalloc
+    cross-policy-default: foreign
+
+  libjpeg:
+    apk: libjpeg-turbo-dev
+    deb: libjpeg62-turbo-dev
+    pkg: libjpeg-turbo
+    rpm: libjpeg-devel
+    MacOS: jpeg-turbo
+    OpenSUSE: libjpeg8-devel
+    Ubuntu: libjpeg-turbo8-dev
+    cross-mingw32-rpm: mingw32-libjpeg-turbo
+    cross-mingw64-rpm: mingw64-libjpeg-turbo
+    cross-policy-default: foreign
+
+  liblzma:
+    apk: xz-dev
+    deb: liblzma-dev
+    rpm: xz-devel
+    cross-policy-default: foreign
+
+  liblzma-static:
+    deb: liblzma-dev
+    Fedora: xz-static
+    OpenSUSE:
+    OpenSUSELeap153: xz-static-devel
+    OpenSUSELeap154: xz-static-devel
+    cross-policy-default: foreign
+
+  libnfs:
+    default: libnfs
+    apk: libnfs-dev
+    deb: libnfs-dev
+    rpm: libnfs-devel
+    # FIXME Drop once EPEL for AlmaLinux 9 / CentOS Stream 9 adds the package
+    AlmaLinux9:
+    CentOSStream9:
+    cross-policy-default: foreign
+
+  libnbd:
+    deb: libnbd-dev
+    rpm: libnbd-devel
+    Debian10:
+    Debian11:
+    Ubuntu1804:
+    Ubuntu2004:
+
+  libnl3:
+    apk: libnl3-dev
+    deb: libnl-3-dev
+    rpm: libnl3-devel
+    cross-policy-default: foreign
+
+  libnlroute3:
+    apk: libnl3-dev
+    deb: libnl-route-3-dev
+    rpm: libnl3-devel
+    cross-policy-default: foreign
+
+  libnuma:
+    apk: numactl-dev
+    deb: libnuma-dev
+    rpm: numactl-devel
+    OpenSUSE: libnuma-devel
+    cross-policy-default: foreign
+
+  libparted:
+    apk: parted-dev
+    deb: libparted-dev
+    rpm: parted-devel
+    cross-policy-default: foreign
+
+  libpcap:
+    default: libpcap
+    apk: libpcap-dev
+    deb: libpcap0.8-dev
+    rpm: libpcap-devel
+    cross-policy-default: foreign
+
+  libpciaccess:
+    apk: libpciaccess-dev
+    deb: libpciaccess-dev
+    pkg: libpciaccess
+    rpm: libpciaccess-devel
+    cross-policy-default: foreign
+
+  libpmem:
+    rpm: libpmem-devel
+    x86_64-deb: libpmem-dev
+    cross-policy-default: foreign
+
+  libpng:
+    apk: libpng-dev
+    deb: libpng-dev
+    pkg: png
+    rpm: libpng-devel
+    MacOS: libpng
+    OpenSUSE: libpng16-devel
+    cross-mingw32-rpm: mingw32-libpng
+    cross-mingw64-rpm: mingw64-libpng
+    cross-policy-default: foreign
+
+  librbd:
+    apk: ceph-dev
+    deb: librbd-dev
+    rpm: librbd-devel
+    cross-policy-default: foreign
+
+  librdmacm:
+    deb: librdmacm-dev
+    rpm: rdma-core-devel
+    cross-policy-default: foreign
+
+  librest:
+    apk: rest-dev
+    deb: librest-dev
+    pkg: rest
+    Fedora: rest-devel
+    MacOS: librest
+    OpenSUSE: librest-devel
+    cross-mingw32-rpm: mingw32-rest
+    cross-mingw64-rpm: mingw64-rest
+    cross-policy-default: foreign
+
+  libseccomp:
+    apk: libseccomp-dev
+    deb: libseccomp-dev
+    rpm: libseccomp-devel
+    cross-policy-default: foreign
+
+  libselinux:
+    apk: libselinux-dev
+    deb: libselinux1-dev
+    rpm: libselinux-devel
+    cross-policy-default: foreign
+
+  libslirp:
+    default: libslirp
+    apk: libslirp-dev
+    deb: libslirp-dev
+    rpm: libslirp-devel
+    AlmaLinux:
+    CentOS:
+    AlmaLinux8: libslirp-devel
+    CentOSStream8: libslirp-devel
+    Debian10:
+    Ubuntu1804:
+    cross-policy-default: foreign
+
+  libsoup:
+    default: libsoup
+    apk: libsoup-dev
+    deb: libsoup2.4-dev
+    rpm: libsoup-devel
+    cross-mingw32-rpm: mingw32-libsoup
+    cross-mingw64-rpm: mingw64-libsoup
+    cross-policy-default: foreign
+
+  libssh:
+    default: libssh
+    apk: libssh-dev
+    rpm: libssh-devel
+    Debian: libssh-gcrypt-dev
+    Ubuntu: libssh-dev
+    cross-policy-default: foreign
+
+  libssh2:
+    default: libssh2
+    apk: libssh2-dev
+    deb: libssh2-1-dev
+    rpm: libssh2-devel
+    cross-mingw32-rpm: mingw32-libssh2
+    cross-mingw64-rpm: mingw64-libssh2
+    cross-policy-default: foreign
+
+  libtasn1:
+    default: libtasn1
+    apk: libtasn1-dev
+    deb: libtasn1-6-dev
+    rpm: libtasn1-devel
+    cross-mingw32-rpm: mingw32-libtasn1
+    cross-mingw64-rpm: mingw64-libtasn1
+    cross-policy-default: foreign
+
+  libtirpc:
+    apk: libtirpc-dev
+    deb: libtirpc-dev
+    rpm: libtirpc-devel
+    cross-policy-default: foreign
+
+  libtool:
+    default: libtool
+    deb: libtool-bin
+
+  libtoolize:
+    default: libtool
+
+  libtorrent:
+    default: libtorrent
+    deb: libtorrent-dev
+    rpm: libtorrent-devel
+
+  libubsan:
+    deb: libubsan1
+    rpm: libubsan
+    OpenSUSE: libubsan1
+    mips-deb:
+    mips64el-deb:
+    mipsel-deb:
+    cross-policy-default: foreign
+
+  libudev:
+    apk: eudev-dev
+    deb: libudev-dev
+    rpm: systemd-devel
+    OpenSUSE: libudev-devel
+    cross-policy-default: foreign
+
+  liburing:
+    apk: liburing-dev
+    deb: liburing-dev
+    rpm: liburing-devel
+    AlmaLinux:
+    CentOS:
+    AlmaLinux8: liburing-devel
+    CentOSStream8: liburing-devel
+    Debian10:
+    Ubuntu1804:
+    Ubuntu2004:
+    cross-policy-default: foreign
+
+  libusbx:
+    apk: libusb-dev
+    deb: libusb-1.0-0-dev
+    rpm: libusbx-devel
+    MacOS: libusb
+    OpenSUSE: libusb-1_0-devel
+    cross-policy-default: foreign
+
+  libuuid:
+    apk: util-linux-dev
+    deb: uuid-dev
+    pkg: e2fsprogs-libuuid
+    rpm: libuuid-devel
+    cross-policy-default: foreign
+
+  libvdeplug:
+    apk: vde2-dev
+    deb: libvdeplug-dev
+    MacOS: vde
+    cross-policy-default: foreign
+
+  libvirt:
+    default: libvirt
+    apk: libvirt-dev
+    deb: libvirt-dev
+    rpm: libvirt-devel
+    cross-mingw32-rpm: mingw32-libvirt
+    cross-mingw64-rpm: mingw64-libvirt
+    cross-policy-default: foreign
+
+  libvirt-glib:
+    apk: libvirt-glib-dev
+    deb: libvirt-glib-1.0-dev
+    pkg: libvirt-glib
+    Fedora: libvirt-gobject-devel
+    MacOS: libvirt-glib
+    OpenSUSE: libvirt-glib-devel
+    AlmaLinux8: libvirt-gobject-devel
+    cross-policy-default: foreign
+
+  libxml2:
+    default: libxml2
+    apk: libxml2-dev
+    deb: libxml2-dev
+    rpm: libxml2-devel
+    cross-mingw32-rpm: mingw32-libxml2
+    cross-mingw64-rpm: mingw64-libxml2
+    cross-policy-default: foreign
+
+  libxslt:
+    default: libxslt
+    apk: libxslt-dev
+    deb: libxslt1-dev
+    rpm: libxslt-devel
+    cross-mingw32-rpm: mingw32-libxslt
+    cross-mingw64-rpm: mingw64-libxslt
+    cross-policy-default: foreign
+
+  libzstd:
+    default: zstd
+    apk: zstd-dev
+    deb: libzstd-dev
+    rpm: libzstd-devel
+    cross-policy-default: foreign
+
+  llvm:
+    default: llvm
+
+  locales:
+    deb: locales
+    rpm: glibc-langpack-en
+    OpenSUSE: glibc-locale
+
+  losetup:
+    apk: busybox
+    deb: mount
+    pkg:
+    rpm: util-linux
+
+  lsof:
+    default: lsof
+
+  lttng-ust:
+    apk: lttng-ust-dev
+    deb: liblttng-ust-dev
+    rpm: lttng-ust-devel
+    cross-policy-default: foreign
+
+  lua:
+    apk: lua5.4
+    deb: lua5.4
+    pkg: lua54
+    rpm: lua-devel
+    MacOS: lua
+    Debian10: lua5.3
+    Ubuntu1804: lua5.3
+    Ubuntu2004: lua5.3
+
+  lvm2:
+    default: lvm2
+    pkg:
+    MacOS:
+
+  lzo:
+    apk: lzo-dev
+    deb: liblzo2-dev
+    pkg: lzo2
+    rpm: lzo-devel
+    MacOS: lzo
+    cross-policy-default: foreign
+
+  make:
+    default: make
+    pkg: gmake
+
+  mesa-libgbm:
+    apk: mesa-dev
+    deb: libgbm-dev
+    rpm: mesa-libgbm-devel
+    OpenSUSE: Mesa-devel
+    cross-policy-default: foreign
+
+  meson:
+    default: meson
+    Debian10:
+    OpenSUSELeap153:
+    Ubuntu1804:
+    Ubuntu2004:
+
+  mkisofs:
+    apk: cdrkit
+    deb: genisoimage
+    pkg: xorriso
+    rpm: xorriso
+    MacOS: xorriso
+
+  modprobe:
+    default: kmod
+    pkg:
+    MacOS:
+
+  mono:
+    Fedora: mono-devel
+
+  monodevelop:
+    Fedora: monodevelop
+
+  nano:
+    default: nano
+    MacOS:
+
+  nbd-client:
+    apk: nbd-client
+    deb: nbd-client
+    rpm: nbd
+    AlmaLinux:
+    CentOS:
+
+  nbd-server:
+    apk: nbd
+    deb: nbd-server
+    pkg: nbd-server
+    rpm: nbd
+    AlmaLinux:
+    CentOS:
+
+  nbdkit:
+    default: nbdkit
+    apk:
+    MacOS:
+    Ubuntu1804:
+
+  nbdsh:
+    default: python3-libnbd
+    apk:
+    pkg:
+    OpenSUSE:
+    Debian10:
+    Ubuntu1804:
+    Ubuntu2004:
+
+  ncursesw:
+    default: ncurses
+    apk: ncurses-dev
+    deb: libncursesw5-dev
+    rpm: ncurses-devel
+    cross-policy-default: foreign
+
+  netcat:
+    apk: nmap-ncat
+    deb: ncat
+    rpm: nmap-ncat
+    OpenSUSE: ncat
+    Ubuntu1804: netcat-openbsd
+
+  netcf:
+    apk: netcf-dev
+    AlmaLinux8: netcf-devel
+    CentOSStream8: netcf-devel
+    Debian10: libnetcf-dev
+    Debian11: libnetcf-dev
+    Ubuntu1804: libnetcf-dev
+    Ubuntu2004: libnetcf-dev
+    cross-policy-default: skip
+
+  net-snmp:
+    default: net-snmp
+    apk: net-snmp-dev
+    deb: libsnmp-dev
+    rpm: net-snmp-devel
+
+  net-tools:
+    default: net-tools
+    pkg:
+    MacOS:
+
+  nettle:
+    default: nettle
+    apk: nettle-dev
+    deb: nettle-dev
+    rpm: nettle-devel
+    OpenSUSE: libnettle-devel
+    cross-mingw32-rpm: mingw32-nettle
+    cross-mingw64-rpm: mingw64-nettle
+    cross-policy-default: foreign
+
+  ninja:
+    default: ninja-build
+    apk: samurai
+    pkg: ninja
+    MacOS: ninja
+    OpenSUSE: ninja
+
+  nsis:
+    cross-mingw32-rpm: mingw32-nsis
+    # Yes, really, the 32-bit build can create 64-bit output
+    # so there is no 64-bit build available
+    cross-mingw64-rpm: mingw32-nsis
+    cross-policy-default: foreign
+
+  numad:
+    default: numad
+    apk:
+    pkg:
+    MacOS:
+
+  ocaml:
+    default: ocaml
+
+  ocaml-findlib:
+    default: ocaml-findlib
+    apk: ocaml-findlib-dev
+
+  ocamldoc:
+    default: ocaml
+    apk: ocaml-ocamldoc
+    deb: ocaml-nox
+    rpm: ocamldoc
+    OpenSUSE: ocaml-ocamldoc
+
+  openwsman:
+    rpm: libwsman-devel
+    Ubuntu: libopenwsman-dev
+    cross-policy-default: foreign
+
+  osinfo-db-tools:
+    default: osinfo-db-tools
+    MacOS:
+
+  pam:
+    apk: linux-pam-dev
+    deb: libpam0g-dev
+    rpm: pam-devel
+    cross-policy-default: foreign
+
+  pci-ids:
+    default: hwdata
+    apk: hwids-pci
+    pkg: pciids
+    MacOS:
+
+  pcre-static:
+    apk: pcre-dev
+    deb: libpcre2-dev
+    rpm: pcre-static
+    OpenSUSE: pcre-devel-static
+
+  perl:
+    default: perl-base
+    apk: perl
+    pkg: perl5
+    MacOS: perl
+    AlmaLinux8: perl
+    CentOSStream8: perl
+
+  perl-App-cpanminus:
+    apk: perl-app-cpanminus
+    deb: cpanminus
+    pkg: p5-App-cpanminus
+    rpm: perl-App-cpanminus
+    MacOS: cpanminus
+
+  perl-Archive-Tar:
+    deb: libarchive-tar-perl
+    pkg: perl5
+    rpm: perl-Archive-Tar
+
+  perl-CPAN-Changes:
+    deb: libcpan-changes-perl
+    pkg: p5-CPAN-Changes
+    rpm: perl-CPAN-Changes
+
+  perl-Digest:
+    apk: perl
+    deb: libdigest-perl
+    pkg: p5-Digest
+    rpm: perl-Digest
+
+  perl-Digest-MD5:
+    deb: libdigest-perl-md5-perl
+    pkg: p5-Digest-MD5
+    rpm: perl-Digest-MD5
+
+  perl-ExtUtils-CBuilder:
+    deb: libextutils-cbuilder-perl
+    pkg: p5-ExtUtils-CBuilder
+    rpm: perl-ExtUtils-CBuilder
+
+  perl-ExtUtils-Embed:
+    apk: perl
+    deb: perl
+    pkg: perl5
+    rpm: perl-ExtUtils-Embed
+    OpenSUSE: perl
+
+  perl-File-Slurp:
+    apk: perl-file-slurp
+    deb: libfile-slurp-perl
+    pkg: p5-File-Slurp
+    rpm: perl-File-Slurp
+
+  perl-IO-Compress-Bzip2:
+    deb: libio-compress-perl
+    pkg: p5-IO-Compress
+    rpm: perl-IO-Compress-Bzip2
+    OpenSUSE:
+
+  perl-IO-Interface:
+    deb: libio-interface-perl
+    pkg: p5-IO-Interface
+    rpm: perl-IO-Interface
+
+  perl-IO-String:
+    apk: perl-io-string
+    deb: libio-string-perl
+    pkg: p5-IO-String
+    rpm: perl-IO-String
+
+  perl-Module-Build:
+    apk: perl-module-build
+    deb: libmodule-build-perl
+    pkg: p5-Module-Build
+    rpm: perl-Module-Build
+
+  perl-Net-OpenSSH:
+    deb: libnet-openssh-perl
+    pkg: p5-Net-OpenSSH
+    rpm: perl-Net-OpenSSH
+    OpenSUSE:
+    # FIXME Drop once EPEL for AlmaLinux 9 / CentOS Stream 9 adds the package
+    AlmaLinux9:
+    CentOSStream9:
+
+  perl-NetAddr-IP:
+    deb: libnetaddr-ip-perl
+    pkg: p5-NetAddr-IP
+    rpm: perl-NetAddr-IP
+
+  perl-Net-SNMP:
+    apk: perl-net-snmp
+    deb: libnet-snmp-perl
+    pkg: p5-Net-SNMP
+    rpm: perl-Net-SNMP
+
+  perl-Pod-Man:
+    default: perl
+    pkg: perl5
+    rpm: perl-podlators
+    OpenSUSE: perl
+
+  perl-Pod-Simple:
+    default: perl
+    pkg: p5-Pod-Simple
+    rpm: perl-Pod-Simple
+
+  perl-Sub-Uplevel:
+    apk: perl-sub-uplevel
+    deb: libsub-uplevel-perl
+    pkg: p5-Sub-Uplevel
+    rpm: perl-Sub-Uplevel
+
+  perl-Sys-Hostname:
+    apk: perl
+    deb: perl-base
+    pkg: perl5
+    rpm: perl-Sys-Hostname
+    MacOS: perl
+    OpenSUSE: perl-base
+    AlmaLinux8: perl
+    CentOSStream8: perl
+
+  perl-TAP-Formatter-HTML:
+    deb: libtap-formatter-html-perl
+    Fedora: perl-TAP-Formatter-HTML
+
+  perl-TAP-Formatter-JUnit:
+    deb: libtap-formatter-junit-perl
+    pkg: p5-TAP-Formatter-JUnit
+    Fedora: perl-TAP-Formatter-JUnit
+
+  perl-TAP-Harness-Archive:
+    deb: libtap-harness-archive-perl
+    Fedora: perl-TAP-Harness-Archive
+
+  perl-Test-Exception:
+    apk: perl-test-exception
+    deb: libtest-exception-perl
+    pkg: p5-Test-Exception
+    rpm: perl-Test-Exception
+
+  perl-Test-Harness:
+    apk: perl-test-harness
+    deb: libtest-harness-perl
+    pkg: p5-Test-Harness
+    rpm: perl-Test-Harness
+
+  perl-Test-LWP-UserAgent:
+    deb: libtest-lwp-useragent-perl
+    pkg: p5-Test-LWP-UserAgent
+    Fedora: perl-Test-LWP-UserAgent
+
+  perl-Test-Pod:
+    apk: perl-test-pod
+    deb: libtest-pod-perl
+    pkg: p5-Test-Pod
+    rpm: perl-Test-Pod
+
+  perl-Test-Pod-Coverage:
+    apk: perl-test-pod-coverage
+    deb: libtest-pod-coverage-perl
+    pkg: p5-Test-Pod-Coverage
+    rpm: perl-Test-Pod-Coverage
+
+  perl-Test-Simple:
+    deb: libtest-simple-perl
+    pkg: p5-Test-Simple
+    rpm: perl-Test-Simple
+
+  perl-Time-HiRes:
+    apk: perl-time-hires
+    deb: libtime-hr-perl
+    pkg: p5-Time-HiRes
+    rpm: perl-Time-HiRes
+
+  perl-XML-Twig:
+    apk: perl-xml-twig
+    deb: libxml-twig-perl
+    pkg: p5-XML-Twig
+    rpm: perl-XML-Twig
+
+  perl-XML-Writer:
+    apk: perl-xml-writer
+    deb: libxml-writer-perl
+    pkg: p5-XML-Writer
+    rpm: perl-XML-Writer
+
+  perl-XML-XPath:
+    apk: perl-xml-xpath
+    deb: libxml-xpath-perl
+    pkg: p5-XML-XPath
+    rpm: perl-XML-XPath
+
+  perl-YAML:
+    apk: perl-yaml
+    deb: libyaml-perl
+    pkg: p5-YAML
+    rpm: perl-YAML
+
+  perl-accessors:
+    deb: libaccessors-perl
+    pkg: p5-accessors
+    Fedora: perl-accessors
+
+  perl-devel:
+    apk: perl-dev
+    deb: libperl-dev
+    pkg: perl5-devel
+    rpm: perl-devel
+    MacOS: perl5-devel
+    OpenSUSE:
+
+  perl-generators:
+    rpm: perl-generators
+    OpenSUSE:
+
+  php:
+    apk: php81-dev
+    deb: php-dev
+    pkg: php74
+    rpm: php-devel
+    Alpine315: php8-dev
+
+  php-imagick:
+    apk: php81-pecl-imagick
+    deb: php-imagick
+    pkg: php74-pecl-imagick
+    Fedora: php-pecl-imagick
+    OpenSUSE: php-imagick
+    Alpine315: php8-pecl-imagick
+
+  pixman:
+    default: pixman
+    apk: pixman-dev
+    deb: libpixman-1-dev
+    rpm: pixman-devel
+    OpenSUSE: libpixman-1-0-devel
+    cross-mingw32-rpm: mingw32-pixman
+    cross-mingw64-rpm: mingw64-pixman
+    cross-policy-default: foreign
+
+  pkg-config:
+    default: pkgconf
+    rpm: pkgconfig
+    MacOS: pkg-config
+    cross-mingw32-rpm: mingw32-pkg-config
+    cross-mingw64-rpm: mingw64-pkg-config
+    cross-policy-rpm: foreign
+
+  polkit:
+    default: polkit
+    deb: policykit-1
+    MacOS:
+
+  portablexdr:
+    cross-mingw32-rpm: mingw32-portablexdr
+    cross-mingw64-rpm: mingw64-portablexdr
+    cross-policy-default: foreign
+
+  publican:
+    deb: publican
+    Fedora36: publican
+
+  pulseaudio:
+    apk: pulseaudio-dev
+    deb: libpulse-dev
+    rpm: pulseaudio-libs-devel
+    OpenSUSE: libpulse-devel
+    cross-policy-default: foreign
+
+  python3:
+    default: python3
+    OpenSUSE: python3-base
+
+  python3-PyYAML:
+    apk: py3-yaml
+    deb: python3-yaml
+    pkg: py39-yaml
+    rpm: python3-PyYAML
+
+  python3-dbus:
+    default: python3-dbus
+    apk: py3-dbus
+    pkg: py39-dbus
+    MacOS:
+    OpenSUSE: python3-dbus-python
+
+  python3-boto3:
+    default: python3-boto3
+    apk: py3-boto3
+    pkg: py39-boto3
+
+  python3-devel:
+    default: python3
+    apk: python3-dev
+    deb: python3-dev
+    rpm: python3-devel
+
+  python3-docutils:
+    default: python3-docutils
+    apk: py3-docutils
+    pkg: py39-docutils
+    MacOS: docutils
+
+  python3-gobject:
+    apk: py3-gobject3
+    deb: python3-gi
+    pkg: py39-gobject3
+    rpm: python3-gobject
+
+  python3-libxml2:
+    default: python3-libxml2
+    apk: py3-libxml2
+    pkg: py39-libxml2
+    MacOS:
+    OpenSUSE: python3-libxml2-python
+
+  python3-lxml:
+    default: python3-lxml
+    apk: py3-lxml
+    pkg: py39-lxml
+    MacOS:
+
+  python3-numpy:
+    default: python3-numpy
+    apk: py3-numpy
+    pkg: py39-numpy
+    MacOS:
+
+  python3-opencv:
+    default: python3-opencv
+    apk:
+    pkg: opencv
+    AlmaLinux:
+    CentOS:
+    MacOS:
+
+  python3-pillow:
+    default: python3-pillow
+    apk: py3-pillow
+    pkg: py39-pillow
+    AlmaLinux:
+    CentOS:
+    MacOS:
+    OpenSUSE: python3-Pillow
+    AlmaLinux8: python3-pillow
+    CentOSStream8: python3-pillow
+
+  python3-pip:
+    default: python3-pip
+    apk: py3-pip
+    pkg: py39-pip
+    MacOS: python3
+
+  python3-pytest:
+    default: python3-pytest
+    apk: py3-pytest
+    pkg: py39-pytest
+    MacOS:
+
+  python3-requests:
+    default: python3-requests
+    apk: py3-requests
+    pkg: py39-requests
+    MacOS:
+
+  python3-selinux:
+    apk:
+    deb: python3-selinux
+    pkg:
+    rpm: python3-libselinux
+    MacOS:
+    OpenSUSE: python3-selinux
+
+  python3-setuptools:
+    default: python3-setuptools
+    apk: py3-setuptools
+    pkg: py39-setuptools
+    MacOS: python3
+
+  python3-sphinx:
+    default: python3-sphinx
+    apk: py3-sphinx
+    pkg: py39-sphinx
+    MacOS:
+    OpenSUSE: python3-Sphinx
+
+  python3-sphinx-rtd-theme:
+    apk: py3-sphinx_rtd_theme
+    deb: python3-sphinx-rtd-theme
+    pkg: py39-sphinx_rtd_theme
+    rpm: python3-sphinx_rtd_theme
+
+  python3-venv:
+    default: python3
+    deb: python3-venv
+    OpenSUSE: python3-base
+
+  python3-wheel:
+    default: python3-wheel
+    apk: py3-wheel
+    pkg: py39-wheel
+    MacOS: python3
+
+  qemu:
+    default: qemu
+    deb: qemu-system
+    AlmaLinux: qemu-kvm
+    CentOS: qemu-kvm
+    Fedora: qemu-kvm
+
+  qemu-img:
+    default: qemu-utils
+    apk: qemu-img
+    pkg: qemu
+    rpm: qemu-img
+    MacOS: qemu
+    OpenSUSE: qemu-tools
+
+  qemu-io:
+    apk: qemu-img
+    deb: qemu-utils
+    pkg: qemu
+    rpm: qemu-img
+    MacOS: qemu
+    OpenSUSE: qemu-tools
+
+  qemu-nbd:
+    default: qemu-utils
+    apk: qemu-img
+    pkg: qemu
+    rpm: qemu-img
+    MacOS: qemu
+    OpenSUSE: qemu-tools
+
+  rake:
+    default: rubygem-rake
+    apk: ruby-rake
+    deb: rake
+    MacOS: ruby
+    OpenSUSE: ruby
+
+  readline:
+    default: readline
+    apk: readline-dev
+    deb: libreadline-dev
+    rpm: readline-devel
+    cross-mingw32-rpm: mingw32-readline
+    cross-mingw64-rpm: mingw64-readline
+    cross-policy-default: foreign
+
+  rpcgen:
+    default: rpcgen
+    deb: libc-dev-bin
+    pkg:
+    # On Alpine 3.15 both the nfs-utils and rpcgen packages provide the rpcgen
+    # command and they conflict, so we have to choose the superset (nfs-utils).
+    #
+    # This issue has already been addressed in Alpine Edge, but apparently the
+    # fix has not been backported to the stable release.
+    #
+    # https://gitlab.alpinelinux.org/alpine/aports/-/issues/13583
+    Alpine315: nfs-utils
+
+  rpm2cpio:
+    default: rpm2cpio
+    rpm: rpm
+
+  rpmbuild:
+    rpm: rpm-build
+
+  ruby:
+    default: ruby
+    apk: ruby-dev
+    deb: ruby-dev
+    rpm: ruby-devel
+
+  rust:
+    default: rust
+    deb: rustc
+
+  sanlock:
+    deb: libsanlock-dev
+    rpm: sanlock-devel
+    cross-policy-default: foreign
+
+  screen:
+    default: screen
+
+  scrub:
+    default: scrub
+    apk:
+    pkg: diskscrub
+
+  sdl2:
+    default: sdl2
+    apk: sdl2-dev
+    deb: libsdl2-dev
+    rpm: SDL2-devel
+    OpenSUSE: libSDL2-devel
+    cross-mingw32-rpm: mingw32-SDL2
+    cross-mingw64-rpm: mingw64-SDL2
+    cross-policy-default: foreign
+
+  sdl2-image:
+    apk: sdl2_image-dev
+    deb: libsdl2-image-dev
+    pkg: sdl2_image
+    Fedora: SDL2_image-devel
+    MacOS: sdl2_image
+    OpenSUSE: libSDL2_image-devel
+    cross-mingw32-rpm: mingw32-SDL2_image
+    cross-mingw64-rpm: mingw64-SDL2_image
+    cross-policy-default: foreign
+
+  sed:
+    default: sed
+    pkg: gsed
+    MacOS: gnu-sed
+
+  sfdisk:
+    default: sfdisk
+    deb: fdisk
+
+    # linuxfdisk includes a version of sfdisk, but it is limited/old (no -X
+    # option) and what's more the binary is called sfdisk-linux
+    pkg:
+    rpm: util-linux
+
+  showmount:
+    apk: nfs-utils
+    deb: nfs-common
+    rpm: nfs-utils
+
+  snappy:
+    default: snappy
+    apk: snappy-dev
+    deb: libsnappy-dev
+    rpm: snappy-devel
+    cross-policy-default: foreign
+
+  sndio:
+    apk: sndio-dev
+    deb: libsndio-dev
+    pkg: sndio
+    OpenSUSE: sndio-devel
+
+  socat:
+    default: socat
+
+  sparse:
+    default: sparse
+    pkg:
+    AlmaLinux:
+    CentOS:
+
+  spice-gtk3:
+    apk: spice-gtk-dev
+    deb: libspice-client-gtk-3.0-dev
+    pkg: spice-gtk
+    Fedora: spice-gtk3-devel
+    MacOS: spice-gtk
+    OpenSUSE: spice-gtk-devel
+    AlmaLinux8: spice-gtk3-devel
+    CentOSStream8: spice-gtk3-devel
+    cross-mingw32-rpm: mingw32-spice-gtk3
+    cross-mingw64-rpm: mingw64-spice-gtk3
+    cross-policy-default: foreign
+
+  spice-protocol:
+    default: spice-protocol
+    deb: libspice-protocol-dev
+    OpenSUSE: spice-protocol-devel
+
+  spice-server:
+    apk: spice-dev
+    deb: libspice-server-dev
+    pkg: libspice-server
+    Fedora: spice-server-devel
+    OpenSUSE: libspice-server-devel
+    AlmaLinux8: spice-server-devel
+    CentOSStream8: spice-server-devel
+    mips-deb:
+    s390x-deb:
+    cross-policy-default: foreign
+
+  ss:
+    deb: iproute2
+    rpm: iproute
+    OpenSUSE: iproute2
+
+  ssh-client:
+    apk: openssh-client
+    deb: openssh-client
+    rpm: openssh-clients
+    OpenSUSE: openssh
+
+  strace:
+    default: strace
+    pkg:
+    MacOS:
+
+  systemd:
+    deb: libsystemd-dev
+    rpm: systemd-devel
+    cross-policy-default: foreign
+
+  systemd-rpm-macros:
+    rpm: systemd-rpm-macros
+
+  sudo:
+    default: sudo
+    MacOS:
+
+  tar:
+    default: tar
+    pkg:
+    MacOS:
+
+  tc:
+    apk: iproute2
+    deb: iproute2
+    rpm: iproute-tc
+    OpenSUSE: iproute2
+
+  tcl:
+    default: tcl
+    deb: tcl-dev
+    pkg: tcl87
+    rpm: tcl-devel
+
+  tcpdump:
+    default: tcpdump
+
+  tesseract:
+    default: tesseract
+    apk: tesseract-ocr
+    deb: tesseract-ocr
+    AlmaLinux:
+    CentOS:
+    OpenSUSE: tesseract-ocr
+
+  tesseract-eng:
+    apk: tesseract-ocr
+    deb: tesseract-ocr-eng
+    rpm: tesseract-langpack-eng
+    AlmaLinux:
+    CentOS:
+    MacOS: tesseract
+    OpenSUSE: tesseract-ocr-traineddata-english
+
+  texinfo:
+    default: texinfo
+
+  unzip:
+    default: unzip
+    pkg:
+
+  usb-ids:
+    default: hwdata
+    apk: hwids-usb
+    pkg: usbids
+    MacOS:
+
+  usbredir:
+    default: usbredir
+    apk: usbredir-dev
+    deb: libusbredirhost-dev
+    rpm: usbredir-devel
+    cross-policy-default: foreign
+
+  vala:
+    default: vala
+    deb: valac
+
+  valgrind:
+    default: valgrind
+    MacOS:
+
+  vim:
+    default: vim
+    deb: vim-nox
+    AlmaLinux: vim-minimal
+    CentOS: vim-minimal
+    Fedora: vim-minimal
+
+  virglrenderer:
+    apk: virglrenderer-dev
+    deb: libvirglrenderer-dev
+    pkg: virglrenderer
+    rpm: virglrenderer-devel
+    # FIXME Drop once EPEL for AlmaLinux 9 / CentOS Stream 9 adds the package
+    AlmaLinux9:
+    CentOSStream9:
+    cross-policy-default: foreign
+
+  libguestfs-tools:
+    deb: libguestfs-tools
+    rpm: guestfs-tools
+    AlmaLinux8: libguestfs-tools-c
+    CentOSStream8: libguestfs-tools-c
+
+  vte:
+    default: vte3
+    apk: vte3-dev
+    deb: libvte-2.91-dev
+    rpm: vte291-devel
+    OpenSUSE: vte-devel
+    cross-policy-default: foreign
+
+  wget:
+    default: wget
+
+  which:
+    apk: which
+    deb: debianutils
+    rpm: which
+
+  wireshark:
+    apk: wireshark-dev
+    deb: wireshark-dev
+    rpm: wireshark-devel
+    cross-policy-default: skip
+
+  xen:
+    apk: xen-dev
+    rpm: xen-devel
+    AlmaLinux:
+    CentOS:
+    aarch64-deb: libxen-dev
+    armv7l-deb: libxen-dev
+    x86_64-deb: libxen-dev
+    cross-policy-default: foreign
+
+  xfsprogs:
+    apk: xfsprogs-dev
+    deb: xfslibs-dev
+    rpm: xfsprogs-devel
+    cross-policy-default: foreign
+
+  xmllint:
+    default: libxml2
+    apk: libxml2-utils
+    deb: libxml2-utils
+
+  xsltproc:
+    default: libxslt
+    deb: xsltproc
+
+  xz:
+    default: xz
+    deb: xz-utils
+    pkg:
+
+  yajl:
+    default: yajl
+    apk: yajl-dev
+    deb: libyajl-dev
+    rpm: yajl-devel
+    OpenSUSE: libyajl-devel
+    cross-policy-default: foreign
+
+  zip:
+    default: zip
+
+  zlib:
+    default: zlib
+    apk: zlib-dev
+    deb: zlib1g-dev
+    pkg:
+    rpm: zlib-devel
+    cross-policy-default: foreign
+
+  zlib-static:
+    apk: zlib-static
+    deb: zlib1g-dev
+    rpm: zlib-static
+    OpenSUSE: zlib-devel-static
+    cross-policy-default: foreign
+
+  zstd:
+    default: zstd
+    deb: libzstd-dev
+    rpm: libzstd-devel
+
+  zstdtools:
+    default: zstd
+
+# PyPi mappings are used to map the generic packages name used to define
+# projects to the specific package name and version which will be used when
+# installing them from PyPi using pip.
+#
+# PyPi packages' name are not different between different OSes, thus only
+# the default "priority" is taken into account.
+#
+# In case we need to stick to a specific version of a PyPi package, it can
+# be represented by adding "==$version" to the PyPi package name, as done
+# with the meson package.
+
+pypi_mappings:
+
+  # Dependencies of this in turn need various native
+  # devel header packages & toolchains that may not
+  # exist.
+  #gcovr:
+  #  default: gcovr
+
+  flake8:
+    default: flake8
+
+  meson:
+    default: meson==0.56.0
+
+  python3-PyYAML:
+    default: PyYAML
+
+  python3-boto3:
+    default: boto3
+
+  # Several packages need devel header packages that are generally not
+  # installed by Linux distros.  Restrict them to MacOS, which is where
+  # they are actually needed.
+  #
+  # TODO: install -devel dependencies also for packages installed from PyPI
+  python3-dbus:
+    MacOS: dbus-python
+
+  python3-docutils:
+    default: docutils
+
+  python3-gobject:
+    MacOS: PyGObject
+
+  python3-libxml2:
+    MacOS: libxml2-python3
+
+  python3-lxml:
+    default: lxml
+
+  python3-numpy:
+    MacOS: numpy
+
+  python3-pillow:
+    default: pillow
+
+  python3-pytest:
+    default: pytest
+
+  python3-requests:
+    default: requests
+
+  python3-sphinx:
+    default: sphinx
+
+  python3-sphinx-rtd-theme:
+    default: sphinx-rtd-theme
+
+
+# CPAN mappings work like PyPi mappings, the only difference being that
+# installing a specific version of a CPAN package is not supported.
+
+cpan_mappings:
+
+  perl-Archive-Tar:
+    default: Archive::Tar
+
+  perl-CPAN-Changes:
+    default: CPAN::Changes
+
+  perl-Digest:
+    default: Digest
+
+  perl-Digest-MD5:
+    default: Digest::MD5
+
+  perl-ExtUtils-CBuilder:
+    default: ExtUtils::CBuilder
+
+  perl-ExtUtils-Embed:
+    default: ExtUtils::Embed
+
+  perl-File-Slurp:
+    default: File::Slurp
+
+  perl-IO-Compress-Bzip2:
+    default: IO::Compress::Bzip2
+
+  perl-IO-Interface:
+    default: IO::Interface
+
+  perl-IO-String:
+    default: IO::String
+
+  perl-Module-Build:
+    default: Module::Build
+
+  perl-Net-OpenSSH:
+    default: Net::OpenSSH
+
+  perl-NetAddr-IP:
+    default: NetAddr::IP
+
+  perl-Net-SNMP:
+    default: Net::SNMP
+
+  perl-Pod-Man:
+    default: Pod::Man
+
+  perl-Pod-Simple:
+    default: Pod::Simple
+
+  perl-Sub-Uplevel:
+    default: Sub::Uplevel
+
+  perl-Sys-Hostname:
+    default: Sys::Hostname
+
+  perl-TAP-Formatter-HTML:
+    default: TAP::Formatter::HTML
+
+  perl-TAP-Formatter-JUnit:
+    default: TAP::Formatter::JUnit
+
+  perl-TAP-Harness-Archive:
+    default: TAP::Harness::Archive
+
+  perl-Test-Exception:
+    default: Test::Exception
+
+  perl-Test-Harness:
+    default: Test::Harness
+
+  perl-Test-LWP-UserAgent:
+    default: LWP::UserAgent
+
+  perl-Test-Pod:
+    default: Test::Pod
+
+  perl-Test-Pod-Coverage:
+    default: Test::Pod::Coverage
+
+  perl-Test-Simple:
+    default: Test::Simple
+
+  perl-Time-HiRes:
+    default: Time::HiRes
+
+  perl-XML-Twig:
+    default: XML::Twig
+
+  perl-XML-Writer:
+    default: XML::Writer
+
+  perl-XML-XPath:
+    default: XML::XPath
+
+  perl-YAML:
+    default: YAML
+
+  perl-accessors:
+    default: accessors

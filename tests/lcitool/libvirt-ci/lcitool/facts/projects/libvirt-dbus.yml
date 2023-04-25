@@ -1,0 +1,18 @@
+---
+packages:
+  - ccache
+  - dbus-daemon
+  - flake8
+  - gcc
+  - glib2
+  - make
+  - meson
+  - ninja
+  - pkg-config
+  - python3
+  - python3-dbus
+  - python3-docutils
+  - python3-gobject
+  - python3-pytest
+  - rpmbuild
+  - systemd-rpm-macros

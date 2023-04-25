@@ -1,0 +1,18 @@
+---
+- set_fact:
+    name: virt-viewer
+    machines: '{{ all_machines }}'
+    archive_format: gz
+    git_url: '{{ git_urls["virt-viewer"][git_remote] }}'
+
+- import_tasks: 'jobs/prepare.yml'
+- import_tasks: 'jobs/meson-build-job.yml'
+- import_tasks: 'jobs/meson-check-job.yml'
+- import_tasks: 'jobs/meson-rpm-job.yml'
+  vars:
+    # The spec file for virt-viewer requires a very recent version
+    # of spice-gtk, so we have to skip this job on older distros
+    machines:
+      - fedora-36
+      - fedora-37
+      - fedora-rawhide

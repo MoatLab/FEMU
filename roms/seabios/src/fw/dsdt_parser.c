@@ -417,6 +417,10 @@ static int parse_termobj(struct parse_state *s,
         break;
     case 0x01: /* one */
         break;
+    case 0x06: /* AliasOp */
+        offset += parse_namestring(s, ptr + offset, "SourceObject");
+        offset += parse_namestring(s, ptr + offset, "AliasObject");
+        break;
     case 0x08: /* name op */
         offset += parse_namestring(s, ptr + offset, "name");
         offset += parse_termobj(s, ptr + offset);

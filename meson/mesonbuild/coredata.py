@@ -34,17 +34,25 @@ import typing as T
 
 if T.TYPE_CHECKING:
     from . import dependencies
-    from .compilers.compilers import Compiler, CompileResult  # noqa: F401
+    from .compilers.compilers import Compiler, CompileResult
     from .environment import Environment
-    from .mesonlib import OptionOverrideProxy
+    from .mesonlib import OptionOverrideProxy, FileOrString
     from .cmake.traceparser import CMakeCacheEntry
 
     OptionDictType = T.Union[T.Dict[str, 'UserOption[T.Any]'], OptionOverrideProxy]
     KeyedOptionDictType = T.Union[T.Dict['OptionKey', 'UserOption[T.Any]'], OptionOverrideProxy]
-    CompilerCheckCacheKey = T.Tuple[T.Tuple[str, ...], str, str, T.Tuple[str, ...], str]
+    CompilerCheckCacheKey = T.Tuple[T.Tuple[str, ...], str, FileOrString, T.Tuple[str, ...], str]
 
-version = '0.59.3'
-backendlist = ['ninja', 'vs', 'vs2010', 'vs2012', 'vs2013', 'vs2015', 'vs2017', 'vs2019', 'xcode']
+    # typeshed
+    StrOrBytesPath = T.Union[str, bytes, os.PathLike[str], os.PathLike[bytes]]
+
+# Check major_versions_differ() if changing versioning scheme.
+#
+# Pip requires that RCs are named like this: '0.1.0.rc1'
+# But the corresponding Git tag needs to be '0.1.0rc1'
+version = '0.61.5'
+
+backendlist = ['ninja', 'vs', 'vs2010', 'vs2012', 'vs2013', 'vs2015', 'vs2017', 'vs2019', 'vs2022', 'xcode']
 
 default_yielding = False
 
@@ -71,6 +79,10 @@ class UserOption(T.Generic[_T], HoldableObject):
         if not isinstance(yielding, bool):
             raise MesonException('Value of "yielding" must be a boolean.')
         self.yielding = yielding
+        self.deprecated: T.Union[bool, T.Dict[str, str], T.List[str]] = False
+
+    def listify(self, value: T.Any) -> T.List[T.Any]:
+        return [value]
 
     def printable_value(self) -> T.Union[str, int, bool, T.List[T.Union[str, int, bool]]]:
         assert isinstance(self.value, (str, int, bool, list))
@@ -204,7 +216,7 @@ class UserArrayOption(UserOption[T.List[str]]):
         self.allow_dups = allow_dups
         self.value = self.validate_value(value, user_input=user_input)
 
-    def validate_value(self, value: T.Union[str, T.List[str]], user_input: bool = True) -> T.List[str]:
+    def listify(self, value: T.Union[str, T.List[str]], user_input: bool = True) -> T.List[str]:
         # User input is for options defined on the command line (via -D
         # options). Users can put their input in as a comma separated
         # string, but for defining options in meson_options.txt the format
@@ -228,7 +240,11 @@ class UserArrayOption(UserOption[T.List[str]]):
         elif isinstance(value, list):
             newvalue = value
         else:
-            raise MesonException(f'"{newvalue}" should be a string array, but it is not')
+            raise MesonException(f'"{value}" should be a string array, but it is not')
+        return newvalue
+
+    def validate_value(self, value: T.Union[str, T.List[str]], user_input: bool = True) -> T.List[str]:
+        newvalue = self.listify(value, user_input)
 
         if not self.allow_dups and len(set(newvalue)) != len(newvalue):
             msg = 'Duplicated values in array option is deprecated. ' \
@@ -267,7 +283,7 @@ class UserFeatureOption(UserComboOption):
         return self.value == 'auto'
 
 if T.TYPE_CHECKING:
-    from .dependencies.detect import TV_DepIDEntry, TV_DepID
+    from .dependencies.detect import TV_DepID
 
 
 class DependencyCacheType(enum.Enum):
@@ -442,7 +458,7 @@ class CoreData:
             DependencyCache(self.options, MachineChoice.BUILD),
             DependencyCache(self.options, MachineChoice.HOST))
 
-        self.compiler_check_cache = OrderedDict()  # type: T.Dict[CompilerCheckCacheKey, compiler.CompileResult]
+        self.compiler_check_cache: T.Dict['CompilerCheckCacheKey', 'CompileResult'] = OrderedDict()
 
         # CMake cache
         self.cmake_cache: PerMachine[CMakeStateCache] = PerMachine(CMakeStateCache(), CMakeStateCache())
@@ -543,7 +559,7 @@ class CoreData:
         This way everyone can do f.ex, get_option('libdir') and be sure to get
         the library directory relative to prefix.
 
-        .as_posix() keeps the posix-like file seperators Meson uses.
+        .as_posix() keeps the posix-like file separators Meson uses.
         '''
         try:
             value = PurePath(value)
@@ -628,9 +644,27 @@ class CoreData:
                 value = self.sanitize_dir_option_value(prefix, key, value)
 
         try:
-            self.options[key].set_value(value)
+            opt = self.options[key]
         except KeyError:
             raise MesonException(f'Tried to set unknown builtin option {str(key)}')
+
+        if opt.deprecated is True:
+            mlog.deprecation(f'Option {key.name!r} is deprecated')
+        elif isinstance(opt.deprecated, list):
+            for v in opt.listify(value):
+                if v in opt.deprecated:
+                    mlog.deprecation(f'Option {key.name!r} value {v!r} is deprecated')
+        elif isinstance(opt.deprecated, dict):
+            def replace(v):
+                newvalue = opt.deprecated.get(v)
+                if newvalue is not None:
+                    mlog.deprecation(f'Option {key.name!r} value {v!r} is replaced by {newvalue!r}')
+                    return newvalue
+                return v
+            newvalue = [replace(v) for v in opt.listify(value)]
+            value = ','.join(newvalue)
+
+        opt.set_value(value)
 
         if key.name == 'buildtype':
             self._set_others_from_buildtype(value)
@@ -645,7 +679,7 @@ class CoreData:
         self.deps.build.clear()
 
     def get_nondefault_buildtype_args(self):
-        result= []
+        result = []
         value = self.options[OptionKey('buildtype')].value
         if value == 'plain':
             opt = '0'
@@ -663,7 +697,7 @@ class CoreData:
             opt = 's'
             debug = True
         else:
-            assert(value == 'custom')
+            assert value == 'custom'
             return []
         actual_opt = self.options[OptionKey('optimization')].value
         actual_debug = self.options[OptionKey('debug')].value
@@ -690,7 +724,7 @@ class CoreData:
             opt = 's'
             debug = True
         else:
-            assert(value == 'custom')
+            assert value == 'custom'
             return
         self.options[OptionKey('optimization')].set_value(opt)
         self.options[OptionKey('debug')].set_value(debug)
@@ -736,7 +770,7 @@ class CoreData:
                 self.options[key] = value
                 try:
                     value.set_value(oldval.value)
-                except MesonException as e:
+                except MesonException:
                     mlog.warning(f'Old value(s) of {key} are no longer valid, resetting to default ({value.value}).')
 
     def is_cross_build(self, when_building_for: MachineChoice = MachineChoice.HOST) -> bool:
@@ -758,7 +792,7 @@ class CoreData:
                 except KeyError:
                     continue
 
-    def set_options(self, options: T.Dict[OptionKey, T.Any], subproject: str = '', warn_unknown: bool = True) -> None:
+    def set_options(self, options: T.Dict[OptionKey, T.Any], subproject: str = '') -> None:
         if not self.is_cross_build():
             options = {k: v for k, v in options.items() if k.machine is not MachineChoice.BUILD}
         # Set prefix first because it's needed to sanitize other options
@@ -774,16 +808,15 @@ class CoreData:
         for k, v in options.items():
             if k == pfk:
                 continue
-            elif k not in self.options:
-                unknown_options.append(k)
-            else:
+            elif k in self.options:
                 self.set_option(k, v)
-        if unknown_options and warn_unknown:
+            elif k.machine != MachineChoice.BUILD:
+                unknown_options.append(k)
+        if unknown_options:
             unknown_options_str = ', '.join(sorted(str(s) for s in unknown_options))
             sub = f'In subproject {subproject}: ' if subproject else ''
-            mlog.warning(f'{sub}Unknown options: "{unknown_options_str}"')
-            mlog.log('The value of new options can be set with:')
-            mlog.log(mlog.bold('meson setup <builddir> --reconfigure -Dnew_option=new_value ...'))
+            raise MesonException(f'{sub}Unknown options: "{unknown_options_str}"')
+
         if not self.is_cross_build():
             self.copy_build_options_from_regular_ones()
 
@@ -866,6 +899,9 @@ class CmdLineFileParser(configparser.ConfigParser):
         # We don't want ':' as key delimiter, otherwise it would break when
         # storing subproject options like "subproject:option=value"
         super().__init__(delimiters=['='], interpolation=None)
+
+    def read(self, filenames: T.Union['StrOrBytesPath', T.Iterable['StrOrBytesPath']], encoding: str ='utf-8') -> T.List[str]:
+        return super().read(filenames, encoding)
 
     def optionxform(self, option: str) -> str:
         # Don't call str.lower() on keys
@@ -982,10 +1018,8 @@ def update_cmd_line_file(build_dir: str, options: argparse.Namespace):
     with open(filename, 'w', encoding='utf-8') as f:
         config.write(f)
 
-def get_cmd_line_options(build_dir: str, options: argparse.Namespace) -> str:
-    copy = argparse.Namespace(**vars(options))
-    read_cmd_line_file(build_dir, copy)
-    cmdline = ['-D{}={}'.format(str(k), v) for k, v in copy.cmd_line_options.items()]
+def format_cmd_line_options(options: argparse.Namespace) -> str:
+    cmdline = ['-D{}={}'.format(str(k), v) for k, v in options.cmd_line_options.items()]
     if options.cross_file:
         cmdline += [f'--cross-file {f}' for f in options.cross_file]
     if options.native_file:
@@ -993,7 +1027,10 @@ def get_cmd_line_options(build_dir: str, options: argparse.Namespace) -> str:
     return ' '.join([shlex.quote(x) for x in cmdline])
 
 def major_versions_differ(v1: str, v2: str) -> bool:
-    return v1.split('.')[0:2] != v2.split('.')[0:2]
+    v1_major, v1_minor = v1.rsplit('.', 1)
+    v2_major, v2_minor = v2.rsplit('.', 1)
+    # Major version differ, or one is development version but not the other.
+    return v1_major != v2_major or ('99' in {v1_minor, v2_minor} and v1_minor != v2_minor)
 
 def load(build_dir: str) -> CoreData:
     filename = os.path.join(build_dir, 'meson-private', 'coredata.dat')
@@ -1003,7 +1040,7 @@ def load(build_dir: str) -> CoreData:
             obj = pickle.load(f)
     except (pickle.UnpicklingError, EOFError):
         raise MesonException(load_fail_msg)
-    except (ModuleNotFoundError, AttributeError):
+    except (TypeError, ModuleNotFoundError, AttributeError):
         raise MesonException(
             f"Coredata file {filename!r} references functions or classes that don't "
             "exist. This probably means that it was generated with an old "
@@ -1172,7 +1209,7 @@ BUILTIN_CORE_OPTIONS: 'KeyedOptionDictType' = OrderedDict([
     (OptionKey('backend'),         BuiltinOption(UserComboOption, 'Backend to use', 'ninja', choices=backendlist)),
     (OptionKey('buildtype'),       BuiltinOption(UserComboOption, 'Build type to use', 'debug',
                                                  choices=['plain', 'debug', 'debugoptimized', 'release', 'minsize', 'custom'])),
-    (OptionKey('debug'),           BuiltinOption(UserBooleanOption, 'Debug', True)),
+    (OptionKey('debug'),           BuiltinOption(UserBooleanOption, 'Enable debug symbols and other information', True)),
     (OptionKey('default_library'), BuiltinOption(UserComboOption, 'Default library type', 'shared', choices=['shared', 'static', 'both'],
                                                  yielding=False)),
     (OptionKey('errorlogs'),       BuiltinOption(UserBooleanOption, "Whether to print the logs from failing tests", True)),
@@ -1187,6 +1224,12 @@ BUILTIN_CORE_OPTIONS: 'KeyedOptionDictType' = OrderedDict([
     (OptionKey('werror'),          BuiltinOption(UserBooleanOption, 'Treat warnings as errors', False, yielding=False)),
     (OptionKey('wrap_mode'),       BuiltinOption(UserComboOption, 'Wrap mode', 'default', choices=['default', 'nofallback', 'nodownload', 'forcefallback', 'nopromote'])),
     (OptionKey('force_fallback_for'), BuiltinOption(UserArrayOption, 'Force fallback for those subprojects', [])),
+
+    # Python module
+    (OptionKey('platlibdir', module='python'),
+     BuiltinOption(UserStringOption, 'Directory for site-specific, platform-specific files.', '')),
+    (OptionKey('purelibdir', module='python'),
+     BuiltinOption(UserStringOption, 'Directory for site-specific, non-platform-specific files.', '')),
 ])
 
 BUILTIN_OPTIONS = OrderedDict(chain(BUILTIN_DIR_OPTIONS.items(), BUILTIN_CORE_OPTIONS.items()))
@@ -1202,6 +1245,8 @@ BULITIN_DIR_NOPREFIX_OPTIONS: T.Dict[OptionKey, T.Dict[str, str]] = {
     OptionKey('sysconfdir'):     {'/usr': '/etc'},
     OptionKey('localstatedir'):  {'/usr': '/var',     '/usr/local': '/var/local'},
     OptionKey('sharedstatedir'): {'/usr': '/var/lib', '/usr/local': '/var/local/lib'},
+    OptionKey('platlibdir', module='python'): {},
+    OptionKey('purelibdir', module='python'): {},
 }
 
 FORBIDDEN_TARGET_NAMES = {'clean': None,
@@ -1225,4 +1270,3 @@ FORBIDDEN_TARGET_NAMES = {'clean': None,
                           'dist': None,
                           'distcheck': None,
                           }
-

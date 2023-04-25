@@ -79,6 +79,7 @@ bool xive2_cap_phb_pq_disable(void);
 bool xive2_cap_phb_abt(void);
 bool xive2_cap_store_eoi(void);
 int64_t xive2_reset(void);
+uint32_t xive2_get_phandle(void);
 
 uint32_t xive2_alloc_hw_irqs(uint32_t chip_id, uint32_t count, uint32_t align);
 uint32_t xive2_alloc_ipi_irqs(uint32_t chip_id, uint32_t count, uint32_t align);

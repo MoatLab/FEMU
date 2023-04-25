@@ -53,7 +53,10 @@ class Settings(CiBuildSettingsManager, UpdateSettingsManager, SetupSettingsManag
                 "ArmPlatformPkg",
                 "ArmVirtPkg",
                 "DynamicTablesPkg",
+                "EmbeddedPkg",
                 "EmulatorPkg",
+                "IntelFsp2Pkg",
+                "IntelFsp2WrapperPkg",
                 "MdePkg",
                 "MdeModulePkg",
                 "NetworkPkg",
@@ -62,12 +65,15 @@ class Settings(CiBuildSettingsManager, UpdateSettingsManager, SetupSettingsManag
                 "UefiCpuPkg",
                 "FmpDevicePkg",
                 "ShellPkg",
+                "SignedCapsulePkg",
                 "StandaloneMmPkg",
                 "FatPkg",
                 "CryptoPkg",
+                "PrmPkg",
                 "UnitTestFrameworkPkg",
                 "OvmfPkg",
                 "RedfishPkg",
+                "SourceLevelDebugPkg",
                 "UefiPayloadPkg"
                 )
 
@@ -78,7 +84,8 @@ class Settings(CiBuildSettingsManager, UpdateSettingsManager, SetupSettingsManag
                 "X64",
                 "ARM",
                 "AARCH64",
-                "RISCV64")
+                "RISCV64",
+                "LOONGARCH64")
 
     def GetTargetsSupported(self):
         ''' return iterable of edk2 target tags supported by this build '''
@@ -162,13 +169,6 @@ class Settings(CiBuildSettingsManager, UpdateSettingsManager, SetupSettingsManag
             else:
                 logging.warning("Falling back to using in-tree BaseTools")
 
-            if is_linux and self.ActualToolChainTag.upper().startswith("GCC"):
-                if "AARCH64" in self.ActualArchitectures:
-                    scopes += ("gcc_aarch64_linux",)
-                if "ARM" in self.ActualArchitectures:
-                    scopes += ("gcc_arm_linux",)
-                if "RISCV64" in self.ActualArchitectures:
-                    scopes += ("gcc_riscv64_unknown",)
             self.ActualScopes = scopes
         return self.ActualScopes
 
@@ -183,6 +183,8 @@ class Settings(CiBuildSettingsManager, UpdateSettingsManager, SetupSettingsManag
             "CryptoPkg/Library/OpensslLib/openssl", False))
         rs.append(RequiredSubmodule(
             "UnitTestFrameworkPkg/Library/CmockaLib/cmocka", False))
+        rs.append(RequiredSubmodule(
+            "UnitTestFrameworkPkg/Library/GoogleTestLib/googletest", False))
         rs.append(RequiredSubmodule(
             "MdeModulePkg/Universal/RegularExpressionDxe/oniguruma", False))
         rs.append(RequiredSubmodule(

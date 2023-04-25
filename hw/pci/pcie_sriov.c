@@ -11,7 +11,7 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/pci/pci.h"
+#include "hw/pci/pci_device.h"
 #include "hw/pci/pcie.h"
 #include "hw/pci/pci_bus.h"
 #include "hw/qdev-properties.h"
@@ -299,4 +299,9 @@ PCIDevice *pcie_sriov_get_vf_at_index(PCIDevice *dev, int n)
         return dev->exp.sriov_pf.vf[n];
     }
     return NULL;
+}
+
+uint16_t pcie_sriov_num_vfs(PCIDevice *dev)
+{
+    return dev->exp.sriov_pf.num_vfs;
 }

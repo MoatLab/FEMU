@@ -37,9 +37,8 @@ import unittest
 
 from contextlib import contextmanager
 
-from qemu.aqmp.legacy import QEMUMonitorProtocol
 from qemu.machine import qtest
-from qemu.qmp import QMPMessage
+from qemu.qmp.legacy import QMPMessage, QEMUMonitorProtocol
 from qemu.utils import VerboseProcessError
 
 # Use this logger for logging messages directly from the iotests module
@@ -207,15 +206,13 @@ def qemu_img_create_prepare_args(args: List[str]) -> List[str]:
 
     return result
 
-def qemu_img(*args: str, check: bool = True, combine_stdio: bool = True
-             ) -> 'subprocess.CompletedProcess[str]':
+
+def qemu_tool(*args: str, check: bool = True, combine_stdio: bool = True
+              ) -> 'subprocess.CompletedProcess[str]':
     """
-    Run qemu_img and return the status code and console output.
+    Run a qemu tool and return its status code and console output.
 
-    This function always prepends QEMU_IMG_OPTIONS and may further alter
-    the args for 'create' commands.
-
-    :param args: command-line arguments to qemu-img.
+    :param args: full command line to run.
     :param check: Enforce a return code of zero.
     :param combine_stdio: set to False to keep stdout/stderr separated.
 
@@ -232,10 +229,8 @@ def qemu_img(*args: str, check: bool = True, combine_stdio: bool = True
         properties. If streams are not combined, it will also have a
         stderr property.
     """
-    full_args = qemu_img_args + qemu_img_create_prepare_args(list(args))
-
     subp = subprocess.run(
-        full_args,
+        args,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT if combine_stdio else subprocess.PIPE,
         universal_newlines=True,
@@ -244,12 +239,26 @@ def qemu_img(*args: str, check: bool = True, combine_stdio: bool = True
 
     if check and subp.returncode or (subp.returncode < 0):
         raise VerboseProcessError(
-            subp.returncode, full_args,
+            subp.returncode, args,
             output=subp.stdout,
             stderr=subp.stderr,
         )
 
     return subp
+
+
+def qemu_img(*args: str, check: bool = True, combine_stdio: bool = True
+             ) -> 'subprocess.CompletedProcess[str]':
+    """
+    Run QEMU_IMG_PROG and return its status code and console output.
+
+    This function always prepends QEMU_IMG_OPTIONS and may further alter
+    the args for 'create' commands.
+
+    See `qemu_tool()` for greater detail.
+    """
+    full_args = qemu_img_args + qemu_img_create_prepare_args(list(args))
+    return qemu_tool(*full_args, check=check, combine_stdio=combine_stdio)
 
 
 def ordered_qmp(qmsg, conv_keys=True):
@@ -320,7 +329,7 @@ def qemu_img_log(*args: str, check: bool = True
 
 def img_info_log(filename: str, filter_path: Optional[str] = None,
                  use_image_opts: bool = False, extra_args: Sequence[str] = (),
-                 check: bool = True,
+                 check: bool = True, drop_child_info: bool = True,
                  ) -> None:
     args = ['info']
     if use_image_opts:
@@ -333,7 +342,7 @@ def img_info_log(filename: str, filter_path: Optional[str] = None,
     output = qemu_img(*args, check=check).stdout
     if not filter_path:
         filter_path = filename
-    log(filter_img_info(output, filter_path))
+    log(filter_img_info(output, filter_path, drop_child_info))
 
 def qemu_io_wrap_args(args: Sequence[str]) -> List[str]:
     if '-f' in args or '--image-opts' in args:
@@ -344,33 +353,22 @@ def qemu_io_wrap_args(args: Sequence[str]) -> List[str]:
 def qemu_io_popen(*args):
     return qemu_tool_popen(qemu_io_wrap_args(args))
 
-def qemu_io(*args):
-    '''Run qemu-io and return the stdout data'''
-    return qemu_tool_pipe_and_status('qemu-io', qemu_io_wrap_args(args))[0]
+def qemu_io(*args: str, check: bool = True, combine_stdio: bool = True
+            ) -> 'subprocess.CompletedProcess[str]':
+    """
+    Run QEMU_IO_PROG and return the status code and console output.
 
-def qemu_io_pipe_and_status(*args):
-    return qemu_tool_pipe_and_status('qemu-io', qemu_io_wrap_args(args))
+    This function always prepends either QEMU_IO_OPTIONS or
+    QEMU_IO_OPTIONS_NO_FMT.
+    """
+    return qemu_tool(*qemu_io_wrap_args(args),
+                     check=check, combine_stdio=combine_stdio)
 
-def qemu_io_log(*args):
-    result = qemu_io(*args)
-    log(result, filters=[filter_testfiles, filter_qemu_io])
+def qemu_io_log(*args: str, check: bool = True
+                ) -> 'subprocess.CompletedProcess[str]':
+    result = qemu_io(*args, check=check)
+    log(result.stdout, filters=[filter_testfiles, filter_qemu_io])
     return result
-
-def qemu_io_silent(*args):
-    '''Run qemu-io and return the exit code, suppressing stdout'''
-    args = qemu_io_wrap_args(args)
-    result = subprocess.run(args, stdout=subprocess.DEVNULL, check=False)
-    if result.returncode < 0:
-        sys.stderr.write('qemu-io received signal %i: %s\n' %
-                         (-result.returncode, ' '.join(args)))
-    return result.returncode
-
-def qemu_io_silent_check(*args):
-    '''Run qemu-io and return the true if subprocess returned 0'''
-    args = qemu_io_wrap_args(args)
-    result = subprocess.run(args, stdout=subprocess.DEVNULL,
-                            stderr=subprocess.STDOUT, check=False)
-    return result.returncode == 0
 
 class QemuIoInteractive:
     def __init__(self, *args):
@@ -644,11 +642,23 @@ def filter_qmp_virtio_scsi(qmsg):
 def filter_generated_node_ids(msg):
     return re.sub("#block[0-9]+", "NODE_NAME", msg)
 
-def filter_img_info(output, filename):
+def filter_img_info(output: str, filename: str,
+                    drop_child_info: bool = True) -> str:
     lines = []
+    drop_indented = False
     for line in output.split('\n'):
         if 'disk size' in line or 'actual-size' in line:
             continue
+
+        # Drop child node info
+        if drop_indented:
+            if line.startswith(' '):
+                continue
+            drop_indented = False
+        if drop_child_info and "Child node '/" in line:
+            drop_indented = True
+            continue
+
         line = line.replace(filename, 'TEST_IMG')
         line = filter_testfiles(line)
         line = line.replace(imgfmt, 'IMGFMT')
@@ -710,7 +720,7 @@ class Timeout:
         signal.setitimer(signal.ITIMER_REAL, 0)
         return False
     def timeout(self, signum, frame):
-        raise Exception(self.errmsg)
+        raise TimeoutError(self.errmsg)
 
 def file_pattern(name):
     return "{0}-{1}".format(os.getpid(), name)
@@ -794,7 +804,7 @@ def remote_filename(path):
     elif imgproto == 'ssh':
         return "ssh://%s@127.0.0.1:22%s" % (os.environ.get('USER'), path)
     else:
-        raise Exception("Protocol %s not supported" % (imgproto))
+        raise ValueError("Protocol %s not supported" % (imgproto))
 
 class VM(qtest.QEMUQtestMachine):
     '''A QEMU VM'''
@@ -1470,6 +1480,26 @@ def verify_working_luks():
     (working, reason) = has_working_luks()
     if not working:
         notrun(reason)
+
+def supports_qcow2_zstd_compression() -> bool:
+    img_file = f'{test_dir}/qcow2-zstd-test.qcow2'
+    res = qemu_img('create', '-f', 'qcow2', '-o', 'compression_type=zstd',
+                   img_file, '0',
+                   check=False)
+    try:
+        os.remove(img_file)
+    except OSError:
+        pass
+
+    if res.returncode == 1 and \
+            "'compression-type' does not accept value 'zstd'" in res.stdout:
+        return False
+    else:
+        return True
+
+def verify_qcow2_zstd_compression():
+    if not supports_qcow2_zstd_compression():
+        notrun('zstd compression not supported')
 
 def qemu_pipe(*args: str) -> str:
     """

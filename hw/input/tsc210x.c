@@ -20,7 +20,6 @@
  */
 
 #include "qemu/osdep.h"
-#include "qemu/log.h"
 #include "hw/hw.h"
 #include "audio/audio.h"
 #include "qemu/timer.h"
@@ -1176,8 +1175,7 @@ I2SCodec *tsc210x_codec(uWireSlave *chip)
  * from the touchscreen.  Assuming 12-bit precision was used during
  * tslib calibration.
  */
-void tsc210x_set_transform(uWireSlave *chip,
-                MouseTransformInfo *info)
+void tsc210x_set_transform(uWireSlave *chip, const MouseTransformInfo *info)
 {
     TSC210xState *s = (TSC210xState *) chip->opaque;
 #if 0

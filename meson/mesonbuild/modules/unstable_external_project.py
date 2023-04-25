@@ -12,23 +12,45 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os, subprocess, shlex
 from pathlib import Path
+import os
+import shlex
+import subprocess
 import typing as T
 
-from . import ExtensionModule, ModuleReturnValue, ModuleState, NewExtensionModule
+from . import ExtensionModule, ModuleReturnValue, NewExtensionModule
 from .. import mlog, build
-from ..mesonlib import (MesonException, Popen_safe, MachineChoice,
-                       get_variable_regex, do_replacement, extract_as_list)
-from ..interpreterbase import InterpreterException, FeatureNew
-from ..interpreterbase import permittedKwargs, typed_pos_args
-from ..compilers.compilers import CFLAGS_MAPPING, CEXE_MAPPING
+from ..compilers.compilers import CFLAGS_MAPPING
+from ..envconfig import ENV_VAR_PROG_MAP
 from ..dependencies import InternalDependency, PkgConfigDependency
-from ..mesonlib import OptionKey
+from ..interpreterbase import FeatureNew
+from ..interpreter.type_checking import ENV_KW
+from ..interpreterbase.decorators import ContainerTypeInfo, KwargInfo, typed_kwargs, typed_pos_args
+from ..mesonlib import (EnvironmentException, MesonException, Popen_safe, MachineChoice,
+                        get_variable_regex, do_replacement, join_args, OptionKey)
+
+if T.TYPE_CHECKING:
+    from typing_extensions import TypedDict
+
+    from . import ModuleState
+    from ..interpreter import Interpreter
+    from ..interpreterbase import TYPE_var
+
+    class Dependency(TypedDict):
+
+        subdir: str
+
+    class AddProject(TypedDict):
+
+        configure_options: T.List[str]
+        cross_configure_options: T.List[str]
+        verbose: bool
+        env: build.EnvironmentVariables
+
 
 class ExternalProject(NewExtensionModule):
     def __init__(self,
-                 state: ModuleState,
+                 state: 'ModuleState',
                  configure_command: str,
                  configure_options: T.List[str],
                  cross_configure_options: T.List[str],
@@ -53,9 +75,15 @@ class ExternalProject(NewExtensionModule):
         self.src_dir = Path(self.env.get_source_dir(), self.subdir)
         self.build_dir = Path(self.env.get_build_dir(), self.subdir, 'build')
         self.install_dir = Path(self.env.get_build_dir(), self.subdir, 'dist')
-        self.prefix = Path(self.env.coredata.get_option(OptionKey('prefix')))
-        self.libdir = Path(self.env.coredata.get_option(OptionKey('libdir')))
-        self.includedir = Path(self.env.coredata.get_option(OptionKey('includedir')))
+        _p = self.env.coredata.get_option(OptionKey('prefix'))
+        assert isinstance(_p, str), 'for mypy'
+        self.prefix = Path(_p)
+        _l = self.env.coredata.get_option(OptionKey('libdir'))
+        assert isinstance(_l, str), 'for mypy'
+        self.libdir = Path(_l)
+        _i = self.env.coredata.get_option(OptionKey('includedir'))
+        assert isinstance(_i, str), 'for mypy'
+        self.includedir = Path(_i)
         self.name = self.src_dir.name
 
         # On Windows if the prefix is "c:/foo" and DESTDIR is "c:/bar", `make`
@@ -67,25 +95,32 @@ class ExternalProject(NewExtensionModule):
         # self.prefix is an absolute path, so we cannot append it to another path.
         self.rel_prefix = self.prefix.relative_to(self.prefix.root)
 
-        self.make = state.find_program('make')
-        self.make = self.make.get_command()[0]
-
         self._configure(state)
 
         self.targets = self._create_targets()
 
-    def _configure(self, state: ModuleState):
-        # Assume it's the name of a script in source dir, like 'configure',
-        # 'autogen.sh', etc).
-        configure_path = Path(self.src_dir, self.configure_command)
-        configure_prog = state.find_program(configure_path.as_posix())
-        configure_cmd = configure_prog.get_command()
+    def _configure(self, state: 'ModuleState') -> None:
+        if self.configure_command == 'waf':
+            FeatureNew('Waf external project', '0.60.0', location=state.current_node).use(self.subproject)
+            waf = state.find_program('waf')
+            configure_cmd = waf.get_command()
+            configure_cmd += ['configure', '-o', str(self.build_dir)]
+            workdir = self.src_dir
+            self.make = waf.get_command() + ['build']
+        else:
+            # Assume it's the name of a script in source dir, like 'configure',
+            # 'autogen.sh', etc).
+            configure_path = Path(self.src_dir, self.configure_command)
+            configure_prog = state.find_program(configure_path.as_posix())
+            configure_cmd = configure_prog.get_command()
+            workdir = self.build_dir
+            self.make = state.find_program('make').get_command()
 
         d = [('PREFIX', '--prefix=@PREFIX@', self.prefix.as_posix()),
              ('LIBDIR', '--libdir=@PREFIX@/@LIBDIR@', self.libdir.as_posix()),
              ('INCLUDEDIR', None, self.includedir.as_posix()),
              ]
-        self._validate_configure_options(d)
+        self._validate_configure_options(d, state)
 
         configure_cmd += self._format_options(self.configure_options, d)
 
@@ -97,18 +132,21 @@ class ExternalProject(NewExtensionModule):
             configure_cmd += self._format_options(self.cross_configure_options, d)
 
         # Set common env variables like CFLAGS, CC, etc.
-        link_exelist = []
-        link_args = []
+        link_exelist: T.List[str] = []
+        link_args: T.List[str] = []
         self.run_env = os.environ.copy()
         for lang, compiler in self.env.coredata.compilers[MachineChoice.HOST].items():
-            if any(lang not in i for i in (CEXE_MAPPING, CFLAGS_MAPPING)):
+            if any(lang not in i for i in (ENV_VAR_PROG_MAP, CFLAGS_MAPPING)):
                 continue
             cargs = self.env.coredata.get_external_args(MachineChoice.HOST, lang)
-            self.run_env[CEXE_MAPPING[lang]] = self._quote_and_join(compiler.get_exelist())
+            assert isinstance(cargs, list), 'for mypy'
+            self.run_env[ENV_VAR_PROG_MAP[lang]] = self._quote_and_join(compiler.get_exelist())
             self.run_env[CFLAGS_MAPPING[lang]] = self._quote_and_join(cargs)
             if not link_exelist:
                 link_exelist = compiler.get_linker_exelist()
-                link_args = self.env.coredata.get_external_link_args(MachineChoice.HOST, lang)
+                _l = self.env.coredata.get_external_link_args(MachineChoice.HOST, lang)
+                assert isinstance(_l, list), 'for mypy'
+                link_args = _l
         if link_exelist:
             # FIXME: Do not pass linker because Meson uses CC as linker wrapper,
             # but autotools often expects the real linker (e.h. GNU ld).
@@ -122,12 +160,12 @@ class ExternalProject(NewExtensionModule):
                                       Path(self.env.get_build_dir(), 'meson-uninstalled').as_posix())
 
         self.build_dir.mkdir(parents=True, exist_ok=True)
-        self._run('configure', configure_cmd)
+        self._run('configure', configure_cmd, workdir)
 
     def _quote_and_join(self, array: T.List[str]) -> str:
         return ' '.join([shlex.quote(i) for i in array])
 
-    def _validate_configure_options(self, variables: T.List[T.Tuple[str, str, str]]):
+    def _validate_configure_options(self, variables: T.List[T.Tuple[str, str, str]], state: 'ModuleState') -> None:
         # Ensure the user at least try to pass basic info to the build system,
         # like the prefix, libdir, etc.
         for key, default, val in variables:
@@ -138,14 +176,14 @@ class ExternalProject(NewExtensionModule):
                 if key_format in option:
                     break
             else:
-                FeatureNew('Default configure_option', '0.57.0').use(self.subproject)
+                FeatureNew('Default configure_option', '0.57.0', location=state.current_node).use(self.subproject)
                 self.configure_options.append(default)
 
     def _format_options(self, options: T.List[str], variables: T.List[T.Tuple[str, str, str]]) -> T.List[str]:
-        out = []
+        out: T.List[str] = []
         missing = set()
         regex = get_variable_regex('meson')
-        confdata = {k: (v, None) for k, d, v in variables}
+        confdata: T.Dict[str, T.Tuple[str, T.Optional[str]]] = {k: (v, None) for k, _, v in variables}
         for o in options:
             arg, missing_vars = do_replacement(regex, o, 'meson', confdata)
             missing.update(missing_vars)
@@ -156,9 +194,9 @@ class ExternalProject(NewExtensionModule):
                 f"Variables {var_list} in configure options are missing.")
         return out
 
-    def _run(self, step: str, command: T.List[str]):
+    def _run(self, step: str, command: T.List[str], workdir: Path) -> None:
         mlog.log(f'External project {self.name}:', mlog.bold(step))
-        m = 'Running command ' + str(command) + ' in directory ' + str(self.build_dir) + '\n'
+        m = 'Running command ' + str(command) + ' in directory ' + str(workdir) + '\n'
         log_filename = Path(mlog.log_dir, f'{self.name}-{step}.log')
         output = None
         if not self.verbose:
@@ -167,16 +205,16 @@ class ExternalProject(NewExtensionModule):
             output.flush()
         else:
             mlog.log(m)
-        p, o, e = Popen_safe(command, cwd=str(self.build_dir), env=self.run_env,
-                                      stderr=subprocess.STDOUT,
-                                      stdout=output)
+        p, *_ = Popen_safe(command, cwd=str(workdir), env=self.run_env,
+                           stderr=subprocess.STDOUT,
+                           stdout=output)
         if p.returncode != 0:
             m = f'{step} step returned error code {p.returncode}.'
             if not self.verbose:
                 m += '\nSee logs: ' + str(log_filename)
             raise MesonException(m)
 
-    def _create_targets(self):
+    def _create_targets(self) -> T.List['TYPE_var']:
         cmd = self.env.get_build_command()
         cmd += ['--internal', 'externalproject',
                 '--name', self.name,
@@ -184,7 +222,7 @@ class ExternalProject(NewExtensionModule):
                 '--builddir', self.build_dir.as_posix(),
                 '--installdir', self.install_dir.as_posix(),
                 '--logdir', mlog.log_dir,
-                '--make', self.make,
+                '--make', join_args(self.make),
                 ]
         if self.verbose:
             cmd.append('--verbose')
@@ -210,59 +248,50 @@ class ExternalProject(NewExtensionModule):
 
         return [self.target, idir]
 
-    @permittedKwargs({'subdir'})
     @typed_pos_args('external_project.dependency', str)
-    def dependency_method(self, state, args: T.Tuple[str], kwargs):
+    @typed_kwargs('external_project.dependency', KwargInfo('subdir', str, default=''))
+    def dependency_method(self, state: 'ModuleState', args: T.Tuple[str], kwargs: 'Dependency') -> InternalDependency:
         libname = args[0]
 
-        subdir = kwargs.get('subdir', '')
-        if not isinstance(subdir, str):
-            m = 'ExternalProject.dependency subdir keyword argument must be string.'
-            raise InterpreterException(m)
-
         abs_includedir = Path(self.install_dir, self.rel_prefix, self.includedir)
-        if subdir:
-            abs_includedir = Path(abs_includedir, subdir)
+        if kwargs['subdir']:
+            abs_includedir = Path(abs_includedir, kwargs['subdir'])
         abs_libdir = Path(self.install_dir, self.rel_prefix, self.libdir)
 
-        version = self.project_version['version']
-        incdir = []
+        version = self.project_version
         compile_args = [f'-I{abs_includedir}']
         link_args = [f'-L{abs_libdir}', f'-l{libname}']
-        libs = []
-        libs_whole = []
         sources = self.target
-        final_deps = []
-        variables = {}
-        dep = InternalDependency(version, incdir, compile_args, link_args, libs,
-                                 libs_whole, sources, final_deps, variables)
+        dep = InternalDependency(version, [], compile_args, link_args, [],
+                                 [], [sources], [], {})
         return dep
 
 
 class ExternalProjectModule(ExtensionModule):
     @FeatureNew('External build system Module', '0.56.0')
-    def __init__(self, interpreter):
+    def __init__(self, interpreter: 'Interpreter'):
         super().__init__(interpreter)
         self.methods.update({'add_project': self.add_project,
                              })
 
-    @permittedKwargs({'configure_options', 'cross_configure_options', 'verbose', 'env'})
     @typed_pos_args('external_project_mod.add_project', str)
-    def add_project(self, state: ModuleState, args: T.Tuple[str], kwargs: T.Dict[str, T.Any]):
+    @typed_kwargs(
+        'external_project.add_project',
+        KwargInfo('configure_options', ContainerTypeInfo(list, str), default=[], listify=True),
+        KwargInfo('cross_configure_options', ContainerTypeInfo(list, str), default=['--host=@HOST@'], listify=True),
+        KwargInfo('verbose', bool, default=False),
+        ENV_KW,
+    )
+    def add_project(self, state: 'ModuleState', args: T.Tuple[str], kwargs: 'AddProject') -> ModuleReturnValue:
         configure_command = args[0]
-        configure_options = extract_as_list(kwargs, 'configure_options')
-        cross_configure_options = extract_as_list(kwargs, 'cross_configure_options')
-        if not cross_configure_options:
-            cross_configure_options = ['--host=@HOST@']
-        verbose = kwargs.get('verbose', False)
-        env = self.interpreter.unpack_env_kwarg(kwargs)
         project = ExternalProject(state,
                                   configure_command,
-                                  configure_options,
-                                  cross_configure_options,
-                                  env, verbose)
+                                  kwargs['configure_options'],
+                                  kwargs['cross_configure_options'],
+                                  kwargs['env'],
+                                  kwargs['verbose'])
         return ModuleReturnValue(project, project.targets)
 
 
-def initialize(*args, **kwargs):
-    return ExternalProjectModule(*args, **kwargs)
+def initialize(interp: 'Interpreter') -> ExternalProjectModule:
+    return ExternalProjectModule(interp)

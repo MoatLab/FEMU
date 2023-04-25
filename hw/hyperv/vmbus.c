@@ -1273,105 +1273,6 @@ void vmbus_free_req(void *req)
     g_free(req);
 }
 
-static const VMStateDescription vmstate_sgent = {
-    .name = "vmbus/sgentry",
-    .version_id = 0,
-    .minimum_version_id = 0,
-    .fields = (VMStateField[]) {
-        VMSTATE_UINT64(base, ScatterGatherEntry),
-        VMSTATE_UINT64(len, ScatterGatherEntry),
-        VMSTATE_END_OF_LIST()
-    }
-};
-
-typedef struct VMBusChanReqSave {
-    uint16_t chan_idx;
-    uint16_t pkt_type;
-    uint32_t msglen;
-    void *msg;
-    uint64_t transaction_id;
-    bool need_comp;
-    uint32_t num;
-    ScatterGatherEntry *sgl;
-} VMBusChanReqSave;
-
-static const VMStateDescription vmstate_vmbus_chan_req = {
-    .name = "vmbus/vmbus_chan_req",
-    .version_id = 0,
-    .minimum_version_id = 0,
-    .fields = (VMStateField[]) {
-        VMSTATE_UINT16(chan_idx, VMBusChanReqSave),
-        VMSTATE_UINT16(pkt_type, VMBusChanReqSave),
-        VMSTATE_UINT32(msglen, VMBusChanReqSave),
-        VMSTATE_VBUFFER_ALLOC_UINT32(msg, VMBusChanReqSave, 0, NULL, msglen),
-        VMSTATE_UINT64(transaction_id, VMBusChanReqSave),
-        VMSTATE_BOOL(need_comp, VMBusChanReqSave),
-        VMSTATE_UINT32(num, VMBusChanReqSave),
-        VMSTATE_STRUCT_VARRAY_POINTER_UINT32(sgl, VMBusChanReqSave, num,
-                                             vmstate_sgent, ScatterGatherEntry),
-        VMSTATE_END_OF_LIST()
-    }
-};
-
-void vmbus_save_req(QEMUFile *f, VMBusChanReq *req)
-{
-    VMBusChanReqSave req_save;
-
-    req_save.chan_idx = req->chan->subchan_idx;
-    req_save.pkt_type = req->pkt_type;
-    req_save.msglen = req->msglen;
-    req_save.msg = req->msg;
-    req_save.transaction_id = req->transaction_id;
-    req_save.need_comp = req->need_comp;
-    req_save.num = req->sgl.nsg;
-    req_save.sgl = g_memdup(req->sgl.sg,
-                            req_save.num * sizeof(ScatterGatherEntry));
-
-    vmstate_save_state(f, &vmstate_vmbus_chan_req, &req_save, NULL);
-
-    g_free(req_save.sgl);
-}
-
-void *vmbus_load_req(QEMUFile *f, VMBusDevice *dev, uint32_t size)
-{
-    VMBusChanReqSave req_save;
-    VMBusChanReq *req = NULL;
-    VMBusChannel *chan = NULL;
-    uint32_t i;
-
-    vmstate_load_state(f, &vmstate_vmbus_chan_req, &req_save, 0);
-
-    if (req_save.chan_idx >= dev->num_channels) {
-        error_report("%s: %u(chan_idx) > %u(num_channels)", __func__,
-                     req_save.chan_idx, dev->num_channels);
-        goto out;
-    }
-    chan = &dev->channels[req_save.chan_idx];
-
-    if (vmbus_channel_reserve(chan, 0, req_save.msglen)) {
-        goto out;
-    }
-
-    req = vmbus_alloc_req(chan, size, req_save.pkt_type, req_save.msglen,
-                          req_save.transaction_id, req_save.need_comp);
-    if (req_save.msglen) {
-        memcpy(req->msg, req_save.msg, req_save.msglen);
-    }
-
-    for (i = 0; i < req_save.num; i++) {
-        qemu_sglist_add(&req->sgl, req_save.sgl[i].base, req_save.sgl[i].len);
-    }
-
-out:
-    if (req_save.msglen) {
-        g_free(req_save.msg);
-    }
-    if (req_save.num) {
-        g_free(req_save.sgl);
-    }
-    return req;
-}
-
 static void channel_event_cb(EventNotifier *e)
 {
     VMBusChannel *chan = container_of(e, VMBusChannel, notifier);
@@ -1677,7 +1578,7 @@ static bool vmbus_initialized(VMBus *vmbus)
 
 static void vmbus_reset_all(VMBus *vmbus)
 {
-    qbus_reset_all(BUS(vmbus));
+    bus_cold_reset(BUS(vmbus));
 }
 
 static void post_msg(VMBus *vmbus, void *msgdata, uint32_t msglen)
@@ -2134,7 +2035,7 @@ static void vdev_reset_on_close(VMBusDevice *vdev)
     }
 
     /* all channels closed -- reset device */
-    qdev_reset_all(DEVICE(vdev));
+    device_cold_reset(DEVICE(vdev));
 }
 
 static void handle_close_channel(VMBus *vmbus, vmbus_message_close_channel *msg,
@@ -2203,7 +2104,7 @@ static void process_message(VMBus *vmbus)
         goto out;
     }
     msgdata = hv_msg->payload;
-    msg = (struct vmbus_message_header *)msgdata;
+    msg = msgdata;
 
     trace_vmbus_process_incoming_message(msg->message_type);
 
@@ -2503,7 +2404,6 @@ static const TypeInfo vmbus_dev_type_info = {
 static void vmbus_realize(BusState *bus, Error **errp)
 {
     int ret = 0;
-    Error *local_err = NULL;
     VMBus *vmbus = VMBUS(bus);
 
     qemu_mutex_init(&vmbus->rx_queue_lock);
@@ -2514,13 +2414,13 @@ static void vmbus_realize(BusState *bus, Error **errp)
     ret = hyperv_set_msg_handler(VMBUS_MESSAGE_CONNECTION_ID,
                                  vmbus_recv_message, vmbus);
     if (ret != 0) {
-        error_setg(&local_err, "hyperv set message handler failed: %d", ret);
+        error_setg(errp, "hyperv set message handler failed: %d", ret);
         goto error_out;
     }
 
     ret = event_notifier_init(&vmbus->notifier, 0);
     if (ret != 0) {
-        error_setg(&local_err, "event notifier failed to init with %d", ret);
+        error_setg(errp, "event notifier failed to init with %d", ret);
         goto remove_msg_handler;
     }
 
@@ -2528,7 +2428,7 @@ static void vmbus_realize(BusState *bus, Error **errp)
     ret = hyperv_set_event_flag_handler(VMBUS_EVENT_CONNECTION_ID,
                                         &vmbus->notifier);
     if (ret != 0) {
-        error_setg(&local_err, "hyperv set event handler failed with %d", ret);
+        error_setg(errp, "hyperv set event handler failed with %d", ret);
         goto clear_event_notifier;
     }
 
@@ -2540,7 +2440,6 @@ remove_msg_handler:
     hyperv_set_msg_handler(VMBUS_MESSAGE_CONNECTION_ID, NULL, NULL);
 error_out:
     qemu_mutex_destroy(&vmbus->rx_queue_lock);
-    error_propagate(errp, local_err);
 }
 
 static void vmbus_unrealize(BusState *bus)

@@ -53,10 +53,43 @@ FfsFindNextFile (
   );
 
 /**
+ * This is a hook which is used to check if the section is the target one.
+ *
+ */
+typedef
+EFI_STATUS
+(EFIAPI *FFS_CHECK_SECTION_HOOK)(
+  IN EFI_COMMON_SECTION_HEADER *Section
+  );
+
+/**
+  This service enables discovery sections of a given type within a valid FFS file.
+  Caller also can provide a SectionCheckHook to do additional checking.
+
+  @param  SectionType           The value of the section type to find.
+  @param  SectionCheckHook      A hook which can check if the section is the target one.
+  @param  FileHeader            A pointer to the file header that contains the set of sections to
+                                be searched.
+  @param  SectionData           A pointer to the discovered section, if successful.
+
+  @retval EFI_SUCCESS           The section was found.
+  @retval EFI_NOT_FOUND         The section was not found.
+
+**/
+EFI_STATUS
+EFIAPI
+FfsFindSectionDataWithHook (
+  IN EFI_SECTION_TYPE        SectionType,
+  IN FFS_CHECK_SECTION_HOOK  SectionCheckHook,
+  IN EFI_PEI_FILE_HANDLE     FileHandle,
+  OUT VOID                   **SectionData
+  );
+
+/**
   This service enables discovery sections of a given type within a valid FFS file.
 
-  @param  SearchType            The value of the section type to find.
-  @param  FfsFileHeader         A pointer to the file header that contains the set of sections to
+  @param  SectionType           The value of the section type to find.
+  @param  FileHandle            A pointer to the file header that contains the set of sections to
                                 be searched.
   @param  SectionData           A pointer to the discovered section, if successful.
 
@@ -662,6 +695,25 @@ BuildPeCoffLoaderHob (
 VOID *
 EFIAPI
 AllocatePages (
+  IN UINTN  Pages
+  );
+
+/**
+  Allocates one or more 4KB pages of type EfiRuntimeServicesData.
+
+  Allocates the number of 4KB pages of type EfiRuntimeServicesData and returns a pointer to the
+  allocated buffer.  The buffer returned is aligned on a 4KB boundary.  If Pages is 0, then NULL
+  is returned.  If there is not enough memory remaining to satisfy the request, then NULL is
+  returned.
+
+  @param  Pages                 The number of 4 KB pages to allocate.
+
+  @return A pointer to the allocated buffer or NULL if allocation fails.
+
+**/
+VOID *
+EFIAPI
+AllocateRuntimePages (
   IN UINTN  Pages
   );
 

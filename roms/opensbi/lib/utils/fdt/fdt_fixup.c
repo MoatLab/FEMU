@@ -38,6 +38,9 @@ void fdt_cpu_fixup(void *fdt)
 		if (err)
 			continue;
 
+		if (!fdt_node_is_enabled(fdt, cpu_offset))
+			continue;
+
 		/*
 		 * Disable a HART DT node if one of the following is true:
 		 * 1. The HART is not assigned to the current domain
@@ -50,6 +53,44 @@ void fdt_cpu_fixup(void *fdt)
 			fdt_setprop_string(fdt, cpu_offset, "status",
 					   "disabled");
 	}
+}
+
+static void fdt_domain_based_fixup_one(void *fdt, int nodeoff)
+{
+	int rc;
+	uint64_t reg_addr, reg_size;
+	struct sbi_domain *dom = sbi_domain_thishart_ptr();
+
+	rc = fdt_get_node_addr_size(fdt, nodeoff, 0, &reg_addr, &reg_size);
+	if (rc < 0 || !reg_addr || !reg_size)
+		return;
+
+	if (!sbi_domain_check_addr(dom, reg_addr, dom->next_mode,
+				    SBI_DOMAIN_READ | SBI_DOMAIN_WRITE)) {
+		rc = fdt_open_into(fdt, fdt, fdt_totalsize(fdt) + 32);
+		if (rc < 0)
+			return;
+		fdt_setprop_string(fdt, nodeoff, "status", "disabled");
+	}
+}
+
+static void fdt_fixup_node(void *fdt, const char *compatible)
+{
+	int noff = 0;
+
+	while ((noff = fdt_node_offset_by_compatible(fdt, noff,
+						     compatible)) >= 0)
+		fdt_domain_based_fixup_one(fdt, noff);
+}
+
+void fdt_aplic_fixup(void *fdt)
+{
+	fdt_fixup_node(fdt, "riscv,aplic");
+}
+
+void fdt_imsic_fixup(void *fdt)
+{
+	fdt_fixup_node(fdt, "riscv,imsics");
 }
 
 void fdt_plic_fixup(void *fdt)
@@ -261,10 +302,12 @@ int fdt_reserved_memory_nomap_fixup(void *fdt)
 
 void fdt_fixups(void *fdt)
 {
+	fdt_aplic_fixup(fdt);
+
+	fdt_imsic_fixup(fdt);
+
 	fdt_plic_fixup(fdt);
 
 	fdt_reserved_memory_fixup(fdt);
 	fdt_pmu_fixup(fdt);
 }
-
-

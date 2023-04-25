@@ -16,9 +16,10 @@ __all__ = [
     'InterpreterObject',
     'MesonInterpreterObject',
     'ObjectHolder',
-    'RangeHolder',
-    'MesonVersionString',
+    'IterableObject',
     'MutableInterpreterObject',
+
+    'MesonOperator',
 
     'Disabler',
     'is_disabled',
@@ -30,20 +31,20 @@ __all__ = [
     'ContinueRequest',
     'BreakRequest',
 
-    'check_stringlist',
     'default_resolve_key',
     'flatten',
     'resolve_second_level_holders',
 
     'noPosargs',
-    'builtinMethodNoKwargs',
     'noKwargs',
     'stringArgs',
     'noArgsFlattening',
     'noSecondLevelHolderResolving',
-    'permissive_unholder_return',
+    'unholder_return',
     'disablerIfNotFound',
     'permittedKwargs',
+    'typed_operator',
+    'unary_operator',
     'typed_pos_args',
     'ContainerTypeInfo',
     'KwargInfo',
@@ -66,13 +67,16 @@ __all__ = [
     'TYPE_kwargs',
     'TYPE_nkwargs',
     'TYPE_key_resolver',
+    'TYPE_HoldableTypes',
+
+    'HoldableTypes',
 ]
 
 from .baseobjects import (
     InterpreterObject,
     MesonInterpreterObject,
     ObjectHolder,
-    RangeHolder,
+    IterableObject,
     MutableInterpreterObject,
 
     TV_fw_var,
@@ -85,21 +89,25 @@ from .baseobjects import (
     TYPE_kwargs,
     TYPE_nkwargs,
     TYPE_key_resolver,
+    TYPE_HoldableTypes,
+
+    HoldableTypes,
 )
 
 from .decorators import (
     noPosargs,
-    builtinMethodNoKwargs,
     noKwargs,
     stringArgs,
     noArgsFlattening,
     noSecondLevelHolderResolving,
-    permissive_unholder_return,
+    unholder_return,
     disablerIfNotFound,
     permittedKwargs,
     typed_pos_args,
     ContainerTypeInfo,
     KwargInfo,
+    typed_operator,
+    unary_operator,
     typed_kwargs,
     FeatureCheckBase,
     FeatureNew,
@@ -118,5 +126,6 @@ from .exceptions import (
 )
 
 from .disabler import Disabler, is_disabled
-from .helpers import check_stringlist, default_resolve_key, flatten, resolve_second_level_holders
-from .interpreterbase import MesonVersionString, InterpreterBase
+from .helpers import default_resolve_key, flatten, resolve_second_level_holders
+from .interpreterbase import InterpreterBase
+from .operator import MesonOperator

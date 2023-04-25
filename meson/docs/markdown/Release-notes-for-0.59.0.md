@@ -121,7 +121,7 @@ if intl_found
   conf.set('ENABLE_NLS', 1)
 endif
 ```
-  
+
 one may simply use:
 
 ```
@@ -195,9 +195,9 @@ executable(
 
 ## New `build target` methods
 
-The [`build target` object](Reference-manual.md#build-target-object) now supports
+The [[@build_tgt]] object now supports
 the following two functions, to ensure feature compatebility with
-[`external program` objects](Reference-manual.html#external-program-object):
+[[@external_program]] objects:
 
 - `found()`: Always returns `true`. This function is meant
   to make executables objects feature compatible with
@@ -232,4 +232,3 @@ the cache upon installation. Most applications do that using a custom script,
 but it can now be done by Meson directly.
 
 See [`gnome.post_install()`](Gnome-module.md#gnomepost_install).
-

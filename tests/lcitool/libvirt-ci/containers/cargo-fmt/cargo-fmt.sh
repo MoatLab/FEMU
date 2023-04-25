@@ -1,15 +1,13 @@
 #!/bin/sh
 
-cargo fmt -- --check > cargo-fmt.patch
+cargo fmt -- --check > cargo-fmt.txt
 
-if test -s cargo-fmt.patch
+if test -s cargo-fmt.txt
 then
     echo
     echo "❌ ERROR: some files failed cargo fmt code style check"
     echo
-    diffstat cargo-fmt.patch
-    echo
-    echo "See the cargo-fmt patch artifact for full details of mistakes."
+    echo "See the cargo-fmt.txt artifact for full details of mistakes."
     echo
     echo "For guidance on how to configure Emacs or Vim to automatically"
     echo "run cargo fmt when saving files read"

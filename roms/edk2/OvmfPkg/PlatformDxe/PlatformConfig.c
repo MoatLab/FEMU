@@ -21,7 +21,8 @@
 //
 // Name of the UEFI variable that we use for persistent storage.
 //
-STATIC CHAR16  mVariableName[] = L"PlatformConfig";
+CHAR16  mVariableName[] = L"PlatformConfig";
+CHAR16  mHiiFormName[]  = L"MainFormState";
 
 /**
   Serialize and persistently save platform configuration.

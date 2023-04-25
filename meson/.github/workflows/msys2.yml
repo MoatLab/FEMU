@@ -9,12 +9,14 @@ on:
     paths:
       - "mesonbuild/**"
       - "test cases/**"
+      - "unittests/**"
       - ".github/workflows/msys2.yml"
       - "run_unittests.py"
   pull_request:
     paths:
       - "mesonbuild/**"
       - "test cases/**"
+      - "unittests/**"
       - ".github/workflows/msys2.yml"
       - "run_unittests.py"
 
@@ -44,6 +46,8 @@ jobs:
             MSYS2_CURSES:
             COMPILER: clang
             TOOLCHAIN: clang
+    env:
+      MESON_CI_JOBNAME: msys2-${{ matrix.NAME }}
 
     defaults:
       run:
@@ -75,7 +79,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python3 -m pip --disable-pip-version-check install gcovr jsonschema pefile pytest pytest-xdist coverage codecov
+          python3 -m pip --disable-pip-version-check install gcovr jsonschema pefile pytest pytest-subtests pytest-xdist coverage codecov
 
       - name: Run Tests
         run: |

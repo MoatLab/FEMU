@@ -34,16 +34,26 @@ parameters:
 - name: extra_install_step
   type: stepList
   default: []
+- name: usePythonVersion
+  type: string
+  default: ''
 
 steps:
+- bash: |
+    echo "##vso[task.prependpath]${HOME}/.local/bin"
+    echo "new PATH=${PATH}"
+  displayName: Set PATH
+  condition: eq('${{ parameters.tool_chain_tag }}', 'GCC5')
+
 - checkout: self
   clean: true
   fetchDepth: 1
 
 - task: UsePythonVersion@0
   inputs:
-    versionSpec: "3.8.x"
+    versionSpec: ${{ parameters.usePythonVersion }}
     architecture: "x64"
+  condition: ne('${{ parameters.usePythonVersion }}', '')
 
 - script: pip install -r pip-requirements.txt --upgrade
   displayName: 'Install/Upgrade pip modules'

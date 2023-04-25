@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
 # -*- python -*-
 #
 # Keycode Map Generator
@@ -13,12 +13,7 @@
 from __future__ import print_function
 
 import csv
-try:
-    import argparse
-except:
-    import os, sys
-    sys.path.append(os.path.join(os.path.dirname(__file__), "../thirdparty"))
-    import argparse
+import argparse
 import hashlib
 import time
 import sys

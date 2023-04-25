@@ -7,12 +7,22 @@ project('generated', 'fortran',
 conf_data = configuration_data()
 conf_data.set('ONE', 1)
 conf_data.set('TWO', 2)
-conf_data.set('THREE', 3)
 
-configure_file(input : 'mod3.fpp', output : 'mod3.f90', configuration : conf_data)
-# Manually build absolute path to source file to test
-# https://github.com/mesonbuild/meson/issues/7265
-three = library('mod3', meson.current_build_dir() / 'mod3.f90')
+mod3_f = custom_target(
+  'mod3.f',
+  input : 'mod3.f90',
+  output : 'mod3.f90',
+  # We need a platform agnostic way to do a copy a file, using a custom_target
+  # and we need to use the @OUTDIR@, not @OUTPUT@ in order to exercise
+  # https://github.com/mesonbuild/meson/issues/9258
+  command : [
+    find_program('python', 'python3'), '-c',
+    'import sys, shutil; shutil.copy(sys.argv[1], sys.argv[2])',
+    '@INPUT@', '@OUTDIR@',
+  ],
+)
+
+three = library('mod3', mod3_f)
 
 templates_basenames = ['mod2', 'mod1']
 generated_sources = []

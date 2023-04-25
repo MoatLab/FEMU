@@ -39,6 +39,7 @@
   UefiRuntimeServicesTableLib
   UefiLib
   UefiBootManagerLib
+  BootLogoLib
   PcdLib
   DxeServicesLib
   MemoryAllocationLib
@@ -59,7 +60,8 @@
   gEfiBootLogoProtocolGuid        ## CONSUMES
   gEfiDxeSmmReadyToLockProtocolGuid
   gEfiSmmAccess2ProtocolGuid
-  gUniversalPayloadPlatformBootManagerOverrideProtocolGuid
+  gEfiSerialIoProtocolGuid
+  gEfiPciRootBridgeIoProtocolGuid
 
 [Pcd]
   gEfiMdePkgTokenSpaceGuid.PcdPlatformBootTimeOut
@@ -73,3 +75,4 @@
   gEfiMdePkgTokenSpaceGuid.PcdUartDefaultParity
   gEfiMdePkgTokenSpaceGuid.PcdUartDefaultStopBits
   gEfiMdeModulePkgTokenSpaceGuid.PcdBootManagerMenuFile
+  gUefiPayloadPkgTokenSpaceGuid.PcdBootManagerEscape

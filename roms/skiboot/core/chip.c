@@ -166,11 +166,20 @@ void init_chips(void)
 		prlog(PR_NOTICE, "CHIP: Detected Simics simulator\n");
 	}
 	/* Detect Awan emulator */
-	if (dt_find_by_path(dt_root, "/awan")) {
-		proc_chip_quirks |= QUIRK_NO_CHIPTOD | QUIRK_NO_F000F
-			| QUIRK_NO_PBA | QUIRK_NO_OCC_IRQ | QUIRK_SLOW_SIM;
+	xn = dt_find_by_path(dt_root, "/awan");
+	if (xn) {
+		const char *model_type;
+		proc_chip_quirks |= QUIRK_AWAN | QUIRK_SLOW_SIM | QUIRK_NO_PBA
+			| QUIRK_NO_OCC_IRQ;
 		tb_hz = 512000;
-		prlog(PR_NOTICE, "CHIP: Detected Awan emulator\n");
+
+		model_type = dt_prop_get_def(xn, "device_type", (void *)"core");
+		if (strcmp(model_type, "core") == 0) {
+			proc_chip_quirks |= QUIRK_NO_RNG | QUIRK_NO_CHIPTOD
+				| QUIRK_NO_F000F;
+		}
+		prlog(PR_NOTICE, "CHIP: Detected Awan emulator %s model\n",
+				model_type);
 	}
 	/* Detect Qemu */
 	if (dt_node_is_compatible(dt_root, "qemu,powernv") ||

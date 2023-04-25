@@ -8,7 +8,7 @@
 **/
 
 #include "MpLib.h"
-#include <Library/VmgExitLib.h>
+#include <Library/CcExitLib.h>
 
 /**
   Get Protected mode code segment with 16-bit default addressing
@@ -110,11 +110,7 @@ MpInitLibSevEsAPReset (
   Code16 = GetProtectedMode16CS ();
   Code32 = GetProtectedMode32CS ();
 
-  if (CpuMpData->WakeupBufferHigh != 0) {
-    APResetFn = (AP_RESET *)(CpuMpData->WakeupBufferHigh + CpuMpData->AddressMap.SwitchToRealNoNxOffset);
-  } else {
-    APResetFn = (AP_RESET *)(CpuMpData->MpCpuExchangeInfo->BufferStart + CpuMpData->AddressMap.SwitchToRealOffset);
-  }
+  APResetFn = (AP_RESET *)(CpuMpData->WakeupBufferHigh + CpuMpData->AddressMap.SwitchToRealNoNxOffset);
 
   BufferStart = CpuMpData->MpCpuExchangeInfo->BufferStart;
   StackStart  = CpuMpData->SevEsAPResetStackStart -
@@ -213,7 +209,7 @@ SevEsPlaceApHlt (
     Msr.GhcbPhysicalAddress = AsmReadMsr64 (MSR_SEV_ES_GHCB);
     Ghcb                    = Msr.Ghcb;
 
-    VmgInit (Ghcb, &InterruptState);
+    CcExitVmgInit (Ghcb, &InterruptState);
 
     if (DoDecrement) {
       DoDecrement = FALSE;
@@ -225,13 +221,13 @@ SevEsPlaceApHlt (
       InterlockedDecrement ((UINT32 *)&CpuMpData->MpCpuExchangeInfo->NumApsExecuting);
     }
 
-    Status = VmgExit (Ghcb, SVM_EXIT_AP_RESET_HOLD, 0, 0);
+    Status = CcExitVmgExit (Ghcb, SVM_EXIT_AP_RESET_HOLD, 0, 0);
     if ((Status == 0) && (Ghcb->SaveArea.SwExitInfo2 != 0)) {
-      VmgDone (Ghcb, InterruptState);
+      CcExitVmgDone (Ghcb, InterruptState);
       break;
     }
 
-    VmgDone (Ghcb, InterruptState);
+    CcExitVmgDone (Ghcb, InterruptState);
   }
 
   //

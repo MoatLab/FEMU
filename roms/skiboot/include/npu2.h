@@ -241,7 +241,7 @@ int64_t npu2_freeze_status(struct phb *phb __unused,
 			   uint8_t *freeze_state,
 			   uint16_t *pci_error_type __unused,
 			   uint16_t *severity __unused);
-void npu2_dump_scoms(int chip_id);
+void npu2_dump_scoms(struct npu2 *npu, int chip_id);
 
 int64_t npu2_init_context(struct phb *phb, uint64_t msr, uint64_t bdf);
 int64_t npu2_destroy_context(struct phb *phb, uint64_t bdf);
@@ -270,5 +270,15 @@ static inline int npu2_get_phb_index(unsigned int brick_index)
 	 */
 	return NPU2_PHB_INDEX_BASE + brick_index;
 }
+
+int64_t npu2_opencapi_spa_setup(struct phb *phb, uint32_t __unused bdfn,
+				uint64_t addr, uint64_t PE_mask);
+int64_t npu2_opencapi_spa_clear_cache(struct phb *phb, uint32_t __unused bdfn,
+				      uint64_t PE_handle);
+int64_t npu2_opencapi_tl_set(struct phb *phb, uint32_t __unused bdfn,
+		    long capabilities, char *rate);
+int64_t npu2_opencapi_mem_alloc(struct phb *phb, uint32_t __unused bdfn,
+				uint64_t size, uint64_t *bar);
+int64_t npu2_opencapi_mem_release(struct phb *phb, uint32_t __unused bdfn);
 
 #endif /* __NPU2_H */

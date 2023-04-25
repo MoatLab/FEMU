@@ -40,16 +40,25 @@ struct xen_seabios_info {
     u32 e820_nr;
 } PACKED;
 
-static void validate_info(struct xen_seabios_info *t)
+static struct xen_seabios_info *validate_info(void)
 {
-    if ( memcmp(t->signature, "XenHVMSeaBIOS", 14) )
-        panic("Bad Xen info signature\n");
+    struct xen_seabios_info *t = (void *)INFO_PHYSICAL_ADDRESS;
 
-    if ( t->length < sizeof(struct xen_seabios_info) )
-        panic("Bad Xen info length\n");
+    if ( memcmp(t->signature, "XenHVMSeaBIOS", 14) ) {
+        dprintf(1, "Bad Xen info signature\n");
+        return NULL;
+    }
 
-    if (checksum(t, t->length) != 0)
-        panic("Bad Xen info checksum\n");
+    if ( t->length < sizeof(struct xen_seabios_info) ) {
+        dprintf(1, "Bad Xen info length\n");
+        return NULL;
+    }
+
+    if (checksum(t, t->length) != 0) {
+        dprintf(1, "Bad Xen info checksum\n");
+        return NULL;
+    }
+    return t;
 }
 
 void xen_preinit(void)
@@ -86,7 +95,10 @@ void xen_preinit(void)
         dprintf(1, "No Xen hypervisor found.\n");
         return;
     }
-    PlatformRunningOn = PF_QEMU|PF_XEN;
+    if (validate_info())
+        PlatformRunningOn = PF_QEMU|PF_XEN;
+    else
+        dprintf(1, "Not enabling Xen support due to lack of Xen info\n");
 }
 
 static int hypercall_xen_version( int cmd, void *arg)
@@ -122,10 +134,14 @@ void xen_hypercall_setup(void)
 
 void xen_biostable_setup(void)
 {
-    struct xen_seabios_info *info = (void *)INFO_PHYSICAL_ADDRESS;
-    void **tables = (void*)info->tables;
+    struct xen_seabios_info *info = validate_info();
+    void **tables;
     int i;
 
+    if (!info)
+        panic("Xen info corrupted\n");
+
+    tables = (void*)info->tables;
     dprintf(1, "xen: copy BIOS tables...\n");
     for (i=0; i<info->tables_nr; i++)
         copy_table(tables[i]);
@@ -136,12 +152,15 @@ void xen_biostable_setup(void)
 void xen_ramsize_preinit(void)
 {
     int i;
-    struct xen_seabios_info *info = (void *)INFO_PHYSICAL_ADDRESS;
-    struct e820entry *e820 = (struct e820entry *)info->e820;
-    validate_info(info);
+    struct xen_seabios_info *info = validate_info();
+    struct e820entry *e820;
+
+    if (!info)
+        panic("Xen info corrupted\n");
 
     dprintf(1, "xen: copy e820...\n");
 
+    e820 = (struct e820entry *)info->e820;
     for (i = 0; i < info->e820_nr; i++) {
         struct e820entry *e = &e820[i];
         e820_add(e->start, e->size, e->type);

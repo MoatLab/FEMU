@@ -24,7 +24,7 @@ from ..mesonlib import (
     is_windows, LibType, OptionKey,
 )
 from .compilers import (Compiler, cuda_buildtype_args, cuda_optimization_args,
-                        cuda_debug_args)
+                        cuda_debug_args, CompileCheckMode)
 
 if T.TYPE_CHECKING:
     from ..build import BuildTarget
@@ -171,7 +171,7 @@ class CudaCompiler(Compiler):
         '--qpp-config':                         '-qpp-config',                  # 4.2.8.19
     }
     # Reverse map -short to --long options.
-    _FLAG_SHORT2LONG_WITHARGS = {v:k for k,v in _FLAG_LONG2SHORT_WITHARGS.items()}
+    _FLAG_SHORT2LONG_WITHARGS = {v: k for k, v in _FLAG_LONG2SHORT_WITHARGS.items()}
 
     def __init__(self, exelist: T.List[str], version: str, for_machine: MachineChoice,
                  is_cross: bool, exe_wrapper: T.Optional['ExternalProgram'],
@@ -186,7 +186,7 @@ class CudaCompiler(Compiler):
         self.warn_args = {level: self._to_host_flags(flags) for level, flags in host_compiler.warn_args.items()}
 
     @classmethod
-    def _shield_nvcc_list_arg(cls, arg: str, listmode: bool=True) -> str:
+    def _shield_nvcc_list_arg(cls, arg: str, listmode: bool = True) -> str:
         r"""
         Shield an argument against both splitting by NVCC's list-argument
         parse logic, and interpretation by any shell.
@@ -195,7 +195,7 @@ class CudaCompiler(Compiler):
         a double-quoted string a split-point. Single-quotes do not provide protection
         against splitting; In fact, after splitting they are \-escaped. Unfortunately,
         double-quotes don't protect against shell expansion. What follows is a
-        complex dance to accomodate everybody.
+        complex dance to accommodate everybody.
         """
 
         SQ = "'"
@@ -290,8 +290,7 @@ class CudaCompiler(Compiler):
                 raise ValueError("-Xcompiler flag merging failed, unknown argument form!")
         return xflags
 
-    @classmethod
-    def _to_host_flags(cls, flags: T.List[str], phase: _Phase = _Phase.COMPILER) -> T.List[str]:
+    def _to_host_flags(self, flags: T.List[str], phase: _Phase = _Phase.COMPILER) -> T.List[str]:
         """
         Translate generic "GCC-speak" plus particular "NVCC-speak" flags to NVCC flags.
 
@@ -320,7 +319,7 @@ class CudaCompiler(Compiler):
             #     follow the name of the option itself by either one of more spaces or an
             #     equals character. When a one-character short name such as -I, -l, and -L
             #     is used, the value of the option may also immediately follow the option
-            #     itself without being seperated by spaces or an equal character. The
+            #     itself without being separated by spaces or an equal character. The
             #     individual values of list options may be separated by commas in a single
             #     instance of the option, or the option may be repeated, or any
             #     combination of these two cases.
@@ -353,10 +352,9 @@ class CudaCompiler(Compiler):
             # an exception for -D (where this would be value-changing) and -U (because
             # it isn't possible to define a macro with a comma in the name).
 
-            if flag in cls._FLAG_PASSTHRU_NOARGS:
+            if flag in self._FLAG_PASSTHRU_NOARGS:
                 xflags.append(flag)
                 continue
-
 
             # Handle breakup of flag-values into a flag-part and value-part.
             if   flag[:1] not in '-/':
@@ -384,19 +382,23 @@ class CudaCompiler(Compiler):
                 else:                            # -Isomething
                     val = flag[2:]
                 flag = flag[:2]                  # -I
-            elif flag in cls._FLAG_LONG2SHORT_WITHARGS or \
-                 flag in cls._FLAG_SHORT2LONG_WITHARGS:
+            elif flag in self._FLAG_LONG2SHORT_WITHARGS or \
+                 flag in self._FLAG_SHORT2LONG_WITHARGS:
                 # This is either -o or a multi-letter flag, and it is receiving its
                 # value isolated.
                 try:
                     val = next(flagit)           # -o something
                 except StopIteration:
                     pass
-            elif flag.split('=',1)[0] in cls._FLAG_LONG2SHORT_WITHARGS or \
-                 flag.split('=',1)[0] in cls._FLAG_SHORT2LONG_WITHARGS:
+            elif flag.split('=', 1)[0] in self._FLAG_LONG2SHORT_WITHARGS or \
+                 flag.split('=', 1)[0] in self._FLAG_SHORT2LONG_WITHARGS:
                 # This is either -o or a multi-letter flag, and it is receiving its
                 # value after an = sign.
-                flag, val = flag.split('=',1)    # -o=something
+                flag, val = flag.split('=', 1)    # -o=something
+            # Some dependencies (e.g., BoostDependency) add unspaced "-isystem/usr/include" arguments
+            elif flag.startswith('-isystem'):
+                val = flag[8:].strip()
+                flag = flag[:8]
             else:
                 # This is a flag, and it's foreign to NVCC.
                 #
@@ -418,18 +420,16 @@ class CudaCompiler(Compiler):
                     xflags.append('-prec-div=true')
                     xflags.append('-Xcompiler='+flag)
                 else:
-                    xflags.append('-Xcompiler='+cls._shield_nvcc_list_arg(flag))
+                    xflags.append('-Xcompiler='+self._shield_nvcc_list_arg(flag))
                     # The above should securely handle GCC's -Wl, -Wa, -Wp, arguments.
                 continue
 
-
             assert val is not None  # Should only trip if there is a missing argument.
 
-
             # Take care of the various NVCC-supported flags that need special handling.
-            flag = cls._FLAG_LONG2SHORT_WITHARGS.get(flag,flag)
+            flag = self._FLAG_LONG2SHORT_WITHARGS.get(flag, flag)
 
-            if   flag in {'-include','-isystem','-I','-L','-l'}:
+            if   flag in {'-include', '-isystem', '-I', '-L', '-l'}:
                 # These flags are known to GCC, but list-valued in NVCC. They potentially
                 # require double-quoting to prevent NVCC interpreting the flags as lists
                 # when GCC would not have done so.
@@ -439,10 +439,14 @@ class CudaCompiler(Compiler):
                 # -U with comma arguments is impossible in GCC-speak (and thus unambiguous
                 #in NVCC-speak, albeit unportable).
                 if len(flag) == 2:
-                    xflags.append(flag+cls._shield_nvcc_list_arg(val))
+                    xflags.append(flag+self._shield_nvcc_list_arg(val))
+                elif flag == '-isystem' and val in self.host_compiler.get_default_include_dirs():
+                    # like GnuLikeCompiler, we have to filter out include directories specified
+                    # with -isystem that overlap with the host compiler's search path
+                    pass
                 else:
                     xflags.append(flag)
-                    xflags.append(cls._shield_nvcc_list_arg(val))
+                    xflags.append(self._shield_nvcc_list_arg(val))
             elif flag == '-O':
                 # Handle optimization levels GCC knows about that NVCC does not.
                 if   val == 'fast':
@@ -463,7 +467,7 @@ class CudaCompiler(Compiler):
                 xflags.append(flag)
                 xflags.append(val)
 
-        return cls._merge_flags(xflags)
+        return self._merge_flags(xflags)
 
     def needs_static_linker(self) -> bool:
         return False
@@ -577,7 +581,7 @@ class CudaCompiler(Compiler):
 
     def has_header_symbol(self, hname: str, symbol: str, prefix: str,
                           env: 'Environment', *,
-                          extra_args: T.Optional[T.List[str]] = None,
+                          extra_args: T.Union[None, T.List[str], T.Callable[[CompileCheckMode], T.List[str]]] = None,
                           dependencies: T.Optional[T.List['Dependency']] = None) -> T.Tuple[bool, bool]:
         if extra_args is None:
             extra_args = []
@@ -647,11 +651,9 @@ class CudaCompiler(Compiler):
 
     def get_soname_args(self, env: 'Environment', prefix: str, shlib_name: str,
                         suffix: str, soversion: str,
-                        darwin_versions: T.Tuple[str, str],
-                        is_shared_module: bool) -> T.List[str]:
+                        darwin_versions: T.Tuple[str, str]) -> T.List[str]:
         return self._to_host_flags(self.host_compiler.get_soname_args(
-            env, prefix, shlib_name, suffix, soversion, darwin_versions,
-            is_shared_module), _Phase.LINKER)
+            env, prefix, shlib_name, suffix, soversion, darwin_versions), _Phase.LINKER)
 
     def get_compile_only_args(self) -> T.List[str]:
         return ['-c']
@@ -704,7 +706,7 @@ class CudaCompiler(Compiler):
         return self._to_host_flags(self.host_compiler.get_buildtype_linker_args(buildtype), _Phase.LINKER)
 
     def build_rpath_args(self, env: 'Environment', build_dir: str, from_dir: str,
-                         rpath_paths: str, build_rpath: str,
+                         rpath_paths: T.Tuple[str, ...], build_rpath: str,
                          install_rpath: str) -> T.Tuple[T.List[str], T.Set[bytes]]:
         (rpath_args, rpath_dirs_to_remove) = self.host_compiler.build_rpath_args(
             env, build_dir, from_dir, rpath_paths, build_rpath, install_rpath)
@@ -758,3 +760,12 @@ class CudaCompiler(Compiler):
             return [self._shield_nvcc_list_arg('-ccbin='+ccbindir, False)]
         else:
             return []
+
+    def get_profile_generate_args(self) -> T.List[str]:
+        return ['-Xcompiler=' + x for x in self.host_compiler.get_profile_generate_args()]
+
+    def get_profile_use_args(self) -> T.List[str]:
+        return ['-Xcompiler=' + x for x in self.host_compiler.get_profile_use_args()]
+
+    def get_disable_assert_args(self) -> T.List[str]:
+        return self.host_compiler.get_disable_assert_args()

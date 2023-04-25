@@ -1,0 +1,48 @@
+---
+# Configuration file for lcitool
+
+install:
+
+  # Installation flavor determining the target environment for the VM:
+  #
+  # test - VMs suitable for local testing (the 'test' user has sudo privileges)
+  # gitlab - VMs ready to be plugged into a GitLab environment
+  flavor: test
+
+  # Root password for the VM. This password will only be necessary for serial
+  # console access in case something goes horribly wrong, for all other use
+  # cases, SSH key authentication will be used instead. (Mandatory)
+  root_password:
+
+  # Path to the public SSH key to be installed
+  ssh_key: '~/.ssh/id_rsa.pub'
+
+  # Whether cloud-init should be installed and enabled within the images, thus
+  # being able to plug them into a cloud environment, e.g. OpenStack
+  cloud_init: false
+
+  # Settings mapping to the virt-install options - see virt-install(1).
+  # It is strongly recommended that you keep the following at their default
+  # values to produce machines which conform to the upstream libvirt standard,
+  # unless you have a reason to do otherwise.
+  #
+  # Sizes are expressed in GiB.
+  #
+  virt_type: kvm
+  arch: x86_64
+  machine: pc
+  cpu_model: host-passthrough
+  vcpus: 2
+  memory_size: 2
+  disk_size: 15
+  storage_pool: default
+  network: default
+
+# GitLab-related options (only apply to the 'gitlab' flavor)
+gitlab:
+
+  # GitLab connection URL
+  url: https://gitlab.com
+
+  # GitLab runner registration token. (Mandatory)
+  runner_secret:

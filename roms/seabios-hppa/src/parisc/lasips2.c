@@ -19,12 +19,19 @@ int lasips2_kbd_in(char *c, int max)
     struct bregs regs;
     volatile int count = 0;
 
+    // check if PS2 reported new keys, if so queue them up.
     while((readl(LASIPS2_KBD_STATUS) & LASIPS2_KBD_STATUS_RBNE)) {
         process_key(readb(LASIPS2_KBD_DATA));
     }
 
     while(count < max) {
-        memset(&regs, 0, sizeof(regs));
+        // check if some key is queued up already
+        regs.ah = 0x11;
+        regs.flags = 0;
+        handle_16(&regs);
+        if (regs.flags & F_ZF)	// return if no key queued
+            break;
+        // read key from keyboard queue
         regs.ah = 0x10;
         handle_16(&regs);
         if (!regs.ah)

@@ -1,7 +1,7 @@
 ## @file  UefiCpuPkg.dec
 # This Package provides UEFI compatible CPU modules and libraries.
 #
-# Copyright (c) 2007 - 2021, Intel Corporation. All rights reserved.<BR>
+# Copyright (c) 2007 - 2022, Intel Corporation. All rights reserved.<BR>
 #
 # SPDX-License-Identifier: BSD-2-Clause-Patent
 #
@@ -53,14 +53,17 @@
   ##
   MpInitLib|Include/Library/MpInitLib.h
 
-  ##  @libraryclass  Provides function to support VMGEXIT processing.
-  VmgExitLib|Include/Library/VmgExitLib.h
+  ##  @libraryclass  Provides function to support CcExit processing.
+  CcExitLib|Include/Library/CcExitLib.h
 
   ##  @libraryclass  Provides function to get CPU cache information.
   CpuCacheInfoLib|Include/Library/CpuCacheInfoLib.h
 
   ##  @libraryclass  Provides function for loading microcode.
   MicrocodeLib|Include/Library/MicrocodeLib.h
+
+  ##  @libraryclass  Provides function for manipulating x86 paging structures.
+  CpuPageTableLib|Include/Library/CpuPageTableLib.h
 
 [Guids]
   gUefiCpuPkgTokenSpaceGuid      = { 0xac05bf33, 0x995a, 0x4ed4, { 0xaa, 0xb8, 0xef, 0x7a, 0xe8, 0xf, 0x5c, 0xb0 }}
@@ -77,10 +80,18 @@
 
 [Protocols]
   ## Include/Protocol/SmmCpuService.h
-  gEfiSmmCpuServiceProtocolGuid  = { 0x1d202cab, 0xc8ab, 0x4d5c, { 0x94, 0xf7, 0x3c, 0xfc, 0xc0, 0xd3, 0xd3, 0x35 }}
+  gEfiSmmCpuServiceProtocolGuid   = { 0x1d202cab, 0xc8ab, 0x4d5c, { 0x94, 0xf7, 0x3c, 0xfc, 0xc0, 0xd3, 0xd3, 0x35 }}
+  gEdkiiSmmCpuRendezvousProtocolGuid = { 0xaa00d50b, 0x4911, 0x428f, { 0xb9, 0x1a, 0xa5, 0x9d, 0xdb, 0x13, 0xe2, 0x4c }}
 
   ## Include/Protocol/SmMonitorInit.h
   gEfiSmMonitorInitProtocolGuid  = { 0x228f344d, 0xb3de, 0x43bb, { 0xa4, 0xd7, 0xea, 0x20, 0xb, 0x1b, 0x14, 0x82 }}
+
+[Protocols.RISCV64]
+  #
+  # Protocols defined for RISC-V systems
+  #
+  ## Include/Protocol/RiscVBootProtocol.h
+  gRiscVEfiBootProtocolGuid  = { 0xccd15fec, 0x6f73, 0x4eec, { 0x83, 0x95, 0x3e, 0x69, 0xe4, 0xb9, 0x40, 0xbf }}
 
 #
 # [Error.gUefiCpuPkgTokenSpaceGuid]
@@ -153,6 +164,18 @@
   #   FALSE - SMM Feature Control MSR will not be locked.<BR>
   # @Prompt Lock SMM Feature Control MSR.
   gUefiCpuPkgTokenSpaceGuid.PcdCpuSmmFeatureControlMsrLock|TRUE|BOOLEAN|0x3213210B
+
+  ## Indicates if SMRR will be enabled.<BR><BR>
+  #   TRUE  - SMRR will be enabled.<BR>
+  #   FALSE - SMRR will not be enabled.<BR>
+  # @Prompt Enable SMRR.
+  gUefiCpuPkgTokenSpaceGuid.PcdSmrrEnable|TRUE|BOOLEAN|0x3213210D
+
+  ## Indicates if SmmFeatureControl will be enabled.<BR><BR>
+  #   TRUE  - SmmFeatureControl will be enabled.<BR>
+  #   FALSE - SmmFeatureControl will not be enabled.<BR>
+  # @Prompt Support SmmFeatureControl.
+  gUefiCpuPkgTokenSpaceGuid.PcdSmmFeatureControlEnable|TRUE|BOOLEAN|0x32132110
 
 [PcdsFixedAtBuild]
   ## List of exception vectors which need switching stack.

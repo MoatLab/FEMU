@@ -1,7 +1,7 @@
 /** @file
 Agent Module to load other modules to deploy SMM Entry Vector for X86 CPU.
 
-Copyright (c) 2009 - 2020, Intel Corporation. All rights reserved.<BR>
+Copyright (c) 2009 - 2022, Intel Corporation. All rights reserved.<BR>
 Copyright (c) 2017, AMD Incorporated. All rights reserved.<BR>
 
 SPDX-License-Identifier: BSD-2-Clause-Patent
@@ -43,6 +43,7 @@ SPDX-License-Identifier: BSD-2-Clause-Patent
 #include <Library/UefiLib.h>
 #include <Library/HobLib.h>
 #include <Library/LocalApicLib.h>
+#include <Library/CpuLib.h>
 #include <Library/UefiCpuLib.h>
 #include <Library/CpuExceptionHandlerLib.h>
 #include <Library/ReportStatusCodeLib.h>
@@ -193,11 +194,6 @@ typedef struct {
 
 #define INVALID_APIC_ID  0xFFFFFFFFFFFFFFFFULL
 
-typedef UINT32 SMM_CPU_ARRIVAL_EXCEPTIONS;
-#define ARRIVAL_EXCEPTION_BLOCKED       0x1
-#define ARRIVAL_EXCEPTION_DELAYED       0x2
-#define ARRIVAL_EXCEPTION_SMI_DISABLED  0x4
-
 //
 // Wrapper used to convert EFI_AP_PROCEDURE2 and EFI_AP_PROCEDURE.
 //
@@ -263,12 +259,42 @@ extern UINTN                 mMaxNumberOfCpus;
 extern UINTN                 mNumberOfCpus;
 extern EFI_SMM_CPU_PROTOCOL  mSmmCpu;
 extern EFI_MM_MP_PROTOCOL    mSmmMp;
-extern UINTN                 mInternalCr3;
+extern BOOLEAN               m5LevelPagingNeeded;
 
 ///
 /// The mode of the CPU at the time an SMI occurs
 ///
 extern UINT8  mSmmSaveStateRegisterLma;
+
+#define PAGE_TABLE_POOL_ALIGNMENT   BASE_128KB
+#define PAGE_TABLE_POOL_UNIT_SIZE   BASE_128KB
+#define PAGE_TABLE_POOL_UNIT_PAGES  EFI_SIZE_TO_PAGES (PAGE_TABLE_POOL_UNIT_SIZE)
+#define PAGE_TABLE_POOL_ALIGN_MASK  \
+  (~(EFI_PHYSICAL_ADDRESS)(PAGE_TABLE_POOL_ALIGNMENT - 1))
+
+typedef struct {
+  VOID     *NextPool;
+  UINTN    Offset;
+  UINTN    FreePages;
+} PAGE_TABLE_POOL;
+
+/**
+  Disable CET.
+**/
+VOID
+EFIAPI
+DisableCet (
+  VOID
+  );
+
+/**
+  Enable CET.
+**/
+VOID
+EFIAPI
+EnableCet (
+  VOID
+  );
 
 //
 // SMM CPU Protocol function prototypes.
@@ -428,6 +454,7 @@ typedef struct {
   volatile SMM_CPU_SYNC_MODE    EffectiveSyncMode;
   volatile BOOLEAN              SwitchBsp;
   volatile BOOLEAN              *CandidateBsp;
+  volatile BOOLEAN              AllApArrivedWithException;
   EFI_AP_PROCEDURE              StartupProcedure;
   VOID                          *StartupProcArgs;
 } SMM_DISPATCHER_MP_SYNC_DATA;
@@ -680,7 +707,6 @@ SmmBlockingStartupThisAp (
 
 **/
 EFI_STATUS
-EFIAPI
 SmmSetMemoryAttributes (
   IN  EFI_PHYSICAL_ADDRESS  BaseAddress,
   IN  UINT64                Length,
@@ -710,7 +736,6 @@ SmmSetMemoryAttributes (
 
 **/
 EFI_STATUS
-EFIAPI
 SmmClearMemoryAttributes (
   IN  EFI_PHYSICAL_ADDRESS  BaseAddress,
   IN  UINT64                Length,
@@ -956,21 +981,11 @@ SetPageTableAttributes (
   );
 
 /**
-  Get page table base address and the depth of the page table.
-
-  @param[out] Base        Page table base address.
-  @param[out] FiveLevels  TRUE means 5 level paging. FALSE means 4 level paging.
-**/
-VOID
-GetPageTable (
-  OUT UINTN    *Base,
-  OUT BOOLEAN  *FiveLevels OPTIONAL
-  );
-
-/**
   This function sets the attributes for the memory region specified by BaseAddress and
   Length from their current attributes to the attributes specified by Attributes.
 
+  @param[in]   PageTableBase    The page table base.
+  @param[in]   EnablePML5Paging If PML5 paging is enabled.
   @param[in]   BaseAddress      The physical address that is the start address of a memory region.
   @param[in]   Length           The size in bytes of the memory region.
   @param[in]   Attributes       The bit mask of attributes to set for the memory region.
@@ -991,8 +1006,9 @@ GetPageTable (
 
 **/
 EFI_STATUS
-EFIAPI
 SmmSetMemoryAttributesEx (
+  IN  UINTN                 PageTableBase,
+  IN  BOOLEAN               EnablePML5Paging,
   IN  EFI_PHYSICAL_ADDRESS  BaseAddress,
   IN  UINT64                Length,
   IN  UINT64                Attributes,
@@ -1003,6 +1019,8 @@ SmmSetMemoryAttributesEx (
   This function clears the attributes for the memory region specified by BaseAddress and
   Length from their current attributes to the attributes specified by Attributes.
 
+  @param[in]   PageTableBase    The page table base.
+  @param[in]   EnablePML5Paging If PML5 paging is enabled.
   @param[in]   BaseAddress      The physical address that is the start address of a memory region.
   @param[in]   Length           The size in bytes of the memory region.
   @param[in]   Attributes       The bit mask of attributes to clear for the memory region.
@@ -1023,8 +1041,9 @@ SmmSetMemoryAttributesEx (
 
 **/
 EFI_STATUS
-EFIAPI
 SmmClearMemoryAttributesEx (
+  IN  UINTN                 PageTableBase,
+  IN  BOOLEAN               EnablePML5Paging,
   IN  EFI_PHYSICAL_ADDRESS  BaseAddress,
   IN  UINT64                Length,
   IN  UINT64                Attributes,
@@ -1469,6 +1488,17 @@ RegisterStartupProcedure (
   );
 
 /**
+  Initialize PackageBsp Info. Processor specified by mPackageFirstThreadIndex[PackageIndex]
+  will do the package-scope register programming. Set default CpuIndex to (UINT32)-1, which
+  means not specified yet.
+
+**/
+VOID
+InitPackageFirstThreadIndexInfo (
+  VOID
+  );
+
+/**
   Allocate buffer for SpinLock and Wrapper function buffer.
 
 **/
@@ -1485,6 +1515,32 @@ InitializeDataForMmMp (
 **/
 BOOLEAN
 IsRestrictedMemoryAccess (
+  VOID
+  );
+
+/**
+  Choose blocking or non-blocking mode to Wait for all APs.
+
+  @param[in]  This                  A pointer to the EDKII_SMM_CPU_RENDEZVOUS_PROTOCOL instance.
+  @param[in]  BlockingMode          Blocking or non-blocking mode.
+
+  @retval EFI_SUCCESS               All APs have arrived SMM mode except SMI disabled APs.
+  @retval EFI_TIMEOUT               There are APs not in SMM mode in given timeout constraint.
+
+**/
+EFI_STATUS
+EFIAPI
+SmmCpuRendezvous (
+  IN  EDKII_SMM_CPU_RENDEZVOUS_PROTOCOL  *This,
+  IN  BOOLEAN                            BlockingMode
+  );
+
+/**
+  Insure when this function returns, no AP will execute normal mode code before entering SMM, except SMI disabled APs.
+
+**/
+VOID
+SmmWaitForApArrival (
   VOID
   );
 

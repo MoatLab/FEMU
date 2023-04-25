@@ -1,0 +1,27 @@
+---
+os:
+  name: 'Fedora'
+  version: '37'
+
+packaging:
+  format: 'rpm'
+  command: 'dnf'
+
+paths:
+  bash: /bin/bash
+  cc: /usr/bin/gcc
+  ccache: /usr/bin/ccache
+  make: /usr/bin/make
+  ninja: /usr/bin/ninja
+  pip3: /usr/bin/pip3
+  python: /usr/bin/python3
+  sudoers: /etc/sudoers
+
+ansible_python_package: python3
+ansible_python_interpreter: /usr/bin/python3
+
+install:
+  url: https://download.fedoraproject.org/pub/fedora/linux/releases/37/Everything/x86_64/os
+
+containers:
+  base: registry.fedoraproject.org/fedora:37

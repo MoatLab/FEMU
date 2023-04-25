@@ -30,6 +30,15 @@ from ..interpreterbase import (
     TYPE_nkwargs,
 )
 
+from ..interpreter import (
+    Interpreter,
+    StringHolder,
+    BooleanHolder,
+    IntegerHolder,
+    ArrayHolder,
+    DictHolder,
+)
+
 from ..mparser import (
     AndNode,
     ArgumentNode,
@@ -94,6 +103,8 @@ class AstInterpreter(InterpreterBase):
                            'install_man': self.func_do_nothing,
                            'install_data': self.func_do_nothing,
                            'install_subdir': self.func_do_nothing,
+                           'install_symlink': self.func_do_nothing,
+                           'install_emptydir': self.func_do_nothing,
                            'configuration_data': self.func_do_nothing,
                            'configure_file': self.func_do_nothing,
                            'find_program': self.func_do_nothing,
@@ -127,6 +138,7 @@ class AstInterpreter(InterpreterBase):
                            'subdir': self.func_subdir,
                            'set_variable': self.func_do_nothing,
                            'get_variable': self.func_do_nothing,
+                           'unset_variable': self.func_do_nothing,
                            'is_disabler': self.func_do_nothing,
                            'is_variable': self.func_do_nothing,
                            'disabler': self.func_do_nothing,
@@ -181,7 +193,7 @@ class AstInterpreter(InterpreterBase):
             return
         with open(absname, encoding='utf-8') as f:
             code = f.read()
-        assert(isinstance(code, str))
+        assert isinstance(code, str)
         try:
             codeblock = mparser.Parser(code, absname).parse()
         except mesonlib.MesonException as me:
@@ -198,8 +210,11 @@ class AstInterpreter(InterpreterBase):
         return True
 
     def evaluate_fstring(self, node: mparser.FormatStringNode) -> str:
-        assert(isinstance(node, mparser.FormatStringNode))
+        assert isinstance(node, mparser.FormatStringNode)
         return node.value
+
+    def evaluate_arraystatement(self, cur: mparser.ArrayNode) -> TYPE_nvar:
+        return self.reduce_arguments(cur.args)[0]
 
     def evaluate_arithmeticstatement(self, cur: ArithmeticNode) -> int:
         self.evaluate_statement(cur.left)
@@ -211,7 +226,7 @@ class AstInterpreter(InterpreterBase):
         return 0
 
     def evaluate_ternary(self, node: TernaryNode) -> None:
-        assert(isinstance(node, TernaryNode))
+        assert isinstance(node, TernaryNode)
         self.evaluate_statement(node.condition)
         self.evaluate_statement(node.trueblock)
         self.evaluate_statement(node.falseblock)
@@ -222,7 +237,7 @@ class AstInterpreter(InterpreterBase):
                 return node.value
             return '__AST_UNKNOWN__'
         arguments, kwargs = self.reduce_arguments(node.args, key_resolver=resolve_key)
-        assert (not arguments)
+        assert not arguments
         self.argument_depth += 1
         for key, value in kwargs.items():
             if isinstance(key, BaseNode):
@@ -231,7 +246,7 @@ class AstInterpreter(InterpreterBase):
         return {}
 
     def evaluate_plusassign(self, node: PlusAssignmentNode) -> None:
-        assert(isinstance(node, PlusAssignmentNode))
+        assert isinstance(node, PlusAssignmentNode)
         # Cheat by doing a reassignment
         self.assignments[node.var_name] = node.value  # Save a reference to the value node
         if node.value.ast_id:
@@ -297,7 +312,7 @@ class AstInterpreter(InterpreterBase):
         return 0
 
     def assignment(self, node: AssignmentNode) -> None:
-        assert(isinstance(node, AssignmentNode))
+        assert isinstance(node, AssignmentNode)
         self.assignments[node.var_name] = node.value # Save a reference to the value node
         if node.value.ast_id:
             self.reverse_assignment[node.value.ast_id] = node
@@ -363,15 +378,15 @@ class AstInterpreter(InterpreterBase):
             mkwargs = {} # type: T.Dict[str, TYPE_nvar]
             try:
                 if isinstance(src, str):
-                    result = self.string_method_call(src, node.name, margs, mkwargs)
+                    result = StringHolder(src, T.cast(Interpreter, self)).method_call(node.name, margs, mkwargs)
                 elif isinstance(src, bool):
-                    result = self.bool_method_call(src, node.name, margs, mkwargs)
+                    result = BooleanHolder(src, T.cast(Interpreter, self)).method_call(node.name, margs, mkwargs)
                 elif isinstance(src, int):
-                    result = self.int_method_call(src, node.name, margs, mkwargs)
+                    result = IntegerHolder(src, T.cast(Interpreter, self)).method_call(node.name, margs, mkwargs)
                 elif isinstance(src, list):
-                    result = self.array_method_call(src, node.name, margs, mkwargs)
+                    result = ArrayHolder(src, T.cast(Interpreter, self)).method_call(node.name, margs, mkwargs)
                 elif isinstance(src, dict):
-                    result = self.dict_method_call(src, node.name, margs, mkwargs)
+                    result = DictHolder(src, T.cast(Interpreter, self)).method_call(node.name, margs, mkwargs)
             except mesonlib.MesonException:
                 return None
 

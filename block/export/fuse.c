@@ -21,12 +21,13 @@
 #include "qemu/osdep.h"
 #include "qemu/memalign.h"
 #include "block/aio.h"
-#include "block/block.h"
+#include "block/block_int-common.h"
 #include "block/export.h"
 #include "block/fuse.h"
 #include "block/qapi.h"
 #include "qapi/error.h"
 #include "qapi/qapi-commands-block.h"
+#include "qemu/main-loop.h"
 #include "sysemu/block-backend.h"
 
 #include <fuse.h>
@@ -554,7 +555,7 @@ static void fuse_read(fuse_req_t req, fuse_ino_t inode,
         return;
     }
 
-    ret = blk_pread(exp->common.blk, offset, buf, size);
+    ret = blk_pread(exp->common.blk, offset, size, buf, 0);
     if (ret >= 0) {
         fuse_reply_buf(req, buf, size);
     } else {
@@ -607,7 +608,7 @@ static void fuse_write(fuse_req_t req, fuse_ino_t inode, const char *buf,
         }
     }
 
-    ret = blk_pwrite(exp->common.blk, offset, buf, size, 0);
+    ret = blk_pwrite(exp->common.blk, offset, size, buf, 0);
     if (ret >= 0) {
         fuse_reply_write(req, size);
     } else {
@@ -672,7 +673,16 @@ static void fuse_fallocate(fuse_req_t req, fuse_ino_t inode, int mode,
         do {
             int size = MIN(length, BDRV_REQUEST_MAX_BYTES);
 
-            ret = blk_pdiscard(exp->common.blk, offset, size);
+            ret = blk_pwrite_zeroes(exp->common.blk, offset, size,
+                                    BDRV_REQ_MAY_UNMAP | BDRV_REQ_NO_FALLBACK);
+            if (ret == -ENOTSUP) {
+                /*
+                 * fallocate() specifies to return EOPNOTSUPP for unsupported
+                 * operations
+                 */
+                ret = -EOPNOTSUPP;
+            }
+
             offset += size;
             length -= size;
         } while (ret == 0 && length > 0);

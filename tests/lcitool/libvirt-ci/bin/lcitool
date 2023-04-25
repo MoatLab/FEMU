@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+
+# lcitool - libvirt CI guest management tool
+#
+# Copyright (C) 2017-2020 Red Hat, Inc.
+#
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+import logging
+import sys
+from pathlib import Path
+
+
+# This hack is to add lcitool/ to PYTHONPATH. It allows execution of
+# lcitool without prior package installation using pip.
+root = Path(__file__).parent.parent
+lib = Path(root, "lcitool")
+
+if lib.exists():
+    sys.path.insert(0, root.as_posix())
+
+from lcitool.application import Application
+from lcitool.commandline import CommandLine
+from lcitool.logger import LevelFormatter
+
+class LcitoolLogger(logging.Logger):
+    def debug(self, *args, **kwargs):
+        super().debug(*args, **kwargs, exc_info=True)
+
+if __name__ == "__main__":
+    log_level_formats = {
+        logging.DEBUG: "[%(levelname)s] %(module)s:%(funcName)s:%(lineno)d: %(message)s",
+        logging.ERROR: "[%(levelname)s]: %(message)s",
+    }
+
+    logging.setLoggerClass(LcitoolLogger)
+
+    custom_formatter = LevelFormatter(log_level_formats)
+    custom_handler = logging.StreamHandler(stream=sys.stderr)
+    custom_handler.setFormatter(custom_formatter)
+
+    log = logging.getLogger()
+    log.addHandler(custom_handler)
+
+    args = CommandLine().parse()
+
+    if args.debug:
+        log.setLevel(logging.DEBUG)
+
+    try:
+        Application().run(args)
+    except Exception:
+        log.exception("An unexpected error occurred")
+        sys.exit(1)

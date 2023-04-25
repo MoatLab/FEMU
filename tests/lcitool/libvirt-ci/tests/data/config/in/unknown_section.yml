@@ -1,0 +1,5 @@
+install:
+  root_password: foo
+
+foo:
+  bar: foobar

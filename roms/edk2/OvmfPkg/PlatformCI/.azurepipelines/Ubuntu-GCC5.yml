@@ -15,11 +15,14 @@ pr:
   - master
   - stable/*
 
+variables:
+  - template: ../../../.azurepipelines/templates/defaults.yml
+
 jobs:
   - job: Platform_CI
     variables:
       package: 'OvmfPkg'
-      vm_image: 'ubuntu-18.04'
+      vm_image: 'ubuntu-22.04'
       should_run: true
       run_flags: "MAKE_STARTUP_NSH=TRUE QEMU_HEADLESS=TRUE"
 
@@ -160,11 +163,24 @@ jobs:
             # this build is for xen not qemu-kvm
             Run.Flags: "QEMU_SKIP=TRUE"
             Run: $(should_run)
+
+          INTELTDX_X64_DEBUG:
+            Build.File: "$(package)/PlatformCI/IntelTdxBuild.py"
+            Build.Arch: "X64"
+            Build.Flags: ""
+            Build.Target: "DEBUG"
+            # no storage supported by microvm build
+            # can't boot to uefi shell -> skip test
+            Run.Flags: "QEMU_SKIP=TRUE"
+            Run: $(should_run)
+
     workspace:
       clean: all
 
     pool:
       vmImage: $(vm_image)
+
+    container: ${{ variables.default_linux_image }}
 
     steps:
     - template: ../../../.azurepipelines/templates/platform-build-run-steps.yml
@@ -176,7 +192,4 @@ jobs:
         build_file: $(Build.File)
         build_flags: $(Build.Flags)
         run_flags: $(Run.Flags)
-        extra_install_step:
-        - bash: sudo apt-get install qemu
-          displayName: Install qemu
-          condition: and(gt(variables.pkg_count, 0), succeeded())
+        usePythonVersion: '' # use Python from the container image

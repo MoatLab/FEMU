@@ -1,7 +1,7 @@
 /** @file
   DXE Core Main Entry Point
 
-Copyright (c) 2006 - 2018, Intel Corporation. All rights reserved.<BR>
+Copyright (c) 2006 - 2022, Intel Corporation. All rights reserved.<BR>
 SPDX-License-Identifier: BSD-2-Clause-Patent
 
 **/
@@ -253,8 +253,16 @@ DxeMain (
     VectorInfoList = (EFI_VECTOR_HANDOFF_INFO *)(GET_GUID_HOB_DATA (GuidHob));
   }
 
-  Status = InitializeCpuExceptionHandlersEx (VectorInfoList, NULL);
+  Status = InitializeCpuExceptionHandlers (VectorInfoList);
   ASSERT_EFI_ERROR (Status);
+
+  //
+  // Setup Stack Guard
+  //
+  if (PcdGetBool (PcdCpuStackGuard)) {
+    Status = InitializeSeparateExceptionStacks (NULL, NULL);
+    ASSERT_EFI_ERROR (Status);
+  }
 
   //
   // Initialize Debug Agent to support source level debug in DXE phase
@@ -754,6 +762,12 @@ CoreExitBootServices (
   )
 {
   EFI_STATUS  Status;
+
+  //
+  // Notify other drivers of their last chance to use boot services
+  // before the memory map is terminated.
+  //
+  CoreNotifySignalList (&gEfiEventBeforeExitBootServicesGuid);
 
   //
   // Disable Timer

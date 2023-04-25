@@ -51,9 +51,10 @@
  *   1: OSPI direct access mode.
  */
 
-#ifndef XILINX_VERSAL_PMC_IOU_SLCR_H
-#define XILINX_VERSAL_PMC_IOU_SLCR_H
+#ifndef XLNX_VERSAL_PMC_IOU_SLCR_H
+#define XLNX_VERSAL_PMC_IOU_SLCR_H
 
+#include "hw/sysbus.h"
 #include "hw/register.h"
 
 #define TYPE_XILINX_VERSAL_PMC_IOU_SLCR "xlnx.versal-pmc-iou-slcr"
@@ -75,4 +76,4 @@ struct XlnxVersalPmcIouSlcr {
     RegisterInfo regs_info[XILINX_VERSAL_PMC_IOU_SLCR_R_MAX];
 };
 
-#endif /* XILINX_VERSAL_PMC_IOU_SLCR_H */
+#endif /* XLNX_VERSAL_PMC_IOU_SLCR_H */

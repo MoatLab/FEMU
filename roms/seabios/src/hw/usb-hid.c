@@ -22,13 +22,13 @@ struct usb_pipe *mouse_pipe VARFSEG;
 
 // Send USB HID protocol message.
 static int
-set_protocol(struct usb_pipe *pipe, u16 val)
+set_protocol(struct usb_pipe *pipe, u16 val, u16 inferface)
 {
     struct usb_ctrlrequest req;
     req.bRequestType = USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE;
     req.bRequest = HID_REQ_SET_PROTOCOL;
     req.wValue = val;
-    req.wIndex = 0;
+    req.wIndex = inferface;
     req.wLength = 0;
     return usb_send_default_control(pipe, &req, NULL);
 }
@@ -76,9 +76,12 @@ usb_kbd_setup(struct usbdevice_s *usbdev
     }
 
     // Enable "boot" protocol.
-    int ret = set_protocol(usbdev->defpipe, 0);
-    if (ret)
+    int ret = set_protocol(usbdev->defpipe, 0, usbdev->iface->bInterfaceNumber);
+    if (ret) {
+        dprintf(3, "Failed to set boot protocol\n");
         return -1;
+    }
+
     // Periodically send reports to enable key repeat.
     ret = set_idle(usbdev->defpipe, KEYREPEATMS);
     if (ret)
@@ -118,7 +121,7 @@ usb_mouse_setup(struct usbdevice_s *usbdev
     }
 
     // Enable "boot" protocol.
-    int ret = set_protocol(usbdev->defpipe, 0);
+    int ret = set_protocol(usbdev->defpipe, 0, usbdev->iface->bInterfaceNumber);
     if (ret)
         return -1;
 

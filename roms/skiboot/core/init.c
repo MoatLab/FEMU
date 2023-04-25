@@ -999,7 +999,7 @@ static void mask_pc_system_xstop(void)
 	if (proc_gen != proc_gen_p10)
                 return;
 
-	if (chip_quirk(QUIRK_MAMBO_CALLOUTS))
+	if (chip_quirk(QUIRK_MAMBO_CALLOUTS) || chip_quirk(QUIRK_AWAN))
 		return;
 
         /*
@@ -1370,7 +1370,9 @@ void __noreturn __nomcount main_cpu_entry(const void *fdt)
 	/* Probe NPUs */
 	probe_npu();
 	probe_npu2();
-	probe_npu3();
+
+	/* Probe PAUs */
+	probe_pau();
 
 	/* Initialize PCI */
 	pci_init_slots();

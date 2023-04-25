@@ -1,10 +1,10 @@
 # THIS FILE WAS AUTO-GENERATED
 #
-#  $ lcitool dockerfile --layers all opensuse-leap-152 qemu
+#  $ lcitool dockerfile --layers all opensuse-leap-153 qemu
 #
 # https://gitlab.com/libvirt/libvirt-ci
 
-FROM registry.opensuse.org/opensuse/leap:15.2
+FROM registry.opensuse.org/opensuse/leap:15.3
 
 RUN zypper update -y && \
     zypper install -y \
@@ -12,6 +12,7 @@ RUN zypper update -y && \
            alsa-lib-devel \
            bash \
            bc \
+           bison \
            brlapi-devel \
            bzip2 \
            ca-certificates \
@@ -22,6 +23,7 @@ RUN zypper update -y && \
            dbus-1 \
            diffutils \
            findutils \
+           flex \
            fuse3-devel \
            gcc \
            gcc-c++ \
@@ -44,6 +46,7 @@ RUN zypper update -y && \
            libbz2-devel \
            libcacard-devel \
            libcap-ng-devel \
+           libcmocka-devel \
            libcurl-devel \
            libdrm-devel \
            libepoxy-devel \
@@ -53,6 +56,7 @@ RUN zypper update -y && \
            libgnutls-devel \
            libiscsi-devel \
            libjpeg8-devel \
+           libjson-c-devel \
            libndctl-devel \
            libnettle-devel \
            libnfs-devel \
@@ -64,6 +68,7 @@ RUN zypper update -y && \
            librbd-devel \
            libseccomp-devel \
            libselinux-devel \
+           libslirp-devel \
            libspice-server-devel \
            libssh-devel \
            libtasn1-devel \
@@ -83,24 +88,16 @@ RUN zypper update -y && \
            openssh \
            pam-devel \
            pcre-devel-static \
-           perl-Test-Harness \
-           perl-base \
            pkgconfig \
-           python3-Pillow \
-           python3-PyYAML \
-           python3-Sphinx \
-           python3-base \
-           python3-numpy \
-           python3-opencv \
-           python3-pip \
-           python3-setuptools \
-           python3-sphinx_rtd_theme \
-           python3-virtualenv \
-           python3-wheel \
+           python39-base \
+           python39-pip \
+           python39-setuptools \
            rdma-core-devel \
            rpm \
            sed \
            snappy-devel \
+           sndio-devel \
+           socat \
            sparse \
            spice-protocol-devel \
            systemd-devel \
@@ -108,7 +105,6 @@ RUN zypper update -y && \
            tar \
            tesseract-ocr \
            tesseract-ocr-traineddata-english \
-           texinfo \
            usbredir-devel \
            util-linux \
            virglrenderer-devel \
@@ -117,7 +113,8 @@ RUN zypper update -y && \
            xen-devel \
            xfsprogs-devel \
            zlib-devel \
-           zlib-devel-static && \
+           zlib-devel-static \
+           zstd && \
     zypper clean --all && \
     rpm -qa | sort > /packages.txt && \
     mkdir -p /usr/libexec/ccache-wrappers && \
@@ -127,10 +124,20 @@ RUN zypper update -y && \
     ln -s /usr/bin/ccache /usr/libexec/ccache-wrappers/g++ && \
     ln -s /usr/bin/ccache /usr/libexec/ccache-wrappers/gcc
 
-RUN pip3 install meson==0.56.0
+RUN /usr/bin/pip3.9 install \
+                    PyYAML \
+                    meson==0.63.2 \
+                    pillow \
+                    sphinx \
+                    sphinx-rtd-theme
 
+ENV CCACHE_WRAPPERSDIR "/usr/libexec/ccache-wrappers"
 ENV LANG "en_US.UTF-8"
 ENV MAKE "/usr/bin/make"
 ENV NINJA "/usr/bin/ninja"
-ENV PYTHON "/usr/bin/python3"
-ENV CCACHE_WRAPPERSDIR "/usr/libexec/ccache-wrappers"
+ENV PYTHON "/usr/bin/python3.9"
+# As a final step configure the user (if env is defined)
+ARG USER
+ARG UID
+RUN if [ "${USER}" ]; then \
+  id ${USER} 2>/dev/null || useradd -u ${UID} -U ${USER}; fi

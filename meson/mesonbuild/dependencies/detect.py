@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .base import Dependency, ExternalDependency, DependencyException, DependencyMethods, NotFoundDependency
+from .base import ExternalDependency, DependencyException, DependencyMethods, NotFoundDependency
 from .cmake import CMakeDependency
 from .dub import DubDependency
 from .framework import ExtraFrameworkDependency
@@ -59,12 +59,12 @@ def get_dep_identifier(name: str, kwargs: T.Dict[str, T.Any]) -> 'TV_DepID':
             continue
         # All keyword arguments are strings, ints, or lists (or lists of lists)
         if isinstance(value, list):
-            value = frozenset(listify(value))
             for i in value:
                 assert isinstance(i, str)
+            value = tuple(frozenset(listify(value)))
         else:
             assert isinstance(value, (str, bool, int))
-        identifier += (key, value)
+        identifier = (*identifier, (key, value),)
     return identifier
 
 display_name_map = {
@@ -82,7 +82,7 @@ display_name_map = {
 }
 
 def find_external_dependency(name: str, env: 'Environment', kwargs: T.Dict[str, object]) -> T.Union['ExternalDependency', NotFoundDependency]:
-    assert(name)
+    assert name
     required = kwargs.get('required', True)
     if not isinstance(required, bool):
         raise DependencyException('Keyword "required" must be a boolean.')
@@ -143,7 +143,7 @@ def find_external_dependency(name: str, env: 'Environment', kwargs: T.Dict[str, 
     # otherwise, the dependency could not be found
     tried_methods = [d.log_tried() for d in pkgdep if d.log_tried()]
     if tried_methods:
-        tried = '{}'.format(mlog.format_list(tried_methods))
+        tried = mlog.format_list(tried_methods)
     else:
         tried = ''
 
@@ -159,10 +159,10 @@ def find_external_dependency(name: str, env: 'Environment', kwargs: T.Dict[str, 
 
         # we have a list of failed ExternalDependency objects, so we can report
         # the methods we tried to find the dependency
-        raise DependencyException('Dependency "%s" not found' % (name) +
-                                  (', tried %s' % (tried) if tried else ''))
+        raise DependencyException(f'Dependency "{name}" not found' +
+                                  (f', tried {tried}' if tried else ''))
 
-    return NotFoundDependency(env)
+    return NotFoundDependency(name, env)
 
 
 def _build_external_dependency_list(name: str, env: 'Environment', for_machine: MachineChoice,

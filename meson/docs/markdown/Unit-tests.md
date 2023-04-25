@@ -36,7 +36,7 @@ By default, environment variable
 [`MALLOC_PERTURB_`](http://man7.org/linux/man-pages/man3/mallopt.3.html) is
 set to a random value between 1..255. This can help find memory leaks on
 configurations using glibc, including with non-GCC compilers. This feature
-can be disabled as discussed in [test()](Reference-manual.md#test).
+can be disabled as discussed in [[test]].
 
 ## Coverage
 
@@ -47,6 +47,7 @@ functions that get called). Meson will autodetect what coverage
 generator tools you have installed and will generate the corresponding
 targets. These targets are `coverage-xml` and `coverage-text` which
 are both provided by [Gcovr](http://gcovr.com) (version 3.3 or higher)
+`coverage-sonarqube` which is provided by [Gcovr](http://gcovr.com) (version 4.2 or higher)
 and `coverage-html`, which requires
 [Lcov](https://ltp.sourceforge.io/coverage/lcov.php) and
 [GenHTML](https://linux.die.net/man/1/genhtml) or

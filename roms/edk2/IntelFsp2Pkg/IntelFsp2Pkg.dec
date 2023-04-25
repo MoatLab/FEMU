@@ -1,7 +1,7 @@
 ## @file
 # Provides driver and definitions to build fsp in EDKII bios.
 #
-# Copyright (c) 2014 - 2021, Intel Corporation. All rights reserved.<BR>
+# Copyright (c) 2014 - 2022, Intel Corporation. All rights reserved.<BR>
 # SPDX-License-Identifier: BSD-2-Clause-Patent
 #
 ##
@@ -37,6 +37,9 @@
   ##  @libraryclass  Provides FSP platform sec related actions.
   FspSecPlatformLib|Include/Library/FspSecPlatformLib.h
 
+  ## @libraryclass  Provides FSP MultiPhase service functions.
+  FspMultiPhaseLib|Include/Library/FspMultiPhaseLib.h
+
 [Ppis]
   #
   # PPI to indicate FSP is ready to enter notify phase
@@ -58,6 +61,12 @@
   # PPI to tear down the temporary memory set up by TempRamInit ().
   #
   gFspTempRamExitPpiGuid                = { 0xbc1cfbdb, 0x7e50, 0x42be, {0xb4, 0x87, 0x22, 0xe0, 0xa9, 0x0c, 0xb0, 0x52}}
+
+  #
+  # PPI for Variable Services
+  #
+  gEdkiiPeiVariablePpiGuid              = { 0xe7b2cd04, 0x4b14, 0x44c2, {0xb7, 0x48, 0xce, 0xaf, 0x2b, 0x66, 0x4a, 0xb0}}
+
 
 [Guids]
   #
@@ -106,5 +115,10 @@
   gIntelFsp2PkgTokenSpaceGuid.PcdFspPrivateTemporaryRamSize |0x00000000|UINT32|0x10000006
 
 [PcdsFixedAtBuild,PcdsDynamic,PcdsDynamicEx]
-  gIntelFsp2PkgTokenSpaceGuid.PcdFspReservedMemoryLength |0x00100000|UINT32|0x46530000
-  gIntelFsp2PkgTokenSpaceGuid.PcdBootLoaderEntry         |0xFFFFFFE4|UINT32|0x46530100
+  gIntelFsp2PkgTokenSpaceGuid.PcdFspReservedMemoryLength  |0x00100000|UINT32|0x46530000
+  gIntelFsp2PkgTokenSpaceGuid.PcdBootLoaderEntry          |0xFFFFFFE4|UINT32|0x46530100
+  #
+  # Different FSP Components may have different NumberOfPhases which can be defined
+  # by each FspSecCore module from DSC.
+  #
+  gIntelFsp2PkgTokenSpaceGuid.PcdMultiPhaseNumberOfPhases |0x00000000|UINT32|0x46530101

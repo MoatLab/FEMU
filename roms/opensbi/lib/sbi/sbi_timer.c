@@ -44,11 +44,6 @@ static u64 get_ticks(void)
 }
 #endif
 
-static u64 get_platform_ticks(void)
-{
-	return timer_dev->timer_value();
-}
-
 static void nop_delay_fn(void *opaque)
 {
 	cpu_relax();
@@ -79,6 +74,19 @@ void sbi_timer_delay_loop(ulong units, u64 unit_freq,
 	/* Busy loop until desired timer value delta reached */
 	while ((get_time_val() - start_val) < delta)
 		delay_fn(opaque);
+}
+
+bool sbi_timer_waitms_until(bool (*predicate)(void *), void *arg,
+			    uint64_t timeout_ms)
+{
+	uint64_t start_time = sbi_timer_value();
+	uint64_t ticks =
+		(sbi_timer_get_device()->timer_freq / 1000) *
+		timeout_ms;
+	while(!predicate(arg))
+		if (sbi_timer_value() - start_time  >= ticks)
+			return false;
+	return true;
 }
 
 u64 sbi_timer_value(void)
@@ -124,16 +132,35 @@ void sbi_timer_set_delta_upper(ulong delta_upper)
 void sbi_timer_event_start(u64 next_event)
 {
 	sbi_pmu_ctr_incr_fw(SBI_PMU_FW_SET_TIMER);
-	if (timer_dev && timer_dev->timer_event_start)
+
+	/**
+	 * Update the stimecmp directly if available. This allows
+	 * the older software to leverage sstc extension on newer hardware.
+	 */
+	if (sbi_hart_has_extension(sbi_scratch_thishart_ptr(), SBI_HART_EXT_SSTC)) {
+#if __riscv_xlen == 32
+		csr_write(CSR_STIMECMP, next_event & 0xFFFFFFFF);
+		csr_write(CSR_STIMECMPH, next_event >> 32);
+#else
+		csr_write(CSR_STIMECMP, next_event);
+#endif
+	} else if (timer_dev && timer_dev->timer_event_start) {
 		timer_dev->timer_event_start(next_event);
-	csr_clear(CSR_MIP, MIP_STIP);
+		csr_clear(CSR_MIP, MIP_STIP);
+	}
 	csr_set(CSR_MIE, MIP_MTIP);
 }
 
 void sbi_timer_process(void)
 {
 	csr_clear(CSR_MIE, MIP_MTIP);
-	csr_set(CSR_MIP, MIP_STIP);
+	/*
+	 * If sstc extension is available, supervisor can receive the timer
+	 * directly without M-mode come in between. This function should
+	 * only invoked if M-mode programs the timer for its own purpose.
+	 */
+	if (!sbi_hart_has_extension(sbi_scratch_thishart_ptr(), SBI_HART_EXT_SSTC))
+		csr_set(CSR_MIP, MIP_STIP);
 }
 
 const struct sbi_timer_device *sbi_timer_get_device(void)
@@ -148,7 +175,7 @@ void sbi_timer_set_device(const struct sbi_timer_device *dev)
 
 	timer_dev = dev;
 	if (!get_time_val && timer_dev->timer_value)
-		get_time_val = get_platform_ticks;
+		get_time_val = timer_dev->timer_value;
 }
 
 int sbi_timer_init(struct sbi_scratch *scratch, bool cold_boot)
@@ -161,7 +188,7 @@ int sbi_timer_init(struct sbi_scratch *scratch, bool cold_boot)
 		if (!time_delta_off)
 			return SBI_ENOMEM;
 
-		if (sbi_hart_has_feature(scratch, SBI_HART_HAS_TIME))
+		if (sbi_hart_has_extension(scratch, SBI_HART_EXT_TIME))
 			get_time_val = get_ticks;
 	} else {
 		if (!time_delta_off)

@@ -105,7 +105,7 @@ bool sbi_domain_check_addr(const struct sbi_domain *dom,
 			   unsigned long addr, unsigned long mode,
 			   unsigned long access_flags)
 {
-	bool mmio = FALSE;
+	bool rmmio, mmio = FALSE;
 	struct sbi_domain_memregion *reg;
 	unsigned long rstart, rend, rflags, rwx = 0;
 
@@ -130,8 +130,8 @@ bool sbi_domain_check_addr(const struct sbi_domain *dom,
 		rend = (reg->order < __riscv_xlen) ?
 			rstart + ((1UL << reg->order) - 1) : -1UL;
 		if (rstart <= addr && addr <= rend) {
-			if ((mmio && !(rflags & SBI_DOMAIN_MEMREGION_MMIO)) ||
-			    (!mmio && (rflags & SBI_DOMAIN_MEMREGION_MMIO)))
+			rmmio = (rflags & SBI_DOMAIN_MEMREGION_MMIO) ? TRUE : FALSE;
+			if (mmio != rmmio)
 				return FALSE;
 			return ((rflags & rwx) == rwx) ? TRUE : FALSE;
 		}
@@ -146,7 +146,10 @@ static bool is_region_valid(const struct sbi_domain_memregion *reg)
 	if (reg->order < 3 || __riscv_xlen < reg->order)
 		return FALSE;
 
-	if (reg->base & (BIT(reg->order) - 1))
+	if (reg->order == __riscv_xlen && reg->base != 0)
+		return FALSE;
+
+	if (reg->order < __riscv_xlen && (reg->base & (BIT(reg->order) - 1)))
 		return FALSE;
 
 	return TRUE;
@@ -159,7 +162,7 @@ static bool is_region_subset(const struct sbi_domain_memregion *regA,
 	ulong regA_start = regA->base;
 	ulong regA_end = regA->base + (BIT(regA->order) - 1);
 	ulong regB_start = regB->base;
-	ulong regB_end = regB->base + (BIT(regA->order) - 1);
+	ulong regB_end = regB->base + (BIT(regB->order) - 1);
 
 	if ((regB_start <= regA_start) &&
 	    (regA_start < regB_end) &&
@@ -471,8 +474,12 @@ int sbi_domain_root_add_memregion(const struct sbi_domain_memregion *reg)
 
 	/* Check for conflicts */
 	sbi_domain_for_each_memregion(&root, nreg) {
-		if (is_region_conflict(reg, nreg))
-			return SBI_EINVAL;
+		if (is_region_conflict(reg, nreg)) {
+			sbi_printf("%s: is_region_conflict check failed"
+			" 0x%lx conflicts existing 0x%lx\n", __func__,
+				   reg->base, nreg->base);
+			return SBI_EALREADY;
+		}
 	}
 
 	/* Append the memregion to root memregions */
@@ -514,6 +521,33 @@ int sbi_domain_root_add_memregion(const struct sbi_domain_memregion *reg)
 			}
 		}
 	} while (reg_merged);
+
+	return 0;
+}
+
+int sbi_domain_root_add_memrange(unsigned long addr, unsigned long size,
+			   unsigned long align, unsigned long region_flags)
+{
+	int rc;
+	unsigned long pos, end, rsize;
+	struct sbi_domain_memregion reg;
+
+	pos = addr;
+	end = addr + size;
+	while (pos < end) {
+		rsize = pos & (align - 1);
+		if (rsize)
+			rsize = 1UL << sbi_ffs(pos);
+		else
+			rsize = ((end - pos) < align) ?
+				(end - pos) : align;
+
+		sbi_domain_memregion_init(pos, rsize, region_flags, &reg);
+		rc = sbi_domain_root_add_memregion(&reg);
+		if (rc)
+			return rc;
+		pos += rsize;
+	}
 
 	return 0;
 }

@@ -22,14 +22,14 @@ from enum import Enum
 
 from .. import mlog
 from ..compilers import clib_langs
-from ..mesonlib import MachineChoice, MesonException, HoldableObject
+from ..mesonlib import LibType, MachineChoice, MesonException, HoldableObject
 from ..mesonlib import version_compare_many
 from ..interpreterbase import FeatureDeprecated
 
 if T.TYPE_CHECKING:
     from ..compilers.compilers import Compiler
     from ..environment import Environment
-    from ..build import BuildTarget
+    from ..build import BuildTarget, CustomTarget
     from ..mesonlib import FileOrString
 
 
@@ -88,8 +88,7 @@ class Dependency(HoldableObject):
         # Raw -L and -l arguments without manual library searching
         # If None, self.link_args will be used
         self.raw_link_args: T.Optional[T.List[str]] = None
-        self.sources: T.List['FileOrString'] = []
-        self.methods = process_method_kw(self.get_methods(), kwargs)
+        self.sources: T.List[T.Union['FileOrString', 'CustomTarget']] = []
         self.include_type = self._process_include_type_kw(kwargs)
         self.ext_deps: T.List[Dependency] = []
 
@@ -128,7 +127,7 @@ class Dependency(HoldableObject):
     def get_all_compile_args(self) -> T.List[str]:
         """Get the compile arguments from this dependency and it's sub dependencies."""
         return list(itertools.chain(self.get_compile_args(),
-                                    *[d.get_all_compile_args() for d in self.ext_deps]))
+                                    *(d.get_all_compile_args() for d in self.ext_deps)))
 
     def get_link_args(self, language: T.Optional[str] = None, raw: bool = False) -> T.List[str]:
         if raw and self.raw_link_args is not None:
@@ -138,19 +137,15 @@ class Dependency(HoldableObject):
     def get_all_link_args(self) -> T.List[str]:
         """Get the link arguments from this dependency and it's sub dependencies."""
         return list(itertools.chain(self.get_link_args(),
-                                    *[d.get_all_link_args() for d in self.ext_deps]))
+                                    *(d.get_all_link_args() for d in self.ext_deps)))
 
     def found(self) -> bool:
         return self.is_found
 
-    def get_sources(self) -> T.List['FileOrString']:
+    def get_sources(self) -> T.List[T.Union['FileOrString', 'CustomTarget']]:
         """Source files that need to be added to the target.
         As an example, gtest-all.cc when using GTest."""
         return self.sources
-
-    @staticmethod
-    def get_methods() -> T.List[DependencyMethods]:
-        return [DependencyMethods.AUTO]
 
     def get_name(self) -> str:
         return self.name
@@ -192,7 +187,7 @@ class Dependency(HoldableObject):
         raise RuntimeError('Unreachable code in partial_dependency called')
 
     def _add_sub_dependency(self, deplist: T.Iterable[T.Callable[[], 'Dependency']]) -> bool:
-        """Add an internal depdency from a list of possible dependencies.
+        """Add an internal dependency from a list of possible dependencies.
 
         This method is intended to make it easier to add additional
         dependencies to another dependency internally.
@@ -223,7 +218,8 @@ class Dependency(HoldableObject):
 class InternalDependency(Dependency):
     def __init__(self, version: str, incdirs: T.List[str], compile_args: T.List[str],
                  link_args: T.List[str], libraries: T.List['BuildTarget'],
-                 whole_libraries: T.List['BuildTarget'], sources: T.List['FileOrString'],
+                 whole_libraries: T.List['BuildTarget'],
+                 sources: T.Sequence[T.Union['FileOrString', 'CustomTarget']],
                  ext_deps: T.List[Dependency], variables: T.Dict[str, T.Any]):
         super().__init__(DependencyTypeName('internal'), {})
         self.version = version
@@ -233,7 +229,7 @@ class InternalDependency(Dependency):
         self.link_args = link_args
         self.libraries = libraries
         self.whole_libraries = whole_libraries
-        self.sources = sources
+        self.sources = list(sources)
         self.ext_deps = ext_deps
         self.variables = variables
 
@@ -324,6 +320,7 @@ class ExternalDependency(Dependency, HasNativeKwarg):
         self.required = kwargs.get('required', True)
         self.silent = kwargs.get('silent', False)
         self.static = kwargs.get('static', False)
+        self.libtype = LibType.STATIC if self.static else LibType.PREFER_SHARED
         if not isinstance(self.static, bool):
             raise DependencyException('Static keyword must be boolean')
         # Is this dependency to be run on the build platform?
@@ -397,10 +394,10 @@ class ExternalDependency(Dependency, HasNativeKwarg):
 
 
 class NotFoundDependency(Dependency):
-    def __init__(self, environment: 'Environment') -> None:
+    def __init__(self, name: str, environment: 'Environment') -> None:
         super().__init__(DependencyTypeName('not-found'), {})
         self.env = environment
-        self.name = 'not-found'
+        self.name = name
         self.is_found = False
 
     def get_partial_dependency(self, *, compile_args: bool = False,
@@ -500,7 +497,7 @@ def process_method_kw(possible: T.Iterable[DependencyMethods], kwargs: T.Dict[st
         FeatureDeprecated.single_use(f'Configuration method {method.value}', '0.44', 'Use "config-tool" instead.')
         method = DependencyMethods.CONFIG_TOOL
     if method is DependencyMethods.QMAKE:
-        FeatureDeprecated.single_use(f'Configuration method "qmake"', '0.58', 'Use "config-tool" instead.')
+        FeatureDeprecated.single_use('Configuration method "qmake"', '0.58', 'Use "config-tool" instead.')
         method = DependencyMethods.CONFIG_TOOL
 
     # Set the detection method. If the method is set to auto, use any available method.
@@ -548,10 +545,6 @@ class SystemDependency(ExternalDependency):
         super().__init__(DependencyTypeName('system'), env, kwargs, language=language)
         self.name = name
 
-    @staticmethod
-    def get_methods() -> T.List[DependencyMethods]:
-        return [DependencyMethods.SYSTEM]
-
     def log_tried(self) -> str:
         return 'system'
 
@@ -564,10 +557,6 @@ class BuiltinDependency(ExternalDependency):
                  language: T.Optional[str] = None) -> None:
         super().__init__(DependencyTypeName('builtin'), env, kwargs, language=language)
         self.name = name
-
-    @staticmethod
-    def get_methods() -> T.List[DependencyMethods]:
-        return [DependencyMethods.BUILTIN]
 
     def log_tried(self) -> str:
         return 'builtin'

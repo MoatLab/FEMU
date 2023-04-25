@@ -30,6 +30,9 @@
   ##  @libraryclass  Defines a set of APIs to a hardware information parser.
   HwInfoParserLib|Include/Library/HwInfoParserLib.h
 
+  ##  @libraryclass Defines functions for customizing the generation of _OSC and slot info.
+  SsdtPcieSupportLib|Include/Library/SsdtPcieSupportLib.h
+
   ##  @libraryclass  Defines a set of methods for fixing up a SSDT Serial Port.
   SsdtSerialPortFixupLib|Include/Library/SsdtSerialPortFixupLib.h
 
@@ -56,6 +59,9 @@
 
   # Non BSA Compliant 16550 Serial HID
   gEdkiiDynamicTablesPkgTokenSpaceGuid.PcdNonBsaCompliant16550SerialHid|""|VOID*|0x40000008
+
+  # Use PCI segment numbers as UID
+  gEdkiiDynamicTablesPkgTokenSpaceGuid.PcdPciUseSegmentAsUid|FALSE|BOOLEAN|0x40000009
 
 [Guids]
   gEdkiiDynamicTablesPkgTokenSpaceGuid = { 0xab226e66, 0x31d8, 0x4613, { 0x87, 0x9d, 0xd2, 0xfa, 0xb6, 0x10, 0x26, 0x3c } }

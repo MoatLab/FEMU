@@ -206,7 +206,7 @@ def process_markup(args: T.Sequence[TV_Loggable], keep: bool) -> T.List[str]:
             arr.append(str(arg))
     return arr
 
-def force_print(*args: str, nested: str, **kwargs: T.Any) -> None:
+def force_print(*args: str, nested: bool, **kwargs: T.Any) -> None:
     if log_disable_stdout:
         return
     iostr = io.StringIO()
@@ -249,12 +249,13 @@ def cmd_ci_include(file: str) -> None:
 def log(*args: TV_Loggable, is_error: bool = False,
         once: bool = False, **kwargs: T.Any) -> None:
     if once:
-        return log_once(*args, is_error=is_error, **kwargs)
-    return _log(*args, is_error=is_error, **kwargs)
+        log_once(*args, is_error=is_error, **kwargs)
+    else:
+        _log(*args, is_error=is_error, **kwargs)
 
 
 def _log(*args: TV_Loggable, is_error: bool = False,
-        **kwargs: T.Any) -> None:
+         **kwargs: T.Any) -> None:
     nested = kwargs.pop('nested', True)
     arr = process_markup(args, False)
     if log_file is not None:
@@ -291,7 +292,7 @@ def log_once(*args: TV_Loggable, is_error: bool = False,
 #
 # This would more accurately embody what this function can handle, but we
 # don't have that yet, so instead we'll do some casting to work around it
-def get_error_location_string(fname: str, lineno: str) -> str:
+def get_error_location_string(fname: str, lineno: int) -> str:
     return f'{fname}:{lineno}:'
 
 def _log_error(severity: str, *rargs: TV_Loggable,

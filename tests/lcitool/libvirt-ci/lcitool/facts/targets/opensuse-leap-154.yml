@@ -1,0 +1,27 @@
+---
+os:
+  name: 'OpenSUSE'
+  version: 'Leap154'
+
+packaging:
+  format: 'rpm'
+  command: 'zypper'
+
+paths:
+  bash: /bin/bash
+  cc: /usr/bin/gcc
+  ccache: /usr/bin/ccache
+  make: /usr/bin/make
+  ninja: /usr/bin/ninja
+  pip3: /usr/bin/pip3
+  python: /usr/bin/python3
+  sudoers: /etc/sudoers
+
+ansible_python_package: python3
+ansible_python_interpreter: /usr/bin/python3
+
+install:
+  url: http://download.opensuse.org/distribution/leap/15.4/repo/oss/
+
+containers:
+  base: registry.opensuse.org/opensuse/leap:15.4

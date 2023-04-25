@@ -1,5 +1,5 @@
 [flake8]
-ignore =
+extend-ignore =
     # E241: multiple spaces after ':'
     E241,
     # E251: unexpected spaces around keyword / parameter equals
@@ -28,4 +28,6 @@ ignore =
     W504,
     # A003: builtin class attribute
     A003
+per-file-ignores =
+    mesonbuild/mesonlib/__init__.py:F401
 max-line-length = 120

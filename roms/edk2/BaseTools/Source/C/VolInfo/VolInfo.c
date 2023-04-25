@@ -2,6 +2,7 @@
 The tool dumps the contents of a firmware volume
 
 Copyright (c) 1999 - 2018, Intel Corporation. All rights reserved.<BR>
+Copyright (c) 2022, Konstantin Aladyshev <aladyshev22@gmail.com><BR>
 SPDX-License-Identifier: BSD-2-Clause-Patent
 
 **/
@@ -43,6 +44,8 @@ SPDX-License-Identifier: BSD-2-Clause-Patent
 //
 
 EFI_GUID  gEfiCrc32GuidedSectionExtractionProtocolGuid = EFI_CRC32_GUIDED_SECTION_EXTRACTION_PROTOCOL_GUID;
+EFI_GUID  gPeiAprioriFileNameGuid = { 0x1b45cc0a, 0x156a, 0x428a, { 0XAF, 0x62,  0x49, 0x86, 0x4d, 0xa0, 0xe6, 0xe6 }};
+EFI_GUID  gAprioriGuid = { 0xFC510EE7, 0xFFDC, 0x11D4, { 0xBD, 0x41, 0x00, 0x80, 0xC7, 0x3C, 0x88, 0x81 }};
 
 #define UTILITY_MAJOR_VERSION      1
 #define UTILITY_MINOR_VERSION      0
@@ -51,15 +54,13 @@ EFI_GUID  gEfiCrc32GuidedSectionExtractionProtocolGuid = EFI_CRC32_GUIDED_SECTIO
 
 #define EFI_SECTION_ERROR EFIERR (100)
 
-#define MAX_BASENAME_LEN  60  // not good to hardcode, but let's be reasonable
-
 //
 // Structure to keep a list of guid-to-basenames
 //
 typedef struct _GUID_TO_BASENAME {
   struct _GUID_TO_BASENAME  *Next;
   INT8                      Guid[PRINTED_GUID_BUFFER_SIZE];
-  INT8                      BaseName[MAX_BASENAME_LEN];
+  INT8                      BaseName[MAX_LINE_LEN];
 } GUID_TO_BASENAME;
 
 static GUID_TO_BASENAME *mGuidBaseNameList = NULL;
@@ -107,6 +108,12 @@ ReadHeader (
   IN FILE       *InputFile,
   OUT UINT32    *FvSize,
   OUT BOOLEAN   *ErasePolarity
+  );
+
+STATIC
+EFI_STATUS
+PrintAprioriFile (
+  EFI_FFS_FILE_HEADER         *FileHeader
   );
 
 STATIC
@@ -678,11 +685,11 @@ Returns:
     //
     // 0x17
     //
-    "EFI_SECTION_FIRMWARE_VOLUME_IMAGE ",
+    "EFI_SECTION_FIRMWARE_VOLUME_IMAGE",
     //
     // 0x18
     //
-    "EFI_SECTION_FREEFORM_SUBTYPE_GUID ",
+    "EFI_SECTION_FREEFORM_SUBTYPE_GUID",
     //
     // 0x19
     //
@@ -698,7 +705,7 @@ Returns:
     //
     // 0x1C
     //
-    "EFI_SECTION_SMM_DEPEX",
+    "EFI_SECTION_MM_DEPEX",
     //
     // 0x1C+
     //
@@ -911,140 +918,134 @@ Returns:
     printf ("       EFI_FVB2_WRITE_LOCK_STATUS\n");
   }
 
-  if (VolumeHeader.Attributes & EFI_FVB2_ALIGNMENT_1) {
+  switch (VolumeHeader.Attributes & EFI_FVB2_ALIGNMENT) {
+    case EFI_FVB2_ALIGNMENT_1:
     printf ("       EFI_FVB2_ALIGNMENT_1\n");
-  }
+    break;
 
-  if (VolumeHeader.Attributes & EFI_FVB2_ALIGNMENT_2) {
-    printf ("        EFI_FVB2_ALIGNMENT_2\n");
-  }
+    case EFI_FVB2_ALIGNMENT_2:
+    printf ("       EFI_FVB2_ALIGNMENT_2\n");
+    break;
 
-  if (VolumeHeader.Attributes & EFI_FVB2_ALIGNMENT_4) {
-    printf ("        EFI_FVB2_ALIGNMENT_4\n");
-  }
+    case EFI_FVB2_ALIGNMENT_4:
+    printf ("       EFI_FVB2_ALIGNMENT_4\n");
+    break;
 
-  if (VolumeHeader.Attributes & EFI_FVB2_ALIGNMENT_8) {
-    printf ("        EFI_FVB2_ALIGNMENT_8\n");
-  }
+    case EFI_FVB2_ALIGNMENT_8:
+    printf ("       EFI_FVB2_ALIGNMENT_8\n");
+    break;
 
-  if (VolumeHeader.Attributes & EFI_FVB2_ALIGNMENT_16) {
-    printf ("        EFI_FVB2_ALIGNMENT_16\n");
-  }
+    case EFI_FVB2_ALIGNMENT_16:
+    printf ("       EFI_FVB2_ALIGNMENT_16\n");
+    break;
 
-  if (VolumeHeader.Attributes & EFI_FVB2_ALIGNMENT_32) {
-    printf ("        EFI_FVB2_ALIGNMENT_32\n");
-  }
+    case EFI_FVB2_ALIGNMENT_32:
+    printf ("       EFI_FVB2_ALIGNMENT_32\n");
+    break;
 
-  if (VolumeHeader.Attributes & EFI_FVB2_ALIGNMENT_64) {
-    printf ("        EFI_FVB2_ALIGNMENT_64\n");
-  }
+    case EFI_FVB2_ALIGNMENT_64:
+    printf ("       EFI_FVB2_ALIGNMENT_64\n");
+    break;
 
-  if (VolumeHeader.Attributes & EFI_FVB2_ALIGNMENT_128) {
-    printf ("        EFI_FVB2_ALIGNMENT_128\n");
-  }
+    case EFI_FVB2_ALIGNMENT_128:
+    printf ("       EFI_FVB2_ALIGNMENT_128\n");
+    break;
 
-  if (VolumeHeader.Attributes & EFI_FVB2_ALIGNMENT_256) {
-    printf ("        EFI_FVB2_ALIGNMENT_256\n");
-  }
+    case EFI_FVB2_ALIGNMENT_256:
+    printf ("       EFI_FVB2_ALIGNMENT_256\n");
+    break;
 
-  if (VolumeHeader.Attributes & EFI_FVB2_ALIGNMENT_512) {
-    printf ("        EFI_FVB2_ALIGNMENT_512\n");
-  }
+    case EFI_FVB2_ALIGNMENT_512:
+    printf ("       EFI_FVB2_ALIGNMENT_512\n");
+    break;
 
-  if (VolumeHeader.Attributes & EFI_FVB2_ALIGNMENT_1K) {
-    printf ("        EFI_FVB2_ALIGNMENT_1K\n");
-  }
+    case EFI_FVB2_ALIGNMENT_1K:
+    printf ("       EFI_FVB2_ALIGNMENT_1K\n");
+    break;
 
-  if (VolumeHeader.Attributes & EFI_FVB2_ALIGNMENT_2K) {
-    printf ("        EFI_FVB2_ALIGNMENT_2K\n");
-  }
+    case EFI_FVB2_ALIGNMENT_2K:
+    printf ("       EFI_FVB2_ALIGNMENT_2K\n");
+    break;
 
-  if (VolumeHeader.Attributes & EFI_FVB2_ALIGNMENT_4K) {
-    printf ("        EFI_FVB2_ALIGNMENT_4K\n");
-  }
+    case EFI_FVB2_ALIGNMENT_4K:
+    printf ("       EFI_FVB2_ALIGNMENT_4K\n");
+    break;
 
-  if (VolumeHeader.Attributes & EFI_FVB2_ALIGNMENT_8K) {
-    printf ("        EFI_FVB2_ALIGNMENT_8K\n");
-  }
+    case EFI_FVB2_ALIGNMENT_8K:
+    printf ("       EFI_FVB2_ALIGNMENT_8K\n");
+    break;
 
-  if (VolumeHeader.Attributes & EFI_FVB2_ALIGNMENT_16K) {
-    printf ("        EFI_FVB2_ALIGNMENT_16K\n");
-  }
+    case EFI_FVB2_ALIGNMENT_16K:
+    printf ("       EFI_FVB2_ALIGNMENT_16K\n");
+    break;
 
-  if (VolumeHeader.Attributes & EFI_FVB2_ALIGNMENT_32K) {
-    printf ("        EFI_FVB2_ALIGNMENT_32K\n");
-  }
+    case EFI_FVB2_ALIGNMENT_32K:
+    printf ("       EFI_FVB2_ALIGNMENT_32K\n");
+    break;
 
-  if (VolumeHeader.Attributes & EFI_FVB2_ALIGNMENT_64K) {
-    printf ("        EFI_FVB2_ALIGNMENT_64K\n");
-  }
+    case EFI_FVB2_ALIGNMENT_64K:
+    printf ("       EFI_FVB2_ALIGNMENT_64K\n");
+    break;
 
-  if (VolumeHeader.Attributes & EFI_FVB2_ALIGNMENT_128K) {
-    printf ("        EFI_FVB2_ALIGNMENT_128K\n");
-  }
+    case EFI_FVB2_ALIGNMENT_128K:
+    printf ("       EFI_FVB2_ALIGNMENT_128K\n");
+    break;
 
-  if (VolumeHeader.Attributes & EFI_FVB2_ALIGNMENT_256K) {
-    printf ("        EFI_FVB2_ALIGNMENT_256K\n");
-  }
+    case EFI_FVB2_ALIGNMENT_256K:
+    printf ("       EFI_FVB2_ALIGNMENT_256K\n");
+    break;
 
-  if (VolumeHeader.Attributes & EFI_FVB2_ALIGNMENT_512K) {
-    printf ("        EFI_FVB2_ALIGNMENT_512K\n");
-  }
+    case EFI_FVB2_ALIGNMENT_512K:
+    printf ("       EFI_FVB2_ALIGNMENT_512K\n");
+    break;
 
-  if (VolumeHeader.Attributes & EFI_FVB2_ALIGNMENT_1M) {
-    printf ("        EFI_FVB2_ALIGNMENT_1M\n");
-  }
+    case EFI_FVB2_ALIGNMENT_1M:
+    printf ("       EFI_FVB2_ALIGNMENT_1M\n");
+    break;
 
-  if (VolumeHeader.Attributes & EFI_FVB2_ALIGNMENT_2M) {
-    printf ("        EFI_FVB2_ALIGNMENT_2M\n");
-  }
+    case EFI_FVB2_ALIGNMENT_2M:
+    printf ("       EFI_FVB2_ALIGNMENT_2M\n");
+    break;
 
-  if (VolumeHeader.Attributes & EFI_FVB2_ALIGNMENT_4M) {
-    printf ("        EFI_FVB2_ALIGNMENT_4M\n");
-  }
+    case EFI_FVB2_ALIGNMENT_4M:
+    printf ("       EFI_FVB2_ALIGNMENT_4M\n");
+    break;
 
-  if (VolumeHeader.Attributes & EFI_FVB2_ALIGNMENT_8M) {
-    printf ("        EFI_FVB2_ALIGNMENT_8M\n");
-  }
+    case EFI_FVB2_ALIGNMENT_8M:
+    printf ("       EFI_FVB2_ALIGNMENT_8M\n");
+    break;
 
-  if (VolumeHeader.Attributes & EFI_FVB2_ALIGNMENT_16M) {
-    printf ("        EFI_FVB2_ALIGNMENT_16M\n");
-  }
+    case EFI_FVB2_ALIGNMENT_16M:
+    printf ("       EFI_FVB2_ALIGNMENT_16M\n");
+    break;
 
-  if (VolumeHeader.Attributes & EFI_FVB2_ALIGNMENT_32M) {
-    printf ("        EFI_FVB2_ALIGNMENT_32M\n");
-  }
+    case EFI_FVB2_ALIGNMENT_32M:
+    printf ("       EFI_FVB2_ALIGNMENT_32M\n");
+    break;
 
-  if (VolumeHeader.Attributes & EFI_FVB2_ALIGNMENT_64M) {
-    printf ("        EFI_FVB2_ALIGNMENT_64M\n");
-  }
+    case EFI_FVB2_ALIGNMENT_64M:
+    printf ("       EFI_FVB2_ALIGNMENT_64M\n");
+    break;
 
-  if (VolumeHeader.Attributes & EFI_FVB2_ALIGNMENT_128M) {
-    printf ("        EFI_FVB2_ALIGNMENT_128M\n");
-  }
+    case EFI_FVB2_ALIGNMENT_128M:
+    printf ("       EFI_FVB2_ALIGNMENT_128M\n");
+    break;
 
-  if (VolumeHeader.Attributes & EFI_FVB2_ALIGNMENT_64M) {
-    printf ("        EFI_FVB2_ALIGNMENT_64M\n");
-  }
+    case EFI_FVB2_ALIGNMENT_256M:
+    printf ("       EFI_FVB2_ALIGNMENT_256M\n");
+    break;
 
-  if (VolumeHeader.Attributes & EFI_FVB2_ALIGNMENT_128M) {
-    printf ("        EFI_FVB2_ALIGNMENT_128M\n");
-  }
+    case EFI_FVB2_ALIGNMENT_512M:
+    printf ("       EFI_FVB2_ALIGNMENT_512M\n");
+    break;
 
-  if (VolumeHeader.Attributes & EFI_FVB2_ALIGNMENT_256M) {
-    printf ("        EFI_FVB2_ALIGNMENT_256M\n");
-  }
+    case EFI_FVB2_ALIGNMENT_1G:
+    printf ("       EFI_FVB2_ALIGNMENT_1G\n");
+    break;
 
-  if (VolumeHeader.Attributes & EFI_FVB2_ALIGNMENT_512M) {
-    printf ("        EFI_FVB2_ALIGNMENT_512M\n");
-  }
-
-  if (VolumeHeader.Attributes & EFI_FVB2_ALIGNMENT_1G) {
-    printf ("        EFI_FVB2_ALIGNMENT_1G\n");
-  }
-
-  if (VolumeHeader.Attributes & EFI_FVB2_ALIGNMENT_2G) {
-    printf ("        EFI_FVB2_ALIGNMENT_2G\n");
+    case EFI_FVB2_ALIGNMENT_2G:
+    printf ("       EFI_FVB2_ALIGNMENT_2G\n");
+    break;
   }
 
 #endif
@@ -1088,6 +1089,53 @@ Returns:
   //
   // rewind (InputFile);
   //
+  return EFI_SUCCESS;
+}
+
+STATIC
+EFI_STATUS
+PrintAprioriFile (
+  EFI_FFS_FILE_HEADER         *FileHeader
+  )
+/*++
+
+Routine Description:
+
+  Print GUIDs from the APRIORI file
+
+Arguments:
+
+  FileHeader - The file header
+
+Returns:
+
+  EFI_SUCCESS       - The APRIORI file was parsed correctly
+  EFI_SECTION_ERROR - Problem with file parsing
+
+--*/
+{
+  UINT8               GuidBuffer[PRINTED_GUID_BUFFER_SIZE];
+  UINT32              HeaderSize;
+
+  HeaderSize = FvBufGetFfsHeaderSize (FileHeader);
+
+  if (FileHeader->Type != EFI_FV_FILETYPE_FREEFORM)
+    return EFI_SECTION_ERROR;
+
+  EFI_COMMON_SECTION_HEADER* SectionHeader = (EFI_COMMON_SECTION_HEADER *) ((UINTN) FileHeader + HeaderSize);
+  if (SectionHeader->Type != EFI_SECTION_RAW)
+    return EFI_SECTION_ERROR;
+
+  UINT32 SectionLength = GetSectionFileLength (SectionHeader);
+  EFI_GUID* FileName = (EFI_GUID *) ((UINT8 *) SectionHeader + sizeof (EFI_COMMON_SECTION_HEADER));
+  while (((UINT8 *) FileName) < ((UINT8 *) SectionHeader + SectionLength)) {
+    PrintGuidToBuffer (FileName, GuidBuffer, sizeof (GuidBuffer), TRUE);
+    printf ("%s  ", GuidBuffer);
+    PrintGuidName (GuidBuffer);
+    printf ("\n");
+    FileName++;
+  }
+
   return EFI_SUCCESS;
 }
 
@@ -1290,7 +1338,7 @@ Returns:
     break;
 
   case EFI_FV_FILETYPE_SMM:
-    printf ("EFI_FV_FILETYPE_SMM\n");
+    printf ("EFI_FV_FILETYPE_MM\n");
     break;
 
   case EFI_FV_FILETYPE_FIRMWARE_VOLUME_IMAGE:
@@ -1298,11 +1346,11 @@ Returns:
     break;
 
   case EFI_FV_FILETYPE_COMBINED_SMM_DXE:
-    printf ("EFI_FV_FILETYPE_COMBINED_SMM_DXE\n");
+    printf ("EFI_FV_FILETYPE_COMBINED_MM_DXE\n");
     break;
 
   case EFI_FV_FILETYPE_SMM_CORE:
-    printf ("EFI_FV_FILETYPE_SMM_CORE\n");
+    printf ("EFI_FV_FILETYPE_MM_CORE\n");
     break;
 
   case EFI_FV_FILETYPE_MM_STANDALONE:
@@ -1345,6 +1393,25 @@ Returns:
       return EFI_ABORTED;
     }
     break;
+  }
+
+  if (!CompareGuid (
+       &FileHeader->Name,
+       &gPeiAprioriFileNameGuid
+       ))
+  {
+    printf("\n");
+    printf("PEI APRIORI FILE:\n");
+    return PrintAprioriFile (FileHeader);
+  }
+  if (!CompareGuid (
+       &FileHeader->Name,
+       &gAprioriGuid
+       ))
+  {
+    printf("\n");
+    printf("DXE APRIORI FILE:\n");
+    return PrintAprioriFile (FileHeader);
   }
 
   return EFI_SUCCESS;
@@ -1682,6 +1749,7 @@ Returns:
   CHAR8               *ToolInputFileName;
   CHAR8               *ToolOutputFileName;
   CHAR8               *UIFileName;
+  CHAR8               *VersionString;
 
   ParsedLength = 0;
   ToolInputFileName = NULL;
@@ -1801,18 +1869,28 @@ Returns:
       break;
 
     case EFI_SECTION_FIRMWARE_VOLUME_IMAGE:
+      printf ("/------------ Firmware Volume section start ---------------\\\n");
       Status = PrintFvInfo (Ptr + SectionHeaderLen, TRUE);
       if (EFI_ERROR (Status)) {
         Error (NULL, 0, 0003, "printing of FV section contents failed", NULL);
         return EFI_SECTION_ERROR;
       }
+      printf ("\\------------ Firmware Volume section end -----------------/\n");
       break;
 
     case EFI_SECTION_COMPATIBILITY16:
-    case EFI_SECTION_FREEFORM_SUBTYPE_GUID:
       //
       // Section does not contain any further header information.
       //
+      break;
+
+    case EFI_SECTION_FREEFORM_SUBTYPE_GUID:
+      printf ("  Guid:  ");
+      if (SectionHeaderLen == sizeof (EFI_COMMON_SECTION_HEADER))
+        PrintGuid (&((EFI_FREEFORM_SUBTYPE_GUID_SECTION *)Ptr)->SubTypeGuid);
+      else
+        PrintGuid (&((EFI_FREEFORM_SUBTYPE_GUID_SECTION2 *)Ptr)->SubTypeGuid);
+      printf ("\n");
       break;
 
     case EFI_SECTION_PEI_DEPEX:
@@ -1822,8 +1900,14 @@ Returns:
       break;
 
     case EFI_SECTION_VERSION:
-      printf ("  Build Number:  0x%02X\n", *(UINT16 *)(Ptr + SectionHeaderLen));
-      printf ("  Version Strg:  %s\n", (char*) (Ptr + SectionHeaderLen + sizeof (UINT16)));
+      printf ("  Build Number:  0x%04X\n", *(UINT16 *)(Ptr + SectionHeaderLen));
+      VersionString = (CHAR8 *) malloc (UnicodeStrLen (((EFI_VERSION_SECTION *) Ptr)->VersionString) + 1);
+      if (VersionString == NULL) {
+        Error (NULL, 0, 4001, "Resource", "memory cannot be allocated!");
+        return EFI_OUT_OF_RESOURCES;
+      }
+      Unicode2AsciiString (((EFI_VERSION_SECTION *) Ptr)->VersionString, VersionString);
+      printf ("  Version String:  %s\n", VersionString);
       break;
 
     case EFI_SECTION_COMPRESSION:
@@ -1902,7 +1986,9 @@ Returns:
         return EFI_SECTION_ERROR;
       }
 
+      printf ("/------------ Encapsulation section start -----------------\\\n");
       Status = ParseSection (UncompressedBuffer, UncompressedLength);
+      printf ("\\------------ Encapsulation section end -------------------/\n");
 
       if (CompressionType == EFI_STANDARD_COMPRESSION) {
         //
@@ -1996,11 +2082,18 @@ Returns:
           );
         free (ExtractionTool);
 
+        if (!CompareGuid (
+               EfiGuid,
+               &gEfiCrc32GuidedSectionExtractionProtocolGuid
+               )
+           ) {
+          DataOffset -= 4;
+        }
         Status =
           PutFileImage (
             ToolInputFile,
-            (CHAR8*) SectionBuffer + DataOffset,
-            BufferLength - DataOffset
+            (CHAR8*)Ptr + DataOffset,
+            SectionLength - DataOffset
             );
 
         system (SystemCommand);
@@ -2021,6 +2114,7 @@ Returns:
           return EFI_SECTION_ERROR;
         }
 
+        printf ("/------------ Encapsulation section start -----------------\\\n");
         Status = ParseSection (
                   ToolOutputBuffer,
                   ToolOutputLength
@@ -2029,6 +2123,7 @@ Returns:
           Error (NULL, 0, 0003, "parse of decoded GUIDED section failed", NULL);
           return EFI_SECTION_ERROR;
         }
+        printf ("\\------------ Encapsulation section end -------------------/\n");
 
       //
       // Check for CRC32 sections which we can handle internally if needed.
@@ -2041,14 +2136,16 @@ Returns:
         //
         // CRC32 guided section
         //
+        printf ("/------------ Encapsulation section start -----------------\\\n");
         Status = ParseSection (
-                  SectionBuffer + DataOffset,
-                  BufferLength - DataOffset
+                  Ptr + DataOffset,
+                  SectionLength - DataOffset
                   );
         if (EFI_ERROR (Status)) {
           Error (NULL, 0, 0003, "parse of CRC32 GUIDED section failed", NULL);
           return EFI_SECTION_ERROR;
         }
+        printf ("\\------------ Encapsulation section end -------------------/\n");
       } else {
         //
         // We don't know how to parse it now.

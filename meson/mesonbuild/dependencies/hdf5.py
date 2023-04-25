@@ -29,7 +29,6 @@ from .factory import factory_methods
 import typing as T
 
 if T.TYPE_CHECKING:
-    from .base import Dependency
     from .factory import DependencyGenerator
     from ..environment import Environment
     from ..mesonlib import MachineChoice
@@ -97,13 +96,13 @@ class HDF5ConfigToolDependency(ConfigToolDependency):
 
         if language == 'c':
             cenv = 'CC'
-            tools = ['h5cc']
+            tools = ['h5cc', 'h5pcc']
         elif language == 'cpp':
             cenv = 'CXX'
-            tools = ['h5c++']
+            tools = ['h5c++', 'h5pc++']
         elif language == 'fortran':
             cenv = 'FC'
-            tools = ['h5fc']
+            tools = ['h5fc', 'h5pfc']
         else:
             raise DependencyException('How did you get here?')
 

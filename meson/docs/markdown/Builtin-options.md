@@ -26,9 +26,10 @@ They can also be edited after setup using `meson configure
 Installation options are all relative to the prefix, except:
 
 * When the prefix is `/usr`: `sysconfdir` defaults to `/etc`,
-* `localstatedir` defaults to `/var`, and `sharedstatedir` defaults to
-* `/var/lib` When the prefix is `/usr/local`: `localstatedir` defaults
-* to `/var/local`, and `sharedstatedir` defaults to `/var/local/lib`
+ `localstatedir` defaults to `/var`, and `sharedstatedir` defaults to
+ `/var/lib`
+* When the prefix is `/usr/local`: `localstatedir` defaults
+ to `/var/local`, and `sharedstatedir` defaults to `/var/local/lib`
 
 ### Directories
 
@@ -69,9 +70,9 @@ machine](#specifying-options-per-machine) section for details.
 | Option                               | Default value | Description                                                    | Is per machine | Is per subproject |
 | ------                               | ------------- | -----------                                                    | -------------- | ----------------- |
 | auto_features {enabled, disabled, auto} | auto       | Override value of all 'auto' features                          | no             | no                |
-| backend {ninja, vs,<br>vs2010, vs2012, vs2013, vs2015, vs2017, vs2019, xcode} | ninja | Backend to use                | no             | no                |
+| backend {ninja, vs,<br>vs2010, vs2012, vs2013, vs2015, vs2017, vs2019, vs2022, xcode} | ninja | Backend to use        | no             | no                |
 | buildtype {plain, debug,<br>debugoptimized, release, minsize, custom} | debug |  Build type to use                    | no             | no                |
-| debug                                | true          | Debug                                                          | no             | no                |
+| debug                                | true          | Enable debug symbols and other information                     | no             | no                |
 | default_library {shared, static, both} | shared      | Default library type                                           | no             | yes               |
 | errorlogs                            | true          | Whether to print the logs from failing tests.                  | no             | no                |
 | install_umask {preserve, 0000-0777}  | 022           | Default umask to apply on permissions of installed files       | no             | no                |
@@ -166,7 +167,7 @@ option:
 `-Wl,-bitcode_bundle` while linking. These options are incompatible
 with `b_asneeded`, so that option will be silently disabled.
 
-[Shared modules](Reference-manual.md#shared_module) will not have
+[[shared_module]]s will not have
 bitcode embedded because `-Wl,-bitcode_bundle` is incompatible with
 both `-bundle` and `-Wl,-undefined,dynamic_lookup` which are necessary
 for shared modules to work.
@@ -260,3 +261,23 @@ The value is overridden in this order:
 - Value from command line if set
 
 Since 0.56.0 `warning_level` can also be defined per subproject.
+
+## Module options
+
+Some Meson modules have built-in options. They can be set by prefixing the option
+name with the module name: `-D<module>.<option>=<value>` (e.g. `-Dpython.platlibdir=/foo`).
+
+### Python module
+
+| Option           | Default value | Possible values | Description |
+| ------           | ------------- | --------------- | ----------- |
+| platlibdir       |               | Directory path  | Directory for site-specific, platform-specific files (Since 0.60.0) |
+| purelibdir       |               | Directory path  | Directory for site-specific, non-platform-specific files  (Since 0.60.0) |
+
+*Since 0.60.0* `python.platlibdir` and `python.purelibdir` options are used by
+python module methods `python.install_sources()` and `python.get_install_dir()`.
+By default Meson tries to detect the correct installation path, but make them
+relative to the installation `prefix`, which will often result in installed python
+modules to not be found by the interpreter unless `prefix` is `/usr` on Linux,
+or for example `C:\Python39` on Windows. These options can be absolute paths
+outside of `prefix`.

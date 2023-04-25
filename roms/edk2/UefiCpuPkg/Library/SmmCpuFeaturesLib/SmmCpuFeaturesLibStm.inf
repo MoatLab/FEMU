@@ -19,6 +19,7 @@
 
 [Sources]
   CpuFeaturesLib.h
+  IntelSmmCpuFeaturesLib.c
   SmmCpuFeaturesLibCommon.c
   SmmStm.c
   SmmStm.h
@@ -69,6 +70,10 @@
   gUefiCpuPkgTokenSpaceGuid.PcdCpuMsegSize                         ## SOMETIMES_CONSUMES
   gUefiCpuPkgTokenSpaceGuid.PcdCpuSmmStmExceptionStackSize         ## SOMETIMES_CONSUMES
   gUefiCpuPkgTokenSpaceGuid.PcdCpuSmmStackGuard                    ## CONSUMES
+
+[FeaturePcd]
+  gUefiCpuPkgTokenSpaceGuid.PcdSmrrEnable  ## CONSUMES
+  gUefiCpuPkgTokenSpaceGuid.PcdSmmFeatureControlEnable  ## CONSUMES
 
 [Depex]
   gEfiMpServiceProtocolGuid

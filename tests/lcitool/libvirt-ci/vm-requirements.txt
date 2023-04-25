@@ -1,0 +1,5 @@
+-r requirements.txt
+
+ansible
+ansible-runner
+libvirt-python

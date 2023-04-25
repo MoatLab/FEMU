@@ -1,0 +1,11 @@
+[binaries]
+c = '/usr/bin/x86_64-linux-gnu-gcc'
+ar = '/usr/bin/x86_64-linux-gnu-gcc-ar'
+strip = '/usr/bin/x86_64-linux-gnu-strip'
+pkgconfig = '/usr/bin/x86_64-linux-gnu-pkg-config'
+
+[host_machine]
+system = 'linux'
+cpu_family = 'x86_64'
+cpu = 'x86_64'
+endian = 'little'

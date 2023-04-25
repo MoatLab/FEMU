@@ -163,6 +163,11 @@ extern void start_kernel32(uint64_t entry, void* fdt,
 			   uint64_t mem_top) __noreturn;
 extern void start_kernel_secondary(uint64_t entry) __noreturn;
 
+/* Re-set r16 register with CPU pointer, based on stack (r1) value */
+extern void restore_cpu_ptr_r16(void);
+/* Set r16 register with value in 'r16' parameter */
+extern void set_cpu_ptr_r16(uint64_t r16);
+
 /* Get description of machine from HDAT and create device-tree */
 extern int parse_hdat(bool is_opal);
 
@@ -209,7 +214,7 @@ extern int preload_capp_ucode(void);
 extern void preload_io_vpd(void);
 extern void probe_npu(void);
 extern void probe_npu2(void);
-extern void probe_npu3(void);
+extern void probe_pau(void);
 extern void uart_init(void);
 extern void mbox_init(void);
 extern void early_uart_init(void);
@@ -310,11 +315,6 @@ enum wakeup_engine_states {
 extern enum wakeup_engine_states wakeup_engine_state;
 extern bool has_deep_states;
 extern void nx_p9_rng_late_init(void);
-
-
-
-/* SLW reinit function for switching core settings */
-extern int64_t slw_reinit(uint64_t flags);
 
 /* Patch SPR in SLW image */
 extern int64_t opal_slw_set_reg(uint64_t cpu_pir, uint64_t sprn, uint64_t val);

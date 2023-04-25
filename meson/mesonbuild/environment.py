@@ -22,7 +22,7 @@ from . import mesonlib
 from .mesonlib import (
     MesonException, EnvironmentException, MachineChoice, Popen_safe, PerMachine,
     PerMachineDefaultable, PerThreeMachineDefaultable, split_args, quote_arg, OptionKey,
-    search_version
+    search_version, MesonBugException
 )
 from . import mlog
 from .programs import (
@@ -49,7 +49,7 @@ from mesonbuild import envconfig
 if T.TYPE_CHECKING:
     from configparser import ConfigParser
 
-    from .dependencies import ExternalProgram
+    from .wrap.wrap import Resolver
 
 build_filename = 'meson.build'
 
@@ -69,7 +69,7 @@ def _get_env_var(for_machine: MachineChoice, is_cross: bool, var_name: str) -> T
         # allows native builds to never need to worry about the 'BUILD_*'
         # ones.
         ([var_name + '_FOR_BUILD'] if is_cross else [var_name]),
-        # Always just the unprefixed host verions
+        # Always just the unprefixed host versions
         [var_name]
     )[for_machine]
     for var in candidates:
@@ -84,7 +84,7 @@ def _get_env_var(for_machine: MachineChoice, is_cross: bool, var_name: str) -> T
     return value
 
 
-def detect_gcovr(min_version='3.3', new_rootdir_version='4.2', log=False):
+def detect_gcovr(min_version='3.3', log=False):
     gcovr_exe = 'gcovr'
     try:
         p, found = Popen_safe([gcovr_exe, '--version'])[0:2]
@@ -95,7 +95,7 @@ def detect_gcovr(min_version='3.3', new_rootdir_version='4.2', log=False):
     if p.returncode == 0 and mesonlib.version_compare(found, '>=' + min_version):
         if log:
             mlog.log('Found gcovr-{} at {}'.format(found, quote_arg(shutil.which(gcovr_exe))))
-        return gcovr_exe, mesonlib.version_compare(found, '>=' + new_rootdir_version)
+        return gcovr_exe, found
     return None, None
 
 def detect_llvm_cov():
@@ -106,7 +106,7 @@ def detect_llvm_cov():
     return None
 
 def find_coverage_tools() -> T.Tuple[T.Optional[str], T.Optional[str], T.Optional[str], T.Optional[str], T.Optional[str]]:
-    gcovr_exe, gcovr_new_rootdir = detect_gcovr()
+    gcovr_exe, gcovr_version = detect_gcovr()
 
     llvm_cov_exe = detect_llvm_cov()
 
@@ -118,7 +118,7 @@ def find_coverage_tools() -> T.Tuple[T.Optional[str], T.Optional[str], T.Optiona
     if not mesonlib.exe_exists([genhtml_exe, '--version']):
         genhtml_exe = None
 
-    return gcovr_exe, gcovr_new_rootdir, lcov_exe, genhtml_exe, llvm_cov_exe
+    return gcovr_exe, gcovr_version, lcov_exe, genhtml_exe, llvm_cov_exe
 
 def detect_ninja(version: str = '1.8.2', log: bool = False) -> T.List[str]:
     r = detect_ninja_command_and_version(version, log)
@@ -545,7 +545,6 @@ class Environment:
                     self.options[key.as_build()] = value
             self._load_machine_file_options(config, properties.host, MachineChoice.HOST)
 
-
         ## "freeze" now initialized configuration, and "save" to the class.
 
         self.machines = machines.default_missing()
@@ -579,7 +578,7 @@ class Environment:
 
         self.default_cmake = ['cmake']
         self.default_pkgconfig = ['pkg-config']
-        self.wrap_resolver = None
+        self.wrap_resolver: T.Optional['Resolver'] = None
 
     def _load_machine_file_options(self, config: 'ConfigParser', properties: Properties, machine: MachineChoice) -> None:
         """Read the contents of a Machine file and put it in the options store."""
@@ -688,11 +687,11 @@ class Environment:
                             # time) until we're instantiating that `Compiler`
                             # object. This is required so that passing
                             # `-Dc_args=` on the command line and `$CFLAGS`
-                            # have subtely differen behavior. `$CFLAGS` will be
+                            # have subtely different behavior. `$CFLAGS` will be
                             # added to the linker command line if the compiler
                             # acts as a linker driver, `-Dc_args` will not.
                             #
-                            # We stil use the original key as the base here, as
+                            # We still use the original key as the base here, as
                             # we want to inhert the machine and the compiler
                             # language
                             key = key.evolve('env_args')
@@ -758,25 +757,29 @@ class Environment:
     def get_coredata(self) -> coredata.CoreData:
         return self.coredata
 
-    def get_build_command(self, unbuffered=False):
-        cmd = mesonlib.get_meson_command().copy()
+    @staticmethod
+    def get_build_command(unbuffered: bool = False) -> T.List[str]:
+        cmd = mesonlib.get_meson_command()
+        if cmd is None:
+            raise MesonBugException('No command?')
+        cmd = cmd.copy()
         if unbuffered and 'python' in os.path.basename(cmd[0]):
             cmd.insert(1, '-u')
         return cmd
 
-    def is_header(self, fname):
+    def is_header(self, fname: 'mesonlib.FileOrString') -> bool:
         return is_header(fname)
 
-    def is_source(self, fname):
+    def is_source(self, fname: 'mesonlib.FileOrString') -> bool:
         return is_source(fname)
 
-    def is_assembly(self, fname):
+    def is_assembly(self, fname: 'mesonlib.FileOrString') -> bool:
         return is_assembly(fname)
 
-    def is_llvm_ir(self, fname):
+    def is_llvm_ir(self, fname: 'mesonlib.FileOrString') -> bool:
         return is_llvm_ir(fname)
 
-    def is_object(self, fname):
+    def is_object(self, fname: 'mesonlib.FileOrString') -> bool:
         return is_object(fname)
 
     @lru_cache(maxsize=None)

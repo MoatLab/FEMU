@@ -1,5 +1,5 @@
 ;------------------------------------------------------------------------------ ;
-; Copyright (c) 2015 - 2021, Intel Corporation. All rights reserved.<BR>
+; Copyright (c) 2015 - 2022, Intel Corporation. All rights reserved.<BR>
 ; SPDX-License-Identifier: BSD-2-Clause-Patent
 ;
 ; Module Name:
@@ -24,8 +24,6 @@ SECTION .text
 ;ALSO THIS PROCEDURE IS EXECUTED BY APs ONLY ON 16 BIT MODE. HENCE THIS PROC
 ;IS IN MACHINE CODE.
 ;-------------------------------------------------------------------------------------
-global ASM_PFX(RendezvousFunnelProc)
-ASM_PFX(RendezvousFunnelProc):
 RendezvousFunnelProcStart:
 ; At this point CS = 0x(vv00) and ip= 0x0.
 BITS 16
@@ -181,6 +179,14 @@ ProgramStack:
     mov         esp, dword [edi + CPU_INFO_IN_HOB.ApTopOfStack]
 
 CProcedureInvoke:
+    ;
+    ; Reserve 4 bytes for CpuMpData.
+    ; When the AP wakes up again via INIT-SIPI-SIPI, push 0 will cause the existing CpuMpData to be overwritten with 0.
+    ; CpuMpData is filled in via InitializeApData() during the first time INIT-SIPI-SIPI,
+    ; while overwirrten may occurs when under ApInHltLoop but InitFlag is not set to ApInitConfig.
+    ; Therefore reservation is implemented by sub esp instead of push 0.
+    ;
+    sub        esp, 4
     push       ebp               ; push BIST data at top of AP stack
     xor        ebp, ebp          ; clear ebp for call stack trace
     push       ebp
@@ -201,17 +207,16 @@ CProcedureInvoke:
     call       eax               ; Invoke C function
 
     jmp        $                 ; Never reach here
-RendezvousFunnelProcEnd:
 
 ;-------------------------------------------------------------------------------------
 ;SwitchToRealProc procedure follows.
 ;NOT USED IN 32 BIT MODE.
 ;-------------------------------------------------------------------------------------
-global ASM_PFX(SwitchToRealProc)
-ASM_PFX(SwitchToRealProc):
 SwitchToRealProcStart:
     jmp        $                 ; Never reach here
 SwitchToRealProcEnd:
+
+RendezvousFunnelProcEnd:
 
 ;-------------------------------------------------------------------------------------
 ;  AsmRelocateApLoop (MwaitSupport, ApTargetCState, PmCodeSegment, TopOfApStack, CountTofinish, Pm16CodeSegment, SevEsAPJumpTable, WakeupBuffer);
@@ -219,8 +224,6 @@ SwitchToRealProcEnd:
 ;  The last three parameters (Pm16CodeSegment, SevEsAPJumpTable and WakeupBuffer) are
 ;  specific to SEV-ES support and are not applicable on IA32.
 ;-------------------------------------------------------------------------------------
-global ASM_PFX(AsmRelocateApLoop)
-ASM_PFX(AsmRelocateApLoop):
 AsmRelocateApLoopStart:
     mov        eax, esp
     mov        esp, [eax + 16]     ; TopOfApStack
@@ -264,8 +267,6 @@ ASM_PFX(AsmGetAddressMap):
     mov        dword [ebx + MP_ASSEMBLY_ADDRESS_MAP.RelocateApLoopFuncAddress], AsmRelocateApLoopStart
     mov        dword [ebx + MP_ASSEMBLY_ADDRESS_MAP.RelocateApLoopFuncSize], AsmRelocateApLoopEnd - AsmRelocateApLoopStart
     mov        dword [ebx + MP_ASSEMBLY_ADDRESS_MAP.ModeTransitionOffset], Flat32Start - RendezvousFunnelProcStart
-    mov        dword [ebx + MP_ASSEMBLY_ADDRESS_MAP.SwitchToRealSize], SwitchToRealProcEnd - SwitchToRealProcStart
-    mov        dword [ebx + MP_ASSEMBLY_ADDRESS_MAP.SwitchToRealOffset], SwitchToRealProcStart - RendezvousFunnelProcStart
     mov        dword [ebx + MP_ASSEMBLY_ADDRESS_MAP.SwitchToRealNoNxOffset], SwitchToRealProcStart - Flat32Start
     mov        dword [ebx + MP_ASSEMBLY_ADDRESS_MAP.SwitchToRealPM16ModeOffset], 0
     mov        dword [ebx + MP_ASSEMBLY_ADDRESS_MAP.SwitchToRealPM16ModeSize], 0
@@ -291,15 +292,8 @@ ASM_PFX(AsmExchangeRole):
     ; edi contains OthersInfo pointer
     mov        edi, [ebp + 28h]
 
-    ;Store EFLAGS, GDTR and IDTR register to stack
+    ;Store EFLAGS to stack
     pushfd
-    mov        eax, cr4
-    push       eax       ; push cr4 firstly
-    mov        eax, cr0
-    push       eax
-
-    sgdt       [esi + CPU_EXCHANGE_ROLE_INFO.Gdtr]
-    sidt       [esi + CPU_EXCHANGE_ROLE_INFO.Idtr]
 
     ; Store the its StackPointer
     mov        [esi + CPU_EXCHANGE_ROLE_INFO.StackPointer],esp
@@ -315,13 +309,6 @@ WaitForOtherStored:
     jmp        WaitForOtherStored
 
 OtherStored:
-    ; Since another CPU already stored its state, load them
-    ; load GDTR value
-    lgdt       [edi + CPU_EXCHANGE_ROLE_INFO.Gdtr]
-
-    ; load IDTR value
-    lidt       [edi + CPU_EXCHANGE_ROLE_INFO.Idtr]
-
     ; load its future StackPointer
     mov        esp, [edi + CPU_EXCHANGE_ROLE_INFO.StackPointer]
 
@@ -338,10 +325,6 @@ WaitForOtherLoaded:
 
 OtherLoaded:
     ; since the other CPU already get the data it want, leave this procedure
-    pop        eax
-    mov        cr0, eax
-    pop        eax
-    mov        cr4, eax
     popfd
 
     popad

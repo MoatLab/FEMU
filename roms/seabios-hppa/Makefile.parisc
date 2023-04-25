@@ -68,7 +68,8 @@ EXTRAVERSION=
 CPPFLAGS = -P -MD -MT $@
 
 COMMONCFLAGS := -I$(OUT) -Isrc -Ivgasrc -Os -MD -g \
-    -Wall -Wno-strict-aliasing -Wold-style-definition \
+    -Wall -Wno-strict-aliasing -Wold-style-definition -Wno-address-of-packed-member \
+    -Wno-stringop-overflow -Wno-array-bounds \
     $(call cc-option,$(CC),-Wtype-limits,) \
     -fomit-frame-pointer \
     -freg-struct-return -ffreestanding -fno-delete-null-pointer-checks \

@@ -193,6 +193,7 @@ struct DeviceState {
     int instance_id_alias;
     int alias_required_for_version;
     ResettableState reset;
+    GSList *unplug_blockers;
 };
 
 struct DeviceListener {
@@ -385,7 +386,7 @@ bool qdev_realize_and_unref(DeviceState *dev, BusState *bus, Error **errp);
  *
  *  - unrealize any child buses by calling qbus_unrealize()
  *    (this will recursively unrealize any devices on those buses)
- *  - call the the unrealize method of @dev
+ *  - call the unrealize method of @dev
  *
  * The device can then be freed by causing its reference count to go
  * to zero.
@@ -418,6 +419,34 @@ void qdev_simple_device_unplug_cb(HotplugHandler *hotplug_dev,
                                   DeviceState *dev, Error **errp);
 void qdev_machine_creation_done(void);
 bool qdev_machine_modified(void);
+
+/**
+ * qdev_add_unplug_blocker: Add an unplug blocker to a device
+ *
+ * @dev: Device to be blocked from unplug
+ * @reason: Reason for blocking
+ */
+void qdev_add_unplug_blocker(DeviceState *dev, Error *reason);
+
+/**
+ * qdev_del_unplug_blocker: Remove an unplug blocker from a device
+ *
+ * @dev: Device to be unblocked
+ * @reason: Pointer to the Error used with qdev_add_unplug_blocker.
+ *          Used as a handle to lookup the blocker for deletion.
+ */
+void qdev_del_unplug_blocker(DeviceState *dev, Error *reason);
+
+/**
+ * qdev_unplug_blocked: Confirm if a device is blocked from unplug
+ *
+ * @dev: Device to be tested
+ * @reason: Returns one of the reasons why the device is blocked,
+ *          if any
+ *
+ * Returns: true if device is blocked from unplug, false otherwise
+ */
+bool qdev_unplug_blocked(DeviceState *dev, Error **errp);
 
 /**
  * GpioPolarity: Polarity of a GPIO line
@@ -686,7 +715,7 @@ static inline void qdev_init_gpio_in_named(DeviceState *dev,
 void qdev_pass_gpios(DeviceState *dev, DeviceState *container,
                      const char *name);
 
-BusState *qdev_get_parent_bus(DeviceState *dev);
+BusState *qdev_get_parent_bus(const DeviceState *dev);
 
 /*** BUS API. ***/
 
@@ -713,32 +742,6 @@ int qdev_walk_children(DeviceState *dev,
                        qdev_walkerfn *pre_devfn, qbus_walkerfn *pre_busfn,
                        qdev_walkerfn *post_devfn, qbus_walkerfn *post_busfn,
                        void *opaque);
-
-/**
- * @qdev_reset_all:
- * Reset @dev. See @qbus_reset_all() for more details.
- *
- * Note: This function is deprecated and will be removed when it becomes unused.
- * Please use device_cold_reset() now.
- */
-void qdev_reset_all(DeviceState *dev);
-void qdev_reset_all_fn(void *opaque);
-
-/**
- * @qbus_reset_all:
- * @bus: Bus to be reset.
- *
- * Reset @bus and perform a bus-level ("hard") reset of all devices connected
- * to it, including recursive processing of all buses below @bus itself.  A
- * hard reset means that qbus_reset_all will reset all state of the device.
- * For PCI devices, for example, this will include the base address registers
- * or configuration space.
- *
- * Note: This function is deprecated and will be removed when it becomes unused.
- * Please use bus_cold_reset() now.
- */
-void qbus_reset_all(BusState *bus);
-void qbus_reset_all_fn(void *opaque);
 
 /**
  * device_cold_reset:
@@ -772,15 +775,6 @@ BusState *sysbus_get_default(void);
 
 char *qdev_get_fw_dev_path(DeviceState *dev);
 char *qdev_get_own_fw_dev_path_from_handler(BusState *bus, DeviceState *dev);
-
-/**
- * device_legacy_reset:
- *
- * Reset a single device (by calling the reset method).
- * Note: This function is deprecated and will be removed when it becomes unused.
- * Please use device_cold_reset() now.
- */
-void device_legacy_reset(DeviceState *dev);
 
 void device_class_set_props(DeviceClass *dc, Property *props);
 
@@ -818,7 +812,18 @@ void qbus_set_bus_hotplug_handler(BusState *bus);
 
 static inline bool qbus_is_hotpluggable(BusState *bus)
 {
-   return bus->hotplug_handler;
+    HotplugHandler *plug_handler = bus->hotplug_handler;
+    bool ret = !!plug_handler;
+
+    if (plug_handler) {
+        HotplugHandlerClass *hdc;
+
+        hdc = HOTPLUG_HANDLER_GET_CLASS(plug_handler);
+        if (hdc->is_hotpluggable_bus) {
+            ret = hdc->is_hotpluggable_bus(plug_handler, bus);
+        }
+    }
+    return ret;
 }
 
 /**

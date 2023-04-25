@@ -29,7 +29,7 @@
 
 /* clang-format on */
 
-static volatile void *uart_base;
+static volatile char *uart_base;
 
 static u32 get_reg(u32 num)
 {
@@ -67,10 +67,10 @@ int gaisler_uart_init(unsigned long base, u32 in_freq, u32 baudrate)
 {
 	u32 ctrl;
 
-	uart_base = (volatile void *)base;
+	uart_base = (volatile char *)base;
 
 	/* Configure baudrate */
-	if (in_freq)
+	if (in_freq && baudrate)
 		set_reg(UART_REG_SCALER, in_freq / (baudrate * 8 + 7));
 
 	ctrl = get_reg(UART_REG_CTRL);

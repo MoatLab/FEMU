@@ -122,6 +122,7 @@
 /* RBA Table : 256 bytes - Reject Bit Array
  *
  * 2048 interrupts, 1 bit each, indiates the reject state of interrupts
+ * Not used (Murano / Venice DD1 only)
  */
 #define RBA_TABLE_SIZE		0x100
 
@@ -213,11 +214,10 @@ struct phb3 {
 	uint32_t		base_lsi;
 
 	/* SkiBoot owned in-memory tables */
-	uint64_t		tbl_rtt;
-	uint64_t		tbl_peltv;
-	uint64_t		tbl_pest;
-	uint64_t		tbl_ivt;
-	uint64_t		tbl_rba;
+	__be16			*tbl_rtt;
+	uint8_t			*tbl_peltv;
+	__be64			*tbl_pest;
+	__be64			*tbl_ivt;
 
 	bool			skip_perst; /* Skip first perst */
 	bool			has_link;
@@ -227,10 +227,10 @@ struct phb3 {
 	unsigned int		max_link_speed;
 	uint32_t		no_ecrc_devs;
 
-	uint16_t		rte_cache[RTT_TABLE_ENTRIES];
+	__be16			rte_cache[RTT_TABLE_ENTRIES];
 	uint8_t			peltv_cache[PELTV_TABLE_SIZE];
 	uint64_t		lxive_cache[8];
-	uint64_t		ive_cache[IVT_TABLE_ENTRIES];
+	__be64			ive_cache[IVT_TABLE_ENTRIES];
 	uint64_t		tve_cache[512];
 	uint64_t		m32d_cache[256];
 	uint64_t		m64b_cache[16];

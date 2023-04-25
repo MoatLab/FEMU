@@ -11,18 +11,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import typing as T
-import os
-import re
-import pickle
-import shlex
-import subprocess
+
 from collections import OrderedDict
 from enum import Enum, unique
-import itertools
-from textwrap import dedent
-from pathlib import PurePath, Path
 from functools import lru_cache
+from pathlib import PurePath, Path
+from textwrap import dedent
+import itertools
+import json
+import os
+import pickle
+import re
+import shlex
+import subprocess
+import typing as T
 
 from . import backends
 from .. import modules
@@ -47,11 +49,10 @@ from ..mesonlib import get_compiler_for_source, has_path_sep, OptionKey
 from .backends import CleanTrees
 from ..build import GeneratedList, InvalidArguments, ExtractedObjects
 from ..interpreter import Interpreter
-from ..mesonmain import need_setup_vsenv
 
 if T.TYPE_CHECKING:
     from .._typing import ImmutableListProtocol
-    from ..linkers import StaticLinker
+    from ..linkers import DynamicLinker, StaticLinker
     from ..compilers.cs import CsCompiler
 
 
@@ -250,7 +251,7 @@ class NinjaRule:
                 outfile.write(' rspfile = $out.rsp\n')
                 outfile.write(' rspfile_content = {}\n'.format(' '.join([self._quoter(x, rspfile_quote_func) for x in self.args])))
             else:
-                outfile.write(' command = {}\n'.format(' '.join([self._quoter(x) for x in (self.command + self.args)])))
+                outfile.write(' command = {}\n'.format(' '.join([self._quoter(x) for x in self.command + self.args])))
             if self.deps:
                 outfile.write(f' deps = {self.deps}\n')
             if self.depfile:
@@ -300,7 +301,7 @@ class NinjaBuildElement:
             self.outfilenames = [outfilenames]
         else:
             self.outfilenames = outfilenames
-        assert(isinstance(rulename, str))
+        assert isinstance(rulename, str)
         self.rulename = rulename
         if isinstance(infilenames, str):
             self.infilenames = [infilenames]
@@ -367,7 +368,7 @@ class NinjaBuildElement:
         use_rspfile = self._should_use_rspfile()
         if use_rspfile:
             rulename = self.rulename + '_RSP'
-            mlog.debug("Command line for building %s is long, using a response file" % self.outfilenames)
+            mlog.debug(f'Command line for building {self.outfilenames} is long, using a response file')
         else:
             rulename = self.rulename
         line = f'build {outs}{implicit_outs}: {rulename} {ins}'
@@ -511,9 +512,15 @@ class NinjaBackend(backends.Backend):
 
     def generate(self):
         ninja = environment.detect_ninja_command_and_version(log=True)
-        if need_setup_vsenv:
+        if self.build.need_vsenv:
             builddir = Path(self.environment.get_build_dir())
-            builddir = builddir.relative_to(Path.cwd())
+            try:
+                # For prettier printing, reduce to a relative path. If
+                # impossible (e.g., because builddir and cwd are on
+                # different Windows drives), skip and use the full path.
+                builddir = builddir.relative_to(Path.cwd())
+            except ValueError:
+                pass
             meson_command = mesonlib.join_args(mesonlib.get_meson_command())
             mlog.log()
             mlog.log('Visual Studio environment is needed to run Ninja. It is recommended to use Meson wrapper:')
@@ -552,8 +559,14 @@ class NinjaBackend(backends.Backend):
             key = OptionKey('b_coverage')
             if (key in self.environment.coredata.options and
                     self.environment.coredata.options[key].value):
-                self.add_build_comment(NinjaComment('Coverage rules'))
-                self.generate_coverage_rules()
+                gcovr_exe, gcovr_version, lcov_exe, genhtml_exe, _ = environment.find_coverage_tools()
+                if gcovr_exe or (lcov_exe and genhtml_exe):
+                    self.add_build_comment(NinjaComment('Coverage rules'))
+                    self.generate_coverage_rules(gcovr_exe, gcovr_version)
+                else:
+                    # FIXME: since we explicitly opted in, should this be an error?
+                    # The docs just say these targets will be created "if possible".
+                    mlog.warning('Need gcovr or lcov/genhtml to generate any coverage reports')
             self.add_build_comment(NinjaComment('Suffix'))
             self.generate_utils()
             self.generate_ending()
@@ -567,6 +580,10 @@ class NinjaBackend(backends.Backend):
         # fully created.
         os.replace(tempfilename, outfilename)
         mlog.cmd_ci_include(outfilename)  # For CI debugging
+        # Refresh Ninja's caches. https://github.com/ninja-build/ninja/pull/1685
+        if mesonlib.version_compare(self.ninja_version, '>=1.10.0') and os.path.exists('.ninja_deps'):
+            subprocess.call(self.ninja_command + ['-t', 'restat'])
+            subprocess.call(self.ninja_command + ['-t', 'cleandead'])
         self.generate_compdb()
 
     # http://clang.llvm.org/docs/JSONCompilationDatabase.html
@@ -588,7 +605,7 @@ class NinjaBackend(backends.Backend):
             with open(os.path.join(builddir, 'compile_commands.json'), 'wb') as f:
                 f.write(jsondb)
         except Exception:
-            mlog.warning('Could not create compilation database.')
+            mlog.warning('Could not create compilation database.', fatal=False)
 
     # Get all generated headers. Any source file might need them so
     # we need to add an order dependency to them.
@@ -718,6 +735,9 @@ class NinjaBackend(backends.Backend):
         self.introspection_data[name] = {}
         # Generate rules for all dependency targets
         self.process_target_dependencies(target)
+
+        self.generate_shlib_aliases(target, self.get_target_dir(target))
+
         # If target uses a language that cannot link to C objects,
         # just generate for that language and return.
         if isinstance(target, build.Jar):
@@ -813,7 +833,7 @@ class NinjaBackend(backends.Backend):
                 o, s = self.generate_llvm_ir_compile(target, src)
             else:
                 o, s = self.generate_single_compile(target, src, True,
-                                                 order_deps=header_deps)
+                                                    order_deps=header_deps)
             compiled_sources.append(s)
             source2object[s] = o
             obj_list.append(o)
@@ -881,8 +901,7 @@ class NinjaBackend(backends.Backend):
         else:
             final_obj_list = obj_list
         elem = self.generate_link(target, outname, final_obj_list, linker, pch_objects, stdlib_args=stdlib_args)
-        self.generate_dependency_scan_target(target, compiled_sources, source2object)
-        self.generate_shlib_aliases(target, self.get_target_dir(target))
+        self.generate_dependency_scan_target(target, compiled_sources, source2object, generated_source_files)
         self.add_build(elem)
 
     def should_use_dyndeps_for_target(self, target: 'build.BuildTarget') -> bool:
@@ -897,7 +916,7 @@ class NinjaBackend(backends.Backend):
         if cpp.get_id() != 'msvc':
             return False
         cppversion = self.environment.coredata.options[OptionKey('std', machine=target.for_machine, lang='cpp')].value
-        if  cppversion not in ('latest', 'c++latest', 'vc++latest'):
+        if cppversion not in ('latest', 'c++latest', 'vc++latest'):
             return False
         if not mesonlib.current_vs_supports_modules():
             return False
@@ -905,17 +924,28 @@ class NinjaBackend(backends.Backend):
             return False
         return True
 
-    def generate_dependency_scan_target(self, target, compiled_sources, source2object):
+    def generate_dependency_scan_target(self, target, compiled_sources, source2object, generated_source_files: T.List[mesonlib.File]):
         if not self.should_use_dyndeps_for_target(target):
             return
         depscan_file = self.get_dep_scan_file_for(target)
         pickle_base = target.name + '.dat'
         pickle_file = os.path.join(self.get_target_private_dir(target), pickle_base).replace('\\', '/')
         pickle_abs = os.path.join(self.get_target_private_dir_abs(target), pickle_base).replace('\\', '/')
+        json_abs = os.path.join(self.get_target_private_dir_abs(target), f'{target.name}-deps.json').replace('\\', '/')
         rule_name = 'depscan'
         scan_sources = self.select_sources_to_scan(compiled_sources)
-        elem = NinjaBuildElement(self.all_outputs, depscan_file, rule_name, scan_sources)
+
+        # Dump the sources as a json list. This avoids potential probllems where
+        # the number of sources passed to depscan exceedes the limit imposed by
+        # the OS.
+        with open(json_abs, 'w', encoding='utf-8') as f:
+            json.dump(scan_sources, f)
+        elem = NinjaBuildElement(self.all_outputs, depscan_file, rule_name, json_abs)
         elem.add_item('picklefile', pickle_file)
+        # Add any generated outputs to the order deps of the scan target, so
+        # that those sources are present
+        for g in generated_source_files:
+            elem.orderdeps.add(g.relative_name())
         scaninfo = TargetDependencyScannerInfo(self.get_target_private_dir(target), source2object)
         with open(pickle_abs, 'wb') as p:
             pickle.dump(scaninfo, p)
@@ -972,11 +1002,12 @@ class NinjaBackend(backends.Backend):
             for output in d.get_outputs():
                 elem.add_dep(os.path.join(self.get_target_dir(d), output))
 
-        cmd, reason = self.as_meson_exe_cmdline(target.name, target.command[0], cmd[1:],
+        cmd, reason = self.as_meson_exe_cmdline(target.command[0], cmd[1:],
                                                 extra_bdeps=target.get_transitive_build_target_deps(),
                                                 capture=ofilenames[0] if target.capture else None,
                                                 feed=srcs[0] if target.feed else None,
-                                                env=target.env)
+                                                env=target.env,
+                                                verbose=target.console)
         if reason:
             cmd_type = f' (wrapped by meson {reason})'
         else:
@@ -989,8 +1020,9 @@ class NinjaBackend(backends.Backend):
             elem.add_item('DEPFILE', rel_dfile)
         if target.console:
             elem.add_item('pool', 'console')
+        full_name = Path(target.subdir, target.name).as_posix()
         elem.add_item('COMMAND', cmd)
-        elem.add_item('description', f'Generating {target.name} with a custom command{cmd_type}')
+        elem.add_item('description', f'Generating {full_name} with a custom command{cmd_type}')
         self.add_build(elem)
         self.processed_targets.add(target.get_id())
 
@@ -1010,7 +1042,7 @@ class NinjaBackend(backends.Backend):
         else:
             target_env = self.get_run_target_env(target)
             _, _, cmd = self.eval_custom_target_command(target)
-            meson_exe_cmd, reason = self.as_meson_exe_cmdline(target_name, target.command[0], cmd[1:],
+            meson_exe_cmd, reason = self.as_meson_exe_cmdline(target.command[0], cmd[1:],
                                                               force_serialize=True, env=target_env,
                                                               verbose=True)
             cmd_type = f' (wrapped by meson {reason})'
@@ -1047,36 +1079,45 @@ class NinjaBackend(backends.Backend):
                        self.environment.get_log_dir()] +
                       (['--use_llvm_cov'] if use_llvm_cov else []))
 
-    def generate_coverage_rules(self):
+    def generate_coverage_rules(self, gcovr_exe: T.Optional[str], gcovr_version: T.Optional[str]):
         e = NinjaBuildElement(self.all_outputs, 'meson-coverage', 'CUSTOM_COMMAND', 'PHONY')
         self.generate_coverage_command(e, [])
         e.add_item('description', 'Generates coverage reports')
         self.add_build(e)
         # Alias that runs the target defined above
         self.create_target_alias('meson-coverage')
-        self.generate_coverage_legacy_rules()
+        self.generate_coverage_legacy_rules(gcovr_exe, gcovr_version)
 
-    def generate_coverage_legacy_rules(self):
-        e = NinjaBuildElement(self.all_outputs, 'meson-coverage-xml', 'CUSTOM_COMMAND', 'PHONY')
-        self.generate_coverage_command(e, ['--xml'])
-        e.add_item('description', 'Generates XML coverage report')
-        self.add_build(e)
-        # Alias that runs the target defined above
-        self.create_target_alias('meson-coverage-xml')
-
-        e = NinjaBuildElement(self.all_outputs, 'meson-coverage-text', 'CUSTOM_COMMAND', 'PHONY')
-        self.generate_coverage_command(e, ['--text'])
-        e.add_item('description', 'Generates text coverage report')
-        self.add_build(e)
-        # Alias that runs the target defined above
-        self.create_target_alias('meson-coverage-text')
-
+    def generate_coverage_legacy_rules(self, gcovr_exe: T.Optional[str], gcovr_version: T.Optional[str]):
         e = NinjaBuildElement(self.all_outputs, 'meson-coverage-html', 'CUSTOM_COMMAND', 'PHONY')
         self.generate_coverage_command(e, ['--html'])
         e.add_item('description', 'Generates HTML coverage report')
         self.add_build(e)
         # Alias that runs the target defined above
         self.create_target_alias('meson-coverage-html')
+
+        if gcovr_exe:
+            e = NinjaBuildElement(self.all_outputs, 'meson-coverage-xml', 'CUSTOM_COMMAND', 'PHONY')
+            self.generate_coverage_command(e, ['--xml'])
+            e.add_item('description', 'Generates XML coverage report')
+            self.add_build(e)
+            # Alias that runs the target defined above
+            self.create_target_alias('meson-coverage-xml')
+
+            e = NinjaBuildElement(self.all_outputs, 'meson-coverage-text', 'CUSTOM_COMMAND', 'PHONY')
+            self.generate_coverage_command(e, ['--text'])
+            e.add_item('description', 'Generates text coverage report')
+            self.add_build(e)
+            # Alias that runs the target defined above
+            self.create_target_alias('meson-coverage-text')
+
+            if mesonlib.version_compare(gcovr_version, '>=4.2'):
+                e = NinjaBuildElement(self.all_outputs, 'meson-coverage-sonarqube', 'CUSTOM_COMMAND', 'PHONY')
+                self.generate_coverage_command(e, ['--sonarqube'])
+                e.add_item('description', 'Generates Sonarqube XML coverage report')
+                self.add_build(e)
+                # Alias that runs the target defined above
+                self.create_target_alias('meson-coverage-sonarqube')
 
     def generate_install(self):
         self.create_install_data_files()
@@ -1364,7 +1405,7 @@ class NinjaBackend(backends.Backend):
             for i in dep.sources:
                 if hasattr(i, 'fname'):
                     i = i.fname
-                if i.endswith('vala'):
+                if i.split('.')[-1] in compilers.lang_suffixes['vala']:
                     vapiname = dep.vala_vapi
                     fullname = os.path.join(self.get_target_dir(dep), vapiname)
                     result.add(fullname)
@@ -1503,6 +1544,7 @@ class NinjaBackend(backends.Backend):
             args += ['--vapi', os.path.join('..', target.vala_vapi)]
             valac_outputs.append(vapiname)
             target.outputs += [target.vala_header, target.vala_vapi]
+            target.install_tag += ['devel', 'devel']
             # Install header and vapi to default locations if user requests this
             if len(target.install_dir) > 1 and target.install_dir[1] is True:
                 target.install_dir[1] = self.environment.get_includedir()
@@ -1514,6 +1556,7 @@ class NinjaBackend(backends.Backend):
                 args += ['--gir', os.path.join('..', target.vala_gir)]
                 valac_outputs.append(girname)
                 target.outputs.append(target.vala_gir)
+                target.install_tag.append('devel')
                 # Install GIR to default location if requested by user
                 if len(target.install_dir) > 3 and target.install_dir[3] is True:
                     target.install_dir[3] = os.path.join(self.environment.get_datadir(), 'gir-1.0')
@@ -1565,10 +1608,13 @@ class NinjaBackend(backends.Backend):
         args += cython.get_option_compile_args(opt_proxy)
         args += self.build.get_global_args(cython, target.for_machine)
         args += self.build.get_project_args(cython, target.subproject, target.for_machine)
+        args += target.get_extra_args('cython')
+
+        ext = opt_proxy[OptionKey('language', machine=target.for_machine, lang='cython')].value
 
         for src in target.get_sources():
             if src.endswith('.pyx'):
-                output = os.path.join(self.get_target_private_dir(target), f'{src}.c')
+                output = os.path.join(self.get_target_private_dir(target), f'{src}.{ext}')
                 args = args.copy()
                 args += cython.get_output_args(output)
                 element = NinjaBuildElement(
@@ -1585,12 +1631,12 @@ class NinjaBackend(backends.Backend):
         for gen in target.get_generated_sources():
             for ssrc in gen.get_outputs():
                 if isinstance(gen, GeneratedList):
-                    ssrc = os.path.join(self.get_target_private_dir(target) , ssrc)
+                    ssrc = os.path.join(self.get_target_private_dir(target), ssrc)
                 else:
                     ssrc = os.path.join(gen.get_subdir(), ssrc)
                 if ssrc.endswith('.pyx'):
                     args = args.copy()
-                    output = os.path.join(self.get_target_private_dir(target), f'{ssrc}.c')
+                    output = os.path.join(self.get_target_private_dir(target), f'{ssrc}.{ext}')
                     args += cython.get_output_args(output)
                     element = NinjaBuildElement(
                         self.all_outputs, [output],
@@ -1617,7 +1663,10 @@ class NinjaBackend(backends.Backend):
         self.generate_generator_list_rules(target)
 
         # dependencies need to cause a relink, they're not just for odering
-        deps = [os.path.join(t.subdir, t.get_filename()) for t in target.link_targets]
+        deps = [
+            os.path.join(t.subdir, t.get_filename())
+            for t in itertools.chain(target.link_targets, target.link_whole_targets)
+        ]
 
         orderdeps: T.List[str] = []
 
@@ -1660,23 +1709,16 @@ class NinjaBackend(backends.Backend):
         if cratetype in {'bin', 'dylib'}:
             args.extend(rustc.get_linker_always_args())
 
-        opt_proxy = self.get_compiler_options_for_target(target)
-
-        args += ['--crate-name', target.name]
-        args += rustc.get_buildtype_args(self.get_option_for_target(OptionKey('buildtype'), target))
-        args += rustc.get_debug_args(self.get_option_for_target(OptionKey('debug'), target))
-        args += rustc.get_optimization_args(self.get_option_for_target(OptionKey('optimization'), target))
-        args += rustc.get_option_compile_args(opt_proxy)
-        args += self.build.get_global_args(rustc, target.for_machine)
-        args += self.build.get_project_args(rustc, target.subproject, target.for_machine)
+        args += self.generate_basic_compiler_args(target, rustc, False)
+        # This matches rustc's default behavior.
+        args += ['--crate-name', target.name.replace('-', '_')]
         depfile = os.path.join(target.subdir, target.name + '.d')
         args += ['--emit', f'dep-info={depfile}', '--emit', 'link']
         args += target.get_extra_args('rust')
         args += rustc.get_output_args(os.path.join(target.subdir, target.get_filename()))
-        args += self.environment.coredata.get_external_args(target.for_machine, rustc.language)
         linkdirs = mesonlib.OrderedSet()
         external_deps = target.external_deps.copy()
-        for d in target.link_targets:
+        for d in itertools.chain(target.link_targets, target.link_whole_targets):
             linkdirs.add(d.subdir)
             if d.uses_rust():
                 # specify `extern CRATE_NAME=OUTPUT_FILE` for each Rust
@@ -2064,8 +2106,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
 
     def generate_compile_rule_for(self, langname, compiler):
         if langname == 'java':
-            if self.environment.machines.matches_build_machine(compiler.for_machine):
-                self.generate_java_compile_rule(compiler)
+            self.generate_java_compile_rule(compiler)
             return
         if langname == 'cs':
             if self.environment.machines.matches_build_machine(compiler.for_machine):
@@ -2123,7 +2164,6 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         self.add_rule(NinjaRule(rule, command, [], description, deps=deps,
                                 depfile=depfile))
 
-
     def generate_scanner_rules(self):
         rulename = 'depscan'
         if rulename in self.ruledict:
@@ -2135,7 +2175,6 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         description = 'Module scanner.'
         rule = NinjaRule(rulename, command, args, description)
         self.add_rule(rule)
-
 
     def generate_compile_rules(self):
         for for_machine in MachineChoice:
@@ -2177,8 +2216,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         infilelist = genlist.get_inputs()
         outfilelist = genlist.get_outputs()
         extra_dependencies = self.get_custom_target_depend_files(genlist)
-        for i in range(len(infilelist)):
-            curfile = infilelist[i]
+        for i, curfile in enumerate(infilelist):
             if len(generator.outputs) == 1:
                 sole_output = os.path.join(self.get_target_private_dir(target), outfilelist[i])
             else:
@@ -2197,14 +2235,13 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                 args = [x.replace('@DEPFILE@', depfile) for x in base_args]
             args = [x.replace("@INPUT@", infilename).replace('@OUTPUT@', sole_output)
                     for x in args]
-            args =  self.replace_outputs(args, self.get_target_private_dir(target), outfilelist)
+            args = self.replace_outputs(args, self.get_target_private_dir(target), outfilelist)
             # We have consumed output files, so drop them from the list of remaining outputs.
             if len(generator.outputs) > 1:
                 outfilelist = outfilelist[len(generator.outputs):]
             args = self.replace_paths(target, args, override_subdir=subdir)
             cmdlist = exe_arr + self.replace_extra_args(args, genlist)
-            cmdlist, reason = self.as_meson_exe_cmdline('generator ' + cmdlist[0],
-                                                        cmdlist[0], cmdlist[1:],
+            cmdlist, reason = self.as_meson_exe_cmdline(cmdlist[0], cmdlist[1:],
                                                         capture=outfiles[0] if generator.capture else None)
             abs_pdir = os.path.join(self.environment.get_build_dir(), self.get_target_dir(target))
             os.makedirs(abs_pdir, exist_ok=True)
@@ -2297,11 +2334,6 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
 
         mod_files = _scan_fortran_file_deps(src, srcdir, dirname, tdeps, compiler)
         return mod_files
-
-    def get_no_stdlib_args(self, target, compiler):
-        if compiler.language in self.build.stdlibs[target.for_machine]:
-            return compiler.get_no_stdinc_args()
-        return []
 
     def get_no_stdlib_link_args(self, target, linker):
         if hasattr(linker, 'language') and linker.language in self.build.stdlibs[target.for_machine]:
@@ -2479,8 +2511,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                 commands += compiler.get_include_args(d, i.is_system)
         # Add per-target compile args, f.ex, `c_args : ['-DFOO']`. We set these
         # near the end since these are supposed to override everything else.
-        commands += self.escape_extra_args(compiler,
-                                           target.get_extra_args(compiler.get_language()))
+        commands += self.escape_extra_args(target.get_extra_args(compiler.get_language()))
 
         # D specific additional flags
         if compiler.language == 'd':
@@ -2587,8 +2618,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                         crstr = self.get_rule_suffix(target.for_machine)
                         depelem = NinjaBuildElement(self.all_outputs,
                                                     modfile,
-                                                     'FORTRAN_DEP_HACK' + crstr,
-                                                      rel_obj)
+                                                    'FORTRAN_DEP_HACK' + crstr,
+                                                    rel_obj)
                         self.add_build(depelem)
             commands += compiler.get_module_outdir_args(self.get_target_private_dir(target))
 
@@ -2610,8 +2641,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
 
         self.add_dependency_scanner_entries_to_element(target, compiler, element, src)
         self.add_build(element)
-        assert(isinstance(rel_obj, str))
-        assert(isinstance(rel_src, str))
+        assert isinstance(rel_obj, str)
+        assert isinstance(rel_src, str)
         return (rel_obj, rel_src.replace('\\', '/'))
 
     def add_dependency_scanner_entries_to_element(self, target, compiler, element, src):
@@ -2762,11 +2793,11 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                 commands += linker.get_std_shared_lib_link_args()
             # All shared libraries are PIC
             commands += linker.get_pic_args()
-            # Add -Wl,-soname arguments on Linux, -install_name on OS X
-            commands += linker.get_soname_args(
-                self.environment, target.prefix, target.name, target.suffix,
-                target.soversion, target.darwin_versions,
-                isinstance(target, build.SharedModule))
+            if not isinstance(target, build.SharedModule) or target.force_soname:
+                # Add -Wl,-soname arguments on Linux, -install_name on OS X
+                commands += linker.get_soname_args(
+                    self.environment, target.prefix, target.name, target.suffix,
+                    target.soversion, target.darwin_versions)
             # This is only visited when building for Windows using either GCC or Visual Studio
             if target.vs_module_defs and hasattr(linker, 'gen_vs_module_defs_args'):
                 commands += linker.gen_vs_module_defs_args(target.vs_module_defs.rel_to_builddir(self.build_to_src))
@@ -2774,7 +2805,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             if target.import_filename:
                 commands += linker.gen_import_library_args(self.get_import_filename(target))
         elif isinstance(target, build.StaticLibrary):
-            commands += linker.get_std_link_args()
+            commands += linker.get_std_link_args(not target.should_install())
         else:
             raise RuntimeError('Unknown build target type.')
         return commands
@@ -2894,7 +2925,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         return guessed_dependencies + absolute_libs
 
     def generate_prelink(self, target, obj_list):
-        assert(isinstance(target, build.StaticLibrary))
+        assert isinstance(target, build.StaticLibrary)
         prelink_name = os.path.join(self.get_target_private_dir(target), target.name + '-prelink.o')
         elem = NinjaBuildElement(self.all_outputs, [prelink_name], 'CUSTOM_COMMAND', obj_list)
 
@@ -3076,7 +3107,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             except OSError:
                 mlog.debug("Library versioning disabled because we do not have symlink creation privileges.")
 
-    def generate_custom_target_clean(self, trees):
+    def generate_custom_target_clean(self, trees: T.List[str]) -> str:
         e = NinjaBuildElement(self.all_outputs, 'meson-clean-ctlist', 'CUSTOM_COMMAND', 'PHONY')
         d = CleanTrees(self.environment.get_build_dir(), trees)
         d_file = os.path.join(self.environment.get_scratch_dir(), 'cleantrees.dat')

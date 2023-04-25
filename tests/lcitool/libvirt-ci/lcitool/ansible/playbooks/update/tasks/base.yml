@@ -1,0 +1,125 @@
+---
+- name: Fetch repository metadata
+  apt:
+    update_cache: true
+  when: os.name == 'Debian' or os.name == 'Ubuntu'
+
+- name: Install packages needed for playbook tasks
+  package:
+    name: '{{ early_install_packages }}'
+    state: present
+
+- name: Enable fedora-rawhide-kernel-nodebug repository
+  template:
+    src: 'templates/fedora-rawhide-kernel-nodebug.repo.j2'
+    dest: /etc/yum.repos.d/fedora-rawhide-kernel-nodebug.repo
+    owner: root
+    group: root
+  when:
+    - os.name == 'Fedora'
+    - os.version == 'Rawhide'
+
+- name: Enable CRB repository
+  command: '{{ packaging.command }} config-manager --set-enabled crb -y'
+  when:
+    - (os.name == 'CentOS' and os.version == 'Stream9') or
+      (os.name == 'AlmaLinux' and os.version == '9')
+
+- name: Enable PowerTools repository
+  command: '{{ packaging.command }} config-manager --set-enabled powertools -y'
+  when:
+    - (os.name == 'CentOS' and os.version == 'Stream8') or
+      (os.name == 'AlmaLinux' and os.version == '8')
+
+- name: Enable EPEL repository
+  package:
+    name: epel-release
+    state: latest
+  when:
+    - os.name == 'CentOS' or os.name == 'AlmaLinux'
+
+- name: Enable EPEL Next repository
+  package:
+    name: epel-next-release
+    state: latest
+  when:
+    - os.name == 'CentOS'
+    - os.version == 'Stream8' or os.version == 'Stream9'
+
+- name: Enable Advanced Virtualization repository
+  package:
+    name: centos-release-advanced-virtualization
+    state: latest
+  when:
+    - (os.name == 'CentOS' and os.version == 'Stream8') or
+      (os.name == 'AlmaLinux' and os.version == '8')
+
+- name: Update installed packages
+  package:
+    name: '*'
+    state: latest
+  when:
+    - packaging.format == 'rpm'
+    - not ( os.name == 'Fedora' and
+            os.version == 'Rawhide' )
+
+- name: Update installed packages
+  package:
+    name: fedora-gpg-keys
+    state: latest
+    disable_gpg_check: yes
+  when:
+    - os.name == 'Fedora'
+    - os.version == 'Rawhide'
+
+- name: Update installed packages
+  command: '{{ packaging.command }} update --refresh --exclude "kernel*" -y'
+  when:
+    - os.name == 'Fedora'
+    - os.version == 'Rawhide'
+
+- name: Update installed packages
+  command: '{{ packaging.command }} update --disablerepo="*" --enablerepo=fedora-rawhide-kernel-nodebug "kernel*" -y'
+  when:
+    - os.name == 'Fedora'
+    - os.version == 'Rawhide'
+
+- name: Update installed packages
+  apt:
+    upgrade: dist
+    update_cache: yes
+  when:
+    - packaging.format == 'deb'
+
+- name: Update installed packages
+  shell: '{{ packaging.command }} update && {{ packaging.command }} upgrade -y'
+  when:
+    - packaging.format == 'pkg'
+
+- name: Clean up packages after update
+  command: '{{ packaging.command }} mark install "kernel*"'
+  when:
+    - os.name == 'Fedora'
+
+- name: Clean up packages after update
+  shell: '{{ packaging.command }} clean packages -y && {{ packaging.command }} autoremove -y'
+  when:
+    - packaging.format == 'rpm'
+    - os.name != 'OpenSUSE'
+
+- name: Clean up packages after update
+  shell: '{{ packaging.command }} clean'
+  when:
+    - os.name == 'OpenSUSE'
+
+- name: Clean up packages after update
+  apt:
+    autoclean: yes
+    autoremove: yes
+  when:
+    - packaging.format == 'deb'
+
+- name: Clean up packages after update
+  shell: '{{ packaging.command }} clean -y && {{ packaging.command }} autoremove -y'
+  when:
+    - packaging.format == 'pkg'

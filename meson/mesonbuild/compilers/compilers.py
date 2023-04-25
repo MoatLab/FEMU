@@ -32,13 +32,13 @@ from ..arglist import CompilerArgs
 
 if T.TYPE_CHECKING:
     from ..build import BuildTarget
-    from ..coredata import OptionDictType, KeyedOptionDictType
+    from ..coredata import KeyedOptionDictType
     from ..envconfig import MachineInfo
     from ..environment import Environment
     from ..linkers import DynamicLinker, RSPFileSyntax
     from ..dependencies import Dependency
 
-    CompilerType = T.TypeVar('CompilerType', bound=Compiler)
+    CompilerType = T.TypeVar('CompilerType', bound='Compiler')
     _T = T.TypeVar('_T')
 
 """This file contains the data files of all compilers Meson knows
@@ -47,7 +47,8 @@ Also add corresponding autodetection code in environment.py."""
 
 header_suffixes = ('h', 'hh', 'hpp', 'hxx', 'H', 'ipp', 'moc', 'vapi', 'di')  # type: T.Tuple[str, ...]
 obj_suffixes = ('o', 'obj', 'res')  # type: T.Tuple[str, ...]
-lib_suffixes = ('a', 'lib', 'dll', 'dll.a', 'dylib', 'so')  # type: T.Tuple[str, ...]
+# To the emscripten compiler, .js files are libraries
+lib_suffixes = ('a', 'lib', 'dll', 'dll.a', 'dylib', 'so', 'js')  # type: T.Tuple[str, ...]
 # Mapping of language to suffixes of files that should always be in that language
 # This means we can't include .h headers here since they could be C, C++, ObjC, etc.
 lang_suffixes = {
@@ -83,6 +84,8 @@ for _l in clink_langs + ('vala',):
     clink_suffixes += lang_suffixes[_l]
 clink_suffixes += ('h', 'll', 's')
 all_suffixes = set(itertools.chain(*lang_suffixes.values(), clink_suffixes))  # type: T.Set[str]
+SUFFIX_TO_LANG = dict(itertools.chain(*(
+    [(suffix, lang) for suffix in v] for lang, v in lang_suffixes.items()))) # type: T.Dict[str, str]
 
 # Languages that should use LDFLAGS arguments when linking.
 LANGUAGES_USING_LDFLAGS = {'objcpp', 'cpp', 'objc', 'c', 'fortran', 'd', 'cuda'}  # type: T.Set[str]
@@ -102,11 +105,6 @@ CFLAGS_MAPPING: T.Mapping[str, str] = {
     'vala': 'VALAFLAGS',
     'rust': 'RUSTFLAGS',
     'cython': 'CYTHONFLAGS',
-}
-
-CEXE_MAPPING: T.Mapping = {
-    'c': 'CC',
-    'cpp': 'CXX',
 }
 
 # All these are only for C-linkable languages; see `clink_langs` above.
@@ -275,7 +273,7 @@ base_options: 'KeyedOptionDictType' = {
     OptionKey('b_pch'): coredata.UserBooleanOption('Use precompiled headers', True),
     OptionKey('b_lto'): coredata.UserBooleanOption('Use link time optimization', False),
     OptionKey('b_lto'): coredata.UserBooleanOption('Use link time optimization', False),
-    OptionKey('b_lto_threads'): coredata.UserIntegerOption('Use multiple threads for Link Time Optimization', (None, None,0)),
+    OptionKey('b_lto_threads'): coredata.UserIntegerOption('Use multiple threads for Link Time Optimization', (None, None, 0)),
     OptionKey('b_lto_mode'): coredata.UserComboOption('Select between different LTO modes.',
                                                       ['default', 'thin'],
                                                       'default'),
@@ -481,11 +479,9 @@ class Compiler(HoldableObject, metaclass=abc.ABCMeta):
     LINKER_PREFIX = None  # type: T.Union[None, str, T.List[str]]
     INVOKES_LINKER = True
 
-    # TODO: these could be forward declarations once we drop 3.5 support
-    if T.TYPE_CHECKING:
-        language = 'unset'
-        id = ''
-        warn_args = {}  # type: T.Dict[str, T.List[str]]
+    language: str
+    id: str
+    warn_args: T.Dict[str, T.List[str]]
 
     def __init__(self, exelist: T.List[str], version: str,
                  for_machine: MachineChoice, info: 'MachineInfo',
@@ -549,13 +545,15 @@ class Compiler(HoldableObject, metaclass=abc.ABCMeta):
         return self.default_suffix
 
     def get_define(self, dname: str, prefix: str, env: 'Environment',
-                   extra_args: T.List[str], dependencies: T.List['Dependency'],
+                   extra_args: T.Union[T.List[str], T.Callable[[CompileCheckMode], T.List[str]]],
+                   dependencies: T.List['Dependency'],
                    disable_cache: bool = False) -> T.Tuple[str, bool]:
         raise EnvironmentException('%s does not support get_define ' % self.get_id())
 
     def compute_int(self, expression: str, low: T.Optional[int], high: T.Optional[int],
                     guess: T.Optional[int], prefix: str, env: 'Environment', *,
-                    extra_args: T.Optional[T.List[str]], dependencies: T.Optional[T.List['Dependency']]) -> int:
+                    extra_args: T.Union[None, T.List[str], T.Callable[[CompileCheckMode], T.List[str]]],
+                    dependencies: T.Optional[T.List['Dependency']]) -> int:
         raise EnvironmentException('%s does not support compute_int ' % self.get_id())
 
     def compute_parameters_with_absolute_paths(self, parameter_list: T.List[str],
@@ -564,12 +562,12 @@ class Compiler(HoldableObject, metaclass=abc.ABCMeta):
 
     def has_members(self, typename: str, membernames: T.List[str],
                     prefix: str, env: 'Environment', *,
-                    extra_args: T.Optional[T.List[str]] = None,
+                    extra_args: T.Union[None, T.List[str], T.Callable[[CompileCheckMode], T.List[str]]] = None,
                     dependencies: T.Optional[T.List['Dependency']] = None) -> T.Tuple[bool, bool]:
         raise EnvironmentException('%s does not support has_member(s) ' % self.get_id())
 
     def has_type(self, typename: str, prefix: str, env: 'Environment',
-                 extra_args: T.List[str], *,
+                 extra_args: T.Union[T.List[str], T.Callable[[CompileCheckMode], T.List[str]]], *,
                  dependencies: T.Optional[T.List['Dependency']] = None) -> T.Tuple[bool, bool]:
         raise EnvironmentException('%s does not support has_type ' % self.get_id())
 
@@ -630,7 +628,7 @@ class Compiler(HoldableObject, metaclass=abc.ABCMeta):
         return self.linker.get_option_args(options)
 
     def check_header(self, hname: str, prefix: str, env: 'Environment', *,
-                     extra_args: T.Optional[T.List[str]] = None,
+                     extra_args: T.Union[None, T.List[str], T.Callable[[CompileCheckMode], T.List[str]]] = None,
                      dependencies: T.Optional[T.List['Dependency']] = None) -> T.Tuple[bool, bool]:
         """Check that header is usable.
 
@@ -641,7 +639,7 @@ class Compiler(HoldableObject, metaclass=abc.ABCMeta):
         raise EnvironmentException('Language %s does not support header checks.' % self.get_display_language())
 
     def has_header(self, hname: str, prefix: str, env: 'Environment', *,
-                   extra_args: T.Optional[T.List[str]] = None,
+                   extra_args: T.Union[None, T.List[str], T.Callable[[CompileCheckMode], T.List[str]]] = None,
                    dependencies: T.Optional[T.List['Dependency']] = None,
                    disable_cache: bool = False) -> T.Tuple[bool, bool]:
         """Check that header is exists.
@@ -662,23 +660,23 @@ class Compiler(HoldableObject, metaclass=abc.ABCMeta):
 
     def has_header_symbol(self, hname: str, symbol: str, prefix: str,
                           env: 'Environment', *,
-                          extra_args: T.Optional[T.List[str]] = None,
+                          extra_args: T.Union[None, T.List[str], T.Callable[[CompileCheckMode], T.List[str]]] = None,
                           dependencies: T.Optional[T.List['Dependency']] = None) -> T.Tuple[bool, bool]:
         raise EnvironmentException('Language %s does not support header symbol checks.' % self.get_display_language())
 
-    def run(self, code: str, env: 'Environment', *,
-            extra_args: T.Optional[T.List[str]] = None,
+    def run(self, code: 'mesonlib.FileOrString', env: 'Environment', *,
+            extra_args: T.Union[T.List[str], T.Callable[[CompileCheckMode], T.List[str]], None] = None,
             dependencies: T.Optional[T.List['Dependency']] = None) -> RunResult:
         raise EnvironmentException('Language %s does not support run checks.' % self.get_display_language())
 
     def sizeof(self, typename: str, prefix: str, env: 'Environment', *,
-               extra_args: T.Optional[T.List[str]] = None,
+               extra_args: T.Union[None, T.List[str], T.Callable[[CompileCheckMode], T.List[str]]] = None,
                dependencies: T.Optional[T.List['Dependency']] = None) -> int:
         raise EnvironmentException('Language %s does not support sizeof checks.' % self.get_display_language())
 
     def alignment(self, typename: str, prefix: str, env: 'Environment', *,
-                 extra_args: T.Optional[T.List[str]] = None,
-                 dependencies: T.Optional[T.List['Dependency']] = None) -> int:
+                  extra_args: T.Optional[T.List[str]] = None,
+                  dependencies: T.Optional[T.List['Dependency']] = None) -> int:
         raise EnvironmentException('Language %s does not support alignment checks.' % self.get_display_language())
 
     def has_function(self, funcname: str, prefix: str, env: 'Environment', *,
@@ -764,29 +762,35 @@ class Compiler(HoldableObject, metaclass=abc.ABCMeta):
             no_ccache = False
             if isinstance(code, str):
                 srcname = os.path.join(tmpdirname,
-                                    'testfile.' + self.default_suffix)
+                                       'testfile.' + self.default_suffix)
                 with open(srcname, 'w', encoding='utf-8') as ofile:
                     ofile.write(code)
                 # ccache would result in a cache miss
                 no_ccache = True
                 contents = code
-            elif isinstance(code, mesonlib.File):
+            else:
                 srcname = code.fname
-                with open(code.fname, encoding='utf-8') as f:
-                    contents = f.read()
+                if not is_object(code.fname):
+                    with open(code.fname, encoding='utf-8') as f:
+                        contents = f.read()
+                else:
+                    contents = '<binary>'
 
             # Construct the compiler command-line
             commands = self.compiler_args()
             commands.append(srcname)
+
             # Preprocess mode outputs to stdout, so no output args
+            output = self._get_compile_output(tmpdirname, mode)
             if mode != 'preprocess':
-                output = self._get_compile_output(tmpdirname, mode)
                 commands += self.get_output_args(output)
             commands.extend(self.get_compiler_args_for_mode(CompileCheckMode(mode)))
+
             # extra_args must be last because it could contain '/link' to
             # pass args to VisualStudio's linker. In that case everything
             # in the command line after '/link' is given to the linker.
-            commands += extra_args
+            if extra_args:
+                commands += extra_args
             # Generate full command-line with the exelist
             command_list = self.get_exelist() + commands.to_native()
             mlog.debug('Running compile:')
@@ -807,7 +811,7 @@ class Compiler(HoldableObject, metaclass=abc.ABCMeta):
             yield result
 
     @contextlib.contextmanager
-    def cached_compile(self, code: str, cdata: coredata.CoreData, *,
+    def cached_compile(self, code: 'mesonlib.FileOrString', cdata: coredata.CoreData, *,
                        extra_args: T.Union[None, T.List[str], CompilerArgs] = None,
                        mode: str = 'link',
                        temp_dir: T.Optional[str] = None) -> T.Iterator[T.Optional[CompileResult]]:
@@ -871,7 +875,7 @@ class Compiler(HoldableObject, metaclass=abc.ABCMeta):
         return None
 
     def build_rpath_args(self, env: 'Environment', build_dir: str, from_dir: str,
-                         rpath_paths: str, build_rpath: str,
+                         rpath_paths: T.Tuple[str, ...], build_rpath: str,
                          install_rpath: str) -> T.Tuple[T.List[str], T.Set[bytes]]:
         return self.linker.build_rpath_args(
             env, build_dir, from_dir, rpath_paths, build_rpath, install_rpath)
@@ -888,7 +892,7 @@ class Compiler(HoldableObject, metaclass=abc.ABCMeta):
     def openmp_link_flags(self) -> T.List[str]:
         return self.openmp_flags()
 
-    def language_stdlib_only_link_flags(self) -> T.List[str]:
+    def language_stdlib_only_link_flags(self, env: 'Environment') -> T.List[str]:
         return []
 
     def gnu_symbol_visibility_args(self, vistype: str) -> T.List[str]:
@@ -988,11 +992,10 @@ class Compiler(HoldableObject, metaclass=abc.ABCMeta):
 
     def get_soname_args(self, env: 'Environment', prefix: str, shlib_name: str,
                         suffix: str, soversion: str,
-                        darwin_versions: T.Tuple[str, str],
-                        is_shared_module: bool) -> T.List[str]:
+                        darwin_versions: T.Tuple[str, str]) -> T.List[str]:
         return self.linker.get_soname_args(
             env, prefix, shlib_name, suffix, soversion,
-            darwin_versions, is_shared_module)
+            darwin_versions)
 
     def get_target_link_args(self, target: 'BuildTarget') -> T.List[str]:
         return target.link_args
@@ -1098,7 +1101,7 @@ class Compiler(HoldableObject, metaclass=abc.ABCMeta):
     def sanity_check(self, work_dir: str, environment: 'Environment') -> None:
         """Check that this compiler actually works.
 
-        This should provide a simple compile/link test. Somthing as simple as:
+        This should provide a simple compile/link test. Something as simple as:
         ```python
         main(): return 0
         ```
@@ -1164,7 +1167,7 @@ class Compiler(HoldableObject, metaclass=abc.ABCMeta):
         return []
 
     def build_wrapper_args(self, env: 'Environment',
-                           extra_args: T.Union[None, CompilerArgs, T.List[str]],
+                           extra_args: T.Union[None, CompilerArgs, T.List[str], T.Callable[[CompileCheckMode], T.List[str]]],
                            dependencies: T.Optional[T.List['Dependency']],
                            mode: CompileCheckMode = CompileCheckMode.COMPILE) -> CompilerArgs:
         """Arguments to pass the build_wrapper helper.
@@ -1201,8 +1204,8 @@ class Compiler(HoldableObject, metaclass=abc.ABCMeta):
         return args
 
     @contextlib.contextmanager
-    def _build_wrapper(self, code: str, env: 'Environment',
-                       extra_args: T.Union[None, CompilerArgs, T.List[str]] = None,
+    def _build_wrapper(self, code: 'mesonlib.FileOrString', env: 'Environment',
+                       extra_args: T.Union[None, CompilerArgs, T.List[str], T.Callable[[CompileCheckMode], T.List[str]]] = None,
                        dependencies: T.Optional[T.List['Dependency']] = None,
                        mode: str = 'compile', want_output: bool = False,
                        disable_cache: bool = False,
@@ -1220,20 +1223,26 @@ class Compiler(HoldableObject, metaclass=abc.ABCMeta):
             with self.cached_compile(code, env.coredata, extra_args=args, mode=mode, temp_dir=env.scratch_dir) as r:
                 yield r
 
-    def compiles(self, code: str, env: 'Environment', *,
-                 extra_args: T.Union[None, T.List[str], CompilerArgs] = None,
+    def compiles(self, code: 'mesonlib.FileOrString', env: 'Environment', *,
+                extra_args: T.Union[None, T.List[str], CompilerArgs, T.Callable[[CompileCheckMode], T.List[str]]] = None,
                  dependencies: T.Optional[T.List['Dependency']] = None,
                  mode: str = 'compile',
                  disable_cache: bool = False) -> T.Tuple[bool, bool]:
         with self._build_wrapper(code, env, extra_args, dependencies, mode, disable_cache=disable_cache) as p:
             return p.returncode == 0, p.cached
 
-
-    def links(self, code: str, env: 'Environment', *,
-              extra_args: T.Union[None, T.List[str], CompilerArgs] = None,
+    def links(self, code: 'mesonlib.FileOrString', env: 'Environment', *,
+              compiler: T.Optional['Compiler'] = None,
+              extra_args: T.Union[None, T.List[str], CompilerArgs, T.Callable[[CompileCheckMode], T.List[str]]] = None,
               dependencies: T.Optional[T.List['Dependency']] = None,
               mode: str = 'compile',
               disable_cache: bool = False) -> T.Tuple[bool, bool]:
+        if compiler:
+            with compiler._build_wrapper(code, env, dependencies=dependencies, want_output=True) as r:
+                objfile = mesonlib.File.from_absolute_file(r.output_name)
+                return self.compiles(objfile, env, extra_args=extra_args,
+                                     dependencies=dependencies, mode='link', disable_cache=True)
+
         return self.compiles(code, env, extra_args=extra_args,
                              dependencies=dependencies, mode='link', disable_cache=disable_cache)
 
@@ -1255,6 +1264,10 @@ class Compiler(HoldableObject, metaclass=abc.ABCMeta):
 
     def get_debug_args(self, is_debug: bool) -> T.List[str]:
         """Arguments required for a debug build."""
+        return []
+
+    def get_no_warn_args(self) -> T.List[str]:
+        """Arguments to completely disable warnings."""
         return []
 
 

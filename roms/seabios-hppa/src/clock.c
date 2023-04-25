@@ -489,7 +489,9 @@ handle_70(void)
     if (time < USEC_PER_RTC) {
         // Done waiting - write to specified flag byte.
         struct segoff_s segoff = GET_BDA(user_wait_complete_flag);
+#if CONFIG_X86
         u16 ptr_seg = segoff.seg;
+#endif
         u8 *ptr_far = (u8*)(segoff.offset+0);
         u8 oldval = GET_FARVAR(ptr_seg, *ptr_far);
         SET_FARVAR(ptr_seg, *ptr_far, oldval | 0x80);

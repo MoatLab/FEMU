@@ -38,10 +38,15 @@ This function also defines targets for maintainers to use:
 * `<project_id>-update-po`: regenerates the `.po` files from current `.pot` file
 * `<project_id>-gmo`: builds the translations without installing
 
+(*since 0.60.0*) Returns a list containing:
+* a list of built `.mo` files
+* the maintainer `-pot` target
+* the maintainer `-update-po` target
+
 ### i18n.merge_file()
 
 This merges translations into a text file using `msgfmt`. See
-[custom_target](Reference-manual.md#custom_target)
+[[@custom_tgt]]
 for normal keywords. In addition it accepts these keywords:
 
 * `data_dirs`: (*Added 0.41.0*) list of directories for its files (See

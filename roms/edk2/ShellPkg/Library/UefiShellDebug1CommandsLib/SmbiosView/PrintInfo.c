@@ -2,6 +2,7 @@
   Module for clarifying the content of the smbios structure element information.
 
   Copyright (c) 2005 - 2018, Intel Corporation. All rights reserved.<BR>
+  Copyright (c) 1985 - 2022, American Megatrends International LLC.<BR>
   (C) Copyright 2014 Hewlett-Packard Development Company, L.P.<BR>
   (C) Copyright 2015-2019 Hewlett Packard Enterprise Development LP<BR>
   SPDX-License-Identifier: BSD-2-Clause-Patent
@@ -597,8 +598,9 @@ SmbiosPrintStructure (
     //
     case 9:
     {
-      MISC_SLOT_PEER_GROUP  *PeerGroupPtr;
-      UINT8                 PeerGroupCount;
+      MISC_SLOT_PEER_GROUP         *PeerGroupPtr;
+      SMBIOS_TABLE_TYPE9_EXTENDED  *Type9ExtendedStruct;
+      UINT8                        PeerGroupCount;
 
       PRINT_PENDING_STRING (Struct, Type9, SlotDesignation);
       DisplaySystemSlotType (Struct->Type9->SlotType, Option);
@@ -634,6 +636,18 @@ SmbiosPrintStructure (
             ShellPrintHiiEx (-1, -1, NULL, STRING_TOKEN (STR_SMBIOSVIEW_PRINTINFO_BUS_NUM), gShellDebug1HiiHandle, PeerGroupPtr[Index].BusNum);
             ShellPrintHiiEx (-1, -1, NULL, STRING_TOKEN (STR_SMBIOSVIEW_PRINTINFO_DEV_FUNC_NUM), gShellDebug1HiiHandle, PeerGroupPtr[Index].DevFuncNum);
             ShellPrintHiiEx (-1, -1, NULL, STRING_TOKEN (STR_SMBIOSVIEW_PRINTINFO_DATA_BUS_WIDTH), gShellDebug1HiiHandle, PeerGroupPtr[Index].DataBusWidth);
+          }
+
+          if (AE_SMBIOS_VERSION (0x3, 0x4)) {
+            // Since PeerGroups has a variable number of entries, new fields added after PeerGroups are defined in
+            // a extended structure. Those fields can be referenced using SMBIOS_TABLE_TYPE9_EXTENDED structure.
+            Type9ExtendedStruct = (SMBIOS_TABLE_TYPE9_EXTENDED *)((UINT8 *)PeerGroupPtr + (PeerGroupCount * sizeof (MISC_SLOT_PEER_GROUP)));
+            DisplaySystemSlotInformation (Type9ExtendedStruct->SlotInformation, Option);
+            DisplaySystemSlotPhysicalWidth (Type9ExtendedStruct->SlotPhysicalWidth, Option);
+            ShellPrintHiiEx (-1, -1, NULL, STRING_TOKEN (STR_SMBIOSVIEW_QUERYTABLE_SYSTEM_SLOT_PITCH), gShellDebug1HiiHandle, Type9ExtendedStruct->SlotPitch);
+            if (AE_SMBIOS_VERSION (0x3, 0x5)) {
+              DisplaySystemSlotHeight (Type9ExtendedStruct->SlotHeight, Option);
+            }
           }
         }
       }
@@ -872,6 +886,11 @@ SmbiosPrintStructure (
         if (Struct->Hdr->Length > 0x4C) {
           PRINT_STRUCT_VALUE_LH (Struct, Type17, LogicalSize);
         }
+      }
+
+      if (AE_SMBIOS_VERSION (0x3, 0x3) && (Struct->Hdr->Length > 0x54)) {
+        PRINT_STRUCT_VALUE_H (Struct, Type17, ExtendedSpeed);
+        PRINT_STRUCT_VALUE_H (Struct, Type17, ExtendedConfiguredMemorySpeed);
       }
 
       break;
@@ -1158,10 +1177,31 @@ SmbiosPrintStructure (
     //
     case 38:
       DisplayIPMIDIBMCInterfaceType (Struct->Type38->InterfaceType, Option);
-      PRINT_STRUCT_VALUE_H (Struct, Type38, IPMISpecificationRevision);
+
+      ShellPrintHiiEx (
+        -1,
+        -1,
+        NULL,
+        STRING_TOKEN (STR_SMBIOSVIEW_PRINTINFO_IPMI_SPECIFICATION_REVISION),
+        gShellDebug1HiiHandle,
+        RShiftU64 ((UINT64)Struct->Type38->IPMISpecificationRevision, 4), \
+        Struct->Type38->IPMISpecificationRevision & 0x0F
+        );
+
       PRINT_STRUCT_VALUE_H (Struct, Type38, I2CSlaveAddress);
-      PRINT_STRUCT_VALUE_H (Struct, Type38, NVStorageDeviceAddress);
-      PRINT_STRUCT_VALUE_LH (Struct, Type38, BaseAddress);
+
+      if (Struct->Type38->NVStorageDeviceAddress == 0xFF) {
+        ShellPrintHiiEx (-1, -1, NULL, STRING_TOKEN (STR_SMBIOSVIEW_PRINTINFO_NV_STORAGE_DEVICE_NOT_PRESENT), gShellDebug1HiiHandle);
+      } else {
+        PRINT_STRUCT_VALUE_H (Struct, Type38, NVStorageDeviceAddress);
+      }
+
+      if (Struct->Type38->InterfaceType == IPMIDeviceInfoInterfaceTypeSSIF) {
+        ShellPrintHiiEx (-1, -1, NULL, STRING_TOKEN (STR_SMBIOSVIEW_PRINTINFO_BASE_ADDRESS), gShellDebug1HiiHandle, RShiftU64 ((UINT64)Struct->Type38->BaseAddress, 1));
+      } else {
+        PRINT_STRUCT_VALUE_LH (Struct, Type38, BaseAddress);
+      }
+
       break;
 
     //
@@ -1535,6 +1575,14 @@ DisplayBiosCharacteristicsExt2 (
 
       if (BIT (byte2, 4) != 0) {
         ShellPrintHiiEx (-1, -1, NULL, STRING_TOKEN (STR_SMBIOSVIEW_PRINTINFO_VIRTUAL_MACHINE), gShellDebug1HiiHandle);
+      }
+
+      if (BIT (byte2, 5) != 0) {
+        ShellPrintHiiEx (-1, -1, NULL, STRING_TOKEN (STR_SMBIOSVIEW_PRINTINFO_MCFG_SUPPORTED), gShellDebug1HiiHandle);
+      }
+
+      if (BIT (byte2, 6) != 0) {
+        ShellPrintHiiEx (-1, -1, NULL, STRING_TOKEN (STR_SMBIOSVIEW_PRINTINFO_MCFG_ENABLED), gShellDebug1HiiHandle);
       }
 
       ShellPrintHiiEx (-1, -1, NULL, STRING_TOKEN (STR_SMBIOSVIEW_PRINTINFO_BITS_RSVD_FOR_FUTURE), gShellDebug1HiiHandle, 5);
@@ -2898,11 +2946,6 @@ DisplaySystemSlotId (
   IN UINT8   Option
   )
 {
-  //
-  // Display slot type first
-  //
-  DisplaySystemSlotType (SlotType, Option);
-
   ShellPrintHiiEx (-1, -1, NULL, STRING_TOKEN (STR_SMBIOSVIEW_PRINTINFO_SLOT_ID), gShellDebug1HiiHandle);
   //
   // print option

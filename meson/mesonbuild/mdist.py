@@ -13,20 +13,25 @@
 # limitations under the License.
 
 
+import argparse
 import gzip
 import os
 import sys
+import shlex
 import shutil
 import subprocess
+import tarfile
+import tempfile
 import hashlib
 import json
 from glob import glob
 from pathlib import Path
 from mesonbuild.environment import detect_ninja
 from mesonbuild.mesonlib import (MesonException, RealPathAction, quiet_git,
-                                 windows_proof_rmtree)
+                                 windows_proof_rmtree, setup_vsenv)
+from mesonbuild.msetup import add_arguments as msetup_argparse
 from mesonbuild.wrap import wrap
-from mesonbuild import mlog, build
+from mesonbuild import mlog, build, coredata
 from .scripts.meson_exe import run_exe
 
 archive_choices = ['gztar', 'xztar', 'zip']
@@ -56,34 +61,40 @@ def create_hash(fname):
         f.write('{} *{}\n'.format(m.hexdigest(), os.path.basename(fname)))
 
 
-def del_gitfiles(dirname):
-    gitfiles = ('.git', '.gitattributes', '.gitignore', '.gitmodules')
-    for f in glob(os.path.join(dirname, '.git*')):
-        if os.path.split(f)[1] in gitfiles:
-            if os.path.isdir(f) and not os.path.islink(f):
-                windows_proof_rmtree(f)
-            else:
-                os.unlink(f)
+def copy_git(src, distdir, revision='HEAD', prefix=None, subdir=None):
+    cmd = ['git', 'archive', '--format', 'tar', revision]
+    if prefix is not None:
+        cmd.insert(2, f'--prefix={prefix}/')
+    if subdir is not None:
+        cmd.extend(['--', subdir])
+    with tempfile.TemporaryFile() as f:
+        subprocess.check_call(cmd, cwd=src, stdout=f)
+        f.seek(0)
+        t = tarfile.open(fileobj=f) # [ignore encoding]
+        t.extractall(path=distdir)
 
-def process_submodules(dirname):
-    module_file = os.path.join(dirname, '.gitmodules')
+def process_submodules(src, distdir):
+    module_file = os.path.join(src, '.gitmodules')
     if not os.path.exists(module_file):
         return
-    subprocess.check_call(['git', 'submodule', 'update', '--init', '--recursive'], cwd=dirname)
-    for line in open(module_file, encoding='utf-8'):
-        line = line.strip()
-        if '=' not in line:
+    cmd = ['git', 'submodule', 'status', '--cached', '--recursive']
+    modlist = subprocess.check_output(cmd, cwd=src, universal_newlines=True).splitlines()
+    for submodule in modlist:
+        status = submodule[:1]
+        sha1, rest = submodule[1:].split(' ', 1)
+        subpath = rest.rsplit(' ', 1)[0]
+
+        if status == '-':
+            mlog.warning(f'Submodule {subpath!r} is not checked out and cannot be added to the dist')
             continue
-        k, v = line.split('=', 1)
-        k = k.strip()
-        v = v.strip()
-        if k != 'path':
-            continue
-        del_gitfiles(os.path.join(dirname, v))
+        elif status in {'+', 'U'}:
+            mlog.warning(f'Submodule {subpath!r} has uncommitted changes that will not be included in the dist tarball')
+
+        copy_git(os.path.join(src, subpath), distdir, revision=sha1, prefix=subpath)
 
 
 def run_dist_scripts(src_root, bld_root, dist_root, dist_scripts, subprojects):
-    assert(os.path.isabs(dist_root))
+    assert os.path.isabs(dist_root)
     env = {}
     env['MESON_DIST_ROOT'] = dist_root
     env['MESON_SOURCE_ROOT'] = src_root
@@ -126,7 +137,7 @@ def git_have_dirty_index(src_root):
     ret = subprocess.call(['git', '-C', src_root, 'diff-index', '--quiet', 'HEAD'])
     return ret == 1
 
-def git_clone(src_root, distdir):
+def process_git_project(src_root, distdir):
     if git_have_dirty_index(src_root):
         mlog.warning('Repository has uncommitted changes that will not be included in the dist tarball')
     if os.path.exists(distdir):
@@ -134,30 +145,28 @@ def git_clone(src_root, distdir):
     repo_root = git_root(src_root)
     if repo_root.samefile(src_root):
         os.makedirs(distdir)
-        subprocess.check_call(['git', 'clone', '--shared', src_root, distdir])
+        copy_git(src_root, distdir)
     else:
         subdir = Path(src_root).relative_to(repo_root)
         tmp_distdir = distdir + '-tmp'
         if os.path.exists(tmp_distdir):
             windows_proof_rmtree(tmp_distdir)
         os.makedirs(tmp_distdir)
-        subprocess.check_call(['git', 'clone', '--shared', '--no-checkout', str(repo_root), tmp_distdir])
-        subprocess.check_call(['git', 'checkout', 'HEAD', '--', str(subdir)], cwd=tmp_distdir)
+        copy_git(repo_root, tmp_distdir, subdir=str(subdir))
         Path(tmp_distdir, subdir).rename(distdir)
         windows_proof_rmtree(tmp_distdir)
-    process_submodules(distdir)
-    del_gitfiles(distdir)
+    process_submodules(src_root, distdir)
 
 def create_dist_git(dist_name, archives, src_root, bld_root, dist_sub, dist_scripts, subprojects):
     distdir = os.path.join(dist_sub, dist_name)
-    git_clone(src_root, distdir)
+    process_git_project(src_root, distdir)
     for path in subprojects.values():
         sub_src_root = os.path.join(src_root, path)
         sub_distdir = os.path.join(distdir, path)
         if os.path.exists(sub_distdir):
             continue
         if is_git(sub_src_root):
-            git_clone(sub_src_root, sub_distdir)
+            process_git_project(sub_src_root, sub_distdir)
         else:
             shutil.copytree(sub_src_root, sub_distdir)
     run_dist_scripts(src_root, bld_root, distdir, dist_scripts, subprojects)
@@ -243,11 +252,9 @@ def check_dist(packagename, meson_command, extra_meson_args, bld_root, privdir):
     ninja_args = detect_ninja()
     shutil.unpack_archive(packagename, unpackdir)
     unpacked_files = glob(os.path.join(unpackdir, '*'))
-    assert(len(unpacked_files) == 1)
+    assert len(unpacked_files) == 1
     unpacked_src_dir = unpacked_files[0]
-    with open(os.path.join(bld_root, 'meson-info', 'intro-buildoptions.json'), encoding='utf-8') as boptions:
-        meson_command += ['-D{name}={value}'.format(**o) for o in json.load(boptions)
-                          if o['name'] not in ['backend', 'install_umask', 'buildtype']]
+    meson_command += create_cmdline_args(bld_root)
     meson_command += extra_meson_args
 
     ret = run_dist_steps(meson_command, unpacked_src_dir, builddir, installdir, ninja_args)
@@ -259,6 +266,15 @@ def check_dist(packagename, meson_command, extra_meson_args, bld_root, privdir):
         windows_proof_rmtree(installdir)
         print(f'Distribution package {packagename} tested')
     return ret
+
+def create_cmdline_args(bld_root):
+    parser = argparse.ArgumentParser()
+    msetup_argparse(parser)
+    args = parser.parse_args([])
+    coredata.parse_cmd_line_options(args)
+    coredata.read_cmd_line_file(bld_root, args)
+    args.cmd_line_options.pop(coredata.OptionKey('backend'), '')
+    return shlex.split(coredata.format_cmd_line_options(args))
 
 def determine_archives_to_generate(options):
     result = []
@@ -275,6 +291,7 @@ def run(options):
     if not buildfile.is_file():
         raise MesonException(f'Directory {options.wd!r} does not seem to be a Meson build directory.')
     b = build.load(options.wd)
+    setup_vsenv(b.need_vsenv)
     # This import must be load delayed, otherwise it will get the default
     # value of None.
     from mesonbuild.mesonlib import get_meson_command

@@ -33,11 +33,12 @@ from .compilers import (
 from .mixins.gnu import GnuCompiler
 
 if T.TYPE_CHECKING:
-    from .compilers import Compiler as CompilerMixinBase
     from ..programs import ExternalProgram
     from ..envconfig import MachineInfo
     from ..environment import Environment
     from ..linkers import DynamicLinker
+
+    CompilerMixinBase = Compiler
 else:
     CompilerMixinBase = object
 
@@ -63,7 +64,7 @@ ldc_optimization_args = {'0': [],
                          '1': ['-O1'],
                          '2': ['-O2'],
                          '3': ['-O3'],
-                         's': ['-Os'],
+                         's': ['-Oz'],
                          }  # type: T.Dict[str, T.List[str]]
 
 dmd_optimization_args = {'0': [],
@@ -104,6 +105,8 @@ class DmdLikeCompilerMixin(CompilerMixinBase):
         return ['-of=' + outputname]
 
     def get_include_args(self, path: str, is_system: bool) -> T.List[str]:
+        if path == "":
+            path = "."
         return ['-I=' + path]
 
     def compute_parameters_with_absolute_paths(self, parameter_list: T.List[str],
@@ -248,7 +251,7 @@ class DmdLikeCompilerMixin(CompilerMixinBase):
         return self.linker.import_library_args(implibname)
 
     def build_rpath_args(self, env: 'Environment', build_dir: str, from_dir: str,
-                         rpath_paths: str, build_rpath: str,
+                         rpath_paths: T.Tuple[str, ...], build_rpath: str,
                          install_rpath: str) -> T.Tuple[T.List[str], T.Set[bytes]]:
         if self.info.is_windows():
             return ([], set())
@@ -283,7 +286,7 @@ class DmdLikeCompilerMixin(CompilerMixinBase):
         # see the comment in the "-L" section
         link_expect_arg = False
         link_flags_with_arg = [
-            '-rpath', '-soname', '-compatibility_version', '-current_version',
+            '-rpath', '-rpath-link', '-soname', '-compatibility_version', '-current_version',
         ]
         for arg in args:
             # Translate OS specific arguments first.
@@ -352,7 +355,7 @@ class DmdLikeCompilerMixin(CompilerMixinBase):
                 #  - arguments like "-L=@rpath/xxx" without a second argument (on Apple platform)
                 #  - arguments like "-L=/SUBSYSTEM:CONSOLE (for Windows linker)
                 #
-                # The logic that follows trys to detect all these cases (some may be missing)
+                # The logic that follows tries to detect all these cases (some may be missing)
                 # in order to prepend a -L only for the library search paths with a single -L
 
                 if arg.startswith('-L='):
@@ -443,7 +446,7 @@ class DmdLikeCompilerMixin(CompilerMixinBase):
 
         if crt_val in self.mscrt_args:
             return self.mscrt_args[crt_val]
-        assert(crt_val in ['from_buildtype', 'static_from_buildtype'])
+        assert crt_val in ['from_buildtype', 'static_from_buildtype']
 
         dbg = 'mdd'
         rel = 'md'
@@ -463,15 +466,14 @@ class DmdLikeCompilerMixin(CompilerMixinBase):
         elif buildtype == 'minsize':
             return self.mscrt_args[rel]
         else:
-            assert(buildtype == 'custom')
+            assert buildtype == 'custom'
             raise EnvironmentException('Requested C runtime based on buildtype, but buildtype is "custom".')
 
     def get_soname_args(self, env: 'Environment', prefix: str, shlib_name: str,
                         suffix: str, soversion: str,
-                        darwin_versions: T.Tuple[str, str],
-                        is_shared_module: bool) -> T.List[str]:
+                        darwin_versions: T.Tuple[str, str]) -> T.List[str]:
         sargs = super().get_soname_args(env, prefix, shlib_name, suffix,
-                                        soversion, darwin_versions, is_shared_module)
+                                        soversion, darwin_versions)
 
         # LDC and DMD actually do use a linker, but they proxy all of that with
         # their own arguments
@@ -816,8 +818,8 @@ class LLVMDCompiler(DmdLikeCompilerMixin, DCompiler):
         return ['--release']
 
     def rsp_file_syntax(self) -> RSPFileSyntax:
-        # We use `mesonlib.is_windows` here because we want to konw what the
-        # build machine is, not the host machine. This really means whe whould
+        # We use `mesonlib.is_windows` here because we want to know what the
+        # build machine is, not the host machine. This really means we would
         # have the Environment not the MachineInfo in the compiler.
         return RSPFileSyntax.MSVC if is_windows() else RSPFileSyntax.GCC
 

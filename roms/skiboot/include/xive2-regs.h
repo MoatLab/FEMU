@@ -479,6 +479,7 @@ struct xive_end {
 #define END_W0_ESCALATE_END		PPC_BIT32(13)	/* "N" bit */
 #define END_W0_FIRMWARE1		PPC_BIT32(16)	/* Owned by FW */
 #define END_W0_FIRMWARE2		PPC_BIT32(17)	/* Owned by FW */
+#define END_W0_RESERVED			PPC_BITMASK32(24,31)
 	beint32_t	w1;
 #define END_W1_ES			PPC_BITMASK32(0,3)
 #define END_W1_ESn			PPC_BITMASK32(0,1)
@@ -487,6 +488,7 @@ struct xive_end {
 #define END_W1_ESe			PPC_BITMASK32(2,3)
 #define END_W1_ESe_P			PPC_BIT32(2)
 #define END_W1_ESe_Q			PPC_BIT32(3)
+#define END_W1_RESERVED			PPC_BITMASK32(6,7)
 #define END_W1_GEN_FLIPPED		PPC_BIT32(8)
 #define END_W1_GENERATION		PPC_BIT32(9)
 #define END_W1_PAGE_OFF			PPC_BITMASK32(10,31)
@@ -511,6 +513,7 @@ struct xive_end {
 	beint32_t	w7;
 #define END_W7_TOPO			PPC_BITMASK32(0,3)	/* Owned by HW */
 #define END_W7_F0_PRIORITY		PPC_BITMASK32(8,15)
+#define END_W7_F0_RESERVED		PPC_BITMASK32(16,31)
 #define END_W7_F1_LOG_SERVER_ID		PPC_BITMASK32(4,31)
 };
 #define xive_end_is_firmware1(end)      \

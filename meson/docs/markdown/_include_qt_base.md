@@ -8,8 +8,9 @@ It takes no positional arguments, and the following keyword arguments:
   - `name` (string | empty): if provided a single .cpp file will be generated,
     and the output of all qrc files will be combined in this file, otherwise
     each qrc file be written to it's own cpp file.
-  - `sources` (File | string)[]: A list of sources to be transpiled. Required,
-    must have at least one source
+  - `sources` (File | string | custom_target | custom_target index | generator_output)[]:
+    A list of sources to be transpiled. Required, must have at least one source
+    *New in 0.60.0*: support for custom_target, custom_target_index, and generator_output.
   - `extra_args` string[]: Extra arguments to pass directly to `qt-rcc`
   - `method` string: The method to use to detect qt, see `dependency()` for more
     information.
@@ -21,8 +22,9 @@ It takes no positional arguments, and the following keyword arguments:
 Compiles Qt's ui files (.ui) into header files.
 
 It takes no positional arguments, and the following keyword arguments:
-  - `sources` (File | string)[]: A list of sources to be transpiled. Required,
-    must have at least one source
+  - `sources` (File | string | custom_target | custom_target index | generator_output)[]:
+    A list of sources to be transpiled. Required, must have at least one source
+    *New in 0.60.0*: support for custom_target, custom_target_index, and generator_output.
   - `extra_args` string[]: Extra arguments to pass directly to `qt-uic`
   - `method` string: The method to use to detect qt, see `dependency()` for more
     information.
@@ -35,12 +37,16 @@ Compiles Qt's moc files (.moc) into header and/or source files. At least one of
 the keyword arguments `headers` and `sources` must be provided.
 
 It takes no positional arguments, and the following keyword arguments:
-  - `sources` (File | string)[]: A list of sources to be transpiled into .moc
-    files for manual inclusion.
-  - `headers` (File | string)[]: A list of headers to be transpiled into .cpp files
+  - `sources` (File | string | custom_target | custom_target index | generator_output)[]:
+    A list of sources to be transpiled into .moc files for manual inclusion.
+    *New in 0.60.0*: support for custom_target, custom_target_index, and generator_output.
+  - `headers` (File | string | custom_target | custom_target index | generator_output)[]:
+     A list of headers to be transpiled into .cpp files
+    *New in 0.60.0*: support for custom_target, custom_target_index, and generator_output.
   - `extra_args` string[]: Extra arguments to pass directly to `qt-moc`
   - `method` string: The method to use to detect qt, see `dependency()` for more
     information.
+  - `dependencies`: dependency objects whose include directories are used by moc.
   - `include_directories` (string | IncludeDirectory)[]: A list of `include_directory()`
     objects used when transpiling the .moc files
 
@@ -53,7 +59,7 @@ compilation.
 
 Has the following signature: `qt.preprocess(name: str | None, *sources: str)`
 
-If the `name` parameter is passed then all of the rcc files will be wirtten to a single output file
+If the `name` parameter is passed then all of the rcc files will be written to a single output file
 
 The variadic `sources` arguments have been deprecated since Meson 0.59.0, as has the `sources` keyword argument. These passed files unmodified through the preprocessor, don't do this, just add the output of the generator to another sources list:
 ```meson
@@ -71,7 +77,7 @@ This method takes the following keyword arguments:
  - `uic_extra_arguments` string[]: any additional arguments to `uic`. Since v0.49.0.
  - `rcc_extra_arguments` string[]: any additional arguments to `rcc`. Since v0.49.0.
  - `dependencies` Dependency[]: dependency objects needed by moc. Available since v0.48.0.
- - `sources`: a list of extra sources, which are added to the output unchaged. Deprecated in 0.59.0.
+ - `sources`: a list of extra sources, which are added to the output unchanged. Deprecated in 0.59.0.
 
 It returns an array of targets and sources to pass to a compilation target.
 
@@ -80,7 +86,9 @@ It returns an array of targets and sources to pass to a compilation target.
 This method generates the necessary targets to build translation files with
 lrelease, it takes no positional arguments, and the following keyword arguments:
 
- - `ts_files` (str | File)[], the list of input translation files produced by Qt's lupdate tool.
+ - `ts_files` (File | string | custom_target | custom_target index | generator_output)[]:
+    the list of input translation files produced by Qt's lupdate tool.
+    *New in 0.60.0*: support for custom_target, custom_target_index, and generator_output.
  - `install` bool: when true, this target is installed during the install step (optional).
  - `install_dir` string: directory to install to (optional).
  - `build_by_default` bool: when set to true, to have this target be built by

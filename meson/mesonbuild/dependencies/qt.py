@@ -69,6 +69,12 @@ def get_qmake_host_bins(qvars: T.Dict[str, str]) -> str:
     return qvars['QT_INSTALL_BINS']
 
 
+def get_qmake_host_libexecs(qvars: T.Dict[str, str]) -> T.Optional[str]:
+    if 'QT_HOST_LIBEXECS' in qvars:
+        return qvars['QT_HOST_LIBEXECS']
+    return qvars.get('QT_INSTALL_LIBEXECS')
+
+
 def _get_modules_lib_suffix(version: str, info: 'MachineInfo', is_debug: bool) -> str:
     """Get the module suffix based on platform and debug type."""
     suffix = ''
@@ -113,13 +119,15 @@ class QtExtraFrameworkDependency(ExtraFrameworkDependency):
 
 class _QtBase:
 
-    """Mixin class for shared componenets between PkgConfig and Qmake."""
+    """Mixin class for shared components between PkgConfig and Qmake."""
 
     link_args: T.List[str]
     clib_compiler: 'Compiler'
     env: 'Environment'
+    libexecdir: T.Optional[str] = None
 
     def __init__(self, name: str, kwargs: T.Dict[str, T.Any]):
+        self.name = name
         self.qtname = name.capitalize()
         self.qtver = name[-1]
         if self.qtver == "4":
@@ -237,10 +245,10 @@ class QmakeQtDependency(_QtBase, ConfigToolDependency, metaclass=abc.ABCMeta):
 
     def __init__(self, name: str, env: 'Environment', kwargs: T.Dict[str, T.Any]):
         _QtBase.__init__(self, name, kwargs)
-        self.tools = [f'qmake-{self.qtname}', 'qmake']
+        self.tools = [f'qmake{self.qtver}', f'qmake-{self.name}', 'qmake']
 
-        # Add additional constraits that the Qt version is met, but preserve
-        # any version requrements the user has set as well. For exmaple, if Qt5
+        # Add additional constraints that the Qt version is met, but preserve
+        # any version requrements the user has set as well. For example, if Qt5
         # is requested, add "">= 5, < 6", but if the user has ">= 5.6", don't
         # lose that.
         kwargs = kwargs.copy()
@@ -277,6 +285,7 @@ class QmakeQtDependency(_QtBase, ConfigToolDependency, metaclass=abc.ABCMeta):
         libdir = qvars['QT_INSTALL_LIBS']
         # Used by qt.compilers_detect()
         self.bindir = get_qmake_host_bins(qvars)
+        self.libexecdir = get_qmake_host_libexecs(qvars)
 
         # Use the buildtype by default, but look at the b_vscrt option if the
         # compiler supports it.
@@ -353,6 +362,7 @@ class QmakeQtDependency(_QtBase, ConfigToolDependency, metaclass=abc.ABCMeta):
             self.is_found = True
             # Used by self.compilers_detect()
             self.bindir = get_qmake_host_bins(qvars)
+            self.libexecdir = get_qmake_host_libexecs(qvars)
 
     def log_info(self) -> str:
         return 'qmake'
@@ -387,7 +397,7 @@ class Qt4PkgConfigDependency(QtPkgConfigDependency):
         applications = ['moc', 'uic', 'rcc', 'lupdate', 'lrelease']
         for application in applications:
             try:
-                return os.path.dirname(core.get_pkgconfig_variable('%s_location' % application, {}))
+                return os.path.dirname(core.get_pkgconfig_variable(f'{application}_location', {}))
             except mesonlib.MesonException:
                 pass
         return None

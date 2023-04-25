@@ -422,7 +422,8 @@ malloc_preinit(void)
     e820_add(BUILD_BIOS_ADDR, BUILD_BIOS_SIZE, E820_RESERVED);
 
     // Populate temp high ram
-    u32 highram = 0;
+    u32 highram_start = 0;
+    u32 highram_size = 0;
     int i;
     for (i=e820_count-1; i>=0; i--) {
         struct e820entry *en = &e820_list[i];
@@ -432,11 +433,15 @@ malloc_preinit(void)
         if (en->type != E820_RAM || end > 0xffffffff)
             continue;
         u32 s = en->start, e = end;
-        if (!highram) {
-            u32 newe = ALIGN_DOWN(e - BUILD_MAX_HIGHTABLE, MALLOC_MIN_ALIGN);
-            if (newe <= e && newe >= s) {
-                highram = newe;
-                e = newe;
+        if (!highram_start) {
+            u32 new_max = ALIGN_DOWN(e - BUILD_MAX_HIGHTABLE, MALLOC_MIN_ALIGN);
+            u32 new_min = ALIGN_DOWN(e - BUILD_MIN_HIGHTABLE, MALLOC_MIN_ALIGN);
+            if (new_max <= e && new_max >= s + BUILD_MAX_HIGHTABLE) {
+                highram_start = e = new_max;
+                highram_size = BUILD_MAX_HIGHTABLE;
+            } else if (new_min <= e && new_min >= s) {
+                highram_start = e = new_min;
+                highram_size = BUILD_MIN_HIGHTABLE;
             }
         }
         alloc_add(&ZoneTmpHigh, s, e);
@@ -444,9 +449,9 @@ malloc_preinit(void)
 
     // Populate regions
     alloc_add(&ZoneTmpLow, BUILD_STACK_ADDR, BUILD_EBDA_MINIMUM);
-    if (highram) {
-        alloc_add(&ZoneHigh, highram, highram + BUILD_MAX_HIGHTABLE);
-        e820_add(highram, BUILD_MAX_HIGHTABLE, E820_RESERVED);
+    if (highram_start) {
+        alloc_add(&ZoneHigh, highram_start, highram_start + highram_size);
+        e820_add(highram_start, highram_size, E820_RESERVED);
     }
 }
 

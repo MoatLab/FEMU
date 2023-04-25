@@ -1,0 +1,2 @@
+install:
+  cloud_init: false

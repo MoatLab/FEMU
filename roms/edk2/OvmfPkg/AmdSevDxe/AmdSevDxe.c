@@ -20,6 +20,13 @@
 #include <Library/UefiBootServicesTableLib.h>
 #include <Guid/ConfidentialComputingSevSnpBlob.h>
 #include <Library/PcdLib.h>
+#include <Pi/PrePiDxeCis.h>
+#include <Protocol/SevMemoryAcceptance.h>
+#include <Protocol/MemoryAccept.h>
+#include <Uefi/UefiSpec.h>
+
+// Present, initialized, tested bits defined in MdeModulePkg/Core/Dxe/DxeMain.h
+#define EFI_MEMORY_INTERNAL_MASK  0x0700000000000000ULL
 
 STATIC CONFIDENTIAL_COMPUTING_SNP_BLOB_LOCATION  mSnpBootDxeTable = {
   SIGNATURE_32 ('A',                                    'M', 'D', 'E'),
@@ -29,6 +36,138 @@ STATIC CONFIDENTIAL_COMPUTING_SNP_BLOB_LOCATION  mSnpBootDxeTable = {
   FixedPcdGet32 (PcdOvmfSnpSecretsSize),
   (UINT64)(UINTN)FixedPcdGet32 (PcdOvmfCpuidBase),
   FixedPcdGet32 (PcdOvmfCpuidSize),
+};
+
+STATIC EFI_HANDLE  mAmdSevDxeHandle = NULL;
+
+STATIC BOOLEAN  mAcceptAllMemoryAtEBS = TRUE;
+
+STATIC EFI_EVENT  mAcceptAllMemoryEvent = NULL;
+
+#define IS_ALIGNED(x, y)  ((((x) & ((y) - 1)) == 0))
+
+STATIC
+EFI_STATUS
+EFIAPI
+AmdSevMemoryAccept (
+  IN EDKII_MEMORY_ACCEPT_PROTOCOL  *This,
+  IN EFI_PHYSICAL_ADDRESS          StartAddress,
+  IN UINTN                         Size
+  )
+{
+  //
+  // The StartAddress must be page-aligned, and the Size must be a positive
+  // multiple of SIZE_4KB. Use an assert instead of returning an erros since
+  // this is an EDK2-internal protocol.
+  //
+  ASSERT (IS_ALIGNED (StartAddress, SIZE_4KB));
+  ASSERT (IS_ALIGNED (Size, SIZE_4KB));
+  ASSERT (Size != 0);
+
+  MemEncryptSevSnpPreValidateSystemRam (
+    StartAddress,
+    EFI_SIZE_TO_PAGES (Size)
+    );
+
+  return EFI_SUCCESS;
+}
+
+STATIC
+EFI_STATUS
+AcceptAllMemory (
+  VOID
+  )
+{
+  EFI_GCD_MEMORY_SPACE_DESCRIPTOR  *AllDescMap;
+  UINTN                            NumEntries;
+  UINTN                            Index;
+  EFI_STATUS                       Status;
+
+  DEBUG ((DEBUG_INFO, "Accepting all memory\n"));
+
+  /*
+   * Get a copy of the memory space map to iterate over while
+   * changing the map.
+   */
+  Status = gDS->GetMemorySpaceMap (&NumEntries, &AllDescMap);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  for (Index = 0; Index < NumEntries; Index++) {
+    CONST EFI_GCD_MEMORY_SPACE_DESCRIPTOR  *Desc;
+
+    Desc = &AllDescMap[Index];
+    if (Desc->GcdMemoryType != EFI_GCD_MEMORY_TYPE_UNACCEPTED) {
+      continue;
+    }
+
+    Status = AmdSevMemoryAccept (
+               NULL,
+               Desc->BaseAddress,
+               Desc->Length
+               );
+    if (EFI_ERROR (Status)) {
+      break;
+    }
+
+    Status = gDS->RemoveMemorySpace (Desc->BaseAddress, Desc->Length);
+    if (EFI_ERROR (Status)) {
+      break;
+    }
+
+    Status = gDS->AddMemorySpace (
+                    EfiGcdMemoryTypeSystemMemory,
+                    Desc->BaseAddress,
+                    Desc->Length,
+                    // Allocable system memory resource capabilities as masked
+                    // in MdeModulePkg/Core/Dxe/Mem/Page.c:PromoteMemoryResource
+                    Desc->Capabilities & ~(EFI_MEMORY_INTERNAL_MASK | EFI_MEMORY_RUNTIME)
+                    );
+    if (EFI_ERROR (Status)) {
+      break;
+    }
+  }
+
+  gBS->FreePool (AllDescMap);
+  gBS->CloseEvent (mAcceptAllMemoryEvent);
+  return Status;
+}
+
+VOID
+EFIAPI
+ResolveUnacceptedMemory (
+  IN EFI_EVENT  Event,
+  IN VOID       *Context
+  )
+{
+  EFI_STATUS  Status;
+
+  if (!mAcceptAllMemoryAtEBS) {
+    return;
+  }
+
+  Status = AcceptAllMemory ();
+  ASSERT_EFI_ERROR (Status);
+}
+
+STATIC
+EFI_STATUS
+EFIAPI
+AllowUnacceptedMemory (
+  IN  OVMF_SEV_MEMORY_ACCEPTANCE_PROTOCOL  *This
+  )
+{
+  mAcceptAllMemoryAtEBS = FALSE;
+  return EFI_SUCCESS;
+}
+
+STATIC
+OVMF_SEV_MEMORY_ACCEPTANCE_PROTOCOL
+  mMemoryAcceptanceProtocol = { AllowUnacceptedMemory };
+
+STATIC EDKII_MEMORY_ACCEPT_PROTOCOL  mMemoryAcceptProtocol = {
+  AmdSevMemoryAccept
 };
 
 EFI_STATUS
@@ -147,11 +286,41 @@ AmdSevDxeEntryPoint (
     }
   }
 
-  //
-  // If its SEV-SNP active guest then install the CONFIDENTIAL_COMPUTING_SEV_SNP_BLOB.
-  // It contains the location for both the Secrets and CPUID page.
-  //
   if (MemEncryptSevSnpIsEnabled ()) {
+    //
+    // Memory acceptance began being required in SEV-SNP, so install the
+    // memory accept protocol implementation for a SEV-SNP active guest.
+    //
+    Status = gBS->InstallMultipleProtocolInterfaces (
+                    &mAmdSevDxeHandle,
+                    &gEdkiiMemoryAcceptProtocolGuid,
+                    &mMemoryAcceptProtocol,
+                    &gOvmfSevMemoryAcceptanceProtocolGuid,
+                    &mMemoryAcceptanceProtocol,
+                    NULL
+                    );
+    ASSERT_EFI_ERROR (Status);
+
+    // SEV-SNP support does not automatically imply unaccepted memory support,
+    // so make ExitBootServices accept all unaccepted memory if support is
+    // not communicated.
+    Status = gBS->CreateEventEx (
+                    EVT_NOTIFY_SIGNAL,
+                    TPL_CALLBACK,
+                    ResolveUnacceptedMemory,
+                    NULL,
+                    &gEfiEventBeforeExitBootServicesGuid,
+                    &mAcceptAllMemoryEvent
+                    );
+
+    if (EFI_ERROR (Status)) {
+      DEBUG ((DEBUG_ERROR, "AllowUnacceptedMemory event creation for EventBeforeExitBootServices failed.\n"));
+    }
+
+    //
+    // If its SEV-SNP active guest then install the CONFIDENTIAL_COMPUTING_SEV_SNP_BLOB.
+    // It contains the location for both the Secrets and CPUID page.
+    //
     return gBS->InstallConfigurationTable (
                   &gConfidentialComputingSevSnpBlobGuid,
                   &mSnpBootDxeTable

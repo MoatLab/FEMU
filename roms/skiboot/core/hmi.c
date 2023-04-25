@@ -19,8 +19,10 @@
 #include <pci.h>
 #include <cpu.h>
 #include <chip.h>
+#include <pau-regs.h>
 #include <npu-regs.h>
 #include <npu2-regs.h>
+#include <pau.h>
 #include <npu2.h>
 #include <npu.h>
 #include <capp.h>
@@ -717,13 +719,7 @@ static void find_nx_checkstop_reason(int flat_chip_id,
 	queue_hmi_event(hmi_evt, 0, out_flags);
 }
 
-static bool phb_is_npu2(struct dt_node *dn)
-{
-	return (dt_node_is_compatible(dn, "ibm,power9-npu-pciex") ||
-		dt_node_is_compatible(dn, "ibm,power9-npu-opencapi-pciex"));
-}
-
-static void add_npu2_xstop_reason(uint32_t *xstop_reason, uint8_t reason)
+static void add_npu_xstop_reason(uint32_t *xstop_reason, uint8_t reason)
 {
 	int i, reason_count;
 	uint8_t *ptr;
@@ -739,8 +735,8 @@ static void add_npu2_xstop_reason(uint32_t *xstop_reason, uint8_t reason)
 	}
 }
 
-static void encode_npu2_xstop_reason(uint32_t *xstop_reason,
-				uint64_t fir, int fir_number)
+static void encode_npu_xstop_reason(uint32_t *xstop_reason,
+				    uint64_t fir, int fir_number)
 {
 	int bit;
 	uint8_t reason;
@@ -758,114 +754,125 @@ static void encode_npu2_xstop_reason(uint32_t *xstop_reason,
 		bit = ilog2(fir);
 		reason = fir_number << 6;
 		reason |= (63 - bit); // IBM numbering
-		add_npu2_xstop_reason(xstop_reason, reason);
+		add_npu_xstop_reason(xstop_reason, reason);
 		fir ^= 1ULL << bit;
 	}
 }
 
-static void find_npu2_checkstop_reason(int flat_chip_id,
-				      struct OpalHMIEvent *hmi_evt,
-				      uint64_t *out_flags)
+static bool npu_fir_errors(struct phb *phb, int flat_chip_id,
+			   uint32_t *xstop_reason)
 {
-	struct phb *phb;
-	int i;
-	bool npu2_hmi_verbose = false, found = false;
-	uint64_t npu2_fir;
-	uint64_t npu2_fir_mask;
-	uint64_t npu2_fir_action0;
-	uint64_t npu2_fir_action1;
-	uint64_t npu2_fir_addr;
-	uint64_t npu2_fir_mask_addr;
-	uint64_t npu2_fir_action0_addr;
-	uint64_t npu2_fir_action1_addr;
+	uint64_t fir, fir_mask;
+	uint64_t fir_action0, fir_action1;
+	uint64_t fir_reg, fir_mask_reg;
+	uint64_t fir_action0_reg, fir_action1_reg;
 	uint64_t fatal_errors;
-	uint32_t xstop_reason = 0;
-	int total_errors = 0;
+	uint64_t xscom_base;
+	bool fir_errors = false;
+	int fir_regs;
 	const char *loc;
+	struct npu *npu;
+	struct npu2 *npu2 = NULL;
+	struct npu2_dev *dev;
+	struct pau *pau;
 
-	/* NPU2 only */
-	if (PVR_TYPE(mfspr(SPR_PVR)) != PVR_TYPE_P9)
-		return;
+	fir_regs = (phb->phb_type == phb_type_pcie_v3) ? 1 : 3;
 
-	/* Find the NPU on the chip associated with the HMI. */
-	for_each_phb(phb) {
-		/* NOTE: if a chip ever has >1 NPU this will need adjusting */
-		if (phb_is_npu2(phb->dt_node) &&
-		    (dt_get_chip_id(phb->dt_node) == flat_chip_id)) {
-			found = true;
-			break;
-		}
-	}
+	for (uint32_t i = 0; i < fir_regs; i++) {
+		switch (phb->phb_type) {
+		case phb_type_pcie_v3:
+			fir_reg = NX_FIR;
+			fir_mask_reg = NX_FIR_MASK;
+			fir_action0_reg = NX_FIR_ACTION0;
+			fir_action1_reg = NX_FIR_ACTION1;
 
-	/* If we didn't find a NPU on the chip, it's not our checkstop. */
-	if (!found)
-		return;
-
-	npu2_fir_addr = NPU2_FIR_REGISTER_0;
-	npu2_fir_mask_addr = NPU2_FIR_REGISTER_0 + NPU2_FIR_MASK_OFFSET;
-	npu2_fir_action0_addr = NPU2_FIR_REGISTER_0 + NPU2_FIR_ACTION0_OFFSET;
-	npu2_fir_action1_addr = NPU2_FIR_REGISTER_0 + NPU2_FIR_ACTION1_OFFSET;
-
-	for (i = 0; i < NPU2_TOTAL_FIR_REGISTERS; i++) {
-		/* Read all the registers necessary to find a checkstop condition. */
-		if (xscom_read(flat_chip_id, npu2_fir_addr, &npu2_fir) ||
-			xscom_read(flat_chip_id, npu2_fir_mask_addr, &npu2_fir_mask) ||
-			xscom_read(flat_chip_id, npu2_fir_action0_addr, &npu2_fir_action0) ||
-			xscom_read(flat_chip_id, npu2_fir_action1_addr, &npu2_fir_action1)) {
-			prerror("HMI: Couldn't read NPU FIR register%d with XSCOM\n", i);
+			npu = phb_to_npu(phb);
+			if (npu != NULL)
+				xscom_base = npu->at_xscom;
+			else
+				continue;
+		break;
+		case phb_type_npu_v2:
+			fir_reg = NPU2_FIR(i);
+			fir_mask_reg = NPU2_FIR_MASK(i);
+			fir_action0_reg = NPU2_FIR_ACTION0(i);
+			fir_action1_reg = NPU2_FIR_ACTION1(i);
+			npu2 = phb_to_npu2_nvlink(phb);
+			xscom_base = npu2->xscom_base;
+		break;
+		case phb_type_npu_v2_opencapi:
+			fir_reg = NPU2_FIR(i);
+			fir_mask_reg = NPU2_FIR_MASK(i);
+			fir_action0_reg = NPU2_FIR_ACTION0(i);
+			fir_action1_reg = NPU2_FIR_ACTION1(i);
+			dev = phb_to_npu2_dev_ocapi(phb);
+			npu2 = dev->npu;
+			xscom_base = npu2->xscom_base;
+		break;
+		case phb_type_pau_opencapi:
+			fir_reg = PAU_FIR(i);
+			fir_mask_reg = PAU_FIR_MASK(i);
+			fir_action0_reg = PAU_FIR_ACTION0(i);
+			fir_action1_reg = PAU_FIR_ACTION1(i);
+			pau = ((struct pau_dev *)(pau_phb_to_opencapi_dev(phb)))->pau;
+			xscom_base = pau->xscom_base;
+		break;
+		default:
 			continue;
 		}
 
-		fatal_errors = npu2_fir & ~npu2_fir_mask & npu2_fir_action0 & npu2_fir_action1;
+		if (xscom_read(flat_chip_id, xscom_base + fir_reg, &fir) ||
+		    xscom_read(flat_chip_id, xscom_base + fir_mask_reg, &fir_mask) ||
+		    xscom_read(flat_chip_id, xscom_base + fir_action0_reg, &fir_action0) ||
+		    xscom_read(flat_chip_id, xscom_base + fir_action1_reg, &fir_action1)) {
+			prerror("HMI: Couldn't read NPU/PAU FIR register%d with XSCOM\n", i);
+			continue;
+		}
+
+		fatal_errors = fir & ~fir_mask & fir_action0 & fir_action1;
 
 		if (fatal_errors) {
 			loc = chip_loc_code(flat_chip_id);
 			if (!loc)
 				loc = "Not Available";
-			prlog(PR_ERR, "NPU: [Loc: %s] P:%d FIR#%d FIR 0x%016llx mask 0x%016llx\n",
-					loc, flat_chip_id, i, npu2_fir, npu2_fir_mask);
-			prlog(PR_ERR, "NPU: [Loc: %s] P:%d ACTION0 0x%016llx, ACTION1 0x%016llx\n",
-					loc, flat_chip_id, npu2_fir_action0, npu2_fir_action1);
-			total_errors++;
-
-			encode_npu2_xstop_reason(&xstop_reason, fatal_errors, i);
+			prlog(PR_ERR, "NPU/PAU: [Loc: %s] P:%d FIR#%d "
+				      "FIR 0x%016llx mask 0x%016llx\n",
+				      loc, flat_chip_id, i, fir, fir_mask);
+			prlog(PR_ERR, "NPU/PAU: [Loc: %s] P:%d ACTION0 "
+				      "0x%016llx, ACTION1 0x%016llx\n",
+				      loc, flat_chip_id, fir_action0, fir_action1);
+			if (phb->phb_type != phb_type_pcie_v3)
+				encode_npu_xstop_reason(xstop_reason,
+							fatal_errors,
+							i);
+			fir_errors = true;
 		}
-
-		/* Can't do a fence yet, we are just logging fir information for now */
-		npu2_fir_addr += NPU2_FIR_OFFSET;
-		npu2_fir_mask_addr += NPU2_FIR_OFFSET;
-		npu2_fir_action0_addr += NPU2_FIR_OFFSET;
-		npu2_fir_action1_addr += NPU2_FIR_OFFSET;
-
 	}
 
-	if (!total_errors)
-		return;
+	/* dump registers */
+	if (fir_errors) {
+		switch (phb->phb_type) {
+		case phb_type_npu_v2:
+		case phb_type_npu_v2_opencapi:
+			npu2_dump_scoms(npu2, flat_chip_id);
+		break;
+		case phb_type_pau_opencapi:
+			pau_opencapi_dump_scoms(pau);
+		break;
+		default:
+		break;
+		}
 
-	npu2_hmi_verbose = nvram_query_eq_safe("npu2-hmi-verbose", "true");
-	/* Force this for now until we sort out something better */
-	npu2_hmi_verbose = true;
-
-	if (npu2_hmi_verbose) {
-		npu2_dump_scoms(flat_chip_id);
 		prlog(PR_ERR, " _________________________ \n");
-		prlog(PR_ERR, "<    It's Debug time!     >\n");
+		prlog(PR_ERR, "< It's Debug time!        >\n");
 		prlog(PR_ERR, " ------------------------- \n");
-		prlog(PR_ERR, "       \\   ,__,            \n");
-		prlog(PR_ERR, "        \\  (oo)____        \n");
-		prlog(PR_ERR, "           (__)    )\\      \n");
+		prlog(PR_ERR, "       \\   ,__,           \n");
+		prlog(PR_ERR, "        \\  (oo)____       \n");
+		prlog(PR_ERR, "           (__)    )\\     \n");
 		prlog(PR_ERR, "              ||--|| *     \n");
 	}
 
-	/* Set up the HMI event */
-	hmi_evt->severity = OpalHMI_SEV_WARNING;
-	hmi_evt->type = OpalHMI_ERROR_MALFUNC_ALERT;
-	hmi_evt->u.xstop_error.xstop_type = CHECKSTOP_TYPE_NPU;
-	hmi_evt->u.xstop_error.xstop_reason = cpu_to_be32(xstop_reason);
-	hmi_evt->u.xstop_error.u.chip_id = cpu_to_be32(flat_chip_id);
-
-	/* Marking the event as recoverable so that we don't crash */
-	queue_hmi_event(hmi_evt, 1, out_flags);
+	return fir_errors;
 }
 
 static void find_npu_checkstop_reason(int flat_chip_id,
@@ -873,67 +880,47 @@ static void find_npu_checkstop_reason(int flat_chip_id,
 				      uint64_t *out_flags)
 {
 	struct phb *phb;
-	struct npu *p = NULL;
+	struct dt_node *dn;
+	uint32_t xstop_reason = 0;
 
-	uint64_t npu_fir;
-	uint64_t npu_fir_mask;
-	uint64_t npu_fir_action0;
-	uint64_t npu_fir_action1;
-	uint64_t fatal_errors;
+	/* Only check for NPU errors if the chip has a NPU/PAU */
+	if ((PVR_TYPE(mfspr(SPR_PVR)) != PVR_TYPE_P8NVL) &&
+	    (PVR_TYPE(mfspr(SPR_PVR)) != PVR_TYPE_P9) &&
+	    (PVR_TYPE(mfspr(SPR_PVR)) != PVR_TYPE_P10))
+		return;
 
-	/* Only check for NPU errors if the chip has a NPU */
-	if (PVR_TYPE(mfspr(SPR_PVR)) != PVR_TYPE_P8NVL)
-		return find_npu2_checkstop_reason(flat_chip_id, hmi_evt, out_flags);
-
-	/* Find the NPU on the chip associated with the HMI. */
+	/* Find the NPU/PAU on the chip associated with the HMI. */
 	for_each_phb(phb) {
-		/* NOTE: if a chip ever has >1 NPU this will need adjusting */
-		if (dt_node_is_compatible(phb->dt_node, "ibm,power8-npu-pciex") &&
-		    (dt_get_chip_id(phb->dt_node) == flat_chip_id)) {
-			p = phb_to_npu(phb);
-			break;
+		dn = phb->dt_node;
+
+		if (!(dt_node_is_compatible(dn, "ibm,power8-npu-pciex") ||
+		      dt_node_is_compatible(dn, "ibm,power9-npu-pciex") ||
+		      dt_node_is_compatible(dn, "ibm,power9-npu-opencapi-pciex") ||
+		      dt_node_is_compatible(dn, "ibm,power10-pau-opencapi-pciex")))
+			continue;
+
+		if (dt_get_chip_id(dn) != flat_chip_id)
+			continue;
+
+		/* Read all the registers necessary to find a checkstop condition. */
+		if (!npu_fir_errors(phb, flat_chip_id, &xstop_reason))
+			continue;
+
+		if (phb->phb_type == phb_type_pcie_v3) {
+			/* Set the NPU to fenced since it can't recover. */
+			npu_set_fence_state(phb_to_npu(phb), true);
 		}
+
+		/* Set up the HMI event */
+		hmi_evt->severity = OpalHMI_SEV_WARNING;
+		hmi_evt->type = OpalHMI_ERROR_MALFUNC_ALERT;
+		hmi_evt->u.xstop_error.xstop_type = CHECKSTOP_TYPE_NPU;
+		hmi_evt->u.xstop_error.xstop_reason = xstop_reason;
+		hmi_evt->u.xstop_error.u.chip_id = cpu_to_be32(flat_chip_id);
+
+		/* Marking the event as recoverable so that we don't crash */
+		queue_hmi_event(hmi_evt, 1, out_flags);
 	}
-
-	/* If we didn't find a NPU on the chip, it's not our checkstop. */
-	if (p == NULL)
-		return;
-
-	/* Read all the registers necessary to find a checkstop condition. */
-	if (xscom_read(flat_chip_id,
-		       p->at_xscom + NX_FIR, &npu_fir) ||
-	    xscom_read(flat_chip_id,
-		       p->at_xscom + NX_FIR_MASK, &npu_fir_mask) ||
-	    xscom_read(flat_chip_id,
-		       p->at_xscom + NX_FIR_ACTION0, &npu_fir_action0) ||
-	    xscom_read(flat_chip_id,
-		       p->at_xscom + NX_FIR_ACTION1, &npu_fir_action1)) {
-		prerror("Couldn't read NPU registers with XSCOM\n");
-		return;
-	}
-
-	fatal_errors = npu_fir & ~npu_fir_mask & npu_fir_action0 & npu_fir_action1;
-
-	/* If there's no errors, we don't need to do anything. */
-	if (!fatal_errors)
-		return;
-
-	prlog(PR_DEBUG, "NPU: FIR 0x%016llx mask 0x%016llx\n",
-	      npu_fir, npu_fir_mask);
-	prlog(PR_DEBUG, "NPU: ACTION0 0x%016llx, ACTION1 0x%016llx\n",
-	      npu_fir_action0, npu_fir_action1);
-
-	/* Set the NPU to fenced since it can't recover. */
-	npu_set_fence_state(p, true);
-
-	/* Set up the HMI event */
-	hmi_evt->severity = OpalHMI_SEV_WARNING;
-	hmi_evt->type = OpalHMI_ERROR_MALFUNC_ALERT;
-	hmi_evt->u.xstop_error.xstop_type = CHECKSTOP_TYPE_NPU;
-	hmi_evt->u.xstop_error.u.chip_id = cpu_to_be32(flat_chip_id);
-
-	/* The HMI is "recoverable" because it shouldn't crash the system */
-	queue_hmi_event(hmi_evt, 1, out_flags);
 }
 
 static void decode_malfunction(struct OpalHMIEvent *hmi_evt, uint64_t *out_flags)
@@ -962,7 +949,8 @@ static void decode_malfunction(struct OpalHMIEvent *hmi_evt, uint64_t *out_flags
 			xscom_write(this_cpu()->chip_id, malf_alert_scom,
 								~PPC_BIT(i));
 			find_capp_checkstop_reason(i, hmi_evt, &flags);
-			find_nx_checkstop_reason(i, hmi_evt, &flags);
+			if (proc_gen != proc_gen_p10)
+				find_nx_checkstop_reason(i, hmi_evt, &flags);
 			find_npu_checkstop_reason(i, hmi_evt, &flags);
 		}
 	}

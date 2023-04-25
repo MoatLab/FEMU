@@ -11,6 +11,7 @@
 #include <AcpiTableGenerator.h>
 
 #include <AmlCoreInterface.h>
+#include <AmlCpcInfo.h>
 #include <AmlEncoding/Aml.h>
 #include <Api/AmlApiHelper.h>
 #include <CodeGen/AmlResourceDataCodeGen.h>
@@ -1071,7 +1072,7 @@ AmlAddPrtEntry (
     goto error_handler;
   }
 
-  // Append to the the list of _PRT entries.
+  // Append to the list of _PRT entries.
   Status = AmlVarListAddTail (
              (AML_NODE_HANDLE)PrtEntryList,
              (AML_NODE_HANDLE)PackageNode
@@ -2598,5 +2599,729 @@ error_handler:
     AmlDeleteTree ((AML_NODE_HANDLE)ResourceTemplateNode);
   }
 
+  return Status;
+}
+
+/** AML code generation for a _DSD device data object.
+
+  AmlAddDeviceDataDescriptorPackage (Uuid, DsdNode, PackageNode) is
+  equivalent of the following ASL code:
+    ToUUID(Uuid),
+    Package () {}
+
+  Cf ACPI 6.4 specification, s6.2.5 "_DSD (Device Specific Data)".
+
+  _DSD (Device Specific Data) Implementation Guide
+  https://github.com/UEFI/DSD-Guide
+  Per s3. "'Well-Known _DSD UUIDs and Data Structure Formats'"
+  If creating a Device Properties data then UUID daffd814-6eba-4d8c-8a91-bc9bbf4aa301 should be used.
+
+  @param [in]  Uuid           The Uuid of the descriptor to be created
+  @param [in]  DsdNode        Node of the DSD Package.
+  @param [out] PackageNode    If success, contains the created package node.
+
+  @retval EFI_SUCCESS             Success.
+  @retval EFI_INVALID_PARAMETER   Invalid parameter.
+  @retval EFI_OUT_OF_RESOURCES    Failed to allocate memory.
+**/
+EFI_STATUS
+EFIAPI
+AmlAddDeviceDataDescriptorPackage (
+  IN  CONST EFI_GUID                *Uuid,
+  IN        AML_OBJECT_NODE_HANDLE  DsdNode,
+  OUT       AML_OBJECT_NODE_HANDLE  *PackageNode
+  )
+{
+  EFI_STATUS              Status;
+  AML_OBJECT_NODE         *UuidNode;
+  AML_DATA_NODE           *UuidDataNode;
+  AML_OBJECT_NODE_HANDLE  DsdEntryList;
+
+  if ((Uuid == NULL)     ||
+      (PackageNode == NULL) ||
+      (AmlGetNodeType ((AML_NODE_HANDLE)DsdNode) != EAmlNodeObject) ||
+      (!AmlNodeHasOpCode (DsdNode, AML_NAME_OP, 0))                 ||
+      !AmlNameOpCompareName (DsdNode, "_DSD"))
+  {
+    ASSERT_EFI_ERROR (EFI_INVALID_PARAMETER);
+    return EFI_INVALID_PARAMETER;
+  }
+
+  // Get the Package object node of the _DSD node,
+  // which is the 2nd fixed argument (i.e. index 1).
+  DsdEntryList = (AML_OBJECT_NODE_HANDLE)AmlGetFixedArgument (
+                                           DsdNode,
+                                           EAmlParseIndexTerm1
+                                           );
+  if ((DsdEntryList == NULL)                                              ||
+      (AmlGetNodeType ((AML_NODE_HANDLE)DsdEntryList) != EAmlNodeObject)  ||
+      (!AmlNodeHasOpCode (DsdEntryList, AML_PACKAGE_OP, 0)))
+  {
+    ASSERT_EFI_ERROR (EFI_INVALID_PARAMETER);
+    return EFI_INVALID_PARAMETER;
+  }
+
+  *PackageNode = NULL;
+  UuidDataNode = NULL;
+
+  Status = AmlCodeGenBuffer (NULL, 0, &UuidNode);
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    return Status;
+  }
+
+  Status = AmlCreateDataNode (
+             EAmlNodeDataTypeRaw,
+             (CONST UINT8 *)Uuid,
+             sizeof (EFI_GUID),
+             &UuidDataNode
+             );
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    goto error_handler;
+  }
+
+  Status = AmlVarListAddTail (
+             (AML_NODE_HEADER *)UuidNode,
+             (AML_NODE_HEADER *)UuidDataNode
+             );
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    goto error_handler;
+  }
+
+  UuidDataNode = NULL;
+
+  // Append to the list of _DSD entries.
+  Status = AmlVarListAddTail (
+             (AML_NODE_HANDLE)DsdEntryList,
+             (AML_NODE_HANDLE)UuidNode
+             );
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    goto error_handler;
+  }
+
+  Status = AmlCodeGenPackage (PackageNode);
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    goto error_handler_detach;
+  }
+
+  // Append to the list of _DSD entries.
+  Status = AmlVarListAddTail (
+             (AML_NODE_HANDLE)DsdEntryList,
+             (AML_NODE_HANDLE)*PackageNode
+             );
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    goto error_handler_detach;
+  }
+
+  return Status;
+
+error_handler_detach:
+  if (UuidNode != NULL) {
+    AmlDetachNode ((AML_NODE_HANDLE)UuidNode);
+  }
+
+error_handler:
+  if (UuidNode != NULL) {
+    AmlDeleteTree ((AML_NODE_HANDLE)UuidNode);
+  }
+
+  if (*PackageNode != NULL) {
+    AmlDeleteTree ((AML_NODE_HANDLE)*PackageNode);
+    *PackageNode = NULL;
+  }
+
+  if (UuidDataNode != NULL) {
+    AmlDeleteTree ((AML_NODE_HANDLE)UuidDataNode);
+  }
+
+  return Status;
+}
+
+/** AML code generation to add a package with a name and value,
+    to a parent package.
+    This is useful to build the _DSD package but can be used in other cases.
+
+  AmlAddNameIntegerPackage ("Name", Value, PackageNode) is
+  equivalent of the following ASL code:
+    Package (2) {"Name", Value}
+
+  Cf ACPI 6.4 specification, s6.2.5 "_DSD (Device Specific Data)".
+
+  @param [in]  Name           String to place in first entry of package
+  @param [in]  Value          Integer to place in second entry of package
+  @param [in]  PackageNode    Package to add new sub package to.
+
+  @retval EFI_SUCCESS             Success.
+  @retval EFI_INVALID_PARAMETER   Invalid parameter.
+  @retval EFI_OUT_OF_RESOURCES    Failed to allocate memory.
+**/
+EFI_STATUS
+EFIAPI
+AmlAddNameIntegerPackage (
+  IN CHAR8                   *Name,
+  IN UINT64                  Value,
+  IN AML_OBJECT_NODE_HANDLE  PackageNode
+  )
+{
+  EFI_STATUS       Status;
+  AML_OBJECT_NODE  *NameNode;
+  AML_OBJECT_NODE  *ValueNode;
+  AML_OBJECT_NODE  *NewPackageNode;
+
+  if ((Name == NULL) ||
+      (AmlGetNodeType ((AML_NODE_HANDLE)PackageNode) != EAmlNodeObject) ||
+      (!AmlNodeHasOpCode (PackageNode, AML_PACKAGE_OP, 0)))
+  {
+    ASSERT_EFI_ERROR (EFI_INVALID_PARAMETER);
+    return EFI_INVALID_PARAMETER;
+  }
+
+  NameNode  = NULL;
+  ValueNode = NULL;
+
+  // The new package entry.
+  Status = AmlCodeGenPackage (&NewPackageNode);
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    return Status;
+  }
+
+  Status = AmlCodeGenString (Name, &NameNode);
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    goto error_handler;
+  }
+
+  Status = AmlVarListAddTail (
+             (AML_NODE_HANDLE)NewPackageNode,
+             (AML_NODE_HANDLE)NameNode
+             );
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    goto error_handler;
+  }
+
+  NameNode = NULL;
+
+  Status = AmlCodeGenInteger (Value, &ValueNode);
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    goto error_handler;
+  }
+
+  Status = AmlVarListAddTail (
+             (AML_NODE_HANDLE)NewPackageNode,
+             (AML_NODE_HANDLE)ValueNode
+             );
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    goto error_handler;
+  }
+
+  ValueNode = NULL;
+
+  Status = AmlVarListAddTail (
+             (AML_NODE_HANDLE)PackageNode,
+             (AML_NODE_HANDLE)NewPackageNode
+             );
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    goto error_handler;
+  }
+
+  return Status;
+
+error_handler:
+  if (NewPackageNode != NULL) {
+    AmlDeleteTree ((AML_NODE_HANDLE)NewPackageNode);
+  }
+
+  if (NameNode != NULL) {
+    AmlDeleteTree ((AML_NODE_HANDLE)NameNode);
+  }
+
+  if (ValueNode != NULL) {
+    AmlDeleteTree ((AML_NODE_HANDLE)ValueNode);
+  }
+
+  return Status;
+}
+
+/** Adds a register to the package
+
+  @ingroup CodeGenApis
+
+  @param [in]  Register     If provided, register that will be added to package.
+                            otherwise NULL register will be added
+  @param [in]  PackageNode  Package to add value to
+
+  @retval EFI_SUCCESS             The function completed successfully.
+  @retval EFI_INVALID_PARAMETER   Invalid parameter.
+  @retval EFI_OUT_OF_RESOURCES    Failed to allocate memory.
+**/
+STATIC
+EFI_STATUS
+EFIAPI
+AmlAddRegisterToPackage (
+  IN EFI_ACPI_6_4_GENERIC_ADDRESS_STRUCTURE  *Register OPTIONAL,
+  IN AML_OBJECT_NODE_HANDLE                  PackageNode
+  )
+{
+  EFI_STATUS              Status;
+  AML_DATA_NODE_HANDLE    RdNode;
+  AML_OBJECT_NODE_HANDLE  ResourceTemplateNode;
+
+  RdNode = NULL;
+
+  Status = AmlCodeGenResourceTemplate (&ResourceTemplateNode);
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    return Status;
+  }
+
+  if (Register != NULL) {
+    Status = AmlCodeGenRdRegister (
+               Register->AddressSpaceId,
+               Register->RegisterBitWidth,
+               Register->RegisterBitOffset,
+               Register->Address,
+               Register->AccessSize,
+               NULL,
+               &RdNode
+               );
+  } else {
+    Status = AmlCodeGenRdRegister (
+               EFI_ACPI_6_4_SYSTEM_MEMORY,
+               0,
+               0,
+               0,
+               0,
+               NULL,
+               &RdNode
+               );
+  }
+
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    goto error_handler;
+  }
+
+  Status = AmlAppendRdNode (ResourceTemplateNode, RdNode);
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    goto error_handler;
+  }
+
+  RdNode = NULL;
+
+  Status = AmlVarListAddTail (
+             (AML_NODE_HANDLE)PackageNode,
+             (AML_NODE_HANDLE)ResourceTemplateNode
+             );
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    goto error_handler;
+  }
+
+  return Status;
+
+error_handler:
+  if (RdNode != NULL) {
+    AmlDeleteTree ((AML_NODE_HANDLE)RdNode);
+  }
+
+  if (ResourceTemplateNode != NULL) {
+    AmlDeleteTree ((AML_NODE_HANDLE)ResourceTemplateNode);
+  }
+
+  return Status;
+}
+
+/** Utility function to check if generic address points to NULL
+
+  @param [in]  Address  Pointer to the Generic address
+
+  @retval TRUE          Address is system memory with an Address of 0.
+  @retval FALSE         Address does not point to NULL.
+**/
+STATIC
+BOOLEAN
+EFIAPI
+IsNullGenericAddress (
+  IN EFI_ACPI_6_4_GENERIC_ADDRESS_STRUCTURE  *Address
+  )
+{
+  if ((Address == NULL) ||
+      ((Address->AddressSpaceId == EFI_ACPI_6_4_SYSTEM_MEMORY) &&
+       (Address->Address == 0x0)))
+  {
+    return TRUE;
+  }
+
+  return FALSE;
+}
+
+/** Adds an integer or register to the package
+
+  @ingroup CodeGenApis
+
+  @param [in]  Register     If provided, register that will be added to package
+  @param [in]  Integer      If Register is NULL, integer that will be added to the package
+  @param [in]  PackageNode  Package to add value to
+
+  @retval EFI_SUCCESS             The function completed successfully.
+  @retval EFI_INVALID_PARAMETER   Invalid parameter.
+  @retval EFI_OUT_OF_RESOURCES    Failed to allocate memory.
+**/
+STATIC
+EFI_STATUS
+EFIAPI
+AmlAddRegisterOrIntegerToPackage (
+  IN EFI_ACPI_6_4_GENERIC_ADDRESS_STRUCTURE  *Register OPTIONAL,
+  IN UINT32                                  Integer,
+  IN AML_OBJECT_NODE_HANDLE                  PackageNode
+  )
+{
+  EFI_STATUS              Status;
+  AML_OBJECT_NODE_HANDLE  IntegerNode;
+
+  IntegerNode = NULL;
+
+  if (!IsNullGenericAddress (Register)) {
+    Status = AmlAddRegisterToPackage (Register, PackageNode);
+  } else {
+    Status = AmlCodeGenInteger (Integer, &IntegerNode);
+    if (EFI_ERROR (Status)) {
+      ASSERT_EFI_ERROR (Status);
+      return Status;
+    }
+
+    Status = AmlVarListAddTail (
+               (AML_NODE_HANDLE)PackageNode,
+               (AML_NODE_HANDLE)IntegerNode
+               );
+  }
+
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    if (IntegerNode != NULL) {
+      AmlDeleteTree ((AML_NODE_HANDLE)IntegerNode);
+    }
+  }
+
+  return Status;
+}
+
+/** Create a _CPC node.
+
+  Creates and optionally adds the following node
+   Name(_CPC, Package()
+   {
+    NumEntries,                              // Integer
+    Revision,                                // Integer
+    HighestPerformance,                      // Integer or Buffer (Resource Descriptor)
+    NominalPerformance,                      // Integer or Buffer (Resource Descriptor)
+    LowestNonlinearPerformance,              // Integer or Buffer (Resource Descriptor)
+    LowestPerformance,                       // Integer or Buffer (Resource Descriptor)
+    GuaranteedPerformanceRegister,           // Buffer (Resource Descriptor)
+    DesiredPerformanceRegister ,             // Buffer (Resource Descriptor)
+    MinimumPerformanceRegister ,             // Buffer (Resource Descriptor)
+    MaximumPerformanceRegister ,             // Buffer (Resource Descriptor)
+    PerformanceReductionToleranceRegister,   // Buffer (Resource Descriptor)
+    TimeWindowRegister,                      // Buffer (Resource Descriptor)
+    CounterWraparoundTime,                   // Integer or Buffer (Resource Descriptor)
+    ReferencePerformanceCounterRegister,     // Buffer (Resource Descriptor)
+    DeliveredPerformanceCounterRegister,     // Buffer (Resource Descriptor)
+    PerformanceLimitedRegister,              // Buffer (Resource Descriptor)
+    CPPCEnableRegister                       // Buffer (Resource Descriptor)
+    AutonomousSelectionEnable,               // Integer or Buffer (Resource Descriptor)
+    AutonomousActivityWindowRegister,        // Buffer (Resource Descriptor)
+    EnergyPerformancePreferenceRegister,     // Buffer (Resource Descriptor)
+    ReferencePerformance                     // Integer or Buffer (Resource Descriptor)
+    LowestFrequency,                         // Integer or Buffer (Resource Descriptor)
+    NominalFrequency                         // Integer or Buffer (Resource Descriptor)
+  })
+
+  If resource buffer is NULL then integer will be used.
+
+  Cf. ACPI 6.4, s8.4.7.1 _CPC (Continuous Performance Control)
+
+  @ingroup CodeGenApis
+
+  @param [in]  CpcInfo               CpcInfo object
+  @param [in]  ParentNode            If provided, set ParentNode as the parent
+                                     of the node created.
+  @param [out] NewCpcNode            If success and provided, contains the created node.
+
+  @retval EFI_SUCCESS             The function completed successfully.
+  @retval EFI_INVALID_PARAMETER   Invalid parameter.
+  @retval EFI_OUT_OF_RESOURCES    Failed to allocate memory.
+**/
+EFI_STATUS
+EFIAPI
+AmlCreateCpcNode (
+  IN  AML_CPC_INFO            *CpcInfo,
+  IN  AML_NODE_HANDLE         ParentNode   OPTIONAL,
+  OUT AML_OBJECT_NODE_HANDLE  *NewCpcNode   OPTIONAL
+  )
+{
+  EFI_STATUS              Status;
+  AML_OBJECT_NODE_HANDLE  CpcNode;
+  AML_OBJECT_NODE_HANDLE  CpcPackage;
+  UINT32                  NumberOfEntries;
+
+  if ((CpcInfo == NULL) ||
+      ((ParentNode == NULL) && (NewCpcNode == NULL)))
+  {
+    ASSERT (0);
+    return EFI_INVALID_PARAMETER;
+  }
+
+  // Revision 3 per ACPI 6.4 specification
+  if (CpcInfo->Revision == 3) {
+    // NumEntries 23 per ACPI 6.4 specification
+    NumberOfEntries = 23;
+  } else {
+    ASSERT (0);
+    return EFI_INVALID_PARAMETER;
+  }
+
+  if ((IsNullGenericAddress (&CpcInfo->HighestPerformanceBuffer) &&
+       (CpcInfo->HighestPerformanceInteger == 0)) ||
+      (IsNullGenericAddress (&CpcInfo->NominalPerformanceBuffer) &&
+       (CpcInfo->NominalPerformanceInteger == 0)) ||
+      (IsNullGenericAddress (&CpcInfo->LowestNonlinearPerformanceBuffer) &&
+       (CpcInfo->LowestNonlinearPerformanceInteger == 0)) ||
+      (IsNullGenericAddress (&CpcInfo->LowestPerformanceBuffer) &&
+       (CpcInfo->LowestPerformanceInteger == 0)) ||
+      IsNullGenericAddress (&CpcInfo->DesiredPerformanceRegister) ||
+      IsNullGenericAddress (&CpcInfo->ReferencePerformanceCounterRegister) ||
+      IsNullGenericAddress (&CpcInfo->DeliveredPerformanceCounterRegister) ||
+      IsNullGenericAddress (&CpcInfo->PerformanceLimitedRegister))
+  {
+    ASSERT (0);
+    return EFI_INVALID_PARAMETER;
+  }
+
+  CpcPackage = NULL;
+
+  Status = AmlCodeGenNamePackage ("_CPC", NULL, &CpcNode);
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    return Status;
+  }
+
+  // Get the Package object node of the _CPC node,
+  // which is the 2nd fixed argument (i.e. index 1).
+  CpcPackage = (AML_OBJECT_NODE_HANDLE)AmlGetFixedArgument (
+                                         CpcNode,
+                                         EAmlParseIndexTerm1
+                                         );
+  if ((CpcPackage == NULL)                                              ||
+      (AmlGetNodeType ((AML_NODE_HANDLE)CpcPackage) != EAmlNodeObject)  ||
+      (!AmlNodeHasOpCode (CpcPackage, AML_PACKAGE_OP, 0)))
+  {
+    ASSERT (0);
+    Status = EFI_INVALID_PARAMETER;
+    goto error_handler;
+  }
+
+  Status = AmlAddRegisterOrIntegerToPackage (
+             NULL,
+             NumberOfEntries,
+             CpcPackage
+             );
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    goto error_handler;
+  }
+
+  Status = AmlAddRegisterOrIntegerToPackage (
+             NULL,
+             CpcInfo->Revision,
+             CpcPackage
+             );
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    goto error_handler;
+  }
+
+  Status = AmlAddRegisterOrIntegerToPackage (
+             &CpcInfo->HighestPerformanceBuffer,
+             CpcInfo->HighestPerformanceInteger,
+             CpcPackage
+             );
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    goto error_handler;
+  }
+
+  Status = AmlAddRegisterOrIntegerToPackage (
+             &CpcInfo->NominalPerformanceBuffer,
+             CpcInfo->NominalPerformanceInteger,
+             CpcPackage
+             );
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    goto error_handler;
+  }
+
+  Status = AmlAddRegisterOrIntegerToPackage (
+             &CpcInfo->LowestNonlinearPerformanceBuffer,
+             CpcInfo->LowestNonlinearPerformanceInteger,
+             CpcPackage
+             );
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    goto error_handler;
+  }
+
+  Status = AmlAddRegisterOrIntegerToPackage (
+             &CpcInfo->LowestPerformanceBuffer,
+             CpcInfo->LowestPerformanceInteger,
+             CpcPackage
+             );
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    goto error_handler;
+  }
+
+  Status = AmlAddRegisterToPackage (&CpcInfo->GuaranteedPerformanceRegister, CpcPackage);
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    goto error_handler;
+  }
+
+  Status = AmlAddRegisterToPackage (&CpcInfo->DesiredPerformanceRegister, CpcPackage);
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    goto error_handler;
+  }
+
+  Status = AmlAddRegisterToPackage (&CpcInfo->MinimumPerformanceRegister, CpcPackage);
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    goto error_handler;
+  }
+
+  Status = AmlAddRegisterToPackage (&CpcInfo->MaximumPerformanceRegister, CpcPackage);
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    goto error_handler;
+  }
+
+  Status = AmlAddRegisterToPackage (&CpcInfo->PerformanceReductionToleranceRegister, CpcPackage);
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    goto error_handler;
+  }
+
+  Status = AmlAddRegisterToPackage (&CpcInfo->TimeWindowRegister, CpcPackage);
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    goto error_handler;
+  }
+
+  Status = AmlAddRegisterOrIntegerToPackage (
+             &CpcInfo->CounterWraparoundTimeBuffer,
+             CpcInfo->CounterWraparoundTimeInteger,
+             CpcPackage
+             );
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    goto error_handler;
+  }
+
+  Status = AmlAddRegisterToPackage (&CpcInfo->ReferencePerformanceCounterRegister, CpcPackage);
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    goto error_handler;
+  }
+
+  Status = AmlAddRegisterToPackage (&CpcInfo->DeliveredPerformanceCounterRegister, CpcPackage);
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    goto error_handler;
+  }
+
+  Status = AmlAddRegisterToPackage (&CpcInfo->PerformanceLimitedRegister, CpcPackage);
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    goto error_handler;
+  }
+
+  Status = AmlAddRegisterToPackage (&CpcInfo->CPPCEnableRegister, CpcPackage);
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    goto error_handler;
+  }
+
+  Status = AmlAddRegisterOrIntegerToPackage (
+             &CpcInfo->AutonomousSelectionEnableBuffer,
+             CpcInfo->AutonomousSelectionEnableInteger,
+             CpcPackage
+             );
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    goto error_handler;
+  }
+
+  Status = AmlAddRegisterToPackage (&CpcInfo->AutonomousActivityWindowRegister, CpcPackage);
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    goto error_handler;
+  }
+
+  Status = AmlAddRegisterToPackage (&CpcInfo->EnergyPerformancePreferenceRegister, CpcPackage);
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    goto error_handler;
+  }
+
+  Status = AmlAddRegisterOrIntegerToPackage (
+             &CpcInfo->ReferencePerformanceBuffer,
+             CpcInfo->ReferencePerformanceInteger,
+             CpcPackage
+             );
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    goto error_handler;
+  }
+
+  Status = AmlAddRegisterOrIntegerToPackage (
+             &CpcInfo->LowestFrequencyBuffer,
+             CpcInfo->LowestFrequencyInteger,
+             CpcPackage
+             );
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    goto error_handler;
+  }
+
+  Status = AmlAddRegisterOrIntegerToPackage (
+             &CpcInfo->NominalFrequencyBuffer,
+             CpcInfo->NominalFrequencyInteger,
+             CpcPackage
+             );
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    goto error_handler;
+  }
+
+  Status = LinkNode (CpcNode, ParentNode, NewCpcNode);
+  if (EFI_ERROR (Status)) {
+    ASSERT_EFI_ERROR (Status);
+    goto error_handler;
+  }
+
+  return Status;
+
+error_handler:
+  AmlDeleteTree ((AML_NODE_HANDLE)CpcNode);
   return Status;
 }

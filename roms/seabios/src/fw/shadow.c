@@ -32,8 +32,8 @@ __make_bios_writable_intel(u16 bdf, u32 pam0)
 {
     // Read in current PAM settings from pci config space
     union pamdata_u pamdata;
-    pamdata.data32[0] = pci_config_readl(bdf, ALIGN_DOWN(pam0, 4));
-    pamdata.data32[1] = pci_config_readl(bdf, ALIGN_DOWN(pam0, 4) + 4);
+    pamdata.data32[0] = pci_ioconfig_readl(bdf, ALIGN_DOWN(pam0, 4));
+    pamdata.data32[1] = pci_ioconfig_readl(bdf, ALIGN_DOWN(pam0, 4) + 4);
     u8 *pam = &pamdata.data8[pam0 & 0x03];
 
     // Make ram from 0xc0000-0xf0000 writable
@@ -46,8 +46,8 @@ __make_bios_writable_intel(u16 bdf, u32 pam0)
     pam[0] = 0x30;
 
     // Write PAM settings back to pci config space
-    pci_config_writel(bdf, ALIGN_DOWN(pam0, 4), pamdata.data32[0]);
-    pci_config_writel(bdf, ALIGN_DOWN(pam0, 4) + 4, pamdata.data32[1]);
+    pci_ioconfig_writel(bdf, ALIGN_DOWN(pam0, 4), pamdata.data32[0]);
+    pci_ioconfig_writel(bdf, ALIGN_DOWN(pam0, 4) + 4, pamdata.data32[1]);
 
     if (!ram_present)
         // Copy bios.
@@ -59,7 +59,7 @@ __make_bios_writable_intel(u16 bdf, u32 pam0)
 static void
 make_bios_writable_intel(u16 bdf, u32 pam0)
 {
-    int reg = pci_config_readb(bdf, pam0);
+    int reg = pci_ioconfig_readb(bdf, pam0);
     if (!(reg & 0x10)) {
         // QEMU doesn't fully implement the piix shadow capabilities -
         // if ram isn't backing the bios segment when shadowing is
@@ -125,8 +125,8 @@ make_bios_writable(void)
     // At this point, statically allocated variables can't be written,
     // so do this search manually.
     int bdf;
-    foreachbdf(bdf, 0) {
-        u32 vendev = pci_config_readl(bdf, PCI_VENDOR_ID);
+    pci_ioconfig_foreachbdf(bdf, 0) {
+        u32 vendev = pci_ioconfig_readl(bdf, PCI_VENDOR_ID);
         u16 vendor = vendev & 0xffff, device = vendev >> 16;
         if (vendor == PCI_VENDOR_ID_INTEL
             && device == PCI_DEVICE_ID_INTEL_82441) {

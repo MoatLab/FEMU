@@ -1,5 +1,5 @@
 ;------------------------------------------------------------------------------ ;
-; Copyright (c) 2015 - 2021, Intel Corporation. All rights reserved.<BR>
+; Copyright (c) 2015 - 2022, Intel Corporation. All rights reserved.<BR>
 ; SPDX-License-Identifier: BSD-2-Clause-Patent
 ;
 ; Module Name:
@@ -35,8 +35,6 @@ SECTION .text
 ;ALSO THIS PROCEDURE IS EXECUTED BY APs ONLY ON 16 BIT MODE. HENCE THIS PROC
 ;IS IN MACHINE CODE.
 ;-------------------------------------------------------------------------------------
-global ASM_PFX(RendezvousFunnelProc)
-ASM_PFX(RendezvousFunnelProc):
 RendezvousFunnelProcStart:
 ; At this point CS = 0x(vv00) and ip= 0x0.
 ; Save BIST information to ebp firstly
@@ -65,9 +63,6 @@ BITS 16
 
     mov        si, MP_CPU_EXCHANGE_INFO_FIELD (GdtrProfile)
 o32 lgdt       [cs:si]
-
-    mov        si, MP_CPU_EXCHANGE_INFO_FIELD (IdtrProfile)
-o32 lidt       [cs:si]
 
     ;
     ; Switch to protected mode
@@ -154,13 +149,13 @@ SkipEnable5LevelPaging:
 
 BITS 64
 
-;
-; Required for the AMD SEV helper functions
-;
-%include "AmdSev.nasm"
-
 LongModeStart:
     mov        esi, ebx
+
+    ; Set IDT table at the start of 64 bit code
+    lea        edi, [esi + MP_CPU_EXCHANGE_INFO_FIELD (IdtrProfile)]
+    lidt       [edi]
+
     lea        edi, [esi + MP_CPU_EXCHANGE_INFO_FIELD (InitFlag)]
     cmp        qword [edi], 1       ; ApInitConfig
     jnz        GetApicId
@@ -244,11 +239,20 @@ ProgramStack:
     mov         rsp, qword [rdi + CPU_INFO_IN_HOB.ApTopOfStack]
 
 CProcedureInvoke:
+    ;
+    ; Reserve 8 bytes for CpuMpData.
+    ; When the AP wakes up again via INIT-SIPI-SIPI, push 0 will cause the existing CpuMpData to be overwritten with 0.
+    ; CpuMpData is filled in via InitializeApData() during the first time INIT-SIPI-SIPI,
+    ; while overwirrten may occurs when under ApInHltLoop but InitFlag is not set to ApInitConfig.
+    ; Therefore reservation is implemented by sub rsp instead of push 0.
+    ;
+    sub        rsp, 8
     push       rbp               ; Push BIST data at top of AP stack
     xor        rbp, rbp          ; Clear ebp for call stack trace
     push       rbp
     mov        rbp, rsp
 
+    push       qword 0          ; Push 8 bytes for alignment
     mov        rax, qword [esi + MP_CPU_EXCHANGE_INFO_FIELD (InitializeFloatingPointUnits)]
     sub        rsp, 20h
     call       rax               ; Call assembly function to initialize FPU per UEFI spec
@@ -267,162 +271,16 @@ CProcedureInvoke:
     add        rsp, 20h
     jmp        $                 ; Should never reach here
 
+;
+; Required for the AMD SEV helper functions
+;
+%include "AmdSev.nasm"
+
 RendezvousFunnelProcEnd:
-
-;-------------------------------------------------------------------------------------
-;SwitchToRealProc procedure follows.
-;ALSO THIS PROCEDURE IS EXECUTED BY APs TRANSITIONING TO 16 BIT MODE. HENCE THIS PROC
-;IS IN MACHINE CODE.
-;  SwitchToRealProc (UINTN BufferStart, UINT16 Code16, UINT16 Code32, UINTN StackStart)
-;  rcx - Buffer Start
-;  rdx - Code16 Selector Offset
-;  r8  - Code32 Selector Offset
-;  r9  - Stack Start
-;-------------------------------------------------------------------------------------
-global ASM_PFX(SwitchToRealProc)
-ASM_PFX(SwitchToRealProc):
-SwitchToRealProcStart:
-BITS 64
-    cli
-
-    ;
-    ; Get RDX reset value before changing stacks since the
-    ; new stack won't be able to accomodate a #VC exception.
-    ;
-    push       rax
-    push       rbx
-    push       rcx
-    push       rdx
-
-    mov        rax, 1
-    cpuid
-    mov        rsi, rax                    ; Save off the reset value for RDX
-
-    pop        rdx
-    pop        rcx
-    pop        rbx
-    pop        rax
-
-    ;
-    ; Establish stack below 1MB
-    ;
-    mov        rsp, r9
-
-    ;
-    ; Push ultimate Reset Vector onto the stack
-    ;
-    mov        rax, rcx
-    shr        rax, 4
-    push       word 0x0002                 ; RFLAGS
-    push       ax                          ; CS
-    push       word 0x0000                 ; RIP
-    push       word 0x0000                 ; For alignment, will be discarded
-
-    ;
-    ; Get address of "16-bit operand size" label
-    ;
-    lea        rbx, [PM16Mode]
-
-    ;
-    ; Push addresses used to change to compatibility mode
-    ;
-    lea        rax, [CompatMode]
-    push       r8
-    push       rax
-
-    ;
-    ; Clear R8 - R15, for reset, before going into 32-bit mode
-    ;
-    xor        r8, r8
-    xor        r9, r9
-    xor        r10, r10
-    xor        r11, r11
-    xor        r12, r12
-    xor        r13, r13
-    xor        r14, r14
-    xor        r15, r15
-
-    ;
-    ; Far return into 32-bit mode
-    ;
-o64 retf
-
-BITS 32
-CompatMode:
-    ;
-    ; Set up stack to prepare for exiting protected mode
-    ;
-    push       edx                         ; Code16 CS
-    push       ebx                         ; PM16Mode label address
-
-    ;
-    ; Disable paging
-    ;
-    mov        eax, cr0                    ; Read CR0
-    btr        eax, 31                     ; Set PG=0
-    mov        cr0, eax                    ; Write CR0
-
-    ;
-    ; Disable long mode
-    ;
-    mov        ecx, 0c0000080h             ; EFER MSR number
-    rdmsr                                  ; Read EFER
-    btr        eax, 8                      ; Set LME=0
-    wrmsr                                  ; Write EFER
-
-    ;
-    ; Disable PAE
-    ;
-    mov        eax, cr4                    ; Read CR4
-    btr        eax, 5                      ; Set PAE=0
-    mov        cr4, eax                    ; Write CR4
-
-    mov        edx, esi                    ; Restore RDX reset value
-
-    ;
-    ; Switch to 16-bit operand size
-    ;
-    retf
-
-BITS 16
-    ;
-    ; At entry to this label
-    ;   - RDX will have its reset value
-    ;   - On the top of the stack
-    ;     - Alignment data (two bytes) to be discarded
-    ;     - IP for Real Mode (two bytes)
-    ;     - CS for Real Mode (two bytes)
-    ;
-    ; This label is also used with AsmRelocateApLoop. During MP finalization,
-    ; the code from PM16Mode to SwitchToRealProcEnd is copied to the start of
-    ; the WakeupBuffer, allowing a parked AP to be booted by an OS.
-    ;
-PM16Mode:
-    mov        eax, cr0                    ; Read CR0
-    btr        eax, 0                      ; Set PE=0
-    mov        cr0, eax                    ; Write CR0
-
-    pop        ax                          ; Discard alignment data
-
-    ;
-    ; Clear registers (except RDX and RSP) before going into 16-bit mode
-    ;
-    xor        eax, eax
-    xor        ebx, ebx
-    xor        ecx, ecx
-    xor        esi, esi
-    xor        edi, edi
-    xor        ebp, ebp
-
-    iret
-
-SwitchToRealProcEnd:
 
 ;-------------------------------------------------------------------------------------
 ;  AsmRelocateApLoop (MwaitSupport, ApTargetCState, PmCodeSegment, TopOfApStack, CountTofinish, Pm16CodeSegment, SevEsAPJumpTable, WakeupBuffer);
 ;-------------------------------------------------------------------------------------
-global ASM_PFX(AsmRelocateApLoop)
-ASM_PFX(AsmRelocateApLoop):
 AsmRelocateApLoopStart:
 BITS 64
     cmp        qword [rsp + 56], 0  ; SevEsAPJumpTable
@@ -507,7 +365,7 @@ NoSevEs:
     ;
     ; Far return into 32-bit mode
     ;
-o64 retf
+    retfq
 
 BITS 32
 PmEntry:
@@ -594,16 +452,14 @@ AsmRelocateApLoopEnd:
 ;-------------------------------------------------------------------------------------
 global ASM_PFX(AsmGetAddressMap)
 ASM_PFX(AsmGetAddressMap):
-    lea        rax, [ASM_PFX(RendezvousFunnelProc)]
+    lea        rax, [RendezvousFunnelProcStart]
     mov        qword [rcx + MP_ASSEMBLY_ADDRESS_MAP.RendezvousFunnelAddress], rax
     mov        qword [rcx + MP_ASSEMBLY_ADDRESS_MAP.ModeEntryOffset], LongModeStart - RendezvousFunnelProcStart
     mov        qword [rcx + MP_ASSEMBLY_ADDRESS_MAP.RendezvousFunnelSize], RendezvousFunnelProcEnd - RendezvousFunnelProcStart
-    lea        rax, [ASM_PFX(AsmRelocateApLoop)]
+    lea        rax, [AsmRelocateApLoopStart]
     mov        qword [rcx + MP_ASSEMBLY_ADDRESS_MAP.RelocateApLoopFuncAddress], rax
     mov        qword [rcx + MP_ASSEMBLY_ADDRESS_MAP.RelocateApLoopFuncSize], AsmRelocateApLoopEnd - AsmRelocateApLoopStart
     mov        qword [rcx + MP_ASSEMBLY_ADDRESS_MAP.ModeTransitionOffset], Flat32Start - RendezvousFunnelProcStart
-    mov        qword [rcx + MP_ASSEMBLY_ADDRESS_MAP.SwitchToRealSize], SwitchToRealProcEnd - SwitchToRealProcStart
-    mov        qword [rcx + MP_ASSEMBLY_ADDRESS_MAP.SwitchToRealOffset], SwitchToRealProcStart - RendezvousFunnelProcStart
     mov        qword [rcx + MP_ASSEMBLY_ADDRESS_MAP.SwitchToRealNoNxOffset], SwitchToRealProcStart - Flat32Start
     mov        qword [rcx + MP_ASSEMBLY_ADDRESS_MAP.SwitchToRealPM16ModeOffset], PM16Mode - RendezvousFunnelProcStart
     mov        qword [rcx + MP_ASSEMBLY_ADDRESS_MAP.SwitchToRealPM16ModeSize], SwitchToRealProcEnd - PM16Mode
@@ -635,22 +491,13 @@ ASM_PFX(AsmExchangeRole):
     push       r14
     push       r15
 
-    mov        rax, cr0
-    push       rax
-
-    mov        rax, cr4
-    push       rax
-
     ; rsi contains MyInfo pointer
     mov        rsi, rcx
 
     ; rdi contains OthersInfo pointer
     mov        rdi, rdx
 
-    ;Store EFLAGS, GDTR and IDTR regiter to stack
     pushfq
-    sgdt       [rsi + CPU_EXCHANGE_ROLE_INFO.Gdtr]
-    sidt       [rsi + CPU_EXCHANGE_ROLE_INFO.Idtr]
 
     ; Store the its StackPointer
     mov        [rsi + CPU_EXCHANGE_ROLE_INFO.StackPointer], rsp
@@ -666,12 +513,6 @@ WaitForOtherStored:
     jmp        WaitForOtherStored
 
 OtherStored:
-    ; Since another CPU already stored its state, load them
-    ; load GDTR value
-    lgdt       [rdi + CPU_EXCHANGE_ROLE_INFO.Gdtr]
-
-    ; load IDTR value
-    lidt       [rdi + CPU_EXCHANGE_ROLE_INFO.Idtr]
 
     ; load its future StackPointer
     mov        rsp, [rdi + CPU_EXCHANGE_ROLE_INFO.StackPointer]
@@ -690,12 +531,6 @@ WaitForOtherLoaded:
 OtherLoaded:
     ; since the other CPU already get the data it want, leave this procedure
     popfq
-
-    pop        rax
-    mov        cr4, rax
-
-    pop        rax
-    mov        cr0, rax
 
     pop        r15
     pop        r14

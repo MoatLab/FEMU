@@ -352,7 +352,7 @@ enum phb_type {
 	phb_type_pcie_v4,
 	phb_type_npu_v2,
 	phb_type_npu_v2_opencapi,
-	phb_type_npu_v3,
+	phb_type_pau_opencapi,
 };
 
 /* Generic PCI NVRAM flags */

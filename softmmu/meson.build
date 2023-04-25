@@ -4,10 +4,12 @@ specific_ss.add(when: 'CONFIG_SOFTMMU', if_true: [files(
   'memory.c',
   'physmem.c',
   'qtest.c',
+  'dirtylimit.c',
+  'watchpoint.c',
 )])
 
 specific_ss.add(when: ['CONFIG_SOFTMMU', 'CONFIG_TCG'], if_true: [files(
-  'icount.c'
+  'icount.c',
 )])
 
 softmmu_ss.add(files(
@@ -23,7 +25,9 @@ softmmu_ss.add(files(
   'qdev-monitor.c',
   'rtc.c',
   'runstate-action.c',
+  'runstate-hmp-cmds.c',
   'runstate.c',
+  'tpm-hmp-cmds.c',
   'vl.c',
 ), sdl, libpmem, libdaxctl)
 

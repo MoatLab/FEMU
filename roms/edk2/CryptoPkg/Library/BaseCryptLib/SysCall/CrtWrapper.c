@@ -265,6 +265,16 @@ strcspn (
   return Count;
 }
 
+char *
+strcpy (
+  char        *strDest,
+  const char  *strSource
+  )
+{
+  AsciiStrCpyS (strDest, MAX_STRING_SIZE, strSource);
+  return strDest;
+}
+
 //
 // -- Character Classification Routines --
 //
@@ -484,7 +494,9 @@ BIO_snprintf (
   ...
   )
 {
-  return 0;
+  // Because the function does not actually print anything to buf, it returns -1 as error.
+  // Otherwise, the consumer may think that the buf is valid and parse the buffer.
+  return -1;
 }
 
 #ifdef __GNUC__

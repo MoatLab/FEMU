@@ -55,6 +55,7 @@ uint_fast32_t verCases_maxErrorCount = 0;
 bool verCases_errorStop = false;
 
 volatile sig_atomic_t verCases_stop = false;
+int verCases_verbosity = 1;
 
 bool verCases_anyErrors = false;
 
@@ -70,15 +71,17 @@ uint_fast32_t verCases_tenThousandsCount, verCases_errorCount;
 void verCases_writeTestsPerformed( int count )
 {
 
-    if ( verCases_tenThousandsCount ) {
-        fprintf(
-            stderr,
-            "\r%lu%04d tests performed",
-            (unsigned long) verCases_tenThousandsCount,
-            count
-        );
-    } else {
-        fprintf( stderr, "\r%d tests performed", count );
+    if ( verCases_verbosity) {
+        if ( verCases_tenThousandsCount ) {
+            fprintf(
+                stderr,
+                "\r%lu%04d tests performed",
+                (unsigned long) verCases_tenThousandsCount,
+                count
+                );
+        } else {
+            fprintf( stderr, "\r%d tests performed", count );
+        }
     }
     if ( verCases_errorCount ) {
         fprintf(
@@ -88,7 +91,9 @@ void verCases_writeTestsPerformed( int count )
             (verCases_errorCount == 1) ? "" : "s"
         );
     } else {
-        fputs( ".\n", stderr );
+        if ( verCases_verbosity) {
+            fputs( ".\n", stderr );
+        }
         if ( verCases_tenThousandsCount ) {
             fprintf(
                 stdout,
@@ -114,9 +119,10 @@ void verCases_perTenThousand( void )
         verCases_writeTestsPerformed( 0 );
         verCases_exitWithStatus();
     }
-    fprintf(
-        stderr, "\r%3lu0000", (unsigned long) verCases_tenThousandsCount );
-
+    if (verCases_verbosity) {
+        fprintf(
+            stderr, "\r%3lu0000", (unsigned long) verCases_tenThousandsCount );
+    }
 }
 
 void verCases_writeErrorFound( int count )

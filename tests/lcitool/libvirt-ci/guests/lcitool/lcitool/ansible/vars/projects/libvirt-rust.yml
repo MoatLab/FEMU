@@ -1,6 +1,0 @@
----
-packages:
-  - cargo
-  - ccache
-  - gcc
-  - rust

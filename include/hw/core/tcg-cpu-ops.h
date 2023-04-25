@@ -31,6 +31,17 @@ struct TCGCPUOps {
      * function to restore all the state, and register it here.
      */
     void (*synchronize_from_tb)(CPUState *cpu, const TranslationBlock *tb);
+    /**
+     * @restore_state_to_opc: Synchronize state from INDEX_op_start_insn
+     *
+     * This is called when we unwind state in the middle of a TB,
+     * usually before raising an exception.  Set all part of the CPU
+     * state which are tracked insn-by-insn in the target-specific
+     * arguments to start_insn, passed as @data.
+     */
+    void (*restore_state_to_opc)(CPUState *cpu, const TranslationBlock *tb,
+                                 const uint64_t *data);
+
     /** @cpu_exec_enter: Callback for cpu_exec preparation */
     void (*cpu_exec_enter)(CPUState *cpu);
     /** @cpu_exec_exit: Callback for cpu_exec cleanup */
@@ -78,9 +89,9 @@ struct TCGCPUOps {
      * @do_unaligned_access: Callback for unaligned access handling
      * The callback must exit via raising an exception.
      */
-    void (*do_unaligned_access)(CPUState *cpu, vaddr addr,
-                                MMUAccessType access_type,
-                                int mmu_idx, uintptr_t retaddr) QEMU_NORETURN;
+    G_NORETURN void (*do_unaligned_access)(CPUState *cpu, vaddr addr,
+                                           MMUAccessType access_type,
+                                           int mmu_idx, uintptr_t retaddr);
 
     /**
      * @adjust_watchpoint_address: hack for cpu_check_watchpoint used by ARM
@@ -90,6 +101,7 @@ struct TCGCPUOps {
     /**
      * @debug_check_watchpoint: return true if the architectural
      * watchpoint whose address has matched should really fire, used by ARM
+     * and RISC-V
      */
     bool (*debug_check_watchpoint)(CPUState *cpu, CPUWatchpoint *wp);
 
@@ -162,5 +174,48 @@ struct TCGCPUOps {
 #endif /* NEED_CPU_H */
 
 };
+
+#if defined(CONFIG_USER_ONLY)
+
+static inline void cpu_check_watchpoint(CPUState *cpu, vaddr addr, vaddr len,
+                                        MemTxAttrs atr, int fl, uintptr_t ra)
+{
+}
+
+static inline int cpu_watchpoint_address_matches(CPUState *cpu,
+                                                 vaddr addr, vaddr len)
+{
+    return 0;
+}
+
+#else
+
+/**
+ * cpu_check_watchpoint:
+ * @cpu: cpu context
+ * @addr: guest virtual address
+ * @len: access length
+ * @attrs: memory access attributes
+ * @flags: watchpoint access type
+ * @ra: unwind return address
+ *
+ * Check for a watchpoint hit in [addr, addr+len) of the type
+ * specified by @flags.  Exit via exception with a hit.
+ */
+void cpu_check_watchpoint(CPUState *cpu, vaddr addr, vaddr len,
+                          MemTxAttrs attrs, int flags, uintptr_t ra);
+
+/**
+ * cpu_watchpoint_address_matches:
+ * @cpu: cpu context
+ * @addr: guest virtual address
+ * @len: access length
+ *
+ * Return the watchpoint flags that apply to [addr, addr+len).
+ * If no watchpoint is registered for the range, the result is 0.
+ */
+int cpu_watchpoint_address_matches(CPUState *cpu, vaddr addr, vaddr len);
+
+#endif
 
 #endif /* TCG_CPU_OPS_H */

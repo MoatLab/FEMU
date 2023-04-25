@@ -795,6 +795,17 @@ interactive_bootmenu(void)
 }
 
 #if CONFIG_PARISC
+int parisc_get_scsi_target(struct drive_s **boot_drive, int target)
+{
+    struct bootentry_s *pos;
+    hlist_for_each_entry(pos, &BootList, node) {
+        if (pos->drive->target != target)
+            continue;
+        *boot_drive = pos->drive;
+        return 1;
+    }
+    return 0;
+}
 void find_initial_parisc_boot_drives(struct drive_s **harddisc,
             struct drive_s **cdrom)
 {
@@ -809,15 +820,13 @@ void find_initial_parisc_boot_drives(struct drive_s **harddisc,
 
 struct drive_s *select_parisc_boot_drive(char bootdrive)
 {
-    printf("Available boot devices:\n");
+    printf("  Available boot devices:\n");
 
     // Show menu items
-    int maxmenu = 0;
     struct bootentry_s *pos;
     hlist_for_each_entry(pos, &BootList, node) {
         char desc[77];
-        maxmenu++;
-        printf("%d. %s\n", maxmenu
+        printf("  FWSCSI.%d.0 : %s\n", pos->drive->target
                , strtcpy(desc, pos->description, ARRAY_SIZE(desc)));
     }
 
@@ -825,15 +834,14 @@ struct drive_s *select_parisc_boot_drive(char bootdrive)
     hlist_for_each_entry(pos, &BootList, node) {
 	if (((bootdrive == 'd') && (pos->type == IPL_TYPE_CDROM)) ||
 	    ((bootdrive == 'c') && (pos->type == IPL_TYPE_HARDDISK))) {
-                printf("\nBooting from %s\n",pos->description);
+                // printf("\nBooting from %s\n",pos->description);
 		return pos->drive;
 	}
         /* -boot order=g-m: machine implementation dependent drives */
         if ((bootdrive >= 'g') && (bootdrive <= 'm')) {
             int scsi_index = (int)bootdrive - 'g';
             if (pos->drive->target == scsi_index) {
-                printf("\nBooting from SCSI target %d: %s\n",
-                        scsi_index, pos->description);
+                // printf("\nBooting from SCSI target %d: %s\n", scsi_index, pos->description);
 		return pos->drive;
             }
         }
@@ -842,7 +850,7 @@ struct drive_s *select_parisc_boot_drive(char bootdrive)
     hlist_for_each_entry(pos, &BootList, node) {
 	if ((pos->type == IPL_TYPE_CDROM) ||
 	    (pos->type == IPL_TYPE_HARDDISK)) {
-                printf("\nAuto-Booting from %s\n",pos->description);
+                // printf("\nAuto-Booting from %s\n",pos->description);
 		return pos->drive;
 	}
     }

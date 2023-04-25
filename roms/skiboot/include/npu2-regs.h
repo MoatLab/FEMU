@@ -610,6 +610,11 @@ void npu2_scom_write(uint64_t gcid, uint64_t scom_base,
 
 #define NPU2_TOTAL_FIR_REGISTERS		3
 
+#define NPU2_FIR(n)				(0x2c00 + (n) * 0x40)
+#define NPU2_FIR_MASK(n)			(0x2c03 + (n) * 0x40)
+#define NPU2_FIR_ACTION0(n)			(0x2c06 + (n) * 0x40)
+#define NPU2_FIR_ACTION1(n)			(0x2c07 + (n) * 0x40)
+
 /*
  * Can't use enums for 64 bit values, use #defines
  */

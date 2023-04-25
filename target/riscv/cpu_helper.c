@@ -21,10 +21,15 @@
 #include "qemu/log.h"
 #include "qemu/main-loop.h"
 #include "cpu.h"
+#include "pmu.h"
 #include "exec/exec-all.h"
+#include "instmap.h"
 #include "tcg/tcg-op.h"
 #include "trace.h"
 #include "semihosting/common-semi.h"
+#include "sysemu/cpu-timers.h"
+#include "cpu_bits.h"
+#include "debug.h"
 
 int riscv_cpu_mmu_index(CPURISCVState *env, bool ifetch)
 {
@@ -46,7 +51,7 @@ void cpu_get_tb_cpu_state(CPURISCVState *env, target_ulong *pc,
     *pc = env->xl == MXL_RV32 ? env->pc & UINT32_MAX : env->pc;
     *cs_base = 0;
 
-    if (riscv_has_ext(env, RVV) || cpu->cfg.ext_zve32f || cpu->cfg.ext_zve64f) {
+    if (cpu->cfg.ext_zve32f) {
         /*
          * If env->vl equals to VLMAX, we can use generic vector operation
          * expanders (GVEC) to accerlate the vector operations.
@@ -55,7 +60,7 @@ void cpu_get_tb_cpu_state(CPURISCVState *env, target_ulong *pc,
          * which is not supported by GVEC. So we set vl_eq_vlmax flag to true
          * only when maxsz >= 8 bytes.
          */
-        uint32_t vlmax = vext_get_vlmax(env_archcpu(env), env->vtype);
+        uint32_t vlmax = vext_get_vlmax(cpu, env->vtype);
         uint32_t sew = FIELD_EX64(env->vtype, VTYPE, VSEW);
         uint32_t maxsz = vlmax << sew;
         bool vl_eq_vlmax = (env->vstart == 0) && (vlmax == env->vl) &&
@@ -65,6 +70,10 @@ void cpu_get_tb_cpu_state(CPURISCVState *env, target_ulong *pc,
         flags = FIELD_DP32(flags, TB_FLAGS, LMUL,
                     FIELD_EX64(env->vtype, VTYPE, VLMUL));
         flags = FIELD_DP32(flags, TB_FLAGS, VL_EQ_VLMAX, vl_eq_vlmax);
+        flags = FIELD_DP32(flags, TB_FLAGS, VTA,
+                    FIELD_EX64(env->vtype, VTYPE, VTA));
+        flags = FIELD_DP32(flags, TB_FLAGS, VMA,
+                    FIELD_EX64(env->vtype, VTYPE, VMA));
     } else {
         flags = FIELD_DP32(flags, TB_FLAGS, VILL, 1);
     }
@@ -95,6 +104,9 @@ void cpu_get_tb_cpu_state(CPURISCVState *env, target_ulong *pc,
 
         flags = FIELD_DP32(flags, TB_FLAGS, MSTATUS_HS_VS,
                            get_field(env->mstatus_hs, MSTATUS_VS));
+    }
+    if (cpu->cfg.debug && !icount_enabled()) {
+        flags = FIELD_DP32(flags, TB_FLAGS, ITRIGGER, env->itrigger_enabled);
     }
 #endif
 
@@ -166,17 +178,17 @@ void riscv_cpu_update_mask(CPURISCVState *env)
  * 14 "
  * 15 "
  * 16 "
- * 18 Debug/trace interrupt
- * 20 (Reserved interrupt)
+ * 17 "
+ * 18 "
+ * 19 "
+ * 20 "
+ * 21 "
  * 22 "
- * 24 "
- * 26 "
- * 28 "
- * 30 (Reserved for standard reporting of bus or system errors)
+ * 23 "
  */
 
 static const int hviprio_index2irq[] = {
-    0, 1, 4, 5, 8, 13, 14, 15, 16, 18, 20, 22, 24, 26, 28, 30 };
+    0, 1, 4, 5, 8, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23 };
 static const int hviprio_index2rdzero[] = {
     1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 
@@ -205,50 +217,60 @@ int riscv_cpu_hviprio_index2irq(int index, int *out_irq, int *out_rdzero)
  *  Default  |
  *  Priority | Major Interrupt Numbers
  * ----------------------------------------------------------------
- *  Highest  | 63 (3f), 62 (3e), 31 (1f), 30 (1e), 61 (3d), 60 (3c),
- *           | 59 (3b), 58 (3a), 29 (1d), 28 (1c), 57 (39), 56 (38),
- *           | 55 (37), 54 (36), 27 (1b), 26 (1a), 53 (35), 52 (34),
- *           | 51 (33), 50 (32), 25 (19), 24 (18), 49 (31), 48 (30)
+ *  Highest  | 47, 23, 46, 45, 22, 44,
+ *           | 43, 21, 42, 41, 20, 40
  *           |
  *           | 11 (0b),  3 (03),  7 (07)
  *           |  9 (09),  1 (01),  5 (05)
  *           | 12 (0c)
  *           | 10 (0a),  2 (02),  6 (06)
  *           |
- *           | 47 (2f), 46 (2e), 23 (17), 22 (16), 45 (2d), 44 (2c),
- *           | 43 (2b), 42 (2a), 21 (15), 20 (14), 41 (29), 40 (28),
- *           | 39 (27), 38 (26), 19 (13), 18 (12), 37 (25), 36 (24),
- *  Lowest   | 35 (23), 34 (22), 17 (11), 16 (10), 33 (21), 32 (20)
+ *           | 39, 19, 38, 37, 18, 36,
+ *  Lowest   | 35, 17, 34, 33, 16, 32
  * ----------------------------------------------------------------
  */
 static const uint8_t default_iprio[64] = {
- [63] = IPRIO_DEFAULT_UPPER,
- [62] = IPRIO_DEFAULT_UPPER + 1,
- [31] = IPRIO_DEFAULT_UPPER + 2,
- [30] = IPRIO_DEFAULT_UPPER + 3,
- [61] = IPRIO_DEFAULT_UPPER + 4,
- [60] = IPRIO_DEFAULT_UPPER + 5,
+ /* Custom interrupts 48 to 63 */
+ [63] = IPRIO_MMAXIPRIO,
+ [62] = IPRIO_MMAXIPRIO,
+ [61] = IPRIO_MMAXIPRIO,
+ [60] = IPRIO_MMAXIPRIO,
+ [59] = IPRIO_MMAXIPRIO,
+ [58] = IPRIO_MMAXIPRIO,
+ [57] = IPRIO_MMAXIPRIO,
+ [56] = IPRIO_MMAXIPRIO,
+ [55] = IPRIO_MMAXIPRIO,
+ [54] = IPRIO_MMAXIPRIO,
+ [53] = IPRIO_MMAXIPRIO,
+ [52] = IPRIO_MMAXIPRIO,
+ [51] = IPRIO_MMAXIPRIO,
+ [50] = IPRIO_MMAXIPRIO,
+ [49] = IPRIO_MMAXIPRIO,
+ [48] = IPRIO_MMAXIPRIO,
 
- [59] = IPRIO_DEFAULT_UPPER + 6,
- [58] = IPRIO_DEFAULT_UPPER + 7,
- [29] = IPRIO_DEFAULT_UPPER + 8,
- [28] = IPRIO_DEFAULT_UPPER + 9,
- [57] = IPRIO_DEFAULT_UPPER + 10,
- [56] = IPRIO_DEFAULT_UPPER + 11,
+ /* Custom interrupts 24 to 31 */
+ [31] = IPRIO_MMAXIPRIO,
+ [30] = IPRIO_MMAXIPRIO,
+ [29] = IPRIO_MMAXIPRIO,
+ [28] = IPRIO_MMAXIPRIO,
+ [27] = IPRIO_MMAXIPRIO,
+ [26] = IPRIO_MMAXIPRIO,
+ [25] = IPRIO_MMAXIPRIO,
+ [24] = IPRIO_MMAXIPRIO,
 
- [55] = IPRIO_DEFAULT_UPPER + 12,
- [54] = IPRIO_DEFAULT_UPPER + 13,
- [27] = IPRIO_DEFAULT_UPPER + 14,
- [26] = IPRIO_DEFAULT_UPPER + 15,
- [53] = IPRIO_DEFAULT_UPPER + 16,
- [52] = IPRIO_DEFAULT_UPPER + 17,
+ [47] = IPRIO_DEFAULT_UPPER,
+ [23] = IPRIO_DEFAULT_UPPER + 1,
+ [46] = IPRIO_DEFAULT_UPPER + 2,
+ [45] = IPRIO_DEFAULT_UPPER + 3,
+ [22] = IPRIO_DEFAULT_UPPER + 4,
+ [44] = IPRIO_DEFAULT_UPPER + 5,
 
- [51] = IPRIO_DEFAULT_UPPER + 18,
- [50] = IPRIO_DEFAULT_UPPER + 19,
- [25] = IPRIO_DEFAULT_UPPER + 20,
- [24] = IPRIO_DEFAULT_UPPER + 21,
- [49] = IPRIO_DEFAULT_UPPER + 22,
- [48] = IPRIO_DEFAULT_UPPER + 23,
+ [43] = IPRIO_DEFAULT_UPPER + 6,
+ [21] = IPRIO_DEFAULT_UPPER + 7,
+ [42] = IPRIO_DEFAULT_UPPER + 8,
+ [41] = IPRIO_DEFAULT_UPPER + 9,
+ [20] = IPRIO_DEFAULT_UPPER + 10,
+ [40] = IPRIO_DEFAULT_UPPER + 11,
 
  [11] = IPRIO_DEFAULT_M,
  [3]  = IPRIO_DEFAULT_M + 1,
@@ -264,33 +286,19 @@ static const uint8_t default_iprio[64] = {
  [2]  = IPRIO_DEFAULT_VS + 1,
  [6]  = IPRIO_DEFAULT_VS + 2,
 
- [47] = IPRIO_DEFAULT_LOWER,
- [46] = IPRIO_DEFAULT_LOWER + 1,
- [23] = IPRIO_DEFAULT_LOWER + 2,
- [22] = IPRIO_DEFAULT_LOWER + 3,
- [45] = IPRIO_DEFAULT_LOWER + 4,
- [44] = IPRIO_DEFAULT_LOWER + 5,
+ [39] = IPRIO_DEFAULT_LOWER,
+ [19] = IPRIO_DEFAULT_LOWER + 1,
+ [38] = IPRIO_DEFAULT_LOWER + 2,
+ [37] = IPRIO_DEFAULT_LOWER + 3,
+ [18] = IPRIO_DEFAULT_LOWER + 4,
+ [36] = IPRIO_DEFAULT_LOWER + 5,
 
- [43] = IPRIO_DEFAULT_LOWER + 6,
- [42] = IPRIO_DEFAULT_LOWER + 7,
- [21] = IPRIO_DEFAULT_LOWER + 8,
- [20] = IPRIO_DEFAULT_LOWER + 9,
- [41] = IPRIO_DEFAULT_LOWER + 10,
- [40] = IPRIO_DEFAULT_LOWER + 11,
-
- [39] = IPRIO_DEFAULT_LOWER + 12,
- [38] = IPRIO_DEFAULT_LOWER + 13,
- [19] = IPRIO_DEFAULT_LOWER + 14,
- [18] = IPRIO_DEFAULT_LOWER + 15,
- [37] = IPRIO_DEFAULT_LOWER + 16,
- [36] = IPRIO_DEFAULT_LOWER + 17,
-
- [35] = IPRIO_DEFAULT_LOWER + 18,
- [34] = IPRIO_DEFAULT_LOWER + 19,
- [17] = IPRIO_DEFAULT_LOWER + 20,
- [16] = IPRIO_DEFAULT_LOWER + 21,
- [33] = IPRIO_DEFAULT_LOWER + 22,
- [32] = IPRIO_DEFAULT_LOWER + 23,
+ [35] = IPRIO_DEFAULT_LOWER + 6,
+ [17] = IPRIO_DEFAULT_LOWER + 7,
+ [34] = IPRIO_DEFAULT_LOWER + 8,
+ [33] = IPRIO_DEFAULT_LOWER + 9,
+ [16] = IPRIO_DEFAULT_LOWER + 10,
+ [32] = IPRIO_DEFAULT_LOWER + 11,
 };
 
 uint8_t riscv_cpu_default_priority(int irq)
@@ -306,6 +314,7 @@ static int riscv_cpu_pending_to_irq(CPURISCVState *env,
                                     int extirq, unsigned int extirq_def_prio,
                                     uint64_t pending, uint8_t *iprio)
 {
+    RISCVCPU *cpu = env_archcpu(env);
     int irq, best_irq = RISCV_EXCP_NONE;
     unsigned int prio, best_prio = UINT_MAX;
 
@@ -314,7 +323,7 @@ static int riscv_cpu_pending_to_irq(CPURISCVState *env,
     }
 
     irq = ctz64(pending);
-    if (!riscv_feature(env, RISCV_FEATURE_AIA)) {
+    if (!((extirq == IRQ_M_EXT) ? cpu->cfg.ext_smaia : cpu->cfg.ext_ssaia)) {
         return irq;
     }
 
@@ -340,12 +349,13 @@ static int riscv_cpu_pending_to_irq(CPURISCVState *env,
     return best_irq;
 }
 
-static uint64_t riscv_cpu_all_pending(CPURISCVState *env)
+uint64_t riscv_cpu_all_pending(CPURISCVState *env)
 {
     uint32_t gein = get_field(env->hstatus, HSTATUS_VGEIN);
     uint64_t vsgein = (env->hgeip & (1ULL << gein)) ? MIP_VSEIP : 0;
+    uint64_t vstip = (env->vstime_irq) ? MIP_VSTIP : 0;
 
-    return (env->mip | vsgein) & env->mie;
+    return (env->mip | vsgein | vstip) & env->mie;
 }
 
 int riscv_cpu_mirq_pending(CPURISCVState *env)
@@ -604,36 +614,30 @@ uint64_t riscv_cpu_update_mip(RISCVCPU *cpu, uint64_t mask, uint64_t value)
 {
     CPURISCVState *env = &cpu->env;
     CPUState *cs = CPU(cpu);
-    uint64_t gein, vsgein = 0, old = env->mip;
-    bool locked = false;
+    uint64_t gein, vsgein = 0, vstip = 0, old = env->mip;
 
     if (riscv_cpu_virt_enabled(env)) {
         gein = get_field(env->hstatus, HSTATUS_VGEIN);
         vsgein = (env->hgeip & (1ULL << gein)) ? MIP_VSEIP : 0;
     }
 
-    if (!qemu_mutex_iothread_locked()) {
-        locked = true;
-        qemu_mutex_lock_iothread();
-    }
+    vstip = env->vstime_irq ? MIP_VSTIP : 0;
+
+    QEMU_IOTHREAD_LOCK_GUARD();
 
     env->mip = (env->mip & ~mask) | (value & mask);
 
-    if (env->mip | vsgein) {
+    if (env->mip | vsgein | vstip) {
         cpu_interrupt(cs, CPU_INTERRUPT_HARD);
     } else {
         cpu_reset_interrupt(cs, CPU_INTERRUPT_HARD);
     }
 
-    if (locked) {
-        qemu_mutex_unlock_iothread();
-    }
-
     return old;
 }
 
-void riscv_cpu_set_rdtime_fn(CPURISCVState *env, uint64_t (*fn)(uint32_t),
-                             uint32_t arg)
+void riscv_cpu_set_rdtime_fn(CPURISCVState *env, uint64_t (*fn)(void *),
+                             void *arg)
 {
     env->rdtime_fn = fn;
     env->rdtime_fn_arg = arg;
@@ -660,6 +664,9 @@ void riscv_cpu_set_mode(CPURISCVState *env, target_ulong newpriv)
     }
     if (newpriv == PRV_H) {
         newpriv = PRV_U;
+    }
+    if (icount_enabled() && newpriv != env->priv) {
+        riscv_itrigger_update_priv(env);
     }
     /* tlb_flush is unnecessary as mode is contained in mmu_idx */
     env->priv = newpriv;
@@ -697,24 +704,26 @@ static int get_physical_address_pmp(CPURISCVState *env, int *prot,
                                     int mode)
 {
     pmp_priv_t pmp_priv;
-    target_ulong tlb_size_pmp = 0;
+    int pmp_index = -1;
 
-    if (!riscv_feature(env, RISCV_FEATURE_PMP)) {
+    if (!riscv_cpu_cfg(env)->pmp) {
         *prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
         return TRANSLATE_SUCCESS;
     }
 
-    if (!pmp_hart_has_privs(env, addr, size, 1 << access_type, &pmp_priv,
-                            mode)) {
+    pmp_index = pmp_hart_has_privs(env, addr, size, 1 << access_type,
+                                   &pmp_priv, mode);
+    if (pmp_index < 0) {
         *prot = 0;
         return TRANSLATE_PMP_FAIL;
     }
 
     *prot = pmp_priv_to_page_prot(pmp_priv);
-    if (tlb_size != NULL) {
-        if (pmp_is_range_in_tlb(env, addr & ~(*tlb_size - 1), &tlb_size_pmp)) {
-            *tlb_size = tlb_size_pmp;
-        }
+    if ((tlb_size != NULL) && pmp_index != MAX_RISCV_PMPS) {
+        target_ulong tlb_sa = addr & ~(TARGET_PAGE_SIZE - 1);
+        target_ulong tlb_ea = tlb_sa + TARGET_PAGE_SIZE - 1;
+
+        *tlb_size = pmp_get_tlb_size(env, pmp_index, tlb_sa, tlb_ea);
     }
 
     return TRANSLATE_SUCCESS;
@@ -787,7 +796,7 @@ static int get_physical_address(CPURISCVState *env, hwaddr *physical,
         mode = PRV_U;
     }
 
-    if (mode == PRV_M || !riscv_feature(env, RISCV_FEATURE_MMU)) {
+    if (mode == PRV_M || !riscv_cpu_cfg(env)->mmu) {
         *physical = addr;
         *prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
         return TRANSLATE_SUCCESS;
@@ -927,9 +936,17 @@ restart:
             return TRANSLATE_FAIL;
         }
 
+        bool pbmte = env->menvcfg & MENVCFG_PBMTE;
+        bool hade = env->menvcfg & MENVCFG_HADE;
+
+        if (first_stage && two_stage && riscv_cpu_virt_enabled(env)) {
+            pbmte = pbmte && (env->henvcfg & HENVCFG_PBMTE);
+            hade = hade && (env->henvcfg & HENVCFG_HADE);
+        }
+
         if (riscv_cpu_sxl(env) == MXL_RV32) {
             ppn = pte >> PTE_PPN_SHIFT;
-        } else if (cpu->cfg.ext_svpbmt || cpu->cfg.ext_svnapot) {
+        } else if (pbmte || cpu->cfg.ext_svnapot) {
             ppn = (pte & (target_ulong)PTE_PPN_MASK) >> PTE_PPN_SHIFT;
         } else {
             ppn = pte >> PTE_PPN_SHIFT;
@@ -941,7 +958,7 @@ restart:
         if (!(pte & PTE_V)) {
             /* Invalid PTE */
             return TRANSLATE_FAIL;
-        } else if (!cpu->cfg.ext_svpbmt && (pte & PTE_PBMT)) {
+        } else if (!pbmte && (pte & PTE_PBMT)) {
             return TRANSLATE_FAIL;
         } else if (!(pte & (PTE_R | PTE_W | PTE_X))) {
             /* Inner PTE, continue walking */
@@ -983,6 +1000,10 @@ restart:
 
             /* Page table updates need to be atomic with MTTCG enabled */
             if (updated_pte != pte) {
+                if (!hade) {
+                    return TRANSLATE_FAIL;
+                }
+
                 /*
                  * - if accessed or dirty bits need updating, and the PTE is
                  *   in RAM, then we do so atomically with a compare and swap.
@@ -1055,7 +1076,8 @@ restart:
 
 static void raise_mmu_exception(CPURISCVState *env, target_ulong address,
                                 MMUAccessType access_type, bool pmp_violation,
-                                bool first_stage, bool two_stage)
+                                bool first_stage, bool two_stage,
+                                bool two_stage_indirect)
 {
     CPUState *cs = env_cpu(env);
     int page_fault_exceptions, vm;
@@ -1105,6 +1127,7 @@ static void raise_mmu_exception(CPURISCVState *env, target_ulong address,
     }
     env->badaddr = address;
     env->two_stage_lookup = two_stage;
+    env->two_stage_indirect_lookup = two_stage_indirect;
 }
 
 hwaddr riscv_cpu_get_phys_page_debug(CPUState *cs, vaddr addr)
@@ -1150,7 +1173,8 @@ void riscv_cpu_do_transaction_failed(CPUState *cs, hwaddr physaddr,
     env->badaddr = addr;
     env->two_stage_lookup = riscv_cpu_virt_enabled(env) ||
                             riscv_cpu_two_stage_lookup(mmu_idx);
-    riscv_raise_exception(&cpu->env, cs->exception_index, retaddr);
+    env->two_stage_indirect_lookup = false;
+    cpu_loop_exit_restore(cs, retaddr);
 }
 
 void riscv_cpu_do_unaligned_access(CPUState *cs, vaddr addr,
@@ -1175,7 +1199,30 @@ void riscv_cpu_do_unaligned_access(CPUState *cs, vaddr addr,
     env->badaddr = addr;
     env->two_stage_lookup = riscv_cpu_virt_enabled(env) ||
                             riscv_cpu_two_stage_lookup(mmu_idx);
-    riscv_raise_exception(env, cs->exception_index, retaddr);
+    env->two_stage_indirect_lookup = false;
+    cpu_loop_exit_restore(cs, retaddr);
+}
+
+
+static void pmu_tlb_fill_incr_ctr(RISCVCPU *cpu, MMUAccessType access_type)
+{
+    enum riscv_pmu_event_idx pmu_event_type;
+
+    switch (access_type) {
+    case MMU_INST_FETCH:
+        pmu_event_type = RISCV_PMU_EVENT_CACHE_ITLB_PREFETCH_MISS;
+        break;
+    case MMU_DATA_LOAD:
+        pmu_event_type = RISCV_PMU_EVENT_CACHE_DTLB_READ_MISS;
+        break;
+    case MMU_DATA_STORE:
+        pmu_event_type = RISCV_PMU_EVENT_CACHE_DTLB_WRITE_MISS;
+        break;
+    default:
+        return;
+    }
+
+    riscv_pmu_incr_ctr(cpu, pmu_event_type);
 }
 
 bool riscv_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
@@ -1190,6 +1237,7 @@ bool riscv_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
     bool pmp_violation = false;
     bool first_stage_error = true;
     bool two_stage_lookup = false;
+    bool two_stage_indirect_error = false;
     int ret = TRANSLATE_FAIL;
     int mode = mmu_idx;
     /* default TLB page size */
@@ -1212,6 +1260,7 @@ bool riscv_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
         }
     }
 
+    pmu_tlb_fill_incr_ctr(cpu, access_type);
     if (riscv_cpu_virt_enabled(env) ||
         ((riscv_cpu_two_stage_lookup(mmu_idx) || two_stage_lookup) &&
          access_type != MMU_INST_FETCH)) {
@@ -1227,12 +1276,13 @@ bool riscv_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
          */
         if (ret == TRANSLATE_G_STAGE_FAIL) {
             first_stage_error = false;
+            two_stage_indirect_error = true;
             access_type = MMU_DATA_LOAD;
         }
 
         qemu_log_mask(CPU_LOG_MMU,
                       "%s 1st-stage address=%" VADDR_PRIx " ret %d physical "
-                      TARGET_FMT_plx " prot %d\n",
+                      HWADDR_FMT_plx " prot %d\n",
                       __func__, address, ret, pa, prot);
 
         if (ret == TRANSLATE_SUCCESS) {
@@ -1245,7 +1295,7 @@ bool riscv_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
 
             qemu_log_mask(CPU_LOG_MMU,
                     "%s 2nd-stage address=%" VADDR_PRIx " ret %d physical "
-                    TARGET_FMT_plx " prot %d\n",
+                    HWADDR_FMT_plx " prot %d\n",
                     __func__, im_address, ret, pa, prot2);
 
             prot &= prot2;
@@ -1255,7 +1305,7 @@ bool riscv_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
                                                size, access_type, mode);
 
                 qemu_log_mask(CPU_LOG_MMU,
-                              "%s PMP address=" TARGET_FMT_plx " ret %d prot"
+                              "%s PMP address=" HWADDR_FMT_plx " ret %d prot"
                               " %d tlb_size " TARGET_FMT_lu "\n",
                               __func__, pa, ret, prot_pmp, tlb_size);
 
@@ -1280,7 +1330,7 @@ bool riscv_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
 
         qemu_log_mask(CPU_LOG_MMU,
                       "%s address=%" VADDR_PRIx " ret %d physical "
-                      TARGET_FMT_plx " prot %d\n",
+                      HWADDR_FMT_plx " prot %d\n",
                       __func__, address, ret, pa, prot);
 
         if (ret == TRANSLATE_SUCCESS) {
@@ -1288,7 +1338,7 @@ bool riscv_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
                                            size, access_type, mode);
 
             qemu_log_mask(CPU_LOG_MMU,
-                          "%s PMP address=" TARGET_FMT_plx " ret %d prot"
+                          "%s PMP address=" HWADDR_FMT_plx " ret %d prot"
                           " %d tlb_size " TARGET_FMT_lu "\n",
                           __func__, pa, ret, prot_pmp, tlb_size);
 
@@ -1310,11 +1360,217 @@ bool riscv_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
         raise_mmu_exception(env, address, access_type, pmp_violation,
                             first_stage_error,
                             riscv_cpu_virt_enabled(env) ||
-                                riscv_cpu_two_stage_lookup(mmu_idx));
-        riscv_raise_exception(env, cs->exception_index, retaddr);
+                                riscv_cpu_two_stage_lookup(mmu_idx),
+                            two_stage_indirect_error);
+        cpu_loop_exit_restore(cs, retaddr);
     }
 
     return true;
+}
+
+static target_ulong riscv_transformed_insn(CPURISCVState *env,
+                                           target_ulong insn,
+                                           target_ulong taddr)
+{
+    target_ulong xinsn = 0;
+    target_ulong access_rs1 = 0, access_imm = 0, access_size = 0;
+
+    /*
+     * Only Quadrant 0 and Quadrant 2 of RVC instruction space need to
+     * be uncompressed. The Quadrant 1 of RVC instruction space need
+     * not be transformed because these instructions won't generate
+     * any load/store trap.
+     */
+
+    if ((insn & 0x3) != 0x3) {
+        /* Transform 16bit instruction into 32bit instruction */
+        switch (GET_C_OP(insn)) {
+        case OPC_RISC_C_OP_QUAD0: /* Quadrant 0 */
+            switch (GET_C_FUNC(insn)) {
+            case OPC_RISC_C_FUNC_FLD_LQ:
+                if (riscv_cpu_xlen(env) != 128) { /* C.FLD (RV32/64) */
+                    xinsn = OPC_RISC_FLD;
+                    xinsn = SET_RD(xinsn, GET_C_RS2S(insn));
+                    access_rs1 = GET_C_RS1S(insn);
+                    access_imm = GET_C_LD_IMM(insn);
+                    access_size = 8;
+                }
+                break;
+            case OPC_RISC_C_FUNC_LW: /* C.LW */
+                xinsn = OPC_RISC_LW;
+                xinsn = SET_RD(xinsn, GET_C_RS2S(insn));
+                access_rs1 = GET_C_RS1S(insn);
+                access_imm = GET_C_LW_IMM(insn);
+                access_size = 4;
+                break;
+            case OPC_RISC_C_FUNC_FLW_LD:
+                if (riscv_cpu_xlen(env) == 32) { /* C.FLW (RV32) */
+                    xinsn = OPC_RISC_FLW;
+                    xinsn = SET_RD(xinsn, GET_C_RS2S(insn));
+                    access_rs1 = GET_C_RS1S(insn);
+                    access_imm = GET_C_LW_IMM(insn);
+                    access_size = 4;
+                } else { /* C.LD (RV64/RV128) */
+                    xinsn = OPC_RISC_LD;
+                    xinsn = SET_RD(xinsn, GET_C_RS2S(insn));
+                    access_rs1 = GET_C_RS1S(insn);
+                    access_imm = GET_C_LD_IMM(insn);
+                    access_size = 8;
+                }
+                break;
+            case OPC_RISC_C_FUNC_FSD_SQ:
+                if (riscv_cpu_xlen(env) != 128) { /* C.FSD (RV32/64) */
+                    xinsn = OPC_RISC_FSD;
+                    xinsn = SET_RS2(xinsn, GET_C_RS2S(insn));
+                    access_rs1 = GET_C_RS1S(insn);
+                    access_imm = GET_C_SD_IMM(insn);
+                    access_size = 8;
+                }
+                break;
+            case OPC_RISC_C_FUNC_SW: /* C.SW */
+                xinsn = OPC_RISC_SW;
+                xinsn = SET_RS2(xinsn, GET_C_RS2S(insn));
+                access_rs1 = GET_C_RS1S(insn);
+                access_imm = GET_C_SW_IMM(insn);
+                access_size = 4;
+                break;
+            case OPC_RISC_C_FUNC_FSW_SD:
+                if (riscv_cpu_xlen(env) == 32) { /* C.FSW (RV32) */
+                    xinsn = OPC_RISC_FSW;
+                    xinsn = SET_RS2(xinsn, GET_C_RS2S(insn));
+                    access_rs1 = GET_C_RS1S(insn);
+                    access_imm = GET_C_SW_IMM(insn);
+                    access_size = 4;
+                } else { /* C.SD (RV64/RV128) */
+                    xinsn = OPC_RISC_SD;
+                    xinsn = SET_RS2(xinsn, GET_C_RS2S(insn));
+                    access_rs1 = GET_C_RS1S(insn);
+                    access_imm = GET_C_SD_IMM(insn);
+                    access_size = 8;
+                }
+                break;
+            default:
+                break;
+            }
+            break;
+        case OPC_RISC_C_OP_QUAD2: /* Quadrant 2 */
+            switch (GET_C_FUNC(insn)) {
+            case OPC_RISC_C_FUNC_FLDSP_LQSP:
+                if (riscv_cpu_xlen(env) != 128) { /* C.FLDSP (RV32/64) */
+                    xinsn = OPC_RISC_FLD;
+                    xinsn = SET_RD(xinsn, GET_C_RD(insn));
+                    access_rs1 = 2;
+                    access_imm = GET_C_LDSP_IMM(insn);
+                    access_size = 8;
+                }
+                break;
+            case OPC_RISC_C_FUNC_LWSP: /* C.LWSP */
+                xinsn = OPC_RISC_LW;
+                xinsn = SET_RD(xinsn, GET_C_RD(insn));
+                access_rs1 = 2;
+                access_imm = GET_C_LWSP_IMM(insn);
+                access_size = 4;
+                break;
+            case OPC_RISC_C_FUNC_FLWSP_LDSP:
+                if (riscv_cpu_xlen(env) == 32) { /* C.FLWSP (RV32) */
+                    xinsn = OPC_RISC_FLW;
+                    xinsn = SET_RD(xinsn, GET_C_RD(insn));
+                    access_rs1 = 2;
+                    access_imm = GET_C_LWSP_IMM(insn);
+                    access_size = 4;
+                } else { /* C.LDSP (RV64/RV128) */
+                    xinsn = OPC_RISC_LD;
+                    xinsn = SET_RD(xinsn, GET_C_RD(insn));
+                    access_rs1 = 2;
+                    access_imm = GET_C_LDSP_IMM(insn);
+                    access_size = 8;
+                }
+                break;
+            case OPC_RISC_C_FUNC_FSDSP_SQSP:
+                if (riscv_cpu_xlen(env) != 128) { /* C.FSDSP (RV32/64) */
+                    xinsn = OPC_RISC_FSD;
+                    xinsn = SET_RS2(xinsn, GET_C_RS2(insn));
+                    access_rs1 = 2;
+                    access_imm = GET_C_SDSP_IMM(insn);
+                    access_size = 8;
+                }
+                break;
+            case OPC_RISC_C_FUNC_SWSP: /* C.SWSP */
+                xinsn = OPC_RISC_SW;
+                xinsn = SET_RS2(xinsn, GET_C_RS2(insn));
+                access_rs1 = 2;
+                access_imm = GET_C_SWSP_IMM(insn);
+                access_size = 4;
+                break;
+            case 7:
+                if (riscv_cpu_xlen(env) == 32) { /* C.FSWSP (RV32) */
+                    xinsn = OPC_RISC_FSW;
+                    xinsn = SET_RS2(xinsn, GET_C_RS2(insn));
+                    access_rs1 = 2;
+                    access_imm = GET_C_SWSP_IMM(insn);
+                    access_size = 4;
+                } else { /* C.SDSP (RV64/RV128) */
+                    xinsn = OPC_RISC_SD;
+                    xinsn = SET_RS2(xinsn, GET_C_RS2(insn));
+                    access_rs1 = 2;
+                    access_imm = GET_C_SDSP_IMM(insn);
+                    access_size = 8;
+                }
+                break;
+            default:
+                break;
+            }
+            break;
+        default:
+            break;
+        }
+
+        /*
+         * Clear Bit1 of transformed instruction to indicate that
+         * original insruction was a 16bit instruction
+         */
+        xinsn &= ~((target_ulong)0x2);
+    } else {
+        /* Transform 32bit (or wider) instructions */
+        switch (MASK_OP_MAJOR(insn)) {
+        case OPC_RISC_ATOMIC:
+            xinsn = insn;
+            access_rs1 = GET_RS1(insn);
+            access_size = 1 << GET_FUNCT3(insn);
+            break;
+        case OPC_RISC_LOAD:
+        case OPC_RISC_FP_LOAD:
+            xinsn = SET_I_IMM(insn, 0);
+            access_rs1 = GET_RS1(insn);
+            access_imm = GET_IMM(insn);
+            access_size = 1 << GET_FUNCT3(insn);
+            break;
+        case OPC_RISC_STORE:
+        case OPC_RISC_FP_STORE:
+            xinsn = SET_S_IMM(insn, 0);
+            access_rs1 = GET_RS1(insn);
+            access_imm = GET_STORE_IMM(insn);
+            access_size = 1 << GET_FUNCT3(insn);
+            break;
+        case OPC_RISC_SYSTEM:
+            if (MASK_OP_SYSTEM(insn) == OPC_RISC_HLVHSV) {
+                xinsn = insn;
+                access_rs1 = GET_RS1(insn);
+                access_size = 1 << ((GET_FUNCT7(insn) >> 1) & 0x3);
+                access_size = 1 << access_size;
+            }
+            break;
+        default:
+            break;
+        }
+    }
+
+    if (access_size) {
+        xinsn = SET_RS1(xinsn, (taddr - (env->gpr[access_rs1] + access_imm)) &
+                               (access_size - 1));
+    }
+
+    return xinsn;
 }
 #endif /* !CONFIG_USER_ONLY */
 
@@ -1340,38 +1596,66 @@ void riscv_cpu_do_interrupt(CPUState *cs)
     target_ulong cause = cs->exception_index & RISCV_EXCP_INT_MASK;
     uint64_t deleg = async ? env->mideleg : env->medeleg;
     target_ulong tval = 0;
+    target_ulong tinst = 0;
     target_ulong htval = 0;
     target_ulong mtval2 = 0;
 
     if  (cause == RISCV_EXCP_SEMIHOST) {
-        if (env->priv >= PRV_S) {
-            env->gpr[xA0] = do_common_semihosting(cs);
-            env->pc += 4;
-            return;
-        }
-        cause = RISCV_EXCP_BREAKPOINT;
+        do_common_semihosting(cs);
+        env->pc += 4;
+        return;
     }
 
     if (!async) {
         /* set tval to badaddr for traps with address information */
         switch (cause) {
-        case RISCV_EXCP_INST_GUEST_PAGE_FAULT:
         case RISCV_EXCP_LOAD_GUEST_ACCESS_FAULT:
         case RISCV_EXCP_STORE_GUEST_AMO_ACCESS_FAULT:
-        case RISCV_EXCP_INST_ADDR_MIS:
-        case RISCV_EXCP_INST_ACCESS_FAULT:
         case RISCV_EXCP_LOAD_ADDR_MIS:
         case RISCV_EXCP_STORE_AMO_ADDR_MIS:
         case RISCV_EXCP_LOAD_ACCESS_FAULT:
         case RISCV_EXCP_STORE_AMO_ACCESS_FAULT:
-        case RISCV_EXCP_INST_PAGE_FAULT:
         case RISCV_EXCP_LOAD_PAGE_FAULT:
         case RISCV_EXCP_STORE_PAGE_FAULT:
-            write_gva = true;
+            write_gva = env->two_stage_lookup;
             tval = env->badaddr;
+            if (env->two_stage_indirect_lookup) {
+                /*
+                 * special pseudoinstruction for G-stage fault taken while
+                 * doing VS-stage page table walk.
+                 */
+                tinst = (riscv_cpu_xlen(env) == 32) ? 0x00002000 : 0x00003000;
+            } else {
+                /*
+                 * The "Addr. Offset" field in transformed instruction is
+                 * non-zero only for misaligned access.
+                 */
+                tinst = riscv_transformed_insn(env, env->bins, tval);
+            }
+            break;
+        case RISCV_EXCP_INST_GUEST_PAGE_FAULT:
+        case RISCV_EXCP_INST_ADDR_MIS:
+        case RISCV_EXCP_INST_ACCESS_FAULT:
+        case RISCV_EXCP_INST_PAGE_FAULT:
+            write_gva = env->two_stage_lookup;
+            tval = env->badaddr;
+            if (env->two_stage_indirect_lookup) {
+                /*
+                 * special pseudoinstruction for G-stage fault taken while
+                 * doing VS-stage page table walk.
+                 */
+                tinst = (riscv_cpu_xlen(env) == 32) ? 0x00002000 : 0x00003000;
+            }
             break;
         case RISCV_EXCP_ILLEGAL_INST:
+        case RISCV_EXCP_VIRT_INSTRUCTION_FAULT:
             tval = env->bins;
+            break;
+        case RISCV_EXCP_BREAKPOINT:
+            if (cs->watchpoint_hit) {
+                tval = cs->watchpoint_hit->hitaddr;
+                cs->watchpoint_hit = NULL;
+            }
             break;
         default:
             break;
@@ -1434,7 +1718,6 @@ void riscv_cpu_do_interrupt(CPUState *cs)
                 /* Trap into HS mode */
                 env->hstatus = set_field(env->hstatus, HSTATUS_SPV, false);
                 htval = env->guest_phys_fault_addr;
-                write_gva = false;
             }
             env->hstatus = set_field(env->hstatus, HSTATUS_GVA, write_gva);
         }
@@ -1448,6 +1731,7 @@ void riscv_cpu_do_interrupt(CPUState *cs)
         env->sepc = env->pc;
         env->stval = tval;
         env->htval = htval;
+        env->htinst = tinst;
         env->pc = (env->stvec >> 2 << 2) +
             ((async && (env->stvec & 3) == 1) ? cause * 4 : 0);
         riscv_cpu_set_mode(env, PRV_S);
@@ -1478,6 +1762,7 @@ void riscv_cpu_do_interrupt(CPUState *cs)
         env->mepc = env->pc;
         env->mtval = tval;
         env->mtval2 = mtval2;
+        env->mtinst = tinst;
         env->pc = (env->mtvec >> 2 << 2) +
             ((async && (env->mtvec & 3) == 1) ? cause * 4 : 0);
         riscv_cpu_set_mode(env, PRV_M);
@@ -1490,6 +1775,7 @@ void riscv_cpu_do_interrupt(CPUState *cs)
      */
 
     env->two_stage_lookup = false;
+    env->two_stage_indirect_lookup = false;
 #endif
     cs->exception_index = RISCV_EXCP_NONE; /* mark handled to qemu */
 }

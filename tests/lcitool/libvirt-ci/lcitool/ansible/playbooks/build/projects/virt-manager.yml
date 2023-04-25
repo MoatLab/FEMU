@@ -1,0 +1,18 @@
+---
+- set_fact:
+    name: virt-manager
+    machines: '{{ all_machines }}'
+    archive_format: gz
+    git_url: '{{ git_urls["virt-manager"][git_remote] }}'
+
+- import_tasks: 'jobs/prepare.yml'
+- import_tasks: 'jobs/python-distutils-build-job.yml'
+  vars:
+    command_pre_build: |
+      $PYTHON ./setup.py configure --prefix=$VIRT_PREFIX
+- import_tasks: 'jobs/python-distutils-check-job.yml'
+  vars:
+    machines: '{{ all_machines }}'
+- import_tasks: 'jobs/python-distutils-rpm-job.yml'
+  vars:
+    machines: '{{ rpm_machines }}'

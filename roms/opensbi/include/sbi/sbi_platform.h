@@ -48,6 +48,7 @@
 struct sbi_domain_memregion;
 struct sbi_trap_info;
 struct sbi_trap_regs;
+struct sbi_hart_features;
 
 /** Possible feature flags of a platform */
 enum sbi_platform_features {
@@ -64,6 +65,9 @@ enum sbi_platform_features {
 
 /** Platform functions */
 struct sbi_platform_operations {
+	/* Platform nascent initialization */
+	int (*nascent_init)(void);
+
 	/** Platform early initialization */
 	int (*early_init)(bool cold_boot);
 	/** Platform final initialization */
@@ -85,6 +89,9 @@ struct sbi_platform_operations {
 	 * methods are needed to get MXL field of misa.
 	 */
 	int (*misa_get_xlen)(void);
+
+	/** Initialize (or populate) HART extensions for the platform */
+	int (*extensions_init)(struct sbi_hart_features *hfeatures);
 
 	/** Initialize (or populate) domains for the platform */
 	int (*domains_init)(void);
@@ -171,6 +178,56 @@ struct sbi_platform {
 	 */
 	const u32 *hart_index2id;
 };
+
+/**
+ * Prevent modification of struct sbi_platform from affecting
+ * SBI_PLATFORM_xxx_OFFSET
+ */
+_Static_assert(
+	offsetof(struct sbi_platform, opensbi_version)
+		== SBI_PLATFORM_OPENSBI_VERSION_OFFSET,
+	"struct sbi_platform definition has changed, please redefine "
+	"SBI_PLATFORM_OPENSBI_VERSION_OFFSET");
+_Static_assert(
+	offsetof(struct sbi_platform, platform_version)
+		== SBI_PLATFORM_VERSION_OFFSET,
+	"struct sbi_platform definition has changed, please redefine "
+	"SBI_PLATFORM_VERSION_OFFSET");
+_Static_assert(
+	offsetof(struct sbi_platform, name)
+		== SBI_PLATFORM_NAME_OFFSET,
+	"struct sbi_platform definition has changed, please redefine "
+	"SBI_PLATFORM_NAME_OFFSET");
+_Static_assert(
+	offsetof(struct sbi_platform, features)
+		== SBI_PLATFORM_FEATURES_OFFSET,
+	"struct sbi_platform definition has changed, please redefine "
+	"SBI_PLATFORM_FEATURES_OFFSET");
+_Static_assert(
+	offsetof(struct sbi_platform, hart_count)
+		== SBI_PLATFORM_HART_COUNT_OFFSET,
+	"struct sbi_platform definition has changed, please redefine "
+	"SBI_PLATFORM_HART_COUNT_OFFSET");
+_Static_assert(
+	offsetof(struct sbi_platform, hart_stack_size)
+		== SBI_PLATFORM_HART_STACK_SIZE_OFFSET,
+	"struct sbi_platform definition has changed, please redefine "
+	"SBI_PLATFORM_HART_STACK_SIZE_OFFSET");
+_Static_assert(
+	offsetof(struct sbi_platform, platform_ops_addr)
+		== SBI_PLATFORM_OPS_OFFSET,
+	"struct sbi_platform definition has changed, please redefine "
+	"SBI_PLATFORM_OPS_OFFSET");
+_Static_assert(
+	offsetof(struct sbi_platform, firmware_context)
+		== SBI_PLATFORM_FIRMWARE_CONTEXT_OFFSET,
+	"struct sbi_platform definition has changed, please redefine "
+	"SBI_PLATFORM_FIRMWARE_CONTEXT_OFFSET");
+_Static_assert(
+	offsetof(struct sbi_platform, hart_index2id)
+		== SBI_PLATFORM_HART_INDEX2ID_OFFSET,
+	"struct sbi_platform definition has changed, please redefine "
+	"SBI_PLATFORM_HART_INDEX2ID_OFFSET");
 
 /** Get pointer to sbi_platform for sbi_scratch pointer */
 #define sbi_platform_ptr(__s) \
@@ -300,6 +357,23 @@ static inline bool sbi_platform_hart_invalid(const struct sbi_platform *plat,
 }
 
 /**
+ * Nascent (very early) initialization for current HART
+ *
+ * NOTE: This function can be used to do very early initialization of
+ * platform specific per-HART CSRs and devices.
+ *
+ * @param plat pointer to struct sbi_platform
+ *
+ * @return 0 on success and negative error code on failure
+ */
+static inline int sbi_platform_nascent_init(const struct sbi_platform *plat)
+{
+	if (plat && sbi_platform_ops(plat)->nascent_init)
+		return sbi_platform_ops(plat)->nascent_init();
+	return 0;
+}
+
+/**
  * Early initialization for current HART
  *
  * @param plat pointer to struct sbi_platform
@@ -381,6 +455,22 @@ static inline int sbi_platform_misa_xlen(const struct sbi_platform *plat)
 	if (plat && sbi_platform_ops(plat)->misa_get_xlen)
 		return sbi_platform_ops(plat)->misa_get_xlen();
 	return -1;
+}
+
+/**
+ * Initialize (or populate) HART extensions for the platform
+ *
+ * @param plat pointer to struct sbi_platform
+ *
+ * @return 0 on success and negative error code on failure
+ */
+static inline int sbi_platform_extensions_init(
+					const struct sbi_platform *plat,
+					struct sbi_hart_features *hfeatures)
+{
+	if (plat && sbi_platform_ops(plat)->extensions_init)
+		return sbi_platform_ops(plat)->extensions_init(hfeatures);
+	return 0;
 }
 
 /**

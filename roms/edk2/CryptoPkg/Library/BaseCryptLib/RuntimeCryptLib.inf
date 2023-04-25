@@ -11,8 +11,9 @@
 #  functions, PKCS#7 SignedData sign functions, Diffie-Hellman functions, and
 #  authenticode signature verification functions are not supported in this instance.
 #
-#  Copyright (c) 2009 - 2021, Intel Corporation. All rights reserved.<BR>
+#  Copyright (c) 2009 - 2022, Intel Corporation. All rights reserved.<BR>
 #  Copyright (c) 2021, Hewlett Packard Enterprise Development LP. All rights reserved.<BR>
+#  Copyright (c) 2022, Loongson Technology Corporation Limited. All rights reserved.<BR>
 #  SPDX-License-Identifier: BSD-2-Clause-Patent
 #
 ##
@@ -40,9 +41,11 @@
   Hash/CryptSha256.c
   Hash/CryptSm3.c
   Hash/CryptSha512.c
-  Hmac/CryptHmacSha256.c
+  Hash/CryptParallelHashNull.c
+  Hmac/CryptHmac.c
   Kdf/CryptHkdf.c
   Cipher/CryptAes.c
+  Cipher/CryptAeadAesGcmNull.c
   Pk/CryptRsaBasic.c
   Pk/CryptRsaExtNull.c
   Pk/CryptPkcs1OaepNull.c
@@ -57,7 +60,9 @@
   Pk/CryptTsNull.c
   Pk/CryptRsaPssNull.c
   Pk/CryptRsaPssSignNull.c
+  Pk/CryptEcNull.c
   Pem/CryptPem.c
+  Bn/CryptBnNull.c
 
   SysCall/CrtWrapper.c
   SysCall/TimerWrapper.c
@@ -78,6 +83,9 @@
 [Sources.RISCV64]
   Rand/CryptRand.c
 
+[Sources.LOONGARCH64]
+  Rand/CryptRand.c
+
 [Packages]
   MdePkg/MdePkg.dec
   CryptoPkg/CryptoPkg.dec
@@ -85,7 +93,6 @@
 [LibraryClasses]
   BaseLib
   BaseMemoryLib
-  UefiBootServicesTableLib
   UefiRuntimeServicesTableLib
   DebugLib
   OpensslLib
@@ -98,14 +105,7 @@
 [BuildOptions]
   #
   # suppress the following warnings so we do not break the build with warnings-as-errors:
-  # C4090: 'function' : different 'const' qualifiers
   #
-  MSFT:*_*_*_CC_FLAGS = /wd4090
-
-  # -JCryptoPkg/Include : To disable the use of the system includes provided by RVCT
-  # --diag_remark=1     : Reduce severity of "#1-D: last line of file ends without a newline"
-  RVCT:*_*_ARM_CC_FLAGS = -JCryptoPkg/Include --diag_remark=1
-
   GCC:*_CLANG35_*_CC_FLAGS = -std=c99
   GCC:*_CLANG38_*_CC_FLAGS = -std=c99
   GCC:*_CLANGPDB_*_CC_FLAGS = -std=c99 -Wno-error=incompatible-pointer-types

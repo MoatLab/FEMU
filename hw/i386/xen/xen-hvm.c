@@ -15,11 +15,10 @@
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_host.h"
 #include "hw/i386/pc.h"
-#include "hw/southbridge/piix.h"
 #include "hw/irq.h"
 #include "hw/hw.h"
 #include "hw/i386/apic-msidef.h"
-#include "hw/xen/xen_common.h"
+#include "hw/xen/xen_native.h"
 #include "hw/xen/xen-legacy-backend.h"
 #include "hw/xen/xen-bus.h"
 #include "hw/xen/xen-x86.h"
@@ -53,10 +52,11 @@ static bool xen_in_migration;
 
 /* Compatibility with older version */
 
-/* This allows QEMU to build on a system that has Xen 4.5 or earlier
- * installed.  This here (not in hw/xen/xen_common.h) because xen/hvm/ioreq.h
- * needs to be included before this block and hw/xen/xen_common.h needs to
- * be included before xen/hvm/ioreq.h
+/*
+ * This allows QEMU to build on a system that has Xen 4.5 or earlier installed.
+ * This is here (not in hw/xen/xen_native.h) because xen/hvm/ioreq.h needs to
+ * be included before this block and hw/xen/xen_native.h needs to be included
+ * before xen/hvm/ioreq.h
  */
 #ifndef IOREQ_TYPE_VMWARE_PORT
 #define IOREQ_TYPE_VMWARE_PORT  3
@@ -149,21 +149,9 @@ void xen_piix3_set_irq(void *opaque, int irq_num, int level)
                            irq_num & 3, level);
 }
 
-void xen_piix_pci_write_config_client(uint32_t address, uint32_t val, int len)
+int xen_set_pci_link_route(uint8_t link, uint8_t irq)
 {
-    int i;
-
-    /* Scan for updates to PCI link routes (0x60-0x63). */
-    for (i = 0; i < len; i++) {
-        uint8_t v = (val >> (8 * i)) & 0xff;
-        if (v & 0x80) {
-            v = 0;
-        }
-        v &= 0xf;
-        if (((address + i) >= PIIX_PIRQCA) && ((address + i) <= PIIX_PIRQCD)) {
-            xen_set_pci_link_route(xen_domid, address + i - PIIX_PIRQCA, v);
-        }
-    }
+    return xendevicemodel_set_pci_link_route(xen_dmod, xen_domid, link, irq);
 }
 
 int xen_is_pirq_msi(uint32_t msi_data)
@@ -529,13 +517,13 @@ static void xen_set_memory(struct MemoryListener *listener,
             if (xen_set_mem_type(xen_domid, mem_type,
                                  start_addr >> TARGET_PAGE_BITS,
                                  size >> TARGET_PAGE_BITS)) {
-                DPRINTF("xen_set_mem_type error, addr: "TARGET_FMT_plx"\n",
+                DPRINTF("xen_set_mem_type error, addr: "HWADDR_FMT_plx"\n",
                         start_addr);
             }
         }
     } else {
         if (xen_remove_from_physmap(state, start_addr, size) < 0) {
-            DPRINTF("physmapping does not exist at "TARGET_FMT_plx"\n", start_addr);
+            DPRINTF("physmapping does not exist at "HWADDR_FMT_plx"\n", start_addr);
         }
     }
 }
@@ -655,8 +643,8 @@ static void xen_sync_dirty_bitmap(XenIOState *state,
 #endif
         if (errno == ENODATA) {
             memory_region_set_dirty(framebuffer, 0, size);
-            DPRINTF("xen: track_dirty_vram failed (0x" TARGET_FMT_plx
-                    ", 0x" TARGET_FMT_plx "): %s\n",
+            DPRINTF("xen: track_dirty_vram failed (0x" HWADDR_FMT_plx
+                    ", 0x" HWADDR_FMT_plx "): %s\n",
                     start_addr, start_addr + size, strerror(errno));
         }
         return;
@@ -774,7 +762,7 @@ static ioreq_t *cpu_get_ioreq(XenIOState *state)
     int i;
     evtchn_port_t port;
 
-    port = xenevtchn_pending(state->xce_handle);
+    port = qemu_xen_evtchn_pending(state->xce_handle);
     if (port == state->bufioreq_local_port) {
         timer_mod(state->buffered_io_timer,
                 BUFFER_IO_MAX_DELAY + qemu_clock_get_ms(QEMU_CLOCK_REALTIME));
@@ -793,7 +781,7 @@ static ioreq_t *cpu_get_ioreq(XenIOState *state)
         }
 
         /* unmask the wanted port again */
-        xenevtchn_unmask(state->xce_handle, port);
+        qemu_xen_evtchn_unmask(state->xce_handle, port);
 
         /* get the io packet from shared memory */
         state->send_vcpu = i;
@@ -1160,7 +1148,7 @@ static void handle_buffered_io(void *opaque)
                 BUFFER_IO_MAX_DELAY + qemu_clock_get_ms(QEMU_CLOCK_REALTIME));
     } else {
         timer_del(state->buffered_io_timer);
-        xenevtchn_unmask(state->xce_handle, state->bufioreq_local_port);
+        qemu_xen_evtchn_unmask(state->xce_handle, state->bufioreq_local_port);
     }
 }
 
@@ -1209,8 +1197,8 @@ static void cpu_handle_ioreq(void *opaque)
         }
 
         req->state = STATE_IORESP_READY;
-        xenevtchn_notify(state->xce_handle,
-                         state->ioreq_local_port[state->send_vcpu]);
+        qemu_xen_evtchn_notify(state->xce_handle,
+                               state->ioreq_local_port[state->send_vcpu]);
     }
 }
 
@@ -1219,7 +1207,7 @@ static void xen_main_loop_prepare(XenIOState *state)
     int evtchn_fd = -1;
 
     if (state->xce_handle != NULL) {
-        evtchn_fd = xenevtchn_fd(state->xce_handle);
+        evtchn_fd = qemu_xen_evtchn_fd(state->xce_handle);
     }
 
     state->buffered_io_timer = timer_new_ms(QEMU_CLOCK_REALTIME, handle_buffered_io,
@@ -1262,7 +1250,7 @@ static void xen_exit_notifier(Notifier *n, void *data)
         xenforeignmemory_unmap_resource(xen_fmem, state->fres);
     }
 
-    xenevtchn_close(state->xce_handle);
+    qemu_xen_evtchn_close(state->xce_handle);
     xs_daemon_close(state->xenstore);
 }
 
@@ -1410,9 +1398,11 @@ void xen_hvm_init_pc(PCMachineState *pcms, MemoryRegion **ram_memory)
     xen_pfn_t ioreq_pfn;
     XenIOState *state;
 
+    setup_xen_backend_ops();
+
     state = g_new0(XenIOState, 1);
 
-    state->xce_handle = xenevtchn_open(NULL, 0);
+    state->xce_handle = qemu_xen_evtchn_open();
     if (state->xce_handle == NULL) {
         perror("xen: event channel open");
         goto err;
@@ -1476,8 +1466,9 @@ void xen_hvm_init_pc(PCMachineState *pcms, MemoryRegion **ram_memory)
 
     /* FIXME: how about if we overflow the page here? */
     for (i = 0; i < max_cpus; i++) {
-        rc = xenevtchn_bind_interdomain(state->xce_handle, xen_domid,
-                                        xen_vcpu_eport(state->shared_page, i));
+        rc = qemu_xen_evtchn_bind_interdomain(state->xce_handle, xen_domid,
+                                              xen_vcpu_eport(state->shared_page,
+                                                             i));
         if (rc == -1) {
             error_report("shared evtchn %d bind error %d", i, errno);
             goto err;
@@ -1485,8 +1476,8 @@ void xen_hvm_init_pc(PCMachineState *pcms, MemoryRegion **ram_memory)
         state->ioreq_local_port[i] = rc;
     }
 
-    rc = xenevtchn_bind_interdomain(state->xce_handle, xen_domid,
-                                    state->bufioreq_remote_port);
+    rc = qemu_xen_evtchn_bind_interdomain(state->xce_handle, xen_domid,
+                                          state->bufioreq_remote_port);
     if (rc == -1) {
         error_report("buffered evtchn bind error %d", errno);
         goto err;
@@ -1515,13 +1506,7 @@ void xen_hvm_init_pc(PCMachineState *pcms, MemoryRegion **ram_memory)
     device_listener_register(&state->device_listener);
 
     xen_bus_init();
-
-    /* Initialize backend core & drivers */
-    if (xen_be_init() != 0) {
-        error_report("xen backend core setup failed");
-        goto err;
-    }
-    xen_be_register_common();
+    xen_be_init();
 
     QLIST_INIT(&xen_physmap);
     xen_read_physmap(state);

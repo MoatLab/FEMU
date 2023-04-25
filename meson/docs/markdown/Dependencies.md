@@ -203,7 +203,7 @@ it automatically.
 
 Support for adding additional `COMPONENTS` for the CMake
 `find_package` lookup is provided with the `components` kwarg
-(*introduced in 0.54.0*). All specified componets will be passed
+(*introduced in 0.54.0*). All specified components will be passed
 directly to `find_package(COMPONENTS)`.
 
 Support for packages which require a specified version for CMake
@@ -350,7 +350,9 @@ dep = dependency('cuda', version : '>=10', modules : ['cublas'])
 
 Note that explicitly adding this dependency is only necessary if you are
 using CUDA Toolkit from a C/C++ file or project, or if you are utilizing
-additional toolkit libraries that need to be explicitly linked to.
+additional toolkit libraries that need to be explicitly linked to. If the
+CUDA Toolkit cannot be found in the default paths on your system, you can
+set the path using `CUDA_PATH` explicitly.
 
 ## CUPS
 
@@ -450,6 +452,15 @@ language.
 *New in 0.56.0* the `config-tool` method.
 *New in 0.56.0* the dependencies now return proper dependency types
  and `get_variable` and similar methods should work as expected.
+
+## iconv
+
+*(added 0.60.0)*
+
+Provides access to the `iconv` family of C functions. On systems where this is
+not built into libc, tries to find an external library providing them instead.
+
+`method` may be `auto`, `builtin` or `system`.
 
 ## intl
 
@@ -700,7 +711,7 @@ $ wx-config --libs std stc
 ## Zlib
 
 Zlib ships with pkg-config and cmake support, but on some operating
-systems (windows, macOs, FreeBSD, dragonflybsd), it is provided as
+systems (windows, macOs, FreeBSD, dragonflybsd, android), it is provided as
 part of the base operating system without pkg-config support. The new
 System finder can be used on these OSes to link with the bundled
 version.

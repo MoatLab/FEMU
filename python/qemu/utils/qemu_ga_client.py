@@ -50,8 +50,8 @@ from typing import (
     Sequence,
 )
 
-from qemu.aqmp import ConnectError, SocketAddrT
-from qemu.aqmp.legacy import QEMUMonitorProtocol
+from qemu.qmp import ConnectError, SocketAddrT
+from qemu.qmp.legacy import QEMUMonitorProtocol
 
 
 # This script has not seen many patches or careful attention in quite
@@ -155,7 +155,7 @@ class QemuGuestAgentClient:
 
     def fsfreeze(self, cmd: str) -> object:
         if cmd not in ['status', 'freeze', 'thaw']:
-            raise Exception('Invalid command: ' + cmd)
+            raise ValueError('Invalid command: ' + cmd)
         # Can be int (freeze, thaw) or GuestFsfreezeStatus (status)
         return getattr(self.qga, 'fsfreeze' + '_' + cmd)()
 
@@ -167,7 +167,7 @@ class QemuGuestAgentClient:
 
     def suspend(self, mode: str) -> None:
         if mode not in ['disk', 'ram', 'hybrid']:
-            raise Exception('Invalid mode: ' + mode)
+            raise ValueError('Invalid mode: ' + mode)
 
         try:
             getattr(self.qga, 'suspend' + '_' + mode)()
@@ -178,7 +178,7 @@ class QemuGuestAgentClient:
 
     def shutdown(self, mode: str = 'powerdown') -> None:
         if mode not in ['powerdown', 'halt', 'reboot']:
-            raise Exception('Invalid mode: ' + mode)
+            raise ValueError('Invalid mode: ' + mode)
 
         try:
             self.qga.shutdown(mode=mode)

@@ -1,0 +1,12 @@
+[centos-stream-8]
+centos-stream-8-1
+centos-stream-8-2
+some-other-centos-stream-8
+
+[fedora-37]
+fedora-test-1
+fedora-test-2   fully_managed=True
+
+[debian-10]
+192.168.1.30
+

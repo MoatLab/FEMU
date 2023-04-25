@@ -77,8 +77,11 @@ static int ast_copy_to_ahb(uint32_t reg, const void *src, uint32_t len)
 		while(len) {
 			/* Chose access size */
 			if (len > 3 && !(off & 3)) {
+				/* endian swap: see ast_copy_from_ahb */
+				uint32_t dat = be32_to_cpu(*(__be32 *)src);
+
 				rc = lpc_write(OPAL_LPC_FW, off,
-					       *(uint32_t *)src, 4);
+					       dat, 4);
 				chunk = 4;
 			} else {
 				rc = lpc_write(OPAL_LPC_FW, off,
@@ -119,8 +122,13 @@ static int ast_copy_from_ahb(void *dst, uint32_t reg, uint32_t len)
 			/* Chose access size */
 			if (len > 3 && !(off & 3)) {
 				rc = lpc_read(OPAL_LPC_FW, off, &dat, 4);
-				if (!rc)
-					*(uint32_t *)dst = dat;
+				if (!rc) {
+					/*
+					 * lpc_read swaps to CPU endian but it's not
+					 * really a 32-bit value, so convert back.
+					 */
+					*(__be32 *)dst = cpu_to_be32(dat);
+				}
 				chunk = 4;
 			} else {
 				rc = lpc_read(OPAL_LPC_FW, off, &dat, 1);

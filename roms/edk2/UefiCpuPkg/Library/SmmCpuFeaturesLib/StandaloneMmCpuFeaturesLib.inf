@@ -20,8 +20,9 @@
 
 [Sources]
   CpuFeaturesLib.h
-  StandaloneMmCpuFeaturesLib.c
+  IntelSmmCpuFeaturesLib.c
   SmmCpuFeaturesLibCommon.c
+  StandaloneMmCpuFeaturesLib.c
   SmmCpuFeaturesLibNoStm.c
 
 [Packages]
@@ -36,3 +37,7 @@
 
 [FixedPcd]
   gUefiCpuPkgTokenSpaceGuid.PcdCpuMaxLogicalProcessorNumber        ## SOMETIMES_CONSUMES
+
+[FeaturePcd]
+  gUefiCpuPkgTokenSpaceGuid.PcdSmrrEnable  ## CONSUMES
+  gUefiCpuPkgTokenSpaceGuid.PcdSmmFeatureControlEnable  ## CONSUMES

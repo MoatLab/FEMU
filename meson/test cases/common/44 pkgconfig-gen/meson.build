@@ -13,11 +13,13 @@ if not pkgconfig.found()
   error('MESON_SKIP_TEST: pkg-config not found')
 endif
 
-v = run_command(pkgconfig, '--version').stdout().strip()
+v = run_command(pkgconfig, '--version', check: true).stdout().strip()
 if v.version_compare('<0.29')
   error('MESON_SKIP_TEST: pkg-config version \'' + v + '\' too old')
 endif
 
+python = import('python').find_installation()
+fs = import('fs')
 pkgg = import('pkgconfig')
 
 lib = shared_library('simple', 'simple.c')
@@ -40,13 +42,22 @@ test('pkgconfig-validation', pkgconfig,
   args: ['--validate', 'simple'],
   env: [ 'PKG_CONFIG_PATH=' + meson.current_build_dir() + '/meson-private' ])
 
+answerlib = shared_library('answer', 'answer.c')
+
+pkgg.generate(answerlib,
+  name : 'libanswer',
+  description : 'An answer library.',
+  extra_cflags : ['-DLIBFOO'],
+)
+
 # Test that name_prefix='' and name='libfoo' results in '-lfoo'
-lib2 = shared_library('libfoo', 'simple.c',
+lib2 = shared_library('libfoo', 'foo.c',
+  link_with: answerlib,
   name_prefix : '',
   version : libver)
 
-pkgg.generate(
-  libraries : lib2,
+pkgg.generate(lib2,
+  libraries : [lib2, answerlib],
   name : 'libfoo',
   version : libver,
   description : 'A foo library.',
@@ -124,3 +135,17 @@ if cc.get_id() in ['gcc', 'clang']
     description: 'custom target index'
   )
 endif
+
+# Regression test: A library linking to an uninstalled custom_target static
+# library used to crash when generating its pkgconfig file.
+# Copy libstat2.a to libstat3.a to have a static library as custom target.
+infile = stat2.full_path()
+outfile = meson.current_build_dir() / 'libstat3.a'
+script = 'import shutil ; shutil.copyfile("@0@", "@1@")'.format(infile, outfile)
+ct = custom_target('stat3',
+  input: stat2,
+  output: fs.name(outfile),
+  command: [python, '-c', script],
+)
+simple6 = library('simple6', link_with: ct)
+pkgg.generate(simple6)

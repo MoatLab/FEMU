@@ -47,8 +47,13 @@
   gUefiOvmfPkgTokenSpaceGuid.PcdOvmfSnpSecretsBase
   gUefiOvmfPkgTokenSpaceGuid.PcdOvmfSnpSecretsSize
 
+[Protocols]
+  gEdkiiMemoryAcceptProtocolGuid
+  gOvmfSevMemoryAcceptanceProtocolGuid
+
 [Guids]
   gConfidentialComputingSevSnpBlobGuid
+  gEfiEventBeforeExitBootServicesGuid
 
 [Pcd]
   gUefiOvmfPkgTokenSpaceGuid.PcdOvmfHostBridgePciDevId

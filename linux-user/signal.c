@@ -18,7 +18,7 @@
  */
 #include "qemu/osdep.h"
 #include "qemu/bitops.h"
-#include "exec/gdbstub.h"
+#include "gdbstub/user.h"
 #include "hw/core/tcg-cpu-ops.h"
 
 #include <sys/ucontext.h>
@@ -53,40 +53,9 @@ abi_ulong default_rt_sigreturn;
 QEMU_BUILD_BUG_ON(__SIGRTMAX + 1 != _NSIG);
 #endif
 static uint8_t host_to_target_signal_table[_NSIG] = {
-    [SIGHUP] = TARGET_SIGHUP,
-    [SIGINT] = TARGET_SIGINT,
-    [SIGQUIT] = TARGET_SIGQUIT,
-    [SIGILL] = TARGET_SIGILL,
-    [SIGTRAP] = TARGET_SIGTRAP,
-    [SIGABRT] = TARGET_SIGABRT,
-/*    [SIGIOT] = TARGET_SIGIOT,*/
-    [SIGBUS] = TARGET_SIGBUS,
-    [SIGFPE] = TARGET_SIGFPE,
-    [SIGKILL] = TARGET_SIGKILL,
-    [SIGUSR1] = TARGET_SIGUSR1,
-    [SIGSEGV] = TARGET_SIGSEGV,
-    [SIGUSR2] = TARGET_SIGUSR2,
-    [SIGPIPE] = TARGET_SIGPIPE,
-    [SIGALRM] = TARGET_SIGALRM,
-    [SIGTERM] = TARGET_SIGTERM,
-#ifdef SIGSTKFLT
-    [SIGSTKFLT] = TARGET_SIGSTKFLT,
-#endif
-    [SIGCHLD] = TARGET_SIGCHLD,
-    [SIGCONT] = TARGET_SIGCONT,
-    [SIGSTOP] = TARGET_SIGSTOP,
-    [SIGTSTP] = TARGET_SIGTSTP,
-    [SIGTTIN] = TARGET_SIGTTIN,
-    [SIGTTOU] = TARGET_SIGTTOU,
-    [SIGURG] = TARGET_SIGURG,
-    [SIGXCPU] = TARGET_SIGXCPU,
-    [SIGXFSZ] = TARGET_SIGXFSZ,
-    [SIGVTALRM] = TARGET_SIGVTALRM,
-    [SIGPROF] = TARGET_SIGPROF,
-    [SIGWINCH] = TARGET_SIGWINCH,
-    [SIGIO] = TARGET_SIGIO,
-    [SIGPWR] = TARGET_SIGPWR,
-    [SIGSYS] = TARGET_SIGSYS,
+#define MAKE_SIG_ENTRY(sig)     [sig] = TARGET_##sig,
+        MAKE_SIGNAL_LIST
+#undef MAKE_SIG_ENTRY
     /* next signals stay the same */
 };
 
@@ -725,7 +694,8 @@ void cpu_loop_exit_sigbus(CPUState *cpu, target_ulong addr,
 }
 
 /* abort execution with signal */
-static void QEMU_NORETURN dump_core_and_abort(int target_sig)
+static G_NORETURN
+void dump_core_and_abort(CPUArchState *cpu_env, int target_sig)
 {
     CPUState *cpu = thread_cpu;
     CPUArchState *env = cpu->env_ptr;
@@ -753,6 +723,8 @@ static void QEMU_NORETURN dump_core_and_abort(int target_sig)
         (void) fprintf(stderr, "qemu: uncaught target signal %d (%s) - %s\n",
             target_sig, strsignal(host_sig), "core dumped" );
     }
+
+    preexit_cleanup(cpu_env, 128 + target_sig);
 
     /* The proper exit code for dying from an uncaught signal is
      * -<signal>.  The kernel doesn't allow exit() or _exit() to pass
@@ -1088,12 +1060,12 @@ static void handle_pending_signal(CPUArchState *cpu_env, int sig,
                    sig != TARGET_SIGURG &&
                    sig != TARGET_SIGWINCH &&
                    sig != TARGET_SIGCONT) {
-            dump_core_and_abort(sig);
+            dump_core_and_abort(cpu_env, sig);
         }
     } else if (handler == TARGET_SIG_IGN) {
         /* ignore sig */
     } else if (handler == TARGET_SIG_ERR) {
-        dump_core_and_abort(sig);
+        dump_core_and_abort(cpu_env, sig);
     } else {
         /* compute the blocked signals during the handler execution */
         sigset_t *blocked_set;

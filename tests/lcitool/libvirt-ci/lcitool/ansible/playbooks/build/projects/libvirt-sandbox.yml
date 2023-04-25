@@ -1,0 +1,30 @@
+---
+- set_fact:
+    name: libvirt-sandbox
+    # libvirt-sandbox is Linux only
+    machines:
+      - debian-10
+      - debian-11
+      - debian-sid
+      - fedora-36
+      - fedora-37
+      - fedora-rawhide
+      - opensuse-leap-153
+      - opensuse-tumbleweed
+      - ubuntu-2004
+      - ubuntu-2204
+    archive_format: gz
+    git_url: '{{ git_urls["libvirt-sandbox"][git_remote] }}'
+
+- import_tasks: 'jobs/prepare.yml'
+- import_tasks: 'jobs/autotools-build-job.yml'
+  vars:
+    autogen_args: --enable-gtk-doc
+- import_tasks: 'jobs/autotools-syntax-check-job.yml'
+- import_tasks: 'jobs/autotools-check-job.yml'
+- import_tasks: 'jobs/autotools-rpm-job.yml'
+  vars:
+    machines:
+      - fedora-36
+      - fedora-37
+      - fedora-rawhide

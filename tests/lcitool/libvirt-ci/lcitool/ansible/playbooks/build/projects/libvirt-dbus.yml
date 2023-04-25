@@ -1,0 +1,31 @@
+---
+- set_fact:
+    name: libvirt-dbus
+    machines: '{{ all_machines }}'
+    archive_format: xz
+    git_url: '{{ git_urls["libvirt-dbus"][git_remote] }}'
+
+- import_tasks: 'jobs/prepare.yml'
+- import_tasks: 'jobs/meson-build-job.yml'
+- import_tasks: 'jobs/meson-check-job.yml'
+  vars:
+    # flake8 and pyflakes versions currently available on FreeBSD
+    # (3.5.0 and 2.0.0 respectively) are not compatible.
+    machines:
+      - almalinux-8
+      - almalinux-9
+      - centos-stream-8
+      - centos-stream-9
+      - debian-10
+      - debian-11
+      - debian-sid
+      - fedora-36
+      - fedora-37
+      - fedora-rawhide
+      - opensuse-leap-153
+      - opensuse-tumbleweed
+      - ubuntu-2004
+      - ubuntu-2204
+- import_tasks: 'jobs/meson-rpm-job.yml'
+  vars:
+    machines: '{{ rpm_machines }}'
