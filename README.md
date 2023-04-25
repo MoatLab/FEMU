@@ -126,26 +126,27 @@ Installation
 
   **Tested host environment** (For successful FEMU compilation):
   
-  | Linux Distribution   | Kernel | Gcc   | Ninja  | Python |
-  | :---                 | :---:  | ---   | ---    | ---    |
-  | Gentoo               | 5.10   | 9.3.0 | 1.10.1 | 3.7.9  |
-  | Ubuntu 16.04.5       | 4.15.0 | 5.4.0 | 1.8.2  | 3.6.0  |
-  | Ubuntu 20.04.1       | 5.4.0  | 9.3.0 | 1.10.0 | 3.8.2  | 
+  | Linux Distribution | Kernel | Gcc    | Ninja  | Python |
+  | :---               | :---:  | ---    | ---    | ---    |
+  | Gentoo             | 5.10   | 9.3.0  | 1.10.1 | 3.7.9  |
+  | Ubuntu 16.04.5     | 4.15.0 | 5.4.0  | 1.8.2  | 3.6.0  |
+  | Ubuntu 20.04.1     | 5.4.0  | 9.3.0  | 1.10.0 | 3.8.2  |
+  | Ubutnu 22.04.2     | 5.15.0 | 11.3.0 | 1.10.1 | 3.10.6 |
 
   **Tested VM environment** (Whether a certain FEMU mode works under a certain
   guest kernel version): 
 
-  | Mode \ Guest Kernel       | 4.16    | 4.20    | 5.4     | 5.10    |
-  | :---                      | :---:   | --      | --      | --      |
-  | NoSSD                     | &check; | &check; | &check; | &check; |
-  | Black-box SSD             | &check; | &check; | &check; | &check; |
+  | Mode \ Guest Kernel       | 4.16    | 4.20    | 5.4     | 5.10    | 6.1
+  | :---                      | :---:   | --      | --      | --      | --
+  | NoSSD                     | &check; | &check; | &check; | &check; | &check
+  | Black-box SSD             | &check; | &check; | &check; | &check; | &check
   | OpenChannel-SSD v1.2      | &check; | &check; | &check; | &check; |
   | OpenChannel-SSD v2.0      | &cross; | &check; | &check; | &check; |
-  | Zoned-Namespace (ZNS) SSD | &cross; | &cross; | &cross; | &check; |
+  | Zoned-Namespace (ZNS) SSD | &cross; | &cross; | &cross; | &check; | &check
 
 
 3. Prepare the VM image (For performance reasons, we suggest to use a server
-   version guest OS [e.g. Ubuntu Server 20.04, 18.04, 16.04])
+   version guest OS [e.g. Ubuntu Server 22.04, 20.04, 18.04, 16.04])
 
   You can either build your own VM image, or use the VM image provided by us
 
