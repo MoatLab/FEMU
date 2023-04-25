@@ -138,11 +138,11 @@ Installation
 
   | Mode \ Guest Kernel       | 4.16    | 4.20    | 5.4     | 5.10    | 6.1
   | :---                      | :---:   | --      | --      | --      | --
-  | NoSSD                     | &check; | &check; | &check; | &check; | &check
-  | Black-box SSD             | &check; | &check; | &check; | &check; | &check
-  | OpenChannel-SSD v1.2      | &check; | &check; | &check; | &check; |
-  | OpenChannel-SSD v2.0      | &cross; | &check; | &check; | &check; |
-  | Zoned-Namespace (ZNS) SSD | &cross; | &cross; | &cross; | &check; | &check
+  | NoSSD                     | &check; | &check; | &check; | &check; | &check;
+  | Black-box SSD             | &check; | &check; | &check; | &check; | &check;
+  | OpenChannel-SSD v1.2      | &check; | &check; | &check; | &check; | &cross;
+  | OpenChannel-SSD v2.0      | &cross; | &check; | &check; | &check; | &cross;
+  | Zoned-Namespace (ZNS) SSD | &cross; | &cross; | &cross; | &check; | &check;
 
 
 3. Prepare the VM image (For performance reasons, we suggest to use a server
