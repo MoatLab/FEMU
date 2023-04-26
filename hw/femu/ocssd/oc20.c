@@ -45,7 +45,7 @@ static int oc20_lba_str(char *buf, FemuCtrl *n, NvmeNamespace *ns, uint64_t lba)
 }
 #endif
 
-#ifdef DEUBUG_OC20
+#ifdef DEBUG_OC20
 static void pr_lba(Oc20Namespace *lns, uint64_t lba)
 {
     Oc20AddrF *addrf = &lns->lbaf;
