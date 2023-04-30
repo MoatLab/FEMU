@@ -1070,20 +1070,50 @@ static inline uint64_t zone_slba(FemuCtrl *n, uint32_t zone_idx)
     return (zone_idx) * n->zone_size;
 }
 
+static inline void check_addr(int a, int max)
+{
+   assert(a >= 0 && a < max);
+}
+
+static void advance_read_pointer(FemuCtrl *n)
+{
+    struct zns_ssd *zns = n->zns;
+    struct write_pointer *wpp = &zns->wp;
+    uint8_t num_ch = zns->num_ch;
+    uint8_t num_lun = zns->num_lun;
+
+    //printf("NUM CH: %"PRIu64"\n", wpp->ch);
+    check_addr(wpp->ch, num_ch);
+    wpp->ch++;
+    if (wpp->ch == num_ch) {
+        wpp->ch = 0;
+	check_addr(wpp->lun, num_lun);
+	wpp->lun++;
+	if(wpp->lun == num_lun) {
+	    wpp->lun = 0;
+
+	    assert(wpp->ch == 0);
+	    assert(wpp->lun == 0);
+	}
+    }
+}
+
 static inline struct ppa lpn_to_ppa(FemuCtrl *n, NvmeNamespace *ns, uint64_t lpn)
 {
 
 	uint32_t zone_idx = zns_zone_idx(ns, lpn);
 	//uint64_t off = lpn - zone_slba(n, zone_idx);
-	 
+	//uint64_t offset = off / 4096;
+	
 	struct zns_ssd *zns = n->zns;
-	uint64_t num_ch = zns->num_ch;
-	uint64_t num_lun = zns->num_lun;
+	struct write_pointer *wpp = &zns->wp;
+	//uint64_t num_ch = zns->num_ch;
+	//uint64_t num_lun = zns->num_lun;
 	struct ppa ppa = {0};
 
-	//printf("NUM CH: %"PRIu64"\n", wpp->ch);
-	ppa.g.ch = lpn % num_ch;
-	ppa.g.fc = (lpn / num_ch) % num_lun;
+	//printf("OFFSET: %"PRIu64"\n", offset);
+	ppa.g.ch = wpp->ch;
+	ppa.g.fc = wpp->lun;
 	ppa.g.blk = zone_idx;
 
     return ppa;
@@ -1103,20 +1133,21 @@ static uint64_t zns_advance_status(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req,
     struct zns_fc *fc = get_fc(zns, ppa);
 
     uint64_t lat = 0;
+    uint64_t delay = n->zns_params.zns_latency;
 
     switch (opcode) {
     case NVME_CMD_READ:
-        nand_stime = (fc->next_fc_avail_time < req_stime) ? req_stime : \
+            nand_stime = (fc->next_fc_avail_time < req_stime) ? req_stime : \
                     fc->next_fc_avail_time;
 
-	    fc->next_fc_avail_time = nand_stime + 40000;
-        lat = fc->next_fc_avail_time - req_stime;
+	    fc->next_fc_avail_time = nand_stime + delay;
+            lat = fc->next_fc_avail_time - req_stime;
 
 	    break;
     case NVME_CMD_WRITE:
 	    nand_stime = (fc->next_fc_avail_time < req_stime) ? req_stime : \
 		            fc->next_fc_avail_time;
-	    fc->next_fc_avail_time = nand_stime + 40000;
+	    fc->next_fc_avail_time = nand_stime + delay;
 	    lat = fc->next_fc_avail_time - req_stime;
 
 	    break;
@@ -1255,16 +1286,17 @@ static uint16_t zns_read(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
     
-    uint64_t slpn = (slba) / 4096;
-    uint64_t elpn = (slba + nlb - 1) / 4096;
+    uint64_t slpn = (slba)/4096;
+    uint64_t elpn = (slba + nlb - 1)/4096;
     
     uint64_t lpn;
     struct ppa ppa;
     uint64_t sublat,maxlat=0;
-    
+
     for (lpn = slpn; lpn <= elpn; lpn++) {
         ppa = lpn_to_ppa(n, ns, lpn);
-	
+	advance_read_pointer(n);
+
 	/*
 	printf("LPN: %"PRIu64"\n", lpn);
         printf("CHANNEL NUMBER: %d\n", ppa.g.ch);
@@ -1421,6 +1453,8 @@ static void zns_init_params(FemuCtrl *n)
         zns_init_ch(&id_zns->ch[i], id_zns->num_lun);
     }
     
+    id_zns->wp.ch = 0;
+    id_zns->wp.lun = 0;
     n->zns = id_zns;
 }
 

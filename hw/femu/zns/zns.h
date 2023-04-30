@@ -29,6 +29,11 @@ struct ppa {
     };
 };
 
+struct write_pointer {
+    uint64_t ch;
+    uint64_t lun;
+};
+
 struct zns_blk {
     uint64_t next_blk_avail_time;
 };
@@ -47,6 +52,7 @@ struct zns_ssd {
     uint64_t num_ch;
     uint64_t num_lun;
     struct zns_ch *ch;
+    struct write_pointer wp;
 };
 
 enum NvmeZoneAttr {

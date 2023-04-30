@@ -656,6 +656,7 @@ static Property femu_props[] = {
     DEFINE_PROP_UINT16("lmetasize", FemuCtrl, oc_params.sos, 16),
     DEFINE_PROP_UINT8("zns_num_ch", FemuCtrl, zns_params.zns_num_ch, 2),
     DEFINE_PROP_UINT8("zns_num_lun", FemuCtrl, zns_params.zns_num_lun, 4),
+    DEFINE_PROP_UINT64("zns_latency", FemuCtrl, zns_params.zns_latency, 40000),
     DEFINE_PROP_END_OF_LIST(),
 };
 
