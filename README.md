@@ -288,6 +288,10 @@ emulation.
 for development purposes. More features like proper latency emulation,
 controller-level zone mappings to flash chips are work-in-progress.
 
+```Bash
+./run-zns.sh
+```
+
 ### 5. Run FEMU as Computational Storage, a.k.a, SmartSSD (``SmartSSD`` mode) ###
 
 Stay tuned.
@@ -296,9 +300,6 @@ Stay tuned.
 
 Stay tuned.
 
-```Bash
-./run-zns.sh
-```
 
 ### Contributing ###
 
