@@ -21,12 +21,12 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
         nvme_clear_virq(n);
     }
 
-    for (int i = 0; i <= n->num_io_queues; i++) {
+    for (int i = 0; i <= n->nr_io_queues; i++) {
         if (n->sq[i] != NULL) {
             nvme_free_sq(n->sq[i], n);
         }
     }
-    for (int i = 0; i <= n->num_io_queues; i++) {
+    for (int i = 0; i <= n->nr_io_queues; i++) {
         if (n->cq[i] != NULL) {
             nvme_free_cq(n->cq[i], n);
         }
@@ -293,7 +293,7 @@ static const MemoryRegionOps nvme_mmio_ops = {
 static int nvme_check_constraints(FemuCtrl *n)
 {
     if ((n->num_namespaces == 0 || n->num_namespaces > NVME_MAX_NUM_NAMESPACES)
-        || (n->num_io_queues < 1 || n->num_io_queues > NVME_MAX_QS) ||
+        || (n->nr_io_queues < 1 || n->nr_io_queues > NVME_MAX_QS) ||
         (n->db_stride > NVME_MAX_STRIDE) ||
         (n->max_q_ents < 1) ||
         (n->max_sqes > NVME_MAX_QUEUE_ES || n->max_cqes > NVME_MAX_QUEUE_ES ||
@@ -429,14 +429,14 @@ static void nvme_init_ctrl(FemuCtrl *n)
     n->features.temp_thresh     = 0x14d;
     n->features.err_rec         = 0;
     n->features.volatile_wc     = n->vwc;
-    n->features.num_io_queues   = ((n->num_io_queues - 1) | ((n->num_io_queues -
+    n->features.nr_io_queues   = ((n->nr_io_queues - 1) | ((n->nr_io_queues -
                                                               1) << 16));
     n->features.int_coalescing  = n->intc_thresh | (n->intc_time << 8);
     n->features.write_atomicity = 0;
     n->features.async_config    = 0x0;
     n->features.sw_prog_marker  = 0;
 
-    for (i = 0; i <= n->num_io_queues; i++) {
+    for (i = 0; i <= n->nr_io_queues; i++) {
         n->features.int_vector_config[i] = i | (n->intc << 16);
     }
 
@@ -487,7 +487,7 @@ static void nvme_init_pci(FemuCtrl *n)
                           n->reg_size);
     pci_register_bar(&n->parent_obj, 0, PCI_BASE_ADDRESS_SPACE_MEMORY |
                      PCI_BASE_ADDRESS_MEM_TYPE_64, &n->iomem);
-    if (msix_init_exclusive_bar(&n->parent_obj, n->num_io_queues + 1, 4, NULL)) {
+    if (msix_init_exclusive_bar(&n->parent_obj, n->nr_io_queues + 1, 4, NULL)) {
         return;
     }
     msi_init(&n->parent_obj, 0x50, 32, true, false, NULL);
@@ -540,16 +540,16 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
 
     n->completed = 0;
     n->start_time = time(NULL);
-    n->reg_size = pow2ceil(0x1004 + 2 * (n->num_io_queues + 1) * 4);
+    n->reg_size = pow2ceil(0x1004 + 2 * (n->nr_io_queues + 1) * 4);
     n->ns_size = bs_size / (uint64_t)n->num_namespaces;
 
-    /* Coperd: [1..num_io_queues] are used as IO queues */
-    n->sq = g_malloc0(sizeof(*n->sq) * (n->num_io_queues + 1));
-    n->cq = g_malloc0(sizeof(*n->cq) * (n->num_io_queues + 1));
+    /* Coperd: [1..nr_io_queues] are used as IO queues */
+    n->sq = g_malloc0(sizeof(*n->sq) * (n->nr_io_queues + 1));
+    n->cq = g_malloc0(sizeof(*n->cq) * (n->nr_io_queues + 1));
     n->namespaces = g_malloc0(sizeof(*n->namespaces) * n->num_namespaces);
     n->elpes = g_malloc0(sizeof(*n->elpes) * (n->elpe + 1));
     n->aer_reqs = g_malloc0(sizeof(*n->aer_reqs) * (n->aerl + 1));
-    n->features.int_vector_config = g_malloc0(sizeof(*n->features.int_vector_config) * (n->num_io_queues + 1));
+    n->features.int_vector_config = g_malloc0(sizeof(*n->features.int_vector_config) * (n->nr_io_queues + 1));
 
     nvme_init_pci(n);
     nvme_init_ctrl(n);
@@ -564,13 +564,14 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
 
 static void nvme_destroy_poller(FemuCtrl *n)
 {
+    int i;
     femu_debug("Destroying NVMe poller !!\n");
 
-    for (int i = 1; i <= n->num_poller; i++) {
+    for (i = 1; i <= n->nr_pollers; i++) {
         qemu_thread_join(&n->poller[i]);
     }
 
-    for (int i = 1; i <= n->num_poller; i++) {
+    for (i = 1; i <= n->nr_pollers; i++) {
         pqueue_free(n->pq[i]);
         femu_ring_free(n->to_poller[i]);
         femu_ring_free(n->to_ftl[i]);
@@ -610,7 +611,7 @@ static Property femu_props[] = {
     DEFINE_PROP_STRING("serial", FemuCtrl, serial),
     DEFINE_PROP_UINT32("devsz_mb", FemuCtrl, memsz, 1024), /* in MB */
     DEFINE_PROP_UINT32("namespaces", FemuCtrl, num_namespaces, 1),
-    DEFINE_PROP_UINT32("queues", FemuCtrl, num_io_queues, 8),
+    DEFINE_PROP_UINT32("queues", FemuCtrl, nr_io_queues, 8),
     DEFINE_PROP_UINT32("entries", FemuCtrl, max_q_ents, 0x7ff),
     DEFINE_PROP_UINT8("multipoller_enabled", FemuCtrl, multipoller_enabled, 0),
     DEFINE_PROP_UINT8("max_cqes", FemuCtrl, max_cqes, 0x4),

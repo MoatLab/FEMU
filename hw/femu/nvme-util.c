@@ -2,12 +2,12 @@
 
 int nvme_check_sqid(FemuCtrl *n, uint16_t sqid)
 {
-    return sqid <= n->num_io_queues && n->sq[sqid] != NULL ? 0 : -1;
+    return sqid <= n->nr_io_queues && n->sq[sqid] != NULL ? 0 : -1;
 }
 
 int nvme_check_cqid(FemuCtrl *n, uint16_t cqid)
 {
-    return cqid <= n->num_io_queues && n->cq[cqid] != NULL ? 0 : -1;
+    return cqid <= n->nr_io_queues && n->cq[cqid] != NULL ? 0 : -1;
 }
 
 void nvme_inc_cq_tail(NvmeCQueue *cq)

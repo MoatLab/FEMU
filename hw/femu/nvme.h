@@ -789,7 +789,7 @@ typedef struct NvmeFeatureVal {
     uint32_t    temp_thresh;
     uint32_t    err_rec;
     uint32_t    volatile_wc;
-    uint32_t    num_io_queues;
+    uint32_t    nr_io_queues;
     uint32_t    int_coalescing;
     uint32_t    *int_vector_config;
     uint32_t    write_atomicity;
@@ -1217,7 +1217,7 @@ typedef struct FemuCtrl {
     uint16_t    oncs;
     uint32_t    reg_size;
     uint32_t    num_namespaces;
-    uint32_t    num_io_queues;
+    uint32_t    nr_io_queues;
     uint32_t    max_q_ents;
     uint64_t    ns_size;
     uint8_t     db_stride;
@@ -1321,7 +1321,7 @@ typedef struct FemuCtrl {
     bool            print_log;
 
     uint8_t         multipoller_enabled;
-    uint32_t        num_poller;
+    uint32_t        nr_pollers;
 
     /* Nand Flash Type: SLC/MLC/TLC/QLC/PLC */
     uint8_t         flash_type;
@@ -1428,10 +1428,9 @@ uint16_t femu_nvme_rw_check_req(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                                 uint32_t nlb, uint16_t ctrl, uint64_t data_size,
                                 uint64_t meta_size);
 
-
 void nvme_process_sq_admin(void *opaque);
 void nvme_post_cqes_io(void *opaque);
-void nvme_create_poller(FemuCtrl *n);
+void *nvme_poller(void *arg);
 
 /* NVMe I/O */
 uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req);

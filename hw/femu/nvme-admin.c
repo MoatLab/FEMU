@@ -158,7 +158,7 @@ static uint16_t nvme_create_cq(FemuCtrl *n, NvmeCmd *cmd)
     if (!prp1) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
-    if (vector > n->num_io_queues) {
+    if (vector > n->nr_io_queues) {
         return NVME_INVALID_IRQ_VECTOR | NVME_DNR;
     }
     if (!(NVME_CQ_FLAGS_PC(qflags)) && NVME_CAP_CQR(n->bar.cap)) {
@@ -206,6 +206,81 @@ static uint16_t nvme_del_cq(FemuCtrl *n, NvmeCmd *cmd)
     return NVME_SUCCESS;
 }
 
+static int cmp_pri(pqueue_pri_t next, pqueue_pri_t curr)
+{
+    return (next > curr);
+}
+
+static pqueue_pri_t get_pri(void *a)
+{
+    return ((NvmeRequest *)a)->expire_time;
+}
+
+static void set_pri(void *a, pqueue_pri_t pri)
+{
+    ((NvmeRequest *)a)->expire_time = pri;
+}
+
+static size_t get_pos(void *a)
+{
+    return ((NvmeRequest *)a)->pos;
+}
+
+static void set_pos(void *a, size_t pos)
+{
+    ((NvmeRequest *)a)->pos = pos;
+}
+
+static void nvme_init_poller(FemuCtrl *n)
+{
+    int i;
+
+    n->should_isr = g_malloc0(sizeof(bool) * (n->nr_io_queues + 1));
+
+    n->nr_pollers = n->multipoller_enabled ? n->nr_io_queues : 1;
+    /* Coperd: we put NvmeRequest into these rings */
+    n->to_ftl = g_malloc0(sizeof(struct rte_ring *) * (n->nr_pollers + 1));
+    for (i = 1; i <= n->nr_pollers; i++) {
+        n->to_ftl[i] = femu_ring_create(FEMU_RING_TYPE_MP_SC, FEMU_MAX_INF_REQS);
+        if (!n->to_ftl[i]) {
+            femu_err("Failed to create ring (n->to_ftl) ...\n");
+            abort();
+        }
+        assert(rte_ring_empty(n->to_ftl[i]));
+    }
+
+    n->to_poller = g_malloc0(sizeof(struct rte_ring *) * (n->nr_pollers + 1));
+    for (i = 1; i <= n->nr_pollers; i++) {
+        n->to_poller[i] = femu_ring_create(FEMU_RING_TYPE_MP_SC, FEMU_MAX_INF_REQS);
+        if (!n->to_poller[i]) {
+            femu_err("Failed to create ring (n->to_poller) ...\n");
+            abort();
+        }
+        assert(rte_ring_empty(n->to_poller[i]));
+    }
+
+    n->pq = g_malloc0(sizeof(pqueue_t *) * (n->nr_pollers + 1));
+    for (i = 1; i <= n->nr_pollers; i++) {
+        n->pq[i] = pqueue_init(FEMU_MAX_INF_REQS, cmp_pri, get_pri, set_pri,
+                               get_pos, set_pos);
+        if (!n->pq[i]) {
+            femu_err("Failed to create pqueue (n->pq) ...\n");
+            abort();
+        }
+    }
+
+    n->poller = g_malloc0(sizeof(QemuThread) * (n->nr_pollers + 1));
+    NvmePollerThreadArgument *args = malloc(sizeof(NvmePollerThreadArgument) *
+                                            (n->nr_pollers + 1));
+    for (i = 1; i <= n->nr_pollers; i++) {
+        args[i].n = n;
+        args[i].index = i;
+        qemu_thread_create(&n->poller[i], "femu-nvme-poller", nvme_poller,
+                &args[i], QEMU_THREAD_JOINABLE);
+        femu_debug("femu-nvme-poller [%d] created ...\n", i - 1);
+    }
+}
+
 static uint16_t nvme_set_db_memory(FemuCtrl *n, const NvmeCmd *cmd)
 {
     uint64_t dbs_addr = le64_to_cpu(cmd->dptr.prp1);
@@ -213,11 +288,14 @@ static uint16_t nvme_set_db_memory(FemuCtrl *n, const NvmeCmd *cmd)
     uint8_t stride = n->db_stride;
     int dbbuf_entry_sz = 1 << (2 + stride);
     AddressSpace *as = pci_get_address_space(&n->parent_obj);
+    int i;
+
+
     dma_addr_t dbs_tlen = n->page_size, eis_tlen = n->page_size;
 
     /* Addresses should not be NULL and should be page aligned. */
-    if (dbs_addr == 0 || dbs_addr & (n->page_size - 1) ||
-            eis_addr == 0 || eis_addr & (n->page_size - 1)) {
+    if (dbs_addr == 0 || dbs_addr & (n->page_size - 1) || eis_addr == 0 ||
+            eis_addr & (n->page_size - 1)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
@@ -226,7 +304,7 @@ static uint16_t nvme_set_db_memory(FemuCtrl *n, const NvmeCmd *cmd)
     n->dbs_addr_hva = (uint64_t)dma_memory_map(as, dbs_addr, &dbs_tlen, 0, MEMTXATTRS_UNSPECIFIED);
     n->eis_addr_hva = (uint64_t)dma_memory_map(as, eis_addr, &eis_tlen, 0, MEMTXATTRS_UNSPECIFIED);
 
-    for (int i = 1; i <= n->num_io_queues; i++) {
+    for (i = 1; i <= n->nr_io_queues; i++) {
         NvmeSQueue *sq = n->sq[i];
         NvmeCQueue *cq = n->cq[i];
 
@@ -252,8 +330,8 @@ static uint16_t nvme_set_db_memory(FemuCtrl *n, const NvmeCmd *cmd)
 
     assert(n->dataplane_started == false);
     if (!n->poller_on) {
-        /* Coperd: make sure this only run once across all controller resets */
-        nvme_create_poller(n);
+        /* Coperd: make sure this only runs once across all controller resets */
+        nvme_init_poller(n);
         n->poller_on = true;
     }
     n->dataplane_started = true;
@@ -570,8 +648,8 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
                 MIN(sizeof(*rt), (dw11 & 0x3f) * sizeof(*rt)),
                 prp1, prp2);
     case NVME_NUMBER_OF_QUEUES:
-        cqe->n.result = cpu_to_le32((n->num_io_queues - 1) |
-                ((n->num_io_queues - 1) << 16));
+        cqe->n.result = cpu_to_le32((n->nr_io_queues - 1) |
+                ((n->nr_io_queues - 1) << 16));
         break;
     case NVME_TEMPERATURE_THRESHOLD:
         cqe->n.result = cpu_to_le32(n->features.temp_thresh);
@@ -586,7 +664,7 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         cqe->n.result = cpu_to_le32(n->features.int_coalescing);
         break;
     case NVME_INTERRUPT_VECTOR_CONF:
-        if ((dw11 & 0xffff) > n->num_io_queues) {
+        if ((dw11 & 0xffff) > n->nr_io_queues) {
             return NVME_INVALID_FIELD | NVME_DNR;
         }
         cqe->n.result = cpu_to_le32(n->features.int_vector_config[dw11 & 0xffff]);
@@ -633,9 +711,9 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
                 MIN(sizeof(*rt), (dw11 & 0x3f) * sizeof(*rt)),
                 prp1, prp2);
     case NVME_NUMBER_OF_QUEUES:
-        /* Coperd: num_io_queues is 0-based */
-        cqe->n.result = cpu_to_le32((n->num_io_queues - 1) |
-                ((n->num_io_queues - 1) << 16));
+        /* Coperd: nr_io_queues is 0-based */
+        cqe->n.result = cpu_to_le32((n->nr_io_queues - 1) |
+                ((n->nr_io_queues - 1) << 16));
         break;
     case NVME_TEMPERATURE_THRESHOLD:
         n->features.temp_thresh = dw11;
@@ -656,7 +734,7 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         n->features.int_coalescing = dw11;
         break;
     case NVME_INTERRUPT_VECTOR_CONF:
-        if ((dw11 & 0xffff) > n->num_io_queues) {
+        if ((dw11 & 0xffff) > n->nr_io_queues) {
             return NVME_INVALID_FIELD | NVME_DNR;
         }
         n->features.int_vector_config[dw11 & 0xffff] = dw11 & 0x1ffff;
