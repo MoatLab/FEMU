@@ -7,6 +7,8 @@
 
 static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
 {
+    int i;
+
     /* Coperd: pause nvme poller at earliest convenience */
     n->dataplane_started = false;
 
@@ -21,12 +23,12 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
         nvme_clear_virq(n);
     }
 
-    for (int i = 0; i <= n->nr_io_queues; i++) {
+    for (i = 0; i <= n->nr_io_queues; i++) {
         if (n->sq[i] != NULL) {
             nvme_free_sq(n->sq[i], n);
         }
     }
-    for (int i = 0; i <= n->nr_io_queues; i++) {
+    for (i = 0; i <= n->nr_io_queues; i++) {
         if (n->cq[i] != NULL) {
             nvme_free_cq(n->cq[i], n);
         }
@@ -324,6 +326,7 @@ static int nvme_check_constraints(FemuCtrl *n)
 static void nvme_ns_init_identify(FemuCtrl *n, NvmeIdNs *id_ns)
 {
     int npdg;
+    int i;
 
     /* NSFEAT Bit 3: Support the Deallocated or Unwritten Logical Block error */
     id_ns->nsfeat        |= (0x4 | 0x10);
@@ -339,7 +342,7 @@ static void nvme_ns_init_identify(FemuCtrl *n, NvmeIdNs *id_ns)
     npdg = 1;
     id_ns->npda = id_ns->npdg = npdg - 1;
 
-    for (int i = 0; i < n->nlbaf; i++) {
+    for (i = 0; i < n->nlbaf; i++) {
         id_ns->lbaf[i].lbads = BDRV_SECTOR_BITS + i;
         id_ns->lbaf[i].ms    = cpu_to_le16(n->meta);
     }
@@ -368,10 +371,12 @@ static int nvme_init_namespace(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 
 static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
 {
+    int i;
+
     /* FIXME: FEMU only supports 1 namesapce now */
     assert(n->num_namespaces == 1);
 
-    for (int i = 0; i < n->num_namespaces; i++) {
+    for (i = 0; i < n->num_namespaces; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
         ns->size = n->ns_size;
         ns->start_block = i * n->ns_size >> BDRV_SECTOR_BITS;

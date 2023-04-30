@@ -130,6 +130,7 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
     uint64_t now;
     int processed = 0;
     int rc;
+    int i;
 
     if (BBSSD(n)) {
         rp = n->to_poller[index_poller];
@@ -179,7 +180,7 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
         nvme_isr_notify_io(n->cq[index_poller]);
         break;
     default:
-        for (int i = 1; i <= n->nr_io_queues; i++) {
+        for (i = 1; i <= n->nr_io_queues; i++) {
             if (n->should_isr[i]) {
                 nvme_isr_notify_io(n->cq[i]);
                 n->should_isr[i] = false;
@@ -193,6 +194,7 @@ void *nvme_poller(void *arg)
 {
     FemuCtrl *n = ((NvmePollerThreadArgument *)arg)->n;
     int index = ((NvmePollerThreadArgument *)arg)->index;
+    int i;
 
     switch (n->multipoller_enabled) {
     case 1:
@@ -217,7 +219,7 @@ void *nvme_poller(void *arg)
                 continue;
             }
 
-            for (int i = 1; i <= n->nr_io_queues; i++) {
+            for (i = 1; i <= n->nr_io_queues; i++) {
                 NvmeSQueue *sq = n->sq[i];
                 NvmeCQueue *cq = n->cq[i];
                 if (sq && sq->is_active && cq && cq->is_active) {
@@ -284,6 +286,7 @@ static uint16_t nvme_dsm(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint32_t dw11 = le32_to_cpu(cmd->cdw11);
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
+    int i;
 
     if (dw11 & NVME_DSMGMT_AD) {
         uint16_t nr = (dw10 & 0xff) + 1;
@@ -299,7 +302,7 @@ static uint16_t nvme_dsm(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         }
 
         req->status = NVME_SUCCESS;
-        for (int i = 0; i < nr; i++) {
+        for (i = 0; i < nr; i++) {
             slba = le64_to_cpu(range[i].slba);
             nlb = le32_to_cpu(range[i].nlb);
             if (slba + nlb > le64_to_cpu(ns->id_ns.nsze)) {
@@ -323,6 +326,7 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t slba = le64_to_cpu(rw->slba);
     uint64_t prp1 = le64_to_cpu(rw->prp1);
     uint64_t prp2 = le64_to_cpu(rw->prp2);
+    int i;
 
     uint64_t elba = slba + nlb;
     uint8_t lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
@@ -349,7 +353,7 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         return NVME_UNRECOVERED_READ;
     }
 
-    for (int i = 0; i < req->qsg.nsg; i++) {
+    for (i = 0; i < req->qsg.nsg; i++) {
         uint32_t len = req->qsg.sg[i].len;
         uint8_t tmp[2][len];
 
