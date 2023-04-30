@@ -288,6 +288,13 @@ emulation.
 for development purposes. More features like proper latency emulation,
 controller-level zone mappings to flash chips are work-in-progress.
 
+### 5. Run FEMU as Computational Storage, a.k.a, SmartSSD (``SmartSSD`` mode) ###
+
+Stay tuned.
+
+### 6. Run FEMU as CXL-SSD (``CXLSSD`` mode) ###
+
+Stay tuned.
 
 ```Bash
 ./run-zns.sh
