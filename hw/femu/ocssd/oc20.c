@@ -66,9 +66,10 @@ static uint16_t oc20_init_chunk_info(Oc20Namespace *lns)
     int chunks = lns->id_ctrl.geo.num_chk;
     int punits = lns->id_ctrl.geo.num_lun;
     int sectors = lns->id_ctrl.geo.clba;
+    int i;
 
     Oc20AddrF addrf = lns->lbaf;
-    for (int i = 0; i < lns->chks_total; i++) {
+    for (i = 0; i < lns->chks_total; i++) {
         cs[i].state = OC20_CHUNK_FREE;
         cs[i].type = OC20_CHUNK_TYPE_SEQ;
         cs[i].wear_index = 0;
@@ -142,9 +143,10 @@ static void oc20_parse_lba_list(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t cur_pg_addr, prev_pg_addr = ~(0ULL);
     int secs_idx = -1;
     uint64_t lba;
+    int i;
 
     memset(bucket, 0, sizeof(Oc20AddrBucket) * max_sec_per_rq);
-    for (int i = 0; i < nlb; i++) {
+    for (i = 0; i < nlb; i++) {
         lba = ((uint64_t *)(req->slba))[i];
         cur_pg_addr = (lba & (~(lns->lbaf.sec_mask)));
         if (cur_pg_addr == prev_pg_addr) {
@@ -180,6 +182,7 @@ static int oc20_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     int num_ch = lns->id_ctrl.geo.num_chk;
     int num_lun = lns->id_ctrl.geo.num_lun;
     Oc20AddrF *addrf = &lns->lbaf;
+    int i;
 
     int64_t now = req->stime;
     uint64_t lba;
@@ -187,7 +190,7 @@ static int oc20_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     /* Erase */
     if (opcode == OC20_CMD_VECT_ERASE) {
         /* FIXME: vector erase */
-        for (int i = 0; i < nlb; i++) {
+        for (i = 0; i < nlb; i++) {
             lba = ((uint64_t *)req->slba)[i];
             ch = OC20_LBA_GET_GROUP(addrf, lba);
             lun = OC20_LBA_GET_PUNIT(addrf, lba);
@@ -213,7 +216,7 @@ static int oc20_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     assert(opcode == NVME_CMD_READ || opcode == OC20_CMD_VECT_READ ||
            opcode == NVME_CMD_WRITE || opcode == OC20_CMD_VECT_WRITE);
     assert(secs_idx > 0);
-    for (int i = 0; i < secs_idx; i++) {
+    for (i = 0; i < secs_idx; i++) {
         lba = ((uint64_t *)(req->slba))[si];
         nb_secs_to_one_chip = addr_bucket[i].cnt;
         si += nb_secs_to_one_chip;
@@ -392,8 +395,9 @@ static uint16_t oc20_rw_check_read_req(FemuCtrl *n, NvmeCmd *cmd,
                                        NvmeRequest *req)
 {
     uint16_t err;
+    int i;
 
-    for (int i = 0; i < req->nlb; i++) {
+    for (i = 0; i < req->nlb; i++) {
         err = oc20_rw_check_chunk_read(n, cmd, req, ((uint64_t *) req->slba)[i]);
         if (err) {
             if (err & NVME_DULB) {
@@ -480,6 +484,7 @@ static uint16_t oc20_rw_check_req(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     uint16_t err;
     uint16_t nlb  = le16_to_cpu(rw->nlb) + 1;
     uint64_t slba = le64_to_cpu(rw->lbal);
+    int i;
 
     switch (rw->opcode) {
     case NVME_CMD_WRITE:
@@ -493,7 +498,7 @@ static uint16_t oc20_rw_check_req(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         }
         break;
     case NVME_CMD_READ:
-        for (int i = 0; i < nlb; i++) {
+        for (i = 0; i < nlb; i++) {
             err = oc20_rw_check_chunk_read(n, cmd, req, slba + i);
             if (err) {
                 if (err & NVME_DULB) {
@@ -706,6 +711,7 @@ static uint16_t oc20_rw(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req, bool vector
     uint64_t lbal = le64_to_cpu(lrw->lbal);
     int lbads = NVME_ID_NS_LBADS(ns);
     uint16_t err;
+    int i;
 
     if (nlb > OC20_CMD_MAX_LBAS) {
         nvme_set_error_page(n, req->sq->sqid, req->cqe.cid, NVME_INVALID_FIELD,
@@ -726,7 +732,7 @@ static uint16_t oc20_rw(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req, bool vector
             ((uint64_t *)req->slba)[0] = lbal;
         }
     } else { /* For SPDK quirks */
-        for (int i = 0; i < nlb; i++) {
+        for (i = 0; i < nlb; i++) {
             ((uint64_t *)req->slba)[i] = lbal + i;
         }
     }
@@ -743,7 +749,7 @@ static uint16_t oc20_rw(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req, bool vector
     }
 
     uint64_t aio_sector_list[OC20_CMD_MAX_LBAS];
-    for (int i = 0; i < nlb; i++) {
+    for (i = 0; i < nlb; i++) {
 #ifdef DEBUG_OC20
         pr_lba(lns, ((uint64_t *)req->slba)[i]);
 #endif
@@ -787,6 +793,7 @@ static uint16_t oc20_erase(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     hwaddr mptr = le64_to_cpu(cmd->mptr);
     uint64_t lbal = le64_to_cpu(dm->lbal);
     uint32_t nlb = le16_to_cpu(dm->nlb) + 1;
+    int i;
 
     req->nlb = nlb;
     req->slba = (uint64_t)g_malloc0(nlb * sizeof(uint64_t));
@@ -797,7 +804,7 @@ static uint16_t oc20_erase(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         ((uint64_t *)req->slba)[0] = lbal;
     }
 
-    for (int i = 0; i < nlb; i++) {
+    for (i = 0; i < nlb; i++) {
         Oc20CS *cs;
         if (NULL == (cs = oc20_chunk_get_state(n, req->ns, ((uint64_t *)
                                                             req->slba)[i]))) {
@@ -968,6 +975,7 @@ static void oc20_nvme_ns_init_identify(FemuCtrl *n, NvmeIdNs *id_ns)
 {
     NvmeParams *params;
     uint16_t ms_min;
+    int i;
 
     params = &n->params;
 
@@ -981,7 +989,7 @@ static void oc20_nvme_ns_init_identify(FemuCtrl *n, NvmeIdNs *id_ns)
 
     /* Coperd: OC2.0, setup all supported LBA format, shouldn't hurt */
     ms_min = 8;
-    for (int i = 1; i < 16 && ms_min <= n->ms_max; i++) {
+    for (i = 1; i < 16 && ms_min <= n->ms_max; i++) {
         id_ns->lbaf[i].lbads = 12;
         id_ns->lbaf[i].ms = ms_min;
 
@@ -1268,6 +1276,7 @@ static int oc20_init_namespace(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 static int oc20_init_namespaces(FemuCtrl *n, Error **errp)
 {
     Oc20Ctrl *ln = n->ext_ops.state;
+    int i;
 
     ln->blk_hdr = (Oc20Header) {
         .magic = OC20_MAGIC,
@@ -1278,7 +1287,7 @@ static int oc20_init_namespaces(FemuCtrl *n, Error **errp)
         .md_size = 16,
     };
 
-    for (int i = 0; i < n->num_namespaces; i++) {
+    for (i = 0; i < n->num_namespaces; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
         NvmeIdNs *id_ns = &ns->id_ns;
         id_ns->vs[0] = 0x1;
@@ -1304,13 +1313,14 @@ static void oc20_set_ctrl_str(FemuCtrl *n)
 static void oc20_release_locks(FemuCtrl *n)
 {
     int ret;
+    int i;
 
-    for (int i = 0; i < FEMU_MAX_NUM_CHNLS; i++) {
+    for (i = 0; i < FEMU_MAX_NUM_CHNLS; i++) {
         ret = pthread_spin_destroy(&n->chnl_locks[i]);
         assert(ret == 0);
     }
 
-    for (int i = 0; i < FEMU_MAX_NUM_CHIPS; i++) {
+    for (i = 0; i < FEMU_MAX_NUM_CHIPS; i++) {
         ret = pthread_spin_destroy(&n->chip_locks[i]);
         assert(ret == 0);
     }
@@ -1319,10 +1329,11 @@ static void oc20_release_locks(FemuCtrl *n)
 static int oc20_init_misc(FemuCtrl *n)
 {
     int ret;
+    int i;
 
 	set_latency(n);
 
-    for (int i = 0; i < FEMU_MAX_NUM_CHNLS; i++) {
+    for (i = 0; i < FEMU_MAX_NUM_CHNLS; i++) {
         n->chnl_next_avail_time[i] = 0;
 
         /* FIXME: Can we use PTHREAD_PROCESS_PRIVATE here? */
@@ -1330,7 +1341,7 @@ static int oc20_init_misc(FemuCtrl *n)
         assert(ret == 0);
     }
 
-    for (int i = 0; i < FEMU_MAX_NUM_CHIPS; i++) {
+    for (i = 0; i < FEMU_MAX_NUM_CHIPS; i++) {
         n->chip_next_avail_time[i] = 0;
 
         /* FIXME: Can we use PTHREAD_PROCESS_PRIVATE here? */
@@ -1352,7 +1363,9 @@ static void oc20_init(FemuCtrl *n, Error **errp)
 
 static void oc20_exit(FemuCtrl *n)
 {
-    for (int i = 0; i < n->num_namespaces; i++) {
+    int i;
+
+    for (i = 0; i < n->num_namespaces; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
         oc20_free_namespace(n, ns);
     }

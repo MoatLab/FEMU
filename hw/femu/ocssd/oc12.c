@@ -16,8 +16,9 @@ static inline bool is_oc12_admin_cmd(uint8_t opcode)
 static void oc12_tbl_initialize(NvmeNamespace *ns)
 {
     uint32_t len = ns->tbl_entries;
+    int i;
 
-    for (int i = 0; i < len; i++) {
+    for (i = 0; i < len; i++) {
         ns->tbl[i] = OC12_LBA_UNMAPPED;
     }
 }
@@ -117,6 +118,7 @@ static int oc12_meta_blk_set_erased(NvmeNamespace *ns, Oc12Ctrl *ln,
     uint64_t mask = 0;
     uint32_t cur_state, state = OC12_SEC_ERASED;
     int sec, pg;
+    int i;
 
     /* Disable erase state tracking due to its high computational overhead */
     return 0;
@@ -154,7 +156,7 @@ static int oc12_meta_blk_set_erased(NvmeNamespace *ns, Oc12Ctrl *ln,
     mask |= ln->ppaf.lun_mask;
     mask |= ln->ppaf.blk_mask;
 
-    for (int i = 0; i < nr_ppas; ++i) {
+    for (i = 0; i < nr_ppas; ++i) {
         uint64_t ppa = psl[i];
         size_t pl_bgn, pl_end;
         size_t pl;
@@ -251,6 +253,7 @@ static uint16_t oc12_rw_check_req(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t slba = psl[0];
     uint64_t elba = psl[nr_pages-1];
     uint16_t is_write = (ocrw->opcode == OC12_CMD_WRITE);
+    int i;
 
     assert(nr_pages == nlb);
 
@@ -270,7 +273,7 @@ static uint16_t oc12_rw_check_req(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    for (int i = 0; i < nr_pages; i++) {
+    for (i = 0; i < nr_pages; i++) {
         if (psl[i] > le64_to_cpu(ns->id_ns.nsze)) {
             return NVME_LBA_RANGE | NVME_DNR;
         }
@@ -317,9 +320,10 @@ static void parse_ppa_list(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t cur_pg_addr, prev_pg_addr = ~(0ULL);
     int secs_idx = -1;
     uint64_t ppa;
+    int i;
 
     memset(bucket, 0, sizeof(AddrBucket) * max_sec_per_rq);
-    for (int i = 0; i < nlb; i++) {
+    for (i = 0; i < nlb; i++) {
         ppa = ((uint64_t *)(req->slba))[i];
         //pr_ppa(ln, ppa);
         cur_pg_addr = (ppa & (~(ln->ppaf.sec_mask)) & (~(ln->ppaf.pln_mask)));
@@ -358,6 +362,7 @@ static int oc12_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     int64_t now = req->stime;
     uint64_t ppa;
+    int i;
 
     /* Erase */
     if (opcode == OC12_CMD_ERASE) {
@@ -380,7 +385,7 @@ static int oc12_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     /* Read & Write */
     assert(opcode == OC12_CMD_READ || opcode == OC12_CMD_WRITE);
     assert(secs_idx > 0);
-    for (int i = 0; i < secs_idx; i++) {
+    for (i = 0; i < secs_idx; i++) {
         ppa = ((uint64_t *)(req->slba))[si];
         nb_secs_to_write = addr_bucket[i].cnt;
         si += nb_secs_to_write;
@@ -434,6 +439,7 @@ static uint16_t oc12_read(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t ppa;
     void *msl;
     uint16_t err;
+    int i;
 
     req->is_write = false;
     req->slba = (uint64_t)g_malloc0(sizeof(uint64_t) * nlb);
@@ -452,7 +458,7 @@ static uint16_t oc12_read(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         goto fail_free;
     }
 
-    for (int i = 0; i < nlb; i++) {
+    for (i = 0; i < nlb; i++) {
         uint32_t state;
         ppa = psl[i];
         oc12_meta_state_get(ln, ppa, &state);
@@ -508,6 +514,7 @@ static uint16_t oc12_write(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t ppa;
     void *msl;
     uint16_t err;
+    int i;
 
     req->is_write = true;
     req->slba = (uint64_t)g_malloc0(sizeof(uint64_t) * nlb);
@@ -531,7 +538,7 @@ static uint16_t oc12_write(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         nvme_addr_read(n, meta, (void *)msl, nlb * ln->params.sos);
     }
 
-    for (int i = 0; i < nlb; i++) {
+    for (i = 0; i < nlb; i++) {
         ppa = psl[i];
         oc12_meta_state_set_written(ln, ppa);
         if (meta) {
@@ -666,6 +673,7 @@ static uint16_t oc12_bbt_set(FemuCtrl *n, NvmeCmd *cmd)
     uint8_t value = bbt_cmd->value;
     uint64_t ppas[ln->params.max_sec_per_rq];
     int ch, lun, lunid, blk;
+    int i;
 
     if (nsid == 0 || nsid > n->num_namespaces) {
         return NVME_INVALID_NSID | NVME_DNR;
@@ -686,7 +694,7 @@ static uint16_t oc12_bbt_set(FemuCtrl *n, NvmeCmd *cmd)
             return NVME_INVALID_FIELD | NVME_DNR;
         }
 
-        for (int i = 0; i < nlb; i++) {
+        for (i = 0; i < nlb; i++) {
             ch = (ppas[i] & ln->ppaf.ch_mask) >> ln->ppaf.ch_offset;
             lun = (ppas[i] & ln->ppaf.lun_mask) >> ln->ppaf.lun_offset;
             blk = (ppas[i] & ln->ppaf.blk_mask) >> ln->ppaf.blk_offset;
@@ -798,12 +806,13 @@ static int oc12_init_bbtbl(FemuCtrl *n, NvmeNamespace *ns)
     uint32_t nr_tt_luns;
     uint32_t blks_per_lun;
     int ret = 0;
+    int i;
 
     nr_tt_luns = c->num_ch * c->num_lun;
     blks_per_lun = c->num_blk * c->num_pln;
     ns->bbtbl = g_malloc0(sizeof(Oc12Bbt *) * nr_tt_luns);
 
-    for (int i = 0; i < nr_tt_luns; i++) {
+    for (i = 0; i < nr_tt_luns; i++) {
         /* Coperd: init per-lun bbtbl */
         Oc12Bbt *bbt = g_malloc0(sizeof(Oc12Bbt) + blks_per_lun);
         bbt->tblid[0] = 'B';
@@ -821,13 +830,14 @@ static int oc12_init_bbtbl(FemuCtrl *n, NvmeNamespace *ns)
 static void oc12_release_locks(FemuCtrl *n)
 {
     int ret;
+    int i;
 
-    for (int i = 0; i < FEMU_MAX_NUM_CHNLS; i++) {
+    for (i = 0; i < FEMU_MAX_NUM_CHNLS; i++) {
         ret = pthread_spin_destroy(&n->chnl_locks[i]);
         assert(ret == 0);
     }
 
-    for (int i = 0; i < FEMU_MAX_NUM_CHIPS; i++) {
+    for (i = 0; i < FEMU_MAX_NUM_CHIPS; i++) {
         ret = pthread_spin_destroy(&n->chip_locks[i]);
         assert(ret == 0);
     }
@@ -836,10 +846,11 @@ static void oc12_release_locks(FemuCtrl *n)
 static int oc12_init_misc(FemuCtrl *n)
 {
     int ret;
+    int i;
 
 	set_latency(n);
 
-    for (int i = 0; i < FEMU_MAX_NUM_CHNLS; i++) {
+    for (i = 0; i < FEMU_MAX_NUM_CHNLS; i++) {
         n->chnl_next_avail_time[i] = 0;
 
         /* FIXME: Can we use PTHREAD_PROCESS_PRIVATE here? */
@@ -847,7 +858,7 @@ static int oc12_init_misc(FemuCtrl *n)
         assert(ret == 0);
     }
 
-    for (int i = 0; i < FEMU_MAX_NUM_CHIPS; i++) {
+    for (i = 0; i < FEMU_MAX_NUM_CHIPS; i++) {
         n->chip_next_avail_time[i] = 0;
 
         /* FIXME: Can we use PTHREAD_PROCESS_PRIVATE here? */
@@ -888,6 +899,7 @@ static int oc12_init_more(FemuCtrl *n)
     Oc12Params *lps;
     uint64_t chnl_blks;
     int ret = 0;
+    int i;
 
     ln = n->oc12_ctrl = g_malloc0(sizeof(Oc12Ctrl));
     ppaf = &ln->id_ctrl.ppaf;
@@ -903,7 +915,7 @@ static int oc12_init_more(FemuCtrl *n)
 
     oc12_init_misc(n);
 
-    for (int i = 0; i < n->num_namespaces; i++) {
+    for (i = 0; i < n->num_namespaces; i++) {
         ns = &n->namespaces[i];
 
         chnl_blks = ns->ns_blks / (lps->sec_per_pg * lps->pgs_per_blk *
@@ -1069,10 +1081,12 @@ static void oc12_set_ctrl_str(FemuCtrl *n)
 
 static void oc12_init(FemuCtrl *n, Error **errp)
 {
+    int i;
+
     NVME_CAP_SET_OC(n->bar.cap, 1);
     oc12_set_ctrl_str(n);
 
-    for (int i = 0; i < n->num_namespaces; i++) {
+    for (i = 0; i < n->num_namespaces; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
         NvmeIdNs *id_ns = &ns->id_ns;
         id_ns->vs[0] = 0x1;

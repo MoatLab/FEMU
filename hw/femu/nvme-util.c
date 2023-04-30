@@ -67,8 +67,9 @@ uint64_t *nvme_setup_discontig(FemuCtrl *n, uint64_t prp_addr, uint16_t
     uint64_t prp[prps_per_page];
     uint16_t total_prps = DIV_ROUND_UP(queue_depth * entry_size, n->page_size);
     uint64_t *prp_list = g_malloc0(total_prps * sizeof(*prp_list));
+    int i;
 
-    for (int i = 0; i < total_prps; i++) {
+    for (i = 0; i < total_prps; i++) {
         if (i % prps_per_page == 0 && i < total_prps - 1) {
             if (!prp_addr || prp_addr & (n->page_size - 1)) {
                 g_free(prp_list);
