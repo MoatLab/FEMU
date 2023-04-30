@@ -179,7 +179,7 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
         nvme_isr_notify_io(n->cq[index_poller]);
         break;
     default:
-        for (int i = 1; i <= n->num_io_queues; i++) {
+        for (int i = 1; i <= n->nr_io_queues; i++) {
             if (n->should_isr[i]) {
                 nvme_isr_notify_io(n->cq[i]);
                 n->should_isr[i] = false;
@@ -189,7 +189,7 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
     }
 }
 
-static void *nvme_poller(void *arg)
+void *nvme_poller(void *arg)
 {
     FemuCtrl *n = ((NvmePollerThreadArgument *)arg)->n;
     int index = ((NvmePollerThreadArgument *)arg)->index;
@@ -217,7 +217,7 @@ static void *nvme_poller(void *arg)
                 continue;
             }
 
-            for (int i = 1; i <= n->num_io_queues; i++) {
+            for (int i = 1; i <= n->nr_io_queues; i++) {
                 NvmeSQueue *sq = n->sq[i];
                 NvmeCQueue *cq = n->cq[i];
                 if (sq && sq->is_active && cq && cq->is_active) {
@@ -230,79 +230,6 @@ static void *nvme_poller(void *arg)
     }
 
     return NULL;
-}
-
-static int cmp_pri(pqueue_pri_t next, pqueue_pri_t curr)
-{
-    return (next > curr);
-}
-
-static pqueue_pri_t get_pri(void *a)
-{
-    return ((NvmeRequest *)a)->expire_time;
-}
-
-static void set_pri(void *a, pqueue_pri_t pri)
-{
-    ((NvmeRequest *)a)->expire_time = pri;
-}
-
-static size_t get_pos(void *a)
-{
-    return ((NvmeRequest *)a)->pos;
-}
-
-static void set_pos(void *a, size_t pos)
-{
-    ((NvmeRequest *)a)->pos = pos;
-}
-
-void nvme_create_poller(FemuCtrl *n)
-{
-    n->should_isr = g_malloc0(sizeof(bool) * (n->num_io_queues + 1));
-
-    n->num_poller = n->multipoller_enabled ? n->num_io_queues : 1;
-    /* Coperd: we put NvmeRequest into these rings */
-    n->to_ftl = malloc(sizeof(struct rte_ring *) * (n->num_poller + 1));
-    for (int i = 1; i <= n->num_poller; i++) {
-        n->to_ftl[i] = femu_ring_create(FEMU_RING_TYPE_MP_SC, FEMU_MAX_INF_REQS);
-        if (!n->to_ftl[i]) {
-            femu_err("failed to create ring (n->to_ftl) ...\n");
-            abort();
-        }
-        assert(rte_ring_empty(n->to_ftl[i]));
-    }
-
-    n->to_poller = malloc(sizeof(struct rte_ring *) * (n->num_poller + 1));
-    for (int i = 1; i <= n->num_poller; i++) {
-        n->to_poller[i] = femu_ring_create(FEMU_RING_TYPE_MP_SC, FEMU_MAX_INF_REQS);
-        if (!n->to_poller[i]) {
-            femu_err("failed to create ring (n->to_poller) ...\n");
-            abort();
-        }
-        assert(rte_ring_empty(n->to_poller[i]));
-    }
-
-    n->pq = malloc(sizeof(pqueue_t *) * (n->num_poller + 1));
-    for (int i = 1; i <= n->num_poller; i++) {
-        n->pq[i] = pqueue_init(FEMU_MAX_INF_REQS, cmp_pri, get_pri, set_pri,
-                               get_pos, set_pos);
-        if (!n->pq[i]) {
-            femu_err("failed to create pqueue (n->pq) ...\n");
-            abort();
-        }
-    }
-
-    n->poller = malloc(sizeof(QemuThread) * (n->num_poller + 1));
-    NvmePollerThreadArgument *args = malloc(sizeof(NvmePollerThreadArgument) *
-                                            (n->num_poller + 1));
-    for (int i = 1; i <= n->num_poller; i++) {
-        args[i].n = n;
-        args[i].index = i;
-        qemu_thread_create(&n->poller[i], "nvme-poller", nvme_poller, &args[i],
-                           QEMU_THREAD_JOINABLE);
-        femu_debug("nvme-poller [%d] created ...\n", i - 1);
-    }
 }
 
 uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)

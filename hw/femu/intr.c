@@ -50,7 +50,7 @@ static void nvme_clear_guest_notifier(FemuCtrl *n)
 {
     NvmeCQueue *cq;
 
-    for (uint32_t qid = 1; qid <= n->num_io_queues; qid++) {
+    for (uint32_t qid = 1; qid <= n->nr_io_queues; qid++) {
         cq = n->cq[qid];
         if (!cq) {
             break;
@@ -74,7 +74,7 @@ static int nvme_vector_unmask(PCIDevice *dev, unsigned vector, MSIMessage msg)
     EventNotifier *e;
     int ret;
 
-    for (uint32_t qid = 1; qid <= n->num_io_queues; qid++) {
+    for (uint32_t qid = 1; qid <= n->nr_io_queues; qid++) {
         cq = n->cq[qid];
         if (!cq) {
             continue;
@@ -110,7 +110,7 @@ static void nvme_vector_mask(PCIDevice *dev, unsigned vector)
     EventNotifier *e;
     int ret;
 
-    for (uint32_t qid = 1; qid <= n->num_io_queues; qid++) {
+    for (uint32_t qid = 1; qid <= n->nr_io_queues; qid++) {
         cq = n->cq[qid];
         if (!cq) {
             continue;
@@ -135,7 +135,7 @@ static void nvme_vector_poll(PCIDevice *dev, unsigned int vector_start, unsigned
     EventNotifier *e;
     uint32_t vector;
 
-    for (uint32_t qid = 1; qid <= n->num_io_queues; qid++) {
+    for (uint32_t qid = 1; qid <= n->nr_io_queues; qid++) {
         cq = n->cq[qid];
         if (!cq) {
             continue;
