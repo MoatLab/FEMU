@@ -407,6 +407,7 @@ static void nvme_init_ctrl(FemuCtrl *n)
     id->cmic         = 0;
     id->mdts         = n->mdts;
     id->ver          = 0x00010300;
+    /* TODO: NVME_OACS_NS_MGMT */
     id->oacs         = cpu_to_le16(n->oacs | NVME_OACS_DBBUF);
     id->acl          = n->acl;
     id->aerl         = n->aerl;
@@ -474,7 +475,8 @@ static void nvme_init_cmb(FemuCtrl *n)
                           NVME_CMBSZ_GETSIZE(n->bar.cmbsz));
     pci_register_bar(&n->parent_obj, NVME_CMBLOC_BIR(n->bar.cmbloc),
                      PCI_BASE_ADDRESS_SPACE_MEMORY |
-                     PCI_BASE_ADDRESS_MEM_TYPE_64, &n->ctrl_mem); }
+                     PCI_BASE_ADDRESS_MEM_TYPE_64, &n->ctrl_mem);
+}
 
 static void nvme_init_pci(FemuCtrl *n)
 {
@@ -522,6 +524,7 @@ static int nvme_register_extensions(FemuCtrl *n)
     } else if (ZNSSD(n)) {
         nvme_register_znssd(n);
     } else {
+        /* TODO: For future extensions */
     }
 
     return 0;
