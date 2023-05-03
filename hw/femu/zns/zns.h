@@ -7,6 +7,12 @@
 
 #include "../nvme.h"
 
+enum {
+    NAND_READ =  0,
+    NAND_WRITE = 1,
+    NAND_ERASE = 2,
+};
+
 typedef struct QEMU_PACKED NvmeZonedResult {
     uint64_t slba;
 } NvmeZonedResult;
@@ -32,6 +38,11 @@ struct ppa {
 struct write_pointer {
     uint64_t ch;
     uint64_t lun;
+};
+
+struct nand_cmd {
+    int cmd;
+    uint64_t stime;
 };
 
 struct zns_blk {

@@ -1148,7 +1148,8 @@ typedef struct NvmeParams {
 typedef struct ZNSCtrlParams {
     uint8_t  zns_num_ch;
     uint8_t  zns_num_lun;
-    uint64_t  zns_latency;
+    uint64_t  zns_read;
+    uint64_t zns_write;
 } ZNSCtrlParams;
 
 typedef struct OcCtrlParams {
