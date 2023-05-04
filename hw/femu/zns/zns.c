@@ -471,6 +471,126 @@ static void zns_finalize_zoned_write(NvmeNamespace *ns, NvmeRequest *req,
     }
 }
 
+// Add some function
+// --------------------------------
+static inline struct zns_ch *get_ch(struct zns_ssd *zns, struct ppa *ppa)
+{
+    return &(zns->ch[ppa->g.ch]);
+}
+
+static inline struct zns_fc *get_fc(struct zns_ssd *zns, struct ppa *ppa)
+{
+    struct zns_ch *ch = get_ch(zns, ppa);
+    return &(ch->fc[ppa->g.fc]);
+}
+
+static inline struct zns_blk *get_blk(struct zns_ssd *zns, struct ppa *ppa)
+{
+    struct zns_fc *fc = get_fc(zns, ppa);
+    return &(fc->blk[ppa->g.blk]);
+}
+
+static inline uint64_t zone_slba(FemuCtrl *n, uint32_t zone_idx)
+{
+    return (zone_idx) * n->zone_size;
+}
+
+static inline void check_addr(int a, int max)
+{
+   assert(a >= 0 && a < max);
+}
+
+static void advance_read_pointer(FemuCtrl *n)
+{
+    struct zns_ssd *zns = n->zns;
+    struct write_pointer *wpp = &zns->wp;
+    uint8_t num_ch = zns->num_ch;
+    uint8_t num_lun = zns->num_lun;
+
+    //printf("NUM CH: %"PRIu64"\n", wpp->ch);
+    check_addr(wpp->ch, num_ch);
+    wpp->ch++;
+    if (wpp->ch == num_ch) {
+        wpp->ch = 0;
+	check_addr(wpp->lun, num_lun);
+	wpp->lun++;
+	if(wpp->lun == num_lun) {
+	    wpp->lun = 0;
+
+	    assert(wpp->ch == 0);
+	    assert(wpp->lun == 0);
+	}
+    }
+}
+
+static inline struct ppa lpn_to_ppa(FemuCtrl *n, NvmeNamespace *ns, uint64_t lpn)
+{
+
+	uint32_t zone_idx = zns_zone_idx(ns, (lpn * 4096));
+
+	struct zns_ssd *zns = n->zns;
+	struct write_pointer *wpp = &zns->wp;
+	//uint64_t num_ch = zns->num_ch;
+	//uint64_t num_lun = zns->num_lun;
+	struct ppa ppa = {0};
+
+	//printf("OFFSET: %"PRIu64"\n\n", offset);
+	//wpp->ch,lun
+	ppa.g.ch = wpp->ch;
+	ppa.g.fc = wpp->lun;
+	ppa.g.blk = zone_idx;
+
+    return ppa;
+}
+
+static uint64_t zns_advance_status(FemuCtrl *n, struct nand_cmd *ncmd,
+		struct ppa *ppa)
+{
+    int c = ncmd->cmd;
+
+    struct zns_ssd *zns = n->zns;
+    uint64_t nand_stime;
+    uint64_t req_stime = (ncmd->stime == 0) ? \
+        qemu_clock_get_ns(QEMU_CLOCK_REALTIME) : ncmd->stime;
+
+    struct zns_fc *fc = get_fc(zns, ppa);
+
+    uint64_t lat = 0;
+    uint64_t read_delay = n->zns_params.zns_read;
+    uint64_t write_delay = n->zns_params.zns_write;
+    uint64_t erase_delay = 2000000;
+   //200 us for write
+    switch (c) {
+    case NAND_READ:
+            nand_stime = (fc->next_fc_avail_time < req_stime) ? req_stime : \
+                    fc->next_fc_avail_time;
+
+	    fc->next_fc_avail_time = nand_stime + read_delay;
+            lat = fc->next_fc_avail_time - req_stime;
+
+	    break;
+    case NAND_WRITE:
+	    nand_stime = (fc->next_fc_avail_time < req_stime) ? req_stime : \
+		            fc->next_fc_avail_time;
+	    fc->next_fc_avail_time = nand_stime + write_delay;
+	    lat = fc->next_fc_avail_time - req_stime;
+
+	    break;
+    case NAND_ERASE:
+    	    nand_stime = (fc->next_fc_avail_time < req_stime) ? req_stime : \
+                            fc->next_fc_avail_time;
+            fc->next_fc_avail_time = nand_stime + erase_delay;
+            lat = fc->next_fc_avail_time - req_stime;
+
+            break;
+    default:
+	//lat = 0;
+	;
+    }
+    return lat;
+}
+//----------------------------------
+
 static uint64_t zns_advance_zone_wp(NvmeNamespace *ns, NvmeZone *zone,
                                     uint32_t nlb)
 {
@@ -502,6 +622,7 @@ struct zns_zone_reset_ctx {
 static void zns_aio_zone_reset_cb(NvmeRequest *req, NvmeZone *zone)
 {
     NvmeNamespace *ns = req->ns;
+    FemuCtrl *n = ns->ctrl;
 
     /* FIXME, We always assume reset SUCCESS */
     switch (zns_get_zone_state(zone)) {
@@ -519,6 +640,25 @@ static void zns_aio_zone_reset_cb(NvmeRequest *req, NvmeZone *zone)
         zns_assign_zone_state(ns, zone, NVME_ZONE_STATE_EMPTY);
     default:
         break;
+    }
+
+    struct zns_ssd *zns = n->zns;
+    uint64_t num_ch = zns->num_ch;
+    uint64_t num_lun = zns->num_lun;
+    struct ppa ppa;
+
+    for (int ch = 0; ch < num_ch; ch++){
+    	for (int lun = 0; lun < num_lun; lun++) {
+	    ppa.g.ch = ch;
+	    ppa.g.fc = lun;
+	    ppa.g.blk = zns_zone_idx(ns, zone->d.zslba);
+	    
+	    struct nand_cmd erase;
+	    erase.cmd = NAND_ERASE;
+	    erase.stime = 0;	    
+	    zns_advance_status(n, &erase, &ppa);
+	    
+	}
     }
 }
 
@@ -1172,6 +1312,29 @@ static uint16_t zns_read(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     data_offset = zns_l2b(ns, slba);
 
     backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
+    
+    uint64_t slpn = (slba)/4096;
+    uint64_t elpn = (slba + nlb - 1)/4096;
+    
+    uint64_t lpn;
+    struct ppa ppa;
+    uint64_t sublat,maxlat=0;
+
+    for (lpn = slpn; lpn <= elpn; lpn++) {
+        ppa = lpn_to_ppa(n, ns, lpn);
+	advance_read_pointer(n);
+
+	struct nand_cmd read;
+	read.cmd = NAND_READ;
+	read.stime = req->stime;
+
+	sublat = zns_advance_status(n, &read, &ppa);
+        maxlat = (sublat > maxlat) ? sublat : maxlat;
+    }
+
+    req->reqlat = maxlat;
+    req->expire_time += maxlat;
+    
     return NVME_SUCCESS;
 
 err:
@@ -1223,10 +1386,31 @@ static uint16_t zns_write(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     if (status) {
         goto err;
     }
-
+    
     backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
     zns_finalize_zoned_write(ns, req, false);
+    
+    uint64_t slpn = (slba)/4096;
+    uint64_t elpn = (slba + nlb - 1)/4096;
 
+    uint64_t lpn;
+    struct ppa ppa;
+    uint64_t sublat,maxlat=0;
+
+    for (lpn = slpn; lpn <= elpn; lpn++) {
+        ppa = lpn_to_ppa(n, ns, lpn);
+	advance_read_pointer(n);
+
+	struct nand_cmd write;
+	write.cmd = NAND_WRITE;
+	write.stime = req->stime;
+
+	sublat = zns_advance_status(n, &write, &ppa);
+        maxlat = (sublat > maxlat) ? sublat : maxlat;
+    }
+    
+    req->reqlat = maxlat;
+    req->expire_time += maxlat;
     return NVME_SUCCESS;
 
 err:
@@ -1271,6 +1455,51 @@ static void zns_set_ctrl(FemuCtrl *n)
     pci_config_set_device_id(pci_conf, 0x5845);
 }
 
+// Add zns init ch, zns init flash and zns init block
+// ----------------------------
+static void zns_init_blk(struct zns_blk *blk)
+{
+    blk->next_blk_avail_time = 0;
+}
+
+static void zns_init_fc(struct zns_fc *fc)
+{
+    fc->blk = g_malloc0(sizeof(struct zns_blk) * 32);
+    for (int i = 0; i < 32; i++) {
+        zns_init_blk(&fc->blk[i]);
+    }
+    fc->next_fc_avail_time = 0;
+}
+
+static void zns_init_ch(struct zns_ch *ch, uint8_t num_lun)
+{
+    ch->fc = g_malloc0(sizeof(struct zns_fc) * num_lun);
+    for (int i = 0; i < num_lun; i++) {
+        zns_init_fc(&ch->fc[i]);
+    }
+    ch->next_ch_avail_time = 0;
+}
+
+static void zns_init_params(FemuCtrl *n)
+{
+    struct zns_ssd *id_zns;
+    
+    id_zns = g_malloc0(sizeof(struct zns_ssd));
+    id_zns->num_ch = n->zns_params.zns_num_ch;
+    id_zns->num_lun = n->zns_params.zns_num_lun;
+    id_zns->ch = g_malloc0(sizeof(struct zns_ch) * id_zns->num_ch);
+    for (int i =0; i < id_zns->num_ch; i++) {
+        zns_init_ch(&id_zns->ch[i], id_zns->num_lun);
+    }
+    
+    id_zns->wp.ch = 0;
+    id_zns->wp.lun = 0;
+    n->zns = id_zns;
+}
+
+// ---------------------------------------
+
+
 static int zns_init_zone_cap(FemuCtrl *n)
 {
     n->zoned = true;
@@ -1281,7 +1510,7 @@ static int zns_init_zone_cap(FemuCtrl *n)
     n->max_active_zones = 0;
     n->max_open_zones = 0;
     n->zd_extension_size = 0;
-
+    
     return 0;
 }
 
@@ -1316,6 +1545,8 @@ static void zns_init(FemuCtrl *n, Error **errp)
     }
 
     zns_init_zone_identify(n, ns, 0);
+    
+    zns_init_params(n);
 }
 
 static void zns_exit(FemuCtrl *n)
