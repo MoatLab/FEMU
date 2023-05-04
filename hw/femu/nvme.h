@@ -1034,7 +1034,6 @@ typedef struct NvmeCQueue {
     uint16_t    irq_enabled;
     uint32_t    head;
     uint32_t    tail;
-    int32_t     virq;
     uint32_t    vector;
     uint32_t    size;
     uint64_t    dma_addr;
@@ -1044,6 +1043,8 @@ typedef struct NvmeCQueue {
     QEMUTimer   *timer;
     QTAILQ_HEAD(sq_list, NvmeSQueue) sq_list;
     QTAILQ_HEAD(cq_req_list, NvmeRequest) req_list;
+    int32_t     virq;
+    MSIMessage  msg;
     uint64_t    db_addr;
     uint64_t    db_addr_hva;
     uint64_t    eventidx_addr;
@@ -1271,6 +1272,7 @@ typedef struct FemuCtrl {
     bool        vector_poll_started;
 
     char            *serial;
+    char            *logfile;
     NvmeErrorLog    *elpes;
     NvmeRequest     **aer_reqs;
     NvmeNamespace   *namespaces;

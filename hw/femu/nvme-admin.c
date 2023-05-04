@@ -94,7 +94,6 @@ static uint16_t nvme_del_sq(FemuCtrl *n, NvmeCmd *cmd)
     }
 
     nvme_free_sq(sq, n);
-
     return NVME_SUCCESS;
 }
 
@@ -201,6 +200,7 @@ static uint16_t nvme_del_cq(FemuCtrl *n, NvmeCmd *cmd)
     if (!QTAILQ_EMPTY(&cq->sq_list)) {
         return NVME_INVALID_QUEUE_DEL;
     }
+
     nvme_free_cq(cq, n);
 
     return NVME_SUCCESS;
