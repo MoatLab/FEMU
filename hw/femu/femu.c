@@ -660,6 +660,10 @@ static Property femu_props[] = {
     DEFINE_PROP_UINT8("lnum_lun", FemuCtrl, oc_params.num_lun, 8),
     DEFINE_PROP_UINT8("lnum_pln", FemuCtrl, oc_params.num_pln, 2),
     DEFINE_PROP_UINT16("lmetasize", FemuCtrl, oc_params.sos, 16),
+    DEFINE_PROP_UINT8("zns_num_ch", FemuCtrl, zns_params.zns_num_ch, 2),
+    DEFINE_PROP_UINT8("zns_num_lun", FemuCtrl, zns_params.zns_num_lun, 4),
+    DEFINE_PROP_UINT64("zns_read", FemuCtrl, zns_params.zns_read, 40000),
+    DEFINE_PROP_UINT64("zns_write", FemuCtrl, zns_params.zns_write, 200000),
     DEFINE_PROP_END_OF_LIST(),
 };
 
