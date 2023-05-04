@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Huaicheng Li <hcli@cmu.edu>
+# Huaicheng Li <huaicheng@vt.edu>
 # Run FEMU as Zoned-Namespace (ZNS) SSDs
 #
 
@@ -18,19 +18,19 @@ if [[ ! -e "$OSIMGF" ]]; then
 	exit
 fi
 
-ssd_size=4096
-num_channels=2
-num_chips_per_channel=4
-read_latency=40000
-write_latency=200000
+SSD_SIZE_MB=4096
+NUM_CHANNELS=8
+NUM_CHIPS_PER_CHANNEL=4
+READ_LATENCY_NS=40000
+WRITE_LATENCY_NS=200000
 
 FEMU_OPTIONS="-device femu"
-FEMU_OPTIONS=${FEMU_OPTIONS}",devsz_mb=${ssd_size}"
+FEMU_OPTIONS=${FEMU_OPTIONS}",devsz_mb=${SSD_SIZE_MB}"
 FEMU_OPTIONS=${FEMU_OPTIONS}",namespaces=1"
-FEMU_OPTIONS=${FEMU_OPTIONS}",zns_num_ch=${num_channels}"
-FEMU_OPTIONS=${FEMU_OPTIONS}",zns_num_lun=${num_chips_per_channel}"
-FEMU_OPTIONS=${FEMU_OPTIONS}",zns_read=${read_latency}"
-FEMU_OPTIONS=${FEMU_OPTIONS}",zns_write=${write_latency}"
+FEMU_OPTIONS=${FEMU_OPTIONS}",zns_num_ch=${NUM_CHANNELS}"
+FEMU_OPTIONS=${FEMU_OPTIONS}",zns_num_lun=${NUM_CHIPS_PER_CHANNEL}"
+FEMU_OPTIONS=${FEMU_OPTIONS}",zns_read=${READ_LATENCY_NS}"
+FEMU_OPTIONS=${FEMU_OPTIONS}",zns_write=${WRITE_LATENCY_NS}"
 FEMU_OPTIONS=${FEMU_OPTIONS}",femu_mode=3"
 
 sudo x86_64-softmmu/qemu-system-x86_64 \
