@@ -526,9 +526,7 @@ static void advance_read_pointer(FemuCtrl *n)
 static inline struct ppa lpn_to_ppa(FemuCtrl *n, NvmeNamespace *ns, uint64_t lpn)
 {
 
-	uint32_t zone_idx = zns_zone_idx(ns, lpn);
-	//uint64_t off = lpn - zone_slba(n, zone_idx);
-	//uint64_t offset = off / 4096;
+	uint32_t zone_idx = zns_zone_idx(ns, (lpn * 4096));
 
 	struct zns_ssd *zns = n->zns;
 	struct write_pointer *wpp = &zns->wp;
@@ -536,7 +534,8 @@ static inline struct ppa lpn_to_ppa(FemuCtrl *n, NvmeNamespace *ns, uint64_t lpn
 	//uint64_t num_lun = zns->num_lun;
 	struct ppa ppa = {0};
 
-	//printf("OFFSET: %"PRIu64"\n", offset);
+	//printf("OFFSET: %"PRIu64"\n\n", offset);
+	//wpp->ch,lun
 	ppa.g.ch = wpp->ch;
 	ppa.g.fc = wpp->lun;
 	ppa.g.blk = zone_idx;
@@ -1325,14 +1324,6 @@ static uint16_t zns_read(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         ppa = lpn_to_ppa(n, ns, lpn);
 	advance_read_pointer(n);
 
-	/*
-	printf("LPN: %"PRIu64"\n", lpn);
-        printf("CHANNEL NUMBER: %d\n", ppa.g.ch);
-        printf("CHIP NUMBER: %d\n", ppa.g.fc);
-        printf("BLOCK NUMBER: %d\n", ppa.g.blk);
-        printf("\n\n");
-	*/
-
 	struct nand_cmd read;
 	read.cmd = NAND_READ;
 	read.stime = req->stime;
@@ -1340,12 +1331,7 @@ static uint16_t zns_read(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 	sublat = zns_advance_status(n, &read, &ppa);
         maxlat = (sublat > maxlat) ? sublat : maxlat;
     }
-    //printf("MAX LATENCY: %"PRIu64"\n", maxlat);
-    //FILE *f;
-    //f = fopen("latency.log", "a+"); // a+ (create + append)
-    //fprintf(f, "%"PRIu64"\n", maxlat);
 
-    //fclose(f);
     req->reqlat = maxlat;
     req->expire_time += maxlat;
     
@@ -1414,14 +1400,6 @@ static uint16_t zns_write(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     for (lpn = slpn; lpn <= elpn; lpn++) {
         ppa = lpn_to_ppa(n, ns, lpn);
 	advance_read_pointer(n);
-
-	/*
-	printf("LPN: %"PRIu64"\n", lpn);
-        printf("CHANNEL NUMBER: %d\n", ppa.g.ch);
-        printf("CHIP NUMBER: %d\n", ppa.g.fc);
-        printf("BLOCK NUMBER: %d\n", ppa.g.blk);
-        printf("\n\n");
-	*/
 
 	struct nand_cmd write;
 	write.cmd = NAND_WRITE;
