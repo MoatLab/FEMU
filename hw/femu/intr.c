@@ -35,7 +35,9 @@ static int nvme_add_kvm_msi_virq(FemuCtrl *n, NvmeCQueue *cq)
 
 static void nvme_remove_kvm_msi_virq(NvmeCQueue *cq)
 {
+    kvm_irqchip_remove_irqfd_notifier_gsi(kvm_state, &cq->guest_notifier, cq->virq);
     kvm_irqchip_release_virq(kvm_state, cq->virq);
+    event_notifier_set_handler(&cq->guest_notifier, NULL);
     event_notifier_cleanup(&cq->guest_notifier);
     cq->virq = -1;
 }
@@ -49,8 +51,9 @@ static int nvme_set_guest_notifier(FemuCtrl *n, EventNotifier *notifier,
 static void nvme_clear_guest_notifier(FemuCtrl *n)
 {
     NvmeCQueue *cq;
+    int qid;
 
-    for (uint32_t qid = 1; qid <= n->nr_io_queues; qid++) {
+    for (qid = 1; qid <= n->nr_io_queues; qid++) {
         cq = n->cq[qid];
         if (!cq) {
             break;
@@ -72,31 +75,35 @@ static int nvme_vector_unmask(PCIDevice *dev, unsigned vector, MSIMessage msg)
     FemuCtrl *n = container_of(dev, FemuCtrl, parent_obj);
     NvmeCQueue *cq;
     EventNotifier *e;
+    int qid;
     int ret;
 
-    for (uint32_t qid = 1; qid <= n->nr_io_queues; qid++) {
+    for (qid = 1; qid <= n->nr_io_queues; qid++) {
         cq = n->cq[qid];
         if (!cq) {
             continue;
         }
 
+        e = &cq->guest_notifier;
         if (cq->vector == vector) {
-            e = &cq->guest_notifier;
-            ret = kvm_irqchip_update_msi_route(kvm_state, cq->virq, msg, dev);
-            if (ret < 0) {
-                femu_err("MSI irq update vector %u failed", vector);
-                return ret;
+            if (cq->msg.data != msg.data || cq->msg.address != msg.address) {
+                ret = kvm_irqchip_update_msi_route(kvm_state, cq->virq, msg, dev);
+                if (ret < 0) {
+                    femu_err("MSI irq update vector %u failed", vector);
+                    return ret;
+                }
+
+                kvm_irqchip_commit_routes(kvm_state);
+
+                cq->msg = msg;
             }
 
-            kvm_irqchip_commit_routes(kvm_state);
             ret = kvm_irqchip_add_irqfd_notifier_gsi(kvm_state, e,
                                                      NULL, cq->virq);
             if (ret < 0) {
-                femu_err("MSI add irqfd gsi vector %u failed, ret %d",
-                             vector, ret);
+                femu_err("MSI add irqfd gsi vector %u failed, ret %d", vector, ret);
                 return ret;
             }
-            return 0;
         }
     }
 
@@ -196,7 +203,7 @@ int nvme_setup_virq(FemuCtrl *n, NvmeCQueue *cq)
 {
     int ret;
 
-    if (cq->irq_enabled) {
+    if (cq->cqid && cq->irq_enabled) {
         ret = nvme_add_kvm_msi_virq(n, cq);
         if (ret < 0) {
             femu_err("nvme: add kvm msix virq failed\n");

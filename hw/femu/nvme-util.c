@@ -245,8 +245,7 @@ uint16_t nvme_init_cq(NvmeCQueue *cq, FemuCtrl *n, uint64_t dma_addr, uint16_t
         cq->dma_addr = dma_addr;
         cq->dma_addr_hva = (uint64_t)dma_memory_map(as, dma_addr, &cqsz, 1, MEMTXATTRS_UNSPECIFIED);
     } else {
-        cq->prp_list = nvme_setup_discontig(n, dma_addr, size,
-                n->cqe_size);
+        cq->prp_list = nvme_setup_discontig(n, dma_addr, size, n->cqe_size);
         if (!cq->prp_list) {
             return NVME_INVALID_FIELD | NVME_DNR;
         }
@@ -260,7 +259,7 @@ uint16_t nvme_init_cq(NvmeCQueue *cq, FemuCtrl *n, uint64_t dma_addr, uint16_t
         cq->eventidx_addr = n->eis_addr + (2 * cqid + 1) * dbbuf_entry_sz;
         cq->eventidx_addr_hva = n->eis_addr_hva + (2 * cqid + 1) * dbbuf_entry_sz;
         femu_debug("CQ, db_addr=%" PRIu64 ", eventidx_addr=%" PRIu64 "\n",
-                cq->db_addr, cq->eventidx_addr);
+                    cq->db_addr, cq->eventidx_addr);
     }
     msix_vector_use(&n->parent_obj, cq->vector);
     n->cq[cqid] = cq;
