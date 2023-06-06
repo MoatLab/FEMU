@@ -1466,8 +1466,8 @@ static inline uint64_t ns_blks(NvmeNamespace *ns, uint8_t lba_idx)
     return ns_size / lba_sz;
 }
 
-static inline hwaddr nvme_discontig(uint64_t *dma_addr, uint16_t page_size,
-    uint16_t queue_idx, uint16_t entry_size)
+static inline hwaddr nvme_discontig(uint64_t *dma_addr, uint16_t queue_idx,
+                                    uint16_t page_size, uint16_t entry_size)
 {
     uint16_t entries_per_page = page_size / entry_size;
     uint16_t prp_index = queue_idx / entries_per_page;
