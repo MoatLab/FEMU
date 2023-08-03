@@ -8,16 +8,16 @@ IMGDIR=$HOME/images
 OSIMGF=$IMGDIR/u20s.qcow2
 
 # Configurable SSD Controller layout parameters (must be power of 2)
-secsz=512		# 512
-secs_per_pg=8		# 8
-pgs_per_blk=256 	# 256
-blks_per_pl=256 	# 256
-pls_per_lun=1		# 1
-luns_per_ch=8		# 8
-nchs=8  			# 8
+secsz=512		
+secs_per_pg=8		
+pgs_per_blk=256 	
+blks_per_pl=256 	
+pls_per_lun=1       # still not support multiplanes		
+luns_per_ch=8		
+nchs=8  			
 ssd_size=12288		# in MegaBytes
 
-# Latency
+# Latency in nanoseconds
 pg_rd_lat=40000
 pg_wr_lat=200000
 blk_er_lat=2000000
