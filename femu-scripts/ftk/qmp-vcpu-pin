@@ -1,4 +1,4 @@
-#!/usr/bin/python2
+#!/usr/bin/python3
 # QEMU vCPU pinning tool
 #
 # Copyright (C) 2016 Red Hat Inc.
@@ -33,13 +33,13 @@ for vcpu in srv.command('query-cpus-fast'):
     vcpuid = vcpu['cpu-index']
     tid = vcpu['thread-id']
     if tid in pinned:
-        print 'vCPU{}\'s tid {} already pinned, skipping'.format(vcpuid, tid)
+        printf('vCPU{}\'s tid {} already pinned, skipping'.format(vcpuid, tid))
         continue
 
     cpuid = args.cpu[vcpuid % len(args.cpu)]
-    print 'Pin vCPU {} (tid {}) to physical CPU {}'.format(vcpuid, tid, cpuid)
+    print('Pin vCPU {} (tid {}) to physical CPU {}'.format(vcpuid, tid, cpuid))
     try:
         call(['taskset', '-pc', str(cpuid), str(tid)], stdout=devnull)
         pinned.append(tid)
     except OSError:
-        print 'Failed to pin vCPU{} to CPU{}'.format(vcpuid, cpuid)
+        print('Failed to pin vCPU{} to CPU{}'.format(vcpuid, cpuid))
