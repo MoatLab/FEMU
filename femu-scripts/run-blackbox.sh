@@ -8,20 +8,20 @@ IMGDIR=$HOME/images
 OSIMGF=$IMGDIR/u20s.qcow2
 
 # Configurable SSD Controller layout parameters (must be power of 2)
-secsz=512		
-secs_per_pg=8		
-pgs_per_blk=256 	
-blks_per_pl=256 	
-pls_per_lun=1       # still not support multiplanes		
-luns_per_ch=8		
-nchs=8  			
-ssd_size=12288		# in MegaBytes
+secsz=512 # sector size in bytes
+secs_per_pg=8 # number of sectors in a flash page
+pgs_per_blk=256 # number of pages per flash block
+blks_per_pl=256 # number of blocks per plane
+pls_per_lun=1 # keep it at one, no multiplanes support
+luns_per_ch=8 # number of chips per channel
+nchs=8 # number of channels
+ssd_size=12288 # in megabytes, if you change the above layout parameters, make sure you manually recalculate the ssd size and modify it here, please consider a default 25% overprovisioning ratio.
 
 # Latency in nanoseconds
-pg_rd_lat=40000
-pg_wr_lat=200000
-blk_er_lat=2000000
-ch_xfer_lat=0
+pg_rd_lat=40000 # page read latency
+pg_wr_lat=200000 # page write latency
+blk_er_lat=2000000 # block erase latency
+ch_xfer_lat=0 # channel transfer time, ignored for now
 
 # GC Threshold (1-100)
 gc_thres_pcent=75
