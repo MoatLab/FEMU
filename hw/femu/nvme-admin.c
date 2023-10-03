@@ -1026,6 +1026,63 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
     return nvme_format_namespace(ns, lba_idx, meta_loc, pil, pi, sec_erase);
 }
 
+/* Namespace  */
+static uint16_t nvme_namespace_management(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
+{
+    uint32_t dw10 = le32_to_cpu(cmd->cdw10);
+    uint32_t dw11 = le32_to_cpu(cmd->cdw11);
+
+    femu_log("[ CAST ] %s - dw10:%d, dw11:%d\n\r", __func__, dw10, dw11);
+    switch (dw10) {
+    case 0:
+        femu_log("[ CAST ] nvme_namespace_management - Create %d\n\r", dw11>>24);
+        return NVME_SUCCESS;
+    case 1:
+        femu_log("[ CAST ] nvme_namespace_management - Delete\n\r");
+        return NVME_SUCCESS;
+    default:
+        femu_log("[ CAST ] nvme_namespace_management - invalid\n\r");
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+}
+static uint16_t nvme_namespace_attachment(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
+{
+    uint32_t dw10 = le32_to_cpu(cmd->cdw10);
+    uint32_t nsid = le32_to_cpu(cmd->nsid);
+
+    femu_log("[ CAST ] %s - dw10:%d nsid:%d\n\r", __func__, dw10, nsid);
+    switch (dw10) {
+    case 0:
+        femu_log("[ CAST ] nvme_namespace_attachment - Attach\n\r");
+        return 0x29;
+    case 1:
+        femu_log("[ CAST ] nvme_namespace_attachment - Detach\n\r");
+        return 0x1A;
+    default:
+        femu_log("[ CAST ] nvme_namespace_attachment - invalid\n\r");
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+}
+static uint16_t nvme_capacity_management(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
+{
+    uint32_t dw10 = le32_to_cpu(cmd->cdw10);
+    uint32_t dw11 = le32_to_cpu(cmd->cdw11);
+    uint32_t dw12 = le32_to_cpu(cmd->cdw12);
+
+    femu_log("[ CAST ] nvme_capacity_management - dw10:%d\n\r", dw10);
+    switch (dw10) {
+    case 3:
+        femu_log("[ CAST ] nvme_capacity_management - Create NVM Set[dw11:%d, dw12:%d]\n\r", dw11, dw12);
+        return NVME_SUCCESS;
+    case 4:
+        femu_log("[ CAST ] nvme_capacity_management - Delete NVM Set[dw11:%d, dw12:%d]\n\r", dw11, dw12);
+        return NVME_SUCCESS;
+    default:
+        femu_log("[ CAST ] nvme_capacity_management - invalid\n\r");
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+}
+
 static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
 {
     switch (cmd->opcode) {
@@ -1077,6 +1134,17 @@ static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     case NVME_ADM_CMD_SET_DB_MEMORY:
         femu_debug("admin cmd,set_db_memory\n");
         return nvme_set_db_memory(n, cmd);
+
+    case NVME_ADM_CMD_NS_MANAGE:
+        femu_debug("admin cmd,nvme_namespace_management\n");
+        return nvme_namespace_management(n, cmd, cqe);
+    case NVME_ADM_CMD_NS_ATTACHMENT:
+        femu_debug("admin cmd,nvme_namespace_attachment\n");
+        return nvme_namespace_attachment(n, cmd, cqe);
+    case NVME_ADM_CMD_CAPA_MANAGE:
+        femu_debug("admin cmd,nvme_capacity_management\n");
+        return nvme_capacity_management(n, cmd, cqe);
+        
     case NVME_ADM_CMD_ACTIVATE_FW:
     case NVME_ADM_CMD_DOWNLOAD_FW:
     case NVME_ADM_CMD_SECURITY_SEND:

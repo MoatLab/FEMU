@@ -2,37 +2,50 @@
 
 /* Coperd: FEMU Memory Backend (mbe) for emulated SSD */
 
-int init_dram_backend(SsdDramBackend **mbe, int64_t nbytes)
+void init_dram_backend_logical_space(SsdDramBackend **mbe, int idx, int64_t nbytes)
+{
+    SsdDramBackend *b = *mbe;
+    if (b->logical_space[idx]) {
+        munlock(b->logical_space[idx], b->sizes[idx]);
+        g_free(b->logical_space[idx]);
+    }
+    b->sizes[idx] = nbytes;
+    b->logical_space[idx] = g_malloc0(b->sizes[idx]);
+    if (mlock(b->logical_space[idx], b->sizes[idx]) == -1){
+        femu_err("Failed to pin the memory backend to the host DRAM\n");
+        g_free(b->logical_space[idx]);
+        abort();
+    }
+}
+
+int init_dram_backend(SsdDramBackend **mbe, int64_t nbytes, uint32_t num_namespaces)
 {
     SsdDramBackend *b = *mbe = g_malloc0(sizeof(SsdDramBackend));
 
-    b->size = nbytes;
-    b->logical_space = g_malloc0(nbytes);
-
-    if (mlock(b->logical_space, nbytes) == -1) {
-        femu_err("Failed to pin the memory backend to the host DRAM\n");
-        g_free(b->logical_space);
-        abort();
-    }
+    b->num_namespaces = num_namespaces;
+    b->sizes = g_malloc0(sizeof(int64_t)*num_namespaces);
+    b->logical_space = g_malloc0(sizeof(SsdDramBackend*)*num_namespaces);
 
     return 0;
 }
 
 void free_dram_backend(SsdDramBackend *b)
 {
-    if (b->logical_space) {
-        munlock(b->logical_space, b->size);
-        g_free(b->logical_space);
+    for (int i = 0; i < b->num_namespaces; i++){
+        if (b->logical_space[i]) {
+            munlock(b->logical_space[i], b->sizes[i]);
+            g_free(b->logical_space[i]);
+        }
     }
 }
 
-int backend_rw(SsdDramBackend *b, QEMUSGList *qsg, uint64_t *lbal, bool is_write)
+int backend_rw_namespace(SsdDramBackend *b, QEMUSGList *qsg, uint64_t *lbal, bool is_write, uint32_t nsid)
 {
     int sg_cur_index = 0;
     dma_addr_t sg_cur_byte = 0;
     dma_addr_t cur_addr, cur_len;
     uint64_t mb_oft = lbal[0];
-    void *mb = b->logical_space;
+    void *mb = b->logical_space[nsid-1];
 
     DMADirection dir = DMA_DIRECTION_FROM_DEVICE;
 
@@ -44,7 +57,7 @@ int backend_rw(SsdDramBackend *b, QEMUSGList *qsg, uint64_t *lbal, bool is_write
         cur_addr = qsg->sg[sg_cur_index].base + sg_cur_byte;
         cur_len = qsg->sg[sg_cur_index].len - sg_cur_byte;
         if (dma_memory_rw(qsg->as, cur_addr, mb + mb_oft, cur_len, dir, MEMTXATTRS_UNSPECIFIED)) {
-            femu_err("dma_memory_rw error\n");
+            femu_err("FEMU: dma_memory_rw error");
         }
 
         sg_cur_byte += cur_len;
@@ -67,4 +80,9 @@ int backend_rw(SsdDramBackend *b, QEMUSGList *qsg, uint64_t *lbal, bool is_write
     qemu_sglist_destroy(qsg);
 
     return 0;
+}
+
+/* For compatibility with the original (No NS) version */
+int backend_rw(SsdDramBackend *b, QEMUSGList *qsg, uint64_t *lbal, bool is_write){
+    return backend_rw_namespace(b, qsg, lbal, is_write, 1);
 }

@@ -357,7 +357,7 @@ static int nvme_init_namespace(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     nvme_ns_init_identify(n, id_ns);
 
     lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
-    num_blks = n->ns_size / ((1 << id_ns->lbaf[lba_index].lbads));
+    num_blks = ns->size / ((1 << id_ns->lbaf[lba_index].lbads));
     id_ns->nuse = id_ns->ncap = id_ns->nsze = cpu_to_le64(num_blks);
 
     n->csi = NVME_CSI_NVM;
@@ -369,19 +369,17 @@ static int nvme_init_namespace(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     return 0;
 }
 
-static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
+static int nvme_init_namespaces(FemuCtrl *n, Error **errp, uint64_t size)
 {
     int i;
 
-    /* FIXME: FEMU only supports 1 namesapce now */
-    assert(n->num_namespaces == 1);
-
     for (i = 0; i < n->num_namespaces; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
-        ns->size = n->ns_size;
-        ns->start_block = i * n->ns_size >> BDRV_SECTOR_BITS;
+        ns->size = size;
+        ns->start_block = i * ns->size >> BDRV_SECTOR_BITS;
         ns->id = i + 1;
-
+        femu_log("Namespace : %d init backend(%ldByte)\r\n", ns->id, ns->size);
+        init_dram_backend_logical_space(&n->mbe, i, ns->size);
         if (nvme_init_namespace(n, ns, errp)) {
             return 1;
         }
@@ -542,8 +540,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     }
 
     bs_size = ((int64_t)n->memsz) * 1024 * 1024;
-
-    init_dram_backend(&n->mbe, bs_size);
+    init_dram_backend(&n->mbe, bs_size, n->num_namespaces);
     n->mbe->femu_mode = n->femu_mode;
 
     n->completed = 0;
@@ -561,7 +558,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
 
     nvme_init_pci(n);
     nvme_init_ctrl(n);
-    nvme_init_namespaces(n, errp);
+    nvme_init_namespaces(n, errp, n->ns_size);
 
     nvme_register_extensions(n);
 
