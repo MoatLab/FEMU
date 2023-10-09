@@ -1,5 +1,7 @@
 #include "./nvme.h"
 
+#include "./bbssd/ftl.h"
+
 #define NVME_IDENTIFY_DATA_SIZE 4096
 
 #if 0
@@ -382,6 +384,7 @@ static uint16_t nvme_identify_ns(FemuCtrl *n, NvmeCmd *cmd)
     uint32_t nsid = le32_to_cpu(c->nsid);
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
+    femu_log("[ CAST ] %s - nsid:%d\n\r", __func__, nsid);
 
     if (!nvme_nsid_valid(n, nsid) || nsid == NVME_NSID_BROADCAST) {
         return NVME_INVALID_NSID | NVME_DNR;
@@ -392,7 +395,8 @@ static uint16_t nvme_identify_ns(FemuCtrl *n, NvmeCmd *cmd)
         return nvme_rpt_empty_id_struct(n, cmd);
     }
 
-    if (c->csi == NVME_CSI_NVM && nvme_csi_has_nvm_support(ns)) {
+    if (c->csi == NVME_CSI_NVM && nvme_csi_has_nvm_support(ns)) {   
+        femu_log("[ CAST ] %s - read IdNs\n\r", __func__);
         return dma_read_prp(n, (uint8_t *)&ns->id_ns, sizeof(NvmeIdNs),
                                  prp1, prp2);
     }
@@ -495,6 +499,7 @@ static uint16_t nvme_identify_nslist(FemuCtrl *n, NvmeCmd *cmd)
         if (j == data_len / sizeof(uint32_t)) {
             break;
         }
+        femu_log("[ CAST ] %s - id:%d \n\r", __func__, cpu_to_le32(ns->id)); 
     }
 
     return dma_read_prp(n, list, data_len, prp1, prp2);
@@ -567,14 +572,18 @@ static uint16_t nvme_identify_ns_descr_list(FemuCtrl *n, NvmeCmd *cmd)
     if (unlikely(!ns)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
-
+    femu_log("[ CAST ] %s - nsid:%d\n\r", __func__, nsid);
     ns_descrs->uuid.hdr.nidt = NVME_NIDT_UUID;
     ns_descrs->uuid.hdr.nidl = NVME_NIDL_UUID;
     memcpy(&ns_descrs->uuid.v, n->uuid.data, NVME_NIDL_UUID);
 
+    femu_log("[ CAST ] %s - memcpy\n\r", __func__);
+
     ns_descrs->csi.hdr.nidt = NVME_NIDT_CSI;
     ns_descrs->csi.hdr.nidl = NVME_NIDL_CSI;
     ns_descrs->csi.v = n->csi;
+
+    femu_log("[ CAST ] %s - csi:%d\n\r", __func__, ns_descrs->csi.v);
 
     return dma_read_prp(n, list, sizeof(list), prp1, prp2);
 }
@@ -596,6 +605,8 @@ static uint16_t nvme_identify(FemuCtrl *n, NvmeCmd *cmd)
 {
     NvmeIdentify *c = (NvmeIdentify *)cmd;
     uint32_t cns  = le32_to_cpu(c->cns);
+
+    femu_log("[ CAST ] %s - cns:%d\n\r", __func__, cns);
 
     switch (cns) {
     case NVME_ID_CNS_NS:
@@ -1027,17 +1038,89 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
 }
 
 /* Namespace  */
-static uint16_t nvme_namespace_management(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
+static void nvme_ns_init_identify(FemuCtrl *n, NvmeIdNs *id_ns)     // copy from femu.c
 {
+    int npdg;
+    int i;
+
+    /* NSFEAT Bit 3: Support the Deallocated or Unwritten Logical Block error */
+    id_ns->nsfeat        |= (0x4 | 0x10);
+    id_ns->nlbaf         = n->nlbaf - 1;
+    id_ns->flbas         = n->lba_index | (n->extended << 4);
+    id_ns->mc            = n->mc;
+    id_ns->dpc           = n->dpc;
+    id_ns->dps           = n->dps;
+    id_ns->dlfeat        = 0x9;
+    id_ns->lbaf[0].lbads = 9;
+    id_ns->lbaf[0].ms    = 0;
+
+    npdg = 1;
+    id_ns->npda = id_ns->npdg = npdg - 1;
+
+    for (i = 0; i < n->nlbaf; i++) {
+        id_ns->lbaf[i].lbads = BDRV_SECTOR_BITS + i;
+        id_ns->lbaf[i].ms    = cpu_to_le16(n->meta);
+    }
+}
+static int nvme_init_namespace(FemuCtrl *n, NvmeNamespace *ns, Error **errp)    // copy from femu.c
+{
+    NvmeIdNs *id_ns = &ns->id_ns;
+    uint64_t num_blks;
+    int lba_index;
+
+    nvme_ns_init_identify(n, id_ns);
+
+    lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
+    num_blks = ns->size / ((1 << id_ns->lbaf[lba_index].lbads));
+    id_ns->nuse = id_ns->ncap = id_ns->nsze = cpu_to_le64(num_blks);
+
+    n->csi = NVME_CSI_NVM;
+    ns->ctrl = n;
+    ns->ns_blks = ns_blks(ns, lba_index);
+    ns->util = bitmap_new(num_blks);
+    ns->uncorrectable = bitmap_new(num_blks);
+
+    return 0;
+}
+static uint16_t nvme_namespace_management(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
+{    
+    uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
+    uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
+
     uint32_t dw10 = le32_to_cpu(cmd->cdw10);
     uint32_t dw11 = le32_to_cpu(cmd->cdw11);
+    uint32_t nsid = le32_to_cpu(cmd->nsid);
+    int sel = dw10 & 0x15;
 
-    femu_log("[ CAST ] %s - dw10:%d, dw11:%d\n\r", __func__, dw10, dw11);
-    switch (dw10) {
-    case 0:
-        femu_log("[ CAST ] nvme_namespace_management - Create %d\n\r", dw11>>24);
-        return NVME_SUCCESS;
-    case 1:
+    femu_log("[ CAST ] %s - dw10:%d, nsid:%d\n\r", __func__, dw10, nsid);
+    switch (sel) {
+    case 0: /* Create Namespace */
+        femu_log("[ CAST ] nvme_namespace_management - Create sel:%d\n\r", dw11>>24);
+        if( dw11>>24 == 0 ){
+            NvmeNamespace *ns;
+            int new_nsid;
+
+            n->num_namespaces = n->num_namespaces + 1;
+            new_nsid = n->num_namespaces;
+            ns = &n->namespaces[new_nsid-1];
+            ns->id = new_nsid;
+            if(dma_write_prp(n, (uint8_t *)&(ns->id_ns), sizeof(NvmeIdNs), prp1, prp2) != NVME_SUCCESS){
+                return NVME_INVALID_FIELD | NVME_DNR;
+            }
+
+            ns->size = ns->id_ns.nsze;
+            init_dram_backend_logical_space(&n->mbe, new_nsid, ns->size);
+            if (nvme_init_namespace(n, ns, NULL)) {
+                return 1;
+            }
+
+            ns_init(n, ns);
+
+            cqe->res64 = new_nsid;
+            return NVME_SUCCESS;
+        }
+        return NVME_INVALID_FIELD | NVME_DNR;
+    case 1: /* Delete Namespace */
         femu_log("[ CAST ] nvme_namespace_management - Delete\n\r");
         return NVME_SUCCESS;
     default:
@@ -1054,10 +1137,10 @@ static uint16_t nvme_namespace_attachment(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cq
     switch (dw10) {
     case 0:
         femu_log("[ CAST ] nvme_namespace_attachment - Attach\n\r");
-        return 0x29;
+        return NVME_SUCCESS;
     case 1:
         femu_log("[ CAST ] nvme_namespace_attachment - Detach\n\r");
-        return 0x1A;
+        return NVME_SUCCESS;
     default:
         femu_log("[ CAST ] nvme_namespace_attachment - invalid\n\r");
         return NVME_INVALID_FIELD | NVME_DNR;
@@ -1085,6 +1168,8 @@ static uint16_t nvme_capacity_management(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe
 
 static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
 {
+    // femu_log("[ %s - cmd->opcode:%d ]\n\r", __func__, cmd->opcode);
+
     switch (cmd->opcode) {
     case NVME_ADM_CMD_FEMU_DEBUG:
         n->upg_rd_lat_ns = le64_to_cpu(cmd->cdw10);

@@ -10,6 +10,8 @@ void init_dram_backend_logical_space(SsdDramBackend **mbe, int idx, int64_t nbyt
         g_free(b->logical_space[idx]);
     }
     b->sizes[idx] = nbytes;
+
+    femu_log("nsid:%d allocate backend(%ldMByte)\r\n", idx, b->sizes[idx]>>20);
     b->logical_space[idx] = g_malloc0(b->sizes[idx]);
     if (mlock(b->logical_space[idx], b->sizes[idx]) == -1){
         femu_err("Failed to pin the memory backend to the host DRAM\n");
@@ -23,8 +25,8 @@ int init_dram_backend(SsdDramBackend **mbe, int64_t nbytes, uint32_t num_namespa
     SsdDramBackend *b = *mbe = g_malloc0(sizeof(SsdDramBackend));
 
     b->num_namespaces = num_namespaces;
-    b->sizes = g_malloc0(sizeof(int64_t)*num_namespaces);
-    b->logical_space = g_malloc0(sizeof(SsdDramBackend*)*num_namespaces);
+    b->sizes = g_malloc0(sizeof(int64_t) * NVME_MAX_NUM_NAMESPACES);
+    b->logical_space = g_malloc0(sizeof(SsdDramBackend*) * NVME_MAX_NUM_NAMESPACES);
 
     return 0;
 }

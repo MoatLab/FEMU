@@ -304,7 +304,7 @@ static void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     check_params(spp);
 }
 
-static void namespace_init_params(struct namespace_params *spp, struct ssdparams *ssdp, uint64_t size)
+static void namespace_init_params(struct namespace_params *spp, struct ssdparams *ssdp, uint64_t phy_size)
 {
     spp->secsz = ssdp->secsz;
     spp->secs_per_pg = ssdp->secs_per_pg;
@@ -312,12 +312,13 @@ static void namespace_init_params(struct namespace_params *spp, struct ssdparams
     spp->blks_per_pl = ssdp->blks_per_pl;
     spp->pls_per_lun = ssdp->pls_per_lun;
     spp->luns_per_ch = ssdp->luns_per_ch;
-    spp->nchs = (size/ssdp->secs_per_ch)/spp->secsz;
+    spp->nchs = (phy_size/ssdp->secs_per_ch)/spp->secsz;    
+    // same as phy_size/(ssdp->secs_per_ch*spp->secsz)
 
-    spp->pg_rd_lat = NAND_READ_LATENCY;
-    spp->pg_wr_lat = NAND_PROG_LATENCY;
-    spp->blk_er_lat = NAND_ERASE_LATENCY;
-    spp->ch_xfer_lat = 0;
+    spp->pg_rd_lat   = ssdp->pg_rd_lat;
+    spp->pg_wr_lat   = ssdp->pg_wr_lat;
+    spp->blk_er_lat  = ssdp->blk_er_lat;
+    spp->ch_xfer_lat = ssdp->ch_xfer_lat;
 
     /* calculated values */
     spp->secs_per_blk   = ssdp->secs_per_blk;
@@ -427,6 +428,25 @@ static void ssd_init_rmap(struct ssd *ssd)
     }
 }
 
+void ns_init(FemuCtrl *n, NvmeNamespace *ns)
+{
+    struct ssd *ssd = n->ssd;
+    struct ssdparams *spp = &ssd->sp;
+
+    // phy_size = ns_size * (1 + OP)
+    uint64_t phy_size;
+    phy_size = ns->size/(1024*1024) * ((uint64_t)spp->tt_secs * spp->secsz) / n->memsz;
+    ns->ssd = ssd;
+    ns->lm = g_malloc0(sizeof(struct write_pointer));
+    ns->wp = g_malloc0(sizeof(struct line_mgmt));
+    
+    namespace_init_params(&ns->sp, spp, phy_size);
+
+    set_ns_start_lpn(ns);
+    ssd_init_lines(ns);
+    ssd_init_write_pointer(ns);
+}
+
 void ssd_init(FemuCtrl *n)
 {
     struct ssd *ssd = n->ssd;
@@ -435,6 +455,9 @@ void ssd_init(FemuCtrl *n)
     ftl_assert(ssd);
 
     ssd_init_params(spp, n);
+    for( int  i = 0; i < n->num_namespaces ; i ++){
+        ns_init(n, &n->namespaces[i]);
+    }
 
     /* initialize ssd internal layout architecture */
     ssd->ch = g_malloc0(sizeof(struct ssd_channel) * spp->nchs);
@@ -447,23 +470,6 @@ void ssd_init(FemuCtrl *n)
 
     /* initialize rmap */
     ssd_init_rmap(ssd);
-
-    // assign first ch to first namespace
-    n->namespaces[0].start_ch_idx = 0;
-    for( int  i = 0; i < n->num_namespaces ; i ++){
-        n->namespaces[i].ssd = ssd;
-        n->namespaces[i].lm = g_malloc0(sizeof(struct write_pointer));
-        n->namespaces[i].wp = g_malloc0(sizeof(struct line_mgmt));
-        namespace_init_params(&n->namespaces[i].sp, spp, n->namespaces[i].size);
-
-        // assign rest ch to rest namespace
-        if( i > 0 ){
-            n->namespaces[i].start_ch_idx = n->namespaces[i-1].start_ch_idx + n->namespaces[i-1].sp.nchs;
-        }
-        set_ns_start_lpn(&n->namespaces[i]);
-        ssd_init_lines(&n->namespaces[i]);
-        ssd_init_write_pointer(&n->namespaces[i]);
-    }
 
     qemu_thread_create(&ssd->ftl_thread, "FEMU-FTL-Thread", ftl_thread, n,
                        QEMU_THREAD_JOINABLE);
@@ -851,7 +857,7 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
     uint64_t sublat, maxlat = 0;
 
     if (end_lpn >= spp->tt_pgs) {
-        ftl_err("start_lpn=%"PRIu64",tt_pgs=%d\n", start_lpn, ns->sp.tt_pgs);
+        ftl_err("start_lpn=%"PRIu64",tt_pgs=%d\r\n", start_lpn, ns->sp.tt_pgs);
     }
 
     /* normal IO read path */
@@ -888,7 +894,7 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     int r;
 
     if (end_lpn >= spp->tt_pgs) {
-        ftl_err("start_lpn=%"PRIu64",tt_pgs=%d\n", start_lpn, ns->sp.tt_pgs);
+        ftl_err("start_lpn=%"PRIu64",tt_pgs=%d\r\n", start_lpn, ns->sp.tt_pgs);
     }
 
     while (should_gc_high(ns)) {

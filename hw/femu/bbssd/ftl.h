@@ -210,6 +210,7 @@ struct ssd {
     QemuThread ftl_thread;
 };
 
+void ns_init(FemuCtrl *n, NvmeNamespace *ns);
 void ssd_init(FemuCtrl *n);
 
 #ifdef FEMU_DEBUG_FTL

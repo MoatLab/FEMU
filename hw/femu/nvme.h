@@ -1174,7 +1174,6 @@ typedef struct NvmeNamespace {
     void *wp;   // write_pointer
     void *lm;   // line_mgmt
     void *ssd;
-    uint64_t start_ch_idx;
     int start_lpn;
 
     void *state;

@@ -378,7 +378,6 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp, uint64_t size)
         ns->size = size;
         ns->start_block = i * ns->size >> BDRV_SECTOR_BITS;
         ns->id = i + 1;
-        femu_log("Namespace : %d init backend(%ldByte)\r\n", ns->id, ns->size);
         init_dram_backend_logical_space(&n->mbe, i, ns->size);
         if (nvme_init_namespace(n, ns, errp)) {
             return 1;
@@ -415,7 +414,9 @@ static void nvme_init_ctrl(FemuCtrl *n)
     id->npss         = 0;
     id->sqes         = (n->max_sqes << 4) | 0x6;
     id->cqes         = (n->max_cqes << 4) | 0x4;
-    id->nn           = cpu_to_le32(n->num_namespaces);
+    /* ns is a maximum number of namespace, not current number of namespace */
+    // id->nn           = cpu_to_le32(n->num_namespaces);   
+    id->nn           = NVME_MAX_NUM_NAMESPACES;
     id->oncs         = cpu_to_le16(n->oncs);
     subnqn           = g_strdup_printf("nqn.2019-08.org.qemu:%s", n->serial);
     strpadcpy((char *)id->subnqn, sizeof(id->subnqn), subnqn, '\0');
@@ -551,7 +552,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     /* Coperd: [1..nr_io_queues] are used as IO queues */
     n->sq = g_malloc0(sizeof(*n->sq) * (n->nr_io_queues + 1));
     n->cq = g_malloc0(sizeof(*n->cq) * (n->nr_io_queues + 1));
-    n->namespaces = g_malloc0(sizeof(*n->namespaces) * n->num_namespaces);
+    n->namespaces = g_malloc0(sizeof(*n->namespaces) * NVME_MAX_NUM_NAMESPACES);
     n->elpes = g_malloc0(sizeof(*n->elpes) * (n->elpe + 1));
     n->aer_reqs = g_malloc0(sizeof(*n->aer_reqs) * (n->aerl + 1));
     n->features.int_vector_config = g_malloc0(sizeof(*n->features.int_vector_config) * (n->nr_io_queues + 1));
