@@ -1,4 +1,5 @@
 #include "ftl.h"
+#include "../stats/stats.h"
 
 //#define FEMU_DEBUG_FTL
 
@@ -889,9 +890,11 @@ static void *ftl_thread(void *arg)
             switch (req->cmd.opcode) {
             case NVME_CMD_WRITE:
                 lat = ssd_write(ssd, req);
+                increase_write_count();
                 break;
             case NVME_CMD_READ:
                 lat = ssd_read(ssd, req);
+                increase_read_count();
                 break;
             case NVME_CMD_DSM:
                 lat = 0;

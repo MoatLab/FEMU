@@ -2,7 +2,7 @@
 [![Build Status](https://travis-ci.com/vtess/FEMU.svg?branch=master)](https://travis-ci.com/vtess/FEMU)
 [![License: GPL v2](https://img.shields.io/badge/License-GPL%20v2-blue.svg)](https://www.gnu.org/licenses/old-licenses/gpl-2.0.en.html)
 [![Platform](https://img.shields.io/badge/Platform-x86--64-brightgreen)](https://shields.io/)
-안녕 리드미
+안녕 리드미 리드미
 ```
   ______ ______ __  __ _    _ 
  |  ____|  ____|  \/  | |  | |

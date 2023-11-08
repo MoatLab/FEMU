@@ -1,5 +1,6 @@
 #include "../nvme.h"
 #include "./ftl.h"
+#include "../stats/stats.h"
 
 static void bb_init_ctrl_str(FemuCtrl *n)
 {
@@ -21,6 +22,16 @@ static void bb_init(FemuCtrl *n, Error **errp)
     ssd->ssdname = (char *)n->devname;
     femu_debug("Starting FEMU in Blackbox-SSD mode ...\n");
     ssd_init(n);
+    pthread_t stats_thread;
+
+    // 스레드 생성
+    if (pthread_create(&stats_thread, NULL, &stats_thread_func, NULL)) {
+        perror("pthread_create failed");
+        return;
+    }
+
+    // 스레드를 분리하여 메인 스레드가 종료될 때 자동으로 정리되도록 함
+    pthread_detach(stats_thread);
 }
 
 static void bb_flip(FemuCtrl *n, NvmeCmd *cmd)
