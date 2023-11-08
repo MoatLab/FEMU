@@ -31,8 +31,6 @@
 #define NVME_ID_NS_LBAF_DS(ns, lba_index) (ns->id_ns.lbaf[lba_index].lbads)
 #define NVME_ID_NS_LBAF_MS(ns, lba_index) (ns->id_ns.lbaf[lba_index].ms)
 
-void log_current_time(void);
-
 typedef struct NvmeBar {
     uint64_t    cap;
     uint32_t    vs;
