@@ -1,21 +1,4 @@
 #include "./nvme.h"
-#include <time.h>
-#include <stdio.h>
-
-void log_current_time(void) {
-    FILE *file = fopen("/home/jyp/logfile.txt", "a");
-    if (file == NULL) {
-        perror("Failed to open log file");
-        return;
-    }
-
-    time_t now = time(NULL);
-    struct tm *t = localtime(&now);
-    fprintf(file, "[%04d-%02d-%02d %02d:%02d:%02d]\n", 
-           t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
-           t->tm_hour, t->tm_min, t->tm_sec);
-    fclose(file);
-}
 
 static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
 
@@ -135,7 +118,6 @@ static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
     }
 
     nvme_inc_cq_tail(cq);
-    log_current_time();
 }
 
 static void nvme_process_cq_cpl(void *arg, int index_poller)
