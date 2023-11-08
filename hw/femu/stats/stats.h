@@ -18,10 +18,6 @@ void increase_read_count(void);
 
 void increase_write_count(void);
 
-// 통계 데이터를 리셋하는 함수
-void reset_stats(void);
-
-// 통계 데이터를 출력하는 함수
-void print_stats(void);
+void print_and_reset_stats(unsigned long);
 
 void *stats_thread_func(void*);
