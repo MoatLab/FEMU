@@ -8,8 +8,8 @@ pthread_mutex_t stats_mutex = PTHREAD_MUTEX_INITIALIZER;
 void print_and_reset_stats(unsigned long seconds) {
     pthread_mutex_lock(&stats_mutex);
     // 통계 데이터 출력
-    printf("[%lu sec] Read Count: %lu, Write Count: %lu\r\n", 
-           seconds, stats.read_count, stats.write_count);
+    printf("[%lu sec], Read_Count: %lu, IO_Write_Count: %lu, GC_Write_Count: %lu\r\n", 
+           seconds, stats.read_count, stats.io_write_count, stats.gc_write_count);
     // 통계 데이터 리셋
     memset(&stats, 0, sizeof(stats));
     pthread_mutex_unlock(&stats_mutex);
@@ -31,8 +31,14 @@ void increase_read_count(void) {
     pthread_mutex_unlock(&stats_mutex);
 }
 
-void increase_write_count(void) {
+void increase_io_write_count(void) {
     pthread_mutex_lock(&stats_mutex);
-    stats.write_count++;
+    stats.io_write_count++;
+    pthread_mutex_unlock(&stats_mutex);
+}
+
+void increase_gc_write_count(int vpc) {
+    pthread_mutex_lock(&stats_mutex);
+    stats.gc_write_count += vpc;
     pthread_mutex_unlock(&stats_mutex);
 }
