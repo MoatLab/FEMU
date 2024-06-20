@@ -130,7 +130,7 @@ static const VMStateDescription vmstate_ads7846 = {
     .version_id = 1,
     .minimum_version_id = 1,
     .post_load = ads7856_post_load,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_SSI_PERIPHERAL(ssidev, ADS7846State),
         VMSTATE_INT32_ARRAY(input, ADS7846State, 8),
         VMSTATE_INT32(noise, ADS7846State),
@@ -158,7 +158,7 @@ static void ads7846_realize(SSIPeripheral *d, Error **errp)
 
     ads7846_int_update(s);
 
-    vmstate_register(NULL, VMSTATE_INSTANCE_ID_ANY, &vmstate_ads7846, s);
+    vmstate_register_any(NULL, &vmstate_ads7846, s);
 }
 
 static void ads7846_class_init(ObjectClass *klass, void *data)

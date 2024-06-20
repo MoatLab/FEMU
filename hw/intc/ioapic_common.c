@@ -152,6 +152,7 @@ static int ioapic_dispatch_post_load(void *opaque, int version_id)
 
 static void ioapic_common_realize(DeviceState *dev, Error **errp)
 {
+    ERRP_GUARD();
     IOAPICCommonState *s = IOAPIC_COMMON(dev);
     IOAPICCommonClass *info;
 
@@ -162,6 +163,9 @@ static void ioapic_common_realize(DeviceState *dev, Error **errp)
 
     info = IOAPIC_COMMON_GET_CLASS(s);
     info->realize(dev, errp);
+    if (*errp) {
+        return;
+    }
 
     sysbus_init_mmio(SYS_BUS_DEVICE(s), &s->io_memory);
     ioapic_no++;
@@ -182,7 +186,7 @@ static const VMStateDescription vmstate_ioapic_common = {
     .minimum_version_id = 1,
     .pre_save = ioapic_dispatch_pre_save,
     .post_load = ioapic_dispatch_post_load,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT8(id, IOAPICCommonState),
         VMSTATE_UINT8(ioregsel, IOAPICCommonState),
         VMSTATE_UNUSED_V(2, 8), /* to account for qemu-kvm's v2 format */

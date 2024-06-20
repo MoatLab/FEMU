@@ -1,5 +1,5 @@
 /*
- *  Exynos4210 Pseudo Random Nubmer Generator Emulation
+ *  Exynos4210 Pseudo Random Number Generator Emulation
  *
  *  Copyright (c) 2017 Krzysztof Kozlowski <krzk@kernel.org>
  *
@@ -243,7 +243,7 @@ static const VMStateDescription exynos4210_rng_vmstate = {
     .name = TYPE_EXYNOS4210_RNG,
     .version_id = 1,
     .minimum_version_id = 1,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_INT32_ARRAY(randr_value, Exynos4210RngState,
                             EXYNOS4210_RNG_PRNG_NUM),
         VMSTATE_UINT32(seed_set, Exynos4210RngState),

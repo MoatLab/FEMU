@@ -90,6 +90,20 @@ CpuFlushCpuDataCache (
   IN EFI_CPU_FLUSH_TYPE     FlushType
   )
 {
+  switch (FlushType) {
+    case EfiCpuFlushTypeWriteBack:
+      WriteBackDataCacheRange ((VOID *)(UINTN)Start, (UINTN)Length);
+      break;
+    case EfiCpuFlushTypeInvalidate:
+      InvalidateDataCacheRange ((VOID *)(UINTN)Start, (UINTN)Length);
+      break;
+    case EfiCpuFlushTypeWriteBackInvalidate:
+      WriteBackInvalidateDataCacheRange ((VOID *)(UINTN)Start, (UINTN)Length);
+      break;
+    default:
+      return EFI_INVALID_PARAMETER;
+  }
+
   return EFI_SUCCESS;
 }
 
@@ -296,8 +310,7 @@ CpuSetMemoryAttributes (
   IN UINT64                 Attributes
   )
 {
-  DEBUG ((DEBUG_INFO, "%a: Set memory attributes not supported yet\n", __FUNCTION__));
-  return EFI_SUCCESS;
+  return RiscVSetMemoryAttributes (BaseAddress, Length, Attributes);
 }
 
 /**
@@ -328,10 +341,10 @@ InitializeCpu (
     return EFI_NOT_FOUND;
   }
 
-  DEBUG ((DEBUG_INFO, " %a: Firmware Context is at 0x%x.\n", __FUNCTION__, FirmwareContext));
+  DEBUG ((DEBUG_INFO, " %a: Firmware Context is at 0x%x.\n", __func__, FirmwareContext));
 
   mBootHartId = FirmwareContext->BootHartId;
-  DEBUG ((DEBUG_INFO, " %a: mBootHartId = 0x%x.\n", __FUNCTION__, mBootHartId));
+  DEBUG ((DEBUG_INFO, " %a: mBootHartId = 0x%x.\n", __func__, mBootHartId));
 
   InitializeCpuExceptionHandlers (NULL);
 
@@ -339,6 +352,12 @@ InitializeCpu (
   // Make sure interrupts are disabled
   //
   DisableInterrupts ();
+
+  //
+  // Enable MMU
+  //
+  Status = RiscVConfigureMmu ();
+  ASSERT_EFI_ERROR (Status);
 
   //
   // Install Boot protocol

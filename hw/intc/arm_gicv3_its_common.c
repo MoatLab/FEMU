@@ -24,6 +24,7 @@
 #include "hw/intc/arm_gicv3_its_common.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
+#include "sysemu/kvm.h"
 
 static int gicv3_its_pre_save(void *opaque)
 {
@@ -53,7 +54,7 @@ static const VMStateDescription vmstate_its = {
     .pre_save = gicv3_its_pre_save,
     .post_load = gicv3_its_post_load,
     .priority = MIG_PRI_GICV3_ITS,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT32(ctlr, GICv3ITSState),
         VMSTATE_UINT32(iidr, GICv3ITSState),
         VMSTATE_UINT64(cbaser, GICv3ITSState),
@@ -158,3 +159,13 @@ static void gicv3_its_common_register_types(void)
 }
 
 type_init(gicv3_its_common_register_types)
+
+const char *its_class_name(void)
+{
+    if (kvm_irqchip_in_kernel()) {
+        return "arm-its-kvm";
+    } else {
+        /* Software emulation based model */
+        return "arm-gicv3-its";
+    }
+}

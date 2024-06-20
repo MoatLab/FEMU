@@ -191,6 +191,11 @@ static int cryptodev_backend_account(CryptoDevBackend *backend,
     if (algtype == QCRYPTODEV_BACKEND_ALG_ASYM) {
         CryptoDevBackendAsymOpInfo *asym_op_info = op_info->u.asym_op_info;
         len = asym_op_info->src_len;
+
+        if (unlikely(!backend->asym_stat)) {
+            error_report("cryptodev: Unexpected asym operation");
+            return -VIRTIO_CRYPTO_NOTSUPP;
+        }
         switch (op_info->op_code) {
         case VIRTIO_CRYPTO_AKCIPHER_ENCRYPT:
             CryptodevAsymStatIncEncrypt(backend, len);
@@ -210,6 +215,11 @@ static int cryptodev_backend_account(CryptoDevBackend *backend,
     } else if (algtype == QCRYPTODEV_BACKEND_ALG_SYM) {
         CryptoDevBackendSymOpInfo *sym_op_info = op_info->u.sym_op_info;
         len = sym_op_info->src_len;
+
+        if (unlikely(!backend->sym_stat)) {
+            error_report("cryptodev: Unexpected sym operation");
+            return -VIRTIO_CRYPTO_NOTSUPP;
+        }
         switch (op_info->op_code) {
         case VIRTIO_CRYPTO_CIPHER_ENCRYPT:
             CryptodevSymStatIncEncrypt(backend, len);
@@ -242,10 +252,11 @@ static void cryptodev_backend_throttle_timer_cb(void *opaque)
             continue;
         }
 
-        throttle_account(&backend->ts, true, ret);
+        throttle_account(&backend->ts, THROTTLE_WRITE, ret);
         cryptodev_backend_operation(backend, op_info);
         if (throttle_enabled(&backend->tc) &&
-            throttle_schedule_timer(&backend->ts, &backend->tt, true)) {
+            throttle_schedule_timer(&backend->ts, &backend->tt,
+                                    THROTTLE_WRITE)) {
             break;
         }
     }
@@ -261,7 +272,7 @@ int cryptodev_backend_crypto_operation(
         goto do_account;
     }
 
-    if (throttle_schedule_timer(&backend->ts, &backend->tt, true) ||
+    if (throttle_schedule_timer(&backend->ts, &backend->tt, THROTTLE_WRITE) ||
         !QTAILQ_EMPTY(&backend->opinfos)) {
         QTAILQ_INSERT_TAIL(&backend->opinfos, op_info, next);
         return 0;
@@ -273,7 +284,7 @@ do_account:
         return ret;
     }
 
-    throttle_account(&backend->ts, true, ret);
+    throttle_account(&backend->ts, THROTTLE_WRITE, ret);
 
     return cryptodev_backend_operation(backend, op_info);
 }
@@ -331,8 +342,7 @@ static void cryptodev_backend_set_throttle(CryptoDevBackend *backend, int field,
     if (!enabled) {
         throttle_init(&backend->ts);
         throttle_timers_init(&backend->tt, qemu_get_aio_context(),
-                             QEMU_CLOCK_REALTIME,
-                             cryptodev_backend_throttle_timer_cb, /* FIXME */
+                             QEMU_CLOCK_REALTIME, NULL,
                              cryptodev_backend_throttle_timer_cb, backend);
     }
 
@@ -388,6 +398,7 @@ static void cryptodev_backend_set_ops(Object *obj, Visitor *v,
 static void
 cryptodev_backend_complete(UserCreatable *uc, Error **errp)
 {
+    ERRP_GUARD();
     CryptoDevBackend *backend = CRYPTODEV_BACKEND(uc);
     CryptoDevBackendClass *bc = CRYPTODEV_BACKEND_GET_CLASS(uc);
     uint32_t services;
@@ -396,11 +407,20 @@ cryptodev_backend_complete(UserCreatable *uc, Error **errp)
     QTAILQ_INIT(&backend->opinfos);
     value = backend->tc.buckets[THROTTLE_OPS_TOTAL].avg;
     cryptodev_backend_set_throttle(backend, THROTTLE_OPS_TOTAL, value, errp);
+    if (*errp) {
+        return;
+    }
     value = backend->tc.buckets[THROTTLE_BPS_TOTAL].avg;
     cryptodev_backend_set_throttle(backend, THROTTLE_BPS_TOTAL, value, errp);
+    if (*errp) {
+        return;
+    }
 
     if (bc->init) {
         bc->init(backend, errp);
+        if (*errp) {
+            return;
+        }
     }
 
     services = backend->conf.crypto_services;
@@ -522,7 +542,7 @@ static int cryptodev_backend_stats_query(Object *obj, void *data)
 
     entry = g_new0(StatsResult, 1);
     entry->provider = STATS_PROVIDER_CRYPTODEV;
-    entry->qom_path = g_strdup(object_get_canonical_path(obj));
+    entry->qom_path = object_get_canonical_path(obj);
     entry->stats = stats_list;
     QAPI_LIST_PREPEND(*stats_results, entry);
 

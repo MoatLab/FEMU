@@ -164,7 +164,7 @@ static void restore_pt_regs(struct target_pt_regs *regs, CPUSPARCState *env)
      */
     uint32_t psr;
     __get_user(psr, &regs->psr);
-    env->psr = (psr & PSR_ICC) | (env->psr & ~PSR_ICC);
+    cpu_put_psr_icc(env, psr);
 #endif
 
     /* Note that pc and npc are handled in the caller. */
@@ -199,20 +199,21 @@ static void save_fpu(struct target_siginfo_fpu *fpu, CPUSPARCState *env)
     for (i = 0; i < 32; ++i) {
         __put_user(env->fpr[i].ll, &fpu->si_double_regs[i]);
     }
-    __put_user(env->fsr, &fpu->si_fsr);
+    __put_user(cpu_get_fsr(env), &fpu->si_fsr);
     __put_user(env->gsr, &fpu->si_gsr);
     __put_user(env->fprs, &fpu->si_fprs);
 #else
     for (i = 0; i < 16; ++i) {
         __put_user(env->fpr[i].ll, &fpu->si_double_regs[i]);
     }
-    __put_user(env->fsr, &fpu->si_fsr);
+    __put_user(cpu_get_fsr(env), &fpu->si_fsr);
     __put_user(0, &fpu->si_fpqdepth);
 #endif
 }
 
 static void restore_fpu(struct target_siginfo_fpu *fpu, CPUSPARCState *env)
 {
+    target_ulong fsr;
     int i;
 
 #ifdef TARGET_SPARC64
@@ -230,15 +231,16 @@ static void restore_fpu(struct target_siginfo_fpu *fpu, CPUSPARCState *env)
             __get_user(env->fpr[i].ll, &fpu->si_double_regs[i]);
         }
     }
-    __get_user(env->fsr, &fpu->si_fsr);
     __get_user(env->gsr, &fpu->si_gsr);
     env->fprs |= fprs;
 #else
     for (i = 0; i < 16; ++i) {
         __get_user(env->fpr[i].ll, &fpu->si_double_regs[i]);
     }
-    __get_user(env->fsr, &fpu->si_fsr);
 #endif
+
+    __get_user(fsr, &fpu->si_fsr);
+    cpu_put_fsr(env, fsr);
 }
 
 #ifdef TARGET_ARCH_HAS_SETUP_FRAME
@@ -331,7 +333,7 @@ void setup_rt_frame(int sig, struct target_sigaction *ka,
 
     __put_user(0, &sf->rwin_save);  /* TODO: save_rwin_state */
 
-    tswap_siginfo(&sf->info, info);
+    sf->info = *info;
     tswap_sigset(&sf->mask, set);
     target_save_altstack(&sf->stack, env);
 
@@ -662,6 +664,7 @@ void sparc64_set_context(CPUSPARCState *env)
     __get_user(fenab, &(fpup->mcfpu_enab));
     if (fenab) {
         abi_ulong fprs;
+        abi_ulong fsr;
 
         /*
          * We use the FPRS from the guest only in deciding whether
@@ -690,7 +693,8 @@ void sparc64_set_context(CPUSPARCState *env)
                 __get_user(env->fpr[i].ll, &(fpup->mcfpu_fregs.dregs[i]));
             }
         }
-        __get_user(env->fsr, &(fpup->mcfpu_fsr));
+        __get_user(fsr, &(fpup->mcfpu_fsr));
+        cpu_put_fsr(env, fsr);
         __get_user(env->gsr, &(fpup->mcfpu_gsr));
     }
     unlock_user_struct(ucp, ucp_addr, 0);

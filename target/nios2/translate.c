@@ -29,11 +29,14 @@
 #include "exec/helper-proto.h"
 #include "exec/helper-gen.h"
 #include "exec/log.h"
-#include "exec/cpu_ldst.h"
 #include "exec/translator.h"
 #include "qemu/qemu-print.h"
-#include "exec/gen-icount.h"
 #include "semihosting/semihost.h"
+
+#define HELPER_H "helper.h"
+#include "exec/helper-info.c.inc"
+#undef  HELPER_H
+
 
 /* is_jmp field values */
 #define DISAS_UPDATE  DISAS_TARGET_1 /* cpu state was modified dynamically */
@@ -206,7 +209,7 @@ static void t_gen_helper_raise_exception(DisasContext *dc, uint32_t index)
 {
     /* Note that PC is advanced for all hardware exceptions. */
     tcg_gen_movi_tl(cpu_pc, dc->base.pc_next);
-    gen_helper_raise_exception(cpu_env, tcg_constant_i32(index));
+    gen_helper_raise_exception(tcg_env, tcg_constant_i32(index));
     dc->base.is_jmp = DISAS_NORETURN;
 }
 
@@ -241,7 +244,7 @@ static void gen_jumpr(DisasContext *dc, int regno, bool is_call)
     tcg_gen_lookup_and_goto_ptr();
 
     gen_set_label(l);
-    tcg_gen_st_tl(dest, cpu_env, offsetof(CPUNios2State, ctrl[CR_BADADDR]));
+    tcg_gen_st_tl(dest, tcg_env, offsetof(CPUNios2State, ctrl[CR_BADADDR]));
     t_gen_helper_raise_exception(dc, EXCP_UNALIGND);
 
     dc->base.is_jmp = DISAS_NORETURN;
@@ -298,6 +301,11 @@ static void gen_ldx(DisasContext *dc, uint32_t code, uint32_t flags)
     TCGv data = dest_gpr(dc, instr.b);
 
     tcg_gen_addi_tl(addr, load_gpr(dc, instr.a), instr.imm16.s);
+#ifdef CONFIG_USER_ONLY
+    flags |= MO_UNALN;
+#else
+    flags |= MO_ALIGN;
+#endif
     tcg_gen_qemu_ld_tl(data, addr, dc->mem_idx, flags);
 }
 
@@ -309,6 +317,11 @@ static void gen_stx(DisasContext *dc, uint32_t code, uint32_t flags)
 
     TCGv addr = tcg_temp_new();
     tcg_gen_addi_tl(addr, load_gpr(dc, instr.a), instr.imm16.s);
+#ifdef CONFIG_USER_ONLY
+    flags |= MO_UNALN;
+#else
+    flags |= MO_ALIGN;
+#endif
     tcg_gen_qemu_st_tl(val, addr, dc->mem_idx, flags);
 }
 
@@ -401,7 +414,7 @@ static void rdprs(DisasContext *dc, uint32_t code, uint32_t flags)
 #else
     I_TYPE(instr, code);
     TCGv dest = dest_gpr(dc, instr.b);
-    gen_helper_rdprs(dest, cpu_env, tcg_constant_i32(instr.a));
+    gen_helper_rdprs(dest, tcg_env, tcg_constant_i32(instr.a));
     tcg_gen_addi_tl(dest, dest, instr.imm16.s);
 #endif
 }
@@ -422,19 +435,19 @@ static const Nios2Instruction i_type_instructions[] = {
     INSTRUCTION_FLG(gen_cmpxxsi, TCG_COND_GE),        /* cmpgei */
     INSTRUCTION_ILLEGAL(),
     INSTRUCTION_ILLEGAL(),
-    INSTRUCTION_FLG(gen_ldx, MO_UW),                  /* ldhu */
+    INSTRUCTION_FLG(gen_ldx, MO_TEUW),                /* ldhu */
     INSTRUCTION(andi),                                /* andi */
-    INSTRUCTION_FLG(gen_stx, MO_UW),                  /* sth */
+    INSTRUCTION_FLG(gen_stx, MO_TEUW),                /* sth */
     INSTRUCTION_FLG(gen_bxx, TCG_COND_GE),            /* bge */
-    INSTRUCTION_FLG(gen_ldx, MO_SW),                  /* ldh */
+    INSTRUCTION_FLG(gen_ldx, MO_TESW),                /* ldh */
     INSTRUCTION_FLG(gen_cmpxxsi, TCG_COND_LT),        /* cmplti */
     INSTRUCTION_ILLEGAL(),
     INSTRUCTION_ILLEGAL(),
     INSTRUCTION_NOP(),                                /* initda */
     INSTRUCTION(ori),                                 /* ori */
-    INSTRUCTION_FLG(gen_stx, MO_UL),                  /* stw */
+    INSTRUCTION_FLG(gen_stx, MO_TEUL),                /* stw */
     INSTRUCTION_FLG(gen_bxx, TCG_COND_LT),            /* blt */
-    INSTRUCTION_FLG(gen_ldx, MO_UL),                  /* ldw */
+    INSTRUCTION_FLG(gen_ldx, MO_TEUL),                /* ldw */
     INSTRUCTION_FLG(gen_cmpxxsi, TCG_COND_NE),        /* cmpnei */
     INSTRUCTION_ILLEGAL(),
     INSTRUCTION_ILLEGAL(),
@@ -454,19 +467,19 @@ static const Nios2Instruction i_type_instructions[] = {
     INSTRUCTION_FLG(gen_cmpxxui, TCG_COND_GEU),       /* cmpgeui */
     INSTRUCTION_ILLEGAL(),
     INSTRUCTION_ILLEGAL(),
-    INSTRUCTION_FLG(gen_ldx, MO_UW),                  /* ldhuio */
+    INSTRUCTION_FLG(gen_ldx, MO_TEUW),                /* ldhuio */
     INSTRUCTION(andhi),                               /* andhi */
-    INSTRUCTION_FLG(gen_stx, MO_UW),                  /* sthio */
+    INSTRUCTION_FLG(gen_stx, MO_TEUW),                /* sthio */
     INSTRUCTION_FLG(gen_bxx, TCG_COND_GEU),           /* bgeu */
-    INSTRUCTION_FLG(gen_ldx, MO_SW),                  /* ldhio */
+    INSTRUCTION_FLG(gen_ldx, MO_TESW),                /* ldhio */
     INSTRUCTION_FLG(gen_cmpxxui, TCG_COND_LTU),       /* cmpltui */
     INSTRUCTION_ILLEGAL(),
     INSTRUCTION_UNIMPLEMENTED(),                      /* custom */
     INSTRUCTION_NOP(),                                /* initd */
     INSTRUCTION(orhi),                                /* orhi */
-    INSTRUCTION_FLG(gen_stx, MO_SL),                  /* stwio */
+    INSTRUCTION_FLG(gen_stx, MO_TESL),                /* stwio */
     INSTRUCTION_FLG(gen_bxx, TCG_COND_LTU),           /* bltu */
-    INSTRUCTION_FLG(gen_ldx, MO_UL),                  /* ldwio */
+    INSTRUCTION_FLG(gen_ldx, MO_TEUL),                /* ldwio */
     INSTRUCTION(rdprs),                               /* rdprs */
     INSTRUCTION_ILLEGAL(),
     INSTRUCTION_FLG(handle_r_type_instr, 0),          /* R-Type */
@@ -495,10 +508,10 @@ static void eret(DisasContext *dc, uint32_t code, uint32_t flags)
 #else
     if (FIELD_EX32(dc->tb_flags, TBFLAGS, CRS0)) {
         TCGv tmp = tcg_temp_new();
-        tcg_gen_ld_tl(tmp, cpu_env, offsetof(CPUNios2State, ctrl[CR_ESTATUS]));
-        gen_helper_eret(cpu_env, tmp, load_gpr(dc, R_EA));
+        tcg_gen_ld_tl(tmp, tcg_env, offsetof(CPUNios2State, ctrl[CR_ESTATUS]));
+        gen_helper_eret(tcg_env, tmp, load_gpr(dc, R_EA));
     } else {
-        gen_helper_eret(cpu_env, load_gpr(dc, R_SSTATUS), load_gpr(dc, R_EA));
+        gen_helper_eret(tcg_env, load_gpr(dc, R_SSTATUS), load_gpr(dc, R_EA));
     }
     dc->base.is_jmp = DISAS_NORETURN;
 #endif
@@ -524,8 +537,8 @@ static void bret(DisasContext *dc, uint32_t code, uint32_t flags)
     g_assert_not_reached();
 #else
     TCGv tmp = tcg_temp_new();
-    tcg_gen_ld_tl(tmp, cpu_env, offsetof(CPUNios2State, ctrl[CR_BSTATUS]));
-    gen_helper_eret(cpu_env, tmp, load_gpr(dc, R_BA));
+    tcg_gen_ld_tl(tmp, tcg_env, offsetof(CPUNios2State, ctrl[CR_BSTATUS]));
+    gen_helper_eret(tcg_env, tmp, load_gpr(dc, R_BA));
 
     dc->base.is_jmp = DISAS_NORETURN;
 #endif
@@ -589,12 +602,12 @@ static void rdctl(DisasContext *dc, uint32_t code, uint32_t flags)
          */
         t1 = tcg_temp_new();
         t2 = tcg_temp_new();
-        tcg_gen_ld_tl(t1, cpu_env, offsetof(CPUNios2State, ctrl[CR_IPENDING]));
-        tcg_gen_ld_tl(t2, cpu_env, offsetof(CPUNios2State, ctrl[CR_IENABLE]));
+        tcg_gen_ld_tl(t1, tcg_env, offsetof(CPUNios2State, ctrl[CR_IPENDING]));
+        tcg_gen_ld_tl(t2, tcg_env, offsetof(CPUNios2State, ctrl[CR_IENABLE]));
         tcg_gen_and_tl(dest, t1, t2);
         break;
     default:
-        tcg_gen_ld_tl(dest, cpu_env,
+        tcg_gen_ld_tl(dest, tcg_env,
                       offsetof(CPUNios2State, ctrl[instr.imm5]));
         break;
     }
@@ -624,13 +637,13 @@ static void wrctl(DisasContext *dc, uint32_t code, uint32_t flags)
 
     switch (instr.imm5) {
     case CR_PTEADDR:
-        gen_helper_mmu_write_pteaddr(cpu_env, v);
+        gen_helper_mmu_write_pteaddr(tcg_env, v);
         break;
     case CR_TLBACC:
-        gen_helper_mmu_write_tlbacc(cpu_env, v);
+        gen_helper_mmu_write_tlbacc(tcg_env, v);
         break;
     case CR_TLBMISC:
-        gen_helper_mmu_write_tlbmisc(cpu_env, v);
+        gen_helper_mmu_write_tlbmisc(tcg_env, v);
         break;
     case CR_STATUS:
     case CR_IENABLE:
@@ -640,7 +653,7 @@ static void wrctl(DisasContext *dc, uint32_t code, uint32_t flags)
     default:
         if (wr == -1) {
             /* The register is entirely writable. */
-            tcg_gen_st_tl(v, cpu_env, ofs);
+            tcg_gen_st_tl(v, tcg_env, ofs);
         } else {
             /*
              * The register is partially read-only or reserved:
@@ -652,12 +665,12 @@ static void wrctl(DisasContext *dc, uint32_t code, uint32_t flags)
 
             if (ro != 0) {
                 TCGv o = tcg_temp_new();
-                tcg_gen_ld_tl(o, cpu_env, ofs);
+                tcg_gen_ld_tl(o, tcg_env, ofs);
                 tcg_gen_andi_tl(o, o, ro);
                 tcg_gen_or_tl(n, n, o);
             }
 
-            tcg_gen_st_tl(n, cpu_env, ofs);
+            tcg_gen_st_tl(n, tcg_env, ofs);
         }
         break;
     }
@@ -679,7 +692,7 @@ static void wrprs(DisasContext *dc, uint32_t code, uint32_t flags)
     g_assert_not_reached();
 #else
     R_TYPE(instr, code);
-    gen_helper_wrprs(cpu_env, tcg_constant_i32(instr.c),
+    gen_helper_wrprs(tcg_env, tcg_constant_i32(instr.c),
                      load_gpr(dc, instr.a));
     /*
      * The expected write to PRS[r0] is 0, from CRS[r0].
@@ -776,14 +789,14 @@ gen_rr_shift(ror, rotr)
 static void divs(DisasContext *dc, uint32_t code, uint32_t flags)
 {
     R_TYPE(instr, (code));
-    gen_helper_divs(dest_gpr(dc, instr.c), cpu_env,
+    gen_helper_divs(dest_gpr(dc, instr.c), tcg_env,
                     load_gpr(dc, instr.a), load_gpr(dc, instr.b));
 }
 
 static void divu(DisasContext *dc, uint32_t code, uint32_t flags)
 {
     R_TYPE(instr, (code));
-    gen_helper_divu(dest_gpr(dc, instr.c), cpu_env,
+    gen_helper_divu(dest_gpr(dc, instr.c), tcg_env,
                     load_gpr(dc, instr.a), load_gpr(dc, instr.b));
 }
 
@@ -796,7 +809,7 @@ static void trap(DisasContext *dc, uint32_t code, uint32_t flags)
      * things easier for cpu_loop if we pop this into env->error_code.
      */
     R_TYPE(instr, code);
-    tcg_gen_st_i32(tcg_constant_i32(instr.imm5), cpu_env,
+    tcg_gen_st_i32(tcg_constant_i32(instr.imm5), tcg_env,
                    offsetof(CPUNios2State, error_code));
 #endif
     t_gen_helper_raise_exception(dc, EXCP_TRAP);
@@ -931,11 +944,11 @@ static const char * const cr_regnames[NUM_CR_REGS] = {
 static void nios2_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
 {
     DisasContext *dc = container_of(dcbase, DisasContext, base);
-    CPUNios2State *env = cs->env_ptr;
+    CPUNios2State *env = cpu_env(cs);
     Nios2CPU *cpu = env_archcpu(env);
     int page_insns;
 
-    dc->mem_idx = cpu_mmu_index(env, false);
+    dc->mem_idx = cpu_mmu_index(cs, false);
     dc->cr_state = cpu->cr_state;
     dc->tb_flags = dc->base.tb->flags;
     dc->eic_present = cpu->eic_present;
@@ -957,7 +970,6 @@ static void nios2_tr_insn_start(DisasContextBase *dcbase, CPUState *cs)
 static void nios2_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
 {
     DisasContext *dc = container_of(dcbase, DisasContext, base);
-    CPUNios2State *env = cs->env_ptr;
     const Nios2Instruction *instr;
     uint32_t code, pc;
     uint8_t op;
@@ -967,7 +979,7 @@ static void nios2_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
     dc->base.pc_next = pc + 4;
 
     /* Decode an instruction */
-    code = cpu_ldl_code(env, pc);
+    code = cpu_ldl_code(cpu_env(cs), pc);
     op = get_opcode(code);
 
     if (unlikely(op >= ARRAY_SIZE(i_type_instructions))) {
@@ -1023,7 +1035,7 @@ static const TranslatorOps nios2_tr_ops = {
 };
 
 void gen_intermediate_code(CPUState *cs, TranslationBlock *tb, int *max_insns,
-                           target_ulong pc, void *host_pc)
+                           vaddr pc, void *host_pc)
 {
     DisasContext dc;
     translator_loop(cs, tb, max_insns, pc, host_pc, &nios2_tr_ops, &dc.base);
@@ -1071,7 +1083,7 @@ void nios2_cpu_dump_state(CPUState *cs, FILE *f, int flags)
 void nios2_tcg_init(void)
 {
 #ifndef CONFIG_USER_ONLY
-    TCGv_ptr crs = tcg_global_mem_new_ptr(cpu_env,
+    TCGv_ptr crs = tcg_global_mem_new_ptr(tcg_env,
                                           offsetof(CPUNios2State, regs), "crs");
 
     for (int i = 0; i < NUM_GP_REGS; i++) {
@@ -1084,12 +1096,12 @@ void nios2_tcg_init(void)
 #endif
 
     for (int i = 0; i < NUM_GP_REGS; i++) {
-        cpu_R[i] = tcg_global_mem_new(cpu_env, offsetof_regs0(i),
+        cpu_R[i] = tcg_global_mem_new(tcg_env, offsetof_regs0(i),
                                       gr_regnames[i]);
     }
 
 #undef offsetof_regs0
 
-    cpu_pc = tcg_global_mem_new(cpu_env,
+    cpu_pc = tcg_global_mem_new(tcg_env,
                                 offsetof(CPUNios2State, pc), "pc");
 }

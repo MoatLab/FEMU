@@ -95,9 +95,9 @@ end:
     return ret;
 }
 
-static int raw_apply_options(BlockDriverState *bs, BDRVRawState *s,
-                             uint64_t offset, bool has_size, uint64_t size,
-                             Error **errp)
+static int GRAPH_RDLOCK
+raw_apply_options(BlockDriverState *bs, BDRVRawState *s, uint64_t offset,
+                  bool has_size, uint64_t size, Error **errp)
 {
     int64_t real_size = 0;
 
@@ -144,6 +144,9 @@ static int raw_reopen_prepare(BDRVReopenState *reopen_state,
     bool has_size;
     uint64_t offset, size;
     int ret;
+
+    GLOBAL_STATE_CODE();
+    GRAPH_RDLOCK_GUARD_MAINLOOP();
 
     assert(reopen_state != NULL);
     assert(reopen_state->bs != NULL);
@@ -214,7 +217,7 @@ raw_co_preadv(BlockDriverState *bs, int64_t offset, int64_t bytes,
         return ret;
     }
 
-    BLKDBG_EVENT(bs->file, BLKDBG_READ_AIO);
+    BLKDBG_CO_EVENT(bs->file, BLKDBG_READ_AIO);
     return bdrv_co_preadv(bs->file, offset, bytes, qiov, flags);
 }
 
@@ -268,7 +271,7 @@ raw_co_pwritev(BlockDriverState *bs, int64_t offset, int64_t bytes,
         goto fail;
     }
 
-    BLKDBG_EVENT(bs->file, BLKDBG_WRITE_AIO);
+    BLKDBG_CO_EVENT(bs->file, BLKDBG_WRITE_AIO);
     ret = bdrv_co_pwritev(bs->file, offset, bytes, qiov, flags);
 
 fail:
@@ -279,11 +282,10 @@ fail:
     return ret;
 }
 
-static int coroutine_fn raw_co_block_status(BlockDriverState *bs,
-                                            bool want_zero, int64_t offset,
-                                            int64_t bytes, int64_t *pnum,
-                                            int64_t *map,
-                                            BlockDriverState **file)
+static int coroutine_fn GRAPH_RDLOCK
+raw_co_block_status(BlockDriverState *bs, bool want_zero, int64_t offset,
+                    int64_t bytes, int64_t *pnum, int64_t *map,
+                    BlockDriverState **file)
 {
     BDRVRawState *s = bs->opaque;
     *pnum = bytes;
@@ -315,6 +317,28 @@ raw_co_pdiscard(BlockDriverState *bs, int64_t offset, int64_t bytes)
         return ret;
     }
     return bdrv_co_pdiscard(bs->file, offset, bytes);
+}
+
+static int coroutine_fn GRAPH_RDLOCK
+raw_co_zone_report(BlockDriverState *bs, int64_t offset,
+                   unsigned int *nr_zones,
+                   BlockZoneDescriptor *zones)
+{
+    return bdrv_co_zone_report(bs->file->bs, offset, nr_zones, zones);
+}
+
+static int coroutine_fn GRAPH_RDLOCK
+raw_co_zone_mgmt(BlockDriverState *bs, BlockZoneOp op,
+                 int64_t offset, int64_t len)
+{
+    return bdrv_co_zone_mgmt(bs->file->bs, op, offset, len);
+}
+
+static int coroutine_fn GRAPH_RDLOCK
+raw_co_zone_append(BlockDriverState *bs,int64_t *offset, QEMUIOVector *qiov,
+                   BdrvRequestFlags flags)
+{
+    return bdrv_co_zone_append(bs->file->bs, offset, qiov, flags);
 }
 
 static int64_t coroutine_fn GRAPH_RDLOCK
@@ -369,13 +393,13 @@ static BlockMeasureInfo *raw_measure(QemuOpts *opts, BlockDriverState *in_bs,
     return info;
 }
 
-static int coroutine_fn
+static int coroutine_fn GRAPH_RDLOCK
 raw_co_get_info(BlockDriverState *bs, BlockDriverInfo *bdi)
 {
     return bdrv_co_get_info(bs->file->bs, bdi);
 }
 
-static void raw_refresh_limits(BlockDriverState *bs, Error **errp)
+static void GRAPH_RDLOCK raw_refresh_limits(BlockDriverState *bs, Error **errp)
 {
     bs->bl.has_variable_length = bs->file->bs->bl.has_variable_length;
 
@@ -430,12 +454,12 @@ raw_co_ioctl(BlockDriverState *bs, unsigned long int req, void *buf)
     return bdrv_co_ioctl(bs->file->bs, req, buf);
 }
 
-static int raw_has_zero_init(BlockDriverState *bs)
+static int GRAPH_RDLOCK raw_has_zero_init(BlockDriverState *bs)
 {
     return bdrv_has_zero_init(bs->file->bs);
 }
 
-static int coroutine_fn GRAPH_RDLOCK
+static int coroutine_fn GRAPH_UNLOCKED
 raw_co_create_opts(BlockDriver *drv, const char *filename,
                    QemuOpts *opts, Error **errp)
 {
@@ -450,6 +474,8 @@ static int raw_open(BlockDriverState *bs, QDict *options, int flags,
     uint64_t offset, size;
     BdrvChildRole file_role;
     int ret;
+
+    GLOBAL_STATE_CODE();
 
     ret = raw_read_options(options, &offset, &has_size, &size, errp);
     if (ret < 0) {
@@ -468,6 +494,8 @@ static int raw_open(BlockDriverState *bs, QDict *options, int flags,
 
     bdrv_open_child(NULL, options, "file", bs, &child_of_bds,
                     file_role, false, errp);
+
+    GRAPH_RDLOCK_GUARD_MAINLOOP();
     if (!bs->file) {
         return -EINVAL;
     }
@@ -514,7 +542,8 @@ static int raw_probe(const uint8_t *buf, int buf_size, const char *filename)
     return 1;
 }
 
-static int raw_probe_blocksizes(BlockDriverState *bs, BlockSizes *bsz)
+static int GRAPH_RDLOCK
+raw_probe_blocksizes(BlockDriverState *bs, BlockSizes *bsz)
 {
     BDRVRawState *s = bs->opaque;
     int ret;
@@ -531,7 +560,8 @@ static int raw_probe_blocksizes(BlockDriverState *bs, BlockSizes *bsz)
     return 0;
 }
 
-static int raw_probe_geometry(BlockDriverState *bs, HDGeometry *geo)
+static int GRAPH_RDLOCK
+raw_probe_geometry(BlockDriverState *bs, HDGeometry *geo)
 {
     BDRVRawState *s = bs->opaque;
     if (s->offset || s->has_size) {
@@ -581,7 +611,7 @@ static const char *const raw_strong_runtime_opts[] = {
     NULL
 };
 
-static void raw_cancel_in_flight(BlockDriverState *bs)
+static void GRAPH_RDLOCK raw_cancel_in_flight(BlockDriverState *bs)
 {
     bdrv_cancel_in_flight(bs->file->bs);
 }
@@ -608,6 +638,7 @@ static void raw_child_perm(BlockDriverState *bs, BdrvChild *c,
 BlockDriver bdrv_raw = {
     .format_name          = "raw",
     .instance_size        = sizeof(BDRVRawState),
+    .supports_zoned_children = true,
     .bdrv_probe           = &raw_probe,
     .bdrv_reopen_prepare  = &raw_reopen_prepare,
     .bdrv_reopen_commit   = &raw_reopen_commit,
@@ -619,6 +650,9 @@ BlockDriver bdrv_raw = {
     .bdrv_co_pwritev      = &raw_co_pwritev,
     .bdrv_co_pwrite_zeroes = &raw_co_pwrite_zeroes,
     .bdrv_co_pdiscard     = &raw_co_pdiscard,
+    .bdrv_co_zone_report  = &raw_co_zone_report,
+    .bdrv_co_zone_mgmt  = &raw_co_zone_mgmt,
+    .bdrv_co_zone_append = &raw_co_zone_append,
     .bdrv_co_block_status = &raw_co_block_status,
     .bdrv_co_copy_range_from = &raw_co_copy_range_from,
     .bdrv_co_copy_range_to  = &raw_co_copy_range_to,

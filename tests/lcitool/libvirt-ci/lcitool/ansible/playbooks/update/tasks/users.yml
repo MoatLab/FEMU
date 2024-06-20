@@ -2,7 +2,8 @@
 - name: 'root: Set password'
   user:
     name: root
-    password: '{{ install.root_password|password_hash("sha512") }}'
+    password: '{{ install.root_password|password_hash("sha512",
+                                                      salt="root.salt") }}'
 
 - name: 'root: Configure ssh access [{{ install.ssh_key }}]'
   authorized_key:
@@ -27,13 +28,13 @@
     name: '{{ install.flavor }}'
     group: '{{ install.flavor }}'
     comment: '{{ install.flavor }}'
-    password: '*'
     shell: '{{ paths.bash }}'
 
 - name: '{{ install.flavor }}: Set password'
   user:
     name: '{{ install.flavor }}'
-    password: '{{ "test"|password_hash("sha512") }}'
+    password: '{{ "test"|password_hash("sha512",
+                                       salt=install.flavor + ".salt") }}'
   when:
     - install.flavor == 'test'
 

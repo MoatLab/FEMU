@@ -10,10 +10,17 @@ config FDT_GPIO
 
 if FDT_GPIO
 
+config FDT_GPIO_DESIGNWARE
+	bool "DesignWare GPIO driver"
+	default n
+
 config FDT_GPIO_SIFIVE
 	bool "SiFive GPIO FDT driver"
 	default n
 
+config FDT_GPIO_STARFIVE
+	bool "StarFive GPIO FDT driver"
+	default n
 endif
 
 config GPIO

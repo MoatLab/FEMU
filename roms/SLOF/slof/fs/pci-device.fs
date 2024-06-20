@@ -95,7 +95,7 @@ s" dma-function.fs" included
 \ if Bus Master function is needed it should be enabled/disabled by open/close in the device driver code
 pci-device-disable
 
-\ Enalbe #PERR and #SERR reporting
+\ Enable #PERR and #SERR reporting
 pci-error-enable
 
 \ Print out device information

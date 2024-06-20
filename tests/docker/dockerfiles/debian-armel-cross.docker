@@ -1,6 +1,6 @@
 # THIS FILE WAS AUTO-GENERATED
 #
-#  $ lcitool dockerfile --layers all --cross armv6l debian-11 qemu
+#  $ lcitool dockerfile --layers all --cross-arch armv6l debian-11 qemu
 #
 # https://gitlab.com/libvirt/libvirt-ci
 
@@ -24,8 +24,8 @@ RUN export DEBIAN_FRONTEND=noninteractive && \
                       exuberant-ctags \
                       findutils \
                       flex \
+                      gcc \
                       gcovr \
-                      genisoimage \
                       gettext \
                       git \
                       hostname \
@@ -37,6 +37,7 @@ RUN export DEBIAN_FRONTEND=noninteractive && \
                       locales \
                       make \
                       meson \
+                      mtools \
                       ncat \
                       ninja-build \
                       openssh-client \
@@ -46,9 +47,11 @@ RUN export DEBIAN_FRONTEND=noninteractive && \
                       python3-opencv \
                       python3-pillow \
                       python3-pip \
+                      python3-setuptools \
                       python3-sphinx \
                       python3-sphinx-rtd-theme \
                       python3-venv \
+                      python3-wheel \
                       python3-yaml \
                       rpm2cpio \
                       sed \
@@ -57,11 +60,14 @@ RUN export DEBIAN_FRONTEND=noninteractive && \
                       tar \
                       tesseract-ocr \
                       tesseract-ocr-eng \
+                      xorriso \
                       zstd && \
     eatmydata apt-get autoremove -y && \
     eatmydata apt-get autoclean -y && \
     sed -Ei 's,^# (en_US\.UTF-8 .*)$,\1,' /etc/locale.gen && \
     dpkg-reconfigure locales
+
+RUN /usr/bin/pip3 install tomli
 
 ENV CCACHE_WRAPPERSDIR "/usr/libexec/ccache-wrappers"
 ENV LANG "en_US.UTF-8"
@@ -78,7 +84,7 @@ RUN export DEBIAN_FRONTEND=noninteractive && \
                       g++-arm-linux-gnueabi \
                       gcc-arm-linux-gnueabi \
                       libaio-dev:armel \
-                      libasan5:armel \
+                      libasan6:armel \
                       libasound2-dev:armel \
                       libattr1-dev:armel \
                       libbpf-dev:armel \
@@ -114,6 +120,7 @@ RUN export DEBIAN_FRONTEND=noninteractive && \
                       libnfs-dev:armel \
                       libnuma-dev:armel \
                       libpam0g-dev:armel \
+                      libpipewire-0.3-dev:armel \
                       libpixman-1-dev:armel \
                       libpng-dev:armel \
                       libpulse-dev:armel \
@@ -146,7 +153,7 @@ RUN export DEBIAN_FRONTEND=noninteractive && \
     eatmydata apt-get autoremove -y && \
     eatmydata apt-get autoclean -y && \
     mkdir -p /usr/local/share/meson/cross && \
-    echo "[binaries]\n\
+    printf "[binaries]\n\
 c = '/usr/bin/arm-linux-gnueabi-gcc'\n\
 ar = '/usr/bin/arm-linux-gnueabi-gcc-ar'\n\
 strip = '/usr/bin/arm-linux-gnueabi-strip'\n\
@@ -156,7 +163,7 @@ pkgconfig = '/usr/bin/arm-linux-gnueabi-pkg-config'\n\
 system = 'linux'\n\
 cpu_family = 'arm'\n\
 cpu = 'arm'\n\
-endian = 'little'" > /usr/local/share/meson/cross/arm-linux-gnueabi && \
+endian = 'little'\n" > /usr/local/share/meson/cross/arm-linux-gnueabi && \
     dpkg-query --showformat '${Package}_${Version}_${Architecture}\n' --show > /packages.txt && \
     mkdir -p /usr/libexec/ccache-wrappers && \
     ln -s /usr/bin/ccache /usr/libexec/ccache-wrappers/arm-linux-gnueabi-c++ && \

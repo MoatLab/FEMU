@@ -18,73 +18,45 @@
 
 struct plicsw_data plicsw;
 
-static inline void plicsw_claim(void)
+static void plicsw_ipi_send(u32 hart_index)
 {
-	u32 hartid = current_hartid();
+	ulong pending_reg;
+	u32 interrupt_id, word_index, pending_bit;
+	u32 target_hart = sbi_hartindex_to_hartid(hart_index);
 
-	if (plicsw.hart_count <= hartid)
+	if (plicsw.hart_count <= target_hart)
 		ebreak();
 
-	plicsw.source_id[hartid] =
-		readl((void *)plicsw.addr + PLICSW_CONTEXT_BASE +
-		      PLICSW_CONTEXT_CLAIM + PLICSW_CONTEXT_STRIDE * hartid);
-}
-
-static inline void plicsw_complete(void)
-{
-	u32 hartid = current_hartid();
-	u32 source = plicsw.source_id[hartid];
-
-	writel(source, (void *)plicsw.addr + PLICSW_CONTEXT_BASE +
-			       PLICSW_CONTEXT_CLAIM +
-			       PLICSW_CONTEXT_STRIDE * hartid);
-}
-
-static inline void plic_sw_pending(u32 target_hart)
-{
 	/*
-	 * The pending array registers are w1s type.
-	 * IPI pending array mapping as following:
-	 *
-	 * Pending array start address: base + 0x1000
-	 * ---------------------------------
-	 * | hart3 | hart2 | hart1 | hart0 |
-	 * ---------------------------------
-	 * Each hartX can send IPI to another hart by setting the
-	 * bitY to its own region (see the below).
-	 *
-	 * In each hartX region:
-	 * <---------- PICSW_PENDING_STRIDE -------->
-	 * | bit7 | ... | bit3 | bit2 | bit1 | bit0 |
-	 * ------------------------------------------
-	 * The bitY of hartX region indicates that hartX sends an
-	 * IPI to hartY.
+	 * We assign a single bit for each hart.
+	 * Bit 0 is hardwired to 0, thus unavailable.
+	 * Bit(X+1) indicates that IPI is sent to hartX.
 	 */
-	u32 hartid	    = current_hartid();
-	u32 word_index	    = hartid / 4;
-	u32 per_hart_offset = PLICSW_PENDING_STRIDE * hartid;
-	u32 val		    = 1 << target_hart << per_hart_offset;
+	interrupt_id = target_hart + 1;
+	word_index   = interrupt_id / 32;
+	pending_bit  = interrupt_id % 32;
+	pending_reg  = plicsw.addr + PLICSW_PENDING_BASE + word_index * 4;
 
-	writel(val, (void *)plicsw.addr + PLICSW_PENDING_BASE + word_index * 4);
+	/* Set target hart's mip.MSIP */
+	writel_relaxed(BIT(pending_bit), (void *)pending_reg);
 }
 
-static void plicsw_ipi_send(u32 target_hart)
+static void plicsw_ipi_clear(u32 hart_index)
 {
+	u32 target_hart = sbi_hartindex_to_hartid(hart_index);
+	ulong reg = plicsw.addr + PLICSW_CONTEXT_BASE + PLICSW_CONTEXT_CLAIM +
+		    PLICSW_CONTEXT_STRIDE * target_hart;
+
 	if (plicsw.hart_count <= target_hart)
 		ebreak();
 
-	/* Set PLICSW IPI */
-	plic_sw_pending(target_hart);
-}
+	/* Claim */
+	u32 source = readl((void *)reg);
 
-static void plicsw_ipi_clear(u32 target_hart)
-{
-	if (plicsw.hart_count <= target_hart)
-		ebreak();
+	/* A successful claim will clear mip.MSIP */
 
-	/* Clear PLICSW IPI */
-	plicsw_claim();
-	plicsw_complete();
+	/* Complete */
+	writel(source, (void *)reg);
 }
 
 static struct sbi_ipi_device plicsw_ipi = {
@@ -106,28 +78,34 @@ int plicsw_warm_ipi_init(void)
 int plicsw_cold_ipi_init(struct plicsw_data *plicsw)
 {
 	int rc;
+	u32 interrupt_id, word_index, enable_bit;
+	ulong enable_reg, priority_reg;
 
 	/* Setup source priority */
-	uint32_t *priority = (void *)plicsw->addr + PLICSW_PRIORITY_BASE;
-
-	for (int i = 0; i < plicsw->hart_count; i++)
-		writel(1, &priority[i]);
-
-	/* Setup target enable */
-	uint32_t enable_mask = PLICSW_HART_MASK;
-
 	for (int i = 0; i < plicsw->hart_count; i++) {
-		uint32_t *enable = (void *)plicsw->addr + PLICSW_ENABLE_BASE +
-				   PLICSW_ENABLE_STRIDE * i;
-		writel(enable_mask, enable);
-		writel(enable_mask, enable + 1);
-		enable_mask <<= 1;
+		priority_reg = plicsw->addr + PLICSW_PRIORITY_BASE + i * 4;
+		writel(1, (void *)priority_reg);
+	}
+
+	/*
+	 * Setup enable for each hart, skip non-existent interrupt ID 0
+	 * which is hardwired to 0.
+	 */
+	for (int i = 0; i < plicsw->hart_count; i++) {
+		interrupt_id = i + 1;
+		word_index   = interrupt_id / 32;
+		enable_bit   = interrupt_id % 32;
+		enable_reg   = plicsw->addr + PLICSW_ENABLE_BASE +
+			       PLICSW_ENABLE_STRIDE * i + 4 * word_index;
+		writel(BIT(enable_bit), (void *)enable_reg);
 	}
 
 	/* Add PLICSW region to the root domain */
 	rc = sbi_domain_root_add_memrange(plicsw->addr, plicsw->size,
 					  PLICSW_REGION_ALIGN,
-					  SBI_DOMAIN_MEMREGION_MMIO);
+					  SBI_DOMAIN_MEMREGION_MMIO |
+					  SBI_DOMAIN_MEMREGION_M_READABLE |
+					  SBI_DOMAIN_MEMREGION_M_WRITABLE);
 	if (rc)
 		return rc;
 

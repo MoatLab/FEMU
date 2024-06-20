@@ -71,6 +71,7 @@ COMMONCFLAGS += $(call cc-option,$(CC),-fno-stack-protector,)
 COMMONCFLAGS += $(call cc-option,$(CC),-fno-stack-protector-all,)
 COMMONCFLAGS += $(call cc-option,$(CC),-fstack-check=no,)
 COMMONCFLAGS += $(call cc-option,$(CC),-Wno-address-of-packed-member,)
+COMMONCFLAGS += $(call cc-option,$(CC),-Wno-array-bounds,)
 COMMONCFLAGS += $(call cc-option,$(CC),-fcf-protection=none,)
 COMMA := ,
 

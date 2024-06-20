@@ -175,7 +175,7 @@
    new-token
 ;
 
-\ decide wether or not to give a new token an own name in the dictionary
+\ decide whether or not to give a new token an own name in the dictionary
 : named-token
    fcode-debug? IF
       external-token

@@ -15,9 +15,8 @@
 #include <sbi/sbi_ipi.h>
 
 static int sbi_ecall_ipi_handler(unsigned long extid, unsigned long funcid,
-				 const struct sbi_trap_regs *regs,
-				 unsigned long *out_val,
-				 struct sbi_trap_info *out_trap)
+				 struct sbi_trap_regs *regs,
+				 struct sbi_ecall_return *out)
 {
 	int ret = 0;
 
@@ -29,8 +28,16 @@ static int sbi_ecall_ipi_handler(unsigned long extid, unsigned long funcid,
 	return ret;
 }
 
+struct sbi_ecall_extension ecall_ipi;
+
+static int sbi_ecall_ipi_register_extensions(void)
+{
+	return sbi_ecall_register_extension(&ecall_ipi);
+}
+
 struct sbi_ecall_extension ecall_ipi = {
-	.extid_start = SBI_EXT_IPI,
-	.extid_end = SBI_EXT_IPI,
-	.handle = sbi_ecall_ipi_handler,
+	.extid_start		= SBI_EXT_IPI,
+	.extid_end		= SBI_EXT_IPI,
+	.register_extensions	= sbi_ecall_ipi_register_extensions,
+	.handle			= sbi_ecall_ipi_handler,
 };

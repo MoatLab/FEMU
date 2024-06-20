@@ -118,14 +118,18 @@ static void emac_load_desc(MSF2EmacState *s, EmacDesc *d, hwaddr desc)
     d->next = le32_to_cpu(d->next);
 }
 
-static void emac_store_desc(MSF2EmacState *s, EmacDesc *d, hwaddr desc)
+static void emac_store_desc(MSF2EmacState *s, const EmacDesc *d, hwaddr desc)
 {
-    /* Convert from host endianness into LE. */
-    d->pktaddr = cpu_to_le32(d->pktaddr);
-    d->pktsize = cpu_to_le32(d->pktsize);
-    d->next = cpu_to_le32(d->next);
+    EmacDesc outd;
+    /*
+     * Convert from host endianness into LE. We use a local struct because
+     * calling code may still want to look at the fields afterwards.
+     */
+    outd.pktaddr = cpu_to_le32(d->pktaddr);
+    outd.pktsize = cpu_to_le32(d->pktsize);
+    outd.next = cpu_to_le32(d->next);
 
-    address_space_write(&s->dma_as, desc, MEMTXATTRS_UNSPECIFIED, d, sizeof *d);
+    address_space_write(&s->dma_as, desc, MEMTXATTRS_UNSPECIFIED, &outd, sizeof outd);
 }
 
 static void msf2_dma_tx(MSF2EmacState *s)
@@ -526,7 +530,8 @@ static void msf2_emac_realize(DeviceState *dev, Error **errp)
 
     qemu_macaddr_default_if_unset(&s->conf.macaddr);
     s->nic = qemu_new_nic(&net_msf2_emac_info, &s->conf,
-                          object_get_typename(OBJECT(dev)), dev->id, s);
+                          object_get_typename(OBJECT(dev)), dev->id,
+                          &dev->mem_reentrancy_guard, s);
     qemu_format_nic_info_str(qemu_get_queue(s->nic), s->conf.macaddr.a);
 }
 
@@ -552,7 +557,7 @@ static const VMStateDescription vmstate_msf2_emac = {
     .name = TYPE_MSS_EMAC,
     .version_id = 1,
     .minimum_version_id = 1,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT8_ARRAY(mac_addr, MSF2EmacState, ETH_ALEN),
         VMSTATE_UINT32(rx_desc, MSF2EmacState),
         VMSTATE_UINT16_ARRAY(phy_regs, MSF2EmacState, PHY_MAX_REGS),

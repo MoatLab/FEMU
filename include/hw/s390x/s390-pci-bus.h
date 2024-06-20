@@ -184,7 +184,7 @@ enum ZpciIoatDtype {
  * The following states make up the "configured" meta-state:
  * disabled: device is configured but not enabled; transition between this
  *           state and enabled via clp enable/disable
- * enbaled: device is ready for use; transition to disabled via clp disable;
+ * enabled: device is ready for use; transition to disabled via clp disable;
  *          may enter an error state
  * blocked: ignore all DMA and interrupts; transition back to enabled or from
  *          error state via mpcifc
@@ -361,6 +361,7 @@ struct S390PCIBusDevice {
     bool unplug_requested;
     bool interp;
     bool forwarding_assist;
+    bool aif;
     QTAILQ_ENTRY(S390PCIBusDevice) link;
 };
 
@@ -400,5 +401,6 @@ S390PCIBusDevice *s390_pci_find_dev_by_target(S390pciState *s,
                                               const char *target);
 S390PCIBusDevice *s390_pci_find_next_avail_dev(S390pciState *s,
                                                S390PCIBusDevice *pbdev);
+void s390_pci_ism_reset(void);
 
 #endif

@@ -340,7 +340,7 @@ cr
 #include "copyright-oss.fs"
 cr cr
 
-\ this CATCH is to ensure the code bellow always executes:  boot may ABORT!
+\ this CATCH is to ensure the code below always executes:  boot may ABORT!
 ' start-it CATCH drop
 
 : boot

@@ -30,7 +30,7 @@ eregs:
 	 * defined in $(TARG).c
 	 * the_exception_frame can be accessed from paflof through
 	 * the word eregs
-	 * in the case an excpetion is handled paflof will read
+	 * in the case an exception is handled paflof will read
 	 * from eregs the values of all registers and print them
 	 * out in the exception handler */
 	.quad	the_exception_frame

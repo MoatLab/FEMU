@@ -16,9 +16,9 @@ VARIABLE chosen-memory-ih 0 chosen-memory-ih !
 \ Maintain "available" property.
 \ Sun has a single memory node with "available" property
 \ and separate memory controller nodes.
-\ We corespond memory nodes with their respective memory controllers
+\ We pair memory nodes with their respective memory controllers
 \ and use /chosen/memory as default memory node to hold the "available" map
-\ NOTE -> /chosen/memory is expected 2B initialized before using claim/release
+\ NOTE -> /chosen/memory is expected to be initialized before using claim/release
 \ +
 
 : (chosen-memory-ph) ( -- phandle )

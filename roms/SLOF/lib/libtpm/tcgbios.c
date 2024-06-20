@@ -332,7 +332,7 @@ static int tpm20_build_digest(struct tpm_log_entry *le,
 	}
 
 	if (sel != end) {
-		dprintf("Malformed pcr selection structure fron TPM\n");
+		dprintf("Malformed pcr selection structure from TPM\n");
 		return -1;
 	}
 
@@ -739,7 +739,7 @@ static int tpm20_write_EfiSpecIdEventStruct(void)
 	}
 
 	if (sel != end) {
-		dprintf("Malformed pcr selection structure fron TPM\n");
+		dprintf("Malformed pcr selection structure from TPM\n");
 		return -1;
 	}
 

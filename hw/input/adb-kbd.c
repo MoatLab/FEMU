@@ -332,7 +332,7 @@ static const VMStateDescription vmstate_adb_kbd = {
     .name = "adb_kbd",
     .version_id = 2,
     .minimum_version_id = 2,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_STRUCT(parent_obj, KBDState, 0, vmstate_adb_device, ADBDevice),
         VMSTATE_BUFFER(data, KBDState),
         VMSTATE_INT32(rptr, KBDState),
@@ -355,7 +355,7 @@ static void adb_kbd_reset(DeviceState *dev)
     s->count = 0;
 }
 
-static QemuInputHandler adb_keyboard_handler = {
+static const QemuInputHandler adb_keyboard_handler = {
     .name  = "QEMU ADB Keyboard",
     .mask  = INPUT_EVENT_MASK_KEY,
     .event = adb_keyboard_event,

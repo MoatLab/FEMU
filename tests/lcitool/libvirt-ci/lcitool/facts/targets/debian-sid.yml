@@ -21,6 +21,7 @@ ansible_python_package: python3
 ansible_python_interpreter: /usr/bin/python3
 
 install:
+  unattended_scheme: preseed
   url: http://deb.debian.org/debian/dists/sid/main/installer-amd64/
 
 containers:

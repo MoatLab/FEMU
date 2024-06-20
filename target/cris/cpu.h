@@ -174,14 +174,27 @@ typedef struct CPUArchState {
  * A CRIS CPU.
  */
 struct ArchCPU {
-    /*< private >*/
     CPUState parent_obj;
-    /*< public >*/
 
-    CPUNegativeOffsetState neg;
     CPUCRISState env;
 };
 
+/**
+ * CRISCPUClass:
+ * @parent_realize: The parent class' realize handler.
+ * @parent_phases: The parent class' reset phase handlers.
+ * @vr: Version Register value.
+ *
+ * A CRIS CPU model.
+ */
+struct CRISCPUClass {
+    CPUClass parent_class;
+
+    DeviceRealize parent_realize;
+    ResettablePhases parent_phases;
+
+    uint32_t vr;
+};
 
 #ifndef CONFIG_USER_ONLY
 extern const VMStateDescription vmstate_cris_cpu;
@@ -243,16 +256,10 @@ enum {
 /* CRIS uses 8k pages.  */
 #define MMAP_SHIFT TARGET_PAGE_BITS
 
-#define CRIS_CPU_TYPE_SUFFIX "-" TYPE_CRIS_CPU
-#define CRIS_CPU_TYPE_NAME(name) (name CRIS_CPU_TYPE_SUFFIX)
 #define CPU_RESOLVING_TYPE TYPE_CRIS_CPU
 
 /* MMU modes definitions */
 #define MMU_USER_IDX 1
-static inline int cpu_mmu_index (CPUCRISState *env, bool ifetch)
-{
-	return !!(env->pregs[PR_CCS] & U_FLAG);
-}
 
 /* Support function regs.  */
 #define SFR_RW_GC_CFG      0][0
@@ -266,8 +273,8 @@ static inline int cpu_mmu_index (CPUCRISState *env, bool ifetch)
 
 #include "exec/cpu-all.h"
 
-static inline void cpu_get_tb_cpu_state(CPUCRISState *env, target_ulong *pc,
-                                        target_ulong *cs_base, uint32_t *flags)
+static inline void cpu_get_tb_cpu_state(CPUCRISState *env, vaddr *pc,
+                                        uint64_t *cs_base, uint32_t *flags)
 {
     *pc = env->pc;
     *cs_base = 0;
@@ -275,8 +282,5 @@ static inline void cpu_get_tb_cpu_state(CPUCRISState *env, target_ulong *pc,
             (env->pregs[PR_CCS] & (S_FLAG | P_FLAG | U_FLAG
 				     | X_FLAG | PFIX_FLAG));
 }
-
-#define cpu_list cris_cpu_list
-void cris_cpu_list(void);
 
 #endif

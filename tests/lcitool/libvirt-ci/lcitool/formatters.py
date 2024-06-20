@@ -9,8 +9,6 @@ import json
 import logging
 import shlex
 
-from pkg_resources import resource_filename
-
 from lcitool import util, LcitoolError
 from lcitool.packages import package_names_by_type
 
@@ -66,9 +64,9 @@ class Formatter(metaclass=abc.ABCMeta):
         pass
 
     def _get_meson_cross(self, cross_abi):
-        cross_name = resource_filename(__name__,
-                                       f"cross/{cross_abi}.meson")
-        with open(cross_name, "r") as c:
+        cross_path = util.package_resource(__package__,
+                                           f"cross/{cross_abi}.meson")
+        with open(cross_path, "r") as c:
             return c.read().rstrip()
 
     def _generator_build_varmap(self,
@@ -264,9 +262,11 @@ class BuildEnvFormatter(Formatter):
                     "fi",
                     "exec \"$@\""
                 ]
+                varmap["nosyncsh"] = "\\n\\\n".join(nosyncsh)
+
                 commands.extend([
                     "{packaging_command} install -y nosync",
-                    "echo -e '%s' > /usr/bin/nosync" % "\\n\\\n".join(nosyncsh),
+                    "printf '{nosyncsh}\\n' > /usr/bin/nosync",
                     "chmod +x /usr/bin/nosync"])
 
             # First we need to run update, then config and install.
@@ -408,7 +408,7 @@ class BuildEnvFormatter(Formatter):
         if not target.cross_arch.startswith("mingw"):
             cross_commands.extend([
                 "mkdir -p /usr/local/share/meson/cross",
-                "echo \"{cross_meson}\" > /usr/local/share/meson/cross/{cross_abi}",
+                "printf \"{cross_meson}\\n\" > /usr/local/share/meson/cross/{cross_abi}",
             ])
 
             cross_meson = self._get_meson_cross(varmap["cross_abi"])

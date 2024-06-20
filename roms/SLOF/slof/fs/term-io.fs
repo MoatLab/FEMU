@@ -107,7 +107,7 @@ VARIABLE stdout
          false
       ELSE
          1 - \ remove 1 from length to ignore null-termination char
-         \ device_type found, check wether it is serial or keyboard
+         \ device_type found, check whether it is serial or keyboard
          2dup s" serial" str= IF
 	    2drop serial-key? r> drop EXIT
 	 THEN \ call serial-key, cleanup return-stack, exit

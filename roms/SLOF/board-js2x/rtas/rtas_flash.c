@@ -496,7 +496,7 @@ rtas_update_flash(rtas_args_t *rtas_args)
 #endif
 
 	/* from SLOF we pass a second (unofficial) parameter, if this parameter is 1, we do not
-	 * check wether we are on permanent side. Needed for update-flash -c to work! */
+	 * check whether we are on permanent side. Needed for update-flash -c to work! */
 	if ((rtas_args->nargs > 1) && (rtas_args->args[1] == 1))
 		perm_check = 0;
 

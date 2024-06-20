@@ -1,0 +1,10 @@
+---
+- name: User pre-bootstrap tasks
+  hosts: all
+  remote_user: root
+  gather_facts: no
+  tasks:
+    - include_tasks: '{{ user_datadir }}/ansible/pre/tasks/main.yml'
+      when:
+        - user_datadir is defined
+        - user_pre == true

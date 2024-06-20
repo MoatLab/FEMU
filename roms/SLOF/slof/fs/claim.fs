@@ -178,7 +178,7 @@ VARIABLE mem-pre-released 0 mem-pre-released !
 \ position
 \ +
 \ insert-available should also check adjacent elements and merge if new
-\ region is contiguos w. others
+\ region is contiguous with others
 \ +
 : (insert-available) ( available-ptr -- available-ptr )
 	dup				\ current element

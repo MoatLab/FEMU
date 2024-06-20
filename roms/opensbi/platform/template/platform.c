@@ -19,6 +19,8 @@
 #include <sbi_utils/timer/aclint_mtimer.h>
 
 #define PLATFORM_PLIC_ADDR		0xc000000
+#define PLATFORM_PLIC_SIZE		(0x200000 + \
+					 (PLATFORM_HART_COUNT * 0x1000))
 #define PLATFORM_PLIC_NUM_SOURCES	128
 #define PLATFORM_HART_COUNT		4
 #define PLATFORM_CLINT_ADDR		0x2000000
@@ -33,6 +35,7 @@
 
 static struct plic_data plic = {
 	.addr = PLATFORM_PLIC_ADDR,
+	.size = PLATFORM_PLIC_SIZE,
 	.num_src = PLATFORM_PLIC_NUM_SOURCES,
 };
 
@@ -53,7 +56,7 @@ static struct aclint_mtimer_data mtimer = {
 	.mtimecmp_size = ACLINT_DEFAULT_MTIMECMP_SIZE,
 	.first_hartid = 0,
 	.hart_count = PLATFORM_HART_COUNT,
-	.has_64bit_mmio = TRUE,
+	.has_64bit_mmio = true,
 };
 
 /*
@@ -152,5 +155,6 @@ const struct sbi_platform platform = {
 	.features		= SBI_PLATFORM_DEFAULT_FEATURES,
 	.hart_count		= 1,
 	.hart_stack_size	= SBI_PLATFORM_DEFAULT_HART_STACK_SIZE,
+	.heap_size		= SBI_PLATFORM_DEFAULT_HEAP_SIZE(1),
 	.platform_ops_addr	= (unsigned long)&platform_ops
 };

@@ -43,7 +43,7 @@
     >r \ stash #retries
     to rcmd-cmd-len to rcmd-cmd-addr to rcmd-dir to rcmd-buf-len to rcmd-buf-addr
     0  \ dummy status & sense
-    r> \ retreive #retries              ( stat #retries )
+    r> \ retrieve #retries              ( stat #retries )
     0 DO
         \ drop previous status & sense
         0<> IF 2drop THEN

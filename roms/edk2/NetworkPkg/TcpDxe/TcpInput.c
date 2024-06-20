@@ -1177,7 +1177,7 @@ TcpInput (
   //
   if (TCP_FLG_ON (Option.Flag, TCP_OPTION_RCVD_TS)) {
     //
-    // update TsRecent as specified in page 16 RFC1323.
+    // update TsRecent as specified in page 17 RFC7323.
     // RcvWl2 equals to the variable "LastAckSent"
     // defined there.
     //
@@ -1569,6 +1569,9 @@ TcpIcmpInput (
   EFI_STATUS  IcmpErrStatus;
   BOOLEAN     IcmpErrIsHard;
   BOOLEAN     IcmpErrNotify;
+
+  IcmpErrIsHard = FALSE;
+  IcmpErrNotify = FALSE;
 
   if (Nbuf->TotalSize < sizeof (TCP_HEAD)) {
     goto CLEAN_EXIT;

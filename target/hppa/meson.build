@@ -7,17 +7,17 @@ hppa_ss.add(files(
   'fpu_helper.c',
   'gdbstub.c',
   'helper.c',
-  'int_helper.c',
   'op_helper.c',
   'translate.c',
 ))
 
-hppa_softmmu_ss = ss.source_set()
-hppa_softmmu_ss.add(files(
+hppa_system_ss = ss.source_set()
+hppa_system_ss.add(files(
+  'int_helper.c',
   'machine.c',
   'mem_helper.c',
   'sys_helper.c',
 ))
 
 target_arch += {'hppa': hppa_ss}
-target_softmmu_arch += {'hppa': hppa_softmmu_ss}
+target_system_arch += {'hppa': hppa_system_ss}

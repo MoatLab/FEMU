@@ -128,13 +128,13 @@
         THEN
 ;
 
-\ check wether this device is a pci-express device
+\ check whether this device is a pci-express device
 : pci-express? ( addr -- 0|1 ) 10 pci-cap-find 0<> ;
 
-\ check wether this device is a pci-express device
+\ check whether this device is a pci-express device
 : pci-x? ( addr -- 0|1 ) 07 pci-cap-find 0<> ;
 
-\ check wether this device has extended config space
+\ check whether this device has extended config space
 : pci-config-ext? ( addr -- 0|1 ) pci-express? ;
 
 

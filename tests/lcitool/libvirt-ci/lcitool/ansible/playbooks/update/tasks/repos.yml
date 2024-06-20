@@ -1,0 +1,54 @@
+---
+- name: Enable the CRB/PowerTools repo on CentOS and AlmaLinux
+  block:
+    - set_fact:
+        repo_name: 'CRB'
+      when:
+        - (os.name == 'CentOS' and os.version == 'Stream9') or
+          (os.name == 'AlmaLinux' and os.version == '9')
+
+    - set_fact:
+        repo_name: 'PowerTools'
+      when:
+        - (os.name == 'CentOS' and os.version == 'Stream8') or
+          (os.name == 'AlmaLinux' and os.version == '8')
+
+    - name: 'Lookup the {{ repo_name }} repo configuration file'
+      find:
+        paths: '/etc/yum.repos.d/'
+        contains: '\[{{ repo_name | lower }}\]'
+        file_type: file
+      register: repo_files
+
+    - name: 'Enable {{ repo.name }} repository'
+      community.general.ini_file:
+        path: '{{ repo_files.files[0].path }}'
+        section: '{{ repo_name | lower }}'
+        option: enabled
+        value: 1
+        create: false
+  when:
+    - os.name == 'CentOS' or os.name == 'AlmaLinux'
+
+- name: Enable EPEL repository
+  package:
+    name: epel-release
+    state: latest
+  when:
+    - os.name == 'CentOS' or os.name == 'AlmaLinux'
+
+- name: Enable EPEL Next repository
+  package:
+    name: epel-next-release
+    state: latest
+  when:
+    - os.name == 'CentOS'
+    - os.version == 'Stream8' or os.version == 'Stream9'
+
+- name: Enable Advanced Virtualization repository
+  package:
+    name: centos-release-advanced-virtualization
+    state: latest
+  when:
+    - (os.name == 'CentOS' and os.version == 'Stream8') or
+      (os.name == 'AlmaLinux' and os.version == '8')

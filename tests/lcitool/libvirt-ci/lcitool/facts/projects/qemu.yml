@@ -54,6 +54,7 @@ packages:
  - libjpeg
  - libnfs
  - libnuma
+ - libpipewire-dev
  - libpmem
  - libpng
  - librbd
@@ -67,6 +68,7 @@ packages:
  - liburing
  - libusbx
  - libvdeplug
+ - libxdp
  - libxml2
  - libzstd
  - llvm
@@ -93,6 +95,7 @@ packages:
  - python3-pip
  - python3-sphinx
  - python3-sphinx-rtd-theme
+ - python3-tomli
  - python3-venv
  - rpm2cpio
  - sdl2

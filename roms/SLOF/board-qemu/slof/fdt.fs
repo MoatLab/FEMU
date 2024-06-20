@@ -84,7 +84,7 @@ fdt-start fdt-init
 	drop -1 throw EXIT
     THEN
     dup >fdth_version l@ 10 < IF
-        ." Flat device tree has usupported version !" cr
+        ." Flat device tree has unsupported version !" cr
 	drop -1 throw EXIT
     THEN
 
@@ -352,7 +352,7 @@ fdt-claim-reserve
 ;
 
 : (fdt-patch-interrupt-map) ( prop-addr prop-len -- )
-    \ interrupt-controller phandle is expected to be the same accross the map
+    \ interrupt-controller phandle is expected to be the same across the map
     over 10 + l@ phandle>node ?dup 0= IF 2drop EXIT THEN
     -rot
     fdt-debug IF ."      ### Patching interrupt-map: " over 10 + l@ . ."  => " 2 pick . cr THEN
@@ -501,7 +501,7 @@ r> drop
 	fdt-cas-pass 0 <> IF
 	    \ We could not find the node added in the previous pass,
 	    \ most likely because it is hotplug-under-hotplug case
-	    \ (such as PCI brigde under bridge) when missing new node methods
+	    \ (such as PCI bridge under bridge) when missing new node methods
 	    \ such as "decode-unit" are critical.
 	    \ Reboot when detect such case which is expected as it is a part of
 	    \ ibm,client-architecture-support.

@@ -18,18 +18,7 @@
  */
 
 #include "qemu/osdep.h"
-#include "cpu.h"
-#include "exec/exec-all.h"
-#include "tcg/tcg-op.h"
-#include "tcg/tcg-op-gvec.h"
-#include "tcg/tcg-gvec-desc.h"
-#include "qemu/log.h"
-#include "arm_ldst.h"
 #include "translate.h"
-#include "internals.h"
-#include "exec/helper-proto.h"
-#include "exec/helper-gen.h"
-#include "exec/log.h"
 #include "translate-a64.h"
 #include "fpu/softfloat.h"
 
@@ -508,8 +497,8 @@ static void do_predtest(DisasContext *s, int dofs, int gofs, int words)
     TCGv_ptr gptr = tcg_temp_new_ptr();
     TCGv_i32 t = tcg_temp_new_i32();
 
-    tcg_gen_addi_ptr(dptr, cpu_env, dofs);
-    tcg_gen_addi_ptr(gptr, cpu_env, gofs);
+    tcg_gen_addi_ptr(dptr, tcg_env, dofs);
+    tcg_gen_addi_ptr(gptr, tcg_env, gofs);
 
     gen_helper_sve_predtest(t, dptr, gptr, tcg_constant_i32(words));
 
@@ -967,8 +956,8 @@ static bool do_vpz_ool(DisasContext *s, arg_rpr_esz *a,
     t_zn = tcg_temp_new_ptr();
     t_pg = tcg_temp_new_ptr();
 
-    tcg_gen_addi_ptr(t_zn, cpu_env, vec_full_reg_offset(s, a->rn));
-    tcg_gen_addi_ptr(t_pg, cpu_env, pred_full_reg_offset(s, a->pg));
+    tcg_gen_addi_ptr(t_zn, tcg_env, vec_full_reg_offset(s, a->rn));
+    tcg_gen_addi_ptr(t_pg, tcg_env, pred_full_reg_offset(s, a->pg));
     fn(temp, t_zn, t_pg, desc);
 
     write_fp_dreg(s, a->rd, temp);
@@ -1220,7 +1209,7 @@ static bool do_index(DisasContext *s, int esz, int rd,
     desc = tcg_constant_i32(simd_desc(vsz, vsz, 0));
     t_zd = tcg_temp_new_ptr();
 
-    tcg_gen_addi_ptr(t_zd, cpu_env, vec_full_reg_offset(s, rd));
+    tcg_gen_addi_ptr(t_zd, tcg_env, vec_full_reg_offset(s, rd));
     if (esz == 3) {
         gen_helper_sve_index_d(t_zd, start, incr, desc);
     } else {
@@ -1390,12 +1379,12 @@ static bool do_pppp_flags(DisasContext *s, arg_rprr_s *a,
         TCGv_i64 pm = tcg_temp_new_i64();
         TCGv_i64 pg = tcg_temp_new_i64();
 
-        tcg_gen_ld_i64(pn, cpu_env, nofs);
-        tcg_gen_ld_i64(pm, cpu_env, mofs);
-        tcg_gen_ld_i64(pg, cpu_env, gofs);
+        tcg_gen_ld_i64(pn, tcg_env, nofs);
+        tcg_gen_ld_i64(pm, tcg_env, mofs);
+        tcg_gen_ld_i64(pg, tcg_env, gofs);
 
         gvec_op->fni8(pd, pn, pm, pg);
-        tcg_gen_st_i64(pd, cpu_env, dofs);
+        tcg_gen_st_i64(pd, tcg_env, dofs);
 
         do_predtest1(pd, pg);
     } else {
@@ -1665,8 +1654,8 @@ static bool trans_PTEST(DisasContext *s, arg_PTEST *a)
             TCGv_i64 pn = tcg_temp_new_i64();
             TCGv_i64 pg = tcg_temp_new_i64();
 
-            tcg_gen_ld_i64(pn, cpu_env, nofs);
-            tcg_gen_ld_i64(pg, cpu_env, gofs);
+            tcg_gen_ld_i64(pn, tcg_env, nofs);
+            tcg_gen_ld_i64(pg, tcg_env, gofs);
             do_predtest1(pn, pg);
         } else {
             do_predtest(s, nofs, gofs, words);
@@ -1747,7 +1736,7 @@ static bool do_predset(DisasContext *s, int esz, int rd, int pat, bool setflag)
     t = tcg_temp_new_i64();
     if (fullsz <= 64) {
         tcg_gen_movi_i64(t, lastword);
-        tcg_gen_st_i64(t, cpu_env, ofs);
+        tcg_gen_st_i64(t, tcg_env, ofs);
         goto done;
     }
 
@@ -1766,17 +1755,17 @@ static bool do_predset(DisasContext *s, int esz, int rd, int pat, bool setflag)
 
     tcg_gen_movi_i64(t, word);
     for (i = 0; i < QEMU_ALIGN_DOWN(setsz, 8); i += 8) {
-        tcg_gen_st_i64(t, cpu_env, ofs + i);
+        tcg_gen_st_i64(t, tcg_env, ofs + i);
     }
     if (lastword != word) {
         tcg_gen_movi_i64(t, lastword);
-        tcg_gen_st_i64(t, cpu_env, ofs + i);
+        tcg_gen_st_i64(t, tcg_env, ofs + i);
         i += 8;
     }
     if (i < fullsz) {
         tcg_gen_movi_i64(t, 0);
         for (; i < fullsz; i += 8) {
-            tcg_gen_st_i64(t, cpu_env, ofs + i);
+            tcg_gen_st_i64(t, tcg_env, ofs + i);
         }
     }
 
@@ -1833,8 +1822,8 @@ static bool do_pfirst_pnext(DisasContext *s, arg_rr_esz *a,
     desc = FIELD_DP32(desc, PREDDESC, OPRSZ, pred_full_reg_size(s));
     desc = FIELD_DP32(desc, PREDDESC, ESZ, a->esz);
 
-    tcg_gen_addi_ptr(t_pd, cpu_env, pred_full_reg_offset(s, a->rd));
-    tcg_gen_addi_ptr(t_pg, cpu_env, pred_full_reg_offset(s, a->rn));
+    tcg_gen_addi_ptr(t_pd, tcg_env, pred_full_reg_offset(s, a->rd));
+    tcg_gen_addi_ptr(t_pg, tcg_env, pred_full_reg_offset(s, a->rn));
     t = tcg_temp_new_i32();
 
     gen_fn(t, t_pd, t_pg, tcg_constant_i32(desc));
@@ -1852,7 +1841,7 @@ TRANS_FEAT(PNEXT, aa64_sve, do_pfirst_pnext, a, gen_helper_sve_pnext)
 
 /* Perform an inline saturating addition of a 32-bit value within
  * a 64-bit register.  The second operand is known to be positive,
- * which halves the comparisions we must perform to bound the result.
+ * which halves the comparisons we must perform to bound the result.
  */
 static void do_sat_addsub_32(TCGv_i64 reg, TCGv_i64 val, bool u, bool d)
 {
@@ -1930,8 +1919,8 @@ static void do_sat_addsub_vec(DisasContext *s, int esz, int rd, int rn,
 
     dptr = tcg_temp_new_ptr();
     nptr = tcg_temp_new_ptr();
-    tcg_gen_addi_ptr(dptr, cpu_env, vec_full_reg_offset(s, rd));
-    tcg_gen_addi_ptr(nptr, cpu_env, vec_full_reg_offset(s, rn));
+    tcg_gen_addi_ptr(dptr, tcg_env, vec_full_reg_offset(s, rd));
+    tcg_gen_addi_ptr(nptr, tcg_env, vec_full_reg_offset(s, rn));
     desc = tcg_constant_i32(simd_desc(vsz, vsz, 0));
 
     switch (esz) {
@@ -2174,9 +2163,9 @@ static void do_cpy_m(DisasContext *s, int esz, int rd, int rn, int pg,
     TCGv_ptr t_zn = tcg_temp_new_ptr();
     TCGv_ptr t_pg = tcg_temp_new_ptr();
 
-    tcg_gen_addi_ptr(t_zd, cpu_env, vec_full_reg_offset(s, rd));
-    tcg_gen_addi_ptr(t_zn, cpu_env, vec_full_reg_offset(s, rn));
-    tcg_gen_addi_ptr(t_pg, cpu_env, pred_full_reg_offset(s, pg));
+    tcg_gen_addi_ptr(t_zd, tcg_env, vec_full_reg_offset(s, rd));
+    tcg_gen_addi_ptr(t_zn, tcg_env, vec_full_reg_offset(s, rn));
+    tcg_gen_addi_ptr(t_pg, tcg_env, pred_full_reg_offset(s, pg));
 
     fns[esz](t_zd, t_zn, t_pg, val, desc);
 }
@@ -2321,8 +2310,8 @@ static void do_insr_i64(DisasContext *s, arg_rrr_esz *a, TCGv_i64 val)
     TCGv_ptr t_zd = tcg_temp_new_ptr();
     TCGv_ptr t_zn = tcg_temp_new_ptr();
 
-    tcg_gen_addi_ptr(t_zd, cpu_env, vec_full_reg_offset(s, a->rd));
-    tcg_gen_addi_ptr(t_zn, cpu_env, vec_full_reg_offset(s, a->rn));
+    tcg_gen_addi_ptr(t_zd, tcg_env, vec_full_reg_offset(s, a->rd));
+    tcg_gen_addi_ptr(t_zn, tcg_env, vec_full_reg_offset(s, a->rn));
 
     fns[a->esz](t_zd, t_zn, val, desc);
 }
@@ -2334,7 +2323,7 @@ static bool trans_INSR_f(DisasContext *s, arg_rrr_esz *a)
     }
     if (sve_access_check(s)) {
         TCGv_i64 t = tcg_temp_new_i64();
-        tcg_gen_ld_i64(t, cpu_env, vec_reg_offset(s, a->rm, 0, MO_64));
+        tcg_gen_ld_i64(t, tcg_env, vec_reg_offset(s, a->rm, 0, MO_64));
         do_insr_i64(s, a, t);
     }
     return true;
@@ -2420,9 +2409,9 @@ static bool do_perm_pred3(DisasContext *s, arg_rrr_esz *a, bool high_odd,
     desc = FIELD_DP32(desc, PREDDESC, ESZ, a->esz);
     desc = FIELD_DP32(desc, PREDDESC, DATA, high_odd);
 
-    tcg_gen_addi_ptr(t_d, cpu_env, pred_full_reg_offset(s, a->rd));
-    tcg_gen_addi_ptr(t_n, cpu_env, pred_full_reg_offset(s, a->rn));
-    tcg_gen_addi_ptr(t_m, cpu_env, pred_full_reg_offset(s, a->rm));
+    tcg_gen_addi_ptr(t_d, tcg_env, pred_full_reg_offset(s, a->rd));
+    tcg_gen_addi_ptr(t_n, tcg_env, pred_full_reg_offset(s, a->rn));
+    tcg_gen_addi_ptr(t_m, tcg_env, pred_full_reg_offset(s, a->rm));
 
     fn(t_d, t_n, t_m, tcg_constant_i32(desc));
     return true;
@@ -2440,8 +2429,8 @@ static bool do_perm_pred2(DisasContext *s, arg_rr_esz *a, bool high_odd,
     TCGv_ptr t_n = tcg_temp_new_ptr();
     uint32_t desc = 0;
 
-    tcg_gen_addi_ptr(t_d, cpu_env, pred_full_reg_offset(s, a->rd));
-    tcg_gen_addi_ptr(t_n, cpu_env, pred_full_reg_offset(s, a->rn));
+    tcg_gen_addi_ptr(t_d, tcg_env, pred_full_reg_offset(s, a->rd));
+    tcg_gen_addi_ptr(t_n, tcg_env, pred_full_reg_offset(s, a->rn));
 
     desc = FIELD_DP32(desc, PREDDESC, OPRSZ, vsz);
     desc = FIELD_DP32(desc, PREDDESC, ESZ, a->esz);
@@ -2536,7 +2525,7 @@ static void find_last_active(DisasContext *s, TCGv_i32 ret, int esz, int pg)
     desc = FIELD_DP32(desc, PREDDESC, OPRSZ, pred_full_reg_size(s));
     desc = FIELD_DP32(desc, PREDDESC, ESZ, esz);
 
-    tcg_gen_addi_ptr(t_p, cpu_env, pred_full_reg_offset(s, pg));
+    tcg_gen_addi_ptr(t_p, tcg_env, pred_full_reg_offset(s, pg));
 
     gen_helper_sve_last_active_element(ret, t_p, tcg_constant_i32(desc));
 }
@@ -2613,7 +2602,7 @@ static TCGv_i64 load_last_active(DisasContext *s, TCGv_i32 last,
     }
 #endif
     tcg_gen_ext_i32_ptr(p, last);
-    tcg_gen_add_ptr(p, p, cpu_env);
+    tcg_gen_add_ptr(p, p, tcg_env);
 
     return load_esz(p, vec_full_reg_offset(s, rm), esz);
 }
@@ -2685,7 +2674,7 @@ static void do_clast_scalar(DisasContext *s, int esz, int pg, int rm,
     }
 
     /* The conceit here is that while last < 0 indicates not found, after
-     * adjusting for cpu_env->vfp.zregs[rm], it is still a valid address
+     * adjusting for tcg_env->vfp.zregs[rm], it is still a valid address
      * from which we can load garbage.  We then discard the garbage with
      * a conditional move.
      */
@@ -2701,7 +2690,7 @@ static bool do_clast_fp(DisasContext *s, arg_rpr_esz *a, bool before)
     if (sve_access_check(s)) {
         int esz = a->esz;
         int ofs = vec_reg_offset(s, a->rd, 0, esz);
-        TCGv_i64 reg = load_esz(cpu_env, ofs, esz);
+        TCGv_i64 reg = load_esz(tcg_env, ofs, esz);
 
         do_clast_scalar(s, esz, a->pg, a->rn, before, reg);
         write_fp_dreg(s, a->rd, reg);
@@ -2805,7 +2794,7 @@ static bool trans_CPY_m_v(DisasContext *s, arg_rpr_esz *a)
     }
     if (sve_access_check(s)) {
         int ofs = vec_reg_offset(s, a->rn, 0, a->esz);
-        TCGv_i64 t = load_esz(cpu_env, ofs, a->esz);
+        TCGv_i64 t = load_esz(tcg_env, ofs, a->esz);
         do_cpy_m(s, a->esz, a->rd, a->rd, a->pg, t);
     }
     return true;
@@ -2858,10 +2847,10 @@ static bool do_ppzz_flags(DisasContext *s, arg_rprr_esz *a,
     zm = tcg_temp_new_ptr();
     pg = tcg_temp_new_ptr();
 
-    tcg_gen_addi_ptr(pd, cpu_env, pred_full_reg_offset(s, a->rd));
-    tcg_gen_addi_ptr(zn, cpu_env, vec_full_reg_offset(s, a->rn));
-    tcg_gen_addi_ptr(zm, cpu_env, vec_full_reg_offset(s, a->rm));
-    tcg_gen_addi_ptr(pg, cpu_env, pred_full_reg_offset(s, a->pg));
+    tcg_gen_addi_ptr(pd, tcg_env, pred_full_reg_offset(s, a->rd));
+    tcg_gen_addi_ptr(zn, tcg_env, vec_full_reg_offset(s, a->rn));
+    tcg_gen_addi_ptr(zm, tcg_env, vec_full_reg_offset(s, a->rm));
+    tcg_gen_addi_ptr(pg, tcg_env, pred_full_reg_offset(s, a->pg));
 
     gen_fn(t, pd, zn, zm, pg, tcg_constant_i32(simd_desc(vsz, vsz, 0)));
 
@@ -2931,9 +2920,9 @@ static bool do_ppzi_flags(DisasContext *s, arg_rpri_esz *a,
     zn = tcg_temp_new_ptr();
     pg = tcg_temp_new_ptr();
 
-    tcg_gen_addi_ptr(pd, cpu_env, pred_full_reg_offset(s, a->rd));
-    tcg_gen_addi_ptr(zn, cpu_env, vec_full_reg_offset(s, a->rn));
-    tcg_gen_addi_ptr(pg, cpu_env, pred_full_reg_offset(s, a->pg));
+    tcg_gen_addi_ptr(pd, tcg_env, pred_full_reg_offset(s, a->rd));
+    tcg_gen_addi_ptr(zn, tcg_env, vec_full_reg_offset(s, a->rn));
+    tcg_gen_addi_ptr(pg, tcg_env, pred_full_reg_offset(s, a->pg));
 
     gen_fn(t, pd, zn, pg, tcg_constant_i32(simd_desc(vsz, vsz, a->imm)));
 
@@ -2982,10 +2971,10 @@ static bool do_brk3(DisasContext *s, arg_rprr_s *a,
     TCGv_ptr g = tcg_temp_new_ptr();
     TCGv_i32 desc = tcg_constant_i32(FIELD_DP32(0, PREDDESC, OPRSZ, vsz));
 
-    tcg_gen_addi_ptr(d, cpu_env, pred_full_reg_offset(s, a->rd));
-    tcg_gen_addi_ptr(n, cpu_env, pred_full_reg_offset(s, a->rn));
-    tcg_gen_addi_ptr(m, cpu_env, pred_full_reg_offset(s, a->rm));
-    tcg_gen_addi_ptr(g, cpu_env, pred_full_reg_offset(s, a->pg));
+    tcg_gen_addi_ptr(d, tcg_env, pred_full_reg_offset(s, a->rd));
+    tcg_gen_addi_ptr(n, tcg_env, pred_full_reg_offset(s, a->rn));
+    tcg_gen_addi_ptr(m, tcg_env, pred_full_reg_offset(s, a->rm));
+    tcg_gen_addi_ptr(g, tcg_env, pred_full_reg_offset(s, a->pg));
 
     if (a->s) {
         TCGv_i32 t = tcg_temp_new_i32();
@@ -3012,9 +3001,9 @@ static bool do_brk2(DisasContext *s, arg_rpr_s *a,
     TCGv_ptr g = tcg_temp_new_ptr();
     TCGv_i32 desc = tcg_constant_i32(FIELD_DP32(0, PREDDESC, OPRSZ, vsz));
 
-    tcg_gen_addi_ptr(d, cpu_env, pred_full_reg_offset(s, a->rd));
-    tcg_gen_addi_ptr(n, cpu_env, pred_full_reg_offset(s, a->rn));
-    tcg_gen_addi_ptr(g, cpu_env, pred_full_reg_offset(s, a->pg));
+    tcg_gen_addi_ptr(d, tcg_env, pred_full_reg_offset(s, a->rd));
+    tcg_gen_addi_ptr(n, tcg_env, pred_full_reg_offset(s, a->rn));
+    tcg_gen_addi_ptr(g, tcg_env, pred_full_reg_offset(s, a->pg));
 
     if (a->s) {
         TCGv_i32 t = tcg_temp_new_i32();
@@ -3055,10 +3044,10 @@ static void do_cntp(DisasContext *s, TCGv_i64 val, int esz, int pn, int pg)
     if (psz <= 8) {
         uint64_t psz_mask;
 
-        tcg_gen_ld_i64(val, cpu_env, pred_full_reg_offset(s, pn));
+        tcg_gen_ld_i64(val, tcg_env, pred_full_reg_offset(s, pn));
         if (pn != pg) {
             TCGv_i64 g = tcg_temp_new_i64();
-            tcg_gen_ld_i64(g, cpu_env, pred_full_reg_offset(s, pg));
+            tcg_gen_ld_i64(g, tcg_env, pred_full_reg_offset(s, pg));
             tcg_gen_and_i64(val, val, g);
         }
 
@@ -3077,8 +3066,8 @@ static void do_cntp(DisasContext *s, TCGv_i64 val, int esz, int pn, int pg)
         desc = FIELD_DP32(desc, PREDDESC, OPRSZ, psz);
         desc = FIELD_DP32(desc, PREDDESC, ESZ, esz);
 
-        tcg_gen_addi_ptr(t_pn, cpu_env, pred_full_reg_offset(s, pn));
-        tcg_gen_addi_ptr(t_pg, cpu_env, pred_full_reg_offset(s, pg));
+        tcg_gen_addi_ptr(t_pn, tcg_env, pred_full_reg_offset(s, pn));
+        tcg_gen_addi_ptr(t_pg, tcg_env, pred_full_reg_offset(s, pg));
 
         gen_helper_sve_cntp(val, t_pn, t_pg, tcg_constant_i32(desc));
     }
@@ -3302,7 +3291,7 @@ static bool trans_WHILE(DisasContext *s, arg_WHILE *a)
     desc = FIELD_DP32(desc, PREDDESC, ESZ, a->esz);
 
     ptr = tcg_temp_new_ptr();
-    tcg_gen_addi_ptr(ptr, cpu_env, pred_full_reg_offset(s, a->rd));
+    tcg_gen_addi_ptr(ptr, tcg_env, pred_full_reg_offset(s, a->rd));
 
     if (a->lt) {
         gen_helper_sve_whilel(t2, ptr, t2, tcg_constant_i32(desc));
@@ -3365,7 +3354,7 @@ static bool trans_WHILE_ptr(DisasContext *s, arg_WHILE_ptr *a)
     desc = FIELD_DP32(desc, PREDDESC, ESZ, a->esz);
 
     ptr = tcg_temp_new_ptr();
-    tcg_gen_addi_ptr(ptr, cpu_env, pred_full_reg_offset(s, a->rd));
+    tcg_gen_addi_ptr(ptr, tcg_env, pred_full_reg_offset(s, a->rd));
 
     gen_helper_sve_whilel(t2, ptr, t2, tcg_constant_i32(desc));
     do_pred_flags(t2);
@@ -3695,8 +3684,8 @@ static bool do_reduce(DisasContext *s, arg_rpr_esz *a,
     t_zn = tcg_temp_new_ptr();
     t_pg = tcg_temp_new_ptr();
 
-    tcg_gen_addi_ptr(t_zn, cpu_env, vec_full_reg_offset(s, a->rn));
-    tcg_gen_addi_ptr(t_pg, cpu_env, pred_full_reg_offset(s, a->pg));
+    tcg_gen_addi_ptr(t_zn, tcg_env, vec_full_reg_offset(s, a->rn));
+    tcg_gen_addi_ptr(t_pg, tcg_env, pred_full_reg_offset(s, a->pg));
     status = fpstatus_ptr(a->esz == MO_16 ? FPST_FPCR_F16 : FPST_FPCR);
 
     fn(temp, t_zn, t_pg, status, t_desc);
@@ -3813,11 +3802,11 @@ static bool trans_FADDA(DisasContext *s, arg_rprr_esz *a)
         return true;
     }
 
-    t_val = load_esz(cpu_env, vec_reg_offset(s, a->rn, 0, a->esz), a->esz);
+    t_val = load_esz(tcg_env, vec_reg_offset(s, a->rn, 0, a->esz), a->esz);
     t_rm = tcg_temp_new_ptr();
     t_pg = tcg_temp_new_ptr();
-    tcg_gen_addi_ptr(t_rm, cpu_env, vec_full_reg_offset(s, a->rm));
-    tcg_gen_addi_ptr(t_pg, cpu_env, pred_full_reg_offset(s, a->pg));
+    tcg_gen_addi_ptr(t_rm, tcg_env, vec_full_reg_offset(s, a->rm));
+    tcg_gen_addi_ptr(t_pg, tcg_env, pred_full_reg_offset(s, a->pg));
     t_fpst = fpstatus_ptr(a->esz == MO_16 ? FPST_FPCR_F16 : FPST_FPCR);
     t_desc = tcg_constant_i32(simd_desc(vsz, vsz, 0));
 
@@ -3889,9 +3878,9 @@ static void do_fp_scalar(DisasContext *s, int zd, int zn, int pg, bool is_fp16,
     t_zd = tcg_temp_new_ptr();
     t_zn = tcg_temp_new_ptr();
     t_pg = tcg_temp_new_ptr();
-    tcg_gen_addi_ptr(t_zd, cpu_env, vec_full_reg_offset(s, zd));
-    tcg_gen_addi_ptr(t_zn, cpu_env, vec_full_reg_offset(s, zn));
-    tcg_gen_addi_ptr(t_pg, cpu_env, pred_full_reg_offset(s, pg));
+    tcg_gen_addi_ptr(t_zd, tcg_env, vec_full_reg_offset(s, zd));
+    tcg_gen_addi_ptr(t_zn, tcg_env, vec_full_reg_offset(s, zn));
+    tcg_gen_addi_ptr(t_pg, tcg_env, pred_full_reg_offset(s, pg));
 
     status = fpstatus_ptr(is_fp16 ? FPST_FPCR_F16 : FPST_FPCR);
     desc = tcg_constant_i32(simd_desc(vsz, vsz, 0));
@@ -4178,15 +4167,16 @@ TRANS_FEAT(UCVTF_dd, aa64_sve, gen_gvec_fpst_arg_zpz,
 void gen_sve_ldr(DisasContext *s, TCGv_ptr base, int vofs,
                  int len, int rn, int imm)
 {
-    int len_align = QEMU_ALIGN_DOWN(len, 8);
-    int len_remain = len % 8;
-    int nparts = len / 8 + ctpop8(len_remain);
+    int len_align = QEMU_ALIGN_DOWN(len, 16);
+    int len_remain = len % 16;
+    int nparts = len / 16 + ctpop8(len_remain);
     int midx = get_mem_index(s);
     TCGv_i64 dirty_addr, clean_addr, t0, t1;
+    TCGv_i128 t16;
 
     dirty_addr = tcg_temp_new_i64();
     tcg_gen_addi_i64(dirty_addr, cpu_reg_sp(s, rn), imm);
-    clean_addr = gen_mte_checkN(s, dirty_addr, false, rn != 31, len);
+    clean_addr = gen_mte_checkN(s, dirty_addr, false, rn != 31, len, MO_8);
 
     /*
      * Note that unpredicated load/store of vector/predicate registers
@@ -4199,10 +4189,16 @@ void gen_sve_ldr(DisasContext *s, TCGv_ptr base, int vofs,
         int i;
 
         t0 = tcg_temp_new_i64();
-        for (i = 0; i < len_align; i += 8) {
-            tcg_gen_qemu_ld_i64(t0, clean_addr, midx, MO_LEUQ);
+        t1 = tcg_temp_new_i64();
+        t16 = tcg_temp_new_i128();
+
+        for (i = 0; i < len_align; i += 16) {
+            tcg_gen_qemu_ld_i128(t16, clean_addr, midx,
+                                 MO_LE | MO_128 | MO_ATOM_NONE);
+            tcg_gen_extr_i128_i64(t0, t1, t16);
             tcg_gen_st_i64(t0, base, vofs + i);
-            tcg_gen_addi_i64(clean_addr, clean_addr, 8);
+            tcg_gen_st_i64(t1, base, vofs + i + 8);
+            tcg_gen_addi_i64(clean_addr, clean_addr, 16);
         }
     } else {
         TCGLabel *loop = gen_new_label();
@@ -4211,22 +4207,39 @@ void gen_sve_ldr(DisasContext *s, TCGv_ptr base, int vofs,
         tcg_gen_movi_ptr(i, 0);
         gen_set_label(loop);
 
-        t0 = tcg_temp_new_i64();
-        tcg_gen_qemu_ld_i64(t0, clean_addr, midx, MO_LEUQ);
-        tcg_gen_addi_i64(clean_addr, clean_addr, 8);
+        t16 = tcg_temp_new_i128();
+        tcg_gen_qemu_ld_i128(t16, clean_addr, midx,
+                             MO_LE | MO_128 | MO_ATOM_NONE);
+        tcg_gen_addi_i64(clean_addr, clean_addr, 16);
 
         tp = tcg_temp_new_ptr();
         tcg_gen_add_ptr(tp, base, i);
-        tcg_gen_addi_ptr(i, i, 8);
+        tcg_gen_addi_ptr(i, i, 16);
+
+        t0 = tcg_temp_new_i64();
+        t1 = tcg_temp_new_i64();
+        tcg_gen_extr_i128_i64(t0, t1, t16);
+
         tcg_gen_st_i64(t0, tp, vofs);
+        tcg_gen_st_i64(t1, tp, vofs + 8);
 
         tcg_gen_brcondi_ptr(TCG_COND_LTU, i, len_align, loop);
     }
 
     /*
      * Predicate register loads can be any multiple of 2.
-     * Note that we still store the entire 64-bit unit into cpu_env.
+     * Note that we still store the entire 64-bit unit into tcg_env.
      */
+    if (len_remain >= 8) {
+        t0 = tcg_temp_new_i64();
+        tcg_gen_qemu_ld_i64(t0, clean_addr, midx, MO_LEUQ | MO_ATOM_NONE);
+        tcg_gen_st_i64(t0, base, vofs + len_align);
+        len_remain -= 8;
+        len_align += 8;
+        if (len_remain) {
+            tcg_gen_addi_i64(clean_addr, clean_addr, 8);
+        }
+    }
     if (len_remain) {
         t0 = tcg_temp_new_i64();
         switch (len_remain) {
@@ -4234,14 +4247,14 @@ void gen_sve_ldr(DisasContext *s, TCGv_ptr base, int vofs,
         case 4:
         case 8:
             tcg_gen_qemu_ld_i64(t0, clean_addr, midx,
-                                MO_LE | ctz32(len_remain));
+                                MO_LE | ctz32(len_remain) | MO_ATOM_NONE);
             break;
 
         case 6:
             t1 = tcg_temp_new_i64();
-            tcg_gen_qemu_ld_i64(t0, clean_addr, midx, MO_LEUL);
+            tcg_gen_qemu_ld_i64(t0, clean_addr, midx, MO_LEUL | MO_ATOM_NONE);
             tcg_gen_addi_i64(clean_addr, clean_addr, 4);
-            tcg_gen_qemu_ld_i64(t1, clean_addr, midx, MO_LEUW);
+            tcg_gen_qemu_ld_i64(t1, clean_addr, midx, MO_LEUW | MO_ATOM_NONE);
             tcg_gen_deposit_i64(t0, t0, t1, 32, 32);
             break;
 
@@ -4256,15 +4269,16 @@ void gen_sve_ldr(DisasContext *s, TCGv_ptr base, int vofs,
 void gen_sve_str(DisasContext *s, TCGv_ptr base, int vofs,
                  int len, int rn, int imm)
 {
-    int len_align = QEMU_ALIGN_DOWN(len, 8);
-    int len_remain = len % 8;
-    int nparts = len / 8 + ctpop8(len_remain);
+    int len_align = QEMU_ALIGN_DOWN(len, 16);
+    int len_remain = len % 16;
+    int nparts = len / 16 + ctpop8(len_remain);
     int midx = get_mem_index(s);
-    TCGv_i64 dirty_addr, clean_addr, t0;
+    TCGv_i64 dirty_addr, clean_addr, t0, t1;
+    TCGv_i128 t16;
 
     dirty_addr = tcg_temp_new_i64();
     tcg_gen_addi_i64(dirty_addr, cpu_reg_sp(s, rn), imm);
-    clean_addr = gen_mte_checkN(s, dirty_addr, false, rn != 31, len);
+    clean_addr = gen_mte_checkN(s, dirty_addr, false, rn != 31, len, MO_8);
 
     /* Note that unpredicated load/store of vector/predicate registers
      * are defined as a stream of bytes, which equates to little-endian
@@ -4278,10 +4292,15 @@ void gen_sve_str(DisasContext *s, TCGv_ptr base, int vofs,
         int i;
 
         t0 = tcg_temp_new_i64();
-        for (i = 0; i < len_align; i += 8) {
+        t1 = tcg_temp_new_i64();
+        t16 = tcg_temp_new_i128();
+        for (i = 0; i < len_align; i += 16) {
             tcg_gen_ld_i64(t0, base, vofs + i);
-            tcg_gen_qemu_st_i64(t0, clean_addr, midx, MO_LEUQ);
-            tcg_gen_addi_i64(clean_addr, clean_addr, 8);
+            tcg_gen_ld_i64(t1, base, vofs + i + 8);
+            tcg_gen_concat_i64_i128(t16, t0, t1);
+            tcg_gen_qemu_st_i128(t16, clean_addr, midx,
+                                 MO_LE | MO_128 | MO_ATOM_NONE);
+            tcg_gen_addi_i64(clean_addr, clean_addr, 16);
         }
     } else {
         TCGLabel *loop = gen_new_label();
@@ -4291,18 +4310,34 @@ void gen_sve_str(DisasContext *s, TCGv_ptr base, int vofs,
         gen_set_label(loop);
 
         t0 = tcg_temp_new_i64();
+        t1 = tcg_temp_new_i64();
         tp = tcg_temp_new_ptr();
         tcg_gen_add_ptr(tp, base, i);
         tcg_gen_ld_i64(t0, tp, vofs);
-        tcg_gen_addi_ptr(i, i, 8);
+        tcg_gen_ld_i64(t1, tp, vofs + 8);
+        tcg_gen_addi_ptr(i, i, 16);
 
-        tcg_gen_qemu_st_i64(t0, clean_addr, midx, MO_LEUQ);
-        tcg_gen_addi_i64(clean_addr, clean_addr, 8);
+        t16 = tcg_temp_new_i128();
+        tcg_gen_concat_i64_i128(t16, t0, t1);
+
+        tcg_gen_qemu_st_i128(t16, clean_addr, midx,
+                             MO_LE | MO_128 | MO_ATOM_NONE);
+        tcg_gen_addi_i64(clean_addr, clean_addr, 16);
 
         tcg_gen_brcondi_ptr(TCG_COND_LTU, i, len_align, loop);
     }
 
     /* Predicate register stores can be any multiple of 2.  */
+    if (len_remain >= 8) {
+        t0 = tcg_temp_new_i64();
+        tcg_gen_ld_i64(t0, base, vofs + len_align);
+        tcg_gen_qemu_st_i64(t0, clean_addr, midx, MO_LEUQ | MO_ATOM_NONE);
+        len_remain -= 8;
+        len_align += 8;
+        if (len_remain) {
+            tcg_gen_addi_i64(clean_addr, clean_addr, 8);
+        }
+    }
     if (len_remain) {
         t0 = tcg_temp_new_i64();
         tcg_gen_ld_i64(t0, base, vofs + len_align);
@@ -4312,14 +4347,14 @@ void gen_sve_str(DisasContext *s, TCGv_ptr base, int vofs,
         case 4:
         case 8:
             tcg_gen_qemu_st_i64(t0, clean_addr, midx,
-                                MO_LE | ctz32(len_remain));
+                                MO_LE | ctz32(len_remain) | MO_ATOM_NONE);
             break;
 
         case 6:
-            tcg_gen_qemu_st_i64(t0, clean_addr, midx, MO_LEUL);
+            tcg_gen_qemu_st_i64(t0, clean_addr, midx, MO_LEUL | MO_ATOM_NONE);
             tcg_gen_addi_i64(clean_addr, clean_addr, 4);
             tcg_gen_shri_i64(t0, t0, 32);
-            tcg_gen_qemu_st_i64(t0, clean_addr, midx, MO_LEUW);
+            tcg_gen_qemu_st_i64(t0, clean_addr, midx, MO_LEUW | MO_ATOM_NONE);
             break;
 
         default:
@@ -4336,7 +4371,7 @@ static bool trans_LDR_zri(DisasContext *s, arg_rri *a)
     if (sve_access_check(s)) {
         int size = vec_full_reg_size(s);
         int off = vec_full_reg_offset(s, a->rd);
-        gen_sve_ldr(s, cpu_env, off, size, a->rn, a->imm * size);
+        gen_sve_ldr(s, tcg_env, off, size, a->rn, a->imm * size);
     }
     return true;
 }
@@ -4349,7 +4384,7 @@ static bool trans_LDR_pri(DisasContext *s, arg_rri *a)
     if (sve_access_check(s)) {
         int size = pred_full_reg_size(s);
         int off = pred_full_reg_offset(s, a->rd);
-        gen_sve_ldr(s, cpu_env, off, size, a->rn, a->imm * size);
+        gen_sve_ldr(s, tcg_env, off, size, a->rn, a->imm * size);
     }
     return true;
 }
@@ -4362,7 +4397,7 @@ static bool trans_STR_zri(DisasContext *s, arg_rri *a)
     if (sve_access_check(s)) {
         int size = vec_full_reg_size(s);
         int off = vec_full_reg_offset(s, a->rd);
-        gen_sve_str(s, cpu_env, off, size, a->rn, a->imm * size);
+        gen_sve_str(s, tcg_env, off, size, a->rn, a->imm * size);
     }
     return true;
 }
@@ -4375,7 +4410,7 @@ static bool trans_STR_pri(DisasContext *s, arg_rri *a)
     if (sve_access_check(s)) {
         int size = pred_full_reg_size(s);
         int off = pred_full_reg_offset(s, a->rd);
-        gen_sve_str(s, cpu_env, off, size, a->rn, a->imm * size);
+        gen_sve_str(s, tcg_env, off, size, a->rn, a->imm * size);
     }
     return true;
 }
@@ -4402,37 +4437,51 @@ static const uint8_t dtype_esz[16] = {
     3, 2, 1, 3
 };
 
+uint32_t make_svemte_desc(DisasContext *s, unsigned vsz, uint32_t nregs,
+                          uint32_t msz, bool is_write, uint32_t data)
+{
+    uint32_t sizem1;
+    uint32_t desc = 0;
+
+    /* Assert all of the data fits, with or without MTE enabled. */
+    assert(nregs >= 1 && nregs <= 4);
+    sizem1 = (nregs << msz) - 1;
+    assert(sizem1 <= R_MTEDESC_SIZEM1_MASK >> R_MTEDESC_SIZEM1_SHIFT);
+    assert(data < 1u << SVE_MTEDESC_SHIFT);
+
+    if (s->mte_active[0]) {
+        desc = FIELD_DP32(desc, MTEDESC, MIDX, get_mem_index(s));
+        desc = FIELD_DP32(desc, MTEDESC, TBI, s->tbid);
+        desc = FIELD_DP32(desc, MTEDESC, TCMA, s->tcma);
+        desc = FIELD_DP32(desc, MTEDESC, WRITE, is_write);
+        desc = FIELD_DP32(desc, MTEDESC, SIZEM1, sizem1);
+        desc <<= SVE_MTEDESC_SHIFT;
+    }
+    return simd_desc(vsz, vsz, desc | data);
+}
+
 static void do_mem_zpa(DisasContext *s, int zt, int pg, TCGv_i64 addr,
-                       int dtype, uint32_t mte_n, bool is_write,
+                       int dtype, uint32_t nregs, bool is_write,
                        gen_helper_gvec_mem *fn)
 {
-    unsigned vsz = vec_full_reg_size(s);
     TCGv_ptr t_pg;
-    int desc = 0;
+    uint32_t desc;
+
+    if (!s->mte_active[0]) {
+        addr = clean_data_tbi(s, addr);
+    }
 
     /*
      * For e.g. LD4, there are not enough arguments to pass all 4
      * registers as pointers, so encode the regno into the data field.
      * For consistency, do this even for LD1.
      */
-    if (s->mte_active[0]) {
-        int msz = dtype_msz(dtype);
-
-        desc = FIELD_DP32(desc, MTEDESC, MIDX, get_mem_index(s));
-        desc = FIELD_DP32(desc, MTEDESC, TBI, s->tbid);
-        desc = FIELD_DP32(desc, MTEDESC, TCMA, s->tcma);
-        desc = FIELD_DP32(desc, MTEDESC, WRITE, is_write);
-        desc = FIELD_DP32(desc, MTEDESC, SIZEM1, (mte_n << msz) - 1);
-        desc <<= SVE_MTEDESC_SHIFT;
-    } else {
-        addr = clean_data_tbi(s, addr);
-    }
-
-    desc = simd_desc(vsz, vsz, zt | desc);
+    desc = make_svemte_desc(s, vec_full_reg_size(s), nregs,
+                            dtype_msz(dtype), is_write, zt);
     t_pg = tcg_temp_new_ptr();
 
-    tcg_gen_addi_ptr(t_pg, cpu_env, pred_full_reg_offset(s, pg));
-    fn(cpu_env, t_pg, addr, tcg_constant_i32(desc));
+    tcg_gen_addi_ptr(t_pg, tcg_env, pred_full_reg_offset(s, pg));
+    fn(tcg_env, t_pg, addr, tcg_constant_i32(desc));
 }
 
 /* Indexed by [mte][be][dtype][nreg] */
@@ -4565,7 +4614,7 @@ static void do_ld_zpa(DisasContext *s, int zt, int pg,
      * accessible via the instruction encoding.
      */
     assert(fn != NULL);
-    do_mem_zpa(s, zt, pg, addr, dtype, nreg, false, fn);
+    do_mem_zpa(s, zt, pg, addr, dtype, nreg + 1, false, fn);
 }
 
 static bool trans_LD_zprr(DisasContext *s, arg_rprr_load *a)
@@ -4812,8 +4861,13 @@ static void do_ldrq(DisasContext *s, int zt, int pg, TCGv_i64 addr, int dtype)
     unsigned vsz = vec_full_reg_size(s);
     TCGv_ptr t_pg;
     int poff;
+    uint32_t desc;
 
     /* Load the first quadword using the normal predicated load helpers.  */
+    if (!s->mte_active[0]) {
+        addr = clean_data_tbi(s, addr);
+    }
+
     poff = pred_full_reg_offset(s, pg);
     if (vsz > 16) {
         /*
@@ -4826,18 +4880,19 @@ static void do_ldrq(DisasContext *s, int zt, int pg, TCGv_i64 addr, int dtype)
 #if HOST_BIG_ENDIAN
         poff += 6;
 #endif
-        tcg_gen_ld16u_i64(tmp, cpu_env, poff);
+        tcg_gen_ld16u_i64(tmp, tcg_env, poff);
 
         poff = offsetof(CPUARMState, vfp.preg_tmp);
-        tcg_gen_st_i64(tmp, cpu_env, poff);
+        tcg_gen_st_i64(tmp, tcg_env, poff);
     }
 
     t_pg = tcg_temp_new_ptr();
-    tcg_gen_addi_ptr(t_pg, cpu_env, poff);
+    tcg_gen_addi_ptr(t_pg, tcg_env, poff);
 
     gen_helper_gvec_mem *fn
         = ldr_fns[s->mte_active[0]][s->be_data == MO_BE][dtype][0];
-    fn(cpu_env, t_pg, addr, tcg_constant_i32(simd_desc(16, 16, zt)));
+    desc = make_svemte_desc(s, 16, 1, dtype_msz(dtype), false, zt);
+    fn(tcg_env, t_pg, addr, tcg_constant_i32(desc));
 
     /* Replicate that first quadword.  */
     if (vsz > 16) {
@@ -4880,6 +4935,7 @@ static void do_ldro(DisasContext *s, int zt, int pg, TCGv_i64 addr, int dtype)
     unsigned vsz_r32;
     TCGv_ptr t_pg;
     int poff, doff;
+    uint32_t desc;
 
     if (vsz < 32) {
         /*
@@ -4892,6 +4948,9 @@ static void do_ldro(DisasContext *s, int zt, int pg, TCGv_i64 addr, int dtype)
     }
 
     /* Load the first octaword using the normal predicated load helpers.  */
+    if (!s->mte_active[0]) {
+        addr = clean_data_tbi(s, addr);
+    }
 
     poff = pred_full_reg_offset(s, pg);
     if (vsz > 32) {
@@ -4905,18 +4964,19 @@ static void do_ldro(DisasContext *s, int zt, int pg, TCGv_i64 addr, int dtype)
 #if HOST_BIG_ENDIAN
         poff += 4;
 #endif
-        tcg_gen_ld32u_i64(tmp, cpu_env, poff);
+        tcg_gen_ld32u_i64(tmp, tcg_env, poff);
 
         poff = offsetof(CPUARMState, vfp.preg_tmp);
-        tcg_gen_st_i64(tmp, cpu_env, poff);
+        tcg_gen_st_i64(tmp, tcg_env, poff);
     }
 
     t_pg = tcg_temp_new_ptr();
-    tcg_gen_addi_ptr(t_pg, cpu_env, poff);
+    tcg_gen_addi_ptr(t_pg, tcg_env, poff);
 
     gen_helper_gvec_mem *fn
         = ldr_fns[s->mte_active[0]][s->be_data == MO_BE][dtype][0];
-    fn(cpu_env, t_pg, addr, tcg_constant_i32(simd_desc(32, 32, zt)));
+    desc = make_svemte_desc(s, 32, 1, dtype_msz(dtype), false, zt);
+    fn(tcg_env, t_pg, addr, tcg_constant_i32(desc));
 
     /*
      * Replicate that first octaword.
@@ -4975,6 +5035,7 @@ static bool trans_LD1R_zpri(DisasContext *s, arg_rpri_load *a)
     unsigned msz = dtype_msz(a->dtype);
     TCGLabel *over;
     TCGv_i64 temp, clean_addr;
+    MemOp memop;
 
     if (!dc_isar_feature(aa64_sve, s)) {
         return false;
@@ -4992,7 +5053,7 @@ static bool trans_LD1R_zpri(DisasContext *s, arg_rpri_load *a)
          */
         uint64_t psz_mask = MAKE_64BIT_MASK(0, psz * 8);
         temp = tcg_temp_new_i64();
-        tcg_gen_ld_i64(temp, cpu_env, pred_full_reg_offset(s, a->pg));
+        tcg_gen_ld_i64(temp, tcg_env, pred_full_reg_offset(s, a->pg));
         tcg_gen_andi_i64(temp, temp, pred_esz_masks[esz] & psz_mask);
         tcg_gen_brcondi_i64(TCG_COND_EQ, temp, 0, over);
     } else {
@@ -5004,10 +5065,10 @@ static bool trans_LD1R_zpri(DisasContext *s, arg_rpri_load *a)
     /* Load the data.  */
     temp = tcg_temp_new_i64();
     tcg_gen_addi_i64(temp, cpu_reg_sp(s, a->rn), a->imm << msz);
-    clean_addr = gen_mte_check1(s, temp, false, true, msz);
 
-    tcg_gen_qemu_ld_i64(temp, clean_addr, get_mem_index(s),
-                        finalize_memop(s, dtype_mop[a->dtype]));
+    memop = finalize_memop(s, dtype_mop[a->dtype]);
+    clean_addr = gen_mte_check1(s, temp, false, true, memop);
+    tcg_gen_qemu_ld_i64(temp, clean_addr, get_mem_index(s), memop);
 
     /* Broadcast to *all* elements.  */
     tcg_gen_gvec_dup_i64(esz, vec_full_reg_offset(s, a->rd),
@@ -5132,14 +5193,13 @@ static void do_st_zpa(DisasContext *s, int zt, int pg, TCGv_i64 addr,
     if (nreg == 0) {
         /* ST1 */
         fn = fn_single[s->mte_active[0]][be][msz][esz];
-        nreg = 1;
     } else {
         /* ST2, ST3, ST4 -- msz == esz, enforced by encoding */
         assert(msz == esz);
         fn = fn_multiple[s->mte_active[0]][be][nreg - 1][msz];
     }
     assert(fn != NULL);
-    do_mem_zpa(s, zt, pg, addr, msz_dtype(s, msz), nreg, true, fn);
+    do_mem_zpa(s, zt, pg, addr, msz_dtype(s, msz), nreg + 1, true, fn);
 }
 
 static bool trans_ST_zprr(DisasContext *s, arg_rprr_store *a)
@@ -5187,26 +5247,17 @@ static void do_mem_zpz(DisasContext *s, int zt, int pg, int zm,
                        int scale, TCGv_i64 scalar, int msz, bool is_write,
                        gen_helper_gvec_mem_scatter *fn)
 {
-    unsigned vsz = vec_full_reg_size(s);
     TCGv_ptr t_zm = tcg_temp_new_ptr();
     TCGv_ptr t_pg = tcg_temp_new_ptr();
     TCGv_ptr t_zt = tcg_temp_new_ptr();
-    int desc = 0;
+    uint32_t desc;
 
-    if (s->mte_active[0]) {
-        desc = FIELD_DP32(desc, MTEDESC, MIDX, get_mem_index(s));
-        desc = FIELD_DP32(desc, MTEDESC, TBI, s->tbid);
-        desc = FIELD_DP32(desc, MTEDESC, TCMA, s->tcma);
-        desc = FIELD_DP32(desc, MTEDESC, WRITE, is_write);
-        desc = FIELD_DP32(desc, MTEDESC, SIZEM1, (1 << msz) - 1);
-        desc <<= SVE_MTEDESC_SHIFT;
-    }
-    desc = simd_desc(vsz, vsz, desc | scale);
+    tcg_gen_addi_ptr(t_pg, tcg_env, pred_full_reg_offset(s, pg));
+    tcg_gen_addi_ptr(t_zm, tcg_env, vec_full_reg_offset(s, zm));
+    tcg_gen_addi_ptr(t_zt, tcg_env, vec_full_reg_offset(s, zt));
 
-    tcg_gen_addi_ptr(t_pg, cpu_env, pred_full_reg_offset(s, pg));
-    tcg_gen_addi_ptr(t_zm, cpu_env, vec_full_reg_offset(s, zm));
-    tcg_gen_addi_ptr(t_zt, cpu_env, vec_full_reg_offset(s, zt));
-    fn(cpu_env, t_zt, t_pg, t_zm, scalar, tcg_constant_i32(desc));
+    desc = make_svemte_desc(s, vec_full_reg_size(s), 1, msz, is_write, scale);
+    fn(tcg_env, t_zt, t_pg, t_zm, scalar, tcg_constant_i32(desc));
 }
 
 /* Indexed by [mte][be][ff][xs][u][msz].  */
@@ -7116,12 +7167,14 @@ TRANS_FEAT(USDOT_zzzz, aa64_sve_i8mm, gen_gvec_ool_arg_zzzz,
            a->esz == 2 ? gen_helper_gvec_usdot_b : NULL, a, 0)
 
 TRANS_FEAT_NONSTREAMING(AESMC, aa64_sve2_aes, gen_gvec_ool_zz,
-                        gen_helper_crypto_aesmc, a->rd, a->rd, a->decrypt)
+                        gen_helper_crypto_aesmc, a->rd, a->rd, 0)
+TRANS_FEAT_NONSTREAMING(AESIMC, aa64_sve2_aes, gen_gvec_ool_zz,
+                        gen_helper_crypto_aesimc, a->rd, a->rd, 0)
 
 TRANS_FEAT_NONSTREAMING(AESE, aa64_sve2_aes, gen_gvec_ool_arg_zzz,
-                        gen_helper_crypto_aese, a, false)
+                        gen_helper_crypto_aese, a, 0)
 TRANS_FEAT_NONSTREAMING(AESD, aa64_sve2_aes, gen_gvec_ool_arg_zzz,
-                        gen_helper_crypto_aese, a, true)
+                        gen_helper_crypto_aesd, a, 0)
 
 TRANS_FEAT_NONSTREAMING(SM4E, aa64_sve2_sm4, gen_gvec_ool_arg_zzz,
                         gen_helper_crypto_sm4e, a, 0)
@@ -7160,7 +7213,7 @@ static bool do_FMLAL_zzzw(DisasContext *s, arg_rrrr_esz *a, bool sub, bool sel)
 {
     return gen_gvec_ptr_zzzz(s, gen_helper_sve2_fmlal_zzzw_s,
                              a->rd, a->rn, a->rm, a->ra,
-                             (sel << 1) | sub, cpu_env);
+                             (sel << 1) | sub, tcg_env);
 }
 
 TRANS_FEAT(FMLALB_zzzw, aa64_sve2, do_FMLAL_zzzw, a, false, false)
@@ -7172,7 +7225,7 @@ static bool do_FMLAL_zzxw(DisasContext *s, arg_rrxr_esz *a, bool sub, bool sel)
 {
     return gen_gvec_ptr_zzzz(s, gen_helper_sve2_fmlal_zzxw_s,
                              a->rd, a->rn, a->rm, a->ra,
-                             (a->index << 2) | (sel << 1) | sub, cpu_env);
+                             (a->index << 2) | (sel << 1) | sub, tcg_env);
 }
 
 TRANS_FEAT(FMLALB_zzxw, aa64_sve2, do_FMLAL_zzxw, a, false, false)
@@ -7252,7 +7305,7 @@ static bool trans_PSEL(DisasContext *s, arg_psel *a)
 
     /* Load the predicate word. */
     tcg_gen_trunc_i64_ptr(ptr, didx);
-    tcg_gen_add_ptr(ptr, ptr, cpu_env);
+    tcg_gen_add_ptr(ptr, ptr, tcg_env);
     tcg_gen_ld8u_i64(tmp, ptr, pred_full_reg_offset(s, a->pm));
 
     /* Extract the predicate bit and replicate to MO_64. */

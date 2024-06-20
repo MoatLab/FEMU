@@ -23,7 +23,6 @@
 #include "s390x-internal.h"
 #include "tcg_s390x.h"
 #include "exec/exec-all.h"
-#include "exec/cpu_ldst.h"
 #include "exec/helper-proto.h"
 #include "fpu/softfloat.h"
 
@@ -52,7 +51,8 @@ uint8_t s390_softfloat_exc_to_ieee(unsigned int exc)
     s390_exc |= (exc & float_flag_divbyzero) ? S390_IEEE_MASK_DIVBYZERO : 0;
     s390_exc |= (exc & float_flag_overflow) ? S390_IEEE_MASK_OVERFLOW : 0;
     s390_exc |= (exc & float_flag_underflow) ? S390_IEEE_MASK_UNDERFLOW : 0;
-    s390_exc |= (exc & float_flag_inexact) ? S390_IEEE_MASK_INEXACT : 0;
+    s390_exc |= (exc & (float_flag_inexact | float_flag_invalid_cvti)) ?
+                S390_IEEE_MASK_INEXACT : 0;
 
     return s390_exc;
 }
@@ -86,7 +86,7 @@ static void handle_exceptions(CPUS390XState *env, bool XxC, uintptr_t retaddr)
 
     /*
      * FIXME:
-     * 1. Right now, all inexact conditions are inidicated as
+     * 1. Right now, all inexact conditions are indicated as
      *    "truncated" (0) and never as "incremented" (1) in the DXC.
      * 2. Only traps due to invalid/divbyzero are suppressing. Other traps
      *    are completing, meaning the target register has to be written!
@@ -306,8 +306,9 @@ uint64_t HELPER(mdb)(CPUS390XState *env, uint64_t f1, uint64_t f2)
 /* 64/32-bit FP multiplication */
 uint64_t HELPER(mdeb)(CPUS390XState *env, uint64_t f1, uint64_t f2)
 {
+    float64 f1_64 = float32_to_float64(f1, &env->fpu_status);
     float64 ret = float32_to_float64(f2, &env->fpu_status);
-    ret = float64_mul(f1, ret, &env->fpu_status);
+    ret = float64_mul(f1_64, ret, &env->fpu_status);
     handle_exceptions(env, false, GETPC());
     return ret;
 }
@@ -321,10 +322,11 @@ Int128 HELPER(mxb)(CPUS390XState *env, Int128 a, Int128 b)
 }
 
 /* 128/64-bit FP multiplication */
-Int128 HELPER(mxdb)(CPUS390XState *env, Int128 a, uint64_t f2)
+Int128 HELPER(mxdb)(CPUS390XState *env, uint64_t f1, uint64_t f2)
 {
+    float128 f1_128 = float64_to_float128(f1, &env->fpu_status);
     float128 ret = float64_to_float128(f2, &env->fpu_status);
-    ret = float128_mul(ARG128(a), ret, &env->fpu_status);
+    ret = float128_mul(f1_128, ret, &env->fpu_status);
     handle_exceptions(env, false, GETPC());
     return RET128(ret);
 }

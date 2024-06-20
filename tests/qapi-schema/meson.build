@@ -27,6 +27,8 @@ schemas = [
   'args-bad-boxed.json',
   'args-boxed-anon.json',
   'args-boxed-string.json',
+  'args-if-implicit.json',
+  'args-if-unboxed.json',
   'args-int.json',
   'args-invalid.json',
   'args-member-array-bad.json',
@@ -64,10 +66,12 @@ schemas = [
   'doc-bad-union-member.json',
   'doc-before-include.json',
   'doc-before-pragma.json',
+  'doc-duplicate-features.json',
   'doc-duplicated-arg.json',
   'doc-duplicated-return.json',
   'doc-duplicated-since.json',
   'doc-empty-arg.json',
+  'doc-empty-features.json',
   'doc-empty-section.json',
   'doc-empty-symbol.json',
   'doc-good.json',
@@ -75,6 +79,7 @@ schemas = [
   'doc-invalid-end.json',
   'doc-invalid-end2.json',
   'doc-invalid-return.json',
+  'doc-invalid-return2.json',
   'doc-invalid-section.json',
   'doc-invalid-start.json',
   'doc-missing-colon.json',
@@ -164,6 +169,7 @@ schemas = [
   'struct-base-clash-deep.json',
   'struct-base-clash.json',
   'struct-data-invalid.json',
+  'struct-data-typename.json',
   'struct-member-if-invalid.json',
   'struct-member-invalid-dict.json',
   'struct-member-invalid.json',
@@ -194,6 +200,8 @@ schemas = [
   'union-invalid-data.json',
   'union-invalid-discriminator.json',
   'union-invalid-if-discriminator.json',
+  'union-invalid-union-subfield.json',
+  'union-invalid-union-subtype.json',
   'union-no-base.json',
   'union-optional-discriminator.json',
   'union-string-discriminator.json',
@@ -268,15 +276,17 @@ if build_docs
                                     output: ['doc-good.txt.nocr'],
                                     input: qapi_doc_out[0],
                                     build_by_default: true,
-                                    command: [remove_cr, '@INPUT@'],
-                                    capture: true)
+                                    command: [remove_cr],
+                                    capture: true,
+                                    feed: true)
 
   qapi_doc_ref_nocr = custom_target('QAPI rST doc reference newline-sanitized',
                                     output: ['doc-good.ref.nocr'],
                                     input: files('doc-good.txt'),
                                     build_by_default: true,
-                                    command: [remove_cr, '@INPUT@'],
-                                    capture: true)
+                                    command: [remove_cr],
+                                    capture: true,
+                                    feed: true)
 
   test('QAPI rST doc', diff, args: ['-u', qapi_doc_ref_nocr[0], qapi_doc_out_nocr[0]],
        suite: ['qapi-schema', 'qapi-doc'])

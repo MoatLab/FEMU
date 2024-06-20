@@ -111,7 +111,7 @@ static uint8_t dhcp_magic[] = {0x63, 0x82, 0x53, 0x63};
  *  or to retrieve options from DHCP-msg during receiving.
  *  <p>
  *  If flag[i] == TRUE then field for i-th option retains valid value and
- *  information from this field may retrived (in case of receiving) or will
+ *  information from this field may be retrieved (in case of receiving) or will
  *  be transmitted (in case of transmitting).
  *
  */
@@ -233,7 +233,7 @@ int32_t dhcpv4(char *ret_buffer, filename_ip_t *fn_ip)
 		}
 	}
 
-	// Store configuration info into filename_ip strucutre
+	// Store configuration info into filename_ip structure
 	fn_ip -> own_ip = dhcp_own_ip;
 	fn_ip -> server_ip = dhcp_tftp_ip;
 	strcpy(fn_ip->filename, dhcp_filename);
@@ -507,7 +507,7 @@ static int32_t dhcp_decode_options(uint8_t opt_field[], uint32_t opt_len,
  * DHCP: Appends information from source "options" into dest "options".
  *       This function is used to support "file/sname" overloading.
  *
- * @param  dst_options   destanation "options" field
+ * @param  dst_options   destination "options" field
  * @param  dst_len       size of dst_options (modified by this function)
  * @param  src_options   source "options" field
  * @param  src_len       size of src_options

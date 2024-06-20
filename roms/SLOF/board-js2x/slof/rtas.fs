@@ -202,8 +202,8 @@ blist 50 erase
    2 rtas-cb rtas>nargs l!
    1 rtas-cb rtas>nret l!
    rtas-cb rtas>args0 l!
-   \ special unofficial parameter: if this is set to 1, the rtas function will not check, wether
-   \ we are on the perm side... this is needed for "update-flash -c" to work...
+   \ special unofficial parameter: if this is set to 1, the rtas function will not check
+   \ whether we are on the perm side... this is needed for "update-flash -c" to work...
    1 rtas-cb rtas>args1 l!
    enter-rtas
    rtas-cb rtas>args2 l@

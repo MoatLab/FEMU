@@ -10,9 +10,13 @@
     state: absent
 
 - name: 'Install PyPI packages'
-  command: '{{ paths.pip3 }} install {{ item }}'
-  loop: '{{ pypi_packages }}'
+  pip:
+    executable: '{{ paths.pip3 }}'
+    name: '{{ pypi_packages }}'
+  when: pypi_packages
 
 - name: 'Install CPAN packages'
-  command: 'cpanm --notest {{ item }}'
+  cpanm:
+    name: '{{ item }}'
+    notest: true
   loop: '{{ cpan_packages }}'

@@ -142,7 +142,7 @@ static void npcm7xx_sdhci_reset(DeviceState *dev)
 static const VMStateDescription vmstate_npcm7xx_sdhci = {
     .name = TYPE_NPCM7XX_SDHCI,
     .version_id = 0,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT32(regs.boottoctrl, NPCM7xxSDHCIState),
         VMSTATE_END_OF_LIST(),
     },
@@ -166,17 +166,14 @@ static void npcm7xx_sdhci_instance_init(Object *obj)
                             TYPE_SYSBUS_SDHCI);
 }
 
-static const TypeInfo npcm7xx_sdhci_info = {
-    .name = TYPE_NPCM7XX_SDHCI,
-    .parent = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(NPCM7xxSDHCIState),
-    .instance_init = npcm7xx_sdhci_instance_init,
-    .class_init = npcm7xx_sdhci_class_init,
+static const TypeInfo npcm7xx_sdhci_types[] = {
+    {
+        .name           = TYPE_NPCM7XX_SDHCI,
+        .parent         = TYPE_SYS_BUS_DEVICE,
+        .instance_size  = sizeof(NPCM7xxSDHCIState),
+        .instance_init  = npcm7xx_sdhci_instance_init,
+        .class_init     = npcm7xx_sdhci_class_init,
+    },
 };
 
-static void npcm7xx_sdhci_register_types(void)
-{
-    type_register_static(&npcm7xx_sdhci_info);
-}
-
-type_init(npcm7xx_sdhci_register_types)
+DEFINE_TYPES(npcm7xx_sdhci_types)

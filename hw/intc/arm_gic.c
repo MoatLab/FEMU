@@ -239,7 +239,7 @@ static inline bool gic_lr_entry_is_free(uint32_t entry)
 }
 
 /* Return true if this LR should trigger an EOI maintenance interrupt, i.e. the
- * corrsponding bit in EISR is set.
+ * corresponding bit in EISR is set.
  */
 static inline bool gic_lr_entry_is_eoi(uint32_t entry)
 {
@@ -1333,7 +1333,7 @@ static void gic_dist_writeb(void *opaque, hwaddr offset,
 
             /* ??? This currently clears the pending bit for all CPUs, even
                for per-CPU interrupts.  It's unclear whether this is the
-               corect behavior.  */
+               correct behavior.  */
             if (value & (1 << i)) {
                 GIC_DIST_CLEAR_PENDING(irq + i, ALL_CPU_MASK);
             }
@@ -1658,7 +1658,7 @@ static MemTxResult gic_cpu_read(GICState *s, int cpu, int offset,
             *data = s->h_apr[gic_get_vcpu_real_id(cpu)];
         } else if (gic_cpu_ns_access(s, cpu, attrs)) {
             /* NS view of GICC_APR<n> is the top half of GIC_NSAPR<n> */
-            *data = gic_apr_ns_view(s, regno, cpu);
+            *data = gic_apr_ns_view(s, cpu, regno);
         } else {
             *data = s->apr[regno][cpu];
         }
@@ -1746,7 +1746,7 @@ static MemTxResult gic_cpu_write(GICState *s, int cpu, int offset,
             s->h_apr[gic_get_vcpu_real_id(cpu)] = value;
         } else if (gic_cpu_ns_access(s, cpu, attrs)) {
             /* NS view of GICC_APR<n> is the top half of GIC_NSAPR<n> */
-            gic_apr_write_ns_view(s, regno, cpu, value);
+            gic_apr_write_ns_view(s, cpu, regno, value);
         } else {
             s->apr[regno][cpu] = value;
         }

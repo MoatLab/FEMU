@@ -71,10 +71,13 @@ class FuncDecl:
         self.args = [ParamDecl(arg.strip()) for arg in args.split(',')]
         self.create_only_co = 'mixed' not in variant
         self.graph_rdlock = 'bdrv_rdlock' in variant
+        self.graph_wrlock = 'bdrv_wrlock' in variant
 
         self.wrapper_type = wrapper_type
 
         if wrapper_type == 'co':
+            if self.graph_wrlock:
+                raise ValueError(f"co function can't be wrlock: {self.name}")
             subsystem, subname = self.name.split('_', 1)
             self.target_name = f'{subsystem}_co_{subname}'
         else:
@@ -84,20 +87,10 @@ class FuncDecl:
                 raise ValueError(f"Invalid no_co function name: {self.name}")
             if not self.create_only_co:
                 raise ValueError(f"no_co function can't be mixed: {self.name}")
-            if self.graph_rdlock:
-                raise ValueError(f"no_co function can't be rdlock: {self.name}")
+            if self.graph_rdlock and self.graph_wrlock:
+                raise ValueError("function can't be both rdlock and wrlock: "
+                                 f"{self.name}")
             self.target_name = f'{subsystem}_{subname}'
-
-        t = self.args[0].type
-        if t == 'BlockDriverState *':
-            ctx = 'bdrv_get_aio_context(bs)'
-        elif t == 'BdrvChild *':
-            ctx = 'bdrv_get_aio_context(child->bs)'
-        elif t == 'BlockBackend *':
-            ctx = 'blk_get_aio_context(blk)'
-        else:
-            ctx = 'qemu_get_aio_context()'
-        self.ctx = ctx
 
         self.get_result = 's->ret = '
         self.ret = 'return s.ret;'
@@ -108,6 +101,18 @@ class FuncDecl:
             self.ret = ''
             self.co_ret = ''
             self.return_field = ''
+
+    def gen_ctx(self, prefix: str = '') -> str:
+        t = self.args[0].type
+        name = self.args[0].name
+        if t == 'BlockDriverState *':
+            return f'bdrv_get_aio_context({prefix}{name})'
+        elif t == 'BdrvChild *':
+            return f'bdrv_get_aio_context({prefix}{name}->bs)'
+        elif t == 'BlockBackend *':
+            return f'blk_get_aio_context({prefix}{name})'
+        else:
+            return 'qemu_get_aio_context()'
 
     def gen_list(self, format: str) -> str:
         return ', '.join(format.format_map(arg.__dict__) for arg in self.args)
@@ -160,7 +165,7 @@ def create_mixed_wrapper(func: FuncDecl) -> str:
         {func.co_ret}{name}({ func.gen_list('{name}') });
     }} else {{
         {struct_name} s = {{
-            .poll_state.ctx = {func.ctx},
+            .poll_state.ctx = qemu_get_current_aio_context(),
             .poll_state.in_progress = true,
 
 { func.gen_block('            .{name} = {name},') }
@@ -184,7 +189,7 @@ def create_co_wrapper(func: FuncDecl) -> str:
 {func.return_type} {func.name}({ func.gen_list('{decl}') })
 {{
     {struct_name} s = {{
-        .poll_state.ctx = {func.ctx},
+        .poll_state.ctx = qemu_get_current_aio_context(),
         .poll_state.in_progress = true,
 
 { func.gen_block('        .{name} = {name},') }
@@ -248,6 +253,15 @@ def gen_no_co_wrapper(func: FuncDecl) -> str:
     name = func.target_name
     struct_name = func.struct_name
 
+    graph_lock=''
+    graph_unlock=''
+    if func.graph_rdlock:
+        graph_lock='    bdrv_graph_rdlock_main_loop();'
+        graph_unlock='    bdrv_graph_rdunlock_main_loop();'
+    elif func.graph_wrlock:
+        graph_lock='    bdrv_graph_wrlock();'
+        graph_unlock='    bdrv_graph_wrunlock();'
+
     return f"""\
 /*
  * Wrappers for {name}
@@ -263,7 +277,9 @@ static void {name}_bh(void *opaque)
 {{
     {struct_name} *s = opaque;
 
+{graph_lock}
     {func.get_result}{name}({ func.gen_list('s->{name}') });
+{graph_unlock}
 
     aio_co_wake(s->co);
 }}

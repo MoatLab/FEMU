@@ -321,6 +321,8 @@ static void sdhci_poweron_reset(DeviceState *dev)
 
 static void sdhci_data_transfer(void *opaque);
 
+#define BLOCK_SIZE_MASK (4 * KiB - 1)
+
 static void sdhci_send_command(SDHCIState *s)
 {
     SDRequest request;
@@ -371,7 +373,8 @@ static void sdhci_send_command(SDHCIState *s)
 
     sdhci_update_irq(s);
 
-    if (!timeout && s->blksize && (s->cmdreg & SDHC_CMD_DATA_PRESENT)) {
+    if (!timeout && (s->blksize & BLOCK_SIZE_MASK) &&
+        (s->cmdreg & SDHC_CMD_DATA_PRESENT)) {
         s->data_count = 0;
         sdhci_data_transfer(s);
     }
@@ -406,7 +409,6 @@ static void sdhci_end_transfer(SDHCIState *s)
 /*
  * Programmed i/o data transfer
  */
-#define BLOCK_SIZE_MASK (4 * KiB - 1)
 
 /* Fill host controller's read buffer with BLKSIZE bytes of data from card */
 static void sdhci_read_block_from_card(SDHCIState *s)
@@ -471,6 +473,7 @@ static uint32_t sdhci_read_dataport(SDHCIState *s, unsigned size)
     }
 
     for (i = 0; i < size; i++) {
+        assert(s->data_count < s->buf_maxsz);
         value |= s->fifo_buffer[s->data_count] << i * 8;
         s->data_count++;
         /* check if we've read all valid data (blksize bytes) from buffer */
@@ -559,6 +562,7 @@ static void sdhci_write_dataport(SDHCIState *s, uint32_t value, unsigned size)
     }
 
     for (i = 0; i < size; i++) {
+        assert(s->data_count < s->buf_maxsz);
         s->fifo_buffer[s->data_count] = value & 0xFF;
         s->data_count++;
         value >>= 8;
@@ -1154,7 +1158,8 @@ sdhci_write(void *opaque, hwaddr offset, uint64_t val, unsigned size)
             s->sdmasysad = (s->sdmasysad & mask) | value;
             MASKED_WRITE(s->sdmasysad, mask, value);
             /* Writing to last byte of sdmasysad might trigger transfer */
-            if (!(mask & 0xFF000000) && s->blkcnt && s->blksize &&
+            if (!(mask & 0xFF000000) && s->blkcnt &&
+                (s->blksize & BLOCK_SIZE_MASK) &&
                 SDHC_DMA_TYPE(s->hostctl1) == SDHC_CTRL_SDMA) {
                 if (s->trnmod & SDHC_TRNS_MULTI) {
                     sdhci_sdma_transfer_multi_blocks(s);
@@ -1168,7 +1173,11 @@ sdhci_write(void *opaque, hwaddr offset, uint64_t val, unsigned size)
         if (!TRANSFERRING_DATA(s->prnsts)) {
             uint16_t blksize = s->blksize;
 
-            MASKED_WRITE(s->blksize, mask, extract32(value, 0, 12));
+            /*
+             * [14:12] SDMA Buffer Boundary
+             * [11:00] Transfer Block Size
+             */
+            MASKED_WRITE(s->blksize, mask, extract32(value, 0, 15));
             MASKED_WRITE(s->blkcnt, mask >> 16, value >> 16);
 
             /* Limit block size to the maximum buffer size */
@@ -1201,6 +1210,12 @@ sdhci_write(void *opaque, hwaddr offset, uint64_t val, unsigned size)
         if (!(s->capareg & R_SDHC_CAPAB_SDMA_MASK)) {
             value &= ~SDHC_TRNS_DMA;
         }
+
+        /* TRNMOD writes are inhibited while Command Inhibit (DAT) is true */
+        if (s->prnsts & SDHC_DATA_INHIBIT) {
+            mask |= 0xffff;
+        }
+
         MASKED_WRITE(s->trnmod, mask, value & SDHC_TRNMOD_MASK);
         MASKED_WRITE(s->cmdreg, mask >> 16, value >> 16);
 
@@ -1382,6 +1397,8 @@ void sdhci_initfn(SDHCIState *s)
 
     s->insert_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, sdhci_raise_insertion_irq, s);
     s->transfer_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, sdhci_data_transfer, s);
+
+    s->io_ops = &sdhci_mmio_le_ops;
 }
 
 void sdhci_uninitfn(SDHCIState *s)
@@ -1399,9 +1416,13 @@ void sdhci_common_realize(SDHCIState *s, Error **errp)
 
     switch (s->endianness) {
     case DEVICE_LITTLE_ENDIAN:
-        s->io_ops = &sdhci_mmio_le_ops;
+        /* s->io_ops is little endian by default */
         break;
     case DEVICE_BIG_ENDIAN:
+        if (s->io_ops != &sdhci_mmio_le_ops) {
+            error_setg(errp, "SD controller doesn't support big endianness");
+            return;
+        }
         s->io_ops = &sdhci_mmio_be_ops;
         break;
     default:
@@ -1444,7 +1465,7 @@ static const VMStateDescription sdhci_pending_insert_vmstate = {
     .version_id = 1,
     .minimum_version_id = 1,
     .needed = sdhci_pending_insert_vmstate_needed,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_BOOL(pending_insert_state, SDHCIState),
         VMSTATE_END_OF_LIST()
     },
@@ -1454,7 +1475,7 @@ const VMStateDescription sdhci_vmstate = {
     .name = "sdhci",
     .version_id = 1,
     .minimum_version_id = 1,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT32(sdmasysad, SDHCIState),
         VMSTATE_UINT16(blksize, SDHCIState),
         VMSTATE_UINT16(blkcnt, SDHCIState),
@@ -1485,7 +1506,7 @@ const VMStateDescription sdhci_vmstate = {
         VMSTATE_TIMER_PTR(transfer_timer, SDHCIState),
         VMSTATE_END_OF_LIST()
     },
-    .subsections = (const VMStateDescription*[]) {
+    .subsections = (const VMStateDescription * const []) {
         &sdhci_pending_insert_vmstate,
         NULL
     },
@@ -1805,7 +1826,7 @@ usdhc_write(void *opaque, hwaddr offset, uint64_t val, unsigned size)
          * on i.MX, but since it is not used by QEMU we do not care.
          *
          * We don't want to call sdhci_write(.., SDHC_TRNMOD, ...)
-         * here becuase it will result in a call to
+         * here because it will result in a call to
          * sdhci_send_command(s) which we don't want.
          *
          */

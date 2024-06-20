@@ -30,17 +30,34 @@
 
 	/* Beginning of the read-only data sections */
 
+	PROVIDE(_rodata_start = .);
+
 	.rodata :
 	{
-		PROVIDE(_rodata_start = .);
 		*(.rodata .rodata.*)
 		. = ALIGN(8);
-		PROVIDE(_rodata_end = .);
 	}
+
+	. = ALIGN(0x1000); /* Ensure next section is page aligned */
+
+	.rela.dyn : {
+		PROVIDE(__rel_dyn_start = .);
+		*(.rela*)
+		PROVIDE(__rel_dyn_end = .);
+	}
+
+	PROVIDE(_rodata_end = .);
 
 	/* End of the read-only data sections */
 
-	. = ALIGN(0x1000); /* Ensure next section is page aligned */
+	/*
+	 * PMP regions must be to be power-of-2. RX/RW will have separate
+	 * regions, so ensure that the split is power-of-2.
+	 */
+	. = ALIGN(1 << LOG2CEIL((SIZEOF(.rodata) + SIZEOF(.text)
+				+ SIZEOF(.dynsym) + SIZEOF(.rela.dyn))));
+
+	PROVIDE(_fw_rw_start = .);
 
 	/* Beginning of the read-write data sections */
 
@@ -57,19 +74,6 @@
 		. = ALIGN(8);
 
 		PROVIDE(_data_end = .);
-	}
-
-	.dynsym : {
-		PROVIDE(__dyn_sym_start = .);
-		*(.dynsym)
-		PROVIDE(__dyn_sym_end = .);
-	}
-
-	.rela.dyn : {
-		PROVIDE(__rel_dyn_start = .);
-		*(.rela*)
-		. = ALIGN(8);
-		PROVIDE(__rel_dyn_end = .);
 	}
 
 	. = ALIGN(0x1000); /* Ensure next section is page aligned */

@@ -724,7 +724,6 @@ struct omap_uart_s *omap2_uart_init(MemoryRegion *sysmem,
                 qemu_irq txdma, qemu_irq rxdma,
                 const char *label, Chardev *chr);
 void omap_uart_reset(struct omap_uart_s *s);
-void omap_uart_attach(struct omap_uart_s *s, Chardev *chr);
 
 struct omap_mpuio_s;
 qemu_irq *omap_mpuio_in_get(struct omap_mpuio_s *s);
@@ -1009,7 +1008,8 @@ void omap_mpu_wakeup(void *opaque, int irq, int req);
                       __func__, paddr)
 
 /* OMAP-specific Linux bootloader tags for the ATAG_BOARD area
-   (Board-specifc tags are not here)  */
+ * (Board-specific tags are not here)
+ */
 #define OMAP_TAG_CLOCK		0x4f01
 #define OMAP_TAG_MMC		0x4f02
 #define OMAP_TAG_SERIAL_CONSOLE	0x4f03

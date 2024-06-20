@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: BSD-2-Clause
+
+menu "Regmap Support"
+
+config FDT_REGMAP
+	bool "FDT based regmap drivers"
+	depends on FDT
+	select REGMAP
+	default n
+
+if FDT_REGMAP
+
+config FDT_REGMAP_SYSCON
+	bool "Syscon regmap FDT driver"
+	default n
+endif
+
+config REGMAP
+	bool "Regmap support"
+	default n
+
+endmenu

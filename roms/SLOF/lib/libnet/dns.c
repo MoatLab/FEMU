@@ -95,7 +95,7 @@ static int8_t  dns_domain_cname[0x100];      /**< Canonical domain name  */
 
 /**
  * DNS: Initialize the environment for DNS client.
- *      To perfrom DNS-queries use the function dns_get_ip.
+ *      To perform DNS-queries use the function dns_get_ip.
  *
  * @param  device_socket a socket number used to send and receive packets
  * @param  server_ip     DNS-server IPv4 address (e.g. 127.0.0.1)
@@ -129,7 +129,7 @@ dns_init(uint32_t _dns_server_ip, uint8_t _dns_server_ipv6[16], uint8_t ip_versi
  * @param  url       the URL to be resolved
  * @param  domain_ip In case of SUCCESS stores extracted IP.
  *                   In case of FAULT stores zeros (0.0.0.0).
- * @return           TRUE - IP successfuly retrieved;
+ * @return           TRUE - IP successfully retrieved;
  *                   FALSE - error condition occurs.
  */
 int8_t

@@ -1,14 +1,15 @@
 import pytest
+import sys
 
 from pathlib import Path
 
 from lcitool.config import Config
-from lcitool.inventory import Inventory
 from lcitool.packages import Packages
 from lcitool.projects import Projects
 from lcitool.targets import Targets
 from lcitool import util
 
+from test_utils.mocks import libvirt, gi
 import test_utils.utils as test_utils
 
 
@@ -34,32 +35,32 @@ _TARGETS = Targets()
 ALL_PROJECTS = sorted(_PROJECTS.names + list(_PROJECTS.internal.keys()))
 ALL_TARGETS = sorted(_TARGETS.targets)
 
+# We need to mock a few modules that we don't need for testing
+sys.modules["libvirt"] = libvirt
+sys.modules["gi"] = gi
+
+
+def monkeypatch_context():
+    with pytest.MonkeyPatch.context() as mp:
+        yield mp
+
+
+@pytest.fixture(scope="module")
+def monkeypatch_module_scope():
+    yield from monkeypatch_context()
+
+
+@pytest.fixture(scope="class")
+def monkeypatch_class_scope():
+    yield from monkeypatch_context()
+
 
 @pytest.fixture
-def config(monkeypatch, request):
-    if 'config_filename' in request.fixturenames:
-        config_filename = request.getfixturevalue('config_filename')
-        actual_path = Path(test_utils.test_data_indir(request.module.__file__), config_filename)
-
-        # we have to monkeypatch the '_config_file_paths' attribute, since we don't
-        # support custom inventory paths
-        config = Config()
-        monkeypatch.setattr(config, "_config_file_paths", [actual_path])
-    else:
-        actual_dir = Path(test_utils.test_data_indir(request.module.__file__))
-        monkeypatch.setattr(util, "get_config_dir", lambda: actual_dir)
-        config = Config()
-
-    return config
-
-
-@pytest.fixture
-def inventory(monkeypatch, targets, config):
-    inventory = Inventory(targets, config)
-
-    monkeypatch.setattr(inventory, "_get_libvirt_inventory",
-                        lambda: {"all": {"children": {}}})
-    return inventory
+def assert_equal(request, tmp_path_factory):
+    def _assert_equal(actual, expected):
+        tmp_dir = Path(tmp_path_factory.getbasetemp(), request.node.name)
+        return test_utils._assert_equal(actual, expected, test_tmp_dir=tmp_dir)
+    return _assert_equal
 
 
 @pytest.fixture(scope="module")
@@ -67,11 +68,11 @@ def packages():
     return Packages()
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def projects():
     return _PROJECTS
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def targets():
     return _TARGETS

@@ -47,10 +47,8 @@ static DBusDisplay *dbus_display;
 static QEMUGLContext dbus_create_context(DisplayGLCtx *dgc,
                                          QEMUGLParams *params)
 {
-#ifdef CONFIG_GBM
     eglMakeCurrent(qemu_egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
                    qemu_egl_rn_ctx);
-#endif
     return qemu_egl_create_context(dgc, params);
 }
 
@@ -59,9 +57,7 @@ dbus_is_compatible_dcl(DisplayGLCtx *dgc,
                        DisplayChangeListener *dcl)
 {
     return
-#ifdef CONFIG_GBM
         dcl->ops == &dbus_gl_dcl_ops ||
-#endif
         dcl->ops == &dbus_console_dcl_ops;
 }
 
@@ -224,9 +220,8 @@ dbus_display_complete(UserCreatable *uc, Error **errp)
     }
 
     if (dd->audiodev && *dd->audiodev) {
-        AudioState *audio_state = audio_state_by_name(dd->audiodev);
+        AudioState *audio_state = audio_state_by_name(dd->audiodev, errp);
         if (!audio_state) {
-            error_setg(errp, "Audiodev '%s' not found", dd->audiodev);
             return;
         }
         if (!g_str_equal(audio_state->drv->name, "dbus")) {
@@ -523,6 +518,7 @@ static QemuDisplay qemu_display_dbus = {
     .type       = DISPLAY_TYPE_DBUS,
     .early_init = early_dbus_init,
     .init       = dbus_init,
+    .vc         = "vc",
 };
 
 static void register_dbus(void)

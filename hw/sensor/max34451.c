@@ -654,7 +654,7 @@ static const VMStateDescription vmstate_max34451 = {
     .name = TYPE_MAX34451,
     .version_id = 0,
     .minimum_version_id = 0,
-    .fields = (VMStateField[]){
+    .fields = (const VMStateField[]){
         VMSTATE_PMBUS_DEVICE(parent, MAX34451State),
         VMSTATE_UINT16_ARRAY(power_good_on, MAX34451State,
                              MAX34451_NUM_PWR_DEVICES),
@@ -734,7 +734,7 @@ static void max34451_init(Object *obj)
 
     /*
      * get and set the temperature of the internal temperature sensor in
-     * centidegrees Celcius i.e.: 2500 -> 25.00 C, max is 327.67 C
+     * centidegrees Celsius i.e.: 2500 -> 25.00 C, max is 327.67 C
      */
     for (int i = 0; i < MAX34451_NUM_TEMP_DEVICES; i++) {
         object_property_add(obj, "temperature[*]", "uint16",

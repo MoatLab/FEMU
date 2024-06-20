@@ -24,7 +24,7 @@
 #define IPV6_DEBUG_PRINT(format, ...)
 #endif
 
-#define IPV6_ADDR_LENGTH	 16 /* Size of IPv6 adress in bytes */
+#define IPV6_ADDR_LENGTH	 16 /* Size of IPv6 address in bytes */
 #define IPV6_LL_PREFIX		 0xFE80000000000000ULL
 #define IPV6_LL_PREFIX_MASK	 0xFFC0000000000000ULL
 #define IPV6_SOLIC_NODE_PREFIX   0xFF02000000000000ULL
@@ -52,7 +52,7 @@ typedef struct {
 
 /** \struct prefix_info
  *
- * List of Prefixes we have adresses from
+ * List of Prefixes we have addresses from
  * Used for internal purposes, information derived from prefix option
  * in Router Advertisements
  * See RFC 4861 section 4.6.2
@@ -121,7 +121,7 @@ struct parseip6_state {
 };
 
 /** \struct ip6_config
- * Stores flags wheter we use Stateless- or Stateful Autoconfiguration or DHCPv6
+ * Stores flags whether we use Stateless- or Stateful Autoconfiguration or DHCPv6
  */
 struct ip6_config {
 	uint8_t managed_mode:1,
@@ -160,7 +160,7 @@ struct prefix_info * ip6_create_prefix_info(void);
  *	and add it to our IPv6 address list */
 void * ip6_prefix2addr (ip6_addr_t prefix);
 
-/* Compare IPv6 adresses */
+/* Compare IPv6 addresses */
 int8_t ip6_cmp(ip6_addr_t ip_1, ip6_addr_t ip_2);
 
 /* Check if it is a link-local address */

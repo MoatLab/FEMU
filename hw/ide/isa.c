@@ -32,8 +32,8 @@
 #include "sysemu/dma.h"
 
 #include "hw/ide/isa.h"
-#include "hw/ide/internal.h"
 #include "qom/object.h"
+#include "ide-internal.h"
 
 /***********************************************************/
 /* ISA IDE definitions */
@@ -58,7 +58,7 @@ static const VMStateDescription vmstate_ide_isa = {
     .name = "isa-ide",
     .version_id = 3,
     .minimum_version_id = 0,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_IDE_BUS(bus, ISAIDEState),
         VMSTATE_IDE_DRIVES(bus.ifs, ISAIDEState),
         VMSTATE_END_OF_LIST()
@@ -73,7 +73,7 @@ static void isa_ide_realizefn(DeviceState *dev, Error **errp)
     ide_bus_init(&s->bus, sizeof(s->bus), dev, 0, 2);
     ide_init_ioport(&s->bus, isadev, s->iobase, s->iobase2);
     ide_bus_init_output_irq(&s->bus, isa_get_irq(isadev, s->irqnum));
-    vmstate_register(VMSTATE_IF(dev), 0, &vmstate_ide_isa, s);
+    vmstate_register_any(VMSTATE_IF(dev), &vmstate_ide_isa, s);
     ide_bus_register_restart_cb(&s->bus);
 }
 

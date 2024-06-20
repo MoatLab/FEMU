@@ -362,7 +362,7 @@ assign_statement : lvalue '=' rvalue
                                 "Assignment side-effect not modeled!");
                        $3 = gen_rvalue_truncate(c, &@1, &$3);
                        $3 = rvalue_materialize(c, &@1, &$3);
-                       OUT(c, &@1, "SET_USR_FIELD(USR_LPCFG, ", &$3, ");\n");
+                       OUT(c, &@1, "gen_set_usr_field(ctx, USR_LPCFG, ", &$3, ");\n");
                    }
                  | DEPOSIT '(' rvalue ',' rvalue ',' rvalue ')'
                    {
@@ -594,8 +594,6 @@ rvalue : FAIL
        | CAST rvalue
          {
              @1.last_column = @2.last_column;
-             /* Assign target signedness */
-             $2.signedness = $1.signedness;
              $$ = gen_cast_op(c, &@1, &$2, $1.bit_width, $1.signedness);
          }
        | rvalue EQ rvalue
@@ -685,7 +683,7 @@ rvalue : FAIL
              yyassert(c, &@1, $5.type == IMMEDIATE &&
                       $5.imm.type == VALUE,
                       "SXT expects immediate values\n");
-             $$ = gen_extend_op(c, &@1, &$3, $5.imm.value, &$7, SIGNED);
+             $$ = gen_extend_op(c, &@1, &$3, 64, &$7, SIGNED);
          }
        | ZXT '(' rvalue ',' IMM ',' rvalue ')'
          {
@@ -693,7 +691,7 @@ rvalue : FAIL
              yyassert(c, &@1, $5.type == IMMEDIATE &&
                       $5.imm.type == VALUE,
                       "ZXT expects immediate values\n");
-             $$ = gen_extend_op(c, &@1, &$3, $5.imm.value, &$7, UNSIGNED);
+             $$ = gen_extend_op(c, &@1, &$3, 64, &$7, UNSIGNED);
          }
        | '(' rvalue ')'
          {
@@ -845,13 +843,14 @@ int main(int argc, char **argv)
     fputs("#include \"qemu/log.h\"\n", output_file);
     fputs("#include \"cpu.h\"\n", output_file);
     fputs("#include \"internal.h\"\n", output_file);
+    fputs("#include \"tcg/tcg.h\"\n", output_file);
     fputs("#include \"tcg/tcg-op.h\"\n", output_file);
+    fputs("#include \"exec/helper-gen.h\"\n", output_file);
     fputs("#include \"insn.h\"\n", output_file);
     fputs("#include \"opcodes.h\"\n", output_file);
     fputs("#include \"translate.h\"\n", output_file);
     fputs("#define QEMU_GENERATE\n", output_file);
     fputs("#include \"genptr.h\"\n", output_file);
-    fputs("#include \"tcg/tcg.h\"\n", output_file);
     fputs("#include \"macros.h\"\n", output_file);
     fprintf(output_file, "#include \"%s\"\n", argv[ARG_INDEX_EMITTER_H]);
 

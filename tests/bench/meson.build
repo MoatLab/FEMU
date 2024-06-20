@@ -3,15 +3,9 @@ qht_bench = executable('qht-bench',
                        sources: 'qht-bench.c',
                        dependencies: [qemuutil])
 
-if have_system
-xbzrle_bench = executable('xbzrle-bench',
-                       sources: 'xbzrle-bench.c',
-                       dependencies: [qemuutil,migration])
-endif
-
-qtree_bench = executable('qtree-bench',
-                         sources: 'qtree-bench.c',
-                         dependencies: [qemuutil])
+executable('qtree-bench',
+           sources: 'qtree-bench.c',
+           dependencies: [qemuutil])
 
 executable('atomic_add-bench',
            sources: files('atomic_add-bench.c'),

@@ -34,8 +34,17 @@ libsbi-objs-$(CONFIG_SBI_ECALL_HSM) += sbi_ecall_hsm.o
 carray-sbi_ecall_exts-$(CONFIG_SBI_ECALL_SRST) += ecall_srst
 libsbi-objs-$(CONFIG_SBI_ECALL_SRST) += sbi_ecall_srst.o
 
+carray-sbi_ecall_exts-$(CONFIG_SBI_ECALL_SUSP) += ecall_susp
+libsbi-objs-$(CONFIG_SBI_ECALL_SUSP) += sbi_ecall_susp.o
+
 carray-sbi_ecall_exts-$(CONFIG_SBI_ECALL_PMU) += ecall_pmu
 libsbi-objs-$(CONFIG_SBI_ECALL_PMU) += sbi_ecall_pmu.o
+
+carray-sbi_ecall_exts-$(CONFIG_SBI_ECALL_DBCN) += ecall_dbcn
+libsbi-objs-$(CONFIG_SBI_ECALL_DBCN) += sbi_ecall_dbcn.o
+
+carray-sbi_ecall_exts-$(CONFIG_SBI_ECALL_CPPC) += ecall_cppc
+libsbi-objs-$(CONFIG_SBI_ECALL_CPPC) += sbi_ecall_cppc.o
 
 carray-sbi_ecall_exts-$(CONFIG_SBI_ECALL_LEGACY) += ecall_legacy
 libsbi-objs-$(CONFIG_SBI_ECALL_LEGACY) += sbi_ecall_legacy.o
@@ -50,6 +59,7 @@ libsbi-objs-y += sbi_domain.o
 libsbi-objs-y += sbi_emulate_csr.o
 libsbi-objs-y += sbi_fifo.o
 libsbi-objs-y += sbi_hart.o
+libsbi-objs-y += sbi_heap.o
 libsbi-objs-y += sbi_math.o
 libsbi-objs-y += sbi_hfence.o
 libsbi-objs-y += sbi_hsm.o
@@ -68,3 +78,4 @@ libsbi-objs-y += sbi_tlb.o
 libsbi-objs-y += sbi_trap.o
 libsbi-objs-y += sbi_unpriv.o
 libsbi-objs-y += sbi_expected_trap.o
+libsbi-objs-y += sbi_cppc.o

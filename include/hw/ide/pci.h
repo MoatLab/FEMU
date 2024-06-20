@@ -1,7 +1,7 @@
 #ifndef HW_IDE_PCI_H
 #define HW_IDE_PCI_H
 
-#include "hw/ide/internal.h"
+#include "hw/ide/ide-bus.h"
 #include "hw/pci/pci_device.h"
 #include "qom/object.h"
 
@@ -58,8 +58,10 @@ struct PCIIDEState {
 
 void bmdma_init(IDEBus *bus, BMDMAState *bm, PCIIDEState *d);
 void bmdma_cmd_writeb(BMDMAState *bm, uint32_t val);
+void bmdma_status_writeb(BMDMAState *bm, uint32_t val);
 extern MemoryRegionOps bmdma_addr_ioport_ops;
 void pci_ide_create_devs(PCIDevice *dev);
+void pci_ide_update_mode(PCIIDEState *s);
 
 extern const VMStateDescription vmstate_ide_pci;
 extern const MemoryRegionOps pci_ide_cmd_le_ops;

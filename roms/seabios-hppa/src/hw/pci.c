@@ -31,63 +31,130 @@ static u32 ioconfig_cmd(u16 bdf, u32 addr)
     return 0x80000000 | (bdf << 8) | (addr & 0xfc);
 }
 
+/*
+ * Memory mapped I/O
+ *
+ * readX()/writeX() do byteswapping and take an ioremapped address
+ * __raw_readX()/__raw_writeX() don't byteswap and take an ioremapped address.
+ * gsc_*() don't byteswap and operate on physical addresses;
+ *   eg dev->hpa or 0xfee00000.
+ */
+
+/* each elroy has 0x2000 offset */
+#define ELROY_MAX_BUSSES        4
+unsigned long elroy_offset(u16 bdf)
+{
+    static const int elroy_hpa_offsets[ELROY_MAX_BUSSES] = { 0x30000, 0x32000, 0x38000, 0x3c000 };
+    int bus = pci_bdf_to_bus(bdf);
+    if (bus >= ELROY_MAX_BUSSES)
+        return -1UL;
+    return elroy_hpa_offsets[bus] - elroy_hpa_offsets[0];
+}
+
+void *elroy_port(unsigned long port, unsigned long offs)
+{
+    return (void *)(port + offs);
+}
+
 void pci_config_writel(u16 bdf, u32 addr, u32 val)
 {
+    if (has_astro) {
+        unsigned long offs = elroy_offset(bdf);
+        if (offs == -1UL)
+            return;
+        writel(elroy_port(PORT_PCI_CMD, offs), ioconfig_cmd((u8)bdf, addr));
+        writel(elroy_port(PORT_PCI_DATA, offs), val);
+    } else
     if (!MODESEGMENT && mmconfig) {
         writel(mmconfig_addr(bdf, addr), val);
     } else {
-        outl(ioconfig_cmd(bdf, addr), PORT_PCI_CMD);
-        outl(cpu_to_le32(val), PORT_PCI_DATA);
+        *(u32*)PORT_PCI_CMD = ioconfig_cmd(bdf, addr);
+        *(u32*)PORT_PCI_DATA = cpu_to_le32(val);
     }
 }
 
 void pci_config_writew(u16 bdf, u32 addr, u16 val)
 {
+    if (has_astro) {
+        unsigned long offs = elroy_offset(bdf);
+        if (offs == -1UL)
+            return;
+        writel(elroy_port(PORT_PCI_CMD, offs), ioconfig_cmd((u8)bdf, addr));
+        writew(elroy_port(PORT_PCI_DATA + (addr & 2), offs), val);
+    } else
     if (!MODESEGMENT && mmconfig) {
         writew(mmconfig_addr(bdf, addr), val);
     } else {
-        outl(ioconfig_cmd(bdf, addr), PORT_PCI_CMD);
-        outw(cpu_to_le16(val), PORT_PCI_DATA + (addr & 2));
+        *(u32*)PORT_PCI_CMD = ioconfig_cmd(bdf, addr);
+        *(u16*)(PORT_PCI_DATA + (addr & 2)) = cpu_to_le16(val);
     }
 }
 
 void pci_config_writeb(u16 bdf, u32 addr, u8 val)
 {
+    if (has_astro) {
+        unsigned long offs = elroy_offset(bdf);
+        if (offs == -1UL)
+            return;
+        writel(elroy_port(PORT_PCI_CMD, offs), ioconfig_cmd((u8)bdf, addr));
+        writeb(elroy_port(PORT_PCI_DATA + (addr & 3), offs), val);
+    } else
     if (!MODESEGMENT && mmconfig) {
         writeb(mmconfig_addr(bdf, addr), val);
     } else {
-        outl(ioconfig_cmd(bdf, addr), PORT_PCI_CMD);
-        outb(val, PORT_PCI_DATA + (addr & 3));
+        *(u32*)PORT_PCI_CMD = ioconfig_cmd(bdf, addr);
+        *(u8*)(PORT_PCI_DATA + (addr & 3)) = val;
     }
 }
 
 u32 pci_config_readl(u16 bdf, u32 addr)
 {
+    if (has_astro) {
+        unsigned long offs = elroy_offset(bdf);
+        if (offs == -1UL)
+            return -1;
+        writel(elroy_port(PORT_PCI_CMD, offs), ioconfig_cmd((u8)bdf, addr));
+        return readl(elroy_port(PORT_PCI_DATA, offs));
+    } else
     if (!MODESEGMENT && mmconfig) {
         return readl(mmconfig_addr(bdf, addr));
     } else {
-        outl(ioconfig_cmd(bdf, addr), PORT_PCI_CMD);
-        return le32_to_cpu(inl(PORT_PCI_DATA));
+        *(u32*)PORT_PCI_CMD = ioconfig_cmd(bdf, addr);
+        return (le32_to_cpu(*(u32*)PORT_PCI_DATA));
     }
 }
 
 u16 pci_config_readw(u16 bdf, u32 addr)
 {
+    if (has_astro) {
+        unsigned long offs = elroy_offset(bdf);
+        if (offs == -1UL)
+            return -1;
+        writel(elroy_port(PORT_PCI_CMD, offs), ioconfig_cmd((u8)bdf, addr));
+        return readw(elroy_port(PORT_PCI_DATA + (addr & 2), offs));
+    } else
     if (!MODESEGMENT && mmconfig) {
         return readw(mmconfig_addr(bdf, addr));
     } else {
-        outl(ioconfig_cmd(bdf, addr), PORT_PCI_CMD);
-        return le16_to_cpu(inw(PORT_PCI_DATA + (addr & 2)));
+        *(u32*)PORT_PCI_CMD = ioconfig_cmd(bdf, addr);
+        return (le16_to_cpu(*(u16*)(PORT_PCI_DATA + (addr & 2))));
     }
 }
 
 u8 pci_config_readb(u16 bdf, u32 addr)
 {
+    if (has_astro) {
+        unsigned long offs = elroy_offset(bdf);
+        if (offs == -1UL)
+            return -1;
+        writel(elroy_port(PORT_PCI_CMD, offs), ioconfig_cmd((u8)bdf, addr));
+        return readb(elroy_port(PORT_PCI_DATA + (addr & 3), offs));
+    } else
     if (!MODESEGMENT && mmconfig) {
         return readb(mmconfig_addr(bdf, addr));
     } else {
-        outl(ioconfig_cmd(bdf, addr), PORT_PCI_CMD);
-        return inb(PORT_PCI_DATA + (addr & 3));
+        *(u32*)PORT_PCI_CMD = ioconfig_cmd(bdf, addr);
+        return (*(u8*)(PORT_PCI_DATA + (addr & 3)));
     }
 }
 

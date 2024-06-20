@@ -141,8 +141,10 @@ void hmp_drive_del(Monitor *mon, const QDict *qdict)
     const char *id = qdict_get_str(qdict, "id");
     BlockBackend *blk;
     BlockDriverState *bs;
-    AioContext *aio_context;
     Error *local_err = NULL;
+
+    GLOBAL_STATE_CODE();
+    GRAPH_RDLOCK_GUARD_MAINLOOP();
 
     bs = bdrv_find_node(id);
     if (bs) {
@@ -165,14 +167,10 @@ void hmp_drive_del(Monitor *mon, const QDict *qdict)
         return;
     }
 
-    aio_context = blk_get_aio_context(blk);
-    aio_context_acquire(aio_context);
-
     bs = blk_bs(blk);
     if (bs) {
         if (bdrv_op_is_blocked(bs, BLOCK_OP_TYPE_DRIVE_DEL, &local_err)) {
             error_report_err(local_err);
-            aio_context_release(aio_context);
             return;
         }
 
@@ -193,8 +191,6 @@ void hmp_drive_del(Monitor *mon, const QDict *qdict)
     } else {
         blk_unref(blk);
     }
-
-    aio_context_release(aio_context);
 }
 
 void hmp_commit(Monitor *mon, const QDict *qdict)
@@ -203,29 +199,28 @@ void hmp_commit(Monitor *mon, const QDict *qdict)
     BlockBackend *blk;
     int ret;
 
+    GLOBAL_STATE_CODE();
+    GRAPH_RDLOCK_GUARD_MAINLOOP();
+
     if (!strcmp(device, "all")) {
         ret = blk_commit_all();
     } else {
         BlockDriverState *bs;
-        AioContext *aio_context;
 
         blk = blk_by_name(device);
         if (!blk) {
             error_report("Device '%s' not found", device);
             return;
         }
+
+        bs = bdrv_skip_implicit_filters(blk_bs(blk));
+
         if (!blk_is_available(blk)) {
             error_report("Device '%s' has no medium", device);
             return;
         }
 
-        bs = bdrv_skip_implicit_filters(blk_bs(blk));
-        aio_context = bdrv_get_aio_context(bs);
-        aio_context_acquire(aio_context);
-
         ret = bdrv_commit(bs);
-
-        aio_context_release(aio_context);
     }
     if (ret < 0) {
         error_report("'commit' error for '%s': %s", device, strerror(-ret));
@@ -501,7 +496,7 @@ void hmp_block_stream(Monitor *mon, const QDict *qdict)
     const char *base = qdict_get_try_str(qdict, "base");
     int64_t speed = qdict_get_try_int(qdict, "speed", 0);
 
-    qmp_block_stream(device, device, base, NULL, NULL, NULL,
+    qmp_block_stream(device, device, base, NULL, NULL, false, false, NULL,
                      qdict_haskey(qdict, "speed"), speed,
                      true, BLOCKDEV_ON_ERROR_REPORT, NULL,
                      false, false, false, false, &error);
@@ -552,7 +547,6 @@ void hmp_qemu_io(Monitor *mon, const QDict *qdict)
     BlockBackend *blk = NULL;
     BlockDriverState *bs = NULL;
     BlockBackend *local_blk = NULL;
-    AioContext *ctx = NULL;
     bool qdev = qdict_get_try_bool(qdict, "qdev", false);
     const char *device = qdict_get_str(qdict, "device");
     const char *command = qdict_get_str(qdict, "command");
@@ -573,9 +567,6 @@ void hmp_qemu_io(Monitor *mon, const QDict *qdict)
             }
         }
     }
-
-    ctx = blk ? blk_get_aio_context(blk) : bdrv_get_aio_context(bs);
-    aio_context_acquire(ctx);
 
     if (bs) {
         blk = local_blk = blk_new(bdrv_get_aio_context(bs), 0, BLK_PERM_ALL);
@@ -614,11 +605,6 @@ void hmp_qemu_io(Monitor *mon, const QDict *qdict)
 
 fail:
     blk_unref(local_blk);
-
-    if (ctx) {
-        aio_context_release(ctx);
-    }
-
     hmp_handle_error(mon, err);
 }
 
@@ -841,7 +827,7 @@ void hmp_info_block_jobs(Monitor *mon, const QDict *qdict)
     }
 
     while (list) {
-        if (strcmp(list->value->type, "stream") == 0) {
+        if (list->value->type == JOB_TYPE_STREAM) {
             monitor_printf(mon, "Streaming device %s: Completed %" PRId64
                            " of %" PRId64 " bytes, speed limit %" PRId64
                            " bytes/s\n",
@@ -853,7 +839,7 @@ void hmp_info_block_jobs(Monitor *mon, const QDict *qdict)
             monitor_printf(mon, "Type %s, device %s: Completed %" PRId64
                            " of %" PRId64 " bytes, speed limit %" PRId64
                            " bytes/s\n",
-                           list->value->type,
+                           JobType_str(list->value->type),
                            list->value->device,
                            list->value->offset,
                            list->value->len,
@@ -874,7 +860,6 @@ void hmp_info_snapshots(Monitor *mon, const QDict *qdict)
     int nb_sns, i;
     int total;
     int *global_snapshots;
-    AioContext *aio_context;
 
     typedef struct SnapshotEntry {
         QEMUSnapshotInfo sn;
@@ -894,16 +879,15 @@ void hmp_info_snapshots(Monitor *mon, const QDict *qdict)
     SnapshotEntry *snapshot_entry;
     Error *err = NULL;
 
+    GRAPH_RDLOCK_GUARD_MAINLOOP();
+
     bs = bdrv_all_find_vmstate_bs(NULL, false, NULL, &err);
     if (!bs) {
         error_report_err(err);
         return;
     }
-    aio_context = bdrv_get_aio_context(bs);
 
-    aio_context_acquire(aio_context);
     nb_sns = bdrv_snapshot_list(bs, &sn_tab);
-    aio_context_release(aio_context);
 
     if (nb_sns < 0) {
         monitor_printf(mon, "bdrv_snapshot_list: error %d\n", nb_sns);
@@ -914,9 +898,7 @@ void hmp_info_snapshots(Monitor *mon, const QDict *qdict)
         int bs1_nb_sns = 0;
         ImageEntry *ie;
         SnapshotEntry *se;
-        AioContext *ctx = bdrv_get_aio_context(bs1);
 
-        aio_context_acquire(ctx);
         if (bdrv_can_snapshot(bs1)) {
             sn = NULL;
             bs1_nb_sns = bdrv_snapshot_list(bs1, &sn);
@@ -934,7 +916,6 @@ void hmp_info_snapshots(Monitor *mon, const QDict *qdict)
             }
             g_free(sn);
         }
-        aio_context_release(ctx);
     }
 
     if (no_snapshot) {

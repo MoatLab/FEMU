@@ -41,9 +41,11 @@ typedef struct VMStateField VMStateField;
  */
 struct VMStateInfo {
     const char *name;
-    int (*get)(QEMUFile *f, void *pv, size_t size, const VMStateField *field);
-    int (*put)(QEMUFile *f, void *pv, size_t size, const VMStateField *field,
-               JSONWriter *vmdesc);
+    int coroutine_mixed_fn (*get)(QEMUFile *f, void *pv, size_t size,
+                                  const VMStateField *field);
+    int coroutine_mixed_fn (*put)(QEMUFile *f, void *pv, size_t size,
+                                  const VMStateField *field,
+                                  JSONWriter *vmdesc);
 };
 
 enum VMStateFlags {
@@ -207,7 +209,7 @@ struct VMStateDescription {
     bool (*dev_unplug_pending)(void *opaque);
 
     const VMStateField *fields;
-    const VMStateDescription **subsections;
+    const VMStateDescription * const *subsections;
 };
 
 extern const VMStateInfo vmstate_info_bool;
@@ -1194,11 +1196,13 @@ int vmstate_load_state(QEMUFile *f, const VMStateDescription *vmsd,
                        void *opaque, int version_id);
 int vmstate_save_state(QEMUFile *f, const VMStateDescription *vmsd,
                        void *opaque, JSONWriter *vmdesc);
+int vmstate_save_state_with_err(QEMUFile *f, const VMStateDescription *vmsd,
+                       void *opaque, JSONWriter *vmdesc, Error **errp);
 int vmstate_save_state_v(QEMUFile *f, const VMStateDescription *vmsd,
                          void *opaque, JSONWriter *vmdesc,
-                         int version_id);
+                         int version_id, Error **errp);
 
-bool vmstate_save_needed(const VMStateDescription *vmsd, void *opaque);
+bool vmstate_section_needed(const VMStateDescription *vmsd, void *opaque);
 
 #define  VMSTATE_INSTANCE_ID_ANY  -1
 
@@ -1209,12 +1213,48 @@ int vmstate_register_with_alias_id(VMStateIf *obj, uint32_t instance_id,
                                    int required_for_version,
                                    Error **errp);
 
-/* Returns: 0 on success, -1 on failure */
+/**
+ * vmstate_register() - legacy function to register state
+ * serialisation description
+ *
+ * New code shouldn't be using this function as QOM-ified devices have
+ * dc->vmsd to store the serialisation description.
+ *
+ * Returns: 0 on success, -1 on failure
+ */
 static inline int vmstate_register(VMStateIf *obj, int instance_id,
                                    const VMStateDescription *vmsd,
                                    void *opaque)
 {
     return vmstate_register_with_alias_id(obj, instance_id, vmsd,
+                                          opaque, -1, 0, NULL);
+}
+
+/**
+ * vmstate_replace_hack_for_ppc() - ppc used to abuse vmstate_register
+ *
+ * Don't even think about using this function in new code.
+ *
+ * Returns: 0 on success, -1 on failure
+ */
+int vmstate_replace_hack_for_ppc(VMStateIf *obj, int instance_id,
+                                 const VMStateDescription *vmsd,
+                                 void *opaque);
+
+/**
+ * vmstate_register_any() - legacy function to register state
+ * serialisation description and let the function choose the id
+ *
+ * New code shouldn't be using this function as QOM-ified devices have
+ * dc->vmsd to store the serialisation description.
+ *
+ * Returns: 0 on success, -1 on failure
+ */
+static inline int vmstate_register_any(VMStateIf *obj,
+                                       const VMStateDescription *vmsd,
+                                       void *opaque)
+{
+    return vmstate_register_with_alias_id(obj, VMSTATE_INSTANCE_ID_ANY, vmsd,
                                           opaque, -1, 0, NULL);
 }
 

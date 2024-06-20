@@ -1,0 +1,9 @@
+---
+- name: Bootstrap
+  hosts: all
+  remote_user: root
+  gather_facts: no
+
+  tasks:
+    # Bootstrap Ansible itself
+    - import_tasks: 'tasks/bootstrap.yml'

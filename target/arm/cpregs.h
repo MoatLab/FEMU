@@ -21,6 +21,9 @@
 #ifndef TARGET_ARM_CPREGS_H
 #define TARGET_ARM_CPREGS_H
 
+#include "hw/registerfields.h"
+#include "target/arm/kvm-consts.h"
+
 /*
  * ARMCPRegInfo type field bits:
  */
@@ -67,8 +70,8 @@ enum {
     ARM_CP_ALIAS                 = 1 << 8,
     /*
      * Flag: Register does I/O and therefore its accesses need to be marked
-     * with gen_io_start() and also end the TB. In particular, registers which
-     * implement clocks or timers require this.
+     * with translator_io_start() and also end the TB. In particular,
+     * registers which implement clocks or timers require this.
      */
     ARM_CP_IO                    = 1 << 9,
     /*
@@ -118,6 +121,11 @@ enum {
      * ARM pseudocode function CheckSMEAccess().
      */
     ARM_CP_SME                   = 1 << 19,
+    /*
+     * Flag: one of the four EL2 registers which redirect to the
+     * equivalent EL1 register when FEAT_NV2 is enabled.
+     */
+    ARM_CP_NV2_REDIRECT          = 1 << 20,
 };
 
 /*
@@ -821,6 +829,11 @@ typedef void CPResetFn(CPUARMState *env, const ARMCPRegInfo *opaque);
 
 #define CP_ANY 0xff
 
+/* Flags in the high bits of nv2_redirect_offset */
+#define NV2_REDIR_NV1 0x4000 /* Only redirect when HCR_EL2.NV1 == 1 */
+#define NV2_REDIR_NO_NV1 0x8000 /* Only redirect when HCR_EL2.NV1 == 0 */
+#define NV2_REDIR_FLAG_MASK 0xc000
+
 /* Definition of an ARM coprocessor register */
 struct ARMCPRegInfo {
     /* Name of register (useful mainly for debugging, need not be unique) */
@@ -862,6 +875,13 @@ struct ARMCPRegInfo {
      * value encodes both the trap register and bit within it.
      */
     FGTBit fgt;
+
+    /*
+     * Offset from VNCR_EL2 when FEAT_NV2 redirects access to memory;
+     * may include an NV2_REDIR_* flag.
+     */
+    uint32_t nv2_redirect_offset;
+
     /*
      * The opaque pointer passed to define_arm_cp_regs_with_opaque() when
      * this register was defined: can be used to hand data through to the
@@ -937,7 +957,7 @@ struct ARMCPRegInfo {
     CPResetFn *resetfn;
 
     /*
-     * "Original" writefn and readfn.
+     * "Original" readfn, writefn, accessfn.
      * For ARMv8.1-VHE register aliases, we overwrite the read/write
      * accessor functions of various EL1/EL0 to perform the runtime
      * check for which sysreg should actually be modified, and then
@@ -948,6 +968,7 @@ struct ARMCPRegInfo {
      */
     CPReadFn *orig_readfn;
     CPWriteFn *orig_writefn;
+    CPAccessFn *orig_accessfn;
 };
 
 /*
@@ -1069,6 +1090,48 @@ static inline bool arm_cpreg_in_idspace(const ARMCPRegInfo *ri)
     return ri->state == ARM_CP_STATE_AA64 &&
         arm_cpreg_encoding_in_idspace(ri->opc0, ri->opc1, ri->opc2,
                                       ri->crn, ri->crm);
+}
+
+#ifdef CONFIG_USER_ONLY
+static inline void define_cortex_a72_a57_a53_cp_reginfo(ARMCPU *cpu) { }
+#else
+void define_cortex_a72_a57_a53_cp_reginfo(ARMCPU *cpu);
+#endif
+
+CPAccessResult access_tvm_trvm(CPUARMState *, const ARMCPRegInfo *, bool);
+
+/**
+ * arm_cpreg_trap_in_nv: Return true if cpreg traps in nested virtualization
+ *
+ * Return true if this cpreg is one which should be trapped to EL2 if
+ * it is executed at EL1 when nested virtualization is enabled via HCR_EL2.NV.
+ */
+static inline bool arm_cpreg_traps_in_nv(const ARMCPRegInfo *ri)
+{
+    /*
+     * The Arm ARM defines the registers to be trapped in terms of
+     * their names (I_TZTZL). However the underlying principle is "if
+     * it would UNDEF at EL1 but work at EL2 then it should trap", and
+     * the way the encoding of sysregs and system instructions is done
+     * means that the right set of registers is exactly those where
+     * the opc1 field is 4 or 5. (You can see this also in the assert
+     * we do that the opc1 field and the permissions mask line up in
+     * define_one_arm_cp_reg_with_opaque().)
+     * Checking the opc1 field is easier for us and avoids the problem
+     * that we do not consistently use the right architectural names
+     * for all sysregs, since we treat the name field as largely for debug.
+     *
+     * However we do this check, it is going to be at least potentially
+     * fragile to future new sysregs, but this seems the least likely
+     * to break.
+     *
+     * In particular, note that the released sysreg XML defines that
+     * the FEAT_MEC sysregs and instructions do not follow this FEAT_NV
+     * trapping rule, so we will need to add an ARM_CP_* flag to indicate
+     * "register does not trap on NV" to handle those if/when we implement
+     * FEAT_MEC.
+     */
+    return ri->opc1 == 4 || ri->opc1 == 5;
 }
 
 #endif /* TARGET_ARM_CPREGS_H */

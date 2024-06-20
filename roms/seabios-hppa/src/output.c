@@ -122,8 +122,13 @@ putc(struct putcinfo *action, char c)
         return;
     }
 
+#if 1
     void (*func)(struct putcinfo *info, char c) = GET_GLOBAL(action->func);
     func(action, c);
+#else
+    /* use Qemu's built-in function to directly output chars */
+    builtin_console_out(c);
+#endif
 }
 
 // Ouptut a string.
@@ -185,8 +190,12 @@ putsinglehex(struct putcinfo *action, u32 val, int uc)
 
 // Output an integer in hexadecimal with a specified width.
 static void
-puthex(struct putcinfo *action, u32 val, int width, int uc)
+puthex(struct putcinfo *action, u64 val, int width, int uc)
 {
+    if (width > 8) {
+        width -= 8;
+        puthex(action, val >> 32, width, uc);
+    }
     switch (width) {
     default: putsinglehex(action, (val >> 28) & 0xf, uc);
     case 7:  putsinglehex(action, (val >> 24) & 0xf, uc);
@@ -246,7 +255,11 @@ bvprintf(struct putcinfo *action, const char *fmt, va_list args)
         const char *n = s+1;
         int field_width = 0;
         char padchar = ' ';
+#ifdef __LP64__
+        u8 is64 = 1;
+#else
         u8 is64 = 0;
+#endif
         for (;;) {
             c = GET_GLOBAL(*(u8*)n);
             if (!isdigit(c))
@@ -267,7 +280,7 @@ bvprintf(struct putcinfo *action, const char *fmt, va_list args)
             n++;
             c = GET_GLOBAL(*(u8*)n);
         }
-        s32 val;
+        s32 val = 0;
         s64 val64;
         const char *sarg;
         switch (c) {
@@ -293,16 +306,28 @@ bvprintf(struct putcinfo *action, const char *fmt, va_list args)
             putuint(action, val64);
             break;
         case 'p':
+#ifdef __LP64__
+            val64 = va_arg(args, s64);
+#else
             val = va_arg(args, s32);
+#endif
             if (!MODESEGMENT && GET_GLOBAL(*(u8*)(n+1)) == 'P') {
                 // %pP is 'struct pci_device' printer
+#ifdef __LP64__
+                put_pci_device(action, (void*)val64);
+#else
                 put_pci_device(action, (void*)val);
+#endif
                 n++;
                 break;
             }
             putc(action, '0');
             putc(action, 'x');
+#ifdef __LP64__
+            puthex(action, val64, 16, 0);
+#else
             puthex(action, val, 8, 0);
+#endif
             break;
         case 'X':
         case 'x':
@@ -482,6 +507,7 @@ hexdump(const void *d, int len)
 static void
 dump_regs(struct bregs *regs)
 {
+#if CONFIG_X86
     if (!regs) {
         dprintf(1, "  NULL\n");
         return;
@@ -492,6 +518,7 @@ dump_regs(struct bregs *regs)
     dprintf(1, "  si=%08x di=%08x bp=%08x sp=%08x cs=%04x ip=%04x  f=%04x\n"
             , regs->esi, regs->edi, regs->ebp, (u32)&regs[1]
             , regs->code.seg, regs->code.offset, regs->flags);
+#endif
 }
 
 // Report entry to an Interrupt Service Routine (ISR).

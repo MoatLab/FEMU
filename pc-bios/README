@@ -14,7 +14,7 @@
 - SLOF (Slimline Open Firmware) is a free IEEE 1275 Open Firmware
   implementation for certain IBM POWER hardware.  The sources are at
   https://github.com/aik/SLOF, and the image currently in qemu is
-  built from git tag qemu-slof-20220719.
+  built from git tag qemu-slof-20230918.
 
 - VOF (Virtual Open Firmware) is a minimalistic firmware to work with
   -machine pseries,x-vof=on. When enabled, the firmware acts as a slim shim and
@@ -67,7 +67,7 @@
   and enable the use of well-known bootloaders such as U-Boot.
   OpenSBI is distributed under the terms of the BSD 2-clause license
   ("Simplified BSD License" or "FreeBSD License", SPDX: BSD-2-Clause). OpenSBI
-  source code also contains code reused from other projects desribed here:
+  source code also contains code reused from other projects described here:
   https://github.com/riscv/opensbi/blob/master/ThirdPartyNotices.md.
 
 - npcm7xx_bootrom.bin is a simplified, free (Apache 2.0) boot ROM for Nuvoton
@@ -75,3 +75,9 @@
   initialize and run boot images stored in SPI flash, but may grow more
   features over time as needed. The source code is available at:
   https://github.com/google/vbootrom
+
+- hppa-firmware.img (32-bit) and hppa-firmware64.img (64-bit) are firmware
+  files for the HP-PARISC (hppa) architecture.
+  They are built form the SeaBIOS-hppa sources, which is a fork of SeaBIOS
+  adapted for hppa.
+  SeaBIOS-hppa is available at https://github.com/hdeller/seabios-hppa

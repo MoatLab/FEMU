@@ -23,7 +23,7 @@
  * THE SOFTWARE.
  */
 
-/* see docs/specs/pci-serial.txt */
+/* see docs/specs/pci-serial.rst */
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
@@ -74,7 +74,7 @@ static const VMStateDescription vmstate_pci_serial = {
     .name = "pci-serial",
     .version_id = 1,
     .minimum_version_id = 1,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_PCI_DEVICE(dev, PCISerialState),
         VMSTATE_STRUCT(state, PCISerialState, 0, vmstate_serial, SerialState),
         VMSTATE_END_OF_LIST()

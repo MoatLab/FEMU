@@ -25,6 +25,8 @@
 #define ARIANE_UART_REG_WIDTH			4
 #define ARIANE_UART_REG_OFFSET			0
 #define ARIANE_PLIC_ADDR			0xc000000
+#define ARIANE_PLIC_SIZE			(0x200000 + \
+						 (ARIANE_HART_COUNT * 0x1000))
 #define ARIANE_PLIC_NUM_SOURCES			3
 #define ARIANE_HART_COUNT			1
 #define ARIANE_CLINT_ADDR			0x2000000
@@ -36,6 +38,7 @@
 
 static struct plic_data plic = {
 	.addr = ARIANE_PLIC_ADDR,
+	.size = ARIANE_PLIC_SIZE,
 	.num_src = ARIANE_PLIC_NUM_SOURCES,
 };
 
@@ -56,7 +59,7 @@ static struct aclint_mtimer_data mtimer = {
 	.mtimecmp_size = ACLINT_DEFAULT_MTIMECMP_SIZE,
 	.first_hartid = 0,
 	.hart_count = ARIANE_HART_COUNT,
-	.has_64bit_mmio = TRUE,
+	.has_64bit_mmio = true,
 };
 
 /*
@@ -185,5 +188,6 @@ const struct sbi_platform platform = {
 	.features = SBI_PLATFORM_DEFAULT_FEATURES,
 	.hart_count = ARIANE_HART_COUNT,
 	.hart_stack_size = SBI_PLATFORM_DEFAULT_HART_STACK_SIZE,
+	.heap_size = SBI_PLATFORM_DEFAULT_HEAP_SIZE(ARIANE_HART_COUNT),
 	.platform_ops_addr = (unsigned long)&platform_ops
 };

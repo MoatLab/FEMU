@@ -3,6 +3,7 @@
 
 Copyright (c) 2015 - 2021, Intel Corporation. All rights reserved.<BR>
 (C) Copyright 2016 Hewlett Packard Enterprise Development LP<BR>
+Copyright (C) 2024 Advanced Micro Devices, Inc. All rights reserved.<BR>
 SPDX-License-Identifier: BSD-2-Clause-Patent
 
 **/
@@ -852,12 +853,12 @@ HttpCleanProtocol (
   NetMapClean (&HttpInstance->TxTokens);
   NetMapClean (&HttpInstance->RxTokens);
 
-  if ((HttpInstance->TlsSb != NULL) && (HttpInstance->TlsChildHandle != NULL)) {
+  if ((HttpInstance->TlsSb != NULL) && HttpInstance->TlsAlreadyCreated) {
     //
     // Destroy the TLS instance.
     //
-    HttpInstance->TlsSb->DestroyChild (HttpInstance->TlsSb, HttpInstance->TlsChildHandle);
-    HttpInstance->TlsChildHandle = NULL;
+    HttpInstance->TlsSb->DestroyChild (HttpInstance->TlsSb, HttpInstance->Handle);
+    HttpInstance->TlsAlreadyCreated = FALSE;
   }
 
   if (HttpInstance->Tcp4ChildHandle != NULL) {
@@ -1073,18 +1074,19 @@ HttpConfigureTcp4 (
   Tcp4AP->ActiveFlag  = TRUE;
   IP4_COPY_ADDRESS (&Tcp4AP->RemoteAddress, &HttpInstance->RemoteAddr);
 
-  Tcp4Option                    = Tcp4CfgData->ControlOption;
-  Tcp4Option->ReceiveBufferSize = HTTP_BUFFER_SIZE_DEAULT;
-  Tcp4Option->SendBufferSize    = HTTP_BUFFER_SIZE_DEAULT;
-  Tcp4Option->MaxSynBackLog     = HTTP_MAX_SYN_BACK_LOG;
-  Tcp4Option->ConnectionTimeout = HTTP_CONNECTION_TIMEOUT;
-  Tcp4Option->DataRetries       = HTTP_DATA_RETRIES;
-  Tcp4Option->FinTimeout        = HTTP_FIN_TIMEOUT;
-  Tcp4Option->KeepAliveProbes   = HTTP_KEEP_ALIVE_PROBES;
-  Tcp4Option->KeepAliveTime     = HTTP_KEEP_ALIVE_TIME;
-  Tcp4Option->KeepAliveInterval = HTTP_KEEP_ALIVE_INTERVAL;
-  Tcp4Option->EnableNagle       = TRUE;
-  Tcp4CfgData->ControlOption    = Tcp4Option;
+  Tcp4Option                      = Tcp4CfgData->ControlOption;
+  Tcp4Option->ReceiveBufferSize   = HTTP_BUFFER_SIZE_DEAULT;
+  Tcp4Option->SendBufferSize      = HTTP_BUFFER_SIZE_DEAULT;
+  Tcp4Option->MaxSynBackLog       = HTTP_MAX_SYN_BACK_LOG;
+  Tcp4Option->ConnectionTimeout   = HTTP_CONNECTION_TIMEOUT;
+  Tcp4Option->DataRetries         = HTTP_DATA_RETRIES;
+  Tcp4Option->FinTimeout          = HTTP_FIN_TIMEOUT;
+  Tcp4Option->KeepAliveProbes     = HTTP_KEEP_ALIVE_PROBES;
+  Tcp4Option->KeepAliveTime       = HTTP_KEEP_ALIVE_TIME;
+  Tcp4Option->KeepAliveInterval   = HTTP_KEEP_ALIVE_INTERVAL;
+  Tcp4Option->EnableNagle         = TRUE;
+  Tcp4Option->EnableWindowScaling = TRUE;
+  Tcp4CfgData->ControlOption      = Tcp4Option;
 
   if ((HttpInstance->State == HTTP_STATE_TCP_CONNECTED) ||
       (HttpInstance->State == HTTP_STATE_TCP_CLOSED))
@@ -1156,17 +1158,18 @@ HttpConfigureTcp6 (
   IP6_COPY_ADDRESS (&Tcp6Ap->StationAddress, &HttpInstance->Ipv6Node.LocalAddress);
   IP6_COPY_ADDRESS (&Tcp6Ap->RemoteAddress, &HttpInstance->RemoteIpv6Addr);
 
-  Tcp6Option                    = Tcp6CfgData->ControlOption;
-  Tcp6Option->ReceiveBufferSize = HTTP_BUFFER_SIZE_DEAULT;
-  Tcp6Option->SendBufferSize    = HTTP_BUFFER_SIZE_DEAULT;
-  Tcp6Option->MaxSynBackLog     = HTTP_MAX_SYN_BACK_LOG;
-  Tcp6Option->ConnectionTimeout = HTTP_CONNECTION_TIMEOUT;
-  Tcp6Option->DataRetries       = HTTP_DATA_RETRIES;
-  Tcp6Option->FinTimeout        = HTTP_FIN_TIMEOUT;
-  Tcp6Option->KeepAliveProbes   = HTTP_KEEP_ALIVE_PROBES;
-  Tcp6Option->KeepAliveTime     = HTTP_KEEP_ALIVE_TIME;
-  Tcp6Option->KeepAliveInterval = HTTP_KEEP_ALIVE_INTERVAL;
-  Tcp6Option->EnableNagle       = TRUE;
+  Tcp6Option                      = Tcp6CfgData->ControlOption;
+  Tcp6Option->ReceiveBufferSize   = HTTP_BUFFER_SIZE_DEAULT;
+  Tcp6Option->SendBufferSize      = HTTP_BUFFER_SIZE_DEAULT;
+  Tcp6Option->MaxSynBackLog       = HTTP_MAX_SYN_BACK_LOG;
+  Tcp6Option->ConnectionTimeout   = HTTP_CONNECTION_TIMEOUT;
+  Tcp6Option->DataRetries         = HTTP_DATA_RETRIES;
+  Tcp6Option->FinTimeout          = HTTP_FIN_TIMEOUT;
+  Tcp6Option->KeepAliveProbes     = HTTP_KEEP_ALIVE_PROBES;
+  Tcp6Option->KeepAliveTime       = HTTP_KEEP_ALIVE_TIME;
+  Tcp6Option->KeepAliveInterval   = HTTP_KEEP_ALIVE_INTERVAL;
+  Tcp6Option->EnableNagle         = TRUE;
+  Tcp6Option->EnableWindowScaling = TRUE;
 
   if ((HttpInstance->State == HTTP_STATE_TCP_CONNECTED) ||
       (HttpInstance->State == HTTP_STATE_TCP_CLOSED))
@@ -1415,6 +1418,7 @@ HttpInitSession (
   //
   if (TlsConfigure) {
     Status = TlsConfigureSession (HttpInstance);
+    HttpNotify (HttpEventTlsConfigured, Status);
     if (EFI_ERROR (Status)) {
       return Status;
     }

@@ -6,6 +6,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/bitops.h"
 
 #include "err.h"
 #include "addrspace.h"
@@ -20,6 +21,7 @@
 #define PE_NAME     "ntoskrnl.exe"
 
 #define INITIAL_MXCSR   0x1f80
+#define MAX_NUMBER_OF_RUNS  42
 
 typedef struct idt_desc {
     uint16_t offset1;   /* offset bits 0..15 */
@@ -46,11 +48,6 @@ static const uint64_t SharedUserData = 0xfffff78000000000;
     s ? printf(#s" = 0x%016"PRIx64"\n", s) :\
     eprintf("Failed to resolve "#s"\n"), s)
 
-static uint64_t rol(uint64_t x, uint64_t y)
-{
-    return (x << y) | (x >> (64 - y));
-}
-
 /*
  * Decoding algorithm can be found in Volatility project
  */
@@ -63,7 +60,7 @@ static void kdbg_decode(uint64_t *dst, uint64_t *src, size_t size,
         uint64_t block;
 
         block = src[i];
-        block = rol(block ^ kwn, (uint8_t)kwn);
+        block = rol64(block ^ kwn, kwn);
         block = __builtin_bswap64(block ^ kdbe) ^ kwa;
         dst[i] = block;
     }
@@ -78,9 +75,9 @@ static KDDEBUGGER_DATA64 *get_kdbg(uint64_t KernBase, struct pdb_reader *pdb,
     bool decode = false;
     uint64_t kwn, kwa, KdpDataBlockEncoded;
 
-    if (va_space_rw(vs,
-                KdDebuggerDataBlock + offsetof(KDDEBUGGER_DATA64, Header),
-                &kdbg_hdr, sizeof(kdbg_hdr), 0)) {
+    if (!va_space_rw(vs,
+                     KdDebuggerDataBlock + offsetof(KDDEBUGGER_DATA64, Header),
+                     &kdbg_hdr, sizeof(kdbg_hdr), 0)) {
         eprintf("Failed to extract KDBG header\n");
         return NULL;
     }
@@ -96,8 +93,8 @@ static KDDEBUGGER_DATA64 *get_kdbg(uint64_t KernBase, struct pdb_reader *pdb,
             return NULL;
         }
 
-        if (va_space_rw(vs, KiWaitNever, &kwn, sizeof(kwn), 0) ||
-                va_space_rw(vs, KiWaitAlways, &kwa, sizeof(kwa), 0)) {
+        if (!va_space_rw(vs, KiWaitNever, &kwn, sizeof(kwn), 0) ||
+            !va_space_rw(vs, KiWaitAlways, &kwa, sizeof(kwa), 0)) {
             return NULL;
         }
 
@@ -119,14 +116,11 @@ static KDDEBUGGER_DATA64 *get_kdbg(uint64_t KernBase, struct pdb_reader *pdb,
         }
     }
 
-    kdbg = malloc(kdbg_hdr.Size);
-    if (!kdbg) {
-        return NULL;
-    }
+    kdbg = g_malloc(kdbg_hdr.Size);
 
-    if (va_space_rw(vs, KdDebuggerDataBlock, kdbg, kdbg_hdr.Size, 0)) {
+    if (!va_space_rw(vs, KdDebuggerDataBlock, kdbg, kdbg_hdr.Size, 0)) {
         eprintf("Failed to extract entire KDBG\n");
-        free(kdbg);
+        g_free(kdbg);
         return NULL;
     }
 
@@ -188,13 +182,13 @@ static void win_context_init_from_qemu_cpu_state(WinContext64 *ctx,
  * Finds paging-structure hierarchy base,
  * if previously set doesn't give access to kernel structures
  */
-static int fix_dtb(struct va_space *vs, QEMU_Elf *qe)
+static bool fix_dtb(struct va_space *vs, QEMU_Elf *qe)
 {
     /*
      * Firstly, test previously set DTB.
      */
     if (va_space_resolve(vs, SharedUserData)) {
-        return 0;
+        return true;
     }
 
     /*
@@ -208,7 +202,7 @@ static int fix_dtb(struct va_space *vs, QEMU_Elf *qe)
             va_space_set_dtb(vs, s->cr[3]);
             printf("DTB 0x%016"PRIx64" has been found from CPU #%zu"
                     " as system task CR3\n", vs->dtb, i);
-            return !(va_space_resolve(vs, SharedUserData));
+            return va_space_resolve(vs, SharedUserData);
         }
     }
 
@@ -222,21 +216,58 @@ static int fix_dtb(struct va_space *vs, QEMU_Elf *qe)
         uint64_t *cr3 = va_space_resolve(vs, Prcb + 0x7000);
 
         if (!cr3) {
-            return 1;
+            return false;
         }
 
         va_space_set_dtb(vs, *cr3);
         printf("DirectoryTableBase = 0x%016"PRIx64" has been found from CPU #0"
                 " as interrupt handling CR3\n", vs->dtb);
-        return !(va_space_resolve(vs, SharedUserData));
+        return va_space_resolve(vs, SharedUserData);
     }
 
-    return 1;
+    return true;
 }
 
-static int fill_header(WinDumpHeader64 *hdr, struct pa_space *ps,
-        struct va_space *vs, uint64_t KdDebuggerDataBlock,
-        KDDEBUGGER_DATA64 *kdbg, uint64_t KdVersionBlock, int nr_cpus)
+static void try_merge_runs(struct pa_space *ps,
+        WinDumpPhyMemDesc64 *PhysicalMemoryBlock)
+{
+    unsigned int merge_cnt = 0, run_idx = 0;
+
+    PhysicalMemoryBlock->NumberOfRuns = 0;
+
+    for (size_t idx = 0; idx < ps->block_nr; idx++) {
+        struct pa_block *blk = ps->block + idx;
+        struct pa_block *next = blk + 1;
+
+        PhysicalMemoryBlock->NumberOfPages += blk->size / ELF2DMP_PAGE_SIZE;
+
+        if (idx + 1 != ps->block_nr && blk->paddr + blk->size == next->paddr) {
+            printf("Block #%zu 0x%"PRIx64"+:0x%"PRIx64" and %u previous will be"
+                    " merged\n", idx, blk->paddr, blk->size, merge_cnt);
+            merge_cnt++;
+        } else {
+            struct pa_block *first_merged = blk - merge_cnt;
+
+            printf("Block #%zu 0x%"PRIx64"+:0x%"PRIx64" and %u previous will be"
+                    " merged to 0x%"PRIx64"+:0x%"PRIx64" (run #%u)\n",
+                    idx, blk->paddr, blk->size, merge_cnt, first_merged->paddr,
+                    blk->paddr + blk->size - first_merged->paddr, run_idx);
+            PhysicalMemoryBlock->Run[run_idx] = (WinDumpPhyMemRun64) {
+                .BasePage = first_merged->paddr / ELF2DMP_PAGE_SIZE,
+                .PageCount = (blk->paddr + blk->size - first_merged->paddr) /
+                        ELF2DMP_PAGE_SIZE,
+            };
+            PhysicalMemoryBlock->NumberOfRuns++;
+            run_idx++;
+            merge_cnt = 0;
+        }
+    }
+}
+
+static bool fill_header(WinDumpHeader64 *hdr, struct pa_space *ps,
+                        struct va_space *vs, uint64_t KdDebuggerDataBlock,
+                        KDDEBUGGER_DATA64 *kdbg, uint64_t KdVersionBlock,
+                        int nr_cpus)
 {
     uint32_t *suite_mask = va_space_resolve(vs, SharedUserData +
             KUSD_OFFSET_SUITE_MASK);
@@ -244,18 +275,17 @@ static int fill_header(WinDumpHeader64 *hdr, struct pa_space *ps,
             KUSD_OFFSET_PRODUCT_TYPE);
     DBGKD_GET_VERSION64 kvb;
     WinDumpHeader64 h;
-    size_t i;
 
     QEMU_BUILD_BUG_ON(KUSD_OFFSET_SUITE_MASK >= ELF2DMP_PAGE_SIZE);
     QEMU_BUILD_BUG_ON(KUSD_OFFSET_PRODUCT_TYPE >= ELF2DMP_PAGE_SIZE);
 
     if (!suite_mask || !product_type) {
-        return 1;
+        return false;
     }
 
-    if (va_space_rw(vs, KdVersionBlock, &kvb, sizeof(kvb), 0)) {
+    if (!va_space_rw(vs, KdVersionBlock, &kvb, sizeof(kvb), 0)) {
         eprintf("Failed to extract KdVersionBlock\n");
-        return 1;
+        return false;
     }
 
     h = (WinDumpHeader64) {
@@ -282,13 +312,17 @@ static int fill_header(WinDumpHeader64 *hdr, struct pa_space *ps,
         .RequiredDumpSpace = sizeof(h),
     };
 
-    for (i = 0; i < ps->block_nr; i++) {
-        h.PhysicalMemoryBlock.NumberOfPages +=
-                ps->block[i].size / ELF2DMP_PAGE_SIZE;
-        h.PhysicalMemoryBlock.Run[i] = (WinDumpPhyMemRun64) {
-            .BasePage = ps->block[i].paddr / ELF2DMP_PAGE_SIZE,
-            .PageCount = ps->block[i].size / ELF2DMP_PAGE_SIZE,
-        };
+    if (h.PhysicalMemoryBlock.NumberOfRuns <= MAX_NUMBER_OF_RUNS) {
+        for (size_t idx = 0; idx < ps->block_nr; idx++) {
+            h.PhysicalMemoryBlock.NumberOfPages +=
+                    ps->block[idx].size / ELF2DMP_PAGE_SIZE;
+            h.PhysicalMemoryBlock.Run[idx] = (WinDumpPhyMemRun64) {
+                .BasePage = ps->block[idx].paddr / ELF2DMP_PAGE_SIZE,
+                .PageCount = ps->block[idx].size / ELF2DMP_PAGE_SIZE,
+            };
+        }
+    } else {
+        try_merge_runs(ps, &h.PhysicalMemoryBlock);
     }
 
     h.RequiredDumpSpace +=
@@ -296,11 +330,16 @@ static int fill_header(WinDumpHeader64 *hdr, struct pa_space *ps,
 
     *hdr = h;
 
-    return 0;
+    return true;
 }
 
-static int fill_context(KDDEBUGGER_DATA64 *kdbg,
-        struct va_space *vs, QEMU_Elf *qe)
+/*
+ * fill_context() continues even if it fails to fill contexts of some CPUs.
+ * A dump may still contain valuable information even if it lacks contexts of
+ * some CPUs due to dump corruption or a failure before starting CPUs.
+ */
+static void fill_context(KDDEBUGGER_DATA64 *kdbg,
+                         struct va_space *vs, QEMU_Elf *qe)
 {
     int i;
 
@@ -310,32 +349,35 @@ static int fill_context(KDDEBUGGER_DATA64 *kdbg,
         WinContext64 ctx;
         QEMUCPUState *s = qe->state[i];
 
-        if (va_space_rw(vs, kdbg->KiProcessorBlock + sizeof(Prcb) * i,
-                    &Prcb, sizeof(Prcb), 0)) {
+        if (!va_space_rw(vs, kdbg->KiProcessorBlock + sizeof(Prcb) * i,
+                         &Prcb, sizeof(Prcb), 0)) {
             eprintf("Failed to read CPU #%d PRCB location\n", i);
-            return 1;
+            continue;
         }
 
-        if (va_space_rw(vs, Prcb + kdbg->OffsetPrcbContext,
-                    &Context, sizeof(Context), 0)) {
+        if (!Prcb) {
+            eprintf("Context for CPU #%d is missing\n", i);
+            continue;
+        }
+
+        if (!va_space_rw(vs, Prcb + kdbg->OffsetPrcbContext,
+                         &Context, sizeof(Context), 0)) {
             eprintf("Failed to read CPU #%d ContextFrame location\n", i);
-            return 1;
+            continue;
         }
 
         printf("Filling context for CPU #%d...\n", i);
         win_context_init_from_qemu_cpu_state(&ctx, s);
 
-        if (va_space_rw(vs, Context, &ctx, sizeof(ctx), 1)) {
+        if (!va_space_rw(vs, Context, &ctx, sizeof(ctx), 1)) {
             eprintf("Failed to fill CPU #%d context\n", i);
-            return 1;
+            continue;
         }
     }
-
-    return 0;
 }
 
-static int pe_get_data_dir_entry(uint64_t base, void *start_addr, int idx,
-        void *entry, size_t size, struct va_space *vs)
+static bool pe_get_data_dir_entry(uint64_t base, void *start_addr, int idx,
+                                  void *entry, size_t size, struct va_space *vs)
 {
     const char e_magic[2] = "MZ";
     const char Signature[4] = "PE\0\0";
@@ -348,40 +390,38 @@ static int pe_get_data_dir_entry(uint64_t base, void *start_addr, int idx,
     QEMU_BUILD_BUG_ON(sizeof(*dos_hdr) >= ELF2DMP_PAGE_SIZE);
 
     if (memcmp(&dos_hdr->e_magic, e_magic, sizeof(e_magic))) {
-        return 1;
+        return false;
     }
 
-    if (va_space_rw(vs, base + dos_hdr->e_lfanew,
-                &nt_hdrs, sizeof(nt_hdrs), 0)) {
-        return 1;
+    if (!va_space_rw(vs, base + dos_hdr->e_lfanew,
+                     &nt_hdrs, sizeof(nt_hdrs), 0)) {
+        return false;
     }
 
     if (memcmp(&nt_hdrs.Signature, Signature, sizeof(Signature)) ||
             file_hdr->Machine != 0x8664 || opt_hdr->Magic != 0x020b) {
-        return 1;
+        return false;
     }
 
-    if (va_space_rw(vs,
-                base + data_dir[idx].VirtualAddress,
-                entry, size, 0)) {
-        return 1;
+    if (!va_space_rw(vs, base + data_dir[idx].VirtualAddress, entry, size, 0)) {
+        return false;
     }
 
     printf("Data directory entry #%d: RVA = 0x%08"PRIx32"\n", idx,
             (uint32_t)data_dir[idx].VirtualAddress);
 
-    return 0;
+    return true;
 }
 
-static int write_dump(struct pa_space *ps,
-        WinDumpHeader64 *hdr, const char *name)
+static bool write_dump(struct pa_space *ps,
+                       WinDumpHeader64 *hdr, const char *name)
 {
     FILE *dmp_file = fopen(name, "wb");
     size_t i;
 
     if (!dmp_file) {
         eprintf("Failed to open output file \'%s\'\n", name);
-        return 1;
+        return false;
     }
 
     printf("Writing header to file...\n");
@@ -389,111 +429,86 @@ static int write_dump(struct pa_space *ps,
     if (fwrite(hdr, sizeof(*hdr), 1, dmp_file) != 1) {
         eprintf("Failed to write dump header\n");
         fclose(dmp_file);
-        return 1;
+        return false;
     }
 
     for (i = 0; i < ps->block_nr; i++) {
         struct pa_block *b = &ps->block[i];
 
-        printf("Writing block #%zu/%zu to file...\n", i, ps->block_nr);
+        printf("Writing block #%zu/%zu of %"PRIu64" bytes to file...\n", i,
+                ps->block_nr, b->size);
         if (fwrite(b->addr, b->size, 1, dmp_file) != 1) {
-            eprintf("Failed to write dump header\n");
+            eprintf("Failed to write block\n");
             fclose(dmp_file);
-            return 1;
+            return false;
         }
     }
 
-    return fclose(dmp_file);
+    return !fclose(dmp_file);
 }
 
-static bool pe_check_export_name(uint64_t base, void *start_addr,
-        struct va_space *vs)
-{
-    IMAGE_EXPORT_DIRECTORY export_dir;
-    const char *pe_name;
-
-    if (pe_get_data_dir_entry(base, start_addr, IMAGE_FILE_EXPORT_DIRECTORY,
-                &export_dir, sizeof(export_dir), vs)) {
-        return false;
-    }
-
-    pe_name = va_space_resolve(vs, base + export_dir.Name);
-    if (!pe_name) {
-        return false;
-    }
-
-    return !strcmp(pe_name, PE_NAME);
-}
-
-static int pe_get_pdb_symstore_hash(uint64_t base, void *start_addr,
-        char *hash, struct va_space *vs)
+static bool pe_check_pdb_name(uint64_t base, void *start_addr,
+        struct va_space *vs, OMFSignatureRSDS *rsds)
 {
     const char sign_rsds[4] = "RSDS";
     IMAGE_DEBUG_DIRECTORY debug_dir;
-    OMFSignatureRSDS rsds;
-    char *pdb_name;
-    size_t pdb_name_sz;
-    size_t i;
+    char pdb_name[sizeof(PDB_NAME)];
 
-    if (pe_get_data_dir_entry(base, start_addr, IMAGE_FILE_DEBUG_DIRECTORY,
-                &debug_dir, sizeof(debug_dir), vs)) {
+    if (!pe_get_data_dir_entry(base, start_addr, IMAGE_FILE_DEBUG_DIRECTORY,
+                               &debug_dir, sizeof(debug_dir), vs)) {
         eprintf("Failed to get Debug Directory\n");
-        return 1;
+        return false;
     }
 
     if (debug_dir.Type != IMAGE_DEBUG_TYPE_CODEVIEW) {
-        return 1;
+        eprintf("Debug Directory type is not CodeView\n");
+        return false;
     }
 
-    if (va_space_rw(vs,
-                base + debug_dir.AddressOfRawData,
-                &rsds, sizeof(rsds), 0)) {
-        return 1;
+    if (!va_space_rw(vs, base + debug_dir.AddressOfRawData,
+                     rsds, sizeof(*rsds), 0)) {
+        eprintf("Failed to resolve OMFSignatureRSDS\n");
+        return false;
     }
 
-    printf("CodeView signature is \'%.4s\'\n", rsds.Signature);
-
-    if (memcmp(&rsds.Signature, sign_rsds, sizeof(sign_rsds))) {
-        return 1;
+    if (memcmp(&rsds->Signature, sign_rsds, sizeof(sign_rsds))) {
+        eprintf("CodeView signature is \'%.4s\', \'%.4s\' expected\n",
+                rsds->Signature, sign_rsds);
+        return false;
     }
 
-    pdb_name_sz = debug_dir.SizeOfData - sizeof(rsds);
-    pdb_name = malloc(pdb_name_sz);
-    if (!pdb_name) {
-        return 1;
+    if (debug_dir.SizeOfData - sizeof(*rsds) != sizeof(PDB_NAME)) {
+        eprintf("PDB name size doesn't match\n");
+        return false;
     }
 
-    if (va_space_rw(vs, base + debug_dir.AddressOfRawData +
-                offsetof(OMFSignatureRSDS, name), pdb_name, pdb_name_sz, 0)) {
-        free(pdb_name);
-        return 1;
+    if (!va_space_rw(vs, base + debug_dir.AddressOfRawData +
+                     offsetof(OMFSignatureRSDS, name),
+                     pdb_name, sizeof(PDB_NAME), 0)) {
+        eprintf("Failed to resolve PDB name\n");
+        return false;
     }
 
     printf("PDB name is \'%s\', \'%s\' expected\n", pdb_name, PDB_NAME);
 
-    if (strcmp(pdb_name, PDB_NAME)) {
-        eprintf("Unexpected PDB name, it seems the kernel isn't found\n");
-        free(pdb_name);
-        return 1;
-    }
+    return !strcmp(pdb_name, PDB_NAME);
+}
 
-    free(pdb_name);
-
-    sprintf(hash, "%.08x%.04x%.04x%.02x%.02x", rsds.guid.a, rsds.guid.b,
-            rsds.guid.c, rsds.guid.d[0], rsds.guid.d[1]);
+static void pe_get_pdb_symstore_hash(OMFSignatureRSDS *rsds, char *hash)
+{
+    sprintf(hash, "%.08x%.04x%.04x%.02x%.02x", rsds->guid.a, rsds->guid.b,
+            rsds->guid.c, rsds->guid.d[0], rsds->guid.d[1]);
     hash += 20;
-    for (i = 0; i < 6; i++, hash += 2) {
-        sprintf(hash, "%.02x", rsds.guid.e[i]);
+    for (unsigned int i = 0; i < 6; i++, hash += 2) {
+        sprintf(hash, "%.02x", rsds->guid.e[i]);
     }
 
-    sprintf(hash, "%.01x", rsds.age);
-
-    return 0;
+    sprintf(hash, "%.01x", rsds->age);
 }
 
 int main(int argc, char *argv[])
 {
-    int err = 0;
+    int err = 1;
     QEMU_Elf qemu_elf;
     struct pa_space ps;
     struct va_space vs;
@@ -510,39 +525,34 @@ int main(int argc, char *argv[])
     KDDEBUGGER_DATA64 *kdbg;
     uint64_t KdVersionBlock;
     bool kernel_found = false;
+    OMFSignatureRSDS rsds;
 
     if (argc != 3) {
         eprintf("usage:\n\t%s elf_file dmp_file\n", argv[0]);
         return 1;
     }
 
-    if (QEMU_Elf_init(&qemu_elf, argv[1])) {
+    if (!QEMU_Elf_init(&qemu_elf, argv[1])) {
         eprintf("Failed to initialize QEMU ELF dump\n");
         return 1;
     }
 
-    if (pa_space_create(&ps, &qemu_elf)) {
-        eprintf("Failed to initialize physical address space\n");
-        err = 1;
-        goto out_elf;
-    }
+    pa_space_create(&ps, &qemu_elf);
 
     state = qemu_elf.state[0];
     printf("CPU #0 CR3 is 0x%016"PRIx64"\n", state->cr[3]);
 
     va_space_create(&vs, &ps, state->cr[3]);
-    if (fix_dtb(&vs, &qemu_elf)) {
+    if (!fix_dtb(&vs, &qemu_elf)) {
         eprintf("Failed to find paging base\n");
-        err = 1;
-        goto out_elf;
+        goto out_ps;
     }
 
     printf("CPU #0 IDT is at 0x%016"PRIx64"\n", state->idt.base);
 
-    if (va_space_rw(&vs, state->idt.base,
-                &first_idt_desc, sizeof(first_idt_desc), 0)) {
+    if (!va_space_rw(&vs, state->idt.base,
+                     &first_idt_desc, sizeof(first_idt_desc), 0)) {
         eprintf("Failed to get CPU #0 IDT[0]\n");
-        err = 1;
         goto out_ps;
     }
     printf("CPU #0 IDT[0] -> 0x%016"PRIx64"\n", idt_desc_addr(first_idt_desc));
@@ -557,7 +567,8 @@ int main(int argc, char *argv[])
         }
 
         if (*(uint16_t *)nt_start_addr == 0x5a4d) { /* MZ */
-            if (pe_check_export_name(KernBase, nt_start_addr, &vs)) {
+            printf("Checking candidate KernBase = 0x%016"PRIx64"\n", KernBase);
+            if (pe_check_pdb_name(KernBase, nt_start_addr, &vs, &rsds)) {
                 kernel_found = true;
                 break;
             }
@@ -566,72 +577,59 @@ int main(int argc, char *argv[])
 
     if (!kernel_found) {
         eprintf("Failed to find NT kernel image\n");
-        err = 1;
         goto out_ps;
     }
 
     printf("KernBase = 0x%016"PRIx64", signature is \'%.2s\'\n", KernBase,
             (char *)nt_start_addr);
 
-    if (pe_get_pdb_symstore_hash(KernBase, nt_start_addr, pdb_hash, &vs)) {
-        eprintf("Failed to get PDB symbol store hash\n");
-        err = 1;
-        goto out_ps;
-    }
+    pe_get_pdb_symstore_hash(&rsds, pdb_hash);
 
     sprintf(pdb_url, "%s%s/%s/%s", SYM_URL_BASE, PDB_NAME, pdb_hash, PDB_NAME);
     printf("PDB URL is %s\n", pdb_url);
 
-    if (download_url(PDB_NAME, pdb_url)) {
+    if (!download_url(PDB_NAME, pdb_url)) {
         eprintf("Failed to download PDB file\n");
-        err = 1;
         goto out_ps;
     }
 
-    if (pdb_init_from_file(PDB_NAME, &pdb)) {
+    if (!pdb_init_from_file(PDB_NAME, &pdb)) {
         eprintf("Failed to initialize PDB reader\n");
-        err = 1;
         goto out_pdb_file;
     }
 
     if (!SYM_RESOLVE(KernBase, &pdb, KdDebuggerDataBlock) ||
             !SYM_RESOLVE(KernBase, &pdb, KdVersionBlock)) {
-        err = 1;
         goto out_pdb;
     }
 
     kdbg = get_kdbg(KernBase, &pdb, &vs, KdDebuggerDataBlock);
     if (!kdbg) {
-        err = 1;
         goto out_pdb;
     }
 
-    if (fill_header(&header, &ps, &vs, KdDebuggerDataBlock, kdbg,
-            KdVersionBlock, qemu_elf.state_nr)) {
-        err = 1;
+    if (!fill_header(&header, &ps, &vs, KdDebuggerDataBlock, kdbg,
+                     KdVersionBlock, qemu_elf.state_nr)) {
         goto out_kdbg;
     }
 
-    if (fill_context(kdbg, &vs, &qemu_elf)) {
-        err = 1;
-        goto out_kdbg;
-    }
+    fill_context(kdbg, &vs, &qemu_elf);
 
-    if (write_dump(&ps, &header, argv[2])) {
+    if (!write_dump(&ps, &header, argv[2])) {
         eprintf("Failed to save dump\n");
-        err = 1;
         goto out_kdbg;
     }
+
+    err = 0;
 
 out_kdbg:
-    free(kdbg);
+    g_free(kdbg);
 out_pdb:
     pdb_exit(&pdb);
 out_pdb_file:
     unlink(PDB_NAME);
 out_ps:
     pa_space_destroy(&ps);
-out_elf:
     QEMU_Elf_exit(&qemu_elf);
 
     return err;

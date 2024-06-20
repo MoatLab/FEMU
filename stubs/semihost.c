@@ -1,9 +1,9 @@
 /*
- * Semihosting Stubs for SoftMMU
+ * Semihosting Stubs for system emulation
  *
  * Copyright (c) 2019 Linaro Ltd
  *
- * Stubs for SoftMMU targets that don't actually do semihosting.
+ * Stubs for system targets that don't actually do semihosting.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -36,7 +36,7 @@ void qemu_semihosting_enable(void)
 {
 }
 
-int qemu_semihosting_config_options(const char *optarg)
+int qemu_semihosting_config_options(const char *optstr)
 {
     return 1;
 }

@@ -9,6 +9,7 @@
 
 #include <Library/BaseLib.h>
 #include <Library/BaseRiscVSbiLib.h>
+#include <Library/UefiLib.h>
 #include "Timer.h"
 
 //
@@ -40,7 +41,47 @@ STATIC EFI_TIMER_NOTIFY  mTimerNotifyFunction;
 //
 // The current period of the timer interrupt
 //
-STATIC UINT64  mTimerPeriod = 0;
+STATIC UINT64  mTimerPeriod     = 0;
+STATIC UINT64  mLastPeriodStart = 0;
+
+//
+// Sstc support
+//
+STATIC BOOLEAN  mSstcEnabled = FALSE;
+
+/**
+  Program the timer.
+
+  Program either using stimecmp (when Sstc extension is enabled) or using SBI
+  TIME call.
+
+  @param NextValue             Core tick value the timer should expire.
+**/
+STATIC
+VOID
+RiscVProgramTimer (
+  UINT64  NextValue
+  )
+{
+  if (mSstcEnabled) {
+    RiscVSetSupervisorTimeCompareRegister (NextValue);
+  } else {
+    SbiSetTimer (NextValue);
+  }
+}
+
+/**
+  Check whether Sstc is enabled in PCD.
+
+**/
+STATIC
+BOOLEAN
+RiscVIsSstcEnabled (
+  VOID
+  )
+{
+  return ((PcdGet64 (PcdRiscVFeatureOverride) & RISCV_CPU_FEATURE_SSTC_BITMASK) != 0);
+}
 
 /**
   Timer Interrupt Handler.
@@ -56,25 +97,45 @@ TimerInterruptHandler (
   )
 {
   EFI_TPL  OriginalTPL;
-  UINT64   RiscvTimer;
+  UINT64   PeriodStart;
+
+  PeriodStart = RiscVReadTimer ();
 
   OriginalTPL = gBS->RaiseTPL (TPL_HIGH_LEVEL);
   if (mTimerNotifyFunction != NULL) {
-    mTimerNotifyFunction (mTimerPeriod);
+    //
+    // For any number of reasons, the ticks could be coming
+    // in slower than mTimerPeriod. For example, some code
+    // is doing a *lot* of stuff inside an EFI_TPL_HIGH
+    // critical section, and this should not cause the EFI
+    // time to increment slower. So when we take an interrupt,
+    // account for the actual time passed.
+    //
+    mTimerNotifyFunction (
+      DivU64x32 (
+        EFI_TIMER_PERIOD_SECONDS (PeriodStart - mLastPeriodStart),
+        PcdGet64 (PcdCpuCoreCrystalClockFrequency)
+        )
+      );
   }
 
-  RiscVDisableTimerInterrupt (); // Disable SMode timer int
-  RiscVClearPendingTimerInterrupt ();
   if (mTimerPeriod == 0) {
+    RiscVDisableTimerInterrupt ();
     gBS->RestoreTPL (OriginalTPL);
-    RiscVDisableTimerInterrupt (); // Disable SMode timer int
     return;
   }
 
-  RiscvTimer               = RiscVReadTimer ();
-  SbiSetTimer (RiscvTimer += mTimerPeriod);
-  gBS->RestoreTPL (OriginalTPL);
+  mLastPeriodStart = PeriodStart;
+  PeriodStart     += DivU64x32 (
+                       MultU64x32 (
+                         mTimerPeriod,
+                         PcdGet64 (PcdCpuCoreCrystalClockFrequency)
+                         ),
+                       1000000u
+                       );  // convert to tick
+  RiscVProgramTimer (PeriodStart);
   RiscVEnableTimerInterrupt (); // enable SMode timer int
+  gBS->RestoreTPL (OriginalTPL);
 }
 
 /**
@@ -154,7 +215,7 @@ TimerDriverSetTimerPeriod (
   IN UINT64                   TimerPeriod
   )
 {
-  UINT64  RiscvTimer;
+  UINT64  PeriodStart;
 
   DEBUG ((DEBUG_INFO, "TimerDriverSetTimerPeriod(0x%lx)\n", TimerPeriod));
 
@@ -164,10 +225,18 @@ TimerDriverSetTimerPeriod (
     return EFI_SUCCESS;
   }
 
-  mTimerPeriod = TimerPeriod / 10; // convert unit from 100ns to 1us
-  RiscvTimer   = RiscVReadTimer ();
-  SbiSetTimer (RiscvTimer + mTimerPeriod);
+  mTimerPeriod = TimerPeriod / 10;     // convert unit from 100ns to 1us
 
+  mLastPeriodStart = RiscVReadTimer ();
+  PeriodStart      = mLastPeriodStart;
+  PeriodStart     += DivU64x32 (
+                       MultU64x32 (
+                         mTimerPeriod,
+                         PcdGet64 (PcdCpuCoreCrystalClockFrequency)
+                         ),
+                       1000000u
+                       ); // convert to tick
+  RiscVProgramTimer (PeriodStart);
   mCpu->EnableInterrupt (mCpu);
   RiscVEnableTimerInterrupt (); // enable SMode timer int
   return EFI_SUCCESS;
@@ -251,6 +320,11 @@ TimerDriverInitialize (
   //
   mTimerNotifyFunction = NULL;
 
+  if (RiscVIsSstcEnabled ()) {
+    mSstcEnabled = TRUE;
+    DEBUG ((DEBUG_INFO, "TimerDriverInitialize: Timer interrupt is via Sstc extension\n"));
+  }
+
   //
   // Make sure the Timer Architectural Protocol is not already installed in the system
   //
@@ -271,7 +345,11 @@ TimerDriverInitialize (
   //
   // Install interrupt handler for RISC-V Timer.
   //
-  Status = mCpu->RegisterInterruptHandler (mCpu, EXCEPT_RISCV_TIMER_INT, TimerInterruptHandler);
+  Status = mCpu->RegisterInterruptHandler (
+                   mCpu,
+                   EXCEPT_RISCV_IRQ_TIMER_FROM_SMODE,
+                   TimerInterruptHandler
+                   );
   ASSERT_EFI_ERROR (Status);
 
   //

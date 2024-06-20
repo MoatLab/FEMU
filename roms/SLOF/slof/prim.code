@@ -561,14 +561,6 @@ PRIM(STRING_X3d_CI)
 	}
 MIRP
 
-// bool dependend pick
-// ?PICK ( v1 v2 bool -- v1|v2 )
-PRIM(_X3f_PICK)
-        type_u b = TOS.u; POP;
-        if (b) { NOS = TOS; }
-        POP;
-MIRP
-
 /* zcount ( zstr -- str len ) */
 PRIM(ZCOUNT)
 	type_u len = strlen(TOS.a);

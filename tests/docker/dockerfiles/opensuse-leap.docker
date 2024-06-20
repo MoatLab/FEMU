@@ -1,10 +1,10 @@
 # THIS FILE WAS AUTO-GENERATED
 #
-#  $ lcitool dockerfile --layers all opensuse-leap-153 qemu
+#  $ lcitool dockerfile --layers all opensuse-leap-15 qemu
 #
 # https://gitlab.com/libvirt/libvirt-ci
 
-FROM registry.opensuse.org/opensuse/leap:15.3
+FROM registry.opensuse.org/opensuse/leap:15.5
 
 RUN zypper update -y && \
     zypper install -y \
@@ -40,7 +40,7 @@ RUN zypper update -y && \
            libSDL2-devel \
            libSDL2_image-devel \
            libaio-devel \
-           libasan6 \
+           libasan8 \
            libattr-devel \
            libbpf-devel \
            libbz2-devel \
@@ -81,25 +81,27 @@ RUN zypper update -y && \
            lttng-ust-devel \
            lzo-devel \
            make \
-           mkisofs \
+           mtools \
            ncat \
            ncurses-devel \
            ninja \
            openssh \
            pam-devel \
            pcre-devel-static \
+           pipewire-devel \
            pkgconfig \
-           python39-base \
-           python39-pip \
-           python39-setuptools \
+           python311 \
+           python311-base \
+           python311-pip \
+           python311-setuptools \
            rdma-core-devel \
-           rpm \
            sed \
            snappy-devel \
            sndio-devel \
            socat \
            sparse \
            spice-protocol-devel \
+           swtpm \
            systemd-devel \
            systemtap-sdt-devel \
            tar \
@@ -112,6 +114,7 @@ RUN zypper update -y && \
            which \
            xen-devel \
            xfsprogs-devel \
+           xorriso \
            zlib-devel \
            zlib-devel-static \
            zstd && \
@@ -124,18 +127,18 @@ RUN zypper update -y && \
     ln -s /usr/bin/ccache /usr/libexec/ccache-wrappers/g++ && \
     ln -s /usr/bin/ccache /usr/libexec/ccache-wrappers/gcc
 
-RUN /usr/bin/pip3.9 install \
-                    PyYAML \
-                    meson==0.63.2 \
-                    pillow \
-                    sphinx \
-                    sphinx-rtd-theme
+RUN /usr/bin/pip3.11 install \
+                     PyYAML \
+                     meson==0.63.2 \
+                     pillow \
+                     sphinx \
+                     sphinx-rtd-theme
 
 ENV CCACHE_WRAPPERSDIR "/usr/libexec/ccache-wrappers"
 ENV LANG "en_US.UTF-8"
 ENV MAKE "/usr/bin/make"
 ENV NINJA "/usr/bin/ninja"
-ENV PYTHON "/usr/bin/python3.9"
+ENV PYTHON "/usr/bin/python3.11"
 # As a final step configure the user (if env is defined)
 ARG USER
 ARG UID

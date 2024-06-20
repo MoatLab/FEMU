@@ -169,13 +169,14 @@ void qmp_blockdev_close_tray(const char *device,
     }
 }
 
-static void blockdev_remove_medium(const char *device, const char *id,
-                                   Error **errp)
+static void GRAPH_UNLOCKED
+blockdev_remove_medium(const char *device, const char *id, Error **errp)
 {
     BlockBackend *blk;
     BlockDriverState *bs;
-    AioContext *aio_context;
     bool has_attached_device;
+
+    GLOBAL_STATE_CODE();
 
     blk = qmp_get_blk(device, id, errp);
     if (!blk) {
@@ -202,12 +203,12 @@ static void blockdev_remove_medium(const char *device, const char *id,
         return;
     }
 
-    aio_context = bdrv_get_aio_context(bs);
-    aio_context_acquire(aio_context);
-
+    bdrv_graph_rdlock_main_loop();
     if (bdrv_op_is_blocked(bs, BLOCK_OP_TYPE_EJECT, errp)) {
-        goto out;
+        bdrv_graph_rdunlock_main_loop();
+        return;
     }
+    bdrv_graph_rdunlock_main_loop();
 
     blk_remove_bs(blk);
 
@@ -218,9 +219,6 @@ static void blockdev_remove_medium(const char *device, const char *id,
          * value passed here (i.e. false). */
         blk_dev_change_media_cb(blk, false, &error_abort);
     }
-
-out:
-    aio_context_release(aio_context);
 }
 
 void qmp_blockdev_remove_medium(const char *id, Error **errp)
@@ -278,6 +276,8 @@ static void blockdev_insert_medium(const char *device, const char *id,
 {
     BlockBackend *blk;
     BlockDriverState *bs;
+
+    GRAPH_RDLOCK_GUARD_MAINLOOP();
 
     blk = qmp_get_blk(device, id, errp);
     if (!blk) {
@@ -363,6 +363,7 @@ void qmp_blockdev_change_medium(const char *device,
     }
 
     medium_bs = bdrv_open(filename, NULL, options, bdrv_flags, errp);
+
     if (!medium_bs) {
         goto fail;
     }
@@ -422,20 +423,16 @@ void qmp_block_set_io_throttle(BlockIOThrottle *arg, Error **errp)
     ThrottleConfig cfg;
     BlockDriverState *bs;
     BlockBackend *blk;
-    AioContext *aio_context;
 
     blk = qmp_get_blk(arg->device, arg->id, errp);
     if (!blk) {
         return;
     }
 
-    aio_context = blk_get_aio_context(blk);
-    aio_context_acquire(aio_context);
-
     bs = blk_bs(blk);
     if (!bs) {
         error_setg(errp, "Device has no medium");
-        goto out;
+        return;
     }
 
     throttle_config_init(&cfg);
@@ -490,7 +487,7 @@ void qmp_block_set_io_throttle(BlockIOThrottle *arg, Error **errp)
     }
 
     if (!throttle_is_valid(&cfg, errp)) {
-        goto out;
+        return;
     }
 
     if (throttle_enabled(&cfg)) {
@@ -507,9 +504,6 @@ void qmp_block_set_io_throttle(BlockIOThrottle *arg, Error **errp)
         /* If all throttling settings are set to 0, disable I/O limits */
         blk_io_limits_disable(blk);
     }
-
-out:
-    aio_context_release(aio_context);
 }
 
 void qmp_block_latency_histogram_set(
@@ -517,6 +511,7 @@ void qmp_block_latency_histogram_set(
     bool has_boundaries, uint64List *boundaries,
     bool has_boundaries_read, uint64List *boundaries_read,
     bool has_boundaries_write, uint64List *boundaries_write,
+    bool has_boundaries_append, uint64List *boundaries_append,
     bool has_boundaries_flush, uint64List *boundaries_flush,
     Error **errp)
 {
@@ -553,6 +548,16 @@ void qmp_block_latency_histogram_set(
             has_boundaries_write ? boundaries_write : boundaries);
         if (ret) {
             error_setg(errp, "Device '%s' set write boundaries fail", id);
+            return;
+        }
+    }
+
+    if (has_boundaries || has_boundaries_append) {
+        ret = block_latency_histogram_set(
+                stats, BLOCK_ACCT_ZONE_APPEND,
+                has_boundaries_append ? boundaries_append : boundaries);
+        if (ret) {
+            error_setg(errp, "Device '%s' set append write boundaries fail", id);
             return;
         }
     }

@@ -38,7 +38,7 @@ import unittest
 from contextlib import contextmanager
 
 from qemu.machine import qtest
-from qemu.qmp.legacy import QMPMessage, QEMUMonitorProtocol
+from qemu.qmp.legacy import QMPMessage, QMPReturnValue, QEMUMonitorProtocol
 from qemu.utils import VerboseProcessError
 
 # Use this logger for logging messages directly from the iotests module
@@ -460,7 +460,16 @@ class QemuStorageDaemon:
     def qmp(self, cmd: str, args: Optional[Dict[str, object]] = None) \
             -> QMPMessage:
         assert self._qmp is not None
-        return self._qmp.cmd(cmd, args)
+        return self._qmp.cmd_raw(cmd, args)
+
+    def get_qmp(self) -> QEMUMonitorProtocol:
+        assert self._qmp is not None
+        return self._qmp
+
+    def cmd(self, cmd: str, args: Optional[Dict[str, object]] = None) \
+            -> QMPReturnValue:
+        assert self._qmp is not None
+        return self._qmp.cmd(cmd, **(args or {}))
 
     def stop(self, kill_signal=15):
         self._p.send_signal(kill_signal)
@@ -642,6 +651,13 @@ def filter_qmp_virtio_scsi(qmsg):
 def filter_generated_node_ids(msg):
     return re.sub("#block[0-9]+", "NODE_NAME", msg)
 
+def filter_qmp_generated_node_ids(qmsg):
+    def _filter(_key, value):
+        if is_str(value):
+            return filter_generated_node_ids(value)
+        return value
+    return filter_qmp(qmsg, _filter)
+
 def filter_img_info(output: str, filename: str,
                     drop_child_info: bool = True) -> str:
     lines = []
@@ -819,7 +835,7 @@ class VM(qtest.QEMUQtestMachine):
         super().__init__(qemu_prog, qemu_opts, wrapper=wrapper,
                          name=name,
                          base_temp_dir=test_dir,
-                         sock_dir=sock_dir, qmp_timer=timer)
+                         qmp_timer=timer)
         self._num_drives = 0
 
     def _post_shutdown(self) -> None:
@@ -1243,8 +1259,7 @@ class QMPTestCase(unittest.TestCase):
     def cancel_and_wait(self, drive='drive0', force=False,
                         resume=False, wait=60.0):
         '''Cancel a block job and wait for it to finish, returning the event'''
-        result = self.vm.qmp('block-job-cancel', device=drive, force=force)
-        self.assert_qmp(result, 'return', {})
+        self.vm.cmd('block-job-cancel', device=drive, force=force)
 
         if resume:
             self.vm.resume_drive(drive)
@@ -1306,8 +1321,7 @@ class QMPTestCase(unittest.TestCase):
         if wait_ready:
             self.wait_ready(drive=drive)
 
-        result = self.vm.qmp('block-job-complete', device=drive)
-        self.assert_qmp(result, 'return', {})
+        self.vm.cmd('block-job-complete', device=drive)
 
         event = self.wait_until_completed(drive=drive, error=completion_error)
         self.assertTrue(event['data']['type'] in ['mirror', 'commit'])
@@ -1326,11 +1340,9 @@ class QMPTestCase(unittest.TestCase):
                 assert found
 
     def pause_job(self, job_id='job0', wait=True):
-        result = self.vm.qmp('block-job-pause', device=job_id)
-        self.assert_qmp(result, 'return', {})
+        self.vm.cmd('block-job-pause', device=job_id)
         if wait:
-            return self.pause_wait(job_id)
-        return result
+            self.pause_wait(job_id)
 
     def case_skip(self, reason):
         '''Skip this test case'''
@@ -1417,7 +1429,7 @@ def _verify_virtio_blk() -> None:
     if 'virtio-blk' not in out:
         notrun('Missing virtio-blk in QEMU binary')
 
-def _verify_virtio_scsi_pci_or_ccw() -> None:
+def verify_virtio_scsi_pci_or_ccw() -> None:
     out = qemu_pipe('-M', 'none', '-device', 'help')
     if 'virtio-scsi-pci' not in out and 'virtio-scsi-ccw' not in out:
         notrun('Missing virtio-scsi-pci or virtio-scsi-ccw in QEMU binary')

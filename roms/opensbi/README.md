@@ -1,11 +1,15 @@
 RISC-V Open Source Supervisor Binary Interface (OpenSBI)
 ========================================================
 
+![RISC-V OpenSBI](docs/riscv_opensbi_logo_final_color.png)
+
 Copyright and License
 ---------------------
 
-The OpenSBI project is copyright (c) 2019 Western Digital Corporation
-or its affiliates and other contributors.
+The OpenSBI project is:
+
+* Copyright (c) 2019 Western Digital Corporation or its affiliates
+* Copyright (c) 2023 RISC-V International
 
 It is distributed under the terms of the BSD 2-clause license
 ("Simplified BSD License" or "FreeBSD License", SPDX: *BSD-2-Clause*).
@@ -297,6 +301,19 @@ NOTE: Using `BUILD_INFO=y` without specifying SOURCE_DATE_EPOCH will violate
 [reproducible builds]. This definition is ONLY for development and debug
 purpose, and should NOT be used in a product which follows "reproducible
 builds".
+
+Building with optimization off for debugging
+--------------------------------------------
+
+When debugging OpenSBI, we may want to turn off the compiler optimization and
+make debugging produce the expected results for a better debugging experience.
+To build with optimization off we can just simply add `DEBUG=1`, like:
+```
+make DEBUG=1
+```
+
+This definition is ONLY for development and debug purpose, and should NOT be
+used in a product build.
 
 Contributing to OpenSBI
 -----------------------

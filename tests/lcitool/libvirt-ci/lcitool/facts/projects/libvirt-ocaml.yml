@@ -3,6 +3,7 @@ packages:
   - autoconf
   - automake
   - autopoint
+  - awk
   - ccache
   - diffutils
   - gcc

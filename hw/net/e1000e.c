@@ -320,7 +320,7 @@ e1000e_init_net_peer(E1000EState *s, PCIDevice *pci_dev, uint8_t *macaddr)
     int i;
 
     s->nic = qemu_new_nic(&net_e1000e_info, &s->conf,
-        object_get_typename(OBJECT(s)), dev->id, s);
+        object_get_typename(OBJECT(s)), dev->id, &dev->mem_reentrancy_guard, s);
 
     s->core.max_queue_num = s->conf.peers.queues ? s->conf.peers.queues - 1 : 0;
 
@@ -564,7 +564,7 @@ static const VMStateDescription e1000e_vmstate_tx = {
     .name = "e1000e-tx",
     .version_id = 1,
     .minimum_version_id = 1,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT8(sum_needed, struct e1000e_tx),
         VMSTATE_UINT8(props.ipcss, struct e1000e_tx),
         VMSTATE_UINT8(props.ipcso, struct e1000e_tx),
@@ -588,7 +588,7 @@ static const VMStateDescription e1000e_vmstate_intr_timer = {
     .name = "e1000e-intr-timer",
     .version_id = 1,
     .minimum_version_id = 1,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_TIMER_PTR(timer, E1000IntrDelayTimer),
         VMSTATE_BOOL(running, E1000IntrDelayTimer),
         VMSTATE_END_OF_LIST()
@@ -609,7 +609,7 @@ static const VMStateDescription e1000e_vmstate = {
     .minimum_version_id = 1,
     .pre_save = e1000e_pre_save,
     .post_load = e1000e_post_load,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_PCI_DEVICE(parent_obj, E1000EState),
         VMSTATE_MSIX(parent_obj, E1000EState),
 

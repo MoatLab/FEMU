@@ -39,8 +39,7 @@
 #   - CentOS7
 #   - Debian9
 #   - FedoraRawhide
-#   - OpenSUSELeap152
-#   - Ubuntu1804
+#   - OpenSUSELeap15
 #
 # and so on.
 #
@@ -148,6 +147,14 @@ mappings:
     rpm: gettext-devel
     MacOS: gettext
 
+  awk:
+    default: awk
+    apk: busybox
+    deb: original-awk
+    pkg:
+    rpm: gawk
+    OpenSUSE: awk
+
   bash:
     default: bash
 
@@ -170,8 +177,6 @@ mappings:
     apk: util-linux
     deb: bsdextrautils
     rpm: util-linux
-    Debian10: bsdmainutils
-    Ubuntu1804: bsdmainutils
     Ubuntu2004: bsdmainutils
 
   bzip2:
@@ -200,15 +205,6 @@ mappings:
     rpm: capstone-devel
     MacOS: capstone
     OpenSUSE:
-    # EPEL9 retired capstone as soon as it was added to c9s for
-    # the future RHEL-9.2 release. This dooms anyone still using
-    # RHEL < 9.2 who still needs capstone from EPEL, so we
-    # workaround by manually picking the most recent version
-    AlmaLinux9:
-    aarch64-AlmaLinux9: https://kojipkgs.fedoraproject.org/packages/capstone/4.0.2/9.el9/aarch64/capstone-4.0.2-9.el9.aarch64.rpm
-    ppc64le-AlmaLinux9: https://kojipkgs.fedoraproject.org/packages/capstone/4.0.2/9.el9/ppc64le/capstone-4.0.2-9.el9.ppc64le.rpm
-    s390x-AlmaLinux9: https://kojipkgs.fedoraproject.org/packages/capstone/4.0.2/9.el9/s390x/capstone-4.0.2-9.el9.s390x.rpm
-    x86_64-AlmaLinux9: https://kojipkgs.fedoraproject.org/packages/capstone/4.0.2/9.el9/x86_64/capstone-4.0.2-9.el9.x86_64.rpm
     cross-policy-default: foreign
 
   cargo:
@@ -239,8 +235,6 @@ mappings:
     pkg: rust
     rpm: clippy
     OpenSUSE:
-    Alpine315:
-    Debian10:
     Debian11:
 
   cloud-init:
@@ -252,6 +246,7 @@ mappings:
     apk: cloud-utils-growpart
     deb: cloud-guest-utils
     rpm: cloud-utils-growpart
+    OpenSUSE: cloud-init
 
   cmocka:
     apk: cmocka-dev
@@ -368,9 +363,6 @@ mappings:
     apk: py3-flake8
     pkg: py39-flake8
     rpm: python3-flake8
-    # FIXME Drop once EPEL for AlmaLinux 9 / CentOS Stream 9 adds the package
-    AlmaLinux9:
-    CentOSStream9:
     OpenSUSETumbleweed: python39-flake8
 
   flex:
@@ -388,14 +380,12 @@ mappings:
     deb: libfuse3-dev
     pkg: fusefs-libs3
     rpm: fuse3-devel
-    Ubuntu1804:
     cross-policy-default: foreign
 
   fusermount:
     default: fuse3
     pkg: fusefs-libs3
     MacOS:
-    Ubuntu1804:
 
   g++:
     apk: g++
@@ -411,6 +401,7 @@ mappings:
     cross-mips64el-deb: g++-mips64el-linux-gnuabi64
     cross-mipsel-deb: g++-mipsel-linux-gnu
     cross-ppc64le-deb: g++-powerpc64le-linux-gnu
+    cross-riscv64-deb: g++-riscv64-linux-gnu
     cross-s390x-deb: g++-s390x-linux-gnu
     cross-x86_64-deb: g++-x86-64-linux-gnu
     cross-policy-default: foreign
@@ -429,9 +420,15 @@ mappings:
     cross-mips64el-deb: gcc-mips64el-linux-gnuabi64
     cross-mipsel-deb: gcc-mipsel-linux-gnu
     cross-ppc64le-deb: gcc-powerpc64le-linux-gnu
+    cross-riscv64-deb: gcc-riscv64-linux-gnu
     cross-s390x-deb: gcc-s390x-linux-gnu
     cross-x86_64-deb: gcc-x86-64-linux-gnu
     cross-policy-default: foreign
+
+  gcc-native:
+    default: gcc
+    pkg:
+    MacOS:
 
   gcovr:
     default: gcovr
@@ -469,6 +466,10 @@ mappings:
     cross-mingw64-rpm: mingw64-gettext
     cross-policy-rpm: foreign
 
+  gettext-native:
+    default: gettext
+    OpenSUSE: gettext-runtime
+
   git:
     default: git
 
@@ -477,7 +478,6 @@ mappings:
     apk: glib-dev
     deb: libglib2.0-dev-bin
     rpm: glib2-devel
-    MacOS: glib-utils
 
   glib2:
     default: glib
@@ -507,7 +507,6 @@ mappings:
     OpenSUSE: glusterfs-devel
     AlmaLinux8: glusterfs-api-devel
     CentOSStream8: glusterfs-api-devel
-    Ubuntu1804: glusterfs-common
     cross-policy-default: foreign
 
   gnutls:
@@ -589,8 +588,6 @@ mappings:
     apk: hexdump
     deb: bsdextrautils
     rpm: util-linux
-    Debian10: bsdmainutils
-    Ubuntu1804: bsdmainutils
     Ubuntu2004: bsdmainutils
 
   hostname:
@@ -634,7 +631,7 @@ mappings:
 
   java:
     apk: openjdk11-jdk
-    deb: openjdk-11-jdk-headless
+    deb: openjdk-17-jdk-headless
     pkg: openjdk11
     rpm: java-11-openjdk-headless
     MacOS: openjdk
@@ -694,9 +691,9 @@ mappings:
     cross-policy-default: foreign
 
   libasan:
-    deb: libasan5
+    deb: libasan6
     rpm: libasan
-    OpenSUSE: libasan6
+    OpenSUSE: libasan8
     mips-deb:
     mips64el-deb:
     mipsel-deb:
@@ -725,7 +722,6 @@ mappings:
     apk: libbpf-dev
     deb: libbpf-dev
     rpm: libbpf-devel
-    Ubuntu1804:
     Ubuntu2004:
     cross-policy-default: foreign
 
@@ -896,8 +892,7 @@ mappings:
     deb: liblzma-dev
     Fedora: xz-static
     OpenSUSE:
-    OpenSUSELeap153: xz-static-devel
-    OpenSUSELeap154: xz-static-devel
+    OpenSUSELeap15: xz-static-devel
     cross-policy-default: foreign
 
   libnfs:
@@ -913,9 +908,7 @@ mappings:
   libnbd:
     deb: libnbd-dev
     rpm: libnbd-devel
-    Debian10:
     Debian11:
-    Ubuntu1804:
     Ubuntu2004:
 
   libnl3:
@@ -955,6 +948,13 @@ mappings:
     deb: libpciaccess-dev
     pkg: libpciaccess
     rpm: libpciaccess-devel
+    cross-policy-default: foreign
+
+  libpipewire-dev:
+    apk: pipewire-dev
+    deb: libpipewire-0.3-dev
+    rpm: pipewire-devel
+    Ubuntu2004:
     cross-policy-default: foreign
 
   libpmem:
@@ -1016,8 +1016,6 @@ mappings:
     CentOS:
     AlmaLinux8: libslirp-devel
     CentOSStream8: libslirp-devel
-    Debian10:
-    Ubuntu1804:
     cross-policy-default: foreign
 
   libsoup:
@@ -1072,6 +1070,9 @@ mappings:
     default: libtorrent
     deb: libtorrent-dev
     rpm: libtorrent-devel
+    # homebrew has libtorrent-rasterbar, but pkg-config doesn't pick
+    # up proper references to compile with boost
+    MacOS:
 
   libubsan:
     deb: libubsan1
@@ -1097,8 +1098,6 @@ mappings:
     CentOS:
     AlmaLinux8: liburing-devel
     CentOSStream8: liburing-devel
-    Debian10:
-    Ubuntu1804:
     Ubuntu2004:
     cross-policy-default: foreign
 
@@ -1151,6 +1150,16 @@ mappings:
     cross-mingw64-rpm: mingw64-libxml2
     cross-policy-default: foreign
 
+  libxdp:
+    apk: libxdp-dev
+    deb: libxdp-dev
+    rpm: libxdp-devel
+    Debian11:
+    OpenSUSELeap15:
+    Ubuntu2004:
+    Ubuntu2204:
+    cross-policy-default: foreign
+
   libxslt:
     default: libxslt
     apk: libxslt-dev
@@ -1196,8 +1205,6 @@ mappings:
     pkg: lua54
     rpm: lua-devel
     MacOS: lua
-    Debian10: lua5.3
-    Ubuntu1804: lua5.3
     Ubuntu2004: lua5.3
 
   lvm2:
@@ -1226,9 +1233,6 @@ mappings:
 
   meson:
     default: meson
-    Debian10:
-    OpenSUSELeap153:
-    Ubuntu1804:
     Ubuntu2004:
 
   mkisofs:
@@ -1248,6 +1252,9 @@ mappings:
 
   monodevelop:
     Fedora: monodevelop
+
+  mtools:
+    default: mtools
 
   nano:
     default: nano
@@ -1272,15 +1279,13 @@ mappings:
     default: nbdkit
     apk:
     MacOS:
-    Ubuntu1804:
 
   nbdsh:
     default: python3-libnbd
     apk:
     pkg:
+    MacOS:
     OpenSUSE:
-    Debian10:
-    Ubuntu1804:
     Ubuntu2004:
 
   ncursesw:
@@ -1295,15 +1300,12 @@ mappings:
     deb: ncat
     rpm: nmap-ncat
     OpenSUSE: ncat
-    Ubuntu1804: netcat-openbsd
 
   netcf:
     apk: netcf-dev
     AlmaLinux8: netcf-devel
     CentOSStream8: netcf-devel
-    Debian10: libnetcf-dev
     Debian11: libnetcf-dev
-    Ubuntu1804: libnetcf-dev
     Ubuntu2004: libnetcf-dev
     cross-policy-default: skip
 
@@ -1471,9 +1473,6 @@ mappings:
     pkg: p5-Net-OpenSSH
     rpm: perl-Net-OpenSSH
     OpenSUSE:
-    # FIXME Drop once EPEL for AlmaLinux 9 / CentOS Stream 9 adds the package
-    AlmaLinux9:
-    CentOSStream9:
 
   perl-NetAddr-IP:
     deb: libnetaddr-ip-perl
@@ -1600,7 +1599,7 @@ mappings:
     deb: libperl-dev
     pkg: perl5-devel
     rpm: perl-devel
-    MacOS: perl5-devel
+    MacOS: perl
     OpenSUSE:
 
   perl-generators:
@@ -1612,7 +1611,6 @@ mappings:
     deb: php-dev
     pkg: php74
     rpm: php-devel
-    Alpine315: php8-dev
 
   php-imagick:
     apk: php81-pecl-imagick
@@ -1620,7 +1618,6 @@ mappings:
     pkg: php74-pecl-imagick
     Fedora: php-pecl-imagick
     OpenSUSE: php-imagick
-    Alpine315: php8-pecl-imagick
 
   pixman:
     default: pixman
@@ -1652,7 +1649,6 @@ mappings:
 
   publican:
     deb: publican
-    Fedora36: publican
 
   pulseaudio:
     apk: pulseaudio-dev
@@ -1671,6 +1667,14 @@ mappings:
     pkg: py39-yaml
     rpm: python3-PyYAML
 
+  python3-build:
+    apk: py3-build
+    deb: python3-build
+    pkg: py39-build
+    Fedora: python3-build
+    MacOS: python-build
+    Ubuntu:
+
   python3-dbus:
     default: python3-dbus
     apk: py3-dbus
@@ -1682,6 +1686,7 @@ mappings:
     default: python3-boto3
     apk: py3-boto3
     pkg: py39-boto3
+    MacOS:
 
   python3-devel:
     default: python3
@@ -1706,7 +1711,6 @@ mappings:
     apk: py3-libxml2
     pkg: py39-libxml2
     MacOS:
-    OpenSUSE: python3-libxml2-python
 
   python3-lxml:
     default: python3-lxml
@@ -1846,18 +1850,11 @@ mappings:
     default: rpcgen
     deb: libc-dev-bin
     pkg:
-    # On Alpine 3.15 both the nfs-utils and rpcgen packages provide the rpcgen
-    # command and they conflict, so we have to choose the superset (nfs-utils).
-    #
-    # This issue has already been addressed in Alpine Edge, but apparently the
-    # fix has not been backported to the stable release.
-    #
-    # https://gitlab.alpinelinux.org/alpine/aports/-/issues/13583
-    Alpine315: nfs-utils
+    MacOS:
 
   rpm2cpio:
     default: rpm2cpio
-    rpm: rpm
+    rpm:
 
   rpmbuild:
     rpm: rpm-build
@@ -1919,6 +1916,7 @@ mappings:
     # option) and what's more the binary is called sfdisk-linux
     pkg:
     rpm: util-linux
+    MacOS:
 
   showmount:
     apk: nfs-utils
@@ -1993,6 +1991,18 @@ mappings:
     pkg:
     MacOS:
 
+  sudo:
+    default: sudo
+    MacOS:
+
+  swtpm:
+    default: swtpm
+    # Although in "latest", not in the stable quarterly releases.
+    # Revisit mid-october 2023 after the next quarterly release.
+    FreeBSD:
+    Debian11:
+    Ubuntu2004:
+
   systemd:
     deb: libsystemd-dev
     rpm: systemd-devel
@@ -2000,10 +2010,6 @@ mappings:
 
   systemd-rpm-macros:
     rpm: systemd-rpm-macros
-
-  sudo:
-    default: sudo
-    MacOS:
 
   tar:
     default: tar
@@ -2021,6 +2027,7 @@ mappings:
     deb: tcl-dev
     pkg: tcl87
     rpm: tcl-devel
+    MacOS: tcl-tk
 
   tcpdump:
     default: tcpdump
@@ -2044,6 +2051,14 @@ mappings:
 
   texinfo:
     default: texinfo
+
+  python3-tomli:
+    default: python3-tomli
+    apk: py3-tomli
+    pkg: py39-tomli
+    MacOS:
+    Debian11:
+    Ubuntu2004:
 
   unzip:
     default: unzip
@@ -2136,6 +2151,9 @@ mappings:
     apk: libxml2-utils
     deb: libxml2-utils
 
+  xorriso:
+    default: xorriso
+
   xsltproc:
     default: libxslt
     deb: xsltproc
@@ -2171,11 +2189,6 @@ mappings:
     OpenSUSE: zlib-devel-static
     cross-policy-default: foreign
 
-  zstd:
-    default: zstd
-    deb: libzstd-dev
-    rpm: libzstd-devel
-
   zstdtools:
     default: zstd
 
@@ -2209,6 +2222,9 @@ pypi_mappings:
 
   python3-boto3:
     default: boto3
+
+  python3-build:
+    default: build
 
   # Several packages need devel header packages that are generally not
   # installed by Linux distros.  Restrict them to MacOS, which is where
@@ -2247,6 +2263,9 @@ pypi_mappings:
 
   python3-sphinx-rtd-theme:
     default: sphinx-rtd-theme
+
+  python3-tomli:
+    default: tomli
 
 
 # CPAN mappings work like PyPi mappings, the only difference being that

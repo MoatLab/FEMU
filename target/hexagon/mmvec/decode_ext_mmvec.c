@@ -1,5 +1,5 @@
 /*
- *  Copyright(c) 2019-2021 Qualcomm Innovation Center, Inc. All Rights Reserved.
+ *  Copyright(c) 2019-2023 Qualcomm Innovation Center, Inc. All Rights Reserved.
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -33,7 +33,6 @@ check_new_value(Packet *pkt)
     const char *dststr = NULL;
     uint16_t def_opcode;
     char letter;
-    int def_regnum;
 
     for (i = 1; i < pkt->num_insns; i++) {
         uint16_t use_opcode = pkt->insn[i].opcode;
@@ -78,7 +77,6 @@ check_new_value(Packet *pkt)
                 }
             }
             if ((dststr == NULL)  && GET_ATTRIB(def_opcode, A_CVI_GATHER)) {
-                def_regnum = 0;
                 pkt->insn[i].regno[use_regidx] = def_oreg;
                 pkt->insn[i].new_value_producer_slot = pkt->insn[def_idx].slot;
             } else {
@@ -86,7 +84,7 @@ check_new_value(Packet *pkt)
                     /* still not there, we have a bad packet */
                     g_assert_not_reached();
                 }
-                def_regnum = pkt->insn[def_idx].regno[dststr - reginfo];
+                int def_regnum = pkt->insn[def_idx].regno[dststr - reginfo];
                 /* Now patch up the consumer with the register number */
                 pkt->insn[i].regno[use_regidx] = def_regnum ^ def_oreg;
                 /* special case for (Vx,Vy) */
@@ -148,9 +146,9 @@ decode_shuffle_for_execution_vops(Packet *pkt)
     int i;
     for (i = 0; i < pkt->num_insns; i++) {
         uint16_t opcode = pkt->insn[i].opcode;
-        if (GET_ATTRIB(opcode, A_LOAD) &&
-            (GET_ATTRIB(opcode, A_CVI_NEW) ||
-             GET_ATTRIB(opcode, A_CVI_TMP))) {
+        if ((GET_ATTRIB(opcode, A_LOAD) &&
+             GET_ATTRIB(opcode, A_CVI_NEW)) ||
+            GET_ATTRIB(opcode, A_CVI_TMP)) {
             /*
              * Find prior consuming vector instructions
              * Move to end of packet

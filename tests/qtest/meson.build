@@ -1,14 +1,18 @@
 slow_qtests = {
-  'ahci-test' : 60,
-  'bios-tables-test' : 120,
-  'boot-serial-test' : 60,
-  'migration-test' : 150,
-  'npcm7xx_pwm-test': 150,
-  'prom-env-test' : 60,
-  'pxe-test' : 60,
-  'qos-test' : 60,
-  'qom-test' : 300,
-  'test-hmp' : 120,
+  'aspeed_smc-test': 360,
+  'bios-tables-test' : 610,
+  'cdrom-test' : 610,
+  'device-introspect-test' : 720,
+  'migration-test' : 480,
+  'npcm7xx_pwm-test': 300,
+  'npcm7xx_watchdog_timer-test': 120,
+  'qom-test' : 900,
+  'test-hmp' : 240,
+  'pxe-test': 610,
+  'prom-env-test': 360,
+  'boot-serial-test': 360,
+  'qos-test': 120,
+  'vmgenid-test': 610,
 }
 
 qtests_generic = [
@@ -23,7 +27,7 @@ qtests_generic = [
   'readconfig-test',
   'netdev-socket',
 ]
-if config_host.has_key('CONFIG_MODULES')
+if enable_modules
   qtests_generic += [ 'modules-test' ]
 endif
 
@@ -34,10 +38,12 @@ qtests_pci = \
 qtests_cxl = \
   (config_all_devices.has_key('CONFIG_CXL') ? ['cxl-test'] : [])
 
+# FIXME: Get rid of get_option('default_devices') here and check
+#        for the availability of the default NICs in the tests
 qtests_filter = \
-  (slirp.found() ? ['test-netfilter'] : []) + \
-  (config_host.has_key('CONFIG_POSIX') ? ['test-filter-mirror'] : []) + \
-  (config_host.has_key('CONFIG_POSIX') ? ['test-filter-redirector'] : [])
+  (get_option('default_devices') and slirp.found() ? ['test-netfilter'] : []) + \
+  (get_option('default_devices') and host_os != 'windows' ? ['test-filter-mirror'] : []) + \
+  (get_option('default_devices') and host_os != 'windows' ? ['test-filter-redirector'] : [])
 
 qtests_i386 = \
   (slirp.found() ? ['pxe-test'] : []) + \
@@ -46,8 +52,9 @@ qtests_i386 = \
   (config_all_devices.has_key('CONFIG_ISA_TESTDEV') ? ['endianness-test'] : []) +           \
   (config_all_devices.has_key('CONFIG_SGA') ? ['boot-serial-test'] : []) +                  \
   (config_all_devices.has_key('CONFIG_ISA_IPMI_KCS') ? ['ipmi-kcs-test'] : []) +            \
-  (config_host.has_key('CONFIG_LINUX') and                                                  \
-   config_all_devices.has_key('CONFIG_ISA_IPMI_BT') ? ['ipmi-bt-test'] : []) +              \
+  (host_os == 'linux' and                                                                  \
+   config_all_devices.has_key('CONFIG_ISA_IPMI_BT') and
+   config_all_devices.has_key('CONFIG_IPMI_EXTERN') ? ['ipmi-bt-test'] : []) +              \
   (config_all_devices.has_key('CONFIG_WDT_IB700') ? ['wdt_ib700-test'] : []) +              \
   (config_all_devices.has_key('CONFIG_PVPANIC_ISA') ? ['pvpanic-test'] : []) +              \
   (config_all_devices.has_key('CONFIG_PVPANIC_PCI') ? ['pvpanic-pci-test'] : []) +          \
@@ -71,7 +78,7 @@ qtests_i386 = \
   (config_all_devices.has_key('CONFIG_SB16') ? ['fuzz-sb16-test'] : []) +                   \
   (config_all_devices.has_key('CONFIG_SDHCI_PCI') ? ['fuzz-sdcard-test'] : []) +            \
   (config_all_devices.has_key('CONFIG_ESP_PCI') ? ['am53c974-test'] : []) +                 \
-  (config_host.has_key('CONFIG_POSIX') and                                                  \
+  (host_os != 'windows' and                                                                \
    config_all_devices.has_key('CONFIG_ACPI_ERST') ? ['erst-test'] : []) +                   \
   (config_all_devices.has_key('CONFIG_PCIE_PORT') and                                       \
    config_all_devices.has_key('CONFIG_VIRTIO_NET') and                                      \
@@ -101,7 +108,7 @@ qtests_i386 = \
    'numa-test'
   ]
 
-if dbus_display and targetos != 'windows'
+if dbus_display
   qtests_i386 += ['dbus-display-test']
 endif
 
@@ -152,14 +159,15 @@ qtests_ppc = \
   qtests_filter + \
   (config_all_devices.has_key('CONFIG_ISA_TESTDEV') ? ['endianness-test'] : []) +            \
   (config_all_devices.has_key('CONFIG_M48T59') ? ['m48t59-test'] : []) +                     \
-  (config_all_devices.has_key('CONFIG_TCG') ? ['prom-env-test'] : []) +                      \
-  (config_all_devices.has_key('CONFIG_TCG') ? ['boot-serial-test'] : []) +                   \
+  (config_all_accel.has_key('CONFIG_TCG') ? ['prom-env-test'] : []) +                              \
+  (config_all_accel.has_key('CONFIG_TCG') ? ['boot-serial-test'] : []) +                           \
   ['boot-order-test']
 
 qtests_ppc64 = \
   qtests_ppc + \
   (config_all_devices.has_key('CONFIG_PSERIES') ? ['device-plug-test'] : []) +               \
   (config_all_devices.has_key('CONFIG_POWERNV') ? ['pnv-xscom-test'] : []) +                 \
+  (config_all_devices.has_key('CONFIG_POWERNV') ? ['pnv-host-i2c-test'] : []) +              \
   (config_all_devices.has_key('CONFIG_PSERIES') ? ['rtas-test'] : []) +                      \
   (slirp.found() ? ['pxe-test'] : []) +              \
   (config_all_devices.has_key('CONFIG_USB_UHCI') ? ['usb-hcd-uhci-test'] : []) +             \
@@ -185,42 +193,55 @@ qtests_npcm7xx = \
    'npcm7xx_sdhci-test',
    'npcm7xx_smbus-test',
    'npcm7xx_timer-test',
-   'npcm7xx_watchdog_timer-test'] + \
+   'npcm7xx_watchdog_timer-test',
+   'npcm_gmac-test'] + \
    (slirp.found() ? ['npcm7xx_emc-test'] : [])
 qtests_aspeed = \
   ['aspeed_hace-test',
    'aspeed_smc-test',
    'aspeed_gpio-test']
+
+qtests_stm32l4x5 = \
+  ['stm32l4x5_exti-test',
+   'stm32l4x5_syscfg-test',
+   'stm32l4x5_rcc-test',
+   'stm32l4x5_gpio-test']
+
 qtests_arm = \
   (config_all_devices.has_key('CONFIG_MPS2') ? ['sse-timer-test'] : []) + \
   (config_all_devices.has_key('CONFIG_CMSDK_APB_DUALTIMER') ? ['cmsdk-apb-dualtimer-test'] : []) + \
   (config_all_devices.has_key('CONFIG_CMSDK_APB_TIMER') ? ['cmsdk-apb-timer-test'] : []) + \
   (config_all_devices.has_key('CONFIG_CMSDK_APB_WATCHDOG') ? ['cmsdk-apb-watchdog-test'] : []) + \
-  (config_all_devices.has_key('CONFIG_PFLASH_CFI02') ? ['pflash-cfi02-test'] : []) +         \
+  (config_all_devices.has_key('CONFIG_PFLASH_CFI02') and
+   config_all_devices.has_key('CONFIG_MUSICPAL') ? ['pflash-cfi02-test'] : []) + \
   (config_all_devices.has_key('CONFIG_ASPEED_SOC') ? qtests_aspeed : []) + \
   (config_all_devices.has_key('CONFIG_NPCM7XX') ? qtests_npcm7xx : []) + \
   (config_all_devices.has_key('CONFIG_GENERIC_LOADER') ? ['hexloader-test'] : []) + \
+  (config_all_devices.has_key('CONFIG_TPM_TIS_I2C') ? ['tpm-tis-i2c-test'] : []) + \
+  (config_all_devices.has_key('CONFIG_VEXPRESS') ? ['test-arm-mptimer'] : []) + \
+  (config_all_devices.has_key('CONFIG_MICROBIT') ? ['microbit-test'] : []) + \
+  (config_all_devices.has_key('CONFIG_STM32L4X5_SOC') ? qtests_stm32l4x5 : []) + \
+  (config_all_devices.has_key('CONFIG_FSI_APB2OPB_ASPEED') ? ['aspeed_fsi-test'] : []) + \
   ['arm-cpu-features',
-   'microbit-test',
-   'test-arm-mptimer',
    'boot-serial-test']
 
 # TODO: once aarch64 TCG is fixed on ARM 32 bit host, make bios-tables-test unconditional
 qtests_aarch64 = \
   (cpu != 'arm' and unpack_edk2_blobs ? ['bios-tables-test'] : []) +                            \
-  (config_all.has_key('CONFIG_TCG') and config_all_devices.has_key('CONFIG_TPM_TIS_SYSBUS') ?            \
+  (config_all_accel.has_key('CONFIG_TCG') and config_all_devices.has_key('CONFIG_TPM_TIS_SYSBUS') ?            \
     ['tpm-tis-device-test', 'tpm-tis-device-swtpm-test'] : []) +                                         \
   (config_all_devices.has_key('CONFIG_XLNX_ZYNQMP_ARM') ? ['xlnx-can-test', 'fuzz-xlnx-dp-test'] : []) + \
-  (config_all_devices.has_key('CONFIG_RASPI') ? ['bcm2835-dma-test'] : []) +  \
+  (config_all_devices.has_key('CONFIG_XLNX_VERSAL') ? ['xlnx-canfd-test', 'xlnx-versal-trng-test'] : []) + \
+  (config_all_devices.has_key('CONFIG_RASPI') ? ['bcm2835-dma-test', 'bcm2835-i2c-test'] : []) +  \
+  (config_all_accel.has_key('CONFIG_TCG') and                                            \
+   config_all_devices.has_key('CONFIG_TPM_TIS_I2C') ? ['tpm-tis-i2c-test'] : []) + \
   ['arm-cpu-features',
    'numa-test',
    'boot-serial-test',
    'migration-test']
 
 qtests_s390x = \
-  (slirp.found() ? ['pxe-test', 'test-netfilter'] : []) +                 \
-  (config_host.has_key('CONFIG_POSIX') ? ['test-filter-mirror'] : []) +                         \
-  (config_host.has_key('CONFIG_POSIX') ? ['test-filter-redirector'] : []) +                     \
+  qtests_filter + \
   ['boot-serial-test',
    'drive_del-test',
    'device-plug-test',
@@ -228,10 +249,14 @@ qtests_s390x = \
    'cpu-plug-test',
    'migration-test']
 
+qtests_riscv32 = \
+  (config_all_devices.has_key('CONFIG_SIFIVE_E_AON') ? ['sifive-e-aon-watchdog-test'] : [])
+
 qos_test_ss = ss.source_set()
 qos_test_ss.add(
   'ac97-test.c',
   'adm1272-test.c',
+  'adm1266-test.c',
   'ds1338-test.c',
   'e1000-test.c',
   'eepro100-test.c',
@@ -260,13 +285,14 @@ qos_test_ss.add(
   'virtio-iommu-test.c',
   'vmxnet3-test.c',
   'igb-test.c',
+  'ufs-test.c',
 )
 
 if config_all_devices.has_key('CONFIG_VIRTIO_SERIAL')
   qos_test_ss.add(files('virtio-serial-test.c'))
 endif
 
-if config_host.has_key('CONFIG_POSIX')
+if host_os != 'windows'
   qos_test_ss.add(files('e1000e-test.c'))
 endif
 if have_virtfs
@@ -299,19 +325,21 @@ qtests = {
   'ivshmem-test': [rt, '../../contrib/ivshmem-server/ivshmem-server.c'],
   'migration-test': migration_files,
   'pxe-test': files('boot-sector.c'),
-  'qos-test': [chardev, io, qos_test_ss.apply(config_host, strict: false).sources()],
+  'qos-test': [chardev, io, qos_test_ss.apply({}).sources()],
   'tpm-crb-swtpm-test': [io, tpmemu_files],
   'tpm-crb-test': [io, tpmemu_files],
   'tpm-tis-swtpm-test': [io, tpmemu_files, 'tpm-tis-util.c'],
   'tpm-tis-test': [io, tpmemu_files, 'tpm-tis-util.c'],
+  'tpm-tis-i2c-test': [io, tpmemu_files, 'qtest_aspeed.c'],
   'tpm-tis-device-swtpm-test': [io, tpmemu_files, 'tpm-tis-util.c'],
   'tpm-tis-device-test': [io, tpmemu_files, 'tpm-tis-util.c'],
+  'virtio-net-failover': files('migration-helpers.c'),
   'vmgenid-test': files('boot-sector.c', 'acpi-utils.c'),
   'netdev-socket': files('netdev-socket.c', '../unit/socket-helpers.c'),
 }
 
 if vnc.found()
-  gvnc = dependency('gvnc-1.0', required: false)
+  gvnc = dependency('gvnc-1.0', method: 'pkg-config', required: false)
   if gvnc.found()
     qtests += {'vnc-display-test': [gvnc]}
     qtests_generic += [ 'vnc-display-test' ]
@@ -319,7 +347,7 @@ if vnc.found()
 endif
 
 if dbus_display
-  qtests += {'dbus-display-test': [dbus_display1, gio]}
+  qtests += {'dbus-display-test': [dbus_display1_dep, gio]}
 endif
 
 qtest_executables = {}
@@ -345,6 +373,8 @@ foreach dir : target_dirs
     test_deps += [qsd]
   endif
 
+  qtest_env.set('PYTHON', python.full_path())
+
   foreach test : target_qtests
     # Executables are shared across targets, declare them only the first time we
     # encounter them
@@ -368,8 +398,8 @@ foreach dir : target_dirs
          env: qtest_env,
          args: ['--tap', '-k'],
          protocol: 'tap',
-         timeout: slow_qtests.get(test, 30),
-         priority: slow_qtests.get(test, 30),
+         timeout: slow_qtests.get(test, 60),
+         priority: slow_qtests.get(test, 60),
          suite: ['qtest', 'qtest-' + target_base])
   endforeach
 endforeach

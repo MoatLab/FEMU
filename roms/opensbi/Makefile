@@ -168,7 +168,7 @@ endif
 OPENSBI_LD_PIE := $(shell $(CC) $(CLANG_TARGET) $(RELAX_FLAG) $(USE_LD_FLAG) -fPIE -nostdlib -Wl,-pie -x c /dev/null -o /dev/null >/dev/null 2>&1 && echo y || echo n)
 
 # Check whether the compiler supports -m(no-)save-restore
-CC_SUPPORT_SAVE_RESTORE := $(shell $(CC) $(CLANG_TARGET) $(RELAX_FLAG) -nostdlib -mno-save-restore -x c /dev/null -o /dev/null 2>&1 | grep "\-save\-restore" >/dev/null && echo n || echo y)
+CC_SUPPORT_SAVE_RESTORE := $(shell $(CC) $(CLANG_TARGET) $(RELAX_FLAG) -nostdlib -mno-save-restore -x c /dev/null -o /dev/null 2>&1 | grep -e "-save-restore" >/dev/null && echo n || echo y)
 
 # Check whether the assembler and the compiler support the Zicsr and Zifencei extensions
 CC_SUPPORT_ZICSR_ZIFENCEI := $(shell $(CC) $(CLANG_TARGET) $(RELAX_FLAG) -nostdlib -march=rv$(OPENSBI_CC_XLEN)imafd_zicsr_zifencei -x c /dev/null -o /dev/null 2>&1 | grep "zicsr\|zifencei" > /dev/null && echo n || echo y)
@@ -254,6 +254,7 @@ deps-y=$(platform-objs-path-y:.o=.dep)
 deps-y+=$(libsbi-objs-path-y:.o=.dep)
 deps-y+=$(libsbiutils-objs-path-y:.o=.dep)
 deps-y+=$(firmware-objs-path-y:.o=.dep)
+deps-y+=$(firmware-elfs-path-y:=.dep)
 
 # Setup platform ABI, ISA and Code Model
 ifndef PLATFORM_RISCV_ABI
@@ -330,7 +331,12 @@ GENFLAGS	+=	$(libsbiutils-genflags-y)
 GENFLAGS	+=	$(platform-genflags-y)
 GENFLAGS	+=	$(firmware-genflags-y)
 
-CFLAGS		=	-g -Wall -Werror -ffreestanding -nostdlib -fno-stack-protector -fno-strict-aliasing -O2
+CFLAGS		=	-g -Wall -Werror -ffreestanding -nostdlib -fno-stack-protector -fno-strict-aliasing
+ifneq ($(DEBUG),)
+CFLAGS		+=	-O0
+else
+CFLAGS		+=	-O2
+endif
 CFLAGS		+=	-fno-omit-frame-pointer -fno-optimize-sibling-calls -mstrict-align
 # enable -m(no-)save-restore option by CC_SUPPORT_SAVE_RESTORE
 ifeq ($(CC_SUPPORT_SAVE_RESTORE),y)
@@ -369,7 +375,8 @@ ASFLAGS		+=	$(firmware-asflags-y)
 ARFLAGS		=	rcs
 
 ELFFLAGS	+=	$(USE_LD_FLAG)
-ELFFLAGS	+=	-Wl,--build-id=none -Wl,-N
+ELFFLAGS	+=	-Wl,--exclude-libs,ALL
+ELFFLAGS	+=	-Wl,--build-id=none
 ELFFLAGS	+=	$(platform-ldflags-y)
 ELFFLAGS	+=	$(firmware-ldflags-y)
 
@@ -395,10 +402,10 @@ merge_deps = $(CMD_PREFIX)mkdir -p `dirname $(1)`; \
 	     cat $(2) > $(1)
 copy_file =  $(CMD_PREFIX)mkdir -p `dirname $(1)`; \
 	     echo " COPY      $(subst $(build_dir)/,,$(1))"; \
-	     cp -f $(2) $(1)
+	     cp -L -f $(2) $(1)
 inst_file =  $(CMD_PREFIX)mkdir -p `dirname $(1)`; \
 	     echo " INSTALL   $(subst $(install_root_dir)/,,$(1))"; \
-	     cp -f $(2) $(1)
+	     cp -L -f $(2) $(1)
 inst_file_list = $(CMD_PREFIX)if [ ! -z "$(4)" ]; then \
 	     mkdir -p $(1)/$(3); \
 	     for file in $(4) ; do \
@@ -407,12 +414,17 @@ inst_file_list = $(CMD_PREFIX)if [ ! -z "$(4)" ]; then \
 	     dest_dir=`dirname $$dest_file`; \
 	     echo " INSTALL   "$(3)"/"`echo $$rel_file`; \
 	     mkdir -p $$dest_dir; \
-	     cp -f $$file $$dest_file; \
+	     cp -L -f $$file $$dest_file; \
 	     done \
 	     fi
 inst_header_dir =  $(CMD_PREFIX)mkdir -p $(1); \
 	     echo " INSTALL   $(subst $(install_root_dir)/,,$(1))"; \
-	     cp -rf $(2) $(1)
+	     cp -L -rf $(2) $(1)
+compile_cpp_dep = $(CMD_PREFIX)mkdir -p `dirname $(1)`; \
+	     echo " CPP-DEP   $(subst $(build_dir)/,,$(1))"; \
+	     printf %s `dirname $(1)`/  > $(1) && \
+	     $(CC) $(CPPFLAGS) -x c -MM $(3) \
+	       -MT `basename $(1:.dep=$(2))` >> $(1) || rm -f $(1)
 compile_cpp = $(CMD_PREFIX)mkdir -p `dirname $(1)`; \
 	     echo " CPP       $(subst $(build_dir)/,,$(1))"; \
 	     $(CPP) $(CPPFLAGS) -x c $(2) | grep -v "\#" > $(1)
@@ -542,6 +554,9 @@ $(platform_build_dir)/%.bin: $(platform_build_dir)/%.elf
 
 $(platform_build_dir)/%.elf: $(platform_build_dir)/%.o $(platform_build_dir)/%.elf.ld $(platform_build_dir)/lib/libplatsbi.a
 	$(call compile_elf,$@,$@.ld,$< $(platform_build_dir)/lib/libplatsbi.a)
+
+$(platform_build_dir)/%.dep: $(src_dir)/%.ldS $(KCONFIG_CONFIG)
+	$(call compile_cpp_dep,$@,.ld,$<)
 
 $(platform_build_dir)/%.ld: $(src_dir)/%.ldS
 	$(call compile_cpp,$@,$<)

@@ -1324,12 +1324,12 @@ static const VMStateDescription vmstate_sb16 = {
     .version_id = 1,
     .minimum_version_id = 1,
     .post_load = sb16_post_load,
-    .fields = (VMStateField[]) {
-        VMSTATE_UINT32 (irq, SB16State),
-        VMSTATE_UINT32 (dma, SB16State),
-        VMSTATE_UINT32 (hdma, SB16State),
-        VMSTATE_UINT32 (port, SB16State),
-        VMSTATE_UINT32 (ver, SB16State),
+    .fields = (const VMStateField[]) {
+        VMSTATE_UNUSED(  4 /* irq */
+                       + 4 /* dma */
+                       + 4 /* hdma */
+                       + 4 /* port */
+                       + 4 /* ver */),
         VMSTATE_INT32 (in_index, SB16State),
         VMSTATE_INT32 (out_data_len, SB16State),
         VMSTATE_INT32 (fmt_stereo, SB16State),
@@ -1402,6 +1402,10 @@ static void sb16_realizefn (DeviceState *dev, Error **errp)
     SB16State *s = SB16 (dev);
     IsaDmaClass *k;
 
+    if (!AUD_register_card ("sb16", &s->card, errp)) {
+        return;
+    }
+
     s->isa_hdma = isa_bus_get_dma(bus, s->hdma);
     s->isa_dma = isa_bus_get_dma(bus, s->dma);
     if (!s->isa_dma || !s->isa_hdma) {
@@ -1434,8 +1438,6 @@ static void sb16_realizefn (DeviceState *dev, Error **errp)
     k->register_channel(s->isa_dma, s->dma, SB_read_DMA, s);
 
     s->can_write = 1;
-
-    AUD_register_card ("sb16", &s->card);
 }
 
 static Property sb16_properties[] = {

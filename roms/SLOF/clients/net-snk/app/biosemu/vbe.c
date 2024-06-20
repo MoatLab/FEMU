@@ -154,7 +154,7 @@ vbe_info(vbe_info_t * info)
 	// offset 4: 16bit le containing VbeVersion
 	info->version = in16le(vbe_info_buffer + 4);
 
-	// offset 6: 32bit le containg segment:offset of OEM String in virtual Mem.
+	// offset 6: 32bit le containing segment:offset of OEM String in virtual Mem.
 	info->oem_string_ptr =
 	    biosmem + ((in16le(vbe_info_buffer + 8) << 4) +
 		       in16le(vbe_info_buffer + 6));
@@ -245,7 +245,7 @@ vbe_get_mode_info(vbe_mode_info_t * mode_info)
 	// offset 27: 8bit le memory model
 	mode_info->memory_model = *(mode_info->mode_info_block + 27);
 
-	// offset 40: 32bit le containg offset of frame buffer memory ptr
+	// offset 40: 32bit le containing offset of frame buffer memory ptr
 	mode_info->framebuffer_address =
 	    in32le(mode_info->mode_info_block + 40);
 

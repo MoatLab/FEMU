@@ -1239,6 +1239,8 @@ static void ohci_frame_boundary(void *opaque)
     /* Increment frame number and take care of endianness. */
     ohci->frame_number = (ohci->frame_number + 1) & 0xffff;
     hcca.frame = cpu_to_le16(ohci->frame_number);
+    /* When the HC updates frame number, set pad to 0. Ref OHCI Spec 4.4.1*/
+    hcca.pad = 0;
 
     if (ohci->done_count == 0 && !(ohci->intr_status & OHCI_INTR_WD)) {
         if (!ohci->done) {
@@ -1353,7 +1355,7 @@ static uint32_t ohci_get_frame_remaining(OHCIState *ohci)
     if ((ohci->ctl & OHCI_CTL_HCFS) != OHCI_USB_OPERATIONAL) {
         return ohci->frt << 31;
     }
-    /* Being in USB operational state guarnatees sof_time was set already. */
+    /* Being in USB operational state guarantees sof_time was set already. */
     tks = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - ohci->sof_time;
     if (tks < 0) {
         tks = 0;
@@ -1953,36 +1955,11 @@ void ohci_sysbus_die(struct OHCIState *ohci)
     ohci_bus_stop(ohci);
 }
 
-static void ohci_realize_pxa(DeviceState *dev, Error **errp)
-{
-    OHCISysBusState *s = SYSBUS_OHCI(dev);
-    SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
-    Error *err = NULL;
-
-    usb_ohci_init(&s->ohci, dev, s->num_ports, s->dma_offset,
-                  s->masterbus, s->firstport,
-                  &address_space_memory, ohci_sysbus_die, &err);
-    if (err) {
-        error_propagate(errp, err);
-        return;
-    }
-    sysbus_init_irq(sbd, &s->ohci.irq);
-    sysbus_init_mmio(sbd, &s->ohci.mem);
-}
-
-static void usb_ohci_reset_sysbus(DeviceState *dev)
-{
-    OHCISysBusState *s = SYSBUS_OHCI(dev);
-    OHCIState *ohci = &s->ohci;
-
-    ohci_hard_reset(ohci);
-}
-
 static const VMStateDescription vmstate_ohci_state_port = {
     .name = "ohci-core/port",
     .version_id = 1,
     .minimum_version_id = 1,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT32(ctrl, OHCIPort),
         VMSTATE_END_OF_LIST()
     },
@@ -2000,7 +1977,7 @@ static const VMStateDescription vmstate_ohci_eof_timer = {
     .version_id = 1,
     .minimum_version_id = 1,
     .needed = ohci_eof_timer_needed,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_TIMER_PTR(eof_timer, OHCIState),
         VMSTATE_END_OF_LIST()
     },
@@ -2010,7 +1987,7 @@ const VMStateDescription vmstate_ohci_state = {
     .name = "ohci-core",
     .version_id = 1,
     .minimum_version_id = 1,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_INT64(sof_time, OHCIState),
         VMSTATE_UINT32(ctl, OHCIState),
         VMSTATE_UINT32(status, OHCIState),
@@ -2047,41 +2024,8 @@ const VMStateDescription vmstate_ohci_state = {
         VMSTATE_BOOL(async_complete, OHCIState),
         VMSTATE_END_OF_LIST()
     },
-    .subsections = (const VMStateDescription*[]) {
+    .subsections = (const VMStateDescription * const []) {
         &vmstate_ohci_eof_timer,
         NULL
     }
 };
-
-static Property ohci_sysbus_properties[] = {
-    DEFINE_PROP_STRING("masterbus", OHCISysBusState, masterbus),
-    DEFINE_PROP_UINT32("num-ports", OHCISysBusState, num_ports, 3),
-    DEFINE_PROP_UINT32("firstport", OHCISysBusState, firstport, 0),
-    DEFINE_PROP_DMAADDR("dma-offset", OHCISysBusState, dma_offset, 0),
-    DEFINE_PROP_END_OF_LIST(),
-};
-
-static void ohci_sysbus_class_init(ObjectClass *klass, void *data)
-{
-    DeviceClass *dc = DEVICE_CLASS(klass);
-
-    dc->realize = ohci_realize_pxa;
-    set_bit(DEVICE_CATEGORY_USB, dc->categories);
-    dc->desc = "OHCI USB Controller";
-    device_class_set_props(dc, ohci_sysbus_properties);
-    dc->reset = usb_ohci_reset_sysbus;
-}
-
-static const TypeInfo ohci_sysbus_info = {
-    .name          = TYPE_SYSBUS_OHCI,
-    .parent        = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(OHCISysBusState),
-    .class_init    = ohci_sysbus_class_init,
-};
-
-static void ohci_register_types(void)
-{
-    type_register_static(&ohci_sysbus_info);
-}
-
-type_init(ohci_register_types)

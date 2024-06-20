@@ -28,6 +28,7 @@
 ################################################################################
 [Includes.common]
   Include                        # Root include for the package
+  Test/Mock/Include
 
 [LibraryClasses.common]
   PrePiLib|Include/Library/PrePiLib.h
@@ -165,6 +166,9 @@
 [PcdsFixedAtBuild.X64]
   gEmbeddedTokenSpaceGuid.PcdPrePiCpuIoSize|16|UINT8|0x00000011
 
+[PcdsFixedAtBuild.LOONGARCH64]
+  gEmbeddedTokenSpaceGuid.PcdPrePiCpuIoSize|16|UINT8|0x00000011
+
 [PcdsFixedAtBuild.common, PcdsDynamic.common]
   #
   # Value to add to a host address to obtain a device address, using
@@ -183,3 +187,8 @@
   # Selection between DT and ACPI as a default
   #
   gEmbeddedTokenSpaceGuid.PcdDefaultDtPref|TRUE|BOOLEAN|0x0000059
+
+  #
+  # Expected Overflow Android Kernel Command Line Characters
+  #
+  gEmbeddedTokenSpaceGuid.PcdAndroidKernelCommandLineOverflow|0|UINT32|0x000005C

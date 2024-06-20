@@ -12,17 +12,22 @@
 #include <sbi/sbi_hart.h>
 #include <sbi/sbi_platform.h>
 #include <sbi/sbi_scratch.h>
+#include <sbi/sbi_string.h>
+
+#define CONSOLE_TBUF_MAX 256
 
 static const struct sbi_console_device *console_dev = NULL;
+static char console_tbuf[CONSOLE_TBUF_MAX];
+static u32 console_tbuf_len;
 static spinlock_t console_out_lock	       = SPIN_LOCK_INITIALIZER;
 
 bool sbi_isprintable(char c)
 {
 	if (((31 < c) && (c < 127)) || (c == '\f') || (c == '\r') ||
 	    (c == '\n') || (c == '\t')) {
-		return TRUE;
+		return true;
 	}
-	return FALSE;
+	return false;
 }
 
 int sbi_getc(void)
@@ -32,23 +37,55 @@ int sbi_getc(void)
 	return -1;
 }
 
+static unsigned long nputs(const char *str, unsigned long len)
+{
+	unsigned long i;
+
+	if (console_dev) {
+		if (console_dev->console_puts)
+			return console_dev->console_puts(str, len);
+		else if (console_dev->console_putc) {
+			for (i = 0; i < len; i++) {
+				if (str[i] == '\n')
+					console_dev->console_putc('\r');
+				console_dev->console_putc(str[i]);
+			}
+		}
+	}
+	return len;
+}
+
+static void nputs_all(const char *str, unsigned long len)
+{
+	unsigned long p = 0;
+
+	while (p < len)
+		p += nputs(&str[p], len - p);
+}
+
 void sbi_putc(char ch)
 {
-	if (console_dev && console_dev->console_putc) {
-		if (ch == '\n')
-			console_dev->console_putc('\r');
-		console_dev->console_putc(ch);
-	}
+	nputs_all(&ch, 1);
 }
 
 void sbi_puts(const char *str)
 {
+	unsigned long len = sbi_strlen(str);
+
 	spin_lock(&console_out_lock);
-	while (*str) {
-		sbi_putc(*str);
-		str++;
-	}
+	nputs_all(str, len);
 	spin_unlock(&console_out_lock);
+}
+
+unsigned long sbi_nputs(const char *str, unsigned long len)
+{
+	unsigned long ret;
+
+	spin_lock(&console_out_lock);
+	ret = nputs(str, len);
+	spin_unlock(&console_out_lock);
+
+	return ret;
 }
 
 void sbi_gets(char *s, int maxwidth, char endchar)
@@ -64,9 +101,26 @@ void sbi_gets(char *s, int maxwidth, char endchar)
 	*retval = '\0';
 }
 
+unsigned long sbi_ngets(char *str, unsigned long len)
+{
+	int ch;
+	unsigned long i;
+
+	for (i = 0; i < len; i++) {
+		ch = sbi_getc();
+		if (ch < 0)
+			break;
+		str[i] = ch;
+	}
+
+	return i;
+}
+
 #define PAD_RIGHT 1
 #define PAD_ZERO 2
 #define PAD_ALTERNATE 4
+#define PAD_SIGN 8
+#define USE_TBUF 16
 #define PRINT_BUF_LEN 64
 
 #define va_start(v, l) __builtin_va_start((v), l)
@@ -74,7 +128,7 @@ void sbi_gets(char *s, int maxwidth, char endchar)
 #define va_arg __builtin_va_arg
 typedef __builtin_va_list va_list;
 
-static void printc(char **out, u32 *out_len, char ch)
+static void printc(char **out, u32 *out_len, char ch, int flags)
 {
 	if (!out) {
 		sbi_putc(ch);
@@ -88,60 +142,66 @@ static void printc(char **out, u32 *out_len, char ch)
 	if (!out_len || *out_len > 1) {
 		*(*out)++ = ch;
 		**out = '\0';
+		if (out_len) {
+			--(*out_len);
+			if ((flags & USE_TBUF) && *out_len == 1) {
+				nputs_all(console_tbuf, CONSOLE_TBUF_MAX - *out_len);
+				*out = console_tbuf;
+				*out_len = CONSOLE_TBUF_MAX;
+			}
+		}
 	}
-
-	if (out_len && *out_len > 0)
-		--(*out_len);
 }
 
 static int prints(char **out, u32 *out_len, const char *string, int width,
 		  int flags)
 {
-	int pc	     = 0;
-	char padchar = ' ';
-
-	if (width > 0) {
-		int len = 0;
-		const char *ptr;
-		for (ptr = string; *ptr; ++ptr)
-			++len;
-		if (len >= width)
-			width = 0;
-		else
-			width -= len;
-		if (flags & PAD_ZERO)
-			padchar = '0';
-	}
+	int pc = 0;
+	width -= sbi_strlen(string);
 	if (!(flags & PAD_RIGHT)) {
 		for (; width > 0; --width) {
-			printc(out, out_len, padchar);
+			printc(out, out_len, flags & PAD_ZERO ? '0' : ' ', flags);
 			++pc;
 		}
 	}
 	for (; *string; ++string) {
-		printc(out, out_len, *string);
+		printc(out, out_len, *string, flags);
 		++pc;
 	}
 	for (; width > 0; --width) {
-		printc(out, out_len, padchar);
+		printc(out, out_len, ' ', flags);
 		++pc;
 	}
 
 	return pc;
 }
 
-static int printi(char **out, u32 *out_len, long long i, int b, int sg,
-		  int width, int flags, int letbase)
+static int printi(char **out, u32 *out_len, long long i,
+		  int width, int flags, int type)
 {
-	char print_buf[PRINT_BUF_LEN];
-	char *s;
-	int neg = 0, pc = 0;
-	u64 t;
-	unsigned long long u = i;
+	int pc = 0;
+	char *s, sign = 0, letbase, print_buf[PRINT_BUF_LEN];
+	unsigned long long u, b, t;
 
-	if (sg && b == 10 && i < 0) {
-		neg = 1;
-		u   = -i;
+	b = 10;
+	letbase = 'a';
+	if (type == 'o')
+		b = 8;
+	else if (type == 'x' || type == 'X' || type == 'p' || type == 'P') {
+		b = 16;
+		letbase &= ~0x20;
+		letbase |= type & 0x20;
+	}
+
+	u = i;
+	sign = 0;
+	if (type == 'i' || type == 'd') {
+		if ((flags & PAD_SIGN) && i > 0)
+			sign = '+';
+		if (i < 0) {
+			sign = '-';
+			u = -i;
+		}
 	}
 
 	s  = print_buf + PRINT_BUF_LEN - 1;
@@ -159,23 +219,33 @@ static int printi(char **out, u32 *out_len, long long i, int b, int sg,
 		}
 	}
 
-	if (flags & PAD_ALTERNATE) {
-		if ((b == 16) && (letbase == 'A')) {
-			*--s = 'X';
-		} else if ((b == 16) && (letbase == 'a')) {
-			*--s = 'x';
-		}
-		*--s = '0';
-	}
-
-	if (neg) {
-		if (width && (flags & PAD_ZERO)) {
-			printc(out, out_len, '-');
+	if (flags & PAD_ZERO) {
+		if (sign) {
+			printc(out, out_len, sign, flags);
 			++pc;
 			--width;
-		} else {
-			*--s = '-';
 		}
+		if (i && (flags & PAD_ALTERNATE)) {
+			if (b == 16 || b == 8) {
+				printc(out, out_len, '0', flags);
+				++pc;
+				--width;
+			}
+			if (b == 16) {
+				printc(out, out_len, 'x' - 'a' + letbase, flags);
+				++pc;
+				--width;
+			}
+		}
+	} else {
+		if (i && (flags & PAD_ALTERNATE)) {
+			if (b == 16)
+				*--s = 'x' - 'a' + letbase;
+			if (b == 16 || b == 8)
+				*--s = '0';
+		}
+		if (sign)
+			*--s = sign;
 	}
 
 	return pc + prints(out, out_len, s, width, flags);
@@ -183,32 +253,68 @@ static int printi(char **out, u32 *out_len, long long i, int b, int sg,
 
 static int print(char **out, u32 *out_len, const char *format, va_list args)
 {
-	int width, flags;
-	int pc = 0;
-	char scr[2];
-	unsigned long long tmp;
+	bool flags_done;
+	int width, flags, pc = 0;
+	char type, scr[2], *tout;
+	bool use_tbuf = (!out) ? true : false;
+
+	/*
+	 * The console_tbuf is protected by console_out_lock and
+	 * print() is always called with console_out_lock held
+	 * when out == NULL.
+	 */
+	if (use_tbuf) {
+		console_tbuf_len = CONSOLE_TBUF_MAX;
+		tout = console_tbuf;
+		out = &tout;
+		out_len = &console_tbuf_len;
+	}
+
+	/* handle special case: *out_len == 1*/
+	if (out) {
+		if(!out_len || *out_len)
+			**out = '\0';
+	}
 
 	for (; *format != 0; ++format) {
+		width = flags = 0;
+		if (use_tbuf)
+			flags |= USE_TBUF;
 		if (*format == '%') {
 			++format;
-			width = flags = 0;
 			if (*format == '\0')
 				break;
 			if (*format == '%')
 				goto literal;
 			/* Get flags */
-			if (*format == '-') {
-				++format;
-				flags = PAD_RIGHT;
+			flags_done = false;
+			while (!flags_done) {
+				switch (*format) {
+				case '-':
+					flags |= PAD_RIGHT;
+					break;
+				case '+':
+					flags |= PAD_SIGN;
+					break;
+				case '#':
+					flags |= PAD_ALTERNATE;
+					break;
+				case '0':
+					flags |= PAD_ZERO;
+					break;
+				case ' ':
+				case '\'':
+					/* Ignored flags, do nothing */
+					break;
+				default:
+					flags_done = true;
+					break;
+				}
+				if (!flags_done)
+					++format;
 			}
-			if (*format == '#') {
-				++format;
-				flags |= PAD_ALTERNATE;
-			}
-			while (*format == '0') {
-				++format;
-				flags |= PAD_ZERO;
-			}
+			if (flags & PAD_RIGHT)
+				flags &= ~PAD_ZERO;
 			/* Get width */
 			for (; *format >= '0' && *format <= '9'; ++format) {
 				width *= 10;
@@ -222,83 +328,47 @@ static int print(char **out, u32 *out_len, const char *format, va_list args)
 			}
 			if ((*format == 'd') || (*format == 'i')) {
 				pc += printi(out, out_len, va_arg(args, int),
-					     10, 1, width, flags, '0');
+					     width, flags, *format);
 				continue;
 			}
-			if (*format == 'x') {
-				pc += printi(out, out_len,
-					     va_arg(args, unsigned int), 16, 0,
-					     width, flags, 'a');
+			if ((*format == 'u') || (*format == 'o')
+					 || (*format == 'x') || (*format == 'X')) {
+				pc += printi(out, out_len, va_arg(args, unsigned int),
+					     width, flags, *format);
 				continue;
 			}
-			if (*format == 'X') {
-				pc += printi(out, out_len,
-					     va_arg(args, unsigned int), 16, 0,
-					     width, flags, 'A');
+			if ((*format == 'p') || (*format == 'P')) {
+				pc += printi(out, out_len, (uintptr_t)va_arg(args, void*),
+					     width, flags, *format);
 				continue;
 			}
-			if (*format == 'u') {
-				pc += printi(out, out_len,
-					     va_arg(args, unsigned int), 10, 0,
-					     width, flags, 'a');
-				continue;
-			}
-			if (*format == 'p') {
-				pc += printi(out, out_len,
-					     va_arg(args, unsigned long), 16, 0,
-					     width, flags, 'a');
-				continue;
-			}
-			if (*format == 'P') {
-				pc += printi(out, out_len,
-					     va_arg(args, unsigned long), 16, 0,
-					     width, flags, 'A');
-				continue;
-			}
-			if (*format == 'l' && *(format + 1) == 'l') {
-				tmp = va_arg(args, unsigned long long);
-				if (*(format + 2) == 'u') {
-					format += 2;
-					pc += printi(out, out_len, tmp, 10, 0,
-						     width, flags, 'a');
-				} else if (*(format + 2) == 'x') {
-					format += 2;
-					pc += printi(out, out_len, tmp, 16, 0,
-						     width, flags, 'a');
-				} else if (*(format + 2) == 'X') {
-					format += 2;
-					pc += printi(out, out_len, tmp, 16, 0,
-						     width, flags, 'A');
-				} else {
-					format += 1;
-					pc += printi(out, out_len, tmp, 10, 1,
-						     width, flags, '0');
+			if (*format == 'l') {
+				type = 'i';
+				if (format[1] == 'l') {
+					++format;
+					if ((format[1] == 'u') || (format[1] == 'o')
+							|| (format[1] == 'd') || (format[1] == 'i')
+							|| (format[1] == 'x') || (format[1] == 'X')) {
+						++format;
+						type = *format;
+					}
+					pc += printi(out, out_len, va_arg(args, long long),
+						width, flags, type);
+					continue;
 				}
-				continue;
-			} else if (*format == 'l') {
-				if (*(format + 1) == 'u') {
-					format += 1;
-					pc += printi(
-						out, out_len,
-						va_arg(args, unsigned long), 10,
-						0, width, flags, 'a');
-				} else if (*(format + 1) == 'x') {
-					format += 1;
-					pc += printi(
-						out, out_len,
-						va_arg(args, unsigned long), 16,
-						0, width, flags, 'a');
-				} else if (*(format + 1) == 'X') {
-					format += 1;
-					pc += printi(
-						out, out_len,
-						va_arg(args, unsigned long), 16,
-						0, width, flags, 'A');
-				} else {
-					pc += printi(out, out_len,
-						     va_arg(args, long), 10, 1,
-						     width, flags, '0');
+				if ((format[1] == 'u') || (format[1] == 'o')
+						|| (format[1] == 'd') || (format[1] == 'i')
+						|| (format[1] == 'x') || (format[1] == 'X')) {
+					++format;
+					type = *format;
 				}
+				if ((type == 'd') || (type == 'i'))
+					pc += printi(out, out_len, va_arg(args, long),
+					     width, flags, type);
+				else
+					pc += printi(out, out_len, va_arg(args, unsigned long),
+					     width, flags, type);
+				continue;
 			}
 			if (*format == 'c') {
 				/* char are converted to int then pushed on the stack */
@@ -309,10 +379,13 @@ static int print(char **out, u32 *out_len, const char *format, va_list args)
 			}
 		} else {
 literal:
-			printc(out, out_len, *format);
+			printc(out, out_len, *format, flags);
 			++pc;
 		}
 	}
+
+	if (use_tbuf && console_tbuf_len < CONSOLE_TBUF_MAX)
+		nputs_all(console_tbuf, CONSOLE_TBUF_MAX - console_tbuf_len);
 
 	return pc;
 }
@@ -407,5 +480,11 @@ void sbi_console_set_device(const struct sbi_console_device *dev)
 
 int sbi_console_init(struct sbi_scratch *scratch)
 {
-	return sbi_platform_console_init(sbi_platform_ptr(scratch));
+	int rc = sbi_platform_console_init(sbi_platform_ptr(scratch));
+
+	/* console is not a necessary device */
+	if (rc == SBI_ENODEV)
+		return 0;
+
+	return rc;
 }

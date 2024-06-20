@@ -21,7 +21,7 @@
  *	01h	- checksum	( 1 byte)
  *	02h	- length	( 2 byte) value = 1st_byte*256 + 2nd_byte
  *	04h	- name		(12 byte)
- *	space for partiton header = 16 byte
+ *	space for partition header = 16 byte
  *
  *	Log Header
  *	10h	- offset	( 2 byte) from Partition Header to Data Section

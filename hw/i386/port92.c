@@ -10,6 +10,7 @@
 #include "sysemu/runstate.h"
 #include "migration/vmstate.h"
 #include "hw/irq.h"
+#include "hw/isa/isa.h"
 #include "hw/i386/pc.h"
 #include "trace.h"
 #include "qom/object.h"
@@ -54,7 +55,7 @@ static const VMStateDescription vmstate_port92_isa = {
     .name = "port92",
     .version_id = 1,
     .minimum_version_id = 1,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT8(outport, Port92State),
         VMSTATE_END_OF_LIST()
     }

@@ -138,6 +138,12 @@ static int ahci_command(struct ahci_port_s *port_gf, int iswrite, int isatapi,
             intbits = ahci_port_readl(ctrl, pnr, PORT_IRQ_STAT);
             if (intbits) {
                 ahci_port_writel(ctrl, pnr, PORT_IRQ_STAT, intbits);
+                if (intbits & 0x40000000) {
+                    u32 tf = ahci_port_readl(ctrl, pnr, PORT_TFDATA);
+                    status = tf & 0xff;
+                    error = (tf & 0xff00) >> 8;
+                    break;
+                }
                 if (intbits & 0x02) {
                     status = GET_LOWFLAT(fis->psfis[2]);
                     error  = GET_LOWFLAT(fis->psfis[3]);

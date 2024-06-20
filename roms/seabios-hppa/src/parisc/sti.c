@@ -34,7 +34,6 @@ static struct sti_glob_cfg_ext sti_glob_ext_cfg = {
 
 static struct sti_glob_cfg sti_glob_cfg = {
         .region_ptrs = { 0, ARTIST_FB_ADDR, 0xf8100000, 0xf8380000, 0, 0, 0, 0 },
-        .ext_ptr = (u32)&sti_glob_ext_cfg,
 };
 
 static struct sti_init_inptr_ext sti_init_inptr_ext = {
@@ -43,7 +42,6 @@ static struct sti_init_inptr_ext sti_init_inptr_ext = {
 
 static struct sti_init_inptr sti_init_inptr = {
         .text_planes = 3,
-        .ext_ptr = (u32)&sti_init_inptr_ext,
 };
 
 static struct sti_init_outptr sti_init_outptr = {
@@ -121,6 +119,8 @@ void sti_console_init(struct sti_rom *rom)
                     struct sti_glob_cfg *);
 
     sti_init = (void *)rom + rom->init_graph;
+    sti_glob_cfg.ext_ptr = (u32)&sti_glob_ext_cfg;
+    sti_init_inptr.ext_ptr = (u32)&sti_init_inptr_ext;
 
     sti_init(&sti_init_flags, &sti_init_inptr,
              &sti_init_outptr, &sti_glob_cfg);
@@ -130,7 +130,7 @@ void sti_console_init(struct sti_rom *rom)
 
 void sti_putc(const char c)
 {
-    struct sti_rom *rom = (struct sti_rom *)PAGE0->proc_sti;
+    struct sti_rom *rom = (struct sti_rom *) ROM_EXTEND(PAGE0->proc_sti);
     struct sti_rom_font *font = (void *)rom + rom->font_start;
     static int row, col;
 

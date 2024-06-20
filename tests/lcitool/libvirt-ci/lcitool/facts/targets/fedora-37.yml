@@ -2,6 +2,7 @@
 os:
   name: 'Fedora'
   version: '37'
+  libosinfo_id: 'http://fedoraproject.org/fedora/37'
 
 packaging:
   format: 'rpm'
@@ -21,6 +22,7 @@ ansible_python_package: python3
 ansible_python_interpreter: /usr/bin/python3
 
 install:
+  unattended_scheme: kickstart
   url: https://download.fedoraproject.org/pub/fedora/linux/releases/37/Everything/x86_64/os
 
 containers:

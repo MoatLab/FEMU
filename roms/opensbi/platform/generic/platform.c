@@ -10,9 +10,13 @@
 #include <libfdt.h>
 #include <platform_override.h>
 #include <sbi/riscv_asm.h>
+#include <sbi/sbi_bitops.h>
 #include <sbi/sbi_hartmask.h>
+#include <sbi/sbi_heap.h>
 #include <sbi/sbi_platform.h>
 #include <sbi/sbi_string.h>
+#include <sbi/sbi_system.h>
+#include <sbi/sbi_tlb.h>
 #include <sbi_utils/fdt/fdt_domain.h>
 #include <sbi_utils/fdt/fdt_fixup.h>
 #include <sbi_utils/fdt/fdt_helper.h>
@@ -53,6 +57,18 @@ static void fw_platform_lookup_special(void *fdt, int root_offset)
 	}
 }
 
+static u32 fw_platform_calculate_heap_size(u32 hart_count)
+{
+	u32 heap_size;
+
+	heap_size = SBI_PLATFORM_DEFAULT_HEAP_SIZE(hart_count);
+
+	/* For TLB fifo */
+	heap_size += SBI_TLB_INFO_SIZE * (hart_count) * (hart_count);
+
+	return BIT_ALIGN(heap_size, HEAP_BASE_ALIGN);
+}
+
 extern struct sbi_platform platform;
 static bool platform_has_mlevel_imsic = false;
 static u32 generic_hart_index2id[SBI_HARTMASK_MAX_BITS] = { 0 };
@@ -85,6 +101,9 @@ unsigned long fw_platform_init(unsigned long arg0, unsigned long arg1,
 
 	fw_platform_lookup_special(fdt, root_offset);
 
+	if (generic_plat && generic_plat->fw_init)
+		generic_plat->fw_init(fdt, generic_plat_match);
+
 	model = fdt_getprop(fdt, root_offset, "model", &len);
 	if (model)
 		sbi_strncpy(platform.name, model, sizeof(platform.name) - 1);
@@ -111,7 +130,7 @@ unsigned long fw_platform_init(unsigned long arg0, unsigned long arg1,
 	}
 
 	platform.hart_count = hart_count;
-
+	platform.heap_size = fw_platform_calculate_heap_size(hart_count);
 	platform_has_mlevel_imsic = fdt_check_imsic_mlevel(fdt);
 
 	/* Return original FDT pointer */
@@ -120,6 +139,14 @@ unsigned long fw_platform_init(unsigned long arg0, unsigned long arg1,
 fail:
 	while (1)
 		wfi();
+}
+
+static bool generic_cold_boot_allowed(u32 hartid)
+{
+	if (generic_plat && generic_plat->cold_boot_allowed)
+		return generic_plat->cold_boot_allowed(
+						hartid, generic_plat_match);
+	return true;
 }
 
 static int generic_nascent_init(void)
@@ -131,6 +158,9 @@ static int generic_nascent_init(void)
 
 static int generic_early_init(bool cold_boot)
 {
+	if (cold_boot)
+		fdt_reset_init();
+
 	if (!generic_plat || !generic_plat->early_init)
 		return 0;
 
@@ -141,9 +171,6 @@ static int generic_final_init(bool cold_boot)
 {
 	void *fdt;
 	int rc;
-
-	if (cold_boot)
-		fdt_reset_init();
 
 	if (generic_plat && generic_plat->final_init) {
 		rc = generic_plat->final_init(cold_boot, generic_plat_match);
@@ -169,27 +196,18 @@ static int generic_final_init(bool cold_boot)
 	return 0;
 }
 
-static int generic_vendor_ext_check(long extid)
+static bool generic_vendor_ext_check(void)
 {
-	if (generic_plat && generic_plat->vendor_ext_check)
-		return generic_plat->vendor_ext_check(extid,
-						      generic_plat_match);
-
-	return 0;
+	return (generic_plat && generic_plat->vendor_ext_provider) ?
+		true : false;
 }
 
-static int generic_vendor_ext_provider(long extid, long funcid,
-				       const struct sbi_trap_regs *regs,
-				       unsigned long *out_value,
-				       struct sbi_trap_info *out_trap)
+static int generic_vendor_ext_provider(long funcid,
+				       struct sbi_trap_regs *regs,
+				       struct sbi_ecall_return *out)
 {
-	if (generic_plat && generic_plat->vendor_ext_provider) {
-		return generic_plat->vendor_ext_provider(extid, funcid, regs,
-							 out_value, out_trap,
-							 generic_plat_match);
-	}
-
-	return SBI_ENOTSUPP;
+	return generic_plat->vendor_ext_provider(funcid, regs, out,
+						 generic_plat_match);
 }
 
 static void generic_early_exit(void)
@@ -206,6 +224,15 @@ static void generic_final_exit(void)
 
 static int generic_extensions_init(struct sbi_hart_features *hfeatures)
 {
+	int rc;
+
+	/* Parse the ISA string from FDT and enable the listed extensions */
+	rc = fdt_parse_isa_extensions(fdt_get_address(), current_hartid(),
+				      hfeatures->extensions);
+
+	if (rc)
+		return rc;
+
 	if (generic_plat && generic_plat->extensions_init)
 		return generic_plat->extensions_init(generic_plat_match,
 						     hfeatures);
@@ -215,7 +242,24 @@ static int generic_extensions_init(struct sbi_hart_features *hfeatures)
 
 static int generic_domains_init(void)
 {
-	return fdt_domains_populate(fdt_get_address());
+	void *fdt = fdt_get_address();
+	int offset, ret;
+
+	ret = fdt_domains_populate(fdt);
+	if (ret < 0)
+		return ret;
+
+	offset = fdt_path_offset(fdt, "/chosen");
+
+	if (offset >= 0) {
+		offset = fdt_node_offset_by_compatible(fdt, offset,
+						       "opensbi,domain,config");
+		if (offset >= 0 &&
+		    fdt_get_property(fdt, offset, "system-suspend-test", NULL))
+			sbi_system_suspend_test_enable();
+	}
+
+	return 0;
 }
 
 static u64 generic_tlbr_flush_limit(void)
@@ -225,9 +269,28 @@ static u64 generic_tlbr_flush_limit(void)
 	return SBI_PLATFORM_TLB_RANGE_FLUSH_LIMIT_DEFAULT;
 }
 
+static u32 generic_tlb_num_entries(void)
+{
+	if (generic_plat && generic_plat->tlb_num_entries)
+		return generic_plat->tlb_num_entries(generic_plat_match);
+	return sbi_scratch_last_hartindex() + 1;
+}
+
 static int generic_pmu_init(void)
 {
-	return fdt_pmu_setup(fdt_get_address());
+	int rc;
+
+	if (generic_plat && generic_plat->pmu_init) {
+		rc = generic_plat->pmu_init(generic_plat_match);
+		if (rc)
+			return rc;
+	}
+
+	rc = fdt_pmu_setup(fdt_get_address());
+	if (rc && rc != SBI_ENOENT)
+		return rc;
+
+	return 0;
 }
 
 static uint64_t generic_pmu_xlate_to_mhpmevent(uint32_t event_idx,
@@ -261,6 +324,7 @@ static int generic_console_init(void)
 }
 
 const struct sbi_platform_operations platform_ops = {
+	.cold_boot_allowed	= generic_cold_boot_allowed,
 	.nascent_init		= generic_nascent_init,
 	.early_init		= generic_early_init,
 	.final_init		= generic_final_init,
@@ -276,6 +340,7 @@ const struct sbi_platform_operations platform_ops = {
 	.pmu_init		= generic_pmu_init,
 	.pmu_xlate_to_mhpmevent = generic_pmu_xlate_to_mhpmevent,
 	.get_tlbr_flush_limit	= generic_tlbr_flush_limit,
+	.get_tlb_num_entries	= generic_tlb_num_entries,
 	.timer_init		= fdt_timer_init,
 	.timer_exit		= fdt_timer_exit,
 	.vendor_ext_check	= generic_vendor_ext_check,
@@ -292,5 +357,6 @@ struct sbi_platform platform = {
 	.hart_count		= SBI_HARTMASK_MAX_BITS,
 	.hart_index2id		= generic_hart_index2id,
 	.hart_stack_size	= SBI_PLATFORM_DEFAULT_HART_STACK_SIZE,
+	.heap_size		= SBI_PLATFORM_DEFAULT_HEAP_SIZE(0),
 	.platform_ops_addr	= (unsigned long)&platform_ops
 };

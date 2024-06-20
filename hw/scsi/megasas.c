@@ -42,6 +42,7 @@
 #define MEGASAS_MAX_FRAMES 2048         /* Firmware limit at 65535 */
 #define MEGASAS_DEFAULT_FRAMES 1000     /* Windows requires this */
 #define MEGASAS_GEN2_DEFAULT_FRAMES 1008     /* Windows requires this */
+#define MEGASAS_MIN_SGE 64
 #define MEGASAS_MAX_SGE 128             /* Firmware limit */
 #define MEGASAS_DEFAULT_SGE 80
 #define MEGASAS_MAX_SECTORS 0xFFFF      /* No real limit */
@@ -2298,7 +2299,7 @@ static const VMStateDescription vmstate_megasas_gen1 = {
     .name = "megasas",
     .version_id = 0,
     .minimum_version_id = 0,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_PCI_DEVICE(parent_obj, MegasasState),
         VMSTATE_MSIX(parent_obj, MegasasState),
 
@@ -2316,7 +2317,7 @@ static const VMStateDescription vmstate_megasas_gen2 = {
     .name = "megasas-gen2",
     .version_id = 0,
     .minimum_version_id = 0,
-    .fields      = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_PCI_DEVICE(parent_obj, MegasasState),
         VMSTATE_MSIX(parent_obj, MegasasState),
 
@@ -2356,6 +2357,7 @@ static void megasas_scsi_realize(PCIDevice *dev, Error **errp)
     MegasasState *s = MEGASAS(dev);
     MegasasBaseClass *b = MEGASAS_GET_CLASS(s);
     uint8_t *pci_conf;
+    uint32_t sge;
     int i, bar_type;
     Error *err = NULL;
     int ret;
@@ -2424,13 +2426,15 @@ static void megasas_scsi_realize(PCIDevice *dev, Error **errp)
     if (!s->hba_serial) {
         s->hba_serial = g_strdup(MEGASAS_HBA_SERIAL);
     }
-    if (s->fw_sge >= MEGASAS_MAX_SGE - MFI_PASS_FRAME_SIZE) {
-        s->fw_sge = MEGASAS_MAX_SGE - MFI_PASS_FRAME_SIZE;
-    } else if (s->fw_sge >= 128 - MFI_PASS_FRAME_SIZE) {
-        s->fw_sge = 128 - MFI_PASS_FRAME_SIZE;
-    } else {
-        s->fw_sge = 64 - MFI_PASS_FRAME_SIZE;
+
+    sge = s->fw_sge + MFI_PASS_FRAME_SIZE;
+    if (sge < MEGASAS_MIN_SGE) {
+        sge = MEGASAS_MIN_SGE;
+    } else if (sge >= MEGASAS_MAX_SGE) {
+        sge = MEGASAS_MAX_SGE;
     }
+    s->fw_sge = sge - MFI_PASS_FRAME_SIZE;
+
     if (s->fw_cmds > MEGASAS_MAX_FRAMES) {
         s->fw_cmds = MEGASAS_MAX_FRAMES;
     }

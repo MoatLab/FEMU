@@ -3,9 +3,11 @@
 *.swp
 __pycache__/
 *.py[cod]
+build/
 dist/
 eggs/
 .eggs/
 sdist/
 *.egg-info/
 *.egg
+.tox

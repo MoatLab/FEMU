@@ -17,7 +17,7 @@
 uint64_t ui64Generator1;
 
 /**
- * calculate standart ethernet 32 bit CRC
+ * calculate standard ethernet 32 bit CRC
  * generator polynome is 0x104C11DB7
  * this algorithm can be used for encoding and decoding
  */
@@ -205,7 +205,7 @@ calCRCword(unsigned char *cPtr, uint32_t ui32NoWords, uint64_t AccumCRC)
 	createCRCParameter(&ui64Mask, &uiRegisterLength);
 
 	if ((ui32NoWords % 2) != 0) {
-		/* if Data string does not end at word boundery add one byte */
+		/* if Data string does not end at word boundary add one byte */
 		ui32NoWords++;
 		cPtr[ui32NoWords] = 0;
 	}

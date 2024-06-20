@@ -12,10 +12,9 @@
 #include "hw/hotplug.h"
 #include "qom/object.h"
 #include "hw/i386/sgx-epc.h"
-#include "hw/firmware/smbios.h"
 #include "hw/cxl/cxl.h"
 
-#define HPET_INTCAP "hpet-intcap"
+#define MAX_IDE_BUS 2
 
 /**
  * PCMachineState:
@@ -32,16 +31,18 @@ typedef struct PCMachineState {
     Notifier machine_done;
 
     /* Pointers to devices and objects: */
-    PCIBus *bus;
+    PCIBus *pcibus;
     I2CBus *smbus;
     PFlashCFI01 *flash[2];
     ISADevice *pcspk;
     DeviceState *iommu;
+    BusState *idebus[MAX_IDE_BUS];
 
     /* Configuration options: */
     uint64_t max_ram_below_4g;
     OnOffAuto vmport;
     SmbiosEntryPointType smbios_entry_point_type;
+    const char *south_bridge;
 
     bool acpi_build_enabled;
     bool smbus_enabled;
@@ -49,6 +50,7 @@ typedef struct PCMachineState {
     bool hpet_enabled;
     bool i8042_enabled;
     bool default_bus_bypass_iommu;
+    bool fd_bootchk;
     uint64_t max_fw_size;
 
     /* ACPI Memory hotplug IO base address */
@@ -60,7 +62,6 @@ typedef struct PCMachineState {
 
 #define PC_MACHINE_ACPI_DEVICE_PROP "acpi-device"
 #define PC_MACHINE_MAX_RAM_BELOW_4G "max-ram-below-4g"
-#define PC_MACHINE_DEVMEM_REGION_SIZE "device-memory-region-size"
 #define PC_MACHINE_VMPORT           "vmport"
 #define PC_MACHINE_SMBUS            "smbus"
 #define PC_MACHINE_SATA             "sata"
@@ -92,8 +93,7 @@ struct PCMachineClass {
 
     /* Device configuration: */
     bool pci_enabled;
-    bool kvmclock_enabled;
-    const char *default_nic_model;
+    const char *default_south_bridge;
 
     /* Compat options: */
 
@@ -111,6 +111,7 @@ struct PCMachineClass {
     bool smbios_defaults;
     bool smbios_legacy_mode;
     bool smbios_uuid_encoded;
+    SmbiosEntryPointType default_smbios_ep_type;
 
     /* RAM / address space compat: */
     bool gigabyte_align;
@@ -127,6 +128,15 @@ struct PCMachineClass {
 
     /* create kvmclock device even when KVM PV features are not exposed */
     bool kvmclock_create_always;
+
+    /* resizable acpi blob compat */
+    bool resizable_acpi_blob;
+
+    /*
+     * whether the machine type implements broken 32-bit address space bound
+     * check for memory.
+     */
+    bool broken_32bit_mem_addr_check;
 };
 
 #define TYPE_PC_MACHINE "generic-pc-machine"
@@ -137,12 +147,13 @@ OBJECT_DECLARE_TYPE(PCMachineState, PCMachineClass, PC_MACHINE)
 GSIState *pc_gsi_create(qemu_irq **irqs, bool pci_enabled);
 
 /* pc.c */
-extern int fd_bootchk;
 
 void pc_acpi_smi_interrupt(void *opaque, int irq, int level);
 
-void pc_guest_info_init(PCMachineState *pcms);
-
+#define PCI_HOST_PROP_RAM_MEM          "ram-mem"
+#define PCI_HOST_PROP_PCI_MEM          "pci-mem"
+#define PCI_HOST_PROP_SYSTEM_MEM       "system-mem"
+#define PCI_HOST_PROP_IO_MEM           "io-mem"
 #define PCI_HOST_PROP_PCI_HOLE_START   "pci-hole-start"
 #define PCI_HOST_PROP_PCI_HOLE_END     "pci-hole-end"
 #define PCI_HOST_PROP_PCI_HOLE64_START "pci-hole64-start"
@@ -159,18 +170,14 @@ void xen_load_linux(PCMachineState *pcms);
 void pc_memory_init(PCMachineState *pcms,
                     MemoryRegion *system_memory,
                     MemoryRegion *rom_memory,
-                    MemoryRegion **ram_memory,
                     uint64_t pci_hole64_size);
 uint64_t pc_pci_hole64_start(void);
 DeviceState *pc_vga_init(ISABus *isa_bus, PCIBus *pci_bus);
 void pc_basic_device_init(struct PCMachineState *pcms,
                           ISABus *isa_bus, qemu_irq *gsi,
-                          ISADevice **rtc_state,
+                          ISADevice *rtc_state,
                           bool create_fdctrl,
                           uint32_t hpet_irqs);
-void pc_cmos_init(PCMachineState *pcms,
-                  BusState *ide0, BusState *ide1,
-                  ISADevice *s);
 void pc_nic_init(PCMachineClass *pcmc, ISABus *isa_bus, PCIBus *pci_bus);
 
 void pc_i8259_create(ISABus *isa_bus, qemu_irq *i8259_irqs);
@@ -188,12 +195,17 @@ bool pc_system_ovmf_table_find(const char *entry, uint8_t **data,
                                int *data_len);
 void pc_system_parse_ovmf_flash(uint8_t *flash_ptr, size_t flash_size);
 
-/* hw/i386/acpi-common.c */
-void pc_madt_cpu_entry(int uid, const CPUArchIdList *apic_ids,
-                       GArray *entry, bool force_enabled);
-
 /* sgx.c */
 void pc_machine_init_sgx_epc(PCMachineState *pcms);
+
+extern GlobalProperty pc_compat_8_2[];
+extern const size_t pc_compat_8_2_len;
+
+extern GlobalProperty pc_compat_8_1[];
+extern const size_t pc_compat_8_1_len;
+
+extern GlobalProperty pc_compat_8_0[];
+extern const size_t pc_compat_8_0_len;
 
 extern GlobalProperty pc_compat_7_2[];
 extern const size_t pc_compat_7_2_len;
@@ -276,27 +288,12 @@ extern const size_t pc_compat_2_1_len;
 extern GlobalProperty pc_compat_2_0[];
 extern const size_t pc_compat_2_0_len;
 
-extern GlobalProperty pc_compat_1_7[];
-extern const size_t pc_compat_1_7_len;
-
-extern GlobalProperty pc_compat_1_6[];
-extern const size_t pc_compat_1_6_len;
-
-extern GlobalProperty pc_compat_1_5[];
-extern const size_t pc_compat_1_5_len;
-
-extern GlobalProperty pc_compat_1_4[];
-extern const size_t pc_compat_1_4_len;
-
-int pc_machine_kvm_type(MachineState *machine, const char *vm_type);
-
 #define DEFINE_PC_MACHINE(suffix, namestr, initfn, optsfn) \
     static void pc_machine_##suffix##_class_init(ObjectClass *oc, void *data) \
     { \
         MachineClass *mc = MACHINE_CLASS(oc); \
         optsfn(mc); \
         mc->init = initfn; \
-        mc->kvm_type = pc_machine_kvm_type; \
     } \
     static const TypeInfo pc_machine_type_##suffix = { \
         .name       = namestr TYPE_MACHINE_SUFFIX, \

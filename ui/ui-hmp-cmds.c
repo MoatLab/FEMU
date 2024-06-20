@@ -437,6 +437,7 @@ void sendkey_completion(ReadLineState *rs, int nb_args, const char *str)
     }
 }
 
+#ifdef CONFIG_PIXMAN
 void coroutine_fn
 hmp_screendump(Monitor *mon, const QDict *qdict)
 {
@@ -456,5 +457,23 @@ hmp_screendump(Monitor *mon, const QDict *qdict)
     qmp_screendump(filename, id, id != NULL, head,
                    input_format != NULL, format, &err);
 end:
+    hmp_handle_error(mon, err);
+}
+#endif
+
+void hmp_client_migrate_info(Monitor *mon, const QDict *qdict)
+{
+    Error *err = NULL;
+    const char *protocol = qdict_get_str(qdict, "protocol");
+    const char *hostname = qdict_get_str(qdict, "hostname");
+    bool has_port        = qdict_haskey(qdict, "port");
+    int port             = qdict_get_try_int(qdict, "port", -1);
+    bool has_tls_port    = qdict_haskey(qdict, "tls-port");
+    int tls_port         = qdict_get_try_int(qdict, "tls-port", -1);
+    const char *cert_subject = qdict_get_try_str(qdict, "cert-subject");
+
+    qmp_client_migrate_info(protocol, hostname,
+                            has_port, port, has_tls_port, tls_port,
+                            cert_subject, &err);
     hmp_handle_error(mon, err);
 }

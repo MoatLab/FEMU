@@ -207,13 +207,8 @@
 
 #define MHPMEVENT_SSCOF_MASK		_ULL(0xFFFF000000000000)
 
-#if __riscv_xlen > 32
 #define ENVCFG_STCE			(_ULL(1) << 63)
 #define ENVCFG_PBMTE			(_ULL(1) << 62)
-#else
-#define ENVCFGH_STCE			(_UL(1) << 31)
-#define ENVCFGH_PBMTE			(_UL(1) << 30)
-#endif
 #define ENVCFG_CBZE			(_UL(1) << 7)
 #define ENVCFG_CBCFE			(_UL(1) << 6)
 #define ENVCFG_CBIE_SHIFT		4
@@ -430,6 +425,7 @@
 #define CSR_MARCHID			0xf12
 #define CSR_MIMPID			0xf13
 #define CSR_MHARTID			0xf14
+#define CSR_MCONFIGPTR			0xf15
 
 /* Machine Trap Setup */
 #define CSR_MSTATUS			0x300
@@ -602,6 +598,8 @@
 
 /* Machine Counter Setup */
 #define CSR_MCOUNTINHIBIT		0x320
+#define CSR_MCYCLECFG			0x321
+#define CSR_MINSTRETCFG			0x322
 #define CSR_MHPMEVENT3			0x323
 #define CSR_MHPMEVENT4			0x324
 #define CSR_MHPMEVENT5			0x325
@@ -633,6 +631,8 @@
 #define CSR_MHPMEVENT31			0x33f
 
 /* For RV32 */
+#define CSR_MCYCLECFGH			0x721
+#define CSR_MINSTRETCFGH		0x722
 #define CSR_MHPMEVENT3H			0x723
 #define CSR_MHPMEVENT4H			0x724
 #define CSR_MHPMEVENT5H			0x725
@@ -662,6 +662,21 @@
 #define CSR_MHPMEVENT29H		0x73d
 #define CSR_MHPMEVENT30H		0x73e
 #define CSR_MHPMEVENT31H		0x73f
+
+/* Machine Security Configuration CSR (mseccfg) */
+#define CSR_MSECCFG			0x747
+#define CSR_MSECCFGH			0x757
+
+#define MSECCFG_MML_SHIFT		(0)
+#define MSECCFG_MML			(_UL(1) << MSECCFG_MML_SHIFT)
+#define MSECCFG_MMWP_SHIFT		(1)
+#define MSECCFG_MMWP			(_UL(1) << MSECCFG_MMWP_SHIFT)
+#define MSECCFG_RLB_SHIFT		(2)
+#define MSECCFG_RLB			(_UL(1) << MSECCFG_RLB_SHIFT)
+#define MSECCFG_USEED_SHIFT		(8)
+#define MSECCFG_USEED			(_UL(1) << MSECCFG_USEED_SHIFT)
+#define MSECCFG_SSEED_SHIFT		(9)
+#define MSECCFG_SSEED			(_UL(1) << MSECCFG_SSEED_SHIFT)
 
 /* Counter Overflow CSR */
 #define CSR_SCOUNTOVF			0xda0
@@ -736,6 +751,8 @@
 #define SMSTATEEN0_CS			(_ULL(1) << SMSTATEEN0_CS_SHIFT)
 #define SMSTATEEN0_FCSR_SHIFT		1
 #define SMSTATEEN0_FCSR			(_ULL(1) << SMSTATEEN0_FCSR_SHIFT)
+#define SMSTATEEN0_CONTEXT_SHIFT	57
+#define SMSTATEEN0_CONTEXT		(_ULL(1) << SMSTATEEN0_CONTEXT_SHIFT)
 #define SMSTATEEN0_IMSIC_SHIFT		58
 #define SMSTATEEN0_IMSIC		(_ULL(1) << SMSTATEEN0_IMSIC_SHIFT)
 #define SMSTATEEN0_AIA_SHIFT		59

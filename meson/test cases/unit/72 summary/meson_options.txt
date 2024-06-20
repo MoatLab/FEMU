@@ -1,1 +1,0 @@
-option('enabled_opt', type: 'feature', value: 'auto')

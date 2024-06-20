@@ -160,34 +160,18 @@ class AnsibleWrapper():
                   Ansible execution
         """
 
-        runner_config = ansible_runner.RunnerConfig(**params)
-        runner_config.prepare()
-        cmd = runner_config.generate_ansible_command()
-
         try:
-            log.debug(f"Running the Ansible runner cmd='{cmd}'")
+            runner = ansible_runner.interface.init_runner(**params)
+            cmd = runner.config.generate_ansible_command()
 
-            runner = ansible_runner.Runner(runner_config, **kwargs)
+            log.debug(f"Running the Ansible runner cmd='{cmd}'")
             runner.run()
         except ansible_runner.exceptions.AnsibleRunnerException as e:
-            raise ExecutionError(e)
+            raise ExecutionError(str(e))
 
         if runner.status != "successful":
-
-            message = f"Failed to execute Ansible command '{cmd}'"
-
-            if params.get("quiet", False):
-                # Ansible runner 1.4.6-X does not expose the stderr property, so we
-                # need to fallback to stdout instead
-                # TODO: We'll be able to drop this code once ansible-runner 2.0 is
-                # widely available
-                if getattr(runner, "stderr", None) is not None:
-                    error = runner.stderr.read()
-                else:
-                    error = runner.stdout.read()
-
-                message = f"{message}: {error}"
-
+            error = runner.stderr.read()
+            message = f"Failed to execute Ansible command '{cmd}': {error}"
             raise ExecutionError(message)
 
         return runner
@@ -199,46 +183,43 @@ class AnsibleWrapper():
         :returns: a dictionary corresponding to the Ansible YAML format.
         """
 
-        ansible_event_handler_data = []
-
-        # NOTE: this is nasty hack! We have no way of verifying dynamic
-        # Ansible inventories provided by users and thus no way of telling
-        # whether their hosts are not named the same way as our target OS
-        # groups. Ansible doesn't like that and emits a warning about it which
-        # can neither be ignored nor disabled. We also have no way of parsing
-        # user's inventory rather than with Ansible's help (as long as we don't
-        # intend to run user scripts ourselves), so we have to ask
-        # ansible-inventory to take all the sources and dump a YAML-formatted
-        # inventory for us from which we can extract the list of hosts.
-        # The problem is that since we're consuming directly the stdout of the
-        # Ansible inventory process it can be potentially polluted with
-        # [WARNING] messages which would make it impossible for the yaml
-        # library to parse the data. So, we'll hook up an event handler to
-        # Ansible runner which will filter out the warnings for us as the
-        # output is produced and we're left out with a list of strings
-        # comprising the stdout data - profit!
-        def ansible_event_handler(event):
-            if "[WARNING]" in event["stdout"]:
-                return
-
-            ansible_event_handler_data.append(event["stdout"])
-
+        inventory_path = Path(self._private_data_dir, "inventory").as_posix()
+        query_inventory = ansible_runner.interface.get_inventory
         params = self._get_default_params()
-        params["binary"] = "ansible-inventory"
-        params["cmdline"] = "--list --yaml"
 
         # we don't want any Ansible console output for the inventory
         params["quiet"] = True
 
-        self._run(params, event_handler=ansible_event_handler)
-
-        ansible_inventory = '\n'.join(ansible_event_handler_data)
+        # NOTE: We have no way of verifying dynamic Ansible inventories
+        # provided by users and thus no way of telling whether their hosts are
+        # not named the same way as our target OS groups. Ansible doesn't like
+        # that and emits a warning about it which can neither be ignored nor
+        # disabled. We also have no way of parsing user's inventory rather than
+        # with Ansible's help (as long as we don't intend to run user scripts
+        # ourselves), so we have to ask ansible-inventory to take all the
+        # sources and dump a YAML-formatted inventory for us from which we can
+        # extract the list of hosts.
+        # There are other types of warnings, like deprecation warnings Ansible
+        # produces. All of these along with genuine errors will be returned
+        # in a tuple from the function below. We don't care about the warnings
+        # and if there was a genuine error, the returned inventory will either
+        # be empty or malformed. Either way, we have no way of knowing until
+        # we try to parse the returned inventory, so we'll just let the YAML
+        # parser fail and hopefully it'll have more details for us.
+        try:
+            inventory, _ = query_inventory(action="list",
+                                           inventories=[inventory_path],
+                                           response_format="yaml",
+                                           **params)
+        except ansible_runner.exceptions.AnsibleRunnerException as ex:
+            raise ExecutionError(f"ansible-runner failed: {ex}")
 
         try:
-            return yaml.safe_load(ansible_inventory)
+            return yaml.safe_load(inventory)
         except Exception as ex:
             raise AnsibleWrapperError(
-                f"ansible-inventory didn't return a valid YAML: {ex}"
+                f"ansible-inventory didn't return a valid YAML: {ex}\n"
+                f"Got this from Ansible: {inventory}"
             )
 
     def run_playbook(self, limit=None, verbosity=0):

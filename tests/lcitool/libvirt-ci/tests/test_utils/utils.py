@@ -4,6 +4,7 @@
 #
 # SPDX-License-Identifier: GPL-2.0-or-later
 
+import difflib
 import pytest
 import yaml
 
@@ -14,16 +15,19 @@ def base_data_dir():
     return Path(__file__).parent.parent.joinpath("data")
 
 
-def test_data_dir(test_name):
-    return Path(base_data_dir(), Path(test_name).stem[len("test_"):])
+def test_data_dir(test_name, relative_dir=None):
+    if relative_dir is None:
+        relative_dir = ""
+    test_stem = Path(test_name).stem[len("test_"):]
+    return Path(base_data_dir(), relative_dir, test_stem)
 
 
-def test_data_outdir(test_name):
-    return Path(test_data_dir(test_name), "out")
+def test_data_outdir(test_name, relative_dir=None):
+    return Path(test_data_dir(test_name, relative_dir), "out")
 
 
-def test_data_indir(test_name):
-    return Path(test_data_dir(test_name), "in")
+def test_data_indir(test_name, relative_dir=None):
+    return Path(test_data_dir(test_name, relative_dir), "in")
 
 
 def format_err_msg(indices, err_msg):
@@ -33,88 +37,89 @@ def format_err_msg(indices, err_msg):
         return err_msg
 
 
-def assert_equal_list(actual, expected, indices, kind):
-    len_err = None
-    if len(actual) != len(expected):
-        # stash the error for later: printing the first different element
-        # has higher priority, but actual and expected will not be
-        # available later to print the error
-        len_err = format_err_msg(indices, f"expected {len(expected)} {kind}s, got {len(actual)}, ")
-        if len(actual) < len(expected):
-            len_err += f"first missing element: {repr(expected[len(actual)])}"
-            expected = expected[:len(actual)]
-        else:
-            len_err += f"first extra element: {repr(actual[len(expected)])}"
-            actual = actual[:len(expected)]
+class Diff:
+    def __init__(self, diffobj):
+        self._obj = diffobj
+        self.diff = "".join(diffobj)
 
-    indices.append(None)
-    try:
-        n = 0
-        for i, j in zip(iter(actual), iter(expected)):
-            indices[-1] = f"at {kind} {n}"
-            assert_equal(i, j, indices)
-            n += 1
-    finally:
-        indices.pop()
-    if len_err:
-        raise AssertionError(len_err)
+    def __repr__(self):
+        return f"obj: {repr(self._diffobj)}, str: {self.diff}"
+
+    def __str__(self):
+        return self.diff
+
+    def empty(self):
+        return not bool(str(self))
 
 
-def assert_equal(actual, expected, indices):
-    if not isinstance(actual, type(expected)):
-        raise AssertionError(format_err_msg(indices, f"expected {type(expected)}, got {type(actual)}"))
+class DiffOperand:
+    def __init__(self, obj):
+        self._obj = obj
+        self._data = self._stringify(obj)
 
-    if isinstance(expected, list):
-        assert_equal_list(actual, expected, indices, "item")
+    def __repr__(self):
+        return f"obj: {repr(self._obj)}, str: {self._data})"
 
-    elif isinstance(expected, str) and "\n" in expected:
-        actual_lines = actual.split("\n")
-        expected_lines = expected.split("\n")
-        assert_equal_list(actual_lines, expected_lines, indices, "line")
+    def __str__(self):
+        return self._data
 
-    elif isinstance(expected, dict):
-        actual_keys = sorted(actual.keys())
-        expected_keys = sorted(expected.keys())
-        assert_equal_list(actual_keys, expected_keys, indices, "key")
+    @staticmethod
+    def _stringify(obj):
+        if isinstance(obj, str):
+            return obj
 
-        indices.append(None)
-        try:
-            for i in actual_keys:
-                indices[-1] = f"at key {i}"
-                assert_equal(actual[i], expected[i], indices)
-        finally:
-            indices.pop()
+        if isinstance(obj, Path):
+            with open(obj, 'r') as f:
+                return f.read()
 
-    elif actual != expected:
-        raise AssertionError(format_err_msg(indices, f"expected {repr(expected)}, got {repr(actual)}"))
+        return yaml.safe_dump(obj)
+
+    def diff(self, other):
+        if not isinstance(other, self.__class__):
+            other = self._stringify(other)
+
+        return Diff(difflib.unified_diff(str(self).splitlines(keepends=True),
+                                         str(other).splitlines(keepends=True),
+                                         fromfile="actual",
+                                         tofile="expected",))
 
 
-def assert_yaml_matches_file(actual, expected_path, allow_regenerate=True):
-    if pytest.custom_args["regenerate_output"] and allow_regenerate:
+def _assert_equal(actual, expected, test_tmp_dir):
+    # create a diff operand for 'actual' now so that we can have a string to
+    # work with if we need to regenerate the output
+    actual = DiffOperand(actual)
+
+    if pytest.custom_args["regenerate_output"] and \
+       isinstance(expected, Path):
+
         # Make sure the target directory exists, since creating the
         # output file would fail otherwise
-        expected_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(expected_path, "w") as fd:
-            yaml.safe_dump(actual, stream=fd)
+        expected.parent.mkdir(parents=True, exist_ok=True)
+        with open(expected, "w") as fd:
+            fd.write(str(actual))
 
-    with open(expected_path) as fd:
-        expected = yaml.safe_load(fd)
+    # create a diff operand for 'expected' late so that we can consume the
+    # updated output based on '--regenerate-output'
+    expected = DiffOperand(expected)
+    diff = actual.diff(expected)
+    if diff.empty():
+        return
 
-    assert_equal(actual, expected, [f"comparing against {expected_path}"])
+    # pytest doesn't provide any flexibility over how and when tmp directories
+    # are created, so we'll take care of it ourselves, but it needs to tell us
+    # where the directory should be created and what its name should be
+    test_tmp_dir.mkdir(parents=True, exist_ok=True)
+    actual_p = Path(test_tmp_dir, "actual")
+    expected_p = Path(test_tmp_dir, "expected")
+    with open(actual_p, "w") as actual_f, open(expected_p, "w") as expected_f:
+        actual_f.write(str(actual))
+        expected_f.write(str(expected))
 
-
-def assert_matches_file(actual, expected_path, allow_regenerate=True):
-    if pytest.custom_args["regenerate_output"] and allow_regenerate:
-        # Make sure the target directory exists, since creating the
-        # output file would fail otherwise
-        expected_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(expected_path, "w") as fd:
-            fd.write(actual)
-
-    with open(expected_path) as fd:
-        expected = fd.read()
-
-    assert_equal(actual, expected, [f"comparing against {expected_path}"])
+    raise AssertionError(
+        f"Actual and expected outputs differ"
+        f"\n{diff}\n\n"
+        f"Full output dumps available at '{test_tmp_dir}'"
+    )
 
 
 # Force loading the facts, for example to avoid conflicts with monkeypatching

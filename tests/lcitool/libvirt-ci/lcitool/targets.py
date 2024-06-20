@@ -80,11 +80,14 @@ class BuildTarget:
         :ivar cross_arch: cross compilation architecture
     """
 
-    def __init__(self, targets, packages, name, cross_arch=None):
+    def __init__(self, targets, packages, name, native_arch=None, cross_arch=None):
         if name not in targets.target_facts:
             raise TargetsError(f"Target not found: {name}")
+        if native_arch is None:
+            native_arch = util.get_host_arch()
         self._packages = packages
         self.name = name
+        self.native_arch = native_arch
         self.cross_arch = cross_arch
         self.facts = targets.target_facts[self.name]
 

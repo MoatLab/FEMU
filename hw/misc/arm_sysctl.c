@@ -57,7 +57,7 @@ static const VMStateDescription vmstate_arm_sysctl = {
     .name = "realview_sysctl",
     .version_id = 4,
     .minimum_version_id = 1,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT32(leds, arm_sysctl_state),
         VMSTATE_UINT16(lockval, arm_sysctl_state),
         VMSTATE_UINT32(cfgdata1, arm_sysctl_state),
@@ -534,12 +534,12 @@ static void arm_sysctl_write(void *opaque, hwaddr offset,
                     s->sys_cfgstat |= 2;        /* error */
                 }
             } else {
-                uint32_t val;
+                uint32_t data;
                 if (!vexpress_cfgctrl_read(s, dcc, function, site, position,
-                                           device, &val)) {
+                                           device, &data)) {
                     s->sys_cfgstat |= 2;        /* error */
                 } else {
-                    s->sys_cfgdata = val;
+                    s->sys_cfgdata = data;
                 }
             }
         }

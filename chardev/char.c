@@ -171,6 +171,18 @@ int qemu_chr_write(Chardev *s, const uint8_t *buf, int len, bool write_all)
         return res;
     }
 
+    if (replay_mode == REPLAY_MODE_RECORD) {
+        /*
+         * When recording we don't want temporary conditions to
+         * perturb the result. By ensuring we write everything we can
+         * while recording we avoid playback being out of sync if it
+         * doesn't encounter the same temporary conditions (usually
+         * triggered by external programs not reading the chardev fast
+         * enough and pipes filling up).
+         */
+        write_all = true;
+    }
+
     res = qemu_chr_write_buffer(s, buf, len, &offset, write_all);
 
     if (qemu_chr_replay(s) && replay_mode == REPLAY_MODE_RECORD) {
@@ -518,7 +530,7 @@ static const ChardevClass *char_get_class(const char *driver, Error **errp)
 
     if (object_class_is_abstract(oc)) {
         error_setg(errp, QERR_INVALID_PARAMETER_VALUE, "driver",
-                   "an abstract device type");
+                   "a non-abstract device type");
         return NULL;
     }
 
@@ -750,7 +762,7 @@ static int qmp_query_chardev_foreach(Object *obj, void *data)
 
     value->label = g_strdup(chr->label);
     value->filename = g_strdup(chr->filename);
-    value->frontend_open = chr->be && chr->be->fe_open;
+    value->frontend_open = chr->be && chr->be->fe_is_open;
 
     QAPI_LIST_PREPEND(*list, value);
 
@@ -804,6 +816,9 @@ QemuOptsList qemu_chardev_opts = {
             .type = QEMU_OPT_STRING,
         },{
             .name = "path",
+            .type = QEMU_OPT_STRING,
+        },{
+            .name = "input-path",
             .type = QEMU_OPT_STRING,
         },{
             .name = "host",
@@ -1112,7 +1127,7 @@ ChardevReturn *qmp_chardev_change(const char *id, ChardevBackend *backend,
         return NULL;
     }
 
-    /* change successfull, clean up */
+    /* change successful, clean up */
     chr_new->handover_yank_instance = false;
 
     /*

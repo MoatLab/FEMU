@@ -5,11 +5,14 @@ VM handling
 Configuration
 =============
 
-Before you can start installing or managing machines, you need to create
-``~/.config/lcitool/config.yml``, ideally by copying the
-``config.yml`` template, and set at least the options marked as
-"(mandatory)" depending on the flavor (``test``, ``gitlab``) you wish to
-use with your machines.
+User configuration is read from ``~/.config/lcitool/config.yml``. In case no
+configuration is provided all the defaults are pulled from
+``lcitool/etc/config.yml``. We recommend reading it to get familiar with the
+options and their defaults. We also strongly recommend to set the
+``root_password`` to something else than the default value ``root`` in the user
+configuration file unless you never plan to use use VMs provisioned with the
+default password in a production environment and instead just wish to use
+lcitool to create local throw-away test VMs immediately.
 
 If managing VMs installed locally with libvirt you can use the
 `libvirt NSS plugin <https://libvirt.org/nss.html>`_ to your
@@ -69,7 +72,19 @@ An example of a simple INI inventory:
 Installing local VMs
 ====================
 
-In order to install a local VM with lcitool, run the following:
+Local VMs can be installed using either of the two ways described below:
+
+Installing using an OS tree URL
+-------------------------------
+
+This is the original and most reliable way of installing local VMs based on
+URLs pointing to distro OS trees where kernel, init ramdisk and packages can be
+pulled from. The main advantage of this method is that most modern distros we
+support in this project provide this way of installation with a few exceptions,
+e.g. FreeBSD (please refer to `Installing FreeBSD VMs`_). The main downside is
+that this installation is slow to be done repeatedly just to spin up a few
+instances of the same OS.
+To install a local VM using this way, run:
 
 ::
 
@@ -85,10 +100,99 @@ like this:
 
     lcitool install $host
 
-Refer to the `Ansible inventory`_ and `Managed hosts`_ sections respectively on
-how to use an inventory with lcitool. Note that not all guests can be installed
-using the ways described above, e.g. FreeBSD or Alpine guests. See
-`Installing FreeBSD VMs`_ to know how to add such a host in that case.
+Please refer to the `Ansible inventory`_ and `Managed hosts`_ sections
+respectively on how to use an inventory with lcitool. Note that not all guests
+can be installed using the ways described above, e.g. FreeBSD or Alpine guests.
+See `Installing FreeBSD VMs`_ to know how to add such a host in that case.
+
+
+Installing using vendor cloud-init images
+-----------------------------------------
+
+This way of installing VMs is based on the *osinfo* database which is continuously
+updated by the community to provide all kinds of useful installation related
+information about an OS. One of such information is a URL to the latest distro
+vendor provided cloud-init image. This image is then downloaded directly from
+the vendor, cached locally, and used for future VM instantiations. This makes
+the method significantly faster then the one using URLs, however it comes at a
+cost. Here are a few downsides to using this method, so make sure you evaluate
+them before deciding which install strategy (as we call it) is best for you:
+
+* even though *osinfo*'s database is constantly updating, your host system may
+  either be too old (an LTS release) with no updates apart from security and bug
+  fixes or simply not be scheduled to update the *osinfo* package more than once
+  a release by *osinfo*'s package maintainers on that given distro. If that's the
+  case, the version of *osinfo* database you have may not have all (if any) URLs
+  to the vendor provided cloud-init images of the OS distro you wish to install
+  in a VM. Naturally, installation of such an OS distro in a VM would fail
+  using this method and you can either fall back to the URL-based install
+  mentioned above or you can install the latest *osinfo* database manually
+  yourself. If you decide to with the latter, there's a few ways of installing
+  a fresh osinfo database on your system:
+
+  * by running ``osinfo-db-import --nightly`` which downloads and installs
+    the latest unofficial automated database build directly from the
+    project's GitLab CI pipeline
+    *Note: your* ``osinfo-db-tools`` *package needs to be new enough to support
+    the* ``--nightly`` *option.*
+
+  * by using the URL to the
+    `Gitlab nightly database build archive <https://gitlab.com/libosinfo/osinfo-db/-/jobs/artifacts/main/raw/osinfo-db-latest.tar.xz?job=publish>`__
+    directly in ``osinfo-db-import <db local archive file | db archive URL>``
+
+  * by building the osinfo-db project locally from source and installing the
+    database that way (**discouraged**)
+
+* some distro vendors don't provide a symbolic link (e.g. Fedora) always
+  pointing to the latest image build. What this means for you is that the image
+  that is pulled from the vendor may not be latest one available or even worse
+  may not even exist anymore because it has since been removed by the vendor,
+  but the link in *osinfo*'s database hasn't been properly updated upstream yet.
+  In either case, if that happens, you need to fall back to the URL-based
+  install.
+
+* vendor provided cloud-init images may not be built on a daily basis, so if
+  you're looking for the latest contents right out of the box without running
+  any additional operations on the VM, you need to use the URL-based install
+  which is guaranteed to always pull the latest contents.
+
+* the locally cached cloud-init images get easily out of sync. Essentially the
+  situation is similar to the previous one with the exception that some vendors
+  provide daily image builds, so if fresh content is more important than speedy
+  VM installs and lower storage footprint of the VM, then you need to fall back
+  to using the URL-based install.
+
+
+To install a local VM using this way, run::
+
+    lcitool install $host --target $target_os --strategy cloud
+
+To force a new download of a new image (potentially a newer one if the vendor
+has refreshed the images since you downloaded your last one), run::
+
+    lcitool install $host --target $target_os --strategy cloud --force
+
+Installing using custom template images
+---------------------------------------
+
+Vendor cloud images are convenient to use because they're stripped down to
+the bare minimum so they don't take long to download, they're publicly
+accessible from potentially multiple mirrors, and they're rebuilt often so you
+should get fresh contents regularly. The problem is that sometimes you need to
+install a bunch of other packages to get your environment going, including some
+complex system configuration. The obvious option is to perform the
+configuration each time you provision a new system backed by the vendor cloud
+image. However, that takes time and it would be better if the provisioning
+could be sped up even more by pre-installing and pre-configuring the vendor
+cloud image to your liking and then use that image as a template.
+
+To install a local VM using your pre-configured template image, run ::
+
+    lcitool install $host --target $target_os --strategy template --template <path to your base image>
+
+Note that in order for the above to work your template image needs to have
+cloud-init enabled as lcitool will provide a minimalistic NoCloud ISO to the
+VM (injecting the public SSH key specified in lcitool's config).
 
 Installing FreeBSD VMs
 ----------------------
@@ -189,6 +293,40 @@ handy as you can go as far as putting the following in your crontab
    0 0 * * * lcitool update all all
 
 
+Injecting software repositories & custom pre-tasks
+--------------------------------------------------
+
+If you wish to use the above procedure with one of the enterprise distros out
+there you'll quickly find out it doesn't work because those don't use publicly
+accessible (or subscription managed) repositories which we could make use of.
+You'll have to inject these using Ansible pre-tasks file which we'll runs very
+early during the bootstrap stage of the ``update`` command before performing
+any update or configuration changes on the target system. First you need to
+create a data directory which you'll pass to lcitool
+
+::
+
+    $ mkdir <lcitool_datadir>
+
+then you'll create a ``<lcitool_datadir>/ansible/pre/tasks/main.yml`` Ansible
+task file containing tasks necessary to enable the base repositories. Finally,
+you need to tell lcitool about this data directory when running the ``update``
+command
+
+::
+
+    $ lcitool --data-dir <lcitool_datadir> update <hosts> <projects>
+
+Note that ``main.yml`` is a regular Ansible tasks file (not a playbook!), so
+you're constrained by what Ansible allows to be in a tasks file. We recommend
+to keep the file as simple as possible by not adding any tasks unrelated to
+software installation or package updates in order to not collide with any
+system configuration changes (e.g. SSH key uploads) lcitool performs as part of
+the ``update`` sequence. If you need more configuration changes you can always
+execute ``ansible-playbook`` yourself after performing ``update`` and that way
+you'll have full control over the expected outcome.
+
+
 Cloud-init
 ==========
 
@@ -285,27 +423,7 @@ globbing. Using the above inventory as an example, running
    $ lcitool update '*fedora*' '*osinfo*'
 
 will update all Fedora guests and get them ready to build libosinfo and related
-projects. Once hosts have been prepared following the steps above, you can use
-``lcitool`` to perform builds as well: for example, running
-
-::
-
-   $ lcitool build '*debian*' libvirt-python
-
-will fetch libvirt-python's ``master`` branch from the upstream repository
-and build it on all Debian hosts.
-
-You can add more git repositories by tweaking the ``git_urls`` dictionary
-defined in ``playbooks/build/jobs/defaults.yml`` and then build arbitrary
-branches out of those with
-
-::
-
-   $ lcitool build -g github/cool-feature all libvirt
-
-Note that unlike other lcitool commands which take projects as input the 'build'
-command doesn't accept the project list specified either as 'all' or with a
-wildcard.
+projects.
 
 
 Useful tips

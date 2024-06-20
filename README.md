@@ -1,4 +1,4 @@
-[![FEMU Version](https://img.shields.io/badge/FEMU-v7.0-brightgreen)](https://img.shields.io/badge/FEMU-v7.0-brightgreen)
+[![FEMU Version](https://img.shields.io/badge/FEMU-v9.0-brightgreen)](https://img.shields.io/badge/FEMU-v9.0-brightgreen)
 [![Build Status](https://travis-ci.com/vtess/FEMU.svg?branch=master)](https://travis-ci.com/vtess/FEMU)
 [![License: GPL v2](https://img.shields.io/badge/License-GPL%20v2-blue.svg)](https://www.gnu.org/licenses/old-licenses/gpl-2.0.en.html)
 [![Platform](https://img.shields.io/badge/Platform-x86--64-brightgreen)](https://shields.io/)
@@ -136,13 +136,13 @@ Installation
   **Tested VM environment** (Whether a certain FEMU mode works under a certain
   guest kernel version): 
 
-  | Mode \ Guest Kernel       | 4.16    | 4.20    | 5.4     | 5.10    | 6.1
-  | :---                      | :---:   | --      | --      | --      | --
-  | NoSSD                     | &check; | &check; | &check; | &check; | &check;
-  | Black-box SSD             | &check; | &check; | &check; | &check; | &check;
-  | OpenChannel-SSD v1.2      | &check; | &check; | &check; | &check; | &cross;
-  | OpenChannel-SSD v2.0      | &cross; | &check; | &check; | &check; | &cross;
-  | Zoned-Namespace (ZNS) SSD | &cross; | &cross; | &cross; | &check; | &check;
+  | Mode \ Guest Kernel       | 4.16    | 4.20    | 5.4     | 5.10    | 6.1     | 6.9
+  | :---                      | :---:   | --      | --      | --      | --      | --
+  | NoSSD                     | &check; | &check; | &check; | &check; | &check; | &check;
+  | BlackBox SSD              | &check; | &check; | &check; | &check; | &check; | &check;
+  | OpenChannel-SSD v1.2      | &check; | &check; | &check; | &check; | &cross; | &cross;
+  | OpenChannel-SSD v2.0      | &cross; | &check; | &check; | &check; | &cross; | &cross;
+  | Zoned-Namespace (ZNS) SSD | &cross; | &cross; | &cross; | &check; | &check; | &check;
 
 
 3. Prepare the VM image (For performance reasons, we suggest to use a server

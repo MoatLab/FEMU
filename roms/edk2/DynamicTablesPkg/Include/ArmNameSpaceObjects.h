@@ -1,6 +1,6 @@
 /** @file
 
-  Copyright (c) 2017 - 2022, Arm Limited. All rights reserved.<BR>
+  Copyright (c) 2017 - 2023, Arm Limited. All rights reserved.<BR>
 
   SPDX-License-Identifier: BSD-2-Clause-Patent
 
@@ -13,7 +13,7 @@
 #ifndef ARM_NAMESPACE_OBJECTS_H_
 #define ARM_NAMESPACE_OBJECTS_H_
 
-#include <AmlCpcInfo.h>
+#include <AcpiObjects.h>
 #include <StandardNameSpaceObjects.h>
 
 #pragma pack(1)
@@ -71,6 +71,8 @@ typedef enum ArmObjectID {
   EArmObjPccSubspaceType3Info,                                 ///< 46 - Pcc Subspace Type 3 Info
   EArmObjPccSubspaceType4Info,                                 ///< 47 - Pcc Subspace Type 4 Info
   EArmObjPccSubspaceType5Info,                                 ///< 48 - Pcc Subspace Type 5 Info
+  EArmObjEtInfo,                                               ///< 49 - Embedded Trace Extension/Module Info
+  EArmObjPsdInfo,                                              ///< 50 - P-State Dependency (PSD) Info
   EArmObjMax
 } EARM_OBJECT_ID;
 
@@ -203,6 +205,24 @@ typedef struct CmArmGicCInfo {
       i.e. a token referencing a CM_ARM_CPC_INFO object.
   */
   CM_OBJECT_TOKEN    CpcToken;
+
+  /** Trace Buffer Extension interrupt GSIV. Zero if
+      unsupported by this processor. This field was introduced in
+      ACPI 6.5 (MADT revision 6) and is therefore ignored when
+      generating MADT revision 5 or lower.
+  */
+  UINT16             TrbeInterrupt;
+
+  /** Optional field: Reference Token for the Embedded Trace device info for
+      this processing element.
+      i.e. a token referencing a CM_ARM_ET_INFO object.
+  */
+  CM_OBJECT_TOKEN    EtToken;
+
+  /** Optional field: Reference Token for the Psd info of this processor.
+      i.e. a token referencing a CM_ARM_PSD_INFO object.
+  */
+  CM_OBJECT_TOKEN    PsdToken;
 } CM_ARM_GICC_INFO;
 
 /** A structure that describes the
@@ -1296,6 +1316,31 @@ typedef struct CmArmPccSubspaceType5Info {
   /// The WriteMask field is not used.
   PCC_MAILBOX_REGISTER_INFO    ErrorStatusReg;
 } CM_ARM_PCC_SUBSPACE_TYPE5_INFO;
+
+/** An enum describing the Arm Embedded Trace device type.
+*/
+typedef enum ArmEtType {
+  ArmEtTypeEtm,   ///< Embedded Trace module.
+  ArmEtTypeEte,   ///< Embedded Trace Extension.
+  ArmEtTypeMax
+} ARM_ET_TYPE;
+
+/** A structure that describes the Embedded Trace Extension/Module.
+
+    ID: EArmObjEtInfo
+*/
+typedef struct CmArmEtInfo {
+  ARM_ET_TYPE    EtType;
+} CM_ARM_ET_INFO;
+
+/** A structure that describes a
+    P-State Dependency (PSD) Info.
+
+    Cf. ACPI 6.5, s8.4.5.5 _PSD (P-State Dependency).
+
+    ID: EArmObjPsdInfo
+*/
+typedef AML_PSD_INFO CM_ARM_PSD_INFO;
 
 #pragma pack()
 

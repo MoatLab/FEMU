@@ -293,7 +293,7 @@ static uint16_t nvme_dsm(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
         uint64_t slba;
         uint32_t nlb;
-        NvmeDsmRange range[nr];
+        NvmeDsmRange *range = g_malloc0(sizeof(NvmeDsmRange) * nr);
 
         if (dma_write_prp(n, (uint8_t *)range, sizeof(range), prp1, prp2)) {
             nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
@@ -355,7 +355,10 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     for (i = 0; i < req->qsg.nsg; i++) {
         uint32_t len = req->qsg.sg[i].len;
-        uint8_t tmp[2][len];
+        uint8_t *tmp[2];
+
+        tmp[0] = g_malloc0(len);
+        tmp[1] = g_malloc0(len);
 
         nvme_addr_read(n, req->qsg.sg[i].base, tmp[1], len);
         if (memcmp(tmp[0], tmp[1], len)) {

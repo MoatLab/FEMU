@@ -105,8 +105,12 @@ static int bochs_open(BlockDriverState *bs, QDict *options, int flags,
     struct bochs_header bochs;
     int ret;
 
+    GLOBAL_STATE_CODE();
+
     /* No write support yet */
+    bdrv_graph_rdlock_main_loop();
     ret = bdrv_apply_auto_read_only(bs, NULL, errp);
+    bdrv_graph_rdunlock_main_loop();
     if (ret < 0) {
         return ret;
     }
@@ -115,6 +119,8 @@ static int bochs_open(BlockDriverState *bs, QDict *options, int flags,
     if (ret < 0) {
         return ret;
     }
+
+    GRAPH_RDLOCK_GUARD_MAINLOOP();
 
     ret = bdrv_pread(bs->file, 0, sizeof(bochs), &bochs, 0);
     if (ret < 0) {
@@ -203,7 +209,8 @@ static void bochs_refresh_limits(BlockDriverState *bs, Error **errp)
     bs->bl.request_alignment = BDRV_SECTOR_SIZE; /* No sub-sector I/O */
 }
 
-static int64_t seek_to_sector(BlockDriverState *bs, int64_t sector_num)
+static int64_t coroutine_fn GRAPH_RDLOCK
+seek_to_sector(BlockDriverState *bs, int64_t sector_num)
 {
     BDRVBochsState *s = bs->opaque;
     uint64_t offset = sector_num * 512;
@@ -224,8 +231,8 @@ static int64_t seek_to_sector(BlockDriverState *bs, int64_t sector_num)
         (s->extent_blocks + s->bitmap_blocks));
 
     /* read in bitmap for current extent */
-    ret = bdrv_pread(bs->file, bitmap_offset + (extent_offset / 8), 1,
-                     &bitmap_entry, 0);
+    ret = bdrv_co_pread(bs->file, bitmap_offset + (extent_offset / 8), 1,
+                        &bitmap_entry, 0);
     if (ret < 0) {
         return ret;
     }

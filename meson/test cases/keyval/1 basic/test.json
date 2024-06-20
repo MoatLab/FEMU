@@ -1,7 +1,0 @@
-{
-  "stdout": [
-    {
-      "line": "WARNING: Module unstable-keyval is now stable, please use the keyval module instead."
-    }
-  ]
-}

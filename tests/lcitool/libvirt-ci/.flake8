@@ -1,7 +1,8 @@
 [flake8]
 
 # E129 - Visually indented line with same indent as next logical line
+# E402 - Module level import not at top of file
 # E501 - Line too long
 # W504 - Line break occurred before a binary operator
 # W605 - Invalid escape sequence 'x'
-ignore = E129, E501, W504, W605
+ignore = E129, E402, E501, W504, W605

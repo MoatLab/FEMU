@@ -115,7 +115,7 @@ static int elapsed_time(RTMRState *tmr, int ch, int64_t delta)
         et = tmr->div_round[ch] / divrate;
         tmr->div_round[ch] %= divrate;
     } else {
-        /* disble clock. so no update */
+        /* disable clock. so no update */
         et = 0;
     }
     return et;
@@ -447,7 +447,7 @@ static const VMStateDescription vmstate_rtmr = {
     .name = "rx-tmr",
     .version_id = 1,
     .minimum_version_id = 1,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_INT64(tick, RTMRState),
         VMSTATE_UINT8_ARRAY(tcnt, RTMRState, TMR_CH),
         VMSTATE_UINT8_ARRAY(tcora, RTMRState, TMR_CH),

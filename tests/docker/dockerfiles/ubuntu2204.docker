@@ -28,12 +28,11 @@ RUN export DEBIAN_FRONTEND=noninteractive && \
                       g++ \
                       gcc \
                       gcovr \
-                      genisoimage \
                       gettext \
                       git \
                       hostname \
                       libaio-dev \
-                      libasan5 \
+                      libasan6 \
                       libasound2-dev \
                       libattr1-dev \
                       libbpf-dev \
@@ -70,6 +69,7 @@ RUN export DEBIAN_FRONTEND=noninteractive && \
                       libnuma-dev \
                       libpam0g-dev \
                       libpcre2-dev \
+                      libpipewire-0.3-dev \
                       libpixman-1-dev \
                       libpmem-dev \
                       libpng-dev \
@@ -103,6 +103,7 @@ RUN export DEBIAN_FRONTEND=noninteractive && \
                       locales \
                       make \
                       meson \
+                      mtools \
                       multipath-tools \
                       ncat \
                       nettle-dev \
@@ -116,17 +117,20 @@ RUN export DEBIAN_FRONTEND=noninteractive && \
                       python3-pip \
                       python3-sphinx \
                       python3-sphinx-rtd-theme \
+                      python3-tomli \
                       python3-venv \
                       python3-yaml \
                       rpm2cpio \
                       sed \
                       socat \
                       sparse \
+                      swtpm \
                       systemtap-sdt-dev \
                       tar \
                       tesseract-ocr \
                       tesseract-ocr-eng \
                       xfslibs-dev \
+                      xorriso \
                       zlib1g-dev \
                       zstd && \
     eatmydata apt-get autoremove -y && \

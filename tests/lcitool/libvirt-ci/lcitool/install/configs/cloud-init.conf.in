@@ -1,0 +1,13 @@
+#NOTE: This is a base template which is further modified by lcitool dynamically
+
+disable_root: false
+ssh_pwauth: true
+
+users:
+  - name: root
+    lock_passwd: false
+    plain_text_passwd: root
+
+growpart:
+    mode: auto
+    devices: ["/"]

@@ -21,6 +21,7 @@
 #include "cpu.h"
 #include "exec/helper-proto.h"
 #include "internals.h"
+#include "cpu-features.h"
 #include "exec/exec-all.h"
 #include "exec/cpu_ldst.h"
 #include "cpregs.h"
@@ -118,6 +119,61 @@ void HELPER(v8m_stackcheck)(CPUARMState *env, uint32_t newvalue)
          */
         raise_exception_ra(env, EXCP_STKOF, 0, 1, GETPC());
     }
+}
+
+/* Sign/zero extend */
+uint32_t HELPER(sxtb16)(uint32_t x)
+{
+    uint32_t res;
+    res = (uint16_t)(int8_t)x;
+    res |= (uint32_t)(int8_t)(x >> 16) << 16;
+    return res;
+}
+
+static void handle_possible_div0_trap(CPUARMState *env, uintptr_t ra)
+{
+    /*
+     * Take a division-by-zero exception if necessary; otherwise return
+     * to get the usual non-trapping division behaviour (result of 0)
+     */
+    if (arm_feature(env, ARM_FEATURE_M)
+        && (env->v7m.ccr[env->v7m.secure] & R_V7M_CCR_DIV_0_TRP_MASK)) {
+        raise_exception_ra(env, EXCP_DIVBYZERO, 0, 1, ra);
+    }
+}
+
+uint32_t HELPER(uxtb16)(uint32_t x)
+{
+    uint32_t res;
+    res = (uint16_t)(uint8_t)x;
+    res |= (uint32_t)(uint8_t)(x >> 16) << 16;
+    return res;
+}
+
+int32_t HELPER(sdiv)(CPUARMState *env, int32_t num, int32_t den)
+{
+    if (den == 0) {
+        handle_possible_div0_trap(env, GETPC());
+        return 0;
+    }
+    if (num == INT_MIN && den == -1) {
+        return INT_MIN;
+    }
+    return num / den;
+}
+
+uint32_t HELPER(udiv)(CPUARMState *env, uint32_t num, uint32_t den)
+{
+    if (den == 0) {
+        handle_possible_div0_trap(env, GETPC());
+        return 0;
+    }
+    return num / den;
+}
+
+uint32_t HELPER(rbit)(uint32_t x)
+{
+    return revbit32(x);
 }
 
 uint32_t HELPER(add_setq)(CPUARMState *env, uint32_t a, uint32_t b)
@@ -426,9 +482,9 @@ void HELPER(cpsr_write_eret)(CPUARMState *env, uint32_t val)
 {
     uint32_t mask;
 
-    qemu_mutex_lock_iothread();
+    bql_lock();
     arm_call_pre_el_change_hook(env_archcpu(env));
-    qemu_mutex_unlock_iothread();
+    bql_unlock();
 
     mask = aarch32_cpsr_valid_mask(env->features, &env_archcpu(env)->isar);
     cpsr_write(env, val, mask, CPSRWriteExceptionReturn);
@@ -441,9 +497,9 @@ void HELPER(cpsr_write_eret)(CPUARMState *env, uint32_t val)
     env->regs[15] &= (env->thumb ? ~1 : ~3);
     arm_rebuild_hflags(env);
 
-    qemu_mutex_lock_iothread();
+    bql_lock();
     arm_call_el_change_hook(env_archcpu(env));
-    qemu_mutex_unlock_iothread();
+    bql_unlock();
 }
 
 /* Access to user mode registers from privileged modes.  */
@@ -514,10 +570,24 @@ static void msr_mrs_banked_exc_checks(CPUARMState *env, uint32_t tgtmode,
      */
     int curmode = env->uncached_cpsr & CPSR_M;
 
-    if (regno == 17) {
-        /* ELR_Hyp: a special case because access from tgtmode is OK */
-        if (curmode != ARM_CPU_MODE_HYP && curmode != ARM_CPU_MODE_MON) {
-            goto undef;
+    if (tgtmode == ARM_CPU_MODE_HYP) {
+        /*
+         * Handle Hyp target regs first because some are special cases
+         * which don't want the usual "not accessible from tgtmode" check.
+         */
+        switch (regno) {
+        case 16 ... 17: /* ELR_Hyp, SPSR_Hyp */
+            if (curmode != ARM_CPU_MODE_HYP && curmode != ARM_CPU_MODE_MON) {
+                goto undef;
+            }
+            break;
+        case 13:
+            if (curmode != ARM_CPU_MODE_MON) {
+                goto undef;
+            }
+            break;
+        default:
+            g_assert_not_reached();
         }
         return;
     }
@@ -548,13 +618,6 @@ static void msr_mrs_banked_exc_checks(CPUARMState *env, uint32_t tgtmode,
         }
     }
 
-    if (tgtmode == ARM_CPU_MODE_HYP) {
-        /* SPSR_Hyp, r13_hyp: accessible from Monitor mode only */
-        if (curmode != ARM_CPU_MODE_MON) {
-            goto undef;
-        }
-    }
-
     return;
 
 undef:
@@ -569,7 +632,12 @@ void HELPER(msr_banked)(CPUARMState *env, uint32_t value, uint32_t tgtmode,
 
     switch (regno) {
     case 16: /* SPSRs */
-        env->banked_spsr[bank_number(tgtmode)] = value;
+        if (tgtmode == (env->uncached_cpsr & CPSR_M)) {
+            /* Only happens for SPSR_Hyp access in Hyp mode */
+            env->spsr = value;
+        } else {
+            env->banked_spsr[bank_number(tgtmode)] = value;
+        }
         break;
     case 17: /* ELR_Hyp */
         env->elr_el[2] = value;
@@ -603,7 +671,12 @@ uint32_t HELPER(mrs_banked)(CPUARMState *env, uint32_t tgtmode, uint32_t regno)
 
     switch (regno) {
     case 16: /* SPSRs */
-        return env->banked_spsr[bank_number(tgtmode)];
+        if (tgtmode == (env->uncached_cpsr & CPSR_M)) {
+            /* Only happens for SPSR_Hyp access in Hyp mode */
+            return env->spsr;
+        } else {
+            return env->banked_spsr[bank_number(tgtmode)];
+        }
     case 17: /* ELR_Hyp */
         return env->elr_el[2];
     case 13:
@@ -764,14 +837,47 @@ const void *HELPER(lookup_cp_reg)(CPUARMState *env, uint32_t key)
     return ri;
 }
 
+/*
+ * Test for HCR_EL2.TIDCP at EL1.
+ * Since implementation defined registers are rare, and within QEMU
+ * most of them are no-op, do not waste HFLAGS space for this and
+ * always use a helper.
+ */
+void HELPER(tidcp_el1)(CPUARMState *env, uint32_t syndrome)
+{
+    if (arm_hcr_el2_eff(env) & HCR_TIDCP) {
+        raise_exception_ra(env, EXCP_UDEF, syndrome, 2, GETPC());
+    }
+}
+
+/*
+ * Similarly, for FEAT_TIDCP1 at EL0.
+ * We have already checked for the presence of the feature.
+ */
+void HELPER(tidcp_el0)(CPUARMState *env, uint32_t syndrome)
+{
+    /* See arm_sctlr(), but we also need the sctlr el. */
+    ARMMMUIdx mmu_idx = arm_mmu_idx_el(env, 0);
+    int target_el = mmu_idx == ARMMMUIdx_E20_0 ? 2 : 1;
+
+    /*
+     * The bit is not valid unless the target el is aa64, but since the
+     * bit test is simpler perform that first and check validity after.
+     */
+    if ((env->cp15.sctlr_el[target_el] & SCTLR_TIDCP)
+        && arm_el_is_aa64(env, target_el)) {
+        raise_exception_ra(env, EXCP_UDEF, syndrome, target_el, GETPC());
+    }
+}
+
 void HELPER(set_cp_reg)(CPUARMState *env, const void *rip, uint32_t value)
 {
     const ARMCPRegInfo *ri = rip;
 
     if (ri->type & ARM_CP_IO) {
-        qemu_mutex_lock_iothread();
+        bql_lock();
         ri->writefn(env, ri, value);
-        qemu_mutex_unlock_iothread();
+        bql_unlock();
     } else {
         ri->writefn(env, ri, value);
     }
@@ -783,9 +889,9 @@ uint32_t HELPER(get_cp_reg)(CPUARMState *env, const void *rip)
     uint32_t res;
 
     if (ri->type & ARM_CP_IO) {
-        qemu_mutex_lock_iothread();
+        bql_lock();
         res = ri->readfn(env, ri);
-        qemu_mutex_unlock_iothread();
+        bql_unlock();
     } else {
         res = ri->readfn(env, ri);
     }
@@ -798,9 +904,9 @@ void HELPER(set_cp_reg64)(CPUARMState *env, const void *rip, uint64_t value)
     const ARMCPRegInfo *ri = rip;
 
     if (ri->type & ARM_CP_IO) {
-        qemu_mutex_lock_iothread();
+        bql_lock();
         ri->writefn(env, ri, value);
-        qemu_mutex_unlock_iothread();
+        bql_unlock();
     } else {
         ri->writefn(env, ri, value);
     }
@@ -812,9 +918,9 @@ uint64_t HELPER(get_cp_reg64)(CPUARMState *env, const void *rip)
     uint64_t res;
 
     if (ri->type & ARM_CP_IO) {
-        qemu_mutex_lock_iothread();
+        bql_lock();
         res = ri->readfn(env, ri);
-        qemu_mutex_unlock_iothread();
+        bql_unlock();
     } else {
         res = ri->readfn(env, ri);
     }
@@ -896,7 +1002,14 @@ void HELPER(pre_smc)(CPUARMState *env, uint32_t syndrome)
      *
      *  Conduit SMC, valid call  Trap to EL2         PSCI Call
      *  Conduit SMC, inval call  Trap to EL2         Undef insn
-     *  Conduit not SMC          Undef insn          Undef insn
+     *  Conduit not SMC          Undef or trap[1]    Undef insn
+     *
+     * [1] In this case:
+     *  - if HCR_EL2.NV == 1 we must trap to EL2
+     *  - if HCR_EL2.NV == 0 then newer architecture revisions permit
+     *    AArch64 (but not AArch32) to trap to EL2 as an IMPDEF choice
+     *  - otherwise we must UNDEF
+     * We take the IMPDEF choice to always UNDEF if HCR_EL2.NV == 0.
      */
 
     /* On ARMv8 with EL3 AArch64, SMD applies to both S and NS state.
@@ -910,9 +1023,12 @@ void HELPER(pre_smc)(CPUARMState *env, uint32_t syndrome)
                                                      : smd_flag && !secure;
 
     if (!arm_feature(env, ARM_FEATURE_EL3) &&
+        !(arm_hcr_el2_eff(env) & HCR_NV) &&
         cpu->psci_conduit != QEMU_PSCI_CONDUIT_SMC) {
-        /* If we have no EL3 then SMC always UNDEFs and can't be
-         * trapped to EL2. PSCI-via-SMC is a sort of ersatz EL3
+        /*
+         * If we have no EL3 then traditionally SMC always UNDEFs and can't be
+         * trapped to EL2. For nested virtualization, SMC can be trapped to
+         * the outer hypervisor. PSCI-via-SMC is a sort of ersatz EL3
          * firmware within QEMU, and we want an EL2 guest to be able
          * to forbid its EL1 from making PSCI calls into QEMU's
          * "firmware" via HCR.TSC, so for these purposes treat

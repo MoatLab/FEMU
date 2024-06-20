@@ -38,7 +38,7 @@ Function: rtas_call
 		rtas_args: pointer to RTAS arguments structure
 	Output:
 		
-Decription: Handle RTAS call. This C function is called
+Description: Handle RTAS call. This C function is called
 		from the asm function rtas_entry.
 */
 

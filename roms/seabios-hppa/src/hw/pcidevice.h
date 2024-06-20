@@ -16,6 +16,7 @@ struct pci_device {
     u8 prog_if, revision;
     u8 header_type;
     u8 secondary_bus;
+    u8 irq;
 
     // Local information on device.
     int have_driver;

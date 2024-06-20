@@ -21,10 +21,12 @@
 #include <Library/IoLib.h>
 
 //
-// RISC-V use 100us timer.
+// RISC-V use 100ns timer.
 // The default timer tick duration is set to 10 ms = 10 * 1000 * 10 100 ns units
 //
 #define DEFAULT_TIMER_TICK_DURATION  100000
+
+#define RISCV_CPU_FEATURE_SSTC_BITMASK  BIT1
 
 extern VOID
 RiscvSetTimerPeriod (

@@ -9,6 +9,7 @@
 #include "qemu/osdep.h"
 #include "cpu.h"
 #include "internals.h"
+#include "cpu-features.h"
 #include "gdbstub/helpers.h"
 #include "exec/helper-proto.h"
 #include "qemu/main-loop.h"
@@ -148,7 +149,7 @@ uint32_t HELPER(v7m_tt)(CPUARMState *env, uint32_t addr, uint32_t op)
      *  R: 0 because unpriv and A flag not set
      *  SRVALID: 0 because NS
      *  MRVALID: 0 because unpriv and A flag not set
-     *  SREGION: 0 becaus SRVALID is 0
+     *  SREGION: 0 because SRVALID is 0
      *  MREGION: 0 because MRVALID is 0
      */
     return 0;
@@ -372,8 +373,8 @@ void HELPER(v7m_preserve_fp_state)(CPUARMState *env)
     bool ts = is_secure && (env->v7m.fpccr[M_REG_S] & R_V7M_FPCCR_TS_MASK);
     bool take_exception;
 
-    /* Take the iothread lock as we are going to touch the NVIC */
-    qemu_mutex_lock_iothread();
+    /* Take the BQL as we are going to touch the NVIC */
+    bql_lock();
 
     /* Check the background context had access to the FPU */
     if (!v7m_cpacr_pass(env, is_secure, is_priv)) {
@@ -427,7 +428,7 @@ void HELPER(v7m_preserve_fp_state)(CPUARMState *env)
     take_exception = !stacked_ok &&
         armv7m_nvic_can_take_pending_exception(env->nvic);
 
-    qemu_mutex_unlock_iothread();
+    bql_unlock();
 
     if (take_exception) {
         raise_exception_ra(env, EXCP_LAZYFP, 0, 1, GETPC());
@@ -1937,8 +1938,8 @@ static bool do_v7m_function_return(ARMCPU *cpu)
          */
         mmu_idx = arm_v7m_mmu_idx_for_secstate(env, true);
         oi = make_memop_idx(MO_LEUL, arm_to_core_mmu_idx(mmu_idx));
-        newpc = cpu_ldl_le_mmu(env, frameptr, oi, 0);
-        newpsr = cpu_ldl_le_mmu(env, frameptr + 4, oi, 0);
+        newpc = cpu_ldl_mmu(env, frameptr, oi, 0);
+        newpsr = cpu_ldl_mmu(env, frameptr + 4, oi, 0);
 
         /* Consistency checks on new IPSR */
         newpsr_exc = newpsr & XPSR_EXCP;

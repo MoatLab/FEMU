@@ -5,20 +5,62 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 import copy
+import errno
 import fnmatch
 import logging
 import os
+import sys
 import platform
 import tempfile
 import textwrap
 import yaml
 
 from pathlib import Path
-from pkg_resources import resource_filename
 
 _tempdir = None
 
 log = logging.getLogger(__name__)
+
+
+class SSHKey:
+    """
+    :ivar path: Absolute path to the SSH key as Path object
+    """
+
+    def __init__(self, keypath):
+        self._contents = None
+
+        # resolve user home directory + canonicalize path
+        self.path = Path(keypath).expanduser().resolve()
+        if not self.path.exists():
+            raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT),
+                                    str(self.path))
+
+    def __str__(self):
+        if self._contents is None:
+            with open(self.path, "r") as f:
+                self._contents = f.read().strip()
+
+        return self._contents
+
+
+class SSHPublicKey(SSHKey):
+    pass
+
+
+class SSHPrivateKey(SSHKey):
+    def __str__(self):
+        # Only the SSH backend should ever need to know the contents of the
+        # private key
+
+        return ""
+
+
+class SSHKeyPair:
+    def __init__(self, keypath):
+        pathobj = Path(keypath)
+        self.public_key = SSHPublicKey(pathobj.with_suffix(".pub"))
+        self.private_key = SSHPrivateKey(pathobj.with_suffix(""))
 
 
 def expand_pattern(pattern, iterable, name):
@@ -80,13 +122,17 @@ def expand_pattern(pattern, iterable, name):
     return matches
 
 
-def get_native_arch():
+def get_host_arch():
     # Same canonicalization as libvirt virArchFromHost
     arch = platform.machine()
     if arch in ["i386", "i486", "i586"]:
         arch = "i686"
     if arch == "amd64":
         arch = "x86_64"
+    if arch == "arm64":
+        arch = "aarch64"
+    if arch not in valid_arches():
+        raise ValueError(f"Unsupported architecture {arch}")
     return arch
 
 
@@ -191,7 +237,7 @@ def get_cache_dir():
     try:
         cache_dir = Path(os.environ["XDG_CACHE_HOME"])
     except KeyError:
-        cache_dir = Path(os.environ["HOME"], ".cache")
+        cache_dir = Path.home().joinpath(".cache")
 
     return Path(cache_dir, "lcitool")
 
@@ -200,9 +246,53 @@ def get_config_dir():
     try:
         config_dir = Path(os.environ["XDG_CONFIG_HOME"])
     except KeyError:
-        config_dir = Path(os.environ["HOME"], ".config")
+        config_dir = Path.home().joinpath(".config")
 
     return Path(config_dir, "lcitool")
+
+
+def get_datadir_inventory(data_dir):
+    if data_dir.path is None or not Path(data_dir.path, "ansible").exists():
+        return None
+
+    # check whether user provided an inventory file via datadir
+    inventory_path = Path(data_dir.path, "ansible/inventory")
+    if inventory_path.exists():
+        return inventory_path
+
+
+def package_resource(package, relpath):
+    """
+    Backcompatibility helper to retrieve a package resource using importlib
+
+    :param package: object conforming to importlib.resources.Package requirement
+    :param relpath: relative path to the actual resource (or directory) as
+                    str or Path object
+    :returns: a Path object to the resource
+    """
+
+    from importlib import import_module, resources
+
+    if hasattr(resources, "files"):
+        return Path(resources.files(package), relpath)
+    else:
+        # This is a horrible hack, it won't work for resources that don't exist
+        # on the file system (which should not be a problem for our use case),
+        # but it's needed because importlib.resources.path only accepts
+        # filenames for a 'Resource' [1]. What it means is that one cannot pass
+        # a path construct in 'relpath', because 'Resource' cannot contain
+        # path delimiters and also cannot be a directory, so we cannot use the
+        # method to construct base resource paths.
+        # [1] https://docs.python.org/3/library/importlib.resources.html?highlight=importlib%20resources#importlib.resources.path
+        # Instead, we'll extract the package path from ModuleSpec (loading the
+        # package first if needed) and then concatenate it with the 'relpath'
+        #
+        # TODO: Drop this helper once we move onto 3.9+
+        if package not in sys.modules:
+            import_module(package)
+
+        package_path = Path(sys.modules[package].__file__).parent
+        return Path(package_path, relpath)
 
 
 def merge_dict(source, dest):
@@ -224,14 +314,26 @@ class DataDir:
        an externally specified data directory.  Used to implement the
        -d option."""
 
+    @property
+    def path(self):
+        if self._path is None:
+            if self._extra_data_dir is not None:
+                self._path = Path(self._extra_data_dir).resolve()
+
+        return self._path
+
     def __init__(self, extra_data_dir=None):
         self._extra_data_dir = extra_data_dir
+        self._path = None
 
     def __repr__(self):
         return f'DataDir({str(self._extra_data_dir)})'
 
+    def __bool__(self):
+        return bool(self._extra_data_dir)
+
     def _search(self, resource_path, *names, internal=False):
-        if not internal and self._extra_data_dir:
+        if self and not internal:
             # The first part of the path is used to keep data files out of
             # the source directory, for example "facts" or "etc".  Remove it
             # when using an external data directory.
@@ -243,7 +345,7 @@ class DataDir:
             if p.exists():
                 yield p
 
-        p = Path(resource_filename(__name__, resource_path), *names)
+        p = Path(package_resource(__package__, resource_path), *names)
         if p.exists():
             yield p
 

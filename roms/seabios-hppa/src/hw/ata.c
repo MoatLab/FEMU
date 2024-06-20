@@ -361,7 +361,7 @@ ata_try_dma(struct disk_op_s *op, int iswrite, int blocksize)
     if (! CONFIG_ATA_DMA)
         return -1;
     ASSERT16(); // behind ATA_DMA, needed on parisc to boot via ata
-    u32 dest = (u32)op->buf_fl;
+    unsigned long dest = (unsigned long)op->buf_fl;
     if (dest & 1)
         // Need minimum alignment of 1.
         return -1;
@@ -392,7 +392,7 @@ ata_try_dma(struct disk_op_s *op, int iswrite, int blocksize)
         if (!bytes)
             // Last descriptor.
             count |= 1<<31;
-        dprintf(16, "dma@%p: %08x %08x\n", dma, dest, count);
+        dprintf(16, "dma@%p: %08lx %08x\n", dma, dest, count);
         dest += count;
         SET_LOWFLAT(dma->count, count);
         dma++;
@@ -842,7 +842,7 @@ powerup_await_non_bsy(portaddr_t base)
         }
         yield();
     }
-    dprintf(6, "powerup iobase=%x st=%x\n", base, status);
+    dprintf(6, "powerup iobase=%lx st=%x\n", base, status);
     return status;
 }
 

@@ -70,9 +70,12 @@ native:
 - firewalld-filesystem
 - flex
 - fuse3
+- gawk
+- gcc
 - gcovr
 - gdb
 - genisoimage
+- gettext
 - gettext-devel
 - git
 - glib2-devel
@@ -104,7 +107,6 @@ native:
 - libtorrent-devel
 - libxml2
 - libxslt
-- libzstd-devel
 - llvm
 - lsof
 - lua-devel
@@ -113,6 +115,7 @@ native:
 - meson
 - mono-devel
 - monodevelop
+- mtools
 - nano
 - nbd
 - nbdkit
@@ -171,6 +174,7 @@ native:
 - python3
 - python3-PyYAML
 - python3-boto3
+- python3-build
 - python3-dbus
 - python3-devel
 - python3-docutils
@@ -189,11 +193,11 @@ native:
 - python3-setuptools
 - python3-sphinx
 - python3-sphinx_rtd_theme
+- python3-tomli
 - python3-wheel
 - qemu-img
 - qemu-kvm
 - rpcgen
-- rpm
 - rpm-build
 - ruby-devel
 - rubygem-rake
@@ -206,6 +210,7 @@ native:
 - spice-protocol
 - strace
 - sudo
+- swtpm
 - systemd-rpm-macros
 - tar
 - tcl-devel

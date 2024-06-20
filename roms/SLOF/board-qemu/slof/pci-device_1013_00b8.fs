@@ -12,7 +12,7 @@
 
 my-space pci-device-generic-setup
 
-\ Defaults, overriden from qemu
+\ Defaults, overridden from qemu
 d# 800 VALUE disp-width
 d# 600 VALUE disp-height
 d#   8 VALUE disp-depth
@@ -125,7 +125,7 @@ include graphics.fs
   12 06 vga-seq!  \ unlock extensions
   05 06 vga-gfx!  \ graphic mode  
   \ set bit depth. Note: we should set the hidden
-  \ dac register to differenciate 15 and 16bpp, but
+  \ dac register to differentiate 15 and 16bpp, but
   \ it's annoying and in practice we don't care as
   \ we are only displaying in black & white atm
   disp-depth CASE \ set depth

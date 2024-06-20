@@ -14,6 +14,8 @@
 #define LS3A_INTC_IP               8
 #define EXTIOI_IRQS                (256)
 #define EXTIOI_IRQS_BITMAP_SIZE    (256 / 8)
+/* irq from EXTIOI is routed to no more than 4 cpus */
+#define EXTIOI_CPUS                (4)
 /* map to ipnum per 32 irqs */
 #define EXTIOI_IRQS_IPMAP_SIZE     (256 / 32)
 #define EXTIOI_IRQS_COREMAP_SIZE   256
@@ -38,25 +40,29 @@
 #define EXTIOI_COREMAP_START         (0xC00 - APIC_OFFSET)
 #define EXTIOI_COREMAP_END           (0xD00 - APIC_OFFSET)
 
+typedef struct ExtIOICore {
+    uint32_t coreisr[EXTIOI_IRQS_GROUP_COUNT];
+    DECLARE_BITMAP(sw_isr[LS3A_INTC_IP], EXTIOI_IRQS);
+    qemu_irq parent_irq[LS3A_INTC_IP];
+} ExtIOICore;
+
 #define TYPE_LOONGARCH_EXTIOI "loongarch.extioi"
 OBJECT_DECLARE_SIMPLE_TYPE(LoongArchExtIOI, LOONGARCH_EXTIOI)
 struct LoongArchExtIOI {
     SysBusDevice parent_obj;
+    uint32_t num_cpu;
     /* hardware state */
     uint32_t nodetype[EXTIOI_IRQS_NODETYPE_COUNT / 2];
     uint32_t bounce[EXTIOI_IRQS_GROUP_COUNT];
     uint32_t isr[EXTIOI_IRQS / 32];
-    uint32_t coreisr[LOONGARCH_MAX_VCPUS][EXTIOI_IRQS_GROUP_COUNT];
     uint32_t enable[EXTIOI_IRQS / 32];
     uint32_t ipmap[EXTIOI_IRQS_IPMAP_SIZE / 4];
     uint32_t coremap[EXTIOI_IRQS / 4];
     uint32_t sw_pending[EXTIOI_IRQS / 32];
-    DECLARE_BITMAP(sw_isr[LOONGARCH_MAX_VCPUS][LS3A_INTC_IP], EXTIOI_IRQS);
     uint8_t  sw_ipmap[EXTIOI_IRQS_IPMAP_SIZE];
     uint8_t  sw_coremap[EXTIOI_IRQS];
-    qemu_irq parent_irq[LOONGARCH_MAX_VCPUS][LS3A_INTC_IP];
     qemu_irq irq[EXTIOI_IRQS];
-    MemoryRegion extioi_iocsr_mem[LOONGARCH_MAX_VCPUS];
+    ExtIOICore *cpu;
     MemoryRegion extioi_system_mem;
 };
 #endif /* LOONGARCH_EXTIOI_H */

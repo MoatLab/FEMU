@@ -156,7 +156,7 @@ static const testdef_t tests[] = {
       "Open Firmware" },
     { "ppc64", "powernv8", "", "OPAL" },
     { "ppc64", "powernv9", "", "OPAL" },
-    { "ppc64", "sam460ex", "-device e1000", "8086  100e" },
+    { "ppc64", "sam460ex", "-device pci-bridge,chassis_nr=2", "1b36  0001" },
     { "i386", "isapc", "-cpu qemu32 -M graphics=off", "SeaBIOS" },
     { "i386", "pc", "-M graphics=off", "SeaBIOS" },
     { "i386", "q35", "-M graphics=off", "SeaBIOS" },
@@ -286,6 +286,11 @@ int main(int argc, char *argv[])
     int i;
 
     g_test_init(&argc, &argv, NULL);
+
+    if (!qtest_has_accel("tcg") && !qtest_has_accel("kvm")) {
+        g_test_skip("No KVM or TCG accelerator available");
+        return 0;
+    }
 
     for (i = 0; tests[i].arch != NULL; i++) {
         if (g_str_equal(arch, tests[i].arch) &&

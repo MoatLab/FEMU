@@ -52,7 +52,7 @@ int _start_kernel(unsigned long p0, unsigned long p1)
 	for(rc=0; rc<FILEIO_MAX; ++rc)
 		fd_array[rc].type = FILEIO_TYPE_EMPTY;
 
-	/* this is step is e.g. resposible to initialize file descriptor 0 and 1 for STDIO */
+	/* this is step is e.g. responsible to initialize file descriptor 0 and 1 for STDIO */
 	rc = of_glue_init(&timebase, (size_t)(unsigned long)&__client_start,
 			  (size_t)(unsigned long)&__client_end - (size_t)(unsigned long)&__client_start);
 	if(rc < 0)

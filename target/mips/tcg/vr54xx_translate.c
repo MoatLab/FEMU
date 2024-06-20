@@ -10,10 +10,7 @@
  */
 
 #include "qemu/osdep.h"
-#include "tcg/tcg-op.h"
-#include "exec/helper-gen.h"
 #include "translate.h"
-#include "internal.h"
 
 /* Include the auto-generated decoder. */
 #include "decode-vr54xx.c.inc"
@@ -46,7 +43,7 @@ static bool trans_mult_acc(DisasContext *ctx, arg_r *a,
     gen_load_gpr(t0, a->rs);
     gen_load_gpr(t1, a->rt);
 
-    gen_helper_mult_acc(t0, cpu_env, t0, t1);
+    gen_helper_mult_acc(t0, tcg_env, t0, t1);
 
     gen_store_gpr(t0, a->rd);
     return true;

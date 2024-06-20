@@ -155,7 +155,7 @@ static void send_rrq(int fd)
 }
 
 /**
- * send_ack - Sends a acknowlege package.
+ * send_ack - Sends an acknowledgement.
  *
  * @blckno: block number
  * @dport:  UDP destination port
@@ -657,7 +657,7 @@ int parse_tftp_args(char buffer[], char *server_ip, char filename[], int fd,
 		/* look for dns server name */
 		tmp1 = strchr(raw, '.');
 		if (tmp1 == NULL) {
-			printf("\n missing . seperator in %s\n", raw);
+			printf("\n missing . separator in %s\n", raw);
 			free(raw);
 			return -1;
 		}

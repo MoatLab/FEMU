@@ -65,8 +65,8 @@ struct MenelausState {
         struct tm tm;
         struct tm new;
         struct tm alm;
-        int sec_offset;
-        int alm_sec;
+        int64_t sec_offset;
+        int64_t alm_sec;
         int next_comp;
     } rtc;
     uint16_t rtc_next_vmstate;
@@ -768,7 +768,7 @@ static const VMStateDescription vmstate_menelaus_tm = {
     .name = "menelaus_tm",
     .version_id = 0,
     .minimum_version_id = 0,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT16_HACK(tm_sec, struct tm),
         VMSTATE_UINT16_HACK(tm_min, struct tm),
         VMSTATE_UINT16_HACK(tm_hour, struct tm),
@@ -810,7 +810,7 @@ static const VMStateDescription vmstate_menelaus = {
     .minimum_version_id = 0,
     .pre_save = menelaus_pre_save,
     .post_load = menelaus_post_load,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_INT32(firstbyte, MenelausState),
         VMSTATE_UINT8(reg, MenelausState),
         VMSTATE_UINT8_ARRAY(vcore, MenelausState, 5),

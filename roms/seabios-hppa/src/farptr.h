@@ -137,8 +137,9 @@ DECL_SEGFUNCS(SS)
 #define FLATPTR_TO_OFFSET(p) (((u32)(p)) & 0xf)
 #define MAKE_FLATPTR(seg,off) ((void*)(((u32)(seg)<<4)+(u32)(off)))
 #elif CONFIG_PARISC
-#define FLATPTR_TO_SEG(p) (((u32)(p)) >> 16)
-#define FLATPTR_TO_OFFSET(p) (((u32)(p)) & 0xffff)
+#define uintptr_t  unsigned long
+#define FLATPTR_TO_SEG(p) (((uintptr_t)(p)) >> 16)
+#define FLATPTR_TO_OFFSET(p) (((uintptr_t)(p)) & 0xffff)
 #define MAKE_FLATPTR(seg,off) ((void*)(unsigned long)(off))
 #endif
 

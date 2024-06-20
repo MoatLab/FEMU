@@ -513,6 +513,7 @@ void sercon_setup(void)
     if (!CONFIG_SERCON)
         return;
 
+#if CONFIG_X86
     struct segoff_s seabios, vgabios;
     u16 addr;
 
@@ -542,6 +543,7 @@ void sercon_setup(void)
     SET_LOW(sercon_port, addr);
     outb(0x03, addr + SEROFF_LCR); // 8N1
     outb(0x01, addr + SEROFF_IIR); // enable fifo
+#endif
 }
 
 /****************************************************************

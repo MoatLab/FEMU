@@ -8,5 +8,5 @@ class LcitoolError(Exception):
     """
 
     def __init__(self, message, module_prefix="lcitool"):
+        super().__init__(message)
         self.module_prefix = module_prefix
-        self.message = message

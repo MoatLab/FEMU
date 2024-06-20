@@ -54,7 +54,7 @@ typedef struct {
 } obp_tftp_args_t;
 
 /**
- * Print error with preceeding error code
+ * Print error with preceding error code
  */
 static void netload_error(int errcode, const char *format, ...)
 {
@@ -556,7 +556,7 @@ int netload(char *buffer, int len, char *args_fs, unsigned alen)
 
 	/***********************************************************
 	 *
-	 * Initialize network stuff and retrieve boot informations
+	 * Initialize network stuff and retrieve boot information
 	 *
 	 ***********************************************************/
 

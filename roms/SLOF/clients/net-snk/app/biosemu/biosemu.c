@@ -175,7 +175,7 @@ biosemu(char argc, char **argv)
 	my_wrb(0x000ffe6e, 0xcf);
 
 	// setup BIOS Data Area (0000:04xx, or 0040:00xx)
-	// we currently 0 this area, meaning "we dont have
+	// we currently 0 this area, meaning "we don't have
 	// any hardware" :-) no serial/parallel ports, floppys, ...
 	memset(biosmem + 0x400, 0x0, 0x100);
 
@@ -322,7 +322,7 @@ biosemu(char argc, char **argv)
 		}
 	}
 #endif
-	// check wether the stack is "clean" i.e. containing the HLT instruction
+	// check whether the stack is "clean" i.e. containing the HLT instruction
 	// we pushed before executing, and pointing to the original stack address...
 	// indicating that the initialization probably was successful
 	if ((pop_word() == 0xf4f4) && (M.x86.R_SS == STACK_SEGMENT)

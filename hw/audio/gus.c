@@ -209,7 +209,7 @@ static const VMStateDescription vmstate_gus = {
     .name = "gus",
     .version_id = 2,
     .minimum_version_id = 2,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_INT32 (pos, GUSState),
         VMSTATE_INT32 (left, GUSState),
         VMSTATE_INT32 (shift, GUSState),
@@ -241,13 +241,15 @@ static void gus_realizefn (DeviceState *dev, Error **errp)
     IsaDmaClass *k;
     struct audsettings as;
 
+    if (!AUD_register_card ("gus", &s->card, errp)) {
+        return;
+    }
+
     s->isa_dma = isa_bus_get_dma(bus, s->emu.gusdma);
     if (!s->isa_dma) {
         error_setg(errp, "ISA controller does not support DMA");
         return;
     }
-
-    AUD_register_card ("gus", &s->card);
 
     as.freq = s->freq;
     as.nchannels = 2;

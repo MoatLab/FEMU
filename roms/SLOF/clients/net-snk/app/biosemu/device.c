@@ -28,7 +28,7 @@ typedef struct {
 } __attribute__ ((__packed__)) assigned_address_t;
 
 
-// scan all adresses assigned to the device ("assigned-addresses" and "reg")
+// scan all addresses assigned to the device ("assigned-addresses" and "reg")
 // store in translate_address_array for faster translation using dev_translate_address
 static void
 dev_get_addr_info(void)
@@ -174,7 +174,7 @@ dev_get_device_vendor_id(void)
 		     bios_device.pci_device_id, bios_device.pci_vendor_id);
 }
 
-/* check, wether the device has a valid Expansion ROM, also search the PCI Data Structure and
+/* check whether the device has a valid expansion ROM, also search the PCI Data Structure and
  * any Expansion ROM Header (using dev_scan_exp_header()) for needed information */
 uint8_t
 dev_check_exprom(void)

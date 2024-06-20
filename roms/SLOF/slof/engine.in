@@ -102,7 +102,6 @@ col(-ROLL DUP ?DUP 0BRANCH(9) >R ROT R> SWAP >R 1 - BRANCH(-12) ?DUP 0BRANCH(6) 
 col(2>R R> ROT >R SWAP >R >R)
 col(2R> R> R> R> ROT >R SWAP)
 col(2R@ R> R> R@ OVER >R ROT >R SWAP)
-cod(?PICK)
 
 // Arithmetic.
 col(2* 1 LSHIFT)

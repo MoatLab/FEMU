@@ -369,7 +369,7 @@ e1k_init_receiver(void)
 	e1k_wr32(RCTL, 0);
 
 	/*
-	 * clear receive desciptors and setup buffer pointers
+	 * clear receive descriptors and setup buffer pointers
 	 */
 	for (i = 0; i < E1K_NUM_RX_DESC; i++) {
 		memset((uint8_t *) &m_e1k.m_rx_ring_pst[i], 0,
@@ -421,7 +421,7 @@ e1k_init_transmitter(void)
 	uint64_t addr;
 
 	/*
-	 * clear transmit desciptors and setup buffer pointers
+	 * clear transmit descriptors and setup buffer pointers
 	 */
 	for (i = 0; i < E1K_NUM_TX_DESC; i++) {
 		memset((uint8_t *) &m_e1k.m_tx_ring_pst[i], 0,
@@ -451,7 +451,7 @@ e1k_init_transmitter(void)
 	 */
 	e1k_wr32(TCTL, BIT32(1) |			// enable transmitter
 			BIT32(3) |			// pad short packets
-			((uint32_t) 0x0f <<  4) |	// collision threshhold
+			((uint32_t) 0x0f <<  4) |	// collision threshold
 			((uint32_t) 0x40 << 12));	// collision distance
 }
 

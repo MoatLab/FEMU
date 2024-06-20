@@ -89,6 +89,7 @@ static int nvme_ns_init(NvmeNamespace *ns, Error **errp)
     id_ns->mcl = cpu_to_le32(ns->params.mcl);
     id_ns->msrc = ns->params.msrc;
     id_ns->eui64 = cpu_to_be64(ns->params.eui64);
+    memcpy(&id_ns->nguid, &ns->params.nguid.data, sizeof(id_ns->nguid));
 
     ds = 31 - clz32(ns->blkconf.logical_block_size);
     ms = ns->params.ms;
@@ -107,7 +108,7 @@ static int nvme_ns_init(NvmeNamespace *ns, Error **errp)
 
     ns->pif = ns->params.pif;
 
-    static const NvmeLBAF lbaf[16] = {
+    static const NvmeLBAF defaults[16] = {
         [0] = { .ds =  9           },
         [1] = { .ds =  9, .ms =  8 },
         [2] = { .ds =  9, .ms = 16 },
@@ -120,7 +121,7 @@ static int nvme_ns_init(NvmeNamespace *ns, Error **errp)
 
     ns->nlbaf = 8;
 
-    memcpy(&id_ns->lbaf, &lbaf, sizeof(lbaf));
+    memcpy(&id_ns->lbaf, &defaults, sizeof(defaults));
 
     for (i = 0; i < ns->nlbaf; i++) {
         NvmeLBAF *lbaf = &id_ns->lbaf[i];
@@ -400,8 +401,9 @@ static bool nvme_ns_init_fdp(NvmeNamespace *ns, Error **errp)
     NvmeRuHandle *ruh;
     uint8_t lbafi = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
     g_autofree unsigned int *ruhids = NULL;
-    unsigned int *ruhid;
-    char *r, *p, *token;
+    unsigned int n, m, *ruhid;
+    const char *endptr, *token;
+    char *r, *p;
     uint16_t *ph;
 
     if (!ns->params.fdp.ruhs) {
@@ -438,22 +440,54 @@ static bool nvme_ns_init_fdp(NvmeNamespace *ns, Error **errp)
 
     /* parse the placement handle identifiers */
     while ((token = qemu_strsep(&p, ";")) != NULL) {
-        ns->fdp.nphs += 1;
-        if (ns->fdp.nphs > NVME_FDP_MAXPIDS ||
-            ns->fdp.nphs == endgrp->fdp.nruh) {
-            error_setg(errp, "too many placement handles");
-            free(r);
-            return false;
-        }
-
-        if (qemu_strtoui(token, NULL, 0, ruhid++) < 0) {
+        if (qemu_strtoui(token, &endptr, 0, &n) < 0) {
             error_setg(errp, "cannot parse reclaim unit handle identifier");
             free(r);
             return false;
         }
+
+        m = n;
+
+        /* parse range */
+        if (*endptr == '-') {
+            token = endptr + 1;
+
+            if (qemu_strtoui(token, NULL, 0, &m) < 0) {
+                error_setg(errp, "cannot parse reclaim unit handle identifier");
+                free(r);
+                return false;
+            }
+
+            if (m < n) {
+                error_setg(errp, "invalid reclaim unit handle identifier range");
+                free(r);
+                return false;
+            }
+        }
+
+        for (; n <= m; n++) {
+            if (ns->fdp.nphs++ == endgrp->fdp.nruh) {
+                error_setg(errp, "too many placement handles");
+                free(r);
+                return false;
+            }
+
+            *ruhid++ = n;
+        }
     }
 
     free(r);
+
+    /* verify that the ruhids are unique */
+    for (unsigned int i = 0; i < ns->fdp.nphs; i++) {
+        for (unsigned int j = i + 1; j < ns->fdp.nphs; j++) {
+            if (ruhids[i] == ruhids[j]) {
+                error_setg(errp, "duplicate reclaim unit handle identifier: %u",
+                           ruhids[i]);
+                return false;
+            }
+        }
+    }
 
     ph = ns->fdp.phs = g_new(uint16_t, ns->fdp.nphs);
 
@@ -764,6 +798,7 @@ static Property nvme_ns_props[] = {
     DEFINE_PROP_BOOL("shared", NvmeNamespace, params.shared, true),
     DEFINE_PROP_UINT32("nsid", NvmeNamespace, params.nsid, 0),
     DEFINE_PROP_UUID_NODEFAULT("uuid", NvmeNamespace, params.uuid),
+    DEFINE_PROP_NGUID_NODEFAULT("nguid", NvmeNamespace, params.nguid),
     DEFINE_PROP_UINT64("eui64", NvmeNamespace, params.eui64, 0),
     DEFINE_PROP_UINT16("ms", NvmeNamespace, params.ms, 0),
     DEFINE_PROP_UINT8("mset", NvmeNamespace, params.mset, 0),

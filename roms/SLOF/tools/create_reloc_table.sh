@@ -37,7 +37,7 @@ while [ $# -gt 0 ] ; do
 done
 
 if [ -z $LDSFILE ]; then
-	echo "Please specifiy an lds file with the --lds option"
+	echo "Please specify an lds file with the --lds option"
 	exit 42
 fi
 

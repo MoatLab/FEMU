@@ -71,6 +71,12 @@ void hmp_hotpluggable_cpus(Monitor *mon, const QDict *qdict)
         if (c->has_node_id) {
             monitor_printf(mon, "    node-id: \"%" PRIu64 "\"\n", c->node_id);
         }
+        if (c->has_drawer_id) {
+            monitor_printf(mon, "    drawer-id: \"%" PRIu64 "\"\n", c->drawer_id);
+        }
+        if (c->has_book_id) {
+            monitor_printf(mon, "    book-id: \"%" PRIu64 "\"\n", c->book_id);
+        }
         if (c->has_socket_id) {
             monitor_printf(mon, "    socket-id: \"%" PRIu64 "\"\n", c->socket_id);
         }
@@ -247,6 +253,7 @@ void hmp_info_memory_devices(Monitor *mon, const QDict *qdict)
     MemoryDeviceInfo *value;
     PCDIMMDeviceInfo *di;
     SgxEPCDeviceInfo *se;
+    HvBalloonDeviceInfo *hi;
 
     for (info = info_list; info; info = info->next) {
         value = info->value;
@@ -303,6 +310,20 @@ void hmp_info_memory_devices(Monitor *mon, const QDict *qdict)
                 monitor_printf(mon, "  size: %" PRIu64 "\n", se->size);
                 monitor_printf(mon, "  node: %" PRId64 "\n", se->node);
                 monitor_printf(mon, "  memdev: %s\n", se->memdev);
+                break;
+            case MEMORY_DEVICE_INFO_KIND_HV_BALLOON:
+                hi = value->u.hv_balloon.data;
+                monitor_printf(mon, "Memory device [%s]: \"%s\"\n",
+                               MemoryDeviceInfoKind_str(value->type),
+                               hi->id ? hi->id : "");
+                if (hi->has_memaddr) {
+                    monitor_printf(mon, "  memaddr: 0x%" PRIx64 "\n",
+                                   hi->memaddr);
+                }
+                monitor_printf(mon, "  max-size: %" PRIu64 "\n", hi->max_size);
+                if (hi->memdev) {
+                    monitor_printf(mon, "  memdev: %s\n", hi->memdev);
+                }
                 break;
             default:
                 g_assert_not_reached();

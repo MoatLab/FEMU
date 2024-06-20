@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Copyright (C) 2009 Red Hat, Inc.
+# Copyright Red Hat
 # Copyright (c) 2000-2006 Silicon Graphics, Inc.  All Rights Reserved.
 #
 # This program is free software; you can redistribute it and/or modify
@@ -717,6 +717,7 @@ _img_info()
             -e "s#$IMGPROTO:$TEST_DIR#TEST_DIR#g" \
             -e "s#$TEST_DIR#TEST_DIR#g" \
             -e "s#$SOCK_DIR/fuse-#TEST_DIR/#g" \
+            -e "s#$SOCK_DIR/#SOCK_DIR/#g" \
             -e "s#$IMGFMT#IMGFMT#g" \
             -e 's/\(compression type: \)\(zlib\|zstd\)/\1COMPRESSION_TYPE/' \
             -e "/^disk size:/ D" \
@@ -978,10 +979,15 @@ _require_drivers()
 #
 _require_large_file()
 {
-    if ! truncate --size="$1" "$TEST_IMG"; then
+    if [ -z "$TEST_IMG_FILE" ]; then
+        FILENAME="$TEST_IMG"
+    else
+        FILENAME="$TEST_IMG_FILE"
+    fi
+    if ! truncate --size="$1" "$FILENAME"; then
         _notrun "file system on $TEST_DIR does not support large enough files"
     fi
-    rm "$TEST_IMG"
+    rm "$FILENAME"
 }
 
 # Check that a set of devices is available in the QEMU binary

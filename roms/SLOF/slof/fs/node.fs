@@ -349,7 +349,7 @@ d# 10 CONSTANT MAX-ALIAS
     ELSE 2drop list-alias THEN THEN ;
 
 \ sub-alias does a single iteration of an alias at the beginning od dev path
-\ expression. de-alias will repeat this until all indirect alising is resolved
+\ expression. de-alias will repeat this until all indirect aliasing is resolved
 : sub-alias ( arg-str arg-len -- arg' len' | false )
    2dup
    2dup [char] / findchar ?dup IF ELSE 2dup [char] : findchar THEN

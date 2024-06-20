@@ -40,6 +40,7 @@
 #include "hw/irq.h"
 #include "sysemu/kvm.h"
 #include "sysemu/reset.h"
+#include "target/ppc/cpu.h"
 
 void icp_pic_print_info(ICPState *icp, Monitor *mon)
 {
@@ -273,7 +274,7 @@ static const VMStateDescription vmstate_icp_server = {
     .minimum_version_id = 1,
     .pre_save = icp_pre_save,
     .post_load = icp_post_load,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         /* Sanity check */
         VMSTATE_UINT32(xirr, ICPState),
         VMSTATE_UINT8(pending_priority, ICPState),
@@ -335,8 +336,22 @@ static void icp_realize(DeviceState *dev, Error **errp)
             return;
         }
     }
-
-    vmstate_register(NULL, icp->cs->cpu_index, &vmstate_icp_server, icp);
+    /*
+     * The way that pre_2_10_icp is handling is really, really hacky.
+     * We used to have here this call:
+     *
+     * vmstate_register(NULL, icp->cs->cpu_index, &vmstate_icp_server, icp);
+     *
+     * But we were doing:
+     *     pre_2_10_vmstate_register_dummy_icp()
+     *     this vmstate_register()
+     *     pre_2_10_vmstate_unregister_dummy_icp()
+     *
+     * So for a short amount of time we had to vmstate entries with
+     * the same name.  This fixes it.
+     */
+    vmstate_replace_hack_for_ppc(NULL, icp->cs->cpu_index,
+                                 &vmstate_icp_server, icp);
 }
 
 static void icp_unrealize(DeviceState *dev)
@@ -651,7 +666,7 @@ static const VMStateDescription vmstate_ics_irq = {
     .name = "ics/irq",
     .version_id = 2,
     .minimum_version_id = 1,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT32(server, ICSIRQState),
         VMSTATE_UINT8(priority, ICSIRQState),
         VMSTATE_UINT8(saved_priority, ICSIRQState),
@@ -667,7 +682,7 @@ static const VMStateDescription vmstate_ics = {
     .minimum_version_id = 1,
     .pre_save = ics_pre_save,
     .post_load = ics_post_load,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         /* Sanity check */
         VMSTATE_UINT32_EQUAL(nr_irqs, ICSState, NULL),
 

@@ -9,7 +9,7 @@ import shutil
 import logging
 import subprocess
 
-from abc import ABC
+from abc import ABC, abstractmethod
 from pathlib import Path
 
 from lcitool import LcitoolError
@@ -21,8 +21,18 @@ class ContainerError(LcitoolError):
     """Global exception type for this module."""
 
     def __init__(self, message):
-        super().__init__(self)
-        self.message = self.__class__.__name__ + ": " + message
+        super().__init__(message, "Container")
+
+
+class ContainerExecError(ContainerError):
+    """ Thrown whenever an error occurs during container engine execution. """
+
+    def __init__(self, rc, message=None):
+        if message is None:
+            message = f"Process exited with error code {rc}"
+
+        super().__init__(message)
+        self.returncode = rc
 
 
 class Container(ABC):
@@ -34,16 +44,12 @@ class Container(ABC):
         else:
             self.engine = self.__class__.__name__.lower()
 
-        self._run_exception = None
-        self._build_exception = None
-
     @staticmethod
-    def _exec(command, _exception=ContainerError, **kwargs):
+    def _exec(command, **kwargs):
         """
         Execute command in a subprocess.run call.
 
         :param command: a list of command to run in the process
-        :param _exception: an instance of ContainerError
         :param **kwargs: arguments passed to subprocess.run()
 
         :returns: an instance of subprocess.CompletedProcess
@@ -53,7 +59,7 @@ class Container(ABC):
             proc = subprocess.run(args=command, encoding="utf-8",
                                   **kwargs)
         except subprocess.CalledProcessError as ex:
-            raise _exception(str(ex.returncode))
+            raise ContainerExecError(ex.returncode, ex.stderr)
 
         return proc
 
@@ -150,6 +156,7 @@ class Container(ABC):
         ]
         """
 
+        engine_args = []
         passwd_entry = self._passwd(user)
         user_home = passwd_entry[5]
 
@@ -162,20 +169,39 @@ class Container(ABC):
         #             instead of root:root
         user = f"{uid}:{gid}"
 
-        # We do not directly mount /etc/{passwd,group} as Docker
-        # is liable to mess with SELinux labelling which will
-        # then prevent the host accessing them. And podman cannot
-        # relabel the files due to it running rootless. So
-        # copying them first is safer and less error-prone.
-        passwd = shutil.copy2(
-            "/etc/passwd", Path(tempdir, 'passwd.copy')
-        )
-        group = shutil.copy2(
-            "/etc/group", Path(tempdir, 'group.copy')
-        )
+        if uid != 0:
+            # We mount these only when running as user other than root inside
+            # the container, because standard operations over /etc/passwd and
+            # /etc/group will fail due to the volumes being bind mounted. We
+            # shouldn't need these when run as root.
+            #
+            # We do not directly mount /etc/{passwd,group} as Docker
+            # is liable to mess with SELinux labelling which will
+            # then prevent the host accessing them. And podman cannot
+            # relabel the files due to it running rootless. So
+            # copying them first is safer and less error-prone.
 
-        passwd_mount = f"{passwd}:/etc/passwd:ro,z"
-        group_mount = f"{group}:/etc/group:ro,z"
+            passwd = shutil.copy2(
+                "/etc/passwd", Path(tempdir, 'passwd.copy')
+            )
+            group = shutil.copy2(
+                "/etc/group", Path(tempdir, 'group.copy')
+            )
+
+            passwd_mount = f"{passwd}:/etc/passwd:ro,z"
+            group_mount = f"{group}:/etc/group:ro,z"
+
+            # We mount a temporary directory as the user's home in
+            # order to set correct home directory permissions.
+            home = Path(tempdir, "home")
+            home.mkdir(exist_ok=True)
+
+            home_mount = f"{home}:{user_home}:z"
+            engine_args.extend([
+                ("--volume", passwd_mount),
+                ("--volume", group_mount),
+                ("--volume", home_mount),
+            ])
 
         # Docker containers can have very large ulimits
         # for nofiles - as much as 1048576. This makes
@@ -183,42 +209,36 @@ class Container(ABC):
         ulimit_files = 1024
         ulimit = f"nofile={ulimit_files}:{ulimit_files}"
 
-        cap_add = "SYS_PTRACE"
-
-        engine_args_ = [
-            "--user", user,
-            "--volume", passwd_mount,
-            "--volume", group_mount,
-            "--ulimit", ulimit,
-            "--cap-add", cap_add
-        ]
+        engine_args.extend([
+            ("--user", user),
+            ("--workdir", f"{user_home}"),
+            ("--ulimit", ulimit),
+            ("--cap-add", "SYS_PTRACE"),
+        ])
 
         if script:
-            script_file = shutil.copy2(
-                script, Path(tempdir, "script")
-            )
+            script_file = Path(shutil.copy2(script, Path(tempdir, "script")))
+
+            # make the script an executable file
+            script_file.chmod(script_file.stat().st_mode | 0o111)
+
             script_mount = f"{script_file}:{user_home}/script:z"
-            engine_args_.extend([
-                "--volume", script_mount
+            engine_args.extend([
+                ("--volume", script_mount)
             ])
 
         if datadir:
             datadir_mount = f"{datadir}:{user_home}/datadir:z"
-            engine_args_.extend([
-                "--volume", datadir_mount,
+            engine_args.extend([
+                ("--volume", datadir_mount),
             ])
 
         if env:
-            envs = ["--env=" + i for i in env]
-            engine_args_.extend(envs)
+            envs = [("--env=" + i,) for i in env]
+            engine_args.extend(envs)
 
-        if datadir or script:
-            engine_args_.extend([
-                "--workdir", f"{user_home}",
-            ])
-
-        log.debug(f"Container options: {engine_args_}")
-        return engine_args_
+        log.debug(f"Container options: {engine_args}")
+        return engine_args
 
     def rmi(self, image):
         """
@@ -256,6 +276,29 @@ class Container(ABC):
         log.debug(f"{self.engine} images\n%s", img.stdout)
         return img.stdout
 
+    @abstractmethod
+    def image_exists(self):
+        pass
+
+    def _run(self, image, container_cmd, engine_extra_args, **kwargs):
+        tag = "latest"
+        if ":" in image:
+            image, tag = image.split(":")
+
+        if not self.image_exists(image, tag):
+            raise ContainerError(
+                f"Image '{image}:{tag}' not found in local cache. "
+                "Build it or pull from registry first."
+            )
+
+        cmd = [self.engine, "run"] + engine_extra_args
+        cmd.extend([image, container_cmd])
+
+        log.debug(f"Run command: {cmd}")
+        run = self._exec(cmd, check=True, **kwargs)
+        return run.returncode
+
+    @abstractmethod
     def run(self, image, container_cmd, user, tempdir, env=None,
             datadir=None, script=None, **kwargs):
         """
@@ -293,24 +336,15 @@ class Container(ABC):
         #   --volume  to pass in the cloned git repo & config
         #   --ulimit  lower files limit for performance reasons
         #   --interactive
-        #   --tty     Ensure we have ability to Ctrl-C the build
 
-        cmd_args = ["--rm", "--interactive", "--tty"]
+        engine_extra_args = ["--rm", "--interactive"]
 
         build_args = self._build_args(
             user, tempdir, env=env, datadir=datadir, script=script
         )
-        cmd_args.extend(build_args)
+        engine_extra_args.extend([item for tuple_ in build_args for item in tuple_])
 
-        cmd = [self.engine, "run"]
-        cmd.extend(cmd_args)
-        cmd.extend([image, container_cmd])
-
-        log.debug(f"Run command: {cmd}")
-        run = self._exec(cmd,
-                         _exception=self._run_exception,
-                         check=True, **kwargs)
-        return run.returncode
+        return self._run(image, container_cmd, engine_extra_args, **kwargs)
 
     def build(self, filepath, tempdir, tag, **kwargs):
         """
@@ -347,7 +381,24 @@ class Container(ABC):
         cmd.extend(cmd_args)
 
         log.debug(f"Build command: {cmd}")
-        build = self._exec(cmd,
-                           _exception=self._build_exception,
-                           check=True, **kwargs)
+        build = self._exec(cmd, check=True, **kwargs)
         return build.returncode
+
+    @abstractmethod
+    def shell(self, image, user, tempdir, env=None, datadir=None, script=None,
+              **kwargs):
+        """
+        Spawns an interactive shell inside the container.
+
+        This method is essentially just a convenience alternative over plain
+        Container.run() with 'container_cmd' being '/bin/sh'. The rest of the
+        arguments bear the exact same semantics.
+        """
+
+        engine_extra_args = ["--rm", "--interactive", "--tty"]
+
+        build_args = self._build_args(
+            user, tempdir, env=env, datadir=datadir, script=script
+        )
+        engine_extra_args.extend([item for tuple_ in build_args for item in tuple_])
+        return self._run(image, "/bin/sh", engine_extra_args, **kwargs)

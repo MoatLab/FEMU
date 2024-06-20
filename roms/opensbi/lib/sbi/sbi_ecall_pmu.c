@@ -18,9 +18,8 @@
 #include <sbi/riscv_asm.h>
 
 static int sbi_ecall_pmu_handler(unsigned long extid, unsigned long funcid,
-				 const struct sbi_trap_regs *regs,
-				 unsigned long *out_val,
-				 struct sbi_trap_info *out_trap)
+				 struct sbi_trap_regs *regs,
+				 struct sbi_ecall_return *out)
 {
 	int ret = 0;
 	uint64_t temp;
@@ -29,12 +28,12 @@ static int sbi_ecall_pmu_handler(unsigned long extid, unsigned long funcid,
 	case SBI_EXT_PMU_NUM_COUNTERS:
 		ret = sbi_pmu_num_ctr();
 		if (ret >= 0) {
-			*out_val = ret;
+			out->value = ret;
 			ret = 0;
 		}
 		break;
 	case SBI_EXT_PMU_COUNTER_GET_INFO:
-		ret = sbi_pmu_ctr_get_info(regs->a0, out_val);
+		ret = sbi_pmu_ctr_get_info(regs->a0, &out->value);
 		break;
 	case SBI_EXT_PMU_COUNTER_CFG_MATCH:
 #if __riscv_xlen == 32
@@ -45,14 +44,22 @@ static int sbi_ecall_pmu_handler(unsigned long extid, unsigned long funcid,
 		ret = sbi_pmu_ctr_cfg_match(regs->a0, regs->a1, regs->a2,
 					    regs->a3, temp);
 		if (ret >= 0) {
-			*out_val = ret;
+			out->value = ret;
 			ret = 0;
 		}
 
 		break;
 	case SBI_EXT_PMU_COUNTER_FW_READ:
 		ret = sbi_pmu_ctr_fw_read(regs->a0, &temp);
-		*out_val = temp;
+		out->value = temp;
+		break;
+	case SBI_EXT_PMU_COUNTER_FW_READ_HI:
+#if __riscv_xlen == 32
+		ret = sbi_pmu_ctr_fw_read(regs->a0, &temp);
+		out->value = temp >> 32;
+#else
+		out->value = 0;
+#endif
 		break;
 	case SBI_EXT_PMU_COUNTER_START:
 
@@ -66,23 +73,25 @@ static int sbi_ecall_pmu_handler(unsigned long extid, unsigned long funcid,
 	case SBI_EXT_PMU_COUNTER_STOP:
 		ret = sbi_pmu_ctr_stop(regs->a0, regs->a1, regs->a2);
 		break;
+	case SBI_EXT_PMU_SNAPSHOT_SET_SHMEM:
+		/* fallthrough as OpenSBI doesn't support snapshot yet */
 	default:
 		ret = SBI_ENOTSUPP;
-	};
+	}
 
 	return ret;
 }
 
-static int sbi_ecall_pmu_probe(unsigned long extid, unsigned long *out_val)
+struct sbi_ecall_extension ecall_pmu;
+
+static int sbi_ecall_pmu_register_extensions(void)
 {
-	/* PMU extension is always enabled */
-	*out_val = 1;
-	return 0;
+	return sbi_ecall_register_extension(&ecall_pmu);
 }
 
 struct sbi_ecall_extension ecall_pmu = {
-	.extid_start = SBI_EXT_PMU,
-	.extid_end = SBI_EXT_PMU,
-	.handle = sbi_ecall_pmu_handler,
-	.probe = sbi_ecall_pmu_probe,
+	.extid_start		= SBI_EXT_PMU,
+	.extid_end		= SBI_EXT_PMU,
+	.register_extensions	= sbi_ecall_pmu_register_extensions,
+	.handle			= sbi_ecall_pmu_handler,
 };

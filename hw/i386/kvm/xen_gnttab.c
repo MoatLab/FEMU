@@ -25,6 +25,7 @@
 #include "hw/xen/xen_backend_ops.h"
 #include "xen_overlay.h"
 #include "xen_gnttab.h"
+#include "xen_primary_console.h"
 
 #include "sysemu/kvm.h"
 #include "sysemu/kvm_xen.h"
@@ -126,7 +127,7 @@ static const VMStateDescription xen_gnttab_vmstate = {
     .minimum_version_id = 1,
     .needed = xen_gnttab_is_needed,
     .post_load = xen_gnttab_post_load,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT32(nr_frames, XenGnttabState),
         VMSTATE_VARRAY_UINT32(gnt_frame_gpas, XenGnttabState, nr_frames, 0,
                               vmstate_info_uint64, uint64_t),
@@ -175,7 +176,7 @@ int xen_gnttab_map_page(uint64_t idx, uint64_t gfn)
         return -EINVAL;
     }
 
-    QEMU_IOTHREAD_LOCK_GUARD();
+    BQL_LOCK_GUARD();
     QEMU_LOCK_GUARD(&s->gnt_lock);
 
     xen_overlay_do_map_page(&s->gnt_aliases[idx], gpa);
@@ -537,11 +538,13 @@ int xen_gnttab_reset(void)
     s->nr_frames = 0;
 
     memset(s->entries.v1, 0, XEN_PAGE_SIZE * s->max_frames);
-
     s->entries.v1[GNTTAB_RESERVED_XENSTORE].flags = GTF_permit_access;
     s->entries.v1[GNTTAB_RESERVED_XENSTORE].frame = XEN_SPECIAL_PFN(XENSTORE);
 
-    memset(s->map_track, 0, s->max_frames * ENTRIES_PER_FRAME_V1);
+    if (xen_primary_console_get_pfn()) {
+        s->entries.v1[GNTTAB_RESERVED_CONSOLE].flags = GTF_permit_access;
+        s->entries.v1[GNTTAB_RESERVED_CONSOLE].frame = XEN_SPECIAL_PFN(CONSOLE);
+    }
 
     return 0;
 }

@@ -1,6 +1,7 @@
 #include "qemu/osdep.h"
 #include "hw/acpi/memory_hotplug.h"
 #include "hw/mem/pc-dimm.h"
+#include "hw/boards.h"
 #include "hw/qdev-core.h"
 #include "migration/vmstate.h"
 #include "trace.h"
@@ -316,7 +317,7 @@ static const VMStateDescription vmstate_memhp_sts = {
     .name = "memory hotplug device state",
     .version_id = 1,
     .minimum_version_id = 1,
-    .fields      = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_BOOL(is_enabled, MemStatus),
         VMSTATE_BOOL(is_inserting, MemStatus),
         VMSTATE_UINT32(ost_event, MemStatus),
@@ -329,7 +330,7 @@ const VMStateDescription vmstate_memory_hotplug = {
     .name = "memory hotplug state",
     .version_id = 1,
     .minimum_version_id = 1,
-    .fields      = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT32(selector, MemHotplugState),
         VMSTATE_STRUCT_VARRAY_POINTER_UINT32(devs, MemHotplugState, dev_count,
                                              vmstate_memhp_sts, MemStatus),

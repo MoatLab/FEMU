@@ -517,7 +517,7 @@ static const VMStateDescription vmstate_i8257_regs = {
     .name = "dma_regs",
     .version_id = 1,
     .minimum_version_id = 1,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_INT32_ARRAY(now, I8257Regs, 2),
         VMSTATE_UINT16_ARRAY(base, I8257Regs, 2),
         VMSTATE_UINT8(mode, I8257Regs),
@@ -542,7 +542,7 @@ static const VMStateDescription vmstate_i8257 = {
     .version_id = 1,
     .minimum_version_id = 1,
     .post_load = i8257_post_load,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT8(command, I8257State),
         VMSTATE_UINT8(mask, I8257State),
         VMSTATE_UINT8(flip_flop, I8257State),
@@ -632,12 +632,13 @@ static void i8257_register_types(void)
 
 type_init(i8257_register_types)
 
-void i8257_dma_init(ISABus *bus, bool high_page_enable)
+void i8257_dma_init(Object *parent, ISABus *bus, bool high_page_enable)
 {
     ISADevice *isa1, *isa2;
     DeviceState *d;
 
     isa1 = isa_new(TYPE_I8257);
+    object_property_add_child(parent, "dma[*]", OBJECT(isa1));
     d = DEVICE(isa1);
     qdev_prop_set_int32(d, "base", 0x00);
     qdev_prop_set_int32(d, "page-base", 0x80);
@@ -646,6 +647,7 @@ void i8257_dma_init(ISABus *bus, bool high_page_enable)
     isa_realize_and_unref(isa1, bus, &error_fatal);
 
     isa2 = isa_new(TYPE_I8257);
+    object_property_add_child(parent, "dma[*]", OBJECT(isa2));
     d = DEVICE(isa2);
     qdev_prop_set_int32(d, "base", 0xc0);
     qdev_prop_set_int32(d, "page-base", 0x88);

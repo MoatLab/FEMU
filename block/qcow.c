@@ -124,8 +124,10 @@ static int qcow_open(BlockDriverState *bs, QDict *options, int flags,
 
     ret = bdrv_open_file_child(NULL, options, "file", bs, errp);
     if (ret < 0) {
-        goto fail;
+        goto fail_unlocked;
     }
+
+    bdrv_graph_rdlock_main_loop();
 
     ret = bdrv_pread(bs->file, 0, sizeof(header), &header, 0);
     if (ret < 0) {
@@ -304,18 +306,21 @@ static int qcow_open(BlockDriverState *bs, QDict *options, int flags,
     error_setg(&s->migration_blocker, "The qcow format used by node '%s' "
                "does not support live migration",
                bdrv_get_device_or_node_name(bs));
-    ret = migrate_add_blocker(s->migration_blocker, errp);
+
+    ret = migrate_add_blocker_normal(&s->migration_blocker, errp);
     if (ret < 0) {
-        error_free(s->migration_blocker);
         goto fail;
     }
 
     qobject_unref(encryptopts);
     qapi_free_QCryptoBlockOpenOptions(crypto_opts);
     qemu_co_mutex_init(&s->lock);
+    bdrv_graph_rdunlock_main_loop();
     return 0;
 
- fail:
+fail:
+    bdrv_graph_rdunlock_main_loop();
+fail_unlocked:
     g_free(s->l1_table);
     qemu_vfree(s->l2_cache);
     g_free(s->cluster_cache);
@@ -370,7 +375,7 @@ get_cluster_offset(BlockDriverState *bs, uint64_t offset, int allocate,
         if (!allocate)
             return 0;
         /* allocate a new l2 entry */
-        l2_offset = bdrv_getlength(bs->file->bs);
+        l2_offset = bdrv_co_getlength(bs->file->bs);
         if (l2_offset < 0) {
             return l2_offset;
         }
@@ -379,7 +384,7 @@ get_cluster_offset(BlockDriverState *bs, uint64_t offset, int allocate,
         /* update the L1 entry */
         s->l1_table[l1_index] = l2_offset;
         tmp = cpu_to_be64(l2_offset);
-        BLKDBG_EVENT(bs->file, BLKDBG_L1_UPDATE);
+        BLKDBG_CO_EVENT(bs->file, BLKDBG_L1_UPDATE);
         ret = bdrv_co_pwrite_sync(bs->file,
                                   s->l1_table_offset + l1_index * sizeof(tmp),
                                   sizeof(tmp), &tmp, 0);
@@ -410,7 +415,7 @@ get_cluster_offset(BlockDriverState *bs, uint64_t offset, int allocate,
         }
     }
     l2_table = s->l2_cache + (min_index << s->l2_bits);
-    BLKDBG_EVENT(bs->file, BLKDBG_L2_LOAD);
+    BLKDBG_CO_EVENT(bs->file, BLKDBG_L2_LOAD);
     if (new_l2_table) {
         memset(l2_table, 0, s->l2_size * sizeof(uint64_t));
         ret = bdrv_co_pwrite_sync(bs->file, l2_offset,
@@ -434,7 +439,7 @@ get_cluster_offset(BlockDriverState *bs, uint64_t offset, int allocate,
         ((cluster_offset & QCOW_OFLAG_COMPRESSED) && allocate == 1)) {
         if (!allocate)
             return 0;
-        BLKDBG_EVENT(bs->file, BLKDBG_CLUSTER_ALLOC);
+        BLKDBG_CO_EVENT(bs->file, BLKDBG_CLUSTER_ALLOC);
         assert(QEMU_IS_ALIGNED(n_start | n_end, BDRV_SECTOR_SIZE));
         /* allocate a new cluster */
         if ((cluster_offset & QCOW_OFLAG_COMPRESSED) &&
@@ -445,20 +450,20 @@ get_cluster_offset(BlockDriverState *bs, uint64_t offset, int allocate,
             if (decompress_cluster(bs, cluster_offset) < 0) {
                 return -EIO;
             }
-            cluster_offset = bdrv_getlength(bs->file->bs);
+            cluster_offset = bdrv_co_getlength(bs->file->bs);
             if ((int64_t) cluster_offset < 0) {
                 return cluster_offset;
             }
             cluster_offset = QEMU_ALIGN_UP(cluster_offset, s->cluster_size);
             /* write the cluster content */
-            BLKDBG_EVENT(bs->file, BLKDBG_WRITE_AIO);
+            BLKDBG_CO_EVENT(bs->file, BLKDBG_WRITE_AIO);
             ret = bdrv_co_pwrite(bs->file, cluster_offset, s->cluster_size,
                                  s->cluster_cache, 0);
             if (ret < 0) {
                 return ret;
             }
         } else {
-            cluster_offset = bdrv_getlength(bs->file->bs);
+            cluster_offset = bdrv_co_getlength(bs->file->bs);
             if ((int64_t) cluster_offset < 0) {
                 return cluster_offset;
             }
@@ -491,7 +496,7 @@ get_cluster_offset(BlockDriverState *bs, uint64_t offset, int allocate,
                                                       NULL) < 0) {
                                 return -EIO;
                             }
-                            BLKDBG_EVENT(bs->file, BLKDBG_WRITE_AIO);
+                            BLKDBG_CO_EVENT(bs->file, BLKDBG_WRITE_AIO);
                             ret = bdrv_co_pwrite(bs->file, cluster_offset + i,
                                                  BDRV_SECTOR_SIZE,
                                                  s->cluster_data, 0);
@@ -510,9 +515,9 @@ get_cluster_offset(BlockDriverState *bs, uint64_t offset, int allocate,
         tmp = cpu_to_be64(cluster_offset);
         l2_table[l2_index] = tmp;
         if (allocate == 2) {
-            BLKDBG_EVENT(bs->file, BLKDBG_L2_UPDATE_COMPRESSED);
+            BLKDBG_CO_EVENT(bs->file, BLKDBG_L2_UPDATE_COMPRESSED);
         } else {
-            BLKDBG_EVENT(bs->file, BLKDBG_L2_UPDATE);
+            BLKDBG_CO_EVENT(bs->file, BLKDBG_L2_UPDATE);
         }
         ret = bdrv_co_pwrite_sync(bs->file, l2_offset + l2_index * sizeof(tmp),
                                   sizeof(tmp), &tmp, 0);
@@ -549,7 +554,10 @@ qcow_co_block_status(BlockDriverState *bs, bool want_zero,
     if (!cluster_offset) {
         return 0;
     }
-    if ((cluster_offset & QCOW_OFLAG_COMPRESSED) || s->crypto) {
+    if (cluster_offset & QCOW_OFLAG_COMPRESSED) {
+        return BDRV_BLOCK_DATA | BDRV_BLOCK_COMPRESSED;
+    }
+    if (s->crypto) {
         return BDRV_BLOCK_DATA;
     }
     *map = cluster_offset | index_in_cluster;
@@ -595,7 +603,7 @@ decompress_cluster(BlockDriverState *bs, uint64_t cluster_offset)
     if (s->cluster_cache_offset != coffset) {
         csize = cluster_offset >> (63 - s->cluster_bits);
         csize &= (s->cluster_size - 1);
-        BLKDBG_EVENT(bs->file, BLKDBG_READ_COMPRESSED);
+        BLKDBG_CO_EVENT(bs->file, BLKDBG_READ_COMPRESSED);
         ret = bdrv_co_pread(bs->file, coffset, csize, s->cluster_data, 0);
         if (ret < 0)
             return -1;
@@ -657,7 +665,7 @@ qcow_co_preadv(BlockDriverState *bs, int64_t offset, int64_t bytes,
                 /* read from the base image */
                 qemu_co_mutex_unlock(&s->lock);
                 /* qcow2 emits this on bs->file instead of bs->backing */
-                BLKDBG_EVENT(bs->file, BLKDBG_READ_BACKING_AIO);
+                BLKDBG_CO_EVENT(bs->file, BLKDBG_READ_BACKING_AIO);
                 ret = bdrv_co_pread(bs->backing, offset, n, buf, 0);
                 qemu_co_mutex_lock(&s->lock);
                 if (ret < 0) {
@@ -680,7 +688,7 @@ qcow_co_preadv(BlockDriverState *bs, int64_t offset, int64_t bytes,
                 break;
             }
             qemu_co_mutex_unlock(&s->lock);
-            BLKDBG_EVENT(bs->file, BLKDBG_READ_AIO);
+            BLKDBG_CO_EVENT(bs->file, BLKDBG_READ_AIO);
             ret = bdrv_co_pread(bs->file, cluster_offset + offset_in_cluster,
                                 n, buf, 0);
             qemu_co_mutex_lock(&s->lock);
@@ -765,7 +773,7 @@ qcow_co_pwritev(BlockDriverState *bs, int64_t offset, int64_t bytes,
         }
 
         qemu_co_mutex_unlock(&s->lock);
-        BLKDBG_EVENT(bs->file, BLKDBG_WRITE_AIO);
+        BLKDBG_CO_EVENT(bs->file, BLKDBG_WRITE_AIO);
         ret = bdrv_co_pwrite(bs->file, cluster_offset + offset_in_cluster,
                              n, buf, 0);
         qemu_co_mutex_lock(&s->lock);
@@ -796,12 +804,11 @@ static void qcow_close(BlockDriverState *bs)
     g_free(s->cluster_cache);
     g_free(s->cluster_data);
 
-    migrate_del_blocker(s->migration_blocker);
-    error_free(s->migration_blocker);
+    migrate_del_blocker(&s->migration_blocker);
 }
 
-static int coroutine_fn qcow_co_create(BlockdevCreateOptions *opts,
-                                       Error **errp)
+static int coroutine_fn GRAPH_UNLOCKED
+qcow_co_create(BlockdevCreateOptions *opts, Error **errp)
 {
     BlockdevCreateOptionsQcow *qcow_opts;
     int header_size, backing_filename_len, l1_size, shift, i;
@@ -878,7 +885,7 @@ static int coroutine_fn qcow_co_create(BlockdevCreateOptions *opts,
         header.crypt_method = cpu_to_be32(QCOW_CRYPT_AES);
 
         crypto = qcrypto_block_create(qcow_opts->encrypt, "encrypt.",
-                                      NULL, NULL, NULL, errp);
+                                      NULL, NULL, NULL, 0, errp);
         if (!crypto) {
             ret = -EINVAL;
             goto exit;
@@ -915,13 +922,13 @@ static int coroutine_fn qcow_co_create(BlockdevCreateOptions *opts,
     g_free(tmp);
     ret = 0;
 exit:
-    blk_unref(qcow_blk);
-    bdrv_unref(bs);
+    blk_co_unref(qcow_blk);
+    bdrv_co_unref(bs);
     qcrypto_block_free(crypto);
     return ret;
 }
 
-static int coroutine_fn GRAPH_RDLOCK
+static int coroutine_fn GRAPH_UNLOCKED
 qcow_co_create_opts(BlockDriver *drv, const char *filename,
                     QemuOpts *opts, Error **errp)
 {
@@ -1015,12 +1022,12 @@ qcow_co_create_opts(BlockDriver *drv, const char *filename,
 fail:
     g_free(backing_fmt);
     qobject_unref(qdict);
-    bdrv_unref(bs);
+    bdrv_co_unref(bs);
     qapi_free_BlockdevCreateOptions(create_options);
     return ret;
 }
 
-static int qcow_make_empty(BlockDriverState *bs)
+static int GRAPH_RDLOCK qcow_make_empty(BlockDriverState *bs)
 {
     BDRVQcowState *s = bs->opaque;
     uint32_t l1_length = s->l1_size * sizeof(uint64_t);
@@ -1114,7 +1121,7 @@ qcow_co_pwritev_compressed(BlockDriverState *bs, int64_t offset, int64_t bytes,
     }
     cluster_offset &= s->cluster_offset_mask;
 
-    BLKDBG_EVENT(bs->file, BLKDBG_WRITE_COMPRESSED);
+    BLKDBG_CO_EVENT(bs->file, BLKDBG_WRITE_COMPRESSED);
     ret = bdrv_co_pwrite(bs->file, cluster_offset, out_len, out_buf, 0);
     if (ret < 0) {
         goto fail;

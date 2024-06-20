@@ -211,14 +211,14 @@ static void out_cb(void *opaque, int avail)
                     AUD_set_active_out(s->vo, 0);
                 }
                 if (c->type & STAT_EOL) {
-                    pci_set_irq(&s->dev, 1);
+                    via_isa_set_irq(&s->dev, 0, 1);
                 }
             }
             if (CLEN_IS_FLAG(c)) {
                 c->stat |= STAT_FLAG;
                 c->stat |= STAT_PAUSED;
                 if (c->type & STAT_FLAG) {
-                    pci_set_irq(&s->dev, 1);
+                    via_isa_set_irq(&s->dev, 0, 1);
                 }
             }
             if (CLEN_IS_STOP(c)) {
@@ -305,13 +305,13 @@ static void sgd_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
         if (val & STAT_EOL) {
             s->aur.stat &= ~(STAT_EOL | STAT_PAUSED);
             if (s->aur.type & STAT_EOL) {
-                pci_set_irq(&s->dev, 0);
+                via_isa_set_irq(&s->dev, 0, 0);
             }
         }
         if (val & STAT_FLAG) {
             s->aur.stat &= ~(STAT_FLAG | STAT_PAUSED);
             if (s->aur.type & STAT_FLAG) {
-                pci_set_irq(&s->dev, 0);
+                via_isa_set_irq(&s->dev, 0, 0);
             }
         }
         break;
@@ -426,6 +426,10 @@ static void via_ac97_realize(PCIDevice *pci_dev, Error **errp)
     ViaAC97State *s = VIA_AC97(pci_dev);
     Object *o = OBJECT(s);
 
+    if (!AUD_register_card ("via-ac97", &s->card, errp)) {
+        return;
+    }
+
     /*
      * Command register Bus Master bit is documented to be fixed at 0 but it's
      * needed for PCI DMA to work in QEMU. The pegasos2 firmware writes 0 here
@@ -445,8 +449,6 @@ static void via_ac97_realize(PCIDevice *pci_dev, Error **errp)
     pci_register_bar(pci_dev, 1, PCI_BASE_ADDRESS_SPACE_IO, &s->fm);
     memory_region_init_io(&s->midi, o, &midi_ops, s, "via-ac97.midi", 4);
     pci_register_bar(pci_dev, 2, PCI_BASE_ADDRESS_SPACE_IO, &s->midi);
-
-    AUD_register_card ("via-ac97", &s->card);
 }
 
 static void via_ac97_exit(PCIDevice *dev)

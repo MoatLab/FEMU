@@ -9,7 +9,6 @@ import sys
 import textwrap
 
 from pathlib import Path
-from pkg_resources import resource_filename
 from tempfile import TemporaryDirectory, NamedTemporaryFile
 
 from lcitool import util, LcitoolError
@@ -20,7 +19,7 @@ from lcitool.projects import Projects
 from lcitool.targets import Targets, BuildTarget
 from lcitool.formatters import DockerfileFormatter, ShellVariablesFormatter, JSONVariablesFormatter, ShellBuildEnvFormatter
 from lcitool.manifest import Manifest
-from lcitool.containers import Docker, Podman, ContainerError
+from lcitool.containers import Docker, Podman, ContainerExecError
 
 
 log = logging.getLogger(__name__)
@@ -63,45 +62,40 @@ class Application:
         log.debug(f"Cmdline args={cli_args}")
 
     def _execute_playbook(self, playbook, hosts_pattern, projects_pattern,
-                          git_revision, data_dir, verbosity=0):
-        from lcitool.ansible_wrapper import AnsibleWrapper, AnsibleWrapperError
+                          config, data_dir, verbosity=0):
+        from lcitool.ansible_wrapper import AnsibleWrapper
 
         log.debug(f"Executing playbook '{playbook}': "
                   f"hosts_pattern={hosts_pattern} "
-                  f"projects_pattern={projects_pattern} gitrev={git_revision}")
+                  f"projects_pattern={projects_pattern}")
 
-        base = resource_filename(__name__, "ansible")
-        config = Config()
+        base = util.package_resource(__package__, "ansible").as_posix()
+        config = Config(config)
         targets = Targets(data_dir)
-        inventory = Inventory(targets, config)
         packages = Packages(data_dir)
         projects = Projects(data_dir)
+        inventory = Inventory(targets, config,
+                              inventory_path=util.get_datadir_inventory(data_dir))
 
         hosts_expanded = inventory.expand_hosts(hosts_pattern)
         projects_expanded = projects.expand_names(projects_pattern)
 
-        if git_revision is not None:
-            tokens = git_revision.split("/")
-            if len(tokens) < 2:
-                print(f"Missing or invalid git revision '{git_revision}'",
-                      file=sys.stderr)
-                sys.exit(1)
-
-            git_remote = tokens[0]
-            git_branch = "/".join(tokens[1:])
-        else:
-            git_remote = "default"
-            git_branch = "master"
-
         playbook_base = Path(base, "playbooks", playbook)
         group_vars = dict()
+
+        user_pre = False
+        if data_dir:
+            ansible_path = Path(data_dir.path, "ansible")
+            if ansible_path.exists():
+                if Path(ansible_path, "pre/tasks/main.yml").exists():
+                    user_pre = True
 
         extra_vars = config.values
         extra_vars.update({
             "base": base,
             "selected_projects": projects_expanded,
-            "git_remote": git_remote,
-            "git_branch": git_branch,
+            "user_datadir": str(data_dir.path) if data_dir else None,
+            "user_pre": user_pre,
         })
 
         log.debug("Preparing Ansible runner environment")
@@ -124,18 +118,20 @@ class Application:
                                    group_vars=group_vars,
                                    extravars=extra_vars)
         log.debug(f"Running Ansible with playbook '{playbook_base.name}'")
-        try:
-            ansible_runner.run_playbook(limit=hosts_expanded, verbosity=verbosity)
-        except AnsibleWrapperError as ex:
-            raise ApplicationError(ex.message)
+        ansible_runner.run_playbook(limit=hosts_expanded, verbosity=verbosity)
 
     @required_deps('ansible_runner', 'libvirt')
     def _action_hosts(self, args):
         self._entrypoint_debug(args)
 
-        config = Config()
+        config_path = None
+        if args.config:
+            config_path = args.config.name
+
+        config = Config(config_path)
         targets = Targets(args.data_dir)
-        inventory = Inventory(targets, config)
+        inventory = Inventory(targets, config,
+                              inventory_path=util.get_datadir_inventory(args.data_dir))
         for host in sorted(inventory.hosts):
             print(host)
 
@@ -166,9 +162,14 @@ class Application:
         self._entrypoint_debug(args)
 
         facts = {}
-        config = Config()
+        config_path = None
+        if args.config:
+            config_path = args.config.name
+
+        config = Config(config_path)
         targets = Targets(args.data_dir)
-        inventory = Inventory(targets, config)
+        inventory = Inventory(targets, config,
+                              inventory_path=util.get_datadir_inventory(args.data_dir))
         host = args.host
         target = args.target
 
@@ -196,30 +197,32 @@ class Application:
                     f"fully_managed=True not set for {host}, refusing to proceed"
                 )
 
-        virt_install = VirtInstall.from_url(name=host,
-                                            facts=facts)
+        if args.strategy == "cloud":
+            virt_install = VirtInstall.from_vendor_image(name=host,
+                                                         config=config,
+                                                         facts=facts,
+                                                         force_download=args.force)
+        elif args.strategy == "template":
+            virt_install = VirtInstall.from_template_image(name=host,
+                                                           config=config,
+                                                           facts=facts,
+                                                           template_path=args.template)
+        else:
+            virt_install = VirtInstall.from_url(name=host,
+                                                config=config,
+                                                facts=facts)
         virt_install(wait=args.wait)
 
     @required_deps('ansible_runner', 'libvirt')
     def _action_update(self, args):
         self._entrypoint_debug(args)
 
+        config_path = None
+        if args.config:
+            config_path = args.config.name
+
         self._execute_playbook("update", args.hosts, args.projects,
-                               args.git_revision, args.data_dir, args.verbose)
-
-    def _action_build(self, args):
-        self._entrypoint_debug(args)
-
-        # we don't keep a dependencies tree for projects, hence pattern
-        # expansion would break the 'build' playbook
-        if args.projects == "all" or "*" in args.projects:
-            raise ApplicationError(
-                "'build' command doesn't support specifying projects by "
-                "either wildcards or the 'all' keyword"
-            )
-
-        self._execute_playbook("build", args.hosts, args.projects,
-                               args.git_revision, args.data_dir, args.verbose)
+                               config_path, args.data_dir, args.verbose)
 
     def _action_variables(self, args):
         self._entrypoint_debug(args)
@@ -234,15 +237,18 @@ class Application:
         else:
             formatter = JSONVariablesFormatter(projects)
 
-        target = BuildTarget(targets, packages, args.target, args.cross_arch)
+        target = BuildTarget(targets, packages, args.target,
+                             args.host_arch, args.cross_arch)
         variables = formatter.format(target,
                                      projects_expanded)
 
         # No comments in json !
         if args.format != "json":
             cliargv = [args.action]
+            if args.host_arch:
+                cliargv.extend(["--host-arch", args.host_arch])
             if args.cross_arch:
-                cliargv.extend(["--cross", args.cross_arch])
+                cliargv.extend(["--cross-arch", args.cross_arch])
             cliargv.extend([args.target, args.projects])
             header = util.generate_file_header(cliargv)
         else:
@@ -257,7 +263,8 @@ class Application:
         packages = Packages(args.data_dir)
         projects = Projects(args.data_dir)
         projects_expanded = projects.expand_names(args.projects)
-        target = BuildTarget(targets, packages, args.target, args.cross_arch)
+        target = BuildTarget(targets, packages, args.target,
+                             args.host_arch, args.cross_arch)
 
         dockerfile = DockerfileFormatter(projects,
                                          args.base,
@@ -268,8 +275,10 @@ class Application:
         if args.base is not None:
             cliargv.extend(["--base", args.base])
         cliargv.extend(["--layers", args.layers])
+        if args.host_arch:
+            cliargv.extend(["--host-arch", args.host_arch])
         if args.cross_arch:
-            cliargv.extend(["--cross", args.cross_arch])
+            cliargv.extend(["--cross-arch", args.cross_arch])
         cliargv.extend([args.target, args.projects])
         header = util.generate_file_header(cliargv)
 
@@ -282,14 +291,17 @@ class Application:
         packages = Packages(args.data_dir)
         projects = Projects(args.data_dir)
         projects_expanded = projects.expand_names(args.projects)
-        target = BuildTarget(targets, packages, args.target, args.cross_arch)
+        target = BuildTarget(targets, packages, args.target,
+                             args.host_arch, args.cross_arch)
 
         buildenvscript = ShellBuildEnvFormatter(projects).format(target,
                                                                  projects_expanded)
 
         cliargv = [args.action]
+        if args.host_arch:
+            cliargv.extend(["--host-arch", args.host_arch])
         if args.cross_arch:
-            cliargv.extend(["--cross", args.cross_arch])
+            cliargv.extend(["--cross-arch", args.cross_arch])
         cliargv.extend([args.target, args.projects])
         header = util.generate_file_header(cliargv)
 
@@ -307,15 +319,15 @@ class Application:
         manifest.generate(args.dry_run)
 
     @staticmethod
-    def _get_client(engine):
-        client = Podman()
+    def _container_handle(engine):
+        handle = Podman()
         if engine == "docker":
-            client = Docker()
+            handle = Docker()
 
-        if client.available is None:
-            raise ApplicationError(f"{client.engine} engine not available")
+        if handle.available is None:
+            raise ApplicationError(f"{handle.engine} engine not available")
 
-        return client
+        return handle
 
     def _action_list_engines(self, args):
         engines = []
@@ -331,25 +343,24 @@ class Application:
     def _action_container_build(self, args):
         self._entrypoint_debug(args)
 
+        targets = Targets()
+        packages = Packages()
+        projects = Projects(args.data_dir)
+        projects_expanded = projects.expand_names(args.projects)
+        target = BuildTarget(targets, packages, args.target, cross_arch=args.cross_arch)
         params = {}
-        client = self._get_client(args.engine)
+        _file = None
+        tag = f"lcitool.{args.target}"
+
+        engine = self._container_handle(args.engine)
+
+        # remove image and prepare to build a new one.
+        engine.rmi(tag)
 
         container_tempdir = TemporaryDirectory(prefix="container",
                                                dir=util.get_temp_dir())
         params["tempdir"] = container_tempdir.name
 
-        tag = f"lcitool.{args.target}"
-
-        # remove image and prepare to build a new one.
-        client.rmi(tag)
-
-        targets = Targets()
-        packages = Packages()
-        projects = Projects(args.data_dir)
-        projects_expanded = projects.expand_names(args.projects)
-        target = BuildTarget(targets, packages, args.target, args.cross_arch)
-
-        _file = None
         file_content = DockerfileFormatter(projects).format(
             target,
             projects_expanded
@@ -360,62 +371,73 @@ class Application:
             fd.write(textwrap.dedent(file_content))
             _file = fd.name
 
-        log.debug(f"Generated dockerfile copied to {_file}")
+        log.debug(f"Generated Dockerfile copied to {_file}")
 
-        try:
-            client.build(tag=tag, filepath=_file, **params)
-        except ContainerError as ex:
-            raise ApplicationError(ex.message)
+        engine.build(tag=tag, filepath=_file, **params)
 
         log.debug(f"Generated image tag --> {tag}")
         print(f"Image '{tag}' successfully built.")
 
-    def _action_container_run(self, args):
-        self._entrypoint_debug(args)
-
+    def _get_container_run_common_params(self):
         params = {}
-        client = self._get_client(args.engine)
+        params["image"] = self.args.image
+        params["user"] = self.args.user
+        if self.args.user.isdecimal():
+            params["user"] = int(self.args.user)
 
-        container_tempdir = TemporaryDirectory(prefix="container",
-                                               dir=util.get_temp_dir())
-        params["tempdir"] = container_tempdir.name
+        if self.args.env:
+            params["env"] = self.args.env
 
-        if not client.image_exists(args.image):
-            print(f"Image '{args.image}' not found in local cache. Build it or pull from registry first.")
-            return
-
-        params["image"] = args.image
-        params["user"] = args.user
-        if args.user.isdecimal():
-            params["user"] = int(args.user)
-
-        if args.env:
-            params["env"] = args.env
-
-        if args.workload_dir:
-            workload_dir = Path(args.workload_dir)
+        if self.args.workload_dir:
+            workload_dir = Path(self.args.workload_dir)
             if not workload_dir.is_dir():
                 raise ApplicationError(f"'{workload_dir}' is not a directory")
             params["datadir"] = workload_dir.resolve()
 
-        if args.script:
-            script = Path(args.script)
+        if self.args.script:
+            script = Path(self.args.script)
             if not script.is_file():
                 raise ApplicationError(f"'{script}' is not a file")
             params["script"] = script.resolve()
 
-        params["container_cmd"] = "/bin/sh"
-        if args.container == "run":
-            params["container_cmd"] = "./script"
+        return params
 
-        try:
-            client.run(**params)
-        except ContainerError as ex:
-            raise ApplicationError(ex.message)
+    def _container_run(self, container_params, shell=False):
+        """
+        Call into the container handle object.
+
+        :param shell: whether to spawn an interactive shell session
+        :param **kwargs: arguments passed to Container.run()
+        """
+
+        container_tempdir = TemporaryDirectory(prefix="container",
+                                               dir=util.get_temp_dir())
+
+        container_params["tempdir"] = container_tempdir.name
+        engine = self._container_handle(self.args.engine)
+        if shell:
+            return engine.shell(**container_params)
+        return engine.run(**container_params)
+
+    def _action_container_run(self, args):
+        self._entrypoint_debug(self.args)
+
+        params = self._get_container_run_common_params()
+        params["container_cmd"] = "./script"
+        return self._container_run(params)
+
+    def _action_container_shell(self, args):
+        self._entrypoint_debug(self.args)
+
+        return self._container_run(self._get_container_run_common_params(),
+                                   shell=True)
 
     def run(self, args):
         try:
+            self.args = args
             args.func(self, args)
+        except ContainerExecError as ex:
+            sys.exit(ex.returncode)
         except LcitoolError as ex:
             print(f"{ex.module_prefix} error:", ex, file=sys.stderr)
             sys.exit(1)

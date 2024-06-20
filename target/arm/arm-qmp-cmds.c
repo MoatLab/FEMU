@@ -28,7 +28,6 @@
 #include "qapi/qobject-input-visitor.h"
 #include "qapi/qapi-commands-machine-target.h"
 #include "qapi/qapi-commands-misc-target.h"
-#include "qapi/qmp/qerror.h"
 #include "qapi/qmp/qdict.h"
 #include "qom/qom-qobject.h"
 
@@ -95,7 +94,7 @@ static const char *cpu_model_advertised_features[] = {
     "sve640", "sve768", "sve896", "sve1024", "sve1152", "sve1280",
     "sve1408", "sve1536", "sve1664", "sve1792", "sve1920", "sve2048",
     "kvm-no-adjvtime", "kvm-steal-time",
-    "pauth", "pauth-impdef",
+    "pauth", "pauth-impdef", "pauth-qarma3",
     NULL
 };
 
@@ -104,7 +103,7 @@ CpuModelExpansionInfo *qmp_query_cpu_model_expansion(CpuModelExpansionType type,
                                                      Error **errp)
 {
     CpuModelExpansionInfo *expansion_info;
-    const QDict *qdict_in = NULL;
+    const QDict *qdict_in;
     QDict *qdict_out;
     ObjectClass *oc;
     Object *obj;
@@ -151,27 +150,20 @@ CpuModelExpansionInfo *qmp_query_cpu_model_expansion(CpuModelExpansionType type,
         }
     }
 
-    if (model->props) {
-        qdict_in = qobject_to(QDict, model->props);
-        if (!qdict_in) {
-            error_setg(errp, QERR_INVALID_PARAMETER_TYPE, "props", "dict");
-            return NULL;
-        }
-    }
-
     obj = object_new(object_class_get_name(oc));
 
-    if (qdict_in) {
+    if (model->props) {
         Visitor *visitor;
         Error *err = NULL;
 
         visitor = qobject_input_visitor_new(model->props);
-        if (!visit_start_struct(visitor, NULL, NULL, 0, errp)) {
+        if (!visit_start_struct(visitor, "model.props", NULL, 0, errp)) {
             visit_free(visitor);
             object_unref(obj);
             return NULL;
         }
 
+        qdict_in = qobject_to(QDict, model->props);
         i = 0;
         while ((name = cpu_model_advertised_features[i++]) != NULL) {
             if (qdict_get(qdict_in, name)) {
@@ -237,8 +229,7 @@ static void arm_cpu_add_definition(gpointer data, gpointer user_data)
 
     typename = object_class_get_name(oc);
     info = g_malloc0(sizeof(*info));
-    info->name = g_strndup(typename,
-                           strlen(typename) - strlen("-" TYPE_ARM_CPU));
+    info->name = cpu_model_from_type(typename);
     info->q_typename = g_strdup(typename);
 
     QAPI_LIST_PREPEND(*cpu_list, info);

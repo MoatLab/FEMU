@@ -22,6 +22,7 @@
 #include "internal.h"
 #include "tcg/tcg.h"
 #include "exec/exec-all.h"
+#include "exec/cpu_ldst.h"
 #include "exec/helper-proto.h"
 #include "exec/memop.h"
 #include "fpu/softfloat.h"
@@ -802,9 +803,9 @@ void helper_msa_bset_d(CPUMIPSState *env, uint32_t wd, uint32_t ws, uint32_t wt)
  * | HADD_S.H      | Vector Signed Horizontal Add (halfword)                  |
  * | HADD_S.W      | Vector Signed Horizontal Add (word)                      |
  * | HADD_S.D      | Vector Signed Horizontal Add (doubleword)                |
- * | HADD_U.H      | Vector Unigned Horizontal Add (halfword)                 |
- * | HADD_U.W      | Vector Unigned Horizontal Add (word)                     |
- * | HADD_U.D      | Vector Unigned Horizontal Add (doubleword)               |
+ * | HADD_U.H      | Vector Unsigned Horizontal Add (halfword)                |
+ * | HADD_U.W      | Vector Unsigned Horizontal Add (word)                    |
+ * | HADD_U.D      | Vector Unsigned Horizontal Add (doubleword)              |
  * +---------------+----------------------------------------------------------+
  */
 
@@ -3451,9 +3452,9 @@ void helper_msa_mulv_d(CPUMIPSState *env,
  * | HSUB_S.H      | Vector Signed Horizontal Subtract (halfword)             |
  * | HSUB_S.W      | Vector Signed Horizontal Subtract (word)                 |
  * | HSUB_S.D      | Vector Signed Horizontal Subtract (doubleword)           |
- * | HSUB_U.H      | Vector Unigned Horizontal Subtract (halfword)            |
- * | HSUB_U.W      | Vector Unigned Horizontal Subtract (word)                |
- * | HSUB_U.D      | Vector Unigned Horizontal Subtract (doubleword)          |
+ * | HSUB_U.H      | Vector Unsigned Horizontal Subtract (halfword)           |
+ * | HSUB_U.W      | Vector Unsigned Horizontal Subtract (word)               |
+ * | HSUB_U.D      | Vector Unsigned Horizontal Subtract (doubleword)         |
  * | SUBS_S.B      | Vector Signed Saturated Subtract (of Signed) (byte)      |
  * | SUBS_S.H      | Vector Signed Saturated Subtract (of Signed) (halfword)  |
  * | SUBS_S.W      | Vector Signed Saturated Subtract (of Signed) (word)      |
@@ -7431,15 +7432,15 @@ void helper_msa_ftq_df(CPUMIPSState *env, uint32_t df, uint32_t wd,
 
 #define MSA_FLOAT_MAXOP(DEST, OP, ARG1, ARG2, BITS)                         \
     do {                                                                    \
-        float_status *status = &env->active_tc.msa_fp_status;               \
+        float_status *status_ = &env->active_tc.msa_fp_status;              \
         int c;                                                              \
                                                                             \
-        set_float_exception_flags(0, status);                               \
-        DEST = float ## BITS ## _ ## OP(ARG1, ARG2, status);                \
+        set_float_exception_flags(0, status_);                              \
+        DEST = float ## BITS ## _ ## OP(ARG1, ARG2, status_);               \
         c = update_msacsr(env, 0, 0);                                       \
                                                                             \
         if (get_enabled_exceptions(env, c)) {                               \
-            DEST = ((FLOAT_SNAN ## BITS(status) >> 6) << 6) | c;            \
+            DEST = ((FLOAT_SNAN ## BITS(status_) >> 6) << 6) | c;           \
         }                                                                   \
     } while (0)
 
@@ -8213,7 +8214,7 @@ void helper_msa_ffint_u_df(CPUMIPSState *env, uint32_t df, uint32_t wd,
 #if !defined(CONFIG_USER_ONLY)
 #define MEMOP_IDX(DF)                                                   \
     MemOpIdx oi = make_memop_idx(MO_TE | DF | MO_UNALN,                 \
-                                 cpu_mmu_index(env, false));
+                                 mips_env_mmu_index(env));
 #else
 #define MEMOP_IDX(DF)
 #endif
@@ -8322,7 +8323,7 @@ void helper_msa_st_b(CPUMIPSState *env, uint32_t wd,
                      target_ulong addr)
 {
     wr_t *pwd = &(env->active_fpu.fpr[wd].wr);
-    int mmu_idx = cpu_mmu_index(env, false);
+    int mmu_idx = mips_env_mmu_index(env);
     uintptr_t ra = GETPC();
 
     ensure_writable_pages(env, addr, mmu_idx, ra);
@@ -8336,7 +8337,7 @@ void helper_msa_st_h(CPUMIPSState *env, uint32_t wd,
                      target_ulong addr)
 {
     wr_t *pwd = &(env->active_fpu.fpr[wd].wr);
-    int mmu_idx = cpu_mmu_index(env, false);
+    int mmu_idx = mips_env_mmu_index(env);
     uintptr_t ra = GETPC();
     uint64_t d0, d1;
 
@@ -8357,7 +8358,7 @@ void helper_msa_st_w(CPUMIPSState *env, uint32_t wd,
                      target_ulong addr)
 {
     wr_t *pwd = &(env->active_fpu.fpr[wd].wr);
-    int mmu_idx = cpu_mmu_index(env, false);
+    int mmu_idx = mips_env_mmu_index(env);
     uintptr_t ra = GETPC();
     uint64_t d0, d1;
 
@@ -8378,7 +8379,7 @@ void helper_msa_st_d(CPUMIPSState *env, uint32_t wd,
                      target_ulong addr)
 {
     wr_t *pwd = &(env->active_fpu.fpr[wd].wr);
-    int mmu_idx = cpu_mmu_index(env, false);
+    int mmu_idx = mips_env_mmu_index(env);
     uintptr_t ra = GETPC();
 
     ensure_writable_pages(env, addr, mmu_idx, GETPC());

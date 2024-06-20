@@ -239,7 +239,7 @@ static void vdi_header_to_le(VdiHeader *header)
 
 static void vdi_header_print(VdiHeader *header)
 {
-    char uuidstr[37];
+    char uuidstr[UUID_STR_LEN];
     QemuUUID uuid;
     logout("text        %s", header->text);
     logout("signature   0x%08x\n", header->signature);
@@ -383,6 +383,8 @@ static int vdi_open(BlockDriverState *bs, QDict *options, int flags,
         return ret;
     }
 
+    GRAPH_RDLOCK_GUARD_MAINLOOP();
+
     logout("\n");
 
     ret = bdrv_pread(bs->file, 0, sizeof(header), &header, 0);
@@ -495,9 +497,9 @@ static int vdi_open(BlockDriverState *bs, QDict *options, int flags,
     error_setg(&s->migration_blocker, "The vdi format used by node '%s' "
                "does not support live migration",
                bdrv_get_device_or_node_name(bs));
-    ret = migrate_add_blocker(s->migration_blocker, errp);
+
+    ret = migrate_add_blocker_normal(&s->migration_blocker, errp);
     if (ret < 0) {
-        error_free(s->migration_blocker);
         goto fail_free_bmap;
     }
 
@@ -518,11 +520,10 @@ static int vdi_reopen_prepare(BDRVReopenState *state,
     return 0;
 }
 
-static int coroutine_fn vdi_co_block_status(BlockDriverState *bs,
-                                            bool want_zero,
-                                            int64_t offset, int64_t bytes,
-                                            int64_t *pnum, int64_t *map,
-                                            BlockDriverState **file)
+static int coroutine_fn GRAPH_RDLOCK
+vdi_co_block_status(BlockDriverState *bs, bool want_zero, int64_t offset,
+                    int64_t bytes, int64_t *pnum, int64_t *map,
+                    BlockDriverState **file)
 {
     BDRVVdiState *s = (BDRVVdiState *)bs->opaque;
     size_t bmap_index = offset / s->block_size;
@@ -634,7 +635,6 @@ vdi_co_pwritev(BlockDriverState *bs, int64_t offset, int64_t bytes,
         bmap_entry = le32_to_cpu(s->bmap[block_index]);
         if (!VDI_IS_ALLOCATED(bmap_entry)) {
             /* Allocate new block and write to it. */
-            uint64_t data_offset;
             qemu_co_rwlock_upgrade(&s->bmap_lock);
             bmap_entry = le32_to_cpu(s->bmap[block_index]);
             if (VDI_IS_ALLOCATED(bmap_entry)) {
@@ -700,7 +700,7 @@ nonallocating_write:
         /* One or more new blocks were allocated. */
         VdiHeader *header;
         uint8_t *base;
-        uint64_t offset;
+        uint64_t bmap_offset;
         uint32_t n_sectors;
 
         g_free(block);
@@ -723,20 +723,22 @@ nonallocating_write:
         bmap_first /= (SECTOR_SIZE / sizeof(uint32_t));
         bmap_last /= (SECTOR_SIZE / sizeof(uint32_t));
         n_sectors = bmap_last - bmap_first + 1;
-        offset = s->bmap_sector + bmap_first;
+        bmap_offset = s->bmap_sector + bmap_first;
         base = ((uint8_t *)&s->bmap[0]) + bmap_first * SECTOR_SIZE;
         logout("will write %u block map sectors starting from entry %u\n",
                n_sectors, bmap_first);
-        ret = bdrv_co_pwrite(bs->file, offset * SECTOR_SIZE,
+        ret = bdrv_co_pwrite(bs->file, bmap_offset * SECTOR_SIZE,
                              n_sectors * SECTOR_SIZE, base, 0);
     }
 
     return ret;
 }
 
-static int coroutine_fn vdi_co_do_create(BlockdevCreateOptions *create_options,
-                                         size_t block_size, Error **errp)
+static int coroutine_fn GRAPH_UNLOCKED
+vdi_co_do_create(BlockdevCreateOptions *create_options, size_t block_size,
+                 Error **errp)
 {
+    ERRP_GUARD();
     BlockdevCreateOptionsVdi *vdi_opts;
     int ret = 0;
     uint64_t bytes = 0;
@@ -886,19 +888,19 @@ static int coroutine_fn vdi_co_do_create(BlockdevCreateOptions *create_options,
 
     ret = 0;
 exit:
-    blk_unref(blk);
-    bdrv_unref(bs_file);
+    blk_co_unref(blk);
+    bdrv_co_unref(bs_file);
     g_free(bmap);
     return ret;
 }
 
-static int coroutine_fn vdi_co_create(BlockdevCreateOptions *create_options,
-                                      Error **errp)
+static int coroutine_fn GRAPH_UNLOCKED
+vdi_co_create(BlockdevCreateOptions *create_options, Error **errp)
 {
     return vdi_co_do_create(create_options, DEFAULT_CLUSTER_SIZE, errp);
 }
 
-static int coroutine_fn GRAPH_RDLOCK
+static int coroutine_fn GRAPH_UNLOCKED
 vdi_co_create_opts(BlockDriver *drv, const char *filename,
                    QemuOpts *opts, Error **errp)
 {
@@ -975,7 +977,7 @@ vdi_co_create_opts(BlockDriver *drv, const char *filename,
 done:
     qobject_unref(qdict);
     qapi_free_BlockdevCreateOptions(create_options);
-    bdrv_unref(bs_file);
+    bdrv_co_unref(bs_file);
     return ret;
 }
 
@@ -985,11 +987,10 @@ static void vdi_close(BlockDriverState *bs)
 
     qemu_vfree(s->bmap);
 
-    migrate_del_blocker(s->migration_blocker);
-    error_free(s->migration_blocker);
+    migrate_del_blocker(&s->migration_blocker);
 }
 
-static int vdi_has_zero_init(BlockDriverState *bs)
+static int GRAPH_RDLOCK vdi_has_zero_init(BlockDriverState *bs)
 {
     BDRVVdiState *s = bs->opaque;
 

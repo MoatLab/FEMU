@@ -147,7 +147,7 @@ static gboolean ibex_uart_xmit(void *do_not_use, GIOCondition cond,
     /* instant drain the fifo when there's no back-end */
     if (!qemu_chr_fe_backend_connected(&s->chr)) {
         s->tx_level = 0;
-        return FALSE;
+        return G_SOURCE_REMOVE;
     }
 
     if (!s->tx_level) {
@@ -156,7 +156,7 @@ static gboolean ibex_uart_xmit(void *do_not_use, GIOCondition cond,
         s->uart_intr_state |= R_INTR_STATE_TX_EMPTY_MASK;
         s->uart_intr_state &= ~R_INTR_STATE_TX_WATERMARK_MASK;
         ibex_uart_update_irqs(s);
-        return FALSE;
+        return G_SOURCE_REMOVE;
     }
 
     ret = qemu_chr_fe_write(&s->chr, s->tx_fifo, s->tx_level);
@@ -171,7 +171,7 @@ static gboolean ibex_uart_xmit(void *do_not_use, GIOCondition cond,
                                         ibex_uart_xmit, s);
         if (!r) {
             s->tx_level = 0;
-            return FALSE;
+            return G_SOURCE_REMOVE;
         }
     }
 
@@ -192,7 +192,7 @@ static gboolean ibex_uart_xmit(void *do_not_use, GIOCondition cond,
     }
 
     ibex_uart_update_irqs(s);
-    return FALSE;
+    return G_SOURCE_REMOVE;
 }
 
 static void uart_write_tx_fifo(IbexUartState *s, const uint8_t *buf,
@@ -488,7 +488,7 @@ static const VMStateDescription vmstate_ibex_uart = {
     .version_id = 1,
     .minimum_version_id = 1,
     .post_load = ibex_uart_post_load,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT8_ARRAY(tx_fifo, IbexUartState,
                             IBEX_UART_TX_FIFO_SIZE),
         VMSTATE_UINT32(tx_level, IbexUartState),

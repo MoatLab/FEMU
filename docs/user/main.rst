@@ -87,14 +87,13 @@ Debug options:
    Activate logging of the specified items (use '-d help' for a list of
    log items)
 
-``-p pagesize``
-   Act as if the host page size was 'pagesize' bytes
-
 ``-g port``
    Wait gdb connection to port
 
-``-singlestep``
-   Run the emulation in single step mode.
+``-one-insn-per-tb``
+   Run the emulation with one guest instruction per translation block.
+   This slows down emulation a lot, but can be useful in some situations,
+   such as when trying to analyse the logs produced by the ``-d`` option.
 
 Environment variables:
 
@@ -242,5 +241,7 @@ Debug options:
 ``-p pagesize``
    Act as if the host page size was 'pagesize' bytes
 
-``-singlestep``
-   Run the emulation in single step mode.
+``-one-insn-per-tb``
+   Run the emulation with one guest instruction per translation block.
+   This slows down emulation a lot, but can be useful in some situations,
+   such as when trying to analyse the logs produced by the ``-d`` option.

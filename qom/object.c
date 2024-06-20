@@ -31,6 +31,7 @@
  * of the QOM core on QObject?  */
 #include "qom/qom-qobject.h"
 #include "qapi/qmp/qbool.h"
+#include "qapi/qmp/qlist.h"
 #include "qapi/qmp/qnum.h"
 #include "qapi/qmp/qstring.h"
 #include "qemu/error-report.h"
@@ -137,9 +138,46 @@ static TypeImpl *type_new(const TypeInfo *info)
     return ti;
 }
 
+static bool type_name_is_valid(const char *name)
+{
+    const int slen = strlen(name);
+    int plen;
+
+    g_assert(slen > 1);
+
+    /*
+     * Ideally, the name should start with a letter - however, we've got
+     * too many names starting with a digit already, so allow digits here,
+     * too (except '0' which is not used yet)
+     */
+    if (!g_ascii_isalnum(name[0]) || name[0] == '0') {
+        return false;
+    }
+
+    plen = strspn(name, "abcdefghijklmnopqrstuvwxyz"
+                        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                        "0123456789-_.");
+
+    /* Allow some legacy names with '+' in it for compatibility reasons */
+    if (name[plen] == '+') {
+        if (plen >= 17 && g_str_has_prefix(name, "Sun-UltraSparc-I")) {
+            /* Allow "Sun-UltraSparc-IV+" and "Sun-UltraSparc-IIIi+" */
+            return true;
+        }
+    }
+
+    return plen == slen;
+}
+
 static TypeImpl *type_register_internal(const TypeInfo *info)
 {
     TypeImpl *ti;
+
+    if (!type_name_is_valid(info->name)) {
+        fprintf(stderr, "Registering '%s' with illegal type name\n", info->name);
+        abort();
+    }
+
     ti = type_new(info);
 
     type_table_add(ti);
@@ -220,6 +258,19 @@ static size_t type_object_get_size(TypeImpl *ti)
     return 0;
 }
 
+static size_t type_object_get_align(TypeImpl *ti)
+{
+    if (ti->instance_align) {
+        return ti->instance_align;
+    }
+
+    if (type_has_parent(ti)) {
+        return type_object_get_align(type_get_parent(ti));
+    }
+
+    return 0;
+}
+
 size_t object_type_get_instance_size(const char *typename)
 {
     TypeImpl *type = type_get_by_name(typename);
@@ -293,6 +344,7 @@ static void type_initialize(TypeImpl *ti)
 
     ti->class_size = type_class_get_size(ti);
     ti->instance_size = type_object_get_size(ti);
+    ti->instance_align = type_object_get_align(ti);
     /* Any type with zero instance_size is implicitly abstract.
      * This means interface types are all abstract.
      */
@@ -1574,6 +1626,11 @@ void object_property_set_default_str(ObjectProperty *prop, const char *value)
     object_property_set_default(prop, QOBJECT(qstring_from_str(value)));
 }
 
+void object_property_set_default_list(ObjectProperty *prop)
+{
+    object_property_set_default(prop, QOBJECT(qlist_new()));
+}
+
 void object_property_set_default_int(ObjectProperty *prop, int64_t value)
 {
     object_property_set_default(prop, QOBJECT(qnum_from_int(value)));
@@ -2170,6 +2227,22 @@ Object *object_resolve_path_at(Object *parent, const char *path)
                                        TYPE_OBJECT);
     }
     return object_resolve_abs_path(parent, parts, TYPE_OBJECT);
+}
+
+Object *object_resolve_type_unambiguous(const char *typename, Error **errp)
+{
+    bool ambig;
+    Object *o = object_resolve_path_type("", typename, &ambig);
+
+    if (ambig) {
+        error_setg(errp, "More than one object of type %s", typename);
+        return NULL;
+    }
+    if (!o) {
+        error_setg(errp, "No object found of type %s", typename);
+        return NULL;
+    }
+    return o;
 }
 
 typedef struct StringProperty

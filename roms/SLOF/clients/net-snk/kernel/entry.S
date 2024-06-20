@@ -33,7 +33,7 @@ Function:
 		r5:   prom entry	 
 	Output:		
 
-Decription: Main entry point, called from OF
+Description: Main entry point, called from OF
 	
 */
 C_ENTRY(_entry)

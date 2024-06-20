@@ -12,6 +12,7 @@ import logging
 import os
 import pathlib
 import shutil
+import stat
 import timeit
 from edk2toolext.environment import version_aggregator
 from edk2toolext.environment.plugin_manager import PluginManager
@@ -110,7 +111,7 @@ class UncrustifyCheck(ICiBuildPlugin):
     # A package can add any additional paths with "AdditionalIncludePaths"
     # A package can remove any of these paths with "IgnoreStandardPaths"
     #
-    STANDARD_PLUGIN_DEFINED_PATHS = ("*.c", "*.h")
+    STANDARD_PLUGIN_DEFINED_PATHS = ("*.c", "*.h", "*.cpp")
 
     #
     # The Uncrustify application path should set in this environment variable
@@ -299,7 +300,7 @@ class UncrustifyCheck(ICiBuildPlugin):
         If git is not found, an empty list will be returned.
         """
         if not shutil.which("git"):
-            logging.warn(
+            logging.warning(
                 "Git is not found on this system. Git submodule paths will not be considered.")
             return []
 
@@ -325,7 +326,7 @@ class UncrustifyCheck(ICiBuildPlugin):
         If git is not found, an empty list will be returned.
         """
         if not shutil.which("git"):
-            logging.warn(
+            logging.warning(
                 "Git is not found on this system. Git submodule paths will not be considered.")
             return []
 
@@ -372,9 +373,9 @@ class UncrustifyCheck(ICiBuildPlugin):
                 file_template_path = pathlib.Path(os.path.join(self._plugin_path, file_template_name))
                 self._file_template_contents = file_template_path.read_text()
         except KeyError:
-            logging.warn("A file header template is not specified in the config file.")
+            logging.warning("A file header template is not specified in the config file.")
         except FileNotFoundError:
-            logging.warn("The specified file header template file was not found.")
+            logging.warning("The specified file header template file was not found.")
         try:
             func_template_name = parser["dummy_section"]["cmt_insert_func_header"]
 
@@ -384,9 +385,9 @@ class UncrustifyCheck(ICiBuildPlugin):
                 func_template_path = pathlib.Path(os.path.join(self._plugin_path, func_template_name))
                 self._func_template_contents = func_template_path.read_text()
         except KeyError:
-            logging.warn("A function header template is not specified in the config file.")
+            logging.warning("A function header template is not specified in the config file.")
         except FileNotFoundError:
-            logging.warn("The specified function header template file was not found.")
+            logging.warning("The specified function header template file was not found.")
 
     def _initialize_app_info(self) -> None:
         """
@@ -628,7 +629,7 @@ class UncrustifyCheck(ICiBuildPlugin):
             """
             Private function to attempt to change permissions on file/folder being deleted.
             """
-            os.chmod(path, os.stat.S_IWRITE)
+            os.chmod(path, stat.S_IWRITE)
             func(path)
 
         for _ in range(3):  # retry up to 3 times
