@@ -66,7 +66,7 @@ static uint16_t last_rx_idx;	/* Last index in RX "used" ring */
 
 /**
  * Module init for virtio via PCI.
- * Checks whether we're reponsible for the given device and set up
+ * Checks whether we're responsible for the given device and set up
  * the virtqueue configuration.
  */
 static int virtionet_init_pci(struct virtio_net *vnet, struct virtio_device *dev)

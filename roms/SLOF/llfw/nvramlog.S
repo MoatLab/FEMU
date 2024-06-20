@@ -42,10 +42,10 @@
  *	last initialisation.
  *	Flags are not checked!
  *
- *	Retrun 0 if no manimulation was found 1 else
+ *	Return 0 if no manipulation was found, otherwise return 1
  *
  *	input:
- *			r3 - NVRAM Base Address 
+ *			r3 - NVRAM Base Address
  *
  *	output:
  *			r3 - status: 0 = ok, 1 = corrupt
@@ -71,7 +71,7 @@ ASM_ENTRY(checkLogHeaderData)
 	LOAD64(	r6, LLFW_LOG_BE0_NAME)
 	subf	r5, r6, r5
 	add	r4, r4, r5
-	
+
 	lhz	r5, LLFW_LOG_POS_DATA_OFFSET(r3)	//check data offset
 	addi	r5, r5, -LLFW_LOG_BE0_DATA_OFFSET
 	add	r4, r4, r5
@@ -91,16 +91,16 @@ ASM_ENTRY(checkLogHeaderData)
 /*****************************************************************************
  * checkLogPartition:	check Partition Header entries and Checksum
  *			check also the NVRAM-Log-Partition CRC
- *			if Partition is not ok set the following bits to 1
- *			bit 1:	if Partiton Header Checksum is corrupt
+ *			if partition is not ok set the following bits to 1
+ *			bit 1:	if partition header checksum is corrupt
  *			bit 2: 	if CRC is corrupt
  *			bit 3: 	if Header entries are corrupt
- *						
- *	input:	
+ *
+ *	input:
  *		r3 - NVRAM log address (BASE + NVRAM_LOG_OFFSET)
  *
- *	output:	
- *		r3 - CRC status  
+ *	output:
+ *		r3 - CRC status
  *		r4 - NVRAM log address
  *
  *	Modifies Register:	R3, R4, R5, R6, R7, R8, R9
@@ -126,7 +126,7 @@ ASM_ENTRY(.checkLogPartition)
 	ori	r7, r7, 1		// 0 as checksum is invalid
 0:
 	mr	r3, r4
-	bl	checkLogHeaderData	
+	bl	checkLogHeaderData
 	cmpdi	7, r3, 0
 	beq+	7, 0f
 	ori	r7, r7, 4
@@ -135,13 +135,13 @@ ASM_ENTRY(.checkLogPartition)
 	mtlr	r8
 	blr
 /*****************************************************************************
- * checkinitLog:	check the NVRAM Log Partition Header 
+ * checkinitLog:	check the NVRAM Log Partition Header
  *			initialize the NVRAM if the Header was modified
- *					
- *	input:	
- *		r3 - NVRAM BASE address 
  *
- *	output:	
+ *	input:
+ *		r3 - NVRAM BASE address
+ *
+ *	output:
  *		r3 - 0 = check ok, no new header written
  *		r3 - 1 = check not ok, header and NVRAM initialized
  *		r4 - NVRAM log address
@@ -152,20 +152,20 @@ ASM_ENTRY(.checkLogPartition)
 ASM_ENTRY(.checkinitLog)
 ASM_ENTRY(checkinitLog)
 	mflr	r9
-	bl 	.checkLogPartition		//r3..r8, r4_out = r3_in   
+	bl 	.checkLogPartition		//r3..r8, r4_out = r3_in
 	mtlr	r9
-	
+
 	cmpwi	7, r3, 0
 	mr	r3, r4			// r3=NVRAM_LOG address
 	bne-	7, .initLog		// if header is not ok, init header
 	li	r3, 0
-	blr				// header OK, return 0			
+	blr				// header OK, return 0
 
 
-/* this is basically just a copy of .initLog 
+/* this is basically just a copy of .initLog
    registers used: r3, r4, r5, r6, r7, r9*/
 init_log_2nd_be:
-	mflr	r9	
+	mflr	r9
 	li	r6, LLFW_LOG_BE0_LENGTH
 	mulli	r6, r6, 0x10
 	add	r6, r7, r6
@@ -192,11 +192,11 @@ init_log_2nd_be:
 /*****************************************************************************
  * initLog:	initialize the NVRAM with 0
  *		write a new NVRAM Log-Partition-Header
- *					
- *	input:	
- *		r3 - NVRAM BASE address 
  *
- *	output:	
+ *	input:
+ *		r3 - NVRAM BASE address
+ *
+ *	output:
  *		r3 - 0 = check ok, no new header written
  *		r3 - 1 = check not ok, header and NVRAM initialized
  *		r4 - NVRAM log address
@@ -235,10 +235,10 @@ ASM_ENTRY(.initLog)
  *	clearNVRAM:	set all not used NVRAM memory to zero
  *
  *
- *	input:	
+ *	input:
  *		R3 - NVRAM BASE ADDRESS
  *
- *	output:	
+ *	output:
  *		R3 - NVARM END ADDRESS
  *
  *	Modifies Register: r4, r5
@@ -253,18 +253,18 @@ ASM_ENTRY(clearNVRAM)
 	stdx	r4, r3,r5
 	addi	r5, r5, 8
 	bdnz+	0b
-	blr	
+	blr
 /*****************************************************************************
  * writeNVRAMbyte:	write next log into NVRAM
- *					
  *
- *	input:	
+ *
+ *	input:
  *		R3 - byte to be written
  *		R4 - NVRAM Base Address
  *
- *	output:	
+ *	output:
  *		R3 - byte that was written
- *		R4 - NVRAM Base Address 
+ *		R4 - NVRAM Base Address
  *
  * 	Modifies Register:	R3, R4, R5, R6
  ****************************************************************************/
@@ -275,22 +275,22 @@ ENTRY(writeLogByte)
 	addi    r5, r5, 1                       // increment pointer
 	stw     r5, LLFW_LOG_POS_POINTER(r4)    // store pointer
 	addi    r5, r5, -1			// restore old pointer
-	add     r6, r4, r5                      // byte address in data section 
+	add     r6, r4, r5                      // byte address in data section
 
-	stb 	r3, LLFW_LOG_BE0_DATA_OFFSET(r6)	
+	stb 	r3, LLFW_LOG_BE0_DATA_OFFSET(r6)
 	blr
 
 /*****************************************************************************
  * writeNVRAMbyte:	write next log into NVRAM
- *					
  *
- *	input:	
+ *
+ *	input:
  *		R3 - byte to be written
  *		R4 - NVRAM Base Address
  *
- *	output:	
+ *	output:
  *		R3 - byte that was written
- *		R4 - NVRAM Base Address 
+ *		R4 - NVRAM Base Address
  *
  * 	Modifies Register:	R3, R4, R5, R6
  ****************************************************************************/
@@ -303,18 +303,18 @@ ENTRY(writeLogByteBE1)
 	addi    r5, r5, 1                       // increment pointer
 	stw     r5, LLFW_LOG_POS_POINTER(r4)    // store pointer
 	addi    r5, r5, -1			// restore old pointer
-	add     r6, r4, r5                      // byte address in data section 
+	add     r6, r4, r5                      // byte address in data section
 
-	stb 	r3, LLFW_LOG_BE1_DATA_OFFSET(r6)	
+	stb 	r3, LLFW_LOG_BE1_DATA_OFFSET(r6)
 	blr
 
 /*****************************************************************************
- * calPartitionHeaderChecksum: 	calculate the Checksum of the 
+ * calPartitionHeaderChecksum: 	calculate the Checksum of the
  *	Partition Header as described in ....
  *
- *	input: r3 - NVRAM BASE adresse
+ *	input: r3 - NVRAM BASE address
  *
- *	output:	R3 - the calculated checksum as 8 bit value 
+ *	output:	R3 - the calculated checksum as 8 bit value
  *			R4 - NVRAM log address
  *
  *	Modifies Register:	R3, R4, R5, R6
@@ -328,9 +328,9 @@ ASM_ENTRY(.calPartitionHeaderChecksum)
 	addi 	r4, r4, 1			// r4++ (index)
 	add 	r5, r5, r3			// r5 new sum =sum +  nexed byte
 	rldicl 	r5, r5, 0, 56
-	cmpld 	7, r5, r3					
+	cmpld 	7, r5, r3
 	cmpldi 	6, r4, LLFW_LOG_POS_DATA_OFFSET
-	bge+ 	7,.L5				// if new sum > sum 
+	bge+ 	7,.L5				// if new sum > sum
 	addi 	r5, r5, 1			// new sum ++
 	rldicl	r5, r5, 0, 56
 .L5:

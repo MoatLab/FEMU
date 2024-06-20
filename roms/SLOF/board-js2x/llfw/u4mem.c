@@ -265,7 +265,7 @@ static const uint32_t SUBVER = 1;
 #define I2C_START		0x50
 
 /*
- * Index to the speed dependend DIMM settings
+ * Index to the speed dependent DIMM settings
  */
 enum
 {
@@ -297,8 +297,8 @@ typedef struct
 	uint32_t m_pop_u32;		// set if bank is populated
 	uint32_t m_bank_u32;		// bank number
 	uint32_t m_clmsk_u32;		// mask of supported CAS latencies
-	uint32_t m_clcnt_u32;		// number of supporetd CAS latencies
-	uint32_t m_clval_pu32[NUM_CL];	// values of supporeted CAS latencies
+	uint32_t m_clcnt_u32;		// number of supported CAS latencies
+	uint32_t m_clval_pu32[NUM_CL];	// values of supported CAS latencies
 	uint32_t m_speed_pu32[NUM_CL];	// speed (Mhz) at CAS latency of same index
 	uint32_t m_size_u32;		// chip size in Mb
 	uint32_t m_rank_u32;		// # of ranks, total size = chip size*rank
@@ -937,7 +937,7 @@ ddr2_setupDIMMcfg( void )
 	uint32_t  i, j, e, b;
 
 	/*
-	 * check wether on board DIMM slot population is valid
+	 * check whether on board DIMM slot population is valid
 	 */
 	e = 0;
 	b = 0;
@@ -1156,7 +1156,7 @@ ddr2_setupDIMMcfg( void )
 	}
 
 	/*
-	 * check wether cl values are supported by U4
+	 * check whether cl values are supported by U4
 	 */
 	for( i = 0; i < m_gendimm.m_clcnt_u32; i++ ) {
 
@@ -1487,7 +1487,7 @@ u4_group2banks( uint32_t *bidx )
 	 */
 
 	/*
-	 * check wether DIMM banks may be grouped
+	 * check whether DIMM banks may be grouped
 	 */
 	if( ( ( ( bidx[0] + bidx[1] ) & 0x1 )           != 0 ) &&
 	    ( u4_Dcmp( &m_dimm[didx0], &m_dimm[didx1] ) == 0 ) ) {
@@ -2461,7 +2461,7 @@ u4_MemInitSequence( uint32_t tRP, uint32_t tWR, uint32_t tRFC, uint32_t CL,
 }
 
 /*
- * static DIMM configuartion settings
+ * static DIMM configuration settings
  */
 static reg_statics_t reg_statics_maui[NUM_SPEED_IDX] = {
 	{	/* 400 Mhz */

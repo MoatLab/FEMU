@@ -555,7 +555,7 @@ ehci_send_pipe(struct usb_pipe *p, int dir, const void *cmd
 
     // Allocate tds on stack (with required alignment)
     u8 tdsbuf[sizeof(struct ehci_qtd) * STACKQTDS + EHCI_QTD_ALIGN - 1];
-    struct ehci_qtd *tds = (void*)ALIGN((u32)tdsbuf, EHCI_QTD_ALIGN), *td = tds;
+    struct ehci_qtd *tds = (void*)ALIGN((unsigned long)tdsbuf, EHCI_QTD_ALIGN), *td = tds;
     memset(tds, 0, sizeof(*tds) * STACKQTDS);
 
     // Setup transfer descriptors

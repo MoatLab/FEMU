@@ -47,6 +47,48 @@ void hreg_swap_gpr_tgpr(CPUPPCState *env)
     env->tgpr[3] = tmp;
 }
 
+static uint32_t hreg_compute_pmu_hflags_value(CPUPPCState *env)
+{
+    uint32_t hflags = 0;
+
+#if defined(TARGET_PPC64)
+    if (env->spr[SPR_POWER_MMCR0] & MMCR0_PMCC0) {
+        hflags |= 1 << HFLAGS_PMCC0;
+    }
+    if (env->spr[SPR_POWER_MMCR0] & MMCR0_PMCC1) {
+        hflags |= 1 << HFLAGS_PMCC1;
+    }
+    if (env->spr[SPR_POWER_MMCR0] & MMCR0_PMCjCE) {
+        hflags |= 1 << HFLAGS_PMCJCE;
+    }
+
+#ifndef CONFIG_USER_ONLY
+    if (env->pmc_ins_cnt) {
+        hflags |= 1 << HFLAGS_INSN_CNT;
+    }
+    if (env->pmc_ins_cnt & 0x1e) {
+        hflags |= 1 << HFLAGS_PMC_OTHER;
+    }
+#endif
+#endif
+
+    return hflags;
+}
+
+/* Mask of all PMU hflags */
+static uint32_t hreg_compute_pmu_hflags_mask(CPUPPCState *env)
+{
+    uint32_t hflags_mask = 0;
+#if defined(TARGET_PPC64)
+    hflags_mask |= 1 << HFLAGS_PMCC0;
+    hflags_mask |= 1 << HFLAGS_PMCC1;
+    hflags_mask |= 1 << HFLAGS_PMCJCE;
+    hflags_mask |= 1 << HFLAGS_INSN_CNT;
+    hflags_mask |= 1 << HFLAGS_PMC_OTHER;
+#endif
+    return hflags_mask;
+}
+
 static uint32_t hreg_compute_hflags_value(CPUPPCState *env)
 {
     target_ulong msr = env->msr;
@@ -104,29 +146,11 @@ static uint32_t hreg_compute_hflags_value(CPUPPCState *env)
     if (env->spr[SPR_LPCR] & LPCR_HR) {
         hflags |= 1 << HFLAGS_HR;
     }
-    if (env->spr[SPR_POWER_MMCR0] & MMCR0_PMCC0) {
-        hflags |= 1 << HFLAGS_PMCC0;
-    }
-    if (env->spr[SPR_POWER_MMCR0] & MMCR0_PMCC1) {
-        hflags |= 1 << HFLAGS_PMCC1;
-    }
-    if (env->spr[SPR_POWER_MMCR0] & MMCR0_PMCjCE) {
-        hflags |= 1 << HFLAGS_PMCJCE;
-    }
 
 #ifndef CONFIG_USER_ONLY
     if (!env->has_hv_mode || (msr & (1ull << MSR_HV))) {
         hflags |= 1 << HFLAGS_HV;
     }
-
-#if defined(TARGET_PPC64)
-    if (env->pmc_ins_cnt) {
-        hflags |= 1 << HFLAGS_INSN_CNT;
-    }
-    if (env->pmc_ins_cnt & 0x1e) {
-        hflags |= 1 << HFLAGS_PMC_OTHER;
-    }
-#endif
 
     /*
      * This is our encoding for server processors. The architecture
@@ -172,6 +196,8 @@ static uint32_t hreg_compute_hflags_value(CPUPPCState *env)
     hflags |= dmmu_idx << HFLAGS_DMMU_IDX;
 #endif
 
+    hflags |= hreg_compute_pmu_hflags_value(env);
+
     return hflags | (msr & msr_mask);
 }
 
@@ -180,9 +206,20 @@ void hreg_compute_hflags(CPUPPCState *env)
     env->hflags = hreg_compute_hflags_value(env);
 }
 
+/*
+ * This can be used as a lighter-weight alternative to hreg_compute_hflags
+ * when PMU MMCR0 or pmc_ins_cnt changes. pmc_ins_cnt is changed by
+ * pmu_update_summaries.
+ */
+void hreg_update_pmu_hflags(CPUPPCState *env)
+{
+    env->hflags &= ~hreg_compute_pmu_hflags_mask(env);
+    env->hflags |= hreg_compute_pmu_hflags_value(env);
+}
+
 #ifdef CONFIG_DEBUG_TCG
-void cpu_get_tb_cpu_state(CPUPPCState *env, target_ulong *pc,
-                          target_ulong *cs_base, uint32_t *flags)
+void cpu_get_tb_cpu_state(CPUPPCState *env, vaddr *pc,
+                          uint64_t *cs_base, uint32_t *flags)
 {
     uint32_t hflags_current = env->hflags;
     uint32_t hflags_rebuilt;
@@ -207,7 +244,7 @@ void cpu_interrupt_exittb(CPUState *cs)
      * unless running with TCG.
      */
     if (tcg_enabled()) {
-        QEMU_IOTHREAD_LOCK_GUARD();
+        BQL_LOCK_GUARD();
         cpu_interrupt(cs, CPU_INTERRUPT_EXITTB);
     }
 }
@@ -226,6 +263,11 @@ int hreg_store_msr(CPUPPCState *env, target_ulong value, int alter_hv)
     if (!alter_hv || !(env->msr & MSR_HVB)) {
         value &= ~MSR_HVB;
         value |= env->msr & MSR_HVB;
+    }
+    /* Attempt to modify MSR[ME] in guest state is ignored */
+    if (is_book3s_arch2x(env) && !(env->msr & MSR_HVB)) {
+        value &= ~(1 << MSR_ME);
+        value |= env->msr & (1 << MSR_ME);
     }
     if ((value ^ env->msr) & (R_MSR_IR_MASK | R_MSR_DR_MASK)) {
         cpu_interrupt_exittb(cs);
@@ -273,7 +315,7 @@ int hreg_store_msr(CPUPPCState *env, target_ulong value, int alter_hv)
     return excp;
 }
 
-#ifdef CONFIG_SOFTMMU
+#ifndef CONFIG_USER_ONLY
 void store_40x_sler(CPUPPCState *env, uint32_t val)
 {
     /* XXX: TO BE FIXED */
@@ -283,9 +325,7 @@ void store_40x_sler(CPUPPCState *env, uint32_t val)
     }
     env->spr[SPR_405_SLER] = val;
 }
-#endif /* CONFIG_SOFTMMU */
 
-#ifndef CONFIG_USER_ONLY
 void check_tlb_flush(CPUPPCState *env, bool global)
 {
     CPUState *cs = env_cpu(env);
@@ -304,7 +344,7 @@ void check_tlb_flush(CPUPPCState *env, bool global)
         tlb_flush(cs);
     }
 }
-#endif
+#endif /* !CONFIG_USER_ONLY */
 
 /**
  * _spr_register
@@ -425,22 +465,41 @@ void register_generic_sprs(PowerPCCPU *cpu)
     }
 
     /* Time base */
-    spr_register(env, SPR_VTBL,  "TBL",
+#if defined(TARGET_PPC64)
+    spr_register(env, SPR_TBL, "TB",
+#else
+    spr_register(env, SPR_TBL, "TBL",
+#endif
                  &spr_read_tbl, SPR_NOACCESS,
                  &spr_read_tbl, SPR_NOACCESS,
                  0x00000000);
-    spr_register(env, SPR_TBL,   "TBL",
-                 &spr_read_tbl, SPR_NOACCESS,
-                 &spr_read_tbl, &spr_write_tbl,
-                 0x00000000);
-    spr_register(env, SPR_VTBU,  "TBU",
+    spr_register(env, SPR_TBU, "TBU",
                  &spr_read_tbu, SPR_NOACCESS,
                  &spr_read_tbu, SPR_NOACCESS,
                  0x00000000);
-    spr_register(env, SPR_TBU,   "TBU",
-                 &spr_read_tbu, SPR_NOACCESS,
-                 &spr_read_tbu, &spr_write_tbu,
-                 0x00000000);
+#ifndef CONFIG_USER_ONLY
+    if (env->has_hv_mode) {
+        spr_register_hv(env, SPR_WR_TBL, "TBL",
+                        SPR_NOACCESS, SPR_NOACCESS,
+                        SPR_NOACCESS, SPR_NOACCESS,
+                        SPR_NOACCESS, &spr_write_tbl,
+                        0x00000000);
+        spr_register_hv(env, SPR_WR_TBU, "TBU",
+                        SPR_NOACCESS, SPR_NOACCESS,
+                        SPR_NOACCESS, SPR_NOACCESS,
+                        SPR_NOACCESS, &spr_write_tbu,
+                        0x00000000);
+    } else {
+        spr_register(env, SPR_WR_TBL, "TBL",
+                     SPR_NOACCESS, SPR_NOACCESS,
+                     SPR_NOACCESS, &spr_write_tbl,
+                     0x00000000);
+        spr_register(env, SPR_WR_TBU, "TBU",
+                     SPR_NOACCESS, SPR_NOACCESS,
+                     SPR_NOACCESS, &spr_write_tbu,
+                     0x00000000);
+    }
+#endif
 }
 
 void register_non_embedded_sprs(CPUPPCState *env)
@@ -448,14 +507,14 @@ void register_non_embedded_sprs(CPUPPCState *env)
     /* Exception processing */
     spr_register_kvm(env, SPR_DSISR, "DSISR",
                      SPR_NOACCESS, SPR_NOACCESS,
-                     &spr_read_generic, &spr_write_generic,
+                     &spr_read_generic, &spr_write_generic32,
                      KVM_REG_PPC_DSISR, 0x00000000);
     spr_register_kvm(env, SPR_DAR, "DAR",
                      SPR_NOACCESS, SPR_NOACCESS,
                      &spr_read_generic, &spr_write_generic,
                      KVM_REG_PPC_DAR, 0x00000000);
     /* Timer */
-    spr_register(env, SPR_DECR, "DECR",
+    spr_register(env, SPR_DECR, "DEC",
                  SPR_NOACCESS, SPR_NOACCESS,
                  &spr_read_decr, &spr_write_decr,
                  0x00000000);

@@ -78,7 +78,7 @@ FEMU_OPTIONS=${FEMU_OPTIONS}",femu_mode=0"
 
 #-------------------------------------------------------------------------------
 # Launch the FEMU VM
-sudo x86_64-softmmu/qemu-system-x86_64 \
+sudo ./qemu-system-x86_64 \
     -name "FEMU-OCSSD-VM" \
     -enable-kvm \
     -cpu host \

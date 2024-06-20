@@ -99,7 +99,7 @@ The SLOF source code is structured into the following directories:
 - llfw : The Low-Level Firmware - this part is platform-specific firmware
          that is responsible to boot the system from the reset vector to a
          state where it is possible to run the Open Firmware Forth engine
-         (i.e. it sets up the necessary CPU registers, intializes the memory,
+         (i.e. it sets up the necessary CPU registers, initializes the memory,
          does some board-specific hardware configuration, etc.)
 
 - slof : The code for the Open Firmware environment, including the Forth
@@ -232,7 +232,7 @@ To add primitives:
     * 2x 256 MB, slots 3/4
     * 2x 256 MB, slots 1/2
 
- On a JS20 SLOF wil always report 0.5 GB even if there is much more memory
+ On a JS20 SLOF will always report 0.5 GB even if there is much more memory
  available.
 
  On a JS21 all memory configurations should work.

@@ -71,6 +71,13 @@ u32 irqtimer_calc(u32 msecs);
 int irqtimer_check(u32 end);
 void handle_1586(struct bregs *regs);
 
+struct wait_t {
+    u32 usecs;
+    u32 end;
+};
+void timer_calc2_ms(struct wait_t *w, u32 msecs);
+int timer_check2(struct wait_t *w);
+
 // fw/acpi.c
 void acpi_setup(void);
 
@@ -88,7 +95,7 @@ u32 find_resume_vector(void);
 void acpi_reboot(void);
 void find_acpi_features(void);
 extern struct smbios_entry_point *SMBiosAddr;
-struct smbios_entry_point *get_smbios_entry_point();
+struct smbios_entry_point *get_smbios_entry_point(void);
 void copy_smbios(void *pos);
 void display_uuid(void);
 void copy_table(void *pos);

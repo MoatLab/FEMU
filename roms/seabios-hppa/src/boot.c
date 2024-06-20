@@ -50,7 +50,7 @@ glob_prefix(const char *glob, const char *str)
 }
 
 #if CONFIG_PARISC
-#define FW_PCI_DOMAIN "/dino-pcihost"
+#define FW_PCI_DOMAIN (has_astro ? "/elroy-pcihost" : "/dino-pcihost")
 #else
 #define FW_PCI_DOMAIN "/pci@i0cf8"
 #endif
@@ -178,7 +178,7 @@ loadBiosGeometry(void)
 static BootDeviceLCHS *
 boot_lchs_find(const char *glob)
 {
-    dprintf(1, "Searching bios-geometry for: %s\n", glob);
+    // dprintf(1, "Searching bios-geometry for: %s\n", glob);
     int i;
     for (i = 0; i < BiosGeometryCount; i++)
         if (glob_prefix(glob, BiosGeometry[i].name))
@@ -291,7 +291,7 @@ loadBootOrder(void)
 static int
 find_prio(const char *glob)
 {
-    dprintf(1, "Searching bootorder for: %s\n", glob);
+    // dprintf(1, "Searching bootorder for: %s\n", glob);
     int i;
     for (i = 0; i < BootorderCount; i++)
         if (glob_prefix(glob, Bootorder[i]))
@@ -507,7 +507,7 @@ boot_init(void)
 struct bootentry_s {
     int type;
     union {
-        u32 data;
+        void *data;
         struct segoff_s vector;
         struct drive_s *drive;
     };
@@ -526,7 +526,7 @@ static struct hlist_head BootList VARVERIFY32INIT;
 #define IPL_TYPE_HALT        0xf0
 
 static void
-bootentry_add(int type, int prio, u32 data, const char *desc)
+bootentry_add(int type, int prio, void *data, const char *desc)
 {
     if (! CONFIG_BOOT)
         return;
@@ -539,7 +539,7 @@ bootentry_add(int type, int prio, u32 data, const char *desc)
     be->priority = prio;
     be->data = data;
     be->description = desc ?: "?";
-    dprintf(3, "Registering bootable: %s (type:%d prio:%d data:%x)\n"
+    dprintf(3, "Registering bootable: %s (type:%d prio:%d data:%p)\n"
             , be->description, type, prio, data);
 
     // Add entry in sorted order.
@@ -573,7 +573,7 @@ void
 boot_add_bev(u16 seg, u16 bev, u16 desc, int prio)
 {
     bootentry_add(IPL_TYPE_BEV, defPrio(prio, DefaultBEVPrio)
-                  , SEGOFF(seg, bev).segoff
+                  , (void *)SEGOFF(seg, bev).segoff
                   , desc ? MAKE_FLATPTR(seg, desc) : "Unknown");
     DefaultBEVPrio = DEFAULT_PRIO;
 }
@@ -583,7 +583,7 @@ void
 boot_add_bcv(u16 seg, u16 ip, u16 desc, int prio)
 {
     bootentry_add(IPL_TYPE_BCV, defPrio(prio, DefaultHDPrio)
-                  , SEGOFF(seg, ip).segoff
+                  , (void *)SEGOFF(seg, ip).segoff
                   , desc ? MAKE_FLATPTR(seg, desc) : "Legacy option rom");
 }
 
@@ -591,14 +591,14 @@ void
 boot_add_floppy(struct drive_s *drive, const char *desc, int prio)
 {
     bootentry_add(IPL_TYPE_FLOPPY, defPrio(prio, DefaultFloppyPrio)
-                  , (u32)drive, desc);
+                  , drive, desc);
 }
 
 void
 boot_add_hd(struct drive_s *drive, const char *desc, int prio)
 {
     bootentry_add(IPL_TYPE_HARDDISK, defPrio(prio, DefaultHDPrio)
-                  , (u32)drive, desc);
+                  , drive, desc);
 }
 
 void
@@ -615,14 +615,14 @@ boot_add_cd(struct drive_s *drive, const char *desc, int prio)
         }
     }
     bootentry_add(IPL_TYPE_CDROM, defPrio(prio, DefaultCDPrio)
-                  , (u32)drive, desc);
+                  , drive, desc);
 }
 
 // Add a CBFS payload entry
 void
 boot_add_cbfs(void *data, const char *desc, int prio)
 {
-    bootentry_add(IPL_TYPE_CBFS, defPrio(prio, DEFAULT_PRIO), (u32)data, desc);
+    bootentry_add(IPL_TYPE_CBFS, defPrio(prio, DEFAULT_PRIO), data, desc);
 }
 
 
@@ -820,12 +820,16 @@ void find_initial_parisc_boot_drives(struct drive_s **harddisc,
 
 struct drive_s *select_parisc_boot_drive(char bootdrive)
 {
-    printf("  Available boot devices:\n");
+    int found = 0;
 
     // Show menu items
     struct bootentry_s *pos;
     hlist_for_each_entry(pos, &BootList, node) {
         char desc[77];
+        if (!found) {
+            printf("  Available boot devices:\n");
+            found = 1;
+        }
         printf("  FWSCSI.%d.0 : %s\n", pos->drive->target
                , strtcpy(desc, pos->description, ARRAY_SIZE(desc)));
     }
@@ -869,7 +873,7 @@ static int BEVCount;
 static int HaveHDBoot, HaveFDBoot;
 
 static void
-add_bev(int type, u32 vector)
+add_bev(int type, void *vector)
 {
     if (type == IPL_TYPE_HARDDISK && HaveHDBoot++)
         return;
@@ -879,7 +883,7 @@ add_bev(int type, u32 vector)
         return;
     struct bev_s *bev = &BEV[BEVCount++];
     bev->type = type;
-    bev->vector = vector;
+    bev->vector = (uintptr_t) vector;
 }
 
 // Prepare for boot - show menu and run bcvs.
@@ -932,7 +936,7 @@ bcv_prepboot(void)
 static void
 call_boot_entry(struct segoff_s bootsegip, u8 bootdrv)
 {
-    dprintf(1, "Booting from %04x:%04x\n", bootsegip.seg, bootsegip.offset);
+    dprintf(1, "Booting from %04x:%04lx\n", bootsegip.seg, bootsegip.offset);
     struct bregs br;
     memset(&br, 0, sizeof(br));
     br.flags = F_IF;

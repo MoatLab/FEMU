@@ -40,7 +40,7 @@ def get_default_machine(qemu_prog: str) -> str:
 
     machines = outp.split('\n')
     try:
-        default_machine = next(m for m in machines if m.endswith(' (default)'))
+        default_machine = next(m for m in machines if ' (default)' in m)
     except StopIteration:
         return ''
     default_machine = default_machine.split(' ', 1)[0]
@@ -126,7 +126,7 @@ class TestEnv(ContextManager['TestEnv']):
             self.tmp_sock_dir = False
             Path(self.sock_dir).mkdir(parents=True, exist_ok=True)
         except KeyError:
-            self.sock_dir = tempfile.mkdtemp()
+            self.sock_dir = tempfile.mkdtemp(prefix="qemu-iotests-")
             self.tmp_sock_dir = True
 
         self.sample_img_dir = os.getenv('SAMPLE_IMG_DIR',
@@ -216,7 +216,7 @@ class TestEnv(ContextManager['TestEnv']):
         self.source_iotests = source_dir
         self.build_iotests = build_dir
 
-        self.build_root = os.path.join(self.build_iotests, '..', '..')
+        self.build_root = Path(self.build_iotests).parent.parent
 
         self.init_directories()
 

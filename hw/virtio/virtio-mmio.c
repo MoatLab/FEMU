@@ -354,6 +354,7 @@ static void virtio_mmio_write(void *opaque, hwaddr offset, uint64_t value,
         if (proxy->legacy) {
             virtio_queue_update_rings(vdev, vdev->queue_sel);
         } else {
+            virtio_init_region_cache(vdev, vdev->queue_sel);
             proxy->vqs[vdev->queue_sel].num = value;
         }
         break;
@@ -564,7 +565,7 @@ static const VMStateDescription vmstate_virtio_mmio_queue_state = {
     .name = "virtio_mmio/queue_state",
     .version_id = 1,
     .minimum_version_id = 1,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT16(num, VirtIOMMIOQueue),
         VMSTATE_BOOL(enabled, VirtIOMMIOQueue),
         VMSTATE_UINT32_ARRAY(desc, VirtIOMMIOQueue, 2),
@@ -578,7 +579,7 @@ static const VMStateDescription vmstate_virtio_mmio_state_sub = {
     .name = "virtio_mmio/state",
     .version_id = 1,
     .minimum_version_id = 1,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(guest_features, VirtIOMMIOProxy, 2),
         VMSTATE_STRUCT_ARRAY(vqs, VirtIOMMIOProxy, VIRTIO_QUEUE_MAX, 0,
                              vmstate_virtio_mmio_queue_state,
@@ -591,10 +592,10 @@ static const VMStateDescription vmstate_virtio_mmio = {
     .name = "virtio_mmio",
     .version_id = 1,
     .minimum_version_id = 1,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_END_OF_LIST()
     },
-    .subsections = (const VMStateDescription * []) {
+    .subsections = (const VMStateDescription * const []) {
         &vmstate_virtio_mmio_state_sub,
         NULL
     }
@@ -759,10 +760,6 @@ static void virtio_mmio_realizefn(DeviceState *d, Error **errp)
 
     qbus_init(&proxy->bus, sizeof(proxy->bus), TYPE_VIRTIO_MMIO_BUS, d, NULL);
     sysbus_init_irq(sbd, &proxy->irq);
-
-    if (!kvm_eventfds_enabled()) {
-        proxy->flags &= ~VIRTIO_IOMMIO_FLAG_USE_IOEVENTFD;
-    }
 
     /* fd-based ioevents can't be synchronized in record/replay */
     if (replay_mode != REPLAY_MODE_NONE) {

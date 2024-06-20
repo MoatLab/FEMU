@@ -86,6 +86,7 @@ native:
 - lua54
 - lzo2
 - meson
+- mtools
 - nano
 - nbd-server
 - nbdkit
@@ -136,6 +137,7 @@ native:
 - png
 - polkit
 - py39-boto3
+- py39-build
 - py39-cloud-init
 - py39-dbus
 - py39-docutils
@@ -151,6 +153,7 @@ native:
 - py39-setuptools
 - py39-sphinx
 - py39-sphinx_rtd_theme
+- py39-tomli
 - py39-wheel
 - py39-yaml
 - python3

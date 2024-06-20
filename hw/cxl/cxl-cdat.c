@@ -49,6 +49,7 @@ static void ct3_build_cdat(CDATObject *cdat, Error **errp)
     g_autofree CDATTableHeader *cdat_header = NULL;
     g_autofree CDATEntry *cdat_st = NULL;
     uint8_t sum = 0;
+    uint8_t *hdr_buf;
     int ent, i;
 
     /* Use default table if fopen == NULL */
@@ -60,9 +61,10 @@ static void ct3_build_cdat(CDATObject *cdat, Error **errp)
         return;
     }
 
-    cdat->built_buf_len = cdat->build_cdat_table(&cdat->built_buf, cdat->private);
+    cdat->built_buf_len = cdat->build_cdat_table(&cdat->built_buf,
+                                                 cdat->private);
 
-    if (!cdat->built_buf_len) {
+    if (cdat->built_buf_len <= 0) {
         /* Build later as not all data available yet */
         cdat->to_update = true;
         return;
@@ -94,8 +96,12 @@ static void ct3_build_cdat(CDATObject *cdat, Error **errp)
     /* For now, no runtime updates */
     cdat_header->sequence = 0;
     cdat_header->length += sizeof(CDATTableHeader);
-    sum += cdat_header->revision + cdat_header->sequence +
-        cdat_header->length;
+
+    hdr_buf = (uint8_t *)cdat_header;
+    for (i = 0; i < sizeof(*cdat_header); i++) {
+        sum += hdr_buf[i];
+    }
+
     /* Sum of all bytes including checksum must be 0 */
     cdat_header->checksum = ~sum + 1;
 
@@ -108,31 +114,21 @@ static void ct3_build_cdat(CDATObject *cdat, Error **errp)
 static void ct3_load_cdat(CDATObject *cdat, Error **errp)
 {
     g_autofree CDATEntry *cdat_st = NULL;
+    g_autofree uint8_t *buf = NULL;
     uint8_t sum = 0;
     int num_ent;
-    int i = 0, ent = 1, file_size = 0;
+    int i = 0, ent = 1;
+    gsize file_size = 0;
     CDATSubHeader *hdr;
-    FILE *fp = NULL;
+    GError *error = NULL;
 
     /* Read CDAT file and create its cache */
-    fp = fopen(cdat->filename, "r");
-    if (!fp) {
-        error_setg(errp, "CDAT: Unable to open file");
+    if (!g_file_get_contents(cdat->filename, (gchar **)&buf,
+                             &file_size, &error)) {
+        error_setg(errp, "CDAT: File read failed: %s", error->message);
+        g_error_free(error);
         return;
     }
-
-    fseek(fp, 0, SEEK_END);
-    file_size = ftell(fp);
-    fseek(fp, 0, SEEK_SET);
-    cdat->buf = g_malloc0(file_size);
-
-    if (fread(cdat->buf, file_size, 1, fp) == 0) {
-        error_setg(errp, "CDAT: File read failed");
-        return;
-    }
-
-    fclose(fp);
-
     if (file_size < sizeof(CDATTableHeader)) {
         error_setg(errp, "CDAT: File too short");
         return;
@@ -140,9 +136,17 @@ static void ct3_load_cdat(CDATObject *cdat, Error **errp)
     i = sizeof(CDATTableHeader);
     num_ent = 1;
     while (i < file_size) {
-        hdr = (CDATSubHeader *)(cdat->buf + i);
+        hdr = (CDATSubHeader *)(buf + i);
+        if (i + sizeof(CDATSubHeader) > file_size) {
+            error_setg(errp, "CDAT: Truncated table");
+            return;
+        }
         cdat_len_check(hdr, errp);
         i += hdr->length;
+        if (i > file_size) {
+            error_setg(errp, "CDAT: Truncated table");
+            return;
+        }
         num_ent++;
     }
     if (i != file_size) {
@@ -150,33 +154,26 @@ static void ct3_load_cdat(CDATObject *cdat, Error **errp)
         return;
     }
 
-    cdat_st = g_malloc0(sizeof(*cdat_st) * num_ent);
-    if (!cdat_st) {
-        error_setg(errp, "CDAT: Failed to allocate entry array");
-        return;
-    }
+    cdat_st = g_new0(CDATEntry, num_ent);
 
     /* Set CDAT header, Entry = 0 */
-    cdat_st[0].base = cdat->buf;
+    cdat_st[0].base = buf;
     cdat_st[0].length = sizeof(CDATTableHeader);
     i = 0;
 
     while (i < cdat_st[0].length) {
-        sum += cdat->buf[i++];
+        sum += buf[i++];
     }
 
     /* Read CDAT structures */
     while (i < file_size) {
-        hdr = (CDATSubHeader *)(cdat->buf + i);
-        cdat_len_check(hdr, errp);
-
+        hdr = (CDATSubHeader *)(buf + i);
         cdat_st[ent].base = hdr;
         cdat_st[ent].length = hdr->length;
 
-        while (cdat->buf + i <
-               (uint8_t *)cdat_st[ent].base + cdat_st[ent].length) {
+        while (buf + i < (uint8_t *)cdat_st[ent].base + cdat_st[ent].length) {
             assert(i < file_size);
-            sum += cdat->buf[i++];
+            sum += buf[i++];
         }
 
         ent++;
@@ -187,6 +184,7 @@ static void ct3_load_cdat(CDATObject *cdat, Error **errp)
     }
     cdat->entry_len = num_ent;
     cdat->entry = g_steal_pointer(&cdat_st);
+    cdat->buf = g_steal_pointer(&buf);
 }
 
 void cxl_doe_cdat_init(CXLComponentState *cxl_cstate, Error **errp)
@@ -218,7 +216,5 @@ void cxl_doe_cdat_release(CXLComponentState *cxl_cstate)
         cdat->free_cdat_table(cdat->built_buf, cdat->built_buf_len,
                               cdat->private);
     }
-    if (cdat->buf) {
-        free(cdat->buf);
-    }
+    g_free(cdat->buf);
 }

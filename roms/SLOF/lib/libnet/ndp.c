@@ -86,7 +86,7 @@ find_router(ip6_addr_t ip)
 
 /**
  * Find a router for a given host address
- * @param  ip - IPv6 address with the prefered prefix
+ * @param  ip - IPv6 address with the preferred prefix
  * @return pointer to router, or NULL if none is available
  */
 struct router *ipv6_get_default_router(ip6_addr_t ip)

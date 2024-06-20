@@ -85,7 +85,7 @@ handle_prefixoption (uint8_t *option)
 	prefix_option = (struct option_prefix *) option;
 	memcpy( &(prefix.addr), &(prefix_option->prefix.addr), IPV6_ADDR_LENGTH);
 
-	/* Link-local adresses in RAs are nonsense */
+	/* Link-local addresses in RAs are nonsense */
 	if (ip6_is_linklocal(&prefix))
 		return;
 
@@ -97,7 +97,7 @@ handle_prefixoption (uint8_t *option)
 	if (!new_address)
 		return;
 
-	/* Process only prefixes we don't already have an adress from */
+	/* Process only prefixes we don't already have an address from */
 	if (!unknown_prefix (&new_address->addr)) {
 		return;
 	}
@@ -256,7 +256,7 @@ send_neighbour_solicitation (int fd, ip6_addr_t *dest_ip6)
  * @param  fd           socket fd
  * @param  ip6_packet	pointer to an IPv6 packet
  * @param  icmp6hdr	pointer to the icmp6 header in ip6_packet
- * @param  na_flags	Neighbour advertisment flags
+ * @param  na_flags	Neighbour advertisement flags
  */
 static void
 send_neighbour_advertisement (int fd, struct neighbor *target)

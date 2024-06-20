@@ -37,12 +37,8 @@ static target_long monitor_get_ccr(Monitor *mon, const struct MonitorDef *md,
 {
     CPUArchState *env = mon_get_cpu_env(mon);
     unsigned int u;
-    int i;
 
-    u = 0;
-    for (i = 0; i < 8; i++) {
-        u |= env->crf[i] << (32 - (4 * (i + 1)));
-    }
+    u = ppc_get_cr(env);
 
     return u;
 }
@@ -107,7 +103,11 @@ const MonitorDef monitor_defs[] = {
     { "xer", 0, &monitor_get_xer },
     { "msr", offsetof(CPUPPCState, msr) },
     { "tbu", 0, &monitor_get_tbu, },
+#if defined(TARGET_PPC64)
+    { "tb", 0, &monitor_get_tbl, },
+#else
     { "tbl", 0, &monitor_get_tbl, },
+#endif
     { NULL },
 };
 
@@ -137,8 +137,7 @@ static int ppc_cpu_get_reg_num(const char *numstr, int maxnum, int *pregnum)
 int target_get_monitor_def(CPUState *cs, const char *name, uint64_t *pval)
 {
     int i, regnum;
-    PowerPCCPU *cpu = POWERPC_CPU(cs);
-    CPUPPCState *env = &cpu->env;
+    CPUPPCState *env = cpu_env(cs);
 
     /* General purpose registers */
     if ((qemu_tolower(name[0]) == 'r') &&
@@ -185,8 +184,7 @@ static void ppc_cpu_defs_entry(gpointer data, gpointer user_data)
 
     typename = object_class_get_name(oc);
     info = g_malloc0(sizeof(*info));
-    info->name = g_strndup(typename,
-                           strlen(typename) - strlen(POWERPC_CPU_TYPE_SUFFIX));
+    info->name = cpu_model_from_type(typename);
 
     QAPI_LIST_PREPEND(*first, info);
 }

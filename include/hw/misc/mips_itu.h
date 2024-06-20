@@ -70,10 +70,6 @@ struct MIPSITUState {
 
     /* ITU Control Register */
     uint64_t icr0;
-
-    /* SAAR */
-    uint64_t *saar;
-    MIPSCPU *cpu0;
 };
 
 /* Get ITC Configuration Tag memory region. */

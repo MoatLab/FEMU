@@ -144,7 +144,7 @@ def container_template(cidir):
         # Note: never publish from merge requests since they have non-committed code
         #
         .container_job:
-          image: docker:stable
+          image: docker:latest
           stage: containers
           interruptible: false
           needs: []
@@ -176,7 +176,7 @@ def container_template(cidir):
         """)
 
 
-def _build_template(template, image, project, cidir):
+def _build_template(template, envid, project, cidir):
     return textwrap.dedent(
         f"""
         #
@@ -198,7 +198,7 @@ def _build_template(template, image, project, cidir):
         # should be logical inverses, such that jobs are mutually exclusive
         #
         {template}_prebuilt_env:
-          image: $CI_REGISTRY/$RUN_UPSTREAM_NAMESPACE/{project}/{image}:latest
+          image: $CI_REGISTRY/$RUN_UPSTREAM_NAMESPACE/{project}/ci-{envid}:latest
           stage: builds
           interruptible: true
           before_script:
@@ -229,7 +229,7 @@ def _build_template(template, image, project, cidir):
             - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == $CI_DEFAULT_BRANCH'
               changes:
                 - {cidir}/gitlab/container-templates.yml
-                - {cidir}/containers/$NAME.Dockerfile
+                - {cidir}/containers/{envid}.Dockerfile
               when: never
             - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == $CI_DEFAULT_BRANCH && $JOB_OPTIONAL'
               when: manual
@@ -245,7 +245,7 @@ def _build_template(template, image, project, cidir):
           stage: builds
           interruptible: true
           before_script:
-            - source {cidir}/buildenv/$NAME.sh
+            - source {cidir}/buildenv/{envid}.sh
             - install_buildenv
             - cat /packages.txt
           rules:
@@ -285,13 +285,13 @@ def _build_template(template, image, project, cidir):
             - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == $CI_DEFAULT_BRANCH && $JOB_OPTIONAL'
               changes:
                 - {cidir}/gitlab/container-templates.yml
-                - {cidir}/containers/$NAME.Dockerfile
+                - {cidir}/containers/{envid}.Dockerfile
               when: manual
               allow_failure: true
             - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == $CI_DEFAULT_BRANCH'
               changes:
                 - {cidir}/gitlab/container-templates.yml
-                - {cidir}/containers/$NAME.Dockerfile
+                - {cidir}/containers/{envid}.Dockerfile
               when: on_success
 
             # upstream+forks: merge requests targeting non-default branches
@@ -308,14 +308,14 @@ def _build_template(template, image, project, cidir):
 
 def native_build_template(project, cidir):
     return _build_template(".gitlab_native_build_job",
-                           "ci-$NAME",
+                           "$NAME",
                            project,
                            cidir)
 
 
 def cross_build_template(project, cidir):
     return _build_template(".gitlab_cross_build_job",
-                           "ci-$NAME-cross-$CROSS",
+                           "$NAME-cross-$CROSS",
                            project,
                            cidir)
 
@@ -332,6 +332,7 @@ def cirrus_template(cidir):
             - source {cidir}/cirrus/$NAME.vars
             - sed -e "s|[@]CI_REPOSITORY_URL@|$CI_REPOSITORY_URL|g"
                   -e "s|[@]CI_COMMIT_REF_NAME@|$CI_COMMIT_REF_NAME|g"
+                  -e "s|[@]CI_MERGE_REQUEST_REF_PATH@|$CI_MERGE_REQUEST_REF_PATH|g"
                   -e "s|[@]CI_COMMIT_SHA@|$CI_COMMIT_SHA|g"
                   -e "s|[@]CIRRUS_VM_INSTANCE_TYPE@|$CIRRUS_VM_INSTANCE_TYPE|g"
                   -e "s|[@]CIRRUS_VM_IMAGE_SELECTOR@|$CIRRUS_VM_IMAGE_SELECTOR|g"

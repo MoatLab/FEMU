@@ -33,8 +33,8 @@
 #include "hw/adc/max111x.h"
 #include "migration/vmstate.h"
 #include "exec/address-spaces.h"
-#include "cpu.h"
 #include "qom/object.h"
+#include "audio/audio.h"
 
 enum spitz_model_e { spitz, akita, borzoi, terrier };
 
@@ -774,15 +774,19 @@ static void spitz_wm8750_addr(void *opaque, int line, int level)
         i2c_slave_set_address(wm, SPITZ_WM_ADDRL);
 }
 
-static void spitz_i2c_setup(PXA2xxState *cpu)
+static void spitz_i2c_setup(MachineState *machine, PXA2xxState *cpu)
 {
     /* Attach the CPU on one end of our I2C bus.  */
     I2CBus *bus = pxa2xx_i2c_bus(cpu->i2c[0]);
 
-    DeviceState *wm;
-
     /* Attach a WM8750 to the bus */
-    wm = DEVICE(i2c_slave_create_simple(bus, TYPE_WM8750, 0));
+    I2CSlave *i2c_dev = i2c_slave_new(TYPE_WM8750, 0);
+    DeviceState *wm = DEVICE(i2c_dev);
+
+    if (machine->audiodev) {
+        qdev_prop_set_string(wm, "audiodev", machine->audiodev);
+    }
+    i2c_slave_realize_and_unref(i2c_dev, bus, &error_abort);
 
     spitz_wm8750_addr(wm, 0, 0);
     qdev_connect_gpio_out(cpu->gpio, SPITZ_GPIO_WM,
@@ -1013,7 +1017,7 @@ static void spitz_common_init(MachineState *machine)
 
     spitz_gpio_setup(mpu, (model == akita) ? 1 : 2);
 
-    spitz_i2c_setup(mpu);
+    spitz_i2c_setup(machine, mpu);
 
     if (model == akita)
         spitz_akita_i2c_setup(mpu);
@@ -1037,6 +1041,9 @@ static void spitz_common_class_init(ObjectClass *oc, void *data)
     mc->block_default_type = IF_IDE;
     mc->ignore_memory_transaction_failures = true;
     mc->init = spitz_common_init;
+    mc->deprecation_reason = "machine is old and unmaintained";
+
+    machine_add_audiodev_property(mc);
 }
 
 static const TypeInfo spitz_common_info = {
@@ -1136,7 +1143,7 @@ static const VMStateDescription vmstate_sl_nand_info = {
     .name = "sl-nand",
     .version_id = 0,
     .minimum_version_id = 0,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT8(ctl, SLNANDState),
         VMSTATE_STRUCT(ecc, SLNANDState, 0, vmstate_ecc_state, ECCState),
         VMSTATE_END_OF_LIST(),
@@ -1173,7 +1180,7 @@ static const VMStateDescription vmstate_spitz_kbd = {
     .version_id = 1,
     .minimum_version_id = 0,
     .post_load = spitz_keyboard_post_load,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT16(sense_state, SpitzKeyboardState),
         VMSTATE_UINT16(strobe_state, SpitzKeyboardState),
         VMSTATE_UNUSED_TEST(is_version_0, 5),
@@ -1201,7 +1208,7 @@ static const VMStateDescription vmstate_corgi_ssp_regs = {
     .name = "corgi-ssp",
     .version_id = 2,
     .minimum_version_id = 2,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_SSI_PERIPHERAL(ssidev, CorgiSSPState),
         VMSTATE_UINT32_ARRAY(enable, CorgiSSPState, 3),
         VMSTATE_END_OF_LIST(),
@@ -1229,7 +1236,7 @@ static const VMStateDescription vmstate_spitz_lcdtg_regs = {
     .name = "spitz-lcdtg",
     .version_id = 1,
     .minimum_version_id = 1,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_SSI_PERIPHERAL(ssidev, SpitzLCDTG),
         VMSTATE_UINT32(bl_intensity, SpitzLCDTG),
         VMSTATE_UINT32(bl_power, SpitzLCDTG),

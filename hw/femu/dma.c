@@ -47,7 +47,7 @@ uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
             goto unmap;
         }
         if (len > n->page_size) {
-            uint64_t prp_list[n->max_prp_ents];
+            uint64_t *prp_list = g_malloc0(sizeof(uint64_t) * n->max_prp_ents);
             uint32_t nents, prp_trans;
             int i = 0;
 

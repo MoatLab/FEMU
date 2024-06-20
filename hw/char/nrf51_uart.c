@@ -93,13 +93,13 @@ static gboolean uart_transmit(void *do_not_use, GIOCondition cond, void *opaque)
              */
             goto buffer_drained;
         }
-        return FALSE;
+        return G_SOURCE_REMOVE;
     }
 
 buffer_drained:
     s->reg[R_UART_TXDRDY] = 1;
     s->pending_tx_byte = false;
-    return FALSE;
+    return G_SOURCE_REMOVE;
 }
 
 static void uart_cancel_transmit(NRF51UARTState *s)
@@ -291,7 +291,7 @@ static int nrf51_uart_post_load(void *opaque, int version_id)
 static const VMStateDescription nrf51_uart_vmstate = {
     .name = "nrf51_soc.uart",
     .post_load = nrf51_uart_post_load,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(reg, NRF51UARTState, 0x56C),
         VMSTATE_UINT8_ARRAY(rx_fifo, NRF51UARTState, UART_FIFO_LENGTH),
         VMSTATE_UINT32(rx_fifo_pos, NRF51UARTState),

@@ -5,13 +5,17 @@
  */
 
 #include <platform_override.h>
-#include <thead_c9xx.h>
+#include <thead/c9xx_encoding.h>
+#include <thead/c9xx_pmu.h>
+#include <sbi/riscv_asm.h>
 #include <sbi/riscv_io.h>
 #include <sbi/sbi_bitops.h>
 #include <sbi/sbi_ecall_interface.h>
 #include <sbi/sbi_error.h>
 #include <sbi/sbi_hsm.h>
 #include <sbi/sbi_pmu.h>
+#include <sbi/sbi_scratch.h>
+#include <sbi_utils/fdt/fdt_fixup.h>
 #include <sbi_utils/fdt/fdt_helper.h>
 #include <sbi_utils/irqchip/fdt_irqchip_plic.h>
 
@@ -69,10 +73,10 @@ static void sun20i_d1_csr_restore(void)
  * PLIC
  */
 
-#define PLIC_SOURCES			176
-#define PLIC_IE_WORDS			((PLIC_SOURCES + 31) / 32)
+#define PLIC_SOURCES			175
+#define PLIC_IE_WORDS			(PLIC_SOURCES / 32 + 1)
 
-static u8 plic_priority[PLIC_SOURCES];
+static u8 plic_priority[1 + PLIC_SOURCES];
 static u32 plic_sie[PLIC_IE_WORDS];
 static u32 plic_threshold;
 
@@ -202,56 +206,32 @@ static int sun20i_d1_final_init(bool cold_boot, const struct fdt_match *match)
 	return 0;
 }
 
-static void thead_c9xx_pmu_ctr_enable_irq(uint32_t ctr_idx)
-{
-	unsigned long mip_val;
-
-	if (ctr_idx >= SBI_PMU_HW_CTR_MAX)
-		return;
-
-	mip_val = csr_read(CSR_MIP);
-	/**
-	 * Clear out the OF bit so that next interrupt can be enabled.
-	 * This should be done only when the corresponding overflow interrupt
-	 * bit is cleared. That indicates that software has already handled the
-	 * previous interrupts or the hardware yet to set an overflow interrupt.
-	 * Otherwise, there will be race conditions where we may clear the bit
-	 * the software is yet to handle the interrupt.
-	 */
-	if (!(mip_val & THEAD_C9XX_MIP_MOIP))
-		csr_clear(THEAD_C9XX_CSR_MCOUNTEROF, BIT(ctr_idx));
-
-	/**
-	 * SSCOFPMF uses the OF bit for enabling/disabling the interrupt,
-	 * while the C9XX has designated enable bits.
-	 * So enable per-counter interrupt on C9xx here.
-	 */
-	csr_set(THEAD_C9XX_CSR_MCOUNTERINTEN, BIT(ctr_idx));
-}
-
-static void thead_c9xx_pmu_ctr_disable_irq(uint32_t ctr_idx)
-{
-	csr_clear(THEAD_C9XX_CSR_MCOUNTERINTEN, BIT(ctr_idx));
-}
-
-static int thead_c9xx_pmu_irq_bit(void)
-{
-	return THEAD_C9XX_MIP_MOIP;
-}
-
-const struct sbi_pmu_device thead_c9xx_pmu_device = {
-	.hw_counter_enable_irq = thead_c9xx_pmu_ctr_enable_irq,
-	.hw_counter_disable_irq = thead_c9xx_pmu_ctr_disable_irq,
-	.hw_counter_irq_bit = thead_c9xx_pmu_irq_bit,
+static const struct sbi_cpu_idle_state sun20i_d1_cpu_idle_states[] = {
+	{
+		.name			= "cpu-nonretentive",
+		.suspend_param		= SBI_HSM_SUSPEND_NON_RET_DEFAULT,
+		.local_timer_stop	= true,
+		.entry_latency_us	= 40,
+		.exit_latency_us	= 67,
+		.min_residency_us	= 1100,
+		.wakeup_latency_us	= 67,
+	},
+	{ }
 };
+
+static int sun20i_d1_fdt_fixup(void *fdt, const struct fdt_match *match)
+{
+	return fdt_add_cpu_idle_states(fdt, sun20i_d1_cpu_idle_states);
+}
 
 static int sun20i_d1_extensions_init(const struct fdt_match *match,
 				     struct sbi_hart_features *hfeatures)
 {
-	sbi_pmu_set_device(&thead_c9xx_pmu_device);
+	thead_c9xx_register_pmu_device();
 
 	/* auto-detection doesn't work on t-head c9xx cores */
-	hfeatures->mhpm_count = 29;
+	/* D1 has 29 mhpmevent csrs, but only 3-9,13-17 have valid value */
+	hfeatures->mhpm_mask = 0x0003e3f8;
 	hfeatures->mhpm_bits = 64;
 
 	return 0;
@@ -265,5 +245,6 @@ static const struct fdt_match sun20i_d1_match[] = {
 const struct platform_override sun20i_d1 = {
 	.match_table	= sun20i_d1_match,
 	.final_init	= sun20i_d1_final_init,
+	.fdt_fixup	= sun20i_d1_fdt_fixup,
 	.extensions_init = sun20i_d1_extensions_init,
 };

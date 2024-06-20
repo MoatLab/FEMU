@@ -263,25 +263,13 @@ static bool trans_th_tst(DisasContext *ctx, arg_th_tst *a)
 
 /* XTheadCmo */
 
-static inline int priv_level(DisasContext *ctx)
-{
-#ifdef CONFIG_USER_ONLY
-    return PRV_U;
-#else
-     /* Priv level is part of mem_idx. */
-    return ctx->mem_idx & TB_FLAGS_PRIV_MMU_MASK;
-#endif
-}
-
 /* Test if priv level is M, S, or U (cannot fail). */
 #define REQUIRE_PRIV_MSU(ctx)
 
 /* Test if priv level is M or S. */
 #define REQUIRE_PRIV_MS(ctx)                                    \
 do {                                                            \
-    int priv = priv_level(ctx);                                 \
-    if (!(priv == PRV_M ||                                      \
-          priv == PRV_S)) {                                     \
+    if (ctx->priv == PRV_U) {                                   \
         return false;                                           \
     }                                                           \
 } while (0)
@@ -308,7 +296,7 @@ NOP_PRIVCHECK(th_dcache_csw, REQUIRE_XTHEADCMO, REQUIRE_PRIV_MS)
 NOP_PRIVCHECK(th_dcache_cisw, REQUIRE_XTHEADCMO, REQUIRE_PRIV_MS)
 NOP_PRIVCHECK(th_dcache_isw, REQUIRE_XTHEADCMO, REQUIRE_PRIV_MS)
 NOP_PRIVCHECK(th_dcache_cpal1, REQUIRE_XTHEADCMO, REQUIRE_PRIV_MS)
-NOP_PRIVCHECK(th_dcache_cval1, REQUIRE_XTHEADCMO, REQUIRE_PRIV_MS)
+NOP_PRIVCHECK(th_dcache_cval1, REQUIRE_XTHEADCMO, REQUIRE_PRIV_MSU)
 
 NOP_PRIVCHECK(th_icache_iall, REQUIRE_XTHEADCMO, REQUIRE_PRIV_MS)
 NOP_PRIVCHECK(th_icache_ialls, REQUIRE_XTHEADCMO, REQUIRE_PRIV_MS)
@@ -997,32 +985,29 @@ static bool trans_th_sfence_vmas(DisasContext *ctx, arg_th_sfence_vmas *a)
 
 #ifndef CONFIG_USER_ONLY
     REQUIRE_PRIV_MS(ctx);
-    gen_helper_tlb_flush_all(cpu_env);
+    gen_helper_tlb_flush_all(tcg_env);
     return true;
 #else
     return false;
 #endif
 }
 
-#ifndef CONFIG_USER_ONLY
 static void gen_th_sync_local(DisasContext *ctx)
 {
     /*
      * Emulate out-of-order barriers with pipeline flush
      * by exiting the translation block.
      */
-    gen_set_pc_imm(ctx, ctx->pc_succ_insn);
+    gen_update_pc(ctx, ctx->cur_insn_len);
     tcg_gen_exit_tb(NULL, 0);
     ctx->base.is_jmp = DISAS_NORETURN;
 }
-#endif
 
 static bool trans_th_sync(DisasContext *ctx, arg_th_sync *a)
 {
     (void) a;
     REQUIRE_XTHEADSYNC(ctx);
 
-#ifndef CONFIG_USER_ONLY
     REQUIRE_PRIV_MSU(ctx);
 
     /*
@@ -1031,9 +1016,6 @@ static bool trans_th_sync(DisasContext *ctx, arg_th_sync *a)
     gen_th_sync_local(ctx);
 
     return true;
-#else
-    return false;
-#endif
 }
 
 static bool trans_th_sync_i(DisasContext *ctx, arg_th_sync_i *a)
@@ -1041,7 +1023,6 @@ static bool trans_th_sync_i(DisasContext *ctx, arg_th_sync_i *a)
     (void) a;
     REQUIRE_XTHEADSYNC(ctx);
 
-#ifndef CONFIG_USER_ONLY
     REQUIRE_PRIV_MSU(ctx);
 
     /*
@@ -1050,9 +1031,6 @@ static bool trans_th_sync_i(DisasContext *ctx, arg_th_sync_i *a)
     gen_th_sync_local(ctx);
 
     return true;
-#else
-    return false;
-#endif
 }
 
 static bool trans_th_sync_is(DisasContext *ctx, arg_th_sync_is *a)

@@ -3,7 +3,7 @@
 #
 #  Copyright (c) 2015 - 2021, Intel Corporation. All rights reserved.<BR>
 #  Copyright (C) 2020, Red Hat, Inc.<BR>
-#  Copyright (c) 2020, ARM Ltd. All rights reserved.<BR>
+#  Copyright (c) 2020 - 2023, Arm Limited. All rights reserved.<BR>
 #
 #  SPDX-License-Identifier: BSD-2-Clause-Patent
 #
@@ -25,6 +25,9 @@ import email.header
 class Verbose:
     SILENT, ONELINE, NORMAL = range(3)
     level = NORMAL
+
+class PatchCheckConf:
+    ignore_change_id = False
 
 class EmailAddressCheck:
     """Checks an email address."""
@@ -111,6 +114,8 @@ class CommitMessageCheck:
             self.check_signed_off_by()
             self.check_misc_signatures()
             self.check_overall_format()
+            if not PatchCheckConf.ignore_change_id:
+                self.check_change_id_format()
         self.report_message_result()
 
     url = 'https://github.com/tianocore/tianocore.github.io/wiki/Commit-Message-Format'
@@ -307,6 +312,12 @@ class CommitMessageCheck:
                 break
             last_sig_line = line.strip()
 
+    def check_change_id_format(self):
+        cid='Change-Id:'
+        if self.msg.find(cid) != -1:
+            self.error('\"%s\" found in commit message:' % cid)
+            return
+
 (START, PRE_PATCH, PATCH) = range(3)
 
 class GitDiffCheck:
@@ -363,6 +374,9 @@ class GitDiffCheck:
                 self.is_newfile = False
                 self.force_crlf = True
                 self.force_notabs = True
+                if self.filename.endswith('.rtf'):
+                    self.force_crlf = False
+                    self.force_notabs = False
                 if self.filename.endswith('.sh') or \
                     self.filename.startswith('BaseTools/BinWrappers/PosixLike/') or \
                     self.filename.startswith('BaseTools/BinPipWrappers/PosixLike/') or \
@@ -383,7 +397,10 @@ class GitDiffCheck:
                     self.force_crlf = False
                     self.force_notabs = False
                 if os.path.basename(self.filename) == 'GNUmakefile' or \
-                   os.path.basename(self.filename) == 'Makefile':
+                   os.path.basename(self.filename).lower() == 'makefile' or \
+                   os.path.splitext(self.filename)[1] == '.makefile' or \
+                   self.filename.startswith(
+                        'BaseTools/Source/C/VfrCompile/Pccts/'):
                     self.force_notabs = False
             elif len(line.rstrip()) != 0:
                 self.format_error("didn't find diff command")
@@ -413,7 +430,7 @@ class GitDiffCheck:
                     self.format_error("didn't find diff hunk marker (@@)")
             self.line_num += 1
         elif self.state == PATCH:
-            if self.binary:
+            if self.binary or self.filename.endswith(".rtf"):
                 pass
             elif line.startswith('-'):
                 pass
@@ -487,6 +504,12 @@ class GitDiffCheck:
             self.added_line_error('EFI_D_' + mo.group(1) + ' was used, '
                                   'but DEBUG_' + mo.group(1) +
                                   ' is now recommended', line)
+
+        rp_file = os.path.realpath(self.filename)
+        rp_script = os.path.realpath(__file__)
+        if line.find('__FUNCTION__') != -1 and rp_file != rp_script:
+            self.added_line_error('__FUNCTION__ was used, but __func__ '
+                                  'is now recommended', line)
 
     split_diff_re = re.compile(r'''
                                    (?P<cmd>
@@ -768,11 +791,16 @@ class PatchCheckApp:
         group.add_argument("--silent",
                            action="store_true",
                            help="Print nothing")
+        group.add_argument("--ignore-change-id",
+                           action="store_true",
+                           help="Ignore the presence of 'Change-Id:' tags in commit message")
         self.args = parser.parse_args()
         if self.args.oneline:
             Verbose.level = Verbose.ONELINE
         if self.args.silent:
             Verbose.level = Verbose.SILENT
+        if self.args.ignore_change_id:
+            PatchCheckConf.ignore_change_id = True
 
 if __name__ == "__main__":
     sys.exit(PatchCheckApp().retval)

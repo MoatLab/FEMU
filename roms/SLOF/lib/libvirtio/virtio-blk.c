@@ -111,10 +111,10 @@ static void fill_blk_hdr(struct virtio_blk_req *blkhdr, bool is_modern,
  * Read / write blocks
  * @param  reg  pointer to "reg" property
  * @param  buf  pointer to destination buffer
- * @param  blocknum  block number of the first block that should be transfered
- * @param  cnt  amount of blocks that should be transfered
+ * @param  blocknum  block number of the first block that should be transferred
+ * @param  cnt  number of blocks that should be transferred
  * @param  type  VIRTIO_BLK_T_OUT for write, VIRTIO_BLK_T_IN for read transfers
- * @return number of blocks that have been transfered successfully
+ * @return number of blocks that have been transferred successfully
  */
 int
 virtioblk_transfer(struct virtio_device *dev, char *buf, uint64_t blocknum,

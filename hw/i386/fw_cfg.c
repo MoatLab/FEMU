@@ -24,6 +24,7 @@
 #include "kvm/kvm_i386.h"
 #include "qapi/error.h"
 #include CONFIG_DEVICES
+#include "target/i386/cpu.h"
 
 struct hpet_fw_config hpet_cfg = {.count = UINT8_MAX};
 
@@ -47,22 +48,34 @@ const char *fw_cfg_arch_key_name(uint16_t key)
     return NULL;
 }
 
-void fw_cfg_build_smbios(MachineState *ms, FWCfgState *fw_cfg)
+void fw_cfg_build_smbios(PCMachineState *pcms, FWCfgState *fw_cfg,
+                         SmbiosEntryPointType ep_type)
 {
 #ifdef CONFIG_SMBIOS
     uint8_t *smbios_tables, *smbios_anchor;
     size_t smbios_tables_len, smbios_anchor_len;
     struct smbios_phys_mem_area *mem_array;
     unsigned i, array_count;
+    MachineState *ms = MACHINE(pcms);
+    PCMachineClass *pcmc = PC_MACHINE_GET_CLASS(pcms);
+    MachineClass *mc = MACHINE_GET_CLASS(pcms);
     X86CPU *cpu = X86_CPU(ms->possible_cpus->cpus[0].cpu);
+
+    if (pcmc->smbios_defaults) {
+        /* These values are guest ABI, do not change */
+        smbios_set_defaults("QEMU", mc->desc, mc->name,
+                            pcmc->smbios_uuid_encoded);
+    }
 
     /* tell smbios about cpuid version and features */
     smbios_set_cpuid(cpu->env.cpuid_version, cpu->env.features[FEAT_1_EDX]);
 
-    smbios_tables = smbios_get_table_legacy(ms, &smbios_tables_len);
-    if (smbios_tables) {
+    if (pcmc->smbios_legacy_mode) {
+        smbios_tables = smbios_get_table_legacy(&smbios_tables_len,
+                                                &error_fatal);
         fw_cfg_add_bytes(fw_cfg, FW_CFG_SMBIOS_ENTRIES,
                          smbios_tables, smbios_tables_len);
+        return;
     }
 
     /* build the array of physical mem area from e820 table */
@@ -76,7 +89,7 @@ void fw_cfg_build_smbios(MachineState *ms, FWCfgState *fw_cfg)
             array_count++;
         }
     }
-    smbios_get_tables(ms, mem_array, array_count,
+    smbios_get_tables(ms, ep_type, mem_array, array_count,
                       &smbios_tables, &smbios_tables_len,
                       &smbios_anchor, &smbios_anchor_len,
                       &error_fatal);

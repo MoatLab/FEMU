@@ -668,7 +668,7 @@
 : pci-bridge-generic-setup ( addr -- )
         pci-device-slots >r             \ save the slot array on return stack
         dup pci-common-props            \ set the common properties before scanning the bus
-        s" pci" device-type             \ the type is allways "pci"
+        s" pci" device-type             \ the type is always "pci"
         dup func-pci-bridge-probe       \ find all device connected to it
         dup assign-all-bridge-bars      \ set up all memory access BARs
         dup pci-set-irq-line            \ set the interrupt pin
@@ -679,7 +679,7 @@
 
 DEFER func-pci-device-props
 
-\ used for an gerneric device set up
+\ used for an generic device set up
 \ if a device has no special handling for setup
 \ the device file (pci-device_VENDOR_DEVICE.fs) can call
 \ this word to setup the device

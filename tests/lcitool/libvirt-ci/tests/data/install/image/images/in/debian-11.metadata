@@ -1,0 +1,6 @@
+arch: x86_64
+format: qcow2
+image: debian-11.qcow2
+libosinfo_id: http://debian.org/debian/11
+target: debian-11
+url: https://cdimage.debian.org/cdimage/cloud/bullseye/latest/debian-11-amd64.qcow2

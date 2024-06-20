@@ -33,7 +33,7 @@ FEMU_OPTIONS=${FEMU_OPTIONS}",zns_read=${READ_LATENCY_NS}"
 FEMU_OPTIONS=${FEMU_OPTIONS}",zns_write=${WRITE_LATENCY_NS}"
 FEMU_OPTIONS=${FEMU_OPTIONS}",femu_mode=3"
 
-sudo x86_64-softmmu/qemu-system-x86_64 \
+sudo ./qemu-system-x86_64 \
     -name "FEMU-ZNSSD-VM" \
     -enable-kvm \
     -cpu host \

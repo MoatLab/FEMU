@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=62.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lcitool"
+version = "0.1"
+description = "libvirt CI guest management tool"
+readme = "README.rst"
+keywords = ["libvirt ci"]
+requires-python = ">=3.8"
+
+authors = [
+    { name = "libvirt team", email = "libvir-list@redhat.com" }
+]
+
+classifiers = [
+    "License :: OSI Approved :: GNU General Public License v2 or later (GPLv2+)",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3 :: Only",
+]
+
+dependencies = [
+    "PyYAML",
+]
+
+[project.urls]
+repository = "https://gitlab.com/libvirt/libvirt-ci.git"
+
+[project.scripts]
+lcitool = "lcitool.__main__:main"
+
+[project.optional-dependencies]
+vm_support = [
+    "ansible",
+    "ansible-runner >= 2.1.1",
+    "libvirt-python",
+]
+
+[tool.setuptools]
+include-package-data = true
+packages = [
+    "lcitool",
+    "lcitool.install",
+    "lcitool.containers",
+]
+
+[tool.setuptools.package-data]
+"lcitool" = [
+    "ansible/**",
+    "cross/**",
+    "etc/**",
+    "facts/**",
+]
+
+"lcitool.install" = ["configs/**"]

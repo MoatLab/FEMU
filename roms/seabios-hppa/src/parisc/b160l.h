@@ -1,7 +1,6 @@
 /* AUTO-GENERATED FILE FOR QEMU */
 #define PARISC_MODEL "9000/778/B160L"
-#define PARISC_PDC_MODEL 0x5020, 0x481, 0x0,\
-0x2020202, 0x7794d7fe, 0x100000f0, 0x4, 0xba, 0xba
+#define PARISC_PDC_MODEL 0x5020, 0x481, 0x0, 0x2020202, 2004000160, 0x100000f0, 0x4, 0xba, 0xba, 0
 #define PARISC_PDC_VERSION 0x0008
 #define PARISC_PDC_CPUID 0x01e8
 #define PARISC_PDC_CAPABILITIES 0x0002
@@ -408,7 +407,7 @@ static struct pdc_iodc iodc_data_hpa_f4000000 = {
 
 #define HPA_f8000000_DESCRIPTION "Gecko GSC Core Graphics"
 static struct pdc_system_map_mod_info mod_info_hpa_f8000000 = {
-	.mod_addr = 0xf8000000,
+	.mod_addr = LASI_GFX_HPA,
 	.mod_pgs = 0x2000,
 	.add_addrs = 0x1,
 };
@@ -464,7 +463,7 @@ static struct pdc_iodc iodc_data_hpa_fff10000 = {
 
 #define HPA_fffbf000_DESCRIPTION "Memory"
 static struct pdc_system_map_mod_info mod_info_hpa_fffbf000 = {
-	.mod_addr = 0xfffbf000,
+	.mod_addr = MEMORY_HPA,
 	.mod_pgs = 0x1,
 	.add_addrs = 0x0,
 };
@@ -603,19 +602,13 @@ static struct pdc_iodc iodc_data_hpa_fff81000 = {
 		.mod_path = &mod_path_hpa_f4000000,\
 		.num_addr = HPA_f4000000_num_addr,\
 		.add_addr = { HPA_f4000000_add_addr } },\
-	{	.hpa = 0xf8000000,\
+	{	.hpa = LASI_GFX_HPA,\
 		.iodc = &iodc_data_hpa_f8000000,\
 		.mod_info = &mod_info_hpa_f8000000,\
 		.mod_path = &mod_path_hpa_f8000000,\
 		.num_addr = HPA_f8000000_num_addr,\
 		.add_addr = { HPA_f8000000_add_addr } },\
-	{	.hpa = CPU_HPA,\
-		.iodc = &iodc_data_hpa_fff10000,\
-		.mod_info = &mod_info_hpa_fff10000,\
-		.mod_path = &mod_path_hpa_fff10000,\
-		.num_addr = HPA_fff10000_num_addr,\
-		.add_addr = { HPA_fff10000_add_addr } },\
-	{	.hpa = 0xfffbf000,\
+	{	.hpa = MEMORY_HPA,\
 		.iodc = &iodc_data_hpa_fffbf000,\
 		.mod_info = &mod_info_hpa_fffbf000,\
 		.mod_path = &mod_path_hpa_fffbf000,\
@@ -627,4 +620,10 @@ static struct pdc_iodc iodc_data_hpa_fff81000 = {
 		.mod_path = &mod_path_hpa_fff81000,\
 		.num_addr = HPA_fff81000_num_addr,\
 		.add_addr = { HPA_fff81000_add_addr } },\
+	{	.hpa = CPU_HPA,\
+		.iodc = &iodc_data_hpa_fff10000,\
+		.mod_info = &mod_info_hpa_fff10000,\
+		.mod_path = &mod_path_hpa_fff10000,\
+		.num_addr = HPA_fff10000_num_addr,\
+		.add_addr = { HPA_fff10000_add_addr } },\
 	{ 0, }

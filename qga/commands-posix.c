@@ -45,9 +45,12 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <net/if.h>
-#if defined(__NetBSD__) || defined(__OpenBSD__)
+#if defined(__NetBSD__) || defined(__OpenBSD__) || defined(CONFIG_SOLARIS)
 #include <net/if_arp.h>
 #include <netinet/if_ether.h>
+#if !defined(ETHER_ADDR_LEN) && defined(ETHERADDRL)
+#define ETHER_ADDR_LEN ETHERADDRL
+#endif
 #else
 #include <net/ethernet.h>
 #endif
@@ -879,7 +882,9 @@ static bool build_guest_fsinfo_for_pci_dev(char const *syspath,
                        g_str_equal(driver, "sym53c8xx") ||
                        g_str_equal(driver, "virtio-pci") ||
                        g_str_equal(driver, "ahci") ||
-                       g_str_equal(driver, "nvme"))) {
+                       g_str_equal(driver, "nvme") ||
+                       g_str_equal(driver, "xhci_hcd") ||
+                       g_str_equal(driver, "ehci-pci"))) {
             break;
         }
 
@@ -976,6 +981,8 @@ static bool build_guest_fsinfo_for_pci_dev(char const *syspath,
         }
     } else if (strcmp(driver, "nvme") == 0) {
         disk->bus_type = GUEST_DISK_BUS_TYPE_NVME;
+    } else if (strcmp(driver, "ehci-pci") == 0 || strcmp(driver, "xhci_hcd") == 0) {
+        disk->bus_type = GUEST_DISK_BUS_TYPE_USB;
     } else {
         g_debug("unknown driver '%s' (sysfs path '%s')", driver, syspath);
         goto cleanup;
@@ -1918,10 +1925,10 @@ static void guest_suspend(SuspendMode mode, Error **errp)
     if (systemd_supports_mode(mode, &local_err)) {
         mode_supported = true;
         systemd_suspend(mode, &local_err);
-    }
 
-    if (!local_err) {
-        return;
+        if (!local_err) {
+            return;
+        }
     }
 
     error_free(local_err);
@@ -1930,10 +1937,10 @@ static void guest_suspend(SuspendMode mode, Error **errp)
     if (pmutils_supports_mode(mode, &local_err)) {
         mode_supported = true;
         pmutils_suspend(mode, &local_err);
-    }
 
-    if (!local_err) {
-        return;
+        if (!local_err) {
+            return;
+        }
     }
 
     error_free(local_err);
@@ -3245,7 +3252,7 @@ GuestUserList *qmp_guest_get_users(Error **errp)
 
 #endif
 
-/* Replace escaped special characters with theire real values. The replacement
+/* Replace escaped special characters with their real values. The replacement
  * is done in place -- returned value is in the original string.
  */
 static void ga_osrelease_replace_special(gchar *value)

@@ -1,0 +1,6 @@
+arch: x86_64
+format: qcow2
+image: fedora-rawhide.qcow2
+libosinfo_id: http://fedoraproject.org/fedora/rawhide
+target: fedora-rawhide
+url: https://dl.fedoraproject.org/pub/fedora/linux/development/rawhide/Cloud/x86_64/images/Fedora-Cloud-Base-rawhide.x86_64.qcow2

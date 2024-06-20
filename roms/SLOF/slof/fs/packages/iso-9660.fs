@@ -109,7 +109,7 @@ INSTANCE VARIABLE index
 ;
 
 
-\ This method coverts the iso file name to user readble form
+\ This method converts the ISO file name to user readable form
 
 : file-name  ( str len --  str' len' )
    2dup  [char] ; findchar  IF
@@ -169,7 +169,7 @@ INSTANCE VARIABLE index
 ;
 
 
-\ METHOD for searching for a file with in a direcotory
+\ METHOD for searching for a file with in a directory
 
 : search-file-dir ( str len  -- TRUE | FALSE )
    dir-addr @  800 *  dir-addr !             ( str len )

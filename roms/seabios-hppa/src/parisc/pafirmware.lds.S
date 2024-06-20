@@ -1,11 +1,21 @@
 #include "parisc/hppa_hardware.h"
 
+#if BITS == 64
+OUTPUT_FORMAT("elf64-hppa-linux")
+OUTPUT_ARCH(hppa:hppa2.0w)
+#else
 OUTPUT_FORMAT("elf32-hppa-linux")
 OUTPUT_ARCH(hppa)
+#endif
 ENTRY(startup)
 SECTIONS
 {
+#if BITS == 64
+	/* limit firmware high bits to physical addresses to allow debug info */
+	. = ((FIRMWARE_HIGH & 0x3ffffff0) << 32) + FIRMWARE_START;
+#else
 	. = FIRMWARE_START;
+#endif
 
 	/* align on next page boundary */
 	. = ALIGN(4096);
@@ -37,6 +47,21 @@ SECTIONS
                 . = ALIGN(4096);
                 _sti_rom_end = .;
         }
+
+#if BITS == 64
+	. = ALIGN(16);
+	.opd : {
+		__start_opd = .;
+		*(.opd)
+		__end_opd = .;
+	} PROVIDE (__gp = .);
+	.plt : {
+		*(.plt)
+	}
+	.dlt : {
+		*(.dlt)
+	}
+#endif
 
 	. = ALIGN(8);
 	.rodata : {

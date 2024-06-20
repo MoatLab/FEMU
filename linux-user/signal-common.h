@@ -43,8 +43,6 @@ void host_to_target_sigset_internal(target_sigset_t *d,
                                     const sigset_t *s);
 void target_to_host_sigset_internal(sigset_t *d,
                                     const target_sigset_t *s);
-void tswap_siginfo(target_siginfo_t *tinfo,
-                   const target_siginfo_t *info);
 void set_sigmask(const sigset_t *set);
 void force_sig(int sig);
 void force_sigsegv(int oldsig);
@@ -113,7 +111,7 @@ int process_sigsuspend_mask(sigset_t **pset, target_ulong sigset,
 static inline void finish_sigsuspend_mask(int ret)
 {
     if (ret != -QEMU_ERESTARTSYS) {
-        TaskState *ts = (TaskState *)thread_cpu->opaque;
+        TaskState *ts = get_task_state(thread_cpu);
         ts->in_sigsuspend = 1;
     }
 }

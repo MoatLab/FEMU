@@ -167,7 +167,7 @@ sev_ioctl(int fd, int cmd, void *data, int *error)
 
     input.id = cmd;
     input.sev_fd = fd;
-    input.data = (__u64)(unsigned long)data;
+    input.data = (uintptr_t)data;
 
     r = kvm_vm_ioctl(kvm_state, KVM_MEMORY_ENCRYPT_OP, &input);
 
@@ -240,7 +240,7 @@ sev_ram_block_added(RAMBlockNotifier *n, void *host, size_t size,
         return;
     }
 
-    range.addr = (__u64)(unsigned long)host;
+    range.addr = (uintptr_t)host;
     range.size = max_size;
 
     trace_kvm_memcrypt_register_region(host, max_size);
@@ -270,7 +270,7 @@ sev_ram_block_removed(RAMBlockNotifier *n, void *host, size_t size,
         return;
     }
 
-    range.addr = (__u64)(unsigned long)host;
+    range.addr = (uintptr_t)host;
     range.size = max_size;
 
     trace_kvm_memcrypt_unregister_region(host, max_size);
@@ -767,7 +767,7 @@ sev_launch_update_data(SevGuestState *sev, uint8_t *addr, uint64_t len)
         return 1;
     }
 
-    update.uaddr = (__u64)(unsigned long)addr;
+    update.uaddr = (uintptr_t)addr;
     update.len = len;
     trace_kvm_sev_launch_update_data(addr, len);
     ret = sev_ioctl(sev->sev_fd, KVM_SEV_LAUNCH_UPDATE_DATA,
@@ -891,7 +891,7 @@ sev_launch_finish(SevGuestState *sev)
     /* add migration blocker */
     error_setg(&sev_mig_blocker,
                "SEV: Migration is not implemented");
-    migrate_add_blocker(sev_mig_blocker, &error_fatal);
+    migrate_add_blocker(&sev_mig_blocker, &error_fatal);
 }
 
 static void
@@ -932,15 +932,26 @@ int sev_kvm_init(ConfidentialGuestSupport *cgs, Error **errp)
     host_cpuid(0x8000001F, 0, NULL, &ebx, NULL, NULL);
     host_cbitpos = ebx & 0x3f;
 
+    /*
+     * The cbitpos value will be placed in bit positions 5:0 of the EBX
+     * register of CPUID 0x8000001F. No need to verify the range as the
+     * comparison against the host value accomplishes that.
+     */
     if (host_cbitpos != sev->cbitpos) {
         error_setg(errp, "%s: cbitpos check failed, host '%d' requested '%d'",
                    __func__, host_cbitpos, sev->cbitpos);
         goto err;
     }
 
-    if (sev->reduced_phys_bits < 1) {
-        error_setg(errp, "%s: reduced_phys_bits check failed, it should be >=1,"
-                   " requested '%d'", __func__, sev->reduced_phys_bits);
+    /*
+     * The reduced-phys-bits value will be placed in bit positions 11:6 of
+     * the EBX register of CPUID 0x8000001F, so verify the supplied value
+     * is in the range of 1 to 63.
+     */
+    if (sev->reduced_phys_bits < 1 || sev->reduced_phys_bits > 63) {
+        error_setg(errp, "%s: reduced_phys_bits check failed,"
+                   " it should be in the range of 1 to 63, requested '%d'",
+                   __func__, sev->reduced_phys_bits);
         goto err;
     }
 
@@ -1033,6 +1044,7 @@ sev_encrypt_flash(uint8_t *ptr, uint64_t len, Error **errp)
 int sev_inject_launch_secret(const char *packet_hdr, const char *secret,
                              uint64_t gpa, Error **errp)
 {
+    ERRP_GUARD();
     struct kvm_sev_launch_secret input;
     g_autofree guchar *data = NULL, *hdr = NULL;
     int error, ret = 1;

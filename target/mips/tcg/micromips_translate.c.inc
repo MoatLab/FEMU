@@ -710,17 +710,17 @@ static void gen_ldst_multiple(DisasContext *ctx, uint32_t opc, int reglist,
     save_cpu_state(ctx, 1);
     switch (opc) {
     case LWM32:
-        gen_helper_lwm(cpu_env, t0, t1, t2);
+        gen_helper_lwm(tcg_env, t0, t1, t2);
         break;
     case SWM32:
-        gen_helper_swm(cpu_env, t0, t1, t2);
+        gen_helper_swm(tcg_env, t0, t1, t2);
         break;
 #ifdef TARGET_MIPS64
     case LDM:
-        gen_helper_ldm(cpu_env, t0, t1, t2);
+        gen_helper_ldm(tcg_env, t0, t1, t2);
         break;
     case SDM:
-        gen_helper_sdm(cpu_env, t0, t1, t2);
+        gen_helper_sdm(tcg_env, t0, t1, t2);
         break;
 #endif
     }
@@ -977,20 +977,24 @@ static void gen_ldst_pair(DisasContext *ctx, uint32_t opc, int rd,
             gen_reserved_instruction(ctx);
             return;
         }
-        tcg_gen_qemu_ld_tl(t1, t0, ctx->mem_idx, MO_TESL);
+        tcg_gen_qemu_ld_tl(t1, t0, ctx->mem_idx, MO_TESL |
+                           ctx->default_tcg_memop_mask);
         gen_store_gpr(t1, rd);
         tcg_gen_movi_tl(t1, 4);
         gen_op_addr_add(ctx, t0, t0, t1);
-        tcg_gen_qemu_ld_tl(t1, t0, ctx->mem_idx, MO_TESL);
+        tcg_gen_qemu_ld_tl(t1, t0, ctx->mem_idx, MO_TESL |
+                           ctx->default_tcg_memop_mask);
         gen_store_gpr(t1, rd + 1);
         break;
     case SWP:
         gen_load_gpr(t1, rd);
-        tcg_gen_qemu_st_tl(t1, t0, ctx->mem_idx, MO_TEUL);
+        tcg_gen_qemu_st_tl(t1, t0, ctx->mem_idx, MO_TEUL |
+                           ctx->default_tcg_memop_mask);
         tcg_gen_movi_tl(t1, 4);
         gen_op_addr_add(ctx, t0, t0, t1);
         gen_load_gpr(t1, rd + 1);
-        tcg_gen_qemu_st_tl(t1, t0, ctx->mem_idx, MO_TEUL);
+        tcg_gen_qemu_st_tl(t1, t0, ctx->mem_idx, MO_TEUL |
+                           ctx->default_tcg_memop_mask);
         break;
 #ifdef TARGET_MIPS64
     case LDP:
@@ -998,20 +1002,24 @@ static void gen_ldst_pair(DisasContext *ctx, uint32_t opc, int rd,
             gen_reserved_instruction(ctx);
             return;
         }
-        tcg_gen_qemu_ld_tl(t1, t0, ctx->mem_idx, MO_TEUQ);
+        tcg_gen_qemu_ld_tl(t1, t0, ctx->mem_idx, MO_TEUQ |
+                           ctx->default_tcg_memop_mask);
         gen_store_gpr(t1, rd);
         tcg_gen_movi_tl(t1, 8);
         gen_op_addr_add(ctx, t0, t0, t1);
-        tcg_gen_qemu_ld_tl(t1, t0, ctx->mem_idx, MO_TEUQ);
+        tcg_gen_qemu_ld_tl(t1, t0, ctx->mem_idx, MO_TEUQ |
+                           ctx->default_tcg_memop_mask);
         gen_store_gpr(t1, rd + 1);
         break;
     case SDP:
         gen_load_gpr(t1, rd);
-        tcg_gen_qemu_st_tl(t1, t0, ctx->mem_idx, MO_TEUQ);
+        tcg_gen_qemu_st_tl(t1, t0, ctx->mem_idx, MO_TEUQ |
+                           ctx->default_tcg_memop_mask);
         tcg_gen_movi_tl(t1, 8);
         gen_op_addr_add(ctx, t0, t0, t1);
         gen_load_gpr(t1, rd + 1);
-        tcg_gen_qemu_st_tl(t1, t0, ctx->mem_idx, MO_TEUQ);
+        tcg_gen_qemu_st_tl(t1, t0, ctx->mem_idx, MO_TEUQ |
+                           ctx->default_tcg_memop_mask);
         break;
 #endif
     }
@@ -1263,7 +1271,7 @@ static void gen_pool32axf(CPUMIPSState *env, DisasContext *ctx, int rt, int rs)
                 TCGv t0 = tcg_temp_new();
 
                 save_cpu_state(ctx, 1);
-                gen_helper_di(t0, cpu_env);
+                gen_helper_di(t0, tcg_env);
                 gen_store_gpr(t0, rs);
                 /*
                  * Stop translation as we may have switched the execution
@@ -1278,7 +1286,7 @@ static void gen_pool32axf(CPUMIPSState *env, DisasContext *ctx, int rt, int rs)
                 TCGv t0 = tcg_temp_new();
 
                 save_cpu_state(ctx, 1);
-                gen_helper_ei(t0, cpu_env);
+                gen_helper_ei(t0, tcg_env);
                 gen_store_gpr(t0, rs);
                 /*
                  * DISAS_STOP isn't sufficient, we need to ensure we break out

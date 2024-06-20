@@ -2,6 +2,7 @@
 os:
   name: 'Ubuntu'
   version: '2204'
+  libosinfo_id: 'http://ubuntu.com/ubuntu/22.04'
 
 packaging:
   format: 'deb'

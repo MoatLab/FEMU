@@ -28,12 +28,12 @@ stages:
 .job_rules_test_container_changes: &job_rules_test_container_changes
   changes:
     - .gitlab-ci.yml
-    - tests/data/formatters/out/${NAME}-all-projects.Dockerfile
+    - lcitool/facts/mappings.yml
 
 # If pushing to the default branch, then publish the container
 # for future reuse, otherwise just discard it after testing build
 .build_container_template:
-  image: docker:stable
+  image: docker:latest
   stage: containers
   interruptible: false
   services:
@@ -68,18 +68,72 @@ stages:
 
 .check_container_template:
   extends: .test_template
-  image: docker:stable
+  image: $IMAGE
   stage: sanity_checks
   interruptible: true
-  services:
-    - docker:dind
   before_script:
-    - docker info
-    - docker login registry.gitlab.com -u ${CI_REGISTRY_USER} -p ${CI_REGISTRY_PASSWORD}
+    - ci/gitlab/all_mappings_prep_env/$NAME-prep.sh
+    - mkdir -p /tmp/datadir/projects
+    - cp tests/data/packages/in/packages.yml /tmp/datadir/projects/all_mappings.yml
+
+    # We need to use Python virtual env because some platforms have an old
+    # version of pip that does not have the '--dry-run' option and because
+    # installing to system locations is broken on Debian
+    - python3 -m venv _venv_
+    - _venv_/bin/pip3 install --upgrade pip
+    - _venv_/bin/python3 -m pip install -r requirements.txt
   script:
-    - docker build -f tests/data/formatters/out/${NAME}-all-projects.Dockerfile tests/data/formatters/out/
-  after_script:
-    - docker logout
+    - source <(_venv_/bin/python3 bin/lcitool -d /tmp/datadir variables $NAME all_mappings | grep PKGS)
+    - set +e
+    - for pkg in $PKGS;
+      do
+        echo -n "Checking package '$pkg' ... ";
+        out=$($DRY_RUN_INSTALL_COMMAND $pkg 2>&1);
+        if [ $? -eq 0 ];
+        then
+          echo "OK";
+        else
+          echo "FAIL";
+          echo "LAST ERROR:";
+          echo "-----------";
+          echo -e "$out";
+          exit 1;
+        fi;
+      done
+
+    - for pkg in $PYPI_PKGS;
+      do
+        echo -n "Checking PyPI package '$pkg' ... ";
+        out=$(_venv_/bin/python3 -m pip install --dry-run $pkg 2>&1);
+        if [ $? -eq 0 ];
+        then
+          echo "OK";
+        else
+          echo "FAIL";
+          echo "LAST ERROR:";
+          echo "-----------";
+          echo -e "$out";
+          exit 1;
+        fi;
+      done
+
+    - for pkg in $CPAN_PKGS;
+      do
+        echo -n "Checking CPAN package '$pkg' ... ";
+        out=$($CPAN_DRY_RUN_COMMAND $pkg 2>&1);
+        if [ $? -eq 0 ];
+        then
+          echo "OK";
+        else
+          echo "FAIL";
+          echo "LAST ERROR:";
+          echo "-----------";
+          echo -e "$out";
+          exit 1;
+        fi;
+      done
+  variables:
+    CPAN_DRY_RUN_COMMAND: cpanm --scandeps
   rules:
     - if: '$LIBVIRT_CI_SKIP_TARGET && $NAME =~ $LIBVIRT_CI_SKIP_TARGET'
       when: never
@@ -147,9 +201,9 @@ flake8:
   needs: []
   before_script:
     - apk update
+    - python3 -m pip install tox
   script:
-    - pip3 install flake8
-    - flake8 --format=pylint
+    - tox -e lint
 
 unittests:
   extends: .test_template
@@ -158,106 +212,147 @@ unittests:
   needs: []
   before_script:
     - apk update
-    - apk add git ansible
+    - apk add gcc linux-headers libffi-dev musl-dev
+    - python3 -m pip install tox
   script:
-    - pip3 install setuptools pytest
-    - pip3 install -r requirements.txt ansible-runner
-    - python3 -m pytest --verbose
+    - tox -e py38
 
-package_install:
-  extends: unittests
-  script:
-    - python3 -m venv _venv_
-    - _venv_/bin/pip3 install setuptools pytest
-    - _venv_/bin/pip3 install -r requirements.txt pytest .
-    - _venv_/bin/python3 -m pytest --verbose tests/test_commands.py -k 'test_commands_installed'
+# DNF returns 1 when 'install --assumeno' is used which is undistinguishable
+# from genuine errors, let's install our DNF helper that checks whether the
+# failure just means that the installation was aborted or whether the package
+# actually doesn't exist
+.dnf_dry_run_command: &dnf_dry_run_command
+    DRY_RUN_INSTALL_COMMAND: ci/gitlab/all_mappings_prep_env/dnf_install_wrapper install --assumeno
+
+.apt_dry_run_command: &apt_dry_run_command
+  DRY_RUN_INSTALL_COMMAND: apt --dry-run install
+
+.apk_dry_run_command: &apk_dry_run_command
+  DRY_RUN_INSTALL_COMMAND: apk add -s
+
+.zypper_dry_run_command: &zypper_dry_run_command
+  DRY_RUN_INSTALL_COMMAND: zypper install -y --dry-run
 
 x86_64-check-almalinux-8:
   extends: .check_container_template
   variables:
+    <<: *dnf_dry_run_command
+    IMAGE: docker.io/library/almalinux:8
     NAME: almalinux-8
 
 x86_64-check-almalinux-9:
   extends: .check_container_template
   variables:
+    <<: *dnf_dry_run_command
+    IMAGE: docker.io/library/almalinux:9
     NAME: almalinux-9
 
-x86_64-check-alpine-315:
+x86_64-check-alpine-317:
   extends: .check_container_template
   variables:
-    NAME: alpine-315
+    <<: *apk_dry_run_command
+    IMAGE: docker.io/library/alpine:3.17
+    NAME: alpine-317
 
-x86_64-check-alpine-316:
+x86_64-check-alpine-318:
   extends: .check_container_template
   variables:
-    NAME: alpine-316
+    <<: *apk_dry_run_command
+    IMAGE: docker.io/library/alpine:3.18
+    NAME: alpine-318
 
 x86_64-check-alpine-edge:
   extends: .check_container_template
   allow_failure: true
   variables:
+    <<: *apk_dry_run_command
+    IMAGE: docker.io/library/alpine:edge
     NAME: alpine-edge
 
 x86_64-check-centos-stream-8:
   extends: .check_container_template
   variables:
+    <<: *dnf_dry_run_command
+    IMAGE: quay.io/centos/centos:stream8
     NAME: centos-stream-8
 
 x86_64-check-centos-stream-9:
   extends: .check_container_template
   allow_failure: true
   variables:
+    <<: *dnf_dry_run_command
+    IMAGE: quay.io/centos/centos:stream9
     NAME: centos-stream-9
 
-x86_64-check-debian-10:
+x86_64-check-debian-11:
   extends: .check_container_template
   variables:
-    NAME: debian-10
+    <<: *apt_dry_run_command
+    IMAGE: docker.io/library/debian:11-slim
+    NAME: debian-11
+
+x86_64-check-debian-12:
+  extends: .check_container_template
+  variables:
+    <<: *apt_dry_run_command
+    IMAGE: docker.io/library/debian:12-slim
+    NAME: debian-12
 
 x86_64-check-debian-sid:
   extends: .check_container_template
   allow_failure: true
   variables:
+    <<: *apt_dry_run_command
+    IMAGE: docker.io/library/debian:sid-slim
     NAME: debian-sid
-
-x86_64-check-fedora-36:
-  extends: .check_container_template
-  variables:
-    NAME: fedora-36
 
 x86_64-check-fedora-37:
   extends: .check_container_template
   variables:
+    <<: *dnf_dry_run_command
+    IMAGE: registry.fedoraproject.org/fedora:38
     NAME: fedora-37
+
+x86_64-check-fedora-38:
+  extends: .check_container_template
+  variables:
+    <<: *dnf_dry_run_command
+    IMAGE: registry.fedoraproject.org/fedora:37
+    NAME: fedora-38
 
 x86_64-check-fedora-rawhide:
   extends: .check_container_template
   allow_failure: true
   variables:
+    <<: *dnf_dry_run_command
+    IMAGE: registry.fedoraproject.org/fedora:rawhide
     NAME: fedora-rawhide
 
-x86_64-check-opensuse-leap-153:
+x86_64-check-opensuse-leap-15:
   extends: .check_container_template
   variables:
-    NAME: opensuse-leap-153
+    <<: *zypper_dry_run_command
+    IMAGE: registry.opensuse.org/opensuse/leap:15.5
+    NAME: opensuse-leap-15
 
 x86_64-check-opensuse-tumbleweed:
   extends: .check_container_template
   allow_failure: true
   variables:
+    <<: *zypper_dry_run_command
+    IMAGE: registry.opensuse.org/opensuse/tumbleweed:latest
     NAME: opensuse-tumbleweed
-
-x86_64-check-ubuntu-1804:
-  extends: .check_container_template
-  variables:
-    NAME: ubuntu-1804
 
 x86_64-check-ubuntu-2004:
   extends: .check_container_template
   variables:
+    <<: *apt_dry_run_command
+    IMAGE: docker.io/library/ubuntu:20.04
     NAME: ubuntu-2004
 
 x86_64-check-ubuntu-2204:
   extends: .check_container_template
   variables:
+    <<: *apt_dry_run_command
+    IMAGE: docker.io/library/ubuntu:22.04
     NAME: ubuntu-2204

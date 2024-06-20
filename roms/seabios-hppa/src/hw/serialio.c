@@ -111,6 +111,7 @@ qemu_debug_preinit(void)
         return;
 
     /* Check if the QEMU debug output port is active */
+    /* PARISC may use serial console */
     if (CONFIG_DEBUG_IO &&
         inb(GET_GLOBAL(DebugOutputPort)) != QEMU_DEBUGCON_READBACK)
         DebugOutputPort = 0;
@@ -122,7 +123,7 @@ qemu_debug_putc(char c)
 {
     if (!CONFIG_DEBUG_IO || !runningOnQEMU())
         return;
-    u16 port = GET_GLOBAL(DebugOutputPort);
+    portaddr_t port = GET_GLOBAL(DebugOutputPort);
     if (port)
         // Send character to debug port.
         outb(c, port);

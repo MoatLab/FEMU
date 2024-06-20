@@ -98,7 +98,7 @@ localsstackbuf VALUE localsstack
 : fc-pop-locals  ( -- )
    \ ." popping locals" cr
    localsstack 8 cells - TO localsstack
-   localsstack localsstackbuf - 0 < ABORT" Locals stack undeflow!"
+   localsstack localsstackbuf - 0 < ABORT" Locals stack underflow!"
 ;
 
 

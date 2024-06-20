@@ -9,8 +9,6 @@
 #include "util.h" // timer_setup
 #include "parisc/pdc.h"
 
-#define PAGE0 ((volatile struct zeropage *) 0UL)
-
 // Setup internal timers.
 void
 timer_setup(void)
@@ -96,6 +94,33 @@ timer_calc_usec(u32 usecs)
     return ((usecs * PAGE0->mem_10msec / 10) / 1000) + timer_read();
 }
 
+void
+timer_calc2_ms(struct wait_t *w, u32 msecs)
+{
+    w->usecs = msecs / 1000;
+    w->end = msecs % 1000;
+    if (w->end == 0) {
+        w->end = 1000;
+        w->usecs -= 1;
+    }
+    w->end = timer_calc(w->end);
+}
+
+int
+timer_check2(struct wait_t *w)
+{
+    s32 remain;
+
+    /* return 1 if timed out */
+    remain = (s32)(timer_read() - w->end);
+    if (remain <= 0)
+        return 0;
+    if (w->usecs == 0)
+        return 1;
+    w->usecs -= 1;
+    w->end = timer_calc(1000);
+    return 0;
+}
 
 void
 pit_setup(void)

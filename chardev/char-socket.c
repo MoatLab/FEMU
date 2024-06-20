@@ -378,6 +378,10 @@ static void tcp_chr_free_connection(Chardev *chr)
                                  char_socket_yank_iochannel,
                                  QIO_CHANNEL(s->sioc));
     }
+
+    if (s->ioc) {
+        qio_channel_close(s->ioc, NULL);
+    }
     object_unref(OBJECT(s->sioc));
     s->sioc = NULL;
     object_unref(OBJECT(s->ioc));
@@ -597,6 +601,22 @@ static void update_ioc_handlers(SocketChardev *s)
 
     remove_hup_source(s);
     s->hup_source = qio_channel_create_watch(s->ioc, G_IO_HUP);
+    /*
+     * poll() is liable to return POLLHUP even when there is
+     * still incoming data available to read on the FD. If
+     * we have the hup_source at the same priority as the
+     * main io_add_watch_poll GSource, then we might end up
+     * processing the POLLHUP event first, closing the FD,
+     * and as a result silently discard data we should have
+     * read.
+     *
+     * By setting the hup_source to G_PRIORITY_DEFAULT + 1,
+     * we ensure that io_add_watch_poll GSource will always
+     * be dispatched first, thus guaranteeing we will be
+     * able to process all incoming data before closing the
+     * FD
+     */
+    g_source_set_priority(s->hup_source, G_PRIORITY_DEFAULT + 1);
     g_source_set_callback(s->hup_source, (GSourceFunc)tcp_chr_hup,
                           chr, NULL);
     g_source_attach(s->hup_source, chr->gcontext);
@@ -710,7 +730,7 @@ static void tcp_chr_telnet_init(Chardev *chr)
 
     if (!s->is_tn3270) {
         init->buflen = 12;
-        /* Prep the telnet negotion to put telnet in binary,
+        /* Prep the telnet negotiation to put telnet in binary,
          * no echo, single char mode */
         IACSET(init->buf, 0xff, 0xfb, 0x01);  /* IAC WILL ECHO */
         IACSET(init->buf, 0xff, 0xfb, 0x03);  /* IAC WILL Suppress go ahead */
@@ -718,7 +738,7 @@ static void tcp_chr_telnet_init(Chardev *chr)
         IACSET(init->buf, 0xff, 0xfd, 0x00);  /* IAC DO Binary */
     } else {
         init->buflen = 21;
-        /* Prep the TN3270 negotion based on RFC1576 */
+        /* Prep the TN3270 negotiation based on RFC1576 */
         IACSET(init->buf, 0xff, 0xfd, 0x19);  /* IAC DO EOR */
         IACSET(init->buf, 0xff, 0xfb, 0x19);  /* IAC WILL EOR */
         IACSET(init->buf, 0xff, 0xfd, 0x00);  /* IAC DO BINARY */
@@ -742,8 +762,12 @@ static void tcp_chr_websock_handshake(QIOTask *task, gpointer user_data)
 {
     Chardev *chr = user_data;
     SocketChardev *s = user_data;
+    Error *err = NULL;
 
-    if (qio_task_propagate_error(task, NULL)) {
+    if (qio_task_propagate_error(task, &err)) {
+        error_reportf_err(err,
+                          "websock handshake of character device %s failed: ",
+                          chr->label);
         tcp_chr_disconnect(chr);
     } else {
         if (s->do_telnetopt) {
@@ -778,8 +802,12 @@ static void tcp_chr_tls_handshake(QIOTask *task,
 {
     Chardev *chr = user_data;
     SocketChardev *s = user_data;
+    Error *err = NULL;
 
-    if (qio_task_propagate_error(task, NULL)) {
+    if (qio_task_propagate_error(task, &err)) {
+        error_reportf_err(err,
+                          "TLS handshake of character device %s failed: ",
+                          chr->label);
         tcp_chr_disconnect(chr);
     } else {
         if (s->is_websock) {
@@ -1290,7 +1318,7 @@ static bool qmp_chardev_validate_socket(ChardevSocket *sock,
         return false;
     }
 
-    /* Validate any options which have a dependancy on client vs server */
+    /* Validate any options which have a dependency on client vs server */
     if (!sock->has_server || sock->server) {
         if (sock->has_reconnect) {
             error_setg(errp,
@@ -1496,7 +1524,7 @@ static void qemu_chr_parse_socket(QemuOpts *opts, ChardevBackend *backend,
         };
     } else {
         addr->type = SOCKET_ADDRESS_TYPE_FD;
-        addr->u.fd.data = g_new(String, 1);
+        addr->u.fd.data = g_new(FdSocketAddress, 1);
         addr->u.fd.data->str = g_strdup(fd);
     }
     sock->addr = addr;

@@ -1,10 +1,10 @@
 # THIS FILE WAS AUTO-GENERATED
 #
-#  $ lcitool dockerfile --layers all alpine-316 qemu
+#  $ lcitool dockerfile --layers all alpine-318 qemu
 #
 # https://gitlab.com/libvirt/libvirt-ci
 
-FROM docker.io/library/alpine:3.16
+FROM docker.io/library/alpine:3.18
 
 RUN apk update && \
     apk upgrade && \
@@ -19,7 +19,6 @@ RUN apk update && \
         ca-certificates \
         capstone-dev \
         ccache \
-        cdrkit \
         ceph-dev \
         clang \
         cmocka-dev \
@@ -60,6 +59,7 @@ RUN apk update && \
         libtasn1-dev \
         liburing-dev \
         libusb-dev \
+        libxdp-dev \
         linux-pam-dev \
         llvm \
         lttng-ust-dev \
@@ -67,6 +67,7 @@ RUN apk update && \
         make \
         mesa-dev \
         meson \
+        mtools \
         multipath-tools \
         musl-dev \
         ncurses-dev \
@@ -77,6 +78,7 @@ RUN apk update && \
         numactl-dev \
         openssh-client \
         pcre-dev \
+        pipewire-dev \
         pixman-dev \
         pkgconf \
         pulseaudio-dev \
@@ -98,6 +100,7 @@ RUN apk update && \
         sparse \
         spice-dev \
         spice-protocol \
+        swtpm \
         tar \
         tesseract-ocr \
         usbredir-dev \
@@ -108,6 +111,7 @@ RUN apk update && \
         which \
         xen-dev \
         xfsprogs-dev \
+        xorriso \
         zlib-dev \
         zlib-static \
         zstd \

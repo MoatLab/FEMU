@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: (GPL-2.0-or-later OR BSD-2-Clause)
+// SPDX-License-Identifier: GPL-2.0-or-later OR BSD-2-Clause
 /*
  * libfdt - Flat Device Tree manipulation
  * Copyright (C) 2016 Free Electrons
@@ -404,7 +404,7 @@ static int overlay_fixup_one_phandle(void *fdt, void *fdto,
 						   name, name_len, poffset,
 						   &phandle_prop,
 						   sizeof(phandle_prop));
-};
+}
 
 /**
  * overlay_fixup_phandle - Set an overlay phandle to the base one

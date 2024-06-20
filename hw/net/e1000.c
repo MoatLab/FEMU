@@ -127,13 +127,9 @@ struct E1000State_st {
     QEMUTimer *flush_queue_timer;
 
 /* Compatibility flags for migration to/from qemu 1.3.0 and older */
-#define E1000_FLAG_AUTONEG_BIT 0
-#define E1000_FLAG_MIT_BIT 1
 #define E1000_FLAG_MAC_BIT 2
 #define E1000_FLAG_TSO_BIT 3
 #define E1000_FLAG_VET_BIT 4
-#define E1000_FLAG_AUTONEG (1 << E1000_FLAG_AUTONEG_BIT)
-#define E1000_FLAG_MIT (1 << E1000_FLAG_MIT_BIT)
 #define E1000_FLAG_MAC (1 << E1000_FLAG_MAC_BIT)
 #define E1000_FLAG_TSO (1 << E1000_FLAG_TSO_BIT)
 #define E1000_FLAG_VET (1 << E1000_FLAG_VET_BIT)
@@ -180,7 +176,7 @@ e1000_autoneg_done(E1000State *s)
 static bool
 have_autoneg(E1000State *s)
 {
-    return chkflag(AUTONEG) && (s->phy_reg[MII_BMCR] & MII_BMCR_AUTOEN);
+    return (s->phy_reg[MII_BMCR] & MII_BMCR_AUTOEN);
 }
 
 static void
@@ -308,35 +304,34 @@ set_interrupt_cause(E1000State *s, int index, uint32_t val)
         if (s->mit_timer_on) {
             return;
         }
-        if (chkflag(MIT)) {
-            /* Compute the next mitigation delay according to pending
-             * interrupts and the current values of RADV (provided
-             * RDTR!=0), TADV and ITR.
-             * Then rearm the timer.
-             */
-            mit_delay = 0;
-            if (s->mit_ide &&
-                    (pending_ints & (E1000_ICR_TXQE | E1000_ICR_TXDW))) {
-                mit_update_delay(&mit_delay, s->mac_reg[TADV] * 4);
-            }
-            if (s->mac_reg[RDTR] && (pending_ints & E1000_ICS_RXT0)) {
-                mit_update_delay(&mit_delay, s->mac_reg[RADV] * 4);
-            }
-            mit_update_delay(&mit_delay, s->mac_reg[ITR]);
 
-            /*
-             * According to e1000 SPEC, the Ethernet controller guarantees
-             * a maximum observable interrupt rate of 7813 interrupts/sec.
-             * Thus if mit_delay < 500 then the delay should be set to the
-             * minimum delay possible which is 500.
-             */
-            mit_delay = (mit_delay < 500) ? 500 : mit_delay;
-
-            s->mit_timer_on = 1;
-            timer_mod(s->mit_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-                      mit_delay * 256);
-            s->mit_ide = 0;
+        /* Compute the next mitigation delay according to pending
+         * interrupts and the current values of RADV (provided
+         * RDTR!=0), TADV and ITR.
+         * Then rearm the timer.
+         */
+        mit_delay = 0;
+        if (s->mit_ide &&
+                (pending_ints & (E1000_ICR_TXQE | E1000_ICR_TXDW))) {
+            mit_update_delay(&mit_delay, s->mac_reg[TADV] * 4);
         }
+        if (s->mac_reg[RDTR] && (pending_ints & E1000_ICS_RXT0)) {
+            mit_update_delay(&mit_delay, s->mac_reg[RADV] * 4);
+        }
+        mit_update_delay(&mit_delay, s->mac_reg[ITR]);
+
+        /*
+         * According to e1000 SPEC, the Ethernet controller guarantees
+         * a maximum observable interrupt rate of 7813 interrupts/sec.
+         * Thus if mit_delay < 500 then the delay should be set to the
+         * minimum delay possible which is 500.
+         */
+        mit_delay = (mit_delay < 500) ? 500 : mit_delay;
+
+        s->mit_timer_on = 1;
+        timer_mod(s->mit_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                  mit_delay * 256);
+        s->mit_ide = 0;
     }
 
     s->mit_irq_level = (pending_ints != 0);
@@ -637,9 +632,8 @@ xmit_seg(E1000State *s)
 
     e1000x_inc_reg_if_not_full(s->mac_reg, TPT);
     e1000x_grow_8reg_if_not_full(s->mac_reg, TOTL, s->tx.size + 4);
-    s->mac_reg[GPTC] = s->mac_reg[TPT];
-    s->mac_reg[GOTCL] = s->mac_reg[TOTL];
-    s->mac_reg[GOTCH] = s->mac_reg[TOTH];
+    e1000x_inc_reg_if_not_full(s->mac_reg, GPTC);
+    e1000x_grow_8reg_if_not_full(s->mac_reg, GOTCL, s->tx.size + 4);
 }
 
 static void
@@ -805,38 +799,11 @@ start_xmit(E1000State *s)
 }
 
 static int
-receive_filter(E1000State *s, const uint8_t *buf, int size)
+receive_filter(E1000State *s, const void *buf)
 {
-    uint32_t rctl = s->mac_reg[RCTL];
-    int isbcast = is_broadcast_ether_addr(buf);
-    int ismcast = is_multicast_ether_addr(buf);
-
-    if (e1000x_is_vlan_packet(buf, le16_to_cpu(s->mac_reg[VET])) &&
-        e1000x_vlan_rx_filter_enabled(s->mac_reg)) {
-        uint16_t vid = lduw_be_p(&PKT_GET_VLAN_HDR(buf)->h_tci);
-        uint32_t vfta =
-            ldl_le_p((uint32_t *)(s->mac_reg + VFTA) +
-                     ((vid >> E1000_VFTA_ENTRY_SHIFT) & E1000_VFTA_ENTRY_MASK));
-        if ((vfta & (1 << (vid & E1000_VFTA_ENTRY_BIT_SHIFT_MASK))) == 0) {
-            return 0;
-        }
-    }
-
-    if (!isbcast && !ismcast && (rctl & E1000_RCTL_UPE)) { /* promiscuous ucast */
-        return 1;
-    }
-
-    if (ismcast && (rctl & E1000_RCTL_MPE)) {          /* promiscuous mcast */
-        e1000x_inc_reg_if_not_full(s->mac_reg, MPRC);
-        return 1;
-    }
-
-    if (isbcast && (rctl & E1000_RCTL_BAM)) {          /* broadcast enabled */
-        e1000x_inc_reg_if_not_full(s->mac_reg, BPRC);
-        return 1;
-    }
-
-    return e1000x_rx_group_filter(s->mac_reg, buf);
+    return (!e1000x_is_vlan_packet(buf, s->mac_reg[VET]) ||
+            e1000x_rx_vlan_filter(s->mac_reg, PKT_GET_VLAN_HDR(buf))) &&
+           e1000x_rx_group_filter(s->mac_reg, buf);
 }
 
 static void
@@ -916,13 +883,13 @@ e1000_receive_iov(NetClientState *nc, const struct iovec *iov, int iovcnt)
     uint16_t vlan_special = 0;
     uint8_t vlan_status = 0;
     uint8_t min_buf[ETH_ZLEN];
-    struct iovec min_iov;
     uint8_t *filter_buf = iov->iov_base;
     size_t size = iov_size(iov, iovcnt);
     size_t iov_ofs = 0;
     size_t desc_offset;
     size_t desc_size;
     size_t total_size;
+    eth_pkt_types_e pkt_type;
 
     if (!e1000x_hw_rx_enabled(s->mac_reg)) {
         return -1;
@@ -932,15 +899,7 @@ e1000_receive_iov(NetClientState *nc, const struct iovec *iov, int iovcnt)
         return 0;
     }
 
-    /* Pad to minimum Ethernet frame length */
-    if (size < sizeof(min_buf)) {
-        iov_to_buf(iov, iovcnt, 0, min_buf, size);
-        memset(&min_buf[size], 0, sizeof(min_buf) - size);
-        min_iov.iov_base = filter_buf = min_buf;
-        min_iov.iov_len = size = sizeof(min_buf);
-        iovcnt = 1;
-        iov = &min_iov;
-    } else if (iov->iov_len < MAXIMUM_ETHERNET_HDR_LEN) {
+    if (iov->iov_len < MAXIMUM_ETHERNET_HDR_LEN) {
         /* This is very unlikely, but may happen. */
         iov_to_buf(iov, iovcnt, 0, min_buf, MAXIMUM_ETHERNET_HDR_LEN);
         filter_buf = min_buf;
@@ -951,7 +910,7 @@ e1000_receive_iov(NetClientState *nc, const struct iovec *iov, int iovcnt)
         return size;
     }
 
-    if (!receive_filter(s, filter_buf, size)) {
+    if (!receive_filter(s, filter_buf)) {
         return size;
     }
 
@@ -972,6 +931,7 @@ e1000_receive_iov(NetClientState *nc, const struct iovec *iov, int iovcnt)
         size -= 4;
     }
 
+    pkt_type = get_eth_packet_type(PKT_GET_ETH_HDR(filter_buf));
     rdh_start = s->mac_reg[RDH];
     desc_offset = 0;
     total_size = size + e1000x_fcs_len(s->mac_reg);
@@ -1037,7 +997,7 @@ e1000_receive_iov(NetClientState *nc, const struct iovec *iov, int iovcnt)
         }
     } while (desc_offset < total_size);
 
-    e1000x_update_rx_total_stats(s->mac_reg, size, total_size);
+    e1000x_update_rx_total_stats(s->mac_reg, pkt_type, size, total_size);
 
     n = E1000_ICS_RXT0;
     if ((rdt = s->mac_reg[RDT]) < s->mac_reg[RDH])
@@ -1258,9 +1218,6 @@ enum { MAC_ACCESS_PARTIAL = 1, MAC_ACCESS_FLAG_NEEDED = 2 };
  * n - flag needed
  * p - partially implenented */
 static const uint8_t mac_reg_access[0x8000] = {
-    [RDTR]    = markflag(MIT),    [TADV]    = markflag(MIT),
-    [RADV]    = markflag(MIT),    [ITR]     = markflag(MIT),
-
     [IPAV]    = markflag(MAC),    [WUC]     = markflag(MAC),
     [IP6AT]   = markflag(MAC),    [IP4AT]   = markflag(MAC),
     [FFVT]    = markflag(MAC),    [WUPM]    = markflag(MAC),
@@ -1429,11 +1386,6 @@ static int e1000_post_load(void *opaque, int version_id)
     E1000State *s = opaque;
     NetClientState *nc = qemu_get_queue(s->nic);
 
-    if (!chkflag(MIT)) {
-        s->mac_reg[ITR] = s->mac_reg[RDTR] = s->mac_reg[RADV] =
-            s->mac_reg[TADV] = 0;
-        s->mit_irq_level = false;
-    }
     s->mit_ide = 0;
     s->mit_timer_on = true;
     timer_mod(s->mit_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 1);
@@ -1467,13 +1419,6 @@ static int e1000_tx_tso_post_load(void *opaque, int version_id)
     return 0;
 }
 
-static bool e1000_mit_state_needed(void *opaque)
-{
-    E1000State *s = opaque;
-
-    return chkflag(MIT);
-}
-
 static bool e1000_full_mac_needed(void *opaque)
 {
     E1000State *s = opaque;
@@ -1492,8 +1437,7 @@ static const VMStateDescription vmstate_e1000_mit_state = {
     .name = "e1000/mit_state",
     .version_id = 1,
     .minimum_version_id = 1,
-    .needed = e1000_mit_state_needed,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT32(mac_reg[RDTR], E1000State),
         VMSTATE_UINT32(mac_reg[RADV], E1000State),
         VMSTATE_UINT32(mac_reg[TADV], E1000State),
@@ -1508,7 +1452,7 @@ static const VMStateDescription vmstate_e1000_full_mac_state = {
     .version_id = 1,
     .minimum_version_id = 1,
     .needed = e1000_full_mac_needed,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(mac_reg, E1000State, 0x8000),
         VMSTATE_END_OF_LIST()
     }
@@ -1520,7 +1464,7 @@ static const VMStateDescription vmstate_e1000_tx_tso_state = {
     .minimum_version_id = 1,
     .needed = e1000_tso_state_needed,
     .post_load = e1000_tx_tso_post_load,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT8(tx.tso_props.ipcss, E1000State),
         VMSTATE_UINT8(tx.tso_props.ipcso, E1000State),
         VMSTATE_UINT16(tx.tso_props.ipcse, E1000State),
@@ -1542,7 +1486,7 @@ static const VMStateDescription vmstate_e1000 = {
     .minimum_version_id = 1,
     .pre_save = e1000_pre_save,
     .post_load = e1000_post_load,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_PCI_DEVICE(parent_obj, E1000State),
         VMSTATE_UNUSED_TEST(is_version_1, 4), /* was instance id */
         VMSTATE_UNUSED(4), /* Was mmio_base.  */
@@ -1614,7 +1558,7 @@ static const VMStateDescription vmstate_e1000 = {
                                  E1000_VLAN_FILTER_TBL_SIZE),
         VMSTATE_END_OF_LIST()
     },
-    .subsections = (const VMStateDescription*[]) {
+    .subsections = (const VMStateDescription * const []) {
         &vmstate_e1000_mit_state,
         &vmstate_e1000_full_mac_state,
         &vmstate_e1000_tx_tso_state,
@@ -1722,7 +1666,8 @@ static void pci_e1000_realize(PCIDevice *pci_dev, Error **errp)
                                macaddr);
 
     d->nic = qemu_new_nic(&net_e1000_info, &d->conf,
-                          object_get_typename(OBJECT(d)), dev->id, d);
+                          object_get_typename(OBJECT(d)), dev->id,
+                          &dev->mem_reentrancy_guard, d);
 
     qemu_format_nic_info_str(qemu_get_queue(d->nic), macaddr);
 
@@ -1734,10 +1679,6 @@ static void pci_e1000_realize(PCIDevice *pci_dev, Error **errp)
 
 static Property e1000_properties[] = {
     DEFINE_NIC_PROPERTIES(E1000State, conf),
-    DEFINE_PROP_BIT("autonegotiation", E1000State,
-                    compat_flags, E1000_FLAG_AUTONEG_BIT, true),
-    DEFINE_PROP_BIT("mitigation", E1000State,
-                    compat_flags, E1000_FLAG_MIT_BIT, true),
     DEFINE_PROP_BIT("extra_mac_registers", E1000State,
                     compat_flags, E1000_FLAG_MAC_BIT, true),
     DEFINE_PROP_BIT("migrate_tso_props", E1000State,

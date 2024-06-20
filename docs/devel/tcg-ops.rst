@@ -253,6 +253,8 @@ Jumps/Labels
        |   ``TCG_COND_GEU /* unsigned */``
        |   ``TCG_COND_LEU /* unsigned */``
        |   ``TCG_COND_GTU /* unsigned */``
+       |   ``TCG_COND_TSTEQ /* t1 & t2 == 0 */``
+       |   ``TCG_COND_TSTNE /* t1 & t2 != 0 */``
 
 Arithmetic
 ----------
@@ -498,6 +500,12 @@ Conditional moves
        |
        | Set *dest* to 1 if (*t1* *cond* *t2*) is true, otherwise set to 0.
 
+   * - negsetcond_i32/i64 *dest*, *t1*, *t2*, *cond*
+
+     - | *dest* = -(*t1* *cond* *t2*)
+       |
+       | Set *dest* to -1 if (*t1* *cond* *t2*) is true, otherwise set to 0.
+
    * - movcond_i32/i64 *dest*, *c1*, *c2*, *v1*, *v2*, *cond*
 
      - | *dest* = (*c1* *cond* *c2* ? *v1* : *v2*)
@@ -672,19 +680,20 @@ QEMU specific operations
        | This operation is optional. If the TCG backend does not implement the
          goto_ptr opcode, emitting this op is equivalent to emitting exit_tb(0).
 
-   * - qemu_ld_i32/i64 *t0*, *t1*, *flags*, *memidx*
+   * - qemu_ld_i32/i64/i128 *t0*, *t1*, *flags*, *memidx*
 
-       qemu_st_i32/i64 *t0*, *t1*, *flags*, *memidx*
+       qemu_st_i32/i64/i128 *t0*, *t1*, *flags*, *memidx*
 
        qemu_st8_i32 *t0*, *t1*, *flags*, *memidx*
 
      - | Load data at the guest address *t1* into *t0*, or store data in *t0* at guest
-         address *t1*.  The _i32/_i64 size applies to the size of the input/output
+         address *t1*.  The _i32/_i64/_i128 size applies to the size of the input/output
          register *t0* only.  The address *t1* is always sized according to the guest,
          and the width of the memory operation is controlled by *flags*.
        |
        | Both *t0* and *t1* may be split into little-endian ordered pairs of registers
-         if dealing with 64-bit quantities on a 32-bit host.
+         if dealing with 64-bit quantities on a 32-bit host, or 128-bit quantities on
+         a 64-bit host.
        |
        | The *memidx* selects the qemu tlb index to use (e.g. user or kernel access).
          The flags are the MemOp bits, selecting the sign, width, and endianness
@@ -692,6 +701,8 @@ QEMU specific operations
        |
        | For a 32-bit host, qemu_ld/st_i64 is guaranteed to only be used with a
          64-bit memory access specified in *flags*.
+       |
+       | For qemu_ld/st_i128, these are only supported for a 64-bit host.
        |
        | For i386, qemu_st8_i32 is exactly like qemu_st_i32, except the size of
          the memory operation is known to be 8-bit.  This allows the backend to
@@ -709,7 +720,9 @@ E.g. VECL = 1 -> 64 << 1 -> v128, and VECE = 2 -> 1 << 2 -> i32.
 .. list-table::
 
    * - mov_vec *v0*, *v1*
+
        ld_vec *v0*, *t1*
+
        st_vec *v0*, *t1*
 
      - | Move, load and store.
@@ -879,14 +892,15 @@ sub2_i32, brcond2_i32).
 On a 64 bit target, the values are transferred between 32 and 64-bit
 registers using the following ops:
 
-- trunc_shr_i64_i32
+- extrl_i64_i32
+- extrh_i64_i32
 - ext_i32_i64
 - extu_i32_i64
 
 They ensure that the values are correctly truncated or extended when
 moved from a 32-bit to a 64-bit register or vice-versa. Note that the
-trunc_shr_i64_i32 is an optional op. It is not necessary to implement
-it if all the following conditions are met:
+extrl_i64_i32 and extrh_i64_i32 are optional ops. It is not necessary
+to implement them if all the following conditions are met:
 
 - 64-bit registers can hold 32-bit values
 - 32-bit values in a 64-bit register do not need to stay zero or

@@ -25,58 +25,9 @@
 #ifndef TCG_INTERNAL_H
 #define TCG_INTERNAL_H
 
-#ifdef CONFIG_TCG_INTERPRETER
-#include <ffi.h>
-#endif
+#include "tcg/helper-info.h"
 
 #define TCG_HIGHWATER 1024
-
-/*
- * Describe the calling convention of a given argument type.
- */
-typedef enum {
-    TCG_CALL_RET_NORMAL,         /* by registers */
-    TCG_CALL_RET_BY_REF,         /* for i128, by reference */
-    TCG_CALL_RET_BY_VEC,         /* for i128, by vector register */
-} TCGCallReturnKind;
-
-typedef enum {
-    TCG_CALL_ARG_NORMAL,         /* by registers (continuing onto stack) */
-    TCG_CALL_ARG_EVEN,           /* like normal, but skipping odd slots */
-    TCG_CALL_ARG_EXTEND,         /* for i32, as a sign/zero-extended i64 */
-    TCG_CALL_ARG_EXTEND_U,       /*      ... as a zero-extended i64 */
-    TCG_CALL_ARG_EXTEND_S,       /*      ... as a sign-extended i64 */
-    TCG_CALL_ARG_BY_REF,         /* for i128, by reference, first */
-    TCG_CALL_ARG_BY_REF_N,       /*       ... by reference, subsequent */
-} TCGCallArgumentKind;
-
-typedef struct TCGCallArgumentLoc {
-    TCGCallArgumentKind kind    : 8;
-    unsigned arg_slot           : 8;
-    unsigned ref_slot           : 8;
-    unsigned arg_idx            : 4;
-    unsigned tmp_subindex       : 2;
-} TCGCallArgumentLoc;
-
-/* Avoid "unsigned < 0 is always false" Werror, when iarg_regs is empty. */
-#define REG_P(L) \
-    ((int)(L)->arg_slot < (int)ARRAY_SIZE(tcg_target_call_iarg_regs))
-
-typedef struct TCGHelperInfo {
-    void *func;
-    const char *name;
-#ifdef CONFIG_TCG_INTERPRETER
-    ffi_cif *cif;
-#endif
-    unsigned typemask           : 32;
-    unsigned flags              : 8;
-    unsigned nr_in              : 8;
-    unsigned nr_out             : 8;
-    TCGCallReturnKind out_kind  : 8;
-
-    /* Maximum physical arguments are constrained by TCG_TYPE_I128. */
-    TCGCallArgumentLoc in[MAX_CALL_IARGS * (128 / TCG_TARGET_REG_BITS)];
-} TCGHelperInfo;
 
 extern TCGContext tcg_init_ctx;
 extern TCGContext **tcg_ctxs;
@@ -113,8 +64,8 @@ static inline TCGv_i32 TCGV_HIGH(TCGv_i64 t)
     return temp_tcgv_i32(tcgv_i64_temp(t) + !HOST_BIG_ENDIAN);
 }
 #else
-extern TCGv_i32 TCGV_LOW(TCGv_i64) QEMU_ERROR("32-bit code path is reachable");
-extern TCGv_i32 TCGV_HIGH(TCGv_i64) QEMU_ERROR("32-bit code path is reachable");
+TCGv_i32 TCGV_LOW(TCGv_i64) QEMU_ERROR("32-bit code path is reachable");
+TCGv_i32 TCGV_HIGH(TCGv_i64) QEMU_ERROR("32-bit code path is reachable");
 #endif
 
 static inline TCGv_i64 TCGV128_LOW(TCGv_i128 t)
@@ -129,5 +80,27 @@ static inline TCGv_i64 TCGV128_HIGH(TCGv_i128 t)
     int o = HOST_BIG_ENDIAN ? 0 : 64 / TCG_TARGET_REG_BITS;
     return temp_tcgv_i64(tcgv_i128_temp(t) + o);
 }
+
+bool tcg_target_has_memory_bswap(MemOp memop);
+
+TCGTemp *tcg_temp_new_internal(TCGType type, TCGTempKind kind);
+
+/*
+ * Locate or create a read-only temporary that is a constant.
+ * This kind of temporary need not be freed, but for convenience
+ * will be silently ignored by tcg_temp_free_*.
+ */
+TCGTemp *tcg_constant_internal(TCGType type, int64_t val);
+
+void tcg_gen_op1(TCGOpcode, TCGArg);
+void tcg_gen_op2(TCGOpcode, TCGArg, TCGArg);
+void tcg_gen_op3(TCGOpcode, TCGArg, TCGArg, TCGArg);
+void tcg_gen_op4(TCGOpcode, TCGArg, TCGArg, TCGArg, TCGArg);
+void tcg_gen_op5(TCGOpcode, TCGArg, TCGArg, TCGArg, TCGArg, TCGArg);
+void tcg_gen_op6(TCGOpcode, TCGArg, TCGArg, TCGArg, TCGArg, TCGArg, TCGArg);
+
+void vec_gen_2(TCGOpcode, TCGType, unsigned, TCGArg, TCGArg);
+void vec_gen_3(TCGOpcode, TCGType, unsigned, TCGArg, TCGArg, TCGArg);
+void vec_gen_4(TCGOpcode, TCGType, unsigned, TCGArg, TCGArg, TCGArg, TCGArg);
 
 #endif /* TCG_INTERNAL_H */

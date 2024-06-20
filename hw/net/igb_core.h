@@ -90,8 +90,6 @@ struct IGBCore {
 
     IGBIntrDelayTimer eitr[IGB_INTR_NUM];
 
-    VMChangeStateEntry *vmstate;
-
     uint32_t eitr_guest_value[IGB_INTR_NUM];
 
     uint8_t permanent_mac[ETH_ALEN];
@@ -129,6 +127,9 @@ igb_core_set_link_status(IGBCore *core);
 
 void
 igb_core_pci_uninit(IGBCore *core);
+
+void
+igb_core_vf_reset(IGBCore *core, uint16_t vfn);
 
 bool
 igb_can_receive(IGBCore *core);

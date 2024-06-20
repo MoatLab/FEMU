@@ -150,3 +150,18 @@ e820_prepboot(void)
 {
     dump_map();
 }
+
+int
+e820_is_used(u64 start, u64 size)
+{
+    int i;
+    for (i=0; i<e820_count; i++) {
+        struct e820entry *e = &e820_list[i];
+        if (start + size <= e->start)
+            continue;
+        if (start >= e->start + e->size)
+            continue;
+        return 1;
+    }
+    return 0;
+}

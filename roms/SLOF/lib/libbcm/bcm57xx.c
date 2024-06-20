@@ -16,7 +16,7 @@
  * reference:
  * Broadcom 57xx
  * Host Programmer Interface Specification for the
- * NetXtreme Family of Highly-Integrated Media Access Controlers
+ * NetXtreme Family of Highly-Integrated Media Access Controllers
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -3255,7 +3255,7 @@ bcm_setmac(char mac_addr1[6], char mac_addr2[6])
 	manu[(0xCC-0x74)/4] = val3;
 	manu[(0xD0-0x74)/4] = val4;
 
-	/* Calculate the new manufacturing datas CRC */
+	/* Calculate the new manufacturing data CRC */
 	crc = util_gen_crc(((char *)manu),
 		MANUFACTURING_INFO_SIZE - 4, 0xFFFFFFFF);
 

@@ -144,7 +144,7 @@ int
 scsi_is_ready(struct disk_op_s *op)
 {
     ASSERT32FLAT();
-    dprintf(6, "scsi_is_ready (drive=%p)\n", op->drive_fl);
+    // dprintf(6, "scsi_is_ready (drive=%p)\n", op->drive_fl);
 
     /* Retry TEST UNIT READY for 5 seconds unless MEDIUM NOT PRESENT is
      * reported by the device 3 times.  If the device reports "IN PROGRESS",

@@ -102,28 +102,10 @@ Similar operations return the new value of ``*ptr``::
     typeof(*ptr) qatomic_or_fetch(ptr, val)
     typeof(*ptr) qatomic_xor_fetch(ptr, val)
 
-``qemu/atomic.h`` also provides loads and stores that cannot be reordered
-with each other::
+``qemu/atomic.h`` also provides an optimized shortcut for
+``qatomic_set`` followed by ``smp_mb``::
 
-    typeof(*ptr) qatomic_mb_read(ptr)
-    void         qatomic_mb_set(ptr, val)
-
-However these do not provide sequential consistency and, in particular,
-they do not participate in the total ordering enforced by
-sequentially-consistent operations.  For this reason they are deprecated.
-They should instead be replaced with any of the following (ordered from
-easiest to hardest):
-
-- accesses inside a mutex or spinlock
-
-- lightweight synchronization primitives such as ``QemuEvent``
-
-- RCU operations (``qatomic_rcu_read``, ``qatomic_rcu_set``) when publishing
-  or accessing a new version of a data structure
-
-- other atomic accesses: ``qatomic_read`` and ``qatomic_load_acquire`` for
-  loads, ``qatomic_set`` and ``qatomic_store_release`` for stores, ``smp_mb``
-  to forbid reordering subsequent loads before a store.
+    void         qatomic_set_mb(ptr, val)
 
 
 Weak atomic access and manual memory barriers
@@ -137,7 +119,7 @@ The only guarantees that you can rely upon in this case are:
   ordinary accesses instead cause data races if they are concurrent with
   other accesses of which at least one is a write.  In order to ensure this,
   the compiler will not optimize accesses out of existence, create unsolicited
-  accesses, or perform other similar optimzations.
+  accesses, or perform other similar optimizations.
 
 - acquire operations will appear to happen, with respect to the other
   components of the system, before all the LOAD or STORE operations
@@ -220,10 +202,9 @@ They come in six kinds:
   retrieves the address to which the second load will be directed),
   the processor will guarantee that the first LOAD will appear to happen
   before the second with respect to the other components of the system.
-  However, this is not always true---for example, it was not true on
-  Alpha processors.  Whenever this kind of access happens to shared
-  memory (that is not protected by a lock), a read barrier is needed,
-  and ``smp_read_barrier_depends()`` can be used instead of ``smp_rmb()``.
+  Therefore, unlike ``smp_rmb()`` or ``qatomic_load_acquire()``,
+  ``smp_read_barrier_depends()`` can be just a compiler barrier on
+  weakly-ordered architectures such as Arm or PPC[#]_.
 
   Note that the first load really has to have a _data_ dependency and not
   a control dependency.  If the address for the second load is dependent
@@ -231,6 +212,10 @@ They come in six kinds:
   than actually loading the address itself, then it's a _control_
   dependency and a full read barrier or better is required.
 
+.. [#] The DEC Alpha is an exception, because ``smp_read_barrier_depends()``
+   needs a processor barrier.  On strongly-ordered architectures such
+   as x86 or s390, ``smp_rmb()`` and ``qatomic_load_acquire()`` can
+   also be compiler barriers only.
 
 Memory barriers and ``qatomic_load_acquire``/``qatomic_store_release`` are
 mostly used when a data structure has one thread that is always a writer
@@ -520,8 +505,7 @@ and memory barriers, and the equivalents in QEMU:
       | ::                             |
       |                                |
       |   a = qatomic_read(&x);        |
-      |   qatomic_set(&x, a + 2);      |
-      |   smp_mb();                    |
+      |   qatomic_set_mb(&x, a + 2);   |
       |   b = qatomic_read(&y);        |
       +--------------------------------+
 

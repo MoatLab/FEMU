@@ -30,7 +30,7 @@ time(time_t *tod)
 	printf("minute: %d\n", ts.minute);
 	printf("second: %d\n", ts.second);
 	printf("nano  : %d\n", ts.nano);
-	printf("debug ende\n");
+	printf("debug end\n");
 
 //	if(tod)
 //		*tod = t;

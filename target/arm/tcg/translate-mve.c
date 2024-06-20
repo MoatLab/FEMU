@@ -18,10 +18,6 @@
  */
 
 #include "qemu/osdep.h"
-#include "tcg/tcg-op.h"
-#include "tcg/tcg-op-gvec.h"
-#include "exec/exec-all.h"
-#include "exec/gen-icount.h"
 #include "translate.h"
 #include "translate-a32.h"
 
@@ -60,7 +56,7 @@ static inline long mve_qreg_offset(unsigned reg)
 static TCGv_ptr mve_qreg_ptr(unsigned reg)
 {
     TCGv_ptr ret = tcg_temp_new_ptr();
-    tcg_gen_addi_ptr(ret, cpu_env, mve_qreg_offset(reg));
+    tcg_gen_addi_ptr(ret, tcg_env, mve_qreg_offset(reg));
     return ret;
 }
 
@@ -177,7 +173,7 @@ static bool do_ldst(DisasContext *s, arg_VLDR_VSTR *a, MVEGenLdStFn *fn,
     }
 
     qreg = mve_qreg_ptr(a->qd);
-    fn(cpu_env, qreg, addr);
+    fn(tcg_env, qreg, addr);
 
     /*
      * Writeback always happens after the last beat of the insn,
@@ -238,7 +234,7 @@ static bool do_ldst_sg(DisasContext *s, arg_vldst_sg *a, MVEGenLdStSGFn fn)
 
     qd = mve_qreg_ptr(a->qd);
     qm = mve_qreg_ptr(a->qm);
-    fn(cpu_env, qd, qm, addr);
+    fn(tcg_env, qd, qm, addr);
     mve_update_eci(s);
     return true;
 }
@@ -334,7 +330,7 @@ static bool do_ldst_sg_imm(DisasContext *s, arg_vldst_sg_imm *a,
 
     qd = mve_qreg_ptr(a->qd);
     qm = mve_qreg_ptr(a->qm);
-    fn(cpu_env, qd, qm, tcg_constant_i32(offset));
+    fn(tcg_env, qd, qm, tcg_constant_i32(offset));
     mve_update_eci(s);
     return true;
 }
@@ -401,7 +397,7 @@ static bool do_vldst_il(DisasContext *s, arg_vldst_il *a, MVEGenLdStIlFn *fn,
      * We pass the index of Qd, not a pointer, because the helper must
      * access multiple Q registers starting at Qd and working up.
      */
-    fn(cpu_env, tcg_constant_i32(a->qd), rn);
+    fn(tcg_env, tcg_constant_i32(a->qd), rn);
 
     if (a->w) {
         tcg_gen_addi_i32(rn, rn, addrinc);
@@ -495,7 +491,7 @@ static bool trans_VDUP(DisasContext *s, arg_VDUP *a)
     } else {
         qd = mve_qreg_ptr(a->qd);
         tcg_gen_dup_i32(a->size, rt, rt);
-        gen_helper_mve_vdup(cpu_env, qd, rt);
+        gen_helper_mve_vdup(tcg_env, qd, rt);
     }
     mve_update_eci(s);
     return true;
@@ -521,7 +517,7 @@ static bool do_1op_vec(DisasContext *s, arg_1op *a, MVEGenOneOpFn fn,
     } else {
         qd = mve_qreg_ptr(a->qd);
         qm = mve_qreg_ptr(a->qm);
-        fn(cpu_env, qd, qm);
+        fn(tcg_env, qd, qm);
     }
     mve_update_eci(s);
     return true;
@@ -616,7 +612,7 @@ static bool do_vcvt_rmode(DisasContext *s, arg_1op *a,
 
     qd = mve_qreg_ptr(a->qd);
     qm = mve_qreg_ptr(a->qm);
-    fn(cpu_env, qd, qm, tcg_constant_i32(arm_rmode_to_sf(rmode)));
+    fn(tcg_env, qd, qm, tcg_constant_i32(arm_rmode_to_sf(rmode)));
     mve_update_eci(s);
     return true;
 }
@@ -804,7 +800,7 @@ static bool do_2op_vec(DisasContext *s, arg_2op *a, MVEGenTwoOpFn fn,
         qd = mve_qreg_ptr(a->qd);
         qn = mve_qreg_ptr(a->qn);
         qm = mve_qreg_ptr(a->qm);
-        fn(cpu_env, qd, qn, qm);
+        fn(tcg_env, qd, qn, qm);
     }
     mve_update_eci(s);
     return true;
@@ -1056,7 +1052,7 @@ static bool do_2op_scalar(DisasContext *s, arg_2scalar *a,
     qd = mve_qreg_ptr(a->qd);
     qn = mve_qreg_ptr(a->qn);
     rm = load_reg(s, a->rm);
-    fn(cpu_env, qd, qn, rm);
+    fn(tcg_env, qd, qn, rm);
     mve_update_eci(s);
     return true;
 }
@@ -1187,7 +1183,7 @@ static bool do_long_dual_acc(DisasContext *s, arg_vmlaldav *a,
         rda_i = tcg_constant_i64(0);
     }
 
-    fn(rda_o, cpu_env, qn, qm, rda_i);
+    fn(rda_o, tcg_env, qn, qm, rda_i);
 
     rdalo = tcg_temp_new_i32();
     rdahi = tcg_temp_new_i32();
@@ -1285,7 +1281,7 @@ static bool do_dual_acc(DisasContext *s, arg_vmladav *a, MVEGenDualAccOpFn *fn)
         rda_o = tcg_temp_new_i32();
     }
 
-    fn(rda_o, cpu_env, qn, qm, rda_i);
+    fn(rda_o, tcg_env, qn, qm, rda_i);
     store_reg(s, a->rda, rda_o);
 
     mve_update_eci(s);
@@ -1381,7 +1377,7 @@ static bool trans_VPNOT(DisasContext *s, arg_VPNOT *a)
         return true;
     }
 
-    gen_helper_mve_vpnot(cpu_env);
+    gen_helper_mve_vpnot(tcg_env);
     /* This insn updates predication bits */
     s->base.is_jmp = DISAS_UPDATE_NOCHAIN;
     mve_update_eci(s);
@@ -1423,7 +1419,7 @@ static bool trans_VADDV(DisasContext *s, arg_VADDV *a)
     }
 
     qm = mve_qreg_ptr(a->qm);
-    fns[a->size][a->u](rda_o, cpu_env, qm, rda_i);
+    fns[a->size][a->u](rda_o, tcg_env, qm, rda_i);
     store_reg(s, a->rda, rda_o);
 
     mve_update_eci(s);
@@ -1475,9 +1471,9 @@ static bool trans_VADDLV(DisasContext *s, arg_VADDLV *a)
 
     qm = mve_qreg_ptr(a->qm);
     if (a->u) {
-        gen_helper_mve_vaddlv_u(rda_o, cpu_env, qm, rda_i);
+        gen_helper_mve_vaddlv_u(rda_o, tcg_env, qm, rda_i);
     } else {
-        gen_helper_mve_vaddlv_s(rda_o, cpu_env, qm, rda_i);
+        gen_helper_mve_vaddlv_s(rda_o, tcg_env, qm, rda_i);
     }
 
     rdalo = tcg_temp_new_i32();
@@ -1512,7 +1508,7 @@ static bool do_1imm(DisasContext *s, arg_1imm *a, MVEGenOneOpImmFn *fn,
               imm, 16, 16);
     } else {
         qd = mve_qreg_ptr(a->qd);
-        fn(cpu_env, qd, tcg_constant_i64(imm));
+        fn(tcg_env, qd, tcg_constant_i64(imm));
     }
     mve_update_eci(s);
     return true;
@@ -1584,7 +1580,7 @@ static bool do_2shift_vec(DisasContext *s, arg_2shift *a, MVEGenTwoOpShiftFn fn,
     } else {
         qd = mve_qreg_ptr(a->qd);
         qm = mve_qreg_ptr(a->qm);
-        fn(cpu_env, qd, qm, tcg_constant_i32(shift));
+        fn(tcg_env, qd, qm, tcg_constant_i32(shift));
     }
     mve_update_eci(s);
     return true;
@@ -1689,7 +1685,7 @@ static bool do_2shift_scalar(DisasContext *s, arg_shl_scalar *a,
 
     qda = mve_qreg_ptr(a->qda);
     rm = load_reg(s, a->rm);
-    fn(cpu_env, qda, qda, rm);
+    fn(tcg_env, qda, qda, rm);
     mve_update_eci(s);
     return true;
 }
@@ -1831,7 +1827,7 @@ static bool trans_VSHLC(DisasContext *s, arg_VSHLC *a)
 
     qd = mve_qreg_ptr(a->qd);
     rdm = load_reg(s, a->rdm);
-    gen_helper_mve_vshlc(rdm, cpu_env, qd, rdm, tcg_constant_i32(a->imm));
+    gen_helper_mve_vshlc(rdm, tcg_env, qd, rdm, tcg_constant_i32(a->imm));
     store_reg(s, a->rdm, rdm);
     mve_update_eci(s);
     return true;
@@ -1860,7 +1856,7 @@ static bool do_vidup(DisasContext *s, arg_vidup *a, MVEGenVIDUPFn *fn)
 
     qd = mve_qreg_ptr(a->qd);
     rn = load_reg(s, a->rn);
-    fn(rn, cpu_env, qd, rn, tcg_constant_i32(a->imm));
+    fn(rn, tcg_env, qd, rn, tcg_constant_i32(a->imm));
     store_reg(s, a->rn, rn);
     mve_update_eci(s);
     return true;
@@ -1895,7 +1891,7 @@ static bool do_viwdup(DisasContext *s, arg_viwdup *a, MVEGenVIWDUPFn *fn)
     qd = mve_qreg_ptr(a->qd);
     rn = load_reg(s, a->rn);
     rm = load_reg(s, a->rm);
-    fn(rn, cpu_env, qd, rn, rm, tcg_constant_i32(a->imm));
+    fn(rn, tcg_env, qd, rn, rm, tcg_constant_i32(a->imm));
     store_reg(s, a->rn, rn);
     mve_update_eci(s);
     return true;
@@ -1961,7 +1957,7 @@ static bool do_vcmp(DisasContext *s, arg_vcmp *a, MVEGenCmpFn *fn)
 
     qn = mve_qreg_ptr(a->qn);
     qm = mve_qreg_ptr(a->qm);
-    fn(cpu_env, qn, qm);
+    fn(tcg_env, qn, qm);
     if (a->mask) {
         /* VPT */
         gen_vpst(s, a->mask);
@@ -1992,7 +1988,7 @@ static bool do_vcmp_scalar(DisasContext *s, arg_vcmp_scalar *a,
     } else {
         rm = load_reg(s, a->rm);
     }
-    fn(cpu_env, qn, rm);
+    fn(tcg_env, qn, rm);
     if (a->mask) {
         /* VPT */
         gen_vpst(s, a->mask);
@@ -2093,7 +2089,7 @@ static bool do_vmaxv(DisasContext *s, arg_vmaxv *a, MVEGenVADDVFn fn)
 
     qm = mve_qreg_ptr(a->qm);
     rda = load_reg(s, a->rda);
-    fn(rda, cpu_env, qm, rda);
+    fn(rda, tcg_env, qm, rda);
     store_reg(s, a->rda, rda);
     mve_update_eci(s);
     return true;
@@ -2157,7 +2153,7 @@ static bool do_vabav(DisasContext *s, arg_vabav *a, MVEGenVABAVFn *fn)
     qm = mve_qreg_ptr(a->qm);
     qn = mve_qreg_ptr(a->qn);
     rda = load_reg(s, a->rda);
-    fn(rda, cpu_env, qn, qm, rda);
+    fn(rda, tcg_env, qn, qm, rda);
     store_reg(s, a->rda, rda);
     mve_update_eci(s);
     return true;
@@ -2186,7 +2182,7 @@ static bool trans_VMOV_to_2gp(DisasContext *s, arg_VMOV_to_2gp *a)
      * execution if it is not in an IT block. For us this means
      * only that if PSR.ECI says we should not be executing the beat
      * corresponding to the lane of the vector register being accessed
-     * then we should skip perfoming the move, and that we need to do
+     * then we should skip performing the move, and that we need to do
      * the usual check for bad ECI state and advance of ECI state.
      * (If PSR.ECI is non-zero then we cannot be in an IT block.)
      */
@@ -2229,7 +2225,7 @@ static bool trans_VMOV_from_2gp(DisasContext *s, arg_VMOV_to_2gp *a)
      * execution if it is not in an IT block. For us this means
      * only that if PSR.ECI says we should not be executing the beat
      * corresponding to the lane of the vector register being accessed
-     * then we should skip perfoming the move, and that we need to do
+     * then we should skip performing the move, and that we need to do
      * the usual check for bad ECI state and advance of ECI state.
      * (If PSR.ECI is non-zero then we cannot be in an IT block.)
      */

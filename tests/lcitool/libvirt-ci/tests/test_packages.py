@@ -48,11 +48,11 @@ def test_project(projects):
                    Path(test_utils.test_data_indir(__file__), "packages.yml"))
 
 
-def test_verify_all_mappings_and_packages(packages):
+def test_verify_all_mappings_and_packages(assert_equal, packages):
     expected_path = Path(test_utils.test_data_indir(__file__), "packages.yml")
     actual = {"packages": sorted(packages.mappings.keys())}
 
-    test_utils.assert_yaml_matches_file(actual, expected_path)
+    assert_equal(actual, expected_path)
 
 
 native_params = [
@@ -60,23 +60,24 @@ native_params = [
 ]
 
 cross_params = [
-    pytest.param("debian-10", "s390x", id="debian-10-cross-s390x"),
+    pytest.param("debian-12", "s390x", id="debian-12-cross-s390x"),
     pytest.param("fedora-rawhide", "mingw64", id="fedora-rawhide-cross-mingw64")
 ]
 
 
 @pytest.mark.parametrize("target,arch", native_params + cross_params)
-def test_package_resolution(targets, packages, test_project, target, arch):
+def test_package_resolution(assert_equal, targets, packages, test_project,
+                            target, arch,):
     if arch is None:
         outfile = f"{target}.yml"
     else:
         outfile = f"{target}-cross-{arch}.yml"
     expected_path = Path(test_utils.test_data_outdir(__file__), outfile)
-    target_obj = BuildTarget(targets, packages, target, arch)
+    target_obj = BuildTarget(targets, packages, target, cross_arch=arch)
     pkgs = test_project.get_packages(target_obj)
     actual = packages_as_dict(pkgs)
 
-    test_utils.assert_yaml_matches_file(actual, expected_path)
+    assert_equal(actual, expected_path)
 
 
 def test_resolution_override(targets, test_project):
@@ -97,7 +98,7 @@ def test_resolution_override(targets, test_project):
 )
 def test_unsupported_cross_platform(targets, packages, test_project, target):
     with pytest.raises(ProjectError):
-        target_obj = BuildTarget(targets, packages, target, "s390x")
+        target_obj = BuildTarget(targets, packages, target, cross_arch="s390x")
         test_project.get_packages(target_obj)
 
 
@@ -110,7 +111,7 @@ def test_unsupported_cross_platform(targets, packages, test_project, target):
 )
 def test_cross_platform_arch_mismatch(targets, packages, test_project, target, arch):
     with pytest.raises(ProjectError):
-        target_obj = BuildTarget(targets, packages, target, arch)
+        target_obj = BuildTarget(targets, packages, target, cross_arch=arch)
         test_project.get_packages(target_obj)
 
 

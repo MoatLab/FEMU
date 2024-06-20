@@ -19,7 +19,6 @@
 
 #include "qemu/osdep.h"
 
-#define NO_CPU_IO_DEFS
 #include "trace.h"
 #include "disas/disas.h"
 #include "exec/exec-all.h"
@@ -62,19 +61,18 @@
 #include "tb-jmp-cache.h"
 #include "tb-hash.h"
 #include "tb-context.h"
-#include "internal.h"
-#include "perf.h"
-
-/* Make sure all possible CPU event bits fit in tb->trace_vcpu_dstate */
-QEMU_BUILD_BUG_ON(CPU_TRACE_DSTATE_MAX_EVENTS >
-                  sizeof_field(TranslationBlock, trace_vcpu_dstate)
-                  * BITS_PER_BYTE);
+#include "internal-common.h"
+#include "internal-target.h"
+#include "tcg/perf.h"
+#include "tcg/insn-start-words.h"
 
 TBContext tb_ctx;
 
-/* Encode VAL as a signed leb128 sequence at P.
-   Return P incremented past the encoded value.  */
-static uint8_t *encode_sleb128(uint8_t *p, target_long val)
+/*
+ * Encode VAL as a signed leb128 sequence at P.
+ * Return P incremented past the encoded value.
+ */
+static uint8_t *encode_sleb128(uint8_t *p, int64_t val)
 {
     int more, byte;
 
@@ -92,21 +90,23 @@ static uint8_t *encode_sleb128(uint8_t *p, target_long val)
     return p;
 }
 
-/* Decode a signed leb128 sequence at *PP; increment *PP past the
-   decoded value.  Return the decoded value.  */
-static target_long decode_sleb128(const uint8_t **pp)
+/*
+ * Decode a signed leb128 sequence at *PP; increment *PP past the
+ * decoded value.  Return the decoded value.
+ */
+static int64_t decode_sleb128(const uint8_t **pp)
 {
     const uint8_t *p = *pp;
-    target_long val = 0;
+    int64_t val = 0;
     int byte, shift = 0;
 
     do {
         byte = *p++;
-        val |= (target_ulong)(byte & 0x7f) << shift;
+        val |= (int64_t)(byte & 0x7f) << shift;
         shift += 7;
     } while (byte & 0x80);
     if (shift < TARGET_LONG_BITS && (byte & 0x40)) {
-        val |= -(target_ulong)1 << shift;
+        val |= -(int64_t)1 << shift;
     }
 
     *pp = p;
@@ -128,22 +128,26 @@ static target_long decode_sleb128(const uint8_t **pp)
 static int encode_search(TranslationBlock *tb, uint8_t *block)
 {
     uint8_t *highwater = tcg_ctx->code_gen_highwater;
+    uint64_t *insn_data = tcg_ctx->gen_insn_data;
+    uint16_t *insn_end_off = tcg_ctx->gen_insn_end_off;
     uint8_t *p = block;
     int i, j, n;
 
     for (i = 0, n = tb->icount; i < n; ++i) {
-        target_ulong prev;
+        uint64_t prev, curr;
 
         for (j = 0; j < TARGET_INSN_START_WORDS; ++j) {
             if (i == 0) {
                 prev = (!(tb_cflags(tb) & CF_PCREL) && j == 0 ? tb->pc : 0);
             } else {
-                prev = tcg_ctx->gen_insn_data[i - 1][j];
+                prev = insn_data[(i - 1) * TARGET_INSN_START_WORDS + j];
             }
-            p = encode_sleb128(p, tcg_ctx->gen_insn_data[i][j] - prev);
+            curr = insn_data[i * TARGET_INSN_START_WORDS + j];
+            p = encode_sleb128(p, curr - prev);
         }
-        prev = (i == 0 ? 0 : tcg_ctx->gen_insn_end_off[i - 1]);
-        p = encode_sleb128(p, tcg_ctx->gen_insn_end_off[i] - prev);
+        prev = (i == 0 ? 0 : insn_end_off[i - 1]);
+        curr = insn_end_off[i];
+        p = encode_sleb128(p, curr - prev);
 
         /* Test for (pending) buffer overflow.  The assumption is that any
            one row beginning below the high water mark cannot overrun
@@ -199,10 +203,6 @@ void cpu_restore_state_from_tb(CPUState *cpu, TranslationBlock *tb,
                                uintptr_t host_pc)
 {
     uint64_t data[TARGET_INSN_START_WORDS];
-#ifdef CONFIG_PROFILER
-    TCGProfile *prof = &tcg_ctx->prof;
-    int64_t ti = profile_getclock();
-#endif
     int insns_left = cpu_unwind_data_from_tb(tb, host_pc, data);
 
     if (insns_left < 0) {
@@ -215,16 +215,10 @@ void cpu_restore_state_from_tb(CPUState *cpu, TranslationBlock *tb,
          * Reset the cycle counter to the start of the block and
          * shift if to the number of actually executed instructions.
          */
-        cpu_neg(cpu)->icount_decr.u16.low += insns_left;
+        cpu->neg.icount_decr.u16.low += insns_left;
     }
 
     cpu->cc->tcg_ops->restore_state_to_opc(cpu, tb, data);
-
-#ifdef CONFIG_PROFILER
-    qatomic_set(&prof->restore_time,
-                prof->restore_time + profile_getclock() - ti);
-    qatomic_set(&prof->restore_count, prof->restore_count + 1);
-#endif
 }
 
 bool cpu_restore_state(CPUState *cpu, uintptr_t host_pc)
@@ -262,7 +256,6 @@ bool cpu_unwind_state_data(CPUState *cpu, uintptr_t host_pc, uint64_t *data)
 
 void page_init(void)
 {
-    page_size_init();
     page_table_config_init();
 }
 
@@ -271,7 +264,7 @@ void page_init(void)
  * Return the size of the generated code, or negative on error.
  */
 static int setjmp_gen_code(CPUArchState *env, TranslationBlock *tb,
-                           target_ulong pc, void *host_pc,
+                           vaddr pc, void *host_pc,
                            int *max_insns, int64_t *ti)
 {
     int ret = sigsetjmp(tcg_ctx->jmp_trans, 0);
@@ -287,29 +280,19 @@ static int setjmp_gen_code(CPUArchState *env, TranslationBlock *tb,
     tcg_ctx->cpu = NULL;
     *max_insns = tb->icount;
 
-#ifdef CONFIG_PROFILER
-    qatomic_set(&tcg_ctx->prof.tb_count, tcg_ctx->prof.tb_count + 1);
-    qatomic_set(&tcg_ctx->prof.interm_time,
-                tcg_ctx->prof.interm_time + profile_getclock() - *ti);
-    *ti = profile_getclock();
-#endif
-
     return tcg_gen_code(tcg_ctx, tb, pc);
 }
 
 /* Called with mmap_lock held for user mode emulation.  */
 TranslationBlock *tb_gen_code(CPUState *cpu,
-                              target_ulong pc, target_ulong cs_base,
+                              vaddr pc, uint64_t cs_base,
                               uint32_t flags, int cflags)
 {
-    CPUArchState *env = cpu->env_ptr;
+    CPUArchState *env = cpu_env(cpu);
     TranslationBlock *tb, *existing_tb;
-    tb_page_addr_t phys_pc;
+    tb_page_addr_t phys_pc, phys_p2;
     tcg_insn_unit *gen_code_buf;
     int gen_code_size, search_size, max_insns;
-#ifdef CONFIG_PROFILER
-    TCGProfile *prof = &tcg_ctx->prof;
-#endif
     int64_t ti;
     void *host_pc;
 
@@ -320,7 +303,7 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
 
     if (phys_pc == -1) {
         /* Generate a one-shot TB with 1 insn in it */
-        cflags = (cflags & ~CF_COUNT_MASK) | CF_LAST_IO | 1;
+        cflags = (cflags & ~CF_COUNT_MASK) | 1;
     }
 
     max_insns = cflags & CF_COUNT_MASK;
@@ -330,6 +313,7 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
     QEMU_BUILD_BUG_ON(CF_COUNT_MASK + 1 != TCG_MAX_INSNS);
 
  buffer_overflow:
+    assert_no_pages_locked();
     tb = tcg_tb_alloc(tcg_ctx);
     if (unlikely(!tb)) {
         /* flush must be done */
@@ -348,18 +332,27 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
     tb->cs_base = cs_base;
     tb->flags = flags;
     tb->cflags = cflags;
-    tb->trace_vcpu_dstate = *cpu->trace_dstate;
     tb_set_page_addr0(tb, phys_pc);
     tb_set_page_addr1(tb, -1);
-    tcg_ctx->gen_tb = tb;
- tb_overflow:
+    if (phys_pc != -1) {
+        tb_lock_page0(phys_pc);
+    }
 
-#ifdef CONFIG_PROFILER
-    /* includes aborted translations because of exceptions */
-    qatomic_set(&prof->tb_count1, prof->tb_count1 + 1);
-    ti = profile_getclock();
+    tcg_ctx->gen_tb = tb;
+    tcg_ctx->addr_type = TARGET_LONG_BITS == 32 ? TCG_TYPE_I32 : TCG_TYPE_I64;
+#ifdef CONFIG_SOFTMMU
+    tcg_ctx->page_bits = TARGET_PAGE_BITS;
+    tcg_ctx->page_mask = TARGET_PAGE_MASK;
+    tcg_ctx->tlb_dyn_max_bits = CPU_TLB_DYN_MAX_BITS;
+#endif
+    tcg_ctx->insn_start_words = TARGET_INSN_START_WORDS;
+#ifdef TCG_GUEST_DEFAULT_MO
+    tcg_ctx->guest_mo = TCG_GUEST_DEFAULT_MO;
+#else
+    tcg_ctx->guest_mo = TCG_MO_ALL;
 #endif
 
+ restart_translate:
     trace_translate_block(tb, pc, tb->tc.ptr);
 
     gen_code_size = setjmp_gen_code(env, tb, pc, host_pc, &max_insns, &ti);
@@ -378,6 +371,8 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
             qemu_log_mask(CPU_LOG_TB_OP | CPU_LOG_TB_OP_OPT,
                           "Restarting code generation for "
                           "code_gen_buffer overflow\n");
+            tb_unlock_pages(tb);
+            tcg_ctx->gen_tb = NULL;
             goto buffer_overflow;
 
         case -2:
@@ -396,14 +391,39 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
                           "Restarting code generation with "
                           "smaller translation block (max %d insns)\n",
                           max_insns);
-            goto tb_overflow;
+
+            /*
+             * The half-sized TB may not cross pages.
+             * TODO: Fix all targets that cross pages except with
+             * the first insn, at which point this can't be reached.
+             */
+            phys_p2 = tb_page_addr1(tb);
+            if (unlikely(phys_p2 != -1)) {
+                tb_unlock_page1(phys_pc, phys_p2);
+                tb_set_page_addr1(tb, -1);
+            }
+            goto restart_translate;
+
+        case -3:
+            /*
+             * We had a page lock ordering problem.  In order to avoid
+             * deadlock we had to drop the lock on page0, which means
+             * that everything we translated so far is compromised.
+             * Restart with locks held on both pages.
+             */
+            qemu_log_mask(CPU_LOG_TB_OP | CPU_LOG_TB_OP_OPT,
+                          "Restarting code generation with re-locked pages");
+            goto restart_translate;
 
         default:
             g_assert_not_reached();
         }
     }
+    tcg_ctx->gen_tb = NULL;
+
     search_size = encode_search(tb, (void *)gen_code_buf + gen_code_size);
     if (unlikely(search_size < 0)) {
+        tb_unlock_pages(tb);
         goto buffer_overflow;
     }
     tb->tc.size = gen_code_size;
@@ -414,14 +434,6 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
      */
     perf_report_code(pc, tb, tcg_splitwx_to_rx(gen_code_buf));
 
-#ifdef CONFIG_PROFILER
-    qatomic_set(&prof->code_time, prof->code_time + profile_getclock() - ti);
-    qatomic_set(&prof->code_in_len, prof->code_in_len + tb->size);
-    qatomic_set(&prof->code_out_len, prof->code_out_len + gen_code_size);
-    qatomic_set(&prof->search_out_len, prof->search_out_len + search_size);
-#endif
-
-#ifdef DEBUG_DISAS
     if (qemu_loglevel_mask(CPU_LOG_TB_OUT_ASM) &&
         qemu_log_in_addr_range(pc)) {
         FILE *logfile = qemu_log_trylock();
@@ -444,8 +456,8 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
             /* Dump header and the first instruction */
             fprintf(logfile, "OUT: [size=%d]\n", gen_code_size);
             fprintf(logfile,
-                    "  -- guest addr 0x" TARGET_FMT_lx " + tb prologue\n",
-                    tcg_ctx->gen_insn_data[insn][0]);
+                    "  -- guest addr 0x%016" PRIx64 " + tb prologue\n",
+                    tcg_ctx->gen_insn_data[insn * TARGET_INSN_START_WORDS]);
             chunk_start = tcg_ctx->gen_insn_end_off[insn];
             disas(logfile, tb->tc.ptr, chunk_start);
 
@@ -457,8 +469,8 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
             while (insn < tb->icount) {
                 size_t chunk_end = tcg_ctx->gen_insn_end_off[insn];
                 if (chunk_end > chunk_start) {
-                    fprintf(logfile, "  -- guest addr 0x" TARGET_FMT_lx "\n",
-                            tcg_ctx->gen_insn_data[insn][0]);
+                    fprintf(logfile, "  -- guest addr 0x%016" PRIx64 "\n",
+                            tcg_ctx->gen_insn_data[insn * TARGET_INSN_START_WORDS]);
                     disas(logfile, tb->tc.ptr + chunk_start,
                           chunk_end - chunk_start);
                     chunk_start = chunk_end;
@@ -494,7 +506,6 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
             qemu_log_unlock(logfile);
         }
     }
-#endif
 
     qatomic_set(&tcg_ctx->code_gen_ptr, (void *)
         ROUND_UP((uintptr_t)gen_code_buf + gen_code_size + search_size,
@@ -522,6 +533,7 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
      * before attempting to link to other TBs or add to the lookup table.
      */
     if (tb_page_addr0(tb) == -1) {
+        assert_no_pages_locked();
         return tb;
     }
 
@@ -536,7 +548,9 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
      * No explicit memory barrier is required -- tb_link_page() makes the
      * TB visible in a consistent state.
      */
-    existing_tb = tb_link_page(tb, tb_page_addr0(tb), tb_page_addr1(tb));
+    existing_tb = tb_link_page(tb);
+    assert_no_pages_locked();
+
     /* if the TB already exists, discard what we just translated */
     if (unlikely(existing_tb != tb)) {
         uintptr_t orig_aligned = (uintptr_t)gen_code_buf;
@@ -564,8 +578,9 @@ void tb_check_watchpoint(CPUState *cpu, uintptr_t retaddr)
     } else {
         /* The exception probably happened in a helper.  The CPU state should
            have been saved before calling it. Fetch the PC from there.  */
-        CPUArchState *env = cpu->env_ptr;
-        target_ulong pc, cs_base;
+        CPUArchState *env = cpu_env(cpu);
+        vaddr pc;
+        uint64_t cs_base;
         tb_page_addr_t addr;
         uint32_t flags;
 
@@ -606,7 +621,7 @@ void cpu_io_recompile(CPUState *cpu, uintptr_t retaddr)
     cc = CPU_GET_CLASS(cpu);
     if (cc->tcg_ops->io_recompile_replay_branch &&
         cc->tcg_ops->io_recompile_replay_branch(cpu, tb)) {
-        cpu_neg(cpu)->icount_decr.u16.low++;
+        cpu->neg.icount_decr.u16.low++;
         n = 2;
     }
 
@@ -616,153 +631,26 @@ void cpu_io_recompile(CPUState *cpu, uintptr_t retaddr)
      * operations only (which execute after completion) so we don't
      * double instrument the instruction.
      */
-    cpu->cflags_next_tb = curr_cflags(cpu) | CF_MEMI_ONLY | CF_LAST_IO | n;
+    cpu->cflags_next_tb = curr_cflags(cpu) | CF_MEMI_ONLY | n;
 
     if (qemu_loglevel_mask(CPU_LOG_EXEC)) {
-        target_ulong pc = log_pc(cpu, tb);
+        vaddr pc = cpu->cc->get_pc(cpu);
         if (qemu_log_in_addr_range(pc)) {
-            qemu_log("cpu_io_recompile: rewound execution of TB to "
-                     TARGET_FMT_lx "\n", pc);
+            qemu_log("cpu_io_recompile: rewound execution of TB to %016"
+                     VADDR_PRIx "\n", pc);
         }
     }
 
     cpu_loop_exit_noexc(cpu);
 }
 
-static void print_qht_statistics(struct qht_stats hst, GString *buf)
-{
-    uint32_t hgram_opts;
-    size_t hgram_bins;
-    char *hgram;
-
-    if (!hst.head_buckets) {
-        return;
-    }
-    g_string_append_printf(buf, "TB hash buckets     %zu/%zu "
-                           "(%0.2f%% head buckets used)\n",
-                           hst.used_head_buckets, hst.head_buckets,
-                           (double)hst.used_head_buckets /
-                           hst.head_buckets * 100);
-
-    hgram_opts =  QDIST_PR_BORDER | QDIST_PR_LABELS;
-    hgram_opts |= QDIST_PR_100X   | QDIST_PR_PERCENT;
-    if (qdist_xmax(&hst.occupancy) - qdist_xmin(&hst.occupancy) == 1) {
-        hgram_opts |= QDIST_PR_NODECIMAL;
-    }
-    hgram = qdist_pr(&hst.occupancy, 10, hgram_opts);
-    g_string_append_printf(buf, "TB hash occupancy   %0.2f%% avg chain occ. "
-                           "Histogram: %s\n",
-                           qdist_avg(&hst.occupancy) * 100, hgram);
-    g_free(hgram);
-
-    hgram_opts = QDIST_PR_BORDER | QDIST_PR_LABELS;
-    hgram_bins = qdist_xmax(&hst.chain) - qdist_xmin(&hst.chain);
-    if (hgram_bins > 10) {
-        hgram_bins = 10;
-    } else {
-        hgram_bins = 0;
-        hgram_opts |= QDIST_PR_NODECIMAL | QDIST_PR_NOBINRANGE;
-    }
-    hgram = qdist_pr(&hst.chain, hgram_bins, hgram_opts);
-    g_string_append_printf(buf, "TB hash avg chain   %0.3f buckets. "
-                           "Histogram: %s\n",
-                           qdist_avg(&hst.chain), hgram);
-    g_free(hgram);
-}
-
-struct tb_tree_stats {
-    size_t nb_tbs;
-    size_t host_size;
-    size_t target_size;
-    size_t max_target_size;
-    size_t direct_jmp_count;
-    size_t direct_jmp2_count;
-    size_t cross_page;
-};
-
-static gboolean tb_tree_stats_iter(gpointer key, gpointer value, gpointer data)
-{
-    const TranslationBlock *tb = value;
-    struct tb_tree_stats *tst = data;
-
-    tst->nb_tbs++;
-    tst->host_size += tb->tc.size;
-    tst->target_size += tb->size;
-    if (tb->size > tst->max_target_size) {
-        tst->max_target_size = tb->size;
-    }
-    if (tb_page_addr1(tb) != -1) {
-        tst->cross_page++;
-    }
-    if (tb->jmp_reset_offset[0] != TB_JMP_OFFSET_INVALID) {
-        tst->direct_jmp_count++;
-        if (tb->jmp_reset_offset[1] != TB_JMP_OFFSET_INVALID) {
-            tst->direct_jmp2_count++;
-        }
-    }
-    return false;
-}
-
-void dump_exec_info(GString *buf)
-{
-    struct tb_tree_stats tst = {};
-    struct qht_stats hst;
-    size_t nb_tbs, flush_full, flush_part, flush_elide;
-
-    tcg_tb_foreach(tb_tree_stats_iter, &tst);
-    nb_tbs = tst.nb_tbs;
-    /* XXX: avoid using doubles ? */
-    g_string_append_printf(buf, "Translation buffer state:\n");
-    /*
-     * Report total code size including the padding and TB structs;
-     * otherwise users might think "-accel tcg,tb-size" is not honoured.
-     * For avg host size we use the precise numbers from tb_tree_stats though.
-     */
-    g_string_append_printf(buf, "gen code size       %zu/%zu\n",
-                           tcg_code_size(), tcg_code_capacity());
-    g_string_append_printf(buf, "TB count            %zu\n", nb_tbs);
-    g_string_append_printf(buf, "TB avg target size  %zu max=%zu bytes\n",
-                           nb_tbs ? tst.target_size / nb_tbs : 0,
-                           tst.max_target_size);
-    g_string_append_printf(buf, "TB avg host size    %zu bytes "
-                           "(expansion ratio: %0.1f)\n",
-                           nb_tbs ? tst.host_size / nb_tbs : 0,
-                           tst.target_size ?
-                           (double)tst.host_size / tst.target_size : 0);
-    g_string_append_printf(buf, "cross page TB count %zu (%zu%%)\n",
-                           tst.cross_page,
-                           nb_tbs ? (tst.cross_page * 100) / nb_tbs : 0);
-    g_string_append_printf(buf, "direct jump count   %zu (%zu%%) "
-                           "(2 jumps=%zu %zu%%)\n",
-                           tst.direct_jmp_count,
-                           nb_tbs ? (tst.direct_jmp_count * 100) / nb_tbs : 0,
-                           tst.direct_jmp2_count,
-                           nb_tbs ? (tst.direct_jmp2_count * 100) / nb_tbs : 0);
-
-    qht_statistics_init(&tb_ctx.htable, &hst);
-    print_qht_statistics(hst, buf);
-    qht_statistics_destroy(&hst);
-
-    g_string_append_printf(buf, "\nStatistics:\n");
-    g_string_append_printf(buf, "TB flush count      %u\n",
-                           qatomic_read(&tb_ctx.tb_flush_count));
-    g_string_append_printf(buf, "TB invalidate count %u\n",
-                           qatomic_read(&tb_ctx.tb_phys_invalidate_count));
-
-    tlb_flush_counts(&flush_full, &flush_part, &flush_elide);
-    g_string_append_printf(buf, "TLB full flushes    %zu\n", flush_full);
-    g_string_append_printf(buf, "TLB partial flushes %zu\n", flush_part);
-    g_string_append_printf(buf, "TLB elided flushes  %zu\n", flush_elide);
-    tcg_dump_info(buf);
-}
-
 #else /* CONFIG_USER_ONLY */
 
 void cpu_interrupt(CPUState *cpu, int mask)
 {
-    g_assert(qemu_mutex_iothread_locked());
+    g_assert(bql_locked());
     cpu->interrupt_request |= mask;
-    qatomic_set(&cpu_neg(cpu)->icount_decr.u16.high, -1);
+    qatomic_set(&cpu->neg.icount_decr.u16.high, -1);
 }
 
 #endif /* CONFIG_USER_ONLY */
@@ -783,12 +671,4 @@ void tcg_flush_jmp_cache(CPUState *cpu)
     for (int i = 0; i < TB_JMP_CACHE_SIZE; i++) {
         qatomic_set(&jc->array[i].tb, NULL);
     }
-}
-
-/* This is a wrapper for common code that can not use CONFIG_SOFTMMU */
-void tcg_flush_softmmu_tlb(CPUState *cs)
-{
-#ifdef CONFIG_SOFTMMU
-    tlb_flush(cs);
-#endif
 }

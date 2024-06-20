@@ -379,7 +379,7 @@ static int oc12_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     int si = 0;
     int nb_secs_to_write = 0;
 
-    AddrBucket addr_bucket[max_sec_per_rq];
+    AddrBucket *addr_bucket = g_malloc0(sizeof(AddrBucket) * max_sec_per_rq);
     parse_ppa_list(n, ns, cmd, req, addr_bucket, &secs_idx);
 
     /* Read & Write */
@@ -671,7 +671,7 @@ static uint16_t oc12_bbt_set(FemuCtrl *n, NvmeCmd *cmd)
     uint32_t nlb  = le16_to_cpu(bbt_cmd->nlb) + 1;
     uint64_t spba = le64_to_cpu(bbt_cmd->spba);
     uint8_t value = bbt_cmd->value;
-    uint64_t ppas[ln->params.max_sec_per_rq];
+    uint64_t *ppas = g_malloc0(sizeof(uint64_t) * ln->params.max_sec_per_rq);
     int ch, lun, lunid, blk;
     int i;
 
@@ -744,7 +744,7 @@ static uint16_t oc12_erase_async(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     Oc12Ctrl *ln = n->oc12_ctrl;
     Oc12RwCmd *dm = (Oc12RwCmd *)cmd;
     uint32_t nlb = le16_to_cpu(dm->nlb) + 1;
-    uint64_t psl[ln->params.max_sec_per_rq];
+    uint64_t *psl = g_malloc0(sizeof(uint64_t) * ln->params.max_sec_per_rq);
 
     oc12_read_ppa_list(n, dm, psl);
 

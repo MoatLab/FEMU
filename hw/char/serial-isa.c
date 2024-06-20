@@ -106,7 +106,7 @@ static const VMStateDescription vmstate_isa_serial = {
     .name = "serial",
     .version_id = 3,
     .minimum_version_id = 2,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_STRUCT(state, ISASerialState, 0, vmstate_serial, SerialState),
         VMSTATE_END_OF_LIST()
     }
@@ -183,4 +183,18 @@ void serial_hds_isa_init(ISABus *bus, int from, int to)
             serial_isa_init(bus, i, serial_hd(i));
         }
     }
+}
+
+void isa_serial_set_iobase(ISADevice *serial, hwaddr iobase)
+{
+    ISASerialState *s = ISA_SERIAL(serial);
+
+    serial->ioport_id = iobase;
+    s->iobase = iobase;
+    memory_region_set_address(&s->state.io, s->iobase);
+}
+
+void isa_serial_set_enabled(ISADevice *serial, bool enabled)
+{
+    memory_region_set_enabled(&ISA_SERIAL(serial)->state.io, enabled);
 }

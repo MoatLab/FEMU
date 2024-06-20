@@ -34,6 +34,7 @@ native:
 - augeas
 - autoconf
 - automake
+- awk
 - bash
 - bash-completion
 - bc
@@ -64,7 +65,6 @@ native:
 - gettext
 - git
 - glib
-- glib-utils
 - gnu-sed
 - gnutls
 - gobject-introspection
@@ -98,7 +98,6 @@ native:
 - libssh2
 - libtasn1
 - libtool
-- libtorrent
 - libusb
 - libvirt
 - libvirt-glib
@@ -110,6 +109,7 @@ native:
 - lzo
 - make
 - meson
+- mtools
 - ncurses
 - net-snmp
 - nettle
@@ -118,15 +118,12 @@ native:
 - ocaml-findlib
 - openjdk
 - perl
-- perl5-devel
 - pixman
 - pkg-config
+- python-build
 - python3
-- python3-boto3
-- python3-libnbd
 - qemu
 - readline
-- rpcgen
 - rpm2cpio
 - ruby
 - rust
@@ -134,13 +131,13 @@ native:
 - scrub
 - sdl2
 - sdl2_image
-- sfdisk
 - snappy
 - socat
 - sparse
 - spice-gtk
 - spice-protocol
-- tcl
+- swtpm
+- tcl-tk
 - tcpdump
 - tesseract
 - texinfo
@@ -160,6 +157,7 @@ native:
 pypi:
 - PyGObject
 - PyYAML
+- boto3
 - dbus-python
 - libxml2-python3
 - lxml
@@ -169,3 +167,4 @@ pypi:
 - requests
 - sphinx
 - sphinx-rtd-theme
+- tomli

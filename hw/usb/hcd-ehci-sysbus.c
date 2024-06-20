@@ -25,7 +25,7 @@ static const VMStateDescription vmstate_ehci_sysbus = {
     .name        = "ehci-sysbus",
     .version_id  = 2,
     .minimum_version_id  = 1,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_STRUCT(ehci, EHCISysBusState, 2, vmstate_ehci, EHCIState),
         VMSTATE_END_OF_LIST()
     }
@@ -88,7 +88,7 @@ static void ehci_sysbus_class_init(ObjectClass *klass, void *data)
     SysBusEHCIClass *sec = SYS_BUS_EHCI_CLASS(klass);
 
     sec->portscbase = 0x44;
-    sec->portnr = NB_PORTS;
+    sec->portnr = EHCI_PORTS;
 
     dc->realize = usb_ehci_sysbus_realize;
     dc->vmsd = &vmstate_ehci_sysbus;

@@ -82,12 +82,8 @@ home directory inside the container, and the working directory is
 switched to the home directory to make execution easier.
 
 The script file is mounted to the *script* file in the home directory
-inside the container. Ensure the file is an executable by running:
-
-::
-
-    chmod +x <path_to_your_script>
-
+inside the container. The script is made executable before the mount is
+performed.
 
 It can also be used as a standalone script (e.g an ``echo hello" script``).
 
@@ -214,7 +210,7 @@ Usage examples
 
 
 - To access interactive shell with ``$DATADIR`` and ``$SCRIPT`` in the ``PWD``
-  in a *opensuse-leap-154* image with *libvirt-go* dependencies installed on it with
+  in a *opensuse-leap-15* image with *libvirt-go* dependencies installed on it with
   environment variable ``FOO=bar`` with user *1000* using *podman* engine.
 
   First, we need to build the actual container image to be able to run any
@@ -222,7 +218,7 @@ Usage examples
   ::
 
       lcitool container build \
-          --projects libvirt-go --target opensuse-leap-154
+          --projects libvirt-go --target opensuse-leap-15
 
 
   When the image is ready, we can proceed with running the workload
@@ -231,7 +227,7 @@ Usage examples
       lcitool container shell \
           --workload-dir $DATADIR --script $SCRIPT \
           --env FOO=baz --user 1000 \
-          lcitool.opensuse-leap-154
+          lcitool.opensuse-leap-15
 
 
 - To access interactive shell with ``$SCRIPT`` in the ``PWD`` in a

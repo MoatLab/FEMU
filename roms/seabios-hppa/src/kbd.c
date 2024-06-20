@@ -245,7 +245,7 @@ set_leds(void)
 void VISIBLE16
 handle_16(struct bregs *regs)
 {
-    debug_enter(regs, DEBUG_HDL_16);
+    // debug_enter(regs, DEBUG_HDL_16);
     if (! CONFIG_KEYBOARD)
         return;
 

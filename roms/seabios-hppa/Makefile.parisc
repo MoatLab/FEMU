@@ -5,7 +5,7 @@
 # This file may be distributed under the terms of the GNU LGPLv3 license.
 
 # Output directory
-OUT=out/
+# OUT=out-$(BITS)/  (provided by caller)
 
 # Common command definitions
 export HOSTCC             := $(CC)
@@ -13,7 +13,6 @@ export CONFIG_SHELL       := sh
 export KCONFIG_AUTOHEADER := autoconf.h
 export KCONFIG_CONFIG     := $(CURDIR)/.config
 export LC_ALL             := C
-CROSS_PREFIX=hppa-linux-gnu-
 ifneq ($(CROSS_PREFIX),)
 CC=$(CROSS_PREFIX)gcc
 LIBGCC = $(shell $(CC) $(KBUILD_CFLAGS) -print-libgcc-file-name)
@@ -32,7 +31,6 @@ LD32BIT_FLAG:=
 # misc.c stacks.c system.c resume.c pcibios.c hw/timer.c
 SRCBOTH=output.c string.c block.c cdrom.c disk.c kbd.c \
     serial.c sercon.c clock.c vgahooks.c \
-    apm.c cp437.c \
     hw/pci.c hw/rtc.c hw/dma.c hw/pic.c hw/serialio.c \
     hw/usb.c hw/usb-uhci.c hw/usb-ohci.c hw/usb-ehci.c \
     hw/usb-hid.c hw/usb-msc.c hw/usb-uas.c \
@@ -43,7 +41,7 @@ SRCBOTH=output.c string.c block.c cdrom.c disk.c kbd.c \
 SRC32FLAT=$(SRCBOTH) post.c e820map.c romfile.c optionroms.c \
     pmm.c font.c boot.c bootsplash.c jpeg.c bmp.c tcgbios.c sha1.c \
     hw/pcidevice.c hw/ahci.c hw/pvscsi.c hw/usb-xhci.c hw/usb-hub.c hw/sdcard.c \
-    fw/coreboot.c fw/lzmadecode.c fw/multiboot.c fw/csm.c fw/biostables.c \
+    fw/coreboot.c fw/lzmadecode.c fw/multiboot.c fw/biostables.c \
     fw/paravirt.c fw/shadow.c fw/pciinit.c fw/smm.c fw/xen.c \
     fw/acpi.c fw/mptable.c fw/pirtable.c fw/smbios.c fw/romfile_loader.c \
     hw/virtio-ring.c hw/virtio-pci.c hw/virtio-blk.c hw/virtio-scsi.c \
@@ -75,12 +73,18 @@ COMMONCFLAGS := -I$(OUT) -Isrc -Ivgasrc -Os -MD -g \
     -freg-struct-return -ffreestanding -fno-delete-null-pointer-checks \
     -fdata-sections -fno-common -fno-merge-constants -mdisable-fpregs \
     -fno-builtin-printf -fno-ipa-sra
+COMMONCFLAGS-64 =
+COMMONCFLAGS-32 =
 COMMONCFLAGS += $(call cc-option,$(CC),-nopie,)
 COMMONCFLAGS += $(call cc-option,$(CC),-fno-pie,)
 COMMONCFLAGS += $(call cc-option,$(CC),-fno-stack-protector,)
 COMMONCFLAGS += $(call cc-option,$(CC),-fno-stack-protector-all,)
 COMMONCFLAGS += $(call cc-option,$(CC),-fstack-check=no,)
-COMMONCFLAGS += $(call cc-option,$(CC),-mfast-indirect-calls,)
+COMMONCFLAGS-32 += $(call cc-option,$(CC),-mfast-indirect-calls,)
+
+COMMONCFLAGS-64 += -Wno-pointer-to-int-cast -Wno-int-to-pointer-cast
+COMMONCFLAGS    += $(COMMONCFLAGS-$(BITS))
+
 COMMA := ,
 
 CFLAGS32FLAT := $(COMMONCFLAGS) -DMODE16=0 -DMODESEGMENT=0
@@ -98,7 +102,7 @@ endif
 -include $(KCONFIG_CONFIG)
 
 target-y :=
-target-$(CONFIG_PARISC) += $(OUT)hppa-firmware.img
+target-$(CONFIG_PARISC) += $(OUT)hppa-firmware$(BIT_SUFFIX).img
 
 all: $(target-y)
 
@@ -161,9 +165,9 @@ $(OUT)ccode32flat.o: $(OUT)autoversion.h $(OUT)autoconf.h $(patsubst %.c, $(OUT)
 $(OUT)autoversion.h:
 	$(Q)$(PYTHON) ./scripts/buildversion.py -e "$(EXTRAVERSION)" -t "$(CC);$(AS);$(LD);$(OBJCOPY);$(OBJDUMP);$(STRIP)" $(OUT)autoversion.h
 
-$(OUT)hppa-firmware.img: $(OUT)autoconf.h $(OUT)head.o $(OUT)ccode32flat.o src/version.c
+$(OUT)hppa-firmware$(BIT_SUFFIX).img: $(OUT)autoconf.h $(OUT)head.o $(OUT)ccode32flat.o src/version.c
 	@echo "  Linking $@"
-	$(Q)$(CPP) $(CPPFLAGS) -Isrc -D__ASSEMBLY__ src/parisc/pafirmware.lds.S -o $(OUT)pafirmware.lds
+	$(Q)$(CPP) $(CPPFLAGS) -Isrc -D__ASSEMBLY__ -DBITS=$(BITS) src/parisc/pafirmware.lds.S -o $(OUT)pafirmware.lds
 	$(Q)$(CC) $(CFLAGS32FLAT) -c src/version.c -o $(OUT)version.o
 	$(Q)$(LD) -N -T $(OUT)pafirmware.lds $(OUT)head.o $(OUT)version.o -X -o $@ -e startup --as-needed $(OUT)ccode32flat.o $(LIBGCC)
 

@@ -108,7 +108,7 @@ INCLUDE freq.fs
 
    pci-next-mmio @ 100000 #aligned ( base )
 
-   \ Sequence prescribed for resetting the EHCI contoller
+   \ Sequence prescribed for resetting the EHCI controller
 
    \ If Run/Stop bit (ECAP30 bit 0) is 1
    \   Set Run/Stop bit to 0
@@ -179,7 +179,7 @@ my-space pci-class-name type cr
 : pci-bridge-generic-setup-amd8111 ( addr -- )
    pci-device-slots >r             \ save the slot array on return stack
    dup pci-common-props            \ set the common properties before scanning the bus
-   s" pci" device-type             \ the type is allways "pci"
+   s" pci" device-type             \ the type is always "pci"
    dup pci-bridge-probe-amd8111    \ find all device connected to it
    dup assign-all-bridge-bars      \ set up all memory access BARs
    dup pci-set-irq-line            \ set the interrupt pin

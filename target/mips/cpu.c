@@ -80,8 +80,7 @@ static void fpu_dump_state(CPUMIPSState *env, FILE *f, int flags)
 
 static void mips_cpu_dump_state(CPUState *cs, FILE *f, int flags)
 {
-    MIPSCPU *cpu = MIPS_CPU(cs);
-    CPUMIPSState *env = &cpu->env;
+    CPUMIPSState *env = cpu_env(cs);
     int i;
 
     qemu_fprintf(f, "pc=0x" TARGET_FMT_lx " HI=0x" TARGET_FMT_lx
@@ -123,9 +122,7 @@ void cpu_set_exception_base(int vp_index, target_ulong address)
 
 static void mips_cpu_set_pc(CPUState *cs, vaddr value)
 {
-    MIPSCPU *cpu = MIPS_CPU(cs);
-
-    mips_env_set_pc(&cpu->env, value);
+    mips_env_set_pc(cpu_env(cs), value);
 }
 
 static vaddr mips_cpu_get_pc(CPUState *cs)
@@ -137,8 +134,7 @@ static vaddr mips_cpu_get_pc(CPUState *cs)
 
 static bool mips_cpu_has_work(CPUState *cs)
 {
-    MIPSCPU *cpu = MIPS_CPU(cs);
-    CPUMIPSState *env = &cpu->env;
+    CPUMIPSState *env = cpu_env(cs);
     bool has_work = false;
 
     /*
@@ -182,13 +178,18 @@ static bool mips_cpu_has_work(CPUState *cs)
     return has_work;
 }
 
+static int mips_cpu_mmu_index(CPUState *cs, bool ifunc)
+{
+    return mips_env_mmu_index(cpu_env(cs));
+}
+
 #include "cpu-defs.c.inc"
 
 static void mips_cpu_reset_hold(Object *obj)
 {
     CPUState *cs = CPU(obj);
     MIPSCPU *cpu = MIPS_CPU(cs);
-    MIPSCPUClass *mcc = MIPS_CPU_GET_CLASS(cpu);
+    MIPSCPUClass *mcc = MIPS_CPU_GET_CLASS(obj);
     CPUMIPSState *env = &cpu->env;
 
     if (mcc->parent_phases.hold) {
@@ -244,6 +245,8 @@ static void mips_cpu_reset_hold(Object *obj)
     env->CP0_PageGrain_rw_bitmask = env->cpu_model->CP0_PageGrain_rw_bitmask;
     env->CP0_PageGrain = env->cpu_model->CP0_PageGrain;
     env->CP0_EBaseWG_rw_bitmask = env->cpu_model->CP0_EBaseWG_rw_bitmask;
+    env->lcsr_cpucfg1 = env->cpu_model->lcsr_cpucfg1;
+    env->lcsr_cpucfg2 = env->cpu_model->lcsr_cpucfg2;
     env->active_fpu.fcr0 = env->cpu_model->CP1_fcr0;
     env->active_fpu.fcr31_rw_bitmask = env->cpu_model->CP1_fcr31_rw_bitmask;
     env->active_fpu.fcr31 = env->cpu_model->CP1_fcr31;
@@ -426,10 +429,7 @@ static void mips_cpu_reset_hold(Object *obj)
 
 static void mips_cpu_disas_set_info(CPUState *s, disassemble_info *info)
 {
-    MIPSCPU *cpu = MIPS_CPU(s);
-    CPUMIPSState *env = &cpu->env;
-
-    if (!(env->insn_flags & ISA_NANOMIPS32)) {
+    if (!(cpu_env(s)->insn_flags & ISA_NANOMIPS32)) {
 #if TARGET_BIG_ENDIAN
         info->print_insn = print_insn_big_mips;
 #else
@@ -449,9 +449,9 @@ static void mips_cp0_period_set(MIPSCPU *cpu)
 {
     CPUMIPSState *env = &cpu->env;
 
-    env->cp0_count_ns = clock_ticks_to_ns(MIPS_CPU(cpu)->clock,
-                                          env->cpu_model->CCRes);
-    assert(env->cp0_count_ns);
+    clock_set_mul_div(cpu->count_div, env->cpu_model->CCRes, 1);
+    clock_set_source(cpu->count_div, cpu->clock);
+    clock_set_source(env->count_clock, cpu->count_div);
 }
 
 static void mips_cpu_realizefn(DeviceState *dev, Error **errp)
@@ -502,9 +502,18 @@ static void mips_cpu_initfn(Object *obj)
     CPUMIPSState *env = &cpu->env;
     MIPSCPUClass *mcc = MIPS_CPU_GET_CLASS(obj);
 
-    cpu_set_cpustate_pointers(cpu);
     cpu->clock = qdev_init_clock_in(DEVICE(obj), "clk-in", NULL, cpu, 0);
+    cpu->count_div = clock_new(OBJECT(obj), "clk-div-count");
+    env->count_clock = clock_new(OBJECT(obj), "clk-count");
     env->cpu_model = mcc->cpu_def;
+#ifndef CONFIG_USER_ONLY
+    if (mcc->cpu_def->lcsr_cpucfg2 & (1 << CPUCFG2_LCSRP)) {
+        memory_region_init_io(&env->iocsr.mr, OBJECT(cpu), NULL,
+                                env, "iocsr", UINT64_MAX);
+        address_space_init(&env->iocsr.as,
+                            &env->iocsr.mr, "IOCSR");
+    }
+#endif
 }
 
 static char *mips_cpu_type_name(const char *cpu_model)
@@ -538,7 +547,7 @@ static const struct SysemuCPUOps mips_sysemu_ops = {
  * NB: cannot be const, as some elements are changed for specific
  * mips hardware (see hw/mips/jazz.c).
  */
-static const struct TCGCPUOps mips_tcg_ops = {
+static const TCGCPUOps mips_tcg_ops = {
     .initialize = mips_tcg_init,
     .synchronize_from_tb = mips_cpu_synchronize_from_tb,
     .restore_state_to_opc = mips_restore_state_to_opc,
@@ -568,6 +577,7 @@ static void mips_cpu_class_init(ObjectClass *c, void *data)
 
     cc->class_by_name = mips_cpu_class_by_name;
     cc->has_work = mips_cpu_has_work;
+    cc->mmu_index = mips_cpu_mmu_index;
     cc->dump_state = mips_cpu_dump_state;
     cc->set_pc = mips_cpu_set_pc;
     cc->get_pc = mips_cpu_get_pc;
@@ -588,6 +598,7 @@ static const TypeInfo mips_cpu_type_info = {
     .name = TYPE_MIPS_CPU,
     .parent = TYPE_CPU,
     .instance_size = sizeof(MIPSCPU),
+    .instance_align = __alignof(MIPSCPU),
     .instance_init = mips_cpu_initfn,
     .abstract = true,
     .class_size = sizeof(MIPSCPUClass),

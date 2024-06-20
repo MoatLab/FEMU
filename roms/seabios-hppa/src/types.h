@@ -24,7 +24,7 @@ union u64_u32_u {
 #if MODE16 == 1
 typedef u16 portaddr_t;
 #else
-typedef unsigned int portaddr_t;
+typedef unsigned long portaddr_t;
 #endif
 
 // Definition for common 16bit segment/offset pointers.
@@ -120,7 +120,7 @@ extern void __force_link_error__only_in_16bit(void) __noreturn;
 # define ASSERT32FLAT() do { } while (0)
 #endif
 
-#define offsetof(TYPE, MEMBER) ((size_t) &((TYPE *)0)->MEMBER)
+#define offsetof(TYPE, MEMBER) ((unsigned long) &((TYPE *)0)->MEMBER)
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof(a[0]))
 #define FIELD_SIZEOF(t, f) (sizeof(((t*)0)->f))
 #define DIV_ROUND_UP(n,d) (((n) + (d) - 1) / (d))

@@ -2,6 +2,7 @@
 packages:
   - autoconf
   - automake
+  - awk
   - ccache
   - gcc
   - make

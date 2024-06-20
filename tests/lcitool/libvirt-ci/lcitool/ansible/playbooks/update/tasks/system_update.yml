@@ -1,0 +1,81 @@
+---
+# During each development cycle Rawhide changes signing keys, so make sure
+# we update them first
+- name: Update GPG keys
+  dnf:
+    name: fedora-gpg-keys
+    update_cache: true
+    state: latest
+    disable_gpg_check: yes
+  when:
+    - os.name == 'Fedora'
+    - os.version == 'Rawhide'
+
+- name: Update installed packages
+  package:
+    name: '*'
+    state: latest
+  when:
+    - packaging.format == 'rpm'
+
+- name: Update installed packages
+  apt:
+    upgrade: dist
+    update_cache: yes
+  when:
+    - packaging.format == 'deb'
+
+- name: Update installed packages
+  community.general.pkgng:
+    name: '*'
+    state: latest
+  when:
+    - packaging.format == 'pkg'
+
+- block:
+    - name: Clean up package cache
+      command: '{{ packaging.command }} clean packages -y'
+      changed_when: false
+
+    - name: Clean up packages after update
+      dnf:
+        autoremove: true
+      when:
+        - os.version != 'Rawhide'
+
+    - name: Clean up packages after update
+      command: '{{ packaging.command }} autoremove -y'
+      changed_when: false
+      when:
+        - os.version == 'Rawhide'
+
+  when:
+    - packaging.format == 'rpm'
+    - os.name != 'OpenSUSE'
+
+- name: Clean up packages after update
+  command: '{{ packaging.command }} clean'
+  changed_when: false
+  when:
+    - os.name == 'OpenSUSE'
+
+- name: Clean up packages after update
+  apt:
+    autoclean: yes
+    autoremove: yes
+  when:
+    - packaging.format == 'deb'
+
+- name: Clean up packages after update
+  block:
+    - name: Clean package cache
+      command:
+        cmd: '{{ packaging.command }} clean -y'
+      changed_when: false
+
+    - name: Remove unneeded packages
+      pkgng:
+        name: '*'
+        autoremove: true
+  when:
+    - packaging.format == 'pkg'

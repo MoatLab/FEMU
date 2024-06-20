@@ -217,10 +217,10 @@ enum {
     (((data) >> field##_SHIFT) & field##_MASK)
 
 #define set_field(data, newval, field) do {                     \
-        uint32_t val = *data;                                   \
-        val &= ~(field##_MASK << field##_SHIFT);                \
-        val |= ((newval) & field##_MASK) << field##_SHIFT;      \
-        *data = val;                                            \
+        uint32_t val_ = *data;                                  \
+        val_ &= ~(field##_MASK << field##_SHIFT);               \
+        val_ |= ((newval) & field##_MASK) << field##_SHIFT;     \
+        *data = val_;                                           \
     } while (0)
 
 typedef enum EPType {
@@ -1894,7 +1894,7 @@ static void xhci_kick_epctx(XHCIEPContext *epctx, unsigned int streamid)
     }
 
     if (epctx->retry) {
-        XHCITransfer *xfer = epctx->retry;
+        xfer = epctx->retry;
 
         trace_usb_xhci_xfer_retry(xfer);
         assert(xfer->running_retry);
@@ -2434,7 +2434,6 @@ static void xhci_detach_slot(XHCIState *xhci, USBPort *uport)
 static TRBCCode xhci_get_port_bandwidth(XHCIState *xhci, uint64_t pctx)
 {
     dma_addr_t ctx;
-    uint8_t bw_ctx[xhci->numports+1];
 
     DPRINTF("xhci_get_port_bandwidth()\n");
 
@@ -2442,11 +2441,10 @@ static TRBCCode xhci_get_port_bandwidth(XHCIState *xhci, uint64_t pctx)
 
     DPRINTF("xhci: bandwidth context at "DMA_ADDR_FMT"\n", ctx);
 
-    /* TODO: actually implement real values here */
-    bw_ctx[0] = 0;
-    memset(&bw_ctx[1], 80, xhci->numports); /* 80% */
-    if (dma_memory_write(xhci->as, ctx, bw_ctx, sizeof(bw_ctx),
-                     MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
+    /* TODO: actually implement real values here. This is 80% for all ports. */
+    if (stb_dma(xhci->as, ctx, 0, MEMTXATTRS_UNSPECIFIED) != MEMTX_OK ||
+        dma_memory_set(xhci->as, ctx + 1, 80, xhci->numports,
+                       MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
         qemu_log_mask(LOG_GUEST_ERROR, "%s: DMA memory write failed!\n",
                       __func__);
         return CC_TRB_ERROR;
@@ -3524,7 +3522,7 @@ static int usb_xhci_post_load(void *opaque, int version_id)
 static const VMStateDescription vmstate_xhci_ring = {
     .name = "xhci-ring",
     .version_id = 1,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT64(dequeue, XHCIRing),
         VMSTATE_BOOL(ccs, XHCIRing),
         VMSTATE_END_OF_LIST()
@@ -3534,7 +3532,7 @@ static const VMStateDescription vmstate_xhci_ring = {
 static const VMStateDescription vmstate_xhci_port = {
     .name = "xhci-port",
     .version_id = 1,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT32(portsc, XHCIPort),
         VMSTATE_END_OF_LIST()
     }
@@ -3543,7 +3541,7 @@ static const VMStateDescription vmstate_xhci_port = {
 static const VMStateDescription vmstate_xhci_slot = {
     .name = "xhci-slot",
     .version_id = 1,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_BOOL(enabled,   XHCISlot),
         VMSTATE_BOOL(addressed, XHCISlot),
         VMSTATE_END_OF_LIST()
@@ -3553,7 +3551,7 @@ static const VMStateDescription vmstate_xhci_slot = {
 static const VMStateDescription vmstate_xhci_event = {
     .name = "xhci-event",
     .version_id = 1,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT32(type,   XHCIEvent),
         VMSTATE_UINT32(ccode,  XHCIEvent),
         VMSTATE_UINT64(ptr,    XHCIEvent),
@@ -3573,7 +3571,7 @@ static bool xhci_er_full(void *opaque, int version_id)
 static const VMStateDescription vmstate_xhci_intr = {
     .name = "xhci-intr",
     .version_id = 1,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         /* registers */
         VMSTATE_UINT32(iman,          XHCIInterrupter),
         VMSTATE_UINT32(imod,          XHCIInterrupter),
@@ -3606,7 +3604,7 @@ const VMStateDescription vmstate_xhci = {
     .name = "xhci-core",
     .version_id = 1,
     .post_load = usb_xhci_post_load,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_STRUCT_VARRAY_UINT32(ports, XHCIState, numports, 1,
                                      vmstate_xhci_port, XHCIPort),
         VMSTATE_STRUCT_VARRAY_UINT32(slots, XHCIState, numslots, 1,

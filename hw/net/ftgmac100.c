@@ -968,14 +968,6 @@ static ssize_t ftgmac100_receive(NetClientState *nc, const uint8_t *buf,
         return -1;
     }
 
-    /* TODO : Pad to minimum Ethernet frame length */
-    /* handle small packets.  */
-    if (size < 10) {
-        qemu_log_mask(LOG_GUEST_ERROR, "%s: dropped frame of %zd bytes\n",
-                      __func__, size);
-        return size;
-    }
-
     if (!ftgmac100_filter(s, buf, size)) {
         return size;
     }
@@ -1118,7 +1110,8 @@ static void ftgmac100_realize(DeviceState *dev, Error **errp)
     qemu_macaddr_default_if_unset(&s->conf.macaddr);
 
     s->nic = qemu_new_nic(&net_ftgmac100_info, &s->conf,
-                          object_get_typename(OBJECT(dev)), dev->id, s);
+                          object_get_typename(OBJECT(dev)), dev->id,
+                          &dev->mem_reentrancy_guard, s);
     qemu_format_nic_info_str(qemu_get_queue(s->nic), s->conf.macaddr.a);
 }
 
@@ -1126,7 +1119,7 @@ static const VMStateDescription vmstate_ftgmac100 = {
     .name = TYPE_FTGMAC100,
     .version_id = 1,
     .minimum_version_id = 1,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT32(irq_state, FTGMAC100State),
         VMSTATE_UINT32(isr, FTGMAC100State),
         VMSTATE_UINT32(ier, FTGMAC100State),
@@ -1311,7 +1304,7 @@ static const VMStateDescription vmstate_aspeed_mii = {
     .name = TYPE_ASPEED_MII,
     .version_id = 1,
     .minimum_version_id = 1,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT32(phycr, FTGMAC100State),
         VMSTATE_UINT32(phydata, FTGMAC100State),
         VMSTATE_END_OF_LIST()

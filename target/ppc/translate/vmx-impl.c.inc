@@ -10,7 +10,7 @@
 static inline TCGv_ptr gen_avr_ptr(int reg)
 {
     TCGv_ptr r = tcg_temp_new_ptr();
-    tcg_gen_addi_ptr(r, cpu_env, avr_full_offset(reg));
+    tcg_gen_addi_ptr(r, tcg_env, avr_full_offset(reg));
     return r;
 }
 
@@ -96,7 +96,7 @@ static void gen_lve##name(DisasContext *ctx)                            \
             tcg_gen_andi_tl(EA, EA, ~(size - 1));                       \
         }                                                               \
         rs = gen_avr_ptr(rS(ctx->opcode));                              \
-        gen_helper_lve##name(cpu_env, rs, EA);                          \
+        gen_helper_lve##name(tcg_env, rs, EA);                          \
     }
 
 #define GEN_VR_STVE(name, opc2, opc3, size)                             \
@@ -115,11 +115,11 @@ static void gen_stve##name(DisasContext *ctx)                           \
             tcg_gen_andi_tl(EA, EA, ~(size - 1));                       \
         }                                                               \
         rs = gen_avr_ptr(rS(ctx->opcode));                              \
-        gen_helper_stve##name(cpu_env, rs, EA);                         \
+        gen_helper_stve##name(tcg_env, rs, EA);                         \
     }
 
 GEN_VR_LDX(lvx, 0x07, 0x03);
-/* As we don't emulate the cache, lvxl is stricly equivalent to lvx */
+/* As we don't emulate the cache, lvxl is strictly equivalent to lvx */
 GEN_VR_LDX(lvxl, 0x07, 0x0B);
 
 GEN_VR_LVE(bx, 0x07, 0x00, 1);
@@ -127,7 +127,7 @@ GEN_VR_LVE(hx, 0x07, 0x01, 2);
 GEN_VR_LVE(wx, 0x07, 0x02, 4);
 
 GEN_VR_STX(svx, 0x07, 0x07);
-/* As we don't emulate the cache, stvxl is stricly equivalent to stvx */
+/* As we don't emulate the cache, stvxl is strictly equivalent to stvx */
 GEN_VR_STX(svxl, 0x07, 0x0F);
 
 GEN_VR_STVE(bx, 0x07, 0x04, 1);
@@ -146,7 +146,7 @@ static void gen_mfvscr(DisasContext *ctx)
     tcg_gen_movi_i64(avr, 0);
     set_avr64(rD(ctx->opcode), avr, true);
     t = tcg_temp_new_i32();
-    gen_helper_mfvscr(t, cpu_env);
+    gen_helper_mfvscr(t, tcg_env);
     tcg_gen_extu_i32_i64(avr, t);
     set_avr64(rD(ctx->opcode), avr, false);
 }
@@ -167,8 +167,8 @@ static void gen_mtvscr(DisasContext *ctx)
     bofs += 3 * 4;
 #endif
 
-    tcg_gen_ld_i32(val, cpu_env, bofs);
-    gen_helper_mtvscr(cpu_env, val);
+    tcg_gen_ld_i32(val, tcg_env, bofs);
+    gen_helper_mtvscr(tcg_env, val);
 }
 
 static void gen_vx_vmul10(DisasContext *ctx, bool add_cin, bool ret_carry)
@@ -287,7 +287,7 @@ static void glue(gen_, name)(DisasContext *ctx)                         \
     ra = gen_avr_ptr(rA(ctx->opcode));                                  \
     rb = gen_avr_ptr(rB(ctx->opcode));                                  \
     rd = gen_avr_ptr(rD(ctx->opcode));                                  \
-    gen_helper_##name(cpu_env, rd, ra, rb);                             \
+    gen_helper_##name(tcg_env, rd, ra, rb);                             \
 }
 
 #define GEN_VXFORM3(name, opc2, opc3)                                   \
@@ -689,10 +689,10 @@ static void trans_vclzw(DisasContext *ctx)
 
     /* Perform count for every word element using tcg_gen_clzi_i32. */
     for (i = 0; i < 4; i++) {
-        tcg_gen_ld_i32(tmp, cpu_env,
+        tcg_gen_ld_i32(tmp, tcg_env,
             offsetof(CPUPPCState, vsr[32 + VB].u64[0]) + i * 4);
         tcg_gen_clzi_i32(tmp, tmp, 32);
-        tcg_gen_st_i32(tmp, cpu_env,
+        tcg_gen_st_i32(tmp, tcg_env,
             offsetof(CPUPPCState, vsr[32 + VT].u64[0]) + i * 4);
     }
 }
@@ -1174,7 +1174,7 @@ static void glue(gen_, name)(DisasContext *ctx)                         \
         ra = gen_avr_ptr(rA(ctx->opcode));                              \
         rb = gen_avr_ptr(rB(ctx->opcode));                              \
         rd = gen_avr_ptr(rD(ctx->opcode));                              \
-        gen_helper_##opname(cpu_env, rd, ra, rb);                       \
+        gen_helper_##opname(tcg_env, rd, ra, rb);                       \
     }
 
 #define GEN_VXRFORM(name, opc2, opc3)                                \
@@ -1183,7 +1183,7 @@ static void glue(gen_, name)(DisasContext *ctx)                         \
 
 /*
  * Support for Altivec instructions that use bit 31 (Rc) as an opcode
- * bit but also use bit 21 as an actual Rc bit.  In general, thse pairs
+ * bit but also use bit 21 as an actual Rc bit.  In general, these pairs
  * come from different versions of the ISA, so we must also support a
  * pair of flags for each instruction.
  */
@@ -1341,8 +1341,7 @@ static bool trans_VCMPEQUQ(DisasContext *ctx, arg_VC *a)
     tcg_gen_xor_i64(t1, t0, t1);
 
     tcg_gen_or_i64(t1, t1, t2);
-    tcg_gen_setcondi_i64(TCG_COND_EQ, t1, t1, 0);
-    tcg_gen_neg_i64(t1, t1);
+    tcg_gen_negsetcond_i64(TCG_COND_EQ, t1, t1, tcg_constant_i64(0));
 
     set_avr64(a->vrt, t1, true);
     set_avr64(a->vrt, t1, false);
@@ -1365,15 +1364,14 @@ static bool do_vcmpgtq(DisasContext *ctx, arg_VC *a, bool sign)
 
     get_avr64(t0, a->vra, false);
     get_avr64(t1, a->vrb, false);
-    tcg_gen_setcond_i64(TCG_COND_GTU, t2, t0, t1);
+    tcg_gen_negsetcond_i64(TCG_COND_GTU, t2, t0, t1);
 
     get_avr64(t0, a->vra, true);
     get_avr64(t1, a->vrb, true);
     tcg_gen_movcond_i64(TCG_COND_EQ, t2, t0, t1, t2, tcg_constant_i64(0));
-    tcg_gen_setcond_i64(sign ? TCG_COND_GT : TCG_COND_GTU, t1, t0, t1);
+    tcg_gen_negsetcond_i64(sign ? TCG_COND_GT : TCG_COND_GTU, t1, t0, t1);
 
     tcg_gen_or_i64(t1, t1, t2);
-    tcg_gen_neg_i64(t1, t1);
 
     set_avr64(a->vrt, t1, true);
     set_avr64(a->vrt, t1, false);
@@ -1480,7 +1478,7 @@ static void glue(gen_, name)(DisasContext *ctx)                         \
         }                                                               \
         rb = gen_avr_ptr(rB(ctx->opcode));                              \
         rd = gen_avr_ptr(rD(ctx->opcode));                              \
-        gen_helper_##name(cpu_env, rd, rb);                             \
+        gen_helper_##name(tcg_env, rd, rb);                             \
     }
 
 #define GEN_VXFORM_NOA_2(name, opc2, opc3, opc4)                        \
@@ -1528,7 +1526,7 @@ static void gen_vprtyb_vec(unsigned vece, TCGv_vec t, TCGv_vec b)
 {
     int i;
     TCGv_vec tmp = tcg_temp_new_vec_matching(b);
-    /* MO_32 is 2, so 2 iteractions for MO_32 and 3 for MO_64 */
+    /* MO_32 is 2, so 2 iterations for MO_32 and 3 for MO_64 */
     for (i = 0; i < vece; i++) {
         tcg_gen_shri_vec(vece, tmp, b, (4 << (vece - i)));
         tcg_gen_xor_vec(vece, b, tmp, b);
@@ -1627,7 +1625,7 @@ static void glue(gen_, name)(DisasContext *ctx)                         \
         uimm = tcg_constant_i32(UIMM5(ctx->opcode));                    \
         rb = gen_avr_ptr(rB(ctx->opcode));                              \
         rd = gen_avr_ptr(rD(ctx->opcode));                              \
-        gen_helper_##name(cpu_env, rd, rb, uimm);                       \
+        gen_helper_##name(tcg_env, rd, rb, uimm);                       \
     }
 
 #define GEN_VXFORM_UIMM_SPLAT(name, opc2, opc3, splat_max)              \
@@ -1815,7 +1813,7 @@ static bool do_vextdx(DisasContext *ctx, arg_VA *a, int size, bool right,
     if (right) {
         tcg_gen_subfi_tl(rc, 32 - size, rc);
     }
-    gen_helper(cpu_env, vrt, vra, vrb, rc);
+    gen_helper(tcg_env, vrt, vra, vrb, rc);
     return true;
 }
 
@@ -1843,7 +1841,7 @@ static bool do_vinsx(DisasContext *ctx, int vrt, int size, bool right, TCGv ra,
         tcg_gen_subfi_tl(idx, 16 - size, idx);
     }
 
-    gen_helper(cpu_env, t, rb, idx);
+    gen_helper(tcg_env, t, rb, idx);
     return true;
 }
 
@@ -2058,7 +2056,7 @@ static bool trans_VEXPANDQM(DisasContext *ctx, arg_VX_tb *a)
 static bool do_vextractm(DisasContext *ctx, arg_VX_tb *a, unsigned vece)
 {
     const uint64_t elem_width = 8 << vece, elem_count_half = 8 >> vece,
-                   mask = dup_const(vece, 1 << (elem_width - 1));
+                   mask = dup_const(vece, 1ULL << (elem_width - 1));
     uint64_t i, j;
     TCGv_i64 lo, hi, t0, t1;
 
@@ -2351,9 +2349,9 @@ static void glue(gen_, name0##_##name1)(DisasContext *ctx)              \
         rc = gen_avr_ptr(rC(ctx->opcode));                              \
         rd = gen_avr_ptr(rD(ctx->opcode));                              \
         if (Rc(ctx->opcode)) {                                          \
-            gen_helper_##name1(cpu_env, rd, ra, rb, rc);                \
+            gen_helper_##name1(tcg_env, rd, ra, rb, rc);                \
         } else {                                                        \
-            gen_helper_##name0(cpu_env, rd, ra, rb, rc);                \
+            gen_helper_##name0(tcg_env, rd, ra, rb, rc);                \
         }                                                               \
     }
 
@@ -2439,7 +2437,7 @@ static bool do_va_env_helper(DisasContext *ctx, arg_VA *a,
     vra = gen_avr_ptr(a->vra);
     vrb = gen_avr_ptr(a->vrb);
     vrc = gen_avr_ptr(a->rc);
-    gen_helper(cpu_env, vrt, vra, vrb, vrc);
+    gen_helper(tcg_env, vrt, vra, vrb, vrc);
     return true;
 }
 

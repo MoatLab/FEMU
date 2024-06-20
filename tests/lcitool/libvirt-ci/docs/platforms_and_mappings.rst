@@ -68,7 +68,8 @@ In order to simply add a new package mapping:
 #. Fork the project.
 
 #. Edit the ``lcitool/facts/mappings.yml`` file to add your desired
-   mapping.
+   mapping. Please refer to `Mappings naming scheme`_ to help you select the
+   best possible name for your mapping.
 
 #. Add the package mapping to the respective project's config file under
    ``lcitool/facts/projects/``.
@@ -95,6 +96,71 @@ In order to simply add a new package mapping:
    repo  and from the root of the original project's git run::
 
    $ lcitool manifest
+
+Mappings naming scheme
+~~~~~~~~~~~~~~~~~~~~~~
+When adding a new mapping please use the following generic naming schema:
+
+* ``[package]`` - typically one specific command (or the main package deliverable)
+
+* ``[package]-tools`` - collection of standalone commands shipped in a single
+  package
+
+* ``lib[package]`` - runtime library
+
+* ``lib[package]-dev`` - development files for a library
+
+* ``lib[package]-tools`` - tools intended to be used when developing against
+  the respective library
+
+Make sure you have a look at the examples below, but like with anything, if
+unsure, then simply choose one of the above, make sure you explain your use
+case in the merge request and the reviewers will gladly assist you in choosing
+the right mapping name for the mapping you're adding.
+
+**Note that many of our existing mappings don't follow the naming scheme above
+simply because we didn't have any guideline in place at that time. We'll try to
+fix that gradually, but given that the mappings are already in use outside of
+this repository, we can't change these at will without the projects agreeing to
+it first to avoid breaking their usage.**
+
+Examples:
+^^^^^^^^^
+
+* ``iptables`` - this package is usually distributed with more commands: the
+  main command ``/usr/sbin/iptables`` and then a few helper tools like
+  ``/usr/sbin/iptables-translate`` or ``/usr/sbin/iptables-apply``. Technically,
+  both ``[package]-tools`` and ``[package]`` schemes are applicable, but
+  arguably given that ``/usr/sbin/iptables`` is the main deliverable of the
+  package going with the latter and hence becoming the ``iptables`` mapping is
+  likely going to be a better choice for the mapping name with the end result
+  looking like so::
+
+   iptables:
+     default: iptables
+     ...
+
+* ``sdl-config`` - ``sdl-config``  is a tool that is used to configure and
+  determine the compiler and linker flags that should be used to compile and
+  link programs, libraries, and plugins that use SDL. As such it is often
+  distributed with the SDL library development package, so given the naming
+  scheme above, it could either be mapped as ``lib[package]`` or
+  ``lib[package]-tools``, whatever feels more sensible with the end
+  results looking like so::
+
+   libsdl-tools:
+     default: sdl2
+     deb: libsdl2-dev
+     ...
+
+  OR
+
+  ::
+
+   libsdl:
+     default: sdl2
+     deb: libsdl2-dev
+     ...
 
 Project-specific mappings
 -------------------------

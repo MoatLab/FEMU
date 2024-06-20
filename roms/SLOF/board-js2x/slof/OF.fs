@@ -26,8 +26,8 @@ uni-n-version 4 rshift  dup 3 = CONSTANT u3?  4 = CONSTANT u4?
 \ if (f4000682 >> 4) == 1... it is a bimini...
 f4000682 rb@ 4 rshift 1 = CONSTANT bimini?
 
-\ to decide wether vga initialisation using bios emulation should be attempted,
-\ we need to know wether a vga-device was found during pci-scan.
+\ to decide whether vga initialisation using bios emulation should be attempted,
+\ we need to know whether a vga-device was found during pci-scan.
 \ If it is found, this value will be set to the device's phandle
 0 value vga-device-node?
 
@@ -331,7 +331,7 @@ check-for-nvramrc
 
 8a8 cp
 
-\ check wether a VGA device was found during pci scan, if it was
+\ check whether a VGA device was found during pci scan, if it was
 \ try to initialize it and create the needed device-nodes
 0 value biosemu-vmem
 100000 value biosemu-vmem-size
@@ -538,7 +538,7 @@ cr
 #include "copyright-oss.fs"
 cr
 
-\ this CATCH is to ensure the code bellow always executes:  boot may ABORT!
+\ this CATCH is to ensure the code below always executes:  boot may ABORT!
 ' start-it CATCH drop
 
 : boot

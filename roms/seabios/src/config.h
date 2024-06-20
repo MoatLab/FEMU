@@ -15,7 +15,7 @@
 #define BUILD_APPNAME4 "BXPC"
 
 // Maximum number of map entries in the e820 map
-#define BUILD_MAX_E820 32
+#define BUILD_MAX_E820 128
 // Space to reserve in high-memory for tables
 #define BUILD_MIN_HIGHTABLE (256*1024)
 #define BUILD_MAX_HIGHTABLE (16*1024*1024)

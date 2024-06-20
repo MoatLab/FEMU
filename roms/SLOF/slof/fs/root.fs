@@ -44,7 +44,7 @@ VARIABLE chosen-cpu-ihandle
 
 : chosen-cpu-unit ( -- ret ) chosen-cpu-ihandle @ ihandle>phandle >unit ;
 
-\ Look for an exising root, create one if needed
+\ Look for an existing root, create one if needed
 " /" find-node dup 0= IF
     drop
     new-device

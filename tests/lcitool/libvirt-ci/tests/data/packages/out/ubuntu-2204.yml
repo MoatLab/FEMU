@@ -65,7 +65,7 @@ native:
 - libapparmor-dev
 - libarchive-dev
 - libarchive-tar-perl
-- libasan5
+- libasan6
 - libasound2-dev
 - libattr1-dev
 - libaudit-dev
@@ -139,6 +139,7 @@ native:
 - libpciaccess-dev
 - libpcre2-dev
 - libperl-dev
+- libpipewire-0.3-dev
 - libpixman-1-dev
 - libpmem-dev
 - libpng-dev
@@ -208,6 +209,7 @@ native:
 - make
 - meson
 - mount
+- mtools
 - multipath-tools
 - nano
 - nbd-client
@@ -223,8 +225,9 @@ native:
 - ocaml-findlib
 - ocaml-nox
 - open-iscsi
-- openjdk-11-jdk-headless
+- openjdk-17-jdk-headless
 - openssh-client
+- original-awk
 - osinfo-db-tools
 - perl
 - perl-base
@@ -252,6 +255,7 @@ native:
 - python3-setuptools
 - python3-sphinx
 - python3-sphinx-rtd-theme
+- python3-tomli
 - python3-venv
 - python3-wheel
 - python3-yaml
@@ -269,6 +273,7 @@ native:
 - sparse
 - strace
 - sudo
+- swtpm
 - systemtap-sdt-dev
 - tar
 - tcl-dev
@@ -284,8 +289,11 @@ native:
 - wget
 - wireshark-dev
 - xfslibs-dev
+- xorriso
 - xsltproc
 - xz-utils
 - zip
 - zlib1g-dev
 - zstd
+pypi:
+- build

@@ -189,7 +189,7 @@ static void qemu_spice_create_update(SimpleSpiceDisplay *ssd)
 {
     static const int blksize = 32;
     int blocks = DIV_ROUND_UP(surface_width(ssd->ds), blksize);
-    int dirty_top[blocks];
+    g_autofree int *dirty_top = NULL;
     int y, yoff1, yoff2, x, xoff, blk, bw;
     int bpp = surface_bytes_per_pixel(ssd->ds);
     uint8_t *guest, *mirror;
@@ -198,6 +198,7 @@ static void qemu_spice_create_update(SimpleSpiceDisplay *ssd)
         return;
     };
 
+    dirty_top = g_new(int, blocks);
     for (blk = 0; blk < blocks; blk++) {
         dirty_top[blk] = -1;
     }
@@ -436,7 +437,7 @@ void qemu_spice_display_switch(SimpleSpiceDisplay *ssd,
     }
     if (ssd->ds) {
         ssd->surface = pixman_image_ref(ssd->ds->image);
-        ssd->mirror  = qemu_pixman_mirror_create(ssd->ds->format,
+        ssd->mirror  = qemu_pixman_mirror_create(surface_format(ssd->ds),
                                                  ssd->ds->image);
         qemu_spice_create_host_primary(ssd);
     }
@@ -935,7 +936,8 @@ static void qemu_spice_gl_scanout_texture(DisplayChangeListener *dcl,
                                           uint32_t backing_width,
                                           uint32_t backing_height,
                                           uint32_t x, uint32_t y,
-                                          uint32_t w, uint32_t h)
+                                          uint32_t w, uint32_t h,
+                                          void *d3d_tex2d)
 {
     SimpleSpiceDisplay *ssd = container_of(dcl, SimpleSpiceDisplay, dcl);
     EGLint stride = 0, fourcc = 0;
@@ -1079,15 +1081,16 @@ static void qemu_spice_gl_update(DisplayChangeListener *dcl,
     }
 
     if (render_cursor) {
-        int x, y;
+        int ptr_x, ptr_y;
+
         qemu_mutex_lock(&ssd->lock);
-        x = ssd->ptr_x;
-        y = ssd->ptr_y;
+        ptr_x = ssd->ptr_x;
+        ptr_y = ssd->ptr_y;
         qemu_mutex_unlock(&ssd->lock);
         egl_texture_blit(ssd->gls, &ssd->blit_fb, &ssd->guest_fb,
                          !y_0_top);
         egl_texture_blend(ssd->gls, &ssd->blit_fb, &ssd->cursor_fb,
-                          !y_0_top, x, y, 1.0, 1.0);
+                          !y_0_top, ptr_x, ptr_y, 1.0, 1.0);
         glFlush();
     }
 

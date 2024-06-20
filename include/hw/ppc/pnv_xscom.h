@@ -64,6 +64,9 @@ struct PnvXScomInterfaceClass {
 #define PNV_XSCOM_PSIHB_BASE      0x2010900
 #define PNV_XSCOM_PSIHB_SIZE      0x20
 
+#define PNV_XSCOM_CHIPTOD_BASE    0x0040000
+#define PNV_XSCOM_CHIPTOD_SIZE    0x31
+
 #define PNV_XSCOM_OCC_BASE        0x0066000
 #define PNV_XSCOM_OCC_SIZE        0x6000
 
@@ -89,6 +92,12 @@ struct PnvXScomInterfaceClass {
 #define PNV9_XSCOM_EQ_BASE(core) \
     ((uint64_t)(((core) & 0x1C) + 0x40) << 22)
 #define PNV9_XSCOM_EQ_SIZE        0x100000
+
+#define PNV9_XSCOM_I2CM_BASE      0xa0000
+#define PNV9_XSCOM_I2CM_SIZE      0x1000
+
+#define PNV9_XSCOM_CHIPTOD_BASE   PNV_XSCOM_CHIPTOD_BASE
+#define PNV9_XSCOM_CHIPTOD_SIZE   PNV_XSCOM_CHIPTOD_SIZE
 
 #define PNV9_XSCOM_OCC_BASE       PNV_XSCOM_OCC_BASE
 #define PNV9_XSCOM_OCC_SIZE       0x8000
@@ -127,16 +136,33 @@ struct PnvXScomInterfaceClass {
 #define PNV10_XSCOM_EC(proc)                    \
     ((0x2 << 16) | ((1 << (3 - (proc))) << 12))
 
+#define PNV10_XSCOM_QME(chiplet) \
+        (PNV10_XSCOM_EQ(chiplet) | (0xE << 16))
+
+/*
+ * Make the region larger by 0x1000 (instead of starting at an offset) so the
+ * modelled addresses start from 0
+ */
+#define PNV10_XSCOM_QME_BASE(core)     \
+    ((uint64_t) PNV10_XSCOM_QME(PNV10_XSCOM_EQ_CHIPLET(core)))
+#define PNV10_XSCOM_QME_SIZE        (0x8000 + 0x1000)
+
 #define PNV10_XSCOM_EQ_BASE(core)     \
     ((uint64_t) PNV10_XSCOM_EQ(PNV10_XSCOM_EQ_CHIPLET(core)))
-#define PNV10_XSCOM_EQ_SIZE        0x100000
+#define PNV10_XSCOM_EQ_SIZE        0x20000
 
 #define PNV10_XSCOM_EC_BASE(core) \
     ((uint64_t) PNV10_XSCOM_EQ_BASE(core) | PNV10_XSCOM_EC(core & 0x3))
-#define PNV10_XSCOM_EC_SIZE        0x100000
+#define PNV10_XSCOM_EC_SIZE        0x1000
 
 #define PNV10_XSCOM_PSIHB_BASE     0x3011D00
 #define PNV10_XSCOM_PSIHB_SIZE     0x100
+
+#define PNV10_XSCOM_I2CM_BASE      PNV9_XSCOM_I2CM_BASE
+#define PNV10_XSCOM_I2CM_SIZE      PNV9_XSCOM_I2CM_SIZE
+
+#define PNV10_XSCOM_CHIPTOD_BASE   PNV9_XSCOM_CHIPTOD_BASE
+#define PNV10_XSCOM_CHIPTOD_SIZE   PNV9_XSCOM_CHIPTOD_SIZE
 
 #define PNV10_XSCOM_OCC_BASE       PNV9_XSCOM_OCC_BASE
 #define PNV10_XSCOM_OCC_SIZE       PNV9_XSCOM_OCC_SIZE
@@ -153,13 +179,22 @@ struct PnvXScomInterfaceClass {
 #define PNV10_XSCOM_XIVE2_BASE     0x2010800
 #define PNV10_XSCOM_XIVE2_SIZE     0x400
 
+#define PNV10_XSCOM_N1_CHIPLET_CTRL_REGS_BASE      0x3000000
+#define PNV10_XSCOM_CHIPLET_CTRL_REGS_SIZE         0x400
+
+#define PNV10_XSCOM_N1_PB_SCOM_EQ_BASE      0x3011000
+#define PNV10_XSCOM_N1_PB_SCOM_EQ_SIZE      0x200
+
+#define PNV10_XSCOM_N1_PB_SCOM_ES_BASE      0x3011300
+#define PNV10_XSCOM_N1_PB_SCOM_ES_SIZE      0x100
+
 #define PNV10_XSCOM_PEC_NEST_BASE  0x3011800 /* index goes downwards ... */
 #define PNV10_XSCOM_PEC_NEST_SIZE  0x100
 
 #define PNV10_XSCOM_PEC_PCI_BASE   0x8010800 /* index goes upwards ... */
 #define PNV10_XSCOM_PEC_PCI_SIZE   0x200
 
-void pnv_xscom_realize(PnvChip *chip, uint64_t size, Error **errp);
+void pnv_xscom_init(PnvChip *chip, uint64_t size, hwaddr addr);
 int pnv_dt_xscom(PnvChip *chip, void *fdt, int root_offset,
                  uint64_t xscom_base, uint64_t xscom_size,
                  const char *compat, int compat_size);

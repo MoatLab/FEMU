@@ -534,11 +534,8 @@ static int tpm_emulator_block_migration(TPMEmulator *tpm_emu)
         error_setg(&tpm_emu->migration_blocker,
                    "Migration disabled: TPM emulator does not support "
                    "migration");
-        if (migrate_add_blocker(tpm_emu->migration_blocker, &err) < 0) {
+        if (migrate_add_blocker(&tpm_emu->migration_blocker, &err) < 0) {
             error_report_err(err);
-            error_free(tpm_emu->migration_blocker);
-            tpm_emu->migration_blocker = NULL;
-
             return -1;
         }
     }
@@ -907,7 +904,7 @@ static void tpm_emulator_vm_state_change(void *opaque, bool running,
 
     trace_tpm_emulator_vm_state_change(running, state);
 
-    if (!running || state != RUN_STATE_RUNNING || !tpm_emu->relock_storage) {
+    if (!running || !tpm_emu->relock_storage) {
         return;
     }
 
@@ -942,7 +939,7 @@ static const VMStateDescription vmstate_tpm_emulator = {
     .version_id = 0,
     .pre_save = tpm_emulator_pre_save,
     .post_load = tpm_emulator_post_load,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT32(state_blobs.permanent_flags, TPMEmulator),
         VMSTATE_UINT32(state_blobs.permanent.size, TPMEmulator),
         VMSTATE_VBUFFER_ALLOC_UINT32(state_blobs.permanent.buffer,
@@ -978,8 +975,7 @@ static void tpm_emulator_inst_init(Object *obj)
         qemu_add_vm_change_state_handler(tpm_emulator_vm_state_change,
                                          tpm_emu);
 
-    vmstate_register(NULL, VMSTATE_INSTANCE_ID_ANY,
-                     &vmstate_tpm_emulator, obj);
+    vmstate_register_any(NULL, &vmstate_tpm_emulator, obj);
 }
 
 /*
@@ -1016,10 +1012,7 @@ static void tpm_emulator_inst_finalize(Object *obj)
 
     qapi_free_TPMEmulatorOptions(tpm_emu->options);
 
-    if (tpm_emu->migration_blocker) {
-        migrate_del_blocker(tpm_emu->migration_blocker);
-        error_free(tpm_emu->migration_blocker);
-    }
+    migrate_del_blocker(&tpm_emu->migration_blocker);
 
     tpm_sized_buffer_reset(&state_blobs->volatil);
     tpm_sized_buffer_reset(&state_blobs->permanent);

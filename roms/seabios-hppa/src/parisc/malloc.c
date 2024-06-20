@@ -23,7 +23,7 @@ static unsigned long stackptr;
 
 // Allocate physical memory from the given zone and track it as a PMM allocation
 unsigned long
-malloc_palloc(struct zone_s *zone, u32 size, u32 align)
+malloc_palloc(struct zone_s *zone, u32 size, unsigned long align)
 {
     unsigned long data;
 
@@ -35,14 +35,14 @@ malloc_palloc(struct zone_s *zone, u32 size, u32 align)
     data = stackptr;
     stackptr += size;
 
-    dprintf(8, "size=%d align=%d ret=0x%lx\n" , size, align, data);
+    // dprintf(9, "malloc: size=%d align=%d ret=0x%lx\n" , size, align, data);
 
     return data;
 }
 
 // Allocate virtual memory from the given zone
 void * __malloc
-parisc_malloc(u32 size, u32 align)
+parisc_malloc(u32 size, unsigned long align)
 {
     return (void*) malloc_palloc(NULL, size, align);
 }

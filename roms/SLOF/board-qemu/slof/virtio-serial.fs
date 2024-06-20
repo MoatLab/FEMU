@@ -33,16 +33,14 @@ virtio-setup-vd VALUE virtiodev
 : virtio-serial-term-key?  virtiodev virtio-serial-haschar ;
 : virtio-serial-term-key   BEGIN virtio-serial-term-key? UNTIL virtiodev virtio-serial-getchar ;
 
-: virtio-serial-close-stdout s" stdout" get-chosen IF decode-int nip nip close-dev THEN ;
-
 \ Basic device initialization - which has only to be done once
 : init  ( -- )
 virtiodev virtio-serial-init drop
     TRUE to initialized?
-    \ Linux closes stdin at some point in prom_init(). This internally triggers a
-    \ quiesce in SLOF. We must ensure stdout gets closed as well otherwise the
-    \ device cannot be reset properly and the boot will hang.
-    ['] virtio-serial-close-stdout add-quiesce-xt
+    \ virtiodev must be shutdown at quiesce so the device is reset properly.
+    \ The read and write methods can be called after quiesce so must handle
+    \ virtiodev being closed.
+    ['] shutdown add-quiesce-xt
 ;
 
 0 VALUE open-count
@@ -62,12 +60,12 @@ virtiodev virtio-serial-init drop
     open-count 0> IF
         open-count 1 - dup to open-count
         0= IF shutdown THEN
+        close
     THEN
-    close
 ;
 
 : write ( addr len -- actual )
-    virtiodev 0= IF nip EXIT THEN
+    virtiodev 0= IF 2drop 0 EXIT THEN
     tuck
     0 ?DO
         dup c@ virtiodev SWAP virtio-serial-putchar
@@ -78,7 +76,7 @@ virtiodev virtio-serial-init drop
 
 : read ( addr len -- actual )
     0= IF drop 0 EXIT THEN
-    virtiodev 0= IF nip EXIT THEN
+    virtiodev 0= IF drop 0 EXIT THEN
     virtiodev virtio-serial-haschar 0= IF 0 swap c! -2 EXIT THEN
     virtiodev virtio-serial-getchar swap c! 1
 ;

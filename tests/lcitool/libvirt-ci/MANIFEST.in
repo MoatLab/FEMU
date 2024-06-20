@@ -1,0 +1,12 @@
+prune bin   # don't include bin/lcitool in the distribution
+prune containers    # don't include CI stuff in the distribution
+
+recursive-include docs *
+recursive-include examples *
+recursive-include tests *
+
+exclude *requirements.txt   # all requirements are specified in pyproject.toml
+exclude .*  # don't include any of the hidden repo files
+
+global-exclude */__pycache__/*
+global-exclude *.pyc

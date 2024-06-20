@@ -714,7 +714,7 @@ static int xhci_port_scan(struct xhci_hcd *xhcd,
 	cap = xhcd->cap_regs;
 	port_cnt = num_ports = read_reg32(&cap->hcsparams1) >> 24;
 
-	/* Read the xHCI extented capability to find usb3 ports and offset*/
+	/* Read the xHCI extended capability to find usb3 ports and offset*/
 	xecp_off = XHCI_HCCPARAMS_XECP(read_reg32(&cap->hccparams));
 	base = (uint32_t *)cap;
 	while (xecp_off > 0) {

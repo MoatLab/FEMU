@@ -67,7 +67,7 @@ typedef struct BlockCopyCallState {
     QLIST_ENTRY(BlockCopyCallState) list;
 
     /*
-     * Fields that report information about return values and erros.
+     * Fields that report information about return values and errors.
      * Protected by lock in BlockCopyState.
      */
     bool error_is_read;
@@ -313,7 +313,12 @@ static int64_t block_copy_calculate_cluster_size(BlockDriverState *target,
 {
     int ret;
     BlockDriverInfo bdi;
-    bool target_does_cow = bdrv_backing_chain_next(target);
+    bool target_does_cow;
+
+    GLOBAL_STATE_CODE();
+    GRAPH_RDLOCK_GUARD_MAINLOOP();
+
+    target_does_cow = bdrv_backing_chain_next(target);
 
     /*
      * If there is no backing file on the target, we cannot rely on COW if our
@@ -355,6 +360,8 @@ BlockCopyState *block_copy_state_new(BdrvChild *source, BdrvChild *target,
     BdrvDirtyBitmap *copy_bitmap;
     bool is_fleecing;
 
+    GLOBAL_STATE_CODE();
+
     cluster_size = block_copy_calculate_cluster_size(target->bs, errp);
     if (cluster_size < 0) {
         return NULL;
@@ -392,7 +399,9 @@ BlockCopyState *block_copy_state_new(BdrvChild *source, BdrvChild *target,
      * For more information see commit f8d59dfb40bb and test
      * tests/qemu-iotests/222
      */
+    bdrv_graph_rdlock_main_loop();
     is_fleecing = bdrv_chain_contains(target->bs, source->bs);
+    bdrv_graph_rdunlock_main_loop();
 
     s = g_new(BlockCopyState, 1);
     *s = (BlockCopyState) {
@@ -462,7 +471,7 @@ static coroutine_fn int block_copy_task_run(AioTaskPool *pool,
  * Do copy of cluster-aligned chunk. Requested region is allowed to exceed
  * s->len only to cover last cluster when s->len is not aligned to clusters.
  *
- * No sync here: nor bitmap neighter intersecting requests handling, only copy.
+ * No sync here: neither bitmap nor intersecting requests handling, only copy.
  *
  * @method is an in-out argument, so that copy_range can be either extended to
  * a full-size buffer or disabled if the copy_range attempt fails.  The output

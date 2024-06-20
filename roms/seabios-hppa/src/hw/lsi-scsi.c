@@ -142,6 +142,7 @@ lsi_scsi_init_lun(struct lsi_lun_s *llun, struct pci_device *pci, u32 iobase,
 {
     memset(llun, 0, sizeof(*llun));
     llun->drive.type = DTYPE_LSI_SCSI;
+    llun->drive.max_bytes_transfer = 4*1024*1024;   /* 4 MB */
     llun->drive.cntl_id = pci->bdf;
     llun->pci = pci;
     llun->target = target;

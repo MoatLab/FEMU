@@ -36,6 +36,7 @@
 #include "qemu/bcd.h"
 #include "qemu/module.h"
 #include "trace.h"
+#include "sysemu/watchdog.h"
 
 #include "m48t59-internal.h"
 #include "migration/vmstate.h"
@@ -133,7 +134,7 @@ static void alarm_cb (void *opaque)
 
 static void set_alarm(M48t59State *NVRAM)
 {
-    int diff;
+    int64_t diff;
     if (NVRAM->alrm_timer != NULL) {
         timer_del(NVRAM->alrm_timer);
         diff = qemu_timedate_diff(&NVRAM->alarm) - NVRAM->time_offset;
@@ -163,8 +164,7 @@ static void watchdog_cb (void *opaque)
     if (NVRAM->buffer[0x1FF7] & 0x80) {
         NVRAM->buffer[0x1FF7] = 0x00;
         NVRAM->buffer[0x1FFC] &= ~0x40;
-        /* May it be a hw CPU Reset instead ? */
-        qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+        watchdog_perform_action();
     } else {
         qemu_set_irq(NVRAM->IRQ, 1);
         qemu_set_irq(NVRAM->IRQ, 0);
@@ -526,7 +526,7 @@ static const VMStateDescription vmstate_m48t59 = {
     .name = "m48t59",
     .version_id = 1,
     .minimum_version_id = 1,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT8(lock, M48t59State),
         VMSTATE_UINT16(addr, M48t59State),
         VMSTATE_VBUFFER_UINT32(buffer, M48t59State, 0, NULL, size),

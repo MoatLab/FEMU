@@ -92,7 +92,7 @@ typedef enum X86OpSize {
     /* Custom */
     X86_SIZE_d64,
     X86_SIZE_f64,
-    X86_SIZE_ph, /* SSE/AVX packed half precision */
+    X86_SIZE_xh, /* SSE/AVX packed half register */
 } X86OpSize;
 
 typedef enum X86CPUIDFeature {
@@ -104,10 +104,12 @@ typedef enum X86CPUIDFeature {
     X86_FEAT_AVX2,
     X86_FEAT_BMI1,
     X86_FEAT_BMI2,
+    X86_FEAT_CMPCCXADD,
     X86_FEAT_F16C,
     X86_FEAT_FMA,
     X86_FEAT_MOVBE,
     X86_FEAT_PCLMULQDQ,
+    X86_FEAT_SHA_NI,
     X86_FEAT_SSE,
     X86_FEAT_SSE2,
     X86_FEAT_SSE3,
@@ -130,21 +132,54 @@ typedef enum X86OpUnit {
     X86_OP_MMX,     /* address in either s->ptrX or s->A0 depending on has_ea */
 } X86OpUnit;
 
+typedef enum X86InsnCheck {
+    /* Illegal or exclusive to 64-bit mode */
+    X86_CHECK_i64 = 1,
+    X86_CHECK_o64 = 2,
+
+    /* Fault outside protected mode */
+    X86_CHECK_prot = 4,
+
+    /* Privileged instruction checks */
+    X86_CHECK_cpl0 = 8,
+    X86_CHECK_vm86_iopl = 16,
+    X86_CHECK_cpl_iopl = 32,
+    X86_CHECK_iopl = X86_CHECK_cpl_iopl | X86_CHECK_vm86_iopl,
+
+    /* Fault if VEX.L=1 */
+    X86_CHECK_VEX128 = 64,
+
+    /* Fault if VEX.W=1 */
+    X86_CHECK_W0 = 128,
+
+    /* Fault if VEX.W=0 */
+    X86_CHECK_W1 = 256,
+} X86InsnCheck;
+
 typedef enum X86InsnSpecial {
     X86_SPECIAL_None,
+
+    /* Accepts LOCK prefix; LOCKed operations do not load or writeback operand 0 */
+    X86_SPECIAL_HasLock,
 
     /* Always locked if it has a memory operand (XCHG) */
     X86_SPECIAL_Locked,
 
-    /* Fault outside protected mode */
-    X86_SPECIAL_ProtMode,
+    /*
+     * Rd/Mb or Rd/Mw in the manual: register operand 0 is treated as 32 bits
+     * (and writeback zero-extends it to 64 bits if applicable).  PREFIX_DATA
+     * does not trigger 16-bit writeback and, as a side effect, high-byte
+     * registers are never used.
+     */
+    X86_SPECIAL_Op0_Rd,
 
     /*
-     * Register operand 0/2 is zero extended to 32 bits.  Rd/Mb or Rd/Mw
-     * in the manual.
+     * Ry/Mb in the manual (PINSRB).  However, the high bits are never used by
+     * the instruction in either the register or memory cases; the *real* effect
+     * of this modifier is that high-byte registers are never used, even without
+     * a REX prefix.  Therefore, PINSRW does not need it despite having Ry/Mw.
      */
-    X86_SPECIAL_ZExtOp0,
-    X86_SPECIAL_ZExtOp2,
+    X86_SPECIAL_Op2_Ry,
 
     /*
      * Register operand 2 is extended to full width, while a memory operand
@@ -158,9 +193,9 @@ typedef enum X86InsnSpecial {
      */
     X86_SPECIAL_MMX,
 
-    /* Illegal or exclusive to 64-bit mode */
-    X86_SPECIAL_i64,
-    X86_SPECIAL_o64,
+    /* When loaded into s->T0, register operand 1 is zero/sign extended.  */
+    X86_SPECIAL_SExtT0,
+    X86_SPECIAL_ZExtT0,
 } X86InsnSpecial;
 
 /*
@@ -223,7 +258,9 @@ struct X86OpEntry {
     X86CPUIDFeature cpuid:8;
     unsigned     vex_class:8;
     X86VEXSpecial vex_special:8;
-    uint16_t     valid_prefix:16;
+    unsigned     valid_prefix:16;
+    unsigned     check:16;
+    unsigned     intercept:8;
     bool         is_decode:1;
 };
 
@@ -246,6 +283,10 @@ struct X86DecodedInsn {
     X86DecodedOp op[3];
     target_ulong immediate;
     AddressParts mem;
+
+    TCGv cc_dst, cc_src, cc_src2;
+    TCGv_i32 cc_op_dynamic;
+    int8_t cc_op;
 
     uint8_t b;
 };

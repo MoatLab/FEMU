@@ -1,7 +1,11 @@
-gen = [
+gen_a64 = [
+  decodetree.process('a64.decode', extra_args: ['--static-decode=disas_a64']),
   decodetree.process('sve.decode', extra_args: '--decode=disas_sve'),
   decodetree.process('sme.decode', extra_args: '--decode=disas_sme'),
   decodetree.process('sme-fa64.decode', extra_args: '--static-decode=disas_sme_fa64'),
+]
+
+gen_a32 = [
   decodetree.process('neon-shared.decode', extra_args: '--decode=disas_neon_shared'),
   decodetree.process('neon-dp.decode', extra_args: '--decode=disas_neon_dp'),
   decodetree.process('neon-ls.decode', extra_args: '--decode=disas_neon_ls'),
@@ -15,9 +19,11 @@ gen = [
   decodetree.process('t16.decode', extra_args: ['-w', '16', '--static-decode=disas_t16']),
 ]
 
-arm_ss.add(gen)
+arm_ss.add(gen_a32)
+arm_ss.add(when: 'TARGET_AARCH64', if_true: gen_a64)
 
 arm_ss.add(files(
+  'cpu32.c',
   'translate.c',
   'translate-m-nocp.c',
   'translate-mve.c',
@@ -35,6 +41,7 @@ arm_ss.add(files(
 ))
 
 arm_ss.add(when: 'TARGET_AARCH64', if_true: files(
+  'cpu64.c',
   'translate-a64.c',
   'translate-sve.c',
   'translate-sme.c',
@@ -45,6 +52,9 @@ arm_ss.add(when: 'TARGET_AARCH64', if_true: files(
   'sve_helper.c',
 ))
 
-arm_softmmu_ss.add(files(
+arm_system_ss.add(files(
   'psci.c',
 ))
+
+arm_system_ss.add(when: 'CONFIG_ARM_V7M', if_true: files('cpu-v7m.c'))
+arm_user_ss.add(when: 'TARGET_AARCH64', if_false: files('cpu-v7m.c'))

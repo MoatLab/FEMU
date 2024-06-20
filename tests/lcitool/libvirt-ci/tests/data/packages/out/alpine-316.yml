@@ -134,6 +134,7 @@ native:
 - make
 - mesa-dev
 - meson
+- mtools
 - multipath-tools
 - musl-dev
 - nano
@@ -176,6 +177,7 @@ native:
 - perl-yaml
 - php81-dev
 - php81-pecl-imagick
+- pipewire-dev
 - pixman-dev
 - pkgconf
 - polkit
@@ -244,6 +246,7 @@ native:
 - wireshark-dev
 - xen-dev
 - xfsprogs-dev
+- xorriso
 - xz
 - xz-dev
 - yajl-dev

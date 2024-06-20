@@ -18,7 +18,7 @@ SVN=`which svn`
 PATCH=`which patch`
 DIFF_FILE=./x86emu_changes.diff
 
-# check wether svn, patch, ... is available...
+# check whether svn, patch, ... is available...
 
 if [ ! -x $SVN ]; then
 	echo "subversion executable not found!"

@@ -290,18 +290,18 @@
 #define E1000_RETA_IDX(hash)        ((hash) & (BIT(7) - 1))
 #define E1000_RETA_VAL(reta, hash)  (((uint8_t *)(reta))[E1000_RETA_IDX(hash)])
 
-#define E1000_MRQC_EN_TCPIPV4(mrqc) ((mrqc) & BIT(16))
-#define E1000_MRQC_EN_IPV4(mrqc)    ((mrqc) & BIT(17))
-#define E1000_MRQC_EN_TCPIPV6(mrqc) ((mrqc) & BIT(18))
-#define E1000_MRQC_EN_IPV6EX(mrqc)  ((mrqc) & BIT(19))
-#define E1000_MRQC_EN_IPV6(mrqc)    ((mrqc) & BIT(20))
+#define E1000_MRQC_EN_TCPIPV4(mrqc)   ((mrqc) & BIT(16))
+#define E1000_MRQC_EN_IPV4(mrqc)      ((mrqc) & BIT(17))
+#define E1000_MRQC_EN_TCPIPV6EX(mrqc) ((mrqc) & BIT(18))
+#define E1000_MRQC_EN_IPV6EX(mrqc)    ((mrqc) & BIT(19))
+#define E1000_MRQC_EN_IPV6(mrqc)      ((mrqc) & BIT(20))
 
-#define E1000_MRQ_RSS_TYPE_NONE     (0)
-#define E1000_MRQ_RSS_TYPE_IPV4TCP  (1)
-#define E1000_MRQ_RSS_TYPE_IPV4     (2)
-#define E1000_MRQ_RSS_TYPE_IPV6TCP  (3)
-#define E1000_MRQ_RSS_TYPE_IPV6EX   (4)
-#define E1000_MRQ_RSS_TYPE_IPV6     (5)
+#define E1000_MRQ_RSS_TYPE_NONE       (0)
+#define E1000_MRQ_RSS_TYPE_IPV4TCP    (1)
+#define E1000_MRQ_RSS_TYPE_IPV4       (2)
+#define E1000_MRQ_RSS_TYPE_IPV6TCPEX  (3)
+#define E1000_MRQ_RSS_TYPE_IPV6EX     (4)
+#define E1000_MRQ_RSS_TYPE_IPV6       (5)
 
 #define E1000_ICR_ASSERTED BIT(31)
 #define E1000_EIAC_MASK    0x01F00000
@@ -839,7 +839,7 @@ union e1000_rx_desc_packet_split {
 #define E1000_RXD_STAT_EOP      0x02    /* End of Packet */
 #define E1000_RXD_STAT_IXSM     0x04    /* Ignore checksum */
 #define E1000_RXD_STAT_VP       0x08    /* IEEE VLAN Packet */
-#define E1000_RXD_STAT_UDPCS    0x10    /* UDP xsum caculated */
+#define E1000_RXD_STAT_UDPCS    0x10    /* UDP xsum calculated */
 #define E1000_RXD_STAT_TCPCS    0x20    /* TCP xsum calculated */
 #define E1000_RXD_STAT_IPCS     0x40    /* IP xsum calculated */
 #define E1000_RXD_STAT_PIF      0x80    /* passed in-exact filter */

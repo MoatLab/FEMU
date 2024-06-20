@@ -76,4 +76,10 @@ uint8_t ecc_digest(ECCState *s, uint8_t sample);
 void ecc_reset(ECCState *s);
 extern const VMStateDescription vmstate_ecc_state;
 
+/* m25p80.c */
+
+#define TYPE_M25P80 "m25p80-generic"
+
+BlockBackend *m25p80_get_blk(DeviceState *dev);
+
 #endif

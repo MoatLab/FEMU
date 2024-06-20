@@ -330,23 +330,20 @@ static MemTxResult get_vte(GICv3ITSState *s, uint32_t vpeid, VTEntry *vte)
     if (entry_addr == -1) {
         /* No L2 table entry, i.e. no valid VTE, or a memory error */
         vte->valid = false;
-        goto out;
+        trace_gicv3_its_vte_read_fault(vpeid);
+        return MEMTX_OK;
     }
     vteval = address_space_ldq_le(as, entry_addr, MEMTXATTRS_UNSPECIFIED, &res);
     if (res != MEMTX_OK) {
-        goto out;
+        trace_gicv3_its_vte_read_fault(vpeid);
+        return res;
     }
     vte->valid = FIELD_EX64(vteval, VTE, VALID);
     vte->vptsize = FIELD_EX64(vteval, VTE, VPTSIZE);
     vte->vptaddr = FIELD_EX64(vteval, VTE, VPTADDR);
     vte->rdbase = FIELD_EX64(vteval, VTE, RDBASE);
-out:
-    if (res != MEMTX_OK) {
-        trace_gicv3_its_vte_read_fault(vpeid);
-    } else {
-        trace_gicv3_its_vte_read(vpeid, vte->valid, vte->vptsize,
-                                 vte->vptaddr, vte->rdbase);
-    }
+    trace_gicv3_its_vte_read(vpeid, vte->valid, vte->vptsize,
+                             vte->vptaddr, vte->rdbase);
     return res;
 }
 
@@ -548,10 +545,10 @@ static ItsCmdResult do_process_its_cmd(GICv3ITSState *s, uint32_t devid,
     }
 
     if (cmdres == CMD_CONTINUE_OK && cmd == DISCARD) {
-        ITEntry ite = {};
+        ITEntry i = {};
         /* remove mapping from interrupt translation table */
-        ite.valid = false;
-        return update_ite(s, eventid, &dte, &ite) ? CMD_CONTINUE_OK : CMD_STALL;
+        i.valid = false;
+        return update_ite(s, eventid, &dte, &i) ? CMD_CONTINUE_OK : CMD_STALL;
     }
     return CMD_CONTINUE_OK;
 }

@@ -58,8 +58,8 @@
 #define  PDC_MODEL_NVA_SUPPORTED	(0 << 4)
 #define  PDC_MODEL_NVA_SLOW		(1 << 4)
 #define  PDC_MODEL_NVA_UNSUPPORTED	(3 << 4)
-#define PDC_MODEL_GET_BOOT__OP	8	/* returns boot test options	*/
-#define PDC_MODEL_SET_BOOT__OP	9	/* set boot test options	*/
+#define PDC_MODEL_FIRM_TEST_GET	8	/* returns boot test options	*/
+#define PDC_MODEL_FIRM_TEST_SET	9	/* set boot test options	*/
 #define PDC_MODEL_GET_PLATFORM_INFO 10	/* returns platform info	*/
 #define PDC_MODEL_GET_INSTALL_KERNEL 11	/* returns kernel for installation */
 
@@ -363,20 +363,25 @@
 
 #if !defined(__ASSEMBLY__)
 
-/* flags of the device_path */
+/* flags for hardware_path */
 #define	PF_AUTOBOOT	0x80
 #define	PF_AUTOSEARCH	0x40
 #define	PF_TIMER	0x0F
 
-struct device_path {		/* page 1-69 */
-	unsigned char flags;	/* flags see above! */
-	unsigned char bc[6];	/* bus converter routing info */
-	unsigned char mod;
-	unsigned int  layers[6];/* device-specific layer-info */
-} __attribute__((aligned(8))) ;
+struct hardware_path {
+	unsigned char flags;	/* see bit definitions below */
+	signed   char bc[6];	/* Bus Converter routing info to a specific */
+				/* I/O adaptor (< 0 means none, > 63 resvd) */
+	signed   char mod;	/* fixed field of specified module */
+};
+
+struct pdc_module_path {	/* page 1-69 */
+	struct hardware_path path;
+	unsigned int layers[6]; /* device-specific info (ctlr #, unit # ...) */
+} __attribute__((aligned(8)));
 
 struct pz_device {
-	struct	device_path dp;	/* see above */
+	struct pdc_module_path dp;	/* see above */
 	/* struct	iomod *hpa; */
 	unsigned int hpa;	/* HPA base address */
 	/* char	*spa; */
@@ -467,6 +472,7 @@ struct pdc_model {		/* for PDC_MODEL */
 	unsigned long arch_rev;
 	unsigned long pot_key;
 	unsigned long curr_key;
+       unsigned long width;    /* default of PSW_W bit (1=enabled) */
 };
 
 struct pdc_cache_cf {		/* for PDC_CACHE  (I/D-caches) */
@@ -604,26 +610,17 @@ struct pdc_system_map_addr_info { /* PDC_SYSTEM_MAP/FIND_ADDRESS */
 	unsigned long mod_pgs;
 };
 
+struct pdc_relocate_info_block {   /* PDC_RELOCATE_INFO */
+        unsigned long pdc_size;
+        unsigned long pdc_alignment;
+        unsigned long pdc_address;
+};
+
 struct pdc_initiator { /* PDC_INITIATOR */
 	int host_id;
 	int factor;
 	int width;
 	int mode;
-};
-
-struct hardware_path {
-	char  flags;	/* see bit definitions below */
-	char  bc[6];	/* Bus Converter routing info to a specific */
-			/* I/O adaptor (< 0 means none, > 63 resvd) */
-	char  mod;	/* fixed field of specified module */
-};
-
-/*
- * Device path specifications used by PDC.
- */
-struct pdc_module_path {
-	struct hardware_path path;
-	unsigned int layers[6]; /* device-specific info (ctlr #, unit # ...) */
 };
 
 /* Only used on some pre-PA2.0 boxes */
@@ -726,6 +723,23 @@ struct pdc_toc_pim_20 {
 	unsigned int check_type;
 	struct pim_cpu_state_cf cpu_state;
 };
+
+/* for SpeedyBoot/firm_ctl funtionality */
+struct pdc_firm_test_get_rtn_block {   /* PDC_MODEL/PDC_FIRM_TEST_GET */
+        unsigned long current_tests;   /* u_R_addr Raddr_ints[0]  */
+        unsigned long tests_supported; /* u_R_addr Raddr_ints[1]  */
+        unsigned long default_tests;   /* u_R_addr Raddr_ints[2]  */
+};
+
+#define TORNADO_CPU_ID 		 0xB
+#define PCXL_CPU_ID              0xD
+#define PCXU_CPU_ID              0xE	/* U and U+ for all but C-class with bug */
+#define VR_CPU_ID                0xF
+#define PCXU_PLUS_CPU_ID        0x10	/* U+ only on C-class with bug */
+#define PCXW_CPU_ID             0x11
+#define PCXW_PLUS_CPU_ID        0x12
+#define PIRANHA_CPU_ID          0x13
+#define MAKO_CPU_ID             0x14
 
 #endif /* !defined(__ASSEMBLY__) */
 

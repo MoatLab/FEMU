@@ -28,6 +28,7 @@
 #include "hw/pci/pcie_regs.h"
 #include "hw/pci/pcie_port.h"
 #include "qemu/range.h"
+#include "trace.h"
 
 //#define DEBUG_PCIE
 #ifdef DEBUG_PCIE
@@ -43,6 +44,23 @@ static bool pcie_sltctl_powered_off(uint16_t sltctl)
 {
     return (sltctl & PCI_EXP_SLTCTL_PCC) == PCI_EXP_SLTCTL_PWR_OFF
         && (sltctl & PCI_EXP_SLTCTL_PIC) == PCI_EXP_SLTCTL_PWR_IND_OFF;
+}
+
+static const char *pcie_led_state_to_str(uint16_t value)
+{
+    switch (value) {
+    case PCI_EXP_SLTCTL_PWR_IND_ON:
+    case PCI_EXP_SLTCTL_ATTN_IND_ON:
+        return "on";
+    case PCI_EXP_SLTCTL_PWR_IND_BLINK:
+    case PCI_EXP_SLTCTL_ATTN_IND_BLINK:
+        return "blink";
+    case PCI_EXP_SLTCTL_PWR_IND_OFF:
+    case PCI_EXP_SLTCTL_ATTN_IND_OFF:
+        return "off";
+    default:
+        return "invalid";
+    }
 }
 
 /***************************************************************************
@@ -152,6 +170,14 @@ static void pcie_cap_fill_slot_lnk(PCIDevice *dev)
         if (s->speed > QEMU_PCI_EXP_LNK_8GT) {
             pci_long_test_and_set_mask(exp_cap + PCI_EXP_LNKCAP2,
                                        PCI_EXP_LNKCAP2_SLS_16_0GB);
+        }
+        if (s->speed > QEMU_PCI_EXP_LNK_16GT) {
+            pci_long_test_and_set_mask(exp_cap + PCI_EXP_LNKCAP2,
+                                       PCI_EXP_LNKCAP2_SLS_32_0GB);
+        }
+        if (s->speed > QEMU_PCI_EXP_LNK_32GT) {
+            pci_long_test_and_set_mask(exp_cap + PCI_EXP_LNKCAP2,
+                                       PCI_EXP_LNKCAP2_SLS_64_0GB);
         }
     }
 }
@@ -272,6 +298,13 @@ uint8_t pcie_cap_get_type(const PCIDevice *dev)
     assert(pos > 0);
     return (pci_get_word(dev->config + pos + PCI_EXP_FLAGS) &
             PCI_EXP_FLAGS_TYPE) >> PCI_EXP_FLAGS_TYPE_SHIFT;
+}
+
+uint8_t pcie_cap_get_version(const PCIDevice *dev)
+{
+    uint32_t pos = dev->exp.exp_cap;
+    assert(pos > 0);
+    return pci_get_word(dev->config + pos + PCI_EXP_FLAGS) & PCI_EXP_FLAGS_VERS;
 }
 
 /* MSI/MSI-X */
@@ -659,6 +692,10 @@ void pcie_cap_slot_init(PCIDevice *dev, PCIESlot *s)
     pci_word_test_and_set_mask(dev->w1cmask + pos + PCI_EXP_SLTSTA,
                                PCI_EXP_HP_EV_SUPPORTED);
 
+    /* Avoid migration abortion when this device hot-removed by guest */
+    pci_word_test_and_clear_mask(dev->cmask + pos + PCI_EXP_SLTSTA,
+                                 PCI_EXP_SLTSTA_PDS);
+
     dev->exp.hpev_notified = false;
 
     qbus_set_hotplug_handler(BUS(pci_bridge_get_sec_bus(PCI_BRIDGE(dev))),
@@ -724,6 +761,28 @@ void pcie_cap_slot_get(PCIDevice *dev, uint16_t *slt_ctl, uint16_t *slt_sta)
     *slt_sta = pci_get_word(exp_cap + PCI_EXP_SLTSTA);
 }
 
+static void find_child_fn(PCIBus *bus, PCIDevice *dev, void *opaque)
+{
+    PCIDevice **child = opaque;
+
+    if (!*child) {
+        *child = dev;
+    }
+}
+
+/*
+ * Returns the plugged device or first function of multifunction plugged device
+ */
+static PCIDevice *pcie_cap_slot_find_child(PCIDevice *dev)
+{
+    PCIBus *sec_bus = pci_bridge_get_sec_bus(PCI_BRIDGE(dev));
+    PCIDevice *child = NULL;
+
+    pci_for_each_device(sec_bus, pci_bus_num(sec_bus), find_child_fn, &child);
+
+    return child;
+}
+
 void pcie_cap_slot_write_config(PCIDevice *dev,
                                 uint16_t old_slt_ctl, uint16_t old_slt_sta,
                                 uint32_t addr, uint32_t val, int len)
@@ -766,6 +825,22 @@ void pcie_cap_slot_write_config(PCIDevice *dev,
         PCIE_DEV_PRINTF(dev, "PCI_EXP_SLTCTL_EIC: "
                         "sltsta -> 0x%02"PRIx16"\n",
                         sltsta);
+    }
+
+    if (trace_event_get_state_backends(TRACE_PCIE_CAP_SLOT_WRITE_CONFIG)) {
+        DeviceState *parent = DEVICE(dev);
+        DeviceState *child = DEVICE(pcie_cap_slot_find_child(dev));
+
+        trace_pcie_cap_slot_write_config(
+            parent->canonical_path,
+            child ? child->canonical_path : "no-child",
+            (sltsta & PCI_EXP_SLTSTA_PDS) ? "present" : "not present",
+            pcie_led_state_to_str(old_slt_ctl & PCI_EXP_SLTCTL_PIC),
+            pcie_led_state_to_str(val & PCI_EXP_SLTCTL_PIC),
+            pcie_led_state_to_str(old_slt_ctl & PCI_EXP_SLTCTL_AIC),
+            pcie_led_state_to_str(val & PCI_EXP_SLTCTL_AIC),
+            (old_slt_ctl & PCI_EXP_SLTCTL_PWR_OFF) ? "off" : "on",
+            (val & PCI_EXP_SLTCTL_PWR_OFF) ? "off" : "on");
     }
 
     /*
@@ -1028,8 +1103,10 @@ void pcie_sync_bridge_lnk(PCIDevice *bridge_dev)
  */
 
 /* ARI */
-void pcie_ari_init(PCIDevice *dev, uint16_t offset, uint16_t nextfn)
+void pcie_ari_init(PCIDevice *dev, uint16_t offset)
 {
+    uint16_t nextfn = dev->cap_present & QEMU_PCIE_ARI_NEXTFN_1 ? 1 : 0;
+
     pcie_add_capability(dev, PCI_EXT_CAP_ID_ARI, PCI_ARI_VER,
                         offset, PCI_ARI_SIZEOF);
     pci_set_long(dev->config + offset + PCI_ARI_CAP, (nextfn & 0xff) << 8);

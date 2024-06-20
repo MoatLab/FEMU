@@ -1,17 +1,21 @@
 ---
-- name: Bootstrap the pkgng package manager
-  raw: 'env ASSUME_ALWAYS_YES=YES {{ packaging.command }} bootstrap'
-  when:
-    - packaging.format == 'pkg'
+- name: 'Check if {{ ansible_python_package }} is installed'
+  raw: '{{ ansible_python_package }} --version'
+  ignore_errors: true
+  changed_when: false
+  register: python_installed
 
-- name: Bootstrap Ansible
+- name: 'Install {{ ansible_python_package }}'
   raw: '{{ packaging.command }} install -y {{ ansible_python_package }}'
   when:
+    - python_installed.rc != 0
     - os.name != 'Alpine'
 
 - block:
-    - name: Bootstrap Ansible
+    - name: 'Install {{ ansible_python_package }}'
       raw: '{{ packaging.command }} add {{ ansible_python_package }}'
+      when:
+        - python_installed.rc != 0
 
     # community repo regex on non-Edge versions
     - set_fact:
@@ -24,8 +28,7 @@
       when: os.version == 'Edge'
 
     # Enable the community repository
-    - name: Bootstrap Ansible
-      replace:
+    - replace:
         path: /etc/apk/repositories
         regexp: '{{ regex }}'
         replace: '\1'

@@ -25,6 +25,7 @@
 #include "qemu/osdep.h"
 #include "disas/disas.h"
 #include "exec/address-spaces.h"
+#include "exec/memory.h"
 #include "monitor/hmp-target.h"
 #include "monitor/monitor-internal.h"
 #include "qapi/error.h"
@@ -81,7 +82,7 @@ CPUArchState *mon_get_cpu_env(Monitor *mon)
 {
     CPUState *cs = mon_get_cpu(mon);
 
-    return cs ? cs->env_ptr : NULL;
+    return cs ? cpu_env(cs) : NULL;
 }
 
 int monitor_get_cpu_index(Monitor *mon)
@@ -260,7 +261,7 @@ void *gpa2hva(MemoryRegion **p_mr, hwaddr addr, uint64_t size, Error **errp)
     }
 
     if (!memory_region_is_ram(mrs.mr) && !memory_region_is_romd(mrs.mr)) {
-        error_setg(errp, "Memory at address 0x%" HWADDR_PRIx "is not RAM", addr);
+        error_setg(errp, "Memory at address 0x%" HWADDR_PRIx " is not RAM", addr);
         memory_region_unref(mrs.mr);
         return NULL;
     }

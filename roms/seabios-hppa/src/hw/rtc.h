@@ -1,15 +1,8 @@
 #ifndef __RTC_H
 #define __RTC_H
 
-#if CONFIG_X86
 #define PORT_CMOS_INDEX        0x0070
 #define PORT_CMOS_DATA         0x0071
-#elif CONFIG_PARISC
-#include "parisc/hppa_hardware.h"
-#define PORT_CMOS_INDEX        (IDE_HPA+0x0070)
-#define PORT_CMOS_DATA         (IDE_HPA+0x0071)
-#endif
-
 
 // PORT_CMOS_INDEX nmi disable bit
 #define NMI_DISABLE_BIT 0x80

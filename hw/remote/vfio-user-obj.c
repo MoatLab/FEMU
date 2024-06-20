@@ -30,6 +30,11 @@
  *
  * notes - x-vfio-user-server could block IO and monitor during the
  *         initialization phase.
+ *
+ *         When x-remote machine has the auto-shutdown property
+ *         enabled (default), x-vfio-user-server terminates after the last
+ *         client disconnects. Otherwise, it will continue running until
+ *         explicitly killed.
  */
 
 #include "qemu/osdep.h"
@@ -61,9 +66,12 @@
 OBJECT_DECLARE_TYPE(VfuObject, VfuObjectClass, VFU_OBJECT)
 
 /**
- * VFU_OBJECT_ERROR - reports an error message. If auto_shutdown
- * is set, it aborts the machine on error. Otherwise, it logs an
- * error message without aborting.
+ * VFU_OBJECT_ERROR - reports an error message.
+ *
+ * If auto_shutdown is set, it aborts the machine on error. Otherwise,
+ * it logs an error message without aborting. auto_shutdown is disabled
+ * when the server serves clients from multiple VMs; as such, an error
+ * from one VM shouldn't be able to disrupt other VM's services.
  */
 #define VFU_OBJECT_ERROR(o, fmt, ...)                                     \
     {                                                                     \
@@ -273,7 +281,7 @@ static ssize_t vfu_object_cfg_access(vfu_ctx_t *vfu_ctx, char * const buf,
     while (bytes > 0) {
         len = (bytes > pci_access_width) ? pci_access_width : bytes;
         if (is_write) {
-            memcpy(&val, ptr, len);
+            val = ldn_le_p(ptr, len);
             pci_host_config_write_common(o->pci_dev, offset,
                                          pci_config_size(o->pci_dev),
                                          val, len);
@@ -281,7 +289,7 @@ static ssize_t vfu_object_cfg_access(vfu_ctx_t *vfu_ctx, char * const buf,
         } else {
             val = pci_host_config_read_common(o->pci_dev, offset,
                                               pci_config_size(o->pci_dev), len);
-            memcpy(ptr, &val, len);
+            stn_le_p(ptr, len, val);
             trace_vfu_cfg_read(offset, val);
         }
         offset += len;
@@ -392,7 +400,7 @@ static int vfu_object_mr_rw(MemoryRegion *mr, uint8_t *buf, hwaddr offset,
         }
 
         if (release_lock) {
-            qemu_mutex_unlock_iothread();
+            bql_unlock();
             release_lock = false;
         }
 

@@ -49,12 +49,9 @@ static void aw_a10_pic_update(AwA10PICState *s)
 static void aw_a10_pic_set_irq(void *opaque, int irq, int level)
 {
     AwA10PICState *s = opaque;
+    uint32_t *pending_reg = &s->irq_pending[irq / 32];
 
-    if (level) {
-        set_bit(irq % 32, (void *)&s->irq_pending[irq / 32]);
-    } else {
-        clear_bit(irq % 32, (void *)&s->irq_pending[irq / 32]);
-    }
+    *pending_reg = deposit32(*pending_reg, irq % 32, 1, !!level);
     aw_a10_pic_update(s);
 }
 
@@ -145,7 +142,7 @@ static const VMStateDescription vmstate_aw_a10_pic = {
     .name = "a10.pic",
     .version_id = 1,
     .minimum_version_id = 1,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT32(vector, AwA10PICState),
         VMSTATE_UINT32(base_addr, AwA10PICState),
         VMSTATE_UINT32(protect, AwA10PICState),

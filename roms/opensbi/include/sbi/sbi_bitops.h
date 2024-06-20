@@ -12,13 +12,7 @@
 
 #include <sbi/sbi_types.h>
 
-#if __SIZEOF_POINTER__ == 8
-#define BITS_PER_LONG		64
-#elif __SIZEOF_POINTER__ == 4
-#define BITS_PER_LONG		32
-#else
-#error "Unexpected __SIZEOF_POINTER__"
-#endif
+#define BITS_PER_LONG		(8 * __SIZEOF_LONG__)
 
 #define EXTRACT_FIELD(val, which) \
 	(((val) & (which)) / ((which) & ~((which)-1)))
@@ -32,6 +26,7 @@
 #define BIT_MASK(nr)		(1UL << ((nr) % BITS_PER_LONG))
 #define BIT_WORD(bit)		((bit) / BITS_PER_LONG)
 #define BIT_WORD_OFFSET(bit)	((bit) & (BITS_PER_LONG - 1))
+#define BIT_ALIGN(bit, align)	(((bit) + ((align) - 1)) & ~((align) - 1))
 
 #define GENMASK(h, l) \
 	(((~0UL) - (1UL << (l)) + 1) & (~0UL >> (BITS_PER_LONG - 1 - (h))))
@@ -116,6 +111,22 @@ static inline unsigned long sbi_fls(unsigned long word)
 	if (!(word & (~0ul << (BITS_PER_LONG-1))))
 		num -= 1;
 	return num;
+}
+
+/**
+ * sbi_popcount - find the number of set bit in a long word
+ * @word: the word to search
+ */
+static inline unsigned long sbi_popcount(unsigned long word)
+{
+	unsigned long count = 0;
+
+	while (word) {
+		word &= word - 1;
+		count++;
+	}
+
+	return count;
 }
 
 #define for_each_set_bit(bit, addr, size) \

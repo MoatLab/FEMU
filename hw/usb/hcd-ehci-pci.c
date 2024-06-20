@@ -74,7 +74,7 @@ static void usb_ehci_pci_realize(PCIDevice *dev, Error **errp)
 
 static void usb_ehci_pci_init(Object *obj)
 {
-    DeviceClass *dc = OBJECT_GET_CLASS(DeviceClass, obj, TYPE_DEVICE);
+    DeviceClass *dc = DEVICE_GET_CLASS(obj);
     EHCIPCIState *i = PCI_EHCI(obj);
     EHCIState *s = &i->ehci;
 
@@ -83,7 +83,7 @@ static void usb_ehci_pci_init(Object *obj)
     s->capsbase = 0x00;
     s->opregbase = 0x20;
     s->portscbase = 0x44;
-    s->portnr = NB_PORTS;
+    s->portnr = EHCI_PORTS;
 
     if (!dc->hotpluggable) {
         s->companion_enable = true;
@@ -144,7 +144,7 @@ static const VMStateDescription vmstate_ehci_pci = {
     .name        = "ehci",
     .version_id  = 2,
     .minimum_version_id  = 1,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_PCI_DEVICE(pcidev, EHCIPCIState),
         VMSTATE_STRUCT(ehci, EHCIPCIState, 2, vmstate_ehci, EHCIState),
         VMSTATE_END_OF_LIST()

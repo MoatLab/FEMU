@@ -32,6 +32,10 @@
 u32 RamSize;
 // Amount of continuous ram >4Gig
 u64 RamSizeOver4G;
+// physical address space bits
+u8 CPUPhysBits;
+// 64bit processor
+u8 CPULongMode;
 // Type of emulator platform.
 int PlatformRunningOn VARFSEG;
 // cfg enabled
@@ -53,23 +57,35 @@ inline int qemu_cfg_dma_enabled(void)
  * should be used to determine that a VM is running under KVM.
  */
 #define KVM_CPUID_SIGNATURE     0x40000000
+static unsigned int kvm_cpuid_base = 0;
 
 static void kvm_detect(void)
 {
+    unsigned int i, max = 0;
     unsigned int eax, ebx, ecx, edx;
     char signature[13];
 
-    cpuid(KVM_CPUID_SIGNATURE, &eax, &ebx, &ecx, &edx);
-    memcpy(signature + 0, &ebx, 4);
-    memcpy(signature + 4, &ecx, 4);
-    memcpy(signature + 8, &edx, 4);
-    signature[12] = 0;
+    for (i = KVM_CPUID_SIGNATURE;; i += 0x100) {
+        eax = 0;
+        cpuid(i, &eax, &ebx, &ecx, &edx);
+        if (eax < i)
+            break;
+        memcpy(signature + 0, &ebx, 4);
+        memcpy(signature + 4, &ecx, 4);
+        memcpy(signature + 8, &edx, 4);
+        signature[12] = 0;
+        dprintf(1, "cpuid 0x%x: eax %x, signature '%s'\n", i, eax, signature);
+        if (strcmp(signature, "KVMKVMKVM") == 0) {
+            kvm_cpuid_base = i;
+            max = eax;
+        }
+    }
 
-    if (strcmp(signature, "KVMKVMKVM") == 0) {
+    if (kvm_cpuid_base) {
         dprintf(1, "Running on KVM\n");
         PlatformRunningOn |= PF_KVM;
-        if (eax >= KVM_CPUID_SIGNATURE + 0x10) {
-            cpuid(KVM_CPUID_SIGNATURE + 0x10, &eax, &ebx, &ecx, &edx);
+        if (max >= kvm_cpuid_base + 0x10) {
+            cpuid(kvm_cpuid_base + 0x10, &eax, &ebx, &ecx, &edx);
             dprintf(1, "kvm: have invtsc, freq %u kHz\n", eax);
             tsctimer_setfreq(eax, "invtsc");
         }
@@ -93,7 +109,7 @@ static void kvmclock_init(void)
     if (!runningOnKVM())
         return;
 
-    cpuid(KVM_CPUID_SIGNATURE + 0x01, &eax, &ebx, &ecx, &edx);
+    cpuid(kvm_cpuid_base + 0x01, &eax, &ebx, &ecx, &edx);
     if (eax & (1 <<  KVM_FEATURE_CLOCKSOURCE2))
         msr = MSR_KVM_SYSTEM_TIME_NEW;
     else if (eax & (1 <<  KVM_FEATURE_CLOCKSOURCE))
@@ -116,6 +132,58 @@ static void kvmclock_init(void)
         MHz >>= kvmclock->tsc_shift;
     dprintf(1, "kvmclock: stable tsc, %d MHz\n", MHz);
     tsctimer_setfreq(MHz * 1000, "kvmclock");
+}
+
+static void physbits(int qemu_quirk)
+{
+    unsigned int max, eax, ebx, ecx, edx;
+    unsigned int physbits;
+    char signature[13];
+    int pae = 0, valid = 0;
+
+    cpuid(0, &eax, &ebx, &ecx, &edx);
+    memcpy(signature + 0, &ebx, 4);
+    memcpy(signature + 4, &edx, 4);
+    memcpy(signature + 8, &ecx, 4);
+    signature[12] = 0;
+    if (eax >= 1) {
+        cpuid(1, &eax, &ebx, &ecx, &edx);
+        pae = (edx & (1 << 6));
+    }
+
+    cpuid(0x80000000, &eax, &ebx, &ecx, &edx);
+    max = eax;
+
+    if (max >= 0x80000001) {
+        cpuid(0x80000001, &eax, &ebx, &ecx, &edx);
+        CPULongMode = !!(edx & (1 << 29));
+    }
+
+    if (pae && CPULongMode && max >= 0x80000008) {
+        cpuid(0x80000008, &eax, &ebx, &ecx, &edx);
+        physbits = (u8)eax;
+        if (!qemu_quirk) {
+            valid = 1;
+        } else if (physbits >= 41) {
+            valid = 1;
+        } else if (strcmp(signature, "GenuineIntel") == 0) {
+            if ((physbits == 36) || (physbits == 39))
+                valid = 1;
+        } else if (strcmp(signature, "AuthenticAMD") == 0) {
+            if (physbits == 40)
+                valid = 1;
+        }
+    } else {
+        physbits = pae ? 36 : 32;
+        valid = 1;
+    }
+
+    dprintf(1, "%s: signature=\"%s\", pae=%s, lm=%s, phys-bits=%d, valid=%s\n",
+            __func__, signature, pae ? "yes" : "no", CPULongMode ? "yes" : "no",
+            physbits, valid ? "yes" : "no");
+
+    if (valid)
+        CPUPhysBits = physbits;
 }
 
 static void qemu_detect(void)
@@ -150,6 +218,7 @@ static void qemu_detect(void)
         dprintf(1, "Running on QEMU (unknown nb: %04x:%04x)\n", v, d);
         break;
     }
+    physbits(1);
 }
 
 static int qemu_early_e820(void);
@@ -696,7 +765,7 @@ static int qemu_early_e820(void)
         switch (table.type) {
         case E820_RESERVED:
             e820_add(table.address, table.length, table.type);
-            dprintf(3, "qemu/e820: addr 0x%016llx len 0x%016llx [reserved]\n",
+            dprintf(1, "qemu/e820: addr 0x%016llx len 0x%016llx [reserved]\n",
                     table.address, table.length);
             break;
         case E820_RAM:

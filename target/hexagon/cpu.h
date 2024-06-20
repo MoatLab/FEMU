@@ -20,11 +20,10 @@
 
 #include "fpu/softfloat-types.h"
 
+#include "cpu-qom.h"
 #include "exec/cpu-defs.h"
 #include "hex_regs.h"
 #include "mmvec/mmvec.h"
-#include "qom/object.h"
-#include "hw/core/cpu.h"
 #include "hw/registerfields.h"
 
 #define NUM_PREGS 4
@@ -36,13 +35,7 @@
 #define PRED_WRITES_MAX 5                   /* 4 insns + endloop */
 #define VSTORES_MAX 2
 
-#define TYPE_HEXAGON_CPU "hexagon-cpu"
-
-#define HEXAGON_CPU_TYPE_SUFFIX "-" TYPE_HEXAGON_CPU
-#define HEXAGON_CPU_TYPE_NAME(name) (name HEXAGON_CPU_TYPE_SUFFIX)
 #define CPU_RESOLVING_TYPE TYPE_HEXAGON_CPU
-
-#define TYPE_HEXAGON_CPU_V67 HEXAGON_CPU_TYPE_NAME("v67")
 
 #define MMU_USER_IDX 0
 
@@ -78,28 +71,21 @@ typedef struct {
 typedef struct CPUArchState {
     target_ulong gpr[TOTAL_PER_THREAD_REGS];
     target_ulong pred[NUM_PREGS];
-    target_ulong branch_taken;
 
     /* For comparing with LLDB on target - see adjust_stack_ptrs function */
     target_ulong last_pc_dumped;
     target_ulong stack_start;
 
     uint8_t slot_cancelled;
-    target_ulong new_value[TOTAL_PER_THREAD_REGS];
+    target_ulong new_value_usr;
 
     /*
      * Only used when HEX_DEBUG is on, but unconditionally included
      * to reduce recompile time when turning HEX_DEBUG on/off.
      */
-    target_ulong this_PC;
     target_ulong reg_written[TOTAL_PER_THREAD_REGS];
 
-    target_ulong new_pred_value[NUM_PREGS];
-    target_ulong pred_written;
-
     MemLog mem_log_stores[STORES_MAX];
-    target_ulong pkt_has_store_s1;
-    target_ulong dczero_addr;
 
     float_status fp_status;
 
@@ -127,33 +113,29 @@ typedef struct CPUArchState {
     VTCMStoreLog vtcm_log;
 } CPUHexagonState;
 
-OBJECT_DECLARE_CPU_TYPE(HexagonCPU, HexagonCPUClass, HEXAGON_CPU)
-
 typedef struct HexagonCPUClass {
-    /*< private >*/
     CPUClass parent_class;
-    /*< public >*/
+
     DeviceRealize parent_realize;
     ResettablePhases parent_phases;
 } HexagonCPUClass;
 
 struct ArchCPU {
-    /*< private >*/
     CPUState parent_obj;
-    /*< public >*/
-    CPUNegativeOffsetState neg;
+
     CPUHexagonState env;
 
     bool lldb_compat;
     target_ulong lldb_stack_adjust;
+    bool short_circuit;
 };
 
 #include "cpu_bits.h"
 
 FIELD(TB_FLAGS, IS_TIGHT_LOOP, 0, 1)
 
-static inline void cpu_get_tb_cpu_state(CPUHexagonState *env, target_ulong *pc,
-                                        target_ulong *cs_base, uint32_t *flags)
+static inline void cpu_get_tb_cpu_state(CPUHexagonState *env, vaddr *pc,
+                                        uint64_t *cs_base, uint32_t *flags)
 {
     uint32_t hex_flags = 0;
     *pc = env->gpr[HEX_REG_PC];
@@ -162,15 +144,6 @@ static inline void cpu_get_tb_cpu_state(CPUHexagonState *env, target_ulong *pc,
         hex_flags = FIELD_DP32(hex_flags, TB_FLAGS, IS_TIGHT_LOOP, 1);
     }
     *flags = hex_flags;
-}
-
-static inline int cpu_mmu_index(CPUHexagonState *env, bool ifetch)
-{
-#ifdef CONFIG_USER_ONLY
-    return MMU_USER_IDX;
-#else
-#error System mode not supported on Hexagon yet
-#endif
 }
 
 typedef HexagonCPU ArchCPU;

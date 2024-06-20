@@ -56,7 +56,7 @@ struct ehdr {
 #define SHT_SHLIB	10	/* Reserved */
 #define SHT_DYNSYM	11	/* Dynamic loader symbol table */
 
-/* Section attributs (sh_flags) */
+/* Section attributes (sh_flags) */
 #define SHF_WRITE	0x1
 #define SHF_ALLOC	0x2
 #define SHF_EXECINSTR	0x4

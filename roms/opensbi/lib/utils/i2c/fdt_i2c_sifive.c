@@ -9,11 +9,10 @@
 
 #include <sbi/riscv_io.h>
 #include <sbi/sbi_error.h>
+#include <sbi/sbi_heap.h>
 #include <sbi/sbi_timer.h>
 #include <sbi_utils/fdt/fdt_helper.h>
 #include <sbi_utils/i2c/fdt_i2c.h>
-
-#define SIFIVE_I2C_ADAPTER_MAX	2
 
 #define SIFIVE_I2C_PRELO	0x00
 #define SIFIVE_I2C_PREHI	0x04
@@ -46,12 +45,6 @@ struct sifive_i2c_adapter {
 	unsigned long addr;
 	struct i2c_adapter adapter;
 };
-
-static unsigned int sifive_i2c_adapter_count;
-static struct sifive_i2c_adapter
-	sifive_i2c_adapter_array[SIFIVE_I2C_ADAPTER_MAX];
-
-extern struct fdt_i2c_adapter fdt_i2c_adapter_sifive;
 
 static inline void sifive_i2c_setreg(struct sifive_i2c_adapter *adap,
 				     uint8_t reg, uint8_t value)
@@ -244,25 +237,26 @@ static int sifive_i2c_init(void *fdt, int nodeoff,
 	struct sifive_i2c_adapter *adapter;
 	uint64_t addr;
 
-	if (sifive_i2c_adapter_count >= SIFIVE_I2C_ADAPTER_MAX)
-		return SBI_ENOSPC;
-
-	adapter = &sifive_i2c_adapter_array[sifive_i2c_adapter_count];
+	adapter = sbi_zalloc(sizeof(*adapter));
+	if (!adapter)
+		return SBI_ENOMEM;
 
 	rc = fdt_get_node_addr_size(fdt, nodeoff, 0, &addr, NULL);
-	if (rc)
+	if (rc) {
+		sbi_free(adapter);
 		return rc;
+	}
 
 	adapter->addr = addr;
-	adapter->adapter.driver = &fdt_i2c_adapter_sifive;
 	adapter->adapter.id = nodeoff;
 	adapter->adapter.write = sifive_i2c_adapter_write;
 	adapter->adapter.read = sifive_i2c_adapter_read;
 	rc = i2c_adapter_add(&adapter->adapter);
-	if (rc)
+	if (rc) {
+		sbi_free(adapter);
 		return rc;
+	}
 
-	sifive_i2c_adapter_count++;
 	return 0;
 }
 

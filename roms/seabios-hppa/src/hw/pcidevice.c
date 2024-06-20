@@ -66,6 +66,7 @@ pci_probe_devices(void)
             dev->class = classrev >> 16;
             dev->prog_if = classrev >> 8;
             dev->revision = classrev & 0xff;
+            dev->irq = pci_config_readb(bdf, PCI_INTERRUPT_PIN);
             dev->header_type = pci_config_readb(bdf, PCI_HEADER_TYPE);
             u8 v = dev->header_type & 0x7f;
             if (v == PCI_HEADER_TYPE_BRIDGE || v == PCI_HEADER_TYPE_CARDBUS) {
@@ -76,8 +77,8 @@ pci_probe_devices(void)
                 if (secbus > MaxPCIBus)
                     MaxPCIBus = secbus;
             }
-            dprintf(4, "PCI device %pP (vd=%04x:%04x c=%04x)\n"
-                    , dev, dev->vendor, dev->device, dev->class);
+            dprintf(4, "PCI device %pP (vd=%04x:%04x c=%04x, irq=%d)\n"
+                    , dev, dev->vendor, dev->device, dev->class, dev->irq);
         }
     }
     dprintf(1, "Found %d PCI devices (max PCI bus is %02x)\n", count, MaxPCIBus);

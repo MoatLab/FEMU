@@ -62,7 +62,7 @@
 #include "hw/boards.h"
 #include "qemu/cutils.h"
 #include "sysemu/runstate.h"
-#include "accel/tcg/debuginfo.h"
+#include "tcg/debuginfo.h"
 
 #include <zlib.h>
 
@@ -505,7 +505,7 @@ ssize_t load_elf_ram_sym(const char *filename,
                          clear_lsb, data_swab, as, load_rom, sym_cb);
     }
 
-    if (ret != ELF_LOAD_FAILED) {
+    if (ret > 0) {
         debuginfo_report_elf(filename, fd, 0);
     }
 
@@ -558,7 +558,7 @@ static void zfree(void *x, void *addr)
 
 ssize_t gunzip(void *dst, size_t dstlen, uint8_t *src, size_t srclen)
 {
-    z_stream s;
+    z_stream s = {};
     ssize_t dstbytes;
     int r, i, flags;
 
@@ -863,7 +863,7 @@ ssize_t load_image_gzipped(const char *filename, hwaddr addr, uint64_t max_sz)
 
 /*
  * The Linux header magic number for a EFI PE/COFF
- * image targetting an unspecified architecture.
+ * image targeting an unspecified architecture.
  */
 #define EFI_PE_LINUX_MAGIC        "\xcd\x23\x82\x81"
 
@@ -1070,7 +1070,7 @@ static void *rom_set_mr(Rom *rom, Object *owner, const char *name, bool ro)
 
 ssize_t rom_add_file(const char *file, const char *fw_dir,
                      hwaddr addr, int32_t bootindex,
-                     bool option_rom, MemoryRegion *mr,
+                     bool has_option_rom, MemoryRegion *mr,
                      AddressSpace *as)
 {
     MachineClass *mc = MACHINE_GET_CLASS(qdev_get_machine());
@@ -1139,7 +1139,7 @@ ssize_t rom_add_file(const char *file, const char *fw_dir,
                  basename);
         snprintf(devpath, sizeof(devpath), "/rom@%s", fw_file_name);
 
-        if ((!option_rom || mc->option_rom_has_mr) && mc->rom_file_has_mr) {
+        if ((!has_option_rom || mc->option_rom_has_mr) && mc->rom_file_has_mr) {
             data = rom_set_mr(rom, OBJECT(fw_cfg), devpath, true);
         } else {
             data = rom->data;
@@ -1492,7 +1492,7 @@ RomGap rom_find_largest_gap_between(hwaddr base, size_t size)
         if (rom->mr || rom->fw_file) {
             continue;
         }
-        /* ignore anything finishing bellow base */
+        /* ignore anything finishing below base */
         if (rom->addr + rom->romsize <= base) {
             continue;
         }

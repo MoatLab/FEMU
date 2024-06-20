@@ -26,6 +26,7 @@
 #include "exec/exec-all.h"
 #include "tcg/tcg.h"
 #include "fpu/softfloat.h"
+#include "crypto/clmul.h"
 
 static uint16_t mve_eci_mask(CPUARMState *env)
 {
@@ -924,8 +925,8 @@ DO_1OP_IMM(vorri, DO_ORRI)
         bool qc = false;                                                \
         for (e = 0; e < 16 / ESIZE; e++, mask >>= ESIZE) {              \
             bool sat = false;                                           \
-            TYPE r = FN(n[H##ESIZE(e)], m[H##ESIZE(e)], &sat);          \
-            mergemask(&d[H##ESIZE(e)], r, mask);                        \
+            TYPE r_ = FN(n[H##ESIZE(e)], m[H##ESIZE(e)], &sat);         \
+            mergemask(&d[H##ESIZE(e)], r_, mask);                       \
             qc |= sat & mask & 1;                                       \
         }                                                               \
         if (qc) {                                                       \
@@ -984,17 +985,10 @@ DO_2OP_L(vmulltuw, 1, 4, uint32_t, 8, uint64_t, DO_MUL)
  * Polynomial multiply. We can always do this generating 64 bits
  * of the result at a time, so we don't need to use DO_2OP_L.
  */
-#define VMULLPH_MASK 0x00ff00ff00ff00ffULL
-#define VMULLPW_MASK 0x0000ffff0000ffffULL
-#define DO_VMULLPBH(N, M) pmull_h((N) & VMULLPH_MASK, (M) & VMULLPH_MASK)
-#define DO_VMULLPTH(N, M) DO_VMULLPBH((N) >> 8, (M) >> 8)
-#define DO_VMULLPBW(N, M) pmull_w((N) & VMULLPW_MASK, (M) & VMULLPW_MASK)
-#define DO_VMULLPTW(N, M) DO_VMULLPBW((N) >> 16, (M) >> 16)
-
-DO_2OP(vmullpbh, 8, uint64_t, DO_VMULLPBH)
-DO_2OP(vmullpth, 8, uint64_t, DO_VMULLPTH)
-DO_2OP(vmullpbw, 8, uint64_t, DO_VMULLPBW)
-DO_2OP(vmullptw, 8, uint64_t, DO_VMULLPTW)
+DO_2OP(vmullpbh, 8, uint64_t, clmul_8x4_even)
+DO_2OP(vmullpth, 8, uint64_t, clmul_8x4_odd)
+DO_2OP(vmullpbw, 8, uint64_t, clmul_16x2_even)
+DO_2OP(vmullptw, 8, uint64_t, clmul_16x2_odd)
 
 /*
  * Because the computation type is at least twice as large as required,
@@ -1256,11 +1250,11 @@ DO_2OP_SAT(vqsubsw, 4, int32_t, DO_SQSUB_W)
 #define WRAP_QRSHL_HELPER(FN, N, M, ROUND, satp)                        \
     ({                                                                  \
         uint32_t su32 = 0;                                              \
-        typeof(N) r = FN(N, (int8_t)(M), sizeof(N) * 8, ROUND, &su32);  \
+        typeof(N) qrshl_ret = FN(N, (int8_t)(M), sizeof(N) * 8, ROUND, &su32); \
         if (su32) {                                                     \
             *satp = true;                                               \
         }                                                               \
-        r;                                                              \
+        qrshl_ret;                                                      \
     })
 
 #define DO_SQSHL_OP(N, M, satp) \
@@ -1298,12 +1292,12 @@ DO_2OP_SAT_U(vqrshlu, DO_UQRSHL_OP)
         for (e = 0; e < 16 / ESIZE; e++, mask >>= ESIZE) {              \
             bool sat = false;                                           \
             if ((e & 1) == XCHG) {                                      \
-                TYPE r = FN(n[H##ESIZE(e)],                             \
+                TYPE vqdmladh_ret = FN(n[H##ESIZE(e)],                  \
                             m[H##ESIZE(e - XCHG)],                      \
                             n[H##ESIZE(e + (1 - 2 * XCHG))],            \
                             m[H##ESIZE(e + (1 - XCHG))],                \
                             ROUND, &sat);                               \
-                mergemask(&d[H##ESIZE(e)], r, mask);                    \
+                mergemask(&d[H##ESIZE(e)], vqdmladh_ret, mask);         \
                 qc |= sat & mask & 1;                                   \
             }                                                           \
         }                                                               \
@@ -2460,7 +2454,7 @@ static inline int64_t do_sqrshl48_d(int64_t src, int64_t shift,
             return extval;
         }
     } else if (shift < 48) {
-        int64_t extval = sextract64(src << shift, 0, 48);
+        extval = sextract64(src << shift, 0, 48);
         if (!sat || src == (extval >> shift)) {
             return extval;
         }
@@ -2492,7 +2486,7 @@ static inline uint64_t do_uqrshl48_d(uint64_t src, int64_t shift,
             return extval;
         }
     } else if (shift < 48) {
-        uint64_t extval = extract64(src << shift, 0, 48);
+        extval = extract64(src << shift, 0, 48);
         if (!sat || src == (extval >> shift)) {
             return extval;
         }

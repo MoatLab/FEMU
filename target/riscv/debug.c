@@ -282,8 +282,8 @@ static target_ulong type2_mcontrol_validate(CPURISCVState *env,
     /* validate size encoding */
     size = type2_breakpoint_size(env, ctrl);
     if (access_size[size] == -1) {
-        qemu_log_mask(LOG_UNIMP, "access size %d is not supported, using SIZE_ANY\n",
-                      size);
+        qemu_log_mask(LOG_UNIMP, "access size %d is not supported, using "
+                                 "SIZE_ANY\n", size);
     } else {
         val |= (ctrl & TYPE2_SIZELO);
         if (riscv_cpu_mxl(env) == MXL_RV64) {
@@ -411,8 +411,8 @@ static target_ulong type6_mcontrol6_validate(CPURISCVState *env,
     /* validate size encoding */
     size = extract32(ctrl, 16, 4);
     if (access_size[size] == -1) {
-        qemu_log_mask(LOG_UNIMP, "access size %d is not supported, using SIZE_ANY\n",
-                      size);
+        qemu_log_mask(LOG_UNIMP, "access size %d is not supported, using "
+                                 "SIZE_ANY\n", size);
     } else {
         val |= (ctrl & TYPE6_SIZE);
     }
@@ -515,7 +515,7 @@ itrigger_set_count(CPURISCVState *env, int index, int value)
 static bool check_itrigger_priv(CPURISCVState *env, int index)
 {
     target_ulong tdata1 = env->tdata1[index];
-    if (riscv_cpu_virt_enabled(env)) {
+    if (env->virt_enabled) {
         /* check VU/VS bit against current privilege level */
         return (get_field(tdata1, ITRIGGER_VS) == env->priv) ||
                (get_field(tdata1, ITRIGGER_VU) == env->priv);
@@ -574,7 +574,7 @@ static void riscv_itrigger_update_count(CPURISCVState *env)
     int count, executed;
     /*
      * Record last icount, so that we can evaluate the executed instructions
-     * since last priviledge mode change or timer expire.
+     * since last privilege mode change or timer expire.
      */
     int64_t last_icount = env->last_icount, current_icount;
     current_icount = env->last_icount = icount_get_raw();
@@ -588,14 +588,14 @@ static void riscv_itrigger_update_count(CPURISCVState *env)
             continue;
         }
         /*
-         * Only when priviledge is changed or itrigger timer expires,
+         * Only when privilege is changed or itrigger timer expires,
          * the count field in itrigger tdata1 register is updated.
          * And the count field in itrigger only contains remaining value.
          */
         if (check_itrigger_priv(env, i)) {
             /*
-             * If itrigger enabled in this priviledge mode, the number of
-             * executed instructions since last priviledge change
+             * If itrigger enabled in this privilege mode, the number of
+             * executed instructions since last privilege change
              * should be reduced from current itrigger count.
              */
             executed = current_icount - last_icount;
@@ -605,7 +605,7 @@ static void riscv_itrigger_update_count(CPURISCVState *env)
             }
         } else {
             /*
-             * If itrigger is not enabled in this priviledge mode,
+             * If itrigger is not enabled in this privilege mode,
              * the number of executed instructions will be discard and
              * the count field in itrigger will not change.
              */
@@ -696,7 +696,8 @@ target_ulong tdata_csr_read(CPURISCVState *env, int tdata_index)
     int trigger_type;
     switch (tdata_index) {
     case TDATA1:
-        trigger_type = extract_trigger_type(env, env->tdata1[env->trigger_cur]);
+        trigger_type = extract_trigger_type(env,
+                                            env->tdata1[env->trigger_cur]);
         if ((trigger_type == TRIGGER_TYPE_INST_CNT) && icount_enabled()) {
             return deposit64(env->tdata1[env->trigger_cur], 10, 14,
                              itrigger_get_adjust_count(env));
@@ -787,7 +788,7 @@ bool riscv_cpu_debug_check_breakpoint(CPUState *cs)
             switch (trigger_type) {
             case TRIGGER_TYPE_AD_MATCH:
                 /* type 2 trigger cannot be fired in VU/VS mode */
-                if (riscv_cpu_virt_enabled(env)) {
+                if (env->virt_enabled) {
                     return false;
                 }
 
@@ -806,7 +807,7 @@ bool riscv_cpu_debug_check_breakpoint(CPUState *cs)
                 pc = env->tdata2[i];
 
                 if ((ctrl & TYPE6_EXEC) && (bp->pc == pc)) {
-                    if (riscv_cpu_virt_enabled(env)) {
+                    if (env->virt_enabled) {
                         /* check VU/VS bit against current privilege level */
                         if ((ctrl >> 23) & BIT(env->priv)) {
                             return true;
@@ -845,7 +846,7 @@ bool riscv_cpu_debug_check_watchpoint(CPUState *cs, CPUWatchpoint *wp)
         switch (trigger_type) {
         case TRIGGER_TYPE_AD_MATCH:
             /* type 2 trigger cannot be fired in VU/VS mode */
-            if (riscv_cpu_virt_enabled(env)) {
+            if (env->virt_enabled) {
                 return false;
             }
 
@@ -880,7 +881,7 @@ bool riscv_cpu_debug_check_watchpoint(CPUState *cs, CPUWatchpoint *wp)
             }
 
             if ((wp->flags & flags) && (wp->vaddr == addr)) {
-                if (riscv_cpu_virt_enabled(env)) {
+                if (env->virt_enabled) {
                     /* check VU/VS bit against current privilege level */
                     if ((ctrl >> 23) & BIT(env->priv)) {
                         return true;
@@ -902,7 +903,17 @@ bool riscv_cpu_debug_check_watchpoint(CPUState *cs, CPUWatchpoint *wp)
     return false;
 }
 
-void riscv_trigger_init(CPURISCVState *env)
+void riscv_trigger_realize(CPURISCVState *env)
+{
+    int i;
+
+    for (i = 0; i < RV_MAX_TRIGGERS; i++) {
+        env->itrigger_timer[i] = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                              riscv_itrigger_timer_cb, env);
+    }
+}
+
+void riscv_trigger_reset_hold(CPURISCVState *env)
 {
     target_ulong tdata1 = build_tdata1(env, TRIGGER_TYPE_AD_MATCH, 0, 0);
     int i;
@@ -927,7 +938,8 @@ void riscv_trigger_init(CPURISCVState *env)
         env->tdata3[i] = 0;
         env->cpu_breakpoint[i] = NULL;
         env->cpu_watchpoint[i] = NULL;
-        env->itrigger_timer[i] = timer_new_ns(QEMU_CLOCK_VIRTUAL,
-                                              riscv_itrigger_timer_cb, env);
+        timer_del(env->itrigger_timer[i]);
     }
+
+    env->mcontext = 0;
 }

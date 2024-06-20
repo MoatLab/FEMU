@@ -16,7 +16,7 @@ gitlab:
 targets:
   centos-stream-9: x86_64
 
-  debian-10:
+  debian-12:
     jobs:
       - arch: x86_64
         builds: false

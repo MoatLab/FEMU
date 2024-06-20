@@ -79,7 +79,7 @@ static const char *resp_get_error(QDict *resp)
     g_assert(_resp);                                                   \
     _error = resp_get_error(_resp);                                    \
     g_assert(_error);                                                  \
-    g_assert(g_str_equal(_error, expected_error));                     \
+    g_assert_cmpstr(_error, ==, expected_error);                       \
     qobject_unref(_resp);                                              \
 })
 
@@ -194,8 +194,8 @@ static void assert_type_full(QTestState *qts)
     g_assert(resp);
     error = resp_get_error(resp);
     g_assert(error);
-    g_assert(g_str_equal(error,
-                         "The requested expansion type is not supported"));
+    g_assert_cmpstr(error, ==,
+                    "The requested expansion type is not supported");
     qobject_unref(resp);
 }
 
@@ -212,8 +212,9 @@ static void assert_bad_props(QTestState *qts, const char *cpu_type)
     g_assert(resp);
     error = resp_get_error(resp);
     g_assert(error);
-    g_assert(g_str_equal(error,
-                         "Invalid parameter type for 'props', expected: dict"));
+    g_assert_cmpstr(error, ==,
+                    "Invalid parameter type for 'model.props',"
+                    " expected: object");
     qobject_unref(resp);
 }
 
@@ -417,12 +418,22 @@ static void pauth_tests_default(QTestState *qts, const char *cpu_type)
 {
     assert_has_feature_enabled(qts, cpu_type, "pauth");
     assert_has_feature_disabled(qts, cpu_type, "pauth-impdef");
+    assert_has_feature_disabled(qts, cpu_type, "pauth-qarma3");
     assert_set_feature(qts, cpu_type, "pauth", false);
     assert_set_feature(qts, cpu_type, "pauth", true);
     assert_set_feature(qts, cpu_type, "pauth-impdef", true);
     assert_set_feature(qts, cpu_type, "pauth-impdef", false);
-    assert_error(qts, cpu_type, "cannot enable pauth-impdef without pauth",
+    assert_set_feature(qts, cpu_type, "pauth-qarma3", true);
+    assert_set_feature(qts, cpu_type, "pauth-qarma3", false);
+    assert_error(qts, cpu_type,
+                 "cannot enable pauth-impdef or pauth-qarma3 without pauth",
                  "{ 'pauth': false, 'pauth-impdef': true }");
+    assert_error(qts, cpu_type,
+                 "cannot enable pauth-impdef or pauth-qarma3 without pauth",
+                 "{ 'pauth': false, 'pauth-qarma3': true }");
+    assert_error(qts, cpu_type,
+                 "cannot enable both pauth-impdef and pauth-qarma3",
+                 "{ 'pauth': true, 'pauth-impdef': true, 'pauth-qarma3': true }");
 }
 
 static void test_query_cpu_model_expansion(const void *data)
@@ -436,7 +447,7 @@ static void test_query_cpu_model_expansion(const void *data)
     assert_bad_props(qts, "max");
     assert_error(qts, "foo", "The CPU type 'foo' is not a recognized "
                  "ARM CPU type", NULL);
-    assert_error(qts, "max", "Parameter 'not-a-prop' is unexpected",
+    assert_error(qts, "max", "Parameter 'model.props.not-a-prop' is unexpected",
                  "{ 'not-a-prop': false }");
     assert_error(qts, "host", "The CPU type 'host' requires KVM", NULL);
 
@@ -506,9 +517,23 @@ static void test_query_cpu_model_expansion_kvm(const void *data)
         QDict *resp;
         char *error;
 
-        assert_error(qts, "cortex-a15",
-            "We cannot guarantee the CPU type 'cortex-a15' works "
-            "with KVM on this host", NULL);
+        /*
+         * When using KVM, only the 'host' and 'max' CPU models are
+         * supported. Test that we're emitting a suitable error for
+         * unsupported CPU models.
+         */
+        if (qtest_has_accel("tcg")) {
+            assert_error(qts, "cortex-a7",
+                         "We cannot guarantee the CPU type 'cortex-a7' works "
+                         "with KVM on this host", NULL);
+        } else {
+            /*
+             * With a KVM-only build the 32-bit CPUs are not present.
+             */
+            assert_error(qts, "cortex-a7",
+                         "The CPU type 'cortex-a7' is not a "
+                         "recognized ARM CPU type", NULL);
+        }
 
         assert_has_feature_enabled(qts, "host", "aarch64");
 

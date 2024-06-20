@@ -1,7 +1,7 @@
 /*
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * QEMU Vitual M68K Machine
+ * QEMU Virtual M68K Machine
  *
  * (c) 2020 Laurent Vivier <laurent@vivier.eu>
  *
@@ -155,6 +155,8 @@ static void virt_init(MachineState *machine)
     /* IRQ Controller */
 
     irqc_dev = qdev_new(TYPE_M68K_IRQC);
+    object_property_set_link(OBJECT(irqc_dev), "m68k-cpu",
+                             OBJECT(cpu), &error_abort);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(irqc_dev), &error_fatal);
 
     /*
@@ -199,11 +201,8 @@ static void virt_init(MachineState *machine)
     sysbus_connect_irq(sysbus, 0, PIC_GPIO(VIRT_GF_TTY_IRQ_BASE));
 
     /* virt controller */
-    dev = qdev_new(TYPE_VIRT_CTRL);
-    sysbus = SYS_BUS_DEVICE(dev);
-    sysbus_realize_and_unref(sysbus, &error_fatal);
-    sysbus_mmio_map(sysbus, 0, VIRT_CTRL_MMIO_BASE);
-    sysbus_connect_irq(sysbus, 0, PIC_GPIO(VIRT_CTRL_IRQ_BASE));
+    dev = sysbus_create_simple(TYPE_VIRT_CTRL, VIRT_CTRL_MMIO_BASE,
+                               PIC_GPIO(VIRT_CTRL_IRQ_BASE));
 
     /* virtio-mmio */
     io_base = VIRT_VIRTIO_MMIO_BASE;
@@ -240,9 +239,20 @@ static void virt_init(MachineState *machine)
         param_ptr = param_blob;
 
         BOOTINFO1(param_ptr, BI_MACHTYPE, MACH_VIRT);
-        BOOTINFO1(param_ptr, BI_FPUTYPE, FPU_68040);
-        BOOTINFO1(param_ptr, BI_MMUTYPE, MMU_68040);
-        BOOTINFO1(param_ptr, BI_CPUTYPE, CPU_68040);
+        if (m68k_feature(&cpu->env, M68K_FEATURE_M68020)) {
+            BOOTINFO1(param_ptr, BI_CPUTYPE, CPU_68020);
+        } else if (m68k_feature(&cpu->env, M68K_FEATURE_M68030)) {
+            BOOTINFO1(param_ptr, BI_MMUTYPE, MMU_68030);
+            BOOTINFO1(param_ptr, BI_CPUTYPE, CPU_68030);
+        } else if (m68k_feature(&cpu->env, M68K_FEATURE_M68040)) {
+            BOOTINFO1(param_ptr, BI_FPUTYPE, FPU_68040);
+            BOOTINFO1(param_ptr, BI_MMUTYPE, MMU_68040);
+            BOOTINFO1(param_ptr, BI_CPUTYPE, CPU_68040);
+        } else if (m68k_feature(&cpu->env, M68K_FEATURE_M68060)) {
+            BOOTINFO1(param_ptr, BI_FPUTYPE, FPU_68060);
+            BOOTINFO1(param_ptr, BI_MMUTYPE, MMU_68060);
+            BOOTINFO1(param_ptr, BI_CPUTYPE, CPU_68060);
+        }
         BOOTINFO2(param_ptr, BI_MEMCHUNK, 0, ram_size);
 
         BOOTINFO1(param_ptr, BI_VIRT_QEMU_VERSION,
@@ -347,10 +357,31 @@ type_init(virt_machine_register_types)
     } \
     type_init(machvirt_machine_##major##_##minor##_init);
 
-static void virt_machine_8_0_options(MachineClass *mc)
+static void virt_machine_9_0_options(MachineClass *mc)
 {
 }
-DEFINE_VIRT_MACHINE(8, 0, true)
+DEFINE_VIRT_MACHINE(9, 0, true)
+
+static void virt_machine_8_2_options(MachineClass *mc)
+{
+    virt_machine_9_0_options(mc);
+    compat_props_add(mc->compat_props, hw_compat_8_2, hw_compat_8_2_len);
+}
+DEFINE_VIRT_MACHINE(8, 2, false)
+
+static void virt_machine_8_1_options(MachineClass *mc)
+{
+    virt_machine_8_2_options(mc);
+    compat_props_add(mc->compat_props, hw_compat_8_1, hw_compat_8_1_len);
+}
+DEFINE_VIRT_MACHINE(8, 1, false)
+
+static void virt_machine_8_0_options(MachineClass *mc)
+{
+    virt_machine_8_1_options(mc);
+    compat_props_add(mc->compat_props, hw_compat_8_0, hw_compat_8_0_len);
+}
+DEFINE_VIRT_MACHINE(8, 0, false)
 
 static void virt_machine_7_2_options(MachineClass *mc)
 {

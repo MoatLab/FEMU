@@ -1,2 +1,6 @@
 install:
   cloud_init: false
+  flavor: gitlab
+
+gitlab:
+  url: https://gitlab.com

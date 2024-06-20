@@ -1,6 +1,6 @@
 from .docker import Docker
 from .podman import Podman
-from .containers import ContainerError
+from .containers import ContainerError, ContainerExecError
 
 # this line only makes sense with 'from xyz import *'; it also silences flake8
-__all__ = ("Docker", "Podman", "ContainerError")
+__all__ = ("Docker", "Podman", "ContainerError", "ContainerExecError")

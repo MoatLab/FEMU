@@ -1,6 +1,8 @@
 #include "sticore.h"
 #include "pdc.h"
 #include "hppa.h"
+#include "../malloc.h"
+#include "../string.h"
 
 #define ARTIST_VRAM_IDX 0x4a0
 #define ARTIST_VRAM_BITMASK 0x5a0
@@ -31,6 +33,8 @@
  */
 
 #define __stifunc(_name) __attribute__((section(".sti.text." _name)))
+
+#define STI_F_EXTEND(x) ((void*)(long)(int)(x))
 
 static const __stidata char user_data[256] __aligned(32);
 
@@ -3281,7 +3285,7 @@ struct sti_rom __stiheader sti_proc_rom = {
 static void __stitext write_artist(struct sti_glob_cfg *cfg,
                                    int reg, u32 val)
 {
-    writel((void *)cfg->region_ptrs[2] + reg, val);
+    gsc_writel(STI_F_EXTEND(cfg->region_ptrs[2] + reg), val);
 }
 
 static int __stifunc("state_mgmt") sti_state_mgmt(struct sti_state_flags *flags,
@@ -3345,7 +3349,7 @@ static int __stifunc("font_unpmv") sti_font_unpmv(struct sti_font_flags *flags,
                                                   struct sti_font_outptr *out,
                                                   struct sti_glob_cfg *cfg)
 {
-    struct font *font = (struct font *) in->font_start_addr;
+    struct font *font = (struct font *) ROM_EXTEND(in->font_start_addr);
     int bpc = font->hdr.bytes_per_char;
     int width = font->hdr.width;
     unsigned char *src;
@@ -3394,8 +3398,8 @@ static int __stifunc("init_graph") sti_init_graph(struct sti_init_flags *flags,
         struct sti_init_outptr *out,
         struct sti_glob_cfg *cfg)
 {
-    u32 *cmap = (u32 *)cfg->region_ptrs[1];
-    u32 resolution = *(u32 *)(cfg->region_ptrs[2] + 0x111110);
+    u32 *cmap = STI_F_EXTEND(cfg->region_ptrs[1]);
+    u32 resolution = *(u32 *)STI_F_EXTEND(cfg->region_ptrs[2] + 0x111110);
 
     out->errno = 0;
     if (resolution & (1 << 31)) {
@@ -3529,7 +3533,7 @@ int __stifunc("set_cm_entry") sti_set_cm_entry(struct setcm_flags *flags,
                                                struct setcm_outptr *out,
                                                struct sti_glob_cfg *cfg)
 {
-    u32 *cmap = (u32 *)cfg->region_ptrs[1];
+    u32 *cmap = STI_F_EXTEND(cfg->region_ptrs[1]);
     (void)flags;
     (void)cfg;
 
@@ -3582,6 +3586,10 @@ void sti_rom_init(void)
     struct font *font_ptr, *font_next, *font_start;
     int i;
 
+    /* STI ROM already initialized? */
+    if (sti_proc_rom.font_start)
+	return;
+
     sti_rom_size = (_sti_rom_end - _sti_rom_start) / 4096;
     if (sti_region_list[0].region_desc.length != sti_rom_size) {
         /* The STI ROM size is wrong. Try to fix it.
@@ -3593,15 +3601,58 @@ void sti_rom_init(void)
     /* Swap selected font as first, then chain all. */
     if (sti_font <= 0 || sti_font > ARRAY_SIZE(fontlist))
 	sti_font = 1;
+
     /* Swap selected font in as first font */
     font_next = fontlist[0];
     fontlist[0] = fontlist[sti_font - 1];
     fontlist[sti_font - 1] = font_next;
+
+#define ENABLE_FONTCOPY
+#ifdef ENABLE_FONTCOPY
+    {
+    struct font *fontlist_temp[ARRAY_SIZE(fontlist)];
+    unsigned long font_size, font_addr;
+    /* * The trivial swapping above breaks the sti driver on older 64-bit Linux
+     * kernels which take the "next_font" pointer as unsigned int (instead of
+     * signed int) and thus calculates a wrong font start address.  Avoid the crash
+     * by sorting the fonts in memory. Maybe HP-UX has problems with that too?
+     * A Linux kernel patch to avoid that was added in kernel 6.7.
+     */
+    #define FONT_SIZE(f) (sizeof(f->hdr) + f->hdr.bytes_per_char * (unsigned int)(f->hdr.last_char - f->hdr.first_char + 1))
+    font_start = fontlist[0];   /* the lowest font ptr */
+    for (i = 0; i < ARRAY_SIZE(fontlist); i++) {
+	font_ptr = fontlist[i];
+        if (font_ptr < font_start)      /* is font ptr lower? */
+            font_start = font_ptr;
+        font_size = FONT_SIZE(font_ptr);
+        font_next = malloc_tmplow(font_size);
+        memcpy(font_next, font_ptr, font_size);
+        fontlist_temp[i] = font_next;
+    }
+    /* font_start is now starting address */
+    font_addr = (unsigned long) font_start;
+    for (i = 0; i < ARRAY_SIZE(fontlist); i++) {
+	font_ptr = fontlist_temp[i];
+        font_size = FONT_SIZE(font_ptr);
+        memcpy((void *)font_addr, font_ptr, font_size);
+        malloc_pfree((unsigned long) font_ptr);
+        fontlist[i] = (struct font *) font_addr;
+        font_addr += font_size;
+        font_addr = ALIGN(font_addr, 32);
+    }
+    }
+#endif
+
     /* Now chain all fonts */
     font_start = fontlist[0];
     sti_proc_rom.font_start = STI_OFFSET(*font_start);
     for (i = 0; i < ARRAY_SIZE(fontlist)-1; i++) {
 	font_ptr = fontlist[i];
+        if (i ==  ARRAY_SIZE(fontlist)-1) {
+            /* last entry? */
+            font_ptr->hdr.next_font = 0;
+            continue;
+        }
 	font_next = fontlist[i+1];
 	font_ptr->hdr.next_font = STI_FONT_OFFSET(font_next, font_start);
     }

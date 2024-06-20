@@ -24,22 +24,10 @@
 extern xc_interface *xen_xc;
 
 /*
- * We don't support Xen prior to 4.2.0.
+ * We don't support Xen prior to 4.7.1.
  */
 
-/* Xen 4.2 through 4.6 */
-#if CONFIG_XEN_CTRL_INTERFACE_VERSION < 40701
-
-typedef xc_interface xenforeignmemory_handle;
-
-#define xenforeignmemory_open(l, f) xen_xc
-#define xenforeignmemory_close(h)
-
-#else /* CONFIG_XEN_CTRL_INTERFACE_VERSION >= 40701 */
-
 #include <xenforeignmemory.h>
-
-#endif
 
 extern xenforeignmemory_handle *xen_fmem;
 
@@ -148,8 +136,6 @@ static inline xendevicemodel_handle *xendevicemodel_open(
     return xen_xc;
 }
 
-#if CONFIG_XEN_CTRL_INTERFACE_VERSION >= 40500
-
 static inline int xendevicemodel_create_ioreq_server(
     xendevicemodel_handle *dmod, domid_t domid, int handle_bufioreq,
     ioservid_t *id)
@@ -210,8 +196,6 @@ static inline int xendevicemodel_set_ioreq_server_state(
 {
     return xc_hvm_set_ioreq_server_state(dmod, domid, id, enabled);
 }
-
-#endif /* CONFIG_XEN_CTRL_INTERFACE_VERSION >= 40500 */
 
 static inline int xendevicemodel_set_pci_intx_level(
     xendevicemodel_handle *dmod, domid_t domid, uint16_t segment,
@@ -340,15 +324,6 @@ static inline int xen_get_vmport_regs_pfn(xc_interface *xc, domid_t dom,
 }
 #endif
 
-/* Xen before 4.6 */
-#if CONFIG_XEN_CTRL_INTERFACE_VERSION < 40600
-
-#ifndef HVM_IOREQSRV_BUFIOREQ_ATOMIC
-#define HVM_IOREQSRV_BUFIOREQ_ATOMIC 2
-#endif
-
-#endif
-
 static inline int xen_get_default_ioreq_server_info(domid_t dom,
                                                     xen_pfn_t *ioreq_pfn,
                                                     xen_pfn_t *bufioreq_pfn,
@@ -385,84 +360,6 @@ static inline int xen_get_default_ioreq_server_info(domid_t dom,
 
     return 0;
 }
-
-/* Xen before 4.5 */
-#if CONFIG_XEN_CTRL_INTERFACE_VERSION < 40500
-
-#ifndef HVM_PARAM_BUFIOREQ_EVTCHN
-#define HVM_PARAM_BUFIOREQ_EVTCHN 26
-#endif
-
-#define IOREQ_TYPE_PCI_CONFIG 2
-
-typedef uint16_t ioservid_t;
-
-static inline void xen_map_memory_section(domid_t dom,
-                                          ioservid_t ioservid,
-                                          MemoryRegionSection *section)
-{
-}
-
-static inline void xen_unmap_memory_section(domid_t dom,
-                                            ioservid_t ioservid,
-                                            MemoryRegionSection *section)
-{
-}
-
-static inline void xen_map_io_section(domid_t dom,
-                                      ioservid_t ioservid,
-                                      MemoryRegionSection *section)
-{
-}
-
-static inline void xen_unmap_io_section(domid_t dom,
-                                        ioservid_t ioservid,
-                                        MemoryRegionSection *section)
-{
-}
-
-static inline void xen_map_pcidev(domid_t dom,
-                                  ioservid_t ioservid,
-                                  PCIDevice *pci_dev)
-{
-}
-
-static inline void xen_unmap_pcidev(domid_t dom,
-                                    ioservid_t ioservid,
-                                    PCIDevice *pci_dev)
-{
-}
-
-static inline void xen_create_ioreq_server(domid_t dom,
-                                           ioservid_t *ioservid)
-{
-}
-
-static inline void xen_destroy_ioreq_server(domid_t dom,
-                                            ioservid_t ioservid)
-{
-}
-
-static inline int xen_get_ioreq_server_info(domid_t dom,
-                                            ioservid_t ioservid,
-                                            xen_pfn_t *ioreq_pfn,
-                                            xen_pfn_t *bufioreq_pfn,
-                                            evtchn_port_t *bufioreq_evtchn)
-{
-    return xen_get_default_ioreq_server_info(dom, ioreq_pfn,
-                                             bufioreq_pfn,
-                                             bufioreq_evtchn);
-}
-
-static inline int xen_set_ioreq_server_state(domid_t dom,
-                                             ioservid_t ioservid,
-                                             bool enable)
-{
-    return 0;
-}
-
-/* Xen 4.5 */
-#else
 
 static bool use_default_ioreq_server;
 
@@ -566,8 +463,8 @@ static inline void xen_unmap_pcidev(domid_t dom,
                                                   PCI_FUNC(pci_dev->devfn));
 }
 
-static inline void xen_create_ioreq_server(domid_t dom,
-                                           ioservid_t *ioservid)
+static inline int xen_create_ioreq_server(domid_t dom,
+                                          ioservid_t *ioservid)
 {
     int rc = xendevicemodel_create_ioreq_server(xen_dmod, dom,
                                                 HVM_IOREQSRV_BUFIOREQ_ATOMIC,
@@ -575,12 +472,14 @@ static inline void xen_create_ioreq_server(domid_t dom,
 
     if (rc == 0) {
         trace_xen_ioreq_server_create(*ioservid);
-        return;
+        return rc;
     }
 
     *ioservid = 0;
     use_default_ioreq_server = true;
     trace_xen_default_ioreq_server();
+
+    return rc;
 }
 
 static inline void xen_destroy_ioreq_server(domid_t dom,
@@ -624,6 +523,28 @@ static inline int xen_set_ioreq_server_state(domid_t dom,
                                                  enable);
 }
 
+#if CONFIG_XEN_CTRL_INTERFACE_VERSION < 41500
+static inline int xendevicemodel_set_irq_level(xendevicemodel_handle *dmod,
+                                               domid_t domid, uint32_t irq,
+                                               unsigned int level)
+{
+    return -1;
+}
+#endif
+
+#if CONFIG_XEN_CTRL_INTERFACE_VERSION < 41700
+#define GUEST_VIRTIO_MMIO_BASE   xen_mk_ullong(0x02000000)
+#define GUEST_VIRTIO_MMIO_SIZE   xen_mk_ullong(0x00100000)
+#define GUEST_VIRTIO_MMIO_SPI_FIRST   33
+#define GUEST_VIRTIO_MMIO_SPI_LAST    43
+#endif
+
+#if defined(__i386__) || defined(__x86_64__)
+#define GUEST_RAM_BANKS   2
+#define GUEST_RAM0_BASE   0x40000000ULL /* 3GB of low RAM @ 1GB */
+#define GUEST_RAM0_SIZE   0xc0000000ULL
+#define GUEST_RAM1_BASE   0x0200000000ULL /* 1016GB of RAM @ 8GB */
+#define GUEST_RAM1_SIZE   0xfe00000000ULL
 #endif
 
 #endif /* QEMU_HW_XEN_NATIVE_H */

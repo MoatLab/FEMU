@@ -114,13 +114,13 @@ static int nfs_parse_uri(const char *filename, QDict *options, Error **errp)
     qdict_put_str(options, "path", uri->path);
 
     for (i = 0; i < qp->n; i++) {
-        unsigned long long val;
+        uint64_t val;
         if (!qp->p[i].value) {
             error_setg(errp, "Value for NFS parameter expected: %s",
                        qp->p[i].name);
             goto out;
         }
-        if (parse_uint_full(qp->p[i].value, &val, 0)) {
+        if (parse_uint_full(qp->p[i].value, 0, &val)) {
             error_setg(errp, "Illegal value for NFS parameter: %s",
                        qp->p[i].name);
             goto out;
@@ -195,7 +195,6 @@ static void nfs_set_events(NFSClient *client)
     int ev = nfs_which_events(client->context);
     if (ev != client->events) {
         aio_set_fd_handler(client->aio_context, nfs_get_fd(client->context),
-                           false,
                            (ev & POLLIN) ? nfs_process_read : NULL,
                            (ev & POLLOUT) ? nfs_process_write : NULL,
                            NULL, NULL, client);
@@ -373,7 +372,7 @@ static void nfs_detach_aio_context(BlockDriverState *bs)
     NFSClient *client = bs->opaque;
 
     aio_set_fd_handler(client->aio_context, nfs_get_fd(client->context),
-                       false, NULL, NULL, NULL, NULL, NULL);
+                       NULL, NULL, NULL, NULL, NULL);
     client->events = 0;
 }
 
@@ -391,7 +390,7 @@ static void nfs_client_close(NFSClient *client)
     if (client->context) {
         qemu_mutex_lock(&client->mutex);
         aio_set_fd_handler(client->aio_context, nfs_get_fd(client->context),
-                           false, NULL, NULL, NULL, NULL, NULL);
+                           NULL, NULL, NULL, NULL, NULL);
         qemu_mutex_unlock(&client->mutex);
         if (client->fh) {
             nfs_close(client->context, client->fh);
@@ -844,7 +843,7 @@ static void nfs_refresh_filename(BlockDriverState *bs)
     }
 }
 
-static char *nfs_dirname(BlockDriverState *bs, Error **errp)
+static char * GRAPH_RDLOCK nfs_dirname(BlockDriverState *bs, Error **errp)
 {
     NFSClient *client = bs->opaque;
 

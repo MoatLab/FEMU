@@ -32,6 +32,7 @@ unsigned long fw_platform_init(unsigned long arg0, unsigned long arg1,
 
 static struct plic_data plic = {
 	.addr = K210_PLIC_BASE_ADDR,
+	.size = K210_PLIC_BASE_SIZE,
 	.num_src = K210_PLIC_NUM_SOURCES,
 };
 
@@ -52,7 +53,7 @@ static struct aclint_mtimer_data mtimer = {
 	.mtimecmp_size = ACLINT_DEFAULT_MTIMECMP_SIZE,
 	.first_hartid = 0,
 	.hart_count = K210_HART_COUNT,
-	.has_64bit_mmio = TRUE,
+	.has_64bit_mmio = true,
 };
 
 static u32 k210_get_clk_freq(void)
@@ -196,5 +197,7 @@ const struct sbi_platform platform = {
 	.features		= 0,
 	.hart_count		= K210_HART_COUNT,
 	.hart_stack_size	= SBI_PLATFORM_DEFAULT_HART_STACK_SIZE,
+	.heap_size		=
+			SBI_PLATFORM_DEFAULT_HEAP_SIZE(K210_HART_COUNT),
 	.platform_ops_addr	= (unsigned long)&platform_ops
 };

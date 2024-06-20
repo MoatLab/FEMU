@@ -11,8 +11,8 @@ install:
 
   # Root password for the VM. This password will only be necessary for serial
   # console access in case something goes horribly wrong, for all other use
-  # cases, SSH key authentication will be used instead. (Mandatory)
-  root_password:
+  # cases, SSH key authentication will be used instead.
+  root_password: root
 
   # Path to the public SSH key to be installed
   ssh_key: '~/.ssh/id_rsa.pub'
@@ -44,5 +44,5 @@ gitlab:
   # GitLab connection URL
   url: https://gitlab.com
 
-  # GitLab runner registration token. (Mandatory)
-  runner_secret:
+  # GitLab runner registration token.
+  runner_secret: NONE

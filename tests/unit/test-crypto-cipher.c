@@ -382,6 +382,19 @@ static QCryptoCipherTestData test_data[] = {
         .plaintext = "90afe91bb288544f2c32dc239b2635e6",
         .ciphertext = "6cb4561c40bf0a9705931cb6d408e7fa",
     },
+#ifdef CONFIG_CRYPTO_SM4
+    {
+        /* SM4, GB/T 32907-2016, Appendix A.1 */
+        .path = "/crypto/cipher/sm4",
+        .alg = QCRYPTO_CIPHER_ALG_SM4,
+        .mode = QCRYPTO_CIPHER_MODE_ECB,
+        .key = "0123456789abcdeffedcba9876543210",
+        .plaintext  =
+            "0123456789abcdeffedcba9876543210",
+        .ciphertext =
+            "681edf34d206965e86b3e94f536e4246",
+    },
+#endif
     {
         /* #1 32 byte key, 32 byte PTX */
         .path = "/crypto/cipher/aes-xts-128-1",
@@ -663,9 +676,8 @@ static void test_cipher(const void *opaque)
     cipher = qcrypto_cipher_new(
         data->alg, data->mode,
         key, nkey,
-        &err);
+        data->plaintext ? &error_abort : &err);
     if (data->plaintext) {
-        g_assert(err == NULL);
         g_assert(cipher != NULL);
     } else {
         error_free_or_abort(&err);
@@ -809,6 +821,10 @@ int main(int argc, char **argv)
     for (i = 0; i < G_N_ELEMENTS(test_data); i++) {
         if (qcrypto_cipher_supports(test_data[i].alg, test_data[i].mode)) {
             g_test_add_data_func(test_data[i].path, &test_data[i], test_cipher);
+        } else {
+            g_printerr("# skip unsupported %s:%s\n",
+                       QCryptoCipherAlgorithm_str(test_data[i].alg),
+                       QCryptoCipherMode_str(test_data[i].mode));
         }
     }
 

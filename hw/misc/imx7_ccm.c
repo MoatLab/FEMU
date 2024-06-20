@@ -214,7 +214,7 @@ static const VMStateDescription vmstate_imx7_ccm = {
     .name = TYPE_IMX7_CCM,
     .version_id = 1,
     .minimum_version_id = 1,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(ccm, IMX7CCMState, CCM_MAX),
         VMSTATE_END_OF_LIST()
     },
@@ -227,7 +227,7 @@ static uint32_t imx7_ccm_get_clock_frequency(IMXCCMState *dev, IMXClk clock)
      * have fixed frequencies and we can provide requested frequency
      * easily. However for CCM provided clocks (like IPG) each GPT
      * timer can have its own clock root.
-     * This means we need additionnal information when calling this
+     * This means we need additional information when calling this
      * function to know the requester's identity.
      */
     uint32_t freq = 0;
@@ -286,7 +286,7 @@ static const VMStateDescription vmstate_imx7_analog = {
     .name = TYPE_IMX7_ANALOG,
     .version_id = 1,
     .minimum_version_id = 1,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(analog, IMX7AnalogState, ANALOG_MAX),
         VMSTATE_UINT32_ARRAY(pmu,    IMX7AnalogState, PMU_MAX),
         VMSTATE_END_OF_LIST()

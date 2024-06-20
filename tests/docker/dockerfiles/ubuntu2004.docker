@@ -28,12 +28,11 @@ RUN export DEBIAN_FRONTEND=noninteractive && \
                       g++ \
                       gcc \
                       gcovr \
-                      genisoimage \
                       gettext \
                       git \
                       hostname \
                       libaio-dev \
-                      libasan5 \
+                      libasan6 \
                       libasound2-dev \
                       libattr1-dev \
                       libbrlapi-dev \
@@ -100,6 +99,7 @@ RUN export DEBIAN_FRONTEND=noninteractive && \
                       llvm \
                       locales \
                       make \
+                      mtools \
                       multipath-tools \
                       ncat \
                       nettle-dev \
@@ -126,6 +126,7 @@ RUN export DEBIAN_FRONTEND=noninteractive && \
                       tesseract-ocr \
                       tesseract-ocr-eng \
                       xfslibs-dev \
+                      xorriso \
                       zlib1g-dev \
                       zstd && \
     eatmydata apt-get autoremove -y && \
@@ -140,7 +141,9 @@ RUN export DEBIAN_FRONTEND=noninteractive && \
     ln -s /usr/bin/ccache /usr/libexec/ccache-wrappers/g++ && \
     ln -s /usr/bin/ccache /usr/libexec/ccache-wrappers/gcc
 
-RUN /usr/bin/pip3 install meson==0.63.2
+RUN /usr/bin/pip3 install \
+                            meson==0.63.2 \
+                            tomli
 
 ENV CCACHE_WRAPPERSDIR "/usr/libexec/ccache-wrappers"
 ENV LANG "en_US.UTF-8"

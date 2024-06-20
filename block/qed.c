@@ -195,14 +195,15 @@ static bool qed_is_image_size_valid(uint64_t image_size, uint32_t cluster_size,
  *
  * The string is NUL-terminated.
  */
-static int qed_read_string(BdrvChild *file, uint64_t offset, size_t n,
-                           char *buf, size_t buflen)
+static int coroutine_fn GRAPH_RDLOCK
+qed_read_string(BdrvChild *file, uint64_t offset,
+                size_t n, char *buf, size_t buflen)
 {
     int ret;
     if (n >= buflen) {
         return -EINVAL;
     }
-    ret = bdrv_pread(file, offset, n, buf, 0);
+    ret = bdrv_co_pread(file, offset, n, buf, 0);
     if (ret < 0) {
         return ret;
     }
@@ -557,18 +558,20 @@ typedef struct QEDOpenCo {
     int ret;
 } QEDOpenCo;
 
-static void coroutine_fn GRAPH_RDLOCK bdrv_qed_open_entry(void *opaque)
+static void coroutine_fn bdrv_qed_open_entry(void *opaque)
 {
     QEDOpenCo *qoc = opaque;
     BDRVQEDState *s = qoc->bs->opaque;
+
+    GRAPH_RDLOCK_GUARD();
 
     qemu_co_mutex_lock(&s->table_lock);
     qoc->ret = bdrv_qed_do_open(qoc->bs, qoc->options, qoc->flags, qoc->errp);
     qemu_co_mutex_unlock(&s->table_lock);
 }
 
-static int bdrv_qed_open(BlockDriverState *bs, QDict *options, int flags,
-                         Error **errp)
+static int coroutine_mixed_fn bdrv_qed_open(BlockDriverState *bs, QDict *options,
+                                            int flags, Error **errp)
 {
     QEDOpenCo qoc = {
         .bs = bs,
@@ -579,21 +582,17 @@ static int bdrv_qed_open(BlockDriverState *bs, QDict *options, int flags,
     };
     int ret;
 
-    assume_graph_lock(); /* FIXME */
-
     ret = bdrv_open_file_child(NULL, options, "file", bs, errp);
     if (ret < 0) {
         return ret;
     }
 
     bdrv_qed_init_state(bs);
-    if (qemu_in_coroutine()) {
-        bdrv_qed_open_entry(&qoc);
-    } else {
-        assert(qemu_get_current_aio_context() == qemu_get_aio_context());
-        qemu_coroutine_enter(qemu_coroutine_create(bdrv_qed_open_entry, &qoc));
-        BDRV_POLL_WHILE(bs, qoc.ret == -EINPROGRESS);
-    }
+    assert(!qemu_in_coroutine());
+    assert(qemu_get_current_aio_context() == qemu_get_aio_context());
+    qemu_coroutine_enter(qemu_coroutine_create(bdrv_qed_open_entry, &qoc));
+    BDRV_POLL_WHILE(bs, qoc.ret == -EINPROGRESS);
+
     return qoc.ret;
 }
 
@@ -613,7 +612,7 @@ static int bdrv_qed_reopen_prepare(BDRVReopenState *state,
     return 0;
 }
 
-static void bdrv_qed_close(BlockDriverState *bs)
+static void GRAPH_RDLOCK bdrv_qed_do_close(BlockDriverState *bs)
 {
     BDRVQEDState *s = bs->opaque;
 
@@ -632,8 +631,16 @@ static void bdrv_qed_close(BlockDriverState *bs)
     qemu_vfree(s->l1_table);
 }
 
-static int coroutine_fn bdrv_qed_co_create(BlockdevCreateOptions *opts,
-                                           Error **errp)
+static void GRAPH_UNLOCKED bdrv_qed_close(BlockDriverState *bs)
+{
+    GLOBAL_STATE_CODE();
+    GRAPH_RDLOCK_GUARD_MAINLOOP();
+
+    bdrv_qed_do_close(bs);
+}
+
+static int coroutine_fn GRAPH_UNLOCKED
+bdrv_qed_co_create(BlockdevCreateOptions *opts, Error **errp)
 {
     BlockdevCreateOptionsQed *qed_opts;
     BlockBackend *blk = NULL;
@@ -748,12 +755,12 @@ static int coroutine_fn bdrv_qed_co_create(BlockdevCreateOptions *opts,
     ret = 0; /* success */
 out:
     g_free(l1_table);
-    blk_unref(blk);
-    bdrv_unref(bs);
+    blk_co_unref(blk);
+    bdrv_co_unref(bs);
     return ret;
 }
 
-static int coroutine_fn GRAPH_RDLOCK
+static int coroutine_fn GRAPH_UNLOCKED
 bdrv_qed_co_create_opts(BlockDriver *drv, const char *filename,
                         QemuOpts *opts, Error **errp)
 {
@@ -819,7 +826,7 @@ bdrv_qed_co_create_opts(BlockDriver *drv, const char *filename,
 
 fail:
     qobject_unref(qdict);
-    bdrv_unref(bs);
+    bdrv_co_unref(bs);
     qapi_free_BlockdevCreateOptions(create_options);
     return ret;
 }
@@ -884,7 +891,7 @@ static int coroutine_fn GRAPH_RDLOCK
 qed_read_backing_file(BDRVQEDState *s, uint64_t pos, QEMUIOVector *qiov)
 {
     if (s->bs->backing) {
-        BLKDBG_EVENT(s->bs->file, BLKDBG_READ_BACKING_AIO);
+        BLKDBG_CO_EVENT(s->bs->file, BLKDBG_READ_BACKING_AIO);
         return bdrv_co_preadv(s->bs->backing, pos, qiov->size, qiov, 0);
     }
     qemu_iovec_memset(qiov, 0, 0, qiov->size);
@@ -919,7 +926,7 @@ qed_copy_from_backing_file(BDRVQEDState *s, uint64_t pos, uint64_t len,
         goto out;
     }
 
-    BLKDBG_EVENT(s->bs->file, BLKDBG_COW_WRITE);
+    BLKDBG_CO_EVENT(s->bs->file, BLKDBG_COW_WRITE);
     ret = bdrv_co_pwritev(s->bs->file, offset, qiov.size, &qiov, 0);
     if (ret < 0) {
         goto out;
@@ -1071,7 +1078,7 @@ static int coroutine_fn GRAPH_RDLOCK qed_aio_write_main(QEDAIOCB *acb)
 
     trace_qed_aio_write_main(s, acb, 0, offset, acb->cur_qiov.size);
 
-    BLKDBG_EVENT(s->bs->file, BLKDBG_WRITE_AIO);
+    BLKDBG_CO_EVENT(s->bs->file, BLKDBG_WRITE_AIO);
     return bdrv_co_pwritev(s->bs->file, offset, acb->cur_qiov.size,
                            &acb->cur_qiov, 0);
 }
@@ -1139,7 +1146,7 @@ out:
 /**
  * Check if the QED_F_NEED_CHECK bit should be set during allocating write
  */
-static bool qed_should_set_need_check(BDRVQEDState *s)
+static bool GRAPH_RDLOCK qed_should_set_need_check(BDRVQEDState *s)
 {
     /* The flush before L2 update path ensures consistency */
     if (s->bs->backing) {
@@ -1325,7 +1332,7 @@ qed_aio_read_data(void *opaque, int ret, uint64_t offset, size_t len)
     } else if (ret != QED_CLUSTER_FOUND) {
         r = qed_read_backing_file(s, acb->cur_pos, &acb->cur_qiov);
     } else {
-        BLKDBG_EVENT(bs->file, BLKDBG_READ_AIO);
+        BLKDBG_CO_EVENT(bs->file, BLKDBG_READ_AIO);
         r = bdrv_co_preadv(bs->file, offset, acb->cur_qiov.size,
                            &acb->cur_qiov, 0);
     }
@@ -1444,12 +1451,10 @@ bdrv_qed_co_pwrite_zeroes(BlockDriverState *bs, int64_t offset, int64_t bytes,
                           QED_AIOCB_WRITE | QED_AIOCB_ZERO);
 }
 
-static int coroutine_fn bdrv_qed_co_truncate(BlockDriverState *bs,
-                                             int64_t offset,
-                                             bool exact,
-                                             PreallocMode prealloc,
-                                             BdrvRequestFlags flags,
-                                             Error **errp)
+static int coroutine_fn GRAPH_RDLOCK
+bdrv_qed_co_truncate(BlockDriverState *bs, int64_t offset, bool exact,
+                     PreallocMode prealloc, BdrvRequestFlags flags,
+                     Error **errp)
 {
     BDRVQEDState *s = bs->opaque;
     uint64_t old_image_size;
@@ -1499,9 +1504,9 @@ bdrv_qed_co_get_info(BlockDriverState *bs, BlockDriverInfo *bdi)
     return 0;
 }
 
-static int bdrv_qed_change_backing_file(BlockDriverState *bs,
-                                        const char *backing_file,
-                                        const char *backing_fmt)
+static int coroutine_fn GRAPH_RDLOCK
+bdrv_qed_co_change_backing_file(BlockDriverState *bs, const char *backing_file,
+                                const char *backing_fmt)
 {
     BDRVQEDState *s = bs->opaque;
     QEDHeader new_header, le_header;
@@ -1563,7 +1568,7 @@ static int bdrv_qed_change_backing_file(BlockDriverState *bs,
     }
 
     /* Write new header */
-    ret = bdrv_pwrite_sync(bs->file, 0, buffer_len, buffer, 0);
+    ret = bdrv_co_pwrite_sync(bs->file, 0, buffer_len, buffer, 0);
     g_free(buffer);
     if (ret == 0) {
         memcpy(&s->header, &new_header, sizeof(new_header));
@@ -1574,10 +1579,11 @@ static int bdrv_qed_change_backing_file(BlockDriverState *bs,
 static void coroutine_fn GRAPH_RDLOCK
 bdrv_qed_co_invalidate_cache(BlockDriverState *bs, Error **errp)
 {
+    ERRP_GUARD();
     BDRVQEDState *s = bs->opaque;
     int ret;
 
-    bdrv_qed_close(bs);
+    bdrv_qed_do_close(bs);
 
     bdrv_qed_init_state(bs);
     qemu_co_mutex_lock(&s->table_lock);
@@ -1637,34 +1643,34 @@ static QemuOptsList qed_create_opts = {
 };
 
 static BlockDriver bdrv_qed = {
-    .format_name              = "qed",
-    .instance_size            = sizeof(BDRVQEDState),
-    .create_opts              = &qed_create_opts,
-    .is_format                = true,
-    .supports_backing         = true,
+    .format_name                    = "qed",
+    .instance_size                  = sizeof(BDRVQEDState),
+    .create_opts                    = &qed_create_opts,
+    .is_format                      = true,
+    .supports_backing               = true,
 
-    .bdrv_probe               = bdrv_qed_probe,
-    .bdrv_open                = bdrv_qed_open,
-    .bdrv_close               = bdrv_qed_close,
-    .bdrv_reopen_prepare      = bdrv_qed_reopen_prepare,
-    .bdrv_child_perm          = bdrv_default_perms,
-    .bdrv_co_create           = bdrv_qed_co_create,
-    .bdrv_co_create_opts      = bdrv_qed_co_create_opts,
-    .bdrv_has_zero_init       = bdrv_has_zero_init_1,
-    .bdrv_co_block_status     = bdrv_qed_co_block_status,
-    .bdrv_co_readv            = bdrv_qed_co_readv,
-    .bdrv_co_writev           = bdrv_qed_co_writev,
-    .bdrv_co_pwrite_zeroes    = bdrv_qed_co_pwrite_zeroes,
-    .bdrv_co_truncate         = bdrv_qed_co_truncate,
-    .bdrv_co_getlength        = bdrv_qed_co_getlength,
-    .bdrv_co_get_info         = bdrv_qed_co_get_info,
-    .bdrv_refresh_limits      = bdrv_qed_refresh_limits,
-    .bdrv_change_backing_file = bdrv_qed_change_backing_file,
-    .bdrv_co_invalidate_cache = bdrv_qed_co_invalidate_cache,
-    .bdrv_co_check            = bdrv_qed_co_check,
-    .bdrv_detach_aio_context  = bdrv_qed_detach_aio_context,
-    .bdrv_attach_aio_context  = bdrv_qed_attach_aio_context,
-    .bdrv_drain_begin         = bdrv_qed_drain_begin,
+    .bdrv_probe                     = bdrv_qed_probe,
+    .bdrv_open                      = bdrv_qed_open,
+    .bdrv_close                     = bdrv_qed_close,
+    .bdrv_reopen_prepare            = bdrv_qed_reopen_prepare,
+    .bdrv_child_perm                = bdrv_default_perms,
+    .bdrv_co_create                 = bdrv_qed_co_create,
+    .bdrv_co_create_opts            = bdrv_qed_co_create_opts,
+    .bdrv_has_zero_init             = bdrv_has_zero_init_1,
+    .bdrv_co_block_status           = bdrv_qed_co_block_status,
+    .bdrv_co_readv                  = bdrv_qed_co_readv,
+    .bdrv_co_writev                 = bdrv_qed_co_writev,
+    .bdrv_co_pwrite_zeroes          = bdrv_qed_co_pwrite_zeroes,
+    .bdrv_co_truncate               = bdrv_qed_co_truncate,
+    .bdrv_co_getlength              = bdrv_qed_co_getlength,
+    .bdrv_co_get_info               = bdrv_qed_co_get_info,
+    .bdrv_refresh_limits            = bdrv_qed_refresh_limits,
+    .bdrv_co_change_backing_file    = bdrv_qed_co_change_backing_file,
+    .bdrv_co_invalidate_cache       = bdrv_qed_co_invalidate_cache,
+    .bdrv_co_check                  = bdrv_qed_co_check,
+    .bdrv_detach_aio_context        = bdrv_qed_detach_aio_context,
+    .bdrv_attach_aio_context        = bdrv_qed_attach_aio_context,
+    .bdrv_drain_begin               = bdrv_qed_drain_begin,
 };
 
 static void bdrv_qed_init(void)

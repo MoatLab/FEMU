@@ -8,6 +8,7 @@
 #include "qemu/osdep.h"
 #include "cpu.h"
 #include "internals.h"
+#include "cpu-features.h"
 #include "exec/exec-all.h"
 #include "exec/helper-proto.h"
 
@@ -24,16 +25,17 @@ bool arm_s1_regime_using_lpae_format(CPUARMState *env, ARMMMUIdx mmu_idx)
 }
 
 static inline uint32_t merge_syn_data_abort(uint32_t template_syn,
+                                            ARMMMUFaultInfo *fi,
                                             unsigned int target_el,
-                                            bool same_el, bool ea,
-                                            bool s1ptw, bool is_write,
+                                            bool same_el, bool is_write,
                                             int fsc)
 {
     uint32_t syn;
 
     /*
-     * ISV is only set for data aborts routed to EL2 and
-     * never for stage-1 page table walks faulting on stage 2.
+     * ISV is only set for stage-2 data aborts routed to EL2 and
+     * never for stage-1 page table walks faulting on stage 2
+     * or for stage-1 faults.
      *
      * Furthermore, ISV is only set for certain kinds of load/stores.
      * If the template syndrome does not have ISV set, we should leave
@@ -42,10 +44,24 @@ static inline uint32_t merge_syn_data_abort(uint32_t template_syn,
      * See ARMv8 specs, D7-1974:
      * ISS encoding for an exception from a Data Abort, the
      * ISV field.
+     *
+     * TODO: FEAT_LS64/FEAT_LS64_V/FEAT_SL64_ACCDATA: Translation,
+     * Access Flag, and Permission faults caused by LD64B, ST64B,
+     * ST64BV, or ST64BV0 insns report syndrome info even for stage-1
+     * faults and regardless of the target EL.
      */
-    if (!(template_syn & ARM_EL_ISV) || target_el != 2 || s1ptw) {
+    if (template_syn & ARM_EL_VNCR) {
+        /*
+         * FEAT_NV2 faults on accesses via VNCR_EL2 are a special case:
+         * they are always reported as "same EL", even though we are going
+         * from EL1 to EL2.
+         */
+        assert(!fi->stage2);
+        syn = syn_data_abort_vncr(fi->ea, is_write, fsc);
+    } else if (!(template_syn & ARM_EL_ISV) || target_el != 2
+        || fi->s1ptw || !fi->stage2) {
         syn = syn_data_abort_no_iss(same_el, 0,
-                                    ea, 0, s1ptw, is_write, fsc);
+                                    fi->ea, 0, fi->s1ptw, is_write, fsc);
     } else {
         /*
          * Fields: IL, ISV, SAS, SSE, SRT, SF and AR come from the template
@@ -54,7 +70,7 @@ static inline uint32_t merge_syn_data_abort(uint32_t template_syn,
          */
         syn = syn_data_abort_with_iss(same_el,
                                       0, 0, 0, 0, 0,
-                                      ea, 0, s1ptw, is_write, fsc,
+                                      fi->ea, 0, fi->s1ptw, is_write, fsc,
                                       true);
         /* Merge the runtime syndrome with the template syndrome.  */
         syn |= template_syn;
@@ -68,8 +84,17 @@ static uint32_t compute_fsr_fsc(CPUARMState *env, ARMMMUFaultInfo *fi,
     ARMMMUIdx arm_mmu_idx = core_to_arm_mmu_idx(env, mmu_idx);
     uint32_t fsr, fsc;
 
-    if (target_el == 2 || arm_el_is_aa64(env, target_el) ||
-        arm_s1_regime_using_lpae_format(env, arm_mmu_idx)) {
+    /*
+     * For M-profile there is no guest-facing FSR. We compute a
+     * short-form value for env->exception.fsr which we will then
+     * examine in arm_v7m_cpu_do_interrupt(). In theory we could
+     * use the LPAE format instead as long as both bits of code agree
+     * (and arm_fi_to_lfsc() handled the M-profile specific
+     * ARMFault_QEMU_NSCExec and ARMFault_QEMU_SFault cases).
+     */
+    if (!arm_feature(env, ARM_FEATURE_M) &&
+        (target_el == 2 || arm_el_is_aa64(env, target_el) ||
+         arm_s1_regime_using_lpae_format(env, arm_mmu_idx))) {
         /*
          * LPAE format fault status register : bottom 6 bits are
          * status code in the same form as needed for syndrome
@@ -91,17 +116,121 @@ static uint32_t compute_fsr_fsc(CPUARMState *env, ARMMMUFaultInfo *fi,
     return fsr;
 }
 
+static bool report_as_gpc_exception(ARMCPU *cpu, int current_el,
+                                    ARMMMUFaultInfo *fi)
+{
+    bool ret;
+
+    switch (fi->gpcf) {
+    case GPCF_None:
+        return false;
+    case GPCF_AddressSize:
+    case GPCF_Walk:
+    case GPCF_EABT:
+        /* R_PYTGX: GPT faults are reported as GPC. */
+        ret = true;
+        break;
+    case GPCF_Fail:
+        /*
+         * R_BLYPM: A GPF at EL3 is reported as insn or data abort.
+         * R_VBZMW, R_LXHQR: A GPF at EL[0-2] is reported as a GPC
+         * if SCR_EL3.GPF is set, otherwise an insn or data abort.
+         */
+        ret = (cpu->env.cp15.scr_el3 & SCR_GPF) && current_el != 3;
+        break;
+    default:
+        g_assert_not_reached();
+    }
+
+    assert(cpu_isar_feature(aa64_rme, cpu));
+    assert(fi->type == ARMFault_GPCFOnWalk ||
+           fi->type == ARMFault_GPCFOnOutput);
+    if (fi->gpcf == GPCF_AddressSize) {
+        assert(fi->level == 0);
+    } else {
+        assert(fi->level >= 0 && fi->level <= 1);
+    }
+
+    return ret;
+}
+
+static unsigned encode_gpcsc(ARMMMUFaultInfo *fi)
+{
+    static uint8_t const gpcsc[] = {
+        [GPCF_AddressSize] = 0b000000,
+        [GPCF_Walk]        = 0b000100,
+        [GPCF_Fail]        = 0b001100,
+        [GPCF_EABT]        = 0b010100,
+    };
+
+    /* Note that we've validated fi->gpcf and fi->level above. */
+    return gpcsc[fi->gpcf] | fi->level;
+}
+
 static G_NORETURN
 void arm_deliver_fault(ARMCPU *cpu, vaddr addr,
                        MMUAccessType access_type,
                        int mmu_idx, ARMMMUFaultInfo *fi)
 {
     CPUARMState *env = &cpu->env;
-    int target_el;
+    int target_el = exception_target_el(env);
+    int current_el = arm_current_el(env);
     bool same_el;
     uint32_t syn, exc, fsr, fsc;
+    /*
+     * We know this must be a data or insn abort, and that
+     * env->exception.syndrome contains the template syndrome set
+     * up at translate time. So we can check only the VNCR bit
+     * (and indeed syndrome does not have the EC field in it,
+     * because we masked that out in disas_set_insn_syndrome())
+     */
+    bool is_vncr = (access_type != MMU_INST_FETCH) &&
+        (env->exception.syndrome & ARM_EL_VNCR);
 
-    target_el = exception_target_el(env);
+    if (is_vncr) {
+        /* FEAT_NV2 faults on accesses via VNCR_EL2 go to EL2 */
+        target_el = 2;
+    }
+
+    if (report_as_gpc_exception(cpu, current_el, fi)) {
+        target_el = 3;
+
+        fsr = compute_fsr_fsc(env, fi, target_el, mmu_idx, &fsc);
+
+        syn = syn_gpc(fi->stage2 && fi->type == ARMFault_GPCFOnWalk,
+                      access_type == MMU_INST_FETCH,
+                      encode_gpcsc(fi), is_vncr,
+                      0, fi->s1ptw,
+                      access_type == MMU_DATA_STORE, fsc);
+
+        env->cp15.mfar_el3 = fi->paddr;
+        switch (fi->paddr_space) {
+        case ARMSS_Secure:
+            break;
+        case ARMSS_NonSecure:
+            env->cp15.mfar_el3 |= R_MFAR_NS_MASK;
+            break;
+        case ARMSS_Root:
+            env->cp15.mfar_el3 |= R_MFAR_NSE_MASK;
+            break;
+        case ARMSS_Realm:
+            env->cp15.mfar_el3 |= R_MFAR_NSE_MASK | R_MFAR_NS_MASK;
+            break;
+        default:
+            g_assert_not_reached();
+        }
+
+        exc = EXCP_GPC;
+        goto do_raise;
+    }
+
+    /* If SCR_EL3.GPF is unset, GPF may still be routed to EL2. */
+    if (fi->gpcf == GPCF_Fail && target_el < 2) {
+        if (arm_hcr_el2_eff(env) & HCR_GPF) {
+            target_el = 2;
+        }
+    }
+
     if (fi->stage2) {
         target_el = 2;
         env->cp15.hpfar_el2 = extract64(fi->s2addr, 12, 47) << 4;
@@ -109,17 +238,16 @@ void arm_deliver_fault(ARMCPU *cpu, vaddr addr,
             env->cp15.hpfar_el2 |= HPFAR_NS;
         }
     }
-    same_el = (arm_current_el(env) == target_el);
 
+    same_el = current_el == target_el;
     fsr = compute_fsr_fsc(env, fi, target_el, mmu_idx, &fsc);
 
     if (access_type == MMU_INST_FETCH) {
         syn = syn_insn_abort(same_el, fi->ea, fi->s1ptw, fsc);
         exc = EXCP_PREFETCH_ABORT;
     } else {
-        syn = merge_syn_data_abort(env->exception.syndrome, target_el,
-                                   same_el, fi->ea, fi->s1ptw,
-                                   access_type == MMU_DATA_STORE,
+        syn = merge_syn_data_abort(env->exception.syndrome, fi, target_el,
+                                   same_el, access_type == MMU_DATA_STORE,
                                    fsc);
         if (access_type == MMU_DATA_STORE
             && arm_feature(env, ARM_FEATURE_V6)) {
@@ -128,6 +256,7 @@ void arm_deliver_fault(ARMCPU *cpu, vaddr addr,
         exc = EXCP_DATA_ABORT;
     }
 
+ do_raise:
     env->exception.vaddress = addr;
     env->exception.fsr = fsr;
     raise_exception(env, exc, syn, target_el);
@@ -152,7 +281,7 @@ void helper_exception_pc_alignment(CPUARMState *env, target_ulong pc)
 {
     ARMMMUFaultInfo fi = { .type = ARMFault_Alignment };
     int target_el = exception_target_el(env);
-    int mmu_idx = cpu_mmu_index(env, true);
+    int mmu_idx = arm_env_mmu_index(env);
     uint32_t fsc;
 
     env->exception.vaddress = pc;
@@ -229,8 +358,8 @@ bool arm_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
             address &= TARGET_PAGE_MASK;
         }
 
-        res.f.pte_attrs = res.cacheattrs.attrs;
-        res.f.shareability = res.cacheattrs.shareability;
+        res.f.extra.arm.pte_attrs = res.cacheattrs.attrs;
+        res.f.extra.arm.shareability = res.cacheattrs.shareability;
 
         tlb_set_page_full(cs, mmu_idx, address, &res.f);
         return true;

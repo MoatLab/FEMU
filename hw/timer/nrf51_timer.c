@@ -45,7 +45,12 @@ static uint32_t update_counter(NRF51TimerState *s, int64_t now)
     uint32_t ticks = ns_to_ticks(s, now - s->update_counter_ns);
 
     s->counter = (s->counter + ticks) % BIT(bitwidths[s->bitmode]);
-    s->update_counter_ns = now;
+    /*
+     * Only advance the sync time to the timestamp of the last tick,
+     * not all the way to 'now', so we don't lose time if we do
+     * multiple resyncs in a single tick.
+     */
+    s->update_counter_ns += ticks_to_ns(s, ticks);
     return ticks;
 }
 
@@ -356,7 +361,7 @@ static const VMStateDescription vmstate_nrf51_timer = {
     .name = TYPE_NRF51_TIMER,
     .version_id = 1,
     .post_load = nrf51_timer_post_load,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_TIMER(timer, NRF51TimerState),
         VMSTATE_INT64(timer_start_ns, NRF51TimerState),
         VMSTATE_INT64(update_counter_ns, NRF51TimerState),

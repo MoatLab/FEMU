@@ -31,7 +31,7 @@ struct sbi_dlist _lname = SBI_LIST_HEAD_INIT(_lname)
 #define SBI_INIT_LIST_HEAD(ptr)	\
 do { \
 	(ptr)->next = ptr; (ptr)->prev = ptr; \
-} while (0);
+} while (0)
 
 static inline void __sbi_list_add(struct sbi_dlist *new,
 				  struct sbi_dlist *prev,
@@ -47,7 +47,7 @@ static inline void __sbi_list_add(struct sbi_dlist *new,
  * Checks if the list is empty or not.
  * @param head List head
  *
- * Retruns TRUE if list is empty, FALSE otherwise.
+ * Returns true if list is empty, false otherwise.
  */
 static inline bool sbi_list_empty(struct sbi_dlist *head)
 {

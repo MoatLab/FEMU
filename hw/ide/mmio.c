@@ -30,8 +30,8 @@
 #include "sysemu/dma.h"
 
 #include "hw/ide/mmio.h"
-#include "hw/ide/internal.h"
 #include "hw/qdev-properties.h"
+#include "ide-internal.h"
 
 /***********************************************************/
 /* MMIO based ide port
@@ -110,7 +110,7 @@ static const VMStateDescription vmstate_ide_mmio = {
     .name = "mmio-ide",
     .version_id = 3,
     .minimum_version_id = 0,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_IDE_BUS(bus, MMIOIDEState),
         VMSTATE_IDE_DRIVES(bus.ifs, MMIOIDEState),
         VMSTATE_END_OF_LIST()

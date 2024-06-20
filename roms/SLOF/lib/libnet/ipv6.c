@@ -289,7 +289,7 @@ void *ip6_prefix2addr(ip6_addr_t prefix)
 }
 
 /**
- * NET: add new IPv6 adress to list
+ * NET: add new IPv6 address to list
  *
  * @param   ip6_addr *new_address
  * @return  0 - passed pointer = NULL;
@@ -309,7 +309,7 @@ int8_t ip6addr_add(struct ip6addr_list_entry *new_address)
 
 	/* If address is a unicast address, we also have to process packets
 	 * for its solicited-node multicast address.
-	 * See RFC 2373 - IP Version 6 Adressing Architecture */
+	 * See RFC 2373 - IP Version 6 Addressing Architecture */
 	if (! ip6_is_multicast(&(new_address->addr))) {
 		solicited_node = malloc(sizeof(struct ip6addr_list_entry));
 		if (! solicited_node)
@@ -371,7 +371,7 @@ static void ipv6_init(int fd)
 }
 
 /**
- * NET: compare IPv6 adresses
+ * NET: compare IPv6 addresses
  *
  * @param  ip6_addr ip_1
  * @param  ip6_addr ip_2
@@ -441,10 +441,9 @@ static unsigned short ip6_checksum(struct ip6hdr *ip6h, unsigned char *packet,
 {
 	int i;
 	unsigned long checksum;
-	const int ip6size = sizeof(struct ip6hdr)/sizeof(unsigned short);
 	union {
 		struct ip6hdr ip6h;
-		unsigned short raw[ip6size];
+		uint16_t raw[sizeof(struct ip6hdr) / sizeof(uint16_t)];
 	} pseudo;
 
 	memcpy (&pseudo.ip6h, ip6h, sizeof(struct ip6hdr));
@@ -455,7 +454,7 @@ static unsigned short ip6_checksum(struct ip6hdr *ip6h, unsigned char *packet,
 	for (checksum = 0, i = 0; i < bytes; i += 2)
 		checksum += (packet[i] << 8) | packet[i + 1];
 
-	for (i = 0; i < ip6size; i++)
+	for (i = 0; i < (int)(sizeof(pseudo.raw) / sizeof(pseudo.raw[0])); i++)
 		checksum += pseudo.raw[i];
 
 	checksum = (checksum >> 16) + (checksum & 0xffff);
@@ -470,7 +469,7 @@ static unsigned short ip6_checksum(struct ip6hdr *ip6h, unsigned char *packet,
  * @param fd          socket fd
  * @param ip6_packet  Pointer to IPv6 header in packet
  * @param packetsize  Size of IPv6 packet
- * @return -1 : Some error occured
+ * @return -1 : Some error occurred
  *          0 : packet stored (NDP request sent - packet will be sent if
  *                             NDP response is received)
  *         >0 : packet sent   (number of transmitted bytes is returned)

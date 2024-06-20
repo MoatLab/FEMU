@@ -54,7 +54,7 @@ allocate_pmm(u32 size, int highmem, int aligned)
         if (checksum_far(SEG_BIOS, pmm, GET_FARVAR(SEG_BIOS, pmm->length)))
             continue;
         struct segoff_s entry = GET_FARVAR(SEG_BIOS, pmm->entry);
-        dprintf(1, "Attempting to allocate %u bytes %s via pmm call to %04x:%04x\n"
+        dprintf(1, "Attempting to allocate %u bytes %s via pmm call to %04x:%04lx\n"
                 , size, highmem ? "highmem" : "lowmem"
                 , entry.seg, entry.offset);
         u16 res1, res2;

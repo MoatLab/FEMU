@@ -65,7 +65,7 @@ native:
 - libapparmor-dev
 - libarchive-dev
 - libarchive-tar-perl
-- libasan5
+- libasan6
 - libasound2-dev
 - libattr1-dev
 - libaudit-dev
@@ -205,6 +205,7 @@ native:
 - lvm2
 - make
 - mount
+- mtools
 - multipath-tools
 - nano
 - nbd-client
@@ -220,8 +221,9 @@ native:
 - ocaml-findlib
 - ocaml-nox
 - open-iscsi
-- openjdk-11-jdk-headless
+- openjdk-17-jdk-headless
 - openssh-client
+- original-awk
 - osinfo-db-tools
 - perl
 - perl-base
@@ -280,10 +282,13 @@ native:
 - wget
 - wireshark-dev
 - xfslibs-dev
+- xorriso
 - xsltproc
 - xz-utils
 - zip
 - zlib1g-dev
 - zstd
 pypi:
+- build
 - meson==0.56.0
+- tomli

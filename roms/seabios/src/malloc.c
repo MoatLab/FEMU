@@ -460,10 +460,10 @@ malloc_csm_preinit(u32 low_pmm, u32 low_pmm_size, u32 hi_pmm, u32 hi_pmm_size)
 {
     ASSERT32FLAT();
 
-    if (hi_pmm_size > BUILD_MAX_HIGHTABLE) {
+    if (hi_pmm_size > BUILD_MIN_HIGHTABLE) {
         u32 hi_pmm_end = hi_pmm + hi_pmm_size;
-        alloc_add(&ZoneTmpHigh, hi_pmm, hi_pmm_end - BUILD_MAX_HIGHTABLE);
-        alloc_add(&ZoneHigh, hi_pmm_end - BUILD_MAX_HIGHTABLE, hi_pmm_end);
+        alloc_add(&ZoneTmpHigh, hi_pmm, hi_pmm_end - BUILD_MIN_HIGHTABLE);
+        alloc_add(&ZoneHigh, hi_pmm_end - BUILD_MIN_HIGHTABLE, hi_pmm_end);
     } else {
         alloc_add(&ZoneTmpHigh, hi_pmm, hi_pmm + hi_pmm_size);
     }

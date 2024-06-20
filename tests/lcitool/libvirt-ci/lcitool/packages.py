@@ -180,8 +180,7 @@ class NativePackage(Package):
                  pkg_mapping,
                  base_keys,
                  target):
-        native_arch = util.get_native_arch()
-        native_keys = [native_arch + "-" + k for k in base_keys] + base_keys
+        native_keys = [target.native_arch + "-" + k for k in base_keys] + base_keys
         super().__init__(mappings, pkg_mapping, native_keys, target)
 
 

@@ -16,8 +16,8 @@ void malloc_preinit(void);
 extern u32 LegacyRamSize;
 void malloc_init(void);
 void malloc_prepboot(void);
-unsigned long malloc_palloc(struct zone_s *zone, u32 size, u32 align);
-void *parisc_malloc(u32 size, u32 align);
+unsigned long malloc_palloc(struct zone_s *zone, u32 size, unsigned long align);
+void *parisc_malloc(u32 size, unsigned long align);
 void *x86_malloc(struct zone_s *zone, u32 size, u32 align);
 #define _malloc(zone, size, align) \
     (CONFIG_X86 ? x86_malloc(zone, size, align) : parisc_malloc(size, align))

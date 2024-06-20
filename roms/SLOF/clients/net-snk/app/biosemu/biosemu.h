@@ -23,7 +23,7 @@
 #define VBE_SEGMENT 0x3000
 
 #define PMM_CONV_SEGMENT 0x4000	// 4000:xxxx is PMM conventional memory area, extended memory area
-				// will be anything beyound MIN_REQUIRED_MEMORY_SIZE
+				// will be anything beyond MIN_REQUIRED_MEMORY_SIZE
 #define PNP_DATA_SEGMENT 0x5000
 
 #define OPTION_ROM_CODE_SEGMENT 0xc000

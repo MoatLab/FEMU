@@ -107,7 +107,13 @@ parisc: FORCE
 ifneq "$(CONFIG_PARISC)" "y"
 	@echo "ERROR: run 'make config' and select PA-RISC before building the parisc target."
 endif
-	DIRS="" $(MAKE) -f Makefile.parisc all
+	  DIRS="" OUT=out/    BITS=32 BIT_SUFFIX=""   CROSS_PREFIX=hppa-linux-gnu-    $(MAKE) -f Makefile.parisc all
+	  DIRS="" OUT=out-64/ BITS=64 BIT_SUFFIX="64" CROSS_PREFIX=hppa64-linux-gnu-  $(MAKE) -f Makefile.parisc all
+
+# Install parisc firmware into qemu pc-bios directory
+parisc-qemu-install: parisc
+	hppa-linux-gnu-objcopy   -S out/hppa-firmware.img       ../../pc-bios/hppa-firmware.img
+	hppa64-linux-gnu-objcopy -S out-64/hppa-firmware64.img  ../../pc-bios/hppa-firmware64.img
 
 # Make definitions
 .PHONY : all clean distclean parisc FORCE

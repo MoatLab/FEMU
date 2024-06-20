@@ -124,6 +124,8 @@ static uint16_t oc20_advance_wp(FemuCtrl *n, NvmeNamespace *ns, uint64_t lba,
     return NVME_SUCCESS;
 }
 
+#define max_sec_per_rq (64)
+
 /*
  * Given the LBA list within a command, get the statistics about the access
  * frequency to different NAND flash pages, this helps us later decide how much
@@ -139,7 +141,6 @@ static void oc20_parse_lba_list(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     Oc20Namespace *lns = ns->state;
     Oc20AddrF *addrf = &lns->lbaf;
     uint16_t nlb  = le16_to_cpu(ocrw->nlb) + 1;
-    int max_sec_per_rq = 64;
     uint64_t cur_pg_addr, prev_pg_addr = ~(0ULL);
     int secs_idx = -1;
     uint64_t lba;
@@ -178,7 +179,6 @@ static int oc20_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     int64_t io_done_ts = 0;
     int64_t total_time_need_to_emulate = 0;
     int64_t cur_time_need_to_emulate;
-    int max_sec_per_rq = 64;
     int num_ch = lns->id_ctrl.geo.num_chk;
     int num_lun = lns->id_ctrl.geo.num_lun;
     Oc20AddrF *addrf = &lns->lbaf;

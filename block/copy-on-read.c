@@ -35,8 +35,8 @@ typedef struct BDRVStateCOR {
 } BDRVStateCOR;
 
 
-static int cor_open(BlockDriverState *bs, QDict *options, int flags,
-                    Error **errp)
+static int GRAPH_UNLOCKED
+cor_open(BlockDriverState *bs, QDict *options, int flags, Error **errp)
 {
     BlockDriverState *bottom_bs = NULL;
     BDRVStateCOR *state = bs->opaque;
@@ -44,10 +44,14 @@ static int cor_open(BlockDriverState *bs, QDict *options, int flags,
     const char *bottom_node = qdict_get_try_str(options, "bottom");
     int ret;
 
+    GLOBAL_STATE_CODE();
+
     ret = bdrv_open_file_child(NULL, options, "file", bs, errp);
     if (ret < 0) {
         return ret;
     }
+
+    GRAPH_RDLOCK_GUARD_MAINLOOP();
 
     bs->supported_read_flags = BDRV_REQ_PREFETCH;
 
@@ -146,11 +150,11 @@ cor_co_preadv_part(BlockDriverState *bs, int64_t offset, int64_t bytes,
         local_flags = flags;
 
         /* In case of failure, try to copy-on-read anyway */
-        ret = bdrv_is_allocated(bs->file->bs, offset, bytes, &n);
+        ret = bdrv_co_is_allocated(bs->file->bs, offset, bytes, &n);
         if (ret <= 0) {
-            ret = bdrv_is_allocated_above(bdrv_backing_chain_next(bs->file->bs),
-                                          state->bottom_bs, true, offset,
-                                          n, &n);
+            ret = bdrv_co_is_allocated_above(bdrv_backing_chain_next(bs->file->bs),
+                                             state->bottom_bs, true, offset,
+                                             n, &n);
             if (ret > 0 || ret < 0) {
                 local_flags |= BDRV_REQ_COPY_ON_READ;
             }
@@ -227,13 +231,17 @@ cor_co_lock_medium(BlockDriverState *bs, bool locked)
 }
 
 
-static void cor_close(BlockDriverState *bs)
+static void GRAPH_UNLOCKED cor_close(BlockDriverState *bs)
 {
     BDRVStateCOR *s = bs->opaque;
 
+    GLOBAL_STATE_CODE();
+
     if (s->chain_frozen) {
+        bdrv_graph_rdlock_main_loop();
         s->chain_frozen = false;
         bdrv_unfreeze_backing_chain(bs, s->bottom_bs);
+        bdrv_graph_rdunlock_main_loop();
     }
 
     bdrv_unref(s->bottom_bs);
@@ -263,12 +271,15 @@ static BlockDriver bdrv_copy_on_read = {
 };
 
 
-void bdrv_cor_filter_drop(BlockDriverState *cor_filter_bs)
+void no_coroutine_fn bdrv_cor_filter_drop(BlockDriverState *cor_filter_bs)
 {
     BDRVStateCOR *s = cor_filter_bs->opaque;
 
+    GLOBAL_STATE_CODE();
+
     /* unfreeze, as otherwise bdrv_replace_node() will fail */
     if (s->chain_frozen) {
+        GRAPH_RDLOCK_GUARD_MAINLOOP();
         s->chain_frozen = false;
         bdrv_unfreeze_backing_chain(cor_filter_bs, s->bottom_bs);
     }

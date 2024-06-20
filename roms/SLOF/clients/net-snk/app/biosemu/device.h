@@ -141,7 +141,7 @@ in16le(void *addr)
 	return val;
 }
 
-/* debug function, dumps HID1 and HID4 to detect wether caches are on/off */
+/* debug function, dumps HID1 and HID4 to detect whether caches are on/off */
 static inline void
 dumpHID(void)
 {

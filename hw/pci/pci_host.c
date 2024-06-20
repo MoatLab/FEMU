@@ -62,6 +62,17 @@ static void pci_adjust_config_limit(PCIBus *bus, uint32_t *limit)
     }
 }
 
+static bool is_pci_dev_ejected(PCIDevice *pci_dev)
+{
+    /*
+     * device unplug was requested and the guest acked it,
+     * so we stop responding config accesses even if the
+     * device is not deleted (failover flow)
+     */
+    return pci_dev && pci_dev->partially_hotplugged &&
+           !pci_dev->qdev.pending_deleted_event;
+}
+
 void pci_host_config_write_common(PCIDevice *pci_dev, uint32_t addr,
                                   uint32_t limit, uint32_t val, uint32_t len)
 {
@@ -75,7 +86,7 @@ void pci_host_config_write_common(PCIDevice *pci_dev, uint32_t addr,
      * allowing direct removal of unexposed functions.
      */
     if ((pci_dev->qdev.hotplugged && !pci_get_function_0(pci_dev)) ||
-        !pci_dev->has_power) {
+        !pci_dev->has_power || is_pci_dev_ejected(pci_dev)) {
         return;
     }
 
@@ -100,7 +111,7 @@ uint32_t pci_host_config_read_common(PCIDevice *pci_dev, uint32_t addr,
      * allowing direct removal of unexposed functions.
      */
     if ((pci_dev->qdev.hotplugged && !pci_get_function_0(pci_dev)) ||
-        !pci_dev->has_power) {
+        !pci_dev->has_power || is_pci_dev_ejected(pci_dev)) {
         return ~0x0;
     }
 
@@ -223,7 +234,7 @@ const VMStateDescription vmstate_pcihost = {
     .needed = pci_host_needed,
     .version_id = 1,
     .minimum_version_id = 1,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT32(config_reg, PCIHostState),
         VMSTATE_END_OF_LIST()
     }
@@ -232,7 +243,7 @@ const VMStateDescription vmstate_pcihost = {
 static Property pci_host_properties_common[] = {
     DEFINE_PROP_BOOL("x-config-reg-migration-enabled", PCIHostState,
                      mig_enabled, true),
-    DEFINE_PROP_BOOL("bypass-iommu", PCIHostState, bypass_iommu, false),
+    DEFINE_PROP_BOOL(PCI_HOST_BYPASS_IOMMU, PCIHostState, bypass_iommu, false),
     DEFINE_PROP_END_OF_LIST(),
 };
 

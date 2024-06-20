@@ -4,7 +4,6 @@
 #
 # SPDX-License-Identifier: GPL-2.0-or-later
 
-import os
 import pytest
 import subprocess
 import sys
@@ -24,17 +23,12 @@ cli_args = [
 
 @pytest.mark.parametrize("test_cli_args", cli_args)
 def test_commands(test_cli_args):
-    pybase = Path(__file__).parent.parent
-    lcitool = pybase.joinpath("bin", "lcitool")
-    subenv = os.environ
-    subenv["PYTHONPATH"] = str(pybase)
-    subprocess.check_call([lcitool] + test_cli_args, stdout=subprocess.DEVNULL)
+    if sys.prefix == sys.base_prefix:
+        # we're running the tests directly from git using the lcitool wrapper
+        lcitool_path = Path(__file__).parent.parent.joinpath("bin", "lcitool")
+    else:
+        # we're running the tests in a virtual env
+        lcitool_path = Path(sys.prefix, "bin/lcitool")
 
-
-@pytest.mark.skipif(sys.prefix == sys.base_prefix,
-                    reason="lcitool package not installed")
-@pytest.mark.parametrize("test_cli_args", cli_args)
-def test_commands_installed(test_cli_args):
-    lcitool_venv_path = Path(sys.prefix, "bin/lcitool")
-    subprocess.check_call([lcitool_venv_path] + test_cli_args,
+    subprocess.check_call([lcitool_path] + test_cli_args,
                           stdout=subprocess.DEVNULL)

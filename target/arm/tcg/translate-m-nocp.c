@@ -18,8 +18,6 @@
  */
 
 #include "qemu/osdep.h"
-#include "tcg/tcg-op.h"
-#include "tcg/tcg-op-gvec.h"
 #include "translate.h"
 #include "translate-a32.h"
 
@@ -87,9 +85,9 @@ static bool trans_VLLDM_VLSTM(DisasContext *s, arg_VLLDM_VLSTM *a)
 
     fptr = load_reg(s, a->rn);
     if (a->l) {
-        gen_helper_v7m_vlldm(cpu_env, fptr);
+        gen_helper_v7m_vlldm(tcg_env, fptr);
     } else {
-        gen_helper_v7m_vlstm(cpu_env, fptr);
+        gen_helper_v7m_vlstm(tcg_env, fptr);
     }
 
     clear_eci_state(s);
@@ -324,7 +322,7 @@ static bool gen_M_fp_sysreg_write(DisasContext *s, int regno,
     switch (regno) {
     case ARM_VFP_FPSCR:
         tmp = loadfn(s, opaque, true);
-        gen_helper_vfp_set_fpscr(cpu_env, tmp);
+        gen_helper_vfp_set_fpscr(tcg_env, tmp);
         gen_lookup_tb(s);
         break;
     case ARM_VFP_FPSCR_NZCVQC:
@@ -393,7 +391,7 @@ static bool gen_M_fp_sysreg_write(DisasContext *s, int regno,
                             R_V7M_CONTROL_SFPA_SHIFT, 1);
         store_cpu_field(control, v7m.control[M_REG_S]);
         tcg_gen_andi_i32(tmp, tmp, ~FPCR_NZCV_MASK);
-        gen_helper_vfp_set_fpscr(cpu_env, tmp);
+        gen_helper_vfp_set_fpscr(tcg_env, tmp);
         s->base.is_jmp = DISAS_UPDATE_NOCHAIN;
         break;
     }
@@ -453,12 +451,12 @@ static bool gen_M_fp_sysreg_read(DisasContext *s, int regno,
     switch (regno) {
     case ARM_VFP_FPSCR:
         tmp = tcg_temp_new_i32();
-        gen_helper_vfp_get_fpscr(tmp, cpu_env);
+        gen_helper_vfp_get_fpscr(tmp, tcg_env);
         storefn(s, opaque, tmp, true);
         break;
     case ARM_VFP_FPSCR_NZCVQC:
         tmp = tcg_temp_new_i32();
-        gen_helper_vfp_get_fpscr(tmp, cpu_env);
+        gen_helper_vfp_get_fpscr(tmp, tcg_env);
         tcg_gen_andi_i32(tmp, tmp, FPCR_NZCVQC_MASK);
         storefn(s, opaque, tmp, true);
         break;
@@ -477,7 +475,7 @@ static bool gen_M_fp_sysreg_read(DisasContext *s, int regno,
         /* Bits [27:0] from FPSCR, bit [31] from CONTROL.SFPA */
         tmp = tcg_temp_new_i32();
         sfpa = tcg_temp_new_i32();
-        gen_helper_vfp_get_fpscr(tmp, cpu_env);
+        gen_helper_vfp_get_fpscr(tmp, tcg_env);
         tcg_gen_andi_i32(tmp, tmp, ~FPCR_NZCV_MASK);
         control = load_cpu_field(v7m.control[M_REG_S]);
         tcg_gen_andi_i32(sfpa, control, R_V7M_CONTROL_SFPA_MASK);
@@ -495,7 +493,7 @@ static bool gen_M_fp_sysreg_read(DisasContext *s, int regno,
         tcg_gen_andi_i32(control, control, ~R_V7M_CONTROL_SFPA_MASK);
         store_cpu_field(control, v7m.control[M_REG_S]);
         fpscr = load_cpu_field(v7m.fpdscr[M_REG_NS]);
-        gen_helper_vfp_set_fpscr(cpu_env, fpscr);
+        gen_helper_vfp_set_fpscr(tcg_env, fpscr);
         lookup_tb = true;
         break;
     }
@@ -508,7 +506,7 @@ static bool gen_M_fp_sysreg_read(DisasContext *s, int regno,
 
         gen_branch_fpInactive(s, TCG_COND_EQ, lab_active);
         /* fpInactive case: reads as FPDSCR_NS */
-        TCGv_i32 tmp = load_cpu_field(v7m.fpdscr[M_REG_NS]);
+        tmp = load_cpu_field(v7m.fpdscr[M_REG_NS]);
         storefn(s, opaque, tmp, true);
         lab_end = gen_new_label();
         tcg_gen_br(lab_end);
@@ -530,7 +528,7 @@ static bool gen_M_fp_sysreg_read(DisasContext *s, int regno,
         tmp = tcg_temp_new_i32();
         sfpa = tcg_temp_new_i32();
         fpscr = tcg_temp_new_i32();
-        gen_helper_vfp_get_fpscr(fpscr, cpu_env);
+        gen_helper_vfp_get_fpscr(fpscr, tcg_env);
         tcg_gen_andi_i32(tmp, fpscr, ~FPCR_NZCV_MASK);
         control = load_cpu_field(v7m.control[M_REG_S]);
         tcg_gen_andi_i32(sfpa, control, R_V7M_CONTROL_SFPA_MASK);
@@ -542,7 +540,7 @@ static bool gen_M_fp_sysreg_read(DisasContext *s, int regno,
         fpdscr = load_cpu_field(v7m.fpdscr[M_REG_NS]);
         tcg_gen_movcond_i32(TCG_COND_EQ, fpscr, sfpa, tcg_constant_i32(0),
                             fpdscr, fpscr);
-        gen_helper_vfp_set_fpscr(cpu_env, fpscr);
+        gen_helper_vfp_set_fpscr(tcg_env, fpscr);
         break;
     }
     case ARM_VFP_VPR:
@@ -645,7 +643,7 @@ static void fp_sysreg_to_memory(DisasContext *s, void *opaque, TCGv_i32 value,
     }
 
     if (s->v8m_stackcheck && a->rn == 13 && a->w) {
-        gen_helper_v8m_stackcheck(cpu_env, addr);
+        gen_helper_v8m_stackcheck(tcg_env, addr);
     }
 
     if (do_access) {
@@ -684,7 +682,7 @@ static TCGv_i32 memory_to_fp_sysreg(DisasContext *s, void *opaque,
     }
 
     if (s->v8m_stackcheck && a->rn == 13 && a->w) {
-        gen_helper_v8m_stackcheck(cpu_env, addr);
+        gen_helper_v8m_stackcheck(tcg_env, addr);
     }
 
     if (do_access) {

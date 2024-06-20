@@ -15,9 +15,8 @@
 #include <sbi/sbi_timer.h>
 
 static int sbi_ecall_time_handler(unsigned long extid, unsigned long funcid,
-				  const struct sbi_trap_regs *regs,
-				  unsigned long *out_val,
-				  struct sbi_trap_info *out_trap)
+				  struct sbi_trap_regs *regs,
+				  struct sbi_ecall_return *out)
 {
 	int ret = 0;
 
@@ -33,8 +32,16 @@ static int sbi_ecall_time_handler(unsigned long extid, unsigned long funcid,
 	return ret;
 }
 
+struct sbi_ecall_extension ecall_time;
+
+static int sbi_ecall_time_register_extensions(void)
+{
+	return sbi_ecall_register_extension(&ecall_time);
+}
+
 struct sbi_ecall_extension ecall_time = {
-	.extid_start = SBI_EXT_TIME,
-	.extid_end = SBI_EXT_TIME,
-	.handle = sbi_ecall_time_handler,
+	.extid_start		= SBI_EXT_TIME,
+	.extid_end		= SBI_EXT_TIME,
+	.register_extensions	= sbi_ecall_time_register_extensions,
+	.handle			= sbi_ecall_time_handler,
 };

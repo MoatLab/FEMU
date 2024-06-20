@@ -1,0 +1,25 @@
+{
+  "ccache": "/usr/bin/ccache",
+  "cpan_pkgs": [],
+  "cross_abi": "s390x-linux-gnu",
+  "cross_arch": "s390x",
+  "cross_arch_deb": "s390x",
+  "cross_pkgs": [
+    "gcc-s390x-linux-gnu",
+    "libc6-dev:s390x"
+  ],
+  "make": "/usr/bin/make",
+  "ninja": "/usr/bin/ninja",
+  "packaging_command": "apt-get",
+  "pip3": "/usr/bin/pip3",
+  "pkgs": [
+    "ca-certificates",
+    "ccache",
+    "git",
+    "golang",
+    "locales",
+    "pkgconf"
+  ],
+  "pypi_pkgs": [],
+  "python": "/usr/bin/python3"
+}

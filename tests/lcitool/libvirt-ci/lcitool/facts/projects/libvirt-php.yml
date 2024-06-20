@@ -3,8 +3,10 @@ packages:
   - autoconf
   - automake
   - autopoint
+  - awk
   - ccache
   - gcc
+  - libc
   - libtool
   - libtoolize
   - libxml2
@@ -12,6 +14,7 @@ packages:
   - php
   - pkg-config
   - rpmbuild
+  - tar
   - xmllint
   - xsltproc
   - xz

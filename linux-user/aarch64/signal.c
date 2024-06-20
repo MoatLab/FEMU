@@ -21,6 +21,7 @@
 #include "user-internals.h"
 #include "signal-common.h"
 #include "linux-user/trace.h"
+#include "target/arm/cpu-features.h"
 
 struct target_sigcontext {
     uint64_t fault_address;
@@ -669,7 +670,7 @@ static void target_setup_frame(int usig, struct target_sigaction *ka,
     aarch64_set_svcr(env, 0, R_SVCR_SM_MASK | R_SVCR_ZA_MASK);
 
     if (info) {
-        tswap_siginfo(&frame->info, info);
+        frame->info = *info;
         env->xregs[1] = frame_addr + offsetof(struct target_rt_sigframe, info);
         env->xregs[2] = frame_addr + offsetof(struct target_rt_sigframe, uc);
     }

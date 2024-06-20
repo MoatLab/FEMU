@@ -846,9 +846,9 @@ static void generic_pre_fuzz(QTestState *s)
  *          functionality B
  *
  * This function attempts to produce an input that:
- * Ouptut: maps a device's BARs, set up three DMA patterns, triggers
- *          functionality A device, replaces the DMA patterns with a single
- *          patten, and triggers device functionality B.
+ * Output: maps a device's BARs, set up three DMA patterns, triggers
+ *          device functionality A, replaces the DMA patterns with a single
+ *          pattern, and triggers device functionality B.
  */
 static size_t generic_fuzz_crossover(const uint8_t *data1, size_t size1, const
                                      uint8_t *data2, size_t size2, uint8_t *out,
@@ -954,17 +954,10 @@ static void register_generic_fuzz_targets(void)
             .crossover = generic_fuzz_crossover
     });
 
-    GString *name;
-    const generic_fuzz_config *config;
-
-    for (int i = 0;
-         i < sizeof(predefined_configs) / sizeof(generic_fuzz_config);
-         i++) {
-        config = predefined_configs + i;
-        name = g_string_new("generic-fuzz");
-        g_string_append_printf(name, "-%s", config->name);
+    for (int i = 0; i < ARRAY_SIZE(predefined_configs); i++) {
+        const generic_fuzz_config *config = predefined_configs + i;
         fuzz_add_target(&(FuzzTarget){
-                .name = name->str,
+                .name = g_strconcat("generic-fuzz-", config->name, NULL),
                 .description = "Predefined generic-fuzz config.",
                 .get_init_cmdline = generic_fuzz_predefined_config_cmdline,
                 .pre_fuzz = generic_pre_fuzz,

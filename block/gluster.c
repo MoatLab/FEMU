@@ -424,7 +424,7 @@ static struct glfs *qemu_gluster_glfs_init(BlockdevOptionsGluster *gconf,
     int ret;
     int old_errno;
     SocketAddressList *server;
-    unsigned long long port;
+    uint64_t port;
 
     glfs = glfs_find_preopened(gconf->volume);
     if (glfs) {
@@ -445,7 +445,7 @@ static struct glfs *qemu_gluster_glfs_init(BlockdevOptionsGluster *gconf,
                                    server->value->u.q_unix.path, 0);
             break;
         case SOCKET_ADDRESS_TYPE_INET:
-            if (parse_uint_full(server->value->u.inet.port, &port, 10) < 0 ||
+            if (parse_uint_full(server->value->u.inet.port, 10, &port) < 0 ||
                 port > 65535) {
                 error_setg(errp, "'%s' is not a valid port number",
                            server->value->u.inet.port);
@@ -863,11 +863,13 @@ static int qemu_gluster_open(BlockDriverState *bs,  QDict *options,
     if (ret == -EACCES || ret == -EROFS) {
         /* Try to degrade to read-only, but if it doesn't work, still use the
          * normal error message. */
+        bdrv_graph_rdlock_main_loop();
         if (bdrv_apply_auto_read_only(bs, NULL, NULL) == 0) {
             open_flags = (open_flags & ~O_RDWR) | O_RDONLY;
             s->fd = glfs_open(s->glfs, gconf->path, open_flags);
             ret = s->fd ? 0 : -errno;
         }
+        bdrv_graph_rdunlock_main_loop();
     }
 
     s->supports_seek_data = qemu_gluster_test_seek(s->fd);

@@ -28,28 +28,19 @@
 
 static void nios2_cpu_set_pc(CPUState *cs, vaddr value)
 {
-    Nios2CPU *cpu = NIOS2_CPU(cs);
-    CPUNios2State *env = &cpu->env;
-
-    env->pc = value;
+    cpu_env(cs)->pc = value;
 }
 
 static vaddr nios2_cpu_get_pc(CPUState *cs)
 {
-    Nios2CPU *cpu = NIOS2_CPU(cs);
-    CPUNios2State *env = &cpu->env;
-
-    return env->pc;
+    return cpu_env(cs)->pc;
 }
 
 static void nios2_restore_state_to_opc(CPUState *cs,
                                        const TranslationBlock *tb,
                                        const uint64_t *data)
 {
-    Nios2CPU *cpu = NIOS2_CPU(cs);
-    CPUNios2State *env = &cpu->env;
-
-    env->pc = data[0];
+    cpu_env(cs)->pc = data[0];
 }
 
 static bool nios2_cpu_has_work(CPUState *cs)
@@ -57,11 +48,17 @@ static bool nios2_cpu_has_work(CPUState *cs)
     return cs->interrupt_request & CPU_INTERRUPT_HARD;
 }
 
+static int nios2_cpu_mmu_index(CPUState *cs, bool ifetch)
+{
+    return (cpu_env(cs)->ctrl[CR_STATUS] & CR_STATUS_U
+            ? MMU_USER_IDX : MMU_SUPERVISOR_IDX);
+}
+
 static void nios2_cpu_reset_hold(Object *obj)
 {
     CPUState *cs = CPU(obj);
     Nios2CPU *cpu = NIOS2_CPU(cs);
-    Nios2CPUClass *ncc = NIOS2_CPU_GET_CLASS(cpu);
+    Nios2CPUClass *ncc = NIOS2_CPU_GET_CLASS(obj);
     CPUNios2State *env = &cpu->env;
 
     if (ncc->parent_phases.hold) {
@@ -113,11 +110,9 @@ static void iic_set_irq(void *opaque, int irq, int level)
 
 static void nios2_cpu_initfn(Object *obj)
 {
+#if !defined(CONFIG_USER_ONLY)
     Nios2CPU *cpu = NIOS2_CPU(obj);
 
-    cpu_set_cpustate_pointers(cpu);
-
-#if !defined(CONFIG_USER_ONLY)
     mmu_init(&cpu->env);
 #endif
 }
@@ -201,14 +196,6 @@ static void nios2_cpu_realizefn(DeviceState *dev, Error **errp)
     Nios2CPUClass *ncc = NIOS2_CPU_GET_CLASS(dev);
     Error *local_err = NULL;
 
-#ifndef CONFIG_USER_ONLY
-    if (cpu->eic_present) {
-        qdev_init_gpio_in_named(DEVICE(cpu), eic_set_irq, "EIC", 1);
-    } else {
-        qdev_init_gpio_in_named(DEVICE(cpu), iic_set_irq, "IRQ", 32);
-    }
-#endif
-
     cpu_exec_realizefn(cs, &local_err);
     if (local_err != NULL) {
         error_propagate(errp, local_err);
@@ -221,6 +208,14 @@ static void nios2_cpu_realizefn(DeviceState *dev, Error **errp)
 
     /* We have reserved storage for cpuid; might as well use it. */
     cpu->env.ctrl[CR_CPUID] = cs->cpu_index;
+
+#ifndef CONFIG_USER_ONLY
+    if (cpu->eic_present) {
+        qdev_init_gpio_in_named(DEVICE(cpu), eic_set_irq, "EIC", 1);
+    } else {
+        qdev_init_gpio_in_named(DEVICE(cpu), iic_set_irq, "IRQ", 32);
+    }
+#endif
 
     ncc->parent_realize(dev, errp);
 }
@@ -356,7 +351,7 @@ static const struct SysemuCPUOps nios2_sysemu_ops = {
 
 #include "hw/core/tcg-cpu-ops.h"
 
-static const struct TCGCPUOps nios2_tcg_ops = {
+static const TCGCPUOps nios2_tcg_ops = {
     .initialize = nios2_tcg_init,
     .restore_state_to_opc = nios2_restore_state_to_opc,
 
@@ -383,6 +378,7 @@ static void nios2_cpu_class_init(ObjectClass *oc, void *data)
 
     cc->class_by_name = nios2_cpu_class_by_name;
     cc->has_work = nios2_cpu_has_work;
+    cc->mmu_index = nios2_cpu_mmu_index;
     cc->dump_state = nios2_cpu_dump_state;
     cc->set_pc = nios2_cpu_set_pc;
     cc->get_pc = nios2_cpu_get_pc;
@@ -400,6 +396,7 @@ static const TypeInfo nios2_cpu_type_info = {
     .name = TYPE_NIOS2_CPU,
     .parent = TYPE_CPU,
     .instance_size = sizeof(Nios2CPU),
+    .instance_align = __alignof(Nios2CPU),
     .instance_init = nios2_cpu_initfn,
     .class_size = sizeof(Nios2CPUClass),
     .class_init = nios2_cpu_class_init,

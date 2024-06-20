@@ -12,7 +12,7 @@
 
 my-space pci-device-generic-setup
 
-\ Defaults, overriden from qemu
+\ Defaults, overridden from qemu
 d# 800 VALUE disp-width
 d# 600 VALUE disp-height
 d#   8 VALUE disp-depth

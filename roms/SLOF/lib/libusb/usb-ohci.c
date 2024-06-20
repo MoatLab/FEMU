@@ -645,7 +645,7 @@ static int ohci_transfer_bulk(struct usb_pipe *pipe, void *td_ptr,
 		__func__, pipe, data_phys, datalen, dir, td, td_phys);
 
 	if (!tds) {
-		printf("%s: tds NULL recieved\n", __func__);
+		printf("%s: tds NULL received\n", __func__);
 		ret = false;
 		goto end;
 	}

@@ -1,0 +1,8 @@
+#!/bin/sh
+
+out="$(dnf $@)"
+echo "$out"
+
+if ( echo "$out" | grep -q "No match for argument:" ); then
+    exit 1
+fi

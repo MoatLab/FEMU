@@ -47,6 +47,9 @@ serial_setup(void)
         return;
     dprintf(3, "init serial\n");
 
+    if (CONFIG_PARISC && has_astro)
+        return;
+
     u16 count = 0;
     count += detect_serial(PORT_SERIAL1, 0x0a, count);
     count += detect_serial(PORT_SERIAL2, 0x0a, count);

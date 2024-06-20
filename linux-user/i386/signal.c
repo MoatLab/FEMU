@@ -214,6 +214,17 @@ struct rt_sigframe {
 };
 #define TARGET_RT_SIGFRAME_FXSAVE_OFFSET (                                 \
     offsetof(struct rt_sigframe, fpstate) + TARGET_FPSTATE_FXSAVE_OFFSET)
+
+/*
+ * Verify that vdso-asmoffset.h constants match.
+ */
+#include "i386/vdso-asmoffset.h"
+
+QEMU_BUILD_BUG_ON(offsetof(struct sigframe, sc.eip)
+                  != SIGFRAME_SIGCONTEXT_eip);
+QEMU_BUILD_BUG_ON(offsetof(struct rt_sigframe, uc.tuc_mcontext.eip)
+                  != RT_SIGFRAME_SIGCONTEXT_eip);
+
 #else
 
 struct rt_sigframe {
@@ -419,7 +430,7 @@ void setup_frame(int sig, struct target_sigaction *ka,
     setup_sigcontext(&frame->sc, &frame->fpstate, env, set->sig[0],
             frame_addr + offsetof(struct sigframe, fpstate));
 
-    for(i = 1; i < TARGET_NSIG_WORDS; i++) {
+    for (i = 1; i < TARGET_NSIG_WORDS; i++) {
         __put_user(set->sig[i], &frame->extramask[i - 1]);
     }
 
@@ -479,7 +490,7 @@ void setup_rt_frame(int sig, struct target_sigaction *ka,
     __put_user(addr, &frame->puc);
 #endif
     if (ka->sa_flags & TARGET_SA_SIGINFO) {
-        tswap_siginfo(&frame->info, info);
+        frame->info = *info;
     }
 
     /* Create the ucontext.  */
@@ -493,7 +504,7 @@ void setup_rt_frame(int sig, struct target_sigaction *ka,
     setup_sigcontext(&frame->uc.tuc_mcontext, &frame->fpstate, env,
             set->sig[0], frame_addr + offsetof(struct rt_sigframe, fpstate));
 
-    for(i = 0; i < TARGET_NSIG_WORDS; i++) {
+    for (i = 0; i < TARGET_NSIG_WORDS; i++) {
         __put_user(set->sig[i], &frame->uc.tuc_sigmask.sig[i]);
     }
 

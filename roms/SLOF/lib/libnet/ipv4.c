@@ -25,7 +25,7 @@
 #define ARP_REQUEST            1
 #define ARP_REPLY              2
 
-/* ARP talbe size (+1) */
+/* ARP table size (+1) */
 #define ARP_ENTRIES 10
 
 /* ICMP Message types */
@@ -373,7 +373,7 @@ int8_t handle_ipv4(int fd, uint8_t * ip_packet, uint32_t packetsize)
 			return 0;
 		}
 
-		// packet is completly reassambled now!
+		// packet is completely reassembled now!
 
 		// recalculate ip_len and set iph and ip_packet to the
 		iph_first->ip_len = iph->ip_len + ((iph->ip_off) & 0x1FFF) * 8;
@@ -402,16 +402,16 @@ int8_t handle_ipv4(int fd, uint8_t * ip_packet, uint32_t packetsize)
 /**
  * IPv4: Send IPv4-packets.
  *
- *       Before the packet is sent there are some patcches performed:
+ *       Before the packet is sent there are some patches performed:
  *       - IPv4 source address is replaced by our unicast IPV4 address
  *         if it is set to 0 or 1
  *       - IPv4 destination address is replaced by our multicast IPV4 address
  *         if it is set to 1
- *       - IPv4 checksum is calculaded.
+ *       - IPv4 checksum is calculated.
  *       - If payload type is UDP, then the UDP checksum is calculated also.
  *
  *       We send an ARP request first, if this is the first packet sent to
- *       the declared IPv4 destination address. In this case we store the
+ *       the declared IPv4 destination address. In this case we store
  *       the packet and send it later if we receive the ARP response.
  *       If the MAC address is known already, then we send the packet immediately.
  *       If there is already an ARP request pending, then we drop this packet
@@ -500,11 +500,11 @@ int send_ipv4(int fd, void* buffer, int len)
 		if(arp_entry)
 			return -2;
 
-		// take the next entry in the ARP table to prepare a the new ARP entry.
+		// take the next entry in the ARP table to prepare the new ARP entry.
 		arp_entry = &arp_table[arp_producer];
 		arp_producer = (arp_producer+1)%ARP_ENTRIES;
 
-		// if ARP table is full then we must drop the oldes entry.
+		// if ARP table is full then we must drop the oldest entry.
 		if(arp_consumer == arp_producer)
 			arp_consumer = (arp_consumer+1)%ARP_ENTRIES;
 

@@ -265,7 +265,7 @@ DEFER func-pci-bridge-probe
 ;
 
 \ check for multifunction and for each function
-\ (dependig from header type) call device or bridge setup
+\ (dependent on header type) call device or bridge setup
 : pci-setup-device ( addr -- )
         dup pci-htype@                      \ read HEADER-Type
         80 and IF 8 ELSE 1 THEN             \ check for multifunction

@@ -248,7 +248,7 @@ update_modification_time(struct stH *header)
 	date = cpu_to_be64(strtoll(dastr, NULL, 16));
 
 	/* this does not match the definition from
-	 * struct stH, but we immitate the bug from
+	 * struct stH, but we imitate the bug from
 	 * flash image creation in create_crc.c.
 	 * The date is in mdate and time in padding2. */
 	memcpy(&(header->mdate), &date, 8);

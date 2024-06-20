@@ -117,8 +117,9 @@ static void arm_kernel_cmpxchg32_helper(CPUARMState *env)
 {
     uint32_t oldval, newval, val, addr, cpsr, *host_addr;
 
-    oldval = env->regs[0];
-    newval = env->regs[1];
+    /* Swap if host != guest endianness, for the host cmpxchg below */
+    oldval = tswap32(env->regs[0]);
+    newval = tswap32(env->regs[1]);
     addr = env->regs[2];
 
     mmap_lock();
@@ -173,6 +174,10 @@ static void arm_kernel_cmpxchg64_helper(CPUARMState *env)
         mmap_unlock();
         return;
     }
+
+    /* Swap if host != guest endianness, for the host cmpxchg below */
+    oldval = tswap64(oldval);
+    newval = tswap64(newval);
 
 #ifdef CONFIG_ATOMIC64
     val = qatomic_cmpxchg__nocheck(host_addr, oldval, newval);
@@ -258,7 +263,7 @@ static bool insn_is_linux_bkpt(uint32_t opcode, bool is_thumb)
 
 static bool emulate_arm_fpa11(CPUARMState *env, uint32_t opcode)
 {
-    TaskState *ts = env_cpu(env)->opaque;
+    TaskState *ts = get_task_state(env_cpu(env));
     int rc = EmulateAll(opcode, &ts->fpa, env);
     int raise, enabled;
 
@@ -509,7 +514,7 @@ void cpu_loop(CPUARMState *env)
 void target_cpu_copy_regs(CPUArchState *env, struct target_pt_regs *regs)
 {
     CPUState *cpu = env_cpu(env);
-    TaskState *ts = cpu->opaque;
+    TaskState *ts = get_task_state(cpu);
     struct image_info *info = ts->info;
     int i;
 

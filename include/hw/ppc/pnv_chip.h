@@ -2,13 +2,16 @@
 #define PPC_PNV_CHIP_H
 
 #include "hw/pci-host/pnv_phb4.h"
+#include "hw/ppc/pnv_chiptod.h"
 #include "hw/ppc/pnv_core.h"
 #include "hw/ppc/pnv_homer.h"
+#include "hw/ppc/pnv_n1_chiplet.h"
 #include "hw/ppc/pnv_lpc.h"
 #include "hw/ppc/pnv_occ.h"
 #include "hw/ppc/pnv_psi.h"
 #include "hw/ppc/pnv_sbe.h"
 #include "hw/ppc/pnv_xive.h"
+#include "hw/ppc/pnv_i2c.h"
 #include "hw/sysbus.h"
 
 OBJECT_DECLARE_TYPE(PnvChip, PnvChipClass,
@@ -77,6 +80,7 @@ struct Pnv9Chip {
     PnvXive      xive;
     Pnv9Psi      psi;
     PnvLpcController lpc;
+    PnvChipTOD   chiptod;
     PnvOCC       occ;
     PnvSBE       sbe;
     PnvHomer     homer;
@@ -86,6 +90,9 @@ struct Pnv9Chip {
 
 #define PNV9_CHIP_MAX_PEC 3
     PnvPhb4PecState pecs[PNV9_CHIP_MAX_PEC];
+
+#define PNV9_CHIP_MAX_I2C 4
+    PnvI2C      i2c[PNV9_CHIP_MAX_I2C];
 };
 
 /*
@@ -106,15 +113,20 @@ struct Pnv10Chip {
     PnvXive2     xive;
     Pnv9Psi      psi;
     PnvLpcController lpc;
+    PnvChipTOD   chiptod;
     PnvOCC       occ;
     PnvSBE       sbe;
     PnvHomer     homer;
+    PnvN1Chiplet     n1_chiplet;
 
     uint32_t     nr_quads;
     PnvQuad      *quads;
 
 #define PNV10_CHIP_MAX_PEC 2
     PnvPhb4PecState pecs[PNV10_CHIP_MAX_PEC];
+
+#define PNV10_CHIP_MAX_I2C 4
+    PnvI2C       i2c[PNV10_CHIP_MAX_I2C];
 };
 
 #define PNV10_PIR2FUSEDCORE(pir) (((pir) >> 3) & 0xf)
@@ -130,9 +142,12 @@ struct PnvChipClass {
     uint32_t     num_pecs;
     uint32_t     num_phbs;
 
+    uint32_t     i2c_num_engines;
+    const int    *i2c_ports_per_engine;
+
     DeviceRealize parent_realize;
 
-    uint32_t (*core_pir)(PnvChip *chip, uint32_t core_id);
+    uint32_t (*chip_pir)(PnvChip *chip, uint32_t core_id, uint32_t thread_id);
     void (*intc_create)(PnvChip *chip, PowerPCCPU *cpu, Error **errp);
     void (*intc_reset)(PnvChip *chip, PowerPCCPU *cpu);
     void (*intc_destroy)(PnvChip *chip, PowerPCCPU *cpu);
