@@ -142,7 +142,6 @@ static void zns_init_zone_identify(FemuCtrl *n, NvmeNamespace *ns, int lba_index
     ns->id_ns.nuse = ns->id_ns.ncap;
 
     ns->id_ns.noiob = 1;
-
     /* NvmeIdNs */
     /*
      * The device uses the BDRV_BLOCK_ZERO flag to determine the "deallocated"
@@ -537,11 +536,7 @@ static void zns_aio_zone_reset_cb(NvmeRequest *req, NvmeZone *zone)
             ppa.g.ch = ch;
             ppa.g.fc = lun;
             ppa.g.blk = zns_zone_idx(ns, zone->d.zslba);
-
-            struct nand_cmd erase;
-            erase.cmd = NAND_ERASE;
-            erase.stime = 0;
-            femu_err("no erase!\n");
+            //FIXME: no erase
         }
     }
 }
@@ -799,6 +794,92 @@ static uint16_t zns_get_mgmt_zone_slba_idx(FemuCtrl *n, NvmeCmd *c,
     assert(*zone_idx < n->num_zones);
 
     return NVME_SUCCESS;
+}
+
+/*Misao: backend read/write without latency emulation*/
+static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
+                           NvmeRequest *req,bool append)
+{
+    NvmeRwCmd *rw = (NvmeRwCmd *)&req->cmd; 
+    uint64_t slba = le64_to_cpu(rw->slba);
+    uint32_t nlb = (uint32_t)le16_to_cpu(rw->nlb) + 1;
+    uint64_t data_size = zns_l2b(ns, nlb);
+    uint64_t data_offset;
+    uint16_t status;
+
+    NvmeZone *zone;
+    NvmeZonedResult *res = (NvmeZonedResult *)&req->cqe;
+    assert(n->zoned);
+    req->is_write = (rw->opcode == NVME_CMD_WRITE) ? 1 : 0;
+
+    status = nvme_check_mdts(n, data_size);
+    if (status) {
+        goto err;
+    }
+
+    status = zns_check_bounds(ns, slba, nlb);
+    if (status) {
+        goto err;
+    }
+
+    if(req->is_write)
+    {
+        zone = zns_get_zone_by_slba(ns, slba);
+        status = zns_check_zone_write(n, ns, zone, slba, nlb, append);
+        if (status) {
+            femu_err("Misao check zone write failed with status (%u)\n",status);
+            goto err;
+        }
+        if(append)
+        {
+             status = zns_auto_open_zone(ns, zone);
+             if(status)
+             {
+                goto err;
+             }
+             slba = zone->w_ptr;
+        }
+        res->slba = zns_advance_zone_wp(ns, zone, nlb);
+    }
+    else
+    {
+        status = zns_check_zone_read(ns, slba, nlb);
+        if (status) {
+            goto err;
+        }
+
+        /* Misao
+        Deallocated or Unwritten Logical Block Error (DULBE) is an option on NVMe drives that allows a storage array to deallocate blocks that are part of a volume. Deallocating blocks on a drive can greatly reduce the time it takes to initialize volumes. In addition, hosts can deallocate logical blocks in the volume using the NVMe Dataset Management command.
+        */
+        if (NVME_ERR_REC_DULBE(n->features.err_rec)) {
+            status = zns_check_dulbe(ns, slba, nlb);
+            if (status) {
+                goto err;
+            }
+        }
+    }
+
+    data_offset = zns_l2b(ns, slba);
+    status = zns_map_dptr(n, data_size, req);
+    if (status) {
+        goto err;
+    }
+
+    req->slba = slba;
+    req->status = NVME_SUCCESS;
+    req->nlb = nlb;
+
+    backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
+
+    if(req->is_write)
+    {
+        zns_finalize_zoned_write(ns, req, false);
+    }
+
+    n->zns->active_zone = zns_zone_idx(ns,slba);
+    return NVME_SUCCESS;
+err:
+    return status | NVME_DNR;
 }
 
 static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
@@ -1083,92 +1164,6 @@ static uint16_t zns_check_dulbe(NvmeNamespace *ns, uint64_t slba, uint32_t nlb)
     return NVME_SUCCESS;
 }
 
-/*Misao: backend read/write without latency emulation*/
-static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
-                           NvmeRequest *req,bool append)
-{
-    NvmeRwCmd *rw = (NvmeRwCmd *)&req->cmd; 
-    uint64_t slba = le64_to_cpu(rw->slba);
-    uint32_t nlb = (uint32_t)le16_to_cpu(rw->nlb) + 1;
-    uint64_t data_size = zns_l2b(ns, nlb);
-    uint64_t data_offset;
-    uint16_t status;
-
-    NvmeZone *zone;
-    NvmeZonedResult *res = (NvmeZonedResult *)&req->cqe;
-    assert(n->zoned);
-    req->is_write = (rw->opcode == NVME_CMD_WRITE) ? 1 : 0;
-
-    status = nvme_check_mdts(n, data_size);
-    if (status) {
-        goto err;
-    }
-
-    status = zns_check_bounds(ns, slba, nlb);
-    if (status) {
-        goto err;
-    }
-
-    if(req->is_write)
-    {
-        zone = zns_get_zone_by_slba(ns, slba);
-        status = zns_check_zone_write(n, ns, zone, slba, nlb, append);
-        if (status) {
-            femu_err("Misao check zone write failed with status (%u)\n",status);
-            goto err;
-        }
-        if(append)
-        {
-             status = zns_auto_open_zone(ns, zone);
-             if(status)
-             {
-                goto err;
-             }
-             slba = zone->w_ptr;
-        }
-        res->slba = zns_advance_zone_wp(ns, zone, nlb);
-    }
-    else
-    {
-        status = zns_check_zone_read(ns, slba, nlb);
-        if (status) {
-            goto err;
-        }
-
-        /* Misao
-        Deallocated or Unwritten Logical Block Error (DULBE) is an option on NVMe drives that allows a storage array to deallocate blocks that are part of a volume. Deallocating blocks on a drive can greatly reduce the time it takes to initialize volumes. In addition, hosts can deallocate logical blocks in the volume using the NVMe Dataset Management command.
-        */
-        if (NVME_ERR_REC_DULBE(n->features.err_rec)) {
-            status = zns_check_dulbe(ns, slba, nlb);
-            if (status) {
-                goto err;
-            }
-        }
-    }
-
-    data_offset = zns_l2b(ns, slba);
-    status = zns_map_dptr(n, data_size, req);
-    if (status) {
-        goto err;
-    }
-
-    req->slba = slba;
-    req->status = NVME_SUCCESS;
-    req->nlb = nlb;
-
-    backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
-
-    if(req->is_write)
-    {
-        zns_finalize_zoned_write(ns, req, false);
-    }
-
-    n->zns->active_zone = zns_zone_idx(ns,slba);
-    return NVME_SUCCESS;
-err:
-    return status | NVME_DNR;
-}
-
 static uint16_t zns_io_cmd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                            NvmeRequest *req)
 {
@@ -1322,7 +1317,6 @@ static int zns_init_zone_cap(FemuCtrl *n)
     n->zoned = true;
     n->zasl_bs = NVME_DEFAULT_MAX_AZ_SIZE;
     n->zone_size_bs = zns->num_ch*zns->num_lun*zns->num_plane*zns->num_page*ZNS_PAGE_SIZE;
-    femu_log("ZMS zone size : %lu KiB\n",n->zone_size_bs/(KiB));
     n->zone_cap_bs = 0;
     n->cross_zone_read = false;
     n->max_active_zones = 0;

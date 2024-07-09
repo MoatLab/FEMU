@@ -664,7 +664,7 @@ static Property femu_props[] = {
     DEFINE_PROP_UINT8("lnum_pln", FemuCtrl, oc_params.num_pln, 2),
     DEFINE_PROP_UINT16("lmetasize", FemuCtrl, oc_params.sos, 16),
     DEFINE_PROP_UINT8("zns_num_ch", FemuCtrl, zns_params.zns_num_ch, 2),
-    DEFINE_PROP_UINT8("zns_num_lun", FemuCtrl, zns_params.zns_num_lun, 2),
+    DEFINE_PROP_UINT8("zns_num_lun", FemuCtrl, zns_params.zns_num_lun, 4),
     DEFINE_PROP_UINT8("zns_num_plane", FemuCtrl, zns_params.zns_num_plane, 2),
     DEFINE_PROP_UINT8("zns_num_blk", FemuCtrl, zns_params.zns_num_blk, 32),
     DEFINE_PROP_INT32("zns_flash_type", FemuCtrl, zns_params.zns_flash_type, QLC),

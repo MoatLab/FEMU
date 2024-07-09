@@ -181,28 +181,18 @@ static uint64_t zns_read(struct zns_ssd *zns, NvmeRequest *req)
 
     /* normal IO read path */
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
-        //TODO Misao mapping cache mgnt (check mapping table firstly )
-        //Misao check newest data in write buffer
-        if(zns_wc_check(zns,wcidx,lpn))
-        {
-            //write buffer hit
-            sublat = SRAM_READ_LATENCY_NS;
+        ppa = get_maptbl_ent(zns, lpn);
+        if (!mapped_ppa(&ppa) || !valid_ppa(zns, &ppa)) {
+            continue;
         }
-        else
-        {
-            ppa = get_maptbl_ent(zns, lpn);
-            if (!mapped_ppa(&ppa) || !valid_ppa(zns, &ppa)) {
-                continue;
-            }
 
-            struct nand_cmd srd;
-            srd.type = USER_IO;
-            srd.cmd = NAND_READ;
-            srd.stime = req->stime;
+        struct nand_cmd srd;
+        srd.type = USER_IO;
+        srd.cmd = NAND_READ;
+        srd.stime = req->stime;
 
-            sublat = zns_advance_status(zns, &ppa, &srd);
-            femu_log("[R] lpn:\t%lu\t<--ch:\t%u\tlun:\t%u\tpl:\t%u\tblk:\t%u\tpg:\t%u\tsubpg:\t%u\tlat\t%lu\n",lpn,ppa.g.ch,ppa.g.fc,ppa.g.pl,ppa.g.blk,ppa.g.pg,ppa.g.spg,sublat);
-        }
+        sublat = zns_advance_status(zns, &ppa, &srd);
+        femu_log("[R] lpn:\t%lu\t<--ch:\t%u\tlun:\t%u\tpl:\t%u\tblk:\t%u\tpg:\t%u\tsubpg:\t%u\tlat\t%lu\n",lpn,ppa.g.ch,ppa.g.fc,ppa.g.pl,ppa.g.blk,ppa.g.pg,ppa.g.spg,sublat);
         maxlat = (sublat > maxlat) ? sublat : maxlat;
     }
 
@@ -215,7 +205,6 @@ static uint64_t zns_wc_flush(struct zns_ssd* zns, int wcidx, int type,uint64_t s
     struct ppa ppa;
     struct ppa oldppa;
     uint64_t lpn;
-    //FIXME Misao: flush to QLC
     int flash_type = zns->flash_type;
     uint64_t sublat = 0, maxlat = 0;
     

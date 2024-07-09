@@ -1,7 +1,6 @@
 #ifndef __FEMU_ZNS_H
 #define __FEMU_ZNS_H
 
-//logical page size = 4KiB = 1/4 physical page
 #define SPG_BITS    (2)
 #define PG_BITS     (16)
 #define BLK_BITS    (32)
@@ -68,15 +67,14 @@ typedef struct NvmeIdCtrlZoned {
 struct ppa {
     union {
         struct {
-        uint64_t spg: SPG_BITS;
-        uint64_t pg : PG_BITS;
-	    uint64_t blk : BLK_BITS;
-	    uint64_t fc  : FC_BITS;
-        uint64_t pl : PL_BITS;
-	    uint64_t ch  : CH_BITS;
-	    uint64_t T : 1;
-        uint64_t V : 1;
-        uint64_t rsv : 8;
+        uint64_t spg  : SPG_BITS;
+        uint64_t pg   : PG_BITS;
+	    uint64_t blk  : BLK_BITS;
+	    uint64_t fc   : FC_BITS;
+        uint64_t pl   : PL_BITS;
+	    uint64_t ch   : CH_BITS;
+        uint64_t V    : 1;
+        uint64_t rsv  : 8;
         } g;
 
 	uint64_t ppa;
@@ -101,13 +99,11 @@ struct zns_blk {
     uint64_t page_wp; //next free page
 };
 
-//each chip has 2 planes
 struct zns_plane{
     struct zns_blk *blk;
     uint64_t next_plane_avail_time;
 };
 
-//chip
 struct zns_fc {
     struct zns_plane *plane;
     uint64_t next_fc_avail_time;
@@ -384,4 +380,5 @@ static inline void zns_aor_dec_active(NvmeNamespace *ns)
 
 void zns_ns_shutdown(NvmeNamespace *ns);
 void zns_ns_cleanup(NvmeNamespace *ns);
+
 #endif
