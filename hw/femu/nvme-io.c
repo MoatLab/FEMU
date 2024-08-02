@@ -298,6 +298,7 @@ static uint16_t nvme_dsm(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         if (dma_write_prp(n, (uint8_t *)range, sizeof(range), prp1, prp2)) {
             nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
                                 offsetof(NvmeCmd, dptr.prp1), 0, ns->id);
+            g_free(range);
             return NVME_INVALID_FIELD | NVME_DNR;
         }
 
@@ -308,13 +309,14 @@ static uint16_t nvme_dsm(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             if (slba + nlb > le64_to_cpu(ns->id_ns.nsze)) {
                 nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
                                     offsetof(NvmeCmd, cdw10), slba + nlb, ns->id);
+                g_free(range);
                 return NVME_LBA_RANGE | NVME_DNR;
             }
 
             bitmap_clear(ns->util, slba, nlb);
         }
+        g_free(range);
     }
-
     return NVME_SUCCESS;
 }
 
@@ -366,6 +368,8 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             return NVME_CMP_FAILURE;
         }
         offset += len;
+        free(tmp[0]);
+        free(tmp[1]);
     }
 
     qemu_sglist_destroy(&req->qsg);

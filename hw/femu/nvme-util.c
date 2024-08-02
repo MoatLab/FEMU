@@ -72,6 +72,7 @@ uint64_t *nvme_setup_discontig(FemuCtrl *n, uint64_t prp_addr, uint16_t
     for (i = 0; i < total_prps; i++) {
         if (i % prps_per_page == 0 && i < total_prps - 1) {
             if (!prp_addr || prp_addr & (n->page_size - 1)) {
+                g_free(prp);
                 g_free(prp_list);
                 return NULL;
             }
@@ -80,11 +81,13 @@ uint64_t *nvme_setup_discontig(FemuCtrl *n, uint64_t prp_addr, uint16_t
         }
         prp_list[i] = le64_to_cpu(prp[i % prps_per_page]);
         if (!prp_list[i] || prp_list[i] & (n->page_size - 1)) {
+            g_free(prp);
             g_free(prp_list);
             return NULL;
         }
     }
 
+    g_free(prp);
     return prp_list;
 }
 
