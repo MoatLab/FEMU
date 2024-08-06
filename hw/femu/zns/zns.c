@@ -141,6 +141,7 @@ static void zns_init_zone_identify(FemuCtrl *n, NvmeNamespace *ns, int lba_index
     ns->id_ns.ncap = ns->id_ns.nsze;
     ns->id_ns.nuse = ns->id_ns.ncap;
 
+    ns->id_ns.noiob = 1;
     /* NvmeIdNs */
     /*
      * The device uses the BDRV_BLOCK_ZERO flag to determine the "deallocated"
@@ -468,123 +469,10 @@ static void zns_finalize_zoned_write(NvmeNamespace *ns, NvmeRequest *req, bool f
 
 // Add some function
 // --------------------------------
-static inline struct zns_ch *get_ch(struct zns_ssd *zns, struct ppa *ppa)
-{
-    return &(zns->ch[ppa->g.ch]);
-}
-
-static inline struct zns_fc *get_fc(struct zns_ssd *zns, struct ppa *ppa)
-{
-    struct zns_ch *ch = get_ch(zns, ppa);
-    return &(ch->fc[ppa->g.fc]);
-}
-
-static inline struct zns_blk *get_blk(struct zns_ssd *zns, struct ppa *ppa)
-{
-    struct zns_fc *fc = get_fc(zns, ppa);
-    return &(fc->blk[ppa->g.blk]);
-}
 
 static inline uint64_t zone_slba(FemuCtrl *n, uint32_t zone_idx)
 {
     return (zone_idx) * n->zone_size;
-}
-
-static inline void check_addr(int a, int max)
-{
-   assert(a >= 0 && a < max);
-}
-
-static void advance_read_pointer(FemuCtrl *n)
-{
-    struct zns_ssd *zns = n->zns;
-    struct write_pointer *wpp = &zns->wp;
-    uint8_t num_ch = zns->num_ch;
-    uint8_t num_lun = zns->num_lun;
-
-    //printf("NUM CH: %"PRIu64"\n", wpp->ch);
-    check_addr(wpp->ch, num_ch);
-    wpp->ch++;
-
-    if (wpp->ch != num_ch) {
-        return;
-    }
-
-    /* Wrap-up, wpp->ch == num_ch */
-    wpp->ch = 0;
-    check_addr(wpp->lun, num_lun);
-    wpp->lun++;
-    if (wpp->lun == num_lun) {
-        wpp->lun = 0;
-        assert(wpp->ch == 0);
-        assert(wpp->lun == 0);
-    }
-}
-
-static inline struct ppa lpn_to_ppa(FemuCtrl *n, NvmeNamespace *ns, uint64_t lpn)
-{
-
-	uint32_t zone_idx = zns_zone_idx(ns, (lpn * 4096));
-
-	struct zns_ssd *zns = n->zns;
-	struct write_pointer *wpp = &zns->wp;
-	//uint64_t num_ch = zns->num_ch;
-	//uint64_t num_lun = zns->num_lun;
-	struct ppa ppa = {0};
-
-	//printf("OFFSET: %"PRIu64"\n\n", offset);
-	//wpp->ch,lun
-	ppa.g.ch = wpp->ch;
-	ppa.g.fc = wpp->lun;
-	ppa.g.blk = zone_idx;
-
-    return ppa;
-}
-
-static uint64_t zns_advance_status(FemuCtrl *n, struct nand_cmd *ncmd, struct ppa *ppa)
-{
-    int c = ncmd->cmd;
-
-    struct zns_ssd *zns = n->zns;
-    uint64_t nand_stime;
-    uint64_t req_stime = (ncmd->stime == 0) ? \
-        qemu_clock_get_ns(QEMU_CLOCK_REALTIME) : ncmd->stime;
-
-    struct zns_fc *fc = get_fc(zns, ppa);
-
-    uint64_t lat = 0;
-    uint64_t read_delay = n->zns_params.zns_read;
-    uint64_t write_delay = n->zns_params.zns_write;
-    uint64_t erase_delay = 2000000;
-
-    switch (c) {
-    case NAND_READ:
-        nand_stime = (fc->next_fc_avail_time < req_stime) ? req_stime : \
-                     fc->next_fc_avail_time;
-        fc->next_fc_avail_time = nand_stime + read_delay;
-        lat = fc->next_fc_avail_time - req_stime;
-	    break;
-
-    case NAND_WRITE:
-	    nand_stime = (fc->next_fc_avail_time < req_stime) ? req_stime : \
-		            fc->next_fc_avail_time;
-	    fc->next_fc_avail_time = nand_stime + write_delay;
-	    lat = fc->next_fc_avail_time - req_stime;
-	    break;
-
-    case NAND_ERASE:
-        nand_stime = (fc->next_fc_avail_time < req_stime) ? req_stime : \
-                        fc->next_fc_avail_time;
-        fc->next_fc_avail_time = nand_stime + erase_delay;
-        lat = fc->next_fc_avail_time - req_stime;
-        break;
-
-    default:
-        /* To silent warnings */
-        ;
-    }
-
-    return lat;
 }
 
 static uint64_t zns_advance_zone_wp(NvmeNamespace *ns, NvmeZone *zone, uint32_t nlb)
@@ -648,11 +536,7 @@ static void zns_aio_zone_reset_cb(NvmeRequest *req, NvmeZone *zone)
             ppa.g.ch = ch;
             ppa.g.fc = lun;
             ppa.g.blk = zns_zone_idx(ns, zone->d.zslba);
-
-            struct nand_cmd erase;
-            erase.cmd = NAND_ERASE;
-            erase.stime = 0;
-            zns_advance_status(n, &erase, &ppa);
+            //FIXME: no erase
         }
     }
 }
@@ -910,6 +794,92 @@ static uint16_t zns_get_mgmt_zone_slba_idx(FemuCtrl *n, NvmeCmd *c,
     assert(*zone_idx < n->num_zones);
 
     return NVME_SUCCESS;
+}
+
+/*Misao: backend read/write without latency emulation*/
+static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
+                           NvmeRequest *req,bool append)
+{
+    NvmeRwCmd *rw = (NvmeRwCmd *)&req->cmd; 
+    uint64_t slba = le64_to_cpu(rw->slba);
+    uint32_t nlb = (uint32_t)le16_to_cpu(rw->nlb) + 1;
+    uint64_t data_size = zns_l2b(ns, nlb);
+    uint64_t data_offset;
+    uint16_t status;
+
+    NvmeZone *zone;
+    NvmeZonedResult *res = (NvmeZonedResult *)&req->cqe;
+    assert(n->zoned);
+    req->is_write = (rw->opcode == NVME_CMD_WRITE) ? 1 : 0;
+
+    status = nvme_check_mdts(n, data_size);
+    if (status) {
+        goto err;
+    }
+
+    status = zns_check_bounds(ns, slba, nlb);
+    if (status) {
+        goto err;
+    }
+
+    if(req->is_write)
+    {
+        zone = zns_get_zone_by_slba(ns, slba);
+        status = zns_check_zone_write(n, ns, zone, slba, nlb, append);
+        if (status) {
+            femu_err("Misao check zone write failed with status (%u)\n",status);
+            goto err;
+        }
+        if(append)
+        {
+             status = zns_auto_open_zone(ns, zone);
+             if(status)
+             {
+                goto err;
+             }
+             slba = zone->w_ptr;
+        }
+        res->slba = zns_advance_zone_wp(ns, zone, nlb);
+    }
+    else
+    {
+        status = zns_check_zone_read(ns, slba, nlb);
+        if (status) {
+            goto err;
+        }
+
+        /* Misao
+        Deallocated or Unwritten Logical Block Error (DULBE) is an option on NVMe drives that allows a storage array to deallocate blocks that are part of a volume. Deallocating blocks on a drive can greatly reduce the time it takes to initialize volumes. In addition, hosts can deallocate logical blocks in the volume using the NVMe Dataset Management command.
+        */
+        if (NVME_ERR_REC_DULBE(n->features.err_rec)) {
+            status = zns_check_dulbe(ns, slba, nlb);
+            if (status) {
+                goto err;
+            }
+        }
+    }
+
+    data_offset = zns_l2b(ns, slba);
+    status = zns_map_dptr(n, data_size, req);
+    if (status) {
+        goto err;
+    }
+
+    req->slba = slba;
+    req->status = NVME_SUCCESS;
+    req->nlb = nlb;
+
+    backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
+
+    if(req->is_write)
+    {
+        zns_finalize_zoned_write(ns, req, false);
+    }
+
+    n->zns->active_zone = zns_zone_idx(ns,slba);
+    return NVME_SUCCESS;
+err:
+    return status | NVME_DNR;
 }
 
 static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
@@ -1180,70 +1150,6 @@ static uint16_t zns_map_dptr(FemuCtrl *n, size_t len, NvmeRequest *req)
     }
 }
 
-static uint16_t zns_do_write(FemuCtrl *n, NvmeRequest *req, bool append,
-                             bool wrz)
-{
-    NvmeRwCmd *rw = (NvmeRwCmd *)&req->cmd;
-    NvmeNamespace *ns = req->ns;
-    uint64_t slba = le64_to_cpu(rw->slba);
-    uint32_t nlb = (uint32_t)le16_to_cpu(rw->nlb) + 1;
-    uint64_t data_size = zns_l2b(ns, nlb);
-    uint64_t data_offset;
-    NvmeZone *zone;
-    NvmeZonedResult *res = (NvmeZonedResult *)&req->cqe;
-    uint16_t status;
-
-    assert(n->zoned);
-    req->is_write = true;
-
-    if (!wrz) {
-        status = nvme_check_mdts(n, data_size);
-        if (status) {
-            goto err;
-        }
-    }
-
-    status = zns_check_bounds(ns, slba, nlb);
-    if (status) {
-        goto err;
-    }
-
-    zone = zns_get_zone_by_slba(ns, slba);
-
-    status = zns_check_zone_write(n, ns, zone, slba, nlb, append);
-    if (status) {
-        goto err;
-    }
-
-    status = zns_auto_open_zone(ns, zone);
-    if (status) {
-        goto err;
-    }
-
-    if (append) {
-        slba = zone->w_ptr;
-    }
-
-    res->slba = zns_advance_zone_wp(ns, zone, nlb);
-
-    data_offset = zns_l2b(ns, slba);
-
-    if (!wrz) {
-        status = zns_map_dptr(n, data_size, req);
-        if (status) {
-            goto err;
-        }
-
-        backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
-    }
-
-    zns_finalize_zoned_write(ns, req, false);
-    return NVME_SUCCESS;
-
-err:
-    printf("****************Append Failed***************\n");
-    return status | NVME_DNR;
-}
 
 static uint16_t zns_admin_cmd(FemuCtrl *n, NvmeCmd *cmd)
 {
@@ -1253,162 +1159,9 @@ static uint16_t zns_admin_cmd(FemuCtrl *n, NvmeCmd *cmd)
     }
 }
 
-static inline uint16_t zns_zone_append(FemuCtrl *n, NvmeRequest *req)
-{
-    return zns_do_write(n, req, true, false);
-}
-
 static uint16_t zns_check_dulbe(NvmeNamespace *ns, uint64_t slba, uint32_t nlb)
 {
     return NVME_SUCCESS;
-}
-
-static uint16_t zns_read(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
-                         NvmeRequest *req)
-{
-    NvmeRwCmd *rw = (NvmeRwCmd *)&req->cmd;
-    uint64_t slba = le64_to_cpu(rw->slba);
-    uint32_t nlb = (uint32_t)le16_to_cpu(rw->nlb) + 1;
-    uint64_t data_size = zns_l2b(ns, nlb);
-    uint64_t data_offset;
-    uint16_t status;
-
-    assert(n->zoned);
-    req->is_write = false;
-
-    status = nvme_check_mdts(n, data_size);
-    if (status) {
-        goto err;
-    }
-
-    status = zns_check_bounds(ns, slba, nlb);
-    if (status) {
-        goto err;
-    }
-
-    status = zns_check_zone_read(ns, slba, nlb);
-    if (status) {
-        goto err;
-    }
-
-    status = zns_map_dptr(n, data_size, req);
-    if (status) {
-        goto err;
-    }
-
-    if (NVME_ERR_REC_DULBE(n->features.err_rec)) {
-        status = zns_check_dulbe(ns, slba, nlb);
-        if (status) {
-            goto err;
-        }
-    }
-
-    data_offset = zns_l2b(ns, slba);
-
-    backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
-
-    uint64_t slpn = (slba) / 4096;
-    uint64_t elpn = (slba + nlb - 1) / 4096;
-    uint64_t lpn;
-    struct ppa ppa;
-    uint64_t sublat,maxlat=0;
-
-    for (lpn = slpn; lpn <= elpn; lpn++) {
-        ppa = lpn_to_ppa(n, ns, lpn);
-        advance_read_pointer(n);
-
-        struct nand_cmd read;
-        read.cmd = NAND_READ;
-        read.stime = req->stime;
-
-        sublat = zns_advance_status(n, &read, &ppa);
-        maxlat = (sublat > maxlat) ? sublat : maxlat;
-    }
-
-    req->reqlat = maxlat;
-    req->expire_time += maxlat;
-
-    return NVME_SUCCESS;
-
-err:
-    return status | NVME_DNR;
-}
-
-static uint16_t zns_write(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
-                          NvmeRequest *req)
-{
-    NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
-    uint64_t slba = le64_to_cpu(rw->slba);
-    uint32_t nlb = (uint32_t)le16_to_cpu(rw->nlb) + 1;
-    uint64_t data_size = zns_l2b(ns, nlb);
-    uint64_t data_offset;
-    NvmeZone *zone;
-    NvmeZonedResult *res = (NvmeZonedResult *)&req->cqe;
-    uint16_t status;
-
-    assert(n->zoned);
-    req->is_write = true;
-
-    status = nvme_check_mdts(n, data_size);
-    if (status) {
-        goto err;
-    }
-
-    status = zns_check_bounds(ns, slba, nlb);
-    if (status) {
-        goto err;
-    }
-
-    zone = zns_get_zone_by_slba(ns, slba);
-
-    status = zns_check_zone_write(n, ns, zone, slba, nlb, false);
-    if (status) {
-        goto err;
-    }
-
-    status = zns_auto_open_zone(ns, zone);
-    if (status) {
-        goto err;
-    }
-
-    res->slba = zns_advance_zone_wp(ns, zone, nlb);
-
-    data_offset = zns_l2b(ns, slba);
-
-    status = zns_map_dptr(n, data_size, req);
-    if (status) {
-        goto err;
-    }
-
-    backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
-    zns_finalize_zoned_write(ns, req, false);
-
-    uint64_t slpn = (slba) / 4096;
-    uint64_t elpn = (slba + nlb - 1) / 4096;
-
-    uint64_t lpn;
-    struct ppa ppa;
-    uint64_t sublat,maxlat=0;
-
-    for (lpn = slpn; lpn <= elpn; lpn++) {
-        ppa = lpn_to_ppa(n, ns, lpn);
-        advance_read_pointer(n);
-
-        struct nand_cmd write;
-        write.cmd = NAND_WRITE;
-        write.stime = req->stime;
-
-        sublat = zns_advance_status(n, &write, &ppa);
-        maxlat = (sublat > maxlat) ? sublat : maxlat;
-    }
-
-    req->reqlat = maxlat;
-    req->expire_time += maxlat;
-    return NVME_SUCCESS;
-
-err:
-    femu_err("*********ZONE WRITE FAILED*********\n");
-    return status | NVME_DNR;
 }
 
 static uint16_t zns_io_cmd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
@@ -1416,15 +1169,14 @@ static uint16_t zns_io_cmd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 {
     switch (cmd->opcode) {
     case NVME_CMD_READ:
-        return zns_read(n, ns, cmd, req);
     case NVME_CMD_WRITE:
-        return zns_write(n, ns, cmd, req);
+        return zns_nvme_rw(n, ns, cmd, req,false);
+    case NVME_CMD_ZONE_APPEND:
+        return zns_nvme_rw(n, ns, cmd, req,true);
     case NVME_CMD_ZONE_MGMT_SEND:
         return zns_zone_mgmt_send(n, req);
     case NVME_CMD_ZONE_MGMT_RECV:
         return zns_zone_mgmt_recv(n, req);
-    case NVME_CMD_ZONE_APPEND:
-        return zns_zone_append(n, req);
     }
 
     return NVME_INVALID_OPCODE | NVME_DNR;
@@ -1433,7 +1185,7 @@ static uint16_t zns_io_cmd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 static void zns_set_ctrl_str(FemuCtrl *n)
 {
     static int fsid_zns = 0;
-    const char *zns_mn = "FEMU ZNS-SSD Controller";
+    const char *zns_mn = "FEMU ZMS-SSD Controller [by Misao]";
     const char *zns_sn = "vZNSSD";
 
     nvme_set_ctrl_name(n, zns_mn, zns_sn, &fsid_zns);
@@ -1450,25 +1202,37 @@ static void zns_set_ctrl(FemuCtrl *n)
 
 // Add zns init ch, zns init flash and zns init block
 // ----------------------------
-static void zns_init_blk(struct zns_blk *blk)
+static void zns_init_blk(struct zns_blk *blk,int num_blk,int blkidx,int flash_type)
 {
+    blk->nand_type = flash_type;
     blk->next_blk_avail_time = 0;
+    blk->page_wp = 0;
 }
 
-static void zns_init_fc(struct zns_fc *fc)
+static void zns_init_plane(struct zns_plane *plane,int num_blk,int flash_type)
 {
-    fc->blk = g_malloc0(sizeof(struct zns_blk) * 32);
-    for (int i = 0; i < 32; i++) {
-        zns_init_blk(&fc->blk[i]);
+    plane->blk = g_malloc0(sizeof(struct zns_blk) * num_blk);
+    for (int i = 0; i < num_blk; i++) {
+        zns_init_blk(&plane->blk[i],num_blk,i,flash_type);
+    }
+    plane->next_plane_avail_time = 0;
+}
+
+static void zns_init_fc(struct zns_fc *fc,uint8_t num_plane,uint8_t num_blk,int flash_type)
+{
+    fc->plane = g_malloc0(sizeof(struct zns_blk) * num_plane);
+    for(int i = 0;i < num_plane;i++)
+    {
+        zns_init_plane(&fc->plane[i],num_blk,flash_type);
     }
     fc->next_fc_avail_time = 0;
 }
 
-static void zns_init_ch(struct zns_ch *ch, uint8_t num_lun)
+static void zns_init_ch(struct zns_ch *ch, uint8_t num_lun,uint8_t num_plane, uint8_t num_blk,int flash_type)
 {
     ch->fc = g_malloc0(sizeof(struct zns_fc) * num_lun);
     for (int i = 0; i < num_lun; i++) {
-        zns_init_fc(&ch->fc[i]);
+        zns_init_fc(&ch->fc[i],num_plane,num_blk,flash_type);
     }
     ch->next_ch_avail_time = 0;
 }
@@ -1481,21 +1245,78 @@ static void zns_init_params(FemuCtrl *n)
     id_zns = g_malloc0(sizeof(struct zns_ssd));
     id_zns->num_ch = n->zns_params.zns_num_ch;
     id_zns->num_lun = n->zns_params.zns_num_lun;
+    id_zns->num_plane = n->zns_params.zns_num_plane;
+    id_zns->num_blk = n->zns_params.zns_num_blk;
+    id_zns->num_page = n->ns_size/ZNS_PAGE_SIZE/(id_zns->num_ch*id_zns->num_lun*id_zns->num_blk);
+    id_zns->lbasz = 1 << zns_ns_lbads(&n->namespaces[0]);
+    id_zns->flash_type = n->zns_params.zns_flash_type;
+
     id_zns->ch = g_malloc0(sizeof(struct zns_ch) * id_zns->num_ch);
     for (i =0; i < id_zns->num_ch; i++) {
-        zns_init_ch(&id_zns->ch[i], id_zns->num_lun);
+        zns_init_ch(&id_zns->ch[i], id_zns->num_lun,id_zns->num_plane,id_zns->num_blk,id_zns->flash_type);
     }
 
     id_zns->wp.ch = 0;
     id_zns->wp.lun = 0;
+
+    //Misao: init mapping table
+    id_zns->l2p_sz = n->ns_size/LOGICAL_PAGE_SIZE;
+    id_zns->maptbl = g_malloc0(sizeof(struct ppa) * id_zns->l2p_sz);
+    for (i = 0; i < id_zns->l2p_sz; i++) {
+        id_zns->maptbl[i].ppa = UNMAPPED_PPA;
+    }
+
+    //Misao: init sram
+    id_zns->program_unit = ZNS_PAGE_SIZE*id_zns->flash_type*2; //PAGE_SIZE*flash_type*2 planes
+    id_zns->stripe_uint = id_zns->program_unit*id_zns->num_ch*id_zns->num_lun;
+    id_zns->cache.num_wc = ZNS_DEFAULT_NUM_WRITE_CACHE;
+    id_zns->cache.write_cache = g_malloc0(sizeof(struct zns_write_cache) * id_zns->cache.num_wc);
+    for(i =0; i < id_zns->cache.num_wc; i++)
+    {
+        id_zns->cache.write_cache[i].sblk = i;
+        id_zns->cache.write_cache[i].used = 0;
+        id_zns->cache.write_cache[i].cap = (id_zns->stripe_uint/LOGICAL_PAGE_SIZE);
+        id_zns->cache.write_cache[i].lpns = g_malloc0(sizeof(uint64_t) * id_zns->cache.write_cache[i].cap);
+    }
+
+    femu_log("===========================================\n");
+    femu_log("|        ZMS HW Configuration()           |\n");      
+    femu_log("===========================================\n");
+    femu_log("|\tnchnl\t: %lu\t|\tchips per chnl\t: %lu\t|\tplanes per chip\t: %lu\t|\tblks per plane\t: %lu\t|\tpages per blk\t: %lu\t|\n",id_zns->num_ch,id_zns->num_lun,id_zns->num_plane,id_zns->num_blk,id_zns->num_page);
+    femu_log("|\tl2p sz\t: %lu\t|\tl2p cache sz\t: %u\t|\n",id_zns->l2p_sz,id_zns->cache.num_l2p_ent);
+    femu_log("|\tprogram unit\t: %lu KiB\t|\tstripe unit\t: %lu KiB\t|\t# of write caches\t: %u\t|\t size of write caches (4KiB)\t: %lu\t|\n",id_zns->program_unit/(KiB),id_zns->stripe_uint/(KiB),id_zns->cache.num_wc,(id_zns->stripe_uint/LOGICAL_PAGE_SIZE));
+    femu_log("===========================================\n"); 
+
+    //Misao: use average read latency
+    id_zns->timing.pg_rd_lat[SLC] = SLC_READ_LATENCY_NS;
+    id_zns->timing.pg_rd_lat[TLC] = TLC_READ_LATENCY_NS;
+    id_zns->timing.pg_rd_lat[QLC] = QLC_READ_LATENCY_NS;
+
+    //Misao: do not suppirt partial programing
+    id_zns->timing.pg_wr_lat[SLC] = SLC_PROGRAM_LATENCY_NS;
+    id_zns->timing.pg_wr_lat[TLC] = TLC_PROGRAM_LATENCY_NS;
+    id_zns->timing.pg_wr_lat[QLC] = QLC_PROGRAM_LATENCY_NS;
+
+    //Misao: copy from nand.h
+    id_zns->timing.blk_er_lat[SLC] = SLC_BLOCK_ERASE_LATENCY_NS;
+    id_zns->timing.blk_er_lat[TLC] = TLC_BLOCK_ERASE_LATENCY_NS;
+    id_zns->timing.blk_er_lat[QLC] = QLC_BLOCK_ERASE_LATENCY_NS;
+
+    id_zns->dataplane_started_ptr = &n->dataplane_started;
+
     n->zns = id_zns;
+
+    //Misao: init ftl
+    zftl_init(n);
 }
 
 static int zns_init_zone_cap(FemuCtrl *n)
 {
+    assert(n->zns);
+    struct zns_ssd* zns  = n->zns;
     n->zoned = true;
     n->zasl_bs = NVME_DEFAULT_MAX_AZ_SIZE;
-    n->zone_size_bs = NVME_DEFAULT_ZONE_SIZE;
+    n->zone_size_bs = zns->num_ch*zns->num_lun*zns->num_plane*zns->num_page*ZNS_PAGE_SIZE;
     n->zone_cap_bs = 0;
     n->cross_zone_read = false;
     n->max_active_zones = 0;
@@ -1528,6 +1349,7 @@ static void zns_init(FemuCtrl *n, Error **errp)
     NvmeNamespace *ns = &n->namespaces[0];
 
     zns_set_ctrl(n);
+    zns_init_params(n);
 
     zns_init_zone_cap(n);
 
@@ -1536,7 +1358,6 @@ static void zns_init(FemuCtrl *n, Error **errp)
     }
 
     zns_init_zone_identify(n, ns, 0);
-    zns_init_params(n);
 }
 
 static void zns_exit(FemuCtrl *n)

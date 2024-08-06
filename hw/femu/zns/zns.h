@@ -1,16 +1,58 @@
 #ifndef __FEMU_ZNS_H
 #define __FEMU_ZNS_H
 
+#define SPG_BITS    (2)
+#define PG_BITS     (16)
 #define BLK_BITS    (32)
-#define FC_BITS     (8)
-#define CH_BITS     (8)
+#define PL_BITS     (1)
+#define FC_BITS     (2)
+#define CH_BITS     (1)
 
 #include "../nvme.h"
+#include "zftl.h"
+
+#define LOGICAL_PAGE_SIZE (4*KiB)
+#define ZNS_PAGE_SIZE (16*KiB)
+#define ZNS_DEFAULT_NUM_WRITE_CACHE (3)
+#define ZNS_DEFAULT_L2P_CACHE_SIZE (1*MiB)
+
+//chunk size = 4MiB = 256*16KiB
+#define ZNS_LOG_CHUNK_SIZE (8)
+
+#define UNMAPPED_PPA    (~(0ULL))
+#define INVALID_LPN     (~(0ULL))
+#define INVALID_PPA     (~(0ULL))
+#define INVALID_SBLK     (~(0ULL))
+
+/**
+ * REFERENCE
+ * slc: [ISSCC 2020] A 128Gb 1b/Cell 96-Word-Line-Layer 3D Flash Memory to Improve Random Read Latency with tPROG=75µs and tR=4µs
+ * tlc: one-step program, plat_us = 1e6×PageSize×3÷(ProgramThroughput/# of planes) [ISSCC 2024] A 1Tb Density 3b/Cell 3D-NAND Flash on a 2YY-Tier Technology with a 300MB/s Write Throughput
+ * qlc: two-step program, plat_us = 2×1e6×PageSize×4÷(ProgramThroughput/# of planes) [ISSCC 2024] A 280-Layer 1Tb 4b/cell 3D-NAND Flash Memory with a 28.5Gb/mm2 Areal Density and a 3.2GB/s High-Speed IO Rate
+ */
+#define SLC_PROGRAM_LATENCY_NS (75000)
+#define TLC_PROGRAM_LATENCY_NS (937500)
+#define QLC_PROGRAM_LATENCY_NS (12196000)
+
+#define SLC_READ_LATENCY_NS (4000)
+#define TLC_READ_LATENCY_NS (32000)
+#define QLC_READ_LATENCY_NS (85000)
+
+/**
+ * just to emulate very small read/write latency
+ */
+#define SRAM_WRITE_LATENCY_NS (1000)
+#define SRAM_READ_LATENCY_NS (1000)
 
 enum {
     NAND_READ =  0,
     NAND_WRITE = 1,
     NAND_ERASE = 2,
+};
+
+enum {
+    USER_IO = 0,
+    GC_IO = 1,
 };
 
 typedef struct QEMU_PACKED NvmeZonedResult {
@@ -25,10 +67,14 @@ typedef struct NvmeIdCtrlZoned {
 struct ppa {
     union {
         struct {
-	    uint64_t blk : BLK_BITS;
-	    uint64_t fc  : FC_BITS;
-	    uint64_t ch  : CH_BITS;
-	    uint64_t rsv : 1;
+        uint64_t spg  : SPG_BITS;
+        uint64_t pg   : PG_BITS;
+	    uint64_t blk  : BLK_BITS;
+	    uint64_t fc   : FC_BITS;
+        uint64_t pl   : PL_BITS;
+	    uint64_t ch   : CH_BITS;
+        uint64_t V    : 1;
+        uint64_t rsv  : 8;
         } g;
 
 	uint64_t ppa;
@@ -42,15 +88,24 @@ struct write_pointer {
 
 struct nand_cmd {
     int cmd;
+    int type;
     uint64_t stime;
 };
 
+
 struct zns_blk {
+    int nand_type;
     uint64_t next_blk_avail_time;
+    uint64_t page_wp; //next free page
+};
+
+struct zns_plane{
+    struct zns_blk *blk;
+    uint64_t next_plane_avail_time;
 };
 
 struct zns_fc {
-    struct zns_blk *blk;
+    struct zns_plane *plane;
     uint64_t next_fc_avail_time;
 };
 
@@ -59,11 +114,53 @@ struct zns_ch {
     uint64_t next_ch_avail_time;
 };
 
+
+typedef struct SSDNandFlashTiming {
+    uint64_t pg_rd_lat[MAX_FLASH_TYPE];  /* NAND page read latency in nanoseconds */
+    uint64_t pg_wr_lat[MAX_FLASH_TYPE]; /* NAND page program latency in nanoseconds */
+    uint64_t blk_er_lat[MAX_FLASH_TYPE]; /* NAND block erase latency in nanoseconds */
+} SSDNandFlashTiming;
+
+struct zns_write_cache{
+    uint64_t sblk; //idx of corresponding superblock
+    uint64_t used; 
+    uint64_t cap;
+    uint64_t* lpns; //identify the cached data
+};
+
+struct zns_sram{
+    int num_wc;
+    struct zns_write_cache* write_cache;
+};
+
 struct zns_ssd {
     uint64_t num_ch;
     uint64_t num_lun;
+    uint64_t num_plane;
+    uint64_t num_blk;
+    uint64_t num_page;
+
     struct zns_ch *ch;
     struct write_pointer wp;
+
+    SSDNandFlashTiming timing; /*Misao: accurate  timing emulation for zns ssd.*/
+    int flash_type;
+    uint64_t program_unit;
+    uint64_t stripe_uint;
+    struct zns_sram cache;
+
+    /*Misao: we still need a ftl in consumer devices*/
+    uint64_t l2p_sz; /* = # of 4KiB pages*/
+    struct ppa *maptbl; /* (page - chunk - block) hybrid L2P mapping table */
+
+    /* lockless ring for communication with NVMe IO thread */
+    struct rte_ring **to_ftl;
+    struct rte_ring **to_poller;
+    bool *dataplane_started_ptr;
+    QemuThread ftl_thread;
+
+    uint32_t lbasz;
+    uint32_t active_zone;
 };
 
 enum NvmeZoneAttr {
