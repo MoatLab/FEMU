@@ -417,7 +417,7 @@ static int oc12_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
 
     req->expire_time = now + total_time_need_to_emulate;
-
+    g_free(addr_bucket);
     return 0;
 }
 
@@ -676,6 +676,7 @@ static uint16_t oc12_bbt_set(FemuCtrl *n, NvmeCmd *cmd)
     int i;
 
     if (nsid == 0 || nsid > n->num_namespaces) {
+        g_free(ppas);
         return NVME_INVALID_NSID | NVME_DNR;
     }
 
@@ -691,6 +692,7 @@ static uint16_t oc12_bbt_set(FemuCtrl *n, NvmeCmd *cmd)
 
     } else {
         if (dma_write_prp(n, (uint8_t *)ppas, nlb * 8, spba, prp2)) {
+            g_free(ppas);
             return NVME_INVALID_FIELD | NVME_DNR;
         }
 
@@ -703,6 +705,7 @@ static uint16_t oc12_bbt_set(FemuCtrl *n, NvmeCmd *cmd)
         }
     }
 
+    g_free(ppas);
     return NVME_SUCCESS;
 }
 
@@ -752,6 +755,7 @@ static uint16_t oc12_erase_async(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     oc12_advance_status(n, ns, cmd, req);
 
+    g_free(psl);
     return NVME_SUCCESS;
 }
 
