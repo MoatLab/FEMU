@@ -71,6 +71,7 @@ uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
                 }
 
                 if (!prp_ent || prp_ent & (n->page_size - 1)) {
+                    free(prp_list);
                     goto unmap;
                 }
 
@@ -84,6 +85,7 @@ uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
                 len -= trans_len;
                 i++;
             }
+            free(prp_list);
         } else {
             if (prp2 & (n->page_size - 1)) {
                 goto unmap;
