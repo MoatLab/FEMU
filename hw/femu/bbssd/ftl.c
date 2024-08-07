@@ -1,6 +1,6 @@
 #include "ftl.h"
 
-//#define FEMU_DEBUG_FTL
+// #define FEMU_DEBUG_FTL
 
 static void *ftl_thread(void *arg);
 
@@ -81,6 +81,12 @@ static inline void victim_line_set_pos(void *a, size_t pos)
     ((struct line *)a)->pos = pos;
 }
 
+int comp_buffer(const void *a, const void *b);
+
+int comp_buffer(const void *a, const void *b){
+	return ((buffer_entry*)a)->lpn - ((buffer_entry*)b)->lpn;
+}
+
 static void ssd_init_lines(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;
@@ -131,6 +137,13 @@ static void ssd_init_write_pointer(struct ssd *ssd)
     wpp->pg = 0;
     wpp->blk = 0;
     wpp->pl = 0;
+
+    //Write Buffer: QUEUE
+    QTAILQ_INIT(&ssd->write_buffer);
+    ssd->write_buffer_cnt=0;
+
+    //Write Buffer: AVL Tree
+    ssd->wb_tree = g_tree_new(comp_buffer);
 }
 
 static inline void check_addr(int a, int max)
@@ -282,6 +295,13 @@ static void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->gc_thres_lines_high = (int)((1 - spp->gc_thres_pcent_high) * spp->tt_lines);
     spp->enable_gc_delay = true;
 
+    spp->buffer_size = n->bb_params.buffer_size;
+    spp->buffer_thres_pcent = n->bb_params.buffer_thres_pcent/100.0;;
+
+    spp->read_hit_cnt = 0;
+    spp->write_hit_cnt = 0;
+    spp->read_cnt = 0;
+    spp->write_cnt = 0;
 
     check_params(spp);
 }
@@ -767,6 +787,96 @@ static int do_gc(struct ssd *ssd, bool force)
     return 0;
 }
 
+bool buffer_full(struct ssd *ssd);
+
+bool buffer_full(struct ssd *ssd){
+    return (ssd->sp.buffer_size * ssd->sp.buffer_thres_pcent <= ssd->write_buffer_cnt);
+}
+
+uint64_t buffer_select_victim(struct ssd *ssd);
+
+uint64_t buffer_select_victim(struct ssd *ssd){
+    // LRU
+    struct buffer_entry *victim_entry = NULL;
+    uint64_t victim_lpn = 0;
+
+    victim_entry = QTAILQ_FIRST(&ssd->write_buffer);
+
+    if(!victim_entry){
+        printf("FEMU-FTL: Error, no victim entry in write buffer!!! \n");
+        return 0;
+        // return NULL;
+    }
+
+    victim_lpn = victim_entry->lpn;
+    QTAILQ_REMOVE(&ssd->write_buffer, victim_entry, b_entry); // remove from queue
+    g_tree_remove(ssd->wb_tree, victim_entry);  // remove from avl tree
+
+    free(victim_entry);
+    ssd->write_buffer_cnt--;
+
+    return victim_lpn;
+}
+
+bool buffer_insert_entry(struct ssd *ssd, struct buffer_entry *new_entry);
+
+bool buffer_insert_entry(struct ssd *ssd, struct buffer_entry *new_entry){
+
+    struct buffer_entry *old_entry = NULL;
+
+    old_entry = g_tree_lookup(ssd->wb_tree, new_entry);
+
+    // LRU
+    if (old_entry == NULL) {
+        // new write
+        g_tree_insert(ssd->wb_tree, new_entry, new_entry);
+        QTAILQ_INSERT_TAIL(&ssd->write_buffer, new_entry, b_entry);
+        ssd->write_buffer_cnt++;
+
+        return false;
+    } 
+    else {
+        // update
+        g_tree_remove(ssd->wb_tree, old_entry);
+        QTAILQ_REMOVE(&ssd->write_buffer, old_entry, b_entry);
+        free(old_entry);
+
+        g_tree_insert(ssd->wb_tree, new_entry, new_entry);
+        QTAILQ_INSERT_TAIL(&ssd->write_buffer, new_entry, b_entry);
+
+        return true;
+    }
+
+    // FIFO
+    // g_tree_insert(ssd->wb_tree, new_entry, new_entry);
+    // QTAILQ_INSERT_TAIL(&ssd->write_buffer, new_entry, b_entry);
+    // ssd->write_buffer_cnt++;
+
+    // if (old_entry == NULL) {
+    //     return false;
+    // } else {
+    //     return true;
+    // }
+}
+
+bool buffer_hit(struct ssd *ssd, uint64_t lpn);
+
+bool buffer_hit(struct ssd *ssd, uint64_t lpn) {
+    // Buffer lookup for 'read'
+
+    struct buffer_entry *buffer_entry = NULL;
+    struct buffer_entry target;
+    target.lpn = lpn;
+
+    buffer_entry = g_tree_lookup(ssd->wb_tree, &target);
+    if (buffer_entry == NULL){
+        return false;
+    } 
+    else {
+        return true;
+    }
+}
+
 static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
 {
     struct ssdparams *spp = &ssd->sp;
@@ -777,27 +887,45 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
     uint64_t end_lpn = (lba + nsecs - 1) / spp->secs_per_pg;
     uint64_t lpn;
     uint64_t sublat, maxlat = 0;
+    bool hitcheck = true;
 
     if (end_lpn >= spp->tt_pgs) {
         ftl_err("start_lpn=%"PRIu64",tt_pgs=%d\n", start_lpn, ssd->sp.tt_pgs);
     }
 
     /* normal IO read path */
+    ssd->sp.read_cnt++;
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
-        ppa = get_maptbl_ent(ssd, lpn);
-        if (!mapped_ppa(&ppa) || !valid_ppa(ssd, &ppa)) {
-            //printf("%s,lpn(%" PRId64 ") not mapped to valid ppa\n", ssd->ssdname, lpn);
-            //printf("Invalid ppa,ch:%d,lun:%d,blk:%d,pl:%d,pg:%d,sec:%d\n",
-            //ppa.g.ch, ppa.g.lun, ppa.g.blk, ppa.g.pl, ppa.g.pg, ppa.g.sec);
+        if (buffer_hit(ssd, lpn)) {
             continue;
         }
+        else {
+            hitcheck = false;
+            ppa = get_maptbl_ent(ssd, lpn);
+            if (!mapped_ppa(&ppa) || !valid_ppa(ssd, &ppa)) {
+                //printf("%s,lpn(%" PRId64 ") not mapped to valid ppa\n", ssd->ssdname, lpn);
+                //printf("Invalid ppa,ch:%d,lun:%d,blk:%d,pl:%d,pg:%d,sec:%d\n",
+                //ppa.g.ch, ppa.g.lun, ppa.g.blk, ppa.g.pl, ppa.g.pg, ppa.g.sec);
+                continue;
+            }
 
-        struct nand_cmd srd;
-        srd.type = USER_IO;
-        srd.cmd = NAND_READ;
-        srd.stime = req->stime;
-        sublat = ssd_advance_status(ssd, &ppa, &srd);
-        maxlat = (sublat > maxlat) ? sublat : maxlat;
+            struct nand_cmd srd;
+            srd.type = USER_IO;
+            srd.cmd = NAND_READ;
+            srd.stime = req->stime;
+            sublat = ssd_advance_status(ssd, &ppa, &srd);
+            maxlat = (sublat > maxlat) ? sublat : maxlat;
+        }
+    }
+
+    // ssd_read
+	if (ssd->sp.read_cnt % 1000 == 0) {
+		ftl_debug("Buffer Read: read_hit_ratio=%.5f;read_hit_cnt=%d;read_cnt=%d\n", 
+        (double) ssd->sp.read_hit_cnt/ssd->sp.read_cnt, ssd->sp.read_hit_cnt, ssd->sp.read_cnt);
+	}
+
+    if (hitcheck == true){
+        ssd->sp.read_hit_cnt++;
     }
 
     return maxlat;
@@ -812,8 +940,12 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     uint64_t end_lpn = (lba + len - 1) / spp->secs_per_pg;
     struct ppa ppa;
     uint64_t lpn;
+    uint64_t victim_lpn=0;
     uint64_t curlat = 0, maxlat = 0;
     int r;
+    struct buffer_entry *buffer_entry;
+    struct nand_lun *new_lun;
+    bool hitcheck = true;
 
     if (end_lpn >= spp->tt_pgs) {
         ftl_err("start_lpn=%"PRIu64",tt_pgs=%d\n", start_lpn, ssd->sp.tt_pgs);
@@ -825,9 +957,11 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         if (r == -1)
             break;
     }
+    
 
-    for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
-        ppa = get_maptbl_ent(ssd, lpn);
+    while (buffer_full(ssd)) {
+        victim_lpn = buffer_select_victim(ssd);
+        ppa = get_maptbl_ent(ssd, victim_lpn);
         if (mapped_ppa(&ppa)) {
             /* update old page information first */
             mark_page_invalid(ssd, &ppa);
@@ -837,9 +971,9 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         /* new write */
         ppa = get_new_page(ssd);
         /* update maptbl */
-        set_maptbl_ent(ssd, lpn, &ppa);
+        set_maptbl_ent(ssd, victim_lpn, &ppa);
         /* update rmap */
-        set_rmap_ent(ssd, lpn, &ppa);
+        set_rmap_ent(ssd, victim_lpn, &ppa);
 
         mark_page_valid(ssd, &ppa);
 
@@ -853,6 +987,29 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         /* get latency statistics */
         curlat = ssd_advance_status(ssd, &ppa, &swr);
         maxlat = (curlat > maxlat) ? curlat : maxlat;
+
+        new_lun = get_lun(ssd, &ppa);
+        new_lun->evict_endtime = new_lun->next_lun_avail_time;    
+    }
+
+    ssd->sp.write_cnt++;
+    for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
+        curlat = 0;
+        buffer_entry = malloc(sizeof(struct buffer_entry));
+        buffer_entry->lpn = lpn;
+        hitcheck = buffer_insert_entry(ssd, buffer_entry) && hitcheck;
+
+        maxlat = (curlat > maxlat) ? curlat : maxlat;
+    }
+
+    // ssd_write
+	if (ssd->sp.write_cnt % 10000 == 0) {
+		ftl_debug("Buffer Write: write_hit_ratio=%.10f;write_hit_cnt=%d;write_cnt=%d\n", 
+        (double) ssd->sp.write_hit_cnt/ssd->sp.write_cnt, ssd->sp.write_hit_cnt, ssd->sp.write_cnt);
+	}
+
+    if (hitcheck) {
+        ssd->sp.write_hit_cnt++;
     }
 
     return maxlat;
@@ -864,6 +1021,7 @@ static void *ftl_thread(void *arg)
     struct ssd *ssd = n->ssd;
     NvmeRequest *req = NULL;
     uint64_t lat = 0;
+    // uint64_t old_lat = 0;
     int rc;
     int i;
 
@@ -903,6 +1061,11 @@ static void *ftl_thread(void *arg)
 
             req->reqlat = lat;
             req->expire_time += lat;
+
+            // if (lat != old_lat) {
+            //     printf("Lat %lu\n", lat);
+            // }
+            // old_lat = lat;
 
             rc = femu_ring_enqueue(ssd->to_poller[i], (void *)&req, 1);
             if (rc != 1) {
