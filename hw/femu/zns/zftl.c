@@ -174,7 +174,7 @@ static uint64_t zns_read(struct zns_ssd *zns, NvmeRequest *req)
     uint64_t secs_per_pg = LOGICAL_PAGE_SIZE/zns->lbasz;
     uint64_t start_lpn = lba / secs_per_pg;
     uint64_t end_lpn = (lba + nlb - 1) / secs_per_pg;
-    int wcidx = zns_get_wcidx(zns);
+    //int wcidx = zns_get_wcidx(zns);
     struct ppa ppa;
     uint64_t lpn;
     uint64_t sublat, maxlat = 0;
@@ -201,13 +201,13 @@ static uint64_t zns_read(struct zns_ssd *zns, NvmeRequest *req)
 
 static uint64_t zns_wc_flush(struct zns_ssd* zns, int wcidx, int type,uint64_t stime)
 {
-    int r,i,j,p,subpage;
+    int i,j,p,subpage;
     struct ppa ppa;
     struct ppa oldppa;
     uint64_t lpn;
     int flash_type = zns->flash_type;
     uint64_t sublat = 0, maxlat = 0;
-    
+
     i = 0;
     while(i < zns->cache.write_cache[wcidx].used)
     {
@@ -291,20 +291,20 @@ static uint64_t zns_write(struct zns_ssd *zns, NvmeRequest *req)
         if(t_used) maxlat = zns_wc_flush(zns,wcidx,USER_IO,req->stime);
         zns->cache.write_cache[wcidx].sblk = zns->active_zone;
     }
-    
+
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
         if(zns->cache.write_cache[wcidx].used==zns->cache.write_cache[wcidx].cap)
         {
-            femu_log("[W] flush wc %d (%u/%u)\n",wcidx,zns->cache.write_cache[wcidx].used,zns->cache.write_cache[wcidx].cap);
+            femu_log("[W] flush wc %d (%u/%u)\n",wcidx,(int)zns->cache.write_cache[wcidx].used,(int)zns->cache.write_cache[wcidx].cap);
             sublat = zns_wc_flush(zns,wcidx,USER_IO,req->stime);
-            femu_log("[W] flush lat: %u\n",sublat);
+            femu_log("[W] flush lat: %u\n", (int)sublat);
             maxlat = (sublat > maxlat) ? sublat : maxlat;
             sublat = 0;
         }
         zns->cache.write_cache[wcidx].lpns[zns->cache.write_cache[wcidx].used++]=lpn;
         sublat += SRAM_WRITE_LATENCY_NS; //Simplified timing emulation
         maxlat = (sublat > maxlat) ? sublat : maxlat;
-        femu_log("[W] lpn:\t%lu\t-->wc cache:%u, used:%u\n",lpn,wcidx,zns->cache.write_cache[wcidx].used);
+        femu_log("[W] lpn:\t%lu\t-->wc cache:%u, used:%u\n",lpn,(int)wcidx,(int)zns->cache.write_cache[wcidx].used);
     }
     return maxlat;
 }
