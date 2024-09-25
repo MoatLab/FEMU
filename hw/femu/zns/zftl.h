@@ -8,6 +8,7 @@
 #define UNMAPPED_PPA    (~(0ULL))
 
 void zftl_init(FemuCtrl *n);
+void zns_reset(struct zns_ssd *zns, uint32_t zid, uint64_t slba, uint64_t elba);
 
 #ifdef FEMU_DEBUG_ZFTL
 #define ftl_debug(fmt, ...) \
