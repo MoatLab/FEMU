@@ -1,4 +1,5 @@
 #include "./zns.h"
+#include "./pv.h"
 
 #define MIN_DISCARD_GRANULARITY     (4 * KiB)
 #define NVME_DEFAULT_ZONE_SIZE      (128 * MiB)
@@ -110,7 +111,10 @@ static void zns_init_zoned_state(NvmeNamespace *ns)
         zone->d.zslba = start;
         zone->d.wp = start;
         zone->w_ptr = start;
+        //yt
+        zone->reset_times = 0;
         start += zone_size;
+        zone->d.performance = gaussrand(12196000, 10000000);
     }
 
     n->zone_size_log2 = 0;
@@ -629,6 +633,9 @@ static uint16_t zns_finish_zone(NvmeNamespace *ns, NvmeZone *zone,
 static uint16_t zns_reset_zone(NvmeNamespace *ns, NvmeZone *zone,
                                NvmeZoneState state, NvmeRequest *req)
 {
+    FemuCtrl *n = ns->ctrl;
+    struct zns_ssd *zns = n->zns;
+    uint32_t zone_idx;
     switch (state) {
     case NVME_ZONE_STATE_EMPTY:
         return NVME_SUCCESS;
@@ -641,6 +648,14 @@ static uint16_t zns_reset_zone(NvmeNamespace *ns, NvmeZone *zone,
         return NVME_ZONE_INVAL_TRANSITION;
     }
 
+    //yt
+    zone_idx = zns_zone_idx(ns, zone->d.zslba);
+    zone->reset_times++;
+    // zns->extra_delay[zone_idx] = zone->reset_times * 10000000 + zone->d.performance;
+    zns->extra_delay[zone_idx] = zone->d.performance;
+    zone->d.performance += 1000000;
+    // printf("zslba:%10lu\treset_times:%10lu\r\n", zone->d.zslba << ns->id_ns.lbaf[0].lbads , zone->reset_times);
+    // printf("femu performance:%10lu\r\n", zone->d.performance);
     zns_aio_zone_reset_cb(req, zone);
 
     return NVME_SUCCESS;
@@ -796,6 +811,38 @@ static uint16_t zns_get_mgmt_zone_slba_idx(FemuCtrl *n, NvmeCmd *c,
     return NVME_SUCCESS;
 }
 
+static inline uint16_t zns_check_bounds(NvmeNamespace *ns, uint64_t slba,
+                                        uint32_t nlb)
+{
+    uint64_t nsze = le64_to_cpu(ns->id_ns.nsze);
+
+    if (unlikely(UINT64_MAX - slba < nlb || slba + nlb > nsze)) {
+        return NVME_LBA_RANGE | NVME_DNR;
+    }
+
+    return NVME_SUCCESS;
+}
+
+static uint16_t zns_map_dptr(FemuCtrl *n, size_t len, NvmeRequest *req)
+{
+    uint64_t prp1, prp2;
+
+    switch (req->cmd.psdt) {
+    case NVME_PSDT_PRP:
+        prp1 = le64_to_cpu(req->cmd.dptr.prp1);
+        prp2 = le64_to_cpu(req->cmd.dptr.prp2);
+
+        return nvme_map_prp(&req->qsg, &req->iov, prp1, prp2, len, n);
+    default:
+        return NVME_INVALID_FIELD;
+    }
+}
+
+static uint16_t zns_check_dulbe(NvmeNamespace *ns, uint64_t slba, uint32_t nlb)
+{
+    return NVME_SUCCESS;
+}
+
 /*Misao: backend read/write without latency emulation*/
 static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                            NvmeRequest *req,bool append)
@@ -877,6 +924,7 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
 
     n->zns->active_zone = zns_zone_idx(ns,slba);
+    // printf("active_zone[%u]\r\n, n->zns->active_zone")
     return NVME_SUCCESS;
 err:
     return status | NVME_DNR;
@@ -1086,6 +1134,8 @@ static uint16_t zns_zone_mgmt_recv(FemuCtrl *n, NvmeRequest *req)
             z->zcap = cpu_to_le64(zone->d.zcap);
             z->zslba = cpu_to_le64(zone->d.zslba);
             z->za = zone->d.za;
+            //yt
+            z->performance = cpu_to_le64(zone->d.performance);
 
             if (zns_wp_is_valid(zone)) {
                 z->wp = cpu_to_le64(zone->d.wp);
@@ -1123,45 +1173,12 @@ static inline bool nvme_csi_has_nvm_support(NvmeNamespace *ns)
     return false;
 }
 
-static inline uint16_t zns_check_bounds(NvmeNamespace *ns, uint64_t slba,
-                                        uint32_t nlb)
-{
-    uint64_t nsze = le64_to_cpu(ns->id_ns.nsze);
-
-    if (unlikely(UINT64_MAX - slba < nlb || slba + nlb > nsze)) {
-        return NVME_LBA_RANGE | NVME_DNR;
-    }
-
-    return NVME_SUCCESS;
-}
-
-static uint16_t zns_map_dptr(FemuCtrl *n, size_t len, NvmeRequest *req)
-{
-    uint64_t prp1, prp2;
-
-    switch (req->cmd.psdt) {
-    case NVME_PSDT_PRP:
-        prp1 = le64_to_cpu(req->cmd.dptr.prp1);
-        prp2 = le64_to_cpu(req->cmd.dptr.prp2);
-
-        return nvme_map_prp(&req->qsg, &req->iov, prp1, prp2, len, n);
-    default:
-        return NVME_INVALID_FIELD;
-    }
-}
-
-
 static uint16_t zns_admin_cmd(FemuCtrl *n, NvmeCmd *cmd)
 {
     switch (cmd->opcode) {
     default:
         return NVME_INVALID_OPCODE | NVME_DNR;
     }
-}
-
-static uint16_t zns_check_dulbe(NvmeNamespace *ns, uint64_t slba, uint32_t nlb)
-{
-    return NVME_SUCCESS;
 }
 
 static uint16_t zns_io_cmd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
@@ -1280,10 +1297,10 @@ static void zns_init_params(FemuCtrl *n)
     }
 
     femu_log("===========================================\n");
-    femu_log("|        ZMS HW Configuration()           |\n");      
+    femu_log("|        ZNS HW Configuration()           |\n");      
     femu_log("===========================================\n");
     femu_log("|\tnchnl\t: %lu\t|\tchips per chnl\t: %lu\t|\tplanes per chip\t: %lu\t|\tblks per plane\t: %lu\t|\tpages per blk\t: %lu\t|\n",id_zns->num_ch,id_zns->num_lun,id_zns->num_plane,id_zns->num_blk,id_zns->num_page);
-    femu_log("|\tl2p sz\t: %lu\t|\tl2p cache sz\t: %u\t|\n",id_zns->l2p_sz,id_zns->cache.num_l2p_ent);
+    // femu_log("|\tl2p sz\t: %lu\t|\tl2p cache sz\t: %u\t|\n",id_zns->l2p_sz,id_zns->cache.num_l2p_ent);
     femu_log("|\tprogram unit\t: %lu KiB\t|\tstripe unit\t: %lu KiB\t|\t# of write caches\t: %u\t|\t size of write caches (4KiB)\t: %lu\t|\n",id_zns->program_unit/(KiB),id_zns->stripe_uint/(KiB),id_zns->cache.num_wc,(id_zns->stripe_uint/LOGICAL_PAGE_SIZE));
     femu_log("===========================================\n"); 
 
@@ -1303,6 +1320,10 @@ static void zns_init_params(FemuCtrl *n)
     id_zns->timing.blk_er_lat[QLC] = QLC_BLOCK_ERASE_LATENCY_NS;
 
     id_zns->dataplane_started_ptr = &n->dataplane_started;
+
+    //yt
+    id_zns->test_time = 0;
+    id_zns->extra_delay = g_malloc0(sizeof(uint64_t) * id_zns->num_blk);
 
     n->zns = id_zns;
 

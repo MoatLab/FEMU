@@ -97,6 +97,8 @@ struct zns_blk {
     int nand_type;
     uint64_t next_blk_avail_time;
     uint64_t page_wp; //next free page
+    //yt
+    u_int64_t extra_delay;
 };
 
 struct zns_plane{
@@ -161,6 +163,9 @@ struct zns_ssd {
 
     uint32_t lbasz;
     uint32_t active_zone;
+    //yt
+    uint16_t test_time;
+    uint64_t *extra_delay;
 };
 
 enum NvmeZoneAttr {
@@ -214,7 +219,10 @@ typedef struct QEMU_PACKED NvmeZoneDescr {
     uint64_t    zcap;
     uint64_t    zslba;
     uint64_t    wp;
-    uint8_t     rsvd32[32];
+    // yt
+    uint64_t    performance;   
+    uint8_t     rsvd32[24];
+    // uint8_t     rsvd32[32];
 } NvmeZoneDescr;
 
 typedef enum NvmeZoneState {
@@ -252,6 +260,8 @@ typedef struct QEMU_PACKED NvmeIdNsZoned {
 typedef struct NvmeZone {
     NvmeZoneDescr   d;
     uint64_t        w_ptr;
+    //yt
+    uint64_t reset_times;
     QTAILQ_ENTRY(NvmeZone) entry;
 } NvmeZone;
 
