@@ -84,6 +84,7 @@ struct ppa {
 struct write_pointer {
     uint64_t ch;
     uint64_t lun;
+    uint64_t pl;
 };
 
 struct nand_cmd {
@@ -99,6 +100,7 @@ struct zns_blk {
     uint64_t page_wp; //next free page
     //yt
     u_int64_t extra_delay;
+    uint64_t ipc; //invalid page count
 };
 
 struct zns_plane{
@@ -130,17 +132,18 @@ struct zns_write_cache{
     uint64_t* lpns; //identify the cached data
 };
 
-struct zns_sram{
+struct zns_buffer{
     int num_wc;
     struct zns_write_cache* write_cache;
 };
 
 struct zns_ssd {
-    uint64_t num_ch;
-    uint64_t num_lun;
-    uint64_t num_plane;
-    uint64_t num_blk;
-    uint64_t num_page;
+    uint64_t num_chs;
+    uint64_t luns_per_ch;
+    uint64_t planes_per_lun;
+    uint64_t blks_per_plane;
+    uint64_t flashpages_per_blk;
+    uint64_t pages_per_flashpage;
 
     struct zns_ch *ch;
     struct write_pointer wp;
@@ -149,7 +152,7 @@ struct zns_ssd {
     int flash_type;
     uint64_t program_unit;
     uint64_t stripe_uint;
-    struct zns_sram cache;
+    struct zns_buffer cache;
 
     /*Misao: we still need a ftl in consumer devices*/
     uint64_t l2p_sz; /* = # of 4KiB pages*/

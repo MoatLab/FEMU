@@ -55,6 +55,7 @@ static int zns_init_zone_geometry(NvmeNamespace *ns, Error **errp)
     n->zone_size = zone_size / lbasz;
     n->zone_capacity = zone_cap / lbasz;
     n->num_zones = ns->size / lbasz / n->zone_size;
+    femu_log("zone size(# of sectors): %ld, zone capacity %ld, num zons %d\n",n->zone_size,n->zone_capacity,n->num_zones);
 
     if (n->max_open_zones > n->num_zones) {
         femu_err("max_open_zones value %u exceeds the number of zones %u",
@@ -509,8 +510,6 @@ struct zns_zone_reset_ctx {
 static void zns_aio_zone_reset_cb(NvmeRequest *req, NvmeZone *zone)
 {
     NvmeNamespace *ns = req->ns;
-    FemuCtrl *n = ns->ctrl;
-    int ch, lun;
 
     /* FIXME, We always assume reset SUCCESS */
     switch (zns_get_zone_state(zone)) {
@@ -530,19 +529,7 @@ static void zns_aio_zone_reset_cb(NvmeRequest *req, NvmeZone *zone)
         break;
     }
 
-    struct zns_ssd *zns = n->zns;
-    uint64_t num_ch = zns->num_ch;
-    uint64_t num_lun = zns->num_lun;
-    struct ppa ppa;
-
-    for (ch = 0; ch < num_ch; ch++) {
-        for (lun = 0; lun < num_lun; lun++) {
-            ppa.g.ch = ch;
-            ppa.g.fc = lun;
-            ppa.g.blk = zns_zone_idx(ns, zone->d.zslba);
-            //FIXME: no erase
-        }
-    }
+    zns_reset(ns->ctrl->zns, zns_zone_idx(ns, zone->d.zslba), zone->d.zslba, zns_zone_rd_boundary(ns,zone));
 }
 
 typedef uint16_t (*op_handler_t)(NvmeNamespace *, NvmeZone *, NvmeZoneState,
@@ -823,6 +810,11 @@ static inline uint16_t zns_check_bounds(NvmeNamespace *ns, uint64_t slba,
     return NVME_SUCCESS;
 }
 
+static uint16_t zns_check_dulbe(NvmeNamespace *ns, uint64_t slba, uint32_t nlb)
+{
+    return NVME_SUCCESS;
+}
+
 static uint16_t zns_map_dptr(FemuCtrl *n, size_t len, NvmeRequest *req)
 {
     uint64_t prp1, prp2;
@@ -836,11 +828,6 @@ static uint16_t zns_map_dptr(FemuCtrl *n, size_t len, NvmeRequest *req)
     default:
         return NVME_INVALID_FIELD;
     }
-}
-
-static uint16_t zns_check_dulbe(NvmeNamespace *ns, uint64_t slba, uint32_t nlb)
-{
-    return NVME_SUCCESS;
 }
 
 /*Misao: backend read/write without latency emulation*/
@@ -896,15 +883,15 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         }
 
         /* Misao
-        Deallocated or Unwritten Logical Block Error (DULBE) is an option on NVMe drives that allows a storage array to deallocate blocks that are part of a volume. Deallocating blocks on a drive can greatly reduce the time it takes to initialize volumes. In addition, hosts can deallocate logical blocks in the volume using the NVMe Dataset Management command.
+           Deallocated or Unwritten Logical Block Error (DULBE) is an option on
+           NVMe drives that allows a storage array to deallocate blocks that are
+           part of a volume. Deallocating blocks on a drive can greatly reduce
+           the time it takes to initialize volumes. In addition, hosts can
+           deallocate logical blocks in the volume using the NVMe Dataset
+           Management command.
         */
-        if (NVME_ERR_REC_DULBE(n->features.err_rec)) {
-            status = zns_check_dulbe(ns, slba, nlb);
-            if (status) {
-                goto err;
-            }
-        }
-    }
+        if (NVME_ERR_REC_DULBE(n->features.err_rec)) { status =
+            zns_check_dulbe(ns, slba, nlb); if (status) { goto err; } } }
 
     data_offset = zns_l2b(ns, slba);
     status = zns_map_dptr(n, data_size, req);
@@ -1260,17 +1247,18 @@ static void zns_init_params(FemuCtrl *n)
     int i;
 
     id_zns = g_malloc0(sizeof(struct zns_ssd));
-    id_zns->num_ch = n->zns_params.zns_num_ch;
-    id_zns->num_lun = n->zns_params.zns_num_lun;
-    id_zns->num_plane = n->zns_params.zns_num_plane;
-    id_zns->num_blk = n->zns_params.zns_num_blk;
-    id_zns->num_page = n->ns_size/ZNS_PAGE_SIZE/(id_zns->num_ch*id_zns->num_lun*id_zns->num_blk);
+    id_zns->num_chs = n->zns_params.zns_num_ch;
+    id_zns->luns_per_ch = n->zns_params.zns_num_lun;
+    id_zns->planes_per_lun = n->zns_params.zns_num_plane;
+    id_zns->blks_per_plane = n->zns_params.zns_num_blk;
+    id_zns->flashpages_per_blk = n->ns_size/ZNS_PAGE_SIZE/(id_zns->num_chs*id_zns->luns_per_ch*id_zns->planes_per_lun*id_zns->blks_per_plane);
+    id_zns->pages_per_flashpage = ZNS_PAGE_SIZE/LOGICAL_PAGE_SIZE;
     id_zns->lbasz = 1 << zns_ns_lbads(&n->namespaces[0]);
     id_zns->flash_type = n->zns_params.zns_flash_type;
 
-    id_zns->ch = g_malloc0(sizeof(struct zns_ch) * id_zns->num_ch);
-    for (i =0; i < id_zns->num_ch; i++) {
-        zns_init_ch(&id_zns->ch[i], id_zns->num_lun,id_zns->num_plane,id_zns->num_blk,id_zns->flash_type);
+    id_zns->ch = g_malloc0(sizeof(struct zns_ch) * id_zns->num_chs);
+    for (i =0; i < id_zns->num_chs; i++) {
+        zns_init_ch(&id_zns->ch[i], id_zns->luns_per_ch,id_zns->planes_per_lun,id_zns->blks_per_plane,id_zns->flash_type);
     }
 
     id_zns->wp.ch = 0;
@@ -1283,9 +1271,9 @@ static void zns_init_params(FemuCtrl *n)
         id_zns->maptbl[i].ppa = UNMAPPED_PPA;
     }
 
-    //Misao: init sram
-    id_zns->program_unit = ZNS_PAGE_SIZE*id_zns->flash_type*id_zns->num_plane; //PAGE_SIZE*flash_type*2 planes
-    id_zns->stripe_uint = id_zns->program_unit*id_zns->num_ch*id_zns->num_lun;
+    //Misao: init buffer
+    id_zns->program_unit = ZNS_PAGE_SIZE*id_zns->flash_type*id_zns->planes_per_lun;
+    id_zns->stripe_uint = id_zns->program_unit*id_zns->num_chs*id_zns->luns_per_ch;
     id_zns->cache.num_wc = ZNS_DEFAULT_NUM_WRITE_CACHE;
     id_zns->cache.write_cache = g_malloc0(sizeof(struct zns_write_cache) * id_zns->cache.num_wc);
     for(i =0; i < id_zns->cache.num_wc; i++)
@@ -1299,17 +1287,15 @@ static void zns_init_params(FemuCtrl *n)
     femu_log("===========================================\n");
     femu_log("|        ZNS HW Configuration()           |\n");      
     femu_log("===========================================\n");
-    femu_log("|\tnchnl\t: %lu\t|\tchips per chnl\t: %lu\t|\tplanes per chip\t: %lu\t|\tblks per plane\t: %lu\t|\tpages per blk\t: %lu\t|\n",id_zns->num_ch,id_zns->num_lun,id_zns->num_plane,id_zns->num_blk,id_zns->num_page);
-    // femu_log("|\tl2p sz\t: %lu\t|\tl2p cache sz\t: %u\t|\n",id_zns->l2p_sz,id_zns->cache.num_l2p_ent);
+    femu_log("|\tnchnl\t: %lu\t|\tchips per chnl\t: %lu\t|\tplanes per chip\t: %lu\t|\tblks per plane\t: %lu\t|\tflashpages per blk\t: %lu\t|\n",id_zns->num_chs,id_zns->luns_per_ch,id_zns->planes_per_lun,id_zns->blks_per_plane,id_zns->flashpages_per_blk);
+    //femu_log("|\tl2p sz\t: %lu\t|\tl2p cache sz\t: %u\t|\n",id_zns->l2p_sz,id_zns->cache.num_l2p_ent);
     femu_log("|\tprogram unit\t: %lu KiB\t|\tstripe unit\t: %lu KiB\t|\t# of write caches\t: %u\t|\t size of write caches (4KiB)\t: %lu\t|\n",id_zns->program_unit/(KiB),id_zns->stripe_uint/(KiB),id_zns->cache.num_wc,(id_zns->stripe_uint/LOGICAL_PAGE_SIZE));
     femu_log("===========================================\n"); 
 
-    //Misao: use average read latency
     id_zns->timing.pg_rd_lat[SLC] = SLC_READ_LATENCY_NS;
     id_zns->timing.pg_rd_lat[TLC] = TLC_READ_LATENCY_NS;
     id_zns->timing.pg_rd_lat[QLC] = QLC_READ_LATENCY_NS;
 
-    //Misao: do not suppirt partial programing
     id_zns->timing.pg_wr_lat[SLC] = SLC_PROGRAM_LATENCY_NS;
     id_zns->timing.pg_wr_lat[TLC] = TLC_PROGRAM_LATENCY_NS;
     id_zns->timing.pg_wr_lat[QLC] = QLC_PROGRAM_LATENCY_NS;
@@ -1327,7 +1313,6 @@ static void zns_init_params(FemuCtrl *n)
 
     n->zns = id_zns;
 
-    //Misao: init ftl
     zftl_init(n);
 }
 
@@ -1337,7 +1322,8 @@ static int zns_init_zone_cap(FemuCtrl *n)
     struct zns_ssd* zns  = n->zns;
     n->zoned = true;
     n->zasl_bs = NVME_DEFAULT_MAX_AZ_SIZE;
-    n->zone_size_bs = zns->num_ch*zns->num_lun*zns->num_plane*zns->num_page*ZNS_PAGE_SIZE;
+    //Misao: we always assume that a zone is the same size as a superblock.
+    n->zone_size_bs = zns->num_chs*zns->luns_per_ch*zns->planes_per_lun*zns->flashpages_per_blk*ZNS_PAGE_SIZE;
     n->zone_cap_bs = 0;
     n->cross_zone_read = false;
     n->max_active_zones = 0;
@@ -1349,6 +1335,7 @@ static int zns_init_zone_cap(FemuCtrl *n)
 
 static int zns_start_ctrl(FemuCtrl *n)
 {
+    femu_debug("%s, n->page_size = %d\n",__func__,n->page_size);
     /* Coperd: let's fail early before anything crazy happens */
     assert(n->page_size == 4096);
 
