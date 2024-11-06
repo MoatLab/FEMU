@@ -19,10 +19,10 @@ void zns_reset(struct zns_ssd *zns, uint32_t zid, uint64_t slba, uint64_t elba);
 #endif
 
 #define ftl_err(fmt, ...) \
-    do { fprintf(stderr, "[Misao] ZFTL-Err: " fmt, ## __VA_ARGS__); } while (0)
+    do { fprintf(stderr, "[Misao] ZFTL-Err: " fmt "\r\n", ## __VA_ARGS__); } while (0)
 
 #define ftl_log(fmt, ...) \
-    do { printf("[Misao] ZFTL-Log: " fmt, ## __VA_ARGS__); } while (0)
+    do { printf("[Misao] ZFTL-Log: " fmt "\r\n", ## __VA_ARGS__); } while (0)
 
 
 /* FEMU assert() */

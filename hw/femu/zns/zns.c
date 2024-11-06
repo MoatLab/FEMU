@@ -830,9 +830,8 @@ static uint16_t zns_map_dptr(FemuCtrl *n, size_t len, NvmeRequest *req)
     }
 }
 
-/*Misao: backend read/write without latency emulation*/
 static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
-                           NvmeRequest *req,bool append)
+                           NvmeRequest *req, bool append)
 {
     NvmeRwCmd *rw = (NvmeRwCmd *)&req->cmd; 
     uint64_t slba = le64_to_cpu(rw->slba);
@@ -840,38 +839,46 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t data_size = zns_l2b(ns, nlb);
     uint64_t data_offset;
     uint16_t status;
-
     NvmeZone *zone;
     NvmeZonedResult *res = (NvmeZonedResult *)&req->cqe;
+
     assert(n->zoned);
     req->is_write = (rw->opcode == NVME_CMD_WRITE) ? 1 : 0;
 
     status = nvme_check_mdts(n, data_size);
     if (status) {
+        femu_err("nvme_check_mdts failed with status (%u)\n",status);
         goto err;
     }
 
     status = zns_check_bounds(ns, slba, nlb);
     if (status) {
+        femu_err("zns_check_bounds failed with status (%u)\n",status);
         goto err;
     }
 
-    if(req->is_write)
-    {
+    if(req->is_write) {
         zone = zns_get_zone_by_slba(ns, slba);
+
         status = zns_check_zone_write(n, ns, zone, slba, nlb, append);
         if (status) {
-            femu_err("Misao check zone write failed with status (%u)\n",status);
+            femu_err("zns_check_zone_write failed with status (%u)\n",status);
             goto err;
         }
-        if(append)
-        {
-             status = zns_auto_open_zone(ns, zone);
-             if(status)
-             {
+
+        // status = zns_auto_open_zone(ns, zone);
+        // if(status) {
+        //     femu_err("zns_auto_open_zone failed with status (%u)\n",status);
+        //     goto err;
+        // }
+
+        if(append) {
+            status = zns_auto_open_zone(ns, zone);
+            if(status) {
+                femu_err("zns_auto_open_zone failed with status (%u)\n",status);
                 goto err;
-             }
-             slba = zone->w_ptr;
+            }
+            slba = zone->w_ptr;
         }
         res->slba = zns_advance_zone_wp(ns, zone, nlb);
     }
@@ -879,6 +886,7 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     {
         status = zns_check_zone_read(ns, slba, nlb);
         if (status) {
+            femu_err("zns_check_zone_read failed with status (%u)\n",status);
             goto err;
         }
 
@@ -890,12 +898,20 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
            deallocate logical blocks in the volume using the NVMe Dataset
            Management command.
         */
-        if (NVME_ERR_REC_DULBE(n->features.err_rec)) { status =
-            zns_check_dulbe(ns, slba, nlb); if (status) { goto err; } } }
+        if (NVME_ERR_REC_DULBE(n->features.err_rec)) { 
+            status = zns_check_dulbe(ns, slba, nlb);
+            if (status) {
+                femu_err("zns_check_dulbe failed with status (%u)\n",status);
+                goto err;
+            }
+        } 
+    }
 
     data_offset = zns_l2b(ns, slba);
+
     status = zns_map_dptr(n, data_size, req);
     if (status) {
+        femu_err("zns_map_dptr failed with status (%u)\n",status);
         goto err;
     }
 
@@ -905,14 +921,20 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
 
-    if(req->is_write)
-    {
+    if(req->is_write) {
         zns_finalize_zoned_write(ns, req, false);
     }
 
+    //todo emulate delay
+    // req->slba = slba;
+    // req->status = NVME_SUCCESS;
+    // req->nlb = nlb;
+    // sublat = zns_advance_status();
+    // req->reqlat = maxlat;
     n->zns->active_zone = zns_zone_idx(ns,slba);
     // printf("active_zone[%u]\r\n, n->zns->active_zone")
     return NVME_SUCCESS;
+
 err:
     return status | NVME_DNR;
 }
@@ -1309,7 +1331,7 @@ static void zns_init_params(FemuCtrl *n)
 
     //yt
     id_zns->test_time = 0;
-    id_zns->extra_delay = g_malloc0(sizeof(uint64_t) * id_zns->num_blk);
+    id_zns->extra_delay = g_malloc0(sizeof(uint64_t) * id_zns->blks_per_plane);
 
     n->zns = id_zns;
 

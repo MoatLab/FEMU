@@ -385,7 +385,7 @@ static void *ftl_thread(void *arg)
                 lat = 0;
                 break;
             default:
-                //ftl_err("FTL received unkown request type, ERROR\n");
+                // ftl_err("FTL received unkown request type, ERROR\r\n");
                 ;
             }
 
