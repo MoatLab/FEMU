@@ -1269,14 +1269,14 @@ static void zns_init_params(FemuCtrl *n)
 
     //Misao: init sram
     id_zns->program_unit = ZNS_PAGE_SIZE*id_zns->flash_type*2; //PAGE_SIZE*flash_type*2 planes
-    id_zns->stripe_uint = id_zns->program_unit*id_zns->num_ch*id_zns->num_lun;
+    id_zns->stripe_unit = id_zns->program_unit*id_zns->num_ch*id_zns->num_lun;
     id_zns->cache.num_wc = ZNS_DEFAULT_NUM_WRITE_CACHE;
     id_zns->cache.write_cache = g_malloc0(sizeof(struct zns_write_cache) * id_zns->cache.num_wc);
     for(i =0; i < id_zns->cache.num_wc; i++)
     {
         id_zns->cache.write_cache[i].sblk = i;
         id_zns->cache.write_cache[i].used = 0;
-        id_zns->cache.write_cache[i].cap = (id_zns->stripe_uint/LOGICAL_PAGE_SIZE);
+        id_zns->cache.write_cache[i].cap = (id_zns->stripe_unit/LOGICAL_PAGE_SIZE);
         id_zns->cache.write_cache[i].lpns = g_malloc0(sizeof(uint64_t) * id_zns->cache.write_cache[i].cap);
     }
 
@@ -1285,7 +1285,7 @@ static void zns_init_params(FemuCtrl *n)
     femu_log("===========================================\n");
     femu_log("|\tnchnl\t: %lu\t|\tchips per chnl\t: %lu\t|\tplanes per chip\t: %lu\t|\tblks per plane\t: %lu\t|\tpages per blk\t: %lu\t|\n",id_zns->num_ch,id_zns->num_lun,id_zns->num_plane,id_zns->num_blk,id_zns->num_page);
     //femu_log("|\tl2p sz\t: %lu\t|\tl2p cache sz\t: %u\t|\n",id_zns->l2p_sz,id_zns->cache.num_l2p_ent);
-    femu_log("|\tprogram unit\t: %lu KiB\t|\tstripe unit\t: %lu KiB\t|\t# of write caches\t: %u\t|\t size of write caches (4KiB)\t: %lu\t|\n",id_zns->program_unit/(KiB),id_zns->stripe_uint/(KiB),id_zns->cache.num_wc,(id_zns->stripe_uint/LOGICAL_PAGE_SIZE));
+    femu_log("|\tprogram unit\t: %lu KiB\t|\tstripe unit\t: %lu KiB\t|\t# of write caches\t: %u\t|\t size of write caches (4KiB)\t: %lu\t|\n",id_zns->program_unit/(KiB),id_zns->stripe_unit/(KiB),id_zns->cache.num_wc,(id_zns->stripe_unit/LOGICAL_PAGE_SIZE));
     femu_log("===========================================\n"); 
 
     //Misao: use average read latency

@@ -146,7 +146,7 @@ struct zns_ssd {
     SSDNandFlashTiming timing; /*Misao: accurate  timing emulation for zns ssd.*/
     int flash_type;
     uint64_t program_unit;
-    uint64_t stripe_uint;
+    uint64_t stripe_unit;
     struct zns_sram cache;
 
     /*Misao: we still need a ftl in consumer devices*/
