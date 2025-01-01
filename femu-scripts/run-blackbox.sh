@@ -3,7 +3,7 @@
 # Run FEMU as a black-box SSD (FTL managed by the device)
 
 # image directory
-IMGDIR=$HOME/images
+IMGDIR=/home/ubuntu/share/imageFEMU
 # Virtual machine disk image
 OSIMGF=$IMGDIR/u20s.qcow2
 

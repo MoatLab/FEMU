@@ -132,3 +132,5 @@ trace-ust-all.h
 trace-ust-all.c
 build-femu/
 build/
+
+.vscode/

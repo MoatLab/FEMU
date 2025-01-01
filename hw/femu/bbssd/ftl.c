@@ -2,6 +2,18 @@
 
 //#define FEMU_DEBUG_FTL
 
+static int gcCount = 0;
+
+void dumpBlocks(struct ssd* ssd) {
+    printf("*************** line erase count *********************\n");
+    struct nand_plane* pl = &ssd->ch[0].lun[0].pl[0];
+    for (int b = 0; b < ssd->sp.tt_lines; b++) {
+        int cnt = pl->blk[b].erase_cnt;
+        printf("%d ", cnt);
+    }
+    printf("\n******************************************************\n");
+}
+
 static void *ftl_thread(void *arg);
 
 static inline bool should_gc(struct ssd *ssd)
@@ -763,6 +775,15 @@ static int do_gc(struct ssd *ssd, bool force)
 
     /* update line status */
     mark_line_free(ssd, &ppa);
+
+    gcCount += 1;
+    if (gcCount % spp->tt_lines == 0) {
+        int cycles = gcCount / spp->tt_lines;
+        printf("cycles: %d, gc count: %d\n", cycles, gcCount);
+        if (cycles % 20 == 0) {
+            dumpBlocks(ssd);
+        }
+    }
 
     return 0;
 }
