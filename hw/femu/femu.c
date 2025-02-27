@@ -543,7 +543,8 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
 
     bs_size = ((int64_t)n->memsz) * 1024 * 1024;
 
-    init_dram_backend(&n->mbe, bs_size);
+    int ps = n->bb_params.secsz * n->bb_params.secs_per_pg;
+    init_dram_backend(&n->mbe, bs_size, n->rain_stripe_size, ps);
     n->mbe->femu_mode = n->femu_mode;
 
     n->completed = 0;
@@ -668,6 +669,7 @@ static Property femu_props[] = {
     DEFINE_PROP_UINT8("zns_num_plane", FemuCtrl, zns_params.zns_num_plane, 2),
     DEFINE_PROP_UINT8("zns_num_blk", FemuCtrl, zns_params.zns_num_blk, 32),
     DEFINE_PROP_INT32("zns_flash_type", FemuCtrl, zns_params.zns_flash_type, QLC),
+    DEFINE_PROP_INT32("rain_stripe_size", FemuCtrl, rain_stripe_size, 1),
     DEFINE_PROP_INT32("secsz", FemuCtrl, bb_params.secsz, 512),
     DEFINE_PROP_INT32("secs_per_pg", FemuCtrl, bb_params.secs_per_pg, 8),
     DEFINE_PROP_INT32("pgs_per_blk", FemuCtrl, bb_params.pgs_per_blk, 256),

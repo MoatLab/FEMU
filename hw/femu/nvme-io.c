@@ -59,6 +59,11 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
         }
         nvme_inc_sq_head(sq);
 
+
+        // printf("*******\n");
+        // printf("sq contig: %d, psdt: %d\n", (int)sq->phys_contig, (int)cmd.psdt);
+
+
         req = QTAILQ_FIRST(&sq->req_list);
         QTAILQ_REMOVE(&sq->req_list, req, entry);
         memset(&req->cqe, 0, sizeof(req->cqe));
@@ -73,6 +78,11 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
         }
 
         status = nvme_io_cmd(n, &cmd, req);
+
+
+        // printf("********\n\n");
+
+
         if (1 && status == NVME_SUCCESS) {
             req->status = status;
 
@@ -270,6 +280,10 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
     req->slba = slba;
     req->status = NVME_SUCCESS;
     req->nlb = nlb;
+
+
+    // printf("is write: %d, nlb: %d, slba: %d, data_shift: %d\n", (int)req->is_write, (int)nlb, (int)slba, (int)data_shift);
+
 
     ret = backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
     if (!ret) {

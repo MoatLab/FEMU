@@ -108,6 +108,10 @@ struct ssd_channel {
 };
 
 struct ssdparams {
+    int rain_stripe_size;
+    int pagesize; // in bytes
+    uint64_t parity_start_lpn;
+
     int secsz;        /* sector size in bytes */
     int secs_per_pg;  /* # of sectors per page */
     int pgs_per_blk;  /* # of NAND pages per block */

@@ -1339,6 +1339,7 @@ typedef struct FemuCtrl {
 
     BbCtrlParams bb_params;
 
+    int             rain_stripe_size;
     struct ssd      *ssd;
     SsdDramBackend  *mbe;
     int             completed;

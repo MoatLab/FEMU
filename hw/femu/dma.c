@@ -41,6 +41,10 @@ uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
         qemu_sglist_add(qsg, prp1, trans_len);
     }
 
+
+    // printf("nvme map prp:\ncmbsz: %d, cmb: %d\n", (int)n->cmbsz, (int)cmb);
+
+
     len -= trans_len;
     if (len) {
         if (!prp2) {
@@ -84,6 +88,11 @@ uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
                 }
                 len -= trans_len;
                 i++;
+
+
+                // printf("added prp entry(prp2 -> list)\n");
+
+
             }
             free(prp_list);
         } else {

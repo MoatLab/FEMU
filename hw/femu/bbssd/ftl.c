@@ -294,6 +294,9 @@ static void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->gc_thres_lines_high = (int)((1 - spp->gc_thres_pcent_high) * spp->tt_lines);
     spp->enable_gc_delay = true;
 
+    spp->rain_stripe_size = n->rain_stripe_size;
+    spp->pagesize = n->bb_params.secsz * n->bb_params.secs_per_pg;
+    spp->parity_start_lpn = (uint64_t)n->memsz * 1024 * 1024 / spp->pagesize;
 
     check_params(spp);
 }
@@ -677,6 +680,31 @@ static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
     return 0;
 }
 
+// same as gc_write_page except no old_ppa
+static uint64_t new_parity_write_page(struct ssd* ssd, uint64_t lpn)
+{
+    struct ppa new_ppa = get_new_page(ssd);
+    /* update maptbl */
+    set_maptbl_ent(ssd, lpn, &new_ppa);
+    /* update rmap */
+    set_rmap_ent(ssd, lpn, &new_ppa);
+
+    mark_page_valid(ssd, &new_ppa);
+
+    /* need to advance the write pointer here */
+    ssd_advance_write_pointer(ssd);
+
+    if (ssd->sp.enable_gc_delay) {
+        struct nand_cmd gcw;
+        gcw.type = GC_IO;
+        gcw.cmd = NAND_WRITE;
+        gcw.stime = 0;
+        ssd_advance_status(ssd, &new_ppa, &gcw);
+    }
+
+    return 0;
+}
+
 static struct line *select_victim_line(struct ssd *ssd, bool force)
 {
     struct line_mgmt *lm = &ssd->lm;
@@ -803,9 +831,19 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
         ftl_err("start_lpn=%"PRIu64",tt_pgs=%d\n", start_lpn, ssd->sp.tt_pgs);
     }
 
+
+    printf("\n[ SSD ]\nread lpn: %lu~%lu, ppa(ch, lun, blk, pg): ", start_lpn, end_lpn);
+
+
     /* normal IO read path */
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
         ppa = get_maptbl_ent(ssd, lpn);
+
+
+        printf("%lu(", lpn);
+        printf("%d, %d, %d, %d), ", ppa.g.ch, ppa.g.lun, ppa.g.blk, ppa.g.pg);
+
+
         if (!mapped_ppa(&ppa) || !valid_ppa(ssd, &ppa)) {
             //printf("%s,lpn(%" PRId64 ") not mapped to valid ppa\n", ssd->ssdname, lpn);
             //printf("Invalid ppa,ch:%d,lun:%d,blk:%d,pl:%d,pg:%d,sec:%d\n",
@@ -820,6 +858,10 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
         sublat = ssd_advance_status(ssd, &ppa, &srd);
         maxlat = (sublat > maxlat) ? sublat : maxlat;
     }
+
+
+    printf("\n\n");
+
 
     return maxlat;
 }
@@ -847,9 +889,30 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
             break;
     }
 
+
+    printf("\n[ SSD ]\nwrite lpn: %lu~%lu, ppa(ch, lun, blk, pg): ", start_lpn, end_lpn);
+
+    int in_stripe_lpn = 0;
+    bool partial = false;
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
+
+
+        printf("%lu(", lpn);
+        if (spp->rain_stripe_size > 1) {
+            in_stripe_lpn = lpn % (spp->rain_stripe_size - 1);
+            partial = (lpn - in_stripe_lpn < start_lpn) || (lpn + spp->rain_stripe_size - 2 - in_stripe_lpn > end_lpn);
+        }
+
+
         ppa = get_maptbl_ent(ssd, lpn);
         if (mapped_ppa(&ppa)) {
+
+
+            printf("%d, %d, %d, %d)->(", ppa.g.ch, ppa.g.lun, ppa.g.blk, ppa.g.pg);
+            if (spp->rain_stripe_size > 1 && partial) {
+                gc_read_page(ssd, &ppa);
+            }
+
             /* update old page information first */
             mark_page_invalid(ssd, &ppa);
             set_rmap_ent(ssd, INVALID_LPN, &ppa);
@@ -864,6 +927,10 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 
         mark_page_valid(ssd, &ppa);
 
+
+        printf("%d, %d, %d, %d), ", ppa.g.ch, ppa.g.lun, ppa.g.blk, ppa.g.pg);
+
+
         /* need to advance the write pointer here */
         ssd_advance_write_pointer(ssd);
 
@@ -874,7 +941,30 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         /* get latency statistics */
         curlat = ssd_advance_status(ssd, &ppa, &swr);
         maxlat = (curlat > maxlat) ? curlat : maxlat;
+
+        if (spp->rain_stripe_size > 1) {
+            if ((in_stripe_lpn == spp->rain_stripe_size - 2) || lpn == end_lpn) {
+                uint64_t stripe_id = lpn / (spp->rain_stripe_size - 1);
+                uint64_t parity_lpn = spp->parity_start_lpn + stripe_id;
+                ppa = get_maptbl_ent(ssd, parity_lpn);
+                if (mapped_ppa(&ppa)) {
+                    if (partial) {
+                        gc_read_page(ssd, &ppa);
+                    }
+                    gc_write_page(ssd, &ppa);
+                } else {
+                    new_parity_write_page(ssd, parity_lpn);
+                }
+
+                printf("[parity lpn: %lu+%lu], ", spp->parity_start_lpn, stripe_id);
+            }
+        }
     }
+
+
+    struct write_pointer* wpp = &ssd->wp;
+    printf("\nadvanced write pointer(ch, lun, blk, pg): (%d, %d, %d, %d)\n\n", wpp->ch, wpp->lun, wpp->blk, wpp->pg);
+
 
     return maxlat;
 }
