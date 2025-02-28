@@ -1221,7 +1221,7 @@ static void zns_init_plane(struct zns_plane *plane,int num_blk,int flash_type)
 
 static void zns_init_fc(struct zns_fc *fc,uint8_t num_plane,uint8_t num_blk,int flash_type)
 {
-    fc->plane = g_malloc0(sizeof(struct zns_blk) * num_plane);
+    fc->plane = g_malloc0(sizeof(struct zns_plane) * num_plane);
     for(int i = 0;i < num_plane;i++)
     {
         zns_init_plane(&fc->plane[i],num_blk,flash_type);
