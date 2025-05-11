@@ -27,6 +27,10 @@ ch_xfer_lat=0 # channel transfer time, ignored for now
 gc_thres_pcent=75
 gc_thres_pcent_high=95
 
+# Buffer
+buffer_size=10000 # number of pages in buffer
+buffer_thres_pcent=90
+
 #-----------------------------------------------------------------------
 
 #Compose the entire FEMU BBSSD command line options
@@ -47,6 +51,8 @@ FEMU_OPTIONS=${FEMU_OPTIONS}",blk_er_lat=${blk_er_lat}"
 FEMU_OPTIONS=${FEMU_OPTIONS}",ch_xfer_lat=${ch_xfer_lat}"
 FEMU_OPTIONS=${FEMU_OPTIONS}",gc_thres_pcent=${gc_thres_pcent}"
 FEMU_OPTIONS=${FEMU_OPTIONS}",gc_thres_pcent_high=${gc_thres_pcent_high}"
+FEMU_OPTIONS=${FEMU_OPTIONS}",buffer_size=${buffer_size}"
+FEMU_OPTIONS=${FEMU_OPTIONS}",buffer_thres_pcent=${buffer_thres_pcent}"
 
 echo ${FEMU_OPTIONS}
 
