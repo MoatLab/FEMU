@@ -858,6 +858,89 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     return maxlat;
 }
 
+static uint64_t ssd_trim(struct ssd *ssd, NvmeRequest *req)
+{
+    struct ssdparams *spp = &ssd->sp;
+    NvmeDsmRange *ranges = req->dsm_ranges;
+    int nr_ranges = req->dsm_nr_ranges;
+    // uint32_t attributes = req->dsm_attributes;
+    
+    int total_trimmed_pages = 0;
+    int total_already_invalid = 0;
+    int total_out_of_bounds = 0;
+    
+    if (!ranges || nr_ranges <= 0) {
+        printf("TRIM: Invalid ranges or count\n");
+        return 0;
+    }
+    
+    // printf("TRIM: Processing %d ranges (attributes=0x%x)\n", nr_ranges, attributes);
+    
+    for (int range_idx = 0; range_idx < nr_ranges; range_idx++) {
+        uint64_t slba = le64_to_cpu(ranges[range_idx].slba);
+        uint32_t nlb = le32_to_cpu(ranges[range_idx].nlb);
+        // uint32_t cattr = le32_to_cpu(ranges[range_idx].cattr);
+        
+        uint64_t start_lpn = slba / spp->secs_per_pg;
+        uint64_t end_lpn = (slba + nlb - 1) / spp->secs_per_pg;
+        uint64_t lpn;
+        struct ppa ppa;
+        int trimmed_pages = 0;
+        int already_invalid = 0;
+
+        // ftl_debug("TRIM Range %d: LBA %lu + %u sectors, LPN range %lu-%lu (%lu pages), cattr=0x%x\n", 
+        //        range_idx, slba, nlb, start_lpn, end_lpn, end_lpn - start_lpn + 1, cattr);
+
+        // Boundary check
+        if (end_lpn >= spp->tt_pgs) {
+            ftl_err("TRIM: Range %d exceeds FTL capacity - end_lpn=%lu, tt_pgs=%d\n", 
+                   range_idx, end_lpn, spp->tt_pgs);
+            total_out_of_bounds++;
+            continue;  // Skip this range, continue with others
+        }
+
+        // Process each LPN in this range
+        for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
+            ppa = get_maptbl_ent(ssd, lpn);
+            
+            // Skip already unmapped/invalid pages
+            if (!mapped_ppa(&ppa) || !valid_ppa(ssd, &ppa)) {
+                already_invalid++;
+                continue;
+            }
+
+            // Invalidate the existing mapped page
+            mark_page_invalid(ssd, &ppa);
+            
+            // Clear reverse mapping
+            set_rmap_ent(ssd, INVALID_LPN, &ppa);
+            
+            // Set mapping table entry as unmapped
+            ppa.ppa = UNMAPPED_PPA;
+            set_maptbl_ent(ssd, lpn, &ppa);
+            
+            trimmed_pages++;
+        }
+        
+        total_trimmed_pages += trimmed_pages;
+        total_already_invalid += already_invalid;
+        
+        // ftl_debug("TRIM Range %d: %d pages trimmed, %d already invalid\n", 
+        //        range_idx, trimmed_pages, already_invalid);
+    }
+
+    // ftl_debug("TRIM: Completed - %d pages trimmed, %d already invalid, %d out of bounds across %d ranges\n", 
+    //        total_trimmed_pages, total_already_invalid, total_out_of_bounds, nr_ranges);
+
+    // Free the ranges array
+    g_free(ranges);
+    req->dsm_ranges = NULL;
+    req->dsm_nr_ranges = 0;
+    req->dsm_attributes = 0;
+
+    return 0;  // Assume TRIM operations have no NAND latency
+}
+
 static void *ftl_thread(void *arg)
 {
     FemuCtrl *n = (FemuCtrl *)arg;
@@ -894,7 +977,9 @@ static void *ftl_thread(void *arg)
                 lat = ssd_read(ssd, req);
                 break;
             case NVME_CMD_DSM:
-                lat = 0;
+                if (req->dsm_ranges && req->dsm_nr_ranges > 0) {
+                    lat = ssd_trim(ssd, req);
+                }
                 break;
             default:
                 //ftl_err("FTL received unkown request type, ERROR\n");
