@@ -368,8 +368,8 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             return NVME_CMP_FAILURE;
         }
         offset += len;
-        free(tmp[0]);
-        free(tmp[1]);
+        g_free(tmp[0]);
+        g_free(tmp[1]);
     }
 
     qemu_sglist_destroy(&req->qsg);
