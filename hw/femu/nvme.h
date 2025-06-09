@@ -993,6 +993,11 @@ typedef struct NvmeRequest {
 
     /* position in the priority queue for delay emulation */
     size_t                  pos;
+
+    // DSM (Dataset Management) related fields
+    NvmeDsmRange    *dsm_ranges;        // Array of DSM ranges
+    int             dsm_nr_ranges;      // Number of ranges
+    uint32_t        dsm_attributes;     // CDW11 attributes (AD, IDR, IDW)
 } NvmeRequest;
 
 typedef struct DMAOff {
