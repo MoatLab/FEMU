@@ -1168,6 +1168,9 @@ typedef struct BbCtrlParams {
 
     int gc_thres_pcent;
     int gc_thres_pcent_high;
+
+    int buffer_size;
+    int buffer_thres_pcent;
 } BbCtrlParams;
 
 typedef struct ZNSCtrlParams {

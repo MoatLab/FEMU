@@ -97,6 +97,7 @@ struct nand_lun {
     uint64_t next_lun_avail_time;
     bool busy;
     uint64_t gc_endtime;
+    uint64_t evict_endtime;
 };
 
 struct ssd_channel {
@@ -154,6 +155,14 @@ struct ssdparams {
     int tt_pls;       /* total # of planes in the SSD */
 
     int tt_luns;      /* total # of LUNs in the SSD */
+
+    int buffer_size;
+    double buffer_thres_pcent;
+
+    int read_hit_cnt;
+    int read_cnt;
+    int write_hit_cnt;
+    int write_cnt;
 };
 
 typedef struct line {
@@ -194,6 +203,11 @@ struct nand_cmd {
     int64_t stime; /* Coperd: request arrival time */
 };
 
+typedef struct buffer_entry{
+    uint64_t lpn;
+    QTAILQ_ENTRY(buffer_entry) b_entry;
+} buffer_entry;
+
 struct ssd {
     char *ssdname;
     struct ssdparams sp;
@@ -202,6 +216,9 @@ struct ssd {
     uint64_t *rmap;     /* reverse mapptbl, assume it's stored in OOB */
     struct write_pointer wp;
     struct line_mgmt lm;
+    QTAILQ_HEAD(write_buffer, buffer_entry) write_buffer;
+    GTree *wb_tree;
+    int write_buffer_cnt;
 
     /* lockless ring for communication with NVMe IO thread */
     struct rte_ring **to_ftl;
@@ -212,6 +229,7 @@ struct ssd {
 
 void ssd_init(FemuCtrl *n);
 
+// #define FEMU_DEBUG_FTL
 #ifdef FEMU_DEBUG_FTL
 #define ftl_debug(fmt, ...) \
     do { printf("[FEMU] FTL-Dbg: " fmt, ## __VA_ARGS__); } while (0)
