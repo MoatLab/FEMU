@@ -338,18 +338,21 @@ static void *ftl_thread(void *arg)
 
             ftl_assert(req);
             switch (req->cmd.opcode) {
-            case NVME_CMD_WRITE:
-                lat = zns_write(zns, req);
-                break;
-            case NVME_CMD_READ:
-                lat = zns_read(zns, req);
-                break;
-            case NVME_CMD_DSM:
-                lat = 0;
-                break;
-            default:
-                //ftl_err("FTL received unkown request type, ERROR\n");
-                ;
+                // Fix bug: zone append not respecting configured delay
+                case NVME_CMD_ZONE_APPEND:
+                    /* Fall through */
+                case NVME_CMD_WRITE:
+                    lat = zns_write(zns, req);
+                    break;
+                case NVME_CMD_READ:
+                    lat = zns_read(zns, req);
+                    break;
+                case NVME_CMD_DSM:
+                    lat = 0;
+                    break;
+                default:
+                    //ftl_err("FTL received unkown request type, ERROR\n");
+                    ;
             }
 
             req->reqlat = lat;
