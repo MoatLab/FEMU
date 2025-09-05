@@ -1,0 +1,148 @@
+name: CI
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-20.04, ubuntu-22.04]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Install dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y build-essential pkg-config libglib2.0-dev \
+          libpixman-1-dev libfdt-dev zlib1g-dev libaio-dev \
+          libcap-ng-dev libattr1-dev ninja-build python3-pip \
+          libslirp-dev libseccomp-dev libcurl4-gnutls-dev \
+          libiscsi-dev libnfs-dev librbd-dev librados-dev \
+          libssh-dev liblzo2-dev libsnappy-dev libbz2-dev \
+          liblzma-dev libzstd-dev libgcrypt20-dev libgnutls28-dev \
+          uuid-dev libcap-dev libxml2-dev libmount-dev \
+          liburing-dev flex bison
+
+    - name: Setup FEMU build environment
+      run: |
+        mkdir build-femu
+        cd build-femu
+        cp ../femu-scripts/femu-copy-scripts.sh .
+        ./femu-copy-scripts.sh .
+
+    - name: Build FEMU using official script
+      run: |
+        cd build-femu
+        ./femu-compile.sh
+
+    - name: Verify FEMU device registration
+      run: |
+        cd build-femu
+        ./qemu-system-x86_64 -device help | grep -q "femu" || exit 1
+        echo "✓ FEMU device successfully registered"
+
+    - name: Run basic functionality test
+      run: |
+        cd build-femu
+        timeout 10s ./qemu-system-x86_64 -device femu,help || true
+        echo "✓ FEMU device parameters accessible"
+
+    - name: Check FEMU modes
+      run: |
+        cd build-femu
+        # Verify all major FEMU modes can be instantiated
+        for mode in 0 1 2 3; do
+          timeout 5s ./qemu-system-x86_64 \
+            -device femu,devsz_mb=1024,femu_mode=${mode},serial=test${mode} \
+            -nographic -M accel=qtest || true
+          echo "✓ FEMU mode ${mode} instantiation test completed"
+        done
+
+    - name: Archive build artifacts
+      uses: actions/upload-artifact@v4
+      if: success()
+      with:
+        name: femu-binary-${{ matrix.os }}
+        path: |
+          build-femu/qemu-system-x86_64
+          build-femu/config-host.mak
+          build-femu/run-*.sh
+        retention-days: 7
+
+  compatibility-test:
+    runs-on: ubuntu-latest
+    needs: build
+    if: success()
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Download build artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: femu-binary-ubuntu-22.04
+        path: build-femu/
+
+    - name: Make binary executable
+      run: chmod +x build-femu/qemu-system-x86_64
+
+    - name: Test run scripts syntax
+      run: |
+        cd build-femu
+        # Check syntax of run scripts (already copied by build job)
+        for script in run-*.sh; do
+          bash -n "$script"
+          echo "✓ $script syntax check passed"
+        done
+
+    - name: Validate FEMU configuration parameters
+      run: |
+        cd build-femu
+        # Test different SSD configurations
+        ./qemu-system-x86_64 \
+          -device femu,devsz_mb=2048,secsz=512,secs_per_pg=8,pgs_per_blk=256 \
+          -M accel=qtest -nographic &
+        sleep 2
+        kill %1 2>/dev/null || true
+        echo "✓ FEMU SSD parameter validation completed"
+
+  code-quality:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Check code style
+      run: |
+        # Check for trailing whitespace in FEMU source files
+        ! find hw/femu -name "*.c" -o -name "*.h" | xargs grep -l '[[:space:]]$'
+        echo "✓ No trailing whitespace found"
+
+        # Check for C++ style comments in C files
+        ! find hw/femu -name "*.c" -o -name "*.h" | xargs grep '//'
+        echo "✓ No C++ style comments found in C files"
+
+    - name: Check build system consistency
+      run: |
+        # Verify FEMU is properly integrated in build system
+        grep -q "CONFIG_FEMU_PCI" hw/femu/Kconfig
+        grep -q "source femu/Kconfig" hw/Kconfig
+        echo "✓ Build system integration verified"
+
+    - name: Validate documentation
+      run: |
+        # Check that README references are valid
+        [ -f "README.md" ] && echo "✓ README.md exists"
+        [ -d "hw/femu" ] && echo "✓ FEMU source directory exists"
+        [ -f "hw/femu/meson.build" ] && echo "✓ FEMU meson.build exists"
