@@ -8,7 +8,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-4-cores  # 4 cores, 16GB RAM for faster FEMU builds
     strategy:
       matrix:
         os: [ubuntu-20.04, ubuntu-22.04]
@@ -42,7 +42,14 @@ jobs:
     - name: Build FEMU using official script
       run: |
         cd build-femu
-        ./femu-compile.sh
+        echo "GitHub Actions runner info:"
+        echo "  Available CPU cores (nproc): $(nproc)"
+        echo "  Available CPU cores (femu method): $(cat /proc/cpuinfo | grep "vendor_id" | wc -l)"
+        echo "  Memory: $(free -h | grep '^Mem:' | awk '{print $2}')"
+        echo ""
+        echo "Starting parallel FEMU build at $(date)"
+        time ./femu-compile.sh
+        echo "Build completed at $(date)"
 
     - name: Verify FEMU device registration
       run: |
@@ -79,7 +86,7 @@ jobs:
         retention-days: 7
 
   compatibility-test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-4-cores  # Match build job runner
     needs: build
     if: success()
 
@@ -117,7 +124,7 @@ jobs:
         echo "✓ FEMU SSD parameter validation completed"
 
   code-quality:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest  # Lightweight job, standard runner sufficient
 
     steps:
     - name: Checkout code
