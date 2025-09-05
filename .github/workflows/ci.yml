@@ -136,7 +136,7 @@ jobs:
     - name: Check build system consistency
       run: |
         # Verify FEMU is properly integrated in build system
-        grep -q "CONFIG_FEMU_PCI" hw/femu/Kconfig
+        grep -q "config FEMU_PCI" hw/femu/Kconfig
         grep -q "source femu/Kconfig" hw/Kconfig
         echo "✓ Build system integration verified"
 
