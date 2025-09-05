@@ -145,6 +145,13 @@ Installation
   | OpenChannel-SSD v2.0      | &cross; | &check; | &check; | &check; | &cross; | &cross;
   | Zoned-Namespace (ZNS) SSD | &cross; | &cross; | &cross; | &check; | &check; | &check;
 
+  **Continuous Integration**: FEMU uses GitHub Actions for automated testing across multiple Ubuntu versions. The CI pipeline:
+  
+  - Tests compilation on Ubuntu 20.04, 22.04, and 24.04 LTS
+  - Verifies FEMU device registration and all SSD modes (BlackBox, WhiteBox, ZNS, NoSSD)
+  - Validates code quality and build system integration
+  - Runs compatibility tests for configuration parameters and run scripts
+  - Build status is shown in the badge at the top of this README
 
 3. Prepare the VM image (For performance reasons, we suggest to use a server
    version guest OS [e.g. Ubuntu Server 22.04, 20.04, 18.04, 16.04])
