@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest-4-cores  # 4 cores, 16GB RAM for faster FEMU builds
     strategy:
       matrix:
-        os: [ubuntu-20.04, ubuntu-22.04]
+        os: [ubuntu-20.04, ubuntu-22.04, ubuntu-24.04]
 
     steps:
     - name: Checkout code
