@@ -131,7 +131,8 @@ Installation
   | Gentoo             | 5.10   | 9.3.0  | 1.10.1 | 3.7.9  |
   | Ubuntu 16.04.5     | 4.15.0 | 5.4.0  | 1.8.2  | 3.6.0  |
   | Ubuntu 20.04.1     | 5.4.0  | 9.3.0  | 1.10.0 | 3.8.2  |
-  | Ubutnu 22.04.2     | 5.15.0 | 11.3.0 | 1.10.1 | 3.10.6 |
+  | Ubuntu 22.04.2     | 5.15.0 | 11.3.0 | 1.10.1 | 3.10.6 |
+  | Ubuntu 24.04 LTS   | 6.8.0  | 13.2.0 | 1.12.1 | 3.12.3 |
 
   **Tested VM environment** (Whether a certain FEMU mode works under a certain
   guest kernel version):
