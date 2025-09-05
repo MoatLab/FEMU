@@ -252,7 +252,7 @@ void dump_header(dictionary_header_t *header)
 	printk("OpenBIOS dictionary:\n");
 	printk("  version:     %d\n", header->version);
 	printk("  cellsize:    %d\n", header->cellsize);
-	printk("  endianess:   %s\n", header->endianess?"big":"little");
+	printk("  endianness:  %s\n", header->endianness?"big":"little");
 	printk("  compression: %s\n", header->compression?"yes":"no");
 	printk("  relocation:  %s\n", header->relocation?"yes":"no");
 	printk("  checksum:    %08x\n", target_long(header->checksum));

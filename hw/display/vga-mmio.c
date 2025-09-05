@@ -111,18 +111,17 @@ static void vga_mmio_realizefn(DeviceState *dev, Error **errp)
     s->vga.con = graphic_console_init(dev, 0, s->vga.hw_ops, &s->vga);
 }
 
-static Property vga_mmio_properties[] = {
+static const Property vga_mmio_properties[] = {
     DEFINE_PROP_UINT8("it_shift", VGAMmioState, it_shift, 0),
     DEFINE_PROP_UINT32("vgamem_mb", VGAMmioState, vga.vram_size_mb, 8),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void vga_mmio_class_initfn(ObjectClass *klass, void *data)
+static void vga_mmio_class_initfn(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = vga_mmio_realizefn;
-    dc->reset = vga_mmio_reset;
+    device_class_set_legacy_reset(dc, vga_mmio_reset);
     dc->vmsd = &vmstate_vga_common;
     device_class_set_props(dc, vga_mmio_properties);
     set_bit(DEVICE_CATEGORY_DISPLAY, dc->categories);

@@ -1,6 +1,17 @@
 History of SeaBIOS releases. Please see [download](Download) for
 information on obtaining these releases.
 
+SeaBIOS 1.17.0
+==============
+
+Available on 20250610. Major changes in this release:
+
+* Prefer PCI IO allocations above 4Gig on 64bit capable machines.
+* Multiple simultaneous USB keyboard and mouse support.
+* Legacy support for internally generated ACPI tables has been removed.
+* SeaVGABIOS support for VBE get/set palette data.
+* Several bug fixes and code cleanups.
+
 SeaBIOS 1.16.0
 ==============
 

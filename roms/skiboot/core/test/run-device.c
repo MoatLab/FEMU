@@ -466,6 +466,19 @@ int main(void)
 	new_prop_ph = dt_prop_get_u32(ut2, "something");
 	assert(!(new_prop_ph == ev1_ph));
 	dt_free(subtree);
+
+	/* Test dt_find_by_name_before_addr */
+	root = dt_new_root("");
+	addr1 = dt_new_addr(root, "node", 0x1);
+	addr2 = dt_new_addr(root, "node0_1", 0x2);
+	assert(dt_find_by_name(root, "node@1") == addr1);
+	assert(dt_find_by_name(root, "node0_1@2") == addr2);
+	assert(dt_find_by_name_before_addr(root, "node") == addr1);
+	assert(dt_find_by_name_before_addr(root, "node0") == NULL);
+	assert(dt_find_by_name_before_addr(root, "node0_") == NULL);
+	assert(dt_find_by_name_before_addr(root, "node0_1") == addr2);
+	dt_free(root);
+
 	return 0;
 }
 

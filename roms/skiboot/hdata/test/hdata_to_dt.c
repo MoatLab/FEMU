@@ -104,6 +104,8 @@ static unsigned long fake_pvr = PVR_P8;
 
 unsigned int cpu_thread_count = 8;
 
+bool lpar_per_core;
+
 static inline unsigned long mfspr(unsigned int spr)
 {
 	assert(spr == SPR_PVR);
@@ -299,7 +301,7 @@ static void dump_hdata_fdt(struct dt_node *root)
 int main(int argc, char *argv[])
 {
 	int fd, r, i = 0, opt_count = 0;
-	bool verbose = false, quiet = false, new_spira = false, blobs = false;
+	bool verbose = false, quiet = false, blobs = false;
 
 	while (argv[++i]) {
 		if (strcmp(argv[i], "-v") == 0) {
@@ -307,9 +309,6 @@ int main(int argc, char *argv[])
 			opt_count++;
 		} else if (strcmp(argv[i], "-q") == 0) {
 			quiet = true;
-			opt_count++;
-		} else if (strcmp(argv[i], "-s") == 0) {
-			new_spira = true;
 			opt_count++;
 		} else if (strcmp(argv[i], "-b") == 0) {
 			blobs = true;
@@ -343,8 +342,7 @@ int main(int argc, char *argv[])
 		errx(1, "Converts HDAT dumps to DTB.\n"
 		     "\n"
 		     "Usage:\n"
-		     "	hdata <opts> <spira-dump> <heap-dump>\n"
-		     "	hdata <opts> -s <spirah-dump> <spiras-dump>\n"
+		     "	hdata <opts> <spirah-dump> <spiras-dump>\n"
 		     "Options: \n"
 		     "	-v Verbose\n"
 		     "	-q Quiet mode\n"
@@ -366,36 +364,19 @@ int main(int argc, char *argv[])
 		phys_map_init(fake_pvr);
 
 	/* Copy in spira dump (assumes little has changed!). */
-	if (new_spira) {
-		fd = open(argv[1], O_RDONLY);
-		if (fd < 0)
-			err(1, "opening %s", argv[1]);
-		r = read(fd, &spirah, sizeof(spirah));
-		if (r < sizeof(spirah.hdr))
-			err(1, "reading %s gave %i", argv[1], r);
-		if (verbose)
-			printf("verbose: read spirah %u bytes\n", r);
-		close(fd);
+	fd = open(argv[1], O_RDONLY);
+	if (fd < 0)
+		err(1, "opening %s", argv[1]);
+	r = read(fd, &spirah, sizeof(spirah));
+	if (r < sizeof(spirah.hdr))
+		err(1, "reading %s gave %i", argv[1], r);
+	if (verbose)
+		printf("verbose: read spirah %u bytes\n", r);
+	close(fd);
 
-		undefined_bytes((void *)&spirah + r, sizeof(spirah) - r);
+	undefined_bytes((void *)&spirah + r, sizeof(spirah) - r);
 
-		base_addr = be64_to_cpu(spirah.ntuples.hs_data_area.addr);
-	} else {
-		fd = open(argv[1], O_RDONLY);
-		if (fd < 0)
-			err(1, "opening %s", argv[1]);
-		r = read(fd, &spira, sizeof(spira));
-		if (r < sizeof(spira.hdr))
-			err(1, "reading %s gave %i", argv[1], r);
-		if (verbose)
-			printf("verbose: read spira %u bytes\n", r);
-		close(fd);
-
-		undefined_bytes((void *)&spira + r, sizeof(spira) - r);
-
-		base_addr = be64_to_cpu(spira.ntuples.heap.addr);
-	}
-
+	base_addr = be64_to_cpu(spirah.ntuples.hs_data_area.addr);
 	if (!base_addr)
 		errx(1, "Invalid base addr");
 	if (verbose)
@@ -415,8 +396,8 @@ int main(int argc, char *argv[])
 		       spira_heap_size, spira_heap);
 	close(fd);
 
-	if (new_spira)
-		spiras = (struct spiras *)spira_heap;
+	/* SPIRA-S defined to be at the start of the SPIRA Host Data Area */
+	spiras = (struct spiras *)spira_heap;
 
 	if (quiet) {
 		fclose(stdout);

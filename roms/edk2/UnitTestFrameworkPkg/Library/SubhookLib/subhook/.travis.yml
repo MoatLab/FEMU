@@ -1,0 +1,30 @@
+language: c
+
+os:
+  - linux
+  - osx
+  - freebsd
+env:
+  global:
+    - CTEST_OUTPUT_ON_FAILURE=ON
+  matrix:
+    - ARCH=x86
+    - ARCH=x86_64
+addons:
+  apt:
+    packages:
+      - gcc
+      - g++
+      - gcc-multilib
+      - g++-multilib
+      - cmake
+      - yasm
+before_install:
+  - if [ $TRAVIS_OS_NAME == osx ]; then brew install yasm; fi
+  - if [ $TRAVIS_OS_NAME == freebsd ]; then sudo pkg install -y yasm; fi
+
+before_script:
+  - cmake . -DSUBHOOK_FORCE_32BIT=`([ $ARCH = x86 ] && echo 'ON') || echo 'OFF'`
+script:
+  - make
+  - make test

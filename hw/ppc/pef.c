@@ -12,10 +12,9 @@
 
 #include "qapi/error.h"
 #include "qom/object_interfaces.h"
-#include "sysemu/kvm.h"
+#include "system/kvm.h"
 #include "migration/blocker.h"
-#include "exec/confidential-guest-support.h"
-#include "hw/ppc/pef.h"
+#include "system/confidential-guest-support.h"
 
 #define TYPE_PEF_GUEST "pef-guest"
 OBJECT_DECLARE_SIMPLE_TYPE(PefGuest, PEF_GUEST)
@@ -93,7 +92,7 @@ static int kvmppc_svm_off(Error **errp)
 #endif
 }
 
-int pef_kvm_init(ConfidentialGuestSupport *cgs, Error **errp)
+static int pef_kvm_init(ConfidentialGuestSupport *cgs, Error **errp)
 {
     if (!object_dynamic_cast(OBJECT(cgs), TYPE_PEF_GUEST)) {
         return 0;
@@ -107,7 +106,7 @@ int pef_kvm_init(ConfidentialGuestSupport *cgs, Error **errp)
     return kvmppc_svm_init(cgs, errp);
 }
 
-int pef_kvm_reset(ConfidentialGuestSupport *cgs, Error **errp)
+static int pef_kvm_reset(ConfidentialGuestSupport *cgs, Error **errp)
 {
     if (!object_dynamic_cast(OBJECT(cgs), TYPE_PEF_GUEST)) {
         return 0;
@@ -129,8 +128,12 @@ OBJECT_DEFINE_TYPE_WITH_INTERFACES(PefGuest,
                                    { TYPE_USER_CREATABLE },
                                    { NULL })
 
-static void pef_guest_class_init(ObjectClass *oc, void *data)
+static void pef_guest_class_init(ObjectClass *oc, const void *data)
 {
+    ConfidentialGuestSupportClass *klass = CONFIDENTIAL_GUEST_SUPPORT_CLASS(oc);
+
+    klass->kvm_init = pef_kvm_init;
+    klass->kvm_reset = pef_kvm_reset;
 }
 
 static void pef_guest_init(Object *obj)

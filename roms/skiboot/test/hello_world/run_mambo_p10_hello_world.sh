@@ -1,7 +1,7 @@
 #!/bin/bash
 
 if [ -z "$P10MAMBO_PATH" ]; then
-    P10MAMBO_PATH=/opt/ibm/systemsim-p10-1.1-0
+    P10MAMBO_PATH=/opt/ibm/systemsim-p10-1.2-1
 fi
 
 if [ -z "$P10MAMBO_BINARY" ]; then

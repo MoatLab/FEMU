@@ -8,29 +8,108 @@
 #include "qemu/osdep.h"
 #include <sys/ioctl.h>
 #include <linux/kvm.h>
-
+#include "asm-loongarch/kvm_para.h"
+#include "qapi/error.h"
 #include "qemu/timer.h"
 #include "qemu/error-report.h"
 #include "qemu/main-loop.h"
-#include "sysemu/sysemu.h"
-#include "sysemu/kvm.h"
-#include "sysemu/kvm_int.h"
+#include "system/system.h"
+#include "system/kvm.h"
+#include "system/kvm_int.h"
 #include "hw/pci/pci.h"
 #include "exec/memattrs.h"
-#include "exec/address-spaces.h"
+#include "system/address-spaces.h"
 #include "hw/boards.h"
 #include "hw/irq.h"
+#include "hw/loongarch/virt.h"
 #include "qemu/log.h"
 #include "hw/loader.h"
-#include "sysemu/runstate.h"
+#include "system/runstate.h"
 #include "cpu-csr.h"
 #include "kvm_loongarch.h"
 #include "trace.h"
 
 static bool cap_has_mp_state;
+static unsigned int brk_insn;
 const KVMCapabilityInfo kvm_arch_required_capabilities[] = {
     KVM_CAP_LAST_INFO
 };
+
+static int kvm_get_stealtime(CPUState *cs)
+{
+    CPULoongArchState *env = cpu_env(cs);
+    int err;
+    struct kvm_device_attr attr = {
+        .group = KVM_LOONGARCH_VCPU_PVTIME_CTRL,
+        .attr = KVM_LOONGARCH_VCPU_PVTIME_GPA,
+        .addr = (uint64_t)&env->stealtime.guest_addr,
+    };
+
+    err = kvm_vcpu_ioctl(cs, KVM_HAS_DEVICE_ATTR, attr);
+    if (err) {
+        return 0;
+    }
+
+    err = kvm_vcpu_ioctl(cs, KVM_GET_DEVICE_ATTR, attr);
+    if (err) {
+        error_report("PVTIME: KVM_GET_DEVICE_ATTR: %s", strerror(errno));
+        return err;
+    }
+
+    return 0;
+}
+
+static int kvm_set_stealtime(CPUState *cs)
+{
+    CPULoongArchState *env = cpu_env(cs);
+    int err;
+    struct kvm_device_attr attr = {
+        .group = KVM_LOONGARCH_VCPU_PVTIME_CTRL,
+        .attr = KVM_LOONGARCH_VCPU_PVTIME_GPA,
+        .addr = (uint64_t)&env->stealtime.guest_addr,
+    };
+
+    err = kvm_vcpu_ioctl(cs, KVM_HAS_DEVICE_ATTR, attr);
+    if (err) {
+        return 0;
+    }
+
+    err = kvm_vcpu_ioctl(cs, KVM_SET_DEVICE_ATTR, attr);
+    if (err) {
+        error_report("PVTIME: KVM_SET_DEVICE_ATTR %s with gpa "TARGET_FMT_lx,
+                      strerror(errno), env->stealtime.guest_addr);
+        return err;
+    }
+
+    return 0;
+}
+
+static int kvm_set_pv_features(CPUState *cs)
+{
+    CPULoongArchState *env = cpu_env(cs);
+    int err;
+    uint64_t val;
+    struct kvm_device_attr attr = {
+        .group = KVM_LOONGARCH_VCPU_CPUCFG,
+        .attr = CPUCFG_KVM_FEATURE,
+        .addr = (uint64_t)&val,
+    };
+
+    err = kvm_vcpu_ioctl(cs, KVM_HAS_DEVICE_ATTR, attr);
+    if (err) {
+        return 0;
+    }
+
+    val = env->pv_features;
+    err = kvm_vcpu_ioctl(cs, KVM_SET_DEVICE_ATTR, attr);
+    if (err) {
+        error_report("Fail to set pv feature "TARGET_FMT_lx " with error %s",
+                      val, strerror(errno));
+        return err;
+    }
+
+    return 0;
+}
 
 static int kvm_loongarch_get_regs_core(CPUState *cs)
 {
@@ -475,9 +554,71 @@ static int kvm_loongarch_put_regs_fp(CPUState *cs)
     return ret;
 }
 
-void kvm_arch_reset_vcpu(CPULoongArchState *env)
+static int kvm_loongarch_put_lbt(CPUState *cs)
 {
+    CPULoongArchState *env = cpu_env(cs);
+    uint64_t val;
+    int ret;
+
+    /* check whether vm support LBT firstly */
+    if (FIELD_EX32(env->cpucfg[2], CPUCFG2, LBT_ALL) != 7) {
+        return 0;
+    }
+
+    /* set six LBT registers including scr0-scr3, eflags, ftop */
+    ret = kvm_set_one_reg(cs, KVM_REG_LOONGARCH_LBT_SCR0, &env->lbt.scr0);
+    ret |= kvm_set_one_reg(cs, KVM_REG_LOONGARCH_LBT_SCR1, &env->lbt.scr1);
+    ret |= kvm_set_one_reg(cs, KVM_REG_LOONGARCH_LBT_SCR2, &env->lbt.scr2);
+    ret |= kvm_set_one_reg(cs, KVM_REG_LOONGARCH_LBT_SCR3, &env->lbt.scr3);
+    /*
+     * Be cautious, KVM_REG_LOONGARCH_LBT_FTOP is defined as 64-bit however
+     * lbt.ftop is 32-bit; the same with KVM_REG_LOONGARCH_LBT_EFLAGS register
+     */
+    val = env->lbt.eflags;
+    ret |= kvm_set_one_reg(cs, KVM_REG_LOONGARCH_LBT_EFLAGS, &val);
+    val = env->lbt.ftop;
+    ret |= kvm_set_one_reg(cs, KVM_REG_LOONGARCH_LBT_FTOP, &val);
+
+    return ret;
+}
+
+static int kvm_loongarch_get_lbt(CPUState *cs)
+{
+    CPULoongArchState *env = cpu_env(cs);
+    uint64_t val;
+    int ret;
+
+    /* check whether vm support LBT firstly */
+    if (FIELD_EX32(env->cpucfg[2], CPUCFG2, LBT_ALL) != 7) {
+        return 0;
+    }
+
+    /* get six LBT registers including scr0-scr3, eflags, ftop */
+    ret = kvm_get_one_reg(cs, KVM_REG_LOONGARCH_LBT_SCR0, &env->lbt.scr0);
+    ret |= kvm_get_one_reg(cs, KVM_REG_LOONGARCH_LBT_SCR1, &env->lbt.scr1);
+    ret |= kvm_get_one_reg(cs, KVM_REG_LOONGARCH_LBT_SCR2, &env->lbt.scr2);
+    ret |= kvm_get_one_reg(cs, KVM_REG_LOONGARCH_LBT_SCR3, &env->lbt.scr3);
+    ret |= kvm_get_one_reg(cs, KVM_REG_LOONGARCH_LBT_EFLAGS, &val);
+    env->lbt.eflags = (uint32_t)val;
+    ret |= kvm_get_one_reg(cs, KVM_REG_LOONGARCH_LBT_FTOP, &val);
+    env->lbt.ftop = (uint32_t)val;
+
+    return ret;
+}
+
+void kvm_arch_reset_vcpu(CPUState *cs)
+{
+    CPULoongArchState *env = cpu_env(cs);
+    int ret = 0;
+    uint64_t unused = 0;
+
     env->mp_state = KVM_MP_STATE_RUNNABLE;
+    ret = kvm_set_one_reg(cs, KVM_REG_LOONGARCH_VCPU_RESET, &unused);
+    if (ret) {
+        error_report("Failed to set KVM_REG_LOONGARCH_VCPU_RESET: %s",
+                     strerror(errno));
+        exit(EXIT_FAILURE);
+    }
 }
 
 static int kvm_loongarch_get_mpstate(CPUState *cs)
@@ -584,11 +725,16 @@ static int kvm_loongarch_put_cpucfg(CPUState *cs)
     return ret;
 }
 
-int kvm_arch_get_registers(CPUState *cs)
+int kvm_arch_get_registers(CPUState *cs, Error **errp)
 {
     int ret;
 
     ret = kvm_loongarch_get_regs_core(cs);
+    if (ret) {
+        return ret;
+    }
+
+    ret = kvm_loongarch_get_cpucfg(cs);
     if (ret) {
         return ret;
     }
@@ -603,20 +749,31 @@ int kvm_arch_get_registers(CPUState *cs)
         return ret;
     }
 
-    ret = kvm_loongarch_get_mpstate(cs);
+    ret = kvm_loongarch_get_lbt(cs);
     if (ret) {
         return ret;
     }
 
-    ret = kvm_loongarch_get_cpucfg(cs);
+    ret = kvm_get_stealtime(cs);
+    if (ret) {
+        return ret;
+    }
+
+    ret = kvm_loongarch_get_mpstate(cs);
     return ret;
 }
 
-int kvm_arch_put_registers(CPUState *cs, int level)
+int kvm_arch_put_registers(CPUState *cs, int level, Error **errp)
 {
     int ret;
+    static int once;
 
     ret = kvm_loongarch_put_regs_core(cs);
+    if (ret) {
+        return ret;
+    }
+
+    ret = kvm_loongarch_put_cpucfg(cs);
     if (ret) {
         return ret;
     }
@@ -631,12 +788,31 @@ int kvm_arch_put_registers(CPUState *cs, int level)
         return ret;
     }
 
-    ret = kvm_loongarch_put_mpstate(cs);
+    ret = kvm_loongarch_put_lbt(cs);
     if (ret) {
         return ret;
     }
 
-    ret = kvm_loongarch_put_cpucfg(cs);
+    if (!once) {
+        ret = kvm_set_pv_features(cs);
+        if (ret) {
+            return ret;
+        }
+        once = 1;
+    }
+
+    if (level >= KVM_PUT_FULL_STATE) {
+        /*
+         * only KVM_PUT_FULL_STATE is required, kvm kernel will clear
+         * guest_addr for KVM_PUT_RESET_STATE
+         */
+        ret = kvm_set_stealtime(cs);
+        if (ret) {
+            return ret;
+        }
+    }
+
+    ret = kvm_loongarch_put_mpstate(cs);
     return ret;
 }
 
@@ -662,14 +838,374 @@ static void kvm_loongarch_vm_stage_change(void *opaque, bool running,
     }
 }
 
+static bool kvm_feature_supported(CPUState *cs, enum loongarch_features feature)
+{
+    int ret;
+    struct kvm_device_attr attr;
+    uint64_t val;
+
+    switch (feature) {
+    case LOONGARCH_FEATURE_LSX:
+        attr.group = KVM_LOONGARCH_VM_FEAT_CTRL;
+        attr.attr = KVM_LOONGARCH_VM_FEAT_LSX;
+        ret = kvm_vm_ioctl(kvm_state, KVM_HAS_DEVICE_ATTR, &attr);
+        if (ret == 0) {
+            return true;
+        }
+
+        /* Fallback to old kernel detect interface */
+        val = 0;
+        attr.group = KVM_LOONGARCH_VCPU_CPUCFG;
+        /* Cpucfg2 */
+        attr.attr  = 2;
+        attr.addr = (uint64_t)&val;
+        ret = kvm_vcpu_ioctl(cs, KVM_HAS_DEVICE_ATTR, &attr);
+        if (!ret) {
+            ret = kvm_vcpu_ioctl(cs, KVM_GET_DEVICE_ATTR, &attr);
+            if (ret) {
+                return false;
+            }
+
+            ret = FIELD_EX32((uint32_t)val, CPUCFG2, LSX);
+            return (ret != 0);
+        }
+        return false;
+
+    case LOONGARCH_FEATURE_LASX:
+        attr.group = KVM_LOONGARCH_VM_FEAT_CTRL;
+        attr.attr = KVM_LOONGARCH_VM_FEAT_LASX;
+        ret = kvm_vm_ioctl(kvm_state, KVM_HAS_DEVICE_ATTR, &attr);
+        if (ret == 0) {
+            return true;
+        }
+
+        /* Fallback to old kernel detect interface */
+        val = 0;
+        attr.group = KVM_LOONGARCH_VCPU_CPUCFG;
+        /* Cpucfg2 */
+        attr.attr  = 2;
+        attr.addr = (uint64_t)&val;
+        ret = kvm_vcpu_ioctl(cs, KVM_HAS_DEVICE_ATTR, &attr);
+        if (!ret) {
+            ret = kvm_vcpu_ioctl(cs, KVM_GET_DEVICE_ATTR, &attr);
+            if (ret) {
+                return false;
+            }
+
+            ret = FIELD_EX32((uint32_t)val, CPUCFG2, LASX);
+            return (ret != 0);
+        }
+        return false;
+
+    case LOONGARCH_FEATURE_LBT:
+        /*
+         * Return all if all the LBT features are supported such as:
+         *  KVM_LOONGARCH_VM_FEAT_X86BT
+         *  KVM_LOONGARCH_VM_FEAT_ARMBT
+         *  KVM_LOONGARCH_VM_FEAT_MIPSBT
+         */
+        attr.group = KVM_LOONGARCH_VM_FEAT_CTRL;
+        attr.attr = KVM_LOONGARCH_VM_FEAT_X86BT;
+        ret = kvm_vm_ioctl(kvm_state, KVM_HAS_DEVICE_ATTR, &attr);
+        attr.attr = KVM_LOONGARCH_VM_FEAT_ARMBT;
+        ret |= kvm_vm_ioctl(kvm_state, KVM_HAS_DEVICE_ATTR, &attr);
+        attr.attr = KVM_LOONGARCH_VM_FEAT_MIPSBT;
+        ret |= kvm_vm_ioctl(kvm_state, KVM_HAS_DEVICE_ATTR, &attr);
+        return (ret == 0);
+
+    case LOONGARCH_FEATURE_PMU:
+        attr.group = KVM_LOONGARCH_VM_FEAT_CTRL;
+        attr.attr = KVM_LOONGARCH_VM_FEAT_PMU;
+        ret = kvm_vm_ioctl(kvm_state, KVM_HAS_DEVICE_ATTR, &attr);
+        return (ret == 0);
+
+    case LOONGARCH_FEATURE_PV_IPI:
+        attr.group = KVM_LOONGARCH_VM_FEAT_CTRL;
+        attr.attr = KVM_LOONGARCH_VM_FEAT_PV_IPI;
+        ret = kvm_vm_ioctl(kvm_state, KVM_HAS_DEVICE_ATTR, &attr);
+        return (ret == 0);
+
+    case LOONGARCH_FEATURE_STEALTIME:
+        attr.group = KVM_LOONGARCH_VM_FEAT_CTRL;
+        attr.attr = KVM_LOONGARCH_VM_FEAT_PV_STEALTIME;
+        ret = kvm_vm_ioctl(kvm_state, KVM_HAS_DEVICE_ATTR, &attr);
+        return (ret == 0);
+
+    default:
+        return false;
+    }
+
+    return false;
+}
+
+static int kvm_cpu_check_lsx(CPUState *cs, Error **errp)
+{
+    CPULoongArchState *env = cpu_env(cs);
+    LoongArchCPU *cpu = LOONGARCH_CPU(cs);
+    bool kvm_supported;
+
+    kvm_supported = kvm_feature_supported(cs, LOONGARCH_FEATURE_LSX);
+    env->cpucfg[2] = FIELD_DP32(env->cpucfg[2], CPUCFG2, LSX, 0);
+    if (cpu->lsx == ON_OFF_AUTO_ON) {
+        if (kvm_supported) {
+            env->cpucfg[2] = FIELD_DP32(env->cpucfg[2], CPUCFG2, LSX, 1);
+        } else {
+            error_setg(errp, "'lsx' feature not supported by KVM on this host");
+            return -ENOTSUP;
+        }
+    } else if ((cpu->lsx == ON_OFF_AUTO_AUTO) && kvm_supported) {
+        env->cpucfg[2] = FIELD_DP32(env->cpucfg[2], CPUCFG2, LSX, 1);
+    }
+
+    return 0;
+}
+
+static int kvm_cpu_check_lasx(CPUState *cs, Error **errp)
+{
+    CPULoongArchState *env = cpu_env(cs);
+    LoongArchCPU *cpu = LOONGARCH_CPU(cs);
+    bool kvm_supported;
+
+    kvm_supported = kvm_feature_supported(cs, LOONGARCH_FEATURE_LASX);
+    env->cpucfg[2] = FIELD_DP32(env->cpucfg[2], CPUCFG2, LASX, 0);
+    if (cpu->lasx == ON_OFF_AUTO_ON) {
+        if (kvm_supported) {
+            env->cpucfg[2] = FIELD_DP32(env->cpucfg[2], CPUCFG2, LASX, 1);
+        } else {
+            error_setg(errp, "'lasx' feature not supported by KVM on host");
+            return -ENOTSUP;
+        }
+    } else if ((cpu->lasx == ON_OFF_AUTO_AUTO) && kvm_supported) {
+        env->cpucfg[2] = FIELD_DP32(env->cpucfg[2], CPUCFG2, LASX, 1);
+    }
+
+    return 0;
+}
+
+static int kvm_cpu_check_lbt(CPUState *cs, Error **errp)
+{
+    CPULoongArchState *env = cpu_env(cs);
+    LoongArchCPU *cpu = LOONGARCH_CPU(cs);
+    bool kvm_supported;
+
+    kvm_supported = kvm_feature_supported(cs, LOONGARCH_FEATURE_LBT);
+    if (cpu->lbt == ON_OFF_AUTO_ON) {
+        if (kvm_supported) {
+            env->cpucfg[2] = FIELD_DP32(env->cpucfg[2], CPUCFG2, LBT_ALL, 7);
+        } else {
+            error_setg(errp, "'lbt' feature not supported by KVM on this host");
+            return -ENOTSUP;
+        }
+    } else if ((cpu->lbt == ON_OFF_AUTO_AUTO) && kvm_supported) {
+        env->cpucfg[2] = FIELD_DP32(env->cpucfg[2], CPUCFG2, LBT_ALL, 7);
+    }
+
+    return 0;
+}
+
+static int kvm_cpu_check_pmu(CPUState *cs, Error **errp)
+{
+    LoongArchCPU *cpu = LOONGARCH_CPU(cs);
+    CPULoongArchState *env = cpu_env(cs);
+    bool kvm_supported;
+
+    kvm_supported = kvm_feature_supported(cs, LOONGARCH_FEATURE_PMU);
+    if (cpu->pmu == ON_OFF_AUTO_ON) {
+        if (!kvm_supported) {
+            error_setg(errp, "'pmu' feature not supported by KVM on the host");
+            return -ENOTSUP;
+        }
+    } else if (cpu->pmu != ON_OFF_AUTO_AUTO) {
+        /* disable pmu if ON_OFF_AUTO_OFF is set */
+        kvm_supported = false;
+    }
+
+    if (kvm_supported) {
+        env->cpucfg[6] = FIELD_DP32(env->cpucfg[6], CPUCFG6, PMP, 1);
+        env->cpucfg[6] = FIELD_DP32(env->cpucfg[6], CPUCFG6, PMNUM, 3);
+        env->cpucfg[6] = FIELD_DP32(env->cpucfg[6], CPUCFG6, PMBITS, 63);
+        env->cpucfg[6] = FIELD_DP32(env->cpucfg[6], CPUCFG6, UPM, 1);
+    }
+    return 0;
+}
+
+static int kvm_cpu_check_pv_features(CPUState *cs, Error **errp)
+{
+    MachineState *ms = MACHINE(qdev_get_machine());
+    LoongArchCPU *cpu = LOONGARCH_CPU(cs);
+    CPULoongArchState *env = cpu_env(cs);
+    bool kvm_supported;
+
+    kvm_supported = kvm_feature_supported(cs, LOONGARCH_FEATURE_PV_IPI);
+    if (cpu->kvm_pv_ipi == ON_OFF_AUTO_ON) {
+        if (!kvm_supported) {
+            error_setg(errp, "'pv_ipi' feature not supported by KVM host");
+            return -ENOTSUP;
+        }
+    } else if (cpu->kvm_pv_ipi != ON_OFF_AUTO_AUTO) {
+        kvm_supported = false;
+    }
+
+    if (kvm_supported) {
+        env->pv_features |= BIT(KVM_FEATURE_IPI);
+    }
+
+    kvm_supported = kvm_feature_supported(cs, LOONGARCH_FEATURE_STEALTIME);
+    if (cpu->kvm_steal_time == ON_OFF_AUTO_ON) {
+        if (!kvm_supported) {
+            error_setg(errp, "'kvm stealtime' feature not supported by KVM host");
+            return -ENOTSUP;
+        }
+    } else if (cpu->kvm_steal_time != ON_OFF_AUTO_AUTO) {
+        kvm_supported = false;
+    }
+
+    if (kvm_supported) {
+        env->pv_features |= BIT(KVM_FEATURE_STEAL_TIME);
+    }
+
+    if (object_dynamic_cast(OBJECT(ms), TYPE_LOONGARCH_VIRT_MACHINE)) {
+        LoongArchVirtMachineState *lvms = LOONGARCH_VIRT_MACHINE(ms);
+
+        if (virt_is_veiointc_enabled(lvms)) {
+            env->pv_features |= BIT(KVM_FEATURE_VIRT_EXTIOI);
+        }
+    }
+    return 0;
+}
+
+int kvm_arch_pre_create_vcpu(CPUState *cpu, Error **errp)
+{
+    return 0;
+}
+
 int kvm_arch_init_vcpu(CPUState *cs)
 {
-    qemu_add_vm_change_state_handler(kvm_loongarch_vm_stage_change, cs);
+    uint64_t val;
+    int ret;
+    Error *local_err = NULL;
+    LoongArchCPU *cpu = LOONGARCH_CPU(cs);
+
+    cpu->vmsentry = qemu_add_vm_change_state_handler(
+                    kvm_loongarch_vm_stage_change, cs);
+
+    if (!kvm_get_one_reg(cs, KVM_REG_LOONGARCH_DEBUG_INST, &val)) {
+        brk_insn = val;
+    }
+
+    ret = kvm_cpu_check_lsx(cs, &local_err);
+    if (ret < 0) {
+        error_report_err(local_err);
+        return ret;
+    }
+
+    ret = kvm_cpu_check_lasx(cs, &local_err);
+    if (ret < 0) {
+        error_report_err(local_err);
+        return ret;
+    }
+
+    ret = kvm_cpu_check_lbt(cs, &local_err);
+    if (ret < 0) {
+        error_report_err(local_err);
+        return ret;
+    }
+
+    ret = kvm_cpu_check_pmu(cs, &local_err);
+    if (ret < 0) {
+        error_report_err(local_err);
+        return ret;
+    }
+
+    ret = kvm_cpu_check_pv_features(cs, &local_err);
+    if (ret < 0) {
+        error_report_err(local_err);
+        return ret;
+    }
+
     return 0;
+}
+
+static bool loongarch_get_lbt(Object *obj, Error **errp)
+{
+    return LOONGARCH_CPU(obj)->lbt != ON_OFF_AUTO_OFF;
+}
+
+static void loongarch_set_lbt(Object *obj, bool value, Error **errp)
+{
+    LoongArchCPU *cpu = LOONGARCH_CPU(obj);
+
+    cpu->lbt = value ? ON_OFF_AUTO_ON : ON_OFF_AUTO_OFF;
+}
+
+static bool loongarch_get_pmu(Object *obj, Error **errp)
+{
+    return LOONGARCH_CPU(obj)->pmu != ON_OFF_AUTO_OFF;
+}
+
+static void loongarch_set_pmu(Object *obj, bool value, Error **errp)
+{
+    LoongArchCPU *cpu = LOONGARCH_CPU(obj);
+
+    cpu->pmu = value ? ON_OFF_AUTO_ON : ON_OFF_AUTO_OFF;
+}
+
+static bool kvm_pv_ipi_get(Object *obj, Error **errp)
+{
+    return LOONGARCH_CPU(obj)->kvm_pv_ipi != ON_OFF_AUTO_OFF;
+}
+
+static void kvm_pv_ipi_set(Object *obj, bool value, Error **errp)
+{
+    LoongArchCPU *cpu = LOONGARCH_CPU(obj);
+
+    cpu->kvm_pv_ipi = value ? ON_OFF_AUTO_ON : ON_OFF_AUTO_OFF;
+}
+
+static bool kvm_steal_time_get(Object *obj, Error **errp)
+{
+    return LOONGARCH_CPU(obj)->kvm_steal_time != ON_OFF_AUTO_OFF;
+}
+
+static void kvm_steal_time_set(Object *obj, bool value, Error **errp)
+{
+    LoongArchCPU *cpu = LOONGARCH_CPU(obj);
+
+    cpu->kvm_steal_time = value ? ON_OFF_AUTO_ON : ON_OFF_AUTO_OFF;
+}
+
+void kvm_loongarch_cpu_post_init(LoongArchCPU *cpu)
+{
+    cpu->lbt = ON_OFF_AUTO_AUTO;
+    object_property_add_bool(OBJECT(cpu), "lbt", loongarch_get_lbt,
+                             loongarch_set_lbt);
+    object_property_set_description(OBJECT(cpu), "lbt",
+                                   "Set off to disable Binary Tranlation.");
+
+    cpu->pmu = ON_OFF_AUTO_AUTO;
+    object_property_add_bool(OBJECT(cpu), "pmu", loongarch_get_pmu,
+                             loongarch_set_pmu);
+    object_property_set_description(OBJECT(cpu), "pmu",
+                               "Set off to disable performance monitor unit.");
+
+    cpu->kvm_pv_ipi = ON_OFF_AUTO_AUTO;
+    object_property_add_bool(OBJECT(cpu), "kvm-pv-ipi", kvm_pv_ipi_get,
+                             kvm_pv_ipi_set);
+    object_property_set_description(OBJECT(cpu), "kvm-pv-ipi",
+                                    "Set off to disable KVM paravirt IPI.");
+
+    cpu->kvm_steal_time = ON_OFF_AUTO_AUTO;
+    object_property_add_bool(OBJECT(cpu), "kvm-steal-time", kvm_steal_time_get,
+                             kvm_steal_time_set);
+    object_property_set_description(OBJECT(cpu), "kvm-steal-time",
+                                    "Set off to disable KVM steal time.");
 }
 
 int kvm_arch_destroy_vcpu(CPUState *cs)
 {
+    LoongArchCPU *cpu = LOONGARCH_CPU(cs);
+
+    qemu_del_vm_change_state_handler(cpu->vmsentry);
     return 0;
 }
 
@@ -704,6 +1240,22 @@ void kvm_arch_init_irq_routing(KVMState *s)
 {
 }
 
+void kvm_loongarch_init_irq_routing(void)
+{
+    int i;
+
+    kvm_async_interrupts_allowed = true;
+    kvm_msi_via_irqfd_allowed = kvm_irqfds_enabled();
+    if (kvm_has_gsi_routing()) {
+        for (i = 0; i < KVM_IRQCHIP_NUM_PINS; ++i) {
+            kvm_irqchip_add_irq_route(kvm_state, i, 0, i);
+        }
+
+        kvm_gsi_routing_allowed = true;
+        kvm_irqchip_commit_routes(kvm_state);
+    }
+}
+
 int kvm_arch_get_default_type(MachineState *ms)
 {
     return 0;
@@ -717,7 +1269,12 @@ int kvm_arch_init(MachineState *ms, KVMState *s)
 
 int kvm_arch_irqchip_create(KVMState *s)
 {
-    return 0;
+    if (kvm_kernel_irqchip_split()) {
+        error_report("kernel_irqchip=split is not supported on LoongArch");
+        exit(1);
+    }
+
+    return kvm_check_extension(s, KVM_CAP_DEVICE_CTRL);
 }
 
 void kvm_arch_pre_run(CPUState *cs, struct kvm_run *run)
@@ -739,9 +1296,65 @@ bool kvm_arch_stop_on_emulation_error(CPUState *cs)
     return true;
 }
 
-bool kvm_arch_cpu_check_are_resettable(void)
+void kvm_arch_update_guest_debug(CPUState *cpu, struct kvm_guest_debug *dbg)
 {
-    return true;
+    if (kvm_sw_breakpoints_active(cpu)) {
+        dbg->control |= KVM_GUESTDBG_ENABLE | KVM_GUESTDBG_USE_SW_BP;
+    }
+}
+
+int kvm_arch_insert_sw_breakpoint(CPUState *cs, struct kvm_sw_breakpoint *bp)
+{
+    if (cpu_memory_rw_debug(cs, bp->pc, (uint8_t *)&bp->saved_insn, 4, 0) ||
+        cpu_memory_rw_debug(cs, bp->pc, (uint8_t *)&brk_insn, 4, 1)) {
+        error_report("%s failed", __func__);
+        return -EINVAL;
+    }
+    return 0;
+}
+
+int kvm_arch_remove_sw_breakpoint(CPUState *cs, struct kvm_sw_breakpoint *bp)
+{
+    static uint32_t brk;
+
+    if (cpu_memory_rw_debug(cs, bp->pc, (uint8_t *)&brk, 4, 0) ||
+        brk != brk_insn ||
+        cpu_memory_rw_debug(cs, bp->pc, (uint8_t *)&bp->saved_insn, 4, 1)) {
+        error_report("%s failed", __func__);
+        return -EINVAL;
+    }
+    return 0;
+}
+
+int kvm_arch_insert_hw_breakpoint(vaddr addr, vaddr len, int type)
+{
+    return -ENOSYS;
+}
+
+int kvm_arch_remove_hw_breakpoint(vaddr addr, vaddr len, int type)
+{
+    return -ENOSYS;
+}
+
+void kvm_arch_remove_all_hw_breakpoints(void)
+{
+}
+
+static bool kvm_loongarch_handle_debug(CPUState *cs, struct kvm_run *run)
+{
+    LoongArchCPU *cpu = LOONGARCH_CPU(cs);
+    CPULoongArchState *env = &cpu->env;
+
+    kvm_cpu_synchronize_state(cs);
+    if (cs->singlestep_enabled) {
+        return true;
+    }
+
+    if (kvm_find_sw_breakpoint(cs, env->pc)) {
+        return true;
+    }
+
+    return false;
 }
 
 int kvm_arch_handle_exit(CPUState *cs, struct kvm_run *run)
@@ -762,6 +1375,13 @@ int kvm_arch_handle_exit(CPUState *cs, struct kvm_run *run)
                          run->iocsr_io.len,
                          run->iocsr_io.is_write);
         break;
+
+    case KVM_EXIT_DEBUG:
+        if (kvm_loongarch_handle_debug(cs, run)) {
+            ret = EXCP_DEBUG;
+        }
+        break;
+
     default:
         ret = -1;
         warn_report("KVM: unknown exit reason %d", run->exit_reason);

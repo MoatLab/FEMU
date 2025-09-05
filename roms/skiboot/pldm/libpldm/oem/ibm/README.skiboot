@@ -1,0 +1,15 @@
+skiboot/pldm/ibm/libpldm/ is a minimally modified version of upstream
+ibm/libpldm/ that is distributed with the openbmc project
+hosted at https://github.com/openbmc/pldm.git
+
+This version is taken from pldm.git commit 8fadc9e03fdb ("pldmtool: Fix
+tool to show the oem entities") by copying most of files from the
+pldm/oem/ibm/libpldm directory.
+
+The only modifications from the upstream source are the additions of
+this file, Makefile.inc which has been derived from the original
+Makefile.inc, an update of platform_oem_ibm.c (change an include
+definition) and the removal of several unnecessary folders and files.
+
+Local libpldm changes should be kept to a minimum, and submitted
+upstream if possible.

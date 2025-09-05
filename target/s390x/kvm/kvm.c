@@ -27,7 +27,7 @@
 #include "cpu.h"
 #include "s390x-internal.h"
 #include "kvm_s390x.h"
-#include "sysemu/kvm_int.h"
+#include "system/kvm_int.h"
 #include "qemu/cutils.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
@@ -36,12 +36,12 @@
 #include "qemu/main-loop.h"
 #include "qemu/mmap-alloc.h"
 #include "qemu/log.h"
-#include "sysemu/sysemu.h"
-#include "sysemu/hw_accel.h"
-#include "sysemu/runstate.h"
-#include "sysemu/device_tree.h"
-#include "exec/gdbstub.h"
-#include "exec/ram_addr.h"
+#include "system/system.h"
+#include "system/hw_accel.h"
+#include "system/runstate.h"
+#include "system/device_tree.h"
+#include "gdbstub/enums.h"
+#include "system/ram_addr.h"
 #include "trace.h"
 #include "hw/s390x/s390-pci-inst.h"
 #include "hw/s390x/s390-pci-bus.h"
@@ -49,8 +49,9 @@
 #include "hw/s390x/ebcdic.h"
 #include "exec/memattrs.h"
 #include "hw/s390x/s390-virtio-ccw.h"
-#include "hw/s390x/s390-virtio-hcall.h"
+#include "hw/s390x/s390-hypercall.h"
 #include "target/s390x/kvm/pv.h"
+#include CONFIG_DEVICES
 
 #define kvm_vm_check_mem_attr(s, attr) \
     kvm_vm_check_attr(s, KVM_S390_VM_MEM_CTRL, attr)
@@ -297,12 +298,6 @@ void kvm_s390_set_max_pagesize(uint64_t pagesize, Error **errp)
         return;
     }
 
-    if (!hpage_1m_allowed()) {
-        error_setg(errp, "This QEMU machine does not support huge page "
-                   "mappings");
-        return;
-    }
-
     if (pagesize != 1 * MiB) {
         error_setg(errp, "Memory backing with 2G pages was specified, "
                    "but KVM does not support this memory backing");
@@ -373,13 +368,9 @@ int kvm_arch_init(MachineState *ms, KVMState *s)
     kvm_vm_enable_cap(s, KVM_CAP_S390_VECTOR_REGISTERS, 0);
     kvm_vm_enable_cap(s, KVM_CAP_S390_USER_STSI, 0);
     kvm_vm_enable_cap(s, KVM_CAP_S390_CPU_TOPOLOGY, 0);
-    if (ri_allowed()) {
-        if (kvm_vm_enable_cap(s, KVM_CAP_S390_RI, 0) == 0) {
-            cap_ri = 1;
-        }
-    }
-    if (cpu_model_allowed()) {
-        kvm_vm_enable_cap(s, KVM_CAP_S390_GS, 0);
+    kvm_vm_enable_cap(s, KVM_CAP_S390_GS, 0);
+    if (kvm_vm_enable_cap(s, KVM_CAP_S390_RI, 0) == 0) {
+        cap_ri = 1;
     }
 
     /*
@@ -388,7 +379,7 @@ int kvm_arch_init(MachineState *ms, KVMState *s)
      * support is considered necessary, we only try to enable this for
      * newer machine types if KVM_CAP_S390_AIS_MIGRATION is available.
      */
-    if (cpu_model_allowed() && kvm_kernel_irqchip_allowed() &&
+    if (kvm_kernel_irqchip_allowed() &&
         kvm_check_extension(s, KVM_CAP_S390_AIS_MIGRATION)) {
         kvm_vm_enable_cap(s, KVM_CAP_S390_AIS, 0);
     }
@@ -405,6 +396,11 @@ int kvm_arch_irqchip_create(KVMState *s)
 unsigned long kvm_arch_vcpu_id(CPUState *cpu)
 {
     return cpu->cpu_index;
+}
+
+int kvm_arch_pre_create_vcpu(CPUState *cpu, Error **errp)
+{
+    return 0;
 }
 
 int kvm_arch_init_vcpu(CPUState *cs)
@@ -472,7 +468,7 @@ static int can_sync_regs(CPUState *cs, int regs)
 #define KVM_SYNC_REQUIRED_REGS (KVM_SYNC_GPRS | KVM_SYNC_ACRS | \
                                 KVM_SYNC_CRS | KVM_SYNC_PREFIX)
 
-int kvm_arch_put_registers(CPUState *cs, int level)
+int kvm_arch_put_registers(CPUState *cs, int level, Error **errp)
 {
     CPUS390XState *env = cpu_env(cs);
     struct kvm_fpu fpu = {};
@@ -598,7 +594,7 @@ int kvm_arch_put_registers(CPUState *cs, int level)
     return 0;
 }
 
-int kvm_arch_get_registers(CPUState *cs)
+int kvm_arch_get_registers(CPUState *cs, Error **errp)
 {
     CPUS390XState *env = cpu_env(cs);
     struct kvm_fpu fpu;
@@ -893,7 +889,7 @@ int kvm_arch_remove_sw_breakpoint(CPUState *cs, struct kvm_sw_breakpoint *bp)
     return 0;
 }
 
-static struct kvm_hw_breakpoint *find_hw_breakpoint(target_ulong addr,
+static struct kvm_hw_breakpoint *find_hw_breakpoint(vaddr addr,
                                                     int len, int type)
 {
     int n;
@@ -908,7 +904,7 @@ static struct kvm_hw_breakpoint *find_hw_breakpoint(target_ulong addr,
     return NULL;
 }
 
-static int insert_hw_breakpoint(target_ulong addr, int len, int type)
+static int insert_hw_breakpoint(vaddr addr, int len, int type)
 {
     int size;
 
@@ -1491,20 +1487,6 @@ static int handle_e3(S390CPU *cpu, struct kvm_run *run, uint8_t ipbl)
     return r;
 }
 
-static int handle_hypercall(S390CPU *cpu, struct kvm_run *run)
-{
-    CPUS390XState *env = &cpu->env;
-    int ret;
-
-    ret = s390_virtio_hypercall(env);
-    if (ret == -EINVAL) {
-        kvm_s390_program_interrupt(cpu, PGM_SPECIFICATION);
-        return 0;
-    }
-
-    return ret;
-}
-
 static void kvm_handle_diag_288(S390CPU *cpu, struct kvm_run *run)
 {
     uint64_t r1, r3;
@@ -1600,9 +1582,11 @@ static int handle_diag(S390CPU *cpu, struct kvm_run *run, uint32_t ipb)
     case DIAG_SET_CONTROL_PROGRAM_CODES:
         handle_diag_318(cpu, run);
         break;
+#ifdef CONFIG_S390_CCW_VIRTIO
     case DIAG_KVM_HYPERCALL:
-        r = handle_hypercall(cpu, run);
+        handle_diag_500(cpu, RA_IGNORED);
         break;
+#endif /* CONFIG_S390_CCW_VIRTIO */
     case DIAG_KVM_BREAKPOINT:
         r = handle_sw_breakpoint(cpu, run);
         break;
@@ -2195,6 +2179,9 @@ static int query_cpu_subfunc(S390FeatBitmap features)
     if (test_bit(S390_FEAT_DEFLATE_BASE, features)) {
         s390_add_from_feat_block(features, S390_FEAT_TYPE_DFLTCC, prop.dfltcc);
     }
+    if (test_bit(S390_FEAT_CCF_BASE, features)) {
+        s390_add_from_feat_block(features, S390_FEAT_TYPE_PFCR, prop.pfcr);
+    }
     return 0;
 }
 
@@ -2247,6 +2234,9 @@ static int configure_cpu_subfunc(const S390FeatBitmap features)
     }
     if (test_bit(S390_FEAT_DEFLATE_BASE, features)) {
         s390_fill_feat_block(features, S390_FEAT_TYPE_DFLTCC, prop.dfltcc);
+    }
+    if (test_bit(S390_FEAT_CCF_BASE, features)) {
+        s390_fill_feat_block(features, S390_FEAT_TYPE_PFCR, prop.pfcr);
     }
     return kvm_vm_ioctl(kvm_state, KVM_SET_DEVICE_ATTR, &attr);
 }
@@ -2359,10 +2349,6 @@ static int configure_cpu_feat(const S390FeatBitmap features)
 
 bool kvm_s390_cpu_models_supported(void)
 {
-    if (!cpu_model_allowed()) {
-        /* compatibility machines interfere with the cpu model */
-        return false;
-    }
     return kvm_vm_check_attr(kvm_state, KVM_S390_VM_CPU_MODEL,
                              KVM_S390_VM_CPU_MACHINE) &&
            kvm_vm_check_attr(kvm_state, KVM_S390_VM_CPU_MODEL,
@@ -2375,7 +2361,7 @@ bool kvm_s390_cpu_models_supported(void)
                              KVM_S390_VM_CPU_MACHINE_SUBFUNC);
 }
 
-void kvm_s390_get_host_cpu_model(S390CPUModel *model, Error **errp)
+bool kvm_s390_get_host_cpu_model(S390CPUModel *model, Error **errp)
 {
     struct kvm_s390_vm_cpu_machine prop = {};
     struct kvm_device_attr attr = {
@@ -2390,14 +2376,14 @@ void kvm_s390_get_host_cpu_model(S390CPUModel *model, Error **errp)
 
     if (!kvm_s390_cpu_models_supported()) {
         error_setg(errp, "KVM doesn't support CPU models");
-        return;
+        return false;
     }
 
     /* query the basic cpu model properties */
     rc = kvm_vm_ioctl(kvm_state, KVM_GET_DEVICE_ATTR, &attr);
     if (rc) {
         error_setg(errp, "KVM: Error querying host CPU model: %d", rc);
-        return;
+        return false;
     }
 
     cpu_type = cpuid_type(prop.cpuid);
@@ -2420,13 +2406,13 @@ void kvm_s390_get_host_cpu_model(S390CPUModel *model, Error **errp)
     rc = query_cpu_feat(model->features);
     if (rc) {
         error_setg(errp, "KVM: Error querying CPU features: %d", rc);
-        return;
+        return false;
     }
     /* get supported cpu subfunctions indicated via query / test bit */
     rc = query_cpu_subfunc(model->features);
     if (rc) {
         error_setg(errp, "KVM: Error querying CPU subfunctions: %d", rc);
-        return;
+        return false;
     }
 
     /* PTFF subfunctions might be indicated although kernel support missing */
@@ -2482,7 +2468,7 @@ void kvm_s390_get_host_cpu_model(S390CPUModel *model, Error **errp)
     }
     if (!model->def) {
         error_setg(errp, "KVM: host CPU model could not be identified");
-        return;
+        return false;
     }
     /* for now, we can only provide the AP feature with HW support */
     if (ap_available()) {
@@ -2506,6 +2492,7 @@ void kvm_s390_get_host_cpu_model(S390CPUModel *model, Error **errp)
     /* strip of features that are not part of the maximum model */
     bitmap_and(model->features, model->features, model->def->full_feat,
                S390_FEAT_MAX);
+    return true;
 }
 
 static int configure_uv_feat_guest(const S390FeatBitmap features)
@@ -2542,7 +2529,7 @@ static void kvm_s390_configure_apie(bool interpret)
     }
 }
 
-void kvm_s390_apply_cpu_model(const S390CPUModel *model, Error **errp)
+bool kvm_s390_apply_cpu_model(const S390CPUModel *model, Error **errp)
 {
     struct kvm_s390_vm_cpu_processor prop  = {
         .fac_list = { 0 },
@@ -2559,11 +2546,11 @@ void kvm_s390_apply_cpu_model(const S390CPUModel *model, Error **errp)
         if (kvm_s390_cmma_available()) {
             kvm_s390_enable_cmma();
         }
-        return;
+        return true;
     }
     if (!kvm_s390_cpu_models_supported()) {
         error_setg(errp, "KVM doesn't support CPU models");
-        return;
+        return false;
     }
     prop.cpuid = s390_cpuid_from_cpu_model(model);
     prop.ibc = s390_ibc_from_cpu_model(model);
@@ -2573,19 +2560,19 @@ void kvm_s390_apply_cpu_model(const S390CPUModel *model, Error **errp)
     rc = kvm_vm_ioctl(kvm_state, KVM_SET_DEVICE_ATTR, &attr);
     if (rc) {
         error_setg(errp, "KVM: Error configuring the CPU model: %d", rc);
-        return;
+        return false;
     }
     /* configure cpu features indicated e.g. via SCLP */
     rc = configure_cpu_feat(model->features);
     if (rc) {
         error_setg(errp, "KVM: Error configuring CPU features: %d", rc);
-        return;
+        return false;
     }
     /* configure cpu subfunctions indicated via query / test bit */
     rc = configure_cpu_subfunc(model->features);
     if (rc) {
         error_setg(errp, "KVM: Error configuring CPU subfunctions: %d", rc);
-        return;
+        return false;
     }
     /* enable CMM via CMMA */
     if (test_bit(S390_FEAT_CMM, model->features)) {
@@ -2600,8 +2587,9 @@ void kvm_s390_apply_cpu_model(const S390CPUModel *model, Error **errp)
     rc = configure_uv_feat_guest(model->features);
     if (rc) {
         error_setg(errp, "KVM: Error configuring CPU UV features %d", rc);
-        return;
+        return false;
     }
+    return true;
 }
 
 void kvm_s390_restart_interrupt(S390CPU *cpu)
@@ -2620,11 +2608,6 @@ void kvm_s390_stop_interrupt(S390CPU *cpu)
     };
 
     kvm_s390_vcpu_interrupt(cpu, &irq);
-}
-
-bool kvm_arch_cpu_check_are_resettable(void)
-{
-    return true;
 }
 
 int kvm_s390_get_zpci_op(void)

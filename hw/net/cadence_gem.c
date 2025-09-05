@@ -23,7 +23,7 @@
  */
 
 #include "qemu/osdep.h"
-#include <zlib.h> /* For crc32 */
+#include <zlib.h> /* for crc32 */
 
 #include "hw/irq.h"
 #include "hw/net/cadence_gem.h"
@@ -33,7 +33,7 @@
 #include "qapi/error.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
-#include "sysemu/dma.h"
+#include "system/dma.h"
 #include "net/checksum.h"
 #include "net/eth.h"
 
@@ -909,8 +909,8 @@ static int get_queue_from_screen(CadenceGEMState *s, uint8_t *rxbuf_ptr,
 
         /* Compare A, B, C */
         for (j = 0; j < 3; j++) {
-            uint32_t cr0, cr1, mask, compare;
-            uint16_t rx_cmp;
+            uint32_t cr0, cr1, mask, compare, disable_mask;
+            uint32_t rx_cmp;
             int offset;
             int cr_idx = extract32(reg, R_SCREENING_TYPE2_REG0_COMPARE_A_SHIFT + j * 6,
                                    R_SCREENING_TYPE2_REG0_COMPARE_A_LENGTH);
@@ -946,9 +946,25 @@ static int get_queue_from_screen(CadenceGEMState *s, uint8_t *rxbuf_ptr,
                 break;
             }
 
-            rx_cmp = rxbuf_ptr[offset] << 8 | rxbuf_ptr[offset];
-            mask = FIELD_EX32(cr0, TYPE2_COMPARE_0_WORD_0, MASK_VALUE);
-            compare = FIELD_EX32(cr0, TYPE2_COMPARE_0_WORD_0, COMPARE_VALUE);
+            disable_mask =
+                FIELD_EX32(cr1, TYPE2_COMPARE_0_WORD_1, DISABLE_MASK);
+            if (disable_mask) {
+                /*
+                 * If disable_mask is set, mask_value is used as an
+                 * additional 2 byte Compare Value; that is equivalent
+                 * to using the whole cr0 register as the comparison value.
+                 * Load 32 bits of data from rx_buf, and set mask to
+                 * all-ones so we compare all 32 bits.
+                 */
+                rx_cmp = ldl_le_p(rxbuf_ptr + offset);
+                mask = 0xFFFFFFFF;
+                compare = cr0;
+            } else {
+                rx_cmp = lduw_le_p(rxbuf_ptr + offset);
+                mask = FIELD_EX32(cr0, TYPE2_COMPARE_0_WORD_0, MASK_VALUE);
+                compare =
+                    FIELD_EX32(cr0, TYPE2_COMPARE_0_WORD_0, COMPARE_VALUE);
+            }
 
             if ((rx_cmp & mask) == (compare & mask)) {
                 matched = true;
@@ -1740,6 +1756,7 @@ static void gem_realize(DeviceState *dev, Error **errp)
         sysbus_init_irq(SYS_BUS_DEVICE(dev), &s->irq[i]);
     }
 
+    gem_init_register_masks(s);
     qemu_macaddr_default_if_unset(&s->conf.macaddr);
 
     s->nic = qemu_new_nic(&net_gem_info, &s->conf,
@@ -1760,7 +1777,6 @@ static void gem_init(Object *obj)
 
     DB_PRINT("\n");
 
-    gem_init_register_masks(s);
     memory_region_init_io(&s->iomem, OBJECT(s), &gem_ops, s,
                           "enet", sizeof(s->regs));
 
@@ -1784,7 +1800,7 @@ static const VMStateDescription vmstate_cadence_gem = {
     }
 };
 
-static Property gem_properties[] = {
+static const Property gem_properties[] = {
     DEFINE_NIC_PROPERTIES(CadenceGEMState, conf),
     DEFINE_PROP_UINT32("revision", CadenceGEMState, revision,
                        GEM_MODID_VALUE),
@@ -1799,17 +1815,16 @@ static Property gem_properties[] = {
                        jumbo_max_len, 10240),
     DEFINE_PROP_LINK("dma", CadenceGEMState, dma_mr,
                      TYPE_MEMORY_REGION, MemoryRegion *),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void gem_class_init(ObjectClass *klass, void *data)
+static void gem_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = gem_realize;
     device_class_set_props(dc, gem_properties);
     dc->vmsd = &vmstate_cadence_gem;
-    dc->reset = gem_reset;
+    device_class_set_legacy_reset(dc, gem_reset);
 }
 
 static const TypeInfo gem_info = {

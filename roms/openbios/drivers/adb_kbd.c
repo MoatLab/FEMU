@@ -88,7 +88,7 @@ static const char *ADB_sequences[] = {
 	[KEY_F13] = "~25[",
 	[KEY_F14] = "~26[",
 	[KEY_F15] = "~28[",
-	[KEY_F15] = "~29[",
+	[KEY_F16] = "~29[",
 };
 
 /* ADB US keyboard translation map */

@@ -10,7 +10,6 @@
 #include "qemu/osdep.h"
 #include "cpu.h"
 #include "migration/vmstate.h"
-#include "monitor/monitor.h"
 #include "hw/qdev-properties.h"
 #include "hw/nmi.h"
 #include "hw/intc/intc.h"
@@ -27,10 +26,10 @@ static bool m68k_irqc_get_statistics(InterruptStatsProvider *obj,
     return true;
 }
 
-static void m68k_irqc_print_info(InterruptStatsProvider *obj, Monitor *mon)
+static void m68k_irqc_print_info(InterruptStatsProvider *obj, GString *buf)
 {
     M68KIRQCState *s = M68K_IRQC(obj);
-    monitor_printf(mon, "m68k-irqc: ipr=0x%x\n", s->ipr);
+    g_string_append_printf(buf, "m68k-irqc: ipr=0x%x\n", s->ipr);
 }
 
 static void m68k_set_irq(void *opaque, int irq, int level)
@@ -86,13 +85,12 @@ static const VMStateDescription vmstate_m68k_irqc = {
     }
 };
 
-static Property m68k_irqc_properties[] = {
+static const Property m68k_irqc_properties[] = {
     DEFINE_PROP_LINK("m68k-cpu", M68KIRQCState, cpu,
                      TYPE_M68K_CPU, ArchCPU *),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void m68k_irqc_class_init(ObjectClass *oc, void *data)
+static void m68k_irqc_class_init(ObjectClass *oc, const void *data)
  {
     DeviceClass *dc = DEVICE_CLASS(oc);
     NMIClass *nc = NMI_CLASS(oc);
@@ -100,7 +98,7 @@ static void m68k_irqc_class_init(ObjectClass *oc, void *data)
 
     device_class_set_props(dc, m68k_irqc_properties);
     nc->nmi_monitor_handler = m68k_nmi;
-    dc->reset = m68k_irqc_reset;
+    device_class_set_legacy_reset(dc, m68k_irqc_reset);
     dc->vmsd = &vmstate_m68k_irqc;
     ic->get_statistics = m68k_irqc_get_statistics;
     ic->print_info = m68k_irqc_print_info;
@@ -112,7 +110,7 @@ static const TypeInfo m68k_irqc_type_info = {
     .instance_size = sizeof(M68KIRQCState),
     .instance_init = m68k_irqc_instance_init,
     .class_init = m68k_irqc_class_init,
-    .interfaces = (InterfaceInfo[]) {
+    .interfaces = (const InterfaceInfo[]) {
          { TYPE_NMI },
          { TYPE_INTERRUPT_STATS_PROVIDER },
          { }

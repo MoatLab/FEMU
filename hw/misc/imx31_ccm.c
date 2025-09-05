@@ -89,7 +89,7 @@ static const char *imx31_ccm_reg_name(uint32_t reg)
     case IMX31_CCM_PDR2_REG:
         return "PDR2";
     default:
-        sprintf(unknown, "[%u ?]", reg);
+        snprintf(unknown, sizeof(unknown), "[%u ?]", reg);
         return unknown;
     }
 }
@@ -319,12 +319,12 @@ static void imx31_ccm_init(Object *obj)
     sysbus_init_mmio(sd, &s->iomem);
 }
 
-static void imx31_ccm_class_init(ObjectClass *klass, void *data)
+static void imx31_ccm_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc  = DEVICE_CLASS(klass);
     IMXCCMClass *ccm = IMX_CCM_CLASS(klass);
 
-    dc->reset = imx31_ccm_reset;
+    device_class_set_legacy_reset(dc, imx31_ccm_reset);
     dc->vmsd  = &vmstate_imx31_ccm;
     dc->desc  = "i.MX31 Clock Control Module";
 

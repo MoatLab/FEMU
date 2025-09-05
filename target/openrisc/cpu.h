@@ -21,10 +21,10 @@
 #define OPENRISC_CPU_H
 
 #include "cpu-qom.h"
+#include "exec/cpu-common.h"
 #include "exec/cpu-defs.h"
+#include "exec/cpu-interrupt.h"
 #include "fpu/softfloat-types.h"
-
-#define TCG_GUEST_DEFAULT_MO (0)
 
 /**
  * OpenRISCCPUClass:
@@ -39,8 +39,6 @@ struct OpenRISCCPUClass {
     DeviceRealize parent_realize;
     ResettablePhases parent_phases;
 };
-
-#define TARGET_INSN_START_EXTRA_WORDS 1
 
 enum {
     MMU_NOMMU_IDX = 0,
@@ -303,6 +301,8 @@ void openrisc_cpu_dump_state(CPUState *cpu, FILE *f, int flags);
 int openrisc_cpu_gdb_read_register(CPUState *cpu, GByteArray *buf, int reg);
 int openrisc_cpu_gdb_write_register(CPUState *cpu, uint8_t *buf, int reg);
 void openrisc_translate_init(void);
+void openrisc_translate_code(CPUState *cs, TranslationBlock *tb,
+                             int *max_insns, vaddr pc, void *host_pc);
 int print_insn_or1k(bfd_vma addr, disassemble_info *info);
 
 #ifndef CONFIG_USER_ONLY
@@ -332,8 +332,6 @@ void cpu_openrisc_count_stop(OpenRISCCPU *cpu);
 
 #define CPU_RESOLVING_TYPE TYPE_OPENRISC_CPU
 
-#include "exec/cpu-all.h"
-
 #define TB_FLAGS_SM    SR_SM
 #define TB_FLAGS_DME   SR_DME
 #define TB_FLAGS_IME   SR_IME
@@ -349,16 +347,6 @@ static inline uint32_t cpu_get_gpr(const CPUOpenRISCState *env, int i)
 static inline void cpu_set_gpr(CPUOpenRISCState *env, int i, uint32_t val)
 {
     env->shadow_gpr[0][i] = val;
-}
-
-static inline void cpu_get_tb_cpu_state(CPUOpenRISCState *env, vaddr *pc,
-                                        uint64_t *cs_base, uint32_t *flags)
-{
-    *pc = env->pc;
-    *cs_base = 0;
-    *flags = (env->dflag ? TB_FLAGS_DFLAG : 0)
-           | (cpu_get_gpr(env, 0) ? 0 : TB_FLAGS_R0_0)
-           | (env->sr & (SR_SM | SR_DME | SR_IME | SR_OVE));
 }
 
 static inline uint32_t cpu_get_sr(const CPUOpenRISCState *env)

@@ -19,7 +19,10 @@
 #include "qemu/log.h"
 #include "hw/registerfields.h"
 #include "cpu.h"
-#include "exec/exec-all.h"
+#include "exec/cputlb.h"
+#include "accel/tcg/cpu-mmu-index.h"
+#include "exec/page-protection.h"
+#include "exec/target_page.h"
 #include "fpu/softfloat-helpers.h"
 #include "qemu/qemu-print.h"
 
@@ -115,7 +118,10 @@ void fpu_set_state(CPUTriCoreState *env)
     set_flush_inputs_to_zero(1, &env->fp_status);
     set_flush_to_zero(1, &env->fp_status);
     set_float_detect_tininess(float_tininess_before_rounding, &env->fp_status);
+    set_float_ftz_detection(float_ftz_before_rounding, &env->fp_status);
     set_default_nan_mode(1, &env->fp_status);
+    /* Default NaN pattern: sign bit clear, frac msb set */
+    set_float_default_nan_pattern(0b01000000, &env->fp_status);
 }
 
 uint32_t psw_read(CPUTriCoreState *env)

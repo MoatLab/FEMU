@@ -11,7 +11,7 @@
 #include "migration/vmstate.h"
 #include "qemu/log.h"
 #include "qemu/timer.h"
-#include "sysemu/rtc.h"
+#include "system/rtc.h"
 
 #include "trace.h"
 
@@ -156,13 +156,13 @@ static void aspeed_rtc_realize(DeviceState *dev, Error **errp)
     sysbus_init_mmio(sbd, &s->iomem);
 }
 
-static void aspeed_rtc_class_init(ObjectClass *klass, void *data)
+static void aspeed_rtc_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = aspeed_rtc_realize;
     dc->vmsd = &vmstate_aspeed_rtc;
-    dc->reset = aspeed_rtc_reset;
+    device_class_set_legacy_reset(dc, aspeed_rtc_reset);
 }
 
 static const TypeInfo aspeed_rtc_info = {

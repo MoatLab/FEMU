@@ -444,7 +444,7 @@ int64_t pau_opencapi_tl_set(struct phb *phb, uint32_t __unused bdfn,
 
 static int64_t pau_opencapi_afu_memory_bars(struct pau_dev *dev,
 					    uint64_t size,
-					    uint64_t *bar)
+					    __be64 *bar)
 {
 	struct pau *pau = dev->pau;
 	uint64_t addr, psize;
@@ -492,12 +492,13 @@ static int64_t pau_opencapi_afu_memory_bars(struct pau_dev *dev,
 	reg = PAU_XSL_GPU_MEM_BAR(dev->index);
 	pau_write(pau, reg, val);
 
-	*bar = addr;
+	*bar = cpu_to_be64(addr);
+
 	return OPAL_SUCCESS;
 }
 
 int64_t pau_opencapi_mem_alloc(struct phb *phb, uint32_t __unused bdfn,
-			       uint64_t size, uint64_t *bar)
+			       uint64_t size, __be64 *bar)
 {
 	struct pau_dev *dev = pau_phb_to_opencapi_dev(phb);
 	int64_t rc;
@@ -1302,7 +1303,7 @@ static int64_t pau_opencapi_pcicfg_read(struct phb *phb, uint32_t bdfn,
 	cfg_addr = SETFIELD(PAU_CTL_MISC_CFG_ADDR_REGISTER_NBR,
 			    cfg_addr, offset & ~3u);
 
-	out_be64((uint64_t *)genid_base, cfg_addr);
+	out_be64((__be64 *)genid_base, cfg_addr);
 	sync();
 
 	switch (size) {
@@ -1312,10 +1313,10 @@ static int64_t pau_opencapi_pcicfg_read(struct phb *phb, uint32_t bdfn,
 		break;
 	case 2:
 		*((uint16_t *)data) =
-			in_le16((uint16_t *)(genid_base + 128 + (offset & 2)));
+			in_le16((__le16 *)(genid_base + 128 + (offset & 2)));
 		break;
 	case 4:
-		*((uint32_t *)data) = in_le32((uint32_t *)(genid_base + 128));
+		*((uint32_t *)data) = in_le32((__le32 *)(genid_base + 128));
 		break;
 	default:
 		return OPAL_PARAMETER;
@@ -1358,7 +1359,7 @@ static int64_t pau_opencapi_pcicfg_write(struct phb *phb, uint32_t bdfn,
 	cfg_addr = SETFIELD(PAU_CTL_MISC_CFG_ADDR_REGISTER_NBR,
 			    cfg_addr, offset & ~3u);
 
-	out_be64((uint64_t *)genid_base, cfg_addr);
+	out_be64((__be64 *)genid_base, cfg_addr);
 	sync();
 
 	switch (size) {
@@ -1366,10 +1367,10 @@ static int64_t pau_opencapi_pcicfg_write(struct phb *phb, uint32_t bdfn,
 		out_8((uint8_t *)(genid_base + 128 + (offset & 3)), data);
 		break;
 	case 2:
-		out_le16((uint16_t *)(genid_base + 128 + (offset & 2)), data);
+		out_le16((__le16 *)(genid_base + 128 + (offset & 2)), data);
 		break;
 	case 4:
-		out_le32((uint32_t *)(genid_base + 128), data);
+		out_le32((__le32 *)(genid_base + 128), data);
 		break;
 	default:
 		return OPAL_PARAMETER;
@@ -2074,7 +2075,7 @@ static void pau_init(struct pau *pau)
 	pau_opencapi_init(pau);
 }
 
-void probe_pau(void)
+static void probe_pau(void)
 {
 	struct dt_node *dn;
 	struct pau *pau;
@@ -2093,3 +2094,4 @@ void probe_pau(void)
 		pau_init(pau);
 	}
 }
+DEFINE_HWPROBE_DEPS(pau, probe_pau, "phb4");

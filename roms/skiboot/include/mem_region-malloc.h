@@ -28,4 +28,8 @@ void *__local_alloc(unsigned int chip, size_t size, size_t align,
 #define local_alloc(chip_id, size, align)	\
 	__local_alloc((chip_id), (size), (align), __location__)
 
+void __local_free(void *mem, const char *location);
+#define local_free(mem)				\
+	__local_free((mem), __location__)
+
 #endif /* __MEM_REGION_MALLOC_H */

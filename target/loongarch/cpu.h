@@ -9,12 +9,14 @@
 #define LOONGARCH_CPU_H
 
 #include "qemu/int128.h"
+#include "exec/cpu-common.h"
 #include "exec/cpu-defs.h"
+#include "exec/cpu-interrupt.h"
 #include "fpu/softfloat-types.h"
 #include "hw/registerfields.h"
 #include "qemu/timer.h"
 #ifndef CONFIG_USER_ONLY
-#include "exec/memory.h"
+#include "system/memory.h"
 #endif
 #include "cpu-csr.h"
 #include "cpu-qom.h"
@@ -36,10 +38,9 @@
 #define CPUNAME_REG             0x20
 #define MISC_FUNC_REG           0x420
 #define IOCSRM_EXTIOI_EN        48
+#define IOCSRM_EXTIOI_INT_ENCODE 49
 
 #define IOCSR_MEM_SIZE          0x428
-
-#define TCG_GUEST_DEFAULT_MO (0)
 
 #define FCSR0_M1    0x1f         /* FCSR1 mask, Enables */
 #define FCSR0_M2    0x1f1f0000   /* FCSR2 mask, Cause and Flags */
@@ -130,7 +131,7 @@ FIELD(CPUCFG1, RI, 21, 1)
 FIELD(CPUCFG1, EP, 22, 1)
 FIELD(CPUCFG1, RPLV, 23, 1)
 FIELD(CPUCFG1, HP, 24, 1)
-FIELD(CPUCFG1, IOCSR_BRD, 25, 1)
+FIELD(CPUCFG1, CRC, 25, 1)
 FIELD(CPUCFG1, MSG_INT, 26, 1)
 
 /* cpucfg[1].arch */
@@ -154,6 +155,7 @@ FIELD(CPUCFG2, LLFTP_VER, 15, 3)
 FIELD(CPUCFG2, LBT_X86, 18, 1)
 FIELD(CPUCFG2, LBT_ARM, 19, 1)
 FIELD(CPUCFG2, LBT_MIPS, 20, 1)
+FIELD(CPUCFG2, LBT_ALL, 18, 3)
 FIELD(CPUCFG2, LSPW, 21, 1)
 FIELD(CPUCFG2, LAM, 22, 1)
 
@@ -272,6 +274,7 @@ union fpr_t {
     VReg  vreg;
 };
 
+#ifdef CONFIG_TCG
 struct LoongArchTLB {
     uint64_t tlb_misc;
     /* Fields corresponding to CSR_TLBELO0/1 */
@@ -279,22 +282,39 @@ struct LoongArchTLB {
     uint64_t tlb_entry1;
 };
 typedef struct LoongArchTLB LoongArchTLB;
+#endif
+
+enum loongarch_features {
+    LOONGARCH_FEATURE_LSX,
+    LOONGARCH_FEATURE_LASX,
+    LOONGARCH_FEATURE_LBT, /* loongson binary translation extension */
+    LOONGARCH_FEATURE_PMU,
+    LOONGARCH_FEATURE_PV_IPI,
+    LOONGARCH_FEATURE_STEALTIME,
+};
+
+typedef struct  LoongArchBT {
+    /* scratch registers */
+    uint64_t scr0;
+    uint64_t scr1;
+    uint64_t scr2;
+    uint64_t scr3;
+    /* loongarch eflags */
+    uint32_t eflags;
+    uint32_t ftop;
+} lbt_t;
 
 typedef struct CPUArchState {
     uint64_t gpr[32];
     uint64_t pc;
 
     fpr_t fpr[32];
-    float_status fp_status;
     bool cf[8];
-
     uint32_t fcsr0;
-    uint32_t fcsr0_mask;
+    lbt_t  lbt;
 
     uint32_t cpucfg[21];
-
-    uint64_t lladdr; /* LL virtual address compared against SC */
-    uint64_t llval;
+    uint32_t pv_features;
 
     /* LoongArch CSRs */
     uint64_t CSR_CRMD;
@@ -351,18 +371,35 @@ typedef struct CPUArchState {
     uint64_t CSR_DBG;
     uint64_t CSR_DERA;
     uint64_t CSR_DSAVE;
+    struct {
+        uint64_t guest_addr;
+    } stealtime;
 
+#ifdef CONFIG_TCG
+    float_status fp_status;
+    uint32_t fcsr0_mask;
+    uint64_t lladdr; /* LL virtual address compared against SC */
+    uint64_t llval;
+#endif
 #ifndef CONFIG_USER_ONLY
+#ifdef CONFIG_TCG
     LoongArchTLB  tlb[LOONGARCH_TLB_MAX];
+#endif
 
     AddressSpace *address_space_iocsr;
     bool load_elf;
     uint64_t elf_address;
     uint32_t mp_state;
-    /* Store ipistate to access from this struct */
-    DeviceState *ipistate;
+
+    struct loongarch_boot_info *boot_info;
 #endif
 } CPULoongArchState;
+
+typedef struct LoongArchCPUTopo {
+    int32_t socket_id;  /* socket-id of this VCPU */
+    int32_t core_id;    /* core-id of this VCPU */
+    int32_t thread_id;  /* thread-id of this VCPU */
+} LoongArchCPUTopo;
 
 /**
  * LoongArchCPU:
@@ -376,11 +413,22 @@ struct ArchCPU {
     CPULoongArchState env;
     QEMUTimer timer;
     uint32_t  phy_id;
+    OnOffAuto lbt;
+    OnOffAuto pmu;
+    OnOffAuto lsx;
+    OnOffAuto lasx;
+    OnOffAuto kvm_pv_ipi;
+    OnOffAuto kvm_steal_time;
+    int32_t socket_id;  /* socket-id of this CPU */
+    int32_t core_id;    /* core-id of this CPU */
+    int32_t thread_id;  /* thread-id of this CPU */
+    int32_t node_id;    /* NUMA node of this CPU */
 
     /* 'compatible' string for this CPU for Linux device trees */
     const char *dtb_compatible;
     /* used by KVM_REG_LOONGARCH_COUNTER ioctl to access guest time counters */
     uint64_t kvm_state_counter;
+    VMChangeStateEntry *vmsentry;
 };
 
 /**
@@ -394,6 +442,7 @@ struct LoongArchCPUClass {
     CPUClass parent_class;
 
     DeviceRealize parent_realize;
+    DeviceUnrealize parent_unrealize;
     ResettablePhases parent_phases;
 };
 
@@ -443,22 +492,17 @@ static inline void set_pc(CPULoongArchState *env, uint64_t value)
 #define HW_FLAGS_VA32       0x20
 #define HW_FLAGS_EUEN_ASXE  0x40
 
-static inline void cpu_get_tb_cpu_state(CPULoongArchState *env, vaddr *pc,
-                                        uint64_t *cs_base, uint32_t *flags)
-{
-    *pc = env->pc;
-    *cs_base = 0;
-    *flags = env->CSR_CRMD & (R_CSR_CRMD_PLV_MASK | R_CSR_CRMD_PG_MASK);
-    *flags |= FIELD_EX64(env->CSR_EUEN, CSR_EUEN, FPE) * HW_FLAGS_EUEN_FPE;
-    *flags |= FIELD_EX64(env->CSR_EUEN, CSR_EUEN, SXE) * HW_FLAGS_EUEN_SXE;
-    *flags |= FIELD_EX64(env->CSR_EUEN, CSR_EUEN, ASXE) * HW_FLAGS_EUEN_ASXE;
-    *flags |= is_va32(env) * HW_FLAGS_VA32;
-}
-
-#include "exec/cpu-all.h"
-
 #define CPU_RESOLVING_TYPE TYPE_LOONGARCH_CPU
 
 void loongarch_cpu_post_init(Object *obj);
+
+#ifdef CONFIG_KVM
+void kvm_loongarch_cpu_post_init(LoongArchCPU *cpu);
+#else
+static inline void kvm_loongarch_cpu_post_init(LoongArchCPU *cpu)
+{
+}
+#endif
+void kvm_loongarch_init_irq_routing(void);
 
 #endif /* LOONGARCH_CPU_H */

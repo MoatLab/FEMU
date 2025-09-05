@@ -324,7 +324,7 @@ boot_offset:
  *   r28 :  PVR
  *   r27 :  DTB pointer (or NULL)
  *   r26 :  PIR thread mask
- *   r25 :  P9/10 fused core flag
+ *   r25 :  P9/10/11 fused core flag
  */
 .global boot_entry
 boot_entry:
@@ -344,6 +344,8 @@ boot_entry:
 	beq 	3f
 	cmpwi	cr0,%r3,PVR_TYPE_P10
 	beq 	4f
+	cmpwi	cr0,%r3,PVR_TYPE_P11
+	beq 	4f
 	attn		/* Unsupported CPU type... what do we do ? */
 	b 	.	/* loop here, just in case attn is disabled */
 
@@ -357,7 +359,7 @@ boot_entry:
 	b   2f
 
 4:      /*
-	 * P10 fused core check (SPRC/SPRD method does not work).
+	 * P10/11 fused core check (SPRC/SPRD method does not work).
 	 * PVR bit 12 set = normal code
 	 */
 	andi.	%r3, %r28, 0x1000
@@ -743,6 +745,8 @@ init_shared_sprs:
 	beq	4f
 	cmpwi	cr0,%r3,PVR_TYPE_P10
 	beq	5f
+	cmpwi	cr0,%r3,PVR_TYPE_P11
+	beq	5f
 	/* Unsupported CPU type... what do we do ? */
 	b	9f
 
@@ -868,6 +872,8 @@ init_replicated_sprs:
 	beq	4f
 	cmpwi	cr0,%r3,PVR_TYPE_P10
 	beq	5f
+	cmpwi	cr0,%r3,PVR_TYPE_P11
+	beq	5f
 	/* Unsupported CPU type... what do we do ? */
 	b	9f
 
@@ -891,7 +897,7 @@ init_replicated_sprs:
 	LOAD_IMM64(%r3,0x0000000000000010)
 	mtspr	SPR_DSCR,%r3
 
-5:	/* P10 */
+5:	/* P10/11 */
 	/* LPCR: sane value */
 	LOAD_IMM64(%r3,0x0040000000000000)
 	mtspr	SPR_LPCR, %r3

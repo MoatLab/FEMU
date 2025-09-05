@@ -201,6 +201,7 @@ void homer_init(void)
 		bar_occ_common = P9_BAR_OCC_COMMON;
 		break;
 	case proc_gen_p10:
+	case proc_gen_p11:
 		pba_bar0 = P10_PBA_BAR0;
 		pba_barmask0 = P10_PBA_BARMASK0;
 		bar_homer = P10_BAR_HOMER;

@@ -3,7 +3,9 @@
 #
 
 ##
-# = TPM (trusted platform module) devices
+# *************************************
+# TPM (trusted platform module) devices
+# *************************************
 ##
 
 ##
@@ -27,11 +29,9 @@
 #
 # Return a list of supported TPM models
 #
-# Returns: a list of TpmModel
-#
 # Since: 1.5
 #
-# Example:
+# .. qmp-example::
 #
 #     -> { "execute": "query-tpm-models" }
 #     <- { "return": [ "tpm-tis", "tpm-crb", "tpm-spapr" ] }
@@ -58,11 +58,9 @@
 #
 # Return a list of supported TPM types
 #
-# Returns: a list of TpmType
-#
 # Since: 1.5
 #
-# Example:
+# .. qmp-example::
 #
 #     -> { "execute": "query-tpm-types" }
 #     <- { "return": [ "passthrough", "emulator" ] }
@@ -168,7 +166,7 @@
 #
 # Since: 1.5
 #
-# Example:
+# .. qmp-example::
 #
 #     -> { "execute": "query-tpm" }
 #     <- { "return":

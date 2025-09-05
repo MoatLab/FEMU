@@ -47,7 +47,7 @@ static const MemoryRegionOps tricore_testdevice_ops = {
         .min_access_size = 4,
         .max_access_size = 4,
     },
-    .endianness = DEVICE_NATIVE_ENDIAN,
+    .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
 static void tricore_testdevice_init(Object *obj)
@@ -58,16 +58,11 @@ static void tricore_testdevice_init(Object *obj)
                           "tricore_testdevice", 0x4);
 }
 
-static Property tricore_testdevice_properties[] = {
-    DEFINE_PROP_END_OF_LIST()
-};
-
-static void tricore_testdevice_class_init(ObjectClass *klass, void *data)
+static void tricore_testdevice_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    device_class_set_props(dc, tricore_testdevice_properties);
-    dc->reset = tricore_testdevice_reset;
+    device_class_set_legacy_reset(dc, tricore_testdevice_reset);
 }
 
 static const TypeInfo tricore_testdevice_info = {

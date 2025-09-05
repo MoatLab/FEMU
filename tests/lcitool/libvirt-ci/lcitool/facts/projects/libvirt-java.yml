@@ -1,8 +1,0 @@
----
-packages:
-  - ant
-  - ant-junit
-  - java
-  - jna
-  - junit
-  - rpmbuild

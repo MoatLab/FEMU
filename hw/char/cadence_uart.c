@@ -525,7 +525,7 @@ static void cadence_uart_reset_init(Object *obj, ResetType type)
     s->r[R_TTRIG] = 0x00000020;
 }
 
-static void cadence_uart_reset_hold(Object *obj)
+static void cadence_uart_reset_hold(Object *obj, ResetType type)
 {
     CadenceUARTState *s = CADENCE_UART(obj);
 
@@ -617,12 +617,11 @@ static const VMStateDescription vmstate_cadence_uart = {
     },
 };
 
-static Property cadence_uart_properties[] = {
+static const Property cadence_uart_properties[] = {
     DEFINE_PROP_CHR("chardev", CadenceUARTState, chr),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void cadence_uart_class_init(ObjectClass *klass, void *data)
+static void cadence_uart_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     ResettableClass *rc = RESETTABLE_CLASS(klass);

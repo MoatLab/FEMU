@@ -209,7 +209,7 @@ void node_stb_parse(void)
 {
 	struct HDIF_common_hdr *hdif_hdr;
 
-	hdif_hdr = get_hdif(&spira.ntuples.node_stb_data, STB_HDIF_SIG);
+	hdif_hdr = get_hdif(&spiras->ntuples.node_stb_data, STB_HDIF_SIG);
 	if (!hdif_hdr) {
 		prlog(PR_DEBUG, "TPMREL data not found\n");
 		return;

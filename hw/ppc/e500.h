@@ -5,6 +5,8 @@
 #include "hw/platform-bus.h"
 #include "qom/object.h"
 
+#define PLATFORM_CLK_FREQ_HZ (400 * 1000 * 1000)
+
 struct PPCE500MachineState {
     /*< private >*/
     MachineState parent_obj;
@@ -37,11 +39,11 @@ struct PPCE500MachineClass {
     hwaddr pci_mmio_base;
     hwaddr pci_mmio_bus_base;
     hwaddr spin_base;
+    uint32_t clock_freq;
+    uint32_t tb_freq;
 };
 
 void ppce500_init(MachineState *machine);
-
-hwaddr booke206_page_size_to_tlb(uint64_t size);
 
 #define TYPE_PPCE500_MACHINE      "ppce500-base-machine"
 OBJECT_DECLARE_TYPE(PPCE500MachineState, PPCE500MachineClass, PPCE500_MACHINE)

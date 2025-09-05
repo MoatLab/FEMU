@@ -341,12 +341,12 @@ static void imx_avic_init(Object *obj)
 }
 
 
-static void imx_avic_class_init(ObjectClass *klass, void *data)
+static void imx_avic_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->vmsd = &vmstate_imx_avic;
-    dc->reset = imx_avic_reset;
+    device_class_set_legacy_reset(dc, imx_avic_reset);
     dc->desc = "i.MX Advanced Vector Interrupt Controller";
 }
 

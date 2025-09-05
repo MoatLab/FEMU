@@ -11,11 +11,15 @@
 # later. See the COPYING file in the top-level directory.
 
 ##
-# = Firmware
+# ********
+# Firmware
+# ********
 ##
 
-{ 'include' : 'machine.json' }
-{ 'include' : 'block-core.json' }
+{ 'pragma': {
+    'member-name-exceptions': [
+        'FirmwareArchitecture' # x86_64
+    ] } }
 
 ##
 # @FirmwareOSInterface:
@@ -55,10 +59,38 @@
 #
 # @memory: The firmware is to be mapped into memory.
 #
+# @igvm: The firmware is defined by a file conforming to the IGVM
+#        specification and mapped into memory according to directives
+#        defined in the file. This is similar to @memory but may
+#        include additional processing defined by the IGVM file
+#        including initial CPU state or population of metadata into
+#        the guest address space. Since: 10.1
+#
 # Since: 3.0
 ##
 { 'enum' : 'FirmwareDevice',
-  'data' : [ 'flash', 'kernel', 'memory' ] }
+  'data' : [ 'flash', 'kernel', 'memory', 'igvm' ] }
+
+##
+# @FirmwareArchitecture:
+#
+# Enumeration of architectures for which Qemu uses additional
+# firmware files.
+#
+# @aarch64: 64-bit Arm.
+#
+# @arm: 32-bit Arm.
+#
+# @i386: 32-bit x86.
+#
+# @loongarch64: 64-bit LoongArch. (since: 7.1)
+#
+# @x86_64: 64-bit x86.
+#
+# Since: 3.0
+##
+{ 'enum' : 'FirmwareArchitecture',
+  'data' : [ 'aarch64', 'arm', 'i386', 'loongarch64', 'x86_64' ] }
 
 ##
 # @FirmwareTarget:
@@ -81,7 +113,7 @@
 # Since: 3.0
 ##
 { 'struct' : 'FirmwareTarget',
-  'data'   : { 'architecture' : 'SysEmuTarget',
+  'data'   : { 'architecture' : 'FirmwareArchitecture',
                'machines'     : [ 'str' ] } }
 
 ##
@@ -191,14 +223,38 @@
 #                  PL011 UART. @verbose-static is mutually exclusive
 #                  with @verbose-dynamic.
 #
+# @host-uefi-vars: The firmware expects the host to provide an uefi
+#                  variable store.  qemu supports that via
+#                  "uefi-vars-sysbus" (aarch64, riscv64, loongarch64)
+#                  or "uefi-vars-x64" (x86_64) devices.  The firmware
+#                  will not use flash for nvram.  When loading the
+#                  firmware into flash the 'stateless' setup should be
+#                  used.  It is recommened to load the firmware into
+#                  memory though.
+#
 # Since: 3.0
 ##
 { 'enum' : 'FirmwareFeature',
   'data' : [ 'acpi-s3', 'acpi-s4',
              'amd-sev', 'amd-sev-es', 'amd-sev-snp',
              'intel-tdx',
-             'enrolled-keys', 'requires-smm', 'secure-boot',
+             'enrolled-keys', 'requires-smm',
+             'secure-boot', 'host-uefi-vars',
              'verbose-dynamic', 'verbose-static' ] }
+
+##
+# @FirmwareFormat:
+#
+# Formats that are supported for firmware images.
+#
+# @raw: Raw disk image format.
+#
+# @qcow2: The QCOW2 image format.
+#
+# Since: 3.0
+##
+{ 'enum': 'FirmwareFormat',
+  'data': [ 'raw', 'qcow2' ] }
 
 ##
 # @FirmwareFlashFile:
@@ -219,7 +275,7 @@
 ##
 { 'struct' : 'FirmwareFlashFile',
   'data'   : { 'filename' : 'str',
-               'format'   : 'BlockdevDriver' } }
+               'format'   : 'FirmwareFormat' } }
 
 
 ##
@@ -331,6 +387,24 @@
   'data'   : { 'filename' : 'str' } }
 
 ##
+# @FirmwareMappingIgvm:
+#
+# Describes loading and mapping properties for the firmware executable,
+# when @FirmwareDevice is @igvm.
+#
+# @filename: Identifies the IGVM file containing the firmware executable
+#            along with other information used to configure the initial
+#            state of the guest. The IGVM file may be shared by multiple
+#            virtual machine definitions. This corresponds to creating
+#            an object on the command line with "-object igvm-cfg,
+#            file=@filename".
+#
+# Since: 10.1
+##
+{ 'struct' : 'FirmwareMappingIgvm',
+  'data'   : { 'filename' : 'str' } }
+
+##
 # @FirmwareMapping:
 #
 # Provides a discriminated structure for firmware to describe its
@@ -346,7 +420,8 @@
   'discriminator' : 'device',
   'data'          : { 'flash'  : 'FirmwareMappingFlash',
                       'kernel' : 'FirmwareMappingKernel',
-                      'memory' : 'FirmwareMappingMemory' } }
+                      'memory' : 'FirmwareMappingMemory',
+                      'igvm'   : 'FirmwareMappingIgvm' } }
 
 ##
 # @Firmware:
@@ -433,7 +508,7 @@
 #
 # Since: 3.0
 #
-# Examples:
+# .. qmp-example::
 #
 #     {
 #         "description": "SeaBIOS",

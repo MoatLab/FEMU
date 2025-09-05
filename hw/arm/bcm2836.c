@@ -18,19 +18,7 @@
 #include "target/arm/cpu-qom.h"
 #include "target/arm/gtimer.h"
 
-struct BCM283XClass {
-    /*< private >*/
-    DeviceClass parent_class;
-    /*< public >*/
-    const char *name;
-    const char *cpu_type;
-    unsigned core_count;
-    hwaddr peri_base; /* Peripheral base address seen by the CPU */
-    hwaddr ctrl_base; /* Interrupt controller and mailboxes etc. */
-    int clusterid;
-};
-
-static Property bcm2836_enabled_cores_property =
+static const Property bcm2836_enabled_cores_property =
     DEFINE_PROP_UINT32("enabled-cpus", BCM283XBaseState, enabled_cpus, 0);
 
 static void bcm283x_base_init(Object *obj)
@@ -175,7 +163,7 @@ static void bcm2836_realize(DeviceState *dev, Error **errp)
     }
 }
 
-static void bcm283x_base_class_init(ObjectClass *oc, void *data)
+static void bcm283x_base_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
 
@@ -183,7 +171,7 @@ static void bcm283x_base_class_init(ObjectClass *oc, void *data)
     dc->user_creatable = false;
 }
 
-static void bcm2835_class_init(ObjectClass *oc, void *data)
+static void bcm2835_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
     BCM283XBaseClass *bc = BCM283X_BASE_CLASS(oc);
@@ -194,7 +182,7 @@ static void bcm2835_class_init(ObjectClass *oc, void *data)
     dc->realize = bcm2835_realize;
 };
 
-static void bcm2836_class_init(ObjectClass *oc, void *data)
+static void bcm2836_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
     BCM283XBaseClass *bc = BCM283X_BASE_CLASS(oc);
@@ -208,7 +196,7 @@ static void bcm2836_class_init(ObjectClass *oc, void *data)
 };
 
 #ifdef TARGET_AARCH64
-static void bcm2837_class_init(ObjectClass *oc, void *data)
+static void bcm2837_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
     BCM283XBaseClass *bc = BCM283X_BASE_CLASS(oc);

@@ -2,6 +2,7 @@
 os:
   name: 'Debian'
   version: 'Sid'
+  stable: false
 
 packaging:
   format: 'deb'

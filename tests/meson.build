@@ -16,6 +16,8 @@ test_qapi_outputs = [
   'test-qapi-events-sub-sub-module.h',
   'test-qapi-events.c',
   'test-qapi-events.h',
+  'test-qapi-features.c',
+  'test-qapi-features.h',
   'test-qapi-init-commands.c',
   'test-qapi-init-commands.h',
   'test-qapi-introspect.c',
@@ -78,10 +80,11 @@ subdir('decode')
 
 if 'CONFIG_TCG' in config_all_accel
   subdir('fp')
+  subdir('tcg/plugins')
 endif
 
-subdir('plugin')
 subdir('unit')
 subdir('qapi-schema')
 subdir('qtest')
-subdir('migration')
+subdir('migration-stress')
+subdir('functional')

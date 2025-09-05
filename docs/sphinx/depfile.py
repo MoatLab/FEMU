@@ -19,7 +19,7 @@ __version__ = '1.0'
 
 def get_infiles(env):
     for x in env.found_docs:
-        yield env.doc2path(x)
+        yield str(env.doc2path(x))
         yield from ((os.path.join(env.srcdir, dep)
                     for dep in env.dependencies[x]))
     for mod in sys.modules.values():
@@ -30,6 +30,9 @@ def get_infiles(env):
     for static_path in env.config.html_static_path + env.config.templates_path:
         for path in Path(static_path).rglob('*'):
             yield str(path)
+
+    # also include kdoc script
+    yield str(env.config.kerneldoc_bin[1])
 
 
 def write_depfile(app, exception):

@@ -10,13 +10,15 @@ import test_utils.utils as test_utils
 from pathlib import Path
 
 from lcitool.targets import BuildTarget
-from lcitool.formatters import ShellVariablesFormatter, JSONVariablesFormatter, DockerfileFormatter, ShellBuildEnvFormatter
+from lcitool.formatters import DockerfileFormatter
+from lcitool.formatters import ShellVariablesFormatter, JSONVariablesFormatter, YamlVariablesFormatter
+from lcitool.formatters import ShellBuildEnvFormatter
 
 
 scenarios = [
     # A minimalist application, testing package managers
     pytest.param("libvirt-go-xml-module", "debian-12", "x86_64", None, id="libvirt-go-xml-module-debian-12"),
-    pytest.param("libvirt-go-xml-module", "almalinux-8", "x86_64", None, id="libvirt-go-xml-module-almalinux-8"),
+    pytest.param("libvirt-go-xml-module", "almalinux-9", "x86_64", None, id="libvirt-go-xml-module-almalinux-9"),
     pytest.param("libvirt-go-xml-module", "opensuse-leap-15", "x86_64", None, id="libvirt-go-xml-module-opensuse-leap-15"),
     pytest.param("libvirt-go-xml-module", "alpine-edge", "x86_64", None, id="libvirt-go-xml-module-alpine-edge"),
     pytest.param("libvirt-go-xml-module", "opensuse-tumbleweed", "x86_64", None, id="libvirt-go-xml-module-opensuse-tumbleweed"),
@@ -74,6 +76,15 @@ def test_variables_json(assert_equal, packages, projects, targets, project, targ
     target_obj = BuildTarget(targets, packages, target, native_arch, cross_arch)
     actual = gen.format(target_obj, [project])
     expected_path = Path(test_utils.test_data_outdir(__file__), request.node.callspec.id + ".json")
+    assert_equal(actual, expected_path)
+
+
+@pytest.mark.parametrize("project,target,native_arch,cross_arch", scenarios)
+def test_variables_yaml(assert_equal, packages, projects, targets, project, target, native_arch, cross_arch, request):
+    gen = YamlVariablesFormatter(projects)
+    target_obj = BuildTarget(targets, packages, target, native_arch, cross_arch)
+    actual = gen.format(target_obj, [project])
+    expected_path = Path(test_utils.test_data_outdir(__file__), request.node.callspec.id + ".yaml")
     assert_equal(actual, expected_path)
 
 

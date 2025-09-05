@@ -39,7 +39,7 @@ block_ss.add(files(
   'throttle.c',
   'throttle-groups.c',
   'write-threshold.c',
-), zstd, zlib, gnutls)
+), zstd, zlib)
 
 system_ss.add(when: 'CONFIG_TCG', if_true: files('blkreplay.c'))
 system_ss.add(files('block-ram-registrar.c'))
@@ -110,7 +110,7 @@ foreach m : [
   [blkio, 'blkio', files('blkio.c')],
   [curl, 'curl', files('curl.c')],
   [glusterfs, 'gluster', files('gluster.c')],
-  [libiscsi, 'iscsi', [files('iscsi.c'), libm]],
+  [libiscsi, 'iscsi', files('iscsi.c')],
   [libnfs, 'nfs', files('nfs.c')],
   [libssh, 'ssh', files('ssh.c')],
   [rbd, 'rbd', files('rbd.c')],
@@ -119,7 +119,7 @@ foreach m : [
     module_ss = ss.source_set()
     module_ss.add(when: m[0], if_true: m[2])
     if enable_modules
-      modsrc += module_ss.all_sources()
+      modsrc += m[2]
     endif
     block_modules += {m[1] : module_ss}
   endif
@@ -154,8 +154,8 @@ block_gen_c = custom_target('block-gen.c',
                                       '../include/block/dirty-bitmap.h',
                                       '../include/block/block_int-io.h',
                                       '../include/block/block-global-state.h',
-                                      '../include/sysemu/block-backend-global-state.h',
-                                      '../include/sysemu/block-backend-io.h',
+                                      '../include/system/block-backend-global-state.h',
+                                      '../include/system/block-backend-io.h',
                                       'coroutines.h'
                                       ),
                             command: [wrapper_py, '@OUTPUT@', '@INPUT@'])
@@ -163,7 +163,7 @@ block_ss.add(block_gen_c)
 
 block_ss.add(files('stream.c'))
 
-system_ss.add(files('qapi-sysemu.c'))
+system_ss.add(files('qapi-system.c'))
 
 subdir('export')
 subdir('monitor')

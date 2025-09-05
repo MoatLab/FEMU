@@ -21,8 +21,6 @@ OBJECT_DECLARE_TYPE(S390SKeysState, S390SKeysClass, S390_SKEYS)
 
 struct S390SKeysState {
     DeviceState parent_obj;
-    bool migration_enabled;
-
 };
 
 
@@ -111,10 +109,36 @@ struct QEMUS390SKeysState {
 };
 
 void s390_skeys_init(void);
+/**
+ * @s390_skeys_get: See S390SKeysClass::get_skeys()
+ */
+int s390_skeys_get(S390SKeysState *ks, uint64_t start_gfn,
+                   uint64_t count, uint8_t *keys);
+/**
+ * @s390_skeys_set: See S390SKeysClass::set_skeys()
+ */
+int s390_skeys_set(S390SKeysState *ks, uint64_t start_gfn,
+                   uint64_t count, uint8_t *keys);
 
 S390SKeysState *s390_get_skeys_device(void);
 
+void s390_qmp_dump_skeys(const char *filename, Error **errp);
 void hmp_dump_skeys(Monitor *mon, const QDict *qdict);
 void hmp_info_skeys(Monitor *mon, const QDict *qdict);
+
+#define TYPE_DUMP_SKEYS_INTERFACE "dump-skeys-interface"
+
+typedef struct DumpSKeysInterface DumpSKeysInterface;
+DECLARE_CLASS_CHECKERS(DumpSKeysInterface, DUMP_SKEYS_INTERFACE,
+                       TYPE_DUMP_SKEYS_INTERFACE)
+
+struct DumpSKeysInterface {
+    InterfaceClass parent_class;
+
+    /**
+     * @qmp_dump_skeys: Callback to dump guest's storage keys to @filename.
+     */
+    void (*qmp_dump_skeys)(const char *filename, Error **errp);
+};
 
 #endif /* S390_STORAGE_KEYS_H */

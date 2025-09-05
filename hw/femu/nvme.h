@@ -10,7 +10,8 @@
 #include "hw/pci/msi.h"
 #include "hw/virtio/vhost.h"
 #include "qapi/error.h"
-#include "sysemu/kvm.h"
+#include "system/kvm.h"
+#include "hw/block/block.h"
 
 #include "backend/dram.h"
 #include "inc/rte_ring.h"

@@ -14,8 +14,8 @@ cli_args = [
     ["--help"],
     ["targets"],
     ["projects"],
-    ["variables", "almalinux-8", "osinfo-db-tools"],
-    ["dockerfile", "almalinux-8", "osinfo-db-tools"],
+    ["variables", "almalinux-9", "libvirt-go-module"],
+    ["dockerfile", "almalinux-9", "libvirt-go-module"],
     ["manifest", "-n", Path(__file__).parent.parent.joinpath("examples", "manifest.yml")],
     ["container", "engines"]
 ]
@@ -30,5 +30,5 @@ def test_commands(test_cli_args):
         # we're running the tests in a virtual env
         lcitool_path = Path(sys.prefix, "bin/lcitool")
 
-    subprocess.check_call([lcitool_path] + test_cli_args,
+    subprocess.check_call([lcitool_path, '-d', Path(__file__).parent.joinpath("data")] + test_cli_args,
                           stdout=subprocess.DEVNULL)

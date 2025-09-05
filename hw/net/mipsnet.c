@@ -266,19 +266,18 @@ static void mipsnet_sysbus_reset(DeviceState *dev)
     mipsnet_reset(s);
 }
 
-static Property mipsnet_properties[] = {
+static const Property mipsnet_properties[] = {
     DEFINE_NIC_PROPERTIES(MIPSnetState, conf),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void mipsnet_class_init(ObjectClass *klass, void *data)
+static void mipsnet_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = mipsnet_realize;
     set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);
     dc->desc = "MIPS Simulator network device";
-    dc->reset = mipsnet_sysbus_reset;
+    device_class_set_legacy_reset(dc, mipsnet_sysbus_reset);
     dc->vmsd = &vmstate_mipsnet;
     device_class_set_props(dc, mipsnet_properties);
 }

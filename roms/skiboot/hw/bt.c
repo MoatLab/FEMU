@@ -490,6 +490,16 @@ static void bt_poll(struct timer *t __unused, void *data __unused,
 #if BT_QUEUE_DEBUG
 	print_debug_queue_info();
 #endif
+	if (chip_quirk(QUIRK_QEMU) && !bt.irq_ok) {
+		/*
+		 * QEMU has a bug where PSI interrupts are lost when booting
+		 * the OS (perhaps when XIVE is reset, are the interrupts not
+		 * re-presented?) Clearing the irq here gets things moving.
+		 */
+		if (bt_inb(BT_INTMASK) & BT_INTMASK_B2H_IRQ)
+			bt_outb(BT_INTMASK_B2H_IRQ | BT_INTMASK_B2H_IRQEN,
+					BT_INTMASK);
+	}
 
 	bt_ctrl = bt_inb(BT_CTRL);
 
@@ -519,9 +529,14 @@ static void bt_poll(struct timer *t __unused, void *data __unused,
 		       bt.irq_ok ? TIMER_POLL : msecs_to_tb(BT_DEFAULT_POLL_MS));
 }
 
-static void bt_ipmi_poll(void)
+static bool bt_ipmi_poll(void)
 {
+	if (!lpc_ok())
+		return false;
+
 	bt_poll(NULL, NULL, mftb());
+
+	return bt.queue_len > 0;
 }
 
 static void bt_add_msg(struct bt_msg *bt_msg)
@@ -710,7 +725,7 @@ void bt_init(void)
 
 	irq = dt_prop_get_u32(n, "interrupts");
 	bt_lpc_client.interrupts = LPC_IRQ(irq);
-	lpc_register_client(dt_get_chip_id(n), &bt_lpc_client,
+	lpc_register_client(dt_get_chip_id(n), &bt_lpc_client, "lpc-bt",
 			    IRQ_ATTR_TARGET_OPAL);
 
 	/* Enqueue an IPMI message to ask the BMC about its BT capabilities */

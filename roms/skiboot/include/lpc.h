@@ -82,10 +82,13 @@ struct lpc_client {
 };
 
 extern void lpc_register_client(uint32_t chip_id, const struct lpc_client *clt,
-				uint32_t policy);
+				const char *name, uint32_t policy);
 
 /* Return the policy for a given serirq */
 extern unsigned int lpc_get_irq_policy(uint32_t chip_id, uint32_t psi_idx);
+
+/* Return the name for a given serirq */
+extern const char *lpc_get_irq_name(uint32_t chip_id, uint32_t psi_idx);
 
 /* Default bus accessors that perform error logging */
 extern int64_t lpc_write(enum OpalLPCAddressType addr_type, uint32_t addr,
@@ -101,6 +104,12 @@ extern int64_t lpc_probe_write(enum OpalLPCAddressType addr_type, uint32_t addr,
 			       uint32_t data, uint32_t sz);
 extern int64_t lpc_probe_read(enum OpalLPCAddressType addr_type, uint32_t addr,
 			      uint32_t *data, uint32_t sz);
+
+/*
+ * helpers for doing a bulk io to firmware space.
+ */
+extern int64_t lpc_fw_read(uint32_t addr, void *buf, uint32_t sz);
+extern int64_t lpc_fw_write(uint32_t addr, const void *buf, uint32_t sz);
 
 /* Mark LPC bus as used by console */
 extern void lpc_used_by_console(void);

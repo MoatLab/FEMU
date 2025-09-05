@@ -206,43 +206,13 @@ qcrypto_tls_creds_psk_complete(UserCreatable *uc, Error **errp)
 }
 
 
-#ifdef CONFIG_GNUTLS
-
-
-static bool
-qcrypto_tls_creds_psk_prop_get_loaded(Object *obj,
-                                      Error **errp G_GNUC_UNUSED)
-{
-    QCryptoTLSCredsPSK *creds = QCRYPTO_TLS_CREDS_PSK(obj);
-
-    if (creds->parent_obj.endpoint == QCRYPTO_TLS_CREDS_ENDPOINT_SERVER) {
-        return creds->data.server != NULL;
-    } else {
-        return creds->data.client != NULL;
-    }
-}
-
-
-#else /* ! CONFIG_GNUTLS */
-
-
-static bool
-qcrypto_tls_creds_psk_prop_get_loaded(Object *obj G_GNUC_UNUSED,
-                                      Error **errp G_GNUC_UNUSED)
-{
-    return false;
-}
-
-
-#endif /* ! CONFIG_GNUTLS */
-
-
 static void
 qcrypto_tls_creds_psk_finalize(Object *obj)
 {
     QCryptoTLSCredsPSK *creds = QCRYPTO_TLS_CREDS_PSK(obj);
 
     qcrypto_tls_creds_psk_unload(creds);
+    g_free(creds->username);
 }
 
 static void
@@ -266,15 +236,12 @@ qcrypto_tls_creds_psk_prop_get_username(Object *obj,
 }
 
 static void
-qcrypto_tls_creds_psk_class_init(ObjectClass *oc, void *data)
+qcrypto_tls_creds_psk_class_init(ObjectClass *oc, const void *data)
 {
     UserCreatableClass *ucc = USER_CREATABLE_CLASS(oc);
 
     ucc->complete = qcrypto_tls_creds_psk_complete;
 
-    object_class_property_add_bool(oc, "loaded",
-                                   qcrypto_tls_creds_psk_prop_get_loaded,
-                                   NULL);
     object_class_property_add_str(oc, "username",
                                   qcrypto_tls_creds_psk_prop_get_username,
                                   qcrypto_tls_creds_psk_prop_set_username);
@@ -288,7 +255,7 @@ static const TypeInfo qcrypto_tls_creds_psk_info = {
     .instance_finalize = qcrypto_tls_creds_psk_finalize,
     .class_size = sizeof(QCryptoTLSCredsPSKClass),
     .class_init = qcrypto_tls_creds_psk_class_init,
-    .interfaces = (InterfaceInfo[]) {
+    .interfaces = (const InterfaceInfo[]) {
         { TYPE_USER_CREATABLE },
         { }
     }

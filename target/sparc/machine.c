@@ -1,6 +1,5 @@
 #include "qemu/osdep.h"
 #include "cpu.h"
-#include "exec/exec-all.h"
 #include "qemu/timer.h"
 
 #include "migration/cpu.h"
@@ -143,6 +142,24 @@ static const VMStateInfo vmstate_xcc = {
     .get = get_xcc,
     .put = put_xcc,
 };
+#else
+static bool fq_needed(void *opaque)
+{
+    SPARCCPU *cpu = opaque;
+    return cpu->env.fsr_qne;
+}
+
+static const VMStateDescription vmstate_fq = {
+    .name = "cpu/fq",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = fq_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(env.fq.s.addr, SPARCCPU),
+        VMSTATE_UINT32(env.fq.s.insn, SPARCCPU),
+        VMSTATE_END_OF_LIST()
+    },
+};
 #endif
 
 static int cpu_pre_save(void *opaque)
@@ -265,4 +282,11 @@ const VMStateDescription vmstate_sparc_cpu = {
 #endif
         VMSTATE_END_OF_LIST()
     },
+#ifndef TARGET_SPARC64
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_fq,
+        NULL
+    },
+#endif
+
 };

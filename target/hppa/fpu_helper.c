@@ -19,7 +19,6 @@
 
 #include "qemu/osdep.h"
 #include "cpu.h"
-#include "exec/exec-all.h"
 #include "exec/helper-proto.h"
 #include "fpu/softfloat.h"
 
@@ -30,7 +29,7 @@ void HELPER(loaded_fr0)(CPUHPPAState *env)
 
     env->fr0_shadow = shadow;
 
-    switch (extract32(shadow, 9, 2)) {
+    switch (FIELD_EX32(shadow, FPSR, RM)) {
     default:
         rm = float_round_nearest_even;
         break;
@@ -46,9 +45,39 @@ void HELPER(loaded_fr0)(CPUHPPAState *env)
     }
     set_float_rounding_mode(rm, &env->fp_status);
 
-    d = extract32(shadow, 5, 1);
+    d = FIELD_EX32(shadow, FPSR, D);
     set_flush_to_zero(d, &env->fp_status);
     set_flush_inputs_to_zero(d, &env->fp_status);
+
+    /*
+     * TODO: we only need to do this at CPU reset, but currently
+     * HPPA does note implement a CPU reset method at all...
+     */
+    set_float_2nan_prop_rule(float_2nan_prop_s_ab, &env->fp_status);
+    /*
+     * TODO: The HPPA architecture reference only documents its NaN
+     * propagation rule for 2-operand operations. Testing on real hardware
+     * might be necessary to confirm whether this order for muladd is correct.
+     * Not preferring the SNaN is almost certainly incorrect as it diverges
+     * from the documented rules for 2-operand operations.
+     */
+    set_float_3nan_prop_rule(float_3nan_prop_abc, &env->fp_status);
+    /* For inf * 0 + NaN, return the input NaN */
+    set_float_infzeronan_rule(float_infzeronan_dnan_never, &env->fp_status);
+    /* Default NaN: sign bit clear, msb-1 frac bit set */
+    set_float_default_nan_pattern(0b00100000, &env->fp_status);
+    set_snan_bit_is_one(true, &env->fp_status);
+    /*
+     * "PA-RISC 2.0 Architecture" says it is IMPDEF whether the flushing
+     * enabled by FPSR.D happens before or after rounding. We pick "before"
+     * for consistency with tininess detection.
+     */
+    set_float_ftz_detection(float_ftz_before_rounding, &env->fp_status);
+    /*
+     * TODO: "PA-RISC 2.0 Architecture" chapter 10 says that we should
+     * detect tininess before rounding, but we don't set that here so we
+     * get the default tininess after rounding.
+     */
 }
 
 void cpu_hppa_loaded_fr0(CPUHPPAState *env)
@@ -57,7 +86,7 @@ void cpu_hppa_loaded_fr0(CPUHPPAState *env)
 }
 
 #define CONVERT_BIT(X, SRC, DST)        \
-    ((SRC) > (DST)                      \
+    ((unsigned)(SRC) > (unsigned)(DST)  \
      ? (X) / ((SRC) / (DST)) & (DST)    \
      : ((X) & (SRC)) * ((DST) / (SRC)))
 
@@ -65,7 +94,8 @@ static void update_fr0_op(CPUHPPAState *env, uintptr_t ra)
 {
     uint32_t soft_exp = get_float_exception_flags(&env->fp_status);
     uint32_t hard_exp = 0;
-    uint32_t shadow = env->fr0_shadow;
+    uint32_t shadow = env->fr0_shadow & 0x3ffffff;
+    uint32_t fr1 = 0;
 
     if (likely(soft_exp == 0)) {
         env->fr[0] = (uint64_t)shadow << 32;
@@ -73,14 +103,27 @@ static void update_fr0_op(CPUHPPAState *env, uintptr_t ra)
     }
     set_float_exception_flags(0, &env->fp_status);
 
-    hard_exp |= CONVERT_BIT(soft_exp, float_flag_inexact,   1u << 0);
-    hard_exp |= CONVERT_BIT(soft_exp, float_flag_underflow, 1u << 1);
-    hard_exp |= CONVERT_BIT(soft_exp, float_flag_overflow,  1u << 2);
-    hard_exp |= CONVERT_BIT(soft_exp, float_flag_divbyzero, 1u << 3);
-    hard_exp |= CONVERT_BIT(soft_exp, float_flag_invalid,   1u << 4);
-    shadow |= hard_exp << (32 - 5);
+    hard_exp |= CONVERT_BIT(soft_exp, float_flag_inexact,   R_FPSR_ENA_I_MASK);
+    hard_exp |= CONVERT_BIT(soft_exp, float_flag_underflow, R_FPSR_ENA_U_MASK);
+    hard_exp |= CONVERT_BIT(soft_exp, float_flag_overflow,  R_FPSR_ENA_O_MASK);
+    hard_exp |= CONVERT_BIT(soft_exp, float_flag_divbyzero, R_FPSR_ENA_Z_MASK);
+    hard_exp |= CONVERT_BIT(soft_exp, float_flag_invalid,   R_FPSR_ENA_V_MASK);
+    if (hard_exp & shadow) {
+        shadow = FIELD_DP32(shadow, FPSR, T, 1);
+        /* fill exception register #1, which is lower 32-bits of fr[0] */
+#if !defined(CONFIG_USER_ONLY)
+        if (hard_exp & (R_FPSR_ENA_O_MASK | R_FPSR_ENA_U_MASK)) {
+            /* over- and underflow both set overflow flag only */
+            fr1 = FIELD_DP32(fr1, FPSR, C, 1);
+            fr1 = FIELD_DP32(fr1, FPSR, FLG_O, 1);
+        } else
+#endif
+        {
+            fr1 |= hard_exp << (R_FPSR_FLAGS_SHIFT - R_FPSR_ENABLES_SHIFT);
+        }
+    }
     env->fr0_shadow = shadow;
-    env->fr[0] = (uint64_t)shadow << 32;
+    env->fr[0] = (uint64_t)shadow << 32 | fr1;
 
     if (hard_exp & shadow) {
         hppa_dynamic_excp(env, EXCP_ASSIST, ra);
@@ -378,15 +421,15 @@ static void update_fr0_cmp(CPUHPPAState *env, uint32_t y,
     if (y) {
         /* targeted comparison */
         /* set fpsr[ca[y - 1]] to current compare */
-        shadow = deposit32(shadow, 21 - (y - 1), 1, c);
+        shadow = deposit32(shadow, R_FPSR_CA0_SHIFT - (y - 1), 1, c);
     } else {
         /* queued comparison */
         /* shift cq right by one place */
-        shadow = deposit32(shadow, 11, 10, extract32(shadow, 12, 10));
+        shadow = (shadow & ~R_FPSR_CQ_MASK) | ((shadow >> 1) & R_FPSR_CQ_MASK);
         /* move fpsr[c] to fpsr[cq[0]] */
-        shadow = deposit32(shadow, 21, 1, extract32(shadow, 26, 1));
+        shadow = FIELD_DP32(shadow, FPSR, CQ0, FIELD_EX32(shadow, FPSR, C));
         /* set fpsr[c] to current compare */
-        shadow = deposit32(shadow, 26, 1, c);
+        shadow = FIELD_DP32(shadow, FPSR, C, c);
     }
 
     env->fr0_shadow = shadow;

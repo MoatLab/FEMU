@@ -144,14 +144,14 @@ static void fsi_master_reset(DeviceState *dev)
     s->regs[FSI_MVER] = 0xe0050101;
 }
 
-static void fsi_master_class_init(ObjectClass *klass, void *data)
+static void fsi_master_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->bus_type = TYPE_OP_BUS;
     dc->desc = "FSI Master";
     dc->realize = fsi_master_realize;
-    dc->reset = fsi_master_reset;
+    device_class_set_legacy_reset(dc, fsi_master_reset);
 }
 
 static const TypeInfo fsi_master_info = {

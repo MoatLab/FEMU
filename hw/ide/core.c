@@ -32,15 +32,15 @@
 #include "qemu/timer.h"
 #include "qemu/hw-version.h"
 #include "qemu/memalign.h"
-#include "sysemu/sysemu.h"
-#include "sysemu/blockdev.h"
-#include "sysemu/dma.h"
+#include "system/system.h"
+#include "system/blockdev.h"
+#include "system/dma.h"
 #include "hw/block/block.h"
-#include "sysemu/block-backend.h"
+#include "system/block-backend.h"
 #include "qapi/error.h"
 #include "qemu/cutils.h"
-#include "sysemu/replay.h"
-#include "sysemu/runstate.h"
+#include "system/replay.h"
+#include "system/runstate.h"
 #include "ide-internal.h"
 #include "trace.h"
 
@@ -968,8 +968,7 @@ static void ide_dma_cb(void *opaque, int ret)
                                            BDRV_SECTOR_SIZE, ide_dma_cb, s);
         break;
     case IDE_DMA_TRIM:
-        s->bus->dma->aiocb = dma_blk_io(blk_get_aio_context(s->blk),
-                                        &s->sg, offset, BDRV_SECTOR_SIZE,
+        s->bus->dma->aiocb = dma_blk_io(&s->sg, offset, BDRV_SECTOR_SIZE,
                                         ide_issue_trim, s, ide_dma_cb, s,
                                         DMA_DIRECTION_TO_DEVICE);
         break;
@@ -1623,11 +1622,24 @@ static bool cmd_read_native_max(IDEState *s, uint8_t cmd)
     /* Refuse if no sectors are addressable (e.g. medium not inserted) */
     if (s->nb_sectors == 0) {
         ide_abort_command(s);
-        return true;
-    }
+    } else {
+        /*
+         * Save the active drive parameters, which may have been
+         * limited from their native counterparts by, e.g., INITIALIZE
+         * DEVICE PARAMETERS or SET MAX ADDRESS.
+         */
+        const int aheads = s->heads;
+        const int asectors = s->sectors;
 
-    ide_cmd_lba48_transform(s, lba48);
-    ide_set_sector(s, s->nb_sectors - 1);
+        s->heads = s->drive_heads;
+        s->sectors = s->drive_sectors;
+
+        ide_cmd_lba48_transform(s, lba48);
+        ide_set_sector(s, s->nb_sectors - 1);
+
+        s->heads = aheads;
+        s->sectors = asectors;
+    }
 
     return true;
 }

@@ -13,6 +13,7 @@
 #include "hw/pci-host/pnv_phb.h"
 #include "hw/pci/pci_bus.h"
 #include "hw/ppc/pnv.h"
+#include "hw/ppc/pnv_nest_pervasive.h"
 #include "hw/ppc/xive.h"
 #include "qom/object.h"
 
@@ -155,7 +156,7 @@ struct PnvPHB4 {
     QLIST_HEAD(, PnvPhb4DMASpace) dma_spaces;
 };
 
-void pnv_phb4_pic_print_info(PnvPHB4 *phb, Monitor *mon);
+void pnv_phb4_pic_print_info(PnvPHB4 *phb, GString *buf);
 int pnv_phb4_pec_get_phb_id(PnvPhb4PecState *pec, int stack_index);
 PnvPhb4PecState *pnv_pec_add_phb(PnvChip *chip, PnvPHB *phb, Error **errp);
 void pnv_phb4_bus_init(DeviceState *dev, PnvPHB4 *phb);
@@ -173,6 +174,9 @@ struct PnvPhb4PecState {
     /* PEC number in chip */
     uint32_t index;
     uint32_t chip_id;
+
+    /* Pervasive chiplet control */
+    PnvNestChipletPervasive nest_pervasive;
 
     /* Nest registers, excuding per-stack */
 #define PHB4_PEC_NEST_REGS_COUNT    0xf
@@ -196,6 +200,7 @@ struct PnvPhb4PecState {
 struct PnvPhb4PecClass {
     DeviceClass parent_class;
 
+    uint32_t (*xscom_cplt_base)(PnvPhb4PecState *pec);
     uint32_t (*xscom_nest_base)(PnvPhb4PecState *pec);
     uint32_t xscom_nest_size;
     uint32_t (*xscom_pci_base)(PnvPhb4PecState *pec);

@@ -16,11 +16,8 @@ static int array2_size = ARRAY_SIZE(array2);
 static int array3_size = ARRAY_SIZE(array3);
 static int array4_size = ARRAY_SIZE(array4);
 
-int __attribute__((const)) main(int argc, char *argv[])
+int main(void)
 {
-	(void)argc;
-	(void)argv;
-
 	plan_tests(8);
 	ok1(array1_size == 1);
 	ok1(array2_size == 2);

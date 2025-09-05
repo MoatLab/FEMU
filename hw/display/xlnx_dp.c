@@ -1387,18 +1387,17 @@ static void xlnx_dp_reset(DeviceState *dev)
     xlnx_dp_update_irq(s);
 }
 
-static Property xlnx_dp_device_properties[] = {
+static const Property xlnx_dp_device_properties[] = {
     DEFINE_AUDIO_PROPERTIES(XlnxDPState, aud_card),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void xlnx_dp_class_init(ObjectClass *oc, void *data)
+static void xlnx_dp_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
 
     dc->realize = xlnx_dp_realize;
     dc->vmsd = &vmstate_dp;
-    dc->reset = xlnx_dp_reset;
+    device_class_set_legacy_reset(dc, xlnx_dp_reset);
     device_class_set_props(dc, xlnx_dp_device_properties);
 }
 

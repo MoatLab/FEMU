@@ -12,14 +12,12 @@
 #include "qemu/osdep.h"
 #include "qemu/units.h"
 #include "qapi/error.h"
-#include "qapi/qmp/qlist.h"
+#include "qobject/qlist.h"
 #include "qemu/module.h"
 #include "hw/sysbus.h"
 #include "net/net.h"
-#include "sysemu/sysemu.h"
-#include "sysemu/kvm.h"
+#include "system/system.h"
 #include "hw/arm/boot.h"
-#include "kvm_arm.h"
 #include "hw/misc/unimp.h"
 #include "hw/arm/xlnx-versal.h"
 #include "qemu/log.h"
@@ -258,14 +256,23 @@ static void versal_create_gems(Versal *s, qemu_irq *pic)
         char *name = g_strdup_printf("gem%d", i);
         DeviceState *dev;
         MemoryRegion *mr;
+        OrIRQState *or_irq;
 
         object_initialize_child(OBJECT(s), name, &s->lpd.iou.gem[i],
                                 TYPE_CADENCE_GEM);
+        or_irq = &s->lpd.iou.gem_irq_orgate[i];
+        object_initialize_child(OBJECT(s), "gem-irq-orgate[*]",
+                                or_irq, TYPE_OR_IRQ);
         dev = DEVICE(&s->lpd.iou.gem[i]);
         qemu_configure_nic_device(dev, true, NULL);
         object_property_set_int(OBJECT(dev), "phy-addr", 23, &error_abort);
         object_property_set_int(OBJECT(dev), "num-priority-queues", 2,
                                 &error_abort);
+        object_property_set_int(OBJECT(or_irq),
+                                "num-lines", 2, &error_fatal);
+        qdev_realize(DEVICE(or_irq), NULL, &error_fatal);
+        qdev_connect_gpio_out(DEVICE(or_irq), 0, pic[irqs[i]]);
+
         object_property_set_link(OBJECT(dev), "dma", OBJECT(&s->mr_ps),
                                  &error_abort);
         sysbus_realize(SYS_BUS_DEVICE(dev), &error_fatal);
@@ -273,7 +280,8 @@ static void versal_create_gems(Versal *s, qemu_irq *pic)
         mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(dev), 0);
         memory_region_add_subregion(&s->mr_ps, addrs[i], mr);
 
-        sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0, pic[irqs[i]]);
+        sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0, qdev_get_gpio_in(DEVICE(or_irq), 0));
+        sysbus_connect_irq(SYS_BUS_DEVICE(dev), 1, qdev_get_gpio_in(DEVICE(or_irq), 1));
         g_free(name);
     }
 }
@@ -958,17 +966,16 @@ static void versal_init(Object *obj)
                              "mr-rpu-ps-alias", &s->mr_ps, 0, UINT64_MAX);
 }
 
-static Property versal_properties[] = {
+static const Property versal_properties[] = {
     DEFINE_PROP_LINK("ddr", Versal, cfg.mr_ddr, TYPE_MEMORY_REGION,
                      MemoryRegion *),
     DEFINE_PROP_LINK("canbus0", Versal, lpd.iou.canbus[0],
                       TYPE_CAN_BUS, CanBusState *),
     DEFINE_PROP_LINK("canbus1", Versal, lpd.iou.canbus[1],
                       TYPE_CAN_BUS, CanBusState *),
-    DEFINE_PROP_END_OF_LIST()
 };
 
-static void versal_class_init(ObjectClass *klass, void *data)
+static void versal_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 

@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR GPL-2.0-or-later
-/* Copyright 2013-2019 IBM Corp. */
+/* Copyright 2013-2019 IBM Corp.
+ * Copyright 2021 Stewart Smith
+ */
 
 #ifndef __SKIBOOT_H
 #define __SKIBOOT_H
@@ -77,6 +79,7 @@ static inline bool is_rodata(const void *p)
 #define pr_fmt(fmt) fmt
 #endif
 
+int vprlog(int log_level, const char *fmt, va_list ap);
 void _prlog(int log_level, const char* fmt, ...) __attribute__((format (printf, 2, 3)));
 #define prlog(l, f, ...) do { _prlog(l, pr_fmt(f), ##__VA_ARGS__); } while(0)
 #define prerror(fmt...)	do { prlog(PR_ERR, fmt); } while(0)
@@ -98,8 +101,11 @@ enum proc_gen {
 	proc_gen_p8,
 	proc_gen_p9,
 	proc_gen_p10,
+	proc_gen_p11,
 };
 extern enum proc_gen proc_gen;
+
+extern bool lpar_per_core;
 
 extern unsigned int pcie_max_link_speed;
 
@@ -208,18 +214,12 @@ extern void copy_sreset_vector_fast_reboot(void);
 extern void patch_traps(bool enable);
 
 /* Various probe routines, to replace with an initcall system */
-extern void probe_phb3(void);
-extern void probe_phb4(void);
 extern int preload_capp_ucode(void);
 extern void preload_io_vpd(void);
-extern void probe_npu(void);
-extern void probe_npu2(void);
-extern void probe_pau(void);
 extern void uart_init(void);
 extern void mbox_init(void);
 extern void early_uart_init(void);
 extern void homer_init(void);
-extern void slw_init(void);
 extern void add_cpu_idle_state_properties(void);
 extern void lpc_rtc_init(void);
 
@@ -306,18 +306,7 @@ extern int  prd_hbrt_fsp_msg_notify(void *data, u32 dsize);
 /* Flatten device-tree */
 extern void *create_dtb(const struct dt_node *root, bool exclusive);
 
-/* Track failure in Wakup engine */
-enum wakeup_engine_states {
-	WAKEUP_ENGINE_NOT_PRESENT,
-	WAKEUP_ENGINE_PRESENT,
-	WAKEUP_ENGINE_FAILED
-};
-extern enum wakeup_engine_states wakeup_engine_state;
-extern bool has_deep_states;
 extern void nx_p9_rng_late_init(void);
-
-/* Patch SPR in SLW image */
-extern int64_t opal_slw_set_reg(uint64_t cpu_pir, uint64_t sprn, uint64_t val);
 
 extern void fast_sleep_exit(void);
 
@@ -345,5 +334,40 @@ extern uint32_t reset_fast_reboot_patch_end;
 extern int fake_nvram_info(uint32_t *total_size);
 extern int fake_nvram_start_read(void *dst, uint32_t src, uint32_t len);
 extern int fake_nvram_write(uint32_t offset, void *src, uint32_t size);
+
+/*
+ * A bunch of hardware needs to be probed, sometimes in a particular order.
+ * Very simple dependency graph, with a even simpler way to resolve it.
+ * But it means we can now at link time choose what hardware we support.
+ * This struct should not be defined directly but with the macros.
+ */
+struct hwprobe {
+	const char	*name;
+	void		(*probe)(void);
+
+	bool		probed;
+
+	/* NULL or NULL-terminated array of strings */
+	const char	**deps;
+};
+
+#define DEFINE_HWPROBE(__name, __probe)		\
+static const struct hwprobe __used __section(".hwprobes") hwprobe_##__name = { \
+	.name = #__name,				\
+	.probe = __probe,				\
+	.deps = NULL,					\
+}
+
+#define DEFINE_HWPROBE_DEPS(__name, __probe, ...)	\
+static const struct hwprobe __used __section(".hwprobes") hwprobe_##__name = { \
+	.name = #__name,				\
+	.probe = __probe,				\
+	.deps = (const char *[]){ __VA_ARGS__, NULL},	\
+}
+
+extern struct hwprobe __hwprobes_start;
+extern struct hwprobe __hwprobes_end;
+
+extern void probe_hardware(void);
 
 #endif /* __SKIBOOT_H */

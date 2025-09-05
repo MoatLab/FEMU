@@ -37,11 +37,11 @@
 
 #include "qemu/osdep.h"
 #include "hw/boards.h"
-#include "sysemu/block-backend.h"
-#include "sysemu/blockdev.h"
+#include "system/block-backend.h"
+#include "system/blockdev.h"
 #include "qapi/qapi-commands-block.h"
 #include "qapi/qapi-commands-block-export.h"
-#include "qapi/qmp/qdict.h"
+#include "qobject/qdict.h"
 #include "qapi/error.h"
 #include "qapi/qmp/qerror.h"
 #include "qemu/config-file.h"
@@ -49,7 +49,7 @@
 #include "qemu/sockets.h"
 #include "qemu/cutils.h"
 #include "qemu/error-report.h"
-#include "sysemu/sysemu.h"
+#include "system/system.h"
 #include "monitor/monitor.h"
 #include "monitor/hmp.h"
 #include "block/nbd.h"
@@ -144,7 +144,7 @@ void hmp_drive_del(Monitor *mon, const QDict *qdict)
     Error *local_err = NULL;
 
     GLOBAL_STATE_CODE();
-    GRAPH_RDLOCK_GUARD_MAINLOOP();
+    bdrv_graph_rdlock_main_loop();
 
     bs = bdrv_find_node(id);
     if (bs) {
@@ -152,29 +152,31 @@ void hmp_drive_del(Monitor *mon, const QDict *qdict)
         if (local_err) {
             error_report_err(local_err);
         }
-        return;
+        goto unlock;
     }
 
     blk = blk_by_name(id);
     if (!blk) {
         error_report("Device '%s' not found", id);
-        return;
+        goto unlock;
     }
 
     if (!blk_legacy_dinfo(blk)) {
         error_report("Deleting device added with blockdev-add"
                      " is not supported");
-        return;
+        goto unlock;
     }
 
     bs = blk_bs(blk);
     if (bs) {
         if (bdrv_op_is_blocked(bs, BLOCK_OP_TYPE_DRIVE_DEL, &local_err)) {
             error_report_err(local_err);
-            return;
+            goto unlock;
         }
 
+        bdrv_graph_rdunlock_main_loop();
         blk_remove_bs(blk);
+        bdrv_graph_rdlock_main_loop();
     }
 
     /* Make the BlockBackend and the attached BlockDriverState anonymous */
@@ -191,6 +193,9 @@ void hmp_drive_del(Monitor *mon, const QDict *qdict)
     } else {
         blk_unref(blk);
     }
+
+unlock:
+    bdrv_graph_rdunlock_main_loop();
 }
 
 void hmp_commit(Monitor *mon, const QDict *qdict)
@@ -402,7 +407,8 @@ void hmp_nbd_server_start(Monitor *mon, const QDict *qdict)
         goto exit;
     }
 
-    nbd_server_start(addr, NULL, NULL, 0, &local_err);
+    nbd_server_start(addr, NBD_DEFAULT_HANDSHAKE_MAX_SECS, NULL, NULL,
+                     NBD_DEFAULT_MAX_CONNECTIONS, &local_err);
     qapi_free_SocketAddress(addr);
     if (local_err != NULL) {
         goto exit;
@@ -629,11 +635,12 @@ static void print_block_info(Monitor *mon, BlockInfo *info,
     }
 
     if (inserted) {
-        monitor_printf(mon, ": %s (%s%s%s)\n",
+        monitor_printf(mon, ": %s (%s%s%s%s)\n",
                        inserted->file,
                        inserted->drv,
                        inserted->ro ? ", read-only" : "",
-                       inserted->encrypted ? ", encrypted" : "");
+                       inserted->encrypted ? ", encrypted" : "",
+                       inserted->active ? "" : ", inactive");
     } else {
         monitor_printf(mon, ": [not inserted]\n");
     }

@@ -619,7 +619,7 @@ static void setup_devices(struct npu2 *npu)
 		npu2_opencapi_init_npu(npu);
 }
 
-void probe_npu2(void)
+static void probe_npu2(void)
 {
 	struct proc_chip *chip = next_chip(NULL);
 	struct npu2 *npu;
@@ -658,3 +658,5 @@ void probe_npu2(void)
 		setup_devices(npu);
 	}
 }
+
+DEFINE_HWPROBE_DEPS(npu2, probe_npu2, "phb4");

@@ -1350,7 +1350,7 @@ static void xlnx_versal_pmc_iou_slcr_reset_init(Object *obj, ResetType type)
     }
 }
 
-static void xlnx_versal_pmc_iou_slcr_reset_hold(Object *obj)
+static void xlnx_versal_pmc_iou_slcr_reset_hold(Object *obj, ResetType type)
 {
     XlnxVersalPmcIouSlcr *s = XILINX_VERSAL_PMC_IOU_SLCR(obj);
 
@@ -1419,7 +1419,8 @@ static const VMStateDescription vmstate_pmc_iou_slcr = {
     }
 };
 
-static void xlnx_versal_pmc_iou_slcr_class_init(ObjectClass *klass, void *data)
+static void xlnx_versal_pmc_iou_slcr_class_init(ObjectClass *klass,
+                                                const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     ResettableClass *rc = RESETTABLE_CLASS(klass);

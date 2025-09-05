@@ -420,16 +420,15 @@ static void slavio_timer_init(Object *obj)
     }
 }
 
-static Property slavio_timer_properties[] = {
+static const Property slavio_timer_properties[] = {
     DEFINE_PROP_UINT32("num_cpus",  SLAVIO_TIMERState, num_cpus,  0),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void slavio_timer_class_init(ObjectClass *klass, void *data)
+static void slavio_timer_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    dc->reset = slavio_timer_reset;
+    device_class_set_legacy_reset(dc, slavio_timer_reset);
     dc->vmsd = &vmstate_slavio_timer;
     device_class_set_props(dc, slavio_timer_properties);
 }

@@ -97,14 +97,16 @@ do_command(esp_private_t *esp, sd_private_t *sd, int cmdlen, int replylen)
     esp->ll->regs[ESP_TCMED] = (cmdlen >> 8) & 0xff;
     // Set DMA direction and enable DMA
     esp->espdma.regs->cond_reg = DMA_ENABLE;
+    // Clear FIFO
+    esp->ll->regs[ESP_CMD] = ESP_CMD_FLUSH;
+    // Clear pending interrupts
+    (void)esp->ll->regs[ESP_INTRPT];
     // Set ATN, issue command
     esp->ll->regs[ESP_CMD] = ESP_CMD_SELA | ESP_CMD_DMA;
-    // Wait for DMA to complete. Can this fail?
-    while ((esp->espdma.regs->cond_reg & DMA_HNDL_INTR) == 0) /* no-op */;
+    // Wait for ESP to complete
+    while (!(esp->ll->regs[ESP_INTRPT] & (ESP_INTR_BSERV | ESP_INTR_FDONE | ESP_INTR_DC)));
     // Check status
     status = esp->ll->regs[ESP_STATUS];
-    // Clear interrupts to avoid guests seeing spurious interrupts
-    (void)esp->ll->regs[ESP_INTRPT];
 
     DPRINTF("do_command: id %d, cmd[0] 0x%x, status 0x%x\n", sd->id, esp->buffer[1], status);
 
@@ -113,11 +115,12 @@ do_command(esp_private_t *esp, sd_private_t *sd, int cmdlen, int replylen)
         return status;
     }
     if (replylen == 0) {
-        return 0;
+        /* No reply expected, ICCS and MSGACC to complete */
+        goto done;
     }
     /* Target went to status phase instead of data phase? */
     if ((status & ESP_STAT_PMASK) == ESP_STATP) {
-        return status;
+        goto done;
     }
 
     // Get reply
@@ -128,21 +131,29 @@ do_command(esp_private_t *esp, sd_private_t *sd, int cmdlen, int replylen)
     esp->ll->regs[ESP_TCMED] = (replylen >> 8) & 0xff;
     // Set DMA direction
     esp->espdma.regs->cond_reg = DMA_ST_WRITE | DMA_ENABLE;
+    // Clear pending interrupts
+    (void)esp->ll->regs[ESP_INTRPT];
     // Transfer
     esp->ll->regs[ESP_CMD] = ESP_CMD_TI | ESP_CMD_DMA;
-    // Wait for DMA to complete
-    while ((esp->espdma.regs->cond_reg & DMA_HNDL_INTR) == 0) /* no-op */;
+    // Wait for ESP to complete
+    while (!(esp->ll->regs[ESP_INTRPT] & (ESP_INTR_BSERV | ESP_INTR_FDONE | ESP_INTR_DC)));
     // Check status
     status = esp->ll->regs[ESP_STATUS];
-    // Clear interrupts to avoid guests seeing spurious interrupts
-    (void)esp->ll->regs[ESP_INTRPT];
 
     DPRINTF("do_command_reply: status 0x%x\n", status);
 
-    if ((status & ESP_STAT_TCNT) != ESP_STAT_TCNT)
+    if ((status & ESP_STAT_TCNT) != ESP_STAT_TCNT) {
         return status;
-    else
-        return 0; // OK
+    }
+
+done:
+    // ICCS and MSGACC sequence to complete
+    esp->ll->regs[ESP_CMD] = ESP_CMD_ICCSEQ;
+    (void)esp->ll->regs[ESP_FDATA];  // Ignore 1st byte for now
+    (void)esp->ll->regs[ESP_FDATA];  // Ignore 2nd byte for now
+    esp->ll->regs[ESP_CMD] = ESP_CMD_MOK;
+
+    return 0; // OK
 }
 
 // offset is in sectors

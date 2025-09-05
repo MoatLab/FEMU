@@ -81,8 +81,8 @@ typedef void VncSendHextileTile(VncState *vs,
 
 /* VNC_MAX_WIDTH must be a multiple of VNC_DIRTY_PIXELS_PER_BIT. */
 
-#define VNC_MAX_WIDTH ROUND_UP(2560, VNC_DIRTY_PIXELS_PER_BIT)
-#define VNC_MAX_HEIGHT 2048
+#define VNC_MAX_WIDTH ROUND_UP(5120, VNC_DIRTY_PIXELS_PER_BIT)
+#define VNC_MAX_HEIGHT 2160
 
 /* VNC_DIRTY_BITS is the number of bits in the dirty bitmap. */
 #define VNC_DIRTY_BITS (VNC_MAX_WIDTH / VNC_DIRTY_PIXELS_PER_BIT)
@@ -168,7 +168,6 @@ struct VncDisplay
 
     const char *id;
     QTAILQ_ENTRY(VncDisplay) next;
-    bool is_unix;
     char *password;
     time_t expires;
     int auth;
@@ -186,6 +185,8 @@ struct VncDisplay
 #endif
 
     AudioState *audio_state;
+
+    VMChangeStateEntry *vmstate_handler_entry;
 };
 
 typedef struct VncTight {
@@ -271,8 +272,6 @@ struct VncState
     gboolean disconnecting;
 
     DECLARE_BITMAP(dirty[VNC_MAX_HEIGHT], VNC_DIRTY_BITS);
-    uint8_t **lossy_rect; /* Not an Array to avoid costly memcpy in
-                           * vnc-jobs-async.c */
 
     VncDisplay *vd;
     VncStateUpdate update; /* Most recent pending request from client */
@@ -324,7 +323,7 @@ struct VncState
     VncWritePixels *write_pixels;
     PixelFormat client_pf;
     pixman_format_code_t client_format;
-    bool client_be;
+    int client_endian; /* G_LITTLE_ENDIAN or G_BIG_ENDIAN */
 
     CaptureVoiceOut *audio_cap;
     struct audsettings as;
@@ -340,10 +339,7 @@ struct VncState
     /* Encoding specific, if you add something here, don't forget to
      *  update vnc_async_encoding_start()
      */
-    VncTight *tight;
-    VncZlib zlib;
     VncHextile hextile;
-    VncZrle *zrle;
     VncZywrle zywrle;
 
     Notifier mouse_mode_notifier;
@@ -354,6 +350,19 @@ struct VncState
 
     QTAILQ_ENTRY(VncState) next;
 };
+
+typedef struct VncWorker {
+    uint8_t lossy_rect[VNC_STAT_ROWS][VNC_STAT_COLS];
+
+    VncTight tight;
+    VncZlib zlib;
+    VncZrle zrle;
+} VncWorker;
+
+typedef struct VncConnection {
+    VncState vs;
+    VncWorker worker;
+} VncConnection;
 
 
 /*****************************************************************************
@@ -601,10 +610,11 @@ int vnc_server_fb_stride(VncDisplay *vd);
 
 void vnc_convert_pixel(VncState *vs, uint8_t *buf, uint32_t v);
 double vnc_update_freq(VncState *vs, int x, int y, int w, int h);
-void vnc_sent_lossy_rect(VncState *vs, int x, int y, int w, int h);
+void vnc_sent_lossy_rect(VncWorker *worker, int x, int y, int w, int h);
 
 /* Encodings */
-int vnc_send_framebuffer_update(VncState *vs, int x, int y, int w, int h);
+int vnc_send_framebuffer_update(VncState *vs, VncWorker *worker,
+                                int x, int y, int w, int h);
 
 int vnc_raw_send_framebuffer_update(VncState *vs, int x, int y, int w, int h);
 
@@ -614,17 +624,21 @@ void vnc_hextile_set_pixel_conversion(VncState *vs, int generic);
 
 void *vnc_zlib_zalloc(void *x, unsigned items, unsigned size);
 void vnc_zlib_zfree(void *x, void *addr);
-int vnc_zlib_send_framebuffer_update(VncState *vs, int x, int y, int w, int h);
-void vnc_zlib_clear(VncState *vs);
+int vnc_zlib_send_framebuffer_update(VncState *vs, VncWorker *worker,
+                                     int x, int y, int w, int h);
+void vnc_zlib_clear(VncWorker *worker);
 
-int vnc_tight_send_framebuffer_update(VncState *vs, int x, int y, int w, int h);
-int vnc_tight_png_send_framebuffer_update(VncState *vs, int x, int y,
-                                          int w, int h);
-void vnc_tight_clear(VncState *vs);
+int vnc_tight_send_framebuffer_update(VncState *vs, VncWorker *worker,
+                                      int x, int y, int w, int h);
+int vnc_tight_png_send_framebuffer_update(VncState *vs, VncWorker *worker,
+                                          int x, int y, int w, int h);
+void vnc_tight_clear(VncWorker *worker);
 
-int vnc_zrle_send_framebuffer_update(VncState *vs, int x, int y, int w, int h);
-int vnc_zywrle_send_framebuffer_update(VncState *vs, int x, int y, int w, int h);
-void vnc_zrle_clear(VncState *vs);
+int vnc_zrle_send_framebuffer_update(VncState *vs, VncWorker *worker,
+                                     int x, int y, int w, int h);
+int vnc_zywrle_send_framebuffer_update(VncState *vs, VncWorker *worker,
+                                       int x, int y, int w, int h);
+void vnc_zrle_clear(VncWorker *worker);
 
 /* vnc-clipboard.c */
 void vnc_server_cut_text_caps(VncState *vs);

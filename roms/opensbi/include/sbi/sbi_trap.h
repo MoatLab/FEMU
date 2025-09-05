@@ -87,20 +87,18 @@
 /** Last member index in sbi_trap_regs */
 #define SBI_TRAP_REGS_last			35
 
-/** Index of epc member in sbi_trap_info */
-#define SBI_TRAP_INFO_epc			0
 /** Index of cause member in sbi_trap_info */
-#define SBI_TRAP_INFO_cause			1
+#define SBI_TRAP_INFO_cause			0
 /** Index of tval member in sbi_trap_info */
-#define SBI_TRAP_INFO_tval			2
+#define SBI_TRAP_INFO_tval			1
 /** Index of tval2 member in sbi_trap_info */
-#define SBI_TRAP_INFO_tval2			3
+#define SBI_TRAP_INFO_tval2			2
 /** Index of tinst member in sbi_trap_info */
-#define SBI_TRAP_INFO_tinst			4
+#define SBI_TRAP_INFO_tinst			3
 /** Index of gva member in sbi_trap_info */
-#define SBI_TRAP_INFO_gva			5
+#define SBI_TRAP_INFO_gva			4
 /** Last member index in sbi_trap_info */
-#define SBI_TRAP_INFO_last			6
+#define SBI_TRAP_INFO_last			5
 
 /* clang-format on */
 
@@ -114,9 +112,15 @@
 /** Size (in bytes) of sbi_trap_info */
 #define SBI_TRAP_INFO_SIZE SBI_TRAP_INFO_OFFSET(last)
 
+/** Size (in bytes) of sbi_trap_context */
+#define SBI_TRAP_CONTEXT_SIZE (SBI_TRAP_REGS_SIZE + \
+			       SBI_TRAP_INFO_SIZE + \
+			       __SIZEOF_POINTER__)
+
 #ifndef __ASSEMBLER__
 
 #include <sbi/sbi_types.h>
+#include <sbi/sbi_scratch.h>
 
 /** Representation of register state at time of trap/interrupt */
 struct sbi_trap_regs {
@@ -194,8 +198,6 @@ struct sbi_trap_regs {
 
 /** Representation of trap details */
 struct sbi_trap_info {
-	/** epc Trap program counter */
-	unsigned long epc;
 	/** cause Trap exception cause */
 	unsigned long cause;
 	/** tval Trap value */
@@ -206,6 +208,16 @@ struct sbi_trap_info {
 	unsigned long tinst;
 	/** gva Guest virtual address in tval flag */
 	unsigned long gva;
+};
+
+/** Representation of trap context saved on stack */
+struct sbi_trap_context {
+	/** Register state */
+	struct sbi_trap_regs regs;
+	/** Trap details */
+	struct sbi_trap_info trap;
+	/** Pointer to previous trap context */
+	struct sbi_trap_context *prev_context;
 };
 
 static inline unsigned long sbi_regs_gva(const struct sbi_trap_regs *regs)
@@ -225,11 +237,20 @@ static inline unsigned long sbi_regs_gva(const struct sbi_trap_regs *regs)
 }
 
 int sbi_trap_redirect(struct sbi_trap_regs *regs,
-		      struct sbi_trap_info *trap);
+		      const struct sbi_trap_info *trap);
 
-struct sbi_trap_regs *sbi_trap_handler(struct sbi_trap_regs *regs);
+static inline struct sbi_trap_context *sbi_trap_get_context(struct sbi_scratch *scratch)
+{
+	return (scratch) ? (void *)scratch->trap_context : NULL;
+}
 
-void __noreturn sbi_trap_exit(const struct sbi_trap_regs *regs);
+static inline void sbi_trap_set_context(struct sbi_scratch *scratch,
+					struct sbi_trap_context *tcntx)
+{
+	scratch->trap_context = (unsigned long)tcntx;
+}
+
+struct sbi_trap_context *sbi_trap_handler(struct sbi_trap_context *tcntx);
 
 #endif
 

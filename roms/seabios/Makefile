@@ -251,21 +251,6 @@ $(OUT)vgabios.bin: $(OUT)vgabios.bin.raw scripts/buildrom.py
 	$(Q)$(PYTHON) ./scripts/buildrom.py $< $@
 
 
-################ DSDT build rules
-
-iasl-option=$(shell if test -z "`$(1) $(2) 2>&1 > /dev/null`" \
-    ; then echo "$(2)"; else echo "$(3)"; fi ;)
-
-%.hex: %.dsl ./scripts/acpi_extract_preprocess.py ./scripts/acpi_extract.py
-	@echo "  Compiling IASL $@"
-	$(Q)$(CPP) $(CPPFLAGS) $< -o $(OUT)$*.dsl.i.orig
-	$(Q)$(PYTHON) ./scripts/acpi_extract_preprocess.py $(OUT)$*.dsl.i.orig > $(OUT)$*.dsl.i
-	$(Q)$(IASL) $(call iasl-option,$(IASL),-Pn,) -vs -l -tc -p $(OUT)$* $(OUT)$*.dsl.i
-	$(Q)$(PYTHON) ./scripts/acpi_extract.py $(OUT)$*.lst > $(OUT)$*.off
-	$(Q)cat $(OUT)$*.off > $@
-
-iasl: src/fw/acpi-dsdt.hex src/fw/ssdt-proc.hex src/fw/ssdt-pcihp.hex src/fw/ssdt-misc.hex
-
 ################ Kconfig rules
 
 define do-kconfig

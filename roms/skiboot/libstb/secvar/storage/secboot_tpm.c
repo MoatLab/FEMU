@@ -127,12 +127,15 @@ static int secboot_format(void)
 		prlog(PR_ERR, "Bank hash failed to calculate somehow\n");
 		return rc;
 	}
+	/* Clear bank_hash[1] anyway, to match initial zeroed bank hash state */
+	memset(tpmnv_control_image->bank_hash[1], 0x00, sizeof(tpmnv_control_image->bank_hash[1]));
+
+	tpmnv_control_image->active_bit = 0;
 
 	rc = tpmnv_ops.write(SECBOOT_TPMNV_CONTROL_INDEX,
-			     tpmnv_control_image->bank_hash[0],
-			     SHA256_DIGEST_SIZE,
-			     offsetof(struct tpmnv_control,
-			     bank_hash[0]));
+			     tpmnv_control_image,
+			     sizeof(struct tpmnv_control),
+			     0);
 	if (rc) {
 		prlog(PR_ERR, "Could not write fresh formatted bank hashes to CONTROL index, rc=%d\n", rc);
 		return rc;
@@ -157,9 +160,9 @@ static char *secboot_serialize_secvar(char *target, const struct secvar *var, co
 		+ var->key_len + var->data_size) > end)
 		return NULL;
 
-	*((uint64_t*) target) = cpu_to_be64(var->key_len);
+	*((beint64_t*) target) = cpu_to_be64(var->key_len);
 	target += sizeof(var->key_len);
-	*((uint64_t*) target) = cpu_to_be64(var->data_size);
+	*((beint64_t*) target) = cpu_to_be64(var->data_size);
 	target += sizeof(var->data_size);
 	memcpy(target, var->key, var->key_len);
 	target += var->key_len;
@@ -286,9 +289,9 @@ static int secboot_deserialize_secvar(struct secvar **var, char **src, const cha
 	assert(var);
 
 	/* Load in the two header values */
-	key_len = be64_to_cpu(*((uint64_t *) *src));
+	key_len = be64_to_cpu(*((beint64_t *) *src));
 	*src += sizeof(uint64_t);
-	data_size = be64_to_cpu(*((uint64_t *) *src));
+	data_size = be64_to_cpu(*((beint64_t *) *src));
 	*src += sizeof(uint64_t);
 
 	/* Check if we've reached the last var to deserialize */
@@ -371,7 +374,9 @@ fail:
 	return rc;
 }
 
-static int secboot_tpm_load_variable_bank(struct list_head *bank)
+
+/* Helper to validate the current active SECBOOT bank's data against the hash stored in the TPM */
+static int compare_bank_hash(void)
 {
 	char bank_hash[SHA256_DIGEST_LENGTH];
 	uint64_t bit = tpmnv_control_image->active_bit;
@@ -390,6 +395,15 @@ static int secboot_tpm_load_variable_bank(struct list_head *bank)
 		   SHA256_DIGEST_LENGTH))
 		/* Tampered pnor space detected, abandon ship */
 		return OPAL_PERMISSION;
+
+	return OPAL_SUCCESS;
+}
+
+
+static int secboot_tpm_load_variable_bank(struct list_head *bank)
+{
+	uint64_t bit = tpmnv_control_image->active_bit;
+	int rc;
 
 	rc = secboot_tpm_deserialize_from_buffer(bank, tpmnv_vars_image->vars, tpmnv_vars_size, SECVAR_FLAG_PROTECTED);
 	if (rc)
@@ -689,7 +703,24 @@ static int secboot_tpm_store_init(void)
 		rc = secboot_format();
 		if (rc)
 			goto error;
+		goto done;
 	}
+
+	/* Verify the active bank's integrity by comparing against the hash in TPM.
+	 * Reformat if it does not match -- we do not want to load potentially
+	 * compromised data.
+	 * Ideally, the backend driver should retain secure boot state in
+	 * protected (TPM) storage, so secure boot state should be the same, albeit
+	 * without the data in unprotected (PNOR) storage.
+	 */
+	rc = compare_bank_hash();
+	if (rc == OPAL_PERMISSION) {
+		rc = secboot_format();
+		if (rc)
+			goto error;
+	}
+	else if (rc)
+		goto error;
 
 done:
 	return OPAL_SUCCESS;

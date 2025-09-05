@@ -493,7 +493,7 @@ static void uart_setup_os_passthrough(void)
 	if (lpc_irq >= 0) {
 		uint32_t chip_id = dt_get_chip_id(uart_node);
 		uart_lpc_os_client.interrupts = LPC_IRQ(lpc_irq);
-		lpc_register_client(chip_id, &uart_lpc_os_client,
+		lpc_register_client(chip_id, &uart_lpc_os_client, "lpc-uart",
 				    IRQ_ATTR_TARGET_LINUX);
 	}
 	prlog(PR_DEBUG, "UART: Enabled as OS pass-through\n");
@@ -525,7 +525,7 @@ static void uart_setup_opal_console(void)
 	if (lpc_irq >= 0) {
 		uint32_t chip_id = dt_get_chip_id(uart_node);
 		uart_lpc_opal_client.interrupts = LPC_IRQ(lpc_irq);
-		lpc_register_client(chip_id, &uart_lpc_opal_client,
+		lpc_register_client(chip_id, &uart_lpc_opal_client, "lpc-uart",
 				    IRQ_ATTR_TARGET_OPAL);
 		has_irq = true;
 	}

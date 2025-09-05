@@ -123,6 +123,12 @@ struct dt_node * add_core_common(struct dt_node *cpus,
 	if (proc_gen >= proc_gen_p9)
 		dt_add_property_cells(cpu, "ibm,processor-radix-AP-encodings",
 			0x0000000c, 0xa0000010, 0x20000015, 0x4000001e);
+	if (proc_gen >= proc_gen_p10) {
+		dt_add_property_cells(cpu, "ibm,mmu-pid-bits", 20);
+		dt_add_property_cells(cpu, "ibm,mmu-lpid-bits", 12);
+	}
+	if (lpar_per_core)
+		dt_add_property(cpu, "ibm,mmu-lpar-per-core", NULL, 0);
 
 	/* HPT segment page size encodings, common to all supported CPUs */
 	dt_add_property_cells(cpu, "ibm,segment-page-sizes",

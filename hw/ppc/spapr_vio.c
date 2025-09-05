@@ -27,8 +27,8 @@
 #include "hw/loader.h"
 #include "elf.h"
 #include "hw/sysbus.h"
-#include "sysemu/kvm.h"
-#include "sysemu/device_tree.h"
+#include "system/kvm.h"
+#include "system/device_tree.h"
 #include "kvm_ppc.h"
 #include "migration/vmstate.h"
 
@@ -50,7 +50,7 @@ static char *spapr_vio_get_dev_name(DeviceState *qdev)
     return g_strdup_printf("%s@%x", pc->dt_name, dev->reg);
 }
 
-static void spapr_vio_bus_class_init(ObjectClass *klass, void *data)
+static void spapr_vio_bus_class_init(ObjectClass *klass, const void *data)
 {
     BusClass *k = BUS_CLASS(klass);
 
@@ -599,7 +599,7 @@ SpaprVioBus *spapr_vio_bus_init(void)
     return bus;
 }
 
-static void spapr_vio_bridge_class_init(ObjectClass *klass, void *data)
+static void spapr_vio_bridge_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
@@ -631,11 +631,11 @@ const VMStateDescription vmstate_spapr_vio = {
     },
 };
 
-static void vio_spapr_device_class_init(ObjectClass *klass, void *data)
+static void vio_spapr_device_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *k = DEVICE_CLASS(klass);
     k->realize = spapr_vio_busdev_realize;
-    k->reset = spapr_vio_busdev_reset;
+    device_class_set_legacy_reset(k, spapr_vio_busdev_reset);
     k->bus_type = TYPE_SPAPR_VIO_BUS;
 }
 

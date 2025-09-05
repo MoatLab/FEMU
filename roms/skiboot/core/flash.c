@@ -363,23 +363,22 @@ static struct dt_node *flash_add_dt_node(struct flash *flash, int id)
 	flash_node = dt_new_addr(opal_node, "flash", id);
 	dt_add_property_strings(flash_node, "compatible", "ibm,opal-flash");
 	dt_add_property_cells(flash_node, "ibm,opal-id", id);
+	/*
+	 * linux kernel reads this as u64 and not address-cells and size-cells encoded
+	 * value.
+	 */
 	dt_add_property_u64(flash_node, "reg", flash->size);
 	dt_add_property_cells(flash_node, "ibm,flash-block-size",
 			flash->block_size);
 	if (flash->no_erase)
 		dt_add_property(flash_node, "no-erase", NULL, 0);
 
-	/* we fix to 32-bits */
-	dt_add_property_cells(flash_node, "#address-cells", 1);
-	dt_add_property_cells(flash_node, "#size-cells", 1);
-
 	/* Add partition container node */
 	partition_container_node = dt_new(flash_node, "partitions");
 	dt_add_property_strings(partition_container_node, "compatible", "fixed-partitions");
 
-	/* we fix to 32-bits */
-	dt_add_property_cells(partition_container_node, "#address-cells", 1);
-	dt_add_property_cells(partition_container_node, "#size-cells", 1);
+	dt_add_property_cells(partition_container_node, "#address-cells", 2);
+	dt_add_property_cells(partition_container_node, "#size-cells", 2);
 
 	/* Add partitions */
 	for (i = 0, name = NULL; i < ARRAY_SIZE(part_name_map); i++) {
@@ -408,7 +407,12 @@ static struct dt_node *flash_add_dt_node(struct flash *flash, int id)
 
 		partition_node = dt_new_addr(partition_container_node, "partition", ffs_part_start);
 		dt_add_property_strings(partition_node, "label", name);
-		dt_add_property_cells(partition_node, "reg", ffs_part_start, ffs_part_size);
+		/*
+		 * flash API supports only 32 bit offset and size. So encode
+		 * the high bits as zero.
+		 */
+		dt_add_property_u64s(partition_node, "reg", ffs_part_start, ffs_part_size);
+
 		if (part_name_map[i].id != RESOURCE_ID_KERNEL_FW) {
 			/* Mark all partitions other than the full PNOR and the boot kernel
 			 * firmware as read only.  These two partitions are the only partitions
@@ -420,7 +424,11 @@ static struct dt_node *flash_add_dt_node(struct flash *flash, int id)
 
 	partition_node = dt_new_addr(partition_container_node, "partition", 0);
 	dt_add_property_strings(partition_node, "label", "PNOR");
-	dt_add_property_cells(partition_node, "reg", 0, flash->size);
+	/*
+	 * we can find larger size here due to support for more than 4G
+	 * mambo bogus disk. So encode them correctly.
+	 */
+	dt_add_property_u64s(partition_node, "reg", 0, flash->size);
 
 	return flash_node;
 }

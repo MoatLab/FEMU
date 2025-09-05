@@ -8,8 +8,8 @@
 #include "qemu/osdep.h"
 #include "qemu/units.h"
 #include "qapi/error.h"
-#include "sysemu/sysemu.h"
-#include "sysemu/block-backend.h"
+#include "system/system.h"
+#include "system/block-backend.h"
 #include "hw/boards.h"
 #include "hw/qdev-clock.h"
 #include "hw/arm/aspeed_soc.h"
@@ -77,6 +77,7 @@ static void fby35_bmc_init(Fby35State *s)
 
     memory_region_init(&s->bmc_memory, OBJECT(&s->bmc), "bmc-memory",
                        UINT64_MAX);
+    memory_region_add_subregion(get_system_memory(), 0, &s->bmc_memory);
     memory_region_init_ram(&s->bmc_dram, OBJECT(&s->bmc), "bmc-dram",
                            FBY35_BMC_RAM_SIZE, &error_abort);
 
@@ -162,7 +163,7 @@ static void fby35_instance_init(Object *obj)
     FBY35(obj)->mmio_exec = false;
 }
 
-static void fby35_class_init(ObjectClass *oc, void *data)
+static void fby35_class_init(ObjectClass *oc, const void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
 
@@ -170,6 +171,7 @@ static void fby35_class_init(ObjectClass *oc, void *data)
     mc->init = fby35_init;
     mc->no_floppy = 1;
     mc->no_cdrom = 1;
+    mc->auto_create_sdcard = true;
     mc->min_cpus = mc->max_cpus = mc->default_cpus = 3;
 
     object_class_property_add_bool(oc, "execute-in-place",

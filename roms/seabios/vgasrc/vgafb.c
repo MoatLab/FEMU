@@ -98,7 +98,7 @@ gfx_planar(struct gfx_op *op)
 static void
 gfx_cga(struct gfx_op *op)
 {
-    int bpp = GET_GLOBAL(op->vmode_g->depth);
+    int bpp = GET_GLOBAL(op->curmode_g->depth);
     void *dest_far = (void*)(op->y / 2 * op->linelength + op->x / 8 * bpp);
     switch (op->op) {
     default:
@@ -270,7 +270,7 @@ gfx_direct(struct gfx_op *op)
     void *fb = (void*)GET_GLOBAL(VBE_framebuffer);
     if (!fb)
         return;
-    int depth = GET_GLOBAL(op->vmode_g->depth);
+    int depth = GET_GLOBAL(op->curmode_g->depth);
     int bypp = DIV_ROUND_UP(depth, 8);
     void *dest_far = (fb + op->displaystart + op->y * op->linelength
                       + op->x * bypp);
@@ -314,19 +314,19 @@ gfx_direct(struct gfx_op *op)
 
 // Prepare a struct gfx_op for use.
 void
-init_gfx_op(struct gfx_op *op, struct vgamode_s *vmode_g)
+init_gfx_op(struct gfx_op *op, struct vgamode_s *curmode_g)
 {
     memset(op, 0, sizeof(*op));
-    op->vmode_g = vmode_g;
-    op->linelength = vgahw_get_linelength(vmode_g);
-    op->displaystart = vgahw_get_displaystart(vmode_g);
+    op->curmode_g = curmode_g;
+    op->linelength = vgahw_get_linelength(curmode_g);
+    op->displaystart = vgahw_get_displaystart(curmode_g);
 }
 
 // Issue a graphics operation.
 void
 handle_gfx_op(struct gfx_op *op)
 {
-    switch (GET_GLOBAL(op->vmode_g->memmodel)) {
+    switch (GET_GLOBAL(op->curmode_g->memmodel)) {
     case MM_PLANAR:
         gfx_planar(op);
         break;
@@ -346,11 +346,11 @@ handle_gfx_op(struct gfx_op *op)
 
 // Move characters when in graphics mode.
 static void
-gfx_move_chars(struct vgamode_s *vmode_g, struct cursorpos dest
+gfx_move_chars(struct vgamode_s *curmode_g, struct cursorpos dest
                , struct cursorpos movesize, int lines)
 {
     struct gfx_op op;
-    init_gfx_op(&op, vmode_g);
+    init_gfx_op(&op, curmode_g);
     op.x = dest.x * 8;
     op.xlen = movesize.x * 8;
     int cheight = GET_BDA(char_height);
@@ -363,11 +363,11 @@ gfx_move_chars(struct vgamode_s *vmode_g, struct cursorpos dest
 
 // Clear area of screen in graphics mode.
 static void
-gfx_clear_chars(struct vgamode_s *vmode_g, struct cursorpos win
+gfx_clear_chars(struct vgamode_s *curmode_g, struct cursorpos win
                 , struct cursorpos winsize, struct carattr ca)
 {
     struct gfx_op op;
-    init_gfx_op(&op, vmode_g);
+    init_gfx_op(&op, curmode_g);
     op.x = win.x * 8;
     op.xlen = winsize.x * 8;
     int cheight = GET_BDA(char_height);
@@ -398,7 +398,7 @@ get_font_data(u8 c)
 
 // Write a character to the screen in graphics mode.
 static void
-gfx_write_char(struct vgamode_s *vmode_g
+gfx_write_char(struct vgamode_s *curmode_g
                 , struct cursorpos cp, struct carattr ca)
 {
     if (cp.x >= GET_BDA(video_cols))
@@ -406,7 +406,7 @@ gfx_write_char(struct vgamode_s *vmode_g
 
     struct segoff_s font = get_font_data(ca.car);
     struct gfx_op op;
-    init_gfx_op(&op, vmode_g);
+    init_gfx_op(&op, curmode_g);
     op.x = cp.x * 8;
     int cheight = GET_BDA(char_height);
     op.y = cp.y * cheight;
@@ -425,7 +425,7 @@ gfx_write_char(struct vgamode_s *vmode_g
             bgattr = op.pixels[7];
             fgattr = bgattr ^ 0x7;
         }
-    } else if (fgattr & 0x80 && GET_GLOBAL(vmode_g->depth) < 8) {
+    } else if (fgattr & 0x80 && GET_GLOBAL(curmode_g->depth) < 8) {
         usexor = 1;
         fgattr &= 0x7f;
     }
@@ -450,7 +450,7 @@ gfx_write_char(struct vgamode_s *vmode_g
 
 // Read a character from the screen in graphics mode.
 static struct carattr
-gfx_read_char(struct vgamode_s *vmode_g, struct cursorpos cp)
+gfx_read_char(struct vgamode_s *curmode_g, struct cursorpos cp)
 {
     u8 lines[16];
     int cheight = GET_BDA(char_height);
@@ -459,7 +459,7 @@ gfx_read_char(struct vgamode_s *vmode_g, struct cursorpos cp)
 
     // Read cell from screen
     struct gfx_op op;
-    init_gfx_op(&op, vmode_g);
+    init_gfx_op(&op, curmode_g);
     op.op = GO_READ8;
     op.x = cp.x * 8;
     op.y = cp.y * cheight;
@@ -502,18 +502,18 @@ fail:
 void
 vgafb_write_pixel(u8 color, u16 x, u16 y)
 {
-    struct vgamode_s *vmode_g = get_current_mode();
-    if (!vmode_g)
+    struct vgamode_s *curmode_g = get_current_mode();
+    if (!curmode_g)
         return;
 
     struct gfx_op op;
-    init_gfx_op(&op, vmode_g);
+    init_gfx_op(&op, curmode_g);
     op.x = ALIGN_DOWN(x, 8);
     op.y = y;
     op.op = GO_READ8;
     handle_gfx_op(&op);
 
-    int usexor = color & 0x80 && GET_GLOBAL(vmode_g->depth) < 8;
+    int usexor = color & 0x80 && GET_GLOBAL(curmode_g->depth) < 8;
     if (usexor)
         op.pixels[x & 0x07] ^= color & 0x7f;
     else
@@ -526,12 +526,12 @@ vgafb_write_pixel(u8 color, u16 x, u16 y)
 u8
 vgafb_read_pixel(u16 x, u16 y)
 {
-    struct vgamode_s *vmode_g = get_current_mode();
-    if (!vmode_g)
+    struct vgamode_s *curmode_g = get_current_mode();
+    if (!curmode_g)
         return 0;
 
     struct gfx_op op;
-    init_gfx_op(&op, vmode_g);
+    init_gfx_op(&op, curmode_g);
     op.x = ALIGN_DOWN(x, 8);
     op.y = y;
     op.op = GO_READ8;
@@ -558,18 +558,18 @@ text_address(struct cursorpos cp)
 static void
 vgafb_move_chars(struct cursorpos dest, struct cursorpos movesize, int lines)
 {
-    struct vgamode_s *vmode_g = get_current_mode();
-    if (!vmode_g)
+    struct vgamode_s *curmode_g = get_current_mode();
+    if (!curmode_g)
         return;
 
-    if (GET_GLOBAL(vmode_g->memmodel) != MM_TEXT) {
-        gfx_move_chars(vmode_g, dest, movesize, lines);
+    if (GET_GLOBAL(curmode_g->memmodel) != MM_TEXT) {
+        gfx_move_chars(curmode_g, dest, movesize, lines);
         return;
     }
 
     int stride = GET_BDA(video_cols) * 2;
     void *dest_addr = text_address(dest), *src_addr = dest_addr + lines * stride;
-    memmove_stride(GET_GLOBAL(vmode_g->sstart), dest_addr, src_addr
+    memmove_stride(GET_GLOBAL(curmode_g->sstart), dest_addr, src_addr
                    , movesize.x * 2, stride, movesize.y);
 }
 
@@ -578,18 +578,18 @@ static void
 vgafb_clear_chars(struct cursorpos win, struct cursorpos winsize
                   , struct carattr ca)
 {
-    struct vgamode_s *vmode_g = get_current_mode();
-    if (!vmode_g)
+    struct vgamode_s *curmode_g = get_current_mode();
+    if (!curmode_g)
         return;
 
-    if (GET_GLOBAL(vmode_g->memmodel) != MM_TEXT) {
-        gfx_clear_chars(vmode_g, win, winsize, ca);
+    if (GET_GLOBAL(curmode_g->memmodel) != MM_TEXT) {
+        gfx_clear_chars(curmode_g, win, winsize, ca);
         return;
     }
 
     int stride = GET_BDA(video_cols) * 2;
     u16 attr = ((ca.use_attr ? ca.attr : 0x07) << 8) | ca.car;
-    memset16_stride(GET_GLOBAL(vmode_g->sstart), text_address(win), attr
+    memset16_stride(GET_GLOBAL(curmode_g->sstart), text_address(win), attr
                     , winsize.x * 2, stride, winsize.y);
 }
 
@@ -625,21 +625,21 @@ vgafb_scroll(struct cursorpos win, struct cursorpos winsize
 void
 vgafb_write_char(struct cursorpos cp, struct carattr ca)
 {
-    struct vgamode_s *vmode_g = get_current_mode();
-    if (!vmode_g)
+    struct vgamode_s *curmode_g = get_current_mode();
+    if (!curmode_g)
         return;
 
-    if (GET_GLOBAL(vmode_g->memmodel) != MM_TEXT) {
-        gfx_write_char(vmode_g, cp, ca);
+    if (GET_GLOBAL(curmode_g->memmodel) != MM_TEXT) {
+        gfx_write_char(curmode_g, cp, ca);
         return;
     }
 
     void *dest_far = text_address(cp);
     if (ca.use_attr) {
         u16 dummy = (ca.attr << 8) | ca.car;
-        SET_FARVAR(GET_GLOBAL(vmode_g->sstart), *(u16*)dest_far, dummy);
+        SET_FARVAR(GET_GLOBAL(curmode_g->sstart), *(u16*)dest_far, dummy);
     } else {
-        SET_FARVAR(GET_GLOBAL(vmode_g->sstart), *(u8*)dest_far, ca.car);
+        SET_FARVAR(GET_GLOBAL(curmode_g->sstart), *(u8*)dest_far, ca.car);
     }
 }
 
@@ -647,14 +647,14 @@ vgafb_write_char(struct cursorpos cp, struct carattr ca)
 struct carattr
 vgafb_read_char(struct cursorpos cp)
 {
-    struct vgamode_s *vmode_g = get_current_mode();
-    if (!vmode_g)
+    struct vgamode_s *curmode_g = get_current_mode();
+    if (!curmode_g)
         return (struct carattr){0, 0, 0};
 
-    if (GET_GLOBAL(vmode_g->memmodel) != MM_TEXT)
-        return gfx_read_char(vmode_g, cp);
+    if (GET_GLOBAL(curmode_g->memmodel) != MM_TEXT)
+        return gfx_read_char(curmode_g, cp);
 
     u16 *dest_far = text_address(cp);
-    u16 v = GET_FARVAR(GET_GLOBAL(vmode_g->sstart), *dest_far);
+    u16 v = GET_FARVAR(GET_GLOBAL(curmode_g->sstart), *dest_far);
     return (struct carattr){v, v>>8, 0};
 }

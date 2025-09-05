@@ -17,8 +17,8 @@ kernel and three interfaces for user interaction, device initialization
 and client (operating system) control.
 
 While far not all possible applications of OpenBIOS are implemented yet,
-a lot of functionality is already there. OpenBIOS can be used to enhance
-LinuxBIOS (http://www.linuxbios.org), or be booted from any multiboot
+a lot of functionality is already there. OpenBIOS can be used as a payload
+for coreboot (http://www.coreboot.org), or be booted from any multiboot
 capable bootloader to bring Open Firmware to your machine. OpenBIOS can
 also be used when an operating system is already running. It provides
 the needed OpenFirmware functionality to MOL (MacOnLinux) to boot MacOS

@@ -19,7 +19,7 @@ static LIST_HEAD(static_list);
 
 #define ref(obj, counter) ((counter)++, (obj))
 
-int main(int argc, char *argv[])
+int main(void)
 {
 	struct parent parent;
 	struct child c1, c2, c3, *c, *n;
@@ -27,9 +27,6 @@ int main(int argc, char *argv[])
 	unsigned int static_count = 0, parent_count = 0, list_count = 0,
 		node_count = 0;
 	struct list_head list = LIST_HEAD_INIT(list);
-
-	(void)argc;
-	(void)argv;
 
 	plan_tests(74);
 	/* Test LIST_HEAD, LIST_HEAD_INIT, list_empty and check_list */

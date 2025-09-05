@@ -28,12 +28,12 @@
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "qemu/error-report.h"
-#include "sysemu/sysemu.h"
-#include "sysemu/device_tree.h"
-#include "sysemu/cpus.h"
-#include "sysemu/hw_accel.h"
-#include "sysemu/runstate.h"
-#include "sysemu/qtest.h"
+#include "system/system.h"
+#include "system/device_tree.h"
+#include "system/cpus.h"
+#include "system/hw_accel.h"
+#include "system/runstate.h"
+#include "system/qtest.h"
 #include "kvm_ppc.h"
 
 #include "hw/ppc/spapr.h"
@@ -110,7 +110,8 @@ static void rtas_query_cpu_stopped_state(PowerPCCPU *cpu_,
     id = rtas_ld(args, 0);
     cpu = spapr_find_cpu(id);
     if (cpu != NULL) {
-        if (CPU(cpu)->halted) {
+        CPUPPCState *env = &cpu->env;
+        if (env->quiesced) {
             rtas_st(rets, 1, 0);
         } else {
             rtas_st(rets, 1, 2);
@@ -215,6 +216,8 @@ static void rtas_stop_self(PowerPCCPU *cpu, SpaprMachineState *spapr,
      * For the same reason, set PSSCR_EC.
      */
     env->spr[SPR_PSSCR] |= PSSCR_EC;
+    env->quiesced = true; /* set "RTAS stopped" state. */
+    ppc_maybe_interrupt(env);
     cs->halted = 1;
     ppc_store_lpcr(cpu, env->spr[SPR_LPCR] & ~pcc->lpcr_pm);
     kvmppc_set_reg_ppc_online(cpu, 0);
@@ -565,7 +568,6 @@ static bool spapr_qtest_callback(CharBackend *chr, gchar **words)
         g_assert(rc == 0);
         res = qtest_rtas_call(words[1], nargs, args, nret, ret);
 
-        qtest_send_prefix(chr);
         qtest_sendf(chr, "OK %"PRIu64"\n", res);
 
         return true;

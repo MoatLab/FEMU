@@ -11,6 +11,9 @@
 #include <openssl/ec.h>
 #include <openssl/ecdsa.h>
 #include <openssl/evp.h>
+#if OPENSSL_VERSION_NUMBER >= 0x30000000
+#include <openssl/core_names.h>
+#endif
 #include <openssl/opensslv.h>
 #include <openssl/ossl_typ.h>
 #include <openssl/pem.h>
@@ -45,7 +48,7 @@ void usage(int status);
 void getPublicKeyRaw(ecc_key_t *pubkeyraw, char *filename)
 {
 	EVP_PKEY* pkey;
-	unsigned char pubkeyData[1 + 2 * EC_COORDBYTES];
+	unsigned char pubkeyData[1 + 2 * EC_COORDBYTES] = {0};
 
 	FILE *fp = fopen(filename, "r");
 	if (!fp)
@@ -64,6 +67,10 @@ void getPublicKeyRaw(ecc_key_t *pubkeyraw, char *filename)
 	}
 
 	if (pkey) {
+#if OPENSSL_VERSION_NUMBER >= 0x30000000
+		size_t sz;
+		EVP_PKEY_get_octet_string_param(pkey, OSSL_PKEY_PARAM_ENCODED_PUBLIC_KEY, pubkeyData, sizeof(pubkeyData), &sz);
+#else
 		EC_KEY *key;
 		const EC_GROUP *ecgrp;
 		const EC_POINT *ecpoint;
@@ -87,6 +94,7 @@ void getPublicKeyRaw(ecc_key_t *pubkeyraw, char *filename)
 
 		BN_free(pubkeyBN);
 		EC_KEY_free(key);
+#endif
 		EVP_PKEY_free(pkey);
 	}
 	else {

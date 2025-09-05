@@ -390,6 +390,16 @@ cpu_g4_init(const struct cpudef *cpu)
 /* In order to get 64 bit aware handlers that rescue all our
    GPRs from getting truncated to 32 bits, we need to patch the
    existing handlers so they jump to our 64 bit aware ones. */
+
+/*
+ * Disable -Warray-bounds for ppc64_patch_handlers() because accesses
+ * to low memory locations via constant pointers triggers a warning
+ * in gcc 12 (see https://gcc.gnu.org/bugzilla/show_bug.cgi?id=105523)
+ */
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Warray-bounds"
+
 static void
 ppc64_patch_handlers(void)
 {
@@ -406,6 +416,8 @@ ppc64_patch_handlers(void)
     asm ("icbi 0, %0" : : "r"(dsi));
     asm ("icbi 0, %0" : : "r"(isi));
 }
+
+#pragma GCC diagnostic pop
 #endif
 
 static void

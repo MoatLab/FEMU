@@ -11,6 +11,7 @@ This work is licensed under the terms of the GNU GPL, version 2.
 See the COPYING file in the top-level directory.
 """
 
+from dataclasses import dataclass
 from typing import (
     Any,
     Dict,
@@ -26,7 +27,9 @@ from .common import c_name, mcgen
 from .gen import QAPISchemaMonolithicCVisitor
 from .schema import (
     QAPISchema,
+    QAPISchemaAlternatives,
     QAPISchemaArrayType,
+    QAPISchemaBranches,
     QAPISchemaBuiltinType,
     QAPISchemaEntity,
     QAPISchemaEnumMember,
@@ -36,7 +39,6 @@ from .schema import (
     QAPISchemaObjectTypeMember,
     QAPISchemaType,
     QAPISchemaVariant,
-    QAPISchemaVariants,
 )
 from .source import QAPISourceInfo
 
@@ -78,19 +80,16 @@ SchemaInfoCommand = Dict[str, object]
 _ValueT = TypeVar('_ValueT', bound=_Value)
 
 
+@dataclass
 class Annotated(Generic[_ValueT]):
     """
     Annotated generally contains a SchemaInfo-like type (as a dict),
     But it also used to wrap comments/ifconds around scalar leaf values,
     for the benefit of features and enums.
     """
-    # TODO: Remove after Python 3.7 adds @dataclass:
-    # pylint: disable=too-few-public-methods
-    def __init__(self, value: _ValueT, ifcond: QAPISchemaIfCond,
-                 comment: Optional[str] = None):
-        self.value = value
-        self.comment: Optional[str] = comment
-        self.ifcond = ifcond
+    value: _ValueT
+    ifcond: QAPISchemaIfCond
+    comment: Optional[str] = None
 
 
 def _tree_to_qlit(obj: JSONValue,
@@ -196,7 +195,7 @@ class QAPISchemaGenIntrospectVisitor(QAPISchemaMonolithicCVisitor):
         # generate C
         name = c_name(self._prefix, protect=False) + 'qmp_schema_qlit'
         self._genh.add(mcgen('''
-#include "qapi/qmp/qlit.h"
+#include "qobject/qlit.h"
 
 extern const QLitObject %(c_name)s;
 ''',
@@ -227,10 +226,14 @@ const QLitObject %(c_name)s = %(c_string)s;
 
         # Map the various integer types to plain int
         if typ.json_type() == 'int':
-            typ = self._schema.lookup_type('int')
+            type_int = self._schema.lookup_type('int')
+            assert type_int
+            typ = type_int
         elif (isinstance(typ, QAPISchemaArrayType) and
               typ.element_type.json_type() == 'int'):
-            typ = self._schema.lookup_type('intList')
+            type_intlist = self._schema.lookup_type('intList')
+            assert type_intlist
+            typ = type_intlist
         # Add type to work queue if new
         if typ not in self._used_types:
             self._used_types.append(typ)
@@ -331,24 +334,24 @@ const QLitObject %(c_name)s = %(c_string)s;
                                ifcond: QAPISchemaIfCond,
                                features: List[QAPISchemaFeature],
                                members: List[QAPISchemaObjectTypeMember],
-                               variants: Optional[QAPISchemaVariants]) -> None:
+                               branches: Optional[QAPISchemaBranches]) -> None:
         obj: SchemaInfoObject = {
             'members': [self._gen_object_member(m) for m in members]
         }
-        if variants:
-            obj['tag'] = variants.tag_member.name
-            obj['variants'] = [self._gen_variant(v) for v in variants.variants]
+        if branches:
+            obj['tag'] = branches.tag_member.name
+            obj['variants'] = [self._gen_variant(v) for v in branches.variants]
         self._gen_tree(name, 'object', obj, ifcond, features)
 
     def visit_alternate_type(self, name: str, info: Optional[QAPISourceInfo],
                              ifcond: QAPISchemaIfCond,
                              features: List[QAPISchemaFeature],
-                             variants: QAPISchemaVariants) -> None:
+                             alternatives: QAPISchemaAlternatives) -> None:
         self._gen_tree(
             name, 'alternate',
             {'members': [Annotated({'type': self._use_type(m.type)},
                                    m.ifcond)
-                         for m in variants.variants]},
+                         for m in alternatives.variants]},
             ifcond, features
         )
 

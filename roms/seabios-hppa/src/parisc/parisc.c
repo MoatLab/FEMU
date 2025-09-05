@@ -61,6 +61,7 @@ char cpu_bit_width;
 #endif
 
 #define is_64bit_CPU()     (cpu_bit_width == 64)  /* 64-bit CPU? */
+#define pat_disabled()     1    // !is_64bit_PDC()
 
 /* running 64-bit PDC, but called from 32-bit app */
 #define is_compat_mode()  (is_64bit_PDC() && ((psw_defaults & PDC_PSW_WIDE_BIT) == 0))
@@ -164,6 +165,7 @@ extern char pdc_entry_table_end;
 extern char iodc_entry[512];
 extern char iodc_entry_table;
 extern char iodc_entry_table_one_entry;
+extern long sr_hashing_enabled(void);
 
 /* args as handed over for firmware calls */
 #define ARG0 arg[7-0]
@@ -192,6 +194,12 @@ static int index_of_CPU_HPA(unsigned long hpa) {
 }
 
 static unsigned long GoldenMemory = MIN_RAM_SIZE;
+static unsigned long ram_size_low;
+#if defined(__LP64__)
+static unsigned long ram_size_high = 0;
+#else
+#define ram_size_high   0   /* Memory limited to < 4GB with 32-bit firmware */
+#endif
 
 static unsigned int chassis_code = 0;
 
@@ -443,14 +451,16 @@ int HPA_is_astro_ioport(unsigned long hpa)
 {
     if (!has_astro)
         return 0;
-    return ((hpa - IOS_DIST_BASE_ADDR) < IOS_DIST_BASE_SIZE);
+    return ((F_EXTEND(hpa) - F_EXTEND(IOS_DIST_BASE_ADDR))
+            < IOS_DIST_BASE_SIZE);
 }
 
 int HPA_is_astro_mmio(unsigned long hpa)
 {
     if (!has_astro)
         return 0;
-    return ((hpa - LMMIO_DIST_BASE_ADDR) < LMMIO_DIST_BASE_SIZE);
+    return (F_EXTEND(hpa) - F_EXTEND(LMMIO_DIST_BASE_ADDR))
+            < (IOS_DIST_BASE_ADDR - LMMIO_DIST_BASE_SIZE);
 }
 
 struct pci_device *find_pci_from_HPA(unsigned long hpa)
@@ -467,10 +477,10 @@ struct pci_device *find_pci_from_HPA(unsigned long hpa)
         return NULL;
 
     foreachpci(pci) {
+        unsigned long mem;
         int i;
         for (i = 0; i < 6; i++) {
             unsigned long addr = PCI_BASE_ADDRESS_0 + 4*i;
-            unsigned long mem;
             mem = pci_config_readl(pci->bdf, addr);
             if ((mem & PCI_BASE_ADDRESS_SPACE_IO) &&
                 ((mem & PCI_BASE_ADDRESS_IO_MASK) == hpa) &&
@@ -481,6 +491,11 @@ struct pci_device *find_pci_from_HPA(unsigned long hpa)
                 (ioport == 0))
                     return pci;     /* found memaddr */
         }
+        mem = pci_config_readl(pci->bdf, PCI_ROM_ADDRESS) & PCI_ROM_ADDRESS_MASK;
+        mem = F_EXTEND(mem);
+        // dprintf(1, "PCI ROM INFO for HPA %lx  mem %lx\n", hpa, mem);
+        if (hpa >= mem && hpa < (mem + 4 * PAGE_SIZE))
+            return pci; /* found ROM */
     }
     dprintf(1, "No PCI device found for HPA %lx\n", hpa);
     return NULL;
@@ -498,7 +513,8 @@ int DEV_is_serial_device(hppa_device_t *dev)
 {
     BUG_ON(!dev);
     if (dev->pci)
-        return (dev->pci->class == PCI_CLASS_COMMUNICATION_SERIAL);
+        return (dev->pci->class == PCI_CLASS_COMMUNICATION_SERIAL ||
+                dev->pci->class == PCI_CLASS_COMMUNICATION_MULTISERIAL);
     return ((dev->iodc->type & 0xf) == 0x0a); /* HPHW_FIO */
 }
 
@@ -1116,12 +1132,7 @@ void iodc_log_call(unsigned int *arg, const char *func)
     }
 }
 
-#define FUNC_MANY_ARGS , \
-    int a0, int a1, int a2, int a3,  int a4,  int a5,  int a6, \
-    int a7, int a8, int a9, int a10, int a11, int a12
-
-
-int __VISIBLE parisc_iodc_ENTRY_IO(unsigned int *arg FUNC_MANY_ARGS)
+int __VISIBLE parisc_iodc_ENTRY_IO(unsigned int *arg)
 {
     unsigned long hpa = COMPAT_VAL(ARG0);
     unsigned long option = ARG1;
@@ -1172,9 +1183,10 @@ int __VISIBLE parisc_iodc_ENTRY_IO(unsigned int *arg FUNC_MANY_ARGS)
         switch (option) {
             case ENTRY_IO_BOOTIN: /* boot medium IN */
             case ENTRY_IO_BBLOCK_IN: /* boot block medium IN */
+            case ENTRY_IO_BOOTOUT:
                 disk_op.drive_fl = boot_drive;
                 disk_op.buf_fl = (void*)ARG6;
-                disk_op.command = CMD_READ;
+                disk_op.command = option == ENTRY_IO_BOOTOUT ? CMD_WRITE : CMD_READ;
 
                 // Make sure we know how many bytes we can read at once!
                 // NOTE: LSI SCSI can not read more than 8191 blocks, esp only 64k
@@ -1236,7 +1248,7 @@ int __VISIBLE parisc_iodc_ENTRY_IO(unsigned int *arg FUNC_MANY_ARGS)
 }
 
 
-int __VISIBLE parisc_iodc_ENTRY_INIT(unsigned int *arg FUNC_MANY_ARGS)
+int __VISIBLE parisc_iodc_ENTRY_INIT(unsigned int *arg)
 {
     unsigned long hpa = COMPAT_VAL(ARG0);
     unsigned long option = ARG1;
@@ -1280,20 +1292,20 @@ int __VISIBLE parisc_iodc_ENTRY_INIT(unsigned int *arg FUNC_MANY_ARGS)
     return PDC_BAD_OPTION;
 }
 
-int __VISIBLE parisc_iodc_ENTRY_SPA(unsigned int *arg FUNC_MANY_ARGS)
+int __VISIBLE parisc_iodc_ENTRY_SPA(unsigned int *arg)
 {
     iodc_log_call(arg, __FUNCTION__);
     return PDC_BAD_OPTION;
 }
 
-int __VISIBLE parisc_iodc_ENTRY_CONFIG(unsigned int *arg FUNC_MANY_ARGS)
+int __VISIBLE parisc_iodc_ENTRY_CONFIG(unsigned int *arg)
 {
     iodc_log_call(arg, __FUNCTION__);
     // BUG_ON(1);
     return PDC_BAD_OPTION;
 }
 
-int __VISIBLE parisc_iodc_ENTRY_TEST(unsigned int *arg FUNC_MANY_ARGS)
+int __VISIBLE parisc_iodc_ENTRY_TEST(unsigned int *arg)
 {
     unsigned long hpa = COMPAT_VAL(ARG0);
     unsigned long option = ARG1;
@@ -1323,7 +1335,7 @@ int __VISIBLE parisc_iodc_ENTRY_TEST(unsigned int *arg FUNC_MANY_ARGS)
     return PDC_BAD_OPTION;
 }
 
-int __VISIBLE parisc_iodc_ENTRY_TLB(unsigned int *arg FUNC_MANY_ARGS)
+int __VISIBLE parisc_iodc_ENTRY_TLB(unsigned int *arg)
 {
     unsigned long option = ARG1;
     unsigned int *result = (unsigned int *)ARG4;
@@ -1411,6 +1423,7 @@ static const char *pdc_name(unsigned long num)
         DO(PDC_PAT_CELL)
         DO(PDC_PAT_CHASSIS_LOG)
         DO(PDC_PAT_CPU)
+        DO(PDC_PAT_EVENT)
         DO(PDC_PAT_PD)
         DO(PDC_LINK)
 #undef DO
@@ -1501,11 +1514,14 @@ static int pdc_pim(unsigned long *arg)
     return PDC_BAD_OPTION;
 }
 
-static int pdc_model(unsigned long *arg)
+static int pdc_model(unsigned long *arg, unsigned long narrow_mode)
 {
     const char *model_str = current_machine->pdc_modelstr;
     unsigned long option = ARG1;
     unsigned long *result = (unsigned long *)ARG2;
+    unsigned int *result_narrow = (unsigned int *)ARG2;
+    unsigned long *source;
+    int i;
 
     switch (option) {
         case PDC_MODEL_INFO:
@@ -1514,10 +1530,21 @@ static int pdc_model(unsigned long *arg)
              * with old qemu versions which will try to run 64-bit instructions
              * kernel sr_disable_hash() function
              */
-            memset(result, 0, 32 * sizeof(unsigned long));
-            memcpy(result, (is_64bit_CPU()) ?
-                    &current_machine->pdc_model : &machine_B160L.pdc_model,
-			sizeof(current_machine->pdc_model));
+            source = is_64bit_CPU() ? &current_machine->pdc_model.hversion
+                                    : &machine_B160L.pdc_model.hversion;
+
+            /* make sure to only copy the necessary bytes. */
+            NO_COMPAT_RETURN_VALUE(ARG2);
+            for (i = 0; i < sizeof(machine_B160L.pdc_model)/sizeof(unsigned long); i++) {
+                if (is_64bit_PDC() && narrow_mode) {
+                    *result_narrow = *source;
+                    result_narrow++;
+                } else {
+                    *result = *source;
+                    result++;
+                }
+                source++;
+            }
             return PDC_OK;
         case PDC_MODEL_VERSIONS:
             switch (ARG3) {
@@ -1568,8 +1595,16 @@ static int pdc_model(unsigned long *arg)
             result[0] &= ~0x30; /* remove NVA bits, we have no issues with non-equiv. aliasing */
             return PDC_OK;
         case PDC_MODEL_GET_INSTALL_KERNEL:
-            // No need to provide a special install kernel during installation of HP-UX
-            return PDC_BAD_OPTION;
+            /* default to IPL standard kernel on 32-bit OS */
+            if (!is_64bit_PDC() || (enable_OS64 & PDC_MODEL_OS64) == 0)
+                return PDC_BAD_OPTION;
+            // dprintf(1, "Default install kernel from IPL is: %s\n", (char *)ARG3);
+            /* tell IPL to load 64-bit install kernel called "WINSTALL" */
+            if (ARG5 > 9)
+                ARG5 = 9;
+            strtcpy((char *)ARG4, "WINSTALL", ARG5);
+            result[0] = ARG5;
+            return PDC_OK;
         case PDC_MODEL_GET_PLATFORM_INFO:
             if (1)      /* not supported on B160L or C3700 */
                 return PDC_BAD_OPTION;
@@ -1628,9 +1663,18 @@ static int pdc_cache(unsigned long *arg)
 
             memcpy(result, machine_cache_info, sizeof(*machine_cache_info));
             return PDC_OK;
-        case PDC_CACHE_RET_SPID:	/* returns space-ID bits when sr-hasing is enabled */
-            memset(result, 0, 32 * sizeof(unsigned long));
-            result[0] = 0;
+        case PDC_CACHE_RET_SPID:
+            /*
+             * Return space-ID bits when space register hashing is enabled.
+             * The Linux kernel disables sr-hashing, while HP-UX 11 (64-bit) uses hashing.
+             * For details check the assembly in arch/parisc/kernel/pacache.S in the Linux kernel
+             * and read some analysis here:
+             * https://patchwork.ozlabs.org/project/qemu-devel/patch/20240324080945.991100-3-svens@stackframe.org/#3289160
+             */
+            if (sr_hashing_enabled() == 0)
+                result[0] = 0;
+            else /* when HPPA64_DIAG_SPHASH_ENABLE bit is set: */
+                result[0] = HPPA64_PDC_CACHE_RET_SPID_VAL << 16;
             return PDC_OK;
     }
     dprintf(0, "\n\nSeaBIOS: Unimplemented PDC_CACHE function %ld %lx %lx %lx %lx\n", ARG1, ARG2, ARG3, ARG4, ARG5);
@@ -1730,7 +1774,7 @@ static int pdc_iodc(unsigned long *arg)
         case PDC_IODC_DINIT:	/* destructive init */
             result[0] = 0; /* IO_STATUS */
             result[1] = 0; /* max_spa */
-            result[2] = ram_size; /* max memory */
+            result[2] = ram_size_low; /* max memory */
             result[3] = 0;
             return PDC_OK;
         case PDC_IODC_MEMERR:
@@ -1841,13 +1885,13 @@ static int pdc_add_valid(unsigned long *arg)
     unsigned long arg2 = is_compat_mode() ? COMPAT_VAL(ARG2) : ARG2;
 
     NO_COMPAT_RETURN_VALUE(ARG2);
-    // dprintf(0, "\n\nSeaBIOS: PDC_ADD_VALID function %ld arg2=%x called.\n", option, arg2);
+    // dprintf(0, "\n\nSeaBIOS: PDC_ADD_VALID function %ld arg2=%lx called.\n", option, arg2);
     if (option != 0)
         return PDC_BAD_OPTION;
     if (0 && arg2 == 0) // should PAGE0 be valid?  HP-UX asks for it, but maybe due a bug in our code...
         return 1;
     // if (arg2 < PAGE_SIZE) return PDC_ERROR;
-    if (arg2 < ram_size)
+    if (arg2 < ram_size_low)
         return PDC_OK;
     if (arg2 >= (unsigned long)_sti_rom_start &&
         arg2 <= (unsigned long)_sti_rom_end)
@@ -1857,6 +1901,8 @@ static int pdc_add_valid(unsigned long *arg)
     if (arg2 <= 0xffffffff)
         return PDC_OK;
     if (find_hpa_device(arg2))
+        return PDC_OK;
+    if (find_pci_from_HPA(arg2))
         return PDC_OK;
     dprintf(0, "\n\nSeaBIOS: FAILED!!!! PDC_ADD_VALID function %ld arg2=%lx called.\n", option, arg2);
     return PDC_REQ_ERR_0; /* Operation completed with a requestor bus error. */
@@ -1950,6 +1996,30 @@ static int pdc_mem(unsigned long *arg)
         case PDC_MEM_GET_MEMORY_SYSTEM_TABLES:
             /* not yet implemented for 64-bit */
             return PDC_BAD_PROC;
+#ifdef __LP64__
+        case PDC_MEM_TABLE:     /* old method on Sprockets, e.g. C3700 machine */
+        {
+            struct pdc_memory_table_raddr *raddr = (void *)ARG2;
+            struct pdc_memory_table *table = (void *)ARG3;
+            unsigned long entries = (unsigned long)ARG4;
+
+            if (entries < 1)
+                return PDC_INVALID_ARG;
+            raddr->entries_returned = 1;
+            raddr->entries_total = ram_size_high ? 2 : 1;
+            table->paddr = 0;
+            table->pages = ram_size_low / PAGE_SIZE; /* Length in 4K pages */
+            table->reserved = 0;
+            if (ram_size_high && entries > 1) {
+                raddr->entries_returned++;
+                table++;
+                table->paddr = RAM_MAP_HIGH;
+                table->pages = ram_size_high / PAGE_SIZE; /* Length in 4K pages */
+                table->reserved = 0;
+            }
+            return PDC_OK;
+        }
+#endif
     }
     dprintf(0, "\n\nSeaBIOS: Check PDC_MEM option %ld ARG3=%lx ARG4=%lx ARG5=%lx\n", option, ARG3, ARG4, ARG5);
     return PDC_BAD_PROC;
@@ -2167,13 +2237,15 @@ static void iosapic_table_setup(void)
         // if (!pci->irq) continue;
         BUG_ON(irt_table_entries >= MAX_IRT_TABLE_ENTRIES);
         irt_table_entries++;
-        dprintf(5, "IRT ENTRY #%d: bdf %02x\n", irt_table_entries, pci->bdf);
+        slot = pci->bdf >> 3;
+        dprintf(5, "IRT ENTRY #%d: bdf:%02x, slot:%d, irq:%d\n",
+                   irt_table_entries, pci->bdf, slot, pci->irq);
         /* write the 16 bytes */
         /* 1: entry_type, entry_length, interrupt_type, polarity_trigger */
         *p++ = 0x8b10000f;      // oder 0x8b10000d
         /* 2: src_bus_irq_devno, src_bus_id, src_seg_id, dest_iosapic_intin */
         /* irq_devno = (slot << 2) | (intr_pin-1); */
-        irq_devno = (slot++ << 2) | (pci->irq - 1);
+        irq_devno = (slot << 2) | (pci->irq - 1);
         bus_id = 0;
         *p++ = (irq_devno << 24) | (bus_id << 16) | (0 << 8) | (iosapic_intin << 0);
         *p++ = IOSAPIC_HPA >> 32;
@@ -2258,6 +2330,8 @@ static int pdc_pat_cell(unsigned long *arg)
             return PDC_OK;
         case PDC_PAT_CELL_GET_INFO:
             return PDC_BAD_OPTION; /* optional on single-cell machines */
+        case PDC_PAT_CELL_MODULE:
+            return PDC_BAD_OPTION;
         default:
             break;
     }
@@ -2293,26 +2367,50 @@ static int pdc_pat_cpu(unsigned long *arg)
     return PDC_BAD_OPTION;
 }
 
+static int pdc_pat_event(unsigned long *arg)
+{
+    unsigned long option = ARG1;
+    unsigned long *result = (unsigned long *)ARG2;
+
+    switch (option) {
+        case PDC_PAT_EVENT_GET_CAPS:
+            result[0] = result[1] = 0x0f;       /* XXX: review caps! */
+            return PDC_OK;
+        default:
+            break;
+    }
+    dprintf(0, "\n\nSeaBIOS: Unimplemented PDC_PAT_CPU OPTION %lu called with ARG2=%lx ARG3=%lx ARG4=%lx\n", option, ARG2, ARG3, ARG4);
+    return PDC_BAD_OPTION;
+}
+
 static int pdc_pat_pd(unsigned long *arg)
 {
     unsigned long option = ARG1;
     unsigned long *result = (unsigned long *)ARG2;
-    struct pdc_pat_pd_addr_map_entry *mem_table = (void *)ARG3;
+    struct pdc_pat_pd_addr_map_entry *dest = (void *)ARG3;
     unsigned long count = ARG4;
     unsigned long offset = ARG5;
+    static struct pdc_pat_pd_addr_map_entry mem_table[2] = {
+     { .entry_type = PAT_MEMORY_DESCRIPTOR, .memory_type = PAT_MEMTYPE_MEMORY,
+       .memory_usage = PAT_MEMUSE_GENERAL },
+     { .entry_type = PAT_MEMORY_DESCRIPTOR, .memory_type = PAT_MEMTYPE_MEMORY,
+       .memory_usage = PAT_MEMUSE_GENERAL },
+    };
+    unsigned long table_size = (ram_size_high ? 2:1) * sizeof(mem_table[0]);
 
     switch (option) {
         case PDC_PAT_PD_GET_ADDR_MAP:
-            if (count < sizeof(*mem_table) || offset != 0)
+            if (count > table_size)
+                count = table_size;
+            if (offset > count)
                 return PDC_INVALID_ARG;
-            memset(mem_table, 0, sizeof(*mem_table));
-            mem_table->entry_type = PAT_MEMORY_DESCRIPTOR;
-            mem_table->memory_type = PAT_MEMTYPE_MEMORY;
-            mem_table->memory_usage = PAT_MEMUSE_GENERAL; /* ?? */
-            mem_table->paddr = 0;  /* note: 64bit! */
-            mem_table->pages = ram_size / 4096; /* Length in 4K pages */
-            mem_table->cell_map = 0;
-            result[0] = sizeof(*mem_table);
+            mem_table[0].paddr = 0;
+            mem_table[0].pages = ram_size_low / PAGE_SIZE;
+            mem_table[1].paddr = RAM_MAP_HIGH;
+            mem_table[1].pages = ram_size_high / PAGE_SIZE;
+            count -= offset;
+            memcpy(dest, ((char *)&mem_table) + offset, count);
+            result[0] = count;
             return PDC_OK;
 
         case PDC_PAT_PD_GET_PDC_INTERF_REV:
@@ -2340,7 +2438,7 @@ static int pdc_pat_mem(unsigned long *arg)
 }
 
 
-int __VISIBLE parisc_pdc_entry(unsigned long *arg FUNC_MANY_ARGS)
+int __VISIBLE parisc_pdc_entry(unsigned long *arg, unsigned long narrow_mode)
 {
     unsigned long proc = ARG0;
     unsigned long option = ARG1;
@@ -2363,7 +2461,7 @@ int __VISIBLE parisc_pdc_entry(unsigned long *arg FUNC_MANY_ARGS)
             return pdc_pim(arg);
 
         case PDC_MODEL: /* model information */
-            return pdc_model(arg);
+            return pdc_model(arg, narrow_mode);
 
         case PDC_CACHE:
             return pdc_cache(arg);
@@ -2422,7 +2520,14 @@ int __VISIBLE parisc_pdc_entry(unsigned long *arg FUNC_MANY_ARGS)
                a chance to see the kernel panic */
             return PDC_OK;
 
-        case 26: // PDC_SCSI_PARMS is the architected firmware interface to replace the Hversion PDC_INITIATOR procedure.
+        case PDC_SCSI_PARMS: // is the architected firmware interface to replace the Hversion PDC_INITIATOR procedure.
+            return PDC_BAD_PROC;
+
+        case 73:
+            // Unknown PDC call, seems similiar to PDC_NVOLATILE:
+            // Unimplemented PDC proc UNKNOWN!(73) option 3 result=0 ARG3=0 ARG4=0 ARG5=0 ARG6=0 ARG7=dfb078
+            // Unimplemented PDC proc UNKNOWN!(73) option 2 result=c25780 ARG3=0 ARG4=0 ARG5=0 ARG6=0 ARG7=dfb078
+            // Called by HP-UX 11 64-bit on C3700 machine, which returns PDC_BAD_PROC
             return PDC_BAD_PROC;
 
 	case PDC_MEM_MAP:
@@ -2461,28 +2566,33 @@ int __VISIBLE parisc_pdc_entry(unsigned long *arg FUNC_MANY_ARGS)
 
         /* PDC PAT functions */
         case PDC_PAT_CELL:
-            if (firmware_width_locked)
+            if (pat_disabled())
                 return PDC_BAD_PROC;
             return pdc_pat_cell(arg);
 
         case PDC_PAT_CHASSIS_LOG:
-            if (firmware_width_locked)
+            if (pat_disabled())
                 return PDC_BAD_PROC;
             dprintf(0, "\n\nSeaBIOS: PDC_PAT_CHASSIS_LOG OPTION %lu called with ARG2=%lx ARG3=%lx ARG4=%lx\n", option, ARG2, ARG3, ARG4);
             return PDC_BAD_PROC;
 
         case PDC_PAT_CPU:
-            if (firmware_width_locked)
+            if (pat_disabled())
                 return PDC_BAD_PROC;
             return pdc_pat_cpu(arg);
 
+        case PDC_PAT_EVENT:
+            if (pat_disabled())
+                return PDC_BAD_PROC;
+            return pdc_pat_event(arg);
+
         case PDC_PAT_PD:
-            if (firmware_width_locked)
+            if (pat_disabled())
                 return PDC_BAD_PROC;
             return pdc_pat_pd(arg);
 
         case PDC_PAT_MEM:
-            if (firmware_width_locked)
+            if (pat_disabled())
                 return PDC_BAD_PROC;
             return pdc_pat_mem(arg);
     }
@@ -2900,7 +3010,8 @@ static void find_serial_pci_card(void)
 {
     struct pci_device *pci;
     hppa_device_t *pdev;
-    u32 pmem;
+    unsigned long pmem;
+    char mm_mapped;
 
     if (!has_astro)     /* use built-in LASI serial port for console */
         return;
@@ -2912,9 +3023,26 @@ static void find_serial_pci_card(void)
     dprintf(1, "PCI: Enabling %pP for primary SERIAL PORT\n", pci);
     pci_config_maskw(pci->bdf, PCI_COMMAND, 0,
                      PCI_COMMAND_IO | PCI_COMMAND_MEMORY);
-    pmem = pci_enable_iobar(pci, PCI_BASE_ADDRESS_0);
-    dprintf(1, "PCI: Enabling %pP for primary SERIAL PORT mem %x\n", pci, pmem);
-    pmem += IOS_DIST_BASE_ADDR;
+    /* prefer memory-mapped I/O. Required for GSP for 64-bit HP-UX 11 */
+    mm_mapped = 1;
+    pmem = 0;
+    if (!pmem && !(pci_config_readl(pci->bdf, PCI_BASE_ADDRESS_0) & PCI_BASE_ADDRESS_SPACE_IO)
+        && (pci_config_readl(pci->bdf, PCI_BASE_ADDRESS_0) & PCI_BASE_ADDRESS_MEM_MASK))
+        pmem = (uintptr_t) pci_enable_membar(pci, PCI_BASE_ADDRESS_0);
+    if (!pmem && !(pci_config_readl(pci->bdf, PCI_BASE_ADDRESS_1) & PCI_BASE_ADDRESS_SPACE_IO)
+        && (pci_config_readl(pci->bdf, PCI_BASE_ADDRESS_1) & PCI_BASE_ADDRESS_MEM_MASK))
+        pmem = (uintptr_t) pci_enable_membar(pci, PCI_BASE_ADDRESS_1);
+    if (!pmem) {
+        mm_mapped = 0;
+        if (pci_config_readl(pci->bdf, PCI_BASE_ADDRESS_0) & PCI_BASE_ADDRESS_SPACE_IO)
+            pmem = pci_enable_iobar(pci, PCI_BASE_ADDRESS_0);
+        else
+            pmem = pci_enable_iobar(pci, PCI_BASE_ADDRESS_1);
+    }
+    dprintf(1, "PCI: Enabling %pP for primary SERIAL PORT %s %lx\n",
+        pci, mm_mapped ? "mem":"i/o", pmem);
+    if (!mm_mapped)
+        pmem += IOS_DIST_BASE_ADDR;
 
     /* set serial port for console output and keyboard input */
     pdev = &hppa_pci_devices[0];
@@ -3050,8 +3178,13 @@ void __VISIBLE start_parisc_firmware(void)
         smp_cpus = HPPA_MAX_CPUS;
     num_online_cpus = smp_cpus;
 
-    if (ram_size >= FIRMWARE_START)
-        ram_size = FIRMWARE_START;
+    ram_size_low = ram_size;
+    if (ram_size_low >= FIRMWARE_START) {
+        ram_size_low = FIRMWARE_START;
+#if defined(__LP64__)
+        ram_size_high = ram_size - FIRMWARE_START;
+#endif
+    }
 
     /* Initialize malloc stack */
     malloc_preinit();
@@ -3179,9 +3312,13 @@ void __VISIBLE start_parisc_firmware(void)
     memcpy((void*)MEM_PDC_ENTRY, &pdc_entry_table, i);
     flush_data_cache((char*)MEM_PDC_ENTRY, i);
 
-    PAGE0->memc_cont = ram_size;
-    PAGE0->memc_phsize = ram_size;
-    PAGE0->memc_adsize = ram_size;
+    if (is_64bit_PDC()) {
+        /* HP-UX 11 checks RAM in rminit() from this address */
+        *(unsigned int *) 0x33c = ram_size_low >> 12; /* # of pages */
+    }
+    PAGE0->memc_cont = ram_size_low;
+    PAGE0->memc_phsize = ram_size_low;
+    PAGE0->memc_adsize = ram_size_low;
     PAGE0->mem_pdc_hi = (MEM_PDC_ENTRY + 0ULL) >> 32;
     PAGE0->mem_free = 0x6000; // min PAGE_SIZE
     PAGE0->mem_hpa = CPU_HPA; // HPA of boot-CPU
@@ -3202,8 +3339,8 @@ void __VISIBLE start_parisc_firmware(void)
         *powersw_ptr = 0x01; /* button not pressed, hw controlled. */
 
     /* PAGE0->imm_hpa - is set later (MEMORY_HPA) */
-    PAGE0->imm_spa_size = ram_size;
-    PAGE0->imm_max_mem = ram_size;
+    PAGE0->imm_spa_size = ram_size_low;
+    PAGE0->imm_max_mem = ram_size_low;
 
     /* initialize graphics (if available) */
     if (artist_present()) {

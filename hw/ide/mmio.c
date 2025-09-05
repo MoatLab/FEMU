@@ -27,7 +27,7 @@
 #include "hw/sysbus.h"
 #include "migration/vmstate.h"
 #include "qemu/module.h"
-#include "sysemu/dma.h"
+#include "system/dma.h"
 
 #include "hw/ide/mmio.h"
 #include "hw/qdev-properties.h"
@@ -141,17 +141,16 @@ static void mmio_ide_initfn(Object *obj)
     sysbus_init_irq(d, &s->irq);
 }
 
-static Property mmio_ide_properties[] = {
+static const Property mmio_ide_properties[] = {
     DEFINE_PROP_UINT32("shift", MMIOIDEState, shift, 0),
-    DEFINE_PROP_END_OF_LIST()
 };
 
-static void mmio_ide_class_init(ObjectClass *oc, void *data)
+static void mmio_ide_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
 
     dc->realize = mmio_ide_realizefn;
-    dc->reset = mmio_ide_reset;
+    device_class_set_legacy_reset(dc, mmio_ide_reset);
     device_class_set_props(dc, mmio_ide_properties);
     dc->vmsd = &vmstate_ide_mmio;
 }

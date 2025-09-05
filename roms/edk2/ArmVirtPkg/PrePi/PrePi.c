@@ -23,12 +23,6 @@
 #include "PrePi.h"
 
 VOID
-EFIAPI
-ProcessLibraryConstructorList (
-  VOID
-  );
-
-VOID
 PrePiMain (
   IN  UINTN   UefiMemoryBase,
   IN  UINTN   StacksBase,
@@ -115,8 +109,6 @@ CEntryPoint (
   UINT64  StartTimeStamp;
 
   if (PerformanceMeasurementEnabled ()) {
-    // Initialize the Timer Library to setup the Timer HW controller
-    TimerConstructor ();
     // We cannot call yet the PerformanceLib because the HOB List has not been initialized
     StartTimeStamp = GetPerformanceCounter ();
   } else {

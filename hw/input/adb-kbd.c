@@ -375,7 +375,7 @@ static void adb_kbd_initfn(Object *obj)
     d->devaddr = ADB_DEVID_KEYBOARD;
 }
 
-static void adb_kbd_class_init(ObjectClass *oc, void *data)
+static void adb_kbd_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
     ADBDeviceClass *adc = ADB_DEVICE_CLASS(oc);
@@ -387,7 +387,7 @@ static void adb_kbd_class_init(ObjectClass *oc, void *data)
 
     adc->devreq = adb_kbd_request;
     adc->devhasdata = adb_kbd_has_data;
-    dc->reset = adb_kbd_reset;
+    device_class_set_legacy_reset(dc, adb_kbd_reset);
     dc->vmsd = &vmstate_adb_kbd;
 }
 

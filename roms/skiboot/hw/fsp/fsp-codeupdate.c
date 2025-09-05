@@ -113,12 +113,14 @@ static void get_ipl_side(void)
 	iplp = dt_find_by_path(dt_root, "ipl-params/ipl-params");
 	if (iplp)
 		side = dt_prop_get_def(iplp, "cec-ipl-side", NULL);
-	prlog(PR_NOTICE, "CUPD: IPL SIDE = %s\n", side);
 
 	if (!side || !strcmp(side, "temp"))
 		ipl_side = FW_IPL_SIDE_TEMP;
 	else
 		ipl_side = FW_IPL_SIDE_PERM;
+
+	prlog(PR_NOTICE, "CUPD: IPL SIDE = %s\n",
+	      ipl_side == FW_IPL_SIDE_TEMP ? "temp" : "perm");
 }
 
 

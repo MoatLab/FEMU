@@ -12,7 +12,7 @@
 #include "qemu/sockets.h"
 #include "ui/input.h"
 #include "qom/object_interfaces.h"
-#include "sysemu/iothread.h"
+#include "system/iothread.h"
 #include "block/aio.h"
 
 #include <sys/ioctl.h>
@@ -412,7 +412,6 @@ err_read_event_bits:
 
 err_close:
     close(il->fd);
-    return;
 }
 
 static void input_linux_instance_finalize(Object *obj)
@@ -495,7 +494,7 @@ static void input_linux_instance_init(Object *obj)
 {
 }
 
-static void input_linux_class_init(ObjectClass *oc, void *data)
+static void input_linux_class_init(ObjectClass *oc, const void *data)
 {
     UserCreatableClass *ucc = USER_CREATABLE_CLASS(oc);
 
@@ -523,7 +522,7 @@ static const TypeInfo input_linux_info = {
     .instance_size = sizeof(InputLinux),
     .instance_init = input_linux_instance_init,
     .instance_finalize = input_linux_instance_finalize,
-    .interfaces = (InterfaceInfo[]) {
+    .interfaces = (const InterfaceInfo[]) {
         { TYPE_USER_CREATABLE },
         { }
     }

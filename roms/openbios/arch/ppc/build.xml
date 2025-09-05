@@ -146,7 +146,7 @@
 
  <executable name="openbios-briq.elf" target="target" condition="BRIQ">
   <rule>
-	$(call quiet-command,$(LD) -g -Ttext=0x01e01000 -Bstatic $^ $(shell $(CC) -print-libgcc-file-name) -o $@.nostrip --whole-archive $^,"  LINK  $(TARGET_DIR)$@")
+	$(call quiet-command,$(LD) -g -z noexecstack -Ttext=0x01e01000 -Bstatic $^ $(shell $(CC) -print-libgcc-file-name) -o $@.nostrip --whole-archive $^,"  LINK  $(TARGET_DIR)$@")
 	$(call quiet-command,$(NM) $@.nostrip | sort > $(ODIR)/openbios-briq.syms,"  GEN   $(TARGET_DIR)$@.syms")
 	$(call quiet-command,$(STRIP) $@.nostrip -o $@,"  STRIP $(TARGET_DIR)$@")</rule>
   <object source="start.S"/>
@@ -162,7 +162,7 @@
 
  <executable name="openbios-pearpc.elf" target="target" condition="PEARPC">
   <rule>
-	$(call quiet-command,$(LD) -g -Ttext=0x01e01000 -Bstatic $^ $(shell $(CC) -print-libgcc-file-name) -o $@.nostrip --whole-archive $^,"  LINK  $(TARGET_DIR)$@")
+	$(call quiet-command,$(LD) -g -z noexecstack -Ttext=0x01e01000 -Bstatic $^ $(shell $(CC) -print-libgcc-file-name) -o $@.nostrip --whole-archive $^,"  LINK  $(TARGET_DIR)$@")
 	$(call quiet-command,$(NM) $@.nostrip | sort > $(ODIR)/openbios-pearpc.syms,"  GEN   $(TARGET_DIR)$@.syms")
 	$(call quiet-command,$(STRIP) $@.nostrip -o $@,"  STRIP $(TARGET_DIR)$@")</rule>
   <object source="start.S"/>
@@ -178,7 +178,7 @@
 
  <executable name="openbios-qemu.elf" target="target" condition="QEMU">
   <rule>
-	$(call quiet-command,$(LD) --warn-common -N -T $(SRCDIR)/arch/$(ARCH)/qemu/ldscript -o $@.nostrip --whole-archive $^,"  LINK  $(TARGET_DIR)$@")
+	$(call quiet-command,$(LD) --warn-common -z noexecstack -N -T $(SRCDIR)/arch/$(ARCH)/qemu/ldscript -o $@.nostrip --whole-archive $^,"  LINK  $(TARGET_DIR)$@")
 	$(call quiet-command,$(NM) $@.nostrip | sort > $(ODIR)/openbios-qemu.syms,"  GEN   $(TARGET_DIR)$@.syms")
 	$(call quiet-command,$(STRIP) $@.nostrip -o $@,"  STRIP $(TARGET_DIR)$@")</rule>
   <object source="qemu/start.S"/>
@@ -197,7 +197,7 @@
 
  <executable name="openbios-mol.elf" target="target" condition="MOL">
   <rule>
-	$(call quiet-command,$(LD) -g -Ttext=0x01e01000 -Bstatic $^ $(shell $(CC) -print-libgcc-file-name) -o $@.nostrip --whole-archive $^,"  LINK  $(TARGET_DIR)$@")
+	$(call quiet-command,$(LD) -g -z noexecstack -Ttext=0x01e01000 -Bstatic $^ $(shell $(CC) -print-libgcc-file-name) -o $@.nostrip --whole-archive $^,"  LINK  $(TARGET_DIR)$@")
 	$(call quiet-command,$(NM) $@.nostrip | sort > $(ODIR)/openbios-mol.syms,"  GEN   $(TARGET_DIR)$@.syms")
 	$(call quiet-command,$(STRIP) $@.nostrip -o $@,"  STRIP $(TARGET_DIR)$@")</rule>
   <object source="start.S"/>

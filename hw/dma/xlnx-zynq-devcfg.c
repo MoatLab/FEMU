@@ -29,7 +29,7 @@
 #include "hw/irq.h"
 #include "migration/vmstate.h"
 #include "qemu/bitops.h"
-#include "sysemu/dma.h"
+#include "system/dma.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
 
@@ -380,11 +380,11 @@ static void xlnx_zynq_devcfg_init(Object *obj)
     sysbus_init_mmio(sbd, &s->iomem);
 }
 
-static void xlnx_zynq_devcfg_class_init(ObjectClass *klass, void *data)
+static void xlnx_zynq_devcfg_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    dc->reset = xlnx_zynq_devcfg_reset;
+    device_class_set_legacy_reset(dc, xlnx_zynq_devcfg_reset);
     dc->vmsd = &vmstate_xlnx_zynq_devcfg;
 }
 

@@ -9,7 +9,9 @@ LIBDIR := $(PREFIX)/lib
 INCDIR := $(PREFIX)/include/libflash
 
 ifneq ($(ARCH), ARCH_ARM)
+ifneq ($(ARCH), ARCH_AARCH64)
 CFLAGS += -m64
+endif
 endif
 CFLAGS += -Werror -Wall -g2 -ggdb -I. -fPIC
 

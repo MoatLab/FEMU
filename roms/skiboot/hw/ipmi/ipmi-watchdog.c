@@ -43,7 +43,6 @@ more frequently than necessary. */
 #define WDT_MARGIN		300
 
 static struct timer wdt_timer;
-static bool wdt_stopped;
 static bool wdt_ticking;
 
 /* Saved values from the last watchdog set action */
@@ -161,23 +160,6 @@ static void reset_wdt(struct timer *t __unused, void *data,
 	}
 }
 
-void ipmi_wdt_stop(void)
-{
-	if (!wdt_stopped) {
-		/* Make sure the background reset timer is disabled before
-		 * stopping the watchdog. If we issue a reset after disabling
-		 * the timer, it will be re-enabled. */
-		wdt_ticking = false;
-		cancel_timer(&wdt_timer);
-
-		/* Configure the watchdog to be disabled and do no action
-		 * in case the underlying implementation is buggy and times
-		 * out anyway. */
-		wdt_stopped = true;
-		set_wdt(WDT_NO_ACTION, 100, 0, false, false);
-	}
-}
-
 void ipmi_wdt_final_reset(void)
 {
 	/* We can safely stop the timer prior to setting up our final
@@ -192,15 +174,7 @@ void ipmi_wdt_final_reset(void)
 	 * can catch up in their development environments.
 	 * If you still read this after 2018, send a patch!
 	 */
-#if 0
-	/* Configure the watchdog and make sure it is still enabled */
-	set_wdt(WDT_RESET_ACTION | WDT_PRETIMEOUT_SMI, WDT_TIMEOUT,
-		WDT_MARGIN/10, true, true);
-	sync_reset_wdt();
-#else
 	set_wdt(WDT_NO_ACTION, 100, 0, false, false);
-#endif
-	ipmi_set_boot_count();
 }
 
 void ipmi_wdt_init(void)

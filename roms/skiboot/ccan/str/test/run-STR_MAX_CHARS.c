@@ -4,9 +4,9 @@
 #include <ccan/tap/tap.h>
 #include <stdint.h>
 
-int main(int argc, char *argv[])
+int main(void)
 {
-	char *str = (char*)malloc(sizeof(char)*1000);
+	char str[1000];
 	struct {
 		uint8_t u1byte;
 		int8_t s1byte;
@@ -18,11 +18,6 @@ int main(int argc, char *argv[])
 		int64_t s8byte;
 		void *ptr;
 	} types;
-
-	(void)argc;
-	(void)argv;
-
-	assert(str);
 
 	plan_tests(13);
 
@@ -59,8 +54,6 @@ int main(int argc, char *argv[])
 	/* Pointer version. */
 	sprintf(str, "%p", types.ptr);
 	ok1(strlen(str) < STR_MAX_CHARS(types.ptr));
-
-	free(str);
 
 	return exit_status();
 }				

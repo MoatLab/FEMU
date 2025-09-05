@@ -333,6 +333,7 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list args)
 
 			case 'X':
 				flags |= LARGE;
+				/* fallthrough */
 			case 'x':
 				base = 16;
 				break;

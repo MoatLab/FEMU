@@ -23,7 +23,7 @@ The *FW_PAYLOAD* firmware can be enabled by any of the following methods:
 2. Specifying `FW_PAYLOAD=y` in the target platform *objects.mk* configuration
    file.
 
-The compiled *FW_PAYLOAD* firmware ELF file is named *fw_jump.elf*. Its
+The compiled *FW_PAYLOAD* firmware ELF file is named *fw_payload.elf*. Its
 expanded image file is *fw_payload.bin*. Both files are created in the
 platform-specific build directory under the
 *build/platform/<platform_subdir>/firmware* directory.
@@ -36,8 +36,8 @@ options. These configuration parameters can be defined using either the top
 level `make` command line or the target platform *objects.mk* configuration
 file. The parameters currently defined are as follows:
 
-* **FW_PAYLOAD_OFFSET** - Offset from *FW_TEXT_START* where the payload binary
-  will be linked in the final *FW_PAYLOAD* firmware binary image. This
+* **FW_PAYLOAD_OFFSET** - Offset from the opensbi load address where the payload
+  binary will be linked in the final *FW_PAYLOAD* firmware binary image. This
   configuration parameter is mandatory if *FW_PAYLOAD_ALIGN* is not defined.
   Compilation errors will result from an incorrect definition of
   *FW_PAYLOAD_OFFSET* or of *FW_PAYLOAD_ALIGN*, or if neither of these
@@ -61,6 +61,11 @@ file. The parameters currently defined are as follows:
   that is, the payload firmware. If this option is not provided, then the
   firmware will pass the FDT address passed by the previous booting stage
   to the next booting stage.
+
+* **FW_PAYLOAD_FDT_OFFSET** - Address offset from the opensbi load address where
+  the FDT will be passed to the next booting stage. This offset is used as
+  relocatable address of the FDT passed to the next booting stage. If
+  *FW_PAYLOAD_FDT_ADDR* is also defined, the firmware will prefer *FW_PAYLOAD_FDT_ADDR*.
 
 *FW_PAYLOAD* Example
 --------------------

@@ -23,6 +23,7 @@
 
 #include "hw/registerfields.h"
 #include "target/arm/kvm-consts.h"
+#include "cpu.h"
 
 /*
  * ARMCPRegInfo type field bits:
@@ -126,6 +127,14 @@ enum {
      * equivalent EL1 register when FEAT_NV2 is enabled.
      */
     ARM_CP_NV2_REDIRECT          = 1 << 20,
+    /*
+     * Flag: this is a TLBI insn which (when FEAT_XS is present) also has
+     * an NXS variant at the same encoding except that crn is 1 greater,
+     * so when registering this cpreg automatically also register one
+     * for the TLBI NXS variant. (For QEMU the NXS variant behaves
+     * identically to the normal one, other than FGT trapping handling.)
+     */
+    ARM_CP_ADD_TLBI_NXS          = 1 << 21,
 };
 
 /*
@@ -320,20 +329,23 @@ typedef enum CPAccessResult {
      * Access fails due to a configurable trap or enable which would
      * result in a categorized exception syndrome giving information about
      * the failing instruction (ie syndrome category 0x3, 0x4, 0x5, 0x6,
-     * 0xc or 0x18).
+     * 0xc or 0x18). These traps are always to a specified target EL,
+     * never to the usual target EL.
      */
-    CP_ACCESS_TRAP = (1 << 2),
-    CP_ACCESS_TRAP_EL2 = CP_ACCESS_TRAP | 2,
-    CP_ACCESS_TRAP_EL3 = CP_ACCESS_TRAP | 3,
+    CP_ACCESS_TRAP_BIT = (1 << 2),
+    CP_ACCESS_TRAP_EL1 = CP_ACCESS_TRAP_BIT | 1,
+    CP_ACCESS_TRAP_EL2 = CP_ACCESS_TRAP_BIT | 2,
+    CP_ACCESS_TRAP_EL3 = CP_ACCESS_TRAP_BIT | 3,
 
     /*
-     * Access fails and results in an exception syndrome 0x0 ("uncategorized").
+     * Access fails with UNDEFINED, i.e. an exception syndrome 0x0
+     * ("uncategorized"), which is what an undefined insn produces.
      * Note that this is not a catch-all case -- the set of cases which may
      * result in this failure is specifically defined by the architecture.
      * This trap is always to the usual target EL, never directly to a
      * specified target EL.
      */
-    CP_ACCESS_TRAP_UNCATEGORIZED = (2 << 2),
+    CP_ACCESS_UNDEFINED = (2 << 2),
 } CPAccessResult;
 
 /* Indexes into fgt_read[] */
@@ -621,6 +633,7 @@ FIELD(HDFGWTR_EL2, NBRBCTL, 60, 1)
 FIELD(HDFGWTR_EL2, NBRBDATA, 61, 1)
 FIELD(HDFGWTR_EL2, NPMSNEVFR_EL1, 62, 1)
 
+FIELD(FGT, NXS, 13, 1) /* Honour HCR_EL2.FGTnXS to suppress FGT */
 /* Which fine-grained trap bit register to check, if any */
 FIELD(FGT, TYPE, 10, 3)
 FIELD(FGT, REV, 9, 1) /* Is bit sense reversed? */
@@ -638,6 +651,17 @@ FIELD(FGT, BITPOS, 0, 6) /* Bit position within the uint64_t */
 /* Some bits have reversed sense, so 0 means trap and 1 means not */
 #define DO_REV_BIT(REG, BITNAME)                                        \
     FGT_##BITNAME = FGT_##REG | FGT_REV | R_##REG##_EL2_##BITNAME##_SHIFT
+
+/*
+ * The FGT bits for TLBI maintenance instructions accessible at EL1 always
+ * affect the "normal" TLBI insns; they affect the corresponding TLBI insns
+ * with the nXS qualifier only if HCRX_EL2.FGTnXS is 0. We define e.g.
+ * FGT_TLBIVAE1 to use for the normal insn, and FGT_TLBIVAE1NXS to use
+ * for the nXS qualified insn.
+ */
+#define DO_TLBINXS_BIT(REG, BITNAME)                             \
+    FGT_##BITNAME = FGT_##REG | R_##REG##_EL2_##BITNAME##_SHIFT, \
+    FGT_##BITNAME##NXS = FGT_##BITNAME | R_FGT_NXS_MASK
 
 typedef enum FGTBit {
     /*
@@ -772,36 +796,36 @@ typedef enum FGTBit {
     DO_BIT(HFGITR, ATS1E0W),
     DO_BIT(HFGITR, ATS1E1RP),
     DO_BIT(HFGITR, ATS1E1WP),
-    DO_BIT(HFGITR, TLBIVMALLE1OS),
-    DO_BIT(HFGITR, TLBIVAE1OS),
-    DO_BIT(HFGITR, TLBIASIDE1OS),
-    DO_BIT(HFGITR, TLBIVAAE1OS),
-    DO_BIT(HFGITR, TLBIVALE1OS),
-    DO_BIT(HFGITR, TLBIVAALE1OS),
-    DO_BIT(HFGITR, TLBIRVAE1OS),
-    DO_BIT(HFGITR, TLBIRVAAE1OS),
-    DO_BIT(HFGITR, TLBIRVALE1OS),
-    DO_BIT(HFGITR, TLBIRVAALE1OS),
-    DO_BIT(HFGITR, TLBIVMALLE1IS),
-    DO_BIT(HFGITR, TLBIVAE1IS),
-    DO_BIT(HFGITR, TLBIASIDE1IS),
-    DO_BIT(HFGITR, TLBIVAAE1IS),
-    DO_BIT(HFGITR, TLBIVALE1IS),
-    DO_BIT(HFGITR, TLBIVAALE1IS),
-    DO_BIT(HFGITR, TLBIRVAE1IS),
-    DO_BIT(HFGITR, TLBIRVAAE1IS),
-    DO_BIT(HFGITR, TLBIRVALE1IS),
-    DO_BIT(HFGITR, TLBIRVAALE1IS),
-    DO_BIT(HFGITR, TLBIRVAE1),
-    DO_BIT(HFGITR, TLBIRVAAE1),
-    DO_BIT(HFGITR, TLBIRVALE1),
-    DO_BIT(HFGITR, TLBIRVAALE1),
-    DO_BIT(HFGITR, TLBIVMALLE1),
-    DO_BIT(HFGITR, TLBIVAE1),
-    DO_BIT(HFGITR, TLBIASIDE1),
-    DO_BIT(HFGITR, TLBIVAAE1),
-    DO_BIT(HFGITR, TLBIVALE1),
-    DO_BIT(HFGITR, TLBIVAALE1),
+    DO_TLBINXS_BIT(HFGITR, TLBIVMALLE1OS),
+    DO_TLBINXS_BIT(HFGITR, TLBIVAE1OS),
+    DO_TLBINXS_BIT(HFGITR, TLBIASIDE1OS),
+    DO_TLBINXS_BIT(HFGITR, TLBIVAAE1OS),
+    DO_TLBINXS_BIT(HFGITR, TLBIVALE1OS),
+    DO_TLBINXS_BIT(HFGITR, TLBIVAALE1OS),
+    DO_TLBINXS_BIT(HFGITR, TLBIRVAE1OS),
+    DO_TLBINXS_BIT(HFGITR, TLBIRVAAE1OS),
+    DO_TLBINXS_BIT(HFGITR, TLBIRVALE1OS),
+    DO_TLBINXS_BIT(HFGITR, TLBIRVAALE1OS),
+    DO_TLBINXS_BIT(HFGITR, TLBIVMALLE1IS),
+    DO_TLBINXS_BIT(HFGITR, TLBIVAE1IS),
+    DO_TLBINXS_BIT(HFGITR, TLBIASIDE1IS),
+    DO_TLBINXS_BIT(HFGITR, TLBIVAAE1IS),
+    DO_TLBINXS_BIT(HFGITR, TLBIVALE1IS),
+    DO_TLBINXS_BIT(HFGITR, TLBIVAALE1IS),
+    DO_TLBINXS_BIT(HFGITR, TLBIRVAE1IS),
+    DO_TLBINXS_BIT(HFGITR, TLBIRVAAE1IS),
+    DO_TLBINXS_BIT(HFGITR, TLBIRVALE1IS),
+    DO_TLBINXS_BIT(HFGITR, TLBIRVAALE1IS),
+    DO_TLBINXS_BIT(HFGITR, TLBIRVAE1),
+    DO_TLBINXS_BIT(HFGITR, TLBIRVAAE1),
+    DO_TLBINXS_BIT(HFGITR, TLBIRVALE1),
+    DO_TLBINXS_BIT(HFGITR, TLBIRVAALE1),
+    DO_TLBINXS_BIT(HFGITR, TLBIVMALLE1),
+    DO_TLBINXS_BIT(HFGITR, TLBIVAE1),
+    DO_TLBINXS_BIT(HFGITR, TLBIASIDE1),
+    DO_TLBINXS_BIT(HFGITR, TLBIVAAE1),
+    DO_TLBINXS_BIT(HFGITR, TLBIVALE1),
+    DO_TLBINXS_BIT(HFGITR, TLBIVAALE1),
     DO_BIT(HFGITR, CFPRCTX),
     DO_BIT(HFGITR, DVPRCTX),
     DO_BIT(HFGITR, CPPRCTX),
@@ -1041,6 +1065,9 @@ void arm_cp_write_ignore(CPUARMState *env, const ARMCPRegInfo *ri,
 /* CPReadFn that can be used for read-as-zero behaviour */
 uint64_t arm_cp_read_zero(CPUARMState *env, const ARMCPRegInfo *ri);
 
+/* CPReadFn that just reads the value from ri->fieldoffset */
+uint64_t raw_read(CPUARMState *env, const ARMCPRegInfo *ri);
+
 /* CPWriteFn that just writes the value to ri->fieldoffset */
 void raw_write(CPUARMState *env, const ARMCPRegInfo *ri, uint64_t value);
 
@@ -1133,5 +1160,33 @@ static inline bool arm_cpreg_traps_in_nv(const ARMCPRegInfo *ri)
      */
     return ri->opc1 == 4 || ri->opc1 == 5;
 }
+
+/* Macros for accessing a specified CP register bank */
+#define A32_BANKED_REG_GET(_env, _regname, _secure)                     \
+    ((_secure) ? (_env)->cp15._regname##_s : (_env)->cp15._regname##_ns)
+
+#define A32_BANKED_REG_SET(_env, _regname, _secure, _val)       \
+    do {                                                        \
+        if (_secure) {                                          \
+            (_env)->cp15._regname##_s = (_val);                 \
+        } else {                                                \
+            (_env)->cp15._regname##_ns = (_val);                \
+        }                                                       \
+    } while (0)
+
+/*
+ * Macros for automatically accessing a specific CP register bank depending on
+ * the current secure state of the system.  These macros are not intended for
+ * supporting instruction translation reads/writes as these are dependent
+ * solely on the SCR.NS bit and not the mode.
+ */
+#define A32_BANKED_CURRENT_REG_GET(_env, _regname)                          \
+    A32_BANKED_REG_GET((_env), _regname,                                    \
+                       (arm_is_secure(_env) && !arm_el_is_aa64((_env), 3)))
+
+#define A32_BANKED_CURRENT_REG_SET(_env, _regname, _val)                    \
+    A32_BANKED_REG_SET((_env), _regname,                                    \
+                       (arm_is_secure(_env) && !arm_el_is_aa64((_env), 3)), \
+                       (_val))
 
 #endif /* TARGET_ARM_CPREGS_H */

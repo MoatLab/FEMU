@@ -12,7 +12,7 @@
 #include "qemu/osdep.h"
 #include "qemu/error-report.h"
 #include "qapi/error.h"
-#include "sysemu/device_tree.h"
+#include "system/device_tree.h"
 #include "hw/block/flash.h"
 #include "hw/boards.h"
 #include "hw/sysbus.h"
@@ -761,9 +761,9 @@ static void versal_virt_init(MachineState *machine)
             if (!flash_klass ||
                 object_class_is_abstract(flash_klass) ||
                 !object_class_dynamic_cast(flash_klass, TYPE_M25P80)) {
-                error_setg(&error_fatal, "'%s' is either abstract or"
+                error_report("'%s' is either abstract or"
                        " not a subtype of m25p80", s->ospi_model);
-                return;
+                exit(1);
             }
         }
 
@@ -808,7 +808,7 @@ static void versal_virt_machine_finalize(Object *obj)
     g_free(s->ospi_model);
 }
 
-static void versal_virt_machine_class_init(ObjectClass *oc, void *data)
+static void versal_virt_machine_class_init(ObjectClass *oc, const void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
 
@@ -818,6 +818,7 @@ static void versal_virt_machine_class_init(ObjectClass *oc, void *data)
     mc->max_cpus = XLNX_VERSAL_NR_ACPUS + XLNX_VERSAL_NR_RCPUS;
     mc->default_cpus = XLNX_VERSAL_NR_ACPUS + XLNX_VERSAL_NR_RCPUS;
     mc->no_cdrom = true;
+    mc->auto_create_sdcard = true;
     mc->default_ram_id = "ddr";
     object_class_property_add_str(oc, "ospi-flash", versal_get_ospi_model,
                                    versal_set_ospi_model);

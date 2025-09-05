@@ -1022,7 +1022,7 @@ static void npcm7xx_smbus_enter_reset(Object *obj, ResetType type)
     s->rx_cur = 0;
 }
 
-static void npcm7xx_smbus_hold_reset(Object *obj)
+static void npcm7xx_smbus_hold_reset(Object *obj, ResetType type)
 {
     NPCM7xxSMBusState *s = NPCM7XX_SMBUS(obj);
 
@@ -1075,7 +1075,7 @@ static const VMStateDescription vmstate_npcm7xx_smbus = {
     },
 };
 
-static void npcm7xx_smbus_class_init(ObjectClass *klass, void *data)
+static void npcm7xx_smbus_class_init(ObjectClass *klass, const void *data)
 {
     ResettableClass *rc = RESETTABLE_CLASS(klass);
     DeviceClass *dc = DEVICE_CLASS(klass);

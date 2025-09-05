@@ -16,7 +16,7 @@ jobs:
       image: ghcr.io/openbios/openbios-builder:master
     steps:
       - name: Checkout OpenBIOS
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
       - name: Backup Makefile.target
         run: cp Makefile.target Makefile.target.orig
@@ -44,7 +44,7 @@ jobs:
         run: "mkdir -p release && mv obj-* release"
 
       - name: Store artifacts
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v4
         with:
           name: "openbios-multiarch-${{ github.ref_name }}"
           path: |
@@ -84,7 +84,7 @@ jobs:
             release/obj-sparc64/QEMU,VGA.bin
 
       - name: Prepare release from artifacts
-        uses: actions/download-artifact@v2
+        uses: actions/download-artifact@v4
         with:
           name: "openbios-multiarch-${{ github.ref_name }}"
           path: archive
@@ -93,7 +93,7 @@ jobs:
         run: cd archive && zip -r ../openbios-multiarch-${{ github.ref_name }}.zip debug release && cd ..
 
       - name: Upload release
-        uses: "marvinpinto/action-automatic-releases@latest"
+        uses: "crowbarmaster/GH-Automatic-Releases@latest"
         with:
           repo_token: "${{ secrets.GITHUB_TOKEN }}"
           prerelease: false

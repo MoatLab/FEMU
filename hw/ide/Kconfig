@@ -43,12 +43,6 @@ config IDE_VIA
     bool
     select IDE_PCI
 
-config MICRODRIVE
-    bool
-    select IDE_BUS
-    select IDE_DEV
-    depends on PCMCIA
-
 config AHCI
     bool
     select IDE_BUS
@@ -58,6 +52,10 @@ config AHCI_ICH9
     bool
     default y if PCI_DEVICES
     depends on PCI
+    select AHCI
+
+config AHCI_SYSBUS
+    bool
     select AHCI
 
 config IDE_SII3112

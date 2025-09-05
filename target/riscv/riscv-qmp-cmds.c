@@ -25,14 +25,14 @@
 #include "qemu/osdep.h"
 
 #include "qapi/error.h"
-#include "qapi/qapi-commands-machine-target.h"
-#include "qapi/qmp/qbool.h"
-#include "qapi/qmp/qdict.h"
+#include "qapi/qapi-commands-machine.h"
+#include "qobject/qbool.h"
+#include "qobject/qdict.h"
 #include "qapi/qobject-input-visitor.h"
 #include "qapi/visitor.h"
 #include "qom/qom-qobject.h"
-#include "sysemu/kvm.h"
-#include "sysemu/tcg.h"
+#include "system/kvm.h"
+#include "system/tcg.h"
 #include "cpu-qom.h"
 #include "cpu.h"
 
@@ -121,7 +121,7 @@ static void riscv_obj_add_profiles_qdict(Object *obj, QDict *qdict_out)
 
     for (int i = 0; riscv_profiles[i] != NULL; i++) {
         profile = riscv_profiles[i];
-        value = QOBJECT(qbool_from_bool(profile->enabled));
+        value = QOBJECT(qbool_from_bool(profile->present));
 
         qdict_put_obj(qdict_out, profile->name, value);
     }

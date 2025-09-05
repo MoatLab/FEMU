@@ -472,7 +472,7 @@ const struct sbi_console_device *sbi_console_get_device(void)
 
 void sbi_console_set_device(const struct sbi_console_device *dev)
 {
-	if (!dev || console_dev)
+	if (!dev)
 		return;
 
 	console_dev = dev;

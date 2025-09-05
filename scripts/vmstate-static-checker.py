@@ -42,6 +42,7 @@ def check_fields_match(name, s_field, d_field):
     # Some fields changed names between qemu versions.  This list
     # is used to allow such changes in each section / description.
     changed_names = {
+        'acpi-ghes': ['ghes_addr_le', 'hw_error_le'],
         'apic': ['timer', 'timer_expiry'],
         'e1000': ['dev', 'parent_obj'],
         'ehci': ['dev', 'pcidev'],
@@ -90,6 +91,7 @@ def check_fields_match(name, s_field, d_field):
                       'mem_win_size', 'mig_mem_win_size',
                       'io_win_addr', 'mig_io_win_addr',
                       'io_win_size', 'mig_io_win_size'],
+        'hpet': ['num_timers', 'num_timers_save'],
     }
 
     if not name in changed_names:

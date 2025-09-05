@@ -15,7 +15,7 @@ sbindir = $(prefix)/sbin
 
 CC	= $(CROSS_COMPILE)gcc
 
-FFSPART_VERSION ?= $(shell ./make_version.sh $(EXE))
+FFSPART_VERSION ?= $(shell ../../make_version.sh $(EXE))
 
 version.c: make_version.sh .version
 	@(if [ "a$(FFSPART_VERSION)" = "a" ]; then \

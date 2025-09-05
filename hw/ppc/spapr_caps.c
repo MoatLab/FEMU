@@ -26,14 +26,15 @@
 #include "qemu/error-report.h"
 #include "qapi/error.h"
 #include "qapi/visitor.h"
-#include "sysemu/hw_accel.h"
-#include "exec/ram_addr.h"
+#include "system/hw_accel.h"
+#include "system/ram_addr.h"
 #include "target/ppc/cpu.h"
 #include "target/ppc/mmu-hash64.h"
 #include "cpu-models.h"
 #include "kvm_ppc.h"
 #include "migration/vmstate.h"
-#include "sysemu/tcg.h"
+#include "system/tcg.h"
+#include "system/hostmem.h"
 
 #include "hw/ppc/spapr.h"
 
@@ -696,6 +697,34 @@ static void cap_ail_mode_3_apply(SpaprMachineState *spapr,
     }
 }
 
+static void cap_dawr1_apply(SpaprMachineState *spapr, uint8_t val,
+                               Error **errp)
+{
+    ERRP_GUARD();
+
+    if (!val) {
+        return; /* Disable by default */
+    }
+
+    if (!ppc_type_check_compat(MACHINE(spapr)->cpu_type,
+                               CPU_POWERPC_LOGICAL_3_10, 0,
+                               spapr->max_compat_pvr)) {
+        error_setg(errp, "DAWR1 supported only on POWER10 and later CPUs");
+        error_append_hint(errp, "Try appending -machine cap-dawr1=off\n");
+        return;
+    }
+
+    if (kvm_enabled()) {
+        if (!kvmppc_has_cap_dawr1()) {
+            error_setg(errp, "DAWR1 not supported by KVM.");
+            error_append_hint(errp, "Try appending -machine cap-dawr1=off");
+        } else if (kvmppc_set_cap_dawr1(val) < 0) {
+            error_setg(errp, "Error enabling cap-dawr1 with KVM.");
+            error_append_hint(errp, "Try appending -machine cap-dawr1=off");
+        }
+    }
+}
+
 SpaprCapabilityInfo capability_table[SPAPR_CAP_NUM] = {
     [SPAPR_CAP_HTM] = {
         .name = "htm",
@@ -831,6 +860,15 @@ SpaprCapabilityInfo capability_table[SPAPR_CAP_NUM] = {
         .type = "bool",
         .apply = cap_ail_mode_3_apply,
     },
+    [SPAPR_CAP_DAWR1] = {
+        .name = "dawr1",
+        .description = "Allow 2nd Data Address Watchpoint Register (DAWR1)",
+        .index = SPAPR_CAP_DAWR1,
+        .get = spapr_cap_get_bool,
+        .set = spapr_cap_set_bool,
+        .type = "bool",
+        .apply = cap_dawr1_apply,
+    },
 };
 
 static SpaprCapabilities default_caps_with_cpu(SpaprMachineState *spapr,
@@ -840,6 +878,11 @@ static SpaprCapabilities default_caps_with_cpu(SpaprMachineState *spapr,
     SpaprCapabilities caps;
 
     caps = smc->default_caps;
+
+    if (!ppc_type_check_compat(cputype, CPU_POWERPC_LOGICAL_3_10,
+                               0, spapr->max_compat_pvr)) {
+        caps.caps[SPAPR_CAP_DAWR1] = SPAPR_CAP_OFF;
+    }
 
     if (!ppc_type_check_compat(cputype, CPU_POWERPC_LOGICAL_3_00,
                                0, spapr->max_compat_pvr)) {
@@ -974,6 +1017,8 @@ SPAPR_CAP_MIG_STATE(large_decr, SPAPR_CAP_LARGE_DECREMENTER);
 SPAPR_CAP_MIG_STATE(ccf_assist, SPAPR_CAP_CCF_ASSIST);
 SPAPR_CAP_MIG_STATE(fwnmi, SPAPR_CAP_FWNMI);
 SPAPR_CAP_MIG_STATE(rpt_invalidate, SPAPR_CAP_RPT_INVALIDATE);
+SPAPR_CAP_MIG_STATE(ail_mode_3, SPAPR_CAP_AIL_MODE_3);
+SPAPR_CAP_MIG_STATE(dawr1, SPAPR_CAP_DAWR1);
 
 void spapr_caps_init(SpaprMachineState *spapr)
 {
@@ -1033,7 +1078,7 @@ void spapr_caps_add_properties(SpaprMachineClass *smc)
     for (i = 0; i < ARRAY_SIZE(capability_table); i++) {
         SpaprCapabilityInfo *cap = &capability_table[i];
         g_autofree char *name = g_strdup_printf("cap-%s", cap->name);
-        g_autofree char *desc = g_strdup_printf("%s", cap->description);
+        g_autofree char *desc = g_strdup(cap->description);
 
         object_class_property_add(klass, name, cap->type,
                                   cap->get, cap->set,

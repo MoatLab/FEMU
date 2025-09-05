@@ -27,9 +27,9 @@ def inventory(targets):
 
 
 @pytest.mark.parametrize("host,target,fully_managed", [
-    pytest.param("centos-stream-8-1", "centos-stream-8", False, id="centos-stream-8-1"),
+    pytest.param("centos-stream-9-1", "centos-stream-9", False, id="centos-stream-9-1"),
     pytest.param("192.168.1.30", "debian-12", False, id="debian-12"),
-    pytest.param("fedora-test-2", "fedora-37", True, id="fedora-test-2"),
+    pytest.param("fedora-test-2", "fedora-41", True, id="fedora-test-2"),
 ])
 def test_host_facts(inventory, targets, host, target, fully_managed):
     host_facts = inventory.host_facts[host]
@@ -41,21 +41,21 @@ def test_host_facts(inventory, targets, host, target, fully_managed):
 
 def test_expand_hosts(inventory):
     assert sorted(inventory.expand_hosts("*centos*")) == [
-        "centos-stream-8-1",
-        "centos-stream-8-2",
-        "some-other-centos-stream-8"
+        "centos-stream-9-1",
+        "centos-stream-9-2",
+        "some-other-centos-stream-9"
     ]
     with pytest.raises(InventoryError):
         inventory.expand_hosts("debian-12")
 
 
 def test_host_target_name(inventory):
-    assert inventory.get_host_target_name("fedora-test-1") == "fedora-37"
+    assert inventory.get_host_target_name("fedora-test-1") == "fedora-41"
 
 
 def test_group_vars(inventory, targets, packages, projects):
-    target = BuildTarget(targets, packages, "fedora-37")
-    group_vars = inventory.get_group_vars(target, projects, ["nbdkit"])
+    target = BuildTarget(targets, packages, "fedora-41")
+    group_vars = inventory.get_group_vars(target, projects, ["libvirt"])
     assert "nano" in group_vars["unwanted_packages"]
     assert "python3-libselinux" in group_vars["early_install_packages"]
 

@@ -22,7 +22,7 @@
 #include "ui/egl-helpers.h"
 #include "ui/shader.h"
 
-#include "sysemu/sysemu.h"
+#include "system/system.h"
 
 static void gtk_egl_set_scanout_mode(VirtualConsole *vc, bool scanout)
 {
@@ -68,39 +68,44 @@ void gd_egl_draw(VirtualConsole *vc)
     GdkWindow *window;
 #ifdef CONFIG_GBM
     QemuDmaBuf *dmabuf = vc->gfx.guest_fb.dmabuf;
+    int fence_fd;
 #endif
-    int ww, wh, ws;
+    int ww, wh, pw, ph, gs;
 
     if (!vc->gfx.gls) {
         return;
     }
 
     window = gtk_widget_get_window(vc->gfx.drawing_area);
-    ws = gdk_window_get_scale_factor(window);
-    ww = gdk_window_get_width(window) * ws;
-    wh = gdk_window_get_height(window) * ws;
+    gs = gdk_window_get_scale_factor(window);
+    ww = gdk_window_get_width(window);
+    wh = gdk_window_get_height(window);
+    pw = ww * gs;
+    ph = wh * gs;
 
     if (vc->gfx.scanout_mode) {
 #ifdef CONFIG_GBM
         if (dmabuf) {
-            if (!dmabuf->draw_submitted) {
+            if (!qemu_dmabuf_get_draw_submitted(dmabuf)) {
                 return;
             } else {
-                dmabuf->draw_submitted = false;
+                qemu_dmabuf_set_draw_submitted(dmabuf, false);
             }
         }
 #endif
         gd_egl_scanout_flush(&vc->gfx.dcl, 0, 0, vc->gfx.w, vc->gfx.h);
 
-        vc->gfx.scale_x = (double)ww / surface_width(vc->gfx.ds);
-        vc->gfx.scale_y = (double)wh / surface_height(vc->gfx.ds);
+        gd_update_scale(vc, ww, wh,
+                        surface_width(vc->gfx.ds),
+                        surface_height(vc->gfx.ds));
 
         glFlush();
 #ifdef CONFIG_GBM
         if (dmabuf) {
             egl_dmabuf_create_fence(dmabuf);
-            if (dmabuf->fence_fd >= 0) {
-                qemu_set_fd_handler(dmabuf->fence_fd, gd_hw_gl_flushed, NULL, vc);
+            fence_fd = qemu_dmabuf_get_fence_fd(dmabuf);
+            if (fence_fd >= 0) {
+                qemu_set_fd_handler(fence_fd, gd_hw_gl_flushed, NULL, vc);
                 return;
             }
             graphic_hw_gl_block(vc->gfx.dcl.con, false);
@@ -113,13 +118,14 @@ void gd_egl_draw(VirtualConsole *vc)
         eglMakeCurrent(qemu_egl_display, vc->gfx.esurface,
                        vc->gfx.esurface, vc->gfx.ectx);
 
-        surface_gl_setup_viewport(vc->gfx.gls, vc->gfx.ds, ww, wh);
+        surface_gl_setup_viewport(vc->gfx.gls, vc->gfx.ds, pw, ph);
         surface_gl_render_texture(vc->gfx.gls, vc->gfx.ds);
 
         eglSwapBuffers(qemu_egl_display, vc->gfx.esurface);
 
-        vc->gfx.scale_x = (double)ww / surface_width(vc->gfx.ds);
-        vc->gfx.scale_y = (double)wh / surface_height(vc->gfx.ds);
+        gd_update_scale(vc, ww, wh,
+                        surface_width(vc->gfx.ds),
+                        surface_height(vc->gfx.ds));
 
         glFlush();
     }
@@ -149,7 +155,9 @@ void gd_egl_refresh(DisplayChangeListener *dcl)
     gd_update_monitor_refresh_rate(
             vc, vc->window ? vc->window : vc->gfx.drawing_area);
 
-    if (vc->gfx.guest_fb.dmabuf && vc->gfx.guest_fb.dmabuf->draw_submitted) {
+    if (vc->gfx.guest_fb.dmabuf &&
+        qemu_dmabuf_get_draw_submitted(vc->gfx.guest_fb.dmabuf)) {
+        gd_egl_draw(vc);
         return;
     }
 
@@ -264,22 +272,30 @@ void gd_egl_scanout_dmabuf(DisplayChangeListener *dcl,
 {
 #ifdef CONFIG_GBM
     VirtualConsole *vc = container_of(dcl, VirtualConsole, gfx.dcl);
+    uint32_t x, y, width, height, backing_width, backing_height, texture;
+    bool y0_top;
 
     eglMakeCurrent(qemu_egl_display, vc->gfx.esurface,
                    vc->gfx.esurface, vc->gfx.ectx);
 
     egl_dmabuf_import_texture(dmabuf);
-    if (!dmabuf->texture) {
+    texture = qemu_dmabuf_get_texture(dmabuf);
+    if (!texture) {
         return;
     }
 
-    gd_egl_scanout_texture(dcl, dmabuf->texture,
-                           dmabuf->y0_top,
-                           dmabuf->backing_width, dmabuf->backing_height,
-                           dmabuf->x, dmabuf->y, dmabuf->width,
-                           dmabuf->height, NULL);
+    x = qemu_dmabuf_get_x(dmabuf);
+    y = qemu_dmabuf_get_y(dmabuf);
+    width = qemu_dmabuf_get_width(dmabuf);
+    height = qemu_dmabuf_get_height(dmabuf);
+    backing_width = qemu_dmabuf_get_backing_width(dmabuf);
+    backing_height = qemu_dmabuf_get_backing_height(dmabuf);
+    y0_top = qemu_dmabuf_get_y0_top(dmabuf);
 
-    if (dmabuf->allow_fences) {
+    gd_egl_scanout_texture(dcl, texture, y0_top, backing_width, backing_height,
+                           x, y, width, height, NULL);
+
+    if (qemu_dmabuf_get_allow_fences(dmabuf)) {
         vc->gfx.guest_fb.dmabuf = dmabuf;
     }
 #endif
@@ -291,15 +307,19 @@ void gd_egl_cursor_dmabuf(DisplayChangeListener *dcl,
 {
 #ifdef CONFIG_GBM
     VirtualConsole *vc = container_of(dcl, VirtualConsole, gfx.dcl);
+    uint32_t backing_width, backing_height, texture;
 
     if (dmabuf) {
         egl_dmabuf_import_texture(dmabuf);
-        if (!dmabuf->texture) {
+        texture = qemu_dmabuf_get_texture(dmabuf);
+        if (!texture) {
             return;
         }
-        egl_fb_setup_for_tex(&vc->gfx.cursor_fb,
-                             dmabuf->backing_width, dmabuf->backing_height,
-                             dmabuf->texture, false);
+
+        backing_width = qemu_dmabuf_get_backing_width(dmabuf);
+        backing_height = qemu_dmabuf_get_backing_height(dmabuf);
+        egl_fb_setup_for_tex(&vc->gfx.cursor_fb, backing_width, backing_height,
+                             texture, false);
     } else {
         egl_fb_destroy(&vc->gfx.cursor_fb);
     }
@@ -320,7 +340,11 @@ void gd_egl_scanout_flush(DisplayChangeListener *dcl,
 {
     VirtualConsole *vc = container_of(dcl, VirtualConsole, gfx.dcl);
     GdkWindow *window;
-    int ww, wh, ws;
+    int px_offset, py_offset;
+    int gs;
+    int pw_widget, ph_widget, pw_surface, ph_surface;
+    int ww_widget, wh_widget, ww_surface, wh_surface;
+    int fbw, fbh;
 
     if (!vc->gfx.scanout_mode) {
         return;
@@ -333,10 +357,32 @@ void gd_egl_scanout_flush(DisplayChangeListener *dcl,
                    vc->gfx.esurface, vc->gfx.ectx);
 
     window = gtk_widget_get_window(vc->gfx.drawing_area);
-    ws = gdk_window_get_scale_factor(window);
-    ww = gdk_window_get_width(window) * ws;
-    wh = gdk_window_get_height(window) * ws;
-    egl_fb_setup_default(&vc->gfx.win_fb, ww, wh);
+    gs = gdk_window_get_scale_factor(window);
+    ww_widget = gdk_window_get_width(window);
+    wh_widget = gdk_window_get_height(window);
+    fbw = surface_width(vc->gfx.ds);
+    fbh = surface_height(vc->gfx.ds);
+
+    gd_update_scale(vc, ww_widget, wh_widget, fbw, fbh);
+
+    ww_surface = fbw * vc->gfx.scale_x;
+    wh_surface = fbh * vc->gfx.scale_y;
+    pw_widget = ww_widget * gs;
+    ph_widget = wh_widget * gs;
+    pw_surface = ww_surface * gs;
+    ph_surface = wh_surface * gs;
+
+    px_offset = 0;
+    py_offset = 0;
+    if (pw_widget > pw_surface) {
+        px_offset = (pw_widget - pw_surface) / 2;
+    }
+    if (ph_widget > ph_surface) {
+        py_offset = (ph_widget - ph_surface) / 2;
+    }
+
+    egl_fb_setup_default(&vc->gfx.win_fb, pw_surface, ph_surface,
+                         px_offset, py_offset);
     if (vc->gfx.cursor_fb.texture) {
         egl_texture_blit(vc->gfx.gls, &vc->gfx.win_fb, &vc->gfx.guest_fb,
                          vc->gfx.y0_top);
@@ -363,9 +409,10 @@ void gd_egl_flush(DisplayChangeListener *dcl,
     VirtualConsole *vc = container_of(dcl, VirtualConsole, gfx.dcl);
     GtkWidget *area = vc->gfx.drawing_area;
 
-    if (vc->gfx.guest_fb.dmabuf && !vc->gfx.guest_fb.dmabuf->draw_submitted) {
+    if (vc->gfx.guest_fb.dmabuf &&
+        !qemu_dmabuf_get_draw_submitted(vc->gfx.guest_fb.dmabuf)) {
         graphic_hw_gl_block(vc->gfx.dcl.con, true);
-        vc->gfx.guest_fb.dmabuf->draw_submitted = true;
+        qemu_dmabuf_set_draw_submitted(vc->gfx.guest_fb.dmabuf, true);
         gtk_egl_set_scanout_mode(vc, true);
         gtk_widget_queue_draw_area(area, x, y, w, h);
         return;

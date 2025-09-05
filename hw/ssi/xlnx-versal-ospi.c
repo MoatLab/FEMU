@@ -1825,18 +1825,17 @@ static const VMStateDescription vmstate_xlnx_versal_ospi = {
     }
 };
 
-static Property xlnx_versal_ospi_properties[] = {
+static const Property xlnx_versal_ospi_properties[] = {
     DEFINE_PROP_BOOL("dac-with-indac", XlnxVersalOspi, dac_with_indac, false),
     DEFINE_PROP_BOOL("indac-write-disabled", XlnxVersalOspi,
                      ind_write_disabled, false),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void xlnx_versal_ospi_class_init(ObjectClass *klass, void *data)
+static void xlnx_versal_ospi_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    dc->reset = xlnx_versal_ospi_reset;
+    device_class_set_legacy_reset(dc, xlnx_versal_ospi_reset);
     dc->realize = xlnx_versal_ospi_realize;
     dc->vmsd = &vmstate_xlnx_versal_ospi;
     device_class_set_props(dc, xlnx_versal_ospi_properties);

@@ -1,0 +1,26 @@
+skiboot/ccan/ is a minimally modified version of upstream ccan that is
+hosted at github.com/rustyrussell/ccan.git
+
+This version is taken from ccan.git commit ca7c5a9e04f3 ("ccan: make tal_dump()
+format more regular.") with these modules:
+
+  array_size
+  check_type
+  container_of
+  heap
+  short_types
+  build_assert
+  endian
+  list
+  str
+
+Generated with `./tools/create-ccan-tree -b make ...` and replacing the
+corresponding directories in skiboot/ccan/, then skiboot/ccan/skiboot.patch
+is applied.
+
+The only other differences from upstream are the additions under the ccan/
+directory of this file README.skiboot, Makefile.inc, Makefile.check, config.h,
+tap/tap.h, skiboot.patch.
+
+Local ccan changes should be kept to a minimum, documented here as necessary,
+and submitted upstream if possible.

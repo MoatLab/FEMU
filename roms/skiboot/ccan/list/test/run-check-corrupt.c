@@ -16,11 +16,9 @@ static int my_fprintf(FILE *stream, const char *format, ...)
 {
 	va_list ap;
 	int ret;
-
 	(void)stream;
-
 	va_start(ap, format);
-	ret = vsnprintf(printf_buffer, sizeof(printf_buffer), format, ap);
+	ret = vsprintf(printf_buffer, format, ap);
 	va_end(ap);
 	return ret;
 }
@@ -29,14 +27,11 @@ static int my_fprintf(FILE *stream, const char *format, ...)
 #include <ccan/tap/tap.h>
 #include <ccan/list/list.c>
 
-int main(int argc, char *argv[])
+int main(void)
 {
 	struct list_head list;
 	struct list_node n1;
 	char expect[100];
-
-	(void)argc;
-	(void)argv;
 
 	plan_tests(9);
 	/* Empty list. */

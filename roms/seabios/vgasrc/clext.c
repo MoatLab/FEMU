@@ -309,13 +309,13 @@ clext_list_modes(u16 seg, u16 *dest, u16 *last)
  ****************************************************************/
 
 int
-clext_get_window(struct vgamode_s *vmode_g, int window)
+clext_get_window(struct vgamode_s *curmode_g, int window)
 {
     return stdvga_grdc_read(window + 9);
 }
 
 int
-clext_set_window(struct vgamode_s *vmode_g, int window, int val)
+clext_set_window(struct vgamode_s *curmode_g, int window, int val)
 {
     if (val >= 0x100)
         return -1;
@@ -324,26 +324,26 @@ clext_set_window(struct vgamode_s *vmode_g, int window, int val)
 }
 
 int
-clext_get_linelength(struct vgamode_s *vmode_g)
+clext_get_linelength(struct vgamode_s *curmode_g)
 {
     u16 crtc_addr = stdvga_get_crtc();
     u8 reg13 = stdvga_crtc_read(crtc_addr, 0x13);
     u8 reg1b = stdvga_crtc_read(crtc_addr, 0x1b);
-    return (((reg1b & 0x10) << 4) + reg13) * 8 / stdvga_vram_ratio(vmode_g);
+    return (((reg1b & 0x10) << 4) + reg13) * 8 / stdvga_vram_ratio(curmode_g);
 }
 
 int
-clext_set_linelength(struct vgamode_s *vmode_g, int val)
+clext_set_linelength(struct vgamode_s *curmode_g, int val)
 {
     u16 crtc_addr = stdvga_get_crtc();
-    val = DIV_ROUND_UP(val * stdvga_vram_ratio(vmode_g), 8);
+    val = DIV_ROUND_UP(val * stdvga_vram_ratio(curmode_g), 8);
     stdvga_crtc_write(crtc_addr, 0x13, val);
     stdvga_crtc_mask(crtc_addr, 0x1b, 0x10, (val & 0x100) >> 4);
     return 0;
 }
 
 int
-clext_get_displaystart(struct vgamode_s *vmode_g)
+clext_get_displaystart(struct vgamode_s *curmode_g)
 {
     u16 crtc_addr = stdvga_get_crtc();
     u8 b2 = stdvga_crtc_read(crtc_addr, 0x0c);
@@ -352,14 +352,14 @@ clext_get_displaystart(struct vgamode_s *vmode_g)
     u8 b4 = stdvga_crtc_read(crtc_addr, 0x1d);
     int val = (b1 | (b2<<8) | ((b3 & 0x01) << 16) | ((b3 & 0x0c) << 15)
                | ((b4 & 0x80) << 12));
-    return val * 4 / stdvga_vram_ratio(vmode_g);
+    return val * 4 / stdvga_vram_ratio(curmode_g);
 }
 
 int
-clext_set_displaystart(struct vgamode_s *vmode_g, int val)
+clext_set_displaystart(struct vgamode_s *curmode_g, int val)
 {
     u16 crtc_addr = stdvga_get_crtc();
-    val = val * stdvga_vram_ratio(vmode_g) / 4;
+    val = val * stdvga_vram_ratio(curmode_g) / 4;
     stdvga_crtc_write(crtc_addr, 0x0d, val);
     stdvga_crtc_write(crtc_addr, 0x0c, val >> 8);
     stdvga_crtc_mask(crtc_addr, 0x1d, 0x80, (val & 0x0800) >> 4);

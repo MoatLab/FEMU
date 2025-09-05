@@ -252,7 +252,7 @@ static inline void phb4_set_err_pending(struct phb4 *p, bool pending)
 
 static inline int phb4_get_opal_id(unsigned int chip_id, unsigned int index)
 {
-	if (proc_gen == proc_gen_p10) {
+	if (proc_gen == proc_gen_p10 || proc_gen == proc_gen_p11) {
 		return chip_id * MAX_PHBS_PER_CHIP_P10 + index;
 	} else {
 		if (PVR_TYPE(mfspr(SPR_PVR)) == PVR_TYPE_P9)

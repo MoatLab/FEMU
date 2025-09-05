@@ -5,22 +5,23 @@
 # See the COPYING file in the top-level directory.
 
 ##
-# = Cryptography devices
+# ********************
+# Cryptography devices
+# ********************
 ##
 
 ##
-# @QCryptodevBackendAlgType:
+# @QCryptodevBackendAlgoType:
 #
 # The supported algorithm types of a crypto device.
 #
 # @sym: symmetric encryption
 #
-# @asym: asymmetric Encryption
+# @asym: asymmetric encryption
 #
 # Since: 8.0
 ##
-{ 'enum': 'QCryptodevBackendAlgType',
-  'prefix': 'QCRYPTODEV_BACKEND_ALG',
+{ 'enum': 'QCryptodevBackendAlgoType',
   'data': ['sym', 'asym']}
 
 ##
@@ -28,10 +29,19 @@
 #
 # The supported service types of a crypto device.
 #
+# @cipher: Symmetric Key Cipher service
+#
+# @hash: Hash service
+#
+# @mac: Message Authentication Codes service
+#
+# @aead: Authenticated Encryption with Associated Data service
+#
+# @akcipher: Asymmetric Key Cipher service
+#
 # Since: 8.0
 ##
 { 'enum': 'QCryptodevBackendServiceType',
-  'prefix': 'QCRYPTODEV_BACKEND_SERVICE',
   'data': ['cipher', 'hash', 'mac', 'aead', 'akcipher']}
 
 ##
@@ -48,7 +58,6 @@
 # Since: 8.0
 ##
 { 'enum': 'QCryptodevBackendType',
-  'prefix': 'QCRYPTODEV_BACKEND_TYPE',
   'data': ['builtin', 'vhost-user', 'lkcf']}
 
 ##
@@ -87,9 +96,7 @@
 ##
 # @query-cryptodev:
 #
-# Returns information about current crypto devices.
-#
-# Returns: a list of @QCryptodevInfo
+# Return information about current crypto devices.
 #
 # Since: 8.0
 ##

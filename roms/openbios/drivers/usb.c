@@ -178,7 +178,7 @@ u8 *
 get_descriptor (usbdev_t *dev, unsigned char bmRequestType, int descType,
 		int descIdx, int langID)
 {
-	u8 buf[8];
+	device_descriptor_t dd;
 	u8 *result;
 	dev_req_t dr;
 	int size;
@@ -189,24 +189,23 @@ get_descriptor (usbdev_t *dev, unsigned char bmRequestType, int descType,
 	dr.wValue = __cpu_to_le16((descType << 8) | descIdx);
 	dr.wIndex = __cpu_to_le16(langID);
 	dr.wLength = __cpu_to_le16(8);
-	if (dev->controller->control (dev, IN, sizeof (dr), &dr, 8, buf)) {
+	if (dev->controller->control (dev, IN, sizeof (dr), &dr, 8, (u8 *)&dd)) {
 		usb_debug ("getting descriptor size (type %x) failed\n",
 			descType);
 	}
 
 	if (descType == 1) {
-		device_descriptor_t *dd = (device_descriptor_t *) buf;
-		usb_debug ("maxPacketSize0: %x\n", dd->bMaxPacketSize0);
-		if (dd->bMaxPacketSize0 != 0)
-			dev->endpoints[0].maxpacketsize = dd->bMaxPacketSize0;
+		usb_debug ("maxPacketSize0: %x\n", dd.bMaxPacketSize0);
+		if (dd.bMaxPacketSize0 != 0)
+			dev->endpoints[0].maxpacketsize = dd.bMaxPacketSize0;
 	}
 
 	/* special case for configuration descriptors: they carry all their
 	   subsequent descriptors with them, and keep the entire size at a
 	   different location */
-	size = buf[0];
-	if (buf[1] == 2) {
-		int realsize = __le16_to_cpu(((unsigned short *) (buf + 2))[0]);
+	size = dd.bLength;
+	if (dd.bDescriptorType == 2) {
+		int realsize = __le16_to_cpu(dd.bcdUSB);
 		size = realsize;
 	}
 	result = malloc (size);

@@ -45,7 +45,9 @@ int update_variable_in_bank(struct secvar *update_var, const char *data,
 	else
 		var->flags |= SECVAR_FLAG_VOLATILE;
 
-	if (key_equals(update_var->key, "PK") || key_equals(update_var->key, "HWKH"))
+	if (key_equals(update_var->key, "PK")
+	    || key_equals(update_var->key, "HWKH")
+	    || key_equals(update_var->key, "TS"))
 		var->flags |= SECVAR_FLAG_PROTECTED;
 
 	return 0;

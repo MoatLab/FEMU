@@ -2,7 +2,9 @@
 # vim: filetype=python
 
 ##
-# = Socket data types
+# *****************
+# Socket data types
+# *****************
 ##
 
 ##
@@ -29,6 +31,7 @@
 # @InetSocketAddressBase:
 #
 # @host: host part of the address
+#
 # @port: port part of the address
 ##
 { 'struct': 'InetSocketAddressBase',
@@ -55,8 +58,24 @@
 # @ipv6: whether to accept IPv6 addresses, default try both IPv4 and
 #     IPv6
 #
-# @keep-alive: enable keep-alive when connecting to this socket.  Not
-#     supported for passive sockets.  (Since 4.2)
+# @keep-alive: enable keep-alive when connecting to/listening on this socket.
+#     (Since 4.2, not supported for listening sockets until 10.1)
+#
+# @keep-alive-count: number of keep-alive packets sent before the connection is
+#     closed.  Only supported for TCP sockets on systems where TCP_KEEPCNT
+#     socket option is defined (this includes Linux, Windows, macOS, FreeBSD,
+#     but not OpenBSD).  When set to 0, system setting is used.  (Since 10.1)
+#
+# @keep-alive-idle: time in seconds the connection needs to be idle before
+#     sending a keepalive packet.  Only supported for TCP sockets on systems
+#     where TCP_KEEPIDLE socket option is defined (this includes Linux,
+#     Windows, macOS, FreeBSD, but not OpenBSD).  When set to 0, system setting
+#     is used.  (Since 10.1)
+#
+# @keep-alive-interval: time in seconds between keep-alive packets.  Only
+#     supported for TCP sockets on systems where TCP_KEEPINTVL is defined (this
+#     includes Linux, Windows, macOS, FreeBSD, but not OpenBSD).  When set to
+#     0, system setting is used.  (Since 10.1)
 #
 # @mptcp: enable multi-path TCP.  (Since 6.1)
 #
@@ -70,6 +89,9 @@
     '*ipv4': 'bool',
     '*ipv6': 'bool',
     '*keep-alive': 'bool',
+    '*keep-alive-count': { 'type': 'uint32', 'if': 'HAVE_TCP_KEEPCNT' },
+    '*keep-alive-idle': { 'type': 'uint32', 'if': 'HAVE_TCP_KEEPIDLE' },
+    '*keep-alive-interval': { 'type': 'uint32', 'if': 'HAVE_TCP_KEEPINTVL' },
     '*mptcp': { 'type': 'bool', 'if': 'HAVE_IPPROTO_MPTCP' } } }
 
 ##
@@ -104,8 +126,8 @@
 #
 # @port: port
 #
-# Note: string types are used to allow for possible future hostname or
-#     service resolution support.
+# .. note:: String types are used to allow for possible future
+#    hostname or service resolution support.
 #
 # Since: 2.8
 ##
@@ -121,7 +143,7 @@
 #
 # @str: decimal is for file descriptor number, otherwise it's a file
 #     descriptor name.  Named file descriptors are permitted in
-#     monitor commands, in combination with the 'getfd' command.
+#     monitor commands, in combination with the `getfd` command.
 #     Decimal file descriptors are permitted at startup or other
 #     contexts where no monitor context is active.
 #
@@ -179,10 +201,6 @@
 #
 # @type: Transport type
 #
-# Note: This type is deprecated in favor of SocketAddress.  The
-#     difference between SocketAddressLegacy and SocketAddress is that
-#     the latter has fewer {} on the wire.
-#
 # Since: 1.3
 ##
 { 'union': 'SocketAddressLegacy',
@@ -193,11 +211,14 @@
     'unix': 'UnixSocketAddressWrapper',
     'vsock': 'VsockSocketAddressWrapper',
     'fd': 'FdSocketAddressWrapper' } }
+# Note: This type is deprecated in favor of `SocketAddress`.  The
+# difference between `SocketAddressLegacy` and `SocketAddress` is that the
+# latter has fewer ``{}`` on the wire.
 
 ##
 # @SocketAddressType:
 #
-# Available SocketAddress types
+# Available `SocketAddress` types
 #
 # @inet: Internet address
 #

@@ -17,7 +17,7 @@ x86_64-debian-12-container:
 
 x86_64-fedora-rawhide-container:
   extends: .container_job
-  allow_failure: false
+  allow_failure: true
   variables:
     NAME: fedora-rawhide
 
@@ -27,7 +27,7 @@ x86_64-fedora-rawhide-container:
 
 i686-debian-sid-container:
   extends: .container_job
-  allow_failure: false
+  allow_failure: true
   variables:
     NAME: debian-sid-cross-i686
 
@@ -42,6 +42,6 @@ ppc64le-debian-sid-container:
 
 mingw32-fedora-rawhide-container:
   extends: .container_job
-  allow_failure: false
+  allow_failure: true
   variables:
     NAME: fedora-rawhide-cross-mingw32

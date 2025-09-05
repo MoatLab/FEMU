@@ -16,7 +16,7 @@
 #include "qemu/module.h"
 #include "hw/intc/kvm_irqcount.h"
 #include "hw/irq.h"
-#include "sysemu/kvm.h"
+#include "system/kvm.h"
 #include "qom/object.h"
 
 #define TYPE_KVM_I8259 "kvm-i8259"
@@ -139,13 +139,13 @@ qemu_irq *kvm_i8259_init(ISABus *bus)
     return qemu_allocate_irqs(kvm_pic_set_irq, NULL, ISA_NUM_IRQS);
 }
 
-static void kvm_i8259_class_init(ObjectClass *klass, void *data)
+static void kvm_i8259_class_init(ObjectClass *klass, const void *data)
 {
     KVMPICClass *kpc = KVM_PIC_CLASS(klass);
     PICCommonClass *k = PIC_COMMON_CLASS(klass);
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    dc->reset     = kvm_pic_reset;
+    device_class_set_legacy_reset(dc, kvm_pic_reset);
     device_class_set_parent_realize(dc, kvm_pic_realize, &kpc->parent_realize);
     k->pre_save   = kvm_pic_get;
     k->post_load  = kvm_pic_put;

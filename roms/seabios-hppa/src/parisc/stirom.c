@@ -3590,6 +3590,9 @@ void sti_rom_init(void)
     if (sti_proc_rom.font_start)
 	return;
 
+    /* allocate first LMMIO range for STI when running on Astro */
+    add_lmmio_directed_range(0x2000000, 0);
+
     sti_rom_size = (_sti_rom_end - _sti_rom_start) / 4096;
     if (sti_region_list[0].region_desc.length != sti_rom_size) {
         /* The STI ROM size is wrong. Try to fix it.

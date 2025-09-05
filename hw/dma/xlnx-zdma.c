@@ -810,18 +810,17 @@ static const VMStateDescription vmstate_zdma = {
     }
 };
 
-static Property zdma_props[] = {
+static const Property zdma_props[] = {
     DEFINE_PROP_UINT32("bus-width", XlnxZDMA, cfg.bus_width, 64),
     DEFINE_PROP_LINK("dma", XlnxZDMA, dma_mr,
                      TYPE_MEMORY_REGION, MemoryRegion *),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void zdma_class_init(ObjectClass *klass, void *data)
+static void zdma_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    dc->reset = zdma_reset;
+    device_class_set_legacy_reset(dc, zdma_reset);
     dc->realize = zdma_realize;
     device_class_set_props(dc, zdma_props);
     dc->vmsd = &vmstate_zdma;

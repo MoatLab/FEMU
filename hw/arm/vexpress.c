@@ -30,11 +30,11 @@
 #include "hw/net/lan9118.h"
 #include "hw/i2c/i2c.h"
 #include "net/net.h"
-#include "sysemu/sysemu.h"
+#include "system/system.h"
 #include "hw/boards.h"
 #include "hw/loader.h"
 #include "hw/block/flash.h"
-#include "sysemu/device_tree.h"
+#include "system/device_tree.h"
 #include "qemu/error-report.h"
 #include <libfdt.h>
 #include "hw/char/pl011.h"
@@ -42,7 +42,7 @@
 #include "hw/cpu/a15mpcore.h"
 #include "hw/i2c/arm_sbcon_i2c.h"
 #include "hw/sd/sd.h"
-#include "qapi/qmp/qlist.h"
+#include "qobject/qlist.h"
 #include "qom/object.h"
 #include "audio/audio.h"
 #include "target/arm/cpu-qom.h"
@@ -50,6 +50,8 @@
 #define VEXPRESS_BOARD_ID 0x8e0
 #define VEXPRESS_FLASH_SIZE (64 * 1024 * 1024)
 #define VEXPRESS_FLASH_SECT_SIZE (256 * 1024)
+
+#define GIC_EXT_IRQS 64 /* Versatile Express A9 development board */
 
 /* Number of virtio transports to create (0..8; limited by
  * number of available IRQ lines).
@@ -241,6 +243,7 @@ static void init_cpus(MachineState *ms, const char *cpu_type,
      */
     dev = qdev_new(privdev);
     qdev_prop_set_uint32(dev, "num-cpu", smp_cpus);
+    qdev_prop_set_uint32(dev, "num-irq", GIC_EXT_IRQS + GIC_INTERNAL);
     busdev = SYS_BUS_DEVICE(dev);
     sysbus_realize_and_unref(busdev, &error_fatal);
     sysbus_mmio_map(busdev, 0, periphbase);
@@ -251,7 +254,7 @@ static void init_cpus(MachineState *ms, const char *cpu_type,
      * external interrupts starting from 32 (because there
      * are internal interrupts 0..31).
      */
-    for (n = 0; n < 64; n++) {
+    for (n = 0; n < GIC_EXT_IRQS; n++) {
         pic[n] = qdev_get_gpio_in(dev, n);
     }
 
@@ -543,7 +546,7 @@ static void vexpress_common_init(MachineState *machine)
     VexpressMachineClass *vmc = VEXPRESS_MACHINE_GET_CLASS(machine);
     VEDBoardInfo *daughterboard = vmc->daughterboard;
     DeviceState *dev, *sysctl, *pl041;
-    qemu_irq pic[64];
+    qemu_irq pic[GIC_EXT_IRQS];
     uint32_t sys_id;
     DriveInfo *dinfo;
     PFlashCFI01 *pflash0;
@@ -774,7 +777,7 @@ static void vexpress_a9_instance_init(Object *obj)
     vms->virt = false;
 }
 
-static void vexpress_class_init(ObjectClass *oc, void *data)
+static void vexpress_class_init(ObjectClass *oc, const void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
 
@@ -792,7 +795,7 @@ static void vexpress_class_init(ObjectClass *oc, void *data)
                                           "Security Extensions (TrustZone)");
 }
 
-static void vexpress_a9_class_init(ObjectClass *oc, void *data)
+static void vexpress_a9_class_init(ObjectClass *oc, const void *data)
 {
     static const char * const valid_cpu_types[] = {
         ARM_CPU_TYPE_NAME("cortex-a9"),
@@ -803,11 +806,12 @@ static void vexpress_a9_class_init(ObjectClass *oc, void *data)
 
     mc->desc = "ARM Versatile Express for Cortex-A9";
     mc->valid_cpu_types = valid_cpu_types;
+    mc->auto_create_sdcard = true;
 
     vmc->daughterboard = &a9_daughterboard;
 }
 
-static void vexpress_a15_class_init(ObjectClass *oc, void *data)
+static void vexpress_a15_class_init(ObjectClass *oc, const void *data)
 {
     static const char * const valid_cpu_types[] = {
         ARM_CPU_TYPE_NAME("cortex-a15"),
@@ -818,6 +822,7 @@ static void vexpress_a15_class_init(ObjectClass *oc, void *data)
 
     mc->desc = "ARM Versatile Express for Cortex-A15";
     mc->valid_cpu_types = valid_cpu_types;
+    mc->auto_create_sdcard = true;
 
     vmc->daughterboard = &a15_daughterboard;
 

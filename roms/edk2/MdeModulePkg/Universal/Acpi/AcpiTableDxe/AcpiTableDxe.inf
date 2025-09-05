@@ -57,6 +57,7 @@
   gEfiAcpi10TableGuid                           ## PRODUCES           ## SystemTable
   gEfiAcpiTableGuid                             ## PRODUCES           ## SystemTable
   gUniversalPayloadAcpiTableGuid                ## SOMETIMES_CONSUMES ## HOB
+  gAcpiTableHobGuid                             ## SOMETIMES_CONSUMES ## HOB
 
 [FeaturePcd]
   gEfiMdeModulePkgTokenSpaceGuid.PcdInstallAcpiSdtProtocol  ## CONSUMES
@@ -68,6 +69,7 @@
   gEfiMdeModulePkgTokenSpaceGuid.PcdAcpiDefaultCreatorId        ## CONSUMES
   gEfiMdeModulePkgTokenSpaceGuid.PcdAcpiDefaultCreatorRevision  ## CONSUMES
   gEfiMdeModulePkgTokenSpaceGuid.PcdAcpiExposedTableVersions    ## CONSUMES
+  gEfiMdeModulePkgTokenSpaceGuid.PcdNoACPIReclaimMemory         ## CONSUMES
 
 [Protocols]
   gEfiAcpiTableProtocolGuid                     ## PRODUCES

@@ -11,8 +11,8 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
-#include "exec/address-spaces.h"
-#include "sysemu/sysemu.h"
+#include "system/address-spaces.h"
+#include "system/system.h"
 #include "hw/qdev-clock.h"
 #include "hw/misc/unimp.h"
 #include "hw/arm/aspeed_soc.h"
@@ -116,7 +116,7 @@ static void aspeed_soc_ast1030_init(Object *obj)
     char typename[64];
     int i;
 
-    if (sscanf(sc->name, "%7s", socname) != 1) {
+    if (sscanf(object_get_typename(obj), "%7s", socname) != 1) {
         g_assert_not_reached();
     }
 
@@ -415,7 +415,7 @@ static void aspeed_soc_ast1030_realize(DeviceState *dev_soc, Error **errp)
                                   sc->memmap[ASPEED_DEV_JTAG1], 0x20);
 }
 
-static void aspeed_soc_ast1030_class_init(ObjectClass *klass, void *data)
+static void aspeed_soc_ast1030_class_init(ObjectClass *klass, const void *data)
 {
     static const char * const valid_cpu_types[] = {
         ARM_CPU_TYPE_NAME("cortex-m4"), /* TODO cortex-m4f */
@@ -428,7 +428,6 @@ static void aspeed_soc_ast1030_class_init(ObjectClass *klass, void *data)
     dc->user_creatable = false;
     dc->realize = aspeed_soc_ast1030_realize;
 
-    sc->name = "ast1030-a1";
     sc->valid_cpu_types = valid_cpu_types;
     sc->silicon_rev = AST1030_A1_SILICON_REV;
     sc->sram_size = 0xc0000;

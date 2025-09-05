@@ -89,6 +89,7 @@ static int edk2_compat_pre_process(struct list_head *variable_bank,
 		memcpy(tsvar->key, "TS", 3);
 		tsvar->key_len = 3;
 		tsvar->data_size = sizeof(struct efi_time) * 4;
+		tsvar->flags = SECVAR_FLAG_PROTECTED;
 		memset(tsvar->data, 0, tsvar->data_size);
 		list_add_tail(variable_bank, &tsvar->link);
 	}

@@ -266,7 +266,7 @@ static void psi_spurious_fsp_irq(struct psi *psi)
 
 	prlog(PR_NOTICE, "PSI: Spurious interrupt, attempting clear\n");
 
-	if (proc_gen == proc_gen_p10) {
+	if (proc_gen == proc_gen_p10 || proc_gen == proc_gen_p11) {
 		reg = PSIHB_XSCOM_P10_HBCSR_CLR;
 		bit = PSIHB_XSCOM_P10_HBSCR_FSP_IRQ;
 	} else if (proc_gen == proc_gen_p9) {
@@ -520,17 +520,17 @@ static const char *psi_p9_irq_names[P9_PSI_NUM_IRQS] = {
 	"fsp",
 	"occ",
 	"fsi",
-	"lpchc",
+	"lpc-hc",
 	"local_err",
 	"global_err",
 	"external",
-	"lpc_serirq_mux0", /* Have a callback to get name ? */
-	"lpc_serirq_mux1", /* Have a callback to get name ? */
-	"lpc_serirq_mux2", /* Have a callback to get name ? */
-	"lpc_serirq_mux3", /* Have a callback to get name ? */
+	"lpc-mux0-unused",
+	"lpc-mux1-unused",
+	"lpc-mux2-unused",
+	"lpc-mux3-unused",
 	"i2c",
 	"dio",
-	"psu"
+	"psu(sbe)"
 };
 
 static void psi_p9_mask_all(struct psi *psi)
@@ -569,6 +569,7 @@ static void psi_p9_mask_unhandled_irq(struct irq_source *is, uint32_t isn)
 		xive_source_mask(is, isn);
 		break;
 	case proc_gen_p10:
+	case proc_gen_p11:
 		xive2_source_mask(is, isn);
 		return;
 	default:
@@ -623,29 +624,40 @@ static void psihb_p9_interrupt(struct irq_source *is, uint32_t isn)
 	}
 }
 
+static bool is_lpc_serirq(int irq)
+{
+	return (irq == P9_PSI_IRQ_LPC_SIRQ0 ||
+		  irq == P9_PSI_IRQ_LPC_SIRQ1 ||
+		  irq == P9_PSI_IRQ_LPC_SIRQ2 ||
+		  irq == P9_PSI_IRQ_LPC_SIRQ3);
+}
+
+/* PSI SERIRQ to LPC */
+static int lpc_irq_nr(int irq)
+{
+	assert(is_lpc_serirq(irq));
+	return irq - P9_PSI_IRQ_LPC_SIRQ0;
+}
+
 static uint64_t psi_p9_irq_attributes(struct irq_source *is __unused,
 				      uint32_t isn)
 {
 	struct psi *psi = is->data;
-	unsigned int idx = isn & 0xf;
-	bool is_lpc_serirq;
+	uint32_t idx = isn - psi->interrupt;
 
-	 is_lpc_serirq =
-		 (idx == P9_PSI_IRQ_LPC_SIRQ0 ||
-		  idx == P9_PSI_IRQ_LPC_SIRQ1 ||
-		  idx == P9_PSI_IRQ_LPC_SIRQ2 ||
-		  idx == P9_PSI_IRQ_LPC_SIRQ3);
+	assert(idx == (isn & 0xf));
 
-	/* If LPC interrupts are disabled, route them to Linux
-	 * (who will not request them since they aren't referenced
-	 * in the device tree)
-	 */
-	 if (is_lpc_serirq && psi->no_lpc_irqs)
-		return IRQ_ATTR_TARGET_LINUX;
+	if (is_lpc_serirq(idx)) {
+		/* If LPC interrupts are disabled, route them to Linux
+		 * (who will not request them since they aren't referenced
+		 * in the device tree)
+		 */
+		if (psi->no_lpc_irqs)
+			return IRQ_ATTR_TARGET_LINUX;
 
-	 /* For serirq, check the LPC layer for policy */
-	 if (is_lpc_serirq)
-		 return lpc_get_irq_policy(psi->chip_id, idx - P9_PSI_IRQ_LPC_SIRQ0);
+		/* For serirq, check the LPC layer for policy */
+		return lpc_get_irq_policy(psi->chip_id, lpc_irq_nr(idx));
+	}
 
 	/* Only direct external interrupts to OPAL if we have a handler */
 	if (idx == P9_PSI_IRQ_EXTERNAL && !platform.external_irq)
@@ -658,13 +670,20 @@ static char *psi_p9_irq_name(struct irq_source *is, uint32_t isn)
 {
 	struct psi *psi = is->data;
 	uint32_t idx = isn - psi->interrupt;
+	const char *name = NULL;
 	char tmp[30];
 
 	if (idx >= ARRAY_SIZE(psi_p9_irq_names))
 		return NULL;
 
-	snprintf(tmp, sizeof(tmp), "psi#%x:%s",
-		 psi->chip_id, psi_p9_irq_names[idx]);
+	assert(idx == (isn & 0xf));
+
+	if (is_lpc_serirq(idx))
+		name = lpc_get_irq_name(psi->chip_id, lpc_irq_nr(idx));
+	if (!name)
+		name = psi_p9_irq_names[idx];
+
+	snprintf(tmp, sizeof(tmp), "psi#%x:%s", psi->chip_id, name);
 
 	return strdup(tmp);
 }
@@ -836,6 +855,7 @@ static void psi_init_interrupts(struct psi *psi)
 		psi_init_p9_interrupts(psi);
 		break;
 	case proc_gen_p10:
+	case proc_gen_p11:
 		psi_init_p10_interrupts(psi);
 		break;
 	default:
@@ -879,8 +899,6 @@ static void psi_activate_phb(struct psi *psi)
 	       in_be64(psi->regs + PSIHB_CR));
 	printf("  PSIHB_SEMR   : %llx\n",
 	       in_be64(psi->regs + PSIHB_SEMR));
-	printf("  PSIHB_XIVR   : %llx\n",
-	       in_be64(psi->regs + PSIHB_XIVR));
 #endif
 }
 
@@ -918,6 +936,7 @@ static void psi_create_mm_dtnode(struct psi *psi)
 		break;
 	case proc_gen_p9:
 	case proc_gen_p10:
+	case proc_gen_p11:
 		dt_add_property_strings(np, "compatible", "ibm,psi",
 					"ibm,power9-psi");
 		psi_create_p9_int_map(psi, np);
@@ -1022,6 +1041,8 @@ static bool psi_init_psihb(struct dt_node *psihb)
 	else if (dt_node_is_compatible(psihb, "ibm,power9-psihb-x"))
 		psi = psi_probe_p9(chip, base);
 	else if (dt_node_is_compatible(psihb, "ibm,power10-psihb-x"))
+		psi = psi_probe_p10(chip, base);
+	else if (dt_node_is_compatible(psihb, "ibm,power11-psihb-x"))
 		psi = psi_probe_p10(chip, base);
 	else {
 		prerror("PSI: Unknown processor type\n");

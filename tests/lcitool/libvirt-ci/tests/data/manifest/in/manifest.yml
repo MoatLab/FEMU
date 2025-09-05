@@ -46,9 +46,4 @@ targets:
 
   freebsd-current: x86_64
 
-  macos-12:
-    jobs:
-      - arch: aarch64
-        builds: false
-
-  macos-13: aarch64
+  macos-14: aarch64

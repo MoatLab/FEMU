@@ -39,7 +39,7 @@ static char memory[MEMSIZE];
 static void *memptr=memory;
 static int memsize=MEMSIZE;
 
-void *malloc(int size)
+void *malloc(size_t size)
 {
 	void *ret=(void *)0;
 	if(memsize>=size) {

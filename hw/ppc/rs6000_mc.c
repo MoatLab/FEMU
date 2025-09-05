@@ -3,10 +3,12 @@
  *
  * Copyright (c) 2017 Hervé Poussineau
  *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 2 of the License, or
- * (at your option) version 3 or any later version.
+ * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -22,7 +24,7 @@
 #include "hw/isa/isa.h"
 #include "hw/qdev-properties.h"
 #include "migration/vmstate.h"
-#include "exec/address-spaces.h"
+#include "system/address-spaces.h"
 #include "qapi/error.h"
 #include "trace.h"
 #include "qom/object.h"
@@ -205,13 +207,12 @@ static const VMStateDescription vmstate_rs6000mc = {
     },
 };
 
-static Property rs6000mc_properties[] = {
+static const Property rs6000mc_properties[] = {
     DEFINE_PROP_UINT32("ram-size", RS6000MCState, ram_size, 0),
     DEFINE_PROP_BOOL("auto-configure", RS6000MCState, autoconfigure, true),
-    DEFINE_PROP_END_OF_LIST()
 };
 
-static void rs6000mc_class_initfn(ObjectClass *klass, void *data)
+static void rs6000mc_class_initfn(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 

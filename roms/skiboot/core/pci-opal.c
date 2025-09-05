@@ -307,42 +307,6 @@ static int64_t opal_pci_set_peltv(uint64_t phb_id, uint32_t parent_pe,
 }
 opal_call(OPAL_PCI_SET_PELTV, opal_pci_set_peltv, 4);
 
-static int64_t opal_pci_set_mve(uint64_t phb_id, uint32_t mve_number,
-				uint64_t pe_number)
-{
-	struct phb *phb = pci_get_phb(phb_id);
-	int64_t rc;
-
-	if (!phb)
-		return OPAL_PARAMETER;
-	if (!phb->ops->set_mve)
-		return OPAL_UNSUPPORTED;
-	phb_lock(phb);
-	rc = phb->ops->set_mve(phb, mve_number, pe_number);
-	phb_unlock(phb);
-
-	return rc;
-}
-opal_call(OPAL_PCI_SET_MVE, opal_pci_set_mve, 3);
-
-static int64_t opal_pci_set_mve_enable(uint64_t phb_id, uint32_t mve_number,
-				       uint32_t state)
-{
-	struct phb *phb = pci_get_phb(phb_id);
-	int64_t rc;
-
-	if (!phb)
-		return OPAL_PARAMETER;
-	if (!phb->ops->set_mve_enable)
-		return OPAL_UNSUPPORTED;
-	phb_lock(phb);
-	rc = phb->ops->set_mve_enable(phb, mve_number, state);
-	phb_unlock(phb);
-
-	return rc;
-}
-opal_call(OPAL_PCI_SET_MVE_ENABLE, opal_pci_set_mve_enable, 3);
-
 static int64_t opal_pci_msi_eoi(uint64_t phb_id,
 				uint32_t hwirq)
 {

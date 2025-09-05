@@ -147,7 +147,7 @@ static inline bool is_phb4(void)
 
 static inline bool is_phb5(void)
 {
-	return (proc_gen == proc_gen_p10);
+	return (proc_gen == proc_gen_p10 || proc_gen == proc_gen_p11);
 }
 
 /* PQ offloading on the XIVE IC. */
@@ -1950,11 +1950,11 @@ static void phb4_read_phb_status(struct phb4 *p,
 
 
 	/* PEC NFIR, same as P8/PHB3 */
-	xscom_read(p->chip_id, p->pe_stk_xscom + 0x0, &__64);
+	xscom_read(p->chip_id, p->pe_stk_xscom + XPEC_NEST_STK_PCI_NFIR, &__64);
 	stat->nFir = cpu_to_be64(__64);
-	xscom_read(p->chip_id, p->pe_stk_xscom + 0x3, &__64);
+	xscom_read(p->chip_id, p->pe_stk_xscom + XPEC_NEST_STK_PCI_NFIR_MSK, &__64);
 	stat->nFirMask = cpu_to_be64(__64);
-	xscom_read(p->chip_id, p->pe_stk_xscom + 0x8, &__64);
+	xscom_read(p->chip_id, p->pe_stk_xscom + XPEC_NEST_STK_PCI_NFIR_WOF, &__64);
 	stat->nFirWOF = cpu_to_be64(__64);
 
 	/* PHB4 inbound and outbound error Regs */
@@ -2959,6 +2959,10 @@ static int64_t phb4_poll_link(struct pci_slot *slot)
 			PHBDBG(p, "LINK: Link is up\n");
 			phb4_prepare_link_change(slot, true);
 			pci_slot_set_state(slot, PHB4_SLOT_LINK_STABLE);
+			if (chip_quirk(QUIRK_QEMU)) {
+				/* QEMU doesn't need to wait */
+				return OPAL_SUCCESS;
+			}
 			return pci_slot_set_sm_timeout(slot, secs_to_tb(1));
 		}
 
@@ -3508,7 +3512,8 @@ static int64_t phb4_creset(struct pci_slot *slot)
 
 		phb4_prepare_link_change(slot, false);
 		/* Clear error inject register, preventing recursive errors */
-		xscom_write(p->chip_id, p->pe_xscom + 0x2, 0x0);
+		xscom_write(p->chip_id, p->pe_xscom + XPEC_NEST_PBCQ_ERR_INJECT,
+			    0x0);
 
 		/* Prevent HMI when PHB gets fenced as we are disabling CAPP */
 		if (p->flags & PHB4_CAPP_DISABLE &&
@@ -3522,7 +3527,8 @@ static int64_t phb4_creset(struct pci_slot *slot)
 
 		/* Force fence on the PHB to work around a non-existent PE */
 		if (!phb4_fenced(p))
-			xscom_write(p->chip_id, p->pe_stk_xscom + 0x2,
+			xscom_write(p->chip_id,
+				    p->pe_stk_xscom + XPEC_NEST_STK_PCI_NFIR_SET,
 				    0x0000002000000000UL);
 
 		/*
@@ -3543,8 +3549,10 @@ static int64_t phb4_creset(struct pci_slot *slot)
 			    0x8000000000000000UL);
 
 		/* Read errors in PFIR and NFIR */
-		xscom_read(p->chip_id, p->pci_stk_xscom + 0x0, &p->pfir_cache);
-		xscom_read(p->chip_id, p->pe_stk_xscom + 0x0, &p->nfir_cache);
+		xscom_read(p->chip_id, p->pci_stk_xscom + XPEC_PCI_STK_PCI_FIR,
+			   &p->pfir_cache);
+		xscom_read(p->chip_id, p->pe_stk_xscom + XPEC_NEST_STK_PCI_NFIR,
+			   &p->nfir_cache);
 
 		pci_slot_set_state(slot, PHB4_SLOT_CRESET_WAIT_CQ);
 		slot->retries = 500;
@@ -3552,7 +3560,9 @@ static int64_t phb4_creset(struct pci_slot *slot)
 	case PHB4_SLOT_CRESET_WAIT_CQ:
 
 		// Wait until operations are complete
-		xscom_read(p->chip_id, p->pe_stk_xscom + 0xc, &pbcq_status);
+		xscom_read(p->chip_id,
+			   p->pe_stk_xscom + XPEC_NEST_STK_PBCQ_STAT,
+			   &pbcq_status);
 		if (!(pbcq_status & 0xC000000000000000UL)) {
 			PHBDBG(p, "CRESET: No pending transactions\n");
 
@@ -3565,13 +3575,24 @@ static int64_t phb4_creset(struct pci_slot *slot)
 				disable_capi_mode(p);
 
 			/* Clear errors in PFIR and NFIR */
-			xscom_write(p->chip_id, p->pci_stk_xscom + 0x1,
-				    ~p->pfir_cache);
-			xscom_write(p->chip_id, p->pe_stk_xscom + 0x1,
-				    ~p->nfir_cache);
+			xscom_write(p->chip_id, p->pci_stk_xscom +
+				    XPEC_PCI_STK_PCI_FIR_CLR, ~p->pfir_cache);
+			xscom_write(p->chip_id, p->pe_stk_xscom +
+				    XPEC_NEST_STK_PCI_NFIR_CLR, ~p->nfir_cache);
 
-			/* Re-read errors in PFIR and NFIR and reset any new
-			 * error reported.
+			/* Clear PHB from reset */
+			xscom_write(p->chip_id,
+				    p->pci_stk_xscom + XPEC_PCI_STK_ETU_RESET, 0x0);
+			p->flags &= ~PHB4_ETU_IN_RESET;
+
+			/*
+			 * Re-read errors in PFIR and NFIR and reset
+			 * any new error reported while the ETU was in
+			 * reset.
+			 * A xscom access when the ETU is in reset
+			 * will set PFIR bit 3 and the OCC is known to
+			 * access PHB performance counters, so such an
+			 * error is not uncommon.
 			 */
 			xscom_read(p->chip_id, p->pci_stk_xscom +
 				   XPEC_PCI_STK_PCI_FIR, &p->pfir_cache);
@@ -3579,20 +3600,13 @@ static int64_t phb4_creset(struct pci_slot *slot)
 				   XPEC_NEST_STK_PCI_NFIR, &p->nfir_cache);
 
 			if (p->pfir_cache || p->nfir_cache) {
-				PHBERR(p, "CRESET: PHB still fenced !!\n");
-				phb4_dump_pec_err_regs(p);
-
-				/* Reset the PHB errors */
 				xscom_write(p->chip_id, p->pci_stk_xscom +
-					    XPEC_PCI_STK_PCI_FIR, 0);
+					    XPEC_PCI_STK_PCI_FIR_CLR,
+					    ~p->pfir_cache);
 				xscom_write(p->chip_id, p->pe_stk_xscom +
-					    XPEC_NEST_STK_PCI_NFIR, 0);
+					    XPEC_NEST_STK_PCI_NFIR_CLR,
+					    ~p->nfir_cache);
 			}
-
-			/* Clear PHB from reset */
-			xscom_write(p->chip_id,
-				    p->pci_stk_xscom + XPEC_PCI_STK_ETU_RESET, 0x0);
-			p->flags &= ~PHB4_ETU_IN_RESET;
 
 			pci_slot_set_state(slot, PHB4_SLOT_CRESET_REINIT);
 			/* After lifting PHB reset, wait while logic settles */
@@ -6368,7 +6382,7 @@ static void phb4_probe_pbcq(struct dt_node *pbcq)
 	}
 }
 
-void probe_phb4(void)
+static void probe_phb4(void)
 {
 	struct dt_node *np;
 	const char *s;
@@ -6404,3 +6418,5 @@ void probe_phb4(void)
 			phb4_create(np);
 	}
 }
+
+DEFINE_HWPROBE(phb4, probe_phb4);

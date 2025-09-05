@@ -32,7 +32,7 @@
 #include "qemu/timer.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
-#include "exec/address-spaces.h"
+#include "system/address-spaces.h"
 #include "trace.h"
 #include "qom/object.h"
 
@@ -701,13 +701,13 @@ static void rc4030_unrealize(DeviceState *dev)
     object_unparent(OBJECT(&s->dma_mr));
 }
 
-static void rc4030_class_init(ObjectClass *klass, void *class_data)
+static void rc4030_class_init(ObjectClass *klass, const void *class_data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = rc4030_realize;
     dc->unrealize = rc4030_unrealize;
-    dc->reset = rc4030_reset;
+    device_class_set_legacy_reset(dc, rc4030_reset);
     dc->vmsd = &vmstate_rc4030;
 }
 
@@ -720,7 +720,7 @@ static const TypeInfo rc4030_info = {
 };
 
 static void rc4030_iommu_memory_region_class_init(ObjectClass *klass,
-                                                  void *data)
+                                                  const void *data)
 {
     IOMMUMemoryRegionClass *imrc = IOMMU_MEMORY_REGION_CLASS(klass);
 

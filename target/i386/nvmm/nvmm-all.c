@@ -9,16 +9,19 @@
 
 #include "qemu/osdep.h"
 #include "cpu.h"
-#include "exec/address-spaces.h"
-#include "exec/ioport.h"
+#include "system/address-spaces.h"
+#include "system/ioport.h"
 #include "qemu/accel.h"
-#include "sysemu/nvmm.h"
-#include "sysemu/cpus.h"
-#include "sysemu/runstate.h"
+#include "accel/accel-ops.h"
+#include "system/nvmm.h"
+#include "system/cpus.h"
+#include "system/runstate.h"
 #include "qemu/main-loop.h"
 #include "qemu/error-report.h"
 #include "qapi/error.h"
 #include "qemu/queue.h"
+#include "accel/accel-cpu-target.h"
+#include "host-cpu.h"
 #include "migration/blocker.h"
 #include "strings.h"
 
@@ -46,7 +49,7 @@ struct qemu_machine {
 
 /* -------------------------------------------------------------------------- */
 
-static bool nvmm_allowed;
+bool nvmm_allowed;
 static struct qemu_machine qemu_mach;
 
 static struct nvmm_machine *
@@ -981,7 +984,7 @@ nvmm_init_vcpu(CPUState *cpu)
         }
     }
 
-    cpu->vcpu_dirty = true;
+    qcpu->vcpu_dirty = true;
     cpu->accel = qcpu;
 
     return 0;
@@ -1152,7 +1155,7 @@ static struct RAMBlockNotifier nvmm_ram_notifier = {
 /* -------------------------------------------------------------------------- */
 
 static int
-nvmm_accel_init(MachineState *ms)
+nvmm_accel_init(AccelState *as, MachineState *ms)
 {
     int ret, err;
 
@@ -1192,14 +1195,8 @@ nvmm_accel_init(MachineState *ms)
     return 0;
 }
 
-int
-nvmm_enabled(void)
-{
-    return nvmm_allowed;
-}
-
 static void
-nvmm_accel_class_init(ObjectClass *oc, void *data)
+nvmm_accel_class_init(ObjectClass *oc, const void *data)
 {
     AccelClass *ac = ACCEL_CLASS(oc);
     ac->name = "NVMM";
@@ -1213,10 +1210,33 @@ static const TypeInfo nvmm_accel_type = {
     .class_init = nvmm_accel_class_init,
 };
 
+static void nvmm_cpu_instance_init(CPUState *cs)
+{
+    X86CPU *cpu = X86_CPU(cs);
+
+    host_cpu_instance_init(cpu);
+}
+
+static void nvmm_cpu_accel_class_init(ObjectClass *oc, const void *data)
+{
+    AccelCPUClass *acc = ACCEL_CPU_CLASS(oc);
+
+    acc->cpu_instance_init = nvmm_cpu_instance_init;
+}
+
+static const TypeInfo nvmm_cpu_accel_type = {
+    .name = ACCEL_CPU_NAME("nvmm"),
+
+    .parent = TYPE_ACCEL_CPU,
+    .class_init = nvmm_cpu_accel_class_init,
+    .abstract = true,
+};
+
 static void
 nvmm_type_init(void)
 {
     type_register_static(&nvmm_accel_type);
+    type_register_static(&nvmm_cpu_accel_type);
 }
 
 type_init(nvmm_type_init);

@@ -28,12 +28,20 @@
 #include "qemu/bitops.h"
 #include "internals.h"
 #include "qemu/crc32c.h"
-#include "exec/exec-all.h"
-#include "exec/cpu_ldst.h"
+#include "exec/cpu-common.h"
+#include "accel/tcg/cpu-ldst.h"
+#include "accel/tcg/helper-retaddr.h"
+#include "accel/tcg/probe.h"
+#include "exec/target_page.h"
+#include "exec/tlb-flags.h"
 #include "qemu/int128.h"
 #include "qemu/atomic128.h"
 #include "fpu/softfloat.h"
-#include <zlib.h> /* For crc32 */
+#include <zlib.h> /* for crc32 */
+#ifdef CONFIG_USER_ONLY
+#include "user/page-protection.h"
+#endif
+#include "vec_internal.h"
 
 /* C2.4.7 Multiply and divide */
 /* special cases for 0 and LLONG_MIN are mandated by the standard */
@@ -64,6 +72,18 @@ uint64_t HELPER(rbit64)(uint64_t x)
 void HELPER(msr_i_spsel)(CPUARMState *env, uint32_t imm)
 {
     update_spsel(env, imm);
+}
+
+void HELPER(msr_set_allint_el1)(CPUARMState *env)
+{
+    /* ALLINT update to PSTATE. */
+    if (arm_hcrx_el2_eff(env) & HCRX_TALLINT) {
+        raise_exception_ra(env, EXCP_UDEF,
+                           syn_aa64_sysregtrap(0, 1, 0, 4, 1, 0x1f, 0), 2,
+                           GETPC());
+    }
+
+    env->pstate |= PSTATE_ALLINT;
 }
 
 static void daif_check(CPUARMState *env, uint32_t op,
@@ -118,40 +138,38 @@ static inline uint32_t float_rel_to_flags(int res)
     return flags;
 }
 
-uint64_t HELPER(vfp_cmph_a64)(uint32_t x, uint32_t y, void *fp_status)
+uint64_t HELPER(vfp_cmph_a64)(uint32_t x, uint32_t y, float_status *fp_status)
 {
     return float_rel_to_flags(float16_compare_quiet(x, y, fp_status));
 }
 
-uint64_t HELPER(vfp_cmpeh_a64)(uint32_t x, uint32_t y, void *fp_status)
+uint64_t HELPER(vfp_cmpeh_a64)(uint32_t x, uint32_t y, float_status *fp_status)
 {
     return float_rel_to_flags(float16_compare(x, y, fp_status));
 }
 
-uint64_t HELPER(vfp_cmps_a64)(float32 x, float32 y, void *fp_status)
+uint64_t HELPER(vfp_cmps_a64)(float32 x, float32 y, float_status *fp_status)
 {
     return float_rel_to_flags(float32_compare_quiet(x, y, fp_status));
 }
 
-uint64_t HELPER(vfp_cmpes_a64)(float32 x, float32 y, void *fp_status)
+uint64_t HELPER(vfp_cmpes_a64)(float32 x, float32 y, float_status *fp_status)
 {
     return float_rel_to_flags(float32_compare(x, y, fp_status));
 }
 
-uint64_t HELPER(vfp_cmpd_a64)(float64 x, float64 y, void *fp_status)
+uint64_t HELPER(vfp_cmpd_a64)(float64 x, float64 y, float_status *fp_status)
 {
     return float_rel_to_flags(float64_compare_quiet(x, y, fp_status));
 }
 
-uint64_t HELPER(vfp_cmped_a64)(float64 x, float64 y, void *fp_status)
+uint64_t HELPER(vfp_cmped_a64)(float64 x, float64 y, float_status *fp_status)
 {
     return float_rel_to_flags(float64_compare(x, y, fp_status));
 }
 
-float32 HELPER(vfp_mulxs)(float32 a, float32 b, void *fpstp)
+float32 HELPER(vfp_mulxs)(float32 a, float32 b, float_status *fpst)
 {
-    float_status *fpst = fpstp;
-
     a = float32_squash_input_denormal(a, fpst);
     b = float32_squash_input_denormal(b, fpst);
 
@@ -164,10 +182,8 @@ float32 HELPER(vfp_mulxs)(float32 a, float32 b, void *fpstp)
     return float32_mul(a, b, fpst);
 }
 
-float64 HELPER(vfp_mulxd)(float64 a, float64 b, void *fpstp)
+float64 HELPER(vfp_mulxd)(float64 a, float64 b, float_status *fpst)
 {
-    float_status *fpst = fpstp;
-
     a = float64_squash_input_denormal(a, fpst);
     b = float64_squash_input_denormal(b, fpst);
 
@@ -181,184 +197,71 @@ float64 HELPER(vfp_mulxd)(float64 a, float64 b, void *fpstp)
 }
 
 /* 64bit/double versions of the neon float compare functions */
-uint64_t HELPER(neon_ceq_f64)(float64 a, float64 b, void *fpstp)
+uint64_t HELPER(neon_ceq_f64)(float64 a, float64 b, float_status *fpst)
 {
-    float_status *fpst = fpstp;
     return -float64_eq_quiet(a, b, fpst);
 }
 
-uint64_t HELPER(neon_cge_f64)(float64 a, float64 b, void *fpstp)
+uint64_t HELPER(neon_cge_f64)(float64 a, float64 b, float_status *fpst)
 {
-    float_status *fpst = fpstp;
     return -float64_le(b, a, fpst);
 }
 
-uint64_t HELPER(neon_cgt_f64)(float64 a, float64 b, void *fpstp)
+uint64_t HELPER(neon_cgt_f64)(float64 a, float64 b, float_status *fpst)
 {
-    float_status *fpst = fpstp;
     return -float64_lt(b, a, fpst);
 }
 
-/* Reciprocal step and sqrt step. Note that unlike the A32/T32
+/*
+ * Reciprocal step and sqrt step. Note that unlike the A32/T32
  * versions, these do a fully fused multiply-add or
  * multiply-add-and-halve.
+ * The FPCR.AH == 1 versions need to avoid flipping the sign of NaN.
  */
-
-uint32_t HELPER(recpsf_f16)(uint32_t a, uint32_t b, void *fpstp)
-{
-    float_status *fpst = fpstp;
-
-    a = float16_squash_input_denormal(a, fpst);
-    b = float16_squash_input_denormal(b, fpst);
-
-    a = float16_chs(a);
-    if ((float16_is_infinity(a) && float16_is_zero(b)) ||
-        (float16_is_infinity(b) && float16_is_zero(a))) {
-        return float16_two;
+#define DO_RECPS(NAME, CTYPE, FLOATTYPE, CHSFN)                         \
+    CTYPE HELPER(NAME)(CTYPE a, CTYPE b, float_status *fpst)            \
+    {                                                                   \
+        a = FLOATTYPE ## _squash_input_denormal(a, fpst);               \
+        b = FLOATTYPE ## _squash_input_denormal(b, fpst);               \
+        a = FLOATTYPE ## _ ## CHSFN(a);                                 \
+        if ((FLOATTYPE ## _is_infinity(a) && FLOATTYPE ## _is_zero(b)) || \
+            (FLOATTYPE ## _is_infinity(b) && FLOATTYPE ## _is_zero(a))) { \
+            return FLOATTYPE ## _two;                                   \
+        }                                                               \
+        return FLOATTYPE ## _muladd(a, b, FLOATTYPE ## _two, 0, fpst);  \
     }
-    return float16_muladd(a, b, float16_two, 0, fpst);
-}
 
-float32 HELPER(recpsf_f32)(float32 a, float32 b, void *fpstp)
-{
-    float_status *fpst = fpstp;
+DO_RECPS(recpsf_f16, uint32_t, float16, chs)
+DO_RECPS(recpsf_f32, float32, float32, chs)
+DO_RECPS(recpsf_f64, float64, float64, chs)
+DO_RECPS(recpsf_ah_f16, uint32_t, float16, ah_chs)
+DO_RECPS(recpsf_ah_f32, float32, float32, ah_chs)
+DO_RECPS(recpsf_ah_f64, float64, float64, ah_chs)
 
-    a = float32_squash_input_denormal(a, fpst);
-    b = float32_squash_input_denormal(b, fpst);
+#define DO_RSQRTSF(NAME, CTYPE, FLOATTYPE, CHSFN)                       \
+    CTYPE HELPER(NAME)(CTYPE a, CTYPE b, float_status *fpst)            \
+    {                                                                   \
+        a = FLOATTYPE ## _squash_input_denormal(a, fpst);               \
+        b = FLOATTYPE ## _squash_input_denormal(b, fpst);               \
+        a = FLOATTYPE ## _ ## CHSFN(a);                                 \
+        if ((FLOATTYPE ## _is_infinity(a) && FLOATTYPE ## _is_zero(b)) || \
+            (FLOATTYPE ## _is_infinity(b) && FLOATTYPE ## _is_zero(a))) { \
+            return FLOATTYPE ## _one_point_five;                        \
+        }                                                               \
+        return FLOATTYPE ## _muladd_scalbn(a, b, FLOATTYPE ## _three,   \
+                                           -1, 0, fpst);                \
+    }                                                                   \
 
-    a = float32_chs(a);
-    if ((float32_is_infinity(a) && float32_is_zero(b)) ||
-        (float32_is_infinity(b) && float32_is_zero(a))) {
-        return float32_two;
-    }
-    return float32_muladd(a, b, float32_two, 0, fpst);
-}
-
-float64 HELPER(recpsf_f64)(float64 a, float64 b, void *fpstp)
-{
-    float_status *fpst = fpstp;
-
-    a = float64_squash_input_denormal(a, fpst);
-    b = float64_squash_input_denormal(b, fpst);
-
-    a = float64_chs(a);
-    if ((float64_is_infinity(a) && float64_is_zero(b)) ||
-        (float64_is_infinity(b) && float64_is_zero(a))) {
-        return float64_two;
-    }
-    return float64_muladd(a, b, float64_two, 0, fpst);
-}
-
-uint32_t HELPER(rsqrtsf_f16)(uint32_t a, uint32_t b, void *fpstp)
-{
-    float_status *fpst = fpstp;
-
-    a = float16_squash_input_denormal(a, fpst);
-    b = float16_squash_input_denormal(b, fpst);
-
-    a = float16_chs(a);
-    if ((float16_is_infinity(a) && float16_is_zero(b)) ||
-        (float16_is_infinity(b) && float16_is_zero(a))) {
-        return float16_one_point_five;
-    }
-    return float16_muladd(a, b, float16_three, float_muladd_halve_result, fpst);
-}
-
-float32 HELPER(rsqrtsf_f32)(float32 a, float32 b, void *fpstp)
-{
-    float_status *fpst = fpstp;
-
-    a = float32_squash_input_denormal(a, fpst);
-    b = float32_squash_input_denormal(b, fpst);
-
-    a = float32_chs(a);
-    if ((float32_is_infinity(a) && float32_is_zero(b)) ||
-        (float32_is_infinity(b) && float32_is_zero(a))) {
-        return float32_one_point_five;
-    }
-    return float32_muladd(a, b, float32_three, float_muladd_halve_result, fpst);
-}
-
-float64 HELPER(rsqrtsf_f64)(float64 a, float64 b, void *fpstp)
-{
-    float_status *fpst = fpstp;
-
-    a = float64_squash_input_denormal(a, fpst);
-    b = float64_squash_input_denormal(b, fpst);
-
-    a = float64_chs(a);
-    if ((float64_is_infinity(a) && float64_is_zero(b)) ||
-        (float64_is_infinity(b) && float64_is_zero(a))) {
-        return float64_one_point_five;
-    }
-    return float64_muladd(a, b, float64_three, float_muladd_halve_result, fpst);
-}
-
-/* Pairwise long add: add pairs of adjacent elements into
- * double-width elements in the result (eg _s8 is an 8x8->16 op)
- */
-uint64_t HELPER(neon_addlp_s8)(uint64_t a)
-{
-    uint64_t nsignmask = 0x0080008000800080ULL;
-    uint64_t wsignmask = 0x8000800080008000ULL;
-    uint64_t elementmask = 0x00ff00ff00ff00ffULL;
-    uint64_t tmp1, tmp2;
-    uint64_t res, signres;
-
-    /* Extract odd elements, sign extend each to a 16 bit field */
-    tmp1 = a & elementmask;
-    tmp1 ^= nsignmask;
-    tmp1 |= wsignmask;
-    tmp1 = (tmp1 - nsignmask) ^ wsignmask;
-    /* Ditto for the even elements */
-    tmp2 = (a >> 8) & elementmask;
-    tmp2 ^= nsignmask;
-    tmp2 |= wsignmask;
-    tmp2 = (tmp2 - nsignmask) ^ wsignmask;
-
-    /* calculate the result by summing bits 0..14, 16..22, etc,
-     * and then adjusting the sign bits 15, 23, etc manually.
-     * This ensures the addition can't overflow the 16 bit field.
-     */
-    signres = (tmp1 ^ tmp2) & wsignmask;
-    res = (tmp1 & ~wsignmask) + (tmp2 & ~wsignmask);
-    res ^= signres;
-
-    return res;
-}
-
-uint64_t HELPER(neon_addlp_u8)(uint64_t a)
-{
-    uint64_t tmp;
-
-    tmp = a & 0x00ff00ff00ff00ffULL;
-    tmp += (a >> 8) & 0x00ff00ff00ff00ffULL;
-    return tmp;
-}
-
-uint64_t HELPER(neon_addlp_s16)(uint64_t a)
-{
-    int32_t reslo, reshi;
-
-    reslo = (int32_t)(int16_t)a + (int32_t)(int16_t)(a >> 16);
-    reshi = (int32_t)(int16_t)(a >> 32) + (int32_t)(int16_t)(a >> 48);
-
-    return (uint32_t)reslo | (((uint64_t)reshi) << 32);
-}
-
-uint64_t HELPER(neon_addlp_u16)(uint64_t a)
-{
-    uint64_t tmp;
-
-    tmp = a & 0x0000ffff0000ffffULL;
-    tmp += (a >> 16) & 0x0000ffff0000ffffULL;
-    return tmp;
-}
+DO_RSQRTSF(rsqrtsf_f16, uint32_t, float16, chs)
+DO_RSQRTSF(rsqrtsf_f32, float32, float32, chs)
+DO_RSQRTSF(rsqrtsf_f64, float64, float64, chs)
+DO_RSQRTSF(rsqrtsf_ah_f16, uint32_t, float16, ah_chs)
+DO_RSQRTSF(rsqrtsf_ah_f32, float32, float32, ah_chs)
+DO_RSQRTSF(rsqrtsf_ah_f64, float64, float64, ah_chs)
 
 /* Floating-point reciprocal exponent - see FPRecpX in ARM ARM */
-uint32_t HELPER(frecpx_f16)(uint32_t a, void *fpstp)
+uint32_t HELPER(frecpx_f16)(uint32_t a, float_status *fpst)
 {
-    float_status *fpst = fpstp;
     uint16_t val16, sbit;
     int16_t exp;
 
@@ -389,9 +292,8 @@ uint32_t HELPER(frecpx_f16)(uint32_t a, void *fpstp)
     }
 }
 
-float32 HELPER(frecpx_f32)(float32 a, void *fpstp)
+float32 HELPER(frecpx_f32)(float32 a, float_status *fpst)
 {
-    float_status *fpst = fpstp;
     uint32_t val32, sbit;
     int32_t exp;
 
@@ -422,9 +324,8 @@ float32 HELPER(frecpx_f32)(float32 a, void *fpstp)
     }
 }
 
-float64 HELPER(frecpx_f64)(float64 a, void *fpstp)
+float64 HELPER(frecpx_f64)(float64 a, float_status *fpst)
 {
-    float_status *fpst = fpstp;
     uint64_t val64, sbit;
     int64_t exp;
 
@@ -455,27 +356,54 @@ float64 HELPER(frecpx_f64)(float64 a, void *fpstp)
     }
 }
 
-float32 HELPER(fcvtx_f64_to_f32)(float64 a, CPUARMState *env)
+float32 HELPER(fcvtx_f64_to_f32)(float64 a, float_status *fpst)
 {
-    /* Von Neumann rounding is implemented by using round-to-zero
-     * and then setting the LSB of the result if Inexact was raised.
-     */
     float32 r;
-    float_status *fpst = &env->vfp.fp_status;
-    float_status tstat = *fpst;
-    int exflags;
+    int old = get_float_rounding_mode(fpst);
 
-    set_float_rounding_mode(float_round_to_zero, &tstat);
-    set_float_exception_flags(0, &tstat);
-    r = float64_to_float32(a, &tstat);
-    exflags = get_float_exception_flags(&tstat);
-    if (exflags & float_flag_inexact) {
-        r = make_float32(float32_val(r) | 1);
-    }
-    exflags |= get_float_exception_flags(fpst);
-    set_float_exception_flags(exflags, fpst);
+    set_float_rounding_mode(float_round_to_odd, fpst);
+    r = float64_to_float32(a, fpst);
+    set_float_rounding_mode(old, fpst);
     return r;
 }
+
+/*
+ * AH=1 min/max have some odd special cases:
+ * comparing two zeroes (regardless of sign), (NaN, anything),
+ * or (anything, NaN) should return the second argument (possibly
+ * squashed to zero).
+ * Also, denormal outputs are not squashed to zero regardless of FZ or FZ16.
+ */
+#define AH_MINMAX_HELPER(NAME, CTYPE, FLOATTYPE, MINMAX)                \
+    CTYPE HELPER(NAME)(CTYPE a, CTYPE b, float_status *fpst)            \
+    {                                                                   \
+        bool save;                                                      \
+        CTYPE r;                                                        \
+        a = FLOATTYPE ## _squash_input_denormal(a, fpst);               \
+        b = FLOATTYPE ## _squash_input_denormal(b, fpst);               \
+        if (FLOATTYPE ## _is_zero(a) && FLOATTYPE ## _is_zero(b)) {     \
+            return b;                                                   \
+        }                                                               \
+        if (FLOATTYPE ## _is_any_nan(a) ||                              \
+            FLOATTYPE ## _is_any_nan(b)) {                              \
+            float_raise(float_flag_invalid, fpst);                      \
+            return b;                                                   \
+        }                                                               \
+        save = get_flush_to_zero(fpst);                                 \
+        set_flush_to_zero(false, fpst);                                 \
+        r = FLOATTYPE ## _ ## MINMAX(a, b, fpst);                       \
+        set_flush_to_zero(save, fpst);                                  \
+        return r;                                                       \
+    }
+
+AH_MINMAX_HELPER(vfp_ah_minh, dh_ctype_f16, float16, min)
+AH_MINMAX_HELPER(vfp_ah_mins, float32, float32, min)
+AH_MINMAX_HELPER(vfp_ah_mind, float64, float64, min)
+AH_MINMAX_HELPER(vfp_ah_maxh, dh_ctype_f16, float16, max)
+AH_MINMAX_HELPER(vfp_ah_maxs, float32, float32, max)
+AH_MINMAX_HELPER(vfp_ah_maxd, float64, float64, max)
+AH_MINMAX_HELPER(sme2_ah_fmax_b16, bfloat16, bfloat16, max)
+AH_MINMAX_HELPER(sme2_ah_fmin_b16, bfloat16, bfloat16, min)
 
 /* 64-bit versions of the CRC helpers. Note that although the operation
  * (and the prototypes of crc32c() and crc32() mean that only the bottom
@@ -512,27 +440,17 @@ uint64_t HELPER(crc32c_64)(uint64_t acc, uint64_t val, uint32_t bytes)
 #define ADVSIMD_HELPER(name, suffix) HELPER(glue(glue(advsimd_, name), suffix))
 
 #define ADVSIMD_HALFOP(name) \
-uint32_t ADVSIMD_HELPER(name, h)(uint32_t a, uint32_t b, void *fpstp) \
+uint32_t ADVSIMD_HELPER(name, h)(uint32_t a, uint32_t b, float_status *fpst) \
 { \
-    float_status *fpst = fpstp; \
     return float16_ ## name(a, b, fpst);    \
 }
 
-ADVSIMD_HALFOP(add)
-ADVSIMD_HALFOP(sub)
-ADVSIMD_HALFOP(mul)
-ADVSIMD_HALFOP(div)
-ADVSIMD_HALFOP(min)
-ADVSIMD_HALFOP(max)
-ADVSIMD_HALFOP(minnum)
-ADVSIMD_HALFOP(maxnum)
-
 #define ADVSIMD_TWOHALFOP(name)                                         \
-uint32_t ADVSIMD_HELPER(name, 2h)(uint32_t two_a, uint32_t two_b, void *fpstp) \
+uint32_t ADVSIMD_HELPER(name, 2h)(uint32_t two_a, uint32_t two_b,       \
+                                  float_status *fpst)                   \
 { \
     float16  a1, a2, b1, b2;                        \
     uint32_t r1, r2;                                \
-    float_status *fpst = fpstp;                     \
     a1 = extract32(two_a, 0, 16);                   \
     a2 = extract32(two_a, 16, 16);                  \
     b1 = extract32(two_b, 0, 16);                   \
@@ -552,10 +470,8 @@ ADVSIMD_TWOHALFOP(minnum)
 ADVSIMD_TWOHALFOP(maxnum)
 
 /* Data processing - scalar floating-point and advanced SIMD */
-static float16 float16_mulx(float16 a, float16 b, void *fpstp)
+static float16 float16_mulx(float16 a, float16 b, float_status *fpst)
 {
-    float_status *fpst = fpstp;
-
     a = float16_squash_input_denormal(a, fpst);
     b = float16_squash_input_denormal(b, fpst);
 
@@ -573,16 +489,14 @@ ADVSIMD_TWOHALFOP(mulx)
 
 /* fused multiply-accumulate */
 uint32_t HELPER(advsimd_muladdh)(uint32_t a, uint32_t b, uint32_t c,
-                                 void *fpstp)
+                                 float_status *fpst)
 {
-    float_status *fpst = fpstp;
     return float16_muladd(a, b, c, 0, fpst);
 }
 
 uint32_t HELPER(advsimd_muladd2h)(uint32_t two_a, uint32_t two_b,
-                                  uint32_t two_c, void *fpstp)
+                                  uint32_t two_c, float_status *fpst)
 {
-    float_status *fpst = fpstp;
     float16  a1, a2, b1, b2, c1, c2;
     uint32_t r1, r2;
     a1 = extract32(two_a, 0, 16);
@@ -604,31 +518,27 @@ uint32_t HELPER(advsimd_muladd2h)(uint32_t two_a, uint32_t two_b,
 
 #define ADVSIMD_CMPRES(test) (test) ? 0xffff : 0
 
-uint32_t HELPER(advsimd_ceq_f16)(uint32_t a, uint32_t b, void *fpstp)
+uint32_t HELPER(advsimd_ceq_f16)(uint32_t a, uint32_t b, float_status *fpst)
 {
-    float_status *fpst = fpstp;
     int compare = float16_compare_quiet(a, b, fpst);
     return ADVSIMD_CMPRES(compare == float_relation_equal);
 }
 
-uint32_t HELPER(advsimd_cge_f16)(uint32_t a, uint32_t b, void *fpstp)
+uint32_t HELPER(advsimd_cge_f16)(uint32_t a, uint32_t b, float_status *fpst)
 {
-    float_status *fpst = fpstp;
     int compare = float16_compare(a, b, fpst);
     return ADVSIMD_CMPRES(compare == float_relation_greater ||
                           compare == float_relation_equal);
 }
 
-uint32_t HELPER(advsimd_cgt_f16)(uint32_t a, uint32_t b, void *fpstp)
+uint32_t HELPER(advsimd_cgt_f16)(uint32_t a, uint32_t b, float_status *fpst)
 {
-    float_status *fpst = fpstp;
     int compare = float16_compare(a, b, fpst);
     return ADVSIMD_CMPRES(compare == float_relation_greater);
 }
 
-uint32_t HELPER(advsimd_acge_f16)(uint32_t a, uint32_t b, void *fpstp)
+uint32_t HELPER(advsimd_acge_f16)(uint32_t a, uint32_t b, float_status *fpst)
 {
-    float_status *fpst = fpstp;
     float16 f0 = float16_abs(a);
     float16 f1 = float16_abs(b);
     int compare = float16_compare(f0, f1, fpst);
@@ -636,9 +546,8 @@ uint32_t HELPER(advsimd_acge_f16)(uint32_t a, uint32_t b, void *fpstp)
                           compare == float_relation_equal);
 }
 
-uint32_t HELPER(advsimd_acgt_f16)(uint32_t a, uint32_t b, void *fpstp)
+uint32_t HELPER(advsimd_acgt_f16)(uint32_t a, uint32_t b, float_status *fpst)
 {
-    float_status *fpst = fpstp;
     float16 f0 = float16_abs(a);
     float16 f1 = float16_abs(b);
     int compare = float16_compare(f0, f1, fpst);
@@ -646,12 +555,12 @@ uint32_t HELPER(advsimd_acgt_f16)(uint32_t a, uint32_t b, void *fpstp)
 }
 
 /* round to integral */
-uint32_t HELPER(advsimd_rinth_exact)(uint32_t x, void *fp_status)
+uint32_t HELPER(advsimd_rinth_exact)(uint32_t x, float_status *fp_status)
 {
     return float16_round_to_int(x, fp_status);
 }
 
-uint32_t HELPER(advsimd_rinth)(uint32_t x, void *fp_status)
+uint32_t HELPER(advsimd_rinth)(uint32_t x, float_status *fp_status)
 {
     int old_flags = get_float_exception_flags(fp_status), new_flags;
     float16 ret;
@@ -665,38 +574,6 @@ uint32_t HELPER(advsimd_rinth)(uint32_t x, void *fp_status)
     }
 
     return ret;
-}
-
-/*
- * Half-precision floating point conversion functions
- *
- * There are a multitude of conversion functions with various
- * different rounding modes. This is dealt with by the calling code
- * setting the mode appropriately before calling the helper.
- */
-
-uint32_t HELPER(advsimd_f16tosinth)(uint32_t a, void *fpstp)
-{
-    float_status *fpst = fpstp;
-
-    /* Invalid if we are passed a NaN */
-    if (float16_is_any_nan(a)) {
-        float_raise(float_flag_invalid, fpst);
-        return 0;
-    }
-    return float16_to_int16(a, fpst);
-}
-
-uint32_t HELPER(advsimd_f16touinth)(uint32_t a, void *fpstp)
-{
-    float_status *fpst = fpstp;
-
-    /* Invalid if we are passed a NaN */
-    if (float16_is_any_nan(a)) {
-        float_raise(float_flag_invalid, fpst);
-        return 0;
-    }
-    return float16_to_uint16(a, fpst);
 }
 
 static int el_from_spsr(uint32_t spsr)
@@ -759,6 +636,7 @@ static void cpsr_write_from_spsr_elx(CPUARMState *env,
 
 void HELPER(exception_return)(CPUARMState *env, uint64_t new_pc)
 {
+    ARMCPU *cpu = env_archcpu(env);
     int cur_el = arm_current_el(env);
     unsigned int spsr_idx = aarch64_banked_spsr_index(cur_el);
     uint32_t spsr = env->banked_spsr[spsr_idx];
@@ -780,15 +658,6 @@ void HELPER(exception_return)(CPUARMState *env, uint64_t new_pc)
         spsr &= ~PSTATE_SS;
     }
 
-    /*
-     * FEAT_RME forbids return from EL3 with an invalid security state.
-     * We don't need an explicit check for FEAT_RME here because we enforce
-     * in scr_write() that you can't set the NSE bit without it.
-     */
-    if (cur_el == 3 && (env->cp15.scr_el3 & (SCR_NS | SCR_NSE)) == SCR_NSE) {
-        goto illegal_return;
-    }
-
     new_el = el_from_spsr(spsr);
     if (new_el == -1) {
         goto illegal_return;
@@ -800,8 +669,24 @@ void HELPER(exception_return)(CPUARMState *env, uint64_t new_pc)
         goto illegal_return;
     }
 
+    /*
+     * FEAT_RME forbids return from EL3 to a lower exception level
+     * with an invalid security state.
+     * We don't need an explicit check for FEAT_RME here because we enforce
+     * in scr_write() that you can't set the NSE bit without it.
+     */
+    if (cur_el == 3 && new_el < 3 &&
+        (env->cp15.scr_el3 & (SCR_NS | SCR_NSE)) == SCR_NSE) {
+        goto illegal_return;
+    }
+
     if (new_el != 0 && arm_el_is_aa64(env, new_el) != return_to_aa64) {
         /* Return to an EL which is configured for a different register width */
+        goto illegal_return;
+    }
+
+    if (!return_to_aa64 && !cpu_isar_feature(aa64_aa32, cpu)) {
+        /* Return to AArch32 when CPU is AArch64-only */
         goto illegal_return;
     }
 
@@ -810,7 +695,7 @@ void HELPER(exception_return)(CPUARMState *env, uint64_t new_pc)
     }
 
     bql_lock();
-    arm_call_pre_el_change_hook(env_archcpu(env));
+    arm_call_pre_el_change_hook(cpu);
     bql_unlock();
 
     if (!return_to_aa64) {
@@ -838,7 +723,7 @@ void HELPER(exception_return)(CPUARMState *env, uint64_t new_pc)
         int tbii;
 
         env->aarch64 = true;
-        spsr &= aarch64_pstate_valid_mask(&env_archcpu(env)->isar);
+        spsr &= aarch64_pstate_valid_mask(&cpu->isar);
         pstate_write(env, spsr);
         if (!arm_singlestep_active(env)) {
             env->pstate &= ~PSTATE_SS;
@@ -877,7 +762,7 @@ void HELPER(exception_return)(CPUARMState *env, uint64_t new_pc)
     aarch64_sve_change_el(env, cur_el, new_el, return_to_aa64);
 
     bql_lock();
-    arm_call_el_change_hook(env_archcpu(env));
+    arm_call_el_change_hook(cpu);
     bql_unlock();
 
     return;
@@ -892,8 +777,8 @@ illegal_return:
      */
     env->pstate |= PSTATE_IL;
     env->pc = new_pc;
-    spsr &= PSTATE_NZCV | PSTATE_DAIF;
-    spsr |= pstate_read(env) & ~(PSTATE_NZCV | PSTATE_DAIF);
+    spsr &= PSTATE_NZCV | PSTATE_DAIF | PSTATE_ALLINT;
+    spsr |= pstate_read(env) & ~(PSTATE_NZCV | PSTATE_DAIF | PSTATE_ALLINT);
     pstate_write(env, spsr);
     if (!arm_singlestep_active(env)) {
         env->pstate &= ~PSTATE_SS;
@@ -903,19 +788,10 @@ illegal_return:
                   "resuming execution at 0x%" PRIx64 "\n", cur_el, env->pc);
 }
 
-/*
- * Square Root and Reciprocal square root
- */
-
-uint32_t HELPER(sqrt_f16)(uint32_t a, void *fpstp)
-{
-    float_status *s = fpstp;
-
-    return float16_sqrt(a, s);
-}
-
 void HELPER(dc_zva)(CPUARMState *env, uint64_t vaddr_in)
 {
+    uintptr_t ra = GETPC();
+
     /*
      * Implement DC ZVA, which zeroes a fixed-length block of memory.
      * Note that we do not implement the (architecturally mandated)
@@ -936,8 +812,6 @@ void HELPER(dc_zva)(CPUARMState *env, uint64_t vaddr_in)
 
 #ifndef CONFIG_USER_ONLY
     if (unlikely(!mem)) {
-        uintptr_t ra = GETPC();
-
         /*
          * Trap if accessing an invalid page.  DC_ZVA requires that we supply
          * the original pointer for an invalid page.  But watchpoints require
@@ -959,7 +833,9 @@ void HELPER(dc_zva)(CPUARMState *env, uint64_t vaddr_in)
     }
 #endif
 
+    set_helper_retaddr(ra);
     memset(mem, 0, blocklen);
+    clear_helper_retaddr();
 }
 
 void HELPER(unaligned_access)(CPUARMState *env, uint64_t addr,
@@ -1108,7 +984,9 @@ static uint64_t set_step(CPUARMState *env, uint64_t toaddr,
     }
 #endif
     /* Easy case: just memset the host memory */
+    set_helper_retaddr(ra);
     memset(mem, data, setsize);
+    clear_helper_retaddr();
     return setsize;
 }
 
@@ -1151,7 +1029,9 @@ static uint64_t set_step_tags(CPUARMState *env, uint64_t toaddr,
     }
 #endif
     /* Easy case: just memset the host memory */
+    set_helper_retaddr(ra);
     memset(mem, data, setsize);
+    clear_helper_retaddr();
     mte_mops_set_tags(env, toaddr, setsize, *mtedesc);
     return setsize;
 }
@@ -1274,7 +1154,6 @@ static void do_setp(CPUARMState *env, uint32_t syndrome, uint32_t mtedesc,
     env->ZF = 1; /* our env->ZF encoding is inverted */
     env->CF = 0;
     env->VF = 0;
-    return;
 }
 
 void HELPER(setp)(CPUARMState *env, uint32_t syndrome, uint32_t mtedesc)
@@ -1330,7 +1209,7 @@ static void do_setm(CPUARMState *env, uint32_t syndrome, uint32_t mtedesc,
     /* Do the actual memset: we leave the last partial page to SETE */
     stagesetsize = setsize & TARGET_PAGE_MASK;
     while (stagesetsize > 0) {
-        step = stepfn(env, toaddr, setsize, data, memidx, &mtedesc, ra);
+        step = stepfn(env, toaddr, stagesetsize, data, memidx, &mtedesc, ra);
         toaddr += step;
         setsize -= step;
         stagesetsize -= step;
@@ -1485,7 +1364,9 @@ static uint64_t copy_step(CPUARMState *env, uint64_t toaddr, uint64_t fromaddr,
     }
 #endif
     /* Easy case: just memmove the host memory */
+    set_helper_retaddr(ra);
     memmove(wmem, rmem, copysize);
+    clear_helper_retaddr();
     return copysize;
 }
 
@@ -1560,7 +1441,9 @@ static uint64_t copy_step_rev(CPUARMState *env, uint64_t toaddr,
      * Easy case: just memmove the host memory. Note that wmem and
      * rmem here point to the *last* byte to copy.
      */
+    set_helper_retaddr(ra);
     memmove(wmem - (copysize - 1), rmem - (copysize - 1), copysize);
+    clear_helper_retaddr();
     return copysize;
 }
 
@@ -1670,7 +1553,6 @@ static void do_cpyp(CPUARMState *env, uint32_t syndrome, uint32_t wdesc,
     env->ZF = 1; /* our env->ZF encoding is inverted */
     env->CF = 0;
     env->VF = 0;
-    return;
 }
 
 void HELPER(cpyp)(CPUARMState *env, uint32_t syndrome, uint32_t wdesc,
@@ -1854,4 +1736,43 @@ void HELPER(cpyfe)(CPUARMState *env, uint32_t syndrome, uint32_t wdesc,
                    uint32_t rdesc)
 {
     do_cpye(env, syndrome, wdesc, rdesc, false, GETPC());
+}
+
+static bool is_guarded_page(CPUARMState *env, target_ulong addr, uintptr_t ra)
+{
+#ifdef CONFIG_USER_ONLY
+    return page_get_flags(addr) & PAGE_BTI;
+#else
+    CPUTLBEntryFull *full;
+    void *host;
+    int mmu_idx = cpu_mmu_index(env_cpu(env), true);
+    int flags = probe_access_full(env, addr, 0, MMU_INST_FETCH, mmu_idx,
+                                  false, &host, &full, ra);
+
+    assert(!(flags & TLB_INVALID_MASK));
+    return full->extra.arm.guarded;
+#endif
+}
+
+void HELPER(guarded_page_check)(CPUARMState *env)
+{
+    /*
+     * We have already verified that bti is enabled, and that the
+     * instruction at PC is not ok for BTYPE.  This is always at
+     * the beginning of a block, so PC is always up-to-date and
+     * no unwind is required.
+     */
+    if (is_guarded_page(env, env->pc, 0)) {
+        raise_exception(env, EXCP_UDEF, syn_btitrap(env->btype),
+                        exception_target_el(env));
+    }
+}
+
+void HELPER(guarded_page_br)(CPUARMState *env, target_ulong pc)
+{
+    /*
+     * We have already checked for branch via x16 and x17.
+     * What remains for choosing BTYPE is checking for a guarded page.
+     */
+    env->btype = is_guarded_page(env, pc, GETPC()) ? 3 : 1;
 }

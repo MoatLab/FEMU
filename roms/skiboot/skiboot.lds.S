@@ -45,9 +45,11 @@
   /* DWARF 3 */								\
   .debug_pubtypes 0 : { *(.debug_pubtypes) }				\
   .debug_ranges   0 : { *(.debug_ranges) }				\
-  /* DWARF Extension.  */						\
+  /* DWARF 5 */								\
   .debug_macro    0 : { *(.debug_macro) }				\
-  .debug_addr     0 : { *(.debug_addr) }
+  .debug_addr     0 : { *(.debug_addr) }				\
+  .debug_rnglists 0 : { *(.debug_rnglists) }				\
+  .debug_loclists 0 : { *(.debug_loclists) }
 
 ENTRY(boot_entry);
 SECTIONS
@@ -62,11 +64,6 @@ SECTIONS
 	. = NACA_OFF;
 	.naca : {
 		KEEP(*(.naca.data))
-	}
-
-	. = SPIRA_OFF;
-	.spira : {
-		KEEP(*(.spira.data))
 	}
 
 	. = SPIRAH_OFF;
@@ -162,6 +159,12 @@ SECTIONS
 		__platforms_start = .;
 		KEEP(*(.platforms))
 		__platforms_end = .;
+	}
+
+	.hwprobes : {
+		__hwprobes_start = .;
+		KEEP(*(.hwprobes))
+		__hwprobes_end = .;
 	}
 
 	/* Relocations */

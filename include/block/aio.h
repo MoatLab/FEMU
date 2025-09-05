@@ -20,6 +20,7 @@
 #include "qemu/coroutine-core.h"
 #include "qemu/queue.h"
 #include "qemu/event_notifier.h"
+#include "qemu/lockcnt.h"
 #include "qemu/thread.h"
 #include "qemu/timer.h"
 #include "block/graph-lock.h"
@@ -53,7 +54,7 @@ typedef void QEMUBHFunc(void *opaque);
 typedef bool AioPollFn(void *opaque);
 typedef void IOHandler(void *opaque);
 
-struct ThreadPool;
+struct ThreadPoolAio;
 struct LinuxAioState;
 typedef struct LuringState LuringState;
 
@@ -121,6 +122,10 @@ struct BHListSlice {
 };
 
 typedef QSLIST_HEAD(, AioHandler) AioHandlerSList;
+
+typedef struct AioPolledEvent {
+    int64_t ns;        /* current polling time in nanoseconds */
+} AioPolledEvent;
 
 struct AioContext {
     GSource source;
@@ -206,7 +211,7 @@ struct AioContext {
     /* Thread pool for performing work and receiving completion callbacks.
      * Has its own locking.
      */
-    struct ThreadPool *thread_pool;
+    struct ThreadPoolAio *thread_pool;
 
 #ifdef CONFIG_LINUX_AIO
     struct LinuxAioState *linux_aio;
@@ -228,7 +233,6 @@ struct AioContext {
     int poll_disable_cnt;
 
     /* Polling mode parameters */
-    int64_t poll_ns;        /* current polling time in nanoseconds */
     int64_t poll_max_ns;    /* maximum polling time in nanoseconds */
     int64_t poll_grow;      /* polling time growth factor */
     int64_t poll_shrink;    /* polling time shrink factor */
@@ -499,8 +503,8 @@ void aio_set_event_notifier_poll(AioContext *ctx,
  */
 GSource *aio_get_g_source(AioContext *ctx);
 
-/* Return the ThreadPool bound to this AioContext */
-struct ThreadPool *aio_get_thread_pool(AioContext *ctx);
+/* Return the ThreadPoolAio bound to this AioContext */
+struct ThreadPoolAio *aio_get_thread_pool(AioContext *ctx);
 
 /* Setup the LinuxAioState bound to this AioContext */
 struct LinuxAioState *aio_setup_linux_aio(AioContext *ctx, Error **errp);
@@ -629,6 +633,9 @@ void aio_co_schedule(AioContext *ctx, Coroutine *co);
  *
  * Move the currently running coroutine to new_ctx. If the coroutine is already
  * running in new_ctx, do nothing.
+ *
+ * Note that this function cannot reschedule from iohandler_ctx to
+ * qemu_aio_context.
  */
 void coroutine_fn aio_co_reschedule_self(AioContext *new_ctx);
 
@@ -661,6 +668,9 @@ void aio_co_enter(AioContext *ctx, Coroutine *co);
  * If called from an IOThread this will be the IOThread's AioContext.  If
  * called from the main thread or with the "big QEMU lock" taken it
  * will be the main loop AioContext.
+ *
+ * Note that the return value is never the main loop's iohandler_ctx and the
+ * return value is the main loop AioContext instead.
  */
 AioContext *qemu_get_current_aio_context(void);
 

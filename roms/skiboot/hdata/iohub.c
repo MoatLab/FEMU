@@ -843,6 +843,10 @@ static void io_parse_fru(const void *sp_iohubs)
 			prlog(PR_INFO, "CEC:     Rainier !\n");
 			io_add_p9(hub, sp_iohubs);
 			break;
+		case CECHUB_HUB_EVEREST:
+			prlog(PR_INFO, "CEC:     Everest !\n");
+			io_add_p9(hub, sp_iohubs);
+			break;
 		case CECHUB_HUB_DENALI:
 			prlog(PR_INFO, "CEC:     Denali !\n");
 			io_add_p9(hub, sp_iohubs);
@@ -858,7 +862,8 @@ static void io_parse_fru(const void *sp_iohubs)
 		io_parse_slots(sp_iohubs, chip_id);
 	}
 
-	if (proc_gen == proc_gen_p8 || proc_gen == proc_gen_p9 || proc_gen == proc_gen_p10)
+	if (proc_gen == proc_gen_p8 || proc_gen == proc_gen_p9 || proc_gen == proc_gen_p10
+		|| proc_gen == proc_gen_p11)
 		io_add_p8_cec_vpd(sp_iohubs);
 }
 
@@ -868,7 +873,7 @@ void io_parse(void)
 	unsigned int i, size;
 
 	/* Look for IO Hubs */
-	if (!get_hdif(&spira.ntuples.cec_iohub_fru, "IO HUB")) {
+	if (!get_hdif(&spiras->ntuples.cec_iohub_fru, "IO HUB")) {
 		prerror("CEC: Cannot locate IO Hub FRU data !\n");
 		return;
 	}
@@ -881,7 +886,7 @@ void io_parse(void)
 	 * increment it for each chip. Works for the machines I have here
 	 */
 
-	for_each_ntuple_idx(&spira.ntuples.cec_iohub_fru, sp_iohubs, i,
+	for_each_ntuple_idx(&spiras->ntuples.cec_iohub_fru, sp_iohubs, i,
 			    CECHUB_FRU_HDIF_SIG) {
 		const struct cechub_hub_fru_id *fru_id_data;
 		unsigned int type;

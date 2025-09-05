@@ -21,10 +21,15 @@
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "qemu.h"
+#include "user/cpu_loop.h"
+#include "exec/page-protection.h"
+#include "user/page-protection.h"
+#include "user/signal.h"
+#include "user/tswap-target.h"
 #include "gdbstub/user.h"
 #include "signal-common.h"
 #include "trace.h"
-#include "hw/core/tcg-cpu-ops.h"
+#include "accel/tcg/cpu-ops.h"
 #include "host-signal.h"
 
 /* target_siginfo_t must fit in gdbstub's siginfo save area. */
@@ -45,6 +50,8 @@ static inline int sas_ss_flags(TaskState *ts, unsigned long sp)
     return ts->sigaltstack_used.ss_size == 0 ? SS_DISABLE :
         on_sig_stack(ts, sp) ? SS_ONSTACK : 0;
 }
+
+int host_interrupt_signal = SIGRTMAX;
 
 /*
  * The BSD ABIs use the same signal numbers across all the CPU architectures, so
@@ -434,7 +441,6 @@ void queue_signal(CPUArchState *env, int sig, int si_type,
     ts->sync_signal.pending = sig;
     /* Signal that a new signal is pending. */
     qatomic_set(&ts->signal_pending, 1);
-    return;
 }
 
 static int fatal_signal(int sig)
@@ -485,6 +491,12 @@ static void host_signal_handler(int host_sig, siginfo_t *info, void *puc)
     int guest_sig;
     uintptr_t pc = 0;
     bool sync_sig = false;
+
+    if (host_sig == host_interrupt_signal) {
+        ts->signal_pending = 1;
+        cpu_exit(thread_cpu);
+        return;
+    }
 
     /*
      * Non-spoofed SIGSEGV and SIGBUS are synchronous, and need special
@@ -726,14 +738,7 @@ static inline abi_ulong get_sigframe(struct target_sigaction *ka,
         sp = ts->sigaltstack_used.ss_sp + ts->sigaltstack_used.ss_size;
     }
 
-/* TODO: make this a target_arch function / define */
-#if defined(TARGET_ARM)
-    return (sp - frame_size) & ~7;
-#elif defined(TARGET_AARCH64)
-    return (sp - frame_size) & ~15;
-#else
-    return sp - frame_size;
-#endif
+    return ROUND_DOWN(sp - frame_size, TARGET_SIGSTACK_ALIGN);
 }
 
 /* compare to $M/$M/exec_machdep.c sendsig and sys/kern/kern_sig.c sigexit */
@@ -856,6 +861,9 @@ void signal_init(void)
 
     for (i = 1; i <= TARGET_NSIG; i++) {
         host_sig = target_to_host_signal(i);
+        if (host_sig == host_interrupt_signal) {
+            continue;
+        }
         sigaction(host_sig, NULL, &oact);
         if (oact.sa_sigaction == (void *)SIG_IGN) {
             sigact_table[i - 1]._sa_handler = TARGET_SIG_IGN;
@@ -874,6 +882,7 @@ void signal_init(void)
             sigaction(host_sig, &act, NULL);
         }
     }
+    sigaction(host_interrupt_signal, &act, NULL);
 }
 
 static void handle_pending_signal(CPUArchState *env, int sig,
@@ -1021,10 +1030,10 @@ void process_pending_signals(CPUArchState *env)
     ts->in_sigsuspend = false;
 }
 
-void cpu_loop_exit_sigsegv(CPUState *cpu, target_ulong addr,
+void cpu_loop_exit_sigsegv(CPUState *cpu, vaddr addr,
                            MMUAccessType access_type, bool maperr, uintptr_t ra)
 {
-    const TCGCPUOps *tcg_ops = CPU_GET_CLASS(cpu)->tcg_ops;
+    const TCGCPUOps *tcg_ops = cpu->cc->tcg_ops;
 
     if (tcg_ops->record_sigsegv) {
         tcg_ops->record_sigsegv(cpu, addr, access_type, maperr, ra);
@@ -1037,10 +1046,10 @@ void cpu_loop_exit_sigsegv(CPUState *cpu, target_ulong addr,
     cpu_loop_exit_restore(cpu, ra);
 }
 
-void cpu_loop_exit_sigbus(CPUState *cpu, target_ulong addr,
+void cpu_loop_exit_sigbus(CPUState *cpu, vaddr addr,
                           MMUAccessType access_type, uintptr_t ra)
 {
-    const TCGCPUOps *tcg_ops = CPU_GET_CLASS(cpu)->tcg_ops;
+    const TCGCPUOps *tcg_ops = cpu->cc->tcg_ops;
 
     if (tcg_ops->record_sigbus) {
         tcg_ops->record_sigbus(cpu, addr, access_type, ra);

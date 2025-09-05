@@ -2296,7 +2296,7 @@ out:
 }
 
 int64_t npu2_opencapi_mem_alloc(struct phb *phb, uint32_t __unused bdfn,
-				uint64_t size, uint64_t *__bar)
+				uint64_t size, __be64 *__bar)
 {
 	struct npu2_dev *dev;
 	uint64_t bar;

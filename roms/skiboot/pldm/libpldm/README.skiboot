@@ -1,0 +1,17 @@
+skiboot/pldm/libpldm/ is a minimally modified version of upstream
+libpldm that is distributed with the openbmc project hosted at
+https://github.com/openbmc/libpldm.git
+
+This version is taken from pldm.git commit 953bc8c1a4e9 ("libpldm: Enable
+API/ABI compliance checks") by copying most of files from the pldm/libpldm/
+directory.
+
+The only modifications from the upstream source are the additions of
+this file, Makefile.inc which has been derived from the original
+Makefile.inc, the rename of the api crc32() which is already
+defined in libmctp/crc32.c and the removal of several unnecessary
+folders and files.
+
+Local libpldm changes should be kept to a minimum, and submitted
+upstream if possible.
+

@@ -24,13 +24,24 @@
 
 #include "qemu/osdep.h"
 #include "cpu.h"
+#include "exec/target_page.h"
 #include "hw/ppc/ppc.h"
 #include "qemu/timer.h"
-#include "sysemu/reset.h"
-#include "sysemu/runstate.h"
+#include "system/reset.h"
+#include "system/runstate.h"
 #include "hw/loader.h"
 #include "kvm_ppc.h"
 
+void booke_set_tlb(ppcemb_tlb_t *tlb, target_ulong va, hwaddr pa,
+                   target_ulong size)
+{
+    tlb->attr = 0;
+    tlb->prot = PAGE_RWX << 4 | PAGE_VALID;
+    tlb->size = size;
+    tlb->EPN = va & TARGET_PAGE_MASK;
+    tlb->RPN = pa & TARGET_PAGE_MASK;
+    tlb->PID = 0;
+}
 
 /* Timer Control Register */
 

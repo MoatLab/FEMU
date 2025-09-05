@@ -494,7 +494,6 @@ static void efuse_rd_addr_postw(RegisterInfo *reg, uint64_t val64)
 
     ARRAY_FIELD_DP32(s->regs, EFUSE_ISR, RD_DONE, 1);
     efuse_imr_update_irq(s);
-    return;
 }
 
 static uint64_t efuse_cache_load_prew(RegisterInfo *reg, uint64_t val64)
@@ -658,7 +657,7 @@ static void efuse_ctrl_register_reset(RegisterInfo *reg)
     register_reset(reg);
 }
 
-static void efuse_ctrl_reset_hold(Object *obj)
+static void efuse_ctrl_reset_hold(Object *obj, ResetType type)
 {
     XlnxVersalEFuseCtrl *s = XLNX_VERSAL_EFUSE_CTRL(obj);
     unsigned int i;
@@ -712,9 +711,8 @@ static void efuse_ctrl_init(Object *obj)
 {
     XlnxVersalEFuseCtrl *s = XLNX_VERSAL_EFUSE_CTRL(obj);
     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
-    RegisterInfoArray *reg_array;
 
-    reg_array =
+    s->reg_array =
         register_init_block32(DEVICE(obj), efuse_ctrl_regs_info,
                               ARRAY_SIZE(efuse_ctrl_regs_info),
                               s->regs_info, s->regs,
@@ -722,7 +720,7 @@ static void efuse_ctrl_init(Object *obj)
                               XLNX_VERSAL_EFUSE_CTRL_ERR_DEBUG,
                               R_MAX * 4);
 
-    sysbus_init_mmio(sbd, &reg_array->mem);
+    sysbus_init_mmio(sbd, &s->reg_array->mem);
     sysbus_init_irq(sbd, &s->irq_efuse_imr);
 }
 
@@ -730,6 +728,7 @@ static void efuse_ctrl_finalize(Object *obj)
 {
     XlnxVersalEFuseCtrl *s = XLNX_VERSAL_EFUSE_CTRL(obj);
 
+    register_finalize_block(s->reg_array);
     g_free(s->extra_pg0_lock_spec);
 }
 
@@ -743,18 +742,16 @@ static const VMStateDescription vmstate_efuse_ctrl = {
     }
 };
 
-static Property efuse_ctrl_props[] = {
+static const Property efuse_ctrl_props[] = {
     DEFINE_PROP_LINK("efuse",
                      XlnxVersalEFuseCtrl, efuse,
                      TYPE_XLNX_EFUSE, XlnxEFuse *),
     DEFINE_PROP_ARRAY("pg0-lock",
                       XlnxVersalEFuseCtrl, extra_pg0_lock_n16,
                       extra_pg0_lock_spec, qdev_prop_uint16, uint16_t),
-
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void efuse_ctrl_class_init(ObjectClass *klass, void *data)
+static void efuse_ctrl_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     ResettableClass *rc = RESETTABLE_CLASS(klass);

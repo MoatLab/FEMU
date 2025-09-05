@@ -12,12 +12,12 @@
 
 // Draw/undraw a cursor on the framebuffer by xor'ing the cursor cell
 static void
-gfx_set_swcursor(struct vgamode_s *vmode_g, int enable, struct cursorpos cp)
+gfx_set_swcursor(struct vgamode_s *curmode_g, int enable, struct cursorpos cp)
 {
     u16 cursor_type = get_cursor_shape();
     u8 start = cursor_type >> 8, end = cursor_type & 0xff;
     struct gfx_op op;
-    init_gfx_op(&op, vmode_g);
+    init_gfx_op(&op, curmode_g);
     op.x = cp.x * 8;
     int cheight = GET_BDA(char_height);
     op.y = cp.y * cheight + start;
@@ -42,8 +42,8 @@ set_swcursor(int enable)
     if (!!(flags & BF_SWCURSOR) == enable)
         // Already in requested mode.
         return;
-    struct vgamode_s *vmode_g = get_current_mode();
-    if (!vmode_g)
+    struct vgamode_s *curmode_g = get_current_mode();
+    if (!curmode_g)
         return;
     struct cursorpos cp = get_cursor_pos(GET_BDA(video_page));
     if (cp.x >= GET_BDA(video_cols) || cp.y > GET_BDA(video_rows)
@@ -53,16 +53,16 @@ set_swcursor(int enable)
 
     SET_BDA_EXT(flags, (flags & ~BF_SWCURSOR) | (enable ? BF_SWCURSOR : 0));
 
-    if (GET_GLOBAL(vmode_g->memmodel) != MM_TEXT) {
-        gfx_set_swcursor(vmode_g, enable, cp);
+    if (GET_GLOBAL(curmode_g->memmodel) != MM_TEXT) {
+        gfx_set_swcursor(curmode_g, enable, cp);
         return;
     }
 
     // In text mode, swap foreground and background attributes for cursor
     void *dest_far = text_address(cp) + 1;
-    u8 attr = GET_FARVAR(GET_GLOBAL(vmode_g->sstart), *(u8*)dest_far);
+    u8 attr = GET_FARVAR(GET_GLOBAL(curmode_g->sstart), *(u8*)dest_far);
     attr = (attr >> 4) | (attr << 4);
-    SET_FARVAR(GET_GLOBAL(vmode_g->sstart), *(u8*)dest_far, attr);
+    SET_FARVAR(GET_GLOBAL(curmode_g->sstart), *(u8*)dest_far, attr);
 }
 
 // Disable virtual cursor if a vgabios call accesses the framebuffer

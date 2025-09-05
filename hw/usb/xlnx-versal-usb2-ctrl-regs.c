@@ -153,7 +153,7 @@ static void usb2_ctrl_regs_reset_init(Object *obj, ResetType type)
     }
 }
 
-static void usb2_ctrl_regs_reset_hold(Object *obj)
+static void usb2_ctrl_regs_reset_hold(Object *obj, ResetType type)
 {
     VersalUsb2CtrlRegs *s = XILINX_VERSAL_USB2_CTRL_REGS(obj);
 
@@ -202,7 +202,7 @@ static const VMStateDescription vmstate_usb2_ctrl_regs = {
     }
 };
 
-static void usb2_ctrl_regs_class_init(ObjectClass *klass, void *data)
+static void usb2_ctrl_regs_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     ResettableClass *rc = RESETTABLE_CLASS(klass);

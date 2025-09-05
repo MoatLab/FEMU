@@ -1,4 +1,5 @@
 i386_ss.add(when: 'CONFIG_TCG', if_true: files(
+  'access.c',
   'bpt_helper.c',
   'cc_helper.c',
   'excp_helper.c',
@@ -11,5 +12,5 @@ i386_ss.add(when: 'CONFIG_TCG', if_true: files(
   'tcg-cpu.c',
   'translate.c'), if_false: files('tcg-stub.c'))
 
-subdir('sysemu')
+subdir('system')
 subdir('user')

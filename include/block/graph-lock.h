@@ -20,8 +20,6 @@
 #ifndef GRAPH_LOCK_H
 #define GRAPH_LOCK_H
 
-#include "qemu/clang-tsa.h"
-
 /**
  * Graph Lock API
  * This API provides a rwlock used to protect block layer
@@ -115,9 +113,20 @@ void no_coroutine_fn TSA_ACQUIRE(graph_lock) TSA_NO_TSA
 bdrv_graph_wrlock(void);
 
 /*
+ * bdrv_graph_wrlock_drained:
+ * Similar to bdrv_graph_wrlock, but will begin a drained section before
+ * locking.
+ */
+void no_coroutine_fn TSA_ACQUIRE(graph_lock) TSA_NO_TSA
+bdrv_graph_wrlock_drained(void);
+
+/*
  * bdrv_graph_wrunlock:
  * Write finished, reset global has_writer to 0 and restart
  * all readers that are waiting.
+ *
+ * Also ends the drained section if bdrv_graph_wrlock_drained() was used to lock
+ * the graph.
  */
 void no_coroutine_fn TSA_RELEASE(graph_lock) TSA_NO_TSA
 bdrv_graph_wrunlock(void);
@@ -209,31 +218,38 @@ typedef struct GraphLockable { } GraphLockable;
  * unlocked. TSA_ASSERT_SHARED() makes sure that the following calls know that
  * we hold the lock while unlocking is left unchecked.
  */
-static inline GraphLockable * TSA_ASSERT_SHARED(graph_lock) TSA_NO_TSA coroutine_fn
+static inline GraphLockable * TSA_ACQUIRE_SHARED(graph_lock) coroutine_fn
 graph_lockable_auto_lock(GraphLockable *x)
 {
     bdrv_graph_co_rdlock();
     return x;
 }
 
-static inline void TSA_NO_TSA coroutine_fn
-graph_lockable_auto_unlock(GraphLockable *x)
+static inline void TSA_RELEASE_SHARED(graph_lock) coroutine_fn
+graph_lockable_auto_unlock(GraphLockable **x)
 {
     bdrv_graph_co_rdunlock();
 }
 
-G_DEFINE_AUTOPTR_CLEANUP_FUNC(GraphLockable, graph_lockable_auto_unlock)
+#define GRAPH_AUTO_UNLOCK __attribute__((cleanup(graph_lockable_auto_unlock)))
 
+/*
+ * @var is only used to break the loop after the first iteration.
+ * @unlock_var can't be unlocked and then set to NULL because TSA wants the lock
+ * to be held at the start of every iteration of the loop.
+ */
 #define WITH_GRAPH_RDLOCK_GUARD_(var)                                         \
-    for (g_autoptr(GraphLockable) var = graph_lockable_auto_lock(GML_OBJ_()); \
+    for (GraphLockable *unlock_var GRAPH_AUTO_UNLOCK =                        \
+            graph_lockable_auto_lock(GML_OBJ_()),                             \
+            *var = unlock_var;                                                \
          var;                                                                 \
-         graph_lockable_auto_unlock(var), var = NULL)
+         var = NULL)
 
 #define WITH_GRAPH_RDLOCK_GUARD() \
     WITH_GRAPH_RDLOCK_GUARD_(glue(graph_lockable_auto, __COUNTER__))
 
 #define GRAPH_RDLOCK_GUARD(x)                                       \
-    g_autoptr(GraphLockable)                                        \
+    GraphLockable * GRAPH_AUTO_UNLOCK                               \
     glue(graph_lockable_auto, __COUNTER__) G_GNUC_UNUSED =          \
             graph_lockable_auto_lock(GML_OBJ_())
 

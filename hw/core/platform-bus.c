@@ -145,9 +145,12 @@ static void platform_bus_map_mmio(PlatformBusDevice *pbus, SysBusDevice *sbdev,
      * the target device's memory region
      */
     for (off = 0; off < pbus->mmio_size; off += alignment) {
-        if (!memory_region_find(&pbus->mmio, off, size).mr) {
+        MemoryRegion *mr = memory_region_find(&pbus->mmio, off, size).mr;
+        if (!mr) {
             found_region = true;
             break;
+        } else {
+            memory_region_unref(mr);
         }
     }
 
@@ -201,13 +204,12 @@ static void platform_bus_realize(DeviceState *dev, Error **errp)
     plaform_bus_refresh_irqs(pbus);
 }
 
-static Property platform_bus_properties[] = {
+static const Property platform_bus_properties[] = {
     DEFINE_PROP_UINT32("num_irqs", PlatformBusDevice, num_irqs, 0),
     DEFINE_PROP_UINT32("mmio_size", PlatformBusDevice, mmio_size, 0),
-    DEFINE_PROP_END_OF_LIST()
 };
 
-static void platform_bus_class_init(ObjectClass *klass, void *data)
+static void platform_bus_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 

@@ -12,14 +12,15 @@ Supported devices
 -----------------
 
 The ``virt`` machine supports:
-- Gpex host bridge
-- Ls7a RTC device
-- Ls7a IOAPIC device
-- ACPI GED device
-- Fw_cfg device
-- PCI/PCIe devices
-- Memory device
-- CPU device. Type: la464.
+
+* Gpex host bridge
+* Ls7a RTC device
+* Ls7a IOAPIC device
+* ACPI GED device
+* Fw_cfg device
+* PCI/PCIe devices
+* Memory device
+* CPU device. Type: la464.
 
 CPU and machine Type
 --------------------
@@ -39,13 +40,7 @@ can be accessed by following steps.
 
 .. code-block:: bash
 
-  ./configure --disable-rdma --disable-pvrdma --prefix=/usr \
-              --target-list="loongarch64-softmmu" \
-              --disable-libiscsi --disable-libnfs --disable-libpmem \
-              --disable-glusterfs --enable-libusb --enable-usb-redir \
-              --disable-opengl --disable-xen --enable-spice \
-              --enable-debug --disable-capstone --disable-kvm \
-              --enable-profiler
+  ./configure --target-list="loongarch64-softmmu"
   make -j8
 
 (2) Set cross tools:
@@ -53,9 +48,7 @@ can be accessed by following steps.
 .. code-block:: bash
 
   wget https://github.com/loongson/build-tools/releases/download/2022.09.06/loongarch64-clfs-6.3-cross-tools-gcc-glibc.tar.xz
-
   tar -vxf loongarch64-clfs-6.3-cross-tools-gcc-glibc.tar.xz  -C /opt
-
   export PATH=/opt/cross-tools/bin:$PATH
   export LD_LIBRARY_PATH=/opt/cross-tools/lib:$LD_LIBRARY_PATH
   export LD_LIBRARY_PATH=/opt/cross-tools/loongarch64-unknown-linux-gnu/lib/:$LD_LIBRARY_PATH
@@ -64,7 +57,7 @@ Note: You need get the latest cross-tools at https://github.com/loongson/build-t
 
 (3) Build BIOS:
 
-    See: https://github.com/tianocore/edk2-platforms/tree/master/Platform/Loongson/LoongArchQemuPkg#readme
+    See: https://github.com/tianocore/edk2/tree/master/OvmfPkg/LoongArchVirt#readme
 
 Note: To build the release version of the bios,  set --buildtarget=RELEASE,
       the bios file path:  Build/LoongArchQemu/RELEASE_GCC5/FV/QEMU_EFI.fd
@@ -74,13 +67,9 @@ Note: To build the release version of the bios,  set --buildtarget=RELEASE,
 .. code-block:: bash
 
   git clone https://github.com/loongson/linux.git
-
   cd linux
-
   git checkout loongarch-next
-
   make ARCH=loongarch CROSS_COMPILE=loongarch64-unknown-linux-gnu- loongson3_defconfig
-
   make ARCH=loongarch CROSS_COMPILE=loongarch64-unknown-linux-gnu- -j32
 
 Note: The branch of linux source code is loongarch-next.

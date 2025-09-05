@@ -3,8 +3,6 @@ cpan:
 - CPAN::Changes
 - Digest
 - Digest::MD5
-- ExtUtils::CBuilder
-- ExtUtils::Embed
 - File::Slurp
 - IO::Compress::Bzip2
 - IO::Interface
@@ -38,9 +36,12 @@ native:
 - bash
 - bash-completion
 - bc
+- bindgen
 - bison
+- black
 - bzip2
 - capstone
+- cargo-c
 - ccache
 - cdrtools
 - check
@@ -82,6 +83,7 @@ native:
 - json-c
 - json-glib
 - libarchive
+- libcbor
 - libconfig
 - libepoxy
 - libev
@@ -101,6 +103,7 @@ native:
 - libusb
 - libvirt
 - libvirt-glib
+- libvirt-python
 - libxml2
 - libxslt
 - llvm
@@ -147,6 +150,7 @@ native:
 - vde
 - vim
 - vte3
+- vulkan-tools
 - wget
 - xorriso
 - xz

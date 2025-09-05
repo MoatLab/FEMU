@@ -1,6 +1,6 @@
+#include "config.h"
 #include <stdio.h>
 #include <string.h>
-#include "config.h"
 
 /**
  * list - double linked list routines
@@ -31,7 +31,7 @@
  *	{
  *		struct parent p;
  *		struct child *c;
- *		unsigned int i;
+ *		int i;
  *
  *		if (argc < 2)
  *			errx(1, "Usage: %s parent children...", argv[0]);
@@ -62,7 +62,9 @@ int main(int argc, char *argv[])
 		return 1;
 
 	if (strcmp(argv[1], "depends") == 0) {
+		printf("ccan/str\n");
 		printf("ccan/container_of\n");
+		printf("ccan/check_type\n");
 		return 0;
 	}
 

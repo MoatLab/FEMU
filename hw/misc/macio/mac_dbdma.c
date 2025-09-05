@@ -44,7 +44,7 @@
 #include "qemu/main-loop.h"
 #include "qemu/module.h"
 #include "qemu/log.h"
-#include "sysemu/dma.h"
+#include "system/dma.h"
 
 /* debug DBDMA */
 #define DEBUG_DBDMA 0
@@ -917,12 +917,12 @@ static void mac_dbdma_realize(DeviceState *dev, Error **errp)
     s->bh = qemu_bh_new_guarded(DBDMA_run_bh, s, &dev->mem_reentrancy_guard);
 }
 
-static void mac_dbdma_class_init(ObjectClass *oc, void *data)
+static void mac_dbdma_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
 
     dc->realize = mac_dbdma_realize;
-    dc->reset = mac_dbdma_reset;
+    device_class_set_legacy_reset(dc, mac_dbdma_reset);
     dc->vmsd = &vmstate_dbdma;
 }
 

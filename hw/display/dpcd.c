@@ -141,11 +141,11 @@ static const VMStateDescription vmstate_dpcd = {
     }
 };
 
-static void dpcd_class_init(ObjectClass *oc, void *data)
+static void dpcd_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
 
-    dc->reset = dpcd_reset;
+    device_class_set_legacy_reset(dc, dpcd_reset);
     dc->vmsd = &vmstate_dpcd;
 }
 

@@ -28,17 +28,16 @@
 
 static ssize_t qio_channel_tls_write_handler(const char *buf,
                                              size_t len,
-                                             void *opaque)
+                                             void *opaque,
+                                             Error **errp)
 {
     QIOChannelTLS *tioc = QIO_CHANNEL_TLS(opaque);
     ssize_t ret;
 
-    ret = qio_channel_write(tioc->master, buf, len, NULL);
+    ret = qio_channel_write(tioc->master, buf, len, errp);
     if (ret == QIO_CHANNEL_ERR_BLOCK) {
-        errno = EAGAIN;
-        return -1;
+        return QCRYPTO_TLS_SESSION_ERR_BLOCK;
     } else if (ret < 0) {
-        errno = EIO;
         return -1;
     }
     return ret;
@@ -46,17 +45,16 @@ static ssize_t qio_channel_tls_write_handler(const char *buf,
 
 static ssize_t qio_channel_tls_read_handler(char *buf,
                                             size_t len,
-                                            void *opaque)
+                                            void *opaque,
+                                            Error **errp)
 {
     QIOChannelTLS *tioc = QIO_CHANNEL_TLS(opaque);
     ssize_t ret;
 
-    ret = qio_channel_read(tioc->master, buf, len, NULL);
+    ret = qio_channel_read(tioc->master, buf, len, errp);
     if (ret == QIO_CHANNEL_ERR_BLOCK) {
-        errno = EAGAIN;
-        return -1;
+        return QCRYPTO_TLS_SESSION_ERR_BLOCK;
     } else if (ret < 0) {
-        errno = EIO;
         return -1;
     }
     return ret;
@@ -164,16 +162,17 @@ static void qio_channel_tls_handshake_task(QIOChannelTLS *ioc,
                                            GMainContext *context)
 {
     Error *err = NULL;
-    QCryptoTLSSessionHandshakeStatus status;
+    int status;
 
-    if (qcrypto_tls_session_handshake(ioc->session, &err) < 0) {
+    status = qcrypto_tls_session_handshake(ioc->session, &err);
+
+    if (status < 0) {
         trace_qio_channel_tls_handshake_fail(ioc);
         qio_task_set_error(task, err);
         qio_task_complete(task);
         return;
     }
 
-    status = qcrypto_tls_session_get_handshake_status(ioc->session);
     if (status == QCRYPTO_TLS_HANDSHAKE_COMPLETE) {
         trace_qio_channel_tls_handshake_complete(ioc);
         if (qcrypto_tls_session_check_credentials(ioc->session,
@@ -242,6 +241,11 @@ void qio_channel_tls_handshake(QIOChannelTLS *ioc,
 {
     QIOTask *task;
 
+    if (qio_channel_has_feature(QIO_CHANNEL(ioc),
+                                QIO_CHANNEL_FEATURE_CONCURRENT_IO)) {
+        qcrypto_tls_session_require_thread_safety(ioc->session);
+    }
+
     task = qio_task_new(OBJECT(ioc),
                         func, opaque, destroy);
 
@@ -249,6 +253,85 @@ void qio_channel_tls_handshake(QIOChannelTLS *ioc,
     qio_channel_tls_handshake_task(ioc, task, context);
 }
 
+static gboolean qio_channel_tls_bye_io(QIOChannel *ioc, GIOCondition condition,
+                                       gpointer user_data);
+
+static void qio_channel_tls_bye_task(QIOChannelTLS *ioc, QIOTask *task,
+                                     GMainContext *context)
+{
+    GIOCondition condition;
+    QIOChannelTLSData *data;
+    int status;
+    Error *err = NULL;
+
+    status = qcrypto_tls_session_bye(ioc->session, &err);
+
+    if (status < 0) {
+        trace_qio_channel_tls_bye_fail(ioc);
+        qio_task_set_error(task, err);
+        qio_task_complete(task);
+        return;
+    }
+
+    if (status == QCRYPTO_TLS_BYE_COMPLETE) {
+        qio_task_complete(task);
+        return;
+    }
+
+    data = g_new0(typeof(*data), 1);
+    data->task = task;
+    data->context = context;
+
+    if (context) {
+        g_main_context_ref(context);
+    }
+
+    if (status == QCRYPTO_TLS_BYE_SENDING) {
+        condition = G_IO_OUT;
+    } else {
+        condition = G_IO_IN;
+    }
+
+    trace_qio_channel_tls_bye_pending(ioc, status);
+    ioc->bye_ioc_tag = qio_channel_add_watch_full(ioc->master, condition,
+                                                  qio_channel_tls_bye_io,
+                                                  data, NULL, context);
+}
+
+
+static gboolean qio_channel_tls_bye_io(QIOChannel *ioc, GIOCondition condition,
+                                       gpointer user_data)
+{
+    QIOChannelTLSData *data = user_data;
+    QIOTask *task = data->task;
+    GMainContext *context = data->context;
+    QIOChannelTLS *tioc = QIO_CHANNEL_TLS(qio_task_get_source(task));
+
+    tioc->bye_ioc_tag = 0;
+    g_free(data);
+    qio_channel_tls_bye_task(tioc, task, context);
+
+    if (context) {
+        g_main_context_unref(context);
+    }
+
+    return FALSE;
+}
+
+static void propagate_error(QIOTask *task, gpointer opaque)
+{
+    qio_task_propagate_error(task, opaque);
+}
+
+void qio_channel_tls_bye(QIOChannelTLS *ioc, Error **errp)
+{
+    QIOTask *task;
+
+    task = qio_task_new(OBJECT(ioc), propagate_error, errp, NULL);
+
+    trace_qio_channel_tls_bye_start(ioc);
+    qio_channel_tls_bye_task(ioc, task, NULL);
+}
 
 static void qio_channel_tls_init(Object *obj G_GNUC_UNUSED)
 {
@@ -277,24 +360,20 @@ static ssize_t qio_channel_tls_readv(QIOChannel *ioc,
     ssize_t got = 0;
 
     for (i = 0 ; i < niov ; i++) {
-        ssize_t ret = qcrypto_tls_session_read(tioc->session,
-                                               iov[i].iov_base,
-                                               iov[i].iov_len);
-        if (ret < 0) {
-            if (errno == EAGAIN) {
-                if (got) {
-                    return got;
-                } else {
-                    return QIO_CHANNEL_ERR_BLOCK;
-                }
-            } else if (errno == ECONNABORTED &&
-                       (qatomic_load_acquire(&tioc->shutdown) &
-                        QIO_CHANNEL_SHUTDOWN_READ)) {
-                return 0;
+        ssize_t ret = qcrypto_tls_session_read(
+            tioc->session,
+            iov[i].iov_base,
+            iov[i].iov_len,
+            flags & QIO_CHANNEL_READ_FLAG_RELAXED_EOF ||
+            qatomic_load_acquire(&tioc->shutdown) & QIO_CHANNEL_SHUTDOWN_READ,
+            errp);
+        if (ret == QCRYPTO_TLS_SESSION_ERR_BLOCK) {
+            if (got) {
+                return got;
+            } else {
+                return QIO_CHANNEL_ERR_BLOCK;
             }
-
-            error_setg_errno(errp, errno,
-                             "Cannot read from TLS channel");
+        } else if (ret < 0) {
             return -1;
         }
         got += ret;
@@ -321,18 +400,15 @@ static ssize_t qio_channel_tls_writev(QIOChannel *ioc,
     for (i = 0 ; i < niov ; i++) {
         ssize_t ret = qcrypto_tls_session_write(tioc->session,
                                                 iov[i].iov_base,
-                                                iov[i].iov_len);
-        if (ret <= 0) {
-            if (errno == EAGAIN) {
-                if (done) {
-                    return done;
-                } else {
-                    return QIO_CHANNEL_ERR_BLOCK;
-                }
+                                                iov[i].iov_len,
+                                                errp);
+        if (ret == QCRYPTO_TLS_SESSION_ERR_BLOCK) {
+            if (done) {
+                return done;
+            } else {
+                return QIO_CHANNEL_ERR_BLOCK;
             }
-
-            error_setg_errno(errp, errno,
-                             "Cannot write to TLS channel");
+        } else if (ret < 0) {
             return -1;
         }
         done += ret;
@@ -387,6 +463,11 @@ static int qio_channel_tls_close(QIOChannel *ioc,
     if (tioc->hs_ioc_tag) {
         trace_qio_channel_tls_handshake_cancel(ioc);
         g_clear_handle_id(&tioc->hs_ioc_tag, g_source_remove);
+    }
+
+    if (tioc->bye_ioc_tag) {
+        trace_qio_channel_tls_bye_cancel(ioc);
+        g_clear_handle_id(&tioc->bye_ioc_tag, g_source_remove);
     }
 
     return qio_channel_close(tioc->master, errp);
@@ -485,7 +566,7 @@ qio_channel_tls_get_session(QIOChannelTLS *ioc)
 }
 
 static void qio_channel_tls_class_init(ObjectClass *klass,
-                                       void *class_data G_GNUC_UNUSED)
+                                       const void *class_data G_GNUC_UNUSED)
 {
     QIOChannelClass *ioc_klass = QIO_CHANNEL_CLASS(klass);
 

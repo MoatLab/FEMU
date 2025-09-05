@@ -32,7 +32,7 @@
 #include "qapi/visitor.h"
 #include "net/filter.h"
 #include "qom/object.h"
-#include "sysemu/rtc.h"
+#include "system/rtc.h"
 
 typedef struct DumpState {
     int64_t start_ts;
@@ -154,10 +154,9 @@ static ssize_t filter_dump_receive_iov(NetFilterState *nf, NetClientState *sndr,
                                        int iovcnt, NetPacketSent *sent_cb)
 {
     NetFilterDumpState *nfds = FILTER_DUMP(nf);
-    int offset = qemu_get_using_vnet_hdr(nf->netdev) ?
-                 qemu_get_vnet_hdr_len(nf->netdev) : 0;
 
-    dump_receive_iov(&nfds->ds, iov, iovcnt, offset);
+    dump_receive_iov(&nfds->ds, iov, iovcnt, flags & QEMU_NET_PACKET_FLAG_RAW ?
+                     0 : qemu_get_vnet_hdr_len(nf->netdev));
     return 0;
 }
 
@@ -235,7 +234,7 @@ static void filter_dump_instance_finalize(Object *obj)
     g_free(nfds->filename);
 }
 
-static void filter_dump_class_init(ObjectClass *oc, void *data)
+static void filter_dump_class_init(ObjectClass *oc, const void *data)
 {
     NetFilterClass *nfc = NETFILTER_CLASS(oc);
 

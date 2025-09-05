@@ -174,25 +174,12 @@ ERST
         .args_type  = "",
         .params     = "",
         .help       = "show PIC state",
-        .cmd        = hmp_info_pic,
+        .cmd_info_hrt = qmp_x_query_interrupt_controllers,
     },
 
 SRST
   ``info pic``
     Show PIC state.
-ERST
-
-    {
-        .name       = "rdma",
-        .args_type  = "",
-        .params     = "",
-        .help       = "show RDMA state",
-        .cmd_info_hrt = qmp_x_query_rdma,
-    },
-
-SRST
-  ``info rdma``
-    Show RDMA state.
 ERST
 
     {
@@ -269,20 +256,6 @@ SRST
     Show dynamic compiler info.
 ERST
 
-#if defined(CONFIG_TCG)
-    {
-        .name       = "opcount",
-        .args_type  = "",
-        .params     = "",
-        .help       = "show dynamic compiler opcode counters",
-    },
-#endif
-
-SRST
-  ``info opcount``
-    Show dynamic compiler opcode counters
-ERST
-
     {
         .name       = "sync-profile",
         .args_type  = "mean:-m,no_coalesce:-n,max:i?",
@@ -293,6 +266,18 @@ ERST
                       "same call site)",
         .cmd        = hmp_info_sync_profile,
     },
+
+    {
+        .name       = "accel",
+        .args_type  = "",
+        .params     = "",
+        .help       = "show accelerator info",
+    },
+
+SRST
+  ``info accel``
+    Show accelerator info.
+ERST
 
 SRST
   ``info sync-profile [-m|-n]`` [*max*]
@@ -488,9 +473,9 @@ ERST
 
     {
         .name       = "migrate",
-        .args_type  = "",
-        .params     = "",
-        .help       = "show migration status",
+        .args_type  = "all:-a",
+        .params     = "[-a]",
+        .help       = "show migration status (-a: all, dump all status)",
         .cmd        = hmp_info_migrate,
     },
 
@@ -905,7 +890,7 @@ ERST
     },
 
 SRST
-  ``stats``
+  ``info stats``
     Show runtime-collected statistics
 ERST
 

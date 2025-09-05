@@ -43,10 +43,11 @@
 #include "hw/southbridge/ich9.h"
 #include "hw/acpi/acpi.h"
 #include "hw/acpi/ich9.h"
+#include "hw/acpi/ich9_timer.h"
 #include "hw/pci/pci_bus.h"
 #include "hw/qdev-properties.h"
-#include "sysemu/runstate.h"
-#include "sysemu/sysemu.h"
+#include "system/runstate.h"
+#include "system/system.h"
 #include "hw/core/cpu.h"
 #include "hw/nvram/fw_cfg.h"
 #include "qemu/cutils.h"
@@ -181,7 +182,6 @@ static uint64_t ich9_cc_read(void *opaque, hwaddr addr,
 }
 
 /* IRQ routing */
-/* */
 static void ich9_lpc_rout(uint8_t pirq_rout, int *pic_irq, int *pic_dis)
 {
     *pic_irq = pirq_rout & ICH9_LPC_PIRQ_ROUT_MASK;
@@ -531,6 +531,15 @@ ich9_lpc_pmcon_update(ICH9LPCState *lpc)
     uint16_t gen_pmcon_1 = pci_get_word(lpc->d.config + ICH9_LPC_GEN_PMCON_1);
     uint16_t wmask;
 
+    if (lpc->pm.swsmi_timer_enabled) {
+        ich9_pm_update_swsmi_timer(
+            &lpc->pm, lpc->pm.smi_en & ICH9_PMIO_SMI_EN_SWSMI_EN);
+    }
+    if (lpc->pm.periodic_timer_enabled) {
+        ich9_pm_update_periodic_timer(
+            &lpc->pm, lpc->pm.smi_en & ICH9_PMIO_SMI_EN_PERIODIC_EN);
+    }
+
     if (gen_pmcon_1 & ICH9_LPC_GEN_PMCON_1_SMI_LOCK) {
         wmask = pci_get_word(lpc->d.wmask + ICH9_LPC_GEN_PMCON_1);
         wmask &= ~ICH9_LPC_GEN_PMCON_1_SMI_LOCK;
@@ -816,7 +825,7 @@ static const VMStateDescription vmstate_ich9_lpc = {
     }
 };
 
-static Property ich9_lpc_properties[] = {
+static const Property ich9_lpc_properties[] = {
     DEFINE_PROP_BOOL("noreboot", ICH9LPCState, pin_strap.spkr_hi, false),
     DEFINE_PROP_BOOL("smm-compat", ICH9LPCState, pm.smm_compat, false),
     DEFINE_PROP_BOOL("smm-enabled", ICH9LPCState, pm.smm_enabled, false),
@@ -826,7 +835,10 @@ static Property ich9_lpc_properties[] = {
                       ICH9_LPC_SMI_F_CPU_HOTPLUG_BIT, true),
     DEFINE_PROP_BIT64("x-smi-cpu-hotunplug", ICH9LPCState, smi_host_features,
                       ICH9_LPC_SMI_F_CPU_HOT_UNPLUG_BIT, true),
-    DEFINE_PROP_END_OF_LIST(),
+    DEFINE_PROP_BOOL("x-smi-swsmi-timer", ICH9LPCState,
+                     pm.swsmi_timer_enabled, true),
+    DEFINE_PROP_BOOL("x-smi-periodic-timer", ICH9LPCState,
+                     pm.periodic_timer_enabled, true),
 };
 
 static void ich9_send_gpe(AcpiDeviceIf *adev, AcpiEventStatusBits ev)
@@ -862,7 +874,7 @@ static void build_ich9_isa_aml(AcpiDevAmlIf *adev, Aml *scope)
     qbus_build_aml(bus, scope);
 }
 
-static void ich9_lpc_class_init(ObjectClass *klass, void *data)
+static void ich9_lpc_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
@@ -871,7 +883,7 @@ static void ich9_lpc_class_init(ObjectClass *klass, void *data)
     AcpiDevAmlIfClass *amldevc = ACPI_DEV_AML_IF_CLASS(klass);
 
     set_bit(DEVICE_CATEGORY_BRIDGE, dc->categories);
-    dc->reset = ich9_lpc_reset;
+    device_class_set_legacy_reset(dc, ich9_lpc_reset);
     k->realize = ich9_lpc_realize;
     dc->vmsd = &vmstate_ich9_lpc;
     device_class_set_props(dc, ich9_lpc_properties);
@@ -902,7 +914,7 @@ static const TypeInfo ich9_lpc_info = {
     .instance_size = sizeof(ICH9LPCState),
     .instance_init = ich9_lpc_initfn,
     .class_init  = ich9_lpc_class_init,
-    .interfaces = (InterfaceInfo[]) {
+    .interfaces = (const InterfaceInfo[]) {
         { TYPE_HOTPLUG_HANDLER },
         { TYPE_ACPI_DEVICE_IF },
         { INTERFACE_CONVENTIONAL_PCI_DEVICE },

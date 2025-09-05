@@ -88,17 +88,16 @@ static void vga_isa_realizefn(DeviceState *dev, Error **errp)
     rom_add_vga(VGABIOS_FILENAME);
 }
 
-static Property vga_isa_properties[] = {
+static const Property vga_isa_properties[] = {
     DEFINE_PROP_UINT32("vgamem_mb", ISAVGAState, state.vram_size_mb, 8),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void vga_isa_class_initfn(ObjectClass *klass, void *data)
+static void vga_isa_class_initfn(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = vga_isa_realizefn;
-    dc->reset = vga_isa_reset;
+    device_class_set_legacy_reset(dc, vga_isa_reset);
     dc->vmsd = &vmstate_vga_common;
     device_class_set_props(dc, vga_isa_properties);
     set_bit(DEVICE_CATEGORY_DISPLAY, dc->categories);

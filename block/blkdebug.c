@@ -33,11 +33,11 @@
 #include "qemu/module.h"
 #include "qemu/option.h"
 #include "qapi/qapi-visit-block-core.h"
-#include "qapi/qmp/qdict.h"
-#include "qapi/qmp/qlist.h"
-#include "qapi/qmp/qstring.h"
+#include "qobject/qdict.h"
+#include "qobject/qlist.h"
+#include "qobject/qstring.h"
 #include "qapi/qobject-input-visitor.h"
-#include "sysemu/qtest.h"
+#include "system/qtest.h"
 
 /* All APIs are thread-safe */
 
@@ -751,9 +751,9 @@ blkdebug_co_pdiscard(BlockDriverState *bs, int64_t offset, int64_t bytes)
 }
 
 static int coroutine_fn GRAPH_RDLOCK
-blkdebug_co_block_status(BlockDriverState *bs, bool want_zero, int64_t offset,
-                         int64_t bytes, int64_t *pnum, int64_t *map,
-                         BlockDriverState **file)
+blkdebug_co_block_status(BlockDriverState *bs, unsigned int mode,
+                         int64_t offset, int64_t bytes, int64_t *pnum,
+                         int64_t *map, BlockDriverState **file)
 {
     int err;
 
@@ -1073,7 +1073,7 @@ static BlockDriver bdrv_blkdebug = {
     .is_filter              = true,
 
     .bdrv_parse_filename    = blkdebug_parse_filename,
-    .bdrv_file_open         = blkdebug_open,
+    .bdrv_open              = blkdebug_open,
     .bdrv_close             = blkdebug_close,
     .bdrv_reopen_prepare    = blkdebug_reopen_prepare,
     .bdrv_child_perm        = blkdebug_child_perm,

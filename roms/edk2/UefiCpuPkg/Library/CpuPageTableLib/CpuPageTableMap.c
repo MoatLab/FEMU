@@ -20,17 +20,17 @@
 **/
 VOID
 PageTableLibSetPte4K (
-  IN IA32_PTE_4K         *Pte4K,
-  IN UINT64              Offset,
-  IN IA32_MAP_ATTRIBUTE  *Attribute,
-  IN IA32_MAP_ATTRIBUTE  *Mask
+  IN OUT volatile IA32_PTE_4K  *Pte4K,
+  IN UINT64                    Offset,
+  IN IA32_MAP_ATTRIBUTE        *Attribute,
+  IN IA32_MAP_ATTRIBUTE        *Mask
   )
 {
   IA32_PTE_4K  LocalPte4K;
 
   LocalPte4K.Uint64 = Pte4K->Uint64;
   if (Mask->Bits.PageTableBaseAddressLow || Mask->Bits.PageTableBaseAddressHigh) {
-    LocalPte4K.Uint64 = (IA32_MAP_ATTRIBUTE_PAGE_TABLE_BASE_ADDRESS (Attribute) + Offset) | (Pte4K->Uint64 & ~IA32_PE_BASE_ADDRESS_MASK_40);
+    LocalPte4K.Uint64 = (IA32_MAP_ATTRIBUTE_PAGE_TABLE_BASE_ADDRESS (Attribute) + Offset) | (LocalPte4K.Uint64 & ~IA32_PE_BASE_ADDRESS_MASK_40);
   }
 
   if (Mask->Bits.Present) {
@@ -94,17 +94,17 @@ PageTableLibSetPte4K (
 **/
 VOID
 PageTableLibSetPleB (
-  IN IA32_PAGE_LEAF_ENTRY_BIG_PAGESIZE  *PleB,
-  IN UINT64                             Offset,
-  IN IA32_MAP_ATTRIBUTE                 *Attribute,
-  IN IA32_MAP_ATTRIBUTE                 *Mask
+  IN OUT volatile IA32_PAGE_LEAF_ENTRY_BIG_PAGESIZE  *PleB,
+  IN UINT64                                          Offset,
+  IN IA32_MAP_ATTRIBUTE                              *Attribute,
+  IN IA32_MAP_ATTRIBUTE                              *Mask
   )
 {
   IA32_PAGE_LEAF_ENTRY_BIG_PAGESIZE  LocalPleB;
 
   LocalPleB.Uint64 = PleB->Uint64;
   if (Mask->Bits.PageTableBaseAddressLow || Mask->Bits.PageTableBaseAddressHigh) {
-    LocalPleB.Uint64 = (IA32_MAP_ATTRIBUTE_PAGE_TABLE_BASE_ADDRESS (Attribute) + Offset) | (PleB->Uint64 & ~IA32_PE_BASE_ADDRESS_MASK_39);
+    LocalPleB.Uint64 = (IA32_MAP_ATTRIBUTE_PAGE_TABLE_BASE_ADDRESS (Attribute) + Offset) | (LocalPleB.Uint64 & ~IA32_PE_BASE_ADDRESS_MASK_39);
   }
 
   LocalPleB.Bits.MustBeOne = 1;
@@ -171,11 +171,11 @@ PageTableLibSetPleB (
 **/
 VOID
 PageTableLibSetPle (
-  IN UINTN               Level,
-  IN IA32_PAGING_ENTRY   *Ple,
-  IN UINT64              Offset,
-  IN IA32_MAP_ATTRIBUTE  *Attribute,
-  IN IA32_MAP_ATTRIBUTE  *Mask
+  IN UINTN                           Level,
+  IN OUT volatile IA32_PAGING_ENTRY  *Ple,
+  IN UINT64                          Offset,
+  IN IA32_MAP_ATTRIBUTE              *Attribute,
+  IN IA32_MAP_ATTRIBUTE              *Mask
   )
 {
   if (Level == 1) {
@@ -195,9 +195,9 @@ PageTableLibSetPle (
 **/
 VOID
 PageTableLibSetPnle (
-  IN IA32_PAGE_NON_LEAF_ENTRY  *Pnle,
-  IN IA32_MAP_ATTRIBUTE        *Attribute,
-  IN IA32_MAP_ATTRIBUTE        *Mask
+  IN OUT volatile IA32_PAGE_NON_LEAF_ENTRY  *Pnle,
+  IN IA32_MAP_ATTRIBUTE                     *Attribute,
+  IN IA32_MAP_ATTRIBUTE                     *Mask
   )
 {
   IA32_PAGE_NON_LEAF_ENTRY  LocalPnle;
@@ -294,7 +294,7 @@ IsAttributesAndMaskValidForNonPresentEntry (
                                     Page table entries that map the linear address range are reset to 0 before set to the new attribute
                                     when a new physical base address is set.
   @param[in]      Mask              The mask used for attribute. The corresponding field in Attribute is ignored if that in Mask is 0.
-  @param[out]     IsModified        TRUE means page table is modified. FALSE means page table is not modified.
+  @param[in, out] IsModified        Change IsModified to True if page table is modified and input parameter Modify is TRUE.
 
   @retval RETURN_INVALID_PARAMETER  For non-present range, Mask->Bits.Present is 0 but some other attributes are provided.
   @retval RETURN_INVALID_PARAMETER  For non-present range, Mask->Bits.Present is 1, Attribute->Bits.Present is 1 but some other attributes are not provided.
@@ -314,7 +314,7 @@ PageTableLibMapInLevel (
   IN     UINT64              Offset,
   IN     IA32_MAP_ATTRIBUTE  *Attribute,
   IN     IA32_MAP_ATTRIBUTE  *Mask,
-  OUT    BOOLEAN             *IsModified
+  IN OUT BOOLEAN             *IsModified
   )
 {
   RETURN_STATUS       Status;
@@ -342,6 +342,7 @@ PageTableLibMapInLevel (
   UINT64              PhysicalAddrInAttr;
   IA32_PAGING_ENTRY   OriginalParentPagingEntry;
   IA32_PAGING_ENTRY   OriginalCurrentPagingEntry;
+  IA32_PAGING_ENTRY   TempPagingEntry;
 
   ASSERT (Level != 0);
   ASSERT ((Attribute != NULL) && (Mask != NULL));
@@ -359,6 +360,8 @@ PageTableLibMapInLevel (
 
   OriginalParentPagingEntry.Uint64 = ParentPagingEntry->Uint64;
   OneOfPagingEntry.Uint64          = 0;
+  TempPagingEntry.Uint64           = 0;
+
   //
   // RegionLength: 256T (1 << 48) 512G (1 << 39), 1G (1 << 30), 2M (1 << 21) or 4K (1 << 12).
   //
@@ -441,8 +444,10 @@ PageTableLibMapInLevel (
       // Non-leaf entry doesn't have PAT bit. So use ~IA32_PE_BASE_ADDRESS_MASK_40 is to make sure PAT bit
       // (bit12) in original big-leaf entry is not assigned to PageTableBaseAddress field of non-leaf entry.
       //
-      PageTableLibSetPnle (&ParentPagingEntry->Pnle, &NopAttribute, &AllOneMask);
-      ParentPagingEntry->Uint64 = ((UINTN)(VOID *)PagingEntry) | (ParentPagingEntry->Uint64 & (~IA32_PE_BASE_ADDRESS_MASK_40));
+      TempPagingEntry.Uint64 = ParentPagingEntry->Uint64;
+      PageTableLibSetPnle (&TempPagingEntry.Pnle, &NopAttribute, &AllOneMask);
+      TempPagingEntry.Uint64                           = ((UINTN)(VOID *)PagingEntry) | (TempPagingEntry.Uint64 & (~IA32_PE_BASE_ADDRESS_MASK_40));
+      *(volatile UINT64 *)&(ParentPagingEntry->Uint64) = TempPagingEntry.Uint64;
     }
   } else {
     //
@@ -587,7 +592,10 @@ PageTableLibMapInLevel (
         OriginalCurrentPagingEntry.Uint64 = CurrentPagingEntry->Uint64;
         PageTableLibSetPle (Level, CurrentPagingEntry, Offset, Attribute, &CurrentMask);
 
-        if (OriginalCurrentPagingEntry.Uint64 != CurrentPagingEntry->Uint64) {
+        if (Modify && (OriginalCurrentPagingEntry.Uint64 != CurrentPagingEntry->Uint64)) {
+          //
+          // The page table entry can be changed by this function only when Modify is true.
+          //
           *IsModified = TRUE;
         }
       }
@@ -629,7 +637,10 @@ PageTableLibMapInLevel (
   // Check if ParentPagingEntry entry is modified here is enough. Except the changes happen in leaf PagingEntry during
   // the while loop, if there is any other change happens in page table, the ParentPagingEntry must has been modified.
   //
-  if (OriginalParentPagingEntry.Uint64 != ParentPagingEntry->Uint64) {
+  if (Modify && (OriginalParentPagingEntry.Uint64 != ParentPagingEntry->Uint64)) {
+    //
+    // The page table entry can be changed by this function only when Modify is true.
+    //
     *IsModified = TRUE;
   }
 
@@ -640,6 +651,7 @@ PageTableLibMapInLevel (
   Create or update page table to map [LinearAddress, LinearAddress + Length) with specified attribute.
 
   @param[in, out] PageTable      The pointer to the page table to update, or pointer to NULL if a new page table is to be created.
+                                 If not pointer to NULL, the value it points to won't be changed in this function.
   @param[in]      PagingMode     The paging mode.
   @param[in]      Buffer         The free buffer to be used for page table creation/updating.
   @param[in, out] BufferSize     The buffer size.
@@ -653,7 +665,9 @@ PageTableLibMapInLevel (
                                  Page table entries that map the linear address range are reset to 0 before set to the new attribute
                                  when a new physical base address is set.
   @param[in]      Mask           The mask used for attribute. The corresponding field in Attribute is ignored if that in Mask is 0.
-  @param[out]     IsModified     TRUE means page table is modified. FALSE means page table is not modified.
+  @param[out]     IsModified     TRUE means page table is modified by software or hardware. FALSE means page table is not modified by software.
+                                 If the output IsModified is FALSE, there is possibility that the page table is changed by hardware. It is ok
+                                 because page table can be changed by hardware anytime, and caller don't need to Flush TLB.
 
   @retval RETURN_UNSUPPORTED        PagingMode is not supported.
   @retval RETURN_INVALID_PARAMETER  PageTable, BufferSize, Attribute or Mask is NULL.

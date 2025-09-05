@@ -1,0 +1,12 @@
+prefix=@CMAKE_INSTALL_PREFIX@
+exec_prefix=@CMAKE_INSTALL_PREFIX@
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include/lib@LIB_NAME@
+
+Name: @CMAKE_PROJECT_NAME@
+Description: @CMAKE_PROJECT_DESCRIPTION@
+Version: @CMAKE_PROJECT_VERSION@
+
+Requires:
+Cflags: -I${includedir} -I${includedir}/include
+Libs: -L${libdir} -l@LIB_NAME@ -l@LIB_NAME@_platform -l@LIB_NAME@_crypto @CRYPTO_DEPS@

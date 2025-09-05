@@ -1,5 +1,5 @@
 /*
- *  Copyright(c) 2019-2023 Qualcomm Innovation Center, Inc. All Rights Reserved.
+ *  Copyright(c) 2019-2024 Qualcomm Innovation Center, Inc. All Rights Reserved.
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -17,8 +17,8 @@
 
 #include "qemu/osdep.h"
 #include "qemu/log.h"
-#include "exec/exec-all.h"
-#include "exec/cpu_ldst.h"
+#include "accel/tcg/cpu-ldst.h"
+#include "accel/tcg/probe.h"
 #include "exec/helper-proto.h"
 #include "fpu/softfloat.h"
 #include "cpu.h"
@@ -36,10 +36,9 @@
 #define SF_MANTBITS    23
 
 /* Exceptions processing helpers */
-static G_NORETURN
-void do_raise_exception_err(CPUHexagonState *env,
-                            uint32_t exception,
-                            uintptr_t pc)
+G_NORETURN void hexagon_raise_exception_err(CPUHexagonState *env,
+                                            uint32_t exception,
+                                            uintptr_t pc)
 {
     CPUState *cs = env_cpu(env);
     qemu_log_mask(CPU_LOG_INT, "%s: %d\n", __func__, exception);
@@ -49,15 +48,12 @@ void do_raise_exception_err(CPUHexagonState *env,
 
 G_NORETURN void HELPER(raise_exception)(CPUHexagonState *env, uint32_t excp)
 {
-    do_raise_exception_err(env, excp, 0);
+    hexagon_raise_exception_err(env, excp, 0);
 }
 
 void log_store32(CPUHexagonState *env, target_ulong addr,
                  target_ulong val, int width, int slot)
 {
-    HEX_DEBUG_LOG("log_store%d(0x" TARGET_FMT_lx
-                  ", %" PRId32 " [0x08%" PRIx32 "])\n",
-                  width, addr, val, val);
     env->mem_log_stores[slot].va = addr;
     env->mem_log_stores[slot].width = width;
     env->mem_log_stores[slot].data32 = val;
@@ -66,33 +62,9 @@ void log_store32(CPUHexagonState *env, target_ulong addr,
 void log_store64(CPUHexagonState *env, target_ulong addr,
                  int64_t val, int width, int slot)
 {
-    HEX_DEBUG_LOG("log_store%d(0x" TARGET_FMT_lx
-                  ", %" PRId64 " [0x016%" PRIx64 "])\n",
-                   width, addr, val, val);
     env->mem_log_stores[slot].va = addr;
     env->mem_log_stores[slot].width = width;
     env->mem_log_stores[slot].data64 = val;
-}
-
-/* Handy place to set a breakpoint */
-void HELPER(debug_start_packet)(CPUHexagonState *env)
-{
-    HEX_DEBUG_LOG("Start packet: pc = 0x" TARGET_FMT_lx "\n",
-                  env->gpr[HEX_REG_PC]);
-
-    for (int i = 0; i < TOTAL_PER_THREAD_REGS; i++) {
-        env->reg_written[i] = 0;
-    }
-}
-
-/* Checks for bookkeeping errors between disassembly context and runtime */
-void HELPER(debug_check_store_width)(CPUHexagonState *env, int slot, int check)
-{
-    if (env->mem_log_stores[slot].width != check) {
-        HEX_DEBUG_LOG("ERROR: %d != %d\n",
-                      env->mem_log_stores[slot].width, check);
-        g_assert_not_reached();
-    }
 }
 
 static void commit_store(CPUHexagonState *env, int slot_num, uintptr_t ra)
@@ -172,91 +144,6 @@ void HELPER(commit_hvx_stores)(CPUHexagonState *env)
             }
         }
     }
-}
-
-static void print_store(CPUHexagonState *env, int slot)
-{
-    if (!(env->slot_cancelled & (1 << slot))) {
-        uint8_t width = env->mem_log_stores[slot].width;
-        if (width == 1) {
-            uint32_t data = env->mem_log_stores[slot].data32 & 0xff;
-            HEX_DEBUG_LOG("\tmemb[0x" TARGET_FMT_lx "] = %" PRId32
-                          " (0x%02" PRIx32 ")\n",
-                          env->mem_log_stores[slot].va, data, data);
-        } else if (width == 2) {
-            uint32_t data = env->mem_log_stores[slot].data32 & 0xffff;
-            HEX_DEBUG_LOG("\tmemh[0x" TARGET_FMT_lx "] = %" PRId32
-                          " (0x%04" PRIx32 ")\n",
-                          env->mem_log_stores[slot].va, data, data);
-        } else if (width == 4) {
-            uint32_t data = env->mem_log_stores[slot].data32;
-            HEX_DEBUG_LOG("\tmemw[0x" TARGET_FMT_lx "] = %" PRId32
-                          " (0x%08" PRIx32 ")\n",
-                          env->mem_log_stores[slot].va, data, data);
-        } else if (width == 8) {
-            HEX_DEBUG_LOG("\tmemd[0x" TARGET_FMT_lx "] = %" PRId64
-                          " (0x%016" PRIx64 ")\n",
-                          env->mem_log_stores[slot].va,
-                          env->mem_log_stores[slot].data64,
-                          env->mem_log_stores[slot].data64);
-        } else {
-            HEX_DEBUG_LOG("\tBad store width %d\n", width);
-            g_assert_not_reached();
-        }
-    }
-}
-
-/* This function is a handy place to set a breakpoint */
-void HELPER(debug_commit_end)(CPUHexagonState *env, uint32_t this_PC,
-                              int pred_written, int has_st0, int has_st1)
-{
-    bool reg_printed = false;
-    bool pred_printed = false;
-    int i;
-
-    HEX_DEBUG_LOG("Packet committed: pc = 0x" TARGET_FMT_lx "\n", this_PC);
-    HEX_DEBUG_LOG("slot_cancelled = %d\n", env->slot_cancelled);
-
-    for (i = 0; i < TOTAL_PER_THREAD_REGS; i++) {
-        if (env->reg_written[i]) {
-            if (!reg_printed) {
-                HEX_DEBUG_LOG("Regs written\n");
-                reg_printed = true;
-            }
-            HEX_DEBUG_LOG("\tr%d = " TARGET_FMT_ld " (0x" TARGET_FMT_lx ")\n",
-                          i, env->gpr[i], env->gpr[i]);
-        }
-    }
-
-    for (i = 0; i < NUM_PREGS; i++) {
-        if (pred_written & (1 << i)) {
-            if (!pred_printed) {
-                HEX_DEBUG_LOG("Predicates written\n");
-                pred_printed = true;
-            }
-            HEX_DEBUG_LOG("\tp%d = 0x" TARGET_FMT_lx "\n",
-                          i, env->pred[i]);
-        }
-    }
-
-    if (has_st0 || has_st1) {
-        HEX_DEBUG_LOG("Stores\n");
-        if (has_st0) {
-            print_store(env, 0);
-        }
-        if (has_st1) {
-            print_store(env, 1);
-        }
-    }
-
-    HEX_DEBUG_LOG("Next PC = " TARGET_FMT_lx "\n", env->gpr[HEX_REG_PC]);
-    HEX_DEBUG_LOG("Exec counters: pkt = " TARGET_FMT_lx
-                  ", insn = " TARGET_FMT_lx
-                  ", hvx = " TARGET_FMT_lx "\n",
-                  env->gpr[HEX_REG_QEMU_PKT_CNT],
-                  env->gpr[HEX_REG_QEMU_INSN_CNT],
-                  env->gpr[HEX_REG_QEMU_HVX_CNT]);
-
 }
 
 int32_t HELPER(fcircadd)(int32_t RxV, int32_t offset, int32_t M, int32_t CS)
@@ -684,7 +571,7 @@ uint32_t HELPER(conv_sf2uw)(CPUHexagonState *env, float32 RsV)
     uint32_t RdV;
     arch_fpop_start(env);
     /* Hexagon checks the sign before rounding */
-    if (float32_is_neg(RsV) && !float32_is_any_nan(RsV)) {
+    if (float32_is_neg(RsV) && !float32_is_any_nan(RsV) && !float32_is_zero(RsV)) {
         float_raise(float_flag_invalid, &env->fp_status);
         RdV = 0;
     } else {
@@ -714,7 +601,7 @@ uint64_t HELPER(conv_sf2ud)(CPUHexagonState *env, float32 RsV)
     uint64_t RddV;
     arch_fpop_start(env);
     /* Hexagon checks the sign before rounding */
-    if (float32_is_neg(RsV) && !float32_is_any_nan(RsV)) {
+    if (float32_is_neg(RsV) && !float32_is_any_nan(RsV) && !float32_is_zero(RsV)) {
         float_raise(float_flag_invalid, &env->fp_status);
         RddV = 0;
     } else {
@@ -744,7 +631,7 @@ uint32_t HELPER(conv_df2uw)(CPUHexagonState *env, float64 RssV)
     uint32_t RdV;
     arch_fpop_start(env);
     /* Hexagon checks the sign before rounding */
-    if (float64_is_neg(RssV) && !float64_is_any_nan(RssV)) {
+    if (float64_is_neg(RssV) && !float64_is_any_nan(RssV) && !float64_is_zero(RssV)) {
         float_raise(float_flag_invalid, &env->fp_status);
         RdV = 0;
     } else {
@@ -774,7 +661,7 @@ uint64_t HELPER(conv_df2ud)(CPUHexagonState *env, float64 RssV)
     uint64_t RddV;
     arch_fpop_start(env);
     /* Hexagon checks the sign before rounding */
-    if (float64_is_neg(RssV) && !float64_is_any_nan(RssV)) {
+    if (float64_is_neg(RssV) && !float64_is_any_nan(RssV) && !float64_is_zero(RssV)) {
         float_raise(float_flag_invalid, &env->fp_status);
         RddV = 0;
     } else {
@@ -804,7 +691,7 @@ uint32_t HELPER(conv_sf2uw_chop)(CPUHexagonState *env, float32 RsV)
     uint32_t RdV;
     arch_fpop_start(env);
     /* Hexagon checks the sign before rounding */
-    if (float32_is_neg(RsV) && !float32_is_any_nan(RsV)) {
+    if (float32_is_neg(RsV) && !float32_is_any_nan(RsV) && !float32_is_zero(RsV)) {
         float_raise(float_flag_invalid, &env->fp_status);
         RdV = 0;
     } else {
@@ -834,7 +721,7 @@ uint64_t HELPER(conv_sf2ud_chop)(CPUHexagonState *env, float32 RsV)
     uint64_t RddV;
     arch_fpop_start(env);
     /* Hexagon checks the sign before rounding */
-    if (float32_is_neg(RsV) && !float32_is_any_nan(RsV)) {
+    if (float32_is_neg(RsV) && !float32_is_any_nan(RsV) && !float32_is_zero(RsV)) {
         float_raise(float_flag_invalid, &env->fp_status);
         RddV = 0;
     } else {
@@ -864,7 +751,7 @@ uint32_t HELPER(conv_df2uw_chop)(CPUHexagonState *env, float64 RssV)
     uint32_t RdV;
     arch_fpop_start(env);
     /* Hexagon checks the sign before rounding */
-    if (float64_is_neg(RssV) && !float64_is_any_nan(RssV)) {
+    if (float64_is_neg(RssV) && !float64_is_any_nan(RssV) && !float64_is_zero(RssV)) {
         float_raise(float_flag_invalid, &env->fp_status);
         RdV = 0;
     } else {
@@ -894,7 +781,7 @@ uint64_t HELPER(conv_df2ud_chop)(CPUHexagonState *env, float64 RssV)
     uint64_t RddV;
     arch_fpop_start(env);
     /* Hexagon checks the sign before rounding */
-    if (float64_is_neg(RssV) && !float64_is_any_nan(RssV)) {
+    if (float64_is_neg(RssV) && !float64_is_any_nan(RssV) && !float64_is_zero(RssV)) {
         float_raise(float_flag_invalid, &env->fp_status);
         RddV = 0;
     } else {
@@ -1158,7 +1045,7 @@ float32 HELPER(sfmpy)(CPUHexagonState *env, float32 RsV, float32 RtV)
 {
     float32 RdV;
     arch_fpop_start(env);
-    RdV = internal_mpyf(RsV, RtV, &env->fp_status);
+    RdV = float32_mul(RsV, RtV, &env->fp_status);
     arch_fpop_end(env);
     return RdV;
 }
@@ -1167,41 +1054,18 @@ float32 HELPER(sffma)(CPUHexagonState *env, float32 RxV,
                       float32 RsV, float32 RtV)
 {
     arch_fpop_start(env);
-    RxV = internal_fmafx(RsV, RtV, RxV, 0, &env->fp_status);
+    RxV = float32_muladd(RsV, RtV, RxV, 0, &env->fp_status);
     arch_fpop_end(env);
     return RxV;
-}
-
-static bool is_zero_prod(float32 a, float32 b)
-{
-    return ((float32_is_zero(a) && is_finite(b)) ||
-            (float32_is_zero(b) && is_finite(a)));
-}
-
-static float32 check_nan(float32 dst, float32 x, float_status *fp_status)
-{
-    float32 ret = dst;
-    if (float32_is_any_nan(x)) {
-        if (extract32(x, 22, 1) == 0) {
-            float_raise(float_flag_invalid, fp_status);
-        }
-        ret = make_float32(0xffffffff);    /* nan */
-    }
-    return ret;
 }
 
 float32 HELPER(sffma_sc)(CPUHexagonState *env, float32 RxV,
                          float32 RsV, float32 RtV, float32 PuV)
 {
-    size4s_t tmp;
     arch_fpop_start(env);
-    RxV = check_nan(RxV, RxV, &env->fp_status);
-    RxV = check_nan(RxV, RsV, &env->fp_status);
-    RxV = check_nan(RxV, RtV, &env->fp_status);
-    tmp = internal_fmafx(RsV, RtV, RxV, fSXTN(8, 64, PuV), &env->fp_status);
-    if (!(float32_is_zero(RxV) && is_zero_prod(RsV, RtV))) {
-        RxV = tmp;
-    }
+    RxV = float32_muladd_scalbn(RsV, RtV, RxV, fSXTN(8, 64, PuV),
+                                float_muladd_suppress_add_product_zero,
+                                &env->fp_status);
     arch_fpop_end(env);
     return RxV;
 }
@@ -1209,86 +1073,50 @@ float32 HELPER(sffma_sc)(CPUHexagonState *env, float32 RxV,
 float32 HELPER(sffms)(CPUHexagonState *env, float32 RxV,
                       float32 RsV, float32 RtV)
 {
-    float32 neg_RsV;
     arch_fpop_start(env);
-    neg_RsV = float32_set_sign(RsV, float32_is_neg(RsV) ? 0 : 1);
-    RxV = internal_fmafx(neg_RsV, RtV, RxV, 0, &env->fp_status);
+    RxV = float32_muladd(RsV, RtV, RxV, float_muladd_negate_product,
+                         &env->fp_status);
     arch_fpop_end(env);
     return RxV;
 }
 
-static bool is_inf_prod(int32_t a, int32_t b)
+static float32 do_sffma_lib(CPUHexagonState *env, float32 RxV,
+                            float32 RsV, float32 RtV, int negate)
 {
-    return (float32_is_infinity(a) && float32_is_infinity(b)) ||
-           (float32_is_infinity(a) && is_finite(b) && !float32_is_zero(b)) ||
-           (float32_is_infinity(b) && is_finite(a) && !float32_is_zero(a));
+    int flags;
+
+    arch_fpop_start(env);
+
+    set_float_rounding_mode(float_round_nearest_even_max, &env->fp_status);
+    RxV = float32_muladd(RsV, RtV, RxV,
+                         negate | float_muladd_suppress_add_product_zero,
+                         &env->fp_status);
+
+    flags = get_float_exception_flags(&env->fp_status);
+    if (flags) {
+        /* Flags are suppressed by this instruction. */
+        set_float_exception_flags(0, &env->fp_status);
+
+        /* Return 0 for Inf - Inf. */
+        if (flags & float_flag_invalid_isi) {
+            RxV = 0;
+        }
+    }
+
+    arch_fpop_end(env);
+    return RxV;
 }
 
 float32 HELPER(sffma_lib)(CPUHexagonState *env, float32 RxV,
                           float32 RsV, float32 RtV)
 {
-    bool infinp;
-    bool infminusinf;
-    float32 tmp;
-
-    arch_fpop_start(env);
-    set_float_rounding_mode(float_round_nearest_even, &env->fp_status);
-    infminusinf = float32_is_infinity(RxV) &&
-                  is_inf_prod(RsV, RtV) &&
-                  (fGETBIT(31, RsV ^ RxV ^ RtV) != 0);
-    infinp = float32_is_infinity(RxV) ||
-             float32_is_infinity(RtV) ||
-             float32_is_infinity(RsV);
-    RxV = check_nan(RxV, RxV, &env->fp_status);
-    RxV = check_nan(RxV, RsV, &env->fp_status);
-    RxV = check_nan(RxV, RtV, &env->fp_status);
-    tmp = internal_fmafx(RsV, RtV, RxV, 0, &env->fp_status);
-    if (!(float32_is_zero(RxV) && is_zero_prod(RsV, RtV))) {
-        RxV = tmp;
-    }
-    set_float_exception_flags(0, &env->fp_status);
-    if (float32_is_infinity(RxV) && !infinp) {
-        RxV = RxV - 1;
-    }
-    if (infminusinf) {
-        RxV = 0;
-    }
-    arch_fpop_end(env);
-    return RxV;
+    return do_sffma_lib(env, RxV, RsV, RtV, 0);
 }
 
 float32 HELPER(sffms_lib)(CPUHexagonState *env, float32 RxV,
                           float32 RsV, float32 RtV)
 {
-    bool infinp;
-    bool infminusinf;
-    float32 tmp;
-
-    arch_fpop_start(env);
-    set_float_rounding_mode(float_round_nearest_even, &env->fp_status);
-    infminusinf = float32_is_infinity(RxV) &&
-                  is_inf_prod(RsV, RtV) &&
-                  (fGETBIT(31, RsV ^ RxV ^ RtV) == 0);
-    infinp = float32_is_infinity(RxV) ||
-             float32_is_infinity(RtV) ||
-             float32_is_infinity(RsV);
-    RxV = check_nan(RxV, RxV, &env->fp_status);
-    RxV = check_nan(RxV, RsV, &env->fp_status);
-    RxV = check_nan(RxV, RtV, &env->fp_status);
-    float32 minus_RsV = float32_sub(float32_zero, RsV, &env->fp_status);
-    tmp = internal_fmafx(minus_RsV, RtV, RxV, 0, &env->fp_status);
-    if (!(float32_is_zero(RxV) && is_zero_prod(RsV, RtV))) {
-        RxV = tmp;
-    }
-    set_float_exception_flags(0, &env->fp_status);
-    if (float32_is_infinity(RxV) && !infinp) {
-        RxV = RxV - 1;
-    }
-    if (infminusinf) {
-        RxV = 0;
-    }
-    arch_fpop_end(env);
-    return RxV;
+    return do_sffma_lib(env, RxV, RsV, RtV, float_muladd_negate_product);
 }
 
 float64 HELPER(dfmpyfix)(CPUHexagonState *env, float64 RssV, float64 RttV)

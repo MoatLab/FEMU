@@ -444,7 +444,8 @@ static int ahci_port_setup(struct ahci_port_s *port)
     ahci_port_writel(ctrl, pnr, PORT_CMD, cmd);
 
     /* spin up */
-    cmd |= PORT_CMD_SPIN_UP;
+    cmd &= ~PORT_CMD_ICC_MASK;
+    cmd |= PORT_CMD_SPIN_UP | PORT_CMD_POWER_ON | PORT_CMD_ICC_ACTIVE;
     ahci_port_writel(ctrl, pnr, PORT_CMD, cmd);
     u32 end = timer_calc(AHCI_LINK_TIMEOUT);
     for (;;) {
@@ -636,7 +637,7 @@ static void
 ahci_controller_setup(struct pci_device *pci)
 {
     struct ahci_port_s *port;
-    u32 val, pnr, max;
+    u32 pnr, max;
 
     if (create_bounce_buf() < 0)
         return;
@@ -659,8 +660,23 @@ ahci_controller_setup(struct pci_device *pci)
 
     pci_enable_busmaster(pci);
 
-    val = ahci_ctrl_readl(ctrl, HOST_CTL);
+    u32 val = ahci_ctrl_readl(ctrl, HOST_CTL);
+    ahci_ctrl_writel(ctrl, HOST_CTL, val | HOST_CTL_RESET);
+    u32 end = timer_calc(AHCI_RESET_TIMEOUT);
+    for (;;) {
+        val = ahci_ctrl_readl(ctrl, HOST_CTL);
+        if (!(val & HOST_CTL_RESET))
+            break;
+        if (timer_check(end)) {
+            warn_timeout();
+            dprintf(1, "AHCI: controller reset failed\n");
+            free(ctrl);
+            return;
+        }
+        yield();
+    }
     ahci_ctrl_writel(ctrl, HOST_CTL, val | HOST_CTL_AHCI_EN);
+    (void)ahci_ctrl_readl(ctrl, HOST_CTL); /* Flush */
 
     ctrl->caps = ahci_ctrl_readl(ctrl, HOST_CAP);
     ctrl->ports = ahci_ctrl_readl(ctrl, HOST_PORTS_IMPL);

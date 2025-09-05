@@ -35,7 +35,7 @@ typedef enum MemOp {
     MO_LE    = 0,
     MO_BE    = MO_BSWAP,
 #endif
-#ifdef NEED_CPU_H
+#ifdef COMPILING_PER_TARGET
 #if TARGET_BIG_ENDIAN
     MO_TE    = MO_BE,
 #else
@@ -91,8 +91,12 @@ typedef enum MemOp {
      *    Depending on alignment, one or both will be single-copy atomic.
      *    This is the atomicity e.g. of Arm FEAT_LSE2 LDP.
      * MO_ATOM_SUBALIGN: the operation is single-copy atomic by parts
-     *    by the alignment.  E.g. if the address is 0 mod 4, then each
-     *    4-byte subobject is single-copy atomic.
+     *    by the alignment.  E.g. if an 8-byte value is accessed at an
+     *    address which is 0 mod 8, then the whole 8-byte access is
+     *    single-copy atomic; otherwise, if it is accessed at 0 mod 4
+     *    then each 4-byte subobject is single-copy atomic; otherwise
+     *    if it is accessed at 0 mod 2 then the four 2-byte subobjects
+     *    are single-copy atomic.
      *    This is the atomicity e.g. of IBM Power.
      * MO_ATOM_NONE: the operation has no atomicity requirements.
      *
@@ -135,7 +139,7 @@ typedef enum MemOp {
     MO_BESL  = MO_BE | MO_SL,
     MO_BESQ  = MO_BE | MO_SQ,
 
-#ifdef NEED_CPU_H
+#ifdef COMPILING_PER_TARGET
     MO_TEUW  = MO_TE | MO_UW,
     MO_TEUL  = MO_TE | MO_UL,
     MO_TEUQ  = MO_TE | MO_UQ,
@@ -158,16 +162,57 @@ static inline unsigned memop_size(MemOp op)
 static inline MemOp size_memop(unsigned size)
 {
 #ifdef CONFIG_DEBUG_TCG
-    /* Power of 2 up to 8.  */
-    assert((size & (size - 1)) == 0 && size >= 1 && size <= 8);
+    /* Power of 2 up to 1024 */
+    assert(is_power_of_2(size) && size >= 1 && size <= (1 << MO_SIZE));
 #endif
-    return ctz32(size);
+    return (MemOp)ctz32(size);
 }
 
-/* Big endianness from MemOp.  */
-static inline bool memop_big_endian(MemOp op)
+/**
+ * memop_alignment_bits:
+ * @memop: MemOp value
+ *
+ * Extract the alignment size from the memop.
+ */
+static inline unsigned memop_alignment_bits(MemOp memop)
 {
-    return (op & MO_BSWAP) == MO_BE;
+    unsigned a = memop & MO_AMASK;
+
+    if (a == MO_UNALN) {
+        /* No alignment required.  */
+        a = 0;
+    } else if (a == MO_ALIGN) {
+        /* A natural alignment requirement.  */
+        a = memop & MO_SIZE;
+    } else {
+        /* A specific alignment requirement.  */
+        a = a >> MO_ASHIFT;
+    }
+    return a;
+}
+
+/*
+ * memop_atomicity_bits:
+ * @memop: MemOp value
+ *
+ * Extract the atomicity size from the memop.
+ */
+static inline unsigned memop_atomicity_bits(MemOp memop)
+{
+    unsigned size = memop & MO_SIZE;
+
+    switch (memop & MO_ATOM_MASK) {
+    case MO_ATOM_NONE:
+        size = MO_8;
+        break;
+    case MO_ATOM_IFALIGN_PAIR:
+    case MO_ATOM_WITHIN16_PAIR:
+        size = size ? size - 1 : 0;
+        break;
+    default:
+        break;
+    }
+    return size;
 }
 
 #endif

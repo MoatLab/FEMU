@@ -234,7 +234,7 @@ int module_load(const char *prefix, const char *name, Error **errp)
 
     search_dir = getenv("QEMU_MODULE_DIR");
     if (search_dir != NULL) {
-        dirs[n_dirs++] = g_strdup_printf("%s", search_dir);
+        dirs[n_dirs++] = g_strdup(search_dir);
     }
     dirs[n_dirs++] = get_relocated_path(CONFIG_QEMU_MODDIR);
 
@@ -354,13 +354,13 @@ int module_load_qom(const char *type, Error **errp)
 void module_load_qom_all(void)
 {
     const QemuModinfo *modinfo;
-    Error *local_err = NULL;
 
     if (module_loaded_qom_all) {
         return;
     }
 
     for (modinfo = module_info; modinfo->name != NULL; modinfo++) {
+        Error *local_err = NULL;
         if (!modinfo->objs) {
             continue;
         }

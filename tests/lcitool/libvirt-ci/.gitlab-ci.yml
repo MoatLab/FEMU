@@ -43,8 +43,8 @@ stages:
     - docker login registry.gitlab.com -u ${CI_REGISTRY_USER} -p ${CI_REGISTRY_PASSWORD}
   script:
     - docker build --tag ${CI_REGISTRY_IMAGE}/${NAME}:latest containers/${NAME}
-    - if test "${CI_PIPELINE_SOURCE}" = "push" &&
-         test "${CI_COMMIT_REF_NAME}" = "${CI_DEFAULT_BRANCH}";
+    - if test "${CI_COMMIT_REF_NAME}" = "${CI_DEFAULT_BRANCH}" &&
+         ( test "${CI_PIPELINE_SOURCE}" = "push" || test "${RUN_PIPELINE}" = "1" )
       then
           docker push ${CI_REGISTRY_IMAGE}/${NAME}:latest;
       fi
@@ -233,13 +233,6 @@ unittests:
 .zypper_dry_run_command: &zypper_dry_run_command
   DRY_RUN_INSTALL_COMMAND: zypper install -y --dry-run
 
-x86_64-check-almalinux-8:
-  extends: .check_container_template
-  variables:
-    <<: *dnf_dry_run_command
-    IMAGE: docker.io/library/almalinux:8
-    NAME: almalinux-8
-
 x86_64-check-almalinux-9:
   extends: .check_container_template
   variables:
@@ -247,19 +240,19 @@ x86_64-check-almalinux-9:
     IMAGE: docker.io/library/almalinux:9
     NAME: almalinux-9
 
-x86_64-check-alpine-317:
+x86_64-check-alpine-320:
   extends: .check_container_template
   variables:
     <<: *apk_dry_run_command
-    IMAGE: docker.io/library/alpine:3.17
-    NAME: alpine-317
+    IMAGE: docker.io/library/alpine:3.20
+    NAME: alpine-320
 
-x86_64-check-alpine-318:
+x86_64-check-alpine-321:
   extends: .check_container_template
   variables:
     <<: *apk_dry_run_command
-    IMAGE: docker.io/library/alpine:3.18
-    NAME: alpine-318
+    IMAGE: docker.io/library/alpine:3.21
+    NAME: alpine-321
 
 x86_64-check-alpine-edge:
   extends: .check_container_template
@@ -268,13 +261,6 @@ x86_64-check-alpine-edge:
     <<: *apk_dry_run_command
     IMAGE: docker.io/library/alpine:edge
     NAME: alpine-edge
-
-x86_64-check-centos-stream-8:
-  extends: .check_container_template
-  variables:
-    <<: *dnf_dry_run_command
-    IMAGE: quay.io/centos/centos:stream8
-    NAME: centos-stream-8
 
 x86_64-check-centos-stream-9:
   extends: .check_container_template
@@ -306,19 +292,19 @@ x86_64-check-debian-sid:
     IMAGE: docker.io/library/debian:sid-slim
     NAME: debian-sid
 
-x86_64-check-fedora-37:
+x86_64-check-fedora-40:
   extends: .check_container_template
   variables:
     <<: *dnf_dry_run_command
-    IMAGE: registry.fedoraproject.org/fedora:38
-    NAME: fedora-37
+    IMAGE: registry.fedoraproject.org/fedora:40
+    NAME: fedora-40
 
-x86_64-check-fedora-38:
+x86_64-check-fedora-41:
   extends: .check_container_template
   variables:
     <<: *dnf_dry_run_command
-    IMAGE: registry.fedoraproject.org/fedora:37
-    NAME: fedora-38
+    IMAGE: registry.fedoraproject.org/fedora:41
+    NAME: fedora-41
 
 x86_64-check-fedora-rawhide:
   extends: .check_container_template
@@ -332,7 +318,7 @@ x86_64-check-opensuse-leap-15:
   extends: .check_container_template
   variables:
     <<: *zypper_dry_run_command
-    IMAGE: registry.opensuse.org/opensuse/leap:15.5
+    IMAGE: registry.opensuse.org/opensuse/leap:15.6
     NAME: opensuse-leap-15
 
 x86_64-check-opensuse-tumbleweed:
@@ -343,16 +329,16 @@ x86_64-check-opensuse-tumbleweed:
     IMAGE: registry.opensuse.org/opensuse/tumbleweed:latest
     NAME: opensuse-tumbleweed
 
-x86_64-check-ubuntu-2004:
-  extends: .check_container_template
-  variables:
-    <<: *apt_dry_run_command
-    IMAGE: docker.io/library/ubuntu:20.04
-    NAME: ubuntu-2004
-
 x86_64-check-ubuntu-2204:
   extends: .check_container_template
   variables:
     <<: *apt_dry_run_command
     IMAGE: docker.io/library/ubuntu:22.04
     NAME: ubuntu-2204
+
+x86_64-check-ubuntu-2404:
+  extends: .check_container_template
+  variables:
+    <<: *apt_dry_run_command
+    IMAGE: docker.io/library/ubuntu:24.04
+    NAME: ubuntu-2404

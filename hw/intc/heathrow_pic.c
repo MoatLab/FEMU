@@ -184,11 +184,11 @@ static void heathrow_init(Object *obj)
     sysbus_init_mmio(sbd, &s->mem);
 }
 
-static void heathrow_class_init(ObjectClass *oc, void *data)
+static void heathrow_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
 
-    dc->reset = heathrow_reset;
+    device_class_set_legacy_reset(dc, heathrow_reset);
     dc->vmsd = &vmstate_heathrow;
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
 }

@@ -131,7 +131,7 @@ void ofmem_arch_map_pages(ucell phys, ucell virt, ucell size, ucell mode)
 /************************************************************************/
 
 void *
-malloc( int size )
+malloc( size_t size )
 {
 	return ofmem_malloc(size);
 }

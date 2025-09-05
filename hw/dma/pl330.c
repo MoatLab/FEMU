@@ -15,13 +15,14 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/cutils.h"
 #include "hw/irq.h"
 #include "hw/qdev-properties.h"
 #include "hw/sysbus.h"
 #include "migration/vmstate.h"
 #include "qapi/error.h"
 #include "qemu/timer.h"
-#include "sysemu/dma.h"
+#include "system/dma.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "trace.h"
@@ -317,22 +318,14 @@ typedef struct PL330InsnDesc {
 
 static void pl330_hexdump(uint8_t *buf, size_t size)
 {
-    unsigned int b, i, len;
-    char tmpbuf[80];
+    g_autoptr(GString) str = g_string_sized_new(64);
+    size_t b, len;
 
-    for (b = 0; b < size; b += 16) {
-        len = size - b;
-        if (len > 16) {
-            len = 16;
-        }
-        tmpbuf[0] = '\0';
-        for (i = 0; i < len; i++) {
-            if ((i % 4) == 0) {
-                strcat(tmpbuf, " ");
-            }
-            sprintf(tmpbuf + strlen(tmpbuf), " %02x", buf[b + i]);
-        }
-        trace_pl330_hexdump(b, tmpbuf);
+    for (b = 0; b < size; b += len) {
+        len = MIN(16, size - b);
+        g_string_truncate(str, 0);
+        qemu_hexdump_line(str, buf + b, len, 1, 4);
+        trace_pl330_hexdump(b, str->str);
     }
 }
 
@@ -1653,7 +1646,7 @@ static void pl330_realize(DeviceState *dev, Error **errp)
     pl330_fifo_init(&s->fifo, s->data_width / 4 * s->data_buffer_dep);
 }
 
-static Property pl330_properties[] = {
+static const Property pl330_properties[] = {
     /* CR0 */
     DEFINE_PROP_UINT32("num_chnls", PL330State, num_chnls, 8),
     DEFINE_PROP_UINT8("num_periph_req", PL330State, num_periph_req, 4),
@@ -1676,16 +1669,14 @@ static Property pl330_properties[] = {
 
     DEFINE_PROP_LINK("memory", PL330State, mem_mr,
                      TYPE_MEMORY_REGION, MemoryRegion *),
-
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void pl330_class_init(ObjectClass *klass, void *data)
+static void pl330_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = pl330_realize;
-    dc->reset = pl330_reset;
+    device_class_set_legacy_reset(dc, pl330_reset);
     device_class_set_props(dc, pl330_properties);
     dc->vmsd = &vmstate_pl330;
 }

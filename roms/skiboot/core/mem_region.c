@@ -734,7 +734,7 @@ static bool maybe_split(struct mem_region *r, uint64_t split_at)
 		return false;
 
 	/* Tail add is important: we may need to split again! */
-	list_add_after(&regions, &tail->list, &r->list);
+	list_add_after(&regions, &r->list, &tail->list);
 	return true;
 }
 
@@ -771,7 +771,7 @@ static void add_region_to_regions(struct mem_region *region)
 		if (r->start < region->start)
 			continue;
 
-		list_add_before(&regions, &region->list, &r->list);
+		list_add_before(&regions, &r->list, &region->list);
 		return;
 	}
 	list_add_tail(&regions, &region->list);
@@ -918,6 +918,40 @@ restart:
 	unlock(&mem_region_lock);
 
 	return p;
+}
+
+static struct mem_region *mem_to_region(void *mem)
+{
+	struct mem_region *region;
+
+	list_for_each(&regions, region, list) {
+		if (mem < region_start(region))
+			continue;
+		if (mem >= region_start(region) + region->len)
+			continue;
+		return region;
+	}
+	return NULL;
+}
+
+void __local_free(void *mem, const char *location)
+{
+	struct mem_region *region;
+
+	lock(&mem_region_lock);
+
+	region = mem_to_region(mem);
+	if (!region) {
+		prerror("MEM: local_free mem=%p no matching region.\n", mem);
+		unlock(&mem_region_lock);
+		return;
+	}
+
+	lock(&region->free_list_lock);
+	mem_free(region, mem, location);
+	unlock(&region->free_list_lock);
+
+	unlock(&mem_region_lock);
 }
 
 struct mem_region *find_mem_region(const char *name)

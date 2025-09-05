@@ -228,9 +228,6 @@ extern void p9_sbe_init(void);
 /* SBE interrupt */
 extern void p9_sbe_interrupt(uint32_t chip_id);
 
-/* Is SBE timer available ? */
-extern bool p9_sbe_timer_ok(void);
-
 /* Update SBE timer expiry */
 extern void p9_sbe_update_timer_expiry(uint64_t new_target);
 

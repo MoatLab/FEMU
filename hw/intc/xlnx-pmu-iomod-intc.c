@@ -474,11 +474,10 @@ static const MemoryRegionOps xlnx_pmu_io_intc_ops = {
     },
 };
 
-static Property xlnx_pmu_io_intc_properties[] = {
+static const Property xlnx_pmu_io_intc_properties[] = {
     DEFINE_PROP_UINT32("intc-intr-size", XlnxPMUIOIntc, cfg.intr_size, 0),
     DEFINE_PROP_UINT32("intc-level-edge", XlnxPMUIOIntc, cfg.level_edge, 0),
     DEFINE_PROP_UINT32("intc-positive", XlnxPMUIOIntc, cfg.positive, 0),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
 static void xlnx_pmu_io_intc_realize(DeviceState *dev, Error **errp)
@@ -532,11 +531,11 @@ static const VMStateDescription vmstate_xlnx_pmu_io_intc = {
     }
 };
 
-static void xlnx_pmu_io_intc_class_init(ObjectClass *klass, void *data)
+static void xlnx_pmu_io_intc_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    dc->reset = xlnx_pmu_io_intc_reset;
+    device_class_set_legacy_reset(dc, xlnx_pmu_io_intc_reset);
     dc->realize = xlnx_pmu_io_intc_realize;
     dc->vmsd = &vmstate_xlnx_pmu_io_intc;
     device_class_set_props(dc, xlnx_pmu_io_intc_properties);

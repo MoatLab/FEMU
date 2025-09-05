@@ -35,6 +35,7 @@ OBJECT_DECLARE_TYPE(QIOChannel, QIOChannelClass,
 #define QIO_CHANNEL_WRITE_FLAG_ZERO_COPY 0x1
 
 #define QIO_CHANNEL_READ_FLAG_MSG_PEEK 0x1
+#define QIO_CHANNEL_READ_FLAG_RELAXED_EOF 0x2
 
 typedef enum QIOChannelFeature QIOChannelFeature;
 
@@ -45,6 +46,7 @@ enum QIOChannelFeature {
     QIO_CHANNEL_FEATURE_WRITE_ZERO_COPY,
     QIO_CHANNEL_FEATURE_READ_MSG_PEEK,
     QIO_CHANNEL_FEATURE_SEEKABLE,
+    QIO_CHANNEL_FEATURE_CONCURRENT_IO,
 };
 
 
@@ -160,6 +162,9 @@ struct QIOChannelClass {
                                   void *opaque);
     int (*io_flush)(QIOChannel *ioc,
                     Error **errp);
+    int (*io_peerpid)(QIOChannel *ioc,
+                       unsigned int *pid,
+                       Error **errp);
 };
 
 /* General I/O handling functions */
@@ -882,6 +887,7 @@ void qio_channel_set_aio_fd_handler(QIOChannel *ioc,
  * @niov: the length of the @iov array
  * @fds: an array of file handles to read
  * @nfds: number of file handles in @fds
+ * @flags: read flags (QIO_CHANNEL_READ_FLAG_*)
  * @errp: pointer to a NULL-initialized error object
  *
  *
@@ -900,6 +906,7 @@ int coroutine_mixed_fn qio_channel_readv_full_all_eof(QIOChannel *ioc,
                                                       const struct iovec *iov,
                                                       size_t niov,
                                                       int **fds, size_t *nfds,
+                                                      int flags,
                                                       Error **errp);
 
 /**
@@ -980,5 +987,23 @@ int coroutine_mixed_fn qio_channel_writev_full_all(QIOChannel *ioc,
 
 int qio_channel_flush(QIOChannel *ioc,
                       Error **errp);
+
+/**
+ * qio_channel_get_peercred:
+ * @ioc: the channel object
+ * @pid: pointer to pid
+ * @errp: pointer to a NULL-initialized error object
+ *
+ * Returns the pid of the peer process connected to this socket.
+ *
+ * The use of this function is possible only for connected
+ * AF_UNIX stream sockets and for AF_UNIX stream and datagram
+ * socket pairs on Linux.
+ * Return -1 on error with pid -1 for the non-Linux OS.
+ *
+ */
+int qio_channel_get_peerpid(QIOChannel *ioc,
+                             unsigned int *pid,
+                             Error **errp);
 
 #endif /* QIO_CHANNEL_H */

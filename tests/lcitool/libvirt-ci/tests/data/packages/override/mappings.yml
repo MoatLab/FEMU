@@ -1,9 +1,9 @@
 mappings:
   meson:
-    CentOSStream8:
+    CentOSStream9:
 
   python3:
-    CentOSStream8: python38
+    CentOSStream9: python38
 
 pypi_mappings:
   meson:

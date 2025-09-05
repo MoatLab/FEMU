@@ -9,7 +9,7 @@
 #**/
 
 [Defines]
-  INF_VERSION                    = 0x00010005
+  INF_VERSION                    = 1.30
   BASE_NAME                      = ArmPlatformPrePiUniCore
   FILE_GUID                      = 3e401783-cc94-4fcd-97bc-bd35ac369d2f
   MODULE_TYPE                    = SEC
@@ -18,7 +18,6 @@
 [Sources]
   PrePi.h
   PrePi.c
-  MainUniCore.c
 
 [Sources.ARM]
   Arm/ArchPrePi.c
@@ -49,7 +48,6 @@
   DebugAgentLib
   PrePiLib
   ArmPlatformLib
-  ArmPlatformStackLib
   MemoryAllocationLib
   HobLib
   PrePiHobListPointerLib
@@ -65,7 +63,6 @@
 
 [FeaturePcd]
   gEmbeddedTokenSpaceGuid.PcdPrePiProduceMemoryTypeInformationHob
-  gArmPlatformTokenSpaceGuid.PcdSendSgiToBringUpSecondaryCores
 
 [Pcd]
   gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVersionString
@@ -80,7 +77,6 @@
   gArmTokenSpaceGuid.PcdFvSize
 
   gArmPlatformTokenSpaceGuid.PcdCPUCorePrimaryStackSize
-  gArmPlatformTokenSpaceGuid.PcdCPUCoreSecondaryStackSize
 
   gArmPlatformTokenSpaceGuid.PcdSystemMemoryUefiRegionSize
 

@@ -13,6 +13,9 @@
 #ifndef _STDINT_H
 #define _STDINT_H
 
+/* C99 requires *_MAX to be in stdint.h */
+#include <limits.h>
+
 typedef unsigned char uint8_t;
 typedef signed char int8_t;
 

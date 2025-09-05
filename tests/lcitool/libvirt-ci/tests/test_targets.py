@@ -42,7 +42,7 @@ def test_group_vars(targets, target):
 def test_override():
     datadir = DataDir(Path(test_utils.test_data_dir(__file__), 'override'))
     targets = Targets(datadir)
-    facts = targets.target_facts['centos-stream-8']
+    facts = targets.target_facts['centos-stream-9']
 
     assert facts["paths"]["pip3"] == "/usr/bin/pip3.8"
     assert facts["paths"]["python"] == "/usr/bin/python3.8"

@@ -5,7 +5,9 @@
 # See the COPYING file in the top-level directory.
 
 ##
-# = Machines
+# ********
+# Machines
+# ********
 ##
 
 { 'include': 'common.json' }
@@ -24,30 +26,31 @@
 #
 # @avr: since 5.1
 #
-# Notes: The resulting QMP strings can be appended to the
-#     "qemu-system-" prefix to produce the corresponding QEMU
-#     executable name.  This is true even for "qemu-system-x86_64".
+# @loongarch64: since 7.1
+#
+# .. note:: The resulting QMP strings can be appended to the
+#    "qemu-system-" prefix to produce the corresponding QEMU
+#    executable name.  This is true even for "qemu-system-x86_64".
 #
 # Since: 3.0
 ##
 { 'enum' : 'SysEmuTarget',
-  'data' : [ 'aarch64', 'alpha', 'arm', 'avr', 'cris', 'hppa', 'i386',
+  'data' : [ 'aarch64', 'alpha', 'arm', 'avr', 'hppa', 'i386',
              'loongarch64', 'm68k', 'microblaze', 'microblazeel', 'mips', 'mips64',
-             'mips64el', 'mipsel', 'nios2', 'or1k', 'ppc',
+             'mips64el', 'mipsel', 'or1k', 'ppc',
              'ppc64', 'riscv32', 'riscv64', 'rx', 's390x', 'sh4',
              'sh4eb', 'sparc', 'sparc64', 'tricore',
              'x86_64', 'xtensa', 'xtensaeb' ] }
 
 ##
-# @CpuS390State:
+# @S390CpuState:
 #
 # An enumeration of cpu states that can be assumed by a virtual S390
 # CPU
 #
 # Since: 2.12
 ##
-{ 'enum': 'CpuS390State',
-  'prefix': 'S390_CPU_STATE',
+{ 'enum': 'S390CpuState',
   'data': [ 'uninitialized', 'stopped', 'check-stop', 'operating', 'load' ] }
 
 ##
@@ -64,9 +67,9 @@
 # Since: 2.12
 ##
 { 'struct': 'CpuInfoS390',
-  'data': { 'cpu-state': 'CpuS390State',
+  'data': { 'cpu-state': 'S390CpuState',
             '*dedicated': 'bool',
-            '*entitlement': 'CpuS390Entitlement' } }
+            '*entitlement': 'S390CpuEntitlement' } }
 
 ##
 # @CpuInfoFast:
@@ -74,6 +77,8 @@
 # Information about a virtual CPU
 #
 # @cpu-index: index of the virtual CPU
+#
+# @qom-type: QOM type name of the CPU (since 10.1)
 #
 # @qom-path: path to the CPU object in the QOM tree
 #
@@ -88,6 +93,7 @@
 ##
 { 'union'         : 'CpuInfoFast',
   'base'          : { 'cpu-index'    : 'int',
+                      'qom-type'     : 'str',
                       'qom-path'     : 'str',
                       'thread-id'    : 'int',
                       '*props'       : 'CpuInstanceProperties',
@@ -98,13 +104,11 @@
 ##
 # @query-cpus-fast:
 #
-# Returns information about all virtual CPUs.
-#
-# Returns: list of @CpuInfoFast
+# Return information about all virtual CPUs.
 #
 # Since: 2.12
 #
-# Example:
+# .. qmp-example::
 #
 #     -> { "execute": "query-cpus-fast" }
 #     <- { "return": [
@@ -136,6 +140,26 @@
 { 'command': 'query-cpus-fast', 'returns': [ 'CpuInfoFast' ] }
 
 ##
+# @CompatProperty:
+#
+# Property default values specific to a machine type, for use by
+# scripts/compare-machine-types.
+#
+# @qom-type: name of the QOM type to which the default applies
+#
+# @property: name of its property to which the default applies
+#
+# @value: the default value (machine-specific default can overwrite
+#     the "default" default, to avoid this use -machine none)
+#
+# Since: 9.1
+##
+{ 'struct': 'CompatProperty',
+  'data': { 'qom-type': 'str',
+            'property': 'str',
+            'value': 'str' } }
+
+##
 # @MachineInfo:
 #
 # Information describing a machine.
@@ -161,10 +185,18 @@
 # @default-cpu-type: default CPU model typename if none is requested
 #     via the -cpu argument.  (since 4.2)
 #
-# @default-ram-id: the default ID of initial RAM memory backend (since
-#     5.2)
+# @default-ram-id: the default ID of initial RAM memory backend
+#     (since 5.2)
 #
 # @acpi: machine type supports ACPI (since 8.0)
+#
+# @compat-props: The machine type's compatibility properties.  Only
+#     present when `query-machines` argument @compat-props is true.
+#     (since 9.1)
+#
+# Features:
+#
+# @unstable: Member @compat-props is experimental.
 #
 # Since: 1.2
 ##
@@ -173,18 +205,51 @@
             '*is-default': 'bool', 'cpu-max': 'int',
             'hotpluggable-cpus': 'bool',  'numa-mem-supported': 'bool',
             'deprecated': 'bool', '*default-cpu-type': 'str',
-            '*default-ram-id': 'str', 'acpi': 'bool' } }
+            '*default-ram-id': 'str', 'acpi': 'bool',
+            '*compat-props': { 'type': ['CompatProperty'],
+                               'features': ['unstable'] } } }
 
 ##
 # @query-machines:
 #
 # Return a list of supported machines
 #
-# Returns: a list of MachineInfo
+# @compat-props: if true, also return compatibility properties.
+#     (default: false) (since 9.1)
+#
+# Features:
+#
+# @unstable: Argument @compat-props is experimental.
 #
 # Since: 1.2
+#
+# .. qmp-example::
+#
+#     -> { "execute": "query-machines", "arguments": { "compat-props": true } }
+#     <- { "return": [
+#               {
+#                  "hotpluggable-cpus": true,
+#                  "name": "pc-q35-6.2",
+#                  "compat-props": [
+#                       {
+#                          "qom-type": "virtio-mem",
+#                          "property": "unplugged-inaccessible",
+#                          "value": "off"
+#                       }
+#                   ],
+#                   "numa-mem-supported": false,
+#                   "default-cpu-type": "qemu64-x86_64-cpu",
+#                   "cpu-max": 288,
+#                   "deprecated": false,
+#                   "default-ram-id": "pc.ram"
+#               },
+#               ...
+#        }
 ##
-{ 'command': 'query-machines', 'returns': ['MachineInfo'] }
+{ 'command': 'query-machines',
+  'data': { '*compat-props': { 'type': 'bool',
+                               'features': [ 'unstable' ] } },
+  'returns': ['MachineInfo'] }
 
 ##
 # @CurrentMachineParams:
@@ -204,22 +269,20 @@
 #
 # Return information on the current virtual machine.
 #
-# Returns: CurrentMachineParams
-#
 # Since: 4.0
 ##
 { 'command': 'query-current-machine', 'returns': 'CurrentMachineParams' }
 
 ##
-# @TargetInfo:
+# @QemuTargetInfo:
 #
-# Information describing the QEMU target.
+# Information on the target configuration built into the QEMU binary.
 #
 # @arch: the target architecture
 #
 # Since: 1.2
 ##
-{ 'struct': 'TargetInfo',
+{ 'struct': 'QemuTargetInfo',
   'data': { 'arch': 'SysEmuTarget' } }
 
 ##
@@ -227,11 +290,9 @@
 #
 # Return information about the target for this QEMU
 #
-# Returns: TargetInfo
-#
 # Since: 1.2
 ##
-{ 'command': 'query-target', 'returns': 'TargetInfo' }
+{ 'command': 'query-target', 'returns': 'QemuTargetInfo' }
 
 ##
 # @UuidInfo:
@@ -242,8 +303,8 @@
 #
 # Since: 0.14
 #
-# Notes: If no UUID was specified for the guest, a null UUID is
-#     returned.
+# .. note:: If no UUID was specified for the guest, the nil UUID (all
+#    zeroes) is returned.
 ##
 { 'struct': 'UuidInfo', 'data': {'UUID': 'str'} }
 
@@ -252,11 +313,9 @@
 #
 # Query the guest UUID information.
 #
-# Returns: The @UuidInfo for the guest
-#
 # Since: 0.14
 #
-# Example:
+# .. qmp-example::
 #
 #     -> { "execute": "query-uuid" }
 #     <- { "return": { "UUID": "550e8400-e29b-41d4-a716-446655440000" } }
@@ -290,7 +349,7 @@
 #
 # Since: 0.14
 #
-# Example:
+# .. qmp-example::
 #
 #     -> { "execute": "system_reset" }
 #     <- { "return": {} }
@@ -304,12 +363,12 @@
 #
 # Since: 0.14
 #
-# Notes: A guest may or may not respond to this command.  This command
-#     returning does not indicate that a guest has accepted the
-#     request or that it has shut down.  Many guests will respond to
-#     this command by prompting the user in some way.
+# .. note:: A guest may or may not respond to this command.  This
+#    command returning does not indicate that a guest has accepted the
+#    request or that it has shut down.  Many guests will respond to
+#    this command by prompting the user in some way.
 #
-# Example:
+# .. qmp-example::
 #
 #     -> { "execute": "system_powerdown" }
 #     <- { "return": {} }
@@ -321,15 +380,15 @@
 #
 # Wake up guest from suspend.  If the guest has wake-up from suspend
 # support enabled (wakeup-suspend-support flag from
-# query-current-machine), wake-up guest from suspend if the guest is
+# `query-current-machine`), wake-up guest from suspend if the guest is
 # in SUSPENDED state.  Return an error otherwise.
 #
 # Since: 1.1
 #
-# Note: prior to 4.0, this command does nothing in case the guest
-#     isn't suspended.
+# .. note:: Prior to 4.0, this command does nothing in case the guest
+#    isn't suspended.
 #
-# Example:
+# .. qmp-example::
 #
 #     -> { "execute": "system_wakeup" }
 #     <- { "return": {} }
@@ -372,49 +431,20 @@
 # @inject-nmi:
 #
 # Injects a Non-Maskable Interrupt into the default CPU (x86/s390) or
-# all CPUs (ppc64). The command fails when the guest doesn't support
+# all CPUs (ppc64).  The command fails when the guest doesn't support
 # injecting.
 #
 # Since: 0.14
 #
-# Note: prior to 2.1, this command was only supported for x86 and s390
-#     VMs
+# .. note:: Prior to 2.1, this command was only supported for x86 and
+#    s390 VMs.
 #
-# Example:
+# .. qmp-example::
 #
 #     -> { "execute": "inject-nmi" }
 #     <- { "return": {} }
 ##
 { 'command': 'inject-nmi' }
-
-##
-# @KvmInfo:
-#
-# Information about support for KVM acceleration
-#
-# @enabled: true if KVM acceleration is active
-#
-# @present: true if KVM acceleration is built into this executable
-#
-# Since: 0.14
-##
-{ 'struct': 'KvmInfo', 'data': {'enabled': 'bool', 'present': 'bool'} }
-
-##
-# @query-kvm:
-#
-# Returns information about KVM acceleration
-#
-# Returns: @KvmInfo
-#
-# Since: 0.14
-#
-# Example:
-#
-#     -> { "execute": "query-kvm" }
-#     <- { "return": { "enabled": true, "present": true } }
-##
-{ 'command': 'query-kvm', 'returns': 'KvmInfo' }
 
 ##
 # @NumaOptionsType:
@@ -535,7 +565,7 @@
 #
 # List of CXL Fixed Memory Windows.
 #
-# @cxl-fmw: List of CXLFixedMemoryWindowOptions
+# @cxl-fmw: List of `CXLFixedMemoryWindowOptions`
 #
 # Since: 7.1
 ##
@@ -590,10 +620,10 @@
 ##
 # @NumaCpuOptions:
 #
-# Option "-numa cpu" overrides default cpu to node mapping.  It
-# accepts the same set of cpu properties as returned by
-# query-hotpluggable-cpus[].props, where node-id could be used to
-# override default node mapping.
+# Option "-numa cpu" overrides default cpu to node mapping.  It accepts
+# the same set of cpu properties as returned by
+# `query-hotpluggable-cpus[].props <query-hotpluggable-cpus>`, where
+# node-id could be used to override default node mapping.
 #
 # Since: 2.10
 ##
@@ -607,7 +637,7 @@
 # The memory hierarchy in the System Locality Latency and Bandwidth
 # Information Structure of HMAT (Heterogeneous Memory Attribute Table)
 #
-# For more information about @HmatLBMemoryHierarchy, see chapter
+# For more information about `HmatLBMemoryHierarchy`, see chapter
 # 5.2.27.4: Table 5-146: Field "Flags" of ACPI 6.3 spec.
 #
 # @memory: the structure represents the memory performance
@@ -629,8 +659,8 @@
 # Data type in the System Locality Latency and Bandwidth Information
 # Structure of HMAT (Heterogeneous Memory Attribute Table)
 #
-# For more information about @HmatLBDataType, see chapter 5.2.27.4:
-# Table 5-146:  Field "Data Type" of ACPI 6.3 spec.
+# For more information about `HmatLBDataType`, see chapter 5.2.27.4:
+# Table 5-146: Field "Data Type" of ACPI 6.3 spec.
 #
 # @access-latency: access latency (nanoseconds)
 #
@@ -656,7 +686,7 @@
 # Set the system locality latency and bandwidth information between
 # Initiator and Target proximity Domains.
 #
-# For more information about @NumaHmatLBOptions, see chapter 5.2.27.4:
+# For more information about `NumaHmatLBOptions`, see chapter 5.2.27.4:
 # Table 5-146 of ACPI 6.3 spec.
 #
 # @initiator: the Initiator Proximity Domain.
@@ -692,7 +722,7 @@
 # Cache associativity in the Memory Side Cache Information Structure
 # of HMAT
 #
-# For more information of @HmatCacheAssociativity, see chapter
+# For more information of `HmatCacheAssociativity`, see chapter
 # 5.2.27.5: Table 5-147 of ACPI 6.3 spec.
 #
 # @none: None (no memory side cache in this proximity domain, or cache
@@ -713,7 +743,7 @@
 # Cache write policy in the Memory Side Cache Information Structure of
 # HMAT
 #
-# For more information of @HmatCacheWritePolicy, see chapter 5.2.27.5:
+# For more information of `HmatCacheWritePolicy`, see chapter 5.2.27.5:
 # Table 5-147: Field "Cache Attributes" of ACPI 6.3 spec.
 #
 # @none: None (no memory side cache in this proximity domain, or cache
@@ -733,7 +763,7 @@
 #
 # Set the memory side cache information for a given memory domain.
 #
-# For more information of @NumaHmatCacheOptions, see chapter 5.2.27.5:
+# For more information of `NumaHmatCacheOptions`, see chapter 5.2.27.5:
 # Table 5-147: Field "Cache Attributes" of ACPI 6.3 spec.
 #
 # @node-id: the memory proximity domain to which the memory belongs.
@@ -747,7 +777,7 @@
 #
 # @policy: the write policy, none/write-back/write-through.
 #
-# @line: the cache Line size in bytes.
+# @line: the cache line size in bytes.
 #
 # Since: 5.0
 ##
@@ -776,9 +806,9 @@
 #
 # Since: 0.14
 #
-# Notes: Errors were not reliably returned until 1.1
+# .. caution:: Errors were not reliably returned until 1.1.
 #
-# Example:
+# .. qmp-example::
 #
 #     -> { "execute": "memsave",
 #          "arguments": { "val": 10,
@@ -787,7 +817,11 @@
 #     <- { "return": {} }
 ##
 { 'command': 'memsave',
-  'data': {'val': 'int', 'size': 'int', 'filename': 'str', '*cpu-index': 'int'} }
+  'data': {
+     'val': 'uint64',
+     'size': 'size',
+     'filename': 'str',
+     '*cpu-index': 'int' } }
 
 ##
 # @pmemsave:
@@ -802,9 +836,9 @@
 #
 # Since: 0.14
 #
-# Notes: Errors were not reliably returned until 1.1
+# .. caution:: Errors were not reliably returned until 1.1.
 #
-# Example:
+# .. qmp-example::
 #
 #     -> { "execute": "pmemsave",
 #          "arguments": { "val": 10,
@@ -813,7 +847,10 @@
 #     <- { "return": {} }
 ##
 { 'command': 'pmemsave',
-  'data': {'val': 'int', 'size': 'int', 'filename': 'str'} }
+  'data': {
+    'val': 'uint64',
+    'size': 'size',
+    'filename': 'str' } }
 
 ##
 # @Memdev:
@@ -859,13 +896,11 @@
 ##
 # @query-memdev:
 #
-# Returns information for all memory backends.
-#
-# Returns: a list of @Memdev.
+# Return information for all memory backends.
 #
 # Since: 2.1
 #
-# Example:
+# .. qmp-example::
 #
 #     -> { "execute": "query-memdev" }
 #     <- { "return": [
@@ -896,9 +931,7 @@
 ##
 # @CpuInstanceProperties:
 #
-# List of properties to be used for hotplugging a CPU instance, it
-# should be passed by management with device_add command when a CPU is
-# being hotplugged.
+# Properties identifying a CPU.
 #
 # Which members are optional and which mandatory depends on the
 # architecture and board.
@@ -907,7 +940,7 @@
 #
 # The ids other than the node-id specify the position of the CPU
 # within the CPU topology (as defined by the machine property "smp",
-# thus see also type @SMPConfiguration)
+# thus see also type `SMPConfiguration`)
 #
 # @node-id: NUMA node ID the CPU belongs to
 #
@@ -925,23 +958,24 @@
 # @cluster-id: cluster number within the parent container the CPU
 #     belongs to (since 7.1)
 #
+# @module-id: module number within the parent container the CPU
+#    belongs to (since 9.1)
+#
 # @core-id: core number within the parent container the CPU belongs to
 #
 # @thread-id: thread number within the core the CPU  belongs to
 #
-# Note: management should be prepared to pass through additional
-#     properties with device_add.
-#
 # Since: 2.7
 ##
 { 'struct': 'CpuInstanceProperties',
-  # Keep these in sync with the properties device_add accepts
+  # Keep these in sync with the properties `device_add` accepts
   'data': { '*node-id': 'int',
             '*drawer-id': 'int',
             '*book-id': 'int',
             '*socket-id': 'int',
             '*die-id': 'int',
             '*cluster-id': 'int',
+            '*module-id': 'int',
             '*core-id': 'int',
             '*thread-id': 'int'
   }
@@ -950,15 +984,19 @@
 ##
 # @HotpluggableCPU:
 #
-# @type: CPU object type for usage with device_add command
+# @type: CPU object type for usage with `device_add` command
 #
-# @props: list of properties to be used for hotplugging CPU
+# @props: list of properties to pass for hotplugging a CPU with
+#     `device_add`
 #
-# @vcpus-count: number of logical VCPU threads @HotpluggableCPU
+# @vcpus-count: number of logical VCPU threads `HotpluggableCPU`
 #     provides
 #
 # @qom-path: link to existing CPU object if CPU is present or omitted
 #     if CPU is not present.
+#
+# .. note:: Management should be prepared to pass through additional
+#    properties with `device_add`.
 #
 # Since: 2.7
 ##
@@ -975,14 +1013,13 @@
 #
 # TODO: Better documentation; currently there is none.
 #
-# Returns: a list of HotpluggableCPU objects.
-#
 # Since: 2.7
 #
-# Examples:
+# .. qmp-example::
+#    :annotated:
 #
-#     For pseries machine type started with -smp 2,cores=2,maxcpus=4
-#     -cpu POWER8:
+#    For pseries machine type started with
+#    ``-smp 2,cores=2,maxcpus=4 -cpu POWER8``::
 #
 #     -> { "execute": "query-hotpluggable-cpus" }
 #     <- {"return": [
@@ -990,9 +1027,12 @@
 #            "vcpus-count": 1 },
 #          { "props": { "core-id": 0 }, "type": "POWER8-spapr-cpu-core",
 #            "vcpus-count": 1, "qom-path": "/machine/unattached/device[0]"}
-#        ]}'
+#        ]}
 #
-#     For pc machine type started with -smp 1,maxcpus=2:
+# .. qmp-example::
+#    :annotated:
+#
+#    For pc machine type started with ``-smp 1,maxcpus=2``::
 #
 #     -> { "execute": "query-hotpluggable-cpus" }
 #     <- {"return": [
@@ -1007,8 +1047,11 @@
 #          }
 #        ]}
 #
-#     For s390x-virtio-ccw machine type started with -smp 1,maxcpus=2
-#     -cpu qemu (Since: 2.11):
+# .. qmp-example::
+#    :annotated:
+#
+#    For s390x-virtio-ccw machine type started with
+#    ``-smp 1,maxcpus=2 -cpu qemu``::
 #
 #     -> { "execute": "query-hotpluggable-cpus" }
 #     <- {"return": [
@@ -1056,18 +1099,21 @@
 #       the KVM kernel module cannot support it, KVMMissingCap
 #     - If no balloon device is present, DeviceNotActive
 #
-# Notes: This command just issues a request to the guest.  When it
-#     returns, the balloon size may not have changed.  A guest can
-#     change the balloon size independent of this command.
+# .. note:: This command just issues a request to the guest.  When it
+#    returns, the balloon size may not have changed.  A guest can
+#    change the balloon size independent of this command.
 #
 # Since: 0.14
 #
-# Example:
+# .. qmp-example::
+#    :annotated:
 #
-#     -> { "execute": "balloon", "arguments": { "value": 536870912 } }
-#     <- { "return": {} }
+#    ::
 #
-#     With a 2.5GiB guest this command inflated the ballon to 3GiB.
+#      -> { "execute": "balloon", "arguments": { "value": 536870912 } }
+#      <- { "return": {} }
+#
+#    With a 2.5GiB guest this command inflated the ballon to 3GiB.
 ##
 { 'command': 'balloon', 'data': {'value': 'int'} }
 
@@ -1076,7 +1122,7 @@
 #
 # Information about the guest balloon device.
 #
-# @actual: the logical size of the VM in bytes Formula used:
+# @actual: the logical size of the VM in bytes.  Formula used:
 #     logical_vm_size = vm_ram_size - balloon_size
 #
 # Since: 0.14
@@ -1088,9 +1134,6 @@
 #
 # Return information about the balloon device.
 #
-# Returns:
-#     @BalloonInfo
-#
 # Errors:
 #     - If the balloon driver is enabled but not functional because
 #       the KVM kernel module cannot support it, KVMMissingCap
@@ -1098,7 +1141,7 @@
 #
 # Since: 0.14
 #
-# Example:
+# .. qmp-example::
 #
 #     -> { "execute": "query-balloon" }
 #     <- { "return": {
@@ -1112,17 +1155,17 @@
 # @BALLOON_CHANGE:
 #
 # Emitted when the guest changes the actual BALLOON level.  This value
-# is equivalent to the @actual field return by the 'query-balloon'
+# is equivalent to the @actual field return by the `query-balloon`
 # command
 #
-# @actual: the logical size of the VM in bytes Formula used:
+# @actual: the logical size of the VM in bytes.  Formula used:
 #     logical_vm_size = vm_ram_size - balloon_size
 #
-# Note: this event is rate-limited.
+# .. note:: This event is rate-limited.
 #
 # Since: 1.2
 #
-# Example:
+# .. qmp-example::
 #
 #     <- { "event": "BALLOON_CHANGE",
 #          "data": { "actual": 944766976 },
@@ -1151,11 +1194,8 @@
 ##
 # @query-hv-balloon-status-report:
 #
-# Returns the hv-balloon driver data contained in the last received
+# Return the hv-balloon driver data contained in the last received
 # "STATUS" message from the guest.
-#
-# Returns:
-#     @HvBalloonInfo
 #
 # Errors:
 #     - If no hv-balloon device is present, guest memory status
@@ -1164,7 +1204,7 @@
 #
 # Since: 8.2
 #
-# Example:
+# .. qmp-example::
 #
 #     -> { "execute": "query-hv-balloon-status-report" }
 #     <- { "return": {
@@ -1181,11 +1221,11 @@
 # Emitted when the hv-balloon driver receives a "STATUS" message from
 # the guest.
 #
-# Note: this event is rate-limited.
+# .. note:: This event is rate-limited.
 #
 # Since: 8.2
 #
-# Example:
+# .. qmp-example::
 #
 #     <- { "event": "HV_BALLOON_STATUS_REPORT",
 #          "data": { "committed": 816640000, "available": 3333054464 },
@@ -1217,7 +1257,9 @@
 # Return the amount of initially allocated and present hotpluggable
 # (if enabled) memory in bytes.
 #
-# Example:
+# TODO: This line is a hack to separate the example from the body
+#
+# .. qmp-example::
 #
 #     -> { "execute": "query-memory-size-summary" }
 #     <- { "return": { "base-memory": 4294967296, "plugged-memory": 0 } }
@@ -1496,7 +1538,7 @@
 #
 # Since: 2.1
 #
-# Example:
+# .. qmp-example::
 #
 #     -> { "execute": "query-memory-devices" }
 #     <- { "return": [ { "data":
@@ -1526,11 +1568,11 @@
 #
 # @qom-path: path to the device object in the QOM tree (since 6.2)
 #
-# Note: this event is rate-limited.
+# .. note:: This event is rate-limited.
 #
 # Since: 5.1
 #
-# Example:
+# .. qmp-example::
 #
 #     <- { "event": "MEMORY_DEVICE_SIZE_CHANGE",
 #          "data": { "id": "vm0", "size": 1073741824,
@@ -1539,34 +1581,6 @@
 ##
 { 'event': 'MEMORY_DEVICE_SIZE_CHANGE',
   'data': { '*id': 'str', 'size': 'size', 'qom-path' : 'str'} }
-
-##
-# @MEM_UNPLUG_ERROR:
-#
-# Emitted when memory hot unplug error occurs.
-#
-# @device: device name
-#
-# @msg: Informative message
-#
-# Features:
-#
-# @deprecated: This event is deprecated.  Use
-#     @DEVICE_UNPLUG_GUEST_ERROR instead.
-#
-# Since: 2.4
-#
-# Example:
-#
-#     <- { "event": "MEM_UNPLUG_ERROR",
-#          "data": { "device": "dimm1",
-#                    "msg": "acpi: device unplug for unsupported device"
-#          },
-#          "timestamp": { "seconds": 1265044230, "microseconds": 450486 } }
-##
-{ 'event': 'MEM_UNPLUG_ERROR',
-  'data': { 'device': 'str', 'msg': 'str' },
-  'features': ['deprecated'] }
 
 ##
 # @BootConfiguration:
@@ -1609,8 +1623,8 @@
 # The members other than @cpus and @maxcpus define a topology of
 # containers.
 #
-# The ordering from highest/coarsest to lowest/finest is:
-# @drawers, @books, @sockets, @dies, @clusters, @cores, @threads.
+# The ordering from highest/coarsest to lowest/finest is: @drawers,
+# @books, @sockets, @dies, @clusters, @cores, @threads.
 #
 # Different architectures support different subsets of topology
 # containers.
@@ -1633,6 +1647,8 @@
 #
 # @clusters: number of clusters per parent container (since 7.0)
 #
+# @modules: number of modules per parent container (since 9.1)
+#
 # @cores: number of cores per parent container
 #
 # @threads: number of threads per core
@@ -1646,6 +1662,7 @@
      '*sockets': 'int',
      '*dies': 'int',
      '*clusters': 'int',
+     '*modules': 'int',
      '*cores': 'int',
      '*threads': 'int',
      '*maxcpus': 'int' } }
@@ -1703,24 +1720,6 @@
   'features': [ 'unstable' ] }
 
 ##
-# @x-query-opcount:
-#
-# Query TCG opcode counters
-#
-# Features:
-#
-# @unstable: This command is meant for debugging.
-#
-# Returns: TCG opcode counters
-#
-# Since: 6.2
-##
-{ 'command': 'x-query-opcount',
-  'returns': 'HumanReadableText',
-  'if': 'CONFIG_TCG',
-  'features': [ 'unstable' ] }
-
-##
 # @x-query-ramblock:
 #
 # Query system ramblock information
@@ -1734,23 +1733,6 @@
 # Since: 6.2
 ##
 { 'command': 'x-query-ramblock',
-  'returns': 'HumanReadableText',
-  'features': [ 'unstable' ] }
-
-##
-# @x-query-rdma:
-#
-# Query RDMA state
-#
-# Features:
-#
-# @unstable: This command is meant for debugging.
-#
-# Returns: RDMA state
-#
-# Since: 6.2
-##
-{ 'command': 'x-query-rdma',
   'returns': 'HumanReadableText',
   'features': [ 'unstable' ] }
 
@@ -1830,7 +1812,7 @@
 #
 # Since: 7.2
 #
-# Example:
+# .. qmp-example::
 #
 #     -> { "execute": "dumpdtb" }
 #          "arguments": { "filename": "fdt.dtb" } }
@@ -1839,3 +1821,399 @@
 { 'command': 'dumpdtb',
   'data': { 'filename': 'str' },
   'if': 'CONFIG_FDT' }
+
+##
+# @x-query-interrupt-controllers:
+#
+# Query information on interrupt controller devices
+#
+# Features:
+#
+# @unstable: This command is meant for debugging.
+#
+# Returns: Interrupt controller devices information
+#
+# Since: 9.1
+##
+{ 'command': 'x-query-interrupt-controllers',
+  'returns': 'HumanReadableText',
+  'features': [ 'unstable' ]}
+
+##
+# @dump-skeys:
+#
+# Dump the storage keys for an s390x guest
+#
+# @filename: the path to the file to dump to
+#
+# Since: 2.5
+#
+# .. qmp-example::
+#
+#     -> { "execute": "dump-skeys",
+#          "arguments": { "filename": "/tmp/skeys" } }
+#     <- { "return": {} }
+##
+{ 'command': 'dump-skeys',
+  'data': { 'filename': 'str' } }
+
+##
+# @CpuModelInfo:
+#
+# Virtual CPU model.
+#
+# A CPU model consists of the name of a CPU definition, to which delta
+# changes are applied (e.g. features added/removed).  Most magic
+# values that an architecture might require should be hidden behind
+# the name.  However, if required, architectures can expose relevant
+# properties.
+#
+# @name: the name of the CPU definition the model is based on
+#
+# @props: a dictionary of QOM properties to be applied
+#
+# Since: 2.8
+##
+{ 'struct': 'CpuModelInfo',
+  'data': { 'name': 'str',
+            '*props': 'any' } }
+
+##
+# @CpuModelExpansionType:
+#
+# An enumeration of CPU model expansion types.
+#
+# @static: Expand to a static CPU model, a combination of a static
+#     base model name and property delta changes.  As the static base
+#     model will never change, the expanded CPU model will be the
+#     same, independent of QEMU version, machine type, machine
+#     options, and accelerator options.  Therefore, the resulting
+#     model can be used by tooling without having to specify a
+#     compatibility machine - e.g. when displaying the "host" model.
+#     The @static CPU models are migration-safe.
+#
+# @full: Expand all properties.  The produced model is not guaranteed
+#     to be migration-safe, but allows tooling to get an insight and
+#     work with model details.
+#
+# .. note:: When a non-migration-safe CPU model is expanded in static
+#    mode, some features enabled by the CPU model may be omitted,
+#    because they can't be implemented by a static CPU model
+#    definition (e.g. cache info passthrough and PMU passthrough in
+#    x86).  If you need an accurate representation of the features
+#    enabled by a non-migration-safe CPU model, use @full.  If you
+#    need a static representation that will keep ABI compatibility
+#    even when changing QEMU version or machine-type, use @static (but
+#    keep in mind that some features may be omitted).
+#
+# Since: 2.8
+##
+{ 'enum': 'CpuModelExpansionType',
+  'data': [ 'static', 'full' ] }
+
+##
+# @CpuModelCompareResult:
+#
+# An enumeration of CPU model comparison results.  The result is
+# usually calculated using e.g. CPU features or CPU generations.
+#
+# @incompatible: If model A is incompatible to model B, model A is not
+#     guaranteed to run where model B runs and the other way around.
+#
+# @identical: If model A is identical to model B, model A is
+#     guaranteed to run where model B runs and the other way around.
+#
+# @superset: If model A is a superset of model B, model B is
+#     guaranteed to run where model A runs.  There are no guarantees
+#     about the other way.
+#
+# @subset: If model A is a subset of model B, model A is guaranteed to
+#     run where model B runs.  There are no guarantees about the other
+#     way.
+#
+# Since: 2.8
+##
+{ 'enum': 'CpuModelCompareResult',
+  'data': [ 'incompatible', 'identical', 'superset', 'subset' ] }
+
+##
+# @CpuModelBaselineInfo:
+#
+# The result of a CPU model baseline.
+#
+# @model: the baselined `CpuModelInfo`.
+#
+# Since: 2.8
+##
+{ 'struct': 'CpuModelBaselineInfo',
+  'data': { 'model': 'CpuModelInfo' } }
+
+##
+# @CpuModelCompareInfo:
+#
+# The result of a CPU model comparison.
+#
+# @result: The result of the compare operation.
+#
+# @responsible-properties: List of properties that led to the
+#     comparison result not being identical.
+#
+# @responsible-properties is a list of QOM property names that led to
+# both CPUs not being detected as identical.  For identical models,
+# this list is empty.  If a QOM property is read-only, that means
+# there's no known way to make the CPU models identical.  If the
+# special property name "type" is included, the models are by
+# definition not identical and cannot be made identical.
+#
+# Since: 2.8
+##
+{ 'struct': 'CpuModelCompareInfo',
+  'data': { 'result': 'CpuModelCompareResult',
+            'responsible-properties': ['str'] } }
+
+##
+# @query-cpu-model-comparison:
+#
+# Compares two CPU models, @modela and @modelb, returning how they
+# compare in a specific configuration.  The results indicates how
+# both models compare regarding runnability.  This result can be
+# used by tooling to make decisions if a certain CPU model will
+# run in a certain configuration or if a compatible CPU model has
+# to be created by baselining.
+#
+# Usually, a CPU model is compared against the maximum possible CPU
+# model of a certain configuration (e.g. the "host" model for KVM).
+# If that CPU model is identical or a subset, it will run in that
+# configuration.
+#
+# The result returned by this command may be affected by:
+#
+# * QEMU version: CPU models may look different depending on the QEMU
+#   version.  (Except for CPU models reported as "static" in
+#   `query-cpu-definitions`.)
+# * machine-type: CPU model may look different depending on the
+#   machine-type.  (Except for CPU models reported as "static" in
+#   `query-cpu-definitions`.)
+# * machine options (including accelerator): in some architectures,
+#   CPU models may look different depending on machine and accelerator
+#   options.  (Except for CPU models reported as "static" in
+#   `query-cpu-definitions`.)
+# * "-cpu" arguments and global properties: arguments to the -cpu
+#   option and global properties may affect expansion of CPU models.
+#   Using `query-cpu-model-expansion` while using these is not advised.
+#
+# Some architectures may not support comparing CPU models.  s390x
+# supports comparing CPU models.
+#
+# @modela: description of the first CPU model to compare, referred to
+#     as "model A" in `CpuModelCompareResult`
+#
+# @modelb: description of the second CPU model to compare, referred to
+#     as "model B" in `CpuModelCompareResult`
+#
+# Returns: a `CpuModelCompareInfo` describing how both CPU models
+#     compare
+#
+# Errors:
+#     - if comparing CPU models is not supported by the target
+#     - if a model cannot be used
+#     - if a model contains an unknown cpu definition name, unknown
+#       properties or properties with wrong types.
+#
+# Since: 2.8
+##
+{ 'command': 'query-cpu-model-comparison',
+  'data': { 'modela': 'CpuModelInfo', 'modelb': 'CpuModelInfo' },
+  'returns': 'CpuModelCompareInfo' }
+
+##
+# @query-cpu-model-baseline:
+#
+# Baseline two CPU models, @modela and @modelb, creating a compatible
+# third model.  The created model will always be a static,
+# migration-safe CPU model (see "static" CPU model expansion for
+# details).
+#
+# This interface can be used by tooling to create a compatible CPU
+# model out two CPU models.  The created CPU model will be identical
+# to or a subset of both CPU models when comparing them.  Therefore,
+# the created CPU model is guaranteed to run where the given CPU
+# models run.
+#
+# The result returned by this command may be affected by:
+#
+# * QEMU version: CPU models may look different depending on the QEMU
+#   version.  (Except for CPU models reported as "static" in
+#   `query-cpu-definitions`.)
+# * machine-type: CPU model may look different depending on the
+#   machine-type.  (Except for CPU models reported as "static" in
+#   `query-cpu-definitions`.)
+# * machine options (including accelerator): in some architectures,
+#   CPU models may look different depending on machine and accelerator
+#   options.  (Except for CPU models reported as "static" in
+#   `query-cpu-definitions`.)
+# * "-cpu" arguments and global properties: arguments to the -cpu
+#   option and global properties may affect expansion of CPU models.
+#   Using `query-cpu-model-expansion` while using these is not advised.
+#
+# Some architectures may not support baselining CPU models.  s390x
+# supports baselining CPU models.
+#
+# @modela: description of the first CPU model to baseline
+#
+# @modelb: description of the second CPU model to baseline
+#
+# Returns: a `CpuModelBaselineInfo` describing the baselined CPU model
+#
+# Errors:
+#     - if baselining CPU models is not supported by the target
+#     - if a model cannot be used
+#     - if a model contains an unknown cpu definition name, unknown
+#       properties or properties with wrong types.
+#
+# Since: 2.8
+##
+{ 'command': 'query-cpu-model-baseline',
+  'data': { 'modela': 'CpuModelInfo',
+            'modelb': 'CpuModelInfo' },
+  'returns': 'CpuModelBaselineInfo' }
+
+##
+# @CpuModelExpansionInfo:
+#
+# The result of a cpu model expansion.
+#
+# @model: the expanded `CpuModelInfo`.
+#
+# @deprecated-props: an optional list of properties that are flagged as
+#     deprecated by the CPU vendor.  The list depends on the
+#     `CpuModelExpansionType`: "static" properties are a subset of the
+#     enabled-properties for the expanded model; "full" properties are
+#     a set of properties that are deprecated across all models for
+#     the architecture.  (since: 10.1 -- since 9.1 on s390x --).
+#
+# Since: 2.8
+##
+{ 'struct': 'CpuModelExpansionInfo',
+  'data': { 'model': 'CpuModelInfo',
+            '*deprecated-props' : ['str'] } }
+
+##
+# @query-cpu-model-expansion:
+#
+# Expands a given CPU model, @model, (or a combination of CPU model +
+# additional options) to different granularities, specified by @type,
+# allowing tooling to get an understanding what a specific CPU model
+# looks like in QEMU under a certain configuration.
+#
+# This interface can be used to query the "host" CPU model.
+#
+# The data returned by this command may be affected by:
+#
+# * QEMU version: CPU models may look different depending on the QEMU
+#   version.  (Except for CPU models reported as "static" in
+#   `query-cpu-definitions`.)
+# * machine-type: CPU model may look different depending on the
+#   machine-type.  (Except for CPU models reported as "static" in
+#   `query-cpu-definitions`.)
+# * machine options (including accelerator): in some architectures,
+#   CPU models may look different depending on machine and accelerator
+#   options.  (Except for CPU models reported as "static" in
+#   `query-cpu-definitions`.)
+# * "-cpu" arguments and global properties: arguments to the -cpu
+#   option and global properties may affect expansion of CPU models.
+#   Using `query-cpu-model-expansion` while using these is not advised.
+#
+# Some architectures may not support all expansion types.  s390x
+# supports "full" and "static".  Arm only supports "full".
+#
+# @model: description of the CPU model to expand
+#
+# @type: expansion type, specifying how to expand the CPU model
+#
+# Returns: a `CpuModelExpansionInfo` describing the expanded CPU model
+#
+# Errors:
+#     - if expanding CPU models is not supported
+#     - if the model cannot be expanded
+#     - if the model contains an unknown CPU definition name, unknown
+#       properties or properties with a wrong type
+#     - if an expansion type is not supported
+#
+# Since: 2.8
+##
+{ 'command': 'query-cpu-model-expansion',
+  'data': { 'type': 'CpuModelExpansionType',
+            'model': 'CpuModelInfo' },
+  'returns': 'CpuModelExpansionInfo' }
+
+##
+# @CpuDefinitionInfo:
+#
+# Virtual CPU definition.
+#
+# @name: the name of the CPU definition
+#
+# @migration-safe: whether a CPU definition can be safely used for
+#     migration in combination with a QEMU compatibility machine when
+#     migrating between different QEMU versions and between hosts with
+#     different sets of (hardware or software) capabilities.  If not
+#     provided, information is not available and callers should not
+#     assume the CPU definition to be migration-safe.  (since 2.8)
+#
+# @static: whether a CPU definition is static and will not change
+#     depending on QEMU version, machine type, machine options and
+#     accelerator options.  A static model is always migration-safe.
+#     (since 2.8)
+#
+# @unavailable-features: List of properties that prevent the CPU model
+#     from running in the current host.  (since 2.8)
+#
+# @typename: Type name that can be used as argument to
+#     `device-list-properties`, to introspect properties configurable
+#     using -cpu or -global.  (since 2.9)
+#
+# @alias-of: Name of CPU model this model is an alias for.  The target
+#     of the CPU model alias may change depending on the machine type.
+#     Management software is supposed to translate CPU model aliases
+#     in the VM configuration, because aliases may stop being
+#     migration-safe in the future (since 4.1)
+#
+# @deprecated: If true, this CPU model is deprecated and may be
+#     removed in some future version of QEMU according to the QEMU
+#     deprecation policy.  (since 5.2)
+#
+# @unavailable-features is a list of QOM property names that represent
+# CPU model attributes that prevent the CPU from running.  If the QOM
+# property is read-only, that means there's no known way to make the
+# CPU model run in the current host.  Implementations that choose not
+# to provide specific information return the property name "type".  If
+# the property is read-write, it means that it MAY be possible to run
+# the CPU model in the current host if that property is changed.
+# Management software can use it as hints to suggest or choose an
+# alternative for the user, or just to generate meaningful error
+# messages explaining why the CPU model can't be used.  If
+# @unavailable-features is an empty list, the CPU model is runnable
+# using the current host and machine-type.  If @unavailable-features
+# is not present, runnability information for the CPU is not
+# available.
+#
+# Since: 1.2
+##
+{ 'struct': 'CpuDefinitionInfo',
+  'data': { 'name': 'str',
+            '*migration-safe': 'bool',
+            'static': 'bool',
+            '*unavailable-features': [ 'str' ],
+            'typename': 'str',
+            '*alias-of' : 'str',
+            'deprecated' : 'bool' } }
+
+##
+# @query-cpu-definitions:
+#
+# Return a list of supported virtual CPU definitions
+#
+# Since: 1.2
+##
+{ 'command': 'query-cpu-definitions', 'returns': ['CpuDefinitionInfo'] }

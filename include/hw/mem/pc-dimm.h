@@ -16,7 +16,7 @@
 #ifndef QEMU_PC_DIMM_H
 #define QEMU_PC_DIMM_H
 
-#include "exec/memory.h"
+#include "system/memory.h"
 #include "hw/qdev-core.h"
 #include "qom/object.h"
 
@@ -66,8 +66,7 @@ struct PCDIMMDeviceClass {
     void (*unrealize)(PCDIMMDevice *dimm);
 };
 
-void pc_dimm_pre_plug(PCDIMMDevice *dimm, MachineState *machine,
-                      const uint64_t *legacy_align, Error **errp);
+void pc_dimm_pre_plug(PCDIMMDevice *dimm, MachineState *machine, Error **errp);
 void pc_dimm_plug(PCDIMMDevice *dimm, MachineState *machine);
 void pc_dimm_unplug(PCDIMMDevice *dimm, MachineState *machine);
 #endif

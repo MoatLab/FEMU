@@ -15,7 +15,7 @@
 #include "hw/display/bcm2835_fb.h"
 #include "hw/registerfields.h"
 #include "qemu/error-report.h"
-#include "sysemu/device_tree.h"
+#include "system/device_tree.h"
 #include "hw/boards.h"
 #include "hw/loader.h"
 #include "hw/arm/boot.h"
@@ -107,7 +107,7 @@ static void raspi4b_machine_init(MachineState *machine)
     raspi_base_machine_init(machine, &soc->parent_obj);
 }
 
-static void raspi4b_machine_class_init(ObjectClass *oc, void *data)
+static void raspi4b_machine_class_init(ObjectClass *oc, const void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
     RaspiBaseMachineClass *rmc = RASPI_BASE_MACHINE_CLASS(oc);
@@ -118,6 +118,7 @@ static void raspi4b_machine_class_init(ObjectClass *oc, void *data)
     rmc->board_rev = 0xb03115; /* Revision 1.5, 2 Gb RAM */
 #endif
     raspi_machine_class_common_init(mc, rmc->board_rev);
+    mc->auto_create_sdcard = true;
     mc->init = raspi4b_machine_init;
 }
 

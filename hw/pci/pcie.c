@@ -86,7 +86,13 @@ pcie_cap_v1_fill(PCIDevice *dev, uint8_t port, uint8_t type, uint8_t version)
      * Specification, Revision 1.1., or subsequent PCI Express Base
      * Specification revisions.
      */
-    pci_set_long(exp_cap + PCI_EXP_DEVCAP, PCI_EXP_DEVCAP_RBER);
+    uint32_t devcap = PCI_EXP_DEVCAP_RBER;
+
+    if (dev->cap_present & QEMU_PCIE_EXT_TAG) {
+        devcap = PCI_EXP_DEVCAP_RBER | PCI_EXP_DEVCAP_EXT_TAG;
+    }
+
+    pci_set_long(exp_cap + PCI_EXP_DEVCAP, devcap);
 
     pci_set_long(exp_cap + PCI_EXP_LNKCAP,
                  (port << PCI_EXP_LNKCAP_PN_SHIFT) |
@@ -105,6 +111,73 @@ pcie_cap_v1_fill(PCIDevice *dev, uint8_t port, uint8_t type, uint8_t version)
     pci_set_word(cmask + PCI_EXP_LNKSTA, 0);
 }
 
+/* Includes setting the target speed default */
+static void pcie_cap_fill_lnk(uint8_t *exp_cap, PCIExpLinkWidth width,
+                              PCIExpLinkSpeed speed)
+{
+    /* Clear and fill LNKCAP from what was configured above */
+    pci_long_test_and_clear_mask(exp_cap + PCI_EXP_LNKCAP,
+                                 PCI_EXP_LNKCAP_MLW | PCI_EXP_LNKCAP_SLS);
+    pci_long_test_and_set_mask(exp_cap + PCI_EXP_LNKCAP,
+                               QEMU_PCI_EXP_LNKCAP_MLW(width) |
+                               QEMU_PCI_EXP_LNKCAP_MLS(speed));
+
+    if (speed > QEMU_PCI_EXP_LNK_2_5GT) {
+        /*
+         * Target Link Speed defaults to the highest link speed supported by
+         * the component.  2.5GT/s devices are permitted to hardwire to zero.
+         */
+        pci_word_test_and_clear_mask(exp_cap + PCI_EXP_LNKCTL2,
+                                     PCI_EXP_LNKCTL2_TLS);
+        pci_word_test_and_set_mask(exp_cap + PCI_EXP_LNKCTL2,
+                                   QEMU_PCI_EXP_LNKCAP_MLS(speed) &
+                                   PCI_EXP_LNKCTL2_TLS);
+    }
+
+    /*
+     * 2.5 & 5.0GT/s can be fully described by LNKCAP, but 8.0GT/s is
+     * actually a reference to the highest bit supported in this register.
+     * We assume the device supports all link speeds.
+     */
+    if (speed > QEMU_PCI_EXP_LNK_5GT) {
+        pci_long_test_and_clear_mask(exp_cap + PCI_EXP_LNKCAP2, ~0U);
+        pci_long_test_and_set_mask(exp_cap + PCI_EXP_LNKCAP2,
+                                   PCI_EXP_LNKCAP2_SLS_2_5GB |
+                                   PCI_EXP_LNKCAP2_SLS_5_0GB |
+                                   PCI_EXP_LNKCAP2_SLS_8_0GB);
+        if (speed > QEMU_PCI_EXP_LNK_8GT) {
+            pci_long_test_and_set_mask(exp_cap + PCI_EXP_LNKCAP2,
+                                       PCI_EXP_LNKCAP2_SLS_16_0GB);
+        }
+        if (speed > QEMU_PCI_EXP_LNK_16GT) {
+            pci_long_test_and_set_mask(exp_cap + PCI_EXP_LNKCAP2,
+                                       PCI_EXP_LNKCAP2_SLS_32_0GB);
+        }
+        if (speed > QEMU_PCI_EXP_LNK_32GT) {
+            pci_long_test_and_set_mask(exp_cap + PCI_EXP_LNKCAP2,
+                                       PCI_EXP_LNKCAP2_SLS_64_0GB);
+        }
+    }
+}
+
+void pcie_cap_fill_link_ep_usp(PCIDevice *dev, PCIExpLinkWidth width,
+                               PCIExpLinkSpeed speed)
+{
+    uint8_t *exp_cap = dev->config + dev->exp.exp_cap;
+
+    /*
+     * For an end point or USP need to set the current status as well
+     * as the capabilities.
+     */
+    pci_long_test_and_clear_mask(exp_cap + PCI_EXP_LNKSTA,
+                                 PCI_EXP_LNKSTA_CLS | PCI_EXP_LNKSTA_NLW);
+    pci_long_test_and_set_mask(exp_cap + PCI_EXP_LNKSTA,
+                               QEMU_PCI_EXP_LNKSTA_NLW(width) |
+                               QEMU_PCI_EXP_LNKSTA_CLS(speed));
+
+    pcie_cap_fill_lnk(exp_cap, width, speed);
+}
+
 static void pcie_cap_fill_slot_lnk(PCIDevice *dev)
 {
     PCIESlot *s = (PCIESlot *)object_dynamic_cast(OBJECT(dev), TYPE_PCIE_SLOT);
@@ -114,13 +187,6 @@ static void pcie_cap_fill_slot_lnk(PCIDevice *dev)
     if (!s) {
         return;
     }
-
-    /* Clear and fill LNKCAP from what was configured above */
-    pci_long_test_and_clear_mask(exp_cap + PCI_EXP_LNKCAP,
-                                 PCI_EXP_LNKCAP_MLW | PCI_EXP_LNKCAP_SLS);
-    pci_long_test_and_set_mask(exp_cap + PCI_EXP_LNKCAP,
-                               QEMU_PCI_EXP_LNKCAP_MLW(s->width) |
-                               QEMU_PCI_EXP_LNKCAP_MLS(s->speed));
 
     /*
      * Link bandwidth notification is required for all root ports and
@@ -144,42 +210,9 @@ static void pcie_cap_fill_slot_lnk(PCIDevice *dev)
         pci_long_test_and_set_mask(exp_cap + PCI_EXP_LNKCAP,
                                    PCI_EXP_LNKCAP_DLLLARC);
         /* the PCI_EXP_LNKSTA_DLLLA will be set in the hotplug function */
-
-        /*
-         * Target Link Speed defaults to the highest link speed supported by
-         * the component.  2.5GT/s devices are permitted to hardwire to zero.
-         */
-        pci_word_test_and_clear_mask(exp_cap + PCI_EXP_LNKCTL2,
-                                     PCI_EXP_LNKCTL2_TLS);
-        pci_word_test_and_set_mask(exp_cap + PCI_EXP_LNKCTL2,
-                                   QEMU_PCI_EXP_LNKCAP_MLS(s->speed) &
-                                   PCI_EXP_LNKCTL2_TLS);
     }
 
-    /*
-     * 2.5 & 5.0GT/s can be fully described by LNKCAP, but 8.0GT/s is
-     * actually a reference to the highest bit supported in this register.
-     * We assume the device supports all link speeds.
-     */
-    if (s->speed > QEMU_PCI_EXP_LNK_5GT) {
-        pci_long_test_and_clear_mask(exp_cap + PCI_EXP_LNKCAP2, ~0U);
-        pci_long_test_and_set_mask(exp_cap + PCI_EXP_LNKCAP2,
-                                   PCI_EXP_LNKCAP2_SLS_2_5GB |
-                                   PCI_EXP_LNKCAP2_SLS_5_0GB |
-                                   PCI_EXP_LNKCAP2_SLS_8_0GB);
-        if (s->speed > QEMU_PCI_EXP_LNK_8GT) {
-            pci_long_test_and_set_mask(exp_cap + PCI_EXP_LNKCAP2,
-                                       PCI_EXP_LNKCAP2_SLS_16_0GB);
-        }
-        if (s->speed > QEMU_PCI_EXP_LNK_16GT) {
-            pci_long_test_and_set_mask(exp_cap + PCI_EXP_LNKCAP2,
-                                       PCI_EXP_LNKCAP2_SLS_32_0GB);
-        }
-        if (s->speed > QEMU_PCI_EXP_LNK_32GT) {
-            pci_long_test_and_set_mask(exp_cap + PCI_EXP_LNKCAP2,
-                                       PCI_EXP_LNKCAP2_SLS_64_0GB);
-        }
-    }
+    pcie_cap_fill_lnk(exp_cap, s->width, s->speed);
 }
 
 int pcie_cap_init(PCIDevice *dev, uint8_t offset,
@@ -1080,16 +1113,20 @@ void pcie_sync_bridge_lnk(PCIDevice *bridge_dev)
         if ((lnksta & PCI_EXP_LNKSTA_NLW) > (lnkcap & PCI_EXP_LNKCAP_MLW)) {
             lnksta &= ~PCI_EXP_LNKSTA_NLW;
             lnksta |= lnkcap & PCI_EXP_LNKCAP_MLW;
-        } else if (!(lnksta & PCI_EXP_LNKSTA_NLW)) {
-            lnksta |= QEMU_PCI_EXP_LNKSTA_NLW(QEMU_PCI_EXP_LNK_X1);
         }
 
         if ((lnksta & PCI_EXP_LNKSTA_CLS) > (lnkcap & PCI_EXP_LNKCAP_SLS)) {
             lnksta &= ~PCI_EXP_LNKSTA_CLS;
             lnksta |= lnkcap & PCI_EXP_LNKCAP_SLS;
-        } else if (!(lnksta & PCI_EXP_LNKSTA_CLS)) {
-            lnksta |= QEMU_PCI_EXP_LNKSTA_CLS(QEMU_PCI_EXP_LNK_2_5GT);
         }
+    }
+
+    if (!(lnksta & PCI_EXP_LNKSTA_NLW)) {
+        lnksta |= QEMU_PCI_EXP_LNKSTA_NLW(QEMU_PCI_EXP_LNK_X1);
+    }
+
+    if (!(lnksta & PCI_EXP_LNKSTA_CLS)) {
+        lnksta |= QEMU_PCI_EXP_LNKSTA_CLS(QEMU_PCI_EXP_LNK_2_5GT);
     }
 
     pci_word_test_and_clear_mask(exp_cap + PCI_EXP_LNKSTA,
@@ -1176,4 +1213,82 @@ void pcie_acs_reset(PCIDevice *dev)
     if (dev->exp.acs_cap) {
         pci_set_word(dev->config + dev->exp.acs_cap + PCI_ACS_CTRL, 0);
     }
+}
+
+/* PASID */
+void pcie_pasid_init(PCIDevice *dev, uint16_t offset, uint8_t pasid_width,
+                     bool exec_perm, bool priv_mod)
+{
+    static const uint16_t control_reg_rw_mask = 0x07;
+    uint16_t capability_reg;
+
+    assert(pasid_width <= PCI_EXT_CAP_PASID_MAX_WIDTH);
+
+    pcie_add_capability(dev, PCI_EXT_CAP_ID_PASID, PCI_PASID_VER, offset,
+                        PCI_EXT_CAP_PASID_SIZEOF);
+
+    capability_reg = ((uint16_t)pasid_width) << PCI_PASID_CAP_WIDTH_SHIFT;
+    capability_reg |= exec_perm ? PCI_PASID_CAP_EXEC : 0;
+    capability_reg |= priv_mod  ? PCI_PASID_CAP_PRIV : 0;
+    pci_set_word(dev->config + offset + PCI_PASID_CAP, capability_reg);
+
+    /* Everything is disabled by default */
+    pci_set_word(dev->config + offset + PCI_PASID_CTRL, 0);
+
+    pci_set_word(dev->wmask + offset + PCI_PASID_CTRL, control_reg_rw_mask);
+
+    dev->exp.pasid_cap = offset;
+}
+
+/* PRI */
+void pcie_pri_init(PCIDevice *dev, uint16_t offset, uint32_t outstanding_pr_cap,
+                   bool prg_response_pasid_req)
+{
+    static const uint16_t control_reg_rw_mask = 0x3;
+    static const uint16_t status_reg_rw1_mask = 0x3;
+    static const uint32_t pr_alloc_reg_rw_mask = 0xffffffff;
+    uint16_t status_reg;
+
+    status_reg = prg_response_pasid_req ? PCI_PRI_STATUS_PASID : 0;
+    status_reg |= PCI_PRI_STATUS_STOPPED; /* Stopped by default */
+
+    pcie_add_capability(dev, PCI_EXT_CAP_ID_PRI, PCI_PRI_VER, offset,
+                        PCI_EXT_CAP_PRI_SIZEOF);
+    /* Disabled by default */
+
+    pci_set_word(dev->config + offset + PCI_PRI_STATUS, status_reg);
+    pci_set_long(dev->config + offset + PCI_PRI_MAX_REQ, outstanding_pr_cap);
+
+    pci_set_word(dev->wmask + offset + PCI_PRI_CTRL, control_reg_rw_mask);
+    pci_set_word(dev->w1cmask + offset + PCI_PRI_STATUS, status_reg_rw1_mask);
+    pci_set_long(dev->wmask + offset + PCI_PRI_ALLOC_REQ, pr_alloc_reg_rw_mask);
+
+    dev->exp.pri_cap = offset;
+}
+
+bool pcie_pri_enabled(const PCIDevice *dev)
+{
+    if (!pci_is_express(dev) || !dev->exp.pri_cap) {
+        return false;
+    }
+    return (pci_get_word(dev->config + dev->exp.pri_cap + PCI_PRI_CTRL) &
+                PCI_PRI_CTRL_ENABLE) != 0;
+}
+
+bool pcie_pasid_enabled(const PCIDevice *dev)
+{
+    if (!pci_is_express(dev) || !dev->exp.pasid_cap) {
+        return false;
+    }
+    return (pci_get_word(dev->config + dev->exp.pasid_cap + PCI_PASID_CTRL) &
+                PCI_PASID_CTRL_ENABLE) != 0;
+}
+
+bool pcie_ats_enabled(const PCIDevice *dev)
+{
+    if (!pci_is_express(dev) || !dev->exp.ats_cap) {
+        return false;
+    }
+    return (pci_get_word(dev->config + dev->exp.ats_cap + PCI_ATS_CTRL) &
+                PCI_ATS_CTRL_ENABLE) != 0;
 }

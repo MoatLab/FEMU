@@ -20,7 +20,7 @@
 #include "qemu/osdep.h"
 #include "qemu.h"
 #include "user-internals.h"
-#include "cpu_loop-common.h"
+#include "user/cpu_loop.h"
 #include "signal-common.h"
 
 static abi_ulong hppa_lws(CPUHPPAState *env)
@@ -99,6 +99,8 @@ static abi_ulong hppa_lws(CPUHPPAState *env)
 #endif
             }
             break;
+        default:
+            g_assert_not_reached();
         }
         break;
     }
@@ -110,7 +112,7 @@ static abi_ulong hppa_lws(CPUHPPAState *env)
 void cpu_loop(CPUHPPAState *env)
 {
     CPUState *cs = env_cpu(env);
-    abi_ulong ret;
+    abi_ulong ret, si_code = 0;
     int trapnr;
 
     while (1) {
@@ -129,8 +131,8 @@ void cpu_loop(CPUHPPAState *env)
             default:
                 env->gr[28] = ret;
                 /* We arrived here by faking the gateway page.  Return.  */
-                env->iaoq_f = env->gr[31];
-                env->iaoq_b = env->gr[31] + 4;
+                env->iaoq_f = env->gr[31] | PRIV_USER;
+                env->iaoq_b = env->iaoq_f + 4;
                 break;
             case -QEMU_ERESTARTSYS:
             case -QEMU_ESIGRETURN:
@@ -140,8 +142,8 @@ void cpu_loop(CPUHPPAState *env)
         case EXCP_SYSCALL_LWS:
             env->gr[21] = hppa_lws(env);
             /* We arrived here by faking the gateway page.  Return.  */
-            env->iaoq_f = env->gr[31];
-            env->iaoq_b = env->gr[31] + 4;
+            env->iaoq_f = env->gr[31] | PRIV_USER;
+            env->iaoq_b = env->iaoq_f + 4;
             break;
         case EXCP_IMP:
             force_sig_fault(TARGET_SIGSEGV, TARGET_SEGV_MAPERR, env->iaoq_f);
@@ -152,9 +154,9 @@ void cpu_loop(CPUHPPAState *env)
         case EXCP_PRIV_OPR:
             /* check for glibc ABORT_INSTRUCTION "iitlbp %r0,(%sr0, %r0)" */
             if (env->cr[CR_IIR] == 0x04000000) {
-		    force_sig_fault(TARGET_SIGILL, TARGET_ILL_ILLOPC, env->iaoq_f);
+                force_sig_fault(TARGET_SIGILL, TARGET_ILL_ILLOPC, env->iaoq_f);
             } else {
-		    force_sig_fault(TARGET_SIGILL, TARGET_ILL_PRVOPC, env->iaoq_f);
+                force_sig_fault(TARGET_SIGILL, TARGET_ILL_PRVOPC, env->iaoq_f);
             }
             break;
         case EXCP_PRIV_REG:
@@ -167,10 +169,18 @@ void cpu_loop(CPUHPPAState *env)
             force_sig_fault(TARGET_SIGFPE, TARGET_FPE_CONDTRAP, env->iaoq_f);
             break;
         case EXCP_ASSIST:
-            force_sig_fault(TARGET_SIGFPE, 0, env->iaoq_f);
+            #define set_si_code(mask, val) \
+                if (env->fr[0] & mask) { si_code = val; }
+            set_si_code(R_FPSR_FLG_I_MASK, TARGET_FPE_FLTRES);
+            set_si_code(R_FPSR_FLG_U_MASK, TARGET_FPE_FLTUND);
+            set_si_code(R_FPSR_FLG_O_MASK, TARGET_FPE_FLTOVF);
+            set_si_code(R_FPSR_FLG_Z_MASK, TARGET_FPE_FLTDIV);
+            set_si_code(R_FPSR_FLG_V_MASK, TARGET_FPE_FLTINV);
+            #undef set_si_code
+            force_sig_fault(TARGET_SIGFPE, si_code, env->iaoq_f);
             break;
         case EXCP_BREAK:
-            force_sig_fault(TARGET_SIGTRAP, TARGET_TRAP_BRKPT, env->iaoq_f & ~3);
+            force_sig_fault(TARGET_SIGTRAP, TARGET_TRAP_BRKPT, env->iaoq_f);
             break;
         case EXCP_DEBUG:
             force_sig_fault(TARGET_SIGTRAP, TARGET_TRAP_BRKPT, env->iaoq_f);
@@ -186,7 +196,7 @@ void cpu_loop(CPUHPPAState *env)
     }
 }
 
-void target_cpu_copy_regs(CPUArchState *env, struct target_pt_regs *regs)
+void target_cpu_copy_regs(CPUArchState *env, target_pt_regs *regs)
 {
     int i;
     for (i = 1; i < 32; i++) {

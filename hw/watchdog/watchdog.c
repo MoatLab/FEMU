@@ -26,8 +26,8 @@
 #include "qapi/error.h"
 #include "qapi/qapi-commands-run-state.h"
 #include "qapi/qapi-events-run-state.h"
-#include "sysemu/runstate.h"
-#include "sysemu/watchdog.h"
+#include "system/runstate.h"
+#include "system/watchdog.h"
 #include "hw/nmi.h"
 #include "qemu/help_option.h"
 #include "trace.h"
@@ -85,7 +85,7 @@ void watchdog_perform_action(void)
         break;
 
     default:
-        assert(0);
+        g_assert_not_reached();
     }
 }
 

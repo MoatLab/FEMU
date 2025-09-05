@@ -1,0 +1,21 @@
+This tree contains a copy of libfdt from the upstream dtc project for the
+purposes of pypi.org packaging. Other than changes to the packaging files,
+changes should be made upstream. The upstream sources are here:
+
+git://git.kernel.org/pub/scm/utils/dtc/dtc.git
+
+
+To install this you will need to install swig and Python development files.
+
+On Debian distributions:
+
+   sudo apt-get install swig python3-dev
+
+
+The module can be installed with pip:
+
+   pip install libfdt
+
+or via setup.py:
+
+   ./setup.py install [--user]

@@ -66,6 +66,23 @@ cdb_test_unit_ready(struct disk_op_s *op)
     return process_op(op);
 }
 
+static int
+cdb_read_capacity16(struct disk_op_s *op, struct cdbres_read_capacity_16 *data)
+{
+    struct cdb_sai_read_capacity_16 cmd;
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.command = CDB_CMD_SERVICE_ACTION_IN;
+    cmd.flags = CDB_CMD_SAI_READ_CAPACITY_16;
+    cmd.len = cpu_to_be32(sizeof(struct cdbres_read_capacity_16));
+    op->command = CMD_SCSI;
+    op->count = 1;
+    op->buf_fl = data;
+    op->cdbcmd = &cmd;
+    op->blocksize = sizeof(*data);
+    return process_op(op);
+}
+
+
 // Request capacity
 static int
 cdb_read_capacity(struct disk_op_s *op, struct cdbres_read_capacity *data)
@@ -111,12 +128,21 @@ scsi_fill_cmd(struct disk_op_s *op, void *cdbcmd, int maxcdb)
     switch (op->command) {
     case CMD_READ:
     case CMD_WRITE: ;
-        struct cdb_rwdata_10 *cmd = cdbcmd;
-        memset(cmd, 0, maxcdb);
-        cmd->command = (op->command == CMD_READ ? CDB_CMD_READ_10
-                        : CDB_CMD_WRITE_10);
-        cmd->lba = cpu_to_be32(op->lba);
-        cmd->count = cpu_to_be16(op->count);
+        if (op->lba < 0xFFFFFFFFULL) {
+            struct cdb_rwdata_10 *cmd = cdbcmd;
+            memset(cmd, 0, maxcdb);
+            cmd->command = (op->command == CMD_READ ? CDB_CMD_READ_10
+                            : CDB_CMD_WRITE_10);
+            cmd->lba = cpu_to_be32(op->lba);
+            cmd->count = cpu_to_be16(op->count);
+        } else {
+            struct cdb_rwdata_16 *cmd = cdbcmd;
+            memset(cmd, 0, maxcdb);
+            cmd->command = (op->command == CMD_READ ? CDB_CMD_READ_16
+                            : CDB_CMD_WRITE_16);
+            cmd->lba = cpu_to_be64(op->lba);
+            cmd->count = cpu_to_be32(op->count);
+        }
         return GET_FLATPTR(op->drive_fl->blksize);
     case CMD_SCSI:
         if (MODESEGMENT)
@@ -331,18 +357,22 @@ scsi_drive_setup(struct drive_s *drive, const char *s, int prio)
     if (ret)
         return ret;
 
-    // READ CAPACITY returns the address of the last block.
-    // We do not bother with READ CAPACITY(16) because BIOS does not support
-    // 64-bit LBA anyway.
-    drive->blksize = be32_to_cpu(capdata.blksize);
+    if (be32_to_cpu(capdata.sectors) == 0xFFFFFFFFUL) {
+        dprintf(3, "%s: >2TB Detected trying READCAP(16)\n", s);
+        struct cdbres_read_capacity_16 capdata16;
+        ret = cdb_read_capacity16(&dop, &capdata16);
+        drive->blksize = be32_to_cpu(capdata16.blksize);
+        drive->sectors = be64_to_cpu(capdata16.sectors) + 1;
+    } else {
+        drive->blksize = be32_to_cpu(capdata.blksize);
+        drive->sectors = (u64)be32_to_cpu(capdata.sectors) + 1;
+    }
+
     if (drive->blksize != DISK_SECTOR_SIZE) {
         dprintf(1, "%s: unsupported block size %d\n", s, drive->blksize);
         return -1;
     }
-    drive->sectors = (u64)be32_to_cpu(capdata.sectors) + 1;
-    dprintf(1, "%s blksize=%d sectors=%u\n"
-            , s, drive->blksize, (unsigned)drive->sectors);
-
+    dprintf(1, "%s blksize=%d sectors=0x%llx\n", s, drive->blksize, drive->sectors);
     // We do not recover from USB stalls, so try to be safe and avoid
     // sending the command if the (obsolete, but still provided by QEMU)
     // fixed disk geometry page may not be supported.

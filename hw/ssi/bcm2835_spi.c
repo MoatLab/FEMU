@@ -264,11 +264,11 @@ static const VMStateDescription vmstate_bcm2835_spi = {
     }
 };
 
-static void bcm2835_spi_class_init(ObjectClass *klass, void *data)
+static void bcm2835_spi_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    dc->reset = bcm2835_spi_reset;
+    device_class_set_legacy_reset(dc, bcm2835_spi_reset);
     dc->realize = bcm2835_spi_realize;
     dc->vmsd = &vmstate_bcm2835_spi;
 }

@@ -151,7 +151,6 @@ ArmVirtPkg
 F: ArmVirtPkg/
 W: https://github.com/tianocore/tianocore.github.io/wiki/ArmVirtPkg
 M: Ard Biesheuvel <ardb+tianocore@kernel.org> [ardbiesheuvel]
-M: Laszlo Ersek <lersek@redhat.com> [lersek]
 R: Leif Lindholm <quic_llindhol@quicinc.com> [leiflindholm]
 R: Sami Mujawar <sami.mujawar@arm.com> [samimujawar]
 R: Gerd Hoffmann <kraxel@redhat.com> [kraxel]
@@ -418,6 +417,11 @@ M: Abner Chang <abner.chang@amd.com> [changab]
 R: Abdul Lateef Attar <AbdulLateef.Attar@amd.com> [abdattar]
 R: Nickle Wang <nicklew@nvidia.com> [nicklela]
 
+MdeModulePkg: SPI driver stack
+F: MdeModulePkg/Bus/Spi/
+M: Abner Chang <abner.chang@amd.com> [changab]
+R: Brit Chesley <brit.chesley@amd.com> [BritChesley]
+
 MdePkg
 F: MdePkg/
 W: https://github.com/tianocore/tianocore.github.io/wiki/MdePkg
@@ -451,6 +455,18 @@ M: Abner Chang <abner.chang@amd.com> [changab]
 R: Abdul Lateef Attar <AbdulLateef.Attar@amd.com> [abdattar]
 R: Nickle Wang <nicklew@nvidia.com> [nicklela]
 
+MdePkg: SPI related C header files
+F: MdePkg/Include/Protocol/Spi*.h
+F: MdePkg/Include/IndustryStandard/SpiNorFlashJedecSfdp.h
+M: Abner Chang <abner.chang@amd.com> [changab]
+R: Brit Chesley <brit.chesley@amd.com> [BritChesley]
+
+MdePkg: ARM/AARCH64 standard interfaces
+F: MdePkg/Include/Library/ArmLib.h
+M: Leif Lindholm <quic_llindhol@quicinc.com> [leiflindholm]
+M: Ard Biesheuvel <ardb+tianocore@kernel.org> [ardbiesheuvel]
+R: Sami Mujawar <sami.mujawar@arm.com> [samimujawar]
+
 NetworkPkg
 F: NetworkPkg/
 W: https://github.com/tianocore/tianocore.github.io/wiki/NetworkPkg
@@ -462,7 +478,6 @@ F: OvmfPkg/
 W: http://www.tianocore.org/ovmf/
 M: Ard Biesheuvel <ardb+tianocore@kernel.org> [ardbiesheuvel]
 M: Jiewen Yao <jiewen.yao@intel.com> [jyao1]
-M: Laszlo Ersek <lersek@redhat.com> [lersek]
 R: Gerd Hoffmann <kraxel@redhat.com> [kraxel]
 S: Maintained
 
@@ -558,12 +573,18 @@ F: OvmfPkg/XenIoPvhDxe/
 F: OvmfPkg/XenPlatformPei/
 F: OvmfPkg/XenPvBlkDxe/
 F: OvmfPkg/XenResetVector/
-R: Anthony Perard <anthony.perard@citrix.com> [tperard]
+R: Anthony Perard <anthony@xenproject.org> [tperard]
 
 OvmfPkg: RISC-V Qemu Virt Platform
 F: OvmfPkg/RiscVVirt
 M: Sunil V L <sunilvl@ventanamicro.com> [vlsunil]
 R: Andrei Warkentin <andrei.warkentin@intel.com> [andreiw]
+
+OvmfPkg: LOONGARCH Qemu Virt Platform
+F: OvmfPkg/LoongArchVirt
+M: Chao Li <lichao@loongson.cn> [kilaterlee]
+M: Bibo Mao <maobibo@loongson.cn> [bibo-mao]
+R: Xianglai Li <lixianglai@loongson.cn> [lixianglai]
 
 PcAtChipsetPkg
 F: PcAtChipsetPkg/
@@ -617,14 +638,15 @@ F: StandaloneMmPkg/
 M: Ard Biesheuvel <ardb+tianocore@kernel.org> [ardbiesheuvel]
 M: Sami Mujawar <sami.mujawar@arm.com> [samimujawar]
 M: Ray Ni <ray.ni@intel.com> [niruiyu]
+R: Jiaxin Wu <jiaxin.wu@intel.com> [jiaxinwu]
 
 UefiCpuPkg
 F: UefiCpuPkg/
 W: https://github.com/tianocore/tianocore.github.io/wiki/UefiCpuPkg
 M: Ray Ni <ray.ni@intel.com> [niruiyu]
-M: Laszlo Ersek <lersek@redhat.com> [lersek]
 R: Rahul Kumar <rahul1.kumar@intel.com> [rahul1-kumar]
 R: Gerd Hoffmann <kraxel@redhat.com> [kraxel]
+R: Jiaxin Wu <jiaxin.wu@intel.com> [jiaxinwu]
 
 UefiCpuPkg: Sec related modules
 F: UefiCpuPkg/SecCore/

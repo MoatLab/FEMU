@@ -34,8 +34,8 @@
 #include "qemu/option.h"
 #include "qemu/bswap.h"
 #include "migration/blocker.h"
-#include "qapi/qmp/qdict.h"
-#include "qapi/qmp/qstring.h"
+#include "qobject/qdict.h"
+#include "qobject/qstring.h"
 #include "qemu/ctype.h"
 #include "qemu/cutils.h"
 #include "qemu/error-report.h"
@@ -403,7 +403,6 @@ static direntry_t *create_long_filename(BDRVVVFATState *s, const char *filename)
 {
     int number_of_entries, i;
     glong length;
-    direntry_t *entry;
 
     gunichar2 *longname = g_utf8_to_utf16(filename, -1, NULL, &length, NULL);
     if (!longname) {
@@ -414,24 +413,24 @@ static direntry_t *create_long_filename(BDRVVVFATState *s, const char *filename)
     number_of_entries = DIV_ROUND_UP(length * 2, 26);
 
     for(i=0;i<number_of_entries;i++) {
-        entry=array_get_next(&(s->directory));
+        direntry_t *entry=array_get_next(&(s->directory));
         entry->attributes=0xf;
         entry->reserved[0]=0;
         entry->begin=0;
         entry->name[0]=(number_of_entries-i)|(i==0?0x40:0);
     }
     for(i=0;i<26*number_of_entries;i++) {
+        unsigned char *entry=array_get(&(s->directory),s->directory.next-1-(i/26));
         int offset=(i%26);
         if(offset<10) offset=1+offset;
         else if(offset<22) offset=14+offset-10;
         else offset=28+offset-22;
-        entry=array_get(&(s->directory),s->directory.next-1-(i/26));
         if (i >= 2 * length + 2) {
-            entry->name[offset] = 0xff;
+            entry[offset] = 0xff;
         } else if (i % 2 == 0) {
-            entry->name[offset] = longname[i / 2] & 0xff;
+            entry[offset] = longname[i / 2] & 0xff;
         } else {
-            entry->name[offset] = longname[i / 2] >> 8;
+            entry[offset] = longname[i / 2] >> 8;
         }
     }
     g_free(longname);
@@ -1369,8 +1368,9 @@ static int open_file(BDRVVVFATState* s,mapping_t* mapping)
             return -1;
         vvfat_close_current_file(s);
         s->current_fd = fd;
-        s->current_mapping = mapping;
     }
+
+    s->current_mapping = mapping;
     return 0;
 }
 
@@ -1408,7 +1408,9 @@ read_cluster_directory:
 
         assert(s->current_fd);
 
-        offset=s->cluster_size*(cluster_num-s->current_mapping->begin)+s->current_mapping->info.file.offset;
+        offset = s->cluster_size *
+            ((cluster_num - s->current_mapping->begin)
+            + s->current_mapping->info.file.offset);
         if(lseek(s->current_fd, offset, SEEK_SET)!=offset)
             return -3;
         s->cluster=s->cluster_buffer;
@@ -1878,7 +1880,6 @@ get_cluster_count_for_direntry(BDRVVVFATState* s, direntry_t* direntry, const ch
 
     uint32_t cluster_num = begin_of_direntry(direntry);
     uint32_t offset = 0;
-    int first_mapping_index = -1;
     mapping_t* mapping = NULL;
     const char* basename2 = NULL;
 
@@ -1929,8 +1930,9 @@ get_cluster_count_for_direntry(BDRVVVFATState* s, direntry_t* direntry, const ch
                         (mapping->mode & MODE_DIRECTORY) == 0) {
 
                     /* was modified in qcow */
-                    if (offset != mapping->info.file.offset + s->cluster_size
-                            * (cluster_num - mapping->begin)) {
+                    if (offset != s->cluster_size
+                            * ((cluster_num - mapping->begin)
+                            + mapping->info.file.offset)) {
                         /* offset of this cluster in file chain has changed */
                         abort();
                         copy_it = 1;
@@ -1939,14 +1941,9 @@ get_cluster_count_for_direntry(BDRVVVFATState* s, direntry_t* direntry, const ch
 
                         if (strcmp(basename, basename2))
                             copy_it = 1;
-                        first_mapping_index = array_index(&(s->mapping), mapping);
                     }
-
-                    if (mapping->first_mapping_index != first_mapping_index
-                            && mapping->info.file.offset > 0) {
-                        abort();
-                        copy_it = 1;
-                    }
+                    assert(mapping->first_mapping_index == -1
+                            || mapping->info.file.offset > 0);
 
                     /* need to write out? */
                     if (!was_modified && is_file(direntry)) {
@@ -2404,7 +2401,7 @@ static int commit_mappings(BDRVVVFATState* s,
                         (mapping->end - mapping->begin);
             } else
                 next_mapping->info.file.offset = mapping->info.file.offset +
-                        mapping->end - mapping->begin;
+                        (mapping->end - mapping->begin);
 
             mapping = next_mapping;
         }
@@ -2525,8 +2522,9 @@ commit_one_file(BDRVVVFATState* s, int dir_index, uint32_t offset)
         return -1;
     }
 
-    for (i = s->cluster_size; i < offset; i += s->cluster_size)
+    for (i = 0; i < offset; i += s->cluster_size) {
         c = modified_fat_get(s, c);
+    }
 
     fd = qemu_open_old(mapping->path, O_RDWR | O_CREAT | O_BINARY, 0666);
     if (fd < 0) {
@@ -3136,9 +3134,9 @@ vvfat_co_pwritev(BlockDriverState *bs, int64_t offset, int64_t bytes,
 }
 
 static int coroutine_fn vvfat_co_block_status(BlockDriverState *bs,
-                                              bool want_zero, int64_t offset,
-                                              int64_t bytes, int64_t *n,
-                                              int64_t *map,
+                                              unsigned int mode,
+                                              int64_t offset, int64_t bytes,
+                                              int64_t *n, int64_t *map,
                                               BlockDriverState **file)
 {
     *n = bytes;
@@ -3258,7 +3256,7 @@ static BlockDriver bdrv_vvfat = {
     .instance_size          = sizeof(BDRVVVFATState),
 
     .bdrv_parse_filename    = vvfat_parse_filename,
-    .bdrv_file_open         = vvfat_open,
+    .bdrv_open              = vvfat_open,
     .bdrv_refresh_limits    = vvfat_refresh_limits,
     .bdrv_close             = vvfat_close,
     .bdrv_child_perm        = vvfat_child_perm,

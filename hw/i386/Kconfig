@@ -4,11 +4,16 @@ config X86_FW_OVMF
 config SEV
     bool
     select X86_FW_OVMF
-    depends on KVM
+    depends on KVM && X86_64
 
 config SGX
     bool
     depends on KVM
+
+config TDX
+    bool
+    select X86_FW_OVMF
+    depends on KVM && X86_64
 
 config PC
     bool
@@ -26,13 +31,14 @@ config PC
     imply QXL
     imply SEV
     imply SGX
+    imply TDX
     imply TEST_DEVICES
     imply TPM_CRB
     imply TPM_TIS_ISA
     imply VGA_PCI
     imply VIRTIO_VGA
     imply NVDIMM
-    select FDC_ISA
+    imply FDC_ISA
     select I8259
     select I8254
     select PCKBD
@@ -43,6 +49,7 @@ config PC
     select SERIAL_ISA
     select ACPI_PCI
     select ACPI_VMGENID
+    select ACPI_VMCLOCK
     select VIRTIO_PMEM_SUPPORTED
     select VIRTIO_MEM_SUPPORTED
     select HV_BALLOON_SUPPORTED
@@ -66,6 +73,8 @@ config PC_ACPI
 
 config I440FX
     bool
+    default y
+    depends on I386
     imply E1000_PCI
     imply VMPORT
     imply VMMOUSE
@@ -81,6 +90,8 @@ config I440FX
 
 config ISAPC
     bool
+    default y
+    depends on I386
     imply VGA_ISA
     select ISA_BUS
     select PC
@@ -91,6 +102,8 @@ config ISAPC
 
 config Q35
     bool
+    default y
+    depends on I386
     imply VTD
     imply AMD_IOMMU
     imply E1000E_PCI_EXPRESS
@@ -108,6 +121,9 @@ config Q35
 
 config MICROVM
     bool
+    default y
+    depends on I386 && FDT
+    select DEVICE_TREE
     select SERIAL_ISA # for serial_hds_isa_init()
     select ISA_BUS
     select APIC
@@ -115,10 +131,21 @@ config MICROVM
     select I8259
     select MC146818RTC
     select VIRTIO_MMIO
+    select ACPI_PCI
     select ACPI_HW_REDUCED
     select PCI_EXPRESS_GENERIC_BRIDGE
     select USB_XHCI_SYSBUS
     select I8254
+
+config NITRO_ENCLAVE
+    default y
+    depends on I386 && FDT # for MICROVM
+    depends on LIBCBOR && GNUTLS # for EIF and VIRTIO_NSM
+    depends on VHOST_USER # for VHOST_USER_VSOCK
+    select EIF
+    select MICROVM
+    select VHOST_USER_VSOCK
+    select VIRTIO_NSM
 
 config X86_IOMMU
     bool
@@ -142,4 +169,4 @@ config VMMOUSE
 config XEN_EMU
     bool
     default y
-    depends on KVM && (I386 || X86_64)
+    depends on KVM && I386

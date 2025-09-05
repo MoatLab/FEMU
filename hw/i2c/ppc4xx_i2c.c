@@ -354,11 +354,11 @@ static void ppc4xx_i2c_init(Object *o)
     bitbang_i2c_init(&s->bitbang, s->bus);
 }
 
-static void ppc4xx_i2c_class_init(ObjectClass *klass, void *data)
+static void ppc4xx_i2c_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    dc->reset = ppc4xx_i2c_reset;
+    device_class_set_legacy_reset(dc, ppc4xx_i2c_reset);
 }
 
 static const TypeInfo ppc4xx_i2c_type_info = {

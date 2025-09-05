@@ -743,19 +743,18 @@ static void qdev_open_eth_reset(DeviceState *dev)
     open_eth_reset(d);
 }
 
-static Property open_eth_properties[] = {
+static const Property open_eth_properties[] = {
     DEFINE_NIC_PROPERTIES(OpenEthState, conf),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void open_eth_class_init(ObjectClass *klass, void *data)
+static void open_eth_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = sysbus_open_eth_realize;
     set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);
     dc->desc = "Opencores 10/100 Mbit Ethernet";
-    dc->reset = qdev_open_eth_reset;
+    device_class_set_legacy_reset(dc, qdev_open_eth_reset);
     device_class_set_props(dc, open_eth_properties);
 }
 

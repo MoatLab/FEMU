@@ -13,26 +13,28 @@ coverage: hdata-coverage
 LCOV_EXCLUDE += $(HDATA_TEST:%=%.c) hdata/test/stubs.c
 LCOV_EXCLUDE += /usr/include/valgrind/memcheck.h
 
+hdata/test/hdata_to_dt hdata/test/hdata_to_dt-gcov: HOSTCFLAGS += $(call try-cflag,$(HOSTCC),-Wno-error=unterminated-string-initialization)
+
 hdata/test/hdata_to_dt-check: hdata/test/hdata_to_dt-check-q
 hdata/test/hdata_to_dt-check: hdata/test/hdata_to_dt-check-dt
 
 # Add some test ntuples for open source version...
 hdata/test/hdata_to_dt-check-q: hdata/test/hdata_to_dt
-	$(call Q, TEST , $(VALGRIND) hdata/test/hdata_to_dt -8E -q hdata/test/p81-811.spira hdata/test/p81-811.spira.heap, $<)
-	$(call Q, TEST , $(VALGRIND) hdata/test/hdata_to_dt -8E -s -q hdata/test/p8-840-spira.spirah hdata/test/p8-840-spira.spiras, $<)
-	$(call Q, TEST , $(VALGRIND) hdata/test/hdata_to_dt -9 -s -q hdata/test/p8-840-spira.spirah hdata/test/op920.wsp.heap, $<)
+	$(call Q, TEST , $(VALGRIND) hdata/test/hdata_to_dt -8E -q hdata/test/p8-840-spira.spirah hdata/test/p8-840-spira.spiras, $<)
+	$(call Q, TEST , $(VALGRIND) hdata/test/hdata_to_dt -9 -q hdata/test/p8-840-spira.spirah hdata/test/op920.wsp.heap, $<)
+	$(call Q, TEST , $(VALGRIND) hdata/test/hdata_to_dt -10 -q hdata/test/p8-840-spira.spirah hdata/test/p10-rainier.spiras, $<)
 
 hdata/test/hdata_to_dt-check-dt: hdata/test/hdata_to_dt
-	$(call Q, TEST , $(VALGRIND) hdata/test/hdata_to_dt -8E hdata/test/p81-811.spira hdata/test/p81-811.spira.heap 2>/dev/null | hdata/test/dtdiff_wrap.sh hdata/test/p81-811.spira.dts, $< device-tree)
-	$(call Q, TEST , $(VALGRIND) hdata/test/hdata_to_dt -8E -s hdata/test/p8-840-spira.spirah hdata/test/p8-840-spira.spiras 2>/dev/null | hdata/test/dtdiff_wrap.sh hdata/test/p8-840-spira.dts, $< device-tree)
-	$(call Q, TEST , $(VALGRIND) hdata/test/hdata_to_dt -9 -s hdata/test/p8-840-spira.spirah hdata/test/op920.wsp.heap 2>/dev/null | hdata/test/dtdiff_wrap.sh hdata/test/op920.wsp.dts, $< device-tree)
+	$(call Q, TEST , $(VALGRIND) hdata/test/hdata_to_dt -8E hdata/test/p8-840-spira.spirah hdata/test/p8-840-spira.spiras 2>/dev/null | hdata/test/dtdiff_wrap.sh hdata/test/p8-840-spira.dts, $< device-tree)
+	$(call Q, TEST , $(VALGRIND) hdata/test/hdata_to_dt -9 hdata/test/p8-840-spira.spirah hdata/test/op920.wsp.heap 2>/dev/null | hdata/test/dtdiff_wrap.sh hdata/test/op920.wsp.dts, $< device-tree)
+	$(call Q, TEST , $(VALGRIND) hdata/test/hdata_to_dt -10 hdata/test/p8-840-spira.spirah hdata/test/p10-rainier.spiras 2>/dev/null | hdata/test/dtdiff_wrap.sh hdata/test/p10-rainier.dts, $< device-tree)
 
 hdata/test/hdata_to_dt-gcov-run: hdata/test/hdata_to_dt-check-dt-gcov-run
 
 hdata/test/hdata_to_dt-check-dt-gcov-run: hdata/test/hdata_to_dt-gcov
-	$(call Q, TEST-COVERAGE , ./hdata/test/hdata_to_dt-gcov -8E hdata/test/p81-811.spira hdata/test/p81-811.spira.heap 2>/dev/null | hdata/test/dtdiff_wrap.sh hdata/test/p81-811.spira.dts, $< device-tree)
-	$(call Q, TEST-COVERAGE , ./hdata/test/hdata_to_dt-gcov -8E -s hdata/test/p8-840-spira.spirah hdata/test/p8-840-spira.spiras 2>/dev/null | hdata/test/dtdiff_wrap.sh hdata/test/p8-840-spira.dts, $< device-tree)
-	$(call Q, TEST-COVERAGE , ./hdata/test/hdata_to_dt -9 -s hdata/test/p8-840-spira.spirah hdata/test/op920.wsp.heap 2>/dev/null | hdata/test/dtdiff_wrap.sh hdata/test/op920.wsp.dts, $< device-tree)
+	$(call Q, TEST-COVERAGE , ./hdata/test/hdata_to_dt-gcov -8E hdata/test/p8-840-spira.spirah hdata/test/p8-840-spira.spiras 2>/dev/null | hdata/test/dtdiff_wrap.sh hdata/test/p8-840-spira.dts, $< device-tree)
+	$(call Q, TEST-COVERAGE , ./hdata/test/hdata_to_dt -9 hdata/test/p8-840-spira.spirah hdata/test/op920.wsp.heap 2>/dev/null | hdata/test/dtdiff_wrap.sh hdata/test/op920.wsp.dts, $< device-tree)
+	$(call Q, TEST-COVERAGE , ./hdata/test/hdata_to_dt -10 hdata/test/p8-840-spira.spirah hdata/test/p10-rainier.spiras 2>/dev/null | hdata/test/dtdiff_wrap.sh hdata/test/p10-rainier.dts, $< device-tree)
 
 hdata/test/stubs.o: hdata/test/stubs.c
 	$(call Q, HOSTCC , $(HOSTCC) $(HOSTCFLAGS) -g -c -o $@ $<, $<)

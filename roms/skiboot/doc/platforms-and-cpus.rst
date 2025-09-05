@@ -58,10 +58,11 @@ astbmc   mowgli       Power9N     Wistron            "ibm,mowgli"               
 ======== ============ =========== ================== ========================== ============================= =======
 Platform Sub platform Host CPU(s) Manufacturer       compatible                 Other names/Notes             Link(s)
 ======== ============ =========== ================== ========================== ============================= =======
-astbmc   rainier      Power10                        "ibm,rainier"              Rainier
+astbmc   rainier      Power10                        "ibm,rainier"                                            [#]_
+                                                     "ibm,rainier-1s4u"         S1014
+                                                     "ibm,rainier-2s2u"         S1022
+                                                     "ibm,rainier-2s4u"         S1024
 ======== ============ =========== ================== ========================== ============================= =======
-
-
 
 Dropped Platforms
 -----------------
@@ -88,3 +89,8 @@ a P7 should look at one of the early `v5.x` releases.
 .. [#] `POWER9 TO THE PEOPLE <https://www.nextplatform.com/2017/12/05/power9-to-the-people/>`_
 .. Tuleta
 .. [#] `IBM Power System S812L and IBM Power System S822L <https://www.ibm.com/au-en/marketplace/power-system-s812l-s822l>`_
+.. Rainier
+.. [#] ` Announcing IBM Power10 Scale-Out and Midrange Servers <https://www.ibm.com/cloud/blog/announcements/announcing-ibm-power10-scale-out-and-midrange-servers>`_
+.. [#] `IBM Power S1014 <https://www.ibm.com/products/power-s1014>`_
+.. [#] `IBM Power S1022 <https://www.ibm.com/products/power-s1022>`_
+.. [#] `IBM Power S1024 <https://www.ibm.com/products/power-s1024>`_

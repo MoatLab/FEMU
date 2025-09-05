@@ -1679,7 +1679,7 @@ static void npu_create_phb(struct dt_node *dn)
 	npu_hw_init(p);
 }
 
-void probe_npu(void)
+static void probe_npu(void)
 {
 	struct dt_node *np;
 
@@ -1691,3 +1691,5 @@ void probe_npu(void)
 	dt_for_each_compatible(dt_root, np, "ibm,power8-npu-pciex")
 		npu_create_phb(np);
 }
+
+DEFINE_HWPROBE_DEPS(npu, probe_npu, "phb3");

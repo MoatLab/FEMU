@@ -555,45 +555,11 @@ static int lpc_window_read(struct ipmi_hiomap *ctx, uint32_t pos,
 			   void *buf, uint32_t len)
 {
 	uint32_t off = ctx->current.lpc_addr + (pos - ctx->current.cur_pos);
-	int rc;
 
 	if ((ctx->current.lpc_addr + ctx->current.size) < (off + len))
 		return FLASH_ERR_PARM_ERROR;
 
-	prlog(PR_TRACE, "Reading at 0x%08x for 0x%08x offset: 0x%08x\n",
-	      pos, len, off);
-
-	while(len) {
-		uint32_t chunk;
-		uint32_t dat;
-
-		/* XXX: make this read until it's aligned */
-		if (len > 3 && !(off & 3)) {
-			rc = lpc_read(OPAL_LPC_FW, off, &dat, 4);
-			if (!rc) {
-				/*
-				 * lpc_read swaps to CPU endian but it's not
-				 * really a 32-bit value, so convert back.
-				 */
-				*(__be32 *)buf = cpu_to_be32(dat);
-			}
-			chunk = 4;
-		} else {
-			rc = lpc_read(OPAL_LPC_FW, off, &dat, 1);
-			if (!rc)
-				*(uint8_t *)buf = dat;
-			chunk = 1;
-		}
-		if (rc) {
-			prlog(PR_ERR, "lpc_read failure %d to FW 0x%08x\n", rc, off);
-			return rc;
-		}
-		len -= chunk;
-		off += chunk;
-		buf += chunk;
-	}
-
-	return 0;
+	return lpc_fw_read(off, buf, len);
 }
 
 static int lpc_window_write(struct ipmi_hiomap *ctx, uint32_t pos,
@@ -601,7 +567,6 @@ static int lpc_window_write(struct ipmi_hiomap *ctx, uint32_t pos,
 {
 	uint32_t off = ctx->current.lpc_addr + (pos - ctx->current.cur_pos);
 	enum lpc_window_state state;
-	int rc;
 
 	lock(&ctx->lock);
 	state = ctx->window_state;
@@ -613,34 +578,7 @@ static int lpc_window_write(struct ipmi_hiomap *ctx, uint32_t pos,
 	if ((ctx->current.lpc_addr + ctx->current.size) < (off + len))
 		return FLASH_ERR_PARM_ERROR;
 
-	prlog(PR_TRACE, "Writing at 0x%08x for 0x%08x offset: 0x%08x\n",
-	      pos, len, off);
-
-	while(len) {
-		uint32_t chunk;
-
-		if (len > 3 && !(off & 3)) {
-			/* endian swap: see lpc_window_read */
-			uint32_t dat = be32_to_cpu(*(__be32 *)buf);
-
-			rc = lpc_write(OPAL_LPC_FW, off, dat, 4);
-			chunk = 4;
-		} else {
-			uint8_t dat = *(uint8_t *)buf;
-
-			rc = lpc_write(OPAL_LPC_FW, off, dat, 1);
-			chunk = 1;
-		}
-		if (rc) {
-			prlog(PR_ERR, "lpc_write failure %d to FW 0x%08x\n", rc, off);
-			return rc;
-		}
-		len -= chunk;
-		off += chunk;
-		buf += chunk;
-	}
-
-	return 0;
+	return lpc_fw_write(off, buf, len);
 }
 
 /* Best-effort asynchronous event handling by blocklevel callbacks */

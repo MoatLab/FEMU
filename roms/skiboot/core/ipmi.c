@@ -159,7 +159,7 @@ void ipmi_cmd_done(uint8_t cmd, uint8_t netfn, uint8_t cc, struct ipmi_msg *msg)
 
 void ipmi_queue_msg_sync(struct ipmi_msg *msg)
 {
-	void (*poll)(void) = msg->backend->poll;
+	bool (*poll)(void) = msg->backend->poll;
 
 	if (!ipmi_present())
 		return;
@@ -170,7 +170,8 @@ void ipmi_queue_msg_sync(struct ipmi_msg *msg)
 	}
 
 	lock(&sync_lock);
-	while (sync_msg);
+	while (sync_msg)
+		cpu_relax();
 	sync_msg = msg;
 	if (msg->backend->disable_retry && !opal_booting())
 		msg->backend->disable_retry(msg);
@@ -191,6 +192,15 @@ void ipmi_queue_msg_sync(struct ipmi_msg *msg)
 	}
 }
 
+void ipmi_flush(void)
+{
+	if (!ipmi_present())
+		return;
+
+	while (ipmi_backend->poll())
+		time_wait_ms(10);
+}
+
 static void ipmi_read_event_complete(struct ipmi_msg *msg)
 {
 	prlog(PR_DEBUG, "IPMI read event %02x complete: %d bytes. cc: %02x\n",
@@ -209,17 +219,6 @@ static void ipmi_get_message_flags_complete(struct ipmi_msg *msg)
 	ipmi_free_msg(msg);
 
 	prlog(PR_DEBUG, "IPMI Get Message Flags: %02x\n", flags);
-
-	/* Once we see an interrupt we assume the payload has
-	 * booted. We disable the wdt and let the OS setup its own
-	 * wdt.
-	 *
-	 * This is also where we consider the OS to be booted, so we set
-	 * the boot count sensor */
-	if (flags & IPMI_MESSAGE_FLAGS_WATCHDOG_PRE_TIMEOUT) {
-		ipmi_wdt_stop();
-		ipmi_set_boot_count();
-	}
 
 	/* Message available in the event buffer? Queue a Read Event command
 	 * to retrieve it. The flag is cleared by performing a read */

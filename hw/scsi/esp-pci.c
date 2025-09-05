@@ -427,7 +427,7 @@ static void esp_pci_init(Object *obj)
     object_initialize_child(obj, "esp", &pci->esp, TYPE_ESP);
 }
 
-static void esp_pci_class_init(ObjectClass *klass, void *data)
+static void esp_pci_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
@@ -440,7 +440,7 @@ static void esp_pci_class_init(ObjectClass *klass, void *data)
     k->class_id = PCI_CLASS_STORAGE_SCSI;
     set_bit(DEVICE_CATEGORY_STORAGE, dc->categories);
     dc->desc = "AMD Am53c974 PCscsi-PCI SCSI adapter";
-    dc->reset = esp_pci_hard_reset;
+    device_class_set_legacy_reset(dc, esp_pci_hard_reset);
     dc->vmsd = &vmstate_esp_pci_scsi;
 }
 
@@ -450,7 +450,7 @@ static const TypeInfo esp_pci_info = {
     .instance_init = esp_pci_init,
     .instance_size = sizeof(PCIESPState),
     .class_init = esp_pci_class_init,
-    .interfaces = (InterfaceInfo[]) {
+    .interfaces = (const InterfaceInfo[]) {
         { INTERFACE_CONVENTIONAL_PCI_DEVICE },
         { },
     },
@@ -557,7 +557,7 @@ static void dc390_scsi_realize(PCIDevice *dev, Error **errp)
     contents[EE_CHKSUM2] = chksum >> 8;
 }
 
-static void dc390_class_init(ObjectClass *klass, void *data)
+static void dc390_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);

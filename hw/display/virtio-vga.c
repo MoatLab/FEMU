@@ -180,14 +180,14 @@ static void virtio_vga_base_realize(VirtIOPCIProxy *vpci_dev, Error **errp)
     }
 }
 
-static void virtio_vga_base_reset_hold(Object *obj)
+static void virtio_vga_base_reset_hold(Object *obj, ResetType type)
 {
     VirtIOVGABaseClass *klass = VIRTIO_VGA_BASE_GET_CLASS(obj);
     VirtIOVGABase *vvga = VIRTIO_VGA_BASE(obj);
 
     /* reset virtio-gpu */
     if (klass->parent_phases.hold) {
-        klass->parent_phases.hold(obj);
+        klass->parent_phases.hold(obj, type);
     }
 
     /* reset vga */
@@ -209,12 +209,11 @@ static void virtio_vga_set_big_endian_fb(Object *obj, bool value, Error **errp)
     d->vga.big_endian_fb = value;
 }
 
-static Property virtio_vga_base_properties[] = {
+static const Property virtio_vga_base_properties[] = {
     DEFINE_VIRTIO_GPU_PCI_PROPERTIES(VirtIOPCIProxy),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void virtio_vga_base_class_init(ObjectClass *klass, void *data)
+static void virtio_vga_base_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     VirtioPCIClass *k = VIRTIO_PCI_CLASS(klass);

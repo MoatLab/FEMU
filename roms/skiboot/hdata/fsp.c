@@ -282,7 +282,7 @@ static void add_chip_id_to_sensors(struct dt_node *sensor_node, uint32_t slca_in
 		return;
 	}
 
-	for_each_ntuple_idx(&spira.ntuples.proc_chip, hdif, i, SPPCRD_HDIF_SIG) {
+	for_each_ntuple_idx(&spiras->ntuples.proc_chip, hdif, i, SPPCRD_HDIF_SIG) {
 		fru_id = HDIF_get_idata(hdif, SPPCRD_IDATA_FRU_ID, NULL);
 		if (!fru_id)
 			return;
@@ -309,7 +309,7 @@ static void add_ipmi_sensors(struct dt_node *bmc_node)
 	const struct ipmi_sensors *ipmi_sensors;
 	struct dt_node *sensors_node, *sensor_node;
 
-	hdif_sensor = get_hdif(&spira.ntuples.ipmi_sensor, IPMI_SENSORS_HDIF_SIG);
+	hdif_sensor = get_hdif(&spiras->ntuples.ipmi_sensor, IPMI_SENSORS_HDIF_SIG);
 	if (!hdif_sensor) {
 		prlog(PR_DEBUG, "SENSORS: Missing IPMI sensors mappings tuple\n");
 		return;
@@ -371,7 +371,7 @@ static void bmc_create_node(const struct HDIF_common_hdr *sp)
 	dt_add_property_cells(bmc_node, "#size-cells", 0);
 
 	/* Add sensor info under /bmc */
-	if (proc_gen < proc_gen_p10)
+	if (proc_gen < proc_gen_p11)
 		add_ipmi_sensors(bmc_node);
 
 	sp_impl = HDIF_get_idata(sp, SPSS_IDATA_SP_IMPL, &size);
@@ -498,11 +498,11 @@ void bmc_parse(void)
 	const void *sp;
 	int i;
 
-	sp = get_hdif(&spira.ntuples.sp_subsys, SPSS_HDIF_SIG);
+	sp = get_hdif(&spiras->ntuples.sp_subsys, SPSS_HDIF_SIG);
 	if (!sp)
 		return;
 
-	for_each_ntuple_idx(&spira.ntuples.sp_subsys, sp, i, SPSS_HDIF_SIG) {
+	for_each_ntuple_idx(&spiras->ntuples.sp_subsys, sp, i, SPSS_HDIF_SIG) {
 		if (find_service_proc_type(sp, i) == SP_BMC) {
 			bmc_create_node(sp);
 			found = true;
@@ -520,13 +520,13 @@ void fsp_parse(void)
 	int index;
 
 	/* Find SPSS tuple in SPIRA */
-	sp = get_hdif(&spira.ntuples.sp_subsys, SPSS_HDIF_SIG);
+	sp = get_hdif(&spiras->ntuples.sp_subsys, SPSS_HDIF_SIG);
 	if (!sp) {
 		prlog(PR_WARNING, "HDAT: No FSP/BMC found!\n");
 		return;
 	}
 
-	for_each_ntuple_idx(&spira.ntuples.sp_subsys, sp, index, SPSS_HDIF_SIG) {
+	for_each_ntuple_idx(&spiras->ntuples.sp_subsys, sp, index, SPSS_HDIF_SIG) {
 		switch (find_service_proc_type(sp, index)) {
 		case SP_FSP:
 			if (!fsp_root) {

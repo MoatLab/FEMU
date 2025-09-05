@@ -30,16 +30,15 @@
 #include "intel-hda.h"
 #include "migration/vmstate.h"
 #include "intel-hda-defs.h"
-#include "sysemu/dma.h"
+#include "system/dma.h"
 #include "qapi/error.h"
 #include "qom/object.h"
 
 /* --------------------------------------------------------------------- */
 /* hda bus                                                               */
 
-static Property hda_props[] = {
+static const Property hda_props[] = {
     DEFINE_PROP_UINT32("cad", HDACodecDevice, cad, -1),
-    DEFINE_PROP_END_OF_LIST()
 };
 
 static const TypeInfo hda_codec_bus_info = {
@@ -1215,14 +1214,13 @@ static const VMStateDescription vmstate_intel_hda = {
     }
 };
 
-static Property intel_hda_properties[] = {
+static const Property intel_hda_properties[] = {
     DEFINE_PROP_UINT32("debug", IntelHDAState, debug, 0),
     DEFINE_PROP_ON_OFF_AUTO("msi", IntelHDAState, msi, ON_OFF_AUTO_AUTO),
     DEFINE_PROP_BOOL("old_msi_addr", IntelHDAState, old_msi_addr, false),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void intel_hda_class_init(ObjectClass *klass, void *data)
+static void intel_hda_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
@@ -1231,12 +1229,12 @@ static void intel_hda_class_init(ObjectClass *klass, void *data)
     k->exit = intel_hda_exit;
     k->vendor_id = PCI_VENDOR_ID_INTEL;
     k->class_id = PCI_CLASS_MULTIMEDIA_HD_AUDIO;
-    dc->reset = intel_hda_reset;
+    device_class_set_legacy_reset(dc, intel_hda_reset);
     dc->vmsd = &vmstate_intel_hda;
     device_class_set_props(dc, intel_hda_properties);
 }
 
-static void intel_hda_class_init_ich6(ObjectClass *klass, void *data)
+static void intel_hda_class_init_ich6(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
@@ -1247,7 +1245,7 @@ static void intel_hda_class_init_ich6(ObjectClass *klass, void *data)
     dc->desc = "Intel HD Audio Controller (ich6)";
 }
 
-static void intel_hda_class_init_ich9(ObjectClass *klass, void *data)
+static void intel_hda_class_init_ich9(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
@@ -1264,7 +1262,7 @@ static const TypeInfo intel_hda_info = {
     .instance_size = sizeof(IntelHDAState),
     .class_init    = intel_hda_class_init,
     .abstract      = true,
-    .interfaces = (InterfaceInfo[]) {
+    .interfaces = (const InterfaceInfo[]) {
         { INTERFACE_CONVENTIONAL_PCI_DEVICE },
         { },
     },
@@ -1282,7 +1280,7 @@ static const TypeInfo intel_hda_info_ich9 = {
     .class_init    = intel_hda_class_init_ich9,
 };
 
-static void hda_codec_device_class_init(ObjectClass *klass, void *data)
+static void hda_codec_device_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *k = DEVICE_CLASS(klass);
     k->realize = hda_codec_dev_realize;

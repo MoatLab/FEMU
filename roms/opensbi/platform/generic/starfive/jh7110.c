@@ -23,13 +23,12 @@
 struct pmic {
 	struct i2c_adapter *adapter;
 	u32 dev_addr;
-	const char *compatible;
 };
 
 struct jh7110 {
 	u64 pmu_reg_base;
 	u64 clk_reg_base;
-	u32 i2c_index;
+	u32 i2c_clk_offset;
 };
 
 static struct pmic pmic_inst;
@@ -67,7 +66,6 @@ static u32 selected_hartid = -1;
 #define AXP15060_POWER_OFF_BIT		BIT(7)
 #define AXP15060_RESET_BIT		BIT(6)
 
-#define I2C_APB_CLK_OFFSET		0x228
 #define I2C_APB_CLK_ENABLE_BIT		BIT(31)
 
 static int pm_system_reset_check(u32 type, u32 reason)
@@ -130,32 +128,26 @@ static void pmic_ops(struct pmic *pmic, int type)
 	u8 val;
 
 	ret = shutdown_device_power_domain();
-
 	if (ret)
 		return;
 
-	if (!sbi_strcmp("stf,axp15060-regulator", pmic->compatible)) {
-		ret = i2c_adapter_reg_read(pmic->adapter, pmic->dev_addr,
-					   AXP15060_POWER_REG, &val);
-
-		if (ret) {
-			sbi_printf("%s: cannot read pmic power register\n",
-				   __func__);
-			return;
-		}
-
-		val |= AXP15060_POWER_OFF_BIT;
-		if (type == SBI_SRST_RESET_TYPE_SHUTDOWN)
-			val |= AXP15060_POWER_OFF_BIT;
-		else
-			val |= AXP15060_RESET_BIT;
-
-		ret = i2c_adapter_reg_write(pmic->adapter, pmic->dev_addr,
-					    AXP15060_POWER_REG, val);
-		if (ret)
-			sbi_printf("%s: cannot write pmic power register\n",
-				   __func__);
+	ret = i2c_adapter_reg_read(pmic->adapter, pmic->dev_addr,
+				   AXP15060_POWER_REG, &val);
+	if (ret) {
+		sbi_printf("%s: cannot read pmic power register\n", __func__);
+		return;
 	}
+
+	val |= AXP15060_POWER_OFF_BIT;
+	if (type == SBI_SRST_RESET_TYPE_SHUTDOWN)
+		val |= AXP15060_POWER_OFF_BIT;
+	else
+		val |= AXP15060_RESET_BIT;
+
+	ret = i2c_adapter_reg_write(pmic->adapter, pmic->dev_addr,
+					AXP15060_POWER_REG, val);
+	if (ret)
+		sbi_printf("%s: cannot write pmic power register\n", __func__);
 }
 
 static void pmic_i2c_clk_enable(void)
@@ -163,10 +155,7 @@ static void pmic_i2c_clk_enable(void)
 	unsigned long clock_base;
 	unsigned int val;
 
-	clock_base = jh7110_inst.clk_reg_base +
-		I2C_APB_CLK_OFFSET +
-		(jh7110_inst.i2c_index << 2);
-
+	clock_base = jh7110_inst.clk_reg_base + jh7110_inst.i2c_clk_offset;
 	val = readl((void *)clock_base);
 
 	if (!val)
@@ -197,6 +186,8 @@ static struct sbi_system_reset_device pm_reset = {
 	.system_reset = pm_system_reset
 };
 
+static int starfive_jh7110_inst_init(void *fdt);
+
 static int pm_reset_init(void *fdt, int nodeoff,
 			 const struct fdt_match *match)
 {
@@ -210,7 +201,6 @@ static int pm_reset_init(void *fdt, int nodeoff,
 		return rc;
 
 	pmic_inst.dev_addr = addr;
-	pmic_inst.compatible = match->compatible;
 
 	i2c_bus = fdt_parent_offset(fdt, nodeoff);
 	if (i2c_bus < 0)
@@ -223,13 +213,17 @@ static int pm_reset_init(void *fdt, int nodeoff,
 
 	pmic_inst.adapter = adapter;
 
+	rc = starfive_jh7110_inst_init(fdt);
+	if (rc)
+		return rc;
+
 	sbi_system_reset_add_device(&pm_reset);
 
 	return 0;
 }
 
 static const struct fdt_match pm_reset_match[] = {
-	{ .compatible = "stf,axp15060-regulator", .data = (void *)true },
+	{ .compatible = "x-powers,axp15060", .data = (void *)true },
 	{ },
 };
 
@@ -241,7 +235,8 @@ static struct fdt_reset fdt_reset_pmic = {
 static int starfive_jh7110_inst_init(void *fdt)
 {
 	int noff, rc = 0;
-	const char *name;
+	const fdt32_t *val;
+	int len;
 	u64 addr;
 
 	noff = fdt_node_offset_by_compatible(fdt, -1, "starfive,jh7110-pmu");
@@ -250,20 +245,31 @@ static int starfive_jh7110_inst_init(void *fdt)
 		if (rc)
 			goto err;
 		jh7110_inst.pmu_reg_base = addr;
+	} else {
+		return -SBI_ENODEV;
 	}
 
-	noff = fdt_node_offset_by_compatible(fdt, -1, "starfive,jh7110-clkgen");
+	noff = fdt_node_offset_by_compatible(fdt, -1, "starfive,jh7110-syscrg");
 	if (-1 < noff) {
 		rc = fdt_get_node_addr_size(fdt, noff, 0, &addr, NULL);
 		if (rc)
 			goto err;
 		jh7110_inst.clk_reg_base = addr;
+	} else {
+		return -SBI_ENODEV;
 	}
 
 	if (pmic_inst.adapter) {
-		name = fdt_get_name(fdt, pmic_inst.adapter->id, NULL);
-		if (!sbi_strncmp(name, "i2c", 3))
-			jh7110_inst.i2c_index = name[3] - '0';
+		/*
+		 * The clocks property looks like this:
+		 *    clocks = <&syscrg JH7110_SYSCLK_I2C5_APB>;
+		 *
+		 * So, check that the length is 8 bytes, and get
+		 * the offset from the second value.
+		 */
+		val = fdt_getprop(fdt, pmic_inst.adapter->id, "clocks", &len);
+		if (val && len == 8)
+			jh7110_inst.i2c_clk_offset = fdt32_to_cpu(val[1]) << 2;
 		else
 			rc = SBI_EINVAL;
 	}
@@ -278,7 +284,6 @@ static int starfive_jh7110_final_init(bool cold_boot,
 
 	if (cold_boot) {
 		fdt_reset_driver_init(fdt, &fdt_reset_pmic);
-		return starfive_jh7110_inst_init(fdt);
 	}
 
 	return 0;

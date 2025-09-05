@@ -13,7 +13,7 @@ const struct slca_entry *slca_get_entry(uint16_t slca_index)
 	struct HDIF_common_hdr *slca_hdr;
 	int count;
 
-	slca_hdr = get_hdif(&spira.ntuples.slca, SLCA_HDIF_SIG);
+	slca_hdr = get_hdif(&spiras->ntuples.slca, SLCA_HDIF_SIG);
 	if (!slca_hdr) {
 		prerror("SLCA Invalid\n");
 		return NULL;
@@ -89,7 +89,7 @@ static const struct slca_entry *slca_get_sai_entry(void)
 	struct HDIF_common_hdr *slca_hdr;
 	uint16_t sai_fru_id = SLCA_SAI_INDICATOR_ID;
 
-	slca_hdr = get_hdif(&spira.ntuples.slca, SLCA_HDIF_SIG);
+	slca_hdr = get_hdif(&spiras->ntuples.slca, SLCA_HDIF_SIG);
 	if (!slca_hdr) {
 		prerror("SLCA Invalid\n");
 		return NULL;

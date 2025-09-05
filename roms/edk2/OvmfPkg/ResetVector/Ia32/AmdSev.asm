@@ -154,10 +154,6 @@ SevEsUnexpectedRespTerminate:
 
 ; If SEV-ES is enabled then initialize and make the GHCB page shared
 SevClearPageEncMaskForGhcbPage:
-    ; Check if SEV is enabled
-    cmp       byte[WORK_AREA_GUEST_TYPE], 1
-    jnz       SevClearPageEncMaskForGhcbPageExit
-
     ; Check if SEV-ES is enabled
     mov       ecx, 1
     bt        [SEV_ES_WORK_AREA_STATUS_MSR], ecx
@@ -166,11 +162,14 @@ SevClearPageEncMaskForGhcbPage:
     ;
     ; The initial GHCB will live at GHCB_BASE and needs to be un-encrypted.
     ; This requires the 2MB page for this range be broken down into 512 4KB
-    ; pages.  All will be marked encrypted, except for the GHCB.
+    ; pages.  All will be marked encrypted, except for the GHCB. Since the
+    ; original PMD entry is no longer a leaf entry, remove the encryption
+    ; bit when pointing to the PTE page.
     ;
     mov     ecx, (GHCB_BASE >> 21)
     mov     eax, GHCB_PT_ADDR + PAGE_PDP_ATTR
     mov     [ecx * 8 + PT_ADDR (0x2000)], eax
+    mov     [ecx * 8 + PT_ADDR (0x2000) + 4], strict dword 0
 
     ;
     ; Page Table Entries (512 * 4KB entries => 2MB)
@@ -195,20 +194,12 @@ pageTableEntries4kLoop:
 SevClearPageEncMaskForGhcbPageExit:
     OneTimeCallRet SevClearPageEncMaskForGhcbPage
 
-; Check if SEV is enabled, and get the C-bit mask above 31.
+; Get the C-bit mask above 31.
 ; Modified: EDX
 ;
 ; The value is returned in the EDX
 GetSevCBitMaskAbove31:
-    xor       edx, edx
-
-    ; Check if SEV is enabled
-    cmp       byte[WORK_AREA_GUEST_TYPE], 1
-    jnz       GetSevCBitMaskAbove31Exit
-
     mov       edx, dword[SEV_ES_WORK_AREA_ENC_MASK + 4]
-
-GetSevCBitMaskAbove31Exit:
     OneTimeCallRet GetSevCBitMaskAbove31
 
 %endif

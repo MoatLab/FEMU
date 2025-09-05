@@ -51,7 +51,7 @@ def gen_param_var(typ: QAPISchemaObjectType) -> str:
 
     Initialize it with the function arguments defined in `gen_event_send`.
     """
-    assert not typ.variants
+    assert not typ.branches
     ret = mcgen('''
     %(c_name)s param = {
 ''',
@@ -194,7 +194,7 @@ class QAPISchemaGenEventVisitor(QAPISchemaModularCVisitor):
 #include "%(visit)s.h"
 #include "qapi/compat-policy.h"
 #include "qapi/error.h"
-#include "qapi/qmp/qdict.h"
+#include "qobject/qdict.h"
 #include "qapi/qmp-event.h"
 ''',
                              events=events, visit=visit,

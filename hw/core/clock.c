@@ -13,6 +13,8 @@
 
 #include "qemu/osdep.h"
 #include "qemu/cutils.h"
+#include "qapi/visitor.h"
+#include "system/qtest.h"
 #include "hw/clock.h"
 #include "trace.h"
 
@@ -42,14 +44,10 @@ Clock *clock_new(Object *parent, const char *name)
 void clock_set_callback(Clock *clk, ClockCallback *cb, void *opaque,
                         unsigned int events)
 {
+    assert(OBJECT(clk)->parent);
     clk->callback = cb;
     clk->callback_opaque = opaque;
     clk->callback_events = events;
-}
-
-void clock_clear_callback(Clock *clk)
-{
-    clock_set_callback(clk, NULL, NULL, 0);
 }
 
 bool clock_set(Clock *clk, uint64_t period)
@@ -108,7 +106,6 @@ static void clock_propagate_period(Clock *clk, bool call_callbacks)
 
 void clock_propagate(Clock *clk)
 {
-    assert(clk->source == NULL);
     trace_clock_propagate(CLOCK_PATH(clk));
     clock_propagate_period(clk, true);
 }
@@ -159,6 +156,25 @@ bool clock_set_mul_div(Clock *clk, uint32_t multiplier, uint32_t divider)
     return true;
 }
 
+static void clock_period_prop_get(Object *obj, Visitor *v, const char *name,
+                                void *opaque, Error **errp)
+{
+    Clock *clk = CLOCK(obj);
+    uint64_t period = clock_get(clk);
+    visit_type_uint64(v, name, &period, errp);
+}
+
+static void clock_unparent(Object *obj)
+{
+    /*
+     * Callback are registered by the parent, which might die anytime after
+     * it's unparented the children.  Avoid having a callback to a deleted
+     * object in case the clock is still referenced somewhere else (eg: by
+     * a clock output).
+     */
+    clock_set_callback(CLOCK(obj), NULL, NULL, 0);
+}
+
 static void clock_initfn(Object *obj)
 {
     Clock *clk = CLOCK(obj);
@@ -167,6 +183,11 @@ static void clock_initfn(Object *obj)
     clk->divider = 1;
 
     QLIST_INIT(&clk->children);
+
+    if (qtest_enabled()) {
+        object_property_add(obj, "qtest-clock-period", "uint64",
+                            clock_period_prop_get, NULL, NULL, NULL);
+    }
 }
 
 static void clock_finalizefn(Object *obj)
@@ -185,11 +206,17 @@ static void clock_finalizefn(Object *obj)
     g_free(clk->canonical_path);
 }
 
+static void clock_class_init(ObjectClass *klass, const void *data)
+{
+    klass->unparent = clock_unparent;
+}
+
 static const TypeInfo clock_info = {
     .name              = TYPE_CLOCK,
     .parent            = TYPE_OBJECT,
     .instance_size     = sizeof(Clock),
     .instance_init     = clock_initfn,
+    .class_init        = clock_class_init,
     .instance_finalize = clock_finalizefn,
 };
 

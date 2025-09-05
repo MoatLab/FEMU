@@ -19,7 +19,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/units.h"
-#include "exec/address-spaces.h"
+#include "system/address-spaces.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
 #include "hw/boards.h"
@@ -121,6 +121,7 @@ static void orangepi_machine_init(MachineClass *mc)
     mc->valid_cpu_types = valid_cpu_types;
     mc->default_ram_size = 1 * GiB;
     mc->default_ram_id = "orangepi.ram";
+    mc->auto_create_sdcard = true;
 }
 
 DEFINE_MACHINE("orangepi-pc", orangepi_machine_init)

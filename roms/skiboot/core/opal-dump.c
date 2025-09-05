@@ -301,6 +301,7 @@ static int64_t opal_mpipl_update(enum opal_mpipl_ops ops,
 				 u64 src, u64 dest, u64 size)
 {
 	int rc;
+	void *skiboot_constant_addr mdrt_table_base_addr = (void *) MDRT_TABLE_BASE;
 
 	switch (ops) {
 	case OPAL_MPIPL_ADD_RANGE:
@@ -330,7 +331,7 @@ static int64_t opal_mpipl_update(enum opal_mpipl_ops ops,
 		free(opal_mpipl_cpu_data);
 		opal_mpipl_cpu_data = NULL;
 		/* Clear MDRT table */
-		memset((void *)MDRT_TABLE_BASE, 0, MDRT_TABLE_SIZE);
+		memset(mdrt_table_base_addr, 0, MDRT_TABLE_SIZE);
 		/* Set MDRT count to max allocated count */
 		ntuple_mdrt->act_cnt = cpu_to_be16(MDRT_TABLE_SIZE / sizeof(struct mdrt_table));
 		rc = OPAL_SUCCESS;
@@ -529,8 +530,8 @@ bool is_mpipl_enabled(void)
 
 void opal_mpipl_init(void)
 {
-	void *mdst_base = (void *)MDST_TABLE_BASE;
-	void *mddt_base = (void *)MDDT_TABLE_BASE;
+	void *skiboot_constant_addr mdst_base = (void *)MDST_TABLE_BASE;
+	void *skiboot_constant_addr mddt_base = (void *)MDDT_TABLE_BASE;
 	struct dt_node *dump_node;
 
 	dump_node = dt_find_by_path(opal_node, "dump");

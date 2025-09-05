@@ -3,7 +3,7 @@
 #include <stddef.h>
 #include <ccan/tap/tap.h>
 
-int main(int argc, char *argv[])
+int main(void)
 {
 	union {
 		uint64_t u64;
@@ -17,9 +17,6 @@ int main(int argc, char *argv[])
 		uint16_t u16;
 		unsigned char u16_bytes[2];
 	} u16;
-
-	(void)argc;
-	(void)argv;
 
 	plan_tests(48);
 

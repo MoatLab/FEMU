@@ -184,7 +184,7 @@ struct opal_command_buffer {
 	u8 request_id;
 	u8 cmd;
 	u8 spare;
-	u16 data_size;
+	__be16 data_size;
 	u8 data[MAX_OPAL_CMD_DATA_LENGTH];
 } __packed;
 
@@ -224,7 +224,7 @@ struct occ_response_buffer {
 	u8 request_id;
 	u8 cmd;
 	u8 status;
-	u16 data_size;
+	__be16 data_size;
 	u8 data[MAX_OCC_RSP_DATA_LENGTH];
 } __packed;
 
@@ -261,21 +261,23 @@ struct occ_dynamic_data {
 	u8 major_version;
 	u8 minor_version;
 	u8 gpus_present;
-	struct __packed { /* Version 0x90 */
-		u8 spare1;
-	} v9;
-	struct __packed { /* Version 0xA0 */
-		u8 wof_enabled;
-	} v10;
+	union __packed {
+		struct __packed { /* Version 0x90 */
+			u8 spare1;
+		} v9;
+		struct __packed { /* Version 0xA0 */
+			u8 wof_enabled;
+		} v10;
+	};
 	u8 cpu_throttle;
 	u8 mem_throttle;
 	u8 quick_pwr_drop;
 	u8 pwr_shifting_ratio;
 	u8 pwr_cap_type;
-	u16 hard_min_pwr_cap;
-	u16 max_pwr_cap;
-	u16 cur_pwr_cap;
-	u16 soft_min_pwr_cap;
+	__be16 hard_min_pwr_cap;
+	__be16 max_pwr_cap;
+	__be16 cur_pwr_cap;
+	__be16 soft_min_pwr_cap;
 	u8 pad[110];
 	struct opal_command_buffer cmd;
 	struct occ_response_buffer rsp;
@@ -444,56 +446,6 @@ static bool wait_for_all_occ_init(void)
 			break;
 
 		case 0x90:
-			/*
-			 * OCC-OPAL interface version 0x90 has a
-			 * dynamic data section.  This has an
-			 * occ_state field whose values inform about
-			 * the state of the OCC.
-			 *
-			 * 0x00 = OCC not running. No communication
-			 *        allowed.
-			 *
-			 * 0x01 = Standby. No communication allowed.
-			 *
-			 * 0x02 = Observation State. Communication
-			 *        allowed and is command dependent.
-			 *
-			 * 0x03 = Active State. Communication allowed
-			 *        and is command dependent.
-			 *
-			 * 0x04 = Safe State. No communication
-			 *        allowed. Just like CPU throttle
-			 *        status, some failures will not allow
-			 *        for OCC to update state to safe.
-			 *
-			 * 0x05 = Characterization State.
-			 *        Communication allowed and is command
-			 *        dependent.
-			 *
-			 * We will error out if OCC is not in the
-			 * Active State.
-			 *
-			 * XXX : Should we error out only if no
-			 *       communication is allowed with the
-			 *       OCC ?
-			 */
-			occ_dyn_data = get_occ_dynamic_data(chip);
-			if (occ_dyn_data->occ_state != 0x3) {
-				/**
-				 * @fwts-label OCCInactive
-				 * @fwts-advice The OCC for a chip was not active.
-				 * This means that CPU frequency scaling will
-				 * not be functional. CPU may be set to a low,
-				 * safe frequency. This means that CPU idle
-				 * states and CPU frequency scaling may not be
-				 * functional.
-				 */
-				prlog(PR_ERR, "OCC: Chip: %x: OCC not active\n",
-				      chip->id);
-				return false;
-			}
-			break;
-
 		case 0xA0:
 			/*
 			 * OCC-OPAL interface version 0x90 has a
@@ -1296,6 +1248,7 @@ static int write_occ_cmd(struct cmd_interface *chip)
 {
 	struct opal_command_buffer *cmd = chip->cmd;
 	enum occ_cmd ocmd = chip->cdata->cmd;
+	u16 data_size;
 
 	if (!chip->retry && occ_in_progress(chip)) {
 		chip->cmd_in_progress = false;
@@ -1305,8 +1258,9 @@ static int write_occ_cmd(struct cmd_interface *chip)
 	cmd->flag = chip->rsp->flag = 0;
 	cmd->cmd = occ_cmds[ocmd].cmd_value;
 	cmd->request_id = chip->request_id++;
-	cmd->data_size = occ_cmds[ocmd].cmd_size;
-	memcpy(&cmd->data, chip->cdata->data, cmd->data_size);
+	data_size = occ_cmds[ocmd].cmd_size;
+	cmd->data_size = cpu_to_be16(data_size);
+	memcpy(&cmd->data, chip->cdata->data, data_size);
 	cmd->flag = OPAL_FLAG_CMD_READY;
 
 	schedule_timer(&chip->timeout,
@@ -1346,9 +1300,13 @@ out:
 static inline bool sanity_check_opal_cmd(struct opal_command_buffer *cmd,
 					 struct cmd_interface *chip)
 {
-	return ((cmd->cmd == occ_cmds[chip->cdata->cmd].cmd_value) &&
-		(cmd->request_id == chip->request_id - 1) &&
-		(cmd->data_size == occ_cmds[chip->cdata->cmd].cmd_size));
+	if (cmd->cmd != occ_cmds[chip->cdata->cmd].cmd_value)
+		return false;
+	if (cmd->request_id != chip->request_id - 1)
+		return false;
+	if (be16_to_cpu(cmd->data_size) != occ_cmds[chip->cdata->cmd].cmd_size)
+		return false;
+	return true;
 }
 
 static inline bool check_occ_rsp(struct opal_command_buffer *cmd,
@@ -1421,6 +1379,7 @@ static int read_occ_rsp(struct occ_response_buffer *rsp)
 		prlog(PR_DEBUG, "OCC: Rsp status: OCC internal error\n");
 		break;
 	default:
+		prlog(PR_WARNING, "OCC: Rsp status: Unknown 0x%x\n", rsp->status);
 		break;
 	}
 
@@ -1466,7 +1425,7 @@ static void handle_occ_rsp(uint32_t chip_id)
 
 	if (rsp->cmd == occ_cmds[OCC_CMD_SELECT_SENSOR_GROUP].cmd_value &&
 	    rsp->status == OCC_RSP_SUCCESS)
-		chip->enabled_sensor_mask = *(u16 *)chip->cdata->data;
+		chip->enabled_sensor_mask = be16_to_cpu(*(__be16 *)chip->cdata->data);
 
 	chip->cmd_in_progress = false;
 	queue_occ_rsp_msg(chip->token, read_occ_rsp(chip->rsp));
@@ -1522,7 +1481,7 @@ static void occ_cmd_interface_init(void)
 	chip = next_chip(NULL);
 	pdata = get_occ_pstate_table(chip);
 	major = pdata->version >> 4;
-	if (major != 0x9 || major != 0xA)
+	if (major != 0x9 && major != 0xA)
 		return;
 
 	for_each_chip(chip)
@@ -1626,16 +1585,16 @@ int occ_get_powercap(u32 handle, u32 *pcap)
 
 	switch (powercap_get_attr(handle)) {
 	case POWERCAP_OCC_SOFT_MIN:
-		*pcap = ddata->soft_min_pwr_cap;
+		*pcap = be16_to_cpu(ddata->soft_min_pwr_cap);
 		break;
 	case POWERCAP_OCC_MAX:
-		*pcap = ddata->max_pwr_cap;
+		*pcap = be16_to_cpu(ddata->max_pwr_cap);
 		break;
 	case POWERCAP_OCC_CUR:
-		*pcap = ddata->cur_pwr_cap;
+		*pcap = be16_to_cpu(ddata->cur_pwr_cap);
 		break;
 	case POWERCAP_OCC_HARD_MIN:
-		*pcap = ddata->hard_min_pwr_cap;
+		*pcap = be16_to_cpu(ddata->hard_min_pwr_cap);
 		break;
 	default:
 		*pcap = 0;
@@ -1645,7 +1604,7 @@ int occ_get_powercap(u32 handle, u32 *pcap)
 	return OPAL_SUCCESS;
 }
 
-static u16 pcap_cdata;
+static __be16 pcap_cdata;
 static struct opal_occ_cmd_data pcap_data = {
 	.data		= (u8 *)&pcap_cdata,
 	.cmd		= OCC_CMD_SET_POWER_CAP,
@@ -1673,14 +1632,14 @@ int __attribute__((__const__)) occ_set_powercap(u32 handle, int token, u32 pcap)
 	chip = get_chip(chips[i].chip_id);
 	ddata = get_occ_dynamic_data(chip);
 
-	if (pcap == ddata->cur_pwr_cap)
+	if (pcap == be16_to_cpu(ddata->cur_pwr_cap))
 		return OPAL_SUCCESS;
 
-	if (pcap && (pcap > ddata->max_pwr_cap ||
-	    pcap < ddata->soft_min_pwr_cap))
+	if (pcap && (pcap > be16_to_cpu(ddata->max_pwr_cap) ||
+	    pcap < be16_to_cpu(ddata->soft_min_pwr_cap)))
 		return OPAL_PARAMETER;
 
-	pcap_cdata = pcap;
+	pcap_cdata = cpu_to_be16(pcap);
 	return opal_occ_command(&chips[i], token, &pcap_data);
 };
 
@@ -1785,7 +1744,7 @@ enum occ_sensor_limit_group {
 	OCC_SENSOR_LIMIT_GROUP_JOB_SCHED	= 0x40,
 };
 
-static u32 sensor_limit;
+static __be32 sensor_limit;
 static struct opal_occ_cmd_data slimit_data = {
 	.data		= (u8 *)&sensor_limit,
 	.cmd		= OCC_CMD_CLEAR_SENSOR_DATA,
@@ -1811,11 +1770,11 @@ int occ_sensor_group_clear(u32 group_hndl, int token)
 	if (!(*chips[i].valid))
 		return OPAL_HARDWARE;
 
-	sensor_limit = limit << 24;
+	sensor_limit = cpu_to_be32(limit << 24);
 	return opal_occ_command(&chips[i], token, &slimit_data);
 }
 
-static u16 sensor_enable;
+static __be16 sensor_enable;
 static struct opal_occ_cmd_data sensor_mask_data = {
 	.data		= (u8 *)&sensor_enable,
 	.cmd		= OCC_CMD_SELECT_SENSOR_GROUP,
@@ -1852,8 +1811,10 @@ int occ_sensor_group_enable(u32 group_hndl, int token, bool enable)
 	else if (!enable && !(type & chips[i].enabled_sensor_mask))
 		return OPAL_SUCCESS;
 
-	sensor_enable = enable ? type | chips[i].enabled_sensor_mask :
-				~type & chips[i].enabled_sensor_mask;
+	if (enable)
+		sensor_enable = cpu_to_be16(type | chips[i].enabled_sensor_mask);
+	else
+		sensor_enable = cpu_to_be16(~type & chips[i].enabled_sensor_mask);
 
 	return opal_occ_command(&chips[i], token, &sensor_mask_data);
 }
@@ -2021,6 +1982,7 @@ void occ_pstates_init(void)
 		break;
 	case proc_gen_p9:
 	case proc_gen_p10:
+	case proc_gen_p11:
 		homer_opal_data_offset = P9_HOMER_OPAL_DATA_OFFSET;
 		break;
 	default:
@@ -2083,7 +2045,7 @@ void occ_pstates_init(void)
 	} else if (proc_gen == proc_gen_p9) {
 		freq_domain_mask = P9_PIR_QUAD_MASK;
 		domain_runs_at = FREQ_MAX_IN_DOMAIN;
-	} else if (proc_gen == proc_gen_p10) {
+	} else if (proc_gen == proc_gen_p10 || proc_gen == proc_gen_p11) {
 		freq_domain_mask = P10_PIR_CHIP_MASK;
 		domain_runs_at = FREQ_MAX_IN_DOMAIN;
 	} else {
@@ -2258,6 +2220,7 @@ void occ_send_dummy_interrupt(void)
 			    OCB_OCI_OCIMISC_IRQ_OPAL_DUMMY);
 		break;
 	case proc_gen_p10:
+	case proc_gen_p11:
 		xscom_write(psi->chip_id, P9_OCB_OCI_OCCMISC_OR,
 			    OCB_OCI_OCIMISC_IRQ |
 			    OCB_OCI_OCIMISC_IRQ_OPAL_DUMMY);

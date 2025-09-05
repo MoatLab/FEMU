@@ -113,13 +113,13 @@ static void clock_mux_reset_enter(Object *obj, ResetType type)
     set_clock_mux_init_info(s, s->id);
 }
 
-static void clock_mux_reset_hold(Object *obj)
+static void clock_mux_reset_hold(Object *obj, ResetType type)
 {
     RccClockMuxState *s = RCC_CLOCK_MUX(obj);
     clock_mux_update(s, true);
 }
 
-static void clock_mux_reset_exit(Object *obj)
+static void clock_mux_reset_exit(Object *obj, ResetType type)
 {
     RccClockMuxState *s = RCC_CLOCK_MUX(obj);
     clock_mux_update(s, false);
@@ -141,7 +141,7 @@ static const VMStateDescription clock_mux_vmstate = {
     }
 };
 
-static void clock_mux_class_init(ObjectClass *klass, void *data)
+static void clock_mux_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     ResettableClass *rc = RESETTABLE_CLASS(klass);
@@ -150,6 +150,8 @@ static void clock_mux_class_init(ObjectClass *klass, void *data)
     rc->phases.hold = clock_mux_reset_hold;
     rc->phases.exit = clock_mux_reset_exit;
     dc->vmsd = &clock_mux_vmstate;
+    /* Reason: Part of Stm32l4x5RccState component */
+    dc->user_creatable = false;
 }
 
 static void clock_mux_set_enable(RccClockMuxState *mux, bool enabled)
@@ -263,13 +265,13 @@ static void pll_reset_enter(Object *obj, ResetType type)
     set_pll_init_info(s, s->id);
 }
 
-static void pll_reset_hold(Object *obj)
+static void pll_reset_hold(Object *obj, ResetType type)
 {
     RccPllState *s = RCC_PLL(obj);
     pll_update(s, true);
 }
 
-static void pll_reset_exit(Object *obj)
+static void pll_reset_exit(Object *obj, ResetType type)
 {
     RccPllState *s = RCC_PLL(obj);
     pll_update(s, false);
@@ -293,7 +295,7 @@ static const VMStateDescription pll_vmstate = {
     }
 };
 
-static void pll_class_init(ObjectClass *klass, void *data)
+static void pll_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     ResettableClass *rc = RESETTABLE_CLASS(klass);
@@ -302,6 +304,8 @@ static void pll_class_init(ObjectClass *klass, void *data)
     rc->phases.hold = pll_reset_hold;
     rc->phases.exit = pll_reset_exit;
     dc->vmsd = &pll_vmstate;
+    /* Reason: Part of Stm32l4x5RccState component */
+    dc->user_creatable = false;
 }
 
 static void pll_set_vco_multiplier(RccPllState *pll, uint32_t vco_multiplier)
@@ -543,19 +547,31 @@ static void rcc_update_cfgr_register(Stm32l4x5RccState *s)
     uint32_t val;
     /* MCOPRE */
     val = FIELD_EX32(s->cfgr, CFGR, MCOPRE);
-    assert(val <= 0b100);
-    clock_mux_set_factor(&s->clock_muxes[RCC_CLOCK_MUX_MCO],
-                         1, 1 << val);
+    if (val > 0b100) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "%s: Invalid MCOPRE value: 0x%"PRIx32"\n",
+                      __func__, val);
+        clock_mux_set_enable(&s->clock_muxes[RCC_CLOCK_MUX_MCO], false);
+    } else {
+        clock_mux_set_factor(&s->clock_muxes[RCC_CLOCK_MUX_MCO],
+                             1, 1 << val);
+    }
 
     /* MCOSEL */
     val = FIELD_EX32(s->cfgr, CFGR, MCOSEL);
-    assert(val <= 0b111);
-    if (val == 0) {
+    if (val > 0b111) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "%s: Invalid MCOSEL value: 0x%"PRIx32"\n",
+                      __func__, val);
         clock_mux_set_enable(&s->clock_muxes[RCC_CLOCK_MUX_MCO], false);
     } else {
-        clock_mux_set_enable(&s->clock_muxes[RCC_CLOCK_MUX_MCO], true);
-        clock_mux_set_source(&s->clock_muxes[RCC_CLOCK_MUX_MCO],
-                             val - 1);
+        if (val == 0) {
+            clock_mux_set_enable(&s->clock_muxes[RCC_CLOCK_MUX_MCO], false);
+        } else {
+            clock_mux_set_enable(&s->clock_muxes[RCC_CLOCK_MUX_MCO], true);
+            clock_mux_set_source(&s->clock_muxes[RCC_CLOCK_MUX_MCO],
+                                 val - 1);
+        }
     }
 
     /* STOPWUCK */
@@ -907,7 +923,7 @@ static void rcc_update_csr(Stm32l4x5RccState *s)
     rcc_update_irq(s);
 }
 
-static void stm32l4x5_rcc_reset_hold(Object *obj)
+static void stm32l4x5_rcc_reset_hold(Object *obj, ResetType type)
 {
     Stm32l4x5RccState *s = STM32L4X5_RCC(obj);
     s->cr = 0x00000063;
@@ -1414,17 +1430,16 @@ static void stm32l4x5_rcc_realize(DeviceState *dev, Error **errp)
     clock_update(s->gnd, 0);
 }
 
-static Property stm32l4x5_rcc_properties[] = {
+static const Property stm32l4x5_rcc_properties[] = {
     DEFINE_PROP_UINT64("hse_frequency", Stm32l4x5RccState,
         hse_frequency, HSE_DEFAULT_FRQ),
     DEFINE_PROP_UINT64("sai1_extclk_frequency", Stm32l4x5RccState,
         sai1_extclk_frequency, 0),
     DEFINE_PROP_UINT64("sai2_extclk_frequency", Stm32l4x5RccState,
         sai2_extclk_frequency, 0),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void stm32l4x5_rcc_class_init(ObjectClass *klass, void *data)
+static void stm32l4x5_rcc_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     ResettableClass *rc = RESETTABLE_CLASS(klass);

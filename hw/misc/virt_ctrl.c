@@ -10,7 +10,7 @@
 #include "migration/vmstate.h"
 #include "qemu/log.h"
 #include "trace.h"
-#include "sysemu/runstate.h"
+#include "system/runstate.h"
 #include "hw/misc/virt_ctrl.h"
 
 enum {
@@ -125,11 +125,11 @@ static void virt_ctrl_instance_init(Object *obj)
     sysbus_init_irq(dev, &s->irq);
 }
 
-static void virt_ctrl_class_init(ObjectClass *oc, void *data)
+static void virt_ctrl_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
 
-    dc->reset = virt_ctrl_reset;
+    device_class_set_legacy_reset(dc, virt_ctrl_reset);
     dc->realize = virt_ctrl_realize;
     dc->vmsd = &vmstate_virt_ctrl;
 }

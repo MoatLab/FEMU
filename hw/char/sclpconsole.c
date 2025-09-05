@@ -251,18 +251,17 @@ static void console_reset(DeviceState *dev)
    scon->notify = false;
 }
 
-static Property console_properties[] = {
+static const Property console_properties[] = {
     DEFINE_PROP_CHR("chardev", SCLPConsole, chr),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void console_class_init(ObjectClass *klass, void *data)
+static void console_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     SCLPEventClass *ec = SCLP_EVENT_CLASS(klass);
 
     device_class_set_props(dc, console_properties);
-    dc->reset = console_reset;
+    device_class_set_legacy_reset(dc, console_reset);
     dc->vmsd = &vmstate_sclpconsole;
     ec->init = console_init;
     ec->get_send_mask = send_mask;

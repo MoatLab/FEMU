@@ -10,16 +10,19 @@
  * directory.
  */
 
+#include <stdbool.h>
 #include "qemu/osdep.h"
 #include CONFIG_DEVICES /* CONFIG_IOMMUFD */
 #include <linux/vfio.h>
 #include <sys/ioctl.h>
 #include "qapi/error.h"
-#include "hw/vfio/vfio-common.h"
-#include "sysemu/iommufd.h"
+#include "hw/vfio/vfio-device.h"
+#include "system/iommufd.h"
 #include "hw/s390x/ap-device.h"
+#include "hw/s390x/css.h"
 #include "qemu/error-report.h"
 #include "qemu/event_notifier.h"
+#include "qemu/lockable.h"
 #include "qemu/main-loop.h"
 #include "qemu/module.h"
 #include "qemu/option.h"
@@ -28,7 +31,7 @@
 #include "migration/vmstate.h"
 #include "hw/qdev-properties.h"
 #include "hw/s390x/ap-bridge.h"
-#include "exec/address-spaces.h"
+#include "system/address-spaces.h"
 #include "qom/object.h"
 
 #define TYPE_VFIO_AP_DEVICE      "vfio-ap"
@@ -37,7 +40,22 @@ struct VFIOAPDevice {
     APDevice apdev;
     VFIODevice vdev;
     EventNotifier req_notifier;
+    EventNotifier cfg_notifier;
 };
+
+typedef struct APConfigChgEvent {
+    QTAILQ_ENTRY(APConfigChgEvent) next;
+} APConfigChgEvent;
+
+static QTAILQ_HEAD(, APConfigChgEvent) cfg_chg_events =
+    QTAILQ_HEAD_INITIALIZER(cfg_chg_events);
+
+static QemuMutex cfg_chg_events_lock;
+
+static void __attribute__((constructor)) vfio_ap_global_init(void)
+{
+    qemu_mutex_init(&cfg_chg_events_lock);
+}
 
 OBJECT_DECLARE_SIMPLE_TYPE(VFIOAPDevice, VFIO_AP_DEVICE)
 
@@ -70,14 +88,65 @@ static void vfio_ap_req_notifier_handler(void *opaque)
     }
 }
 
-static void vfio_ap_register_irq_notifier(VFIOAPDevice *vapdev,
+static void vfio_ap_cfg_chg_notifier_handler(void *opaque)
+{
+    APConfigChgEvent *cfg_chg_event;
+    VFIOAPDevice *vapdev = opaque;
+
+    if (!event_notifier_test_and_clear(&vapdev->cfg_notifier)) {
+        return;
+    }
+
+    cfg_chg_event = g_new0(APConfigChgEvent, 1);
+
+    WITH_QEMU_LOCK_GUARD(&cfg_chg_events_lock) {
+        QTAILQ_INSERT_TAIL(&cfg_chg_events, cfg_chg_event, next);
+    }
+
+    css_generate_css_crws(0);
+
+}
+
+int ap_chsc_sei_nt0_get_event(void *res)
+{
+    ChscSeiNt0Res *nt0_res  = (ChscSeiNt0Res *)res;
+    APConfigChgEvent *cfg_chg_event;
+
+    WITH_QEMU_LOCK_GUARD(&cfg_chg_events_lock) {
+        if (QTAILQ_EMPTY(&cfg_chg_events)) {
+            return EVENT_INFORMATION_NOT_STORED;
+        }
+
+        cfg_chg_event = QTAILQ_FIRST(&cfg_chg_events);
+        QTAILQ_REMOVE(&cfg_chg_events, cfg_chg_event, next);
+    }
+
+    memset(nt0_res, 0, sizeof(*nt0_res));
+    g_free(cfg_chg_event);
+    nt0_res->flags |= PENDING_EVENT_INFO_BITMASK;
+    nt0_res->length = sizeof(ChscSeiNt0Res);
+    nt0_res->code = NT0_RES_RESPONSE_CODE;
+    nt0_res->nt = NT0_RES_NT_DEFAULT;
+    nt0_res->rs = NT0_RES_RS_AP_CHANGE;
+    nt0_res->cc = NT0_RES_CC_AP_CHANGE;
+
+    return EVENT_INFORMATION_STORED;
+}
+
+bool ap_chsc_sei_nt0_have_event(void)
+{
+    QEMU_LOCK_GUARD(&cfg_chg_events_lock);
+    return !QTAILQ_EMPTY(&cfg_chg_events);
+}
+
+static bool vfio_ap_register_irq_notifier(VFIOAPDevice *vapdev,
                                           unsigned int irq, Error **errp)
 {
     int fd;
-    size_t argsz;
+    int ret;
     IOHandler *fd_read;
     EventNotifier *notifier;
-    struct vfio_irq_info *irq_info;
+    struct vfio_irq_info irq_info;
     VFIODevice *vdev = &vapdev->vdev;
 
     switch (irq) {
@@ -85,47 +154,50 @@ static void vfio_ap_register_irq_notifier(VFIOAPDevice *vapdev,
         notifier = &vapdev->req_notifier;
         fd_read = vfio_ap_req_notifier_handler;
         break;
+    case VFIO_AP_CFG_CHG_IRQ_INDEX:
+        notifier = &vapdev->cfg_notifier;
+        fd_read = vfio_ap_cfg_chg_notifier_handler;
+        break;
     default:
         error_setg(errp, "vfio: Unsupported device irq(%d)", irq);
-        return;
+        return false;
     }
 
     if (vdev->num_irqs < irq + 1) {
         error_setg(errp, "vfio: IRQ %u not available (number of irqs %u)",
                    irq, vdev->num_irqs);
-        return;
+        return false;
     }
 
-    argsz = sizeof(*irq_info);
-    irq_info = g_malloc0(argsz);
-    irq_info->index = irq;
-    irq_info->argsz = argsz;
+    ret = vfio_device_get_irq_info(vdev, irq, &irq_info);
 
-    if (ioctl(vdev->fd, VFIO_DEVICE_GET_IRQ_INFO,
-              irq_info) < 0 || irq_info->count < 1) {
-        error_setg_errno(errp, errno, "vfio: Error getting irq info");
-        goto out_free_info;
+    if (ret < 0) {
+        error_setg_errno(errp, -ret, "vfio: Error getting irq info");
+        return false;
+    }
+
+    if (irq_info.count < 1) {
+        error_setg(errp, "vfio: Error getting irq info, count=0");
+        return false;
     }
 
     if (event_notifier_init(notifier, 0)) {
         error_setg_errno(errp, errno,
                          "vfio: Unable to init event notifier for irq (%d)",
                          irq);
-        goto out_free_info;
+        return false;
     }
 
     fd = event_notifier_get_fd(notifier);
     qemu_set_fd_handler(fd, fd_read, NULL, vapdev);
 
-    if (vfio_set_irq_signaling(vdev, irq, 0, VFIO_IRQ_SET_ACTION_TRIGGER, fd,
-                               errp)) {
+    if (!vfio_device_irq_set_signaling(vdev, irq, 0, VFIO_IRQ_SET_ACTION_TRIGGER, fd,
+                                       errp)) {
         qemu_set_fd_handler(fd, NULL, NULL, vapdev);
         event_notifier_cleanup(notifier);
     }
 
-out_free_info:
-    g_free(irq_info);
-
+    return true;
 }
 
 static void vfio_ap_unregister_irq_notifier(VFIOAPDevice *vapdev,
@@ -138,13 +210,16 @@ static void vfio_ap_unregister_irq_notifier(VFIOAPDevice *vapdev,
     case VFIO_AP_REQ_IRQ_INDEX:
         notifier = &vapdev->req_notifier;
         break;
+    case VFIO_AP_CFG_CHG_IRQ_INDEX:
+        notifier = &vapdev->cfg_notifier;
+        break;
     default:
         error_report("vfio: Unsupported device irq(%d)", irq);
         return;
     }
 
-    if (vfio_set_irq_signaling(&vapdev->vdev, irq, 0,
-                               VFIO_IRQ_SET_ACTION_TRIGGER, -1, &err)) {
+    if (!vfio_device_irq_set_signaling(&vapdev->vdev, irq, 0,
+                                       VFIO_IRQ_SET_ACTION_TRIGGER, -1, &err)) {
         warn_reportf_err(err, VFIO_MSG_PREFIX, vapdev->vdev.name);
     }
 
@@ -156,35 +231,41 @@ static void vfio_ap_unregister_irq_notifier(VFIOAPDevice *vapdev,
 static void vfio_ap_realize(DeviceState *dev, Error **errp)
 {
     ERRP_GUARD();
-    int ret;
     Error *err = NULL;
     VFIOAPDevice *vapdev = VFIO_AP_DEVICE(dev);
     VFIODevice *vbasedev = &vapdev->vdev;
 
-    if (vfio_device_get_name(vbasedev, errp) < 0) {
+    if (!vfio_device_get_name(vbasedev, errp)) {
         return;
     }
 
-    ret = vfio_attach_device(vbasedev->name, vbasedev,
-                             &address_space_memory, errp);
-    if (ret) {
+    if (!vfio_device_attach(vbasedev->name, vbasedev,
+                            &address_space_memory, errp)) {
         goto error;
     }
 
-    vfio_ap_register_irq_notifier(vapdev, VFIO_AP_REQ_IRQ_INDEX, &err);
-    if (err) {
+    if (!vfio_ap_register_irq_notifier(vapdev, VFIO_AP_REQ_IRQ_INDEX, &err)) {
         /*
          * Report this error, but do not make it a failing condition.
          * Lack of this IRQ in the host does not prevent normal operation.
          */
-        error_report_err(err);
+        warn_report_err(err);
+    }
+
+    if (!vfio_ap_register_irq_notifier(vapdev, VFIO_AP_CFG_CHG_IRQ_INDEX, &err))
+    {
+        /*
+         * Report this error, but do not make it a failing condition.
+         * Lack of this IRQ in the host does not prevent normal operation.
+         */
+        warn_report_err(err);
     }
 
     return;
 
 error:
     error_prepend(errp, VFIO_MSG_PREFIX, vbasedev->name);
-    g_free(vbasedev->name);
+    vfio_device_free_name(vbasedev);
 }
 
 static void vfio_ap_unrealize(DeviceState *dev)
@@ -192,17 +273,17 @@ static void vfio_ap_unrealize(DeviceState *dev)
     VFIOAPDevice *vapdev = VFIO_AP_DEVICE(dev);
 
     vfio_ap_unregister_irq_notifier(vapdev, VFIO_AP_REQ_IRQ_INDEX);
-    vfio_detach_device(&vapdev->vdev);
-    g_free(vapdev->vdev.name);
+    vfio_ap_unregister_irq_notifier(vapdev, VFIO_AP_CFG_CHG_IRQ_INDEX);
+    vfio_device_detach(&vapdev->vdev);
+    vfio_device_free_name(&vapdev->vdev);
 }
 
-static Property vfio_ap_properties[] = {
+static const Property vfio_ap_properties[] = {
     DEFINE_PROP_STRING("sysfsdev", VFIOAPDevice, vdev.sysfsdev),
 #ifdef CONFIG_IOMMUFD
     DEFINE_PROP_LINK("iommufd", VFIOAPDevice, vdev.iommufd,
                      TYPE_IOMMUFD_BACKEND, IOMMUFDBackend *),
 #endif
-    DEFINE_PROP_END_OF_LIST(),
 };
 
 static void vfio_ap_reset(DeviceState *dev)
@@ -235,6 +316,9 @@ static void vfio_ap_instance_init(Object *obj)
      */
     vfio_device_init(vbasedev, VFIO_DEVICE_TYPE_AP, &vfio_ap_ops,
                      DEVICE(vapdev), true);
+
+    /* AP device is mdev type device */
+    vbasedev->mdev = true;
 }
 
 #ifdef CONFIG_IOMMUFD
@@ -244,7 +328,7 @@ static void vfio_ap_set_fd(Object *obj, const char *str, Error **errp)
 }
 #endif
 
-static void vfio_ap_class_init(ObjectClass *klass, void *data)
+static void vfio_ap_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
@@ -258,8 +342,17 @@ static void vfio_ap_class_init(ObjectClass *klass, void *data)
     dc->realize = vfio_ap_realize;
     dc->unrealize = vfio_ap_unrealize;
     dc->hotpluggable = true;
-    dc->reset = vfio_ap_reset;
+    device_class_set_legacy_reset(dc, vfio_ap_reset);
     dc->bus_type = TYPE_AP_BUS;
+
+    object_class_property_set_description(klass, /* 3.1 */
+                                          "sysfsdev",
+                                          "Host sysfs path of assigned device");
+#ifdef CONFIG_IOMMUFD
+    object_class_property_set_description(klass, /* 9.0 */
+                                          "iommufd",
+                                          "Set host IOMMUFD backend device");
+#endif
 }
 
 static const TypeInfo vfio_ap_info = {

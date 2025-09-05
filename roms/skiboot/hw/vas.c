@@ -428,7 +428,7 @@ static int init_uwcm(struct proc_chip *chip)
 static inline void free_wcbs(struct proc_chip *chip)
 {
 	if (chip->vas->wcbs) {
-		free((void *)chip->vas->wcbs);
+		local_free((void *)chip->vas->wcbs);
 		chip->vas->wcbs = 0ULL;
 	}
 }
@@ -466,7 +466,7 @@ static int alloc_init_wcbs(struct proc_chip *chip)
 	return OPAL_SUCCESS;
 
 out:
-	free((void *)wcbs);
+	local_free((void *)wcbs);
 	return rc;
 }
 
@@ -615,7 +615,7 @@ void vas_init(void)
 
 	if (proc_gen == proc_gen_p9)
 		compat = "ibm,power9-vas-x";
-	else if (proc_gen == proc_gen_p10)
+	else if (proc_gen == proc_gen_p10 || proc_gen == proc_gen_p11)
 		compat = "ibm,power10-vas-x";
 	else
 		return;
@@ -637,3 +637,5 @@ out:
 	vas_err("Disabled (failed initialization)\n");
 	return;
 }
+
+DEFINE_HWPROBE(vas, vas_init);

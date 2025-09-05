@@ -26,6 +26,7 @@ Testing:
         {
             "iops_rd": 0,
             "detect_zeroes": "off",
+            "active": true,
             "image": {
                 "backing-image": {
                     "virtual-size": 1073741824,
@@ -40,6 +41,12 @@ Testing:
             },
             "iops_wr": 0,
             "ro": false,
+            "children": [
+                {
+                    "node-name": "disk0",
+                    "child": "file"
+                }
+            ],
             "node-name": "throttle0",
             "backing_file_depth": 1,
             "drv": "throttle",
@@ -59,6 +66,7 @@ Testing:
         {
             "iops_rd": 0,
             "detect_zeroes": "off",
+            "active": true,
             "image": {
                 "virtual-size": 1073741824,
                 "filename": "null-co://",
@@ -67,6 +75,8 @@ Testing:
             },
             "iops_wr": 0,
             "ro": false,
+            "children": [
+            ],
             "node-name": "disk0",
             "backing_file_depth": 0,
             "drv": "null-co",

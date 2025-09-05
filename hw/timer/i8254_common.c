@@ -238,12 +238,11 @@ static const VMStateDescription vmstate_pit_common = {
     }
 };
 
-static Property pit_common_properties[] = {
+static const Property pit_common_properties[] = {
     DEFINE_PROP_UINT32("iobase", PITCommonState, iobase,  -1),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void pit_common_class_init(ObjectClass *klass, void *data)
+static void pit_common_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 

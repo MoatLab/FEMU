@@ -75,7 +75,7 @@ static const char *imx7_src_reg_name(uint32_t reg)
     case SRC_GPR10:
         return "SRC_GPR10";
     default:
-        sprintf(unknown, "%u ?", reg);
+        snprintf(unknown, sizeof(unknown), "%u ?", reg);
         return unknown;
     }
 }
@@ -251,12 +251,12 @@ static void imx7_src_realize(DeviceState *dev, Error **errp)
     sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->iomem);
 }
 
-static void imx7_src_class_init(ObjectClass *klass, void *data)
+static void imx7_src_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = imx7_src_realize;
-    dc->reset = imx7_src_reset;
+    device_class_set_legacy_reset(dc, imx7_src_reset);
     dc->vmsd = &vmstate_imx7_src;
     dc->desc = "i.MX6 System Reset Controller";
 }

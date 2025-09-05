@@ -115,13 +115,6 @@ const DMAMap *iova_tree_find_iova(const IOVATree *tree, const DMAMap *map)
     return args.result;
 }
 
-const DMAMap *iova_tree_find_address(const IOVATree *tree, hwaddr iova)
-{
-    const DMAMap map = { .iova = iova, .size = 0 };
-
-    return iova_tree_find(tree, &map);
-}
-
 static inline void iova_tree_insert_internal(GTree *gtree, DMAMap *range)
 {
     /* Key and value are sharing the same range data */
@@ -146,22 +139,6 @@ int iova_tree_insert(IOVATree *tree, const DMAMap *map)
     iova_tree_insert_internal(tree->tree, new);
 
     return IOVA_OK;
-}
-
-static gboolean iova_tree_traverse(gpointer key, gpointer value,
-                                gpointer data)
-{
-    iova_tree_iterator iterator = data;
-    DMAMap *map = key;
-
-    g_assert(key == value);
-
-    return iterator(map);
-}
-
-void iova_tree_foreach(IOVATree *tree, iova_tree_iterator iterator)
-{
-    g_tree_foreach(tree->tree, iova_tree_traverse, iterator);
 }
 
 void iova_tree_remove(IOVATree *tree, DMAMap map)
@@ -279,4 +256,50 @@ void iova_tree_destroy(IOVATree *tree)
 {
     g_tree_destroy(tree->tree);
     g_free(tree);
+}
+
+static int gpa_tree_compare(gconstpointer a, gconstpointer b, gpointer data)
+{
+    const DMAMap *m1 = a, *m2 = b;
+
+    if (m1->translated_addr > m2->translated_addr + m2->size) {
+        return 1;
+    }
+
+    if (m1->translated_addr + m1->size < m2->translated_addr) {
+        return -1;
+    }
+
+    /* Overlapped */
+    return 0;
+}
+
+IOVATree *gpa_tree_new(void)
+{
+    IOVATree *gpa_tree = g_new0(IOVATree, 1);
+
+    gpa_tree->tree = g_tree_new_full(gpa_tree_compare, NULL, g_free, NULL);
+
+    return gpa_tree;
+}
+
+int gpa_tree_insert(IOVATree *tree, const DMAMap *map)
+{
+    DMAMap *new;
+
+    if (map->translated_addr + map->size < map->translated_addr ||
+        map->perm == IOMMU_NONE) {
+        return IOVA_ERR_INVALID;
+    }
+
+    /* We don't allow inserting ranges that overlap with existing ones */
+    if (iova_tree_find(tree, map)) {
+        return IOVA_ERR_OVERLAP;
+    }
+
+    new = g_new0(DMAMap, 1);
+    memcpy(new, map, sizeof(*new));
+    iova_tree_insert_internal(tree->tree, new);
+
+    return IOVA_OK;
 }

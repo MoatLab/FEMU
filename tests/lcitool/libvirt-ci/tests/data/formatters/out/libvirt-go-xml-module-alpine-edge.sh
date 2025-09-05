@@ -5,7 +5,7 @@ function install_buildenv() {
         ca-certificates \
         git \
         go
-    apk list | sort > /packages.txt
+    apk list --installed | sort > /packages.txt
 }
 
 export LANG="en_US.UTF-8"

@@ -117,7 +117,7 @@ DECLARE_PLATFORM(palmetto) = {
 	.elog_commit		= ipmi_elog_commit,
 	.start_preload_resource	= flash_start_preload_resource,
 	.resource_loaded	= flash_resource_loaded,
-	.exit			= ipmi_wdt_final_reset,
+	.exit			= astbmc_exit,
 	.terminate		= ipmi_terminate,
 	.op_display		= op_display_lpc,
 };

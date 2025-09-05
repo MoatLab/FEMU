@@ -1,0 +1,29 @@
+name: Generate and deploy documentation
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  docs-build-and-deploy:
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install apt dependencies
+        run: sudo apt-get update &&
+          sudo apt-get install -qq build-essential gcc-powerpc64le-linux-gnu git lcov
+          device-tree-compiler libssl-dev libmbedtls-dev python3-sphinx
+          python3-recommonmark
+      - name: Generate docs and coverage report
+        run: ./opal-ci/build-docs.sh
+
+      - name: Deploy docs
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          branch: gh-pages
+          folder: doc/_build/ghpages

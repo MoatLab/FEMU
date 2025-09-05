@@ -166,7 +166,7 @@ TPM_RC TSS_Dev_Transmit(TSS_CONTEXT *tssContext,
 	 * it here.
 	 */
 	if (rc == 0) {
-		responseSize = ntohl(*(uint32_t *)(responseBuffer + sizeof(TPM_ST)));
+		responseSize = ntohl(*(beint32_t *)(responseBuffer + sizeof(TPM_ST)));
 		if (responseSize != *length) {
 			if (tssVerbose)
 				printf("TSS_Skiboot_Transmit: Bytes read (%u) and Buffer responseSize field (%lu) don't match\n",
@@ -180,7 +180,7 @@ TPM_RC TSS_Dev_Transmit(TSS_CONTEXT *tssContext,
 	 * and deliver it to the upper layers
 	 */
 	if (rc == 0)
-		rc = ntohl(*(uint32_t *)(responseBuffer + sizeof(TPM_ST) + sizeof(uint32_t)));
+		rc = ntohl(*(beint32_t *)(responseBuffer + sizeof(TPM_ST) + sizeof(uint32_t)));
 
 	if (tssVverbose)
 		printf("TSS_Skiboot_Transmit: Response Code: %08x", rc);

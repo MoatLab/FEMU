@@ -262,12 +262,12 @@ static uint32_t imx7_ccm_get_clock_frequency(IMXCCMState *dev, IMXClk clock)
     return freq;
 }
 
-static void imx7_ccm_class_init(ObjectClass *klass, void *data)
+static void imx7_ccm_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     IMXCCMClass *ccm = IMX_CCM_CLASS(klass);
 
-    dc->reset = imx7_ccm_reset;
+    device_class_set_legacy_reset(dc, imx7_ccm_reset);
     dc->vmsd  = &vmstate_imx7_ccm;
     dc->desc  = "i.MX7 Clock Control Module";
 
@@ -293,11 +293,11 @@ static const VMStateDescription vmstate_imx7_analog = {
     },
 };
 
-static void imx7_analog_class_init(ObjectClass *klass, void *data)
+static void imx7_analog_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    dc->reset = imx7_analog_reset;
+    device_class_set_legacy_reset(dc, imx7_analog_reset);
     dc->vmsd  = &vmstate_imx7_analog;
     dc->desc  = "i.MX7 Analog Module";
 }

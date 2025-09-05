@@ -243,14 +243,22 @@ static int fsp_ipmi_dequeue_msg(struct ipmi_msg *ipmi_msg)
 	return 0;
 }
 
+
+static bool fsp_ipmi_poll(void)
+{
+	/* fsp_opal_poll poller checks command responses */
+	opal_run_pollers();
+
+	return !list_empty(&fsp_ipmi.msg_queue);
+}
+
 static struct ipmi_backend fsp_ipmi_backend = {
 	.alloc_msg	= fsp_ipmi_alloc_msg,
 	.free_msg	= fsp_ipmi_free_msg,
 	.queue_msg	= fsp_ipmi_queue_msg,
 	.queue_msg_head	= fsp_ipmi_queue_msg_head,
 	.dequeue_msg	= fsp_ipmi_dequeue_msg,
-	/* FIXME if ever use ipmi_queue_msg_sync on FSP */
-	.poll           = NULL,
+	.poll           = fsp_ipmi_poll,
 };
 
 static bool fsp_ipmi_rr_notify(uint32_t cmd_sub_mod,

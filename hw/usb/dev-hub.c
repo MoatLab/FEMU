@@ -479,6 +479,7 @@ static void usb_hub_handle_control(USBDevice *dev, USBPacket *p,
                     usb_hub_port_clear(port, PORT_STAT_SUSPEND);
                     port->wPortChange = 0;
                 }
+                break;
             default:
                 goto fail;
             }
@@ -664,13 +665,12 @@ static const VMStateDescription vmstate_usb_hub = {
     }
 };
 
-static Property usb_hub_properties[] = {
+static const Property usb_hub_properties[] = {
     DEFINE_PROP_UINT32("ports", USBHubState, num_ports, 8),
     DEFINE_PROP_BOOL("port-power", USBHubState, port_power, false),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void usb_hub_class_initfn(ObjectClass *klass, void *data)
+static void usb_hub_class_initfn(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     USBDeviceClass *uc = USB_DEVICE_CLASS(klass);

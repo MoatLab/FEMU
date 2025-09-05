@@ -251,18 +251,18 @@ Usage examples
           lcitool.debian-11
 
 
-- To access the shell in an upstream *almalinux-8* image with *root* user with
+- To access the shell in an upstream *almalinux-9* image with *root* user with
   the *docker* engine.
 
   First, we need to pull the actual container image to be able to run any
   workloads in it
   ::
 
-      docker pull registry.gitlab.com/libvirt/libvirt/ci-almalinux-8
+      docker pull registry.gitlab.com/libvirt/libvirt/ci-almalinux-9
 
   When the image is ready, we can proceed with running the workload
   ::
 
       lcitool container shell \
           --engine docker \
-          registry.gitlab.com/libvirt/libvirt/ci-almalinux-8
+          registry.gitlab.com/libvirt/libvirt/ci-almalinux-9

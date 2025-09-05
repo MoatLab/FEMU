@@ -7,12 +7,6 @@
         - (os.name == 'CentOS' and os.version == 'Stream9') or
           (os.name == 'AlmaLinux' and os.version == '9')
 
-    - set_fact:
-        repo_name: 'PowerTools'
-      when:
-        - (os.name == 'CentOS' and os.version == 'Stream8') or
-          (os.name == 'AlmaLinux' and os.version == '8')
-
     - name: 'Lookup the {{ repo_name }} repo configuration file'
       find:
         paths: '/etc/yum.repos.d/'
@@ -43,12 +37,3 @@
     state: latest
   when:
     - os.name == 'CentOS'
-    - os.version == 'Stream8' or os.version == 'Stream9'
-
-- name: Enable Advanced Virtualization repository
-  package:
-    name: centos-release-advanced-virtualization
-    state: latest
-  when:
-    - (os.name == 'CentOS' and os.version == 'Stream8') or
-      (os.name == 'AlmaLinux' and os.version == '8')

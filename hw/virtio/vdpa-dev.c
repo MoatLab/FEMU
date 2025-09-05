@@ -26,8 +26,8 @@
 #include "hw/virtio/virtio.h"
 #include "hw/virtio/virtio-bus.h"
 #include "hw/virtio/vdpa-dev.h"
-#include "sysemu/sysemu.h"
-#include "sysemu/runstate.h"
+#include "system/system.h"
+#include "system/runstate.h"
 
 static void
 vhost_vdpa_device_dummy_handle_output(VirtIODevice *vdev, VirtQueue *vq)
@@ -312,7 +312,7 @@ static void vhost_vdpa_device_stop(VirtIODevice *vdev)
     vhost_dev_disable_notifiers(&s->dev, vdev);
 }
 
-static void vhost_vdpa_device_set_status(VirtIODevice *vdev, uint8_t status)
+static int vhost_vdpa_device_set_status(VirtIODevice *vdev, uint8_t status)
 {
     VhostVdpaDevice *s = VHOST_VDPA_DEVICE(vdev);
     bool should_start = virtio_device_started(vdev, status);
@@ -324,7 +324,7 @@ static void vhost_vdpa_device_set_status(VirtIODevice *vdev, uint8_t status)
     }
 
     if (s->started == should_start) {
-        return;
+        return 0;
     }
 
     if (should_start) {
@@ -335,12 +335,12 @@ static void vhost_vdpa_device_set_status(VirtIODevice *vdev, uint8_t status)
     } else {
         vhost_vdpa_device_stop(vdev);
     }
+    return 0;
 }
 
-static Property vhost_vdpa_device_properties[] = {
+static const Property vhost_vdpa_device_properties[] = {
     DEFINE_PROP_STRING("vhostdev", VhostVdpaDevice, vhostdev),
     DEFINE_PROP_UINT16("queue-size", VhostVdpaDevice, queue_size, 0),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
 static const VMStateDescription vmstate_vhost_vdpa_device = {
@@ -354,7 +354,7 @@ static const VMStateDescription vmstate_vhost_vdpa_device = {
     },
 };
 
-static void vhost_vdpa_device_class_init(ObjectClass *klass, void *data)
+static void vhost_vdpa_device_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     VirtioDeviceClass *vdc = VIRTIO_DEVICE_CLASS(klass);

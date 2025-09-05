@@ -32,16 +32,18 @@ vbe_104f00(struct bregs *regs)
 {
     u16 seg = regs->es;
     struct vbe_info *info = (void*)(regs->di+0);
+    size_t info_size = offsetof(struct vbe_info, oem_data);
 
     if (GET_FARVAR(seg, info->signature) == VBE2_SIGNATURE) {
         dprintf(4, "Get VBE Controller: VBE2 Signature found\n");
+        info_size = sizeof(*info);
     } else if (GET_FARVAR(seg, info->signature) == VESA_SIGNATURE) {
         dprintf(4, "Get VBE Controller: VESA Signature found\n");
     } else {
         dprintf(4, "Get VBE Controller: Invalid Signature\n");
     }
 
-    memset_far(seg, info, 0, sizeof(*info));
+    memset_far(seg, info, 0, info_size);
 
     SET_FARVAR(seg, info->signature, VESA_SIGNATURE);
 
@@ -108,7 +110,7 @@ vbe_104f01(struct bregs *regs)
     // Basic information about mode.
     int width = GET_GLOBAL(vmode_g->width);
     int height = GET_GLOBAL(vmode_g->height);
-    int linesize = vgahw_get_linesize(vmode_g);
+    int linesize = vgahw_minimum_linelength(vmode_g);
     SET_FARVAR(seg, info->bytes_per_scanline, linesize);
     SET_FARVAR(seg, info->xres, width);
     SET_FARVAR(seg, info->yres, height);
@@ -242,7 +244,7 @@ vbe_104f04(struct bregs *regs)
     if (ret < 0)
         goto fail;
     if (cmd == 0)
-        regs->bx = ret / 64;
+        regs->bx = DIV_ROUND_UP(ret, 64);
     regs->ax = 0x004f;
     return;
 fail:
@@ -258,18 +260,18 @@ vbe_104f05(struct bregs *regs)
         regs->ah = VBE_RETURN_STATUS_INVALID;
         return;
     }
-    struct vgamode_s *vmode_g = get_current_mode();
-    if (! vmode_g)
+    struct vgamode_s *curmode_g = get_current_mode();
+    if (! curmode_g)
         goto fail;
     if (regs->bh) {
-        int ret = vgahw_get_window(vmode_g, regs->bl);
+        int ret = vgahw_get_window(curmode_g, regs->bl);
         if (ret < 0)
             goto fail;
         regs->dx = ret;
         regs->ax = 0x004f;
         return;
     }
-    int ret = vgahw_set_window(vmode_g, regs->bl, regs->dx);
+    int ret = vgahw_set_window(curmode_g, regs->bl, regs->dx);
     if (ret)
         goto fail;
     regs->ax = 0x004f;
@@ -283,21 +285,22 @@ vbe_104f06(struct bregs *regs)
 {
     if (regs->bl > 0x02)
         goto fail;
-    struct vgamode_s *vmode_g = get_current_mode();
-    if (! vmode_g)
+    struct vgamode_s *curmode_g = get_current_mode();
+    if (! curmode_g)
         goto fail;
-    int bpp = vga_bpp(vmode_g);
+    int bpp = vga_bpp(curmode_g);
 
     if (regs->bl == 0x00) {
-        int ret = vgahw_set_linelength(vmode_g, DIV_ROUND_UP(regs->cx * bpp, 8));
+        int ret = vgahw_set_linelength(curmode_g
+                                       , DIV_ROUND_UP(regs->cx * bpp, 8));
         if (ret)
             goto fail;
     } else if (regs->bl == 0x02) {
-        int ret = vgahw_set_linelength(vmode_g, regs->cx);
+        int ret = vgahw_set_linelength(curmode_g, regs->cx);
         if (ret)
             goto fail;
     }
-    int linelength = vgahw_get_linelength(vmode_g);
+    int linelength = vgahw_get_linelength(curmode_g);
     if (linelength < 0)
         goto fail;
 
@@ -313,11 +316,11 @@ fail:
 static void
 vbe_104f07(struct bregs *regs)
 {
-    struct vgamode_s *vmode_g = get_current_mode();
-    if (! vmode_g)
+    struct vgamode_s *curmode_g = get_current_mode();
+    if (! curmode_g)
         goto fail;
-    int bpp = vga_bpp(vmode_g);
-    int linelength = vgahw_get_linelength(vmode_g);
+    int bpp = vga_bpp(curmode_g);
+    int linelength = vgahw_get_linelength(curmode_g);
     if (linelength < 0)
         goto fail;
 
@@ -326,12 +329,12 @@ vbe_104f07(struct bregs *regs)
     case 0x80:
     case 0x00:
         ret = vgahw_set_displaystart(
-            vmode_g, DIV_ROUND_UP(regs->cx * bpp, 8) + linelength * regs->dx);
+            curmode_g, DIV_ROUND_UP(regs->cx * bpp, 8) + linelength * regs->dx);
         if (ret)
             goto fail;
         break;
     case 0x01:
-        ret = vgahw_get_displaystart(vmode_g);
+        ret = vgahw_get_displaystart(curmode_g);
         if (ret < 0)
             goto fail;
         regs->dx = ret / linelength;
@@ -349,10 +352,10 @@ fail:
 static void
 vbe_104f08(struct bregs *regs)
 {
-    struct vgamode_s *vmode_g = get_current_mode();
-    if (! vmode_g)
+    struct vgamode_s *curmode_g = get_current_mode();
+    if (! curmode_g)
         goto fail;
-    u8 memmodel = GET_GLOBAL(vmode_g->memmodel);
+    u8 memmodel = GET_GLOBAL(curmode_g->memmodel);
     if (memmodel == MM_DIRECT || memmodel == MM_YUV) {
         regs->ax = 0x034f;
         return;
@@ -360,14 +363,65 @@ vbe_104f08(struct bregs *regs)
     if (regs->bl > 1)
         goto fail;
     if (regs->bl == 0) {
-        int ret = vgahw_set_dacformat(vmode_g, regs->bh);
+        int ret = vgahw_set_dacformat(curmode_g, regs->bh);
         if (ret < 0)
             goto fail;
     }
-    int ret = vgahw_get_dacformat(vmode_g);
+    int ret = vgahw_get_dacformat(curmode_g);
     if (ret < 0)
         goto fail;
     regs->bh = ret;
+    regs->ax = 0x004f;
+    return;
+fail:
+    regs->ax = 0x014f;
+}
+
+static void
+vbe_104f09(struct bregs *regs)
+{
+    if (!CONFIG_VGA_STDVGA_PORTS) {
+        // DAC palette support only available on devices with stdvga ports
+        regs->ax = 0x0100;
+        return;
+    }
+
+    struct vgamode_s *curmode_g = get_current_mode();
+    if (! curmode_g)
+        goto fail;
+    u8 memmodel = GET_GLOBAL(curmode_g->memmodel);
+    u8 depth = GET_GLOBAL(curmode_g->depth);
+    if (memmodel == MM_DIRECT || memmodel == MM_YUV || depth > 8) {
+        regs->ax = 0x034f;
+        return;
+    }
+    if (regs->dh)
+        goto fail;
+    u8 start = regs->dl;
+    int count = regs->cx;
+    int max_colors = 1 << depth;
+    if (start + count > max_colors)
+        goto fail;
+    u16 seg = regs->es;
+    struct vbe_palette_entry *data_far = (void*)(regs->di+0);
+    int i;
+    switch (regs->bl) {
+    case 0x80:
+    case 0x00:
+        for (i = 0; i < count; i++) {
+            struct vbe_palette_entry rgb = GET_FARVAR(seg, data_far[i]);
+            stdvga_dac_write(start + i, rgb);
+        }
+        break;
+    case 0x01:
+        for (i = 0; i < count; i++) {
+            struct vbe_palette_entry rgb = stdvga_dac_read(start + i);
+            SET_FARVAR(seg, data_far[i], rgb);
+        }
+        break;
+    default:
+        goto fail;
+    }
     regs->ax = 0x004f;
     return;
 fail:
@@ -454,6 +508,7 @@ handle_104f(struct bregs *regs)
     case 0x06: vbe_104f06(regs); break;
     case 0x07: vbe_104f07(regs); break;
     case 0x08: vbe_104f08(regs); break;
+    case 0x09: vbe_104f09(regs); break;
     case 0x0a: vbe_104f0a(regs); break;
     case 0x10: vbe_104f10(regs); break;
     case 0x15: vbe_104f15(regs); break;

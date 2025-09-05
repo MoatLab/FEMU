@@ -301,7 +301,7 @@ void decode_mce(uint64_t srr0, uint64_t srr1,
 
 	if (proc_gen == proc_gen_p9) {
 		decode_mce_p9(srr0, srr1, dsisr, dar, type, error_str, address);
-	} else if (proc_gen == proc_gen_p10) {
+	} else if (proc_gen == proc_gen_p10 || proc_gen == proc_gen_p11) {
 		decode_mce_p10(srr0, srr1, dsisr, dar, type, error_str, address);
 	} else {
 		*error_str = "unknown error (processor not supported)";

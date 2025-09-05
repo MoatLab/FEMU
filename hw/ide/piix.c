@@ -178,12 +178,12 @@ static void pci_piix_ide_exitfn(PCIDevice *dev)
 }
 
 /* NOTE: for the PIIX3, the IRQs and IOports are hardcoded */
-static void piix3_ide_class_init(ObjectClass *klass, void *data)
+static void piix3_ide_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
 
-    dc->reset = piix_ide_reset;
+    device_class_set_legacy_reset(dc, piix_ide_reset);
     dc->vmsd = &vmstate_ide_pci;
     k->realize = pci_piix_ide_realize;
     k->exit = pci_piix_ide_exitfn;
@@ -201,12 +201,12 @@ static const TypeInfo piix3_ide_info = {
 };
 
 /* NOTE: for the PIIX4, the IRQs and IOports are hardcoded */
-static void piix4_ide_class_init(ObjectClass *klass, void *data)
+static void piix4_ide_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
 
-    dc->reset = piix_ide_reset;
+    device_class_set_legacy_reset(dc, piix_ide_reset);
     dc->vmsd = &vmstate_ide_pci;
     k->realize = pci_piix_ide_realize;
     k->exit = pci_piix_ide_exitfn;

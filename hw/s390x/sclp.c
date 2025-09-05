@@ -21,13 +21,14 @@
 #include "hw/s390x/s390-pci-bus.h"
 #include "hw/s390x/ipl.h"
 #include "hw/s390x/cpu-topology.h"
+#include "hw/s390x/s390-virtio-ccw.h"
 
-static inline SCLPDevice *get_sclp_device(void)
+static SCLPDevice *get_sclp_device(void)
 {
     static SCLPDevice *sclp;
 
     if (!sclp) {
-        sclp = SCLP(object_resolve_path_type("", TYPE_SCLP, NULL));
+        sclp = S390_CCW_MACHINE(qdev_get_machine())->sclp;
     }
     return sclp;
 }
@@ -109,7 +110,6 @@ static void read_SCP_info(SCLPDevice *sclp, SCCB *sccb)
     MachineState *machine = MACHINE(qdev_get_machine());
     int cpu_count;
     int rnsize, rnmax;
-    IplParameterBlock *ipib = s390_ipl_get_iplb();
     int required_len = SCCB_REQ_LEN(ReadInfo, machine->possible_cpus->len);
     int offset_cpu = s390_has_feat(S390_FEAT_EXTENDED_LENGTH_SCCB) ?
                      offsetof(ReadInfo, entries) :
@@ -161,7 +161,11 @@ static void read_SCP_info(SCLPDevice *sclp, SCCB *sccb)
         read_info->rnsize2 = cpu_to_be32(rnsize);
     }
 
-    /* we don't support standby memory, maxram_size is never exposed */
+    /*
+     * We don't support standby memory. maxram_size is used for sizing the
+     * memory device region, which is not exposed through SCLP but through
+     * diag500.
+     */
     rnmax = machine->ram_size >> sclp->increment_size;
     if (rnmax < 0x10000) {
         read_info->rnmax = cpu_to_be16(rnmax);
@@ -170,12 +174,8 @@ static void read_SCP_info(SCLPDevice *sclp, SCCB *sccb)
         read_info->rnmax2 = cpu_to_be64(rnmax);
     }
 
-    if (ipib && ipib->flags & DIAG308_FLAGS_LP_VALID) {
-        memcpy(&read_info->loadparm, &ipib->loadparm,
-               sizeof(read_info->loadparm));
-    } else {
-        s390_ipl_set_loadparm(read_info->loadparm);
-    }
+    s390_ipl_convert_loadparm((char *)S390_CCW_MACHINE(machine)->loadparm,
+                                read_info->loadparm);
 
     sccb->h.response_code = cpu_to_be16(SCLP_RC_NORMAL_READ_COMPLETION);
 }
@@ -378,22 +378,9 @@ void sclp_service_interrupt(uint32_t sccb)
 }
 
 /* qemu object creation and initialization functions */
-
-void s390_sclp_init(void)
-{
-    Object *new = object_new(TYPE_SCLP);
-
-    object_property_add_child(qdev_get_machine(), TYPE_SCLP, new);
-    object_unref(new);
-    qdev_realize(DEVICE(new), NULL, &error_fatal);
-}
-
 static void sclp_realize(DeviceState *dev, Error **errp)
 {
-    MachineState *machine = MACHINE(qdev_get_machine());
     SCLPDevice *sclp = SCLP(dev);
-    uint64_t hw_limit;
-    int ret;
 
     /*
      * qdev_device_add searches the sysbus for TYPE_SCLP_EVENTS_BUS. As long
@@ -402,14 +389,6 @@ static void sclp_realize(DeviceState *dev, Error **errp)
      */
     if (!sysbus_realize(SYS_BUS_DEVICE(sclp->event_facility), errp)) {
         return;
-    }
-
-    ret = s390_set_memory_limit(machine->maxram_size, &hw_limit);
-    if (ret == -E2BIG) {
-        error_setg(errp, "host supports a maximum of %" PRIu64 " GB",
-                   hw_limit / GiB);
-    } else if (ret) {
-        error_setg(errp, "setting the guest size failed");
     }
 }
 
@@ -445,7 +424,7 @@ static void sclp_init(Object *obj)
     sclp_memory_init(sclp);
 }
 
-static void sclp_class_init(ObjectClass *oc, void *data)
+static void sclp_class_init(ObjectClass *oc, const void *data)
 {
     SCLPDeviceClass *sc = SCLP_CLASS(oc);
     DeviceClass *dc = DEVICE_CLASS(oc);

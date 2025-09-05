@@ -76,7 +76,7 @@ static void pca955x_display_pins_status(PCA955xState *s,
         return;
     }
     if (trace_event_get_state_backends(TRACE_PCA955X_GPIO_STATUS)) {
-        char *buf = g_newa(char, k->pin_count + 1);
+        char buf[PCA955X_PIN_COUNT_MAX + 1];
 
         for (i = 0; i < k->pin_count; i++) {
             if (extract32(pins_status, i, 1)) {
@@ -428,12 +428,11 @@ static void pca955x_realize(DeviceState *dev, Error **errp)
     qdev_init_gpio_in(dev, pca955x_gpio_in_handler, k->pin_count);
 }
 
-static Property pca955x_properties[] = {
+static const Property pca955x_properties[] = {
     DEFINE_PROP_STRING("description", PCA955xState, description),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void pca955x_class_init(ObjectClass *klass, void *data)
+static void pca955x_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     I2CSlaveClass *k = I2C_SLAVE_CLASS(klass);
@@ -455,12 +454,12 @@ static const TypeInfo pca955x_info = {
     .abstract      = true,
 };
 
-static void pca9552_class_init(ObjectClass *oc, void *data)
+static void pca9552_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
     PCA955xClass *pc = PCA955X_CLASS(oc);
 
-    dc->reset = pca9552_reset;
+    device_class_set_legacy_reset(dc, pca9552_reset);
     dc->vmsd = &pca9552_vmstate;
     pc->max_reg = PCA9552_LS3;
     pc->pin_count = 16;

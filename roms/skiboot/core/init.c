@@ -6,6 +6,7 @@
  */
 
 #include <skiboot.h>
+#include <slw.h>
 #include <psi.h>
 #include <chiptod.h>
 #include <nx.h>
@@ -33,6 +34,7 @@
 #include <libfdt/libfdt.h>
 #include <timer.h>
 #include <ipmi.h>
+#include <pldm.h>
 #include <sensor.h>
 #include <xive.h>
 #include <nvram.h>
@@ -47,6 +49,7 @@
 #include <debug_descriptor.h>
 #include <occ.h>
 #include <opal-dump.h>
+#include <xscom-p9-regs.h>
 #include <xscom-p10-regs.h>
 
 enum proc_gen proc_gen;
@@ -560,8 +563,12 @@ void __noreturn load_and_boot_kernel(bool is_reboot)
 
 	trustedboot_exit_boot_services();
 
+#ifdef CONFIG_PLDM
+	pldm_platform_send_progress_state_change(
+		PLDM_STATE_SET_BOOT_PROG_STATE_STARTING_OP_SYS);
+#else
 	ipmi_set_fw_progress_sensor(IPMI_FW_OS_BOOT);
-
+#endif
 
 	if (!is_reboot) {
 		/* We wait for the nvram read to complete here so we can
@@ -571,6 +578,8 @@ void __noreturn load_and_boot_kernel(bool is_reboot)
 
 		if (!occ_sensors_init())
 			dts_sensor_create_nodes(sensor_node);
+
+		opal_mpipl_init();
 
 	} else {
 		/* fdt will be rebuilt */
@@ -635,10 +644,6 @@ void __noreturn load_and_boot_kernel(bool is_reboot)
 
 	patch_traps(false);
 	cpu_set_hile_mode(false); /* Clear HILE on all CPUs */
-
-	/* init MPIPL */
-	if (!is_reboot)
-		opal_mpipl_init();
 
 	checksum_romem();
 
@@ -868,7 +873,11 @@ void copy_exception_vectors(void)
 	 * this is the boot flag used by CPUs still potentially entering
 	 * skiboot.
 	 */
-	memcpy((void *)0x100, (void *)(SKIBOOT_BASE + 0x100),
+	void *skiboot_constant_addr exception_vectors_start_addr = (void *)(SKIBOOT_BASE + 0x100);
+	void *skiboot_constant_addr dst = (void *)0x100;
+
+
+	memcpy(dst, exception_vectors_start_addr,
 			EXCEPTION_VECTORS_END - 0x100);
 	sync_icache();
 }
@@ -996,7 +1005,7 @@ static void mask_pc_system_xstop(void)
         uint32_t chip_id, core_id;
         int rc;
 
-	if (proc_gen != proc_gen_p10)
+	if (proc_gen != proc_gen_p10 && proc_gen != proc_gen_p11)
                 return;
 
 	if (chip_quirk(QUIRK_MAMBO_CALLOUTS) || chip_quirk(QUIRK_AWAN))
@@ -1019,6 +1028,40 @@ static void mask_pc_system_xstop(void)
                         prerror("Error setting FIR MASK rc:%d on PIR:%x\n",
                                 rc, cpu->pir);
         }
+}
+
+bool lpar_per_core = false;
+
+static void probe_lpar_per_core(void)
+{
+	struct cpu_thread *cpu = this_cpu();
+	uint32_t chip_id = pir_to_chip_id(cpu->pir);
+	uint32_t core_id = pir_to_core_id(cpu->pir);
+	uint64_t addr;
+	uint64_t core_thread_state;
+	int rc;
+
+	if (chip_quirk(QUIRK_MAMBO_CALLOUTS) || chip_quirk(QUIRK_AWAN))
+		return;
+
+	if (proc_gen == proc_gen_p9)
+		addr = XSCOM_ADDR_P9_EC(core_id, P9_CORE_THREAD_STATE);
+	else if (proc_gen == proc_gen_p10 || proc_gen == proc_gen_p11)
+		addr = XSCOM_ADDR_P10_EC(core_id, P10_EC_CORE_THREAD_STATE);
+	else
+		return;
+
+	rc = xscom_read(chip_id, addr, &core_thread_state);
+	if (rc) {
+		prerror("Error reading CORE_THREAD_STATE rc:%d on PIR:%x\n",
+			rc, cpu->pir);
+		return;
+	}
+
+	if (core_thread_state & PPC_BIT(62)) {
+		lpar_per_core = true;
+		prlog(PR_WARNING, "LPAR-per-core mode detected. KVM may not be usable.\n");
+	}
 }
 
 
@@ -1200,11 +1243,14 @@ void __noreturn __nomcount main_cpu_entry(const void *fdt)
 
 	/* Initialize the rest of the cpu thread structs */
 	init_all_cpus();
-	if (proc_gen == proc_gen_p9 || proc_gen == proc_gen_p10)
+	if (proc_gen == proc_gen_p9 || proc_gen == proc_gen_p10 || proc_gen == proc_gen_p11)
 		cpu_set_ipi_enable(true);
 
         /* Once all CPU are up apply this workaround */
         mask_pc_system_xstop();
+
+	/* P9/10 may be in LPAR-per-core mode, which is incompatible with KVM */
+	probe_lpar_per_core();
 
 	/* Add the /opal node to the device-tree */
 	add_opal_node();
@@ -1228,7 +1274,7 @@ void __noreturn __nomcount main_cpu_entry(const void *fdt)
 	/* On P9 and P10, initialize XIVE */
 	if (proc_gen == proc_gen_p9)
 		init_xive();
-	else if (proc_gen == proc_gen_p10)
+	else if (proc_gen == proc_gen_p10 || proc_gen == proc_gen_p11)
 		xive2_init();
 
 	/* Grab centaurs from device-tree if present (only on FSP-less) */
@@ -1355,24 +1401,8 @@ void __noreturn __nomcount main_cpu_entry(const void *fdt)
 	/* Catalog decompression routine */
 	imc_decompress_catalog();
 
-	/* Virtual Accelerator Switchboard */
-	vas_init();
-
-	/* NX init */
-	nx_init();
-
-	/* Probe PHB3 on P8 */
-	probe_phb3();
-
-	/* Probe PHB4 on P9 and PHB5 on P10 */
-	probe_phb4();
-
-	/* Probe NPUs */
-	probe_npu();
-	probe_npu2();
-
-	/* Probe PAUs */
-	probe_pau();
+	/* Probe all HWPROBE hardware we have code linked for */
+	probe_hardware();
 
 	/* Initialize PCI */
 	pci_init_slots();
@@ -1383,10 +1413,19 @@ void __noreturn __nomcount main_cpu_entry(const void *fdt)
 	/* Setup ibm,firmware-versions if able */
 	if (platform.bmc) {
 		flash_dt_add_fw_version();
+#ifdef CONFIG_PLDM
+		pldm_fru_dt_add_bmc_version();
+#else
 		ipmi_dt_add_bmc_info();
+#endif
 	}
 
+#ifdef CONFIG_PLDM
+	pldm_platform_send_progress_state_change(
+		PLDM_STATE_SET_BOOT_PROG_STATE_PCI_RESORUCE_CONFIG);
+#else
 	ipmi_set_fw_progress_sensor(IPMI_FW_PCI_INIT);
+#endif
 
 	/*
 	 * These last few things must be done as late as possible
@@ -1444,7 +1483,7 @@ void __noreturn __secondary_cpu_entry(void)
 	/* Some XIVE setup */
 	if (proc_gen == proc_gen_p9)
 		xive_cpu_callin(cpu);
-	else if (proc_gen == proc_gen_p10)
+	else if (proc_gen == proc_gen_p10 || proc_gen == proc_gen_p11)
 		xive2_cpu_callin(cpu);
 
 	/* Wait for work to do */

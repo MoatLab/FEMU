@@ -9,6 +9,7 @@
 #include <xscom.h>
 #include <ast.h>
 #include <ipmi.h>
+#include <pldm.h>
 #include <bt.h>
 #include <errorlog.h>
 #include <lpc.h>
@@ -31,6 +32,11 @@
 #define MBOX_IO_COUNT 6
 #define MBOX_LPC_IRQ 9
 
+/* MCTP config */
+#define MCTP_IO_BASE	0xca2
+#define MCTP_IO_COUNT	2
+#define MCTP_LPC_IRQ	11
+
 void astbmc_ext_irq_serirq_cpld(unsigned int chip_id)
 {
 	lpc_all_interrupts(chip_id);
@@ -43,46 +49,31 @@ static void astbmc_ipmi_error(struct ipmi_msg *msg)
         ipmi_free_msg(msg);
 }
 
+#define SET_ENABLE_SEL		0x08
+#define SET_ENABLE_MSGBUF	0x04
+#define SET_ENABLE_RX_MQ_INT	0x01
+
 static void astbmc_ipmi_setenables(void)
 {
-        struct ipmi_msg *msg;
+	struct ipmi_msg *msg;
+	uint8_t data;
 
-        struct {
-                uint8_t oem2_en : 1;
-                uint8_t oem1_en : 1;
-                uint8_t oem0_en : 1;
-                uint8_t reserved : 1;
-                uint8_t sel_en : 1;
-                uint8_t msgbuf_en : 1;
-                uint8_t msgbuf_full_int_en : 1;
-                uint8_t rxmsg_queue_int_en : 1;
-        } data;
+	data = SET_ENABLE_SEL | SET_ENABLE_MSGBUF | SET_ENABLE_RX_MQ_INT;
 
-        memset(&data, 0, sizeof(data));
-
-        /* The spec says we need to read-modify-write to not clobber
-         * the state of the other flags. These are set on by the bmc */
-        data.rxmsg_queue_int_en = 1;
-        data.sel_en = 1;
-
-        /* These are the ones we want to set on */
-        data.msgbuf_en = 1;
-
-        msg = ipmi_mkmsg_simple(IPMI_SET_ENABLES, &data, sizeof(data));
-        if (!msg) {
+	msg = ipmi_mkmsg_simple(IPMI_SET_ENABLES, &data, sizeof(data));
+	if (!msg) {
 		/**
 		 * @fwts-label ASTBMCFailedSetEnables
 		 * @fwts-advice AST BMC is likely to be non-functional
 		 * when accessed from host.
 		 */
-                prlog(PR_ERR, "ASTBMC: failed to set enables\n");
-                return;
-        }
+		prlog(PR_ERR, "ASTBMC: failed to set enables\n");
+		return;
+	}
 
-        msg->error = astbmc_ipmi_error;
+	msg->error = astbmc_ipmi_error;
 
-        ipmi_queue_msg(msg);
-
+	ipmi_queue_msg(msg);
 }
 
 static int astbmc_fru_init(void)
@@ -104,6 +95,36 @@ static int astbmc_fru_init(void)
 	return 0;
 }
 
+#ifdef CONFIG_PLDM
+int astbmc_pldm_init(void)
+{
+	int rc = OPAL_SUCCESS;
+
+	/* PLDM over MCTP */
+	rc = pldm_mctp_init();
+	if (!rc) {
+		/* Initialize PNOR/NVRAM */
+		rc = pnor_pldm_init();
+
+		if (!rc) {
+			pldm_watchdog_init();
+			pldm_rtc_init();
+			pldm_opal_init();
+		}
+	}
+
+	/* Initialize elog */
+	elog_init();
+
+	/* Setup UART console for use by Linux via OPAL API */
+	set_opal_console(&uart_opal_con);
+
+	if (rc)
+		prlog(PR_WARNING, "Failed to configure PLDM\n");
+
+	return rc;
+}
+#endif
 
 void astbmc_init(void)
 {
@@ -226,6 +247,37 @@ static void astbmc_fixup_dt_system_id(void)
 
 	dt_add_property_strings(dt_root, "system-id", "unavailable");
 }
+
+#ifdef CONFIG_PLDM
+static void astbmc_fixup_dt_mctp(struct dt_node *lpc)
+{
+	struct dt_node *mctp;
+	char namebuf[32];
+
+	if (!lpc)
+		return;
+
+	/* First check if the mbox interface is already there */
+	dt_for_each_child(lpc, mctp) {
+		if (dt_node_is_compatible(mctp, "mctp"))
+			return;
+	}
+
+	snprintf(namebuf, sizeof(namebuf), "mctp@i%x", MCTP_IO_BASE);
+	mctp = dt_new(lpc, namebuf);
+
+	dt_add_property_cells(mctp, "reg",
+			      1, /* IO space */
+			      MCTP_IO_BASE, MCTP_IO_COUNT);
+	dt_add_property_strings(mctp, "compatible", "mctp");
+
+	/* Mark it as reserved to avoid Linux trying to claim it */
+	dt_add_property_strings(mctp, "status", "reserved");
+
+	dt_add_property_cells(mctp, "interrupts", MCTP_LPC_IRQ);
+	dt_add_property_cells(mctp, "interrupt-parent", lpc->phandle);
+}
+#endif
 
 static void astbmc_fixup_dt_bt(struct dt_node *lpc)
 {
@@ -404,6 +456,11 @@ static void astbmc_fixup_dt(void)
 	/* BT is not in HB either */
 	astbmc_fixup_dt_bt(primary_lpc);
 
+#ifdef CONFIG_PLDM
+	/* Fixup the MCTP, that might be missing from HB */
+	astbmc_fixup_dt_mctp(primary_lpc);
+#endif
+
 	/* The pel logging code needs a system-id property to work so
 	   make sure we have one. */
 	astbmc_fixup_dt_system_id();
@@ -501,7 +558,18 @@ void astbmc_early_init(void)
 
 void astbmc_exit(void)
 {
+#ifdef CONFIG_PLDM
+	return;
+#endif
 	ipmi_wdt_final_reset();
+
+	ipmi_set_boot_count();
+
+	/*
+	 * Booting into an OS that may not call back into skiboot for
+	 * some time. Ensure all IPMI messages are processed first.
+	 */
+	ipmi_flush();
 }
 
 static const struct bmc_sw_config bmc_sw_ami = {

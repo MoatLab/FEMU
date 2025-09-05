@@ -142,9 +142,9 @@ enum NvmeCapMask {
     ((cap) |= (uint64_t)((val) & CAP_CMBS_MASK)   << CAP_CMBS_SHIFT)
 
 enum NvmeCapCss {
-    NVME_CAP_CSS_NVM        = 1 << 0,
-    NVME_CAP_CSS_CSI_SUPP   = 1 << 6,
-    NVME_CAP_CSS_ADMIN_ONLY = 1 << 7,
+    NVME_CAP_CSS_NCSS    = 1 << 0,
+    NVME_CAP_CSS_IOCSS   = 1 << 6,
+    NVME_CAP_CSS_NOIOCSS = 1 << 7,
 };
 
 enum NvmeCcShift {
@@ -177,7 +177,7 @@ enum NvmeCcMask {
 
 enum NvmeCcCss {
     NVME_CC_CSS_NVM        = 0x0,
-    NVME_CC_CSS_CSI        = 0x6,
+    NVME_CC_CSS_ALL        = 0x6,
     NVME_CC_CSS_ADMIN_ONLY = 0x7,
 };
 
@@ -799,6 +799,8 @@ typedef struct QEMU_PACKED NvmeDsmRange {
 enum {
     NVME_COPY_FORMAT_0 = 0x0,
     NVME_COPY_FORMAT_1 = 0x1,
+    NVME_COPY_FORMAT_2 = 0x2,
+    NVME_COPY_FORMAT_3 = 0x3,
 };
 
 typedef struct QEMU_PACKED NvmeCopyCmd {
@@ -820,25 +822,30 @@ typedef struct QEMU_PACKED NvmeCopyCmd {
     uint16_t    appmask;
 } NvmeCopyCmd;
 
-typedef struct QEMU_PACKED NvmeCopySourceRangeFormat0 {
-    uint8_t  rsvd0[8];
+typedef struct QEMU_PACKED NvmeCopySourceRangeFormat0_2 {
+    uint32_t sparams;
+    uint8_t  rsvd4[4];
     uint64_t slba;
     uint16_t nlb;
-    uint8_t  rsvd18[6];
+    uint8_t  rsvd18[4];
+    uint16_t sopt;
     uint32_t reftag;
     uint16_t apptag;
     uint16_t appmask;
-} NvmeCopySourceRangeFormat0;
+} NvmeCopySourceRangeFormat0_2;
 
-typedef struct QEMU_PACKED NvmeCopySourceRangeFormat1 {
-    uint8_t  rsvd0[8];
+typedef struct QEMU_PACKED NvmeCopySourceRangeFormat1_3 {
+    uint32_t sparams;
+    uint8_t  rsvd4[4];
     uint64_t slba;
     uint16_t nlb;
-    uint8_t  rsvd18[8];
+    uint8_t  rsvd18[4];
+    uint16_t sopt;
+    uint8_t  rsvd24[2];
     uint8_t  sr[10];
     uint16_t apptag;
     uint16_t appmask;
-} NvmeCopySourceRangeFormat1;
+} NvmeCopySourceRangeFormat1_3;
 
 enum NvmeAsyncEventRequest {
     NVME_AER_TYPE_ERROR                     = 0,
@@ -899,8 +906,7 @@ enum NvmeStatusCodes {
     NVME_SGL_DESCR_TYPE_INVALID = 0x0011,
     NVME_INVALID_USE_OF_CMB     = 0x0012,
     NVME_INVALID_PRP_OFFSET     = 0x0013,
-    NVME_CMD_SET_CMB_REJECTED   = 0x002b,
-    NVME_INVALID_CMD_SET        = 0x002c,
+    NVME_COMMAND_INTERRUPTED    = 0x0021,
     NVME_FDP_DISABLED           = 0x0029,
     NVME_INVALID_PHID_LIST      = 0x002a,
     NVME_LBA_RANGE              = 0x0080,
@@ -933,10 +939,16 @@ enum NvmeStatusCodes {
     NVME_INVALID_SEC_CTRL_STATE = 0x0120,
     NVME_INVALID_NUM_RESOURCES  = 0x0121,
     NVME_INVALID_RESOURCE_ID    = 0x0122,
+    NVME_IOCS_NOT_SUPPORTED     = 0x0129,
+    NVME_IOCS_NOT_ENABLED       = 0x012a,
+    NVME_IOCS_COMBINATION_REJECTED = 0x012b,
+    NVME_INVALID_IOCS           = 0x012c,
     NVME_CONFLICTING_ATTRS      = 0x0180,
     NVME_INVALID_PROT_INFO      = 0x0181,
     NVME_WRITE_TO_RO            = 0x0182,
     NVME_CMD_SIZE_LIMIT         = 0x0183,
+    NVME_CMD_INCOMP_NS_OR_FMT   = 0x0185,
+    NVME_CMD_OVERLAP_IO_RANGE   = 0x0187,
     NVME_INVALID_ZONE_OP        = 0x01b6,
     NVME_NOZRWA                 = 0x01b7,
     NVME_ZONE_BOUNDARY_ERROR    = 0x01b8,
@@ -1006,6 +1018,40 @@ typedef struct QEMU_PACKED NvmeSmartLog {
     uint8_t     reserved2[320];
 } NvmeSmartLog;
 
+typedef struct QEMU_PACKED NvmeSmartLogExtended {
+    uint64_t    physical_media_units_written[2];
+    uint64_t    physical_media_units_read[2];
+    uint64_t    bad_user_blocks;
+    uint64_t    bad_system_nand_blocks;
+    uint64_t    xor_recovery_count;
+    uint64_t    uncorrectable_read_error_count;
+    uint64_t    soft_ecc_error_count;
+    uint64_t    end2end_correction_counts;
+    uint8_t     system_data_percent_used;
+    uint8_t     refresh_counts[7];
+    uint64_t    user_data_erase_counts;
+    uint16_t    thermal_throttling_stat_and_count;
+    uint16_t    dssd_spec_version[3];
+    uint64_t    pcie_correctable_error_count;
+    uint32_t    incomplete_shutdowns;
+    uint32_t    rsvd116;
+    uint8_t     percent_free_blocks;
+    uint8_t     rsvd121[7];
+    uint16_t    capacity_health;
+    uint8_t     nvme_errata_ver;
+    uint8_t     rsvd131[5];
+    uint64_t    unaligned_io;
+    uint64_t    security_ver_num;
+    uint64_t    total_nuse;
+    uint64_t    plp_start_count[2];
+    uint64_t    endurance_estimate[2];
+    uint64_t    pcie_retraining_count;
+    uint64_t    power_state_change_count;
+    uint8_t     rsvd208[286];
+    uint16_t    log_page_version;
+    uint64_t    log_page_guid[2];
+} NvmeSmartLogExtended;
+
 #define NVME_SMART_WARN_MAX     6
 enum NvmeSmartWarn {
     NVME_SMART_SPARE                  = 1 << 0,
@@ -1043,6 +1089,12 @@ enum NvmeLogIdentifier {
     NVME_LOG_FDP_RUH_USAGE              = 0x21,
     NVME_LOG_FDP_STATS                  = 0x22,
     NVME_LOG_FDP_EVENTS                 = 0x23,
+    NVME_LOG_VENDOR_START               = 0xc0,
+    NVME_LOG_VENDOR_END                 = 0xff,
+};
+
+enum NvmeOcpLogIdentifier {
+    NVME_OCP_EXTENDED_SMART_INFO = 0xc0,
 };
 
 typedef struct QEMU_PACKED NvmePSD {
@@ -1068,15 +1120,18 @@ enum NvmeIdCns {
     NVME_ID_CNS_CS_NS                 = 0x05,
     NVME_ID_CNS_CS_CTRL               = 0x06,
     NVME_ID_CNS_CS_NS_ACTIVE_LIST     = 0x07,
+    NVME_ID_CNS_CS_IND_NS             = 0x08,
     NVME_ID_CNS_NS_PRESENT_LIST       = 0x10,
     NVME_ID_CNS_NS_PRESENT            = 0x11,
     NVME_ID_CNS_NS_ATTACHED_CTRL_LIST = 0x12,
     NVME_ID_CNS_CTRL_LIST             = 0x13,
     NVME_ID_CNS_PRIMARY_CTRL_CAP      = 0x14,
     NVME_ID_CNS_SECONDARY_CTRL_LIST   = 0x15,
+    NVME_ID_CNS_ENDURANCE_GROUP_LIST  = 0x19,
     NVME_ID_CNS_CS_NS_PRESENT_LIST    = 0x1a,
     NVME_ID_CNS_CS_NS_PRESENT         = 0x1b,
     NVME_ID_CNS_IO_COMMAND_SET        = 0x1c,
+    NVME_ID_CNS_CS_IND_NS_ALLOCATED   = 0x1f,
 };
 
 typedef struct QEMU_PACKED NvmeIdCtrl {
@@ -1155,6 +1210,8 @@ typedef struct NvmeIdCtrlZoned {
     uint8_t     rsvd1[4095];
 } NvmeIdCtrlZoned;
 
+#define NVME_ID_CTRL_NVM_DMRL_MAX 255
+
 typedef struct NvmeIdCtrlNvm {
     uint8_t     vsl;
     uint8_t     wzsl;
@@ -1172,6 +1229,7 @@ enum NvmeIdCtrlOaes {
 enum NvmeIdCtrlCtratt {
     NVME_CTRATT_ENDGRPS = 1 <<  4,
     NVME_CTRATT_ELBAS   = 1 << 15,
+    NVME_CTRATT_MEM     = 1 << 16,
     NVME_CTRATT_FDPS    = 1 << 19,
 };
 
@@ -1179,9 +1237,10 @@ enum NvmeIdCtrlOacs {
     NVME_OACS_SECURITY      = 1 << 0,
     NVME_OACS_FORMAT        = 1 << 1,
     NVME_OACS_FW            = 1 << 2,
-    NVME_OACS_NS_MGMT       = 1 << 3,
+    NVME_OACS_NMS           = 1 << 3,
     NVME_OACS_DIRECTIVES    = 1 << 5,
-    NVME_OACS_DBBUF         = 1 << 8,
+    NVME_OACS_VMS           = 1 << 7,
+    NVME_OACS_DBCS          = 1 << 8,
 };
 
 enum NvmeIdCtrlOncs {
@@ -1194,11 +1253,15 @@ enum NvmeIdCtrlOncs {
     NVME_ONCS_TIMESTAMP     = 1 << 6,
     NVME_ONCS_VERIFY        = 1 << 7,
     NVME_ONCS_COPY          = 1 << 8,
+    NVME_ONCS_NVMCSA        = 1 << 9,
+    NVME_ONCS_NVMAFC        = 1 << 10,
 };
 
 enum NvmeIdCtrlOcfs {
     NVME_OCFS_COPY_FORMAT_0 = 1 << NVME_COPY_FORMAT_0,
     NVME_OCFS_COPY_FORMAT_1 = 1 << NVME_COPY_FORMAT_1,
+    NVME_OCFS_COPY_FORMAT_2 = 1 << NVME_COPY_FORMAT_2,
+    NVME_OCFS_COPY_FORMAT_3 = 1 << NVME_COPY_FORMAT_3,
 };
 
 enum NvmeIdctrlVwc {
@@ -1271,6 +1334,8 @@ enum NvmeNsAttachmentOperation {
 #define NVME_ERR_REC_TLER(err_rec)  (err_rec & 0xffff)
 #define NVME_ERR_REC_DULBE(err_rec) (err_rec & 0x10000)
 
+#define NVME_ID_CTRL_CTRATT_MEM(ctratt) (ctratt & NVME_CTRATT_MEM)
+
 enum NvmeFeatureIds {
     NVME_ARBITRATION                = 0x1,
     NVME_POWER_MANAGEMENT           = 0x2,
@@ -1332,7 +1397,9 @@ typedef struct NvmeHostBehaviorSupport {
     uint8_t     acre;
     uint8_t     etdas;
     uint8_t     lbafee;
-    uint8_t     rsvd3[509];
+    uint8_t     rsvd3;
+    uint16_t    cdfe;
+    uint8_t     rsvd6[506];
 } NvmeHostBehaviorSupport;
 
 typedef struct QEMU_PACKED NvmeLBAF {
@@ -1397,8 +1464,27 @@ typedef struct QEMU_PACKED NvmeIdNsNvm {
     uint8_t     pic;
     uint8_t     rsvd9[3];
     uint32_t    elbaf[NVME_MAX_NLBAF];
-    uint8_t     rsvd268[3828];
+    uint32_t    npdgl;
+    uint32_t    nprg;
+    uint32_t    npra;
+    uint32_t    nors;
+    uint32_t    npdal;
+    uint8_t     rsvd288[3808];
 } NvmeIdNsNvm;
+
+typedef struct QEMU_PACKED NvmeIdNsInd {
+    uint8_t     nsfeat;
+    uint8_t     nmic;
+    uint8_t     rescap;
+    uint8_t     fpi;
+    uint32_t    anagrpid;
+    uint8_t     nsattr;
+    uint8_t     rsvd9;
+    uint16_t    nvmsetid;
+    uint16_t    endgrpid;
+    uint8_t     nstat;
+    uint8_t     rsvd15[4081];
+} NvmeIdNsInd;
 
 typedef struct QEMU_PACKED NvmeIdNsDescr {
     uint8_t nidt;
@@ -1420,8 +1506,10 @@ enum NvmeNsIdentifierType {
     NVME_NIDT_CSI               = 0x04,
 };
 
-enum NvmeIdNsNmic {
-    NVME_NMIC_NS_SHARED         = 1 << 0,
+enum NvmeIdNsIndependent {
+    NVME_ID_NS_IND_NMIC_SHRNS   = 1 << 0,
+    NVME_ID_NS_IND_NMIC_DISNS   = 1 << 1,
+    NVME_ID_NS_IND_NSTAT_NRDY   = 1 << 0,
 };
 
 enum NvmeCsi {
@@ -1497,6 +1585,16 @@ enum NvmeIdNsFlbas {
 enum NvmeIdNsMc {
     NVME_ID_NS_MC_EXTENDED = 1 << 0,
     NVME_ID_NS_MC_SEPARATE = 1 << 1,
+};
+
+enum NvmeIdNsNsfeat {
+    NVME_ID_NS_NSFEAT_THINP         = 1 << 0,
+    NVME_ID_NS_NSFEAT_NSABPNS       = 1 << 1,
+    NVME_ID_NS_NSFEAT_DAE           = 1 << 2,
+    NVME_ID_NS_NSFEAT_UIDREUSE      = 1 << 3,
+    NVME_ID_NS_NSFEAT_OPTPERF_ALL   = 3 << 4,
+    NVME_ID_NS_NSFEAT_MAM           = 1 << 6,
+    NVME_ID_NS_NSFEAT_OPTRPERF      = 1 << 7,
 };
 
 #define NVME_ID_NS_DPS_TYPE(dps) (dps & NVME_ID_NS_DPS_TYPE_MASK)
@@ -1832,8 +1930,8 @@ static inline void _nvme_check_size(void)
     QEMU_BUILD_BUG_ON(sizeof(NvmeZonedResult) != 8);
     QEMU_BUILD_BUG_ON(sizeof(NvmeCqe) != 16);
     QEMU_BUILD_BUG_ON(sizeof(NvmeDsmRange) != 16);
-    QEMU_BUILD_BUG_ON(sizeof(NvmeCopySourceRangeFormat0) != 32);
-    QEMU_BUILD_BUG_ON(sizeof(NvmeCopySourceRangeFormat1) != 40);
+    QEMU_BUILD_BUG_ON(sizeof(NvmeCopySourceRangeFormat0_2) != 32);
+    QEMU_BUILD_BUG_ON(sizeof(NvmeCopySourceRangeFormat1_3) != 40);
     QEMU_BUILD_BUG_ON(sizeof(NvmeCmd) != 64);
     QEMU_BUILD_BUG_ON(sizeof(NvmeDeleteQ) != 64);
     QEMU_BUILD_BUG_ON(sizeof(NvmeCreateCq) != 64);
@@ -1847,6 +1945,7 @@ static inline void _nvme_check_size(void)
     QEMU_BUILD_BUG_ON(sizeof(NvmeErrorLog) != 64);
     QEMU_BUILD_BUG_ON(sizeof(NvmeFwSlotInfoLog) != 512);
     QEMU_BUILD_BUG_ON(sizeof(NvmeSmartLog) != 512);
+    QEMU_BUILD_BUG_ON(sizeof(NvmeSmartLogExtended) != 512);
     QEMU_BUILD_BUG_ON(sizeof(NvmeEffectsLog) != 4096);
     QEMU_BUILD_BUG_ON(sizeof(NvmeIdCtrl) != 4096);
     QEMU_BUILD_BUG_ON(sizeof(NvmeIdCtrlZoned) != 4096);
@@ -1854,6 +1953,7 @@ static inline void _nvme_check_size(void)
     QEMU_BUILD_BUG_ON(sizeof(NvmeLBAF) != 4);
     QEMU_BUILD_BUG_ON(sizeof(NvmeLBAFE) != 16);
     QEMU_BUILD_BUG_ON(sizeof(NvmeIdNs) != 4096);
+    QEMU_BUILD_BUG_ON(sizeof(NvmeIdNsInd) != 4096);
     QEMU_BUILD_BUG_ON(sizeof(NvmeIdNsNvm) != 4096);
     QEMU_BUILD_BUG_ON(sizeof(NvmeIdNsZoned) != 4096);
     QEMU_BUILD_BUG_ON(sizeof(NvmeSglDescriptor) != 16);

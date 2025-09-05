@@ -150,7 +150,7 @@ static void zynqmp_apu_reset_enter(Object *obj, ResetType type)
     s->cpu_in_wfi = 0;
 }
 
-static void zynqmp_apu_reset_hold(Object *obj)
+static void zynqmp_apu_reset_hold(Object *obj, ResetType type)
 {
     XlnxZynqMPAPUCtrl *s = XLNX_ZYNQMP_APU_CTRL(obj);
 
@@ -224,7 +224,7 @@ static const VMStateDescription vmstate_zynqmp_apu = {
     }
 };
 
-static void zynqmp_apu_class_init(ObjectClass *klass, void *data)
+static void zynqmp_apu_class_init(ObjectClass *klass, const void *data)
 {
     ResettableClass *rc = RESETTABLE_CLASS(klass);
     DeviceClass *dc = DEVICE_CLASS(klass);

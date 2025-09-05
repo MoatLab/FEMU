@@ -11,7 +11,7 @@
  */
 
 #include "qemu/osdep.h"
-#include "sysemu/rng.h"
+#include "system/rng.h"
 #include "chardev/char-fe.h"
 #include "qapi/error.h"
 #include "qapi/qmp/qerror.h"
@@ -143,7 +143,7 @@ static void rng_egd_finalize(Object *obj)
     g_free(s->chr_name);
 }
 
-static void rng_egd_class_init(ObjectClass *klass, void *data)
+static void rng_egd_class_init(ObjectClass *klass, const void *data)
 {
     RngBackendClass *rbc = RNG_BACKEND_CLASS(klass);
 

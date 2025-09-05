@@ -1,0 +1,69 @@
+name: Code Coverage
+
+on:
+  schedule:
+    - cron:  '00 8 * * *'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build - Linux
+        run: |
+          sudo apt-get update
+          sudo apt-get install lcov
+          mkdir build
+          cd build
+          cmake -E env CFLAGS="-DLIBSPDM_FIPS_MODE=1" cmake -DARCH=x64 -DTOOLCHAIN=GCC -DTARGET=Debug -DCRYPTO=mbedtls -DGCOV=ON ..
+          make -j`nproc`
+          make copy_sample_key
+      - name: Test Requester
+        run: |
+          cd build/bin
+          ./test_spdm_requester
+      - name: Test Responder
+        run: |
+          cd build/bin
+          ./test_spdm_responder
+      - name: Test Common
+        run: |
+          cd build/bin
+          ./test_spdm_common
+      - name: Test Cryptography
+        run: |
+          cd build/bin
+          ./test_spdm_crypt
+      - name: Test FIPS
+        run: |
+          cd build/bin
+          ./test_spdm_fips
+      - name: Generate Coverage
+        env:
+          CI_COMMIT_MESSAGE: Publish code coverage.
+          CI_COMMIT_AUTHOR: Continuous Integration
+        run: |
+          mkdir /tmp/coverage_log
+          sudo sed -i 's/#geninfo_gcov_all_blocks = 1/geninfo_gcov_all_blocks = 1/g' /etc/lcovrc
+          sudo sed -i 's/#genhtml_function_coverage = 1/genhtml_function_coverage = 1/g' /etc/lcovrc
+          sudo sed -i 's/#genhtml_branch_coverage = 1/genhtml_branch_coverage = 1/g' /etc/lcovrc
+          sudo sed -i 's/lcov_branch_coverage = 0/lcov_branch_coverage = 1/g' /etc/lcovrc
+          cat /etc/lcovrc
+          lcov --capture --directory ./build --output-file coverage.info
+          genhtml coverage.info --output-directory /tmp/coverage_log
+          git fetch origin
+          git checkout github_pages
+          rm -rf ./coverage_log
+          mv /tmp/coverage_log ./
+          git config --global user.name "${{ env.CI_COMMIT_AUTHOR }}"
+          git config --global user.email "void@void.net"
+          git add -f coverage_log/\*
+          git commit -a -m "${{ env.CI_COMMIT_MESSAGE }}"
+          git push --force origin github_pages

@@ -94,13 +94,27 @@ size_t strcount(const char *haystack, const char *needle);
 #if HAVE_TYPEOF
 /* Only a simple type can have 0 assigned, so test that. */
 #define STR_MAX_CHARS_TCHECK_(type_or_expr)		\
-	({ typeof(type_or_expr) x = 0; (void)x; 0; })
+	(sizeof(({ typeof(type_or_expr) x = 0; x; }))*0)
 #else
 #define STR_MAX_CHARS_TCHECK_(type_or_expr) 0
 #endif
 
+#include <ccan/str/str_debug.h>
+
 /* These checks force things out of line, hence they are under DEBUG. */
 #ifdef CCAN_STR_DEBUG
+#include <ccan/build_assert/build_assert.h>
+
+/* You can use a char if char is unsigned. */
+#if HAVE_BUILTIN_TYPES_COMPATIBLE_P && HAVE_TYPEOF
+#define str_check_arg_(i)						\
+	((i) + BUILD_ASSERT_OR_ZERO(!__builtin_types_compatible_p(typeof(i), \
+								  char)	\
+				    || (char)255 > 0))
+#else
+#define str_check_arg_(i) (i)
+#endif
+
 #if HAVE_TYPEOF
 /* With GNU magic, we can make const-respecting standard string functions. */
 #undef strstr

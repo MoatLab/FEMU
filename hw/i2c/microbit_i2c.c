@@ -105,12 +105,12 @@ static void microbit_i2c_realize(DeviceState *dev, Error **errp)
     sysbus_init_mmio(sbd, &s->iomem);
 }
 
-static void microbit_i2c_class_init(ObjectClass *klass, void *data)
+static void microbit_i2c_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->vmsd = &microbit_i2c_vmstate;
-    dc->reset = microbit_i2c_reset;
+    device_class_set_legacy_reset(dc, microbit_i2c_reset);
     dc->realize = microbit_i2c_realize;
     dc->desc = "Microbit I2C controller";
 }

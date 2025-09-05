@@ -361,15 +361,77 @@ bool ais_needed(void *opaque)
     return s->ais_supported;
 }
 
+static bool ais_needed_v(void *opaque, int version_id)
+{
+    return ais_needed(opaque);
+}
+
+static bool qemu_s390_flic_full_state_needed(void *opaque)
+{
+    QEMUS390FLICState *s = opaque;
+
+    return s->migrate_all_state;
+}
+
+static bool qemu_s390_flic_state_needed(void *opaque)
+{
+    return ais_needed(opaque) || qemu_s390_flic_full_state_needed(opaque);
+}
+
+static const VMStateDescription vmstate_qemu_s390_flic_io = {
+     .name = "qemu-s390-flic-io",
+     .version_id = 1,
+     .minimum_version_id = 1,
+     .fields = (const VMStateField[]) {
+         VMSTATE_UINT16(id, QEMUS390FlicIO),
+         VMSTATE_UINT16(nr, QEMUS390FlicIO),
+         VMSTATE_UINT32(parm, QEMUS390FlicIO),
+         VMSTATE_UINT32(word, QEMUS390FlicIO),
+         VMSTATE_END_OF_LIST()
+     },
+};
+
+static const VMStateDescription vmstate_qemu_s390_flic_full = {
+    .name = "qemu-s390-flic-full",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = qemu_s390_flic_full_state_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(pending, QEMUS390FLICState),
+        VMSTATE_UINT32(service_param, QEMUS390FLICState),
+        VMSTATE_QLIST_V(io[0], QEMUS390FLICState, 1,
+                        vmstate_qemu_s390_flic_io, QEMUS390FlicIO, next),
+        VMSTATE_QLIST_V(io[1], QEMUS390FLICState, 1,
+                        vmstate_qemu_s390_flic_io, QEMUS390FlicIO, next),
+        VMSTATE_QLIST_V(io[2], QEMUS390FLICState, 1,
+                        vmstate_qemu_s390_flic_io, QEMUS390FlicIO, next),
+        VMSTATE_QLIST_V(io[3], QEMUS390FLICState, 1,
+                        vmstate_qemu_s390_flic_io, QEMUS390FlicIO, next),
+        VMSTATE_QLIST_V(io[4], QEMUS390FLICState, 1,
+                        vmstate_qemu_s390_flic_io, QEMUS390FlicIO, next),
+        VMSTATE_QLIST_V(io[5], QEMUS390FLICState, 1,
+                        vmstate_qemu_s390_flic_io, QEMUS390FlicIO, next),
+        VMSTATE_QLIST_V(io[6], QEMUS390FLICState, 1,
+                        vmstate_qemu_s390_flic_io, QEMUS390FlicIO, next),
+        VMSTATE_QLIST_V(io[7], QEMUS390FLICState, 1,
+                        vmstate_qemu_s390_flic_io, QEMUS390FlicIO, next),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static const VMStateDescription qemu_s390_flic_vmstate = {
     .name = "qemu-s390-flic",
     .version_id = 1,
     .minimum_version_id = 1,
-    .needed = ais_needed,
+    .needed = qemu_s390_flic_state_needed,
     .fields = (const VMStateField[]) {
-        VMSTATE_UINT8(simm, QEMUS390FLICState),
-        VMSTATE_UINT8(nimm, QEMUS390FLICState),
+        VMSTATE_UINT8_TEST(simm, QEMUS390FLICState, ais_needed_v),
+        VMSTATE_UINT8_TEST(nimm, QEMUS390FLICState, ais_needed_v),
         VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_qemu_s390_flic_full,
+        NULL
     }
 };
 
@@ -383,12 +445,18 @@ static void qemu_s390_flic_instance_init(Object *obj)
     }
 }
 
-static void qemu_s390_flic_class_init(ObjectClass *oc, void *data)
+static const Property qemu_s390_flic_properties[] = {
+    DEFINE_PROP_BOOL("migrate-all-state", QEMUS390FLICState,
+                     migrate_all_state, true),
+};
+
+static void qemu_s390_flic_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
     S390FLICStateClass *fsc = S390_FLIC_COMMON_CLASS(oc);
 
-    dc->reset = qemu_s390_flic_reset;
+    device_class_set_props(dc, qemu_s390_flic_properties);
+    device_class_set_legacy_reset(dc, qemu_s390_flic_reset);
     dc->vmsd = &qemu_s390_flic_vmstate;
     fsc->register_io_adapter = qemu_s390_register_io_adapter;
     fsc->io_adapter_map = qemu_s390_io_adapter_map;
@@ -402,31 +470,17 @@ static void qemu_s390_flic_class_init(ObjectClass *oc, void *data)
     fsc->inject_crw_mchk = qemu_s390_inject_crw_mchk;
 }
 
-static Property s390_flic_common_properties[] = {
-    DEFINE_PROP_UINT32("adapter_routes_max_batch", S390FLICState,
-                       adapter_routes_max_batch, ADAPTER_ROUTES_MAX_GSI),
-    DEFINE_PROP_END_OF_LIST(),
-};
-
 static void s390_flic_common_realize(DeviceState *dev, Error **errp)
 {
     S390FLICState *fs = S390_FLIC_COMMON(dev);
-    uint32_t max_batch = fs->adapter_routes_max_batch;
-
-    if (max_batch > ADAPTER_ROUTES_MAX_GSI) {
-        error_setg(errp, "flic property adapter_routes_max_batch too big"
-                   " (%d > %d)", max_batch, ADAPTER_ROUTES_MAX_GSI);
-        return;
-    }
 
     fs->ais_supported = s390_has_feat(S390_FEAT_ADAPTER_INT_SUPPRESSION);
 }
 
-static void s390_flic_class_init(ObjectClass *oc, void *data)
+static void s390_flic_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
 
-    device_class_set_props(dc, s390_flic_common_properties);
     dc->realize = s390_flic_common_realize;
 }
 
@@ -455,16 +509,10 @@ static void qemu_s390_flic_register_types(void)
 
 type_init(qemu_s390_flic_register_types)
 
-static bool adapter_info_so_needed(void *opaque)
-{
-    return css_migration_enabled();
-}
-
 const VMStateDescription vmstate_adapter_info_so = {
     .name = "s390_adapter_info/summary_offset",
     .version_id = 1,
     .minimum_version_id = 1,
-    .needed = adapter_info_so_needed,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(summary_offset, AdapterInfo),
         VMSTATE_END_OF_LIST()

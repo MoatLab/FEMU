@@ -3,7 +3,9 @@
 #
 
 ##
-# = QMP monitor control
+# *******************
+# QMP monitor control
+# *******************
 ##
 
 ##
@@ -11,25 +13,25 @@
 #
 # Enable QMP capabilities.
 #
-# @enable: An optional list of QMPCapability values to enable.  The
+# @enable: An optional list of `QMPCapability` values to enable.  The
 #     client must not enable any capability that is not mentioned in
 #     the QMP greeting message.  If the field is not provided, it
 #     means no QMP capabilities will be enabled.  (since 2.12)
 #
-# Example:
+# .. qmp-example::
 #
 #     -> { "execute": "qmp_capabilities",
 #          "arguments": { "enable": [ "oob" ] } }
 #     <- { "return": {} }
 #
-# Notes: This command is valid exactly when first connecting: it must
-#     be issued before any other command will be accepted, and will
-#     fail once the monitor is accepting other commands.  (see qemu
-#     docs/interop/qmp-spec.rst)
+# .. note:: This command is valid exactly when first connecting: it
+#    must be issued before any other command will be accepted, and
+#    will fail once the monitor is accepting other commands.  (see
+#    :doc:`/interop/qmp-spec`)
 #
-#     The QMP client needs to explicitly enable QMP capabilities,
-#     otherwise all the QMP capabilities will be turned off by
-#     default.
+# .. note:: The QMP client needs to explicitly enable QMP
+#    capabilities, otherwise all the QMP capabilities will be turned
+#    off by default.
 #
 # Since: 0.13
 ##
@@ -91,14 +93,13 @@
 ##
 # @query-version:
 #
-# Returns the current version of QEMU.
+# Return the current version of QEMU.
 #
-# Returns: A @VersionInfo object describing the current version of
-#     QEMU.
+# Returns: An object describing the current version of QEMU.
 #
 # Since: 0.14
 #
-# Example:
+# .. qmp-example::
 #
 #     -> { "execute": "query-version" }
 #     <- {
@@ -131,11 +132,11 @@
 #
 # Return a list of supported QMP commands by this server
 #
-# Returns: A list of @CommandInfo for all supported commands
+# Returns: A list of all supported commands
 #
 # Since: 0.14
 #
-# Example:
+# .. qmp-example::
 #
 #     -> { "execute": "query-commands" }
 #     <- {
@@ -145,12 +146,12 @@
 #             },
 #             {
 #                "name":"system_powerdown"
-#             }
+#             },
+#             ...
 #          ]
 #        }
 #
-# Note: This example has been shortened as the real response is too
-#     long.
+# This example has been shortened as the real response is too long.
 ##
 { 'command': 'query-commands', 'returns': ['CommandInfo'],
   'allow-preconfig': true }
@@ -158,14 +159,15 @@
 ##
 # @quit:
 #
-# This command will cause the QEMU process to exit gracefully.  While
-# every attempt is made to send the QMP response before terminating,
-# this is not guaranteed.  When using this interface, a premature EOF
-# would not be unexpected.
+# Request graceful QEMU process termination.
+#
+# While every attempt is made to send the QMP response before
+# terminating, this is not guaranteed.  When using this interface, a
+# premature EOF would not be unexpected.
 #
 # Since: 0.14
 #
-# Example:
+# .. qmp-example::
 #
 #     -> { "execute": "quit" }
 #     <- { "return": {} }

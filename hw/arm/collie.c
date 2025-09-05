@@ -16,7 +16,7 @@
 #include "strongarm.h"
 #include "hw/arm/boot.h"
 #include "hw/block/flash.h"
-#include "exec/address-spaces.h"
+#include "system/address-spaces.h"
 #include "qom/object.h"
 #include "qemu/error-report.h"
 
@@ -69,7 +69,7 @@ static void collie_init(MachineState *machine)
     arm_load_kernel(cms->sa1110->cpu, machine, &collie_binfo);
 }
 
-static void collie_machine_class_init(ObjectClass *oc, void *data)
+static void collie_machine_class_init(ObjectClass *oc, const void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
 

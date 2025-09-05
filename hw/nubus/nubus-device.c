@@ -35,6 +35,13 @@ static void nubus_device_realize(DeviceState *dev, Error **errp)
     uint8_t *rom_ptr;
     int ret;
 
+    if (nd->slot < 0 || nd->slot >= NUBUS_SLOT_NB) {
+        error_setg(errp,
+                   "'slot' value %d out of range (must be between 0 and %d)",
+                   nd->slot, NUBUS_SLOT_NB - 1);
+        return;
+    }
+
     /* Super */
     slot_offset = nd->slot * NUBUS_SUPER_SLOT_SIZE;
 
@@ -100,13 +107,12 @@ static void nubus_device_realize(DeviceState *dev, Error **errp)
     }
 }
 
-static Property nubus_device_properties[] = {
+static const Property nubus_device_properties[] = {
     DEFINE_PROP_INT32("slot", NubusDevice, slot, -1),
     DEFINE_PROP_STRING("romfile", NubusDevice, romfile),
-    DEFINE_PROP_END_OF_LIST()
 };
 
-static void nubus_device_class_init(ObjectClass *oc, void *data)
+static void nubus_device_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
 

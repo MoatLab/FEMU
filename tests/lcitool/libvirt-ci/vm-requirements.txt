@@ -6,5 +6,4 @@ libvirt-python
 paramiko
 passlib
 PyGObject
-requests
 tqdm

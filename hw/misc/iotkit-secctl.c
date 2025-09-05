@@ -814,17 +814,16 @@ static const VMStateDescription iotkit_secctl_vmstate = {
     },
 };
 
-static Property iotkit_secctl_props[] = {
+static const Property iotkit_secctl_props[] = {
     DEFINE_PROP_UINT32("sse-version", IoTKitSecCtl, sse_version, 0),
-    DEFINE_PROP_END_OF_LIST()
 };
 
-static void iotkit_secctl_class_init(ObjectClass *klass, void *data)
+static void iotkit_secctl_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->vmsd = &iotkit_secctl_vmstate;
-    dc->reset = iotkit_secctl_reset;
+    device_class_set_legacy_reset(dc, iotkit_secctl_reset);
     dc->realize = iotkit_secctl_realize;
     device_class_set_props(dc, iotkit_secctl_props);
 }

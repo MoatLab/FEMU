@@ -64,81 +64,87 @@ static inline int vgahw_setup(void) {
     return stdvga_setup();
 }
 
-static inline int vgahw_get_window(struct vgamode_s *vmode_g, int window) {
+static inline int vgahw_get_window(struct vgamode_s *curmode_g, int window) {
     if (CONFIG_VGA_CIRRUS)
-        return clext_get_window(vmode_g, window);
+        return clext_get_window(curmode_g, window);
     if (CONFIG_VGA_BOCHS)
-        return bochsvga_get_window(vmode_g, window);
+        return bochsvga_get_window(curmode_g, window);
     if (CONFIG_VGA_EMULATE_TEXT)
-        return cbvga_get_window(vmode_g, window);
-    return stdvga_get_window(vmode_g, window);
+        return cbvga_get_window(curmode_g, window);
+    return stdvga_get_window(curmode_g, window);
 }
 
-static inline int vgahw_set_window(struct vgamode_s *vmode_g, int window
+static inline int vgahw_set_window(struct vgamode_s *curmode_g, int window
                                    , int val) {
     if (CONFIG_VGA_CIRRUS)
-        return clext_set_window(vmode_g, window, val);
+        return clext_set_window(curmode_g, window, val);
     if (CONFIG_VGA_BOCHS)
-        return bochsvga_set_window(vmode_g, window, val);
+        return bochsvga_set_window(curmode_g, window, val);
     if (CONFIG_VGA_EMULATE_TEXT)
-        return cbvga_set_window(vmode_g, window, val);
-    return stdvga_set_window(vmode_g, window, val);
+        return cbvga_set_window(curmode_g, window, val);
+    return stdvga_set_window(curmode_g, window, val);
 }
 
-static inline int vgahw_get_linelength(struct vgamode_s *vmode_g) {
+static inline int vgahw_get_linelength(struct vgamode_s *curmode_g) {
     if (CONFIG_VGA_CIRRUS)
-        return clext_get_linelength(vmode_g);
+        return clext_get_linelength(curmode_g);
     if (CONFIG_VGA_BOCHS)
-        return bochsvga_get_linelength(vmode_g);
+        return bochsvga_get_linelength(curmode_g);
     if (CONFIG_VGA_EMULATE_TEXT)
-        return cbvga_get_linelength(vmode_g);
-    return stdvga_get_linelength(vmode_g);
+        return cbvga_get_linelength(curmode_g);
+    return stdvga_get_linelength(curmode_g);
 }
 
-static inline int vgahw_set_linelength(struct vgamode_s *vmode_g, int val) {
+static inline int vgahw_minimum_linelength(struct vgamode_s *vmode_g) {
+    if (CONFIG_VGA_EMULATE_TEXT)
+        return cbvga_minimum_linelength(vmode_g);
+    return stdvga_minimum_linelength(vmode_g);
+}
+
+static inline int vgahw_set_linelength(struct vgamode_s *curmode_g, int val) {
     if (CONFIG_VGA_CIRRUS)
-        return clext_set_linelength(vmode_g, val);
+        return clext_set_linelength(curmode_g, val);
     if (CONFIG_VGA_BOCHS)
-        return bochsvga_set_linelength(vmode_g, val);
+        return bochsvga_set_linelength(curmode_g, val);
     if (CONFIG_VGA_EMULATE_TEXT)
-        return cbvga_set_linelength(vmode_g, val);
-    return stdvga_set_linelength(vmode_g, val);
+        return cbvga_set_linelength(curmode_g, val);
+    return stdvga_set_linelength(curmode_g, val);
 }
 
-static inline int vgahw_get_displaystart(struct vgamode_s *vmode_g) {
+static inline int vgahw_get_displaystart(struct vgamode_s *curmode_g) {
     if (CONFIG_VGA_CIRRUS)
-        return clext_get_displaystart(vmode_g);
+        return clext_get_displaystart(curmode_g);
     if (CONFIG_VGA_BOCHS)
-        return bochsvga_get_displaystart(vmode_g);
+        return bochsvga_get_displaystart(curmode_g);
     if (CONFIG_VGA_EMULATE_TEXT)
-        return cbvga_get_displaystart(vmode_g);
-    return stdvga_get_displaystart(vmode_g);
+        return cbvga_get_displaystart(curmode_g);
+    return stdvga_get_displaystart(curmode_g);
 }
 
-static inline int vgahw_set_displaystart(struct vgamode_s *vmode_g, int val) {
+static inline int vgahw_set_displaystart(struct vgamode_s *curmode_g, int val) {
     if (CONFIG_VGA_CIRRUS)
-        return clext_set_displaystart(vmode_g, val);
+        return clext_set_displaystart(curmode_g, val);
     if (CONFIG_VGA_BOCHS)
-        return bochsvga_set_displaystart(vmode_g, val);
+        return bochsvga_set_displaystart(curmode_g, val);
     if (CONFIG_VGA_EMULATE_TEXT)
-        return cbvga_set_displaystart(vmode_g, val);
-    return stdvga_set_displaystart(vmode_g, val);
+        return cbvga_set_displaystart(curmode_g, val);
+    return stdvga_set_displaystart(curmode_g, val);
 }
 
-static inline int vgahw_get_dacformat(struct vgamode_s *vmode_g) {
+static inline int vgahw_get_dacformat(struct vgamode_s *curmode_g) {
     if (CONFIG_VGA_BOCHS)
-        return bochsvga_get_dacformat(vmode_g);
+        return bochsvga_get_dacformat(curmode_g);
     if (CONFIG_VGA_EMULATE_TEXT)
-        return cbvga_get_dacformat(vmode_g);
-    return stdvga_get_dacformat(vmode_g);
+        return cbvga_get_dacformat(curmode_g);
+    return stdvga_get_dacformat(curmode_g);
 }
 
-static inline int vgahw_set_dacformat(struct vgamode_s *vmode_g, int val) {
+static inline int vgahw_set_dacformat(struct vgamode_s *curmode_g, int val) {
     if (CONFIG_VGA_BOCHS)
-        return bochsvga_set_dacformat(vmode_g, val);
+        return bochsvga_set_dacformat(curmode_g, val);
     if (CONFIG_VGA_EMULATE_TEXT)
-        return cbvga_set_dacformat(vmode_g, val);
-    return stdvga_set_dacformat(vmode_g, val);
+        return cbvga_set_dacformat(curmode_g, val);
+    return stdvga_set_dacformat(curmode_g, val);
 }
 
 static inline int vgahw_save_restore(int cmd, u16 seg, void *data) {
@@ -149,12 +155,6 @@ static inline int vgahw_save_restore(int cmd, u16 seg, void *data) {
     if (CONFIG_VGA_EMULATE_TEXT)
         return cbvga_save_restore(cmd, seg, data);
     return stdvga_save_restore(cmd, seg, data);
-}
-
-static inline int vgahw_get_linesize(struct vgamode_s *vmode_g) {
-    if (CONFIG_VGA_EMULATE_TEXT)
-        return cbvga_get_linesize(vmode_g);
-    return stdvga_get_linesize(vmode_g);
 }
 
 #endif // vgahw.h

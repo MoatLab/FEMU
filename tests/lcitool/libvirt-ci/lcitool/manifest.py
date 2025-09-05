@@ -119,7 +119,7 @@ class Manifest:
                 if "arch" not in jobinfo:
                     raise ValueError(f"target {target} job {idx} missing arch")
                 jobinfo.setdefault("enabled", True)
-                jobinfo.setdefault("allow-failure", False)
+                jobinfo.setdefault("allow-failure", not facts["os"].get("stable", True))
                 jobinfo.setdefault("artifacts", None)
                 jobinfo.setdefault("variables", {})
                 jobinfo.setdefault("suffix", "")

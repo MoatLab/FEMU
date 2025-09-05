@@ -121,12 +121,12 @@ static const VMStateDescription mchp_pfsoc_mmuart_vmstate = {
     }
 };
 
-static void mchp_pfsoc_mmuart_class_init(ObjectClass *oc, void *data)
+static void mchp_pfsoc_mmuart_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
 
     dc->realize = mchp_pfsoc_mmuart_realize;
-    dc->reset = mchp_pfsoc_mmuart_reset;
+    device_class_set_legacy_reset(dc, mchp_pfsoc_mmuart_reset);
     dc->vmsd = &mchp_pfsoc_mmuart_vmstate;
     set_bit(DEVICE_CATEGORY_INPUT, dc->categories);
 }

@@ -28,7 +28,7 @@
 #include <poll.h>
 #include <math.h>
 #include <arpa/inet.h>
-#include "sysemu/sysemu.h"
+#include "system/system.h"
 #include "qemu/config-file.h"
 #include "qemu/error-report.h"
 #include "qemu/bitops.h"
@@ -41,11 +41,11 @@
 #include "qemu/module.h"
 #include "qemu/option.h"
 #include "qemu/uuid.h"
-#include "sysemu/replay.h"
+#include "system/replay.h"
 #include "qapi/error.h"
 #include "qapi/qapi-commands-machine.h"
-#include "qapi/qmp/qdict.h"
-#include "qapi/qmp/qstring.h"
+#include "qobject/qdict.h"
+#include "qobject/qstring.h"
 #include "crypto/secret.h"
 #include "scsi/utils.h"
 #include "trace.h"
@@ -694,9 +694,9 @@ out_unlock:
 
 
 static int coroutine_fn iscsi_co_block_status(BlockDriverState *bs,
-                                              bool want_zero, int64_t offset,
-                                              int64_t bytes, int64_t *pnum,
-                                              int64_t *map,
+                                              unsigned int mode,
+                                              int64_t offset, int64_t bytes,
+                                              int64_t *pnum, int64_t *map,
                                               BlockDriverState **file)
 {
     IscsiLun *iscsilun = bs->opaque;
@@ -2429,7 +2429,7 @@ static BlockDriver bdrv_iscsi = {
 
     .instance_size          = sizeof(IscsiLun),
     .bdrv_parse_filename    = iscsi_parse_filename,
-    .bdrv_file_open         = iscsi_open,
+    .bdrv_open              = iscsi_open,
     .bdrv_close             = iscsi_close,
     .bdrv_co_create_opts    = bdrv_co_create_opts_simple,
     .create_opts            = &bdrv_create_opts_simple,
@@ -2468,7 +2468,7 @@ static BlockDriver bdrv_iser = {
 
     .instance_size          = sizeof(IscsiLun),
     .bdrv_parse_filename    = iscsi_parse_filename,
-    .bdrv_file_open         = iscsi_open,
+    .bdrv_open              = iscsi_open,
     .bdrv_close             = iscsi_close,
     .bdrv_co_create_opts    = bdrv_co_create_opts_simple,
     .create_opts            = &bdrv_create_opts_simple,

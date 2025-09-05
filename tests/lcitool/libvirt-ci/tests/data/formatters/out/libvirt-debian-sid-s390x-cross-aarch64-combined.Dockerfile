@@ -8,6 +8,7 @@ RUN export DEBIAN_FRONTEND=noninteractive && \
                       augeas-lenses \
                       augeas-tools \
                       bash-completion \
+                      black \
                       ca-certificates \
                       ccache \
                       codespell \
@@ -22,7 +23,6 @@ RUN export DEBIAN_FRONTEND=noninteractive && \
                       iproute2 \
                       iptables \
                       kmod \
-                      libc-dev-bin \
                       libnbd-dev \
                       libxml2-utils \
                       locales \
@@ -35,17 +35,18 @@ RUN export DEBIAN_FRONTEND=noninteractive && \
                       open-iscsi \
                       perl-base \
                       pkgconf \
-                      policykit-1 \
+                      polkitd \
                       python3 \
                       python3-docutils \
+                      python3-pytest \
                       qemu-utils \
-                      scrub \
                       sed \
                       xsltproc && \
     eatmydata apt-get autoremove -y && \
     eatmydata apt-get autoclean -y && \
     sed -Ei 's,^# (en_US\.UTF-8 .*)$,\1,' /etc/locale.gen && \
-    dpkg-reconfigure locales
+    dpkg-reconfigure locales && \
+    rm -f /usr/lib*/python3*/EXTERNALLY-MANAGED
 
 ENV CCACHE_WRAPPERSDIR "/usr/libexec/ccache-wrappers"
 ENV LANG "en_US.UTF-8"
@@ -85,7 +86,7 @@ RUN export DEBIAN_FRONTEND=noninteractive && \
                       libsanlock-dev:arm64 \
                       libsasl2-dev:arm64 \
                       libselinux1-dev:arm64 \
-                      libssh-gcrypt-dev:arm64 \
+                      libssh-dev:arm64 \
                       libssh2-1-dev:arm64 \
                       libtirpc-dev:arm64 \
                       libudev-dev:arm64 \

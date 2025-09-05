@@ -28,7 +28,7 @@
 #include "qapi/error.h"
 #include "hw/virtio/virtio-bus.h"
 #include "hw/virtio/virtio.h"
-#include "exec/address-spaces.h"
+#include "system/address-spaces.h"
 
 /* #define DEBUG_VIRTIO_BUS */
 
@@ -348,7 +348,7 @@ bool virtio_bus_device_iommu_enabled(VirtIODevice *vdev)
     return klass->iommu_enabled(qbus->parent);
 }
 
-static void virtio_bus_class_init(ObjectClass *klass, void *data)
+static void virtio_bus_class_init(ObjectClass *klass, const void *data)
 {
     BusClass *bus_class = BUS_CLASS(klass);
     bus_class->get_dev_path = virtio_bus_get_dev_path;

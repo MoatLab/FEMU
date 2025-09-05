@@ -3,7 +3,9 @@
 #
 
 ##
-# = Character devices
+# *****************
+# Character devices
+# *****************
 ##
 
 { 'include': 'sockets.json' }
@@ -21,8 +23,8 @@
 #     backend (e.g. with the chardev=... option) is in open or closed
 #     state (since 2.1)
 #
-# Notes: @filename is encoded using the QEMU command line character
-#     device encoding.  See the QEMU man page for details.
+# .. note:: @filename is encoded using the QEMU command line character
+#    device encoding.  See the QEMU man page for details.
 #
 # Since: 0.14
 ##
@@ -34,13 +36,11 @@
 ##
 # @query-chardev:
 #
-# Returns information about current character devices.
-#
-# Returns: a list of @ChardevInfo
+# Return information about current character devices.
 #
 # Since: 0.14
 #
-# Example:
+# .. qmp-example::
 #
 #     -> { "execute": "query-chardev" }
 #     <- {
@@ -80,13 +80,11 @@
 ##
 # @query-chardev-backends:
 #
-# Returns information about character device backends.
-#
-# Returns: a list of @ChardevBackendInfo
+# Return information about character device backends.
 #
 # Since: 2.0
 #
-# Example:
+# .. qmp-example::
 #
 #     -> { "execute": "query-chardev-backends" }
 #     <- {
@@ -141,7 +139,7 @@
 #
 # Since: 1.4
 #
-# Example:
+# .. qmp-example::
 #
 #     -> { "execute": "ringbuf-write",
 #          "arguments": { "device": "foo",
@@ -177,7 +175,7 @@
 #
 # Since: 1.4
 #
-# Example:
+# .. qmp-example::
 #
 #     -> { "execute": "ringbuf-read",
 #          "arguments": { "device": "foo",
@@ -258,7 +256,7 @@
 # @server: create server socket (default: true)
 #
 # @wait: wait for incoming connection on server sockets (default:
-#     false). Silently ignored with server: false.  This use is
+#     false).  Silently ignored with server: false.  This use is
 #     deprecated.
 #
 # @nodelay: set TCP_NODELAY socket option (default: false)
@@ -273,7 +271,19 @@
 #
 # @reconnect: For a client socket, if a socket is disconnected, then
 #     attempt a reconnect after the given number of seconds.  Setting
-#     this to zero disables this function.  (default: 0) (Since: 2.2)
+#     this to zero disables this function.  The use of this member is
+#     deprecated, use @reconnect-ms instead.  (default: 0) (Since: 2.2)
+#
+# @reconnect-ms: For a client socket, if a socket is disconnected,
+#     then attempt a reconnect after the given number of milliseconds.
+#     Setting this to zero disables this function.  This member is
+#     mutually exclusive with @reconnect.
+#     (default: 0) (Since: 9.2)
+#
+# Features:
+#
+# @deprecated: Member @reconnect is deprecated.  Use @reconnect-ms
+#     instead.
 #
 # Since: 1.4
 ##
@@ -287,7 +297,8 @@
             '*telnet': 'bool',
             '*tn3270': 'bool',
             '*websocket': 'bool',
-            '*reconnect': 'int' },
+            '*reconnect': { 'type': 'int', 'features': [ 'deprecated' ] },
+            '*reconnect-ms': 'int' },
   'base': 'ChardevCommon' }
 
 ##
@@ -320,12 +331,25 @@
   'base': 'ChardevCommon' }
 
 ##
+# @ChardevHub:
+#
+# Configuration info for hub chardevs.
+#
+# @chardevs: IDs to be added to this hub (maximum 4 devices).
+#
+# Since: 10.0
+##
+{ 'struct': 'ChardevHub',
+  'data': { 'chardevs': ['str'] },
+  'base': 'ChardevCommon' }
+
+##
 # @ChardevStdio:
 #
 # Configuration info for stdio chardevs.
 #
 # @signal: Allow signals (such as SIGINT triggered by ^C) be delivered
-#     to qemu.  Default: true.
+#     to QEMU.  Default: true.
 #
 # Since: 1.5
 ##
@@ -388,9 +412,9 @@
 #
 # @rows: console height, in chars
 #
-# Note: the options are only effective when the VNC or SDL graphical
-#     display backend is active.  They are ignored with the GTK,
-#     Spice, VNC and D-Bus display backends.
+# .. note:: The options are only effective when the VNC or SDL
+#    graphical display backend is active.  They are ignored with the
+#    GTK, Spice, VNC and D-Bus display backends.
 #
 # Since: 1.5
 ##
@@ -417,7 +441,7 @@
 ##
 # @ChardevQemuVDAgent:
 #
-# Configuration info for qemu vdagent implementation.
+# Configuration info for QEMU vdagent implementation.
 #
 # @mouse: enable/disable mouse, default is enabled.
 #
@@ -432,39 +456,67 @@
   'if': 'CONFIG_SPICE_PROTOCOL' }
 
 ##
+# @ChardevPty:
+#
+# Configuration info for pty implementation.
+#
+# @path: optional path to create a symbolic link that points to the
+#     allocated PTY
+#
+# Since: 9.2
+##
+{ 'struct': 'ChardevPty',
+  'data': { '*path': 'str' },
+  'base': 'ChardevCommon' }
+
+##
 # @ChardevBackendKind:
 #
-# @pipe: Since 1.5
+# @file: regular files
 #
-# @udp: Since 1.5
+# @serial: serial host device
 #
-# @mux: Since 1.5
+# @parallel: parallel host device
 #
-# @msmouse: Since 1.5
+# @pipe: pipes (since 1.5)
 #
-# @wctablet: Since 2.9
+# @socket: stream socket
 #
-# @braille: Since 1.5
+# @udp: datagram socket (since 1.5)
 #
-# @testdev: Since 2.2
+# @pty: pseudo-terminal
 #
-# @stdio: Since 1.5
+# @null: provides no input, throws away output
 #
-# @console: Since 1.5
+# @mux: (since 1.5)
 #
-# @spicevmc: Since 1.5
+# @hub: (since 10.0)
 #
-# @spiceport: Since 1.5
+# @msmouse: emulated Microsoft serial mouse (since 1.5)
 #
-# @qemu-vdagent: Since 6.1
+# @wctablet: emulated Wacom Penpartner serial tablet (since 2.9)
 #
-# @dbus: Since 7.0
+# @braille: Baum Braille device (since 1.5)
 #
-# @vc: v1.5
+# @testdev: device for test-suite control (since 2.2)
 #
-# @ringbuf: Since 1.6
+# @stdio: standard I/O (since 1.5)
 #
-# @memory: Since 1.5
+# @console: Windows console (since 1.5)
+#
+# @spicevmc: spice vm channel (since 1.5)
+#
+# @spiceport: Spice port channel (since 1.5)
+#
+# @qemu-vdagent: Spice vdagent (since 6.1)
+#
+# @dbus: D-Bus channel (since 7.0)
+#
+# @vc: virtual console (since 1.5)
+#
+# @ringbuf: memory ring buffer (since 1.6)
+#
+# @memory: synonym for @ringbuf (since 1.5)
 #
 # Features:
 #
@@ -482,6 +534,7 @@
             'pty',
             'null',
             'mux',
+            'hub',
             'msmouse',
             'wctablet',
             { 'name': 'braille', 'if': 'CONFIG_BRLAPI' },
@@ -557,6 +610,16 @@
   'data': { 'data': 'ChardevMux' } }
 
 ##
+# @ChardevHubWrapper:
+#
+# @data: Configuration info for hub chardevs
+#
+# Since: 10.0
+##
+{ 'struct': 'ChardevHubWrapper',
+  'data': { 'data': 'ChardevHub' } }
+
+##
 # @ChardevStdioWrapper:
 #
 # @data: Configuration info for stdio chardevs
@@ -591,7 +654,7 @@
 ##
 # @ChardevQemuVDAgentWrapper:
 #
-# @data: Configuration info for qemu vdagent implementation
+# @data: Configuration info for QEMU vdagent implementation
 #
 # Since: 6.1
 ##
@@ -630,6 +693,17 @@
 { 'struct': 'ChardevRingbufWrapper',
   'data': { 'data': 'ChardevRingbuf' } }
 
+
+##
+# @ChardevPtyWrapper:
+#
+# @data: Configuration info for pty chardevs
+#
+# Since: 9.2
+##
+{ 'struct': 'ChardevPtyWrapper',
+  'data': { 'data': 'ChardevPty' } }
+
 ##
 # @ChardevBackend:
 #
@@ -650,9 +724,10 @@
             'pipe': 'ChardevHostdevWrapper',
             'socket': 'ChardevSocketWrapper',
             'udp': 'ChardevUdpWrapper',
-            'pty': 'ChardevCommonWrapper',
+            'pty': 'ChardevPtyWrapper',
             'null': 'ChardevCommonWrapper',
             'mux': 'ChardevMuxWrapper',
+            'hub': 'ChardevHubWrapper',
             'msmouse': 'ChardevCommonWrapper',
             'wctablet': 'ChardevCommonWrapper',
             'braille': { 'type': 'ChardevCommonWrapper',
@@ -695,22 +770,24 @@
 #
 # @backend: backend type and parameters
 #
-# Returns: ChardevReturn.
-#
 # Since: 1.4
 #
-# Examples:
+# .. qmp-example::
 #
 #     -> { "execute" : "chardev-add",
 #          "arguments" : { "id" : "foo",
 #                          "backend" : { "type" : "null", "data" : {} } } }
 #     <- { "return": {} }
 #
+# .. qmp-example::
+#
 #     -> { "execute" : "chardev-add",
 #          "arguments" : { "id" : "bar",
 #                          "backend" : { "type" : "file",
 #                                        "data" : { "out" : "/tmp/bar.log" } } } }
 #     <- { "return": {} }
+#
+# .. qmp-example::
 #
 #     -> { "execute" : "chardev-add",
 #          "arguments" : { "id" : "baz",
@@ -731,16 +808,16 @@
 #
 # @backend: new backend type and parameters
 #
-# Returns: ChardevReturn.
-#
 # Since: 2.10
 #
-# Examples:
+# .. qmp-example::
 #
 #     -> { "execute" : "chardev-change",
 #          "arguments" : { "id" : "baz",
 #                          "backend" : { "type" : "pty", "data" : {} } } }
 #     <- { "return": { "pty" : "/dev/pty/42" } }
+#
+# .. qmp-example::
 #
 #     -> {"execute" : "chardev-change",
 #         "arguments" : {
@@ -772,7 +849,7 @@
 #
 # Since: 1.4
 #
-# Example:
+# .. qmp-example::
 #
 #     -> { "execute": "chardev-remove", "arguments": { "id" : "foo" } }
 #     <- { "return": {} }
@@ -789,7 +866,7 @@
 #
 # Since: 2.10
 #
-# Example:
+# .. qmp-example::
 #
 #     -> { "execute": "chardev-send-break", "arguments": { "id" : "foo" } }
 #     <- { "return": {} }
@@ -806,11 +883,11 @@
 #
 # @open: true if the guest has opened the virtio-serial port
 #
-# Note: This event is rate-limited.
+# .. note:: This event is rate-limited.
 #
 # Since: 2.1
 #
-# Example:
+# .. qmp-example::
 #
 #     <- { "event": "VSERPORT_CHANGE",
 #          "data": { "id": "channel0", "open": true },

@@ -223,6 +223,72 @@ int64_t lpc_read(enum OpalLPCAddressType addr_type __attribute__((unused)),
 	return 0;
 }
 
+int64_t lpc_fw_read(uint32_t off, void *buf, uint32_t len)
+{
+	int rc;
+
+	while (len) {
+		uint32_t chunk;
+		uint32_t dat;
+
+		/* XXX: make this read until it's aligned */
+		if (len > 3 && !(off & 3)) {
+			rc = lpc_read(OPAL_LPC_FW, off, &dat, 4);
+			if (!rc) {
+				/*
+				 * lpc_read swaps to CPU endian but it's not
+				 * really a 32-bit value, so convert back.
+				 */
+				*(__be32 *)buf = cpu_to_be32(dat);
+			}
+			chunk = 4;
+		} else {
+			rc = lpc_read(OPAL_LPC_FW, off, &dat, 1);
+			if (!rc)
+				*(uint8_t *)buf = dat;
+			chunk = 1;
+		}
+		if (rc)
+			return rc;
+
+		len -= chunk;
+		off += chunk;
+		buf += chunk;
+	}
+
+	return 0;
+}
+
+int64_t lpc_fw_write(uint32_t off, const void *buf, uint32_t len)
+{
+	int rc;
+
+	while (len) {
+		uint32_t chunk;
+
+		if (len > 3 && !(off & 3)) {
+			/* endian swap: see lpc_window_write */
+			uint32_t dat = be32_to_cpu(*(__be32 *)buf);
+
+			rc = lpc_write(OPAL_LPC_FW, off, dat, 4);
+			chunk = 4;
+		} else {
+			uint8_t dat = *(uint8_t *)buf;
+
+			rc = lpc_write(OPAL_LPC_FW, off, dat, 1);
+			chunk = 1;
+		}
+		if (rc)
+			return rc;
+
+		len -= chunk;
+		off += chunk;
+		buf += chunk;
+	}
+
+	return 0;
+}
+
 static bool lpc_read_success(const uint8_t *buf, size_t len)
 {
 	if (len < 64) {

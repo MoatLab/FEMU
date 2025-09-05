@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 ##
-##  Copyright(c) 2019-2023 Qualcomm Innovation Center, Inc. All Rights Reserved.
+##  Copyright(c) 2019-2024 Qualcomm Innovation Center, Inc. All Rights Reserved.
 ##
 ##  This program is free software; you can redistribute it and/or modify
 ##  it under the terms of the GNU General Public License as published by
@@ -108,32 +108,16 @@ def gen_def_tcg_func(f, tag, tagregs, tagimms):
 
 
 def main():
-    hex_common.read_semantics_file(sys.argv[1])
-    hex_common.read_attribs_file(sys.argv[2])
-    hex_common.read_overrides_file(sys.argv[3])
-    hex_common.read_overrides_file(sys.argv[4])
-    hex_common.calculate_attribs()
-    hex_common.init_registers()
-    ## Whether or not idef-parser is enabled is
-    ## determined by the number of arguments to
-    ## this script:
-    ##
-    ##   5 args. -> not enabled,
-    ##   6 args. -> idef-parser enabled.
-    ##
-    ## The 6:th arg. then holds a list of the successfully
-    ## parsed instructions.
-    is_idef_parser_enabled = len(sys.argv) > 6
-    if is_idef_parser_enabled:
-        hex_common.read_idef_parser_enabled_file(sys.argv[5])
+    args = hex_common.parse_common_args(
+        "Emit functions calling generated code implementing instruction semantics (helpers, idef-parser)"
+    )
     tagregs = hex_common.get_tagregs()
     tagimms = hex_common.get_tagimms()
 
-    output_file = sys.argv[-1]
-    with open(output_file, "w") as f:
+    with open(args.out, "w") as f:
         f.write("#ifndef HEXAGON_TCG_FUNCS_H\n")
         f.write("#define HEXAGON_TCG_FUNCS_H\n\n")
-        if is_idef_parser_enabled:
+        if args.idef_parser:
             f.write('#include "idef-generated-emitter.h.inc"\n\n')
 
         for tag in hex_common.tags:

@@ -15,7 +15,7 @@
 #include "timebase.h"
 #include <debug_descriptor.h>
 
-static int vprlog(int log_level, const char *fmt, va_list ap)
+int vprlog(int log_level, const char *fmt, va_list ap)
 {
 	int count;
 	char buffer[320];

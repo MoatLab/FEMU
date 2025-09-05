@@ -354,9 +354,8 @@ static void nrf51_nvm_reset(DeviceState *dev)
     memset(s->uicr_content, 0xFF, sizeof(s->uicr_content));
 }
 
-static Property nrf51_nvm_properties[] = {
+static const Property nrf51_nvm_properties[] = {
     DEFINE_PROP_UINT32("flash-size", NRF51NVMState, flash_size, 0x40000),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
 static const VMStateDescription vmstate_nvm = {
@@ -371,14 +370,14 @@ static const VMStateDescription vmstate_nvm = {
     }
 };
 
-static void nrf51_nvm_class_init(ObjectClass *klass, void *data)
+static void nrf51_nvm_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     device_class_set_props(dc, nrf51_nvm_properties);
     dc->vmsd = &vmstate_nvm;
     dc->realize = nrf51_nvm_realize;
-    dc->reset = nrf51_nvm_reset;
+    device_class_set_legacy_reset(dc, nrf51_nvm_reset);
 }
 
 static const TypeInfo nrf51_nvm_info = {

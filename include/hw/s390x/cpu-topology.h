@@ -13,7 +13,7 @@
 
 #include "qemu/queue.h"
 #include "hw/boards.h"
-#include "qapi/qapi-types-machine-target.h"
+#include "qapi/qapi-types-machine-s390x.h"
 
 #define S390_TOPOLOGY_CPU_IFL   0x03
 
@@ -37,7 +37,7 @@ typedef struct S390TopologyEntry {
 
 typedef struct S390Topology {
     uint8_t *cores_per_socket;
-    CpuS390Polarization polarization;
+    S390CpuPolarization polarization;
 } S390Topology;
 
 typedef QTAILQ_HEAD(, S390TopologyEntry) S390TopologyList;
@@ -57,7 +57,7 @@ static inline void s390_topology_setup_cpu(MachineState *ms,
 static inline void s390_topology_reset(void)
 {
     /* Unreachable, CPU topology not implemented for TCG */
-    assert(false);
+    g_assert_not_reached();
 }
 #endif
 

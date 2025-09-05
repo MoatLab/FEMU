@@ -15,6 +15,7 @@
 #include "hw/cpu/a15mpcore.h"
 #include "hw/arm/armv7m.h"
 #include "hw/intc/aspeed_vic.h"
+#include "hw/intc/aspeed_intc.h"
 #include "hw/misc/aspeed_scu.h"
 #include "hw/adc/aspeed_adc.h"
 #include "hw/misc/aspeed_sdmc.h"
@@ -26,6 +27,7 @@
 #include "hw/ssi/aspeed_smc.h"
 #include "hw/misc/aspeed_hace.h"
 #include "hw/misc/aspeed_sbc.h"
+#include "hw/misc/aspeed_sli.h"
 #include "hw/watchdog/wdt_aspeed.h"
 #include "hw/net/ftgmac100.h"
 #include "target/arm/cpu.h"
@@ -37,12 +39,13 @@
 #include "hw/misc/unimp.h"
 #include "hw/misc/aspeed_peci.h"
 #include "hw/fsi/aspeed_apb2opb.h"
-#include "hw/char/serial.h"
+#include "hw/char/serial-mm.h"
+#include "hw/intc/arm_gicv3.h"
 
-#define ASPEED_SPIS_NUM  2
-#define ASPEED_EHCIS_NUM 2
-#define ASPEED_WDTS_NUM  4
-#define ASPEED_CPUS_NUM  2
+#define ASPEED_SPIS_NUM  3
+#define ASPEED_EHCIS_NUM 4
+#define ASPEED_WDTS_NUM  8
+#define ASPEED_CPUS_NUM  4
 #define ASPEED_MACS_NUM  4
 #define ASPEED_UARTS_NUM 13
 #define ASPEED_JTAG_NUM  2
@@ -56,11 +59,14 @@ struct AspeedSoCState {
     MemoryRegion sram;
     MemoryRegion spi_boot_container;
     MemoryRegion spi_boot;
+    MemoryRegion vbootrom;
+    AddressSpace dram_as;
     AspeedRtcState rtc;
     AspeedTimerCtrlState timerctrl;
     AspeedI2CState i2c;
     AspeedI3CState i3c;
     AspeedSCUState scu;
+    AspeedSCUState scuio;
     AspeedHACEState hace;
     AspeedXDMAState xdma;
     AspeedADCState adc;
@@ -68,6 +74,8 @@ struct AspeedSoCState {
     AspeedSMCState spi[ASPEED_SPIS_NUM];
     EHCISysBusState ehci[ASPEED_EHCIS_NUM];
     AspeedSBCState sbc;
+    AspeedSLIState sli;
+    AspeedSLIState sliio;
     MemoryRegion secsram;
     UnimplementedDeviceState sbc_unimplemented;
     AspeedSDMCState sdmc;
@@ -83,6 +91,8 @@ struct AspeedSoCState {
     SerialMM uart[ASPEED_UARTS_NUM];
     Clock *sysclk;
     UnimplementedDeviceState iomem;
+    UnimplementedDeviceState iomem0;
+    UnimplementedDeviceState iomem1;
     UnimplementedDeviceState video;
     UnimplementedDeviceState emmc_boot_controller;
     UnimplementedDeviceState dpmcu;
@@ -90,6 +100,7 @@ struct AspeedSoCState {
     UnimplementedDeviceState espi;
     UnimplementedDeviceState udc;
     UnimplementedDeviceState sgpiom;
+    UnimplementedDeviceState ltpi;
     UnimplementedDeviceState jtag[ASPEED_JTAG_NUM];
     AspeedAPB2OPBState fsi[2];
 };
@@ -117,11 +128,47 @@ struct Aspeed2600SoCState {
 #define TYPE_ASPEED2600_SOC "aspeed2600-soc"
 OBJECT_DECLARE_SIMPLE_TYPE(Aspeed2600SoCState, ASPEED2600_SOC)
 
+struct Aspeed27x0SoCState {
+    AspeedSoCState parent;
+
+    ARMCPU cpu[ASPEED_CPUS_NUM];
+    AspeedINTCState intc[2];
+    GICv3State gic;
+    MemoryRegion dram_empty;
+};
+
+#define TYPE_ASPEED27X0_SOC "aspeed27x0-soc"
+OBJECT_DECLARE_SIMPLE_TYPE(Aspeed27x0SoCState, ASPEED27X0_SOC)
+
 struct Aspeed10x0SoCState {
     AspeedSoCState parent;
 
     ARMv7MState armv7m;
 };
+
+struct Aspeed27x0SSPSoCState {
+    AspeedSoCState parent;
+    AspeedINTCState intc[2];
+    UnimplementedDeviceState ipc[2];
+    UnimplementedDeviceState scuio;
+
+    ARMv7MState armv7m;
+};
+
+#define TYPE_ASPEED27X0SSP_SOC "aspeed27x0ssp-soc"
+OBJECT_DECLARE_SIMPLE_TYPE(Aspeed27x0SSPSoCState, ASPEED27X0SSP_SOC)
+
+struct Aspeed27x0TSPSoCState {
+    AspeedSoCState parent;
+    AspeedINTCState intc[2];
+    UnimplementedDeviceState ipc[2];
+    UnimplementedDeviceState scuio;
+
+    ARMv7MState armv7m;
+};
+
+#define TYPE_ASPEED27X0TSP_SOC "aspeed27x0tsp-soc"
+OBJECT_DECLARE_SIMPLE_TYPE(Aspeed27x0TSPSoCState, ASPEED27X0TSP_SOC)
 
 #define TYPE_ASPEED10X0_SOC "aspeed10x0-soc"
 OBJECT_DECLARE_SIMPLE_TYPE(Aspeed10x0SoCState, ASPEED10X0_SOC)
@@ -129,7 +176,6 @@ OBJECT_DECLARE_SIMPLE_TYPE(Aspeed10x0SoCState, ASPEED10X0_SOC)
 struct AspeedSoCClass {
     DeviceClass parent_class;
 
-    const char *name;
     /** valid_cpu_types: NULL terminated array of a single CPU type. */
     const char * const *valid_cpu_types;
     uint32_t silicon_rev;
@@ -145,13 +191,18 @@ struct AspeedSoCClass {
     const hwaddr *memmap;
     uint32_t num_cpus;
     qemu_irq (*get_irq)(AspeedSoCState *s, int dev);
+    bool (*boot_from_emmc)(AspeedSoCState *s);
 };
 
 const char *aspeed_soc_cpu_type(AspeedSoCClass *sc);
 
 enum {
+    ASPEED_DEV_VBOOTROM,
     ASPEED_DEV_SPI_BOOT,
     ASPEED_DEV_IOMEM,
+    ASPEED_DEV_IOMEM0,
+    ASPEED_DEV_IOMEM1,
+    ASPEED_DEV_LTPI,
     ASPEED_DEV_UART0,
     ASPEED_DEV_UART1,
     ASPEED_DEV_UART2,
@@ -168,11 +219,16 @@ enum {
     ASPEED_DEV_UART13,
     ASPEED_DEV_VUART,
     ASPEED_DEV_FMC,
+    ASPEED_DEV_SPI0,
     ASPEED_DEV_SPI1,
     ASPEED_DEV_SPI2,
     ASPEED_DEV_EHCI1,
     ASPEED_DEV_EHCI2,
+    ASPEED_DEV_EHCI3,
+    ASPEED_DEV_EHCI4,
     ASPEED_DEV_VIC,
+    ASPEED_DEV_INTC,
+    ASPEED_DEV_INTCIO,
     ASPEED_DEV_SDMC,
     ASPEED_DEV_SCU,
     ASPEED_DEV_ADC,
@@ -222,6 +278,13 @@ enum {
     ASPEED_DEV_JTAG1,
     ASPEED_DEV_FSI1,
     ASPEED_DEV_FSI2,
+    ASPEED_DEV_SCUIO,
+    ASPEED_DEV_SLI,
+    ASPEED_DEV_SLIIO,
+    ASPEED_GIC_DIST,
+    ASPEED_GIC_REDIST,
+    ASPEED_DEV_IPC0,
+    ASPEED_DEV_IPC1,
 };
 
 qemu_irq aspeed_soc_get_irq(AspeedSoCState *s, int dev);

@@ -443,7 +443,6 @@ static void pl061_write(void *opaque, hwaddr offset,
         return;
     }
     pl061_update(s);
-    return;
 }
 
 static void pl061_enter_reset(Object *obj, ResetType type)
@@ -484,7 +483,7 @@ static void pl061_enter_reset(Object *obj, ResetType type)
     s->amsel = 0;
 }
 
-static void pl061_hold_reset(Object *obj)
+static void pl061_hold_reset(Object *obj, ResetType type)
 {
     PL061State *s = PL061(obj);
     int i, level;
@@ -562,13 +561,12 @@ static void pl061_realize(DeviceState *dev, Error **errp)
     }
 }
 
-static Property pl061_props[] = {
+static const Property pl061_props[] = {
     DEFINE_PROP_UINT32("pullups", PL061State, pullups, 0xff),
     DEFINE_PROP_UINT32("pulldowns", PL061State, pulldowns, 0x0),
-    DEFINE_PROP_END_OF_LIST()
 };
 
-static void pl061_class_init(ObjectClass *klass, void *data)
+static void pl061_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     ResettableClass *rc = RESETTABLE_CLASS(klass);

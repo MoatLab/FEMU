@@ -1,7 +1,7 @@
 /** @file
   Module for clarifying the content of the smbios structure element information.
 
-  Copyright (c) 2005 - 2018, Intel Corporation. All rights reserved.<BR>
+  Copyright (c) 2005 - 2024, Intel Corporation. All rights reserved.<BR>
   Copyright (c) 1985 - 2022, American Megatrends International LLC.<BR>
   (C) Copyright 2014 Hewlett-Packard Development Company, L.P.<BR>
   (C) Copyright 2015-2019 Hewlett Packard Enterprise Development LP<BR>
@@ -520,6 +520,10 @@ SmbiosPrintStructure (
         ShellPrintEx (-1, -1, L"Thread Count 2: %u\n", Struct->Type4->ThreadCount2);
       }
 
+      if (AE_SMBIOS_VERSION (0x3, 0x6) && (Struct->Hdr->Length > 0x2E)) {
+        ShellPrintEx (-1, -1, L"Thread Enabled: %u\n", Struct->Type4->ThreadEnabled);
+      }
+
       break;
 
     //
@@ -897,6 +901,13 @@ SmbiosPrintStructure (
       if (AE_SMBIOS_VERSION (0x3, 0x3) && (Struct->Hdr->Length > 0x54)) {
         ShellPrintEx (-1, -1, L"Extended Speed: 0x%x\n", Struct->Type17->ExtendedSpeed);
         ShellPrintEx (-1, -1, L"Extended Configured Memory Speed: 0x%x\n", Struct->Type17->ExtendedConfiguredMemorySpeed);
+      }
+
+      if (AE_SMBIOS_VERSION (0x3, 0x7) && (Struct->Hdr->Length > 0x5C)) {
+        ShellPrintEx (-1, -1, L"PMIC0 Manufacturer ID: 0x%x\n", Struct->Type17->Pmic0ManufacturerID);
+        ShellPrintEx (-1, -1, L"PMIC0 Revision Number: 0x%x\n", Struct->Type17->Pmic0RevisionNumber);
+        ShellPrintEx (-1, -1, L"RCD Manufacturer ID: 0x%x\n", Struct->Type17->RcdManufacturerID);
+        ShellPrintEx (-1, -1, L"RCD Revision Number: 0x%x\n", Struct->Type17->RcdRevisionNumber);
       }
 
       break;
@@ -1478,7 +1489,7 @@ DisplayBiosCharacteristics (
   }
 
   if (BIT (Chara, 5) != 0) {
-    ShellPrintHiiEx (-1, -1, NULL, STRING_TOKEN (STR_SMBIOSVIEW_PRINTINFO_MSA_SUPPORTED), gShellDebug1HiiHandle);
+    ShellPrintHiiEx (-1, -1, NULL, STRING_TOKEN (STR_SMBIOSVIEW_PRINTINFO_MCA_SUPPORTED), gShellDebug1HiiHandle);
   }
 
   if (BIT (Chara, 6) != 0) {
@@ -1589,7 +1600,7 @@ DisplayBiosCharacteristics (
   // Just print the Reserved
   //
   ShellPrintHiiEx (-1, -1, NULL, STRING_TOKEN (STR_SMBIOSVIEW_PRINTINFO_BITS_32_47), gShellDebug1HiiHandle);
-  ShellPrintHiiEx (-1, -1, NULL, STRING_TOKEN (STR_SMBIOSVIEW_PRINTINFO_BITS_48_64), gShellDebug1HiiHandle);
+  ShellPrintHiiEx (-1, -1, NULL, STRING_TOKEN (STR_SMBIOSVIEW_PRINTINFO_BITS_48_63), gShellDebug1HiiHandle);
 }
 
 /**
@@ -2676,6 +2687,38 @@ DisplayProcessorFamily2 (
 
     case 0x271:
       Print (L"MultiCoreLoongson3D\n");
+      break;
+
+    case 0x300:
+      Print (L"IntelCore3\n");
+      break;
+
+    case 0x301:
+      Print (L"IntelCore5\n");
+      break;
+
+    case 0x302:
+      Print (L"IntelCore7\n");
+      break;
+
+    case 0x303:
+      Print (L"IntelCore9\n");
+      break;
+
+    case 0x304:
+      Print (L"IntelCoreUltra3\n");
+      break;
+
+    case 0x305:
+      Print (L"IntelCoreUltra5\n");
+      break;
+
+    case 0x306:
+      Print (L"IntelCoreUltra7\n");
+      break;
+
+    case 0x307:
+      Print (L"IntelCoreUltra9\n");
       break;
 
     default:

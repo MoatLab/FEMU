@@ -16,9 +16,9 @@
 #include "hw/misc/arm_integrator_debug.h"
 #include "hw/net/smc91c111.h"
 #include "net/net.h"
-#include "exec/address-spaces.h"
-#include "sysemu/runstate.h"
-#include "sysemu/sysemu.h"
+#include "system/address-spaces.h"
+#include "system/runstate.h"
+#include "system/system.h"
 #include "qemu/log.h"
 #include "qemu/error-report.h"
 #include "hw/char/pl011.h"
@@ -688,18 +688,18 @@ static void integratorcp_machine_init(MachineClass *mc)
     mc->ignore_memory_transaction_failures = true;
     mc->default_cpu_type = ARM_CPU_TYPE_NAME("arm926");
     mc->default_ram_id = "integrator.ram";
+    mc->auto_create_sdcard = true;
 
     machine_add_audiodev_property(mc);
 }
 
 DEFINE_MACHINE("integratorcp", integratorcp_machine_init)
 
-static Property core_properties[] = {
+static const Property core_properties[] = {
     DEFINE_PROP_UINT32("memsz", IntegratorCMState, memsz, 0),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void core_class_init(ObjectClass *klass, void *data)
+static void core_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
@@ -708,14 +708,14 @@ static void core_class_init(ObjectClass *klass, void *data)
     dc->vmsd = &vmstate_integratorcm;
 }
 
-static void icp_pic_class_init(ObjectClass *klass, void *data)
+static void icp_pic_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->vmsd = &vmstate_icp_pic;
 }
 
-static void icp_control_class_init(ObjectClass *klass, void *data)
+static void icp_control_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 

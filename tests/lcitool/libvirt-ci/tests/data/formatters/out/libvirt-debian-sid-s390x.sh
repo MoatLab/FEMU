@@ -6,6 +6,7 @@ function install_buildenv() {
             augeas-lenses \
             augeas-tools \
             bash-completion \
+            black \
             ca-certificates \
             ccache \
             clang \
@@ -27,7 +28,6 @@ function install_buildenv() {
             libattr1-dev \
             libaudit-dev \
             libblkid-dev \
-            libc-dev-bin \
             libc6-dev \
             libcap-ng-dev \
             libcurl4-gnutls-dev \
@@ -49,7 +49,7 @@ function install_buildenv() {
             libsanlock-dev \
             libsasl2-dev \
             libselinux1-dev \
-            libssh-gcrypt-dev \
+            libssh-dev \
             libssh2-1-dev \
             libtirpc-dev \
             libudev-dev \
@@ -66,17 +66,18 @@ function install_buildenv() {
             open-iscsi \
             perl-base \
             pkgconf \
-            policykit-1 \
+            polkitd \
             python3 \
             python3-docutils \
+            python3-pytest \
             qemu-utils \
-            scrub \
             sed \
             systemtap-sdt-dev \
             wireshark-dev \
             xsltproc
     sed -Ei 's,^# (en_US\.UTF-8 .*)$,\1,' /etc/locale.gen
     dpkg-reconfigure locales
+    rm -f /usr/lib*/python3*/EXTERNALLY-MANAGED
     dpkg-query --showformat '${Package}_${Version}_${Architecture}\n' --show > /packages.txt
     mkdir -p /usr/libexec/ccache-wrappers
     ln -s /usr/bin/ccache /usr/libexec/ccache-wrappers/cc

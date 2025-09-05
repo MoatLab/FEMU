@@ -25,49 +25,63 @@
  */
 static uint16_t qvirtio_readw(QVirtioDevice *d, QTestState *qts, uint64_t addr)
 {
-    uint16_t val = qtest_readw(qts, addr);
+    uint16_t val;
 
-    if (d->features & (1ull << VIRTIO_F_VERSION_1) && qtest_big_endian(qts)) {
-        val = bswap16(val);
+    if (d->features & (1ull << VIRTIO_F_VERSION_1)) {
+        qtest_memread(qts, addr, &val, sizeof(val));
+        val = le16_to_cpu(val);
+    } else {
+        val = qtest_readw(qts, addr);
     }
+
     return val;
 }
 
 static uint32_t qvirtio_readl(QVirtioDevice *d, QTestState *qts, uint64_t addr)
 {
-    uint32_t val = qtest_readl(qts, addr);
+    uint32_t val;
 
-    if (d->features & (1ull << VIRTIO_F_VERSION_1) && qtest_big_endian(qts)) {
-        val = bswap32(val);
+    if (d->features & (1ull << VIRTIO_F_VERSION_1)) {
+        qtest_memread(qts, addr, &val, sizeof(val));
+        val = le32_to_cpu(val);
+    } else {
+        val = qtest_readl(qts, addr);
     }
+
     return val;
 }
 
 static void qvirtio_writew(QVirtioDevice *d, QTestState *qts,
                            uint64_t addr, uint16_t val)
 {
-    if (d->features & (1ull << VIRTIO_F_VERSION_1) && qtest_big_endian(qts)) {
-        val = bswap16(val);
+    if (d->features & (1ull << VIRTIO_F_VERSION_1)) {
+        val = cpu_to_le16(val);
+        qtest_memwrite(qts, addr, &val, sizeof(val));
+    } else {
+        qtest_writew(qts, addr, val);
     }
-    qtest_writew(qts, addr, val);
 }
 
 static void qvirtio_writel(QVirtioDevice *d, QTestState *qts,
                            uint64_t addr, uint32_t val)
 {
-    if (d->features & (1ull << VIRTIO_F_VERSION_1) && qtest_big_endian(qts)) {
-        val = bswap32(val);
+    if (d->features & (1ull << VIRTIO_F_VERSION_1)) {
+        val = cpu_to_le32(val);
+        qtest_memwrite(qts, addr, &val, sizeof(val));
+    } else {
+        qtest_writel(qts, addr, val);
     }
-    qtest_writel(qts, addr, val);
 }
 
 static void qvirtio_writeq(QVirtioDevice *d, QTestState *qts,
                            uint64_t addr, uint64_t val)
 {
-    if (d->features & (1ull << VIRTIO_F_VERSION_1) && qtest_big_endian(qts)) {
-        val = bswap64(val);
+    if (d->features & (1ull << VIRTIO_F_VERSION_1)) {
+        val = cpu_to_le64(val);
+        qtest_memwrite(qts, addr, &val, sizeof(val));
+    } else {
+        qtest_writeq(qts, addr, val);
     }
-    qtest_writeq(qts, addr, val);
 }
 
 uint8_t qvirtio_config_readb(QVirtioDevice *d, uint64_t addr)
@@ -170,7 +184,6 @@ void qvirtio_wait_queue_isr(QTestState *qts, QVirtioDevice *d,
     gint64 start_time = g_get_monotonic_time();
 
     for (;;) {
-        qtest_clock_step(qts, 100);
         if (d->bus->get_queue_isr_status(d, vq)) {
             return;
         }
@@ -192,7 +205,6 @@ uint8_t qvirtio_wait_status_byte_no_isr(QTestState *qts, QVirtioDevice *d,
     uint8_t val;
 
     while ((val = qtest_readb(qts, addr)) == 0xff) {
-        qtest_clock_step(qts, 100);
         g_assert(!d->bus->get_queue_isr_status(d, vq));
         g_assert(g_get_monotonic_time() - start_time <= timeout_us);
     }
@@ -219,14 +231,12 @@ void qvirtio_wait_used_elem(QTestState *qts, QVirtioDevice *d,
     for (;;) {
         uint32_t got_desc_idx;
 
-        qtest_clock_step(qts, 100);
 
         if (d->bus->get_queue_isr_status(d, vq) &&
             qvirtqueue_get_buf(qts, vq, &got_desc_idx, len)) {
             g_assert_cmpint(got_desc_idx, ==, desc_idx);
             return;
         }
-
         g_assert(g_get_monotonic_time() - start_time <= timeout_us);
     }
 }

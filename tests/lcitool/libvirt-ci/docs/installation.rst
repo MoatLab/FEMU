@@ -22,7 +22,7 @@ or into a virtual environment
    # this will install only the very basic dependencies
    $ python3 -m venv <path_to_venv>
    $ source <path_to_venv>/bin/activate
-   $ pip install -r requirements
+   $ pip install -r requirements.txt
 
 More dependencies may be needed depending on your intended use case for
 lcitool, see below.

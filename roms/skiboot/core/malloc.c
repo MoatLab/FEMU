@@ -8,6 +8,8 @@
 
 #include <mem_region.h>
 #include <lock.h>
+#include <skiboot.h>
+#include <stack.h>
 #include <string.h>
 #include <mem_region-malloc.h>
 
@@ -29,8 +31,27 @@ void *__malloc(size_t bytes, const char *location)
 	return __memalign(DEFAULT_ALIGN, bytes, location);
 }
 
+static bool check_heap_ptr(const void *p)
+{
+	struct mem_region *region = &skiboot_heap;
+	unsigned long ptr = (unsigned long)p;
+
+	if (!ptr)
+		return true;
+
+	if (ptr < region->start || ptr > region->start + region->len) {
+		prerror("Trying to free() a pointer outside heap. Possibly local_alloc().\n");
+		backtrace();
+		return false;
+	}
+	return true;
+}
+
 void __free(void *p, const char *location)
 {
+	if (!check_heap_ptr(p))
+		return;
+
 	lock(&skiboot_heap.free_list_lock);
 	mem_free(&skiboot_heap, p, location);
 	unlock(&skiboot_heap.free_list_lock);
@@ -39,6 +60,9 @@ void __free(void *p, const char *location)
 void *__realloc(void *ptr, size_t size, const char *location)
 {
 	void *newptr;
+
+	if (!check_heap_ptr(ptr))
+		return NULL;
 
 	/* Two classic malloc corner cases. */
 	if (!size) {

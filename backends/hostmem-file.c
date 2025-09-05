@@ -15,7 +15,7 @@
 #include "qemu/error-report.h"
 #include "qemu/module.h"
 #include "qemu/madvise.h"
-#include "sysemu/hostmem.h"
+#include "system/hostmem.h"
 #include "qom/object_interfaces.h"
 #include "qom/object.h"
 #include "qapi/visitor.h"
@@ -80,11 +80,13 @@ file_backend_memory_alloc(HostMemoryBackend *backend, Error **errp)
         g_assert_not_reached();
     }
 
+    backend->aligned = true;
     name = host_memory_backend_get_name(backend);
-    ram_flags = backend->share ? RAM_SHARED : 0;
+    ram_flags = backend->share ? RAM_SHARED : RAM_PRIVATE;
     ram_flags |= fb->readonly ? RAM_READONLY_FD : 0;
     ram_flags |= fb->rom == ON_OFF_AUTO_ON ? RAM_READONLY : 0;
     ram_flags |= backend->reserve ? 0 : RAM_NORESERVE;
+    ram_flags |= backend->guest_memfd ? RAM_GUEST_MEMFD : 0;
     ram_flags |= fb->is_pmem ? RAM_PMEM : 0;
     ram_flags |= RAM_NAMED_FILE;
     return memory_region_init_ram_from_file(&backend->mr, OBJECT(backend), name,
@@ -268,7 +270,7 @@ static void file_backend_unparent(Object *obj)
 }
 
 static void
-file_backend_class_init(ObjectClass *oc, void *data)
+file_backend_class_init(ObjectClass *oc, const void *data)
 {
     HostMemoryBackendClass *bc = MEMORY_BACKEND_CLASS(oc);
 

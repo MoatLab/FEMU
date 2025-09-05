@@ -96,6 +96,10 @@ extern const struct bmc_platform bmc_plat_ast2600_openbmc;
 extern void astbmc_early_init(void);
 extern int64_t astbmc_ipmi_reboot(void);
 extern int64_t astbmc_ipmi_power_down(uint64_t request);
+#ifdef CONFIG_PLDM
+extern int astbmc_pldm_init(void);
+extern int pnor_pldm_init(void);
+#endif
 extern void astbmc_init(void);
 extern void astbmc_ext_irq_serirq_cpld(unsigned int chip_id);
 extern int pnor_init(void);

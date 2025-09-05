@@ -12,13 +12,13 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
-#include "qapi/qmp/qdict.h"
-#include "qapi/qmp/qstring.h"
+#include "qobject/qdict.h"
+#include "qobject/qstring.h"
 #include "qemu/module.h"
 #include "qemu/option.h"
 #include "block/block-io.h"
 #include "block/block_int.h"
-#include "sysemu/replay.h"
+#include "system/replay.h"
 
 #define NULL_OPT_LATENCY "latency-ns"
 #define NULL_OPT_ZEROES  "read-zeroes"
@@ -77,8 +77,8 @@ static void null_aio_parse_filename(const char *filename, QDict *options,
     }
 }
 
-static int null_file_open(BlockDriverState *bs, QDict *options, int flags,
-                          Error **errp)
+static int null_open(BlockDriverState *bs, QDict *options, int flags,
+                     Error **errp)
 {
     QemuOpts *opts;
     BDRVNullState *s = bs->opaque;
@@ -227,9 +227,9 @@ static int null_reopen_prepare(BDRVReopenState *reopen_state,
 }
 
 static int coroutine_fn null_co_block_status(BlockDriverState *bs,
-                                             bool want_zero, int64_t offset,
-                                             int64_t bytes, int64_t *pnum,
-                                             int64_t *map,
+                                             unsigned int mode,
+                                             int64_t offset, int64_t bytes,
+                                             int64_t *pnum, int64_t *map,
                                              BlockDriverState **file)
 {
     BDRVNullState *s = bs->opaque;
@@ -283,7 +283,7 @@ static BlockDriver bdrv_null_co = {
     .protocol_name          = "null-co",
     .instance_size          = sizeof(BDRVNullState),
 
-    .bdrv_file_open         = null_file_open,
+    .bdrv_open              = null_open,
     .bdrv_parse_filename    = null_co_parse_filename,
     .bdrv_co_getlength      = null_co_getlength,
     .bdrv_co_get_allocated_file_size = null_co_get_allocated_file_size,
@@ -304,7 +304,7 @@ static BlockDriver bdrv_null_aio = {
     .protocol_name          = "null-aio",
     .instance_size          = sizeof(BDRVNullState),
 
-    .bdrv_file_open         = null_file_open,
+    .bdrv_open              = null_open,
     .bdrv_parse_filename    = null_aio_parse_filename,
     .bdrv_co_getlength      = null_co_getlength,
     .bdrv_co_get_allocated_file_size = null_co_get_allocated_file_size,

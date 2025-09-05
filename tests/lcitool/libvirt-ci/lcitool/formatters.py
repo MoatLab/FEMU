@@ -95,6 +95,7 @@ class Formatter(metaclass=abc.ABCMeta):
             "cross_arch": None,
             "cross_abi": None,
             "cross_arch_deb": None,
+            "cross_rust_target": None,
 
             "mappings": [pkg.mapping for pkg in pkgs.values()],
             "pkgs": package_names["native"],
@@ -110,6 +111,9 @@ class Formatter(metaclass=abc.ABCMeta):
             if target.facts["packaging"]["format"] == "deb":
                 cross_arch_deb = util.native_arch_to_deb_arch(target.cross_arch)
                 varmap["cross_arch_deb"] = cross_arch_deb
+
+                if "rust" in varmap["mappings"]:
+                    varmap["cross_rust_target"] = util.native_arch_to_rust_target(varmap["cross_arch"])
 
         log.debug(f"Generated varmap: {varmap}")
         return varmap
@@ -200,7 +204,7 @@ class BuildEnvFormatter(Formatter):
         facts = target.facts
         commands = []
         if facts["packaging"]["format"] == "apk":
-            commands.extend(["apk list | sort > /packages.txt"])
+            commands.extend(["apk list --installed | sort > /packages.txt"])
         elif facts["packaging"]["format"] == "deb":
             commands.extend([
                 "dpkg-query --showformat '${{Package}}_${{Version}}_${{Architecture}}\\n' --show > /packages.txt"
@@ -273,8 +277,7 @@ class BuildEnvFormatter(Formatter):
             # For rolling distros, it's preferable to do a distro syncing type
             # of update rather than a regular package update
             if (osname == "Fedora" and osversion == "Rawhide" or
-                osname == "CentOS" and (osversion == "Stream8" or
-                                        osversion == "Stream9")):
+                osname == "CentOS"):
                 commands.extend(["{nosync}{packaging_command} distro-sync -y"])
             elif osname == "OpenSUSE" and osversion == "Tumbleweed":
                 commands.extend(["{nosync}{packaging_command} dist-upgrade -y"])
@@ -286,40 +289,30 @@ class BuildEnvFormatter(Formatter):
                 # for the original CentOS distro and so the checks below apply
                 # there as well
                 #
-                # Starting with CentOS 8, most -devel packages are shipped in
-                # a separate repository which is not enabled by default. The
-                # name of this repository has changed over time
-                commands.extend([
-                    "{nosync}{packaging_command} install 'dnf-command(config-manager)' -y",
-                ])
-                if osversion in ["9", "Stream9"]:
-                    commands.extend([
-                        "{nosync}{packaging_command} config-manager --set-enabled -y crb",
-                    ])
-                if osversion in ["8", "Stream8"]:
-                    commands.extend([
-                        "{nosync}{packaging_command} config-manager --set-enabled -y powertools",
-                    ])
-
-                # Not all of the virt related -devel packages are provided by
-                # virt:rhel module so we have to enable AV repository as well.
-                # CentOS Stream 9 no longer uses modules for virt
-                if osversion in ["8", "Stream8"]:
-                    commands.extend([
-                        "{nosync}{packaging_command} install -y centos-release-advanced-virtualization",
-                    ])
-
+                # Most -devel packages are shipped in the separate 'crb' repository
+                # which is not enabled by default.
+                #
                 # Some of the packages we need are not part of CentOS proper
                 # and are only available through EPEL
                 commands.extend([
+                    "{nosync}{packaging_command} install 'dnf-command(config-manager)' -y",
+                    "{nosync}{packaging_command} config-manager --set-enabled -y crb",
                     "{nosync}{packaging_command} install -y epel-release",
                 ])
 
                 # For CentOS Stream, we want EPEL Next as well
-                if osversion in ["Stream8", "Stream9"]:
+                if osversion in ["Stream9"]:
                     commands.extend([
                         "{nosync}{packaging_command} install -y epel-next-release",
                     ])
+
+            repos = facts["packaging"].get("repos", [])
+            if repos:
+                if osname == "OpenSUSE":
+                    commands.extend(("{nosync}{packaging_command} addrepo -fc " + shlex.quote(x)
+                                     for x in repos))
+                else:
+                    raise FormatterError(f"packaging.repos not supported for {osname}")
 
             commands.extend(["{nosync}{packaging_command} install -y {pkgs}"])
 
@@ -335,6 +328,12 @@ class BuildEnvFormatter(Formatter):
                         "{nosync}{packaging_command} autoremove -y",
                         "{nosync}{packaging_command} clean all -y",
                     ])
+
+        # If distro forces "pip" to use a venv by default,
+        # then undo that, because our CI env is expected to
+        # have a mix of distro & pip installed pieces
+        if "python3" in varmap["mappings"]:
+            commands.extend(["rm -f /usr/lib*/python3*/EXTERNALLY-MANAGED"])
 
         if not target.cross_arch:
             commands.extend(self._format_commands_pkglist(target))
@@ -433,6 +432,9 @@ class BuildEnvFormatter(Formatter):
                 env["MESON_OPTS"] = "--cross-file=/usr/share/mingw/toolchain-" + varmap["cross_arch"] + ".meson"
             else:
                 env["MESON_OPTS"] = "--cross-file=" + varmap["cross_abi"]
+
+        if varmap["cross_rust_target"] is not None:
+            env["RUST_TARGET"] = varmap["cross_rust_target"]
 
         return env
 
@@ -589,6 +591,27 @@ class JSONVariablesFormatter(VariablesFormatter):
     @staticmethod
     def _format_variables(varmap):
         return json.dumps(varmap, indent="  ", sort_keys=True)
+
+
+class YamlVariablesFormatter(VariablesFormatter):
+    @staticmethod
+    def _format_variables(varmap):
+        packages = varmap.get('pkgs', []) + varmap.get('cross_pkgs', [])
+        yaml_output = "packages:\n"
+        for pkg in packages:
+            yaml_output += f"  - {pkg}\n"
+        return yaml_output
+
+    def format(self, target, selected_projects):
+        log.debug(f"Generating YAML package list for projects "
+                  f"'{selected_projects} on target {target}")
+
+        try:
+            varmap = self._generator_build_varmap(target, selected_projects)
+        except FormatterError as ex:
+            raise VariablesError(str(ex))
+
+        return self._format_variables(varmap)
 
 
 class ShellBuildEnvFormatter(BuildEnvFormatter):

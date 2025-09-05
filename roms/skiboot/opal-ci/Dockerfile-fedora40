@@ -1,0 +1,10 @@
+FROM registry.fedoraproject.org/fedora:40
+RUN dnf -y update
+RUN dnf -y install --allowerasing wget curl xterm gcc git xz make diffutils findutils expect valgrind valgrind-devel ccache dtc openssl openssl-devel gcc-powerpc64-linux-gnu mbedtls-devel which qemu-system-ppc
+# for building documentation and the coverage report
+RUN dnf -y install python-pip lcov
+RUN if [ `arch` = "x86_64" ]; then dnf -y install https://public.dhe.ibm.com/software/server/powerfuncsim/p9/packages/v1.1-0/systemsim-p9-1.1-0.f22.x86_64.rpm; fi
+RUN if [ `arch` = "x86_64" ]; then dnf -y install https://public.dhe.ibm.com/software/server/powerfuncsim/p10/packages/v1.2-1/rhel8/systemsim-p10-1.2-1.x86_64.rpm; fi
+COPY . /build/
+WORKDIR /build
+RUN curl -L -O https://github.com/open-power/op-build/releases/download/v2.7/zImage.epapr

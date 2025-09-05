@@ -463,17 +463,16 @@ static const VMStateDescription vmstate_rtmr = {
     }
 };
 
-static Property rtmr_properties[] = {
+static const Property rtmr_properties[] = {
     DEFINE_PROP_UINT64("input-freq", RTMRState, input_freq, 0),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void rtmr_class_init(ObjectClass *klass, void *data)
+static void rtmr_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->vmsd = &vmstate_rtmr;
-    dc->reset = rtmr_reset;
+    device_class_set_legacy_reset(dc, rtmr_reset);
     device_class_set_props(dc, rtmr_properties);
 }
 

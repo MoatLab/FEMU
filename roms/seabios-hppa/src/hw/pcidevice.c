@@ -145,11 +145,11 @@ pci_enable_busmaster(struct pci_device *pci)
 }
 
 // Verify an IO bar and return it to the caller
-u16
+portaddr_t
 pci_enable_iobar(struct pci_device *pci, u32 addr)
 {
     wait_preempt();
-    u32 bar = pci_config_readl(pci->bdf, addr);
+    portaddr_t bar = pci_config_readl(pci->bdf, addr);
     if (!(bar & PCI_BASE_ADDRESS_SPACE_IO)) {
         warn_internalerror();
         return 0;

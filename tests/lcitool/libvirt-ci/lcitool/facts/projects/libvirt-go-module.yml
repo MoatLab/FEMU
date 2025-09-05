@@ -1,7 +1,0 @@
----
-packages:
-  - ccache
-  - gcc
-  - go
-  - libc
-  - pkg-config

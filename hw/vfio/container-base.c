@@ -10,85 +10,305 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+#include <sys/ioctl.h>
+#include <linux/vfio.h>
+
 #include "qemu/osdep.h"
+#include "system/tcg.h"
+#include "system/ram_addr.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
 #include "hw/vfio/vfio-container-base.h"
+#include "hw/vfio/vfio-device.h" /* vfio_device_reset_handler */
+#include "system/reset.h"
+#include "vfio-helpers.h"
+
+#include "trace.h"
+
+static QLIST_HEAD(, VFIOAddressSpace) vfio_address_spaces =
+    QLIST_HEAD_INITIALIZER(vfio_address_spaces);
+
+VFIOAddressSpace *vfio_address_space_get(AddressSpace *as)
+{
+    VFIOAddressSpace *space;
+
+    QLIST_FOREACH(space, &vfio_address_spaces, list) {
+        if (space->as == as) {
+            return space;
+        }
+    }
+
+    /* No suitable VFIOAddressSpace, create a new one */
+    space = g_malloc0(sizeof(*space));
+    space->as = as;
+    QLIST_INIT(&space->containers);
+
+    if (QLIST_EMPTY(&vfio_address_spaces)) {
+        qemu_register_reset(vfio_device_reset_handler, NULL);
+    }
+
+    QLIST_INSERT_HEAD(&vfio_address_spaces, space, list);
+
+    return space;
+}
+
+void vfio_address_space_put(VFIOAddressSpace *space)
+{
+    if (!QLIST_EMPTY(&space->containers)) {
+        return;
+    }
+
+    QLIST_REMOVE(space, list);
+    g_free(space);
+
+    if (QLIST_EMPTY(&vfio_address_spaces)) {
+        qemu_unregister_reset(vfio_device_reset_handler, NULL);
+    }
+}
+
+void vfio_address_space_insert(VFIOAddressSpace *space,
+                               VFIOContainerBase *bcontainer)
+{
+    QLIST_INSERT_HEAD(&space->containers, bcontainer, next);
+    bcontainer->space = space;
+}
 
 int vfio_container_dma_map(VFIOContainerBase *bcontainer,
                            hwaddr iova, ram_addr_t size,
-                           void *vaddr, bool readonly)
+                           void *vaddr, bool readonly, MemoryRegion *mr)
 {
-    g_assert(bcontainer->ops->dma_map);
-    return bcontainer->ops->dma_map(bcontainer, iova, size, vaddr, readonly);
+    VFIOIOMMUClass *vioc = VFIO_IOMMU_GET_CLASS(bcontainer);
+    RAMBlock *rb = mr->ram_block;
+    int mfd = rb ? qemu_ram_get_fd(rb) : -1;
+
+    if (mfd >= 0 && vioc->dma_map_file) {
+        unsigned long start = vaddr - qemu_ram_get_host_addr(rb);
+        unsigned long offset = qemu_ram_get_fd_offset(rb);
+
+        return vioc->dma_map_file(bcontainer, iova, size, mfd, start + offset,
+                                  readonly);
+    }
+    g_assert(vioc->dma_map);
+    return vioc->dma_map(bcontainer, iova, size, vaddr, readonly, mr);
 }
 
 int vfio_container_dma_unmap(VFIOContainerBase *bcontainer,
                              hwaddr iova, ram_addr_t size,
-                             IOMMUTLBEntry *iotlb)
+                             IOMMUTLBEntry *iotlb, bool unmap_all)
 {
-    g_assert(bcontainer->ops->dma_unmap);
-    return bcontainer->ops->dma_unmap(bcontainer, iova, size, iotlb);
+    VFIOIOMMUClass *vioc = VFIO_IOMMU_GET_CLASS(bcontainer);
+
+    g_assert(vioc->dma_unmap);
+    return vioc->dma_unmap(bcontainer, iova, size, iotlb, unmap_all);
 }
 
-int vfio_container_add_section_window(VFIOContainerBase *bcontainer,
-                                      MemoryRegionSection *section,
-                                      Error **errp)
+bool vfio_container_add_section_window(VFIOContainerBase *bcontainer,
+                                       MemoryRegionSection *section,
+                                       Error **errp)
 {
-    if (!bcontainer->ops->add_window) {
-        return 0;
+    VFIOIOMMUClass *vioc = VFIO_IOMMU_GET_CLASS(bcontainer);
+
+    if (!vioc->add_window) {
+        return true;
     }
 
-    return bcontainer->ops->add_window(bcontainer, section, errp);
+    return vioc->add_window(bcontainer, section, errp);
 }
 
 void vfio_container_del_section_window(VFIOContainerBase *bcontainer,
                                        MemoryRegionSection *section)
 {
-    if (!bcontainer->ops->del_window) {
+    VFIOIOMMUClass *vioc = VFIO_IOMMU_GET_CLASS(bcontainer);
+
+    if (!vioc->del_window) {
         return;
     }
 
-    return bcontainer->ops->del_window(bcontainer, section);
+    return vioc->del_window(bcontainer, section);
 }
 
 int vfio_container_set_dirty_page_tracking(VFIOContainerBase *bcontainer,
-                                           bool start)
+                                           bool start, Error **errp)
 {
+    VFIOIOMMUClass *vioc = VFIO_IOMMU_GET_CLASS(bcontainer);
+    int ret;
+
     if (!bcontainer->dirty_pages_supported) {
         return 0;
     }
 
-    g_assert(bcontainer->ops->set_dirty_page_tracking);
-    return bcontainer->ops->set_dirty_page_tracking(bcontainer, start);
+    g_assert(vioc->set_dirty_page_tracking);
+    if (bcontainer->dirty_pages_started == start) {
+        return 0;
+    }
+
+    ret = vioc->set_dirty_page_tracking(bcontainer, start, errp);
+    if (!ret) {
+        bcontainer->dirty_pages_started = start;
+    }
+
+    return ret;
 }
 
-int vfio_container_query_dirty_bitmap(const VFIOContainerBase *bcontainer,
-                                      VFIOBitmap *vbmap,
-                                      hwaddr iova, hwaddr size)
+static bool vfio_container_devices_dirty_tracking_is_started(
+    const VFIOContainerBase *bcontainer)
 {
-    g_assert(bcontainer->ops->query_dirty_bitmap);
-    return bcontainer->ops->query_dirty_bitmap(bcontainer, vbmap, iova, size);
+    VFIODevice *vbasedev;
+
+    QLIST_FOREACH(vbasedev, &bcontainer->device_list, container_next) {
+        if (!vbasedev->dirty_tracking) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
-void vfio_container_init(VFIOContainerBase *bcontainer, VFIOAddressSpace *space,
-                         const VFIOIOMMUClass *ops)
+bool vfio_container_dirty_tracking_is_started(
+    const VFIOContainerBase *bcontainer)
 {
-    bcontainer->ops = ops;
-    bcontainer->space = space;
-    bcontainer->error = NULL;
-    bcontainer->dirty_pages_supported = false;
-    bcontainer->dma_max_mappings = 0;
-    bcontainer->iova_ranges = NULL;
-    QLIST_INIT(&bcontainer->giommu_list);
-    QLIST_INIT(&bcontainer->vrdl_list);
+    return vfio_container_devices_dirty_tracking_is_started(bcontainer) ||
+           bcontainer->dirty_pages_started;
 }
 
-void vfio_container_destroy(VFIOContainerBase *bcontainer)
+bool vfio_container_devices_dirty_tracking_is_supported(
+    const VFIOContainerBase *bcontainer)
 {
+    VFIODevice *vbasedev;
+
+    QLIST_FOREACH(vbasedev, &bcontainer->device_list, container_next) {
+        if (vbasedev->device_dirty_page_tracking == ON_OFF_AUTO_OFF) {
+            return false;
+        }
+        if (!vbasedev->dirty_pages_supported) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static int vfio_device_dma_logging_report(VFIODevice *vbasedev, hwaddr iova,
+                                          hwaddr size, void *bitmap)
+{
+    uint64_t buf[DIV_ROUND_UP(sizeof(struct vfio_device_feature) +
+                        sizeof(struct vfio_device_feature_dma_logging_report),
+                        sizeof(uint64_t))] = {};
+    struct vfio_device_feature *feature = (struct vfio_device_feature *)buf;
+    struct vfio_device_feature_dma_logging_report *report =
+        (struct vfio_device_feature_dma_logging_report *)feature->data;
+
+    report->iova = iova;
+    report->length = size;
+    report->page_size = qemu_real_host_page_size();
+    report->bitmap = (uintptr_t)bitmap;
+
+    feature->argsz = sizeof(buf);
+    feature->flags = VFIO_DEVICE_FEATURE_GET |
+                     VFIO_DEVICE_FEATURE_DMA_LOGGING_REPORT;
+
+    return vbasedev->io_ops->device_feature(vbasedev, feature);
+}
+
+static int vfio_container_iommu_query_dirty_bitmap(const VFIOContainerBase *bcontainer,
+                   VFIOBitmap *vbmap, hwaddr iova, hwaddr size, Error **errp)
+{
+    VFIOIOMMUClass *vioc = VFIO_IOMMU_GET_CLASS(bcontainer);
+
+    g_assert(vioc->query_dirty_bitmap);
+    return vioc->query_dirty_bitmap(bcontainer, vbmap, iova, size,
+                                               errp);
+}
+
+static int vfio_container_devices_query_dirty_bitmap(const VFIOContainerBase *bcontainer,
+                 VFIOBitmap *vbmap, hwaddr iova, hwaddr size, Error **errp)
+{
+    VFIODevice *vbasedev;
+    int ret;
+
+    QLIST_FOREACH(vbasedev, &bcontainer->device_list, container_next) {
+        ret = vfio_device_dma_logging_report(vbasedev, iova, size,
+                                             vbmap->bitmap);
+        if (ret) {
+            error_setg_errno(errp, -ret,
+                             "%s: Failed to get DMA logging report, iova: "
+                             "0x%" HWADDR_PRIx ", size: 0x%" HWADDR_PRIx,
+                             vbasedev->name, iova, size);
+
+            return ret;
+        }
+    }
+
+    return 0;
+}
+
+int vfio_container_query_dirty_bitmap(const VFIOContainerBase *bcontainer, uint64_t iova,
+                          uint64_t size, ram_addr_t ram_addr, Error **errp)
+{
+    bool all_device_dirty_tracking =
+        vfio_container_devices_dirty_tracking_is_supported(bcontainer);
+    uint64_t dirty_pages;
+    VFIOBitmap vbmap;
+    int ret;
+
+    if (!bcontainer->dirty_pages_supported && !all_device_dirty_tracking) {
+        cpu_physical_memory_set_dirty_range(ram_addr, size,
+                                            tcg_enabled() ? DIRTY_CLIENTS_ALL :
+                                            DIRTY_CLIENTS_NOCODE);
+        return 0;
+    }
+
+    ret = vfio_bitmap_alloc(&vbmap, size);
+    if (ret) {
+        error_setg_errno(errp, -ret,
+                         "Failed to allocate dirty tracking bitmap");
+        return ret;
+    }
+
+    if (all_device_dirty_tracking) {
+        ret = vfio_container_devices_query_dirty_bitmap(bcontainer, &vbmap, iova, size,
+                                                        errp);
+    } else {
+        ret = vfio_container_iommu_query_dirty_bitmap(bcontainer, &vbmap, iova, size,
+                                                     errp);
+    }
+
+    if (ret) {
+        goto out;
+    }
+
+    dirty_pages = cpu_physical_memory_set_dirty_lebitmap(vbmap.bitmap, ram_addr,
+                                                         vbmap.pages);
+
+    trace_vfio_container_query_dirty_bitmap(iova, size, vbmap.size, ram_addr,
+                                            dirty_pages);
+out:
+    g_free(vbmap.bitmap);
+
+    return ret;
+}
+
+static gpointer copy_iova_range(gconstpointer src, gpointer data)
+{
+     Range *source = (Range *)src;
+     Range *dest = g_new(Range, 1);
+
+     range_set_bounds(dest, range_lob(source), range_upb(source));
+     return dest;
+}
+
+GList *vfio_container_get_iova_ranges(const VFIOContainerBase *bcontainer)
+{
+    assert(bcontainer);
+    return g_list_copy_deep(bcontainer->iova_ranges, copy_iova_range, NULL);
+}
+
+static void vfio_container_instance_finalize(Object *obj)
+{
+    VFIOContainerBase *bcontainer = VFIO_IOMMU(obj);
     VFIOGuestIOMMU *giommu, *tmp;
 
-    QLIST_REMOVE(bcontainer, next);
+    QLIST_SAFE_REMOVE(bcontainer, next);
 
     QLIST_FOREACH_SAFE(giommu, &bcontainer->giommu_list, giommu_next, tmp) {
         memory_region_unregister_iommu_notifier(
@@ -100,11 +320,27 @@ void vfio_container_destroy(VFIOContainerBase *bcontainer)
     g_list_free_full(bcontainer->iova_ranges, g_free);
 }
 
+static void vfio_container_instance_init(Object *obj)
+{
+    VFIOContainerBase *bcontainer = VFIO_IOMMU(obj);
+
+    bcontainer->error = NULL;
+    bcontainer->dirty_pages_supported = false;
+    bcontainer->dma_max_mappings = 0;
+    bcontainer->iova_ranges = NULL;
+    QLIST_INIT(&bcontainer->giommu_list);
+    QLIST_INIT(&bcontainer->vrdl_list);
+}
+
 static const TypeInfo types[] = {
     {
         .name = TYPE_VFIO_IOMMU,
-        .parent = TYPE_INTERFACE,
+        .parent = TYPE_OBJECT,
+        .instance_init = vfio_container_instance_init,
+        .instance_finalize = vfio_container_instance_finalize,
+        .instance_size = sizeof(VFIOContainerBase),
         .class_size = sizeof(VFIOIOMMUClass),
+        .abstract = true,
     },
 };
 

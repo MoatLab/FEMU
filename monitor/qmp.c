@@ -28,9 +28,9 @@
 #include "monitor-internal.h"
 #include "qapi/error.h"
 #include "qapi/qapi-commands-control.h"
-#include "qapi/qmp/qdict.h"
-#include "qapi/qmp/qjson.h"
-#include "qapi/qmp/qlist.h"
+#include "qobject/qdict.h"
+#include "qobject/qjson.h"
+#include "qobject/qlist.h"
 #include "trace.h"
 
 /*
@@ -356,7 +356,8 @@ void qmp_dispatcher_co_wake(void)
     /* Write request before reading qmp_dispatcher_co_busy.  */
     smp_mb__before_rmw();
 
-    if (!qatomic_xchg(&qmp_dispatcher_co_busy, true)) {
+    if (!qatomic_xchg(&qmp_dispatcher_co_busy, true) &&
+            qatomic_read(&qmp_dispatcher_co)) {
         aio_co_wake(qmp_dispatcher_co);
     }
 }
@@ -466,7 +467,6 @@ static void monitor_qmp_event(void *opaque, QEMUChrEvent event)
         data = qmp_greeting(mon);
         qmp_send_response(mon, data);
         qobject_unref(data);
-        mon_refcount++;
         break;
     case CHR_EVENT_CLOSED:
         /*
@@ -479,7 +479,6 @@ static void monitor_qmp_event(void *opaque, QEMUChrEvent event)
         json_message_parser_destroy(&mon->parser);
         json_message_parser_init(&mon->parser, handle_qmp_command,
                                  mon, NULL);
-        mon_refcount--;
         monitor_fdsets_cleanup();
         break;
     case CHR_EVENT_BREAK:

@@ -24,11 +24,11 @@
 #include "qemu/units.h"
 #include "hw/qdev-core.h"
 #include "hw/sysbus.h"
-#include "hw/char/serial.h"
+#include "hw/char/serial-mm.h"
 #include "hw/misc/unimp.h"
 #include "hw/usb/hcd-ehci.h"
 #include "hw/loader.h"
-#include "sysemu/sysemu.h"
+#include "system/system.h"
 #include "hw/arm/allwinner-h3.h"
 #include "target/arm/cpu-qom.h"
 #include "target/arm/gtimer.h"
@@ -182,9 +182,8 @@ void allwinner_h3_bootrom_setup(AwH3State *s, BlockBackend *blk)
     g_autofree uint8_t *buffer = g_new0(uint8_t, rom_size);
 
     if (blk_pread(blk, 8 * KiB, rom_size, buffer, 0) < 0) {
-        error_setg(&error_fatal, "%s: failed to read BlockBackend data",
-                   __func__);
-        return;
+        error_report("%s: failed to read BlockBackend data", __func__);
+        exit(1);
     }
 
     rom_add_blob("allwinner-h3.bootrom", buffer, rom_size,
@@ -409,19 +408,19 @@ static void allwinner_h3_realize(DeviceState *dev, Error **errp)
     /* UART0. For future clocktree API: All UARTS are connected to APB2_CLK. */
     serial_mm_init(get_system_memory(), s->memmap[AW_H3_DEV_UART0], 2,
                    qdev_get_gpio_in(DEVICE(&s->gic), AW_H3_GIC_SPI_UART0),
-                   115200, serial_hd(0), DEVICE_NATIVE_ENDIAN);
+                   115200, serial_hd(0), DEVICE_LITTLE_ENDIAN);
     /* UART1 */
     serial_mm_init(get_system_memory(), s->memmap[AW_H3_DEV_UART1], 2,
                    qdev_get_gpio_in(DEVICE(&s->gic), AW_H3_GIC_SPI_UART1),
-                   115200, serial_hd(1), DEVICE_NATIVE_ENDIAN);
+                   115200, serial_hd(1), DEVICE_LITTLE_ENDIAN);
     /* UART2 */
     serial_mm_init(get_system_memory(), s->memmap[AW_H3_DEV_UART2], 2,
                    qdev_get_gpio_in(DEVICE(&s->gic), AW_H3_GIC_SPI_UART2),
-                   115200, serial_hd(2), DEVICE_NATIVE_ENDIAN);
+                   115200, serial_hd(2), DEVICE_LITTLE_ENDIAN);
     /* UART3 */
     serial_mm_init(get_system_memory(), s->memmap[AW_H3_DEV_UART3], 2,
                    qdev_get_gpio_in(DEVICE(&s->gic), AW_H3_GIC_SPI_UART3),
-                   115200, serial_hd(3), DEVICE_NATIVE_ENDIAN);
+                   115200, serial_hd(3), DEVICE_LITTLE_ENDIAN);
 
     /* DRAMC */
     sysbus_realize(SYS_BUS_DEVICE(&s->dramc), &error_fatal);
@@ -467,7 +466,7 @@ static void allwinner_h3_realize(DeviceState *dev, Error **errp)
     }
 }
 
-static void allwinner_h3_class_init(ObjectClass *oc, void *data)
+static void allwinner_h3_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
 

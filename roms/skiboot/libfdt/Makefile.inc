@@ -1,10 +1,11 @@
+# SPDX-License-Identifier: (GPL-2.0-or-later OR BSD-2-Clause)
 # Makefile.inc
 #
 # LIBFDT_ variables are taken from Makefile.libfdt
 
 LIBFDT_INCLUDES = fdt.h libfdt.h libfdt_env.h
 LIBFDT_SRCS = fdt.c fdt_ro.c fdt_wip.c fdt_sw.c fdt_rw.c fdt_strerror.c fdt_empty_tree.c \
-	fdt_addresses.c fdt_overlay.c
+	fdt_addresses.c fdt_overlay.c fdt_check.c
 LIBFDT_OBJS = $(LIBFDT_SRCS:%.c=%.o)
 
 CFLAGS_SKIP_libfdt/ = -Wsuggest-attribute=const -Wsuggest-attribute=noreturn

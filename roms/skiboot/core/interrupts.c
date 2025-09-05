@@ -16,8 +16,7 @@
 #include <device.h>
 #include <ccan/str/str.h>
 #include <timer.h>
-#include <sbe-p8.h>
-#include <sbe-p9.h>
+#include <sbe.h>
 #include <xive.h>
 
 /* ICP registers */
@@ -200,6 +199,21 @@ uint32_t get_ics_phandle(void)
 	abort();
 }
 
+static bool source_has_opal_interrupts(struct irq_source *is)
+{
+	/* check with the source first */
+	if (is->ops->has_opal_interrupts)
+		return is->ops->has_opal_interrupts(is);
+	/*
+	 * Default case: to handle an interrupt in opal, a source
+	 * needs at least an attribute callback to declare it and a
+	 * handler
+	 */
+	if (!is->ops->interrupt || !is->ops->attributes)
+		return false;
+	return true;
+}
+
 void add_opal_interrupts(void)
 {
 	struct irq_source *is;
@@ -215,11 +229,8 @@ void add_opal_interrupts(void)
 
 	lock(&irq_lock);
 	list_for_each(&irq_sources, is, link) {
-		/*
-		 * Don't even consider sources that don't have an interrupts
-		 * callback or don't have an attributes one.
-		 */
-		if (!is->ops->interrupt || !is->ops->attributes)
+
+		if (!source_has_opal_interrupts(is))
 			continue;
 		for (isn = is->start; isn < is->end; isn++) {
 			uint64_t attr = is->ops->attributes(is, isn);
@@ -490,8 +501,8 @@ static int64_t opal_handle_interrupt(uint32_t isn, __be64 *outstanding_event_mas
 	/* Run it */
 	is->ops->interrupt(is, isn);
 
-	/* Check timers if SBE timer isn't working */
-	if (!p8_sbe_timer_ok() && !p9_sbe_timer_ok())
+	/* Check timers if SBE timer isn't working well */
+	if (!sbe_timer_ok())
 		check_timers(true);
 
 	/* Update output events */

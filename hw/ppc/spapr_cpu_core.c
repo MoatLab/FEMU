@@ -15,15 +15,15 @@
 #include "target/ppc/cpu.h"
 #include "hw/ppc/spapr.h"
 #include "qapi/error.h"
-#include "sysemu/cpus.h"
-#include "sysemu/kvm.h"
+#include "system/cpus.h"
+#include "system/kvm.h"
 #include "target/ppc/kvm_ppc.h"
 #include "hw/ppc/ppc.h"
 #include "target/ppc/mmu-hash64.h"
 #include "target/ppc/power8-pmu.h"
-#include "sysemu/numa.h"
-#include "sysemu/reset.h"
-#include "sysemu/hw_accel.h"
+#include "system/numa.h"
+#include "system/reset.h"
+#include "system/hw_accel.h"
 #include "qemu/error-report.h"
 
 static void spapr_reset_vcpu(PowerPCCPU *cpu)
@@ -36,6 +36,9 @@ static void spapr_reset_vcpu(PowerPCCPU *cpu)
     SpaprMachineState *spapr = SPAPR_MACHINE(qdev_get_machine());
 
     cpu_reset(cs);
+
+    env->quiesced = true; /* set "RTAS stopped" state. */
+    ppc_maybe_interrupt(env);
 
     /*
      * "PowerPC Processor binding to IEEE 1275" defines the initial MSR state
@@ -98,6 +101,9 @@ void spapr_cpu_set_entry_state(PowerPCCPU *cpu, target_ulong nip,
     CPU(cpu)->halted = 0;
     /* Enable Power-saving mode Exit Cause exceptions */
     ppc_store_lpcr(cpu, env->spr[SPR_LPCR] | pcc->lpcr_pm);
+
+    env->quiesced = false; /* clear "RTAS stopped" state. */
+    ppc_maybe_interrupt(env);
 }
 
 /*
@@ -197,9 +203,7 @@ static void spapr_unrealize_vcpu(PowerPCCPU *cpu, SpaprCpuCore *sc)
 {
     CPUPPCState *env = &cpu->env;
 
-    if (!sc->pre_3_0_migration) {
-        vmstate_unregister(NULL, &vmstate_spapr_cpu_state, cpu->machine_data);
-    }
+    vmstate_unregister(NULL, &vmstate_spapr_cpu_state, cpu->machine_data);
     spapr_irq_cpu_intc_destroy(SPAPR_MACHINE(qdev_get_machine()), cpu);
     cpu_ppc_tb_free(env);
     qdev_unrealize(DEVICE(cpu));
@@ -275,6 +279,8 @@ static bool spapr_realize_vcpu(PowerPCCPU *cpu, SpaprMachineState *spapr,
     env->spr_cb[SPR_PIR].default_value = cs->cpu_index;
     env->spr_cb[SPR_TIR].default_value = thread_index;
 
+    env->spr_cb[SPR_HASHPKEYR].default_value = spapr->hashpkey_val;
+
     cpu_ppc_set_1lpar(cpu);
 
     /* Set time-base frequency to 512 MHz. vhyp must be set first. */
@@ -285,10 +291,8 @@ static bool spapr_realize_vcpu(PowerPCCPU *cpu, SpaprMachineState *spapr,
         return false;
     }
 
-    if (!sc->pre_3_0_migration) {
-        vmstate_register(NULL, cs->cpu_index, &vmstate_spapr_cpu_state,
-                         cpu->machine_data);
-    }
+    vmstate_register(NULL, cs->cpu_index, &vmstate_spapr_cpu_state,
+                     cpu->machine_data);
     return true;
 }
 
@@ -300,11 +304,13 @@ static PowerPCCPU *spapr_create_vcpu(SpaprCpuCore *sc, int i, Error **errp)
     g_autofree char *id = NULL;
     CPUState *cs;
     PowerPCCPU *cpu;
+    CPUPPCState *env;
 
     obj = object_new(scc->cpu_type);
 
     cs = CPU(obj);
     cpu = POWERPC_CPU(obj);
+    env = &cpu->env;
     /*
      * All CPUs start halted. CPU0 is unhalted from the machine level reset code
      * and the rest are explicitly started up by the guest using an RTAS call.
@@ -314,6 +320,9 @@ static PowerPCCPU *spapr_create_vcpu(SpaprCpuCore *sc, int i, Error **errp)
     if (!spapr_set_vcpu_id(cpu, cs->cpu_index, errp)) {
         return NULL;
     }
+
+    env->chip_index = sc->node_id;
+    env->core_index = cc->core_id;
 
     cpu->node_id = sc->node_id;
 
@@ -345,30 +354,33 @@ static void spapr_cpu_core_realize(DeviceState *dev, Error **errp)
     qemu_register_reset(spapr_cpu_core_reset_handler, sc);
     sc->threads = g_new0(PowerPCCPU *, cc->nr_threads);
     for (i = 0; i < cc->nr_threads; i++) {
-        sc->threads[i] = spapr_create_vcpu(sc, i, errp);
-        if (!sc->threads[i] ||
-            !spapr_realize_vcpu(sc->threads[i], spapr, sc, i, errp)) {
+        PowerPCCPU *cpu;
+
+        cpu = spapr_create_vcpu(sc, i, errp);
+        sc->threads[i] = cpu;
+        if (cpu && cc->nr_threads > 1) {
+            cpu->env.has_smt_siblings = true;
+        }
+
+        if (!cpu || !spapr_realize_vcpu(cpu, spapr, sc, i, errp)) {
             spapr_cpu_core_unrealize(dev);
             return;
         }
     }
 }
 
-static Property spapr_cpu_core_properties[] = {
+static const Property spapr_cpu_core_properties[] = {
     DEFINE_PROP_INT32("node-id", SpaprCpuCore, node_id, CPU_UNSET_NUMA_NODE_ID),
-    DEFINE_PROP_BOOL("pre-3.0-migration", SpaprCpuCore, pre_3_0_migration,
-                     false),
-    DEFINE_PROP_END_OF_LIST()
 };
 
-static void spapr_cpu_core_class_init(ObjectClass *oc, void *data)
+static void spapr_cpu_core_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
     SpaprCpuCoreClass *scc = SPAPR_CPU_CORE_CLASS(oc);
 
     dc->realize = spapr_cpu_core_realize;
     dc->unrealize = spapr_cpu_core_unrealize;
-    dc->reset = spapr_cpu_core_reset;
+    device_class_set_legacy_reset(dc, spapr_cpu_core_reset);
     device_class_set_props(dc, spapr_cpu_core_properties);
     scc->cpu_type = data;
 }
@@ -376,7 +388,7 @@ static void spapr_cpu_core_class_init(ObjectClass *oc, void *data)
 #define DEFINE_SPAPR_CPU_CORE_TYPE(cpu_model) \
     {                                                   \
         .parent = TYPE_SPAPR_CPU_CORE,                  \
-        .class_data = (void *) POWERPC_CPU_TYPE_NAME(cpu_model), \
+        .class_data = POWERPC_CPU_TYPE_NAME(cpu_model), \
         .class_init = spapr_cpu_core_class_init,        \
         .name = SPAPR_CPU_CORE_TYPE_NAME(cpu_model),    \
     }
@@ -401,6 +413,7 @@ static const TypeInfo spapr_cpu_core_type_infos[] = {
     DEFINE_SPAPR_CPU_CORE_TYPE("power9_v2.0"),
     DEFINE_SPAPR_CPU_CORE_TYPE("power9_v2.2"),
     DEFINE_SPAPR_CPU_CORE_TYPE("power10_v2.0"),
+    DEFINE_SPAPR_CPU_CORE_TYPE("power11_v2.0"),
 #ifdef CONFIG_KVM
     DEFINE_SPAPR_CPU_CORE_TYPE("host"),
 #endif

@@ -26,11 +26,11 @@
 #include "qapi/error.h"
 #include "qemu/module.h"
 #include "hw/arm/boot.h"
-#include "exec/address-spaces.h"
+#include "system/address-spaces.h"
 #include "hw/arm/stm32f205_soc.h"
 #include "hw/qdev-properties.h"
 #include "hw/qdev-clock.h"
-#include "sysemu/sysemu.h"
+#include "system/system.h"
 
 /* At the moment only Timer 2 to 5 are modelled */
 static const uint32_t timer_addr[STM_NUM_TIMERS] = { 0x40000000, 0x40000400,
@@ -202,7 +202,7 @@ static void stm32f205_soc_realize(DeviceState *dev_soc, Error **errp)
     }
 }
 
-static void stm32f205_soc_class_init(ObjectClass *klass, void *data)
+static void stm32f205_soc_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 

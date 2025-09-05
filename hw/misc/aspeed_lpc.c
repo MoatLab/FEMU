@@ -454,17 +454,16 @@ static const VMStateDescription vmstate_aspeed_lpc = {
     }
 };
 
-static Property aspeed_lpc_properties[] = {
+static const Property aspeed_lpc_properties[] = {
     DEFINE_PROP_UINT32("hicr7", AspeedLPCState, hicr7, 0),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void aspeed_lpc_class_init(ObjectClass *klass, void *data)
+static void aspeed_lpc_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = aspeed_lpc_realize;
-    dc->reset = aspeed_lpc_reset;
+    device_class_set_legacy_reset(dc, aspeed_lpc_reset);
     dc->desc = "Aspeed LPC Controller",
     dc->vmsd = &vmstate_aspeed_lpc;
     device_class_set_props(dc, aspeed_lpc_properties);

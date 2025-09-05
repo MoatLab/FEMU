@@ -211,7 +211,7 @@ int64_t pau_opencapi_spa_clear_cache(struct phb *phb,
 int64_t pau_opencapi_tl_set(struct phb *phb, uint32_t __unused bdfn,
 			    long capabilities, char *rate_buf);
 int64_t pau_opencapi_mem_alloc(struct phb *phb, uint32_t __unused bdfn,
-			       uint64_t size, uint64_t *bar);
+			       uint64_t size, __be64 *bar);
 int64_t pau_opencapi_mem_release(struct phb *phb, uint32_t __unused bdfn);
 
 /* PHY */

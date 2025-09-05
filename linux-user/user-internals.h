@@ -18,9 +18,7 @@
 #ifndef LINUX_USER_USER_INTERNALS_H
 #define LINUX_USER_USER_INTERNALS_H
 
-#include "exec/user/thunk.h"
-#include "exec/exec-all.h"
-#include "exec/tb-flush.h"
+#include "user/thunk.h"
 #include "qemu/log.h"
 
 extern char *exec_path;
@@ -65,7 +63,6 @@ abi_long do_syscall(CPUArchState *cpu_env, int num, abi_long arg1,
                     abi_long arg5, abi_long arg6, abi_long arg7,
                     abi_long arg8);
 extern __thread CPUState *thread_cpu;
-G_NORETURN void cpu_loop(CPUArchState *env);
 abi_long get_errno(abi_long ret);
 const char *target_strerror(int err);
 int get_osversion(void);
@@ -102,7 +99,6 @@ int host_to_target_waitstatus(int status);
 /* vm86.c */
 void save_v86_state(CPUX86State *env);
 void handle_vm86_trap(CPUX86State *env, int trapno);
-void handle_vm86_fault(CPUX86State *env);
 int do_vm86(CPUX86State *env, long subfunction, abi_ulong v86_addr);
 #elif defined(TARGET_SPARC64)
 void sparc64_set_context(CPUSPARCState *env);

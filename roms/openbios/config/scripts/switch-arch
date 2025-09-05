@@ -258,7 +258,7 @@ for ARCH in $arch_list; do
     case $ARCH in
         amd64)
         select_prefix x86_64
-        CFLAGS="-fno-builtin"
+        CFLAGS="-fno-builtin -fno-stack-protector"
         AS_FLAGS=
         ;;
 
@@ -266,10 +266,10 @@ for ARCH in $arch_list; do
         select_prefix powerpc powerpc64
         if [ "$unix" = "no" ]; then
             # 604 cpu includes support for PReP as well as Mac
-            CFLAGS="-m32 -mcpu=604 -msoft-float -fno-builtin-bcopy -fno-builtin-log2"
+            CFLAGS="-m32 -mcpu=604 -msoft-float -fno-builtin-bcopy -fno-builtin-log2 -fno-stack-protector -fno-pic"
             AS_FLAGS="-m32"
         else
-            CFLAGS="-fno-builtin"
+            CFLAGS="-fno-builtin -fno-stack-protector"
             AS_FLAGS=
         fi
         ;;
@@ -278,25 +278,25 @@ for ARCH in $arch_list; do
         select_prefix powerpc64
 
         # 970 cpu is used in all 64-bit Macs but disable altivec
-        CFLAGS="-mcpu=970 -mno-altivec -Wa,-a64 -m64 -msoft-float -fno-builtin"
+        CFLAGS="-mcpu=970 -mno-altivec -Wa,-a64 -m64 -msoft-float -fno-builtin -fno-stack-protector -fno-pic"
         AS_FLAGS="-Wa,-a64"
         ;;
 
         sparc32)
         select_prefix sparc sparc64
-        CFLAGS="-Wa,-xarch=v8 -Wa,-32 -m32 -mcpu=supersparc -fno-builtin"
+        CFLAGS="-Wa,-xarch=v8 -Wa,-32 -m32 -mcpu=supersparc -fno-builtin -fno-stack-protector -fno-pic"
         AS_FLAGS="-Wa,-xarch=v8 -Wa,-32"
         ;;
 
         sparc64)
         select_prefix sparc64
-        CFLAGS="-Wa,-xarch=v9b -Wa,-64 -m64 -mcpu=ultrasparc -mcmodel=medany -fno-builtin"
+        CFLAGS="-Wa,-xarch=v9b -Wa,-64 -m64 -mcpu=ultrasparc -mcmodel=medany -fno-builtin -fno-stack-protector -fno-pic"
         AS_FLAGS="-Wa,-xarch=v9b -Wa,-64"
         ;;
 
         x86)
         select_prefix i486 x86_64
-        CFLAGS="-fno-builtin -m32"
+        CFLAGS="-fno-builtin -m32 -fno-stack-protector -fno-pic"
         AS_FLAGS="-Wa,-32"
         ;;
     esac

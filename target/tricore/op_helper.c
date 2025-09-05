@@ -18,8 +18,7 @@
 #include "cpu.h"
 #include "qemu/host-utils.h"
 #include "exec/helper-proto.h"
-#include "exec/exec-all.h"
-#include "exec/cpu_ldst.h"
+#include "accel/tcg/cpu-ldst.h"
 #include <zlib.h> /* for crc32 */
 
 
@@ -1505,8 +1504,8 @@ uint32_t helper_sub_h(CPUTriCoreState *env, target_ulong r1, target_ulong r2)
 
 uint32_t helper_eq_b(target_ulong r1, target_ulong r2)
 {
-    int32_t ret;
-    int32_t i, msk;
+    uint32_t ret, msk;
+    int32_t i;
 
     ret = 0;
     msk = 0xff;

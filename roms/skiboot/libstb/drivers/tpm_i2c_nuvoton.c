@@ -16,13 +16,6 @@
 
 #define DRIVER_NAME "i2c_tpm_nuvoton"
 
-/* I2C interface offsets */
-#define TPM_STS			0x00
-#define TPM_BURST_COUNT		0x01
-#define TPM_DATA_FIFO_W		0x20
-#define TPM_DATA_FIFO_R		0x40
-#define TPM_VID_DID		0x60
-
 /* Bit masks for the TPM STATUS register */
 #define TPM_STS_VALID		0x80
 #define TPM_STS_COMMAND_READY	0x40
@@ -34,15 +27,45 @@
 /* TPM Driver values */
 #define MAX_STSVALID_POLLS 	5
 #define TPM_TIMEOUT_INTERVAL	10
-#define TPM_NUVOTON_VID		0x5010FE00
 #define TPM_VENDOR_ID_MASK	0xFFFFFF00
 
+struct tpm_info {
+	const char *compatible;
+	uint32_t vendor_id;
+	uint8_t sts;
+	uint8_t burst_count;
+	uint8_t data_fifo_w;
+	uint8_t data_fifo_r;
+	uint8_t vid_did;
+};
+
+static const struct tpm_info tpm_nuvoton_650 = {
+	.compatible = "nuvoton,npct650",
+	.vendor_id = 0x5010FE00,
+	.sts = 0x00,
+	.burst_count = 0x01,
+	.data_fifo_w = 0x20,
+	.data_fifo_r = 0x40,
+	.vid_did = 0x60,
+};
+
+static const struct tpm_info tpm_nuvoton_75x = {
+	.compatible = "nuvoton,npct75x",
+	.vendor_id = 0x5010FC00,
+	.sts = 0x18,
+	.burst_count = 0x19,
+	.data_fifo_w = 0x24,
+	.data_fifo_r = 0x24,
+	.vid_did = 0x48,
+};
+
 static struct tpm_dev *tpm_device = NULL;
+static const struct tpm_info *tpm_info = NULL;
 
 static int tpm_status_write_byte(uint8_t byte)
 {
 	uint8_t value = byte;
-	return tpm_i2c_request_send(tpm_device, SMBUS_WRITE, TPM_STS, 1, &value,
+	return tpm_i2c_request_send(tpm_device, SMBUS_WRITE, tpm_info->sts, 1, &value,
 				    sizeof(value));
 }
 
@@ -68,7 +91,7 @@ static int tpm_wait_for_command_ready(void)
 
 	do {
 		now = mftb();
-		rc = tpm_status_read_byte(TPM_STS, &status);
+		rc = tpm_status_read_byte(tpm_info->sts, &status);
 		if (rc < 0) {
 			/**
 			 * @fwts-label TPMReadCmdReady
@@ -138,7 +161,7 @@ static int tpm_wait_for_fifo_status(uint8_t mask, uint8_t expected)
 	uint8_t status;
 
 	for(retries = 0; retries <= MAX_STSVALID_POLLS; retries++) {
-		rc = tpm_status_read_byte(TPM_STS, &status);
+		rc = tpm_status_read_byte(tpm_info->sts, &status);
 		if (rc < 0) {
 			/**
 			 * @fwts-label TPMReadFifoStatus
@@ -170,7 +193,7 @@ static int tpm_wait_for_data_avail(void)
 
 	do {
 		now = mftb();
-		rc = tpm_status_read_byte(TPM_STS, &status);
+		rc = tpm_status_read_byte(tpm_info->sts, &status);
 		if (rc < 0) {
 			/**
 			 * @fwts-label TPMReadDataAvail
@@ -218,7 +241,7 @@ static int tpm_read_burst_count(void)
 	do {
 		now = mftb();
 		/* In i2C, burstCount is 1 byte */
-		rc = tpm_status_read_byte(TPM_BURST_COUNT, &burst_count);
+		rc = tpm_status_read_byte(tpm_info->burst_count, &burst_count);
 		if (rc == 0 && burst_count > 0) {
 			DBG("---- burst_count=%d, delay=%lu/%d\n", burst_count,
 			    tb_to_msecs(now-start), TPM_TIMEOUT_D);
@@ -272,7 +295,7 @@ static int tpm_write_fifo(uint8_t* buf, size_t buflen)
 			  (buflen - 1 - count) : burst_count);
 
 		rc = tpm_i2c_request_send(tpm_device,
-					  SMBUS_WRITE, TPM_DATA_FIFO_W,
+					  SMBUS_WRITE, tpm_info->data_fifo_w,
 					  1, &buf[count], bytes);
 		count += bytes;
 		DBG("%s FIFO: %zd bytes written, count=%zd, rc=%d\n",
@@ -315,7 +338,7 @@ static int tpm_write_fifo(uint8_t* buf, size_t buflen)
 
 	rc = tpm_i2c_request_send(tpm_device,
 				  SMBUS_WRITE,
-				  TPM_DATA_FIFO_W, 1,
+				  tpm_info->data_fifo_w, 1,
 				  &buf[count], 1);
 	count++;
 	DBG("%s FIFO: last byte written, count=%zd, rc=%d\n",
@@ -381,7 +404,7 @@ static int tpm_read_fifo(uint8_t* buf, size_t* buflen)
 		}
 		rc = tpm_i2c_request_send(tpm_device,
 					  SMBUS_READ,
-					  TPM_DATA_FIFO_R, 1,
+					  tpm_info->data_fifo_r, 1,
 					  &buf[count], burst_count);
 		count += burst_count;
 		DBG("%s FIFO: %d bytes read, count=%zd, rc=%d\n",
@@ -541,7 +564,7 @@ static int nuvoton_tpm_quirk(void *data, struct i2c_request *req, int *rc)
 	return 0;
 }
 
-void tpm_i2c_nuvoton_probe(void)
+static void __tpm_i2c_nuvoton_probe(const struct tpm_info *info)
 {
 	struct tpm_dev *tpm_device = NULL;
 	struct dt_node *node = NULL;
@@ -549,9 +572,10 @@ void tpm_i2c_nuvoton_probe(void)
 	const char *name;
 	uint32_t vendor = 0;
 
-	dt_for_each_compatible(dt_root, node, "nuvoton,npct650") {
+	dt_for_each_compatible(dt_root, node, info->compatible) {
 		if (!dt_node_is_enabled(node))
 			continue;
+		tpm_info = info;
 		tpm_device = (struct tpm_dev*) malloc(sizeof(struct tpm_dev));
 		assert(tpm_device);
 		/*
@@ -585,12 +609,12 @@ void tpm_i2c_nuvoton_probe(void)
 			goto disable;
 		}
 		/* ensure there's really the TPM we expect at that address */
-		if (tpm_i2c_request_send(tpm_device, SMBUS_READ, TPM_VID_DID,
+		if (tpm_i2c_request_send(tpm_device, SMBUS_READ, tpm_info->vid_did,
 					 1, &vendor, sizeof(vendor))) {
 			prlog(PR_ERR, "NUVOTON: i2c device inaccessible\n");
 			goto disable;
 		}
-		if ((vendor & TPM_VENDOR_ID_MASK) != TPM_NUVOTON_VID) {
+		if ((vendor & TPM_VENDOR_ID_MASK) != tpm_info->vendor_id) {
 			prlog(PR_ERR, "NUVOTON: expected vendor id mismatch\n");
 			goto disable;
 		}
@@ -612,8 +636,11 @@ void tpm_i2c_nuvoton_probe(void)
 		/*
 		 * Tweak for linux. It doesn't have a driver compatible
 		 * with "nuvoton,npct650"
+		 *
+		 * Not necessary for 75x, as we use the compatible that
+		 * Linux expects.
 		 */
-		if (!dt_node_is_compatible(node, "nuvoton,npct601")) {
+		if (dt_node_is_compatible(node, "nuvoton,npct650")) {
 			dt_check_del_prop(node, "compatible");
 			dt_add_property_strings(node, "compatible",
 						"nuvoton,npct650", "nuvoton,npct601");
@@ -624,4 +651,10 @@ disable:
 	dt_add_property_string(node, "status", "disabled");
 	prlog(PR_NOTICE, "TPM: tpm node %p disabled\n", node);
 	free(tpm_device);
+}
+
+void tpm_i2c_nuvoton_probe(void)
+{
+	__tpm_i2c_nuvoton_probe(&tpm_nuvoton_650);
+	__tpm_i2c_nuvoton_probe(&tpm_nuvoton_75x);
 }

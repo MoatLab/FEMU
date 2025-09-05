@@ -9,12 +9,13 @@
 #include "qemu/osdep.h"
 #include "cpu.h"
 #include "exec/cpu-defs.h"
+#include "exec/target_page.h"
 #include "elf.h"
 #include "hw/loader.h"
 #include "hw/openrisc/boot.h"
-#include "sysemu/device_tree.h"
-#include "sysemu/qtest.h"
-#include "sysemu/reset.h"
+#include "system/device_tree.h"
+#include "system/qtest.h"
+#include "system/reset.h"
 #include "qemu/error-report.h"
 
 #include <libfdt.h>
@@ -32,7 +33,7 @@ hwaddr openrisc_load_kernel(ram_addr_t ram_size,
 
     if (kernel_filename && !qtest_enabled()) {
         kernel_size = load_elf(kernel_filename, NULL, NULL, NULL,
-                               &elf_entry, NULL, &high_addr, NULL, 1,
+                               &elf_entry, NULL, &high_addr, NULL, ELFDATA2MSB,
                                EM_OPENRISC, 1, 0);
         entry = elf_entry;
         if (kernel_size < 0) {
@@ -90,8 +91,8 @@ hwaddr openrisc_load_initrd(void *fdt, const char *filename,
     return start + size;
 }
 
-uint32_t openrisc_load_fdt(void *fdt, hwaddr load_start,
-                           uint64_t mem_size)
+uint32_t openrisc_load_fdt(MachineState *ms, void *fdt,
+                           hwaddr load_start, uint64_t mem_size)
 {
     uint32_t fdt_addr;
     int ret;
@@ -109,7 +110,9 @@ uint32_t openrisc_load_fdt(void *fdt, hwaddr load_start,
     /* Should only fail if we've built a corrupted tree */
     g_assert(ret == 0);
     /* copy in the device tree */
-    qemu_fdt_dumpdtb(fdt, fdtsize);
+
+    /* Save FDT for dumpdtb monitor command */
+    ms->fdt = fdt;
 
     rom_add_blob_fixed_as("fdt", fdt, fdtsize, fdt_addr,
                           &address_space_memory);

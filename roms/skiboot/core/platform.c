@@ -135,15 +135,27 @@ static int64_t opal_cec_reboot2(uint32_t reboot_type, char *diag)
 }
 opal_call(OPAL_CEC_REBOOT2, opal_cec_reboot2, 2);
 
+static void generic_platform_fixup_bmc(struct dt_node *bmc)
+{
+	/* Try setting proper bmc platform by checking compatible property */
+	if (dt_node_is_compatible(bmc, "ibm,ast2600,openbmc"))
+		platform.bmc = &bmc_plat_ast2600_openbmc;
+}
+
 static bool generic_platform_probe(void)
 {
-	if (dt_find_by_path(dt_root, "bmc")) {
+	struct dt_node *bmc;
+
+	bmc = dt_find_by_path(dt_root, "bmc");
+	if (bmc) {
 		/* We appear to have a BMC... so let's cross our fingers
 		 * and see if we can do anything!
 		 */
 		prlog(PR_ERR, "GENERIC BMC PLATFORM: **GUESSING** that there's "
 		      "*maybe* a BMC we can talk to.\n");
 		prlog(PR_ERR, "THIS IS ****UNSUPPORTED****, BRINGUP USE ONLY.\n");
+
+		generic_platform_fixup_bmc(bmc);
 		astbmc_early_init();
 	} else {
 		uart_init();

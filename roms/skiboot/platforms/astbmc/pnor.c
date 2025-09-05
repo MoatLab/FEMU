@@ -5,6 +5,7 @@
 #include <device.h>
 #include <console.h>
 #include <opal.h>
+#include <pldm.h>
 #include <libflash/ipmi-hiomap.h>
 #include <libflash/mbox-flash.h>
 #include <libflash/libflash.h>
@@ -31,6 +32,30 @@ static enum ast_flash_style ast_flash_get_fallback_style(void)
 
     return raw_mem;
 }
+
+#ifdef CONFIG_PLDM
+int pnor_pldm_init(void)
+{
+	struct blocklevel_device *bl = NULL;
+	int rc = 0;
+
+	rc = pldm_lid_files_init(&bl);
+	if (rc) {
+		prerror("PLAT: Failed to init PNOR driver\n");
+		goto fail;
+	}
+
+	rc = flash_register(bl);
+	if (!rc)
+		return 0;
+
+fail:
+	if (bl)
+		pldm_lid_files_exit(bl);
+
+	return rc;
+}
+#endif
 
 int pnor_init(void)
 {

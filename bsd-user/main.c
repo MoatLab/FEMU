@@ -35,7 +35,10 @@
 #include "qemu/path.h"
 #include "qemu/help_option.h"
 #include "qemu/module.h"
-#include "exec/exec-all.h"
+#include "qemu/plugin.h"
+#include "user/guest-base.h"
+#include "user/page-protection.h"
+#include "accel/accel-ops.h"
 #include "tcg/startup.h"
 #include "qemu/timer.h"
 #include "qemu/envlist.h"
@@ -45,6 +48,7 @@
 #include "crypto/init.h"
 #include "qemu/guest-random.h"
 #include "gdbstub/user.h"
+#include "exec/page-vary.h"
 
 #include "host-os.h"
 #include "target_arch_cpu.h"
@@ -57,6 +61,7 @@ uintptr_t qemu_host_page_size;
 intptr_t qemu_host_page_mask;
 
 static bool opt_one_insn_per_tb;
+static unsigned long opt_tb_size;
 uintptr_t guest_base;
 bool have_guest_base;
 /*
@@ -75,29 +80,20 @@ bool have_guest_base;
 # if HOST_LONG_BITS > TARGET_VIRT_ADDR_SPACE_BITS
 #  if TARGET_VIRT_ADDR_SPACE_BITS == 32 && \
       (TARGET_LONG_BITS == 32 || defined(TARGET_ABI32))
-#   define MAX_RESERVED_VA  0xfffffffful
+#   define MAX_RESERVED_VA(CPU)  0xfffffffful
 #  else
-#   define MAX_RESERVED_VA  ((1ul << TARGET_VIRT_ADDR_SPACE_BITS) - 1)
+#   define MAX_RESERVED_VA(CPU)  ((1ul << TARGET_VIRT_ADDR_SPACE_BITS) - 1)
 #  endif
 # else
-#  define MAX_RESERVED_VA  0
+#  define MAX_RESERVED_VA(CPU)  0
 # endif
 #endif
 
-/*
- * That said, reserving *too* much vm space via mmap can run into problems
- * with rlimits, oom due to page table creation, etc.  We will still try it,
- * if directed by the command-line option, but not by default.
- */
-#if HOST_LONG_BITS == 64 && TARGET_VIRT_ADDR_SPACE_BITS <= 32
-unsigned long reserved_va = MAX_RESERVED_VA;
-#else
 unsigned long reserved_va;
-#endif
+unsigned long guest_addr_max;
 
 const char *interp_prefix = CONFIG_QEMU_INTERP_PREFIX;
 const char *qemu_uname_release;
-char qemu_proc_pathname[PATH_MAX];  /* full path to exeutable */
 
 unsigned long target_maxtsiz = TARGET_MAXTSIZ;   /* max text size */
 unsigned long target_dfldsiz = TARGET_DFLDSIZ;   /* initial data size limit */
@@ -111,8 +107,9 @@ unsigned long target_sgrowsiz = TARGET_SGROWSIZ; /* amount to grow stack */
 void fork_start(void)
 {
     start_exclusive();
-    cpu_list_lock();
     mmap_fork_start();
+    cpu_list_lock();
+    qemu_plugin_user_prefork_lock();
     gdbserver_fork_start();
 }
 
@@ -120,31 +117,31 @@ void fork_end(pid_t pid)
 {
     bool child = pid == 0;
 
+    qemu_plugin_user_postfork(child);
+    mmap_fork_end(child);
     if (child) {
         CPUState *cpu, *next_cpu;
         /*
-         * Child processes created by fork() only have a single thread.  Discard
-         * information about the parent threads.
+         * Child processes created by fork() only have a single thread.
+         * Discard information about the parent threads.
          */
         CPU_FOREACH_SAFE(cpu, next_cpu) {
             if (cpu != thread_cpu) {
                 QTAILQ_REMOVE_RCU(&cpus_queue, cpu, node);
             }
         }
-        mmap_fork_end(child);
-        /*
-         * qemu_init_cpu_list() takes care of reinitializing the exclusive
-         * state, so we don't need to end_exclusive() here.
-         */
         qemu_init_cpu_list();
         get_task_state(thread_cpu)->ts_tid = qemu_get_thread_id();
-        gdbserver_fork_end(thread_cpu, pid);
     } else {
-        mmap_fork_end(child);
         cpu_list_unlock();
-        gdbserver_fork_end(thread_cpu, pid);
-        end_exclusive();
     }
+    gdbserver_fork_end(thread_cpu, pid);
+    /*
+     * qemu_init_cpu_list() reinitialized the child exclusive state, but we
+     * also need to keep current_cpu consistent, so call end_exclusive() for
+     * both child and parent.
+     */
+    end_exclusive();
 }
 
 void cpu_loop(CPUArchState *env)
@@ -175,9 +172,13 @@ static void usage(void)
            "                  (use '-d help' for a list of log items)\n"
            "-D logfile        write logs to 'logfile' (default stderr)\n"
            "-one-insn-per-tb  run with one guest instruction per emulated TB\n"
+           "-tb-size size     TCG translation block cache size\n"
            "-strace           log system calls\n"
            "-trace            [[enable=]<pattern>][,events=<file>][,file=<file>]\n"
            "                  specify tracing options\n"
+#ifdef CONFIG_PLUGIN
+           "-plugin           [file=]<file>[,<argname>=<argvalue>]\n"
+#endif
            "\n"
            "Environment variables:\n"
            "QEMU_STRACE       Print system calls and arguments similar to the\n"
@@ -228,6 +229,8 @@ static void init_task_state(TaskState *ts)
     };
 }
 
+static QemuPluginList plugins = QTAILQ_HEAD_INITIALIZER(plugins);
+
 void gemu_log(const char *fmt, ...)
 {
     va_list ap;
@@ -254,22 +257,6 @@ adjust_ssize(void)
     setrlimit(RLIMIT_STACK, &rl);
 }
 
-static void save_proc_pathname(char *argv0)
-{
-    int mib[4];
-    size_t len;
-
-    mib[0] = CTL_KERN;
-    mib[1] = KERN_PROC;
-    mib[2] = KERN_PROC_PATHNAME;
-    mib[3] = -1;
-
-    len = sizeof(qemu_proc_pathname);
-    if (sysctl(mib, 4, qemu_proc_pathname, &len, NULL, 0)) {
-        perror("sysctl");
-    }
-}
-
 int main(int argc, char **argv)
 {
     const char *filename;
@@ -290,6 +277,8 @@ int main(int argc, char **argv)
     char **target_environ, **wrk;
     envlist_t *envlist = NULL;
     char *argv0 = NULL;
+    int host_page_size;
+    unsigned long max_reserved_va;
 
     adjust_ssize();
 
@@ -297,7 +286,6 @@ int main(int argc, char **argv)
         usage();
     }
 
-    save_proc_pathname(argv[0]);
 
     error_init(argv[0]);
     module_call_init(MODULE_INIT_TRACE);
@@ -325,6 +313,7 @@ int main(int argc, char **argv)
     cpu_model = NULL;
 
     qemu_add_opts(&qemu_trace_opts);
+    qemu_plugin_add_opts();
 
     optind = 1;
     for (;;) {
@@ -408,10 +397,20 @@ int main(int argc, char **argv)
             seed_optarg = optarg;
         } else if (!strcmp(r, "one-insn-per-tb")) {
             opt_one_insn_per_tb = true;
+        } else if (!strcmp(r, "tb-size")) {
+            r = argv[optind++];
+            if (qemu_strtoul(r, NULL, 0, &opt_tb_size)) {
+                usage();
+            }
         } else if (!strcmp(r, "strace")) {
             do_strace = 1;
         } else if (!strcmp(r, "trace")) {
             trace_opt_parse(optarg);
+#ifdef CONFIG_PLUGIN
+        } else if (!strcmp(r, "plugin")) {
+            r = argv[optind++];
+            qemu_plugin_opt_parse(r, &plugins);
+#endif
         } else if (!strcmp(r, "0")) {
             argv0 = argv[optind++];
         } else {
@@ -446,6 +445,7 @@ int main(int argc, char **argv)
         exit(1);
     }
     trace_init_file();
+    qemu_plugin_load_list(&plugins, &error_fatal);
 
     /* Zero out regs */
     memset(regs, 0, sizeof(struct target_pt_regs));
@@ -473,12 +473,54 @@ int main(int argc, char **argv)
         accel_init_interfaces(ac);
         object_property_set_bool(OBJECT(accel), "one-insn-per-tb",
                                  opt_one_insn_per_tb, &error_abort);
-        ac->init_machine(NULL);
+        object_property_set_int(OBJECT(accel), "tb-size",
+                                opt_tb_size, &error_abort);
+        ac->init_machine(accel, NULL);
     }
+
+    /*
+     * Finalize page size before creating CPUs.
+     * This will do nothing if !TARGET_PAGE_BITS_VARY.
+     * The most efficient setting is to match the host.
+     */
+    host_page_size = qemu_real_host_page_size();
+    set_preferred_target_page_bits(ctz32(host_page_size));
+    finalize_target_page_bits();
+
     cpu = cpu_create(cpu_type);
     env = cpu_env(cpu);
     cpu_reset(cpu);
     thread_cpu = cpu;
+
+    /*
+     * Reserving too much vm space via mmap can run into problems with rlimits,
+     * oom due to page table creation, etc.  We will still try it, if directed
+     * by the command-line option, but not by default. Unless we're running a
+     * target address space of 32 or fewer bits on a host with 64 bits.
+     */
+    max_reserved_va = MAX_RESERVED_VA(cpu);
+    if (reserved_va != 0) {
+        if ((reserved_va + 1) % host_page_size) {
+            char *s = size_to_str(host_page_size);
+            fprintf(stderr, "Reserved virtual address not aligned mod %s\n", s);
+            g_free(s);
+            exit(EXIT_FAILURE);
+        }
+        if (max_reserved_va && reserved_va > max_reserved_va) {
+            fprintf(stderr, "Reserved virtual address too big\n");
+            exit(EXIT_FAILURE);
+        }
+    } else if (HOST_LONG_BITS == 64 && TARGET_VIRT_ADDR_SPACE_BITS <= 32) {
+        /* MAX_RESERVED_VA + 1 is a large power of 2, so is aligned. */
+        reserved_va = max_reserved_va;
+    }
+    if (reserved_va != 0) {
+        guest_addr_max = reserved_va;
+    } else if (MIN(TARGET_VIRT_ADDR_SPACE_BITS, TARGET_ABI_BITS) <= 32) {
+        guest_addr_max = UINT32_MAX;
+    } else {
+        guest_addr_max = ~0ul;
+    }
 
     if (getenv("QEMU_STRACE")) {
         do_strace = 1;
@@ -589,6 +631,7 @@ int main(int argc, char **argv)
     init_task_state(ts);
     ts->info = info;
     ts->bprm = &bprm;
+    ts->ts_tid = qemu_get_thread_id();
     cpu->opaque = ts;
 
     target_set_brk(info->brk);
@@ -605,8 +648,7 @@ int main(int argc, char **argv)
     target_cpu_init(env, regs);
 
     if (gdbstub) {
-        gdbserver_start(gdbstub);
-        gdb_handlesig(cpu, 0, NULL, NULL, 0);
+        gdbserver_start(gdbstub, &error_fatal);
     }
     cpu_loop(env);
     /* never exits */

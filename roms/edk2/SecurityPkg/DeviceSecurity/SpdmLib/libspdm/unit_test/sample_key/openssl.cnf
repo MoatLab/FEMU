@@ -1,0 +1,74 @@
+### REF: https://www.openssl.org/docs/man1.1.1/man3/ASN1_generate_nconf.html
+
+[ v3_inter ]
+basicConstraints = CA:true
+keyUsage = cRLSign, keyCertSign, digitalSignature, nonRepudiation, keyEncipherment, dataEncipherment, keyAgreement
+subjectKeyIdentifier = hash
+extendedKeyUsage = critical, serverAuth, clientAuth
+
+[ v3_end ]
+basicConstraints = critical,CA:false
+keyUsage = nonRepudiation, digitalSignature, keyEncipherment
+subjectKeyIdentifier = hash
+subjectAltName = otherName:1.3.6.1.4.1.412.274.1;UTF8:ACME:WIDGET:1234567890
+extendedKeyUsage = critical, serverAuth, clientAuth, OCSPSigning
+1.3.6.1.4.1.412.274.6 = ASN1:SEQUENCE:id_spdm_cert_oids
+[id_spdm_cert_oids]
+field1 = SEQUENCE:id_spdm_cert_oid
+[id_spdm_cert_oid]
+field1 = OID:1.3.6.1.4.1.412.274.2
+
+[ v3_end_with_false_basicConstraints ]
+basicConstraints = critical,CA:true
+keyUsage = nonRepudiation, digitalSignature, keyEncipherment
+subjectKeyIdentifier = hash
+subjectAltName = otherName:1.3.6.1.4.1.412.274.1;UTF8:ACME:WIDGET:1234567890
+extendedKeyUsage = critical, serverAuth, clientAuth, OCSPSigning
+1.3.6.1.4.1.412.274.6 = ASN1:SEQUENCE:id_spdm_cert_oids
+[id_spdm_cert_oids]
+field1 = SEQUENCE:id_spdm_cert_oid
+[id_spdm_cert_oid]
+field1 = OID:1.3.6.1.4.1.412.274.2
+
+[ v3_end_without_basicConstraints ]
+keyUsage = nonRepudiation, digitalSignature, keyEncipherment
+subjectKeyIdentifier = hash
+subjectAltName = otherName:1.3.6.1.4.1.412.274.1;UTF8:ACME:WIDGET:1234567890
+extendedKeyUsage = critical, serverAuth, clientAuth, OCSPSigning
+1.3.6.1.4.1.412.274.6 = ASN1:SEQUENCE:id_spdm_cert_oids
+[id_spdm_cert_oids]
+field1 = SEQUENCE:id_spdm_cert_oid
+[id_spdm_cert_oid]
+field1 = OID:1.3.6.1.4.1.412.274.2
+
+[v3_end_with_spdm_req_rsp_eku]
+basicConstraints = critical,CA:false
+keyUsage = nonRepudiation, digitalSignature, keyEncipherment
+subjectKeyIdentifier = hash
+extendedKeyUsage = critical, serverAuth, clientAuth, OCSPSigning, OID:1.3.6.1.4.1.412.274.3, OID:1.3.6.1.4.1.412.274.4
+
+[v3_end_with_spdm_rsp_eku]
+basicConstraints = critical,CA:false
+keyUsage = nonRepudiation, digitalSignature, keyEncipherment
+subjectKeyIdentifier = hash
+extendedKeyUsage = critical, serverAuth, clientAuth, OCSPSigning, OID:1.3.6.1.4.1.412.274.3
+
+[v3_end_with_spdm_req_eku]
+basicConstraints = critical,CA:false
+keyUsage = nonRepudiation, digitalSignature, keyEncipherment
+subjectKeyIdentifier = hash
+extendedKeyUsage = critical, serverAuth, clientAuth, OCSPSigning, OID:1.3.6.1.4.1.412.274.4
+
+[ v3_end_alias_part ]
+basicConstraints = critical,CA:true
+keyUsage = nonRepudiation, digitalSignature, keyEncipherment, keyCertSign
+subjectKeyIdentifier = hash
+subjectAltName = otherName:1.3.6.1.4.1.412.274.1;UTF8:ACME:WIDGET:1234567890
+extendedKeyUsage = critical, serverAuth, clientAuth, OCSPSigning
+
+[ v3_end_alias_entire ]
+basicConstraints = critical,CA:false
+keyUsage = nonRepudiation, digitalSignature, keyEncipherment
+subjectKeyIdentifier = hash
+subjectAltName = otherName:1.3.6.1.4.1.412.274.1;UTF8:ACME:WIDGET:1234567890
+extendedKeyUsage = critical, serverAuth, clientAuth, OCSPSigning

@@ -14,17 +14,26 @@
  * limitations under the License.
  */
 /* Dummy config.h for CCAN test suite */
+#ifndef CCAN_CONFIG_H
+#define CCAN_CONFIG_H
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE /* Always use GNU extensions. */
+#endif
+
+#include <endian.h>
+
+#if __BYTE_ORDER == __LITTLE_ENDIAN
+#define HAVE_BIG_ENDIAN         0
+#define HAVE_LITTLE_ENDIAN      1
+#else
+#define HAVE_BIG_ENDIAN         1
+#define HAVE_LITTLE_ENDIAN      0
+#endif
 
 #define HAVE_BUILTIN_TYPES_COMPATIBLE_P 1
 #define HAVE_TYPEOF 1
 
-#ifndef HAVE_BIG_ENDIAN
-#define HAVE_BIG_ENDIAN 0
-#endif
+#define HAVE_BYTESWAP_H 1
+#define HAVE_BSWAP_64 1
 
-#ifndef HAVE_LITTLE_ENDIAN
-#define HAVE_LITTLE_ENDIAN 0
-#endif
-
-#define HAVE_BYTESWAP_H 0
-#define HAVE_BSWAP_64 0
+#endif /* CCAN_CONFIG_H */

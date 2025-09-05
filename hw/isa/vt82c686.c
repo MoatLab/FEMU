@@ -17,7 +17,7 @@
 #include "hw/isa/vt82c686.h"
 #include "hw/block/fdc.h"
 #include "hw/char/parallel-isa.h"
-#include "hw/char/serial.h"
+#include "hw/char/serial-isa.h"
 #include "hw/pci/pci.h"
 #include "hw/qdev-properties.h"
 #include "hw/ide/pci.h"
@@ -220,11 +220,11 @@ typedef struct via_pm_init_info {
     uint16_t device_id;
 } ViaPMInitInfo;
 
-static void via_pm_class_init(ObjectClass *klass, void *data)
+static void via_pm_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
-    ViaPMInitInfo *info = data;
+    const ViaPMInitInfo *info = data;
 
     k->realize = via_pm_realize;
     k->config_write = pm_write_config;
@@ -232,7 +232,7 @@ static void via_pm_class_init(ObjectClass *klass, void *data)
     k->device_id = info->device_id;
     k->class_id = PCI_CLASS_BRIDGE_OTHER;
     k->revision = 0x40;
-    dc->reset = via_pm_reset;
+    device_class_set_legacy_reset(dc, via_pm_reset);
     /* Reason: part of VIA south bridge, does not exist stand alone */
     dc->user_creatable = false;
     dc->vmsd = &vmstate_acpi;
@@ -243,7 +243,7 @@ static const TypeInfo via_pm_info = {
     .parent        = TYPE_PCI_DEVICE,
     .instance_size = sizeof(ViaPMState),
     .abstract      = true,
-    .interfaces = (InterfaceInfo[]) {
+    .interfaces = (const InterfaceInfo[]) {
         { INTERFACE_CONVENTIONAL_PCI_DEVICE },
         { },
     },
@@ -259,7 +259,7 @@ static const TypeInfo vt82c686b_pm_info = {
     .name          = TYPE_VT82C686B_PM,
     .parent        = TYPE_VIA_PM,
     .class_init    = via_pm_class_init,
-    .class_data    = (void *)&vt82c686b_pm_init_info,
+    .class_data    = &vt82c686b_pm_init_info,
 };
 
 static const ViaPMInitInfo vt8231_pm_init_info = {
@@ -272,7 +272,7 @@ static const TypeInfo vt8231_pm_info = {
     .name          = TYPE_VT8231_PM,
     .parent        = TYPE_VIA_PM,
     .class_init    = via_pm_class_init,
-    .class_data    = (void *)&vt8231_pm_init_info,
+    .class_data    = &vt8231_pm_init_info,
 };
 
 
@@ -337,7 +337,7 @@ static void via_superio_devices_enable(ViaSuperIOState *s, uint8_t data)
     isa_fdc_set_enabled(s->superio.floppy, data & BIT(4));
 }
 
-static void via_superio_class_init(ObjectClass *klass, void *data)
+static void via_superio_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     ISASuperIOClass *sc = ISA_SUPERIO_CLASS(klass);
@@ -456,12 +456,12 @@ static void vt82c686b_superio_init(Object *obj)
     VIA_SUPERIO(obj)->io_ops = &vt82c686b_superio_cfg_ops;
 }
 
-static void vt82c686b_superio_class_init(ObjectClass *klass, void *data)
+static void vt82c686b_superio_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     ISASuperIOClass *sc = ISA_SUPERIO_CLASS(klass);
 
-    dc->reset = vt82c686b_superio_reset;
+    device_class_set_legacy_reset(dc, vt82c686b_superio_reset);
     sc->serial.count = 2;
     sc->parallel.count = 1;
     sc->ide.count = 0; /* emulated by via-ide */
@@ -565,12 +565,12 @@ static void vt8231_superio_init(Object *obj)
     VIA_SUPERIO(obj)->io_ops = &vt8231_superio_cfg_ops;
 }
 
-static void vt8231_superio_class_init(ObjectClass *klass, void *data)
+static void vt8231_superio_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     ISASuperIOClass *sc = ISA_SUPERIO_CLASS(klass);
 
-    dc->reset = vt8231_superio_reset;
+    device_class_set_legacy_reset(dc, vt8231_superio_reset);
     sc->serial.count = 1;
     sc->parallel.count = 1;
     sc->ide.count = 0; /* emulated by via-ide */
@@ -592,6 +592,8 @@ OBJECT_DECLARE_SIMPLE_TYPE(ViaISAState, VIA_ISA)
 
 struct ViaISAState {
     PCIDevice dev;
+
+    IRQState i8259_irq;
     qemu_irq cpu_intr;
     qemu_irq *isa_irqs_in;
     uint16_t irq_state[ISA_NUM_IRQS];
@@ -632,7 +634,7 @@ static const TypeInfo via_isa_info = {
     .instance_size = sizeof(ViaISAState),
     .instance_init = via_isa_init,
     .abstract      = true,
-    .interfaces    = (InterfaceInfo[]) {
+    .interfaces    = (const InterfaceInfo[]) {
         { INTERFACE_CONVENTIONAL_PCI_DEVICE },
         { },
     },
@@ -715,13 +717,12 @@ static void via_isa_realize(PCIDevice *d, Error **errp)
     ViaISAState *s = VIA_ISA(d);
     DeviceState *dev = DEVICE(d);
     PCIBus *pci_bus = pci_get_bus(d);
-    qemu_irq *isa_irq;
     ISABus *isa_bus;
     int i;
 
-    qdev_init_gpio_out(dev, &s->cpu_intr, 1);
+    qdev_init_gpio_out_named(dev, &s->cpu_intr, "intr", 1);
     qdev_init_gpio_in_named(dev, via_isa_pirq, "pirq", PCI_NUM_PINS);
-    isa_irq = qemu_allocate_irqs(via_isa_request_i8259_irq, s, 1);
+    qemu_init_irq(&s->i8259_irq, via_isa_request_i8259_irq, s, 0);
     isa_bus = isa_bus_new(dev, pci_address_space(d), pci_address_space_io(d),
                           errp);
 
@@ -729,7 +730,7 @@ static void via_isa_realize(PCIDevice *d, Error **errp)
         return;
     }
 
-    s->isa_irqs_in = i8259_init(isa_bus, *isa_irq);
+    s->isa_irqs_in = i8259_init(isa_bus, &s->i8259_irq);
     isa_bus_register_input_irqs(isa_bus, s->isa_irqs_in);
     i8254_pit_init(isa_bus, 0x40, 0, NULL);
     i8257_dma_init(OBJECT(d), isa_bus, 0);
@@ -832,7 +833,7 @@ static void vt82c686b_init(Object *obj)
     object_initialize_child(obj, "pm", &s->pm, TYPE_VT82C686B_PM);
 }
 
-static void vt82c686b_class_init(ObjectClass *klass, void *data)
+static void vt82c686b_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
@@ -843,7 +844,7 @@ static void vt82c686b_class_init(ObjectClass *klass, void *data)
     k->device_id = PCI_DEVICE_ID_VIA_82C686B_ISA;
     k->class_id = PCI_CLASS_BRIDGE_ISA;
     k->revision = 0x40;
-    dc->reset = vt82c686b_isa_reset;
+    device_class_set_legacy_reset(dc, vt82c686b_isa_reset);
     dc->desc = "ISA bridge";
     dc->vmsd = &vmstate_via;
     /* Reason: part of VIA VT82C686 southbridge, needs to be wired up */
@@ -897,7 +898,7 @@ static void vt8231_init(Object *obj)
     object_initialize_child(obj, "pm", &s->pm, TYPE_VT8231_PM);
 }
 
-static void vt8231_class_init(ObjectClass *klass, void *data)
+static void vt8231_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
@@ -908,7 +909,7 @@ static void vt8231_class_init(ObjectClass *klass, void *data)
     k->device_id = PCI_DEVICE_ID_VIA_8231_ISA;
     k->class_id = PCI_CLASS_BRIDGE_ISA;
     k->revision = 0x10;
-    dc->reset = vt8231_isa_reset;
+    device_class_set_legacy_reset(dc, vt8231_isa_reset);
     dc->desc = "ISA bridge";
     dc->vmsd = &vmstate_via;
     /* Reason: part of VIA VT8231 southbridge, needs to be wired up */

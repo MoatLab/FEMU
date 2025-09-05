@@ -18,6 +18,16 @@ struct cdb_rwdata_10 {
     u8 pad[6];
 } PACKED;
 
+#define CDB_CMD_READ_16 0x88
+#define CDB_CMD_WRITE_16 0x8A
+struct cdb_rwdata_16 {
+    u8 command;
+    u8 flags;
+    u64 lba;
+    u32 count;
+    u16 reserved_14;
+} PACKED;
+
 #define CDB_CMD_READ_CAPACITY 0x25
 
 struct cdb_read_capacity {
@@ -30,6 +40,23 @@ struct cdb_read_capacity {
 struct cdbres_read_capacity {
     u32 sectors;
     u32 blksize;
+} PACKED;
+
+
+#define CDB_CMD_SERVICE_ACTION_IN 0x9E
+#define CDB_CMD_SAI_READ_CAPACITY_16 0x10
+struct cdb_sai_read_capacity_16 {
+    u8 command;
+    u8 flags;
+    u64 lba; //marked as obsolete?
+    u32 len;
+    u16 reserved_14;
+} PACKED;
+
+struct cdbres_read_capacity_16 {
+    u64 sectors;
+    u32 blksize;
+    u8 reserved_12[20];
 } PACKED;
 
 #define CDB_CMD_TEST_UNIT_READY  0x00

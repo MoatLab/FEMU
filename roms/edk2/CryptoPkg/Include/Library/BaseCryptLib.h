@@ -5,6 +5,7 @@
   functionality enabling.
 
 Copyright (c) 2009 - 2022, Intel Corporation. All rights reserved.<BR>
+Copyright (c) Microsoft Corporation. All rights reserved.
 SPDX-License-Identifier: BSD-2-Clause-Patent
 
 **/
@@ -2148,6 +2149,122 @@ Pkcs1v2Encrypt (
   );
 
 /**
+  Encrypts a blob using PKCS1v2 (RSAES-OAEP) schema. On success, will return the
+  encrypted message in a newly allocated buffer.
+
+  Things that can cause a failure include:
+  - X509 key size does not match any known key size.
+  - Fail to allocate an intermediate buffer.
+  - Null pointer provided for a non-optional parameter.
+  - Data size is too large for the provided key size (max size is a function of key size
+    and hash digest size).
+
+  @param[in]  RsaContext          A pointer to an RSA context created by RsaNew() and
+                                  provisioned with a public key using RsaSetKey().
+  @param[in]  InData              Data to be encrypted.
+  @param[in]  InDataSize          Size of the data buffer.
+  @param[in]  PrngSeed            [Optional] If provided, a pointer to a random seed buffer
+                                  to be used when initializing the PRNG. NULL otherwise.
+  @param[in]  PrngSeedSize        [Optional] If provided, size of the random seed buffer.
+                                  0 otherwise.
+  @param[in]  DigestLen           [Optional] If provided, size of the hash used:
+                                  SHA1_DIGEST_SIZE
+                                  SHA256_DIGEST_SIZE
+                                  SHA384_DIGEST_SIZE
+                                  SHA512_DIGEST_SIZE
+                                  0 to use default (SHA1)
+  @param[out] EncryptedData       Pointer to an allocated buffer containing the encrypted
+                                  message.
+  @param[out] EncryptedDataSize   Size of the encrypted message buffer.
+
+  @retval     TRUE                Encryption was successful.
+  @retval     FALSE               Encryption failed.
+
+**/
+BOOLEAN
+EFIAPI
+RsaOaepEncrypt (
+  IN   VOID         *RsaContext,
+  IN   UINT8        *InData,
+  IN   UINTN        InDataSize,
+  IN   CONST UINT8  *PrngSeed   OPTIONAL,
+  IN   UINTN        PrngSeedSize   OPTIONAL,
+  IN   UINT16       DigestLen   OPTIONAL,
+  OUT  UINT8        **EncryptedData,
+  OUT  UINTN        *EncryptedDataSize
+  );
+
+/**
+  Decrypts a blob using PKCS1v2 (RSAES-OAEP) schema. On success, will return the
+  decrypted message in a newly allocated buffer.
+
+  Things that can cause a failure include:
+  - Fail to parse private key.
+  - Fail to allocate an intermediate buffer.
+  - Null pointer provided for a non-optional parameter.
+
+  @param[in]  PrivateKey          A pointer to the DER-encoded private key.
+  @param[in]  PrivateKeySize      Size of the private key buffer.
+  @param[in]  EncryptedData       Data to be decrypted.
+  @param[in]  EncryptedDataSize   Size of the encrypted buffer.
+  @param[out] OutData             Pointer to an allocated buffer containing the encrypted
+                                  message.
+  @param[out] OutDataSize         Size of the encrypted message buffer.
+
+  @retval     TRUE                Encryption was successful.
+  @retval     FALSE               Encryption failed.
+
+**/
+BOOLEAN
+EFIAPI
+Pkcs1v2Decrypt (
+  IN   CONST UINT8  *PrivateKey,
+  IN   UINTN        PrivateKeySize,
+  IN   UINT8        *EncryptedData,
+  IN   UINTN        EncryptedDataSize,
+  OUT  UINT8        **OutData,
+  OUT  UINTN        *OutDataSize
+  );
+
+/**
+  Decrypts a blob using PKCS1v2 (RSAES-OAEP) schema. On success, will return the
+  decrypted message in a newly allocated buffer.
+
+  Things that can cause a failure include:
+  - Fail to parse private key.
+  - Fail to allocate an intermediate buffer.
+  - Null pointer provided for a non-optional parameter.
+
+  @param[in]  RsaContext          A pointer to an RSA context created by RsaNew() and
+                                  provisioned with a private key using RsaSetKey().
+  @param[in]  EncryptedData       Data to be decrypted.
+  @param[in]  EncryptedDataSize   Size of the encrypted buffer.
+  @param[in]  DigestLen           [Optional] If provided, size of the hash used:
+                                  SHA1_DIGEST_SIZE
+                                  SHA256_DIGEST_SIZE
+                                  SHA384_DIGEST_SIZE
+                                  SHA512_DIGEST_SIZE
+                                  0 to use default (SHA1)
+  @param[out] OutData             Pointer to an allocated buffer containing the encrypted
+                                  message.
+  @param[out] OutDataSize         Size of the encrypted message buffer.
+
+  @retval     TRUE                Encryption was successful.
+  @retval     FALSE               Encryption failed.
+
+**/
+BOOLEAN
+EFIAPI
+RsaOaepDecrypt (
+  IN   VOID    *RsaContext,
+  IN   UINT8   *EncryptedData,
+  IN   UINTN   EncryptedDataSize,
+  IN   UINT16  DigestLen   OPTIONAL,
+  OUT  UINT8   **OutData,
+  OUT  UINTN   *OutDataSize
+  );
+
+/**
   The 3rd parameter of Pkcs7GetSigners will return all embedded
   X.509 certificate in one given PKCS7 signature. The format is:
   //
@@ -2233,6 +2350,8 @@ Pkcs7FreeSigners (
   Cryptographic Message Syntax Standard", and outputs two certificate lists chained and
   unchained to the signer's certificates.
   The input signed data could be wrapped in a ContentInfo structure.
+
+  Pkcs7GetCertificatesList has not been implemented in BaseCryptoLibMbedTls.
 
   @param[in]  P7Data            Pointer to the PKCS#7 message.
   @param[in]  P7Length          Length of the PKCS#7 message in bytes.
@@ -2724,7 +2843,7 @@ X509GetKeyUsage (
   @param[in]      Cert             Pointer to the DER-encoded X509 certificate.
   @param[in]      CertSize         Size of the X509 certificate in bytes.
   @param[out]     Usage            Key Usage bytes.
-  @param[in, out] UsageSize        Key Usage buffer sizs in bytes.
+  @param[in, out] UsageSize        Key Usage buffer size in bytes.
 
   @retval TRUE                     The Usage bytes retrieve successfully.
   @retval FALSE                    If Cert is NULL.
@@ -2751,12 +2870,12 @@ X509GetExtendedKeyUsage (
   @param[in]      RootCertLength    Trusted Root Certificate buffer length
   @param[in]      CertChain         One or more ASN.1 DER-encoded X.509 certificates
                                     where the first certificate is signed by the Root
-                                    Certificate or is the Root Cerificate itself. and
-                                    subsequent cerificate is signed by the preceding
-                                    cerificate.
+                                    Certificate or is the Root Certificate itself. and
+                                    subsequent certificate is signed by the preceding
+                                    certificate.
   @param[in]      CertChainLength   Total length of the certificate chain, in bytes.
 
-  @retval  TRUE   All cerificates was issued by the first certificate in X509Certchain.
+  @retval  TRUE   All certificates was issued by the first certificate in X509Certchain.
   @retval  FALSE  Invalid certificate or the certificate was not issued by the given
                   trusted CA.
 **/
@@ -2774,9 +2893,9 @@ X509VerifyCertChain (
 
   @param[in]      CertChain         One or more ASN.1 DER-encoded X.509 certificates
                                     where the first certificate is signed by the Root
-                                    Certificate or is the Root Cerificate itself. and
-                                    subsequent cerificate is signed by the preceding
-                                    cerificate.
+                                    Certificate or is the Root Certificate itself. and
+                                    subsequent certificate is signed by the preceding
+                                    certificate.
   @param[in]      CertChainLength   Total length of the certificate chain, in bytes.
 
   @param[in]      CertIndex         Index of certificate. If index is -1 indecate the
@@ -2824,7 +2943,7 @@ Asn1GetTag (
   @param[in]      Cert                     Pointer to the DER-encoded X509 certificate.
   @param[in]      CertSize                 size of the X509 certificate in bytes.
   @param[out]     BasicConstraints         basic constraints bytes.
-  @param[in, out] BasicConstraintsSize     basic constraints buffer sizs in bytes.
+  @param[in, out] BasicConstraintsSize     basic constraints buffer size in bytes.
 
   @retval TRUE                     The basic constraints retrieve successfully.
   @retval FALSE                    If cert is NULL.
@@ -3021,6 +3140,8 @@ DhComputeKey (
   If Seed is not NULL, then the seed passed in is used.
   If Seed is NULL, then default seed is used.
   If this interface is not supported, then return FALSE.
+
+  RandomSeed has not been implemented in BaseCryptoLibMbedTls.
 
   @param[in]  Seed      Pointer to seed value.
                         If NULL, default seed is used.

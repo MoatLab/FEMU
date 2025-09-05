@@ -28,8 +28,8 @@
 #include "migration/qemu-file-types.h"
 #include "qemu/host-utils.h"
 #include "qemu/module.h"
-#include "sysemu/kvm.h"
-#include "sysemu/replay.h"
+#include "system/kvm.h"
+#include "system/replay.h"
 #include "hw/virtio/virtio-mmio.h"
 #include "qemu/error-report.h"
 #include "qemu/log.h"
@@ -248,6 +248,7 @@ static void virtio_mmio_write(void *opaque, hwaddr offset, uint64_t value,
 {
     VirtIOMMIOProxy *proxy = (VirtIOMMIOProxy *)opaque;
     VirtIODevice *vdev = virtio_bus_get_device(&proxy->bus);
+    uint16_t vq_idx;
 
     trace_virtio_mmio_write_offset(offset, value);
 
@@ -407,8 +408,14 @@ static void virtio_mmio_write(void *opaque, hwaddr offset, uint64_t value,
         }
         break;
     case VIRTIO_MMIO_QUEUE_NOTIFY:
-        if (value < VIRTIO_QUEUE_MAX) {
-            virtio_queue_notify(vdev, value);
+        vq_idx = value;
+        if (vq_idx < VIRTIO_QUEUE_MAX && virtio_queue_get_num(vdev, vq_idx)) {
+            if (virtio_vdev_has_feature(vdev, VIRTIO_F_NOTIFICATION_DATA)) {
+                VirtQueue *vq = virtio_get_queue(vdev, vq_idx);
+
+                virtio_queue_set_shadow_avail_idx(vq, (value >> 16) & 0xFFFF);
+            }
+            virtio_queue_notify(vdev, vq_idx);
         }
         break;
     case VIRTIO_MMIO_INTERRUPT_ACK:
@@ -744,13 +751,12 @@ static void virtio_mmio_pre_plugged(DeviceState *d, Error **errp)
 
 /* virtio-mmio device */
 
-static Property virtio_mmio_properties[] = {
+static const Property virtio_mmio_properties[] = {
     DEFINE_PROP_BOOL("format_transport_address", VirtIOMMIOProxy,
                      format_transport_address, true),
     DEFINE_PROP_BOOL("force-legacy", VirtIOMMIOProxy, legacy, true),
     DEFINE_PROP_BIT("ioeventfd", VirtIOMMIOProxy, flags,
                     VIRTIO_IOMMIO_FLAG_USE_IOEVENTFD_BIT, true),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
 static void virtio_mmio_realizefn(DeviceState *d, Error **errp)
@@ -778,12 +784,12 @@ static void virtio_mmio_realizefn(DeviceState *d, Error **errp)
     sysbus_init_mmio(sbd, &proxy->iomem);
 }
 
-static void virtio_mmio_class_init(ObjectClass *klass, void *data)
+static void virtio_mmio_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = virtio_mmio_realizefn;
-    dc->reset = virtio_mmio_reset;
+    device_class_set_legacy_reset(dc, virtio_mmio_reset);
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
     device_class_set_props(dc, virtio_mmio_properties);
 }
@@ -849,7 +855,7 @@ static void virtio_mmio_vmstate_change(DeviceState *d, bool running)
     }
 }
 
-static void virtio_mmio_bus_class_init(ObjectClass *klass, void *data)
+static void virtio_mmio_bus_class_init(ObjectClass *klass, const void *data)
 {
     BusClass *bus_class = BUS_CLASS(klass);
     VirtioBusClass *k = VIRTIO_BUS_CLASS(klass);

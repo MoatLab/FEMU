@@ -201,8 +201,7 @@ void v9fs_path_free(V9fsPath *path)
 }
 
 
-void G_GNUC_PRINTF(2, 3)
-v9fs_path_sprintf(V9fsPath *path, const char *fmt, ...)
+void v9fs_path_sprintf(V9fsPath *path, const char *fmt, ...)
 {
     va_list ap;
 
@@ -434,16 +433,24 @@ void coroutine_fn v9fs_reclaim_fd(V9fsPDU *pdu)
     V9fsFidState *f;
     GHashTableIter iter;
     gpointer fid;
+    int err;
+    int nclosed = 0;
+
+    /* prevent multiple coroutines running this function simultaniously */
+    if (s->reclaiming) {
+        return;
+    }
+    s->reclaiming = true;
 
     g_hash_table_iter_init(&iter, s->fids);
 
     QSLIST_HEAD(, V9fsFidState) reclaim_list =
         QSLIST_HEAD_INITIALIZER(reclaim_list);
 
+    /* Pick FIDs to be closed, collect them on reclaim_list. */
     while (g_hash_table_iter_next(&iter, &fid, (gpointer *) &f)) {
         /*
-         * Unlink fids cannot be reclaimed. Check
-         * for them and skip them. Also skip fids
+         * Unlinked fids cannot be reclaimed, skip those, and also skip fids
          * currently being operated on.
          */
         if (f->ref || f->flags & FID_NON_RECLAIMABLE) {
@@ -493,23 +500,42 @@ void coroutine_fn v9fs_reclaim_fd(V9fsPDU *pdu)
         }
     }
     /*
-     * Now close the fid in reclaim list. Free them if they
-     * are already clunked.
+     * Close the picked FIDs altogether on a background I/O driver thread. Do
+     * this all at once to keep latency (i.e. amount of thread hops between main
+     * thread <-> fs driver background thread) as low as possible.
      */
+    v9fs_co_run_in_worker({
+        QSLIST_FOREACH(f, &reclaim_list, reclaim_next) {
+            err = (f->fid_type == P9_FID_DIR) ?
+                s->ops->closedir(&s->ctx, &f->fs_reclaim) :
+                s->ops->close(&s->ctx, &f->fs_reclaim);
+
+            /* 'man 2 close' suggests to ignore close() errors except of EBADF */
+            if (unlikely(err && errno == EBADF)) {
+                /*
+                 * unexpected case as FIDs were picked above by having a valid
+                 * file descriptor
+                 */
+                error_report("9pfs: v9fs_reclaim_fd() WARNING: close() failed with EBADF");
+            } else {
+                /* total_open_fd must only be mutated on main thread */
+                nclosed++;
+            }
+        }
+    });
+    total_open_fd -= nclosed;
+    /* Free the closed FIDs. */
     while (!QSLIST_EMPTY(&reclaim_list)) {
         f = QSLIST_FIRST(&reclaim_list);
         QSLIST_REMOVE(&reclaim_list, f, V9fsFidState, reclaim_next);
-        if (f->fid_type == P9_FID_FILE) {
-            v9fs_co_close(pdu, &f->fs_reclaim);
-        } else if (f->fid_type == P9_FID_DIR) {
-            v9fs_co_closedir(pdu, &f->fs_reclaim);
-        }
         /*
          * Now drop the fid reference, free it
          * if clunked.
          */
         put_fid(pdu, f);
     }
+
+    s->reclaiming = false;
 }
 
 /*
@@ -1574,6 +1600,11 @@ out_nofid:
     pdu_complete(pdu, err);
 }
 
+static bool fid_has_valid_file_handle(V9fsState *s, V9fsFidState *fidp)
+{
+    return s->ops->has_valid_file_handle(fidp->fid_type, &fidp->fs);
+}
+
 static void coroutine_fn v9fs_getattr(void *opaque)
 {
     int32_t fid;
@@ -1596,11 +1627,11 @@ static void coroutine_fn v9fs_getattr(void *opaque)
         retval = -ENOENT;
         goto out_nofid;
     }
-    /*
-     * Currently we only support BASIC fields in stat, so there is no
-     * need to look at request_mask.
-     */
-    retval = v9fs_co_lstat(pdu, &fidp->path, &stbuf);
+    if (fid_has_valid_file_handle(pdu->s, fidp)) {
+        retval = v9fs_co_fstat(pdu, fidp, &stbuf);
+    } else {
+        retval = v9fs_co_lstat(pdu, &fidp->path, &stbuf);
+    }
     if (retval < 0) {
         goto out;
     }
@@ -1703,7 +1734,11 @@ static void coroutine_fn v9fs_setattr(void *opaque)
         } else {
             times[1].tv_nsec = UTIME_OMIT;
         }
-        err = v9fs_co_utimensat(pdu, &fidp->path, times);
+        if (fid_has_valid_file_handle(pdu->s, fidp)) {
+            err = v9fs_co_futimens(pdu, fidp, times);
+        } else {
+            err = v9fs_co_utimensat(pdu, &fidp->path, times);
+        }
         if (err < 0) {
             goto out;
         }
@@ -1728,7 +1763,11 @@ static void coroutine_fn v9fs_setattr(void *opaque)
         }
     }
     if (v9iattr.valid & (P9_ATTR_SIZE)) {
-        err = v9fs_co_truncate(pdu, &fidp->path, v9iattr.size);
+        if (fid_has_valid_file_handle(pdu->s, fidp)) {
+            err = v9fs_co_ftruncate(pdu, fidp, v9iattr.size);
+        } else {
+            err = v9fs_co_truncate(pdu, &fidp->path, v9iattr.size);
+        }
         if (err < 0) {
             goto out;
         }
@@ -1772,6 +1811,21 @@ static bool same_stat_id(const struct stat *a, const struct stat *b)
     return a->st_dev == b->st_dev && a->st_ino == b->st_ino;
 }
 
+/*
+ * Returns a (newly allocated) comma-separated string presentation of the
+ * passed array for logging (tracing) purpose for trace event "v9fs_walk".
+ *
+ * It is caller's responsibility to free the returned string.
+ */
+static char *trace_v9fs_walk_wnames(V9fsString *wnames, size_t nwnames)
+{
+    g_autofree char **arr = g_malloc0_n(nwnames + 1, sizeof(char *));
+    for (size_t i = 0; i < nwnames; ++i) {
+        arr[i] = wnames[i].data;
+    }
+    return g_strjoinv(", ", arr);
+}
+
 static void coroutine_fn v9fs_walk(void *opaque)
 {
     int name_idx, nwalked;
@@ -1785,6 +1839,7 @@ static void coroutine_fn v9fs_walk(void *opaque)
     size_t offset = 7;
     int32_t fid, newfid;
     P9ARRAY_REF(V9fsString) wnames = NULL;
+    g_autofree char *trace_wnames = NULL;
     V9fsFidState *fidp;
     V9fsFidState *newfidp = NULL;
     V9fsPDU *pdu = opaque;
@@ -1798,11 +1853,9 @@ static void coroutine_fn v9fs_walk(void *opaque)
     }
     offset += err;
 
-    trace_v9fs_walk(pdu->tag, pdu->id, fid, newfid, nwnames);
-
     if (nwnames > P9_MAXWELEM) {
         err = -EINVAL;
-        goto out_nofid;
+        goto out_nofid_nownames;
     }
     if (nwnames) {
         P9ARRAY_NEW(V9fsString, wnames, nwnames);
@@ -1812,15 +1865,23 @@ static void coroutine_fn v9fs_walk(void *opaque)
         for (i = 0; i < nwnames; i++) {
             err = pdu_unmarshal(pdu, offset, "s", &wnames[i]);
             if (err < 0) {
-                goto out_nofid;
+                goto out_nofid_nownames;
             }
             if (name_is_illegal(wnames[i].data)) {
                 err = -ENOENT;
-                goto out_nofid;
+                goto out_nofid_nownames;
             }
             offset += err;
         }
+        if (trace_event_get_state_backends(TRACE_V9FS_WALK)) {
+            trace_wnames = trace_v9fs_walk_wnames(wnames, nwnames);
+            trace_v9fs_walk(pdu->tag, pdu->id, fid, newfid, nwnames,
+                            trace_wnames);
+        }
+    } else {
+        trace_v9fs_walk(pdu->tag, pdu->id, fid, newfid, nwnames, "");
     }
+
     fidp = get_fid(pdu, fid);
     if (fidp == NULL) {
         err = -ENOENT;
@@ -1955,7 +2016,11 @@ out:
     }
     v9fs_path_free(&dpath);
     v9fs_path_free(&path);
+    goto out_pdu_complete;
+out_nofid_nownames:
+    trace_v9fs_walk(pdu->tag, pdu->id, fid, newfid, nwnames, "<?>");
 out_nofid:
+out_pdu_complete:
     pdu_complete(pdu, err);
 }
 
@@ -1980,6 +2045,7 @@ static void coroutine_fn v9fs_open(void *opaque)
     V9fsFidState *fidp;
     V9fsPDU *pdu = opaque;
     V9fsState *s = pdu->s;
+    g_autofree char *trace_oflags = NULL;
 
     if (s->proto_version == V9FS_PROTO_2000L) {
         err = pdu_unmarshal(pdu, offset, "dd", &fid, &mode);
@@ -1991,7 +2057,13 @@ static void coroutine_fn v9fs_open(void *opaque)
     if (err < 0) {
         goto out_nofid;
     }
-    trace_v9fs_open(pdu->tag, pdu->id, fid, mode);
+    if (trace_event_get_state_backends(TRACE_V9FS_OPEN)) {
+        trace_oflags = qemu_open_flags_tostr(
+            (s->proto_version == V9FS_PROTO_2000L) ?
+                dotl_to_open_flags(mode) : omode_to_uflags(mode)
+        );
+        trace_v9fs_open(pdu->tag, pdu->id, fid, mode, trace_oflags);
+    }
 
     fidp = get_fid(pdu, fid);
     if (fidp == NULL) {
@@ -2586,6 +2658,11 @@ static void coroutine_fn v9fs_readdir(void *opaque)
     if (fidp == NULL) {
         retval = -EINVAL;
         goto out_nofid;
+    }
+    if (fidp->fid_type != P9_FID_DIR) {
+        warn_report_once("9p: bad client: T_readdir on non-directory stream");
+        retval = -ENOTDIR;
+        goto out;
     }
     if (!fidp->fs.dir.stream) {
         retval = -EINVAL;
@@ -4283,6 +4360,8 @@ int v9fs_device_realize_common(V9fsState *s, const V9fsTransport *t,
 
     s->ctx.fst = &fse->fst;
     fsdev_throttle_init(s->ctx.fst);
+
+    s->reclaiming = false;
 
     rc = 0;
 out:

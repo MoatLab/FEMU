@@ -1,12 +1,13 @@
 #include "qemu/osdep.h"
 #include "cpu.h"
 #include "qemu/error-report.h"
-#include "sysemu/kvm.h"
-#include "sysemu/tcg.h"
+#include "system/kvm.h"
+#include "system/tcg.h"
 #include "kvm_arm.h"
 #include "internals.h"
 #include "cpu-features.h"
-#include "migration/cpu.h"
+#include "migration/qemu-file-types.h"
+#include "migration/vmstate.h"
 #include "target/arm/gtimer.h"
 
 static bool vfp_needed(void *opaque)
@@ -18,6 +19,35 @@ static bool vfp_needed(void *opaque)
             : cpu_isar_feature(aa32_vfp_simd, cpu));
 }
 
+static bool vfp_fpcr_fpsr_needed(void *opaque)
+{
+    /*
+     * If either the FPCR or the FPSR include set bits that are not
+     * visible in the AArch32 FPSCR view of floating point control/status
+     * then we must send the FPCR and FPSR as two separate fields in the
+     * cpu/vfp/fpcr_fpsr subsection, and we will send a 0 for the old
+     * FPSCR field in cpu/vfp.
+     *
+     * If all the set bits are representable in an AArch32 FPSCR then we
+     * send that value as the cpu/vfp FPSCR field, and don't send the
+     * cpu/vfp/fpcr_fpsr subsection.
+     *
+     * On incoming migration, if the cpu/vfp FPSCR field is non-zero we
+     * use it, and if the fpcr_fpsr subsection is present we use that.
+     * (The subsection will never be present with a non-zero FPSCR field,
+     * and if FPSCR is zero and the subsection is not present that means
+     * that FPSCR/FPSR/FPCR are zero.)
+     *
+     * This preserves migration compatibility with older QEMU versions,
+     * in both directions.
+     */
+    ARMCPU *cpu = opaque;
+    CPUARMState *env = &cpu->env;
+
+    return (vfp_get_fpcr(env) & ~FPSCR_FPCR_MASK) ||
+        (vfp_get_fpsr(env) & ~FPSCR_FPSR_MASK);
+}
+
 static int get_fpscr(QEMUFile *f, void *opaque, size_t size,
                      const VMStateField *field)
 {
@@ -25,7 +55,10 @@ static int get_fpscr(QEMUFile *f, void *opaque, size_t size,
     CPUARMState *env = &cpu->env;
     uint32_t val = qemu_get_be32(f);
 
-    vfp_set_fpscr(env, val);
+    if (val) {
+        /* 0 means we might have the data in the fpcr_fpsr subsection */
+        vfp_set_fpscr(env, val);
+    }
     return 0;
 }
 
@@ -34,8 +67,9 @@ static int put_fpscr(QEMUFile *f, void *opaque, size_t size,
 {
     ARMCPU *cpu = opaque;
     CPUARMState *env = &cpu->env;
+    uint32_t fpscr = vfp_fpcr_fpsr_needed(opaque) ? 0 : vfp_get_fpscr(env);
 
-    qemu_put_be32(f, vfp_get_fpscr(env));
+    qemu_put_be32(f, fpscr);
     return 0;
 }
 
@@ -43,6 +77,86 @@ static const VMStateInfo vmstate_fpscr = {
     .name = "fpscr",
     .get = get_fpscr,
     .put = put_fpscr,
+};
+
+static int get_fpcr(QEMUFile *f, void *opaque, size_t size,
+                     const VMStateField *field)
+{
+    ARMCPU *cpu = opaque;
+    CPUARMState *env = &cpu->env;
+    uint64_t val = qemu_get_be64(f);
+
+    vfp_set_fpcr(env, val);
+    return 0;
+}
+
+static int put_fpcr(QEMUFile *f, void *opaque, size_t size,
+                     const VMStateField *field, JSONWriter *vmdesc)
+{
+    ARMCPU *cpu = opaque;
+    CPUARMState *env = &cpu->env;
+
+    qemu_put_be64(f, vfp_get_fpcr(env));
+    return 0;
+}
+
+static const VMStateInfo vmstate_fpcr = {
+    .name = "fpcr",
+    .get = get_fpcr,
+    .put = put_fpcr,
+};
+
+static int get_fpsr(QEMUFile *f, void *opaque, size_t size,
+                     const VMStateField *field)
+{
+    ARMCPU *cpu = opaque;
+    CPUARMState *env = &cpu->env;
+    uint64_t val = qemu_get_be64(f);
+
+    vfp_set_fpsr(env, val);
+    return 0;
+}
+
+static int put_fpsr(QEMUFile *f, void *opaque, size_t size,
+                     const VMStateField *field, JSONWriter *vmdesc)
+{
+    ARMCPU *cpu = opaque;
+    CPUARMState *env = &cpu->env;
+
+    qemu_put_be64(f, vfp_get_fpsr(env));
+    return 0;
+}
+
+static const VMStateInfo vmstate_fpsr = {
+    .name = "fpsr",
+    .get = get_fpsr,
+    .put = put_fpsr,
+};
+
+static const VMStateDescription vmstate_vfp_fpcr_fpsr = {
+    .name = "cpu/vfp/fpcr_fpsr",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = vfp_fpcr_fpsr_needed,
+    .fields = (const VMStateField[]) {
+        {
+            .name = "fpcr",
+            .version_id = 0,
+            .size = sizeof(uint64_t),
+            .info = &vmstate_fpcr,
+            .flags = VMS_SINGLE,
+            .offset = 0,
+        },
+        {
+            .name = "fpsr",
+            .version_id = 0,
+            .size = sizeof(uint64_t),
+            .info = &vmstate_fpsr,
+            .flags = VMS_SINGLE,
+            .offset = 0,
+        },
+        VMSTATE_END_OF_LIST()
+    },
 };
 
 static const VMStateDescription vmstate_vfp = {
@@ -100,6 +214,10 @@ static const VMStateDescription vmstate_vfp = {
             .offset = 0,
         },
         VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_vfp_fpcr_fpsr,
+        NULL
     }
 };
 
@@ -123,7 +241,6 @@ static const VMStateDescription vmstate_iwmmxt = {
     }
 };
 
-#ifdef TARGET_AARCH64
 /* The expression ARM_MAX_VQ - 2 is 0 for pure AArch32 build,
  * and ARMPredicateReg is actively empty.  This triggers errors
  * in the expansion of the VMSTATE macros.
@@ -198,12 +315,30 @@ static const VMStateDescription vmstate_za = {
     .minimum_version_id = 1,
     .needed = za_needed,
     .fields = (const VMStateField[]) {
-        VMSTATE_STRUCT_ARRAY(env.zarray, ARMCPU, ARM_MAX_VQ * 16, 0,
+        VMSTATE_STRUCT_ARRAY(env.za_state.za, ARMCPU, ARM_MAX_VQ * 16, 0,
                              vmstate_vreg, ARMVectorReg),
         VMSTATE_END_OF_LIST()
     }
 };
-#endif /* AARCH64 */
+
+static bool zt0_needed(void *opaque)
+{
+    ARMCPU *cpu = opaque;
+
+    return za_needed(cpu) && cpu_isar_feature(aa64_sme2, cpu);
+}
+
+static const VMStateDescription vmstate_zt0 = {
+    .name = "cpu/zt0",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = zt0_needed,
+    .fields = (VMStateField[]) {
+        VMSTATE_UINT64_ARRAY(env.za_state.zt0, ARMCPU,
+                             ARRAY_SIZE(((CPUARMState *)0)->za_state.zt0)),
+        VMSTATE_END_OF_LIST()
+    }
+};
 
 static bool serror_needed(void *opaque)
 {
@@ -238,6 +373,25 @@ static const VMStateDescription vmstate_irq_line_state = {
     .needed = irq_line_state_needed,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(env.irq_line_state, ARMCPU),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static bool wfxt_timer_needed(void *opaque)
+{
+    ARMCPU *cpu = opaque;
+
+    /* We'll only have the timer object if FEAT_WFxT is implemented */
+    return cpu->wfxt_timer;
+}
+
+static const VMStateDescription vmstate_wfxt_timer = {
+    .name = "cpu/wfxt-timer",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = wfxt_timer_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_TIMER_PTR(wfxt_timer, ARMCPU),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -766,6 +920,20 @@ static int cpu_pre_load(void *opaque)
     CPUARMState *env = &cpu->env;
 
     /*
+     * In an inbound migration where on the source FPSCR/FPSR/FPCR are 0,
+     * there will be no fpcr_fpsr subsection so we won't call vfp_set_fpcr()
+     * and vfp_set_fpsr() from get_fpcr() and get_fpsr(); also the get_fpscr()
+     * function will not call vfp_set_fpscr() because it will see a 0 in the
+     * inbound data. Ensure that in this case we have a correctly set up
+     * zero FPSCR/FPCR/FPSR.
+     *
+     * This is not strictly needed because FPSCR is zero out of reset, but
+     * it avoids the possibility of future confusing migration bugs if some
+     * future architecture change makes the reset value non-zero.
+     */
+    vfp_set_fpscr(env, 0);
+
+    /*
      * Pre-initialize irq_line_state to a value that's never valid as
      * real data, so cpu_post_load() can tell whether we've seen the
      * irq-line-state subsection in the incoming migration state.
@@ -827,15 +995,9 @@ static int cpu_post_load(void *opaque, int version_id)
     }
 
     if (kvm_enabled()) {
-        if (!write_list_to_kvmstate(cpu, KVM_PUT_FULL_STATE)) {
+        if (!kvm_arm_cpu_post_load(cpu)) {
             return -1;
         }
-        /* Note that it's OK for the TCG side not to know about
-         * every register in the list; KVM is authoritative if
-         * we're using it.
-         */
-        write_list_to_cpustate(cpu);
-        kvm_arm_cpu_post_load(cpu);
     } else {
         if (!write_list_to_cpustate(cpu)) {
             return -1;
@@ -951,12 +1113,12 @@ const VMStateDescription vmstate_arm_cpu = {
         &vmstate_pmsav7,
         &vmstate_pmsav8,
         &vmstate_m_security,
-#ifdef TARGET_AARCH64
         &vmstate_sve,
         &vmstate_za,
-#endif
+        &vmstate_zt0,
         &vmstate_serror,
         &vmstate_irq_line_state,
+        &vmstate_wfxt_timer,
         NULL
     }
 };

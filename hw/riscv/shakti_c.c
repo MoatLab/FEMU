@@ -23,9 +23,9 @@
 #include "qemu/error-report.h"
 #include "hw/intc/sifive_plic.h"
 #include "hw/intc/riscv_aclint.h"
-#include "sysemu/sysemu.h"
+#include "system/system.h"
 #include "hw/qdev-properties.h"
-#include "exec/address-spaces.h"
+#include "system/address-spaces.h"
 #include "hw/riscv/boot.h"
 
 static const struct MemmapEntry {
@@ -45,6 +45,7 @@ static void shakti_c_machine_state_init(MachineState *mstate)
 {
     ShaktiCMachineState *sms = RISCV_SHAKTI_MACHINE(mstate);
     MemoryRegion *system_memory = get_system_memory();
+    hwaddr firmware_load_addr = shakti_c_memmap[SHAKTI_C_RAM].base;
 
     /* Initialize SoC */
     object_initialize_child(OBJECT(mstate), "soc", &sms->soc,
@@ -56,23 +57,21 @@ static void shakti_c_machine_state_init(MachineState *mstate)
                                 shakti_c_memmap[SHAKTI_C_RAM].base,
                                 mstate->ram);
 
+    if (mstate->firmware) {
+        riscv_load_firmware(mstate->firmware, &firmware_load_addr, NULL);
+    }
+
     /* ROM reset vector */
-    riscv_setup_rom_reset_vec(mstate, &sms->soc.cpus,
-                              shakti_c_memmap[SHAKTI_C_RAM].base,
+    riscv_setup_rom_reset_vec(mstate, &sms->soc.cpus, firmware_load_addr,
                               shakti_c_memmap[SHAKTI_C_ROM].base,
                               shakti_c_memmap[SHAKTI_C_ROM].size, 0, 0);
-    if (mstate->firmware) {
-        riscv_load_firmware(mstate->firmware,
-                            shakti_c_memmap[SHAKTI_C_RAM].base,
-                            NULL);
-    }
 }
 
 static void shakti_c_machine_instance_init(Object *obj)
 {
 }
 
-static void shakti_c_machine_class_init(ObjectClass *klass, void *data)
+static void shakti_c_machine_class_init(ObjectClass *klass, const void *data)
 {
     MachineClass *mc = MACHINE_CLASS(klass);
     static const char * const valid_cpu_types[] = {
@@ -143,7 +142,7 @@ static void shakti_c_soc_state_realize(DeviceState *dev, Error **errp)
         shakti_c_memmap[SHAKTI_C_ROM].base, &sss->rom);
 }
 
-static void shakti_c_soc_class_init(ObjectClass *klass, void *data)
+static void shakti_c_soc_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     dc->realize = shakti_c_soc_state_realize;

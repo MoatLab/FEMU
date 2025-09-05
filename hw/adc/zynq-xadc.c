@@ -281,12 +281,12 @@ static const VMStateDescription vmstate_zynq_xadc = {
     }
 };
 
-static void zynq_xadc_class_init(ObjectClass *klass, void *data)
+static void zynq_xadc_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->vmsd = &vmstate_zynq_xadc;
-    dc->reset = zynq_xadc_reset;
+    device_class_set_legacy_reset(dc, zynq_xadc_reset);
 }
 
 static const TypeInfo zynq_xadc_info = {

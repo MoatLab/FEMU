@@ -170,6 +170,7 @@ $(OUT)hppa-firmware$(BIT_SUFFIX).img: $(OUT)autoconf.h $(OUT)head.o $(OUT)ccode3
 	$(Q)$(CPP) $(CPPFLAGS) -Isrc -D__ASSEMBLY__ -DBITS=$(BITS) src/parisc/pafirmware.lds.S -o $(OUT)pafirmware.lds
 	$(Q)$(CC) $(CFLAGS32FLAT) -c src/version.c -o $(OUT)version.o
 	$(Q)$(LD) -N -T $(OUT)pafirmware.lds $(OUT)head.o $(OUT)version.o -X -o $@ -e startup --as-needed $(OUT)ccode32flat.o $(LIBGCC)
+	$(Q)chmod -x $@
 
 ################ Kconfig rules
 

@@ -18,14 +18,13 @@
  */
 
 #include "qemu/osdep.h"
-#include "exec/address-spaces.h"
+#include "system/address-spaces.h"
 #include "hw/irq.h"
 #include "target/ppc/cpu.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
-#include "sysemu/reset.h"
+#include "system/reset.h"
 #include "qapi/error.h"
-#include "monitor/monitor.h"
 
 
 #include "hw/ppc/fdt.h"
@@ -553,13 +552,12 @@ static int pnv_psi_dt_xscom(PnvXScomInterface *dev, void *fdt, int xscom_offset)
     return 0;
 }
 
-static Property pnv_psi_properties[] = {
+static const Property pnv_psi_properties[] = {
     DEFINE_PROP_UINT64("bar", PnvPsi, bar, 0),
     DEFINE_PROP_UINT64("fsp-bar", PnvPsi, fsp_bar, 0),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void pnv_psi_power8_class_init(ObjectClass *klass, void *data)
+static void pnv_psi_power8_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PnvPsiClass *ppc = PNV_PSI_CLASS(klass);
@@ -889,7 +887,7 @@ static void pnv_psi_power9_realize(DeviceState *dev, Error **errp)
     pnv_psi_realize(dev, errp);
 }
 
-static void pnv_psi_power9_class_init(ObjectClass *klass, void *data)
+static void pnv_psi_power9_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PnvPsiClass *ppc = PNV_PSI_CLASS(klass);
@@ -898,7 +896,7 @@ static void pnv_psi_power9_class_init(ObjectClass *klass, void *data)
 
     dc->desc    = "PowerNV PSI Controller POWER9";
     dc->realize = pnv_psi_power9_realize;
-    dc->reset   = pnv_psi_power9_reset;
+    device_class_set_legacy_reset(dc, pnv_psi_power9_reset);
 
     ppc->xscom_pcba = PNV9_XSCOM_PSIHB_BASE;
     ppc->xscom_size = PNV9_XSCOM_PSIHB_SIZE;
@@ -915,13 +913,13 @@ static const TypeInfo pnv_psi_power9_info = {
     .instance_size = sizeof(Pnv9Psi),
     .instance_init = pnv_psi_power9_instance_init,
     .class_init    = pnv_psi_power9_class_init,
-    .interfaces = (InterfaceInfo[]) {
+    .interfaces = (const InterfaceInfo[]) {
             { TYPE_XIVE_NOTIFIER },
             { },
     },
 };
 
-static void pnv_psi_power10_class_init(ObjectClass *klass, void *data)
+static void pnv_psi_power10_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PnvPsiClass *ppc = PNV_PSI_CLASS(klass);
@@ -941,7 +939,7 @@ static const TypeInfo pnv_psi_power10_info = {
     .class_init    = pnv_psi_power10_class_init,
 };
 
-static void pnv_psi_class_init(ObjectClass *klass, void *data)
+static void pnv_psi_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PnvXScomInterfaceClass *xdc = PNV_XSCOM_INTERFACE_CLASS(klass);
@@ -950,7 +948,7 @@ static void pnv_psi_class_init(ObjectClass *klass, void *data)
 
     dc->desc = "PowerNV PSI Controller";
     device_class_set_props(dc, pnv_psi_properties);
-    dc->reset = pnv_psi_reset;
+    device_class_set_legacy_reset(dc, pnv_psi_reset);
     dc->user_creatable = false;
 }
 
@@ -961,7 +959,7 @@ static const TypeInfo pnv_psi_info = {
     .class_init    = pnv_psi_class_init,
     .class_size    = sizeof(PnvPsiClass),
     .abstract      = true,
-    .interfaces    = (InterfaceInfo[]) {
+    .interfaces    = (const InterfaceInfo[]) {
         { TYPE_PNV_XSCOM_INTERFACE },
         { }
     }
@@ -977,14 +975,14 @@ static void pnv_psi_register_types(void)
 
 type_init(pnv_psi_register_types);
 
-void pnv_psi_pic_print_info(Pnv9Psi *psi9, Monitor *mon)
+void pnv_psi_pic_print_info(Pnv9Psi *psi9, GString *buf)
 {
     PnvPsi *psi = PNV_PSI(psi9);
 
     uint32_t offset =
         (psi->regs[PSIHB_REG(PSIHB9_IVT_OFFSET)] >> PSIHB9_IVT_OFF_SHIFT);
 
-    monitor_printf(mon, "PSIHB Source %08x .. %08x\n",
-                  offset, offset + psi9->source.nr_irqs - 1);
-    xive_source_pic_print_info(&psi9->source, offset, mon);
+    g_string_append_printf(buf, "PSIHB Source %08x .. %08x\n",
+                           offset, offset + psi9->source.nr_irqs - 1);
+    xive_source_pic_print_info(&psi9->source, offset, buf);
 }

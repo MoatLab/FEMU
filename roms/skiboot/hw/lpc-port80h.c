@@ -7,6 +7,7 @@
 
 #define pr_fmt(fmt)	"Port80h: " fmt
 
+#include <opal-api.h>
 #include <lpc.h>
 #include <op-panel.h>
 #include <chip.h>

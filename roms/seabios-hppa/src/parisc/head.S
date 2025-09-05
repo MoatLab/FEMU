@@ -481,6 +481,26 @@ ENTRY(firmware_default_ivt)	/* to detect crashes */
 	.endr
 END(smp_ivt)
 
+/*******************************************************
+ Check if space register hashing is enabled.
+ Returns non-zero if sr-hashing in CPU is enabled.
+ Needs adjustment when we emulate PCX-T later.
+ Requires at least qemu v9.x
+ *******************************************************/
+ENTRY(sr_hashing_enabled)
+	copy %r0,%r26
+	copy %r0,%r28		/* zero-initialize %r28 in case qemu can't emulate mfdiag call */
+#ifdef CONFIG_64BIT
+	.word 0x144008bc	/* PCXU,PCXU+,PCXW,PCXW+,PCXW2: mfdiag %dr2, %r28 */
+	depdi 1,54,1, %r26	/* set DIAG_SPHASH_ENABLE (bit 54) of %dr2 */
+#else
+	.word 0x141c0600	/* PCXL: mfdiag %dr0, %r28 */
+	depwi 3,28,2, %r26	/* Set DHASH_EN & IHASH_EN of %dr0 */
+#endif
+	bv    %r0(%rp)
+	and   %r28, %r26, %r28	/* mask hash enable bits */
+END(sr_hashing_enabled)
+
 
 /*******************************************************
 	PDC and IODC entry
@@ -512,6 +532,7 @@ ENTRY(pdc_entry_32)	/* 32-bit PDC */
 	stw %arg2,-44(%sp)
 	stw %arg3,-48(%sp)
 	ldo -FRAME_SIZE(%sp),%arg0
+	ldi 1,%arg1		/* called with wide-bit cleared (narrow mode) */
 
 	loadgp
 	load32		MEM_PDC_ENTRY + 1f - pdc_entry_table,%rp
@@ -566,6 +587,7 @@ ENTRY(pdc_entry_64_32)	/* 32-bit call on 64-bit PDC */
 	std %arg0, -0x58(%sp)
 
 	ldo -0x58(%sp),%arg0	/* points to arg7 */
+	ldi 1,%arg1		/* called with wide-bit cleared (narrow mode) */
 
 	loadgp
 	load32_firmware parisc_pdc_entry,%r1
@@ -614,6 +636,7 @@ ENTRY(pdc_entry_64_64)	/* 64-bit call on 64-bit PDC */
 	std %r20, -0x50(%sp)
 	std %r19, -0x58(%sp)
 	ldo -0x58(%sp),%arg0	/* points to arg7 */
+	ldi 0,%arg1		/* called with wide-bit set (not narrow) */
 
 	loadgp
 	b,l parisc_pdc_entry, %rp
@@ -659,21 +682,12 @@ ENTRY(iodc_entry)
 
 iodc_narrow:
 	/* we run narrow, but want wide! Jump to firmware to set PSW.W=1 */
-	stw %r1,-20(%sp)	/* temporarily store r1 */
-
 	/* Switch to wide mode. */
-#if 0
-1:	mfia            %r1
-	ldo             2f-1b(%r1),%r1
-	depdi           0,31,32,%r1
-#else
-	load32		MEM_PDC_ENTRY + 2f - pdc_entry_table,%r1
-#endif
-	bv              0(%r1)
+	load32		MEM_PDC_ENTRY + 2f - pdc_entry_table,%r31
+	bv              0(%r31)
 	set_PSW_W
 2:	/* now in wide mode, running in low memory */
 	depdi   0, 31, 32, %sp
-	ldw     -20(%sp),%r1	/* restore r1 */
 	load_fw_upper32 %r1
 
 	stw %rp,-20(%sp)

@@ -18,8 +18,8 @@ h1, h2, .rst-content .toctree-wrapper p.caption, h3, h4, h5, h6, legend {
 
 .rst-content dl:not(.docutils) dt {
     border-top: none;
-    border-left: solid 3px #ccc;
-    background-color: #f0f0f0;
+    border-left: solid 5px #bcc6d2;
+    background-color: #eaedf1;
     color: black;
 }
 
@@ -86,6 +86,55 @@ div[class^="highlight"] pre {
     padding-top: 1px;
     padding-bottom: 1px;
 }
+
+/* qmp-example directive styling */
+
+.rst-content .admonition-example {
+    /* do not apply the standard admonition background */
+    background-color: transparent;
+    border: solid #ffd2ed 1px;
+}
+
+.rst-content .admonition-example > .admonition-title:before {
+    content: "▷";
+}
+
+.rst-content .admonition-example > .admonition-title {
+    background-color: #5980a6;
+}
+
+.rst-content .admonition-example > div[class^="highlight"] {
+    /* make code boxes take up the full width of the admonition w/o margin */
+    margin-left: -12px;
+    margin-right: -12px;
+
+    border-top: 1px solid #ffd2ed;
+    border-bottom: 1px solid #ffd2ed;
+    border-left: 0px;
+    border-right: 0px;
+}
+
+.rst-content .admonition-example > div[class^="highlight"]:nth-child(2) {
+    /* If a code box is the second element in an example admonition,
+     * it is the first child after the title. let it sit flush against
+     * the title. */
+    margin-top: -12px;
+    border-top: 0px;
+}
+
+.rst-content .admonition-example > div[class^="highlight"]:last-child {
+    /* If a code box is the final element in an example admonition, don't
+     * render margin below it; let it sit flush with the end of the
+     * admonition box */
+    margin-bottom: -12px;
+    border-bottom: 0px;
+}
+
+.rst-content .admonition-example .highlight {
+    background-color: #fffafd;
+}
+
+/* end qmp-example styling */
 
 @media screen {
 
@@ -158,4 +207,98 @@ div[class^="highlight"] pre {
     .rst-content tt.literal,.rst-content tt.literal,.rst-content code.literal {
         color: inherit;
     }
+}
+
+/* QAPI domain theming */
+
+/* most content in a QAPI object definition should not eclipse about
+   80ch, but nested field lists are explicitly exempt due to their
+   two-column nature */
+.qapi dd *:not(dl) {
+    max-width: 80ch;
+}
+
+/* but the content column itself should still be less than ~80ch. */
+.qapi .field-list dd {
+    max-width: 80ch;
+}
+
+.qapi-infopips {
+    margin-bottom: 1em;
+}
+
+.qapi-infopip {
+    display: inline-block;
+    padding: 0em 0.5em 0em 0.5em;
+    margin: 0.25em;
+}
+
+.qapi-deprecated,.qapi-unstable {
+    background-color: #fffef5;
+    border: solid #fff176 6px;
+    font-weight: bold;
+    padding: 8px;
+    border-radius: 15px;
+    margin: 5px;
+}
+
+.qapi-unstable::before {
+    content: '🚧 ';
+}
+
+.qapi-deprecated::before {
+    content: '⚠️ ';
+}
+
+.qapi-ifcond::before {
+    /* gaze ye into the crystal ball to determine feature availability */
+    content: '🔮 ';
+}
+
+.qapi-ifcond {
+    background-color: #f9f5ff;
+    border: solid #dac2ff 6px;
+    padding: 8px;
+    border-radius: 15px;
+    margin: 5px;
+}
+
+/* code blocks */
+.qapi div[class^="highlight"] {
+    width: fit-content;
+    background-color: #fffafd;
+    border: 2px solid #ffe1f3;
+}
+
+/* note, warning, etc. */
+.qapi .admonition {
+    width: fit-content;
+}
+
+/* pad the top of the field-list so the text doesn't start directly at
+   the top border; primarily for the field list labels, but adjust the
+   field bodies as well for parity. */
+dl.field-list > dt:first-of-type, dl.field-list > dd:first-of-type {
+    padding-top: 0.3em;
+}
+
+dl.field-list > dt:last-of-type, dl.field-list > dd:last-of-type {
+    padding-bottom: 0.3em;
+}
+
+/* pad the field list labels so they don't crash into the border */
+dl.field-list > dt {
+    padding-left: 0.5em;
+    padding-right: 0.5em;
+}
+
+/* Add a little padding between field list sections */
+dl.field-list > dd:not(:last-child) {
+    padding-bottom: 1em;
+}
+
+/* Sphinx 3.x: unresolved xrefs */
+.rst-content *:not(a) > code.xref {
+    font-weight: 400;
+    color: #333333;
 }

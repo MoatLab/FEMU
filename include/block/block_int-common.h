@@ -248,10 +248,7 @@ struct BlockDriver {
     int GRAPH_UNLOCKED_PTR (*bdrv_open)(
         BlockDriverState *bs, QDict *options, int flags, Error **errp);
 
-    /* Protocol drivers should implement this instead of bdrv_open */
-    int GRAPH_UNLOCKED_PTR (*bdrv_file_open)(
-        BlockDriverState *bs, QDict *options, int flags, Error **errp);
-    void (*bdrv_close)(BlockDriverState *bs);
+    void GRAPH_UNLOCKED_PTR (*bdrv_close)(BlockDriverState *bs);
 
     int coroutine_fn GRAPH_UNLOCKED_PTR (*bdrv_co_create)(
         BlockdevCreateOptions *opts, Error **errp);
@@ -399,9 +396,23 @@ struct BlockDriver {
     int GRAPH_RDLOCK_PTR (*bdrv_probe_geometry)(
         BlockDriverState *bs, HDGeometry *geo);
 
+    /**
+     * Hot add a BDS's child. Used in combination with bdrv_del_child, so the
+     * user can take a child offline when it is broken and take a new child
+     * online.
+     *
+     * All block nodes must be drained.
+     */
     void GRAPH_WRLOCK_PTR (*bdrv_add_child)(
         BlockDriverState *parent, BlockDriverState *child, Error **errp);
 
+    /**
+     * Hot remove a BDS's child. Used in combination with bdrv_add_child, so the
+     * user can take a child offline when it is broken and take a new child
+     * online.
+     *
+     * All block nodes must be drained.
+     */
     void GRAPH_WRLOCK_PTR (*bdrv_del_child)(
         BlockDriverState *parent, BdrvChild *child, Error **errp);
 
@@ -509,10 +520,6 @@ struct BlockDriver {
     BlockAIOCB * GRAPH_RDLOCK_PTR (*bdrv_aio_flush)(
         BlockDriverState *bs, BlockCompletionFunc *cb, void *opaque);
 
-    BlockAIOCB * GRAPH_RDLOCK_PTR (*bdrv_aio_pdiscard)(
-        BlockDriverState *bs, int64_t offset, int bytes,
-        BlockCompletionFunc *cb, void *opaque);
-
     int coroutine_fn GRAPH_RDLOCK_PTR (*bdrv_co_readv)(BlockDriverState *bs,
         int64_t sector_num, int nb_sectors, QEMUIOVector *qiov);
 
@@ -611,15 +618,16 @@ struct BlockDriver {
      * according to the current layer, and should only need to set
      * BDRV_BLOCK_DATA, BDRV_BLOCK_ZERO, BDRV_BLOCK_OFFSET_VALID,
      * and/or BDRV_BLOCK_RAW; if the current layer defers to a backing
-     * layer, the result should be 0 (and not BDRV_BLOCK_ZERO).  See
-     * block.h for the overall meaning of the bits.  As a hint, the
-     * flag want_zero is true if the caller cares more about precise
-     * mappings (favor accurate _OFFSET_VALID/_ZERO) or false for
-     * overall allocation (favor larger *pnum, perhaps by reporting
-     * _DATA instead of _ZERO).  The block layer guarantees input
-     * clamped to bdrv_getlength() and aligned to request_alignment,
-     * as well as non-NULL pnum, map, and file; in turn, the driver
-     * must return an error or set pnum to an aligned non-zero value.
+     * layer, the result should be 0 (and not BDRV_BLOCK_ZERO).  The
+     * caller will synthesize BDRV_BLOCK_ALLOCATED based on the
+     * non-zero results.  See block.h for the overall meaning of the
+     * bits.  As a hint, the flags in @mode may include a bitwise-or
+     * of BDRV_WANT_ALLOCATED, BDRV_WANT_OFFSET_VALID, or
+     * BDRV_WANT_ZERO based on what the caller is looking for in the
+     * results.  The block layer guarantees input clamped to
+     * bdrv_getlength() and aligned to request_alignment, as well as
+     * non-NULL pnum, map, and file; in turn, the driver must return
+     * an error or set pnum to an aligned non-zero value.
      *
      * Note that @bytes is just a hint on how big of a region the
      * caller wants to inspect.  It is not a limit on *pnum.
@@ -631,8 +639,8 @@ struct BlockDriver {
      * to clamping *pnum for return to its caller.
      */
     int coroutine_fn GRAPH_RDLOCK_PTR (*bdrv_co_block_status)(
-        BlockDriverState *bs,
-        bool want_zero, int64_t offset, int64_t bytes, int64_t *pnum,
+        BlockDriverState *bs, unsigned int mode,
+        int64_t offset, int64_t bytes, int64_t *pnum,
         int64_t *map, BlockDriverState **file);
 
     /*
@@ -656,8 +664,8 @@ struct BlockDriver {
         QEMUIOVector *qiov, size_t qiov_offset);
 
     int coroutine_fn GRAPH_RDLOCK_PTR (*bdrv_co_snapshot_block_status)(
-        BlockDriverState *bs, bool want_zero, int64_t offset, int64_t bytes,
-        int64_t *pnum, int64_t *map, BlockDriverState **file);
+        BlockDriverState *bs, unsigned int mode, int64_t offset,
+        int64_t bytes, int64_t *pnum, int64_t *map, BlockDriverState **file);
 
     int coroutine_fn GRAPH_RDLOCK_PTR (*bdrv_co_pdiscard_snapshot)(
         BlockDriverState *bs, int64_t offset, int64_t bytes);
@@ -989,9 +997,21 @@ struct BdrvChildClass {
                            bool backing_mask_protocol,
                            Error **errp);
 
-    bool (*change_aio_ctx)(BdrvChild *child, AioContext *ctx,
-                           GHashTable *visited, Transaction *tran,
-                           Error **errp);
+    /*
+     * Notifies the parent that the child is trying to change its AioContext.
+     * The parent may in turn change the AioContext of other nodes in the same
+     * transaction. Returns true if the change is possible and the transaction
+     * can be continued. Returns false and sets @errp if not and the transaction
+     * must be aborted.
+     *
+     * @visited will accumulate all visited BdrvChild objects. The caller is
+     * responsible for freeing the list afterwards.
+     *
+     * Must be called with the affected block nodes drained.
+     */
+    bool GRAPH_RDLOCK_PTR (*change_aio_ctx)(BdrvChild *child, AioContext *ctx,
+                                            GHashTable *visited,
+                                            Transaction *tran, Error **errp);
 
     /*
      * I/O API functions. These functions are thread-safe.
@@ -1233,7 +1253,7 @@ struct BlockDriverState {
     /* do we need to tell the quest if we have a volatile write cache? */
     int enable_write_cache;
 
-    /* Accessed with atomic ops.  */
+    /* Accessed only in the main thread. */
     int quiesce_counter;
 
     unsigned int write_gen;               /* Current data generation */

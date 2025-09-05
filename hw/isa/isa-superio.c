@@ -14,7 +14,7 @@
 #include "qemu/error-report.h"
 #include "qemu/module.h"
 #include "qapi/error.h"
-#include "sysemu/blockdev.h"
+#include "system/blockdev.h"
 #include "chardev/char.h"
 #include "hw/char/parallel.h"
 #include "hw/block/fdc.h"
@@ -22,7 +22,7 @@
 #include "hw/qdev-properties.h"
 #include "hw/input/i8042.h"
 #include "hw/char/parallel-isa.h"
-#include "hw/char/serial.h"
+#include "hw/char/serial-isa.h"
 #include "trace.h"
 
 static void isa_superio_realize(DeviceState *dev, Error **errp)
@@ -172,7 +172,7 @@ static void isa_superio_realize(DeviceState *dev, Error **errp)
     }
 }
 
-static void isa_superio_class_init(ObjectClass *oc, void *data)
+static void isa_superio_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
 

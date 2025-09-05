@@ -546,11 +546,10 @@ static void msf2_emac_init(Object *obj)
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->mmio);
 }
 
-static Property msf2_emac_properties[] = {
+static const Property msf2_emac_properties[] = {
     DEFINE_PROP_LINK("ahb-bus", MSF2EmacState, dma_mr,
                      TYPE_MEMORY_REGION, MemoryRegion *),
     DEFINE_NIC_PROPERTIES(MSF2EmacState, conf),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
 static const VMStateDescription vmstate_msf2_emac = {
@@ -566,12 +565,12 @@ static const VMStateDescription vmstate_msf2_emac = {
     }
 };
 
-static void msf2_emac_class_init(ObjectClass *klass, void *data)
+static void msf2_emac_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = msf2_emac_realize;
-    dc->reset = msf2_emac_reset;
+    device_class_set_legacy_reset(dc, msf2_emac_reset);
     dc->vmsd = &vmstate_msf2_emac;
     device_class_set_props(dc, msf2_emac_properties);
 }

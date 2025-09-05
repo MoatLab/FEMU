@@ -25,7 +25,7 @@
 #include "util.h" // pci_setup
 #include "x86.h" // outb
 
-#define PCI_DEVICE_MEM_MIN    (1<<12)  // 4k == page size
+#define PCI_DEVICE_MEM_MIN    (1<<16)  // 64k
 #define PCI_BRIDGE_MEM_MIN    (1<<21)  // 2M == hugepage size
 #define PCI_BRIDGE_IO_MIN      0x1000  // mandated by pci bridge spec
 
@@ -574,10 +574,13 @@ static void parisc_mem_addr_setup(struct pci_device *dev, void *arg)
 }
 #endif /* CONFIG_PARISC */
 
-static unsigned long add_lmmio_directed_range(unsigned long size, int rope)
+unsigned long add_lmmio_directed_range(unsigned long size, int rope)
 {
 #ifdef CONFIG_PARISC
     int i;
+
+    if (!has_astro)
+        return -1;
 
     /* Astro has 4 directed ranges. */
     for (i = 0; i < 4; i++) {
@@ -590,14 +593,17 @@ static unsigned long add_lmmio_directed_range(unsigned long size, int rope)
 
             /* fixme for multiple addresses */
             /* Linux driver currently only allows one distr. range per IOC */
-            addr = 0xfa000000;  /* graphics card area for parisc, f8 is used by artist */
+            addr = 0xf8000000;  /* graphics card area for parisc, LASI_GFX_HPA is usually artist */
             addr += i * 0x02000000;
 
-            writel(reg + LMMIO_DIRECT0_BASE, addr | 1);
+            /* clear bit 0 of address to disable LMMIO while we modify things */
+            writel(reg + LMMIO_DIRECT0_BASE, addr & ~1ULL);
             writel(reg + LMMIO_DIRECT0_ROUTE, rope & (ROPES_PER_IOC - 1));
             size = 0xfff8000000 | ~(size-1); /* is -1 correct? */
             // dprintf(1, "use  addr %lx  size %lx\n", addr|1, size);
             writel(reg + LMMIO_DIRECT0_MASK, size);
+            /* finally turn on the modified LMMIO region */
+            writel(reg + LMMIO_DIRECT0_BASE, addr | 1);
             return addr;
     }
 #endif /* CONFIG_PARISC */

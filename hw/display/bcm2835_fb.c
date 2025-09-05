@@ -145,7 +145,7 @@ static bool fb_use_offsets(BCM2835FBConfig *config)
      * viewport size is larger than the physical screen. (It doesn't
      * prevent the guest setting this silly viewport setting, though...)
      */
-    return config->xres_virtual > config->xres &&
+    return config->xres_virtual > config->xres ||
         config->yres_virtual > config->yres;
 }
 
@@ -429,7 +429,7 @@ static void bcm2835_fb_realize(DeviceState *dev, Error **errp)
     qemu_console_resize(s->con, s->config.xres, s->config.yres);
 }
 
-static Property bcm2835_fb_props[] = {
+static const Property bcm2835_fb_props[] = {
     DEFINE_PROP_UINT32("vcram-base", BCM2835FBState, vcram_base, 0),/*required*/
     DEFINE_PROP_UINT32("vcram-size", BCM2835FBState, vcram_size,
                        DEFAULT_VCRAM_SIZE),
@@ -440,16 +440,15 @@ static Property bcm2835_fb_props[] = {
                        initial_config.pixo, 1), /* 1=RGB, 0=BGR */
     DEFINE_PROP_UINT32("alpha", BCM2835FBState,
                        initial_config.alpha, 2), /* alpha ignored */
-    DEFINE_PROP_END_OF_LIST()
 };
 
-static void bcm2835_fb_class_init(ObjectClass *klass, void *data)
+static void bcm2835_fb_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     device_class_set_props(dc, bcm2835_fb_props);
     dc->realize = bcm2835_fb_realize;
-    dc->reset = bcm2835_fb_reset;
+    device_class_set_legacy_reset(dc, bcm2835_fb_reset);
     dc->vmsd = &vmstate_bcm2835_fb;
 }
 

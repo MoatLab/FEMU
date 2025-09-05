@@ -45,7 +45,16 @@ def packages_as_dict(raw_pkgs):
 @pytest.fixture
 def test_project(projects):
     return Project(projects, "packages",
-                   Path(test_utils.test_data_indir(__file__), "packages.yml"))
+                   path=Path(test_utils.test_data_indir(__file__), "packages.yml"))
+
+
+def mock_get_host_arch():
+    return "x86_64"
+
+
+@pytest.fixture(scope="module")
+def mock_arch(monkeypatch_module_scope):
+    monkeypatch_module_scope.setattr(util, "get_host_arch", mock_get_host_arch)
 
 
 def test_verify_all_mappings_and_packages(assert_equal, packages):
@@ -67,7 +76,7 @@ cross_params = [
 
 @pytest.mark.parametrize("target,arch", native_params + cross_params)
 def test_package_resolution(assert_equal, targets, packages, test_project,
-                            target, arch,):
+                            target, arch, mock_arch):
     if arch is None:
         outfile = f"{target}.yml"
     else:
@@ -83,7 +92,7 @@ def test_package_resolution(assert_equal, targets, packages, test_project,
 def test_resolution_override(targets, test_project):
     datadir = DataDir(Path(test_utils.test_data_dir(__file__), 'override'))
     packages = Packages(datadir)
-    target_obj = BuildTarget(targets, packages, "centos-stream-8")
+    target_obj = BuildTarget(targets, packages, "centos-stream-9")
     pkgs = test_project.get_packages(target_obj)
     assert isinstance(pkgs['meson'], PyPIPackage)
 

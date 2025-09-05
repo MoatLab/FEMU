@@ -38,9 +38,11 @@
 #include "qemu/help_option.h"
 #include "qemu/module.h"
 #include "qemu/plugin.h"
-#include "exec/exec-all.h"
+#include "user/guest-base.h"
+#include "user/page-protection.h"
 #include "exec/gdbstub.h"
 #include "gdbstub/user.h"
+#include "accel/accel-ops.h"
 #include "tcg/startup.h"
 #include "qemu/timer.h"
 #include "qemu/envlist.h"
@@ -48,7 +50,7 @@
 #include "elf.h"
 #include "trace/control.h"
 #include "target_elf.h"
-#include "cpu_loop-common.h"
+#include "user/cpu_loop.h"
 #include "crypto/init.h"
 #include "fd-trans.h"
 #include "signal-common.h"
@@ -70,6 +72,7 @@ char *exec_path;
 char real_exec_path[PATH_MAX];
 
 static bool opt_one_insn_per_tb;
+static unsigned long opt_tb_size;
 static const char *argv0;
 static const char *gdbstub;
 static envlist_t *envlist;
@@ -120,6 +123,7 @@ static const char *last_log_filename;
 #endif
 
 unsigned long reserved_va;
+unsigned long guest_addr_max;
 
 static void usage(int exitcode);
 
@@ -146,12 +150,14 @@ void fork_start(void)
     cpu_list_lock();
     qemu_plugin_user_prefork_lock();
     gdbserver_fork_start();
+    fd_trans_prefork();
 }
 
 void fork_end(pid_t pid)
 {
     bool child = pid == 0;
 
+    fd_trans_postfork();
     qemu_plugin_user_postfork(child);
     mmap_fork_end(child);
     if (child) {
@@ -411,9 +417,23 @@ static void handle_arg_reserved_va(const char *arg)
     reserved_va = val ? val - 1 : 0;
 }
 
+static const char *rtsig_map = CONFIG_QEMU_RTSIG_MAP;
+
+static void handle_arg_rtsig_map(const char *arg)
+{
+    rtsig_map = arg;
+}
+
 static void handle_arg_one_insn_per_tb(const char *arg)
 {
     opt_one_insn_per_tb = true;
+}
+
+static void handle_arg_tb_size(const char *arg)
+{
+    if (qemu_strtoul(arg, NULL, 0, &opt_tb_size)) {
+        usage(EXIT_FAILURE);
+    }
 }
 
 static void handle_arg_strace(const char *arg)
@@ -493,6 +513,9 @@ static const struct qemu_argument arg_table[] = {
      "address",    "set guest_base address to 'address'"},
     {"R",          "QEMU_RESERVED_VA", true,  handle_arg_reserved_va,
      "size",       "reserve 'size' bytes for guest virtual address space"},
+    {"t",          "QEMU_RTSIG_MAP",   true,  handle_arg_rtsig_map,
+     "tsig hsig n[,...]",
+                   "map target rt signals [tsig,tsig+n) to [hsig,hsig+n]"},
     {"d",          "QEMU_LOG",         true,  handle_arg_log,
      "item[,...]", "enable logging of specified items "
      "(use '-d help' for a list of items)"},
@@ -505,6 +528,8 @@ static const struct qemu_argument arg_table[] = {
     {"one-insn-per-tb",
                    "QEMU_ONE_INSN_PER_TB",  false, handle_arg_one_insn_per_tb,
      "",           "run with one guest instruction per emulated TB"},
+    {"tb-size",    "QEMU_TB_SIZE",     true,  handle_arg_tb_size,
+     "size",       "TCG translation block cache size"},
     {"strace",     "QEMU_STRACE",      false, handle_arg_strace,
      "",           "log system calls"},
     {"seed",       "QEMU_RAND_SEED",   true,  handle_arg_seed,
@@ -754,8 +779,9 @@ int main(int argc, char **argv, char **envp)
     /*
      * Manage binfmt-misc open-binary flag
      */
+    errno = 0;
     execfd = qemu_getauxval(AT_EXECFD);
-    if (execfd == 0) {
+    if (errno != 0) {
         execfd = open(exec_path, O_RDONLY);
         if (execfd < 0) {
             printf("Error while loading %s: %s\n", exec_path, strerror(errno));
@@ -795,7 +821,9 @@ int main(int argc, char **argv, char **envp)
         accel_init_interfaces(ac);
         object_property_set_bool(OBJECT(accel), "one-insn-per-tb",
                                  opt_one_insn_per_tb, &error_abort);
-        ac->init_machine(NULL);
+        object_property_set_int(OBJECT(accel), "tb-size",
+                                opt_tb_size, &error_abort);
+        ac->init_machine(accel, NULL);
     }
 
     /*
@@ -813,10 +841,10 @@ int main(int argc, char **argv, char **envp)
     thread_cpu = cpu;
 
     /*
-     * Reserving too much vm space via mmap can run into problems
-     * with rlimits, oom due to page table creation, etc.  We will
-     * still try it, if directed by the command-line option, but
-     * not by default.
+     * Reserving too much vm space via mmap can run into problems with rlimits,
+     * oom due to page table creation, etc.  We will still try it, if directed
+     * by the command-line option, but not by default. Unless we're running a
+     * target address space of 32 or fewer bits on a host with 64 bits.
      */
     max_reserved_va = MAX_RESERVED_VA(cpu);
     if (reserved_va != 0) {
@@ -834,6 +862,13 @@ int main(int argc, char **argv, char **envp)
         /* MAX_RESERVED_VA + 1 is a large power of 2, so is aligned. */
         reserved_va = max_reserved_va;
     }
+    if (reserved_va != 0) {
+        guest_addr_max = reserved_va;
+    } else if (MIN(TARGET_VIRT_ADDR_SPACE_BITS, TARGET_ABI_BITS) <= 32) {
+        guest_addr_max = UINT32_MAX;
+    } else {
+        guest_addr_max = ~0ul;
+    }
 
     /*
      * Temporarily disable
@@ -842,6 +877,7 @@ int main(int argc, char **argv, char **envp)
      */
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wtype-limits"
+#pragma GCC diagnostic ignored "-Wtautological-compare"
 
     /*
      * Select an initial value for task_unmapped_base that is in range.
@@ -999,7 +1035,7 @@ int main(int argc, char **argv, char **envp)
 
     target_set_brk(info->brk);
     syscall_init();
-    signal_init();
+    signal_init(rtsig_map);
 
     /* Now that we've loaded the binary, GUEST_BASE is fixed.  Delay
        generating the prologue until now so that the prologue can take
@@ -1009,12 +1045,7 @@ int main(int argc, char **argv, char **envp)
     target_cpu_copy_regs(env, regs);
 
     if (gdbstub) {
-        if (gdbserver_start(gdbstub) < 0) {
-            fprintf(stderr, "qemu: could not open gdbserver on %s\n",
-                    gdbstub);
-            exit(EXIT_FAILURE);
-        }
-        gdb_handlesig(cpu, 0, NULL, NULL, 0);
+        gdbserver_start(gdbstub, &error_fatal);
     }
 
 #ifdef CONFIG_SEMIHOSTING

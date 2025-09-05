@@ -13,8 +13,8 @@
 #include "qemu/osdep.h"
 #include "libqtest.h"
 #include "libqos/virtio.h"
-#include "qapi/qmp/qdict.h"
-#include "qapi/qmp/qlist.h"
+#include "qobject/qdict.h"
+#include "qobject/qlist.h"
 
 static const char *qvirtio_get_dev_type(void);
 
@@ -154,15 +154,10 @@ static void device_add(QTestState *qts)
 
 static void device_del(QTestState *qts, bool and_reset)
 {
-    QDict *response;
-
     qtest_qmp_device_del_send(qts, "dev0");
 
     if (and_reset) {
-        response = qtest_qmp(qts, "{'execute': 'system_reset' }");
-        g_assert(response);
-        g_assert(qdict_haskey(response, "return"));
-        qobject_unref(response);
+        qtest_system_reset_nowait(qts);
     }
 
     qtest_qmp_eventwait(qts, "DEVICE_DELETED");
@@ -173,7 +168,7 @@ static void test_drive_without_dev(void)
     QTestState *qts;
 
     /* Start with an empty drive */
-    qts = qtest_init("-drive if=none,id=drive0");
+    qts = qtest_init("-drive if=none,id=drive0 -M none");
 
     /* Delete the drive */
     drive_del(qts);
@@ -191,6 +186,11 @@ static void test_after_failed_device_add(void)
     char driver[32];
     QDict *response;
     QTestState *qts;
+
+    if (!has_device_builtin("virtio-blk")) {
+        g_test_skip("Device virtio-blk is not available");
+        return;
+    }
 
     snprintf(driver, sizeof(driver), "virtio-blk-%s",
              qvirtio_get_dev_type());

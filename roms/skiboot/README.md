@@ -125,7 +125,7 @@ to run skiboot:
 To run a boot-to-bootloader test you need a Linux kernel image 'zImage.epapr'.
 Build one using the `opal_defconfig` config for op-build. See
 https://github.com/open-power/op-build/ on how to build, or download one from
-https://openpower.xyz/job/openpower/job/openpower-op-build/.
+https://github.com/open-power/op-build/releases/ .
 
 Drop zImage.epapr in the skiboot directory and the skiboot test suite will
 automatically pick it up. You can also run a combined skiboot and Linux test in

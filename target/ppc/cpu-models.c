@@ -35,7 +35,7 @@
 #define POWERPC_DEF_SVR(_name, _desc, _pvr, _svr, _type)                    \
     static void                                                             \
     glue(POWERPC_DEF_PREFIX(_pvr, _svr, _type), _cpu_class_init)            \
-    (ObjectClass *oc, void *data)                                           \
+    (ObjectClass *oc, const void *data)                                     \
     {                                                                       \
         DeviceClass *dc = DEVICE_CLASS(oc);                                 \
         PowerPCCPUClass *pcc = POWERPC_CPU_CLASS(oc);                       \
@@ -734,6 +734,8 @@
                 "POWER9 v2.2")
     POWERPC_DEF("power10_v2.0",  CPU_POWERPC_POWER10_DD20,           POWER10,
                 "POWER10 v2.0")
+    POWERPC_DEF("power11_v2.0",  CPU_POWERPC_POWER11_DD20,           POWER11,
+                "POWER11_v2.0")
 #endif /* defined (TARGET_PPC64) */
 
 /***************************************************************************/
@@ -909,6 +911,7 @@ PowerPCCPUAlias ppc_cpu_aliases[] = {
     { "power8nvl", "power8nvl_v1.0" },
     { "power9", "power9_v2.2" },
     { "power10", "power10_v2.0" },
+    { "power11", "power11_v2.0" },
 #endif
 
     /* Generic PowerPCs */

@@ -1,10 +1,9 @@
 /*
  * QEMU PowerPC sPAPR XIVE interrupt controller model
  *
- * Copyright (c) 2017-2018, IBM Corporation.
+ * Copyright (c) 2017-2024, IBM Corporation.
  *
- * This code is licensed under the GPL version 2 or later. See the
- * COPYING file in the top-level directory.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include "qemu/osdep.h"
@@ -13,10 +12,9 @@
 #include "qapi/error.h"
 #include "qemu/error-report.h"
 #include "target/ppc/cpu.h"
-#include "sysemu/cpus.h"
-#include "sysemu/reset.h"
+#include "system/cpus.h"
+#include "system/reset.h"
 #include "migration/vmstate.h"
-#include "monitor/monitor.h"
 #include "hw/ppc/fdt.h"
 #include "hw/ppc/spapr.h"
 #include "hw/ppc/spapr_cpu_core.h"
@@ -132,7 +130,7 @@ static int spapr_xive_target_to_end(uint32_t target, uint8_t prio,
  * structure dumping only the information related to the OS EQ.
  */
 static void spapr_xive_end_pic_print_info(SpaprXive *xive, XiveEND *end,
-                                          Monitor *mon)
+                                          GString *buf)
 {
     uint64_t qaddr_base = xive_end_qaddr(end);
     uint32_t qindex = xive_get_field32(END_W1_PAGE_OFF, end->w1);
@@ -142,11 +140,11 @@ static void spapr_xive_end_pic_print_info(SpaprXive *xive, XiveEND *end,
     uint32_t nvt = xive_get_field32(END_W6_NVT_INDEX, end->w6);
     uint8_t priority = xive_get_field32(END_W7_F0_PRIORITY, end->w7);
 
-    monitor_printf(mon, "%3d/%d % 6d/%5d @%"PRIx64" ^%d",
-                   spapr_xive_nvt_to_target(0, nvt),
-                   priority, qindex, qentries, qaddr_base, qgen);
+    g_string_append_printf(buf, "%3d/%d % 6d/%5d @%"PRIx64" ^%d",
+                           spapr_xive_nvt_to_target(0, nvt),
+                           priority, qindex, qentries, qaddr_base, qgen);
 
-    xive_end_queue_pic_print_info(end, 6, mon);
+    xive_end_queue_pic_print_info(end, 6, buf);
 }
 
 /*
@@ -156,7 +154,7 @@ static void spapr_xive_end_pic_print_info(SpaprXive *xive, XiveEND *end,
 #define spapr_xive_in_kernel(xive) \
     (kvm_irqchip_in_kernel() && (xive)->fd != -1)
 
-static void spapr_xive_pic_print_info(SpaprXive *xive, Monitor *mon)
+static void spapr_xive_pic_print_info(SpaprXive *xive, GString *buf)
 {
     XiveSource *xsrc = &xive->source;
     int i;
@@ -171,7 +169,7 @@ static void spapr_xive_pic_print_info(SpaprXive *xive, Monitor *mon)
         }
     }
 
-    monitor_printf(mon, "  LISN         PQ    EISN     CPU/PRIO EQ\n");
+    g_string_append_printf(buf, "  LISN         PQ    EISN     CPU/PRIO EQ\n");
 
     for (i = 0; i < xive->nr_irqs; i++) {
         uint8_t pq = xive_source_esb_get(xsrc, i);
@@ -181,13 +179,13 @@ static void spapr_xive_pic_print_info(SpaprXive *xive, Monitor *mon)
             continue;
         }
 
-        monitor_printf(mon, "  %08x %s %c%c%c %s %08x ", i,
-                       xive_source_irq_is_lsi(xsrc, i) ? "LSI" : "MSI",
-                       pq & XIVE_ESB_VAL_P ? 'P' : '-',
-                       pq & XIVE_ESB_VAL_Q ? 'Q' : '-',
-                       xive_source_is_asserted(xsrc, i) ? 'A' : ' ',
-                       xive_eas_is_masked(eas) ? "M" : " ",
-                       (int) xive_get_field64(EAS_END_DATA, eas->w));
+        g_string_append_printf(buf, "  %08x %s %c%c%c %s %08x ", i,
+                               xive_source_irq_is_lsi(xsrc, i) ? "LSI" : "MSI",
+                               pq & XIVE_ESB_VAL_P ? 'P' : '-',
+                               pq & XIVE_ESB_VAL_Q ? 'Q' : '-',
+                               xive_source_is_asserted(xsrc, i) ? 'A' : ' ',
+                               xive_eas_is_masked(eas) ? "M" : " ",
+                               (int) xive_get_field64(EAS_END_DATA, eas->w));
 
         if (!xive_eas_is_masked(eas)) {
             uint32_t end_idx = xive_get_field64(EAS_END_INDEX, eas->w);
@@ -197,10 +195,11 @@ static void spapr_xive_pic_print_info(SpaprXive *xive, Monitor *mon)
             end = &xive->endt[end_idx];
 
             if (xive_end_is_valid(end)) {
-                spapr_xive_end_pic_print_info(xive, end, mon);
+                spapr_xive_end_pic_print_info(xive, end, buf);
             }
+
         }
-        monitor_printf(mon, "\n");
+        g_string_append_c(buf, '\n');
     }
 }
 
@@ -429,13 +428,13 @@ static int spapr_xive_write_nvt(XiveRouter *xrtr, uint8_t nvt_blk,
     g_assert_not_reached();
 }
 
-static int spapr_xive_match_nvt(XivePresenter *xptr, uint8_t format,
-                                uint8_t nvt_blk, uint32_t nvt_idx,
-                                bool cam_ignore, uint8_t priority,
-                                uint32_t logic_serv, XiveTCTXMatch *match)
+static bool spapr_xive_match_nvt(XivePresenter *xptr, uint8_t format,
+                                 uint8_t nvt_blk, uint32_t nvt_idx,
+                                 bool crowd, bool cam_ignore,
+                                 uint8_t priority,
+                                 uint32_t logic_serv, XiveTCTXMatch *match)
 {
     CPUState *cs;
-    int count = 0;
 
     CPU_FOREACH(cs) {
         PowerPCCPU *cpu = POWERPC_CPU(cs);
@@ -463,16 +462,17 @@ static int spapr_xive_match_nvt(XivePresenter *xptr, uint8_t format,
             if (match->tctx) {
                 qemu_log_mask(LOG_GUEST_ERROR, "XIVE: already found a thread "
                               "context NVT %x/%x\n", nvt_blk, nvt_idx);
-                return -1;
+                match->count++;
+                continue;
             }
 
             match->ring = ring;
             match->tctx = tctx;
-            count++;
+            match->count++;
         }
     }
 
-    return count;
+    return !!match->count;
 }
 
 static uint32_t spapr_xive_presenter_get_config(XivePresenter *xptr)
@@ -627,13 +627,12 @@ static void spapr_xive_free_irq(SpaprInterruptController *intc, int lisn)
     xive->eat[lisn].w &= cpu_to_be64(~EAS_VALID);
 }
 
-static Property spapr_xive_properties[] = {
+static const Property spapr_xive_properties[] = {
     DEFINE_PROP_UINT32("nr-irqs", SpaprXive, nr_irqs, 0),
     DEFINE_PROP_UINT32("nr-ends", SpaprXive, nr_ends, 0),
     DEFINE_PROP_UINT64("vc-base", SpaprXive, vc_base, SPAPR_XIVE_VC_BASE),
     DEFINE_PROP_UINT64("tm-base", SpaprXive, tm_base, SPAPR_XIVE_TM_BASE),
     DEFINE_PROP_UINT8("hv-prio", SpaprXive, hv_prio, 7),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
 static int spapr_xive_cpu_intc_create(SpaprInterruptController *intc,
@@ -699,7 +698,7 @@ static void spapr_xive_set_irq(SpaprInterruptController *intc, int irq, int val)
     }
 }
 
-static void spapr_xive_print_info(SpaprInterruptController *intc, Monitor *mon)
+static void spapr_xive_print_info(SpaprInterruptController *intc, GString *buf)
 {
     SpaprXive *xive = SPAPR_XIVE(intc);
     CPUState *cs;
@@ -707,10 +706,9 @@ static void spapr_xive_print_info(SpaprInterruptController *intc, Monitor *mon)
     CPU_FOREACH(cs) {
         PowerPCCPU *cpu = POWERPC_CPU(cs);
 
-        xive_tctx_pic_print_info(spapr_cpu_state(cpu)->tctx, mon);
+        xive_tctx_pic_print_info(spapr_cpu_state(cpu)->tctx, buf);
     }
-
-    spapr_xive_pic_print_info(xive, mon);
+    spapr_xive_pic_print_info(xive, buf);
 }
 
 static void spapr_xive_dt(SpaprInterruptController *intc, uint32_t nr_servers,
@@ -811,7 +809,7 @@ static bool spapr_xive_in_kernel_xptr(const XivePresenter *xptr)
     return spapr_xive_in_kernel(SPAPR_XIVE(xptr));
 }
 
-static void spapr_xive_class_init(ObjectClass *klass, void *data)
+static void spapr_xive_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     XiveRouterClass *xrc = XIVE_ROUTER_CLASS(klass);
@@ -858,7 +856,7 @@ static const TypeInfo spapr_xive_info = {
     .instance_size = sizeof(SpaprXive),
     .class_init = spapr_xive_class_init,
     .class_size = sizeof(SpaprXiveClass),
-    .interfaces = (InterfaceInfo[]) {
+    .interfaces = (const InterfaceInfo[]) {
         { TYPE_SPAPR_INTC },
         { }
     },

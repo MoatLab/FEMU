@@ -470,23 +470,71 @@
   </interface>
 
   <!--
-      org.qemu.Display1.Listener.Win32.Map:
+      org.qemu.Display1.Listener.Unix.Map:
 
       This optional client-side interface can complement
-      org.qemu.Display1.Listener on ``/org/qemu/Display1/Listener`` for Windows
-      specific shared memory scanouts.
+      org.qemu.Display1.Listener on ``/org/qemu/Display1/Listener`` for
+      Unix-specific shared memory scanouts.
   -->
-  <interface name="org.qemu.Display1.Listener.Win32.Map">
+  <?if $(env.HOST_OS) != windows?>
+  <interface name="org.qemu.Display1.Listener.Unix.Map">
     <!--
         ScanoutMap:
-        @handle: the shared map handle value.
-        @offset: mapping offset.
+        @handle: the shared map FD.
+        @offset: mapping offset, in bytes.
         @width: display width, in pixels.
         @height: display height, in pixels.
         @stride: stride, in bytes.
         @pixman_format: image format (ex: ``PIXMAN_X8R8G8B8``).
 
         Resize and update the display content with a shared map.
+    -->
+    <method name="ScanoutMap">
+      <arg type="h" name="handle" direction="in"/>
+      <arg type="u" name="offset" direction="in"/>
+      <arg type="u" name="width" direction="in"/>
+      <arg type="u" name="height" direction="in"/>
+      <arg type="u" name="stride" direction="in"/>
+      <arg type="u" name="pixman_format" direction="in"/>
+    </method>
+
+    <!--
+        UpdateMap:
+        @x: the X update position, in pixels.
+        @y: the Y update position, in pixels.
+        @width: the update width, in pixels.
+        @height: the update height, in pixels.
+
+        Update the display content with the current shared map and the given region.
+    -->
+    <method name="UpdateMap">
+      <arg type="i" name="x" direction="in"/>
+      <arg type="i" name="y" direction="in"/>
+      <arg type="i" name="width" direction="in"/>
+      <arg type="i" name="height" direction="in"/>
+    </method>
+  </interface>
+  <?endif?>
+
+  <!--
+      org.qemu.Display1.Listener.Win32.Map:
+
+      This optional client-side interface can complement
+      org.qemu.Display1.Listener on ``/org/qemu/Display1/Listener`` for Windows
+      specific shared memory scanouts.
+  -->
+  <?if $(env.HOST_OS) == windows?>
+  <interface name="org.qemu.Display1.Listener.Win32.Map">
+    <!--
+        ScanoutMap:
+        @handle: the shared file mapping handle value (not a file handle)
+        @offset: mapping offset.
+        @width: display width, in pixels.
+        @height: display height, in pixels.
+        @stride: stride, in bytes.
+        @pixman_format: image format (ex: ``PIXMAN_X8R8G8B8``).
+
+        Resize and update the display content with a shared file mapping object.
     -->
     <method name="ScanoutMap">
       <arg type="t" name="handle" direction="in"/>
@@ -513,6 +561,7 @@
       <arg type="i" name="height" direction="in"/>
     </method>
   </interface>
+  <?endif?>
 
   <!--
       org.qemu.Display1.Listener.Win32.D3d11:
@@ -564,6 +613,51 @@
       <arg type="i" name="height" direction="in"/>
     </method>
   </interface>
+
+  <!--
+      org.qemu.Display1.Listener.Unix.ScanoutDMABUF2:
+
+      This optional client-side interface can complement
+      org.qemu.Display1.Listener on ``/org/qemu/Display1/Listener`` for
+      Unix-specific DMABUF scanout setup which support multi plane.
+  -->
+  <?if $(env.HOST_OS) != windows?>
+  <interface name="org.qemu.Display1.Listener.Unix.ScanoutDMABUF2">
+    <!--
+        ScanoutDMABUF2:
+        @dmabuf: DMABUF file descriptor of each plane.
+        @x: display x offset, in pixels
+        @y: display y offset, in pixels
+        @width: display width, in pixels.
+        @height: display height, in pixels.
+        @offset: offset of each plane, in bytes.
+        @stride: stride of each plane, in bytes.
+        @num_planes: plane number.
+        @fourcc: DMABUF fourcc.
+        @backing_width: backing framebuffer width, in pixels
+        @backing_height: backing framebuffer height, in pixels
+        @modifier: DMABUF modifier.
+        @y0_top: whether Y position 0 is the top or not.
+
+        Resize and update the display content with DMABUF.
+    -->
+    <method name="ScanoutDMABUF2">
+      <arg type="ah" name="dmabuf" direction="in"/>
+      <arg type="u" name="x" direction="in"/>
+      <arg type="u" name="y" direction="in"/>
+      <arg type="u" name="width" direction="in"/>
+      <arg type="u" name="height" direction="in"/>
+      <arg type="au" name="offset" direction="in"/>
+      <arg type="au" name="stride" direction="in"/>
+      <arg type="u" name="num_planes" direction="in"/>
+      <arg type="u" name="fourcc" direction="in"/>
+      <arg type="u" name="backing_width" direction="in"/>
+      <arg type="u" name="backing_height" direction="in"/>
+      <arg type="t" name="modifier" direction="in"/>
+      <arg type="b" name="y0_top" direction="in"/>
+    </method>
+  </interface>
+  <?endif?>
 
   <!--
       org.qemu.Display1.Clipboard:
@@ -723,6 +817,18 @@
       <arg type="h" name="listener" direction="in"/>
       <?endif?>
     </method>
+
+    <!--
+        NSamples:
+
+        The number of samples per read/write frames. (for example the default is
+        480, or 10ms at 48kHz)
+
+        (earlier version of the display interface do not provide this property)
+    -->
+    <property name="NSamples" type="u" access="read">
+      <annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="const"/>
+    </property>
 
     <!--
         Interfaces:

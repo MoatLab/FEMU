@@ -4,6 +4,14 @@
  * Copyright (c) 2007 CodeSourcery.
  *
  * This code is licensed under the GPL
+ *
+ * This file models both the MCF5208 SoC, and the
+ * MCF5208EVB evaluation board. For details see
+ *
+ * "MCF5208 Reference Manual"
+ * https://www.nxp.com/docs/en/reference-manual/MCF5208RM.pdf
+ * "M5208EVB-RevB 32-bit Microcontroller User Manual"
+ * https://www.nxp.com/docs/en/reference-manual/M5208EVBUM.pdf
  */
 
 #include "qemu/osdep.h"
@@ -18,8 +26,8 @@
 #include "hw/m68k/mcf_fec.h"
 #include "qemu/timer.h"
 #include "hw/ptimer.h"
-#include "sysemu/sysemu.h"
-#include "sysemu/qtest.h"
+#include "system/system.h"
+#include "system/qtest.h"
 #include "net/net.h"
 #include "hw/boards.h"
 #include "hw/loader.h"
@@ -147,7 +155,7 @@ static uint64_t m5208_timer_read(void *opaque, hwaddr addr,
 static const MemoryRegionOps m5208_timer_ops = {
     .read = m5208_timer_read,
     .write = m5208_timer_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+    .endianness = DEVICE_BIG_ENDIAN,
 };
 
 static uint64_t m5208_sys_read(void *opaque, hwaddr addr,
@@ -158,7 +166,7 @@ static uint64_t m5208_sys_read(void *opaque, hwaddr addr,
         {
             int n;
             for (n = 0; n < 32; n++) {
-                if (current_machine->ram_size < (2u << n)) {
+                if (current_machine->ram_size < (2ULL << n)) {
                     break;
                 }
             }
@@ -184,7 +192,7 @@ static void m5208_sys_write(void *opaque, hwaddr addr,
 static const MemoryRegionOps m5208_sys_ops = {
     .read = m5208_sys_read,
     .write = m5208_sys_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+    .endianness = DEVICE_BIG_ENDIAN,
 };
 
 static uint64_t m5208_rcm_read(void *opaque, hwaddr addr,
@@ -216,7 +224,7 @@ static void m5208_rcm_write(void *opaque, hwaddr addr,
 static const MemoryRegionOps m5208_rcm_ops = {
     .read = m5208_rcm_read,
     .write = m5208_rcm_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+    .endianness = DEVICE_BIG_ENDIAN,
 };
 
 static void mcf5208_sys_init(MemoryRegion *address_space, qemu_irq *pic,
@@ -351,7 +359,7 @@ static void mcf5208evb_init(MachineState *machine)
         /* Initial PC is always at offset 4 in firmware binaries */
         ptr = rom_ptr(0x4, 4);
         assert(ptr != NULL);
-        env->pc = ldl_p(ptr);
+        env->pc = ldl_be_p(ptr);
     }
 
     /* Load kernel.  */
@@ -364,7 +372,7 @@ static void mcf5208evb_init(MachineState *machine)
     }
 
     kernel_size = load_elf(kernel_filename, NULL, NULL, NULL, &elf_entry,
-                           NULL, NULL, NULL, 1, EM_68K, 0, 0);
+                           NULL, NULL, NULL, ELFDATA2MSB, EM_68K, 0, 0);
     entry = elf_entry;
     if (kernel_size < 0) {
         kernel_size = load_uimage(kernel_filename, &entry, NULL, NULL,

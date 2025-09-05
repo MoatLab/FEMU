@@ -6,6 +6,6 @@ RUN apk update && \
         ca-certificates \
         git \
         go && \
-    apk list | sort > /packages.txt
+    apk list --installed | sort > /packages.txt
 
 ENV LANG "en_US.UTF-8"

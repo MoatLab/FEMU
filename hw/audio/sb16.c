@@ -1181,7 +1181,7 @@ static int write_audio (SB16State *s, int nchan, int dma_pos,
     IsaDma *isa_dma = nchan == s->dma ? s->isa_dma : s->isa_hdma;
     IsaDmaClass *k = ISADMA_GET_CLASS(isa_dma);
     int temp, net;
-    uint8_t tmpbuf[4096];
+    QEMU_UNINITIALIZED uint8_t tmpbuf[4096];
 
     temp = len;
     net = 0;
@@ -1440,17 +1440,16 @@ static void sb16_realizefn (DeviceState *dev, Error **errp)
     s->can_write = 1;
 }
 
-static Property sb16_properties[] = {
+static const Property sb16_properties[] = {
     DEFINE_AUDIO_PROPERTIES(SB16State, card),
     DEFINE_PROP_UINT32 ("version", SB16State, ver,  0x0405), /* 4.5 */
     DEFINE_PROP_UINT32 ("iobase",  SB16State, port, 0x220),
     DEFINE_PROP_UINT32 ("irq",     SB16State, irq,  5),
     DEFINE_PROP_UINT32 ("dma",     SB16State, dma,  1),
     DEFINE_PROP_UINT32 ("dma16",   SB16State, hdma, 5),
-    DEFINE_PROP_END_OF_LIST (),
 };
 
-static void sb16_class_initfn (ObjectClass *klass, void *data)
+static void sb16_class_initfn(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS (klass);
 

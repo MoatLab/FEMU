@@ -10,13 +10,14 @@
 
 #include "qemu/osdep.h"
 #include "cpu.h"
-#include "exec/address-spaces.h"
-#include "exec/ioport.h"
+#include "system/address-spaces.h"
+#include "system/ioport.h"
 #include "gdbstub/helpers.h"
 #include "qemu/accel.h"
-#include "sysemu/whpx.h"
-#include "sysemu/cpus.h"
-#include "sysemu/runstate.h"
+#include "accel/accel-ops.h"
+#include "system/whpx.h"
+#include "system/cpus.h"
+#include "system/runstate.h"
 #include "qemu/main-loop.h"
 #include "hw/boards.h"
 #include "hw/intc/ioapic.h"
@@ -26,6 +27,8 @@
 #include "qapi/qapi-types-common.h"
 #include "qapi/qapi-visit-common.h"
 #include "migration/blocker.h"
+#include "host-cpu.h"
+#include "accel/accel-cpu-target.h"
 #include <winerror.h>
 
 #include "whpx-internal.h"
@@ -242,7 +245,7 @@ struct AccelCPUState {
     WHV_RUN_VP_EXIT_CONTEXT exit_ctx;
 };
 
-static bool whpx_allowed;
+bool whpx_allowed;
 static bool whp_dispatch_initialized;
 static HMODULE hWinHvPlatform, hWinHvEmulation;
 static uint32_t max_vcpu_index;
@@ -548,8 +551,6 @@ static void whpx_set_registers(CPUState *cpu, int level)
         error_report("WHPX: Failed to set virtual processor context, hr=%08lx",
                      hr);
     }
-
-    return;
 }
 
 static int whpx_get_tsc(CPUState *cpu)
@@ -770,8 +771,6 @@ static void whpx_get_registers(CPUState *cpu)
     }
 
     x86_update_hflags(env);
-
-    return;
 }
 
 static HRESULT CALLBACK whpx_emu_ioport_callback(
@@ -1569,8 +1568,6 @@ static void whpx_vcpu_pre_run(CPUState *cpu)
                          " hr=%08lx", hr);
         }
     }
-
-    return;
 }
 
 static void whpx_vcpu_post_run(CPUState *cpu)
@@ -1594,8 +1591,6 @@ static void whpx_vcpu_post_run(CPUState *cpu)
 
     vcpu->interruptable =
         !vcpu->exit_ctx.VpContext.ExecutionState.InterruptShadow;
-
-    return;
 }
 
 static void whpx_vcpu_process_async_events(CPUState *cpu)
@@ -1633,8 +1628,6 @@ static void whpx_vcpu_process_async_events(CPUState *cpu)
         apic_handle_tpr_access_report(x86_cpu->apic_state, env->eip,
                                       env->tpr_access_type);
     }
-
-    return;
 }
 
 static int whpx_vcpu_run(CPUState *cpu)
@@ -2115,7 +2108,7 @@ void whpx_cpu_synchronize_pre_loadvm(CPUState *cpu)
     run_on_cpu(cpu, do_whpx_cpu_synchronize_pre_loadvm, RUN_ON_CPU_NULL);
 }
 
-void whpx_cpu_synchronize_pre_resume(bool step_pending)
+static void whpx_pre_resume_vm(AccelState *as, bool step_pending)
 {
     whpx_global.step_pending = step_pending;
 }
@@ -2279,7 +2272,6 @@ void whpx_destroy_vcpu(CPUState *cpu)
     whp_dispatch.WHvDeleteVirtualProcessor(whpx->partition, cpu->cpu_index);
     whp_dispatch.WHvEmulatorDestroyEmulator(vcpu->emulator);
     g_free(cpu->accel);
-    return;
 }
 
 void whpx_vcpu_kick(CPUState *cpu)
@@ -2511,11 +2503,33 @@ static void whpx_set_kernel_irqchip(Object *obj, Visitor *v,
     }
 }
 
+static void whpx_cpu_instance_init(CPUState *cs)
+{
+    X86CPU *cpu = X86_CPU(cs);
+
+    host_cpu_instance_init(cpu);
+}
+
+static void whpx_cpu_accel_class_init(ObjectClass *oc, const void *data)
+{
+    AccelCPUClass *acc = ACCEL_CPU_CLASS(oc);
+
+    acc->cpu_instance_init = whpx_cpu_instance_init;
+}
+
+static const TypeInfo whpx_cpu_accel_type = {
+    .name = ACCEL_CPU_NAME("whpx"),
+
+    .parent = TYPE_ACCEL_CPU,
+    .class_init = whpx_cpu_accel_class_init,
+    .abstract = true,
+};
+
 /*
  * Partition support
  */
 
-static int whpx_accel_init(MachineState *ms)
+static int whpx_accel_init(AccelState *as, MachineState *ms)
 {
     struct whpx_state *whpx;
     int ret;
@@ -2699,20 +2713,16 @@ error:
     return ret;
 }
 
-int whpx_enabled(void)
-{
-    return whpx_allowed;
-}
-
 bool whpx_apic_in_platform(void) {
     return whpx_global.apic_in_platform;
 }
 
-static void whpx_accel_class_init(ObjectClass *oc, void *data)
+static void whpx_accel_class_init(ObjectClass *oc, const void *data)
 {
     AccelClass *ac = ACCEL_CLASS(oc);
     ac->name = "WHPX";
     ac->init_machine = whpx_accel_init;
+    ac->pre_resume_vm = whpx_pre_resume_vm;
     ac->allowed = &whpx_allowed;
 
     object_class_property_add(oc, "kernel-irqchip", "on|off|split",
@@ -2741,6 +2751,7 @@ static const TypeInfo whpx_accel_type = {
 static void whpx_type_init(void)
 {
     type_register_static(&whpx_accel_type);
+    type_register_static(&whpx_cpu_accel_type);
 }
 
 bool init_whp_dispatch(void)

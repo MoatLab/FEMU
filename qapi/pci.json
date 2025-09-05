@@ -6,7 +6,9 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 ##
-# = PCI
+# ***
+# PCI
+# ***
 ##
 
 ##
@@ -32,6 +34,8 @@
 # @type:
 #     - 'io' if the region is a PIO region
 #     - 'memory' if the region is a MMIO region
+#
+# @address: memory address
 #
 # @size: memory size
 #
@@ -81,7 +85,7 @@
 #
 # @bus: information about the bus the device resides on
 #
-# @devices: a list of @PciDeviceInfo for each device on this bridge
+# @devices: a list of `PciDeviceInfo` for each device on this bridge
 #
 # Since: 0.14
 ##
@@ -93,7 +97,8 @@
 #
 # Information about the Class of a PCI device
 #
-# @desc: a string description of the device's class
+# @desc: a string description of the device's class (not stable, and
+#     should only be treated as informational)
 #
 # @class: the class code of the device
 #
@@ -146,9 +151,6 @@
 #
 # @regions: a list of the PCI I/O regions associated with the device
 #
-# Notes: the contents of @class_info.desc are not stable and should
-#     only be treated as informational.
-#
 # Since: 0.14
 ##
 { 'struct': 'PciDeviceInfo',
@@ -175,14 +177,14 @@
 #
 # Return information about the PCI bus topology of the guest.
 #
-# Returns: a list of @PciInfo for each PCI bus.  Each bus is
+# Returns: a list of info for each PCI bus.  Each bus is
 #     represented by a json-object, which has a key with a json-array
 #     of all PCI devices attached to it.  Each device is represented
 #     by a json-object.
 #
 # Since: 0.14
 #
-# Example:
+# .. qmp-example::
 #
 #     -> { "execute": "query-pci" }
 #     <- { "return": [
@@ -311,7 +313,6 @@
 #           ]
 #        }
 #
-# Note: This example has been shortened as the real response is too
-#     long.
+# This example has been shortened as the real response is too long.
 ##
 { 'command': 'query-pci', 'returns': ['PciInfo'] }

@@ -136,18 +136,17 @@ static const VMStateDescription vmstate_aspeed_sbc = {
     }
 };
 
-static Property aspeed_sbc_properties[] = {
+static const Property aspeed_sbc_properties[] = {
     DEFINE_PROP_BOOL("emmc-abr", AspeedSBCState, emmc_abr, 0),
     DEFINE_PROP_UINT32("signing-settings", AspeedSBCState, signing_settings, 0),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void aspeed_sbc_class_init(ObjectClass *klass, void *data)
+static void aspeed_sbc_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = aspeed_sbc_realize;
-    dc->reset = aspeed_sbc_reset;
+    device_class_set_legacy_reset(dc, aspeed_sbc_reset);
     dc->vmsd = &vmstate_aspeed_sbc;
     device_class_set_props(dc, aspeed_sbc_properties);
 }
@@ -160,7 +159,7 @@ static const TypeInfo aspeed_sbc_info = {
     .class_size = sizeof(AspeedSBCClass)
 };
 
-static void aspeed_ast2600_sbc_class_init(ObjectClass *klass, void *data)
+static void aspeed_ast2600_sbc_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 

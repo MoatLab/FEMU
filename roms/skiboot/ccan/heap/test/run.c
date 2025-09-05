@@ -82,7 +82,7 @@ static bool some_test(size_t n, bool is_less)
 		item = &items[i];
 
 		item->v = rand();
-		/* printf("pushing %d\n", item->v); */
+		printf("pushing %d\n", item->v);
 		heap_push(h, item);
 		if (!heap_ok(h, is_less ? __less : __more, 0))
 			return false;
@@ -104,7 +104,7 @@ static bool some_test(size_t n, bool is_less)
 		item = heap_pop(h);
 		if (!heap_ok(h, is_less ? __less : __more, 0))
 			return false;
-		/* printf("popped %d\n", item->v); */
+		printf("popped %d\n", item->v);
 		if (i > 0) {
 			if (is_less) {
 				if (less(item, prev))

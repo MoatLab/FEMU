@@ -81,7 +81,7 @@ static const MemoryRegionOps iosb_mmio_ops = {
     .endianness = DEVICE_BIG_ENDIAN,
 };
 
-static void iosb_reset_hold(Object *obj)
+static void iosb_reset_hold(Object *obj, ResetType type)
 {
     IOSBState *s = IOSB(obj);
 
@@ -111,7 +111,7 @@ static const VMStateDescription vmstate_iosb = {
     }
 };
 
-static void iosb_class_init(ObjectClass *oc, void *data)
+static void iosb_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
     ResettableClass *rc = RESETTABLE_CLASS(oc);

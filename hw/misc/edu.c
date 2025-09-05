@@ -23,9 +23,9 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/log.h"
 #include "qemu/units.h"
 #include "hw/pci/pci.h"
-#include "hw/hw.h"
 #include "hw/pci/msi.h"
 #include "qemu/timer.h"
 #include "qom/object.h"
@@ -103,25 +103,25 @@ static void edu_lower_irq(EduState *edu, uint32_t val)
     }
 }
 
-static bool within(uint64_t addr, uint64_t start, uint64_t end)
+static void edu_check_range(uint64_t xfer_start, uint64_t xfer_size,
+                uint64_t dma_start, uint64_t dma_size)
 {
-    return start <= addr && addr < end;
-}
+    uint64_t xfer_end = xfer_start + xfer_size;
+    uint64_t dma_end = dma_start + dma_size;
 
-static void edu_check_range(uint64_t addr, uint64_t size1, uint64_t start,
-                uint64_t size2)
-{
-    uint64_t end1 = addr + size1;
-    uint64_t end2 = start + size2;
-
-    if (within(addr, start, end2) &&
-            end1 > addr && end1 <= end2) {
+    /*
+     * 1. ensure we aren't overflowing
+     * 2. ensure that xfer is within dma address range
+     */
+    if (dma_end >= dma_start && xfer_end >= xfer_start &&
+        xfer_start >= dma_start && xfer_end <= dma_end) {
         return;
     }
 
-    hw_error("EDU: DMA range 0x%016"PRIx64"-0x%016"PRIx64
-             " out of bounds (0x%016"PRIx64"-0x%016"PRIx64")!",
-            addr, end1 - 1, start, end2 - 1);
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "EDU: DMA range 0x%016"PRIx64"-0x%016"PRIx64
+                  " out of bounds (0x%016"PRIx64"-0x%016"PRIx64")!",
+                  xfer_start, xfer_end - 1, dma_start, dma_end - 1);
 }
 
 static dma_addr_t edu_clamp_addr(const EduState *edu, dma_addr_t addr)
@@ -129,7 +129,9 @@ static dma_addr_t edu_clamp_addr(const EduState *edu, dma_addr_t addr)
     dma_addr_t res = addr & edu->dma_mask;
 
     if (addr != res) {
-        printf("EDU: clamping DMA %#.16"PRIx64" to %#.16"PRIx64"!\n", addr, res);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "EDU: clamping DMA 0x%016"PRIx64" to 0x%016"PRIx64"!",
+                      addr, res);
     }
 
     return res;
@@ -413,7 +415,7 @@ static void edu_instance_init(Object *obj)
                                    &edu->dma_mask, OBJ_PROP_FLAG_READWRITE);
 }
 
-static void edu_class_init(ObjectClass *class, void *data)
+static void edu_class_init(ObjectClass *class, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(class);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(class);
@@ -427,21 +429,18 @@ static void edu_class_init(ObjectClass *class, void *data)
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
 }
 
-static void pci_edu_register_types(void)
-{
-    static InterfaceInfo interfaces[] = {
-        { INTERFACE_CONVENTIONAL_PCI_DEVICE },
-        { },
-    };
-    static const TypeInfo edu_info = {
+static const TypeInfo edu_types[] = {
+    {
         .name          = TYPE_PCI_EDU_DEVICE,
         .parent        = TYPE_PCI_DEVICE,
         .instance_size = sizeof(EduState),
         .instance_init = edu_instance_init,
         .class_init    = edu_class_init,
-        .interfaces = interfaces,
-    };
+        .interfaces    = (const InterfaceInfo[]) {
+            { INTERFACE_CONVENTIONAL_PCI_DEVICE },
+            { },
+        },
+    }
+};
 
-    type_register_static(&edu_info);
-}
-type_init(pci_edu_register_types)
+DEFINE_TYPES(edu_types)

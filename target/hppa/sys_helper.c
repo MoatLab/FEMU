@@ -18,12 +18,12 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/log.h"
 #include "cpu.h"
-#include "exec/exec-all.h"
 #include "exec/helper-proto.h"
 #include "qemu/timer.h"
-#include "sysemu/runstate.h"
-#include "sysemu/sysemu.h"
+#include "system/runstate.h"
+#include "system/system.h"
 #include "chardev/char-fe.h"
 
 void HELPER(write_interval_timer)(CPUHPPAState *env, target_ulong val)
@@ -72,7 +72,7 @@ target_ulong HELPER(swap_system_mask)(CPUHPPAState *env, target_ulong nsm)
      * machines set the Q bit from 0 to 1 without an exception,
      * so let this go without comment.
      */
-    env->psw = (psw & ~PSW_SM) | (nsm & PSW_SM);
+    cpu_hppa_put_psw(env, (psw & ~PSW_SM) | (nsm & PSW_SM));
     return psw & PSW_SM;
 }
 
@@ -87,12 +87,23 @@ void HELPER(rfi)(CPUHPPAState *env)
      * To recreate the space identifier, remove the offset bits.
      * For pa1.x, the mask reduces to no change to space.
      */
-    mask = gva_offset_mask(env->psw);
+    mask = env->gva_offset_mask;
 
     env->iaoq_f = env->cr[CR_IIAOQ];
     env->iaoq_b = env->cr_back[1];
     env->iasq_f = (env->cr[CR_IIASQ] << 32) & ~(env->iaoq_f & mask);
     env->iasq_b = (env->cr_back[0] << 32) & ~(env->iaoq_b & mask);
+
+    if (qemu_loglevel_mask(CPU_LOG_INT)) {
+        FILE *logfile = qemu_log_trylock();
+        if (logfile) {
+            CPUState *cs = env_cpu(env);
+
+            fprintf(logfile, "RFI: cpu %d\n", cs->cpu_index);
+            hppa_cpu_dump_state(cs, logfile, 0);
+            qemu_log_unlock(logfile);
+        }
+    }
 }
 
 static void getshadowregs(CPUHPPAState *env)

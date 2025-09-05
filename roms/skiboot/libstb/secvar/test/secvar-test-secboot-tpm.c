@@ -100,21 +100,6 @@ int run_test(void)
 	ASSERT(*((uint64_t*) secboot_image->bank[1]) != 0llu);
 
 	clear_bank_list(&variable_bank);
-
-	// Tamper with pnor, hash check should catch this
-	secboot_image->bank[0][0] = ~secboot_image->bank[0][0];
-
-	rc = secboot_tpm_load_bank(&variable_bank, SECVAR_VARIABLE_BANK);
-	ASSERT(rc != OPAL_SUCCESS); // TODO: permission?
-
-	// Fix it back...
-	secboot_image->bank[0][0] = ~secboot_image->bank[0][0];
-
-	// Should be ok again
-	rc = secboot_tpm_load_bank(&variable_bank, SECVAR_VARIABLE_BANK);
-	ASSERT(rc == OPAL_SUCCESS);
-
-	clear_bank_list(&variable_bank);
 	free(secboot_buffer);
 
 	return 0;

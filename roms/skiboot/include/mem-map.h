@@ -26,17 +26,13 @@
 /* The NACA and other stuff in head.S need to be at the start: we
  * give it 64k before placing the SPIRA and related data.
  */
-#define SPIRA_OFF		0x00010000
-#define SPIRA_SIZE		0x400
-#define SPIRAH_OFF		0x00010400
+#define SPIRAH_OFF		0x00010000
 #define SPIRAH_SIZE		0x300
 
 #define PROC_DUMP_AREA_OFF	(SPIRAH_OFF + SPIRAH_SIZE)
 #define PROC_DUMP_AREA_SIZE	0x100
 
-/* Actual SPIRA size is lesser than 1K (presently 0x340 bytes).
- * Use 1K for legacy SPIRA.
- *
+/*
  * SPIRA-H is lesser than 768 bytes (presently we use 288 bytes)
  * Use 768 bytes for SPIRAH.
  *
@@ -48,21 +44,23 @@
  * endian: linker can't endian reverse a pointer for us.  Text, data
  * et. al. follows this.
  */
-#define PROCIN_OFF		(SPIRA_OFF + 0x800)
+#define PROCIN_OFF		(PROC_DUMP_AREA_OFF + PROC_DUMP_AREA_SIZE)
+#define PROCIN_SIZE		0x800
 
 /* Initial MDST and MDDT tables like PROCIN, we need fixed addresses,
  * we leave a 2k gap for PROCIN
  */
-#define MDST_TABLE_OFF		(SPIRA_OFF + 0x1000)
+#define MDST_TABLE_OFF		(PROCIN_OFF + PROCIN_SIZE)
 #define MDST_TABLE_SIZE		0x400
 
-#define MDDT_TABLE_OFF		(SPIRA_OFF + 0x1400)
+#define MDDT_TABLE_OFF		(MDST_TABLE_OFF + MDST_TABLE_SIZE)
 #define MDDT_TABLE_SIZE		0x400
 
 /* Like MDST and MDDT, we need fixed address for CPU control header.
- * We leave a 2k gap for MDST. CPU_CTL table is of size ~4k
+ * We leave a 2k gap for MDST. CPU_CTL table is of size ~4k, give it 8k.
  */
-#define CPU_CTL_OFF             (SPIRA_OFF + 0x1800)
+#define CPU_CTL_OFF		(MDDT_TABLE_OFF + MDDT_TABLE_SIZE)
+#define CPU_CTL_SIZE		0x2000
 
 /* We keep a gap of 5M for skiboot text & bss for now. We will
  * then we have our heap which goes up to base + 14M (so 11M for

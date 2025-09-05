@@ -162,7 +162,7 @@ static int cuda_adb_req (void *host, const uint8_t *snd_buf, int len,
         }
     } else {
         pos = buffer + 1;
-        len = -1;
+        len -= 1;
     }
     memcpy(rcv_buf, pos, len);
 

@@ -9,7 +9,9 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 ##
-# = Statistics
+# **********
+# Statistics
+# **********
 ##
 
 ##
@@ -87,7 +89,7 @@
 # @StatsRequest:
 #
 # Indicates a set of statistics that should be returned by
-# query-stats.
+# `query-stats`.
 #
 # @provider: provider for which to return statistics.
 #
@@ -112,15 +114,15 @@
 ##
 # @StatsFilter:
 #
-# The arguments to the query-stats command; specifies a target for
+# The arguments to the `query-stats` command; specifies a target for
 # which to request statistics and optionally the required subset of
 # information for that target.
 #
 # @target: the kind of objects to query.  Note that each possible
-#          target may enable additional filtering options
+#     target may enable additional filtering options
 #
-# @providers: which providers to request statistics from, and optionally
-#             which named values to return within each provider
+# @providers: which providers to request statistics from, and
+#     optionally which named values to return within each provider
 #
 # Since: 7.1
 ##
@@ -183,10 +185,10 @@
 # Return runtime-collected statistics for objects such as the VM or
 # its vCPUs.
 #
-# The arguments are a StatsFilter and specify the provider and objects
+# The arguments are a `StatsFilter` and specify the provider and objects
 # to return statistics about.
 #
-# Returns: a list of StatsResult, one for each provider and object
+# Returns: a list of statistics, one for each provider and object
 #     (e.g., for each vCPU).
 #
 # Since: 7.1
@@ -203,7 +205,7 @@
 #
 # @name: name of the statistic; each element of the schema is uniquely
 #     identified by a target, a provider (both available in
-#     @StatsSchema) and the name.
+#     `StatsSchema`) and the name.
 #
 # @type: kind of statistic.
 #
@@ -258,17 +260,17 @@
 #
 # @provider: a provider to restrict the query to.
 #
-# Note: runtime-collected statistics and their names fall outside
-#     QEMU's usual deprecation policies.  QEMU will try to keep the
-#     set of available data stable, together with their names, but
-#     will not guarantee stability at all costs; the same is true of
-#     providers that source statistics externally, e.g. from Linux.
-#     For example, if the same value is being tracked with different
-#     names on different architectures or by different providers, one
-#     of them might be renamed.  A statistic might go away if an
-#     algorithm is changed or some code is removed; changing a default
-#     might cause previously useful statistics to always report 0.
-#     Such changes, however, are expected to be rare.
+# .. note:: Runtime-collected statistics and their names fall outside
+#    QEMU's usual deprecation policies.  QEMU will try to keep the set
+#    of available data stable, together with their names, but will not
+#    guarantee stability at all costs; the same is true of providers
+#    that source statistics externally, e.g. from Linux.  For example,
+#    if the same value is being tracked with different names on
+#    different architectures or by different providers, one of them
+#    might be renamed.  A statistic might go away if an algorithm is
+#    changed or some code is removed; changing a default might cause
+#    previously useful statistics to always report 0.  Such changes,
+#    however, are expected to be rare.
 #
 # Since: 7.1
 ##

@@ -24,8 +24,8 @@
 #include "qemu/error-report.h"
 #include "hw/intc/arm_gicv3_its_common.h"
 #include "hw/qdev-properties.h"
-#include "sysemu/runstate.h"
-#include "sysemu/kvm.h"
+#include "system/runstate.h"
+#include "system/kvm.h"
 #include "kvm_arm.h"
 #include "migration/blocker.h"
 #include "qom/object.h"
@@ -197,14 +197,14 @@ static void kvm_arm_its_post_load(GICv3ITSState *s)
                       GITS_CTLR, &s->ctlr, true, &error_abort);
 }
 
-static void kvm_arm_its_reset_hold(Object *obj)
+static void kvm_arm_its_reset_hold(Object *obj, ResetType type)
 {
     GICv3ITSState *s = ARM_GICV3_ITS_COMMON(obj);
     KVMARMITSClass *c = KVM_ARM_ITS_GET_CLASS(s);
     int i;
 
     if (c->parent_phases.hold) {
-        c->parent_phases.hold(obj);
+        c->parent_phases.hold(obj, type);
     }
 
     if (kvm_device_check_attr(s->dev_fd, KVM_DEV_ARM_VGIC_GRP_CTRL,
@@ -234,13 +234,12 @@ static void kvm_arm_its_reset_hold(Object *obj)
     }
 }
 
-static Property kvm_arm_its_props[] = {
+static const Property kvm_arm_its_props[] = {
     DEFINE_PROP_LINK("parent-gicv3", GICv3ITSState, gicv3, "kvm-arm-gicv3",
                      GICv3State *),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void kvm_arm_its_class_init(ObjectClass *klass, void *data)
+static void kvm_arm_its_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     ResettableClass *rc = RESETTABLE_CLASS(klass);

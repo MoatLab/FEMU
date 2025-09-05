@@ -31,6 +31,7 @@ struct cpu_stack {
 } __align(STACK_SIZE);
 
 static struct cpu_stack * const cpu_stacks = (struct cpu_stack *)CPU_STACKS_BASE;
+static unsigned int cpu_threads_max;
 unsigned int cpu_thread_count;
 unsigned int cpu_max_pir;
 struct cpu_thread *boot_cpu;
@@ -38,6 +39,8 @@ static struct lock reinit_lock = LOCK_UNLOCKED;
 static bool radix_supported;
 static unsigned long hid0_hile;
 static unsigned long hid0_attn;
+static unsigned long hid0_icache;
+static bool reconfigure_idle = false;
 static bool sreset_enabled;
 static bool ipi_enabled;
 static bool pm_enabled;
@@ -95,17 +98,13 @@ void __nomcount cpu_relax(void)
 	barrier();
 }
 
-static void cpu_wake(struct cpu_thread *cpu)
+static void cpu_send_ipi(struct cpu_thread *cpu)
 {
-	/* Is it idle ? If not, no need to wake */
-	sync();
-	if (!cpu->in_idle)
-		return;
-
 	if (proc_gen == proc_gen_p8) {
 		/* Poke IPI */
 		icp_kick_cpu(cpu);
-	} else if (proc_gen == proc_gen_p9 || proc_gen == proc_gen_p10) {
+	} else if (proc_gen == proc_gen_p9 || proc_gen == proc_gen_p10 ||
+						proc_gen == proc_gen_p11) {
 		p9_dbell_send(cpu->pir);
 	}
 }
@@ -194,9 +193,12 @@ static void queue_job_on_cpu(struct cpu_thread *cpu, struct cpu_job *job)
 		cpu->job_has_no_return = true;
 	else
 		cpu->job_count++;
-	if (pm_enabled)
-		cpu_wake(cpu);
 	unlock(&cpu->job_lock);
+
+	/* Is it idle waiting for jobs? If so, must send an IPI. */
+	sync();
+	if (cpu->in_job_sleep)
+		cpu_send_ipi(cpu);
 }
 
 struct cpu_job *__cpu_queue_job(struct cpu_thread *cpu,
@@ -379,56 +381,21 @@ enum cpu_wake_cause {
 static unsigned int cpu_idle_p8(enum cpu_wake_cause wake_on)
 {
 	uint64_t lpcr = mfspr(SPR_LPCR) & ~SPR_LPCR_P8_PECE;
-	struct cpu_thread *cpu = this_cpu();
-	unsigned int vec = 0;
-
-	if (!pm_enabled) {
-		prlog_once(PR_DEBUG, "cpu_idle_p8 called pm disabled\n");
-		return vec;
-	}
+	unsigned int vec;
 
 	/* Clean up ICP, be ready for IPIs */
 	icp_prep_for_pm();
 
-	/* Synchronize with wakers */
-	if (wake_on == cpu_wake_on_job) {
-		/* Mark ourselves in idle so other CPUs know to send an IPI */
-		cpu->in_idle = true;
-		sync();
-
-		/* Check for jobs again */
-		if (cpu_check_jobs(cpu) || !pm_enabled)
-			goto skip_sleep;
-
-		/* Setup wakup cause in LPCR: EE (for IPI) */
-		lpcr |= SPR_LPCR_P8_PECE2;
-		mtspr(SPR_LPCR, lpcr);
-
-	} else {
-		/* Mark outselves sleeping so cpu_set_pm_enable knows to
-		 * send an IPI
-		 */
-		cpu->in_sleep = true;
-		sync();
-
-		/* Check if PM got disabled */
-		if (!pm_enabled)
-			goto skip_sleep;
-
-		/* EE and DEC */
-		lpcr |= SPR_LPCR_P8_PECE2 | SPR_LPCR_P8_PECE3;
-		mtspr(SPR_LPCR, lpcr);
-	}
+	/* Setup wakup cause in LPCR: EE (for IPI) */
+	lpcr |= SPR_LPCR_P8_PECE2;
+	if (wake_on == cpu_wake_on_dec)
+		lpcr |= SPR_LPCR_P8_PECE3; /* DEC */
+	mtspr(SPR_LPCR, lpcr);
 	isync();
 
 	/* Enter nap */
 	vec = enter_p8_pm_state(false);
 
-skip_sleep:
-	/* Restore */
-	sync();
-	cpu->in_idle = false;
-	cpu->in_sleep = false;
 	reset_cpu_icp();
 
 	return vec;
@@ -438,41 +405,11 @@ static unsigned int cpu_idle_p9(enum cpu_wake_cause wake_on)
 {
 	uint64_t lpcr = mfspr(SPR_LPCR) & ~SPR_LPCR_P9_PECE;
 	uint64_t psscr;
-	struct cpu_thread *cpu = this_cpu();
-	unsigned int vec = 0;
+	unsigned int vec;
 
-	if (!pm_enabled) {
-		prlog(PR_DEBUG, "cpu_idle_p9 called on cpu 0x%04x with pm disabled\n", cpu->pir);
-		return vec;
-	}
-
-	/* Synchronize with wakers */
-	if (wake_on == cpu_wake_on_job) {
-		/* Mark ourselves in idle so other CPUs know to send an IPI */
-		cpu->in_idle = true;
-		sync();
-
-		/* Check for jobs again */
-		if (cpu_check_jobs(cpu) || !pm_enabled)
-			goto skip_sleep;
-
-		/* HV DBELL for IPI */
-		lpcr |= SPR_LPCR_P9_PECEL1;
-	} else {
-		/* Mark outselves sleeping so cpu_set_pm_enable knows to
-		 * send an IPI
-		 */
-		cpu->in_sleep = true;
-		sync();
-
-		/* Check if PM got disabled */
-		if (!pm_enabled)
-			goto skip_sleep;
-
-		/* HV DBELL and DEC */
-		lpcr |= SPR_LPCR_P9_PECEL1 | SPR_LPCR_P9_PECEL3;
-	}
-
+	lpcr |= SPR_LPCR_P9_PECEL1; /* HV DBELL for IPI */
+	if (wake_on == cpu_wake_on_dec)
+		lpcr |= SPR_LPCR_P9_PECEL3; /* DEC */
 	mtspr(SPR_LPCR, lpcr);
 	isync();
 
@@ -487,39 +424,46 @@ static unsigned int cpu_idle_p9(enum cpu_wake_cause wake_on)
 		/* PSSCR SD=0 ESL=0 EC=0 PSSL=0 TR=3 MTL=0 RL=1 */
 		psscr = PPC_BITMASK(54, 55) | PPC_BIT(63);
 		enter_p9_pm_lite_state(psscr);
+		vec = 0;
 	}
 
 	/* Clear doorbell */
 	p9_dbell_receive();
-
- skip_sleep:
-	/* Restore */
-	sync();
-	cpu->in_idle = false;
-	cpu->in_sleep = false;
 
 	return vec;
 }
 
 static void cpu_idle_pm(enum cpu_wake_cause wake_on)
 {
+	struct cpu_thread *cpu = this_cpu();
 	unsigned int vec;
 
-	switch(proc_gen) {
-	case proc_gen_p8:
-		vec = cpu_idle_p8(wake_on);
-		break;
-	case proc_gen_p9:
-		vec = cpu_idle_p9(wake_on);
-		break;
-	case proc_gen_p10:
-		vec = cpu_idle_p9(wake_on);
-		break;
-	default:
-		vec = 0;
-		prlog_once(PR_DEBUG, "cpu_idle_pm called with bad processor type\n");
-		break;
+	if (!pm_enabled) {
+		prlog_once(PR_DEBUG, "cpu_idle_pm called pm disabled\n");
+		return;
 	}
+
+	/*
+	 * Mark ourselves in sleep so other CPUs know to send an IPI,
+	 * then re-check the wake conditions. This is ordered against
+	 * queue_job_on_cpu() and reconfigure_idle_start() which first
+	 * set the wake conditions (either queue a job or set
+	 * reconfigure_idle = true), issue a sync(), then test if the
+	 * target is in_sleep / in_job_sleep.
+	 */
+	cpu->in_sleep = true;
+	if (wake_on == cpu_wake_on_job)
+		cpu->in_job_sleep = true;
+	sync();
+	if (reconfigure_idle)
+		goto skip_sleep;
+	if (wake_on == cpu_wake_on_job && cpu_check_jobs(cpu))
+		goto skip_sleep;
+
+	if (proc_gen == proc_gen_p8)
+		vec = cpu_idle_p8(wake_on);
+	else
+		vec = cpu_idle_p9(wake_on);
 
 	if (vec == 0x100) {
 		unsigned long srr1 = mfspr(SPR_SRR1);
@@ -538,24 +482,147 @@ static void cpu_idle_pm(enum cpu_wake_cause wake_on)
 		enable_machine_check();
 		mtmsrd(MSR_RI, 1);
 	}
+
+skip_sleep:
+	sync();
+	cpu->in_sleep = false;
+	if (wake_on == cpu_wake_on_job)
+		cpu->in_job_sleep = false;
+}
+
+static struct lock idle_lock = LOCK_UNLOCKED;
+static int nr_cpus_idle = 0;
+
+static void enter_idle(void)
+{
+	struct cpu_thread *cpu = this_cpu();
+
+	assert(!cpu->in_idle);
+	assert(!cpu->in_sleep);
+	assert(!cpu->in_job_sleep);
+
+	for (;;) {
+		lock(&idle_lock);
+		if (!reconfigure_idle) {
+			nr_cpus_idle++;
+			cpu->in_idle = true;
+			break;
+		}
+		unlock(&idle_lock);
+
+		/* Another CPU is reconfiguring idle */
+		smt_lowest();
+		while (reconfigure_idle)
+			barrier();
+		smt_medium();
+	}
+
+	unlock(&idle_lock);
+}
+
+static void exit_idle(void)
+{
+	struct cpu_thread *cpu = this_cpu();
+
+	assert(cpu->in_idle);
+	assert(!cpu->in_sleep);
+	assert(!cpu->in_job_sleep);
+
+	lock(&idle_lock);
+	assert(nr_cpus_idle > 0);
+	nr_cpus_idle--;
+	cpu->in_idle = false;
+	unlock(&idle_lock);
+}
+
+static void reconfigure_idle_start(void)
+{
+	struct cpu_thread *cpu;
+
+	/*
+	 * First, make sure we are exclusive in reconfiguring by taking
+	 * reconfigure_idle from false to true.
+	 */
+	for (;;) {
+		lock(&idle_lock);
+		if (!reconfigure_idle) {
+			reconfigure_idle = true;
+			break;
+		}
+		unlock(&idle_lock);
+
+		/* Someone else is reconfiguring */
+		smt_lowest();
+		while (reconfigure_idle)
+			barrier();
+		smt_medium();
+	}
+
+	unlock(&idle_lock);
+
+	/*
+	 * Then kick everyone out of idle.
+	 */
+
+	/*
+	 * Order earlier store to reconfigure_idle=true vs load from
+	 * cpu->in_sleep.
+	 */
+	sync();
+
+	for_each_available_cpu(cpu) {
+		if (cpu->in_sleep)
+			cpu_send_ipi(cpu);
+	}
+
+	/*
+	 * Then wait for all other CPUs to leave idle. Now they will see
+	 * reconfigure_idle==true and not re-enter idle.
+	 */
+	smt_lowest();
+	while (nr_cpus_idle != 0)
+		barrier();
+	smt_medium();
+
+	/*
+	 * Order load of nr_cpus_idle with later loads of data that other
+	 * CPUs might have stored-to before coming out of idle.
+	 */
+	lwsync();
+}
+
+static void reconfigure_idle_end(void)
+{
+	assert(reconfigure_idle);
+	lock(&idle_lock);
+	reconfigure_idle = false;
+	unlock(&idle_lock);
 }
 
 void cpu_idle_job(void)
 {
-	if (pm_enabled) {
-		cpu_idle_pm(cpu_wake_on_job);
-	} else {
-		struct cpu_thread *cpu = this_cpu();
+	struct cpu_thread *cpu = this_cpu();
 
-		smt_lowest();
-		/* Check for jobs again */
-		while (!cpu_check_jobs(cpu)) {
-			if (pm_enabled)
-				break;
-			barrier();
+	do {
+		enter_idle();
+
+		if (pm_enabled) {
+			cpu_idle_pm(cpu_wake_on_job);
+		} else {
+			smt_lowest();
+			for (;;) {
+				if (cpu_check_jobs(cpu))
+					break;
+				if (reconfigure_idle)
+					break;
+				barrier();
+			}
+			smt_medium();
 		}
-		smt_medium();
-	}
+
+		exit_idle();
+
+	} while (!cpu_check_jobs(cpu));
 }
 
 void cpu_idle_delay(unsigned long delay)
@@ -564,82 +631,49 @@ void cpu_idle_delay(unsigned long delay)
 	unsigned long end = now + delay;
 	unsigned long min_pm = usecs_to_tb(10);
 
-	if (pm_enabled && delay > min_pm) {
-pm:
-		for (;;) {
+	do {
+		enter_idle();
+
+		delay = end - now;
+
+		if (pm_enabled && delay > min_pm) {
 			if (delay >= 0x7fffffff)
 				delay = 0x7fffffff;
 			mtspr(SPR_DEC, delay);
 
 			cpu_idle_pm(cpu_wake_on_dec);
-
-			now = mftb();
-			if (tb_compare(now, end) == TB_AAFTERB)
-				break;
-			delay = end - now;
-			if (!(pm_enabled && delay > min_pm))
-				goto no_pm;
-		}
-	} else {
-no_pm:
-		smt_lowest();
-		for (;;) {
-			now = mftb();
-			if (tb_compare(now, end) == TB_AAFTERB)
-				break;
-			delay = end - now;
-			if (pm_enabled && delay > min_pm) {
-				smt_medium();
-				goto pm;
+		} else {
+			smt_lowest();
+			for (;;) {
+				if (tb_compare(mftb(), end) == TB_AAFTERB)
+					break;
+				if (reconfigure_idle)
+					break;
+				barrier();
 			}
+			smt_medium();
 		}
-		smt_medium();
-	}
+
+		exit_idle();
+
+		now = mftb();
+
+	} while (tb_compare(now, end) != TB_AAFTERB);
 }
 
-static void cpu_pm_disable(void)
+static void recalc_pm_enabled(void)
 {
-	struct cpu_thread *cpu;
-	unsigned int timeout;
+	if (chip_quirk(QUIRK_AWAN))
+		return;
 
-	pm_enabled = false;
-	sync();
-
-	if (proc_gen == proc_gen_p8) {
-		for_each_available_cpu(cpu) {
-			while (cpu->in_sleep || cpu->in_idle) {
-				icp_kick_cpu(cpu);
-				cpu_relax();
-			}
-		}
-	} else if (proc_gen == proc_gen_p9 || proc_gen == proc_gen_p10) {
-		for_each_available_cpu(cpu) {
-			if (cpu->in_sleep || cpu->in_idle)
-				p9_dbell_send(cpu->pir);
-		}
-
-		/*  This code is racy with cpus entering idle, late ones miss the dbell */
-
-		smt_lowest();
-		for_each_available_cpu(cpu) {
-			timeout = 0x08000000;
-			while ((cpu->in_sleep || cpu->in_idle) && --timeout)
-				barrier();
-			if (!timeout) {
-				prlog(PR_DEBUG, "cpu_pm_disable TIMEOUT on cpu 0x%04x to exit idle\n",
-				      cpu->pir);
-                                p9_dbell_send(cpu->pir);
-                        }
-		}
-		smt_medium();
-	}
+	if (proc_gen == proc_gen_p8)
+		pm_enabled = ipi_enabled && sreset_enabled;
+	else
+		pm_enabled = ipi_enabled;
 }
 
 void cpu_set_sreset_enable(bool enabled)
 {
-	if (proc_chip_quirks & QUIRK_AWAN)
-		return;
-
 	if (sreset_enabled == enabled)
 		return;
 
@@ -647,28 +681,15 @@ void cpu_set_sreset_enable(bool enabled)
 		/* Public P8 Mambo has broken NAP */
 		if (chip_quirk(QUIRK_MAMBO_CALLOUTS))
 			return;
-
-		sreset_enabled = enabled;
-		sync();
-
-		if (!enabled) {
-			cpu_pm_disable();
-		} else {
-			if (ipi_enabled)
-				pm_enabled = true;
-		}
-
-	} else if (proc_gen == proc_gen_p9 || proc_gen == proc_gen_p10) {
-		sreset_enabled = enabled;
-		sync();
-		/*
-		 * Kick everybody out of PM so they can adjust the PM
-		 * mode they are using (EC=0/1).
-		 */
-		cpu_pm_disable();
-		if (ipi_enabled)
-			pm_enabled = true;
 	}
+
+	reconfigure_idle_start();
+
+	sreset_enabled = enabled;
+
+	recalc_pm_enabled();
+
+	reconfigure_idle_end();
 }
 
 void cpu_set_ipi_enable(bool enabled)
@@ -676,24 +697,13 @@ void cpu_set_ipi_enable(bool enabled)
 	if (ipi_enabled == enabled)
 		return;
 
-	if (proc_gen == proc_gen_p8) {
-		ipi_enabled = enabled;
-		sync();
-		if (!enabled) {
-			cpu_pm_disable();
-		} else {
-			if (sreset_enabled)
-				pm_enabled = true;
-		}
+	reconfigure_idle_start();
 
-	} else if (proc_gen == proc_gen_p9 || proc_gen == proc_gen_p10) {
-		ipi_enabled = enabled;
-		sync();
-		if (!enabled)
-			cpu_pm_disable();
-		else if (!chip_quirk(QUIRK_AWAN))
-			pm_enabled = true;
-	}
+	ipi_enabled = enabled;
+
+	recalc_pm_enabled();
+
+	reconfigure_idle_end();
 }
 
 void cpu_process_local_jobs(void)
@@ -962,6 +972,16 @@ static void enable_attn(void)
 	hid0 = mfspr(SPR_HID0);
 	hid0 |= hid0_attn;
 	set_hid0(hid0);
+	if (hid0_icache) {
+		if (hid0 & hid0_icache) {
+			prlog(PR_WARNING, "enable_attn found hid0_cache bit set unexpectedly\n");
+			hid0 &= ~hid0_icache;
+		}
+		/* icache is flushed on hid0_icache 0->1 */
+		set_hid0(hid0 | hid0_icache);
+		set_hid0(hid0);
+	}
+
 }
 
 static void disable_attn(void)
@@ -971,6 +991,15 @@ static void disable_attn(void)
 	hid0 = mfspr(SPR_HID0);
 	hid0 &= ~hid0_attn;
 	set_hid0(hid0);
+	if (hid0_icache) {
+		if (hid0 & hid0_icache) {
+			prlog(PR_WARNING, "disable_attn found hid0_cache bit set unexpectedly\n");
+			hid0 &= ~hid0_icache;
+		}
+		/* icache is flushed on hid0_icache 0->1 */
+		set_hid0(hid0 | hid0_icache);
+		set_hid0(hid0);
+	}
 }
 
 extern void __trigger_attn(void);
@@ -1020,12 +1049,21 @@ void init_boot_cpu(void)
 		radix_supported = true;
 		hid0_hile = SPR_HID0_POWER9_HILE;
 		hid0_attn = SPR_HID0_POWER9_ENABLE_ATTN;
+		hid0_icache = SPR_HID0_POWER9_FLUSH_ICACHE;
 		break;
 	case PVR_TYPE_P10:
 		proc_gen = proc_gen_p10;
 		radix_supported = true;
 		hid0_hile = SPR_HID0_POWER10_HILE;
 		hid0_attn = SPR_HID0_POWER10_ENABLE_ATTN;
+		hid0_icache = SPR_HID0_POWER10_FLUSH_ICACHE;
+		break;
+	case PVR_TYPE_P11:
+		proc_gen = proc_gen_p11;
+		radix_supported = true;
+		hid0_hile = SPR_HID0_POWER10_HILE;
+		hid0_attn = SPR_HID0_POWER10_ENABLE_ATTN;
+		hid0_icache = SPR_HID0_POWER10_FLUSH_ICACHE;
 		break;
 	default:
 		proc_gen = proc_gen_unknown;
@@ -1034,34 +1072,49 @@ void init_boot_cpu(void)
 	/* Get a CPU thread count based on family */
 	switch(proc_gen) {
 	case proc_gen_p8:
-		cpu_thread_count = 8;
+		cpu_threads_max = 8;
 		prlog(PR_INFO, "CPU: P8 generation processor"
-		      " (max %d threads/core)\n", cpu_thread_count);
+		      " (max %d threads/core)\n", cpu_threads_max);
 		break;
 	case proc_gen_p9:
 		if (is_fused_core(pvr))
-			cpu_thread_count = 8;
+			cpu_threads_max = 8;
 		else
-			cpu_thread_count = 4;
+			cpu_threads_max = 4;
 		prlog(PR_INFO, "CPU: P9 generation processor"
-		      " (max %d threads/core)\n", cpu_thread_count);
+		      " (max %d threads/core)\n", cpu_threads_max);
 		break;
 	case proc_gen_p10:
 		if (is_fused_core(pvr))
-			cpu_thread_count = 8;
+			cpu_threads_max = 8;
 		else
-			cpu_thread_count = 4;
+			cpu_threads_max = 4;
 		prlog(PR_INFO, "CPU: P10 generation processor"
+		      " (max %d threads/core)\n", cpu_threads_max);
+		break;
+	case proc_gen_p11:
+		if (is_fused_core(pvr))
+			cpu_threads_max = 8;
+		else
+			cpu_threads_max = 4;
+		prlog(PR_INFO, "CPU: Power11 generation processor"
 		      " (max %d threads/core)\n", cpu_thread_count);
 		break;
 	default:
 		prerror("CPU: Unknown PVR, assuming 1 thread\n");
-		cpu_thread_count = 1;
+		cpu_threads_max = 1;
 	}
 
-	if (proc_gen == proc_gen_p8 && (PVR_VERS_MAJ(mfspr(SPR_PVR)) == 1)) {
-		prerror("CPU: POWER8 DD1 is not supported\n");
+	if (proc_gen == proc_gen_p8) {
+#ifdef CONFIG_P8
+		if (PVR_VERS_MAJ(mfspr(SPR_PVR)) == 1) {
+			prerror("CPU: POWER8 DD1 is not supported\n");
+			abort();
+		}
+#else
+		prerror("CPU: POWER8 detected but CONFIG_P8 not set\n");
 		abort();
+#endif
 	}
 
 	if (is_power9n(pvr) && (PVR_VERS_MAJ(pvr) == 1)) {
@@ -1156,7 +1209,8 @@ void init_cpu_max_pir(void)
 
 	/* Iterate all CPUs in the device-tree */
 	dt_for_each_child(cpus, cpu) {
-		unsigned int pir, server_no;
+		unsigned int pir, server_no, threads;
+		const struct dt_property *p;
 
 		/* Skip cache nodes */
 		if (strcmp(dt_prop_get(cpu, "device_type"), "cpu"))
@@ -1169,8 +1223,27 @@ void init_cpu_max_pir(void)
 		 */
 		pir = dt_prop_get_u32_def(cpu, "ibm,pir", server_no);
 
-		if (cpu_max_pir < pir + cpu_thread_count - 1)
-			cpu_max_pir = pir + cpu_thread_count - 1;
+		p = dt_find_property(cpu, "ibm,ppc-interrupt-server#s");
+		if (!p)
+			continue;
+		threads = p->len / 4;
+		assert(threads > 0);
+		if (threads > cpu_threads_max) {
+			prlog(PR_WARNING, "CPU: Threads out of range for PIR 0x%04x"
+			      " threads=%d max=%d\n",
+			      pir, threads, cpu_threads_max);
+			threads = cpu_threads_max;
+		}
+		if (!cpu_thread_count) {
+			cpu_thread_count = threads;
+		} else {
+			/* Do not support asymmetric SMT topologies */
+			assert(cpu_thread_count == threads);
+		}
+
+
+		if (cpu_max_pir < pir + threads - 1)
+			cpu_max_pir = pir + threads - 1;
 	}
 
 	prlog(PR_DEBUG, "CPU: New max PIR set to 0x%x\n", cpu_max_pir);
@@ -1241,17 +1314,10 @@ void init_all_cpus(void)
 		prlog(PR_INFO, "CPU: CPU from DT PIR=0x%04x Server#=0x%x"
 		      " State=%d\n", pir, server_no, state);
 
-		/* Check max PIR */
-		if (cpu_max_pir < (pir + cpu_thread_count - 1)) {
-			prlog(PR_WARNING, "CPU: CPU potentially out of range"
-			      "PIR=0x%04x MAX=0x%04x !\n",
-			      pir, cpu_max_pir);
-			continue;
-		}
-
 		/* Setup thread 0 */
 		assert(pir <= cpu_max_pir);
 		t = pt0 = &cpu_stacks[pir].cpu;
+
 		if (t != boot_cpu) {
 			init_cpu_thread(t, state, pir);
 			/* Each cpu gets its own later in init_trace_buffers */
@@ -1286,12 +1352,6 @@ void init_all_cpus(void)
 		if (!p)
 			continue;
 		threads = p->len / 4;
-		if (threads > cpu_thread_count) {
-			prlog(PR_WARNING, "CPU: Threads out of range for PIR 0x%04x"
-			      " threads=%d max=%d\n",
-			      pir, threads, cpu_thread_count);
-			threads = cpu_thread_count;
-		}
 		for (thread = 1; thread < threads; thread++) {
 			prlog(PR_TRACE, "CPU:   secondary thread %d found\n",
 			      thread);
@@ -1563,6 +1623,10 @@ void cpu_fast_reboot_complete(void)
 	/* and set HID0:RADIX */
 	if (proc_gen == proc_gen_p9)
 		current_radix_mode = true;
+
+	/* P8 clears TLBs in cleanup_cpu_state() */
+	if (proc_gen >= proc_gen_p9)
+		 cleanup_global_tlb();
 }
 
 static int64_t opal_reinit_cpus(uint64_t flags)

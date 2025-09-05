@@ -20,9 +20,12 @@
 
 #include "qemu/osdep.h"
 #include "cpu.h"
-#include "exec/exec-all.h"
+#include "exec/cputlb.h"
+#include "exec/page-protection.h"
+#include "exec/target_page.h"
 #include "exec/gdbstub.h"
 #include "exec/helper-proto.h"
+#include "system/memory.h"
 #include "gdbstub/helpers.h"
 #include "fpu/softfloat.h"
 #include "qemu/qemu-print.h"
@@ -35,7 +38,8 @@ static int cf_fpu_gdb_get_reg(CPUState *cs, GByteArray *mem_buf, int n)
     CPUM68KState *env = &cpu->env;
 
     if (n < 8) {
-        float_status s;
+        /* Use scratch float_status so any exceptions don't change CPU state */
+        float_status s = env->fp_status;
         return gdb_get_reg64(mem_buf, floatx80_to_float64(env->fregs[n].d, &s));
     }
     switch (n) {
@@ -55,16 +59,17 @@ static int cf_fpu_gdb_set_reg(CPUState *cs, uint8_t *mem_buf, int n)
     CPUM68KState *env = &cpu->env;
 
     if (n < 8) {
-        float_status s;
-        env->fregs[n].d = float64_to_floatx80(ldq_p(mem_buf), &s);
+        /* Use scratch float_status so any exceptions don't change CPU state */
+        float_status s = env->fp_status;
+        env->fregs[n].d = float64_to_floatx80(ldq_be_p(mem_buf), &s);
         return 8;
     }
     switch (n) {
     case 8: /* fpcontrol */
-        cpu_m68k_set_fpcr(env, ldl_p(mem_buf));
+        cpu_m68k_set_fpcr(env, ldl_be_p(mem_buf));
         return 4;
     case 9: /* fpstatus */
-        env->fpsr = ldl_p(mem_buf);
+        env->fpsr = ldl_be_p(mem_buf);
         return 4;
     case 10: /* fpiar, not implemented */
         return 4;
@@ -106,10 +111,10 @@ static int m68k_fpu_gdb_set_reg(CPUState *cs, uint8_t *mem_buf, int n)
     }
     switch (n) {
     case 8: /* fpcontrol */
-        cpu_m68k_set_fpcr(env, ldl_p(mem_buf));
+        cpu_m68k_set_fpcr(env, ldl_be_p(mem_buf));
         return 4;
     case 9: /* fpstatus */
-        cpu_m68k_set_fpsr(env, ldl_p(mem_buf));
+        cpu_m68k_set_fpsr(env, ldl_be_p(mem_buf));
         return 4;
     case 10: /* fpiar, not implemented */
         return 4;
@@ -286,7 +291,6 @@ void HELPER(m68k_movec_to)(CPUM68KState *env, uint32_t reg, uint32_t val)
 
     /* Invalid control registers will generate an exception. */
     raise_exception_ra(env, EXCP_ILLEGAL, 0);
-    return;
 }
 
 uint32_t HELPER(m68k_movec_from)(CPUM68KState *env, uint32_t reg)
@@ -478,7 +482,6 @@ static void print_address_zone(uint32_t logical, uint32_t physical,
 
 static void dump_address_map(CPUM68KState *env, uint32_t root_pointer)
 {
-    int i, j, k;
     int tic_size, tic_shift;
     uint32_t tib_mask;
     uint32_t tia, tib, tic;
@@ -501,19 +504,19 @@ static void dump_address_map(CPUM68KState *env, uint32_t root_pointer)
         tic_shift = 12;
         tib_mask = M68K_4K_PAGE_MASK;
     }
-    for (i = 0; i < M68K_ROOT_POINTER_ENTRIES; i++) {
+    for (unsigned i = 0; i < M68K_ROOT_POINTER_ENTRIES; i++) {
         tia = address_space_ldl(cs->as, M68K_POINTER_BASE(root_pointer) + i * 4,
                                 MEMTXATTRS_UNSPECIFIED, &txres);
         if (txres != MEMTX_OK || !M68K_UDT_VALID(tia)) {
             continue;
         }
-        for (j = 0; j < M68K_ROOT_POINTER_ENTRIES; j++) {
+        for (unsigned j = 0; j < M68K_ROOT_POINTER_ENTRIES; j++) {
             tib = address_space_ldl(cs->as, M68K_POINTER_BASE(tia) + j * 4,
                                     MEMTXATTRS_UNSPECIFIED, &txres);
             if (txres != MEMTX_OK || !M68K_UDT_VALID(tib)) {
                 continue;
             }
-            for (k = 0; k < tic_size; k++) {
+            for (unsigned k = 0; k < tic_size; k++) {
                 tic = address_space_ldl(cs->as, (tib & tib_mask) + k * 4,
                                         MEMTXATTRS_UNSPECIFIED, &txres);
                 if (txres != MEMTX_OK || !M68K_PDT_VALID(tic)) {

@@ -178,8 +178,10 @@ struct ipmi_backend {
 	 *
 	 * So, ensure we have a way to drive any state machines that an IPMI
 	 * backend may neeed to crank to ensure forward progress.
+	 *
+	 * This returns true while there are any messages queued.
 	 */
-	void (*poll)(void);
+	bool (*poll)(void);
 };
 
 extern struct ipmi_backend *ipmi_backend;
@@ -219,6 +221,9 @@ void ipmi_queue_msg_sync(struct ipmi_msg *msg);
 
 /* Removes the message from the list, queued previously */
 int ipmi_dequeue_msg(struct ipmi_msg *msg);
+
+/* Polls the backend until all queued messages are completed */
+void ipmi_flush(void);
 
 /* Process a completed message */
 void ipmi_cmd_done(uint8_t cmd, uint8_t netfn, uint8_t cc, struct ipmi_msg *msg);
@@ -263,9 +268,6 @@ void ipmi_parse_sel(struct ipmi_msg *msg);
 
 /* Starts the watchdog timer */
 void ipmi_wdt_init(void);
-
-/* Stop the wdt */
-void ipmi_wdt_stop(void);
 
 /* Reset the watchdog timer. Does not return until the timer has been
  * reset and does not schedule future resets. */

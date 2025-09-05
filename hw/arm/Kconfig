@@ -1,5 +1,8 @@
 config ARM_VIRT
     bool
+    default y
+    depends on ARM
+    depends on TCG || KVM || HVF
     imply PCI_DEVICES
     imply TEST_DEVICES
     imply VFIO_AMD_XGBE
@@ -13,6 +16,7 @@ config ARM_VIRT
     select ACPI
     select ARM_SMMUV3
     select GPIO_KEY
+    select DEVICE_TREE
     select FW_CFG_DMA
     select PCI_EXPRESS
     select PCI_EXPRESS_GENERIC_BRIDGE
@@ -30,16 +34,11 @@ config ARM_VIRT
     select ACPI_HW_REDUCED
     select ACPI_APEI
     select ACPI_VIOT
+    select ACPI_PCIHP
+    select ACPI_PCI_BRIDGE
     select VIRTIO_MEM_SUPPORTED
     select ACPI_CXL
     select ACPI_HMAT
-
-config CHEETAH
-    bool
-    default y
-    depends on TCG && ARM
-    select OMAP
-    select TSC210X
 
 config CUBIEBOARD
     bool
@@ -74,7 +73,7 @@ config HIGHBANK
     depends on TCG && ARM
     select A9MPCORE
     select A15MPCORE
-    select AHCI
+    select AHCI_SYSBUS
     select ARM_TIMER # sp804
     select ARM_V7M
     select PL011 # UART
@@ -98,13 +97,11 @@ config INTEGRATOR
     select PL181 # display
     select SMC91C111
 
-config MAINSTONE
+config MAX78000FTHR
     bool
     default y
     depends on TCG && ARM
-    select PXA2XX
-    select PFLASH_CFI01
-    select SMC91C111
+    select MAX78000_SOC
 
 config MPS3R
     bool
@@ -116,7 +113,7 @@ config MUSCA
     default y
     depends on TCG && ARM
     select ARMSSE
-    select PL011
+    select PL011 # UART
     select PL031
     select SPLIT_IRQ
     select UNIMP
@@ -133,7 +130,7 @@ config MUSICPAL
     select MARVELL_88W8618
     select PTIMER
     select PFLASH_CFI02
-    select SERIAL
+    select SERIAL_MM
     select WM8750
 
 config NETDUINO2
@@ -154,79 +151,13 @@ config OLIMEX_STM32_H405
     depends on TCG && ARM
     select STM32F405_SOC
 
-config NSERIES
-    bool
-    default y
-    depends on TCG && ARM
-    select OMAP
-    select TMP105   # temperature sensor
-    select BLIZZARD # LCD/TV controller
-    select ONENAND
-    select TSC210X  # touchscreen/sensors/audio
-    select TSC2005  # touchscreen/sensors/keypad
-    select LM832X   # GPIO keyboard chip
-    select TWL92230 # energy-management
-    select TUSB6010
-
 config OMAP
     bool
     select FRAMEBUFFER
     select I2C
-    select ECC
-    select NAND
     select PFLASH_CFI01
     select SD
-    select SERIAL
-
-config PXA2XX
-    bool
-    select FRAMEBUFFER
-    select I2C
-    select SERIAL
-    select SD
-    select SSI
-    select USB_OHCI_SYSBUS
-    select PCMCIA
-
-config GUMSTIX
-    bool
-    default y
-    depends on TCG && ARM
-    select PFLASH_CFI01
-    select SMC91C111
-    select PXA2XX
-
-config TOSA
-    bool
-    default y
-    depends on TCG && ARM
-    select ZAURUS  # scoop
-    select MICRODRIVE
-    select PXA2XX
-    select LED
-
-config SPITZ
-    bool
-    default y
-    depends on TCG && ARM
-    select ADS7846 # touch-screen controller
-    select MAX111X # A/D converter
-    select WM8750  # audio codec
-    select MAX7310 # GPIO expander
-    select ZAURUS  # scoop
-    select NAND    # memory
-    select ECC     # Error-correcting for NAND
-    select MICRODRIVE
-    select PXA2XX
-
-config Z2
-    bool
-    default y
-    depends on TCG && ARM
-    select PFLASH_CFI01
-    select WM8750
-    select PL011 # UART
-    select PXA2XX
+    select SERIAL_MM
 
 config REALVIEW
     bool
@@ -245,7 +176,7 @@ config REALVIEW
     select WM8750 # audio codec
     select LSI_SCSI_PCI
     select PCI
-    select PL011  # UART
+    select PL011 # UART
     select PL031  # RTC
     select PL041  # audio codec
     select PL050  # keyboard/mouse
@@ -263,7 +194,8 @@ config SBSA_REF
     default y
     depends on TCG && AARCH64
     imply PCI_DEVICES
-    select AHCI
+    select DEVICE_TREE
+    select AHCI_SYSBUS
     select ARM_SMMUV3
     select GPIO_KEY
     select PCI_EXPRESS
@@ -312,14 +244,15 @@ config STM32VLDISCOVERY
 
 config STRONGARM
     bool
-    select PXA2XX
+    select PXA2XX_TIMER
+    select SSI
 
 config COLLIE
     bool
     default y
     depends on TCG && ARM
     select PFLASH_CFI01
-    select ZAURUS  # scoop
+    select ZAURUS_SCOOP
     select STRONGARM
 
 config SX1
@@ -345,6 +278,7 @@ config VEXPRESS
     bool
     default y
     depends on TCG && ARM
+    select DEVICE_TREE
     select A9MPCORE
     select A15MPCORE
     select ARM_MPTIMER
@@ -365,10 +299,11 @@ config ZYNQ
     select A9MPCORE
     select CADENCE # UART
     select PFLASH_CFI02
+    select PL310 # cache controller
     select PL330
     select SDHCI
     select SSI_M25P80
-    select USB_EHCI_SYSBUS
+    select USB_CHIPIDEA
     select XILINX # UART
     select XILINX_AXI
     select XILINX_SPI
@@ -384,7 +319,7 @@ config ARM_V7M
 
 config ALLWINNER_A10
     bool
-    select AHCI
+    select AHCI_SYSBUS
     select ALLWINNER_A10_PIT
     select ALLWINNER_A10_PIC
     select ALLWINNER_A10_CCM
@@ -392,8 +327,9 @@ config ALLWINNER_A10
     select ALLWINNER_WDT
     select ALLWINNER_EMAC
     select ALLWINNER_I2C
+    select ALLWINNER_A10_SPI
     select AXP2XX_PMU
-    select SERIAL
+    select SERIAL_MM
     select UNIMP
     select USB_OHCI_SYSBUS
 
@@ -405,7 +341,7 @@ config ALLWINNER_H3
     select ALLWINNER_SUN8I_EMAC
     select ALLWINNER_I2C
     select ALLWINNER_WDT
-    select SERIAL
+    select SERIAL_MM
     select ARM_TIMER
     select ARM_GIC
     select UNIMP
@@ -416,18 +352,27 @@ config ALLWINNER_H3
 config ALLWINNER_R40
     bool
     default y if TCG && ARM
-    select AHCI
+    select AHCI_SYSBUS
     select ALLWINNER_SRAMC
     select ALLWINNER_A10_PIT
     select ALLWINNER_WDT
     select AXP2XX_PMU
-    select SERIAL
+    select SERIAL_MM
     select ARM_TIMER
     select ARM_GIC
     select UNIMP
     select USB_OHCI_SYSBUS
     select USB_EHCI_SYSBUS
     select SD
+
+config MAX78000_SOC
+    bool
+    select ARM_V7M
+    select MAX78000_ICC
+    select MAX78000_UART
+    select MAX78000_GCR
+    select MAX78000_TRNG
+    select MAX78000_AES
 
 config RASPI
     bool
@@ -460,6 +405,7 @@ config STM32F405_SOC
     bool
     select ARM_V7M
     select OR_IRQ
+    select STM32_RCC
     select STM32F4XX_SYSCFG
     select STM32F4XX_EXTI
 
@@ -468,6 +414,7 @@ config B_L475E_IOT01A
     default y
     depends on TCG && ARM
     select STM32L4X5_SOC
+    imply DM163
 
 config STM32L4X5_SOC
     bool
@@ -477,16 +424,19 @@ config STM32L4X5_SOC
     select STM32L4X5_SYSCFG
     select STM32L4X5_RCC
     select STM32L4X5_GPIO
+    select STM32L4X5_USART
 
 config XLNX_ZYNQMP_ARM
     bool
     default y if PIXMAN
     depends on TCG && AARCH64
-    select AHCI
+    select AHCI_SYSBUS
     select ARM_GIC
     select CADENCE
+    select CPU_CLUSTER
     select DDC
     select DPCD
+    select DEVICE_TREE
     select SDHCI
     select SSI
     select SSI_M25P80
@@ -503,7 +453,9 @@ config XLNX_VERSAL
     default y
     depends on TCG && AARCH64
     select ARM_GIC
-    select PL011
+    select CPU_CLUSTER
+    select DEVICE_TREE
+    select PL011 # UART
     select CADENCE
     select VIRTIO_MMIO
     select UNIMP
@@ -530,11 +482,24 @@ config NPCM7XX
     select ISL_PMBUS_VR
     select PL310  # cache controller
     select PMBUS
-    select SERIAL
+    select SERIAL_MM
     select SSI
     select UNIMP
     select PCA954X
     select USB_OHCI_SYSBUS
+
+config NPCM8XX
+    bool
+    default y
+    depends on TCG && AARCH64
+    select ARM_GIC
+    select SMBUS
+    select PL310  # cache controller
+    select NPCM7XX
+    select SERIAL
+    select SSI
+    select UNIMP
+
 
 config FSL_IMX25
     bool
@@ -544,6 +509,7 @@ config FSL_IMX25
     select IMX
     select IMX_FEC
     select IMX_I2C
+    select USB_CHIPIDEA
     select WDT_IMX2
     select SDHCI
 
@@ -552,7 +518,7 @@ config FSL_IMX31
     default y
     depends on TCG && ARM
     imply I2C_DEVICES
-    select SERIAL
+    select SERIAL_MM
     select IMX
     select IMX_I2C
     select WDT_IMX2
@@ -571,6 +537,8 @@ config FSL_IMX6
     select PL310  # cache controller
     select PCI_EXPRESS_DESIGNWARE
     select SDHCI
+    select USB_CHIPIDEA
+    select OR_IRQ
 
 config ASPEED_SOC
     bool
@@ -581,7 +549,8 @@ config ASPEED_SOC
     select I2C
     select DPS310
     select PCA9552
-    select SERIAL
+    select PCA9554
+    select SERIAL_MM
     select SMBUS_EEPROM
     select PCA954X
     select SSI
@@ -594,6 +563,7 @@ config ASPEED_SOC
     select PMBUS
     select MAX31785
     select FSI_APB2OPB_ASPEED
+    select AT24C
 
 config MPS2
     bool
@@ -627,7 +597,33 @@ config FSL_IMX7
     select WDT_IMX2
     select PCI_EXPRESS_DESIGNWARE
     select SDHCI
+    select OR_IRQ
     select UNIMP
+    select USB_CHIPIDEA
+
+config FSL_IMX8MP
+    bool
+    imply I2C_DEVICES
+    imply PCI_DEVICES
+    select ARM_GIC
+    select FSL_IMX8MP_ANALOG
+    select FSL_IMX8MP_CCM
+    select IMX
+    select IMX_FEC
+    select IMX_I2C
+    select OR_IRQ
+    select PCI_EXPRESS_DESIGNWARE
+    select PCI_EXPRESS_FSL_IMX8M_PHY
+    select SDHCI
+    select UNIMP
+    select USB_DWC3
+    select WDT_IMX2
+
+config FSL_IMX8MP_EVK
+    bool
+    default y
+    depends on TCG && AARCH64
+    select FSL_IMX8MP
 
 config ARM_SMMUV3
     bool
@@ -643,6 +639,7 @@ config FSL_IMX6UL
     select IMX_I2C
     select WDT_IMX2
     select SDHCI
+    select USB_CHIPIDEA
     select UNIMP
 
 config MICROBIT
@@ -669,29 +666,9 @@ config MSF2
     bool
     select ARM_V7M
     select PTIMER
-    select SERIAL
+    select SERIAL_MM
     select SSI
     select UNIMP
-
-config ZAURUS
-    bool
-    select NAND
-    select ECC
-
-config A9MPCORE
-    bool
-    select A9_GTIMER
-    select A9SCU       # snoop control unit
-    select ARM_GIC
-    select ARM_MPTIMER
-
-config A15MPCORE
-    bool
-    select ARM_GIC
-
-config ARM11MPCORE
-    bool
-    select ARM11SCU
 
 config ARMSSE
     bool
@@ -703,6 +680,7 @@ config ARMSSE
     select CMSDK_APB_DUALTIMER
     select CMSDK_APB_UART
     select CMSDK_APB_WATCHDOG
+    select CPU_CLUSTER
     select IOTKIT_SECCTL
     select IOTKIT_SYSCTL
     select IOTKIT_SYSINFO

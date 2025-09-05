@@ -91,14 +91,16 @@ that are covered by additional licenses.
 -  `ArmPkg/Library/ArmSoftFloatLib/berkeley-softfloat-3 <https://github.com/ucb-bar/berkeley-softfloat-3/blob/b64af41c3276f97f0e181920400ee056b9c88037/COPYING.txt>`__
 -  `BaseTools/Source/C/BrotliCompress/brotli <https://github.com/google/brotli/blob/666c3280cc11dc433c303d79a83d4ffbdd12cc8d/LICENSE>`__
 -  `CryptoPkg/Library/OpensslLib/openssl <https://github.com/openssl/openssl/blob/e2e09d9fba1187f8d6aafaa34d4172f56f1ffb72/LICENSE>`__
+-  `CryptoPkg/Library/MbedTlsLib/mbedtls <https://github.com/Mbed-TLS/mbedtls/blob/8c89224991adff88d53cd380f42a2baa36f91454/LICENSE>`__
 -  `MdeModulePkg/Library/BrotliCustomDecompressLib/brotli <https://github.com/google/brotli/blob/666c3280cc11dc433c303d79a83d4ffbdd12cc8d/LICENSE>`__
 -  `MdeModulePkg/Universal/RegularExpressionDxe/oniguruma <https://github.com/kkos/oniguruma/blob/abfc8ff81df4067f309032467785e06975678f0d/COPYING>`__
 -  `UnitTestFrameworkPkg/Library/CmockaLib/cmocka <https://github.com/tianocore/edk2-cmocka/blob/f5e2cd77c88d9f792562888d2b70c5a396bfbf7a/COPYING>`__
 -  `UnitTestFrameworkPkg/Library/GoogleTestLib/googletest <https://github.com/google/googletest/blob/86add13493e5c881d7e4ba77fb91c1f57752b3a4/LICENSE>`__
--  `UnitTestFrameworkPkg/Library/SubhookLib/subhook <https://github.com/Zeex/subhook/blob/83d4e1ebef3588fae48b69a7352cc21801cb70bc/LICENSE.txt>`__
+-  `UnitTestFrameworkPkg/Library/SubhookLib/subhook <https://github.com/tianocore/edk2-subhook/blob/83d4e1ebef3588fae48b69a7352cc21801cb70bc/LICENSE.txt>`__
 -  `RedfishPkg/Library/JsonLib/jansson <https://github.com/akheron/jansson/blob/2882ead5bb90cf12a01b07b2c2361e24960fae02/LICENSE>`__
 -  `MdePkg/Library/BaseFdtLib/libfdt <https://github.com/devicetree-org/pylibfdt/blob/f39368a217496d32c4091a2dba4045b60649e3a5/BSD-2-Clause>`__
 -  `MdePkg/Library/MipiSysTLib/mipisyst <https://github.com/MIPI-Alliance/public-mipi-sys-t/blob/aae857d0d05ac65152ed24992a4acd834a0a107c/LICENSE>`__
+-  `SecurityPkg/DeviceSecurity/SpdmLib/libspdm <https://github.com/DMTF/libspdm/blob/main/LICENSE.md>`__
 
 The EDK II Project is composed of packages. The maintainers for each package
 are listed in `Maintainers.txt <Maintainers.txt>`__.

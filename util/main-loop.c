@@ -26,8 +26,9 @@
 #include "qapi/error.h"
 #include "qemu/cutils.h"
 #include "qemu/timer.h"
-#include "sysemu/cpu-timers.h"
-#include "sysemu/replay.h"
+#include "system/cpu-timers.h"
+#include "exec/icount.h"
+#include "system/replay.h"
 #include "qemu/main-loop.h"
 #include "block/aio.h"
 #include "block/thread-pool.h"
@@ -212,7 +213,6 @@ static void main_loop_init(EventLoopBase *base, Error **errp)
     main_loop_update_params(base, errp);
 
     mloop = m;
-    return;
 }
 
 static bool main_loop_can_be_deleted(EventLoopBase *base)
@@ -220,7 +220,7 @@ static bool main_loop_can_be_deleted(EventLoopBase *base)
     return false;
 }
 
-static void main_loop_class_init(ObjectClass *oc, void *class_data)
+static void main_loop_class_init(ObjectClass *oc, const void *class_data)
 {
     EventLoopBaseClass *bc = EVENT_LOOP_BASE_CLASS(oc);
 

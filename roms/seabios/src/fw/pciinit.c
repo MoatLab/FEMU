@@ -55,7 +55,7 @@ u64 pcimem64_end   = BUILD_PCIMEM64_END;
 // Resource allocation limits
 static u64 pci_io_low_end = 0xa000;
 static u64 pci_mem64_top  = 0;
-static u32 pci_pad_mem64  = 0;
+static u32 pci_pad_mem64  = -1;
 
 struct pci_region_entry {
     struct pci_device *dev;
@@ -970,9 +970,11 @@ static int pci_bios_check_devices(struct pci_bus *busses)
             int resource_optional = 0;
             if (hotplug_support == HOTPLUG_PCIE)
                 resource_optional = pcie_cap && (type == PCI_REGION_TYPE_IO);
+
+            u64 top_align = pci_mem64_top >> 11;
             if (hotplug_support && pci_pad_mem64 && is64
-                && (type == PCI_REGION_TYPE_PREFMEM))
-                align = pci_mem64_top >> 11;
+                && (type == PCI_REGION_TYPE_PREFMEM) && (top_align > align))
+                align = top_align;
             if (align > sum && hotplug_support && !resource_optional)
                 sum = align; /* reserve min size for hot-plug */
             if (size > sum) {
@@ -1187,16 +1189,28 @@ pci_setup(void)
 
     if (CPUPhysBits) {
         pci_mem64_top = 1LL << CPUPhysBits;
-        if (CPUPhysBits > 46) {
-            // Old linux kernels have trouble dealing with more than 46
-            // phys-bits, so avoid that for now.  Seems to be a bug in the
-            // virtio-pci driver.  Reported: centos-7, ubuntu-18.04
-            pci_mem64_top = 1LL << 46;
+        if (CPUPhysBits > 44) {
+            // Old linux kernels have trouble dealing with more than 44 (i386
+            // kernels) or 46 (x86_64 kernels) phys-bits. Seems to be a bug in
+            // the virtio-pci driver.
+            // Reported: centos-7, ubuntu-18.04
+            // Limit the used address space to mitigate the bug, except we are
+            // running in a huge guest with more than 1TB of memory installed.
+            if (RamSizeOver4G < (1LL << 40)) {
+                pci_mem64_top = 1LL << 44;
+            }
         }
     }
 
-    if (CPUPhysBits >= 36 && CPULongMode && RamSizeOver4G)
-        pci_pad_mem64 = 1;
+    pci_pad_mem64 = romfile_loadbool("opt/org.seabios/pci64", -1);
+
+    if (pci_pad_mem64 == -1)
+        // when not set enable in case memory over 4G is present
+        pci_pad_mem64 = RamSizeOver4G ? 1 : 0;
+
+    if (!CPULongMode)
+        // force off for 32-bit CPUs
+        pci_pad_mem64 = 0;
 
     dprintf(1, "=== PCI bus & bridge init ===\n");
     if (pci_probe_host() != 0) {

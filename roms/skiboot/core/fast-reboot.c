@@ -6,6 +6,7 @@
  */
 
 #include <skiboot.h>
+#include <slw.h>
 #include <cpu.h>
 #include <console.h>
 #include <fsp.h>
@@ -262,7 +263,7 @@ static void cleanup_cpu_state(void)
 
 	if (proc_gen == proc_gen_p9)
 		xive_cpu_reset();
-	else if (proc_gen == proc_gen_p10)
+	else if (proc_gen == proc_gen_p10 || proc_gen == proc_gen_p11)
 		xive2_cpu_reset();
 
 	/* Per core cleanup */
@@ -272,6 +273,7 @@ static void cleanup_cpu_state(void)
 		/* XXX Update the SLW copies ! Also dbl check HIDs etc... */
 		init_shared_sprs();
 
+#ifdef CONFIG_P8
 		if (proc_gen == proc_gen_p8) {
 			/* If somebody was in fast_sleep, we may have a
 			 * workaround to undo
@@ -287,6 +289,7 @@ static void cleanup_cpu_state(void)
 			 */
 			cleanup_local_tlb();
 		}
+#endif
 
 		/* And we might have lost TB sync */
 		chiptod_wakeup_resync();
@@ -304,6 +307,8 @@ void __noreturn fast_reboot_entry(void);
 void __noreturn fast_reboot_entry(void)
 {
 	struct cpu_thread *cpu = this_cpu();
+	void *skiboot_constant_addr kerneal_load_base_addr = KERNEL_LOAD_BASE;
+	void *skiboot_constant_addr initramfs_load_base_addr = INITRAMFS_LOAD_BASE;
 
 	if (proc_gen == proc_gen_p8) {
 		/* We reset our ICP first ! Otherwise we might get stray
@@ -383,7 +388,7 @@ void __noreturn fast_reboot_entry(void)
 
 	if (proc_gen == proc_gen_p9)
 		xive_reset();
-	else if (proc_gen == proc_gen_p10)
+	else if (proc_gen == proc_gen_p10 || proc_gen == proc_gen_p11)
 		xive2_reset();
 
 	/* Let the CPU layer do some last minute global cleanups */
@@ -412,18 +417,18 @@ void __noreturn fast_reboot_entry(void)
 	/* Clear release flag for next time */
 	fast_boot_release = false;
 
-	if (!chip_quirk(QUIRK_MAMBO_CALLOUTS)) {
+	if (!chip_quirk(QUIRK_MAMBO_CALLOUTS) && !chip_quirk(QUIRK_QEMU)) {
 		/*
 		 * mem_region_clear_unused avoids these preload regions
 		 * so it can run along side image preloading. Clear these
 		 * regions now to catch anything not overwritten by
 		 * preload.
 		 *
-		 * Mambo may have embedded payload here, so don't clear
-		 * it at all.
+		 * Simulators may have embedded payload here, so don't clear
+		 * these ranges for them.
 		 */
-		memset(KERNEL_LOAD_BASE, 0, KERNEL_LOAD_SIZE);
-		memset(INITRAMFS_LOAD_BASE, 0, INITRAMFS_LOAD_SIZE);
+		memset(kerneal_load_base_addr, 0, KERNEL_LOAD_SIZE);
+		memset(initramfs_load_base_addr, 0, INITRAMFS_LOAD_SIZE);
 	}
 
 	/* Start preloading kernel and ramdisk */

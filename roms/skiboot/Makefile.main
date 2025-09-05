@@ -21,6 +21,7 @@ try = $(shell set -e; if ($(1)) >/dev/null 2>&1; \
 	else echo "$(3)"; fi )
 
 try-cflag = $(call try,$(1) -Werror $(2) -x c -c /dev/null -o /dev/null,$(2))
+try-ldflag = $(call try,$(1) $(2) -v,$(2))
 test_cflag = $(call try,$(1) -Werror $(2) -x c -c /dev/null -o /dev/null,1,0)
 
 cc-name := $(shell $(CC) -v 2>&1 | grep -q "clang version" && echo clang || echo gcc)
@@ -50,7 +51,7 @@ endif
 
 # Host tools and options
 HOSTCC=gcc
-HOSTEND=$(shell uname -m | sed -e 's/^i.*86$$/LITTLE/' -e 's/^x86.*/LITTLE/' -e 's/^ppc64le/LITTLE/' -e 's/^ppc.*/BIG/')
+HOSTEND=$(shell uname -m | sed -e 's/^i.*86$$/LITTLE/' -e 's/^x86.*/LITTLE/' -e 's/^ppc64le/LITTLE/' -e 's/^ppc.*/BIG/' -e 's/^riscv.*/LITTLE/')
 HOSTCFLAGS:=-O1 $(CWARNS) -DHAVE_$(HOSTEND)_ENDIAN -MMD
 HOSTCFLAGS += $(call try-cflag,$(HOSTCC),-std=gnu11)
 HOSTCFLAGS += $(call try-cflag,$(HOSTCC),-m64)
@@ -75,7 +76,7 @@ DBG=-g
 
 CPPFLAGS := -I$(SRC)/include -Iinclude -MMD -include $(SRC)/include/config.h
 CPPFLAGS += -I$(SRC)/libfdt -I$(SRC)/libflash -I$(SRC)/libxz -I$(SRC)/libc/include -I$(SRC)
-CPPFLAGS += -I$(SRC)/libpore
+CPPFLAGS += -I$(SRC)/libpore -I$(SRC)/libmctp
 CPPFLAGS += -D__SKIBOOT__ -nostdinc
 CPPFLAGS += -isystem $(shell $(CC) -print-file-name=include)
 CPPFLAGS += -DBITS_PER_LONG=64
@@ -87,8 +88,10 @@ CPPFLAGS += -ffreestanding
 
 ifeq ($(LITTLE_ENDIAN),1)
 CPPFLAGS += -DHAVE_LITTLE_ENDIAN
+CPPFLAGS += -D__LITTLE_ENDIAN_BITFIELD
 else
 CPPFLAGS += -DHAVE_BIG_ENDIAN
+CPPFLAGS += -D__BIG_ENDIAN_BITFIELD
 endif
 
 ifeq ($(DEBUG),1)
@@ -96,7 +99,11 @@ CPPFLAGS += -DDEBUG -DCCAN_LIST_DEBUG
 endif
 
 CFLAGS := -fno-strict-aliasing -pie -fpie -fno-pic -m64 -fno-asynchronous-unwind-tables
+ifeq ($(CONFIG_P8),1)
 CFLAGS += -mcpu=power8
+else
+CFLAGS += -mcpu=power9
+endif
 CFLAGS += -Wl,--oformat,elf64-powerpc -ggdb
 # r13,r14,r15 are preserved for OS to use as fixed registers.
 # These could be saved and restored in and out of skiboot, but it's more
@@ -156,6 +163,13 @@ else
 CFLAGS += -fno-stack-protector
 endif
 
+# Add preprocessor defines for CONFIG_ options here
+ifeq ($(CONFIG_P8),1)
+CFLAGS += -DCONFIG_P8=1
+endif
+ifeq ($(CONFIG_PLDM),1)
+CFLAGS += -DCONFIG_PLDM=1
+endif
 
 CFLAGS += $(call try-cflag,$(CC),-Wjump-misses-init) \
 	  $(call try-cflag,$(CC),-Wsuggest-attribute=const) \
@@ -173,10 +187,16 @@ LDFLAGS := -m64 -static -nostdlib -pie
 LDFLAGS += -Wl,-pie
 LDFLAGS += -Wl,-Ttext-segment,$(LD_TEXT) -Wl,-N -Wl,--build-id=none
 LDFLAGS += -Wl,--no-multi-toc
-LDFLAGS += -mcpu=power8 -Wl,--oformat,elf64-powerpc
+ifeq ($(CONFIG_P8),1)
+LDFLAGS += -mcpu=power8
+else
+LDFLAGS += -mcpu=power9
+endif
+LDFLAGS += -Wl,--oformat,elf64-powerpc
 LDFLAGS_FINAL = -m elf64lppc --no-multi-toc -N --build-id=none --whole-archive
 LDFLAGS_FINAL += -static -nostdlib -pie -Ttext-segment=$(LD_TEXT) --oformat=elf64-powerpc
 LDFLAGS_FINAL += --orphan-handling=warn
+LDFLAGS_FINAL += $(call try-ldflag,$(LD),--no-warn-rwx-segments)
 
 LDRFLAGS=-melf64ppc
 # Debug stuff
@@ -282,6 +302,11 @@ include $(SRC)/libc/Makefile.inc
 include $(SRC)/ccan/Makefile.inc
 include $(SRC)/$(DEVSRC)/Makefile.inc
 include $(SRC)/libstb/Makefile.inc
+ifeq ($(CONFIG_PLDM),1)
+include $(SRC)/libmctp/Makefile.inc
+include $(SRC)/pldm/libpldm/Makefile.inc
+include $(SRC)/pldm/libpldm/oem/ibm/Makefile.inc
+endif
 
 # hack for travis-ci and coverity
 gard:
@@ -306,6 +331,9 @@ all: $(TARGET).lid.stb $(TARGET).lid.xz.stb
 
 OBJS := $(ASM) $(CORE) $(HW) $(PLATFORMS) $(LIBFDT) $(LIBXZ) $(LIBFLASH) $(LIBSTB)
 OBJS += $(LIBC) $(CCAN) $(DEVSRC_OBJ) $(LIBPORE)
+ifeq ($(CONFIG_PLDM),1)
+OBJS += $(LIBMCTP) $(LIBPLDM) $(LIBPLDM_IBM)
+endif
 OBJS_NO_VER = $(OBJS)
 ALL_OBJS = $(OBJS) version.o
 
@@ -385,7 +413,7 @@ skiboot.info: coverage external/pflash/pflash.info external/gard/gard.info
 	lcov -q -r $@ 'external/gard/*' -o $@
 	lcov -q -a $@ -a external/pflash/pflash.info -o $@
 	lcov -q -a $@ -a external/gard/gard.info -o $@
-	lcov -q -r $@ $(LCOV_EXCLUDE) -o $@ --rc lcov_branch_coverage=1
+	lcov -q -r $@ $(LCOV_EXCLUDE) -o $@ --rc lcov_branch_coverage=1 --ignore-errors unused
 
 doc:
 	make -C doc html

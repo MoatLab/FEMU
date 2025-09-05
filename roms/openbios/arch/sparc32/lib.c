@@ -85,7 +85,7 @@ pa2va(phys_addr_t pa)
 }
 
 void *
-malloc(int size)
+malloc(size_t size)
 {
     return ofmem_malloc(size);
 }

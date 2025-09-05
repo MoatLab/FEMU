@@ -6,15 +6,36 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/log.h"
 #include "qemu/main-loop.h"
 #include "cpu.h"
 #include "internals.h"
 #include "qemu/host-utils.h"
 #include "exec/helper-proto.h"
-#include "exec/exec-all.h"
-#include "exec/cpu_ldst.h"
+#include "exec/cputlb.h"
+#include "accel/tcg/cpu-ldst.h"
 #include "hw/irq.h"
 #include "cpu-csr.h"
+
+target_ulong helper_csrwr_stlbps(CPULoongArchState *env, target_ulong val)
+{
+    int64_t old_v = env->CSR_STLBPS;
+
+    /*
+     * The real hardware only supports the min tlb_ps is 12
+     * tlb_ps=0 may cause undefined-behavior.
+     */
+    uint8_t tlb_ps = FIELD_EX64(env->CSR_STLBPS, CSR_STLBPS, PS);
+    if (!check_ps(env, tlb_ps)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "Attempted set ps %d\n", tlb_ps);
+    } else {
+        /* Only update PS field, reserved bit keeps zero */
+        env->CSR_STLBPS = FIELD_DP64(old_v, CSR_STLBPS, PS, tlb_ps);
+    }
+
+    return old_v;
+}
 
 target_ulong helper_csrrd_pgd(CPULoongArchState *env)
 {
@@ -93,5 +114,29 @@ target_ulong helper_csrwr_ticlr(CPULoongArchState *env, target_ulong val)
         loongarch_cpu_set_irq(cpu, IRQ_TIMER, 0);
         bql_unlock();
     }
+    return old_v;
+}
+
+target_ulong helper_csrwr_pwcl(CPULoongArchState *env, target_ulong val)
+{
+    uint8_t shift, ptbase;
+    int64_t old_v = env->CSR_PWCL;
+
+    /*
+     * The real hardware only supports 64bit PTE width now, 128bit or others
+     * treated as illegal.
+     */
+    shift = FIELD_EX64(val, CSR_PWCL, PTEWIDTH);
+    ptbase = FIELD_EX64(val, CSR_PWCL, PTBASE);
+    if (shift) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "Attempted set pte width with %d bit\n", 64 << shift);
+        val = FIELD_DP64(val, CSR_PWCL, PTEWIDTH, 0);
+    }
+    if (!check_ps(env, ptbase)) {
+         qemu_log_mask(LOG_GUEST_ERROR,
+                      "Attempted set ptbase 2^%d\n", ptbase);
+    }
+    env->CSR_PWCL = val;
     return old_v;
 }

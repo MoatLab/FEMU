@@ -8,9 +8,9 @@
  */
 #include "qemu/osdep.h"
 #include "qemu/log.h"
+#include "qemu/bswap.h"
 #include "qapi/visitor.h"
 #include "qapi/error.h"
-#include "monitor/monitor.h"
 #include "target/ppc/cpu.h"
 #include "hw/pci-host/pnv_phb4_regs.h"
 #include "hw/pci-host/pnv_phb4.h"
@@ -1363,7 +1363,7 @@ DECLARE_INSTANCE_CHECKER(IOMMUMemoryRegion, PNV_PHB4_IOMMU_MEMORY_REGION,
                          TYPE_PNV_PHB4_IOMMU_MEMORY_REGION)
 
 static void pnv_phb4_iommu_memory_region_class_init(ObjectClass *klass,
-                                                    void *data)
+                                                    const void *data)
 {
     IOMMUMemoryRegionClass *imrc = IOMMU_MEMORY_REGION_CLASS(klass);
 
@@ -1689,16 +1689,15 @@ static void pnv_phb4_xive_notify(XiveNotifier *xf, uint32_t srcno,
     }
 }
 
-static Property pnv_phb4_properties[] = {
+static const Property pnv_phb4_properties[] = {
     DEFINE_PROP_UINT32("index", PnvPHB4, phb_id, 0),
     DEFINE_PROP_UINT32("chip-id", PnvPHB4, chip_id, 0),
     DEFINE_PROP_LINK("pec", PnvPHB4, pec, TYPE_PNV_PHB4_PEC,
                      PnvPhb4PecState *),
     DEFINE_PROP_LINK("phb-base", PnvPHB4, phb_base, TYPE_PNV_PHB, PnvPHB *),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void pnv_phb4_class_init(ObjectClass *klass, void *data)
+static void pnv_phb4_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     XiveNotifierClass *xfc = XIVE_NOTIFIER_CLASS(klass);
@@ -1716,7 +1715,7 @@ static const TypeInfo pnv_phb4_type_info = {
     .instance_init = pnv_phb4_instance_init,
     .instance_size = sizeof(PnvPHB4),
     .class_init    = pnv_phb4_class_init,
-    .interfaces = (InterfaceInfo[]) {
+    .interfaces = (const InterfaceInfo[]) {
             { TYPE_XIVE_NOTIFIER },
             { },
     }
@@ -1763,7 +1762,7 @@ static void pnv_phb4_root_bus_set_prop(Object *obj, Visitor *v,
     }
 }
 
-static void pnv_phb4_root_bus_class_init(ObjectClass *klass, void *data)
+static void pnv_phb4_root_bus_class_init(ObjectClass *klass, const void *data)
 {
     BusClass *k = BUS_CLASS(klass);
 
@@ -1801,17 +1800,19 @@ static void pnv_phb4_register_types(void)
 
 type_init(pnv_phb4_register_types);
 
-void pnv_phb4_pic_print_info(PnvPHB4 *phb, Monitor *mon)
+void pnv_phb4_pic_print_info(PnvPHB4 *phb, GString *buf)
 {
     uint64_t notif_port =
         phb->regs[PHB_INT_NOTIFY_ADDR >> 3] & ~PHB_INT_NOTIFY_ADDR_64K;
     uint32_t offset = phb->regs[PHB_INT_NOTIFY_INDEX >> 3];
     bool abt = !!(phb->regs[PHB_CTRLR >> 3] & PHB_CTRLR_IRQ_ABT_MODE);
 
-    monitor_printf(mon, "PHB4[%x:%x] Source %08x .. %08x %s @%"HWADDR_PRIx"\n",
-                   phb->chip_id, phb->phb_id,
-                   offset, offset + phb->xsrc.nr_irqs - 1,
-                   abt ? "ABT" : "",
-                   notif_port);
-    xive_source_pic_print_info(&phb->xsrc, 0, mon);
+    g_string_append_printf(buf,
+                           "PHB4[%x:%x] Source %08x .. %08x "
+                           "%s @%"HWADDR_PRIx"\n",
+                           phb->chip_id, phb->phb_id,
+                           offset, offset + phb->xsrc.nr_irqs - 1,
+                           abt ? "ABT" : "",
+                           notif_port);
+    xive_source_pic_print_info(&phb->xsrc, 0, buf);
 }

@@ -7,15 +7,12 @@
 #include <unistd.h>
 #include <signal.h>
 
-int main(int argc, char *argv[])
+int main(void)
 {
 	struct list_head list1, list2;
 	struct list_node n1, n2, n3;
 	pid_t child;
 	int status;
-
-	(void)argc;
-	(void)argv;
 
 	plan_tests(1);
 	list_head_init(&list1);
@@ -28,7 +25,6 @@ int main(int argc, char *argv[])
 	if (child) {
 		wait(&status);
 	} else {
-		close(2); /* Close stderr so we don't print confusing assert */
 		/* This should abort. */
 		list_del_from(&list1, &n3);
 		exit(0);

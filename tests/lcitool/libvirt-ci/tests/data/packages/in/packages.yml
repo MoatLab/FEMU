@@ -12,13 +12,17 @@ packages:
 - bash
 - bash-completion
 - bc
+- bindgen
 - bison
+- black
 - brlapi
 - bzip2
 - bzip2-libs
 - ca-certificates
 - capstone
 - cargo
+- cargo-c
+- cargo-rpm-macros
 - ccache
 - check
 - chrony
@@ -102,10 +106,13 @@ packages:
 - libblkid
 - libbpf
 - libc
+- libc-malloc-debug
 - libc-static
 - libcacard
 - libcap-ng
+- libcbor
 - libclang
+- libclang-rt
 - libcmpiutil
 - libconfig
 - libcurl
@@ -173,6 +180,7 @@ packages:
 - make
 - mesa-libgbm
 - meson
+- mingw-w64-tools
 - mkisofs
 - modprobe
 - mono
@@ -240,8 +248,8 @@ packages:
 - php
 - php-imagick
 - pixman
+- pkcheck
 - pkg-config
-- polkit
 - portablexdr
 - publican
 - pulseaudio
@@ -253,6 +261,8 @@ packages:
 - python3-devel
 - python3-docutils
 - python3-gobject
+- python3-imp
+- python3-libvirt
 - python3-libxml2
 - python3-lxml
 - python3-numpy
@@ -279,6 +289,7 @@ packages:
 - rpmbuild
 - ruby
 - rust
+- rust-std
 - sanlock
 - screen
 - scrub
@@ -301,6 +312,7 @@ packages:
 - swtpm
 - systemd
 - systemd-rpm-macros
+- systemtap
 - tar
 - tc
 - tcl
@@ -316,6 +328,7 @@ packages:
 - vim
 - virglrenderer
 - vte
+- vulkan-tools
 - wget
 - which
 - wireshark

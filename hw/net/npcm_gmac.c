@@ -33,7 +33,7 @@
 #include "qemu/cutils.h"
 #include "qemu/log.h"
 #include "qemu/units.h"
-#include "sysemu/dma.h"
+#include "system/dma.h"
 #include "trace.h"
 
 REG32(NPCM_DMA_BUS_MODE, 0x1000)
@@ -516,8 +516,6 @@ static void gmac_try_send_next_packet(NPCMGMACState *gmac)
     uint32_t desc_addr;
     struct NPCMGMACTxDesc tx_desc;
     uint32_t tx_buf_addr, tx_buf_len;
-    uint16_t length = 0;
-    uint8_t *buf = tx_send_buffer;
     uint32_t prev_buf_size = 0;
     int csum = 0;
 
@@ -546,9 +544,8 @@ static void gmac_try_send_next_packet(NPCMGMACState *gmac)
 
         /* 1 = DMA Owned, 0 = Software Owned */
         if (!(tx_desc.tdes0 & TX_DESC_TDES0_OWN)) {
-            qemu_log_mask(LOG_GUEST_ERROR,
-                          "TX Descriptor @ 0x%x is owned by software\n",
-                          desc_addr);
+            trace_npcm_gmac_tx_desc_owner(DEVICE(gmac)->canonical_path,
+                                          desc_addr);
             gmac->regs[R_NPCM_DMA_STATUS] |= NPCM_DMA_STATUS_TU;
             gmac_dma_set_state(gmac, NPCM_DMA_STATUS_TX_PROCESS_STATE_SHIFT,
                 NPCM_DMA_STATUS_TX_SUSPENDED_STATE);
@@ -569,22 +566,20 @@ static void gmac_try_send_next_packet(NPCMGMACState *gmac)
         tx_buf_addr = tx_desc.tdes2;
         gmac->regs[R_NPCM_DMA_CUR_TX_BUF_ADDR] = tx_buf_addr;
         tx_buf_len = TX_DESC_TDES1_BFFR1_SZ_MASK(tx_desc.tdes1);
-        buf = &tx_send_buffer[prev_buf_size];
 
-        if ((prev_buf_size + tx_buf_len) > sizeof(buf)) {
+        if ((prev_buf_size + tx_buf_len) > tx_buffer_size) {
             tx_buffer_size = prev_buf_size + tx_buf_len;
             tx_send_buffer = g_realloc(tx_send_buffer, tx_buffer_size);
-            buf = &tx_send_buffer[prev_buf_size];
         }
 
         /* step 5 */
-        if (dma_memory_read(&address_space_memory, tx_buf_addr, buf,
+        if (dma_memory_read(&address_space_memory, tx_buf_addr,
+                            tx_send_buffer + prev_buf_size,
                             tx_buf_len, MEMTXATTRS_UNSPECIFIED)) {
             qemu_log_mask(LOG_GUEST_ERROR, "%s: Failed to read packet @ 0x%x\n",
                         __func__, tx_buf_addr);
             return;
         }
-        length += tx_buf_len;
         prev_buf_size += tx_buf_len;
 
         /* If not chained we'll have a second buffer. */
@@ -592,30 +587,32 @@ static void gmac_try_send_next_packet(NPCMGMACState *gmac)
             tx_buf_addr = tx_desc.tdes3;
             gmac->regs[R_NPCM_DMA_CUR_TX_BUF_ADDR] = tx_buf_addr;
             tx_buf_len = TX_DESC_TDES1_BFFR2_SZ_MASK(tx_desc.tdes1);
-            buf = &tx_send_buffer[prev_buf_size];
 
-            if ((prev_buf_size + tx_buf_len) > sizeof(buf)) {
+            if ((prev_buf_size + tx_buf_len) > tx_buffer_size) {
                 tx_buffer_size = prev_buf_size + tx_buf_len;
                 tx_send_buffer = g_realloc(tx_send_buffer, tx_buffer_size);
-                buf = &tx_send_buffer[prev_buf_size];
             }
 
-            if (dma_memory_read(&address_space_memory, tx_buf_addr, buf,
+            if (dma_memory_read(&address_space_memory, tx_buf_addr,
+                                tx_send_buffer + prev_buf_size,
                                 tx_buf_len, MEMTXATTRS_UNSPECIFIED)) {
                 qemu_log_mask(LOG_GUEST_ERROR,
                               "%s: Failed to read packet @ 0x%x\n",
                               __func__, tx_buf_addr);
                 return;
             }
-            length += tx_buf_len;
             prev_buf_size += tx_buf_len;
         }
         if (tx_desc.tdes1 & TX_DESC_TDES1_LAST_SEG_MASK) {
+            /*
+             * This will truncate the packet at 64K.
+             * TODO: find out if this is the correct behaviour.
+             */
+            uint16_t length = prev_buf_size;
             net_checksum_calculate(tx_send_buffer, length, csum);
             qemu_send_packet(qemu_get_queue(gmac->nic), tx_send_buffer, length);
             trace_npcm_gmac_packet_sent(DEVICE(gmac)->canonical_path, length);
-            buf = tx_send_buffer;
-            length = 0;
+            prev_buf_size = 0;
         }
 
         /* step 6 */
@@ -913,12 +910,11 @@ static const VMStateDescription vmstate_npcm_gmac = {
     },
 };
 
-static Property npcm_gmac_properties[] = {
+static const Property npcm_gmac_properties[] = {
     DEFINE_NIC_PROPERTIES(NPCMGMACState, conf),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void npcm_gmac_class_init(ObjectClass *klass, void *data)
+static void npcm_gmac_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
@@ -926,7 +922,7 @@ static void npcm_gmac_class_init(ObjectClass *klass, void *data)
     dc->desc = "NPCM GMAC Controller";
     dc->realize = npcm_gmac_realize;
     dc->unrealize = npcm_gmac_unrealize;
-    dc->reset = npcm_gmac_reset;
+    device_class_set_legacy_reset(dc, npcm_gmac_reset);
     dc->vmsd = &vmstate_npcm_gmac;
     device_class_set_props(dc, npcm_gmac_properties);
 }

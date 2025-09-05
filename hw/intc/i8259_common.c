@@ -28,7 +28,6 @@
 #include "hw/isa/i8259_internal.h"
 #include "hw/qdev-properties.h"
 #include "migration/vmstate.h"
-#include "monitor/monitor.h"
 #include "qapi/error.h"
 
 static int irq_level[16];
@@ -132,16 +131,17 @@ static bool pic_get_statistics(InterruptStatsProvider *obj,
     return true;
 }
 
-static void pic_print_info(InterruptStatsProvider *obj, Monitor *mon)
+static void pic_print_info(InterruptStatsProvider *obj, GString *buf)
 {
     PICCommonState *s = PIC_COMMON(obj);
 
     pic_dispatch_pre_save(s);
-    monitor_printf(mon, "pic%d: irr=%02x imr=%02x isr=%02x hprio=%d "
-                   "irq_base=%02x rr_sel=%d elcr=%02x fnm=%d\n",
-                   s->master ? 0 : 1, s->irr, s->imr, s->isr, s->priority_add,
-                   s->irq_base, s->read_reg_select, s->elcr,
-                   s->special_fully_nested_mode);
+    g_string_append_printf(buf, "pic%d: irr=%02x imr=%02x isr=%02x hprio=%d "
+                           "irq_base=%02x rr_sel=%d elcr=%02x fnm=%d\n",
+                           s->master ? 0 : 1, s->irr, s->imr, s->isr,
+                           s->priority_add,
+                           s->irq_base, s->read_reg_select, s->elcr,
+                           s->special_fully_nested_mode);
 }
 
 static bool ltim_state_needed(void *opaque)
@@ -193,15 +193,14 @@ static const VMStateDescription vmstate_pic_common = {
     }
 };
 
-static Property pic_properties_common[] = {
+static const Property pic_properties_common[] = {
     DEFINE_PROP_UINT32("iobase", PICCommonState, iobase,  -1),
     DEFINE_PROP_UINT32("elcr_addr", PICCommonState, elcr_addr,  -1),
     DEFINE_PROP_UINT8("elcr_mask", PICCommonState, elcr_mask,  -1),
     DEFINE_PROP_BIT("master", PICCommonState, master,  0, false),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void pic_common_class_init(ObjectClass *klass, void *data)
+static void pic_common_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     InterruptStatsProviderClass *ic = INTERRUPT_STATS_PROVIDER_CLASS(klass);
@@ -227,7 +226,7 @@ static const TypeInfo pic_common_type = {
     .class_size = sizeof(PICCommonClass),
     .class_init = pic_common_class_init,
     .abstract = true,
-    .interfaces = (InterfaceInfo[]) {
+    .interfaces = (const InterfaceInfo[]) {
         { TYPE_INTERRUPT_STATS_PROVIDER },
         { }
     },

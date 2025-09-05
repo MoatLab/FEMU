@@ -8,12 +8,12 @@
  */
 
 #include "qemu/osdep.h"
-#include "sysemu/block-backend.h"
-#include "sysemu/dma.h"
-#include "trace/trace-root.h"
+#include "system/block-backend.h"
+#include "system/dma.h"
+#include "trace.h"
 #include "qemu/thread.h"
 #include "qemu/main-loop.h"
-#include "sysemu/cpu-timers.h"
+#include "exec/icount.h"
 #include "qemu/range.h"
 
 /* #define DEBUG_IOMMU */
@@ -169,7 +169,7 @@ static void dma_blk_cb(void *opaque, int ret)
     if (dbs->iov.size == 0) {
         trace_dma_map_wait(dbs);
         dbs->bh = aio_bh_new(ctx, reschedule_dma, dbs);
-        cpu_register_map_client(dbs->bh);
+        address_space_register_map_client(dbs->sg->as, dbs->bh);
         return;
     }
 
@@ -197,7 +197,7 @@ static void dma_aio_cancel(BlockAIOCB *acb)
     }
 
     if (dbs->bh) {
-        cpu_unregister_map_client(dbs->bh);
+        address_space_unregister_map_client(dbs->sg->as, dbs->bh);
         qemu_bh_delete(dbs->bh);
         dbs->bh = NULL;
     }
@@ -211,7 +211,7 @@ static const AIOCBInfo dma_aiocb_info = {
     .cancel_async       = dma_aio_cancel,
 };
 
-BlockAIOCB *dma_blk_io(AioContext *ctx,
+BlockAIOCB *dma_blk_io(
     QEMUSGList *sg, uint64_t offset, uint32_t align,
     DMAIOFunc *io_func, void *io_func_opaque,
     BlockCompletionFunc *cb,
@@ -223,7 +223,7 @@ BlockAIOCB *dma_blk_io(AioContext *ctx,
 
     dbs->acb = NULL;
     dbs->sg = sg;
-    dbs->ctx = ctx;
+    dbs->ctx = qemu_get_current_aio_context();
     dbs->offset = offset;
     dbs->align = align;
     dbs->sg_cur_index = 0;
@@ -251,7 +251,7 @@ BlockAIOCB *dma_blk_read(BlockBackend *blk,
                          QEMUSGList *sg, uint64_t offset, uint32_t align,
                          void (*cb)(void *opaque, int ret), void *opaque)
 {
-    return dma_blk_io(blk_get_aio_context(blk), sg, offset, align,
+    return dma_blk_io(sg, offset, align,
                       dma_blk_read_io_func, blk, cb, opaque,
                       DMA_DIRECTION_FROM_DEVICE);
 }
@@ -269,7 +269,7 @@ BlockAIOCB *dma_blk_write(BlockBackend *blk,
                           QEMUSGList *sg, uint64_t offset, uint32_t align,
                           void (*cb)(void *opaque, int ret), void *opaque)
 {
-    return dma_blk_io(blk_get_aio_context(blk), sg, offset, align,
+    return dma_blk_io(sg, offset, align,
                       dma_blk_write_io_func, blk, cb, opaque,
                       DMA_DIRECTION_TO_DEVICE);
 }

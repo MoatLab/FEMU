@@ -50,6 +50,7 @@
 #define ESP_CMD_RESET    0x02
 #define ESP_CMD_TI       0x10
 #define ESP_CMD_ICCS     0x11
+#define ESP_CMD_MSGACC   0x12
 #define ESP_CMD_SELATN   0x42
 
 #define ESP_STAT_DI      0x01
@@ -159,11 +160,12 @@ esp_scsi_process_op(struct disk_op_s *op)
             continue;
         }
 
-        /* Finally read data from the message in phase.  */
+        /* Finally read data from the message in phase and accept.  */
         if (state == 3 && (stat & ESP_STAT_MSG)) {
             state++;
             status = inb(iobase + ESP_FIFO);
             inb(iobase + ESP_FIFO);
+            outb(ESP_CMD_MSGACC, iobase + ESP_CMD);
             break;
         }
         usleep(5);

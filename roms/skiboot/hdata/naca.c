@@ -9,9 +9,9 @@
 __section(".naca.data") struct naca naca = {
 	.spirah_addr = CPU_TO_BE64(SPIRAH_OFF),
 	.hv_release_data_addr = CPU_TO_BE64(NACA_OFF + offsetof(struct naca, hv_release_data)),
-	.spira_addr = CPU_TO_BE64(SPIRA_OFF),
+	.spira_addr = 0,
 	.lid_table_addr = CPU_TO_BE64(NACA_OFF + offsetof(struct naca, hv_lid_load_table)),
-	.spira_size = CPU_TO_BE32(SPIRA_ACTUAL_SIZE),
+	.spira_size = 0,
 	.hv_load_map_addr = 0,
 	.attn_enabled = 0,
 	.pcia_supported = 1,

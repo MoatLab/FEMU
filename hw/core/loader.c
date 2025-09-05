@@ -51,17 +51,18 @@
 #include "trace.h"
 #include "hw/hw.h"
 #include "disas/disas.h"
+#include "migration/cpr.h"
 #include "migration/vmstate.h"
 #include "monitor/monitor.h"
-#include "sysemu/reset.h"
-#include "sysemu/sysemu.h"
+#include "system/reset.h"
+#include "system/system.h"
 #include "uboot_image.h"
 #include "hw/loader.h"
 #include "hw/nvram/fw_cfg.h"
-#include "exec/memory.h"
+#include "system/memory.h"
 #include "hw/boards.h"
 #include "qemu/cutils.h"
-#include "sysemu/runstate.h"
+#include "system/runstate.h"
 #include "tcg/debuginfo.h"
 
 #include <zlib.h>
@@ -144,7 +145,7 @@ ssize_t load_image_mr(const char *filename, MemoryRegion *mr)
 {
     ssize_t size;
 
-    if (!memory_access_is_direct(mr, false)) {
+    if (!memory_access_is_direct(mr, false, MEMTXATTRS_UNSPECIFIED)) {
         /* Can only load an image into RAM or ROM */
         return -1;
     }
@@ -225,7 +226,7 @@ static void bswap_ahdr(struct exec *e)
 
 
 ssize_t load_aout(const char *filename, hwaddr addr, int max_sz,
-                  int bswap_needed, hwaddr target_page_size)
+                  bool big_endian, hwaddr target_page_size)
 {
     int fd;
     ssize_t size, ret;
@@ -240,7 +241,7 @@ ssize_t load_aout(const char *filename, hwaddr addr, int max_sz,
     if (size < 0)
         goto fail;
 
-    if (bswap_needed) {
+    if (big_endian != HOST_BIG_ENDIAN) {
         bswap_ahdr(&e);
     }
 
@@ -305,7 +306,7 @@ static void *load_at(int fd, off_t offset, size_t size)
 #define elf_word        uint32_t
 #define elf_sword       int32_t
 #define bswapSZs        bswap32s
-#include "hw/elf_ops.h"
+#include "hw/elf_ops.h.inc"
 
 #undef elfhdr
 #undef elf_phdr
@@ -327,7 +328,7 @@ static void *load_at(int fd, off_t offset, size_t size)
 #define elf_sword       int64_t
 #define bswapSZs        bswap64s
 #define SZ              64
-#include "hw/elf_ops.h"
+#include "hw/elf_ops.h.inc"
 
 const char *load_elf_strerror(ssize_t error)
 {
@@ -409,11 +410,11 @@ ssize_t load_elf(const char *filename,
                  uint64_t (*elf_note_fn)(void *, void *, bool),
                  uint64_t (*translate_fn)(void *, uint64_t),
                  void *translate_opaque, uint64_t *pentry, uint64_t *lowaddr,
-                 uint64_t *highaddr, uint32_t *pflags, int big_endian,
+                 uint64_t *highaddr, uint32_t *pflags, int elf_data_order,
                  int elf_machine, int clear_lsb, int data_swab)
 {
     return load_elf_as(filename, elf_note_fn, translate_fn, translate_opaque,
-                       pentry, lowaddr, highaddr, pflags, big_endian,
+                       pentry, lowaddr, highaddr, pflags, elf_data_order,
                        elf_machine, clear_lsb, data_swab, NULL);
 }
 
@@ -422,29 +423,15 @@ ssize_t load_elf_as(const char *filename,
                     uint64_t (*elf_note_fn)(void *, void *, bool),
                     uint64_t (*translate_fn)(void *, uint64_t),
                     void *translate_opaque, uint64_t *pentry, uint64_t *lowaddr,
-                    uint64_t *highaddr, uint32_t *pflags, int big_endian,
+                    uint64_t *highaddr, uint32_t *pflags, int elf_data_order,
                     int elf_machine, int clear_lsb, int data_swab,
                     AddressSpace *as)
 {
-    return load_elf_ram(filename, elf_note_fn, translate_fn, translate_opaque,
-                        pentry, lowaddr, highaddr, pflags, big_endian,
-                        elf_machine, clear_lsb, data_swab, as, true);
-}
-
-/* return < 0 if error, otherwise the number of bytes loaded in memory */
-ssize_t load_elf_ram(const char *filename,
-                     uint64_t (*elf_note_fn)(void *, void *, bool),
-                     uint64_t (*translate_fn)(void *, uint64_t),
-                     void *translate_opaque, uint64_t *pentry,
-                     uint64_t *lowaddr, uint64_t *highaddr, uint32_t *pflags,
-                     int big_endian, int elf_machine, int clear_lsb,
-                     int data_swab, AddressSpace *as, bool load_rom)
-{
     return load_elf_ram_sym(filename, elf_note_fn,
                             translate_fn, translate_opaque,
-                            pentry, lowaddr, highaddr, pflags, big_endian,
+                            pentry, lowaddr, highaddr, pflags, elf_data_order,
                             elf_machine, clear_lsb, data_swab, as,
-                            load_rom, NULL);
+                            true, NULL);
 }
 
 /* return < 0 if error, otherwise the number of bytes loaded in memory */
@@ -453,11 +440,12 @@ ssize_t load_elf_ram_sym(const char *filename,
                          uint64_t (*translate_fn)(void *, uint64_t),
                          void *translate_opaque, uint64_t *pentry,
                          uint64_t *lowaddr, uint64_t *highaddr,
-                         uint32_t *pflags, int big_endian, int elf_machine,
+                         uint32_t *pflags, int elf_data_order, int elf_machine,
                          int clear_lsb, int data_swab,
                          AddressSpace *as, bool load_rom, symbol_fn_t sym_cb)
 {
-    int fd, data_order, target_data_order, must_swab;
+    const int host_data_order = HOST_BIG_ENDIAN ? ELFDATA2MSB : ELFDATA2LSB;
+    int fd, must_swab;
     ssize_t ret = ELF_LOAD_FAILED;
     uint8_t e_ident[EI_NIDENT];
 
@@ -475,22 +463,13 @@ ssize_t load_elf_ram_sym(const char *filename,
         ret = ELF_LOAD_NOT_ELF;
         goto fail;
     }
-#if HOST_BIG_ENDIAN
-    data_order = ELFDATA2MSB;
-#else
-    data_order = ELFDATA2LSB;
-#endif
-    must_swab = data_order != e_ident[EI_DATA];
-    if (big_endian) {
-        target_data_order = ELFDATA2MSB;
-    } else {
-        target_data_order = ELFDATA2LSB;
-    }
 
-    if (target_data_order != e_ident[EI_DATA]) {
+    if (elf_data_order != ELFDATANONE && elf_data_order != e_ident[EI_DATA]) {
         ret = ELF_LOAD_WRONG_ENDIAN;
         goto fail;
     }
+
+    must_swab = host_data_order != e_ident[EI_DATA];
 
     lseek(fd, 0, SEEK_SET);
     if (e_ident[EI_CLASS] == ELFCLASS64) {
@@ -610,6 +589,7 @@ ssize_t gunzip(void *dst, size_t dstlen, uint8_t *src, size_t srclen)
     r = inflate(&s, Z_FINISH);
     if (r != Z_OK && r != Z_STREAM_END) {
         printf ("Error: inflate() returned %d\n", r);
+        inflateEnd(&s);
         return -1;
     }
     dstbytes = s.next_out - (unsigned char *) dst;
@@ -844,19 +824,6 @@ ssize_t load_image_gzipped_buffer(const char *filename, uint64_t max_sz,
     return ret;
 }
 
-/* Load a gzip-compressed kernel. */
-ssize_t load_image_gzipped(const char *filename, hwaddr addr, uint64_t max_sz)
-{
-    ssize_t bytes;
-    uint8_t *data;
-
-    bytes = load_image_gzipped_buffer(filename, max_sz, &data);
-    if (bytes != -1) {
-        rom_add_blob_fixed(filename, data, bytes, addr);
-        g_free(data);
-    }
-    return bytes;
-}
 
 /* The PE/COFF MS-DOS stub magic number */
 #define EFI_PE_MSDOS_MAGIC        "MZ"
@@ -898,11 +865,11 @@ struct linux_efi_zboot_header {
  *
  * If the image is not a Linux EFI zboot image, do nothing and return success.
  */
-ssize_t unpack_efi_zboot_image(uint8_t **buffer, int *size)
+ssize_t unpack_efi_zboot_image(uint8_t **buffer, ssize_t *size)
 {
     const struct linux_efi_zboot_header *header;
     uint8_t *data = NULL;
-    int ploff, plsize;
+    ssize_t ploff, plsize;
     ssize_t bytes;
 
     /* ignore if this is too small to be a EFI zboot image */
@@ -1063,7 +1030,9 @@ static void *rom_set_mr(Rom *rom, Object *owner, const char *name, bool ro)
     vmstate_register_ram_global(rom->mr);
 
     data = memory_region_get_ram_ptr(rom->mr);
-    memcpy(data, rom->data, rom->datasize);
+    if (!cpr_is_incoming()) {
+        memcpy(data, rom->data, rom->datasize);
+    }
 
     return data;
 }
@@ -1075,8 +1044,8 @@ ssize_t rom_add_file(const char *file, const char *fw_dir,
 {
     MachineClass *mc = MACHINE_GET_CLASS(qdev_get_machine());
     Rom *rom;
-    ssize_t rc;
-    int fd = -1;
+    gsize size;
+    g_autoptr(GError) gerr = NULL;
     char devpath[100];
 
     if (as && mr) {
@@ -1094,10 +1063,10 @@ ssize_t rom_add_file(const char *file, const char *fw_dir,
         rom->path = g_strdup(file);
     }
 
-    fd = open(rom->path, O_RDONLY | O_BINARY);
-    if (fd == -1) {
-        fprintf(stderr, "Could not open option rom '%s': %s\n",
-                rom->path, strerror(errno));
+    if (!g_file_get_contents(rom->path, (gchar **) &rom->data,
+                             &size, &gerr)) {
+        fprintf(stderr, "rom: file %-20s: error %s\n",
+                rom->name, gerr->message);
         goto err;
     }
 
@@ -1106,23 +1075,8 @@ ssize_t rom_add_file(const char *file, const char *fw_dir,
         rom->fw_file = g_strdup(file);
     }
     rom->addr     = addr;
-    rom->romsize  = lseek(fd, 0, SEEK_END);
-    if (rom->romsize == -1) {
-        fprintf(stderr, "rom: file %-20s: get size error: %s\n",
-                rom->name, strerror(errno));
-        goto err;
-    }
-
+    rom->romsize  = size;
     rom->datasize = rom->romsize;
-    rom->data     = g_malloc0(rom->datasize);
-    lseek(fd, 0, SEEK_SET);
-    rc = read(fd, rom->data, rom->datasize);
-    if (rc != rom->datasize) {
-        fprintf(stderr, "rom: file %-20s: read error: rc=%zd (expected %zd)\n",
-                rom->name, rc, rom->datasize);
-        goto err;
-    }
-    close(fd);
     rom_insert(rom);
     if (rom->fw_file && fw_cfg) {
         const char *basename;
@@ -1159,9 +1113,6 @@ ssize_t rom_add_file(const char *file, const char *fw_dir,
     return 0;
 
 err:
-    if (fd != -1)
-        close(fd);
-
     rom_free(rom);
     return -1;
 }
@@ -1382,20 +1333,6 @@ void rom_set_fw(FWCfgState *f)
     fw_cfg = f;
 }
 
-void rom_set_order_override(int order)
-{
-    if (!fw_cfg)
-        return;
-    fw_cfg_set_order_override(fw_cfg, order);
-}
-
-void rom_reset_order_override(void)
-{
-    if (!fw_cfg)
-        return;
-    fw_cfg_reset_order_override(fw_cfg);
-}
-
 void rom_transaction_begin(void)
 {
     Rom *rom;
@@ -1459,7 +1396,7 @@ typedef struct RomSec {
  * work, but this way saves a little work later by avoiding
  * dealing with "gaps" of 0 length.
  */
-static gint sort_secs(gconstpointer a, gconstpointer b)
+static gint sort_secs(gconstpointer a, gconstpointer b, gpointer d)
 {
     RomSec *ra = (RomSec *) a;
     RomSec *rb = (RomSec *) b;
@@ -1512,7 +1449,7 @@ RomGap rom_find_largest_gap_between(hwaddr base, size_t size)
     /* sentinel */
     secs = add_romsec_to_list(secs, base + size, 1);
 
-    secs = g_list_sort(secs, sort_secs);
+    secs = g_list_sort_with_data(secs, sort_secs, NULL);
 
     for (it = g_list_first(secs); it; it = g_list_next(it)) {
         cand = (RomSec *) it->data;

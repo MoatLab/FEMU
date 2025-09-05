@@ -175,7 +175,7 @@ static void out_cb(void *opaque, int avail)
     ViaAC97SGDChannel *c = &s->aur;
     int temp, to_copy, copied;
     bool stop = false;
-    uint8_t tmpbuf[4096];
+    QEMU_UNINITIALIZED uint8_t tmpbuf[4096];
 
     if (c->stat & STAT_PAUSED) {
         return;
@@ -459,12 +459,11 @@ static void via_ac97_exit(PCIDevice *dev)
     AUD_remove_card(&s->card);
 }
 
-static Property via_ac97_properties[] = {
+static const Property via_ac97_properties[] = {
     DEFINE_AUDIO_PROPERTIES(ViaAC97State, card),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void via_ac97_class_init(ObjectClass *klass, void *data)
+static void via_ac97_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
@@ -478,7 +477,7 @@ static void via_ac97_class_init(ObjectClass *klass, void *data)
     device_class_set_props(dc, via_ac97_properties);
     set_bit(DEVICE_CATEGORY_SOUND, dc->categories);
     dc->desc = "VIA AC97";
-    dc->reset = via_ac97_reset;
+    device_class_set_legacy_reset(dc, via_ac97_reset);
     /* Reason: Part of a south bridge chip */
     dc->user_creatable = false;
 }
@@ -488,7 +487,7 @@ static const TypeInfo via_ac97_info = {
     .parent        = TYPE_PCI_DEVICE,
     .instance_size = sizeof(ViaAC97State),
     .class_init    = via_ac97_class_init,
-    .interfaces = (InterfaceInfo[]) {
+    .interfaces = (const InterfaceInfo[]) {
         { INTERFACE_CONVENTIONAL_PCI_DEVICE },
         { },
     },
@@ -502,7 +501,7 @@ static void via_mc97_realize(PCIDevice *pci_dev, Error **errp)
     pci_set_long(pci_dev->config + PCI_INTERRUPT_PIN, 0x03);
 }
 
-static void via_mc97_class_init(ObjectClass *klass, void *data)
+static void via_mc97_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
@@ -523,7 +522,7 @@ static const TypeInfo via_mc97_info = {
     .parent        = TYPE_PCI_DEVICE,
     .instance_size = sizeof(PCIDevice),
     .class_init    = via_mc97_class_init,
-    .interfaces = (InterfaceInfo[]) {
+    .interfaces = (const InterfaceInfo[]) {
         { INTERFACE_CONVENTIONAL_PCI_DEVICE },
         { },
     },

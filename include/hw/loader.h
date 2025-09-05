@@ -77,15 +77,13 @@ ssize_t load_image_targphys(const char *filename, hwaddr,
 ssize_t load_image_mr(const char *filename, MemoryRegion *mr);
 
 /* This is the limit on the maximum uncompressed image size that
- * load_image_gzipped_buffer() and load_image_gzipped() will read. It prevents
+ * load_image_gzipped_buffer() will read. It prevents
  * g_malloc() in those functions from allocating a huge amount of memory.
  */
 #define LOAD_IMAGE_MAX_GUNZIP_BYTES (256 << 20)
 
 ssize_t load_image_gzipped_buffer(const char *filename, uint64_t max_sz,
                                   uint8_t **buffer);
-ssize_t load_image_gzipped(const char *filename, hwaddr addr, uint64_t max_sz);
-
 /**
  * unpack_efi_zboot_image:
  * @buffer: pointer to a variable holding the address of a buffer containing the
@@ -103,7 +101,7 @@ ssize_t load_image_gzipped(const char *filename, hwaddr addr, uint64_t max_sz);
  * Returns the size of the decompressed payload if decompression was performed
  * successfully.
  */
-ssize_t unpack_efi_zboot_image(uint8_t **buffer, int *size);
+ssize_t unpack_efi_zboot_image(uint8_t **buffer, ssize_t *size);
 
 #define ELF_LOAD_FAILED       -1
 #define ELF_LOAD_NOT_ELF      -2
@@ -122,7 +120,7 @@ const char *load_elf_strerror(ssize_t error);
  * @lowaddr: Populated with lowest loaded address. Ignored if NULL.
  * @highaddr: Populated with highest loaded address. Ignored if NULL.
  * @pflags: Populated with ELF processor-specific flags. Ignore if NULL.
- * @bigendian: Expected ELF endianness. 0 for LE otherwise BE
+ * @elf_data_order: Expected ELF endianness (ELFDATA2LSB or ELFDATA2MSB).
  * @elf_machine: Expected ELF machine type
  * @clear_lsb: Set to mask off LSB of addresses (Some architectures use
  *             this for non-address data)
@@ -153,30 +151,18 @@ ssize_t load_elf_ram_sym(const char *filename,
                          uint64_t (*translate_fn)(void *, uint64_t),
                          void *translate_opaque, uint64_t *pentry,
                          uint64_t *lowaddr, uint64_t *highaddr,
-                         uint32_t *pflags, int big_endian, int elf_machine,
+                         uint32_t *pflags, int elf_data_order, int elf_machine,
                          int clear_lsb, int data_swab,
                          AddressSpace *as, bool load_rom, symbol_fn_t sym_cb);
 
-/** load_elf_ram:
- * Same as load_elf_ram_sym(), but doesn't allow the caller to specify a
- * symbol callback function
- */
-ssize_t load_elf_ram(const char *filename,
-                     uint64_t (*elf_note_fn)(void *, void *, bool),
-                     uint64_t (*translate_fn)(void *, uint64_t),
-                     void *translate_opaque, uint64_t *pentry,
-                     uint64_t *lowaddr, uint64_t *highaddr, uint32_t *pflags,
-                     int big_endian, int elf_machine, int clear_lsb,
-                     int data_swab, AddressSpace *as, bool load_rom);
-
 /** load_elf_as:
- * Same as load_elf_ram(), but always loads the elf as ROM
+ * Same as load_elf_ram_sym(), but always loads the elf as ROM
  */
 ssize_t load_elf_as(const char *filename,
                     uint64_t (*elf_note_fn)(void *, void *, bool),
                     uint64_t (*translate_fn)(void *, uint64_t),
                     void *translate_opaque, uint64_t *pentry, uint64_t *lowaddr,
-                    uint64_t *highaddr, uint32_t *pflags, int big_endian,
+                    uint64_t *highaddr, uint32_t *pflags, int elf_data_order,
                     int elf_machine, int clear_lsb, int data_swab,
                     AddressSpace *as);
 
@@ -188,7 +174,7 @@ ssize_t load_elf(const char *filename,
                  uint64_t (*elf_note_fn)(void *, void *, bool),
                  uint64_t (*translate_fn)(void *, uint64_t),
                  void *translate_opaque, uint64_t *pentry, uint64_t *lowaddr,
-                 uint64_t *highaddr, uint32_t *pflags, int big_endian,
+                 uint64_t *highaddr, uint32_t *pflags, int elf_data_order,
                  int elf_machine, int clear_lsb, int data_swab);
 
 /** load_elf_hdr:
@@ -204,7 +190,7 @@ ssize_t load_elf(const char *filename,
 void load_elf_hdr(const char *filename, void *hdr, bool *is64, Error **errp);
 
 ssize_t load_aout(const char *filename, hwaddr addr, int max_sz,
-                  int bswap_needed, hwaddr target_page_size);
+                  bool big_endian, hwaddr target_page_size);
 
 #define LOAD_UIMAGE_LOADADDR_INVALID (-1)
 
@@ -284,8 +270,6 @@ int rom_add_elf_program(const char *name, GMappedFile *mapped_file, void *data,
                         AddressSpace *as);
 int rom_check_and_register_reset(void);
 void rom_set_fw(FWCfgState *f);
-void rom_set_order_override(int order);
-void rom_reset_order_override(void);
 
 /**
  * rom_transaction_begin:
@@ -338,7 +322,6 @@ void *rom_ptr(hwaddr addr, size_t size);
  * rom_ptr().
  */
 void *rom_ptr_for_as(AddressSpace *as, hwaddr addr, size_t size);
-void hmp_info_roms(Monitor *mon, const QDict *qdict);
 
 #define rom_add_file_fixed(_f, _a, _i)          \
     rom_add_file(_f, NULL, _a, _i, false, NULL, NULL)

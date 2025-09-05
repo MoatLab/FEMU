@@ -1,5 +1,5 @@
 /*
- *  Copyright(c) 2019-2023 Qualcomm Innovation Center, Inc. All Rights Reserved.
+ *  Copyright(c) 2019-2024 Qualcomm Innovation Center, Inc. All Rights Reserved.
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -1365,7 +1365,10 @@
     do { \
         uiV = uiV; \
         tcg_gen_movi_tl(hex_gpr[HEX_REG_PC], ctx->pkt->pc); \
-        TCGv excp = tcg_constant_tl(HEX_EXCP_TRAP0); \
+        TCGv excp = tcg_constant_tl(HEX_EVENT_TRAP0); \
         gen_helper_raise_exception(tcg_env, excp); \
     } while (0)
 #endif
+
+#define fGEN_TCG_A2_nop(SHORTCODE) do { } while (0)
+#define fGEN_TCG_SA1_setin1(SHORTCODE) tcg_gen_movi_tl(RdV, -1)

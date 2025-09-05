@@ -4,11 +4,10 @@
 #ifndef __SBE_P8_H
 #define __SBE_P8_H
 
+#include <stdint.h>
+
 /* P8 SBE update timer function */
 extern void p8_sbe_update_timer_expiry(uint64_t new_target);
-
-/* Is SBE timer available ? */
-extern bool p8_sbe_timer_ok(void);
 
 /* Initialize SBE timer */
 extern void p8_sbe_init_timer(void);

@@ -1587,7 +1587,7 @@ void p8_i2c_init(void)
 	/* setup the handshake reg */
 	if (proc_gen <= proc_gen_p9)
 		occflg = 0x6C08A;
-	else if (proc_gen == proc_gen_p10)
+	else if (proc_gen == proc_gen_p10 || proc_gen == proc_gen_p11)
 		occflg = 0x6C0AC;
 	else
 		return;

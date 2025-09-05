@@ -191,7 +191,7 @@ static void crf_reset_enter(Object *obj, ResetType type)
     }
 }
 
-static void crf_reset_hold(Object *obj)
+static void crf_reset_hold(Object *obj, ResetType type)
 {
     XlnxZynqMPCRF *s = XLNX_ZYNQMP_CRF(obj);
     ir_update_irq(s);
@@ -239,7 +239,7 @@ static const VMStateDescription vmstate_crf = {
     }
 };
 
-static void crf_class_init(ObjectClass *klass, void *data)
+static void crf_class_init(ObjectClass *klass, const void *data)
 {
     ResettableClass *rc = RESETTABLE_CLASS(klass);
     DeviceClass *dc = DEVICE_CLASS(klass);

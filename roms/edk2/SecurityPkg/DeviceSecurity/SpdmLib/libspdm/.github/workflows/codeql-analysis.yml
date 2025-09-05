@@ -1,0 +1,93 @@
+# For most projects, this workflow file will not need changing; you simply need
+# to commit it to your repository.
+#
+# You may wish to alter this file to override the set of languages analyzed,
+# or to provide custom queries or build logic.
+#
+# ******** NOTE ********
+# We have attempted to detect the languages in your repository. Please check
+# the `language` matrix defined below to confirm you have the correct set of
+# supported CodeQL languages.
+#
+name: "CodeQL"
+
+on:
+  schedule:
+    - cron:  '00 8 * * *'
+  workflow_dispatch:
+
+jobs:
+  analyze:
+    name: Analyze
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [ 'cpp' ]
+        # CodeQL supports [ 'cpp', 'csharp', 'go', 'java', 'javascript', 'python', 'ruby' ]
+        # Learn more about CodeQL language support at https://aka.ms/codeql-docs/language-support
+        crypto:
+          - mbedtls
+          - openssl
+        arch:
+          - x64
+          - ia32
+        target:
+          - Debug
+          - Release
+        toolchain:
+          - GCC
+        configurations:
+          - "-DLIBSPDM_ENABLE_CAPABILITY_CERT_CAP=1 -DLIBSPDM_ENABLE_CAPABILITY_CHAL_CAP=1 -DLIBSPDM_ENABLE_CAPABILITY_MEAS_CAP=1 -DLIBSPDM_ENABLE_CAPABILITY_KEY_EX_CAP=1 -DLIBSPDM_ENABLE_CAPABILITY_PSK_CAP=1 -DLIBSPDM_ENABLE_CAPABILITY_SET_CERT_CAP=1 -DLIBSPDM_ENABLE_CAPABILITY_CHUNK_CAP=1 -DLIBSPDM_ENABLE_CAPABILITY_MUT_AUTH_CAP=1 -DLIBSPDM_ENABLE_CAPABILITY_ENCAP_CAP=1"
+          - "-DLIBSPDM_ENABLE_CAPABILITY_CERT_CAP=0 -DLIBSPDM_ENABLE_CAPABILITY_CHAL_CAP=0 -DLIBSPDM_ENABLE_CAPABILITY_MEAS_CAP=0 -DLIBSPDM_ENABLE_CAPABILITY_KEY_EX_CAP=0 -DLIBSPDM_ENABLE_CAPABILITY_PSK_CAP=0 -DLIBSPDM_ENABLE_CAPABILITY_SET_CERT_CAP=0 -DLIBSPDM_ENABLE_CAPABILITY_CHUNK_CAP=0 -DLIBSPDM_ENABLE_CAPABILITY_MUT_AUTH_CAP=0 -DLIBSPDM_ENABLE_CAPABILITY_ENCAP_CAP=0"
+          - "-DLIBSPDM_RECORD_TRANSCRIPT_DATA_SUPPORT=0"
+          - "-DLIBSPDM_RECORD_TRANSCRIPT_DATA_SUPPORT=1"
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    # Initializes the CodeQL tools for scanning.
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v2
+      with:
+        languages: ${{ matrix.language }}
+        queries: security-extended
+        # If you wish to specify custom queries, you can do so here or in a config file.
+        # By default, queries listed here will override any specified in a config file.
+        # Prefix the list here with "+" to use these queries and those in the config file.
+
+        # Details on CodeQL's query packs refer to : https://docs.github.com/en/code-security/code-scanning/automatically-scanning-your-code-for-vulnerabilities-and-errors/configuring-code-scanning#using-queries-in-ql-packs
+        # queries: security-extended,security-and-quality
+
+    - name: Setup Node.js environment
+      uses: actions/setup-node@v3
+      with:
+        node-version: 16.x
+
+    # ℹ️ Command-line programs to run using the OS shell.
+    # 📚 See https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#jobsjob_idstepsrun
+
+    #   If the Autobuild fails above, remove it and uncomment the following three lines.
+    #   modify them (or add more) to build your code if your project, please refer to the EXAMPLE below for guidance.
+
+    # - run: |
+    #   echo "Run, Build Application using script"
+    #   ./location_of_script_within_repo/buildscript.sh
+    - name: build
+      run: |
+          sudo apt-get update
+          sudo apt-get install llvm gcc-multilib
+          mkdir build
+          cd build
+          cmake -E env CFLAGS="${{ matrix.configurations }} -DLIBSPDM_DEBUG_LIBSPDM_ASSERT_CONFIG=0" cmake -DARCH=${{ matrix.arch }} -DTOOLCHAIN=${{ matrix.toolchain }} -DTARGET=${{ matrix.target }} -DCRYPTO=${{ matrix.crypto }} -DENABLE_CODEQL=ON ..
+          make -j`nproc`
+
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v2

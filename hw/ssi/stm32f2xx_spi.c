@@ -202,11 +202,11 @@ static void stm32f2xx_spi_init(Object *obj)
     s->ssi = ssi_create_bus(dev, "ssi");
 }
 
-static void stm32f2xx_spi_class_init(ObjectClass *klass, void *data)
+static void stm32f2xx_spi_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    dc->reset = stm32f2xx_spi_reset;
+    device_class_set_legacy_reset(dc, stm32f2xx_spi_reset);
     dc->vmsd = &vmstate_stm32f2xx_spi;
 }
 

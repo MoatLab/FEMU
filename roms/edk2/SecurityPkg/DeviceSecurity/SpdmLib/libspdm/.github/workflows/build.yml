@@ -1,0 +1,219 @@
+name: Build and Test
+
+on:
+  push:
+    paths-ignore:
+      - '**/*.md'
+      - 'doc/**'
+    branches:
+      - main
+      - release-2.3
+  pull_request:
+    paths-ignore:
+      - 'doc/**'
+      - '**/*.md'
+    branches:
+      - main
+      - release-2.3
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+        crypto:
+          - mbedtls
+          - openssl
+        arch:
+          - x64
+          - ia32
+          - aarch64
+        target:
+          - Debug
+          - Release
+        toolchain:
+          - GCC
+          - VS2019
+          - LIBFUZZER
+          - CLANG
+          - ARM_GNU
+        configurations:
+          - "-DLIBSPDM_ENABLE_CAPABILITY_CERT_CAP=1 -DLIBSPDM_ENABLE_CAPABILITY_CHAL_CAP=1 -DLIBSPDM_ENABLE_CAPABILITY_MEAS_CAP=1 -DLIBSPDM_ENABLE_CAPABILITY_KEY_EX_CAP=1 -DLIBSPDM_ENABLE_CAPABILITY_PSK_CAP=1 -DLIBSPDM_ENABLE_CAPABILITY_SET_CERT_CAP=1 -DLIBSPDM_ENABLE_CAPABILITY_CHUNK_CAP=1 -DLIBSPDM_ENABLE_CAPABILITY_MUT_AUTH_CAP=1 -DLIBSPDM_ENABLE_CAPABILITY_ENCAP_CAP=1 -DLIBSPDM_ENABLE_CAPABILITY_CSR_CAP=1 -DLIBSPDM_ENABLE_CAPABILITY_HBEAT_CAP=1 -DLIBSPDM_ENABLE_CAPABILITY_EVENT_CAP=1 -DLIBSPDM_RESPOND_IF_READY_SUPPORT=1 -DLIBSPDM_SEND_GET_CERTIFICATE_SUPPORT=1 -DLIBSPDM_SEND_CHALLENGE_SUPPORT=1 -DLIBSPDM_EVENT_RECIPIENT_SUPPORT=1 -DLIBSPDM_HAL_PASS_SPDM_CONTEXT=1"
+          - "-DLIBSPDM_ENABLE_CAPABILITY_CERT_CAP=0 -DLIBSPDM_ENABLE_CAPABILITY_CHAL_CAP=0 -DLIBSPDM_ENABLE_CAPABILITY_MEAS_CAP=0 -DLIBSPDM_ENABLE_CAPABILITY_KEY_EX_CAP=0 -DLIBSPDM_ENABLE_CAPABILITY_PSK_CAP=0 -DLIBSPDM_ENABLE_CAPABILITY_SET_CERT_CAP=0 -DLIBSPDM_ENABLE_CAPABILITY_CHUNK_CAP=0 -DLIBSPDM_ENABLE_CAPABILITY_MUT_AUTH_CAP=0 -DLIBSPDM_ENABLE_CAPABILITY_ENCAP_CAP=0 -DLIBSPDM_ENABLE_CAPABILITY_CSR_CAP=0 -DLIBSPDM_ENABLE_CAPABILITY_HBEAT_CAP=0 -DLIBSPDM_ENABLE_CAPABILITY_EVENT_CAP=0 -DLIBSPDM_RESPOND_IF_READY_SUPPORT=0 -DLIBSPDM_SEND_GET_CERTIFICATE_SUPPORT=0 -DLIBSPDM_SEND_CHALLENGE_SUPPORT=0 -DLIBSPDM_EVENT_RECIPIENT_SUPPORT=0 -DLIBSPDM_HAL_PASS_SPDM_CONTEXT=0"
+          - "-DLIBSPDM_RECORD_TRANSCRIPT_DATA_SUPPORT=0 -DLIBSPDM_FIPS_MODE=0 -DLIBSPDM_ENABLE_CAPABILITY_CSR_CAP_EX=0"
+          - "-DLIBSPDM_RECORD_TRANSCRIPT_DATA_SUPPORT=1 -DLIBSPDM_FIPS_MODE=1 -DLIBSPDM_ENABLE_CAPABILITY_CSR_CAP_EX=1"
+          - "-DDISABLE_TESTS=1"
+        exclude:
+          - os: ubuntu-latest
+            toolchain: VS2019
+          - os: ubuntu-latest
+            arch: ia32
+          - os: windows-latest
+            toolchain: GCC
+            arch: ia32
+          - os: windows-latest
+            toolchain: GCC
+            crypto: mbedtls
+          - os: windows-latest
+            toolchain: LIBFUZZER
+          - crypto: openssl
+            arch: ia32
+          - os: windows-latest
+            toolchain: CLANG
+          - target: Debug
+            toolchain: CLANG
+          - crypto: mbedtls
+            toolchain: CLANG
+          - configurations: "-DLIBSPDM_RECORD_TRANSCRIPT_DATA_SUPPORT=0 -DLIBSPDM_FIPS_MODE=0"
+            toolchain: CLANG
+          - configurations: "-DLIBSPDM_RECORD_TRANSCRIPT_DATA_SUPPORT=1 -DLIBSPDM_FIPS_MODE=1"
+            toolchain: CLANG
+          - arch: aarch64
+            toolchain: GCC
+          - arch: aarch64
+            toolchain: VS2019
+          - arch: aarch64
+            toolchain: LIBFUZZER
+          - arch: aarch64
+            toolchain: CLANG
+          - os: windows-latest
+            toolchain: ARM_GNU
+          - arch: x64
+            toolchain: ARM_GNU
+          - arch: ia32
+            toolchain: ARM_GNU
+          - configurations: "-DLIBSPDM_RECORD_TRANSCRIPT_DATA_SUPPORT=0 -DLIBSPDM_FIPS_MODE=0"
+            toolchain: ARM_GNU
+          - configurations: "-DLIBSPDM_RECORD_TRANSCRIPT_DATA_SUPPORT=1 -DLIBSPDM_FIPS_MODE=1"
+            toolchain: ARM_GNU
+          - target: Debug
+            toolchain: ARM_GNU
+          - crypto: openssl
+            toolchain: ARM_GNU
+    steps:
+      - name: Toolchain Setup - VS2019 (x64)
+        if: matrix.toolchain == 'VS2019' && matrix.arch == 'x64'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Toolchain Setup - VS2019 (x86)
+        if: matrix.toolchain == 'VS2019' && matrix.arch == 'ia32'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x86
+      - name:  Toolchain Setup - Clang
+        if:  matrix.toolchain == 'CLANG' || matrix.toolchain == 'LIBFUZZER' && matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install llvm
+      - name: 'Toolchain Setup - MinGW (x64)'
+        if: matrix.toolchain == 'GCC' && matrix.arch == 'x64' && matrix.os == 'windows-latest'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git
+            make
+          pacboy: >-
+            toolchain:p
+            cmake:p
+            make:p
+      - name: Toolchain Setup - ARM_GNU
+        if: matrix.toolchain == 'ARM_GNU' && matrix.os == 'ubuntu-latest'
+        run: |
+          wget https://developer.arm.com/-/media/Files/downloads/gnu/11.2-2022.02/binrel/gcc-arm-11.2-2022.02-x86_64-aarch64-none-linux-gnu.tar.xz
+          tar -xvf gcc-arm-11.2-2022.02-x86_64-aarch64-none-linux-gnu.tar.xz -C ~/
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build - Linux
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          export PATH=~/gcc-arm-11.2-2022.02-x86_64-aarch64-none-linux-gnu/bin:$PATH
+          mkdir build
+          cd build
+          cmake --version
+          cmake -E env CFLAGS="${{ matrix.configurations }} -DLIBSPDM_DEBUG_LIBSPDM_ASSERT_CONFIG=3" cmake -DARCH=${{ matrix.arch }} -DTOOLCHAIN=${{ matrix.toolchain }} -DTARGET=${{ matrix.target }} -DCRYPTO=${{ matrix.crypto }} ..
+          make copy_sample_key
+          make copy_seed
+          make -j`nproc`
+      - name: Build - Windows
+        if: matrix.os == 'windows-latest' && matrix.toolchain != 'GCC'
+        run: |
+          mkdir build
+          cd build
+          cmake --version
+          cmake -E env CFLAGS="${{ matrix.configurations }} -DLIBSPDM_DEBUG_LIBSPDM_ASSERT_CONFIG=3" cmake -G"NMake Makefiles" -DARCH=${{ matrix.arch }} -DTOOLCHAIN=${{ matrix.toolchain }} -DTARGET=${{ matrix.target }} -DCRYPTO=${{ matrix.crypto }} ..
+          nmake copy_sample_key
+          nmake
+      - name: Build - Windows MinGW
+        if: matrix.os == 'windows-latest' && matrix.toolchain == 'GCC'
+        shell: msys2 {0}
+        run: |
+          mkdir build
+          cd build
+          cmake --version
+          cmake -E env CFLAGS="${{ matrix.configurations }} -DLIBSPDM_DEBUG_LIBSPDM_ASSERT_CONFIG=3" cmake -G"MSYS Makefiles" -DARCH=${{ matrix.arch }} -DTOOLCHAIN=${{ matrix.toolchain }} -DTARGET=${{ matrix.target }} -DCRYPTO=${{ matrix.crypto }} ..
+          make copy_sample_key
+          make
+      - name: Build - Linux - GCOV=ON
+        if: matrix.os == 'ubuntu-latest' && matrix.toolchain == 'GCC' && matrix.target == 'Debug' && matrix.arch == 'x64'
+        run: |
+          mkdir build_gcov
+          cd build_gcov
+          cmake --version
+          cmake -DARCH=x64 -DTOOLCHAIN=GCC -DTARGET=Debug -DCRYPTO=${{matrix.crypto}} -DGCOV=ON ..
+          make copy_sample_key
+          make -j`nproc`
+      - name: Test Requester
+        if: matrix.toolchain != 'LIBFUZZER' && matrix.toolchain != 'ARM_GNU' && matrix.configurations != '-DDISABLE_TESTS=1'
+        run: |
+          cd build/bin
+          ./test_spdm_requester
+      - name: Test Responder
+        if: matrix.toolchain != 'LIBFUZZER' && matrix.toolchain != 'ARM_GNU' && matrix.configurations != '-DDISABLE_TESTS=1'
+        run: |
+          cd build/bin
+          ./test_spdm_responder
+      - name: Test Common
+        if: matrix.toolchain != 'LIBFUZZER' && matrix.toolchain != 'ARM_GNU' && matrix.configurations != '-DDISABLE_TESTS=1'
+        run: |
+          cd build/bin
+          ./test_spdm_common
+      - name: Test SPDM Crypt
+        if: matrix.toolchain != 'LIBFUZZER' && matrix.toolchain != 'ARM_GNU'&& matrix.configurations != '-DDISABLE_TESTS=1'
+        run: |
+          cd build/bin
+          ./test_spdm_crypt
+      - name: Test Crypt
+        if: matrix.toolchain != 'LIBFUZZER' && matrix.toolchain != 'ARM_GNU' && matrix.configurations != '-DDISABLE_TESTS=1'
+        run: |
+          cd build/bin
+          ./test_crypt
+      - name: Test Secured Message
+        if: matrix.toolchain != 'LIBFUZZER' && matrix.toolchain != 'ARM_GNU' && matrix.configurations != '-DDISABLE_TESTS=1'
+        run: |
+          cd build/bin
+          ./test_spdm_secured_message
+      - name: Test FIPS
+        if: matrix.toolchain != 'LIBFUZZER' && matrix.toolchain != 'ARM_GNU' && matrix.configurations == '-DLIBSPDM_RECORD_TRANSCRIPT_DATA_SUPPORT=1 -DLIBSPDM_FIPS_MODE=1' && matrix.configurations != '-DDISABLE_TESTS=1'
+        run: |
+          cd build/bin
+          ./test_spdm_fips
+      - name: Fuzz test with initial seed
+        if: matrix.os == 'ubuntu-latest' && matrix.arch == 'x64' && matrix.configurations != '-DDISABLE_TESTS=1'
+        run: |
+          cd build/bin
+          ./run_initial_seed.sh

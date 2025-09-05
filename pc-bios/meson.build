@@ -4,11 +4,15 @@ if unpack_edk2_blobs
     'edk2-aarch64-code.fd',
     'edk2-arm-code.fd',
     'edk2-arm-vars.fd',
+    'edk2-riscv-code.fd',
+    'edk2-riscv-vars.fd',
     'edk2-i386-code.fd',
     'edk2-i386-secure-code.fd',
     'edk2-i386-vars.fd',
     'edk2-x86_64-code.fd',
     'edk2-x86_64-secure-code.fd',
+    'edk2-loongarch64-code.fd',
+    'edk2-loongarch64-vars.fd',
   ]
 
   foreach f : fds
@@ -24,6 +28,7 @@ if unpack_edk2_blobs
 endif
 
 blobs = [
+  'ast27x0_bootrom.bin',
   'bios.bin',
   'bios-256k.bin',
   'bios-microvm.bin',
@@ -64,9 +69,9 @@ blobs = [
   'kvmvapic.bin',
   'pvh.bin',
   's390-ccw.img',
-  's390-netboot.img',
   'slof.bin',
   'skiboot.lid',
+  'pnv-pnor.bin',
   'palcode-clipper',
   'u-boot.e500',
   'u-boot-sam460-20100605.bin',
@@ -77,34 +82,15 @@ blobs = [
   'opensbi-riscv32-generic-fw_dynamic.bin',
   'opensbi-riscv64-generic-fw_dynamic.bin',
   'npcm7xx_bootrom.bin',
+  'npcm8xx_bootrom.bin',
   'vof.bin',
   'vof-nvram.bin',
 ]
 
-dtc = find_program('dtc', required: false)
-foreach f : [
-  'bamboo.dts',
-  'canyonlands.dts',
-  'petalogix-s3adsp1800.dts',
-  'petalogix-ml605.dts',
-]
-  out = fs.replace_suffix(f, '.dtb')
-  if dtc.found()
-    custom_target(f,
-        build_by_default: have_system,
-        input: files(f),
-        output: out,
-        install: get_option('install_blobs'),
-        install_dir: qemu_datadir,
-        command: [ dtc, '-I', 'dts', '-O', 'dtb', '-o', '@OUTPUT@', '@INPUT0@' ])
-  else
-    blobs += out
-  endif
-endforeach
-
 if get_option('install_blobs')
-  install_data(blobs, install_dir: qemu_datadir)
+  install_data(blobs, install_dir: qemu_datadir, install_mode: 'rw-r--r--')
 endif
 
 subdir('descriptors')
+subdir('dtb')
 subdir('keymaps')

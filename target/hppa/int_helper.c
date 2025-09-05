@@ -94,11 +94,12 @@ void hppa_cpu_do_interrupt(CPUState *cs)
     HPPACPU *cpu = HPPA_CPU(cs);
     CPUHPPAState *env = &cpu->env;
     int i = cs->exception_index;
-    uint64_t old_psw;
+    uint64_t old_psw, old_gva_offset_mask;
 
     /* As documented in pa2.0 -- interruption handling.  */
     /* step 1 */
     env->cr[CR_IPSW] = old_psw = cpu_hppa_get_psw(env);
+    old_gva_offset_mask = env->gva_offset_mask;
 
     /* step 2 -- Note PSW_W is masked out again for pa1.x */
     cpu_hppa_put_psw(env,
@@ -112,9 +113,9 @@ void hppa_cpu_do_interrupt(CPUState *cs)
      */
     if (old_psw & PSW_C) {
         env->cr[CR_IIASQ] =
-            hppa_form_gva_psw(old_psw, env->iasq_f, env->iaoq_f) >> 32;
+            hppa_form_gva_mask(old_gva_offset_mask, env->iasq_f, env->iaoq_f) >> 32;
         env->cr_back[0] =
-            hppa_form_gva_psw(old_psw, env->iasq_b, env->iaoq_b) >> 32;
+            hppa_form_gva_mask(old_gva_offset_mask, env->iasq_b, env->iaoq_b) >> 32;
     } else {
         env->cr[CR_IIASQ] = 0;
         env->cr_back[0] = 0;
@@ -134,13 +135,13 @@ void hppa_cpu_do_interrupt(CPUState *cs)
         switch (i) {
         case EXCP_ILL:
         case EXCP_BREAK:
+        case EXCP_OVERFLOW:
+        case EXCP_COND:
         case EXCP_PRIV_REG:
         case EXCP_PRIV_OPR:
             /* IIR set via translate.c.  */
             break;
 
-        case EXCP_OVERFLOW:
-        case EXCP_COND:
         case EXCP_ASSIST:
         case EXCP_DTLB_MISS:
         case EXCP_NA_ITLB_MISS:
@@ -165,9 +166,10 @@ void hppa_cpu_do_interrupt(CPUState *cs)
                 if (old_psw & PSW_C) {
                     int prot, t;
 
-                    vaddr = hppa_form_gva_psw(old_psw, env->iasq_f, vaddr);
+                    vaddr = hppa_form_gva_mask(old_gva_offset_mask,
+					       env->iasq_f, vaddr);
                     t = hppa_get_physical_address(env, vaddr, MMU_KERNEL_IDX,
-                                                  0, &paddr, &prot, NULL);
+                                                  0, 0, &paddr, &prot);
                     if (t >= 0) {
                         /* We can't re-load the instruction.  */
                         env->cr[CR_IIR] = 0;
@@ -175,6 +177,10 @@ void hppa_cpu_do_interrupt(CPUState *cs)
                     }
                 }
                 env->cr[CR_IIR] = ldl_phys(cs->as, paddr);
+                if (i == EXCP_ASSIST) {
+                    /* stuff insn code into bits of FP exception register #1 */
+                    env->fr[0] |= (env->cr[CR_IIR] & 0x03ffffff);
+                }
             }
             break;
 
@@ -241,21 +247,22 @@ void hppa_cpu_do_interrupt(CPUState *cs)
             [EXCP_SYSCALL_LWS]   = "syscall-lws",
             [EXCP_TOC]           = "TOC (transfer of control)",
         };
-        static int count;
-        const char *name = NULL;
-        char unknown[16];
 
-        if (i >= 0 && i < ARRAY_SIZE(names)) {
-            name = names[i];
+        FILE *logfile = qemu_log_trylock();
+        if (logfile) {
+            const char *name = NULL;
+
+            if (i >= 0 && i < ARRAY_SIZE(names)) {
+                name = names[i];
+            }
+            if (name) {
+                fprintf(logfile, "INT: cpu %d %s\n", cs->cpu_index, name);
+            } else {
+                fprintf(logfile, "INT: cpu %d unknown %d\n", cs->cpu_index, i);
+            }
+            hppa_cpu_dump_state(cs, logfile, 0);
+            qemu_log_unlock(logfile);
         }
-        if (!name) {
-            snprintf(unknown, sizeof(unknown), "unknown %d", i);
-            name = unknown;
-        }
-        qemu_log("INT %6d: %s @ " TARGET_FMT_lx ":" TARGET_FMT_lx
-                 " for " TARGET_FMT_lx ":" TARGET_FMT_lx "\n",
-                 ++count, name, env->cr[CR_IIASQ], env->cr[CR_IIAOQ],
-                 env->cr[CR_ISR], env->cr[CR_IOR]);
     }
     cs->exception_index = -1;
 }

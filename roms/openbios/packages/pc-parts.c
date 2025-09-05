@@ -235,12 +235,15 @@ pcparts_open( pcparts_info_t *di )
 			}
 
 			/* Second entry is link to next partition */
-			if (!is_pc_extended_part(p[1].type)) {
+			partition = (struct pc_partition *) (buf + 0x1ce);
+			memcpy(p, partition, sizeof(struct pc_partition));
+
+			if (!is_pc_extended_part(p->type)) {
 				DPRINTF("no link\n");
 				break;
 			}
 
-			cur_table = ext_start + __le32_to_cpu(p[1].start_sect);
+			cur_table = ext_start + __le32_to_cpu(p->start_sect);
 			cur_part++;
 		}
 

@@ -18,13 +18,15 @@ native:
 - automake
 - awk
 - bash
-- bash-completion
+- bash-completion-devel
 - bc
 - bison
 - brlapi-devel
 - bzip2
 - ca-certificates
 - cargo
+- cargo-c
+- cargo-packaging
 - ccache
 - check-devel
 - chrony
@@ -78,7 +80,7 @@ native:
 - intltool
 - iproute2
 - iptables
-- java-11-openjdk-headless
+- java-21-openjdk-headless
 - jemalloc-devel
 - jna
 - jq
@@ -98,6 +100,7 @@ native:
 - libbz2-devel
 - libcacard-devel
 - libcap-ng-devel
+- libcbor-devel
 - libcmocka-devel
 - libcmpiutil-devel
 - libconfig-devel
@@ -185,25 +188,20 @@ native:
 - pcre-devel-static
 - perl
 - perl-App-cpanminus
-- perl-Archive-Tar
 - perl-CPAN-Changes
 - perl-Digest
 - perl-Digest-MD5
-- perl-ExtUtils-CBuilder
 - perl-File-Slurp
 - perl-IO-Interface
 - perl-IO-String
 - perl-Module-Build
 - perl-Net-SNMP
 - perl-NetAddr-IP
-- perl-Pod-Simple
 - perl-Sub-Uplevel
 - perl-Test-Exception
-- perl-Test-Harness
 - perl-Test-Pod
 - perl-Test-Pod-Coverage
 - perl-Test-Simple
-- perl-Time-HiRes
 - perl-XML-Twig
 - perl-XML-Writer
 - perl-XML-XPath
@@ -218,11 +216,16 @@ native:
 - python3-PyYAML
 - python3-Sphinx
 - python3-base
+- python3-black
 - python3-boto3
+- python3-build
 - python3-dbus-python
 - python3-devel
 - python3-docutils
+- python3-flake8
 - python3-gobject
+- python3-libnbd
+- python3-libvirt-python
 - python3-libxml2
 - python3-lxml
 - python3-numpy
@@ -235,7 +238,6 @@ native:
 - python3-sphinx_rtd_theme
 - python3-tomli
 - python3-wheel
-- python39-flake8
 - qemu
 - qemu-tools
 - rdma-core-devel
@@ -245,6 +247,7 @@ native:
 - ruby
 - ruby-devel
 - rust
+- rust-bindgen
 - sanlock-devel
 - screen
 - scrub
@@ -260,7 +263,8 @@ native:
 - swtpm
 - systemd-devel
 - systemd-rpm-macros
-- systemtap-sdt-devel
+- systemtap-dtrace
+- systemtap-headers
 - tar
 - tcl-devel
 - tcpdump
@@ -275,6 +279,7 @@ native:
 - vim
 - virglrenderer-devel
 - vte-devel
+- vulkan-tools
 - wget
 - which
 - wireshark-devel
@@ -287,5 +292,3 @@ native:
 - zlib-devel
 - zlib-devel-static
 - zstd
-pypi:
-- build

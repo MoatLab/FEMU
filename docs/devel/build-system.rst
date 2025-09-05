@@ -134,7 +134,7 @@ in how the build process runs Python code.
 
 At this stage, ``configure`` also queries the chosen Python interpreter
 about QEMU's build dependencies.  Note that the build process does  *not*
-look for ``meson``, ``sphinx-build`` or ``avocado`` binaries in the PATH;
+look for ``meson`` or ``sphinx-build`` binaries in the PATH;
 likewise, there are no options such as ``--meson`` or ``--sphinx-build``.
 This avoids a potential mismatch, where Meson and Sphinx binaries on the
 PATH might operate in a different Python environment than the one chosen
@@ -145,13 +145,13 @@ was installed in the ``site-packages`` directory of another interpreter,
 or with the wrong ``pip`` program.
 
 If a package is available for the chosen interpreter, ``configure``
-prepares a small script that invokes it from the venv itself[#distlib]_.
+prepares a small script that invokes it from the venv itself\ [#distlib]_.
 If not, ``configure`` can also optionally install dependencies in the
 virtual environment with ``pip``, either from wheels in ``python/wheels``
 or by downloading the package with PyPI.  Downloading can be disabled with
 ``--disable-download``; and anyway, it only happens when a ``configure``
 option (currently, only ``--enable-docs``) is explicitly enabled but
-the dependencies are not present[#pip]_.
+the dependencies are not present.
 
 .. [#distlib] The scripts are created based on the package's metadata,
               specifically the ``console_script`` entry points.  This is the
@@ -164,15 +164,11 @@ the dependencies are not present[#pip]_.
               because the Python Packaging Authority provides a package
               ``distlib.scripts`` to perform this task.
 
-.. [#pip] ``pip`` might also be used when running ``make check-avocado``
-           if downloading is enabled, to ensure that Avocado is
-           available.
-
 The required versions of the packages are stored in a configuration file
 ``pythondeps.toml``.  The format is custom to QEMU, but it is documented
 at the top of the file itself and it should be easy to understand.  The
 requirements should make it possible to use the version that is packaged
-that is provided by supported distros.
+by QEMU's supported distros.
 
 When dependencies are downloaded, instead, ``configure`` uses a "known
 good" version that is also listed in ``pythondeps.toml``.  In this
@@ -185,14 +181,13 @@ Bundled Python packages
 
 Python packages that are **mandatory** dependencies to build QEMU,
 but are not available in all supported distros, are bundled with the
-QEMU sources.  Currently this includes Meson (outdated in CentOS 8
-and derivatives, Ubuntu 20.04 and 22.04, and openSUSE Leap) and tomli
-(absent in Ubuntu 20.04).
+QEMU sources.  The only one is currently Meson (outdated in Ubuntu
+22.04 and openSUSE Leap).
 
-If you need to update these, please do so by modifying and rerunning
-``python/scripts/vendor.py``.  This script embeds the sha256 hash of
-package sources and checks it.  The pypi.org web site provides an easy
-way to retrieve the sha256 hash of the sources.
+In order to include a new or updated wheel, modify and rerun the
+``python/scripts/vendor.py`` script.  The script embeds the
+sha256 hash of package sources and checks it.  The pypi.org web site
+provides an easy way to retrieve the sha256 hash of the sources.
 
 
 Stage 2: Meson
@@ -236,14 +231,10 @@ Subsystem sourcesets:
   are then turned into static libraries as follows::
 
     libchardev = static_library('chardev', chardev_ss.sources(),
-                                name_suffix: 'fa',
                                 build_by_default: false)
 
-    chardev = declare_dependency(link_whole: libchardev)
-
-  As of Meson 0.55.1, the special ``.fa`` suffix should be used for everything
-  that is used with ``link_whole``, to ensure that the link flags are placed
-  correctly in the command line.
+    chardev = declare_dependency(objects: libchardev.extract_all_objects(recursive: false),
+                                 dependencies: chardev_ss.dependencies())
 
 Target-independent emulator sourcesets:
   Various general purpose helper code is compiled only once and
@@ -265,7 +256,7 @@ Target-dependent emulator sourcesets:
   Each emulator also includes sources for files in the ``hw/`` and ``target/``
   subdirectories.  The subdirectory used for each emulator comes
   from the target's definition of ``TARGET_BASE_ARCH`` or (if missing)
-  ``TARGET_ARCH``, as found in ``default-configs/targets/*.mak``.
+  ``TARGET_ARCH``, as found in ``configs/targets/*.mak``.
 
   Each subdirectory in ``hw/`` adds one sourceset to the ``hw_arch`` dictionary,
   for example::
@@ -322,8 +313,8 @@ Utility sourcesets:
 The following files concur in the definition of which files are linked
 into each emulator:
 
-``default-configs/devices/*.mak``
-  The files under ``default-configs/devices/`` control the boards and devices
+``configs/devices/*.mak``
+  The files under ``configs/devices/`` control the boards and devices
   that are built into each QEMU system emulation targets. They merely contain
   a list of config variable definitions such as::
 
@@ -332,13 +323,13 @@ into each emulator:
     CONFIG_XLNX_VERSAL=y
 
 ``*/Kconfig``
-  These files are processed together with ``default-configs/devices/*.mak`` and
+  These files are processed together with ``configs/devices/*.mak`` and
   describe the dependencies between various features, subsystems and
   device models.  They are described in :ref:`kconfig`
 
-``default-configs/targets/*.mak``
+``configs/targets/*.mak``
   These files mostly define symbols that appear in the ``*-config-target.h``
-  file for each emulator [#cfgtarget]_.  However, the ``TARGET_ARCH``
+  file for each emulator\ [#cfgtarget]_.  However, the ``TARGET_ARCH``
   and ``TARGET_BASE_ARCH`` will also be used to select the ``hw/`` and
   ``target/`` subdirectories that are compiled into each target.
 
@@ -502,8 +493,7 @@ number of dynamically created files listed later.
   ``pyvenv/bin``, and calling ``pip`` to install dependencies.
 
 ``tests/Makefile.include``
-  Rules for external test harnesses. These include the TCG tests
-  and the Avocado-based integration tests.
+  Rules for external test harnesses like the TCG tests.
 
 ``tests/docker/Makefile.include``
   Rules for Docker tests. Like ``tests/Makefile.include``, this file is

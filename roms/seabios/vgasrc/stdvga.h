@@ -2,6 +2,7 @@
 #define __STDVGA_H
 
 #include "types.h" // u8
+#include "std/vbe.h" // struct vbe_palette_entry
 
 // VGA registers
 #define VGAREG_ACTL_ADDRESS            0x3c0
@@ -45,18 +46,21 @@
 #define SEG_MTEXT 0xB000
 
 // stdvga.c
-void stdvga_set_border_color(u8 color);
+void stdvga_set_cga_background_color(u8 color);
+void stdvga_set_cga_palette(u8 palid);
 void stdvga_set_overscan_border_color(u8 color);
 u8 stdvga_get_overscan_border_color(void);
-void stdvga_set_palette(u8 palid);
 void stdvga_set_all_palette_reg(u16 seg, u8 *data_far);
 void stdvga_get_all_palette_reg(u16 seg, u8 *data_far);
-void stdvga_toggle_intensity(u8 flag);
-void stdvga_select_video_dac_color_page(u8 flag, u8 data);
-void stdvga_read_video_dac_state(u8 *pmode, u8 *curpage);
+void stdvga_set_palette_blinking(u8 enable_blink);
+void stdvga_set_palette_pagesize(u8 pal_pagesize);
+void stdvga_set_palette_page(u8 pal_page);
+void stdvga_get_palette_page(u8 *pal_pagesize, u8 *pal_page);
+void stdvga_dac_read_many(u16 seg, u8 *data_far, u8 start, int count);
+void stdvga_dac_write_many(u16 seg, u8 *data_far, u8 start, int count);
 void stdvga_perform_gray_scale_summing(u16 start, u16 count);
-void stdvga_set_text_block_specifier(u8 spec);
 void stdvga_planar4_plane(int plane);
+void stdvga_set_font_location(u8 spec);
 void stdvga_load_font(u16 seg, void *src_far, u16 count
                       , u16 start, u8 destflags, u8 fontsize);
 u16 stdvga_get_crtc(void);
@@ -64,18 +68,43 @@ struct vgamode_s;
 int stdvga_vram_ratio(struct vgamode_s *vmode_g);
 void stdvga_set_cursor_shape(u16 cursor_type);
 void stdvga_set_cursor_pos(int address);
-void stdvga_set_scan_lines(u8 lines);
-u16 stdvga_get_vde(void);
-int stdvga_get_window(struct vgamode_s *vmode_g, int window);
-int stdvga_set_window(struct vgamode_s *vmode_g, int window, int val);
-int stdvga_get_linelength(struct vgamode_s *vmode_g);
-int stdvga_set_linelength(struct vgamode_s *vmode_g, int val);
-int stdvga_get_displaystart(struct vgamode_s *vmode_g);
-int stdvga_set_displaystart(struct vgamode_s *vmode_g, int val);
-int stdvga_get_dacformat(struct vgamode_s *vmode_g);
-int stdvga_set_dacformat(struct vgamode_s *vmode_g, int val);
+void stdvga_set_character_height(u8 lines);
+u16 stdvga_get_vertical_size(void);
+void stdvga_set_vertical_size(int lines);
+int stdvga_get_window(struct vgamode_s *curmode_g, int window);
+int stdvga_set_window(struct vgamode_s *curmode_g, int window, int val);
+int stdvga_minimum_linelength(struct vgamode_s *vmode_g);
+int stdvga_get_linelength(struct vgamode_s *curmode_g);
+int stdvga_set_linelength(struct vgamode_s *curmode_g, int val);
+int stdvga_get_displaystart(struct vgamode_s *curmode_g);
+int stdvga_set_displaystart(struct vgamode_s *curmode_g, int val);
+int stdvga_get_dacformat(struct vgamode_s *curmode_g);
+int stdvga_set_dacformat(struct vgamode_s *curmode_g, int val);
 int stdvga_save_restore(int cmd, u16 seg, void *data);
 void stdvga_enable_video_addressing(u8 disable);
 int stdvga_setup(void);
+
+// stdvgaio.c
+u8 stdvga_pelmask_read(void);
+void stdvga_pelmask_write(u8 val);
+u8 stdvga_misc_read(void);
+void stdvga_misc_write(u8 value);
+void stdvga_misc_mask(u8 off, u8 on);
+u8 stdvga_sequ_read(u8 index);
+void stdvga_sequ_write(u8 index, u8 value);
+void stdvga_sequ_mask(u8 index, u8 off, u8 on);
+u8 stdvga_grdc_read(u8 index);
+void stdvga_grdc_write(u8 index, u8 value);
+void stdvga_grdc_mask(u8 index, u8 off, u8 on);
+u8 stdvga_crtc_read(u16 crtc_addr, u8 index);
+void stdvga_crtc_write(u16 crtc_addr, u8 index, u8 value);
+void stdvga_crtc_mask(u16 crtc_addr, u8 index, u8 off, u8 on);
+u8 stdvga_attr_read(u8 index);
+void stdvga_attr_write(u8 index, u8 value);
+void stdvga_attr_mask(u8 index, u8 off, u8 on);
+u8 stdvga_attrindex_read(void);
+void stdvga_attrindex_write(u8 value);
+struct vbe_palette_entry stdvga_dac_read(u8 color);
+void stdvga_dac_write(u8 color, struct vbe_palette_entry rgb);
 
 #endif // stdvga.h

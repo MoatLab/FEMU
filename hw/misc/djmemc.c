@@ -96,7 +96,7 @@ static void djmemc_init(Object *obj)
     sysbus_init_mmio(sbd, &s->mem_regs);
 }
 
-static void djmemc_reset_hold(Object *obj)
+static void djmemc_reset_hold(Object *obj, ResetType type)
 {
     DJMEMCState *s = DJMEMC(obj);
 
@@ -113,7 +113,7 @@ static const VMStateDescription vmstate_djmemc = {
     }
 };
 
-static void djmemc_class_init(ObjectClass *oc, void *data)
+static void djmemc_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
     ResettableClass *rc = RESETTABLE_CLASS(oc);

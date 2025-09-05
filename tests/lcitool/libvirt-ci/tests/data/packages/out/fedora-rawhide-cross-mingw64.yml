@@ -1,4 +1,5 @@
 cross:
+- mingw-w64-tools
 - mingw32-nsis
 - mingw64-SDL2
 - mingw64-SDL2_image
@@ -13,6 +14,7 @@ cross:
 - mingw64-gnutls
 - mingw64-gstreamer1-plugins-bad-free
 - mingw64-gstreamer1-plugins-good
+- mingw64-gtk-vnc2
 - mingw64-gtk3
 - mingw64-headers
 - mingw64-json-glib
@@ -35,6 +37,7 @@ cross:
 - mingw64-readline
 - mingw64-rest
 - mingw64-spice-gtk3
+- rust-std-static-x86_64-pc-windows-gnu
 native:
 - ant
 - ant-junit
@@ -42,12 +45,15 @@ native:
 - autoconf
 - automake
 - bash
-- bash-completion
+- bash-completion-devel
 - bc
+- bindgen-cli
 - bison
 - bzip2
 - ca-certificates
 - cargo
+- cargo-c
+- cargo-rpm-macros
 - ccache
 - check-devel
 - chrony
@@ -56,6 +62,7 @@ native:
 - cloud-init
 - cloud-utils-growpart
 - codespell
+- compiler-rt
 - cpp
 - cppi
 - ctags
@@ -85,7 +92,6 @@ native:
 - grep
 - gtk-doc
 - gtk-update-icon-cache
-- gtk-vnc2-devel
 - guestfs-tools
 - gzip
 - hostname
@@ -96,7 +102,7 @@ native:
 - iproute-tc
 - iptables
 - iscsi-initiator-utils
-- java-11-openjdk-headless
+- java-21-openjdk-headless
 - jna
 - jq
 - junit
@@ -104,7 +110,6 @@ native:
 - libcmpiutil-devel
 - libnbd-devel
 - libtool
-- libtorrent-devel
 - libxml2
 - libxslt
 - llvm
@@ -119,7 +124,6 @@ native:
 - nano
 - nbd
 - nbdkit
-- net-snmp-devel
 - net-tools
 - nfs-utils
 - ninja-build
@@ -130,7 +134,6 @@ native:
 - ocamldoc
 - openssh-clients
 - osinfo-db-tools
-- pcre-static
 - perl-App-cpanminus
 - perl-Archive-Tar
 - perl-CPAN-Changes
@@ -173,6 +176,7 @@ native:
 - polkit
 - python3
 - python3-PyYAML
+- python3-black
 - python3-boto3
 - python3-build
 - python3-dbus
@@ -182,6 +186,7 @@ native:
 - python3-gobject
 - python3-libnbd
 - python3-libselinux
+- python3-libvirt
 - python3-libxml2
 - python3-lxml
 - python3-numpy
@@ -207,7 +212,6 @@ native:
 - sed
 - socat
 - sparse
-- spice-protocol
 - strace
 - sudo
 - swtpm
@@ -223,6 +227,7 @@ native:
 - vala
 - valgrind
 - vim-minimal
+- vulkan-tools
 - wget
 - which
 - xorriso

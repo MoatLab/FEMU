@@ -20,6 +20,7 @@
 #include "qemu/log.h"
 #include "hw/gpio/stm32l4x5_gpio.h"
 #include "hw/irq.h"
+#include "hw/clock.h"
 #include "hw/qdev-clock.h"
 #include "hw/qdev-properties.h"
 #include "qapi/visitor.h"
@@ -70,7 +71,7 @@ static bool is_push_pull(Stm32l4x5GpioState *s, unsigned pin)
     return extract32(s->otyper, pin, 1) == 0;
 }
 
-static void stm32l4x5_gpio_reset_hold(Object *obj)
+static void stm32l4x5_gpio_reset_hold(Object *obj, ResetType type)
 {
     Stm32l4x5GpioState *s = STM32L4X5_GPIO(obj);
 
@@ -426,8 +427,8 @@ static void stm32l4x5_gpio_realize(DeviceState *dev, Error **errp)
 
 static const VMStateDescription vmstate_stm32l4x5_gpio = {
     .name = TYPE_STM32L4X5_GPIO,
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 2,
+    .minimum_version_id = 2,
     .fields = (VMStateField[]){
         VMSTATE_UINT32(moder, Stm32l4x5GpioState),
         VMSTATE_UINT32(otyper, Stm32l4x5GpioState),
@@ -441,19 +442,19 @@ static const VMStateDescription vmstate_stm32l4x5_gpio = {
         VMSTATE_UINT32(ascr, Stm32l4x5GpioState),
         VMSTATE_UINT16(disconnected_pins, Stm32l4x5GpioState),
         VMSTATE_UINT16(pins_connected_high, Stm32l4x5GpioState),
+        VMSTATE_CLOCK(clk, Stm32l4x5GpioState),
         VMSTATE_END_OF_LIST()
     }
 };
 
-static Property stm32l4x5_gpio_properties[] = {
+static const Property stm32l4x5_gpio_properties[] = {
     DEFINE_PROP_STRING("name", Stm32l4x5GpioState, name),
     DEFINE_PROP_UINT32("mode-reset", Stm32l4x5GpioState, moder_reset, 0),
     DEFINE_PROP_UINT32("ospeed-reset", Stm32l4x5GpioState, ospeedr_reset, 0),
     DEFINE_PROP_UINT32("pupd-reset", Stm32l4x5GpioState, pupdr_reset, 0),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void stm32l4x5_gpio_class_init(ObjectClass *klass, void *data)
+static void stm32l4x5_gpio_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     ResettableClass *rc = RESETTABLE_CLASS(klass);

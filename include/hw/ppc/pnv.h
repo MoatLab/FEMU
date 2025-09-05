@@ -76,6 +76,9 @@ struct PnvMachineClass {
     /*< public >*/
     const char *compat;
     int compat_size;
+    int max_smt_threads;
+    bool has_lpar_per_thread;
+    bool quirk_tb_big_core;
 
     void (*dt_power_mgt)(PnvMachineState *pnv, void *fdt);
     void (*i2c_init)(PnvMachineState *pnv);
@@ -100,6 +103,9 @@ struct PnvMachineState {
     PnvPnor      *pnor;
 
     hwaddr       fw_load_addr;
+
+    bool         big_core;
+    bool         lpar_per_core;
 };
 
 PnvChip *pnv_get_chip(PnvMachineState *pnv, uint32_t chip_id);
@@ -107,6 +113,8 @@ PnvChip *pnv_chip_add_phb(PnvChip *chip, PnvPHB *phb);
 
 #define PNV_FDT_ADDR          0x01000000
 #define PNV_TIMEBASE_FREQ     512000000ULL
+
+void pnv_cpu_do_nmi_resume(CPUState *cs);
 
 /*
  * BMC helpers
@@ -197,9 +205,8 @@ void pnv_bmc_set_pnor(IPMIBmc *bmc, PnvPnor *pnor);
 #define PNV9_OCC_SENSOR_BASE(chip)   (PNV9_OCC_COMMON_AREA_BASE +       \
     PNV_OCC_SENSOR_DATA_BLOCK_BASE((chip)->chip_id))
 
-#define PNV9_HOMER_SIZE              0x0000000000400000ull
 #define PNV9_HOMER_BASE(chip)                                           \
-    (0x203ffd800000ull + ((uint64_t)(chip)->chip_id) * PNV9_HOMER_SIZE)
+    (0x203ffd800000ull + ((uint64_t)(chip)->chip_id) * PNV_HOMER_SIZE)
 
 /*
  * POWER10 MMIO base addresses - 16TB stride per chip
@@ -242,8 +249,7 @@ void pnv_bmc_set_pnor(IPMIBmc *bmc, PnvPnor *pnor);
 #define PNV10_OCC_SENSOR_BASE(chip) (PNV10_OCC_COMMON_AREA_BASE +       \
     PNV_OCC_SENSOR_DATA_BLOCK_BASE((chip)->chip_id))
 
-#define PNV10_HOMER_SIZE              0x0000000000400000ull
 #define PNV10_HOMER_BASE(chip)                                           \
-    (0x300ffd800000ll + ((uint64_t)(chip)->chip_id) * PNV10_HOMER_SIZE)
+    (0x300ffd800000ll + ((uint64_t)(chip)->chip_id) * PNV_HOMER_SIZE)
 
 #endif /* PPC_PNV_H */

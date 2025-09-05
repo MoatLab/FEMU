@@ -2,6 +2,7 @@
 os:
   name: 'OpenSUSE'
   version: 'Tumbleweed'
+  stable: false
   libosinfo_id: 'http://opensuse.org/opensuse/tumbleweed'
 
 packaging:

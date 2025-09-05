@@ -24,6 +24,7 @@
 #include "hw/pci/pcie_port.h"
 #include "hw/pci/msi.h"
 #include "hw/qdev-properties.h"
+#include "hw/qdev-properties-system.h"
 #include "hw/sysbus.h"
 #include "qapi/error.h"
 #include "hw/cxl/cxl.h"
@@ -186,19 +187,19 @@ static void cxl_rp_realize(DeviceState *dev, Error **errp)
                      component_bar);
 }
 
-static void cxl_rp_reset_hold(Object *obj)
+static void cxl_rp_reset_hold(Object *obj, ResetType type)
 {
     PCIERootPortClass *rpc = PCIE_ROOT_PORT_GET_CLASS(obj);
     CXLRootPort *crp = CXL_ROOT_PORT(obj);
 
     if (rpc->parent_phases.hold) {
-        rpc->parent_phases.hold(obj);
+        rpc->parent_phases.hold(obj, type);
     }
 
     latch_registers(crp);
 }
 
-static Property gen_rp_props[] = {
+static const Property gen_rp_props[] = {
     DEFINE_PROP_UINT32("bus-reserve", CXLRootPort, res_reserve.bus, -1),
     DEFINE_PROP_SIZE("io-reserve", CXLRootPort, res_reserve.io, -1),
     DEFINE_PROP_SIZE("mem-reserve", CXLRootPort, res_reserve.mem_non_pref, -1),
@@ -206,7 +207,10 @@ static Property gen_rp_props[] = {
                      -1),
     DEFINE_PROP_SIZE("pref64-reserve", CXLRootPort, res_reserve.mem_pref_64,
                      -1),
-    DEFINE_PROP_END_OF_LIST()
+    DEFINE_PROP_PCIE_LINK_SPEED("x-speed", PCIESlot,
+                                speed, PCIE_LINK_SPEED_64),
+    DEFINE_PROP_PCIE_LINK_WIDTH("x-width", PCIESlot,
+                                width, PCIE_LINK_WIDTH_32),
 };
 
 static void cxl_rp_dvsec_write_config(PCIDevice *dev, uint32_t addr,
@@ -258,7 +262,7 @@ static void cxl_rp_write_config(PCIDevice *d, uint32_t address, uint32_t val,
     cxl_rp_dvsec_write_config(d, address, val, len);
 }
 
-static void cxl_root_port_class_init(ObjectClass *oc, void *data)
+static void cxl_root_port_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc        = DEVICE_CLASS(oc);
     PCIDeviceClass *k      = PCI_DEVICE_CLASS(oc);
@@ -290,7 +294,7 @@ static const TypeInfo cxl_root_port_info = {
     .parent = TYPE_PCIE_ROOT_PORT,
     .instance_size = sizeof(CXLRootPort),
     .class_init = cxl_root_port_class_init,
-    .interfaces = (InterfaceInfo[]) {
+    .interfaces = (const InterfaceInfo[]) {
         { INTERFACE_CXL_DEVICE },
         { }
     },

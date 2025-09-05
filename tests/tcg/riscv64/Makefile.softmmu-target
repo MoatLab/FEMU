@@ -10,7 +10,7 @@ LDFLAGS = -T $(LINK_SCRIPT)
 CFLAGS += -g -Og
 
 %.o: %.S
-	$(CC) $(CFLAGS) $< -c -o $@
+	$(CC) $(CFLAGS) $< -Wa,--noexecstack -c -o $@
 %: %.o $(LINK_SCRIPT)
 	$(LD) $(LDFLAGS) $< -o $@
 
@@ -18,6 +18,10 @@ QEMU_OPTS += -M virt -display none -semihosting -device loader,file=
 
 EXTRA_RUNS += run-issue1060
 run-issue1060: issue1060
+	$(call run-test, $<, $(QEMU) $(QEMU_OPTS)$<)
+
+EXTRA_RUNS += run-test-mepc-masking
+run-test-mepc-masking: test-mepc-masking
 	$(call run-test, $<, $(QEMU) $(QEMU_OPTS)$<)
 
 # We don't currently support the multiarch system tests

@@ -106,6 +106,9 @@ def expand_pattern(pattern, iterable, name):
     # of the above
     matches = []
     for partial_pattern in pattern.split(","):
+        if "/" in partial_pattern:
+            matches.append(partial_pattern)
+            continue
 
         partial_matches = []
         for item in iterable:
@@ -191,6 +194,27 @@ def native_arch_to_deb_arch(native_arch):
     }
     if native_arch not in archmap:
         raise ValueError(f"Unsupported architecture {native_arch}")
+    return archmap[native_arch]
+
+
+def native_arch_to_rust_target(native_arch):
+    archmap = {
+        "aarch64": "aarch64-unknown-linux-gnu",
+        "armv6l": "armv5te-unknown-linux-gnueabi",
+        "armv7l": "armv7-unknown-linux-gnueabihf",
+        "i686": "i686-unknown-linux-gnu",
+        "mingw32": "i686-pc-windows-gnu",
+        "mingw64": "x86_64-pc-windows-gnu",
+        "mips": "mips-unknown-linux-gnu",
+        "mipsel": "mipsel-unknown-linux-gnu",
+        "mips64el": "mips64el-unknown-linux-gnuabi64",
+        "ppc64le": "powerpc64le-unknown-linux-gnu",
+        "riscv64": "riscv64gc-unknown-linux-gnu",
+        "s390x": "s390x-unknown-linux-gnu",
+        "x86_64": "x86_64-unknown-linux-gnu",
+    }
+    if native_arch not in archmap:
+        raise ValueError(f"Unsupported rust target {native_arch}")
     return archmap[native_arch]
 
 
@@ -322,7 +346,14 @@ class DataDir:
 
         return self._path
 
-    def __init__(self, extra_data_dir=None):
+    def _default():
+        extra = Path("ci", "lcitool")
+        if extra.exists():
+            return extra.as_posix()
+
+        return None
+
+    def __init__(self, extra_data_dir=_default()):
         self._extra_data_dir = extra_data_dir
         self._path = None
 

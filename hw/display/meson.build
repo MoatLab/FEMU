@@ -3,7 +3,7 @@ hw_display_modules = {}
 system_ss.add(when: 'CONFIG_DDC', if_true: files('i2c-ddc.c'))
 system_ss.add(when: 'CONFIG_EDID', if_true: files('edid-generate.c', 'edid-region.c'))
 
-system_ss.add(when: 'CONFIG_FW_CFG_DMA', if_true: files('ramfb.c'))
+system_ss.add(when: 'CONFIG_FW_CFG_DMA', if_true: files('ramfb.c'), if_false: files('ramfb-stubs.c'))
 system_ss.add(when: 'CONFIG_FW_CFG_DMA', if_true: files('ramfb-standalone.c'))
 
 system_ss.add(when: 'CONFIG_VGA_CIRRUS', if_true: files('cirrus_vga.c'))
@@ -22,13 +22,9 @@ system_ss.add(when: 'CONFIG_VGA_MMIO', if_true: files('vga-mmio.c'))
 system_ss.add(when: 'CONFIG_VMWARE_VGA', if_true: files('vmware_vga.c'))
 system_ss.add(when: 'CONFIG_BOCHS_DISPLAY', if_true: files('bochs-display.c'))
 
-system_ss.add(when: 'CONFIG_BLIZZARD', if_true: files('blizzard.c'))
 system_ss.add(when: 'CONFIG_EXYNOS4', if_true: files('exynos4210_fimd.c'))
 system_ss.add(when: 'CONFIG_FRAMEBUFFER', if_true: files('framebuffer.c'))
-system_ss.add(when: 'CONFIG_ZAURUS', if_true: files('tc6393xb.c'))
 
-system_ss.add(when: 'CONFIG_OMAP', if_true: files('omap_dss.c'))
-system_ss.add(when: 'CONFIG_PXA2XX', if_true: files('pxa2xx_lcd.c'))
 system_ss.add(when: 'CONFIG_RASPI', if_true: files('bcm2835_fb.c'))
 system_ss.add(when: 'CONFIG_SM501', if_true: files('sm501.c'))
 system_ss.add(when: 'CONFIG_TCX', if_true: files('tcx.c'))
@@ -38,6 +34,7 @@ system_ss.add(when: 'CONFIG_NEXTCUBE', if_true: files('next-fb.c'))
 
 system_ss.add(when: 'CONFIG_VGA', if_true: files('vga.c'))
 system_ss.add(when: 'CONFIG_VIRTIO', if_true: files('virtio-dmabuf.c'))
+system_ss.add(when: 'CONFIG_DM163', if_true: files('dm163.c'))
 
 if (config_all_devices.has_key('CONFIG_VGA_CIRRUS') or
     config_all_devices.has_key('CONFIG_VGA_PCI') or
@@ -64,6 +61,8 @@ system_ss.add(when: 'CONFIG_ARTIST', if_true: files('artist.c'))
 
 system_ss.add(when: 'CONFIG_ATI_VGA', if_true: [files('ati.c', 'ati_2d.c', 'ati_dbg.c'), pixman])
 
+system_ss.add(when: [pvg, 'CONFIG_MAC_PVG_PCI'],     if_true: [files('apple-gfx.m', 'apple-gfx-pci.m')])
+system_ss.add(when: [pvg, 'CONFIG_MAC_PVG_MMIO'],    if_true: [files('apple-gfx.m', 'apple-gfx-mmio.m')])
 
 if config_all_devices.has_key('CONFIG_VIRTIO_GPU')
   virtio_gpu_ss = ss.source_set()
@@ -124,12 +123,14 @@ if config_all_devices.has_key('CONFIG_VIRTIO_VGA')
                                          if_false: files('acpi-vga-stub.c'))
   hw_display_modules += {'virtio-vga': virtio_vga_ss}
 
-  virtio_vga_gl_ss = ss.source_set()
-  virtio_vga_gl_ss.add(when: ['CONFIG_VIRTIO_VGA', virgl, opengl],
-                       if_true: [files('virtio-vga-gl.c'), pixman])
-  virtio_vga_gl_ss.add(when: 'CONFIG_ACPI', if_true: files('acpi-vga.c'),
-                                            if_false: files('acpi-vga-stub.c'))
-  hw_display_modules += {'virtio-vga-gl': virtio_vga_gl_ss}
+  if virgl.found() and opengl.found()
+    virtio_vga_gl_ss = ss.source_set()
+    virtio_vga_gl_ss.add(when: ['CONFIG_VIRTIO_VGA', virgl, opengl],
+                         if_true: [files('virtio-vga-gl.c'), pixman])
+    virtio_vga_gl_ss.add(when: 'CONFIG_ACPI', if_true: files('acpi-vga.c'),
+                                              if_false: files('acpi-vga-stub.c'))
+    hw_display_modules += {'virtio-vga-gl': virtio_vga_gl_ss}
+  endif
 
   if rutabaga.found()
     virtio_vga_rutabaga_ss = ss.source_set()

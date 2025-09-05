@@ -16,13 +16,11 @@ This work is licensed under the terms of the GNU GPL, version 2.
 from typing import List, Optional
 
 from .common import c_enum_const, c_name, mcgen
-from .gen import (
-    QAPISchemaModularCVisitor,
-    gen_special_features,
-    ifcontext,
-)
+from .gen import QAPISchemaModularCVisitor, gen_features, ifcontext
 from .schema import (
     QAPISchema,
+    QAPISchemaAlternatives,
+    QAPISchemaBranches,
     QAPISchemaEnumMember,
     QAPISchemaFeature,
     QAPISchemaIfCond,
@@ -59,17 +57,17 @@ const QEnumLookup %(c_name)s_lookup = {
                      index=index, name=memb.name)
         ret += memb.ifcond.gen_endif()
 
-        special_features = gen_special_features(memb.features)
-        if special_features != '0':
+        features = gen_features(memb.features)
+        if features != '0':
             feats += mcgen('''
-        [%(index)s] = %(special_features)s,
+        [%(index)s] = %(features)s,
 ''',
-                           index=index, special_features=special_features)
+                           index=index, features=features)
 
     if feats:
         ret += mcgen('''
     },
-    .special_features = (const unsigned char[%(max_index)s]) {
+    .features = (const uint64_t[%(max_index)s]) {
 ''',
                      max_index=max_index)
         ret += feats
@@ -169,7 +167,7 @@ def gen_object(name: str, ifcond: QAPISchemaIfCond,
         if not isinstance(obj, QAPISchemaObjectType):
             continue
         ret += gen_object(obj.name, obj.ifcond, obj.base,
-                          obj.local_members, obj.variants)
+                          obj.local_members, obj.branches)
 
     ret += mcgen('''
 
@@ -306,11 +304,14 @@ class QAPISchemaGenTypeVisitor(QAPISchemaModularCVisitor):
 #include "qapi/dealloc-visitor.h"
 #include "%(types)s.h"
 #include "%(visit)s.h"
+#include "%(prefix)sqapi-features.h"
 ''',
-                                      types=types, visit=visit))
+                                      types=types, visit=visit,
+                                      prefix=self._prefix))
         self._genh.preamble_add(mcgen('''
 #include "qapi/qapi-builtin-types.h"
-'''))
+''',
+                                      prefix=self._prefix))
 
     def visit_begin(self, schema: QAPISchema) -> None:
         # gen_object() is recursive, ensure it doesn't visit the empty type
@@ -348,13 +349,13 @@ class QAPISchemaGenTypeVisitor(QAPISchemaModularCVisitor):
                           features: List[QAPISchemaFeature],
                           base: Optional[QAPISchemaObjectType],
                           members: List[QAPISchemaObjectTypeMember],
-                          variants: Optional[QAPISchemaVariants]) -> None:
+                          branches: Optional[QAPISchemaBranches]) -> None:
         # Nothing to do for the special empty builtin
         if name == 'q_empty':
             return
         with ifcontext(ifcond, self._genh):
             self._genh.preamble_add(gen_fwd_object_or_array(name))
-        self._genh.add(gen_object(name, ifcond, base, members, variants))
+        self._genh.add(gen_object(name, ifcond, base, members, branches))
         with ifcontext(ifcond, self._genh, self._genc):
             if base and not base.is_implicit():
                 self._genh.add(gen_upcast(name, base))
@@ -369,11 +370,11 @@ class QAPISchemaGenTypeVisitor(QAPISchemaModularCVisitor):
                              info: Optional[QAPISourceInfo],
                              ifcond: QAPISchemaIfCond,
                              features: List[QAPISchemaFeature],
-                             variants: QAPISchemaVariants) -> None:
+                             alternatives: QAPISchemaAlternatives) -> None:
         with ifcontext(ifcond, self._genh):
             self._genh.preamble_add(gen_fwd_object_or_array(name))
         self._genh.add(gen_object(name, ifcond, None,
-                                  [variants.tag_member], variants))
+                                  [alternatives.tag_member], alternatives))
         with ifcontext(ifcond, self._genh, self._genc):
             self._gen_type_cleanup(name)
 

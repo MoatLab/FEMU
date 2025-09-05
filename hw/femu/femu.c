@@ -615,7 +615,8 @@ static void femu_exit(PCIDevice *pci_dev)
     }
 }
 
-static Property femu_props[] = {
+static const Property femu_props[] = {
+    //DEFINE_BLOCK_PROPERTIES(FemuCtrl, blkconf),
     DEFINE_PROP_STRING("serial", FemuCtrl, serial),
     DEFINE_PROP_UINT32("devsz_mb", FemuCtrl, memsz, 1024), /* in MB */
     DEFINE_PROP_UINT32("namespaces", FemuCtrl, num_namespaces, 1),
@@ -681,7 +682,6 @@ static Property femu_props[] = {
     DEFINE_PROP_INT32("ch_xfer_lat", FemuCtrl, bb_params.ch_xfer_lat, 0),
     DEFINE_PROP_INT32("gc_thres_pcent", FemuCtrl, bb_params.gc_thres_pcent, 75),
     DEFINE_PROP_INT32("gc_thres_pcent_high", FemuCtrl, bb_params.gc_thres_pcent_high, 95),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
 static const VMStateDescription femu_vmstate = {
@@ -689,7 +689,7 @@ static const VMStateDescription femu_vmstate = {
     .unmigratable = 1,
 };
 
-static void femu_class_init(ObjectClass *oc, void *data)
+static void femu_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
     PCIDeviceClass *pc = PCI_DEVICE_CLASS(oc);

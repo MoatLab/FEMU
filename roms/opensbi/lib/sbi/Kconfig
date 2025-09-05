@@ -38,12 +38,28 @@ config SBI_ECALL_CPPC
 	bool "CPPC extension"
 	default y
 
+config SBI_ECALL_FWFT
+	bool "Firmware Feature extension"
+	default y
+
 config SBI_ECALL_LEGACY
 	bool "SBI v0.1 legacy extensions"
 	default y
 
 config SBI_ECALL_VENDOR
 	bool "Platform-defined vendor extensions"
+	default y
+
+config SBI_ECALL_DBTR
+	bool "Debug Trigger Extension"
+	default y
+
+config SBIUNIT
+	bool "Enable SBIUNIT tests"
+	default n
+
+config SBI_ECALL_SSE
+	bool "SSE extension"
 	default y
 
 endmenu

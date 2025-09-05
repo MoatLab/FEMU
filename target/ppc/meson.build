@@ -14,6 +14,7 @@ ppc_ss.add(when: 'CONFIG_TCG', if_true: files(
   'int_helper.c',
   'mem_helper.c',
   'misc_helper.c',
+  'tcg-excp_helper.c',
   'timebase_helper.c',
   'translate.c',
   'power8-pmu.c',
@@ -37,6 +38,7 @@ ppc_system_ss.add(files(
   'arch_dump.c',
   'machine.c',
   'mmu-hash32.c',
+  'mmu-booke.c',
   'mmu_common.c',
   'ppc-qmp-cmds.c',
 ))

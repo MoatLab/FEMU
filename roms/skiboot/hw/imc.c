@@ -8,6 +8,7 @@
 
 #define pr_fmt(fmt)  "IMC: " fmt
 #include <skiboot.h>
+#include <slw.h>
 #include <xscom.h>
 #include <imc.h>
 #include <chip.h>
@@ -48,7 +49,7 @@ static unsigned int *htm_scom_index;
  * imc_chip_avl_vector(in struct imc_chip_cb, look at include/imc.h).
  * nest_pmus[] is an array containing all the possible nest IMC PMU node names.
  */
-static char const *nest_pmus[] = {
+static const char *nest_pmus_p9[] = {
 	"powerbus0",
 	"mcs0",
 	"mcs1",
@@ -66,14 +67,14 @@ static char const *nest_pmus[] = {
 	"mba5",
 	"mba6",
 	"mba7",
-	"cen0",
-	"cen1",
-	"cen2",
-	"cen3",
-	"cen4",
-	"cen5",
-	"cen6",
-	"cen7",
+	"centaur0",
+	"centaur1",
+	"centaur2",
+	"centaur3",
+	"centaur4",
+	"centaur5",
+	"centaur6",
+	"centaur7",
 	"xlink0",
 	"xlink1",
 	"xlink2",
@@ -101,6 +102,67 @@ static char const *nest_pmus[] = {
 	"nvlink4",
 	"nvlink5",
 	/* reserved bits : 51 - 63 */
+};
+
+static const char *nest_pmus_p10[] = {
+	"pb",
+	"mcs0",
+	"mcs1",
+	"mcs2",
+	"mcs3",
+	"mcs4",
+	"mcs5",
+	"mcs6",
+	"mcs7",
+	"pec0",
+	"pec1",
+	"NA",
+	"NA",
+	"NA",
+	"NA",
+	"NA",
+	"NA",
+	"NA",
+	"NA",
+	"NA",
+	"NA",
+	"NA",
+	"NA",
+	"NA",
+	"NA",
+	"NA",
+	"NA",
+	"NA",
+	"NA",
+	"NA",
+	"NA",
+	"NA",
+	"NA",
+	"NA",
+	"NA",
+	"phb0",
+	"phb1",
+	"phb2",
+	"phb3",
+	"phb4",
+	"phb5",
+	"ocmb0",
+	"ocmb1",
+	"ocmb2",
+	"ocmb3",
+	"ocmb4",
+	"ocmb5",
+	"ocmb6",
+	"ocmb7",
+	"ocmb8",
+	"ocmb9",
+	"ocmb10",
+	"ocmb11",
+	"ocmb12",
+	"ocmb13",
+	"ocmb14",
+	"ocmb15",
+	"nx",
 };
 
 /*
@@ -370,7 +432,7 @@ static void disable_unavailable_units(struct dt_node *dev)
 	uint64_t avl_vec;
 	struct imc_chip_cb *cb;
 	struct dt_node *target;
-	int i;
+	int i, j;
 	bool disable_all_nests = false;
 	struct proc_chip *chip;
 
@@ -408,14 +470,129 @@ static void disable_unavailable_units(struct dt_node *dev)
 			avl_vec = (0xffULL) << 56;
 	}
 
-	for (i = 0; i < ARRAY_SIZE(nest_pmus); i++) {
-		if (!(PPC_BITMASK(i, i) & avl_vec)) {
-			/* Check if the device node exists */
-			target = dt_find_by_name(dev, nest_pmus[i]);
-			if (!target)
-				continue;
-			/* Remove the device node */
-			dt_free(target);
+	if (proc_gen == proc_gen_p9) {
+		for (i = 0; i < ARRAY_SIZE(nest_pmus_p9); i++) {
+			if (!(PPC_BIT(i) & avl_vec)) {
+				/* Check if the device node exists */
+				target = dt_find_by_name_before_addr(dev, nest_pmus_p9[i]);
+				if (!target)
+					continue;
+				/* Remove the device node */
+				dt_free(target);
+			}
+		}
+	} else if (proc_gen == proc_gen_p10 || proc_gen == proc_gen_p11) {
+		int val;
+		char name[8];
+
+		for (i = 0; i < 11; i++) {
+			if (!(PPC_BIT(i) & avl_vec)) {
+				/* Check if the device node exists */
+				target = dt_find_by_name_before_addr(dev, nest_pmus_p10[i]);
+				if (!target)
+					continue;
+				/* Remove the device node */
+				dt_free(target);
+			}
+		}
+
+		for (i = 35; i < 41; i++) {
+			if (!(PPC_BIT(i) & avl_vec)) {
+				/* Check if the device node exists for phb */
+				for (j = 0; j < 3; j++) {
+					snprintf(name, sizeof(name), "phb%d_%d", (i-35), j);
+					target = dt_find_by_name_before_addr(dev, name);
+					if (!target)
+						continue;
+					/* Remove the device node */
+					dt_free(target);
+				}
+			}
+		}
+
+		for (i = 41; i < 58; i++) {
+			if (!(PPC_BIT(i) & avl_vec)) {
+				/* Check if the device node exists */
+				target = dt_find_by_name_before_addr(dev, nest_pmus_p10[i]);
+				if (!target)
+					continue;
+				/* Remove the device node */
+				dt_free(target);
+			}
+		}
+
+		for (i = 0; i < 8; i++) {
+			val = ((avl_vec & (0x7ULL << (29 + (3 * i)))) >> (29 + (3 * i)));
+			switch (val) {
+			case 0x5: //xlink configured and functional
+
+				snprintf(name, sizeof(name), "alink%1d", (7-i));
+				target = dt_find_by_name_before_addr(dev, name);
+				if (target)
+					dt_free(target);
+
+				snprintf(name, sizeof(name), "otl%1d_0", (7-i));
+				target = dt_find_by_name_before_addr(dev, name);
+				if (target)
+					dt_free(target);
+
+				snprintf(name, sizeof(name), "otl%1d_1", (7-i));
+				target = dt_find_by_name_before_addr(dev, name);
+				if (target)
+					dt_free(target);
+
+				break;
+			case 0x6: //alink configured and functional
+
+				snprintf(name, sizeof(name), "xlink%1d", (7-i));
+				target = dt_find_by_name_before_addr(dev, name);
+				if (target)
+					dt_free(target);
+
+				snprintf(name, sizeof(name), "otl%1d_0", (7-i));
+				target = dt_find_by_name_before_addr(dev, name);
+				if (target)
+					dt_free(target);
+
+				snprintf(name, sizeof(name), "otl%1d_1", (7-i));
+				target = dt_find_by_name_before_addr(dev, name);
+				if (target)
+					dt_free(target);
+				break;
+
+			case 0x7: //CAPI configured and functional
+				snprintf(name, sizeof(name), "alink%1d", (7-i));
+				target = dt_find_by_name_before_addr(dev, name);
+				if (target)
+					dt_free(target);
+
+				snprintf(name, sizeof(name), "xlink%1d", (7-i));
+				target = dt_find_by_name_before_addr(dev, name);
+				if (target)
+					dt_free(target);
+				break;
+			default:
+				snprintf(name, sizeof(name), "xlink%1d", (7-i));
+				target = dt_find_by_name_before_addr(dev, name);
+				if (target)
+					dt_free(target);
+
+				snprintf(name, sizeof(name), "alink%1d", (7-i));
+				target = dt_find_by_name_before_addr(dev, name);
+				if (target)
+					dt_free(target);
+
+				snprintf(name, sizeof(name), "otl%1d_0", (7-i));
+				target = dt_find_by_name_before_addr(dev, name);
+				if (target)
+					dt_free(target);
+
+				snprintf(name, sizeof(name), "otl%1d_1", (7-i));
+				target = dt_find_by_name_before_addr(dev, name);
+				if (target)
+					dt_free(target);
+				break;
+			}
 		}
 	}
 
@@ -474,7 +651,7 @@ void imc_catalog_preload(void)
 	int ret = OPAL_SUCCESS;
 	compress_buf_size = MAX_COMPRESSED_IMC_DTB_SIZE;
 
-	if (proc_chip_quirks & QUIRK_MAMBO_CALLOUTS)
+	if (proc_chip_quirks & (QUIRK_MAMBO_CALLOUTS | QUIRK_BML))
 		return;
 
 	/* Enable only for power 9/10 */
@@ -584,6 +761,7 @@ static int setup_imc_scoms(void)
 						IMC_TRACE_BUFF_SIZE);
 		return 0;
 	case proc_gen_p10:
+	case proc_gen_p11:
 		CORE_IMC_EVENT_MASK_ADDR = CORE_IMC_EVENT_MASK_ADDR_P10;
 		TRACE_IMC_ADDR = TRACE_IMC_ADDR_P10;
 		pdbar_scom_index = pdbar_scom_index_p10;
@@ -612,13 +790,13 @@ void imc_init(void)
 	struct dt_node *dev;
 	int err_flag = -1;
 
-	if (proc_chip_quirks & QUIRK_MAMBO_CALLOUTS) {
+	if (proc_chip_quirks & (QUIRK_MAMBO_CALLOUTS | QUIRK_BML)) {
 		dev = dt_find_compatible_node(dt_root, NULL,
 					"ibm,opal-in-memory-counters");
 		if (!dev)
 			return;
 
-		goto imc_mambo;
+		goto imc_mambo_bml;
 	}
 
 	/* Enable only for power 9/10 */
@@ -661,7 +839,7 @@ void imc_init(void)
 		goto err;
 	}
 
-imc_mambo:
+imc_mambo_bml:
 	if (setup_imc_scoms()) {
 		prerror("IMC: Failed to setup the scoms\n");
 		goto err;
@@ -682,7 +860,7 @@ imc_mambo:
 	/* Update the base_addr and chip-id for nest nodes */
 	imc_dt_update_nest_node(dev);
 
-	if (proc_chip_quirks & QUIRK_MAMBO_CALLOUTS)
+	if (proc_chip_quirks & (QUIRK_MAMBO_CALLOUTS | QUIRK_BML))
 		return;
 
 	/*
@@ -756,6 +934,7 @@ static uint32_t get_imc_scom_addr_for_core(int core, uint64_t addr)
 		scom_addr = XSCOM_ADDR_P9_EC(core, addr);
 		return scom_addr;
 	case proc_gen_p10:
+	case proc_gen_p11:
 		scom_addr = XSCOM_ADDR_P10_EC(core, addr);
 		return scom_addr;
 	default:
@@ -773,6 +952,7 @@ static uint32_t get_imc_scom_addr_for_quad(int core, uint64_t addr)
 		scom_addr = XSCOM_ADDR_P9_EQ(core, addr);
 		return scom_addr;
 	case proc_gen_p10:
+	case proc_gen_p11:
 		scom_addr = XSCOM_ADDR_P10_EQ(core, addr);
 		return scom_addr;
 	default:

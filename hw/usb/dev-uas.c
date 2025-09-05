@@ -914,7 +914,6 @@ static void usb_uas_handle_data(USBDevice *dev, USBPacket *p)
 err_stream:
     error_report("%s: invalid stream %d", __func__, p->stream);
     p->status = USB_RET_STALL;
-    return;
 }
 
 static void usb_uas_unrealize(USBDevice *dev)
@@ -953,12 +952,11 @@ static const VMStateDescription vmstate_usb_uas = {
     }
 };
 
-static Property uas_properties[] = {
+static const Property uas_properties[] = {
     DEFINE_PROP_UINT32("log-scsi-req", UASDevice, requestlog, 0),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void usb_uas_class_initfn(ObjectClass *klass, void *data)
+static void usb_uas_class_initfn(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     USBDeviceClass *uc = USB_DEVICE_CLASS(klass);

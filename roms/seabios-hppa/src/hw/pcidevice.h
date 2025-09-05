@@ -71,7 +71,7 @@ int pci_init_device(const struct pci_device_id *ids
 struct pci_device *pci_find_init_device(const struct pci_device_id *ids
                                         , void *arg);
 void pci_enable_busmaster(struct pci_device *pci);
-u16 pci_enable_iobar(struct pci_device *pci, u32 addr);
+portaddr_t pci_enable_iobar(struct pci_device *pci, u32 addr);
 void *pci_enable_membar(struct pci_device *pci, u32 addr);
 
 #endif // pcidevice.h

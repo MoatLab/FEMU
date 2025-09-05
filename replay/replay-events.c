@@ -11,7 +11,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/error-report.h"
-#include "sysemu/replay.h"
+#include "system/replay.h"
 #include "replay-internal.h"
 #include "block/aio.h"
 #include "ui/input.h"
@@ -89,15 +89,6 @@ void replay_flush_events(void)
         replay_run_event(event);
         QTAILQ_REMOVE(&events_list, event, events);
         g_free(event);
-    }
-}
-
-void replay_disable_events(void)
-{
-    if (replay_mode != REPLAY_MODE_NONE) {
-        events_enabled = false;
-        /* Flush events queue before waiting of completion */
-        replay_flush_events();
     }
 }
 

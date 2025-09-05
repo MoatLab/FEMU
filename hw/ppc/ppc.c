@@ -27,13 +27,14 @@
 #include "hw/ppc/ppc.h"
 #include "hw/ppc/ppc_e500.h"
 #include "qemu/timer.h"
-#include "sysemu/cpus.h"
+#include "exec/cpu-interrupt.h"
+#include "system/cpus.h"
 #include "qemu/log.h"
 #include "qemu/main-loop.h"
 #include "qemu/error-report.h"
-#include "sysemu/kvm.h"
-#include "sysemu/replay.h"
-#include "sysemu/runstate.h"
+#include "system/kvm.h"
+#include "system/replay.h"
+#include "system/runstate.h"
 #include "kvm_ppc.h"
 #include "migration/vmstate.h"
 #include "trace.h"
@@ -267,7 +268,6 @@ static void power9_set_irq(void *opaque, int pin, int level)
         break;
     default:
         g_assert_not_reached();
-        return;
     }
 }
 
@@ -729,7 +729,9 @@ static inline int64_t __cpu_ppc_load_decr(CPUPPCState *env, int64_t now,
     int64_t decr;
 
     n = ns_to_tb(tb_env->decr_freq, now);
-    if (next > n && tb_env->flags & PPC_TIMER_BOOKE) {
+
+    /* BookE timers stop when reaching 0.  */
+    if (next < n && tb_env->flags & PPC_TIMER_BOOKE) {
         decr = 0;
     } else {
         decr = next - n;
@@ -1122,16 +1124,21 @@ void cpu_ppc_tb_reset(CPUPPCState *env)
         timer_del(tb_env->hdecr_timer);
         ppc_set_irq(cpu, PPC_INTERRUPT_HDECR, 0);
         tb_env->hdecr_next = 0;
+        _cpu_ppc_store_hdecr(cpu, 0, 0, 0, 64);
     }
 
     /*
      * There is a bug in Linux 2.4 kernels:
      * if a decrementer exception is pending when it enables msr_ee at startup,
      * it's not ready to handle it...
+     *
+     * On machine reset, this is called before icount is reset, so for
+     * icount-mode, setting TB registers using now == qemu_clock_get_ns()
+     * results in them being garbage after icount is reset. Use an
+     * explicit now == 0 to get a consistent reset state.
      */
-    cpu_ppc_store_decr(env, -1);
-    cpu_ppc_store_hdecr(env, -1);
-    cpu_ppc_store_purr(env, 0x0000000000000000ULL);
+    _cpu_ppc_store_decr(cpu, 0, 0, -1, 64);
+    _cpu_ppc_store_purr(env, 0, 0);
 }
 
 void cpu_ppc_tb_free(CPUPPCState *env)

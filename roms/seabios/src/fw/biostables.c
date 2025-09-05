@@ -499,7 +499,7 @@ smbios_build_tables(struct romfile_s *f_tables,
                     u16 *number_of_structures)
 {
     struct smbios_type_0 *t0;
-    u16 qtables_len, need_t0 = 1;
+    u32 qtables_len, need_t0 = 1;
     u8 *qtables, *tables;
 
     if (f_tables->size != *length)

@@ -45,10 +45,21 @@ int tap_open(char *ifname, int ifname_size, int *vnet_hdr,
     int len = sizeof(struct virtio_net_hdr);
     unsigned int features;
 
-    fd = RETRY_ON_EINTR(open(PATH_NET_TUN, O_RDWR));
+
+    ret = if_nametoindex(ifname);
+    if (ret) {
+        g_autofree char *file = g_strdup_printf("/dev/tap%d", ret);
+        fd = open(file, O_RDWR);
+    } else {
+        fd = -1;
+    }
+
     if (fd < 0) {
-        error_setg_errno(errp, errno, "could not open %s", PATH_NET_TUN);
-        return -1;
+        fd = RETRY_ON_EINTR(open(PATH_NET_TUN, O_RDWR));
+        if (fd < 0) {
+            error_setg_errno(errp, errno, "could not open %s", PATH_NET_TUN);
+            return -1;
+        }
     }
     memset(&ifr, 0, sizeof(ifr));
     ifr.ifr_flags = IFF_TAP | IFF_NO_PI;
@@ -181,26 +192,6 @@ int tap_probe_has_uso(int fd)
 
     if (ioctl(fd, TUNSETOFFLOAD, offload) < 0) {
         return 0;
-    }
-    return 1;
-}
-
-/* Verify that we can assign given length */
-int tap_probe_vnet_hdr_len(int fd, int len)
-{
-    int orig;
-    if (ioctl(fd, TUNGETVNETHDRSZ, &orig) == -1) {
-        return 0;
-    }
-    if (ioctl(fd, TUNSETVNETHDRSZ, &len) == -1) {
-        return 0;
-    }
-    /* Restore original length: we can't handle failure. */
-    if (ioctl(fd, TUNSETVNETHDRSZ, &orig) == -1) {
-        fprintf(stderr, "TUNGETVNETHDRSZ ioctl() failed: %s. Exiting.\n",
-                strerror(errno));
-        abort();
-        return -errno;
     }
     return 1;
 }

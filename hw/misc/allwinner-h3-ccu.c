@@ -155,7 +155,7 @@ static void allwinner_h3_ccu_write(void *opaque, hwaddr offset,
 static const MemoryRegionOps allwinner_h3_ccu_ops = {
     .read = allwinner_h3_ccu_read,
     .write = allwinner_h3_ccu_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+    .endianness = DEVICE_LITTLE_ENDIAN,
     .valid = {
         .min_access_size = 4,
         .max_access_size = 4,
@@ -218,11 +218,11 @@ static const VMStateDescription allwinner_h3_ccu_vmstate = {
     }
 };
 
-static void allwinner_h3_ccu_class_init(ObjectClass *klass, void *data)
+static void allwinner_h3_ccu_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    dc->reset = allwinner_h3_ccu_reset;
+    device_class_set_legacy_reset(dc, allwinner_h3_ccu_reset);
     dc->vmsd = &allwinner_h3_ccu_vmstate;
 }
 

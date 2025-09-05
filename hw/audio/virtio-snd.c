@@ -19,12 +19,11 @@
 #include "qemu/iov.h"
 #include "qemu/log.h"
 #include "qemu/error-report.h"
-#include "include/qemu/lockable.h"
-#include "sysemu/runstate.h"
+#include "qemu/lockable.h"
+#include "system/runstate.h"
 #include "trace.h"
 #include "qapi/error.h"
 #include "hw/audio/virtio-snd.h"
-#include "hw/core/cpu.h"
 
 #define VIRTIO_SOUND_VM_VERSION 1
 #define VIRTIO_SOUND_JACK_DEFAULT 0
@@ -78,7 +77,7 @@ static const VMStateDescription vmstate_virtio_snd = {
     },
 };
 
-static Property virtio_snd_properties[] = {
+static const Property virtio_snd_properties[] = {
     DEFINE_AUDIO_PROPERTIES(VirtIOSound, card),
     DEFINE_PROP_UINT32("jacks", VirtIOSound, snd_conf.jacks,
                        VIRTIO_SOUND_JACK_DEFAULT),
@@ -86,7 +85,6 @@ static Property virtio_snd_properties[] = {
                        VIRTIO_SOUND_STREAM_DEFAULT),
     DEFINE_PROP_UINT32("chmaps", VirtIOSound, snd_conf.chmaps,
                        VIRTIO_SOUND_CHMAP_DEFAULT),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
 static void
@@ -104,29 +102,6 @@ virtio_snd_get_config(VirtIODevice *vdev, uint8_t *config)
     cpu_to_le32s(&sndconfig->jacks);
     cpu_to_le32s(&sndconfig->streams);
     cpu_to_le32s(&sndconfig->chmaps);
-
-}
-
-static void
-virtio_snd_set_config(VirtIODevice *vdev, const uint8_t *config)
-{
-    VirtIOSound *s = VIRTIO_SND(vdev);
-    const virtio_snd_config *sndconfig =
-        (const virtio_snd_config *)config;
-
-
-   trace_virtio_snd_set_config(vdev,
-                               s->snd_conf.jacks,
-                               sndconfig->jacks,
-                               s->snd_conf.streams,
-                               sndconfig->streams,
-                               s->snd_conf.chmaps,
-                               sndconfig->chmaps);
-
-    memcpy(&s->snd_conf, sndconfig, sizeof(virtio_snd_config));
-    le32_to_cpus(&s->snd_conf.jacks);
-    le32_to_cpus(&s->snd_conf.streams);
-    le32_to_cpus(&s->snd_conf.chmaps);
 
 }
 
@@ -282,11 +257,13 @@ uint32_t virtio_snd_set_pcm_params(VirtIOSound *s,
         error_report("Number of channels is not supported.");
         return cpu_to_le32(VIRTIO_SND_S_NOT_SUPP);
     }
-    if (!(supported_formats & BIT(params->format))) {
+    if (params->format >= sizeof(supported_formats) * BITS_PER_BYTE ||
+        !(supported_formats & BIT(params->format))) {
         error_report("Stream format is not supported.");
         return cpu_to_le32(VIRTIO_SND_S_NOT_SUPP);
     }
-    if (!(supported_rates & BIT(params->rate))) {
+    if (params->rate >= sizeof(supported_rates) * BITS_PER_BYTE ||
+        !(supported_rates & BIT(params->rate))) {
         error_report("Stream rate is not supported.");
         return cpu_to_le32(VIRTIO_SND_S_NOT_SUPP);
     }
@@ -401,7 +378,7 @@ static void virtio_snd_get_qemu_audsettings(audsettings *as,
     as->nchannels = MIN(AUDIO_MAX_CHANNELS, params->channels);
     as->fmt = virtio_snd_get_qemu_format(params->format);
     as->freq = virtio_snd_get_qemu_freq(params->rate);
-    as->endianness = target_words_bigendian() ? 1 : 0;
+    as->endianness = 0; /* Conforming to VIRTIO 1.0: always little endian. */
 }
 
 /*
@@ -1261,7 +1238,7 @@ static void virtio_snd_pcm_in_cb(void *data, int available)
 {
     VirtIOSoundPCMStream *stream = data;
     VirtIOSoundPCMBuffer *buffer;
-    size_t size;
+    size_t size, max_size;
 
     WITH_QEMU_LOCK_GUARD(&stream->queue_mutex) {
         while (!QSIMPLEQ_EMPTY(&stream->queue)) {
@@ -1275,7 +1252,12 @@ static void virtio_snd_pcm_in_cb(void *data, int available)
                 continue;
             }
 
+            max_size = iov_size(buffer->elem->in_sg, buffer->elem->in_num);
             for (;;) {
+                if (buffer->size >= max_size) {
+                    return_rx_buffer(stream, buffer);
+                    break;
+                }
                 size = AUD_read(stream->voice.in,
                         buffer->data + buffer->size,
                         MIN(available, (stream->params.period_bytes -
@@ -1379,7 +1361,7 @@ static void virtio_snd_reset(VirtIODevice *vdev)
     }
 }
 
-static void virtio_snd_class_init(ObjectClass *klass, void *data)
+static void virtio_snd_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     VirtioDeviceClass *vdc = VIRTIO_DEVICE_CLASS(klass);
@@ -1393,7 +1375,6 @@ static void virtio_snd_class_init(ObjectClass *klass, void *data)
     vdc->realize = virtio_snd_realize;
     vdc->unrealize = virtio_snd_unrealize;
     vdc->get_config = virtio_snd_get_config;
-    vdc->set_config = virtio_snd_set_config;
     vdc->get_features = get_features;
     vdc->reset = virtio_snd_reset;
     vdc->legacy_features = 0;

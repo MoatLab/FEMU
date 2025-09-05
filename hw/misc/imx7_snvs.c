@@ -19,9 +19,9 @@
 #include "hw/misc/imx7_snvs.h"
 #include "qemu/cutils.h"
 #include "qemu/module.h"
-#include "sysemu/sysemu.h"
-#include "sysemu/rtc.h"
-#include "sysemu/runstate.h"
+#include "system/system.h"
+#include "system/rtc.h"
+#include "system/runstate.h"
 #include "trace.h"
 
 #define RTC_FREQ    32768ULL
@@ -143,11 +143,11 @@ static void imx7_snvs_init(Object *obj)
         qemu_clock_get_ns(rtc_clock) / NANOSECONDS_PER_SECOND;
 }
 
-static void imx7_snvs_class_init(ObjectClass *klass, void *data)
+static void imx7_snvs_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    dc->reset = imx7_snvs_reset;
+    device_class_set_legacy_reset(dc, imx7_snvs_reset);
     dc->vmsd = &vmstate_imx7_snvs;
     dc->desc  = "i.MX7 Secure Non-Volatile Storage Module";
 }

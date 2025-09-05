@@ -423,7 +423,7 @@ void dt_init_vpd_node(void)
 	dt_add_property_cells(dt_vpd, "#size-cells", 0);
 	dt_add_property_cells(dt_vpd, "#address-cells", 1);
 
-	slca_hdr = get_hdif(&spira.ntuples.slca, SLCA_HDIF_SIG);
+	slca_hdr = get_hdif(&spiras->ntuples.slca, SLCA_HDIF_SIG);
 	if (!slca_hdr) {
 		prerror("SLCA Invalid\n");
 		return;
@@ -551,7 +551,7 @@ static void dt_add_model_name(void)
 
 	model = dt_find_property(dt_root, "model");
 
-	iplp = get_hdif(&spira.ntuples.ipl_parms, "IPLPMS");
+	iplp = get_hdif(&spiras->ntuples.ipl_parms, "IPLPMS");
 	if (!iplp)
 		goto def_model;
 
@@ -627,7 +627,7 @@ static void sysvpd_parse(void)
 	const struct spira_fru_id *fru_id;
 	struct HDIF_common_hdr *sysvpd_hdr;
 
-	sysvpd_hdr = get_hdif(&spira.ntuples.system_vpd, SYSVPD_HDIF_SIG);
+	sysvpd_hdr = get_hdif(&spiras->ntuples.system_vpd, SYSVPD_HDIF_SIG);
 	if (!sysvpd_hdr)
 		return;
 
@@ -683,12 +683,12 @@ static void iohub_vpd_parse(void)
 	const struct cechub_hub_fru_id *fru_id_data;
 	unsigned int i, vpd_sz, fru_id_sz;
 
-	if (!get_hdif(&spira.ntuples.cec_iohub_fru, CECHUB_FRU_HDIF_SIG)) {
+	if (!get_hdif(&spiras->ntuples.cec_iohub_fru, CECHUB_FRU_HDIF_SIG)) {
 		prerror("VPD: Could not find IO HUB FRU data\n");
 		return;
 	}
 
-	for_each_ntuple_idx(&spira.ntuples.cec_iohub_fru, iohub_hdr,
+	for_each_ntuple_idx(&spiras->ntuples.cec_iohub_fru, iohub_hdr,
 					i, CECHUB_FRU_HDIF_SIG) {
 
 		fru_id_data = HDIF_get_idata(iohub_hdr,
@@ -732,25 +732,22 @@ void vpd_parse(void)
 	sysvpd_parse();
 
 	/* Enclosure */
-	_vpd_parse(spira.ntuples.nt_enclosure_vpd);
+	_vpd_parse(spiras->ntuples.nt_enclosure_vpd);
 
 	/* Backplane */
-	_vpd_parse(spira.ntuples.backplane_vpd);
+	_vpd_parse(spiras->ntuples.backplane_vpd);
 
 	/* clock card -- does this use the FRUVPD sig? */
-	_vpd_parse(spira.ntuples.clock_vpd);
+	_vpd_parse(spiras->ntuples.clock_vpd);
 
 	/* Anchor card */
-	_vpd_parse(spira.ntuples.anchor_vpd);
+	_vpd_parse(spiras->ntuples.anchor_vpd);
 
 	/* Op panel -- does this use the FRUVPD sig? */
-	_vpd_parse(spira.ntuples.op_panel_vpd);
-
-	/* External cache FRU vpd -- does this use the FRUVPD sig? */
-	_vpd_parse(spira.ntuples.ext_cache_fru_vpd);
+	_vpd_parse(spiras->ntuples.op_panel_vpd);
 
 	/* Misc CEC FRU */
-	_vpd_parse(spira.ntuples.misc_cec_fru_vpd);
+	_vpd_parse(spiras->ntuples.misc_cec_fru_vpd);
 
 	/* CEC IO HUB FRU */
 	iohub_vpd_parse();
@@ -760,7 +757,7 @@ void vpd_parse(void)
 	 * different, the FRU ID data and pointer pair to keyword VPD
 	 * are the same offset as a FRUVPD entry. So reuse it
 	 */
-	fruvpd_hdr = get_hdif(&spira.ntuples.sp_subsys, SPSS_HDIF_SIG);
+	fruvpd_hdr = get_hdif(&spiras->ntuples.sp_subsys, SPSS_HDIF_SIG);
 	if (fruvpd_hdr)
 		dt_add_vpd_node(fruvpd_hdr,
 				FRUVPD_IDATA_FRU_ID, FRUVPD_IDATA_KW_VPD);

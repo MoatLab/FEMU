@@ -38,6 +38,7 @@ void psi_init_for_fsp(struct psi *psi)
 	case proc_gen_p8:
 	case proc_gen_p9:
 	case proc_gen_p10:
+	case proc_gen_p11:
 		out_be64(psi->regs + PSIHB_TAR, PSI_TCE_TABLE_BASE |
 			 PSIHB_TAR_256K_ENTRIES);
 		break;

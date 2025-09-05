@@ -70,49 +70,56 @@ cbvga_list_modes(u16 seg, u16 *dest, u16 *last)
 }
 
 int
-cbvga_get_window(struct vgamode_s *vmode_g, int window)
+cbvga_get_window(struct vgamode_s *curmode_g, int window)
 {
     return -1;
 }
 
 int
-cbvga_set_window(struct vgamode_s *vmode_g, int window, int val)
+cbvga_set_window(struct vgamode_s *curmode_g, int window, int val)
 {
     return -1;
 }
 
 int
-cbvga_get_linelength(struct vgamode_s *vmode_g)
+cbvga_minimum_linelength(struct vgamode_s *vmode_g)
+{
+    /* Can't change mode, always report active pitch. */
+    return GET_GLOBAL(CBlinelength);
+}
+
+int
+cbvga_get_linelength(struct vgamode_s *curmode_g)
 {
     return GET_GLOBAL(CBlinelength);
 }
 
 int
-cbvga_set_linelength(struct vgamode_s *vmode_g, int val)
+cbvga_set_linelength(struct vgamode_s *curmode_g, int val)
 {
     return -1;
 }
 
 int
-cbvga_get_displaystart(struct vgamode_s *vmode_g)
+cbvga_get_displaystart(struct vgamode_s *curmode_g)
 {
     return 0;
 }
 
 int
-cbvga_set_displaystart(struct vgamode_s *vmode_g, int val)
+cbvga_set_displaystart(struct vgamode_s *curmode_g, int val)
 {
     return -1;
 }
 
 int
-cbvga_get_dacformat(struct vgamode_s *vmode_g)
+cbvga_get_dacformat(struct vgamode_s *curmode_g)
 {
     return -1;
 }
 
 int
-cbvga_set_dacformat(struct vgamode_s *vmode_g, int val)
+cbvga_set_dacformat(struct vgamode_s *curmode_g, int val)
 {
     return -1;
 }
@@ -154,13 +161,6 @@ cbvga_set_mode(struct vgamode_s *vmode_g, int flags)
         }
     }
     return 0;
-}
-
-int
-cbvga_get_linesize(struct vgamode_s *vmode_g)
-{
-    /* Can't change mode, always report active pitch. */
-    return GET_GLOBAL(CBlinelength);
 }
 
 #define CB_TAG_FRAMEBUFFER      0x0012

@@ -592,7 +592,7 @@ static void npcm7xx_watchdog_timer_expired(void *opaque)
     }
 }
 
-static void npcm7xx_timer_hold_reset(Object *obj)
+static void npcm7xx_timer_hold_reset(Object *obj, ResetType type)
 {
     NPCM7xxTimerCtrlState *s = NPCM7XX_TIMER(obj);
     int i;
@@ -689,7 +689,7 @@ static const VMStateDescription vmstate_npcm7xx_timer_ctrl = {
     },
 };
 
-static void npcm7xx_timer_class_init(ObjectClass *klass, void *data)
+static void npcm7xx_timer_class_init(ObjectClass *klass, const void *data)
 {
     ResettableClass *rc = RESETTABLE_CLASS(klass);
     DeviceClass *dc = DEVICE_CLASS(klass);

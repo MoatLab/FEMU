@@ -28,7 +28,6 @@
 #include "qapi/visitor.h"
 #include "qemu/module.h"
 #include "qemu/log.h"
-#include "qemu/bswap.h"
 
 enum LSM303DLHCMagReg {
     LSM303DLHC_MAG_REG_CRA          = 0x00,
@@ -530,12 +529,12 @@ static void lsm303dlhc_mag_initfn(Object *obj)
 /*
  * Set the virtual method pointers (bus state change, tx/rx, etc.).
  */
-static void lsm303dlhc_mag_class_init(ObjectClass *klass, void *data)
+static void lsm303dlhc_mag_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     I2CSlaveClass *k = I2C_SLAVE_CLASS(klass);
 
-    dc->reset = lsm303dlhc_mag_reset;
+    device_class_set_legacy_reset(dc, lsm303dlhc_mag_reset);
     dc->vmsd = &vmstate_lsm303dlhc_mag;
     k->event = lsm303dlhc_mag_event;
     k->recv = lsm303dlhc_mag_recv;

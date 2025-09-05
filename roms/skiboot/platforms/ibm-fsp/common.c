@@ -186,6 +186,12 @@ void ibm_fsp_exit(void)
 
 	/* Clear SRCs on the op-panel when Linux starts */
 	op_panel_clear_src();
+
+	/*
+	 * Booting into an OS that may not call back into skiboot for
+	 * some time. Ensure all IPMI messages are processed first.
+	 */
+	ipmi_flush();
 }
 
 int64_t ibm_fsp_cec_reboot(void)

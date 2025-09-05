@@ -12,20 +12,22 @@
 #include "hw/boards.h"
 #include "hw/intc/intc.h"
 #include "hw/mem/memory-device.h"
-#include "hw/rdma/rdma.h"
 #include "qapi/error.h"
 #include "qapi/qapi-builtin-visit.h"
+#include "qapi/qapi-commands-accelerator.h"
 #include "qapi/qapi-commands-machine.h"
-#include "qapi/qmp/qobject.h"
+#include "qobject/qobject.h"
 #include "qapi/qobject-input-visitor.h"
 #include "qapi/type-helpers.h"
 #include "qemu/uuid.h"
+#include "qemu/target-info-qapi.h"
 #include "qom/qom-qobject.h"
-#include "sysemu/hostmem.h"
-#include "sysemu/hw_accel.h"
-#include "sysemu/numa.h"
-#include "sysemu/runstate.h"
-#include "sysemu/sysemu.h"
+#include "system/hostmem.h"
+#include "system/hw_accel.h"
+#include "system/numa.h"
+#include "system/runstate.h"
+#include "system/system.h"
+#include "hw/s390x/storage-keys.h"
 
 /*
  * fast means: we NEVER interrupt vCPU threads to retrieve
@@ -36,8 +38,7 @@ CpuInfoFastList *qmp_query_cpus_fast(Error **errp)
     MachineState *ms = MACHINE(qdev_get_machine());
     MachineClass *mc = MACHINE_GET_CLASS(ms);
     CpuInfoFastList *head = NULL, **tail = &head;
-    SysEmuTarget target = qapi_enum_parse(&SysEmuTarget_lookup, target_name(),
-                                          -1, &error_abort);
+    SysEmuTarget target = target_arch();
     CPUState *cpu;
 
     CPU_FOREACH(cpu) {
@@ -46,6 +47,7 @@ CpuInfoFastList *qmp_query_cpus_fast(Error **errp)
         value->cpu_index = cpu->cpu_index;
         value->qom_path = object_get_canonical_path(OBJECT(cpu));
         value->thread_id = cpu->thread_id;
+        value->qom_type = g_strdup(object_get_typename(OBJECT(cpu)));
 
         if (mc->cpu_index_to_instance_props) {
             CpuInstanceProperties *props;
@@ -65,13 +67,15 @@ CpuInfoFastList *qmp_query_cpus_fast(Error **errp)
     return head;
 }
 
-MachineInfoList *qmp_query_machines(Error **errp)
+MachineInfoList *qmp_query_machines(bool has_compat_props, bool compat_props,
+                                    Error **errp)
 {
     GSList *el, *machines = object_class_get_list(TYPE_MACHINE, false);
     MachineInfoList *mach_list = NULL;
 
     for (el = machines; el; el = el->next) {
         MachineClass *mc = el->data;
+        const char *default_cpu_type = machine_class_default_cpu_type(mc);
         MachineInfo *info;
 
         info = g_malloc0(sizeof(*info));
@@ -90,11 +94,31 @@ MachineInfoList *qmp_query_machines(Error **errp)
         info->numa_mem_supported = mc->numa_mem_supported;
         info->deprecated = !!mc->deprecation_reason;
         info->acpi = !!object_class_property_find(OBJECT_CLASS(mc), "acpi");
-        if (mc->default_cpu_type) {
-            info->default_cpu_type = g_strdup(mc->default_cpu_type);
+        if (default_cpu_type) {
+            info->default_cpu_type = g_strdup(default_cpu_type);
         }
         if (mc->default_ram_id) {
             info->default_ram_id = g_strdup(mc->default_ram_id);
+        }
+
+        if (compat_props && mc->compat_props) {
+            int i;
+            info->compat_props = NULL;
+            CompatPropertyList **tail = &(info->compat_props);
+            info->has_compat_props = true;
+
+            for (i = 0; i < mc->compat_props->len; i++) {
+                GlobalProperty *mt_prop = g_ptr_array_index(mc->compat_props,
+                                                            i);
+                CompatProperty *prop;
+
+                prop = g_malloc0(sizeof(*prop));
+                prop->qom_type = g_strdup(mt_prop->driver);
+                prop->property = g_strdup(mt_prop->property);
+                prop->value = g_strdup(mt_prop->value);
+
+                QAPI_LIST_APPEND(tail, prop);
+            }
         }
 
         QAPI_LIST_PREPEND(mach_list, info);
@@ -112,12 +136,11 @@ CurrentMachineParams *qmp_query_current_machine(Error **errp)
     return params;
 }
 
-TargetInfo *qmp_query_target(Error **errp)
+QemuTargetInfo *qmp_query_target(Error **errp)
 {
-    TargetInfo *info = g_malloc0(sizeof(*info));
+    QemuTargetInfo *info = g_malloc0(sizeof(*info));
 
-    info->arch = qapi_enum_parse(&SysEmuTarget_lookup, target_name(), -1,
-                                 &error_abort);
+    info->arch = target_arch();
 
     return info;
 }
@@ -291,37 +314,6 @@ MemoryInfo *qmp_query_memory_size_summary(Error **errp)
     return mem_info;
 }
 
-static int qmp_x_query_rdma_foreach(Object *obj, void *opaque)
-{
-    RdmaProvider *rdma;
-    RdmaProviderClass *k;
-    GString *buf = opaque;
-
-    if (object_dynamic_cast(obj, INTERFACE_RDMA_PROVIDER)) {
-        rdma = RDMA_PROVIDER(obj);
-        k = RDMA_PROVIDER_GET_CLASS(obj);
-        if (k->format_statistics) {
-            k->format_statistics(rdma, buf);
-        } else {
-            g_string_append_printf(buf,
-                                   "RDMA statistics not available for %s.\n",
-                                   object_get_typename(obj));
-        }
-    }
-
-    return 0;
-}
-
-HumanReadableText *qmp_x_query_rdma(Error **errp)
-{
-    g_autoptr(GString) buf = g_string_new("");
-
-    object_child_foreach_recursive(object_get_root(),
-                                   qmp_x_query_rdma_foreach, buf);
-
-    return human_readable_text_from_str(buf);
-}
-
 HumanReadableText *qmp_x_query_ramblock(Error **errp)
 {
     g_autoptr(GString) buf = ram_block_format();
@@ -372,6 +364,35 @@ HumanReadableText *qmp_x_query_irq(Error **errp)
     return human_readable_text_from_str(buf);
 }
 
+static int qmp_x_query_intc_foreach(Object *obj, void *opaque)
+{
+    InterruptStatsProvider *intc;
+    InterruptStatsProviderClass *k;
+    GString *buf = opaque;
+
+    if (object_dynamic_cast(obj, TYPE_INTERRUPT_STATS_PROVIDER)) {
+        intc = INTERRUPT_STATS_PROVIDER(obj);
+        k = INTERRUPT_STATS_PROVIDER_GET_CLASS(obj);
+        if (k->print_info) {
+            k->print_info(intc, buf);
+        } else {
+            g_string_append_printf(buf,
+                                   "Interrupt controller information not available for %s.\n",
+                                   object_get_typename(obj));
+        }
+    }
+
+    return 0;
+}
+
+HumanReadableText *qmp_x_query_interrupt_controllers(Error **errp)
+{
+    g_autoptr(GString) buf = g_string_new("");
+    object_child_foreach_recursive(object_get_root(),
+                                   qmp_x_query_intc_foreach, buf);
+    return human_readable_text_from_str(buf);
+}
+
 GuidInfo *qmp_query_vm_generation_id(Error **errp)
 {
     GuidInfo *info;
@@ -387,4 +408,17 @@ GuidInfo *qmp_query_vm_generation_id(Error **errp)
     info = g_malloc0(sizeof(*info));
     info->guid = qemu_uuid_unparse_strdup(&vms->guid);
     return info;
+}
+
+void qmp_dump_skeys(const char *filename, Error **errp)
+{
+    ObjectClass *mc = object_get_class(qdev_get_machine());
+    ObjectClass *oc = object_class_dynamic_cast(mc, TYPE_DUMP_SKEYS_INTERFACE);
+
+    if (!oc) {
+        error_setg(errp, "Storage keys information not available"
+                         " for this architecture");
+        return;
+    }
+    DUMP_SKEYS_INTERFACE_CLASS(oc)->qmp_dump_skeys(filename, errp);
 }

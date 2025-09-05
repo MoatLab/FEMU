@@ -78,6 +78,17 @@ qio_channel_socket_new(void)
     return sioc;
 }
 
+int qio_channel_socket_set_send_buffer(QIOChannelSocket *ioc,
+                                       size_t size,
+                                       Error **errp)
+{
+    if (setsockopt(ioc->fd, SOL_SOCKET, SO_SNDBUF, &size, sizeof(size)) < 0) {
+        error_setg_errno(errp, errno, "Unable to set socket send buffer size");
+        return -1;
+    }
+
+    return 0;
+}
 
 static int
 qio_channel_socket_set_fd(QIOChannelSocket *sioc,
@@ -841,6 +852,33 @@ qio_channel_socket_set_cork(QIOChannel *ioc,
     socket_set_cork(sioc->fd, v);
 }
 
+static int
+qio_channel_socket_get_peerpid(QIOChannel *ioc,
+                               unsigned int *pid,
+                               Error **errp)
+{
+#ifdef CONFIG_LINUX
+    QIOChannelSocket *sioc = QIO_CHANNEL_SOCKET(ioc);
+    Error *err = NULL;
+    socklen_t len = sizeof(struct ucred);
+
+    struct ucred cred;
+    if (getsockopt(sioc->fd,
+               SOL_SOCKET, SO_PEERCRED,
+               &cred, &len) == -1) {
+        error_setg_errno(&err, errno, "Unable to get peer credentials");
+        error_propagate(errp, err);
+        *pid = -1;
+        return -1;
+    }
+    *pid = (unsigned int)cred.pid;
+    return 0;
+#else
+    error_setg(errp, "Unsupported feature");
+    *pid = -1;
+    return -1;
+#endif
+}
 
 static int
 qio_channel_socket_close(QIOChannel *ioc,
@@ -922,7 +960,7 @@ static GSource *qio_channel_socket_create_watch(QIOChannel *ioc,
 }
 
 static void qio_channel_socket_class_init(ObjectClass *klass,
-                                          void *class_data G_GNUC_UNUSED)
+                                          const void *class_data G_GNUC_UNUSED)
 {
     QIOChannelClass *ioc_klass = QIO_CHANNEL_CLASS(klass);
 
@@ -938,6 +976,7 @@ static void qio_channel_socket_class_init(ObjectClass *klass,
 #ifdef QEMU_MSG_ZEROCOPY
     ioc_klass->io_flush = qio_channel_socket_flush;
 #endif
+    ioc_klass->io_peerpid = qio_channel_socket_get_peerpid;
 }
 
 static const TypeInfo qio_channel_socket_info = {

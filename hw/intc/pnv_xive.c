@@ -1,10 +1,9 @@
 /*
  * QEMU PowerPC XIVE interrupt controller model
  *
- * Copyright (c) 2017-2019, IBM Corporation.
+ * Copyright (c) 2017-2024, IBM Corporation.
  *
- * This code is licensed under the GPL version 2 or later. See the
- * COPYING file in the top-level directory.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include "qemu/osdep.h"
@@ -12,10 +11,9 @@
 #include "qemu/module.h"
 #include "qapi/error.h"
 #include "target/ppc/cpu.h"
-#include "sysemu/cpus.h"
-#include "sysemu/dma.h"
-#include "sysemu/reset.h"
-#include "monitor/monitor.h"
+#include "system/cpus.h"
+#include "system/dma.h"
+#include "system/reset.h"
 #include "hw/ppc/fdt.h"
 #include "hw/ppc/pnv.h"
 #include "hw/ppc/pnv_chip.h"
@@ -472,14 +470,13 @@ static bool pnv_xive_is_cpu_enabled(PnvXive *xive, PowerPCCPU *cpu)
     return xive->regs[reg >> 3] & PPC_BIT(bit);
 }
 
-static int pnv_xive_match_nvt(XivePresenter *xptr, uint8_t format,
-                              uint8_t nvt_blk, uint32_t nvt_idx,
-                              bool cam_ignore, uint8_t priority,
-                              uint32_t logic_serv, XiveTCTXMatch *match)
+static bool pnv_xive_match_nvt(XivePresenter *xptr, uint8_t format,
+                               uint8_t nvt_blk, uint32_t nvt_idx,
+                               bool crowd, bool cam_ignore, uint8_t priority,
+                               uint32_t logic_serv, XiveTCTXMatch *match)
 {
     PnvXive *xive = PNV_XIVE(xptr);
     PnvChip *chip = xive->chip;
-    int count = 0;
     int i, j;
 
     for (i = 0; i < chip->nr_cores; i++) {
@@ -501,7 +498,8 @@ static int pnv_xive_match_nvt(XivePresenter *xptr, uint8_t format,
              * Check the thread context CAM lines and record matches.
              */
             ring = xive_presenter_tctx_match(xptr, tctx, format, nvt_blk,
-                                             nvt_idx, cam_ignore, logic_serv);
+                                             nvt_idx, cam_ignore,
+                                             logic_serv);
             /*
              * Save the context and follow on to catch duplicates, that we
              * don't support yet.
@@ -511,17 +509,18 @@ static int pnv_xive_match_nvt(XivePresenter *xptr, uint8_t format,
                     qemu_log_mask(LOG_GUEST_ERROR, "XIVE: already found a "
                                   "thread context NVT %x/%x\n",
                                   nvt_blk, nvt_idx);
-                    return -1;
+                    match->count++;
+                    continue;
                 }
 
                 match->ring = ring;
                 match->tctx = tctx;
-                count++;
+                match->count++;
             }
         }
     }
 
-    return count;
+    return !!match->count;
 }
 
 static uint32_t pnv_xive_presenter_get_config(XivePresenter *xptr)
@@ -1831,7 +1830,7 @@ static const MemoryRegionOps pnv_xive_pc_ops = {
 };
 
 static void xive_nvt_pic_print_info(XiveNVT *nvt, uint32_t nvt_idx,
-                                    Monitor *mon)
+                                    GString *buf)
 {
     uint8_t  eq_blk = xive_get_field32(NVT_W1_EQ_BLOCK, nvt->w1);
     uint32_t eq_idx = xive_get_field32(NVT_W1_EQ_INDEX, nvt->w1);
@@ -1840,12 +1839,12 @@ static void xive_nvt_pic_print_info(XiveNVT *nvt, uint32_t nvt_idx,
         return;
     }
 
-    monitor_printf(mon, "  %08x end:%02x/%04x IPB:%02x\n", nvt_idx,
-                   eq_blk, eq_idx,
-                   xive_get_field32(NVT_W4_IPB, nvt->w4));
+    g_string_append_printf(buf, "  %08x end:%02x/%04x IPB:%02x\n",
+                           nvt_idx, eq_blk, eq_idx,
+                           xive_get_field32(NVT_W4_IPB, nvt->w4));
 }
 
-void pnv_xive_pic_print_info(PnvXive *xive, Monitor *mon)
+void pnv_xive_pic_print_info(PnvXive *xive, GString *buf)
 {
     XiveRouter *xrtr = XIVE_ROUTER(xive);
     uint8_t blk = pnv_xive_block_id(xive);
@@ -1858,39 +1857,40 @@ void pnv_xive_pic_print_info(PnvXive *xive, Monitor *mon)
     int i;
     uint64_t xive_nvt_per_subpage;
 
-    monitor_printf(mon, "XIVE[%x] #%d Source %08x .. %08x\n", chip_id, blk,
-                   srcno0, srcno0 + nr_ipis - 1);
-    xive_source_pic_print_info(&xive->ipi_source, srcno0, mon);
+    g_string_append_printf(buf, "XIVE[%x] #%d Source %08x .. %08x\n",
+                           chip_id, blk, srcno0, srcno0 + nr_ipis - 1);
+    xive_source_pic_print_info(&xive->ipi_source, srcno0, buf);
 
-    monitor_printf(mon, "XIVE[%x] #%d EAT %08x .. %08x\n", chip_id, blk,
-                   srcno0, srcno0 + nr_ipis - 1);
+    g_string_append_printf(buf, "XIVE[%x] #%d EAT %08x .. %08x\n",
+                           chip_id, blk, srcno0, srcno0 + nr_ipis - 1);
     for (i = 0; i < nr_ipis; i++) {
         if (xive_router_get_eas(xrtr, blk, i, &eas)) {
             break;
         }
         if (!xive_eas_is_masked(&eas)) {
-            xive_eas_pic_print_info(&eas, i, mon);
+            xive_eas_pic_print_info(&eas, i, buf);
         }
     }
 
-    monitor_printf(mon, "XIVE[%x] #%d ENDT\n", chip_id, blk);
+    g_string_append_printf(buf, "XIVE[%x] #%d ENDT\n", chip_id, blk);
     i = 0;
     while (!xive_router_get_end(xrtr, blk, i, &end)) {
-        xive_end_pic_print_info(&end, i++, mon);
+        xive_end_pic_print_info(&end, i++, buf);
     }
 
-    monitor_printf(mon, "XIVE[%x] #%d END Escalation EAT\n", chip_id, blk);
+    g_string_append_printf(buf, "XIVE[%x] #%d END Escalation EAT\n",
+                           chip_id, blk);
     i = 0;
     while (!xive_router_get_end(xrtr, blk, i, &end)) {
-        xive_end_eas_pic_print_info(&end, i++, mon);
+        xive_end_eas_pic_print_info(&end, i++, buf);
     }
 
-    monitor_printf(mon, "XIVE[%x] #%d NVTT %08x .. %08x\n", chip_id, blk,
-                   0, XIVE_NVT_COUNT - 1);
+    g_string_append_printf(buf, "XIVE[%x] #%d NVTT %08x .. %08x\n",
+                           chip_id, blk, 0, XIVE_NVT_COUNT - 1);
     xive_nvt_per_subpage = pnv_xive_vst_per_subpage(xive, VST_TSEL_VPDT);
     for (i = 0; i < XIVE_NVT_COUNT; i += xive_nvt_per_subpage) {
         while (!xive_router_get_nvt(xrtr, blk, i, &nvt)) {
-            xive_nvt_pic_print_info(&nvt, i++, mon);
+            xive_nvt_pic_print_info(&nvt, i++, buf);
         }
     }
 }
@@ -2059,17 +2059,16 @@ static int pnv_xive_dt_xscom(PnvXScomInterface *dev, void *fdt,
     return 0;
 }
 
-static Property pnv_xive_properties[] = {
+static const Property pnv_xive_properties[] = {
     DEFINE_PROP_UINT64("ic-bar", PnvXive, ic_base, 0),
     DEFINE_PROP_UINT64("vc-bar", PnvXive, vc_base, 0),
     DEFINE_PROP_UINT64("pc-bar", PnvXive, pc_base, 0),
     DEFINE_PROP_UINT64("tm-bar", PnvXive, tm_base, 0),
     /* The PnvChip id identifies the XIVE interrupt controller. */
     DEFINE_PROP_LINK("chip", PnvXive, chip, TYPE_PNV_CHIP, PnvChip *),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void pnv_xive_class_init(ObjectClass *klass, void *data)
+static void pnv_xive_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PnvXScomInterfaceClass *xdc = PNV_XSCOM_INTERFACE_CLASS(klass);
@@ -2107,7 +2106,7 @@ static const TypeInfo pnv_xive_info = {
     .instance_size = sizeof(PnvXive),
     .class_init    = pnv_xive_class_init,
     .class_size    = sizeof(PnvXiveClass),
-    .interfaces    = (InterfaceInfo[]) {
+    .interfaces    = (const InterfaceInfo[]) {
         { TYPE_PNV_XSCOM_INTERFACE },
         { }
     }

@@ -23,5 +23,5 @@ ansible_python_interpreter: /opt/homebrew/bin/python3
 cirrus:
   instance_type: macos_instance
   image_selector: image
-  image_name: ghcr.io/cirruslabs/macos-sonoma-base:latest
+  image_name: ghcr.io/cirruslabs/macos-runner:sonoma
   arch: aarch64

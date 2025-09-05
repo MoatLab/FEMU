@@ -21,15 +21,15 @@
 #include "qapi/error.h"
 #include "qapi/qapi-commands-migration.h"
 #include "qapi/qapi-visit-migration.h"
-#include "qapi/qmp/qdict.h"
+#include "qobject/qdict.h"
 #include "qapi/string-input-visitor.h"
 #include "qapi/string-output-visitor.h"
 #include "qemu/cutils.h"
 #include "qemu/error-report.h"
 #include "qemu/sockets.h"
-#include "sysemu/runstate.h"
+#include "system/runstate.h"
 #include "ui/qemu-spice.h"
-#include "sysemu/sysemu.h"
+#include "system/system.h"
 #include "options.h"
 #include "migration.h"
 
@@ -37,28 +37,107 @@ static void migration_global_dump(Monitor *mon)
 {
     MigrationState *ms = migrate_get_current();
 
-    monitor_printf(mon, "globals:\n");
-    monitor_printf(mon, "store-global-state: %s\n",
+    monitor_printf(mon, "Globals:\n");
+    monitor_printf(mon, "  store-global-state: %s\n",
                    ms->store_global_state ? "on" : "off");
-    monitor_printf(mon, "only-migratable: %s\n",
+    monitor_printf(mon, "  only-migratable: %s\n",
                    only_migratable ? "on" : "off");
-    monitor_printf(mon, "send-configuration: %s\n",
+    monitor_printf(mon, "  send-configuration: %s\n",
                    ms->send_configuration ? "on" : "off");
-    monitor_printf(mon, "send-section-footer: %s\n",
+    monitor_printf(mon, "  send-section-footer: %s\n",
                    ms->send_section_footer ? "on" : "off");
-    monitor_printf(mon, "decompress-error-check: %s\n",
-                   ms->decompress_error_check ? "on" : "off");
-    monitor_printf(mon, "clear-bitmap-shift: %u\n",
+    monitor_printf(mon, "  send-switchover-start: %s\n",
+                   ms->send_switchover_start ? "on" : "off");
+    monitor_printf(mon, "  clear-bitmap-shift: %u\n",
                    ms->clear_bitmap_shift);
+}
+
+static const gchar *format_time_str(uint64_t us)
+{
+    const char *units[] = {"us", "ms", "sec"};
+    int index = 0;
+
+    while (us >= 1000 && index + 1 < ARRAY_SIZE(units)) {
+        us /= 1000;
+        index++;
+    }
+
+    return g_strdup_printf("%"PRIu64" %s", us, units[index]);
+}
+
+static void migration_dump_blocktime(Monitor *mon, MigrationInfo *info)
+{
+    if (info->has_postcopy_blocktime) {
+        monitor_printf(mon, "Postcopy Blocktime (ms): %" PRIu32 "\n",
+                       info->postcopy_blocktime);
+    }
+
+    if (info->has_postcopy_vcpu_blocktime) {
+        uint32List *item = info->postcopy_vcpu_blocktime;
+        const char *sep = "";
+        int count = 0;
+
+        monitor_printf(mon, "Postcopy vCPU Blocktime (ms):\n [");
+
+        while (item) {
+            monitor_printf(mon, "%s%"PRIu32, sep, item->value);
+            item = item->next;
+            /* Each line 10 vcpu results, newline if there's more */
+            sep = ((++count % 10 == 0) && item) ? ",\n  " : ", ";
+        }
+        monitor_printf(mon, "]\n");
+    }
+
+    if (info->has_postcopy_latency) {
+        monitor_printf(mon, "Postcopy Latency (ns): %" PRIu64 "\n",
+                       info->postcopy_latency);
+    }
+
+    if (info->has_postcopy_non_vcpu_latency) {
+        monitor_printf(mon, "Postcopy non-vCPU Latencies (ns): %" PRIu64 "\n",
+                       info->postcopy_non_vcpu_latency);
+    }
+
+    if (info->has_postcopy_vcpu_latency) {
+        uint64List *item = info->postcopy_vcpu_latency;
+        const char *sep = "";
+        int count = 0;
+
+        monitor_printf(mon, "Postcopy vCPU Latencies (ns):\n [");
+
+        while (item) {
+            monitor_printf(mon, "%s%"PRIu64, sep, item->value);
+            item = item->next;
+            /* Each line 10 vcpu results, newline if there's more */
+            sep = ((++count % 10 == 0) && item) ? ",\n  " : ", ";
+        }
+        monitor_printf(mon, "]\n");
+    }
+
+    if (info->has_postcopy_latency_dist) {
+        uint64List *item = info->postcopy_latency_dist;
+        int count = 0;
+
+        monitor_printf(mon, "Postcopy Latency Distribution:\n");
+
+        while (item) {
+            g_autofree const gchar *from = format_time_str(1UL << count);
+            g_autofree const gchar *to = format_time_str(1UL << (count + 1));
+
+            monitor_printf(mon, "  [ %8s - %8s ]: %10"PRIu64"\n",
+                           from, to, item->value);
+            item = item->next;
+            count++;
+        }
+    }
 }
 
 void hmp_info_migrate(Monitor *mon, const QDict *qdict)
 {
+    bool show_all = qdict_get_try_bool(qdict, "all", false);
     MigrationInfo *info;
 
     info = qmp_query_migrate(NULL);
-
-    migration_global_dump(mon);
 
     if (info->blocked_reasons) {
         strList *reasons = info->blocked_reasons;
@@ -70,157 +149,39 @@ void hmp_info_migrate(Monitor *mon, const QDict *qdict)
     }
 
     if (info->has_status) {
-        monitor_printf(mon, "Migration status: %s",
+        monitor_printf(mon, "Status: \t\t%s",
                        MigrationStatus_str(info->status));
-        if (info->status == MIGRATION_STATUS_FAILED && info->error_desc) {
+        if ((info->status == MIGRATION_STATUS_FAILED ||
+             info->status == MIGRATION_STATUS_POSTCOPY_PAUSED) &&
+            info->error_desc) {
             monitor_printf(mon, " (%s)\n", info->error_desc);
         } else {
             monitor_printf(mon, "\n");
         }
 
-        monitor_printf(mon, "total time: %" PRIu64 " ms\n",
-                       info->total_time);
-        if (info->has_expected_downtime) {
-            monitor_printf(mon, "expected downtime: %" PRIu64 " ms\n",
-                           info->expected_downtime);
-        }
-        if (info->has_downtime) {
-            monitor_printf(mon, "downtime: %" PRIu64 " ms\n",
-                           info->downtime);
-        }
-        if (info->has_setup_time) {
-            monitor_printf(mon, "setup: %" PRIu64 " ms\n",
-                           info->setup_time);
-        }
-    }
-
-    if (info->ram) {
-        monitor_printf(mon, "transferred ram: %" PRIu64 " kbytes\n",
-                       info->ram->transferred >> 10);
-        monitor_printf(mon, "throughput: %0.2f mbps\n",
-                       info->ram->mbps);
-        monitor_printf(mon, "remaining ram: %" PRIu64 " kbytes\n",
-                       info->ram->remaining >> 10);
-        monitor_printf(mon, "total ram: %" PRIu64 " kbytes\n",
-                       info->ram->total >> 10);
-        monitor_printf(mon, "duplicate: %" PRIu64 " pages\n",
-                       info->ram->duplicate);
-        monitor_printf(mon, "skipped: %" PRIu64 " pages\n",
-                       info->ram->skipped);
-        monitor_printf(mon, "normal: %" PRIu64 " pages\n",
-                       info->ram->normal);
-        monitor_printf(mon, "normal bytes: %" PRIu64 " kbytes\n",
-                       info->ram->normal_bytes >> 10);
-        monitor_printf(mon, "dirty sync count: %" PRIu64 "\n",
-                       info->ram->dirty_sync_count);
-        monitor_printf(mon, "page size: %" PRIu64 " kbytes\n",
-                       info->ram->page_size >> 10);
-        monitor_printf(mon, "multifd bytes: %" PRIu64 " kbytes\n",
-                       info->ram->multifd_bytes >> 10);
-        monitor_printf(mon, "pages-per-second: %" PRIu64 "\n",
-                       info->ram->pages_per_second);
-
-        if (info->ram->dirty_pages_rate) {
-            monitor_printf(mon, "dirty pages rate: %" PRIu64 " pages\n",
-                           info->ram->dirty_pages_rate);
-        }
-        if (info->ram->postcopy_requests) {
-            monitor_printf(mon, "postcopy request count: %" PRIu64 "\n",
-                           info->ram->postcopy_requests);
-        }
-        if (info->ram->precopy_bytes) {
-            monitor_printf(mon, "precopy ram: %" PRIu64 " kbytes\n",
-                           info->ram->precopy_bytes >> 10);
-        }
-        if (info->ram->downtime_bytes) {
-            monitor_printf(mon, "downtime ram: %" PRIu64 " kbytes\n",
-                           info->ram->downtime_bytes >> 10);
-        }
-        if (info->ram->postcopy_bytes) {
-            monitor_printf(mon, "postcopy ram: %" PRIu64 " kbytes\n",
-                           info->ram->postcopy_bytes >> 10);
-        }
-        if (info->ram->dirty_sync_missed_zero_copy) {
-            monitor_printf(mon,
-                           "Zero-copy-send fallbacks happened: %" PRIu64 " times\n",
-                           info->ram->dirty_sync_missed_zero_copy);
+        if (info->total_time) {
+            monitor_printf(mon, "Time (ms): \t\ttotal=%" PRIu64,
+                           info->total_time);
+            if (info->has_setup_time) {
+                monitor_printf(mon, ", setup=%" PRIu64,
+                               info->setup_time);
+            }
+            if (info->has_expected_downtime) {
+                monitor_printf(mon, ", exp_down=%" PRIu64,
+                               info->expected_downtime);
+            }
+            if (info->has_downtime) {
+                monitor_printf(mon, ", down=%" PRIu64,
+                               info->downtime);
+            }
+            monitor_printf(mon, "\n");
         }
     }
 
-    if (info->disk) {
-        monitor_printf(mon, "transferred disk: %" PRIu64 " kbytes\n",
-                       info->disk->transferred >> 10);
-        monitor_printf(mon, "remaining disk: %" PRIu64 " kbytes\n",
-                       info->disk->remaining >> 10);
-        monitor_printf(mon, "total disk: %" PRIu64 " kbytes\n",
-                       info->disk->total >> 10);
-    }
-
-    if (info->xbzrle_cache) {
-        monitor_printf(mon, "cache size: %" PRIu64 " bytes\n",
-                       info->xbzrle_cache->cache_size);
-        monitor_printf(mon, "xbzrle transferred: %" PRIu64 " kbytes\n",
-                       info->xbzrle_cache->bytes >> 10);
-        monitor_printf(mon, "xbzrle pages: %" PRIu64 " pages\n",
-                       info->xbzrle_cache->pages);
-        monitor_printf(mon, "xbzrle cache miss: %" PRIu64 " pages\n",
-                       info->xbzrle_cache->cache_miss);
-        monitor_printf(mon, "xbzrle cache miss rate: %0.2f\n",
-                       info->xbzrle_cache->cache_miss_rate);
-        monitor_printf(mon, "xbzrle encoding rate: %0.2f\n",
-                       info->xbzrle_cache->encoding_rate);
-        monitor_printf(mon, "xbzrle overflow: %" PRIu64 "\n",
-                       info->xbzrle_cache->overflow);
-    }
-
-    if (info->compression) {
-        monitor_printf(mon, "compression pages: %" PRIu64 " pages\n",
-                       info->compression->pages);
-        monitor_printf(mon, "compression busy: %" PRIu64 "\n",
-                       info->compression->busy);
-        monitor_printf(mon, "compression busy rate: %0.2f\n",
-                       info->compression->busy_rate);
-        monitor_printf(mon, "compressed size: %" PRIu64 " kbytes\n",
-                       info->compression->compressed_size >> 10);
-        monitor_printf(mon, "compression rate: %0.2f\n",
-                       info->compression->compression_rate);
-    }
-
-    if (info->has_cpu_throttle_percentage) {
-        monitor_printf(mon, "cpu throttle percentage: %" PRIu64 "\n",
-                       info->cpu_throttle_percentage);
-    }
-
-    if (info->has_dirty_limit_throttle_time_per_round) {
-        monitor_printf(mon, "dirty-limit throttle time: %" PRIu64 " us\n",
-                       info->dirty_limit_throttle_time_per_round);
-    }
-
-    if (info->has_dirty_limit_ring_full_time) {
-        monitor_printf(mon, "dirty-limit ring full time: %" PRIu64 " us\n",
-                       info->dirty_limit_ring_full_time);
-    }
-
-    if (info->has_postcopy_blocktime) {
-        monitor_printf(mon, "postcopy blocktime: %u\n",
-                       info->postcopy_blocktime);
-    }
-
-    if (info->has_postcopy_vcpu_blocktime) {
-        Visitor *v;
-        char *str;
-        v = string_output_visitor_new(false, &str);
-        visit_type_uint32List(v, NULL, &info->postcopy_vcpu_blocktime,
-                              &error_abort);
-        visit_complete(v, &str);
-        monitor_printf(mon, "postcopy vcpu blocktime: %s\n", str);
-        g_free(str);
-        visit_free(v);
-    }
     if (info->has_socket_address) {
         SocketAddressList *addr;
 
-        monitor_printf(mon, "socket address: [\n");
+        monitor_printf(mon, "Sockets: [\n");
 
         for (addr = info->socket_address; addr; addr = addr->next) {
             char *s = socket_uri(addr->value);
@@ -230,11 +191,101 @@ void hmp_info_migrate(Monitor *mon, const QDict *qdict)
         monitor_printf(mon, "]\n");
     }
 
-    if (info->vfio) {
-        monitor_printf(mon, "vfio device transferred: %" PRIu64 " kbytes\n",
-                       info->vfio->transferred >> 10);
+    if (info->ram) {
+        g_autofree char *str_psize = size_to_str(info->ram->page_size);
+        g_autofree char *str_total = size_to_str(info->ram->total);
+        g_autofree char *str_transferred = size_to_str(info->ram->transferred);
+        g_autofree char *str_remaining = size_to_str(info->ram->remaining);
+        g_autofree char *str_precopy = size_to_str(info->ram->precopy_bytes);
+        g_autofree char *str_multifd = size_to_str(info->ram->multifd_bytes);
+        g_autofree char *str_postcopy = size_to_str(info->ram->postcopy_bytes);
+
+        monitor_printf(mon, "RAM info:\n");
+        monitor_printf(mon, "  Throughput (Mbps): \t%0.2f\n",
+                       info->ram->mbps);
+        monitor_printf(mon, "  Sizes: \t\tpagesize=%s, total=%s\n",
+                       str_psize, str_total);
+        monitor_printf(mon, "  Transfers: \t\ttransferred=%s, remain=%s\n",
+                       str_transferred, str_remaining);
+        monitor_printf(mon, "    Channels: \t\tprecopy=%s, "
+                       "multifd=%s, postcopy=%s",
+                       str_precopy, str_multifd, str_postcopy);
+
+        if (info->vfio) {
+            g_autofree char *str_vfio = size_to_str(info->vfio->transferred);
+
+            monitor_printf(mon, ", vfio=%s", str_vfio);
+        }
+        monitor_printf(mon, "\n");
+
+        monitor_printf(mon, "    Page Types: \tnormal=%" PRIu64
+                       ", zero=%" PRIu64 "\n",
+                       info->ram->normal, info->ram->duplicate);
+        monitor_printf(mon, "  Page Rates (pps): \ttransfer=%" PRIu64,
+                       info->ram->pages_per_second);
+        if (info->ram->dirty_pages_rate) {
+            monitor_printf(mon, ", dirty=%" PRIu64,
+                           info->ram->dirty_pages_rate);
+        }
+        monitor_printf(mon, "\n");
+
+        monitor_printf(mon, "  Others: \t\tdirty_syncs=%" PRIu64,
+                       info->ram->dirty_sync_count);
+        if (info->ram->postcopy_requests) {
+            monitor_printf(mon, ", postcopy_req=%" PRIu64,
+                           info->ram->postcopy_requests);
+        }
+        if (info->ram->downtime_bytes) {
+            monitor_printf(mon, ", downtime_bytes=%" PRIu64,
+                           info->ram->downtime_bytes);
+        }
+        if (info->ram->dirty_sync_missed_zero_copy) {
+            monitor_printf(mon, ", zerocopy_fallbacks=%" PRIu64,
+                           info->ram->dirty_sync_missed_zero_copy);
+        }
+        monitor_printf(mon, "\n");
     }
 
+    if (!show_all) {
+        goto out;
+    }
+
+    migration_global_dump(mon);
+
+    if (info->xbzrle_cache) {
+        monitor_printf(mon, "XBZRLE: size=%" PRIu64
+                       ", transferred=%" PRIu64
+                       ", pages=%" PRIu64
+                       ", miss=%" PRIu64 "\n"
+                       "  miss_rate=%0.2f"
+                       ", encode_rate=%0.2f"
+                       ", overflow=%" PRIu64 "\n",
+                       info->xbzrle_cache->cache_size,
+                       info->xbzrle_cache->bytes,
+                       info->xbzrle_cache->pages,
+                       info->xbzrle_cache->cache_miss,
+                       info->xbzrle_cache->cache_miss_rate,
+                       info->xbzrle_cache->encoding_rate,
+                       info->xbzrle_cache->overflow);
+    }
+
+    if (info->has_cpu_throttle_percentage) {
+        monitor_printf(mon, "CPU Throttle (%%): %" PRIu64 "\n",
+                       info->cpu_throttle_percentage);
+    }
+
+    if (info->has_dirty_limit_throttle_time_per_round) {
+        monitor_printf(mon, "Dirty-limit Throttle (us): %" PRIu64 "\n",
+                       info->dirty_limit_throttle_time_per_round);
+    }
+
+    if (info->has_dirty_limit_ring_full_time) {
+        monitor_printf(mon, "Dirty-limit Ring Full (us): %" PRIu64 "\n",
+                       info->dirty_limit_ring_full_time);
+    }
+
+    migration_dump_blocktime(mon, info);
+out:
     qapi_free_MigrationInfo(info);
 }
 
@@ -274,22 +325,6 @@ void hmp_info_migrate_parameters(Monitor *mon, const QDict *qdict)
         monitor_printf(mon, "%s: %" PRIu64 " ms\n",
             MigrationParameter_str(MIGRATION_PARAMETER_ANNOUNCE_STEP),
             params->announce_step);
-        assert(params->has_compress_level);
-        monitor_printf(mon, "%s: %u\n",
-            MigrationParameter_str(MIGRATION_PARAMETER_COMPRESS_LEVEL),
-            params->compress_level);
-        assert(params->has_compress_threads);
-        monitor_printf(mon, "%s: %u\n",
-            MigrationParameter_str(MIGRATION_PARAMETER_COMPRESS_THREADS),
-            params->compress_threads);
-        assert(params->has_compress_wait_thread);
-        monitor_printf(mon, "%s: %s\n",
-            MigrationParameter_str(MIGRATION_PARAMETER_COMPRESS_WAIT_THREAD),
-            params->compress_wait_thread ? "on" : "off");
-        assert(params->has_decompress_threads);
-        monitor_printf(mon, "%s: %u\n",
-            MigrationParameter_str(MIGRATION_PARAMETER_DECOMPRESS_THREADS),
-            params->decompress_threads);
         assert(params->has_throttle_trigger_threshold);
         monitor_printf(mon, "%s: %u\n",
             MigrationParameter_str(MIGRATION_PARAMETER_THROTTLE_TRIGGER_THRESHOLD),
@@ -334,10 +369,6 @@ void hmp_info_migrate_parameters(Monitor *mon, const QDict *qdict)
         monitor_printf(mon, "%s: %u ms\n",
             MigrationParameter_str(MIGRATION_PARAMETER_X_CHECKPOINT_DELAY),
             params->x_checkpoint_delay);
-        assert(params->has_block_incremental);
-        monitor_printf(mon, "%s: %s\n",
-            MigrationParameter_str(MIGRATION_PARAMETER_BLOCK_INCREMENTAL),
-            params->block_incremental ? "on" : "off");
         monitor_printf(mon, "%s: %u\n",
             MigrationParameter_str(MIGRATION_PARAMETER_MULTIFD_CHANNELS),
             params->multifd_channels);
@@ -397,6 +428,13 @@ void hmp_info_migrate_parameters(Monitor *mon, const QDict *qdict)
         monitor_printf(mon, "%s: %s\n",
             MigrationParameter_str(MIGRATION_PARAMETER_MODE),
             qapi_enum_lookup(&MigMode_lookup, params->mode));
+
+        if (params->has_direct_io) {
+            monitor_printf(mon, "%s: %s\n",
+                           MigrationParameter_str(
+                               MIGRATION_PARAMETER_DIRECT_IO),
+                           params->direct_io ? "on" : "off");
+        }
     }
 
     qapi_free_MigrationParameters(params);
@@ -466,7 +504,7 @@ void hmp_migrate_incoming(Monitor *mon, const QDict *qdict)
     }
     QAPI_LIST_PREPEND(caps, g_steal_pointer(&channel));
 
-    qmp_migrate_incoming(NULL, true, caps, &err);
+    qmp_migrate_incoming(NULL, true, caps, true, false, &err);
     qapi_free_MigrationChannelList(caps);
 
 end:
@@ -535,22 +573,6 @@ void hmp_migrate_set_parameter(Monitor *mon, const QDict *qdict)
     }
 
     switch (val) {
-    case MIGRATION_PARAMETER_COMPRESS_LEVEL:
-        p->has_compress_level = true;
-        visit_type_uint8(v, param, &p->compress_level, &err);
-        break;
-    case MIGRATION_PARAMETER_COMPRESS_THREADS:
-        p->has_compress_threads = true;
-        visit_type_uint8(v, param, &p->compress_threads, &err);
-        break;
-    case MIGRATION_PARAMETER_COMPRESS_WAIT_THREAD:
-        p->has_compress_wait_thread = true;
-        visit_type_bool(v, param, &p->compress_wait_thread, &err);
-        break;
-    case MIGRATION_PARAMETER_DECOMPRESS_THREADS:
-        p->has_decompress_threads = true;
-        visit_type_uint8(v, param, &p->decompress_threads, &err);
-        break;
     case MIGRATION_PARAMETER_THROTTLE_TRIGGER_THRESHOLD:
         p->has_throttle_trigger_threshold = true;
         visit_type_uint8(v, param, &p->throttle_trigger_threshold, &err);
@@ -618,10 +640,6 @@ void hmp_migrate_set_parameter(Monitor *mon, const QDict *qdict)
         p->has_x_checkpoint_delay = true;
         visit_type_uint32(v, param, &p->x_checkpoint_delay, &err);
         break;
-    case MIGRATION_PARAMETER_BLOCK_INCREMENTAL:
-        p->has_block_incremental = true;
-        visit_type_bool(v, param, &p->block_incremental, &err);
-        break;
     case MIGRATION_PARAMETER_MULTIFD_CHANNELS:
         p->has_multifd_channels = true;
         visit_type_uint8(v, param, &p->multifd_channels, &err);
@@ -634,6 +652,10 @@ void hmp_migrate_set_parameter(Monitor *mon, const QDict *qdict)
     case MIGRATION_PARAMETER_MULTIFD_ZLIB_LEVEL:
         p->has_multifd_zlib_level = true;
         visit_type_uint8(v, param, &p->multifd_zlib_level, &err);
+        break;
+    case MIGRATION_PARAMETER_MULTIFD_QATZIP_LEVEL:
+        p->has_multifd_qatzip_level = true;
+        visit_type_uint8(v, param, &p->multifd_qatzip_level, &err);
         break;
     case MIGRATION_PARAMETER_MULTIFD_ZSTD_LEVEL:
         p->has_multifd_zstd_level = true;
@@ -690,8 +712,12 @@ void hmp_migrate_set_parameter(Monitor *mon, const QDict *qdict)
         p->has_mode = true;
         visit_type_MigMode(v, param, &p->mode, &err);
         break;
+    case MIGRATION_PARAMETER_DIRECT_IO:
+        p->has_direct_io = true;
+        visit_type_bool(v, param, &p->direct_io, &err);
+        break;
     default:
-        assert(0);
+        g_assert_not_reached();
     }
 
     if (err) {
@@ -736,24 +762,8 @@ static void hmp_migrate_status_cb(void *opaque)
     info = qmp_query_migrate(NULL);
     if (!info->has_status || info->status == MIGRATION_STATUS_ACTIVE ||
         info->status == MIGRATION_STATUS_SETUP) {
-        if (info->disk) {
-            int progress;
-
-            if (info->disk->remaining) {
-                progress = info->disk->transferred * 100 / info->disk->total;
-            } else {
-                progress = 100;
-            }
-
-            monitor_printf(status->mon, "Completed %d %%\r", progress);
-            monitor_flush(status->mon);
-        }
-
         timer_mod(status->timer, qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + 1000);
     } else {
-        if (migrate_block()) {
-            monitor_printf(status->mon, "\n");
-        }
         if (info->error_desc) {
             error_report("%s", info->error_desc);
         }
@@ -768,23 +778,11 @@ static void hmp_migrate_status_cb(void *opaque)
 void hmp_migrate(Monitor *mon, const QDict *qdict)
 {
     bool detach = qdict_get_try_bool(qdict, "detach", false);
-    bool blk = qdict_get_try_bool(qdict, "blk", false);
-    bool inc = qdict_get_try_bool(qdict, "inc", false);
     bool resume = qdict_get_try_bool(qdict, "resume", false);
     const char *uri = qdict_get_str(qdict, "uri");
     Error *err = NULL;
     g_autoptr(MigrationChannelList) caps = NULL;
     g_autoptr(MigrationChannel) channel = NULL;
-
-    if (inc) {
-        warn_report("option '-i' is deprecated;"
-                    " use blockdev-mirror with NBD instead");
-    }
-
-    if (blk) {
-        warn_report("option '-b' is deprecated;"
-                    " use blockdev-mirror with NBD instead");
-    }
 
     if (!migrate_uri_parse(uri, &channel, &err)) {
         hmp_handle_error(mon, err);
@@ -792,8 +790,7 @@ void hmp_migrate(Monitor *mon, const QDict *qdict)
     }
     QAPI_LIST_PREPEND(caps, g_steal_pointer(&channel));
 
-    qmp_migrate(NULL, true, caps, !!blk, blk, !!inc, inc,
-                 false, false, true, resume, &err);
+    qmp_migrate(NULL, true, caps, false, false, true, resume, &err);
     if (hmp_handle_error(mon, err)) {
         return;
     }

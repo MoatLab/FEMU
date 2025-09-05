@@ -1,0 +1,15 @@
+skiboot/libmctp/ is a minimally modified version of upstream libmctp
+that is distributed with the openbmc project hosted at
+https://github.com/openbmc/libmctp.git
+
+This version is taken from libmctp.git commit 4df106db7766d ("astlpc: Add
+mctp_astlpc_tx_done() API") by copying most
+of files from the libmctp/ directory.
+
+The only modifications from the upstream source are the additions of
+this file, Makefile.inc which has been derived from the original
+Makefile.inc, astlpc.c (compilation error when MCTP_HAVE_FILEIO is
+undefined) and the removal of several unnecessary folders and files.
+
+Local libmctp changes should be kept to a minimum, and submitted
+upstream if possible.

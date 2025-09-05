@@ -212,7 +212,7 @@ class CommandLine:
         formatopt.add_argument(
             "-f", "--format",
             default="shell",
-            choices=["shell", "json"],
+            choices=["shell", "json", "yaml"],
             help="output format (default: shell)",
         )
 

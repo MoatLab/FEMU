@@ -162,8 +162,6 @@ void cpu_mips_store_cause(CPUMIPSState *env, target_ulong val);
 
 extern const VMStateDescription vmstate_mips_cpu;
 
-#endif /* !CONFIG_USER_ONLY */
-
 static inline bool cpu_mips_hw_interrupts_enabled(CPUMIPSState *env)
 {
     return (env->CP0_Status & (1 << CP0St_IE)) &&
@@ -206,6 +204,8 @@ static inline bool cpu_mips_hw_interrupts_pending(CPUMIPSState *env)
     return r;
 }
 
+#endif /* !CONFIG_USER_ONLY */
+
 void msa_reset(CPUMIPSState *env);
 
 /* cp0_timer.c */
@@ -223,6 +223,16 @@ static inline void mips_env_set_pc(CPUMIPSState *env, target_ulong value)
     } else {
         env->hflags &= ~(MIPS_HFLAG_M16);
     }
+}
+
+static inline bool mips_env_is_bigendian(CPUMIPSState *env)
+{
+    return extract32(env->CP0_Config0, CP0C0_BE, 1);
+}
+
+static inline MemOp mo_endian_env(CPUMIPSState *env)
+{
+    return mips_env_is_bigendian(env) ? MO_BE : MO_LE;
 }
 
 static inline void restore_pamask(CPUMIPSState *env)

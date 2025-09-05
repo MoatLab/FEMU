@@ -145,9 +145,27 @@ void qemu_log_unlock(FILE *logfile)
 
 void qemu_log(const char *fmt, ...)
 {
-    FILE *f = qemu_log_trylock();
+    FILE *f;
+    g_autofree const char *timestr = NULL;
+
+    /*
+     * Prepare the timestamp *outside* the logging
+     * lock so it better reflects when the message
+     * was emitted if we are delayed acquiring the
+     * mutex
+     */
+    if (message_with_timestamp) {
+        g_autoptr(GDateTime) dt = g_date_time_new_now_utc();
+        timestr = g_date_time_format_iso8601(dt);
+    }
+
+    f = qemu_log_trylock();
     if (f) {
         va_list ap;
+
+        if (timestr) {
+            fprintf(f, "%s ", timestr);
+        }
 
         va_start(ap, fmt);
         vfprintf(f, fmt, ap);
@@ -466,6 +484,10 @@ const QEMULogItem qemu_log_items[] = {
       "show micro ops after optimization" },
     { CPU_LOG_TB_OP_IND, "op_ind",
       "show micro ops before indirect lowering" },
+#ifdef CONFIG_PLUGIN
+    { LOG_TB_OP_PLUGIN, "op_plugin",
+      "show micro ops before plugin injection" },
+#endif
     { CPU_LOG_INT, "int",
       "show interrupts/exceptions in short format" },
     { CPU_LOG_EXEC, "exec",
@@ -499,6 +521,8 @@ const QEMULogItem qemu_log_items[] = {
       "open a separate log file per thread; filename must contain '%d'" },
     { CPU_LOG_TB_VPU, "vpu",
       "include VPU registers in the 'cpu' logging" },
+    { LOG_INVALID_MEM, "invalid_mem",
+      "log invalid memory accesses" },
     { 0, NULL, NULL },
 };
 
@@ -552,3 +576,15 @@ void qemu_print_log_usage(FILE *f)
     fprintf(f, "\nUse \"-d trace:help\" to get a list of trace events.\n\n");
 #endif
 }
+
+#ifdef CONFIG_HAVE_RUST
+ssize_t rust_fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream)
+{
+    /*
+     * Same as fwrite, but return -errno because Rust libc does not provide
+     * portable access to errno. :(
+     */
+    int ret = fwrite(ptr, size, nmemb, stream);
+    return ret < 0 ? -errno : 0;
+}
+#endif

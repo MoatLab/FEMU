@@ -172,6 +172,7 @@ enum proc_chip_type {
 	PROC_CHIP_P9_CUMULUS,
 	PROC_CHIP_P9P,
 	PROC_CHIP_P10,
+	PROC_CHIP_P11,
 };
 
 /* Simulator quirks */
@@ -187,6 +188,8 @@ enum proc_chip_quirks {
 	QUIRK_NO_RNG		= 0x00000100,
 	QUIRK_QEMU              = 0x00000200,
 	QUIRK_AWAN		= 0x00000400,
+	QUIRK_BML		= 0x00000800,
+	QUIRK_NO_SBE		= 0x00001000,
 };
 
 extern enum proc_chip_quirks proc_chip_quirks;

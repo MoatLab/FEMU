@@ -508,9 +508,8 @@ static const VMStateDescription vmstate_ibex_uart = {
     }
 };
 
-static Property ibex_uart_properties[] = {
+static const Property ibex_uart_properties[] = {
     DEFINE_PROP_CHR("chardev", IbexUartState, chr),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
 static void ibex_uart_init(Object *obj)
@@ -543,11 +542,11 @@ static void ibex_uart_realize(DeviceState *dev, Error **errp)
                              s, NULL, true);
 }
 
-static void ibex_uart_class_init(ObjectClass *klass, void *data)
+static void ibex_uart_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    dc->reset = ibex_uart_reset;
+    device_class_set_legacy_reset(dc, ibex_uart_reset);
     dc->realize = ibex_uart_realize;
     dc->vmsd = &vmstate_ibex_uart;
     device_class_set_props(dc, ibex_uart_properties);

@@ -1026,7 +1026,7 @@ static void fixup_tod_reg_value(struct chiptod_tod_regs *treg_entry)
 {
 	int32_t chip_id = this_cpu()->chip_id;
 
-	if (proc_gen != proc_gen_p10)
+	if (proc_gen != proc_gen_p10 && proc_gen != proc_gen_p11)
 		return;
 
 	if (treg_entry->xscom_addr == TOD_SLAVE_PATH_CTRL)
@@ -1556,8 +1556,9 @@ void tfmr_cleanup_core_errors(uint64_t tfmr)
 	 * restored after the next rendez-vous
 	 */
 	if (!(tfmr & SPR_TFMR_TB_VALID)) {
+		mtspr(SPR_TBWL, 0);
 		mtspr(SPR_TBWU, 0);
-		mtspr(SPR_TBWU, 0);
+		mtspr(SPR_TBWL, 0);
 	}
 }
 
@@ -1680,7 +1681,6 @@ error_out:
 
 static int64_t opal_resync_timebase(void)
 {
-	/* Mambo and qemu doesn't simulate the chiptod */
 	if (chip_quirk(QUIRK_NO_CHIPTOD))
 		return OPAL_SUCCESS;
 
@@ -1718,6 +1718,8 @@ static bool chiptod_probe(void)
 			if (dt_node_is_compatible(np, "ibm,power9-chiptod"))
 				chiptod_type = chiptod_p9;
 			if (dt_node_is_compatible(np, "ibm,power10-chiptod"))
+				chiptod_type = chiptod_p10;
+			if (dt_node_is_compatible(np, "ibm,power11-chiptod"))
 				chiptod_type = chiptod_p10;
 		}
 
@@ -1828,13 +1830,16 @@ void chiptod_init(void)
 	bool sres;
 	int i;
 
-	/* Mambo and qemu doesn't simulate the chiptod */
 	if (chip_quirk(QUIRK_NO_CHIPTOD))
 		return;
 
 	op_display(OP_LOG, OP_MOD_CHIPTOD, 0);
 
 	if (!chiptod_probe()) {
+		/* Not all QEMU models provide chiptod */
+		if (chip_quirk(QUIRK_QEMU))
+			return;
+
 		prerror("Failed ChipTOD detection !\n");
 		op_display(OP_FATAL, OP_MOD_CHIPTOD, 0);
 		abort();
@@ -1902,6 +1907,8 @@ void chiptod_init(void)
 
 	chiptod_init_topology_info();
 	op_display(OP_LOG, OP_MOD_CHIPTOD, 4);
+
+	prlog(PR_NOTICE, "Synchronized all processors to common timebase.\n");
 }
 
 /* CAPP timebase sync */

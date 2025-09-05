@@ -11,12 +11,13 @@
 
 #include "qemu/osdep.h"
 #include "qemu/module.h"
-#include "sysemu/sysemu.h"
-#include "sysemu/cpus.h"
-#include "sysemu/hw_accel.h"
-#include "sysemu/kvm.h"
-#include "sysemu/runstate.h"
-#include "exec/address-spaces.h"
+#include "exec/target_page.h"
+#include "system/system.h"
+#include "system/cpus.h"
+#include "system/hw_accel.h"
+#include "system/kvm.h"
+#include "system/runstate.h"
+#include "system/address-spaces.h"
 #include "hw/i386/apic_internal.h"
 #include "hw/sysbus.h"
 #include "hw/boards.h"
@@ -718,7 +719,7 @@ static uint64_t vapic_read(void *opaque, hwaddr addr, unsigned size)
 static const MemoryRegionOps vapic_ops = {
     .write = vapic_write,
     .read = vapic_read,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+    .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
 static void vapic_realize(DeviceState *dev, Error **errp)
@@ -846,11 +847,11 @@ static const VMStateDescription vmstate_vapic = {
     }
 };
 
-static void vapic_class_init(ObjectClass *klass, void *data)
+static void vapic_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    dc->reset   = vapic_reset;
+    device_class_set_legacy_reset(dc, vapic_reset);
     dc->vmsd    = &vmstate_vapic;
     dc->realize = vapic_realize;
 }

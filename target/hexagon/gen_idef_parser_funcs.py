@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 ##
-##  Copyright(c) 2019-2023 rev.ng Labs Srl. All Rights Reserved.
+##  Copyright(c) 2019-2024 rev.ng Labs Srl. All Rights Reserved.
 ##
 ##  This program is free software; you can redistribute it and/or modify
 ##  it under the terms of the GNU General Public License as published by
@@ -20,6 +20,7 @@
 import sys
 import re
 import string
+import argparse
 from io import StringIO
 
 import hex_common
@@ -43,15 +44,20 @@ import hex_common
 ## them are inputs ("in" prefix), while some others are outputs.
 ##
 def main():
-    hex_common.read_semantics_file(sys.argv[1])
-    hex_common.read_attribs_file(sys.argv[2])
+    parser = argparse.ArgumentParser(
+        "Emit instruction implementations that can be fed to idef-parser"
+    )
+    parser.add_argument("semantics", help="semantics file")
+    parser.add_argument("out", help="output file")
+    args = parser.parse_args()
+    hex_common.read_semantics_file(args.semantics)
     hex_common.calculate_attribs()
     hex_common.init_registers()
     tagregs = hex_common.get_tagregs()
     tagimms = hex_common.get_tagimms()
 
-    with open(sys.argv[3], "w") as f:
-        f.write('#include "macros.inc"\n\n')
+    with open(args.out, "w") as f:
+        f.write('#include "macros.h.inc"\n\n')
 
         for tag in hex_common.tags:
             ## Skip the priv instructions

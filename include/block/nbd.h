@@ -33,6 +33,19 @@ typedef struct NBDMetaContexts NBDMetaContexts;
 
 extern const BlockExportDriver blk_exp_nbd;
 
+/*
+ * NBD_DEFAULT_HANDSHAKE_MAX_SECS: Number of seconds in which client must
+ * succeed at NBD_OPT_GO before being forcefully dropped as too slow.
+ */
+#define NBD_DEFAULT_HANDSHAKE_MAX_SECS 10
+
+/*
+ * NBD_DEFAULT_MAX_CONNECTIONS: Number of client sockets to allow at
+ * once; must be large enough to allow a MULTI_CONN-aware client like
+ * nbdcopy to create its typical number of 8-16 sockets.
+ */
+#define NBD_DEFAULT_MAX_CONNECTIONS 100
+
 /* Handshake phase structs - this struct is passed on the wire */
 
 typedef struct NBDOption {
@@ -403,18 +416,21 @@ AioContext *nbd_export_aio_context(NBDExport *exp);
 NBDExport *nbd_export_find(const char *name);
 
 void nbd_client_new(QIOChannelSocket *sioc,
+                    uint32_t handshake_max_secs,
                     QCryptoTLSCreds *tlscreds,
                     const char *tlsauthz,
-                    void (*close_fn)(NBDClient *, bool));
+                    void (*close_fn)(NBDClient *, bool),
+                    void *owner);
+void *nbd_client_owner(NBDClient *client);
 void nbd_client_get(NBDClient *client);
 void nbd_client_put(NBDClient *client);
 
 void nbd_server_is_qemu_nbd(int max_connections);
 bool nbd_server_is_running(void);
 int nbd_server_max_connections(void);
-void nbd_server_start(SocketAddress *addr, const char *tls_creds,
-                      const char *tls_authz, uint32_t max_connections,
-                      Error **errp);
+void nbd_server_start(SocketAddress *addr, uint32_t handshake_max_secs,
+                      const char *tls_creds, const char *tls_authz,
+                      uint32_t max_connections, Error **errp);
 void nbd_server_start_options(NbdServerOptions *arg, Error **errp);
 
 /* nbd_read

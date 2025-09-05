@@ -317,6 +317,7 @@ static void occ_do_reset(u8 scope, u32 dbob_id, u32 seq_id)
 		break;
 	case proc_gen_p9:
 	case proc_gen_p10:
+	case proc_gen_p11:
 		last_seq_id = seq_id;
 		chip = next_chip(NULL);
 		prd_fsp_occ_reset(chip->id);

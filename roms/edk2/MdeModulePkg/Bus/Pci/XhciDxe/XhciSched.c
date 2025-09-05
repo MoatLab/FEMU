@@ -1192,8 +1192,11 @@ XhcCheckUrbResult (
         DEBUG ((DEBUG_ERROR, "XhcCheckUrbResult: ERR_BUFFER! Completecode = %x\n", EvtTrb->Completecode));
         goto EXIT;
 
+      //
+      // Based on XHCI spec 4.8.3, software should do the reset endpoint while USB Transaction occur.
+      //
       case TRB_COMPLETION_USB_TRANSACTION_ERROR:
-        CheckedUrb->Result  |= EFI_USB_ERR_TIMEOUT;
+        CheckedUrb->Result  |= EDKII_USB_ERR_TRANSACTION;
         CheckedUrb->Finished = TRUE;
         DEBUG ((DEBUG_ERROR, "XhcCheckUrbResult: TRANSACTION_ERROR! Completecode = %x\n", EvtTrb->Completecode));
         goto EXIT;
@@ -3539,7 +3542,7 @@ XhcSetTrDequeuePointer (
   // Send stop endpoint command to transit Endpoint from running to stop state
   //
   ZeroMem (&CmdSetTRDeq, sizeof (CmdSetTRDeq));
-  PhyAddr              = UsbHcGetPciAddrForHostAddr (Xhc->MemPool, Urb->Ring->RingEnqueue, sizeof (CMD_SET_TR_DEQ_POINTER), TRUE);
+  PhyAddr              = UsbHcGetPciAddrForHostAddr (Xhc->MemPool, Urb->Ring->RingEnqueue, sizeof (CMD_SET_TR_DEQ_POINTER), FALSE);
   CmdSetTRDeq.PtrLo    = XHC_LOW_32BIT (PhyAddr) | Urb->Ring->RingPCS;
   CmdSetTRDeq.PtrHi    = XHC_HIGH_32BIT (PhyAddr);
   CmdSetTRDeq.CycleBit = 1;

@@ -187,8 +187,10 @@
 #define SPR_HID0_POWER9_HILE		PPC_BIT(4)
 #define SPR_HID0_POWER10_HILE		PPC_BIT(4)
 #define SPR_HID0_POWER8_ENABLE_ATTN	PPC_BIT(31)
-#define SPR_HID0_POWER9_ENABLE_ATTN	(PPC_BIT(2) | PPC_BIT(3))
-#define SPR_HID0_POWER10_ENABLE_ATTN	(PPC_BIT(2) | PPC_BIT(3))
+#define SPR_HID0_POWER9_ENABLE_ATTN	PPC_BIT(3)
+#define SPR_HID0_POWER10_ENABLE_ATTN	PPC_BIT(3)
+#define SPR_HID0_POWER9_FLUSH_ICACHE	PPC_BIT(2)
+#define SPR_HID0_POWER10_FLUSH_ICACHE	PPC_BIT(2)
 #define SPR_HID0_POWER9_RADIX		PPC_BIT(8)
 
 /* PVR bits */
@@ -209,6 +211,7 @@
 #define PVR_TYPE_P9	0x004e
 #define PVR_TYPE_P9P	0x004f /* Axone */
 #define PVR_TYPE_P10	0x0080
+#define PVR_TYPE_P11	0x0082
 
 #ifdef __ASSEMBLY__
 
@@ -264,6 +267,11 @@ static inline bool is_fused_core(uint32_t version)
 
 	} else if(PVR_TYPE(version) == PVR_TYPE_P10) {
 		if(PVR_CHIP_TYPE(version) & 0x01)
+			return false;
+		else
+			return true;
+	} else if (PVR_TYPE(version) == PVR_TYPE_P11) {
+		if (PVR_CHIP_TYPE(version) & 0x01)
 			return false;
 		else
 			return true;

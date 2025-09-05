@@ -440,18 +440,17 @@ static const VMStateDescription sse_timer_vmstate = {
     }
 };
 
-static Property sse_timer_properties[] = {
+static const Property sse_timer_properties[] = {
     DEFINE_PROP_LINK("counter", SSETimer, counter, TYPE_SSE_COUNTER, SSECounter *),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void sse_timer_class_init(ObjectClass *klass, void *data)
+static void sse_timer_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = sse_timer_realize;
     dc->vmsd = &sse_timer_vmstate;
-    dc->reset = sse_timer_reset;
+    device_class_set_legacy_reset(dc, sse_timer_reset);
     device_class_set_props(dc, sse_timer_properties);
 }
 

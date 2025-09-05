@@ -280,7 +280,7 @@ class TestContainerReference:
         ]
     )
     def test_docker_image_reference_error(self, args, docker):
-        assert docker.image_exists(*args) == False
+        assert docker.image_exists(*args) is False
 
     @pytest.mark.parametrize(
         "args",
@@ -307,4 +307,4 @@ class TestContainerReference:
         ]
     )
     def test_podman_image_reference_error(self, args, podman):
-        assert podman.image_exists(*args) ==  False
+        assert podman.image_exists(*args) is False

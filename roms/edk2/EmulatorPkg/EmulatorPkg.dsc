@@ -127,11 +127,12 @@
   ShellLib|ShellPkg/Library/UefiShellLib/UefiShellLib.inf
   FileHandleLib|MdePkg/Library/UefiFileHandleLib/UefiFileHandleLib.inf
   ImagePropertiesRecordLib|MdeModulePkg/Library/ImagePropertiesRecordLib/ImagePropertiesRecordLib.inf
-
-!if $(SECURE_BOOT_ENABLE) == TRUE
   RngLib|MdeModulePkg/Library/BaseRngLibTimerLib/BaseRngLibTimerLib.inf
   IntrinsicLib|CryptoPkg/Library/IntrinsicLib/IntrinsicLib.inf
   OpensslLib|CryptoPkg/Library/OpensslLib/OpensslLibCrypto.inf
+  BaseCryptLib|CryptoPkg/Library/BaseCryptLib/BaseCryptLib.inf
+
+!if $(SECURE_BOOT_ENABLE) == TRUE
   PlatformSecureLib|SecurityPkg/Library/PlatformSecureLibNull/PlatformSecureLibNull.inf
   AuthVariableLib|SecurityPkg/Library/AuthVariableLib/AuthVariableLib.inf
   SecureBootVariableLib|SecurityPkg/Library/SecureBootVariableLib/SecureBootVariableLib.inf
@@ -278,6 +279,27 @@
   gEfiRedfishPkgTokenSpaceGuid.PcdRedfishRestExServiceDevicePath.DevicePath|{DEVICE_PATH("MAC(000000000000,0x1)")}
   gEfiRedfishPkgTokenSpaceGuid.PcdRedfishRestExServiceAccessModeInBand|False
   gEfiRedfishPkgTokenSpaceGuid.PcdRedfishDiscoverAccessModeInBand|False
+
+  gEmulatorPkgTokenSpaceGuid.PcdRedfishServiceStopIfSecureBootDisabled|False
+  gEmulatorPkgTokenSpaceGuid.PcdRedfishServiceStopIfExitbootService|False
+
+  gEfiRedfishClientPkgTokenSpaceGuid.PcdRedfishServiceEtagSupported|False
+
+  #
+  # Redfish Debug enablement
+  #
+  # 0x0000000000000001  RedfishPlatformConfigDxe driver debug enabled.
+  gEfiRedfishPkgTokenSpaceGuid.PcdRedfishDebugCategory|0
+  #   0x00000001  x-uefi-redfish string database message enabled
+  #   0x00000002  Debug Message for dumping formset
+  #   0x00000004  Debug Message for x-uefi-redfish searching result
+  #   0x00000008  Debug Message for x-uefi-redfish Regular Expression searching result
+  gEfiRedfishPkgTokenSpaceGuid.PcdRedfishPlatformConfigDebugProperty|0
+
+  # Redfish Platform Configure DXE driver feature enablement
+  #   0x00000001  Enable building Redfish Attribute Registry menu path.
+  #   0x00000002  Allow supressed HII option to be exposed on Redfish.
+  gEfiRedfishPkgTokenSpaceGuid.PcdRedfishPlatformConfigFeatureProperty|0
 !endif
 
 [PcdsDynamicDefault.common.DEFAULT]
@@ -376,6 +398,15 @@
   MdeModulePkg/Universal/FaultTolerantWriteDxe/FaultTolerantWriteDxe.inf
   EmulatorPkg/PlatformSmbiosDxe/PlatformSmbiosDxe.inf
   EmulatorPkg/TimerDxe/Timer.inf
+
+  #
+  # Rng Protocol producer
+  #
+  SecurityPkg/RandomNumberGenerator/RngDxe/RngDxe.inf
+  #
+  # Hash2 Protocol producer
+  #
+  SecurityPkg/Hash2DxeCrypto/Hash2DxeCrypto.inf
 
 !if $(SECURE_BOOT_ENABLE) == TRUE
   SecurityPkg/VariableAuthenticated/SecureBootConfigDxe/SecureBootConfigDxe.inf

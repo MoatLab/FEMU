@@ -1,0 +1,9 @@
+packages:
+  - ca-certificates
+  - ccache
+  - git
+  - golang
+  - locales
+  - pkgconf
+  - gcc-s390x-linux-gnu
+  - libc6-dev:s390x

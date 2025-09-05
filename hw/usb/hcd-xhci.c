@@ -541,18 +541,10 @@ static XHCIPort *xhci_lookup_port(XHCIState *xhci, struct USBPort *uport)
     case USB_SPEED_LOW:
     case USB_SPEED_FULL:
     case USB_SPEED_HIGH:
-        if (xhci_get_flag(xhci, XHCI_FLAG_SS_FIRST)) {
-            index = uport->index + xhci->numports_3;
-        } else {
-            index = uport->index;
-        }
+        index = uport->index + xhci->numports_3;
         break;
     case USB_SPEED_SUPER:
-        if (xhci_get_flag(xhci, XHCI_FLAG_SS_FIRST)) {
-            index = uport->index;
-        } else {
-            index = uport->index + xhci->numports_2;
-        }
+        index = uport->index;
         break;
     default:
         return NULL;
@@ -651,6 +643,11 @@ static void xhci_event(XHCIState *xhci, XHCIEvent *event, int v)
     XHCIInterrupter *intr;
     dma_addr_t erdp;
     unsigned int dp_idx;
+
+    if (xhci->numintrs == 1 ||
+        (xhci->intr_mapping_supported && !xhci->intr_mapping_supported(xhci))) {
+        v = 0;
+    }
 
     if (v >= xhci->numintrs) {
         DPRINTF("intr nr out of range (%d >= %d)\n", v, xhci->numintrs);
@@ -1190,6 +1187,12 @@ static void xhci_ep_free_xfer(XHCITransfer *xfer)
     g_free(xfer);
 }
 
+static void xhci_xfer_unmap(XHCITransfer *xfer)
+{
+    usb_packet_unmap(&xfer->packet, &xfer->sgl);
+    qemu_sglist_destroy(&xfer->sgl);
+}
+
 static int xhci_ep_nuke_one_xfer(XHCITransfer *t, TRBCCode report)
 {
     int killed = 0;
@@ -1201,6 +1204,7 @@ static int xhci_ep_nuke_one_xfer(XHCITransfer *t, TRBCCode report)
 
     if (t->running_async) {
         usb_cancel_packet(&t->packet);
+        xhci_xfer_unmap(t);
         t->running_async = 0;
         killed = 1;
     }
@@ -1481,12 +1485,6 @@ err:
     qemu_sglist_destroy(&xfer->sgl);
     xhci_die(xhci);
     return -1;
-}
-
-static void xhci_xfer_unmap(XHCITransfer *xfer)
-{
-    usb_packet_unmap(&xfer->packet, &xfer->sgl);
-    qemu_sglist_destroy(&xfer->sgl);
 }
 
 static void xhci_xfer_report(XHCITransfer *xfer)
@@ -2779,11 +2777,7 @@ static uint64_t xhci_cap_read(void *ptr, hwaddr reg, unsigned size)
         ret = 0x20425355; /* "USB " */
         break;
     case 0x28: /* Supported Protocol:08 */
-        if (xhci_get_flag(xhci, XHCI_FLAG_SS_FIRST)) {
-            ret = (xhci->numports_2<<8) | (xhci->numports_3+1);
-        } else {
-            ret = (xhci->numports_2<<8) | 1;
-        }
+        ret = (xhci->numports_2 << 8) | (xhci->numports_3 + 1);
         break;
     case 0x2c: /* Supported Protocol:0c */
         ret = 0x00000000; /* reserved */
@@ -2795,11 +2789,7 @@ static uint64_t xhci_cap_read(void *ptr, hwaddr reg, unsigned size)
         ret = 0x20425355; /* "USB " */
         break;
     case 0x38: /* Supported Protocol:08 */
-        if (xhci_get_flag(xhci, XHCI_FLAG_SS_FIRST)) {
-            ret = (xhci->numports_3<<8) | 1;
-        } else {
-            ret = (xhci->numports_3<<8) | (xhci->numports_2+1);
-        }
+        ret = (xhci->numports_3 << 8) | 1;
         break;
     case 0x3c: /* Supported Protocol:0c */
         ret = 0x00000000; /* reserved */
@@ -2826,9 +2816,15 @@ static uint64_t xhci_port_read(void *ptr, hwaddr reg, unsigned size)
     case 0x08: /* PORTLI */
         ret = 0;
         break;
-    case 0x0c: /* reserved */
+    case 0x0c: /* PORTHLPMC */
+        ret = 0;
+        qemu_log_mask(LOG_UNIMP, "%s: read from port register PORTHLPMC",
+                      __func__);
+        break;
     default:
-        trace_usb_xhci_unimplemented("port read", reg);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "%s: read from port offset 0x%" HWADDR_PRIx,
+                      __func__, reg);
         ret = 0;
     }
 
@@ -2897,9 +2893,22 @@ static void xhci_port_write(void *ptr, hwaddr reg,
         }
         break;
     case 0x04: /* PORTPMSC */
+    case 0x0c: /* PORTHLPMC */
+        qemu_log_mask(LOG_UNIMP,
+                      "%s: write 0x%" PRIx64
+                      " (%u bytes) to port register at offset 0x%" HWADDR_PRIx,
+                      __func__, val, size, reg);
+        break;
     case 0x08: /* PORTLI */
+        qemu_log_mask(LOG_GUEST_ERROR, "%s: Write to read-only PORTLI register",
+                      __func__);
+        break;
     default:
-        trace_usb_xhci_unimplemented("port write", reg);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "%s: write 0x%" PRIx64 " (%u bytes) to unknown port "
+                      "register at offset 0x%" HWADDR_PRIx,
+                      __func__, val, size, reg);
+        break;
     }
 }
 
@@ -3349,13 +3358,8 @@ static void usb_xhci_init(XHCIState *xhci)
     for (i = 0; i < usbports; i++) {
         speedmask = 0;
         if (i < xhci->numports_2) {
-            if (xhci_get_flag(xhci, XHCI_FLAG_SS_FIRST)) {
-                port = &xhci->ports[i + xhci->numports_3];
-                port->portnr = i + 1 + xhci->numports_3;
-            } else {
-                port = &xhci->ports[i];
-                port->portnr = i + 1;
-            }
+            port = &xhci->ports[i + xhci->numports_3];
+            port->portnr = i + 1 + xhci->numports_3;
             port->uport = &xhci->uports[i];
             port->speedmask =
                 USB_SPEED_MASK_LOW  |
@@ -3366,13 +3370,8 @@ static void usb_xhci_init(XHCIState *xhci)
             speedmask |= port->speedmask;
         }
         if (i < xhci->numports_3) {
-            if (xhci_get_flag(xhci, XHCI_FLAG_SS_FIRST)) {
-                port = &xhci->ports[i];
-                port->portnr = i + 1;
-            } else {
-                port = &xhci->ports[i + xhci->numports_2];
-                port->portnr = i + 1 + xhci->numports_2;
-            }
+            port = &xhci->ports[i];
+            port->portnr = i + 1;
             port->uport = &xhci->uports[i];
             port->speedmask = USB_SPEED_MASK_SUPER;
             assert(i < XHCI_MAXPORTS);
@@ -3631,23 +3630,22 @@ const VMStateDescription vmstate_xhci = {
     }
 };
 
-static Property xhci_properties[] = {
+static const Property xhci_properties[] = {
     DEFINE_PROP_BIT("streams", XHCIState, flags,
                     XHCI_FLAG_ENABLE_STREAMS, true),
     DEFINE_PROP_UINT32("p2",    XHCIState, numports_2, 4),
     DEFINE_PROP_UINT32("p3",    XHCIState, numports_3, 4),
     DEFINE_PROP_LINK("host",    XHCIState, hostOpaque, TYPE_DEVICE,
                      DeviceState *),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void xhci_class_init(ObjectClass *klass, void *data)
+static void xhci_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = usb_xhci_realize;
     dc->unrealize = usb_xhci_unrealize;
-    dc->reset   = xhci_reset;
+    device_class_set_legacy_reset(dc, xhci_reset);
     device_class_set_props(dc, xhci_properties);
     dc->user_creatable = false;
 }

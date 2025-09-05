@@ -136,6 +136,7 @@ struct lpcm {
 	bool			sirq_routed[LPC_NUM_SERIRQ];
 	uint32_t		sirq_rmasks[4];
 	uint8_t			sirq_ralloc[4];
+	const char		*sirq_name[4];
 	struct dt_node		*node;
 };
 
@@ -667,6 +668,80 @@ int64_t lpc_probe_read(enum OpalLPCAddressType addr_type, uint32_t addr,
 	return __lpc_read_sanity(addr_type, addr, data, sz, true);
 }
 
+int64_t lpc_fw_read(uint32_t off, void *buf, uint32_t len)
+{
+	int rc;
+
+	prlog(PR_TRACE, "Reading 0x%08x bytes at FW offset 0x%08x\n",
+	      len, off);
+
+	while (len) {
+		uint32_t chunk;
+		uint32_t dat;
+
+		/* XXX: make this read until it's aligned */
+		if (len > 3 && !(off & 3)) {
+			rc = lpc_read(OPAL_LPC_FW, off, &dat, 4);
+			if (!rc) {
+				/*
+				 * lpc_read swaps to CPU endian but it's not
+				 * really a 32-bit value, so convert back.
+				 */
+				*(__be32 *)buf = cpu_to_be32(dat);
+			}
+			chunk = 4;
+		} else {
+			rc = lpc_read(OPAL_LPC_FW, off, &dat, 1);
+			if (!rc)
+				*(uint8_t *)buf = dat;
+			chunk = 1;
+		}
+		if (rc) {
+			prlog(PR_ERR, "lpc_read failure %d to FW 0x%08x\n", rc, off);
+			return rc;
+		}
+		len -= chunk;
+		off += chunk;
+		buf += chunk;
+	}
+
+	return 0;
+}
+
+int64_t lpc_fw_write(uint32_t off, const void *buf, uint32_t len)
+{
+	int rc;
+
+	prlog(PR_TRACE, "Writing 0x%08x bytes at FW offset 0x%08x\n",
+	      len, off);
+
+	while (len) {
+		uint32_t chunk;
+
+		if (len > 3 && !(off & 3)) {
+			/* endian swap: see lpc_window_write */
+			uint32_t dat = be32_to_cpu(*(__be32 *)buf);
+
+			rc = lpc_write(OPAL_LPC_FW, off, dat, 4);
+			chunk = 4;
+		} else {
+			uint8_t dat = *(uint8_t *)buf;
+
+			rc = lpc_write(OPAL_LPC_FW, off, dat, 1);
+			chunk = 1;
+		}
+		if (rc) {
+			prlog(PR_ERR, "lpc_write failure %d to FW 0x%08x\n", rc, off);
+			return rc;
+		}
+		len -= chunk;
+		off += chunk;
+		buf += chunk;
+	}
+
+	return 0;
+}
+
 /*
  * The "OPAL" variant add the emulation of 2 and 4 byte accesses using
  * byte accesses for IO and MEM space in order to be compatible with
@@ -807,8 +882,8 @@ static void lpc_route_serirq(struct lpcm *lpc, uint32_t sirq,
 	opb_write(lpc, opb_master_reg_base + reg, val, 4);
 }
 
-static void lpc_alloc_route(struct lpcm *lpc, unsigned int irq,
-			    unsigned int policy)
+static void lpc_alloc_route(struct lpcm *lpc, const char *name,
+			    unsigned int irq, unsigned int policy)
 {
 	unsigned int i, r, c;
 	int route = -1;
@@ -818,8 +893,8 @@ static void lpc_alloc_route(struct lpcm *lpc, unsigned int irq,
 	else
 		r = LPC_ROUTE_LINUX;
 
-	prlog(PR_DEBUG, "Routing irq %d, policy: %d (r=%d)\n",
-	      irq, policy, r);
+	prlog(PR_DEBUG, "Routing %s irq %d, policy: %d (r=%d)\n",
+	      name, irq, policy, r);
 
 	/* Are we already routed ? */
 	if (lpc->sirq_routed[irq] &&
@@ -841,6 +916,7 @@ static void lpc_alloc_route(struct lpcm *lpc, unsigned int irq,
 		 */
 		if (lpc->sirq_ralloc[i] == LPC_ROUTE_FREE && c < 4) {
 			lpc->sirq_ralloc[i] = r;
+			lpc->sirq_name[i] = name;
 			route = i;
 			break;
 		}
@@ -850,8 +926,12 @@ static void lpc_alloc_route(struct lpcm *lpc, unsigned int irq,
 	 * with a matching policy
 	 */
 	for (i = 0; route < 0 && i < 4; i++) {
-		if (lpc->sirq_ralloc[i] == r)
+		if (lpc->sirq_ralloc[i] == r) {
+			prlog(PR_NOTICE, "Muxing PSI SIRQ%d (%s %s)\n", i, name,
+					lpc->sirq_name[i]);
+			lpc->sirq_name[i] = "muxed";
 			route = i;
+		}
 	}
 
 	/* Still no route ? bail. That should never happen */
@@ -878,6 +958,16 @@ unsigned int lpc_get_irq_policy(uint32_t chip_id, uint32_t psi_idx)
 		return IRQ_ATTR_TARGET_LINUX;
 	else
 		return IRQ_ATTR_TARGET_OPAL | IRQ_ATTR_TYPE_LSI;
+}
+
+const char *lpc_get_irq_name(uint32_t chip_id, uint32_t psi_idx)
+{
+	struct proc_chip *c = get_chip(chip_id);
+
+	if (!c || !c->lpc)
+		return NULL;
+
+	return c->lpc->sirq_name[psi_idx];
 }
 
 static void lpc_create_int_map(struct lpcm *lpc, struct dt_node *psi_node)
@@ -916,7 +1006,8 @@ void lpc_finalize_interrupts(void)
 		    (chip->type == PROC_CHIP_P9_NIMBUS ||
 		     chip->type == PROC_CHIP_P9_CUMULUS ||
 		     chip->type == PROC_CHIP_P9P ||
-		     chip->type == PROC_CHIP_P10))
+		     chip->type == PROC_CHIP_P10 ||
+		     chip->type == PROC_CHIP_P11))
 			lpc_create_int_map(chip->lpc, chip->psi->node);
 	}
 }
@@ -961,6 +1052,7 @@ static void lpc_init_interrupts_one(struct proc_chip *chip)
 	case PROC_CHIP_P9_CUMULUS:
 	case PROC_CHIP_P9P:
 	case PROC_CHIP_P10:
+	case PROC_CHIP_P11:
 		/* On P9, we additionally setup the routing. */
 		lpc->has_serirq = true;
 		for (i = 0; i < LPC_NUM_SERIRQ; i++) {
@@ -1358,9 +1450,8 @@ bool lpc_ok(void)
 	return !lock_held_by_me(&chip->lpc->lock);
 }
 
-void lpc_register_client(uint32_t chip_id,
-			 const struct lpc_client *clt,
-			 uint32_t policy)
+void lpc_register_client(uint32_t chip_id, const struct lpc_client *clt,
+			 const char *name, uint32_t policy)
 {
 	struct lpc_client_entry *ent;
 	struct proc_chip *chip;
@@ -1380,7 +1471,8 @@ void lpc_register_client(uint32_t chip_id,
 		chip->type == PROC_CHIP_P9_NIMBUS ||
 		chip->type == PROC_CHIP_P9_CUMULUS ||
 		chip->type == PROC_CHIP_P9P ||
-		chip->type == PROC_CHIP_P10;
+		chip->type == PROC_CHIP_P10 ||
+		chip->type == PROC_CHIP_P11;
 
 	if (policy != IRQ_ATTR_TARGET_OPAL && !has_routes) {
 		prerror("Chip doesn't support OS interrupt policy\n");
@@ -1398,7 +1490,7 @@ void lpc_register_client(uint32_t chip_id,
 		unsigned int i;
 		for (i = 0; i < LPC_NUM_SERIRQ; i++)
 			if (clt->interrupts & LPC_IRQ(i))
-				lpc_alloc_route(lpc, i, policy);
+				lpc_alloc_route(lpc, name, i, policy);
 	}
 
 	if (lpc->has_serirq)

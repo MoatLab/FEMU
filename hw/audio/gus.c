@@ -183,7 +183,7 @@ static int GUS_read_DMA (void *opaque, int nchan, int dma_pos, int dma_len)
 {
     GUSState *s = opaque;
     IsaDmaClass *k = ISADMA_GET_CLASS(s->isa_dma);
-    char tmpbuf[4096];
+    QEMU_UNINITIALIZED char tmpbuf[4096];
     int pos = dma_pos, mode, left = dma_len - dma_pos;
 
     ldebug ("read DMA %#x %d\n", dma_pos, dma_len);
@@ -290,16 +290,15 @@ static void gus_realizefn (DeviceState *dev, Error **errp)
     AUD_set_active_out (s->voice, 1);
 }
 
-static Property gus_properties[] = {
+static const Property gus_properties[] = {
     DEFINE_AUDIO_PROPERTIES(GUSState, card),
     DEFINE_PROP_UINT32 ("freq",    GUSState, freq,        44100),
     DEFINE_PROP_UINT32 ("iobase",  GUSState, port,        0x240),
     DEFINE_PROP_UINT32 ("irq",     GUSState, emu.gusirq,  7),
     DEFINE_PROP_UINT32 ("dma",     GUSState, emu.gusdma,  3),
-    DEFINE_PROP_END_OF_LIST (),
 };
 
-static void gus_class_initfn (ObjectClass *klass, void *data)
+static void gus_class_initfn(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS (klass);
 

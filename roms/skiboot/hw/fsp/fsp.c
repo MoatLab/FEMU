@@ -91,7 +91,7 @@ static enum ipl_state ipl_state = ipl_initial;
 static struct fsp *first_fsp;
 static struct fsp *active_fsp;
 static u16 fsp_curseq = 0x8000;
-static __be64 *fsp_tce_table;
+static __be64 *skiboot_constant_addr fsp_tce_table;
 
 #define FSP_INBOUND_SIZE	0x00100000UL
 static void *fsp_inbound_buf = NULL;

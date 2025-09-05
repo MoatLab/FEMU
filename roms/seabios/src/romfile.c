@@ -99,6 +99,29 @@ romfile_loadint(const char *name, u64 defval)
     return val;
 }
 
+u32
+romfile_loadbool(const char *name, u32 defval)
+{
+    static const char *true_strings[] = { "1", "on", "yes" };
+    static const char *false_strings[] = { "0", "off", "no" };
+    char *str = romfile_loadfile(name, NULL);
+    int i;
+
+    if (!str)
+        return defval;
+
+    for (i = 0; i < ARRAY_SIZE(true_strings); i++)
+        if (0 == strcmp(str, true_strings[i]))
+            return 1;
+
+    for (i = 0; i < ARRAY_SIZE(false_strings); i++)
+        if (0 == strcmp(str, false_strings[i]))
+            return 0;
+
+    dprintf(1, "%s: unknown bool string: %s\n", __func__, str);
+    return defval;
+}
+
 struct const_romfile_s {
     struct romfile_s file;
     void *data;

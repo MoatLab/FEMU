@@ -19,11 +19,18 @@
 
 #include "qemu/osdep.h"
 #include "qemu/log.h"
+#include "qemu/range.h"
 #include "cpu.h"
 #include "tcg/tcg.h"
 #include "exec/helper-proto.h"
-#include "exec/exec-all.h"
-#include "exec/cpu_ldst.h"
+#include "exec/cputlb.h"
+#include "exec/page-protection.h"
+#include "exec/target_page.h"
+#include "accel/tcg/cpu-ldst.h"
+#include "system/memory.h"
+#ifdef CONFIG_USER_ONLY
+#include "user/page-protection.h"
+#endif
 #include "asi.h"
 
 //#define DEBUG_MMU
@@ -239,9 +246,7 @@ static void replace_tlb_1bit_lru(SparcTLBEntry *tlb,
             if (new_ctx == ctx) {
                 uint64_t vaddr = tlb[i].tag & ~0x1fffULL;
                 uint64_t size = 8192ULL << 3 * TTE_PGSIZE(tlb[i].tte);
-                if (new_vaddr == vaddr
-                    || (new_vaddr < vaddr + size
-                        && vaddr < new_vaddr + new_size)) {
+                if (ranges_overlap(new_vaddr, new_size, vaddr, size)) {
                     DPRINTF_MMU("auto demap entry [%d] %lx->%lx\n", i, vaddr,
                                 new_vaddr);
                     replace_tlb_entry(&tlb[i], tlb_tag, tlb_tte, env1);
@@ -596,6 +601,9 @@ uint64_t helper_ld_asi(CPUSPARCState *env, target_ulong addr,
         case 0x0C:          /* Leon3 Date Cache config */
             if (env->def.features & CPU_FEATURE_CACHE_CTRL) {
                 ret = leon3_cache_control_ld(env, addr, size);
+            } else {
+                qemu_log_mask(LOG_UNIMP, "0x" TARGET_FMT_lx ": unimplemented"
+                                         " address, size: %d\n", addr, size);
             }
             break;
         case 0x01c00a00: /* MXCC control register */
@@ -812,6 +820,9 @@ void helper_st_asi(CPUSPARCState *env, target_ulong addr, uint64_t val,
         case 0x0C:          /* Leon3 Date Cache config */
             if (env->def.features & CPU_FEATURE_CACHE_CTRL) {
                 leon3_cache_control_st(env, addr, val, size);
+            } else {
+                qemu_log_mask(LOG_UNIMP, "0x" TARGET_FMT_lx ": unimplemented"
+                                         " address, size: %d\n", addr, size);
             }
             break;
 
@@ -1394,6 +1405,10 @@ uint64_t helper_ld_asi(CPUSPARCState *env, target_ulong addr,
     case ASI_TWINX_PL: /* Primary, twinx, LE */
     case ASI_TWINX_S:  /* Secondary, twinx */
     case ASI_TWINX_SL: /* Secondary, twinx, LE */
+    case ASI_MON_P:
+    case ASI_MON_S:
+    case ASI_MON_AIUP:
+    case ASI_MON_AIUS:
         /* These are always handled inline.  */
         g_assert_not_reached();
 

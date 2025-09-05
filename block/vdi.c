@@ -3,10 +3,12 @@
  *
  * Copyright (c) 2009, 2012 Stefan Weil
  *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 2 of the License, or
- * (at your option) version 3 or any later version.
+ * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -56,7 +58,7 @@
 #include "qapi/qapi-visit-block-core.h"
 #include "block/block_int.h"
 #include "block/qdict.h"
-#include "sysemu/block-backend.h"
+#include "system/block-backend.h"
 #include "qemu/module.h"
 #include "qemu/option.h"
 #include "qemu/bswap.h"
@@ -85,7 +87,7 @@
 /* Command line option for static images. */
 #define BLOCK_OPT_STATIC "static"
 
-#define SECTOR_SIZE 512
+#define SECTOR_SIZE 512ULL
 #define DEFAULT_CLUSTER_SIZE 1048576
 /* Note: can't use 1 * MiB, because it's passed to stringify() */
 
@@ -440,7 +442,7 @@ static int vdi_open(BlockDriverState *bs, QDict *options, int flags,
         goto fail;
     } else if (header.sector_size != SECTOR_SIZE) {
         error_setg(errp, "unsupported VDI image (sector size %" PRIu32
-                   " is not %u)", header.sector_size, SECTOR_SIZE);
+                   " is not %llu)", header.sector_size, SECTOR_SIZE);
         ret = -ENOTSUP;
         goto fail;
     } else if (header.block_size != DEFAULT_CLUSTER_SIZE) {
@@ -521,8 +523,8 @@ static int vdi_reopen_prepare(BDRVReopenState *state,
 }
 
 static int coroutine_fn GRAPH_RDLOCK
-vdi_co_block_status(BlockDriverState *bs, bool want_zero, int64_t offset,
-                    int64_t bytes, int64_t *pnum, int64_t *map,
+vdi_co_block_status(BlockDriverState *bs, unsigned int mode,
+                    int64_t offset, int64_t bytes, int64_t *pnum, int64_t *map,
                     BlockDriverState **file)
 {
     BDRVVdiState *s = (BDRVVdiState *)bs->opaque;

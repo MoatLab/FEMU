@@ -886,7 +886,7 @@ static MTPData *usb_mtp_get_storage_info(MTPState *s, MTPControl *c)
     rc = statvfs(s->root, &buf);
     if (rc == 0) {
         usb_mtp_add_u64(d, (uint64_t)buf.f_frsize * buf.f_blocks);
-        usb_mtp_add_u64(d, (uint64_t)buf.f_bavail * buf.f_blocks);
+        usb_mtp_add_u64(d, (uint64_t)buf.f_frsize * buf.f_bavail);
         usb_mtp_add_u32(d, buf.f_ffree);
     } else {
         usb_mtp_add_u64(d, 0xffffffff);
@@ -1234,8 +1234,6 @@ static void usb_mtp_object_delete(MTPState *s, uint32_t handle,
     default:
         g_assert_not_reached();
     }
-
-    return;
 }
 
 static void usb_mtp_command(MTPState *s, MTPControl *c)
@@ -2078,14 +2076,13 @@ static const VMStateDescription vmstate_usb_mtp = {
     }
 };
 
-static Property mtp_properties[] = {
+static const Property mtp_properties[] = {
     DEFINE_PROP_STRING("rootdir", MTPState, root),
     DEFINE_PROP_STRING("desc", MTPState, desc),
     DEFINE_PROP_BOOL("readonly", MTPState, readonly, true),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void usb_mtp_class_initfn(ObjectClass *klass, void *data)
+static void usb_mtp_class_initfn(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     USBDeviceClass *uc = USB_DEVICE_CLASS(klass);

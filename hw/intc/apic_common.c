@@ -28,7 +28,7 @@
 #include "hw/intc/kvm_irqcount.h"
 #include "trace.h"
 #include "hw/boards.h"
-#include "sysemu/kvm.h"
+#include "system/kvm.h"
 #include "hw/qdev-properties.h"
 #include "hw/sysbus.h"
 #include "migration/vmstate.h"
@@ -408,13 +408,12 @@ static const VMStateDescription vmstate_apic_common = {
     }
 };
 
-static Property apic_properties_common[] = {
+static const Property apic_properties_common[] = {
     DEFINE_PROP_UINT8("version", APICCommonState, version, 0x14),
     DEFINE_PROP_BIT("vapic", APICCommonState, vapic_control, VAPIC_ENABLE_BIT,
                     true),
     DEFINE_PROP_BOOL("legacy-instance-id", APICCommonState, legacy_instance_id,
                      false),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
 static void apic_common_get_id(Object *obj, Visitor *v, const char *name,
@@ -433,6 +432,7 @@ static void apic_common_set_id(Object *obj, Visitor *v, const char *name,
     APICCommonState *s = APIC_COMMON(obj);
     DeviceState *dev = DEVICE(obj);
     uint32_t value;
+    Error *local_err = NULL;
 
     if (dev->realized) {
         qdev_prop_set_after_realize(dev, name, errp);
@@ -444,7 +444,11 @@ static void apic_common_set_id(Object *obj, Visitor *v, const char *name,
     }
 
     if (value >= 255 && !cpu_has_x2apic_feature(&s->cpu->env)) {
-        error_setg(errp, "APIC ID %d requires x2APIC feature in CPU", value);
+        error_setg(&local_err,
+                   "APIC ID %d requires x2APIC feature in CPU",
+                   value);
+        error_append_hint(&local_err, "Try x2apic=on in -cpu.\n");
+        error_propagate(errp, local_err);
         return;
     }
 
@@ -462,11 +466,11 @@ static void apic_common_initfn(Object *obj)
                         apic_common_set_id, NULL, NULL);
 }
 
-static void apic_common_class_init(ObjectClass *klass, void *data)
+static void apic_common_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    dc->reset = apic_reset_common;
+    device_class_set_legacy_reset(dc, apic_reset_common);
     device_class_set_props(dc, apic_properties_common);
     dc->realize = apic_common_realize;
     dc->unrealize = apic_common_unrealize;

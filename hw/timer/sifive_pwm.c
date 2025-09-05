@@ -404,11 +404,10 @@ static const VMStateDescription vmstate_sifive_pwm = {
     }
 };
 
-static Property sifive_pwm_properties[] = {
+static const Property sifive_pwm_properties[] = {
     /* 0.5Ghz per spec after FSBL */
     DEFINE_PROP_UINT64("clock-frequency", struct SiFivePwmState,
                        freq_hz, 500000000ULL),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
 static void sifive_pwm_init(Object *obj)
@@ -442,11 +441,11 @@ static void sifive_pwm_realize(DeviceState *dev, Error **errp)
                   sifive_pwm_interrupt_3, s);
 }
 
-static void sifive_pwm_class_init(ObjectClass *klass, void *data)
+static void sifive_pwm_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    dc->reset = sifive_pwm_reset;
+    device_class_set_legacy_reset(dc, sifive_pwm_reset);
     device_class_set_props(dc, sifive_pwm_properties);
     dc->vmsd = &vmstate_sifive_pwm;
     dc->realize = sifive_pwm_realize;

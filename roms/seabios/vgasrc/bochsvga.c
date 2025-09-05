@@ -93,20 +93,20 @@ bochsvga_dispi_enabled(void)
 }
 
 int
-bochsvga_get_window(struct vgamode_s *vmode_g, int window)
+bochsvga_get_window(struct vgamode_s *curmode_g, int window)
 {
     if (!bochsvga_dispi_enabled())
-        return stdvga_get_window(vmode_g, window);
+        return stdvga_get_window(curmode_g, window);
     if (window != 0)
         return -1;
     return dispi_read(VBE_DISPI_INDEX_BANK);
 }
 
 int
-bochsvga_set_window(struct vgamode_s *vmode_g, int window, int val)
+bochsvga_set_window(struct vgamode_s *curmode_g, int window, int val)
 {
     if (!bochsvga_dispi_enabled())
-        return stdvga_set_window(vmode_g, window, val);
+        return stdvga_set_window(curmode_g, window, val);
     if (window != 0)
         return -1;
     dispi_write(VBE_DISPI_INDEX_BANK, val);
@@ -116,30 +116,30 @@ bochsvga_set_window(struct vgamode_s *vmode_g, int window, int val)
 }
 
 int
-bochsvga_get_linelength(struct vgamode_s *vmode_g)
+bochsvga_get_linelength(struct vgamode_s *curmode_g)
 {
     if (!bochsvga_dispi_enabled())
-        return stdvga_get_linelength(vmode_g);
-    return dispi_read(VBE_DISPI_INDEX_VIRT_WIDTH) * vga_bpp(vmode_g) / 8;
+        return stdvga_get_linelength(curmode_g);
+    return dispi_read(VBE_DISPI_INDEX_VIRT_WIDTH) * vga_bpp(curmode_g) / 8;
 }
 
 int
-bochsvga_set_linelength(struct vgamode_s *vmode_g, int val)
+bochsvga_set_linelength(struct vgamode_s *curmode_g, int val)
 {
-    stdvga_set_linelength(vmode_g, val);
+    stdvga_set_linelength(curmode_g, val);
     if (bochsvga_dispi_enabled()) {
-        int pixels = (val * 8) / vga_bpp(vmode_g);
+        int pixels = (val * 8) / vga_bpp(curmode_g);
         dispi_write(VBE_DISPI_INDEX_VIRT_WIDTH, pixels);
     }
     return 0;
 }
 
 int
-bochsvga_get_displaystart(struct vgamode_s *vmode_g)
+bochsvga_get_displaystart(struct vgamode_s *curmode_g)
 {
     if (!bochsvga_dispi_enabled())
-        return stdvga_get_displaystart(vmode_g);
-    int bpp = vga_bpp(vmode_g);
+        return stdvga_get_displaystart(curmode_g);
+    int bpp = vga_bpp(curmode_g);
     int linelength = dispi_read(VBE_DISPI_INDEX_VIRT_WIDTH) * bpp / 8;
     int x = dispi_read(VBE_DISPI_INDEX_X_OFFSET);
     int y = dispi_read(VBE_DISPI_INDEX_Y_OFFSET);
@@ -147,11 +147,11 @@ bochsvga_get_displaystart(struct vgamode_s *vmode_g)
 }
 
 int
-bochsvga_set_displaystart(struct vgamode_s *vmode_g, int val)
+bochsvga_set_displaystart(struct vgamode_s *curmode_g, int val)
 {
-    stdvga_set_displaystart(vmode_g, val);
+    stdvga_set_displaystart(curmode_g, val);
     if (bochsvga_dispi_enabled()) {
-        int bpp = vga_bpp(vmode_g);
+        int bpp = vga_bpp(curmode_g);
         int linelength = dispi_read(VBE_DISPI_INDEX_VIRT_WIDTH) * bpp / 8;
         if (!linelength)
             return 0;
@@ -162,19 +162,19 @@ bochsvga_set_displaystart(struct vgamode_s *vmode_g, int val)
 }
 
 int
-bochsvga_get_dacformat(struct vgamode_s *vmode_g)
+bochsvga_get_dacformat(struct vgamode_s *curmode_g)
 {
     if (!bochsvga_dispi_enabled())
-        return stdvga_get_dacformat(vmode_g);
+        return stdvga_get_dacformat(curmode_g);
     u16 en = dispi_read(VBE_DISPI_INDEX_ENABLE);
     return (en & VBE_DISPI_8BIT_DAC) ? 8 : 6;
 }
 
 int
-bochsvga_set_dacformat(struct vgamode_s *vmode_g, int val)
+bochsvga_set_dacformat(struct vgamode_s *curmode_g, int val)
 {
     if (!bochsvga_dispi_enabled())
-        return stdvga_set_dacformat(vmode_g, val);
+        return stdvga_set_dacformat(curmode_g, val);
     u16 en = dispi_read(VBE_DISPI_INDEX_ENABLE);
     if (val == 6)
         en &= ~VBE_DISPI_8BIT_DAC;
@@ -275,13 +275,7 @@ bochsvga_set_mode(struct vgamode_s *vmode_g, int flags)
     stdvga_crtc_write(crtc_addr, 0x11, 0x00);
     stdvga_crtc_write(crtc_addr, 0x01, width / 8 - 1);
     stdvga_set_linelength(vmode_g, width);
-    stdvga_crtc_write(crtc_addr, 0x12, height - 1);
-    u8 v = 0;
-    if ((height - 1) & 0x0100)
-        v |= 0x02;
-    if ((height - 1) & 0x0200)
-        v |= 0x40;
-    stdvga_crtc_mask(crtc_addr, 0x07, 0x42, v);
+    stdvga_set_vertical_size(height);
 
     stdvga_crtc_write(crtc_addr, 0x09, 0x00);
     stdvga_crtc_mask(crtc_addr, 0x17, 0x00, 0x03);

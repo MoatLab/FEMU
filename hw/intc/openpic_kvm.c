@@ -30,7 +30,7 @@
 #include "hw/pci/msi.h"
 #include "hw/qdev-properties.h"
 #include "hw/sysbus.h"
-#include "sysemu/kvm.h"
+#include "system/kvm.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "qom/object.h"
@@ -262,19 +262,18 @@ int kvm_openpic_connect_vcpu(DeviceState *d, CPUState *cs)
                                kvm_arch_vcpu_id(cs));
 }
 
-static Property kvm_openpic_properties[] = {
+static const Property kvm_openpic_properties[] = {
     DEFINE_PROP_UINT32("model", KVMOpenPICState, model,
                        OPENPIC_MODEL_FSL_MPIC_20),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void kvm_openpic_class_init(ObjectClass *oc, void *data)
+static void kvm_openpic_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
 
     dc->realize = kvm_openpic_realize;
     device_class_set_props(dc, kvm_openpic_properties);
-    dc->reset = kvm_openpic_reset;
+    device_class_set_legacy_reset(dc, kvm_openpic_reset);
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
 }
 

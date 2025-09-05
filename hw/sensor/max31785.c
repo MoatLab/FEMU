@@ -444,7 +444,7 @@ static int max31785_write_data(PMBusDevice *pmdev, const uint8_t *buf,
     return 0;
 }
 
-static void max31785_exit_reset(Object *obj)
+static void max31785_exit_reset(Object *obj, ResetType type)
 {
     PMBusDevice *pmdev = PMBUS_DEVICE(obj);
     MAX31785State *s = MAX31785(obj);
@@ -544,7 +544,7 @@ static void max31785_init(Object *obj)
     }
 }
 
-static void max31785_class_init(ObjectClass *klass, void *data)
+static void max31785_class_init(ObjectClass *klass, const void *data)
 {
     ResettableClass *rc = RESETTABLE_CLASS(klass);
     DeviceClass *dc = DEVICE_CLASS(klass);

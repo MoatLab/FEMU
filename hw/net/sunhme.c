@@ -31,7 +31,7 @@
 #include "qemu/module.h"
 #include "net/checksum.h"
 #include "net/eth.h"
-#include "sysemu/sysemu.h"
+#include "system/system.h"
 #include "trace.h"
 #include "qom/object.h"
 
@@ -177,9 +177,8 @@ struct SunHMEState {
     uint16_t miiregs[HME_MII_REGS_SIZE];
 };
 
-static Property sunhme_properties[] = {
+static const Property sunhme_properties[] = {
     DEFINE_NIC_PROPERTIES(SunHMEState, conf),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
 static void sunhme_reset_tx(SunHMEState *s)
@@ -938,7 +937,7 @@ static const VMStateDescription vmstate_hme = {
     }
 };
 
-static void sunhme_class_init(ObjectClass *klass, void *data)
+static void sunhme_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
@@ -948,7 +947,7 @@ static void sunhme_class_init(ObjectClass *klass, void *data)
     k->device_id = PCI_DEVICE_ID_SUN_HME;
     k->class_id = PCI_CLASS_NETWORK_ETHERNET;
     dc->vmsd = &vmstate_hme;
-    dc->reset = sunhme_reset;
+    device_class_set_legacy_reset(dc, sunhme_reset);
     device_class_set_props(dc, sunhme_properties);
     set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);
 }
@@ -959,7 +958,7 @@ static const TypeInfo sunhme_info = {
     .class_init    = sunhme_class_init,
     .instance_size = sizeof(SunHMEState),
     .instance_init = sunhme_instance_init,
-    .interfaces = (InterfaceInfo[]) {
+    .interfaces = (const InterfaceInfo[]) {
         { INTERFACE_CONVENTIONAL_PCI_DEVICE },
         { }
     }

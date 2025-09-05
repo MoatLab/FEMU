@@ -66,7 +66,7 @@ err_host_notifiers:
     vhost_dev_disable_notifiers(&vub->vhost_dev, vdev);
 }
 
-static void vub_stop(VirtIODevice *vdev)
+static int vub_stop(VirtIODevice *vdev)
 {
     VHostUserBase *vub = VHOST_USER_BASE(vdev);
     BusState *qbus = BUS(qdev_get_parent_bus(DEVICE(vdev)));
@@ -74,34 +74,39 @@ static void vub_stop(VirtIODevice *vdev)
     int ret;
 
     if (!k->set_guest_notifiers) {
-        return;
+        return 0;
     }
 
-    vhost_dev_stop(&vub->vhost_dev, vdev, true);
+    ret = vhost_dev_stop(&vub->vhost_dev, vdev, true);
 
-    ret = k->set_guest_notifiers(qbus->parent, vub->vhost_dev.nvqs, false);
-    if (ret < 0) {
+    if (k->set_guest_notifiers(qbus->parent, vub->vhost_dev.nvqs, false) < 0) {
         error_report("vhost guest notifier cleanup failed: %d", ret);
-        return;
+        return -1;
     }
 
     vhost_dev_disable_notifiers(&vub->vhost_dev, vdev);
+    return ret;
 }
 
-static void vub_set_status(VirtIODevice *vdev, uint8_t status)
+static int vub_set_status(VirtIODevice *vdev, uint8_t status)
 {
     VHostUserBase *vub = VHOST_USER_BASE(vdev);
     bool should_start = virtio_device_should_start(vdev, status);
 
     if (vhost_dev_is_started(&vub->vhost_dev) == should_start) {
-        return;
+        return 0;
     }
 
     if (should_start) {
         vub_start(vdev);
     } else {
-        vub_stop(vdev);
+        int ret;
+        ret = vub_stop(vdev);
+        if (ret < 0) {
+            return ret;
+        }
     }
+    return 0;
 }
 
 /*
@@ -223,15 +228,18 @@ static void vub_disconnect(DeviceState *dev)
 {
     VirtIODevice *vdev = VIRTIO_DEVICE(dev);
     VHostUserBase *vub = VHOST_USER_BASE(vdev);
+    struct vhost_virtqueue *vhost_vqs = vub->vhost_dev.vqs;
 
     if (!vub->connected) {
-        return;
+        goto done;
     }
     vub->connected = false;
 
     vub_stop(vdev);
     vhost_dev_cleanup(&vub->vhost_dev);
+    g_free(vhost_vqs);
 
+done:
     /* Re-instate the event handler for new connections */
     qemu_chr_fe_set_handlers(&vub->chardev,
                              NULL, NULL, vub_event,
@@ -254,7 +262,7 @@ static void vub_event(void *opaque, QEMUChrEvent event)
     case CHR_EVENT_CLOSED:
         /* defer close until later to avoid circular close */
         vhost_user_async_close(dev, &vub->chardev, &vub->vhost_dev,
-                               vub_disconnect, vub_event);
+                               vub_disconnect);
         break;
     case CHR_EVENT_BREAK:
     case CHR_EVENT_MUX_IN:
@@ -345,7 +353,7 @@ static void vub_device_unrealize(DeviceState *dev)
     do_vhost_user_cleanup(vdev, vub);
 }
 
-static void vub_class_init(ObjectClass *klass, void *data)
+static void vub_class_init(ObjectClass *klass, const void *data)
 {
     VirtioDeviceClass *vdc = VIRTIO_DEVICE_CLASS(klass);
 

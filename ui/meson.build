@@ -1,12 +1,10 @@
 system_ss.add(pixman)
-specific_ss.add(when: ['CONFIG_SYSTEM_ONLY'], if_true: pixman)   # for the include path
-specific_ss.add(when: ['CONFIG_SYSTEM_ONLY'], if_true: opengl)   # for the include path
-
 system_ss.add(png)
 system_ss.add(files(
   'clipboard.c',
   'console.c',
   'cursor.c',
+  'dmabuf.c',
   'input-keymap.c',
   'input-legacy.c',
   'input-barrier.c',
@@ -43,7 +41,7 @@ vnc_ss.add(files(
   'vnc-jobs.c',
   'vnc-clipboard.c',
 ))
-vnc_ss.add(zlib, jpeg, gnutls)
+vnc_ss.add(zlib, jpeg)
 vnc_ss.add(when: sasl, if_true: files('vnc-auth-sasl.c'))
 system_ss.add_all(when: [vnc, pixman], if_true: vnc_ss)
 system_ss.add(when: vnc, if_false: files('vnc-stubs.c'))
@@ -90,8 +88,7 @@ if dbus_display
                                           '--interface-prefix', 'org.qemu.',
                                           '--c-namespace', 'QemuDBus',
                                           '--generate-c-code', '@BASENAME@'])
-  dbus_display1_dep = declare_dependency(sources: dbus_display1, dependencies: gio)
-  dbus_ss.add(when: [gio, dbus_display1_dep],
+  dbus_ss.add(when: gio,
               if_true: [files(
                 'dbus-chardev.c',
                 'dbus-clipboard.c',
@@ -99,7 +96,7 @@ if dbus_display
                 'dbus-error.c',
                 'dbus-listener.c',
                 'dbus.c',
-              ), opengl, gbm, pixman])
+              ), opengl, gbm, pixman, dbus_display1])
   ui_modules += {'dbus' : dbus_ss}
 endif
 
@@ -120,10 +117,6 @@ if gtk.found()
 endif
 
 if sdl.found()
-  if host_os == 'windows'
-    system_ss.add(files('win32-kbd-hook.c'))
-  endif
-
   sdl_ss = ss.source_set()
   sdl_ss.add(sdl, sdl_image, pixman, glib, files(
     'sdl2-2d.c',

@@ -320,13 +320,13 @@ static void fsi_aspeed_apb2opb_reset(DeviceState *dev)
     memcpy(s->regs, aspeed_apb2opb_reset, ASPEED_APB2OPB_NR_REGS);
 }
 
-static void fsi_aspeed_apb2opb_class_init(ObjectClass *klass, void *data)
+static void fsi_aspeed_apb2opb_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->desc = "ASPEED APB2OPB Bridge";
     dc->realize = fsi_aspeed_apb2opb_realize;
-    dc->reset = fsi_aspeed_apb2opb_reset;
+    device_class_set_legacy_reset(dc, fsi_aspeed_apb2opb_reset);
 }
 
 static const TypeInfo aspeed_apb2opb_info = {

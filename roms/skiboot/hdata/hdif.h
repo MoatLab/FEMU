@@ -63,12 +63,16 @@ struct HDIF_child_ptr {
 	.size	= CPU_TO_BE32(_size),			\
 }
 
-static inline bool HDIF_check(const void *hdif, const char id[])
+static inline bool HDIF_check(const void *hdif, const char *id)
 {
 	const struct HDIF_common_hdr *hdr = hdif;
 
-	return hdr->d1f0 == CPU_TO_BE16(0xd1f0) &&
-		memcmp(hdr->id, id, sizeof(hdr->id)) == 0;
+	if (hdr->d1f0 != CPU_TO_BE16(0xd1f0))
+		return false;
+	if (id && memcmp(hdr->id, id, sizeof(hdr->id)) != 0)
+		return false;
+
+	return true;
 }
 
 /* HDIF_get_idata - Get a pointer to internal data block

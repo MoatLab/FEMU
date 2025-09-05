@@ -15,12 +15,14 @@
 #include "hw/vfio/vfio-calxeda-xgmac.h"
 #include "migration/vmstate.h"
 #include "qemu/module.h"
+#include "qemu/error-report.h"
 
 static void calxeda_xgmac_realize(DeviceState *dev, Error **errp)
 {
     VFIOPlatformDevice *vdev = VFIO_PLATFORM_DEVICE(dev);
     VFIOCalxedaXgmacDeviceClass *k = VFIO_CALXEDA_XGMAC_DEVICE_GET_CLASS(dev);
 
+    warn_report("-device vfio-calxeda-xgmac is deprecated");
     vdev->compat = g_strdup("calxeda,hb-xgmac");
     vdev->num_compat = 1;
 
@@ -32,7 +34,7 @@ static const VMStateDescription vfio_platform_calxeda_xgmac_vmstate = {
     .unmigratable = 1,
 };
 
-static void vfio_calxeda_xgmac_class_init(ObjectClass *klass, void *data)
+static void vfio_calxeda_xgmac_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     VFIOCalxedaXgmacDeviceClass *vcxc =
@@ -41,8 +43,6 @@ static void vfio_calxeda_xgmac_class_init(ObjectClass *klass, void *data)
                                     &vcxc->parent_realize);
     dc->desc = "VFIO Calxeda XGMAC";
     dc->vmsd = &vfio_platform_calxeda_xgmac_vmstate;
-    /* Supported by TYPE_VIRT_MACHINE */
-    dc->user_creatable = true;
 }
 
 static const TypeInfo vfio_calxeda_xgmac_dev_info = {

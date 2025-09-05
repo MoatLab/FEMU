@@ -395,7 +395,7 @@ static void xics_spapr_set_irq(SpaprInterruptController *intc, int irq, int val)
     ics_set_irq(ics, srcno, val);
 }
 
-static void xics_spapr_print_info(SpaprInterruptController *intc, Monitor *mon)
+static void xics_spapr_print_info(SpaprInterruptController *intc, GString *buf)
 {
     ICSState *ics = ICS_SPAPR(intc);
     CPUState *cs;
@@ -403,10 +403,9 @@ static void xics_spapr_print_info(SpaprInterruptController *intc, Monitor *mon)
     CPU_FOREACH(cs) {
         PowerPCCPU *cpu = POWERPC_CPU(cs);
 
-        icp_pic_print_info(spapr_cpu_state(cpu)->icp, mon);
+        icp_pic_print_info(spapr_cpu_state(cpu)->icp, buf);
     }
-
-    ics_pic_print_info(ics, mon);
+    ics_pic_print_info(ics, buf);
 }
 
 static int xics_spapr_post_load(SpaprInterruptController *intc, int version_id)
@@ -437,7 +436,7 @@ static void xics_spapr_deactivate(SpaprInterruptController *intc)
     }
 }
 
-static void ics_spapr_class_init(ObjectClass *klass, void *data)
+static void ics_spapr_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     ICSStateClass *isc = ICS_CLASS(klass);
@@ -462,7 +461,7 @@ static const TypeInfo ics_spapr_info = {
     .name = TYPE_ICS_SPAPR,
     .parent = TYPE_ICS,
     .class_init = ics_spapr_class_init,
-    .interfaces = (InterfaceInfo[]) {
+    .interfaces = (const InterfaceInfo[]) {
         { TYPE_SPAPR_INTC },
         { }
     },

@@ -152,10 +152,10 @@ static int fakenv_readpublic(TPMI_RH_NV_INDEX index, TPMS_NV_PUBLIC *nv_public,
 
 	switch (index) {
 	case SECBOOT_TPMNV_VARS_INDEX:
-		memcpy(&nv_name->t.name, tpmnv_vars_name, sizeof(TPM2B_NAME));
+		memcpy(&nv_name->t.name, tpmnv_vars_name, sizeof(tpmnv_vars_name));
 		break;
 	case SECBOOT_TPMNV_CONTROL_INDEX:
-		memcpy(&nv_name->t.name, tpmnv_control_name, sizeof(TPM2B_NAME));
+		memcpy(&nv_name->t.name, tpmnv_control_name, sizeof(tpmnv_control_name));
 		break;
 	default:
 		return OPAL_INTERNAL_ERROR;

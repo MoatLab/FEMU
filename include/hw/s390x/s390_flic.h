@@ -35,17 +35,12 @@ typedef struct AdapterRoutes {
 
 extern const VMStateDescription vmstate_adapter_routes;
 
-#define VMSTATE_ADAPTER_ROUTES(_f, _s) \
-    VMSTATE_STRUCT(_f, _s, 1, vmstate_adapter_routes, AdapterRoutes)
-
 #define TYPE_S390_FLIC_COMMON "s390-flic"
 OBJECT_DECLARE_TYPE(S390FLICState, S390FLICStateClass,
                     S390_FLIC_COMMON)
 
 struct S390FLICState {
     SysBusDevice parent_obj;
-    /* to limit AdapterRoutes.num_routes for compat */
-    uint32_t adapter_routes_max_batch;
     bool ais_supported;
 };
 
@@ -118,6 +113,7 @@ struct QEMUS390FLICState {
     uint8_t simm;
     uint8_t nimm;
     QLIST_HEAD(, QEMUS390FlicIO) io[8];
+    bool migrate_all_state;
 };
 
 uint32_t qemu_s390_flic_dequeue_service(QEMUS390FLICState *flic);

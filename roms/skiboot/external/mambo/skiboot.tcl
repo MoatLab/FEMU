@@ -175,6 +175,34 @@ if { $default_config == "P10" } {
     }
 }
 
+if { $default_config == "P11" } {
+    # PVR configured for POWER11 DD2.0, LPAR-per-thread
+    myconf config processor/initial/SIM_CTRL  0x0c1dd60000000000
+    if { $mconf(threads) == 8 } {
+        # Big-core mode.
+        myconf config processor/initial/PVR 0x00820200
+        myconf config processor/initial/SIM_CTRL1 0xc0400c0400040a40
+	puts "Set P11 big-core mode"
+    } else {
+        # Small-core mode.
+        myconf config processor/initial/PVR 0x00821200
+        myconf config processor/initial/SIM_CTRL1 0xc0400c0401040a40
+        if { $mconf(threads) != 1 && $mconf(threads) != 2 && $mconf(threads) != 4 } {
+            puts "ERROR: Bad threads configuration"
+            exit
+        }
+        if { $mconf(threads) != 4 && $mconf(cpus) != 1 } {
+            puts "ERROR: Bad threads, cpus configuration"
+            exit
+        }
+
+	puts "Set P11 small-core mode"
+    }
+
+    if { $mconf(numa) } {
+        myconf config memory_region_id_shift 44
+    }
+}
 
 if { $mconf(numa) } {
     myconf config memory_regions $mconf(cpus)
@@ -364,10 +392,42 @@ foreach pmem_file $pmem_files { # PMEM_DISK
     } else {
 	set pmem_mode "rw"
     }
-    if {[catch {mysim memory mmap $pmem_start $pmem_size $pmem_file $pmem_mode}]} {
-	puts "ERROR: pmem: 'mysim mmap' command needs newer mambo"
+    if {[catch {mysim memory mmap $pmem_start $pmem_size $pmem_file $pmem_mode} err]} {
+	puts "ERROR: pmem: 'mysim mmap' $err"
 	exit
     }
+
+    # Linux requires the pmem size to be 2MB align.
+    # If not then mmap remaining bytes as padding to align mamp to 2MB
+    set pmem_map_align [expr 2 \* [expr 1024 \* 1024]]
+    puts $pmem_map_align
+    set pmem_remainder [expr $pmem_size % $pmem_map_align]
+    if { $pmem_remainder != 0 } {
+	set pmem_padding [expr $pmem_map_align - $pmem_remainder]
+	if { $pmem_padding > $pmem_map_align } {
+		puts "ERROR: pmem: Failed to calculate valid padding size"
+		exit
+	}
+	puts "pmem_padding: $pmem_padding"
+
+	# Create pad file of remiaing size and map it.
+	set pmem_pad_file [exec mktemp /tmp/pmem_padXXXXXX]
+	puts "Pad file: $pmem_pad_file"
+	if {[catch {exec dd if=/dev/zero of=$pmem_pad_file bs=$pmem_padding count=1 status=none} err]} {
+		puts "ERROR: pmem: 'Failed to create paded file' $err"
+		exec rm -f $pmem_pad_file
+		exit
+	}
+
+	set pmem_end [expr $pmem_start + $pmem_size]
+	if {[catch {mysim memory mmap $pmem_end $pmem_padding $pmem_pad_file $pmem_mode} err]} {
+		puts "ERROR: pmem: 'mysim mmap padding' $err"
+		exit
+	}
+	exec rm -f $pmem_pad_file
+	set pmem_size [expr $pmem_size + $pmem_padding]
+    }
+
     set pmem_start [pmem_node_add $pmem_root $pmem_start $pmem_size]
     set pmem_file_ix [expr $pmem_file_ix + 1]
 }
@@ -466,8 +526,11 @@ add_feature_node $np "inst-l1d-flush-ori30,30,0" $mconf(inst_l1d_flush_ori30)
 
 # Init CPUs
 set pir 0
+set pirmax [expr $mconf(cpus) * $mconf(threads)]
+set pirbits [expr int(ceil(log($pirmax) / log (16)))]
 for { set c 0 } { $c < $mconf(cpus) } { incr c } {
-    set cpu_node [mysim of find_device "/cpus/PowerPC@$pir"]
+    set p [format "%0${pirbits}x" $pir]
+    set cpu_node [mysim of find_device "/cpus/PowerPC@$p"]
     mysim of addprop $cpu_node int "ibm,pir" $pir
     set reg  [list 0x0000001c00000028 0xffffffffffffffff]
     mysim of addprop $cpu_node array64 "ibm,processor-segment-sizes" reg
@@ -551,6 +614,11 @@ for { set c 0 } { $c < $mconf(cpus) } { incr c } {
         set reg {}
 	lappend reg 0x6000f63fc70080c0
 	mysim of addprop $cpu_node array64 "ibm,pa-features" reg
+    }
+
+    if { $default_config == "P10" } {
+        mysim of addprop $cpu_node int "ibm,mmu-pid-bits" 20
+        mysim of addprop $cpu_node int "ibm,mmu-lpid-bits" 12
     }
 
     set irqreg [list]

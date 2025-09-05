@@ -1,0 +1,20 @@
+version: '{build}'
+
+platform:
+  - x86
+  - x64
+configuration:
+  - Release
+environment:
+  CTEST_OUTPUT_ON_FAILURE: ON
+
+install:
+  - choco install -y yasm
+before_build:
+  - if %PLATFORM% == x86 set BUILD_ARCH=Win32
+  - if %PLATFORM% == x64 set BUILD_ARCH=x64
+  - cmake . -A %BUILD_ARCH%
+build_script:
+  - cmake --build . --config %CONFIGURATION%
+test_script:
+  - ctest --build-config %CONFIGURATION%

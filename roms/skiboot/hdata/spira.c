@@ -121,48 +121,6 @@ __section(".mdst.data") struct mdst_table init_mdst_table[2] = {
 	},
 };
 
-/* SP Interface Root Array, aka SPIRA */
-__section(".spira.data") struct spira spira = {
-	.hdr = HDIF_SIMPLE_HDR("SPIRA ", SPIRA_VERSION, struct spira),
-	.ntuples_ptr = HDIF_IDATA_PTR(offsetof(struct spira, ntuples),
-				      sizeof(struct spira_ntuples)),
-	.ntuples = {
-		.array_hdr = {
-			.offset		= CPU_TO_BE32(HDIF_ARRAY_OFFSET),
-			.ecnt		= CPU_TO_BE32(SPIRA_NTUPLES_COUNT),
-			.esize
-				= CPU_TO_BE32(sizeof(struct spira_ntuple)),
-			.eactsz		= CPU_TO_BE32(0x18),
-		},
-		/* We only populate some n-tuples */
-		.proc_init = {
-			.addr  		= CPU_TO_BE64(PROCIN_OFF),
-			.alloc_cnt	= CPU_TO_BE16(1),
-			.act_cnt	= CPU_TO_BE16(1),
-			.alloc_len
-			= CPU_TO_BE32(sizeof(struct proc_init_data)),
-		},
-		.heap = {
-			.addr		= CPU_TO_BE64(SPIRA_HEAP_BASE),
-			.alloc_cnt	= CPU_TO_BE16(1),
-			.alloc_len	= CPU_TO_BE32(SPIRA_HEAP_SIZE),
-		},
-		.mdump_src = {
-			.addr		= CPU_TO_BE64(MDST_TABLE_OFF),
-			.alloc_cnt	= CPU_TO_BE16(ARRAY_SIZE(init_mdst_table)),
-			.act_cnt	= CPU_TO_BE16(ARRAY_SIZE(init_mdst_table)),
-			.alloc_len	=
-				CPU_TO_BE32(sizeof(init_mdst_table)),
-		},
-		.cpu_ctrl = {
-			.addr		= CPU_TO_BE64(CPU_CTL_INIT_DATA_OFF),
-			.alloc_cnt	= CPU_TO_BE16(1),
-			.act_cnt	= CPU_TO_BE16(1),
-			.alloc_len	= CPU_TO_BE32(sizeof(cpu_ctl_init_data)),
-		},
-	},
-};
-
 /* The Hypervisor SPIRA-H Structure */
 __section(".spirah.data") struct spirah spirah = {
 	.hdr = HDIF_SIMPLE_HDR(SPIRAH_HDIF_SIG, SPIRAH_VERSION, struct spirah),
@@ -236,7 +194,7 @@ __section(".spirah.data") struct spirah spirah = {
 };
 
 /* The service processor SPIRA-S structure */
-struct spiras *spiras;
+struct spiras *skiboot_constant_addr spiras;
 
 /* Overridden for testing. */
 #ifndef spira_check_ptr
@@ -319,6 +277,7 @@ static struct dt_node *add_xscom_node(uint64_t base,
 		addr = base | (((uint64_t)hw_id) << 42);
 		break;
 	case proc_gen_p10:
+	case proc_gen_p11:
 	default:
 		/* Use Primary topology table index for xscom address */
 		addr = base | (((uint64_t)cinfo->topology_id_table[cinfo->primary_topology_loc]) << 44);
@@ -352,6 +311,10 @@ static struct dt_node *add_xscom_node(uint64_t base,
 		dt_add_property_strings(node, "compatible",
 					"ibm,xscom", "ibm,power10-xscom");
 		break;
+	case proc_gen_p11:
+		dt_add_property_strings(node, "compatible",
+					"ibm,xscom", "ibm,power11-xscom");
+		break;
 	default:
 		dt_add_property_strings(node, "compatible", "ibm,xscom");
 	}
@@ -376,7 +339,7 @@ static struct dt_node *add_xscom_node(uint64_t base,
 #define GET_HDIF_HDR -1
 static const void *xscom_to_pcrd(struct dt_node *xscom, int idata_index)
 {
-	struct spira_ntuple *t = &spira.ntuples.proc_chip;
+	struct spira_ntuple *t = &spiras->ntuples.proc_chip;
 	const struct HDIF_common_hdr *hdif;
 	const void *idata;
 	unsigned int size;
@@ -441,6 +404,7 @@ static void add_psihb_node(struct dt_node *np)
 		psi_comp = "ibm,power9-psihb-x";
 		break;
 	case proc_gen_p10:
+	case proc_gen_p11:
 		psi_scom = 0x3011d00;
 		psi_slen = 0x100;
 		psi_comp = "ibm,power10-psihb-x";
@@ -474,6 +438,7 @@ static void add_xive_node(struct dt_node *np)
 		comp = "ibm,power9-xive-x";
 		break;
 	case proc_gen_p10:
+	case proc_gen_p11:
 		scom = 0x2010800;
 		slen = 0x400;
 		comp = "ibm,power10-xive-x";
@@ -567,11 +532,11 @@ static void add_xscom_add_pcia_assoc(struct dt_node *np, uint32_t pcid)
 	 * affinity can be different for groups of cores within the
 	 * chip, but for now we are going to ignore that
 	 */
-	hdr = get_hdif(&spira.ntuples.pcia, SPPCIA_HDIF_SIG);
+	hdr = get_hdif(&spiras->ntuples.pcia, SPPCIA_HDIF_SIG);
 	if (!hdr)
 		return;
 
-	for_each_pcia(hdr) {
+	for_each_pcia(spiras, hdr) {
 		const struct sppcia_core_unique *id;
 
 		id = HDIF_get_idata(hdr, SPPCIA_IDATA_CORE_UNIQUE, &size);
@@ -605,7 +570,7 @@ static bool add_xscom_sppcrd(uint64_t xscom_base)
 	const void *vpd;
 	struct dt_node *np, *vpd_node;
 
-	for_each_ntuple_idx(&spira.ntuples.proc_chip, hdif, i,
+	for_each_ntuple_idx(&spiras->ntuples.proc_chip, hdif, i,
 			    SPPCRD_HDIF_SIG) {
 		const struct sppcrd_chip_info *cinfo;
 		const struct spira_fru_id *fru_id = NULL;
@@ -731,7 +696,7 @@ static void add_xscom(void)
 	unsigned int size;
 	uint64_t xscom_base;
 
-	ms_vpd = get_hdif(&spira.ntuples.ms_vpd, MSVPD_HDIF_SIG);
+	ms_vpd = get_hdif(&spiras->ntuples.ms_vpd, MSVPD_HDIF_SIG);
 	if (!ms_vpd) {
 		prerror("XSCOM: Can't find MS VPD\n");
 		return;
@@ -787,6 +752,9 @@ static void add_chiptod_node(unsigned int chip_id, int flags)
 	case proc_gen_p10:
 		compat_str = "ibm,power10-chiptod";
 		break;
+	case proc_gen_p11:
+		compat_str = "ibm,power11-chiptod";
+		break;
 	default:
 		return;
 	}
@@ -809,35 +777,7 @@ static void add_chiptod_node(unsigned int chip_id, int flags)
 		dt_add_property(node, "secondary", NULL, 0);
 }
 
-static bool add_chiptod_old(void)
-{
-	const void *hdif;
-	unsigned int i;
-	bool found = false;
-
-	/*
-	 * Locate chiptod ID structures in SPIRA
-	 */
-	if (!get_hdif(&spira.ntuples.chip_tod, "TOD   "))
-		return found;
-
-	for_each_ntuple_idx(&spira.ntuples.chip_tod, hdif, i, "TOD   ") {
-		const struct chiptod_chipid *id;
-
-		id = HDIF_get_idata(hdif, CHIPTOD_IDATA_CHIPID, NULL);
-		if (!CHECK_SPPTR(id)) {
-			prerror("CHIPTOD: Bad ChipID data %d\n", i);
-			continue;
-		}
-
-		add_chiptod_node(pcid_to_chip_id(be32_to_cpu(id->chip_id)),
-				 be32_to_cpu(id->flags));
-		found = true;
-	}
-	return found;
-}
-
-static bool add_chiptod_new(void)
+static bool add_chiptod(void)
 {
 	const void *hdif;
 	unsigned int i;
@@ -846,10 +786,10 @@ static bool add_chiptod_new(void)
 	/*
 	 * Locate Proc Chip ID structures in SPIRA
 	 */
-	if (!get_hdif(&spira.ntuples.proc_chip, SPPCRD_HDIF_SIG))
+	if (!get_hdif(&spiras->ntuples.proc_chip, SPPCRD_HDIF_SIG))
 		return found;
 
-	for_each_ntuple_idx(&spira.ntuples.proc_chip, hdif, i,
+	for_each_ntuple_idx(&spiras->ntuples.proc_chip, hdif, i,
 			    SPPCRD_HDIF_SIG) {
 		const struct sppcrd_chip_info *cinfo;
 		const struct sppcrd_chip_tod *tinfo;
@@ -926,6 +866,7 @@ static void add_nx_node(u32 gcid)
 		break;
 	case proc_gen_p9:
 	case proc_gen_p10:
+	case proc_gen_p11:
 		/* POWER9 NX is not software compatible with P8 NX */
 		dt_add_property_strings(nx, "compatible", "ibm,power9-nx");
 		break;
@@ -941,7 +882,7 @@ static void add_nx(void)
 	unsigned int i;
 	void *hdif;
 
-	for_each_ntuple_idx(&spira.ntuples.proc_chip, hdif, i,
+	for_each_ntuple_idx(&spiras->ntuples.proc_chip, hdif, i,
 			SPPCRD_HDIF_SIG) {
 		const struct sppcrd_chip_info *cinfo;
 		u32 ve;
@@ -973,7 +914,7 @@ static void add_nmmu(void)
 	if (proc_gen < proc_gen_p9)
 		return;
 
-	if (proc_gen == proc_gen_p10) {
+	if (proc_gen == proc_gen_p10 || proc_gen == proc_gen_p11) {
 		scom1 = 0x2010c40;
 		scom2 = 0x3010c40;
 	} else
@@ -988,7 +929,7 @@ static void add_nmmu(void)
 		 * P10 has a second nMMU, a.k.a "south" nMMU.
 		 * It exists only on P1 and P3
 		 */
-		if (proc_gen == proc_gen_p10) {
+		if (proc_gen == proc_gen_p10 || proc_gen == proc_gen_p11) {
 
 			chip_id = __dt_get_chip_id(xscom);
 			if (chip_id != 2 && chip_id != 6)
@@ -1051,7 +992,7 @@ static void dt_init_secureboot_node(const struct iplparams_sysparams *sysparams)
 
 static void opal_dump_add_mpipl_boot(const struct iplparams_iplparams *p)
 {
-	u32 mdrt_cnt = be16_to_cpu(spira.ntuples.mdump_res.act_cnt);
+	u32 mdrt_cnt = be16_to_cpu(spirah.ntuples.mdump_res.act_cnt);
 	u32 mdrt_max_cnt = MDRT_TABLE_SIZE / sizeof(struct mdrt_table);
 	struct dt_node *dump_node;
 
@@ -1386,7 +1327,7 @@ static void add_iplparams(void)
 	struct dt_node *iplp_node;
 	const void *ipl_parms;
 
-	ipl_parms = get_hdif(&spira.ntuples.ipl_parms, "IPLPMS");
+	ipl_parms = get_hdif(&spiras->ntuples.ipl_parms, "IPLPMS");
 	if (!ipl_parms) {
 		prerror("IPLPARAMS: Cannot find IPL Parms in SPIRA\n");
 		return;
@@ -1415,7 +1356,7 @@ uint32_t pcid_to_chip_id(uint32_t proc_chip_id)
 	const void *hdif;
 
 	/* First, try the proc_chip ntuples for chip data */
-	for_each_ntuple_idx(&spira.ntuples.proc_chip, hdif, i,
+	for_each_ntuple_idx(&spiras->ntuples.proc_chip, hdif, i,
 			    SPPCRD_HDIF_SIG) {
 		const struct sppcrd_chip_info *cinfo;
 
@@ -1441,7 +1382,7 @@ uint32_t pcid_to_topology_idx(uint32_t proc_chip_id)
 	const void *hdif;
 
 	/* First, try the proc_chip ntuples for chip data */
-	for_each_ntuple_idx(&spira.ntuples.proc_chip, hdif, i,
+	for_each_ntuple_idx(&spiras->ntuples.proc_chip, hdif, i,
 			    SPPCRD_HDIF_SIG) {
 		const struct sppcrd_chip_info *cinfo;
 
@@ -1491,15 +1432,15 @@ static void hostservices_parse(void)
 		return;
 
 	ntuples_size = sizeof(struct HDIF_array_hdr) + 
-		be32_to_cpu(spira.ntuples.array_hdr.ecnt) *
+		be32_to_cpu(spiras->ntuples.array_hdr.ecnt) *
 		sizeof(struct spira_ntuple);
 
-	if (offsetof(struct spira_ntuples, hs_data) >= ntuples_size) {
+	if (offsetof(struct spiras_ntuples, hs_data) >= ntuples_size) {
 		prerror("SPIRA: No host services data found\n");
 		return;
 	}
 
-	hs_hdr = get_hdif(&spira.ntuples.hs_data, HSERV_HDIF_SIG);
+	hs_hdr = get_hdif(&spiras->ntuples.hs_data, HSERV_HDIF_SIG);
 	if (!hs_hdr) {
 		prerror("SPIRA: No host services data found\n");
 		return;
@@ -1515,7 +1456,7 @@ static void hostservices_parse(void)
 
 static void add_stop_levels(void)
 {
-	struct spira_ntuple *t = &spira.ntuples.proc_chip;
+	struct spira_ntuple *t = &spiras->ntuples.proc_chip;
 	struct HDIF_common_hdr *hdif;
 	u32 stop_levels = ~0;
 	bool valid = false;
@@ -1775,13 +1716,10 @@ static void add_npus(void)
 }
 
 /*
- * Legacy SPIRA is being deprecated and we have new SPIRA-H/S structures.
- * But on older system (p7?) we will continue to get legacy SPIRA.
- *
- * SPIRA-S is initialized and provided by FSP. We use SPIRA-S signature
- * to identify supported format. Also if required adjust spira pointer.
+ * SPIRA-S is initialized and provided by boot firmware. Check the SPIRA-S
+ * signature to confirm it was provided.
  */
-static void fixup_spira(void)
+static bool find_spiras(void)
 {
 #if !defined(TEST)
 	spiras = (struct spiras *)SPIRA_HEAP_BASE;
@@ -1789,35 +1727,12 @@ static void fixup_spira(void)
 
 	/* Validate SPIRA-S signature */
 	if (!spiras)
-		return;
+		return false;
 	if (!HDIF_check(&spiras->hdr, SPIRAS_HDIF_SIG))
-		return;
+		return false;
 
 	prlog(PR_DEBUG, "SPIRA-S found.\n");
-
-	spira.ntuples.sp_subsys = spiras->ntuples.sp_subsys;
-	spira.ntuples.ipl_parms = spiras->ntuples.ipl_parms;
-	spira.ntuples.nt_enclosure_vpd = spiras->ntuples.nt_enclosure_vpd;
-	spira.ntuples.slca = spiras->ntuples.slca;
-	spira.ntuples.backplane_vpd = spiras->ntuples.backplane_vpd;
-	spira.ntuples.system_vpd = spiras->ntuples.system_vpd;
-	spira.ntuples.proc_init = spirah.ntuples.proc_init;
-	spira.ntuples.clock_vpd = spiras->ntuples.clock_vpd;
-	spira.ntuples.anchor_vpd = spiras->ntuples.anchor_vpd;
-	spira.ntuples.op_panel_vpd = spiras->ntuples.op_panel_vpd;
-	spira.ntuples.misc_cec_fru_vpd = spiras->ntuples.misc_cec_fru_vpd;
-	spira.ntuples.ms_vpd = spiras->ntuples.ms_vpd;
-	spira.ntuples.cec_iohub_fru = spiras->ntuples.cec_iohub_fru;
-	spira.ntuples.cpu_ctrl = spirah.ntuples.cpu_ctrl;
-	spira.ntuples.mdump_src = spirah.ntuples.mdump_src;
-	spira.ntuples.mdump_dst = spirah.ntuples.mdump_dst;
-	spira.ntuples.mdump_res  = spirah.ntuples.mdump_res;
-	spira.ntuples.proc_dump_area = spirah.ntuples.proc_dump_area;
-	spira.ntuples.pcia = spiras->ntuples.pcia;
-	spira.ntuples.proc_chip = spiras->ntuples.proc_chip;
-	spira.ntuples.hs_data = spiras->ntuples.hs_data;
-	spira.ntuples.ipmi_sensor = spiras->ntuples.ipmi_sensor;
-	spira.ntuples.node_stb_data = spiras->ntuples.node_stb_data;
+	return true;
 }
 
 /*
@@ -1831,7 +1746,7 @@ static void update_spirah_addr(void)
 		return;
 
 	naca.spirah_addr = CPU_TO_BE64(SPIRAH_OFF);
-	naca.spira_addr = CPU_TO_BE64(SPIRA_OFF);
+	naca.spira_addr = 0;
 	spirah.ntuples.hs_data_area.addr = CPU_TO_BE64(SPIRA_HEAP_BASE - SKIBOOT_BASE);
 	spirah.ntuples.mdump_res.addr = CPU_TO_BE64(MDRT_TABLE_BASE - SKIBOOT_BASE);
 #endif
@@ -1843,7 +1758,10 @@ int parse_hdat(bool is_opal)
 
 	prlog(PR_DEBUG, "Parsing HDAT...\n");
 
-	fixup_spira();
+	if (!find_spiras()) {
+		prlog(PR_ERR, "SPIRA-S not found.\n");
+		return -1;
+	}
 
 	update_spirah_addr();
 
@@ -1882,7 +1800,7 @@ int parse_hdat(bool is_opal)
 	fsp_parse();
 
 	/* Add ChipTOD's */
-	if (!add_chiptod_old() && !add_chiptod_new())
+	if (!add_chiptod())
 		prerror("CHIPTOD: No ChipTOD found !\n");
 
 	/* Add NX */

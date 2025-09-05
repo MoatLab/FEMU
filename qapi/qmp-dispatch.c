@@ -16,12 +16,12 @@
 #include "block/aio.h"
 #include "qapi/compat-policy.h"
 #include "qapi/error.h"
-#include "qapi/qmp/dispatch.h"
-#include "qapi/qmp/qdict.h"
-#include "qapi/qmp/qjson.h"
+#include "qapi/qmp-registry.h"
+#include "qobject/qdict.h"
+#include "qobject/qjson.h"
 #include "qapi/qobject-input-visitor.h"
 #include "qapi/qobject-output-visitor.h"
-#include "qapi/qmp/qbool.h"
+#include "qobject/qbool.h"
 #include "qemu/coroutine.h"
 #include "qemu/main-loop.h"
 
@@ -173,7 +173,7 @@ QDict *coroutine_mixed_fn qmp_dispatch(const QmpCommandList *cmds, QObject *requ
                   "The command %s has not been found", command);
         goto out;
     }
-    if (!compat_policy_input_ok(cmd->special_features, &compat_policy,
+    if (!compat_policy_input_ok(cmd->features, &compat_policy,
                                 ERROR_CLASS_COMMAND_NOT_FOUND,
                                 "command", command, &err)) {
         goto out;
@@ -212,7 +212,8 @@ QDict *coroutine_mixed_fn qmp_dispatch(const QmpCommandList *cmds, QObject *requ
              * executing the command handler so that it can make progress if it
              * involves an AIO_WAIT_WHILE().
              */
-            aio_co_reschedule_self(qemu_get_aio_context());
+            aio_co_schedule(qemu_get_aio_context(), qemu_coroutine_self());
+            qemu_coroutine_yield();
         }
 
         monitor_set_cur(qemu_coroutine_self(), cur_mon);
@@ -226,7 +227,9 @@ QDict *coroutine_mixed_fn qmp_dispatch(const QmpCommandList *cmds, QObject *requ
              * Move back to iohandler_ctx so that nested event loops for
              * qemu_aio_context don't start new monitor commands.
              */
-            aio_co_reschedule_self(iohandler_get_aio_context());
+            aio_co_schedule(iohandler_get_aio_context(),
+                            qemu_coroutine_self());
+            qemu_coroutine_yield();
         }
     } else {
        /*

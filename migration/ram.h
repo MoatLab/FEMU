@@ -33,6 +33,34 @@
 #include "exec/cpu-common.h"
 #include "io/channel.h"
 
+/*
+ * RAM_SAVE_FLAG_ZERO used to be named RAM_SAVE_FLAG_COMPRESS, it
+ * worked for pages that were filled with the same char.  We switched
+ * it to only search for the zero value.  And to avoid confusion with
+ * RAM_SAVE_FLAG_COMPRESS_PAGE just rename it.
+ *
+ * RAM_SAVE_FLAG_FULL (0x01) was obsoleted in 2009.
+ *
+ * RAM_SAVE_FLAG_COMPRESS_PAGE (0x100) was removed in QEMU 9.1.
+ *
+ * RAM_SAVE_FLAG_HOOK is only used in RDMA. Whenever this is found in the
+ * data stream, the flags will be passed to rdma functions in the
+ * incoming-migration side.
+ *
+ * We can't use any flag that is bigger than 0x200, because the flags are
+ * always assumed to be encoded in a ramblock address offset, which is
+ * multiple of PAGE_SIZE.  Here it means QEMU supports migration with any
+ * architecture that has PAGE_SIZE>=1K (0x400).
+ */
+#define RAM_SAVE_FLAG_ZERO                    0x002
+#define RAM_SAVE_FLAG_MEM_SIZE                0x004
+#define RAM_SAVE_FLAG_PAGE                    0x008
+#define RAM_SAVE_FLAG_EOS                     0x010
+#define RAM_SAVE_FLAG_CONTINUE                0x020
+#define RAM_SAVE_FLAG_XBZRLE                  0x040
+#define RAM_SAVE_FLAG_HOOK                    0x080
+#define RAM_SAVE_FLAG_MULTIFD_FLUSH           0x200
+
 extern XBZRLECacheStats xbzrle_counters;
 
 /* Should be holding either ram_list.mutex, or the RCU lock. */
@@ -44,6 +72,7 @@ extern XBZRLECacheStats xbzrle_counters;
     INTERNAL_RAMBLOCK_FOREACH(block)                   \
         if (!qemu_ram_is_migratable(block)) {} else
 
+void ram_mig_init(void);
 int xbzrle_cache_resize(uint64_t new_size, Error **errp);
 uint64_t ram_bytes_remaining(void);
 uint64_t ram_bytes_total(void);
@@ -69,6 +98,7 @@ int ramblock_recv_bitmap_test(RAMBlock *rb, void *host_addr);
 bool ramblock_recv_bitmap_test_byte_offset(RAMBlock *rb, uint64_t byte_offset);
 void ramblock_recv_bitmap_set(RAMBlock *rb, void *host_addr);
 void ramblock_recv_bitmap_set_range(RAMBlock *rb, void *host_addr, size_t nr);
+void ramblock_recv_bitmap_set_offset(RAMBlock *rb, uint64_t byte_offset);
 int64_t ramblock_recv_bitmap_send(QEMUFile *file,
                                   const char *block_name);
 bool ram_dirty_bitmap_reload(MigrationState *s, RAMBlock *rb, Error **errp);

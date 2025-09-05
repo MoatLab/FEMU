@@ -861,7 +861,7 @@ int dctl_set_special_wakeup(struct cpu_thread *t)
 
 	lock(&c->dctl_lock);
 	if (c->special_wakeup_count == 0) {
-		if (proc_gen == proc_gen_p10)
+		if (proc_gen == proc_gen_p10 || proc_gen == proc_gen_p11)
 			rc = p10_core_set_special_wakeup(c);
 		else if (proc_gen == proc_gen_p9)
 			rc = p9_core_set_special_wakeup(c);
@@ -887,7 +887,7 @@ int dctl_clear_special_wakeup(struct cpu_thread *t)
 	if (!c->special_wakeup_count)
 		goto out;
 	if (c->special_wakeup_count == 1) {
-		if (proc_gen == proc_gen_p10)
+		if (proc_gen == proc_gen_p10 || proc_gen == proc_gen_p11)
 			rc = p10_core_clear_special_wakeup(c);
 		else if (proc_gen == proc_gen_p9)
 			rc = p9_core_clear_special_wakeup(c);
@@ -906,7 +906,7 @@ int dctl_core_is_gated(struct cpu_thread *t)
 {
 	struct cpu_thread *c = t->primary;
 
-	if (proc_gen == proc_gen_p10)
+	if (proc_gen == proc_gen_p10 || proc_gen == proc_gen_p11)
 		return p10_core_is_gated(c);
 	else if (proc_gen == proc_gen_p9)
 		return p9_core_is_gated(c);
@@ -924,7 +924,7 @@ static int dctl_stop(struct cpu_thread *t)
 		unlock(&c->dctl_lock);
 		return OPAL_BUSY;
 	}
-	if (proc_gen == proc_gen_p10)
+	if (proc_gen == proc_gen_p10 || proc_gen == proc_gen_p11)
 		rc = p10_stop_thread(t);
 	else if (proc_gen == proc_gen_p9)
 		rc = p9_stop_thread(t);
@@ -942,7 +942,7 @@ static int dctl_cont(struct cpu_thread *t)
 	struct cpu_thread *c = t->primary;
 	int rc;
 
-	if (proc_gen != proc_gen_p10 && proc_gen != proc_gen_p9)
+	if (proc_gen != proc_gen_p11 && proc_gen != proc_gen_p10 && proc_gen != proc_gen_p9)
 		return OPAL_UNSUPPORTED;
 
 	lock(&c->dctl_lock);
@@ -950,7 +950,7 @@ static int dctl_cont(struct cpu_thread *t)
 		unlock(&c->dctl_lock);
 		return OPAL_BUSY;
 	}
-	if (proc_gen == proc_gen_p10)
+	if (proc_gen == proc_gen_p10 || proc_gen == proc_gen_p11)
 		rc = p10_cont_thread(t);
 	else /* (proc_gen == proc_gen_p9) */
 		rc = p9_cont_thread(t);
@@ -977,7 +977,7 @@ static int dctl_sreset(struct cpu_thread *t)
 		unlock(&c->dctl_lock);
 		return OPAL_BUSY;
 	}
-	if (proc_gen == proc_gen_p10)
+	if (proc_gen == proc_gen_p10 || proc_gen == proc_gen_p11)
 		rc = p10_sreset_thread(t);
 	else if (proc_gen == proc_gen_p9)
 		rc = p9_sreset_thread(t);
@@ -1124,7 +1124,7 @@ int64_t opal_signal_system_reset(int cpu_nr)
 	struct cpu_thread *cpu;
 	int64_t ret;
 
-	if (proc_gen != proc_gen_p9 && proc_gen != proc_gen_p10)
+	if (proc_gen != proc_gen_p9 && proc_gen != proc_gen_p10 && proc_gen != proc_gen_p11)
 		return OPAL_UNSUPPORTED;
 
 	/*
@@ -1151,10 +1151,10 @@ int64_t opal_signal_system_reset(int cpu_nr)
 
 void direct_controls_init(void)
 {
-	if (chip_quirk(QUIRK_MAMBO_CALLOUTS))
+	if (chip_quirk(QUIRK_NO_DIRECT_CTL))
 		return;
 
-	if (proc_gen != proc_gen_p9 && proc_gen != proc_gen_p10)
+	if (proc_gen != proc_gen_p9 && proc_gen != proc_gen_p10 && proc_gen != proc_gen_p11)
 		return;
 
 	opal_register(OPAL_SIGNAL_SYSTEM_RESET, opal_signal_system_reset, 1);

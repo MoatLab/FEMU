@@ -584,7 +584,7 @@ PeiAllocatePages (
   }
 
   if ((RUNTIME_PAGE_ALLOCATION_GRANULARITY > DEFAULT_PAGE_ALLOCATION_GRANULARITY) &&
-      ((MemoryType == EfiACPIReclaimMemory) ||
+      ((MemoryType == EfiReservedMemoryType) ||
        (MemoryType == EfiACPIMemoryNVS) ||
        (MemoryType == EfiRuntimeServicesCode) ||
        (MemoryType == EfiRuntimeServicesData)))
@@ -862,8 +862,6 @@ PeiAllocatePool (
              (UINT16)(sizeof (EFI_HOB_MEMORY_POOL) + Size),
              (VOID **)&Hob
              );
-  ASSERT_EFI_ERROR (Status);
-
   if (EFI_ERROR (Status)) {
     *Buffer = NULL;
   } else {

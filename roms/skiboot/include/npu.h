@@ -153,7 +153,14 @@ int64_t npu_dev_procedure(void *dev, struct pci_cfg_reg_filter *pcrf,
 			  uint32_t offset, uint32_t len, uint32_t *data,
 			  bool write);
 
+#ifdef CONFIG_P8
 void npu_set_fence_state(struct npu *p, bool fence);
+#else
+static inline void npu_set_fence_state(struct npu *p __unused, bool fence __unused)
+{
+	/* Should never be called */
+}
+#endif
 void npu_dev_procedure_reset(struct npu_dev *dev);
 
 #define NPUDBG(p, fmt, a...)	prlog(PR_DEBUG, "NPU%d: " fmt, \

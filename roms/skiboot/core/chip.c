@@ -13,7 +13,7 @@ enum proc_chip_quirks proc_chip_quirks;
 
 uint32_t pir_to_chip_id(uint32_t pir)
 {
-	if (proc_gen == proc_gen_p10)
+	if (proc_gen == proc_gen_p10 || proc_gen == proc_gen_p11)
 		return P10_PIR2GCID(pir);
 	else if (proc_gen == proc_gen_p9)
 		return P9_PIR2GCID(pir);
@@ -25,7 +25,7 @@ uint32_t pir_to_chip_id(uint32_t pir)
 
 uint32_t pir_to_core_id(uint32_t pir)
 {
-	if (proc_gen == proc_gen_p10) {
+	if (proc_gen == proc_gen_p10 || proc_gen == proc_gen_p11) {
 		if (this_cpu()->is_fused_core)
 			return P10_PIRFUSED2NORMALCOREID(pir);
 		else
@@ -44,7 +44,7 @@ uint32_t pir_to_core_id(uint32_t pir)
 
 uint32_t pir_to_fused_core_id(uint32_t pir)
 {
-	if (proc_gen == proc_gen_p10) {
+	if (proc_gen == proc_gen_p10 || proc_gen == proc_gen_p11) {
 		if (this_cpu()->is_fused_core)
 			return P10_PIR2FUSEDCOREID(pir);
 		else
@@ -63,7 +63,7 @@ uint32_t pir_to_fused_core_id(uint32_t pir)
 
 uint32_t pir_to_thread_id(uint32_t pir)
 {
-	if (proc_gen == proc_gen_p10) {
+	if (proc_gen == proc_gen_p10 || proc_gen == proc_gen_p11) {
 		if (this_cpu()->is_fused_core)
 			return P10_PIRFUSED2NORMALTHREADID(pir);
 		else
@@ -148,7 +148,7 @@ void init_chips(void)
 	if (dt_find_by_path(dt_root, "/mambo")) {
 		proc_chip_quirks |= QUIRK_NO_CHIPTOD | QUIRK_MAMBO_CALLOUTS
 			| QUIRK_NO_F000F | QUIRK_NO_PBA | QUIRK_NO_OCC_IRQ
-			| QUIRK_NO_RNG;
+			| QUIRK_NO_RNG | QUIRK_NO_DIRECT_CTL | QUIRK_NO_SBE;
 
 		enable_mambo_console();
 
@@ -176,20 +176,27 @@ void init_chips(void)
 		model_type = dt_prop_get_def(xn, "device_type", (void *)"core");
 		if (strcmp(model_type, "core") == 0) {
 			proc_chip_quirks |= QUIRK_NO_RNG | QUIRK_NO_CHIPTOD
-				| QUIRK_NO_F000F;
+				| QUIRK_NO_F000F | QUIRK_NO_SBE;
 		}
 		prlog(PR_NOTICE, "CHIP: Detected Awan emulator %s model\n",
 				model_type);
 	}
 	/* Detect Qemu */
-	if (dt_node_is_compatible(dt_root, "qemu,powernv") ||
+	if (dt_node_is_compatible(dt_root, "qemu,powernv10") ||
+	    dt_node_is_compatible(dt_root, "qemu,powernv11")) {
+		/* POWER10 and Power11 has direct controls */
+		proc_chip_quirks |= QUIRK_QEMU | QUIRK_NO_RNG;
+		prlog(PR_NOTICE, "CHIP: Detected QEMU simulator\n");
+	} else if (dt_node_is_compatible(dt_root, "qemu,powernv") ||
 	    dt_node_is_compatible(dt_root, "qemu,powernv8") ||
 	    dt_node_is_compatible(dt_root, "qemu,powernv9") ||
-	    dt_node_is_compatible(dt_root, "qemu,powernv10") ||
 	    dt_find_by_path(dt_root, "/qemu")) {
-		proc_chip_quirks |= QUIRK_QEMU | QUIRK_NO_CHIPTOD
-			| QUIRK_NO_DIRECT_CTL | QUIRK_NO_RNG;
+		proc_chip_quirks |= QUIRK_QEMU | QUIRK_NO_DIRECT_CTL | QUIRK_NO_RNG;
 		prlog(PR_NOTICE, "CHIP: Detected QEMU simulator\n");
+	}
+	if (dt_find_by_path(dt_root, "/bml")) {
+		proc_chip_quirks |= QUIRK_BML;
+		prlog(PR_NOTICE, "CHIP: Detected BML\n");
 	}
 
 	/* We walk the chips based on xscom nodes in the tree */

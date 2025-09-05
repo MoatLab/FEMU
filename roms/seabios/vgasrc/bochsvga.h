@@ -42,14 +42,14 @@
 
 struct vgamode_s *bochsvga_find_mode(int mode);
 void bochsvga_list_modes(u16 seg, u16 *dest, u16 *last);
-int bochsvga_get_window(struct vgamode_s *vmode_g, int window);
-int bochsvga_set_window(struct vgamode_s *vmode_g, int window, int val);
-int bochsvga_get_linelength(struct vgamode_s *vmode_g);
-int bochsvga_set_linelength(struct vgamode_s *vmode_g, int val);
-int bochsvga_get_displaystart(struct vgamode_s *vmode_g);
-int bochsvga_set_displaystart(struct vgamode_s *vmode_g, int val);
-int bochsvga_get_dacformat(struct vgamode_s *vmode_g);
-int bochsvga_set_dacformat(struct vgamode_s *vmode_g, int val);
+int bochsvga_get_window(struct vgamode_s *curmode_g, int window);
+int bochsvga_set_window(struct vgamode_s *curmode_g, int window, int val);
+int bochsvga_get_linelength(struct vgamode_s *curmode_g);
+int bochsvga_set_linelength(struct vgamode_s *curmode_g, int val);
+int bochsvga_get_displaystart(struct vgamode_s *curmode_g);
+int bochsvga_set_displaystart(struct vgamode_s *curmode_g, int val);
+int bochsvga_get_dacformat(struct vgamode_s *curmode_g);
+int bochsvga_set_dacformat(struct vgamode_s *curmode_g, int val);
 int bochsvga_save_restore(int cmd, u16 seg, void *data);
 int bochsvga_set_mode(struct vgamode_s *vmode_g, int flags);
 int bochsvga_setup(void);

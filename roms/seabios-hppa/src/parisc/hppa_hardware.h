@@ -1,5 +1,5 @@
 /* HPPA cores and system support chips.  */
-/* Be aware: This file is shared as-is with seabios-hppa. */
+/* Be aware: QEMU and seabios-hppa repositories share this file as-is. */
 
 #ifndef HW_HPPA_HPPA_HARDWARE_H
 #define HW_HPPA_HPPA_HARDWARE_H
@@ -7,6 +7,8 @@
 #define FIRMWARE_START  0xf0000000
 #define FIRMWARE_END    0xf0800000
 #define FIRMWARE_HIGH   0xfffffff0  /* upper 32-bits of 64-bit firmware address */
+
+#define RAM_MAP_HIGH  0x0100000000  /* memory above 3.75 GB is mapped here */
 
 #define MEM_PDC_ENTRY       0x4800  /* PDC entry address */
 
@@ -31,6 +33,7 @@
 #define CPU_HPA         0xfffb0000
 #define MEMORY_HPA      0xfffff000
 
+#define IDE_HPA         0xf9000000      /* Boot disc controller */
 #define ASTRO_HPA       0xfed00000
 #define ELROY0_HPA      0xfed30000
 #define ELROY2_HPA      0xfed32000
@@ -60,7 +63,6 @@
 #define CPU_HPA_CR_REG  7       /* store CPU HPA in cr7 (SeaBIOS internal) */
 #define PIM_STORAGE_SIZE 600	/* storage size of pdc_pim_toc_struct (64bit) */
 
-
 #define ASTRO_BUS_MODULE        0x0a            /* C3700: 0x0a, others maybe 0 ? */
 
 /* ASTRO Memory and I/O regions */
@@ -78,5 +80,9 @@
 #define LMMIO_DIRECT0_BASE  0x300
 #define LMMIO_DIRECT0_MASK  0x308
 #define LMMIO_DIRECT0_ROUTE 0x310
+
+/* space register hashing */
+#define HPPA64_DIAG_SPHASH_ENABLE       0x200   /* DIAG_SPHASH_ENAB (bit 54) */
+#define HPPA64_PDC_CACHE_RET_SPID_VAL   0xfe0   /* PDC return value on 64-bit CPU */
 
 #endif

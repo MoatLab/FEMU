@@ -241,7 +241,7 @@ static int64_t opal_npu_tl_set(uint64_t phb_id, uint32_t bdfn,
 opal_call(OPAL_NPU_TL_SET, opal_npu_tl_set, 5);
 
 static int64_t opal_npu_mem_alloc(uint64_t phb_id, uint32_t bdfn,
-				  uint64_t size, uint64_t *bar)
+				  uint64_t size, __be64 *bar)
 {
 	struct phb *phb = pci_get_phb(phb_id);
 
@@ -260,7 +260,7 @@ opal_call(OPAL_NPU_MEM_ALLOC, opal_npu_mem_alloc, 4);
 
 static int64_t opal_npu_mem_release(uint64_t phb_id, uint32_t bdfn)
 {
-	struct phb *phb = pci_get_phb(phb_id);;
+	struct phb *phb = pci_get_phb(phb_id);
 
 	if (!phb)
 		return OPAL_PARAMETER;

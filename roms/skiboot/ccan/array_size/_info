@@ -1,6 +1,6 @@
+#include "config.h"
 #include <stdio.h>
 #include <string.h>
-#include "config.h"
 
 /**
  * array_size - routine for safely deriving the size of a visible array.
@@ -12,7 +12,7 @@
  * macro or constant.
  *
  * Example:
- *	// Outputs "Initialized 32 values"
+ *	// Outputs "Initialized 32 values\n"
  *	#include <ccan/array_size/array_size.h>
  *	#include <stdlib.h>
  *	#include <stdio.h>

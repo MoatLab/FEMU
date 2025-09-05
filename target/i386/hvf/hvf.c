@@ -49,19 +49,22 @@
 #include "qemu/osdep.h"
 #include "qemu/error-report.h"
 #include "qemu/memalign.h"
+#include "qapi/error.h"
+#include "migration/blocker.h"
 
-#include "sysemu/hvf.h"
-#include "sysemu/hvf_int.h"
-#include "sysemu/runstate.h"
-#include "sysemu/cpus.h"
+#include "system/hvf.h"
+#include "system/hvf_int.h"
+#include "system/runstate.h"
+#include "system/cpus.h"
 #include "hvf-i386.h"
 #include "vmcs.h"
 #include "vmx.h"
-#include "x86.h"
+#include "emulate/x86.h"
 #include "x86_descr.h"
+#include "emulate/x86_flags.h"
 #include "x86_mmu.h"
-#include "x86_decode.h"
-#include "x86_emu.h"
+#include "emulate/x86_decode.h"
+#include "emulate/x86_emu.h"
 #include "x86_task.h"
 #include "x86hvf.h"
 
@@ -73,6 +76,9 @@
 #include "qemu/main-loop.h"
 #include "qemu/accel.h"
 #include "target/i386/cpu.h"
+#include "exec/target_page.h"
+
+static Error *invtsc_mig_blocker;
 
 void vmx_update_tpr(CPUState *cpu)
 {
@@ -99,7 +105,7 @@ static void update_apic_tpr(CPUState *cpu)
 
 #define VECTORING_INFO_VECTOR_MASK     0xff
 
-void hvf_handle_io(CPUArchState *env, uint16_t port, void *buffer,
+void hvf_handle_io(CPUState *env, uint16_t port, void *buffer,
                   int direction, int size, int count)
 {
     int i;
@@ -131,9 +137,10 @@ static bool ept_emulation_fault(hvf_slot *slot, uint64_t gpa, uint64_t ept_qual)
 
     if (write && slot) {
         if (slot->flags & HVF_SLOT_LOG) {
+            uint64_t dirty_page_start = gpa & ~(TARGET_PAGE_SIZE - 1u);
             memory_region_set_dirty(slot->region, gpa - slot->start, 1);
-            hv_vm_protect((hv_gpaddr_t)slot->start, (size_t)slot->size,
-                          HV_MEMORY_READ | HV_MEMORY_WRITE);
+            hv_vm_protect(dirty_page_start, TARGET_PAGE_SIZE,
+                          HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC);
         }
     }
 
@@ -162,7 +169,7 @@ void hvf_arch_vcpu_destroy(CPUState *cpu)
     X86CPU *x86_cpu = X86_CPU(cpu);
     CPUX86State *env = &x86_cpu->env;
 
-    g_free(env->hvf_mmio_buf);
+    g_free(env->emu_mmio_buf);
 }
 
 static void init_tsc_freq(CPUX86State *env)
@@ -210,6 +217,7 @@ static inline bool apic_bus_freq_is_known(CPUX86State *env)
 void hvf_kick_vcpu_thread(CPUState *cpu)
 {
     cpus_kick_thread(cpu);
+    hv_vcpu_interrupt(&cpu->accel->fd, 1);
 }
 
 int hvf_arch_init(void)
@@ -217,17 +225,53 @@ int hvf_arch_init(void)
     return 0;
 }
 
+hv_return_t hvf_arch_vm_create(MachineState *ms, uint32_t pa_range)
+{
+    return hv_vm_create(HV_VM_DEFAULT);
+}
+
+static void hvf_read_segment_descriptor(CPUState *s, struct x86_segment_descriptor *desc,
+                                        X86Seg seg)
+{
+    struct vmx_segment vmx_segment;
+    vmx_read_segment_descriptor(s, &vmx_segment, seg);
+    vmx_segment_to_x86_descriptor(s, &vmx_segment, desc);
+}
+
+static void hvf_read_mem(CPUState *cpu, void *data, target_ulong gva, int bytes)
+{
+    vmx_read_mem(cpu, data, gva, bytes);
+}
+
+static void hvf_write_mem(CPUState *cpu, void *data, target_ulong gva, int bytes)
+{
+    vmx_write_mem(cpu, gva, data, bytes);
+}
+
+static const struct x86_emul_ops hvf_x86_emul_ops = {
+    .read_mem = hvf_read_mem,
+    .write_mem = hvf_write_mem,
+    .read_segment_descriptor = hvf_read_segment_descriptor,
+    .handle_io = hvf_handle_io,
+    .simulate_rdmsr = hvf_simulate_rdmsr,
+    .simulate_wrmsr = hvf_simulate_wrmsr,
+};
+
 int hvf_arch_init_vcpu(CPUState *cpu)
 {
     X86CPU *x86cpu = X86_CPU(cpu);
     CPUX86State *env = &x86cpu->env;
+    Error *local_err = NULL;
+    int r;
     uint64_t reqCap;
 
-    init_emu();
+    init_emu(&hvf_x86_emul_ops);
     init_decoder();
 
-    hvf_state->hvf_caps = g_new0(struct hvf_vcpu_caps, 1);
-    env->hvf_mmio_buf = g_new(char, 4096);
+    if (hvf_state->hvf_caps == NULL) {
+        hvf_state->hvf_caps = g_new0(struct hvf_vcpu_caps, 1);
+    }
+    env->emu_mmio_buf = g_new(char, 4096);
 
     if (x86cpu->vmware_cpuid_freq) {
         init_tsc_freq(env);
@@ -237,6 +281,18 @@ int hvf_arch_init_vcpu(CPUState *cpu)
             error_report("vmware-cpuid-freq: feature couldn't be enabled");
         }
     }
+
+    if ((env->features[FEAT_8000_0007_EDX] & CPUID_APM_INVTSC) &&
+        invtsc_mig_blocker == NULL) {
+        error_setg(&invtsc_mig_blocker,
+                   "State blocked by non-migratable CPU device (invtsc flag)");
+        r = migrate_add_blocker(&invtsc_mig_blocker, &local_err);
+        if (r < 0) {
+            error_report_err(local_err);
+            return r;
+        }
+    }
+
 
     if (hv_vmx_read_capability(HV_VMX_CAP_PINBASED,
         &hvf_state->hvf_caps->vmx_cap_pinbased)) {
@@ -407,6 +463,264 @@ static void hvf_cpu_x86_cpuid(CPUX86State *env, uint32_t index, uint32_t count,
     }
 }
 
+void hvf_load_regs(CPUState *cs)
+{
+    X86CPU *cpu = X86_CPU(cs);
+    CPUX86State *env = &cpu->env;
+
+    int i = 0;
+    RRX(env, R_EAX) = rreg(cs->accel->fd, HV_X86_RAX);
+    RRX(env, R_EBX) = rreg(cs->accel->fd, HV_X86_RBX);
+    RRX(env, R_ECX) = rreg(cs->accel->fd, HV_X86_RCX);
+    RRX(env, R_EDX) = rreg(cs->accel->fd, HV_X86_RDX);
+    RRX(env, R_ESI) = rreg(cs->accel->fd, HV_X86_RSI);
+    RRX(env, R_EDI) = rreg(cs->accel->fd, HV_X86_RDI);
+    RRX(env, R_ESP) = rreg(cs->accel->fd, HV_X86_RSP);
+    RRX(env, R_EBP) = rreg(cs->accel->fd, HV_X86_RBP);
+    for (i = 8; i < 16; i++) {
+        RRX(env, i) = rreg(cs->accel->fd, HV_X86_RAX + i);
+    }
+
+    env->eflags = rreg(cs->accel->fd, HV_X86_RFLAGS);
+    rflags_to_lflags(env);
+    env->eip = rreg(cs->accel->fd, HV_X86_RIP);
+}
+
+void hvf_store_regs(CPUState *cs)
+{
+    X86CPU *cpu = X86_CPU(cs);
+    CPUX86State *env = &cpu->env;
+
+    int i = 0;
+    wreg(cs->accel->fd, HV_X86_RAX, RAX(env));
+    wreg(cs->accel->fd, HV_X86_RBX, RBX(env));
+    wreg(cs->accel->fd, HV_X86_RCX, RCX(env));
+    wreg(cs->accel->fd, HV_X86_RDX, RDX(env));
+    wreg(cs->accel->fd, HV_X86_RSI, RSI(env));
+    wreg(cs->accel->fd, HV_X86_RDI, RDI(env));
+    wreg(cs->accel->fd, HV_X86_RBP, RBP(env));
+    wreg(cs->accel->fd, HV_X86_RSP, RSP(env));
+    for (i = 8; i < 16; i++) {
+        wreg(cs->accel->fd, HV_X86_RAX + i, RRX(env, i));
+    }
+
+    lflags_to_rflags(env);
+    wreg(cs->accel->fd, HV_X86_RFLAGS, env->eflags);
+    macvm_set_rip(cs, env->eip);
+}
+
+void hvf_simulate_rdmsr(CPUState *cs)
+{
+    X86CPU *cpu = X86_CPU(cs);
+    CPUX86State *env = &cpu->env;
+    uint32_t msr = ECX(env);
+    uint64_t val = 0;
+
+    switch (msr) {
+    case MSR_IA32_TSC:
+        val = rdtscp() + rvmcs(cs->accel->fd, VMCS_TSC_OFFSET);
+        break;
+    case MSR_IA32_APICBASE:
+        val = cpu_get_apic_base(cpu->apic_state);
+        break;
+    case MSR_APIC_START ... MSR_APIC_END: {
+        int ret;
+        int index = (uint32_t)env->regs[R_ECX] - MSR_APIC_START;
+
+        ret = apic_msr_read(index, &val);
+        if (ret < 0) {
+            x86_emul_raise_exception(env, EXCP0D_GPF, 0);
+        }
+
+        break;
+    }
+    case MSR_IA32_UCODE_REV:
+        val = cpu->ucode_rev;
+        break;
+    case MSR_EFER:
+        val = rvmcs(cs->accel->fd, VMCS_GUEST_IA32_EFER);
+        break;
+    case MSR_FSBASE:
+        val = rvmcs(cs->accel->fd, VMCS_GUEST_FS_BASE);
+        break;
+    case MSR_GSBASE:
+        val = rvmcs(cs->accel->fd, VMCS_GUEST_GS_BASE);
+        break;
+    case MSR_KERNELGSBASE:
+        val = rvmcs(cs->accel->fd, VMCS_HOST_FS_BASE);
+        break;
+    case MSR_STAR:
+        abort();
+        break;
+    case MSR_LSTAR:
+        abort();
+        break;
+    case MSR_CSTAR:
+        abort();
+        break;
+    case MSR_IA32_MISC_ENABLE:
+        val = env->msr_ia32_misc_enable;
+        break;
+    case MSR_MTRRphysBase(0):
+    case MSR_MTRRphysBase(1):
+    case MSR_MTRRphysBase(2):
+    case MSR_MTRRphysBase(3):
+    case MSR_MTRRphysBase(4):
+    case MSR_MTRRphysBase(5):
+    case MSR_MTRRphysBase(6):
+    case MSR_MTRRphysBase(7):
+        val = env->mtrr_var[(ECX(env) - MSR_MTRRphysBase(0)) / 2].base;
+        break;
+    case MSR_MTRRphysMask(0):
+    case MSR_MTRRphysMask(1):
+    case MSR_MTRRphysMask(2):
+    case MSR_MTRRphysMask(3):
+    case MSR_MTRRphysMask(4):
+    case MSR_MTRRphysMask(5):
+    case MSR_MTRRphysMask(6):
+    case MSR_MTRRphysMask(7):
+        val = env->mtrr_var[(ECX(env) - MSR_MTRRphysMask(0)) / 2].mask;
+        break;
+    case MSR_MTRRfix64K_00000:
+        val = env->mtrr_fixed[0];
+        break;
+    case MSR_MTRRfix16K_80000:
+    case MSR_MTRRfix16K_A0000:
+        val = env->mtrr_fixed[ECX(env) - MSR_MTRRfix16K_80000 + 1];
+        break;
+    case MSR_MTRRfix4K_C0000:
+    case MSR_MTRRfix4K_C8000:
+    case MSR_MTRRfix4K_D0000:
+    case MSR_MTRRfix4K_D8000:
+    case MSR_MTRRfix4K_E0000:
+    case MSR_MTRRfix4K_E8000:
+    case MSR_MTRRfix4K_F0000:
+    case MSR_MTRRfix4K_F8000:
+        val = env->mtrr_fixed[ECX(env) - MSR_MTRRfix4K_C0000 + 3];
+        break;
+    case MSR_MTRRdefType:
+        val = env->mtrr_deftype;
+        break;
+    case MSR_CORE_THREAD_COUNT:
+        val = cpu_x86_get_msr_core_thread_count(cpu);
+        break;
+    default:
+        /* fprintf(stderr, "%s: unknown msr 0x%x\n", __func__, msr); */
+        val = 0;
+        break;
+    }
+
+    RAX(env) = (uint32_t)val;
+    RDX(env) = (uint32_t)(val >> 32);
+}
+
+void hvf_simulate_wrmsr(CPUState *cs)
+{
+    X86CPU *cpu = X86_CPU(cs);
+    CPUX86State *env = &cpu->env;
+    uint32_t msr = ECX(env);
+    uint64_t data = ((uint64_t)EDX(env) << 32) | EAX(env);
+
+    switch (msr) {
+    case MSR_IA32_TSC:
+        break;
+    case MSR_IA32_APICBASE: {
+        int r;
+
+        r = cpu_set_apic_base(cpu->apic_state, data);
+        if (r < 0) {
+            x86_emul_raise_exception(env, EXCP0D_GPF, 0);
+        }
+
+        break;
+    }
+    case MSR_APIC_START ... MSR_APIC_END: {
+        int ret;
+        int index = (uint32_t)env->regs[R_ECX] - MSR_APIC_START;
+
+        ret = apic_msr_write(index, data);
+        if (ret < 0) {
+            x86_emul_raise_exception(env, EXCP0D_GPF, 0);
+        }
+
+        break;
+    }
+    case MSR_FSBASE:
+        wvmcs(cs->accel->fd, VMCS_GUEST_FS_BASE, data);
+        break;
+    case MSR_GSBASE:
+        wvmcs(cs->accel->fd, VMCS_GUEST_GS_BASE, data);
+        break;
+    case MSR_KERNELGSBASE:
+        wvmcs(cs->accel->fd, VMCS_HOST_FS_BASE, data);
+        break;
+    case MSR_STAR:
+        abort();
+        break;
+    case MSR_LSTAR:
+        abort();
+        break;
+    case MSR_CSTAR:
+        abort();
+        break;
+    case MSR_EFER:
+        /*printf("new efer %llx\n", EFER(cs));*/
+        wvmcs(cs->accel->fd, VMCS_GUEST_IA32_EFER, data);
+        if (data & MSR_EFER_NXE) {
+            hv_vcpu_invalidate_tlb(cs->accel->fd);
+        }
+        break;
+    case MSR_MTRRphysBase(0):
+    case MSR_MTRRphysBase(1):
+    case MSR_MTRRphysBase(2):
+    case MSR_MTRRphysBase(3):
+    case MSR_MTRRphysBase(4):
+    case MSR_MTRRphysBase(5):
+    case MSR_MTRRphysBase(6):
+    case MSR_MTRRphysBase(7):
+        env->mtrr_var[(ECX(env) - MSR_MTRRphysBase(0)) / 2].base = data;
+        break;
+    case MSR_MTRRphysMask(0):
+    case MSR_MTRRphysMask(1):
+    case MSR_MTRRphysMask(2):
+    case MSR_MTRRphysMask(3):
+    case MSR_MTRRphysMask(4):
+    case MSR_MTRRphysMask(5):
+    case MSR_MTRRphysMask(6):
+    case MSR_MTRRphysMask(7):
+        env->mtrr_var[(ECX(env) - MSR_MTRRphysMask(0)) / 2].mask = data;
+        break;
+    case MSR_MTRRfix64K_00000:
+        env->mtrr_fixed[ECX(env) - MSR_MTRRfix64K_00000] = data;
+        break;
+    case MSR_MTRRfix16K_80000:
+    case MSR_MTRRfix16K_A0000:
+        env->mtrr_fixed[ECX(env) - MSR_MTRRfix16K_80000 + 1] = data;
+        break;
+    case MSR_MTRRfix4K_C0000:
+    case MSR_MTRRfix4K_C8000:
+    case MSR_MTRRfix4K_D0000:
+    case MSR_MTRRfix4K_D8000:
+    case MSR_MTRRfix4K_E0000:
+    case MSR_MTRRfix4K_E8000:
+    case MSR_MTRRfix4K_F0000:
+    case MSR_MTRRfix4K_F8000:
+        env->mtrr_fixed[ECX(env) - MSR_MTRRfix4K_C0000 + 3] = data;
+        break;
+    case MSR_MTRRdefType:
+        env->mtrr_deftype = data;
+        break;
+    default:
+        break;
+    }
+
+    /* Related to support known hypervisor interface */
+    /* if (g_hypervisor_iface)
+         g_hypervisor_iface->wrmsr_handler(cs, msr, data);
+
+    printf("write msr %llx\n", RCX(cs));*/
+}
+
 int hvf_vcpu_exec(CPUState *cpu)
 {
     X86CPU *x86_cpu = X86_CPU(cpu);
@@ -435,7 +749,7 @@ int hvf_vcpu_exec(CPUState *cpu)
             return EXCP_HLT;
         }
 
-        hv_return_t r  = hv_vcpu_run(cpu->accel->fd);
+        hv_return_t r = hv_vcpu_run_until(cpu->accel->fd, HV_DEADLINE_FOREVER);
         assert_hvf_ok(r);
 
         /* handle VMEXIT */
@@ -490,10 +804,10 @@ int hvf_vcpu_exec(CPUState *cpu)
             if (ept_emulation_fault(slot, gpa, exit_qual)) {
                 struct x86_decode decode;
 
-                load_regs(cpu);
+                hvf_load_regs(cpu);
                 decode_instruction(env, &decode);
                 exec_instruction(env, &decode);
-                store_regs(cpu);
+                hvf_store_regs(cpu);
                 break;
             }
             break;
@@ -508,8 +822,8 @@ int hvf_vcpu_exec(CPUState *cpu)
 
             if (!string && in) {
                 uint64_t val = 0;
-                load_regs(cpu);
-                hvf_handle_io(env, port, &val, 0, size, 1);
+                hvf_load_regs(cpu);
+                hvf_handle_io(env_cpu(env), port, &val, 0, size, 1);
                 if (size == 1) {
                     AL(env) = val;
                 } else if (size == 2) {
@@ -520,21 +834,21 @@ int hvf_vcpu_exec(CPUState *cpu)
                     RAX(env) = (uint64_t)val;
                 }
                 env->eip += ins_len;
-                store_regs(cpu);
+                hvf_store_regs(cpu);
                 break;
             } else if (!string && !in) {
                 RAX(env) = rreg(cpu->accel->fd, HV_X86_RAX);
-                hvf_handle_io(env, port, &RAX(env), 1, size, 1);
+                hvf_handle_io(env_cpu(env), port, &RAX(env), 1, size, 1);
                 macvm_set_rip(cpu, rip + ins_len);
                 break;
             }
             struct x86_decode decode;
 
-            load_regs(cpu);
+            hvf_load_regs(cpu);
             decode_instruction(env, &decode);
             assert(ins_len == decode.len);
             exec_instruction(env, &decode);
-            store_regs(cpu);
+            hvf_store_regs(cpu);
 
             break;
         }
@@ -559,8 +873,6 @@ int hvf_vcpu_exec(CPUState *cpu)
             break;
         }
         case EXIT_REASON_XSETBV: {
-            X86CPU *x86_cpu = X86_CPU(cpu);
-            CPUX86State *env = &x86_cpu->env;
             uint32_t eax = (uint32_t)rreg(cpu->accel->fd, HV_X86_RAX);
             uint32_t ecx = (uint32_t)rreg(cpu->accel->fd, HV_X86_RCX);
             uint32_t edx = (uint32_t)rreg(cpu->accel->fd, HV_X86_RDX);
@@ -589,21 +901,21 @@ int hvf_vcpu_exec(CPUState *cpu)
         case EXIT_REASON_RDMSR:
         case EXIT_REASON_WRMSR:
         {
-            load_regs(cpu);
+            hvf_load_regs(cpu);
             if (exit_reason == EXIT_REASON_RDMSR) {
-                simulate_rdmsr(env);
+                hvf_simulate_rdmsr(cpu);
             } else {
-                simulate_wrmsr(env);
+                hvf_simulate_wrmsr(cpu);
             }
             env->eip += ins_len;
-            store_regs(cpu);
+            hvf_store_regs(cpu);
             break;
         }
         case EXIT_REASON_CR_ACCESS: {
             int cr;
             int reg;
 
-            load_regs(cpu);
+            hvf_load_regs(cpu);
             cr = exit_qual & 15;
             reg = (exit_qual >> 8) & 15;
 
@@ -617,7 +929,6 @@ int hvf_vcpu_exec(CPUState *cpu)
                 break;
             }
             case 8: {
-                X86CPU *x86_cpu = X86_CPU(cpu);
                 if (exit_qual & 0x10) {
                     RRX(env, reg) = cpu_get_apic_tpr(x86_cpu->apic_state);
                 } else {
@@ -632,16 +943,16 @@ int hvf_vcpu_exec(CPUState *cpu)
                 abort();
             }
             env->eip += ins_len;
-            store_regs(cpu);
+            hvf_store_regs(cpu);
             break;
         }
         case EXIT_REASON_APIC_ACCESS: { /* TODO */
             struct x86_decode decode;
 
-            load_regs(cpu);
+            hvf_load_regs(cpu);
             decode_instruction(env, &decode);
             exec_instruction(env, &decode);
-            store_regs(cpu);
+            hvf_store_regs(cpu);
             break;
         }
         case EXIT_REASON_TPR: {
@@ -650,7 +961,7 @@ int hvf_vcpu_exec(CPUState *cpu)
         }
         case EXIT_REASON_TASK_SWITCH: {
             uint64_t vinfo = rvmcs(cpu->accel->fd, VMCS_IDT_VECTORING_INFO);
-            x68_segment_selector sel = {.sel = exit_qual & 0xffff};
+            x86_segment_selector sel = {.sel = exit_qual & 0xffff};
             vmx_handle_task_switch(cpu, sel, (exit_qual >> 30) & 0x3,
              vinfo & VMCS_INTR_VALID, vinfo & VECTORING_INFO_VECTOR_MASK, vinfo
              & VMCS_INTR_T_MASK);

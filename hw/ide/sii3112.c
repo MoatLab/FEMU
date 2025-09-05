@@ -290,7 +290,7 @@ static void sii3112_pci_realize(PCIDevice *dev, Error **errp)
     }
 }
 
-static void sii3112_pci_class_init(ObjectClass *klass, void *data)
+static void sii3112_pci_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *pd = PCI_DEVICE_CLASS(klass);
@@ -300,7 +300,7 @@ static void sii3112_pci_class_init(ObjectClass *klass, void *data)
     pd->class_id = PCI_CLASS_STORAGE_RAID;
     pd->revision = 1;
     pd->realize = sii3112_pci_realize;
-    dc->reset = sii3112_reset;
+    device_class_set_legacy_reset(dc, sii3112_reset);
     dc->desc = "SiI3112A SATA controller";
     set_bit(DEVICE_CATEGORY_STORAGE, dc->categories);
 }

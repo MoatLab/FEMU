@@ -1,9 +1,9 @@
-[centos-stream-8]
-centos-stream-8-1
-centos-stream-8-2
-some-other-centos-stream-8
+[centos-stream-9]
+centos-stream-9-1
+centos-stream-9-2
+some-other-centos-stream-9
 
-[fedora-37]
+[fedora-41]
 fedora-test-1
 fedora-test-2   fully_managed=True
 

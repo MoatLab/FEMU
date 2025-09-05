@@ -248,7 +248,7 @@ int adb_cmd (adb_dev_t *dev, uint8_t cmd, uint8_t reg,
         break;
     case ADB_LISTEN:
         memcpy(adb_send + 1, buf, len);
-        /* No break here */
+        /* fallthrough */
     case ADB_TALK:
         adb_send[0] = (dev->addr << 4) | cmd | reg;
         break;

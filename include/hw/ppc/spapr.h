@@ -2,7 +2,7 @@
 #define HW_SPAPR_H
 
 #include "qemu/units.h"
-#include "sysemu/dma.h"
+#include "system/dma.h"
 #include "hw/boards.h"
 #include "hw/ppc/spapr_drc.h"
 #include "hw/mem/pc-dimm.h"
@@ -83,8 +83,10 @@ typedef enum {
 #define SPAPR_CAP_AIL_MODE_3            0x0C
 /* Nested PAPR */
 #define SPAPR_CAP_NESTED_PAPR           0x0D
+/* DAWR1 */
+#define SPAPR_CAP_DAWR1                 0x0E
 /* Num Caps */
-#define SPAPR_CAP_NUM                   (SPAPR_CAP_NESTED_PAPR + 1)
+#define SPAPR_CAP_NUM                   (SPAPR_CAP_DAWR1 + 1)
 
 /*
  * Capability Values
@@ -141,11 +143,8 @@ struct SpaprMachineClass {
     MachineClass parent_class;
 
     /*< public >*/
-    bool dr_lmb_enabled;       /* enable dynamic-reconfig/hotplug of LMBs */
     bool dr_phb_enabled;       /* enable dynamic-reconfig/hotplug of PHBs */
     bool update_dt_enabled;    /* enable KVMPPC_H_UPDATE_DT */
-    bool use_ohci_by_default;  /* use USB-OHCI instead of XHCI */
-    bool pre_2_10_has_unused_icps;
     bool legacy_irq_allocation;
     uint32_t nr_xirqs;
     bool broken_host_serial_model; /* present real host info to the guest */
@@ -204,6 +203,7 @@ struct SpaprMachineState {
     uint32_t fdt_initial_size;
     void *fdt_blob;
     uint8_t fdt_rng_seed[32];
+    uint64_t hashpkey_val;
     long kernel_size;
     bool kernel_le;
     uint64_t kernel_addr;
@@ -409,6 +409,7 @@ struct SpaprMachineState {
 #define H_SET_MODE_RESOURCE_SET_DAWR0           2
 #define H_SET_MODE_RESOURCE_ADDR_TRANS_MODE     3
 #define H_SET_MODE_RESOURCE_LE                  4
+#define H_SET_MODE_RESOURCE_SET_DAWR1           5
 
 /* Flags for H_SET_MODE_RESOURCE_LE */
 #define H_SET_MODE_ENDIAN_BIG    0
@@ -1004,7 +1005,9 @@ extern const VMStateDescription vmstate_spapr_cap_large_decr;
 extern const VMStateDescription vmstate_spapr_cap_ccf_assist;
 extern const VMStateDescription vmstate_spapr_cap_fwnmi;
 extern const VMStateDescription vmstate_spapr_cap_rpt_invalidate;
+extern const VMStateDescription vmstate_spapr_cap_ail_mode_3;
 extern const VMStateDescription vmstate_spapr_wdt;
+extern const VMStateDescription vmstate_spapr_cap_dawr1;
 
 static inline uint8_t spapr_get_cap(SpaprMachineState *spapr, int cap)
 {

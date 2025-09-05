@@ -28,7 +28,7 @@
 #include "hw/sysbus.h"
 #include "net/net.h"
 #include "hw/arm/boot.h"
-#include "exec/address-spaces.h"
+#include "system/address-spaces.h"
 #include "hw/arm/exynos4210.h"
 #include "hw/net/lan9118.h"
 #include "hw/qdev-properties.h"
@@ -154,7 +154,7 @@ static const char * const valid_cpu_types[] = {
     NULL
 };
 
-static void nuri_class_init(ObjectClass *oc, void *data)
+static void nuri_class_init(ObjectClass *oc, const void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
 
@@ -165,6 +165,7 @@ static void nuri_class_init(ObjectClass *oc, void *data)
     mc->min_cpus = EXYNOS4210_NCPUS;
     mc->default_cpus = EXYNOS4210_NCPUS;
     mc->ignore_memory_transaction_failures = true;
+    mc->auto_create_sdcard = true;
 }
 
 static const TypeInfo nuri_type = {
@@ -173,7 +174,7 @@ static const TypeInfo nuri_type = {
     .class_init = nuri_class_init,
 };
 
-static void smdkc210_class_init(ObjectClass *oc, void *data)
+static void smdkc210_class_init(ObjectClass *oc, const void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
 
@@ -184,6 +185,7 @@ static void smdkc210_class_init(ObjectClass *oc, void *data)
     mc->min_cpus = EXYNOS4210_NCPUS;
     mc->default_cpus = EXYNOS4210_NCPUS;
     mc->ignore_memory_transaction_failures = true;
+    mc->auto_create_sdcard = true;
 }
 
 static const TypeInfo smdkc210_type = {

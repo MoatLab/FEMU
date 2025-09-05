@@ -334,7 +334,8 @@ void mbox_init(void)
 
 	chip_id = dt_get_chip_id(np);
 	mbox_lpc_client.interrupts = LPC_IRQ(irq);
-	lpc_register_client(chip_id, &mbox_lpc_client, IRQ_ATTR_TARGET_OPAL);
+	lpc_register_client(chip_id, &mbox_lpc_client, "lpc-mbox",
+			IRQ_ATTR_TARGET_OPAL);
 
 	/* Enable interrupts */
 	bmc_mbox_outb(MBOX_STATUS_1_ATTN | MBOX_STATUS_1_RESP, MBOX_HOST_INT_EN_1);

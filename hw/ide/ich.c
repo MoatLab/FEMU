@@ -61,13 +61,12 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/irq.h"
 #include "hw/pci/msi.h"
 #include "hw/pci/pci.h"
 #include "migration/vmstate.h"
 #include "qemu/module.h"
 #include "hw/isa/isa.h"
-#include "sysemu/dma.h"
+#include "system/dma.h"
 #include "hw/ide/pci.h"
 #include "hw/ide/ahci-pci.h"
 #include "ahci-internal.h"
@@ -91,6 +90,19 @@ static const VMStateDescription vmstate_ich9_ahci = {
     },
 };
 
+static void pci_ich9_ahci_update_irq(void *opaque, int irq_num, int level)
+{
+    PCIDevice *pci_dev = opaque;
+
+    if (msi_enabled(pci_dev)) {
+        if (level) {
+            msi_notify(pci_dev, 0);
+        }
+    } else {
+        pci_set_irq(pci_dev, level);
+    }
+}
+
 static void pci_ich9_reset(DeviceState *dev)
 {
     AHCIPCIState *d = ICH9_AHCI(dev);
@@ -102,7 +114,9 @@ static void pci_ich9_ahci_init(Object *obj)
 {
     AHCIPCIState *d = ICH9_AHCI(obj);
 
+    qemu_init_irq(&d->irq, pci_ich9_ahci_update_irq, d, 0);
     ahci_init(&d->ahci, DEVICE(obj));
+    d->ahci.irq = &d->irq;
 }
 
 static void pci_ich9_ahci_realize(PCIDevice *dev, Error **errp)
@@ -124,8 +138,6 @@ static void pci_ich9_ahci_realize(PCIDevice *dev, Error **errp)
 
     /* XXX Software should program this register */
     dev->config[0x90]   = 1 << 6; /* Address Map Register - AHCI mode */
-
-    d->ahci.irq = pci_allocate_irq(dev);
 
     pci_register_bar(dev, ICH9_IDP_BAR, PCI_BASE_ADDRESS_SPACE_IO,
                      &d->ahci.idp);
@@ -161,10 +173,9 @@ static void pci_ich9_uninit(PCIDevice *dev)
 
     msi_uninit(dev);
     ahci_uninit(&d->ahci);
-    qemu_free_irq(d->ahci.irq);
 }
 
-static void ich_ahci_class_init(ObjectClass *klass, void *data)
+static void ich_ahci_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
@@ -176,7 +187,7 @@ static void ich_ahci_class_init(ObjectClass *klass, void *data)
     k->revision = 0x02;
     k->class_id = PCI_CLASS_STORAGE_SATA;
     dc->vmsd = &vmstate_ich9_ahci;
-    dc->reset = pci_ich9_reset;
+    device_class_set_legacy_reset(dc, pci_ich9_reset);
     set_bit(DEVICE_CATEGORY_STORAGE, dc->categories);
 }
 
@@ -186,7 +197,7 @@ static const TypeInfo ich_ahci_info = {
     .instance_size = sizeof(AHCIPCIState),
     .instance_init = pci_ich9_ahci_init,
     .class_init    = ich_ahci_class_init,
-    .interfaces = (InterfaceInfo[]) {
+    .interfaces = (const InterfaceInfo[]) {
         { INTERFACE_CONVENTIONAL_PCI_DEVICE },
         { },
     },

@@ -296,12 +296,6 @@ struct phb_ops {
 	int64_t (*get_option)(struct phb *phb, enum OpalPhbOption opt,
 			      __be64 *setting);
 
-	int64_t (*set_mve)(struct phb *phb, uint32_t mve_number,
-			   uint64_t pe_number);
-
-	int64_t (*set_mve_enable)(struct phb *phb, uint32_t mve_number,
-				  uint32_t state);
-
 	int64_t (*set_xive_pe)(struct phb *phb, uint64_t pe_number,
 			       uint32_t xive_num);
 

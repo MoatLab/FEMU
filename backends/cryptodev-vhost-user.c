@@ -27,9 +27,9 @@
 #include "qemu/error-report.h"
 #include "hw/virtio/vhost-user.h"
 #include "standard-headers/linux/virtio_crypto.h"
-#include "sysemu/cryptodev-vhost.h"
+#include "system/cryptodev-vhost.h"
 #include "chardev/char-fe.h"
-#include "sysemu/cryptodev-vhost-user.h"
+#include "system/cryptodev-vhost-user.h"
 #include "qom/object.h"
 
 
@@ -221,9 +221,9 @@ static void cryptodev_vhost_user_init(
                      cryptodev_vhost_user_event, NULL, s, NULL, true);
 
     backend->conf.crypto_services =
-                         1u << QCRYPTODEV_BACKEND_SERVICE_CIPHER |
-                         1u << QCRYPTODEV_BACKEND_SERVICE_HASH |
-                         1u << QCRYPTODEV_BACKEND_SERVICE_MAC;
+                         1u << QCRYPTODEV_BACKEND_SERVICE_TYPE_CIPHER |
+                         1u << QCRYPTODEV_BACKEND_SERVICE_TYPE_HASH |
+                         1u << QCRYPTODEV_BACKEND_SERVICE_TYPE_MAC;
     backend->conf.cipher_algo_l = 1u << VIRTIO_CRYPTO_CIPHER_AES_CBC;
     backend->conf.hash_algo = 1u << VIRTIO_CRYPTO_HASH_SHA1;
 
@@ -281,8 +281,7 @@ static int cryptodev_vhost_user_create_session(
         break;
 
     default:
-        error_setg(&local_error, "Unsupported opcode :%" PRIu32 "",
-                   sess_info->op_code);
+        error_report("Unsupported opcode :%" PRIu32 "", sess_info->op_code);
         return -VIRTIO_CRYPTO_NOTSUPP;
     }
 
@@ -394,7 +393,7 @@ static void cryptodev_vhost_user_finalize(Object *obj)
 }
 
 static void
-cryptodev_vhost_user_class_init(ObjectClass *oc, void *data)
+cryptodev_vhost_user_class_init(ObjectClass *oc, const void *data)
 {
     CryptoDevBackendClass *bc = CRYPTODEV_BACKEND_CLASS(oc);
 

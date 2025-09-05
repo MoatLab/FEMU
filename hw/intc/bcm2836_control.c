@@ -384,11 +384,11 @@ static const VMStateDescription vmstate_bcm2836_control = {
     }
 };
 
-static void bcm2836_control_class_init(ObjectClass *klass, void *data)
+static void bcm2836_control_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    dc->reset = bcm2836_control_reset;
+    device_class_set_legacy_reset(dc, bcm2836_control_reset);
     dc->vmsd = &vmstate_bcm2836_control;
 }
 

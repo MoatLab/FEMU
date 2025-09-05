@@ -18,6 +18,7 @@
 #include "chardev/char-fe.h"
 #include "qapi/error.h"
 #include "migration/blocker.h"
+#include "standard-headers/drm/drm_fourcc.h"
 
 typedef enum VhostUserGpuRequest {
     VHOST_USER_GPU_NONE = 0,
@@ -249,6 +250,9 @@ vhost_user_gpu_handle_display(VhostUserGPU *g, VhostUserGpuMsg *msg)
     case VHOST_USER_GPU_DMABUF_SCANOUT: {
         VhostUserGpuDMABUFScanout *m = &msg->payload.dmabuf_scanout;
         int fd = qemu_chr_fe_get_msgfd(&g->vhost_chr);
+        uint32_t offset = 0;
+        uint32_t stride = m->fd_stride;
+        uint64_t modifier = DRM_FORMAT_MOD_INVALID;
         QemuDmaBuf *dmabuf;
 
         if (m->scanout_id >= g->parent_obj.conf.max_outputs) {
@@ -261,30 +265,34 @@ vhost_user_gpu_handle_display(VhostUserGPU *g, VhostUserGpuMsg *msg)
 
         g->parent_obj.enable = 1;
         con = g->parent_obj.scanout[m->scanout_id].con;
-        dmabuf = &g->dmabuf[m->scanout_id];
-        if (dmabuf->fd >= 0) {
-            close(dmabuf->fd);
-            dmabuf->fd = -1;
-        }
-        dpy_gl_release_dmabuf(con, dmabuf);
-        if (fd == -1) {
-            dpy_gl_scanout_disable(con);
-            break;
-        }
-        *dmabuf = (QemuDmaBuf) {
-            .fd = fd,
-            .width = m->fd_width,
-            .height = m->fd_height,
-            .stride = m->fd_stride,
-            .fourcc = m->fd_drm_fourcc,
-            .y0_top = m->fd_flags & VIRTIO_GPU_RESOURCE_FLAG_Y_0_TOP,
-        };
-        if (msg->request == VHOST_USER_GPU_DMABUF_SCANOUT2) {
-            VhostUserGpuDMABUFScanout2 *m2 = &msg->payload.dmabuf_scanout2;
-            dmabuf->modifier = m2->modifier;
+        dmabuf = g->dmabuf[m->scanout_id];
+
+        if (dmabuf) {
+            qemu_dmabuf_close(dmabuf);
+            dpy_gl_release_dmabuf(con, dmabuf);
+            g_clear_pointer(&dmabuf, qemu_dmabuf_free);
         }
 
+        if (fd == -1) {
+            dpy_gl_scanout_disable(con);
+            g->dmabuf[m->scanout_id] = NULL;
+            break;
+        }
+
+        if (msg->request == VHOST_USER_GPU_DMABUF_SCANOUT2) {
+            VhostUserGpuDMABUFScanout2 *m2 = &msg->payload.dmabuf_scanout2;
+            modifier = m2->modifier;
+        }
+
+        dmabuf = qemu_dmabuf_new(m->width, m->height,
+                                 &offset, &stride, 0, 0,
+                                 m->fd_width, m->fd_height,
+                                 m->fd_drm_fourcc, modifier,
+                                 &fd, 1, false, m->fd_flags &
+                                 VIRTIO_GPU_RESOURCE_FLAG_Y_0_TOP);
+
         dpy_gl_scanout_dmabuf(con, dmabuf);
+        g->dmabuf[m->scanout_id] = dmabuf;
         break;
     }
     case VHOST_USER_GPU_DMABUF_UPDATE: {
@@ -385,7 +393,7 @@ vhost_user_gpu_chr_read(void *opaque)
     }
 
     msg->request = request;
-    msg->flags = size;
+    msg->flags = flags;
     msg->size = size;
 
     if (request == VHOST_USER_GPU_CURSOR_UPDATE ||
@@ -508,7 +516,7 @@ vhost_user_gpu_set_config(VirtIODevice *vdev,
     }
 }
 
-static void
+static int
 vhost_user_gpu_set_status(VirtIODevice *vdev, uint8_t val)
 {
     VhostUserGPU *g = VHOST_USER_GPU(vdev);
@@ -517,18 +525,24 @@ vhost_user_gpu_set_status(VirtIODevice *vdev, uint8_t val)
     if (val & VIRTIO_CONFIG_S_DRIVER_OK && vdev->vm_running) {
         if (!vhost_user_gpu_do_set_socket(g, &err)) {
             error_report_err(err);
-            return;
+            return 0;
         }
         vhost_user_backend_start(g->vhost);
     } else {
+        int ret;
+
         /* unblock any wait and stop processing */
         if (g->vhost_gpu_fd != -1) {
             vhost_user_gpu_update_blocked(g, true);
             qemu_chr_fe_deinit(&g->vhost_chr, true);
             g->vhost_gpu_fd = -1;
         }
-        vhost_user_backend_stop(g->vhost);
+        ret = vhost_user_backend_stop(g->vhost);
+        if (ret < 0) {
+            return ret;
+        }
     }
+    return 0;
 }
 
 static bool
@@ -626,6 +640,14 @@ vhost_user_gpu_device_realize(DeviceState *qdev, Error **errp)
         error_report("EDID requested but the backend doesn't support it.");
         g->parent_obj.conf.flags &= ~(1 << VIRTIO_GPU_FLAG_EDID_ENABLED);
     }
+    if (virtio_has_feature(g->vhost->dev.features,
+        VIRTIO_GPU_F_RESOURCE_UUID)) {
+        g->parent_obj.conf.flags |= 1 << VIRTIO_GPU_FLAG_RESOURCE_UUID_ENABLED;
+    }
+    if (virtio_has_feature(g->vhost->dev.features,
+        VIRTIO_GPU_F_RESOURCE_UUID)) {
+        g->parent_obj.conf.flags |= 1 << VIRTIO_GPU_FLAG_RESOURCE_UUID_ENABLED;
+    }
 
     if (!virtio_gpu_base_device_realize(qdev, NULL, NULL, errp)) {
         return;
@@ -637,16 +659,15 @@ vhost_user_gpu_device_realize(DeviceState *qdev, Error **errp)
 static struct vhost_dev *vhost_user_gpu_get_vhost(VirtIODevice *vdev)
 {
     VhostUserGPU *g = VHOST_USER_GPU(vdev);
-    return &g->vhost->dev;
+    return g->vhost ? &g->vhost->dev : NULL;
 }
 
-static Property vhost_user_gpu_properties[] = {
+static const Property vhost_user_gpu_properties[] = {
     VIRTIO_GPU_BASE_PROPERTIES(VhostUserGPU, parent_obj.conf),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
 static void
-vhost_user_gpu_class_init(ObjectClass *klass, void *data)
+vhost_user_gpu_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     VirtioDeviceClass *vdc = VIRTIO_DEVICE_CLASS(klass);

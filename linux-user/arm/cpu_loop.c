@@ -21,9 +21,12 @@
 #include "qemu.h"
 #include "user-internals.h"
 #include "elf.h"
-#include "cpu_loop-common.h"
+#include "user/cpu_loop.h"
 #include "signal-common.h"
 #include "semihosting/common-semi.h"
+#include "exec/page-protection.h"
+#include "exec/mmap-lock.h"
+#include "user/page-protection.h"
 #include "target/arm/syndrome.h"
 
 #define get_user_code_u32(x, gaddr, env)                \
@@ -34,45 +37,10 @@
         __r;                                            \
     })
 
-#define get_user_code_u16(x, gaddr, env)                \
-    ({ abi_long __r = get_user_u16((x), (gaddr));       \
-        if (!__r && bswap_code(arm_sctlr_b(env))) {     \
-            (x) = bswap16(x);                           \
-        }                                               \
-        __r;                                            \
-    })
-
-#define get_user_data_u32(x, gaddr, env)                \
-    ({ abi_long __r = get_user_u32((x), (gaddr));       \
-        if (!__r && arm_cpu_bswap_data(env)) {          \
-            (x) = bswap32(x);                           \
-        }                                               \
-        __r;                                            \
-    })
-
-#define get_user_data_u16(x, gaddr, env)                \
-    ({ abi_long __r = get_user_u16((x), (gaddr));       \
-        if (!__r && arm_cpu_bswap_data(env)) {          \
-            (x) = bswap16(x);                           \
-        }                                               \
-        __r;                                            \
-    })
-
-#define put_user_data_u32(x, gaddr, env)                \
-    ({ typeof(x) __x = (x);                             \
-        if (arm_cpu_bswap_data(env)) {                  \
-            __x = bswap32(__x);                         \
-        }                                               \
-        put_user_u32(__x, (gaddr));                     \
-    })
-
-#define put_user_data_u16(x, gaddr, env)                \
-    ({ typeof(x) __x = (x);                             \
-        if (arm_cpu_bswap_data(env)) {                  \
-            __x = bswap16(__x);                         \
-        }                                               \
-        put_user_u16(__x, (gaddr));                     \
-    })
+/*
+ * Note that if we need to do data accesses here, they should do a
+ * bswap if arm_cpu_bswap_data() returns true.
+ */
 
 /*
  * Similar to code in accel/tcg/user-exec.c, but outside the execution loop.
@@ -395,6 +363,7 @@ void cpu_loop(CPUARMState *env)
                     switch (n) {
                     case ARM_NR_cacheflush:
                         /* nop */
+                        env->regs[0] = 0;
                         break;
                     case ARM_NR_set_tls:
                         cpu_set_tls(env, env->regs[0]);
@@ -511,7 +480,7 @@ void cpu_loop(CPUARMState *env)
     }
 }
 
-void target_cpu_copy_regs(CPUArchState *env, struct target_pt_regs *regs)
+void target_cpu_copy_regs(CPUArchState *env, target_pt_regs *regs)
 {
     CPUState *cpu = env_cpu(env);
     TaskState *ts = get_task_state(cpu);

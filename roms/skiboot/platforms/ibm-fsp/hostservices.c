@@ -639,6 +639,7 @@ int hservice_wakeup(uint32_t i_core, uint32_t i_mode)
 		i_core <<= 2;
 		break;
 	case proc_gen_p10:
+	case proc_gen_p11:
 		i_core &= SPR_PIR_P10_MASK;
 		i_core <<= 2;
 		break;

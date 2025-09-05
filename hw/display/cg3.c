@@ -361,20 +361,19 @@ static void cg3_reset(DeviceState *d)
     qemu_irq_lower(s->irq);
 }
 
-static Property cg3_properties[] = {
+static const Property cg3_properties[] = {
     DEFINE_PROP_UINT32("vram-size",    CG3State, vram_size, -1),
     DEFINE_PROP_UINT16("width",        CG3State, width,     -1),
     DEFINE_PROP_UINT16("height",       CG3State, height,    -1),
     DEFINE_PROP_UINT16("depth",        CG3State, depth,     -1),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void cg3_class_init(ObjectClass *klass, void *data)
+static void cg3_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = cg3_realizefn;
-    dc->reset = cg3_reset;
+    device_class_set_legacy_reset(dc, cg3_reset);
     dc->vmsd = &vmstate_cg3;
     device_class_set_props(dc, cg3_properties);
 }

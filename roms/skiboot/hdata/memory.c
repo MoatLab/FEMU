@@ -236,14 +236,14 @@ static void add_bus_freq_to_ram_area(struct dt_node *ram_node, u32 chip_id)
 	u64 freq;
 	u32 size;
 
-	pcia = get_hdif(&spira.ntuples.pcia, SPPCIA_HDIF_SIG);
+	pcia = get_hdif(&spiras->ntuples.pcia, SPPCIA_HDIF_SIG);
 	if (!pcia) {
 		prlog(PR_WARNING, "HDAT: Failed to add memory bus frequency "
 		      "as PCIA does not exist\n");
 		return;
 	}
 
-	for_each_pcia(pcia) {
+	for_each_pcia(spiras, pcia) {
 		const struct sppcia_core_unique *id;
 
 		id = HDIF_get_idata(pcia, SPPCIA_IDATA_CORE_UNIQUE, &size);
@@ -897,15 +897,15 @@ static bool __memory_parse(struct dt_node *root)
 	const struct msvpd_total_config_ms *tcms;
 	unsigned int size;
 
-	ms_vpd = get_hdif(&spira.ntuples.ms_vpd, MSVPD_HDIF_SIG);
+	ms_vpd = get_hdif(&spiras->ntuples.ms_vpd, MSVPD_HDIF_SIG);
 	if (!ms_vpd) {
 		prerror("MS VPD: invalid\n");
 		op_display(OP_FATAL, OP_MOD_MEM, 0x0000);
 		return false;
 	}
-	if (be32_to_cpu(spira.ntuples.ms_vpd.act_len) < sizeof(*ms_vpd)) {
+	if (be32_to_cpu(spiras->ntuples.ms_vpd.act_len) < sizeof(*ms_vpd)) {
 		prerror("MS VPD: invalid size %u\n",
-			be32_to_cpu(spira.ntuples.ms_vpd.act_len));
+			be32_to_cpu(spiras->ntuples.ms_vpd.act_len));
 		op_display(OP_FATAL, OP_MOD_MEM, 0x0001);
 		return false;
 	}

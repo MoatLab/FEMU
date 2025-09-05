@@ -28,29 +28,23 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "qemu/datadir.h"
-#include "exec/address-spaces.h"
+#include "system/address-spaces.h"
 #include "hw/clock.h"
 #include "hw/mips/mips.h"
-#include "hw/char/serial.h"
+#include "hw/char/serial-mm.h"
 #include "net/net.h"
-#include "sysemu/sysemu.h"
+#include "system/system.h"
 #include "hw/boards.h"
 #include "hw/loader.h"
 #include "elf.h"
 #include "hw/sysbus.h"
 #include "hw/qdev-properties.h"
 #include "qemu/error-report.h"
-#include "sysemu/qtest.h"
-#include "sysemu/reset.h"
+#include "system/qtest.h"
+#include "system/reset.h"
 #include "cpu.h"
 
 #define BIOS_SIZE (4 * MiB)
-
-#if TARGET_BIG_ENDIAN
-#define BIOS_FILENAME "mips_bios.bin"
-#else
-#define BIOS_FILENAME "mipsel_bios.bin"
-#endif
 
 static struct _loaderparams {
     int ram_size;
@@ -73,7 +67,8 @@ static uint64_t load_kernel(void)
     kernel_size = load_elf(loaderparams.kernel_filename, NULL,
                            cpu_mips_kseg0_to_phys, NULL,
                            &entry, NULL,
-                           &kernel_high, NULL, TARGET_BIG_ENDIAN,
+                           &kernel_high, NULL,
+                           TARGET_BIG_ENDIAN ? ELFDATA2MSB : ELFDATA2LSB,
                            EM_MIPS, 1, 0);
     if (kernel_size < 0) {
         error_report("could not load kernel '%s': %s",
@@ -142,6 +137,8 @@ mips_mipssim_init(MachineState *machine)
     const char *kernel_filename = machine->kernel_filename;
     const char *kernel_cmdline = machine->kernel_cmdline;
     const char *initrd_filename = machine->initrd_filename;
+    const char *bios_name = TARGET_BIG_ENDIAN ? "mips_bios.bin"
+                                              : "mipsel_bios.bin";
     char *filename;
     MemoryRegion *address_space_mem = get_system_memory();
     MemoryRegion *isa = g_new(MemoryRegion, 1);
@@ -160,7 +157,8 @@ mips_mipssim_init(MachineState *machine)
 #endif
 
     /* Init CPUs. */
-    cpu = mips_cpu_create_with_clock(machine->cpu_type, cpuclk);
+    cpu = mips_cpu_create_with_clock(machine->cpu_type, cpuclk,
+                                     TARGET_BIG_ENDIAN);
     env = &cpu->env;
 
     reset_info = g_new0(ResetData, 1);
@@ -177,7 +175,8 @@ mips_mipssim_init(MachineState *machine)
     /* Map the BIOS / boot exception handler. */
     memory_region_add_subregion(address_space_mem, 0x1fc00000LL, bios);
     /* Load a BIOS / boot exception handler image. */
-    filename = qemu_find_file(QEMU_FILE_TYPE_BIOS, machine->firmware ?: BIOS_FILENAME);
+    filename = qemu_find_file(QEMU_FILE_TYPE_BIOS,
+                              machine->firmware ?: bios_name);
     if (filename) {
         bios_size = load_image_targphys(filename, 0x1fc00000LL, BIOS_SIZE);
         g_free(filename);

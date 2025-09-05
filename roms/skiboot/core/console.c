@@ -15,7 +15,7 @@
 #include <processor.h>
 #include <cpu.h>
 
-static char *con_buf = (char *)INMEM_CON_START;
+static char *skiboot_constant_addr con_buf = (char *)INMEM_CON_START;
 static size_t con_in;
 static size_t con_out;
 static bool con_wrapped;

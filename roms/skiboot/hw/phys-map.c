@@ -486,6 +486,9 @@ void phys_map_init(unsigned long pvr)
 	} else if (proc_gen == proc_gen_p10) {
 		name = "p10";
 		phys_map = &phys_map_p10;
+	} else if (proc_gen == proc_gen_p11) {
+		name = "p11";
+		phys_map = &phys_map_p10;
 	}
 
 	prlog(PR_DEBUG, "Assigning physical memory map table for %s\n", name);

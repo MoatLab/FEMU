@@ -13,6 +13,7 @@ CORE_OBJS += timer.o i2c.o rtc.o flash.o sensor.o ipmi-opal.o
 CORE_OBJS += flash-subpartition.o bitmap.o buddy.o pci-quirk.o powercap.o psr.o
 CORE_OBJS += pci-dt-slot.o direct-controls.o cpufeatures.o
 CORE_OBJS += flash-firmware-versions.o opal-dump.o
+CORE_OBJS += hwprobe.o
 
 ifeq ($(SKIBOOT_GCOV),1)
 CORE_OBJS += gcov-profiling.o
@@ -21,8 +22,12 @@ endif
 
 CORE=core/built-in.a
 
+ifeq ($(CONFIG_PLDM),1)
+include $(SRC)/core/pldm/Makefile.inc
+endif
+
 CFLAGS_SKIP_core/relocate.o = -pg -fstack-protector-all
 CFLAGS_SKIP_core/relocate.o += -fstack-protector -fstack-protector-strong
 CFLAGS_SKIP_core/relocate.o += -fprofile-arcs -ftest-coverage
 
-$(CORE): $(CORE_OBJS:%=core/%)
+$(CORE): $(CORE_OBJS:%=core/%) $(PLDM)

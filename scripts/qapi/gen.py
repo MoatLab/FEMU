@@ -24,6 +24,7 @@ from typing import (
 )
 
 from .common import (
+    c_enum_const,
     c_fname,
     c_name,
     guardend,
@@ -40,10 +41,10 @@ from .schema import (
 from .source import QAPISourceInfo
 
 
-def gen_special_features(features: Sequence[QAPISchemaFeature]) -> str:
-    special_features = [f"1u << QAPI_{feat.name.upper()}"
-                        for feat in features if feat.is_special()]
-    return ' | '.join(special_features) or '0'
+def gen_features(features: Sequence[QAPISchemaFeature]) -> str:
+    feats = [f"1u << {c_enum_const('qapi_feature', feat.name)}"
+             for feat in features]
+    return ' | '.join(feats) or '0'
 
 
 class QAPIGen:
@@ -118,7 +119,7 @@ def build_params(arg_type: Optional[QAPISchemaObjectType],
         ret += '%s arg' % arg_type.c_param_type()
         sep = ', '
     elif arg_type:
-        assert not arg_type.variants
+        assert not arg_type.branches
         for memb in arg_type.members:
             assert not memb.ifcond.is_present()
             ret += sep

@@ -21,6 +21,8 @@ static const int user_feature_bits[] = {
     VIRTIO_RING_F_INDIRECT_DESC,
     VIRTIO_RING_F_EVENT_IDX,
     VIRTIO_F_NOTIFY_ON_EMPTY,
+    VIRTIO_F_IN_ORDER,
+    VIRTIO_F_NOTIFICATION_DATA,
     VHOST_INVALID_FEATURE_BIT
 };
 
@@ -52,23 +54,28 @@ const VhostDevConfigOps vsock_ops = {
     .vhost_dev_config_notifier = vuv_handle_config_change,
 };
 
-static void vuv_set_status(VirtIODevice *vdev, uint8_t status)
+static int vuv_set_status(VirtIODevice *vdev, uint8_t status)
 {
     VHostVSockCommon *vvc = VHOST_VSOCK_COMMON(vdev);
     bool should_start = virtio_device_should_start(vdev, status);
+    int ret;
 
     if (vhost_dev_is_started(&vvc->vhost_dev) == should_start) {
-        return;
+        return 0;
     }
 
     if (should_start) {
-        int ret = vhost_vsock_common_start(vdev);
+        ret = vhost_vsock_common_start(vdev);
         if (ret < 0) {
-            return;
+            return ret;
         }
     } else {
-        vhost_vsock_common_stop(vdev);
+        ret = vhost_vsock_common_stop(vdev);
+        if (ret < 0) {
+            return ret;
+        }
     }
+    return 0;
 }
 
 static uint64_t vuv_get_features(VirtIODevice *vdev,
@@ -126,7 +133,6 @@ err_vhost_dev:
 err_virtio:
     vhost_vsock_common_unrealize(vdev);
     vhost_user_cleanup(&vsock->vhost_user);
-    return;
 }
 
 static void vuv_device_unrealize(DeviceState *dev)
@@ -146,12 +152,11 @@ static void vuv_device_unrealize(DeviceState *dev)
 
 }
 
-static Property vuv_properties[] = {
+static const Property vuv_properties[] = {
     DEFINE_PROP_CHR("chardev", VHostUserVSock, conf.chardev),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void vuv_class_init(ObjectClass *klass, void *data)
+static void vuv_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     VirtioDeviceClass *vdc = VIRTIO_DEVICE_CLASS(klass);

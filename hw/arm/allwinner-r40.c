@@ -20,17 +20,16 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
-#include "qemu/bswap.h"
 #include "qemu/module.h"
 #include "qemu/units.h"
 #include "hw/boards.h"
 #include "hw/qdev-core.h"
 #include "hw/sysbus.h"
-#include "hw/char/serial.h"
+#include "hw/char/serial-mm.h"
 #include "hw/misc/unimp.h"
 #include "hw/usb/hcd-ehci.h"
 #include "hw/loader.h"
-#include "sysemu/sysemu.h"
+#include "system/system.h"
 #include "hw/arm/allwinner-r40.h"
 #include "hw/misc/allwinner-r40-dramc.h"
 #include "target/arm/cpu-qom.h"
@@ -231,9 +230,8 @@ bool allwinner_r40_bootrom_setup(AwR40State *s, BlockBackend *blk, int unit)
     struct boot_file_head *head = (struct boot_file_head *)buffer;
 
     if (blk_pread(blk, 8 * KiB, rom_size, buffer, 0) < 0) {
-        error_setg(&error_fatal, "%s: failed to read BlockBackend data",
-                   __func__);
-        return false;
+        error_report("%s: failed to read BlockBackend data", __func__);
+        exit(1);
     }
 
     /* we only check the magic string here. */
@@ -493,7 +491,7 @@ static void allwinner_r40_realize(DeviceState *dev, Error **errp)
 
         serial_mm_init(get_system_memory(), addr, 2,
                        qdev_get_gpio_in(DEVICE(&s->gic), uart_irqs[i]),
-                       115200, serial_hd(i), DEVICE_NATIVE_ENDIAN);
+                       115200, serial_hd(i), DEVICE_LITTLE_ENDIAN);
     }
 
     /* I2C */
@@ -540,7 +538,7 @@ static void allwinner_r40_realize(DeviceState *dev, Error **errp)
     }
 }
 
-static void allwinner_r40_class_init(ObjectClass *oc, void *data)
+static void allwinner_r40_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
 

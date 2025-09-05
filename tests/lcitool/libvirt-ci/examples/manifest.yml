@@ -4,7 +4,7 @@
 # needed projects that are build dependencies
 projects:
   - libvirt
-  - libvirt-go-module
+  - https://gitlab.com/libvirt/libvirt-go-module/-/raw/master/ci/lcitool/projects/libvirt-go-module.yml
 
 
 # Whether to generate dockerfiles by default for hosts
@@ -91,16 +91,17 @@ gitlab:
 #
 
 targets:
-  alpine-317: x86_64
 
-  alpine-318: x86_64
+  almalinux-9: x86_64
+
+  alpine-320: x86_64
+
+  alpine-321: x86_64
 
   alpine-edge:
     jobs:
       - arch: x86_64
         allow-failure: true
-
-  centos-stream-8: x86_64
 
   centos-stream-9: x86_64
 
@@ -137,7 +138,9 @@ targets:
       - arch: ppc64le
       - arch: s390x
 
-  fedora-37: x86_64
+  fedora-40: x86_64
+
+  fedora-41: x86_64
 
   fedora-rawhide:
     jobs:
@@ -149,19 +152,15 @@ targets:
       - arch: mingw32
       - arch: mingw64
 
-  freebsd-12: x86_64
+  freebsd-13: x86_64
+
+  freebsd-14: x86_64
 
   freebsd-current: x86_64
 
-  macos-12: aarch64
-
-  macos-13: aarch64
+  macos-14: aarch64
 
   opensuse-leap-15:
-    jobs:
-      - arch: x86_64
-
-  ubuntu-2004:
     jobs:
       - arch: x86_64
 
@@ -172,3 +171,7 @@ targets:
         allow-failure: true
         variables:
           foo: bar2
+
+  ubuntu-2404:
+    jobs:
+      - arch: x86_64

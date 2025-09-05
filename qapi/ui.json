@@ -3,7 +3,9 @@
 #
 
 ##
-# = Remote desktop
+# **************
+# Remote desktop
+# **************
 ##
 
 { 'include': 'common.json' }
@@ -39,7 +41,7 @@
 ##
 # @SetPasswordOptions:
 #
-# Options for set_password.
+# Options for `set_password`.
 #
 # @protocol:
 #     - 'vnc' to modify the VNC server password
@@ -48,8 +50,8 @@
 # @password: the new password
 #
 # @connected: How to handle existing clients when changing the
-#     password.  If nothing is specified, defaults to 'keep'. For VNC,
-#     only 'keep' is currently implemented.
+#     password.  If nothing is specified, defaults to 'keep'.  For
+#     VNC, only 'keep' is currently implemented.
 #
 # Since: 7.0
 ##
@@ -63,7 +65,7 @@
 ##
 # @SetPasswordOptionsVnc:
 #
-# Options for set_password specific to the VNC protocol.
+# Options for `set_password` specific to the VNC protocol.
 #
 # @display: The id of the display where the password should be
 #     changed.  Defaults to the first.
@@ -83,7 +85,7 @@
 #
 # Since: 0.14
 #
-# Example:
+# .. qmp-example::
 #
 #     -> { "execute": "set_password", "arguments": { "protocol": "vnc",
 #                                                    "password": "secret" } }
@@ -94,7 +96,7 @@
 ##
 # @ExpirePasswordOptions:
 #
-# General options for expire_password.
+# General options for `expire_password`.
 #
 # @protocol:
 #     - 'vnc' to modify the VNC server expiration
@@ -107,11 +109,11 @@
 #     - '+INT' where INT is the number of seconds from now (integer)
 #     - 'INT' where INT is the absolute time in seconds
 #
-# Notes: Time is relative to the server and currently there is no way
-#     to coordinate server time with client time.  It is not
-#     recommended to use the absolute time version of the @time
-#     parameter unless you're sure you are on the same machine as the
-#     QEMU instance.
+# .. note:: Time is relative to the server and currently there is no
+#    way to coordinate server time with client time.  It is not
+#    recommended to use the absolute time version of the @time
+#    parameter unless you're sure you are on the same machine as the
+#    QEMU instance.
 #
 # Since: 7.0
 ##
@@ -124,7 +126,7 @@
 ##
 # @ExpirePasswordOptionsVnc:
 #
-# Options for expire_password specific to the VNC protocol.
+# Options for `expire_password` specific to the VNC protocol.
 #
 # @display: The id of the display where the expiration should be
 #     changed.  Defaults to the first.
@@ -145,7 +147,7 @@
 #
 # Since: 0.14
 #
-# Example:
+# .. qmp-example::
 #
 #     -> { "execute": "expire_password", "arguments": { "protocol": "vnc",
 #                                                       "time": "+60" } }
@@ -175,19 +177,19 @@
 # @filename: the path of a new file to store the image
 #
 # @device: ID of the display device that should be dumped.  If this
-#     parameter is missing, the primary display will be used.  (Since
-#     2.12)
+#     parameter is missing, the primary display will be used.
+#     (Since 2.12)
 #
 # @head: head to use in case the device supports multiple heads.  If
 #     this parameter is missing, head #0 will be used.  Also note that
 #     the head can only be specified in conjunction with the device
 #     ID.  (Since 2.12)
 #
-# @format: image format for screendump.  (default: ppm) (Since 7.1)
+# @format: image format for `screendump`.  (default: ppm) (Since 7.1)
 #
 # Since: 0.14
 #
-# Example:
+# .. qmp-example::
 #
 #     -> { "execute": "screendump",
 #          "arguments": { "filename": "/tmp/image" } }
@@ -200,7 +202,8 @@
   'if': 'CONFIG_PIXMAN' }
 
 ##
-# == Spice
+# Spice
+# =====
 ##
 
 ##
@@ -274,8 +277,6 @@
 # @unknown: No information is available about mouse mode used by the
 #     spice server.
 #
-# Note: spice/enums.h has a SpiceMouseMode already, hence the name.
-#
 # Since: 1.1
 ##
 { 'enum': 'SpiceQueryMouseMode',
@@ -312,7 +313,7 @@
 #     unknown if spice server doesn't provide this information.
 #     (since: 1.1)
 #
-# @channels: a list of @SpiceChannel for each active spice channel
+# @channels: a list of `SpiceChannel` for each active spice channel
 #
 # Since: 0.14
 ##
@@ -325,13 +326,11 @@
 ##
 # @query-spice:
 #
-# Returns information about the current SPICE server
-#
-# Returns: @SpiceInfo
+# Return information about the current SPICE server
 #
 # Since: 0.14
 #
-# Example:
+# .. qmp-example::
 #
 #     -> { "execute": "query-spice" }
 #     <- { "return": {
@@ -361,7 +360,7 @@
 #                    "channel-id": 0,
 #                    "tls": false
 #                 },
-#                 [ ... more channels follow ... ]
+#                 ...
 #              ]
 #           }
 #        }
@@ -380,7 +379,7 @@
 #
 # Since: 0.14
 #
-# Example:
+# .. qmp-example::
 #
 #     <- { "timestamp": {"seconds": 1290688046, "microseconds": 388707},
 #          "event": "SPICE_CONNECTED",
@@ -406,7 +405,7 @@
 #
 # Since: 0.14
 #
-# Example:
+# .. qmp-example::
 #
 #     <- { "timestamp": {"seconds": 1290688046, "microseconds": 417172},
 #          "event": "SPICE_INITIALIZED",
@@ -433,7 +432,7 @@
 #
 # Since: 0.14
 #
-# Example:
+# .. qmp-example::
 #
 #     <- { "timestamp": {"seconds": 1290688046, "microseconds": 388707},
 #          "event": "SPICE_DISCONNECTED",
@@ -454,7 +453,7 @@
 #
 # Since: 1.3
 #
-# Example:
+# .. qmp-example::
 #
 #     <- { "timestamp": {"seconds": 1290688046, "microseconds": 417172},
 #          "event": "SPICE_MIGRATE_COMPLETED" }
@@ -463,7 +462,8 @@
   'if': 'CONFIG_SPICE' }
 
 ##
-# == VNC
+# VNC
+# ===
 ##
 
 ##
@@ -563,7 +563,7 @@
 #     - 'vencrypt+x509+sasl' if VEncrypt is used with x509 and SASL
 #       auth
 #
-# @clients: a list of @VncClientInfo of all currently connected
+# @clients: a list of `VncClientInfo` of all currently connected
 #     clients
 #
 # Since: 0.14
@@ -626,12 +626,12 @@
 #
 # @id: vnc server name.
 #
-# @server: A list of @VncBasincInfo describing all listening sockets.
-#     The list can be empty (in case the vnc server is disabled). It
+# @server: A list of `VncBasicInfo` describing all listening sockets.
+#     The list can be empty (in case the vnc server is disabled).  It
 #     also may have multiple entries: normal + websocket, possibly
 #     also ipv4 + ipv6 in the future.
 #
-# @clients: A list of @VncClientInfo of all currently connected
+# @clients: A list of `VncClientInfo` of all currently connected
 #     clients.  The list can be empty, for obvious reasons.
 #
 # @auth: The current authentication type used by the non-websockets
@@ -656,13 +656,11 @@
 ##
 # @query-vnc:
 #
-# Returns information about the current VNC server
-#
-# Returns: @VncInfo
+# Return information about the current VNC server
 #
 # Since: 0.14
 #
-# Example:
+# .. qmp-example::
 #
 #     -> { "execute": "query-vnc" }
 #     <- { "return": {
@@ -687,9 +685,7 @@
 ##
 # @query-vnc-servers:
 #
-# Returns a list of vnc servers.  The list can be empty.
-#
-# Returns: a list of @VncInfo2
+# Return a list of vnc servers.  The list can be empty.
 #
 # Since: 2.3
 ##
@@ -705,9 +701,9 @@
 #
 # Since: 1.1
 #
-# Notes: An empty password in this command will set the password to
-#     the empty string.  Existing clients are unaffected by executing
-#     this command.
+# .. note:: An empty password in this command will set the password to
+#    the empty string.  Existing clients are unaffected by executing
+#    this command.
 ##
 { 'command': 'change-vnc-password',
   'data': { 'password': 'str' },
@@ -722,12 +718,12 @@
 #
 # @client: client information
 #
-# Note: This event is emitted before any authentication takes place,
-#     thus the authentication ID is not provided
+# .. note:: This event is emitted before any authentication takes
+#    place, thus the authentication ID is not provided.
 #
 # Since: 0.13
 #
-# Example:
+# .. qmp-example::
 #
 #     <- { "event": "VNC_CONNECTED",
 #          "data": {
@@ -754,7 +750,7 @@
 #
 # Since: 0.13
 #
-# Example:
+# .. qmp-example::
 #
 #     <-  { "event": "VNC_INITIALIZED",
 #           "data": {
@@ -780,7 +776,7 @@
 #
 # Since: 0.13
 #
-# Example:
+# .. qmp-example::
 #
 #     <- { "event": "VNC_DISCONNECTED",
 #          "data": {
@@ -796,7 +792,9 @@
   'if': 'CONFIG_VNC' }
 
 ##
-# = Input
+# *****
+# Input
+# *****
 ##
 
 ##
@@ -822,13 +820,13 @@
 ##
 # @query-mice:
 #
-# Returns information about each active mouse device
+# Return information about each active mouse device
 #
-# Returns: a list of @MouseInfo for each device
+# Returns: a list of info for each device
 #
 # Since: 0.14
 #
-# Example:
+# .. qmp-example::
 #
 #     -> { "execute": "query-mice" }
 #     <- { "return": [
@@ -854,7 +852,7 @@
 #
 # An enumeration of key name.
 #
-# This is used by the @send-key command.
+# This is used by the `send-key` command.
 #
 # @unmapped: since 2.0
 #
@@ -951,6 +949,7 @@
 # Since: 1.3
 ##
 { 'enum': 'QKeyCode',
+  'prefix': 'Q_KEY_CODE',
   'data': [ 'unmapped',
             'shift', 'shift_r', 'alt', 'alt_r', 'ctrl',
             'ctrl_r', 'menu', 'esc', '1', '2', '3', '4', '5', '6', '7', '8',
@@ -1024,10 +1023,10 @@
 #
 # Send keys to guest.
 #
-# @keys: An array of @KeyValue elements.  All @KeyValues in this array
-#     are simultaneously sent to the guest.  A @KeyValue.number value
-#     is sent directly to the guest, while @KeyValue.qcode must be a
-#     valid @QKeyCode value
+# @keys: An array of `KeyValue` elements.  All @KeyValues in this array
+#     are simultaneously sent to the guest.  A `KeyValue`.number value
+#     is sent directly to the guest, while `KeyValue`.qcode must be a
+#     valid `QKeyCode` value
 #
 # @hold-time: time to delay key up events, milliseconds.  Defaults to
 #     100
@@ -1037,7 +1036,7 @@
 #
 # Since: 1.3
 #
-# Example:
+# .. qmp-example::
 #
 #     -> { "execute": "send-key",
 #          "arguments": { "keys": [ { "type": "qcode", "data": "ctrl" },
@@ -1134,7 +1133,7 @@
 # @axis: Which axis is referenced by @value.
 #
 # @value: Pointer position.  For absolute coordinates the valid range
-#     is 0 -> 0x7ffff
+#     is 0 to 0x7fff.
 #
 # Since: 2.0
 ##
@@ -1264,18 +1263,17 @@
 # @head: head to send event(s) to, in case the display device supports
 #     multiple scanouts.
 #
-# @events: List of InputEvent union.
+# @events: List of `InputEvent` union.
 #
 # Since: 2.6
 #
-# Note: The consoles are visible in the qom tree, under
-#     /backend/console[$index]. They have a device link and head
-#     property, so it is possible to map which console belongs to
-#     which device and display.
+# .. note:: The consoles are visible in the qom tree, under
+#    ``/backend/console[$index]``.  They have a device link and head
+#    property, so it is possible to map which console belongs to which
+#    device and display.
 #
-# Examples:
-#
-#     1. Press left mouse button.
+# .. qmp-example::
+#    :title: Press left mouse button
 #
 #     -> { "execute": "input-send-event",
 #         "arguments": { "device": "video0",
@@ -1289,7 +1287,8 @@
 #                        "data" : { "down": false, "button": "left" } } ] } }
 #     <- { "return": {} }
 #
-#     2. Press ctrl-alt-del.
+# .. qmp-example::
+#    :title: Press ctrl-alt-del
 #
 #     -> { "execute": "input-send-event",
 #          "arguments": { "events": [
@@ -1301,7 +1300,8 @@
 #               "key": {"type": "qcode", "data": "delete" } } } ] } }
 #     <- { "return": {} }
 #
-#     3. Move mouse pointer to absolute coordinates (20000, 400).
+# .. qmp-example::
+#    :title: Move mouse pointer to absolute coordinates
 #
 #     -> { "execute": "input-send-event" ,
 #       "arguments": { "events": [
@@ -1335,13 +1335,20 @@
 # @show-menubar: Display the main window menubar.  Defaults to "on".
 #     (Since 8.0)
 #
+# @keep-aspect-ratio: Keep width/height aspect ratio of guest content when
+#     resizing host window.  Defaults to "on". (Since 10.1)
+#
+# @scale: Set preferred scale of the display.  Defaults to 1.0.  (Since 10.1)
+#
 # Since: 2.12
 ##
 { 'struct'  : 'DisplayGTK',
-  'data'    : { '*grab-on-hover' : 'bool',
-                '*zoom-to-fit'   : 'bool',
-                '*show-tabs'     : 'bool',
-                '*show-menubar'  : 'bool'  } }
+  'data'    : { '*grab-on-hover'     : 'bool',
+                '*zoom-to-fit'       : 'bool',
+                '*show-tabs'         : 'bool',
+                '*show-menubar'      : 'bool',
+                '*keep-aspect-ratio' : 'bool',
+                '*scale'             : 'number'  } }
 
 ##
 # @DisplayEGLHeadless:
@@ -1367,7 +1374,7 @@
 #     first available node on the host.
 #
 # @p2p: Whether to use peer-to-peer connections (accepted through
-#     @add_client).
+#     `add_client`).
 #
 # @audiodev: Use the specified DBus audiodev to export audio.
 #
@@ -1418,11 +1425,11 @@
 #
 # @left-command-key: Enable/disable forwarding of left command key to
 #     guest.  Allows command-tab window switching on the host without
-#     sending this key to the guest when "off". Defaults to "on"
+#     sending this key to the guest when "off".  Defaults to "on"
 #
 # @full-grab: Capture all key presses, including system combos.  This
 #     requires accessibility permissions, since it performs a global
-#     grab on key events.  (default: off) See
+#     grab on key events.  (default: off)  See
 #     https://support.apple.com/en-in/guide/mac-help/mh32356/mac
 #
 # @swap-opt-cmd: Swap the Option and Command keys so that their key
@@ -1434,7 +1441,7 @@
 #     "off".  (Since 8.2)
 #
 # @zoom-interpolation: Apply interpolation to smooth output when
-#     zoom-to-fit is enabled. Defaults to "off".  (Since 9.0)
+#     zoom-to-fit is enabled.  Defaults to "off".  (Since 9.0)
 #
 # Since: 7.0
 ##
@@ -1526,12 +1533,12 @@
 #
 # Display (user interface) options.
 #
-# @type: Which DisplayType qemu should use.
+# @type: Which `DisplayType` QEMU should use.
 #
 # @full-screen: Start user interface in fullscreen mode
 #     (default: off).
 #
-# @window-close: Allow to quit qemu with window close button
+# @window-close: Allow to quit QEMU with window close button
 #     (default: on).
 #
 # @show-cursor: Force showing the mouse cursor (default: off).
@@ -1562,9 +1569,7 @@
 ##
 # @query-display-options:
 #
-# Returns information about display configuration
-#
-# Returns: @DisplayOptions
+# Return information about display configuration
 #
 # Since: 3.1
 ##
@@ -1616,7 +1621,7 @@
 #
 # Since: 6.0
 #
-# Example:
+# .. qmp-example::
 #
 #     -> { "execute": "display-reload",
 #          "arguments": { "type": "vnc", "tls-certs": true  } }
@@ -1673,7 +1678,7 @@
 #
 # Since: 7.1
 #
-# Example:
+# .. qmp-example::
 #
 #     -> { "execute": "display-update",
 #          "arguments": { "type": "vnc", "addresses":
@@ -1704,7 +1709,7 @@
 #
 # Since: 0.14
 #
-# Example:
+# .. qmp-example::
 #
 #     -> { "execute": "client_migrate_info",
 #          "arguments": { "protocol": "spice",

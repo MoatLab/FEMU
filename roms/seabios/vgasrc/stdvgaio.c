@@ -6,7 +6,6 @@
 
 #include "farptr.h" // GET_FARVAR
 #include "stdvga.h" // VGAREG_PEL_MASK
-#include "vgautil.h" // stdvga_pelmask_read
 #include "x86.h" // inb
 
 u8
@@ -155,32 +154,21 @@ stdvga_attrindex_write(u8 value)
 }
 
 
-void
-stdvga_dac_read(u16 seg, u8 *data_far, u8 start, int count)
+struct vbe_palette_entry
+stdvga_dac_read(u8 color)
 {
-    outb(start, VGAREG_DAC_READ_ADDRESS);
-    while (count) {
-        SET_FARVAR(seg, *data_far, inb(VGAREG_DAC_DATA));
-        data_far++;
-        SET_FARVAR(seg, *data_far, inb(VGAREG_DAC_DATA));
-        data_far++;
-        SET_FARVAR(seg, *data_far, inb(VGAREG_DAC_DATA));
-        data_far++;
-        count--;
-    }
+    outb(color, VGAREG_DAC_READ_ADDRESS);
+    u8 r = inb(VGAREG_DAC_DATA);
+    u8 g = inb(VGAREG_DAC_DATA);
+    u8 b = inb(VGAREG_DAC_DATA);
+    return (struct vbe_palette_entry){ .red=r, .green=g, .blue=b };
 }
 
 void
-stdvga_dac_write(u16 seg, u8 *data_far, u8 start, int count)
+stdvga_dac_write(u8 color, struct vbe_palette_entry rgb)
 {
-    outb(start, VGAREG_DAC_WRITE_ADDRESS);
-    while (count) {
-        outb(GET_FARVAR(seg, *data_far), VGAREG_DAC_DATA);
-        data_far++;
-        outb(GET_FARVAR(seg, *data_far), VGAREG_DAC_DATA);
-        data_far++;
-        outb(GET_FARVAR(seg, *data_far), VGAREG_DAC_DATA);
-        data_far++;
-        count--;
-    }
+    outb(color, VGAREG_DAC_WRITE_ADDRESS);
+    outb(rgb.red, VGAREG_DAC_DATA);
+    outb(rgb.green, VGAREG_DAC_DATA);
+    outb(rgb.blue, VGAREG_DAC_DATA);
 }

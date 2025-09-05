@@ -36,6 +36,49 @@ static bool trans_lui(DisasContext *ctx, arg_lui *a)
     return true;
 }
 
+static bool trans_lpad(DisasContext *ctx, arg_lpad *a)
+{
+    /*
+     * fcfi_lp_expected can set only if fcfi was eanbled.
+     * translate further only if fcfi_lp_expected set.
+     * lpad comes from NOP space anyways, so return true if
+     * fcfi_lp_expected is false.
+     */
+    if (!ctx->fcfi_lp_expected) {
+        return true;
+    }
+
+    ctx->fcfi_lp_expected = false;
+    if ((ctx->base.pc_next) & 0x3) {
+        /*
+         * misaligned, according to spec we should raise sw check exception
+         */
+        tcg_gen_st_tl(tcg_constant_tl(RISCV_EXCP_SW_CHECK_FCFI_TVAL),
+                      tcg_env, offsetof(CPURISCVState, sw_check_code));
+        gen_helper_raise_exception(tcg_env,
+                      tcg_constant_i32(RISCV_EXCP_SW_CHECK));
+        return true;
+    }
+
+    /* per spec, label check performed only when embedded label non-zero */
+    if (a->label != 0) {
+        TCGLabel *skip = gen_new_label();
+        TCGv tmp = tcg_temp_new();
+        tcg_gen_extract_tl(tmp, get_gpr(ctx, xT2, EXT_NONE), 12, 20);
+        tcg_gen_brcondi_tl(TCG_COND_EQ, tmp, a->label, skip);
+        tcg_gen_st_tl(tcg_constant_tl(RISCV_EXCP_SW_CHECK_FCFI_TVAL),
+                      tcg_env, offsetof(CPURISCVState, sw_check_code));
+        gen_helper_raise_exception(tcg_env,
+                      tcg_constant_i32(RISCV_EXCP_SW_CHECK));
+        gen_set_label(skip);
+    }
+
+    tcg_gen_st8_tl(tcg_constant_tl(0), tcg_env,
+                  offsetof(CPURISCVState, elp));
+
+    return true;
+}
+
 static bool trans_auipc(DisasContext *ctx, arg_auipc *a)
 {
     TCGv target_pc = dest_gpr(ctx, a->rd);
@@ -50,6 +93,51 @@ static bool trans_jal(DisasContext *ctx, arg_jal *a)
     return true;
 }
 
+#ifndef CONFIG_USER_ONLY
+/*
+ * Indirect calls
+ * - jalr x1, rs where rs != x5;
+ * - jalr x5, rs where rs != x1;
+ * - c.jalr rs1 where rs1 != x5;
+ *
+ * Indirect jumps
+ * - jalr x0, rs where rs != x1 and rs != x5;
+ * - c.jr rs1 where rs1 != x1 and rs1 != x5.
+ *
+ * Returns
+ * - jalr rd, rs where (rs == x1 or rs == x5) and rd != x1 and rd != x5;
+ * - c.jr rs1 where rs1 == x1 or rs1 == x5.
+ *
+ * Co-routine swap
+ * - jalr x1, x5;
+ * - jalr x5, x1;
+ * - c.jalr x5.
+ *
+ * Other indirect jumps
+ * - jalr rd, rs where rs != x1, rs != x5, rd != x0, rd != x1 and rd != x5.
+ */
+static void gen_ctr_jalr(DisasContext *ctx, arg_jalr *a, TCGv dest)
+{
+    TCGv src = tcg_temp_new();
+    TCGv type;
+
+    if ((a->rd == 1 && a->rs1 != 5) || (a->rd == 5 && a->rs1 != 1)) {
+        type = tcg_constant_tl(CTRDATA_TYPE_INDIRECT_CALL);
+    } else if (a->rd == 0 && a->rs1 != 1 && a->rs1 != 5) {
+        type = tcg_constant_tl(CTRDATA_TYPE_INDIRECT_JUMP);
+    } else if ((a->rs1 == 1 || a->rs1 == 5) && (a->rd != 1 && a->rd != 5)) {
+        type = tcg_constant_tl(CTRDATA_TYPE_RETURN);
+    } else if ((a->rs1 == 1 && a->rd == 5) || (a->rs1 == 5 && a->rd == 1)) {
+        type = tcg_constant_tl(CTRDATA_TYPE_CO_ROUTINE_SWAP);
+    } else {
+        type = tcg_constant_tl(CTRDATA_TYPE_OTHER_INDIRECT_JUMP);
+    }
+
+    gen_pc_plus_diff(src, ctx, 0);
+    gen_helper_ctr_add_entry(tcg_env, src, dest, type);
+}
+#endif
+
 static bool trans_jalr(DisasContext *ctx, arg_jalr *a)
 {
     TCGLabel *misaligned = NULL;
@@ -63,7 +151,9 @@ static bool trans_jalr(DisasContext *ctx, arg_jalr *a)
         tcg_gen_ext32s_tl(target_pc, target_pc);
     }
 
-    if (!has_ext(ctx, RVC) && !ctx->cfg_ptr->ext_zca) {
+    if (!riscv_cpu_allow_16bit_insn(ctx->cfg_ptr,
+                                    ctx->priv_ver,
+                                    ctx->misa_ext)) {
         TCGv t0 = tcg_temp_new();
 
         misaligned = gen_new_label();
@@ -74,7 +164,25 @@ static bool trans_jalr(DisasContext *ctx, arg_jalr *a)
     gen_pc_plus_diff(succ_pc, ctx, ctx->cur_insn_len);
     gen_set_gpr(ctx, a->rd, succ_pc);
 
+#ifndef CONFIG_USER_ONLY
+    if (ctx->cfg_ptr->ext_smctr || ctx->cfg_ptr->ext_ssctr) {
+        gen_ctr_jalr(ctx, a, target_pc);
+    }
+#endif
+
     tcg_gen_mov_tl(cpu_pc, target_pc);
+    if (ctx->fcfi_enabled) {
+        /*
+         * return from functions (i.e. rs1 == xRA || rs1 == xT0) are not
+         * tracked. zicfilp introduces sw guarded branch as well. sw guarded
+         * branch are not tracked. rs1 == xT2 is a sw guarded branch.
+         */
+        if (a->rs1 != xRA && a->rs1 != xT0 && a->rs1 != xT2) {
+            tcg_gen_st8_tl(tcg_constant_tl(1),
+                          tcg_env, offsetof(CPURISCVState, elp));
+        }
+    }
+
     lookup_and_goto_ptr(ctx);
 
     if (misaligned) {
@@ -176,18 +284,44 @@ static bool gen_branch(DisasContext *ctx, arg_b *a, TCGCond cond)
     } else {
         tcg_gen_brcond_tl(cond, src1, src2, l);
     }
+
+#ifndef CONFIG_USER_ONLY
+    if (ctx->cfg_ptr->ext_smctr || ctx->cfg_ptr->ext_ssctr) {
+        TCGv type = tcg_constant_tl(CTRDATA_TYPE_NONTAKEN_BRANCH);
+        TCGv dest = tcg_temp_new();
+        TCGv src = tcg_temp_new();
+
+        gen_pc_plus_diff(src, ctx, 0);
+        gen_pc_plus_diff(dest, ctx, ctx->cur_insn_len);
+        gen_helper_ctr_add_entry(tcg_env, src, dest, type);
+    }
+#endif
+
     gen_goto_tb(ctx, 1, ctx->cur_insn_len);
     ctx->pc_save = orig_pc_save;
 
     gen_set_label(l); /* branch taken */
 
-    if (!has_ext(ctx, RVC) && !ctx->cfg_ptr->ext_zca &&
+    if (!riscv_cpu_allow_16bit_insn(ctx->cfg_ptr,
+                                    ctx->priv_ver,
+                                    ctx->misa_ext) &&
         (a->imm & 0x3)) {
         /* misaligned */
         TCGv target_pc = tcg_temp_new();
         gen_pc_plus_diff(target_pc, ctx, a->imm);
         gen_exception_inst_addr_mis(ctx, target_pc);
     } else {
+#ifndef CONFIG_USER_ONLY
+        if (ctx->cfg_ptr->ext_smctr || ctx->cfg_ptr->ext_ssctr) {
+            TCGv type = tcg_constant_tl(CTRDATA_TYPE_TAKEN_BRANCH);
+            TCGv dest = tcg_temp_new();
+            TCGv src = tcg_temp_new();
+
+            gen_pc_plus_diff(src, ctx, 0);
+            gen_pc_plus_diff(dest, ctx, a->imm);
+            gen_helper_ctr_add_entry(tcg_env, src, dest, type);
+        }
+#endif
         gen_goto_tb(ctx, 0, a->imm);
     }
     ctx->pc_save = -1;
@@ -268,7 +402,10 @@ static bool gen_load(DisasContext *ctx, arg_lb *a, MemOp memop)
 {
     bool out;
 
-    decode_save_opc(ctx);
+    if (ctx->cfg_ptr->ext_zama16b) {
+        memop |= MO_ATOM_WITHIN16;
+    }
+    decode_save_opc(ctx, 0);
     if (get_xl(ctx) == MXL_RV128) {
         out = gen_load_i128(ctx, a, memop);
     } else {
@@ -366,7 +503,10 @@ static bool gen_store_i128(DisasContext *ctx, arg_sb *a, MemOp memop)
 
 static bool gen_store(DisasContext *ctx, arg_sb *a, MemOp memop)
 {
-    decode_save_opc(ctx);
+    if (ctx->cfg_ptr->ext_zama16b) {
+        memop |= MO_ATOM_WITHIN16;
+    }
+    decode_save_opc(ctx, 0);
     if (get_xl(ctx) == MXL_RV128) {
         return gen_store_i128(ctx, a, memop);
     } else {
@@ -828,7 +968,7 @@ static bool trans_fence_i(DisasContext *ctx, arg_fence_i *a)
 static bool do_csr_post(DisasContext *ctx)
 {
     /* The helper may raise ILLEGAL_INSN -- record binv for unwind. */
-    decode_save_opc(ctx);
+    decode_save_opc(ctx, 0);
     /* We may have changed important cpu state -- exit to main loop. */
     gen_update_pc(ctx, ctx->cur_insn_len);
     exit_tb(ctx);

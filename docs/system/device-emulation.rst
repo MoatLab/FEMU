@@ -85,7 +85,9 @@ Emulated Devices
    devices/can.rst
    devices/ccid.rst
    devices/cxl.rst
+   devices/vfio-user.rst
    devices/ivshmem.rst
+   devices/ivshmem-flat.rst
    devices/keyboard.rst
    devices/net.rst
    devices/nvme.rst

@@ -17,7 +17,7 @@
 #include "hw/boards.h"
 #include "hw/qdev-properties.h"
 #include "qemu/error-report.h"
-#include "sysemu/qtest.h"
+#include "system/qtest.h"
 
 static struct arm_boot_info sabrelite_binfo = {
     /* DDR memory start */
@@ -110,6 +110,7 @@ static void sabrelite_machine_init(MachineClass *mc)
     mc->max_cpus = FSL_IMX6_NUM_CPUS;
     mc->ignore_memory_transaction_failures = true;
     mc->default_ram_id = "sabrelite.ram";
+    mc->auto_create_sdcard = true;
 }
 
 DEFINE_MACHINE("sabrelite", sabrelite_machine_init)

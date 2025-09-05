@@ -7,7 +7,7 @@
  */
 
 #include "qemu/osdep.h"
-#include "sysemu/runstate.h"
+#include "system/runstate.h"
 #include "migration/vmstate.h"
 #include "hw/irq.h"
 #include "hw/isa/isa.h"
@@ -97,12 +97,12 @@ static void port92_realizefn(DeviceState *dev, Error **errp)
     isa_register_ioport(isadev, &s->io, 0x92);
 }
 
-static void port92_class_initfn(ObjectClass *klass, void *data)
+static void port92_class_initfn(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = port92_realizefn;
-    dc->reset = port92_reset;
+    device_class_set_legacy_reset(dc, port92_reset);
     dc->vmsd = &vmstate_port92_isa;
     /*
      * Reason: unlike ordinary ISA devices, this one needs additional

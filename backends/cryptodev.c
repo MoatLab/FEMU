@@ -22,8 +22,8 @@
  */
 
 #include "qemu/osdep.h"
-#include "sysemu/cryptodev.h"
-#include "sysemu/stats.h"
+#include "system/cryptodev.h"
+#include "system/stats.h"
 #include "qapi/error.h"
 #include "qapi/qapi-commands-cryptodev.h"
 #include "qapi/qapi-types-stats.h"
@@ -74,7 +74,7 @@ static int qmp_query_cryptodev_foreach(Object *obj, void *data)
 
     backend = CRYPTODEV_BACKEND(obj);
     services = backend->conf.crypto_services;
-    for (i = 0; i < QCRYPTODEV_BACKEND_SERVICE__MAX; i++) {
+    for (i = 0; i < QCRYPTODEV_BACKEND_SERVICE_TYPE__MAX; i++) {
         if (services & (1 << i)) {
             QAPI_LIST_PREPEND(info->service, i);
         }
@@ -97,7 +97,7 @@ static int qmp_query_cryptodev_foreach(Object *obj, void *data)
 QCryptodevInfoList *qmp_query_cryptodev(Error **errp)
 {
     QCryptodevInfoList *list = NULL;
-    Object *objs = container_get(object_get_root(), "/objects");
+    Object *objs = object_get_container("objects");
 
     object_child_foreach(objs, qmp_query_cryptodev_foreach, &list);
 
@@ -185,10 +185,10 @@ static int cryptodev_backend_operation(
 static int cryptodev_backend_account(CryptoDevBackend *backend,
                  CryptoDevBackendOpInfo *op_info)
 {
-    enum QCryptodevBackendAlgType algtype = op_info->algtype;
+    enum QCryptodevBackendAlgoType algtype = op_info->algtype;
     int len;
 
-    if (algtype == QCRYPTODEV_BACKEND_ALG_ASYM) {
+    if (algtype == QCRYPTODEV_BACKEND_ALGO_TYPE_ASYM) {
         CryptoDevBackendAsymOpInfo *asym_op_info = op_info->u.asym_op_info;
         len = asym_op_info->src_len;
 
@@ -212,7 +212,7 @@ static int cryptodev_backend_account(CryptoDevBackend *backend,
         default:
             return -VIRTIO_CRYPTO_NOTSUPP;
         }
-    } else if (algtype == QCRYPTODEV_BACKEND_ALG_SYM) {
+    } else if (algtype == QCRYPTODEV_BACKEND_ALGO_TYPE_SYM) {
         CryptoDevBackendSymOpInfo *sym_op_info = op_info->u.sym_op_info;
         len = sym_op_info->src_len;
 
@@ -424,11 +424,11 @@ cryptodev_backend_complete(UserCreatable *uc, Error **errp)
     }
 
     services = backend->conf.crypto_services;
-    if (services & (1 << QCRYPTODEV_BACKEND_SERVICE_CIPHER)) {
+    if (services & (1 << QCRYPTODEV_BACKEND_SERVICE_TYPE_CIPHER)) {
         backend->sym_stat = g_new0(CryptodevBackendSymStat, 1);
     }
 
-    if (services & (1 << QCRYPTODEV_BACKEND_SERVICE_AKCIPHER)) {
+    if (services & (1 << QCRYPTODEV_BACKEND_SERVICE_TYPE_AKCIPHER)) {
         backend->asym_stat = g_new0(CryptodevBackendAsymStat, 1);
     }
 }
@@ -557,7 +557,7 @@ static void cryptodev_backend_stats_cb(StatsResultList **result,
     switch (target) {
     case STATS_TARGET_CRYPTODEV:
     {
-        Object *objs = container_get(object_get_root(), "/objects");
+        Object *objs = object_get_container("objects");
         StatsArgs stats_args;
         stats_args.result.stats = result;
         stats_args.names = names;
@@ -608,7 +608,7 @@ static void cryptodev_backend_schemas_cb(StatsSchemaList **result,
 }
 
 static void
-cryptodev_backend_class_init(ObjectClass *oc, void *data)
+cryptodev_backend_class_init(ObjectClass *oc, const void *data)
 {
     UserCreatableClass *ucc = USER_CREATABLE_CLASS(oc);
 
@@ -641,7 +641,7 @@ static const TypeInfo cryptodev_backend_info = {
     .instance_finalize = cryptodev_backend_finalize,
     .class_size = sizeof(CryptoDevBackendClass),
     .class_init = cryptodev_backend_class_init,
-    .interfaces = (InterfaceInfo[]) {
+    .interfaces = (const InterfaceInfo[]) {
         { TYPE_USER_CREATABLE },
         { }
     }

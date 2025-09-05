@@ -3,8 +3,8 @@
 /* this file is included by x86.h */
 
 /* version number of this SeaBIOS firmware */
-#define SEABIOS_HPPA_VERSION 16
-#define SEABIOS_HPPA_VERSION_STR  "16"
+#define SEABIOS_HPPA_VERSION 18
+#define SEABIOS_HPPA_VERSION_STR  "18"
 
 #ifdef __LP64__
 #define CONFIG_64BIT
@@ -440,6 +440,8 @@ void cpuid(u32 index, u32 *eax, u32 *ebx, u32 *ecx, u32 *edx);
 // pci.c
 unsigned long elroy_offset(u16 bdf);
 void *elroy_port(unsigned long port, unsigned long offs);
+// pciinit.c
+unsigned long add_lmmio_directed_range(unsigned long size, int rope);
 
 #endif // !__ASSEMBLY__
 #endif

@@ -28,4 +28,10 @@
 #define PRIx64 "llx"
 #endif
 
+#define PRIu32 "u"
+#define PRIx32 "x"
+
+#define PRIu16 "hu"
+#define PRIx16 "hx"
+
 #endif

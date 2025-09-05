@@ -27,7 +27,7 @@ typedef struct dictionary_header {
 	char	signature[8];
 	u8	version;
 	u8	cellsize;
-	u8 	endianess;
+	u8 	endianness;
 	u8	compression;
 	u8	relocation;
 	u8	reserved[3];

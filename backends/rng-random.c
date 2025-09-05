@@ -11,8 +11,8 @@
  */
 
 #include "qemu/osdep.h"
-#include "sysemu/rng-random.h"
-#include "sysemu/rng.h"
+#include "system/rng-random.h"
+#include "system/rng.h"
 #include "qapi/error.h"
 #include "qapi/qmp/qerror.h"
 #include "qemu/main-loop.h"
@@ -75,10 +75,7 @@ static void rng_random_opened(RngBackend *b, Error **errp)
         error_setg(errp, QERR_INVALID_PARAMETER_VALUE,
                    "filename", "a valid filename");
     } else {
-        s->fd = qemu_open_old(s->filename, O_RDONLY | O_NONBLOCK);
-        if (s->fd == -1) {
-            error_setg_file_open(errp, errno, s->filename);
-        }
+        s->fd = qemu_open(s->filename, O_RDONLY | O_NONBLOCK, errp);
     }
 }
 
@@ -124,7 +121,7 @@ static void rng_random_finalize(Object *obj)
     g_free(s->filename);
 }
 
-static void rng_random_class_init(ObjectClass *klass, void *data)
+static void rng_random_class_init(ObjectClass *klass, const void *data)
 {
     RngBackendClass *rbc = RNG_BACKEND_CLASS(klass);
 

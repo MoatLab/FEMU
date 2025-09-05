@@ -33,7 +33,7 @@
 #include "hw/ppc/spapr.h"
 #include "hw/ppc/spapr_vio.h"
 #include "hw/qdev-properties.h"
-#include "sysemu/sysemu.h"
+#include "system/system.h"
 #include "trace.h"
 
 #include <libfdt.h>
@@ -770,6 +770,12 @@ static target_ulong h_change_logical_lan_mac(PowerPCCPU *cpu,
     SpaprVioVlan *dev = VIO_SPAPR_VLAN_DEVICE(sdev);
     int i;
 
+    if (!dev) {
+        hcall_dprintf("H_CHANGE_LOGICAL_LAN_MAC called when "
+                      "no NIC is present\n");
+        return H_PARAMETER;
+    }
+
     for (i = 0; i < ETH_ALEN; i++) {
         dev->nicconf.macaddr.a[ETH_ALEN - i - 1] = macaddr & 0xff;
         macaddr >>= 8;
@@ -780,12 +786,11 @@ static target_ulong h_change_logical_lan_mac(PowerPCCPU *cpu,
     return H_SUCCESS;
 }
 
-static Property spapr_vlan_properties[] = {
+static const Property spapr_vlan_properties[] = {
     DEFINE_SPAPR_PROPERTIES(SpaprVioVlan, sdev),
     DEFINE_NIC_PROPERTIES(SpaprVioVlan, nicconf),
     DEFINE_PROP_BIT("use-rx-buffer-pools", SpaprVioVlan,
                     compat_flags, SPAPRVLAN_FLAG_RX_BUF_POOLS_BIT, true),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
 static bool spapr_vlan_rx_buffer_pools_needed(void *opaque)
@@ -843,7 +848,7 @@ static const VMStateDescription vmstate_spapr_llan = {
     }
 };
 
-static void spapr_vlan_class_init(ObjectClass *klass, void *data)
+static void spapr_vlan_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     SpaprVioDeviceClass *k = VIO_SPAPR_DEVICE_CLASS(klass);

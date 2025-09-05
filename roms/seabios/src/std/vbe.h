@@ -18,6 +18,8 @@ struct vbe_info {
     struct segoff_s oem_product_string;
     struct segoff_s oem_revision_string;
     u8 reserved[222];
+    /* VBE 2.0 */
+    u8 oem_data[256];
 } PACKED;
 
 struct vbe_mode_info {
@@ -84,6 +86,13 @@ struct vbe_crtc_info {
     u32 pixclock;
     u16 refresh_rate;
     u8 reserved[40];
+} PACKED;
+
+struct vbe_palette_entry {
+    u8 blue;
+    u8 green;
+    u8 red;
+    u8 align;
 } PACKED;
 
 /* VBE Return Status Info */

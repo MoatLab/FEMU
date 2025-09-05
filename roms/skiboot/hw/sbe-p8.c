@@ -5,14 +5,15 @@
  * Copyright 2013-2018 IBM Corp.
  */
 
+#include <chip.h>
 #include <device.h>
+#include <sbe.h>
 #include <sbe-p8.h>
 #include <skiboot.h>
 #include <timebase.h>
 #include <xscom.h>
 
 /* SLW timer related stuff */
-static bool sbe_has_timer;
 static uint64_t sbe_timer_inc;
 static uint64_t sbe_timer_target;
 static uint32_t sbe_timer_chip;
@@ -65,7 +66,7 @@ void p8_sbe_update_timer_expiry(uint64_t new_target)
 	uint64_t count, gen, gen2, req, now;
 	int64_t rc;
 
-	if (!sbe_has_timer || new_target == sbe_timer_target)
+	if (new_target == sbe_timer_target)
 		return;
 
 	sbe_timer_target = new_target;
@@ -120,6 +121,7 @@ void p8_sbe_update_timer_expiry(uint64_t new_target)
 				prlog(PR_DEBUG, "SLW: Stuck with odd generation !\n");
 				_xscom_unlock();
 				sbe_has_timer = false;
+				sbe_timer_good = false;
 				p8_sbe_dump_timer_ffdc();
 				return;
 			}
@@ -153,6 +155,7 @@ void p8_sbe_update_timer_expiry(uint64_t new_target)
 			prlog(PR_ERR,
 			      "SLW: Timer appears to not be running !\n");
 			sbe_has_timer = false;
+			sbe_timer_good = false;
 			p8_sbe_dump_timer_ffdc();
 		}
 		sbe_last_gen = gen;
@@ -162,16 +165,14 @@ void p8_sbe_update_timer_expiry(uint64_t new_target)
 	prlog(PR_TRACE, "SLW: gen: %llx\n", gen);
 }
 
-bool p8_sbe_timer_ok(void)
-{
-	return sbe_has_timer;
-}
-
 void p8_sbe_init_timer(void)
 {
 	struct dt_node *np;
 	int64_t rc;
 	uint32_t tick_us;
+
+	if (proc_gen != proc_gen_p8 || chip_quirk(QUIRK_NO_SBE))
+		return;
 
 	np = dt_find_compatible_node(dt_root, NULL, "ibm,power8-sbe-timer");
 	if (!np)
@@ -192,4 +193,5 @@ void p8_sbe_init_timer(void)
 	prlog(PR_INFO, "SLW: Timer facility on chip %d, resolution %dus\n",
 	      sbe_timer_chip, tick_us);
 	sbe_has_timer = true;
+	sbe_timer_good = true;
 }

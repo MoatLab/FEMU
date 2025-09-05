@@ -4,6 +4,7 @@
 #include <skiboot.h>
 #include <console.h>
 #include <device.h>
+#include <ast.h>
 #include <ipmi.h>
 
 #include <platforms/astbmc/astbmc.h>
@@ -75,12 +76,22 @@ static bool qemu_probe_powernv10(void)
 	return qemu_probe_common("qemu,powernv10");
 }
 
+static bool qemu_probe_powernv11(void)
+{
+	return qemu_probe_common("qemu,powernv11");
+}
+
 static void qemu_init(void)
 {
 	if (!bt_device_present) {
 		set_opal_console(&uart_opal_con);
 	} else {
+#ifdef CONFIG_PLDM
+		/* need to be checked according platform: P10, P11 ... */
+		astbmc_pldm_init();
+#else
 		astbmc_init();
+#endif
 	}
 }
 
@@ -140,6 +151,24 @@ DECLARE_PLATFORM(qemu_powernv10) = {
 	.name		= "QEMU POWER10",
 	.probe		= qemu_probe_powernv10,
 	.bmc		= &bmc_plat_ast2500_openbmc,
+	.init		= qemu_init,
+	.external_irq   = astbmc_ext_irq_serirq_cpld,
+	.cec_power_down = astbmc_ipmi_power_down,
+	.cec_reboot     = astbmc_ipmi_reboot,
+	.pci_get_slot_info = slot_table_get_slot_info,
+	.start_preload_resource	= flash_start_preload_resource,
+	.resource_loaded	= flash_resource_loaded,
+	.exit			= astbmc_exit,
+	.terminate	= ipmi_terminate,
+};
+
+/*
+ * For a QEMU PowerNV machine using Power11 CPUs
+ */
+DECLARE_PLATFORM(qemu_powernv11) = {
+	.name		= "QEMU Power11",
+	.probe		= qemu_probe_powernv11,
+	.bmc		= &bmc_plat_ast2600_openbmc,
 	.init		= qemu_init,
 	.external_irq   = astbmc_ext_irq_serirq_cpld,
 	.cec_power_down = astbmc_ipmi_power_down,

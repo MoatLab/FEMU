@@ -25,8 +25,8 @@
 #include "hw/arm/boot.h"
 #include "hw/loader.h"
 #include "net/net.h"
-#include "sysemu/runstate.h"
-#include "sysemu/sysemu.h"
+#include "system/runstate.h"
+#include "system/system.h"
 #include "hw/boards.h"
 #include "qemu/error-report.h"
 #include "hw/char/pl011.h"
@@ -45,7 +45,7 @@
 #define MVBAR_ADDR              0x200
 #define BOARD_SETUP_ADDR        (MVBAR_ADDR + 8 * sizeof(uint32_t))
 
-#define NIRQ_GIC                160
+#define GIC_EXT_IRQS            128 /* EnergyCore ECX-1000 & ECX-2000 */
 
 /* Board init.  */
 
@@ -139,13 +139,13 @@ static void highbank_regs_init(Object *obj)
     sysbus_init_mmio(dev, &s->iomem);
 }
 
-static void highbank_regs_class_init(ObjectClass *klass, void *data)
+static void highbank_regs_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->desc = "Calxeda Highbank registers";
     dc->vmsd = &vmstate_highbank_regs;
-    dc->reset = highbank_regs_reset;
+    device_class_set_legacy_reset(dc, highbank_regs_reset);
 }
 
 static const TypeInfo highbank_regs_info = {
@@ -180,7 +180,7 @@ static void calxeda_init(MachineState *machine, enum cxmachines machine_id)
 {
     DeviceState *dev = NULL;
     SysBusDevice *busdev;
-    qemu_irq pic[128];
+    qemu_irq pic[GIC_EXT_IRQS];
     int n;
     unsigned int smp_cpus = machine->smp.cpus;
     qemu_irq cpu_irq[4];
@@ -199,7 +199,7 @@ static void calxeda_init(MachineState *machine, enum cxmachines machine_id)
         machine->cpu_type = ARM_CPU_TYPE_NAME("cortex-a15");
         break;
     default:
-        assert(0);
+        g_assert_not_reached();
     }
 
     for (n = 0; n < smp_cpus; n++) {
@@ -260,7 +260,7 @@ static void calxeda_init(MachineState *machine, enum cxmachines machine_id)
         break;
     }
     qdev_prop_set_uint32(dev, "num-cpu", smp_cpus);
-    qdev_prop_set_uint32(dev, "num-irq", NIRQ_GIC);
+    qdev_prop_set_uint32(dev, "num-irq", GIC_EXT_IRQS + GIC_INTERNAL);
     busdev = SYS_BUS_DEVICE(dev);
     sysbus_realize_and_unref(busdev, &error_fatal);
     sysbus_mmio_map(busdev, 0, MPCORE_PERIPHBASE);
@@ -271,7 +271,7 @@ static void calxeda_init(MachineState *machine, enum cxmachines machine_id)
         sysbus_connect_irq(busdev, n + 3 * smp_cpus, cpu_vfiq[n]);
     }
 
-    for (n = 0; n < 128; n++) {
+    for (n = 0; n < GIC_EXT_IRQS; n++) {
         pic[n] = qdev_get_gpio_in(dev, n);
     }
 
@@ -341,7 +341,7 @@ static void midway_init(MachineState *machine)
     calxeda_init(machine, CALXEDA_MIDWAY);
 }
 
-static void highbank_class_init(ObjectClass *oc, void *data)
+static void highbank_class_init(ObjectClass *oc, const void *data)
 {
     static const char * const valid_cpu_types[] = {
         ARM_CPU_TYPE_NAME("cortex-a9"),
@@ -357,6 +357,7 @@ static void highbank_class_init(ObjectClass *oc, void *data)
     mc->max_cpus = 4;
     mc->ignore_memory_transaction_failures = true;
     mc->default_ram_id = "highbank.dram";
+    mc->deprecation_reason = "no known users left for this machine";
 }
 
 static const TypeInfo highbank_type = {
@@ -365,7 +366,7 @@ static const TypeInfo highbank_type = {
     .class_init = highbank_class_init,
 };
 
-static void midway_class_init(ObjectClass *oc, void *data)
+static void midway_class_init(ObjectClass *oc, const void *data)
 {
     static const char * const valid_cpu_types[] = {
         ARM_CPU_TYPE_NAME("cortex-a15"),
@@ -381,6 +382,7 @@ static void midway_class_init(ObjectClass *oc, void *data)
     mc->max_cpus = 4;
     mc->ignore_memory_transaction_failures = true;
     mc->default_ram_id = "highbank.dram";
+    mc->deprecation_reason = "no known users left for this machine";
 }
 
 static const TypeInfo midway_type = {

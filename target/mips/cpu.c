@@ -27,13 +27,14 @@
 #include "internal.h"
 #include "kvm_mips.h"
 #include "qemu/module.h"
-#include "sysemu/kvm.h"
-#include "sysemu/qtest.h"
-#include "exec/exec-all.h"
+#include "system/kvm.h"
+#include "system/qtest.h"
 #include "hw/qdev-properties.h"
 #include "hw/qdev-clock.h"
-#include "semihosting/semihost.h"
 #include "fpu_helper.h"
+#ifndef CONFIG_USER_ONLY
+#include "semihosting/semihost.h"
+#endif
 
 const char regnames[32][3] = {
     "r0", "at", "v0", "v1", "a0", "a1", "a2", "a3",
@@ -132,6 +133,7 @@ static vaddr mips_cpu_get_pc(CPUState *cs)
     return cpu->env.active_tc.PC;
 }
 
+#if !defined(CONFIG_USER_ONLY)
 static bool mips_cpu_has_work(CPUState *cs)
 {
     CPUMIPSState *env = cpu_env(cs);
@@ -177,15 +179,11 @@ static bool mips_cpu_has_work(CPUState *cs)
     }
     return has_work;
 }
-
-static int mips_cpu_mmu_index(CPUState *cs, bool ifunc)
-{
-    return mips_env_mmu_index(cpu_env(cs));
-}
+#endif /* !CONFIG_USER_ONLY */
 
 #include "cpu-defs.c.inc"
 
-static void mips_cpu_reset_hold(Object *obj)
+static void mips_cpu_reset_hold(Object *obj, ResetType type)
 {
     CPUState *cs = CPU(obj);
     MIPSCPU *cpu = MIPS_CPU(cs);
@@ -193,17 +191,15 @@ static void mips_cpu_reset_hold(Object *obj)
     CPUMIPSState *env = &cpu->env;
 
     if (mcc->parent_phases.hold) {
-        mcc->parent_phases.hold(obj);
+        mcc->parent_phases.hold(obj, type);
     }
 
     memset(env, 0, offsetof(CPUMIPSState, end_reset_fields));
 
     /* Reset registers to their default values */
     env->CP0_PRid = env->cpu_model->CP0_PRid;
-    env->CP0_Config0 = env->cpu_model->CP0_Config0;
-#if TARGET_BIG_ENDIAN
-    env->CP0_Config0 |= (1 << CP0C0_BE);
-#endif
+    env->CP0_Config0 = deposit32(env->cpu_model->CP0_Config0,
+                                 CP0C0_BE, 1, cpu->is_big_endian);
     env->CP0_Config1 = env->cpu_model->CP0_Config1;
     env->CP0_Config2 = env->cpu_model->CP0_Config2;
     env->CP0_Config3 = env->cpu_model->CP0_Config3;
@@ -409,18 +405,17 @@ static void mips_cpu_reset_hold(Object *obj)
     }
 
     msa_reset(env);
+    fp_reset(env);
 
     compute_hflags(env);
-    restore_fp_status(env);
     restore_pamask(env);
     cs->exception_index = EXCP_NONE;
 
+#ifndef CONFIG_USER_ONLY
     if (semihosting_get_argc()) {
         /* UHI interface can be used to obtain argc and argv */
         env->active_tc.gpr[4] = -1;
     }
-
-#ifndef CONFIG_USER_ONLY
     if (kvm_enabled()) {
         kvm_mips_reset_vcpu(cpu);
     }
@@ -430,13 +425,13 @@ static void mips_cpu_reset_hold(Object *obj)
 static void mips_cpu_disas_set_info(CPUState *s, disassemble_info *info)
 {
     if (!(cpu_env(s)->insn_flags & ISA_NANOMIPS32)) {
-#if TARGET_BIG_ENDIAN
-        info->print_insn = print_insn_big_mips;
-#else
-        info->print_insn = print_insn_little_mips;
-#endif
+        info->endian = TARGET_BIG_ENDIAN ? BFD_ENDIAN_BIG
+                                         : BFD_ENDIAN_LITTLE;
+        info->print_insn = TARGET_BIG_ENDIAN ? print_insn_big_mips
+                                             : print_insn_little_mips;
     } else {
         info->print_insn = print_insn_nanomips;
+        info->endian = BFD_ENDIAN_LITTLE;
     }
 }
 
@@ -536,25 +531,60 @@ static ObjectClass *mips_cpu_class_by_name(const char *cpu_model)
 #include "hw/core/sysemu-cpu-ops.h"
 
 static const struct SysemuCPUOps mips_sysemu_ops = {
+    .has_work = mips_cpu_has_work,
     .get_phys_page_debug = mips_cpu_get_phys_page_debug,
     .legacy_vmsd = &vmstate_mips_cpu,
 };
 #endif
 
+static const Property mips_cpu_properties[] = {
+    DEFINE_PROP_BOOL("big-endian", MIPSCPU, is_big_endian, TARGET_BIG_ENDIAN),
+};
+
 #ifdef CONFIG_TCG
-#include "hw/core/tcg-cpu-ops.h"
-/*
- * NB: cannot be const, as some elements are changed for specific
- * mips hardware (see hw/mips/jazz.c).
- */
+#include "accel/tcg/cpu-ops.h"
+
+static int mips_cpu_mmu_index(CPUState *cs, bool ifunc)
+{
+    return mips_env_mmu_index(cpu_env(cs));
+}
+
+static TCGTBCPUState mips_get_tb_cpu_state(CPUState *cs)
+{
+    CPUMIPSState *env = cpu_env(cs);
+
+    return (TCGTBCPUState){
+        .pc = env->active_tc.PC,
+        .flags = env->hflags & (MIPS_HFLAG_TMASK | MIPS_HFLAG_BMASK |
+                                MIPS_HFLAG_HWRENA_ULR),
+    };
+}
+
+#ifndef CONFIG_USER_ONLY
+static vaddr mips_pointer_wrap(CPUState *cs, int mmu_idx,
+                               vaddr result, vaddr base)
+{
+    return cpu_env(cs)->hflags & MIPS_HFLAG_AWRAP ? (int32_t)result : result;
+}
+#endif
+
 static const TCGCPUOps mips_tcg_ops = {
+    .mttcg_supported = TARGET_LONG_BITS == 32,
+    .guest_default_memory_order = 0,
+
     .initialize = mips_tcg_init,
+    .translate_code = mips_translate_code,
+    .get_tb_cpu_state = mips_get_tb_cpu_state,
     .synchronize_from_tb = mips_cpu_synchronize_from_tb,
     .restore_state_to_opc = mips_restore_state_to_opc,
+    .mmu_index = mips_cpu_mmu_index,
 
 #if !defined(CONFIG_USER_ONLY)
     .tlb_fill = mips_cpu_tlb_fill,
+    .pointer_wrap = mips_pointer_wrap,
     .cpu_exec_interrupt = mips_cpu_exec_interrupt,
+    .cpu_exec_halt = mips_cpu_has_work,
+    .cpu_exec_reset = cpu_reset,
     .do_interrupt = mips_cpu_do_interrupt,
     .do_transaction_failed = mips_cpu_do_transaction_failed,
     .do_unaligned_access = mips_cpu_do_unaligned_access,
@@ -563,21 +593,20 @@ static const TCGCPUOps mips_tcg_ops = {
 };
 #endif /* CONFIG_TCG */
 
-static void mips_cpu_class_init(ObjectClass *c, void *data)
+static void mips_cpu_class_init(ObjectClass *c, const void *data)
 {
     MIPSCPUClass *mcc = MIPS_CPU_CLASS(c);
     CPUClass *cc = CPU_CLASS(c);
     DeviceClass *dc = DEVICE_CLASS(c);
     ResettableClass *rc = RESETTABLE_CLASS(c);
 
+    device_class_set_props(dc, mips_cpu_properties);
     device_class_set_parent_realize(dc, mips_cpu_realizefn,
                                     &mcc->parent_realize);
     resettable_class_set_parent_phases(rc, NULL, mips_cpu_reset_hold, NULL,
                                        &mcc->parent_phases);
 
     cc->class_by_name = mips_cpu_class_by_name;
-    cc->has_work = mips_cpu_has_work;
-    cc->mmu_index = mips_cpu_mmu_index;
     cc->dump_state = mips_cpu_dump_state;
     cc->set_pc = mips_cpu_set_pc;
     cc->get_pc = mips_cpu_get_pc;
@@ -605,7 +634,7 @@ static const TypeInfo mips_cpu_type_info = {
     .class_init = mips_cpu_class_init,
 };
 
-static void mips_cpu_cpudef_class_init(ObjectClass *oc, void *data)
+static void mips_cpu_cpudef_class_init(ObjectClass *oc, const void *data)
 {
     MIPSCPUClass *mcc = MIPS_CPU_CLASS(oc);
     mcc->cpu_def = data;
@@ -618,10 +647,10 @@ static void mips_register_cpudef_type(const struct mips_def_t *def)
         .name = typename,
         .parent = TYPE_MIPS_CPU,
         .class_init = mips_cpu_cpudef_class_init,
-        .class_data = (void *)def,
+        .class_data = def,
     };
 
-    type_register(&ti);
+    type_register_static(&ti);
     g_free(typename);
 }
 
@@ -638,12 +667,15 @@ static void mips_cpu_register_types(void)
 type_init(mips_cpu_register_types)
 
 /* Could be used by generic CPU object */
-MIPSCPU *mips_cpu_create_with_clock(const char *cpu_type, Clock *cpu_refclk)
+MIPSCPU *mips_cpu_create_with_clock(const char *cpu_type, Clock *cpu_refclk,
+                                    bool is_big_endian)
 {
     DeviceState *cpu;
 
-    cpu = DEVICE(object_new(cpu_type));
+    cpu = qdev_new(cpu_type);
     qdev_connect_clock_in(cpu, "clk-in", cpu_refclk);
+    object_property_set_bool(OBJECT(cpu), "big-endian", is_big_endian,
+                             &error_abort);
     qdev_realize(cpu, NULL, &error_abort);
 
     return MIPS_CPU(cpu);

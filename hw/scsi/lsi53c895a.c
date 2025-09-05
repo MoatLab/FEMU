@@ -19,7 +19,7 @@
 #include "hw/pci/pci_device.h"
 #include "hw/scsi/scsi.h"
 #include "migration/vmstate.h"
-#include "sysemu/dma.h"
+#include "system/dma.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "trace.h"
@@ -188,7 +188,7 @@ static const char *names[] = {
 #define LSI_TAG_VALID     (1 << 16)
 
 /* Maximum instructions to process. */
-#define LSI_MAX_INSN    100
+#define LSI_MAX_INSN    500
 
 typedef struct lsi_request {
     SCSIRequest *req;
@@ -1112,7 +1112,7 @@ bad:
 static void lsi_memcpy(LSIState *s, uint32_t dest, uint32_t src, int count)
 {
     int n;
-    uint8_t buf[LSI_BUF_SIZE];
+    QEMU_UNINITIALIZED uint8_t buf[LSI_BUF_SIZE];
 
     trace_lsi_memcpy(dest, src, count);
     while (count) {
@@ -2372,10 +2372,10 @@ static void lsi_scsi_exit(PCIDevice *dev)
     LSIState *s = LSI53C895A(dev);
 
     address_space_destroy(&s->pci_io_as);
-    timer_del(s->scripts_timer);
+    timer_free(s->scripts_timer);
 }
 
-static void lsi_class_init(ObjectClass *klass, void *data)
+static void lsi_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
@@ -2386,7 +2386,7 @@ static void lsi_class_init(ObjectClass *klass, void *data)
     k->device_id = PCI_DEVICE_ID_LSI_53C895A;
     k->class_id = PCI_CLASS_STORAGE_SCSI;
     k->subsystem_id = 0x1000;
-    dc->reset = lsi_scsi_reset;
+    device_class_set_legacy_reset(dc, lsi_scsi_reset);
     dc->vmsd = &vmstate_lsi_scsi;
     set_bit(DEVICE_CATEGORY_STORAGE, dc->categories);
 }
@@ -2396,13 +2396,13 @@ static const TypeInfo lsi_info = {
     .parent        = TYPE_PCI_DEVICE,
     .instance_size = sizeof(LSIState),
     .class_init    = lsi_class_init,
-    .interfaces = (InterfaceInfo[]) {
+    .interfaces = (const InterfaceInfo[]) {
         { INTERFACE_CONVENTIONAL_PCI_DEVICE },
         { },
     },
 };
 
-static void lsi53c810_class_init(ObjectClass *klass, void *data)
+static void lsi53c810_class_init(ObjectClass *klass, const void *data)
 {
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
 

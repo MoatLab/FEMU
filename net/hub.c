@@ -20,7 +20,7 @@
 #include "hub.h"
 #include "qemu/iov.h"
 #include "qemu/error-report.h"
-#include "sysemu/qtest.h"
+#include "system/qtest.h"
 
 /*
  * A hub broadcasts incoming packets to all its ports except the source port.
@@ -194,31 +194,6 @@ NetClientState *net_hub_add_port(int hub_id, const char *name,
 }
 
 /**
- * Find a available port on a hub; otherwise create one new port
- */
-NetClientState *net_hub_port_find(int hub_id)
-{
-    NetHub *hub;
-    NetHubPort *port;
-    NetClientState *nc;
-
-    QLIST_FOREACH(hub, &hubs, next) {
-        if (hub->id == hub_id) {
-            QLIST_FOREACH(port, &hub->ports, next) {
-                nc = port->nc.peer;
-                if (!nc) {
-                    return &(port->nc);
-                }
-            }
-            break;
-        }
-    }
-
-    nc = net_hub_add_port(hub_id, NULL, NULL);
-    return nc;
-}
-
-/**
  * Print hub configuration
  */
 void net_hub_info(Monitor *mon)
@@ -310,6 +285,9 @@ void net_hub_check_clients(void)
             case NET_CLIENT_DRIVER_NIC:
                 has_nic = 1;
                 break;
+#ifdef CONFIG_PASST
+            case NET_CLIENT_DRIVER_PASST:
+#endif
             case NET_CLIENT_DRIVER_USER:
             case NET_CLIENT_DRIVER_TAP:
             case NET_CLIENT_DRIVER_SOCKET:

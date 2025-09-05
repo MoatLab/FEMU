@@ -9,6 +9,9 @@
 #ifndef SEMIHOSTING_SYSCALLS_H
 #define SEMIHOSTING_SYSCALLS_H
 
+#include "exec/cpu-defs.h"
+#include "gdbstub/syscalls.h"
+
 /*
  * Argument loading from the guest is performed by the caller;
  * results are returned via the 'complete' callback.

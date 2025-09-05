@@ -27,7 +27,7 @@
 #include "hw/sysbus.h"
 #include "migration/vmstate.h"
 #include "qemu/module.h"
-#include "sysemu/runstate.h"
+#include "system/runstate.h"
 #include "trace.h"
 #include "qom/object.h"
 
@@ -483,11 +483,11 @@ static void slavio_misc_init(Object *obj)
     qdev_init_gpio_in(dev, slavio_set_power_fail, 1);
 }
 
-static void slavio_misc_class_init(ObjectClass *klass, void *data)
+static void slavio_misc_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    dc->reset = slavio_misc_reset;
+    device_class_set_legacy_reset(dc, slavio_misc_reset);
     dc->vmsd = &vmstate_misc;
 }
 

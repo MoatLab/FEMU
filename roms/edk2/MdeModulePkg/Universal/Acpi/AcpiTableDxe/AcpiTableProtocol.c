@@ -340,6 +340,7 @@ ReallocateAcpiTableBuffer (
   EFI_ACPI_TABLE_INSTANCE  TempPrivateData;
   EFI_STATUS               Status;
   UINT64                   CurrentData;
+  EFI_MEMORY_TYPE          AcpiAllocateMemoryType;
 
   CopyMem (&TempPrivateData, AcpiTableInstance, sizeof (EFI_ACPI_TABLE_INSTANCE));
   //
@@ -359,6 +360,12 @@ ReallocateAcpiTableBuffer (
                  NewMaxTableNumber * sizeof (UINT32);
   }
 
+  if (PcdGetBool (PcdNoACPIReclaimMemory)) {
+    AcpiAllocateMemoryType = EfiACPIMemoryNVS;
+  } else {
+    AcpiAllocateMemoryType = EfiACPIReclaimMemory;
+  }
+
   if (mAcpiTableAllocType != AllocateAnyPages) {
     //
     // Allocate memory in the lower 32 bit of address range for
@@ -372,13 +379,13 @@ ReallocateAcpiTableBuffer (
     PageAddress = 0xFFFFFFFF;
     Status      = gBS->AllocatePages (
                          mAcpiTableAllocType,
-                         EfiACPIReclaimMemory,
+                         AcpiAllocateMemoryType,
                          EFI_SIZE_TO_PAGES (TotalSize),
                          &PageAddress
                          );
   } else {
     Status = gBS->AllocatePool (
-                    EfiACPIReclaimMemory,
+                    AcpiAllocateMemoryType,
                     TotalSize,
                     (VOID **)&Pointer
                     );
@@ -512,6 +519,7 @@ AddTableToList (
   EFI_PHYSICAL_ADDRESS  AllocPhysAddress;
   UINT64                Buffer64;
   BOOLEAN               AddToRsdt;
+  EFI_MEMORY_TYPE       AcpiAllocateMemoryType;
 
   //
   // Check for invalid input parameters
@@ -550,6 +558,12 @@ AddTableToList (
   CurrentTableList->TableSize      = CurrentTableSize;
   CurrentTableList->PoolAllocation = FALSE;
 
+  if (PcdGetBool (PcdNoACPIReclaimMemory)) {
+    AcpiAllocateMemoryType = EfiACPIMemoryNVS;
+  } else {
+    AcpiAllocateMemoryType = EfiACPIReclaimMemory;
+  }
+
   //
   // Allocation memory type depends on the type of the table
   //
@@ -585,7 +599,7 @@ AddTableToList (
     // such as AArch64 that allocate multiples of 64 KB
     //
     Status = gBS->AllocatePool (
-                    EfiACPIReclaimMemory,
+                    AcpiAllocateMemoryType,
                     CurrentTableList->TableSize,
                     (VOID **)&CurrentTableList->Table
                     );
@@ -596,7 +610,7 @@ AddTableToList (
     //
     Status = gBS->AllocatePages (
                     mAcpiTableAllocType,
-                    EfiACPIReclaimMemory,
+                    AcpiAllocateMemoryType,
                     EFI_SIZE_TO_PAGES (CurrentTableList->TableSize),
                     &AllocPhysAddress
                     );
@@ -1265,16 +1279,16 @@ RemoveTableFromRsdt (
     {
       //
       // Found entry, so copy all following entries and shrink table
-      // We actually copy all + 1 to copy the initialized value of memory over
-      // the last entry.
       //
       if (Rsdt != NULL) {
-        CopyMem (CurrentRsdtEntry, CurrentRsdtEntry + 1, (*NumberOfTableEntries - Index) * sizeof (UINT32));
+        CopyMem (CurrentRsdtEntry, CurrentRsdtEntry + 1, (*NumberOfTableEntries - Index - 1) * sizeof (UINT32));
+        ZeroMem ((UINT8 *)Rsdt + sizeof (EFI_ACPI_DESCRIPTION_HEADER) + ((*NumberOfTableEntries - 1) * sizeof (UINT32)), sizeof (UINT32));
         Rsdt->Length = Rsdt->Length - sizeof (UINT32);
       }
 
       if (Xsdt != NULL) {
-        CopyMem (CurrentXsdtEntry, ((UINT64 *)CurrentXsdtEntry) + 1, (*NumberOfTableEntries - Index) * sizeof (UINT64));
+        CopyMem (CurrentXsdtEntry, ((UINT64 *)CurrentXsdtEntry) + 1, (*NumberOfTableEntries - Index - 1) * sizeof (UINT64));
+        ZeroMem ((UINT8 *)Xsdt + sizeof (EFI_ACPI_DESCRIPTION_HEADER) + ((*NumberOfTableEntries - 1) * sizeof (UINT64)), sizeof (UINT64));
         Xsdt->Length = Xsdt->Length - sizeof (UINT64);
       }
 
@@ -1892,14 +1906,24 @@ InstallAcpiTableFromHob (
           }
         }
 
-        if (((EFI_ACPI_3_0_FIXED_ACPI_DESCRIPTION_TABLE *)ChildTable)->Dsdt != 0) {
+        //
+        // First check if xDSDT is available, as that is preferred as per
+        // ACPI Spec 6.5+ Table 5-9 X_DSDT definition
+        //
+        if (((EFI_ACPI_3_0_FIXED_ACPI_DESCRIPTION_TABLE *)ChildTable)->XDsdt != 0) {
+          TableToInstall = (VOID *)(UINTN)((EFI_ACPI_3_0_FIXED_ACPI_DESCRIPTION_TABLE *)ChildTable)->XDsdt;
+        } else if (((EFI_ACPI_3_0_FIXED_ACPI_DESCRIPTION_TABLE *)ChildTable)->Dsdt != 0) {
           TableToInstall = (VOID *)(UINTN)((EFI_ACPI_3_0_FIXED_ACPI_DESCRIPTION_TABLE *)ChildTable)->Dsdt;
-          Status         = AddTableToList (AcpiTableInstance, TableToInstall, TRUE, Version, TRUE, &TableKey);
-          if (EFI_ERROR (Status)) {
-            DEBUG ((DEBUG_ERROR, "InstallAcpiTableFromHob: Fail to add ACPI table DSDT\n"));
-            ASSERT_EFI_ERROR (Status);
-            break;
-          }
+        } else {
+          DEBUG ((DEBUG_ERROR, "DSDT table not found\n"));
+          continue;
+        }
+
+        Status = AddTableToList (AcpiTableInstance, TableToInstall, TRUE, Version, TRUE, &TableKey);
+        if (EFI_ERROR (Status)) {
+          DEBUG ((DEBUG_ERROR, "InstallAcpiTableFromHob: Fail to add ACPI table DSDT\n"));
+          ASSERT_EFI_ERROR (Status);
+          break;
         }
       }
     }
@@ -1924,6 +1948,107 @@ InstallAcpiTableFromHob (
 }
 
 /**
+  This function is updating the instance with RSDP and RSDT, these are steps in the constructor that will be skipped if this HOB is available.
+
+  @param  AcpiTableInstance  Protocol instance private data.
+  @param  GuidHob            GUID HOB header.
+
+  @return EFI_SUCCESS        The function completed successfully.
+  @return EFI_NOT_FOUND      The function doesn't find the Rsdp from AcpiSiliconHob.
+  @return EFI_ABORTED        The function could not complete successfully.
+
+**/
+EFI_STATUS
+InstallAcpiTableFromAcpiSiliconHob (
+  EFI_ACPI_TABLE_INSTANCE  *AcpiTableInstance,
+  EFI_HOB_GUID_TYPE        *GuidHob
+  )
+{
+  ACPI_SILICON_HOB                              *AcpiSiliconHob;
+  EFI_ACPI_3_0_ROOT_SYSTEM_DESCRIPTION_POINTER  *SiAcpiHobRsdp;
+  EFI_ACPI_DESCRIPTION_HEADER                   *SiCommonAcpiTable;
+  EFI_STATUS                                    Status;
+  UINT8                                         *TempBuffer;
+  UINTN                                         NumOfTblEntries;
+
+  DEBUG ((DEBUG_INFO, "InstallAcpiTableFromAcpiSiliconHob\n"));
+  //
+  // Initial variable.
+  //
+  SiAcpiHobRsdp     = NULL;
+  SiCommonAcpiTable = NULL;
+  AcpiSiliconHob    = GET_GUID_HOB_DATA (GuidHob);
+  Status            = EFI_SUCCESS;
+  //
+  // Got RSDP table from ACPI Silicon Hob.
+  //
+  SiAcpiHobRsdp = (EFI_ACPI_3_0_ROOT_SYSTEM_DESCRIPTION_POINTER *)(UINTN)(AcpiSiliconHob->Rsdp);
+  if (SiAcpiHobRsdp == NULL) {
+    DEBUG ((DEBUG_ERROR, "InstallAcpiTableFromAcpiSiliconHob: Fail to locate RSDP Acpi table!!\n"));
+    return EFI_NOT_FOUND;
+  }
+
+  DEBUG ((DEBUG_INFO, "Silicon ACPI RSDP address : 0x%lx\n", SiAcpiHobRsdp));
+  AcpiTableInstance->Rsdp3 = SiAcpiHobRsdp;
+
+  if (SiAcpiHobRsdp->RsdtAddress != 0x00000000) {
+    //
+    // Initial RSDT.
+    //
+    TempBuffer               = (UINT8 *)(UINTN)(SiAcpiHobRsdp->RsdtAddress);
+    SiCommonAcpiTable        = (EFI_ACPI_DESCRIPTION_HEADER *)TempBuffer;
+    AcpiTableInstance->Rsdt3 = SiCommonAcpiTable;
+
+    if (SiCommonAcpiTable->Length <= sizeof (EFI_ACPI_DESCRIPTION_HEADER)) {
+      DEBUG ((DEBUG_ERROR, "RSDT length is incorrect\n"));
+      return EFI_ABORTED;
+    }
+
+    //
+    // Calcaue 32bit Acpi table number.
+    //
+    NumOfTblEntries                          = (SiCommonAcpiTable->Length - sizeof (EFI_ACPI_DESCRIPTION_HEADER)) / sizeof (UINT32);
+    AcpiTableInstance->NumberOfTableEntries1 = NumOfTblEntries;
+    DEBUG ((DEBUG_INFO, "32bit NumOfTblEntries : 0x%x\n", NumOfTblEntries));
+    //
+    // Enlarge the max table number from mEfiAcpiMaxNumTables to current ACPI tables + EFI_ACPI_MAX_NUM_TABLES
+    //
+    if (AcpiTableInstance->NumberOfTableEntries1 >= EFI_ACPI_MAX_NUM_TABLES) {
+      mEfiAcpiMaxNumTables = AcpiTableInstance->NumberOfTableEntries1 + EFI_ACPI_MAX_NUM_TABLES;
+      DEBUG ((DEBUG_ERROR, "mEfiAcpiMaxNumTables : 0x%x\n", mEfiAcpiMaxNumTables));
+    }
+  } else {
+    //
+    // Initial XSDT.
+    //
+    TempBuffer              = (UINT8 *)(UINTN)(SiAcpiHobRsdp->XsdtAddress);
+    SiCommonAcpiTable       = (EFI_ACPI_DESCRIPTION_HEADER *)TempBuffer;
+    AcpiTableInstance->Xsdt = SiCommonAcpiTable;
+
+    if (SiCommonAcpiTable->Length <= sizeof (EFI_ACPI_DESCRIPTION_HEADER)) {
+      DEBUG ((DEBUG_ERROR, "XSDT length is incorrect\n"));
+      return EFI_ABORTED;
+    }
+
+    //
+    // Calcaue 64bit Acpi table number.
+    //
+    NumOfTblEntries                          = (SiCommonAcpiTable->Length - sizeof (EFI_ACPI_DESCRIPTION_HEADER)) / sizeof (UINT64);
+    AcpiTableInstance->NumberOfTableEntries3 = NumOfTblEntries;
+    DEBUG ((DEBUG_ERROR, "64bit NumOfTblEntries : 0x%x\n", NumOfTblEntries));
+    //
+    // Enlarge the max table number from mEfiAcpiMaxNumTables to current ACPI tables + EFI_ACPI_MAX_NUM_TABLES
+    //
+    if (AcpiTableInstance->NumberOfTableEntries3 >= EFI_ACPI_MAX_NUM_TABLES) {
+      mEfiAcpiMaxNumTables = AcpiTableInstance->NumberOfTableEntries3 + EFI_ACPI_MAX_NUM_TABLES;
+      DEBUG ((DEBUG_ERROR, "mEfiAcpiMaxNumTables : 0x%x\n", mEfiAcpiMaxNumTables));
+    }
+  }
+
+  return Status;
+}
+
+/**
   Constructor for the ACPI table protocol.  Initializes instance
   data.
 
@@ -1944,6 +2069,8 @@ AcpiTableAcpiTableConstructor (
   UINTN                 RsdpTableSize;
   UINT8                 *Pointer;
   EFI_PHYSICAL_ADDRESS  PageAddress;
+  EFI_MEMORY_TYPE       AcpiAllocateMemoryType;
+  EFI_HOB_GUID_TYPE     *GuidHob;
 
   //
   // Check for invalid input parameters
@@ -1971,6 +2098,23 @@ AcpiTableAcpiTableConstructor (
   }
 
   //
+  // Check Silicon ACPI Hob.
+  //
+  GuidHob = GetFirstGuidHob (&gAcpiTableHobGuid);
+  if (GuidHob != NULL) {
+    Status = InstallAcpiTableFromAcpiSiliconHob (AcpiTableInstance, GuidHob);
+    if (Status == EFI_SUCCESS) {
+      DEBUG ((DEBUG_INFO, "Installed ACPI Table from AcpiSiliconHob.\n"));
+      return EFI_SUCCESS;
+    } else {
+      DEBUG ((DEBUG_ERROR, "Fail to Installed ACPI Table from AcpiSiliconHob!!\n"));
+      ASSERT (Status != EFI_SUCCESS);
+    }
+  } else {
+    DEBUG ((DEBUG_INFO, "Fail to locate AcpiSiliconHob!!\n"));
+  }
+
+  //
   // Create RSDP table
   //
   RsdpTableSize = sizeof (EFI_ACPI_3_0_ROOT_SYSTEM_DESCRIPTION_POINTER);
@@ -1978,17 +2122,23 @@ AcpiTableAcpiTableConstructor (
     RsdpTableSize += sizeof (EFI_ACPI_1_0_ROOT_SYSTEM_DESCRIPTION_POINTER);
   }
 
+  if (PcdGetBool (PcdNoACPIReclaimMemory)) {
+    AcpiAllocateMemoryType = EfiACPIMemoryNVS;
+  } else {
+    AcpiAllocateMemoryType = EfiACPIReclaimMemory;
+  }
+
   if (mAcpiTableAllocType != AllocateAnyPages) {
     PageAddress = 0xFFFFFFFF;
     Status      = gBS->AllocatePages (
                          mAcpiTableAllocType,
-                         EfiACPIReclaimMemory,
+                         AcpiAllocateMemoryType,
                          EFI_SIZE_TO_PAGES (RsdpTableSize),
                          &PageAddress
                          );
   } else {
     Status = gBS->AllocatePool (
-                    EfiACPIReclaimMemory,
+                    AcpiAllocateMemoryType,
                     RsdpTableSize,
                     (VOID **)&Pointer
                     );
@@ -2037,13 +2187,13 @@ AcpiTableAcpiTableConstructor (
     PageAddress = 0xFFFFFFFF;
     Status      = gBS->AllocatePages (
                          mAcpiTableAllocType,
-                         EfiACPIReclaimMemory,
+                         AcpiAllocateMemoryType,
                          EFI_SIZE_TO_PAGES (TotalSize),
                          &PageAddress
                          );
   } else {
     Status = gBS->AllocatePool (
-                    EfiACPIReclaimMemory,
+                    AcpiAllocateMemoryType,
                     TotalSize,
                     (VOID **)&Pointer
                     );

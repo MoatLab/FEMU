@@ -708,20 +708,23 @@ interactive_bootmenu(void)
         return;
     }
 
-    while (get_keystroke(0) >= 0)
-        ;
-
-    char *bootmsg = romfile_loadfile("etc/boot-menu-message", NULL);
+    int menutime = romfile_loadint("etc/boot-menu-wait", DEFAULT_BOOTMENU_WAIT);
     int menukey = romfile_loadint("etc/boot-menu-key", 1);
-    printf("%s", bootmsg ?: "\nPress ESC for boot menu.\n\n");
-    free(bootmsg);
+    int scan_code;
+    if (menutime >= 0) {
+        while (get_keystroke(0) >= 0)
+            ;
 
-    u32 menutime = romfile_loadint("etc/boot-menu-wait", DEFAULT_BOOTMENU_WAIT);
-    enable_bootsplash();
-    int scan_code = get_keystroke(menutime);
-    disable_bootsplash();
-    if (scan_code != menukey)
-        return;
+        char *bootmsg = romfile_loadfile("etc/boot-menu-message", NULL);
+        printf("%s", bootmsg ?: "\nPress ESC for boot menu.\n\n");
+        free(bootmsg);
+
+        enable_bootsplash();
+        scan_code = get_keystroke(menutime);
+        disable_bootsplash();
+        if (scan_code != menukey)
+            return;
+    }
 
     while (get_keystroke(0) >= 0)
         ;

@@ -12,6 +12,7 @@ HOSTCFLAGS+= -O2 -g -DFCOMPILER -DBOOTSTRAP $(CROSSCFLAGS)
 HOSTCFLAGS+= -Wall -Wredundant-decls -Wshadow -Wpointer-arith
 HOSTCFLAGS+= -Wstrict-prototypes -Wmissing-declarations -Wundef -Wendif-labels
 HOSTCFLAGS+= -Wstrict-aliasing -Wwrite-strings -Wmissing-prototypes -Wnested-externs
+HOSTCFLAGS+= -Wbuiltin-declaration-mismatch -Wimplicit-fallthrough -Woverride-init -Wno-maybe-uninitialized
 HOSTCFLAGS+= -W
 # Flags for dependency generation
 HOSTCFLAGS+= -MMD -MP -MT $@ -MF '$(*D)/$(*F).d'
@@ -29,6 +30,7 @@ CFLAGS+= -Os -g -DNATIVE_BITWIDTH_EQUALS_HOST_BITWIDTH -USWAP_ENDIANNESS
 CFLAGS+= -Wall -Wredundant-decls -Wshadow -Wpointer-arith
 CFLAGS+= -Wstrict-prototypes -Wmissing-declarations -Wundef -Wendif-labels
 CFLAGS+= -Wstrict-aliasing -Wwrite-strings -Wmissing-prototypes -Wnested-externs
+CFLAGS+= -Wbuiltin-declaration-mismatch -Wimplicit-fallthrough -Woverride-init -Wno-maybe-uninitialized
 CFLAGS+= -Werror
 # Flags for dependency generation
 CFLAGS+= -MMD -MP -MT $@ -MF '$(*D)/$(*F).d'

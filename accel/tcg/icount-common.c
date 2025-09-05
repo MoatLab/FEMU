@@ -27,17 +27,16 @@
 #include "migration/vmstate.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
-#include "sysemu/cpus.h"
-#include "sysemu/qtest.h"
+#include "system/cpus.h"
+#include "system/qtest.h"
 #include "qemu/main-loop.h"
 #include "qemu/option.h"
 #include "qemu/seqlock.h"
-#include "sysemu/replay.h"
-#include "sysemu/runstate.h"
+#include "system/replay.h"
+#include "system/runstate.h"
 #include "hw/core/cpu.h"
-#include "sysemu/cpu-timers.h"
-#include "sysemu/cpu-throttle.h"
-#include "sysemu/cpu-timers-internal.h"
+#include "exec/icount.h"
+#include "system/cpu-timers-internal.h"
 
 /*
  * ICOUNT: Instruction Counter
@@ -48,6 +47,8 @@
 static bool icount_sleep = true;
 /* Arbitrarily pick 1MIPS as the minimum allowable speed.  */
 #define MAX_ICOUNT_SHIFT 10
+
+bool icount_align_option;
 
 /* Do not count executed instructions */
 ICountMode use_icount = ICOUNT_DISABLED;
@@ -336,10 +337,8 @@ void icount_start_warp_timer(void)
     deadline = qemu_clock_deadline_ns_all(QEMU_CLOCK_VIRTUAL,
                                           ~QEMU_TIMER_ATTR_EXTERNAL);
     if (deadline < 0) {
-        static bool notified;
-        if (!icount_sleep && !notified) {
-            warn_report("icount sleep disabled and no active timers");
-            notified = true;
+        if (!icount_sleep) {
+            warn_report_once("icount sleep disabled and no active timers");
         }
         return;
     }

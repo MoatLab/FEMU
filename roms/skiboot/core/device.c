@@ -120,7 +120,7 @@ bool dt_attach_root(struct dt_node *parent, struct dt_node *root)
 			break;
 	}
 
-	list_add_before(&parent->children, &root->list, &node->list);
+	list_add_before(&parent->children, &node->list, &root->list);
 	root->parent = parent;
 
 	return true;
@@ -394,6 +394,29 @@ struct dt_node *dt_find_by_name(struct dt_node *root, const char *name)
 	return NULL;
 }
 
+struct dt_node *dt_find_by_name_before_addr(struct dt_node *root, const char *name)
+{
+	struct dt_node *child, *match;
+	char *child_name;
+
+	list_for_each(&root->children, child, list) {
+		child_name = strdup(child->name);
+		if (!child_name)
+			return NULL;
+
+		child_name = strtok(child_name, "@");
+		if (!strcmp(child_name, name))
+			match = child;
+		else
+			match = dt_find_by_name_before_addr(child, name);
+
+		free(child_name);
+		if (match)
+			return match;
+	}
+
+	return NULL;
+}
 
 struct dt_node *dt_new_check(struct dt_node *parent, const char *name)
 {

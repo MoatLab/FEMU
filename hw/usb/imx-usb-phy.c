@@ -214,11 +214,11 @@ static void imx_usbphy_realize(DeviceState *dev, Error **errp)
     sysbus_init_mmio(SYS_BUS_DEVICE(s), &s->iomem);
 }
 
-static void imx_usbphy_class_init(ObjectClass *klass, void *data)
+static void imx_usbphy_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    dc->reset = imx_usbphy_reset;
+    device_class_set_legacy_reset(dc, imx_usbphy_reset);
     dc->vmsd = &vmstate_imx_usbphy;
     dc->desc = "i.MX USB PHY Module";
     dc->realize = imx_usbphy_realize;

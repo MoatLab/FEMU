@@ -153,6 +153,7 @@ struct irq_source_ops {
 	void (*interrupt)(struct irq_source *is, uint32_t isn);
 	void (*eoi)(struct irq_source *is, uint32_t isn);
 	char *(*name)(struct irq_source *is, uint32_t isn);
+	bool (*has_opal_interrupts)(struct irq_source *is);
 };
 
 struct irq_source {

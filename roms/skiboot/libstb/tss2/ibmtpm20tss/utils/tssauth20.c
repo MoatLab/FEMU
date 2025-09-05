@@ -1295,7 +1295,7 @@ TPM_RC TSS_GetCommandDecryptParam(TSS_AUTH_CONTEXT *tssAuthContext,
     }
     /* extract contents of the first TPM2B */
     if (rc == 0) {
-	*decryptParamSize = ntohs(*(uint16_t *)cpBuffer);
+	*decryptParamSize = ntohs(*(beint16_t *)cpBuffer);
 	*decryptParamBuffer = cpBuffer + sizeof(uint16_t);
     }
     /* sanity range check */
@@ -1491,7 +1491,7 @@ TPM_RC TSS_GetResponseEncryptParam(TSS_AUTH_CONTEXT *tssAuthContext,
     }
     /* extract contents of the first TPM2B */
     if (rc == 0) {
-	*encryptParamSize = ntohs(*(uint16_t *)rpBuffer);
+	*encryptParamSize = ntohs(*(beint16_t *)rpBuffer);
 	*encryptParamBuffer = rpBuffer + sizeof(uint16_t);
     }
     /* sanity range check */

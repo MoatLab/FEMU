@@ -17,6 +17,9 @@
  *  along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 #include "qemu/osdep.h"
+#include "exec/mmap-lock.h"
+#include "exec/page-protection.h"
+#include "user/page-protection.h"
 
 #include "qemu.h"
 
@@ -96,7 +99,7 @@ int target_mprotect(abi_ulong start, abi_ulong len, int prot)
             end = host_end;
         }
         ret = mprotect(g2h_untagged(host_start),
-                       qemu_host_page_size, prot1 & PAGE_BITS);
+                       qemu_host_page_size, prot1 & PAGE_RWX);
         if (ret != 0)
             goto error;
         host_start += qemu_host_page_size;
@@ -107,7 +110,7 @@ int target_mprotect(abi_ulong start, abi_ulong len, int prot)
             prot1 |= page_get_flags(addr);
         }
         ret = mprotect(g2h_untagged(host_end - qemu_host_page_size),
-                       qemu_host_page_size, prot1 & PAGE_BITS);
+                       qemu_host_page_size, prot1 & PAGE_RWX);
         if (ret != 0)
             goto error;
         host_end -= qemu_host_page_size;
@@ -125,6 +128,40 @@ int target_mprotect(abi_ulong start, abi_ulong len, int prot)
 error:
     mmap_unlock();
     return ret;
+}
+
+/*
+ * Perform a pread on behalf of target_mmap.  We can reach EOF, we can be
+ * interrupted by signals, and in general there's no good error return path.
+ * If @zero, zero the rest of the block at EOF.
+ * Return true on success.
+ */
+static bool mmap_pread(int fd, void *p, size_t len, off_t offset, bool zero)
+{
+    while (1) {
+        ssize_t r = pread(fd, p, len, offset);
+
+        if (likely(r == len)) {
+            /* Complete */
+            return true;
+        }
+        if (r == 0) {
+            /* EOF */
+            if (zero) {
+                memset(p, 0, len);
+            }
+            return true;
+        }
+        if (r > 0) {
+            /* Short read */
+            p += r;
+            len -= r;
+            offset += r;
+        } else if (errno != EINTR) {
+            /* Error */
+            return false;
+        }
+    }
 }
 
 /*
@@ -174,7 +211,7 @@ static int mmap_frag(abi_ulong real_start,
             return -1;
         prot1 = prot;
     }
-    prot1 &= PAGE_BITS;
+    prot1 &= PAGE_RWX;
 
     prot_new = prot | prot1;
     if (fd != -1) {
@@ -189,7 +226,7 @@ static int mmap_frag(abi_ulong real_start,
             mprotect(host_start, qemu_host_page_size, prot1 | PROT_WRITE);
 
         /* read the corresponding file data */
-        if (pread(fd, g2h_untagged(start), end - start, offset) == -1) {
+        if (!mmap_pread(fd, g2h_untagged(start), end - start, offset, true)) {
             return -1;
         }
 
@@ -239,8 +276,7 @@ static abi_ulong mmap_find_vma_reserved(abi_ulong start, abi_ulong size,
  * It must be called with mmap_lock() held.
  * Return -1 if error.
  */
-static abi_ulong mmap_find_vma_aligned(abi_ulong start, abi_ulong size,
-                                       abi_ulong alignment)
+abi_ulong mmap_find_vma(abi_ulong start, abi_ulong size, abi_ulong alignment)
 {
     void *ptr, *prev;
     abi_ulong addr;
@@ -359,11 +395,6 @@ static abi_ulong mmap_find_vma_aligned(abi_ulong start, abi_ulong size,
     }
 }
 
-abi_ulong mmap_find_vma(abi_ulong start, abi_ulong size)
-{
-    return mmap_find_vma_aligned(start, size, 0);
-}
-
 /* NOTE: all the constants are the HOST ones */
 abi_long target_mmap(abi_ulong start, abi_ulong len, int prot,
                      int flags, int fd, off_t offset)
@@ -453,13 +484,12 @@ abi_long target_mmap(abi_ulong start, abi_ulong len, int prot,
      * before we truncate the length for mapping files below.
      */
     if (!(flags & MAP_FIXED)) {
+        abi_ulong alignment;
+
         host_len = len + offset - host_offset;
         host_len = HOST_PAGE_ALIGN(host_len);
-        if ((flags & MAP_ALIGNMENT_MASK) != 0)
-            start = mmap_find_vma_aligned(real_start, host_len,
-                (flags & MAP_ALIGNMENT_MASK) >> MAP_ALIGNMENT_SHIFT);
-        else
-            start = mmap_find_vma(real_start, host_len);
+        alignment = (flags & MAP_ALIGNMENT_MASK) >> MAP_ALIGNMENT_SHIFT;
+        start = mmap_find_vma(real_start, host_len, alignment);
         if (start == (abi_ulong)-1) {
             errno = ENOMEM;
             goto fail;
@@ -564,7 +594,7 @@ abi_long target_mmap(abi_ulong start, abi_ulong len, int prot,
                                   -1, 0);
             if (retaddr == -1)
                 goto fail;
-            if (pread(fd, g2h_untagged(start), len, offset) == -1) {
+            if (!mmap_pread(fd, g2h_untagged(start), len, offset, false)) {
                 goto fail;
             }
             if (!(prot & PROT_WRITE)) {

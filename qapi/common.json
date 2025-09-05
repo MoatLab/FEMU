@@ -2,7 +2,9 @@
 # vim: filetype=python
 
 ##
-# = Common data types
+# *****************
+# Common data types
+# *****************
 ##
 
 ##
@@ -183,7 +185,19 @@
 ##
 # @GrabToggleKeys:
 #
-# Keys to toggle input-linux between host and guest.
+# Key combinations to toggle input-linux between host and guest.
+#
+# @ctrl-ctrl: left and right control key
+#
+# @alt-alt: left and right alt key
+#
+# @shift-shift: left and right shift key
+#
+# @meta-meta: left and right meta key
+#
+# @scrolllock: scroll lock key
+#
+# @ctrl-scrolllock: either control key and scroll lock key
 #
 # Since: 4.0
 ##
@@ -200,3 +214,17 @@
 ##
 { 'struct': 'HumanReadableText',
   'data': { 'human-readable-text': 'str' } }
+
+##
+# @EndianMode:
+#
+# @unspecified: Endianness not specified
+#
+# @little: Little endianness
+#
+# @big: Big endianness
+#
+# Since: 10.0
+##
+{ 'enum': 'EndianMode',
+  'data': [ 'unspecified', 'little', 'big' ] }

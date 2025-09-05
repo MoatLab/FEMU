@@ -38,4 +38,16 @@ static inline void barrier(void)
 #define __tostr(x)	#x
 #define tostr(x)	__tostr(x)
 
+
+#if __GNUC__ >= 11
+/* Compiler workaround to avoid compiler optimization warnings
+ * when assigning constant address to pointer and using memory
+ * functions such as memcpy and  memset
+ */
+#define skiboot_constant_addr          volatile
+#else
+#define skiboot_constant_addr
+#endif
+
+
 #endif /* __COMPILER_H */

@@ -25,10 +25,11 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/lockcnt.h"
 #include "qemu/thread.h"
 #include "qemu/main-loop.h"
 #include "hw/core/cpu.h"
-#include "sysemu/accel-blocker.h"
+#include "system/accel-blocker.h"
 
 static QemuLockCnt accel_in_ioctl_lock;
 static QemuEvent accel_in_ioctl_event;

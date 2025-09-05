@@ -10,6 +10,28 @@
 # This work is licensed under the terms of the GNU GPLv2 or later.
 # See the COPYING file in the top-level directory.
 
+function subproject_dir() {
+    if test ! -f "$src/subprojects/$1.wrap"; then
+      echo "scripts/archive-source.sh should only process wrap subprojects"
+      exit 1
+    fi
+
+    # Print the directory key of the wrap file, defaulting to the
+    # subproject name.  The wrap file is in ini format and should
+    # have a single section only.  There should be only one section
+    # named "[wrap-*]", which helps keeping the script simple.
+    local dir
+    dir=$(sed -n \
+      -e '/^\[wrap-[a-z][a-z]*\]$/,/^\[/{' \
+      -e    '/^directory *= */!b' \
+      -e    's///p' \
+      -e    'q' \
+      -e '}' \
+      "$src/subprojects/$1.wrap")
+
+    echo "${dir:-$1}"
+}
+
 if [ $# -ne 2 ]; then
     echo "Usage:"
     echo " $0 gitrepo version"
@@ -17,7 +39,12 @@ if [ $# -ne 2 ]; then
 fi
 
 # Only include wraps that are invoked with subproject()
-SUBPROJECTS="libvfio-user keycodemapdb berkeley-softfloat-3 berkeley-testfloat-3"
+SUBPROJECTS="libvfio-user keycodemapdb berkeley-softfloat-3
+  berkeley-testfloat-3 anyhow-1-rs arbitrary-int-1-rs bilge-0.2-rs
+  bilge-impl-0.2-rs either-1-rs foreign-0.3-rs itertools-0.11-rs
+  libc-0.2-rs proc-macro2-1-rs
+  proc-macro-error-1-rs proc-macro-error-attr-1-rs quote-1-rs
+  syn-2-rs unicode-ident-1-rs"
 
 src="$1"
 version="$2"
@@ -35,17 +62,23 @@ meson subprojects download $SUBPROJECTS
 (cd roms/skiboot && ./make_version.sh > .version)
 # Fetch edk2 submodule's submodules, since it won't have access to them via
 # the tarball later.
-#
-# A more uniform way to handle this sort of situation would be nice, but we
-# don't necessarily have much control over how a submodule handles its
-# submodule dependencies, so we continue to handle these on a case-by-case
-# basis for now.
-(cd roms/edk2 && \
-    git submodule update --init --depth 1 -- \
-        ArmPkg/Library/ArmSoftFloatLib/berkeley-softfloat-3 \
-        BaseTools/Source/C/BrotliCompress/brotli \
-        CryptoPkg/Library/OpensslLib/openssl \
-        MdeModulePkg/Library/BrotliCustomDecompressLib/brotli)
+
+# As recommended by the EDK2 readme, we don't use --recursive here.
+# EDK2 won't use any code or feature from a submodule of a submodule,
+# so we don't need to add them to the tarball.
+# Although we don't necessarily need all of the submodules that EDK2
+# has, we clone them all, to avoid running into problems where EDK2
+# adds a new submodule or changes its use of an existing one and
+# the sources we ship in the tarball then fail to build.
+(cd roms/edk2 && git submodule update --init --depth 1)
 popd
-tar --exclude=.git -cJf ${destination}.tar.xz ${destination}
+
+exclude=(--exclude=.git)
+# include the tarballs in subprojects/packagecache but not their expansion
+for sp in $SUBPROJECTS; do
+    if grep -xqF "[wrap-file]" $src/subprojects/$sp.wrap; then
+      exclude+=(--exclude=subprojects/"$(subproject_dir $sp)")
+    fi
+done
+tar "${exclude[@]}" -cJf ${destination}.tar.xz ${destination}
 rm -rf ${destination}

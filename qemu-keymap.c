@@ -116,7 +116,6 @@ static void walk_map(struct xkb_keymap *map, xkb_keycode_t code, void *data)
     if (kshift != kaltgrshift && kaltgr != kaltgrshift) {
         print_sym(kaltgrshift, qcode, " shift altgr");
     }
-    return;
 }
 
 static void usage(FILE *out)
@@ -213,6 +212,7 @@ int main(int argc, char *argv[])
 
     ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
     map = xkb_keymap_new_from_names(ctx, &names, XKB_KEYMAP_COMPILE_NO_FLAGS);
+    xkb_context_unref(ctx);
     if (!map) {
         /* libxkbcommon prints error */
         exit(1);
@@ -235,7 +235,7 @@ int main(int argc, char *argv[])
     state = xkb_state_new(map);
     xkb_keymap_key_for_each(map, walk_map, state);
     xkb_state_unref(state);
-    state = NULL;
+    xkb_keymap_unref(map);
 
     /* add quirks */
     fprintf(outfile,

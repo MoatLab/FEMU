@@ -36,8 +36,8 @@
 #define SBI_SCRATCH_PLATFORM_ADDR_OFFSET	(9 * __SIZEOF_POINTER__)
 /** Offset of hartid_to_scratch member in sbi_scratch */
 #define SBI_SCRATCH_HARTID_TO_SCRATCH_OFFSET	(10 * __SIZEOF_POINTER__)
-/** Offset of trap_exit member in sbi_scratch */
-#define SBI_SCRATCH_TRAP_EXIT_OFFSET		(11 * __SIZEOF_POINTER__)
+/** Offset of trap_context member in sbi_scratch */
+#define SBI_SCRATCH_TRAP_CONTEXT_OFFSET		(11 * __SIZEOF_POINTER__)
 /** Offset of tmp0 member in sbi_scratch */
 #define SBI_SCRATCH_TMP0_OFFSET			(12 * __SIZEOF_POINTER__)
 /** Offset of options member in sbi_scratch */
@@ -77,8 +77,8 @@ struct sbi_scratch {
 	unsigned long platform_addr;
 	/** Address of HART ID to sbi_scratch conversion function */
 	unsigned long hartid_to_scratch;
-	/** Address of trap exit function */
-	unsigned long trap_exit;
+	/** Address of current trap context */
+	unsigned long trap_context;
 	/** Temporary storage */
 	unsigned long tmp0;
 	/** Options for OpenSBI library */
@@ -130,10 +130,10 @@ _Static_assert(
 	"struct sbi_scratch definition has changed, please redefine "
 	"SBI_SCRATCH_HARTID_TO_SCRATCH_OFFSET");
 _Static_assert(
-	offsetof(struct sbi_scratch, trap_exit)
-		== SBI_SCRATCH_TRAP_EXIT_OFFSET,
+	offsetof(struct sbi_scratch, trap_context)
+		== SBI_SCRATCH_TRAP_CONTEXT_OFFSET,
 	"struct sbi_scratch definition has changed, please redefine "
-	"SBI_SCRATCH_TRAP_EXIT_OFFSET");
+	"SBI_SCRATCH_TRAP_CONTEXT_OFFSET");
 _Static_assert(
 	offsetof(struct sbi_scratch, tmp0)
 		== SBI_SCRATCH_TMP0_OFFSET,

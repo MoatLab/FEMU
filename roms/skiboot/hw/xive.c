@@ -7,6 +7,7 @@
  */
 
 #include <skiboot.h>
+#include <slw.h>
 #include <xscom.h>
 #include <chip.h>
 #include <io.h>
@@ -2519,6 +2520,15 @@ void xive_source_mask(struct irq_source *is, uint32_t isn)
 	xive_update_irq_mask(s, isn - s->esb_base, true);
 }
 
+static bool xive_has_opal_interrupts(struct irq_source *is)
+{
+	struct xive_src *s = container_of(is, struct xive_src, is);
+
+	if (!s->orig_ops || !s->orig_ops->attributes || !s->orig_ops->interrupt)
+		return false;
+	return true;
+}
+
 static const struct irq_source_ops xive_irq_source_ops = {
 	.get_xive = xive_source_get_xive,
 	.set_xive = xive_source_set_xive,
@@ -2526,6 +2536,7 @@ static const struct irq_source_ops xive_irq_source_ops = {
 	.interrupt = xive_source_interrupt,
 	.attributes = xive_source_attributes,
 	.name = xive_source_name,
+	.has_opal_interrupts = xive_has_opal_interrupts,
 };
 
 static void __xive_register_source(struct xive *x, struct xive_src *s,
@@ -4970,7 +4981,7 @@ static int64_t opal_xive_dump_tm(uint32_t offset, const char *n, uint32_t pir)
 	      " W2       W3\n", pir);
 	prlog(PR_INFO, "CPU[%04x]: %02x  %02x   %02x  %02x    %02x   "
 	       "%02x  %02x  %02x   %08x %08x\n", pir,
-	      (uint8_t)(v0 >> 58) & 0xff, (uint8_t)(v0 >> 48) & 0xff,
+	      (uint8_t)(v0 >> 56) & 0xff, (uint8_t)(v0 >> 48) & 0xff,
 	      (uint8_t)(v0 >> 40) & 0xff, (uint8_t)(v0 >> 32) & 0xff,
 	      (uint8_t)(v0 >> 24) & 0xff, (uint8_t)(v0 >> 16) & 0xff,
 	      (uint8_t)(v0 >>  8) & 0xff, (uint8_t)(v0      ) & 0xff,

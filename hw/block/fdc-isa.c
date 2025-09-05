@@ -39,10 +39,10 @@
 #include "hw/qdev-properties-system.h"
 #include "migration/vmstate.h"
 #include "hw/block/block.h"
-#include "sysemu/block-backend.h"
-#include "sysemu/blockdev.h"
-#include "sysemu/sysemu.h"
-#include "exec/ioport.h"
+#include "system/block-backend.h"
+#include "system/blockdev.h"
+#include "system/system.h"
+#include "system/ioport.h"
 #include "qemu/log.h"
 #include "qemu/main-loop.h"
 #include "qemu/module.h"
@@ -147,6 +147,8 @@ static void isa_fdc_get_drive_max_chs(FloppyDriveType type, uint8_t *maxc,
             *maxs = fdf->last_sect;
         }
     }
+    /* fd_formats must contain at least one entry per FloppyDriveType */
+    assert(*maxc);
     (*maxc)--;
 }
 
@@ -281,7 +283,7 @@ static const VMStateDescription vmstate_isa_fdc = {
     }
 };
 
-static Property isa_fdc_properties[] = {
+static const Property isa_fdc_properties[] = {
     DEFINE_PROP_UINT32("iobase", FDCtrlISABus, iobase, 0x3f0),
     DEFINE_PROP_UINT32("irq", FDCtrlISABus, irq, 6),
     DEFINE_PROP_UINT32("dma", FDCtrlISABus, dma, 2),
@@ -294,10 +296,9 @@ static Property isa_fdc_properties[] = {
     DEFINE_PROP_SIGNED("fallback", FDCtrlISABus, state.fallback,
                         FLOPPY_DRIVE_TYPE_288, qdev_prop_fdc_drive_type,
                         FloppyDriveType),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void isabus_fdc_class_init(ObjectClass *klass, void *data)
+static void isabus_fdc_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     AcpiDevAmlIfClass *adevc = ACPI_DEV_AML_IF_CLASS(klass);
@@ -305,7 +306,7 @@ static void isabus_fdc_class_init(ObjectClass *klass, void *data)
     dc->desc = "virtual floppy controller";
     dc->realize = isabus_fdc_realize;
     dc->fw_name = "fdc";
-    dc->reset = fdctrl_external_reset_isa;
+    device_class_set_legacy_reset(dc, fdctrl_external_reset_isa);
     dc->vmsd = &vmstate_isa_fdc;
     adevc->build_dev_aml = build_fdc_aml;
     device_class_set_props(dc, isa_fdc_properties);
@@ -330,7 +331,7 @@ static const TypeInfo isa_fdc_info = {
     .instance_size = sizeof(FDCtrlISABus),
     .class_init    = isabus_fdc_class_init,
     .instance_init = isabus_fdc_instance_init,
-    .interfaces = (InterfaceInfo[]) {
+    .interfaces = (const InterfaceInfo[]) {
         { TYPE_ACPI_DEV_AML_IF },
         { },
     },

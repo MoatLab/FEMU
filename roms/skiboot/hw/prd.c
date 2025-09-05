@@ -741,6 +741,7 @@ void prd_init(void)
 		prd_ipoll_mask = PRD_P9_IPOLL_MASK;
 		break;
 	case proc_gen_p10: /* IPOLL regs are the same for p9 and p10 */
+	case proc_gen_p11: /* IPOLL regs are the same for p9 and p10/11 */
 		prd_ipoll_mask_reg = PRD_P9_IPOLL_REG_MASK;
 		prd_ipoll_status_reg = PRD_P9_IPOLL_REG_STATUS;
 		prd_ipoll_mask = PRD_P9_IPOLL_MASK;

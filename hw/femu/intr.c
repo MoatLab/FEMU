@@ -175,7 +175,7 @@ static void nvme_isr_notify_legacy(void *opaque)
                 msi_notify(&(n->parent_obj), cq->vector);
             }
         } else {
-            pci_irq_pulse(&n->parent_obj);
+            //pci_irq_pulse(&n->parent_obj);
         }
     }
 }

@@ -492,17 +492,16 @@ static void dino_pcihost_init(Object *obj)
     qdev_init_gpio_in(DEVICE(obj), dino_set_irq, DINO_IRQS);
 }
 
-static Property dino_pcihost_properties[] = {
+static const Property dino_pcihost_properties[] = {
     DEFINE_PROP_LINK("memory-as", DinoState, memory_as, TYPE_MEMORY_REGION,
                      MemoryRegion *),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void dino_pcihost_class_init(ObjectClass *klass, void *data)
+static void dino_pcihost_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    dc->reset = dino_pcihost_reset;
+    device_class_set_legacy_reset(dc, dino_pcihost_reset);
     dc->realize = dino_pcihost_realize;
     dc->unrealize = dino_pcihost_unrealize;
     device_class_set_props(dc, dino_pcihost_properties);

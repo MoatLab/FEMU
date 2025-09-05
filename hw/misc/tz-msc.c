@@ -278,21 +278,20 @@ static const VMStateDescription tz_msc_vmstate = {
     }
 };
 
-static Property tz_msc_properties[] = {
+static const Property tz_msc_properties[] = {
     DEFINE_PROP_LINK("downstream", TZMSC, downstream,
                      TYPE_MEMORY_REGION, MemoryRegion *),
     DEFINE_PROP_LINK("idau", TZMSC, idau,
                      TYPE_IDAU_INTERFACE, IDAUInterface *),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void tz_msc_class_init(ObjectClass *klass, void *data)
+static void tz_msc_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = tz_msc_realize;
     dc->vmsd = &tz_msc_vmstate;
-    dc->reset = tz_msc_reset;
+    device_class_set_legacy_reset(dc, tz_msc_reset);
     device_class_set_props(dc, tz_msc_properties);
 }
 

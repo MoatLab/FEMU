@@ -160,11 +160,11 @@ static void cs4231_init(Object *obj)
     sysbus_init_irq(dev, &s->irq);
 }
 
-static void cs4231_class_init(ObjectClass *klass, void *data)
+static void cs4231_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    dc->reset = cs_reset;
+    device_class_set_legacy_reset(dc, cs_reset);
     dc->vmsd = &vmstate_cs4231;
 }
 

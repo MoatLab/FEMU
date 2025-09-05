@@ -4,12 +4,12 @@ LDFLAGS += -m64
 ASFLAGS = -m64
 CPPFLAGS += -I. -I../../include -I../../
 
-prefix = /usr/local/
+prefix = /usr/local
 sbindir = $(prefix)/sbin
 datadir = $(prefix)/share
 mandir = $(datadir)/man
 
-all: links arch_links | opal-prd
+all: links arch_links | opal-prd opal-prd.service
 
 GET_ARCH = ../../external/common/get_arch.sh
 include ../../external/common/rules.mk
@@ -50,6 +50,9 @@ version.c: ../../make_version.sh .version
 	else \
 	echo "const char version[] = \"$(OPAL_PRD_VERSION)\";" ;\
 	fi) > $@
+
+opal-prd.service: opal-prd.service.in
+	sed -e 's|@sbindir@|$(sbindir)|g' $< > $@
 
 .PHONY: VERSION-always
 .version: VERSION-always

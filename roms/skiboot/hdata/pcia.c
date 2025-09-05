@@ -15,8 +15,8 @@
 
 static unsigned int pcia_index(const void *pcia)
 {
-	return (pcia - (void *)get_hdif(&spira.ntuples.pcia, "SPPCIA"))
-		/ be32_to_cpu(spira.ntuples.pcia.alloc_len);
+	return (pcia - (void *)get_hdif(&spiras->ntuples.pcia, "SPPCIA"))
+		/ be32_to_cpu(spiras->ntuples.pcia.alloc_len);
 }
 
 static const struct sppcia_cpu_thread *find_tada(const void *pcia,
@@ -78,6 +78,7 @@ static void add_xics_icp(const void *pcia, u32 tcount, const char *compat)
 	dt_add_property_cells(icp, "ibm,interrupt-server-ranges",
 			      irange[0], irange[1]);
 	dt_add_property(icp, "interrupt-controller", NULL, 0);
+	dt_add_property_cells(icp, "#interrupt-cells", 1);
 	dt_add_property(icp, "reg", reg, rsize);
 	dt_add_property_cells(icp, "#address-cells", 0);
 	dt_add_property_string(icp, "device_type",
@@ -179,7 +180,7 @@ bool pcia_parse(void)
 	const void *pcia;
 	struct dt_node *cpus;
 
-	pcia = get_hdif(&spira.ntuples.pcia, "SPPCIA");
+	pcia = get_hdif(&spiras->ntuples.pcia, SPPCIA_HDIF_SIG);
 	if (!pcia)
 		return false;
 
@@ -189,7 +190,7 @@ bool pcia_parse(void)
 	dt_add_property_cells(cpus, "#address-cells", 1);
 	dt_add_property_cells(cpus, "#size-cells", 0);
 
-	for_each_pcia(pcia) {
+	for_each_pcia(spiras, pcia) {
 		const struct sppcia_core_unique *id;
 		u32 size, ve_flags;
 		bool okay;

@@ -253,7 +253,7 @@ TPM_RC TSS_TPM2B_CreateUint32(TPM2B *target, uint32_t source, uint16_t targetSiz
 	}
     }
     if (rc == 0) {
-	uint32_t sourceNbo = htonl(source);
+	beint32_t sourceNbo = htonl(source);
 	memmove(target->buffer, (uint8_t *)&sourceNbo, sizeof(uint32_t));
 	target->size = sizeof(uint32_t);
     }

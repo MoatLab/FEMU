@@ -19,10 +19,9 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
-#include "qemu/module.h"
 #include "hw/sysbus.h"
 #include "monitor/monitor.h"
-#include "exec/address-spaces.h"
+#include "system/address-spaces.h"
 
 static void sysbus_dev_print(Monitor *mon, DeviceState *dev, int indent);
 static char *sysbus_get_fw_dev_path(DeviceState *dev);
@@ -65,27 +64,20 @@ void foreach_dynamic_sysbus_device(FindSysbusDeviceFunc *func, void *opaque)
     };
 
     /* Loop through all sysbus devices that were spawned outside the machine */
-    container = container_get(qdev_get_machine(), "/peripheral");
+    container = machine_get_container("peripheral");
     find_sysbus_device(container, &find);
-    container = container_get(qdev_get_machine(), "/peripheral-anon");
+    container = machine_get_container("peripheral-anon");
     find_sysbus_device(container, &find);
 }
 
 
-static void system_bus_class_init(ObjectClass *klass, void *data)
+static void system_bus_class_init(ObjectClass *klass, const void *data)
 {
     BusClass *k = BUS_CLASS(klass);
 
     k->print_dev = sysbus_dev_print;
     k->get_fw_dev_path = sysbus_get_fw_dev_path;
 }
-
-static const TypeInfo system_bus_info = {
-    .name = TYPE_SYSTEM_BUS,
-    .parent = TYPE_BUS,
-    .instance_size = sizeof(BusState),
-    .class_init = system_bus_class_init,
-};
 
 /* Check whether an IRQ source exists */
 bool sysbus_has_irq(SysBusDevice *dev, int n)
@@ -154,19 +146,20 @@ static void sysbus_mmio_map_common(SysBusDevice *dev, int n, hwaddr addr,
     }
 }
 
-void sysbus_mmio_unmap(SysBusDevice *dev, int n)
-{
-    assert(n >= 0 && n < dev->num_mmio);
-
-    if (dev->mmio[n].addr != (hwaddr)-1) {
-        memory_region_del_subregion(get_system_memory(), dev->mmio[n].memory);
-        dev->mmio[n].addr = (hwaddr)-1;
-    }
-}
-
 void sysbus_mmio_map(SysBusDevice *dev, int n, hwaddr addr)
 {
     sysbus_mmio_map_common(dev, n, addr, false, 0);
+}
+
+int sysbus_mmio_map_name(SysBusDevice *dev, const char *name, hwaddr addr)
+{
+    for (int i = 0; i < dev->num_mmio; i++) {
+        if (!strcmp(dev->mmio[i].memory->name, name)) {
+            sysbus_mmio_map(dev, i, addr);
+            return i;
+        }
+    }
+    return -1;
 }
 
 void sysbus_mmio_map_overlap(SysBusDevice *dev, int n, hwaddr addr,
@@ -298,7 +291,7 @@ static char *sysbus_get_fw_dev_path(DeviceState *dev)
     return g_strdup(qdev_fw_name(dev));
 }
 
-static void sysbus_device_class_init(ObjectClass *klass, void *data)
+static void sysbus_device_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *k = DEVICE_CLASS(klass);
     k->realize = sysbus_device_realize;
@@ -316,15 +309,6 @@ static void sysbus_device_class_init(ObjectClass *klass, void *data)
     k->user_creatable = false;
 }
 
-static const TypeInfo sysbus_device_type_info = {
-    .name = TYPE_SYS_BUS_DEVICE,
-    .parent = TYPE_DEVICE,
-    .instance_size = sizeof(SysBusDevice),
-    .abstract = true,
-    .class_size = sizeof(SysBusDeviceClass),
-    .class_init = sysbus_device_class_init,
-};
-
 static BusState *main_system_bus;
 
 static void main_system_bus_create(void)
@@ -333,8 +317,8 @@ static void main_system_bus_create(void)
      * assign main_system_bus before qbus_init()
      * in order to make "if (bus != sysbus_get_default())" work
      */
-    main_system_bus = g_malloc0(system_bus_info.instance_size);
-    qbus_init(main_system_bus, system_bus_info.instance_size,
+    main_system_bus = g_new0(BusState, 1);
+    qbus_init(main_system_bus, sizeof(BusState),
               TYPE_SYSTEM_BUS, NULL, "main-system-bus");
     OBJECT(main_system_bus)->free = g_free;
 }
@@ -347,10 +331,36 @@ BusState *sysbus_get_default(void)
     return main_system_bus;
 }
 
-static void sysbus_register_types(void)
+static void dynamic_sysbus_device_class_init(ObjectClass *klass,
+                                             const void *data)
 {
-    type_register_static(&system_bus_info);
-    type_register_static(&sysbus_device_type_info);
+    DeviceClass *k = DEVICE_CLASS(klass);
+
+    k->user_creatable = true;
+    k->hotpluggable = false;
 }
 
-type_init(sysbus_register_types)
+static const TypeInfo sysbus_types[] = {
+    {
+        .name           = TYPE_SYSTEM_BUS,
+        .parent         = TYPE_BUS,
+        .instance_size  = sizeof(BusState),
+        .class_init     = system_bus_class_init,
+    },
+    {
+        .name           = TYPE_SYS_BUS_DEVICE,
+        .parent         = TYPE_DEVICE,
+        .instance_size  = sizeof(SysBusDevice),
+        .abstract       = true,
+        .class_size     = sizeof(SysBusDeviceClass),
+        .class_init     = sysbus_device_class_init,
+    },
+    {
+        .name           = TYPE_DYNAMIC_SYS_BUS_DEVICE,
+        .parent         = TYPE_SYS_BUS_DEVICE,
+        .class_init     = dynamic_sysbus_device_class_init,
+        .abstract       = true,
+    }
+};
+
+DEFINE_TYPES(sysbus_types)

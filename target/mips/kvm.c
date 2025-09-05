@@ -18,9 +18,9 @@
 #include "internal.h"
 #include "qemu/error-report.h"
 #include "qemu/main-loop.h"
-#include "sysemu/kvm.h"
-#include "sysemu/kvm_int.h"
-#include "sysemu/runstate.h"
+#include "system/kvm.h"
+#include "system/kvm_int.h"
+#include "system/runstate.h"
 #include "kvm_mips.h"
 #include "hw/boards.h"
 #include "fpu_helper.h"
@@ -57,6 +57,11 @@ int kvm_arch_init(MachineState *ms, KVMState *s)
 }
 
 int kvm_arch_irqchip_create(KVMState *s)
+{
+    return 0;
+}
+
+int kvm_arch_pre_create_vcpu(CPUState *cpu, Error **errp)
 {
     return 0;
 }
@@ -1172,7 +1177,7 @@ static int kvm_mips_get_cp0_registers(CPUState *cs)
     return ret;
 }
 
-int kvm_arch_put_registers(CPUState *cs, int level)
+int kvm_arch_put_registers(CPUState *cs, int level, Error **errp)
 {
     CPUMIPSState *env = cpu_env(cs);
     struct kvm_regs regs;
@@ -1207,7 +1212,7 @@ int kvm_arch_put_registers(CPUState *cs, int level)
     return ret;
 }
 
-int kvm_arch_get_registers(CPUState *cs)
+int kvm_arch_get_registers(CPUState *cs, Error **errp)
 {
     CPUMIPSState *env = cpu_env(cs);
     int ret = 0;
@@ -1271,11 +1276,6 @@ int kvm_arch_get_default_type(MachineState *machine)
 
     error_report("KVM_VM_MIPS_VZ type is not available");
     return -1;
-}
-
-bool kvm_arch_cpu_check_are_resettable(void)
-{
-    return true;
 }
 
 void kvm_arch_accel_class_init(ObjectClass *oc)

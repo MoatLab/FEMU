@@ -3,7 +3,7 @@
 
 // Graphics pixel operations.
 struct gfx_op {
-    struct vgamode_s *vmode_g;
+    struct vgamode_s *curmode_g;
     u32 linelength;
     u32 displaystart;
 
@@ -30,7 +30,7 @@ struct carattr {
 
 // vgafb.c
 void memcpy_high(void *dest, void *src, u32 len);
-void init_gfx_op(struct gfx_op *op, struct vgamode_s *vmode_g);
+void init_gfx_op(struct gfx_op *op, struct vgamode_s *curmode_g);
 void handle_gfx_op(struct gfx_op *op);
 void *text_address(struct cursorpos cp);
 void vgafb_scroll(struct cursorpos win, struct cursorpos winsize

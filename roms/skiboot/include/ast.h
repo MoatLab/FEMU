@@ -91,6 +91,34 @@ void ast_setup_ibt(uint16_t io_base, uint8_t irq);
 /* MBOX configuration */
 void ast_setup_sio_mbox(uint16_t io_base, uint8_t irq);
 
+/* MCTP configuration */
+
+/*
+ * EID is the MCTP endpoint ID, which aids in routing MCTP packets.
+ * For the EIDs: the valid range is 8-254.
+ * We are saying that BMC is EID 8 and Skiboot is HOST_EID 9
+ */
+#define BMC_EID  8
+#define HOST_EID 9
+
+/*
+ * Skiboot's PLDM Terminus ID.
+ * BMC TID is 1, HB is 2, Skiboot is 3.
+ */
+#define BMC_TID  1
+#define HB_TID   2
+#define HOST_TID 3
+
+enum mctp_msg_type {
+	MCTP_MSG_TYPE_CONTROL = 0x00,
+	MCTP_MSG_TYPE_PLDM    = 0x01,
+};
+
+int ast_mctp_message_tx(bool tag_owner, uint8_t msg_tag,
+			uint8_t *msg, int msg_len);
+int ast_mctp_init(void);
+void ast_mctp_exit(void);
+
 #endif /* __SKIBOOT__ */
 
 /*

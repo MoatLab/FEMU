@@ -404,6 +404,7 @@ static int setup_scom_addresses(void)
 		nx_pbi_fir = P9_NX_PBI_FIR;
 		return 1;
 	case proc_gen_p10:
+	case proc_gen_p11:
 		malf_alert_scom = P10_MALFUNC_ALERT;
 		nx_status_reg = P10_NX_STATUS_REG;
 		nx_dma_engine_fir = P10_NX_DMA_ENGINE_FIR;
@@ -460,6 +461,7 @@ static int read_core_fir(uint32_t chip_id, uint32_t core_id, uint64_t *core_fir)
 			XSCOM_ADDR_P9_EC(core_id, P9_CORE_FIR), core_fir);
 		break;
 	case proc_gen_p10:
+	case proc_gen_p11:
 		rc = xscom_read(chip_id,
 			XSCOM_ADDR_P10_EC(core_id, P10_CORE_FIR), core_fir);
 		break;
@@ -479,6 +481,7 @@ static int read_core_wof(uint32_t chip_id, uint32_t core_id, uint64_t *core_wof)
 			XSCOM_ADDR_P9_EC(core_id, P9_CORE_WOF), core_wof);
 		break;
 	case proc_gen_p10:
+	case proc_gen_p11:
 		rc = xscom_read(chip_id,
 			XSCOM_ADDR_P10_EC(core_id, P10_CORE_WOF), core_wof);
 		break;
@@ -541,7 +544,7 @@ static bool decode_core_fir(struct cpu_thread *cpu,
 			loc ? loc : "Not Available",
 			cpu->chip_id, core_id, core_fir);
 
-	if (proc_gen == proc_gen_p10) {
+	if (proc_gen == proc_gen_p10 || proc_gen == proc_gen_p11) {
 		for (i = 0; i < ARRAY_SIZE(p10_core_fir_bits); i++) {
 			if (core_fir & PPC_BIT(p10_core_fir_bits[i].bit))
 				prlog(PR_INFO, "    %s\n", p10_core_fir_bits[i].reason);
@@ -774,7 +777,7 @@ static bool npu_fir_errors(struct phb *phb, int flat_chip_id,
 	struct npu *npu;
 	struct npu2 *npu2 = NULL;
 	struct npu2_dev *dev;
-	struct pau *pau;
+	struct pau *pau = NULL;
 
 	fir_regs = (phb->phb_type == phb_type_pcie_v3) ? 1 : 3;
 
@@ -915,7 +918,7 @@ static void find_npu_checkstop_reason(int flat_chip_id,
 		hmi_evt->severity = OpalHMI_SEV_WARNING;
 		hmi_evt->type = OpalHMI_ERROR_MALFUNC_ALERT;
 		hmi_evt->u.xstop_error.xstop_type = CHECKSTOP_TYPE_NPU;
-		hmi_evt->u.xstop_error.xstop_reason = xstop_reason;
+		hmi_evt->u.xstop_error.xstop_reason = cpu_to_be32(xstop_reason);
 		hmi_evt->u.xstop_error.u.chip_id = cpu_to_be32(flat_chip_id);
 
 		/* Marking the event as recoverable so that we don't crash */
@@ -949,7 +952,7 @@ static void decode_malfunction(struct OpalHMIEvent *hmi_evt, uint64_t *out_flags
 			xscom_write(this_cpu()->chip_id, malf_alert_scom,
 								~PPC_BIT(i));
 			find_capp_checkstop_reason(i, hmi_evt, &flags);
-			if (proc_gen != proc_gen_p10)
+			if (proc_gen != proc_gen_p10 && proc_gen != proc_gen_p11)
 				find_nx_checkstop_reason(i, hmi_evt, &flags);
 			find_npu_checkstop_reason(i, hmi_evt, &flags);
 		}
@@ -1121,12 +1124,26 @@ static int handle_all_core_tfac_error(uint64_t tfmr, uint64_t *out_flags)
 	struct cpu_thread *t, *t0;
 	int recover = -1;
 	struct cpu_job **hmi_jobs = NULL;
+	bool hmi_with_no_error = false;
 
 	t = this_cpu();
 	t0 = find_cpu_by_pir(cpu_get_thread0(t));
 
 	if (t == t0 && t0->state == cpu_state_os)
 		hmi_jobs = hmi_kick_secondaries();
+
+	/*
+	 * Handle special case: If TB is in invalid state and no TB error
+	 * reported in TFMR for this HMI, then treat this as TFMR corrupt error
+	 * to force the recovery procedure recover_corrupt_tfmr(). This will
+	 * also reset the core level TB erorrs including Missing step. Do this
+	 * only on thread 0, otherwise every thread will repeat the same
+	 * procedure unnecessarily.
+	 */
+	if (t == t0 && !(tfmr & SPR_TFMR_CORE_ERRORS) && this_cpu()->tb_invalid) {
+		tfmr |= SPR_TFMR_TFMR_CORRUPT;
+		hmi_with_no_error = true;
+	}
 
 	/* Rendez vous all threads */
 	hmi_rendez_vous(1);
@@ -1142,7 +1159,7 @@ static int handle_all_core_tfac_error(uint64_t tfmr, uint64_t *out_flags)
 	 */
 	if (tfmr & SPR_TFMR_TFMR_CORRUPT) {
 		/* Check if it's still in error state */
-		if (mfspr(SPR_TFMR) & SPR_TFMR_TFMR_CORRUPT)
+		if (hmi_with_no_error || mfspr(SPR_TFMR) & SPR_TFMR_TFMR_CORRUPT)
 			if (!recover_corrupt_tfmr()) {
 				unlock(&hmi_lock);
 				recover = 0;
@@ -1311,13 +1328,31 @@ static int handle_tfac_errors(struct OpalHMIEvent *hmi_evt, uint64_t *out_flags)
 		if (recover != 0)
 			recover = recover2;
 	} else if (this_cpu()->tb_invalid) {
-		/* This shouldn't happen, TB is invalid and no global error
-		 * was reported. We just return for now assuming one will
-		 * be. We can't do a rendez vous without a core-global HMI.
+		int recover2;
+
+		/*
+		 * This shouldn't happen, TB is invalid and no global error was
+		 * reported. However, On p10, in a very rare situation when
+		 * core is waking up from stop2 or higher stop state, timer
+		 * facility goes into error state due to Missing step, causing
+		 * an HMI with no error reason set in TFMR register other than
+		 * TFMR[41]=0 (tb_valid) and TFMR[28:31]=9 (tbst_encoded).
+		 * Ideally, "Missing step" error should be reported in
+		 * TFMR[44]=1. It looks like in this rare case, while
+		 * generating HMI, HW fails to sync up the TFMR register with
+		 * the core which is waking up from stop2.
+		 *
+		 * To be able to recover, follow down to recovery method as if
+		 * we got core level TB error and treat this as TFMR corrupt
+		 * error and reset all core errors including Missing step.
 		 */
+
 		prlog(PR_ERR, "HMI: TB invalid without core error reported ! "
 			"CPU=%x, TFMR=0x%016lx\n", this_cpu()->pir,
 						mfspr(SPR_TFMR));
+		recover2 = handle_all_core_tfac_error(tfmr, out_flags);
+		if (recover != 0)
+			recover = recover2;
 	}
 
 	if (recover != -1 && hmi_evt) {
@@ -1381,7 +1416,7 @@ static int handle_hmi_exception(uint64_t hmer, struct OpalHMIEvent *hmi_evt,
 					if (core_wof & PPC_BIT(p9_recoverable_bits[i].bit))
 						prlog(PR_DEBUG, "    %s\n", p9_recoverable_bits[i].reason);
 				}
-			} else if (proc_gen == proc_gen_p10) {
+			} else if (proc_gen == proc_gen_p10 || proc_gen == proc_gen_p11) {
 				for (i = 0; i < ARRAY_SIZE(p10_core_fir_bits); i++) {
 					if (core_wof & PPC_BIT(p10_core_fir_bits[i].bit))
 						prlog(PR_DEBUG, "    %s\n", p10_core_fir_bits[i].reason);
@@ -1476,7 +1511,8 @@ static int handle_hmi_exception(uint64_t hmer, struct OpalHMIEvent *hmi_evt,
 				queue_hmi_event(hmi_evt, recover, out_flags);
 		}
 	}
-	if ((proc_gen == proc_gen_p10) && (hmer & SPR_HMER_P10_TRIG_FIR_HMI)) {
+	if ((proc_gen == proc_gen_p10 || proc_gen == proc_gen_p11)
+		&& (hmer & SPR_HMER_P10_TRIG_FIR_HMI)) {
 		handled |= SPR_HMER_P10_TRIG_FIR_HMI;
 		hmer &= ~SPR_HMER_P10_TRIG_FIR_HMI;
 

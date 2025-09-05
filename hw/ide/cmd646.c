@@ -29,8 +29,8 @@
 #include "migration/vmstate.h"
 #include "qemu/module.h"
 #include "hw/isa/isa.h"
-#include "sysemu/dma.h"
-#include "sysemu/reset.h"
+#include "system/dma.h"
+#include "system/reset.h"
 
 #include "hw/ide/pci.h"
 #include "ide-internal.h"
@@ -313,17 +313,16 @@ static void pci_cmd646_ide_exitfn(PCIDevice *dev)
     }
 }
 
-static Property cmd646_ide_properties[] = {
+static const Property cmd646_ide_properties[] = {
     DEFINE_PROP_UINT32("secondary", PCIIDEState, secondary, 0),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void cmd646_ide_class_init(ObjectClass *klass, void *data)
+static void cmd646_ide_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
 
-    dc->reset = cmd646_reset;
+    device_class_set_legacy_reset(dc, cmd646_reset);
     dc->vmsd = &vmstate_ide_pci;
     k->realize = pci_cmd646_ide_realize;
     k->exit = pci_cmd646_ide_exitfn;

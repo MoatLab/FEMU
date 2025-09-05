@@ -1,0 +1,4234 @@
+/dts-v1/;
+
+/ {
+	phandle = <0x01>;
+	#address-cells = <0x02>;
+	#size-cells = <0x02>;
+	compatible = "ibm,powernv\0ibm,p10-openbmc\0ibm,rainier-2s2u";
+	nest-frequency = <0x00 0x861c4680>;
+	vendor = "IBM";
+	ibm,sw-checkstop-fir = <0x3040100 0x3c>;
+	ibm,io-base-loc-code = "U78DA.ND0.WZS003Y-P0";
+	ibm,vpd-lx-info = <0x00 0x31000401 0x300071>;
+	model = "9105-22A";
+	system-id = "139F260";
+	system-brand = "S0";
+	model-name = "ibm,rainier-2s2u";
+
+	bmc {
+		phandle = <0x02>;
+		#address-cells = <0x01>;
+		#size-cells = <0x00>;
+		compatible = "ibm,ast2600,openbmc";
+	};
+
+	cpus {
+		phandle = <0x19>;
+		#address-cells = <0x01>;
+		#size-cells = <0x00>;
+
+		PowerPC,POWER10@10 {
+			phandle = <0x1a>;
+			device_type = "cpu";
+			status = "okay";
+			reg = <0x10>;
+			cpu-version = <0x800100>;
+			64-bit;
+			32-64-bridge;
+			graphics;
+			general-purpose;
+			ibm,processor-segment-sizes = <0x1c 0x28 0xffffffff 0xffffffff>;
+			ibm,processor-page-sizes = <0x0c 0x10 0x18 0x22>;
+			ibm,processor-radix-AP-encodings = <0x0c 0xa0000010 0x20000015 0x4000001e>;
+			ibm,mmu-pid-bits = <0x14>;
+			ibm,mmu-lpid-bits = <0x0c>;
+			ibm,segment-page-sizes = <0x0c 0x00 0x03 0x0c 0x00 0x10 0x07 0x18 0x38 0x10 0x110 0x02 0x10 0x01 0x18 0x08 0x18 0x100 0x01 0x18 0x00 0x22 0x120 0x01 0x22 0x03>;
+			ibm,pa-features = <0x4200f63f 0xc7c080d0 0x80000000 0x00 0x8000 0x80008000 0x8000 0x80008000 0x8000 0x80000000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000>;
+			ibm,slb-size = <0x20>;
+			ibm,vmx = <0x02>;
+			ibm,dfp = <0x02>;
+			ibm,purr = <0x01>;
+			ibm,spurr = <0x01>;
+			clock-frequency = <0x9af8da00>;
+			ibm,extended-clock-frequency = <0x00 0x9af8da00>;
+			timebase-frequency = <0x1e848000>;
+			ibm,extended-timebase-frequency = <0x00 0x1e848000>;
+			reservation-granule-size = <0x80>;
+			d-tlb-size = <0x1000>;
+			i-tlb-size = <0x00>;
+			tlb-size = <0x1000>;
+			d-tlb-sets = <0x400>;
+			i-tlb-sets = <0x00>;
+			tlb-sets = <0x400>;
+			d-cache-block-size = <0x80>;
+			i-cache-block-size = <0x80>;
+			d-cache-size = <0x8000>;
+			i-cache-size = <0xc000>;
+			i-cache-sets = <0x40>;
+			d-cache-sets = <0x20>;
+			performance-monitor = <0x00 0x01>;
+			l2-cache = <0x1b>;
+			ibm,pir = <0x10>;
+			ibm,chip-id = <0x00>;
+			ibm,ppc-interrupt-server#s = <0x10 0x11 0x12 0x13 0x14 0x15 0x16 0x17>;
+		};
+
+		PowerPC,POWER10@18 {
+			phandle = <0x1d>;
+			device_type = "cpu";
+			status = "okay";
+			reg = <0x18>;
+			cpu-version = <0x800100>;
+			64-bit;
+			32-64-bridge;
+			graphics;
+			general-purpose;
+			ibm,processor-segment-sizes = <0x1c 0x28 0xffffffff 0xffffffff>;
+			ibm,processor-page-sizes = <0x0c 0x10 0x18 0x22>;
+			ibm,processor-radix-AP-encodings = <0x0c 0xa0000010 0x20000015 0x4000001e>;
+			ibm,mmu-pid-bits = <0x14>;
+			ibm,mmu-lpid-bits = <0x0c>;
+			ibm,segment-page-sizes = <0x0c 0x00 0x03 0x0c 0x00 0x10 0x07 0x18 0x38 0x10 0x110 0x02 0x10 0x01 0x18 0x08 0x18 0x100 0x01 0x18 0x00 0x22 0x120 0x01 0x22 0x03>;
+			ibm,pa-features = <0x4200f63f 0xc7c080d0 0x80000000 0x00 0x8000 0x80008000 0x8000 0x80008000 0x8000 0x80000000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000>;
+			ibm,slb-size = <0x20>;
+			ibm,vmx = <0x02>;
+			ibm,dfp = <0x02>;
+			ibm,purr = <0x01>;
+			ibm,spurr = <0x01>;
+			clock-frequency = <0x9af8da00>;
+			ibm,extended-clock-frequency = <0x00 0x9af8da00>;
+			timebase-frequency = <0x1e848000>;
+			ibm,extended-timebase-frequency = <0x00 0x1e848000>;
+			reservation-granule-size = <0x80>;
+			d-tlb-size = <0x1000>;
+			i-tlb-size = <0x00>;
+			tlb-size = <0x1000>;
+			d-tlb-sets = <0x400>;
+			i-tlb-sets = <0x00>;
+			tlb-sets = <0x400>;
+			d-cache-block-size = <0x80>;
+			i-cache-block-size = <0x80>;
+			d-cache-size = <0x8000>;
+			i-cache-size = <0xc000>;
+			i-cache-sets = <0x40>;
+			d-cache-sets = <0x20>;
+			performance-monitor = <0x00 0x01>;
+			l2-cache = <0x1e>;
+			ibm,pir = <0x18>;
+			ibm,chip-id = <0x00>;
+			ibm,ppc-interrupt-server#s = <0x18 0x19 0x1a 0x1b 0x1c 0x1d 0x1e 0x1f>;
+		};
+
+		PowerPC,POWER10@20 {
+			phandle = <0x20>;
+			device_type = "cpu";
+			status = "okay";
+			reg = <0x20>;
+			cpu-version = <0x800100>;
+			64-bit;
+			32-64-bridge;
+			graphics;
+			general-purpose;
+			ibm,processor-segment-sizes = <0x1c 0x28 0xffffffff 0xffffffff>;
+			ibm,processor-page-sizes = <0x0c 0x10 0x18 0x22>;
+			ibm,processor-radix-AP-encodings = <0x0c 0xa0000010 0x20000015 0x4000001e>;
+			ibm,mmu-pid-bits = <0x14>;
+			ibm,mmu-lpid-bits = <0x0c>;
+			ibm,segment-page-sizes = <0x0c 0x00 0x03 0x0c 0x00 0x10 0x07 0x18 0x38 0x10 0x110 0x02 0x10 0x01 0x18 0x08 0x18 0x100 0x01 0x18 0x00 0x22 0x120 0x01 0x22 0x03>;
+			ibm,pa-features = <0x4200f63f 0xc7c080d0 0x80000000 0x00 0x8000 0x80008000 0x8000 0x80008000 0x8000 0x80000000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000>;
+			ibm,slb-size = <0x20>;
+			ibm,vmx = <0x02>;
+			ibm,dfp = <0x02>;
+			ibm,purr = <0x01>;
+			ibm,spurr = <0x01>;
+			clock-frequency = <0x9af8da00>;
+			ibm,extended-clock-frequency = <0x00 0x9af8da00>;
+			timebase-frequency = <0x1e848000>;
+			ibm,extended-timebase-frequency = <0x00 0x1e848000>;
+			reservation-granule-size = <0x80>;
+			d-tlb-size = <0x1000>;
+			i-tlb-size = <0x00>;
+			tlb-size = <0x1000>;
+			d-tlb-sets = <0x400>;
+			i-tlb-sets = <0x00>;
+			tlb-sets = <0x400>;
+			d-cache-block-size = <0x80>;
+			i-cache-block-size = <0x80>;
+			d-cache-size = <0x8000>;
+			i-cache-size = <0xc000>;
+			i-cache-sets = <0x40>;
+			d-cache-sets = <0x20>;
+			performance-monitor = <0x00 0x01>;
+			l2-cache = <0x21>;
+			ibm,pir = <0x20>;
+			ibm,chip-id = <0x00>;
+			ibm,ppc-interrupt-server#s = <0x20 0x21 0x22 0x23 0x24 0x25 0x26 0x27>;
+		};
+
+		PowerPC,POWER10@28 {
+			phandle = <0x23>;
+			device_type = "cpu";
+			status = "okay";
+			reg = <0x28>;
+			cpu-version = <0x800100>;
+			64-bit;
+			32-64-bridge;
+			graphics;
+			general-purpose;
+			ibm,processor-segment-sizes = <0x1c 0x28 0xffffffff 0xffffffff>;
+			ibm,processor-page-sizes = <0x0c 0x10 0x18 0x22>;
+			ibm,processor-radix-AP-encodings = <0x0c 0xa0000010 0x20000015 0x4000001e>;
+			ibm,mmu-pid-bits = <0x14>;
+			ibm,mmu-lpid-bits = <0x0c>;
+			ibm,segment-page-sizes = <0x0c 0x00 0x03 0x0c 0x00 0x10 0x07 0x18 0x38 0x10 0x110 0x02 0x10 0x01 0x18 0x08 0x18 0x100 0x01 0x18 0x00 0x22 0x120 0x01 0x22 0x03>;
+			ibm,pa-features = <0x4200f63f 0xc7c080d0 0x80000000 0x00 0x8000 0x80008000 0x8000 0x80008000 0x8000 0x80000000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000>;
+			ibm,slb-size = <0x20>;
+			ibm,vmx = <0x02>;
+			ibm,dfp = <0x02>;
+			ibm,purr = <0x01>;
+			ibm,spurr = <0x01>;
+			clock-frequency = <0x9af8da00>;
+			ibm,extended-clock-frequency = <0x00 0x9af8da00>;
+			timebase-frequency = <0x1e848000>;
+			ibm,extended-timebase-frequency = <0x00 0x1e848000>;
+			reservation-granule-size = <0x80>;
+			d-tlb-size = <0x1000>;
+			i-tlb-size = <0x00>;
+			tlb-size = <0x1000>;
+			d-tlb-sets = <0x400>;
+			i-tlb-sets = <0x00>;
+			tlb-sets = <0x400>;
+			d-cache-block-size = <0x80>;
+			i-cache-block-size = <0x80>;
+			d-cache-size = <0x8000>;
+			i-cache-size = <0xc000>;
+			i-cache-sets = <0x40>;
+			d-cache-sets = <0x20>;
+			performance-monitor = <0x00 0x01>;
+			l2-cache = <0x24>;
+			ibm,pir = <0x28>;
+			ibm,chip-id = <0x00>;
+			ibm,ppc-interrupt-server#s = <0x28 0x29 0x2a 0x2b 0x2c 0x2d 0x2e 0x2f>;
+		};
+
+		PowerPC,POWER10@50 {
+			phandle = <0x26>;
+			device_type = "cpu";
+			status = "okay";
+			reg = <0x50>;
+			cpu-version = <0x800100>;
+			64-bit;
+			32-64-bridge;
+			graphics;
+			general-purpose;
+			ibm,processor-segment-sizes = <0x1c 0x28 0xffffffff 0xffffffff>;
+			ibm,processor-page-sizes = <0x0c 0x10 0x18 0x22>;
+			ibm,processor-radix-AP-encodings = <0x0c 0xa0000010 0x20000015 0x4000001e>;
+			ibm,mmu-pid-bits = <0x14>;
+			ibm,mmu-lpid-bits = <0x0c>;
+			ibm,segment-page-sizes = <0x0c 0x00 0x03 0x0c 0x00 0x10 0x07 0x18 0x38 0x10 0x110 0x02 0x10 0x01 0x18 0x08 0x18 0x100 0x01 0x18 0x00 0x22 0x120 0x01 0x22 0x03>;
+			ibm,pa-features = <0x4200f63f 0xc7c080d0 0x80000000 0x00 0x8000 0x80008000 0x8000 0x80008000 0x8000 0x80000000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000>;
+			ibm,slb-size = <0x20>;
+			ibm,vmx = <0x02>;
+			ibm,dfp = <0x02>;
+			ibm,purr = <0x01>;
+			ibm,spurr = <0x01>;
+			clock-frequency = <0x9af8da00>;
+			ibm,extended-clock-frequency = <0x00 0x9af8da00>;
+			timebase-frequency = <0x1e848000>;
+			ibm,extended-timebase-frequency = <0x00 0x1e848000>;
+			reservation-granule-size = <0x80>;
+			d-tlb-size = <0x1000>;
+			i-tlb-size = <0x00>;
+			tlb-size = <0x1000>;
+			d-tlb-sets = <0x400>;
+			i-tlb-sets = <0x00>;
+			tlb-sets = <0x400>;
+			d-cache-block-size = <0x80>;
+			i-cache-block-size = <0x80>;
+			d-cache-size = <0x8000>;
+			i-cache-size = <0xc000>;
+			i-cache-sets = <0x40>;
+			d-cache-sets = <0x20>;
+			performance-monitor = <0x00 0x01>;
+			l2-cache = <0x27>;
+			ibm,pir = <0x50>;
+			ibm,chip-id = <0x00>;
+			ibm,ppc-interrupt-server#s = <0x50 0x51 0x52 0x53 0x54 0x55 0x56 0x57>;
+		};
+
+		PowerPC,POWER10@58 {
+			phandle = <0x29>;
+			device_type = "cpu";
+			status = "okay";
+			reg = <0x58>;
+			cpu-version = <0x800100>;
+			64-bit;
+			32-64-bridge;
+			graphics;
+			general-purpose;
+			ibm,processor-segment-sizes = <0x1c 0x28 0xffffffff 0xffffffff>;
+			ibm,processor-page-sizes = <0x0c 0x10 0x18 0x22>;
+			ibm,processor-radix-AP-encodings = <0x0c 0xa0000010 0x20000015 0x4000001e>;
+			ibm,mmu-pid-bits = <0x14>;
+			ibm,mmu-lpid-bits = <0x0c>;
+			ibm,segment-page-sizes = <0x0c 0x00 0x03 0x0c 0x00 0x10 0x07 0x18 0x38 0x10 0x110 0x02 0x10 0x01 0x18 0x08 0x18 0x100 0x01 0x18 0x00 0x22 0x120 0x01 0x22 0x03>;
+			ibm,pa-features = <0x4200f63f 0xc7c080d0 0x80000000 0x00 0x8000 0x80008000 0x8000 0x80008000 0x8000 0x80000000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000>;
+			ibm,slb-size = <0x20>;
+			ibm,vmx = <0x02>;
+			ibm,dfp = <0x02>;
+			ibm,purr = <0x01>;
+			ibm,spurr = <0x01>;
+			clock-frequency = <0x9af8da00>;
+			ibm,extended-clock-frequency = <0x00 0x9af8da00>;
+			timebase-frequency = <0x1e848000>;
+			ibm,extended-timebase-frequency = <0x00 0x1e848000>;
+			reservation-granule-size = <0x80>;
+			d-tlb-size = <0x1000>;
+			i-tlb-size = <0x00>;
+			tlb-size = <0x1000>;
+			d-tlb-sets = <0x400>;
+			i-tlb-sets = <0x00>;
+			tlb-sets = <0x400>;
+			d-cache-block-size = <0x80>;
+			i-cache-block-size = <0x80>;
+			d-cache-size = <0x8000>;
+			i-cache-size = <0xc000>;
+			i-cache-sets = <0x40>;
+			d-cache-sets = <0x20>;
+			performance-monitor = <0x00 0x01>;
+			l2-cache = <0x2a>;
+			ibm,pir = <0x58>;
+			ibm,chip-id = <0x00>;
+			ibm,ppc-interrupt-server#s = <0x58 0x59 0x5a 0x5b 0x5c 0x5d 0x5e 0x5f>;
+		};
+
+		PowerPC,POWER10@60 {
+			phandle = <0x2c>;
+			device_type = "cpu";
+			status = "okay";
+			reg = <0x60>;
+			cpu-version = <0x800100>;
+			64-bit;
+			32-64-bridge;
+			graphics;
+			general-purpose;
+			ibm,processor-segment-sizes = <0x1c 0x28 0xffffffff 0xffffffff>;
+			ibm,processor-page-sizes = <0x0c 0x10 0x18 0x22>;
+			ibm,processor-radix-AP-encodings = <0x0c 0xa0000010 0x20000015 0x4000001e>;
+			ibm,mmu-pid-bits = <0x14>;
+			ibm,mmu-lpid-bits = <0x0c>;
+			ibm,segment-page-sizes = <0x0c 0x00 0x03 0x0c 0x00 0x10 0x07 0x18 0x38 0x10 0x110 0x02 0x10 0x01 0x18 0x08 0x18 0x100 0x01 0x18 0x00 0x22 0x120 0x01 0x22 0x03>;
+			ibm,pa-features = <0x4200f63f 0xc7c080d0 0x80000000 0x00 0x8000 0x80008000 0x8000 0x80008000 0x8000 0x80000000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000>;
+			ibm,slb-size = <0x20>;
+			ibm,vmx = <0x02>;
+			ibm,dfp = <0x02>;
+			ibm,purr = <0x01>;
+			ibm,spurr = <0x01>;
+			clock-frequency = <0x9af8da00>;
+			ibm,extended-clock-frequency = <0x00 0x9af8da00>;
+			timebase-frequency = <0x1e848000>;
+			ibm,extended-timebase-frequency = <0x00 0x1e848000>;
+			reservation-granule-size = <0x80>;
+			d-tlb-size = <0x1000>;
+			i-tlb-size = <0x00>;
+			tlb-size = <0x1000>;
+			d-tlb-sets = <0x400>;
+			i-tlb-sets = <0x00>;
+			tlb-sets = <0x400>;
+			d-cache-block-size = <0x80>;
+			i-cache-block-size = <0x80>;
+			d-cache-size = <0x8000>;
+			i-cache-size = <0xc000>;
+			i-cache-sets = <0x40>;
+			d-cache-sets = <0x20>;
+			performance-monitor = <0x00 0x01>;
+			l2-cache = <0x2d>;
+			ibm,pir = <0x60>;
+			ibm,chip-id = <0x00>;
+			ibm,ppc-interrupt-server#s = <0x60 0x61 0x62 0x63 0x64 0x65 0x66 0x67>;
+		};
+
+		PowerPC,POWER10@78 {
+			phandle = <0x2f>;
+			device_type = "cpu";
+			status = "okay";
+			reg = <0x78>;
+			cpu-version = <0x800100>;
+			64-bit;
+			32-64-bridge;
+			graphics;
+			general-purpose;
+			ibm,processor-segment-sizes = <0x1c 0x28 0xffffffff 0xffffffff>;
+			ibm,processor-page-sizes = <0x0c 0x10 0x18 0x22>;
+			ibm,processor-radix-AP-encodings = <0x0c 0xa0000010 0x20000015 0x4000001e>;
+			ibm,mmu-pid-bits = <0x14>;
+			ibm,mmu-lpid-bits = <0x0c>;
+			ibm,segment-page-sizes = <0x0c 0x00 0x03 0x0c 0x00 0x10 0x07 0x18 0x38 0x10 0x110 0x02 0x10 0x01 0x18 0x08 0x18 0x100 0x01 0x18 0x00 0x22 0x120 0x01 0x22 0x03>;
+			ibm,pa-features = <0x4200f63f 0xc7c080d0 0x80000000 0x00 0x8000 0x80008000 0x8000 0x80008000 0x8000 0x80000000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000>;
+			ibm,slb-size = <0x20>;
+			ibm,vmx = <0x02>;
+			ibm,dfp = <0x02>;
+			ibm,purr = <0x01>;
+			ibm,spurr = <0x01>;
+			clock-frequency = <0x9af8da00>;
+			ibm,extended-clock-frequency = <0x00 0x9af8da00>;
+			timebase-frequency = <0x1e848000>;
+			ibm,extended-timebase-frequency = <0x00 0x1e848000>;
+			reservation-granule-size = <0x80>;
+			d-tlb-size = <0x1000>;
+			i-tlb-size = <0x00>;
+			tlb-size = <0x1000>;
+			d-tlb-sets = <0x400>;
+			i-tlb-sets = <0x00>;
+			tlb-sets = <0x400>;
+			d-cache-block-size = <0x80>;
+			i-cache-block-size = <0x80>;
+			d-cache-size = <0x8000>;
+			i-cache-size = <0xc000>;
+			i-cache-sets = <0x40>;
+			d-cache-sets = <0x20>;
+			performance-monitor = <0x00 0x01>;
+			l2-cache = <0x30>;
+			ibm,pir = <0x78>;
+			ibm,chip-id = <0x00>;
+			ibm,ppc-interrupt-server#s = <0x78 0x79 0x7a 0x7b 0x7c 0x7d 0x7e 0x7f>;
+		};
+
+		PowerPC,POWER10@218 {
+			phandle = <0x32>;
+			device_type = "cpu";
+			status = "okay";
+			reg = <0x218>;
+			cpu-version = <0x800100>;
+			64-bit;
+			32-64-bridge;
+			graphics;
+			general-purpose;
+			ibm,processor-segment-sizes = <0x1c 0x28 0xffffffff 0xffffffff>;
+			ibm,processor-page-sizes = <0x0c 0x10 0x18 0x22>;
+			ibm,processor-radix-AP-encodings = <0x0c 0xa0000010 0x20000015 0x4000001e>;
+			ibm,mmu-pid-bits = <0x14>;
+			ibm,mmu-lpid-bits = <0x0c>;
+			ibm,segment-page-sizes = <0x0c 0x00 0x03 0x0c 0x00 0x10 0x07 0x18 0x38 0x10 0x110 0x02 0x10 0x01 0x18 0x08 0x18 0x100 0x01 0x18 0x00 0x22 0x120 0x01 0x22 0x03>;
+			ibm,pa-features = <0x4200f63f 0xc7c080d0 0x80000000 0x00 0x8000 0x80008000 0x8000 0x80008000 0x8000 0x80000000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000>;
+			ibm,slb-size = <0x20>;
+			ibm,vmx = <0x02>;
+			ibm,dfp = <0x02>;
+			ibm,purr = <0x01>;
+			ibm,spurr = <0x01>;
+			clock-frequency = <0x9af8da00>;
+			ibm,extended-clock-frequency = <0x00 0x9af8da00>;
+			timebase-frequency = <0x1e848000>;
+			ibm,extended-timebase-frequency = <0x00 0x1e848000>;
+			reservation-granule-size = <0x80>;
+			d-tlb-size = <0x1000>;
+			i-tlb-size = <0x00>;
+			tlb-size = <0x1000>;
+			d-tlb-sets = <0x400>;
+			i-tlb-sets = <0x00>;
+			tlb-sets = <0x400>;
+			d-cache-block-size = <0x80>;
+			i-cache-block-size = <0x80>;
+			d-cache-size = <0x8000>;
+			i-cache-size = <0xc000>;
+			i-cache-sets = <0x40>;
+			d-cache-sets = <0x20>;
+			performance-monitor = <0x00 0x01>;
+			l2-cache = <0x33>;
+			ibm,pir = <0x218>;
+			ibm,chip-id = <0x02>;
+			ibm,ppc-interrupt-server#s = <0x218 0x219 0x21a 0x21b 0x21c 0x21d 0x21e 0x21f>;
+		};
+
+		PowerPC,POWER10@228 {
+			phandle = <0x35>;
+			device_type = "cpu";
+			status = "okay";
+			reg = <0x228>;
+			cpu-version = <0x800100>;
+			64-bit;
+			32-64-bridge;
+			graphics;
+			general-purpose;
+			ibm,processor-segment-sizes = <0x1c 0x28 0xffffffff 0xffffffff>;
+			ibm,processor-page-sizes = <0x0c 0x10 0x18 0x22>;
+			ibm,processor-radix-AP-encodings = <0x0c 0xa0000010 0x20000015 0x4000001e>;
+			ibm,mmu-pid-bits = <0x14>;
+			ibm,mmu-lpid-bits = <0x0c>;
+			ibm,segment-page-sizes = <0x0c 0x00 0x03 0x0c 0x00 0x10 0x07 0x18 0x38 0x10 0x110 0x02 0x10 0x01 0x18 0x08 0x18 0x100 0x01 0x18 0x00 0x22 0x120 0x01 0x22 0x03>;
+			ibm,pa-features = <0x4200f63f 0xc7c080d0 0x80000000 0x00 0x8000 0x80008000 0x8000 0x80008000 0x8000 0x80000000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000>;
+			ibm,slb-size = <0x20>;
+			ibm,vmx = <0x02>;
+			ibm,dfp = <0x02>;
+			ibm,purr = <0x01>;
+			ibm,spurr = <0x01>;
+			clock-frequency = <0x9af8da00>;
+			ibm,extended-clock-frequency = <0x00 0x9af8da00>;
+			timebase-frequency = <0x1e848000>;
+			ibm,extended-timebase-frequency = <0x00 0x1e848000>;
+			reservation-granule-size = <0x80>;
+			d-tlb-size = <0x1000>;
+			i-tlb-size = <0x00>;
+			tlb-size = <0x1000>;
+			d-tlb-sets = <0x400>;
+			i-tlb-sets = <0x00>;
+			tlb-sets = <0x400>;
+			d-cache-block-size = <0x80>;
+			i-cache-block-size = <0x80>;
+			d-cache-size = <0x8000>;
+			i-cache-size = <0xc000>;
+			i-cache-sets = <0x40>;
+			d-cache-sets = <0x20>;
+			performance-monitor = <0x00 0x01>;
+			l2-cache = <0x36>;
+			ibm,pir = <0x228>;
+			ibm,chip-id = <0x02>;
+			ibm,ppc-interrupt-server#s = <0x228 0x229 0x22a 0x22b 0x22c 0x22d 0x22e 0x22f>;
+		};
+
+		PowerPC,POWER10@250 {
+			phandle = <0x38>;
+			device_type = "cpu";
+			status = "okay";
+			reg = <0x250>;
+			cpu-version = <0x800100>;
+			64-bit;
+			32-64-bridge;
+			graphics;
+			general-purpose;
+			ibm,processor-segment-sizes = <0x1c 0x28 0xffffffff 0xffffffff>;
+			ibm,processor-page-sizes = <0x0c 0x10 0x18 0x22>;
+			ibm,processor-radix-AP-encodings = <0x0c 0xa0000010 0x20000015 0x4000001e>;
+			ibm,mmu-pid-bits = <0x14>;
+			ibm,mmu-lpid-bits = <0x0c>;
+			ibm,segment-page-sizes = <0x0c 0x00 0x03 0x0c 0x00 0x10 0x07 0x18 0x38 0x10 0x110 0x02 0x10 0x01 0x18 0x08 0x18 0x100 0x01 0x18 0x00 0x22 0x120 0x01 0x22 0x03>;
+			ibm,pa-features = <0x4200f63f 0xc7c080d0 0x80000000 0x00 0x8000 0x80008000 0x8000 0x80008000 0x8000 0x80000000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000>;
+			ibm,slb-size = <0x20>;
+			ibm,vmx = <0x02>;
+			ibm,dfp = <0x02>;
+			ibm,purr = <0x01>;
+			ibm,spurr = <0x01>;
+			clock-frequency = <0x9af8da00>;
+			ibm,extended-clock-frequency = <0x00 0x9af8da00>;
+			timebase-frequency = <0x1e848000>;
+			ibm,extended-timebase-frequency = <0x00 0x1e848000>;
+			reservation-granule-size = <0x80>;
+			d-tlb-size = <0x1000>;
+			i-tlb-size = <0x00>;
+			tlb-size = <0x1000>;
+			d-tlb-sets = <0x400>;
+			i-tlb-sets = <0x00>;
+			tlb-sets = <0x400>;
+			d-cache-block-size = <0x80>;
+			i-cache-block-size = <0x80>;
+			d-cache-size = <0x8000>;
+			i-cache-size = <0xc000>;
+			i-cache-sets = <0x40>;
+			d-cache-sets = <0x20>;
+			performance-monitor = <0x00 0x01>;
+			l2-cache = <0x39>;
+			ibm,pir = <0x250>;
+			ibm,chip-id = <0x02>;
+			ibm,ppc-interrupt-server#s = <0x250 0x251 0x252 0x253 0x254 0x255 0x256 0x257>;
+		};
+
+		PowerPC,POWER10@258 {
+			phandle = <0x3b>;
+			device_type = "cpu";
+			status = "okay";
+			reg = <0x258>;
+			cpu-version = <0x800100>;
+			64-bit;
+			32-64-bridge;
+			graphics;
+			general-purpose;
+			ibm,processor-segment-sizes = <0x1c 0x28 0xffffffff 0xffffffff>;
+			ibm,processor-page-sizes = <0x0c 0x10 0x18 0x22>;
+			ibm,processor-radix-AP-encodings = <0x0c 0xa0000010 0x20000015 0x4000001e>;
+			ibm,mmu-pid-bits = <0x14>;
+			ibm,mmu-lpid-bits = <0x0c>;
+			ibm,segment-page-sizes = <0x0c 0x00 0x03 0x0c 0x00 0x10 0x07 0x18 0x38 0x10 0x110 0x02 0x10 0x01 0x18 0x08 0x18 0x100 0x01 0x18 0x00 0x22 0x120 0x01 0x22 0x03>;
+			ibm,pa-features = <0x4200f63f 0xc7c080d0 0x80000000 0x00 0x8000 0x80008000 0x8000 0x80008000 0x8000 0x80000000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000>;
+			ibm,slb-size = <0x20>;
+			ibm,vmx = <0x02>;
+			ibm,dfp = <0x02>;
+			ibm,purr = <0x01>;
+			ibm,spurr = <0x01>;
+			clock-frequency = <0x9af8da00>;
+			ibm,extended-clock-frequency = <0x00 0x9af8da00>;
+			timebase-frequency = <0x1e848000>;
+			ibm,extended-timebase-frequency = <0x00 0x1e848000>;
+			reservation-granule-size = <0x80>;
+			d-tlb-size = <0x1000>;
+			i-tlb-size = <0x00>;
+			tlb-size = <0x1000>;
+			d-tlb-sets = <0x400>;
+			i-tlb-sets = <0x00>;
+			tlb-sets = <0x400>;
+			d-cache-block-size = <0x80>;
+			i-cache-block-size = <0x80>;
+			d-cache-size = <0x8000>;
+			i-cache-size = <0xc000>;
+			i-cache-sets = <0x40>;
+			d-cache-sets = <0x20>;
+			performance-monitor = <0x00 0x01>;
+			l2-cache = <0x3c>;
+			ibm,pir = <0x258>;
+			ibm,chip-id = <0x02>;
+			ibm,ppc-interrupt-server#s = <0x258 0x259 0x25a 0x25b 0x25c 0x25d 0x25e 0x25f>;
+		};
+
+		PowerPC,POWER10@260 {
+			phandle = <0x3e>;
+			device_type = "cpu";
+			status = "okay";
+			reg = <0x260>;
+			cpu-version = <0x800100>;
+			64-bit;
+			32-64-bridge;
+			graphics;
+			general-purpose;
+			ibm,processor-segment-sizes = <0x1c 0x28 0xffffffff 0xffffffff>;
+			ibm,processor-page-sizes = <0x0c 0x10 0x18 0x22>;
+			ibm,processor-radix-AP-encodings = <0x0c 0xa0000010 0x20000015 0x4000001e>;
+			ibm,mmu-pid-bits = <0x14>;
+			ibm,mmu-lpid-bits = <0x0c>;
+			ibm,segment-page-sizes = <0x0c 0x00 0x03 0x0c 0x00 0x10 0x07 0x18 0x38 0x10 0x110 0x02 0x10 0x01 0x18 0x08 0x18 0x100 0x01 0x18 0x00 0x22 0x120 0x01 0x22 0x03>;
+			ibm,pa-features = <0x4200f63f 0xc7c080d0 0x80000000 0x00 0x8000 0x80008000 0x8000 0x80008000 0x8000 0x80000000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000>;
+			ibm,slb-size = <0x20>;
+			ibm,vmx = <0x02>;
+			ibm,dfp = <0x02>;
+			ibm,purr = <0x01>;
+			ibm,spurr = <0x01>;
+			clock-frequency = <0x9af8da00>;
+			ibm,extended-clock-frequency = <0x00 0x9af8da00>;
+			timebase-frequency = <0x1e848000>;
+			ibm,extended-timebase-frequency = <0x00 0x1e848000>;
+			reservation-granule-size = <0x80>;
+			d-tlb-size = <0x1000>;
+			i-tlb-size = <0x00>;
+			tlb-size = <0x1000>;
+			d-tlb-sets = <0x400>;
+			i-tlb-sets = <0x00>;
+			tlb-sets = <0x400>;
+			d-cache-block-size = <0x80>;
+			i-cache-block-size = <0x80>;
+			d-cache-size = <0x8000>;
+			i-cache-size = <0xc000>;
+			i-cache-sets = <0x40>;
+			d-cache-sets = <0x20>;
+			performance-monitor = <0x00 0x01>;
+			l2-cache = <0x3f>;
+			ibm,pir = <0x260>;
+			ibm,chip-id = <0x02>;
+			ibm,ppc-interrupt-server#s = <0x260 0x261 0x262 0x263 0x264 0x265 0x266 0x267>;
+		};
+
+		PowerPC,POWER10@268 {
+			phandle = <0x41>;
+			device_type = "cpu";
+			status = "okay";
+			reg = <0x268>;
+			cpu-version = <0x800100>;
+			64-bit;
+			32-64-bridge;
+			graphics;
+			general-purpose;
+			ibm,processor-segment-sizes = <0x1c 0x28 0xffffffff 0xffffffff>;
+			ibm,processor-page-sizes = <0x0c 0x10 0x18 0x22>;
+			ibm,processor-radix-AP-encodings = <0x0c 0xa0000010 0x20000015 0x4000001e>;
+			ibm,mmu-pid-bits = <0x14>;
+			ibm,mmu-lpid-bits = <0x0c>;
+			ibm,segment-page-sizes = <0x0c 0x00 0x03 0x0c 0x00 0x10 0x07 0x18 0x38 0x10 0x110 0x02 0x10 0x01 0x18 0x08 0x18 0x100 0x01 0x18 0x00 0x22 0x120 0x01 0x22 0x03>;
+			ibm,pa-features = <0x4200f63f 0xc7c080d0 0x80000000 0x00 0x8000 0x80008000 0x8000 0x80008000 0x8000 0x80000000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000>;
+			ibm,slb-size = <0x20>;
+			ibm,vmx = <0x02>;
+			ibm,dfp = <0x02>;
+			ibm,purr = <0x01>;
+			ibm,spurr = <0x01>;
+			clock-frequency = <0x9af8da00>;
+			ibm,extended-clock-frequency = <0x00 0x9af8da00>;
+			timebase-frequency = <0x1e848000>;
+			ibm,extended-timebase-frequency = <0x00 0x1e848000>;
+			reservation-granule-size = <0x80>;
+			d-tlb-size = <0x1000>;
+			i-tlb-size = <0x00>;
+			tlb-size = <0x1000>;
+			d-tlb-sets = <0x400>;
+			i-tlb-sets = <0x00>;
+			tlb-sets = <0x400>;
+			d-cache-block-size = <0x80>;
+			i-cache-block-size = <0x80>;
+			d-cache-size = <0x8000>;
+			i-cache-size = <0xc000>;
+			i-cache-sets = <0x40>;
+			d-cache-sets = <0x20>;
+			performance-monitor = <0x00 0x01>;
+			l2-cache = <0x42>;
+			ibm,pir = <0x268>;
+			ibm,chip-id = <0x02>;
+			ibm,ppc-interrupt-server#s = <0x268 0x269 0x26a 0x26b 0x26c 0x26d 0x26e 0x26f>;
+		};
+
+		PowerPC,POWER10@270 {
+			phandle = <0x44>;
+			device_type = "cpu";
+			status = "okay";
+			reg = <0x270>;
+			cpu-version = <0x800100>;
+			64-bit;
+			32-64-bridge;
+			graphics;
+			general-purpose;
+			ibm,processor-segment-sizes = <0x1c 0x28 0xffffffff 0xffffffff>;
+			ibm,processor-page-sizes = <0x0c 0x10 0x18 0x22>;
+			ibm,processor-radix-AP-encodings = <0x0c 0xa0000010 0x20000015 0x4000001e>;
+			ibm,mmu-pid-bits = <0x14>;
+			ibm,mmu-lpid-bits = <0x0c>;
+			ibm,segment-page-sizes = <0x0c 0x00 0x03 0x0c 0x00 0x10 0x07 0x18 0x38 0x10 0x110 0x02 0x10 0x01 0x18 0x08 0x18 0x100 0x01 0x18 0x00 0x22 0x120 0x01 0x22 0x03>;
+			ibm,pa-features = <0x4200f63f 0xc7c080d0 0x80000000 0x00 0x8000 0x80008000 0x8000 0x80008000 0x8000 0x80000000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000>;
+			ibm,slb-size = <0x20>;
+			ibm,vmx = <0x02>;
+			ibm,dfp = <0x02>;
+			ibm,purr = <0x01>;
+			ibm,spurr = <0x01>;
+			clock-frequency = <0x9af8da00>;
+			ibm,extended-clock-frequency = <0x00 0x9af8da00>;
+			timebase-frequency = <0x1e848000>;
+			ibm,extended-timebase-frequency = <0x00 0x1e848000>;
+			reservation-granule-size = <0x80>;
+			d-tlb-size = <0x1000>;
+			i-tlb-size = <0x00>;
+			tlb-size = <0x1000>;
+			d-tlb-sets = <0x400>;
+			i-tlb-sets = <0x00>;
+			tlb-sets = <0x400>;
+			d-cache-block-size = <0x80>;
+			i-cache-block-size = <0x80>;
+			d-cache-size = <0x8000>;
+			i-cache-size = <0xc000>;
+			i-cache-sets = <0x40>;
+			d-cache-sets = <0x20>;
+			performance-monitor = <0x00 0x01>;
+			l2-cache = <0x45>;
+			ibm,pir = <0x270>;
+			ibm,chip-id = <0x02>;
+			ibm,ppc-interrupt-server#s = <0x270 0x271 0x272 0x273 0x274 0x275 0x276 0x277>;
+		};
+
+		PowerPC,POWER10@278 {
+			phandle = <0x47>;
+			device_type = "cpu";
+			status = "okay";
+			reg = <0x278>;
+			cpu-version = <0x800100>;
+			64-bit;
+			32-64-bridge;
+			graphics;
+			general-purpose;
+			ibm,processor-segment-sizes = <0x1c 0x28 0xffffffff 0xffffffff>;
+			ibm,processor-page-sizes = <0x0c 0x10 0x18 0x22>;
+			ibm,processor-radix-AP-encodings = <0x0c 0xa0000010 0x20000015 0x4000001e>;
+			ibm,mmu-pid-bits = <0x14>;
+			ibm,mmu-lpid-bits = <0x0c>;
+			ibm,segment-page-sizes = <0x0c 0x00 0x03 0x0c 0x00 0x10 0x07 0x18 0x38 0x10 0x110 0x02 0x10 0x01 0x18 0x08 0x18 0x100 0x01 0x18 0x00 0x22 0x120 0x01 0x22 0x03>;
+			ibm,pa-features = <0x4200f63f 0xc7c080d0 0x80000000 0x00 0x8000 0x80008000 0x8000 0x80008000 0x8000 0x80000000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000>;
+			ibm,slb-size = <0x20>;
+			ibm,vmx = <0x02>;
+			ibm,dfp = <0x02>;
+			ibm,purr = <0x01>;
+			ibm,spurr = <0x01>;
+			clock-frequency = <0x9af8da00>;
+			ibm,extended-clock-frequency = <0x00 0x9af8da00>;
+			timebase-frequency = <0x1e848000>;
+			ibm,extended-timebase-frequency = <0x00 0x1e848000>;
+			reservation-granule-size = <0x80>;
+			d-tlb-size = <0x1000>;
+			i-tlb-size = <0x00>;
+			tlb-size = <0x1000>;
+			d-tlb-sets = <0x400>;
+			i-tlb-sets = <0x00>;
+			tlb-sets = <0x400>;
+			d-cache-block-size = <0x80>;
+			i-cache-block-size = <0x80>;
+			d-cache-size = <0x8000>;
+			i-cache-size = <0xc000>;
+			i-cache-sets = <0x40>;
+			d-cache-sets = <0x20>;
+			performance-monitor = <0x00 0x01>;
+			l2-cache = <0x48>;
+			ibm,pir = <0x278>;
+			ibm,chip-id = <0x02>;
+			ibm,ppc-interrupt-server#s = <0x278 0x279 0x27a 0x27b 0x27c 0x27d 0x27e 0x27f>;
+		};
+
+		PowerPC,POWER10@410 {
+			phandle = <0x4a>;
+			device_type = "cpu";
+			status = "okay";
+			reg = <0x410>;
+			cpu-version = <0x800100>;
+			64-bit;
+			32-64-bridge;
+			graphics;
+			general-purpose;
+			ibm,processor-segment-sizes = <0x1c 0x28 0xffffffff 0xffffffff>;
+			ibm,processor-page-sizes = <0x0c 0x10 0x18 0x22>;
+			ibm,processor-radix-AP-encodings = <0x0c 0xa0000010 0x20000015 0x4000001e>;
+			ibm,mmu-pid-bits = <0x14>;
+			ibm,mmu-lpid-bits = <0x0c>;
+			ibm,segment-page-sizes = <0x0c 0x00 0x03 0x0c 0x00 0x10 0x07 0x18 0x38 0x10 0x110 0x02 0x10 0x01 0x18 0x08 0x18 0x100 0x01 0x18 0x00 0x22 0x120 0x01 0x22 0x03>;
+			ibm,pa-features = <0x4200f63f 0xc7c080d0 0x80000000 0x00 0x8000 0x80008000 0x8000 0x80008000 0x8000 0x80000000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000>;
+			ibm,slb-size = <0x20>;
+			ibm,vmx = <0x02>;
+			ibm,dfp = <0x02>;
+			ibm,purr = <0x01>;
+			ibm,spurr = <0x01>;
+			clock-frequency = <0x9af8da00>;
+			ibm,extended-clock-frequency = <0x00 0x9af8da00>;
+			timebase-frequency = <0x1e848000>;
+			ibm,extended-timebase-frequency = <0x00 0x1e848000>;
+			reservation-granule-size = <0x80>;
+			d-tlb-size = <0x1000>;
+			i-tlb-size = <0x00>;
+			tlb-size = <0x1000>;
+			d-tlb-sets = <0x400>;
+			i-tlb-sets = <0x00>;
+			tlb-sets = <0x400>;
+			d-cache-block-size = <0x80>;
+			i-cache-block-size = <0x80>;
+			d-cache-size = <0x8000>;
+			i-cache-size = <0xc000>;
+			i-cache-sets = <0x40>;
+			d-cache-sets = <0x20>;
+			performance-monitor = <0x00 0x01>;
+			l2-cache = <0x4b>;
+			ibm,pir = <0x410>;
+			ibm,chip-id = <0x04>;
+			ibm,ppc-interrupt-server#s = <0x410 0x411 0x412 0x413 0x414 0x415 0x416 0x417>;
+		};
+
+		PowerPC,POWER10@420 {
+			phandle = <0x4d>;
+			device_type = "cpu";
+			status = "okay";
+			reg = <0x420>;
+			cpu-version = <0x800100>;
+			64-bit;
+			32-64-bridge;
+			graphics;
+			general-purpose;
+			ibm,processor-segment-sizes = <0x1c 0x28 0xffffffff 0xffffffff>;
+			ibm,processor-page-sizes = <0x0c 0x10 0x18 0x22>;
+			ibm,processor-radix-AP-encodings = <0x0c 0xa0000010 0x20000015 0x4000001e>;
+			ibm,mmu-pid-bits = <0x14>;
+			ibm,mmu-lpid-bits = <0x0c>;
+			ibm,segment-page-sizes = <0x0c 0x00 0x03 0x0c 0x00 0x10 0x07 0x18 0x38 0x10 0x110 0x02 0x10 0x01 0x18 0x08 0x18 0x100 0x01 0x18 0x00 0x22 0x120 0x01 0x22 0x03>;
+			ibm,pa-features = <0x4200f63f 0xc7c080d0 0x80000000 0x00 0x8000 0x80008000 0x8000 0x80008000 0x8000 0x80000000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000>;
+			ibm,slb-size = <0x20>;
+			ibm,vmx = <0x02>;
+			ibm,dfp = <0x02>;
+			ibm,purr = <0x01>;
+			ibm,spurr = <0x01>;
+			clock-frequency = <0x9af8da00>;
+			ibm,extended-clock-frequency = <0x00 0x9af8da00>;
+			timebase-frequency = <0x1e848000>;
+			ibm,extended-timebase-frequency = <0x00 0x1e848000>;
+			reservation-granule-size = <0x80>;
+			d-tlb-size = <0x1000>;
+			i-tlb-size = <0x00>;
+			tlb-size = <0x1000>;
+			d-tlb-sets = <0x400>;
+			i-tlb-sets = <0x00>;
+			tlb-sets = <0x400>;
+			d-cache-block-size = <0x80>;
+			i-cache-block-size = <0x80>;
+			d-cache-size = <0x8000>;
+			i-cache-size = <0xc000>;
+			i-cache-sets = <0x40>;
+			d-cache-sets = <0x20>;
+			performance-monitor = <0x00 0x01>;
+			l2-cache = <0x4e>;
+			ibm,pir = <0x420>;
+			ibm,chip-id = <0x04>;
+			ibm,ppc-interrupt-server#s = <0x420 0x421 0x422 0x423 0x424 0x425 0x426 0x427>;
+		};
+
+		PowerPC,POWER10@428 {
+			phandle = <0x50>;
+			device_type = "cpu";
+			status = "okay";
+			reg = <0x428>;
+			cpu-version = <0x800100>;
+			64-bit;
+			32-64-bridge;
+			graphics;
+			general-purpose;
+			ibm,processor-segment-sizes = <0x1c 0x28 0xffffffff 0xffffffff>;
+			ibm,processor-page-sizes = <0x0c 0x10 0x18 0x22>;
+			ibm,processor-radix-AP-encodings = <0x0c 0xa0000010 0x20000015 0x4000001e>;
+			ibm,mmu-pid-bits = <0x14>;
+			ibm,mmu-lpid-bits = <0x0c>;
+			ibm,segment-page-sizes = <0x0c 0x00 0x03 0x0c 0x00 0x10 0x07 0x18 0x38 0x10 0x110 0x02 0x10 0x01 0x18 0x08 0x18 0x100 0x01 0x18 0x00 0x22 0x120 0x01 0x22 0x03>;
+			ibm,pa-features = <0x4200f63f 0xc7c080d0 0x80000000 0x00 0x8000 0x80008000 0x8000 0x80008000 0x8000 0x80000000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000>;
+			ibm,slb-size = <0x20>;
+			ibm,vmx = <0x02>;
+			ibm,dfp = <0x02>;
+			ibm,purr = <0x01>;
+			ibm,spurr = <0x01>;
+			clock-frequency = <0x9af8da00>;
+			ibm,extended-clock-frequency = <0x00 0x9af8da00>;
+			timebase-frequency = <0x1e848000>;
+			ibm,extended-timebase-frequency = <0x00 0x1e848000>;
+			reservation-granule-size = <0x80>;
+			d-tlb-size = <0x1000>;
+			i-tlb-size = <0x00>;
+			tlb-size = <0x1000>;
+			d-tlb-sets = <0x400>;
+			i-tlb-sets = <0x00>;
+			tlb-sets = <0x400>;
+			d-cache-block-size = <0x80>;
+			i-cache-block-size = <0x80>;
+			d-cache-size = <0x8000>;
+			i-cache-size = <0xc000>;
+			i-cache-sets = <0x40>;
+			d-cache-sets = <0x20>;
+			performance-monitor = <0x00 0x01>;
+			l2-cache = <0x51>;
+			ibm,pir = <0x428>;
+			ibm,chip-id = <0x04>;
+			ibm,ppc-interrupt-server#s = <0x428 0x429 0x42a 0x42b 0x42c 0x42d 0x42e 0x42f>;
+		};
+
+		PowerPC,POWER10@450 {
+			phandle = <0x53>;
+			device_type = "cpu";
+			status = "okay";
+			reg = <0x450>;
+			cpu-version = <0x800100>;
+			64-bit;
+			32-64-bridge;
+			graphics;
+			general-purpose;
+			ibm,processor-segment-sizes = <0x1c 0x28 0xffffffff 0xffffffff>;
+			ibm,processor-page-sizes = <0x0c 0x10 0x18 0x22>;
+			ibm,processor-radix-AP-encodings = <0x0c 0xa0000010 0x20000015 0x4000001e>;
+			ibm,mmu-pid-bits = <0x14>;
+			ibm,mmu-lpid-bits = <0x0c>;
+			ibm,segment-page-sizes = <0x0c 0x00 0x03 0x0c 0x00 0x10 0x07 0x18 0x38 0x10 0x110 0x02 0x10 0x01 0x18 0x08 0x18 0x100 0x01 0x18 0x00 0x22 0x120 0x01 0x22 0x03>;
+			ibm,pa-features = <0x4200f63f 0xc7c080d0 0x80000000 0x00 0x8000 0x80008000 0x8000 0x80008000 0x8000 0x80000000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000>;
+			ibm,slb-size = <0x20>;
+			ibm,vmx = <0x02>;
+			ibm,dfp = <0x02>;
+			ibm,purr = <0x01>;
+			ibm,spurr = <0x01>;
+			clock-frequency = <0x9af8da00>;
+			ibm,extended-clock-frequency = <0x00 0x9af8da00>;
+			timebase-frequency = <0x1e848000>;
+			ibm,extended-timebase-frequency = <0x00 0x1e848000>;
+			reservation-granule-size = <0x80>;
+			d-tlb-size = <0x1000>;
+			i-tlb-size = <0x00>;
+			tlb-size = <0x1000>;
+			d-tlb-sets = <0x400>;
+			i-tlb-sets = <0x00>;
+			tlb-sets = <0x400>;
+			d-cache-block-size = <0x80>;
+			i-cache-block-size = <0x80>;
+			d-cache-size = <0x8000>;
+			i-cache-size = <0xc000>;
+			i-cache-sets = <0x40>;
+			d-cache-sets = <0x20>;
+			performance-monitor = <0x00 0x01>;
+			l2-cache = <0x54>;
+			ibm,pir = <0x450>;
+			ibm,chip-id = <0x04>;
+			ibm,ppc-interrupt-server#s = <0x450 0x451 0x452 0x453 0x454 0x455 0x456 0x457>;
+		};
+
+		PowerPC,POWER10@458 {
+			phandle = <0x56>;
+			device_type = "cpu";
+			status = "okay";
+			reg = <0x458>;
+			cpu-version = <0x800100>;
+			64-bit;
+			32-64-bridge;
+			graphics;
+			general-purpose;
+			ibm,processor-segment-sizes = <0x1c 0x28 0xffffffff 0xffffffff>;
+			ibm,processor-page-sizes = <0x0c 0x10 0x18 0x22>;
+			ibm,processor-radix-AP-encodings = <0x0c 0xa0000010 0x20000015 0x4000001e>;
+			ibm,mmu-pid-bits = <0x14>;
+			ibm,mmu-lpid-bits = <0x0c>;
+			ibm,segment-page-sizes = <0x0c 0x00 0x03 0x0c 0x00 0x10 0x07 0x18 0x38 0x10 0x110 0x02 0x10 0x01 0x18 0x08 0x18 0x100 0x01 0x18 0x00 0x22 0x120 0x01 0x22 0x03>;
+			ibm,pa-features = <0x4200f63f 0xc7c080d0 0x80000000 0x00 0x8000 0x80008000 0x8000 0x80008000 0x8000 0x80000000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000>;
+			ibm,slb-size = <0x20>;
+			ibm,vmx = <0x02>;
+			ibm,dfp = <0x02>;
+			ibm,purr = <0x01>;
+			ibm,spurr = <0x01>;
+			clock-frequency = <0x9af8da00>;
+			ibm,extended-clock-frequency = <0x00 0x9af8da00>;
+			timebase-frequency = <0x1e848000>;
+			ibm,extended-timebase-frequency = <0x00 0x1e848000>;
+			reservation-granule-size = <0x80>;
+			d-tlb-size = <0x1000>;
+			i-tlb-size = <0x00>;
+			tlb-size = <0x1000>;
+			d-tlb-sets = <0x400>;
+			i-tlb-sets = <0x00>;
+			tlb-sets = <0x400>;
+			d-cache-block-size = <0x80>;
+			i-cache-block-size = <0x80>;
+			d-cache-size = <0x8000>;
+			i-cache-size = <0xc000>;
+			i-cache-sets = <0x40>;
+			d-cache-sets = <0x20>;
+			performance-monitor = <0x00 0x01>;
+			l2-cache = <0x57>;
+			ibm,pir = <0x458>;
+			ibm,chip-id = <0x04>;
+			ibm,ppc-interrupt-server#s = <0x458 0x459 0x45a 0x45b 0x45c 0x45d 0x45e 0x45f>;
+		};
+
+		PowerPC,POWER10@460 {
+			phandle = <0x59>;
+			device_type = "cpu";
+			status = "okay";
+			reg = <0x460>;
+			cpu-version = <0x800100>;
+			64-bit;
+			32-64-bridge;
+			graphics;
+			general-purpose;
+			ibm,processor-segment-sizes = <0x1c 0x28 0xffffffff 0xffffffff>;
+			ibm,processor-page-sizes = <0x0c 0x10 0x18 0x22>;
+			ibm,processor-radix-AP-encodings = <0x0c 0xa0000010 0x20000015 0x4000001e>;
+			ibm,mmu-pid-bits = <0x14>;
+			ibm,mmu-lpid-bits = <0x0c>;
+			ibm,segment-page-sizes = <0x0c 0x00 0x03 0x0c 0x00 0x10 0x07 0x18 0x38 0x10 0x110 0x02 0x10 0x01 0x18 0x08 0x18 0x100 0x01 0x18 0x00 0x22 0x120 0x01 0x22 0x03>;
+			ibm,pa-features = <0x4200f63f 0xc7c080d0 0x80000000 0x00 0x8000 0x80008000 0x8000 0x80008000 0x8000 0x80000000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000>;
+			ibm,slb-size = <0x20>;
+			ibm,vmx = <0x02>;
+			ibm,dfp = <0x02>;
+			ibm,purr = <0x01>;
+			ibm,spurr = <0x01>;
+			clock-frequency = <0x9af8da00>;
+			ibm,extended-clock-frequency = <0x00 0x9af8da00>;
+			timebase-frequency = <0x1e848000>;
+			ibm,extended-timebase-frequency = <0x00 0x1e848000>;
+			reservation-granule-size = <0x80>;
+			d-tlb-size = <0x1000>;
+			i-tlb-size = <0x00>;
+			tlb-size = <0x1000>;
+			d-tlb-sets = <0x400>;
+			i-tlb-sets = <0x00>;
+			tlb-sets = <0x400>;
+			d-cache-block-size = <0x80>;
+			i-cache-block-size = <0x80>;
+			d-cache-size = <0x8000>;
+			i-cache-size = <0xc000>;
+			i-cache-sets = <0x40>;
+			d-cache-sets = <0x20>;
+			performance-monitor = <0x00 0x01>;
+			l2-cache = <0x5a>;
+			ibm,pir = <0x460>;
+			ibm,chip-id = <0x04>;
+			ibm,ppc-interrupt-server#s = <0x460 0x461 0x462 0x463 0x464 0x465 0x466 0x467>;
+		};
+
+		PowerPC,POWER10@468 {
+			phandle = <0x5c>;
+			device_type = "cpu";
+			status = "okay";
+			reg = <0x468>;
+			cpu-version = <0x800100>;
+			64-bit;
+			32-64-bridge;
+			graphics;
+			general-purpose;
+			ibm,processor-segment-sizes = <0x1c 0x28 0xffffffff 0xffffffff>;
+			ibm,processor-page-sizes = <0x0c 0x10 0x18 0x22>;
+			ibm,processor-radix-AP-encodings = <0x0c 0xa0000010 0x20000015 0x4000001e>;
+			ibm,mmu-pid-bits = <0x14>;
+			ibm,mmu-lpid-bits = <0x0c>;
+			ibm,segment-page-sizes = <0x0c 0x00 0x03 0x0c 0x00 0x10 0x07 0x18 0x38 0x10 0x110 0x02 0x10 0x01 0x18 0x08 0x18 0x100 0x01 0x18 0x00 0x22 0x120 0x01 0x22 0x03>;
+			ibm,pa-features = <0x4200f63f 0xc7c080d0 0x80000000 0x00 0x8000 0x80008000 0x8000 0x80008000 0x8000 0x80000000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000>;
+			ibm,slb-size = <0x20>;
+			ibm,vmx = <0x02>;
+			ibm,dfp = <0x02>;
+			ibm,purr = <0x01>;
+			ibm,spurr = <0x01>;
+			clock-frequency = <0x9af8da00>;
+			ibm,extended-clock-frequency = <0x00 0x9af8da00>;
+			timebase-frequency = <0x1e848000>;
+			ibm,extended-timebase-frequency = <0x00 0x1e848000>;
+			reservation-granule-size = <0x80>;
+			d-tlb-size = <0x1000>;
+			i-tlb-size = <0x00>;
+			tlb-size = <0x1000>;
+			d-tlb-sets = <0x400>;
+			i-tlb-sets = <0x00>;
+			tlb-sets = <0x400>;
+			d-cache-block-size = <0x80>;
+			i-cache-block-size = <0x80>;
+			d-cache-size = <0x8000>;
+			i-cache-size = <0xc000>;
+			i-cache-sets = <0x40>;
+			d-cache-sets = <0x20>;
+			performance-monitor = <0x00 0x01>;
+			l2-cache = <0x5d>;
+			ibm,pir = <0x468>;
+			ibm,chip-id = <0x04>;
+			ibm,ppc-interrupt-server#s = <0x468 0x469 0x46a 0x46b 0x46c 0x46d 0x46e 0x46f>;
+		};
+
+		PowerPC,POWER10@478 {
+			phandle = <0x5f>;
+			device_type = "cpu";
+			status = "okay";
+			reg = <0x478>;
+			cpu-version = <0x800100>;
+			64-bit;
+			32-64-bridge;
+			graphics;
+			general-purpose;
+			ibm,processor-segment-sizes = <0x1c 0x28 0xffffffff 0xffffffff>;
+			ibm,processor-page-sizes = <0x0c 0x10 0x18 0x22>;
+			ibm,processor-radix-AP-encodings = <0x0c 0xa0000010 0x20000015 0x4000001e>;
+			ibm,mmu-pid-bits = <0x14>;
+			ibm,mmu-lpid-bits = <0x0c>;
+			ibm,segment-page-sizes = <0x0c 0x00 0x03 0x0c 0x00 0x10 0x07 0x18 0x38 0x10 0x110 0x02 0x10 0x01 0x18 0x08 0x18 0x100 0x01 0x18 0x00 0x22 0x120 0x01 0x22 0x03>;
+			ibm,pa-features = <0x4200f63f 0xc7c080d0 0x80000000 0x00 0x8000 0x80008000 0x8000 0x80008000 0x8000 0x80000000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000>;
+			ibm,slb-size = <0x20>;
+			ibm,vmx = <0x02>;
+			ibm,dfp = <0x02>;
+			ibm,purr = <0x01>;
+			ibm,spurr = <0x01>;
+			clock-frequency = <0x9af8da00>;
+			ibm,extended-clock-frequency = <0x00 0x9af8da00>;
+			timebase-frequency = <0x1e848000>;
+			ibm,extended-timebase-frequency = <0x00 0x1e848000>;
+			reservation-granule-size = <0x80>;
+			d-tlb-size = <0x1000>;
+			i-tlb-size = <0x00>;
+			tlb-size = <0x1000>;
+			d-tlb-sets = <0x400>;
+			i-tlb-sets = <0x00>;
+			tlb-sets = <0x400>;
+			d-cache-block-size = <0x80>;
+			i-cache-block-size = <0x80>;
+			d-cache-size = <0x8000>;
+			i-cache-size = <0xc000>;
+			i-cache-sets = <0x40>;
+			d-cache-sets = <0x20>;
+			performance-monitor = <0x00 0x01>;
+			l2-cache = <0x60>;
+			ibm,pir = <0x478>;
+			ibm,chip-id = <0x04>;
+			ibm,ppc-interrupt-server#s = <0x478 0x479 0x47a 0x47b 0x47c 0x47d 0x47e 0x47f>;
+		};
+
+		PowerPC,POWER10@618 {
+			phandle = <0x62>;
+			device_type = "cpu";
+			status = "okay";
+			reg = <0x618>;
+			cpu-version = <0x800100>;
+			64-bit;
+			32-64-bridge;
+			graphics;
+			general-purpose;
+			ibm,processor-segment-sizes = <0x1c 0x28 0xffffffff 0xffffffff>;
+			ibm,processor-page-sizes = <0x0c 0x10 0x18 0x22>;
+			ibm,processor-radix-AP-encodings = <0x0c 0xa0000010 0x20000015 0x4000001e>;
+			ibm,mmu-pid-bits = <0x14>;
+			ibm,mmu-lpid-bits = <0x0c>;
+			ibm,segment-page-sizes = <0x0c 0x00 0x03 0x0c 0x00 0x10 0x07 0x18 0x38 0x10 0x110 0x02 0x10 0x01 0x18 0x08 0x18 0x100 0x01 0x18 0x00 0x22 0x120 0x01 0x22 0x03>;
+			ibm,pa-features = <0x4200f63f 0xc7c080d0 0x80000000 0x00 0x8000 0x80008000 0x8000 0x80008000 0x8000 0x80000000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000>;
+			ibm,slb-size = <0x20>;
+			ibm,vmx = <0x02>;
+			ibm,dfp = <0x02>;
+			ibm,purr = <0x01>;
+			ibm,spurr = <0x01>;
+			clock-frequency = <0x9af8da00>;
+			ibm,extended-clock-frequency = <0x00 0x9af8da00>;
+			timebase-frequency = <0x1e848000>;
+			ibm,extended-timebase-frequency = <0x00 0x1e848000>;
+			reservation-granule-size = <0x80>;
+			d-tlb-size = <0x1000>;
+			i-tlb-size = <0x00>;
+			tlb-size = <0x1000>;
+			d-tlb-sets = <0x400>;
+			i-tlb-sets = <0x00>;
+			tlb-sets = <0x400>;
+			d-cache-block-size = <0x80>;
+			i-cache-block-size = <0x80>;
+			d-cache-size = <0x8000>;
+			i-cache-size = <0xc000>;
+			i-cache-sets = <0x40>;
+			d-cache-sets = <0x20>;
+			performance-monitor = <0x00 0x01>;
+			l2-cache = <0x63>;
+			ibm,pir = <0x618>;
+			ibm,chip-id = <0x06>;
+			ibm,ppc-interrupt-server#s = <0x618 0x619 0x61a 0x61b 0x61c 0x61d 0x61e 0x61f>;
+		};
+
+		PowerPC,POWER10@620 {
+			phandle = <0x65>;
+			device_type = "cpu";
+			status = "okay";
+			reg = <0x620>;
+			cpu-version = <0x800100>;
+			64-bit;
+			32-64-bridge;
+			graphics;
+			general-purpose;
+			ibm,processor-segment-sizes = <0x1c 0x28 0xffffffff 0xffffffff>;
+			ibm,processor-page-sizes = <0x0c 0x10 0x18 0x22>;
+			ibm,processor-radix-AP-encodings = <0x0c 0xa0000010 0x20000015 0x4000001e>;
+			ibm,mmu-pid-bits = <0x14>;
+			ibm,mmu-lpid-bits = <0x0c>;
+			ibm,segment-page-sizes = <0x0c 0x00 0x03 0x0c 0x00 0x10 0x07 0x18 0x38 0x10 0x110 0x02 0x10 0x01 0x18 0x08 0x18 0x100 0x01 0x18 0x00 0x22 0x120 0x01 0x22 0x03>;
+			ibm,pa-features = <0x4200f63f 0xc7c080d0 0x80000000 0x00 0x8000 0x80008000 0x8000 0x80008000 0x8000 0x80000000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000>;
+			ibm,slb-size = <0x20>;
+			ibm,vmx = <0x02>;
+			ibm,dfp = <0x02>;
+			ibm,purr = <0x01>;
+			ibm,spurr = <0x01>;
+			clock-frequency = <0x9af8da00>;
+			ibm,extended-clock-frequency = <0x00 0x9af8da00>;
+			timebase-frequency = <0x1e848000>;
+			ibm,extended-timebase-frequency = <0x00 0x1e848000>;
+			reservation-granule-size = <0x80>;
+			d-tlb-size = <0x1000>;
+			i-tlb-size = <0x00>;
+			tlb-size = <0x1000>;
+			d-tlb-sets = <0x400>;
+			i-tlb-sets = <0x00>;
+			tlb-sets = <0x400>;
+			d-cache-block-size = <0x80>;
+			i-cache-block-size = <0x80>;
+			d-cache-size = <0x8000>;
+			i-cache-size = <0xc000>;
+			i-cache-sets = <0x40>;
+			d-cache-sets = <0x20>;
+			performance-monitor = <0x00 0x01>;
+			l2-cache = <0x66>;
+			ibm,pir = <0x620>;
+			ibm,chip-id = <0x06>;
+			ibm,ppc-interrupt-server#s = <0x620 0x621 0x622 0x623 0x624 0x625 0x626 0x627>;
+		};
+
+		PowerPC,POWER10@650 {
+			phandle = <0x68>;
+			device_type = "cpu";
+			status = "okay";
+			reg = <0x650>;
+			cpu-version = <0x800100>;
+			64-bit;
+			32-64-bridge;
+			graphics;
+			general-purpose;
+			ibm,processor-segment-sizes = <0x1c 0x28 0xffffffff 0xffffffff>;
+			ibm,processor-page-sizes = <0x0c 0x10 0x18 0x22>;
+			ibm,processor-radix-AP-encodings = <0x0c 0xa0000010 0x20000015 0x4000001e>;
+			ibm,mmu-pid-bits = <0x14>;
+			ibm,mmu-lpid-bits = <0x0c>;
+			ibm,segment-page-sizes = <0x0c 0x00 0x03 0x0c 0x00 0x10 0x07 0x18 0x38 0x10 0x110 0x02 0x10 0x01 0x18 0x08 0x18 0x100 0x01 0x18 0x00 0x22 0x120 0x01 0x22 0x03>;
+			ibm,pa-features = <0x4200f63f 0xc7c080d0 0x80000000 0x00 0x8000 0x80008000 0x8000 0x80008000 0x8000 0x80000000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000>;
+			ibm,slb-size = <0x20>;
+			ibm,vmx = <0x02>;
+			ibm,dfp = <0x02>;
+			ibm,purr = <0x01>;
+			ibm,spurr = <0x01>;
+			clock-frequency = <0x9af8da00>;
+			ibm,extended-clock-frequency = <0x00 0x9af8da00>;
+			timebase-frequency = <0x1e848000>;
+			ibm,extended-timebase-frequency = <0x00 0x1e848000>;
+			reservation-granule-size = <0x80>;
+			d-tlb-size = <0x1000>;
+			i-tlb-size = <0x00>;
+			tlb-size = <0x1000>;
+			d-tlb-sets = <0x400>;
+			i-tlb-sets = <0x00>;
+			tlb-sets = <0x400>;
+			d-cache-block-size = <0x80>;
+			i-cache-block-size = <0x80>;
+			d-cache-size = <0x8000>;
+			i-cache-size = <0xc000>;
+			i-cache-sets = <0x40>;
+			d-cache-sets = <0x20>;
+			performance-monitor = <0x00 0x01>;
+			l2-cache = <0x69>;
+			ibm,pir = <0x650>;
+			ibm,chip-id = <0x06>;
+			ibm,ppc-interrupt-server#s = <0x650 0x651 0x652 0x653 0x654 0x655 0x656 0x657>;
+		};
+
+		PowerPC,POWER10@658 {
+			phandle = <0x6b>;
+			device_type = "cpu";
+			status = "okay";
+			reg = <0x658>;
+			cpu-version = <0x800100>;
+			64-bit;
+			32-64-bridge;
+			graphics;
+			general-purpose;
+			ibm,processor-segment-sizes = <0x1c 0x28 0xffffffff 0xffffffff>;
+			ibm,processor-page-sizes = <0x0c 0x10 0x18 0x22>;
+			ibm,processor-radix-AP-encodings = <0x0c 0xa0000010 0x20000015 0x4000001e>;
+			ibm,mmu-pid-bits = <0x14>;
+			ibm,mmu-lpid-bits = <0x0c>;
+			ibm,segment-page-sizes = <0x0c 0x00 0x03 0x0c 0x00 0x10 0x07 0x18 0x38 0x10 0x110 0x02 0x10 0x01 0x18 0x08 0x18 0x100 0x01 0x18 0x00 0x22 0x120 0x01 0x22 0x03>;
+			ibm,pa-features = <0x4200f63f 0xc7c080d0 0x80000000 0x00 0x8000 0x80008000 0x8000 0x80008000 0x8000 0x80000000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000>;
+			ibm,slb-size = <0x20>;
+			ibm,vmx = <0x02>;
+			ibm,dfp = <0x02>;
+			ibm,purr = <0x01>;
+			ibm,spurr = <0x01>;
+			clock-frequency = <0x9af8da00>;
+			ibm,extended-clock-frequency = <0x00 0x9af8da00>;
+			timebase-frequency = <0x1e848000>;
+			ibm,extended-timebase-frequency = <0x00 0x1e848000>;
+			reservation-granule-size = <0x80>;
+			d-tlb-size = <0x1000>;
+			i-tlb-size = <0x00>;
+			tlb-size = <0x1000>;
+			d-tlb-sets = <0x400>;
+			i-tlb-sets = <0x00>;
+			tlb-sets = <0x400>;
+			d-cache-block-size = <0x80>;
+			i-cache-block-size = <0x80>;
+			d-cache-size = <0x8000>;
+			i-cache-size = <0xc000>;
+			i-cache-sets = <0x40>;
+			d-cache-sets = <0x20>;
+			performance-monitor = <0x00 0x01>;
+			l2-cache = <0x6c>;
+			ibm,pir = <0x658>;
+			ibm,chip-id = <0x06>;
+			ibm,ppc-interrupt-server#s = <0x658 0x659 0x65a 0x65b 0x65c 0x65d 0x65e 0x65f>;
+		};
+
+		PowerPC,POWER10@660 {
+			phandle = <0x6e>;
+			device_type = "cpu";
+			status = "okay";
+			reg = <0x660>;
+			cpu-version = <0x800100>;
+			64-bit;
+			32-64-bridge;
+			graphics;
+			general-purpose;
+			ibm,processor-segment-sizes = <0x1c 0x28 0xffffffff 0xffffffff>;
+			ibm,processor-page-sizes = <0x0c 0x10 0x18 0x22>;
+			ibm,processor-radix-AP-encodings = <0x0c 0xa0000010 0x20000015 0x4000001e>;
+			ibm,mmu-pid-bits = <0x14>;
+			ibm,mmu-lpid-bits = <0x0c>;
+			ibm,segment-page-sizes = <0x0c 0x00 0x03 0x0c 0x00 0x10 0x07 0x18 0x38 0x10 0x110 0x02 0x10 0x01 0x18 0x08 0x18 0x100 0x01 0x18 0x00 0x22 0x120 0x01 0x22 0x03>;
+			ibm,pa-features = <0x4200f63f 0xc7c080d0 0x80000000 0x00 0x8000 0x80008000 0x8000 0x80008000 0x8000 0x80000000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000>;
+			ibm,slb-size = <0x20>;
+			ibm,vmx = <0x02>;
+			ibm,dfp = <0x02>;
+			ibm,purr = <0x01>;
+			ibm,spurr = <0x01>;
+			clock-frequency = <0x9af8da00>;
+			ibm,extended-clock-frequency = <0x00 0x9af8da00>;
+			timebase-frequency = <0x1e848000>;
+			ibm,extended-timebase-frequency = <0x00 0x1e848000>;
+			reservation-granule-size = <0x80>;
+			d-tlb-size = <0x1000>;
+			i-tlb-size = <0x00>;
+			tlb-size = <0x1000>;
+			d-tlb-sets = <0x400>;
+			i-tlb-sets = <0x00>;
+			tlb-sets = <0x400>;
+			d-cache-block-size = <0x80>;
+			i-cache-block-size = <0x80>;
+			d-cache-size = <0x8000>;
+			i-cache-size = <0xc000>;
+			i-cache-sets = <0x40>;
+			d-cache-sets = <0x20>;
+			performance-monitor = <0x00 0x01>;
+			l2-cache = <0x6f>;
+			ibm,pir = <0x660>;
+			ibm,chip-id = <0x06>;
+			ibm,ppc-interrupt-server#s = <0x660 0x661 0x662 0x663 0x664 0x665 0x666 0x667>;
+		};
+
+		PowerPC,POWER10@668 {
+			phandle = <0x71>;
+			device_type = "cpu";
+			status = "okay";
+			reg = <0x668>;
+			cpu-version = <0x800100>;
+			64-bit;
+			32-64-bridge;
+			graphics;
+			general-purpose;
+			ibm,processor-segment-sizes = <0x1c 0x28 0xffffffff 0xffffffff>;
+			ibm,processor-page-sizes = <0x0c 0x10 0x18 0x22>;
+			ibm,processor-radix-AP-encodings = <0x0c 0xa0000010 0x20000015 0x4000001e>;
+			ibm,mmu-pid-bits = <0x14>;
+			ibm,mmu-lpid-bits = <0x0c>;
+			ibm,segment-page-sizes = <0x0c 0x00 0x03 0x0c 0x00 0x10 0x07 0x18 0x38 0x10 0x110 0x02 0x10 0x01 0x18 0x08 0x18 0x100 0x01 0x18 0x00 0x22 0x120 0x01 0x22 0x03>;
+			ibm,pa-features = <0x4200f63f 0xc7c080d0 0x80000000 0x00 0x8000 0x80008000 0x8000 0x80008000 0x8000 0x80000000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000>;
+			ibm,slb-size = <0x20>;
+			ibm,vmx = <0x02>;
+			ibm,dfp = <0x02>;
+			ibm,purr = <0x01>;
+			ibm,spurr = <0x01>;
+			clock-frequency = <0x9af8da00>;
+			ibm,extended-clock-frequency = <0x00 0x9af8da00>;
+			timebase-frequency = <0x1e848000>;
+			ibm,extended-timebase-frequency = <0x00 0x1e848000>;
+			reservation-granule-size = <0x80>;
+			d-tlb-size = <0x1000>;
+			i-tlb-size = <0x00>;
+			tlb-size = <0x1000>;
+			d-tlb-sets = <0x400>;
+			i-tlb-sets = <0x00>;
+			tlb-sets = <0x400>;
+			d-cache-block-size = <0x80>;
+			i-cache-block-size = <0x80>;
+			d-cache-size = <0x8000>;
+			i-cache-size = <0xc000>;
+			i-cache-sets = <0x40>;
+			d-cache-sets = <0x20>;
+			performance-monitor = <0x00 0x01>;
+			l2-cache = <0x72>;
+			ibm,pir = <0x668>;
+			ibm,chip-id = <0x06>;
+			ibm,ppc-interrupt-server#s = <0x668 0x669 0x66a 0x66b 0x66c 0x66d 0x66e 0x66f>;
+		};
+
+		PowerPC,POWER10@670 {
+			phandle = <0x74>;
+			device_type = "cpu";
+			status = "okay";
+			reg = <0x670>;
+			cpu-version = <0x800100>;
+			64-bit;
+			32-64-bridge;
+			graphics;
+			general-purpose;
+			ibm,processor-segment-sizes = <0x1c 0x28 0xffffffff 0xffffffff>;
+			ibm,processor-page-sizes = <0x0c 0x10 0x18 0x22>;
+			ibm,processor-radix-AP-encodings = <0x0c 0xa0000010 0x20000015 0x4000001e>;
+			ibm,mmu-pid-bits = <0x14>;
+			ibm,mmu-lpid-bits = <0x0c>;
+			ibm,segment-page-sizes = <0x0c 0x00 0x03 0x0c 0x00 0x10 0x07 0x18 0x38 0x10 0x110 0x02 0x10 0x01 0x18 0x08 0x18 0x100 0x01 0x18 0x00 0x22 0x120 0x01 0x22 0x03>;
+			ibm,pa-features = <0x4200f63f 0xc7c080d0 0x80000000 0x00 0x8000 0x80008000 0x8000 0x80008000 0x8000 0x80000000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000>;
+			ibm,slb-size = <0x20>;
+			ibm,vmx = <0x02>;
+			ibm,dfp = <0x02>;
+			ibm,purr = <0x01>;
+			ibm,spurr = <0x01>;
+			clock-frequency = <0x9af8da00>;
+			ibm,extended-clock-frequency = <0x00 0x9af8da00>;
+			timebase-frequency = <0x1e848000>;
+			ibm,extended-timebase-frequency = <0x00 0x1e848000>;
+			reservation-granule-size = <0x80>;
+			d-tlb-size = <0x1000>;
+			i-tlb-size = <0x00>;
+			tlb-size = <0x1000>;
+			d-tlb-sets = <0x400>;
+			i-tlb-sets = <0x00>;
+			tlb-sets = <0x400>;
+			d-cache-block-size = <0x80>;
+			i-cache-block-size = <0x80>;
+			d-cache-size = <0x8000>;
+			i-cache-size = <0xc000>;
+			i-cache-sets = <0x40>;
+			d-cache-sets = <0x20>;
+			performance-monitor = <0x00 0x01>;
+			l2-cache = <0x75>;
+			ibm,pir = <0x670>;
+			ibm,chip-id = <0x06>;
+			ibm,ppc-interrupt-server#s = <0x670 0x671 0x672 0x673 0x674 0x675 0x676 0x677>;
+		};
+
+		PowerPC,POWER10@678 {
+			phandle = <0x77>;
+			device_type = "cpu";
+			status = "okay";
+			reg = <0x678>;
+			cpu-version = <0x800100>;
+			64-bit;
+			32-64-bridge;
+			graphics;
+			general-purpose;
+			ibm,processor-segment-sizes = <0x1c 0x28 0xffffffff 0xffffffff>;
+			ibm,processor-page-sizes = <0x0c 0x10 0x18 0x22>;
+			ibm,processor-radix-AP-encodings = <0x0c 0xa0000010 0x20000015 0x4000001e>;
+			ibm,mmu-pid-bits = <0x14>;
+			ibm,mmu-lpid-bits = <0x0c>;
+			ibm,segment-page-sizes = <0x0c 0x00 0x03 0x0c 0x00 0x10 0x07 0x18 0x38 0x10 0x110 0x02 0x10 0x01 0x18 0x08 0x18 0x100 0x01 0x18 0x00 0x22 0x120 0x01 0x22 0x03>;
+			ibm,pa-features = <0x4200f63f 0xc7c080d0 0x80000000 0x00 0x8000 0x80008000 0x8000 0x80008000 0x8000 0x80000000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000 0x80008000>;
+			ibm,slb-size = <0x20>;
+			ibm,vmx = <0x02>;
+			ibm,dfp = <0x02>;
+			ibm,purr = <0x01>;
+			ibm,spurr = <0x01>;
+			clock-frequency = <0x9af8da00>;
+			ibm,extended-clock-frequency = <0x00 0x9af8da00>;
+			timebase-frequency = <0x1e848000>;
+			ibm,extended-timebase-frequency = <0x00 0x1e848000>;
+			reservation-granule-size = <0x80>;
+			d-tlb-size = <0x1000>;
+			i-tlb-size = <0x00>;
+			tlb-size = <0x1000>;
+			d-tlb-sets = <0x400>;
+			i-tlb-sets = <0x00>;
+			tlb-sets = <0x400>;
+			d-cache-block-size = <0x80>;
+			i-cache-block-size = <0x80>;
+			d-cache-size = <0x8000>;
+			i-cache-size = <0xc000>;
+			i-cache-sets = <0x40>;
+			d-cache-sets = <0x20>;
+			performance-monitor = <0x00 0x01>;
+			l2-cache = <0x78>;
+			ibm,pir = <0x678>;
+			ibm,chip-id = <0x06>;
+			ibm,ppc-interrupt-server#s = <0x678 0x679 0x67a 0x67b 0x67c 0x67d 0x67e 0x67f>;
+		};
+
+		l2-cache@20000010 {
+			phandle = <0x1b>;
+			device_type = "cache";
+			reg = <0x20000010>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x100000>;
+			i-cache-size = <0x100000>;
+			l2-cache = <0x1c>;
+		};
+
+		l2-cache@20000018 {
+			phandle = <0x1e>;
+			device_type = "cache";
+			reg = <0x20000018>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x100000>;
+			i-cache-size = <0x100000>;
+			l2-cache = <0x1f>;
+		};
+
+		l2-cache@20000020 {
+			phandle = <0x21>;
+			device_type = "cache";
+			reg = <0x20000020>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x100000>;
+			i-cache-size = <0x100000>;
+			l2-cache = <0x22>;
+		};
+
+		l2-cache@20000028 {
+			phandle = <0x24>;
+			device_type = "cache";
+			reg = <0x20000028>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x100000>;
+			i-cache-size = <0x100000>;
+			l2-cache = <0x25>;
+		};
+
+		l2-cache@20000050 {
+			phandle = <0x27>;
+			device_type = "cache";
+			reg = <0x20000050>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x100000>;
+			i-cache-size = <0x100000>;
+			l2-cache = <0x28>;
+		};
+
+		l2-cache@20000058 {
+			phandle = <0x2a>;
+			device_type = "cache";
+			reg = <0x20000058>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x100000>;
+			i-cache-size = <0x100000>;
+			l2-cache = <0x2b>;
+		};
+
+		l2-cache@20000060 {
+			phandle = <0x2d>;
+			device_type = "cache";
+			reg = <0x20000060>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x100000>;
+			i-cache-size = <0x100000>;
+			l2-cache = <0x2e>;
+		};
+
+		l2-cache@20000078 {
+			phandle = <0x30>;
+			device_type = "cache";
+			reg = <0x20000078>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x100000>;
+			i-cache-size = <0x100000>;
+			l2-cache = <0x31>;
+		};
+
+		l2-cache@20000218 {
+			phandle = <0x33>;
+			device_type = "cache";
+			reg = <0x20000218>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x100000>;
+			i-cache-size = <0x100000>;
+			l2-cache = <0x34>;
+		};
+
+		l2-cache@20000228 {
+			phandle = <0x36>;
+			device_type = "cache";
+			reg = <0x20000228>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x100000>;
+			i-cache-size = <0x100000>;
+			l2-cache = <0x37>;
+		};
+
+		l2-cache@20000250 {
+			phandle = <0x39>;
+			device_type = "cache";
+			reg = <0x20000250>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x100000>;
+			i-cache-size = <0x100000>;
+			l2-cache = <0x3a>;
+		};
+
+		l2-cache@20000258 {
+			phandle = <0x3c>;
+			device_type = "cache";
+			reg = <0x20000258>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x100000>;
+			i-cache-size = <0x100000>;
+			l2-cache = <0x3d>;
+		};
+
+		l2-cache@20000260 {
+			phandle = <0x3f>;
+			device_type = "cache";
+			reg = <0x20000260>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x100000>;
+			i-cache-size = <0x100000>;
+			l2-cache = <0x40>;
+		};
+
+		l2-cache@20000268 {
+			phandle = <0x42>;
+			device_type = "cache";
+			reg = <0x20000268>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x100000>;
+			i-cache-size = <0x100000>;
+			l2-cache = <0x43>;
+		};
+
+		l2-cache@20000270 {
+			phandle = <0x45>;
+			device_type = "cache";
+			reg = <0x20000270>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x100000>;
+			i-cache-size = <0x100000>;
+			l2-cache = <0x46>;
+		};
+
+		l2-cache@20000278 {
+			phandle = <0x48>;
+			device_type = "cache";
+			reg = <0x20000278>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x100000>;
+			i-cache-size = <0x100000>;
+			l2-cache = <0x49>;
+		};
+
+		l2-cache@20000410 {
+			phandle = <0x4b>;
+			device_type = "cache";
+			reg = <0x20000410>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x100000>;
+			i-cache-size = <0x100000>;
+			l2-cache = <0x4c>;
+		};
+
+		l2-cache@20000420 {
+			phandle = <0x4e>;
+			device_type = "cache";
+			reg = <0x20000420>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x100000>;
+			i-cache-size = <0x100000>;
+			l2-cache = <0x4f>;
+		};
+
+		l2-cache@20000428 {
+			phandle = <0x51>;
+			device_type = "cache";
+			reg = <0x20000428>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x100000>;
+			i-cache-size = <0x100000>;
+			l2-cache = <0x52>;
+		};
+
+		l2-cache@20000450 {
+			phandle = <0x54>;
+			device_type = "cache";
+			reg = <0x20000450>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x100000>;
+			i-cache-size = <0x100000>;
+			l2-cache = <0x55>;
+		};
+
+		l2-cache@20000458 {
+			phandle = <0x57>;
+			device_type = "cache";
+			reg = <0x20000458>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x100000>;
+			i-cache-size = <0x100000>;
+			l2-cache = <0x58>;
+		};
+
+		l2-cache@20000460 {
+			phandle = <0x5a>;
+			device_type = "cache";
+			reg = <0x20000460>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x100000>;
+			i-cache-size = <0x100000>;
+			l2-cache = <0x5b>;
+		};
+
+		l2-cache@20000468 {
+			phandle = <0x5d>;
+			device_type = "cache";
+			reg = <0x20000468>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x100000>;
+			i-cache-size = <0x100000>;
+			l2-cache = <0x5e>;
+		};
+
+		l2-cache@20000478 {
+			phandle = <0x60>;
+			device_type = "cache";
+			reg = <0x20000478>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x100000>;
+			i-cache-size = <0x100000>;
+			l2-cache = <0x61>;
+		};
+
+		l2-cache@20000618 {
+			phandle = <0x63>;
+			device_type = "cache";
+			reg = <0x20000618>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x100000>;
+			i-cache-size = <0x100000>;
+			l2-cache = <0x64>;
+		};
+
+		l2-cache@20000620 {
+			phandle = <0x66>;
+			device_type = "cache";
+			reg = <0x20000620>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x100000>;
+			i-cache-size = <0x100000>;
+			l2-cache = <0x67>;
+		};
+
+		l2-cache@20000650 {
+			phandle = <0x69>;
+			device_type = "cache";
+			reg = <0x20000650>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x100000>;
+			i-cache-size = <0x100000>;
+			l2-cache = <0x6a>;
+		};
+
+		l2-cache@20000658 {
+			phandle = <0x6c>;
+			device_type = "cache";
+			reg = <0x20000658>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x100000>;
+			i-cache-size = <0x100000>;
+			l2-cache = <0x6d>;
+		};
+
+		l2-cache@20000660 {
+			phandle = <0x6f>;
+			device_type = "cache";
+			reg = <0x20000660>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x100000>;
+			i-cache-size = <0x100000>;
+			l2-cache = <0x70>;
+		};
+
+		l2-cache@20000668 {
+			phandle = <0x72>;
+			device_type = "cache";
+			reg = <0x20000668>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x100000>;
+			i-cache-size = <0x100000>;
+			l2-cache = <0x73>;
+		};
+
+		l2-cache@20000670 {
+			phandle = <0x75>;
+			device_type = "cache";
+			reg = <0x20000670>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x100000>;
+			i-cache-size = <0x100000>;
+			l2-cache = <0x76>;
+		};
+
+		l2-cache@20000678 {
+			phandle = <0x78>;
+			device_type = "cache";
+			reg = <0x20000678>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x100000>;
+			i-cache-size = <0x100000>;
+			l2-cache = <0x79>;
+		};
+
+		l3-cache@30000010 {
+			phandle = <0x1c>;
+			device_type = "cache";
+			reg = <0x30000010>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x400000>;
+			i-cache-size = <0x400000>;
+		};
+
+		l3-cache@30000018 {
+			phandle = <0x1f>;
+			device_type = "cache";
+			reg = <0x30000018>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x400000>;
+			i-cache-size = <0x400000>;
+		};
+
+		l3-cache@30000020 {
+			phandle = <0x22>;
+			device_type = "cache";
+			reg = <0x30000020>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x400000>;
+			i-cache-size = <0x400000>;
+		};
+
+		l3-cache@30000028 {
+			phandle = <0x25>;
+			device_type = "cache";
+			reg = <0x30000028>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x400000>;
+			i-cache-size = <0x400000>;
+		};
+
+		l3-cache@30000050 {
+			phandle = <0x28>;
+			device_type = "cache";
+			reg = <0x30000050>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x400000>;
+			i-cache-size = <0x400000>;
+		};
+
+		l3-cache@30000058 {
+			phandle = <0x2b>;
+			device_type = "cache";
+			reg = <0x30000058>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x400000>;
+			i-cache-size = <0x400000>;
+		};
+
+		l3-cache@30000060 {
+			phandle = <0x2e>;
+			device_type = "cache";
+			reg = <0x30000060>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x400000>;
+			i-cache-size = <0x400000>;
+		};
+
+		l3-cache@30000078 {
+			phandle = <0x31>;
+			device_type = "cache";
+			reg = <0x30000078>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x400000>;
+			i-cache-size = <0x400000>;
+		};
+
+		l3-cache@30000218 {
+			phandle = <0x34>;
+			device_type = "cache";
+			reg = <0x30000218>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x400000>;
+			i-cache-size = <0x400000>;
+		};
+
+		l3-cache@30000228 {
+			phandle = <0x37>;
+			device_type = "cache";
+			reg = <0x30000228>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x400000>;
+			i-cache-size = <0x400000>;
+		};
+
+		l3-cache@30000250 {
+			phandle = <0x3a>;
+			device_type = "cache";
+			reg = <0x30000250>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x400000>;
+			i-cache-size = <0x400000>;
+		};
+
+		l3-cache@30000258 {
+			phandle = <0x3d>;
+			device_type = "cache";
+			reg = <0x30000258>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x400000>;
+			i-cache-size = <0x400000>;
+		};
+
+		l3-cache@30000260 {
+			phandle = <0x40>;
+			device_type = "cache";
+			reg = <0x30000260>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x400000>;
+			i-cache-size = <0x400000>;
+		};
+
+		l3-cache@30000268 {
+			phandle = <0x43>;
+			device_type = "cache";
+			reg = <0x30000268>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x400000>;
+			i-cache-size = <0x400000>;
+		};
+
+		l3-cache@30000270 {
+			phandle = <0x46>;
+			device_type = "cache";
+			reg = <0x30000270>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x400000>;
+			i-cache-size = <0x400000>;
+		};
+
+		l3-cache@30000278 {
+			phandle = <0x49>;
+			device_type = "cache";
+			reg = <0x30000278>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x400000>;
+			i-cache-size = <0x400000>;
+		};
+
+		l3-cache@30000410 {
+			phandle = <0x4c>;
+			device_type = "cache";
+			reg = <0x30000410>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x400000>;
+			i-cache-size = <0x400000>;
+		};
+
+		l3-cache@30000420 {
+			phandle = <0x4f>;
+			device_type = "cache";
+			reg = <0x30000420>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x400000>;
+			i-cache-size = <0x400000>;
+		};
+
+		l3-cache@30000428 {
+			phandle = <0x52>;
+			device_type = "cache";
+			reg = <0x30000428>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x400000>;
+			i-cache-size = <0x400000>;
+		};
+
+		l3-cache@30000450 {
+			phandle = <0x55>;
+			device_type = "cache";
+			reg = <0x30000450>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x400000>;
+			i-cache-size = <0x400000>;
+		};
+
+		l3-cache@30000458 {
+			phandle = <0x58>;
+			device_type = "cache";
+			reg = <0x30000458>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x400000>;
+			i-cache-size = <0x400000>;
+		};
+
+		l3-cache@30000460 {
+			phandle = <0x5b>;
+			device_type = "cache";
+			reg = <0x30000460>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x400000>;
+			i-cache-size = <0x400000>;
+		};
+
+		l3-cache@30000468 {
+			phandle = <0x5e>;
+			device_type = "cache";
+			reg = <0x30000468>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x400000>;
+			i-cache-size = <0x400000>;
+		};
+
+		l3-cache@30000478 {
+			phandle = <0x61>;
+			device_type = "cache";
+			reg = <0x30000478>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x400000>;
+			i-cache-size = <0x400000>;
+		};
+
+		l3-cache@30000618 {
+			phandle = <0x64>;
+			device_type = "cache";
+			reg = <0x30000618>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x400000>;
+			i-cache-size = <0x400000>;
+		};
+
+		l3-cache@30000620 {
+			phandle = <0x67>;
+			device_type = "cache";
+			reg = <0x30000620>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x400000>;
+			i-cache-size = <0x400000>;
+		};
+
+		l3-cache@30000650 {
+			phandle = <0x6a>;
+			device_type = "cache";
+			reg = <0x30000650>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x400000>;
+			i-cache-size = <0x400000>;
+		};
+
+		l3-cache@30000658 {
+			phandle = <0x6d>;
+			device_type = "cache";
+			reg = <0x30000658>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x400000>;
+			i-cache-size = <0x400000>;
+		};
+
+		l3-cache@30000660 {
+			phandle = <0x70>;
+			device_type = "cache";
+			reg = <0x30000660>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x400000>;
+			i-cache-size = <0x400000>;
+		};
+
+		l3-cache@30000668 {
+			phandle = <0x73>;
+			device_type = "cache";
+			reg = <0x30000668>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x400000>;
+			i-cache-size = <0x400000>;
+		};
+
+		l3-cache@30000670 {
+			phandle = <0x76>;
+			device_type = "cache";
+			reg = <0x30000670>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x400000>;
+			i-cache-size = <0x400000>;
+		};
+
+		l3-cache@30000678 {
+			phandle = <0x79>;
+			device_type = "cache";
+			reg = <0x30000678>;
+			status = "okay";
+			cache-unified;
+			d-cache-sets = <0x400>;
+			i-cache-sets = <0x400>;
+			d-cache-size = <0x400000>;
+			i-cache-size = <0x400000>;
+		};
+	};
+
+	ibm,hostboot {
+		phandle = <0xd6>;
+		#size-cells = <0x02>;
+		#address-cells = <0x02>;
+
+		reserved-memory {
+			phandle = <0xd7>;
+			ranges;
+			#size-cells = <0x02>;
+			#address-cells = <0x02>;
+
+			ibm,arch-reg-data@803ffce00000 {
+				phandle = <0xde>;
+				reg = <0x803f 0xfce00000 0x00 0x600000>;
+				ibm,prd-instance = <0x00>;
+				ibm,prd-label = "arch-reg-data";
+			};
+
+			ibm,hb-rsv-mem@4000070000000 {
+				phandle = <0xd8>;
+				reg = <0x40000 0x70000000 0x00 0x10000000>;
+				ibm,prd-instance = <0x00>;
+				ibm,prd-label = "hb-rsv-mem";
+			};
+
+			ibm,hbrt-code-image@803ffc820000 {
+				phandle = <0xe0>;
+				reg = <0x803f 0xfc820000 0x00 0x4c0000>;
+				ibm,prd-instance = <0x00>;
+				ibm,prd-label = "ibm,hbrt-code-image";
+			};
+
+			ibm,hbrt-data@803ffcce0000 {
+				phandle = <0xdf>;
+				reg = <0x803f 0xfcce0000 0x00 0x120000>;
+				ibm,prd-instance = <0x00>;
+				ibm,prd-label = "hbrt-data";
+			};
+
+			ibm,homer-image@803ffd800000 {
+				phandle = <0xd9>;
+				reg = <0x803f 0xfd800000 0x00 0x400000>;
+				ibm,prd-instance = <0x00>;
+				ibm,prd-label = "homer-image";
+			};
+
+			ibm,homer-image@803ffdc00000 {
+				phandle = <0xda>;
+				reg = <0x803f 0xfdc00000 0x00 0x400000>;
+				ibm,prd-instance = <0x02>;
+				ibm,prd-label = "homer-image";
+			};
+
+			ibm,homer-image@803ffe000000 {
+				phandle = <0xdb>;
+				reg = <0x803f 0xfe000000 0x00 0x400000>;
+				ibm,prd-instance = <0x04>;
+				ibm,prd-label = "homer-image";
+			};
+
+			ibm,homer-image@803ffe400000 {
+				phandle = <0xdc>;
+				reg = <0x803f 0xfe400000 0x00 0x400000>;
+				ibm,prd-instance = <0x06>;
+				ibm,prd-label = "homer-image";
+			};
+
+			ibm,occ-common-area@803fff800000 {
+				phandle = <0xdd>;
+				reg = <0x803f 0xff800000 0x00 0x800000>;
+				ibm,prd-instance = <0x00>;
+				ibm,prd-label = "occ-common-area";
+			};
+
+			ibm,sbe-comm@803ffc7b0000 {
+				phandle = <0xe7>;
+				reg = <0x803f 0xfc7b0000 0x00 0x10000>;
+				ibm,prd-instance = <0x06>;
+				ibm,prd-label = "sbe-comm";
+			};
+
+			ibm,sbe-comm@803ffc7d0000 {
+				phandle = <0xe5>;
+				reg = <0x803f 0xfc7d0000 0x00 0x10000>;
+				ibm,prd-instance = <0x04>;
+				ibm,prd-label = "sbe-comm";
+			};
+
+			ibm,sbe-comm@803ffc7f0000 {
+				phandle = <0xe3>;
+				reg = <0x803f 0xfc7f0000 0x00 0x10000>;
+				ibm,prd-instance = <0x02>;
+				ibm,prd-label = "sbe-comm";
+			};
+
+			ibm,sbe-comm@803ffc810000 {
+				phandle = <0xe1>;
+				reg = <0x803f 0xfc810000 0x00 0x10000>;
+				ibm,prd-instance = <0x00>;
+				ibm,prd-label = "sbe-comm";
+			};
+
+			ibm,sbe-ffdc@803ffc7a0000 {
+				phandle = <0xe8>;
+				reg = <0x803f 0xfc7a0000 0x00 0x10000>;
+				ibm,prd-instance = <0x06>;
+				ibm,prd-label = "sbe-ffdc";
+			};
+
+			ibm,sbe-ffdc@803ffc7c0000 {
+				phandle = <0xe6>;
+				reg = <0x803f 0xfc7c0000 0x00 0x10000>;
+				ibm,prd-instance = <0x04>;
+				ibm,prd-label = "sbe-ffdc";
+			};
+
+			ibm,sbe-ffdc@803ffc7e0000 {
+				phandle = <0xe4>;
+				reg = <0x803f 0xfc7e0000 0x00 0x10000>;
+				ibm,prd-instance = <0x02>;
+				ibm,prd-label = "sbe-ffdc";
+			};
+
+			ibm,sbe-ffdc@803ffc800000 {
+				phandle = <0xe2>;
+				reg = <0x803f 0xfc800000 0x00 0x10000>;
+				ibm,prd-instance = <0x00>;
+				ibm,prd-label = "sbe-ffdc";
+			};
+
+			ibm,sbe-psu@803ffc79f000 {
+				phandle = <0xe9>;
+				reg = <0x803f 0xfc79f000 0x00 0x1000>;
+				ibm,prd-instance = <0x00>;
+				ibm,prd-label = "sbe-psu";
+			};
+
+			ibm,secure-crypt-algo-code@803ffc78f000 {
+				phandle = <0xea>;
+				reg = <0x803f 0xfc78f000 0x00 0x10000>;
+				ibm,prd-instance = <0x00>;
+				ibm,prd-label = "secure-crypt-algo-code";
+			};
+		};
+	};
+
+	ibm,opal {
+		phandle = <0x17>;
+
+		dump {
+			phandle = <0x7c>;
+			compatible = "ibm,opal-dump";
+			fw-load-area = <0x00 0x20000000 0x00 0x8000000 0x00 0x28000000 0x00 0x8000000>;
+		};
+
+		fw-features {
+			phandle = <0x80>;
+
+			fw-bcctrl-serialized {
+				phandle = <0x82>;
+				disabled;
+			};
+
+			fw-branch-hints-honored {
+				phandle = <0x86>;
+				disabled;
+			};
+
+			fw-count-cache-disabled {
+				phandle = <0x88>;
+				disabled;
+			};
+
+			fw-count-cache-flush-bcctr2,0,0 {
+				phandle = <0x89>;
+				enabled;
+			};
+
+			fw-l1d-thread-split {
+				phandle = <0x85>;
+				disabled;
+			};
+
+			fw-link-stack-disabled {
+				phandle = <0x8a>;
+				disabled;
+			};
+
+			fw-link-stack-flush-bcctr2,0,0 {
+				phandle = <0x8b>;
+				disabled;
+			};
+
+			inst-l1d-flush-ori30,30,0 {
+				phandle = <0x83>;
+				disabled;
+			};
+
+			inst-l1d-flush-trig2 {
+				phandle = <0x84>;
+				disabled;
+			};
+
+			inst-spec-barrier-ori31,31,0 {
+				phandle = <0x81>;
+				enabled;
+			};
+
+			inst-thread-reconfig-control-trig0-1 {
+				phandle = <0x87>;
+				disabled;
+			};
+
+			needs-count-cache-flush-on-context-switch {
+				phandle = <0x91>;
+				enabled;
+			};
+
+			needs-l1d-flush-msr-hv-1-to-0 {
+				phandle = <0x8e>;
+				disabled;
+			};
+
+			needs-l1d-flush-msr-pr-0-to-1 {
+				phandle = <0x8f>;
+				disabled;
+			};
+
+			needs-link-stack-flush-on-context-switch {
+				phandle = <0x92>;
+				enabled;
+			};
+
+			needs-spec-barrier-for-bound-checks {
+				phandle = <0x90>;
+				enabled;
+			};
+
+			no-need-l1d-flush-kernel-on-user-access {
+				phandle = <0x94>;
+				enabled;
+			};
+
+			no-need-l1d-flush-msr-pr-1-to-0 {
+				phandle = <0x93>;
+				enabled;
+			};
+
+			no-need-store-drain-on-priv-state-switch {
+				phandle = <0x95>;
+				enabled;
+			};
+
+			speculation-policy-favor-security {
+				phandle = <0x8c>;
+				enabled;
+			};
+
+			user-mode-branch-speculation {
+				phandle = <0x8d>;
+				disabled;
+			};
+		};
+
+		leds {
+			phandle = <0x18>;
+			led-mode = "lightpath";
+		};
+
+		power-mgt {
+			phandle = <0x148>;
+			ibm,enabled-stop-levels = <0xb0100000>;
+		};
+	};
+
+	ibm,pcie-slots {
+		phandle = <0x101>;
+		#address-cells = <0x02>;
+		#size-cells = <0x00>;
+
+		root-complex@0,0 {
+			phandle = <0x102>;
+			reg = <0x00 0x00>;
+			#address-cells = <0x02>;
+			#size-cells = <0x00>;
+			compatible = "ibm,pcie-port\0ibm,pcie-root-port";
+			ibm,chip-id = <0x00>;
+
+			pluggable {
+				phandle = <0x103>;
+				lane-mask = <0xff00>;
+				max-power = <0x19>;
+				hotplug;
+				nvlink;
+			};
+		};
+
+		root-complex@0,1 {
+			phandle = <0x104>;
+			reg = <0x00 0x01>;
+			#address-cells = <0x02>;
+			#size-cells = <0x00>;
+			compatible = "ibm,pcie-port\0ibm,pcie-root-port";
+			ibm,chip-id = <0x00>;
+
+			pluggable {
+				phandle = <0x105>;
+				lane-mask = <0xff>;
+				max-power = <0x19>;
+				nvlink;
+			};
+		};
+
+		root-complex@0,2 {
+			phandle = <0x106>;
+			reg = <0x00 0x02>;
+			#address-cells = <0x02>;
+			#size-cells = <0x00>;
+			compatible = "ibm,pcie-port\0ibm,pcie-root-port";
+			ibm,chip-id = <0x00>;
+
+			pluggable {
+				phandle = <0x107>;
+				lane-mask = <0x0f>;
+				max-power = <0x19>;
+				nvlink;
+			};
+		};
+
+		root-complex@0,3 {
+			phandle = <0x108>;
+			reg = <0x00 0x03>;
+			#address-cells = <0x02>;
+			#size-cells = <0x00>;
+			compatible = "ibm,pcie-port\0ibm,pcie-root-port";
+			ibm,chip-id = <0x00>;
+
+			pluggable {
+				phandle = <0x109>;
+				lane-mask = <0xffff>;
+				max-power = <0x19>;
+				hotplug;
+				nvlink;
+			};
+		};
+
+		root-complex@0,4 {
+			phandle = <0x10d>;
+			reg = <0x00 0x04>;
+			#address-cells = <0x02>;
+			#size-cells = <0x00>;
+			compatible = "ibm,pcie-port\0ibm,pcie-root-port";
+			ibm,chip-id = <0x00>;
+
+			pluggable {
+				phandle = <0x10e>;
+				lane-mask = <0xf0>;
+				max-power = <0x19>;
+				nvlink;
+			};
+		};
+
+		root-complex@0,5 {
+			phandle = <0x10f>;
+			reg = <0x00 0x05>;
+			#address-cells = <0x02>;
+			#size-cells = <0x00>;
+			compatible = "ibm,pcie-port\0ibm,pcie-root-port";
+			ibm,chip-id = <0x00>;
+
+			pluggable {
+				phandle = <0x110>;
+				lane-mask = <0x0f>;
+				max-power = <0x19>;
+				nvlink;
+			};
+		};
+
+		root-complex@2,0 {
+			phandle = <0x119>;
+			reg = <0x02 0x00>;
+			#address-cells = <0x02>;
+			#size-cells = <0x00>;
+			compatible = "ibm,pcie-port\0ibm,pcie-root-port";
+			ibm,chip-id = <0x02>;
+
+			pluggable {
+				phandle = <0x11a>;
+				lane-mask = <0xff00>;
+				max-power = <0x19>;
+				hotplug;
+				nvlink;
+			};
+		};
+
+		root-complex@2,1 {
+			phandle = <0x11b>;
+			reg = <0x02 0x01>;
+			#address-cells = <0x02>;
+			#size-cells = <0x00>;
+			compatible = "ibm,pcie-port\0ibm,pcie-root-port";
+			ibm,chip-id = <0x02>;
+
+			pluggable {
+				phandle = <0x11c>;
+				lane-mask = <0xff>;
+				max-power = <0x19>;
+				nvlink;
+			};
+		};
+
+		root-complex@2,2 {
+			phandle = <0x11d>;
+			reg = <0x02 0x02>;
+			#address-cells = <0x02>;
+			#size-cells = <0x00>;
+			compatible = "ibm,pcie-port\0ibm,pcie-root-port";
+			ibm,chip-id = <0x02>;
+
+			pluggable {
+				phandle = <0x11e>;
+				lane-mask = <0x0f>;
+				max-power = <0x19>;
+				nvlink;
+			};
+		};
+
+		root-complex@2,3 {
+			phandle = <0x11f>;
+			reg = <0x02 0x03>;
+			#address-cells = <0x02>;
+			#size-cells = <0x00>;
+			compatible = "ibm,pcie-port\0ibm,pcie-root-port";
+			ibm,chip-id = <0x02>;
+
+			pluggable {
+				phandle = <0x120>;
+				lane-mask = <0xffff>;
+				max-power = <0x19>;
+				hotplug;
+				nvlink;
+			};
+		};
+
+		root-complex@2,4 {
+			phandle = <0x124>;
+			reg = <0x02 0x04>;
+			#address-cells = <0x02>;
+			#size-cells = <0x00>;
+			compatible = "ibm,pcie-port\0ibm,pcie-root-port";
+			ibm,chip-id = <0x02>;
+
+			pluggable {
+				phandle = <0x125>;
+				lane-mask = <0xf0>;
+				max-power = <0x19>;
+				nvlink;
+			};
+		};
+
+		root-complex@2,5 {
+			phandle = <0x126>;
+			reg = <0x02 0x05>;
+			#address-cells = <0x02>;
+			#size-cells = <0x00>;
+			compatible = "ibm,pcie-port\0ibm,pcie-root-port";
+			ibm,chip-id = <0x02>;
+
+			pluggable {
+				phandle = <0x127>;
+				lane-mask = <0x0f>;
+				max-power = <0x19>;
+				nvlink;
+			};
+		};
+
+		root-complex@4,0 {
+			phandle = <0x130>;
+			reg = <0x04 0x00>;
+			#address-cells = <0x02>;
+			#size-cells = <0x00>;
+			compatible = "ibm,pcie-port\0ibm,pcie-root-port";
+			ibm,chip-id = <0x04>;
+
+			pluggable {
+				phandle = <0x131>;
+				lane-mask = <0xffff>;
+				max-power = <0x19>;
+				hotplug;
+				nvlink;
+			};
+		};
+
+		root-complex@4,1 {
+			phandle = <0x135>;
+			reg = <0x04 0x01>;
+			#address-cells = <0x02>;
+			#size-cells = <0x00>;
+			compatible = "ibm,pcie-port\0ibm,pcie-root-port";
+			ibm,chip-id = <0x04>;
+
+			pluggable {
+				phandle = <0x136>;
+				lane-mask = <0xff>;
+				max-power = <0x19>;
+				hotplug;
+				nvlink;
+			};
+		};
+
+		root-complex@4,3 {
+			phandle = <0x132>;
+			reg = <0x04 0x03>;
+			#address-cells = <0x02>;
+			#size-cells = <0x00>;
+			compatible = "ibm,pcie-port\0ibm,pcie-root-port";
+			ibm,chip-id = <0x04>;
+
+			pluggable {
+				phandle = <0x133>;
+				lane-mask = <0xffff>;
+				max-power = <0x19>;
+				hotplug;
+				nvlink;
+			};
+		};
+
+		root-complex@6,0 {
+			phandle = <0x140>;
+			reg = <0x06 0x00>;
+			#address-cells = <0x02>;
+			#size-cells = <0x00>;
+			compatible = "ibm,pcie-port\0ibm,pcie-root-port";
+			ibm,chip-id = <0x06>;
+
+			pluggable {
+				phandle = <0x141>;
+				lane-mask = <0xffff>;
+				max-power = <0x19>;
+				hotplug;
+				nvlink;
+			};
+		};
+
+		root-complex@6,1 {
+			phandle = <0x145>;
+			reg = <0x06 0x01>;
+			#address-cells = <0x02>;
+			#size-cells = <0x00>;
+			compatible = "ibm,pcie-port\0ibm,pcie-root-port";
+			ibm,chip-id = <0x06>;
+
+			pluggable {
+				phandle = <0x146>;
+				lane-mask = <0xff>;
+				max-power = <0x19>;
+				hotplug;
+				nvlink;
+			};
+		};
+
+		root-complex@6,3 {
+			phandle = <0x142>;
+			reg = <0x06 0x03>;
+			#address-cells = <0x02>;
+			#size-cells = <0x00>;
+			compatible = "ibm,pcie-port\0ibm,pcie-root-port";
+			ibm,chip-id = <0x06>;
+
+			pluggable {
+				phandle = <0x143>;
+				lane-mask = <0xffff>;
+				max-power = <0x19>;
+				hotplug;
+				nvlink;
+			};
+		};
+	};
+
+	ibm,secureboot {
+		phandle = <0x7d>;
+		compatible = "ibm,secureboot\0ibm,secureboot-v2";
+		trusted-enabled;
+		hw-key-hash = <0x40d487ff 0x7380ed6a 0xd54775d5 0x795fea0d 0xe2f541fe 0xa9db06b8 0x466a42a3 0x20e65f75 0xb4866546 0x17d907 0x515dc2a5 0xf9fc5095 0x4d6ee0c9 0xb67d219d 0xfb708535 0x1d01d6d1>;
+		hw-key-hash-size = <0x40>;
+
+		ibm,cvc {
+			phandle = <0x149>;
+			#address-cells = <0x01>;
+			#size-cells = <0x00>;
+			compatible = "ibm,container-verification-code";
+			memory-region = <0xea>;
+
+			ibm,cvc-service@40 {
+				phandle = <0x14a>;
+				compatible = "ibm,cvc-sha512";
+				reg = <0x40>;
+				version = <0x01>;
+			};
+
+			ibm,cvc-service@50 {
+				phandle = <0x14b>;
+				compatible = "ibm,cvc-verify";
+				reg = <0x50>;
+				version = <0x01>;
+			};
+		};
+	};
+
+	ipl-params {
+		phandle = <0x7a>;
+		#address-cells = <0x00>;
+		#size-cells = <0x00>;
+
+		ipl-params {
+			phandle = <0x7e>;
+			#address-cells = <0x00>;
+			#size-cells = <0x00>;
+			cec-ipl-side = "temp";
+			sp-ipl-side = "temp";
+			os-ipl-mode = <0x00>;
+			cec-major-type = "cold";
+		};
+
+		platform-dump {
+			phandle = <0x7f>;
+		};
+
+		sys-params {
+			phandle = <0x7b>;
+			#address-cells = <0x00>;
+			#size-cells = <0x00>;
+			ibm,sys-model = " 22A";
+		};
+	};
+
+	lpcm-opb@6030000000000 {
+		phandle = <0x03>;
+		#address-cells = <0x01>;
+		#size-cells = <0x01>;
+		compatible = "ibm,power9-lpcm-opb\0simple-bus";
+		reg = <0x60300 0x00 0x01 0x00>;
+		ibm,chip-id = <0x00>;
+		ranges = <0x00 0x60300 0x00 0x80000000 0x80000000 0x60300 0x80000000 0x80000000>;
+
+		lpc-controller@c0012000 {
+			phandle = <0x06>;
+			compatible = "ibm,power9-lpc-controller";
+			reg = <0xc0012000 0x100>;
+		};
+
+		lpc@0 {
+			phandle = <0x07>;
+			#address-cells = <0x02>;
+			#size-cells = <0x01>;
+			compatible = "ibm,power9-lpc\0ibm,power8-lpc";
+			ranges = <0x00 0x00 0xe0000000 0x10000000 0x01 0x00 0xd0010000 0x10000 0x03 0x00 0xf0000000 0x10000000>;
+
+			serial@i3f8 {
+				phandle = <0x08>;
+				reg = <0x01 0x3f8 0x01>;
+				compatible = "ns16550";
+				current-speed = <0x1c200>;
+				clock-frequency = <0x1c2000>;
+				interrupts = <0x04>;
+				device_type = "serial";
+			};
+		};
+
+		opb-arbiter@c0011000 {
+			phandle = <0x05>;
+			compatible = "ibm,power9-lpcm-opb-arbiter";
+			reg = <0xc0011000 0x08>;
+		};
+
+		opb-master@c0010000 {
+			phandle = <0x04>;
+			compatible = "ibm,power9-lpcm-opb-master";
+			reg = <0xc0010000 0x60>;
+		};
+	};
+
+	memory@0 {
+		phandle = <0xd4>;
+		device_type = "memory";
+		reg = <0x00 0x00 0x40 0x00>;
+		ibm,chip-id = <0x00>;
+	};
+
+	memory@800000000000 {
+		phandle = <0xd5>;
+		device_type = "memory";
+		reg = <0x8000 0x00 0x40 0x00>;
+		ibm,chip-id = <0x04>;
+	};
+
+	vpd {
+		phandle = <0x09>;
+		compatible = "ibm,opal-v3-vpd";
+		#size-cells = <0x00>;
+		#address-cells = <0x01>;
+		ibm,vpd = [84 7c 00 52 54 04 56 49 4e 49 42 33 06 00 00 00 00 00 00 42 34 01 00 42 37 0c 00 00 00 00 00 00 00 00 00 00 00 00 43 43 04 32 45 32 44 43 45 01 31 43 54 04 40 18 00 0c 44 52 10 53 59 53 54 45 4d 20 42 41 43 4b 50 4c 41 4e 45 46 4e 07 30 32 57 47 36 37 36 48 45 04 30 30 30 31 48 57 02 00 01 50 4e 07 30 32 57 47 36 37 38 53 4e 0c 59 31 33 31 55 46 30 37 33 30 32 54 56 5a 02 30 31 78 84 aa 00 52 54 04 56 53 59 53 42 52 02 53 30 44 52 06 53 59 53 54 45 4d 46 56 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 49 44 02 20 20 4d 4e 07 20 20 20 20 20 20 20 4e 4e 10 43 30 35 30 37 36 30 42 39 34 34 36 20 20 20 20 52 42 04 31 20 20 20 52 47 04 00 00 00 00 53 45 07 31 33 39 46 32 36 30 53 47 07 20 20 20 20 20 20 20 53 55 06 00 04 ac 1e 65 5a 54 4d 08 39 31 30 35 2d 32 32 41 54 4e 08 20 20 20 20 20 20 20 20 57 4e 0c 20 20 20 20 20 20 20 20 20 20 20 20 78 84 17 00 52 54 04 4c 58 52 30 4c 58 08 31 00 04 01 00 30 00 71 56 5a 02 30 31 78 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00];
+		ibm,loc-code = "U9105.22A.139F260";
+
+		root-node-vpd@a000 {
+			phandle = <0x0a>;
+			ibm,loc-code = "U9105.22A.139F260";
+			fru-type = [56 56];
+			reg = <0xa000>;
+			#size-cells = <0x00>;
+			#address-cells = <0x01>;
+			ibm,vpd = [84 6a 00 44 52 10 50 52 4f 43 45 53 53 4f 52 20 4d 4f 44 55 4c 45 56 5a 02 20 20 43 43 04 41 42 34 32 43 45 01 31 46 4e 07 46 32 31 30 31 31 30 50 4e 07 30 33 4a 4d 32 39 30 53 4e 0c 59 41 33 39 33 36 30 38 39 37 33 37 50 52 08 37 00 00 01 00 00 80 01 48 45 04 30 30 30 31 43 54 04 00 00 00 00 48 57 02 00 01 50 46 03 00 00 00 78 00 00 00 30 00 38 00 00];
+
+			enclosure@1e00 {
+				phandle = <0x0c>;
+				ibm,loc-code = "U78DA.ND0.WZS003Y";
+				fru-type = [45 56];
+				reg = <0x1e00>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+
+				backplane@800 {
+					phandle = <0x0d>;
+					ibm,loc-code = "U78DA.ND0.WZS003Y-P0";
+					fru-type = [42 50];
+					reg = <0x800>;
+					#size-cells = <0x00>;
+					#address-cells = <0x01>;
+					ibm,vpd = [84 7c 00 52 54 04 56 49 4e 49 42 33 06 00 00 00 00 00 00 42 34 01 00 42 37 0c 00 00 00 00 00 00 00 00 00 00 00 00 43 43 04 32 45 32 44 43 45 01 31 43 54 04 40 18 00 0c 44 52 10 53 59 53 54 45 4d 20 42 41 43 4b 50 4c 41 4e 45 46 4e 07 30 32 57 47 36 37 36 48 45 04 30 30 30 31 48 57 02 00 01 50 4e 07 30 32 57 47 36 37 38 53 4e 0c 59 31 33 31 55 46 30 37 33 30 32 54 56 5a 02 30 31 78 84 aa 00 52 54 04 56 53 59 53 42 52 02 53 30 44 52 06 53 59 53 54 45 4d 46 56 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 49 44 02 20 20 4d 4e 07 20 20 20 20 20 20 20 4e 4e 10 43 30 35 30 37 36 30 42 39 34 34 36 20 20 20 20 52 42 04 31 20 20 20 52 47 04 00 00 00 00 53 45 07 31 33 39 46 32 36 30 53 47 07 20 20 20 20 20 20 20 53 55 06 00 04 ac 1e 65 5a 54 4d 08 39 31 30 35 2d 32 32 41 54 4e 08 20 20 20 20 20 20 20 20 57 4e 0c 20 20 20 20 20 20 20 20 20 20 20 20 78 84 17 00 52 54 04 4c 58 52 30 4c 58 08 31 00 04 01 00 30 00 71 56 5a 02 30 31 78 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00];
+					fru-number = "02WG676";
+					serial-number = "Y131UF07302T";
+					part-number = "02WG678";
+					ccin-extension = "1";
+					hw-version = [00];
+					card-type = [40 18 00];
+					hw-characteristics = [00];
+					ccin = "2E2D";
+					description = "SYSTEM BACKPLANE";
+
+					interplane-card@4900 {
+						phandle = <0x0e>;
+						ibm,loc-code = "U78DA.ND0.WZS003Y-P0-C22";
+						fru-type = [49 50];
+						reg = <0x4900>;
+						#size-cells = <0x00>;
+						#address-cells = <0x01>;
+					};
+
+					ms-dimm@d002 {
+						phandle = <0x0f>;
+						ibm,loc-code = "U78DA.ND0.WZS003Y-P0-C27";
+						fru-type = [4d 53];
+						reg = <0xd002>;
+						#size-cells = <0x00>;
+						#address-cells = <0x01>;
+						ibm,vpd = <0xcafebeef 0x18bd 0x1c7f072>;
+						fru-number = "78P6576";
+						serial-number = "YH30MS06N009";
+						part-number = "78P6576";
+						ccin-extension = "1";
+						hw-version = [00];
+						card-type = [00];
+						hw-characteristics = [00];
+						ccin = "327C";
+						description = "65536";
+						ibm,chip-id = <0x00>;
+						ibm,memory-bus-frequency = <0x00 0x16e3600>;
+						frequency = <0x9ee7ee80>;
+						size = "131072";
+					};
+
+					ms-dimm@d003 {
+						phandle = <0x10>;
+						ibm,loc-code = "U78DA.ND0.WZS003Y-P0-C32";
+						fru-type = [4d 53];
+						reg = <0xd003>;
+						#size-cells = <0x00>;
+						#address-cells = <0x01>;
+						ibm,vpd = <0xcafebeef 0x18bd 0x1d12458>;
+						fru-number = "78P6576";
+						serial-number = "YH30MS05E012";
+						part-number = "78P6576";
+						ccin-extension = "1";
+						hw-version = [00];
+						card-type = [00];
+						hw-characteristics = [00];
+						ccin = "327C";
+						description = "65536";
+						ibm,chip-id = <0x00>;
+						ibm,memory-bus-frequency = <0x00 0x16e3600>;
+						frequency = <0x9ee7ee80>;
+						size = "131072";
+					};
+
+					ms-dimm@d012 {
+						phandle = <0x11>;
+						ibm,loc-code = "U78DA.ND0.WZS003Y-P0-C21";
+						fru-type = [4d 53];
+						reg = <0xd012>;
+						#size-cells = <0x00>;
+						#address-cells = <0x01>;
+						ibm,vpd = <0xcafebeef 0x18bd 0x1d542b6>;
+						fru-number = "78P6576";
+						serial-number = "YH30MS05E011";
+						part-number = "78P6576";
+						ccin-extension = "1";
+						hw-version = [00];
+						card-type = [00];
+						hw-characteristics = [00];
+						ccin = "327C";
+						description = "65536";
+						ibm,chip-id = <0x04>;
+						ibm,memory-bus-frequency = <0x00 0x16e3600>;
+						frequency = <0x9ee7ee80>;
+						size = "131072";
+					};
+
+					ms-dimm@d013 {
+						phandle = <0x12>;
+						ibm,loc-code = "U78DA.ND0.WZS003Y-P0-C40";
+						fru-type = [4d 53];
+						reg = <0xd013>;
+						#size-cells = <0x00>;
+						#address-cells = <0x01>;
+						ibm,vpd = <0xcafebeef 0x18bd 0x1baa6b8>;
+						fru-number = "78P6576";
+						serial-number = "YH30MS05E01B";
+						part-number = "78P6576";
+						ccin-extension = "1";
+						hw-version = [00];
+						card-type = [00];
+						hw-characteristics = [00];
+						ccin = "327C";
+						description = "65536";
+						ibm,chip-id = <0x04>;
+						ibm,memory-bus-frequency = <0x00 0x16e3600>;
+						frequency = <0x9ee7ee80>;
+						size = "131072";
+					};
+
+					processor@1000 {
+						phandle = <0x13>;
+						ibm,loc-code = "U78DA.ND0.WZS003Y-P0-C15";
+						fru-type = [50 46];
+						reg = <0x1000>;
+						#size-cells = <0x00>;
+						#address-cells = <0x01>;
+						ibm,vpd = <0x84a00052 0x54045649 0x4e494452 0x1050524f 0x43455353 0x4f52204d 0x4f44554c 0x45565a02 0x20204343 0x4414234 0x32434501 0x31464e07 0x46323130 0x31313050 0x4e073033 0x4a4d3239 0x30534e0c 0x59413339 0x33363038 0x39373337 0x50520837 0x100 0x800148 0x45043030 0x30314354 0x4000000 0x485702 0x14233 0x6000000 0x42 0x34010042 0x370c0000 0x00 0x00 0x564e 0x1049424d 0x20202020 0x20202020 0x20202020 0x20504603 0x78>;
+						fru-number = "F210110";
+						serial-number = "YA3936089737";
+						part-number = "03JM290";
+						vendor = "IBM";
+						ccin-extension = "1";
+						hw-version = [00];
+						card-type = [00];
+						hw-characteristics = [00];
+						ccin = "AB42";
+						description = "PROCESSOR MODULE";
+						ibm,chip-id = <0x00>;
+					};
+
+					processor@1001 {
+						phandle = <0x14>;
+						ibm,loc-code = "U78DA.ND0.WZS003Y-P0-C15";
+						fru-type = [50 46];
+						reg = <0x1001>;
+						#size-cells = <0x00>;
+						#address-cells = <0x01>;
+						ibm,vpd = <0x84a00052 0x54045649 0x4e494452 0x1050524f 0x43455353 0x4f52204d 0x4f44554c 0x45565a02 0x20204343 0x4414234 0x32434501 0x31464e07 0x46323130 0x31313050 0x4e073033 0x4a4d3239 0x30534e0c 0x59413339 0x33363038 0x39373337 0x50520837 0x100 0x800148 0x45043030 0x30314354 0x4000000 0x485702 0x14233 0x6000000 0x42 0x34010042 0x370c0000 0x00 0x00 0x564e 0x1049424d 0x20202020 0x20202020 0x20202020 0x20504603 0x78>;
+						fru-number = "F210110";
+						serial-number = "YA3936089737";
+						part-number = "03JM290";
+						vendor = "IBM";
+						ccin-extension = "1";
+						hw-version = [00];
+						card-type = [00];
+						hw-characteristics = [00];
+						ccin = "AB42";
+						description = "PROCESSOR MODULE";
+						ibm,chip-id = <0x02>;
+					};
+
+					processor@1002 {
+						phandle = <0x15>;
+						ibm,loc-code = "U78DA.ND0.WZS003Y-P0-C24";
+						fru-type = [50 46];
+						reg = <0x1002>;
+						#size-cells = <0x00>;
+						#address-cells = <0x01>;
+						ibm,vpd = <0x84a00052 0x54045649 0x4e494452 0x1050524f 0x43455353 0x4f52204d 0x4f44554c 0x45565a02 0x20204343 0x4414234 0x32434501 0x31464e07 0x46323130 0x31313050 0x4e073033 0x4a4d3239 0x30534e0c 0x59413339 0x33363039 0x36393031 0x50520837 0x100 0x800148 0x45043030 0x30314354 0x4000000 0x485702 0x14233 0x6000000 0x42 0x34010042 0x370c0000 0x00 0x00 0x564e 0x1049424d 0x20202020 0x20202020 0x20202020 0x20504603 0x78>;
+						fru-number = "F210110";
+						serial-number = "YA3936096901";
+						part-number = "03JM290";
+						vendor = "IBM";
+						ccin-extension = "1";
+						hw-version = [00];
+						card-type = [00];
+						hw-characteristics = [00];
+						ccin = "AB42";
+						description = "PROCESSOR MODULE";
+						ibm,chip-id = <0x04>;
+					};
+
+					processor@1003 {
+						phandle = <0x16>;
+						ibm,loc-code = "U78DA.ND0.WZS003Y-P0-C24";
+						fru-type = [50 46];
+						reg = <0x1003>;
+						#size-cells = <0x00>;
+						#address-cells = <0x01>;
+						ibm,vpd = <0x84a00052 0x54045649 0x4e494452 0x1050524f 0x43455353 0x4f52204d 0x4f44554c 0x45565a02 0x20204343 0x4414234 0x32434501 0x31464e07 0x46323130 0x31313050 0x4e073033 0x4a4d3239 0x30534e0c 0x59413339 0x33363039 0x36393031 0x50520837 0x100 0x800148 0x45043030 0x30314354 0x4000000 0x485702 0x14233 0x6000000 0x42 0x34010042 0x370c0000 0x00 0x00 0x564e 0x1049424d 0x20202020 0x20202020 0x20202020 0x20504603 0x78>;
+						fru-number = "F210110";
+						serial-number = "YA3936096901";
+						part-number = "03JM290";
+						vendor = "IBM";
+						ccin-extension = "1";
+						hw-version = [00];
+						card-type = [00];
+						hw-characteristics = [00];
+						ccin = "AB42";
+						description = "PROCESSOR MODULE";
+						ibm,chip-id = <0x06>;
+					};
+				};
+			};
+
+			system-vpd@1c00 {
+				phandle = <0x0b>;
+				ibm,loc-code = "U9105.22A.139F260";
+				fru-type = [53 56];
+				reg = <0x1c00>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+			};
+		};
+	};
+
+	xscom@e03fc00000000 {
+		phandle = <0x96>;
+		ibm,chip-id = <0x00>;
+		ibm,proc-chip-id = <0x00>;
+		#address-cells = <0x01>;
+		#size-cells = <0x01>;
+		scom-controller;
+		compatible = "ibm,xscom\0ibm,power10-xscom";
+		reg = <0xe03fc 0x00 0x08 0x00>;
+		bus-frequency = <0x00 0x218711a0>;
+		ibm,dbob-id = <0x00>;
+		ibm,occ-functional-state = <0x01>;
+		ibm,loc-code = "U78DA.ND0.WZS003Y-P0-C15";
+		ibm,module-vpd = <0xcafebeef 0xffff 0x271cc689>;
+		part-number = "03JM290";
+		serial-number = "YA3936089737";
+		ibm,ccm-node-id = <0x00>;
+		ibm,hw-card-id = <0x00>;
+		ibm,hw-module-id = <0x00>;
+		ecid = <0x2a328b0 0xbd042fff 0x472b0000 0xa30000>;
+		wafer-id = "AZAB2-12  ";
+		wafer-location = <0x47 0x2b>;
+		primary;
+		ibm,primary-topology-index = <0x00>;
+
+		chiptod@40000 {
+			phandle = <0xeb>;
+			reg = <0x40000 0x34>;
+			compatible = "ibm,power-chiptod\0ibm,power10-chiptod";
+			primary;
+		};
+
+		i2cm@a2000 {
+			phandle = <0xa2>;
+			compatible = "ibm,power8-i2cm\0ibm,power9-i2cm";
+			reg = <0xa2000 0x1000>;
+			#size-cells = <0x00>;
+			#address-cells = <0x01>;
+			chip-engine# = <0x02>;
+			clock-frequency = <0x861c468>;
+
+			i2c-bus@0 {
+				phandle = <0xa4>;
+				reg = <0x00>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+				compatible = "ibm,opal-i2c\0ibm,power8-i2c-port\0ibm,power9-i2c-port";
+				bus-frequency = <0x61a80>;
+
+				eeprom@50 {
+					phandle = <0xa5>;
+					reg = <0x50>;
+					link-id = <0x37>;
+					compatible = "atmel,24c128";
+					label = [00];
+					status = "reserved";
+				};
+			};
+
+			i2c-bus@1 {
+				phandle = <0xa3>;
+				reg = <0x01>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+				compatible = "ibm,opal-i2c\0ibm,power8-i2c-port\0ibm,power9-i2c-port";
+				bus-frequency = <0x61a80>;
+			};
+		};
+
+		i2cm@a3000 {
+			phandle = <0x99>;
+			compatible = "ibm,power8-i2cm\0ibm,power9-i2cm";
+			reg = <0xa3000 0x1000>;
+			#size-cells = <0x00>;
+			#address-cells = <0x01>;
+			chip-engine# = <0x03>;
+			clock-frequency = <0x861c468>;
+
+			i2c-bus@0 {
+				phandle = <0xa1>;
+				reg = <0x00>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+				compatible = "ibm,opal-i2c\0ibm,power8-i2c-port\0ibm,power9-i2c-port";
+				bus-frequency = <0x61a80>;
+			};
+
+			i2c-bus@1 {
+				phandle = <0xa0>;
+				reg = <0x01>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+				compatible = "ibm,opal-i2c\0ibm,power8-i2c-port\0ibm,power9-i2c-port";
+				bus-frequency = <0x61a80>;
+			};
+
+			i2c-bus@8 {
+				phandle = <0x9f>;
+				reg = <0x08>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+				compatible = "ibm,opal-i2c\0ibm,power8-i2c-port\0ibm,power9-i2c-port";
+				bus-frequency = <0x61a80>;
+			};
+
+			i2c-bus@9 {
+				phandle = <0x9e>;
+				reg = <0x09>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+				compatible = "ibm,opal-i2c\0ibm,power8-i2c-port\0ibm,power9-i2c-port";
+				bus-frequency = <0x61a80>;
+			};
+
+			i2c-bus@a {
+				phandle = <0x9d>;
+				reg = <0x0a>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+				compatible = "ibm,opal-i2c\0ibm,power8-i2c-port\0ibm,power9-i2c-port";
+				bus-frequency = <0x61a80>;
+			};
+
+			i2c-bus@b {
+				phandle = <0x9c>;
+				reg = <0x0b>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+				compatible = "ibm,opal-i2c\0ibm,power8-i2c-port\0ibm,power9-i2c-port";
+				bus-frequency = <0x61a80>;
+			};
+
+			i2c-bus@c {
+				phandle = <0x9b>;
+				reg = <0x0c>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+				compatible = "ibm,opal-i2c\0ibm,power8-i2c-port\0ibm,power9-i2c-port";
+				bus-frequency = <0x61a80>;
+			};
+
+			i2c-bus@d {
+				phandle = <0x9a>;
+				reg = <0x0d>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+				compatible = "ibm,opal-i2c\0ibm,power8-i2c-port\0ibm,power9-i2c-port";
+				bus-frequency = <0x61a80>;
+			};
+		};
+
+		nmmu@2010c40 {
+			phandle = <0xf3>;
+			compatible = "ibm,power9-nest-mmu";
+			reg = <0x2010c40 0x20>;
+		};
+
+		nx@2010000 {
+			phandle = <0xef>;
+			compatible = "ibm,power9-nx";
+			reg = <0x2010000 0x4000>;
+		};
+
+		pbcq@2011800 {
+			phandle = <0xfd>;
+			reg = <0x2011800 0x100 0x9010800 0x200>;
+			compatible = "ibm,power10-pbcq";
+			ibm,pec-index = <0x01>;
+			#address-cells = <0x01>;
+			#size-cells = <0x00>;
+			ibm,hub-id = <0x00>;
+			ibm,loc-code = "U78DA.ND0.WZS003Y-P0-C15";
+
+			stack@0 {
+				phandle = <0xfe>;
+				reg = <0x00>;
+				ibm,phb-index = <0x03>;
+				compatible = "ibm,power10-phb-stack";
+				status = "okay";
+				ibm,lane-eq = <0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x99999999 0x99999999 0x99999999 0x99999999>;
+			};
+
+			stack@1 {
+				phandle = <0xff>;
+				reg = <0x01>;
+				ibm,phb-index = <0x04>;
+				compatible = "ibm,power10-phb-stack";
+				status = "disabled";
+				ibm,lane-eq = <0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00>;
+			};
+
+			stack@2 {
+				phandle = <0x100>;
+				reg = <0x02>;
+				ibm,phb-index = <0x05>;
+				compatible = "ibm,power10-phb-stack";
+				status = "disabled";
+				ibm,lane-eq = <0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00>;
+			};
+		};
+
+		pbcq@3011800 {
+			phandle = <0xf9>;
+			reg = <0x3011800 0x100 0x8010800 0x200>;
+			compatible = "ibm,power10-pbcq";
+			ibm,pec-index = <0x00>;
+			#address-cells = <0x01>;
+			#size-cells = <0x00>;
+			ibm,hub-id = <0x00>;
+			ibm,loc-code = "U78DA.ND0.WZS003Y-P0-C15";
+
+			stack@0 {
+				phandle = <0xfa>;
+				reg = <0x00>;
+				ibm,phb-index = <0x00>;
+				compatible = "ibm,power10-phb-stack";
+				status = "okay";
+				ibm,lane-eq = <0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x99999999 0x99999999 0x99999999 0x99999999>;
+			};
+
+			stack@1 {
+				phandle = <0xfb>;
+				reg = <0x01>;
+				ibm,phb-index = <0x01>;
+				compatible = "ibm,power10-phb-stack";
+				status = "okay";
+				ibm,lane-eq = <0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x99999999 0x99999999 0x99999999 0x99999999>;
+			};
+
+			stack@2 {
+				phandle = <0xfc>;
+				reg = <0x02>;
+				ibm,phb-index = <0x02>;
+				compatible = "ibm,power10-phb-stack";
+				status = "okay";
+				ibm,lane-eq = <0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x99999999 0x99999999 0x99999999 0x99999999>;
+			};
+		};
+
+		psihb@3011d00 {
+			phandle = <0x97>;
+			reg = <0x3011d00 0x100>;
+			compatible = "ibm,power10-psihb-x\0ibm,psihb-x";
+		};
+
+		vas@2011400 {
+			phandle = <0xa6>;
+			reg = <0x2011400 0x300>;
+			compatible = "ibm,power10-vas-x";
+			ibm,vas-id = <0x00>;
+		};
+
+		xive@2010800 {
+			phandle = <0x98>;
+			reg = <0x2010800 0x400>;
+			compatible = "ibm,power10-xive-x";
+			force-assign-bars;
+		};
+	};
+
+	xscom@e43fc00000000 {
+		phandle = <0xa7>;
+		ibm,chip-id = <0x02>;
+		ibm,proc-chip-id = <0x01>;
+		#address-cells = <0x01>;
+		#size-cells = <0x01>;
+		scom-controller;
+		compatible = "ibm,xscom\0ibm,power10-xscom";
+		reg = <0xe43fc 0x00 0x08 0x00>;
+		bus-frequency = <0x00 0x218711a0>;
+		ibm,dbob-id = <0x00>;
+		ibm,occ-functional-state = <0x01>;
+		ibm,loc-code = "U78DA.ND0.WZS003Y-P0-C15";
+		ibm,module-vpd = <0xcafebeef 0xffff 0x28152cc1>;
+		part-number = "03JM290";
+		serial-number = "YA3936089737";
+		ibm,ccm-node-id = <0x00>;
+		ibm,hw-card-id = <0x00>;
+		ibm,hw-module-id = <0x00>;
+		ecid = <0x2a328b0 0xbd041fff 0x2c4c0000 0x990000>;
+		wafer-id = "AZAB2-11  ";
+		wafer-location = <0x2c 0x4c>;
+		ibm,primary-topology-index = <0x04>;
+
+		chiptod@40000 {
+			phandle = <0xec>;
+			reg = <0x40000 0x34>;
+			compatible = "ibm,power-chiptod\0ibm,power10-chiptod";
+			secondary;
+		};
+
+		i2cm@a2000 {
+			phandle = <0xb3>;
+			compatible = "ibm,power8-i2cm\0ibm,power9-i2cm";
+			reg = <0xa2000 0x1000>;
+			#size-cells = <0x00>;
+			#address-cells = <0x01>;
+			chip-engine# = <0x02>;
+			clock-frequency = <0x861c468>;
+
+			i2c-bus@1 {
+				phandle = <0xb4>;
+				reg = <0x01>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+				compatible = "ibm,opal-i2c\0ibm,power8-i2c-port\0ibm,power9-i2c-port";
+				bus-frequency = <0x61a80>;
+			};
+		};
+
+		i2cm@a3000 {
+			phandle = <0xaa>;
+			compatible = "ibm,power8-i2cm\0ibm,power9-i2cm";
+			reg = <0xa3000 0x1000>;
+			#size-cells = <0x00>;
+			#address-cells = <0x01>;
+			chip-engine# = <0x03>;
+			clock-frequency = <0x861c468>;
+
+			i2c-bus@2 {
+				phandle = <0xb2>;
+				reg = <0x02>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+				compatible = "ibm,opal-i2c\0ibm,power8-i2c-port\0ibm,power9-i2c-port";
+				bus-frequency = <0x61a80>;
+			};
+
+			i2c-bus@3 {
+				phandle = <0xb1>;
+				reg = <0x03>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+				compatible = "ibm,opal-i2c\0ibm,power8-i2c-port\0ibm,power9-i2c-port";
+				bus-frequency = <0x61a80>;
+			};
+
+			i2c-bus@8 {
+				phandle = <0xb0>;
+				reg = <0x08>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+				compatible = "ibm,opal-i2c\0ibm,power8-i2c-port\0ibm,power9-i2c-port";
+				bus-frequency = <0x61a80>;
+			};
+
+			i2c-bus@9 {
+				phandle = <0xaf>;
+				reg = <0x09>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+				compatible = "ibm,opal-i2c\0ibm,power8-i2c-port\0ibm,power9-i2c-port";
+				bus-frequency = <0x61a80>;
+			};
+
+			i2c-bus@c {
+				phandle = <0xae>;
+				reg = <0x0c>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+				compatible = "ibm,opal-i2c\0ibm,power8-i2c-port\0ibm,power9-i2c-port";
+				bus-frequency = <0x61a80>;
+			};
+
+			i2c-bus@d {
+				phandle = <0xad>;
+				reg = <0x0d>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+				compatible = "ibm,opal-i2c\0ibm,power8-i2c-port\0ibm,power9-i2c-port";
+				bus-frequency = <0x61a80>;
+			};
+
+			i2c-bus@e {
+				phandle = <0xac>;
+				reg = <0x0e>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+				compatible = "ibm,opal-i2c\0ibm,power8-i2c-port\0ibm,power9-i2c-port";
+				bus-frequency = <0x61a80>;
+			};
+
+			i2c-bus@f {
+				phandle = <0xab>;
+				reg = <0x0f>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+				compatible = "ibm,opal-i2c\0ibm,power8-i2c-port\0ibm,power9-i2c-port";
+				bus-frequency = <0x61a80>;
+			};
+		};
+
+		nmmu@2010c40 {
+			phandle = <0xf4>;
+			compatible = "ibm,power9-nest-mmu";
+			reg = <0x2010c40 0x20>;
+		};
+
+		nmmu@3010c40 {
+			phandle = <0xf5>;
+			compatible = "ibm,power9-nest-mmu";
+			reg = <0x3010c40 0x20>;
+		};
+
+		nx@2010000 {
+			phandle = <0xf0>;
+			compatible = "ibm,power9-nx";
+			reg = <0x2010000 0x4000>;
+		};
+
+		pbcq@2011800 {
+			phandle = <0x115>;
+			reg = <0x2011800 0x100 0x9010800 0x200>;
+			compatible = "ibm,power10-pbcq";
+			ibm,pec-index = <0x01>;
+			#address-cells = <0x01>;
+			#size-cells = <0x00>;
+			ibm,hub-id = <0x01>;
+			ibm,loc-code = "U78DA.ND0.WZS003Y-P0-C15";
+
+			stack@0 {
+				phandle = <0x116>;
+				reg = <0x00>;
+				ibm,phb-index = <0x03>;
+				compatible = "ibm,power10-phb-stack";
+				status = "okay";
+				ibm,lane-eq = <0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x99999999 0x99999999 0x99999999 0x99999999>;
+			};
+
+			stack@1 {
+				phandle = <0x117>;
+				reg = <0x01>;
+				ibm,phb-index = <0x04>;
+				compatible = "ibm,power10-phb-stack";
+				status = "okay";
+				ibm,lane-eq = <0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x99999999 0x99999999 0x99999999 0x99999999>;
+			};
+
+			stack@2 {
+				phandle = <0x118>;
+				reg = <0x02>;
+				ibm,phb-index = <0x05>;
+				compatible = "ibm,power10-phb-stack";
+				status = "okay";
+				ibm,lane-eq = <0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x99999999 0x99999999 0x99999999 0x99999999>;
+			};
+		};
+
+		pbcq@3011800 {
+			phandle = <0x111>;
+			reg = <0x3011800 0x100 0x8010800 0x200>;
+			compatible = "ibm,power10-pbcq";
+			ibm,pec-index = <0x00>;
+			#address-cells = <0x01>;
+			#size-cells = <0x00>;
+			ibm,hub-id = <0x01>;
+			ibm,loc-code = "U78DA.ND0.WZS003Y-P0-C15";
+
+			stack@0 {
+				phandle = <0x112>;
+				reg = <0x00>;
+				ibm,phb-index = <0x00>;
+				compatible = "ibm,power10-phb-stack";
+				status = "okay";
+				ibm,lane-eq = <0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x99999999 0x99999999 0x99999999 0x99999999>;
+			};
+
+			stack@1 {
+				phandle = <0x113>;
+				reg = <0x01>;
+				ibm,phb-index = <0x01>;
+				compatible = "ibm,power10-phb-stack";
+				status = "okay";
+				ibm,lane-eq = <0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x99999999 0x99999999 0x99999999 0x99999999>;
+			};
+
+			stack@2 {
+				phandle = <0x114>;
+				reg = <0x02>;
+				ibm,phb-index = <0x02>;
+				compatible = "ibm,power10-phb-stack";
+				status = "disabled";
+				ibm,lane-eq = <0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00>;
+			};
+		};
+
+		psihb@3011d00 {
+			phandle = <0xa8>;
+			reg = <0x3011d00 0x100>;
+			compatible = "ibm,power10-psihb-x\0ibm,psihb-x";
+		};
+
+		vas@2011400 {
+			phandle = <0xb5>;
+			reg = <0x2011400 0x300>;
+			compatible = "ibm,power10-vas-x";
+			ibm,vas-id = <0x01>;
+		};
+
+		xive@2010800 {
+			phandle = <0xa9>;
+			reg = <0x2010800 0x400>;
+			compatible = "ibm,power10-xive-x";
+			force-assign-bars;
+		};
+	};
+
+	xscom@e83fc00000000 {
+		phandle = <0xb6>;
+		ibm,chip-id = <0x04>;
+		ibm,proc-chip-id = <0x02>;
+		#address-cells = <0x01>;
+		#size-cells = <0x01>;
+		scom-controller;
+		compatible = "ibm,xscom\0ibm,power10-xscom";
+		reg = <0xe83fc 0x00 0x08 0x00>;
+		bus-frequency = <0x00 0x218711a0>;
+		ibm,dbob-id = <0x00>;
+		ibm,occ-functional-state = <0x01>;
+		ibm,loc-code = "U78DA.ND0.WZS003Y-P0-C24";
+		ibm,module-vpd = <0xcafebeef 0xffff 0x2bc2717b>;
+		part-number = "03JM290";
+		serial-number = "YA3936096901";
+		ibm,ccm-node-id = <0x00>;
+		ibm,hw-card-id = <0x00>;
+		ibm,hw-module-id = <0x00>;
+		ecid = <0x2a32913 0x7d049fff 0x3e200000 0x1d0000>;
+		wafer-id = "AZAHD-19  ";
+		wafer-location = <0x3e 0x20>;
+		ibm,primary-topology-index = <0x08>;
+
+		chiptod@40000 {
+			phandle = <0xed>;
+			reg = <0x40000 0x34>;
+			compatible = "ibm,power-chiptod\0ibm,power10-chiptod";
+			secondary;
+		};
+
+		i2cm@a2000 {
+			phandle = <0xc2>;
+			compatible = "ibm,power8-i2cm\0ibm,power9-i2cm";
+			reg = <0xa2000 0x1000>;
+			#size-cells = <0x00>;
+			#address-cells = <0x01>;
+			chip-engine# = <0x02>;
+			clock-frequency = <0x861c468>;
+
+			i2c-bus@1 {
+				phandle = <0xc3>;
+				reg = <0x01>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+				compatible = "ibm,opal-i2c\0ibm,power8-i2c-port\0ibm,power9-i2c-port";
+				bus-frequency = <0x61a80>;
+			};
+		};
+
+		i2cm@a3000 {
+			phandle = <0xb9>;
+			compatible = "ibm,power8-i2cm\0ibm,power9-i2cm";
+			reg = <0xa3000 0x1000>;
+			#size-cells = <0x00>;
+			#address-cells = <0x01>;
+			chip-engine# = <0x03>;
+			clock-frequency = <0x861c468>;
+
+			i2c-bus@0 {
+				phandle = <0xc1>;
+				reg = <0x00>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+				compatible = "ibm,opal-i2c\0ibm,power8-i2c-port\0ibm,power9-i2c-port";
+				bus-frequency = <0x61a80>;
+			};
+
+			i2c-bus@1 {
+				phandle = <0xc0>;
+				reg = <0x01>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+				compatible = "ibm,opal-i2c\0ibm,power8-i2c-port\0ibm,power9-i2c-port";
+				bus-frequency = <0x61a80>;
+			};
+
+			i2c-bus@8 {
+				phandle = <0xbf>;
+				reg = <0x08>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+				compatible = "ibm,opal-i2c\0ibm,power8-i2c-port\0ibm,power9-i2c-port";
+				bus-frequency = <0x61a80>;
+			};
+
+			i2c-bus@9 {
+				phandle = <0xbe>;
+				reg = <0x09>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+				compatible = "ibm,opal-i2c\0ibm,power8-i2c-port\0ibm,power9-i2c-port";
+				bus-frequency = <0x61a80>;
+			};
+
+			i2c-bus@a {
+				phandle = <0xbd>;
+				reg = <0x0a>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+				compatible = "ibm,opal-i2c\0ibm,power8-i2c-port\0ibm,power9-i2c-port";
+				bus-frequency = <0x61a80>;
+			};
+
+			i2c-bus@b {
+				phandle = <0xbc>;
+				reg = <0x0b>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+				compatible = "ibm,opal-i2c\0ibm,power8-i2c-port\0ibm,power9-i2c-port";
+				bus-frequency = <0x61a80>;
+			};
+
+			i2c-bus@c {
+				phandle = <0xbb>;
+				reg = <0x0c>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+				compatible = "ibm,opal-i2c\0ibm,power8-i2c-port\0ibm,power9-i2c-port";
+				bus-frequency = <0x61a80>;
+			};
+
+			i2c-bus@d {
+				phandle = <0xba>;
+				reg = <0x0d>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+				compatible = "ibm,opal-i2c\0ibm,power8-i2c-port\0ibm,power9-i2c-port";
+				bus-frequency = <0x61a80>;
+			};
+		};
+
+		nmmu@2010c40 {
+			phandle = <0xf6>;
+			compatible = "ibm,power9-nest-mmu";
+			reg = <0x2010c40 0x20>;
+		};
+
+		nx@2010000 {
+			phandle = <0xf1>;
+			compatible = "ibm,power9-nx";
+			reg = <0x2010000 0x4000>;
+		};
+
+		pbcq@2011800 {
+			phandle = <0x12c>;
+			reg = <0x2011800 0x100 0x9010800 0x200>;
+			compatible = "ibm,power10-pbcq";
+			ibm,pec-index = <0x01>;
+			#address-cells = <0x01>;
+			#size-cells = <0x00>;
+			ibm,hub-id = <0x02>;
+			ibm,loc-code = "U78DA.ND0.WZS003Y-P0-C24";
+
+			stack@0 {
+				phandle = <0x12d>;
+				reg = <0x00>;
+				ibm,phb-index = <0x03>;
+				compatible = "ibm,power10-phb-stack";
+				status = "okay";
+				ibm,lane-eq = <0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x99999999 0x99999999 0x99999999 0x99999999>;
+			};
+
+			stack@1 {
+				phandle = <0x12e>;
+				reg = <0x01>;
+				ibm,phb-index = <0x04>;
+				compatible = "ibm,power10-phb-stack";
+				status = "disabled";
+				ibm,lane-eq = <0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00>;
+			};
+
+			stack@2 {
+				phandle = <0x12f>;
+				reg = <0x02>;
+				ibm,phb-index = <0x05>;
+				compatible = "ibm,power10-phb-stack";
+				status = "disabled";
+				ibm,lane-eq = <0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00>;
+			};
+		};
+
+		pbcq@3011800 {
+			phandle = <0x128>;
+			reg = <0x3011800 0x100 0x8010800 0x200>;
+			compatible = "ibm,power10-pbcq";
+			ibm,pec-index = <0x00>;
+			#address-cells = <0x01>;
+			#size-cells = <0x00>;
+			ibm,hub-id = <0x02>;
+			ibm,loc-code = "U78DA.ND0.WZS003Y-P0-C24";
+
+			stack@0 {
+				phandle = <0x129>;
+				reg = <0x00>;
+				ibm,phb-index = <0x00>;
+				compatible = "ibm,power10-phb-stack";
+				status = "okay";
+				ibm,lane-eq = <0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x99999999 0x99999999 0x99999999 0x99999999>;
+			};
+
+			stack@1 {
+				phandle = <0x12a>;
+				reg = <0x01>;
+				ibm,phb-index = <0x01>;
+				compatible = "ibm,power10-phb-stack";
+				status = "disabled";
+				ibm,lane-eq = <0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00>;
+			};
+
+			stack@2 {
+				phandle = <0x12b>;
+				reg = <0x02>;
+				ibm,phb-index = <0x02>;
+				compatible = "ibm,power10-phb-stack";
+				status = "disabled";
+				ibm,lane-eq = <0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00>;
+			};
+		};
+
+		psihb@3011d00 {
+			phandle = <0xb7>;
+			reg = <0x3011d00 0x100>;
+			compatible = "ibm,power10-psihb-x\0ibm,psihb-x";
+		};
+
+		vas@2011400 {
+			phandle = <0xc4>;
+			reg = <0x2011400 0x300>;
+			compatible = "ibm,power10-vas-x";
+			ibm,vas-id = <0x02>;
+		};
+
+		xive@2010800 {
+			phandle = <0xb8>;
+			reg = <0x2010800 0x400>;
+			compatible = "ibm,power10-xive-x";
+			force-assign-bars;
+		};
+	};
+
+	xscom@ec3fc00000000 {
+		phandle = <0xc5>;
+		ibm,chip-id = <0x06>;
+		ibm,proc-chip-id = <0x03>;
+		#address-cells = <0x01>;
+		#size-cells = <0x01>;
+		scom-controller;
+		compatible = "ibm,xscom\0ibm,power10-xscom";
+		reg = <0xec3fc 0x00 0x08 0x00>;
+		bus-frequency = <0x00 0x218711a0>;
+		ibm,dbob-id = <0x00>;
+		ibm,occ-functional-state = <0x01>;
+		ibm,loc-code = "U78DA.ND0.WZS003Y-P0-C24";
+		ibm,module-vpd = <0xcafebeef 0xffff 0x1edc449c>;
+		part-number = "03JM290";
+		serial-number = "YA3936096901";
+		ibm,ccm-node-id = <0x00>;
+		ibm,hw-card-id = <0x00>;
+		ibm,hw-module-id = <0x00>;
+		ecid = <0x2a32913 0x7d080fff 0x472b0000 0x410000>;
+		wafer-id = "AZAHD-20  ";
+		wafer-location = <0x47 0x2b>;
+		ibm,primary-topology-index = <0x0c>;
+
+		chiptod@40000 {
+			phandle = <0xee>;
+			reg = <0x40000 0x34>;
+			compatible = "ibm,power-chiptod\0ibm,power10-chiptod";
+			secondary;
+		};
+
+		i2cm@a2000 {
+			phandle = <0xd1>;
+			compatible = "ibm,power8-i2cm\0ibm,power9-i2cm";
+			reg = <0xa2000 0x1000>;
+			#size-cells = <0x00>;
+			#address-cells = <0x01>;
+			chip-engine# = <0x02>;
+			clock-frequency = <0x861c468>;
+
+			i2c-bus@1 {
+				phandle = <0xd2>;
+				reg = <0x01>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+				compatible = "ibm,opal-i2c\0ibm,power8-i2c-port\0ibm,power9-i2c-port";
+				bus-frequency = <0x61a80>;
+			};
+		};
+
+		i2cm@a3000 {
+			phandle = <0xc8>;
+			compatible = "ibm,power8-i2cm\0ibm,power9-i2cm";
+			reg = <0xa3000 0x1000>;
+			#size-cells = <0x00>;
+			#address-cells = <0x01>;
+			chip-engine# = <0x03>;
+			clock-frequency = <0x861c468>;
+
+			i2c-bus@2 {
+				phandle = <0xd0>;
+				reg = <0x02>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+				compatible = "ibm,opal-i2c\0ibm,power8-i2c-port\0ibm,power9-i2c-port";
+				bus-frequency = <0x61a80>;
+			};
+
+			i2c-bus@3 {
+				phandle = <0xcf>;
+				reg = <0x03>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+				compatible = "ibm,opal-i2c\0ibm,power8-i2c-port\0ibm,power9-i2c-port";
+				bus-frequency = <0x61a80>;
+			};
+
+			i2c-bus@8 {
+				phandle = <0xce>;
+				reg = <0x08>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+				compatible = "ibm,opal-i2c\0ibm,power8-i2c-port\0ibm,power9-i2c-port";
+				bus-frequency = <0x61a80>;
+			};
+
+			i2c-bus@9 {
+				phandle = <0xcd>;
+				reg = <0x09>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+				compatible = "ibm,opal-i2c\0ibm,power8-i2c-port\0ibm,power9-i2c-port";
+				bus-frequency = <0x61a80>;
+			};
+
+			i2c-bus@c {
+				phandle = <0xcc>;
+				reg = <0x0c>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+				compatible = "ibm,opal-i2c\0ibm,power8-i2c-port\0ibm,power9-i2c-port";
+				bus-frequency = <0x61a80>;
+			};
+
+			i2c-bus@d {
+				phandle = <0xcb>;
+				reg = <0x0d>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+				compatible = "ibm,opal-i2c\0ibm,power8-i2c-port\0ibm,power9-i2c-port";
+				bus-frequency = <0x61a80>;
+			};
+
+			i2c-bus@e {
+				phandle = <0xca>;
+				reg = <0x0e>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+				compatible = "ibm,opal-i2c\0ibm,power8-i2c-port\0ibm,power9-i2c-port";
+				bus-frequency = <0x61a80>;
+			};
+
+			i2c-bus@f {
+				phandle = <0xc9>;
+				reg = <0x0f>;
+				#size-cells = <0x00>;
+				#address-cells = <0x01>;
+				compatible = "ibm,opal-i2c\0ibm,power8-i2c-port\0ibm,power9-i2c-port";
+				bus-frequency = <0x61a80>;
+			};
+		};
+
+		nmmu@2010c40 {
+			phandle = <0xf7>;
+			compatible = "ibm,power9-nest-mmu";
+			reg = <0x2010c40 0x20>;
+		};
+
+		nmmu@3010c40 {
+			phandle = <0xf8>;
+			compatible = "ibm,power9-nest-mmu";
+			reg = <0x3010c40 0x20>;
+		};
+
+		nx@2010000 {
+			phandle = <0xf2>;
+			compatible = "ibm,power9-nx";
+			reg = <0x2010000 0x4000>;
+		};
+
+		pbcq@2011800 {
+			phandle = <0x13c>;
+			reg = <0x2011800 0x100 0x9010800 0x200>;
+			compatible = "ibm,power10-pbcq";
+			ibm,pec-index = <0x01>;
+			#address-cells = <0x01>;
+			#size-cells = <0x00>;
+			ibm,hub-id = <0x03>;
+			ibm,loc-code = "U78DA.ND0.WZS003Y-P0-C24";
+
+			stack@0 {
+				phandle = <0x13d>;
+				reg = <0x00>;
+				ibm,phb-index = <0x03>;
+				compatible = "ibm,power10-phb-stack";
+				status = "okay";
+				ibm,lane-eq = <0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x99999999 0x99999999 0x99999999 0x99999999>;
+			};
+
+			stack@1 {
+				phandle = <0x13e>;
+				reg = <0x01>;
+				ibm,phb-index = <0x04>;
+				compatible = "ibm,power10-phb-stack";
+				status = "disabled";
+				ibm,lane-eq = <0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00>;
+			};
+
+			stack@2 {
+				phandle = <0x13f>;
+				reg = <0x02>;
+				ibm,phb-index = <0x05>;
+				compatible = "ibm,power10-phb-stack";
+				status = "disabled";
+				ibm,lane-eq = <0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00>;
+			};
+		};
+
+		pbcq@3011800 {
+			phandle = <0x138>;
+			reg = <0x3011800 0x100 0x8010800 0x200>;
+			compatible = "ibm,power10-pbcq";
+			ibm,pec-index = <0x00>;
+			#address-cells = <0x01>;
+			#size-cells = <0x00>;
+			ibm,hub-id = <0x03>;
+			ibm,loc-code = "U78DA.ND0.WZS003Y-P0-C24";
+
+			stack@0 {
+				phandle = <0x139>;
+				reg = <0x00>;
+				ibm,phb-index = <0x00>;
+				compatible = "ibm,power10-phb-stack";
+				status = "okay";
+				ibm,lane-eq = <0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x99999999 0x99999999 0x99999999 0x99999999>;
+			};
+
+			stack@1 {
+				phandle = <0x13a>;
+				reg = <0x01>;
+				ibm,phb-index = <0x01>;
+				compatible = "ibm,power10-phb-stack";
+				status = "okay";
+				ibm,lane-eq = <0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x44444444 0x99999999 0x99999999 0x99999999 0x99999999>;
+			};
+
+			stack@2 {
+				phandle = <0x13b>;
+				reg = <0x02>;
+				ibm,phb-index = <0x02>;
+				compatible = "ibm,power10-phb-stack";
+				status = "disabled";
+				ibm,lane-eq = <0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00 0x00>;
+			};
+		};
+
+		psihb@3011d00 {
+			phandle = <0xc6>;
+			reg = <0x3011d00 0x100>;
+			compatible = "ibm,power10-psihb-x\0ibm,psihb-x";
+		};
+
+		vas@2011400 {
+			phandle = <0xd3>;
+			reg = <0x2011400 0x300>;
+			compatible = "ibm,power10-vas-x";
+			ibm,vas-id = <0x03>;
+		};
+
+		xive@2010800 {
+			phandle = <0xc7>;
+			reg = <0x2010800 0x400>;
+			compatible = "ibm,power10-xive-x";
+			force-assign-bars;
+		};
+	};
+};

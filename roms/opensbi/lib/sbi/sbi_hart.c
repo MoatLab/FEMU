@@ -95,11 +95,16 @@ static void mstatus_init(struct sbi_scratch *scratch)
 		mstateen_val |= SMSTATEEN0_HSENVCFG;
 
 		if (sbi_hart_has_extension(scratch, SBI_HART_EXT_SMAIA))
-			mstateen_val |= (SMSTATEEN0_AIA | SMSTATEEN0_SVSLCT |
-					SMSTATEEN0_IMSIC);
+			mstateen_val |= (SMSTATEEN0_AIA | SMSTATEEN0_IMSIC);
 		else
-			mstateen_val &= ~(SMSTATEEN0_AIA | SMSTATEEN0_SVSLCT |
-					SMSTATEEN0_IMSIC);
+			mstateen_val &= ~(SMSTATEEN0_AIA | SMSTATEEN0_IMSIC);
+
+		if (sbi_hart_has_extension(scratch, SBI_HART_EXT_SMAIA) ||
+		    sbi_hart_has_extension(scratch, SBI_HART_EXT_SMCSRIND))
+			mstateen_val |= (SMSTATEEN0_SVSLCT);
+		else
+			mstateen_val &= ~(SMSTATEEN0_SVSLCT);
+
 		csr_write(CSR_MSTATEEN0, mstateen_val);
 #if __riscv_xlen == 32
 		csr_write(CSR_MSTATEEN0H, mstateen_val >> 32);
@@ -129,8 +134,19 @@ static void mstatus_init(struct sbi_scratch *scratch)
 		__set_menvcfg_ext(SBI_HART_EXT_SVPBMT, ENVCFG_PBMTE)
 #endif
 		__set_menvcfg_ext(SBI_HART_EXT_SSTC, ENVCFG_STCE)
+		__set_menvcfg_ext(SBI_HART_EXT_SMCDELEG, ENVCFG_CDE);
+		__set_menvcfg_ext(SBI_HART_EXT_SVADU, ENVCFG_ADUE);
 
 #undef __set_menvcfg_ext
+
+		/*
+		 * When both Svade and Svadu are present in DT, the default scheme for managing
+		 * the PTE A/D bits should use Svade. Check Svadu before Svade extension to ensure
+		 * that the ADUE bit is cleared when the Svade support are specified.
+		 */
+
+		if (sbi_hart_has_extension(scratch, SBI_HART_EXT_SVADE))
+			menvcfg_val &= ~ENVCFG_ADUE;
 
 		csr_write(CSR_MENVCFG, menvcfg_val);
 #if __riscv_xlen == 32
@@ -657,7 +673,17 @@ const struct sbi_hart_ext_data sbi_hart_ext[] = {
 	__SBI_HART_EXT_DATA(zicboz, SBI_HART_EXT_ZICBOZ),
 	__SBI_HART_EXT_DATA(zicbom, SBI_HART_EXT_ZICBOM),
 	__SBI_HART_EXT_DATA(svpbmt, SBI_HART_EXT_SVPBMT),
+	__SBI_HART_EXT_DATA(sdtrig, SBI_HART_EXT_SDTRIG),
+	__SBI_HART_EXT_DATA(smcsrind, SBI_HART_EXT_SMCSRIND),
+	__SBI_HART_EXT_DATA(smcdeleg, SBI_HART_EXT_SMCDELEG),
+	__SBI_HART_EXT_DATA(sscsrind, SBI_HART_EXT_SSCSRIND),
+	__SBI_HART_EXT_DATA(ssccfg, SBI_HART_EXT_SSCCFG),
+	__SBI_HART_EXT_DATA(svade, SBI_HART_EXT_SVADE),
+	__SBI_HART_EXT_DATA(svadu, SBI_HART_EXT_SVADU),
 };
+
+_Static_assert(SBI_HART_EXT_MAX == array_size(sbi_hart_ext),
+	       "sbi_hart_ext[]: wrong number of entries");
 
 /**
  * Get the hart extensions in string format
@@ -898,6 +924,9 @@ __pmp_skip:
 	/* Detect if hart supports smcntrpmf */
 	__check_ext_csr(SBI_HART_PRIV_VER_1_12,
 			CSR_MCYCLECFG, SBI_HART_EXT_SMCNTRPMF);
+	/* Detect if hart support sdtrig (debug triggers) */
+	__check_ext_csr(SBI_HART_PRIV_VER_UNKNOWN,
+			CSR_TSELECT, SBI_HART_EXT_SDTRIG);
 
 #undef __check_ext_csr
 
@@ -1029,10 +1058,17 @@ sbi_hart_switch_mode(unsigned long arg0, unsigned long arg1,
 	csr_write(CSR_MEPC, next_addr);
 
 	if (next_mode == PRV_S) {
-		csr_write(CSR_STVEC, next_addr);
-		csr_write(CSR_SSCRATCH, 0);
-		csr_write(CSR_SIE, 0);
-		csr_write(CSR_SATP, 0);
+		if (next_virt) {
+			csr_write(CSR_VSTVEC, next_addr);
+			csr_write(CSR_VSSCRATCH, 0);
+			csr_write(CSR_VSIE, 0);
+			csr_write(CSR_VSATP, 0);
+		} else {
+			csr_write(CSR_STVEC, next_addr);
+			csr_write(CSR_SSCRATCH, 0);
+			csr_write(CSR_SIE, 0);
+			csr_write(CSR_SATP, 0);
+		}
 	} else if (next_mode == PRV_U) {
 		if (misa_extension('N')) {
 			csr_write(CSR_UTVEC, next_addr);

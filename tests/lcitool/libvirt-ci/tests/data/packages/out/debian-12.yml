@@ -9,11 +9,14 @@ native:
 - bash
 - bash-completion
 - bc
+- bindgen
 - bison
+- black
 - bsdextrautils
 - bzip2
 - ca-certificates
 - cargo
+- cargo-c
 - ccache
 - check
 - chrony
@@ -78,7 +81,9 @@ native:
 - libcacard-dev
 - libcap-ng-dev
 - libcapstone-dev
+- libcbor-dev
 - libclang-dev
+- libclang-rt-dev
 - libcmocka-dev
 - libconfig-dev
 - libcpan-changes-perl
@@ -90,7 +95,6 @@ native:
 - libdrm-dev
 - libepoxy-dev
 - libev-dev
-- libextutils-cbuilder-perl
 - libfdt-dev
 - libffi-dev
 - libfile-slurp-perl
@@ -98,7 +102,7 @@ native:
 - libfuse3-dev
 - libgbm-dev
 - libgcrypt20-dev
-- libgdk-pixbuf2.0-dev
+- libgdk-pixbuf-2.0-dev
 - libgirepository1.0-dev
 - libglib2.0-dev
 - libglib2.0-dev-bin
@@ -121,6 +125,7 @@ native:
 - libjson-c-dev
 - libjson-glib-dev
 - liblttng-ust-dev
+- liblua5.4-dev
 - liblzma-dev
 - liblzo2-dev
 - libmodule-build-perl
@@ -162,8 +167,9 @@ native:
 - libspice-client-gtk-3.0-dev
 - libspice-protocol-dev
 - libspice-server-dev
-- libssh-gcrypt-dev
+- libssh-dev
 - libssh2-1-dev
+- libstd-rust-dev
 - libsub-uplevel-perl
 - libsystemd-dev
 - libtap-formatter-html-perl
@@ -205,7 +211,6 @@ native:
 - llvm
 - locales
 - lsof
-- lua5.4
 - lvm2
 - make
 - meson
@@ -235,7 +240,7 @@ native:
 - php-dev
 - php-imagick
 - pkgconf
-- policykit-1
+- polkitd
 - publican
 - python3
 - python3-boto3
@@ -245,6 +250,7 @@ native:
 - python3-docutils
 - python3-gi
 - python3-libnbd
+- python3-libvirt
 - python3-libxml2
 - python3-lxml
 - python3-numpy
@@ -288,6 +294,7 @@ native:
 - valac
 - valgrind
 - vim-nox
+- vulkan-tools
 - wget
 - wireshark-dev
 - xfslibs-dev
