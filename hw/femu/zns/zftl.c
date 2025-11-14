@@ -173,7 +173,9 @@ static void zns_invalidate_zone_cache(struct zns_ssd *zns, uint32_t zone_idx)
 
     for (i = 0; i < zns->cache.num_wc; i++) {
         if (zns->cache.write_cache[i].sblk == zone_idx) {
+            #ifdef FEMU_DEBUG_ZFTL
             uint64_t discarded_entries = zns->cache.write_cache[i].used;
+            #endif
 
             zns->cache.write_cache[i].used = 0;
             zns->cache.write_cache[i].sblk = INVALID_SBLK;
