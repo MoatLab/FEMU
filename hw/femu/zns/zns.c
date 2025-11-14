@@ -502,11 +502,14 @@ struct zns_zone_reset_ctx {
     NvmeZone    *zone;
 };
 
-static void zns_aio_zone_reset_cb(NvmeRequest *req, NvmeZone *zone)
+static uint64_t zns_aio_zone_reset_cb(NvmeRequest *req, NvmeZone *zone)
 {
     NvmeNamespace *ns = req->ns;
+    FemuCtrl *n = ns->ctrl;
+    struct zns_ssd *zns = n->zns;
+    uint32_t zone_idx = zns_zone_idx(ns, zone->d.zslba);
+    uint64_t erase_latency = 0;
 
-    /* FIXME, We always assume reset SUCCESS */
     switch (zns_get_zone_state(zone)) {
     case NVME_ZONE_STATE_EXPLICITLY_OPEN:
         /* fall through */
@@ -520,27 +523,20 @@ static void zns_aio_zone_reset_cb(NvmeRequest *req, NvmeZone *zone)
         zone->w_ptr = zone->d.zslba;
         zone->d.wp = zone->w_ptr;
         zns_assign_zone_state(ns, zone, NVME_ZONE_STATE_EMPTY);
+        break;
     default:
         break;
     }
 
-#if 0
-    FemuCtrl *n = ns->ctrl;
-    int ch, lun;
-    struct zns_ssd *zns = n->zns;
-    uint64_t num_ch = zns->num_ch;
-    uint64_t num_lun = zns->num_lun;
+    erase_latency = zns_zone_reset(zns, zone_idx, n->zone_size, zns->lbasz, req->stime);
 
-    struct ppa ppa;
-    for (ch = 0; ch < num_ch; ch++) {
-        for (lun = 0; lun < num_lun; lun++) {
-            ppa.g.ch = ch;
-            ppa.g.fc = lun;
-            ppa.g.blk = zns_zone_idx(ns, zone->d.zslba);
-            //FIXME: no erase
-        }
+    /* Reset write pointer if this was the active zone */
+    if (zns->active_zone == zone_idx) {
+        zns->wp.ch = 0;
+        zns->wp.lun = 0;
     }
-#endif
+
+    return erase_latency;
 }
 
 typedef uint16_t (*op_handler_t)(NvmeNamespace *, NvmeZone *, NvmeZoneState,
@@ -631,6 +627,8 @@ static uint16_t zns_finish_zone(NvmeNamespace *ns, NvmeZone *zone,
 static uint16_t zns_reset_zone(NvmeNamespace *ns, NvmeZone *zone,
                                NvmeZoneState state, NvmeRequest *req)
 {
+    uint64_t erase_lat = 0;
+
     switch (state) {
     case NVME_ZONE_STATE_EMPTY:
         return NVME_SUCCESS;
@@ -643,7 +641,10 @@ static uint16_t zns_reset_zone(NvmeNamespace *ns, NvmeZone *zone,
         return NVME_ZONE_INVAL_TRANSITION;
     }
 
-    zns_aio_zone_reset_cb(req, zone);
+    erase_lat = zns_aio_zone_reset_cb(req, zone);
+
+    req->reqlat = erase_lat;
+    req->expire_time += erase_lat;
 
     return NVME_SUCCESS;
 }

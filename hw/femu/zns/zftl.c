@@ -167,6 +167,122 @@ static int zns_get_wcidx(struct zns_ssd* zns)
     return -1;
 }
 
+static void zns_invalidate_zone_cache(struct zns_ssd *zns, uint32_t zone_idx)
+{
+    int i;
+
+    for (i = 0; i < zns->cache.num_wc; i++) {
+        if (zns->cache.write_cache[i].sblk == zone_idx) {
+            uint64_t discarded_entries = zns->cache.write_cache[i].used;
+
+            zns->cache.write_cache[i].used = 0;
+            zns->cache.write_cache[i].sblk = INVALID_SBLK;
+
+            ftl_debug("Invalidated write_cache[%d] for zone %u (%lu entries discarded)\n",
+                     i, zone_idx, discarded_entries);
+            return;
+        }
+    }
+}
+
+static void zns_invalidate_zone_mappings(struct zns_ssd *zns, uint32_t zone_idx,
+                                         uint64_t zone_size_lbas, uint64_t lbasz)
+{
+    uint64_t zone_start_lba = zone_idx * zone_size_lbas;
+    uint64_t zone_end_lba = (zone_idx + 1) * zone_size_lbas;
+    uint64_t secs_per_pg = LOGICAL_PAGE_SIZE / lbasz;
+    uint64_t start_lpn = zone_start_lba / secs_per_pg;
+    uint64_t end_lpn = zone_end_lba / secs_per_pg;
+    uint64_t lpn;
+    uint64_t invalidated_count = 0;
+
+    for (lpn = start_lpn; lpn < end_lpn && lpn < zns->l2p_sz; lpn++) {
+        if (zns->maptbl[lpn].ppa != UNMAPPED_PPA) {
+            zns->maptbl[lpn].ppa = UNMAPPED_PPA;
+            invalidated_count++;
+        }
+    }
+
+    ftl_debug("Invalidated %lu LPN mappings for zone %u (LPN %lu-%lu)\n",
+             invalidated_count, zone_idx, start_lpn, end_lpn - 1);
+}
+
+static void zns_reset_block_state(struct zns_ssd *zns, uint32_t zone_idx)
+{
+    int ch, lun, pl;
+    struct ppa ppa;
+    struct zns_blk *blk;
+
+    for (ch = 0; ch < zns->num_ch; ch++) {
+        for (lun = 0; lun < zns->num_lun; lun++) {
+            for (pl = 0; pl < zns->num_plane; pl++) {
+                ppa.g.ch = ch;
+                ppa.g.fc = lun;
+                ppa.g.pl = pl;
+                ppa.g.blk = zone_idx;
+                ppa.g.pg = 0;
+                ppa.g.spg = 0;
+
+                blk = get_blk(zns, &ppa);
+                blk->page_wp = 0;
+            }
+        }
+    }
+
+    ftl_debug("Reset block state for zone %u (all page_wp = 0)\n", zone_idx);
+}
+
+uint64_t zns_zone_reset(struct zns_ssd *zns, uint32_t zone_idx,
+                        uint64_t zone_size_lbas, uint64_t lbasz, uint64_t stime)
+{
+    int ch, lun, pl;
+    struct ppa ppa;
+    struct nand_cmd erase_cmd;
+    uint64_t sublat, maxlat = 0;
+    uint64_t total_blocks_erased = 0;
+
+    ftl_debug("=== Zone Reset Started for Zone %u ===\n", zone_idx);
+
+    /* Step 1: Invalidate write cache (instant) */
+    zns_invalidate_zone_cache(zns, zone_idx);
+
+    /* Step 2: Invalidate L2P mappings (instant) */
+    zns_invalidate_zone_mappings(zns, zone_idx, zone_size_lbas, lbasz);
+
+    /* Step 3: Reset block state (instant) */
+    zns_reset_block_state(zns, zone_idx);
+
+    /* Step 4: Simulate physical erase across all channels/LUNs/planes (parallel) */
+    erase_cmd.type = USER_IO;
+    erase_cmd.cmd = NAND_ERASE;
+    erase_cmd.stime = stime;
+
+    for (ch = 0; ch < zns->num_ch; ch++) {
+        for (lun = 0; lun < zns->num_lun; lun++) {
+            for (pl = 0; pl < zns->num_plane; pl++) {
+                ppa.ppa = 0;
+                ppa.g.ch = ch;
+                ppa.g.fc = lun;
+                ppa.g.pl = pl;
+                ppa.g.blk = zone_idx;
+                ppa.g.pg = 0;
+                ppa.g.spg = 0;
+
+                sublat = zns_advance_status(zns, &ppa, &erase_cmd);
+                maxlat = (sublat > maxlat) ? sublat : maxlat;
+                total_blocks_erased++;
+            }
+        }
+    }
+
+    ftl_debug("Zone %u reset complete: erased %lu blocks across %d ch * %d lun * %d planes\n",
+             zone_idx, total_blocks_erased, (int)zns->num_ch, (int)zns->num_lun, (int)zns->num_plane);
+    ftl_debug("Maximum erase latency: %lu ns (%.2f ms)\n", maxlat, maxlat / 1000000.0);
+    ftl_debug("=== Zone Reset Finished ===\n\n");
+
+    return maxlat;
+}
+
 static uint64_t zns_read(struct zns_ssd *zns, NvmeRequest *req)
 {
     uint64_t lba = req->slba;

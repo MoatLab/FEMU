@@ -9,6 +9,9 @@
 
 void zftl_init(FemuCtrl *n);
 
+uint64_t zns_zone_reset(struct zns_ssd *zns, uint32_t zone_idx,
+                        uint64_t zone_size_lbas, uint64_t lbasz, uint64_t stime);
+
 #ifdef FEMU_DEBUG_ZFTL
 #define ftl_debug(fmt, ...) \
     do { printf("[Misao] ZFTL-Dbg: " fmt, ## __VA_ARGS__); } while (0)
