@@ -308,7 +308,7 @@ static uint64_t zns_read(struct zns_ssd *zns, NvmeRequest *req)
         srd.stime = req->stime;
 
         sublat = zns_advance_status(zns, &ppa, &srd);
-        femu_log("[R] lpn:\t%lu\t<--ch:\t%u\tlun:\t%u\tpl:\t%u\tblk:\t%u\tpg:\t%u\tsubpg:\t%u\tlat\t%lu\n",lpn,ppa.g.ch,ppa.g.fc,ppa.g.pl,ppa.g.blk,ppa.g.pg,ppa.g.spg,sublat);
+        ftl_debug("[R] lpn:\t%lu\t<--ch:\t%u\tlun:\t%u\tpl:\t%u\tblk:\t%u\tpg:\t%u\tsubpg:\t%u\tlat\t%lu\n",lpn,ppa.g.ch,ppa.g.fc,ppa.g.pl,ppa.g.blk,ppa.g.pg,ppa.g.spg,sublat);
         maxlat = (sublat > maxlat) ? sublat : maxlat;
     }
 
@@ -350,7 +350,7 @@ static uint64_t zns_wc_flush(struct zns_ssd* zns, int wcidx, int type,uint64_t s
                     ppa.g.spg = subpage;
                     /* update maptbl */
                     set_maptbl_ent(zns, lpn, &ppa);
-                    //femu_log("[F] lpn:\t%lu\t-->ch:\t%u\tlun:\t%u\tpl:\t%u\tblk:\t%u\tpg:\t%u\tsubpg:\t%u\tlat\t%lu\n",lpn,ppa.g.ch,ppa.g.fc,ppa.g.pl,ppa.g.blk,ppa.g.pg,ppa.g.spg,sublat);
+                    // ftl_debug("[F] lpn:\t%lu\t-->ch:\t%u\tlun:\t%u\tpl:\t%u\tblk:\t%u\tpg:\t%u\tsubpg:\t%u\tlat\t%lu\n",lpn,ppa.g.ch,ppa.g.fc,ppa.g.pl,ppa.g.blk,ppa.g.pg,ppa.g.spg,sublat);
                 }
                 i+=ZNS_PAGE_SIZE/LOGICAL_PAGE_SIZE;
             }
@@ -411,16 +411,16 @@ static uint64_t zns_write(struct zns_ssd *zns, NvmeRequest *req)
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
         if(zns->cache.write_cache[wcidx].used==zns->cache.write_cache[wcidx].cap)
         {
-            femu_log("[W] flush wc %d (%u/%u)\n",wcidx,(int)zns->cache.write_cache[wcidx].used,(int)zns->cache.write_cache[wcidx].cap);
+            ftl_debug("[W] flush wc %d (%u/%u)\n",wcidx,(int)zns->cache.write_cache[wcidx].used,(int)zns->cache.write_cache[wcidx].cap);
             sublat = zns_wc_flush(zns,wcidx,USER_IO,req->stime);
-            femu_log("[W] flush lat: %u\n", (int)sublat);
+            ftl_debug("[W] flush lat: %u\n", (int)sublat);
             maxlat = (sublat > maxlat) ? sublat : maxlat;
             sublat = 0;
         }
         zns->cache.write_cache[wcidx].lpns[zns->cache.write_cache[wcidx].used++]=lpn;
         sublat += SRAM_WRITE_LATENCY_NS; //Simplified timing emulation
         maxlat = (sublat > maxlat) ? sublat : maxlat;
-        femu_log("[W] lpn:\t%lu\t-->wc cache:%u, used:%u\n",lpn,(int)wcidx,(int)zns->cache.write_cache[wcidx].used);
+        ftl_debug("[W] lpn:\t%lu\t-->wc cache:%u, used:%u\n",lpn,(int)wcidx,(int)zns->cache.write_cache[wcidx].used);
     }
     return maxlat;
 }
