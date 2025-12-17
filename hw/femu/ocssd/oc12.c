@@ -445,8 +445,8 @@ static uint16_t oc12_read(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     Oc12Ctrl *ln = n->oc12_ctrl;
     Oc12RwCmd *ocrw = (Oc12RwCmd *)cmd;
     uint16_t nlb  = le16_to_cpu(ocrw->nlb) + 1;     /* # of logical blocks */
-    uint64_t prp1 = le64_to_cpu(ocrw->prp1);        /* PRP1 */
-    uint64_t prp2 = le64_to_cpu(ocrw->prp2);        /* PRP2 */
+    //uint64_t prp1 = le64_to_cpu(ocrw->prp1);        /* PRP1 */
+    //uint64_t prp2 = le64_to_cpu(ocrw->prp2);        /* PRP2 */
     uint64_t meta = le64_to_cpu(ocrw->metadata);    /* OOB */
     const uint8_t lbaid = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
     const uint8_t lbads = NVME_ID_NS_LBAF_DS(ns, lbaid);
@@ -520,8 +520,8 @@ static uint16_t oc12_write(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     Oc12Ctrl *ln = n->oc12_ctrl;
     Oc12RwCmd *ocrw = (Oc12RwCmd *)cmd;
     uint16_t nlb  = le16_to_cpu(ocrw->nlb) + 1;     /* # of logical blocks */
-    uint64_t prp1 = le64_to_cpu(ocrw->prp1);        /* PRP1 */
-    uint64_t prp2 = le64_to_cpu(ocrw->prp2);        /* PRP2 */
+    //uint64_t prp1 = le64_to_cpu(ocrw->prp1);        /* PRP1 */
+    //uint64_t prp2 = le64_to_cpu(ocrw->prp2);        /* PRP2 */
     uint64_t meta = le64_to_cpu(ocrw->metadata);    /* OOB */
     const uint8_t lbaid = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
     const uint8_t lbads = NVME_ID_NS_LBAF_DS(ns, lbaid);
