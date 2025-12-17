@@ -1,4 +1,5 @@
 #include "./nvme.h"
+#define SEG_CHUNK_SIZE 256
 
 int nvme_addr_read(FemuCtrl *n, hwaddr addr, void *buf, int size)
 {
@@ -53,7 +54,7 @@ uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
             goto unmap;
         }
         if (len > n->page_size) {
-            uint64_t prp_list[n->max_prp_ents];
+            uint64_t *prp_list = g_malloc0(sizeof(uint64_t) * n->max_prp_ents);
             uint32_t nents, prp_trans;
             int i = 0;
 
@@ -77,6 +78,7 @@ uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
                 }
 
                 if (!prp_ent || prp_ent & (n->page_size - 1)) {
+                    free(prp_list);
                     goto unmap;
                 }
 
@@ -90,6 +92,7 @@ uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
                 len -= trans_len;
                 i++;
             }
+            free(prp_list);
         } else {
             if (prp2 & (n->page_size - 1)) {
                 goto unmap;
@@ -131,7 +134,7 @@ static uint16_t nvme_map_sgl_data(FemuCtrl *n, QEMUSGList *sg,
 {
     dma_addr_t addr, trans_len;
     uint32_t dlen;
-    uint16_t status;
+    //uint16_t status;
 
     for (int i = 0; i < nsgld; i++) {
         uint8_t type = NVME_SGL_TYPE(segment[i].type);
@@ -192,7 +195,6 @@ uint16_t nvme_map_sgl(FemuCtrl *n, QEMUSGList *sg, NvmeSglDescriptor sgl,
      * descriptors and segment chain) than the command transfer size, so it is
      * not bounded by MDTS.
      */
-    const int SEG_CHUNK_SIZE = 256;
 
     NvmeSglDescriptor segment[SEG_CHUNK_SIZE], *sgld, *last_sgld;
     uint64_t nsgld;
@@ -310,9 +312,10 @@ out:
     return NVME_SUCCESS;
 
 unmap:
-    qemu_sglist_destroy(&sg);
+    qemu_sglist_destroy(sg);
     return status;
 }
+
 
 uint16_t dma_write_prp(FemuCtrl *n, uint8_t *ptr, uint32_t len, uint64_t prp1,
                        uint64_t prp2)
