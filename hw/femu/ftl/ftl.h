@@ -2,6 +2,7 @@
 #define __FEMU_FTL_H
 
 #include "../nvme.h"
+#include "../backend/dram.h"
 
 #define INVALID_PPA     (~(0ULL))
 #define INVALID_LPN     (~(0ULL))
@@ -194,6 +195,16 @@ struct nand_cmd {
     int64_t stime; /* Coperd: request arrival time */
 };
 
+/* Forward declarations */
+struct ssd;
+typedef uint64_t lpn_t;
+
+/* Caching plugin interface - extendable and modular */
+/* Forward declarations - actual definitions in cache/cache_plugin.h */
+struct cache_entry;
+struct cache_ops;
+struct cache_plugin;
+
 struct ssd {
     char *ssdname;
     struct ssdparams sp;
@@ -202,15 +213,51 @@ struct ssd {
     uint64_t *rmap;     /* reverse mapptbl, assume it's stored in OOB */
     struct write_pointer wp;
     struct line_mgmt lm;
+    SsdDramBackend *b;  /* DRAM backend (set in ssd_init) */
 
     /* lockless ring for communication with NVMe IO thread */
     struct rte_ring **to_ftl;
     struct rte_ring **to_poller;
     bool *dataplane_started_ptr;
     QemuThread ftl_thread;
+
+    /* Opaque for device-specific state (e.g. cxlssd: struct cxlssd *) */
+    void *opaque;
+
+    /* Optional cache plugin (e.g. CXL DER); set via set_cache_plugin callback */
+    void (*set_cache_plugin)(struct ssd *ssd, struct cache_plugin *plugin);
+    struct cache_plugin *cache;
 };
 
 void ssd_init(FemuCtrl *n);
+
+/* Register caching plugin with FTL */
+void ftl_register_cache_plugin(struct ssd *ssd, struct cache_plugin *plugin);
+
+/* Check if LPN is valid */
+bool valid_lpn(struct ssd *ssd, uint64_t lpn);
+
+/* FTL thread functions - implemented in device-specific directories */
+void *ftl_thread_bbssd(void *arg);
+void *ftl_thread_cxlssd(void *arg);
+
+/* FTL I/O functions */
+uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req);
+uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req);
+int do_gc(struct ssd *ssd, bool force);
+
+/* FTL helper functions */
+bool should_gc(struct ssd *ssd);
+struct ppa get_maptbl_ent(struct ssd *ssd, uint64_t lpn);
+void set_maptbl_ent(struct ssd *ssd, uint64_t lpn, struct ppa *ppa);
+bool valid_ppa(struct ssd *ssd, struct ppa *ppa);
+bool mapped_ppa(struct ppa *ppa);
+struct ppa get_new_page(struct ssd *ssd);
+void mark_page_valid(struct ssd *ssd, struct ppa *ppa);
+void mark_page_invalid(struct ssd *ssd, struct ppa *ppa);
+uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa, struct nand_cmd *cmd);
+void ssd_advance_write_pointer(struct ssd *ssd);
+void set_rmap_ent(struct ssd *ssd, uint64_t lpn, struct ppa *ppa);
 
 #ifdef FEMU_DEBUG_FTL
 #define ftl_debug(fmt, ...) \

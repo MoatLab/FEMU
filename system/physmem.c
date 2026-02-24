@@ -80,6 +80,8 @@
 #include <daxctl/libdaxctl.h>
 #endif
 
+#include "hw/femu/femu.h"
+
 //#define DEBUG_SUBPAGE
 
 /* ram_list is read under rcu_read_lock()/rcu_read_unlock().  Writes
@@ -3180,6 +3182,36 @@ void *address_space_map(AddressSpace *as,
     fv = address_space_to_flatview(as);
     mr = flatview_translate(fv, addr, &xlat, &l, is_write, attrs);
 
+    if (mr->dual_mode) {
+        ram_addr_t offset;
+        uint64_t dummy;
+        FemuCtrl *femu;
+        void *ptr = femu_get_backend_ptr_from_gpa(addr);
+
+        if (!ptr) {
+            *plen = 0;
+            return NULL;
+        }
+
+        mr = memory_region_from_host(ptr, &offset);
+        femu = (FemuCtrl *)mr->owner;
+        memory_region_ref(mr);
+
+        /* Touch pages via cxl_mem_ops with DUAL_MODE_DMA_MAP so DER-KVM
+         * can set EPTEs to direct for the mapped range.
+         */
+        while (l > 0) {
+            uint64_t chunk = MIN(l, TARGET_PAGE_SIZE);
+            femu->cxl_mem_ops.read((void *)femu, offset, &dummy,
+                                   sizeof(dummy), MEMTXATTRS_DUAL_MODE_DMA_MAP);
+            offset += chunk;
+            l -= chunk;
+        }
+
+        *plen = len;
+        return ptr;
+    }
+
     if (!memory_access_is_direct(mr, is_write)) {
         if (qatomic_xchg(&bounce.in_use, true)) {
             *plen = 0;
@@ -3223,6 +3255,26 @@ void address_space_unmap(AddressSpace *as, void *buffer, hwaddr len,
 
         mr = memory_region_from_host(buffer, &addr1);
         assert(mr != NULL);
+
+        if (mr->dual_mode) {
+            FemuCtrl *femu = (FemuCtrl *)mr->owner;
+            ram_addr_t offset = addr1;
+            hwaddr l = len;
+            uint64_t dummy = 1;
+
+            while (l > 0) {
+                uint64_t chunk = MIN(l, TARGET_PAGE_SIZE);
+
+                femu->cxl_mem_ops.write((void *)femu, offset, dummy,
+                                        sizeof(dummy),
+                                        MEMTXATTRS_DUAL_MODE_DMA_MAP);
+                offset += chunk;
+                l -= chunk;
+            }
+            memory_region_unref(mr);
+            return;
+        }
+
         if (is_write) {
             invalidate_and_set_dirty(mr, addr1, access_len);
         }
@@ -3232,6 +3284,7 @@ void address_space_unmap(AddressSpace *as, void *buffer, hwaddr len,
         memory_region_unref(mr);
         return;
     }
+
     if (is_write) {
         address_space_write(as, bounce.addr, MEMTXATTRS_UNSPECIFIED,
                             bounce.buffer, access_len);

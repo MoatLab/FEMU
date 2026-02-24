@@ -50,6 +50,7 @@
 #include "acpi-build.h"
 #include "hw/mem/nvdimm.h"
 #include "hw/cxl/cxl_host.h"
+#include "hw/femu/femu.h"
 #include "hw/usb.h"
 #include "hw/i386/intel_iommu.h"
 #include "hw/net/ne2000-isa.h"
@@ -998,8 +999,11 @@ void pc_memory_init(PCMachineState *pcms,
                 CXLFixedWindow *fw = it->data;
 
                 fw->base = cxl_fmw_base;
-                memory_region_init_io(&fw->mr, OBJECT(machine), &cfmws_ops, fw,
-                                      "cxl-fixed-memory-region", fw->size);
+                femu_set_base_gpa(fw->base);
+                memory_region_init_io_dual_mode(&fw->mr, OBJECT(machine),
+                                                &cfmws_ops, fw,
+                                                "cxl-fixed-memory-region",
+                                                fw->size);
                 memory_region_add_subregion(system_memory, fw->base, &fw->mr);
                 cxl_fmw_base += fw->size;
                 cxl_resv_end = cxl_fmw_base;

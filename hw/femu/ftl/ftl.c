@@ -2,9 +2,19 @@
 
 //#define FEMU_DEBUG_FTL
 
-static void *ftl_thread(void *arg);
+/* Register caching plugin with FTL */
+void ftl_register_cache_plugin(struct ssd *ssd, struct cache_plugin *plugin)
+{
+    if (ssd->set_cache_plugin) {
+        ssd->set_cache_plugin(ssd, plugin);
+    } else {
+        ssd->cache = plugin;
+    }
+}
 
-static inline bool should_gc(struct ssd *ssd)
+/* FTL thread functions are now implemented in device-specific directories */
+
+bool should_gc(struct ssd *ssd)
 {
     return (ssd->lm.free_line_cnt <= ssd->sp.gc_thres_lines);
 }
@@ -14,12 +24,12 @@ static inline bool should_gc_high(struct ssd *ssd)
     return (ssd->lm.free_line_cnt <= ssd->sp.gc_thres_lines_high);
 }
 
-static inline struct ppa get_maptbl_ent(struct ssd *ssd, uint64_t lpn)
+struct ppa get_maptbl_ent(struct ssd *ssd, uint64_t lpn)
 {
     return ssd->maptbl[lpn];
 }
 
-static inline void set_maptbl_ent(struct ssd *ssd, uint64_t lpn, struct ppa *ppa)
+void set_maptbl_ent(struct ssd *ssd, uint64_t lpn, struct ppa *ppa)
 {
     ftl_assert(lpn < ssd->sp.tt_pgs);
     ssd->maptbl[lpn] = *ppa;
@@ -49,7 +59,7 @@ static inline uint64_t get_rmap_ent(struct ssd *ssd, struct ppa *ppa)
 }
 
 /* set rmap[page_no(ppa)] -> lpn */
-static inline void set_rmap_ent(struct ssd *ssd, uint64_t lpn, struct ppa *ppa)
+void set_rmap_ent(struct ssd *ssd, uint64_t lpn, struct ppa *ppa)
 {
     uint64_t pgidx = ppa2pgidx(ssd, ppa);
 
@@ -154,7 +164,7 @@ static struct line *get_next_free_line(struct ssd *ssd)
     return curline;
 }
 
-static void ssd_advance_write_pointer(struct ssd *ssd)
+void ssd_advance_write_pointer(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;
     struct write_pointer *wpp = &ssd->wp;
@@ -208,7 +218,7 @@ static void ssd_advance_write_pointer(struct ssd *ssd)
     }
 }
 
-static struct ppa get_new_page(struct ssd *ssd)
+struct ppa get_new_page(struct ssd *ssd)
 {
     struct write_pointer *wpp = &ssd->wp;
     struct ppa ppa;
@@ -367,6 +377,7 @@ void ssd_init(FemuCtrl *n)
 
     ftl_assert(ssd);
 
+    ssd->b = n->mbe;
     ssd_init_params(spp, n);
 
     /* initialize ssd internal layout architecture */
@@ -387,11 +398,17 @@ void ssd_init(FemuCtrl *n)
     /* initialize write pointer, this is how we allocate new pages for writes */
     ssd_init_write_pointer(ssd);
 
-    qemu_thread_create(&ssd->ftl_thread, "FEMU-FTL-Thread", ftl_thread, n,
-                       QEMU_THREAD_JOINABLE);
+    /* Create appropriate FTL thread based on device mode */
+    if (CXLSSD(n)) {
+        qemu_thread_create(&ssd->ftl_thread, "FEMU-FTL-CXLSSD-Thread", 
+                          ftl_thread_cxlssd, n, QEMU_THREAD_JOINABLE);
+    } else {
+        qemu_thread_create(&ssd->ftl_thread, "FEMU-FTL-BBSSD-Thread", 
+                          ftl_thread_bbssd, n, QEMU_THREAD_JOINABLE);
+    }
 }
 
-static inline bool valid_ppa(struct ssd *ssd, struct ppa *ppa)
+bool valid_ppa(struct ssd *ssd, struct ppa *ppa)
 {
     struct ssdparams *spp = &ssd->sp;
     int ch = ppa->g.ch;
@@ -409,12 +426,12 @@ static inline bool valid_ppa(struct ssd *ssd, struct ppa *ppa)
     return false;
 }
 
-static inline bool valid_lpn(struct ssd *ssd, uint64_t lpn)
+bool valid_lpn(struct ssd *ssd, uint64_t lpn)
 {
     return (lpn < ssd->sp.tt_pgs);
 }
 
-static inline bool mapped_ppa(struct ppa *ppa)
+bool mapped_ppa(struct ppa *ppa)
 {
     return !(ppa->ppa == UNMAPPED_PPA);
 }
@@ -453,7 +470,7 @@ static inline struct nand_page *get_pg(struct ssd *ssd, struct ppa *ppa)
     return &(blk->pg[ppa->g.pg]);
 }
 
-static uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa, struct
+uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa, struct
         nand_cmd *ncmd)
 {
     int c = ncmd->cmd;
@@ -525,7 +542,7 @@ static uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa, struct
 }
 
 /* update SSD status about one page from PG_VALID -> PG_VALID */
-static void mark_page_invalid(struct ssd *ssd, struct ppa *ppa)
+void mark_page_invalid(struct ssd *ssd, struct ppa *ppa)
 {
     struct line_mgmt *lm = &ssd->lm;
     struct ssdparams *spp = &ssd->sp;
@@ -572,7 +589,7 @@ static void mark_page_invalid(struct ssd *ssd, struct ppa *ppa)
     }
 }
 
-static void mark_page_valid(struct ssd *ssd, struct ppa *ppa)
+void mark_page_valid(struct ssd *ssd, struct ppa *ppa)
 {
     struct nand_block *blk = NULL;
     struct nand_page *pg = NULL;
@@ -721,7 +738,7 @@ static void mark_line_free(struct ssd *ssd, struct ppa *ppa)
     lm->free_line_cnt++;
 }
 
-static int do_gc(struct ssd *ssd, bool force)
+int do_gc(struct ssd *ssd, bool force)
 {
     struct line *victim_line = NULL;
     struct ssdparams *spp = &ssd->sp;
@@ -767,7 +784,7 @@ static int do_gc(struct ssd *ssd, bool force)
     return 0;
 }
 
-static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
+uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
 {
     struct ssdparams *spp = &ssd->sp;
     uint64_t lba = req->slba;
@@ -803,7 +820,7 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
     return maxlat;
 }
 
-static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
+uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 {
     uint64_t lba = req->slba;
     struct ssdparams *spp = &ssd->sp;
@@ -858,63 +875,4 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     return maxlat;
 }
 
-static void *ftl_thread(void *arg)
-{
-    FemuCtrl *n = (FemuCtrl *)arg;
-    struct ssd *ssd = n->ssd;
-    NvmeRequest *req = NULL;
-    uint64_t lat = 0;
-    int rc;
-    int i;
-
-    while (!*(ssd->dataplane_started_ptr)) {
-        usleep(100000);
-    }
-
-    /* FIXME: not safe, to handle ->to_ftl and ->to_poller gracefully */
-    ssd->to_ftl = n->to_ftl;
-    ssd->to_poller = n->to_poller;
-
-    while (1) {
-        for (i = 1; i <= n->nr_pollers; i++) {
-            if (!ssd->to_ftl[i] || !femu_ring_count(ssd->to_ftl[i]))
-                continue;
-
-            rc = femu_ring_dequeue(ssd->to_ftl[i], (void *)&req, 1);
-            if (rc != 1) {
-                printf("FEMU: FTL to_ftl dequeue failed\n");
-            }
-
-            ftl_assert(req);
-            switch (req->cmd.opcode) {
-            case NVME_CMD_WRITE:
-                lat = ssd_write(ssd, req);
-                break;
-            case NVME_CMD_READ:
-                lat = ssd_read(ssd, req);
-                break;
-            case NVME_CMD_DSM:
-                lat = 0;
-                break;
-            default:
-                //ftl_err("FTL received unkown request type, ERROR\n");
-                ;
-            }
-
-            req->reqlat = lat;
-            req->expire_time += lat;
-
-            rc = femu_ring_enqueue(ssd->to_poller[i], (void *)&req, 1);
-            if (rc != 1) {
-                ftl_err("FTL to_poller enqueue failed\n");
-            }
-
-            /* clean one line if needed (in the background) */
-            if (should_gc(ssd)) {
-                do_gc(ssd, false);
-            }
-        }
-    }
-
-    return NULL;
-}
+/* FTL thread functions are now implemented in device-specific directories */

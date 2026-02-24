@@ -52,6 +52,8 @@ typedef struct MemTxAttrs {
     unsigned int memory:1;
     /* Requester ID (for MSI for example) */
     unsigned int requester_id:16;
+    /* Cylon/FEMU: mark DMA coming from dual-mode CFMWS window */
+    unsigned int dual_mode_dma:1;
 } MemTxAttrs;
 
 /* Bus masters which don't specify any attributes will get this,
@@ -60,6 +62,8 @@ typedef struct MemTxAttrs {
  * from "didn't specify" if necessary).
  */
 #define MEMTXATTRS_UNSPECIFIED ((MemTxAttrs) { .unspecified = 1 })
+/* Cylon/FEMU: attribute used when mapping DMA through dual-mode CFMWS */
+#define MEMTXATTRS_DUAL_MODE_DMA_MAP ((MemTxAttrs) { .dual_mode_dma = 1 })
 
 /* New-style MMIO accessors can indicate that the transaction failed.
  * A zero (MEMTX_OK) response means success; anything else is a failure

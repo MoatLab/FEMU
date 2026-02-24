@@ -1,4 +1,7 @@
 #include "./nvme.h"
+#include <pthread.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 
 static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
 
@@ -15,15 +18,27 @@ static void nvme_update_sq_eventidx(const NvmeSQueue *sq)
     }
 }
 
-static inline void nvme_copy_cmd(NvmeCmd *dst, NvmeCmd *src)
+static inline void avx512_copy_cmd(NvmeCmd *dst, NvmeCmd *src)
 {
-#if defined(__AVX__)
+    __m512i *d512 = (__m512i *)dst;
+    const __m512i *s512 = (const __m512i *)src;
+
+    // Load 64 bytes (512 bits) from source and store in destination
+    __m512i data = _mm512_loadu_si512(s512);
+    _mm512_storeu_si512(d512, data);
+}
+
+static inline void avx256_copy_cmd(NvmeCmd *dst, NvmeCmd *src)
+{
     __m256i *d256 = (__m256i *)dst;
     const __m256i *s256 = (const __m256i *)src;
 
     _mm256_store_si256(&d256[0], _mm256_load_si256(&s256[0]));
     _mm256_store_si256(&d256[1], _mm256_load_si256(&s256[1]));
-#elif defined(__SSE2__)
+}
+
+static inline void sse2_copy_cmd(NvmeCmd *dst, NvmeCmd *src)
+{
     __m128i *d128 = (__m128i *)dst;
     const __m128i *s128 = (const __m128i *)src;
 
@@ -31,6 +46,16 @@ static inline void nvme_copy_cmd(NvmeCmd *dst, NvmeCmd *src)
     _mm_store_si128(&d128[1], _mm_load_si128(&s128[1]));
     _mm_store_si128(&d128[2], _mm_load_si128(&s128[2]));
     _mm_store_si128(&d128[3], _mm_load_si128(&s128[3]));
+}
+
+static inline void nvme_copy_cmd(NvmeCmd *dst, NvmeCmd *src)
+{
+#if defined(__AVX512F__) && defined(__AVX512VL__)
+    avx512_copy_cmd(dst, src);
+#elif defined(__AVX__)
+    avx256_copy_cmd(dst, src);
+#elif defined(__SSE2__)
+    sse2_copy_cmd(dst, src);
 #else
     *dst = *src;
 #endif
@@ -132,7 +157,7 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
     int rc;
     int i;
 
-    if (BBSSD(n)) {
+    if (BBSSD(n) || CXLSSD(n)) {
         rp = n->to_poller[index_poller];
     }
 
@@ -195,6 +220,8 @@ void *nvme_poller(void *arg)
     FemuCtrl *n = ((NvmePollerThreadArgument *)arg)->n;
     int index = ((NvmePollerThreadArgument *)arg)->index;
     int i;
+
+    femu_log("FEMU-NVMe-Poller-TID: %ld\n", syscall(SYS_gettid));
 
     switch (n->multipoller_enabled) {
     case 1:
@@ -293,7 +320,7 @@ static uint16_t nvme_dsm(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
         uint64_t slba;
         uint32_t nlb;
-        NvmeDsmRange *range = g_malloc0(sizeof(NvmeDsmRange) * nr);
+        NvmeDsmRange range[nr];
 
         if (dma_write_prp(n, (uint8_t *)range, sizeof(range), prp1, prp2)) {
             nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
@@ -355,10 +382,7 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     for (i = 0; i < req->qsg.nsg; i++) {
         uint32_t len = req->qsg.sg[i].len;
-        uint8_t *tmp[2];
-
-        tmp[0] = g_malloc0(len);
-        tmp[1] = g_malloc0(len);
+        uint8_t tmp[2][len];
 
         nvme_addr_read(n, req->qsg.sg[i].base, tmp[1], len);
         if (memcmp(tmp[0], tmp[1], len)) {

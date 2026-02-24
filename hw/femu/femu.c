@@ -1,5 +1,6 @@
 #include "qemu/osdep.h"
 #include "hw/qdev-properties.h"
+#include "sysemu/hostmem.h"
 
 #include "./nvme.h"
 
@@ -523,8 +524,9 @@ static int nvme_register_extensions(FemuCtrl *n)
         nvme_register_bbssd(n);
     } else if (ZNSSD(n)) {
         nvme_register_znssd(n);
+    } else if (CXLSSD(n)) {
+        nvme_register_cxlssd(n);
     } else {
-        /* TODO: For future extensions */
     }
 
     return 0;
@@ -536,16 +538,15 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     int64_t bs_size;
 
     nvme_check_size();
-
     if (nvme_check_constraints(n)) {
         return;
     }
 
     bs_size = ((int64_t)n->memsz) * 1024 * 1024;
 
-    init_dram_backend(&n->mbe, bs_size);
+    init_dram_backend(n);
     n->mbe->femu_mode = n->femu_mode;
-
+    
     n->completed = 0;
     n->start_time = time(NULL);
     n->reg_size = pow2ceil(0x1004 + 2 * (n->nr_io_queues + 1) * 4);
@@ -558,12 +559,13 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     n->elpes = g_malloc0(sizeof(*n->elpes) * (n->elpe + 1));
     n->aer_reqs = g_malloc0(sizeof(*n->aer_reqs) * (n->aerl + 1));
     n->features.int_vector_config = g_malloc0(sizeof(*n->features.int_vector_config) * (n->nr_io_queues + 1));
+    qemu_mutex_init(&n->mutex);
+    nvme_register_extensions(n);
 
     nvme_init_pci(n);
     nvme_init_ctrl(n);
     nvme_init_namespaces(n, errp);
 
-    nvme_register_extensions(n);
 
     if (n->ext_ops.init) {
         n->ext_ops.init(n, errp);
@@ -618,6 +620,11 @@ static void femu_exit(PCIDevice *pci_dev)
 static Property femu_props[] = {
     DEFINE_PROP_STRING("serial", FemuCtrl, serial),
     DEFINE_PROP_UINT32("devsz_mb", FemuCtrl, memsz, 1024), /* in MB */
+    DEFINE_PROP_UINT32("bufsz_mb", FemuCtrl, bufsz, 0), /* in MB */
+    DEFINE_PROP_UINT8("replacement", FemuCtrl, rep, LIFO), /* 1=LIFO, 2=FIFO */
+    DEFINE_PROP_UINT8("prefetch_degree", FemuCtrl, prefetch_degree, 0),
+    DEFINE_PROP_UINT8("buffer_way", FemuCtrl, buffer_way, 0),
+    DEFINE_PROP_UINT8("cxl_skip_ftl", FemuCtrl, cxl_skip_ftl, 0),
     DEFINE_PROP_UINT32("namespaces", FemuCtrl, num_namespaces, 1),
     DEFINE_PROP_UINT32("queues", FemuCtrl, nr_io_queues, 8),
     DEFINE_PROP_UINT32("entries", FemuCtrl, max_q_ents, 0x7ff),
@@ -640,7 +647,7 @@ static Property femu_props[] = {
     DEFINE_PROP_UINT8("mpsmin", FemuCtrl, mpsmin, 0),
     DEFINE_PROP_UINT8("mpsmax", FemuCtrl, mpsmax, 0),
     DEFINE_PROP_UINT8("nlbaf", FemuCtrl, nlbaf, 5),
-    DEFINE_PROP_UINT8("lba_index", FemuCtrl, lba_index, 0),
+    DEFINE_PROP_UINT8("lba_index", FemuCtrl, lba_index, 3),
     DEFINE_PROP_UINT8("extended", FemuCtrl, extended, 0),
     DEFINE_PROP_UINT8("dpc", FemuCtrl, dpc, 0),
     DEFINE_PROP_UINT8("dps", FemuCtrl, dps, 0),
@@ -680,6 +687,13 @@ static Property femu_props[] = {
     DEFINE_PROP_INT32("ch_xfer_lat", FemuCtrl, bb_params.ch_xfer_lat, 0),
     DEFINE_PROP_INT32("gc_thres_pcent", FemuCtrl, bb_params.gc_thres_pcent, 75),
     DEFINE_PROP_INT32("gc_thres_pcent_high", FemuCtrl, bb_params.gc_thres_pcent_high, 95),
+    DEFINE_PROP_STRING("backend_dev", FemuCtrl, bdev_name),
+    DEFINE_PROP_UINT64("bdev_offset", FemuCtrl, bdev_offset, 0),
+    DEFINE_PROP_UINT64("hpa_base", FemuCtrl, hpa_base, 0),
+    DEFINE_PROP_STRING("cache_backend_dev", FemuCtrl, cache_backend_dev),
+    DEFINE_PROP_UINT64("cache_bdev_offset", FemuCtrl, cache_bdev_offset, 0),
+    DEFINE_PROP_UINT64("cache_hpa_base", FemuCtrl, cache_hpa_base, 0),
+    DEFINE_PROP_LINK("cca_dev", FemuCtrl, cca_dev, TYPE_MEMORY_BACKEND, HostMemoryBackend *),
     DEFINE_PROP_END_OF_LIST(),
 };
 

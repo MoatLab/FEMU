@@ -15,6 +15,8 @@
 #include "hw/register.h"
 #include "hw/cxl/cxl_events.h"
 
+struct FemuCtrl;
+
 /*
  * The following is how a CXL device's Memory Device registers are laid out.
  * The only requirement from the spec is that the capabilities array and the
@@ -429,6 +431,7 @@ struct CXLType3Dev {
     HostMemoryBackend *hostvmem;
     HostMemoryBackend *hostpmem;
     HostMemoryBackend *lsa;
+    struct FemuCtrl *femu;  /* Cylon: optional FEMU CXL-SSD backend */
     uint64_t sn;
 
     /* State */
