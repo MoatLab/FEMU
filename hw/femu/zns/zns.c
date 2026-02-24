@@ -1149,7 +1149,6 @@ static inline bool nvme_csi_has_nvm_support(NvmeNamespace *ns)
     case NVME_CSI_ZONED:
         return true;
     }
-
     return false;
 }
 

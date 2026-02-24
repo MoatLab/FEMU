@@ -1,5 +1,5 @@
 #include "../nvme.h"
-#include "./ftl.h"
+#include "../ftl/ftl.h"
 
 static void bb_init_ctrl_str(FemuCtrl *n)
 {

@@ -1,4 +1,7 @@
 #include "./nvme.h"
+#include <pthread.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 
 #define NVME_IDENTIFY_DATA_SIZE 4096
 
@@ -275,9 +278,10 @@ static void nvme_init_poller(FemuCtrl *n)
     for (i = 1; i <= n->nr_pollers; i++) {
         args[i].n = n;
         args[i].index = i;
+        femu_log("Creating FEMU-NVMe-Poller,%d,#total-pollers:%d\n", i, n->nr_pollers);
         qemu_thread_create(&n->poller[i], "femu-nvme-poller", nvme_poller,
                 &args[i], QEMU_THREAD_JOINABLE);
-        femu_debug("femu-nvme-poller [%d] created ...\n", i - 1);
+        printf("femu-nvme-poller [%d] created [%ld] ...\n", i - 1, syscall(SYS_gettid));
     }
 }
 
@@ -1130,4 +1134,3 @@ void nvme_process_sq_admin(void *opaque)
         nvme_isr_notify_admin(cq);
     }
 }
-

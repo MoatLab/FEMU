@@ -829,6 +829,8 @@ struct MemoryRegion {
 
     /* For devices designed to perform re-entrant IO into their own IO MRs */
     bool disable_reentrancy_guard;
+    /* Cylon/FEMU: EPT direct vs trap (cfmws dual-mode) */
+    bool dual_mode;
 };
 
 struct IOMMUMemoryRegion {
@@ -1273,6 +1275,17 @@ void memory_region_init_io(MemoryRegion *mr,
                            void *opaque,
                            const char *name,
                            uint64_t size);
+
+/**
+ * memory_region_init_io_dual_mode: Like memory_region_init_io but marks the
+ * region as dual_mode (Cylon/FEMU: EPT direct vs trap for CFMWS).
+ */
+void memory_region_init_io_dual_mode(MemoryRegion *mr,
+                                     Object *owner,
+                                     const MemoryRegionOps *ops,
+                                     void *opaque,
+                                     const char *name,
+                                     uint64_t size);
 
 /**
  * memory_region_init_ram_nomigrate:  Initialize RAM memory region.  Accesses
