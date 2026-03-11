@@ -76,29 +76,28 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
         }
 
         status = nvme_io_cmd(n, &cmd, req);
-        if (status == NVME_SUCCESS) {
-            req->status = status;
-            int rc = femu_ring_enqueue(n->to_ftl[index_poller], (void *)&req, 1);
-            if (rc != 1) {
-                femu_err("enqueue failed, ret=%d\n", rc);
-                // Clean up DSM ranges on enqueue failure
-                if (req->dsm_ranges) {
-                    g_free(req->dsm_ranges);
-                    req->dsm_ranges = NULL;
-                    req->dsm_nr_ranges = 0;
-                }
-            }
-        } else {
-            femu_err("Error IO processed! opcode=0x%x, status=0x%x\n", 
-                     cmd.opcode, status);
-            req->status = status;
-            
-            // Clean up DSM ranges on error
+        req->status = status;
+
+        if (status != NVME_SUCCESS) {
+            /* Clean up DSM ranges on error */
             if (req->dsm_ranges) {
                 g_free(req->dsm_ranges);
                 req->dsm_ranges = NULL;
                 req->dsm_nr_ranges = 0;
             }
+        }
+
+        /*
+         * Always enqueue to FTL ring for completion. Failed requests
+         * will hit the FTL default case (lat=0) and get completed
+         * immediately with the error status. Without this, failed
+         * requests would leak from the request list and never be
+         * completed back to the guest, eventually causing the NVMe
+         * driver to timeout and crash.
+         */
+        int rc = femu_ring_enqueue(n->to_ftl[index_poller], (void *)&req, 1);
+        if (rc != 1) {
+            femu_err("enqueue failed, ret=%d\n", rc);
         }
 
         processed++;
@@ -167,12 +166,15 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
             break;
         }
 
+        pqueue_pop(pq);
         cq = n->cq[req->sq->sqid];
-        if (!cq->is_active)
+        if (!cq->is_active) {
+            /* CQ inactive: return request to SQ free list to avoid leak */
+            QTAILQ_INSERT_TAIL(&req->sq->req_list, req, entry);
             continue;
+        }
         nvme_post_cqe(cq, req);
         QTAILQ_INSERT_TAIL(&req->sq->req_list, req, entry);
-        pqueue_pop(pq);
         processed++;
         n->nr_tt_ios++;
         if (now - req->expire_time >= 20000) {
@@ -284,6 +286,15 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
     req->slba = slba;
     req->status = NVME_SUCCESS;
     req->nlb = nlb;
+
+    /* FDP: extract placement info from write commands.
+     * DTYPE is in CDW12 bits [23:20] = control bits [7:4] (fio: dtype<<20).
+     * DSPEC is in CDW13 bits [31:16] = rw->dspec (fio: dspec<<16).
+     */
+    if (req->is_write && n->subsys && n->subsys->endgrp.fdp.enabled) {
+        req->fdp_dspec = le16_to_cpu(rw->dspec);
+        req->fdp_dtype = (le16_to_cpu(rw->control) >> 4) & 0xF;
+    }
 
     ret = backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
     if (!ret) {
@@ -499,6 +510,274 @@ static uint16_t nvme_write_uncor(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     return NVME_SUCCESS;
 }
 
+/* ========== FDP IO Command Helpers ========== */
+
+static inline uint64_t nvme_get_timestamp(FemuCtrl *n)
+{
+    uint64_t now = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+
+    union nvme_timestamp {
+        struct {
+            uint64_t timestamp : 48;
+            uint64_t sync      : 1;
+            uint64_t origin    : 3;
+            uint64_t rsvd1     : 12;
+        };
+        uint64_t all;
+    };
+
+    union nvme_timestamp ts;
+    ts.all = 0;
+    ts.timestamp = now;
+
+    return cpu_to_le64(ts.all);
+}
+
+uint16_t nvme_pid2ph(NvmeNamespace *ns, uint16_t pid)
+{
+    uint16_t rgif = ns->endgrp->fdp.rgif;
+
+    if (!rgif) {
+        return pid;
+    }
+
+    return pid & ((1 << (15 - rgif)) - 1);
+}
+
+uint16_t nvme_pid2rg(NvmeNamespace *ns, uint16_t pid)
+{
+    uint16_t rgif = ns->endgrp->fdp.rgif;
+
+    if (!rgif) {
+        return 0;
+    }
+
+    return pid >> (16 - rgif);
+}
+
+static inline bool nvme_ph_valid(NvmeNamespace *ns, uint16_t ph)
+{
+    return ph < ns->fdp.nphs;
+}
+
+static inline bool nvme_rg_valid(NvmeEnduranceGroup *endgrp, uint16_t rg)
+{
+    return rg < endgrp->fdp.nrg;
+}
+
+static inline uint16_t nvme_make_pid(NvmeNamespace *ns, uint16_t rg,
+                                     uint16_t ph)
+{
+    uint16_t rgif = ns->endgrp->fdp.rgif;
+
+    if (!rgif) {
+        return ph;
+    }
+
+    return (rg << (16 - rgif)) | ph;
+}
+
+bool nvme_parse_pid(NvmeNamespace *ns, uint16_t pid,
+                    uint16_t *ph, uint16_t *rg)
+{
+    *rg = nvme_pid2rg(ns, pid);
+    *ph = nvme_pid2ph(ns, pid);
+
+    return nvme_ph_valid(ns, *ph) && nvme_rg_valid(ns->endgrp, *rg);
+}
+
+static inline int log_event(NvmeRuHandle *ruh, uint8_t event_type)
+{
+    return (ruh->event_filter >> nvme_fdp_evf_shifts[event_type]) & 0x1;
+}
+
+static NvmeFdpEvent *nvme_fdp_alloc_event(FemuCtrl *n,
+                                          NvmeFdpEventBuffer *ebuf)
+{
+    NvmeFdpEvent *ret = NULL;
+    bool is_full = ebuf->next == ebuf->start && ebuf->nelems;
+
+    ret = &ebuf->events[ebuf->next++];
+    if (unlikely(ebuf->next == NVME_FDP_MAX_EVENTS)) {
+        ebuf->next = 0;
+    }
+    if (is_full) {
+        ebuf->start = ebuf->next;
+    } else {
+        ebuf->nelems++;
+    }
+
+    memset(ret, 0, sizeof(NvmeFdpEvent));
+    ret->timestamp = nvme_get_timestamp(n);
+
+    return ret;
+}
+
+bool nvme_update_ruh(FemuCtrl *n, NvmeNamespace *ns, uint16_t pid)
+{
+    NvmeEnduranceGroup *endgrp = ns->endgrp;
+    NvmeRuHandle *ruh;
+    NvmeReclaimUnit *ru;
+    NvmeFdpEvent *e = NULL;
+    uint16_t ph, rg, ruhid;
+
+    if (!nvme_parse_pid(ns, pid, &ph, &rg)) {
+        return false;
+    }
+
+    ruhid = ns->fdp.phs[ph];
+    ruh = &endgrp->fdp.ruhs[ruhid];
+    ru = ruh->rus[rg];
+
+    if (ru->ruamw) {
+        if (log_event(ruh, FDP_EVT_RU_NOT_FULLY_WRITTEN)) {
+            e = nvme_fdp_alloc_event(n, &endgrp->fdp.host_events);
+            e->type = FDP_EVT_RU_NOT_FULLY_WRITTEN;
+            e->flags = FDPEF_PIV | FDPEF_NSIDV | FDPEF_LV;
+            e->pid = cpu_to_le16(pid);
+            e->nsid = cpu_to_le32(ns->id);
+            e->rgid = cpu_to_le16(rg);
+            e->ruhid = cpu_to_le16(ruhid);
+        }
+    }
+
+    ru->ruamw = ruh->ruamw;
+
+    return true;
+}
+
+static uint16_t nvme_io_mgmt_recv_ruhs(FemuCtrl *n, NvmeRequest *req,
+                                       size_t len)
+{
+    NvmeNamespace *ns = req->ns;
+    NvmeEnduranceGroup *endgrp;
+    NvmeRuhStatus *hdr;
+    NvmeRuhStatusDescr *ruhsd;
+    unsigned int nruhsd;
+    uint16_t rg, ph, *ruhid;
+    size_t trans_len;
+    g_autofree uint8_t *buf = NULL;
+    NvmeCmd *cmd = &req->cmd;
+    uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
+    uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
+
+    if (!n->subsys) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    if (ns->id == 0 || ns->id == 0xffffffff) {
+        return NVME_INVALID_NSID | NVME_DNR;
+    }
+
+    if (!n->subsys->endgrp.fdp.enabled) {
+        return NVME_FDP_DISABLED | NVME_DNR;
+    }
+
+    if (!ns->endgrp) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    endgrp = ns->endgrp;
+    nruhsd = ns->fdp.nphs * endgrp->fdp.nrg;
+    trans_len = sizeof(NvmeRuhStatus) + nruhsd * sizeof(NvmeRuhStatusDescr);
+    buf = g_malloc0(trans_len);
+    trans_len = MIN(trans_len, len);
+
+    hdr = (NvmeRuhStatus *)buf;
+    ruhsd = (NvmeRuhStatusDescr *)(buf + sizeof(NvmeRuhStatus));
+    hdr->nruhsd = cpu_to_le16(nruhsd);
+
+    ruhid = ns->fdp.phs;
+    for (ph = 0; ph < ns->fdp.nphs; ph++, ruhid++) {
+        NvmeRuHandle *ruh = &endgrp->fdp.ruhs[*ruhid];
+
+        for (rg = 0; rg < endgrp->fdp.nrg; rg++, ruhsd++) {
+            uint16_t pid = nvme_make_pid(ns, rg, ph);
+            NvmeReclaimUnit *ru = ruh->rus[rg];
+            ruhsd->pid = cpu_to_le16(pid);
+            ruhsd->ruhid = *ruhid;
+            ruhsd->earutr = 0;
+            ruhsd->ruamw = cpu_to_le64(ru->ruamw);
+        }
+    }
+
+    return dma_read_prp(n, (uint8_t *)buf, trans_len, prp1, prp2);
+}
+
+static uint16_t nvme_io_mgmt_recv(FemuCtrl *n, NvmeRequest *req)
+{
+    NvmeCmd *cmd = &req->cmd;
+    uint32_t cdw10 = le32_to_cpu(cmd->cdw10);
+    uint32_t numd = le32_to_cpu(cmd->cdw11);
+    uint8_t mo = (cdw10 & 0xff);
+    size_t len = (numd + 1) << 2;
+
+    switch (mo) {
+    case NVME_IOMR_MO_NOP:
+        return NVME_SUCCESS;
+    case NVME_IOMR_MO_RUH_STATUS:
+        return nvme_io_mgmt_recv_ruhs(n, req, len);
+    default:
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+}
+
+static uint16_t nvme_io_mgmt_send_ruh_update(FemuCtrl *n, NvmeRequest *req)
+{
+    NvmeCmd *cmd = &req->cmd;
+    NvmeNamespace *ns = req->ns;
+    uint32_t cdw10 = le32_to_cpu(cmd->cdw10);
+    uint32_t npid = (cdw10 >> 1) + 1;
+    unsigned int i;
+    g_autofree uint16_t *pids = NULL;
+    uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
+    uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
+    uint32_t maxnpid;
+    uint16_t ret;
+
+    if (!n->subsys || !n->subsys->endgrp.fdp.enabled) {
+        return NVME_FDP_DISABLED | NVME_DNR;
+    }
+
+    maxnpid = n->subsys->endgrp.fdp.nrg * n->subsys->endgrp.fdp.nruh;
+    if (unlikely(npid >= MIN(NVME_FDP_MAXPIDS, maxnpid))) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    pids = g_new(uint16_t, npid);
+    ret = dma_write_prp(n, (uint8_t *)pids, npid * sizeof(uint16_t),
+                        prp1, prp2);
+    if (ret) {
+        return ret;
+    }
+
+    for (i = 0; i < npid; i++) {
+        if (!nvme_update_ruh(n, ns, pids[i])) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+    }
+
+    return NVME_SUCCESS;
+}
+
+static uint16_t nvme_io_mgmt_send(FemuCtrl *n, NvmeRequest *req)
+{
+    NvmeCmd *cmd = &req->cmd;
+    uint32_t cdw10 = le32_to_cpu(cmd->cdw10);
+    uint8_t mo = (cdw10 & 0xff);
+
+    switch (mo) {
+    case NVME_IOMS_MO_NOP:
+        return NVME_SUCCESS;
+    case NVME_IOMS_MO_RUH_UPDATE:
+        return nvme_io_mgmt_send_ruh_update(n, req);
+    default:
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+}
+
+/* ========== End FDP IO Commands ========== */
+
 static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 {
     NvmeNamespace *ns;
@@ -537,6 +816,10 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
             return nvme_write_uncor(n, ns, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
+    case NVME_CMD_IO_MGMT_RECV:
+        return nvme_io_mgmt_recv(n, req);
+    case NVME_CMD_IO_MGMT_SEND:
+        return nvme_io_mgmt_send(n, req);
     default:
         if (n->ext_ops.io_cmd) {
             return n->ext_ops.io_cmd(n, ns, cmd, req);

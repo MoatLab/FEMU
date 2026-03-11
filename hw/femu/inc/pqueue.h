@@ -134,6 +134,13 @@ int pqueue_remove(pqueue_t *q, void *d);
 void *pqueue_peek(pqueue_t *q);
 
 /**
+ * pop a random item from the queue.
+ * @param q the queue
+ * @return NULL on error, otherwise the entry
+ */
+void *pqueue_randpop(pqueue_t *q);
+
+/**
  * print the queue
  * @internal
  * DEBUG function only

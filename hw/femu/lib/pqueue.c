@@ -193,6 +193,28 @@ void *pqueue_peek(pqueue_t *q)
     return d;
 }
 
+void *pqueue_randpop(pqueue_t *q)
+{
+    void *head;
+    int ra;
+
+    if (!q || q->size == 1)
+        return NULL;
+
+    /* pick a random valid index in [1, size-1] */
+    ra = rand() % (q->size - 1) + 1;
+    head = q->d[ra];
+
+    /* replace with last element and shrink */
+    q->d[ra] = q->d[--q->size];
+    q->setpos(q->d[ra], ra);
+
+    /* restore heap property from the replaced position */
+    percolate_down(q, ra);
+
+    return head;
+}
+
 void pqueue_dump(pqueue_t *q, FILE *out, pqueue_print_entry_f print)
 {
     int i;

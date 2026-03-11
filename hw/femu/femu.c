@@ -5,6 +5,264 @@
 
 #define NVME_SPEC_VER (0x00010400)
 
+/* ========== NVMe Subsystem (femu-subsys) QOM Device ========== */
+
+int femu_subsys_register_ctrl(FemuCtrl *n)
+{
+    NvmeSubsystem *subsys = n->subsys;
+    int cntlid;
+
+    for (cntlid = 0; cntlid < ARRAY_SIZE(subsys->ctrls); cntlid++) {
+        if (!subsys->ctrls[cntlid]) {
+            break;
+        }
+    }
+
+    if (cntlid == ARRAY_SIZE(subsys->ctrls)) {
+        return -1;
+    }
+
+    if (!subsys->serial) {
+        subsys->serial = g_strdup(n->serial);
+    }
+
+    subsys->ctrls[cntlid] = n;
+
+    return cntlid;
+}
+
+void femu_subsys_unregister_ctrl(NvmeSubsystem *subsys, FemuCtrl *n)
+{
+    subsys->ctrls[n->cntlid] = NULL;
+    n->cntlid = -1;
+}
+
+static bool nvme_calc_rgif(uint16_t nruh, uint16_t nrg, uint8_t *rgif)
+{
+    uint16_t val;
+    unsigned int i;
+
+    if (unlikely(nrg == 1)) {
+        *rgif = 0;
+        return true;
+    }
+
+    val = nrg;
+    i = 0;
+    while (val) {
+        val >>= 1;
+        i++;
+    }
+    *rgif = i;
+
+    if (unlikely((UINT16_MAX >> i) < nruh)) {
+        *rgif = 0;
+        return false;
+    }
+
+    return true;
+}
+
+static bool nvme_subsys_setup_fdp(NvmeSubsystem *subsys, Error **errp)
+{
+    NvmeEnduranceGroup *endgrp = &subsys->endgrp;
+    uint64_t tt_nru = subsys->params.fdp.nru;
+    uint16_t ruhid;
+
+    if (!subsys->params.fdp.runs) {
+        error_setg(errp, "fdp.runs must be non-zero");
+        return false;
+    }
+    endgrp->fdp.runs = subsys->params.fdp.runs;
+    endgrp->fdp.nru = subsys->params.fdp.nru;
+
+    if (!subsys->params.fdp.nrg) {
+        error_setg(errp, "fdp.nrg must be non-zero");
+        return false;
+    }
+    endgrp->fdp.nrg = subsys->params.fdp.nrg;
+
+    if (!subsys->params.fdp.nruh) {
+        error_setg(errp, "fdp.nruh must be non-zero");
+        return false;
+    }
+    if (subsys->params.fdp.nruh > tt_nru) {
+        error_setg(errp, "fdp.nruh (%u) must not exceed fdp.nru (%"PRIu64")",
+                   subsys->params.fdp.nruh, tt_nru);
+        return false;
+    }
+    endgrp->fdp.nruh = subsys->params.fdp.nruh;
+
+    if (!nvme_calc_rgif(endgrp->fdp.nruh, endgrp->fdp.nrg,
+                        &endgrp->fdp.rgif)) {
+        error_setg(errp, "cannot derive a valid rgif "
+                   "(nruh %"PRIu16" nrg %"PRIu16")",
+                   endgrp->fdp.nruh, endgrp->fdp.nrg);
+        return false;
+    }
+
+    endgrp->fdp.rus = g_new(NvmeReclaimUnit *, endgrp->fdp.nrg);
+    for (int i = 0; i < endgrp->fdp.nrg; i++) {
+        endgrp->fdp.rus[i] = g_new0(NvmeReclaimUnit, tt_nru);
+    }
+
+    endgrp->fdp.ruhs = g_new0(NvmeRuHandle, endgrp->fdp.nruh);
+
+    for (ruhid = 0; ruhid < endgrp->fdp.nruh; ruhid++) {
+        /*
+         * isolation_mode=0 (default): all RUHs are Persistently Isolated (PI).
+         * isolation_mode=1: last RUH is Initially Isolated (II), rest are PI.
+         * This matches the fdp.isolation_mode QOM property.
+         */
+        uint8_t ruht = NVME_RUHT_PERSISTENTLY_ISOLATED;
+        if (subsys->params.fdp.isolation_mode &&
+            ruhid == endgrp->fdp.nruh - 1) {
+            ruht = NVME_RUHT_INITIALLY_ISOLATED;
+        }
+        endgrp->fdp.ruhs[ruhid] = (NvmeRuHandle) {
+            .ruht = ruht,
+            .ruha = NVME_RUHA_UNUSED,
+            /* enable all FDP event types by default */
+            .event_filter = UINT64_MAX,
+        };
+        endgrp->fdp.ruhs[ruhid].rus =
+            g_new(NvmeReclaimUnit *, endgrp->fdp.nrg);
+        for (int rg = 0; rg < endgrp->fdp.nrg; rg++) {
+            endgrp->fdp.ruhs[ruhid].rus[rg] =
+                &endgrp->fdp.rus[rg][ruhid];
+        }
+    }
+
+    endgrp->fdp.enabled = true;
+    femu_log("FDP enabled: nruh=%u, nrg=%u, runs=%lu, nru=%lu\n",
+             endgrp->fdp.nruh, endgrp->fdp.nrg,
+             endgrp->fdp.runs, endgrp->fdp.nru);
+
+    return true;
+}
+
+static bool nvme_subsys_setup(NvmeSubsystem *subsys, Error **errp)
+{
+    const char *nqn = subsys->params.nqn ?
+        subsys->params.nqn : subsys->parent_obj.id;
+
+    snprintf((char *)subsys->subnqn, sizeof(subsys->subnqn),
+             "nqn.2019-08.org.qemu:%s", nqn);
+
+    if (subsys->params.fdp.enabled &&
+        !nvme_subsys_setup_fdp(subsys, errp)) {
+        return false;
+    }
+
+    return true;
+}
+
+static void nvme_subsys_realize(DeviceState *dev, Error **errp)
+{
+    NvmeSubsystem *subsys = NVME_SUBSYS(dev);
+
+    qbus_init(&subsys->bus, sizeof(NvmeBus), TYPE_NVME_BUS, dev, dev->id);
+    nvme_subsys_setup(subsys, errp);
+}
+
+static const Property nvme_subsystem_props[] = {
+    DEFINE_PROP_STRING("nqn", NvmeSubsystem, params.nqn),
+    DEFINE_PROP_BOOL("fdp", NvmeSubsystem, params.fdp.enabled, false),
+    DEFINE_PROP_SIZE("fdp.runs", NvmeSubsystem, params.fdp.runs,
+                     NVME_DEFAULT_RU_SIZE),
+    DEFINE_PROP_UINT32("fdp.nrg", NvmeSubsystem, params.fdp.nrg, 1),
+    DEFINE_PROP_UINT16("fdp.nruh", NvmeSubsystem, params.fdp.nruh, 0),
+    DEFINE_PROP_UINT64("fdp.nru", NvmeSubsystem, params.fdp.nru, 128),
+    DEFINE_PROP_UINT32("fdp.isolation_mode", NvmeSubsystem,
+                       params.fdp.isolation_mode, 0),
+};
+
+static void nvme_subsys_class_init(ObjectClass *oc, const void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(oc);
+
+    set_bit(DEVICE_CATEGORY_STORAGE, dc->categories);
+    dc->realize = nvme_subsys_realize;
+    dc->desc = "FEMU NVMe Subsystem (FDP)";
+    device_class_set_props(dc, nvme_subsystem_props);
+}
+
+static const TypeInfo nvme_subsys_info = {
+    .name          = TYPE_NVME_SUBSYS,
+    .parent        = TYPE_DEVICE,
+    .instance_size = sizeof(NvmeSubsystem),
+    .class_init    = nvme_subsys_class_init,
+};
+
+/* ========== FDP Namespace Init ========== */
+
+static bool nvme_ns_init_fdp(NvmeNamespace *ns, Error **errp)
+{
+    NvmeEnduranceGroup *endgrp = ns->endgrp;
+    NvmeRuHandle *ruh;
+    uint8_t lbafi = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
+    uint16_t *ph;
+
+    if (!endgrp || !endgrp->fdp.enabled) {
+        return true;
+    }
+
+    /*
+     * Auto-assign all RUHs to this namespace sequentially.
+     * Each RUH gets a placement handle index.
+     */
+    ns->fdp.nphs = endgrp->fdp.nruh;
+    ph = ns->fdp.phs = g_new(uint16_t, ns->fdp.nphs);
+
+    for (uint16_t i = 0; i < ns->fdp.nphs; i++, ph++) {
+        ruh = &endgrp->fdp.ruhs[i];
+
+        if (ruh->ruha == NVME_RUHA_UNUSED) {
+            ruh->ruha = NVME_RUHA_HOST;
+            ruh->lbafi = lbafi;
+            ruh->ruamw = endgrp->fdp.runs >> ns->lbaf.lbads;
+            ruh->hbmw = 0;
+            ruh->mbmw = 0;
+            ruh->mbe = 0;
+
+            for (uint16_t rg = 0; rg < endgrp->fdp.nrg; rg++) {
+                for (uint64_t j = 0; j < endgrp->fdp.nru; j++) {
+                    endgrp->fdp.rus[rg][j].ruamw = ruh->ruamw;
+                }
+            }
+        }
+
+        *ph = i;
+    }
+
+    femu_log("FDP ns init: nphs=%u, ruamw=%lu\n",
+             ns->fdp.nphs,
+             endgrp->fdp.ruhs[0].ruamw);
+    return true;
+}
+
+/* ========== FDP Subsystem Registration ========== */
+
+static int nvme_init_subsys(FemuCtrl *n)
+{
+    int cntlid;
+
+    if (!n->subsys) {
+        return 0;
+    }
+
+    cntlid = femu_subsys_register_ctrl(n);
+    if (cntlid < 0) {
+        return -1;
+    }
+
+    n->cntlid = cntlid;
+
+    return 0;
+}
+
+/* ========== End FDP Subsystem ========== */
+
 static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
 {
     int i;
@@ -366,6 +624,18 @@ static int nvme_init_namespace(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     ns->util = bitmap_new(num_blks);
     ns->uncorrectable = bitmap_new(num_blks);
 
+    /* FDP: cache lbaf for this namespace */
+    ns->lbaf = id_ns->lbaf[lba_index];
+
+    /* FDP: connect subsystem and endurance group, then init FDP state */
+    if (n->subsys) {
+        ns->subsys = n->subsys;
+        ns->endgrp = &n->subsys->endgrp;
+        if (!nvme_ns_init_fdp(ns, errp)) {
+            return -1;
+        }
+    }
+
     return 0;
 }
 
@@ -407,6 +677,15 @@ static void nvme_init_ctrl(FemuCtrl *n)
     id->cmic         = 0;
     id->mdts         = n->mdts;
     id->ver          = 0x00010300;
+
+    /* FDP: set Controller Attributes for FDP support */
+    if (n->subsys && n->subsys->endgrp.fdp.enabled) {
+        id->ctratt = cpu_to_le32(NVME_CTRATT_ENDGRPS | NVME_CTRATT_FDPS);
+        id->endgidmax = cpu_to_le16(0);
+        femu_log("FDP: CTRATT=0x%x (ENDGRPS|FDPS), endgidmax=0\n",
+                 NVME_CTRATT_ENDGRPS | NVME_CTRATT_FDPS);
+    }
+
     /* TODO: NVME_OACS_NS_MGMT */
     id->oacs         = cpu_to_le16(n->oacs | NVME_OACS_DBBUF);
     id->acl          = n->acl;
@@ -560,6 +839,13 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     n->features.int_vector_config = g_malloc0(sizeof(*n->features.int_vector_config) * (n->nr_io_queues + 1));
 
     nvme_init_pci(n);
+
+    /* FDP: register controller with subsystem if linked */
+    if (nvme_init_subsys(n)) {
+        error_setg(errp, "failed to register controller with subsystem");
+        return;
+    }
+
     nvme_init_ctrl(n);
     nvme_init_namespaces(n, errp);
 
@@ -601,6 +887,18 @@ static void femu_exit(PCIDevice *pci_dev)
     nvme_clear_ctrl(n, true);
     nvme_destroy_poller(n);
     free_dram_backend(n->mbe);
+
+    /* FDP: free namespace FDP placement handles */
+    if (n->namespaces) {
+        for (int i = 0; i < n->num_namespaces; i++) {
+            g_free(n->namespaces[i].fdp.phs);
+        }
+    }
+
+    /* FDP: unregister controller from subsystem */
+    if (n->subsys) {
+        femu_subsys_unregister_ctrl(n->subsys, n);
+    }
 
     g_free(n->namespaces);
     g_free(n->features.int_vector_config);
@@ -682,6 +980,9 @@ static const Property femu_props[] = {
     DEFINE_PROP_INT32("ch_xfer_lat", FemuCtrl, bb_params.ch_xfer_lat, 0),
     DEFINE_PROP_INT32("gc_thres_pcent", FemuCtrl, bb_params.gc_thres_pcent, 75),
     DEFINE_PROP_INT32("gc_thres_pcent_high", FemuCtrl, bb_params.gc_thres_pcent_high, 95),
+    DEFINE_PROP_INT32("gc_strategy", FemuCtrl, bb_params.gc_strategy, 0),
+    DEFINE_PROP_LINK("subsys", FemuCtrl, subsys, TYPE_NVME_SUBSYS,
+                     NvmeSubsystem *),
 };
 
 static const VMStateDescription femu_vmstate = {
@@ -720,6 +1021,7 @@ static const TypeInfo femu_info = {
 
 static void femu_register_types(void)
 {
+    type_register_static(&nvme_subsys_info);
     type_register_static(&femu_info);
 }
 

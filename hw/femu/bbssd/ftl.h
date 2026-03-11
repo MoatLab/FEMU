@@ -7,6 +7,11 @@
 #define INVALID_LPN     (~(0ULL))
 #define UNMAPPED_PPA    (~(0ULL))
 
+/* forward declarations for FDP types */
+typedef struct FemuReclaimGroup FemuReclaimGroup;
+typedef struct FemuRuHandle FemuRuHandle;
+typedef struct FemuReclaimUnit FemuReclaimUnit;
+
 enum {
     NAND_READ =  0,
     NAND_WRITE = 1,
@@ -154,6 +159,10 @@ struct ssdparams {
     int tt_pls;       /* total # of planes in the SSD */
 
     int tt_luns;      /* total # of LUNs in the SSD */
+
+    /* FDP: reclaim unit geometry */
+    int lines_per_ru;
+    int total_ru_cnt;
 };
 
 typedef struct line {
@@ -163,6 +172,8 @@ typedef struct line {
     QTAILQ_ENTRY(line) entry; /* in either {free,victim,full} list */
     /* position in the priority queue for victim lines */
     size_t                  pos;
+    /* FDP: owning reclaim unit (NULL in non-FDP mode) */
+    FemuReclaimUnit *my_ru;
 } line;
 
 /* wp: record next write addr */
@@ -194,6 +205,96 @@ struct nand_cmd {
     int64_t stime; /* Coperd: request arrival time */
 };
 
+/* ========== FDP FTL Structures ========== */
+
+/* FDP GC strategy selection */
+enum {
+    GC_GLOBAL_GREEDY              = 0,
+    GC_GLOBAL_CB                  = 1,
+    GC_GLOBAL_RAND                = 2,
+    GC_GLOBAL_WARM                = 3,
+    GC_NOISY_RUH_CUSTOM           = 4,
+    GC_SELECTIVE_RUH              = 10,
+    GC_SELECTIVE_RUH_ADV          = 11,
+    GC_SELECTIVE_MIDAS_OP         = 12,
+    GC_SELECTIVE_RUH_SOCIAL_WELFARE = 13,
+    GC_EXPLOIT_SEQUENTIAL         = 14,
+    GC_BIT_POPULATION             = 15,
+};
+
+typedef struct ru_mgmt {
+    int mgmt_type; /* GC strategy: GC_GLOBAL_GREEDY, etc. */
+
+    QTAILQ_HEAD(free_ru_list, FemuReclaimUnit) free_ru_list;
+    pqueue_t *victim_ru_pq;  /* greedy/random victim selection */
+    pqueue_t *victim_ru_cb;  /* cost-benefit victim selection */
+    QTAILQ_HEAD(full_ru_list, FemuReclaimUnit) full_ru_list;
+    uint64_t tt_rus;
+    uint64_t free_ru_cnt;
+    int victim_ru_cnt;
+    int full_ru_cnt;
+    int custom_gc_threshold;
+
+    uint64_t gc_thres_rus;
+    uint64_t gc_thres_rus_high;
+    double gc_thres_pcent;
+    double gc_thres_pcent_high;
+
+    /* runtime WAF tracking */
+    bool is_gc_triggered;
+    bool is_force_gc_triggered;
+    float waf_score_global;
+    float waf_score_transitory;
+    float utilization_overall;
+} ru_mgmt;
+
+struct FemuReclaimUnit {
+    uint16_t ruidx;
+    uint16_t rgidx;
+    NvmeReclaimUnit *nvme_ru;
+    FemuRuHandle *ruh;
+    struct write_pointer *ssd_wptr;
+    struct line **lines;
+    QTAILQ_ENTRY(FemuReclaimUnit) entry;
+    int vpc;
+    int ipc;
+    int pos;
+    int n_lines;
+    int next_line_index;
+    int npages;
+    int chance_token;
+    float utilization;
+
+    /* cost-benefit GC attributes */
+    uint64_t last_init_time;
+    uint64_t last_invalidated_time;
+    int erase_cnt;
+    float my_cb;
+};
+
+struct FemuRuHandle {
+    uint16_t ruh_type;
+    uint16_t ruhid;
+    int ru_in_use_cnt;
+    int ruh_live_pages_cnt;
+    uint16_t curr_rg;
+    NvmeRuHandle *ruh;
+    FemuReclaimUnit **rus;
+    FemuReclaimUnit *curr_ru;
+    FemuReclaimUnit *gc_ru;
+    struct ru_mgmt *ru_mgmt;
+    uint64_t hbmw;
+    uint64_t mbmw;
+    uint64_t mbe;
+};
+
+struct FemuReclaimGroup {
+    int rgidx;
+    FemuReclaimUnit *rus;
+    int tt_nru;
+    struct ru_mgmt *ru_mgmt;
+};
+
 struct ssd {
     char *ssdname;
     struct ssdparams sp;
@@ -208,6 +309,18 @@ struct ssd {
     struct rte_ring **to_poller;
     bool *dataplane_started_ptr;
     QemuThread ftl_thread;
+
+    /* FDP: reclaim group/unit/handle management */
+    FemuReclaimGroup *rg;
+    uint64_t nrg;
+    FemuReclaimUnit **rus;
+    uint64_t nrus;
+    FemuRuHandle *ruhs;
+    uint64_t nruhs;
+    bool fdp_enabled;
+    bool fdp_debug;    /* enable FDP FTL tracing */
+
+    FemuCtrl *n;
 };
 
 void ssd_init(FemuCtrl *n);
@@ -233,5 +346,15 @@ void ssd_init(FemuCtrl *n);
 #else
 #define ftl_assert(expression)
 #endif
+
+/* FDP debug logging */
+#define fdp_log(fmt, ...) \
+    do { fprintf(stderr, "[FEMU] FDP-Log: " fmt, ## __VA_ARGS__); } while (0)
+
+/* FDP conditional trace: only emits when ssd->fdp_debug is set */
+#define FDP_TRACE(ssd, fmt, ...) do { \
+    if ((ssd)->fdp_debug) \
+        fprintf(stderr, "[FEMU] FDP-Trace: " fmt, ## __VA_ARGS__); \
+} while (0)
 
 #endif

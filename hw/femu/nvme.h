@@ -13,11 +13,328 @@
 #include "system/kvm.h"
 #include "hw/block/block.h"
 
+#include "hw/registerfields.h"
+
 #include "backend/dram.h"
 #include "inc/rte_ring.h"
 #include "inc/pqueue.h"
 #include "nand/nand.h"
 #include "timing-model/timing.h"
+
+typedef struct FemuCtrl FemuCtrl;
+typedef struct NvmeNamespace NvmeNamespace;
+
+/* ========== FDP (Flexible Data Placement) Constants ========== */
+
+#define TYPE_NVME_BUS "nvme-bus"
+OBJECT_DECLARE_SIMPLE_TYPE(NvmeBus, NVME_BUS)
+
+typedef struct NvmeBus {
+    BusState parent_bus;
+} NvmeBus;
+
+#define TYPE_NVME_SUBSYS "femu-subsys"
+#define NVME_SUBSYS(obj) \
+    OBJECT_CHECK(NvmeSubsystem, (obj), TYPE_NVME_SUBSYS)
+#define SUBSYS_SLOT_RSVD    (void *)0xFFFF
+#define NVME_MAX_CONTROLLERS 256
+#define NVME_MAX_NAMESPACES  256
+
+#define NVME_FDP_MAX_EVENTS 63
+#define NVME_FDP_MAXPIDS    128
+#define FDP_EVT_MAX         0xff
+#define NVME_FDP_MAX_NS_RUHS 32u
+#define FDPVSS              0
+#define NVME_DEFAULT_RU_SIZE (96 * MiB)
+
+/* ========== FDP Directive Types ========== */
+
+enum NvmeDirectiveTypes {
+    NVME_DIRECTIVE_IDENTIFY       = 0x0,
+    NVME_DIRECTIVE_DATA_PLACEMENT = 0x2,
+};
+
+/* ========== FDP Wire-Format Structs (NVMe Spec) ========== */
+
+typedef struct QEMU_PACKED NvmeFdpConfsHdr {
+    uint16_t num_confs;
+    uint8_t  version;
+    uint8_t  rsvd3;
+    uint32_t size;
+    uint8_t  rsvd8[8];
+} NvmeFdpConfsHdr;
+
+REG8(FDPA, 0x0)
+    FIELD(FDPA, RGIF, 0, 4)
+    FIELD(FDPA, VWC, 4, 1)
+    FIELD(FDPA, VALID, 7, 1);
+
+typedef struct QEMU_PACKED NvmeFdpDescrHdr {
+    uint16_t descr_size;
+    uint8_t  fdpa;
+    uint8_t  vss;
+    uint32_t nrg;
+    uint16_t nruh;
+    uint16_t maxpids;
+    uint32_t nnss;
+    uint64_t runs;
+    uint32_t erutl;
+    uint8_t  rsvd28[36];
+} NvmeFdpDescrHdr;
+
+enum NvmeRuhType {
+    NVME_RUHT_INITIALLY_ISOLATED = 1,
+    NVME_RUHT_PERSISTENTLY_ISOLATED = 2,
+};
+
+typedef struct QEMU_PACKED NvmeRuhDescr {
+    uint8_t ruht;
+    uint8_t rsvd1[3];
+} NvmeRuhDescr;
+
+typedef struct QEMU_PACKED NvmeRuhuLog {
+    uint16_t nruh;
+    uint8_t  rsvd2[6];
+} NvmeRuhuLog;
+
+enum NvmeRuhAttributes {
+    NVME_RUHA_UNUSED = 0,
+    NVME_RUHA_HOST = 1,
+    NVME_RUHA_CTRL = 2,
+};
+
+typedef struct QEMU_PACKED NvmeRuhuDescr {
+    uint8_t ruha;
+    uint8_t rsvd1[7];
+    uint64_t hbmw;
+    uint64_t mbmw;
+} NvmeRuhuDescr;
+
+typedef struct QEMU_PACKED NvmeFdpStatsLog {
+    uint64_t hbmw[2];
+    uint64_t mbmw[2];
+    uint64_t mbe[2];
+    uint8_t  rsvd48[16];
+} NvmeFdpStatsLog;
+
+typedef struct QEMU_PACKED NvmeFdpEventsLog {
+    uint32_t num_events;
+    uint8_t  rsvd4[60];
+} NvmeFdpEventsLog;
+
+enum NvmeFdpEventType {
+    FDP_EVT_RU_NOT_FULLY_WRITTEN   = 0x0,
+    FDP_EVT_RU_ATL_EXCEEDED        = 0x1,
+    FDP_EVT_CTRL_RESET_RUH         = 0x2,
+    FDP_EVT_INVALID_PID            = 0x3,
+    FDP_EVT_MEDIA_REALLOC          = 0x80,
+    FDP_EVT_RUH_IMPLICIT_RU_CHANGE = 0x81,
+};
+
+enum NvmeFdpEventFlags {
+    FDPEF_PIV   = 1 << 0,
+    FDPEF_NSIDV = 1 << 1,
+    FDPEF_LV    = 1 << 2,
+};
+
+enum NvmeIdCtrlCtratt {
+    NVME_CTRATT_ENDGRPS = 1 <<  4,
+    NVME_CTRATT_ELBAS   = 1 << 15,
+    NVME_CTRATT_FDPS    = 1 << 19,
+};
+
+typedef struct QEMU_PACKED NvmeFdpEvent {
+    uint8_t  type;
+    uint8_t  flags;
+    uint16_t pid;
+    uint64_t timestamp;
+    uint32_t nsid;
+    uint64_t type_specific[2];
+    uint16_t rgid;
+    uint8_t  ruhid;
+    uint8_t  rsvd35[5];
+    uint64_t vendor[3];
+} NvmeFdpEvent;
+
+typedef struct QEMU_PACKED NvmeFdpEventDescr {
+    uint8_t evt;
+    uint8_t evta;
+} NvmeFdpEventDescr;
+
+REG32(FEAT_FDP, 0x0)
+    FIELD(FEAT_FDP, FDPE, 0, 1)
+    FIELD(FEAT_FDP, CONF_NDX, 8, 8);
+
+REG32(NVME_IOMS, 0x0)
+    FIELD(NVME_IOMS, MO, 0, 8)
+    FIELD(NVME_IOMS, MOS, 16, 16);
+
+enum NvmeIomsMo {
+    NVME_IOMS_MO_NOP        = 0x0,
+    NVME_IOMS_MO_RUH_UPDATE = 0x1,
+};
+
+REG32(NVME_IOMR, 0x0)
+    FIELD(NVME_IOMR, MO, 0, 8)
+    FIELD(NVME_IOMR, MOS, 16, 16);
+
+enum NvmeIomrMo {
+    NVME_IOMR_MO_NOP        = 0x0,
+    NVME_IOMR_MO_RUH_STATUS = 0x1,
+};
+
+/* ========== FDP Runtime State Structs ========== */
+
+typedef struct NvmeFdpEventBuffer {
+    NvmeFdpEvent     events[NVME_FDP_MAX_EVENTS];
+    unsigned int     nelems;
+    unsigned int     start;
+    unsigned int     next;
+} NvmeFdpEventBuffer;
+
+typedef struct NvmeReclaimUnit {
+    uint64_t ruamw;
+} NvmeReclaimUnit;
+
+typedef struct NvmeRuHandle {
+    uint8_t  ruht;
+    uint8_t  ruha;
+    uint64_t event_filter;
+    uint8_t  lbafi;
+    uint64_t ruamw;
+    /* reclaim units indexed by reclaim group */
+    NvmeReclaimUnit **rus;
+    uint64_t hbmw;
+    uint64_t mbmw;
+    uint64_t mbe;
+} NvmeRuHandle;
+
+typedef struct NvmeEnduranceGroup {
+    uint8_t event_conf;
+
+    struct {
+        NvmeFdpEventBuffer host_events, ctrl_events;
+
+        uint16_t nruh;
+        uint16_t nrg;
+        uint8_t  rgif;
+        uint64_t runs;
+        uint64_t nru;
+
+        uint64_t hbmw;
+        uint64_t mbmw;
+        uint64_t mbe;
+
+        bool enabled;
+
+        NvmeRuHandle *ruhs;
+        NvmeReclaimUnit **rus;
+    } fdp;
+} NvmeEnduranceGroup;
+
+typedef struct QEMU_PACKED NvmeEndGrpLog {
+    uint8_t  critical_warning;
+    uint8_t  rsvd[2];
+    uint8_t  avail_spare;
+    uint8_t  avail_spare_thres;
+    uint8_t  percet_used;
+    uint8_t  rsvd1[26];
+    uint64_t end_estimate[2];
+    uint64_t data_units_read[2];
+    uint64_t data_units_written[2];
+    uint64_t media_units_written[2];
+    uint64_t host_read_commands[2];
+    uint64_t host_write_commands[2];
+    uint64_t media_integrity_errors[2];
+    uint64_t no_err_info_log_entries[2];
+    uint8_t rsvd2[352];
+} NvmeEndGrpLog;
+
+typedef struct NvmeSubsystem {
+    DeviceState parent_obj;
+    NvmeBus     bus;
+    uint8_t     subnqn[256];
+    char        *serial;
+
+    FemuCtrl           *ctrls[NVME_MAX_CONTROLLERS];
+    NvmeNamespace      *namespaces[NVME_MAX_NAMESPACES + 1];
+    NvmeEnduranceGroup endgrp;
+
+    struct {
+        char *nqn;
+
+        struct {
+            bool     enabled;
+            uint64_t runs;
+            uint16_t nruh;
+            uint32_t nrg;
+            uint64_t nru;
+            uint32_t isolation_mode;
+        } fdp;
+    } params;
+} NvmeSubsystem;
+
+typedef struct QEMU_PACKED NvmeRuhStatus {
+    uint8_t  rsvd0[14];
+    uint16_t nruhsd;
+} NvmeRuhStatus;
+
+typedef struct QEMU_PACKED NvmeRuhStatusDescr {
+    uint16_t pid;
+    uint16_t ruhid;
+    uint32_t earutr;
+    uint64_t ruamw;
+    uint8_t  rsvd16[16];
+} NvmeRuhStatusDescr;
+
+/* FDP event filter shift table */
+static const uint8_t nvme_fdp_evf_shifts[FDP_EVT_MAX] = {
+    /* Host events */
+    [FDP_EVT_RU_NOT_FULLY_WRITTEN]   = 0,
+    [FDP_EVT_RU_ATL_EXCEEDED]        = 1,
+    [FDP_EVT_CTRL_RESET_RUH]         = 2,
+    [FDP_EVT_INVALID_PID]            = 3,
+    /* CTRL events */
+    [FDP_EVT_MEDIA_REALLOC]          = 32,
+    [FDP_EVT_RUH_IMPLICIT_RU_CHANGE] = 33,
+};
+
+static inline void nvme_fdp_stat_inc(uint64_t *a, uint64_t b)
+{
+    uint64_t ret = *a + b;
+    *a = ret < *a ? UINT64_MAX : ret;
+}
+
+/* ========== Subsystem helpers ========== */
+
+int femu_subsys_register_ctrl(FemuCtrl *n);
+void femu_subsys_unregister_ctrl(NvmeSubsystem *subsys, FemuCtrl *n);
+
+static inline FemuCtrl *nvme_subsys_ctrl(NvmeSubsystem *subsys,
+                                         uint32_t cntlid)
+{
+    if (!subsys || cntlid >= NVME_MAX_CONTROLLERS) {
+        return NULL;
+    }
+
+    if (subsys->ctrls[cntlid] == SUBSYS_SLOT_RSVD) {
+        return NULL;
+    }
+
+    return subsys->ctrls[cntlid];
+}
+
+static inline NvmeNamespace *nvme_subsys_ns(NvmeSubsystem *subsys,
+                                            uint32_t nsid)
+{
+    if (!subsys || !nsid || nsid > NVME_MAX_NAMESPACES) {
+        return NULL;
+    }
+
+    return subsys->namespaces[nsid];
+}
+
+/* ========== End FDP definitions ========== */
 
 #define NVME_ID_NS_LBADS(ns)                                                  \
     ((ns)->id_ns.lbaf[NVME_ID_NS_FLBAS_INDEX((ns)->id_ns.flbas)].lbads)
@@ -339,6 +656,8 @@ enum NvmeIoCommands {
     NVME_CMD_COMPARE            = 0x05,
     NVME_CMD_WRITE_ZEROES       = 0x08,
     NVME_CMD_DSM                = 0x09,
+    NVME_CMD_IO_MGMT_RECV       = 0x12,
+    NVME_CMD_IO_MGMT_SEND       = 0x1d,
     NVME_CMD_ZONE_MGMT_SEND     = 0x79,
     NVME_CMD_ZONE_MGMT_RECV     = 0x7a,
     NVME_CMD_ZONE_APPEND        = 0x7d,
@@ -414,19 +733,22 @@ typedef struct NvmeIdentity {
     uint32_t    rsvd12[4];
 } NvmeIdentify;
 
-typedef struct NvmeRwCmd {
+typedef struct QEMU_PACKED NvmeRwCmd {
     uint8_t     opcode;
     uint8_t     flags;
     uint16_t    cid;
     uint32_t    nsid;
-    uint64_t    rsvd2;
+    uint32_t    cdw2;
+    uint32_t    cdw3;
     uint64_t    mptr;
     uint64_t    prp1;
     uint64_t    prp2;
     uint64_t    slba;
     uint16_t    nlb;
     uint16_t    control;
-    uint32_t    dsmgmt;
+    uint8_t     dsmgmt;
+    uint8_t     rsvd;
+    uint16_t    dspec;
     uint32_t    reftag;
     uint16_t    apptag;
     uint16_t    appmask;
@@ -532,6 +854,9 @@ enum NvmeStatusCodes {
     NVME_CMD_ABORT_MISSING_FUSE = 0x000a,
     NVME_INVALID_NSID           = 0x000b,
     NVME_CMD_SEQ_ERROR          = 0x000c,
+    NVME_FDP_DISABLED           = 0x0029,
+    NVME_INVALID_PHID_LIST      = 0x002a,
+    NVME_CMD_SET_CMB_REJECTED   = 0x002b,
     NVME_INVALID_CMD_SET        = 0x002c,
     NVME_LBA_RANGE              = 0x0080,
     NVME_CAP_EXCEEDED           = 0x0081,
@@ -649,11 +974,16 @@ enum {
     NVME_CMD_EFF_UUID_SEL   = 1 << 19,
 };
 
-enum LogIdentifier {
+enum NvmeLogIdentifier {
     NVME_LOG_ERROR_INFO     = 0x01,
     NVME_LOG_SMART_INFO     = 0x02,
     NVME_LOG_FW_SLOT_INFO   = 0x03,
     NVME_LOG_CMD_EFFECTS    = 0x05,
+    NVME_LOG_ENDGRP         = 0x09,
+    NVME_LOG_FDP_CONFS      = 0x20,
+    NVME_LOG_FDP_RUH_USAGE  = 0x21,
+    NVME_LOG_FDP_STATS      = 0x22,
+    NVME_LOG_FDP_EVENTS     = 0x23,
 };
 
 typedef struct NvmePSD {
@@ -729,7 +1059,10 @@ typedef struct QEMU_PACKED NvmeIdCtrl {
     uint16_t    mntmt;
     uint16_t    mxtmt;
     uint32_t    sanicap;
-    uint8_t     rsvd332[180];
+    uint8_t     rsvd332[6];
+    uint16_t    nsetidmax;
+    uint16_t    endgidmax;
+    uint8_t     rsvd342[170];
     uint8_t     sqes;
     uint8_t     cqes;
     uint16_t    maxcmd;
@@ -822,6 +1155,10 @@ enum NvmeFeatureIds {
     NVME_WRITE_ATOMICITY            = 0xa,
     NVME_ASYNCHRONOUS_EVENT_CONF    = 0xb,
     NVME_TIMESTAMP                  = 0xe,
+    NVME_HOST_BEHAVIOR_SUPPORT      = 0x16,
+    NVME_COMMAND_SET_PROFILE        = 0x19,
+    NVME_FDP_MODE                   = 0x1d,
+    NVME_FDP_EVENTS                 = 0x1e,
     NVME_SOFTWARE_PROGRESS_MARKER   = 0x80,
     NVME_FID_MAX                    = 0x100
 };
@@ -995,10 +1332,14 @@ typedef struct NvmeRequest {
     /* position in the priority queue for delay emulation */
     size_t                  pos;
 
-    // DSM (Dataset Management) related fields
-    NvmeDsmRange    *dsm_ranges;        // Array of DSM ranges
-    int             dsm_nr_ranges;      // Number of ranges
-    uint32_t        dsm_attributes;     // CDW11 attributes (AD, IDR, IDW)
+    /* DSM (Dataset Management) related fields */
+    NvmeDsmRange    *dsm_ranges;
+    int             dsm_nr_ranges;
+    uint32_t        dsm_attributes;
+
+    /* FDP (Flexible Data Placement) */
+    uint16_t        fdp_dspec;
+    uint8_t         fdp_dtype;
 } NvmeRequest;
 
 typedef struct DMAOff {
@@ -1068,6 +1409,7 @@ typedef struct NvmeZone NvmeZone;
 typedef struct NvmeNamespace {
     struct FemuCtrl *ctrl;
     NvmeIdNs        id_ns;
+    NvmeLBAF        lbaf;
     NvmeRangeType   lba_range[64];
     unsigned long   *util;
     unsigned long   *uncorrectable;
@@ -1090,6 +1432,15 @@ typedef struct NvmeNamespace {
     } blk;
 
     void *state;
+
+    NvmeSubsystem *subsys;
+    NvmeEnduranceGroup *endgrp;
+
+    struct {
+        uint16_t nphs;
+        /* reclaim unit handle identifiers indexed by placement handle */
+        uint16_t *phs;
+    } fdp;
 } NvmeNamespace;
 
 #define TYPE_NVME "femu"
@@ -1169,6 +1520,7 @@ typedef struct BbCtrlParams {
 
     int gc_thres_pcent;
     int gc_thres_pcent_high;
+    int gc_strategy; /* FDP GC strategy: 0=greedy, 1=cost-benefit, 2=random */
 } BbCtrlParams;
 
 typedef struct ZNSCtrlParams {
@@ -1301,6 +1653,12 @@ typedef struct FemuCtrl {
     char            *logfile;
     NvmeErrorLog    *elpes;
     NvmeRequest     **aer_reqs;
+
+    /* FDP: Endurance group and subsystem */
+    NvmeEnduranceGroup *endgrp;
+    NvmeSubsystem   *subsys;
+    uint16_t        cntlid;
+
     NvmeNamespace   *namespaces;
     NvmeSQueue      **sq;
     NvmeCQueue      **cq;
@@ -1474,6 +1832,15 @@ void *nvme_poller(void *arg);
 
 /* NVMe I/O */
 uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req);
+
+/* FDP helpers */
+uint16_t nvme_pid2ph(NvmeNamespace *ns, uint16_t pid);
+uint16_t nvme_pid2rg(NvmeNamespace *ns, uint16_t pid);
+bool nvme_parse_pid(NvmeNamespace *ns, uint16_t pid,
+                    uint16_t *ph, uint16_t *rg);
+bool nvme_update_ruh(FemuCtrl *n, NvmeNamespace *ns, uint16_t pid);
+uint64_t nvme_do_write_fdp(FemuCtrl *n, NvmeRequest *req,
+                           uint64_t slba, uint32_t nlb);
 
 int nvme_register_ocssd12(FemuCtrl *n);
 int nvme_register_ocssd20(FemuCtrl *n);
