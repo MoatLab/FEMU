@@ -3,6 +3,7 @@
 #include <gmodule.h>
 
 #include "csd.h"
+#include "../bbssd/ftl.h"
 
 #ifdef CONFIG_FEMU_CSD_UBPF
 #include <ubpf.h>
@@ -125,6 +126,7 @@ static void csd_init_ctrl_str(FemuCtrl *n)
 static void csd_init(FemuCtrl *n, Error **errp)
 {
     FemuCsdState *csd;
+    struct ssd *ssd;
 
     csd_check_size();
 
@@ -154,6 +156,11 @@ static void csd_init(FemuCtrl *n, Error **errp)
     }
 
     csd_init_ctrl_str(n);
+
+    ssd = n->ssd = g_malloc0(sizeof(*ssd));
+    ssd->dataplane_started_ptr = &n->dataplane_started;
+    ssd->ssdname = (char *)n->devname;
+    ssd_init(n);
 
     csd = g_new0(FemuCsdState, 1);
     csd->params = n->csd_params;

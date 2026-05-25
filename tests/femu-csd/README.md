@@ -25,8 +25,10 @@ The smoke test sends these CSD commands through `NVME_IOCTL_IO_CMD`:
 - deallocate AFDM
 
 Build also produces `csd-vadd.so`, a minimal shared-library CSF used by the
-shared-library smoke path. Because the shared library is loaded by the QEMU
-process on the host, pass a host-visible path to the guest tool:
+shared-library smoke path. The program download payload follows the original
+CEMU descriptor format: a PRP data buffer containing `path\0symbol\0`. Because
+the shared library is loaded by the QEMU process on the host, the `path` string
+inside that descriptor must be visible to the host QEMU process:
 
 ```bash
 sudo ./csd-passthru /dev/nvme0n1 smoke-so /home/<user>/FEMU/tests/femu-csd/csd-vadd.so
@@ -61,7 +63,10 @@ The tool assumes FEMU was started with CSD mode enabled, for example:
 -device femu,femu_mode=4,fdm_size=64
 ```
 
-It intentionally does not depend on CEMU's modified kernel driver or FDMFS.
+It intentionally does not depend on CEMU's modified kernel driver or FDMFS. CSD
+mode still uses FEMU's device-side BBSSD FTL path for normal NVM read/write
+requests; the passthrough commands validate the additional computational
+storage interface.
 
 Shared-library CSF support is enabled in the default FEMU build. uBPF support
 is optional because it depends on an external `ubpf` library. Build FEMU with:

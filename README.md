@@ -63,12 +63,12 @@ FEMU bridges the gap between SSD hardware platforms and SSD simulators by provid
 
 ## Features
 
-| Feature | BlackBox | WhiteBox | ZNS | NoSSD |
-|---------|----------|----------|-----|--------|
-| **FTL Management** | Device-side | Host-side | Zone-based | None |
-| **Use Cases** | Commercial SSD simulation | OpenChannel SSD research | ZNS research | SCM emulation |
-| **Latency Model** | Realistic NAND | Realistic NAND | Zone-optimized | Ultra-low (sub-10μs) |
-| **Guest Support** | Full NVMe | OpenChannel 1.2/2.0 | NVMe ZNS | NVMe basic |
+| Feature | BlackBox | WhiteBox | ZNS | NoSSD | CSD |
+|---------|----------|----------|-----|--------|-----|
+| **FTL Management** | Device-side | Host-side | Zone-based | None | Device-side |
+| **Use Cases** | Commercial SSD simulation | OpenChannel SSD research | ZNS research | SCM emulation | Computational storage research |
+| **Latency Model** | Realistic NAND | Realistic NAND | Zone-optimized | Ultra-low (sub-10μs) | Realistic NAND + compute runtime |
+| **Guest Support** | Full NVMe | OpenChannel 1.2/2.0 | NVMe ZNS | NVMe basic | Full NVMe + CSD commands |
 
 ---
 
@@ -388,10 +388,11 @@ csf_runtime_scale=3    # Runtime scaling factor
 ```
 
 **Current Scope:**
-- Normal NVMe read/write compatibility in CSD mode
+- Normal NVMe read/write through the device-side BBSSD FTL path in CSD mode
 - Vendor commands for AFDM allocation, read/write, NVM-to-AFDM copy
 - Minimal phantom CSF download/execute path
-- Shared-library CSF download/execute path using a host-visible `.so`
+- Shared-library CSF download/execute path using the original CEMU
+  `path\0symbol\0` program descriptor format
 - Optional uBPF CSF support via `./femu-compile.sh --enable-csd-ubpf`
 - Group/QoS command metadata
 - Guest-side passthrough tests in `tests/femu-csd/`
