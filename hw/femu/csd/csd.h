@@ -16,6 +16,11 @@ enum FemuCsdIoCommands {
     NVME_CMD_CSD_DELETE_GROUP   = 0xf8,
 };
 
+enum FemuCsdAdminCommands {
+    NVME_ADM_CMD_CSD_COMPUTE_LOAD     = 0x22,
+    NVME_ADM_CMD_CSD_COMPUTE_ACTIVATE = 0x23,
+};
+
 enum FemuCsdFdmType {
     NVME_CSD_FDM_TYPE_HOST = 0,
 };
@@ -42,6 +47,45 @@ typedef struct QEMU_PACKED NvmeCsdDownloadCmd {
     uint32_t    runtime;
     uint32_t    rsvd15[2];
 } NvmeCsdDownloadCmd;
+
+typedef struct QEMU_PACKED NvmeCsdLoadProgramCmd {
+    uint8_t     opcode;
+    uint8_t     flags;
+    uint16_t    cid;
+    uint32_t    nsid;
+    uint16_t    jit:1;
+    uint16_t    rsvd_ctrl:15;
+    uint16_t    runtime_scale;
+    uint32_t    runtime;
+    uint32_t    rsvd4[2];
+    uint64_t    prp1;
+    uint64_t    prp2;
+    uint16_t    pind;
+    uint8_t     ptype;
+    uint8_t     sel:1;
+    uint8_t     pit:3;
+    uint8_t     indirect:1;
+    uint8_t     rsvd10:3;
+    uint32_t    psize;
+    uint64_t    pid;
+    uint32_t    numb;
+    uint32_t    loff;
+} NvmeCsdLoadProgramCmd;
+
+typedef struct QEMU_PACKED NvmeCsdProgramActivationCmd {
+    uint8_t     opcode;
+    uint8_t     flags;
+    uint16_t    cid;
+    uint32_t    nsid;
+    uint32_t    rsvd[4];
+    uint64_t    prp1;
+    uint64_t    prp2;
+    uint32_t    pind:16;
+    uint32_t    sel:4;
+    uint32_t    rsvd10:12;
+    uint32_t    runtime;
+    uint32_t    rsvd12[4];
+} NvmeCsdProgramActivationCmd;
 
 typedef struct QEMU_PACKED NvmeCsdAllocFdmCmd {
     uint8_t     opcode;

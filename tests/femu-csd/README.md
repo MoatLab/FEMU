@@ -57,6 +57,18 @@ sudo ./csd-passthru /dev/nvme0n1 delete-group <group-id>
 sudo ./csd-passthru /dev/nvme0n1 nvm-to-afdm <afdm-id> 0 0 0
 ```
 
+FEMU CSD also accepts the original CEMU program lifecycle admin command
+layouts for load/unload (`0x22`) and activate/deactivate (`0x23`). The
+lightweight passthrough helper can send those commands to the controller device
+without the CEMU kernel driver:
+
+```bash
+sudo ./csd-passthru /dev/nvme0 admin-load-so 1 /host/path/csd-vadd.so csd_vadd
+sudo ./csd-passthru /dev/nvme0 admin-activate 1
+sudo ./csd-passthru /dev/nvme0 admin-deactivate 1
+sudo ./csd-passthru /dev/nvme0 admin-unload 1
+```
+
 The tool assumes FEMU was started with CSD mode enabled, for example:
 
 ```bash

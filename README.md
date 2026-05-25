@@ -393,6 +393,7 @@ csf_runtime_scale=3    # Runtime scaling factor
 - Minimal phantom CSF download/execute path
 - Shared-library CSF download/execute path using the original CEMU
   `path\0symbol\0` program descriptor format
+- CEMU-style admin commands for CSF load/unload and activate/deactivate
 - Optional uBPF CSF support via `./femu-compile.sh --enable-csd-ubpf`
 - Group/QoS command metadata
 - Guest-side passthrough tests in `tests/femu-csd/`
