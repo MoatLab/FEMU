@@ -2292,6 +2292,8 @@ endif
 # libbpf
 bpf_version = '1.1.0'
 libbpf = dependency('libbpf', version: '>=' + bpf_version, required: get_option('bpf'), method: 'pkg-config')
+femu_csd_ubpf = dependency('ubpf', required: get_option('femu_csd_ubpf'),
+                           method: 'pkg-config')
 if libbpf.found() and not cc.links('''
    #include <bpf/libbpf.h>
    #include <linux/bpf.h>
@@ -2529,6 +2531,7 @@ config_host_data.set('CONFIG_HEXAGON_IDEF_PARSER', get_option('hexagon_idef_pars
 config_host_data.set('CONFIG_LIBATTR', have_old_libattr)
 config_host_data.set('CONFIG_LIBCAP_NG', libcap_ng.found())
 config_host_data.set('CONFIG_EBPF', libbpf.found())
+config_host_data.set('CONFIG_FEMU_CSD_UBPF', femu_csd_ubpf.found())
 config_host_data.set('CONFIG_AF_XDP', libxdp.found())
 config_host_data.set('CONFIG_LIBDAXCTL', libdaxctl.found())
 config_host_data.set('CONFIG_LIBISCSI', libiscsi.found())

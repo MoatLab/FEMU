@@ -1,7 +1,14 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
+#include <gmodule.h>
 
 #include "csd.h"
+
+#ifdef CONFIG_FEMU_CSD_UBPF
+#include <ubpf.h>
+#endif
+
+typedef int64_t (*FemuCsdSharedLibFn)(FemuCsdArgs *args);
 
 typedef struct FemuCsdAfdm {
     uint32_t id;
@@ -16,6 +23,12 @@ typedef struct FemuCsdProgram {
     uint16_t runtime_scale;
     uint64_t size;
     uint8_t *data;
+    GModule *module;
+    FemuCsdSharedLibFn shared_lib_fn;
+#ifdef CONFIG_FEMU_CSD_UBPF
+    struct ubpf_vm *ubpf_vm;
+    ubpf_jit_fn ubpf_jit_fn;
+#endif
 } FemuCsdProgram;
 
 typedef struct FemuCsdGroup {
@@ -70,6 +83,23 @@ static void csd_afdm_free(gpointer opaque)
     g_free(afdm);
 }
 
+static void csd_program_unload(FemuCsdProgram *program)
+{
+    if (program->module) {
+        g_module_close(program->module);
+        program->module = NULL;
+        program->shared_lib_fn = NULL;
+    }
+
+#ifdef CONFIG_FEMU_CSD_UBPF
+    if (program->ubpf_vm) {
+        ubpf_destroy(program->ubpf_vm);
+        program->ubpf_vm = NULL;
+        program->ubpf_jit_fn = NULL;
+    }
+#endif
+}
+
 static void csd_program_free(gpointer opaque)
 {
     FemuCsdProgram *program = opaque;
@@ -78,6 +108,7 @@ static void csd_program_free(gpointer opaque)
         return;
     }
 
+    csd_program_unload(program);
     g_free(program->data);
     g_free(program);
 }
@@ -203,6 +234,119 @@ static uint16_t csd_check_afdm_range(FemuCsdAfdm *afdm, uint64_t offset,
     return NVME_SUCCESS;
 }
 
+static uint16_t csd_parse_program(FemuCsdProgram *program, const char **path,
+                                  const char **symbol)
+{
+    char *name;
+    size_t path_len;
+    size_t symbol_len;
+
+    if (!program->data || program->size < 3) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    name = memchr(program->data, '\0', program->size);
+    if (!name || name == (char *)program->data) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    path_len = name - (char *)program->data;
+    if (path_len + 1 >= program->size) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    *path = (const char *)program->data;
+    *symbol = name + 1;
+    symbol_len = strnlen(*symbol, program->size - path_len - 1);
+    if (symbol_len == 0 || path_len + symbol_len + 2 > program->size) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    return NVME_SUCCESS;
+}
+
+static uint16_t csd_load_shared_lib(FemuCsdProgram *program)
+{
+    const char *path;
+    const char *symbol;
+    gpointer fn = NULL;
+    uint16_t status;
+
+    status = csd_parse_program(program, &path, &symbol);
+    if (status) {
+        return status;
+    }
+
+    program->module = g_module_open(path, G_MODULE_BIND_LOCAL);
+    if (!program->module) {
+        femu_err("CSD: failed to load shared library %s: %s\n", path,
+                 g_module_error());
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    if (!g_module_symbol(program->module, symbol, &fn) || !fn) {
+        femu_err("CSD: failed to find shared library symbol %s: %s\n", symbol,
+                 g_module_error());
+        csd_program_unload(program);
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    program->shared_lib_fn = (FemuCsdSharedLibFn)fn;
+    return NVME_SUCCESS;
+}
+
+static uint16_t csd_load_ubpf(FemuCsdProgram *program, bool jit)
+{
+#ifdef CONFIG_FEMU_CSD_UBPF
+    const char *path;
+    const char *symbol;
+    g_autofree char *elf = NULL;
+    gsize elf_size = 0;
+    g_autoptr(GError) err = NULL;
+    char *errmsg = NULL;
+    uint16_t status;
+
+    status = csd_parse_program(program, &path, &symbol);
+    if (status) {
+        return status;
+    }
+
+    if (!g_file_get_contents(path, &elf, &elf_size, &err)) {
+        femu_err("CSD: failed to read uBPF program %s: %s\n", path,
+                 err ? err->message : "unknown error");
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    program->ubpf_vm = ubpf_create();
+    if (!program->ubpf_vm) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    if (ubpf_load_elf(program->ubpf_vm, elf, elf_size, symbol, &errmsg) < 0) {
+        femu_err("CSD: failed to load uBPF ELF %s:%s: %s\n", path, symbol,
+                 errmsg ? errmsg : "unknown error");
+        free(errmsg);
+        csd_program_unload(program);
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    if (jit) {
+        program->ubpf_jit_fn = ubpf_compile(program->ubpf_vm, &errmsg);
+        if (!program->ubpf_jit_fn) {
+            femu_err("CSD: failed to JIT uBPF ELF %s:%s: %s\n", path, symbol,
+                     errmsg ? errmsg : "unknown error");
+            free(errmsg);
+            csd_program_unload(program);
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+    }
+
+    return NVME_SUCCESS;
+#else
+    return NVME_INVALID_FIELD | NVME_DNR;
+#endif
+}
+
 static uint16_t csd_download(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 {
     FemuCsdState *csd = csd_state(n);
@@ -214,8 +358,16 @@ static uint16_t csd_download(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     uint32_t id;
     uint16_t status = NVME_SUCCESS;
 
-    if (download->csf_type != NVME_CSD_CSF_TYPE_PHANTOM ||
-        size > UINT32_MAX) {
+    if (size > UINT32_MAX) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    switch (download->csf_type) {
+    case NVME_CSD_CSF_TYPE_PHANTOM:
+    case NVME_CSD_CSF_TYPE_EBPF:
+    case NVME_CSD_CSF_TYPE_SHARED_LIB:
+        break;
+    default:
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
@@ -232,6 +384,24 @@ static uint16_t csd_download(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
             csd_program_free(program);
             return status | NVME_DNR;
         }
+    }
+
+    switch (program->type) {
+    case NVME_CSD_CSF_TYPE_PHANTOM:
+        break;
+    case NVME_CSD_CSF_TYPE_SHARED_LIB:
+        status = csd_load_shared_lib(program);
+        break;
+    case NVME_CSD_CSF_TYPE_EBPF:
+        status = csd_load_ubpf(program, download->csf_flags & 0x1);
+        break;
+    default:
+        status = NVME_INVALID_FIELD | NVME_DNR;
+        break;
+    }
+    if (status) {
+        csd_program_free(program);
+        return status;
     }
 
     qemu_mutex_lock(&csd->lock);
@@ -256,11 +426,17 @@ static uint16_t csd_exec(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     uint32_t in_id = le32_to_cpu(exec->in_afdm_id);
     uint32_t out_id = le32_to_cpu(exec->out_afdm_id);
     uint32_t group_id = le32_to_cpu(exec->group);
+    uint32_t cparam1 = le32_to_cpu(exec->cparam1);
     uint32_t runtime = le32_to_cpu(exec->runtime);
     FemuCsdProgram *program;
-    FemuCsdAfdm *in;
-    FemuCsdAfdm *out;
+    FemuCsdAfdm *in = NULL;
+    FemuCsdAfdm *out = NULL;
     uint64_t copy_size;
+    void *mr_addr[2] = { 0 };
+    long long mr_len[2] = { 0 };
+    FemuCsdArgs args = { 0 };
+    int64_t result = 0;
+    uint16_t status = NVME_SUCCESS;
 
     qemu_mutex_lock(&csd->lock);
     program = csd_get_program_locked(csd, csf_id);
@@ -274,25 +450,82 @@ static uint16_t csd_exec(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    if (in_id != 0 || out_id != 0) {
-        in = csd_get_afdm_locked(csd, in_id);
-        out = csd_get_afdm_locked(csd, out_id);
-        if (!in || !out) {
-            qemu_mutex_unlock(&csd->lock);
-            return NVME_INVALID_FIELD | NVME_DNR;
-        }
-
-        copy_size = MIN(in->size, out->size);
-        memcpy(out->data, in->data, copy_size);
-        req->cqe.n.result = copy_size > UINT32_MAX ? UINT32_MAX : copy_size;
-    } else {
-        req->cqe.n.result = 0;
+    in = in_id ? csd_get_afdm_locked(csd, in_id) : NULL;
+    out = out_id ? csd_get_afdm_locked(csd, out_id) : NULL;
+    if ((in_id && !in) || (out_id && !out)) {
+        qemu_mutex_unlock(&csd->lock);
+        return NVME_INVALID_FIELD | NVME_DNR;
     }
 
     if (runtime == 0) {
         runtime = program->runtime;
     }
+
+    switch (program->type) {
+    case NVME_CSD_CSF_TYPE_PHANTOM:
+        if (in && out) {
+            copy_size = MIN(in->size, out->size);
+            memcpy(out->data, in->data, copy_size);
+            result = copy_size > UINT32_MAX ? UINT32_MAX : copy_size;
+        }
+        break;
+    case NVME_CSD_CSF_TYPE_SHARED_LIB:
+        if (!program->shared_lib_fn || !in || !out) {
+            status = NVME_INVALID_FIELD | NVME_DNR;
+            break;
+        }
+        mr_addr[0] = out->data;
+        mr_addr[1] = in->data;
+        mr_len[0] = out->size;
+        mr_len[1] = in->size;
+        args.numr = 2;
+        args.mr_addr = mr_addr;
+        args.mr_len = mr_len;
+        args.cparam1 = cparam1;
+        result = program->shared_lib_fn(&args);
+        break;
+    case NVME_CSD_CSF_TYPE_EBPF:
+#ifdef CONFIG_FEMU_CSD_UBPF
+        if (!program->ubpf_vm || !in || !out) {
+            status = NVME_INVALID_FIELD | NVME_DNR;
+            break;
+        }
+        mr_addr[0] = out->data;
+        mr_addr[1] = in->data;
+        mr_len[0] = out->size;
+        mr_len[1] = in->size;
+        args.numr = 2;
+        args.mr_addr = mr_addr;
+        args.mr_len = mr_len;
+        args.cparam1 = cparam1;
+        if (program->ubpf_jit_fn) {
+            result = program->ubpf_jit_fn(&args, sizeof(args));
+        } else {
+            uint64_t ubpf_result;
+
+            if (ubpf_exec(program->ubpf_vm, &args, sizeof(args),
+                          &ubpf_result) < 0) {
+                status = NVME_INVALID_FIELD | NVME_DNR;
+                break;
+            }
+            result = ubpf_result;
+        }
+#else
+        status = NVME_INVALID_FIELD | NVME_DNR;
+#endif
+        break;
+    default:
+        status = NVME_INVALID_FIELD | NVME_DNR;
+        break;
+    }
+    if (!status) {
+        req->cqe.n.result = result > UINT32_MAX ? UINT32_MAX : result;
+    }
     qemu_mutex_unlock(&csd->lock);
+
+    if (status) {
+        return status;
+    }
 
     if (runtime) {
         req->reqlat += runtime;

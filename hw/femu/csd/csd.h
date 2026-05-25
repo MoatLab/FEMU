@@ -96,9 +96,19 @@ typedef struct QEMU_PACKED NvmeCsdExecCmd {
     uint32_t    in_afdm_id;
     uint32_t    out_afdm_id;
     uint32_t    group;
-    uint32_t    rsvd14;
+    uint32_t    cparam1;
     uint32_t    runtime;
 } NvmeCsdExecCmd;
+
+typedef struct FemuCsdArgs {
+    int numr;
+    void **mr_addr;
+    long long *mr_len;
+    long long cparam1;
+    long long cparam2;
+    void *data_buffer;
+    long long buffer_len;
+} QEMU_PACKED FemuCsdArgs;
 
 typedef struct QEMU_PACKED NvmeCsdReadAfdmCmd {
     uint8_t     opcode;

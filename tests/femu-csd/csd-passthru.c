@@ -27,6 +27,8 @@ enum {
 
 enum {
     CSD_CSF_TYPE_PHANTOM = 0,
+    CSD_CSF_TYPE_EBPF = 1,
+    CSD_CSF_TYPE_SHARED_LIB = 3,
 };
 
 static void usage(const char *prog)
@@ -37,14 +39,18 @@ static void usage(const char *prog)
             "  %s /dev/nvmeXnY alloc <bytes>\n"
             "  %s /dev/nvmeXnY dealloc <id>\n"
             "  %s /dev/nvmeXnY download-phantom <runtime-ns>\n"
-            "  %s /dev/nvmeXnY exec <csf-id> <in-afdm-id> <out-afdm-id> [runtime-ns] [group-id]\n"
+            "  %s /dev/nvmeXnY download-so <host-so-path> <symbol> [runtime-ns]\n"
+            "  %s /dev/nvmeXnY download-ubpf <host-elf-path> <symbol> [jit:0|1] [runtime-ns]\n"
+            "  %s /dev/nvmeXnY exec <csf-id> <in-afdm-id> <out-afdm-id> [runtime-ns] [group-id] [cparam1]\n"
+            "  %s /dev/nvmeXnY smoke-so <host-so-path>\n"
             "  %s /dev/nvmeXnY create-group <prio> <bandwidth-kb> <deadline-us>\n"
             "  %s /dev/nvmeXnY set-qos <group-id> <prio> <bandwidth-kb> <deadline-us>\n"
             "  %s /dev/nvmeXnY delete-group <group-id>\n"
             "  %s /dev/nvmeXnY write <id> <offset> <string>\n"
             "  %s /dev/nvmeXnY read <id> <offset> <bytes>\n"
             "  %s /dev/nvmeXnY nvm-to-afdm <id> <offset> <slba> <nlb>\n",
-            prog, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog);
+            prog, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog,
+            prog, prog, prog);
 }
 
 static uint64_t parse_u64(const char *s, const char *name)
@@ -90,8 +96,46 @@ static uint32_t csd_download_phantom(int fd, uint32_t runtime)
     return cmd.result;
 }
 
+static uint32_t csd_download_program(int fd, uint8_t type, const char *path,
+                                     const char *symbol, uint8_t flags,
+                                     uint32_t runtime)
+{
+    size_t path_len = strlen(path);
+    size_t symbol_len = strlen(symbol);
+    size_t size = path_len + symbol_len + 2;
+    void *buf = NULL;
+    struct nvme_passthru_cmd cmd = {
+        .opcode = CSD_CMD_DOWNLOAD,
+        .nsid = 1,
+        .data_len = size,
+        .cdw10 = (uint32_t)size,
+        .cdw11 = (uint32_t)(size >> 32),
+        .cdw12 = type | ((uint32_t)flags << 8),
+        .cdw13 = runtime,
+    };
+
+    if (posix_memalign(&buf, 4096, (size + 4095) & ~4095ULL)) {
+        perror("posix_memalign");
+        exit(EXIT_FAILURE);
+    }
+
+    memset(buf, 0, (size + 4095) & ~4095ULL);
+    memcpy(buf, path, path_len);
+    memcpy((char *)buf + path_len + 1, symbol, symbol_len);
+    cmd.addr = (uintptr_t)buf;
+
+    if (submit(fd, &cmd)) {
+        free(buf);
+        exit(EXIT_FAILURE);
+    }
+
+    free(buf);
+    return cmd.result;
+}
+
 static void csd_exec(int fd, uint32_t csf_id, uint32_t in_afdm_id,
-                     uint32_t out_afdm_id, uint32_t runtime, uint32_t group_id)
+                     uint32_t out_afdm_id, uint32_t runtime,
+                     uint32_t group_id, uint32_t cparam1)
 {
     struct nvme_passthru_cmd cmd = {
         .opcode = CSD_CMD_EXEC,
@@ -100,7 +144,7 @@ static void csd_exec(int fd, uint32_t csf_id, uint32_t in_afdm_id,
         .cdw11 = in_afdm_id,
         .cdw12 = out_afdm_id,
         .cdw13 = group_id,
-        .cdw14 = 0,
+        .cdw14 = cparam1,
         .cdw15 = runtime,
     };
 
@@ -288,7 +332,7 @@ static void run_smoke(int fd)
 
     csf_id = csd_download_phantom(fd, 1000);
     printf("downloaded phantom CSF id=%" PRIu32 "\n", csf_id);
-    csd_exec(fd, csf_id, id, id, 0, 0);
+    csd_exec(fd, csf_id, id, id, 0, 0, 0);
     printf("phantom exec passed\n");
 
     csd_dealloc(fd, id);
@@ -296,6 +340,56 @@ static void run_smoke(int fd)
 
     free(write_buf);
     free(read_buf);
+}
+
+static void run_so_smoke(int fd, const char *so_path)
+{
+    enum { COUNT = 1024 };
+    int *input = NULL;
+    int *output = NULL;
+    uint32_t in_id;
+    uint32_t out_id;
+    uint32_t csf_id;
+
+    if (posix_memalign((void **)&input, 4096, 8192) ||
+        posix_memalign((void **)&output, 4096, 4096)) {
+        perror("posix_memalign");
+        exit(EXIT_FAILURE);
+    }
+
+    for (int i = 0; i < COUNT; i++) {
+        input[i * 2] = i;
+        input[i * 2 + 1] = i * 2;
+        output[i] = 0;
+    }
+
+    in_id = csd_alloc(fd, 8192);
+    out_id = csd_alloc(fd, 4096);
+    csd_write(fd, in_id, 0, input, 8192);
+    csd_write(fd, out_id, 0, output, 4096);
+
+    csf_id = csd_download_program(fd, CSD_CSF_TYPE_SHARED_LIB, so_path,
+                                  "csd_vadd", 0, 0);
+    printf("downloaded shared-library CSF id=%" PRIu32 "\n", csf_id);
+    csd_exec(fd, csf_id, in_id, out_id, 0, 0, COUNT);
+    csd_read(fd, out_id, 0, output, 4096);
+
+    for (int i = 0; i < COUNT; i++) {
+        int expected = i + i * 2;
+
+        if (output[i] != expected) {
+            fprintf(stderr, "shared-library smoke mismatch at %d: got %d expected %d\n",
+                    i, output[i], expected);
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    csd_dealloc(fd, in_id);
+    csd_dealloc(fd, out_id);
+    printf("shared-library smoke passed\n");
+
+    free(input);
+    free(output);
 }
 
 int main(int argc, char **argv)
@@ -319,6 +413,12 @@ int main(int argc, char **argv)
 
     if (!strcmp(op, "smoke")) {
         run_smoke(fd);
+    } else if (!strcmp(op, "smoke-so")) {
+        if (argc != 4) {
+            usage(argv[0]);
+            return EXIT_FAILURE;
+        }
+        run_so_smoke(fd, argv[3]);
     } else if (!strcmp(op, "alloc")) {
         uint64_t size;
         uint32_t id;
@@ -345,25 +445,60 @@ int main(int argc, char **argv)
         }
         id = csd_download_phantom(fd, (uint32_t)parse_u64(argv[3], "runtime-ns"));
         printf("%" PRIu32 "\n", id);
+    } else if (!strcmp(op, "download-so")) {
+        uint32_t runtime = 0;
+        uint32_t id;
+
+        if (argc < 5 || argc > 6) {
+            usage(argv[0]);
+            return EXIT_FAILURE;
+        }
+        if (argc == 6) {
+            runtime = (uint32_t)parse_u64(argv[5], "runtime-ns");
+        }
+        id = csd_download_program(fd, CSD_CSF_TYPE_SHARED_LIB, argv[3],
+                                  argv[4], 0, runtime);
+        printf("%" PRIu32 "\n", id);
+    } else if (!strcmp(op, "download-ubpf")) {
+        uint32_t runtime = 0;
+        uint8_t jit = 0;
+        uint32_t id;
+
+        if (argc < 5 || argc > 7) {
+            usage(argv[0]);
+            return EXIT_FAILURE;
+        }
+        if (argc >= 6) {
+            jit = (uint8_t)parse_u64(argv[5], "jit");
+        }
+        if (argc == 7) {
+            runtime = (uint32_t)parse_u64(argv[6], "runtime-ns");
+        }
+        id = csd_download_program(fd, CSD_CSF_TYPE_EBPF, argv[3], argv[4],
+                                  jit ? 1 : 0, runtime);
+        printf("%" PRIu32 "\n", id);
     } else if (!strcmp(op, "exec")) {
         uint32_t runtime = 0;
-
         uint32_t group_id = 0;
+        uint32_t cparam1 = 0;
 
-        if (argc < 6 || argc > 8) {
+        if (argc < 6 || argc > 9) {
             usage(argv[0]);
             return EXIT_FAILURE;
         }
         if (argc >= 7) {
             runtime = (uint32_t)parse_u64(argv[6], "runtime-ns");
         }
-        if (argc == 8) {
+        if (argc >= 8) {
             group_id = (uint32_t)parse_u64(argv[7], "group-id");
+        }
+        if (argc == 9) {
+            cparam1 = (uint32_t)parse_u64(argv[8], "cparam1");
         }
         csd_exec(fd, (uint32_t)parse_u64(argv[3], "csf-id"),
                  (uint32_t)parse_u64(argv[4], "in-afdm-id"),
                  (uint32_t)parse_u64(argv[5], "out-afdm-id"),
-                 runtime, group_id);
+                 runtime, group_id, cparam1);
     } else if (!strcmp(op, "create-group")) {
         uint32_t id;
 

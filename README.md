@@ -391,13 +391,15 @@ csf_runtime_scale=3    # Runtime scaling factor
 - Normal NVMe read/write compatibility in CSD mode
 - Vendor commands for AFDM allocation, read/write, NVM-to-AFDM copy
 - Minimal phantom CSF download/execute path
+- Shared-library CSF download/execute path using a host-visible `.so`
+- Optional uBPF CSF support via `./femu-compile.sh --enable-csd-ubpf`
 - Group/QoS command metadata
 - Guest-side passthrough tests in `tests/femu-csd/`
 
 The initial CSD path does not require a CEMU-specific Linux kernel, FDMFS, or a
 fixed VM image. Advanced CEMU features such as VM freezing, virtual clock
-changes, full eBPF execution, and FDMFS are intentionally kept out of the
-default path while the base mode is upstreamed.
+changes, and FDMFS are intentionally kept out of the default path while the base
+mode is upstreamed.
 
 ---
 
