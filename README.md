@@ -31,6 +31,7 @@
   - [WhiteBox SSD Mode (OCSSD)](#whitebox-ssd-mode-ocssd)
   - [Zoned Namespace SSD Mode (ZNSSD)](#zoned-namespace-ssd-mode-znssd)
   - [NoSSD Mode](#nossd-mode)
+  - [Computational Storage Mode (CSD)](#computational-storage-mode-csd)
 - [Configuration](#configuration)
 - [Development](#development)
 - [Troubleshooting](#troubleshooting)
@@ -367,6 +368,37 @@ Ultra-fast NVMe emulation without storage logic.
 - Performance upper-bound testing
 - Fast storage prototyping
 
+### Computational Storage Mode (CSD)
+
+Experimental computational storage support derived from CEMU. CSD is selected
+with `femu_mode=4` and keeps CSD-specific code under `hw/femu/csd/`.
+
+```bash
+./run-csd.sh
+```
+
+**Key Parameters:**
+```bash
+fdm_size=64            # Functional data memory size (MB), required
+nr_cu=4                # Number of compute units
+nr_thread=4            # Number of functional simulation threads
+time_slice=200000      # Scheduler time slice (ns)
+context_switch_time=200 # Context switch time (ns)
+csf_runtime_scale=3    # Runtime scaling factor
+```
+
+**Current Scope:**
+- Normal NVMe read/write compatibility in CSD mode
+- Vendor commands for AFDM allocation, read/write, NVM-to-AFDM copy
+- Minimal phantom CSF download/execute path
+- Group/QoS command metadata
+- Guest-side passthrough tests in `tests/femu-csd/`
+
+The initial CSD path does not require a CEMU-specific Linux kernel, FDMFS, or a
+fixed VM image. Advanced CEMU features such as VM freezing, virtual clock
+changes, full eBPF execution, and FDMFS are intentionally kept out of the
+default path while the base mode is upstreamed.
+
 ---
 
 ## Configuration
@@ -451,6 +483,9 @@ hw/femu/                    # Main FEMU implementation
 │   └── zftl.c              # Zone-based FTL
 ├── nossd/                  # NoSSD mode
 │   └── nop.c               # Minimal processing
+├── csd/                    # Computational Storage mode
+│   ├── csd.c               # CSD command handling
+│   └── csd.h               # CSD private command definitions
 ├── timing-model/           # Performance modeling
 ├── backend/                # Storage backends
 └── lib/                    # Utility libraries
