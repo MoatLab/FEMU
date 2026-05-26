@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 enum {
+    CSD_ADM_MRS_MGMT         = 0x21,
     CSD_ADM_COMPUTE_LOAD     = 0x22,
     CSD_ADM_COMPUTE_LOAD_DATA = 0x25,
     CSD_ADM_COMPUTE_ACTIVATE = 0x23,
@@ -33,6 +34,8 @@ enum {
     CSD_CSF_TYPE_PHANTOM = 0,
     CSD_CSF_TYPE_EBPF = 1,
     CSD_CSF_TYPE_SHARED_LIB = 3,
+    CSD_LOAD_FLAG_JIT = 1U << 0,
+    CSD_LOAD_FLAG_INDIRECT = 1U << 1,
 };
 
 enum {
@@ -65,6 +68,23 @@ struct csd_program_execute_cmd {
     uint32_t runtime;
 } __attribute__((packed));
 
+struct csd_mrs_mgmt_cmd {
+    uint8_t opcode;
+    uint8_t flags;
+    uint16_t cid;
+    uint32_t nsid;
+    uint32_t rsvd[4];
+    uint64_t prp1;
+    uint64_t prp2;
+    uint16_t sel:4;
+    uint16_t rsvd10:12;
+    uint16_t rsid;
+    uint8_t numr;
+    uint8_t rsvd11a;
+    uint16_t rsvd11b;
+    uint32_t rsvd12[4];
+} __attribute__((packed));
+
 static void usage(const char *prog)
 {
     fprintf(stderr,
@@ -76,6 +96,11 @@ static void usage(const char *prog)
             "  %s /dev/nvmeXnY smoke-so <host-visible-so-path>\n"
             "  %s /dev/nvmeXnY smoke-so-all <host-visible-kernels-so-path>\n"
             "  %s /dev/nvmeXnY smoke-ubpf <host-visible-bpf-elf-path> [jit:0|1]\n"
+            "  %s /dev/nvmeXnY smoke-mrs <host-visible-so-path>\n"
+            "  %s /dev/nvmeXnY vadd-example <host-visible-so-path>\n"
+            "  %s /dev/nvmeXnY sync-breakdown <host-visible-so-path> <bytes> <iterations>\n"
+            "  %s /dev/nvmeXnY indirect-vadd <host-visible-so-path>\n"
+            "  %s /dev/nvmeXnY benchmark-kernels <host-visible-vadd-so-path> <host-visible-kernels-so-path> <iterations>\n"
             "  %s /dev/nvmeXnY bench <bytes> <iterations>\n"
             "  %s /dev/nvmeX admin-load-so <pind> <host-visible-so-path> <symbol> [runtime-ns]\n"
             "  %s /dev/nvmeX admin-load-ubpf <pind> <host-visible-elf-path> <symbol> [jit:0|1] [runtime-ns]\n"
@@ -86,12 +111,14 @@ static void usage(const char *prog)
             "  %s /dev/nvmeXnY create-group <prio> <bandwidth-kb> <deadline-us>\n"
             "  %s /dev/nvmeXnY set-qos <group-id> <prio> <bandwidth-kb> <deadline-us>\n"
             "  %s /dev/nvmeXnY delete-group <group-id>\n"
+            "  %s /dev/nvmeX admin-create-mrs <out-afdm-id> <in-afdm-id>\n"
+            "  %s /dev/nvmeX admin-delete-mrs <rsid>\n"
             "  %s /dev/nvmeXnY write <id> <offset> <string>\n"
             "  %s /dev/nvmeXnY read <id> <offset> <bytes>\n"
             "  %s /dev/nvmeXnY nvm-to-afdm <id> <offset> <slba> <nlb>\n",
             prog, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog,
-            prog,
-            prog, prog, prog, prog, prog, prog, prog, prog);
+            prog, prog, prog, prog, prog, prog,
+            prog, prog, prog, prog, prog, prog, prog, prog, prog, prog);
 }
 
 static uint64_t monotonic_ns(void)
@@ -199,7 +226,7 @@ static void csd_admin_load_program(int fd, uint16_t pind, uint8_t type,
         .data_len = size,
         .cdw2 = ((uint32_t)flags & 0x1),
         .cdw3 = runtime,
-        .cdw10 = cdw10,
+        .cdw10 = cdw10 | ((flags & CSD_LOAD_FLAG_INDIRECT) ? (1U << 28) : 0),
         .cdw11 = (uint32_t)size,
         .cdw14 = (uint32_t)size,
     };
@@ -249,6 +276,41 @@ static void csd_admin_activation(int fd, uint16_t pind, uint8_t sel)
     }
 }
 
+static uint16_t csd_admin_create_mrs(int fd, const struct csd_memory_range *ranges,
+                                     uint8_t numr)
+{
+    struct nvme_passthru_cmd cmd = { 0 };
+    struct csd_mrs_mgmt_cmd *mrs = (struct csd_mrs_mgmt_cmd *)&cmd;
+
+    mrs->opcode = CSD_ADM_MRS_MGMT;
+    mrs->nsid = 1;
+    mrs->sel = 0;
+    mrs->numr = numr;
+    cmd.addr = (uintptr_t)ranges;
+    cmd.data_len = numr * sizeof(*ranges);
+
+    if (submit_admin(fd, &cmd)) {
+        exit(EXIT_FAILURE);
+    }
+
+    return (uint16_t)cmd.result;
+}
+
+static void csd_admin_delete_mrs(int fd, uint16_t rsid)
+{
+    struct nvme_passthru_cmd cmd = { 0 };
+    struct csd_mrs_mgmt_cmd *mrs = (struct csd_mrs_mgmt_cmd *)&cmd;
+
+    mrs->opcode = CSD_ADM_MRS_MGMT;
+    mrs->nsid = 1;
+    mrs->sel = 1;
+    mrs->rsid = rsid;
+
+    if (submit_admin(fd, &cmd)) {
+        exit(EXIT_FAILURE);
+    }
+}
+
 static uint32_t csd_exec_ranges(int fd, uint32_t pind, uint32_t mr0_afdm_id,
                                 uint32_t mr1_afdm_id, uint32_t runtime,
                                 uint32_t group_id, uint64_t cparam1,
@@ -281,6 +343,30 @@ static uint32_t csd_exec_ranges(int fd, uint32_t pind, uint32_t mr0_afdm_id,
 
     cmd.addr = (uintptr_t)ranges;
     cmd.data_len = sizeof(ranges);
+
+    if (submit(fd, &cmd)) {
+        exit(EXIT_FAILURE);
+    }
+
+    return cmd.result;
+}
+
+static uint32_t csd_exec_mrs(int fd, uint32_t pind, uint16_t rsid,
+                             uint32_t runtime, uint32_t group_id,
+                             uint64_t cparam1, uint64_t cparam2)
+{
+    struct nvme_passthru_cmd cmd = { 0 };
+    struct csd_program_execute_cmd *exec =
+        (struct csd_program_execute_cmd *)&cmd;
+
+    exec->opcode = CSD_CMD_EXEC;
+    exec->nsid = 1;
+    exec->pind = pind;
+    exec->rsid = rsid;
+    exec->cparam1 = cparam1;
+    exec->cparam2 = cparam2;
+    exec->group = group_id;
+    exec->runtime = runtime;
 
     if (submit(fd, &cmd)) {
         exit(EXIT_FAILURE);
@@ -607,6 +693,368 @@ static void run_ubpf_smoke(const char *dev, int fd, const char *elf_path,
     free(output);
 }
 
+static void run_mrs_smoke(const char *dev, int fd, const char *so_path)
+{
+    enum { COUNT = 1024 };
+    int *input = NULL;
+    int *output = NULL;
+    uint32_t in_id;
+    uint32_t out_id;
+    uint16_t rsid;
+    uint16_t csf_id = 7;
+    int admin_fd;
+    struct csd_memory_range ranges[2];
+
+    if (posix_memalign((void **)&input, 4096, 8192) ||
+        posix_memalign((void **)&output, 4096, 4096)) {
+        perror("posix_memalign");
+        exit(EXIT_FAILURE);
+    }
+
+    for (int i = 0; i < COUNT; i++) {
+        input[i * 2] = i;
+        input[i * 2 + 1] = i * 4;
+        output[i] = 0;
+    }
+
+    in_id = csd_alloc(fd, 8192);
+    out_id = csd_alloc(fd, 4096);
+    csd_write(fd, in_id, 0, input, 8192);
+    csd_write(fd, out_id, 0, output, 4096);
+
+    memset(ranges, 0, sizeof(ranges));
+    ranges[0].nsid = CSD_MR_AFDM_NSID;
+    ranges[0].len = 0;
+    ranges[0].sb = out_id;
+    ranges[1].nsid = CSD_MR_AFDM_NSID;
+    ranges[1].len = 0;
+    ranges[1].sb = in_id;
+
+    admin_fd = open_admin_from_namespace(dev);
+    rsid = csd_admin_create_mrs(admin_fd, ranges, 2);
+    csd_admin_load_program(admin_fd, csf_id, CSD_CSF_TYPE_SHARED_LIB,
+                           so_path, "csd_vadd", 0, 0);
+    csd_admin_activation(admin_fd, csf_id, 1);
+    printf("created MRS rsid=%" PRIu16 "\n", rsid);
+    csd_exec_mrs(fd, csf_id, rsid, 0, 0, COUNT, 0);
+    csd_read(fd, out_id, 0, output, 4096);
+
+    for (int i = 0; i < COUNT; i++) {
+        int expected = i + i * 4;
+
+        if (output[i] != expected) {
+            fprintf(stderr, "MRS smoke mismatch at %d: got %d expected %d\n",
+                    i, output[i], expected);
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    csd_admin_activation(admin_fd, csf_id, 0);
+    csd_admin_unload_program(admin_fd, csf_id);
+    csd_admin_delete_mrs(admin_fd, rsid);
+    close(admin_fd);
+    csd_dealloc(fd, in_id);
+    csd_dealloc(fd, out_id);
+    printf("MRS shared-library smoke passed\n");
+
+    free(input);
+    free(output);
+}
+
+static void run_vadd_example(const char *dev, int fd, const char *so_path)
+{
+    enum { COUNT = 1024 };
+    int *input = NULL;
+    int *output = NULL;
+    uint32_t in_id;
+    uint32_t out_id;
+    uint16_t rsid;
+    uint16_t csf_id = 8;
+    int admin_fd;
+    struct csd_memory_range ranges[2];
+
+    if (posix_memalign((void **)&input, 4096, 8192) ||
+        posix_memalign((void **)&output, 4096, 4096)) {
+        perror("posix_memalign");
+        exit(EXIT_FAILURE);
+    }
+
+    for (int i = 0; i < COUNT; i++) {
+        input[i * 2] = i * 2;
+        input[i * 2 + 1] = i * 2 + 1;
+        output[i] = 0;
+    }
+
+    in_id = csd_alloc(fd, 8192);
+    out_id = csd_alloc(fd, 4096);
+    csd_write(fd, in_id, 0, input, 8192);
+    csd_write(fd, out_id, 0, output, 4096);
+
+    memset(ranges, 0, sizeof(ranges));
+    ranges[0].nsid = CSD_MR_AFDM_NSID;
+    ranges[0].sb = out_id;
+    ranges[1].nsid = CSD_MR_AFDM_NSID;
+    ranges[1].sb = in_id;
+
+    admin_fd = open_admin_from_namespace(dev);
+    rsid = csd_admin_create_mrs(admin_fd, ranges, 2);
+    csd_admin_load_program(admin_fd, csf_id, CSD_CSF_TYPE_SHARED_LIB,
+                           so_path, "csd_vadd", 0, 0);
+    csd_admin_activation(admin_fd, csf_id, 1);
+    csd_exec_mrs(fd, csf_id, rsid, 0, 0, COUNT, 0);
+    csd_read(fd, out_id, 0, output, 4096);
+
+    for (int i = 0; i < COUNT; i++) {
+        int expected = input[i * 2] + input[i * 2 + 1];
+
+        if (output[i] != expected) {
+            fprintf(stderr, "vadd example mismatch at %d: got %d expected %d\n",
+                    i, output[i], expected);
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    csd_admin_activation(admin_fd, csf_id, 0);
+    csd_admin_unload_program(admin_fd, csf_id);
+    csd_admin_delete_mrs(admin_fd, rsid);
+    close(admin_fd);
+    csd_dealloc(fd, in_id);
+    csd_dealloc(fd, out_id);
+    printf("vadd example passed\n");
+
+    free(input);
+    free(output);
+}
+
+static void run_sync_breakdown(const char *dev, int fd, const char *so_path,
+                               uint32_t bytes, uint32_t iterations)
+{
+    int *input = NULL;
+    int *output = NULL;
+    uint32_t in_id;
+    uint32_t out_id;
+    uint16_t rsid;
+    uint16_t csf_id = 9;
+    int admin_fd;
+    struct csd_memory_range ranges[2];
+    uint64_t copy_time = 0;
+    uint64_t exec_time = 0;
+    uint64_t read_time = 0;
+    uint64_t start;
+    uint64_t end;
+    uint32_t count;
+    uint32_t in_bytes;
+
+    if (bytes == 0 || iterations == 0 || bytes % sizeof(int)) {
+        fprintf(stderr, "sync-breakdown requires non-zero int-aligned bytes and iterations\n");
+        exit(EXIT_FAILURE);
+    }
+    count = bytes / sizeof(int);
+    in_bytes = bytes * 2;
+
+    if (posix_memalign((void **)&input, 4096, (in_bytes + 4095U) & ~4095U) ||
+        posix_memalign((void **)&output, 4096, (bytes + 4095U) & ~4095U)) {
+        perror("posix_memalign");
+        exit(EXIT_FAILURE);
+    }
+
+    for (uint32_t i = 0; i < count; i++) {
+        input[i * 2] = i;
+        input[i * 2 + 1] = i + 1;
+        output[i] = 0;
+    }
+
+    in_id = csd_alloc(fd, in_bytes);
+    out_id = csd_alloc(fd, bytes);
+    csd_write(fd, out_id, 0, output, bytes);
+
+    memset(ranges, 0, sizeof(ranges));
+    ranges[0].nsid = CSD_MR_AFDM_NSID;
+    ranges[0].sb = out_id;
+    ranges[1].nsid = CSD_MR_AFDM_NSID;
+    ranges[1].sb = in_id;
+
+    admin_fd = open_admin_from_namespace(dev);
+    rsid = csd_admin_create_mrs(admin_fd, ranges, 2);
+    csd_admin_load_program(admin_fd, csf_id, CSD_CSF_TYPE_SHARED_LIB,
+                           so_path, "csd_vadd", 0, 0);
+    csd_admin_activation(admin_fd, csf_id, 1);
+
+    if (pwrite(fd, input, in_bytes, 0) != (ssize_t)in_bytes) {
+        perror("pwrite nvm");
+        exit(EXIT_FAILURE);
+    }
+    fsync(fd);
+
+    for (uint32_t i = 0; i < iterations; i++) {
+        start = monotonic_ns();
+        csd_nvm_to_afdm(fd, in_id, 0, 0,
+                        (uint16_t)((in_bytes + 511U) / 512U - 1));
+        end = monotonic_ns();
+        copy_time += end - start;
+
+        start = monotonic_ns();
+        csd_exec_mrs(fd, csf_id, rsid, 0, 0, count, 0);
+        end = monotonic_ns();
+        exec_time += end - start;
+
+        start = monotonic_ns();
+        csd_read(fd, out_id, 0, output, bytes);
+        end = monotonic_ns();
+        read_time += end - start;
+    }
+
+    for (uint32_t i = 0; i < count; i++) {
+        int expected = input[i * 2] + input[i * 2 + 1];
+
+        if (output[i] != expected) {
+            fprintf(stderr, "sync breakdown mismatch at %u: got %d expected %d\n",
+                    i, output[i], expected);
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    printf("breakdown nvm_to_afdm bytes=%u iterations=%u avg_ns=%" PRIu64 "\n",
+           in_bytes, iterations, copy_time / iterations);
+    printf("breakdown exec bytes=%u iterations=%u avg_ns=%" PRIu64 "\n",
+           bytes, iterations, exec_time / iterations);
+    printf("breakdown afdm_read bytes=%u iterations=%u avg_ns=%" PRIu64 "\n",
+           bytes, iterations, read_time / iterations);
+
+    csd_admin_activation(admin_fd, csf_id, 0);
+    csd_admin_unload_program(admin_fd, csf_id);
+    csd_admin_delete_mrs(admin_fd, rsid);
+    close(admin_fd);
+    csd_dealloc(fd, in_id);
+    csd_dealloc(fd, out_id);
+
+    free(input);
+    free(output);
+}
+
+static void run_so_smoke(const char *dev, int fd, const char *so_path);
+static void run_original_so_smoke(const char *dev, int fd, const char *so_path);
+
+static void run_indirect_vadd(const char *dev, int fd, const char *so_path)
+{
+    enum { COUNT = 1024 };
+    int *input = NULL;
+    int *output = NULL;
+    int *global_mem = NULL;
+    uint32_t in_id;
+    uint32_t out_id;
+    uint32_t global_id;
+    uint16_t rsid;
+    uint16_t csf_id = 10;
+    int admin_fd;
+    struct csd_memory_range ranges[3];
+    uint8_t task_info[16 + sizeof(int)] = { 0 };
+
+    if (posix_memalign((void **)&input, 4096, 8192) ||
+        posix_memalign((void **)&output, 4096, 4096) ||
+        posix_memalign((void **)&global_mem, 4096, 4096)) {
+        perror("posix_memalign");
+        exit(EXIT_FAILURE);
+    }
+
+    for (int i = 0; i < COUNT; i++) {
+        input[i * 2] = i;
+        input[i * 2 + 1] = i + 7;
+        output[i] = 0;
+    }
+    global_mem[0] = 0;
+    global_mem[1] = 0;
+
+    in_id = csd_alloc(fd, 8192);
+    out_id = csd_alloc(fd, 4096);
+    global_id = csd_alloc(fd, 4096);
+    csd_write(fd, in_id, 0, input, 8192);
+    csd_write(fd, out_id, 0, output, 4096);
+    csd_write(fd, global_id, 0, global_mem, 4096);
+
+    memset(ranges, 0, sizeof(ranges));
+    ranges[0].nsid = CSD_MR_AFDM_NSID;
+    ranges[0].sb = out_id;
+    ranges[1].nsid = CSD_MR_AFDM_NSID;
+    ranges[1].sb = in_id;
+    ranges[2].nsid = CSD_MR_AFDM_NSID;
+    ranges[2].sb = global_id;
+
+    /*
+     * Original CEMU indirect execute starts with:
+     * nr_concurrent_chunks, destination, nr_total_input_cf2, nr_total_output_cf2.
+     * This FDMFS-free smoke uses pre-filled AFDM ranges, so copy-format lists
+     * are intentionally empty while the indirect CSF ABI is still exercised.
+     */
+    ((int *)task_info)[0] = 1;
+    ((int *)task_info)[1] = 0;
+    ((int *)task_info)[2] = 0;
+    ((int *)task_info)[3] = 0;
+
+    admin_fd = open_admin_from_namespace(dev);
+    rsid = csd_admin_create_mrs(admin_fd, ranges, 3);
+    csd_admin_load_program(admin_fd, csf_id, CSD_CSF_TYPE_SHARED_LIB,
+                           so_path, "csd_vadd_indirect",
+                           CSD_LOAD_FLAG_INDIRECT, 0);
+    csd_admin_activation(admin_fd, csf_id, 1);
+    if (csd_exec_mrs(fd, csf_id, rsid, 0, 0, COUNT, 0) == 0) {
+        fprintf(stderr, "indirect vadd returned zero blocks\n");
+        exit(EXIT_FAILURE);
+    }
+    csd_read(fd, out_id, 0, output, 4096);
+
+    for (int i = 0; i < COUNT; i++) {
+        int expected = input[i * 2] + input[i * 2 + 1];
+
+        if (output[i] != expected) {
+            fprintf(stderr, "indirect vadd mismatch at %d: got %d expected %d\n",
+                    i, output[i], expected);
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    csd_admin_activation(admin_fd, csf_id, 0);
+    csd_admin_unload_program(admin_fd, csf_id);
+    csd_admin_delete_mrs(admin_fd, rsid);
+    close(admin_fd);
+    csd_dealloc(fd, in_id);
+    csd_dealloc(fd, out_id);
+    csd_dealloc(fd, global_id);
+    printf("indirect vadd smoke passed\n");
+
+    free(input);
+    free(output);
+    free(global_mem);
+}
+
+static void run_benchmark_kernels(const char *dev, int fd, const char *vadd_so,
+                                  const char *kernels_so, uint32_t iterations)
+{
+    uint64_t start;
+    uint64_t end;
+
+    if (iterations == 0) {
+        fprintf(stderr, "benchmark-kernels requires non-zero iterations\n");
+        exit(EXIT_FAILURE);
+    }
+
+    start = monotonic_ns();
+    for (uint32_t i = 0; i < iterations; i++) {
+        run_so_smoke(dev, fd, vadd_so);
+    }
+    end = monotonic_ns();
+    printf("benchmark-kernel name=vadd iterations=%u avg_ns=%" PRIu64 "\n",
+           iterations, (end - start) / iterations);
+
+    start = monotonic_ns();
+    for (uint32_t i = 0; i < iterations; i++) {
+        run_original_so_smoke(dev, fd, kernels_so);
+    }
+    end = monotonic_ns();
+    printf("benchmark-kernel name=knn_sql_grep_lz4 iterations=%u avg_ns=%" PRIu64 "\n",
+           iterations, (end - start) / iterations);
+}
+
 static void run_original_so_smoke(const char *dev, int fd, const char *so_path)
 {
     int admin_fd = open_admin_from_namespace(dev);
@@ -772,7 +1220,7 @@ static void run_bench(int fd, uint32_t size, uint32_t iterations)
     fsync(fd);
     start = monotonic_ns();
     for (uint32_t i = 0; i < iterations; i++) {
-        csd_nvm_to_afdm(fd, id, 0, 0, (uint16_t)((size + 4095U) / 4096U - 1));
+        csd_nvm_to_afdm(fd, id, 0, 0, (uint16_t)((size + 511U) / 512U - 1));
     }
     end = monotonic_ns();
     printf("bench nvm_to_afdm bytes=%u iterations=%u avg_ns=%" PRIu64 "\n",
@@ -827,6 +1275,39 @@ int main(int argc, char **argv)
             jit = (uint8_t)parse_u64(argv[4], "jit");
         }
         run_ubpf_smoke(dev, fd, argv[3], jit ? 1 : 0);
+    } else if (!strcmp(op, "smoke-mrs")) {
+        if (argc != 4) {
+            usage(argv[0]);
+            return EXIT_FAILURE;
+        }
+        run_mrs_smoke(dev, fd, argv[3]);
+    } else if (!strcmp(op, "vadd-example")) {
+        if (argc != 4) {
+            usage(argv[0]);
+            return EXIT_FAILURE;
+        }
+        run_vadd_example(dev, fd, argv[3]);
+    } else if (!strcmp(op, "sync-breakdown")) {
+        if (argc != 6) {
+            usage(argv[0]);
+            return EXIT_FAILURE;
+        }
+        run_sync_breakdown(dev, fd, argv[3],
+                           (uint32_t)parse_u64(argv[4], "bytes"),
+                           (uint32_t)parse_u64(argv[5], "iterations"));
+    } else if (!strcmp(op, "indirect-vadd")) {
+        if (argc != 4) {
+            usage(argv[0]);
+            return EXIT_FAILURE;
+        }
+        run_indirect_vadd(dev, fd, argv[3]);
+    } else if (!strcmp(op, "benchmark-kernels")) {
+        if (argc != 6) {
+            usage(argv[0]);
+            return EXIT_FAILURE;
+        }
+        run_benchmark_kernels(dev, fd, argv[3], argv[4],
+                              (uint32_t)parse_u64(argv[5], "iterations"));
     } else if (!strcmp(op, "bench")) {
         if (argc != 5) {
             usage(argv[0]);
@@ -907,6 +1388,28 @@ int main(int argc, char **argv)
             return EXIT_FAILURE;
         }
         csd_admin_unload_program(fd, (uint16_t)parse_u64(argv[3], "pind"));
+    } else if (!strcmp(op, "admin-create-mrs")) {
+        struct csd_memory_range ranges[2];
+        uint16_t rsid;
+
+        if (argc != 5) {
+            usage(argv[0]);
+            return EXIT_FAILURE;
+        }
+
+        memset(ranges, 0, sizeof(ranges));
+        ranges[0].nsid = CSD_MR_AFDM_NSID;
+        ranges[0].sb = (uint32_t)parse_u64(argv[3], "out-afdm-id");
+        ranges[1].nsid = CSD_MR_AFDM_NSID;
+        ranges[1].sb = (uint32_t)parse_u64(argv[4], "in-afdm-id");
+        rsid = csd_admin_create_mrs(fd, ranges, 2);
+        printf("%" PRIu16 "\n", rsid);
+    } else if (!strcmp(op, "admin-delete-mrs")) {
+        if (argc != 4) {
+            usage(argv[0]);
+            return EXIT_FAILURE;
+        }
+        csd_admin_delete_mrs(fd, (uint16_t)parse_u64(argv[3], "rsid"));
     } else if (!strcmp(op, "exec")) {
         uint32_t runtime = 0;
         uint32_t group_id = 0;

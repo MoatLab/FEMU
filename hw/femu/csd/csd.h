@@ -16,6 +16,7 @@ enum FemuCsdIoCommands {
 };
 
 enum FemuCsdAdminCommands {
+    NVME_ADM_CMD_CSD_MRS_MGMT         = 0x21,
     NVME_ADM_CMD_CSD_COMPUTE_LOAD     = 0x22,
     NVME_ADM_CMD_CSD_COMPUTE_ACTIVATE = 0x23,
     NVME_ADM_CMD_CSD_COMPUTE_LOAD_DATA = 0x25,
@@ -222,5 +223,22 @@ typedef struct QEMU_PACKED NvmeCsdDeleteGroupCmd {
     uint32_t    id;
     uint32_t    rsvd11[5];
 } NvmeCsdDeleteGroupCmd;
+
+typedef struct QEMU_PACKED NvmeCsdMrsMgmtCmd {
+    uint8_t     opcode;
+    uint8_t     flags;
+    uint16_t    cid;
+    uint32_t    nsid;
+    uint32_t    rsvd[4];
+    uint64_t    prp1;
+    uint64_t    prp2;
+    uint16_t    sel:4;
+    uint16_t    rsvd10:12;
+    uint16_t    rsid;
+    uint8_t     numr;
+    uint8_t     rsvd11a;
+    uint16_t    rsvd11b;
+    uint32_t    rsvd12[4];
+} NvmeCsdMrsMgmtCmd;
 
 #endif

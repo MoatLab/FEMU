@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <string.h>
 #include "femu-csd-kernel.h"
 
 int64_t csd_vadd(struct femu_csd_args *args)
@@ -23,4 +24,39 @@ int64_t csd_vadd(struct femu_csd_args *args)
     }
 
     return count;
+}
+
+int64_t csd_vadd_indirect(struct femu_csd_args *args)
+{
+    int *output;
+    int *input;
+    int *global_mem;
+    long long count = args->cparam1;
+    int pos;
+    int start_loc;
+
+    if (args->numr < 3 || count < 0) {
+        return -1;
+    }
+
+    output = args->mr_addr[0];
+    input = args->mr_addr[1];
+    global_mem = args->mr_addr[2];
+    pos = global_mem[0];
+    start_loc = global_mem[1];
+
+    if (start_loc > 0 && pos > 0) {
+        memmove(output, input + start_loc, (pos - start_loc) * sizeof(int));
+        pos -= start_loc;
+        start_loc = 0;
+    }
+
+    for (long long i = 0; i < count; i++) {
+        output[pos++] = input[i * 2] + input[i * 2 + 1];
+    }
+
+    global_mem[1] = (pos / (512 / (int)sizeof(int))) * (512 / (int)sizeof(int));
+    global_mem[0] = pos;
+
+    return global_mem[1] / (512 / (int)sizeof(int));
 }

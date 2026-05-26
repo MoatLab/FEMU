@@ -45,6 +45,35 @@ range interface as the vadd test:
 sudo ./csd-passthru /dev/nvme0n1 smoke-so-all /home/<user>/FEMU/tests/femu-csd/csd-original-kernels.so
 ```
 
+FDMFS-free MRS is available through the original CEMU memory range set
+management command layout (`0x21`). The passthrough helper creates an MRS from
+AFDM-backed memory range descriptors and executes a CSF by `rsid`:
+
+```bash
+sudo ./csd-passthru /dev/nvme0n1 smoke-mrs /home/<user>/FEMU/tests/femu-csd/csd-vadd.so
+sudo ./csd-passthru /dev/nvme0n1 vadd-example /home/<user>/FEMU/tests/femu-csd/csd-vadd.so
+```
+
+The migrated sync-breakdown check measures NVM-to-AFDM copy, CSF execution, and
+AFDM read as separate stages:
+
+```bash
+sudo ./csd-passthru /dev/nvme0n1 sync-breakdown /home/<user>/FEMU/tests/femu-csd/csd-vadd.so 4096 16
+```
+
+The indirect vadd smoke keeps the original indirect CSF ABI shape and uses an
+AFDM-backed MRS instead of FDMFS files:
+
+```bash
+sudo ./csd-passthru /dev/nvme0n1 indirect-vadd /home/<user>/FEMU/tests/femu-csd/csd-vadd.so
+```
+
+A compact benchmark entry covers vadd plus the original kernel smoke set:
+
+```bash
+sudo ./csd-passthru /dev/nvme0n1 benchmark-kernels /home/<user>/FEMU/tests/femu-csd/csd-vadd.so /home/<user>/FEMU/tests/femu-csd/csd-original-kernels.so 1
+```
+
 The shared-library CSF ABI is:
 
 ```c
@@ -88,6 +117,8 @@ sudo ./csd-passthru /dev/nvme0 admin-load-ubpf 1 /host/path/csf.bpf.o csf_symbol
 sudo ./csd-passthru /dev/nvme0 admin-activate 1
 sudo ./csd-passthru /dev/nvme0 admin-deactivate 1
 sudo ./csd-passthru /dev/nvme0 admin-unload 1
+sudo ./csd-passthru /dev/nvme0 admin-create-mrs <out-afdm-id> <in-afdm-id>
+sudo ./csd-passthru /dev/nvme0 admin-delete-mrs <rsid>
 ```
 
 The tool assumes FEMU was started with CSD mode enabled, for example:

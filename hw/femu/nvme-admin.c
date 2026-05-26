@@ -1407,6 +1407,9 @@ static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     case NVME_ADM_CMD_SECURITY_RECV:
         return NVME_INVALID_OPCODE | NVME_DNR;
     default:
+        if (n->ext_ops.admin_cmd_cqe) {
+            return n->ext_ops.admin_cmd_cqe(n, cmd, cqe);
+        }
         if (n->ext_ops.admin_cmd) {
             return n->ext_ops.admin_cmd(n, cmd);
         }
@@ -1454,4 +1457,3 @@ void nvme_process_sq_admin(void *opaque)
         nvme_isr_notify_admin(cq);
     }
 }
-

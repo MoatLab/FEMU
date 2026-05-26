@@ -1559,6 +1559,7 @@ typedef struct FemuExtCtrlOps {
     uint16_t (*rw_check_req)(struct FemuCtrl *, NvmeCmd *, NvmeRequest *);
     int      (*start_ctrl)(struct FemuCtrl *);
     uint16_t (*admin_cmd)(struct FemuCtrl *, NvmeCmd *);
+    uint16_t (*admin_cmd_cqe)(struct FemuCtrl *, NvmeCmd *, NvmeCqe *);
     uint16_t (*io_cmd)(struct FemuCtrl *, NvmeNamespace *, NvmeCmd *, NvmeRequest *);
     uint16_t (*get_log)(struct FemuCtrl *, NvmeCmd *);
 } FemuExtCtrlOps;

@@ -47,15 +47,23 @@ typedef struct FemuCsdGroup {
     uint32_t deadline;
 } FemuCsdGroup;
 
+typedef struct FemuCsdMrs {
+    uint16_t rsid;
+    uint32_t numr;
+    NvmeCsdMemoryRange *ranges;
+} FemuCsdMrs;
+
 typedef struct FemuCsdState {
     CsdCtrlParams params;
     uint64_t fdm_capacity;
     uint64_t fdm_used;
     uint32_t next_afdm_id;
     uint32_t next_group_id;
+    uint32_t next_rsid;
     GHashTable *afdms;
     GHashTable *programs;
     GHashTable *groups;
+    GHashTable *mrs;
     QemuMutex lock;
 } FemuCsdState;
 
@@ -73,6 +81,7 @@ static void csd_check_size(void)
     QEMU_BUILD_BUG_ON(sizeof(NvmeCsdDeleteGroupCmd) != 64);
     QEMU_BUILD_BUG_ON(sizeof(NvmeCsdLoadProgramCmd) != 64);
     QEMU_BUILD_BUG_ON(sizeof(NvmeCsdProgramActivationCmd) != 64);
+    QEMU_BUILD_BUG_ON(sizeof(NvmeCsdMrsMgmtCmd) != 64);
 }
 
 static FemuCsdState *csd_state(FemuCtrl *n)
@@ -120,6 +129,18 @@ static void csd_program_free(gpointer opaque)
     csd_program_unload(program);
     g_free(program->data);
     g_free(program);
+}
+
+static void csd_mrs_free(gpointer opaque)
+{
+    FemuCsdMrs *mrs = opaque;
+
+    if (!mrs) {
+        return;
+    }
+
+    g_free(mrs->ranges);
+    g_free(mrs);
 }
 
 static void csd_init_ctrl_str(FemuCtrl *n)
@@ -175,12 +196,15 @@ static void csd_init(FemuCtrl *n, Error **errp)
     csd->fdm_capacity = n->csd_params.fdm_size_mb * MiB;
     csd->next_afdm_id = 1;
     csd->next_group_id = 1;
+    csd->next_rsid = 1;
     csd->afdms = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL,
                                        csd_afdm_free);
     csd->programs = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL,
                                           csd_program_free);
     csd->groups = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL,
                                         g_free);
+    csd->mrs = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL,
+                                     csd_mrs_free);
     qemu_mutex_init(&csd->lock);
     n->ext_ops.state = csd;
 
@@ -201,6 +225,7 @@ static void csd_exit(FemuCtrl *n)
     g_hash_table_destroy(csd->afdms);
     g_hash_table_destroy(csd->programs);
     g_hash_table_destroy(csd->groups);
+    g_hash_table_destroy(csd->mrs);
     qemu_mutex_destroy(&csd->lock);
     g_free(csd);
     n->ext_ops.state = NULL;
@@ -231,6 +256,15 @@ static FemuCsdGroup *csd_get_group_locked(FemuCsdState *csd, uint32_t id)
     }
 
     return g_hash_table_lookup(csd->groups, GUINT_TO_POINTER(id));
+}
+
+static FemuCsdMrs *csd_get_mrs_locked(FemuCsdState *csd, uint32_t id)
+{
+    if (id == 0) {
+        return NULL;
+    }
+
+    return g_hash_table_lookup(csd->mrs, GUINT_TO_POINTER(id));
 }
 
 static uint16_t csd_check_afdm_range(FemuCsdAfdm *afdm, uint64_t offset,
@@ -530,6 +564,79 @@ static uint16_t csd_compute_activate(FemuCtrl *n, NvmeCmd *cmd)
     return NVME_SUCCESS;
 }
 
+static uint16_t csd_mrs_mgmt(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
+{
+    FemuCsdState *csd = csd_state(n);
+    NvmeCsdMrsMgmtCmd *manage = (NvmeCsdMrsMgmtCmd *)cmd;
+    uint16_t rsid = le16_to_cpu(manage->rsid);
+    uint32_t sel = manage->sel;
+    uint32_t numr = manage->numr;
+    uint64_t prp1 = le64_to_cpu(manage->prp1);
+    uint64_t prp2 = le64_to_cpu(manage->prp2);
+    NvmeCsdMemoryRange *ranges = NULL;
+    FemuCsdMrs *mrs;
+    uint32_t id;
+    uint16_t status = NVME_SUCCESS;
+
+    switch (sel) {
+    case 0:
+        if (rsid != 0 || numr == 0 ||
+            numr > CSD_EXEC_DATA_MAX / sizeof(NvmeCsdMemoryRange)) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+
+        ranges = g_new0(NvmeCsdMemoryRange, numr);
+        status = dma_write_prp(n, (uint8_t *)ranges,
+                               numr * sizeof(*ranges), prp1, prp2);
+        if (status) {
+            g_free(ranges);
+            return status;
+        }
+
+        qemu_mutex_lock(&csd->lock);
+        id = csd->next_rsid++;
+        if (id == 0) {
+            csd->next_rsid = 1;
+            id = csd->next_rsid++;
+        }
+        while (g_hash_table_contains(csd->mrs, GUINT_TO_POINTER(id))) {
+            id = csd->next_rsid++;
+            if (id == 0) {
+                csd->next_rsid = 1;
+                id = csd->next_rsid++;
+            }
+        }
+
+        mrs = g_new0(FemuCsdMrs, 1);
+        mrs->rsid = id;
+        mrs->numr = numr;
+        mrs->ranges = ranges;
+        g_hash_table_insert(csd->mrs, GUINT_TO_POINTER(id), mrs);
+        qemu_mutex_unlock(&csd->lock);
+
+        cqe->n.result = id;
+        return NVME_SUCCESS;
+
+    case 1:
+        if (rsid == 0) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+
+        qemu_mutex_lock(&csd->lock);
+        if (!csd_get_mrs_locked(csd, rsid)) {
+            qemu_mutex_unlock(&csd->lock);
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        g_hash_table_remove(csd->mrs, GUINT_TO_POINTER((uint32_t)rsid));
+        qemu_mutex_unlock(&csd->lock);
+        cqe->n.result = 0;
+        return NVME_SUCCESS;
+
+    default:
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+}
+
 static uint16_t csd_build_exec_args_locked(FemuCsdState *csd,
                                            NvmeCsdMemoryRange *ranges,
                                            uint32_t numr,
@@ -595,6 +702,7 @@ static uint16_t csd_exec(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     uint64_t prp1 = le64_to_cpu(exec->prp1);
     uint64_t prp2 = le64_to_cpu(exec->prp2);
     FemuCsdProgram *program;
+    FemuCsdMrs *mrs = NULL;
     uint64_t copy_size;
     uint8_t *data = NULL;
     NvmeCsdMemoryRange *ranges = NULL;
@@ -608,21 +716,26 @@ static uint16_t csd_exec(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         dlen = numr * sizeof(NvmeCsdMemoryRange);
     }
 
-    if (pind == 0 || rsid != 0 || numr == 0 ||
+    if (pind == 0 || (rsid == 0 && numr == 0) ||
         numr > CSD_EXEC_DATA_MAX / sizeof(NvmeCsdMemoryRange)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    if (rsid != 0 && numr != 0) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     if (dlen < numr * sizeof(NvmeCsdMemoryRange) || dlen > CSD_EXEC_DATA_MAX) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    data = g_malloc0(dlen);
-    status = dma_write_prp(n, data, dlen, prp1, prp2);
-    if (status) {
-        g_free(data);
-        return status;
+    if (numr) {
+        data = g_malloc0(dlen);
+        status = dma_write_prp(n, data, dlen, prp1, prp2);
+        if (status) {
+            g_free(data);
+            return status;
+        }
+        ranges = (NvmeCsdMemoryRange *)data;
     }
-    ranges = (NvmeCsdMemoryRange *)data;
 
     qemu_mutex_lock(&csd->lock);
     program = csd_get_program_locked(csd, pind);
@@ -647,6 +760,18 @@ static uint16_t csd_exec(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         runtime = program->runtime;
     }
 
+    if (rsid) {
+        mrs = csd_get_mrs_locked(csd, rsid);
+        if (!mrs) {
+            qemu_mutex_unlock(&csd->lock);
+            status = NVME_INVALID_FIELD | NVME_DNR;
+            goto out;
+        }
+        ranges = mrs->ranges;
+        numr = mrs->numr;
+        dlen = 0;
+    }
+
     status = csd_build_exec_args_locked(csd, ranges, numr, &args,
                                         &mr_addr, &mr_len);
     if (status) {
@@ -655,7 +780,7 @@ static uint16_t csd_exec(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     }
     args.cparam1 = cparam1;
     args.cparam2 = cparam2;
-    args.data_buffer = dlen > numr * sizeof(NvmeCsdMemoryRange) ?
+    args.data_buffer = data && dlen > numr * sizeof(NvmeCsdMemoryRange) ?
                        data + numr * sizeof(NvmeCsdMemoryRange) : NULL;
     args.buffer_len = args.data_buffer ?
                       dlen - numr * sizeof(NvmeCsdMemoryRange) : 0;
@@ -1010,9 +1135,11 @@ static uint16_t csd_io_cmd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
 }
 
-static uint16_t csd_admin_cmd(FemuCtrl *n, NvmeCmd *cmd)
+static uint16_t csd_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
 {
     switch (cmd->opcode) {
+    case NVME_ADM_CMD_CSD_MRS_MGMT:
+        return csd_mrs_mgmt(n, cmd, cqe);
     case NVME_ADM_CMD_CSD_COMPUTE_LOAD:
     case NVME_ADM_CMD_CSD_COMPUTE_LOAD_DATA:
         return csd_compute_load(n, cmd);
@@ -1031,7 +1158,8 @@ int nvme_register_csd(FemuCtrl *n)
         .exit             = csd_exit,
         .rw_check_req     = NULL,
         .start_ctrl       = NULL,
-        .admin_cmd        = csd_admin_cmd,
+        .admin_cmd        = NULL,
+        .admin_cmd_cqe    = csd_admin_cmd,
         .io_cmd           = csd_io_cmd,
         .get_log          = NULL,
     };
