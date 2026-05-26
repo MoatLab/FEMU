@@ -276,6 +276,43 @@ static uint16_t csd_parse_program(FemuCsdProgram *program, const char **path,
     return NVME_SUCCESS;
 }
 
+static uint16_t csd_check_nvm_ftl_range(FemuCtrl *n, uint64_t slba,
+                                        uint64_t nlb, uint64_t *mapped_pages)
+{
+    struct ssd *ssd = n->ssd;
+    struct ssdparams *spp;
+    uint64_t start_lpn;
+    uint64_t end_lpn;
+
+    if (!ssd || !ssd->maptbl) {
+        return NVME_INTERNAL_DEV_ERROR | NVME_DNR;
+    }
+
+    spp = &ssd->sp;
+    if (spp->secs_per_pg <= 0 || spp->tt_pgs == 0 || nlb == 0) {
+        return NVME_INTERNAL_DEV_ERROR | NVME_DNR;
+    }
+
+    start_lpn = slba / spp->secs_per_pg;
+    if (slba > UINT64_MAX - nlb + 1) {
+        return NVME_LBA_RANGE | NVME_DNR;
+    }
+
+    end_lpn = (slba + nlb - 1) / spp->secs_per_pg;
+    if (end_lpn >= spp->tt_pgs) {
+        return NVME_LBA_RANGE | NVME_DNR;
+    }
+
+    *mapped_pages = 0;
+    for (uint64_t lpn = start_lpn; lpn <= end_lpn; lpn++) {
+        if (ssd->maptbl[lpn].ppa != UNMAPPED_PPA) {
+            (*mapped_pages)++;
+        }
+    }
+
+    return NVME_SUCCESS;
+}
+
 static uint16_t csd_load_shared_lib(FemuCsdProgram *program)
 {
     const char *path;
@@ -833,12 +870,19 @@ static uint16_t csd_nvm_to_afdm(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t nlb = le16_to_cpu(copy->nlb) + 1;
     uint64_t size = nlb << data_shift;
     uint64_t nvm_offset = slba << data_shift;
+    uint64_t mapped_pages;
     FemuCsdAfdm *afdm;
     uint16_t status;
 
-    if (slba + nlb > le64_to_cpu(ns->id_ns.nsze) ||
+    if (slba > le64_to_cpu(ns->id_ns.nsze) ||
+        nlb > le64_to_cpu(ns->id_ns.nsze) - slba ||
         nvm_offset > n->mbe->size || size > n->mbe->size - nvm_offset) {
         return NVME_LBA_RANGE | NVME_DNR;
+    }
+
+    status = csd_check_nvm_ftl_range(n, slba, nlb, &mapped_pages);
+    if (status) {
+        return status;
     }
 
     qemu_mutex_lock(&csd->lock);
@@ -855,6 +899,10 @@ static uint16_t csd_nvm_to_afdm(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
 
     req->cqe.n.result = size;
+    if (mapped_pages) {
+        req->reqlat += n->ssd->sp.pg_rd_lat;
+        req->expire_time += n->ssd->sp.pg_rd_lat;
+    }
     return NVME_SUCCESS;
 }
 
