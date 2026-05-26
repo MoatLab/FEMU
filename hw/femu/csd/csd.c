@@ -11,6 +11,8 @@
 
 typedef int64_t (*FemuCsdSharedLibFn)(FemuCsdArgs *args);
 
+#define CSD_EXEC_DATA_MAX (1U << 20)
+
 typedef struct FemuCsdAfdm {
     uint32_t id;
     uint64_t size;
@@ -63,6 +65,7 @@ static void csd_check_size(void)
     QEMU_BUILD_BUG_ON(sizeof(NvmeCsdDeallocAfdmCmd) != 64);
     QEMU_BUILD_BUG_ON(sizeof(NvmeCsdNvmToAfdmCmd) != 64);
     QEMU_BUILD_BUG_ON(sizeof(NvmeCsdExecCmd) != 64);
+    QEMU_BUILD_BUG_ON(sizeof(NvmeCsdMemoryRange) != 32);
     QEMU_BUILD_BUG_ON(sizeof(NvmeCsdReadAfdmCmd) != 64);
     QEMU_BUILD_BUG_ON(sizeof(NvmeCsdWriteAfdmCmd) != 64);
     QEMU_BUILD_BUG_ON(sizeof(NvmeCsdCreateGroupCmd) != 64);
@@ -527,90 +530,157 @@ static uint16_t csd_compute_activate(FemuCtrl *n, NvmeCmd *cmd)
     return NVME_SUCCESS;
 }
 
+static uint16_t csd_build_exec_args_locked(FemuCsdState *csd,
+                                           NvmeCsdMemoryRange *ranges,
+                                           uint32_t numr,
+                                           FemuCsdArgs *args,
+                                           void ***mr_addrp,
+                                           long long **mr_lenp)
+{
+    void **mr_addr = g_new0(void *, numr);
+    long long *mr_len = g_new0(long long, numr);
+
+    for (uint32_t i = 0; i < numr; i++) {
+        uint32_t nsid = le32_to_cpu(ranges[i].nsid);
+        uint32_t len = le32_to_cpu(ranges[i].len);
+        uint64_t sb = le64_to_cpu(ranges[i].sb);
+        FemuCsdAfdm *afdm;
+
+        if (nsid != NVME_CSD_MR_AFDM_NSID) {
+            g_free(mr_addr);
+            g_free(mr_len);
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+
+        afdm = csd_get_afdm_locked(csd, sb);
+        if (!afdm) {
+            g_free(mr_addr);
+            g_free(mr_len);
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        if (len == 0) {
+            len = afdm->size > UINT32_MAX ? UINT32_MAX : afdm->size;
+        }
+        if (len > afdm->size) {
+            g_free(mr_addr);
+            g_free(mr_len);
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+
+        mr_addr[i] = afdm->data;
+        mr_len[i] = len;
+    }
+
+    args->numr = numr;
+    args->mr_addr = mr_addr;
+    args->mr_len = mr_len;
+    *mr_addrp = mr_addr;
+    *mr_lenp = mr_len;
+
+    return NVME_SUCCESS;
+}
+
 static uint16_t csd_exec(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 {
     FemuCsdState *csd = csd_state(n);
     NvmeCsdExecCmd *exec = (NvmeCsdExecCmd *)cmd;
-    uint32_t csf_id = le32_to_cpu(exec->csf_id);
-    uint32_t in_id = le32_to_cpu(exec->in_afdm_id);
-    uint32_t out_id = le32_to_cpu(exec->out_afdm_id);
-    uint32_t group_id = le32_to_cpu(exec->group);
-    uint32_t cparam1 = le32_to_cpu(exec->cparam1);
+    uint16_t pind = le16_to_cpu(exec->pind);
+    uint16_t rsid = le16_to_cpu(exec->rsid);
+    uint32_t numr = le32_to_cpu(exec->numr);
+    uint32_t dlen = le32_to_cpu(exec->dlen);
+    uint64_t cparam1 = le64_to_cpu(exec->cparam1);
+    uint64_t cparam2 = le64_to_cpu(exec->cparam2);
+    uint32_t group_id = exec->group;
     uint32_t runtime = le32_to_cpu(exec->runtime);
+    uint64_t prp1 = le64_to_cpu(exec->prp1);
+    uint64_t prp2 = le64_to_cpu(exec->prp2);
     FemuCsdProgram *program;
-    FemuCsdAfdm *in = NULL;
-    FemuCsdAfdm *out = NULL;
     uint64_t copy_size;
-    void *mr_addr[2] = { 0 };
-    long long mr_len[2] = { 0 };
+    uint8_t *data = NULL;
+    NvmeCsdMemoryRange *ranges = NULL;
+    void **mr_addr = NULL;
+    long long *mr_len = NULL;
     FemuCsdArgs args = { 0 };
     int64_t result = 0;
     uint16_t status = NVME_SUCCESS;
 
+    if (dlen == 0 && numr > 0) {
+        dlen = numr * sizeof(NvmeCsdMemoryRange);
+    }
+
+    if (pind == 0 || rsid != 0 || numr == 0 ||
+        numr > CSD_EXEC_DATA_MAX / sizeof(NvmeCsdMemoryRange)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    if (dlen < numr * sizeof(NvmeCsdMemoryRange) || dlen > CSD_EXEC_DATA_MAX) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    data = g_malloc0(dlen);
+    status = dma_write_prp(n, data, dlen, prp1, prp2);
+    if (status) {
+        g_free(data);
+        return status;
+    }
+    ranges = (NvmeCsdMemoryRange *)data;
+
     qemu_mutex_lock(&csd->lock);
-    program = csd_get_program_locked(csd, csf_id);
+    program = csd_get_program_locked(csd, pind);
     if (!program) {
         qemu_mutex_unlock(&csd->lock);
-        return NVME_INVALID_FIELD | NVME_DNR;
+        status = NVME_INVALID_FIELD | NVME_DNR;
+        goto out;
     }
     if (!program->active) {
         qemu_mutex_unlock(&csd->lock);
-        return NVME_INVALID_FIELD | NVME_DNR;
+        status = NVME_INVALID_FIELD | NVME_DNR;
+        goto out;
     }
 
     if (group_id != 0 && !csd_get_group_locked(csd, group_id)) {
         qemu_mutex_unlock(&csd->lock);
-        return NVME_INVALID_FIELD | NVME_DNR;
-    }
-
-    in = in_id ? csd_get_afdm_locked(csd, in_id) : NULL;
-    out = out_id ? csd_get_afdm_locked(csd, out_id) : NULL;
-    if ((in_id && !in) || (out_id && !out)) {
-        qemu_mutex_unlock(&csd->lock);
-        return NVME_INVALID_FIELD | NVME_DNR;
+        status = NVME_INVALID_FIELD | NVME_DNR;
+        goto out;
     }
 
     if (runtime == 0) {
         runtime = program->runtime;
     }
 
+    status = csd_build_exec_args_locked(csd, ranges, numr, &args,
+                                        &mr_addr, &mr_len);
+    if (status) {
+        qemu_mutex_unlock(&csd->lock);
+        goto out;
+    }
+    args.cparam1 = cparam1;
+    args.cparam2 = cparam2;
+    args.data_buffer = dlen > numr * sizeof(NvmeCsdMemoryRange) ?
+                       data + numr * sizeof(NvmeCsdMemoryRange) : NULL;
+    args.buffer_len = args.data_buffer ?
+                      dlen - numr * sizeof(NvmeCsdMemoryRange) : 0;
+
     switch (program->type) {
     case NVME_CSD_CSF_TYPE_PHANTOM:
-        if (in && out) {
-            copy_size = MIN(in->size, out->size);
-            memcpy(out->data, in->data, copy_size);
-            result = copy_size > UINT32_MAX ? UINT32_MAX : copy_size;
+        if (args.numr >= 2) {
+            copy_size = MIN(args.mr_len[0], args.mr_len[1]);
+            memcpy(args.mr_addr[0], args.mr_addr[1], copy_size);
+            result = copy_size > INT64_MAX ? INT64_MAX : copy_size;
         }
         break;
     case NVME_CSD_CSF_TYPE_SHARED_LIB:
-        if (!program->shared_lib_fn || !in || !out) {
+        if (!program->shared_lib_fn) {
             status = NVME_INVALID_FIELD | NVME_DNR;
             break;
         }
-        mr_addr[0] = out->data;
-        mr_addr[1] = in->data;
-        mr_len[0] = out->size;
-        mr_len[1] = in->size;
-        args.numr = 2;
-        args.mr_addr = mr_addr;
-        args.mr_len = mr_len;
-        args.cparam1 = cparam1;
         result = program->shared_lib_fn(&args);
         break;
     case NVME_CSD_CSF_TYPE_EBPF:
 #ifdef CONFIG_FEMU_CSD_UBPF
-        if (!program->ubpf_vm || !in || !out) {
+        if (!program->ubpf_vm) {
             status = NVME_INVALID_FIELD | NVME_DNR;
             break;
         }
-        mr_addr[0] = out->data;
-        mr_addr[1] = in->data;
-        mr_len[0] = out->size;
-        mr_len[1] = in->size;
-        args.numr = 2;
-        args.mr_addr = mr_addr;
-        args.mr_len = mr_len;
-        args.cparam1 = cparam1;
         if (program->ubpf_jit_fn) {
             result = program->ubpf_jit_fn(&args, sizeof(args));
         } else {
@@ -634,10 +704,12 @@ static uint16_t csd_exec(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     if (!status) {
         req->cqe.n.result = result > UINT32_MAX ? UINT32_MAX : result;
     }
+    g_free(mr_addr);
+    g_free(mr_len);
     qemu_mutex_unlock(&csd->lock);
 
     if (status) {
-        return status;
+        goto out;
     }
 
     if (runtime) {
@@ -645,7 +717,9 @@ static uint16_t csd_exec(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         req->expire_time += runtime;
     }
 
-    return NVME_SUCCESS;
+out:
+    g_free(data);
+    return status;
 }
 
 static uint16_t csd_normalize_prio(int8_t *prio)
@@ -940,6 +1014,7 @@ static uint16_t csd_admin_cmd(FemuCtrl *n, NvmeCmd *cmd)
 {
     switch (cmd->opcode) {
     case NVME_ADM_CMD_CSD_COMPUTE_LOAD:
+    case NVME_ADM_CMD_CSD_COMPUTE_LOAD_DATA:
         return csd_compute_load(n, cmd);
     case NVME_ADM_CMD_CSD_COMPUTE_ACTIVATE:
         return csd_compute_activate(n, cmd);

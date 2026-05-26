@@ -7,7 +7,7 @@ enum FemuCsdIoCommands {
     NVME_CMD_CSD_ALLOC_FDM      = 0xb0,
     NVME_CMD_CSD_DEALLOC_AFDM   = 0xc0,
     NVME_CMD_CSD_NVM_TO_AFDM    = 0xd0,
-    NVME_CMD_CSD_EXEC           = 0xe0,
+    NVME_CMD_CSD_EXEC           = 0xe1,
     NVME_CMD_CSD_READ_AFDM      = 0xf2,
     NVME_CMD_CSD_WRITE_AFDM     = 0xf5,
     NVME_CMD_CSD_CREATE_GROUP   = 0xf6,
@@ -18,7 +18,10 @@ enum FemuCsdIoCommands {
 enum FemuCsdAdminCommands {
     NVME_ADM_CMD_CSD_COMPUTE_LOAD     = 0x22,
     NVME_ADM_CMD_CSD_COMPUTE_ACTIVATE = 0x23,
+    NVME_ADM_CMD_CSD_COMPUTE_LOAD_DATA = 0x25,
 };
+
+#define NVME_CSD_MR_AFDM_NSID 0
 
 enum FemuCsdFdmType {
     NVME_CSD_FDM_TYPE_HOST = 0,
@@ -116,16 +119,26 @@ typedef struct QEMU_PACKED NvmeCsdExecCmd {
     uint8_t     flags;
     uint16_t    cid;
     uint32_t    nsid;
-    uint64_t    rsvd2[2];
+    uint16_t    pind;
+    uint16_t    rsid;
+    uint32_t    numr;
+    uint32_t    dlen;
+    uint32_t    rsvd4;
     uint64_t    prp1;
     uint64_t    prp2;
-    uint32_t    csf_id;
-    uint32_t    in_afdm_id;
-    uint32_t    out_afdm_id;
-    uint32_t    group;
-    uint32_t    cparam1;
+    uint64_t    cparam1;
+    uint64_t    cparam2;
+    uint32_t    group:8;
+    uint32_t    chunk_nlb:24;
     uint32_t    runtime;
 } NvmeCsdExecCmd;
+
+typedef struct QEMU_PACKED NvmeCsdMemoryRange {
+    uint32_t    nsid;
+    uint32_t    len;
+    uint64_t    sb;
+    uint64_t    rsvd[2];
+} NvmeCsdMemoryRange;
 
 typedef struct FemuCsdArgs {
     int numr;

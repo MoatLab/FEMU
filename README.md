@@ -385,13 +385,18 @@ nr_thread=4            # Number of functional simulation threads
 time_slice=200000      # Scheduler time slice (ns)
 context_switch_time=200 # Context switch time (ns)
 csf_runtime_scale=3    # Runtime scaling factor
+pg_rd_lat=40000        # NAND page read latency (ns), used by NVM-to-AFDM
+pg_wr_lat=200000       # NAND page program latency (ns)
+blk_er_lat=2000000     # NAND block erase latency (ns)
+ch_xfer_lat=0          # Channel transfer latency (ns)
 ```
 
 **Current Scope:**
 - Normal NVMe read/write through the device-side BBSSD FTL path in CSD mode
 - Vendor commands for AFDM allocation, read/write, NVM-to-AFDM copy
 - Phantom and shared-library CSF load/execute path using the original CEMU
-  lifecycle and `path\0symbol\0` program descriptor format
+  lifecycle, `path\0symbol\0` program descriptor format, and program execute
+  fields (`pind`, `numr`, `dlen`, `cparam1`, `cparam2`, `group`, `runtime`)
 - CEMU-style admin commands for CSF load/unload and activate/deactivate
 - Optional uBPF CSF support via `./femu-compile.sh --enable-csd-ubpf`
 - Group/QoS command metadata

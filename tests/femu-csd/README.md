@@ -36,14 +36,28 @@ inside that descriptor must be visible to the host QEMU process:
 sudo ./csd-passthru /dev/nvme0n1 smoke-so /home/<user>/FEMU/tests/femu-csd/csd-vadd.so
 ```
 
+`make` also builds `csd-original-kernels.so`, which contains small
+shared-library ports of the original CEMU `knn`, `sql`, and `grep` kernels.
+These tests exercise the same CSD program lifecycle and inline memory range
+interface as the vadd test:
+
+```bash
+sudo ./csd-passthru /dev/nvme0n1 smoke-so-all /home/<user>/FEMU/tests/femu-csd/csd-original-kernels.so
+```
+
 The shared-library CSF ABI is:
 
 ```c
 int64_t kernel(struct femu_csd_args *args);
 ```
 
-For the direct AFDM execution path, `args->mr_addr[0]` is the output AFDM and
-`args->mr_addr[1]` is the input AFDM.
+The execute command uses a CEMU-style program execute command body:
+`pind`, `numr`, `dlen`, `cparam1`, `cparam2`, `group`, and `runtime` are sent
+in the command. Because this lightweight test path intentionally avoids MRS and
+FDMFS, it sends inline memory ranges in the PRP data buffer. In those test
+ranges, `nsid=0` means AFDM, `sb` is the AFDM id, and `len=0` means the full
+AFDM allocation. The CSF ABI then sees `args->mr_addr[0]` as the output AFDM
+and `args->mr_addr[1]` as the input AFDM.
 
 Other useful command-level checks:
 
@@ -51,10 +65,16 @@ Other useful command-level checks:
 sudo ./csd-passthru /dev/nvme0n1 alloc 4096
 sudo ./csd-passthru /dev/nvme0n1 create-group 5 0 0
 sudo ./csd-passthru /dev/nvme0n1 set-qos <group-id> 6 0 0
-sudo ./csd-passthru /dev/nvme0n1 exec <csf-id> <in-afdm-id> <out-afdm-id> 0 <group-id> <cparam1>
+sudo ./csd-passthru /dev/nvme0n1 exec <pind> <in-afdm-id> <out-afdm-id> 0 <group-id> <cparam1> <cparam2>
 sudo ./csd-passthru /dev/nvme0n1 delete-group <group-id>
 sudo ./csd-passthru /dev/nvme0n1 nvm-to-afdm <afdm-id> 0 0 0
+sudo ./csd-passthru /dev/nvme0n1 bench 4096 32
+sudo ./csd-passthru /dev/nvme0n1 bench 65536 16
 ```
+
+The `bench` command reports wall-clock average latency for AFDM write, AFDM
+read, and NVM-to-AFDM copy. It is intended as a regression check for the CSD
+command path, not a final paper-level benchmark harness.
 
 FEMU CSD also accepts the original CEMU program lifecycle admin command
 layouts for load/unload (`0x22`) and activate/deactivate (`0x23`). The
@@ -87,3 +107,7 @@ is optional because it depends on an external `ubpf` library. Build FEMU with:
 ```bash
 ./femu-compile.sh --enable-csd-ubpf
 ```
+
+The original CEMU LZ4 and uBPF tests are not part of the default smoke suite:
+LZ4 requires an additional host dependency, and uBPF requires FEMU to be built
+with `--enable-csd-ubpf`.
