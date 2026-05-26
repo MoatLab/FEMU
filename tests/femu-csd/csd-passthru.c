@@ -75,6 +75,7 @@ static void usage(const char *prog)
             "  %s /dev/nvmeXnY exec <pind> <in-afdm-id> <out-afdm-id> [runtime-ns] [group-id] [cparam1] [cparam2]\n"
             "  %s /dev/nvmeXnY smoke-so <host-visible-so-path>\n"
             "  %s /dev/nvmeXnY smoke-so-all <host-visible-kernels-so-path>\n"
+            "  %s /dev/nvmeXnY smoke-ubpf <host-visible-bpf-elf-path> [jit:0|1]\n"
             "  %s /dev/nvmeXnY bench <bytes> <iterations>\n"
             "  %s /dev/nvmeX admin-load-so <pind> <host-visible-so-path> <symbol> [runtime-ns]\n"
             "  %s /dev/nvmeX admin-load-ubpf <pind> <host-visible-elf-path> <symbol> [jit:0|1] [runtime-ns]\n"
@@ -89,6 +90,7 @@ static void usage(const char *prog)
             "  %s /dev/nvmeXnY read <id> <offset> <bytes>\n"
             "  %s /dev/nvmeXnY nvm-to-afdm <id> <offset> <slba> <nlb>\n",
             prog, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog,
+            prog,
             prog, prog, prog, prog, prog, prog, prog, prog);
 }
 
@@ -548,6 +550,63 @@ static void run_so_smoke(const char *dev, int fd, const char *so_path)
     free(output);
 }
 
+static void run_ubpf_smoke(const char *dev, int fd, const char *elf_path,
+                           uint8_t jit)
+{
+    enum { COUNT = 1024 };
+    int *input = NULL;
+    int *output = NULL;
+    uint32_t in_id;
+    uint32_t out_id;
+    uint16_t csf_id = 5;
+    int admin_fd;
+
+    if (posix_memalign((void **)&input, 4096, 8192) ||
+        posix_memalign((void **)&output, 4096, 4096)) {
+        perror("posix_memalign");
+        exit(EXIT_FAILURE);
+    }
+
+    for (int i = 0; i < COUNT; i++) {
+        input[i * 2] = i;
+        input[i * 2 + 1] = i * 3;
+        output[i] = 0;
+    }
+
+    in_id = csd_alloc(fd, 8192);
+    out_id = csd_alloc(fd, 4096);
+    csd_write(fd, in_id, 0, input, 8192);
+    csd_write(fd, out_id, 0, output, 4096);
+
+    admin_fd = open_admin_from_namespace(dev);
+    csd_admin_load_program(admin_fd, csf_id, CSD_CSF_TYPE_EBPF,
+                           elf_path, "csd_vadd_bpf", jit, 0);
+    csd_admin_activation(admin_fd, csf_id, 1);
+    printf("loaded uBPF CSF id=%" PRIu16 " jit=%u\n", csf_id, jit);
+    csd_exec(fd, csf_id, in_id, out_id, 0, 0, COUNT, 0);
+    csd_read(fd, out_id, 0, output, 4096);
+
+    for (int i = 0; i < COUNT; i++) {
+        int expected = i + i * 3;
+
+        if (output[i] != expected) {
+            fprintf(stderr, "uBPF smoke mismatch at %d: got %d expected %d\n",
+                    i, output[i], expected);
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    csd_dealloc(fd, in_id);
+    csd_dealloc(fd, out_id);
+    csd_admin_activation(admin_fd, csf_id, 0);
+    csd_admin_unload_program(admin_fd, csf_id);
+    close(admin_fd);
+    printf("uBPF smoke passed\n");
+
+    free(input);
+    free(output);
+}
+
 static void run_original_so_smoke(const char *dev, int fd, const char *so_path)
 {
     int admin_fd = open_admin_from_namespace(dev);
@@ -642,6 +701,25 @@ static void run_original_so_smoke(const char *dev, int fd, const char *so_path)
     csd_dealloc(fd, in_id);
     csd_dealloc(fd, pattern_id);
     printf("grep shared-library smoke passed\n");
+
+    memset(input, 'L', 4096);
+    memset(output, 0, 65536);
+    in_id = csd_alloc(fd, 4096);
+    out_id = csd_alloc(fd, 8192);
+    csd_write(fd, in_id, 0, input, 4096);
+    csd_write(fd, out_id, 0, output, 8192);
+    csd_admin_load_program(admin_fd, 6, CSD_CSF_TYPE_SHARED_LIB,
+                           so_path, "csd_lz4", 0, 0);
+    csd_admin_activation(admin_fd, 6, 1);
+    if (csd_exec_ranges(fd, 6, in_id, out_id, 0, 0, 0, 0) == 0) {
+        fprintf(stderr, "lz4 smoke unexpected result\n");
+        exit(EXIT_FAILURE);
+    }
+    csd_admin_activation(admin_fd, 6, 0);
+    csd_admin_unload_program(admin_fd, 6);
+    csd_dealloc(fd, in_id);
+    csd_dealloc(fd, out_id);
+    printf("lz4 shared-library smoke passed\n");
 
     close(admin_fd);
     free(input);
@@ -738,6 +816,17 @@ int main(int argc, char **argv)
             return EXIT_FAILURE;
         }
         run_original_so_smoke(dev, fd, argv[3]);
+    } else if (!strcmp(op, "smoke-ubpf")) {
+        uint8_t jit = 0;
+
+        if (argc < 4 || argc > 5) {
+            usage(argv[0]);
+            return EXIT_FAILURE;
+        }
+        if (argc == 5) {
+            jit = (uint8_t)parse_u64(argv[4], "jit");
+        }
+        run_ubpf_smoke(dev, fd, argv[3], jit ? 1 : 0);
     } else if (!strcmp(op, "bench")) {
         if (argc != 5) {
             usage(argv[0]);

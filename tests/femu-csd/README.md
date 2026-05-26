@@ -37,9 +37,9 @@ sudo ./csd-passthru /dev/nvme0n1 smoke-so /home/<user>/FEMU/tests/femu-csd/csd-v
 ```
 
 `make` also builds `csd-original-kernels.so`, which contains small
-shared-library ports of the original CEMU `knn`, `sql`, and `grep` kernels.
-These tests exercise the same CSD program lifecycle and inline memory range
-interface as the vadd test:
+shared-library ports of the original CEMU `knn`, `sql`, `grep`, and `lz4`
+kernels. These tests exercise the same CSD program lifecycle and inline memory
+range interface as the vadd test:
 
 ```bash
 sudo ./csd-passthru /dev/nvme0n1 smoke-so-all /home/<user>/FEMU/tests/femu-csd/csd-original-kernels.so
@@ -102,12 +102,24 @@ requests; the passthrough commands validate the additional computational
 storage interface.
 
 Shared-library CSF support is enabled in the default FEMU build. uBPF support
-is optional because it depends on an external `ubpf` library. Build FEMU with:
+is optional because it depends on an external `ubpf` library. If `ubpf` is
+installed through pkg-config, build FEMU with:
 
 ```bash
 ./femu-compile.sh --enable-csd-ubpf
 ```
 
-The original CEMU LZ4 and uBPF tests are not part of the default smoke suite:
-LZ4 requires an additional host dependency, and uBPF requires FEMU to be built
-with `--enable-csd-ubpf`.
+If you use the `ubpf-cemu` source tree directly, pass its path explicitly:
+
+```bash
+./femu-compile.sh --enable-csd-ubpf=/home/<user>/CEMU-FEMU/ubpf-cemu
+```
+
+The guest helper does not build BPF objects by default. Build the BPF test
+program on the host or in a guest with Clang BPF support:
+
+```bash
+make bpf
+sudo ./csd-passthru /dev/nvme0n1 smoke-ubpf /host/path/csd-vadd.bpf.o 0
+sudo ./csd-passthru /dev/nvme0n1 smoke-ubpf /host/path/csd-vadd.bpf.o 1
+```

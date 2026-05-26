@@ -373,7 +373,7 @@ static uint16_t csd_load_ubpf(FemuCsdProgram *program, bool jit)
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    if (ubpf_load_elf(program->ubpf_vm, elf, elf_size, symbol, &errmsg) < 0) {
+    if (ubpf_load_elf_ex(program->ubpf_vm, elf, elf_size, symbol, &errmsg) < 0) {
         femu_err("CSD: failed to load uBPF ELF %s:%s: %s\n", path, symbol,
                  errmsg ? errmsg : "unknown error");
         free(errmsg);
@@ -682,11 +682,11 @@ static uint16_t csd_exec(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
             break;
         }
         if (program->ubpf_jit_fn) {
-            result = program->ubpf_jit_fn(&args, sizeof(args));
+            result = program->ubpf_jit_fn((struct ubpf_jit_args *)&args);
         } else {
             uint64_t ubpf_result;
 
-            if (ubpf_exec(program->ubpf_vm, &args, sizeof(args),
+            if (ubpf_exec(program->ubpf_vm, (struct ubpf_jit_args *)&args,
                           &ubpf_result) < 0) {
                 status = NVME_INVALID_FIELD | NVME_DNR;
                 break;

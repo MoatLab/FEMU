@@ -3,6 +3,8 @@
 #include <thread>
 #include <vector>
 
+#include <lz4.h>
+
 #include "femu-csd-kernel.h"
 
 struct KnnNode {
@@ -124,4 +126,23 @@ extern "C" long long csd_grep(struct femu_csd_args *args)
     int rows = args->cparam1 ? args->cparam1 : args->mr_len[0] / cols;
 
     return grep_rows(data, rows, cols, pattern);
+}
+
+extern "C" long long csd_lz4(struct femu_csd_args *args)
+{
+    if (args->numr < 2) {
+        return -1;
+    }
+
+    const char *input = static_cast<const char *>(args->mr_addr[0]);
+    char *output = static_cast<char *>(args->mr_addr[1]);
+    long long input_size = args->mr_len[0];
+    long long output_size = args->mr_len[1];
+    int max_compressed_size = LZ4_compressBound(input_size);
+
+    if (max_compressed_size <= 0 || output_size < max_compressed_size) {
+        return -1;
+    }
+
+    return LZ4_compress_default(input, output, input_size, output_size);
 }
