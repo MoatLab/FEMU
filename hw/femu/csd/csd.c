@@ -50,7 +50,6 @@ typedef struct FemuCsdState {
     uint64_t fdm_capacity;
     uint64_t fdm_used;
     uint32_t next_afdm_id;
-    uint32_t next_csf_id;
     uint32_t next_group_id;
     GHashTable *afdms;
     GHashTable *programs;
@@ -60,7 +59,6 @@ typedef struct FemuCsdState {
 
 static void csd_check_size(void)
 {
-    QEMU_BUILD_BUG_ON(sizeof(NvmeCsdDownloadCmd) != 64);
     QEMU_BUILD_BUG_ON(sizeof(NvmeCsdAllocFdmCmd) != 64);
     QEMU_BUILD_BUG_ON(sizeof(NvmeCsdDeallocAfdmCmd) != 64);
     QEMU_BUILD_BUG_ON(sizeof(NvmeCsdNvmToAfdmCmd) != 64);
@@ -173,7 +171,6 @@ static void csd_init(FemuCtrl *n, Error **errp)
     csd->params = n->csd_params;
     csd->fdm_capacity = n->csd_params.fdm_size_mb * MiB;
     csd->next_afdm_id = 1;
-    csd->next_csf_id = 1;
     csd->next_group_id = 1;
     csd->afdms = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL,
                                        csd_afdm_free);
@@ -490,66 +487,6 @@ static uint16_t csd_compute_activate(FemuCtrl *n, NvmeCmd *cmd)
     }
 
     qemu_mutex_unlock(&csd->lock);
-    return NVME_SUCCESS;
-}
-
-static uint16_t csd_download(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
-{
-    FemuCsdState *csd = csd_state(n);
-    NvmeCsdDownloadCmd *download = (NvmeCsdDownloadCmd *)cmd;
-    uint64_t size = le64_to_cpu(download->size);
-    uint64_t prp1 = le64_to_cpu(download->prp1);
-    uint64_t prp2 = le64_to_cpu(download->prp2);
-    FemuCsdProgram *program;
-    uint32_t id;
-    uint16_t status = NVME_SUCCESS;
-
-    if (size > UINT32_MAX) {
-        return NVME_INVALID_FIELD | NVME_DNR;
-    }
-
-    switch (download->csf_type) {
-    case NVME_CSD_CSF_TYPE_PHANTOM:
-    case NVME_CSD_CSF_TYPE_EBPF:
-    case NVME_CSD_CSF_TYPE_SHARED_LIB:
-        break;
-    default:
-        return NVME_INVALID_FIELD | NVME_DNR;
-    }
-
-    program = g_new0(FemuCsdProgram, 1);
-    program->type = download->csf_type;
-    program->runtime = le32_to_cpu(download->runtime);
-    program->runtime_scale = le16_to_cpu(download->runtime_scale);
-    program->size = size;
-    program->active = true;
-
-    if (size) {
-        program->data = g_malloc0(size);
-        status = dma_write_prp(n, program->data, size, prp1, prp2);
-        if (status) {
-            csd_program_free(program);
-            return status | NVME_DNR;
-        }
-    }
-
-    status = csd_load_program_data(program, download->csf_flags & 0x1);
-    if (status) {
-        csd_program_free(program);
-        return status;
-    }
-
-    qemu_mutex_lock(&csd->lock);
-    id = csd->next_csf_id++;
-    if (id == 0) {
-        csd->next_csf_id = 1;
-        id = csd->next_csf_id++;
-    }
-    program->id = id;
-    g_hash_table_insert(csd->programs, GUINT_TO_POINTER(id), program);
-    qemu_mutex_unlock(&csd->lock);
-
-    req->cqe.n.result = id;
     return NVME_SUCCESS;
 }
 
@@ -928,8 +865,6 @@ static uint16_t csd_io_cmd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     case NVME_CMD_READ:
     case NVME_CMD_WRITE:
         return nvme_rw(n, ns, cmd, req);
-    case NVME_CMD_CSD_DOWNLOAD:
-        return csd_download(n, cmd, req);
     case NVME_CMD_CSD_ALLOC_FDM:
         return csd_alloc_fdm(n, cmd, req);
     case NVME_CMD_CSD_DEALLOC_AFDM:

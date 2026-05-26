@@ -4,7 +4,6 @@
 #include "../nvme.h"
 
 enum FemuCsdIoCommands {
-    NVME_CMD_CSD_DOWNLOAD       = 0xa1,
     NVME_CMD_CSD_ALLOC_FDM      = 0xb0,
     NVME_CMD_CSD_DEALLOC_AFDM   = 0xc0,
     NVME_CMD_CSD_NVM_TO_AFDM    = 0xd0,
@@ -31,22 +30,6 @@ enum FemuCsdCsfType {
     NVME_CSD_CSF_TYPE_BITSTREAM = 2,
     NVME_CSD_CSF_TYPE_SHARED_LIB = 3,
 };
-
-typedef struct QEMU_PACKED NvmeCsdDownloadCmd {
-    uint8_t     opcode;
-    uint8_t     flags;
-    uint16_t    cid;
-    uint32_t    nsid;
-    uint64_t    rsvd2[2];
-    uint64_t    prp1;
-    uint64_t    prp2;
-    uint64_t    size;
-    uint8_t     csf_type;
-    uint8_t     csf_flags;
-    uint16_t    runtime_scale;
-    uint32_t    runtime;
-    uint32_t    rsvd15[2];
-} NvmeCsdDownloadCmd;
 
 typedef struct QEMU_PACKED NvmeCsdLoadProgramCmd {
     uint8_t     opcode;
