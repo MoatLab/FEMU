@@ -1531,6 +1531,15 @@ typedef struct ZNSCtrlParams {
     int zns_flash_type;
 } ZNSCtrlParams;
 
+typedef struct CsdCtrlParams {
+    uint64_t fdm_size_mb;
+    uint8_t  nr_cu;
+    uint8_t  nr_thread;
+    uint64_t time_slice;
+    uint64_t context_switch_time;
+    uint16_t csf_runtime_scale;
+} CsdCtrlParams;
+
 typedef struct OcCtrlParams {
     uint16_t sec_size;
     uint8_t  secs_per_pg;
@@ -1550,6 +1559,7 @@ typedef struct FemuExtCtrlOps {
     uint16_t (*rw_check_req)(struct FemuCtrl *, NvmeCmd *, NvmeRequest *);
     int      (*start_ctrl)(struct FemuCtrl *);
     uint16_t (*admin_cmd)(struct FemuCtrl *, NvmeCmd *);
+    uint16_t (*admin_cmd_cqe)(struct FemuCtrl *, NvmeCmd *, NvmeCqe *);
     uint16_t (*io_cmd)(struct FemuCtrl *, NvmeNamespace *, NvmeCmd *, NvmeRequest *);
     uint16_t (*get_log)(struct FemuCtrl *, NvmeCmd *);
 } FemuExtCtrlOps;
@@ -1680,6 +1690,7 @@ typedef struct FemuCtrl {
     uint8_t         lver; /* Coperd: OCSSD version, 0x1 -> OC1.2, 0x2 -> OC2.0 */
     uint32_t        memsz;
     OcCtrlParams    oc_params;
+    CsdCtrlParams   csd_params;
 
     Oc12Ctrl  *oc12_ctrl;
     volatile int64_t chip_next_avail_time[FEMU_MAX_NUM_CHIPS];
@@ -1745,6 +1756,7 @@ enum {
     FEMU_BBSSD_MODE = 1,
     FEMU_NOSSD_MODE = 2,
     FEMU_ZNSSD_MODE = 3,
+    FEMU_CSD_MODE = 4,
     FEMU_SMARTSSD_MODE,
     FEMU_KVSSD_MODE,
 };
@@ -1777,6 +1789,11 @@ static inline bool NOSSD(FemuCtrl *n)
 static inline bool ZNSSD(FemuCtrl *n)
 {
     return (n->femu_mode == FEMU_ZNSSD_MODE);
+}
+
+static inline bool CSD(FemuCtrl *n)
+{
+    return (n->femu_mode == FEMU_CSD_MODE);
 }
 
 /* Basic NVMe Queue Pair operation APIs from nvme-util.c */
@@ -1847,6 +1864,7 @@ int nvme_register_ocssd20(FemuCtrl *n);
 int nvme_register_nossd(FemuCtrl *n);
 int nvme_register_bbssd(FemuCtrl *n);
 int nvme_register_znssd(FemuCtrl *n);
+int nvme_register_csd(FemuCtrl *n);
 
 static inline uint64_t ns_blks(NvmeNamespace *ns, uint8_t lba_idx)
 {

@@ -31,6 +31,7 @@
   - [WhiteBox SSD Mode (OCSSD)](#whitebox-ssd-mode-ocssd)
   - [Zoned Namespace SSD Mode (ZNSSD)](#zoned-namespace-ssd-mode-znssd)
   - [NoSSD Mode](#nossd-mode)
+  - [Computational Storage Mode (CSD)](#computational-storage-mode-csd)
 - [Configuration](#configuration)
 - [Development](#development)
 - [Troubleshooting](#troubleshooting)
@@ -62,12 +63,12 @@ FEMU bridges the gap between SSD hardware platforms and SSD simulators by provid
 
 ## Features
 
-| Feature | BlackBox | WhiteBox | ZNS | NoSSD |
-|---------|----------|----------|-----|--------|
-| **FTL Management** | Device-side | Host-side | Zone-based | None |
-| **Use Cases** | Commercial SSD simulation | OpenChannel SSD research | ZNS research | SCM emulation |
-| **Latency Model** | Realistic NAND | Realistic NAND | Zone-optimized | Ultra-low (sub-10μs) |
-| **Guest Support** | Full NVMe | OpenChannel 1.2/2.0 | NVMe ZNS | NVMe basic |
+| Feature | BlackBox | WhiteBox | ZNS | NoSSD | CSD |
+|---------|----------|----------|-----|--------|-----|
+| **FTL Management** | Device-side | Host-side | Zone-based | None | Device-side |
+| **Use Cases** | Commercial SSD simulation | OpenChannel SSD research | ZNS research | SCM emulation | Computational storage research |
+| **Latency Model** | Realistic NAND | Realistic NAND | Zone-optimized | Ultra-low (sub-10μs) | Realistic NAND + compute runtime |
+| **Guest Support** | Full NVMe | OpenChannel 1.2/2.0 | NVMe ZNS | NVMe basic | Full NVMe + CSD commands |
 
 ---
 
@@ -367,6 +368,42 @@ Ultra-fast NVMe emulation without storage logic.
 - Performance upper-bound testing
 - Fast storage prototyping
 
+### Computational Storage Mode (CSD)
+
+Experimental computational storage support derived from CEMU. CSD is selected
+with `femu_mode=4` and keeps CSD-specific code under `hw/femu/csd/`.
+
+```bash
+./run-csd.sh
+```
+
+**Key Parameters:**
+```bash
+fdm_size=64            # Functional data memory size (MB), required
+nr_cu=4                # Number of compute units
+nr_thread=4            # Number of functional simulation threads
+time_slice=200000      # Scheduler time slice (ns)
+context_switch_time=200 # Context switch time (ns)
+csf_runtime_scale=3    # Runtime scaling factor
+```
+
+**Current Scope:**
+- Normal NVMe read/write through the device-side BBSSD FTL path in CSD mode
+- Vendor commands for AFDM allocation, read/write, NVM-to-AFDM copy
+- Phantom and shared-library CSF load/execute path using the original CEMU
+  lifecycle, `path\0symbol\0` program descriptor format, and program execute
+  fields (`pind`, `numr`, `dlen`, `cparam1`, `cparam2`, `group`, `runtime`)
+- CEMU-style admin commands for CSF load/unload and activate/deactivate
+- Optional uBPF CSF support via `./femu-compile.sh --enable-csd-ubpf`
+  or `./femu-compile.sh --enable-csd-ubpf=/path/to/ubpf-cemu`
+- Group/QoS command metadata
+- Guest-side passthrough tests in `tests/femu-csd/`
+
+The initial CSD path does not require a CEMU-specific Linux kernel, FDMFS, or a
+fixed VM image. Advanced CEMU features such as VM freezing, virtual clock
+changes, and FDMFS are intentionally kept out of the default path while the base
+mode is upstreamed.
+
 ---
 
 ## Configuration
@@ -451,6 +488,9 @@ hw/femu/                    # Main FEMU implementation
 │   └── zftl.c              # Zone-based FTL
 ├── nossd/                  # NoSSD mode
 │   └── nop.c               # Minimal processing
+├── csd/                    # Computational Storage mode
+│   ├── csd.c               # CSD command handling
+│   └── csd.h               # CSD private command definitions
 ├── timing-model/           # Performance modeling
 ├── backend/                # Storage backends
 └── lib/                    # Utility libraries

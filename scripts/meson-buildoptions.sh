@@ -116,6 +116,7 @@ meson_options_help() {
   printf "%s\n" '  dmg             dmg image format support'
   printf "%s\n" '  docs            Documentations build support'
   printf "%s\n" '  dsound          DirectSound sound support'
+  printf "%s\n" '  femu-csd-ubpf   uBPF runtime support for FEMU CSD'
   printf "%s\n" '  fuse            FUSE block device export'
   printf "%s\n" '  fuse-lseek      SEEK_HOLE/SEEK_DATA support for FUSE exports'
   printf "%s\n" '  gcrypt          libgcrypt cryptography support'
@@ -315,6 +316,8 @@ _meson_option_parse() {
     --enable-fdt) printf "%s" -Dfdt=enabled ;;
     --disable-fdt) printf "%s" -Dfdt=disabled ;;
     --enable-fdt=*) quote_sh "-Dfdt=$2" ;;
+    --enable-femu-csd-ubpf) printf "%s" -Dfemu_csd_ubpf=enabled ;;
+    --disable-femu-csd-ubpf) printf "%s" -Dfemu_csd_ubpf=disabled ;;
     --enable-fuse) printf "%s" -Dfuse=enabled ;;
     --disable-fuse) printf "%s" -Dfuse=disabled ;;
     --enable-fuse-lseek) printf "%s" -Dfuse_lseek=enabled ;;

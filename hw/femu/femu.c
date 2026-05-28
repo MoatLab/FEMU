@@ -802,6 +802,8 @@ static int nvme_register_extensions(FemuCtrl *n)
         nvme_register_bbssd(n);
     } else if (ZNSSD(n)) {
         nvme_register_znssd(n);
+    } else if (CSD(n)) {
+        nvme_register_csd(n);
     } else {
         /* TODO: For future extensions */
     }
@@ -962,6 +964,14 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT8("lnum_lun", FemuCtrl, oc_params.num_lun, 8),
     DEFINE_PROP_UINT8("lnum_pln", FemuCtrl, oc_params.num_pln, 2),
     DEFINE_PROP_UINT16("lmetasize", FemuCtrl, oc_params.sos, 16),
+    DEFINE_PROP_UINT64("fdm_size", FemuCtrl, csd_params.fdm_size_mb, 0),
+    DEFINE_PROP_UINT8("nr_cu", FemuCtrl, csd_params.nr_cu, 4),
+    DEFINE_PROP_UINT8("nr_thread", FemuCtrl, csd_params.nr_thread, 4),
+    DEFINE_PROP_UINT64("time_slice", FemuCtrl, csd_params.time_slice, 200000),
+    DEFINE_PROP_UINT64("context_switch_time", FemuCtrl,
+                       csd_params.context_switch_time, 200),
+    DEFINE_PROP_UINT16("csf_runtime_scale", FemuCtrl,
+                       csd_params.csf_runtime_scale, 3),
     DEFINE_PROP_UINT8("zns_num_ch", FemuCtrl, zns_params.zns_num_ch, 2),
     DEFINE_PROP_UINT8("zns_num_lun", FemuCtrl, zns_params.zns_num_lun, 4),
     DEFINE_PROP_UINT8("zns_num_plane", FemuCtrl, zns_params.zns_num_plane, 2),
