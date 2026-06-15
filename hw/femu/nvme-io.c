@@ -223,6 +223,9 @@ void *nvme_poller(void *arg)
             NvmeSQueue *sq = n->sq[index];
             NvmeCQueue *cq = n->cq[index];
             if (sq && sq->is_active && cq && cq->is_active) {
+                /* acquire: pair with the smp_wmb() before is_active=true in
+                 * nvme_create_sq so we see a fully-initialized sq/cq */
+                smp_rmb();
                 nvme_process_sq_io(sq, index);
             }
             nvme_process_cq_cpl(n, index);
@@ -239,6 +242,9 @@ void *nvme_poller(void *arg)
                 NvmeSQueue *sq = n->sq[i];
                 NvmeCQueue *cq = n->cq[i];
                 if (sq && sq->is_active && cq && cq->is_active) {
+                    /* acquire: pair with the smp_wmb() before is_active=true
+                     * in nvme_create_sq so we see a fully-initialized sq/cq */
+                    smp_rmb();
                     nvme_process_sq_io(sq, index);
                 }
             }

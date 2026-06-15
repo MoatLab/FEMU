@@ -133,6 +133,16 @@ static uint16_t nvme_create_sq(FemuCtrl *n, NvmeCmd *cmd)
     }
 
     assert(sq->is_active == false);
+    /*
+     * Publish is_active LAST, after a write barrier, so a concurrent poller
+     * that observes is_active==true is guaranteed to see a fully-initialized
+     * SQ (size / dma_addr_hva / io_req filled by nvme_init_sq, which also
+     * publishes n->sq[sqid] before returning). Without this, at high
+     * queue-creation rates (e.g. SPDK with many reactors) a poller could race
+     * a half-initialized SQ and segfault on a stale dma_addr_hva. The matching
+     * acquire barrier is the smp_rmb() in nvme_poller().
+     */
+    smp_wmb();
     sq->is_active = true;
 
     return NVME_SUCCESS;
