@@ -1732,6 +1732,17 @@ typedef struct FemuCtrl {
     uint8_t         multipoller_enabled;
     uint32_t        nr_pollers;
 
+    /*
+     * Poller quiesce handshake. A poller sets poller_in_sweep[idx]=true (with
+     * a barrier) before touching queue / dbbuf shadow memory and false after.
+     * nvme_clear_ctrl() clears dataplane_started, then waits until every
+     * in_sweep flag is false before freeing queues / unmapping the dbbuf
+     * regions, so a poller can never write a freed eventidx_addr_hva
+     * (use-after-free segfault on guest reboot / controller reset). 1-based
+     * poller indices; NULL until pollers init.
+     */
+    volatile bool   *poller_in_sweep;
+
     /* Nand Flash Type: SLC/MLC/TLC/QLC/PLC */
     uint8_t         flash_type;
 } FemuCtrl;

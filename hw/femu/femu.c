@@ -270,6 +270,32 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
     /* Coperd: pause nvme poller at earliest convenience */
     n->dataplane_started = false;
 
+    /*
+     * Quiesce the pollers before freeing queues / unmapping the dbbuf shadow
+     * regions below. Without this, a poller mid-sweep can write a freed
+     * eventidx_addr_hva (use-after-free segfault on guest reboot / controller
+     * reset). Pair with the Dekker-style handshake in nvme_poller():
+     * dataplane_started is now false + barrier, so any poller will observe it
+     * and clear its in_sweep flag; wait here until all are idle.
+     */
+    smp_mb();
+    if (n->poller_on && n->poller_in_sweep) {
+        int p;
+        bool busy;
+        do {
+            busy = false;
+            for (p = 1; p <= (int)n->nr_pollers; p++) {
+                if (n->poller_in_sweep[p]) {
+                    busy = true;
+                    break;
+                }
+            }
+            if (busy) {
+                usleep(100);
+            }
+        } while (busy);
+    }
+
     if (shutdown) {
         femu_debug("shutting down NVMe Controller ...\n");
     } else {
@@ -874,6 +900,8 @@ static void nvme_destroy_poller(FemuCtrl *n)
     }
 
     g_free(n->should_isr);
+    g_free((void *)n->poller_in_sweep);
+    n->poller_in_sweep = NULL;
 }
 
 static void femu_exit(PCIDevice *pci_dev)

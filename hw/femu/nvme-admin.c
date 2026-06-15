@@ -248,6 +248,12 @@ static void nvme_init_poller(FemuCtrl *n)
     n->should_isr = g_malloc0(sizeof(bool) * (n->nr_io_queues + 1));
 
     n->nr_pollers = n->multipoller_enabled ? n->nr_io_queues : 1;
+
+    /* poller quiesce flags (1-based poller indices); see poller_in_sweep */
+    if (!n->poller_in_sweep) {
+        n->poller_in_sweep = g_malloc0(sizeof(bool) * (n->nr_pollers + 1));
+    }
+
     /* Coperd: we put NvmeRequest into these rings */
     n->to_ftl = g_malloc0(sizeof(struct rte_ring *) * (n->nr_pollers + 1));
     for (i = 1; i <= n->nr_pollers; i++) {

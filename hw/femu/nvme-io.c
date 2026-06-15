@@ -216,6 +216,24 @@ void *nvme_poller(void *arg)
     case 1:
         while (1) {
             if ((!n->dataplane_started)) {
+                n->poller_in_sweep[index] = false;
+                usleep(1000);
+                continue;
+            }
+
+            /*
+             * Quiesce handshake (Dekker-style): mark in_sweep, barrier, then
+             * re-check dataplane_started. If nvme_clear_ctrl() cleared it after
+             * our top check but before this barrier, we observe it here and
+             * back off, so we never touch queue / dbbuf shadow memory that
+             * clear_ctrl is about to free. Conversely clear_ctrl, after
+             * clearing dataplane_started, waits for in_sweep==false, so it
+             * never frees under an active sweep.
+             */
+            n->poller_in_sweep[index] = true;
+            smp_mb();
+            if (!n->dataplane_started) {
+                n->poller_in_sweep[index] = false;
                 usleep(1000);
                 continue;
             }
@@ -229,11 +247,24 @@ void *nvme_poller(void *arg)
                 nvme_process_sq_io(sq, index);
             }
             nvme_process_cq_cpl(n, index);
+            /* release: queue / eventidx writes in this sweep must be globally
+             * visible before clear_ctrl can observe in_sweep==false and free */
+            smp_mb();
+            n->poller_in_sweep[index] = false;
         }
         break;
     default:
         while (1) {
             if ((!n->dataplane_started)) {
+                n->poller_in_sweep[index] = false;
+                usleep(1000);
+                continue;
+            }
+
+            n->poller_in_sweep[index] = true;
+            smp_mb();
+            if (!n->dataplane_started) {
+                n->poller_in_sweep[index] = false;
                 usleep(1000);
                 continue;
             }
@@ -249,6 +280,10 @@ void *nvme_poller(void *arg)
                 }
             }
             nvme_process_cq_cpl(n, index);
+            /* release: queue / eventidx writes in this sweep must be globally
+             * visible before clear_ctrl can observe in_sweep==false and free */
+            smp_mb();
+            n->poller_in_sweep[index] = false;
         }
         break;
     }
