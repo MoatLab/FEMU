@@ -51,6 +51,22 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
     while (!(nvme_sq_empty(sq))) {
         if (sq->phys_contig) {
             addr = sq->dma_addr + sq->head * n->sqe_size;
+            /*
+             * Software-pipeline the SQ ring: prefetch the NEXT SQE slot into L1
+             * while we decode and copy the current command. The SQ is a
+             * contiguous guest-RAM ring (dma_addr_hva); at high IOPS its lines
+             * are cold (the guest just wrote them on another core), so the
+             * per-command SQE load is a memory-latency stall. A prefetch hint
+             * one slot ahead overlaps that latency with the current command's
+             * work. Pure hint -- no correctness impact, bounded to the ring.
+             */
+            {
+                uint32_t nh = sq->head + 1;
+                if (nh >= sq->size) {
+                    nh = 0;
+                }
+                __builtin_prefetch(&((NvmeCmd *)sq->dma_addr_hva)[nh], 0, 3);
+            }
             nvme_copy_cmd(&cmd, (void *)&(((NvmeCmd *)sq->dma_addr_hva)[sq->head]));
         } else {
             addr = nvme_discontig(sq->prp_list, sq->head, n->page_size,
@@ -61,7 +77,16 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
 
         req = QTAILQ_FIRST(&sq->req_list);
         QTAILQ_REMOVE(&sq->req_list, req, entry);
-        memset(&req->cqe, 0, sizeof(req->cqe));
+        /*
+         * Only res64 (the result+rsvd union) is left unset per command: cid is
+         * assigned just below, and sq_head/sq_id/status are written by
+         * nvme_post_cqe before the CQE is copied to the guest. Zeroing just the
+         * 8-byte res64 instead of memset-ing the whole 16-byte CQE saves a
+         * per-command store on the hot path. res64 defaults to 0 (the NVMe
+         * result for ordinary I/O); handlers that produce a result (e.g. zone
+         * append, feature get) overwrite it explicitly.
+         */
+        req->cqe.res64 = 0;
         req->dsm_ranges = NULL;
         req->dsm_nr_ranges = 0;
         req->dsm_attributes = 0;
