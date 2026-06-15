@@ -1401,6 +1401,17 @@ static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     case NVME_ADM_CMD_SET_DB_MEMORY:
         femu_debug("admin cmd,set_db_memory\n");
         return nvme_set_db_memory(n, cmd);
+    case NVME_ADM_CMD_ASYNC_EV_REQ:
+        /*
+         * Async Event Request: the controller holds it outstanding until an
+         * async event occurs. FEMU generates no async events, so keep it
+         * pending (never complete it) by returning NVME_NO_COMPLETE. This is
+         * correct NVMe behaviour and stops drivers (e.g. SPDK) that post AERs
+         * at init from getting INVALID_OPCODE and retrying in a tight loop
+         * (which otherwise floods the controller and stalls the benchmark).
+         */
+        femu_debug("admin cmd,async_event_request (held pending)\n");
+        return NVME_NO_COMPLETE;
     case NVME_ADM_CMD_ACTIVATE_FW:
     case NVME_ADM_CMD_DOWNLOAD_FW:
     case NVME_ADM_CMD_SECURITY_SEND:
@@ -1442,6 +1453,11 @@ void nvme_process_sq_admin(void *opaque)
         memset(&cqe, 0, sizeof(cqe));
 
         status = nvme_admin_cmd(n, &cmd, &cqe);
+        if (status == NVME_NO_COMPLETE) {
+            /* command held pending (e.g. Async Event Request) — do not post a
+             * CQE; it stays outstanding until an async event (never, here) */
+            continue;
+        }
         cqe.cid = cmd.cid;
         cqe.status = cpu_to_le16(status << 1 | cq->phase);
         cqe.sq_id = cpu_to_le16(sq->sqid);
