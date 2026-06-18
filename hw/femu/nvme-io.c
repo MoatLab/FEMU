@@ -248,10 +248,21 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
 
     switch (n->multipoller_enabled) {
     case 1:
-        nvme_isr_notify_io(n->cq[index_poller]);
-        /* publish the CQ eventidx so the guest suppresses its CQ-head
-         * doorbell MMIO (see nvme_update_cq_eventidx) */
-        nvme_update_cq_eventidx(n->cq[index_poller]);
+        /*
+         * Fire one ISR per active CQ in this poller's round-robin shard. With
+         * poller_ratio == 1 (nr_pollers == nr_io_queues) the loop runs once for
+         * i == index_poller, identical to the original single-CQ notify; with
+         * M:N this poller owns several CQs and must service each that completed.
+         * publish the CQ eventidx alongside so the guest suppresses its CQ-head
+         * doorbell MMIO (see nvme_update_cq_eventidx).
+         */
+        for (i = index_poller; i <= n->nr_io_queues; i += n->nr_pollers) {
+            if (n->should_isr[i]) {
+                nvme_isr_notify_io(n->cq[i]);
+                nvme_update_cq_eventidx(n->cq[i]);
+                n->should_isr[i] = false;
+            }
+        }
         break;
     default:
         for (i = 1; i <= n->nr_io_queues; i++) {
@@ -297,13 +308,30 @@ void *nvme_poller(void *arg)
                 continue;
             }
 
-            NvmeSQueue *sq = n->sq[index];
-            NvmeCQueue *cq = n->cq[index];
-            if (sq && sq->is_active && cq && cq->is_active) {
-                /* acquire: pair with the smp_wmb() before is_active=true in
-                 * nvme_create_sq so we see a fully-initialized sq/cq */
-                smp_rmb();
-                nvme_process_sq_io(sq, index);
+            /*
+             * Sweep this poller's round-robin shard of queues. With M:N
+             * (poller_ratio > 1) one poller owns queues {index, index+M,
+             * index+2M, ...} where M = nr_pollers. With ratio == 1,
+             * nr_pollers == nr_io_queues and the loop runs once for q == index
+             * -- identical to the original one-queue-per-poller behavior.
+             */
+            for (int q = index; q <= n->nr_io_queues; q += n->nr_pollers) {
+                NvmeSQueue *sq = n->sq[q];
+                NvmeCQueue *cq = n->cq[q];
+                if (sq && sq->is_active && cq && cq->is_active) {
+                    /* acquire: pair with the smp_wmb() before is_active=true
+                     * in nvme_create_sq so we see a fully-initialized sq/cq */
+                    smp_rmb();
+                    /*
+                     * Pass the POLLER index, not q. to_ftl/to_poller/pq are
+                     * poller-indexed (sized nr_pollers+1); every SQ in this
+                     * poller's shard intentionally funnels its requests through
+                     * ring `index`, and the FTL thread / completion path key off
+                     * the same poller index. Using `q` here would index those
+                     * poller-sized arrays out of bounds. Do NOT change to `q`.
+                     */
+                    nvme_process_sq_io(sq, index);
+                }
             }
             nvme_process_cq_cpl(n, index);
             /* release: queue / eventidx writes in this sweep must be globally
