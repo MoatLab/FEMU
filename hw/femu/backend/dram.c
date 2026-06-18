@@ -1,6 +1,56 @@
+#include <sys/syscall.h>
 #include "../nvme.h"
 
 /* Coperd: FEMU Memory Backend (mbe) for emulated SSD */
+
+/*
+ * Optionally bind the emulated-SSD backend buffer to a NUMA node before it is
+ * first touched. FEMU_MBE_INTERLEAVE=<n> binds every page to node n
+ * (MPOL_BIND); =on interleaves across nodes 0-1 (MPOL_INTERLEAVE). This is the
+ * device-side half of the strict socket-isolation setup: pin the guest's vCPUs
+ * and RAM to one socket and the FEMU poller threads + this backend to the
+ * other, so the only thing crossing the inter-socket link is the per-I/O
+ * emulation copy and the two DRAM-bandwidth domains do not contend. A direct
+ * mbind(2) syscall avoids a libnuma build dependency. No-op (default) when the
+ * env var is unset, so existing single-socket setups are unchanged.
+ */
+static void mbe_numa_bind(void *addr, int64_t len)
+{
+    const char *il = getenv("FEMU_MBE_INTERLEAVE");
+    if (!il || !il[0]) {
+        return;
+    }
+    if (strcmp(il, "on") && strcmp(il, "0") && strcmp(il, "1")) {
+        femu_err("backend: ignoring FEMU_MBE_INTERLEAVE=%s (want on|0|1)\n", il);
+        return;
+    }
+    int mode = strcmp(il, "on") ? 2 /* MPOL_BIND */ : 3 /* MPOL_INTERLEAVE */;
+    unsigned long nodemask = strcmp(il, "on") ? (1ul << atoi(il)) : 0x3ul;
+
+    /*
+     * mbind(2) requires a page-aligned start address; g_malloc0 returns only
+     * malloc alignment. Round the start down and the length up to whole pages
+     * so the policy covers every page backing the buffer. (Touching the shared
+     * boundary pages is harmless: the policy only steers where not-yet-faulted
+     * pages land, and the prealloc below faults our buffer immediately.)
+     */
+    long pgsz = sysconf(_SC_PAGESIZE);
+    uintptr_t start = (uintptr_t)addr & ~((uintptr_t)pgsz - 1);
+    uintptr_t end = ((uintptr_t)addr + len + pgsz - 1) & ~((uintptr_t)pgsz - 1);
+    /*
+     * MPOL_MF_MOVE (0x2): g_malloc0 has already zeroed (hence faulted) the
+     * pages onto the default node, so a plain mbind would not relocate them.
+     * MF_MOVE migrates the already-resident pages to the target node now.
+     */
+    if (syscall(SYS_mbind, (void *)start, end - start, mode, &nodemask,
+                sizeof(nodemask) * 8, 0x2 /* MPOL_MF_MOVE */)) {
+        femu_err("backend: mbind(FEMU_MBE_INTERLEAVE=%s) failed: %s\n",
+                 il, strerror(errno));
+    } else {
+        femu_log("backend: %ld MB bound via FEMU_MBE_INTERLEAVE=%s\n",
+                 (long)(len >> 20), il);
+    }
+}
 
 int init_dram_backend(SsdDramBackend **mbe, int64_t nbytes)
 {
@@ -8,6 +58,9 @@ int init_dram_backend(SsdDramBackend **mbe, int64_t nbytes)
 
     b->size = nbytes;
     b->logical_space = g_malloc0(nbytes);
+
+    /* bind to the requested NUMA node before mlock faults the pages in */
+    mbe_numa_bind(b->logical_space, nbytes);
 
     if (mlock(b->logical_space, nbytes) == -1) {
         femu_err("Failed to pin the memory backend to the host DRAM\n");
