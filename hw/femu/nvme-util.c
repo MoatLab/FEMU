@@ -48,6 +48,37 @@ void nvme_update_cq_head(NvmeCQueue *cq)
     }
 }
 
+void nvme_update_cq_eventidx(NvmeCQueue *cq)
+{
+    /*
+     * Same dbbuf contract as the SQ side (see nvme_update_sq_eventidx): the
+     * eventidx is a pure CQ-head-doorbell MMIO-suppression hint. Publishing
+     * ei == cq->head makes the guest cross it on its next CQ-head update and
+     * take a doorbell exit every completion batch. FEMU reads the CQ head from
+     * the shadow doorbell every poll (nvme_update_cq_head) and never blocks on
+     * a guest notification, so publish one slot behind the current head to keep
+     * need_event() false for all advances. The same busy-poll INVARIANT as the
+     * SQ side applies: correct only while the poller sweeps unconditionally.
+     *
+     * Refresh cq->head from the shadow doorbell first: unlike the SQ tail (read
+     * every sweep in nvme_process_sq_io), the completion path does not otherwise
+     * re-read the CQ head, so without this the published eventidx would trail a
+     * stale head and suppress only a fraction of the CQ-head doorbell MMIOs.
+     */
+    if (cq->size == 0) {
+        return;
+    }
+    nvme_update_cq_head(cq);
+    uint32_t ei = (cq->head + cq->size - 1) % cq->size;
+    if (cq->eventidx_addr_hva) {
+        *((uint32_t *)(cq->eventidx_addr_hva)) = ei;
+        return;
+    }
+    if (cq->eventidx_addr) {
+        nvme_addr_write(cq->ctrl, cq->eventidx_addr, (void *)&ei, sizeof(ei));
+    }
+}
+
 uint8_t nvme_cq_full(NvmeCQueue *cq)
 {
     nvme_update_cq_head(cq);
@@ -213,7 +244,7 @@ uint16_t nvme_init_sq(NvmeSQueue *sq, FemuCtrl *n, uint64_t dma_addr, uint16_t
         sq->db_addr = n->dbs_addr + 2 * sqid * dbbuf_entry_sz;
         sq->db_addr_hva = n->dbs_addr_hva + 2 * sqid * dbbuf_entry_sz;
         sq->eventidx_addr = n->eis_addr + 2 * sqid * dbbuf_entry_sz;
-        sq->eventidx_addr = n->eis_addr_hva + 2 * sqid + dbbuf_entry_sz;
+        sq->eventidx_addr_hva = n->eis_addr_hva + 2 * sqid * dbbuf_entry_sz;
         femu_debug("SQ[%d],db=%" PRIu64 ",ei=%" PRIu64 "\n", sqid, sq->db_addr,
                 sq->eventidx_addr);
     }

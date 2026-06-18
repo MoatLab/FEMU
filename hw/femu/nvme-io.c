@@ -4,14 +4,42 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
 
 static void nvme_update_sq_eventidx(const NvmeSQueue *sq)
 {
+    /*
+     * The dbbuf (shadow doorbell) eventidx is a pure MMIO-suppression hint.
+     * The guest skips its SQ-tail doorbell write (a VM-exit) when
+     * need_event(ei, new, old) is false, i.e. when its new tail has not
+     * crossed our published eventidx `ei`. FEMU busy-polls the SQ tail from
+     * the shadow doorbell every sweep (nvme_update_sq_tail at the top of
+     * nvme_process_sq_io) and never blocks on a guest notification, so it
+     * never needs one. Publishing ei == sq->tail (the value the guest just
+     * wrote -- what upstream QEMU's trap-driven model does) is wrong for a
+     * poller: the guest crosses it on its very next submission and takes a
+     * doorbell exit every time. Publish an eventidx the guest cannot reach in
+     * any single legal advance (max outstanding is size - 1), i.e. one slot
+     * behind the current position, so need_event() stays false for all batch
+     * sizes and the doorbell MMIO is suppressed.
+     *
+     * INVARIANT: this is correct ONLY while the poller sweeps every active
+     * queue unconditionally. If FEMU ever adopts adaptive/halt polling, this
+     * MUST revert to echoing the position (== upstream QEMU) or the guest will
+     * suppress the only wakeup and the device will stall.
+     *
+     * Guard size == 0: at high queue-creation rates a poller can observe a
+     * freshly published n->sq[q] pointer whose size store has not landed yet;
+     * the modulo would then trap (divide error). Skipping the hint for one
+     * sweep is harmless -- the next sweep republishes once size is visible.
+     */
+    if (sq->size == 0) {
+        return;
+    }
+    uint32_t ei = (sq->tail + sq->size - 1) % sq->size;
     if (sq->eventidx_addr_hva) {
-        *((uint32_t *)(sq->eventidx_addr_hva)) = sq->tail;
+        *((uint32_t *)(sq->eventidx_addr_hva)) = ei;
         return;
     }
 
     if (sq->eventidx_addr) {
-        nvme_addr_write(sq->ctrl, sq->eventidx_addr, (void *)&sq->tail,
-                        sizeof(sq->tail));
+        nvme_addr_write(sq->ctrl, sq->eventidx_addr, (void *)&ei, sizeof(ei));
     }
 }
 
@@ -219,11 +247,15 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
     switch (n->multipoller_enabled) {
     case 1:
         nvme_isr_notify_io(n->cq[index_poller]);
+        /* publish the CQ eventidx so the guest suppresses its CQ-head
+         * doorbell MMIO (see nvme_update_cq_eventidx) */
+        nvme_update_cq_eventidx(n->cq[index_poller]);
         break;
     default:
         for (i = 1; i <= n->nr_io_queues; i++) {
             if (n->should_isr[i]) {
                 nvme_isr_notify_io(n->cq[i]);
+                nvme_update_cq_eventidx(n->cq[i]);
                 n->should_isr[i] = false;
             }
         }

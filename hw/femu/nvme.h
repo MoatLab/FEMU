@@ -1813,6 +1813,7 @@ int nvme_check_cqid(FemuCtrl *n, uint16_t cqid);
 void nvme_inc_cq_tail(NvmeCQueue *cq);
 void nvme_inc_sq_head(NvmeSQueue *sq);
 void nvme_update_cq_head(NvmeCQueue *cq);
+void nvme_update_cq_eventidx(NvmeCQueue *cq);
 uint8_t nvme_cq_full(NvmeCQueue *cq);
 uint8_t nvme_sq_empty(NvmeSQueue *sq);
 void nvme_update_sq_tail(NvmeSQueue *sq);
