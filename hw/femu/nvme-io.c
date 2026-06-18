@@ -465,6 +465,52 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
     if (err)
         return err;
 
+    /*
+     * Single-PRP fast path (NoSSD inline only). The common 4 KiB-class
+     * read/write needs at most prp1 (one page) plus optionally prp2 (a second
+     * contiguous page) -- never an indirect PRP list. The generic
+     * nvme_map_prp + backend_rw stack costs a per-I/O sglist g_malloc/g_free
+     * and a cross-core object_ref/unref atomic on the shared PCIDevice. When
+     * the whole transfer fits in one or two PRP pages, copy each page directly
+     * between guest memory and the backend with dma_memory_rw, with no list.
+     *
+     * Falls through to the generic path for anything needing an indirect PRP
+     * list (transfer spanning > 2 pages), a CMB, or any non-inline / FTL mode.
+     * NoSSD does not inject uncorrectable read errors, so skipping that check
+     * (done on the generic read path) is correct here.
+     */
+    if (NOSSD(n) && n->hiops_inline && !n->cmbsz && prp1) {
+        uint64_t pg = n->page_size;
+        uint64_t off0 = prp1 & (pg - 1);
+        uint64_t len0 = MIN(data_size, pg - off0);
+        uint64_t rem = data_size - len0;
+        if (rem == 0 || (rem <= pg && prp2 && (prp2 & (pg - 1)) == 0)) {
+            DMADirection dir = req->is_write ? DMA_DIRECTION_TO_DEVICE
+                                             : DMA_DIRECTION_FROM_DEVICE;
+            AddressSpace *as = pci_get_address_space(&n->parent_obj);
+            uint8_t *mb = n->mbe->logical_space;
+            uint64_t moff = data_offset;
+
+            req->slba = slba;
+            req->nlb = nlb;
+            req->status = NVME_SUCCESS;
+            if (req->is_write && n->subsys && n->subsys->endgrp.fdp.enabled) {
+                req->fdp_dspec = le16_to_cpu(rw->dspec);
+                req->fdp_dtype = (le16_to_cpu(rw->control) >> 4) & 0xF;
+            }
+
+            if (dma_memory_rw(as, prp1, mb + moff, len0, dir,
+                              MEMTXATTRS_UNSPECIFIED)) {
+                return NVME_DNR;
+            }
+            if (rem && dma_memory_rw(as, prp2, mb + moff + len0, rem, dir,
+                                     MEMTXATTRS_UNSPECIFIED)) {
+                return NVME_DNR;
+            }
+            return NVME_SUCCESS;
+        }
+    }
+
     if (nvme_map_prp(&req->qsg, &req->iov, prp1, prp2, data_size, n)) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
                             offsetof(NvmeRwCmd, prp1), 0, ns->id);
