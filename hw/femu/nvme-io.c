@@ -1,6 +1,7 @@
 #include "./nvme.h"
 
 static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
+static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req);
 
 static void nvme_update_sq_eventidx(const NvmeSQueue *sq)
 {
@@ -75,8 +76,35 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
     NvmeRequest *req;
     int processed = 0;
 
+    /*
+     * Inline completion fast path (NoSSD only). NoSSD has a no-op timing model
+     * (expire_time == stime), so bouncing each request through the to_ftl ring
+     * + per-poller pqueue + nvme_process_cq_cpl is pure overhead and the
+     * dominant serialization point. When enabled, complete each request
+     * directly in this sweep and batch one interrupt at the end. Only ever
+     * true for NoSSD; every other mode keeps the FTL-thread completion path
+     * untouched.
+     */
+    bool inline_mode = NOSSD(n) && n->hiops_inline;
+    bool did_isr = false;
+
     nvme_update_sq_tail(sq);
     while (!(nvme_sq_empty(sq))) {
+        /*
+         * Inline mode completes into the CQ within this same sweep, so unlike
+         * the FTL path (which is latency-throttled and drip-feeds completions
+         * across many sweeps) it can drain a whole SQ burst at once. Stop if the
+         * paired CQ has no free slot, leaving the SQE unconsumed (head not yet
+         * advanced, command not yet executed) to retry next sweep; otherwise a
+         * deep SQ feeding a smaller, slowly-drained CQ would overwrite CQEs the
+         * guest has not read and flip the phase tag early.
+         */
+        if (inline_mode) {
+            NvmeCQueue *cq = n->cq[sq->cqid];
+            if (cq && cq->is_active && nvme_cq_full(cq)) {
+                break;
+            }
+        }
         if (sq->phys_contig) {
             addr = sq->dma_addr + sq->head * n->sqe_size;
             /*
@@ -140,20 +168,54 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
             }
         }
 
-        /*
-         * Always enqueue to FTL ring for completion. Failed requests
-         * will hit the FTL default case (lat=0) and get completed
-         * immediately with the error status. Without this, failed
-         * requests would leak from the request list and never be
-         * completed back to the guest, eventually causing the NVMe
-         * driver to timeout and crash.
-         */
-        int rc = femu_ring_enqueue(n->to_ftl[index_poller], (void *)&req, 1);
-        if (rc != 1) {
-            femu_err("enqueue failed, ret=%d\n", rc);
+        if (inline_mode) {
+            /*
+             * Inline completion: NoSSD has zero latency, so the request is
+             * ready now. Post the CQE directly here instead of bouncing it
+             * through the to_ftl ring + per-poller pqueue in
+             * nvme_process_cq_cpl, then return it to the SQ free list (mirrors
+             * the cq_cpl path). The interrupt is fired once at sweep end.
+             * Failed requests carry their error status in the same CQE, so the
+             * leak hazard that the FTL-ring path guards against does not arise.
+             */
+            NvmeCQueue *cq = n->cq[sq->cqid];
+            if (cq && cq->is_active) {
+                /* CQ space guaranteed by the nvme_cq_full check at loop top */
+                nvme_post_cqe(cq, req);
+                did_isr = true;
+                n->poller_ctr[index_poller].nr_tt_ios++;
+            }
+            QTAILQ_INSERT_TAIL(&sq->req_list, req, entry);
+        } else {
+            /*
+             * Always enqueue to FTL ring for completion. Failed requests
+             * will hit the FTL default case (lat=0) and get completed
+             * immediately with the error status. Without this, failed
+             * requests would leak from the request list and never be
+             * completed back to the guest, eventually causing the NVMe
+             * driver to timeout and crash.
+             */
+            int rc = femu_ring_enqueue(n->to_ftl[index_poller], (void *)&req, 1);
+            if (rc != 1) {
+                femu_err("enqueue failed, ret=%d\n", rc);
+            }
         }
 
         processed++;
+    }
+
+    /*
+     * Inline mode batches the interrupt: one fire per sweep for this SQ's CQ,
+     * plus the CQ head/eventidx publish so the guest suppresses its CQ-head
+     * doorbell MMIO (see nvme_update_cq_eventidx). The FTL-ring path fires its
+     * interrupt from nvme_process_cq_cpl instead.
+     */
+    if (inline_mode && did_isr) {
+        NvmeCQueue *cq = n->cq[sq->cqid];
+        if (cq && cq->is_active) {
+            nvme_isr_notify_io(cq);
+            nvme_update_cq_eventidx(cq);
+        }
     }
 
     nvme_update_sq_eventidx(sq);

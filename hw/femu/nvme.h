@@ -1746,6 +1746,7 @@ typedef struct FemuCtrl {
     uint8_t         multipoller_enabled;
     uint32_t        poller_ratio;  /* queues per poller; nr_pollers = ceil(N/ratio) */
     uint32_t        nr_pollers;
+    bool            hiops_inline;  /* NoSSD: complete I/O inline in the SQ sweep */
 
     /*
      * Poller quiesce handshake. A poller sets poller_in_sweep[idx]=true (with
