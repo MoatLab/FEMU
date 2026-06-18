@@ -316,9 +316,16 @@ static void nvme_init_poller(FemuCtrl *n)
     for (i = 1; i <= n->nr_pollers; i++) {
         args[i].n = n;
         args[i].index = i;
-        qemu_thread_create(&n->poller[i], "femu-nvme-poller", nvme_poller,
+        /*
+         * Thread name must fit the kernel's 15-char TASK_COMM_LEN limit
+         * (incl. NUL), or pthread_setname_np() silently fails and the poller
+         * inherits its creator's comm (e.g. "CPU N/KVM"). That misnames the
+         * pollers, breaking per-thread identification and CPU pinning. Keep
+         * "femu-poller" (11 chars) rather than the 16-char "femu-nvme-poller".
+         */
+        qemu_thread_create(&n->poller[i], "femu-poller", nvme_poller,
                 &args[i], QEMU_THREAD_JOINABLE);
-        femu_debug("femu-nvme-poller [%d] created ...\n", i - 1);
+        femu_debug("femu-poller [%d] created ...\n", i - 1);
     }
 }
 
