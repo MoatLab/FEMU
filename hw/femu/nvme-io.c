@@ -229,13 +229,15 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
         nvme_post_cqe(cq, req);
         QTAILQ_INSERT_TAIL(&req->sq->req_list, req, entry);
         processed++;
-        n->nr_tt_ios++;
+        /* per-poller counters: no shared cacheline on the hot path */
+        n->poller_ctr[index_poller].nr_tt_ios++;
         if (now - req->expire_time >= 20000) {
-            n->nr_tt_late_ios++;
+            n->poller_ctr[index_poller].nr_tt_late_ios++;
             if (n->print_log) {
-                femu_debug("%s,diff,pq.count=%lu,%" PRId64 ", %lu/%lu\n",
+                femu_debug("%s,diff,pq.count=%lu,%" PRId64 ", %ld/%ld\n",
                            n->devname, pqueue_size(pq), now - req->expire_time,
-                           n->nr_tt_late_ios, n->nr_tt_ios);
+                           n->poller_ctr[index_poller].nr_tt_late_ios,
+                           n->poller_ctr[index_poller].nr_tt_ios);
             }
         }
         n->should_isr[req->sq->sqid] = true;

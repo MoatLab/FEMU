@@ -254,6 +254,17 @@ static void nvme_init_poller(FemuCtrl *n)
         n->poller_in_sweep = g_malloc0(sizeof(bool) * (n->nr_pollers + 1));
     }
 
+    /*
+     * per-poller I/O counters, cacheline-isolated (1-based); see FemuPollerCtr.
+     * qemu_memalign(64) so each slot's QEMU_ALIGNED(64) padding actually lands
+     * on its own cacheline (g_malloc0 would not guarantee 64-byte alignment).
+     */
+    if (!n->poller_ctr) {
+        size_t ctr_sz = sizeof(FemuPollerCtr) * (n->nr_pollers + 1);
+        n->poller_ctr = qemu_memalign(64, ctr_sz);
+        memset(n->poller_ctr, 0, ctr_sz);
+    }
+
     /* Coperd: we put NvmeRequest into these rings */
     n->to_ftl = g_malloc0(sizeof(struct rte_ring *) * (n->nr_pollers + 1));
     for (i = 1; i <= n->nr_pollers; i++) {

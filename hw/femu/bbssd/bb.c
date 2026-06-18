@@ -51,12 +51,20 @@ static void bb_flip(FemuCtrl *n, NvmeCmd *cmd)
         ssd->sp.ch_xfer_lat = 0;
         femu_log("%s,FEMU Delay Emulation [Disabled]!\n", n->devname);
         break;
-    case FEMU_RESET_ACCT:
-        n->nr_tt_ios = 0;
-        n->nr_tt_late_ios = 0;
-        femu_log("%s,Reset tt_late_ios/tt_ios,%lu/%lu\n", n->devname,
-                n->nr_tt_late_ios, n->nr_tt_ios);
+    case FEMU_RESET_ACCT: {
+        /* counters are sharded per poller (see FemuPollerCtr); sum then reset */
+        int64_t tt = 0, late = 0;
+        if (n->poller_ctr) {
+            for (uint32_t p = 1; p <= n->nr_pollers; p++) {
+                tt += n->poller_ctr[p].nr_tt_ios;
+                late += n->poller_ctr[p].nr_tt_late_ios;
+                n->poller_ctr[p].nr_tt_ios = 0;
+                n->poller_ctr[p].nr_tt_late_ios = 0;
+            }
+        }
+        femu_log("%s,Reset tt_late_ios/tt_ios,%ld/%ld\n", n->devname, late, tt);
         break;
+    }
     case FEMU_ENABLE_LOG:
         n->print_log = true;
         femu_log("%s,Log print [Enabled]!\n", n->devname);

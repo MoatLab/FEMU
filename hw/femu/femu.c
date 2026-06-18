@@ -902,6 +902,8 @@ static void nvme_destroy_poller(FemuCtrl *n)
     g_free(n->should_isr);
     g_free((void *)n->poller_in_sweep);
     n->poller_in_sweep = NULL;
+    qemu_vfree(n->poller_ctr);   /* allocated with qemu_memalign */
+    n->poller_ctr = NULL;
 }
 
 static void femu_exit(PCIDevice *pci_dev)

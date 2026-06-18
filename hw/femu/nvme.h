@@ -1564,6 +1564,21 @@ typedef struct FemuExtCtrlOps {
     uint16_t (*get_log)(struct FemuCtrl *, NvmeCmd *);
 } FemuExtCtrlOps;
 
+/*
+ * Per-poller I/O accounting, cacheline-isolated. The old single
+ * FemuCtrl.nr_tt_ios was bumped by every poller on every I/O; that one shared
+ * cacheline ping-ponged across all poller threads (and across sockets) and was
+ * the dominant serialization capping a single multi-queue device. Sharding it
+ * into 64-byte-aligned per-poller slots (1-based, indexed by poller) removes
+ * the false sharing; readers sum across the slots. Pure statistics, no
+ * correctness state.
+ */
+typedef struct FemuPollerCtr {
+    int64_t nr_tt_ios;
+    int64_t nr_tt_late_ios;
+    char    pad[64 - 2 * sizeof(int64_t)];
+} QEMU_ALIGNED(64) FemuPollerCtr;
+
 typedef struct FemuCtrl {
     PCIDevice       parent_obj;
     MemoryRegion    iomem;
@@ -1725,8 +1740,7 @@ typedef struct FemuCtrl {
     bool            *should_isr;
     bool            poller_on;
 
-    int64_t         nr_tt_ios;
-    int64_t         nr_tt_late_ios;
+    FemuPollerCtr   *poller_ctr;   /* per-poller I/O accounting (1-based) */
     bool            print_log;
 
     uint8_t         multipoller_enabled;
