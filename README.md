@@ -368,6 +368,14 @@ Ultra-fast NVMe emulation without storage logic.
 - Performance upper-bound testing
 - Fast storage prototyping
 
+**High-IOPS path.** NoSSD mode carries a set of optimizations (shadow-doorbell
+MMIO suppression, per-poller counter sharding, M:N poller↔queue decoupling via
+`poller_ratio`, inline completion, a single-PRP fast path, and NUMA placement of
+the emulated backend). With SPDK driven inside the guest and strict socket
+isolation on a 2-socket host, a single VM sustains tens of millions of 512B
+random-read IOPS. See `hw/femu/docs/HIOPS.md` and the reproduction harness in
+`hw/femu/scripts/hiops/` for the configuration and measured results.
+
 ### Computational Storage Mode (CSD)
 
 Experimental computational storage support derived from CEMU. CSD is selected
@@ -491,10 +499,28 @@ hw/femu/                    # Main FEMU implementation
 ├── csd/                    # Computational Storage mode
 │   ├── csd.c               # CSD command handling
 │   └── csd.h               # CSD private command definitions
+├── nand/                   # NAND flash model
 ├── timing-model/           # Performance modeling
-├── backend/                # Storage backends
-└── lib/                    # Utility libraries
+├── backend/                # Storage backends (emulated medium / mbe)
+├── lib/                    # Utility libraries
+├── inc/                    # Shared headers (rings, pqueue, ...)
+├── scripts/                # Build + run scripts (see below)
+└── docs/                   # FEMU documentation
 ```
+
+All FEMU-specific code, scripts, and docs live under `hw/femu/` to keep the
+project self-contained and easy to maintain long term. For backward
+compatibility, a top-level `femu-scripts` symlink points to `hw/femu/scripts/`,
+so the historical `cd build-femu && ../femu-scripts/...` workflow still works.
+
+Docs under `hw/femu/docs/`:
+- `HIOPS.md` — NoSSD high-IOPS optimizations, results, and reproduction.
+- `FEMU-Master-Roadmap.md` — design roadmap.
+
+Scripts under `hw/femu/scripts/` (run from your `build-femu/` dir):
+- `femu-compile.sh`, `femu-copy-scripts.sh` — build and stage the run scripts.
+- `run-{blackbox,whitebox,zns,nossd,csd}.sh` — per-mode launchers.
+- `hiops/` — the socket-isolation high-IOPS benchmark harness.
 
 ### Adding New Features
 
