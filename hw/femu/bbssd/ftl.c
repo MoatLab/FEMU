@@ -1153,6 +1153,36 @@ static FemuReclaimUnit *fdp_get_new_ru(struct ssd *ssd, uint16_t rgidx,
 }
 
 /*
+ * fdp_get_new_ru_spread - like fdp_get_new_ru but, when the preferred reclaim
+ * group is exhausted, fall back to any other RG that still has a free RU.
+ *
+ * This is for NON-placement (default) writes only. NVMe FDP does not bind a
+ * default write to a specific RG (the controller chooses), so spreading default
+ * writes across all RGs is spec-compliant and is what makes the FULL device
+ * usable when nrg>1. Without it, all default writes funnel to rg[0], which owns
+ * only tt_nru/nrg of the capacity, so the device wedges at ~1/nrg full with no
+ * victims yet to GC. Directive (placement) writes must NOT use this -- they are
+ * pinned to their requested RG via fdp_get_new_ru().
+ */
+static FemuReclaimUnit *fdp_get_new_ru_spread(struct ssd *ssd, uint16_t rgidx,
+                                              uint16_t ruhid)
+{
+    FemuReclaimUnit *new_ru = fdp_get_new_ru(ssd, rgidx, ruhid);
+    if (new_ru) {
+        return new_ru;
+    }
+    /* preferred RG is full; try the others in round-robin order */
+    for (uint16_t off = 1; off < (uint16_t)ssd->nrg; off++) {
+        uint16_t alt = (rgidx + off) % (uint16_t)ssd->nrg;
+        new_ru = fdp_get_new_ru(ssd, alt, ruhid);
+        if (new_ru) {
+            return new_ru;
+        }
+    }
+    return NULL;
+}
+
+/*
  * fdp_get_new_page - get next PPA from an RU's write pointer
  */
 static struct ppa fdp_get_new_page(struct ssd *ssd, FemuReclaimUnit *ru)
@@ -1182,7 +1212,8 @@ static struct ppa fdp_get_new_page(struct ssd *ssd, FemuReclaimUnit *ru)
 static FemuReclaimUnit *fdp_advance_ru_pointer(struct ssd *ssd,
                                                FemuReclaimGroup *rg,
                                                FemuRuHandle *ruh,
-                                               FemuReclaimUnit *ru)
+                                               FemuReclaimUnit *ru,
+                                               bool allow_spread)
 {
     struct ssdparams *spp = &ssd->sp;
     struct ru_mgmt *rm = rg->ru_mgmt;
@@ -1241,7 +1272,20 @@ static FemuReclaimUnit *fdp_advance_ru_pointer(struct ssd *ssd,
                 /* allocate a new RU for this RUH cuase ruh->curr_ru is full */
                 if (ruh != NULL) {
                     check_addr(wpp->blk, spp->blks_per_pl);
-                    new_ru = fdp_get_new_ru(ssd, ru->rgidx, ruh->ruhid);
+                    /*
+                     * Prefer the same RG as the RU that just filled. For the
+                     * default host-write frontier (allow_spread) fall back to any
+                     * other RG with a free RU: with nrg>1 this keeps the whole
+                     * device usable, since a single RG's capacity (tt_nru/nrg) is
+                     * otherwise exhausted during fill -- before overwrites create
+                     * GC victims -- and the device wedges at ~1/nrg. Only the
+                     * future frontier moves RG; written data keeps its RG via its
+                     * PPA. The GC destination frontier passes allow_spread=false
+                     * so GC stays pinned to the victim's RG (correct accounting).
+                     */
+                    new_ru = allow_spread ?
+                        fdp_get_new_ru_spread(ssd, ru->rgidx, ruh->ruhid) :
+                        fdp_get_new_ru(ssd, ru->rgidx, ruh->ruhid);
                     if (!new_ru) {
                         ftl_err("No free RU for ruh %d: device full - point %s L:%d\n",
                                 ruh->ruhid, __FILE__, __LINE__);
@@ -1724,20 +1768,26 @@ static void gc_write_page_fdp_style(struct ssd *ssd, struct ppa *old_ppa,
      * right after the advance.
      */
 
+    /*
+     * GC destination frontier stays PINNED to the victim's RG (allow_spread=
+     * false): a GC write must reclaim within the same reclaim group, and pinning
+     * guarantees ret_ru->rgidx == dest_ru->rgidx so the rus[dest_ru->rgidx]
+     * indexing below is correct.
+     */
     if(dest_ruh->ruh_type == NVME_RUHT_PERSISTENTLY_ISOLATED ){
         // handle ruh->ru pointer after adv
-        if( (ret_ru = fdp_advance_ru_pointer(ssd, &ssd->rg[dest_ru->rgidx], dest_ru->ruh, dest_ru)) != dest_ru){
+        if( (ret_ru = fdp_advance_ru_pointer(ssd, &ssd->rg[dest_ru->rgidx], dest_ru->ruh, dest_ru, false)) != dest_ru){
             dest_ruh->gc_ru = ret_ru;
         }
     }else if (dest_ruh->ruh_type == NVME_RUHT_INITIALLY_ISOLATED ){
         int gcruh_id = ssd->nruhs-1;
         ftl_assert( dest_ruh->ruhid == gcruh_id );
-        if( (ret_ru = fdp_advance_ru_pointer(ssd, &ssd->rg[dest_ru->rgidx], dest_ruh, dest_ru)) != dest_ru ) {
+        if( (ret_ru = fdp_advance_ru_pointer(ssd, &ssd->rg[dest_ru->rgidx], dest_ruh, dest_ru, false)) != dest_ru ) {
             //Do ugly updates
             ssd->ruhs[gcruh_id].rus[dest_ru->rgidx] = ret_ru;
             ssd->ruhs[gcruh_id].curr_ru = ret_ru;
             ssd->ruhs[gcruh_id].ruh->rus[dest_ru->rgidx] = ret_ru->nvme_ru;
-        } 
+        }
     }
     
     ftl_assert((ret_ru != NULL));
@@ -1978,7 +2028,15 @@ static int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid,
         }
     }
 
-    mark_ru_free(ssd, rgid, victim_ru);
+    /*
+     * Free the victim into ITS OWN reclaim group, not the caller's rgid. With
+     * the cross-RG spread fallback a victim can belong to a different RG than
+     * the GC was invoked for; freeing it into the wrong RG corrupts per-RG
+     * free_ru_cnt/free_ru_list -- GC then keeps "reclaiming" without ever
+     * restoring free RUs to the RG under pressure and livelocks on fully-valid
+     * RUs. mark_ru_free uses ssd->rg[rgid], so pass the victim's rgidx.
+     */
+    mark_ru_free(ssd, victim_ru->rgidx, victim_ru);
     return 0;
 }
 
@@ -1990,7 +2048,6 @@ static uint64_t ssd_stream_write(FemuCtrl *n, struct ssd *ssd,
 {
     NvmeNamespace *ns = req->ns;
     struct ssdparams *spp = &ssd->sp;
-    FemuReclaimGroup *rg;
     FemuRuHandle *ruh;
     FemuReclaimUnit *ru;
 
@@ -2007,9 +2064,17 @@ static uint64_t ssd_stream_write(FemuCtrl *n, struct ssd *ssd,
     uint16_t pid = req->fdp_dspec;
     uint8_t dtype = req->fdp_dtype;
     uint16_t ph, rgid, ruhid;
+    /*
+     * is_placement: the host issued a valid placement directive selecting a
+     * specific reclaim group. Such writes MUST stay pinned to that RG (no cross-
+     * RG spread, no rgid re-sync). Non-placement (default) writes have no RG
+     * guarantee and may spread across RGs to use the whole nrg>1 device.
+     */
+    bool is_placement = true;
 
     if (dtype != NVME_DIRECTIVE_DATA_PLACEMENT ||
         !nvme_parse_pid(ns, pid, &ph, &rgid)) {
+        is_placement = false;
         /* generate INVALID_PID event if placement was attempted */
         if (dtype == NVME_DIRECTIVE_DATA_PLACEMENT && ssd->n->subsys) {
             NvmeEnduranceGroup *endgrp = &ssd->n->subsys->endgrp;
@@ -2035,7 +2100,6 @@ static uint64_t ssd_stream_write(FemuCtrl *n, struct ssd *ssd,
                 (unsigned)ruhid, (unsigned long)ssd->nruhs);
         ruhid = 0;
     }
-    rg = &ssd->rg[rgid];
     ruh = &ssd->ruhs[ruhid];
 
     // FDP_TRACE(ssd, "WRITE lpn=%lu-%lu dtype=%u dspec=0x%x ph=%u "
@@ -2056,11 +2120,16 @@ static uint64_t ssd_stream_write(FemuCtrl *n, struct ssd *ssd,
         //for (int gi = 0; gi < max_fg_gc && !ruh->curr_ru; gi++) {
         //    r = do_gc_fdp_style(ssd, rgid, ruhid, true);
         //    if (r == -1) break;
-            /* GC may have freed a RU; try to grab it */
-            FemuReclaimUnit *fresh = fdp_get_new_ru(ssd, rgid, ruhid);
+            /* GC may have freed a RU; try to grab it. For default writes spread
+             * across RGs so a single exhausted RG does not wedge the device when
+             * nrg>1; placement writes stay pinned to their requested RG. The new
+             * RU may come from a different RG, so index rus[] by fresh->rgidx. */
+            FemuReclaimUnit *fresh = is_placement ?
+                fdp_get_new_ru(ssd, rgid, ruhid) :
+                fdp_get_new_ru_spread(ssd, rgid, ruhid);
             if (fresh) {
-                ruh->rus[rgid] = fresh;
-                ruh->ruh->rus[rgid] = fresh->nvme_ru;
+                ruh->rus[fresh->rgidx] = fresh;
+                ruh->ruh->rus[fresh->rgidx] = fresh->nvme_ru;
                 ruh->curr_ru = fresh;
             }else{
                 ftl_err("NO reclaim Unit. Device is full error\n");
@@ -2072,6 +2141,14 @@ static uint64_t ssd_stream_write(FemuCtrl *n, struct ssd *ssd,
             return 0; /* return zero latency; write will be retried by GC */
         }
     }
+    /*
+     * Re-sync rgid to the active RU's actual RG. For default writes the spread
+     * fallback may have placed curr_ru in a different RG than requested; for
+     * placement writes curr_ru stays pinned to the requested RG so this is a
+     * no-op. Keeps the assert and per-RG bookkeeping (rus[rgid], foreground GC
+     * target, post-write rotation) consistent either way.
+     */
+    rgid = ruh->curr_ru->rgidx;
     ru = ruh->rus[rgid];
     ru = ruh->curr_ru;
     ftl_assert(ruh->curr_ru == ruh->rus[rgid]);
@@ -2117,12 +2194,17 @@ static uint64_t ssd_stream_write(FemuCtrl *n, struct ssd *ssd,
             ru->nvme_ru->ruamw--; //TODO ? Does this really decrements page KiB?
         }
 
-        /* advance RU write pointer; may allocate new RU */
-        FemuReclaimUnit *ret = fdp_advance_ru_pointer(ssd, rg, ruh, ru);
+        /* advance RU write pointer; may allocate new RU. Use the RU's OWN RG
+         * (it can differ from the request's rgid after a spread fallback) so
+         * the filled RU is classified into the correct RG's victim/full list.
+         * allow_spread only for default writes; placement writes stay pinned. */
+        FemuReclaimUnit *ret = fdp_advance_ru_pointer(ssd,
+                                   &ssd->rg[ru->rgidx], ruh, ru, !is_placement);
         if (ret && ret != ruh->curr_ru) {
-            ruh->rus[rgid] = ret;
+            /* the new active RU may have come from a different RG via spread */
+            ruh->rus[ret->rgidx] = ret;
             ruh->curr_ru = ret;
-            ruh->ruh->rus[rgid] = ret->nvme_ru;
+            ruh->ruh->rus[ret->rgidx] = ret->nvme_ru;
             ru = ret;
         } else if (!ret) {
             /*
