@@ -258,7 +258,8 @@ struct FemuReclaimUnit {
     QTAILQ_ENTRY(FemuReclaimUnit) entry;
     int vpc;
     int ipc;
-    int pos;
+    int pos;       /* heap index in the per-RG (global) victim pqueue */
+    int ruh_pos;   /* heap index in the per-RUH victim pqueue (PI RUHs) */
     int n_lines;
     int next_line_index;
     int npages;

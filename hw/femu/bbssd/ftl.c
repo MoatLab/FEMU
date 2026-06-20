@@ -167,6 +167,24 @@ static inline void victim_ru_set_pos(void *a, size_t pos)
     ((FemuReclaimUnit *)a)->pos = pos;
 }
 
+/*
+ * A PI-type RUH keeps its full RUs in BOTH the per-RG (global) victim pqueue
+ * and its own per-RUH victim pqueue simultaneously. The two heaps must track
+ * each RU's index independently, so the per-RUH queues use ruh_pos via these
+ * callbacks. Sharing the single `pos` field across both heaps (issue #189)
+ * corrupted whichever heap was touched second and crashed in
+ * victim_ru_get_pri(NULL).
+ */
+static inline size_t victim_ru_get_pos_ruh(void *a)
+{
+    return ((FemuReclaimUnit *)a)->ruh_pos;
+}
+
+static inline void victim_ru_set_pos_ruh(void *a, size_t pos)
+{
+    ((FemuReclaimUnit *)a)->ruh_pos = pos;
+}
+
 /* FDP: victim RU priority queue callbacks (cost-benefit by my_cb) */
 static inline int victim_ru_cmp_pri_by_cb(pqueue_pri_t next, pqueue_pri_t curr)
 {
@@ -1377,13 +1395,30 @@ static void mark_page_invalid_fdp(struct ssd *ssd, struct ppa *ppa)
         if (ru->pos) {
             pqueue_change_priority(rm->victim_ru_pq, ru->vpc, ru);
         }
+        /*
+         * Only GC_NOISY_RUH_CUSTOM consults the per-RUH victim queue; keep its
+         * ordering in sync there. The per-RUH heap indexes via ruh_pos, so it
+         * no longer aliases the global queue's pos (issue #189). ruh_pos != 0
+         * is a valid "in per-RUH queue" marker here because, for this strategy,
+         * every per-RUH pop/remove is paired with a ruh_pos reset.
+         */
+        if (rm->mgmt_type == GC_NOISY_RUH_CUSTOM && ru->ruh_pos &&
+            ru->ruh && ru->ruh->ru_mgmt) {
+            pqueue_change_priority(ru->ruh->ru_mgmt->victim_ru_pq, ru->vpc, ru);
+        }
         if (was_full_ru) {
             QTAILQ_REMOVE(&rm->full_ru_list, ru, entry);
             rm->full_ru_cnt--;
             pqueue_insert(rm->victim_ru_pq, ru);
             rm->victim_ru_cnt++;
-            /* also insert into per-RUH queue if applicable */
-            if (ru->ruh && ru->ruh->ru_mgmt) {
+            /*
+             * Mirror into the per-RUH queue ONLY for the strategy that reads it
+             * (GC_NOISY_RUH_CUSTOM). GREEDY/RAND never pop the per-RUH queue, so
+             * a second membership there would just go stale on the global pop
+             * and later corrupt that heap (issue #189).
+             */
+            if (rm->mgmt_type == GC_NOISY_RUH_CUSTOM &&
+                ru->ruh && ru->ruh->ru_mgmt) {
                pqueue_insert(ru->ruh->ru_mgmt->victim_ru_pq, ru);
                ru->ruh->ru_mgmt->victim_ru_cnt++;
             }
@@ -1475,6 +1510,15 @@ static FemuReclaimUnit *select_victim_ru_from_ruh(struct ssd *ssd,
 
     victim_ru = pqueue_pop(ru_mgmt->victim_ru_pq);
     if (victim_ru) {
+        /*
+         * pqueue_pop does not clear the popped element's stored index, so reset
+         * ruh_pos to keep it a truthful "not in per-RUH queue" marker (same
+         * discipline as the NOISY path). Without this, a later change_priority
+         * or insert could act on a stale per-RUH index -- the issue #189 bug
+         * class. Dormant today (no strategy fills the per-RUH queue on this
+         * path) but hardened for when one does.
+         */
+        victim_ru->ruh_pos = 0;
         ru_mgmt->victim_ru_cnt--;
     }
     return victim_ru;
@@ -1532,13 +1576,35 @@ static FemuReclaimUnit *select_victim_ru(struct ssd *ssd, uint16_t rgid,
             victim_ru = pqueue_pop(
                 ssd->ruhs[best_ruh].ru_mgmt->victim_ru_pq);
             if (victim_ru) {
+                /*
+                 * pqueue_pop does NOT clear the element's stored index, so reset
+                 * ruh_pos explicitly to keep it a truthful "in per-RUH queue"
+                 * marker (the change_priority guard relies on it).
+                 */
+                victim_ru->ruh_pos = 0;
                 ssd->ruhs[best_ruh].ru_mgmt->victim_ru_cnt--;
-                /* also remove from global queue */
-                pqueue_remove(rm->victim_ru_pq, victim_ru);
+                /* also remove from the global queue (uses the still-valid pos);
+                 * the global victim_ru_cnt-- and pos=0 happen at the shared
+                 * cleanup below, so do not touch them here */
+                if (victim_ru->pos) {
+                    pqueue_remove(rm->victim_ru_pq, victim_ru);
+                }
             }
         } else {
             /* fallback to global greedy */
             victim_ru = pqueue_pop(rm->victim_ru_pq);
+            /*
+             * The global-popped RU may still have a per-RUH twin (NOISY mirrors
+             * full RUs into both queues). Drop it from the per-RUH queue here,
+             * using the still-valid ruh_pos, so it does not linger as a stale
+             * entry (later change_priority / duplicate insert on put-back).
+             */
+            if (victim_ru && victim_ru->ruh_pos &&
+                victim_ru->ruh && victim_ru->ruh->ru_mgmt) {
+                pqueue_remove(victim_ru->ruh->ru_mgmt->victim_ru_pq, victim_ru);
+                victim_ru->ruh_pos = 0;
+                victim_ru->ruh->ru_mgmt->victim_ru_cnt--;
+            }
         }
         break;
     }
@@ -1581,14 +1647,26 @@ static FemuReclaimUnit *select_victim_ru(struct ssd *ssd, uint16_t rgid,
             if (rm->mgmt_type == GC_GLOBAL_CB){
                 pqueue_insert(rm->victim_ru_cb, victim_ru);
             }else{
-                //TODO per ruh->victim_ru_pq(experimental) here
                 pqueue_insert(rm->victim_ru_pq, victim_ru);
+                /*
+                 * GC_NOISY_RUH_CUSTOM selection popped this RU from BOTH the
+                 * per-RUH and global queues (and zeroed ruh_pos + decremented
+                 * the per-RUH count). Restore the per-RUH membership and count
+                 * too, or they drift out of sync. pqueue_insert re-sets ruh_pos.
+                 */
+                if (rm->mgmt_type == GC_NOISY_RUH_CUSTOM &&
+                    victim_ru->ruh && victim_ru->ruh->ru_mgmt) {
+                    pqueue_insert(victim_ru->ruh->ru_mgmt->victim_ru_pq,
+                                  victim_ru);
+                    victim_ru->ruh->ru_mgmt->victim_ru_cnt++;
+                }
             }
             return NULL;
         }
     }
 
     victim_ru->pos = 0;
+    victim_ru->ruh_pos = 0;
     rm->victim_ru_cnt--;
 
     return victim_ru;
@@ -1729,6 +1807,7 @@ static void mark_ru_free(struct ssd *ssd, uint16_t rgid,
     ru->vpc = 0;
     ru->ipc = 0;
     ru->pos = 0;
+    ru->ruh_pos = 0;
     ru->next_line_index = 1;
     ru->utilization = 0.0f;
     ru->my_cb = 0.0f;
@@ -2148,6 +2227,8 @@ static void femu_fdp_init_ssd_reclaim_unit(struct ssd *ssd,
     femu_ru->next_line_index = 1;
     femu_ru->vpc = 0;
     femu_ru->ipc = 0;
+    femu_ru->pos = 0;
+    femu_ru->ruh_pos = 0;     /* not yet in any victim pqueue */
     femu_ru->ssd_wptr = g_malloc0(sizeof(struct write_pointer));
     femu_ru->npages = spp->lines_per_ru * spp->pgs_per_line;
 
@@ -2285,15 +2366,17 @@ static void femu_fdp_ssd_init_ru_handles(FemuCtrl *n, struct ssd *ssd)
             ssd->ruhs[i].ru_mgmt->custom_gc_threshold = 0;
             QTAILQ_INIT(&ssd->ruhs[i].ru_mgmt->free_ru_list);
             QTAILQ_INIT(&ssd->ruhs[i].ru_mgmt->full_ru_list);
+            /* per-RUH queues index via ruh_pos (see victim_ru_*_pos_ruh) so
+             * they do not alias the per-RG queue's `pos` (issue #189) */
             ssd->ruhs[i].ru_mgmt->victim_ru_pq =
                 pqueue_init(ssd->rg[0].tt_nru, victim_ru_cmp_pri,
                             victim_ru_get_pri, victim_ru_set_pri,
-                            victim_ru_get_pos, victim_ru_set_pos);
+                            victim_ru_get_pos_ruh, victim_ru_set_pos_ruh);
             ssd->ruhs[i].ru_mgmt->victim_ru_cb =
                 pqueue_init(ssd->rg[0].tt_nru, victim_ru_cmp_pri_by_cb,
                             victim_ru_get_pri_by_cb,
                             victim_ru_set_pri_by_cb,
-                            victim_ru_get_pos, victim_ru_set_pos);
+                            victim_ru_get_pos_ruh, victim_ru_set_pos_ruh);
         }
 
         ftl_log("FDP: ruh[%d] type=%d, curr_ru=%d (line=%d)\n",
@@ -2402,6 +2485,23 @@ static void ssd_trim_fdp_style(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
     /* reset active RUs and stats for each RUH across all RGs */
     ruh = endgrp->fdp.ruhs;
     for (int i = 0; i < (int)endgrp->fdp.nruh; i++, ruh++) {
+        /*
+         * Empty this RUH's victim queue too. The per-RG drain above freed the
+         * RUs (and zeroed their ruh_pos via mark_ru_free), but the per-RUH heap
+         * still physically references them; drop those stale entries so trim
+         * leaves the per-RUH queue consistent (PI RUHs only). The RU objects
+         * are already freed, so just clear the heap and its counter.
+         */
+        if (ssd->ruhs[i].ru_mgmt && ssd->ruhs[i].ru_mgmt->victim_ru_pq) {
+            FemuReclaimUnit *pru;
+            /* pqueue_pop reassigns ruh_pos during percolate_down and never
+             * clears the popped element's own index, so zero it explicitly or
+             * a drained RU keeps a stale ruh_pos and later looks "in queue". */
+            while ((pru = pqueue_pop(ssd->ruhs[i].ru_mgmt->victim_ru_pq))) {
+                pru->ruh_pos = 0;
+            }
+            ssd->ruhs[i].ru_mgmt->victim_ru_cnt = 0;
+        }
         ruh->hbmw = 0;
         ruh->mbmw = 0;
         ruh->mbe = 0;
