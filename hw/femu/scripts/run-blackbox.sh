@@ -59,7 +59,10 @@ if [[ ! -e "$OSIMGF" ]]; then
 	exit
 fi
 
-sudo ./qemu-system-x86_64 \
+sudo FEMU_EXP_LOG=${FEMU_EXP_LOG} \
+     FEMU_SECRET=${FEMU_SECRET} \
+     FEMU_DUMP_LPN=${FEMU_DUMP_LPN} \
+     ./qemu-system-x86_64 \
     -name "FEMU-BBSSD-VM" \
     -enable-kvm \
     -cpu host \
