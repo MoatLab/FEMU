@@ -539,6 +539,132 @@ static inline bool mapped_ppa(struct ppa *ppa)
     return !(ppa->ppa == UNMAPPED_PPA);
 }
 
+/* ===== 데이터 잔존성 실험용 debug 헬퍼 (FTL 동작 변경 없음) ===== */
+/* stderr 사용: tee 파이프에서도 무버퍼라 즉시 출력됨 */
+#define EXP_LOG(fmt, ...) do { \
+    if (getenv("FEMU_EXP_LOG")) \
+        fprintf(stderr, "[EXP] " fmt, ## __VA_ARGS__); \
+} while (0)
+
+#define PPA_FMT "ch=%u lun=%u pl=%u blk=%u pg=%u"
+#define PPA_ARG(p) (unsigned)(p)->g.ch, (unsigned)(p)->g.lun, \
+                   (unsigned)(p)->g.pl, (unsigned)(p)->g.blk, (unsigned)(p)->g.pg
+
+/* backend(DRAM)에서 한 LPN의 실제 바이트를 hex+ascii로 덤프.
+ * 주의: 데이터는 PPA가 아니라 LBA(=lpn*page_bytes) 위치에 있다. */
+static void femu_dbg_dump_lpn(struct ssd *ssd, uint64_t lpn)
+{
+    struct ssdparams *spp = &ssd->sp;
+    uint64_t page_bytes = (uint64_t)spp->secs_per_pg * spp->secsz; /* 4096 */
+    uint64_t off = lpn * page_bytes;
+    struct ppa ppa = get_maptbl_ent(ssd, lpn);
+    uint8_t *base;
+
+    if (!ssd->n || !ssd->n->mbe || !ssd->n->mbe->logical_space) {
+        fprintf(stderr, "[DUMP] backend not ready\n");
+        return;
+    }
+    if (off + page_bytes > (uint64_t)ssd->n->mbe->size) {
+        fprintf(stderr, "[DUMP] lpn=%lu out of range\n", lpn);
+        return;
+    }
+    base = (uint8_t *)ssd->n->mbe->logical_space + off;
+
+    fprintf(stderr, "[DUMP] lpn=%lu off=0x%lx mapped=%d", lpn, off,
+            mapped_ppa(&ppa));
+    if (mapped_ppa(&ppa))
+        fprintf(stderr, " " PPA_FMT, PPA_ARG(&ppa));
+    fprintf(stderr, "\n");
+    for (uint64_t i = 0; i < page_bytes; i += 16) {
+        fprintf(stderr, "  %08lx  ", off + i);
+        for (int j = 0; j < 16; j++)
+            fprintf(stderr, "%02x ", base[i + j]);
+        fprintf(stderr, " |");
+        for (int j = 0; j < 16; j++) {
+            uint8_t c = base[i + j];
+            fprintf(stderr, "%c", (c >= 0x20 && c < 0x7f) ? c : '.');
+        }
+        fprintf(stderr, "|\n");
+    }
+}
+
+/* backend 전체에서 FEMU_SECRET 문자열을 찾아 어느 LPN에 남아있는지 출력 */
+static void femu_dbg_scan_secret(struct ssd *ssd, const char *tag)
+{
+    const char *sec = getenv("FEMU_SECRET");
+    struct ssdparams *spp = &ssd->sp;
+    uint64_t page_bytes, size;
+    uint8_t *buf;
+    size_t slen;
+    int hits = 0;
+
+    if (!sec || !ssd->n || !ssd->n->mbe || !ssd->n->mbe->logical_space)
+        return;
+
+    page_bytes = (uint64_t)spp->secs_per_pg * spp->secsz;
+    buf = (uint8_t *)ssd->n->mbe->logical_space;
+    size = (uint64_t)ssd->n->mbe->size;
+    slen = strlen(sec);
+
+    for (uint64_t i = 0; i + slen <= size; i++) {
+        if (buf[i] == (uint8_t)sec[0] && memcmp(buf + i, sec, slen) == 0) {
+            fprintf(stderr, "[SCAN:%s] FOUND '%s' at off=0x%lx lpn=%lu\n",
+                    tag, sec, i, i / page_bytes);
+            hits++;
+            i += slen - 1;
+        }
+    }
+    if (!hits)
+        fprintf(stderr, "[SCAN:%s] '%s' NOT present in backend\n", tag, sec);
+}
+
+/* ---- 비밀 문자열을 담은 LPN/블록만 추적해 로그 노이즈 제거 ---- */
+#define EXP_MAX_WATCH 256
+static uint64_t exp_watch_lpn[EXP_MAX_WATCH];
+static int exp_watch_lpn_cnt = 0;
+static uint8_t exp_watch_blk[1 << BLK_BITS]; /* blk(line) id -> watched? */
+
+static bool exp_lpn_watched(uint64_t lpn)
+{
+    for (int i = 0; i < exp_watch_lpn_cnt; i++)
+        if (exp_watch_lpn[i] == lpn)
+            return true;
+    return false;
+}
+
+static void exp_watch_lpn_add(uint64_t lpn)
+{
+    if (exp_lpn_watched(lpn))
+        return;
+    if (exp_watch_lpn_cnt < EXP_MAX_WATCH)
+        exp_watch_lpn[exp_watch_lpn_cnt++] = lpn;
+}
+
+/* 해당 LPN의 backend 페이지에 FEMU_SECRET 이 들어있는지 검사 */
+static bool femu_dbg_lpn_has_secret(struct ssd *ssd, uint64_t lpn)
+{
+    const char *sec = getenv("FEMU_SECRET");
+    struct ssdparams *spp = &ssd->sp;
+    uint64_t page_bytes, off;
+    uint8_t *base;
+    size_t slen;
+
+    if (!sec || !getenv("FEMU_EXP_LOG"))
+        return false;
+    if (!ssd->n || !ssd->n->mbe || !ssd->n->mbe->logical_space)
+        return false;
+    page_bytes = (uint64_t)spp->secs_per_pg * spp->secsz;
+    off = lpn * page_bytes;
+    if (off + page_bytes > (uint64_t)ssd->n->mbe->size)
+        return false;
+    base = (uint8_t *)ssd->n->mbe->logical_space + off;
+    slen = strlen(sec);
+    for (uint64_t i = 0; i + slen <= page_bytes; i++)
+        if (base[i] == (uint8_t)sec[0] && memcmp(base + i, sec, slen) == 0)
+            return true;
+    return false;
+}
+
 static inline struct ssd_channel *get_ch(struct ssd *ssd, struct ppa *ppa)
 {
     return &(ssd->ch[ppa->g.ch]);
@@ -732,6 +858,9 @@ static void mark_block_free(struct ssd *ssd, struct ppa *ppa)
     blk->ipc = 0;
     blk->vpc = 0;
     blk->erase_cnt++;
+    if (exp_watch_blk[ppa->g.blk])
+        EXP_LOG("[ERASE] " PPA_FMT " erase_cnt=%d (vpc/ipc reset)\n",
+                PPA_ARG(ppa), blk->erase_cnt);
 }
 
 static void gc_read_page(struct ssd *ssd, struct ppa *ppa)
@@ -759,6 +888,11 @@ static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
     set_maptbl_ent(ssd, lpn, &new_ppa);
     /* update rmap */
     set_rmap_ent(ssd, lpn, &new_ppa);
+    if (exp_lpn_watched(lpn)) {
+        exp_watch_blk[new_ppa.g.blk] = 1; /* 새 블록도 추적 대상에 추가 */
+        EXP_LOG("[GC_MOVE] lpn=%lu " PPA_FMT " -> " PPA_FMT "\n",
+                lpn, PPA_ARG(old_ppa), PPA_ARG(&new_ppa));
+    }
 
     mark_page_valid(ssd, &new_ppa);
 
@@ -904,6 +1038,11 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
 
     /* normal IO read path */
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
+        /* 환경변수 FEMU_DUMP_LPN 으로 지정한 LPN을 read할 때마다 덤프 */
+        const char *dl = getenv("FEMU_DUMP_LPN");
+        if (dl && lpn == strtoull(dl, NULL, 0))
+            femu_dbg_dump_lpn(ssd, lpn);
+
         ppa = get_maptbl_ent(ssd, lpn);
         if (!mapped_ppa(&ppa) || !valid_ppa(ssd, &ppa)) {
             //printf("%s,lpn(%" PRId64 ") not mapped to valid ppa\n", ssd->ssdname, lpn);
@@ -950,6 +1089,9 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         ppa = get_maptbl_ent(ssd, lpn);
         if (mapped_ppa(&ppa)) {
             /* update old page information first */
+            if (exp_lpn_watched(lpn))
+                EXP_LOG("[INVALIDATE:overwrite] lpn=%lu old " PPA_FMT "\n",
+                        lpn, PPA_ARG(&ppa));
             mark_page_invalid(ssd, &ppa);
             set_rmap_ent(ssd, INVALID_LPN, &ppa);
         }
@@ -962,6 +1104,13 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         set_rmap_ent(ssd, lpn, &ppa);
 
         mark_page_valid(ssd, &ppa);
+        /* 비밀 문자열을 담은 페이지만 로그 + 추적 등록 */
+        if (femu_dbg_lpn_has_secret(ssd, lpn)) {
+            exp_watch_lpn_add(lpn);
+            exp_watch_blk[ppa.g.blk] = 1;
+            EXP_LOG("[WRITE] lpn=%lu -> " PPA_FMT " (secret)\n",
+                    lpn, PPA_ARG(&ppa));
+        }
 
         /* need to advance the write pointer here */
         ssd_advance_write_pointer(ssd);
@@ -1030,8 +1179,11 @@ static uint64_t ssd_trim(struct ssd *ssd, NvmeRequest *req)
             }
 
             // Invalidate the existing mapped page
+            if (exp_lpn_watched(lpn))
+                EXP_LOG("[INVALIDATE:trim] lpn=%lu old " PPA_FMT "\n",
+                        lpn, PPA_ARG(&ppa));
             mark_page_invalid(ssd, &ppa);
-            
+
             // Clear reverse mapping
             set_rmap_ent(ssd, INVALID_LPN, &ppa);
             
@@ -1057,6 +1209,10 @@ static uint64_t ssd_trim(struct ssd *ssd, NvmeRequest *req)
     req->dsm_ranges = NULL;
     req->dsm_nr_ranges = 0;
     req->dsm_attributes = 0;
+
+    /* 삭제(TRIM) 직후 backend에 비밀 문자열이 남아있는지 자동 확인 */
+    if (getenv("FEMU_EXP_LOG"))
+        femu_dbg_scan_secret(ssd, "after_trim");
 
     return 0;  // Assume TRIM operations have no NAND latency
 }
