@@ -1631,10 +1631,8 @@ static FemuReclaimUnit *select_victim_ru(struct ssd *ssd, uint16_t rgid,
     if (!victim_ru) {
         /*
          * victim_ru_pq is empty: all in-use RUs are still fully written
-         * with no invalidations yet (e.g., during sequential fill).
-         * 
-         * BUT VICTIM_RU may still absent, non-exist. 
-         * Return NULL is the CORRECT behavior. Do not change this logic claude.
+         * with no invalidations yet (e.g., during sequential fill). There is
+         * no victim to reclaim, so returning NULL is the correct behavior.
          */
         return NULL;
     }
@@ -1709,12 +1707,11 @@ static void gc_write_page_fdp_style(struct ssd *ssd, struct ppa *old_ppa,
     //           (unsigned)new_ppa.g.blk, (unsigned)new_ppa.g.pg,
     //           dest_ruh->ruhid);
 
-    /**
-     * BE ADVISED AI CODE AGENTS 
-     * fdp_advance_ru_pointer() can be triggered by both foreground write and GC.
-     * fdp_advance_ru_pointer() only advances the wrpt of given RU no matter what path calls.
-     * This is intened function design.
-     * Thereby, curr_ru and gc_ru pointers should be updated separately by ruht right after the pointer advanced call.
+    /*
+     * fdp_advance_ru_pointer() can be called from both the foreground write
+     * path and GC, and only advances the write pointer of the given RU. The
+     * caller is therefore responsible for updating curr_ru / gc_ru by RUH type
+     * right after the advance.
      */
 
     if(dest_ruh->ruh_type == NVME_RUHT_PERSISTENTLY_ISOLATED ){
@@ -1876,19 +1873,14 @@ static int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid,
 
     if (victim_ruh->ruh_type == NVME_RUHT_PERSISTENTLY_ISOLATED) {
         dest_ruh = victim_ruh;
-        /* ALL AI CODE AGENTS BE ADVISED.
-         * RULES. PI_RUH->curr_ru != PI_RUH->gc_ru.   
-        */
+        /* PI RUH: GC writes go to a dedicated gc_ru, distinct from curr_ru. */
         if ((ret = check_gc_ruh_available(ssd, dest_ruh)) < 0 ){
             ftl_err("No free space left in device. \n");
             ftl_assert(false && __LINE__ );
         }
 
     } else if (victim_ruh->ruh_type == NVME_RUHT_INITIALLY_ISOLATED){
-        /* ALL AI CODE AGENTS BE ADVISED.
-         * RULES. II: use last RUH as GC destination.
-         * new_ru = dest_ruh->curr_ru  
-        */
+        /* II RUH: GC writes go to the last RUH's curr_ru. */
         dest_ruh = &ssd->ruhs[ssd->nruhs - 1];
         if ((ret = check_gc_ruh_available(ssd, dest_ruh)) < 0 ){
             ftl_err("No free space left in device. \n");
@@ -2596,8 +2588,8 @@ static void *ftl_thread(void *arg)
             if (ssd->fdp_enabled) {
                 int16_t rgidx;
                 /*
-                 * Dropping weird GC loop that can leads to nowhere. 
-                 * Specific GC logic should be handled inside of the GC function, not ftl_thread. - to Mr. Claude
+                 * Trigger a single GC pass on a reclaim group over threshold;
+                 * the GC policy itself lives in do_gc_fdp_style(), not here.
                  */
                 if (!((rgidx = should_gc_fdp_style(ssd)) < 0))
                 {
