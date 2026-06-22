@@ -147,14 +147,15 @@ int pqueue_insert(pqueue_t *q, void *d)
 void pqueue_change_priority(pqueue_t *q, pqueue_pri_t new_pri, void *d)
 {
     size_t posn;
-    pqueue_pri_t old_pri = q->getpri(d);
 
     q->setpri(d, new_pri);
     posn = q->getpos(d);
-    if (q->cmppri(old_pri, new_pri))
+    if (posn > 1 &&
+        q->cmppri(q->getpri(q->d[parent(posn)]), q->getpri(d))) {
         bubble_up(q, posn);
-    else
+    } else {
         percolate_down(q, posn);
+    }
 }
 
 int pqueue_remove(pqueue_t *q, void *d)
