@@ -2122,8 +2122,15 @@ static uint64_t ssd_stream_write(FemuCtrl *n, struct ssd *ssd,
             }
         //}
         if (!ruh->curr_ru) {
-            ftl_err("ssd_stream_write: no RU for ruh %d after GC\n", ruhid);
-            return 0; /* return zero latency; write will be retried by GC */
+            /*
+             * Genuinely out of reclaimable space: the foreground backpressure
+             * GC below could not free a reclaim unit. Fail the command with a
+             * capacity error instead of completing it as success with no data
+             * written.
+             */
+            ftl_err("ssd_stream_write: device full, no RU for ruh %d\n", ruhid);
+            req->status = NVME_CAP_EXCEEDED | NVME_DNR;
+            return 0;
         }
     }
     ru = ruh->rus[rgid];
@@ -2165,6 +2172,17 @@ static uint64_t ssd_stream_write(FemuCtrl *n, struct ssd *ssd,
          * Updating curr_ru should be handled by fdp_advance_ru_pointer() naturally.
          */
         ru = ruh->curr_ru;
+        /*
+         * A previous iteration may have exhausted the last free reclaim unit:
+         * fdp_advance_ru_pointer() cleared curr_ru with nothing left to allocate.
+         * Writing into a NULL RU would dereference it in fdp_get_new_page(); stop
+         * and fail the command with a capacity error rather than crashing or
+         * reporting a silent success for pages that were never written.
+         */
+        if (unlikely(!ru)) {
+            req->status = NVME_CAP_EXCEEDED | NVME_DNR;
+            break;
+        }
 
         ppa = get_maptbl_ent(ssd, lpn);
         if (mapped_ppa(&ppa)) {
