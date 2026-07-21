@@ -2096,11 +2096,22 @@ static uint64_t ssd_stream_write(FemuCtrl *n, struct ssd *ssd,
         ftl_err("start_lpn=%" PRIu64 ",tt_pgs=%d\n", start_lpn, spp->tt_pgs);
     }
 
-    /* foreground GC if needed; cap iterations to avoid infinite loop */
+    /*
+     * Foreground GC backpressure: reclaim until write pressure clears rather
+     * than for a fixed number of passes. Each pass frees at most one reclaim
+     * unit, so the old fixed cap (nrg) let the free-RU pool drain to zero under
+     * sustained overwrites and the write then failed with a spurious device-full.
+     * Running until should_gc_high_fdp_style() reports no pressure holds the
+     * pool above the threshold -- the host write effectively waits on GC, which
+     * is the intended backpressure. do_gc_fdp_style() returns -1 when no victim
+     * remains (nothing left to reclaim); that is the normal exit. The counter is
+     * only a guard against an unexpected non-terminating condition, bounded by
+     * the total reclaim-unit population so it never trips during real progress.
+     */
     {
-        int fg_gc_iters = 0;
-        int max_fg_gc = (int)(ssd->nrg > 1 ? ssd->nrg : 1);
-        //change to ngrp.
+        uint64_t fg_gc_iters = 0;
+        uint64_t max_fg_gc = (uint64_t)ssd->nrg * ssd->rg[0].ru_mgmt->tt_rus
+                             + ssd->nrg;
         while (should_gc_high_fdp_style(ssd) >= 0 &&
                fg_gc_iters < max_fg_gc) {
             r = do_gc_fdp_style(ssd, rgid, ruhid, true);
