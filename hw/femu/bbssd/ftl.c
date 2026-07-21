@@ -2421,8 +2421,19 @@ static void femu_fdp_ssd_init_ru_handles(FemuCtrl *n, struct ssd *ssd)
             ssd->ruhs[i].rus[j] = fdp_get_new_ru(ssd, j, i);
             ssd->ruhs[i].rus[j]->ruh = &ssd->ruhs[i];
             ssd->ruhs[i].ruh->rus[j] = ssd->ruhs[i].rus[j]->nvme_ru;
-            ssd->ruhs[i].curr_ru = ssd->ruhs[i].rus[j];
         }
+        /*
+         * The active RU must match the default reclaim group (rgid 0, curr_rg
+         * 0), not the last one allocated by the loop above. A non-placement
+         * write uses rgid 0, and the write path advances ruh->curr_ru through
+         * ssd->rg[rgid]'s management object. Leaving curr_ru in the last group
+         * (nrg-1) made a default write advance an rg[nrg-1] RU through rg[0]'s
+         * bookkeeping: the RU was enqueued in one group's victim queue but later
+         * looked up via its own group's queue with a stale heap position, a NULL
+         * dereference crash under nrg>1. Cross-group placement writes still need
+         * a per-(RUH,RG) active-RU model; this repairs the default path.
+         */
+        ssd->ruhs[i].curr_ru = ssd->ruhs[i].rus[0];
 
         /* PI type RUHs get their own ru_mgmt for per-RUH victim queues */
         if (nvme_ruh->ruht == NVME_RUHT_PERSISTENTLY_ISOLATED) {
