@@ -1156,6 +1156,9 @@ static uint16_t nvme_fdp_events(FemuCtrl *n, uint32_t endgrpid,
     }
 
     log_size = sizeof(NvmeFdpEventsLog) + ebuf->nelems * sizeof(NvmeFdpEvent);
+    if (off >= log_size) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
     trans_len = MIN(log_size - off, buf_len);
     elog = g_malloc0(log_size);
     elog->num_events = cpu_to_le32(ebuf->nelems);
