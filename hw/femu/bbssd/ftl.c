@@ -16,6 +16,7 @@ static void femu_fdp_ssd_init_ru_handles(FemuCtrl *n, struct ssd *ssd);
 static void ssd_trim_fdp_style(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
                                uint32_t nlb);
 static void ssd_reset_maptbl(struct ssd *ssd);
+static void exp_load_cfg(void);
 
 /*
  * ftl_fdp_alloc_event - allocate an FDP event from the FTL layer
@@ -489,6 +490,9 @@ void ssd_init(FemuCtrl *n)
     ftl_assert(ssd);
     ssd->n = n;
 
+    /* read the data-remanence experiment env vars once (debug only, off by default) */
+    exp_load_cfg();
+
     ssd_init_params(spp, n);
 
     /* initialize ssd internal layout architecture */
@@ -557,10 +561,39 @@ static inline bool mapped_ppa(struct ppa *ppa)
     return !(ppa->ppa == UNMAPPED_PPA);
 }
 
-/* ===== 데이터 잔존성 실험용 debug 헬퍼 (FTL 동작 변경 없음) ===== */
-/* stderr 사용: tee 파이프에서도 무버퍼라 즉시 출력됨 */
+/*
+ * Deleted-data-remanence experiment instrumentation (debug only; does not change
+ * FTL behavior). Gated by environment variables read once at init:
+ *   FEMU_EXP_LOG   non-empty -> emit [EXP] log lines to stderr
+ *   FEMU_SECRET    a marker string; only pages whose backend bytes contain it are
+ *                  tracked and logged, to keep the output focused
+ *   FEMU_DUMP_LPN  hex-dump this LPN's backend page on every read
+ * stderr is used so the output stays unbuffered through a tee pipe.
+ */
+static bool exp_log_enabled;
+static const char *exp_secret;       /* NULL, or the (non-empty) marker string */
+static uint64_t exp_dump_lpn;
+static bool exp_dump_lpn_set;
+
+static void exp_load_cfg(void)
+{
+    const char *v;
+
+    v = getenv("FEMU_EXP_LOG");
+    exp_log_enabled = (v && v[0] != '\0');
+
+    v = getenv("FEMU_SECRET");
+    exp_secret = (v && v[0] != '\0') ? v : NULL;
+
+    v = getenv("FEMU_DUMP_LPN");
+    if (v && v[0] != '\0') {
+        exp_dump_lpn = strtoull(v, NULL, 0);
+        exp_dump_lpn_set = true;
+    }
+}
+
 #define EXP_LOG(fmt, ...) do { \
-    if (getenv("FEMU_EXP_LOG")) \
+    if (exp_log_enabled) \
         fprintf(stderr, "[EXP] " fmt, ## __VA_ARGS__); \
 } while (0)
 
@@ -568,8 +601,10 @@ static inline bool mapped_ppa(struct ppa *ppa)
 #define PPA_ARG(p) (unsigned)(p)->g.ch, (unsigned)(p)->g.lun, \
                    (unsigned)(p)->g.pl, (unsigned)(p)->g.blk, (unsigned)(p)->g.pg
 
-/* backend(DRAM)에서 한 LPN의 실제 바이트를 hex+ascii로 덤프.
- * 주의: 데이터는 PPA가 아니라 LBA(=lpn*page_bytes) 위치에 있다. */
+/*
+ * Hex+ASCII dump of one LPN's bytes from the DRAM backend. Note: the data lives
+ * at the LBA offset (lpn * page_bytes) in the logical space, not at a PPA.
+ */
 static void femu_dbg_dump_lpn(struct ssd *ssd, uint64_t lpn)
 {
     struct ssdparams *spp = &ssd->sp;
@@ -606,10 +641,10 @@ static void femu_dbg_dump_lpn(struct ssd *ssd, uint64_t lpn)
     }
 }
 
-/* backend 전체에서 FEMU_SECRET 문자열을 찾아 어느 LPN에 남아있는지 출력 */
+/* Scan the whole backend for the marker string and report which LPN holds it. */
 static void femu_dbg_scan_secret(struct ssd *ssd, const char *tag)
 {
-    const char *sec = getenv("FEMU_SECRET");
+    const char *sec = exp_secret;
     struct ssdparams *spp = &ssd->sp;
     uint64_t page_bytes, size;
     uint8_t *buf;
@@ -636,11 +671,11 @@ static void femu_dbg_scan_secret(struct ssd *ssd, const char *tag)
         fprintf(stderr, "[SCAN:%s] '%s' NOT present in backend\n", tag, sec);
 }
 
-/* ---- 비밀 문자열을 담은 LPN/블록만 추적해 로그 노이즈 제거 ---- */
+/* Track only the LPNs/blocks that carry the marker, to keep the log focused. */
 #define EXP_MAX_WATCH 256
 static uint64_t exp_watch_lpn[EXP_MAX_WATCH];
 static int exp_watch_lpn_cnt = 0;
-static uint8_t exp_watch_blk[1 << BLK_BITS]; /* blk(line) id -> watched? */
+static uint8_t exp_watch_blk[1 << BLK_BITS]; /* block (line) id -> watched? */
 
 static bool exp_lpn_watched(uint64_t lpn)
 {
@@ -658,16 +693,16 @@ static void exp_watch_lpn_add(uint64_t lpn)
         exp_watch_lpn[exp_watch_lpn_cnt++] = lpn;
 }
 
-/* 해당 LPN의 backend 페이지에 FEMU_SECRET 이 들어있는지 검사 */
+/* Does this LPN's backend page currently contain the marker string? */
 static bool femu_dbg_lpn_has_secret(struct ssd *ssd, uint64_t lpn)
 {
-    const char *sec = getenv("FEMU_SECRET");
+    const char *sec = exp_secret;
     struct ssdparams *spp = &ssd->sp;
     uint64_t page_bytes, off;
     uint8_t *base;
     size_t slen;
 
-    if (!sec || !getenv("FEMU_EXP_LOG"))
+    if (!sec)
         return false;
     if (!ssd->n || !ssd->n->mbe || !ssd->n->mbe->logical_space)
         return false;
@@ -907,7 +942,7 @@ static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
     /* update rmap */
     set_rmap_ent(ssd, lpn, &new_ppa);
     if (exp_lpn_watched(lpn)) {
-        exp_watch_blk[new_ppa.g.blk] = 1; /* 새 블록도 추적 대상에 추가 */
+        exp_watch_blk[new_ppa.g.blk] = 1; /* track the new block too */
         EXP_LOG("[GC_MOVE] lpn=%lu " PPA_FMT " -> " PPA_FMT "\n",
                 lpn, PPA_ARG(old_ppa), PPA_ARG(&new_ppa));
     }
@@ -1056,9 +1091,8 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
 
     /* normal IO read path */
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
-        /* 환경변수 FEMU_DUMP_LPN 으로 지정한 LPN을 read할 때마다 덤프 */
-        const char *dl = getenv("FEMU_DUMP_LPN");
-        if (dl && lpn == strtoull(dl, NULL, 0))
+        /* dump the FEMU_DUMP_LPN page on every read (config read once at init) */
+        if (exp_dump_lpn_set && lpn == exp_dump_lpn)
             femu_dbg_dump_lpn(ssd, lpn);
 
         ppa = get_maptbl_ent(ssd, lpn);
@@ -1122,7 +1156,7 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         set_rmap_ent(ssd, lpn, &ppa);
 
         mark_page_valid(ssd, &ppa);
-        /* 비밀 문자열을 담은 페이지만 로그 + 추적 등록 */
+        /* only log + track pages that carry the marker string */
         if (femu_dbg_lpn_has_secret(ssd, lpn)) {
             exp_watch_lpn_add(lpn);
             exp_watch_blk[ppa.g.blk] = 1;
@@ -1228,8 +1262,8 @@ static uint64_t ssd_trim(struct ssd *ssd, NvmeRequest *req)
     req->dsm_nr_ranges = 0;
     req->dsm_attributes = 0;
 
-    /* 삭제(TRIM) 직후 backend에 비밀 문자열이 남아있는지 자동 확인 */
-    if (getenv("FEMU_EXP_LOG"))
+    /* right after a TRIM, check whether the marker still remains in the backend */
+    if (exp_log_enabled)
         femu_dbg_scan_secret(ssd, "after_trim");
 
     return 0;  // Assume TRIM operations have no NAND latency
