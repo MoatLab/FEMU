@@ -2511,10 +2511,68 @@ static void ssd_reset_maptbl(struct ssd *ssd)
 }
 
 /*
- * ssd_trim_fdp_style - FDP deallocate: erase all, reset all RUs and stats
+ * ssd_trim_fdp_range - FDP DSM deallocate (default). Invalidate only the logical
+ * pages covered by the requested LBA ranges: mark each mapped page invalid via
+ * the FDP path (which decrements RU/line vpc and moves the RU onto the victim
+ * queue so GC reclaims it), clear the reverse map, and unmap the L2P entry.
+ * Erase is left to GC. This matches a normal SSD's deallocate: a host TRIM of a
+ * few LBAs must not disturb any other logical data.
  */
-static void ssd_trim_fdp_style(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
-                               uint32_t nlb)
+static void ssd_trim_fdp_range(FemuCtrl *n, NvmeRequest *req)
+{
+    struct ssd *ssd = n->ssd;
+    struct ssdparams *spp = &ssd->sp;
+    NvmeDsmRange *ranges = req->dsm_ranges;
+    int nr_ranges = req->dsm_nr_ranges;
+    struct ppa ppa;
+    uint64_t lpn;
+    int total_trimmed_pages = 0;
+    int total_already_invalid = 0;
+
+    if (!ranges || nr_ranges <= 0) {
+        return;
+    }
+
+    for (int range_idx = 0; range_idx < nr_ranges; range_idx++) {
+        uint64_t r_slba = le64_to_cpu(ranges[range_idx].slba);
+        uint32_t r_nlb = le32_to_cpu(ranges[range_idx].nlb);
+        uint64_t start_lpn = r_slba / spp->secs_per_pg;
+        uint64_t end_lpn = (r_slba + r_nlb - 1) / spp->secs_per_pg;
+
+        if (end_lpn >= spp->tt_pgs) {
+            ftl_err("FDP TRIM: range %d exceeds capacity (end_lpn=%lu "
+                    "tt_pgs=%d)\n", range_idx, end_lpn, spp->tt_pgs);
+            continue;
+        }
+
+        for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
+            ppa = get_maptbl_ent(ssd, lpn);
+            if (!mapped_ppa(&ppa) || !valid_ppa(ssd, &ppa)) {
+                total_already_invalid++;
+                continue;
+            }
+            mark_page_invalid_fdp(ssd, &ppa);
+            set_rmap_ent(ssd, INVALID_LPN, &ppa);
+            ppa.ppa = UNMAPPED_PPA;
+            set_maptbl_ent(ssd, lpn, &ppa);
+            total_trimmed_pages++;
+        }
+    }
+
+    ftl_debug("FDP TRIM: %d pages trimmed, %d already invalid across %d ranges\n",
+              total_trimmed_pages, total_already_invalid, nr_ranges);
+}
+
+/*
+ * ssd_trim_fdp_reset_all - FDP DSM whole-device reset (opt-in via the
+ * fdp_trim_erase_all device property, test only). Erases every block, drains all
+ * reclaim units, resets all RUH state, and wipes the mapping table. This was the
+ * original prototype behavior for a customized non-filesystem fio+trim sweep; it
+ * is NOT how DSM-deallocate behaves on a real SSD and ignores the requested LBA
+ * range, so it is gated off by default.
+ */
+static void ssd_trim_fdp_reset_all(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
+                                   uint32_t nlb)
 {
     struct ssd *ssd = n->ssd;
     struct ssdparams *spp = &ssd->sp;
@@ -2627,6 +2685,27 @@ static void ssd_trim_fdp_style(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
     endgrp->fdp.mbe = 0;
 
     ftl_log("FDP TRIM: all RUs reset\n");
+}
+
+/*
+ * ssd_trim_fdp_style - dispatch FDP DSM deallocate. Range-honoring by default;
+ * whole-device reset only when the fdp_trim_erase_all knob is set. Frees the
+ * per-command DSM range list either way (nvme_dsm() allocates it per command and
+ * leaves it for the FTL to release, as ssd_trim() does on the non-FDP path).
+ */
+static void ssd_trim_fdp_style(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
+                               uint32_t nlb)
+{
+    if (n->bb_params.fdp_trim_erase_all) {
+        ssd_trim_fdp_reset_all(n, req, slba, nlb);
+    } else {
+        ssd_trim_fdp_range(n, req);
+    }
+
+    g_free(req->dsm_ranges);
+    req->dsm_ranges = NULL;
+    req->dsm_nr_ranges = 0;
+    req->dsm_attributes = 0;
 }
 
 static void *ftl_thread(void *arg)
