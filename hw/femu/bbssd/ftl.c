@@ -1465,6 +1465,14 @@ static void mark_page_invalid_fdp(struct ssd *ssd, struct ppa *ppa)
 
 //check ru->gc_write_ptr to check or align. 
 static int check_gc_ruh_available(struct ssd *ssd, FemuRuHandle * ruh){
+    /*
+     * The destination RG is derived from ruh->curr_ru; if this RUH has no active
+     * RU (fill exhausted it), there is nothing to derive it from and no space to
+     * reclaim into, so report failure instead of dereferencing NULL.
+     */
+    if (ruh->curr_ru == NULL) {
+        return -1;
+    }
     if(ruh->ruh_type == NVME_RUHT_INITIALLY_ISOLATED){
         if(ssd->ruhs[ssd->nruhs - 1].curr_ru == NULL){
             ssd->ruhs[ssd->nruhs - 1].curr_ru = fdp_get_new_ru(ssd, ruh->curr_ru->rgidx, ruh->ruhid);
@@ -1844,6 +1852,30 @@ static void mark_ru_free(struct ssd *ssd, uint16_t rgid,
 }
 
 /*
+ * reinsert_victim_ru - return a fully-popped victim RU to its own reclaim
+ * group's victim queue. Used when GC cannot proceed (no free destination RU),
+ * so the victim is not orphaned. Reverses the bookkeeping select_victim_ru()
+ * performed when it returned this victim, always keying off the victim's own
+ * reclaim group so a cross-RG NOISY victim goes back to the right heap.
+ */
+static void reinsert_victim_ru(struct ssd *ssd, FemuReclaimUnit *victim_ru)
+{
+    struct ru_mgmt *victim_rm = ssd->rg[victim_ru->rgidx].ru_mgmt;
+
+    if (victim_rm->mgmt_type == GC_GLOBAL_CB) {
+        pqueue_insert(victim_rm->victim_ru_cb, victim_ru);
+    } else {
+        pqueue_insert(victim_rm->victim_ru_pq, victim_ru);
+        if (victim_rm->mgmt_type == GC_NOISY_RUH_CUSTOM &&
+            victim_ru->ruh && victim_ru->ruh->ru_mgmt) {
+            pqueue_insert(victim_ru->ruh->ru_mgmt->victim_ru_pq, victim_ru);
+            victim_ru->ruh->ru_mgmt->victim_ru_cnt++;
+        }
+    }
+    victim_rm->victim_ru_cnt++;
+}
+
+/*
  * do_gc_fdp_style - FDP garbage collection: select victim RU, migrate valid
  * pages to GC RU, then free the victim
  *  gaurantees one RU to be reclaimed, if victim is valid.
@@ -1895,16 +1927,22 @@ static int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid,
         dest_ruh = victim_ruh;
         /* PI RUH: GC writes go to a dedicated gc_ru, distinct from curr_ru. */
         if ((ret = check_gc_ruh_available(ssd, dest_ruh)) < 0 ){
-            ftl_err("No free space left in device. \n");
-            ftl_assert(false && __LINE__ );
+            /*
+             * No free RU for the GC destination means the device is genuinely
+             * out of reclaimable space. Put the victim back and fail the GC pass
+             * rather than aborting the emulator; the caller degrades to a normal
+             * device-full write outcome.
+             */
+            reinsert_victim_ru(ssd, victim_ru);
+            return -1;
         }
 
     } else if (victim_ruh->ruh_type == NVME_RUHT_INITIALLY_ISOLATED){
         /* II RUH: GC writes go to the last RUH's curr_ru. */
         dest_ruh = &ssd->ruhs[ssd->nruhs - 1];
         if ((ret = check_gc_ruh_available(ssd, dest_ruh)) < 0 ){
-            ftl_err("No free space left in device. \n");
-            ftl_assert(false && __LINE__ );
+            reinsert_victim_ru(ssd, victim_ru);
+            return -1;
         }
     }else {
         ftl_err("Undefined RUHT.");
