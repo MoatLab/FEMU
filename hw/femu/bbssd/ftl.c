@@ -1586,10 +1586,13 @@ static FemuReclaimUnit *select_victim_ru(struct ssd *ssd, uint16_t rgid,
                 /*
                  * Also remove from the global queue (uses the still-valid pos);
                  * the global victim_ru_cnt-- and pos=0 happen at the shared
-                 * cleanup below, so do not touch them here.
+                 * cleanup below, so do not touch them here. With nrg>1 the
+                 * per-RUH queue can hold RUs from any RG, so the global twin
+                 * lives in the victim's OWN RG queue, not the caller's rgid.
                  */
                 if (victim_ru->pos) {
-                    pqueue_remove(rm->victim_ru_pq, victim_ru);
+                    pqueue_remove(ssd->rg[victim_ru->rgidx].ru_mgmt->victim_ru_pq,
+                                  victim_ru);
                 }
             }
         } else {
@@ -1642,19 +1645,29 @@ static FemuReclaimUnit *select_victim_ru(struct ssd *ssd, uint16_t rgid,
     if (!force && victim_ru->vpc > 0) {
         int threshold = victim_ru->npages / 8;
         if (victim_ru->ipc < threshold) {
+            /*
+             * Delay GC and put the victim back. Cross-RG NOISY selection can
+             * return an RU that belongs to a different reclaim group than the
+             * caller's rgid, so re-insert it into the victim's OWN RG queue --
+             * matching the global removal above and the shared count decrement
+             * below. Using the caller's rm here would charge the entry to the
+             * wrong heap, and its stored pos would then index that wrong array
+             * on a later remove/change_priority, corrupting the queue.
+             */
+            struct ru_mgmt *victim_rm = ssd->rg[victim_ru->rgidx].ru_mgmt;
             /* put it back */
             FDP_TRACE(ssd, "GC_BACK_RESERT triggered but delay GC (ru %d ipc %d threshold %d full %d)\n",victim_ru->ruidx, victim_ru->ipc, threshold, victim_ru->npages);
-            if (rm->mgmt_type == GC_GLOBAL_CB){
-                pqueue_insert(rm->victim_ru_cb, victim_ru);
+            if (victim_rm->mgmt_type == GC_GLOBAL_CB){
+                pqueue_insert(victim_rm->victim_ru_cb, victim_ru);
             }else{
-                pqueue_insert(rm->victim_ru_pq, victim_ru);
+                pqueue_insert(victim_rm->victim_ru_pq, victim_ru);
                 /*
                  * GC_NOISY_RUH_CUSTOM selection popped this RU from BOTH the
                  * per-RUH and global queues (and zeroed ruh_pos + decremented
                  * the per-RUH count). Restore the per-RUH membership and count
                  * too, or they drift out of sync. pqueue_insert re-sets ruh_pos.
                  */
-                if (rm->mgmt_type == GC_NOISY_RUH_CUSTOM &&
+                if (victim_rm->mgmt_type == GC_NOISY_RUH_CUSTOM &&
                     victim_ru->ruh && victim_ru->ruh->ru_mgmt) {
                     pqueue_insert(victim_ru->ruh->ru_mgmt->victim_ru_pq,
                                   victim_ru);
@@ -1667,7 +1680,12 @@ static FemuReclaimUnit *select_victim_ru(struct ssd *ssd, uint16_t rgid,
 
     victim_ru->pos = 0;
     victim_ru->ruh_pos = 0;
-    rm->victim_ru_cnt--;
+    /*
+     * Decrement the count on the victim's OWN reclaim group. For every path
+     * except cross-RG NOISY selection this is the caller's rgid; NOISY can pull
+     * a victim from another RG, whose global count must be the one adjusted.
+     */
+    ssd->rg[victim_ru->rgidx].ru_mgmt->victim_ru_cnt--;
 
     return victim_ru;
 }
@@ -1965,12 +1983,18 @@ static int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid,
                                     &endgrp->fdp.ctrl_events);
             e->type = FDP_EVT_RUH_IMPLICIT_RU_CHANGE;
             e->flags = FDPEF_LV;
-            e->rgid = cpu_to_le16(rgid);
+            e->rgid = cpu_to_le16(victim_ru->rgidx);
             e->ruhid = victim_ru->ruh->ruhid;
         }
     }
 
-    mark_ru_free(ssd, rgid, victim_ru);
+    /*
+     * Free the victim into its OWN reclaim group. A cross-RG NOISY victim can
+     * differ from the caller's rgid; freeing it into rgid would corrupt the
+     * per-RG free list and later hand a foreign RU out from the wrong group.
+     * For every non-NOISY path victim_ru->rgidx == rgid, so this is a no-op.
+     */
+    mark_ru_free(ssd, victim_ru->rgidx, victim_ru);
     return 0;
 }
 
@@ -2469,6 +2493,21 @@ static void ssd_trim_fdp_style(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
         while ((v_ru = pqueue_peek(rm->victim_ru_pq)) != NULL) {
             pqueue_remove(rm->victim_ru_pq, v_ru);
             rm->victim_ru_cnt--;
+            mark_ru_free(ssd, v_ru->rgidx, v_ru);
+        }
+        /*
+         * GC_GLOBAL_CB keeps its full victims in victim_ru_cb, not
+         * victim_ru_pq, so drain it too or those RUs leak with a stale
+         * victim_ru_cnt on trim/format. The two queues are mutually exclusive
+         * per RG mode (the inactive one is empty here) and victim_ru_cb indexes
+         * via the same pos field, so this is safe; guard the shared count
+         * against underflow in case it was already inconsistent.
+         */
+        while ((v_ru = pqueue_peek(rm->victim_ru_cb)) != NULL) {
+            pqueue_remove(rm->victim_ru_cb, v_ru);
+            if (rm->victim_ru_cnt > 0) {
+                rm->victim_ru_cnt--;
+            }
             mark_ru_free(ssd, v_ru->rgidx, v_ru);
         }
         while ((v_ru = QTAILQ_FIRST(&rm->full_ru_list)) != NULL) {
