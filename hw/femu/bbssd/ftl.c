@@ -1586,10 +1586,13 @@ static FemuReclaimUnit *select_victim_ru(struct ssd *ssd, uint16_t rgid,
                 /*
                  * Also remove from the global queue (uses the still-valid pos);
                  * the global victim_ru_cnt-- and pos=0 happen at the shared
-                 * cleanup below, so do not touch them here.
+                 * cleanup below, so do not touch them here. With nrg>1 the
+                 * per-RUH queue can hold RUs from any RG, so the global twin
+                 * lives in the victim's OWN RG queue, not the caller's rgid.
                  */
                 if (victim_ru->pos) {
-                    pqueue_remove(rm->victim_ru_pq, victim_ru);
+                    pqueue_remove(ssd->rg[victim_ru->rgidx].ru_mgmt->victim_ru_pq,
+                                  victim_ru);
                 }
             }
         } else {
@@ -1667,7 +1670,12 @@ static FemuReclaimUnit *select_victim_ru(struct ssd *ssd, uint16_t rgid,
 
     victim_ru->pos = 0;
     victim_ru->ruh_pos = 0;
-    rm->victim_ru_cnt--;
+    /*
+     * Decrement the count on the victim's OWN reclaim group. For every path
+     * except cross-RG NOISY selection this is the caller's rgid; NOISY can pull
+     * a victim from another RG, whose global count must be the one adjusted.
+     */
+    ssd->rg[victim_ru->rgidx].ru_mgmt->victim_ru_cnt--;
 
     return victim_ru;
 }
@@ -2469,6 +2477,21 @@ static void ssd_trim_fdp_style(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
         while ((v_ru = pqueue_peek(rm->victim_ru_pq)) != NULL) {
             pqueue_remove(rm->victim_ru_pq, v_ru);
             rm->victim_ru_cnt--;
+            mark_ru_free(ssd, v_ru->rgidx, v_ru);
+        }
+        /*
+         * GC_GLOBAL_CB keeps its full victims in victim_ru_cb, not
+         * victim_ru_pq, so drain it too or those RUs leak with a stale
+         * victim_ru_cnt on trim/format. The two queues are mutually exclusive
+         * per RG mode (the inactive one is empty here) and victim_ru_cb indexes
+         * via the same pos field, so this is safe; guard the shared count
+         * against underflow in case it was already inconsistent.
+         */
+        while ((v_ru = pqueue_peek(rm->victim_ru_cb)) != NULL) {
+            pqueue_remove(rm->victim_ru_cb, v_ru);
+            if (rm->victim_ru_cnt > 0) {
+                rm->victim_ru_cnt--;
+            }
             mark_ru_free(ssd, v_ru->rgidx, v_ru);
         }
         while ((v_ru = QTAILQ_FIRST(&rm->full_ru_list)) != NULL) {
