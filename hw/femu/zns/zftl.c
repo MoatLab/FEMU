@@ -218,6 +218,7 @@ static void zns_reset_block_state(struct zns_ssd *zns, uint32_t zone_idx)
     for (ch = 0; ch < zns->num_ch; ch++) {
         for (lun = 0; lun < zns->num_lun; lun++) {
             for (pl = 0; pl < zns->num_plane; pl++) {
+                ppa.ppa = 0; /* clear rsv/unused bits before field writes */
                 ppa.g.ch = ch;
                 ppa.g.fc = lun;
                 ppa.g.pl = pl;

@@ -3,10 +3,10 @@
 
 #define SPG_BITS    (2)
 #define PG_BITS     (16)
-#define BLK_BITS    (32)
-#define PL_BITS     (1)
-#define FC_BITS     (2)
-#define CH_BITS     (1)
+#define BLK_BITS    (16)
+#define PL_BITS     (3)
+#define FC_BITS     (8)
+#define CH_BITS     (7)
 
 #include "../nvme.h"
 #include "zftl.h"
