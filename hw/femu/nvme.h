@@ -591,6 +591,15 @@ typedef struct QEMU_PACKED NvmeSglDescriptor {
 #define NVME_SGL_TYPE(type)     ((type >> 4) & 0xf)
 #define NVME_SGL_SUBTYPE(type)  (type & 0xf)
 
+enum NvmeSglDescriptorType {
+    NVME_SGL_DESCR_TYPE_DATA_BLOCK       = 0x0,
+    NVME_SGL_DESCR_TYPE_BIT_BUCKET       = 0x1,
+    NVME_SGL_DESCR_TYPE_SEGMENT          = 0x2,
+    NVME_SGL_DESCR_TYPE_LAST_SEGMENT     = 0x3,
+    NVME_SGL_DESCR_TYPE_KEYED_DATA_BLOCK = 0x4,
+    NVME_SGL_DESCR_TYPE_VENDOR_SPECIFIC  = 0xf,
+};
+
 typedef union NvmeCmdDptr {
     struct {
         uint64_t    prp1;
@@ -1630,6 +1639,7 @@ typedef struct FemuCtrl {
     uint16_t    sqe_size;
     uint16_t    oacs;
     uint16_t    oncs;
+    bool        sgl;        /* advertise + accept NVMe SGL data transfers */
     uint32_t    reg_size;
     uint32_t    num_namespaces;
     uint32_t    nr_io_queues;
@@ -1855,6 +1865,8 @@ void     nvme_addr_read(FemuCtrl *n, hwaddr addr, void *buf, int size);
 void     nvme_addr_write(FemuCtrl *n, hwaddr addr, void *buf, int size);
 uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
                       uint64_t prp2, uint32_t len, FemuCtrl *n);
+uint16_t nvme_map_sgl(QEMUSGList *qsg, QEMUIOVector *iov,
+                      NvmeSglDescriptor sgl, uint32_t len, FemuCtrl *n);
 uint16_t dma_write_prp(FemuCtrl *n, uint8_t *ptr, uint32_t len, uint64_t
                             prp1, uint64_t prp2);
 uint16_t dma_read_prp(FemuCtrl *n, uint8_t *ptr, uint32_t len, uint64_t

@@ -466,6 +466,20 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
         return err;
 
     /*
+     * SGL data transfers map their scatter-gather list here and join the
+     * shared backend path below, bypassing the PRP fast path and PRP mapper.
+     */
+    if (cmd->psdt) {
+        if (!n->sgl || cmd->psdt > NVME_PSDT_SGL_MPTR_SGL ||
+            nvme_map_sgl(&req->qsg, &req->iov, cmd->dptr.sgl, data_size, n)) {
+            nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
+                                offsetof(NvmeRwCmd, prp1), 0, ns->id);
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        goto mapped;
+    }
+
+    /*
      * Single-PRP fast path (NoSSD inline only). The common 4 KiB-class
      * read/write needs at most prp1 (one page) plus optionally prp2 (a second
      * contiguous page) -- never an indirect PRP list. The generic
@@ -517,6 +531,7 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
+mapped:
     assert((nlb << data_shift) == req->qsg.size);
 
     req->slba = slba;
@@ -675,7 +690,14 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                             offsetof(NvmeRwCmd, nlb), nlb, ns->id);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
-    if (nvme_map_prp(&req->qsg, &req->iov, prp1, prp2, data_size, n)) {
+    if (cmd->psdt) {
+        if (!n->sgl || cmd->psdt > NVME_PSDT_SGL_MPTR_SGL ||
+            nvme_map_sgl(&req->qsg, &req->iov, cmd->dptr.sgl, data_size, n)) {
+            nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
+                                offsetof(NvmeRwCmd, prp1), 0, ns->id);
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+    } else if (nvme_map_prp(&req->qsg, &req->iov, prp1, prp2, data_size, n)) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
                             offsetof(NvmeRwCmd, prp1), 0, ns->id);
         return NVME_INVALID_FIELD | NVME_DNR;

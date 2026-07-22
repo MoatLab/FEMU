@@ -724,6 +724,9 @@ static void nvme_init_ctrl(FemuCtrl *n)
     id->cqes         = (n->max_cqes << 4) | 0x4;
     id->nn           = cpu_to_le32(n->num_namespaces);
     id->oncs         = cpu_to_le16(n->oncs);
+    if (n->sgl) {
+        id->sgls     = cpu_to_le32(0x1);   /* advertise address-SGL support */
+    }
     subnqn           = g_strdup_printf("nqn.2019-08.org.qemu:%s", n->serial);
     strpadcpy((char *)id->subnqn, sizeof(id->subnqn), subnqn, '\0');
     id->fuses        = cpu_to_le16(0);
@@ -983,6 +986,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT32("cmbloc", FemuCtrl, cmbloc, 0),
     DEFINE_PROP_UINT16("oacs", FemuCtrl, oacs, NVME_OACS_FORMAT),
     DEFINE_PROP_UINT16("oncs", FemuCtrl, oncs, NVME_ONCS_DSM),
+    DEFINE_PROP_BOOL("sgl", FemuCtrl, sgl, false),
     DEFINE_PROP_UINT16("vid", FemuCtrl, vid, 0x1d1d),
     DEFINE_PROP_UINT16("did", FemuCtrl, did, 0x1f1f),
     DEFINE_PROP_UINT8("femu_mode", FemuCtrl, femu_mode, FEMU_NOSSD_MODE),

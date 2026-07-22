@@ -3,7 +3,8 @@
 void nvme_addr_read(FemuCtrl *n, hwaddr addr, void *buf, int size)
 {
     if (n->cmbsz && addr >= n->ctrl_mem.addr &&
-        addr < (n->ctrl_mem.addr + int128_get64(n->ctrl_mem.size))) {
+        addr < (n->ctrl_mem.addr + int128_get64(n->ctrl_mem.size)) &&
+        (uint64_t)size <= (n->ctrl_mem.addr + int128_get64(n->ctrl_mem.size)) - addr) {
         memcpy(buf, (void *)&n->cmbuf[addr - n->ctrl_mem.addr], size);
     } else {
         pci_dma_read(&n->parent_obj, addr, buf, size);
@@ -108,6 +109,119 @@ unmap:
         qemu_iovec_destroy(iov);
     }
 
+    return NVME_INVALID_FIELD | NVME_DNR;
+}
+
+/*
+ * Map an NVMe SGL into a QEMUSGList, the PRP-path equivalent of nvme_map_prp.
+ * Supports address SGLs: DATA_BLOCK descriptors (a direct segment) and
+ * SEGMENT / LAST_SEGMENT descriptors (which point at a further array of
+ * descriptors in guest memory). Bit-bucket and keyed SGLs are rejected.
+ * CMB-resident SGLs are not special-cased (rare); the descriptors are read
+ * from guest memory via nvme_addr_read. Builds the same qsg the backend_rw
+ * path consumes, so no other code path changes.
+ */
+uint16_t nvme_map_sgl(QEMUSGList *qsg, QEMUIOVector *iov,
+                      NvmeSglDescriptor sgl, uint32_t len, FemuCtrl *n)
+{
+    const int max_descrs = 4096; /* guard against a runaway/looping SGL */
+    int nsegs = 0;
+    bool inited = false;
+
+    /* worst case one descriptor per controller page; grow lazily */
+    pci_dma_sglist_init(qsg, &n->parent_obj, (len >> n->page_bits) + 1);
+    inited = true;
+
+    while (len) {
+        uint8_t type = NVME_SGL_TYPE(sgl.type);
+
+        if (type == NVME_SGL_DESCR_TYPE_DATA_BLOCK) {
+            uint32_t dlen = le32_to_cpu(sgl.len);
+
+            if (!dlen || dlen > len) {
+                goto inval;
+            }
+            qemu_sglist_add(qsg, le64_to_cpu(sgl.addr), dlen);
+            len -= dlen;
+            if (++nsegs > max_descrs) {
+                goto inval;
+            }
+            /* a bare data block must consume the whole transfer */
+            if (len) {
+                goto inval;
+            }
+            break;
+        } else if (type == NVME_SGL_DESCR_TYPE_SEGMENT ||
+                   type == NVME_SGL_DESCR_TYPE_LAST_SEGMENT) {
+            /* the descriptor points at an array of descriptors in guest mem */
+            uint32_t seg_bytes = le32_to_cpu(sgl.len);
+            uint64_t seg_addr = le64_to_cpu(sgl.addr);
+            int ndesc = seg_bytes / sizeof(NvmeSglDescriptor);
+            NvmeSglDescriptor *descs;
+            int i;
+            bool chained = false;
+
+            if (!ndesc || ndesc > max_descrs) {
+                goto inval;
+            }
+            descs = g_malloc(seg_bytes);
+            nvme_addr_read(n, seg_addr, descs, seg_bytes);
+            for (i = 0; i < ndesc && len; i++) {
+                uint8_t dt = NVME_SGL_TYPE(descs[i].type);
+                uint32_t dl = le32_to_cpu(descs[i].len);
+
+                /* only the final entry of a non-last segment may chain */
+                if (dt == NVME_SGL_DESCR_TYPE_DATA_BLOCK) {
+                    if (!dl || dl > len) {
+                        g_free(descs);
+                        goto inval;
+                    }
+                    qemu_sglist_add(qsg, le64_to_cpu(descs[i].addr), dl);
+                    len -= dl;
+                    if (++nsegs > max_descrs) {
+                        g_free(descs);
+                        goto inval;
+                    }
+                } else if ((dt == NVME_SGL_DESCR_TYPE_SEGMENT ||
+                            dt == NVME_SGL_DESCR_TYPE_LAST_SEGMENT) &&
+                           i == ndesc - 1) {
+                    /* chain: continue the outer loop with this descriptor.
+                     * Count the follow so a cyclic segment list cannot spin
+                     * the poller forever. */
+                    if (++nsegs > max_descrs) {
+                        g_free(descs);
+                        goto inval;
+                    }
+                    sgl = descs[i];
+                    chained = true;
+                    break;
+                } else {
+                    g_free(descs);
+                    goto inval;
+                }
+            }
+            g_free(descs);
+            if (type == NVME_SGL_DESCR_TYPE_LAST_SEGMENT) {
+                break;
+            }
+            if (!chained) {
+                goto inval;   /* a non-last segment must chain from its end */
+            }
+        } else {
+            goto inval; /* bit-bucket, keyed, vendor: unsupported */
+        }
+    }
+
+    if (len) {
+        goto inval; /* under-described transfer */
+    }
+    (void)iov;
+    return NVME_SUCCESS;
+
+inval:
+    if (inited) {
+        qemu_sglist_destroy(qsg);
+    }
     return NVME_INVALID_FIELD | NVME_DNR;
 }
 
