@@ -39,15 +39,15 @@ static int zns_init_zone_geometry(NvmeNamespace *ns, Error **errp)
     }
 
     if (zone_cap > zone_size) {
-        femu_err("zone capacity %luB > zone size %luB", zone_cap, zone_size);
+        error_setg(errp, "zone capacity %luB > zone size %luB", zone_cap, zone_size);
         return -1;
     }
     if (zone_size < lbasz) {
-        femu_err("zone size %luB too small, must >= %uB", zone_size, lbasz);
+        error_setg(errp, "zone size %luB too small, must >= %uB", zone_size, lbasz);
         return -1;
     }
     if (zone_cap < lbasz) {
-        femu_err("zone capacity %luB too small, must >= %uB", zone_cap, lbasz);
+        error_setg(errp, "zone capacity %luB too small, must >= %uB", zone_cap, lbasz);
         return -1;
     }
 
@@ -55,24 +55,44 @@ static int zns_init_zone_geometry(NvmeNamespace *ns, Error **errp)
     n->zone_capacity = zone_cap / lbasz;
     n->num_zones = ns->size / lbasz / n->zone_size;
 
+    if (n->num_zones == 0) {
+        error_setg(errp, "the device is too small to hold a single zone of %"
+                   PRIu64 " logical blocks", n->zone_size);
+        return -1;
+    }
+
+    /*
+     * Each zone is backed by one flash block: a zone reset encodes the zone
+     * index into ppa.g.blk and indexes the per-plane block array (get_blk() in
+     * zftl.c). Integer truncation of the derived pages-per-block can leave more
+     * zones than there are blocks, so a later reset would write past the block
+     * array. Reject such a geometry at realize.
+     */
+    if (n->num_zones > n->zns->num_blk) {
+        error_setg(errp, "FEMU zns: %u zones exceed %" PRIu64 " blocks per plane; "
+                   "each zone maps to one flash block -- raise zns_num_blk or the "
+                   "device size", n->num_zones, n->zns->num_blk);
+        return -1;
+    }
+
     if (n->max_open_zones > n->num_zones) {
-        femu_err("max_open_zones value %u exceeds the number of zones %u",
-                 n->max_open_zones, n->num_zones);
+        error_setg(errp, "max_open_zones value %u exceeds the number of zones %u",
+                   n->max_open_zones, n->num_zones);
         return -1;
     }
     if (n->max_active_zones > n->num_zones) {
-        femu_err("max_active_zones value %u exceeds the number of zones %u",
-                 n->max_active_zones, n->num_zones);
+        error_setg(errp, "max_active_zones value %u exceeds the number of zones %u",
+                   n->max_active_zones, n->num_zones);
         return -1;
     }
 
     if (n->zd_extension_size) {
         if (n->zd_extension_size & 0x3f) {
-            femu_err("zone descriptor extension size must be multiples of 64B");
+            error_setg(errp, "zone descriptor extension size must be multiples of 64B");
             return -1;
         }
         if ((n->zd_extension_size >> 6) > 0xff) {
-            femu_err("zone descriptor extension size is too large");
+            error_setg(errp, "zone descriptor extension size is too large");
             return -1;
         }
     }
@@ -1308,9 +1328,6 @@ static void zns_init_params(FemuCtrl *n)
     id_zns->dataplane_started_ptr = &n->dataplane_started;
 
     n->zns = id_zns;
-
-    //Misao: init ftl
-    zftl_init(n);
 }
 
 static int zns_init_zone_cap(FemuCtrl *n)
@@ -1361,6 +1378,14 @@ static void zns_init(FemuCtrl *n, Error **errp)
     }
 
     zns_init_zone_identify(n, ns, 0);
+
+    /*
+     * Create the FTL thread only after every geometry check above has passed.
+     * A rejected geometry returns early with an error set; a thread started
+     * back in zns_init_params() would otherwise keep running on, and keep
+     * dereferencing, a controller whose failed realize is being torn down.
+     */
+    zftl_init(n);
 }
 
 static void zns_exit(FemuCtrl *n)
