@@ -663,12 +663,12 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint8_t lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
     uint8_t data_shift = ns->id_ns.lbaf[lba_index].lbads;
     uint64_t data_size = nlb << data_shift;
-    uint64_t offset  = ns->start_block + (slba << data_shift);
+    uint64_t offset  = slba << data_shift;
 
     if ((slba + nlb) > le64_to_cpu(ns->id_ns.nsze)) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
                             offsetof(NvmeRwCmd, nlb), elba, ns->id);
-        return NVME_LBA_RANGE | NVME_DNR;
+        return NVME_LBA_RANGE;
     }
     if (n->id_ctrl.mdts && data_size > n->page_size * (1 << n->id_ctrl.mdts)) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
@@ -681,24 +681,29 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     if (find_next_bit(ns->uncorrectable, elba, slba) < elba) {
-        return NVME_UNRECOVERED_READ;
+        qemu_sglist_destroy(&req->qsg);
+        return NVME_UNRECOVERED_READ | NVME_DNR;
     }
 
     for (i = 0; i < req->qsg.nsg; i++) {
         uint32_t len = req->qsg.sg[i].len;
-        uint8_t *tmp[2];
+        uint8_t *host = g_malloc(len);
+        const uint8_t *dev = (const uint8_t *)n->mbe->logical_space + offset;
+        int cmp;
 
-        tmp[0] = g_malloc0(len);
-        tmp[1] = g_malloc0(len);
-
-        nvme_addr_read(n, req->qsg.sg[i].base, tmp[1], len);
-        if (memcmp(tmp[0], tmp[1], len)) {
+        /*
+         * Compare the host-supplied buffer against the device media at offset;
+         * the previous code compared against a zeroed buffer, so any non-zero
+         * device data spuriously failed the compare.
+         */
+        nvme_addr_read(n, req->qsg.sg[i].base, host, len);
+        cmp = memcmp(dev, host, len);
+        g_free(host);
+        if (cmp) {
             qemu_sglist_destroy(&req->qsg);
             return NVME_CMP_FAILURE;
         }
         offset += len;
-        g_free(tmp[0]);
-        g_free(tmp[1]);
     }
 
     qemu_sglist_destroy(&req->qsg);
