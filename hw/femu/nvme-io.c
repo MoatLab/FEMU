@@ -521,6 +521,9 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
                                      MEMTXATTRS_UNSPECIFIED)) {
                 return NVME_DNR;
             }
+            if (req->is_write) {
+                nvme_mark_written(ns, slba, nlb);
+            }
             return NVME_SUCCESS;
         }
     }
@@ -549,6 +552,9 @@ mapped:
 
     ret = backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
     if (!ret) {
+        if (req->is_write) {
+            nvme_mark_written(ns, slba, nlb);
+        }
         return NVME_SUCCESS;
     }
 
@@ -608,30 +614,23 @@ static uint16_t nvme_dsm(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     // Validate and process each range
     uint64_t total_blocks = 0;
     uint64_t ns_size = le64_to_cpu(ns->id_ns.nsze);
-    
+
+    /*
+     * Validate every range before mutating anything. Deallocate zeroes the
+     * backing store, so it must be all-or-nothing: a later invalid range must
+     * not leave earlier ranges already destroyed while the command completes
+     * with an error. The bound test avoids slba + nlb overflowing past UINT64.
+     */
     for (i = 0; i < nr_ranges; i++) {
         uint64_t slba = le64_to_cpu(ranges[i].slba);
         uint32_t nlb = le32_to_cpu(ranges[i].nlb);
-        // uint32_t cattr = le32_to_cpu(ranges[i].cattr);
-        
-        // femu_debug("    DSM Range %d: slba=%lu, nlb=%u, cattr=0x%x\n", 
-        //        i, slba, nlb, cattr);
 
         // Validate LBA range against namespace size
-        if (slba >= ns_size) {
-            femu_err("DSM: Range %d SLBA %lu exceeds namespace size %lu\n", 
-                     i, slba, ns_size);
+        if (slba >= ns_size || nlb > ns_size - slba) {
+            femu_err("DSM: Range %d [%lu,+%u) exceeds namespace size %lu\n",
+                     i, slba, nlb, ns_size);
             nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
                                 offsetof(NvmeCmd, cdw10), slba, ns->id);
-            g_free(ranges);
-            return NVME_LBA_RANGE | NVME_DNR;
-        }
-
-        if (slba + nlb > ns_size) {
-            femu_err("DSM: Range %d end LBA %lu exceeds namespace size %lu\n", 
-                     i, slba + nlb, ns_size);
-            nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
-                                offsetof(NvmeCmd, cdw10), slba + nlb, ns->id);
             g_free(ranges);
             return NVME_LBA_RANGE | NVME_DNR;
         }
@@ -642,13 +641,18 @@ static uint16_t nvme_dsm(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             g_free(ranges);
             return NVME_INVALID_FIELD | NVME_DNR;
         }
-        
-        total_blocks += nlb;
 
-        // Update namespace utilization bitmap for this range
-        if (ns->util) {
-            bitmap_clear(ns->util, slba, nlb);
-        }
+        total_blocks += nlb;
+    }
+
+    /*
+     * All ranges valid: deallocate each. Clear the util bits and zero the
+     * backing store so a later read returns deterministic zeros (DLFEAT
+     * DRB=001b) and the Deallocated-or-Unwritten Logical Block error can apply.
+     */
+    for (i = 0; i < nr_ranges; i++) {
+        nvme_deallocate_range(n, ns, le64_to_cpu(ranges[i].slba),
+                              le32_to_cpu(ranges[i].nlb));
     }
 
     femu_debug("DSM: Total blocks to deallocate: %lu\n", total_blocks);
@@ -684,6 +688,10 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
                             offsetof(NvmeRwCmd, nlb), elba, ns->id);
         return NVME_LBA_RANGE;
+    }
+    uint16_t dulbe = nvme_check_dulbe(n, ns, slba, elba);
+    if (dulbe) {
+        return dulbe;
     }
     if (n->id_ctrl.mdts && data_size > n->page_size * (1 << n->id_ctrl.mdts)) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
@@ -745,11 +753,30 @@ static uint16_t nvme_write_zeros(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
     uint64_t slba = le64_to_cpu(rw->slba);
     uint32_t nlb  = le16_to_cpu(rw->nlb) + 1;
+    uint16_t control = le16_to_cpu(rw->control);
+    bool deac = (control & NVME_WZ_DEAC) != 0;
 
-    if ((slba + nlb) > ns->id_ns.nsze) {
+    /* Non-wrapping bound test: nvme_deallocate_range zeroes the backing store,
+     * so slba + nlb must not overflow past the namespace and drive an
+     * out-of-range memset. */
+    if (slba >= ns->id_ns.nsze || nlb > ns->id_ns.nsze - slba) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
-                            offsetof(NvmeRwCmd, nlb), slba + nlb, ns->id);
+                            offsetof(NvmeRwCmd, nlb), slba, ns->id);
         return NVME_LBA_RANGE | NVME_DNR;
+    }
+
+    /*
+     * Zero the backing store for the range either way. With the Deallocate bit
+     * (and WZDS advertised) the blocks become deallocated -- clear the util bits
+     * so DULBE applies and the device may reclaim them. Without it, the blocks
+     * hold written zeros, so mark them allocated. nvme_deallocate_range already
+     * zeroes the backend; for the non-deallocate case zero then mark written.
+     */
+    if (deac) {
+        nvme_deallocate_range(n, ns, slba, nlb);
+    } else {
+        nvme_deallocate_range(n, ns, slba, nlb);
+        nvme_mark_written(ns, slba, nlb);
     }
 
     return NVME_SUCCESS;

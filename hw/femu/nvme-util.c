@@ -1,5 +1,67 @@
 #include "./nvme.h"
 
+/*
+ * Deallocation-state tracking (TRIM / Write Zeroes Deallocate / DULBE).
+ *
+ * ns->util is the per-LBA "has valid data" bitmap: a set bit means the logical
+ * block has been written (allocated); a clear bit means it is deallocated or
+ * never-written. Writes set it (nvme_mark_written); deallocate clears it AND
+ * zeroes the backing store for those LBAs (nvme_deallocate_range), so that a
+ * subsequent read returns deterministic zeros straight from the backend -- which
+ * is what DLFEAT DRB=001b promises (NVM Command Set, 3.3.3.2.1). Only the trimmed
+ * range is zeroed (never the whole device), keeping the cost bounded.
+ *
+ * On read, nvme_check_dulbe enforces the Deallocated-or-Unwritten Logical Block
+ * error when the host has enabled it via the Error Recovery feature (DULBE bit):
+ * a read overlapping any deallocated block is aborted with NVME_DULB. When DULBE
+ * is not enabled the read simply returns the zeros already in the backend.
+ */
+
+/* Mark [slba, slba+nlb) as written (allocated). Called on every host write. */
+void nvme_mark_written(NvmeNamespace *ns, uint64_t slba, uint32_t nlb)
+{
+    if (ns->util) {
+        bitmap_set(ns->util, slba, nlb);
+    }
+}
+
+/*
+ * Deallocate [slba, slba+nlb): clear the util bits and zero the backing store so
+ * later reads return deterministic zeros. Bounded to the requested range.
+ */
+void nvme_deallocate_range(FemuCtrl *n, NvmeNamespace *ns, uint64_t slba,
+                           uint32_t nlb)
+{
+    if (ns->util) {
+        bitmap_clear(ns->util, slba, nlb);
+    }
+    if (n->mbe && n->mbe->logical_space) {
+        uint8_t lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
+        uint8_t data_shift = ns->id_ns.lbaf[lba_index].lbads;
+        uint64_t off = slba << data_shift;
+        uint64_t len = (uint64_t)nlb << data_shift;
+        memset((uint8_t *)n->mbe->logical_space + off, 0, len);
+    }
+}
+
+/*
+ * Read-side DULBE check. Returns NVME_DULB if the Deallocated-or-Unwritten
+ * Logical Block error is enabled for this namespace and the read range overlaps
+ * any deallocated/unwritten block; 0 otherwise. find_next_zero_bit over util
+ * finds the first non-allocated block in [slba, elba).
+ */
+uint16_t nvme_check_dulbe(FemuCtrl *n, NvmeNamespace *ns, uint64_t slba,
+                          uint64_t elba)
+{
+    if (!ns->util || !NVME_ERR_REC_DULBE(n->features.err_rec)) {
+        return 0;
+    }
+    if (find_next_zero_bit(ns->util, elba, slba) < elba) {
+        return NVME_DULB | NVME_DNR;
+    }
+    return 0;
+}
+
 int nvme_check_sqid(FemuCtrl *n, uint16_t sqid)
 {
     return sqid <= n->nr_io_queues && n->sq[sqid] != NULL ? 0 : -1;
@@ -173,6 +235,12 @@ uint16_t femu_nvme_rw_check_req(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_UNRECOVERED_READ,
                             offsetof(NvmeRwCmd, slba), elba, ns->id);
         return NVME_UNRECOVERED_READ;
+    }
+    if (!req->is_write) {
+        uint16_t dulbe = nvme_check_dulbe(n, ns, slba, elba);
+        if (dulbe) {
+            return dulbe;
+        }
     }
 
     return 0;

@@ -766,6 +766,7 @@ typedef struct QEMU_PACKED NvmeRwCmd {
 enum {
     NVME_RW_LR                  = 1 << 15,
     NVME_RW_FUA                 = 1 << 14,
+    NVME_WZ_DEAC                = 1 << 9,
     NVME_RW_DSM_FREQ_UNSPEC     = 0,
     NVME_RW_DSM_FREQ_TYPICAL    = 1,
     NVME_RW_DSM_FREQ_RARE       = 2,
@@ -1833,6 +1834,13 @@ static inline bool CSD(FemuCtrl *n)
 {
     return (n->femu_mode == FEMU_CSD_MODE);
 }
+
+/* Deallocation-state tracking (TRIM / Write Zeroes / DULBE) from nvme-util.c */
+void nvme_mark_written(NvmeNamespace *ns, uint64_t slba, uint32_t nlb);
+void nvme_deallocate_range(FemuCtrl *n, NvmeNamespace *ns, uint64_t slba,
+                           uint32_t nlb);
+uint16_t nvme_check_dulbe(FemuCtrl *n, NvmeNamespace *ns, uint64_t slba,
+                          uint64_t elba);
 
 /* Basic NVMe Queue Pair operation APIs from nvme-util.c */
 int nvme_check_sqid(FemuCtrl *n, uint16_t sqid);

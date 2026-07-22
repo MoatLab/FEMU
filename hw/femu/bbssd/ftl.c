@@ -2954,27 +2954,38 @@ static void *ftl_thread(void *arg)
 
             ftl_assert(req);
             lat = 0;
-            switch (req->cmd.opcode) {
-            case NVME_CMD_WRITE:
-                if (ssd->fdp_enabled) {
-                    lat = nvme_do_write_fdp(n, req, req->slba, req->nlb);
-                } else {
-                    lat = ssd_write(ssd, req);
+            /*
+             * A request that already failed validation in the I/O layer is only
+             * routed through the FTL ring so the poller completes it with its
+             * carried error status. It must not run any opcode handler: req->slba
+             * and req->nlb may be stale (the I/O layer returns before setting
+             * them) and ssd_read/ssd_write would then touch unrelated mapping
+             * state and overwrite the error. Leave latency at zero and let the
+             * poller post the carried status.
+             */
+            if (req->status == NVME_SUCCESS) {
+                switch (req->cmd.opcode) {
+                case NVME_CMD_WRITE:
+                    if (ssd->fdp_enabled) {
+                        lat = nvme_do_write_fdp(n, req, req->slba, req->nlb);
+                    } else {
+                        lat = ssd_write(ssd, req);
+                    }
+                    break;
+                case NVME_CMD_READ:
+                    lat = ssd_read(ssd, req);
+                    break;
+                case NVME_CMD_DSM:
+                    if (ssd->fdp_enabled) {
+                        ssd_trim_fdp_style(n, req, req->slba, req->nlb);
+                        lat = 0;
+                    } else if (req->dsm_ranges && req->dsm_nr_ranges > 0) {
+                        lat = ssd_trim(ssd, req);
+                    }
+                    break;
+                default:
+                    ;
                 }
-                break;
-            case NVME_CMD_READ:
-                lat = ssd_read(ssd, req);
-                break;
-            case NVME_CMD_DSM:
-                if (ssd->fdp_enabled) {
-                    ssd_trim_fdp_style(n, req, req->slba, req->nlb);
-                    lat = 0;
-                } else if (req->dsm_ranges && req->dsm_nr_ranges > 0) {
-                    lat = ssd_trim(ssd, req);
-                }
-                break;
-            default:
-                ;
             }
 
             req->reqlat = lat;
