@@ -53,9 +53,9 @@ enum {
 #define BLK_BITS    (16)
 #define PG_BITS     (16)
 #define SEC_BITS    (8)
-#define PL_BITS     (8)
-#define LUN_BITS    (8)
-#define CH_BITS     (7)
+#define PL_BITS     (4)
+#define LUN_BITS    (7)
+#define CH_BITS     (12)
 
 /* describe a physical page addr */
 struct ppa {
