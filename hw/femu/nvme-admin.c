@@ -111,7 +111,13 @@ static uint16_t nvme_create_sq(FemuCtrl *n, NvmeCmd *cmd)
     if (!cqid || nvme_check_cqid(n, cqid)) {
         return NVME_INVALID_CQID | NVME_DNR;
     }
-    if (!sqid || (sqid && !nvme_check_sqid(n, sqid))) {
+    /*
+     * n->sq is sized nr_io_queues + 1. nvme_check_sqid() returns nonzero both
+     * for an out-of-range id and for an id with no live queue, so it cannot by
+     * itself reject an out-of-range id here; bound sqid explicitly before it is
+     * used to index n->sq in nvme_init_sq().
+     */
+    if (!sqid || sqid > n->nr_io_queues || !nvme_check_sqid(n, sqid)) {
         return NVME_INVALID_QID | NVME_DNR;
     }
     if (!qsize || qsize > NVME_CAP_MQES(n->bar.cap)) {
@@ -158,7 +164,9 @@ static uint16_t nvme_create_cq(FemuCtrl *n, NvmeCmd *cmd)
     uint16_t qflags = le16_to_cpu(c->cq_flags);
     uint64_t prp1 = le64_to_cpu(c->prp1);
 
-    if (!cqid || (cqid && !nvme_check_cqid(n, cqid))) {
+    /* Bound cqid before it indexes n->cq (sized nr_io_queues + 1); see the
+     * matching note in nvme_create_sq(). */
+    if (!cqid || cqid > n->nr_io_queues || !nvme_check_cqid(n, cqid)) {
         return NVME_INVALID_CQID | NVME_DNR;
     }
     if (!qsize || qsize > NVME_CAP_MQES(n->bar.cap)) {
