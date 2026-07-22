@@ -178,6 +178,16 @@ static uint16_t nvme_create_cq(FemuCtrl *n, NvmeCmd *cmd)
     if (vector > n->nr_io_queues) {
         return NVME_INVALID_IRQ_VECTOR | NVME_DNR;
     }
+    /*
+     * MSI is limited to the number of vectors the guest has enabled (at most
+     * 32). If MSI is active, a completion-queue vector at or beyond that count
+     * has no MSI vector and would make msi_notify() assert when the queue
+     * fires; reject it as an invalid interrupt vector instead.
+     */
+    if (msi_enabled(&n->parent_obj) &&
+        vector >= msi_nr_vectors_allocated(&n->parent_obj)) {
+        return NVME_INVALID_IRQ_VECTOR | NVME_DNR;
+    }
     if (!(NVME_CQ_FLAGS_PC(qflags)) && NVME_CAP_CQR(n->bar.cap)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }

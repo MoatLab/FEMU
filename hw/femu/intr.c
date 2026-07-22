@@ -171,7 +171,8 @@ static void nvme_isr_notify_legacy(void *opaque)
         if (msix_enabled(&(n->parent_obj))) {
             msix_notify(&(n->parent_obj), cq->vector);
         } else if (msi_enabled(&(n->parent_obj))) {
-            if (!(n->bar.intms & (1 << cq->vector))) {
+            if (cq->vector < msi_nr_vectors_allocated(&(n->parent_obj)) &&
+                !(n->bar.intms & (1U << cq->vector))) {
                 msi_notify(&(n->parent_obj), cq->vector);
             }
         } else {
