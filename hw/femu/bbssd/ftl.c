@@ -1086,7 +1086,10 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
     uint64_t sublat, maxlat = 0;
 
     if (end_lpn >= spp->tt_pgs) {
-        ftl_err("start_lpn=%"PRIu64",tt_pgs=%d\n", start_lpn, ssd->sp.tt_pgs);
+        ftl_err("read past device geometry: end_lpn=%"PRIu64" tt_pgs=%d\n",
+                end_lpn, ssd->sp.tt_pgs);
+        req->status = NVME_LBA_RANGE | NVME_DNR;
+        return 0;
     }
 
     /* normal IO read path */
@@ -1127,7 +1130,10 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     int r;
 
     if (end_lpn >= spp->tt_pgs) {
-        ftl_err("start_lpn=%"PRIu64",tt_pgs=%d\n", start_lpn, ssd->sp.tt_pgs);
+        ftl_err("write past device geometry: end_lpn=%"PRIu64" tt_pgs=%d\n",
+                end_lpn, ssd->sp.tt_pgs);
+        req->status = NVME_LBA_RANGE | NVME_DNR;
+        return 0;
     }
 
     while (should_gc_high(ssd)) {
@@ -2328,7 +2334,10 @@ static uint64_t ssd_stream_write(FemuCtrl *n, struct ssd *ssd,
     ftl_assert(ruh->curr_ru == ruh->rus[rgid]);
     
     if (end_lpn >= spp->tt_pgs) {
-        ftl_err("start_lpn=%" PRIu64 ",tt_pgs=%d\n", start_lpn, spp->tt_pgs);
+        ftl_err("write past device geometry: end_lpn=%" PRIu64 " tt_pgs=%d\n",
+                end_lpn, spp->tt_pgs);
+        req->status = NVME_LBA_RANGE | NVME_DNR;
+        return 0;
     }
 
     /*
