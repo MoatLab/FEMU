@@ -42,6 +42,8 @@ static void bb_flip(FemuCtrl *n, NvmeCmd *cmd)
         ssd->sp.pg_wr_lat = NAND_PROG_LATENCY;
         ssd->sp.blk_er_lat = NAND_ERASE_LATENCY;
         ssd->sp.ch_xfer_lat = 0;
+        /* refresh the media-layer timing snapshot from the updated params */
+        bb_nand_media_refresh_timing(ssd);
         femu_log("%s,FEMU Delay Emulation [Enabled]!\n", n->devname);
         break;
     case FEMU_DISABLE_DELAY_EMU:
@@ -49,6 +51,8 @@ static void bb_flip(FemuCtrl *n, NvmeCmd *cmd)
         ssd->sp.pg_wr_lat = 0;
         ssd->sp.blk_er_lat = 0;
         ssd->sp.ch_xfer_lat = 0;
+        /* refresh the media-layer timing snapshot from the updated params */
+        bb_nand_media_refresh_timing(ssd);
         femu_log("%s,FEMU Delay Emulation [Disabled]!\n", n->devname);
         break;
     case FEMU_RESET_ACCT: {

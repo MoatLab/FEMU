@@ -501,6 +501,9 @@ void ssd_init(FemuCtrl *n)
         ssd_init_ch(&ssd->ch[i], spp);
     }
 
+    /* configure the NAND media-layer timing (reads spp, points at ssd->ch) */
+    bb_nand_media_init(ssd);
+
     /* initialize maptbl */
     ssd_init_maptbl(ssd);
 
@@ -752,76 +755,11 @@ static inline struct nand_page *get_pg(struct ssd *ssd, struct ppa *ppa)
     return &(blk->pg[ppa->g.pg]);
 }
 
-static uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa, struct
-        nand_cmd *ncmd)
-{
-    int c = ncmd->cmd;
-    uint64_t cmd_stime = (ncmd->stime == 0) ? \
-        qemu_clock_get_ns(QEMU_CLOCK_REALTIME) : ncmd->stime;
-    uint64_t nand_stime;
-    struct ssdparams *spp = &ssd->sp;
-    struct nand_lun *lun = get_lun(ssd, ppa);
-    uint64_t lat = 0;
-
-    switch (c) {
-    case NAND_READ:
-        /* read: perform NAND cmd first */
-        nand_stime = (lun->next_lun_avail_time < cmd_stime) ? cmd_stime : \
-                     lun->next_lun_avail_time;
-        lun->next_lun_avail_time = nand_stime + spp->pg_rd_lat;
-        lat = lun->next_lun_avail_time - cmd_stime;
-#if 0
-        lun->next_lun_avail_time = nand_stime + spp->pg_rd_lat;
-
-        /* read: then data transfer through channel */
-        chnl_stime = (ch->next_ch_avail_time < lun->next_lun_avail_time) ? \
-            lun->next_lun_avail_time : ch->next_ch_avail_time;
-        ch->next_ch_avail_time = chnl_stime + spp->ch_xfer_lat;
-
-        lat = ch->next_ch_avail_time - cmd_stime;
-#endif
-        break;
-
-    case NAND_WRITE:
-        /* write: transfer data through channel first */
-        nand_stime = (lun->next_lun_avail_time < cmd_stime) ? cmd_stime : \
-                     lun->next_lun_avail_time;
-        if (ncmd->type == USER_IO) {
-            lun->next_lun_avail_time = nand_stime + spp->pg_wr_lat;
-        } else {
-            lun->next_lun_avail_time = nand_stime + spp->pg_wr_lat;
-        }
-        lat = lun->next_lun_avail_time - cmd_stime;
-
-#if 0
-        chnl_stime = (ch->next_ch_avail_time < cmd_stime) ? cmd_stime : \
-                     ch->next_ch_avail_time;
-        ch->next_ch_avail_time = chnl_stime + spp->ch_xfer_lat;
-
-        /* write: then do NAND program */
-        nand_stime = (lun->next_lun_avail_time < ch->next_ch_avail_time) ? \
-            ch->next_ch_avail_time : lun->next_lun_avail_time;
-        lun->next_lun_avail_time = nand_stime + spp->pg_wr_lat;
-
-        lat = lun->next_lun_avail_time - cmd_stime;
-#endif
-        break;
-
-    case NAND_ERASE:
-        /* erase: only need to advance NAND status */
-        nand_stime = (lun->next_lun_avail_time < cmd_stime) ? cmd_stime : \
-                     lun->next_lun_avail_time;
-        lun->next_lun_avail_time = nand_stime + spp->blk_er_lat;
-
-        lat = lun->next_lun_avail_time - cmd_stime;
-        break;
-
-    default:
-        ftl_err("Unsupported NAND command: 0x%x\n", c);
-    }
-
-    return lat;
-}
+/*
+ * ssd_advance_status now lives in the NAND media-layer bridge
+ * (hw/femu/bbssd/ftl-media.c), which runs the same flat per-LUN read/program/
+ * erase timing through the uniform nand_media API.
+ */
 
 /* update SSD status about one page from PG_VALID -> PG_INVALID */
 static void mark_page_invalid(struct ssd *ssd, struct ppa *ppa)

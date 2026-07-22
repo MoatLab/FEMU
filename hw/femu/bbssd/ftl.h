@@ -2,6 +2,7 @@
 #define __FEMU_FTL_H
 
 #include "../nvme.h"
+#include "../nand/nand-media.h"
 
 #define INVALID_PPA     (~(0ULL))
 #define INVALID_LPN     (~(0ULL))
@@ -299,6 +300,7 @@ struct FemuReclaimGroup {
 struct ssd {
     char *ssdname;
     struct ssdparams sp;
+    NandMedia media;    /* uniform NAND media-layer timing handle */
     struct ssd_channel *ch;
     struct ppa *maptbl; /* page level mapping table */
     uint64_t *rmap;     /* reverse mapptbl, assume it's stored in OOB */
@@ -325,6 +327,12 @@ struct ssd {
 };
 
 void ssd_init(FemuCtrl *n);
+
+/* NAND media-layer bridge (hw/femu/bbssd/ftl-media.c) */
+void bb_nand_media_init(struct ssd *ssd);
+void bb_nand_media_refresh_timing(struct ssd *ssd);
+uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
+                            struct nand_cmd *ncmd);
 
 #ifdef FEMU_DEBUG_FTL
 #define ftl_debug(fmt, ...) \
