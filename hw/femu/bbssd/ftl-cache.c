@@ -182,6 +182,12 @@ uint64_t rcache_touch(struct ssd *ssd, uint64_t lpn)
         ssd->rcache.hash[h] = victim;
     } else {
         victim = rcache_evict(ssd);
+        /*
+         * The victim may be a slot that a prior rcache_invalidate() marked dead
+         * (valid=false, left in the used prefix); revive it so the insert stays
+         * visible to rcache_rehash() and later lookups.
+         */
+        ssd->rcache.slots[victim].valid = true;
         ssd->rcache.slots[victim].lpn = lpn;
         ssd->rcache.slots[victim].ref = (ssd->rcache.evict_policy != 3);
         ssd->rcache.slots[victim].last_used = ++ssd->rcache.tick;
@@ -246,9 +252,10 @@ void rcache_invalidate(struct ssd *ssd, uint64_t lpn)
 }
 
 /*
- * Allocate the read cache from read_cache_mb (0 = disabled). One slot per 4 KiB
- * page. hit_lat defaults to ~1/16 of a page read (a DRAM-ish hit) when pg_rd_lat
- * is known.
+ * Allocate the read cache from read_cache_mb (0 = disabled), one slot per NAND
+ * page. The sizing is held in 64 bits and bounded so capacity and hash_sz stay
+ * within uint32_t even for an absurdly large request. hit_lat defaults to ~1/16
+ * of a page read (a DRAM-ish hit) when pg_rd_lat is known.
  */
 void rcache_init(struct ssd *ssd, uint32_t read_cache_mb, uint32_t evict_policy)
 {
@@ -256,10 +263,19 @@ void rcache_init(struct ssd *ssd, uint32_t read_cache_mb, uint32_t evict_policy)
     if (read_cache_mb == 0) {
         return;
     }
-    ssd->rcache.capacity = ((uint64_t)read_cache_mb * 1024 * 1024) / 4096;
-    if (ssd->rcache.capacity < 1) {
-        ssd->rcache.capacity = 1;
+    uint32_t page_sz = (uint32_t)ssd->sp.secsz * ssd->sp.secs_per_pg;
+    if (page_sz == 0) {
+        page_sz = 4096;
     }
+    uint64_t cap = ((uint64_t)read_cache_mb * 1024 * 1024) / page_sz;
+    /* bound so capacity and hash_sz (= capacity * 2 + 1) never overflow uint32_t */
+    if (cap > (UINT32_MAX - 1) / 2) {
+        cap = (UINT32_MAX - 1) / 2;
+    }
+    if (cap < 1) {
+        cap = 1;
+    }
+    ssd->rcache.capacity = (uint32_t)cap;
     ssd->rcache.used = 0;
     ssd->rcache.hand = 0;
     ssd->rcache.evict_policy = evict_policy; /* 0 = CLOCK, 1 = random, 2 = LRU, 3 = 2Q */
@@ -267,7 +283,11 @@ void rcache_init(struct ssd *ssd, uint32_t read_cache_mb, uint32_t evict_policy)
     ssd->rcache.tick = 0; /* LRU recency counter */
     ssd->rcache.hits = 0;
     ssd->rcache.misses = 0;
+    /* a hit must return a nonzero latency: rcache_touch() signals a miss with 0 */
     ssd->rcache.hit_lat = ssd->sp.pg_rd_lat ? ssd->sp.pg_rd_lat / 16 : 1000;
+    if (ssd->rcache.hit_lat < 1) {
+        ssd->rcache.hit_lat = 1;
+    }
     ssd->rcache.hash_sz = ssd->rcache.capacity * 2 + 1;
     ssd->rcache.slots = g_malloc0(sizeof(*ssd->rcache.slots) * ssd->rcache.capacity);
     ssd->rcache.hash = g_malloc(sizeof(*ssd->rcache.hash) * ssd->rcache.hash_sz);

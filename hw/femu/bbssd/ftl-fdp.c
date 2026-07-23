@@ -1216,6 +1216,8 @@ static uint64_t ssd_stream_write(FemuCtrl *n, struct ssd *ssd,
             mark_page_invalid_fdp(ssd, &ppa);
             set_rmap_ent(ssd, INVALID_LPN, &ppa);
         }
+        /* the page content changes: drop any stale read-cache entry for it */
+        rcache_invalidate(ssd, lpn);
         /* new write */
         ppa = fdp_get_new_page(ssd, ru);
         set_maptbl_ent(ssd, lpn, &ppa);
@@ -1600,6 +1602,8 @@ static void ssd_trim_fdp_range(FemuCtrl *n, NvmeRequest *req)
             set_rmap_ent(ssd, INVALID_LPN, &ppa);
             ppa.ppa = UNMAPPED_PPA;
             set_maptbl_ent(ssd, lpn, &ppa);
+            /* drop any stale read-cache entry for the trimmed page */
+            rcache_invalidate(ssd, lpn);
             total_trimmed_pages++;
         }
     }
