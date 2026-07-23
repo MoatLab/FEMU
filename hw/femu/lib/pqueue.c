@@ -210,8 +210,16 @@ void *pqueue_randpop(pqueue_t *q)
     q->d[ra] = q->d[--q->size];
     q->setpos(q->d[ra], ra);
 
-    /* restore heap property from the replaced position */
-    percolate_down(q, ra);
+    /*
+     * Restore the heap property. Like pqueue_remove(), the replacement may
+     * rank either above or below its new neighbours, so pick the direction by
+     * comparing it against the element that was removed; percolating down alone
+     * would leave an invalid heap when the replacement must move up.
+     */
+    if (q->cmppri(q->getpri(head), q->getpri(q->d[ra])))
+        bubble_up(q, ra);
+    else
+        percolate_down(q, ra);
 
     return head;
 }
