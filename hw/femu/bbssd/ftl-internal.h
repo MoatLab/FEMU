@@ -156,6 +156,29 @@ static inline bool should_gc_high(struct ssd *ssd)
     return (ssd->lm.free_line_cnt <= ssd->sp.gc_thres_lines_high);
 }
 
+/* FDP GC decision: returns rg index if GC needed, -1 otherwise */
+static inline int16_t should_gc_fdp_style(struct ssd *ssd)
+{
+    for (int i = 0; i < (int)ssd->nrg; i++) {
+        if (ssd->rg[i].ru_mgmt->free_ru_cnt <=
+            ssd->rg[i].ru_mgmt->gc_thres_rus) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static inline int should_gc_high_fdp_style(struct ssd *ssd)
+{
+    for (int i = 0; i < (int)ssd->nrg; i++) {
+        if (ssd->rg[i].ru_mgmt->free_ru_cnt <=
+            ssd->rg[i].ru_mgmt->gc_thres_rus_high) {
+            return i;
+        }
+    }
+    return -1;
+}
+
 /* line management + garbage collection (hw/femu/bbssd/ftl-line-gc.c) */
 struct line *get_next_free_line(struct ssd *ssd);
 void ssd_init_lines(struct ssd *ssd);
@@ -172,5 +195,15 @@ int do_gc(struct ssd *ssd, bool force);
 uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req);
 uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req);
 uint64_t ssd_trim(struct ssd *ssd, NvmeRequest *req);
+
+/* Flexible Data Placement (hw/femu/bbssd/ftl-fdp.c) */
+void ssd_init_fdp_params(struct ssdparams *spp, FemuCtrl *n);
+void femu_fdp_ssd_init_reclaim_group(FemuCtrl *n, struct ssd *ssd);
+void femu_fdp_ssd_init_ru_handles(FemuCtrl *n, struct ssd *ssd);
+uint64_t nvme_do_write_fdp(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
+                           uint32_t nlb);
+int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid, bool force);
+void ssd_trim_fdp_style(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
+                        uint32_t nlb);
 
 #endif /* __FEMU_BBSSD_FTL_INTERNAL_H */
