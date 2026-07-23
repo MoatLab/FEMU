@@ -8,7 +8,7 @@ system_ss.add(when: 'CONFIG_FEMU_PCI',
                              'bbssd/bb.c', 'bbssd/ftl.c', 'bbssd/ftl-media.c',
                              'bbssd/ftl-geom.c', 'bbssd/ftl-map.c',
                              'bbssd/ftl-line-gc.c', 'bbssd/ftl-exp.c',
-                             'csd/csd.c',
+                             'bbssd/ftl-datapath.c', 'csd/csd.c',
                              'lib/pqueue.c', 'lib/rte_ring.c',
                              'backend/dram.c'))
 system_ss.add(when: 'CONFIG_FEMU_CSD_UBPF', if_true: femu_csd_ubpf)

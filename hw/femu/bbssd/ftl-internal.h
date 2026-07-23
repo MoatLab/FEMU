@@ -168,4 +168,9 @@ void mark_block_free(struct ssd *ssd, struct ppa *ppa);
 void gc_read_page(struct ssd *ssd, struct ppa *ppa);
 int do_gc(struct ssd *ssd, bool force);
 
+/* non-FDP host datapath (hw/femu/bbssd/ftl-datapath.c) */
+uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req);
+uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req);
+uint64_t ssd_trim(struct ssd *ssd, NvmeRequest *req);
+
 #endif /* __FEMU_BBSSD_FTL_INTERNAL_H */
