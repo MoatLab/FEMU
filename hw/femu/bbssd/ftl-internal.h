@@ -123,12 +123,20 @@ void ssd_init_maptbl(struct ssd *ssd);
 void ssd_init_rmap(struct ssd *ssd);
 
 /*
- * Data-remanence experiment logging (debug; off unless the env var is set).
- * Shared by the datapath and GC; the state is defined in ftl.c.
+ * Data-remanence experiment logging (debug; off unless FEMU_EXP_LOG / FEMU_DUMP_LPN
+ * are set). Shared by the datapath, GC, and init; the code and state live in
+ * hw/femu/bbssd/ftl-exp.c.
  */
 extern bool exp_log_enabled;
 extern uint8_t exp_watch_blk[];   /* block (line) id -> carries the marker? */
+extern uint64_t exp_dump_lpn;
+extern bool exp_dump_lpn_set;
+void exp_load_cfg(void);
 bool exp_lpn_watched(uint64_t lpn);
+void exp_watch_lpn_add(uint64_t lpn);
+void femu_dbg_dump_lpn(struct ssd *ssd, uint64_t lpn);
+void femu_dbg_scan_secret(struct ssd *ssd, const char *tag);
+bool femu_dbg_lpn_has_secret(struct ssd *ssd, uint64_t lpn);
 #define EXP_LOG(fmt, ...) do { \
     if (exp_log_enabled) \
         fprintf(stderr, "[EXP] " fmt, ## __VA_ARGS__); \
@@ -136,6 +144,17 @@ bool exp_lpn_watched(uint64_t lpn);
 #define PPA_FMT "ch=%u lun=%u pl=%u blk=%u pg=%u"
 #define PPA_ARG(p) (unsigned)(p)->g.ch, (unsigned)(p)->g.lun, \
                    (unsigned)(p)->g.pl, (unsigned)(p)->g.blk, (unsigned)(p)->g.pg
+
+/* GC trigger predicates (used by the datapath and GC) */
+static inline bool should_gc(struct ssd *ssd)
+{
+    return (ssd->lm.free_line_cnt <= ssd->sp.gc_thres_lines);
+}
+
+static inline bool should_gc_high(struct ssd *ssd)
+{
+    return (ssd->lm.free_line_cnt <= ssd->sp.gc_thres_lines_high);
+}
 
 /* line management + garbage collection (hw/femu/bbssd/ftl-line-gc.c) */
 struct line *get_next_free_line(struct ssd *ssd);
