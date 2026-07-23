@@ -197,6 +197,11 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req);
 uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req);
 uint64_t ssd_trim(struct ssd *ssd, NvmeRequest *req);
 
+/* optional DRAM read cache (hw/femu/bbssd/ftl-cache.c) */
+void rcache_init(struct ssd *ssd, uint32_t read_cache_mb, uint32_t evict_policy);
+uint64_t rcache_touch(struct ssd *ssd, uint64_t lpn);
+void rcache_invalidate(struct ssd *ssd, uint64_t lpn);
+
 /* Flexible Data Placement (hw/femu/bbssd/ftl-fdp.c) */
 void ssd_init_fdp_params(struct ssdparams *spp, FemuCtrl *n);
 void femu_fdp_ssd_init_reclaim_group(FemuCtrl *n, struct ssd *ssd);

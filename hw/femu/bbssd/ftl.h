@@ -336,6 +336,32 @@ struct ssd {
     bool fdp_enabled;
     bool fdp_debug;    /* enable FDP FTL tracing */
 
+    /*
+     * Optional DRAM read cache (timing-only; capacity 0 = disabled). It models
+     * the latency benefit of a controller read cache but holds no data. Single
+     * FTL thread, so no locking. See ftl-cache.c.
+     */
+    struct rcache_slot {
+        uint64_t lpn;
+        uint64_t last_used;  /* recency tick for true-LRU eviction */
+        bool valid;
+        bool ref;            /* CLOCK reference bit */
+    };
+    struct {
+        uint32_t capacity;   /* number of cached pages (0 = off) */
+        uint32_t used;
+        uint32_t hand;       /* CLOCK hand */
+        uint32_t evict_policy; /* 0 = CLOCK, 1 = random, 2 = LRU, 3 = 2Q */
+        uint64_t rand_state; /* LCG state for reproducible random eviction */
+        uint64_t tick;       /* monotonic recency counter for LRU */
+        uint64_t hit_lat;    /* DRAM read-hit latency (ns) */
+        uint64_t hits;
+        uint64_t misses;
+        struct rcache_slot *slots;
+        int32_t *hash;       /* lpn hash -> slot idx, -1 empty */
+        uint32_t hash_sz;
+    } rcache;
+
     /* base-path GC victim policy (greedy by default) */
     const struct femu_ftl_policy_ops *policy;
 

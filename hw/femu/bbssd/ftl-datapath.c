@@ -41,6 +41,17 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
             continue;
         }
 
+        /*
+         * Optional DRAM read cache: a hit returns at DRAM latency and skips the
+         * NAND read (and its channel/LUN occupancy); a miss inserts the LPN and
+         * falls through to the media. No-op when disabled (bit-identical default).
+         */
+        sublat = rcache_touch(ssd, lpn);
+        if (sublat) {
+            maxlat = (sublat > maxlat) ? sublat : maxlat;
+            continue;
+        }
+
         struct nand_cmd srd;
         srd.type = USER_IO;
         srd.cmd = NAND_READ;
@@ -88,6 +99,9 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
             mark_page_invalid(ssd, &ppa);
             set_rmap_ent(ssd, INVALID_LPN, &ppa);
         }
+
+        /* the page content changes: drop any stale read-cache entry for it */
+        rcache_invalidate(ssd, lpn);
 
         /* new write */
         ppa = get_new_page(ssd);
@@ -179,11 +193,14 @@ uint64_t ssd_trim(struct ssd *ssd, NvmeRequest *req)
 
             // Clear reverse mapping
             set_rmap_ent(ssd, INVALID_LPN, &ppa);
-            
+
             // Set mapping table entry as unmapped
             ppa.ppa = UNMAPPED_PPA;
             set_maptbl_ent(ssd, lpn, &ppa);
-            
+
+            /* drop any stale read-cache entry for the trimmed page */
+            rcache_invalidate(ssd, lpn);
+
             trimmed_pages++;
         }
         

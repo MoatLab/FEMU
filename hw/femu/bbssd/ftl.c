@@ -43,6 +43,22 @@ void ssd_init(FemuCtrl *n)
     /* resolve the base-path GC victim policy (greedy by default) */
     ssd->policy = femu_ftl_policy_lookup(n->bb_params.gc_policy);
 
+    /*
+     * Optional DRAM read cache (opt-in via read_cache_mb; 0 = off, bit-identical
+     * default). cache_evict selects the eviction policy.
+     */
+    uint32_t rc_evict = 0; /* 0 = CLOCK (default) */
+    if (n->bb_params.cache_evict) {
+        if (!strcmp(n->bb_params.cache_evict, "random")) {
+            rc_evict = 1;
+        } else if (!strcmp(n->bb_params.cache_evict, "lru")) {
+            rc_evict = 2;
+        } else if (!strcmp(n->bb_params.cache_evict, "arc")) {
+            rc_evict = 3; /* scan-resistant 2Q-style */
+        }
+    }
+    rcache_init(ssd, n->read_cache_mb, rc_evict);
+
     /* FDP vs non-FDP init path */
     ssd->fdp_enabled = (n->subsys != NULL &&
                         n->subsys->params.fdp.enabled);

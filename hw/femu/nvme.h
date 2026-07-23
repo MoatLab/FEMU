@@ -1533,6 +1533,7 @@ typedef struct BbCtrlParams {
     int gc_strategy; /* FDP GC strategy: 0=greedy, 1=cost-benefit, 2=random */
     int fdp_trim_erase_all; /* FDP DSM: 1 = reset whole device (test only); 0 = range */
     char *gc_policy; /* base-path GC victim policy name (NULL/"" => greedy) */
+    char *cache_evict; /* read-cache eviction: clock (default) | random | lru | arc */
 } BbCtrlParams;
 
 typedef struct ZNSCtrlParams {
@@ -1717,6 +1718,7 @@ typedef struct FemuCtrl {
     uint8_t         femu_mode;
     uint8_t         lver; /* Coperd: OCSSD version, 0x1 -> OC1.2, 0x2 -> OC2.0 */
     uint32_t        memsz;
+    uint32_t        read_cache_mb; /* bbssd DRAM read cache size (0 = off) */
     OcCtrlParams    oc_params;
     CsdCtrlParams   csd_params;
 
