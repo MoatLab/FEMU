@@ -6,7 +6,7 @@ system_ss.add(when: 'CONFIG_FEMU_PCI',
                              'timing-model/timing.c', 'ocssd/oc12.c',
                              'ocssd/oc20.c', 'zns/zns.c', 'zns/zftl.c',
                              'bbssd/bb.c', 'bbssd/ftl.c', 'bbssd/ftl-media.c',
-                             'bbssd/ftl-geom.c', 'csd/csd.c',
+                             'bbssd/ftl-geom.c', 'bbssd/ftl-map.c', 'csd/csd.c',
                              'lib/pqueue.c', 'lib/rte_ring.c',
                              'backend/dram.c'))
 system_ss.add(when: 'CONFIG_FEMU_CSD_UBPF', if_true: femu_csd_ubpf)

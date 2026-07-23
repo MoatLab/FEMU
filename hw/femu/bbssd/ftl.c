@@ -76,47 +76,6 @@ static inline int should_gc_high_fdp_style(struct ssd *ssd)
     return -1;
 }
 
-static inline struct ppa get_maptbl_ent(struct ssd *ssd, uint64_t lpn)
-{
-    return ssd->maptbl[lpn];
-}
-
-static inline void set_maptbl_ent(struct ssd *ssd, uint64_t lpn, struct ppa *ppa)
-{
-    ftl_assert(lpn < ssd->sp.tt_pgs);
-    ssd->maptbl[lpn] = *ppa;
-}
-
-static uint64_t ppa2pgidx(struct ssd *ssd, struct ppa *ppa)
-{
-    struct ssdparams *spp = &ssd->sp;
-    uint64_t pgidx;
-
-    pgidx = ppa->g.ch  * spp->pgs_per_ch  + \
-            ppa->g.lun * spp->pgs_per_lun + \
-            ppa->g.pl  * spp->pgs_per_pl  + \
-            ppa->g.blk * spp->pgs_per_blk + \
-            ppa->g.pg;
-
-    ftl_assert(pgidx < spp->tt_pgs);
-
-    return pgidx;
-}
-
-static inline uint64_t get_rmap_ent(struct ssd *ssd, struct ppa *ppa)
-{
-    uint64_t pgidx = ppa2pgidx(ssd, ppa);
-
-    return ssd->rmap[pgidx];
-}
-
-/* set rmap[page_no(ppa)] -> lpn */
-static inline void set_rmap_ent(struct ssd *ssd, uint64_t lpn, struct ppa *ppa)
-{
-    uint64_t pgidx = ppa2pgidx(ssd, ppa);
-
-    ssd->rmap[pgidx] = lpn;
-}
 
 static inline int victim_line_cmp_pri(pqueue_pri_t next, pqueue_pri_t curr)
 {
@@ -347,25 +306,6 @@ static struct ppa get_new_page(struct ssd *ssd)
 }
 
 
-static void ssd_init_maptbl(struct ssd *ssd)
-{
-    struct ssdparams *spp = &ssd->sp;
-
-    ssd->maptbl = g_malloc0(sizeof(struct ppa) * spp->tt_pgs);
-    for (int i = 0; i < spp->tt_pgs; i++) {
-        ssd->maptbl[i].ppa = UNMAPPED_PPA;
-    }
-}
-
-static void ssd_init_rmap(struct ssd *ssd)
-{
-    struct ssdparams *spp = &ssd->sp;
-
-    ssd->rmap = g_malloc0(sizeof(uint64_t) * spp->tt_pgs);
-    for (int i = 0; i < spp->tt_pgs; i++) {
-        ssd->rmap[i] = INVALID_LPN;
-    }
-}
 
 void ssd_init(FemuCtrl *n)
 {
