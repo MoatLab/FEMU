@@ -1532,6 +1532,7 @@ typedef struct BbCtrlParams {
     int gc_thres_pcent_high;
     int gc_strategy; /* FDP GC strategy: 0=greedy, 1=cost-benefit, 2=random */
     int fdp_trim_erase_all; /* FDP DSM: 1 = reset whole device (test only); 0 = range */
+    char *gc_policy; /* base-path GC victim policy name (NULL/"" => greedy) */
 } BbCtrlParams;
 
 typedef struct ZNSCtrlParams {

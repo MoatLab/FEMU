@@ -59,6 +59,7 @@ void ssd_init_lines(struct ssd *ssd)
         line->ipc = 0;
         line->vpc = 0;
         line->pos = 0;
+        line->close_time = 0;
         /* initialize all the lines as free lines */
         QTAILQ_INSERT_TAIL(&lm->free_line_list, line, entry);
         lm->free_line_cnt++;
@@ -125,6 +126,9 @@ void ssd_advance_write_pointer(struct ssd *ssd)
             wpp->pg++;
             if (wpp->pg == spp->pgs_per_blk) {
                 wpp->pg = 0;
+                /* record when the line filled, for age-based GC policies */
+                wpp->curline->close_time =
+                    qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
                 /* move current line to {victim,full} line list */
                 if (wpp->curline->vpc == spp->pgs_per_line) {
                     /* all pgs are still valid, move to full line list */
@@ -345,6 +349,166 @@ static struct line *select_victim_line(struct ssd *ssd, bool force)
     return victim_line;
 }
 
+/* Alternative victim policy: pick a random victim (selectable via
+ * gc_policy=random). Demonstrates the policy vtable; greedy stays the default. */
+static struct line *select_victim_line_random(struct ssd *ssd, bool force)
+{
+    struct line_mgmt *lm = &ssd->lm;
+    struct line *victim_line = pqueue_randpop(lm->victim_line_pq);
+
+    if (!victim_line) {
+        return NULL;
+    }
+    if (!force && victim_line->ipc < ssd->sp.pgs_per_line / 8) {
+        pqueue_insert(lm->victim_line_pq, victim_line);
+        return NULL;
+    }
+    victim_line->pos = 0;
+    lm->victim_line_cnt--;
+    return victim_line;
+}
+
+/*
+ * Cost-benefit victim policy: pick the line maximizing age * (1 - u) / (2u),
+ * where u = vpc/pgs_per_line. P cancels, so the rank is age * ipc / (2 * vpc);
+ * lines are compared by the cross-multiplied integer form to avoid division and
+ * float on the GC path. A line with vpc == 0 is the ideal victim. The victim
+ * pqueue is keyed by vpc (greedy), so CB scans its bounded backing heap.
+ */
+static struct line *select_victim_line_cb(struct ssd *ssd, bool force)
+{
+    struct line_mgmt *lm = &ssd->lm;
+    pqueue_t *pq = lm->victim_line_pq;
+    uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    struct line *best = NULL;
+    uint64_t best_age = 0, best_inv = 0, best_val = 1;
+
+    /* heap is 1-indexed and size is (count + 1), so valid slots are [1, size) */
+    for (size_t i = 1; i < pq->size; i++) {
+        struct line *ln = pq->d[i];
+        uint64_t age = now - ln->close_time;
+        uint64_t inv = ln->ipc;
+        uint64_t val = ln->vpc;
+        bool better;
+
+        if (val == 0) {
+            /* fully invalid: ideal victim (free reclaim), always wins */
+            better = true;
+        } else if (best && best_val == 0) {
+            /* incumbent is already a free-reclaim line; keep it */
+            better = false;
+        } else {
+            /* compare age*(1-u)/(2u) ~ age*inv/val via cross-multiply */
+            better = !best || (__uint128_t)age * inv * best_val >
+                              (__uint128_t)best_age * best_inv * val;
+        }
+        if (better) {
+            best = ln;
+            best_age = age;
+            best_inv = inv;
+            best_val = val;
+        }
+    }
+
+    if (!best) {
+        return NULL;
+    }
+    if (!force && best->ipc < ssd->sp.pgs_per_line / 8) {
+        return NULL;
+    }
+    pqueue_remove(pq, best);
+    best->pos = 0;
+    lm->victim_line_cnt--;
+    return best;
+}
+
+/*
+ * FIFO victim selection: reclaim the line that was closed earliest (lowest
+ * close_time), regardless of validity -- the simplest age-based policy. Iterates
+ * the victim heap like cost-benefit and removes the chosen line.
+ */
+static struct line *select_victim_line_fifo(struct ssd *ssd, bool force)
+{
+    struct line_mgmt *lm = &ssd->lm;
+    pqueue_t *pq = lm->victim_line_pq;
+    struct line *best = NULL;
+
+    for (size_t i = 1; i < pq->size; i++) {
+        struct line *ln = pq->d[i];
+        if (!best || ln->close_time < best->close_time) {
+            best = ln;
+        }
+    }
+    if (!best) {
+        return NULL;
+    }
+    if (!force && best->ipc < ssd->sp.pgs_per_line / 8) {
+        return NULL;
+    }
+    pqueue_remove(pq, best);
+    best->pos = 0;
+    lm->victim_line_cnt--;
+    return best;
+}
+
+/*
+ * D-Choice victim selection (random d-sample then greedy): sample DCHOICE_D
+ * random candidates from the victim heap and pick the one with the fewest valid
+ * pages. A cheap O(d) approximation of greedy that avoids full-heap scans; d=4 is
+ * the common choice in the literature.
+ */
+#define FEMU_DCHOICE_D 4
+static struct line *select_victim_line_dchoice(struct ssd *ssd, bool force)
+{
+    struct line_mgmt *lm = &ssd->lm;
+    pqueue_t *pq = lm->victim_line_pq;
+    struct line *best = NULL;
+    size_t n = (pq->size > 1) ? pq->size - 1 : 0; /* heap slots [1, size) */
+    int d = FEMU_DCHOICE_D;
+
+    if (n == 0) {
+        return NULL;
+    }
+    for (int s = 0; s < d; s++) {
+        size_t idx = 1 + (qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + s * 2654435761u) % n;
+        struct line *ln = pq->d[idx];
+        if (!best || ln->vpc < best->vpc) {
+            best = ln;
+        }
+    }
+    if (!best) {
+        return NULL;
+    }
+    if (!force && best->ipc < ssd->sp.pgs_per_line / 8) {
+        return NULL;
+    }
+    pqueue_remove(pq, best);
+    best->pos = 0;
+    lm->victim_line_cnt--;
+    return best;
+}
+
+static const struct femu_ftl_policy_ops femu_ftl_policies[] = {
+    { .name = "greedy", .select_victim_line = select_victim_line },
+    { .name = "random", .select_victim_line = select_victim_line_random },
+    { .name = "cost-benefit", .select_victim_line = select_victim_line_cb },
+    { .name = "fifo", .select_victim_line = select_victim_line_fifo },
+    { .name = "d-choice", .select_victim_line = select_victim_line_dchoice },
+};
+
+/* Resolve a gc_policy name to its ops; default to greedy for NULL/empty/unknown. */
+const struct femu_ftl_policy_ops *femu_ftl_policy_lookup(const char *name)
+{
+    if (name && name[0]) {
+        for (size_t i = 0; i < ARRAY_SIZE(femu_ftl_policies); i++) {
+            if (strcmp(name, femu_ftl_policies[i].name) == 0) {
+                return &femu_ftl_policies[i];
+            }
+        }
+    }
+    return &femu_ftl_policies[0]; /* greedy */
+}
+
 /* here ppa identifies the block we want to clean */
 static void clean_one_block(struct ssd *ssd, struct ppa *ppa)
 {
@@ -374,6 +538,7 @@ static void mark_line_free(struct ssd *ssd, struct ppa *ppa)
     struct line *line = get_line(ssd, ppa);
     line->ipc = 0;
     line->vpc = 0;
+    line->close_time = 0;
     /* move this line to free line list */
     QTAILQ_INSERT_TAIL(&lm->free_line_list, line, entry);
     lm->free_line_cnt++;
@@ -387,7 +552,7 @@ int do_gc(struct ssd *ssd, bool force)
     struct ppa ppa;
     int ch, lun;
 
-    victim_line = select_victim_line(ssd, force);
+    victim_line = ssd->policy->select_victim_line(ssd, force);
     if (!victim_line) {
         return -1;
     }

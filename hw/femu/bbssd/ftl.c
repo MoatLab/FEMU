@@ -40,6 +40,9 @@ void ssd_init(FemuCtrl *n)
     /* initialize all the lines */
     ssd_init_lines(ssd);
 
+    /* resolve the base-path GC victim policy (greedy by default) */
+    ssd->policy = femu_ftl_policy_lookup(n->bb_params.gc_policy);
+
     /* FDP vs non-FDP init path */
     ssd->fdp_enabled = (n->subsys != NULL &&
                         n->subsys->params.fdp.enabled);

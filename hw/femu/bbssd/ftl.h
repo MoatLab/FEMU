@@ -175,6 +175,8 @@ typedef struct line {
     size_t                  pos;
     /* FDP: owning reclaim unit (NULL in non-FDP mode) */
     FemuReclaimUnit *my_ru;
+    /* time the line filled, in ns; used by age-based GC policies */
+    uint64_t close_time;
 } line;
 
 /* wp: record next write addr */
@@ -297,6 +299,17 @@ struct FemuReclaimGroup {
     struct ru_mgmt *ru_mgmt;
 };
 
+/*
+ * Pluggable GC victim-selection policy (vtable). Alternative policies coexist
+ * without forking the GC path; the default ("greedy") is the original behavior
+ * verbatim. Selected by the gc_policy device property; the FDP RU GC path
+ * (do_gc_fdp_style) is separate and unaffected.
+ */
+struct femu_ftl_policy_ops {
+    const char *name;
+    struct line *(*select_victim_line)(struct ssd *ssd, bool force);
+};
+
 struct ssd {
     char *ssdname;
     struct ssdparams sp;
@@ -322,6 +335,9 @@ struct ssd {
     uint64_t nruhs;
     bool fdp_enabled;
     bool fdp_debug;    /* enable FDP FTL tracing */
+
+    /* base-path GC victim policy (greedy by default) */
+    const struct femu_ftl_policy_ops *policy;
 
     FemuCtrl *n;
 };

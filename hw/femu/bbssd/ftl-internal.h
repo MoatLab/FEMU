@@ -190,6 +190,7 @@ void mark_page_valid(struct ssd *ssd, struct ppa *ppa);
 void mark_block_free(struct ssd *ssd, struct ppa *ppa);
 void gc_read_page(struct ssd *ssd, struct ppa *ppa);
 int do_gc(struct ssd *ssd, bool force);
+const struct femu_ftl_policy_ops *femu_ftl_policy_lookup(const char *name);
 
 /* non-FDP host datapath (hw/femu/bbssd/ftl-datapath.c) */
 uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req);
