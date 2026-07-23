@@ -122,4 +122,31 @@ void ssd_init_ch(struct ssd_channel *ch, struct ssdparams *spp);
 void ssd_init_maptbl(struct ssd *ssd);
 void ssd_init_rmap(struct ssd *ssd);
 
+/*
+ * Data-remanence experiment logging (debug; off unless the env var is set).
+ * Shared by the datapath and GC; the state is defined in ftl.c.
+ */
+extern bool exp_log_enabled;
+extern uint8_t exp_watch_blk[];   /* block (line) id -> carries the marker? */
+bool exp_lpn_watched(uint64_t lpn);
+#define EXP_LOG(fmt, ...) do { \
+    if (exp_log_enabled) \
+        fprintf(stderr, "[EXP] " fmt, ## __VA_ARGS__); \
+} while (0)
+#define PPA_FMT "ch=%u lun=%u pl=%u blk=%u pg=%u"
+#define PPA_ARG(p) (unsigned)(p)->g.ch, (unsigned)(p)->g.lun, \
+                   (unsigned)(p)->g.pl, (unsigned)(p)->g.blk, (unsigned)(p)->g.pg
+
+/* line management + garbage collection (hw/femu/bbssd/ftl-line-gc.c) */
+struct line *get_next_free_line(struct ssd *ssd);
+void ssd_init_lines(struct ssd *ssd);
+void ssd_init_write_pointer(struct ssd *ssd);
+void ssd_advance_write_pointer(struct ssd *ssd);
+struct ppa get_new_page(struct ssd *ssd);
+void mark_page_invalid(struct ssd *ssd, struct ppa *ppa);
+void mark_page_valid(struct ssd *ssd, struct ppa *ppa);
+void mark_block_free(struct ssd *ssd, struct ppa *ppa);
+void gc_read_page(struct ssd *ssd, struct ppa *ppa);
+int do_gc(struct ssd *ssd, bool force);
+
 #endif /* __FEMU_BBSSD_FTL_INTERNAL_H */
