@@ -3,6 +3,12 @@
  * pages over the flat maptbl; a CMT miss charges a translation-page NAND read
  * (and a write-back if a dirty TP is evicted). Timing-only: the flat maptbl in
  * ftl-map.c stays the source of truth. cmt_touch is the datapath entry point.
+ *
+ * Scope: the cost is charged for the USER read/write datapath (ssd_read /
+ * ssd_write). Bulk mapping updates from base GC relocation, TRIM, and the FDP
+ * write path update the flat maptbl directly and are not separately charged,
+ * so the CMT models the host-facing translation cost rather than every internal
+ * table mutation.
  */
 #include "qemu/osdep.h"
 #include "ftl.h"
@@ -83,25 +89,36 @@ uint64_t cmt_touch(struct ssd *ssd, uint64_t lpn, uint64_t stime, bool is_write)
         return 0;
     }
 
-    /* miss: model the translation-page access on a home LUN */
+    /* miss: model the translation-page access */
     ssd->cmt.misses++;
+    uint32_t victim = cmt_clock_evict(ssd);
+
+    /*
+     * If a dirty translation page is evicted, write it back on ITS OWN home LUN
+     * (not the incoming TP's), then serialize the new TP read after it so the two
+     * accesses are charged once, in order, rather than both from stime.
+     */
+    uint64_t wb_lat = 0;
+    if (ssd->cmt.slots[victim].valid) {
+        if (ssd->cmt.slots[victim].dirty) {
+            uint32_t vhome = ssd->cmt.slots[victim].tp_id % spp->tt_luns;
+            struct ppa vppa = {.ppa = 0};
+            vppa.g.ch = vhome / spp->luns_per_ch;
+            vppa.g.lun = vhome % spp->luns_per_ch;
+            struct nand_cmd twr = {.type = USER_IO, .cmd = NAND_WRITE,
+                                   .stime = stime};
+            wb_lat = ssd_advance_status(ssd, &vppa, &twr);
+        }
+        ssd->cmt.used--;
+    }
+
     uint32_t home = tp_id % spp->tt_luns;
     struct ppa tppa = {.ppa = 0};
     tppa.g.ch = home / spp->luns_per_ch;
     tppa.g.lun = home % spp->luns_per_ch;
-
-    uint32_t victim = cmt_clock_evict(ssd);
-    if (ssd->cmt.slots[victim].valid && ssd->cmt.slots[victim].dirty) {
-        /* writeback of the evicted dirty translation page */
-        struct nand_cmd twr = {.type = USER_IO, .cmd = NAND_WRITE, .stime = stime};
-        lat += ssd_advance_status(ssd, &tppa, &twr);
-    }
-    if (ssd->cmt.slots[victim].valid) {
-        ssd->cmt.used--;
-    }
-
-    struct nand_cmd trd = {.type = USER_IO, .cmd = NAND_READ, .stime = stime};
-    lat += ssd_advance_status(ssd, &tppa, &trd);
+    struct nand_cmd trd = {.type = USER_IO, .cmd = NAND_READ,
+                           .stime = stime + wb_lat};
+    lat = wb_lat + ssd_advance_status(ssd, &tppa, &trd);
 
     ssd->cmt.slots[victim].tp_id = tp_id;
     ssd->cmt.slots[victim].valid = true;
@@ -125,7 +142,12 @@ void cmt_init(struct ssd *ssd, uint32_t cache_mb)
     if (!cache_mb) {
         return;
     }
-    uint32_t pgsz = (uint32_t)spp->secsz * spp->secs_per_pg;
+    /* the CMT models translation-page reads on a home LUN; without LUNs there is
+     * nothing to model (and tp_id % tt_luns would divide by zero) */
+    if (spp->tt_luns == 0) {
+        return;
+    }
+    uint64_t pgsz = (uint64_t)spp->secsz * spp->secs_per_pg;
     if (pgsz == 0) {
         pgsz = 4096;
     }

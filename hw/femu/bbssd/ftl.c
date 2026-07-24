@@ -54,7 +54,9 @@ void ssd_init(FemuCtrl *n)
     if (femu_mapping_scheme_uses_cmt(ssd->mapping) && map_cache_mb == 0) {
         map_cache_mb = 4; /* default dftl cache when no explicit size given */
     }
-    cmt_init(ssd, map_cache_mb);
+    /* the CMT is a dftl-only cost model: never charge it under the page scheme,
+     * even if mapping_cache_mb was set */
+    cmt_init(ssd, femu_mapping_scheme_uses_cmt(ssd->mapping) ? map_cache_mb : 0);
 
     /*
      * Optional DRAM read cache (opt-in via read_cache_mb; 0 = off, bit-identical
