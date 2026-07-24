@@ -118,9 +118,15 @@ static inline void set_rmap_ent(struct ssd *ssd, uint64_t lpn, struct ppa *ppa)
 void ssd_init_params(struct ssdparams *spp, FemuCtrl *n);
 void ssd_init_ch(struct ssd_channel *ch, struct ssdparams *spp);
 
-/* page mapping table init (hw/femu/bbssd/ftl-map.c) */
+/* page mapping table init + mapping-scheme registry (hw/femu/bbssd/ftl-map.c) */
 void ssd_init_maptbl(struct ssd *ssd);
 void ssd_init_rmap(struct ssd *ssd);
+const struct femu_mapping_ops *femu_mapping_scheme_lookup(const char *name);
+bool femu_mapping_scheme_uses_cmt(const struct femu_mapping_ops *ops);
+
+/* DFTL cached mapping table cost model (hw/femu/bbssd/ftl-map-cmt.c) */
+void cmt_init(struct ssd *ssd, uint32_t cache_mb);
+uint64_t cmt_touch(struct ssd *ssd, uint64_t lpn, uint64_t stime, bool is_write);
 
 /*
  * Data-remanence experiment logging (debug; off unless FEMU_EXP_LOG / FEMU_DUMP_LPN

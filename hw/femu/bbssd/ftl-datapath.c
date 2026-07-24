@@ -33,7 +33,13 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
         if (exp_dump_lpn_set && lpn == exp_dump_lpn)
             femu_dbg_dump_lpn(ssd, lpn);
 
-        ppa = get_maptbl_ent(ssd, lpn);
+        /* dftl: charge the demand-cache translation cost (no-op when disabled) */
+        if (ssd->cmt.capacity) {
+            uint64_t clat = cmt_touch(ssd, lpn, req->stime, false);
+            maxlat = (clat > maxlat) ? clat : maxlat;
+        }
+
+        ppa = ssd->mapping->translate(ssd, lpn);
         if (!mapped_ppa(&ppa) || !valid_ppa(ssd, &ppa)) {
             //printf("%s,lpn(%" PRId64 ") not mapped to valid ppa\n", ssd->ssdname, lpn);
             //printf("Invalid ppa,ch:%d,lun:%d,blk:%d,pl:%d,pg:%d,sec:%d\n",
@@ -90,25 +96,30 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     }
 
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
-        ppa = get_maptbl_ent(ssd, lpn);
-        if (mapped_ppa(&ppa)) {
-            /* update old page information first */
-            if (exp_lpn_watched(lpn))
-                EXP_LOG("[INVALIDATE:overwrite] lpn=%lu old " PPA_FMT "\n",
-                        lpn, PPA_ARG(&ppa));
-            mark_page_invalid(ssd, &ppa);
-            set_rmap_ent(ssd, INVALID_LPN, &ppa);
+        /* dftl: charge the demand-cache translation cost (no-op when disabled) */
+        if (ssd->cmt.capacity) {
+            uint64_t clat = cmt_touch(ssd, lpn, req->stime, true);
+            maxlat = (clat > maxlat) ? clat : maxlat;
         }
+
+        /* log the overwrite before commit_write invalidates the old mapping */
+        if (exp_lpn_watched(lpn)) {
+            struct ppa old = ssd->mapping->translate(ssd, lpn);
+            if (mapped_ppa(&old))
+                EXP_LOG("[INVALIDATE:overwrite] lpn=%lu old " PPA_FMT "\n",
+                        lpn, PPA_ARG(&old));
+        }
+
+        /* mapping scheme picks placement (page/dftl: data class, no reclaim) */
+        struct map_write_plan plan = ssd->mapping->prepare_write(ssd, lpn, USER_IO);
+        (void)plan;
 
         /* the page content changes: drop any stale read-cache entry for it */
         rcache_invalidate(ssd, lpn);
 
-        /* new write */
+        /* allocate the new page and commit the mapping (invalidates the old) */
         ppa = get_new_page(ssd);
-        /* update maptbl */
-        set_maptbl_ent(ssd, lpn, &ppa);
-        /* update rmap */
-        set_rmap_ent(ssd, lpn, &ppa);
+        ssd->mapping->commit_write(ssd, lpn, &ppa);
 
         mark_page_valid(ssd, &ppa);
         /* only log + track pages that carry the marker string */

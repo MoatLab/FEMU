@@ -44,6 +44,19 @@ void ssd_init(FemuCtrl *n)
     ssd->policy = femu_ftl_policy_lookup(n->bb_params.gc_policy);
 
     /*
+     * L2P mapping scheme: "page" (default, full DRAM L2P, bit-identical) vs "dftl"
+     * (demand-cached L2P via the CMT). The CMT turns on when dftl is named or
+     * mapping_cache_mb is set; a named dftl with no explicit size gets 4 MB.
+     */
+    ssd->mapping = femu_mapping_scheme_lookup(n->bb_params.mapping_scheme);
+    ssd->map_priv = NULL;
+    uint32_t map_cache_mb = n->mapping_cache_mb;
+    if (femu_mapping_scheme_uses_cmt(ssd->mapping) && map_cache_mb == 0) {
+        map_cache_mb = 4; /* default dftl cache when no explicit size given */
+    }
+    cmt_init(ssd, map_cache_mb);
+
+    /*
      * Optional DRAM read cache (opt-in via read_cache_mb; 0 = off, bit-identical
      * default). cache_evict selects the eviction policy.
      */

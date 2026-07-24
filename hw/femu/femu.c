@@ -1030,6 +1030,8 @@ static const Property femu_props[] = {
     DEFINE_PROP_STRING("gc_policy", FemuCtrl, bb_params.gc_policy),
     DEFINE_PROP_UINT32("read_cache_mb", FemuCtrl, read_cache_mb, 0),
     DEFINE_PROP_STRING("cache_evict", FemuCtrl, bb_params.cache_evict),
+    DEFINE_PROP_STRING("mapping", FemuCtrl, bb_params.mapping_scheme),
+    DEFINE_PROP_UINT32("mapping_cache_mb", FemuCtrl, mapping_cache_mb, 0),
     DEFINE_PROP_INT32("fdp_trim_erase_all", FemuCtrl,
                       bb_params.fdp_trim_erase_all, 0),
     DEFINE_PROP_LINK("subsys", FemuCtrl, subsys, TYPE_NVME_SUBSYS,

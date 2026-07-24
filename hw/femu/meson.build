@@ -9,7 +9,7 @@ system_ss.add(when: 'CONFIG_FEMU_PCI',
                              'bbssd/ftl-geom.c', 'bbssd/ftl-map.c',
                              'bbssd/ftl-line-gc.c', 'bbssd/ftl-exp.c',
                              'bbssd/ftl-datapath.c', 'bbssd/ftl-fdp.c',
-                             'bbssd/ftl-cache.c',
+                             'bbssd/ftl-cache.c', 'bbssd/ftl-map-cmt.c',
                              'csd/csd.c',
                              'lib/pqueue.c', 'lib/rte_ring.c',
                              'backend/dram.c'))

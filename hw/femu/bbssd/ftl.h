@@ -310,6 +310,39 @@ struct femu_ftl_policy_ops {
     struct line *(*select_victim_line)(struct ssd *ssd, bool force);
 };
 
+/* allocation class chosen for a new write (page/dftl only use DATA) */
+enum { FEMU_MAP_CLASS_DATA = 0 };
+
+struct map_write_plan {
+    int target_class;   /* allocation class for the new page */
+};
+
+/*
+ * Pluggable L2P mapping scheme (vtable). The default "page" scheme is the
+ * original full-DRAM mapping, bit-identical; "dftl" adds a demand-cached
+ * translation table (the CMT cost model in ftl-map-cmt.c). Selected by the
+ * mapping device property. The flat maptbl/rmap stay the source of truth.
+ */
+struct femu_mapping_ops {
+    const char *name;
+    bool uses_cmt;          /* dftl-style demand-cached translation table */
+
+    /* translate a read: lpn -> ppa (unmapped if absent) */
+    struct ppa (*translate)(struct ssd *ssd, uint64_t lpn);
+
+    /*
+     * write split: choose placement, then commit the new mapping and invalidate
+     * the old one
+     */
+    struct map_write_plan (*prepare_write)(struct ssd *ssd, uint64_t lpn,
+                                           int io_type);
+    void (*commit_write)(struct ssd *ssd, uint64_t lpn, struct ppa *new_ppa);
+
+    /* GC relocation: point lpn at its relocated ppa (victim policy is separate) */
+    void (*gc_relocate_commit)(struct ssd *ssd, uint64_t lpn,
+                               struct ppa *old_ppa, struct ppa *new_ppa);
+};
+
 struct ssd {
     char *ssdname;
     struct ssdparams sp;
@@ -361,6 +394,34 @@ struct ssd {
         int32_t *hash;       /* lpn hash -> slot idx, -1 empty */
         uint32_t hash_sz;
     } rcache;
+
+    /*
+     * Optional cached mapping table (DFTL/CMT) cost model (capacity 0 = disabled,
+     * bit-identical). Demand-caches translation pages over the flat maptbl; a miss
+     * charges a translation-page NAND read. Timing-only: maptbl stays the source
+     * of truth. Single FTL thread, so no locking. See ftl-map-cmt.c.
+     */
+    struct cmt_slot {
+        uint64_t tp_id;
+        bool valid;
+        bool ref;   /* CLOCK reference bit */
+        bool dirty; /* dirty TP: eviction costs a write-back */
+    };
+    struct {
+        uint32_t capacity;   /* cached translation pages (0 = off) */
+        uint32_t used;
+        uint32_t hand;       /* CLOCK hand */
+        uint32_t lpn_per_tp; /* LPNs covered by one translation page */
+        uint64_t hits;
+        uint64_t misses;
+        struct cmt_slot *slots;
+        int32_t *hash;       /* tp_id hash -> slot idx, -1 empty */
+        uint32_t hash_sz;
+    } cmt;
+
+    /* active L2P mapping scheme (page by default) + its opaque private state */
+    const struct femu_mapping_ops *mapping;
+    void *map_priv;
 
     /* base-path GC victim policy (greedy by default) */
     const struct femu_ftl_policy_ops *policy;

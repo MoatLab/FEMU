@@ -292,10 +292,8 @@ static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
 
     ftl_assert(valid_lpn(ssd, lpn));
     new_ppa = get_new_page(ssd);
-    /* update maptbl */
-    set_maptbl_ent(ssd, lpn, &new_ppa);
-    /* update rmap */
-    set_rmap_ent(ssd, lpn, &new_ppa);
+    /* commit the relocated mapping through the active scheme (maptbl + rmap) */
+    ssd->mapping->gc_relocate_commit(ssd, lpn, old_ppa, &new_ppa);
     if (exp_lpn_watched(lpn)) {
         exp_watch_blk[new_ppa.g.blk] = 1; /* track the new block too */
         EXP_LOG("[GC_MOVE] lpn=%lu " PPA_FMT " -> " PPA_FMT "\n",
