@@ -22,8 +22,14 @@ done
 
 make clean
 # --disable-werror --extra-cflags=-w --disable-git-update
-../configure --enable-kvm --target-list=x86_64-softmmu --enable-slirp ${FEMU_CONFIGURE_OPTS}
-make -j $NRCPUS
+../configure --enable-kvm --target-list=x86_64-softmmu --enable-slirp ${FEMU_CONFIGURE_OPTS} || {
+    echo "===> FEMU configure failed"
+    exit 1
+}
+make -j $NRCPUS || {
+    echo "===> FEMU compilation failed"
+    exit 1
+}
 
 echo ""
 echo "===> FEMU compilation done ..."
