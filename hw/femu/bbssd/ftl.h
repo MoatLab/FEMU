@@ -343,6 +343,22 @@ struct femu_mapping_ops {
                                struct ppa *old_ppa, struct ppa *new_ppa);
 };
 
+/* one slot of the optional DRAM read cache (ftl-cache.c) */
+struct rcache_slot {
+    uint64_t lpn;
+    uint64_t last_used;  /* recency tick for true-LRU eviction */
+    bool valid;
+    bool ref;            /* CLOCK reference bit */
+};
+
+/* one slot of the optional DFTL cached mapping table (ftl-map-cmt.c) */
+struct cmt_slot {
+    uint64_t tp_id;
+    bool valid;
+    bool ref;   /* CLOCK reference bit */
+    bool dirty; /* dirty TP: eviction costs a write-back */
+};
+
 struct ssd {
     char *ssdname;
     struct ssdparams sp;
@@ -374,12 +390,6 @@ struct ssd {
      * the latency benefit of a controller read cache but holds no data. Single
      * FTL thread, so no locking. See ftl-cache.c.
      */
-    struct rcache_slot {
-        uint64_t lpn;
-        uint64_t last_used;  /* recency tick for true-LRU eviction */
-        bool valid;
-        bool ref;            /* CLOCK reference bit */
-    };
     struct {
         uint32_t capacity;   /* number of cached pages (0 = off) */
         uint32_t used;
@@ -401,12 +411,6 @@ struct ssd {
      * charges a translation-page NAND read. Timing-only: maptbl stays the source
      * of truth. Single FTL thread, so no locking. See ftl-map-cmt.c.
      */
-    struct cmt_slot {
-        uint64_t tp_id;
-        bool valid;
-        bool ref;   /* CLOCK reference bit */
-        bool dirty; /* dirty TP: eviction costs a write-back */
-    };
     struct {
         uint32_t capacity;   /* cached translation pages (0 = off) */
         uint32_t used;
