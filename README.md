@@ -300,7 +300,17 @@ pg_wr_lat=200000       # Page write latency (ns)
 blk_er_lat=2000000     # Block erase latency (ns)
 
 # Garbage Collection
-gc_thres_pcent=75      # GC trigger threshold
+gc_thres_pcent=75      # GC trigger threshold (percent of lines in use)
+gc_policy=greedy       # Victim selection: greedy (default), random,
+                       #   cost-benefit, fifo, d-choice
+
+# L2P Mapping (optional; default is a full DRAM page-mapping table)
+mapping=page           # page (default) or dftl (demand-cached translation)
+mapping_cache_mb=0     # DFTL translation-cache size in MiB (used only for dftl)
+
+# DRAM Read Cache (optional; default off)
+read_cache_mb=0        # Read-cache size in MiB (0 disables it)
+cache_evict=clock      # Eviction policy: clock (default), random, lru, arc
 ```
 
 **Use Cases:**
@@ -459,6 +469,27 @@ devsz_mb=16384         # 16GB SSD capacity
 -device femu,devsz_mb=4096,femu_mode=1,serial=femu1 \
 -device femu,devsz_mb=4096,femu_mode=1,serial=femu2
 ```
+
+### FTL Policies and Caches (BlackBox)
+
+The BlackBox FTL exposes several pluggable, opt-in models. Each defaults to the
+original behavior, so a device that sets none of them keeps the classic timing.
+
+**Garbage-collection victim policy (`gc_policy`).** Chooses which line the FTL
+reclaims first: `greedy` (fewest valid pages, the default), `random`,
+`cost-benefit` (age-weighted), `fifo` (oldest closed line first), or `d-choice`
+(sample d candidates and take the fewest valid pages).
+
+**L2P mapping scheme (`mapping`).** `page` (default) keeps the whole
+logical-to-physical table in DRAM. `dftl` demand-caches translation pages and
+charges a translation-page read on a cache miss, modeling a DRAM-constrained
+controller. Size its cache with `mapping_cache_mb`; a `dftl` device with no
+explicit size gets 4 MiB.
+
+**DRAM read cache (`read_cache_mb`).** A timing-only read cache: a hit returns
+at DRAM latency and skips the NAND read. It holds no data, so NAND stays the
+source of truth. `cache_evict` selects the replacement policy: `clock`
+(default), `random`, `lru`, or a scan-resistant `arc`.
 
 ---
 
