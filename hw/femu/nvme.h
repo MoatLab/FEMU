@@ -1554,6 +1554,14 @@ typedef struct ZNSCtrlParams {
     uint8_t  zns_num_plane;
     uint8_t  zns_num_blk;
     int zns_flash_type;
+    /*
+     * Optional ZNS resource limits, all 0 = unlimited (spec MAR/MOR "no limit",
+     * no zone-descriptor extension). Non-zero activates the already-present
+     * active/open-zone accounting and the zone-descriptor extension area.
+     */
+    uint32_t zns_max_active;  /* max active zones (0 = unlimited) */
+    uint32_t zns_max_open;    /* max open zones (0 = unlimited) */
+    uint32_t zns_zd_ext_size; /* per-zone descriptor extension bytes (0 = none) */
 } ZNSCtrlParams;
 
 typedef struct CsdCtrlParams {

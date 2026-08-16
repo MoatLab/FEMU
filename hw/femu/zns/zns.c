@@ -85,6 +85,16 @@ static int zns_init_zone_geometry(NvmeNamespace *ns, Error **errp)
                    n->max_active_zones, n->num_zones);
         return -1;
     }
+    /*
+     * An open zone is always active, so the open limit cannot exceed the active
+     * limit (both zero-based "unlimited" values are skipped).
+     */
+    if (n->max_open_zones && n->max_active_zones &&
+        n->max_open_zones > n->max_active_zones) {
+        error_setg(errp, "max_open_zones value %u exceeds max_active_zones %u",
+                   n->max_open_zones, n->max_active_zones);
+        return -1;
+    }
 
     if (n->zd_extension_size) {
         if (n->zd_extension_size & 0x3f) {
@@ -1339,9 +1349,15 @@ static int zns_init_zone_cap(FemuCtrl *n)
     n->zone_size_bs = zns->num_ch*zns->num_lun*zns->num_plane*zns->num_page*ZNS_PAGE_SIZE;
     n->zone_cap_bs = 0;
     n->cross_zone_read = false;
-    n->max_active_zones = 0;
-    n->max_open_zones = 0;
-    n->zd_extension_size = 0;
+    /*
+     * Optional resource limits (all default 0 = unlimited / no extension, so an
+     * unconfigured device is unchanged). zns_init_zone_geometry() validates these
+     * against the zone count, and zns_init_zoned_state() allocates the descriptor
+     * extension area, both after this point.
+     */
+    n->max_active_zones = n->zns_params.zns_max_active;
+    n->max_open_zones = n->zns_params.zns_max_open;
+    n->zd_extension_size = n->zns_params.zns_zd_ext_size;
 
     return 0;
 }
