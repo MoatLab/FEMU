@@ -1,5 +1,43 @@
 #include "../nvme.h"
 
+/* Single definition of the shared NAND physics state (declared extern in nand.h). */
+struct NandFlashTiming nand_flash_timing;
+int slc_tbl[MAX_SUPPORTED_PAGES_PER_BLOCK];
+int mlc_tbl[MAX_SUPPORTED_PAGES_PER_BLOCK];
+int tlc_tbl[MAX_SUPPORTED_PAGES_PER_BLOCK];
+int qlc_tbl[MAX_SUPPORTED_PAGES_PER_BLOCK];
+
+uint8_t get_page_type(int flash_type, int pg)
+{
+    switch (flash_type) {
+    case SLC:
+        return slc_tbl[pg];
+    case MLC:
+        return mlc_tbl[pg];
+    case TLC:
+        return tlc_tbl[pg];
+    case QLC:
+        return qlc_tbl[pg];
+    default:
+        abort();
+    }
+}
+
+int64_t get_page_read_latency(int flash_type, int page_type)
+{
+    return nand_flash_timing.pg_rd_lat[flash_type][page_type];
+}
+
+int64_t get_page_write_latency(int flash_type, int page_type)
+{
+    return nand_flash_timing.pg_wr_lat[flash_type][page_type];
+}
+
+int64_t get_blk_erase_latency(int flash_type)
+{
+    return nand_flash_timing.blk_er_lat[flash_type];
+}
+
 /*
  * Lower/Upper page pairing in one block
  * Shadow page programming sequence to reduce cell-to-cell interference

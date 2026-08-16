@@ -100,7 +100,14 @@ typedef struct NandFlashTiming {
     int64_t chnl_pg_xfer_lat[MAX_FLASH_TYPE];
 } NandFlashTiming;
 
-static struct NandFlashTiming nand_flash_timing;
+/*
+ * Shared NAND physics state lives once in nand.c (a single compiled unit) and is
+ * referenced everywhere via these extern declarations. It used to be header-static,
+ * which gave every including translation unit its own zero-initialized copy: only
+ * nand.c's copy was ever initialized, so other readers (oc12.c, timing.c) saw
+ * zeros. Making it a real linker symbol shares one initialized copy across modes.
+ */
+extern struct NandFlashTiming nand_flash_timing;
 
 struct NandFlash {
     uint8_t flash_type;
@@ -117,42 +124,16 @@ struct NandFlash {
 #define PPA_PG(ln, ppa)  ((ppa & ln->ppaf.pg_mask) >> ln->ppaf.pg_offset)
 #define PPA_SEC(ln, ppa) ((ppa & ln->ppaf.sec_mask) >> ln->ppaf.sec_offset)
 
-/* Lower/Upper page format within one block */
-static int slc_tbl[MAX_SUPPORTED_PAGES_PER_BLOCK];
-static int mlc_tbl[MAX_SUPPORTED_PAGES_PER_BLOCK];
-static int tlc_tbl[MAX_SUPPORTED_PAGES_PER_BLOCK];
-static int qlc_tbl[MAX_SUPPORTED_PAGES_PER_BLOCK];
+/* Lower/Upper page-type table within one block, defined once in nand.c */
+extern int slc_tbl[MAX_SUPPORTED_PAGES_PER_BLOCK];
+extern int mlc_tbl[MAX_SUPPORTED_PAGES_PER_BLOCK];
+extern int tlc_tbl[MAX_SUPPORTED_PAGES_PER_BLOCK];
+extern int qlc_tbl[MAX_SUPPORTED_PAGES_PER_BLOCK];
 
-static inline uint8_t get_page_type(int flash_type, int pg)
-{
-    switch (flash_type) {
-    case SLC:
-        return slc_tbl[pg];
-    case MLC:
-        return mlc_tbl[pg];
-    case TLC:
-        return tlc_tbl[pg];
-    case QLC:
-        return qlc_tbl[pg];
-    default:
-        abort();
-    }
-}
-
-static inline int64_t get_page_read_latency(int flash_type, int page_type)
-{
-    return nand_flash_timing.pg_rd_lat[flash_type][page_type];
-}
-
-static inline int64_t get_page_write_latency(int flash_type, int page_type)
-{
-    return nand_flash_timing.pg_wr_lat[flash_type][page_type];
-}
-
-static inline int64_t get_blk_erase_latency(int flash_type)
-{
-    return nand_flash_timing.blk_er_lat[flash_type];
-}
+uint8_t get_page_type(int flash_type, int pg);
+int64_t get_page_read_latency(int flash_type, int page_type);
+int64_t get_page_write_latency(int flash_type, int page_type);
+int64_t get_blk_erase_latency(int flash_type);
 
 int init_nand_flash(void *opaque);
 
