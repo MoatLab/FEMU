@@ -23,6 +23,12 @@ enum {
     NAND_ERASE_LATENCY = 2000000,
 };
 
+/* ECC read-latency wear model: P/E cycles per latency tier, and the tier cap */
+enum {
+    FEMU_ECC_PE_PER_TIER = 750,
+    FEMU_ECC_MAX_TIERS   = 4,
+};
+
 enum {
     USER_IO = 0,
     GC_IO = 1,
@@ -128,6 +134,18 @@ struct ssdparams {
     int ch_xfer_lat;  /* channel transfer latency for one page in nanoseconds
                        * this defines the channel bandwith
                        */
+
+    /* optional richer NAND timing model (all 0 = off, flat per-page latency) */
+    int cell_pages;   /* pages per wordline = bits/cell: 1 SLC..5 PLC; 0 = off */
+    int pgtype_lat;   /* model per-page-type (LSB/CSB/MSB) program latency, 0=off */
+    int ecc_step_ns;  /* per-tier ECC read-latency adder vs P/E wear, 0=off */
+    int cmd_addr_lat; /* command+address bus phase (ns); 0 = off */
+    int pg_xfer_lat;  /* page data-in/data-out bus phase (ns); 0 = off */
+    int status_lat;   /* status/ready-poll bus phase (ns); 0 = off */
+    int tplpbsy;      /* multi-plane program inter-plane busy (ns); 0 = off */
+    int tplrbsy;      /* multi-plane read inter-plane busy (ns); 0 = off */
+    int tplebsy;      /* multi-plane erase inter-plane busy (ns); 0 = off */
+    int trcbsy;       /* cache read busy (next-page array overlap), ns; 0 = off */
 
     double gc_thres_pcent;
     int gc_thres_lines;

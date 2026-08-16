@@ -8,14 +8,32 @@
  */
 #include "qemu/osdep.h"
 #include "ftl.h"
+#include "ftl-internal.h"
 
 /* Decode a bbssd ppa into the media's normalized NandLoc. */
 static NandLoc bb_decode_loc(struct ssd *ssd, struct ppa *ppa)
 {
+    int ct = (ssd->n) ? ssd->n->nand_cell_type : 0;
     NandLoc loc = {
         .ch = ppa->g.ch, .lun = ppa->g.lun, .pl = ppa->g.pl,
         .blk = ppa->g.blk, .pg = ppa->g.pg,
-        .flash_type = 0, .page_type = 0, .pe_cycles = 0,
+        /*
+         * With a cell type set, the media layer uses table timing, so report the
+         * real flash type and the paired page type. Otherwise flash_type is 0
+         * (flat timing) and page_type is the pg-modulo-bits-per-cell value, which
+         * only the optional pgtype_lat program-latency model consumes.
+         */
+        .flash_type = (uint8_t)ct,
+        .page_type = ct ? get_page_type(ct, ppa->g.pg) :
+                     (uint8_t)(ppa->g.pg % (ssd->sp.cell_pages ?
+                                            ssd->sp.cell_pages : 3)),
+        /*
+         * pe_cycles feeds only the wear-dependent ECC-on-read latency tier, which
+         * is active when ecc_step_ns is set. Read the block erase count lazily so
+         * the common path does not chase block metadata on every op.
+         */
+        .pe_cycles = ssd->sp.ecc_step_ns ?
+                     (uint32_t)get_blk(ssd, ppa)->erase_cnt : 0,
     };
     return loc;
 }
@@ -58,7 +76,55 @@ void bb_nand_media_init(struct ssd *ssd)
     cfg.timing.rd_ns = spp->pg_rd_lat;
     cfg.timing.wr_ns = spp->pg_wr_lat;
     cfg.timing.er_ns = spp->blk_er_lat;
+
+    /* optional finer NAND timing; every knob defaults to 0, leaving these zero
+     * and the behavior bit-identical to the flat model. */
+    cfg.timing.cmd_addr_ns = spp->cmd_addr_lat;
+    cfg.timing.page_xfer_ns = spp->pg_xfer_lat;
+    cfg.timing.status_ns = spp->status_lat;
+    cfg.timing.tplpbsy_ns = spp->tplpbsy;
+    cfg.timing.tplrbsy_ns = spp->tplrbsy;
+    cfg.timing.tplebsy_ns = spp->tplebsy;
+    cfg.timing.trcbsy_ns = spp->trcbsy;
+    cfg.timing.ecc_step_ns = spp->ecc_step_ns;
+    cfg.timing.ecc_pe_per_tier = FEMU_ECC_PE_PER_TIER;
+    cfg.timing.ecc_max_tiers = FEMU_ECC_MAX_TIERS;
+    cfg.timing.pgtype_lat = (spp->pgtype_lat != 0);
+    /* page-type program multipliers (x1000): SLC..PLC rows, picked by cell_pages.
+     * Only consulted when pgtype_lat is set, so this is inert by default. */
+    {
+        static const int32_t mult[5][NAND_MEDIA_MAX_PGTYPE] = {
+            {1000,    0,    0,    0,    0, 0},
+            { 600, 1400,    0,    0,    0, 0},
+            { 600, 1000, 1400,    0,    0, 0},
+            { 500,  850, 1150, 1500,    0, 0},
+            { 400,  750, 1000, 1250, 1600, 0},
+        };
+        int cp = spp->cell_pages < 1 ? 1 : (spp->cell_pages > 5 ? 5 : spp->cell_pages);
+        for (int i = 0; i < NAND_MEDIA_MAX_PGTYPE; i++) {
+            cfg.timing.pgtype_mult[i] = mult[cp - 1][i];
+        }
+    }
+
     cfg.policy.use_flat_timing = true;
+    /*
+     * Cell type: when nand_cell_type is set (1 SLC .. 4 QLC), drive true per-type
+     * NAND timing from the shared flash-type table (per-type read/program/erase
+     * plus page pairing) instead of the flat latencies. Default (0) keeps the flat
+     * path bit-identical.
+     */
+    if (ssd->n && ssd->n->nand_cell_type) {
+        int ft = ssd->n->nand_cell_type;
+        init_nand_flash(ssd->n); /* ensure the shared flash tables are populated */
+        for (int p = 0; p < NAND_MEDIA_MAX_PGTYPE; p++) {
+            cfg.timing.rd_table_ns[ft][p] = get_page_read_latency(ft, p);
+            cfg.timing.wr_table_ns[ft][p] = get_page_write_latency(ft, p);
+        }
+        cfg.timing.er_table_ns[ft] = get_blk_erase_latency(ft);
+        cfg.policy.use_flat_timing = false;
+        cfg.timing.pgtype_lat = false; /* the table path already carries pairing */
+    }
+
     cfg.policy.array_gate = NAND_GATE_LUN_ONLY;
     cfg.policy.channel_mode = NAND_CH_OFF;
     cfg.timeline = &bb_timeline_ops;

@@ -33,6 +33,18 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->blk_er_lat = n->bb_params.blk_er_lat;
     spp->ch_xfer_lat = n->bb_params.ch_xfer_lat;
 
+    /* optional richer NAND timing model (all 0 = off, flat per-page latency) */
+    spp->cell_pages = n->bb_params.cell_pages;
+    spp->pgtype_lat = n->bb_params.pgtype_lat;
+    spp->ecc_step_ns = n->bb_params.ecc_step_ns;
+    spp->cmd_addr_lat = n->bb_params.cmd_addr_lat;
+    spp->pg_xfer_lat = n->bb_params.pg_xfer_lat;
+    spp->status_lat = n->bb_params.status_lat;
+    spp->tplpbsy = n->bb_params.tplpbsy;
+    spp->tplrbsy = n->bb_params.tplrbsy;
+    spp->tplebsy = n->bb_params.tplebsy;
+    spp->trcbsy = n->bb_params.trcbsy;
+
     /* calculated values */
     spp->secs_per_blk = spp->secs_per_pg * spp->pgs_per_blk;
     spp->secs_per_pl = spp->secs_per_blk * spp->blks_per_pl;

@@ -28,6 +28,27 @@ void ssd_init(FemuCtrl *n)
         ssd_init_ch(&ssd->ch[i], spp);
     }
 
+    /*
+     * Validate the optional NAND cell type before the media layer or the datapath
+     * indexes the per-type tables with it. Only SLC..QLC have populated tables and
+     * page-type pairing; anything else (including PLC) falls back to flat timing.
+     */
+    if (n->nand_cell_type &&
+        (n->nand_cell_type < SLC || n->nand_cell_type > QLC)) {
+        ftl_err("nand_cell_type %u out of range (1 SLC..4 QLC); using flat timing\n",
+                n->nand_cell_type);
+        n->nand_cell_type = 0;
+    }
+    /*
+     * The pgtype_lat program model needs a bits-per-cell count to pick a
+     * multiplier row and to fold the page number into a page type; default it to
+     * TLC when the model is on but cell_pages was left unset, so the page type
+     * and the multiplier row stay consistent.
+     */
+    if (spp->pgtype_lat && spp->cell_pages < 1) {
+        spp->cell_pages = 3; /* TLC */
+    }
+
     /* configure the NAND media-layer timing (reads spp, points at ssd->ch) */
     bb_nand_media_init(ssd);
 

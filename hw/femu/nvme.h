@@ -1535,6 +1535,17 @@ typedef struct BbCtrlParams {
     char *gc_policy; /* base-path GC victim policy name (NULL/"" => greedy) */
     char *cache_evict; /* read-cache eviction: clock (default) | random | lru | arc */
     char *mapping_scheme; /* L2P mapping: page (default) | dftl (demand cache) */
+    /* optional richer NAND timing model (all 0 = off, flat per-page latency) */
+    int cell_pages;   /* pages per wordline = bits/cell: 1 SLC..5 PLC; 0 = off */
+    int pgtype_lat;   /* model per-page-type program latency; 0 = off */
+    int ecc_step_ns;  /* per-tier ECC read-latency adder vs P/E wear; 0 = off */
+    int cmd_addr_lat; /* command+address bus phase (ns); 0 = off */
+    int pg_xfer_lat;  /* page data-in/data-out bus phase (ns); 0 = off */
+    int status_lat;   /* status/ready-poll bus phase (ns); 0 = off */
+    int tplpbsy;      /* multi-plane program inter-plane busy (ns); 0 = off */
+    int tplrbsy;      /* multi-plane read inter-plane busy (ns); 0 = off */
+    int tplebsy;      /* multi-plane erase inter-plane busy (ns); 0 = off */
+    int trcbsy;       /* cache read busy (next-page array overlap), ns; 0 = off */
 } BbCtrlParams;
 
 typedef struct ZNSCtrlParams {
@@ -1721,6 +1732,7 @@ typedef struct FemuCtrl {
     uint32_t        memsz;
     uint32_t        read_cache_mb; /* bbssd DRAM read cache size (0 = off) */
     uint32_t        mapping_cache_mb; /* bbssd DFTL translation cache size (0 = off) */
+    uint8_t         nand_cell_type; /* bbssd NAND cell type: 0=off(flat), 1 SLC..4 QLC */
     OcCtrlParams    oc_params;
     CsdCtrlParams   csd_params;
 
