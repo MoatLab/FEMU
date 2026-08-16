@@ -844,6 +844,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
 {
     FemuCtrl *n = FEMU(pci_dev);
     int64_t bs_size;
+    uint64_t nand_cap = 0;
 
     nvme_check_size();
 
@@ -853,6 +854,20 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
 
     bs_size = ((int64_t)n->memsz) * 1024 * 1024;
 
+    /*
+     * Explicit over-provisioning (bbssd only). Without it, the spare area is just
+     * the incidental gap between the NAND capacity implied by the geometry and the
+     * devsz_mb-derived namespace. With op_pcent set, back the device with the full
+     * NAND capacity and expose a namespace op_pcent smaller, so the over-provision
+     * ratio is a known fraction. op_pcent == 0 keeps the devsz_mb-based sizing.
+     */
+    if (BBSSD(n) && n->op_pcent) {
+        BbCtrlParams *bb = &n->bb_params;
+        nand_cap = (uint64_t)bb->nchs * bb->luns_per_ch * bb->pls_per_lun *
+                   bb->blks_per_pl * bb->pgs_per_blk * bb->secs_per_pg * bb->secsz;
+        bs_size = nand_cap;
+    }
+
     init_dram_backend(&n->mbe, bs_size);
     n->mbe->femu_mode = n->femu_mode;
 
@@ -860,6 +875,10 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     n->start_time = time(NULL);
     n->reg_size = pow2ceil(0x1004 + 2 * (n->nr_io_queues + 1) * 4);
     n->ns_size = bs_size / (uint64_t)n->num_namespaces;
+    if (BBSSD(n) && n->op_pcent) {
+        n->ns_size = nand_cap * 100 / (100ULL + n->op_pcent);
+        n->ns_size &= ~((1ULL << BDRV_SECTOR_BITS) - 1);
+    }
 
     /* Coperd: [1..nr_io_queues] are used as IO queues */
     n->sq = g_malloc0(sizeof(*n->sq) * (n->nr_io_queues + 1));
@@ -1048,6 +1067,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_INT32("trcbsy", FemuCtrl, bb_params.trcbsy, 0),
     DEFINE_PROP_INT32("trim_lat_ns", FemuCtrl, bb_params.trim_lat_ns, 0),
     DEFINE_PROP_UINT32("nand_bad_blocks", FemuCtrl, nand_bad_blocks, 0),
+    DEFINE_PROP_UINT32("op_pcent", FemuCtrl, op_pcent, 0),
     DEFINE_PROP_INT32("fdp_trim_erase_all", FemuCtrl,
                       bb_params.fdp_trim_erase_all, 0),
     DEFINE_PROP_LINK("subsys", FemuCtrl, subsys, TYPE_NVME_SUBSYS,

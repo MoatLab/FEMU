@@ -1743,6 +1743,7 @@ typedef struct FemuCtrl {
     uint32_t        mapping_cache_mb; /* bbssd DFTL translation cache size (0 = off) */
     uint8_t         nand_cell_type; /* bbssd NAND cell type: 0=off(flat), 1 SLC..4 QLC */
     uint32_t        nand_bad_blocks; /* bbssd factory bad blocks reported via SMART; 0 = none */
+    uint32_t        op_pcent; /* bbssd over-provisioning percent (0 = use devsz_mb) */
     OcCtrlParams    oc_params;
     CsdCtrlParams   csd_params;
 
