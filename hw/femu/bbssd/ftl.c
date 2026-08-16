@@ -49,6 +49,13 @@ void ssd_init(FemuCtrl *n)
         spp->cell_pages = 3; /* TLC */
     }
 
+    /* factory bad-block count, reported via SMART available_spare; clamp to the
+     * total block count so a misconfigured value cannot exceed 100% depletion */
+    ssd->bad_blocks = n->nand_bad_blocks;
+    if (spp->tt_blks > 0 && ssd->bad_blocks > (uint32_t)spp->tt_blks) {
+        ssd->bad_blocks = (uint32_t)spp->tt_blks;
+    }
+
     /* configure the NAND media-layer timing (reads spp, points at ssd->ch) */
     bb_nand_media_init(ssd);
 
@@ -116,6 +123,23 @@ void ssd_init(FemuCtrl *n)
 
     qemu_thread_create(&ssd->ftl_thread, "FEMU-FTL-Thread", ftl_thread, n,
                        QEMU_THREAD_JOINABLE);
+}
+
+/*
+ * SMART available_spare: 100% on a healthy device, reduced by the factory
+ * bad-block fraction (bad_blocks / tt_blks) as bad blocks consume the
+ * over-provisioned reserve. A reported value only -- placement is unaffected.
+ */
+uint8_t ssd_available_spare(struct ssd *ssd)
+{
+    struct ssdparams *spp = &ssd->sp;
+    uint64_t bad_pct;
+
+    if (ssd->bad_blocks == 0 || spp->tt_blks <= 0) {
+        return 100;
+    }
+    bad_pct = ((uint64_t)ssd->bad_blocks * 100ull) / (uint64_t)spp->tt_blks;
+    return bad_pct >= 100 ? 0 : (uint8_t)(100 - bad_pct);
 }
 
 

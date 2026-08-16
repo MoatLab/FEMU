@@ -1742,6 +1742,7 @@ typedef struct FemuCtrl {
     uint32_t        read_cache_mb; /* bbssd DRAM read cache size (0 = off) */
     uint32_t        mapping_cache_mb; /* bbssd DFTL translation cache size (0 = off) */
     uint8_t         nand_cell_type; /* bbssd NAND cell type: 0=off(flat), 1 SLC..4 QLC */
+    uint32_t        nand_bad_blocks; /* bbssd factory bad blocks reported via SMART; 0 = none */
     OcCtrlParams    oc_params;
     CsdCtrlParams   csd_params;
 
@@ -1940,6 +1941,9 @@ int nvme_register_nossd(FemuCtrl *n);
 int nvme_register_bbssd(FemuCtrl *n);
 int nvme_register_znssd(FemuCtrl *n);
 int nvme_register_csd(FemuCtrl *n);
+
+/* bbssd SMART available-spare (100% healthy, reduced by the factory bad-block fraction) */
+uint8_t ssd_available_spare(struct ssd *ssd);
 
 static inline uint64_t ns_blks(NvmeNamespace *ns, uint8_t lba_idx)
 {

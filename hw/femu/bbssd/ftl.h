@@ -449,6 +449,8 @@ struct ssd {
     /* base-path GC victim policy (greedy by default) */
     const struct femu_ftl_policy_ops *policy;
 
+    uint32_t bad_blocks; /* factory bad-block count, reported via SMART; 0 = none */
+
     FemuCtrl *n;
 };
 

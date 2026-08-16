@@ -949,6 +949,9 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
     smart.temperature[0] = n->temperature & 0xff;
     smart.temperature[1] = (n->temperature >> 8) & 0xff;
 
+    /* healthy by default; bbssd derives it from the factory bad-block fraction */
+    smart.available_spare = (BBSSD(n) && n->ssd) ? ssd_available_spare(n->ssd) : 100;
+
     current_seconds = time(NULL);
     smart.power_on_hours[0] = cpu_to_le64(
         ((current_seconds - n->start_time) / 60) / 60);
