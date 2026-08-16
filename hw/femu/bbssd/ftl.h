@@ -146,6 +146,7 @@ struct ssdparams {
     int tplrbsy;      /* multi-plane read inter-plane busy (ns); 0 = off */
     int tplebsy;      /* multi-plane erase inter-plane busy (ns); 0 = off */
     int trcbsy;       /* cache read busy (next-page array overlap), ns; 0 = off */
+    int trim_lat_ns;  /* modeled cost per processed DSM/TRIM range, ns; 0 = off */
 
     double gc_thres_pcent;
     int gc_thres_lines;

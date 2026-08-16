@@ -235,5 +235,13 @@ uint64_t ssd_trim(struct ssd *ssd, NvmeRequest *req)
     if (exp_log_enabled)
         femu_dbg_scan_secret(ssd, "after_trim");
 
-    return 0;  // Assume TRIM operations have no NAND latency
+    /*
+     * Optional modeled TRIM cost: trim_lat_ns per processed DSM range, for the
+     * metadata map updates a real SSD incurs on deallocate. Default 0 keeps TRIM
+     * instant, bit-identical to the prior behavior.
+     */
+    if (spp->trim_lat_ns > 0) {
+        return (uint64_t)spp->trim_lat_ns * nr_ranges;
+    }
+    return 0;
 }

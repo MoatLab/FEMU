@@ -1046,6 +1046,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_INT32("tplrbsy", FemuCtrl, bb_params.tplrbsy, 0),
     DEFINE_PROP_INT32("tplebsy", FemuCtrl, bb_params.tplebsy, 0),
     DEFINE_PROP_INT32("trcbsy", FemuCtrl, bb_params.trcbsy, 0),
+    DEFINE_PROP_INT32("trim_lat_ns", FemuCtrl, bb_params.trim_lat_ns, 0),
     DEFINE_PROP_INT32("fdp_trim_erase_all", FemuCtrl,
                       bb_params.fdp_trim_erase_all, 0),
     DEFINE_PROP_LINK("subsys", FemuCtrl, subsys, TYPE_NVME_SUBSYS,

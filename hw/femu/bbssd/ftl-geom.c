@@ -44,6 +44,7 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->tplrbsy = n->bb_params.tplrbsy;
     spp->tplebsy = n->bb_params.tplebsy;
     spp->trcbsy = n->bb_params.trcbsy;
+    spp->trim_lat_ns = n->bb_params.trim_lat_ns;
 
     /* calculated values */
     spp->secs_per_blk = spp->secs_per_pg * spp->pgs_per_blk;
