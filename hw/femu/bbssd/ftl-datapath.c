@@ -12,7 +12,7 @@
 uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
 {
     struct ssdparams *spp = &ssd->sp;
-    uint64_t lba = req->slba;
+    uint64_t lba = req->slba + ssd_ns_lba_base(ssd, req);
     int nsecs = req->nlb;
     struct ppa ppa;
     uint64_t start_lpn = lba / spp->secs_per_pg;
@@ -71,7 +71,7 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
 
 uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 {
-    uint64_t lba = req->slba;
+    uint64_t lba = req->slba + ssd_ns_lba_base(ssd, req);
     struct ssdparams *spp = &ssd->sp;
     int len = req->nlb;
     uint64_t start_lpn = lba / spp->secs_per_pg;
@@ -164,7 +164,9 @@ uint64_t ssd_trim(struct ssd *ssd, NvmeRequest *req)
     // printf("TRIM: Processing %d ranges (attributes=0x%x)\n", nr_ranges, attributes);
     
     for (int range_idx = 0; range_idx < nr_ranges; range_idx++) {
-        uint64_t slba = le64_to_cpu(ranges[range_idx].slba);
+        /* shift into this namespace's slice of the FTL, as read and write do */
+        uint64_t slba = le64_to_cpu(ranges[range_idx].slba) +
+                        ssd_ns_lba_base(ssd, req);
         uint32_t nlb = le32_to_cpu(ranges[range_idx].nlb);
         // uint32_t cattr = le32_to_cpu(ranges[range_idx].cattr);
         

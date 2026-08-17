@@ -1,4 +1,5 @@
 #include "qemu/osdep.h"
+#include "qemu/cutils.h"
 #include "hw/qdev-properties.h"
 
 #include "./nvme.h"
@@ -641,7 +642,8 @@ static int nvme_init_namespace(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     nvme_ns_init_identify(n, id_ns);
 
     lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
-    num_blks = n->ns_size / ((1 << id_ns->lbaf[lba_index].lbads));
+    /* size this namespace from its own backend slice, not the whole backend */
+    num_blks = ns->size / ((1 << id_ns->lbaf[lba_index].lbads));
     id_ns->nuse = id_ns->ncap = id_ns->nsze = cpu_to_le64(num_blks);
 
     n->csi = NVME_CSI_NVM;
@@ -665,23 +667,129 @@ static int nvme_init_namespace(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     return 0;
 }
 
-static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
+/*
+ * Resolve each namespace's byte size. With namespace_sizes unset the backend is
+ * split equally, which for a single namespace hands it the whole backend. When
+ * set, it is a comma-separated per-namespace list (e.g. "8G,4G") whose count must
+ * equal namespaces, each entry at least one sector, and whose sum must fit the
+ * backend. Sizes are rounded down to a sector so slices stay sector-aligned.
+ */
+static int nvme_resolve_ns_sizes(FemuCtrl *n, uint64_t total, uint64_t *out_sizes,
+                                 Error **errp)
 {
+    char *dup, *saveptr = NULL, *tok;
+    uint64_t sum = 0;
     int i;
 
-    /* FIXME: FEMU only supports 1 namesapce now */
-    assert(n->num_namespaces == 1);
+    if (!n->namespace_sizes || !n->namespace_sizes[0]) {
+        uint64_t each = total / n->num_namespaces;
+
+        each &= ~((uint64_t)(1 << BDRV_SECTOR_BITS) - 1);
+        if (each == 0) {
+            error_setg(errp, "backend capacity %" PRIu64 " B is too small for %u "
+                       "namespaces", total, n->num_namespaces);
+            return -1;
+        }
+        for (i = 0; i < n->num_namespaces; i++) {
+            out_sizes[i] = each;
+        }
+        return 0;
+    }
+
+    dup = g_strdup(n->namespace_sizes);
+    tok = strtok_r(dup, ",", &saveptr);
+    i = 0;
+    while (tok && i < n->num_namespaces) {
+        uint64_t sz;
+
+        if (qemu_strtosz(tok, NULL, &sz) < 0 || sz == 0) {
+            error_setg(errp, "namespace_sizes: invalid size '%s'", tok);
+            g_free(dup);
+            return -1;
+        }
+        sz &= ~((uint64_t)(1 << BDRV_SECTOR_BITS) - 1);
+        if (sz == 0) {
+            error_setg(errp, "namespace_sizes: '%s' is smaller than a sector", tok);
+            g_free(dup);
+            return -1;
+        }
+        out_sizes[i++] = sz;
+        sum += sz;
+        tok = strtok_r(NULL, ",", &saveptr);
+    }
+    if (i != n->num_namespaces || tok) {
+        error_setg(errp, "namespace_sizes count must equal namespaces=%u",
+                   n->num_namespaces);
+        g_free(dup);
+        return -1;
+    }
+    g_free(dup);
+
+    if (sum > total) {
+        error_setg(errp, "namespace_sizes sum (%" PRIu64 " B) exceeds the backend "
+                   "capacity (%" PRIu64 " B)", sum, total);
+        return -1;
+    }
+
+    return 0;
+}
+
+static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
+{
+    uint64_t *ns_sizes;
+    uint64_t backend_total = n->ns_size * (uint64_t)n->num_namespaces;
+    uint64_t running_offset = 0;
+    int i;
+
+    /*
+     * Namespaces carve up one shared backend, so each needs its own slice. Only
+     * the flat-LBA modes can do that today: the zoned and Open-Channel paths keep
+     * their geometry (zone array, block tables) on the controller, so a second
+     * namespace would share one namespace's worth of state.
+     */
+    if (n->num_namespaces > 1 && !NOSSD(n) && !BBSSD(n)) {
+        error_setg(errp, "femu_mode %u supports a single namespace; only nossd "
+                   "and bbssd support namespaces > 1", n->femu_mode);
+        return 1;
+    }
+    /*
+     * FDP keeps its reclaim groups and unit handles on the controller and places
+     * writes through its own path, which addresses the flash by the raw command
+     * LBA rather than the namespace slice. Sharing that between namespaces would
+     * let them land on the same logical pages, so keep FDP to one namespace.
+     */
+    if (n->num_namespaces > 1 && n->subsys && n->subsys->params.fdp.enabled) {
+        error_setg(errp, "FDP supports a single namespace; set namespaces=1 or "
+                   "disable FDP on the subsystem");
+        return 1;
+    }
+
+    ns_sizes = g_new0(uint64_t, n->num_namespaces);
+    if (nvme_resolve_ns_sizes(n, backend_total, ns_sizes, errp)) {
+        g_free(ns_sizes);
+        return 1;
+    }
 
     for (i = 0; i < n->num_namespaces; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
-        ns->size = n->ns_size;
-        ns->start_block = i * n->ns_size >> BDRV_SECTOR_BITS;
+
+        /*
+         * Pack the slices in order: each namespace starts where the previous one
+         * ended, so variable sizes leave no gap and no overlap. With one namespace
+         * the offset is 0 and the size is the whole backend, exactly as before.
+         */
+        ns->size = ns_sizes[i];
+        ns->backend_offset = running_offset;
+        ns->start_block = running_offset >> BDRV_SECTOR_BITS;
+        running_offset += ns_sizes[i];
         ns->id = i + 1;
 
         if (nvme_init_namespace(n, ns, errp)) {
+            g_free(ns_sizes);
             return 1;
         }
     }
+    g_free(ns_sizes);
 
     return 0;
 }
@@ -874,9 +982,11 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     n->completed = 0;
     n->start_time = time(NULL);
     n->reg_size = pow2ceil(0x1004 + 2 * (n->nr_io_queues + 1) * 4);
+    /* ns_size is the per-namespace share of the exposed capacity */
     n->ns_size = bs_size / (uint64_t)n->num_namespaces;
     if (BBSSD(n) && n->op_pcent) {
-        n->ns_size = nand_cap * 100 / (100ULL + n->op_pcent);
+        n->ns_size = (nand_cap * 100 / (100ULL + n->op_pcent)) /
+                     (uint64_t)n->num_namespaces;
         n->ns_size &= ~((1ULL << BDRV_SECTOR_BITS) - 1);
     }
 
@@ -897,7 +1007,15 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     }
 
     nvme_init_ctrl(n);
-    nvme_init_namespaces(n, errp);
+    /*
+     * Stop here if the namespaces did not come up. The mode init below builds on
+     * initialized namespace state and would otherwise run against half-built
+     * namespaces, and it takes the same Error argument, which must not already
+     * carry an error.
+     */
+    if (nvme_init_namespaces(n, errp)) {
+        return;
+    }
 
     nvme_register_extensions(n);
 
@@ -1068,6 +1186,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_INT32("trim_lat_ns", FemuCtrl, bb_params.trim_lat_ns, 0),
     DEFINE_PROP_UINT32("nand_bad_blocks", FemuCtrl, nand_bad_blocks, 0),
     DEFINE_PROP_UINT32("op_pcent", FemuCtrl, op_pcent, 0),
+    DEFINE_PROP_STRING("namespace_sizes", FemuCtrl, namespace_sizes),
     DEFINE_PROP_INT32("fdp_trim_erase_all", FemuCtrl,
                       bb_params.fdp_trim_erase_all, 0),
     DEFINE_PROP_LINK("subsys", FemuCtrl, subsys, TYPE_NVME_SUBSYS,

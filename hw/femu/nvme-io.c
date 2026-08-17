@@ -452,7 +452,12 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
     const uint16_t ms = le16_to_cpu(ns->id_ns.lbaf[lba_index].ms);
     const uint8_t data_shift = ns->id_ns.lbaf[lba_index].lbads;
     uint64_t data_size = (uint64_t)nlb << data_shift;
-    uint64_t data_offset = slba << data_shift;
+    /*
+     * Address the backend within this namespace's slice. backend_offset is 0 for
+     * the first namespace, so single-namespace addressing is unchanged; without it
+     * every namespace would start at backend offset 0 and alias the others.
+     */
+    uint64_t data_offset = ns->backend_offset + (slba << data_shift);
     uint64_t meta_size = nlb * ms;
     uint64_t elba = slba + nlb;
     uint16_t err;

@@ -1427,6 +1427,13 @@ typedef struct NvmeNamespace {
     uint64_t        size; /* Coperd: for ZNS, FIXME */
     uint64_t        ns_blks;
     uint64_t        start_block;
+    /*
+     * Byte offset of this namespace's slice within the shared backend. Zero for
+     * the first namespace, so a single-namespace device addresses the backend
+     * exactly as before. Namespaces are packed in order, so slice i starts where
+     * slice i-1 ended and no two namespaces alias.
+     */
+    uint64_t        backend_offset;
     uint64_t        meta_start_offset;
     uint64_t        tbl_dsk_start_offset;
     uint32_t        tbl_entries;
@@ -1744,6 +1751,7 @@ typedef struct FemuCtrl {
     uint8_t         nand_cell_type; /* bbssd NAND cell type: 0=off(flat), 1 SLC..4 QLC */
     uint32_t        nand_bad_blocks; /* bbssd factory bad blocks reported via SMART; 0 = none */
     uint32_t        op_pcent; /* bbssd over-provisioning percent (0 = use devsz_mb) */
+    char            *namespace_sizes; /* per-NS sizes "8G,4G"; NULL = equal split */
     OcCtrlParams    oc_params;
     CsdCtrlParams   csd_params;
 
@@ -1950,7 +1958,8 @@ static inline uint64_t ns_blks(NvmeNamespace *ns, uint8_t lba_idx)
 {
     FemuCtrl *n = ns->ctrl;
     NvmeIdNs *id_ns = &ns->id_ns;
-    uint64_t ns_size = n->ns_size;
+    /* per-namespace slice size; equals the whole backend for a single namespace */
+    uint64_t ns_size = ns->size;
 
     uint32_t lba_ds = (1 << id_ns->lbaf[lba_idx].lbads);
     uint32_t lba_sz = lba_ds + n->meta;

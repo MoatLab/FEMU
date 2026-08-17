@@ -198,6 +198,23 @@ void gc_read_page(struct ssd *ssd, struct ppa *ppa);
 int do_gc(struct ssd *ssd, bool force);
 const struct femu_ftl_policy_ops *femu_ftl_policy_lookup(const char *name);
 
+/*
+ * Base LBA of a request's namespace inside the FTL address space. One FTL maps a
+ * single flat logical page space over the whole device, so each namespace has to
+ * be shifted into its own slice; otherwise namespaces would map onto the same
+ * logical pages and overwrite each other. The slice offset is a byte count, and
+ * the FTL treats an LBA as a sector of spp->secsz, so convert between the two.
+ * Returns 0 for the first namespace, leaving single-namespace mapping unchanged.
+ */
+static inline uint64_t ssd_ns_lba_base(struct ssd *ssd, NvmeRequest *req)
+{
+    if (!req->ns || req->ns->backend_offset == 0) {
+        return 0;
+    }
+
+    return req->ns->backend_offset / ssd->sp.secsz;
+}
+
 /* non-FDP host datapath (hw/femu/bbssd/ftl-datapath.c) */
 uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req);
 uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req);

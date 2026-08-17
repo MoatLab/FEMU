@@ -318,6 +318,36 @@ cache_evict=clock      # Eviction policy: clock (default), random, lru, arc
 - FTL algorithm development and testing
 - Storage system performance evaluation
 
+### Multiple Namespaces
+
+BBSSD and NoSSD can expose more than one namespace. The namespaces share the
+device's capacity, each getting its own slice, so they are independent block
+devices (`/dev/nvme0n1`, `/dev/nvme0n2`, ...) that cannot overwrite each other.
+
+```bash
+# two namespaces, splitting the capacity evenly
+-device femu,devsz_mb=4096,namespaces=2,femu_mode=1,...
+
+# two namespaces with explicit sizes (3 GiB and 1 GiB)
+-device femu,devsz_mb=4096,namespaces=2,namespace_sizes=3G,,1G,femu_mode=1,...
+```
+
+**Key Parameters:**
+```bash
+namespaces=1           # Number of namespaces (default 1)
+namespace_sizes=       # Optional per-namespace sizes, e.g. "8G,,4G".
+                       #   Unset splits the capacity evenly. One entry per
+                       #   namespace, and the sum must fit the device.
+```
+
+Note the doubled comma in `namespace_sizes`: QEMU treats a comma as an option
+separator, so a comma inside a value has to be escaped by doubling it.
+
+Zoned (ZNSSD), Open-Channel (OCSSD), and CSD modes keep their geometry on the
+controller and support a single namespace; so does FDP, whose reclaim groups are
+shared device-wide. Requesting more than one namespace in those configurations
+is rejected at startup.
+
 ### WhiteBox SSD Mode (OCSSD)
 
 Emulates OpenChannel SSDs with host-managed FTL.
