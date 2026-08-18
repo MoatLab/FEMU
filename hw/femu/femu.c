@@ -855,6 +855,10 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
         ns->zd_extension_size = n->zns_params.zns_zd_ext_size;
         ns->num_conv_zones = n->zns_params.zns_num_conv_zones;
         ns->zns_chnls_per_zone = n->zns_params.zns_chnls_per_zone;
+        ns->zrwa_size = n->zns_params.zns_zrwa_size;
+        ns->zrwafg_size = n->zns_params.zns_zrwafg_size;
+        ns->zrwa_num = n->zns_params.zns_zrwa_num;
+        ns->zrwa_avail = n->zns_params.zns_zrwa_num;
 
         if (nvme_init_namespace(n, ns, errp)) {
             g_free(ns_sizes);
@@ -1358,6 +1362,10 @@ static const Property femu_props[] = {
                        zns_params.zns_num_conv_zones, 0),
     DEFINE_PROP_UINT32("zns_chnls_per_zone", FemuCtrl,
                        zns_params.zns_chnls_per_zone, 0),
+    DEFINE_PROP_UINT64("zns_zrwa_size", FemuCtrl, zns_params.zns_zrwa_size, 0),
+    DEFINE_PROP_UINT64("zns_zrwafg_size", FemuCtrl,
+                       zns_params.zns_zrwafg_size, 0),
+    DEFINE_PROP_UINT32("zns_zrwa_num", FemuCtrl, zns_params.zns_zrwa_num, 0),
     DEFINE_PROP_INT32("secsz", FemuCtrl, bb_params.secsz, 512),
     DEFINE_PROP_INT32("secs_per_pg", FemuCtrl, bb_params.secs_per_pg, 8),
     DEFINE_PROP_INT32("pgs_per_blk", FemuCtrl, bb_params.pgs_per_blk, 256),

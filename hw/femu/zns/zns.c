@@ -115,6 +115,8 @@ static int zns_init_zone_geometry(NvmeNamespace *ns, Error **errp)
     return 0;
 }
 
+static void zns_zrwa_release(NvmeNamespace *ns, NvmeZone *zone);
+
 static void zns_init_zoned_state(NvmeNamespace *ns)
 {
     uint64_t start = 0, zone_size = ns->zone_size;
@@ -176,6 +178,15 @@ static void zns_init_zone_identify(FemuCtrl *n, NvmeNamespace *ns, int lba_index
     id_ns_z->mor = cpu_to_le32(ns->max_open_zones - 1);
     id_ns_z->zoc = 0;
     id_ns_z->ozcs = ns->cross_zone_read ? 0x01 : 0x00;
+
+    /* advertise ZRWA and its parameters when the namespace is configured for it */
+    if (ns->zrwa_size) {
+        id_ns_z->ozcs |= NVME_ID_NS_ZONED_OZCS_ZRWASUP;
+        id_ns_z->numzrwa = cpu_to_le32(ns->zrwa_num - 1);
+        id_ns_z->zrwas = cpu_to_le16(ns->zrwa_size);
+        id_ns_z->zrwafg = cpu_to_le16(ns->zrwafg_size);
+        id_ns_z->zrwacap = NVME_ID_NS_ZONED_ZRWACAP_EXPFLUSHSUP;
+    }
 
     id_ns_z->lbafe[lba_index].zsze = cpu_to_le64(ns->zone_size);
     id_ns_z->lbafe[lba_index].zdes = ns->zd_extension_size >> 6; /* Units of 64B */
@@ -375,6 +386,20 @@ static uint16_t zns_check_zone_write(FemuCtrl *n, NvmeNamespace *ns,
         if (append) {
             status = NVME_INVALID_FIELD;
         }
+    } else if (zone->d.za & NVME_ZA_ZRWA_VALID) {
+        /*
+         * A zone with a ZRWA takes writes anywhere in the window
+         * [w_ptr, w_ptr + zrwas). Zone append targets the write pointer, which
+         * the window decouples from each write, so it is not allowed. The window
+         * accepted here spans two ZRWA sizes: the active one plus the buffer the
+         * implicit flush rolls into. Beyond that is out of range.
+         */
+        if (append) {
+            status = NVME_INVALID_ZONE_OP;
+        } else if (unlikely(slba < zone->w_ptr ||
+                            slba + nlb > zone->w_ptr + 2 * ns->zrwa_size)) {
+            status = NVME_ZONE_INVALID_WRITE;
+        }
     } else {
         assert(zns_wp_is_valid(zone));
         if (append) {
@@ -495,6 +520,36 @@ static void zns_finalize_zoned_write(NvmeNamespace *ns, NvmeRequest *req, bool f
         return;
     }
 
+    if (zone->d.za & NVME_ZA_ZRWA_VALID) {
+        /*
+         * With a ZRWA the write pointer only moves when a write crosses the
+         * window, and it moves in whole flush-granularity units. Writes that
+         * land inside the window leave it where it is.
+         */
+        uint64_t ezrwa = zone->w_ptr + ns->zrwa_size; /* one past the window */
+        uint64_t elba = slba + nlb;
+
+        if (failed) {
+            res->slba = 0;
+        }
+        if (elba > ezrwa) {
+            uint64_t over = elba - ezrwa;
+            uint64_t fg = ns->zrwafg_size;
+            uint64_t boundary = zns_zone_wr_boundary(zone);
+
+            zone->w_ptr += ((over + fg - 1) / fg) * fg;
+            if (zone->w_ptr > boundary) {
+                zone->w_ptr = boundary; /* never past the zone's capacity */
+            }
+            zone->d.wp = zone->w_ptr;
+        }
+        if (zone->w_ptr >= zns_zone_wr_boundary(zone)) {
+            zns_zrwa_release(ns, zone);
+            zns_assign_zone_state(ns, zone, NVME_ZONE_STATE_FULL);
+        }
+        return;
+    }
+
     zone->d.wp += nlb;
 
     if (failed) {
@@ -539,6 +594,15 @@ static uint64_t zns_advance_zone_wp(NvmeNamespace *ns, NvmeZone *zone, uint32_t 
      * write-pointer or active/open state machine, so leave its state alone.
      */
     if (zone->d.zt == NVME_ZONE_TYPE_CONVENTIONAL) {
+        return result;
+    }
+
+    /*
+     * A ZRWA decouples the write pointer from each write: it only moves on a
+     * flush, handled when the write completes. The zone is already explicitly
+     * open with its ZRWA held, so there is no state transition to make either.
+     */
+    if (zone->d.za & NVME_ZA_ZRWA_VALID) {
         return result;
     }
 
@@ -661,9 +725,21 @@ static uint16_t zns_close_zone(NvmeNamespace *ns, NvmeZone *zone,
     }
 }
 
+/* Give back a zone's ZRWA resource, on finish or reset of a ZRWA-active zone. */
+static void zns_zrwa_release(NvmeNamespace *ns, NvmeZone *zone)
+{
+    if (zone->d.za & NVME_ZA_ZRWA_VALID) {
+        zone->d.za &= ~NVME_ZA_ZRWA_VALID;
+        if (ns->zrwa_avail < ns->zrwa_num) {
+            ns->zrwa_avail++;
+        }
+    }
+}
+
 static uint16_t zns_finish_zone(NvmeNamespace *ns, NvmeZone *zone,
                                 NvmeZoneState state, NvmeRequest *req)
 {
+    zns_zrwa_release(ns, zone);
     switch (state) {
     case NVME_ZONE_STATE_EXPLICITLY_OPEN:
         /* fall through */
@@ -689,6 +765,8 @@ static uint16_t zns_reset_zone(NvmeNamespace *ns, NvmeZone *zone,
                                NvmeZoneState state, NvmeRequest *req)
 {
     uint64_t erase_lat = 0;
+
+    zns_zrwa_release(ns, zone);
 
     switch (state) {
     case NVME_ZONE_STATE_EMPTY:
@@ -935,7 +1013,8 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         }
         if(append)
         {
-             status = zns_auto_open_zone(ns, zone);
+             status = (zone->d.za & NVME_ZA_ZRWA_VALID) ? NVME_SUCCESS :
+                      zns_auto_open_zone(ns, zone);
              if(status)
              {
                 goto err;
@@ -1015,16 +1094,74 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
     }
 
     zone = &ns->zone_array[zone_idx];
-    if (slba != zone->d.zslba) {
+    /*
+     * An explicit ZRWA flush names a boundary inside the zone; every other
+     * action addresses its zone by the zone's start LBA.
+     */
+    if (action != NVME_ZONE_ACTION_FLUSH_ZRWA && slba != zone->d.zslba) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
     switch (action) {
     case NVME_ZONE_ACTION_OPEN:
+        /*
+         * Opening with the ZRWA-allocate flag hands the zone a ZRWA. It has to
+         * be a namespace configured for ZRWA, an empty zone that does not
+         * already hold one, aligned to the flush granularity, and there has to
+         * be a resource left. Check before opening so a rejection leaves the
+         * zone closed.
+         */
+        if (!all && (dw13 & NVME_ZSFLAG_ZRWA_ALLOC)) {
+            if (!ns->zrwa_size || !ns->zrwafg_size || !ns->zrwa_num) {
+                return NVME_INVALID_ZONE_OP | NVME_DNR;
+            } else if (zone->d.za & NVME_ZA_ZRWA_VALID) {
+                return NVME_SUCCESS;
+            } else if (zns_get_zone_state(zone) != NVME_ZONE_STATE_EMPTY) {
+                return NVME_INVALID_ZONE_OP | NVME_DNR;
+            } else if (zone->w_ptr % ns->zrwafg_size) {
+                return NVME_NOZRWA | NVME_DNR;
+            } else if (ns->zrwa_avail == 0) {
+                return NVME_NOZRWA | NVME_DNR;
+            }
+        }
         if (all) {
             proc_mask = NVME_PROC_CLOSED_ZONES;
         }
         status = zns_do_zone_op(ns, zone, proc_mask, zns_open_zone, req);
+        if (status == NVME_SUCCESS && !all &&
+            (dw13 & NVME_ZSFLAG_ZRWA_ALLOC)) {
+            zone->d.za |= NVME_ZA_ZRWA_VALID;
+            ns->zrwa_avail--;
+        }
+        break;
+    case NVME_ZONE_ACTION_FLUSH_ZRWA:
+        /*
+         * Explicit flush: move the write pointer up to and including the named
+         * boundary, which must sit inside the active window and end on a flush
+         * granularity. Only meaningful on a zone that holds a ZRWA.
+         */
+        if (all || !(zone->d.za & NVME_ZA_ZRWA_VALID)) {
+            return NVME_INVALID_ZONE_OP | NVME_DNR;
+        }
+        if (slba < zone->w_ptr || slba >= zone->w_ptr + ns->zrwa_size ||
+            slba >= zns_zone_wr_boundary(zone)) {
+            return NVME_INVALID_ZONE_OP | NVME_DNR;
+        }
+        if (((slba - zone->w_ptr + 1) % ns->zrwafg_size) != 0) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        /* flushing a closed zone brings it back to implicitly open */
+        if (zns_get_zone_state(zone) == NVME_ZONE_STATE_CLOSED) {
+            zns_aor_inc_open(ns);
+            zns_assign_zone_state(ns, zone, NVME_ZONE_STATE_IMPLICITLY_OPEN);
+        }
+        zone->w_ptr = slba + 1;
+        zone->d.wp = zone->w_ptr;
+        if (zone->w_ptr >= zns_zone_wr_boundary(zone)) {
+            zns_zrwa_release(ns, zone);
+            zns_assign_zone_state(ns, zone, NVME_ZONE_STATE_FULL);
+        }
+        status = NVME_SUCCESS;
         break;
     case NVME_ZONE_ACTION_CLOSE:
         if (all) {

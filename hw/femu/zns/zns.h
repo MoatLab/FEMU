@@ -177,6 +177,7 @@ enum NvmeZoneAttr {
     NVME_ZA_FINISHED_BY_CTLR         = 1 << 0,
     NVME_ZA_FINISH_RECOMMENDED       = 1 << 1,
     NVME_ZA_RESET_RECOMMENDED        = 1 << 2,
+    NVME_ZA_ZRWA_VALID               = 1 << 3,
     NVME_ZA_ZD_EXT_VALID             = 1 << 7,
 };
 
@@ -215,6 +216,7 @@ enum NvmeZoneSendAction {
     NVME_ZONE_ACTION_RESET           = 0x04,
     NVME_ZONE_ACTION_OFFLINE         = 0x05,
     NVME_ZONE_ACTION_SET_ZD_EXT      = 0x10,
+    NVME_ZONE_ACTION_FLUSH_ZRWA      = 0x11,
 };
 
 typedef struct QEMU_PACKED NvmeZoneDescr {
@@ -247,6 +249,14 @@ typedef struct QEMU_PACKED NvmeLBAFE {
     uint8_t     rsvd9[7];
 } NvmeLBAFE;
 
+enum NvmeIdNsZonedFlags {
+    NVME_ID_NS_ZONED_OZCS_ZRWASUP        = 1 << 1, /* ZRWA supported */
+    NVME_ID_NS_ZONED_ZRWACAP_EXPFLUSHSUP = 1 << 0, /* explicit ZRWA flush */
+};
+
+/* Zone Mgmt Send cdw13 bit 9: allocate a ZRWA when opening the zone */
+#define NVME_ZSFLAG_ZRWA_ALLOC (1 << 9)
+
 typedef struct QEMU_PACKED NvmeIdNsZoned {
     uint16_t    zoc;
     uint16_t    ozcs;
@@ -254,11 +264,25 @@ typedef struct QEMU_PACKED NvmeIdNsZoned {
     uint32_t    mor;
     uint32_t    rrl;
     uint32_t    frl;
-    uint8_t     rsvd20[2796];
+    /*
+     * ZRWA fields sit at their spec byte offsets inside what was reserved space
+     * (numzrwa@44, zrwafg@48, zrwas@50, zrwacap@52). The reserved bytes around
+     * them keep lbafe[] at offset 2816: 24 + 4 + 2 + 2 + 1 + 2763 = 2796.
+     */
+    uint8_t     rsvd20[24];
+    uint32_t    numzrwa;
+    uint16_t    zrwafg;
+    uint16_t    zrwas;
+    uint8_t     zrwacap;
+    uint8_t     rsvd53[2763];
     NvmeLBAFE   lbafe[16];
     uint8_t     rsvd3072[768];
     uint8_t     vs[256];
 } NvmeIdNsZoned;
+
+QEMU_BUILD_BUG_ON(sizeof(NvmeIdNsZoned) != 4096);
+QEMU_BUILD_BUG_ON(offsetof(NvmeIdNsZoned, numzrwa) != 44);
+QEMU_BUILD_BUG_ON(offsetof(NvmeIdNsZoned, lbafe) != 2816);
 
 typedef struct NvmeZone {
     NvmeZoneDescr   d;

@@ -392,7 +392,24 @@ zns_max_open=0         # Max open zones (0 = unlimited)
 zns_zd_ext_size=0      # Zone-descriptor extension bytes (0 = none)
 zns_num_conv_zones=0   # Leading conventional zones (0 = all sequential)
 zns_chnls_per_zone=0   # Channels a zone spans (0 = all of them)
+zns_zrwa_size=0        # ZRWA window in LBAs (0 = ZRWA disabled)
+zns_zrwafg_size=0      # ZRWA flush granularity in LBAs
+zns_zrwa_num=0         # Zones that may hold a ZRWA at once
 ```
+
+**Zone Random Write Area (ZRWA).** Setting all three of `zns_zrwa_size`,
+`zns_zrwafg_size` and `zns_zrwa_num` advertises ZRWA support. A zone opened with
+the ZRWA-allocate flag (`nvme zns open-zone --zrwaa`) then accepts writes
+anywhere in a sliding window instead of strictly at the write pointer, which
+only advances — in whole flush-granularity units — when a write crosses the end
+of the window, or when the host flushes explicitly
+(`nvme zns zrwa-flush-zone`). Finishing or resetting the zone returns the ZRWA
+resource. With all three left at 0 the namespace advertises no ZRWA and behaves
+exactly as before.
+
+Note that Linux issues writes to a zoned block device at the write pointer, so
+the random-write freedom is visible through the NVMe passthrough commands rather
+than through ordinary buffered or direct writes to the block device.
 
 **Zone width.** By default a zone spans every channel, so it is as wide as the
 device and there are relatively few of them. `zns_chnls_per_zone=N` narrows a

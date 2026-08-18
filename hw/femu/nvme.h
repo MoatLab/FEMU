@@ -899,6 +899,8 @@ enum NvmeStatusCodes {
     NVME_ZONE_TOO_MANY_ACTIVE   = 0x01bd,
     NVME_ZONE_TOO_MANY_OPEN     = 0x01be,
     NVME_ZONE_INVAL_TRANSITION  = 0x01bf,
+    NVME_INVALID_ZONE_OP        = 0x01b6,
+    NVME_NOZRWA                 = 0x01b7,
     NVME_INVALID_MEMORY_ADDRESS = 0x01C0,
     NVME_WRITE_FAULT            = 0x0280,
     NVME_UNRECOVERED_READ       = 0x0281,
@@ -1505,6 +1507,10 @@ typedef struct NvmeNamespace {
     uint32_t        zd_extension_size;
     uint32_t        num_conv_zones; /* leading conventional zones (0 = none) */
     uint32_t        zns_chnls_per_zone; /* channels a zone spans (0 = full width) */
+    uint64_t        zrwa_size;   /* ZRWA window in LBAs (0 = ZRWA off) */
+    uint64_t        zrwafg_size; /* ZRWA flush granularity in LBAs */
+    uint32_t        zrwa_num;    /* zones that may hold a ZRWA at once */
+    uint32_t        zrwa_avail;  /* ZRWA resources still free */
     bool            cross_zone_read;
     uint64_t        zone_size_bs;
     bool            zone_cap_bs;
@@ -1623,6 +1629,9 @@ typedef struct ZNSCtrlParams {
     uint32_t zns_zd_ext_size; /* per-zone descriptor extension bytes (0 = none) */
     uint32_t zns_num_conv_zones; /* leading conventional zones (0 = all sequential) */
     uint32_t zns_chnls_per_zone; /* channels a zone spans (0 = full width) */
+    uint64_t zns_zrwa_size;      /* ZRWA window, LBAs (0 = ZRWA off) */
+    uint64_t zns_zrwafg_size;    /* ZRWA flush granularity, LBAs */
+    uint32_t zns_zrwa_num;       /* how many zones may hold a ZRWA at once */
 } ZNSCtrlParams;
 
 typedef struct CsdCtrlParams {
