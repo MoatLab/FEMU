@@ -161,6 +161,16 @@ struct zns_ssd {
 
     uint32_t lbasz;
     uint32_t active_zone;
+
+    /*
+     * Zone-to-parallelism mapping. A zone spans chnls_per_zone channels;
+     * chnls_per_zone == num_ch is the full-width default. Narrower zones let
+     * num_ch/chnls_per_zone zones share one physical block index, each bound to
+     * its own channel group, so per-channel page use is unchanged. Placement
+     * progress is tracked per zone, since zones fill independently.
+     */
+    uint64_t chnls_per_zone;
+    uint64_t *zone_wp_slot;
 };
 
 enum NvmeZoneAttr {

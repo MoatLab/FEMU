@@ -43,20 +43,10 @@ static inline void check_addr(int a, int max)
    assert(a >= 0 && a < max);
 }
 
-static void zns_advance_write_pointer(struct zns_ssd *zns)
+static void zns_advance_write_pointer(struct zns_ssd *zns, uint32_t zone_idx)
 {
-    struct write_pointer *wpp = &zns->wp;
-
-    check_addr(wpp->ch, zns->num_ch);
-    wpp->ch++;
-    if (wpp->ch == zns->num_ch) {
-        wpp->ch = 0;
-        check_addr(wpp->lun, zns->num_lun);
-        wpp->lun++;
-        /* in this case, we should go to next lun */
-        if (wpp->lun == zns->num_lun) {
-            wpp->lun = 0;
-        }
+    if (zns->zone_wp_slot) {
+        zns->zone_wp_slot[zone_idx]++;
     }
 }
 
@@ -129,14 +119,30 @@ static inline bool mapped_ppa(struct ppa *ppa)
     return !(ppa->ppa == UNMAPPED_PPA);
 }
 
-static struct ppa get_new_page(struct zns_ssd *zns)
+/*
+ * Place the next physical page for a write to zone_idx. A full-width zone walks
+ * every channel and then every LUN, which is what the shared write pointer used
+ * to do. A narrower zone binds num_ch/chnls_per_zone zones to one block index,
+ * each on its own channel group, so per-channel page use is unchanged. The slot
+ * counter is per zone because zones fill independently.
+ */
+static struct ppa get_new_page(struct zns_ssd *zns, uint32_t zone_idx)
 {
-    struct write_pointer *wpp = &zns->wp;
+    uint64_t cpz = zns->chnls_per_zone;
+    uint64_t slot = zns->zone_wp_slot ? zns->zone_wp_slot[zone_idx] : 0;
     struct ppa ppa;
     ppa.ppa = 0;
-    ppa.g.ch = wpp->ch;
-    ppa.g.fc = wpp->lun;
-    ppa.g.blk = zns->active_zone;
+    if (cpz == zns->num_ch) {
+        ppa.g.ch = slot % zns->num_ch;
+        ppa.g.fc = (slot / zns->num_ch) % zns->num_lun;
+        ppa.g.blk = zone_idx;
+    } else {
+        uint64_t groups = zns->num_ch / cpz;
+
+        ppa.g.ch = (zone_idx % groups) * cpz + (slot % cpz);
+        ppa.g.fc = (slot / cpz) % zns->num_lun;
+        ppa.g.blk = zone_idx / groups;
+    }
     ppa.g.V = 1; //not padding page
     if(!valid_ppa(zns,&ppa))
     {
@@ -222,6 +228,11 @@ static void zns_reset_block_state(struct zns_ssd *zns, uint32_t zone_idx)
                 blk->page_wp = 0;
             }
         }
+    }
+
+    /* the zone starts filling from its first page again */
+    if (zns->zone_wp_slot) {
+        zns->zone_wp_slot[zone_idx] = 0;
     }
 
     ftl_debug("Reset block state for zone %u (all page_wp = 0)\n", zone_idx);
@@ -312,6 +323,7 @@ static uint64_t zns_read(struct zns_ssd *zns, NvmeRequest *req)
 
 static uint64_t zns_wc_flush(struct zns_ssd* zns, int wcidx, int type,uint64_t stime)
 {
+    uint32_t zone_idx = zns->cache.write_cache[wcidx].sblk;
     int i,j,p,subpage;
     struct ppa ppa;
     struct ppa oldppa;
@@ -324,7 +336,7 @@ static uint64_t zns_wc_flush(struct zns_ssd* zns, int wcidx, int type,uint64_t s
     {
         for(p = 0;p<zns->num_plane;p++){
             /* new write */
-            ppa = get_new_page(zns);
+            ppa = get_new_page(zns, zone_idx);
             ppa.g.pl = p;
             for(j = 0; j < flash_type ;j++)
             {
@@ -362,7 +374,7 @@ static uint64_t zns_wc_flush(struct zns_ssd* zns, int wcidx, int type,uint64_t s
             }
         }
         /* need to advance the write pointer here */
-        zns_advance_write_pointer(zns);
+        zns_advance_write_pointer(zns, zone_idx);
     }
     zns->cache.write_cache[wcidx].used = 0;
     return maxlat;

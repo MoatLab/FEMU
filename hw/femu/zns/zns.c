@@ -59,17 +59,25 @@ static int zns_init_zone_geometry(NvmeNamespace *ns, Error **errp)
     }
 
     /*
-     * Each zone is backed by one flash block: a zone reset encodes the zone
-     * index into ppa.g.blk and indexes the per-plane block array (get_blk() in
-     * zftl.c). Integer truncation of the derived pages-per-block can leave more
-     * zones than there are blocks, so a later reset would write past the block
-     * array. Reject such a geometry at realize.
+     * A zone reset encodes the zone's block index into ppa.g.blk and indexes the
+     * per-plane block array (get_blk() in zftl.c), so the geometry has to supply
+     * a block for every zone. Full-width zones take one block each; narrower
+     * zones share a block index between the num_ch/chnls_per_zone zones that sit
+     * on different channel groups. Integer truncation of the derived
+     * pages-per-block can otherwise leave more zones than blocks, and a later
+     * reset would write past the block array.
      */
-    if (ns->num_zones > ns->zns->num_blk) {
-        error_setg(errp, "FEMU zns: %u zones exceed %" PRIu64 " blocks per plane; "
-                   "each zone maps to one flash block -- raise zns_num_blk or the "
-                   "device size", ns->num_zones, ns->zns->num_blk);
-        return -1;
+    {
+        uint64_t groups = ns->zns->num_ch / ns->zns->chnls_per_zone;
+        uint64_t zones_per_blk = groups ? groups : 1;
+
+        if (ns->num_zones > ns->zns->num_blk * zones_per_blk) {
+            error_setg(errp, "FEMU zns: %u zones exceed %" PRIu64 " blocks per "
+                       "plane (%" PRIu64 " zone(s) per block) -- raise zns_num_blk "
+                       "or the device size", ns->num_zones, ns->zns->num_blk,
+                       zones_per_blk);
+            return -1;
+        }
     }
 
     if (ns->max_open_zones > ns->num_zones) {
@@ -120,6 +128,9 @@ static void zns_init_zoned_state(NvmeNamespace *ns)
     }
 
     ns->zone_array = g_new0(NvmeZone, ns->num_zones);
+    /* per-zone placement progress; zones fill independently of one another */
+    g_free(ns->zns->zone_wp_slot);
+    ns->zns->zone_wp_slot = g_new0(uint64_t, ns->num_zones);
     if (ns->zd_extension_size) {
         ns->zd_extensions = g_malloc0(ns->zd_extension_size * ns->num_zones);
     }
@@ -1310,6 +1321,20 @@ static void zns_init_params(FemuCtrl *n, NvmeNamespace *ns)
     id_zns->lbasz = 1 << zns_ns_lbads(ns);
     id_zns->flash_type = n->zns_params.zns_flash_type;
 
+    /*
+     * A zone spans chnls_per_zone channels; unset (or the full count) keeps the
+     * original full-width zone. It has to divide the channel count so the zones
+     * sharing a block index split evenly into channel groups.
+     */
+    id_zns->chnls_per_zone = ns->zns_chnls_per_zone ? ns->zns_chnls_per_zone :
+                                                      id_zns->num_ch;
+    if (id_zns->num_ch % id_zns->chnls_per_zone != 0) {
+        femu_err("zns_chnls_per_zone=%" PRIu64 " must divide zns_num_ch=%" PRIu64
+                 "; using full width\n",
+                 id_zns->chnls_per_zone, id_zns->num_ch);
+        id_zns->chnls_per_zone = id_zns->num_ch;
+    }
+
     id_zns->ch = g_malloc0(sizeof(struct zns_ch) * id_zns->num_ch);
     for (i =0; i < id_zns->num_ch; i++) {
         zns_init_ch(&id_zns->ch[i], id_zns->num_lun,id_zns->num_plane,id_zns->num_blk,id_zns->flash_type);
@@ -1373,7 +1398,7 @@ static int zns_init_zone_cap(FemuCtrl *n, NvmeNamespace *ns)
     struct zns_ssd* zns  = ns->zns;
     n->zoned = true;
     n->zasl_bs = NVME_DEFAULT_MAX_AZ_SIZE;
-    ns->zone_size_bs = zns->num_ch*zns->num_lun*zns->num_plane*zns->num_page*ZNS_PAGE_SIZE;
+    ns->zone_size_bs = zns->chnls_per_zone*zns->num_lun*zns->num_plane*zns->num_page*ZNS_PAGE_SIZE;
     ns->zone_cap_bs = 0;
     ns->cross_zone_read = false;
     /*

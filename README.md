@@ -391,7 +391,23 @@ zns_max_active=0       # Max active zones (0 = unlimited)
 zns_max_open=0         # Max open zones (0 = unlimited)
 zns_zd_ext_size=0      # Zone-descriptor extension bytes (0 = none)
 zns_num_conv_zones=0   # Leading conventional zones (0 = all sequential)
+zns_chnls_per_zone=0   # Channels a zone spans (0 = all of them)
 ```
+
+**Zone width.** By default a zone spans every channel, so it is as wide as the
+device and there are relatively few of them. `zns_chnls_per_zone=N` narrows a
+zone to N channels, which divides the zone size and multiplies the zone count by
+`zns_num_ch / N` while leaving the device capacity alone — useful for studying
+how zone size and zone-level parallelism affect a zoned workload. N must divide
+`zns_num_ch`; anything else warns and falls back to full width.
+
+With `zns_num_ch=8`, a 4 GiB device gives:
+
+| `zns_chnls_per_zone` | zones | zone size |
+|---|---|---|
+| 0 (default) or 8 | 16 | 256 MiB |
+| 4 | 32 | 128 MiB |
+| 2 | 64 | 64 MiB |
 
 **Conventional zones.** `zns_num_conv_zones=N` makes the first N zones
 conventional: they take writes anywhere inside the zone, keep no write pointer
