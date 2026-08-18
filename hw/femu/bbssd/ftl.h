@@ -454,7 +454,7 @@ struct ssd {
     FemuCtrl *n;
 };
 
-void ssd_init(FemuCtrl *n);
+void ssd_init(FemuCtrl *n, NvmeNamespace *ns);
 
 /* NAND media-layer bridge (hw/femu/bbssd/ftl-media.c) */
 void bb_nand_media_init(struct ssd *ssd);

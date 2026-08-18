@@ -1116,8 +1116,9 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     case NVME_CMD_IO_MGMT_SEND:
         return nvme_io_mgmt_send(n, req);
     default:
-        if (n->ext_ops.io_cmd) {
-            return n->ext_ops.io_cmd(n, ns, cmd, req);
+        /* dispatch on the namespace's mode, not the controller's */
+        if (ns->ext_ops.io_cmd) {
+            return ns->ext_ops.io_cmd(n, ns, cmd, req);
         }
 
         femu_err("%s, NVME_INVALID_OPCODE\n", __func__);

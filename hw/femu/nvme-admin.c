@@ -431,8 +431,7 @@ static uint16_t nvme_rpt_empty_id_struct(FemuCtrl *n, NvmeCmd *cmd)
 
 static inline bool nvme_csi_has_nvm_support(NvmeNamespace *ns)
 {
-    FemuCtrl *n = ns->ctrl;
-    switch (n->csi) {
+    switch (ns->csi) {
     case NVME_CSI_NVM:
     case NVME_CSI_ZONED:
         return true;
@@ -486,7 +485,7 @@ static uint16_t nvme_identify_ns_csi(FemuCtrl *n, NvmeCmd *cmd)
 
     if (c->csi == NVME_CSI_NVM && nvme_csi_has_nvm_support(ns)) {
         return nvme_rpt_empty_id_struct(n, cmd);
-    } else if (c->csi == NVME_CSI_ZONED && n->csi == NVME_CSI_ZONED) {
+    } else if (c->csi == NVME_CSI_ZONED && ns->csi == NVME_CSI_ZONED) {
         return dma_read_prp(n, (uint8_t *)ns->id_ns_zoned, pgsz, prp1, prp2);
     }
 
@@ -591,7 +590,7 @@ static uint16_t nvme_identify_nslist_csi(FemuCtrl *n, NvmeCmd *cmd)
         if (!ns) {
             continue;
         }
-        if (ns->id <= min_nsid || c->csi != n->csi) {
+        if (ns->id <= min_nsid || c->csi != ns->csi) {
             continue;
         }
         list_ptr[j++] = cpu_to_le32(ns->id);
@@ -640,7 +639,7 @@ static uint16_t nvme_identify_ns_descr_list(FemuCtrl *n, NvmeCmd *cmd)
 
     ns_descrs->csi.hdr.nidt = NVME_NIDT_CSI;
     ns_descrs->csi.hdr.nidl = NVME_NIDL_CSI;
-    ns_descrs->csi.v = n->csi;
+    ns_descrs->csi.v = ns->csi;
 
     return dma_read_prp(n, list, sizeof(list), prp1, prp2);
 }

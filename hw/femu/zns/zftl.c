@@ -2,7 +2,6 @@
 
 //#define FEMU_DEBUG_ZFTL
 
-static void *ftl_thread(void *arg);
 
 static inline struct ppa get_maptbl_ent(struct zns_ssd *zns, uint64_t lpn)
 {
@@ -15,14 +14,6 @@ static inline void set_maptbl_ent(struct zns_ssd *zns, uint64_t lpn, struct ppa 
     zns->maptbl[lpn] = *ppa;
 }
 
-void zftl_init(FemuCtrl *n)
-{
-    NvmeNamespace *ns = &n->namespaces[0];
-    struct zns_ssd *ssd = ns->zns;
-
-    qemu_thread_create(&ssd->ftl_thread, "FEMU-FTL-Thread", ftl_thread, n,
-                       QEMU_THREAD_JOINABLE);
-}
 
 static inline struct zns_ch *get_ch(struct zns_ssd *zns, struct ppa *ppa)
 {
@@ -429,63 +420,35 @@ static uint64_t zns_write(struct zns_ssd *zns, NvmeRequest *req)
     return maxlat;
 }
 
-static void *ftl_thread(void *arg)
+/*
+ * Run one request against this namespace's zoned backend and return the latency
+ * to charge it. The controller's FTL thread calls this once it has picked out
+ * the namespace, so one controller can serve namespaces of different modes.
+ */
+uint64_t zns_ftl_process_req(NvmeNamespace *ns, NvmeRequest *req)
 {
-    FemuCtrl *n = (FemuCtrl *)arg;
-    NvmeNamespace *ns = &n->namespaces[0];
     struct zns_ssd *zns = ns->zns;
-    NvmeRequest *req = NULL;
     uint64_t lat = 0;
-    int rc;
-    int i;
 
-    while (!*(zns->dataplane_started_ptr)) {
-        usleep(100000);
+    if (!zns || req->status != NVME_SUCCESS) {
+        return 0;
     }
 
-    /* FIXME: not safe, to handle ->to_ftl and ->to_poller gracefully */
-    zns->to_ftl = n->to_ftl;
-    zns->to_poller = n->to_poller;
-
-    while (1) {
-        for (i = 1; i <= n->nr_pollers; i++) {
-            if (!zns->to_ftl[i] || !femu_ring_count(zns->to_ftl[i]))
-                continue;
-
-            rc = femu_ring_dequeue(zns->to_ftl[i], (void *)&req, 1);
-            if (rc != 1) {
-                printf("FEMU: FTL to_ftl dequeue failed\n");
-            }
-
-            ftl_assert(req);
-            switch (req->cmd.opcode) {
-                // Fix bug: zone append not respecting configured delay
-                case NVME_CMD_ZONE_APPEND:
-                    /* Fall through */
-                case NVME_CMD_WRITE:
-                    lat = zns_write(zns, req);
-                    break;
-                case NVME_CMD_READ:
-                    lat = zns_read(zns, req);
-                    break;
-                case NVME_CMD_DSM:
-                    lat = 0;
-                    break;
-                default:
-                    //ftl_err("FTL received unkown request type, ERROR\n");
-                    ;
-            }
-
-            req->reqlat = lat;
-            req->expire_time += lat;
-
-            rc = femu_ring_enqueue(zns->to_poller[i], (void *)&req, 1);
-            if (rc != 1) {
-                ftl_err("FTL to_poller enqueue failed\n");
-            }
-
-        }
+    switch (req->cmd.opcode) {
+    case NVME_CMD_ZONE_APPEND:
+        /* fall through: an append is a write once the zone has placed it */
+    case NVME_CMD_WRITE:
+        lat = zns_write(zns, req);
+        break;
+    case NVME_CMD_READ:
+        lat = zns_read(zns, req);
+        break;
+    case NVME_CMD_DSM:
+        lat = 0;
+        break;
+    default:
+        ;
     }
 
-    return NULL;
+    return lat;
 }

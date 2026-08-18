@@ -1352,8 +1352,10 @@ static int oc20_init_misc(FemuCtrl *n)
     return 0;
 }
 
-static void oc20_init(FemuCtrl *n, Error **errp)
+static void oc20_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 {
+    (void)ns;
+
     NVME_CAP_SET_OC(n->bar.cap, 1);
     oc20_set_ctrl_str(n);
     oc20_init_namespaces(n, errp);

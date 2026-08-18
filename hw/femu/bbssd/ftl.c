@@ -3,15 +3,14 @@
 
 //#define FEMU_DEBUG_FTL
 
-static void *ftl_thread(void *arg);
 
 
 
 
 
-void ssd_init(FemuCtrl *n)
+void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
 {
-    struct ssd *ssd = n->ssd;
+    struct ssd *ssd = ns->ssd;
     struct ssdparams *spp = &ssd->sp;
 
     ftl_assert(ssd);
@@ -120,9 +119,6 @@ void ssd_init(FemuCtrl *n)
         /* non-FDP: use single write pointer */
         ssd_init_write_pointer(ssd);
     }
-
-    qemu_thread_create(&ssd->ftl_thread, "FEMU-FTL-Thread", ftl_thread, n,
-                       QEMU_THREAD_JOINABLE);
 }
 
 /*
@@ -153,99 +149,72 @@ uint8_t ssd_available_spare(struct ssd *ssd)
 
 
 
-static void *ftl_thread(void *arg)
+/*
+ * Run one request against this namespace's bbssd FTL and return the latency to
+ * charge it. The controller's FTL thread calls this once it has picked out the
+ * namespace, so one controller can serve namespaces of different modes.
+ */
+uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
 {
-    FemuCtrl *n = (FemuCtrl *)arg;
-    struct ssd *ssd = n->ssd;
-    NvmeRequest *req = NULL;
+    struct ssd *ssd = ns->ssd;
     uint64_t lat = 0;
-    int rc;
-    int i;
 
-    while (!*(ssd->dataplane_started_ptr)) {
-        usleep(100000);
+    if (!ssd) {
+        return 0;
     }
 
-    /* FIXME: not safe, to handle ->to_ftl and ->to_poller gracefully */
-    ssd->to_ftl = n->to_ftl;
-    ssd->to_poller = n->to_poller;
+    /*
+     * A request that already failed validation in the I/O layer is only routed
+     * through the FTL ring so the poller completes it with its carried error
+     * status. It must not run any opcode handler: req->slba and req->nlb may be
+     * stale (the I/O layer returns before setting them) and ssd_read/ssd_write
+     * would then touch unrelated mapping state and overwrite the error. Leave
+     * latency at zero and let the poller post the carried status.
+     */
+    if (req->status != NVME_SUCCESS) {
+        return 0;
+    }
 
-    while (1) {
-        for (i = 1; i <= n->nr_pollers; i++) {
-            if (!ssd->to_ftl[i] || !femu_ring_count(ssd->to_ftl[i]))
-                continue;
-
-            rc = femu_ring_dequeue(ssd->to_ftl[i], (void *)&req, 1);
-            if (rc != 1) {
-                printf("FEMU: FTL to_ftl dequeue failed\n");
-            }
-
-            ftl_assert(req);
+    switch (req->cmd.opcode) {
+    case NVME_CMD_WRITE:
+        if (ssd->fdp_enabled) {
+            lat = nvme_do_write_fdp(n, req, req->slba, req->nlb);
+        } else {
+            lat = ssd_write(ssd, req);
+        }
+        break;
+    case NVME_CMD_READ:
+        lat = ssd_read(ssd, req);
+        break;
+    case NVME_CMD_DSM:
+        if (ssd->fdp_enabled) {
+            ssd_trim_fdp_style(n, req, req->slba, req->nlb);
             lat = 0;
-            /*
-             * A request that already failed validation in the I/O layer is only
-             * routed through the FTL ring so the poller completes it with its
-             * carried error status. It must not run any opcode handler: req->slba
-             * and req->nlb may be stale (the I/O layer returns before setting
-             * them) and ssd_read/ssd_write would then touch unrelated mapping
-             * state and overwrite the error. Leave latency at zero and let the
-             * poller post the carried status.
-             */
-            if (req->status == NVME_SUCCESS) {
-                switch (req->cmd.opcode) {
-                case NVME_CMD_WRITE:
-                    if (ssd->fdp_enabled) {
-                        lat = nvme_do_write_fdp(n, req, req->slba, req->nlb);
-                    } else {
-                        lat = ssd_write(ssd, req);
-                    }
-                    break;
-                case NVME_CMD_READ:
-                    lat = ssd_read(ssd, req);
-                    break;
-                case NVME_CMD_DSM:
-                    if (ssd->fdp_enabled) {
-                        ssd_trim_fdp_style(n, req, req->slba, req->nlb);
-                        lat = 0;
-                    } else if (req->dsm_ranges && req->dsm_nr_ranges > 0) {
-                        lat = ssd_trim(ssd, req);
-                    }
-                    break;
-                default:
-                    ;
-                }
-            }
+        } else if (req->dsm_ranges && req->dsm_nr_ranges > 0) {
+            lat = ssd_trim(ssd, req);
+        }
+        break;
+    default:
+        ;
+    }
 
-            req->reqlat = lat;
-            req->expire_time += lat;
-
-            rc = femu_ring_enqueue(ssd->to_poller[i], (void *)&req, 1);
-            if (rc != 1) {
-                ftl_err("FTL to_poller enqueue failed\n");
-            }
-
-            /* background GC */
-            if (ssd->fdp_enabled) {
-                int16_t rgidx;
-                /*
-                 * Trigger a single GC pass on a reclaim group over threshold;
-                 * the GC policy itself lives in do_gc_fdp_style(), not here.
-                 */
-                if (!((rgidx = should_gc_fdp_style(ssd)) < 0))
-                {
-                    //do_gc_fdp_style(ssd, rgidx, 0, false);
-                    if (ssd->nrg == 1)
-                        do_gc_fdp_style(ssd, 0, 0, false);
-                    else
-                    {
-                        do_gc_fdp_style(ssd, rgidx, 0, false);
-                    }
-                }
-            } else if (should_gc(ssd)) {
-                do_gc(ssd, false);
+    /* background GC */
+    if (ssd->fdp_enabled) {
+        int16_t rgidx;
+        /*
+         * Trigger a single GC pass on a reclaim group over threshold; the GC
+         * policy itself lives in do_gc_fdp_style(), not here.
+         */
+        if (!((rgidx = should_gc_fdp_style(ssd)) < 0)) {
+            if (ssd->nrg == 1) {
+                do_gc_fdp_style(ssd, 0, 0, false);
+            } else {
+                do_gc_fdp_style(ssd, rgidx, 0, false);
             }
         }
+    } else if (should_gc(ssd)) {
+        do_gc(ssd, false);
     }
 
-    return NULL;
+    return lat;
 }

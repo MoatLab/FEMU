@@ -1083,16 +1083,18 @@ static void oc12_set_ctrl_str(FemuCtrl *n)
     nvme_set_ctrl_name(n, vocssd12_mn, vocssd12_sn, &fsid_voc12);
 }
 
-static void oc12_init(FemuCtrl *n, Error **errp)
+static void oc12_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 {
+    (void)ns;
+
     int i;
 
     NVME_CAP_SET_OC(n->bar.cap, 1);
     oc12_set_ctrl_str(n);
 
     for (i = 0; i < n->num_namespaces; i++) {
-        NvmeNamespace *ns = &n->namespaces[i];
-        NvmeIdNs *id_ns = &ns->id_ns;
+        NvmeNamespace *cur_ns = &n->namespaces[i];
+        NvmeIdNs *id_ns = &cur_ns->id_ns;
         id_ns->vs[0] = 0x1;
     }
 

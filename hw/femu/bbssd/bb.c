@@ -11,16 +11,25 @@ static void bb_init_ctrl_str(FemuCtrl *n)
 }
 
 /* bb <=> black-box */
-static void bb_init(FemuCtrl *n, Error **errp)
+static void bb_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 {
-    struct ssd *ssd = n->ssd = g_malloc0(sizeof(struct ssd));
+    struct ssd *ssd = ns->ssd = g_malloc0(sizeof(struct ssd));
 
     bb_init_ctrl_str(n);
+
+    /*
+     * Each bbssd namespace carries its own FTL, so the controller can mix it
+     * with namespaces of other modes. The first one also answers the
+     * controller-wide queries that predate per-namespace state.
+     */
+    if (!n->ssd) {
+        n->ssd = ssd;
+    }
 
     ssd->dataplane_started_ptr = &n->dataplane_started;
     ssd->ssdname = (char *)n->devname;
     femu_debug("Starting FEMU in Blackbox-SSD mode ...\n");
-    ssd_init(n);
+    ssd_init(n, ns);
 }
 
 static void bb_flip(FemuCtrl *n, NvmeCmd *cmd)

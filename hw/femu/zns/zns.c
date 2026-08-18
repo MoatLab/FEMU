@@ -162,6 +162,8 @@ static void zns_init_zone_identify(FemuCtrl *n, NvmeNamespace *ns, int lba_index
     id_ns_z->lbafe[lba_index].zsze = cpu_to_le64(ns->zone_size);
     id_ns_z->lbafe[lba_index].zdes = ns->zd_extension_size >> 6; /* Units of 64B */
 
+    ns->csi = NVME_CSI_ZONED;
+    /* the controller offers the zoned command set as soon as one namespace uses it */
     n->csi = NVME_CSI_ZONED;
     ns->id_ns.nsze = cpu_to_le64(ns->num_zones * ns->zone_size);
     ns->id_ns.ncap = ns->id_ns.nsze;
@@ -794,10 +796,10 @@ out:
     return status;
 }
 
-static uint16_t zns_get_mgmt_zone_slba_idx(FemuCtrl *n, NvmeCmd *c,
-                                           uint64_t *slba, uint32_t *zone_idx)
+static uint16_t zns_get_mgmt_zone_slba_idx(FemuCtrl *n, NvmeNamespace *ns,
+                                           NvmeCmd *c, uint64_t *slba,
+                                           uint32_t *zone_idx)
 {
-    NvmeNamespace *ns = &n->namespaces[0];
     uint32_t dw10 = le32_to_cpu(c->cdw10);
     uint32_t dw11 = le32_to_cpu(c->cdw11);
 
@@ -959,7 +961,7 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
     req->status = NVME_SUCCESS;
 
     if (!all) {
-        status = zns_get_mgmt_zone_slba_idx(n, cmd, &slba, &zone_idx);
+        status = zns_get_mgmt_zone_slba_idx(n, ns, cmd, &slba, &zone_idx);
         if (status) {
             return status;
         }
@@ -1079,7 +1081,7 @@ static uint16_t zns_zone_mgmt_recv(FemuCtrl *n, NvmeRequest *req)
 
     req->status = NVME_SUCCESS;
 
-    status = zns_get_mgmt_zone_slba_idx(n, cmd, &slba, &zone_idx);
+    status = zns_get_mgmt_zone_slba_idx(n, ns, cmd, &slba, &zone_idx);
     if (status) {
         return status;
     }
@@ -1258,9 +1260,8 @@ static void zns_init_ch(struct zns_ch *ch, uint8_t num_lun,uint8_t num_plane, ui
     ch->next_ch_avail_time = 0;
 }
 
-static void zns_init_params(FemuCtrl *n)
+static void zns_init_params(FemuCtrl *n, NvmeNamespace *ns)
 {
-    NvmeNamespace *ns = &n->namespaces[0];
     struct zns_ssd *id_zns;
     int i;
 
@@ -1269,8 +1270,8 @@ static void zns_init_params(FemuCtrl *n)
     id_zns->num_lun = n->zns_params.zns_num_lun;
     id_zns->num_plane = n->zns_params.zns_num_plane;
     id_zns->num_blk = n->zns_params.zns_num_blk;
-    id_zns->num_page = n->ns_size/ZNS_PAGE_SIZE/(id_zns->num_ch*id_zns->num_lun*id_zns->num_blk);
-    id_zns->lbasz = 1 << zns_ns_lbads(&n->namespaces[0]);
+    id_zns->num_page = ns->size/ZNS_PAGE_SIZE/(id_zns->num_ch*id_zns->num_lun*id_zns->num_blk);
+    id_zns->lbasz = 1 << zns_ns_lbads(ns);
     id_zns->flash_type = n->zns_params.zns_flash_type;
 
     id_zns->ch = g_malloc0(sizeof(struct zns_ch) * id_zns->num_ch);
@@ -1282,7 +1283,7 @@ static void zns_init_params(FemuCtrl *n)
     id_zns->wp.lun = 0;
 
     //Misao: init mapping table
-    id_zns->l2p_sz = n->ns_size/LOGICAL_PAGE_SIZE;
+    id_zns->l2p_sz = ns->size/LOGICAL_PAGE_SIZE;
     id_zns->maptbl = g_malloc0(sizeof(struct ppa) * id_zns->l2p_sz);
     for (i = 0; i < id_zns->l2p_sz; i++) {
         id_zns->maptbl[i].ppa = UNMAPPED_PPA;
@@ -1329,9 +1330,8 @@ static void zns_init_params(FemuCtrl *n)
     ns->zns = id_zns;
 }
 
-static int zns_init_zone_cap(FemuCtrl *n)
+static int zns_init_zone_cap(FemuCtrl *n, NvmeNamespace *ns)
 {
-    NvmeNamespace *ns = &n->namespaces[0];
 
     assert(ns->zns);
     struct zns_ssd* zns  = ns->zns;
@@ -1371,28 +1371,18 @@ static int zns_start_ctrl(FemuCtrl *n)
     return 0;
 }
 
-static void zns_init(FemuCtrl *n, Error **errp)
+static void zns_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 {
-    NvmeNamespace *ns = &n->namespaces[0];
-
     zns_set_ctrl(n);
-    zns_init_params(n);
+    zns_init_params(n, ns);
 
-    zns_init_zone_cap(n);
+    zns_init_zone_cap(n, ns);
 
     if (zns_init_zone_geometry(ns, errp) != 0) {
         return;
     }
 
     zns_init_zone_identify(n, ns, 0);
-
-    /*
-     * Create the FTL thread only after every geometry check above has passed.
-     * A rejected geometry returns early with an error set; a thread started
-     * back in zns_init_params() would otherwise keep running on, and keep
-     * dereferencing, a controller whose failed realize is being torn down.
-     */
-    zftl_init(n);
 }
 
 static void zns_exit(FemuCtrl *n)

@@ -1416,6 +1416,18 @@ typedef struct Oc12Ctrl Oc12Ctrl;
 typedef struct NvmeIdNsZoned NvmeIdNsZoned;
 typedef struct NvmeZone NvmeZone;
 
+typedef struct FemuExtCtrlOps {
+    void     *state;
+    void     (*init)(struct FemuCtrl *, NvmeNamespace *, Error **);
+    void     (*exit)(struct FemuCtrl *);
+    uint16_t (*rw_check_req)(struct FemuCtrl *, NvmeCmd *, NvmeRequest *);
+    int      (*start_ctrl)(struct FemuCtrl *);
+    uint16_t (*admin_cmd)(struct FemuCtrl *, NvmeCmd *);
+    uint16_t (*admin_cmd_cqe)(struct FemuCtrl *, NvmeCmd *, NvmeCqe *);
+    uint16_t (*io_cmd)(struct FemuCtrl *, NvmeNamespace *, NvmeCmd *, NvmeRequest *);
+    uint16_t (*get_log)(struct FemuCtrl *, NvmeCmd *);
+} FemuExtCtrlOps;
+
 typedef struct NvmeNamespace {
     struct FemuCtrl *ctrl;
     NvmeIdNs        id_ns;
@@ -1465,6 +1477,16 @@ typedef struct NvmeNamespace {
      * all describe one namespace's zones. Unused by a namespace that is not
      * zoned.
      */
+    /*
+     * Per-namespace emulation mode and its handler table. A controller may run
+     * namespaces of different modes, so the command handlers are selected by the
+     * namespace the request names rather than by the controller.
+     */
+    uint8_t         femu_mode;
+    uint8_t         csi;
+    FemuExtCtrlOps  ext_ops;
+    struct ssd      *ssd; /* bbssd FTL for this namespace */
+
     NvmeIdNsZoned   *id_ns_zoned;
     NvmeZone        *zone_array;
     QTAILQ_HEAD(, NvmeZone) exp_open_zones;
@@ -1620,17 +1642,6 @@ typedef struct OcCtrlParams {
 } OcCtrlParams;
 
 struct FemuCtrl;
-typedef struct FemuExtCtrlOps {
-    void     *state;
-    void     (*init)(struct FemuCtrl *, Error **);
-    void     (*exit)(struct FemuCtrl *);
-    uint16_t (*rw_check_req)(struct FemuCtrl *, NvmeCmd *, NvmeRequest *);
-    int      (*start_ctrl)(struct FemuCtrl *);
-    uint16_t (*admin_cmd)(struct FemuCtrl *, NvmeCmd *);
-    uint16_t (*admin_cmd_cqe)(struct FemuCtrl *, NvmeCmd *, NvmeCqe *);
-    uint16_t (*io_cmd)(struct FemuCtrl *, NvmeNamespace *, NvmeCmd *, NvmeRequest *);
-    uint16_t (*get_log)(struct FemuCtrl *, NvmeCmd *);
-} FemuExtCtrlOps;
 
 /*
  * Per-poller I/O accounting, cacheline-isolated. The old single
@@ -1662,6 +1673,7 @@ typedef struct FemuCtrl {
     const uint32_t  *iocs;
     uint8_t         csi;
     ZNSCtrlParams zns_params;
+    QemuThread      ftl_thread; /* one FTL thread serving every namespace */
 
     /* Coperd: OC2.0 FIXME */
     NvmeParams  params;
@@ -1758,6 +1770,7 @@ typedef struct FemuCtrl {
     uint32_t        nand_bad_blocks; /* bbssd factory bad blocks reported via SMART; 0 = none */
     uint32_t        op_pcent; /* bbssd over-provisioning percent (0 = use devsz_mb) */
     char            *namespace_sizes; /* per-NS sizes "8G,4G"; NULL = equal split */
+    char            *namespace_modes; /* per-NS modes "znssd,bbssd"; NULL = all femu_mode */
     OcCtrlParams    oc_params;
     CsdCtrlParams   csd_params;
 
@@ -1855,6 +1868,31 @@ enum OC20AdminCommands {
 static inline bool OCSSD(FemuCtrl *n)
 {
     return (n->femu_mode == FEMU_OCSSD_MODE);
+}
+
+static inline bool NS_OCSSD(NvmeNamespace *ns)
+{
+    return (ns->femu_mode == FEMU_OCSSD_MODE);
+}
+
+static inline bool NS_BBSSD(NvmeNamespace *ns)
+{
+    return (ns->femu_mode == FEMU_BBSSD_MODE);
+}
+
+static inline bool NS_NOSSD(NvmeNamespace *ns)
+{
+    return (ns->femu_mode == FEMU_NOSSD_MODE);
+}
+
+static inline bool NS_ZNSSD(NvmeNamespace *ns)
+{
+    return (ns->femu_mode == FEMU_ZNSSD_MODE);
+}
+
+static inline bool NS_CSD(NvmeNamespace *ns)
+{
+    return (ns->femu_mode == FEMU_CSD_MODE);
 }
 
 static inline bool BBSSD(FemuCtrl *n)
@@ -1956,6 +1994,10 @@ int nvme_register_nossd(FemuCtrl *n);
 int nvme_register_bbssd(FemuCtrl *n);
 int nvme_register_znssd(FemuCtrl *n);
 int nvme_register_csd(FemuCtrl *n);
+
+/* per-namespace FTL entry points, dispatched by the controller's FTL thread */
+uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req);
+uint64_t zns_ftl_process_req(NvmeNamespace *ns, NvmeRequest *req);
 
 /* bbssd SMART available-spare (100% healthy, reduced by the factory bad-block fraction) */
 uint8_t ssd_available_spare(struct ssd *ssd);

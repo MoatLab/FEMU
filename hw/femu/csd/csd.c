@@ -152,8 +152,9 @@ static void csd_init_ctrl_str(FemuCtrl *n)
     nvme_set_ctrl_name(n, mn, sn, &csd_id);
 }
 
-static void csd_init(FemuCtrl *n, Error **errp)
+static void csd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 {
+
     FemuCsdState *csd;
     struct ssd *ssd;
 
@@ -186,10 +187,13 @@ static void csd_init(FemuCtrl *n, Error **errp)
 
     csd_init_ctrl_str(n);
 
-    ssd = n->ssd = g_malloc0(sizeof(*ssd));
+    ssd = ns->ssd = g_malloc0(sizeof(*ssd));
+    if (!n->ssd) {
+        n->ssd = ssd;
+    }
     ssd->dataplane_started_ptr = &n->dataplane_started;
     ssd->ssdname = (char *)n->devname;
-    ssd_init(n);
+    ssd_init(n, ns);
 
     csd = g_new0(FemuCsdState, 1);
     csd->params = n->csd_params;

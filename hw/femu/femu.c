@@ -646,7 +646,6 @@ static int nvme_init_namespace(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     num_blks = ns->size / ((1 << id_ns->lbaf[lba_index].lbads));
     id_ns->nuse = id_ns->ncap = id_ns->nsze = cpu_to_le64(num_blks);
 
-    n->csi = NVME_CSI_NVM;
     ns->ctrl = n;
     ns->ns_blks = ns_blks(ns, lba_index);
     ns->util = bitmap_new(num_blks);
@@ -663,6 +662,60 @@ static int nvme_init_namespace(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
             return -1;
         }
     }
+
+    return 0;
+}
+
+/* map a namespace_modes token to a femu_mode; returns -1 on an unknown token */
+static int nvme_mode_from_token(const char *tok)
+{
+    if (!strcmp(tok, "nossd"))  return FEMU_NOSSD_MODE;
+    if (!strcmp(tok, "bbssd"))  return FEMU_BBSSD_MODE;
+    if (!strcmp(tok, "znssd"))  return FEMU_ZNSSD_MODE;
+    if (!strcmp(tok, "ocssd"))  return FEMU_OCSSD_MODE;
+    if (!strcmp(tok, "csd"))    return FEMU_CSD_MODE;
+    return -1;
+}
+
+/*
+ * Resolve each namespace's mode. With namespace_modes unset every namespace runs
+ * the controller's femu_mode, which is the homogeneous behavior. When set, it is
+ * a comma-separated per-namespace list (e.g. "znssd,bbssd") whose count must
+ * equal namespaces.
+ */
+static int nvme_resolve_ns_modes(FemuCtrl *n, uint8_t *out_modes, Error **errp)
+{
+    char *dup, *saveptr = NULL, *tok;
+    int i;
+
+    if (!n->namespace_modes || !n->namespace_modes[0]) {
+        for (i = 0; i < n->num_namespaces; i++) {
+            out_modes[i] = n->femu_mode;
+        }
+        return 0;
+    }
+
+    dup = g_strdup(n->namespace_modes);
+    tok = strtok_r(dup, ",", &saveptr);
+    i = 0;
+    while (tok && i < n->num_namespaces) {
+        int m = nvme_mode_from_token(tok);
+
+        if (m < 0) {
+            error_setg(errp, "namespace_modes: unknown mode '%s'", tok);
+            g_free(dup);
+            return -1;
+        }
+        out_modes[i++] = (uint8_t)m;
+        tok = strtok_r(NULL, ",", &saveptr);
+    }
+    if (i != n->num_namespaces || tok) {
+        error_setg(errp, "namespace_modes count must equal namespaces=%u",
+                   n->num_namespaces);
+        g_free(dup);
+        return -1;
+    }
+    g_free(dup);
 
     return 0;
 }
@@ -737,21 +790,11 @@ static int nvme_resolve_ns_sizes(FemuCtrl *n, uint64_t total, uint64_t *out_size
 static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
 {
     uint64_t *ns_sizes;
+    uint8_t *ns_modes;
     uint64_t backend_total = n->ns_size * (uint64_t)n->num_namespaces;
     uint64_t running_offset = 0;
     int i;
 
-    /*
-     * Namespaces carve up one shared backend, so each needs its own slice. Only
-     * the flat-LBA modes can do that today: the zoned and Open-Channel paths keep
-     * their geometry (zone array, block tables) on the controller, so a second
-     * namespace would share one namespace's worth of state.
-     */
-    if (n->num_namespaces > 1 && !NOSSD(n) && !BBSSD(n)) {
-        error_setg(errp, "femu_mode %u supports a single namespace; only nossd "
-                   "and bbssd support namespaces > 1", n->femu_mode);
-        return 1;
-    }
     /*
      * FDP keeps its reclaim groups and unit handles on the controller and places
      * writes through its own path, which addresses the flash by the raw command
@@ -765,9 +808,25 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
     }
 
     ns_sizes = g_new0(uint64_t, n->num_namespaces);
-    if (nvme_resolve_ns_sizes(n, backend_total, ns_sizes, errp)) {
+    ns_modes = g_new0(uint8_t, n->num_namespaces);
+    if (nvme_resolve_ns_sizes(n, backend_total, ns_sizes, errp) ||
+        nvme_resolve_ns_modes(n, ns_modes, errp)) {
         g_free(ns_sizes);
+        g_free(ns_modes);
         return 1;
+    }
+
+    for (i = 0; i < n->num_namespaces; i++) {
+        /*
+         * Open-Channel keeps its tables on the controller and cannot be one mode
+         * among several, so it stays a single-namespace controller.
+         */
+        if (n->num_namespaces > 1 && ns_modes[i] == FEMU_OCSSD_MODE) {
+            error_setg(errp, "ocssd supports a single namespace");
+            g_free(ns_sizes);
+            g_free(ns_modes);
+            return 1;
+        }
     }
 
     for (i = 0; i < n->num_namespaces; i++) {
@@ -784,12 +843,25 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
         running_offset += ns_sizes[i];
         ns->id = i + 1;
 
+        /* mode and command set for this namespace */
+        ns->femu_mode = ns_modes[i];
+        ns->csi = (ns_modes[i] == FEMU_ZNSSD_MODE) ? NVME_CSI_ZONED :
+                                                     NVME_CSI_NVM;
+
+        /* the zone geometry properties are shared; each zoned namespace keeps
+         * its own copy of the limits it enforces */
+        ns->max_active_zones = n->zns_params.zns_max_active;
+        ns->max_open_zones = n->zns_params.zns_max_open;
+        ns->zd_extension_size = n->zns_params.zns_zd_ext_size;
+
         if (nvme_init_namespace(n, ns, errp)) {
             g_free(ns_sizes);
+            g_free(ns_modes);
             return 1;
         }
     }
     g_free(ns_sizes);
+    g_free(ns_modes);
 
     return 0;
 }
@@ -920,6 +992,88 @@ static void nvme_init_pci(FemuCtrl *n)
     }
 }
 
+/*
+ * Hand one request to the backend that serves its namespace. Namespaces may run
+ * different modes, so the backend is chosen per request rather than per
+ * controller.
+ */
+static uint64_t femu_ftl_process_req(FemuCtrl *n, NvmeRequest *req)
+{
+    NvmeNamespace *ns = req->ns;
+
+    if (!ns) {
+        return 0;
+    }
+
+    if (NS_ZNSSD(ns)) {
+        return zns_ftl_process_req(ns, req);
+    }
+    if (NS_BBSSD(ns)) {
+        return bb_ftl_process_req(n, ns, req);
+    }
+
+    return 0;
+}
+
+/*
+ * The controller's FTL thread. It drains the rings the pollers feed and routes
+ * each request to its namespace's backend. There is one of these per controller
+ * rather than one per mode, so that a controller whose namespaces do not share a
+ * mode still has a single reader per ring.
+ */
+static void *femu_ftl_thread(void *arg)
+{
+    FemuCtrl *n = (FemuCtrl *)arg;
+    NvmeRequest *req = NULL;
+    uint64_t lat;
+    int rc, i;
+
+    while (!n->dataplane_started) {
+        usleep(100000);
+    }
+
+    while (1) {
+        for (i = 1; i <= n->nr_pollers; i++) {
+            if (!n->to_ftl[i] || !femu_ring_count(n->to_ftl[i])) {
+                continue;
+            }
+
+            rc = femu_ring_dequeue(n->to_ftl[i], (void *)&req, 1);
+            if (rc != 1) {
+                femu_err("FEMU: FTL to_ftl dequeue failed\n");
+                continue;
+            }
+
+            lat = femu_ftl_process_req(n, req);
+            req->reqlat = lat;
+            req->expire_time += lat;
+
+            rc = femu_ring_enqueue(n->to_poller[i], (void *)&req, 1);
+            if (rc != 1) {
+                femu_err("FEMU: FTL to_poller enqueue failed\n");
+            }
+        }
+    }
+
+    return NULL;
+}
+
+/* true when some namespace needs the controller's FTL thread running */
+static bool femu_needs_ftl_thread(FemuCtrl *n)
+{
+    int i;
+
+    for (i = 0; i < n->num_namespaces; i++) {
+        NvmeNamespace *ns = &n->namespaces[i];
+
+        if (NS_BBSSD(ns) || NS_ZNSSD(ns)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 static int nvme_register_extensions(FemuCtrl *n)
 {
     if (OCSSD(n)) {
@@ -946,6 +1100,25 @@ static int nvme_register_extensions(FemuCtrl *n)
     }
 
     return 0;
+}
+
+/*
+ * Select the handler table for one namespace. The per-mode registration writes
+ * into the controller, so borrow it for the namespace's mode and take a copy;
+ * the controller keeps the table for its own mode, which still answers the
+ * admin and start-up paths.
+ */
+static void nvme_register_extensions_ns(FemuCtrl *n, NvmeNamespace *ns)
+{
+    FemuExtCtrlOps saved_ops = n->ext_ops;
+    uint8_t saved_mode = n->femu_mode;
+
+    n->femu_mode = ns->femu_mode;
+    nvme_register_extensions(n);
+    ns->ext_ops = n->ext_ops;
+
+    n->femu_mode = saved_mode;
+    n->ext_ops = saved_ops;
 }
 
 static void femu_realize(PCIDevice *pci_dev, Error **errp)
@@ -1019,8 +1192,34 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
 
     nvme_register_extensions(n);
 
-    if (n->ext_ops.init) {
-        n->ext_ops.init(n, errp);
+    /*
+     * Bring up each namespace under its own mode. The controller keeps the table
+     * for its own femu_mode for the admin paths, while each namespace gets the
+     * one matching the mode it runs.
+     */
+    for (int i = 0; i < n->num_namespaces; i++) {
+        NvmeNamespace *ns = &n->namespaces[i];
+
+        nvme_register_extensions_ns(n, ns);
+        if (ns->ext_ops.init) {
+            Error *local_err = NULL;
+
+            ns->ext_ops.init(n, ns, &local_err);
+            if (local_err) {
+                error_propagate(errp, local_err);
+                return;
+            }
+        }
+    }
+
+    /*
+     * One FTL thread serves every namespace that needs one. It is started after
+     * all namespaces are built, so it never runs against half-initialized state,
+     * and only once every geometry check has passed.
+     */
+    if (femu_needs_ftl_thread(n)) {
+        qemu_thread_create(&n->ftl_thread, "FEMU-FTL-Thread", femu_ftl_thread,
+                           n, QEMU_THREAD_JOINABLE);
     }
 }
 
@@ -1187,6 +1386,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT32("nand_bad_blocks", FemuCtrl, nand_bad_blocks, 0),
     DEFINE_PROP_UINT32("op_pcent", FemuCtrl, op_pcent, 0),
     DEFINE_PROP_STRING("namespace_sizes", FemuCtrl, namespace_sizes),
+    DEFINE_PROP_STRING("namespace_modes", FemuCtrl, namespace_modes),
     DEFINE_PROP_INT32("fdp_trim_erase_all", FemuCtrl,
                       bb_params.fdp_trim_erase_all, 0),
     DEFINE_PROP_LINK("subsys", FemuCtrl, subsys, TYPE_NVME_SUBSYS,

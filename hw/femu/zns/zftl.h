@@ -7,7 +7,6 @@
 #define INVALID_LPN     (~(0ULL))
 #define UNMAPPED_PPA    (~(0ULL))
 
-void zftl_init(FemuCtrl *n);
 
 uint64_t zns_zone_reset(struct zns_ssd *zns, uint32_t zone_idx,
                         uint64_t zone_size_lbas, uint64_t lbasz, uint64_t stime);

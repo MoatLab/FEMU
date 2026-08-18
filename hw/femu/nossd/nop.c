@@ -21,8 +21,10 @@ static uint16_t nop_io_cmd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
 }
 
-static void nop_init(FemuCtrl *n, Error **errp)
+static void nop_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 {
+    (void)ns;
+
     bb_init_ctrl_str(n);
 }
 
