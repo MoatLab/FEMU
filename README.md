@@ -385,6 +385,33 @@ Emulates NVMe ZNS SSDs with zone-based interface.
 - Support for zone management commands
 - Zone state tracking and validation
 
+**Key Parameters:**
+```bash
+zns_max_active=0       # Max active zones (0 = unlimited)
+zns_max_open=0         # Max open zones (0 = unlimited)
+zns_zd_ext_size=0      # Zone-descriptor extension bytes (0 = none)
+zns_num_conv_zones=0   # Leading conventional zones (0 = all sequential)
+```
+
+**Conventional zones.** `zns_num_conv_zones=N` makes the first N zones
+conventional: they take writes anywhere inside the zone, keep no write pointer
+(reported as all ones), and reject zone management and zone append. The
+remaining zones stay sequential-write-required.
+
+This is off by default, and it should stay off for a Linux guest. The NVMe ZNS
+command set only defines the sequential-write-required zone type, so Linux's
+NVMe driver rejects a conventional zone and fails the *whole* zone report with
+`EINVAL` — the namespace then reports `nr_zones=0` and is unusable for zoned
+btrfs, f2fs, zonefs or dm-zoned. Enable it only for host software that accepts
+the conventional zone type, or to exercise FEMU's own zone handling.
+
+To combine randomly-writable and zoned capacity on a Linux guest, give the
+controller one namespace of each mode instead (see Multiple Namespaces):
+
+```bash
+-device femu,devsz_mb=8192,namespaces=2,namespace_modes=znssd,,bbssd,...
+```
+
 **Use Cases:**
 - ZNS filesystem development (F2FS, Btrfs)
 - Zone-aware applications

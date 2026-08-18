@@ -114,6 +114,11 @@ static void zns_init_zoned_state(NvmeNamespace *ns)
     NvmeZone *zone;
     int i;
 
+    /* a config may not mark more conventional zones than the namespace has */
+    if (ns->num_conv_zones > ns->num_zones) {
+        ns->num_conv_zones = ns->num_zones;
+    }
+
     ns->zone_array = g_new0(NvmeZone, ns->num_zones);
     if (ns->zd_extension_size) {
         ns->zd_extensions = g_malloc0(ns->zd_extension_size * ns->num_zones);
@@ -129,7 +134,9 @@ static void zns_init_zoned_state(NvmeNamespace *ns)
         if (start + zone_size > capacity) {
             zone_size = capacity - start;
         }
-        zone->d.zt = NVME_ZONE_TYPE_SEQ_WRITE;
+        /* the leading num_conv_zones are conventional (random-write) */
+        zone->d.zt = (i < ns->num_conv_zones) ? NVME_ZONE_TYPE_CONVENTIONAL :
+                                                NVME_ZONE_TYPE_SEQ_WRITE;
         zns_set_zone_state(zone, NVME_ZONE_STATE_EMPTY);
         zone->d.za = 0;
         zone->d.zcap = ns->zone_capacity;
@@ -348,6 +355,15 @@ static uint16_t zns_check_zone_write(FemuCtrl *n, NvmeNamespace *ns,
     }
 
     if (status != NVME_SUCCESS) {
+    } else if (zone->d.zt == NVME_ZONE_TYPE_CONVENTIONAL) {
+        /*
+         * A conventional zone takes writes anywhere inside it and keeps no write
+         * pointer. Zone append targets the write pointer, so it has no meaning
+         * here and is rejected.
+         */
+        if (append) {
+            status = NVME_INVALID_FIELD;
+        }
     } else {
         assert(zns_wp_is_valid(zone));
         if (append) {
@@ -463,6 +479,11 @@ static void zns_finalize_zoned_write(NvmeNamespace *ns, NvmeRequest *req, bool f
     nlb = le16_to_cpu(rw->nlb) + 1;
     zone = zns_get_zone_by_slba(ns, slba);
 
+    /* conventional zones have no write pointer and no sequential state machine */
+    if (zone->d.zt == NVME_ZONE_TYPE_CONVENTIONAL) {
+        return;
+    }
+
     zone->d.wp += nlb;
 
     if (failed) {
@@ -501,6 +522,14 @@ static uint64_t zns_advance_zone_wp(NvmeNamespace *ns, NvmeZone *zone, uint32_t 
 {
     uint64_t result = zone->w_ptr;
     uint8_t zs;
+
+    /*
+     * A conventional zone takes random writes and runs no sequential
+     * write-pointer or active/open state machine, so leave its state alone.
+     */
+    if (zone->d.zt == NVME_ZONE_TYPE_CONVENTIONAL) {
+        return result;
+    }
 
     zone->w_ptr += nlb;
 
@@ -745,6 +774,13 @@ static uint16_t zns_do_zone_op(NvmeNamespace *ns, NvmeZone *zone,
     int i;
 
     if (!proc_mask) {
+        /*
+         * Conventional zones are random-write and have no open/close/finish/
+         * reset state machine, so reject zone management aimed at one.
+         */
+        if (zone->d.zt == NVME_ZONE_TYPE_CONVENTIONAL) {
+            return NVME_ZONE_INVAL_TRANSITION | NVME_DNR;
+        }
         status = op_hndlr(ns, zone, zns_get_zone_state(zone), req);
     } else {
         if (proc_mask & NVME_PROC_CLOSED_ZONES) {

@@ -193,6 +193,7 @@ enum NvmeZoneReportType {
 
 enum NvmeZoneType {
     NVME_ZONE_TYPE_RESERVED          = 0x00,
+    NVME_ZONE_TYPE_CONVENTIONAL      = 0x01,
     NVME_ZONE_TYPE_SEQ_WRITE         = 0x02,
 };
 
@@ -326,6 +327,11 @@ static inline uint64_t zns_zone_wr_boundary(NvmeZone *zone)
 static inline bool zns_wp_is_valid(NvmeZone *zone)
 {
     uint8_t st = zns_get_zone_state(zone);
+
+    /* a conventional zone has no write pointer; it is reported as all-ones */
+    if (zone->d.zt == NVME_ZONE_TYPE_CONVENTIONAL) {
+        return false;
+    }
 
     return st != NVME_ZONE_STATE_FULL &&
            st != NVME_ZONE_STATE_READ_ONLY &&

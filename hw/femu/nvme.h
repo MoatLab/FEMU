@@ -1503,6 +1503,7 @@ typedef struct NvmeNamespace {
     uint32_t        max_active_zones;
     uint32_t        max_open_zones;
     uint32_t        zd_extension_size;
+    uint32_t        num_conv_zones; /* leading conventional zones (0 = none) */
     bool            cross_zone_read;
     uint64_t        zone_size_bs;
     bool            zone_cap_bs;
@@ -1619,6 +1620,7 @@ typedef struct ZNSCtrlParams {
     uint32_t zns_max_active;  /* max active zones (0 = unlimited) */
     uint32_t zns_max_open;    /* max open zones (0 = unlimited) */
     uint32_t zns_zd_ext_size; /* per-zone descriptor extension bytes (0 = none) */
+    uint32_t zns_num_conv_zones; /* leading conventional zones (0 = all sequential) */
 } ZNSCtrlParams;
 
 typedef struct CsdCtrlParams {

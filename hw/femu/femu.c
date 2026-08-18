@@ -853,6 +853,7 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
         ns->max_active_zones = n->zns_params.zns_max_active;
         ns->max_open_zones = n->zns_params.zns_max_open;
         ns->zd_extension_size = n->zns_params.zns_zd_ext_size;
+        ns->num_conv_zones = n->zns_params.zns_num_conv_zones;
 
         if (nvme_init_namespace(n, ns, errp)) {
             g_free(ns_sizes);
@@ -1352,6 +1353,8 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT32("zns_max_active", FemuCtrl, zns_params.zns_max_active, 0),
     DEFINE_PROP_UINT32("zns_max_open", FemuCtrl, zns_params.zns_max_open, 0),
     DEFINE_PROP_UINT32("zns_zd_ext_size", FemuCtrl, zns_params.zns_zd_ext_size, 0),
+    DEFINE_PROP_UINT32("zns_num_conv_zones", FemuCtrl,
+                       zns_params.zns_num_conv_zones, 0),
     DEFINE_PROP_INT32("secsz", FemuCtrl, bb_params.secsz, 512),
     DEFINE_PROP_INT32("secs_per_pg", FemuCtrl, bb_params.secs_per_pg, 8),
     DEFINE_PROP_INT32("pgs_per_blk", FemuCtrl, bb_params.pgs_per_blk, 256),
