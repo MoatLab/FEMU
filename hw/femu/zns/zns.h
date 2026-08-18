@@ -315,7 +315,7 @@ static inline void zns_set_zone_state(NvmeZone *zone, NvmeZoneState state)
 
 static inline uint64_t zns_zone_rd_boundary(NvmeNamespace *ns, NvmeZone *zone)
 {
-    return zone->d.zslba + ns->ctrl->zone_size;
+    return zone->d.zslba + ns->zone_size;
 }
 
 static inline uint64_t zns_zone_wr_boundary(NvmeZone *zone)
@@ -334,48 +334,44 @@ static inline bool zns_wp_is_valid(NvmeZone *zone)
 
 static inline uint8_t *zns_get_zd_extension(NvmeNamespace *ns, uint32_t zone_idx)
 {
-    return &ns->ctrl->zd_extensions[zone_idx * ns->ctrl->zd_extension_size];
+    return &ns->zd_extensions[zone_idx * ns->zd_extension_size];
 }
 
 static inline void zns_aor_inc_open(NvmeNamespace *ns)
 {
-    FemuCtrl *n = ns->ctrl;
-    assert(n->nr_open_zones >= 0);
-    if (n->max_open_zones) {
-        n->nr_open_zones++;
-        assert(n->nr_open_zones <= n->max_open_zones);
+    assert(ns->nr_open_zones >= 0);
+    if (ns->max_open_zones) {
+        ns->nr_open_zones++;
+        assert(ns->nr_open_zones <= ns->max_open_zones);
     }
 }
 
 static inline void zns_aor_dec_open(NvmeNamespace *ns)
 {
-    FemuCtrl *n = ns->ctrl;
-    if (n->max_open_zones) {
-        assert(n->nr_open_zones > 0);
-        n->nr_open_zones--;
+    if (ns->max_open_zones) {
+        assert(ns->nr_open_zones > 0);
+        ns->nr_open_zones--;
     }
-    assert(n->nr_open_zones >= 0);
+    assert(ns->nr_open_zones >= 0);
 }
 
 static inline void zns_aor_inc_active(NvmeNamespace *ns)
 {
-    FemuCtrl *n = ns->ctrl;
-    assert(n->nr_active_zones >= 0);
-    if (n->max_active_zones) {
-        n->nr_active_zones++;
-        assert(n->nr_active_zones <= n->max_active_zones);
+    assert(ns->nr_active_zones >= 0);
+    if (ns->max_active_zones) {
+        ns->nr_active_zones++;
+        assert(ns->nr_active_zones <= ns->max_active_zones);
     }
 }
 
 static inline void zns_aor_dec_active(NvmeNamespace *ns)
 {
-    FemuCtrl *n = ns->ctrl;
-    if (n->max_active_zones) {
-        assert(n->nr_active_zones > 0);
-        n->nr_active_zones--;
-        assert(n->nr_active_zones >= n->nr_open_zones);
+    if (ns->max_active_zones) {
+        assert(ns->nr_active_zones > 0);
+        ns->nr_active_zones--;
+        assert(ns->nr_active_zones >= ns->nr_open_zones);
     }
-    assert(n->nr_active_zones >= 0);
+    assert(ns->nr_active_zones >= 0);
 }
 
 void zns_ns_shutdown(NvmeNamespace *ns);

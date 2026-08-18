@@ -1458,6 +1458,33 @@ typedef struct NvmeNamespace {
         /* reclaim unit handle identifiers indexed by placement handle */
         uint16_t *phs;
     } fdp;
+
+    /*
+     * Zoned state. A zoned namespace owns its zones, so this lives here rather
+     * than on the controller: the zone array, the state lists and the counters
+     * all describe one namespace's zones. Unused by a namespace that is not
+     * zoned.
+     */
+    NvmeIdNsZoned   *id_ns_zoned;
+    NvmeZone        *zone_array;
+    QTAILQ_HEAD(, NvmeZone) exp_open_zones;
+    QTAILQ_HEAD(, NvmeZone) imp_open_zones;
+    QTAILQ_HEAD(, NvmeZone) closed_zones;
+    QTAILQ_HEAD(, NvmeZone) full_zones;
+    uint32_t        num_zones;
+    uint64_t        zone_size;
+    uint64_t        zone_capacity;
+    uint32_t        zone_size_log2;
+    uint8_t         *zd_extensions;
+    int32_t         nr_open_zones;
+    int32_t         nr_active_zones;
+    uint32_t        max_active_zones;
+    uint32_t        max_open_zones;
+    uint32_t        zd_extension_size;
+    bool            cross_zone_read;
+    uint64_t        zone_size_bs;
+    bool            zone_cap_bs;
+    struct zns_ssd  *zns;
 } NvmeNamespace;
 
 #define TYPE_NVME "femu"
@@ -1631,30 +1658,9 @@ typedef struct FemuCtrl {
     uint32_t        zasl_bs;
     uint8_t         zasl;
     bool            zoned;
-    bool            cross_zone_read;
-    uint64_t        zone_size_bs;
-    bool            zone_cap_bs;
-    uint32_t        max_active_zones;
-    uint32_t        max_open_zones;
-    uint32_t        zd_extension_size;
 
     const uint32_t  *iocs;
     uint8_t         csi;
-    NvmeIdNsZoned   *id_ns_zoned;
-    NvmeZone        *zone_array;
-    QTAILQ_HEAD(, NvmeZone) exp_open_zones;
-    QTAILQ_HEAD(, NvmeZone) imp_open_zones;
-    QTAILQ_HEAD(, NvmeZone) closed_zones;
-    QTAILQ_HEAD(, NvmeZone) full_zones;
-    uint32_t        num_zones;
-    uint64_t        zone_size;
-    uint64_t        zone_capacity;
-    uint32_t        zone_size_log2;
-    uint8_t         *zd_extensions;
-    int32_t         nr_open_zones;
-    int32_t         nr_active_zones;
-
-    struct zns_ssd *zns;
     ZNSCtrlParams zns_params;
 
     /* Coperd: OC2.0 FIXME */

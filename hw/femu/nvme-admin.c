@@ -487,7 +487,7 @@ static uint16_t nvme_identify_ns_csi(FemuCtrl *n, NvmeCmd *cmd)
     if (c->csi == NVME_CSI_NVM && nvme_csi_has_nvm_support(ns)) {
         return nvme_rpt_empty_id_struct(n, cmd);
     } else if (c->csi == NVME_CSI_ZONED && n->csi == NVME_CSI_ZONED) {
-        return dma_read_prp(n, (uint8_t *)n->id_ns_zoned, pgsz, prp1, prp2);
+        return dma_read_prp(n, (uint8_t *)ns->id_ns_zoned, pgsz, prp1, prp2);
     }
 
     return NVME_INVALID_FIELD | NVME_DNR;

@@ -17,7 +17,8 @@ static inline void set_maptbl_ent(struct zns_ssd *zns, uint64_t lpn, struct ppa 
 
 void zftl_init(FemuCtrl *n)
 {
-    struct zns_ssd *ssd = n->zns;
+    NvmeNamespace *ns = &n->namespaces[0];
+    struct zns_ssd *ssd = ns->zns;
 
     qemu_thread_create(&ssd->ftl_thread, "FEMU-FTL-Thread", ftl_thread, n,
                        QEMU_THREAD_JOINABLE);
@@ -431,7 +432,8 @@ static uint64_t zns_write(struct zns_ssd *zns, NvmeRequest *req)
 static void *ftl_thread(void *arg)
 {
     FemuCtrl *n = (FemuCtrl *)arg;
-    struct zns_ssd *zns = n->zns;
+    NvmeNamespace *ns = &n->namespaces[0];
+    struct zns_ssd *zns = ns->zns;
     NvmeRequest *req = NULL;
     uint64_t lat = 0;
     int rc;
