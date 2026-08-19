@@ -191,12 +191,18 @@ void ssd_init_lines(struct ssd *ssd);
 void ssd_init_write_pointer(struct ssd *ssd);
 void ssd_advance_write_pointer(struct ssd *ssd);
 struct ppa get_new_page(struct ssd *ssd);
+struct ppa get_new_page_class(struct ssd *ssd, int klass);
+void ssd_advance_write_pointer_class(struct ssd *ssd, int klass);
 void mark_page_invalid(struct ssd *ssd, struct ppa *ppa);
 void mark_page_valid(struct ssd *ssd, struct ppa *ppa);
 void mark_block_free(struct ssd *ssd, struct ppa *ppa);
 void gc_read_page(struct ssd *ssd, struct ppa *ppa);
 int do_gc(struct ssd *ssd, bool force);
 const struct femu_ftl_policy_ops *femu_ftl_policy_lookup(const char *name);
+
+/* log-block mapping schemes (hw/femu/bbssd/ftl-map-hybrid.c) */
+extern const struct femu_mapping_ops femu_mapping_hybrid_ops;
+extern const struct femu_mapping_ops femu_mapping_fast_ops;
 
 /*
  * Base LBA of a request's namespace inside the FTL address space. One FTL maps a

@@ -112,13 +112,12 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 
         /* mapping scheme picks placement (page/dftl: data class, no reclaim) */
         struct map_write_plan plan = ssd->mapping->prepare_write(ssd, lpn, USER_IO);
-        (void)plan;
 
         /* the page content changes: drop any stale read-cache entry for it */
         rcache_invalidate(ssd, lpn);
 
-        /* allocate the new page and commit the mapping (invalidates the old) */
-        ppa = get_new_page(ssd);
+        /* allocate from the class the scheme asked for and commit the mapping */
+        ppa = get_new_page_class(ssd, plan.target_class);
         ssd->mapping->commit_write(ssd, lpn, &ppa);
 
         mark_page_valid(ssd, &ppa);
@@ -132,7 +131,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         }
 
         /* need to advance the write pointer here */
-        ssd_advance_write_pointer(ssd);
+        ssd_advance_write_pointer_class(ssd, plan.target_class);
 
         struct nand_cmd swr;
         swr.type = USER_IO;

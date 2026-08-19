@@ -103,6 +103,15 @@ static const struct femu_mapping_ops femu_mapping_schemes[] = {
     },
 };
 
+/*
+ * Schemes that keep their own state live in their own files and are spliced in
+ * by name here, so the table above stays the plain page-mapping description.
+ */
+static const struct femu_mapping_ops * const femu_mapping_extra[] = {
+    &femu_mapping_hybrid_ops,
+    &femu_mapping_fast_ops,
+};
+
 /* Resolve a mapping name to its ops; default to page for NULL/unknown. */
 const struct femu_mapping_ops *femu_mapping_scheme_lookup(const char *name)
 {
@@ -110,6 +119,11 @@ const struct femu_mapping_ops *femu_mapping_scheme_lookup(const char *name)
         for (size_t i = 0; i < ARRAY_SIZE(femu_mapping_schemes); i++) {
             if (!strcmp(name, femu_mapping_schemes[i].name)) {
                 return &femu_mapping_schemes[i];
+            }
+        }
+        for (size_t i = 0; i < ARRAY_SIZE(femu_mapping_extra); i++) {
+            if (!strcmp(name, femu_mapping_extra[i]->name)) {
+                return femu_mapping_extra[i];
             }
         }
     }

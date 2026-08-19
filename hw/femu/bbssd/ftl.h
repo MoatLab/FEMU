@@ -329,11 +329,16 @@ struct femu_ftl_policy_ops {
     struct line *(*select_victim_line)(struct ssd *ssd, bool force);
 };
 
-/* allocation class chosen for a new write (page/dftl only use DATA) */
-enum { FEMU_MAP_CLASS_DATA = 0 };
+/*
+ * Allocation class chosen for a new write. Page and dftl only ever use DATA;
+ * a log-block scheme puts its overwrites in LOG so they land in blocks of
+ * their own rather than mixed in with the data blocks.
+ */
+enum { FEMU_MAP_CLASS_DATA = 0, FEMU_MAP_CLASS_LOG = 1 };
 
 struct map_write_plan {
-    int target_class;   /* allocation class for the new page */
+    int target_class;      /* allocation class for the new page */
+    bool may_need_reclaim; /* the scheme may have to reclaim before committing */
 };
 
 /*
@@ -402,6 +407,7 @@ struct ssd {
     struct ppa *maptbl; /* page level mapping table */
     uint64_t *rmap;     /* reverse mapptbl, assume it's stored in OOB */
     struct write_pointer wp;
+    struct write_pointer log_wp; /* LOG class; its line is taken on first use */
     struct line_mgmt lm;
 
     /* lockless ring for communication with NVMe IO thread */

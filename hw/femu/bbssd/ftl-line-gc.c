@@ -106,10 +106,10 @@ struct line *get_next_free_line(struct ssd *ssd)
     return curline;
 }
 
-void ssd_advance_write_pointer(struct ssd *ssd)
+static void ssd_advance_write_pointer_common(struct ssd *ssd,
+                                             struct write_pointer *wpp)
 {
     struct ssdparams *spp = &ssd->sp;
-    struct write_pointer *wpp = &ssd->wp;
     struct line_mgmt *lm = &ssd->lm;
 
     check_addr(wpp->ch, spp->nchs);
@@ -161,6 +161,67 @@ void ssd_advance_write_pointer(struct ssd *ssd)
             }
         }
     }
+}
+
+/* the LOG class takes its own line, the first time something is written to it */
+static void ssd_init_log_write_pointer(struct ssd *ssd)
+{
+    struct write_pointer *wpp = &ssd->log_wp;
+    struct line *curline = get_next_free_line(ssd);
+
+    if (!curline) {
+        ftl_err("no free line for the log class in [%s]\n", ssd->ssdname);
+        return;
+    }
+
+    wpp->curline = curline;
+    wpp->ch = 0;
+    wpp->lun = 0;
+    wpp->pg = 0;
+    wpp->blk = curline->id;
+    wpp->pl = 0;
+}
+
+/* pick the write pointer an allocation class writes through */
+static struct write_pointer *ssd_write_pointer_for_class(struct ssd *ssd,
+                                                         int klass)
+{
+    if (klass == FEMU_MAP_CLASS_LOG) {
+        if (!ssd->log_wp.curline) {
+            ssd_init_log_write_pointer(ssd);
+        }
+        if (ssd->log_wp.curline) {
+            return &ssd->log_wp;
+        }
+    }
+
+    return &ssd->wp;
+}
+
+void ssd_advance_write_pointer(struct ssd *ssd)
+{
+    ssd_advance_write_pointer_common(ssd, &ssd->wp);
+}
+
+void ssd_advance_write_pointer_class(struct ssd *ssd, int klass)
+{
+    ssd_advance_write_pointer_common(ssd, ssd_write_pointer_for_class(ssd, klass));
+}
+
+struct ppa get_new_page_class(struct ssd *ssd, int klass)
+{
+    struct write_pointer *wpp = ssd_write_pointer_for_class(ssd, klass);
+    struct ppa ppa;
+
+    ppa.ppa = 0;
+    ppa.g.ch = wpp->ch;
+    ppa.g.lun = wpp->lun;
+    ppa.g.pg = wpp->pg;
+    ppa.g.blk = wpp->blk;
+    ppa.g.pl = wpp->pl;
+    ftl_assert(ppa.g.pl == 0);
+
+    return ppa;
 }
 
 struct ppa get_new_page(struct ssd *ssd)
