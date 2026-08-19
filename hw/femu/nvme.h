@@ -1513,7 +1513,7 @@ typedef struct NvmeNamespace {
     uint32_t        zrwa_avail;  /* ZRWA resources still free */
     bool            cross_zone_read;
     uint64_t        zone_size_bs;
-    bool            zone_cap_bs;
+    uint64_t        zone_cap_bs; /* zone capacity in bytes; 0 = the whole zone */
     struct zns_ssd  *zns;
 } NvmeNamespace;
 
@@ -1628,6 +1628,7 @@ typedef struct ZNSCtrlParams {
     uint32_t zns_max_open;    /* max open zones (0 = unlimited) */
     uint32_t zns_zd_ext_size; /* per-zone descriptor extension bytes (0 = none) */
     uint32_t zns_num_conv_zones; /* leading conventional zones (0 = all sequential) */
+    uint64_t zns_zone_cap;       /* usable bytes per zone; 0 = the whole zone */
     uint32_t zns_chnls_per_zone; /* channels a zone spans (0 = full width) */
     uint64_t zns_zrwa_size;      /* ZRWA window, LBAs (0 = ZRWA off) */
     uint64_t zns_zrwafg_size;    /* ZRWA flush granularity, LBAs */
@@ -1783,6 +1784,24 @@ typedef struct FemuCtrl {
     uint32_t        nand_bad_blocks; /* bbssd factory bad blocks reported via SMART; 0 = none */
     uint32_t        op_pcent; /* bbssd over-provisioning percent (0 = use devsz_mb) */
     bool            debug_ftl; /* check bbssd FTL invariants on the GC path */
+    uint32_t        err_read_unc_ppm;  /* uncorrectable reads per million; 0 = off */
+    uint32_t        err_write_fail_ppm; /* write faults per million; 0 = off */
+
+    /*
+     * Optional host-link and controller-CPU models, both off by default. The
+     * link is one physical resource, so transfers serialize through a
+     * next-available time per direction; the firmware core does the same for a
+     * fixed per-command cost.
+     */
+    bool            pcie_enabled;
+    uint32_t        pcie_bandwidth_mbps;
+    uint32_t        pcie_prop_delay_ns;
+    uint64_t        pcie_tx_next_avail_time;
+    uint64_t        pcie_rx_next_avail_time;
+    pthread_spinlock_t pcie_lock;
+    uint64_t        fw_cpu_ns;
+    uint64_t        fw_cpu_next_avail_time;
+    pthread_spinlock_t fw_cpu_lock;
     char            *namespace_sizes; /* per-NS sizes "8G,4G"; NULL = equal split */
     char            *namespace_modes; /* per-NS modes "znssd,bbssd"; NULL = all femu_mode */
     OcCtrlParams    oc_params;

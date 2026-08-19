@@ -272,6 +272,54 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
         }
         assert(req);
 
+        /*
+         * Optional host-link model: charge the transfer over a link of the
+         * configured bandwidth plus a propagation delay. The link is one
+         * physical resource, so transfers queue behind each other through a
+         * next-available time, kept per direction since a read and a write
+         * travel opposite ways over it. Applied once the media latency is
+         * already in expire_time and before the completion is posted.
+         */
+        if (unlikely(n->pcie_enabled) && req->ns &&
+            (req->cmd_opcode == NVME_CMD_READ ||
+             req->cmd_opcode == NVME_CMD_WRITE)) {
+            uint8_t lbads = req->ns->id_ns.lbaf[
+                NVME_ID_NS_FLBAS_INDEX(req->ns->id_ns.flbas)].lbads;
+            uint64_t data_size = (uint64_t)req->nlb << lbads;
+            uint64_t trans_ns = n->pcie_bandwidth_mbps ?
+                data_size * 1000 / n->pcie_bandwidth_mbps : 0;
+            uint64_t *next, start;
+
+            pthread_spin_lock(&n->pcie_lock);
+            next = req->is_write ? &n->pcie_rx_next_avail_time :
+                                   &n->pcie_tx_next_avail_time;
+            start = (*next > (uint64_t)req->expire_time) ?
+                    *next : (uint64_t)req->expire_time;
+            *next = start + trans_ns;
+            req->expire_time = (int64_t)(*next + n->pcie_prop_delay_ns);
+            pthread_spin_unlock(&n->pcie_lock);
+        }
+
+        /*
+         * Optional controller-CPU model: charge a fixed cost per command on a
+         * single firmware core. At high rates this caps throughput at roughly
+         * one command per fw_cpu_ns, the way a real controller's CPU does. It
+         * is a separate resource from the link, so it takes its own lock.
+         */
+        if (unlikely(n->fw_cpu_ns) &&
+            (req->cmd_opcode == NVME_CMD_READ ||
+             req->cmd_opcode == NVME_CMD_WRITE ||
+             req->cmd_opcode == NVME_CMD_ZONE_APPEND)) {
+            uint64_t start;
+
+            pthread_spin_lock(&n->fw_cpu_lock);
+            start = (n->fw_cpu_next_avail_time > (uint64_t)req->expire_time) ?
+                    n->fw_cpu_next_avail_time : (uint64_t)req->expire_time;
+            n->fw_cpu_next_avail_time = start + n->fw_cpu_ns;
+            req->expire_time = (int64_t)n->fw_cpu_next_avail_time;
+            pthread_spin_unlock(&n->fw_cpu_lock);
+        }
+
         pqueue_insert(pq, req);
     }
 

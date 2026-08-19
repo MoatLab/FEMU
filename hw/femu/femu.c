@@ -854,6 +854,7 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
         ns->max_open_zones = n->zns_params.zns_max_open;
         ns->zd_extension_size = n->zns_params.zns_zd_ext_size;
         ns->num_conv_zones = n->zns_params.zns_num_conv_zones;
+        ns->zone_cap_bs = n->zns_params.zns_zone_cap;
         ns->zns_chnls_per_zone = n->zns_params.zns_chnls_per_zone;
         ns->zrwa_size = n->zns_params.zns_zrwa_size;
         ns->zrwafg_size = n->zns_params.zns_zrwafg_size;
@@ -1158,6 +1159,14 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     init_dram_backend(&n->mbe, bs_size);
     n->mbe->femu_mode = n->femu_mode;
 
+    /* the host-link model is armed only when a knob asks for it */
+    n->pcie_enabled = (n->pcie_bandwidth_mbps || n->pcie_prop_delay_ns);
+    n->pcie_tx_next_avail_time = 0;
+    n->pcie_rx_next_avail_time = 0;
+    n->fw_cpu_next_avail_time = 0;
+    pthread_spin_init(&n->pcie_lock, PTHREAD_PROCESS_PRIVATE);
+    pthread_spin_init(&n->fw_cpu_lock, PTHREAD_PROCESS_PRIVATE);
+
     n->completed = 0;
     n->start_time = time(NULL);
     n->reg_size = pow2ceil(0x1004 + 2 * (n->nr_io_queues + 1) * 4);
@@ -1360,6 +1369,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT32("zns_zd_ext_size", FemuCtrl, zns_params.zns_zd_ext_size, 0),
     DEFINE_PROP_UINT32("zns_num_conv_zones", FemuCtrl,
                        zns_params.zns_num_conv_zones, 0),
+    DEFINE_PROP_SIZE("zns_zone_cap", FemuCtrl, zns_params.zns_zone_cap, 0),
     DEFINE_PROP_UINT32("zns_chnls_per_zone", FemuCtrl,
                        zns_params.zns_chnls_per_zone, 0),
     DEFINE_PROP_UINT64("zns_zrwa_size", FemuCtrl, zns_params.zns_zrwa_size, 0),
@@ -1400,6 +1410,11 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT32("nand_bad_blocks", FemuCtrl, nand_bad_blocks, 0),
     DEFINE_PROP_UINT32("op_pcent", FemuCtrl, op_pcent, 0),
     DEFINE_PROP_BOOL("debug_ftl", FemuCtrl, debug_ftl, false),
+    DEFINE_PROP_UINT32("err_read_unc_ppm", FemuCtrl, err_read_unc_ppm, 0),
+    DEFINE_PROP_UINT32("err_write_fail_ppm", FemuCtrl, err_write_fail_ppm, 0),
+    DEFINE_PROP_UINT32("pcie_bandwidth_mbps", FemuCtrl, pcie_bandwidth_mbps, 0),
+    DEFINE_PROP_UINT32("pcie_prop_delay_ns", FemuCtrl, pcie_prop_delay_ns, 0),
+    DEFINE_PROP_UINT64("fw_cpu_ns", FemuCtrl, fw_cpu_ns, 0),
     DEFINE_PROP_STRING("namespace_sizes", FemuCtrl, namespace_sizes),
     DEFINE_PROP_STRING("namespace_modes", FemuCtrl, namespace_modes),
     DEFINE_PROP_INT32("fdp_trim_erase_all", FemuCtrl,

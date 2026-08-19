@@ -1536,7 +1536,7 @@ static int zns_init_zone_cap(FemuCtrl *n, NvmeNamespace *ns)
     n->zoned = true;
     n->zasl_bs = NVME_DEFAULT_MAX_AZ_SIZE;
     ns->zone_size_bs = zns->chnls_per_zone*zns->num_lun*zns->num_plane*zns->num_page*ZNS_PAGE_SIZE;
-    ns->zone_cap_bs = 0;
+    /* keep a user-set capacity; 0 means the zone is fully usable */
     ns->cross_zone_read = false;
     /*
      * Optional resource limits (all default 0 = unlimited / no extension, so an

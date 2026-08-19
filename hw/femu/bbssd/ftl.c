@@ -51,6 +51,29 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
     /* factory bad-block count, reported via SMART available_spare; clamp to the
      * total block count so a misconfigured value cannot exceed 100% depletion */
     ssd->debug_ftl = n->debug_ftl;
+
+    /*
+     * Turn a parts-per-million rate into a 1-in-N period, clamped so a non-zero
+     * rate always injects something. Zero leaves injection off.
+     */
+    ssd->err_read_unc_period = 0;
+    ssd->err_read_counter = 0;
+    ssd->err_read_injected = 0;
+    if (n->err_read_unc_ppm) {
+        ssd->err_read_unc_period = 1000000u / n->err_read_unc_ppm;
+        if (ssd->err_read_unc_period < 1) {
+            ssd->err_read_unc_period = 1;
+        }
+    }
+    ssd->err_write_fail_period = 0;
+    ssd->err_write_counter = 0;
+    ssd->err_write_injected = 0;
+    if (n->err_write_fail_ppm) {
+        ssd->err_write_fail_period = 1000000u / n->err_write_fail_ppm;
+        if (ssd->err_write_fail_period < 1) {
+            ssd->err_write_fail_period = 1;
+        }
+    }
     ssd->host_write_pages = 0;
     ssd->gc_write_pages = 0;
 
@@ -218,9 +241,24 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
         } else {
             lat = ssd_write(ssd, req);
         }
+        /* optional write fault on every Nth write, on the same principle */
+        if (ssd->err_write_fail_period &&
+            (++ssd->err_write_counter % ssd->err_write_fail_period) == 0) {
+            req->status = NVME_WRITE_FAULT;
+            ssd->err_write_injected++;
+        }
         break;
     case NVME_CMD_READ:
         lat = ssd_read(ssd, req);
+        /*
+         * Optional media error on every Nth read. The counter makes a run
+         * reproducible, unlike a random draw.
+         */
+        if (ssd->err_read_unc_period &&
+            (++ssd->err_read_counter % ssd->err_read_unc_period) == 0) {
+            req->status = NVME_UNRECOVERED_READ | NVME_DNR;
+            ssd->err_read_injected++;
+        }
         break;
     case NVME_CMD_DSM:
         if (ssd->fdp_enabled) {

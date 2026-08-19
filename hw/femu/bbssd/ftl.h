@@ -483,6 +483,18 @@ struct ssd {
 
     bool debug_ftl; /* check FTL invariants on the GC path (off by default) */
 
+    /*
+     * Fault insertion, off by default. A period of N returns a media error on
+     * every Nth read or write, counted rather than randomised so a run
+     * reproduces exactly.
+     */
+    uint32_t err_read_unc_period;
+    uint64_t err_read_counter;
+    uint64_t err_read_injected;
+    uint32_t err_write_fail_period;
+    uint64_t err_write_counter;
+    uint64_t err_write_injected;
+
     FemuCtrl *n;
 };
 

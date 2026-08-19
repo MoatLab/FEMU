@@ -311,6 +311,15 @@ mapping_cache_mb=0     # DFTL translation-cache size in MiB (used only for dftl)
 # Write amplification / debugging
 debug_ftl=false        # report FTL invariant violations instead of aborting
 
+# Fault insertion (0 = off)
+err_read_unc_ppm=0     # uncorrectable reads per million reads
+err_write_fail_ppm=0   # write faults per million writes
+
+# Host link and controller CPU (0 = off)
+pcie_bandwidth_mbps=0  # host link bandwidth, MB/s
+pcie_prop_delay_ns=0   # host link propagation delay, ns
+fw_cpu_ns=0            # controller CPU time charged per command, ns
+
 # DRAM Read Cache (optional; default off)
 read_cache_mb=0        # Read-cache size in MiB (0 disables it)
 cache_evict=clock      # Eviction policy: clock (default), random, lru, arc
@@ -330,6 +339,18 @@ The log-block schemes are workload-shaped: sequential overwrites merge cheaply,
 random overwrites force full merges. Their cost is charged to the NAND timeline
 and counted as relocated pages, so it appears in latency and in write
 amplification.
+
+**Fault insertion.** `err_read_unc_ppm` and `err_write_fail_ppm` return a media
+error on a fixed fraction of reads or writes. The device counts commands rather
+than drawing at random, so a run reproduces exactly.
+
+**Host link and controller CPU.** `pcie_bandwidth_mbps` and `pcie_prop_delay_ns`
+charge each transfer against a link of finite bandwidth, serialized per
+direction; `fw_cpu_ns` charges a fixed cost per command against a single
+firmware core, which caps command rate the way a real controller's CPU does.
+Both sit after the media latency, so they compose with it, and both are off by
+default. They apply to the modes that model timing; NoSSD completes inline and
+is unaffected.
 
 **Write amplification.** The device reports amplification in the vendor area of
 the SMART log: the factor scaled by 1000 at byte 192, host-programmed pages at
@@ -417,6 +438,7 @@ zns_max_active=0       # Max active zones (0 = unlimited)
 zns_max_open=0         # Max open zones (0 = unlimited)
 zns_zd_ext_size=0      # Zone-descriptor extension bytes (0 = none)
 zns_num_conv_zones=0   # Leading conventional zones (0 = all sequential)
+zns_zone_cap=0         # Usable bytes per zone (0 = the whole zone)
 zns_chnls_per_zone=0   # Channels a zone spans (0 = all of them)
 zns_zrwa_size=0        # ZRWA window in LBAs (0 = ZRWA disabled)
 zns_zrwafg_size=0      # ZRWA flush granularity in LBAs
