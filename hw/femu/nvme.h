@@ -1782,6 +1782,7 @@ typedef struct FemuCtrl {
     uint8_t         nand_cell_type; /* bbssd NAND cell type: 0=off(flat), 1 SLC..4 QLC */
     uint32_t        nand_bad_blocks; /* bbssd factory bad blocks reported via SMART; 0 = none */
     uint32_t        op_pcent; /* bbssd over-provisioning percent (0 = use devsz_mb) */
+    bool            debug_ftl; /* check bbssd FTL invariants on the GC path */
     char            *namespace_sizes; /* per-NS sizes "8G,4G"; NULL = equal split */
     char            *namespace_modes; /* per-NS modes "znssd,bbssd"; NULL = all femu_mode */
     OcCtrlParams    oc_params;
@@ -2014,6 +2015,11 @@ uint64_t zns_ftl_process_req(NvmeNamespace *ns, NvmeRequest *req);
 
 /* bbssd SMART available-spare (100% healthy, reduced by the factory bad-block fraction) */
 uint8_t ssd_available_spare(struct ssd *ssd);
+
+/* write amplification: factor scaled by 1000, plus the raw page counters */
+uint32_t ssd_waf_x1000(struct ssd *ssd);
+uint64_t ssd_host_write_pages(struct ssd *ssd);
+uint64_t ssd_gc_write_pages(struct ssd *ssd);
 
 static inline uint64_t ns_blks(NvmeNamespace *ns, uint8_t lba_idx)
 {

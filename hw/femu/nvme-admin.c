@@ -951,6 +951,23 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
     /* healthy by default; bbssd derives it from the factory bad-block fraction */
     smart.available_spare = (BBSSD(n) && n->ssd) ? ssd_available_spare(n->ssd) : 100;
 
+    /*
+     * Vendor-specific area: report the write-amplification factor (scaled by
+     * 1000) and the raw page counters, so a workload can read amplification
+     * straight out of `nvme smart-log -o binary`. reserved2 begins at byte 192
+     * of the log, putting the factor at 192, host pages at 200 and relocated
+     * pages at 208. The standard fields above are untouched.
+     */
+    if (BBSSD(n) && n->ssd) {
+        uint32_t waf = cpu_to_le32(ssd_waf_x1000(n->ssd));
+        uint64_t hw = cpu_to_le64(ssd_host_write_pages(n->ssd));
+        uint64_t gw = cpu_to_le64(ssd_gc_write_pages(n->ssd));
+
+        memcpy(&smart.reserved2[0], &waf, sizeof(waf));
+        memcpy(&smart.reserved2[8], &hw, sizeof(hw));
+        memcpy(&smart.reserved2[16], &gw, sizeof(gw));
+    }
+
     current_seconds = time(NULL);
     smart.power_on_hours[0] = cpu_to_le64(
         ((current_seconds - n->start_time) / 60) / 60);

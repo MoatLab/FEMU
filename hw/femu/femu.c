@@ -1399,6 +1399,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_INT32("trim_lat_ns", FemuCtrl, bb_params.trim_lat_ns, 0),
     DEFINE_PROP_UINT32("nand_bad_blocks", FemuCtrl, nand_bad_blocks, 0),
     DEFINE_PROP_UINT32("op_pcent", FemuCtrl, op_pcent, 0),
+    DEFINE_PROP_BOOL("debug_ftl", FemuCtrl, debug_ftl, false),
     DEFINE_PROP_STRING("namespace_sizes", FemuCtrl, namespace_sizes),
     DEFINE_PROP_STRING("namespace_modes", FemuCtrl, namespace_modes),
     DEFINE_PROP_INT32("fdp_trim_erase_all", FemuCtrl,

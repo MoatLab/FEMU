@@ -50,6 +50,10 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
 
     /* factory bad-block count, reported via SMART available_spare; clamp to the
      * total block count so a misconfigured value cannot exceed 100% depletion */
+    ssd->debug_ftl = n->debug_ftl;
+    ssd->host_write_pages = 0;
+    ssd->gc_write_pages = 0;
+
     ssd->bad_blocks = n->nand_bad_blocks;
     if (spp->tt_blks > 0 && ssd->bad_blocks > (uint32_t)spp->tt_blks) {
         ssd->bad_blocks = (uint32_t)spp->tt_blks;
@@ -76,7 +80,11 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
      * mapping_cache_mb is set; a named dftl with no explicit size gets 4 MB.
      */
     ssd->mapping = femu_mapping_scheme_lookup(n->bb_params.mapping_scheme);
+    /* schemes that keep private state allocate it here; page/dftl keep it NULL */
     ssd->map_priv = NULL;
+    if (ssd->mapping->init) {
+        ssd->mapping->init(ssd);
+    }
     uint32_t map_cache_mb = n->mapping_cache_mb;
     if (femu_mapping_scheme_uses_cmt(ssd->mapping) && map_cache_mb == 0) {
         map_cache_mb = 4; /* default dftl cache when no explicit size given */
@@ -119,6 +127,34 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
         /* non-FDP: use single write pointer */
         ssd_init_write_pointer(ssd);
     }
+}
+
+/*
+ * Write-amplification factor scaled by 1000, so it needs no floating point on
+ * the read path: (host + relocated) / host. Reads 1000 (a factor of 1.0) before
+ * the host has written anything.
+ */
+uint32_t ssd_waf_x1000(struct ssd *ssd)
+{
+    uint64_t host = ssd->host_write_pages;
+    uint64_t total = host + ssd->gc_write_pages;
+
+    if (host == 0) {
+        return 1000;
+    }
+
+    return (uint32_t)((total * 1000ull) / host);
+}
+
+/* struct ssd is opaque outside the FTL, so the raw counters need accessors */
+uint64_t ssd_host_write_pages(struct ssd *ssd)
+{
+    return ssd->host_write_pages;
+}
+
+uint64_t ssd_gc_write_pages(struct ssd *ssd)
+{
+    return ssd->gc_write_pages;
 }
 
 /*

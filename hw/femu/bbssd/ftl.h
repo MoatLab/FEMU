@@ -346,6 +346,10 @@ struct femu_mapping_ops {
     const char *name;
     bool uses_cmt;          /* dftl-style demand-cached translation table */
 
+    /* allocate and release scheme-private state in ssd->map_priv */
+    void (*init)(struct ssd *ssd);
+    void (*exit)(struct ssd *ssd);
+
     /* translate a read: lpn -> ppa (unmapped if absent) */
     struct ppa (*translate)(struct ssd *ssd, uint64_t lpn);
 
@@ -357,9 +361,21 @@ struct femu_mapping_ops {
                                            int io_type);
     void (*commit_write)(struct ssd *ssd, uint64_t lpn, struct ppa *new_ppa);
 
+    /*
+     * Reclaim of the scheme's own structures, such as a log-block merge. The
+     * NAND cost it incurs is charged inside reclaim(), which returns the latency
+     * to add to the request that triggered it. A scheme with nothing to reclaim
+     * leaves both hooks NULL.
+     */
+    bool (*needs_reclaim)(struct ssd *ssd);
+    uint64_t (*reclaim)(struct ssd *ssd, int budget);
+
     /* GC relocation: point lpn at its relocated ppa (victim policy is separate) */
     void (*gc_relocate_commit)(struct ssd *ssd, uint64_t lpn,
                                struct ppa *old_ppa, struct ppa *new_ppa);
+
+    /* unmap an lpn on DSM deallocate; NULL falls back to the flat invalidation */
+    void (*trim)(struct ssd *ssd, uint64_t lpn);
 };
 
 /* one slot of the optional DRAM read cache (ftl-cache.c) */
@@ -450,6 +466,16 @@ struct ssd {
     const struct femu_ftl_policy_ops *policy;
 
     uint32_t bad_blocks; /* factory bad-block count, reported via SMART; 0 = none */
+
+    /*
+     * Write-amplification accounting: NAND pages programmed on behalf of the
+     * host, and pages programmed to relocate data the device already held. WAF
+     * is (host + relocated) / host.
+     */
+    uint64_t host_write_pages;
+    uint64_t gc_write_pages;
+
+    bool debug_ftl; /* check FTL invariants on the GC path (off by default) */
 
     FemuCtrl *n;
 };

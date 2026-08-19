@@ -190,6 +190,10 @@ void mark_page_invalid(struct ssd *ssd, struct ppa *ppa)
 
     /* update corresponding page status */
     pg = get_pg(ssd, ppa);
+    if (unlikely(ssd->debug_ftl) && pg->status != PG_VALID) {
+        ftl_err("invalidating a page that is not valid: status=%d " PPA_FMT "\n",
+                pg->status, PPA_ARG(ppa));
+    }
     ftl_assert(pg->status == PG_VALID);
     pg->status = PG_INVALID;
 
@@ -234,6 +238,10 @@ void mark_page_valid(struct ssd *ssd, struct ppa *ppa)
 
     /* update page status */
     pg = get_pg(ssd, ppa);
+    if (unlikely(ssd->debug_ftl) && pg->status != PG_FREE) {
+        ftl_err("programming a page that is not free: status=%d " PPA_FMT "\n",
+                pg->status, PPA_ARG(ppa));
+    }
     ftl_assert(pg->status == PG_FREE);
     pg->status = PG_VALID;
 
@@ -301,6 +309,7 @@ static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
     }
 
     mark_page_valid(ssd, &new_ppa);
+    ssd->gc_write_pages++; /* write amplification: a page the device relocated */
 
     /* need to advance the write pointer here */
     ssd_advance_write_pointer(ssd);

@@ -122,6 +122,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         ssd->mapping->commit_write(ssd, lpn, &ppa);
 
         mark_page_valid(ssd, &ppa);
+        ssd->host_write_pages++; /* write amplification: a host-programmed page */
         /* only log + track pages that carry the marker string */
         if (femu_dbg_lpn_has_secret(ssd, lpn)) {
             exp_watch_lpn_add(lpn);
@@ -139,6 +140,18 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         swr.stime = req->stime;
         /* get latency statistics */
         curlat = ssd_advance_status(ssd, &ppa, &swr);
+        maxlat = (curlat > maxlat) ? curlat : maxlat;
+    }
+
+    /*
+     * Let the mapping scheme reclaim its own structures once the writes have
+     * committed -- for a log-block scheme that is a merge. The NAND cost is
+     * charged inside reclaim(). One reclaim per request bounds the latency a
+     * single command can absorb; page and dftl have no reclaim and skip this.
+     */
+    if (ssd->mapping->needs_reclaim && ssd->mapping->reclaim &&
+        ssd->mapping->needs_reclaim(ssd)) {
+        curlat = ssd->mapping->reclaim(ssd, 1);
         maxlat = (curlat > maxlat) ? curlat : maxlat;
     }
 
@@ -202,14 +215,24 @@ uint64_t ssd_trim(struct ssd *ssd, NvmeRequest *req)
             if (exp_lpn_watched(lpn))
                 EXP_LOG("[INVALIDATE:trim] lpn=%lu old " PPA_FMT "\n",
                         lpn, PPA_ARG(&ppa));
-            mark_page_invalid(ssd, &ppa);
 
-            // Clear reverse mapping
-            set_rmap_ent(ssd, INVALID_LPN, &ppa);
+            /*
+             * Hand the unmap to the mapping scheme when it keeps state of its
+             * own, so a log-block scheme drops the page from its logs as well.
+             * The hook does the same flat invalidation; without one, do it here.
+             */
+            if (ssd->mapping->trim) {
+                ssd->mapping->trim(ssd, lpn);
+            } else {
+                mark_page_invalid(ssd, &ppa);
 
-            // Set mapping table entry as unmapped
-            ppa.ppa = UNMAPPED_PPA;
-            set_maptbl_ent(ssd, lpn, &ppa);
+                // Clear reverse mapping
+                set_rmap_ent(ssd, INVALID_LPN, &ppa);
+
+                // Set mapping table entry as unmapped
+                ppa.ppa = UNMAPPED_PPA;
+                set_maptbl_ent(ssd, lpn, &ppa);
+            }
 
             /* drop any stale read-cache entry for the trimmed page */
             rcache_invalidate(ssd, lpn);
