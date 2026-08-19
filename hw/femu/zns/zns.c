@@ -1494,7 +1494,7 @@ static void zns_init_params(FemuCtrl *n, NvmeNamespace *ns)
     id_zns->cache.write_cache = g_malloc0(sizeof(struct zns_write_cache) * id_zns->cache.num_wc);
     for(i =0; i < id_zns->cache.num_wc; i++)
     {
-        id_zns->cache.write_cache[i].sblk = i;
+        id_zns->cache.write_cache[i].sblk = INVALID_SBLK;
         id_zns->cache.write_cache[i].used = 0;
         id_zns->cache.write_cache[i].cap = (id_zns->stripe_unit/LOGICAL_PAGE_SIZE);
         id_zns->cache.write_cache[i].lpns = g_malloc0(sizeof(uint64_t) * id_zns->cache.write_cache[i].cap);
