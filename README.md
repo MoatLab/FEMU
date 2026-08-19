@@ -305,12 +305,38 @@ gc_policy=greedy       # Victim selection: greedy (default), random,
                        #   cost-benefit, fifo, d-choice
 
 # L2P Mapping (optional; default is a full DRAM page-mapping table)
-mapping=page           # page (default) or dftl (demand-cached translation)
+mapping=page           # page (default), dftl, hybrid, or fast
 mapping_cache_mb=0     # DFTL translation-cache size in MiB (used only for dftl)
+
+# Write amplification / debugging
+debug_ftl=false        # report FTL invariant violations instead of aborting
 
 # DRAM Read Cache (optional; default off)
 read_cache_mb=0        # Read-cache size in MiB (0 disables it)
 cache_evict=clock      # Eviction policy: clock (default), random, lru, arc
+```
+
+**Mapping schemes.** `mapping=` selects how the FTL translates logical to
+physical pages:
+
+| Scheme | Model |
+|--------|-------|
+| `page` | Full DRAM page-level table (default) |
+| `dftl` | Page-level, with the translation table charged as a demand cache |
+| `hybrid` | BAST log-block mapping (Kim 2002): one log block per data block, merged when the pool runs out |
+| `fast` | FAST log-block mapping (Lee et al. 2007): a sequential log block plus a shared fully-associative random-write pool |
+
+The log-block schemes are workload-shaped: sequential overwrites merge cheaply,
+random overwrites force full merges. Their cost is charged to the NAND timeline
+and counted as relocated pages, so it appears in latency and in write
+amplification.
+
+**Write amplification.** The device reports amplification in the vendor area of
+the SMART log: the factor scaled by 1000 at byte 192, host-programmed pages at
+200, and relocated pages at 208.
+
+```bash
+sudo nvme smart-log /dev/nvme0n1 -o binary | od -An -tu4 -j192 -N4   # WAF x1000
 ```
 
 **Use Cases:**
