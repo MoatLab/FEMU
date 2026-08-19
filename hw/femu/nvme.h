@@ -435,6 +435,7 @@ enum NvmeCapMask {
                                                             << CAP_MPSMAX_SHIFT)
 enum NvmeCsi {
     NVME_CSI_NVM                = 0x00,
+    NVME_CSI_KV                 = 0x01,
     NVME_CSI_ZONED              = 0x02,
 };
 
@@ -901,6 +902,14 @@ enum NvmeStatusCodes {
     NVME_ZONE_INVAL_TRANSITION  = 0x01bf,
     NVME_INVALID_ZONE_OP        = 0x01b6,
     NVME_NOZRWA                 = 0x01b7,
+
+    /* key-value command set */
+    NVME_KV_FORMAT_IN_PROGRESS  = 0x0084,
+    NVME_KV_INVALID_VALUE_SIZE  = 0x0085,
+    NVME_KV_INVALID_KEY_SIZE    = 0x0086,
+    NVME_KV_KEY_NOT_EXIST       = 0x0087,
+    NVME_KV_UNRECOVERED_ERROR   = 0x0088,
+    NVME_KV_KEY_EXISTS          = 0x0089,
     NVME_INVALID_MEMORY_ADDRESS = 0x01C0,
     NVME_WRITE_FAULT            = 0x0280,
     NVME_UNRECOVERED_READ       = 0x0281,
@@ -1019,6 +1028,7 @@ enum NvmeIdCns {
     NVME_ID_CNS_NS_DESCR_LIST         = 0x03,
     NVME_ID_CNS_CS_NS                 = 0x05,
     NVME_ID_CNS_CS_CTRL               = 0x06,
+    NVME_ID_CNS_CS_NS_FMT             = 0x0a,  /* CSI-specific NS for a format index */
     NVME_ID_CNS_CS_NS_ACTIVE_LIST     = 0x07,
     NVME_ID_CNS_NS_PRESENT_LIST       = 0x10,
     NVME_ID_CNS_NS_PRESENT            = 0x11,
@@ -1156,6 +1166,7 @@ typedef struct NvmeFeatureVal {
 
 enum NvmeFeatureIds {
     NVME_ARBITRATION                = 0x1,
+    NVME_KV_FEAT_CONFIG             = 0x20, /* Key Value Configuration */
     NVME_POWER_MANAGEMENT           = 0x2,
     NVME_LBA_RANGE_TYPE             = 0x3,
     NVME_TEMPERATURE_THRESHOLD      = 0x4,
@@ -1884,8 +1895,8 @@ enum {
     FEMU_NOSSD_MODE = 2,
     FEMU_ZNSSD_MODE = 3,
     FEMU_CSD_MODE = 4,
+    FEMU_KVSSD_MODE = 5,
     FEMU_SMARTSSD_MODE,
-    FEMU_KVSSD_MODE,
 };
 
 enum {
@@ -1941,6 +1952,11 @@ static inline bool NOSSD(FemuCtrl *n)
 static inline bool ZNSSD(FemuCtrl *n)
 {
     return (n->femu_mode == FEMU_ZNSSD_MODE);
+}
+
+static inline bool KVSSD(FemuCtrl *n)
+{
+    return (n->femu_mode == FEMU_KVSSD_MODE);
 }
 
 static inline bool CSD(FemuCtrl *n)
@@ -2027,6 +2043,7 @@ int nvme_register_nossd(FemuCtrl *n);
 int nvme_register_bbssd(FemuCtrl *n);
 int nvme_register_znssd(FemuCtrl *n);
 int nvme_register_csd(FemuCtrl *n);
+int nvme_register_kvssd(FemuCtrl *n);
 
 /* per-namespace FTL entry points, dispatched by the controller's FTL thread */
 uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req);

@@ -1,4 +1,5 @@
 #include "./nvme.h"
+#include "./kvssd/kvssd.h"
 
 #define NVME_IDENTIFY_DATA_SIZE 4096
 
@@ -457,7 +458,15 @@ static uint16_t nvme_identify_ns(FemuCtrl *n, NvmeCmd *cmd)
         return nvme_rpt_empty_id_struct(n, cmd);
     }
 
-    if (c->csi == NVME_CSI_NVM && nvme_csi_has_nvm_support(ns)) {
+    /*
+     * This structure describes the namespace's size and format, which an active
+     * namespace has whatever command set it runs, and which a host needs before
+     * it can attach the namespace and ask for the command-set-specific pages
+     * below. Report it for any active namespace rather than only for the command
+     * sets built on the NVM one, otherwise a namespace of another kind cannot be
+     * attached at all.
+     */
+    if (c->csi == NVME_CSI_NVM) {
         return dma_read_prp(n, (uint8_t *)&ns->id_ns, sizeof(NvmeIdNs),
                                  prp1, prp2);
     }
@@ -487,6 +496,8 @@ static uint16_t nvme_identify_ns_csi(FemuCtrl *n, NvmeCmd *cmd)
         return nvme_rpt_empty_id_struct(n, cmd);
     } else if (c->csi == NVME_CSI_ZONED && ns->csi == NVME_CSI_ZONED) {
         return dma_read_prp(n, (uint8_t *)ns->id_ns_zoned, pgsz, prp1, prp2);
+    } else if (c->csi == NVME_CSI_KV && ns->csi == NVME_CSI_KV) {
+        return kvssd_identify_ns_csi(n, ns, cmd);
     }
 
     return NVME_INVALID_FIELD | NVME_DNR;
@@ -521,6 +532,8 @@ static uint16_t nvme_identify_ctrl_csi(FemuCtrl *n, NvmeCmd *cmd)
             id.zasl = n->zasl;
         }
         return dma_read_prp(n, (uint8_t *)&id, sizeof(id), prp1, prp2);
+    } else if (c->csi == NVME_CSI_KV) {
+        return kvssd_identify_ctrl_csi(n, cmd);
     }
 
     return NVME_INVALID_FIELD | NVME_DNR;
@@ -581,7 +594,8 @@ static uint16_t nvme_identify_nslist_csi(FemuCtrl *n, NvmeCmd *cmd)
         return NVME_INVALID_NSID | NVME_DNR;
     }
 
-    if (c->csi != NVME_CSI_NVM && c->csi != NVME_CSI_ZONED) {
+    if (c->csi != NVME_CSI_NVM && c->csi != NVME_CSI_ZONED &&
+        c->csi != NVME_CSI_KV) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
@@ -673,6 +687,12 @@ static uint16_t nvme_identify(FemuCtrl *n, NvmeCmd *cmd)
         return nvme_identify_ctrl(n, cmd);
     case NVME_ID_CNS_CS_CTRL:
         return nvme_identify_ctrl_csi(n, cmd);
+    case NVME_ID_CNS_CS_NS_FMT:
+        /* key-value format-index identify: NSID 0, format index in CDW11 */
+        if (c->csi == NVME_CSI_KV) {
+            return kvssd_identify_ns_csi_fmt(n, &n->namespaces[0], cmd);
+        }
+        return NVME_INVALID_FIELD | NVME_DNR;
     case NVME_ID_CNS_NS_ACTIVE_LIST:
     case NVME_ID_CNS_NS_PRESENT_LIST:
         return nvme_identify_nslist(n, cmd);
@@ -696,6 +716,20 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     uint32_t nsid = le32_to_cpu(cmd->nsid);
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
+
+    /* Key Value Configuration is answered by the mode that owns the namespace */
+    if ((dw10 & 0xff) == NVME_KV_FEAT_CONFIG && KVSSD(n)) {
+        NvmeNamespace *kv_ns;
+
+        if (!nvme_nsid_valid(n, nsid) || nsid == NVME_NSID_BROADCAST) {
+            return NVME_INVALID_NSID | NVME_DNR;
+        }
+        kv_ns = nvme_ns(n, nsid);
+        if (!kv_ns || kv_ns->csi != NVME_CSI_KV) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        return kvssd_get_feature(n, kv_ns, cmd, cqe);
+    }
 
     switch (dw10) {
     case NVME_ARBITRATION:
@@ -796,6 +830,20 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     uint32_t nsid = le32_to_cpu(cmd->nsid);
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
+
+    /* Key Value Configuration is handled by FID, whatever the save bit says */
+    if ((dw10 & 0xff) == NVME_KV_FEAT_CONFIG && KVSSD(n)) {
+        NvmeNamespace *kv_ns;
+
+        if (!nvme_nsid_valid(n, nsid) || nsid == NVME_NSID_BROADCAST) {
+            return NVME_INVALID_NSID | NVME_DNR;
+        }
+        kv_ns = nvme_ns(n, nsid);
+        if (!kv_ns || kv_ns->csi != NVME_CSI_KV) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        return kvssd_set_feature(n, kv_ns, cmd, cqe);
+    }
 
     switch (dw10) {
     case NVME_ARBITRATION:

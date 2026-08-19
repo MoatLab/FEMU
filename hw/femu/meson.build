@@ -11,6 +11,8 @@ system_ss.add(when: 'CONFIG_FEMU_PCI',
                              'bbssd/ftl-datapath.c', 'bbssd/ftl-fdp.c',
                              'bbssd/ftl-cache.c', 'bbssd/ftl-map-cmt.c',
                              'bbssd/ftl-map-hybrid.c', 'bbssd/ftl-map-fast.c',
+                             'kvssd/kvssd.c', 'kvssd/kvssd-ftl.c',
+                             'kvssd/kvssd-admin.c',
                              'csd/csd.c',
                              'lib/pqueue.c', 'lib/rte_ring.c',
                              'backend/dram.c'))

@@ -196,6 +196,7 @@ void ssd_advance_write_pointer_class(struct ssd *ssd, int klass);
 void mark_page_invalid(struct ssd *ssd, struct ppa *ppa);
 void mark_page_valid(struct ssd *ssd, struct ppa *ppa);
 void mark_block_free(struct ssd *ssd, struct ppa *ppa);
+void mark_line_free(struct ssd *ssd, struct ppa *ppa);
 void gc_read_page(struct ssd *ssd, struct ppa *ppa);
 int do_gc(struct ssd *ssd, bool force);
 const struct femu_ftl_policy_ops *femu_ftl_policy_lookup(const char *name);

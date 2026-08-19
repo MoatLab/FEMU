@@ -674,6 +674,7 @@ static int nvme_mode_from_token(const char *tok)
     if (!strcmp(tok, "znssd"))  return FEMU_ZNSSD_MODE;
     if (!strcmp(tok, "ocssd"))  return FEMU_OCSSD_MODE;
     if (!strcmp(tok, "csd"))    return FEMU_CSD_MODE;
+    if (!strcmp(tok, "kvssd"))  return FEMU_KVSSD_MODE;
     return -1;
 }
 
@@ -1102,6 +1103,8 @@ static int nvme_register_extensions(FemuCtrl *n)
         nvme_register_znssd(n);
     } else if (CSD(n)) {
         nvme_register_csd(n);
+    } else if (KVSSD(n)) {
+        nvme_register_kvssd(n);
     } else {
         /* TODO: For future extensions */
     }

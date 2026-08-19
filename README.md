@@ -498,6 +498,42 @@ controller one namespace of each mode instead (see Multiple Namespaces):
 - Zone-aware applications
 - Log-structured storage research
 
+### Key-Value SSD Mode (KVSSD)
+
+Emulates a key-value SSD: the namespace stores values against keys rather than
+blocks against addresses.
+
+```bash
+-device femu,devsz_mb=4096,namespaces=1,femu_mode=5,...
+```
+
+Keys of up to 16 bytes travel inline in CDW12-15, the key length less one in
+CDW11, and the value length in dwords in CDW10; the value itself uses the normal
+data pointer. The commands are:
+
+| Command | Opcode |
+|---------|--------|
+| Store | 0x01 |
+| Retrieve | 0x02 |
+| List | 0x06 |
+| Delete | 0x10 |
+| Exist | 0x14 |
+
+Linux has no key-value command set, so the namespace appears without a block
+device and is driven by passthrough:
+
+```bash
+# store 4 KiB under the key "KVKEY123"
+nvme io-passthru /dev/nvme0 -O 0x01 -n 1 --cdw10=1024 --cdw11=7     --cdw12=0x454B564B --cdw13=0x33323159 -l 4096 -i value.bin -w
+```
+
+Retrieving or checking a key that is not stored returns 0x87, key does not
+exist.
+
+**Use Cases:**
+- Key-value store research without key-value hardware
+- Host software that targets a key-value device
+
 ### NoSSD Mode
 
 Ultra-fast NVMe emulation without storage logic.
