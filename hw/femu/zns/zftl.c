@@ -205,12 +205,21 @@ static struct ppa get_new_page(struct zns_ssd *zns, uint32_t zone_idx)
     return ppa;
 }
 
-static int zns_get_wcidx(struct zns_ssd* zns)
+/*
+ * Look up the write cache bound to a specific zone. Caches are keyed by the
+ * zone a request actually targets: the previous key, the global active_zone,
+ * is updated by the NVMe I/O thread on every write and read here by the FTL
+ * thread, so under concurrent writers a request could be matched with (and
+ * its LPNs appended to) a cache bound to a different zone, and any request
+ * arriving while active_zone pointed at another zone evicted a cache on
+ * nearly every command.
+ */
+static int zns_get_wcidx(struct zns_ssd* zns, uint64_t sblk)
 {
     int i;
     for(i = 0;i < zns->cache.num_wc;i++)
     {
-        if(zns->cache.write_cache[i].sblk==zns->active_zone)
+        if(zns->cache.write_cache[i].sblk==sblk)
         {
             return i;
         }
@@ -467,7 +476,10 @@ static uint64_t zns_write(struct zns_ssd *zns, NvmeRequest *req)
     uint64_t lpn;
     uint64_t sublat = 0, maxlat = 0;
     int i;
-    int wcidx = zns_get_wcidx(zns);
+    NvmeNamespace *ns = req->ns;
+    uint64_t req_zone = ns->zone_size_log2 > 0 ?
+        req->slba >> ns->zone_size_log2 : req->slba / ns->zone_size;
+    int wcidx = zns_get_wcidx(zns, req_zone);
 
     if(wcidx==-1)
     {
@@ -489,7 +501,7 @@ static uint64_t zns_write(struct zns_ssd *zns, NvmeRequest *req)
             }
         }
         if(t_used) maxlat = zns_wc_flush(zns,wcidx,USER_IO,req->stime);
-        zns->cache.write_cache[wcidx].sblk = zns->active_zone;
+        zns->cache.write_cache[wcidx].sblk = req_zone;
     }
 
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
