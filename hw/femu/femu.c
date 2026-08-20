@@ -830,6 +830,29 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
         }
     }
 
+    /*
+     * CSD keeps its FDM pool and its AFDM/group/program tables in one
+     * controller-wide state object (n->ext_ops.state). ext_ops.init runs once
+     * per namespace of a given mode, so a second CSD namespace would overwrite
+     * that pointer with a fresh object, leaking the first and aliasing both
+     * namespaces onto the second's tables. Unlike OCSSD, CSD can coexist with
+     * other modes on the same controller -- only a second CSD namespace is the
+     * problem -- so count CSD namespaces rather than rejecting the mode outright.
+     */
+    {
+        int n_csd = 0;
+
+        for (i = 0; i < n->num_namespaces; i++) {
+            n_csd += (ns_modes[i] == FEMU_CSD_MODE);
+        }
+        if (n_csd > 1) {
+            error_setg(errp, "csd supports at most one namespace per controller");
+            g_free(ns_sizes);
+            g_free(ns_modes);
+            return 1;
+        }
+    }
+
     for (i = 0; i < n->num_namespaces; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
 
