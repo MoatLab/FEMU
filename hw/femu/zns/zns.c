@@ -1041,7 +1041,13 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         if (NVME_ERR_REC_DULBE(n->features.err_rec)) { status =
             zns_check_dulbe(ns, slba, nlb); if (status) { goto err; } } }
 
-    data_offset = zns_l2b(ns, slba);
+    /*
+     * Address the backend within this namespace's slice, as the NVM path does.
+     * backend_offset is 0 for the first namespace, so a single zoned namespace
+     * is addressed exactly as before; without it a zoned namespace in any later
+     * slot would start at backend offset 0 and overwrite the namespace there.
+     */
+    data_offset = ns->backend_offset + zns_l2b(ns, slba);
     status = zns_map_dptr(n, data_size, req);
     if (status) {
         goto err;
