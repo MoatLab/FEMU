@@ -843,18 +843,25 @@ static uint16_t kv_build_list_locked(FemuKvssdState *s, const uint8_t *start_key
             continue;
         }
         need = 2 + e->key_len;
+        /*
+         * Figure 16: a key data structure is padded to end on a 4 byte boundary,
+         * so the next entry begins at the padded offset rather than immediately
+         * after the key. Advancing by the unpadded length would misalign every
+         * following entry and desynchronize a host walking the list. Only whole
+         * keys that fit in the host buffer are returned.
+         */
         padded = (pos + need + 3) & ~3u;
         if (padded > cap) {
-            break;                     /* only whole keys that fit are returned */
+            break;
         }
         stw_le_p(buf + pos, e->key_len);
         memcpy(buf + pos + 2, e->key, e->key_len);
-        pos += need;
+        pos = padded;                  /* buf is zeroed, so the pad is zero */
         nrk++;
     }
     stl_le_p(buf, nrk);                /* Number of Returned Keys header */
     *out = buf;
-    *out_len = (pos + 3) & ~3u;
+    *out_len = pos;                    /* already 4 byte aligned by the pad */
     *out_nrk = nrk;
     return NVME_SUCCESS;
 }
@@ -1397,6 +1404,50 @@ void kvssd_ftl_selftest(FemuKvssdState *s)
             }
         }
         KVT(ok && s->ssd->wp.curline != NULL, "long-overwrite-line-reclaim");
+    }
+
+    /*
+     * 8. List return buffer: walk it back exactly as a host does (Figure 15 NRK
+     * header, then Figure 16 entries) using keys whose lengths are not multiples
+     * of 4, so any missing pad desynchronizes the walk on the second entry.
+     */
+    {
+        static const char *lk[] = { "a", "bcd", "ef", "ghijk" };
+        uint8_t *lbuf = NULL;
+        uint32_t llen = 0, lnrk = 0;
+        bool ok;
+
+        kvssd_reset_table(s);
+        for (int i = 0; i < 4; i++) {
+            KVT(kv_selftest_store_locked(s, &req, lk[i],
+                                         (uint8_t)strlen(lk[i]), "v", 1)
+                == NVME_SUCCESS, "list-seed-store");
+        }
+        ok = (kv_build_list_locked(s, NULL, 0, 4096, &lbuf, &llen, &lnrk) ==
+              NVME_SUCCESS);
+        if (ok) {
+            uint32_t pos = 4;
+            uint32_t seen = 0;
+
+            ok = (ldl_le_p(lbuf) == 4) && (llen % 4 == 0);
+            while (ok && seen < lnrk) {
+                uint32_t kl;
+
+                if (pos + 2 > llen) {
+                    ok = false;
+                    break;
+                }
+                kl = lduw_le_p(lbuf + pos);
+                /* every entry must start 4 byte aligned and carry a sane length */
+                ok = (pos % 4 == 0) && kl >= 1 && kl <= FEMU_KVSSD_KEY_MAX &&
+                     (pos + 2 + kl) <= llen;
+                pos = (pos + 2 + kl + 3) & ~3u;
+                seen++;
+            }
+            ok = ok && seen == 4 && pos == llen;
+        }
+        g_free(lbuf);
+        KVT(ok, "list-entry-4byte-padding");
     }
 
     qemu_mutex_unlock(&s->lock);
