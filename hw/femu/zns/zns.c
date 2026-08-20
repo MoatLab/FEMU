@@ -101,6 +101,43 @@ static int zns_init_zone_geometry(NvmeNamespace *ns, Error **errp)
         return -1;
     }
 
+    /*
+     * ZRWA is advertised through Identify fields narrower than the properties
+     * that set them: zrwas and zrwafg are 16 bits. A larger value would be
+     * advertised truncated while the write path kept enforcing the full one, so
+     * the device would accept writes across a window it told the host was
+     * smaller. The window also has to be a whole number of flush granules,
+     * since the write pointer only ever advances in granule units, and a zone
+     * cannot hold a ZRWA unless there is at least one resource to hold.
+     */
+    if (ns->zrwa_size) {
+        if (ns->zrwa_size > 0xffff) {
+            error_setg(errp, "zns_zrwa_size %" PRIu64 " exceeds the %u the "
+                       "Identify zrwas field can report", ns->zrwa_size, 0xffff);
+            return -1;
+        }
+        if (!ns->zrwafg_size || ns->zrwafg_size > 0xffff) {
+            error_setg(errp, "zns_zrwafg_size must be between 1 and %u when "
+                       "ZRWA is enabled, got %" PRIu64, 0xffff, ns->zrwafg_size);
+            return -1;
+        }
+        if (ns->zrwa_size % ns->zrwafg_size) {
+            error_setg(errp, "zns_zrwa_size %" PRIu64 " must be a multiple of "
+                       "zns_zrwafg_size %" PRIu64, ns->zrwa_size,
+                       ns->zrwafg_size);
+            return -1;
+        }
+        if (!ns->zrwa_num) {
+            error_setg(errp, "zns_zrwa_num must be non-zero when ZRWA is "
+                       "enabled");
+            return -1;
+        }
+    } else if (ns->zrwafg_size || ns->zrwa_num) {
+        error_setg(errp, "zns_zrwafg_size and zns_zrwa_num have no effect "
+                   "without zns_zrwa_size");
+        return -1;
+    }
+
     if (ns->zd_extension_size) {
         if (ns->zd_extension_size & 0x3f) {
             error_setg(errp, "zone descriptor extension size must be multiples of 64B");
