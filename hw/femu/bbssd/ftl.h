@@ -498,6 +498,7 @@ struct ssd {
     FemuCtrl *n;
 };
 
+int bb_check_geometry(FemuCtrl *n, Error **errp);
 void ssd_init(FemuCtrl *n, NvmeNamespace *ns);
 
 /* NAND media-layer bridge (hw/femu/bbssd/ftl-media.c) */

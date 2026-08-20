@@ -7,6 +7,70 @@
 #include "ftl.h"
 #include "ftl-internal.h"
 
+/*
+ * Validate the configured geometry before any of it is used to size an
+ * allocation or drive the datapath.
+ *
+ * Two independent failure modes are reachable from the device parameters. An
+ * axis of zero or less divides by zero on the datapath -- an LBA becomes a page
+ * by dividing by secs_per_pg -- or allocates an empty array the FTL still
+ * indexes. Separately, an axis that fits its own PPA field can still overflow
+ * the derived totals: those are held in int, and the sector count is the
+ * product of every axis, so per-axis values that are each legal can push the
+ * aggregate past INT_MAX and wrap negative. Compute the aggregate in 64-bit
+ * here and reject it, rather than letting ssd_init() allocate from a wrapped
+ * count.
+ */
+int bb_check_geometry(FemuCtrl *n, Error **errp)
+{
+    const BbCtrlParams *p = &n->bb_params;
+    const struct {
+        const char *name;
+        int value;
+        int max;              /* 0 = no PPA field bound, only positivity */
+    } axes[] = {
+        { "secsz",       p->secsz,       0 },
+        { "secs_per_pg", p->secs_per_pg, 1 << SEC_BITS },
+        { "pgs_per_blk", p->pgs_per_blk, 1 << PG_BITS  },
+        { "blks_per_pl", p->blks_per_pl, 1 << BLK_BITS },
+        { "pls_per_lun", p->pls_per_lun, 1 << PL_BITS  },
+        { "luns_per_ch", p->luns_per_ch, 1 << LUN_BITS },
+        { "nchs",        p->nchs,        1 << CH_BITS  },
+    };
+    uint64_t tt_secs;
+    int i;
+
+    for (i = 0; i < (int)ARRAY_SIZE(axes); i++) {
+        if (axes[i].value <= 0) {
+            error_setg(errp, "FEMU bbssd: %s must be greater than 0, got %d",
+                       axes[i].name, axes[i].value);
+            return -1;
+        }
+        /*
+         * An index runs 0..value-1, so a count equal to the field's capacity
+         * still addresses within the field; only a larger count aliases.
+         */
+        if (axes[i].max && axes[i].value > axes[i].max) {
+            error_setg(errp, "FEMU bbssd: %s value %d exceeds the %d addressable "
+                       "by its PPA field", axes[i].name, axes[i].value,
+                       axes[i].max);
+            return -1;
+        }
+    }
+
+    tt_secs = (uint64_t)p->secs_per_pg * p->pgs_per_blk * p->blks_per_pl *
+              p->pls_per_lun * p->luns_per_ch * p->nchs;
+    if (tt_secs > INT_MAX) {
+        error_setg(errp, "FEMU bbssd: the geometry describes %" PRIu64 " sectors, "
+                   "which exceeds the %d the FTL can address; reduce one of "
+                   "secs_per_pg, pgs_per_blk, blks_per_pl, pls_per_lun, "
+                   "luns_per_ch or nchs", tt_secs, INT_MAX);
+        return -1;
+    }
+
+    return 0;
+}
+
 static void check_params(struct ssdparams *spp)
 {
     /*

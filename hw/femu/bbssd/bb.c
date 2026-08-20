@@ -13,7 +13,13 @@ static void bb_init_ctrl_str(FemuCtrl *n)
 /* bb <=> black-box */
 static void bb_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 {
-    struct ssd *ssd = ns->ssd = g_malloc0(sizeof(struct ssd));
+    struct ssd *ssd;
+
+    if (bb_check_geometry(n, errp)) {
+        return;
+    }
+
+    ssd = ns->ssd = g_malloc0(sizeof(struct ssd));
 
     bb_init_ctrl_str(n);
 
