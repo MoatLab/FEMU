@@ -38,36 +38,71 @@ static void bb_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     ssd_init(n, ns);
 }
 
+/*
+ * Apply a timing or GC toggle to every namespace carrying an FTL. Flip arrives
+ * as an admin command and names no namespace, so it is device-wide; n->ssd is
+ * only whichever namespace brought its mode up first, and using it would leave
+ * every other FTL-backed namespace on the previous setting.
+ */
+static void bb_flip_apply(FemuCtrl *n, int64_t cdw10)
+{
+    int i;
+
+    for (i = 0; i < n->num_namespaces; i++) {
+        struct ssd *ssd = n->namespaces[i].ssd;
+
+        if (!ssd) {
+            continue;
+        }
+
+        switch (cdw10) {
+        case FEMU_ENABLE_GC_DELAY:
+            ssd->sp.enable_gc_delay = true;
+            break;
+        case FEMU_DISABLE_GC_DELAY:
+            ssd->sp.enable_gc_delay = false;
+            break;
+        case FEMU_ENABLE_DELAY_EMU:
+            ssd->sp.pg_rd_lat = NAND_READ_LATENCY;
+            ssd->sp.pg_wr_lat = NAND_PROG_LATENCY;
+            ssd->sp.blk_er_lat = NAND_ERASE_LATENCY;
+            ssd->sp.ch_xfer_lat = 0;
+            /* refresh the media-layer timing snapshot from the updated params */
+            bb_nand_media_refresh_timing(ssd);
+            break;
+        case FEMU_DISABLE_DELAY_EMU:
+            ssd->sp.pg_rd_lat = 0;
+            ssd->sp.pg_wr_lat = 0;
+            ssd->sp.blk_er_lat = 0;
+            ssd->sp.ch_xfer_lat = 0;
+            /* refresh the media-layer timing snapshot from the updated params */
+            bb_nand_media_refresh_timing(ssd);
+            break;
+        default:
+            break;
+        }
+    }
+}
+
 static void bb_flip(FemuCtrl *n, NvmeCmd *cmd)
 {
-    struct ssd *ssd = n->ssd;
     int64_t cdw10 = le64_to_cpu(cmd->cdw10);
 
     switch (cdw10) {
     case FEMU_ENABLE_GC_DELAY:
-        ssd->sp.enable_gc_delay = true;
+        bb_flip_apply(n, cdw10);
         femu_log("%s,FEMU GC Delay Emulation [Enabled]!\n", n->devname);
         break;
     case FEMU_DISABLE_GC_DELAY:
-        ssd->sp.enable_gc_delay = false;
+        bb_flip_apply(n, cdw10);
         femu_log("%s,FEMU GC Delay Emulation [Disabled]!\n", n->devname);
         break;
     case FEMU_ENABLE_DELAY_EMU:
-        ssd->sp.pg_rd_lat = NAND_READ_LATENCY;
-        ssd->sp.pg_wr_lat = NAND_PROG_LATENCY;
-        ssd->sp.blk_er_lat = NAND_ERASE_LATENCY;
-        ssd->sp.ch_xfer_lat = 0;
-        /* refresh the media-layer timing snapshot from the updated params */
-        bb_nand_media_refresh_timing(ssd);
+        bb_flip_apply(n, cdw10);
         femu_log("%s,FEMU Delay Emulation [Enabled]!\n", n->devname);
         break;
     case FEMU_DISABLE_DELAY_EMU:
-        ssd->sp.pg_rd_lat = 0;
-        ssd->sp.pg_wr_lat = 0;
-        ssd->sp.blk_er_lat = 0;
-        ssd->sp.ch_xfer_lat = 0;
-        /* refresh the media-layer timing snapshot from the updated params */
-        bb_nand_media_refresh_timing(ssd);
+        bb_flip_apply(n, cdw10);
         femu_log("%s,FEMU Delay Emulation [Disabled]!\n", n->devname);
         break;
     case FEMU_RESET_ACCT: {
