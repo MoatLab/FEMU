@@ -209,21 +209,45 @@ static void zns_invalidate_zone_mappings(struct zns_ssd *zns, uint32_t zone_idx,
 
 static void zns_reset_block_state(struct zns_ssd *zns, uint32_t zone_idx)
 {
-    int ch, lun, pl;
+    uint64_t cpz = zns->chnls_per_zone;
+    uint64_t groups = (cpz && cpz < zns->num_ch) ? zns->num_ch / cpz : 1;
+    uint32_t blk_idx = zone_idx;
+    int ch, lun, pl, ch_lo = 0, ch_hi = zns->num_ch;
     struct ppa ppa;
     struct zns_blk *blk;
 
-    for (ch = 0; ch < zns->num_ch; ch++) {
+    /*
+     * Address the same blocks get_new_page() writes. A narrower zone binds
+     * num_ch/chnls_per_zone zones to one block index, each zone on its own
+     * channel group, so the block index is zone_idx/groups and only that
+     * group's channels hold the zone. Using zone_idx as the block index here
+     * would clear a block the zone does not own -- and, since the geometry
+     * check admits up to num_blk*groups zones, would index past the block
+     * array once zone_idx reached num_blk.
+     */
+    if (groups > 1) {
+        blk_idx = zone_idx / groups;
+        ch_lo = (zone_idx % groups) * cpz;
+        ch_hi = ch_lo + cpz;
+    }
+
+    for (ch = ch_lo; ch < ch_hi; ch++) {
         for (lun = 0; lun < zns->num_lun; lun++) {
             for (pl = 0; pl < zns->num_plane; pl++) {
                 ppa.ppa = 0; /* clear rsv/unused bits before field writes */
                 ppa.g.ch = ch;
                 ppa.g.fc = lun;
                 ppa.g.pl = pl;
-                ppa.g.blk = zone_idx;
+                ppa.g.blk = blk_idx;
                 ppa.g.pg = 0;
                 ppa.g.spg = 0;
 
+                if (!valid_ppa(zns, &ppa)) {
+                    ftl_err("zone %u reset: invalid ppa ch %u lun %u pl %u "
+                            "blk %u\n", zone_idx, ppa.g.ch, ppa.g.fc,
+                            ppa.g.pl, ppa.g.blk);
+                    continue;
+                }
                 blk = get_blk(zns, &ppa);
                 blk->page_wp = 0;
             }
