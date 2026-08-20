@@ -317,10 +317,15 @@ static uint16_t csd_parse_program(FemuCsdProgram *program, const char **path,
     return NVME_SUCCESS;
 }
 
-static uint16_t csd_check_nvm_ftl_range(FemuCtrl *n, uint64_t slba,
+/*
+ * Look up the mapping state in the FTL of the namespace the command names.
+ * n->ssd is whichever namespace initialized its mode first, so on a device that
+ * mixes CSD with another FTL mode it is not this namespace's FTL.
+ */
+static uint16_t csd_check_nvm_ftl_range(NvmeNamespace *ns, uint64_t slba,
                                         uint64_t nlb, uint64_t *mapped_pages)
 {
-    struct ssd *ssd = n->ssd;
+    struct ssd *ssd = ns->ssd;
     struct ssdparams *spp;
     uint64_t start_lpn;
     uint64_t end_lpn;
@@ -1072,18 +1077,28 @@ static uint16_t csd_nvm_to_afdm(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t slba = le64_to_cpu(copy->slba);
     uint64_t nlb = le16_to_cpu(copy->nlb) + 1;
     uint64_t size = nlb << data_shift;
-    uint64_t nvm_offset = slba << data_shift;
+    /*
+     * Address the backend within this namespace's slice, as the NVM read/write
+     * path does. Without the shift a CSD namespace packed after another one
+     * would copy from the earlier namespace's data instead of its own.
+     */
+    uint64_t nvm_offset = ns->backend_offset + (slba << data_shift);
     uint64_t mapped_pages;
     FemuCsdAfdm *afdm;
     uint16_t status;
 
+    /*
+     * Bound the copy by this namespace's slice rather than the whole backend:
+     * the LBA test already limits it to the namespace, and checking the slice
+     * keeps a range that passes here from reaching another namespace's data.
+     */
     if (slba > le64_to_cpu(ns->id_ns.nsze) ||
         nlb > le64_to_cpu(ns->id_ns.nsze) - slba ||
-        nvm_offset > n->mbe->size || size > n->mbe->size - nvm_offset) {
+        size > ns->size || nvm_offset > ns->backend_offset + ns->size - size) {
         return NVME_LBA_RANGE | NVME_DNR;
     }
 
-    status = csd_check_nvm_ftl_range(n, slba, nlb, &mapped_pages);
+    status = csd_check_nvm_ftl_range(ns, slba, nlb, &mapped_pages);
     if (status) {
         return status;
     }
@@ -1102,9 +1117,9 @@ static uint16_t csd_nvm_to_afdm(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
 
     req->cqe.n.result = size;
-    if (mapped_pages) {
-        req->reqlat += n->ssd->sp.pg_rd_lat;
-        req->expire_time += n->ssd->sp.pg_rd_lat;
+    if (mapped_pages && ns->ssd) {
+        req->reqlat += ns->ssd->sp.pg_rd_lat;
+        req->expire_time += ns->ssd->sp.pg_rd_lat;
     }
     return NVME_SUCCESS;
 }
