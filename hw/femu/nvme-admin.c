@@ -1355,11 +1355,27 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
         return nvme_fdp_stats(n, lspi, len, off, cmd);
     case NVME_LOG_FDP_EVENTS:
         return nvme_fdp_events(n, lspi, len, off, cmd);
-    default:
+    default: {
+        /*
+         * A namespace-specific log page belongs to the mode that namespace
+         * runs, which is not necessarily the controller's once namespaces run
+         * different modes. Offer the command to the named namespace's handler
+         * first, then fall back to the controller's for controller-wide logs.
+         */
+        uint32_t nsid = le32_to_cpu(cmd->nsid);
+
+        if (nsid && nsid != NVME_NSID_BROADCAST && nsid <= n->num_namespaces) {
+            NvmeNamespace *ns = &n->namespaces[nsid - 1];
+
+            if (ns->ext_ops.get_log) {
+                return ns->ext_ops.get_log(n, cmd);
+            }
+        }
         if (n->ext_ops.get_log) {
             return n->ext_ops.get_log(n, cmd);
         }
         return NVME_INVALID_LOG_ID | NVME_DNR;
+    }
     }
 }
 

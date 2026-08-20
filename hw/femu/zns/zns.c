@@ -277,8 +277,40 @@ void zns_ns_cleanup(NvmeNamespace *ns)
     }
 }
 
+/*
+ * Record a zone whose descriptor changed into the Changed Zone List (BFh).
+ * Each ZSLBA appears at most once per the spec, so deduplicate; once the
+ * 511-entry page is full, flag the overflow rather than dropping zones
+ * silently, so the host learns the list is incomplete and rescans.
+ */
+static void zns_record_changed_zone(NvmeNamespace *ns, uint64_t zslba)
+{
+    struct zns_ssd *zns = ns->zns;
+    uint32_t i;
+
+    if (!zns) {
+        return;
+    }
+
+    for (i = 0; i < zns->nr_changed_zones; i++) {
+        if (zns->changed_zones[i] == zslba) {
+            return;
+        }
+    }
+    if (zns->nr_changed_zones >= ARRAY_SIZE(zns->changed_zones)) {
+        zns->changed_zone_overflow = true;
+        return;
+    }
+    zns->changed_zones[zns->nr_changed_zones++] = zslba;
+}
+
 static void zns_assign_zone_state(NvmeNamespace *ns, NvmeZone *zone, NvmeZoneState state)
 {
+    /* the list reports transitions, so record only an actual change */
+    if (zns_get_zone_state(zone) != state) {
+        zns_record_changed_zone(ns, zone->d.zslba);
+    }
+
 
     if (QTAILQ_IN_USE(zone, entry)) {
         switch (zns_get_zone_state(zone)) {
@@ -1596,6 +1628,92 @@ static void zns_exit(FemuCtrl *n)
      */
 }
 
+#define ZNS_CHANGED_ZONE_LOG_SIZE 4096   /* 8 byte header + 511 x 8 byte ZSLBA */
+
+/*
+ * Build the Changed Zone List page for one namespace. The header holds the
+ * number of entries, or FFFFh when more zones changed than the page can carry.
+ * The list is clear-on-read: unless the host sets Retain Asynchronous Event,
+ * reading it consumes the entries, so the next read reports only what changed
+ * since.
+ */
+static uint16_t zns_changed_zone_list(FemuCtrl *n, NvmeNamespace *ns,
+                                      NvmeCmd *cmd, uint32_t len, uint64_t off,
+                                      bool rae)
+{
+    struct zns_ssd *zns = ns->zns;
+    uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
+    uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
+    uint32_t trans_len;
+    uint16_t status;
+    uint8_t *log;
+    uint32_t i;
+
+    if (off >= ZNS_CHANGED_ZONE_LOG_SIZE) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    log = g_malloc0(ZNS_CHANGED_ZONE_LOG_SIZE);
+    if (zns->changed_zone_overflow) {
+        stq_le_p(log, 0xffff);
+    } else {
+        stq_le_p(log, zns->nr_changed_zones);
+    }
+    for (i = 0; i < zns->nr_changed_zones; i++) {
+        stq_le_p(log + 8 + i * 8, zns->changed_zones[i]);
+    }
+    if (!rae) {
+        zns->nr_changed_zones = 0;
+        zns->changed_zone_overflow = false;
+    }
+
+    trans_len = MIN(len, ZNS_CHANGED_ZONE_LOG_SIZE - off);
+    status = dma_read_prp(n, log + off, trans_len, prp1, prp2);
+    g_free(log);
+
+    return status;
+}
+
+/*
+ * Get Log Page for a zoned namespace. Only the Changed Zone List is namespace
+ * specific here; every other identifier is answered by the generic handler that
+ * called us.
+ */
+static uint16_t zns_get_log(FemuCtrl *n, NvmeCmd *cmd)
+{
+    uint32_t dw10 = le32_to_cpu(cmd->cdw10);
+    uint32_t dw11 = le32_to_cpu(cmd->cdw11);
+    uint32_t dw12 = le32_to_cpu(cmd->cdw12);
+    uint32_t dw13 = le32_to_cpu(cmd->cdw13);
+    uint32_t nsid = le32_to_cpu(cmd->nsid);
+    uint8_t lid = dw10 & 0xff;
+    bool rae = (dw10 >> 15) & 0x1;
+    uint32_t numdl = dw10 >> 16;
+    uint32_t numdu = dw11 & 0xffff;
+    uint64_t off = ((uint64_t)dw13 << 32) | dw12;
+    uint32_t len = (((numdu << 16) | numdl) + 1) << 2;
+    NvmeNamespace *ns;
+
+    if (lid != NVME_LOG_CHANGED_ZONE_LIST) {
+        return NVME_INVALID_LOG_ID | NVME_DNR;
+    }
+    /* the log is a list of 8 byte ZSLBAs, so the offset must be 8 byte aligned */
+    if (off & 0x7) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    /* the list is per namespace, so the broadcast identifier has no meaning */
+    if (nsid == 0 || nsid == NVME_NSID_BROADCAST || nsid > n->num_namespaces) {
+        return NVME_INVALID_NSID | NVME_DNR;
+    }
+    ns = &n->namespaces[nsid - 1];
+    /* the page exists only for a zoned namespace; ns->zns marks one */
+    if (ns->csi != NVME_CSI_ZONED || !ns->zns) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    return zns_changed_zone_list(n, ns, cmd, len, off, rae);
+}
+
 int nvme_register_znssd(FemuCtrl *n)
 {
     n->ext_ops = (FemuExtCtrlOps) {
@@ -1606,7 +1724,7 @@ int nvme_register_znssd(FemuCtrl *n)
         .start_ctrl       = zns_start_ctrl,
         .admin_cmd        = zns_admin_cmd,
         .io_cmd           = zns_io_cmd,
-        .get_log          = NULL,
+        .get_log          = zns_get_log,
     };
 
     return 0;

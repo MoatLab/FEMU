@@ -1005,6 +1005,7 @@ enum NvmeLogIdentifier {
     NVME_LOG_FDP_RUH_USAGE  = 0x21,
     NVME_LOG_FDP_STATS      = 0x22,
     NVME_LOG_FDP_EVENTS     = 0x23,
+    NVME_LOG_CHANGED_ZONE_LIST  = 0xbf,
 };
 
 typedef struct NvmePSD {
