@@ -71,8 +71,7 @@ static void kvssd_fill_id_ns(FemuKvssdState *s, NvmeIdNsKv *id)
 
 uint16_t kvssd_identify_ns_csi(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
 {
-    FemuKvssdState *s = (n->femu_mode == FEMU_KVSSD_MODE) ?
-                        n->ext_ops.state : ns->ext_ops.state;
+    FemuKvssdState *s = kvssd_ns_state(n, ns);
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
     NvmeIdNsKv id;
@@ -106,8 +105,7 @@ uint16_t kvssd_identify_ctrl_csi(FemuCtrl *n, NvmeCmd *cmd)
  */
 uint16_t kvssd_identify_ns_csi_fmt(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
 {
-    FemuKvssdState *s = (n->femu_mode == FEMU_KVSSD_MODE) ?
-                        n->ext_ops.state : (ns ? ns->ext_ops.state : NULL);
+    FemuKvssdState *s = kvssd_ns_state(n, ns);
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
     uint16_t fidx = le32_to_cpu(cmd->cdw11) & 0xffff;
@@ -132,8 +130,7 @@ uint16_t kvssd_identify_ns_csi_fmt(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
 uint16_t kvssd_set_feature(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                            NvmeCqe *cqe)
 {
-    FemuKvssdState *s = (n->femu_mode == FEMU_KVSSD_MODE) ?
-                        n->ext_ops.state : (ns ? ns->ext_ops.state : NULL);
+    FemuKvssdState *s = kvssd_ns_state(n, ns);
     uint32_t dw11 = le32_to_cpu(cmd->cdw11);
 
     if (!s) {
@@ -149,8 +146,7 @@ uint16_t kvssd_set_feature(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 uint16_t kvssd_get_feature(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                            NvmeCqe *cqe)
 {
-    FemuKvssdState *s = (n->femu_mode == FEMU_KVSSD_MODE) ?
-                        n->ext_ops.state : (ns ? ns->ext_ops.state : NULL);
+    FemuKvssdState *s = kvssd_ns_state(n, ns);
 
     if (!s) {
         return NVME_INVALID_FIELD | NVME_DNR;

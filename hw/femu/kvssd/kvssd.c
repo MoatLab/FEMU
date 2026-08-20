@@ -64,12 +64,17 @@ static inline uint32_t kv_value_size(const NvmeCmd *cmd)
     return le32_to_cpu(cmd->cdw10);                       /* CDW10: VS / HBS, bytes */
 }
 
+FemuKvssdState *kvssd_ns_state(FemuCtrl *n, NvmeNamespace *ns)
+{
+    if (ns && ns->ext_ops.state) {
+        return ns->ext_ops.state;
+    }
+    return n->ext_ops.state;
+}
+
 static FemuKvssdState *kvssd_state(FemuCtrl *n, NvmeNamespace *ns)
 {
-    if (n->femu_mode == FEMU_KVSSD_MODE) {
-        return n->ext_ops.state;
-    }
-    return ns ? ns->ext_ops.state : NULL;
+    return kvssd_ns_state(n, ns);
 }
 
 /*
@@ -285,13 +290,15 @@ static void kvssd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 {
     FemuKvssdState *kvssd;
 
-    if (n->femu_mode == FEMU_KVSSD_MODE) {
-        kvssd = n->ext_ops.state;
-    } else {
-        kvssd = ns->ext_ops.state;
-    }
-    if (kvssd) {
-        ns->ext_ops.state = kvssd;
+    /*
+     * Every namespace running the KV command set reports it, whether or not it
+     * is the first one brought up, and owns its own key space and value store.
+     * The store is sized from the namespace, so one per namespace is what the
+     * capacity accounting already assumes.
+     */
+    ns->csi = NVME_CSI_KV;
+
+    if (ns->ext_ops.state) {
         return;
     }
 
@@ -300,11 +307,11 @@ static void kvssd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         return;
     }
 
-    if (n->femu_mode == FEMU_KVSSD_MODE) {
+    ns->ext_ops.state = kvssd;
+    /* the first KV namespace also answers admin paths that name none */
+    if (!n->ext_ops.state) {
         n->ext_ops.state = kvssd;
     }
-    ns->ext_ops.state = kvssd;
-    ns->csi = NVME_CSI_KV;
 
     if (ns == &n->namespaces[0]) {
         kvssd_init_ctrl_str(n);
@@ -313,19 +320,31 @@ static void kvssd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 
 static void kvssd_exit(FemuCtrl *n)
 {
-    FemuKvssdState *kvssd = n->ext_ops.state;
-    int i;
+    int i, j;
 
-    if (!kvssd) {
-        return;
-    }
+    /*
+     * Each KV namespace owns its state, so free them all rather than only the
+     * one the controller points at. A state can be reached from more than one
+     * namespace pointer only if something aliased them, so clear every matching
+     * pointer before freeing to keep this safe against that.
+     */
     for (i = 0; i < n->num_namespaces; i++) {
-        if (n->namespaces[i].ext_ops.state == kvssd) {
-            n->namespaces[i].ext_ops.state = NULL;
+        FemuKvssdState *kvssd = n->namespaces[i].ext_ops.state;
+
+        if (!kvssd) {
+            continue;
         }
+        for (j = i; j < n->num_namespaces; j++) {
+            if (n->namespaces[j].ext_ops.state == kvssd) {
+                n->namespaces[j].ext_ops.state = NULL;
+            }
+        }
+        if (n->ext_ops.state == kvssd) {
+            n->ext_ops.state = NULL;
+        }
+        kvssd_ftl_free(kvssd);
     }
     n->ext_ops.state = NULL;
-    kvssd_ftl_free(kvssd);
 }
 
 int nvme_register_kvssd(FemuCtrl *n)

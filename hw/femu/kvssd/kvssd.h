@@ -85,6 +85,14 @@ typedef struct FemuKvssdState {
     QemuMutex lock;
 } FemuKvssdState;
 
+/*
+ * Resolve the KV state a command addresses. Each KV namespace owns its own key
+ * space and value store, so a command naming a namespace is answered by that
+ * namespace's state; the controller's is only the fallback for admin paths that
+ * name no namespace.
+ */
+FemuKvssdState *kvssd_ns_state(FemuCtrl *n, NvmeNamespace *ns);
+
 /* --- KV-FTL firmware (kvssd-ftl.c) --- */
 FemuKvssdState *kvssd_ftl_alloc(FemuCtrl *n, NvmeNamespace *ns, Error **errp);
 void kvssd_ftl_free(FemuKvssdState *s);
