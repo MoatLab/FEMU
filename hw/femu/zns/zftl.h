@@ -8,6 +8,9 @@
 #define UNMAPPED_PPA    (~(0ULL))
 
 
+
+/* configure the shared NAND media layer for this ZNS device */
+void zns_nand_media_init(struct zns_ssd *zns);
 uint64_t zns_zone_reset(struct zns_ssd *zns, uint32_t zone_idx,
                         uint64_t zone_size_lbas, uint64_t lbasz, uint64_t stime);
 

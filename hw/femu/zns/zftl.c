@@ -50,52 +50,105 @@ static void zns_advance_write_pointer(struct zns_ssd *zns, uint32_t zone_idx)
     }
 }
 
-static uint64_t zns_advance_status(struct zns_ssd *zns, struct ppa *ppa,struct nand_cmd *ncmd)
+/* timeline-vtable thunks: pointers into the ZNS device's own per-resource state */
+static uint64_t *zns_tl_ch_avail(void *opaque, uint32_t ch)
 {
-    int c = ncmd->cmd;
+    struct zns_ssd *zns = opaque;
+    return &zns->ch[ch].next_ch_avail_time;
+}
 
-    uint64_t nand_stime;
-    uint64_t req_stime = (ncmd->stime == 0) ? \
+static uint64_t *zns_tl_plane_avail(void *opaque, const NandLoc *loc)
+{
+    struct zns_ssd *zns = opaque;
+    struct ppa ppa;
+
+    ppa.ppa = 0;
+    ppa.g.ch = loc->ch;
+    ppa.g.fc = loc->lun;
+    ppa.g.pl = loc->pl;
+    return &get_plane(zns, &ppa)->next_plane_avail_time;
+}
+
+/*
+ * lun_avail is required by the vtable but never reached: the gate is
+ * PLANE_ONLY, which consults the plane accumulator alone. lock_lun and
+ * unlock_lun stay unset because a single FTL thread drives the ZNS media.
+ */
+static uint64_t *zns_tl_lun_avail(void *opaque, const NandLoc *loc)
+{
+    struct zns_ssd *zns = opaque;
+    return &zns->ch[loc->ch].fc[loc->lun].next_fc_avail_time;
+}
+
+static const NandTimelineOps zns_timeline_ops = {
+    .ch_avail    = zns_tl_ch_avail,
+    .lun_avail   = zns_tl_lun_avail,
+    .plane_avail = zns_tl_plane_avail,
+};
+
+/*
+ * Configure the shared NAND media layer to reproduce the ZNS timing exactly:
+ * the array is gated on the plane alone with no channel accounting, which is
+ * what the enum's PLANE_ONLY and CH_OFF modes were named for, and the per-op
+ * latency comes from the same per-flash-type values the device already carries.
+ * Page type is left at 0 so a flash type resolves to one latency, as before.
+ */
+void zns_nand_media_init(struct zns_ssd *zns)
+{
+    NandMediaConfig cfg = {0};
+    int ft;
+
+    cfg.nchs = zns->num_ch;
+    cfg.luns_per_ch = zns->num_lun;
+    cfg.planes_per_lun = zns->num_plane;
+
+    for (ft = 0; ft < NAND_MEDIA_MAX_FLASH; ft++) {
+        cfg.timing.rd_table_ns[ft][0] = zns->timing.pg_rd_lat[ft];
+        cfg.timing.wr_table_ns[ft][0] = zns->timing.pg_wr_lat[ft];
+        cfg.timing.er_table_ns[ft] = zns->timing.blk_er_lat[ft];
+    }
+    cfg.policy.use_flat_timing = false;
+    cfg.policy.array_gate = NAND_GATE_PLANE_ONLY;
+    cfg.policy.channel_mode = NAND_CH_OFF;
+    cfg.timeline = &zns_timeline_ops;
+    cfg.timeline_opaque = zns;
+
+    nand_media_init(&zns->media, &cfg);
+}
+
+/*
+ * Map a ZNS read/program/erase onto the shared media layer. The gate, the
+ * ordering and the latency values are the same ones the open-coded version
+ * used, so the timing is unchanged.
+ */
+static uint64_t zns_advance_status(struct zns_ssd *zns, struct ppa *ppa,
+                                   struct nand_cmd *ncmd)
+{
+    uint64_t stime = (ncmd->stime == 0) ?
         qemu_clock_get_ns(QEMU_CLOCK_REALTIME) : ncmd->stime;
+    NandMediaOp op;
+    NandLoc loc;
 
-    //plane level parallism
-    struct zns_plane *pl = get_plane(zns, ppa);
-
-    uint64_t lat = 0;
-    int nand_type = get_blk(zns,ppa)->nand_type;
-
-    uint64_t read_delay = zns->timing.pg_rd_lat[nand_type];
-    uint64_t write_delay = zns->timing.pg_wr_lat[nand_type];
-    uint64_t erase_delay = zns->timing.blk_er_lat[nand_type];
-
-    switch (c) {
-    case NAND_READ:
-        nand_stime = (pl->next_plane_avail_time < req_stime) ? req_stime : \
-                     pl->next_plane_avail_time;
-        pl->next_plane_avail_time = nand_stime + read_delay;
-        lat = pl->next_plane_avail_time - req_stime;
-	    break;
-
-    case NAND_WRITE:
-	    nand_stime = (pl->next_plane_avail_time < req_stime) ? req_stime : \
-		            pl->next_plane_avail_time;
-	    pl->next_plane_avail_time = nand_stime + write_delay;
-	    lat = pl->next_plane_avail_time - req_stime;
-	    break;
-
-    case NAND_ERASE:
-        nand_stime = (pl->next_plane_avail_time < req_stime) ? req_stime : \
-                        pl->next_plane_avail_time;
-        pl->next_plane_avail_time = nand_stime + erase_delay;
-        lat = pl->next_plane_avail_time - req_stime;
-        break;
-
+    switch (ncmd->cmd) {
+    case NAND_READ:  op = NAND_MEDIA_READ;    break;
+    case NAND_WRITE: op = NAND_MEDIA_PROGRAM; break;
+    case NAND_ERASE: op = NAND_MEDIA_ERASE;   break;
     default:
-        /* To silent warnings */
-        ;
+        return 0;   /* unchanged: an unknown command costs nothing */
     }
 
-    return lat;
+    loc = (NandLoc) {
+        .ch = ppa->g.ch,
+        .lun = ppa->g.fc,
+        .pl = ppa->g.pl,
+        .blk = ppa->g.blk,
+        .pg = ppa->g.pg,
+        .flash_type = get_blk(zns, ppa)->nand_type,
+        .page_type = 0,
+        .pe_cycles = 0,
+    };
+
+    return nand_media_op(&zns->media, &loc, op, stime).latency_ns;
 }
 
 static inline bool valid_ppa(struct zns_ssd *zns, struct ppa *ppa)

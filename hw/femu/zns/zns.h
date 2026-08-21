@@ -10,6 +10,7 @@
 
 #include "../nvme.h"
 #include "zftl.h"
+#include "../nand/nand-media.h"
 
 #define LOGICAL_PAGE_SIZE (4*KiB)
 #define ZNS_PAGE_SIZE (16*KiB)
@@ -144,6 +145,7 @@ struct zns_ssd {
     struct write_pointer wp;
 
     SSDNandFlashTiming timing; /*Misao: accurate  timing emulation for zns ssd.*/
+    NandMedia media;           /* shared NAND op timing (hw/femu/nand) */
     int flash_type;
     uint64_t program_unit;
     uint64_t stripe_unit;

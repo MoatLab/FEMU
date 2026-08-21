@@ -1623,6 +1623,13 @@ static void zns_init_params(FemuCtrl *n, NvmeNamespace *ns)
 
     id_zns->dataplane_started_ptr = &n->dataplane_started;
 
+    /*
+     * Hand the timing to the shared media layer now that it is populated and
+     * the channel/LUN/plane arrays exist; the datapath goes through it from
+     * here on.
+     */
+    zns_nand_media_init(id_zns);
+
     ns->zns = id_zns;
 }
 
