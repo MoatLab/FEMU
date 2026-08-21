@@ -214,7 +214,7 @@ static void zns_init_zone_identify(FemuCtrl *n, NvmeNamespace *ns, int lba_index
     id_ns_z->mar = cpu_to_le32(ns->max_active_zones - 1);
     id_ns_z->mor = cpu_to_le32(ns->max_open_zones - 1);
     id_ns_z->zoc = 0;
-    id_ns_z->ozcs = ns->cross_zone_read ? 0x01 : 0x00;
+    id_ns_z->ozcs = ns->cross_zone_read ? NVME_ID_NS_ZONED_OZCS_RAZB : 0x00;
 
     /* advertise ZRWA and its parameters when the namespace is configured for it */
     if (ns->zrwa_size) {
@@ -1612,7 +1612,7 @@ static int zns_init_zone_cap(FemuCtrl *n, NvmeNamespace *ns)
     n->zasl_bs = NVME_DEFAULT_MAX_AZ_SIZE;
     ns->zone_size_bs = zns->chnls_per_zone*zns->num_lun*zns->num_plane*zns->num_page*ZNS_PAGE_SIZE;
     /* keep a user-set capacity; 0 means the zone is fully usable */
-    ns->cross_zone_read = false;
+    /* cross_zone_read comes from the device property; do not clear it here */
     /*
      * Optional resource limits (all default 0 = unlimited / no extension, so an
      * unconfigured device is unchanged). zns_init_zone_geometry() validates these

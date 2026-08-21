@@ -884,6 +884,7 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
         ns->zrwafg_size = n->zns_params.zns_zrwafg_size;
         ns->zrwa_num = n->zns_params.zns_zrwa_num;
         ns->zrwa_avail = n->zns_params.zns_zrwa_num;
+        ns->cross_zone_read = n->zns_params.zns_cross_zone_read;
 
         if (nvme_init_namespace(n, ns, errp)) {
             g_free(ns_sizes);
@@ -1402,6 +1403,8 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT64("zns_zrwafg_size", FemuCtrl,
                        zns_params.zns_zrwafg_size, 0),
     DEFINE_PROP_UINT32("zns_zrwa_num", FemuCtrl, zns_params.zns_zrwa_num, 0),
+    DEFINE_PROP_BOOL("zns_cross_zone_read", FemuCtrl,
+                     zns_params.zns_cross_zone_read, false),
     DEFINE_PROP_INT32("secsz", FemuCtrl, bb_params.secsz, 512),
     DEFINE_PROP_INT32("secs_per_pg", FemuCtrl, bb_params.secs_per_pg, 8),
     DEFINE_PROP_INT32("pgs_per_blk", FemuCtrl, bb_params.pgs_per_blk, 256),

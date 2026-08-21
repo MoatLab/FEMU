@@ -443,6 +443,7 @@ zns_chnls_per_zone=0   # Channels a zone spans (0 = all of them)
 zns_zrwa_size=0        # ZRWA window in LBAs (0 = ZRWA disabled)
 zns_zrwafg_size=0      # ZRWA flush granularity in LBAs
 zns_zrwa_num=0         # Zones that may hold a ZRWA at once
+zns_cross_zone_read=false # Allow reads to span zone boundaries (OZCS bit 0)
 ```
 
 **Zone Random Write Area (ZRWA).** Setting all three of `zns_zrwa_size`,
@@ -458,6 +459,13 @@ exactly as before.
 Note that Linux issues writes to a zoned block device at the write pointer, so
 the random-write freedom is visible through the NVMe passthrough commands rather
 than through ordinary buffered or direct writes to the block device.
+
+**Reads across zone boundaries.** A zoned namespace normally rejects a read that
+runs past the end of its zone with a zone-boundary error, since consecutive
+zones need not hold related data. `zns_cross_zone_read=true` allows such a read
+and advertises it through OZCS bit 0, which is how the host knows it may issue
+one; the controller still checks that every zone the read spans is in a readable
+state. It defaults to false, which is the stricter and more common behavior.
 
 **Changed Zone List log page.** Log page BFh reports the zones whose state
 changed since the host last read it, which is how a host learns that zones moved

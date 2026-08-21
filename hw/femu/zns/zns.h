@@ -260,6 +260,7 @@ typedef struct QEMU_PACKED NvmeLBAFE {
 } NvmeLBAFE;
 
 enum NvmeIdNsZonedFlags {
+    NVME_ID_NS_ZONED_OZCS_RAZB      = 1 << 0, /* read across zone boundaries */
     NVME_ID_NS_ZONED_OZCS_ZRWASUP        = 1 << 1, /* ZRWA supported */
     NVME_ID_NS_ZONED_ZRWACAP_EXPFLUSHSUP = 1 << 0, /* explicit ZRWA flush */
 };
