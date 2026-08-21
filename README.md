@@ -444,6 +444,7 @@ zns_zrwa_size=0        # ZRWA window in LBAs (0 = ZRWA disabled)
 zns_zrwafg_size=0      # ZRWA flush granularity in LBAs
 zns_zrwa_num=0         # Zones that may hold a ZRWA at once
 zns_cross_zone_read=false # Allow reads to span zone boundaries (OZCS bit 0)
+zns_zasl_bs=131072     # Max Zone Append transfer in bytes (0 = follow MDTS)
 ```
 
 **Zone Random Write Area (ZRWA).** Setting all three of `zns_zrwa_size`,
@@ -459,6 +460,14 @@ exactly as before.
 Note that Linux issues writes to a zoned block device at the write pointer, so
 the random-write freedom is visible through the NVMe passthrough commands rather
 than through ordinary buffered or direct writes to the block device.
+
+**Zone Append size limit.** ZASL caps how much one Zone Append may transfer,
+and the host reads it from Identify to size its appends. `zns_zasl_bs` sets it
+in bytes, defaulting to the 128 KiB that used to be fixed; 0 makes it follow
+MDTS instead. Because the limit is reported as a power-of-two count of 4 KiB
+controller pages, the value must be such a multiple -- anything else is rejected
+at startup rather than quietly rounded down to a smaller limit than asked for.
+An append larger than the limit is refused with Invalid Field in Command.
 
 **Reads across zone boundaries.** A zoned namespace normally rejects a read that
 runs past the end of its zone with a zone-boundary error, since consecutive

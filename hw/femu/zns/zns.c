@@ -2,7 +2,6 @@
 
 #define MIN_DISCARD_GRANULARITY     (4 * KiB)
 #define NVME_DEFAULT_ZONE_SIZE      (128 * MiB)
-#define NVME_DEFAULT_MAX_AZ_SIZE    (128 * KiB)
 
 static inline uint32_t zns_zone_idx(NvmeNamespace *ns, uint64_t slba)
 {
@@ -17,6 +16,9 @@ static inline NvmeZone *zns_get_zone_by_slba(NvmeNamespace *ns, uint64_t slba)
     assert(zone_idx < ns->num_zones);
     return &ns->zone_array[zone_idx];
 }
+
+/* the controller page size zns_start_ctrl asserts when converting ZASL */
+#define ZNS_CTRL_PAGE_SIZE 4096
 
 static int zns_init_zone_geometry(NvmeNamespace *ns, Error **errp)
 {
@@ -136,6 +138,27 @@ static int zns_init_zone_geometry(NvmeNamespace *ns, Error **errp)
         error_setg(errp, "zns_zrwafg_size and zns_zrwa_num have no effect "
                    "without zns_zrwa_size");
         return -1;
+    }
+
+    /*
+     * ZASL is reported to the host as a power-of-two count of controller pages,
+     * so a size that is not one would be rounded down and the device would
+     * enforce a smaller Zone Append limit than was configured. The controller
+     * page size is fixed at 4 KiB here (zns_start_ctrl asserts it), and the
+     * conversion runs at controller enable, where a failure has nowhere to be
+     * reported -- so check the property now.
+     */
+    if (ns->ctrl && ns->ctrl->zns_params.zns_zasl_bs) {
+        uint32_t zasl_bs = ns->ctrl->zns_params.zns_zasl_bs;
+        uint32_t pages = zasl_bs / ZNS_CTRL_PAGE_SIZE;
+
+        if (zasl_bs < ZNS_CTRL_PAGE_SIZE || zasl_bs % ZNS_CTRL_PAGE_SIZE ||
+            (pages & (pages - 1))) {
+            error_setg(errp, "zns_zasl_bs %u must be a power-of-two multiple "
+                       "of the %u byte controller page size", zasl_bs,
+                       ZNS_CTRL_PAGE_SIZE);
+            return -1;
+        }
     }
 
     if (ns->zd_extension_size) {
@@ -1609,7 +1632,7 @@ static int zns_init_zone_cap(FemuCtrl *n, NvmeNamespace *ns)
     assert(ns->zns);
     struct zns_ssd* zns  = ns->zns;
     n->zoned = true;
-    n->zasl_bs = NVME_DEFAULT_MAX_AZ_SIZE;
+    n->zasl_bs = n->zns_params.zns_zasl_bs;
     ns->zone_size_bs = zns->chnls_per_zone*zns->num_lun*zns->num_plane*zns->num_page*ZNS_PAGE_SIZE;
     /* keep a user-set capacity; 0 means the zone is fully usable */
     /* cross_zone_read comes from the device property; do not clear it here */

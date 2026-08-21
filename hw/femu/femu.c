@@ -1405,6 +1405,9 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT32("zns_zrwa_num", FemuCtrl, zns_params.zns_zrwa_num, 0),
     DEFINE_PROP_BOOL("zns_cross_zone_read", FemuCtrl,
                      zns_params.zns_cross_zone_read, false),
+    /* max Zone Append transfer; 0 follows MDTS. 128 KiB was the fixed value */
+    DEFINE_PROP_UINT32("zns_zasl_bs", FemuCtrl, zns_params.zns_zasl_bs,
+                       128 * 1024),
     DEFINE_PROP_INT32("secsz", FemuCtrl, bb_params.secsz, 512),
     DEFINE_PROP_INT32("secs_per_pg", FemuCtrl, bb_params.secs_per_pg, 8),
     DEFINE_PROP_INT32("pgs_per_blk", FemuCtrl, bb_params.pgs_per_blk, 256),

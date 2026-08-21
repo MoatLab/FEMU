@@ -1646,6 +1646,7 @@ typedef struct ZNSCtrlParams {
     uint64_t zns_zrwafg_size;    /* ZRWA flush granularity, LBAs */
     uint32_t zns_zrwa_num;       /* how many zones may hold a ZRWA at once */
     bool zns_cross_zone_read;    /* allow a read to span zone boundaries */
+    uint32_t zns_zasl_bs;        /* max Zone Append bytes; 0 = follow MDTS */
 } ZNSCtrlParams;
 
 typedef struct CsdCtrlParams {
