@@ -1329,7 +1329,15 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
     uint32_t dw11 = le32_to_cpu(cmd->cdw11);
     uint32_t dw12 = le32_to_cpu(cmd->cdw12);
     uint32_t dw13 = le32_to_cpu(cmd->cdw13);
-    uint16_t lid = dw10 & 0xffff;
+    /*
+     * Command Dword 10 packs more than the identifier: bits 7:0 are the Log
+     * Page Identifier, 13:8 the Log Specific Field, and bit 15 Retain
+     * Asynchronous Event. Masking the whole low half made a host that set
+     * Retain Asynchronous Event -- the ordinary way to read a log without
+     * clearing the event behind it -- miss every identifier below and be told
+     * the log page was invalid.
+     */
+    uint8_t lid = dw10 & 0xff;
     uint8_t  csi = le32_to_cpu(cmd->cdw14) >> 24;
     uint16_t lspi = (dw11 >> 16) & 0xffff;
     uint32_t len;
