@@ -987,10 +987,28 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
 
     trans_len = MIN(sizeof(smart), buf_len);
     memset(&smart, 0x0, sizeof(smart));
-    smart.data_units_read[0] = cpu_to_le64(0);
-    smart.data_units_written[0] = cpu_to_le64(0);
-    smart.host_read_commands[0] = cpu_to_le64(0);
-    smart.host_write_commands[0] = cpu_to_le64(0);
+
+    /*
+     * Host I/O totals, summed from the per-poller shards the I/O path keeps.
+     * The log reports data units in thousands of 512 byte units, rounded up,
+     * so a workload that moved anything at all reports at least one unit
+     * rather than the zero these fields used to carry.
+     */
+    {
+        uint64_t rd_bytes = 0, wr_bytes = 0, rd_cmds = 0, wr_cmds = 0;
+        uint32_t p;
+
+        for (p = 1; n->poller_ctr && p <= n->nr_pollers; p++) {
+            rd_cmds  += n->poller_ctr[p].nr_host_rd_cmds;
+            wr_cmds  += n->poller_ctr[p].nr_host_wr_cmds;
+            rd_bytes += n->poller_ctr[p].nr_host_rd_bytes;
+            wr_bytes += n->poller_ctr[p].nr_host_wr_bytes;
+        }
+        smart.data_units_read[0] = cpu_to_le64(DIV_ROUND_UP(rd_bytes / 512, 1000));
+        smart.data_units_written[0] = cpu_to_le64(DIV_ROUND_UP(wr_bytes / 512, 1000));
+        smart.host_read_commands[0] = cpu_to_le64(rd_cmds);
+        smart.host_write_commands[0] = cpu_to_le64(wr_cmds);
+    }
 
     smart.number_of_error_log_entries[0] = cpu_to_le64(n->num_errors);
     smart.temperature[0] = n->temperature & 0xff;

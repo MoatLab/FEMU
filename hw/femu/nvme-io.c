@@ -159,6 +159,33 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
         status = nvme_io_cmd(n, &cmd, req);
         req->status = status;
 
+        /*
+         * Host I/O totals for the SMART health log, counted here so every mode
+         * is covered: this is the one point each I/O command passes through
+         * before it is handed to whichever mode owns the namespace. Only
+         * commands that moved host data count, and only when they succeeded.
+         * Zone Append is a write that names no LBA, so it is counted as one.
+         */
+        if (status == NVME_SUCCESS && req->ns) {
+            FemuPollerCtr *ctr = &n->poller_ctr[index_poller];
+            uint64_t bytes = (uint64_t)req->nlb <<
+                req->ns->id_ns.lbaf[NVME_ID_NS_FLBAS_INDEX(req->ns->id_ns.flbas)].lbads;
+
+            switch (req->cmd_opcode) {
+            case NVME_CMD_READ:
+                ctr->nr_host_rd_cmds++;
+                ctr->nr_host_rd_bytes += bytes;
+                break;
+            case NVME_CMD_WRITE:
+            case NVME_CMD_ZONE_APPEND:
+                ctr->nr_host_wr_cmds++;
+                ctr->nr_host_wr_bytes += bytes;
+                break;
+            default:
+                break;
+            }
+        }
+
         if (status != NVME_SUCCESS) {
             /* Clean up DSM ranges on error */
             if (req->dsm_ranges) {

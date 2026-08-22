@@ -352,6 +352,17 @@ Both sit after the media latency, so they compose with it, and both are off by
 default. They apply to the modes that model timing; NoSSD completes inline and
 is unaffected.
 
+**Host I/O counters.** The SMART log reports the standard host totals -- data
+units read and written, and read and write command counts -- so a workload's
+volume can be read back the way it would be from a real drive. They are counted
+where every I/O command passes before reaching whichever mode owns the
+namespace, so they are the same in every mode, including the ones with no FTL.
+Data units follow the spec's unit of a thousand 512 byte units, rounded up.
+
+```bash
+sudo nvme smart-log /dev/nvme0        # Data Units Written, host_write_commands, ...
+```
+
 **Write amplification.** The device reports amplification in the vendor area of
 the SMART log: the factor scaled by 1000 at byte 192, host-programmed pages at
 200, and relocated pages at 208.

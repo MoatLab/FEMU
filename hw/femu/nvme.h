@@ -1683,7 +1683,17 @@ struct FemuCtrl;
 typedef struct FemuPollerCtr {
     int64_t nr_tt_ios;
     int64_t nr_tt_late_ios;
-    char    pad[64 - 2 * sizeof(int64_t)];
+    /*
+     * Host I/O totals behind the SMART health log. Bytes rather than logical
+     * blocks so namespaces with different block sizes add up, and sharded per
+     * poller for the same reason the counters above are: this runs on every
+     * command, and a shared line would bounce between pollers.
+     */
+    int64_t nr_host_rd_cmds;
+    int64_t nr_host_wr_cmds;
+    int64_t nr_host_rd_bytes;
+    int64_t nr_host_wr_bytes;
+    char    pad[64 - 6 * sizeof(int64_t)];
 } QEMU_ALIGNED(64) FemuPollerCtr;
 
 typedef struct FemuCtrl {
