@@ -551,9 +551,11 @@ blocks against addresses.
 -device femu,devsz_mb=4096,namespaces=1,femu_mode=5,...
 ```
 
-Keys of up to 16 bytes travel inline in CDW12-15, the key length less one in
-CDW11, and the value length in dwords in CDW10; the value itself uses the normal
-data pointer. The commands are:
+Keys of up to 16 bytes travel inline in the command: the low eight bytes in
+CDW2 and CDW3, the high eight in CDW14 and CDW15. The key length in bytes goes
+in CDW11 bits 7:0, and CDW10 carries the value size in bytes for a store, or the
+host buffer size for a retrieve; the value itself uses the normal data pointer.
+The commands are:
 
 | Command | Opcode |
 |---------|--------|
@@ -567,12 +569,30 @@ Linux has no key-value command set, so the namespace appears without a block
 device and is driven by passthrough:
 
 ```bash
-# store 4 KiB under the key "KVKEY123"
-nvme io-passthru /dev/nvme0 -O 0x01 -n 1 --cdw10=1024 --cdw11=7     --cdw12=0x454B564B --cdw13=0x33323159 -l 4096 -i value.bin -w
+# store a 64 byte value under the 4 byte key "BBBB"
+nvme io-passthru /dev/nvme0 -O 0x01 -n 1 --cdw10=64 --cdw11=4 \
+    --cdw2=0x42424242 -l 64 -w -i value.bin
+
+# read it back
+nvme io-passthru /dev/nvme0 -O 0x02 -n 1 --cdw10=64 --cdw11=4 \
+    --cdw2=0x42424242 -l 64 -r -b
 ```
 
+Note that the namespace identifier has to be given explicitly: nvme-cli sends
+the broadcast value by default, which a per-namespace command rejects. Because
+the namespace has no block device, the command goes to the controller node.
+
 Retrieving or checking a key that is not stored returns 0x87, key does not
-exist.
+exist, with Do Not Retry set alongside it.
+
+`femu-scripts/kv-probe.c` drives the whole lifecycle -- store, exist, retrieve
+in full and short form, the conditional stores, delete, and the miss afterwards
+-- and checks both status and data:
+
+```bash
+gcc -O2 -o kv-probe femu-scripts/kv-probe.c   # inside the guest
+sudo ./kv-probe /dev/nvme0
+```
 
 **Use Cases:**
 - Key-value store research without key-value hardware
