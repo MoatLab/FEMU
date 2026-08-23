@@ -1,10 +1,9 @@
 /*
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ *
  * FEMU priority queue tests
  *
  * Copyright 2026 Changhyeon Park <changhyeonb533@gmail.com>
- *
- * This work is licensed under the terms of the GNU GPL, version 2 or later.
- * See the COPYING file in the top-level directory.
  */
 
 #include "qemu/osdep.h"

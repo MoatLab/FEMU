@@ -214,16 +214,16 @@ static struct ppa get_new_page(struct zns_ssd *zns, uint32_t zone_idx)
  * arriving while active_zone pointed at another zone evicted a cache on
  * nearly every command.
  */
-static int zns_get_wcidx(struct zns_ssd* zns, uint64_t sblk)
+static int zns_get_wcidx(struct zns_ssd *zns, uint64_t sblk)
 {
     int i;
-    for(i = 0;i < zns->cache.num_wc;i++)
-    {
-        if(zns->cache.write_cache[i].sblk==sblk)
-        {
+
+    for (i = 0; i < zns->cache.num_wc; i++) {
+        if (zns->cache.write_cache[i].sblk == sblk) {
             return i;
         }
     }
+
     return -1;
 }
 
