@@ -868,8 +868,19 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         break;
     case NVME_TEMPERATURE_THRESHOLD:
         n->features.temp_thresh = dw11;
+        /*
+         * Crossing the threshold raises a SMART event once, pointing the host
+         * at the health log. It is armed again when the threshold moves back
+         * above the temperature and the previous event has been read.
+         */
         if (n->features.temp_thresh <= n->temperature && !n->temp_warn_issued) {
             n->temp_warn_issued = 1;
+            if (NVME_AEC_SMART(n->features.async_config) &
+                NVME_SMART_TEMPERATURE) {
+                nvme_enqueue_event(n, NVME_AER_TYPE_SMART,
+                                   NVME_AER_INFO_SMART_TEMP_THRESH,
+                                   NVME_LOG_SMART_INFO);
+            }
         } else if (n->features.temp_thresh > n->temperature &&
                 !(n->aer_mask & 1 << NVME_AER_TYPE_SMART)) {
             n->temp_warn_issued = 0;
@@ -976,7 +987,8 @@ static uint16_t nvme_error_log_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
     return dma_read_prp(n, (uint8_t *)n->elpes, trans_len, prp1, prp2);
 }
 
-static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
+static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
+                                bool rae)
 {
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
@@ -1016,6 +1028,14 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
 
     /* healthy by default; bbssd derives it from the factory bad-block fraction */
     smart.available_spare = (BBSSD(n) && n->ssd) ? ssd_available_spare(n->ssd) : 100;
+
+    /*
+     * Reading this log without Retain Asynchronous Event is what clears a
+     * SMART event: the host has now seen the state the event was pointing at.
+     */
+    if (!rae) {
+        nvme_clear_events(n, NVME_AER_TYPE_SMART);
+    }
 
     /*
      * Vendor-specific area: report the write-amplification factor (scaled by
@@ -1338,6 +1358,7 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
      * the log page was invalid.
      */
     uint8_t lid = dw10 & 0xff;
+    bool rae = (dw10 >> 15) & 0x1;   /* Retain Asynchronous Event */
     uint8_t  csi = le32_to_cpu(cmd->cdw14) >> 24;
     uint16_t lspi = (dw11 >> 16) & 0xffff;
     uint32_t len;
@@ -1366,7 +1387,7 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
     case NVME_LOG_ERROR_INFO:
         return nvme_error_log_info(n, cmd, len);
     case NVME_LOG_SMART_INFO:
-        return nvme_smart_info(n, cmd, len);
+        return nvme_smart_info(n, cmd, len, rae);
     case NVME_LOG_FW_SLOT_INFO:
         return nvme_fw_log_info(n, cmd, len);
     case NVME_LOG_CMD_EFFECTS:
@@ -1589,6 +1610,9 @@ static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
          * (which otherwise floods the controller and stalls the benchmark).
          */
         femu_debug("admin cmd,async_event_request (held pending)\n");
+        if (n->outstanding_aers > n->aerl) {
+            return NVME_AER_LIMIT_EXCEEDED;
+        }
         return NVME_NO_COMPLETE;
     case NVME_ADM_CMD_ACTIVATE_FW:
     case NVME_ADM_CMD_DOWNLOAD_FW:
@@ -1604,6 +1628,116 @@ static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         }
 
         return NVME_INVALID_OPCODE | NVME_DNR;
+    }
+}
+
+/* an event is dropped rather than growing this queue without bound */
+#define FEMU_AER_MAX_QUEUED 16
+
+/* Post one admin completion for an entry the controller had been holding. */
+static void nvme_post_held_cqe(FemuCtrl *n, const NvmeAerHold *hold,
+                               const NvmeAerResult *result)
+{
+    NvmeCQueue *cq = n->cq[hold->cqid];
+    NvmeCqe cqe;
+    hwaddr addr;
+
+    /*
+     * is_active is not checked here: it marks a queue brought up by Create I/O
+     * Completion Queue, and the admin queue an Async Event Request arrives on
+     * is built at controller enable instead, so it never carries the flag.
+     */
+    if (!cq) {
+        return;
+    }
+
+    memset(&cqe, 0, sizeof(cqe));
+    memcpy(&cqe.n.result, result, sizeof(*result));
+    cqe.cid = hold->cid;
+    cqe.status = cpu_to_le16(NVME_SUCCESS << 1 | cq->phase);
+    cqe.sq_id = cpu_to_le16(hold->sqid);
+    cqe.sq_head = cpu_to_le16(hold->sq_head);
+
+    if (cq->phys_contig) {
+        addr = cq->dma_addr + cq->tail * n->cqe_size;
+    } else {
+        addr = nvme_discontig(cq->prp_list, cq->tail, n->page_size,
+                              n->cqe_size);
+    }
+    nvme_addr_write(n, addr, (void *)&cqe, sizeof(cqe));
+    nvme_inc_cq_tail(cq);
+    nvme_isr_notify_admin(cq);
+}
+
+/*
+ * Hand queued events to the Async Event Requests the host has outstanding.
+ *
+ * One event of a given type is reported at a time: posting sets that type in
+ * aer_mask, and the mask is only cleared when the host reads the log page the
+ * event pointed at. Until then further events of that type stay queued, so the
+ * host is not told the same thing twice before it has looked.
+ */
+void nvme_process_aers(FemuCtrl *n)
+{
+    NvmeAsyncEvent *event, *next;
+
+    QSIMPLEQ_FOREACH_SAFE(event, &n->aer_queue, entry, next) {
+        if (!n->outstanding_aers) {
+            break;              /* nothing to complete it with */
+        }
+        if (n->aer_mask & (1 << event->result.event_type)) {
+            continue;           /* already reported, awaiting the log read */
+        }
+
+        QSIMPLEQ_REMOVE(&n->aer_queue, event, NvmeAsyncEvent, entry);
+        n->aer_queued--;
+        n->aer_mask |= 1 << event->result.event_type;
+        n->outstanding_aers--;
+
+        nvme_post_held_cqe(n, &n->aer_held[n->outstanding_aers],
+                           &event->result);
+        g_free(event);
+    }
+}
+
+/* Raise an asynchronous event, reporting it as soon as an AER is available. */
+void nvme_enqueue_event(FemuCtrl *n, uint8_t event_type, uint8_t event_info,
+                        uint8_t log_page)
+{
+    NvmeAsyncEvent *event;
+
+    if (n->aer_queued >= FEMU_AER_MAX_QUEUED) {
+        return;
+    }
+
+    event = g_new0(NvmeAsyncEvent, 1);
+    event->result.event_type = event_type;
+    event->result.event_info = event_info;
+    event->result.log_page = log_page;
+
+    QSIMPLEQ_INSERT_TAIL(&n->aer_queue, event, entry);
+    n->aer_queued++;
+
+    nvme_process_aers(n);
+}
+
+/*
+ * The host has read the log page an event pointed at, so that type may be
+ * reported again. Drop any still-queued events of the type as well: the host
+ * has just seen the state they describe.
+ */
+void nvme_clear_events(FemuCtrl *n, uint8_t event_type)
+{
+    NvmeAsyncEvent *event, *next;
+
+    n->aer_mask &= ~(1 << event_type);
+
+    QSIMPLEQ_FOREACH_SAFE(event, &n->aer_queue, entry, next) {
+        if (event->result.event_type == event_type) {
+            QSIMPLEQ_REMOVE(&n->aer_queue, event, NvmeAsyncEvent, entry);
+            n->aer_queued--;
+            g_free(event);
+        }
     }
 }
 
@@ -1632,8 +1766,23 @@ void nvme_process_sq_admin(void *opaque)
 
         status = nvme_admin_cmd(n, &cmd, &cqe);
         if (status == NVME_NO_COMPLETE) {
-            /* command held pending (e.g. Async Event Request) — do not post a
-             * CQE; it stays outstanding until an async event (never, here) */
+            /*
+             * Held pending: no completion now. An Async Event Request is
+             * recorded here rather than in the handler because the entry it
+             * will eventually be completed with is identified by the queue it
+             * arrived on, which the handler does not see.
+             */
+            if (cmd.opcode == NVME_ADM_CMD_ASYNC_EV_REQ) {
+                NvmeAerHold *hold = &n->aer_held[n->outstanding_aers++];
+
+                hold->cid = cmd.cid;
+                hold->sqid = sq->sqid;
+                hold->cqid = sq->cqid;
+                hold->sq_head = sq->head;
+                if (!QSIMPLEQ_EMPTY(&n->aer_queue)) {
+                    nvme_process_aers(n);
+                }
+            }
             continue;
         }
         cqe.cid = cmd.cid;

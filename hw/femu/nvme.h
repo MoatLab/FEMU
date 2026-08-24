@@ -1317,6 +1317,21 @@ static inline void nvme_check_size(void)
     //oc12_check_size();
 }
 
+/* Async Event Configuration, bits 7:0: which SMART warnings raise an event */
+#define NVME_AEC_SMART(aec) ((aec) & 0xff)
+
+/*
+ * An Async Event Request the controller is holding. The admin path builds its
+ * completion on the stack rather than from a request object, so what has to be
+ * kept is the identity of the entry to post once an event arrives.
+ */
+typedef struct NvmeAerHold {
+    uint16_t cid;
+    uint16_t sqid;
+    uint16_t cqid;
+    uint16_t sq_head;
+} NvmeAerHold;
+
 typedef struct NvmeAsyncEvent {
     QSIMPLEQ_ENTRY(NvmeAsyncEvent) entry;
     NvmeAerResult result;
@@ -1775,7 +1790,8 @@ typedef struct FemuCtrl {
     char            *serial;
     char            *logfile;
     NvmeErrorLog    *elpes;
-    NvmeRequest     **aer_reqs;
+    NvmeAerHold     *aer_held;     /* outstanding AERs, aerl + 1 entries */
+    uint32_t        aer_queued;    /* events waiting for an outstanding AER */
 
     /* FDP: Endurance group and subsystem */
     NvmeEnduranceGroup *endgrp;
@@ -2035,6 +2051,10 @@ uint16_t femu_nvme_rw_check_req(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                                 uint64_t meta_size);
 
 void nvme_process_sq_admin(void *opaque);
+void nvme_process_aers(FemuCtrl *n);
+void nvme_enqueue_event(FemuCtrl *n, uint8_t event_type, uint8_t event_info,
+                        uint8_t log_page);
+void nvme_clear_events(FemuCtrl *n, uint8_t event_type);
 void nvme_post_cqes_io(void *opaque);
 void *nvme_poller(void *arg);
 

@@ -352,6 +352,23 @@ Both sit after the media latency, so they compose with it, and both are off by
 default. They apply to the modes that model timing; NoSSD completes inline and
 is unaffected.
 
+**Asynchronous events.** The controller reports events to a host that has
+Async Event Requests outstanding, rather than leaving them pending forever. The
+one it raises today is the SMART temperature warning: `temperature` sets the
+reported value in Kelvin (default 0x143, 50 C), and a host that enables the
+warning through Async Event Configuration and then sets a temperature threshold
+at or below it gets an event naming the health log.
+
+An event of a given type is reported once and then withheld until the host
+reads the log page it pointed at with Retain Asynchronous Event clear, so the
+same condition is not reported repeatedly before the host has looked. A
+controller reset drops anything outstanding.
+
+```bash
+gcc -O2 -o aer-probe femu-scripts/aer-probe.c   # inside the guest
+sudo ./aer-probe /dev/nvme0
+```
+
 **Host I/O counters.** The SMART log reports the standard host totals -- data
 units read and written, and read and write command counts -- so a workload's
 volume can be read back the way it would be from a real drive. They are counted

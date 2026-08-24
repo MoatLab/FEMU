@@ -266,10 +266,27 @@ static int nvme_init_subsys(FemuCtrl *n)
 
 static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
 {
+    NvmeAsyncEvent *event;
     int i;
 
     /* Coperd: pause nvme poller at earliest convenience */
     n->dataplane_started = false;
+
+    /*
+     * Drop every Async Event Request the controller was holding, along with any
+     * event queued for one. A reset ends the commands the host had outstanding,
+     * so completing one afterwards would post to an entry the host has already
+     * reclaimed -- which the driver takes as a completion for a request it no
+     * longer owns.
+     */
+    while ((event = QSIMPLEQ_FIRST(&n->aer_queue)) != NULL) {
+        QSIMPLEQ_REMOVE_HEAD(&n->aer_queue, entry);
+        g_free(event);
+    }
+    n->aer_queued = 0;
+    n->aer_mask = 0;
+    n->outstanding_aers = 0;
+    n->temp_warn_issued = 0;
 
     /*
      * Quiesce the pollers before freeing queues / unmapping the dbbuf shadow
@@ -982,7 +999,7 @@ static void nvme_init_ctrl(FemuCtrl *n)
 
     n->bar.vs = NVME_SPEC_VER;
     n->bar.intmc = n->bar.intms = 0;
-    n->temperature = NVME_TEMPERATURE;
+    /* n->temperature comes from the device property; do not overwrite it */
 }
 
 static void nvme_init_cmb(FemuCtrl *n)
@@ -1210,7 +1227,8 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     n->cq = g_malloc0(sizeof(*n->cq) * (n->nr_io_queues + 1));
     n->namespaces = g_malloc0(sizeof(*n->namespaces) * n->num_namespaces);
     n->elpes = g_malloc0(sizeof(*n->elpes) * (n->elpe + 1));
-    n->aer_reqs = g_malloc0(sizeof(*n->aer_reqs) * (n->aerl + 1));
+    n->aer_held = g_malloc0(sizeof(*n->aer_held) * (n->aerl + 1));
+    QSIMPLEQ_INIT(&n->aer_queue);
     n->features.int_vector_config = g_malloc0(sizeof(*n->features.int_vector_config) * (n->nr_io_queues + 1));
 
     nvme_init_pci(n);
@@ -1315,7 +1333,15 @@ static void femu_exit(PCIDevice *pci_dev)
 
     g_free(n->namespaces);
     g_free(n->features.int_vector_config);
-    g_free(n->aer_reqs);
+    {
+        NvmeAsyncEvent *event;
+
+        while ((event = QSIMPLEQ_FIRST(&n->aer_queue)) != NULL) {
+            QSIMPLEQ_REMOVE_HEAD(&n->aer_queue, entry);
+            g_free(event);
+        }
+    }
+    g_free(n->aer_held);
     g_free(n->elpes);
     g_free(n->cq);
     g_free(n->sq);
@@ -1351,6 +1377,9 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT8("ms", FemuCtrl, ms, 16),
     DEFINE_PROP_UINT8("ms_max", FemuCtrl, ms_max, 64),
     DEFINE_PROP_UINT8("dlfeat", FemuCtrl, dlfeat, 1),
+    /* reported temperature in Kelvin; 0x143 (50 C) is the NVMe default */
+    DEFINE_PROP_UINT16("temperature", FemuCtrl, temperature,
+                       NVME_TEMPERATURE),
     DEFINE_PROP_UINT8("mpsmin", FemuCtrl, mpsmin, 0),
     DEFINE_PROP_UINT8("mpsmax", FemuCtrl, mpsmax, 0),
     DEFINE_PROP_UINT8("nlbaf", FemuCtrl, nlbaf, 5),

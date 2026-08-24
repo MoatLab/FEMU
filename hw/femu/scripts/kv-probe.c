@@ -1,6 +1,7 @@
 /*
  * KV passthru probe: drive FEMU's NVMe-KV mode end-to-end via the IO passthru
- * ioctl on the controller node (/dev/nvme0), skipping the block layer (the stock
+ * ioctl on the controller node (/dev/nvme0), skipping the block layer (the
+ * stock
  * Linux nvme driver does not bring up a CSI=01h namespace). Issues a full KV
  * lifecycle against the spec wire format: Store 01h, Exist 14h, Retrieve 02h
  * (full + short read), Delete 10h, then Retrieve-miss; checks status + data.
@@ -60,17 +61,20 @@ static int fails;
 static void set_key(struct nvme_passthru_cmd *c, const uint8_t *k, int kl)
 {
     uint8_t b[16] = {0};
-    int copy = kl > 16 ? 16 : kl;      /* the wire still carries KL=kl in cdw11 */
+    /* the wire still carries KL=kl in cdw11 */
+    int copy = kl > 16 ? 16 : kl;
     memcpy(b, k, copy);
-    c->cdw2  = (uint32_t)b[0] | b[1]<<8 | b[2]<<16 | (uint32_t)b[3]<<24;
-    c->cdw3  = (uint32_t)b[4] | b[5]<<8 | b[6]<<16 | (uint32_t)b[7]<<24;
-    c->cdw14 = (uint32_t)b[8] | b[9]<<8 | b[10]<<16 | (uint32_t)b[11]<<24;
-    c->cdw15 = (uint32_t)b[12]| b[13]<<8| b[14]<<16 | (uint32_t)b[15]<<24;
+    c->cdw2  = (uint32_t)b[0] | b[1] << 8 | b[2] << 16 | (uint32_t)b[3] << 24;
+    c->cdw3  = (uint32_t)b[4] | b[5] << 8 | b[6] << 16 | (uint32_t)b[7] << 24;
+    c->cdw14 = (uint32_t)b[8] | b[9] << 8 | b[10] << 16 | (uint32_t)b[11] << 24;
+    c->cdw15 = (uint32_t)b[12] | b[13] << 8 | b[14] << 16 |
+               (uint32_t)b[15] << 24;
     c->cdw11 = (c->cdw11 & ~0xffu) | (uint32_t)(kl & 0xff);
 }
 
 static int kv_cmd(uint8_t op, const uint8_t *key, int kl, void *buf,
-                  uint32_t buflen, uint32_t cdw10, uint32_t opt, uint64_t *result)
+                  uint32_t buflen, uint32_t cdw10, uint32_t opt,
+                  uint64_t *result)
 {
     struct nvme_passthru_cmd c;
     int ret;
@@ -112,7 +116,7 @@ static void check(const char *name, int got, int want_status)
 int main(int argc, char **argv)
 {
     const char *dev = argc > 1 ? argv[1] : "/dev/nvme0";
-    uint8_t key[6] = { 'h','e','l','l','o', 0 };
+    uint8_t key[6] = { 'h', 'e', 'l', 'l', 'o', 0 };
     int kl = 5;
     char wbuf[4096], rbuf[4096];
     uint64_t result;
@@ -139,7 +143,8 @@ int main(int argc, char **argv)
 
     /* 3. Retrieve full -> data matches, CQE result = full value size */
     memset(rbuf, 0, sizeof(rbuf));
-    st = kv_cmd(KV_RETRIEVE, key, kl, rbuf, sizeof(rbuf), sizeof(rbuf), 0, &result);
+    st = kv_cmd(KV_RETRIEVE, key, kl, rbuf, sizeof(rbuf), sizeof(rbuf), 0,
+                &result);
     check("retrieve(full)", st, 0x0);
     if (memcmp(rbuf, wbuf, vlen) != 0) {
         printf("  FAIL retrieve(data)        mismatch\n"); fails++;
@@ -150,7 +155,8 @@ int main(int argc, char **argv)
         printf("  FAIL retrieve(cqe-size)    got=%llu want=%u\n",
                (unsigned long long)result, vlen); fails++;
     } else {
-        printf("  PASS retrieve(cqe-size)    %llu\n", (unsigned long long)result);
+        printf("  PASS retrieve(cqe-size)    %llu\n",
+               (unsigned long long)result);
     }
 
     /* 4. Short read: HBS=8 -> 8 bytes transferred, CQE reports full size */
@@ -174,10 +180,11 @@ int main(int argc, char **argv)
     check("delete", st, 0x0);
 
     /* 7. Retrieve after delete -> Key Does Not Exist (0x87) */
-    st = kv_cmd(KV_RETRIEVE, key, kl, rbuf, sizeof(rbuf), sizeof(rbuf), 0, &result);
+    st = kv_cmd(KV_RETRIEVE, key, kl, rbuf, sizeof(rbuf), sizeof(rbuf), 0,
+                &result);
     check("retrieve(deleted)", st, 0x87);
 
-    /* 8. SIKE (store-if-key-exists) on absent key -> Key Does Not Exist (0x87) */
+    /* 8. SIKE (store-if-key-exists) on absent key -> Key Not Exist (0x87) */
     st = kv_cmd(KV_STORE, key, kl, wbuf, vlen, vlen, 0x01 /*SIKE*/, &result);
     check("store(SIKE,absent)", st, 0x87);
 
