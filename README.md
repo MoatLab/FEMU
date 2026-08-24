@@ -513,11 +513,23 @@ default.
 
 The specification excludes most changes from this list: anything following a
 Zone Management Send command, a write that opens or fills a zone, and the
-controller closing a zone to free a resource. Those are all the transitions this
-device currently makes, so the count is zero and the header is returned on its
-own. A zone going read only or offline after a media failure, or a change of
-capacity or of the reset-recommended attribute, is the kind of change that would
-appear here.
+controller closing a zone to free a resource. What is left is a change the host
+did not ask for, and reading the log without `--rae` clears both the list and
+the event behind it.
+
+`err_write_fail_ppm` produces such a change on a zoned namespace: one write in
+every million/ppm fails and takes its zone read only, the way a controller does
+when it can no longer program the zone. The failing write is reported as a write
+fault, later writes to that zone are refused as read only, the zone is added to
+this log, and a Zone Descriptor Changed notice is raised for a host with an
+Async Event Request outstanding. The counter makes a run repeat rather than
+drawing at random. With the knob unset nothing does this, and the list stays
+empty.
+
+```bash
+gcc -O2 -o zone-aen-probe femu-scripts/zone-aen-probe.c   # inside the guest
+sudo ./zone-aen-probe /dev/nvme0 /dev/nvme0n1
+```
 
 **Zone width.** By default a zone spans every channel, so it is as wide as the
 device and there are relatively few of them. `zns_chnls_per_zone=N` narrows a

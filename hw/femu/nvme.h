@@ -817,6 +817,7 @@ typedef struct NvmeDsmRange {
 enum NvmeAsyncEventRequest {
     NVME_AER_TYPE_ERROR                     = 0,
     NVME_AER_TYPE_SMART                     = 1,
+    NVME_AER_TYPE_NOTICE                    = 2,
     NVME_AER_TYPE_IO_SPECIFIC               = 6,
     NVME_AER_TYPE_VENDOR_SPECIFIC           = 7,
     NVME_AER_INFO_ERR_INVALID_SQ            = 0,
@@ -827,6 +828,8 @@ enum NvmeAsyncEventRequest {
     NVME_AER_INFO_ERR_FW_IMG_LOAD_ERR       = 5,
     NVME_AER_INFO_SMART_RELIABILITY         = 0,
     NVME_AER_INFO_SMART_TEMP_THRESH         = 1,
+    /* ZNS: a zone descriptor changed for a reason the host did not cause */
+    NVME_AER_INFO_NOTICE_ZONE_DESCR_CHANGED = 0xef,
     NVME_AER_INFO_SMART_SPARE_THRESH        = 2,
 };
 

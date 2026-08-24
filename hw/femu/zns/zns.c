@@ -337,6 +337,40 @@ void zns_ns_cleanup(NvmeNamespace *ns)
     }
 }
 
+/*
+ * Record a zone whose descriptor changed for a reason the host did not cause,
+ * and tell it to look. Deduplicated, because the list carries a zone once
+ * however many times it changed; once the page is full the count is reported
+ * as FFFFh so the host rescans instead of trusting a truncated list.
+ *
+ * Called only from the paths the specification does not exclude -- not from
+ * zns_assign_zone_state(), which every host-driven transition goes through.
+ */
+static void zns_record_changed_zone(NvmeNamespace *ns, uint64_t zslba)
+{
+    struct zns_ssd *zns = ns->zns;
+    uint32_t i;
+
+    if (!zns) {
+        return;
+    }
+
+    for (i = 0; i < zns->nr_changed_zones; i++) {
+        if (zns->changed_zones[i] == zslba) {
+            return;
+        }
+    }
+    if (zns->nr_changed_zones >= ARRAY_SIZE(zns->changed_zones)) {
+        zns->changed_zone_overflow = true;
+    } else {
+        zns->changed_zones[zns->nr_changed_zones++] = zslba;
+    }
+
+    nvme_enqueue_event(ns->ctrl, NVME_AER_TYPE_NOTICE,
+                       NVME_AER_INFO_NOTICE_ZONE_DESCR_CHANGED,
+                       NVME_LOG_CHANGED_ZONE_LIST);
+}
+
 static void zns_assign_zone_state(NvmeNamespace *ns, NvmeZone *zone, NvmeZoneState state)
 {
 
@@ -1121,7 +1155,30 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     if(req->is_write)
     {
+        struct zns_ssd *zns = ns->zns;
+
         zns_finalize_zoned_write(ns, req, false);
+
+        /*
+         * Take the zone read only on every Nth write. A real controller does
+         * this when it can no longer program the zone; here it is the only
+         * change a host does not cause, so it is what gives the Changed Zone
+         * List and its notice something to carry. The failing write itself is
+         * reported as a write fault, and later writes to the zone are refused
+         * as read only by the state machine.
+         */
+        if (zns->err_write_fail_period &&
+            (++zns->err_write_counter % zns->err_write_fail_period) == 0) {
+            NvmeZone *failed = zns_get_zone_by_slba(ns, slba);
+
+            if (failed && zns_get_zone_state(failed) !=
+                          NVME_ZONE_STATE_READ_ONLY) {
+                zns_assign_zone_state(ns, failed, NVME_ZONE_STATE_READ_ONLY);
+                zns_record_changed_zone(ns, failed->d.zslba);
+                zns->err_write_injected++;
+            }
+            return NVME_WRITE_FAULT | NVME_DNR;
+        }
     }
 
     ns->zns->active_zone = zns_zone_idx(ns,slba);
@@ -1589,6 +1646,22 @@ static void zns_init_params(FemuCtrl *n, NvmeNamespace *ns)
     id_zns->timing.blk_er_lat[TLC] = TLC_BLOCK_ERASE_LATENCY_NS;
     id_zns->timing.blk_er_lat[QLC] = QLC_BLOCK_ERASE_LATENCY_NS;
 
+    /*
+     * Optional write-fault injection. One write in N fails and takes its zone
+     * read only, which is a change the host did not ask for and so is the one
+     * thing that belongs in the Changed Zone List. Counted rather than drawn at
+     * random, so a run repeats. 0 leaves it off.
+     */
+    id_zns->err_write_fail_period = 0;
+    id_zns->err_write_counter = 0;
+    id_zns->err_write_injected = 0;
+    if (n->err_write_fail_ppm) {
+        id_zns->err_write_fail_period = 1000000u / n->err_write_fail_ppm;
+        if (id_zns->err_write_fail_period < 1) {
+            id_zns->err_write_fail_period = 1;
+        }
+    }
+
     id_zns->dataplane_started_ptr = &n->dataplane_started;
 
     /*
@@ -1692,17 +1765,37 @@ static uint16_t zns_changed_zone_list(FemuCtrl *n, NvmeNamespace *ns,
                                       NvmeCmd *cmd, uint32_t len, uint64_t off,
                                       bool rae)
 {
+    struct zns_ssd *zns = ns->zns;
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
     uint32_t trans_len;
     uint16_t status;
     uint8_t *log;
+    uint32_t i;
 
     if (off >= ZNS_CHANGED_ZONE_LOG_SIZE) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
     log = g_malloc0(ZNS_CHANGED_ZONE_LOG_SIZE);
+    if (zns->changed_zone_overflow) {
+        stq_le_p(log, 0xffff);
+    } else {
+        stq_le_p(log, zns->nr_changed_zones);
+    }
+    for (i = 0; i < zns->nr_changed_zones; i++) {
+        stq_le_p(log + 8 + i * 8, zns->changed_zones[i]);
+    }
+    /*
+     * Reading without Retain Asynchronous Event is what clears the event: the
+     * host has now seen the zones it was pointing at.
+     */
+    if (!rae) {
+        zns->nr_changed_zones = 0;
+        zns->changed_zone_overflow = false;
+        nvme_clear_events(n, NVME_AER_TYPE_NOTICE);
+    }
+
     trans_len = MIN(len, ZNS_CHANGED_ZONE_LOG_SIZE - off);
     status = dma_read_prp(n, log + off, trans_len, prp1, prp2);
     g_free(log);

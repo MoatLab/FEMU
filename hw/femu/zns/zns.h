@@ -146,6 +146,19 @@ struct zns_ssd {
 
     SSDNandFlashTiming timing; /*Misao: accurate  timing emulation for zns ssd.*/
     NandMedia media;           /* shared NAND op timing (hw/femu/nand) */
+
+    /*
+     * Zones whose descriptor changed for a reason the host did not cause, and
+     * the counters behind the optional write-fault injection that produces
+     * them. The list holds ZSLBAs; a full page is reported as an overflow so
+     * the host rescans rather than trusting a truncated list.
+     */
+    uint64_t changed_zones[511];
+    uint32_t nr_changed_zones;
+    bool     changed_zone_overflow;
+    uint32_t err_write_fail_period;   /* fail one write in N; 0 = off */
+    uint64_t err_write_counter;
+    uint64_t err_write_injected;
     int flash_type;
     uint64_t program_unit;
     uint64_t stripe_unit;
