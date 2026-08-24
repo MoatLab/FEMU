@@ -487,21 +487,20 @@ and advertises it through OZCS bit 0, which is how the host knows it may issue
 one; the controller still checks that every zone the read spans is in a readable
 state. It defaults to false, which is the stricter and more common behavior.
 
-**Changed Zone List log page.** Log page BFh reports the zones whose state
-changed since the host last read it, which is how a host learns that zones moved
-without it asking — a zone the controller finished or closed on its own, for
-instance. Read it with `nvme get-log <dev> --log-id=0xbf --log-len=4096
---namespace-id=N`; the page carries an 8-byte count followed by up to 511
-zone start LBAs, and reports FFFFh as the count if more zones changed than fit,
-telling the host to rescan instead of trusting a truncated list.
+**Changed Zone List log page.** Log page BFh reports zone descriptor changes the
+host did not cause. Read it with `nvme get-log <dev> --log-id=0xbf
+--log-len=4096 --namespace-id=N`; the page carries an 8-byte count followed by
+up to 511 zone start LBAs. The list is per namespace, so the command needs a
+specific namespace identifier rather than the broadcast value nvme-cli sends by
+default.
 
-The list is per namespace, so the command needs a specific namespace identifier
-rather than the broadcast value nvme-cli sends by default. It is also
-clear-on-read: reading it consumes the entries so the next read reports only
-what changed since, unless the host sets Retain Asynchronous Event
-(`--rae`), which returns the list and leaves it in place. Each zone appears at
-most once however many times it changed, and only an actual state transition is
-recorded.
+The specification excludes most changes from this list: anything following a
+Zone Management Send command, a write that opens or fills a zone, and the
+controller closing a zone to free a resource. Those are all the transitions this
+device currently makes, so the count is zero and the header is returned on its
+own. A zone going read only or offline after a media failure, or a change of
+capacity or of the reset-recommended attribute, is the kind of change that would
+appear here.
 
 **Zone width.** By default a zone spans every channel, so it is as wide as the
 device and there are relatively few of them. `zns_chnls_per_zone=N` narrows a

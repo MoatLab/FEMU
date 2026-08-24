@@ -337,40 +337,8 @@ void zns_ns_cleanup(NvmeNamespace *ns)
     }
 }
 
-/*
- * Record a zone whose descriptor changed into the Changed Zone List (BFh).
- * Each ZSLBA appears at most once per the spec, so deduplicate; once the
- * 511-entry page is full, flag the overflow rather than dropping zones
- * silently, so the host learns the list is incomplete and rescans.
- */
-static void zns_record_changed_zone(NvmeNamespace *ns, uint64_t zslba)
-{
-    struct zns_ssd *zns = ns->zns;
-    uint32_t i;
-
-    if (!zns) {
-        return;
-    }
-
-    for (i = 0; i < zns->nr_changed_zones; i++) {
-        if (zns->changed_zones[i] == zslba) {
-            return;
-        }
-    }
-    if (zns->nr_changed_zones >= ARRAY_SIZE(zns->changed_zones)) {
-        zns->changed_zone_overflow = true;
-        return;
-    }
-    zns->changed_zones[zns->nr_changed_zones++] = zslba;
-}
-
 static void zns_assign_zone_state(NvmeNamespace *ns, NvmeZone *zone, NvmeZoneState state)
 {
-    /* the list reports transitions, so record only an actual change */
-    if (zns_get_zone_state(zone) != state) {
-        zns_record_changed_zone(ns, zone->d.zslba);
-    }
-
 
     if (QTAILQ_IN_USE(zone, entry)) {
         switch (zns_get_zone_state(zone)) {
@@ -1704,36 +1672,37 @@ static void zns_exit(FemuCtrl *n)
  * reading it consumes the entries, so the next read reports only what changed
  * since.
  */
+/*
+ * Build the Changed Zone List page (BFh).
+ *
+ * The list carries only zone descriptor changes the host did not cause. The
+ * specification excludes every change that follows from a Zone Management Send
+ * command, from a write that opens or fills a zone, and from the controller
+ * closing a zone to free a resource -- which between them are every transition
+ * this device makes. A zone going read only or offline after a media failure,
+ * or a change of capacity or of the reset-recommended attribute, is the kind of
+ * change that belongs here; none of those happen yet, so the count is zero and
+ * the header is returned on its own.
+ *
+ * The count is what the host reads to decide whether to walk the descriptors,
+ * so answering with a well-formed empty page is the correct response rather
+ * than refusing the log.
+ */
 static uint16_t zns_changed_zone_list(FemuCtrl *n, NvmeNamespace *ns,
                                       NvmeCmd *cmd, uint32_t len, uint64_t off,
                                       bool rae)
 {
-    struct zns_ssd *zns = ns->zns;
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
     uint32_t trans_len;
     uint16_t status;
     uint8_t *log;
-    uint32_t i;
 
     if (off >= ZNS_CHANGED_ZONE_LOG_SIZE) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
     log = g_malloc0(ZNS_CHANGED_ZONE_LOG_SIZE);
-    if (zns->changed_zone_overflow) {
-        stq_le_p(log, 0xffff);
-    } else {
-        stq_le_p(log, zns->nr_changed_zones);
-    }
-    for (i = 0; i < zns->nr_changed_zones; i++) {
-        stq_le_p(log + 8 + i * 8, zns->changed_zones[i]);
-    }
-    if (!rae) {
-        zns->nr_changed_zones = 0;
-        zns->changed_zone_overflow = false;
-    }
-
     trans_len = MIN(len, ZNS_CHANGED_ZONE_LOG_SIZE - off);
     status = dma_read_prp(n, log + off, trans_len, prp1, prp2);
     g_free(log);

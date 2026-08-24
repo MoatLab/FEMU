@@ -151,16 +151,6 @@ struct zns_ssd {
     uint64_t stripe_unit;
     struct zns_sram cache;
 
-    /*
-     * Changed Zone List (BFh): the ZSLBA of every zone whose state changed
-     * since the host last read the page, deduplicated. The page holds a
-     * 511-entry list after its 8 byte header; once full, the overflow flag
-     * makes the report say so rather than silently dropping zones.
-     */
-    uint64_t changed_zones[511];
-    uint32_t nr_changed_zones;
-    bool changed_zone_overflow;
-
     /*Misao: we still need a ftl in consumer devices*/
     uint64_t l2p_sz; /* = # of 4KiB pages*/
     struct ppa *maptbl; /* (page - chunk - block) hybrid L2P mapping table */
