@@ -180,6 +180,15 @@ struct ssdparams {
 
     int tt_luns;      /* total # of LUNs in the SSD */
 
+    /* DRAM write buffer: pages held before they are programmed */
+    int buffer_size;
+    double buffer_thres_pcent;
+
+    int read_hit_cnt;
+    int read_cnt;
+    int write_hit_cnt;
+    int write_cnt;
+
     /* FDP: reclaim unit geometry */
     int lines_per_ru;
     int total_ru_cnt;
@@ -220,6 +229,11 @@ struct line_mgmt {
     int victim_line_cnt;
     int full_line_cnt;
 };
+
+typedef struct buffer_entry {
+    uint64_t lpn;
+    QTAILQ_ENTRY(buffer_entry) b_entry;
+} buffer_entry;
 
 struct nand_cmd {
     int type;
@@ -407,6 +421,9 @@ struct ssd {
     struct ppa *maptbl; /* page level mapping table */
     uint64_t *rmap;     /* reverse mapptbl, assume it's stored in OOB */
     struct write_pointer wp;
+    QTAILQ_HEAD(write_buffer, buffer_entry) write_buffer;   /* LRU order */
+    GTree *wb_tree;                                         /* lpn lookup */
+    int write_buffer_cnt;
     struct write_pointer log_wp; /* LOG class; its line is taken on first use */
     struct line_mgmt lm;
 

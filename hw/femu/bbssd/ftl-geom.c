@@ -110,6 +110,14 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->trcbsy = n->bb_params.trcbsy;
     spp->trim_lat_ns = n->bb_params.trim_lat_ns;
 
+    /* DRAM write buffer */
+    spp->buffer_size = n->bb_params.buffer_size;
+    spp->buffer_thres_pcent = n->bb_params.buffer_thres_pcent / 100.0;
+    spp->read_hit_cnt = 0;
+    spp->read_cnt = 0;
+    spp->write_hit_cnt = 0;
+    spp->write_cnt = 0;
+
     /* calculated values */
     spp->secs_per_blk = spp->secs_per_pg * spp->pgs_per_blk;
     spp->secs_per_pl = spp->secs_per_blk * spp->blks_per_pl;

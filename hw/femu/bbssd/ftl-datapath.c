@@ -9,6 +9,121 @@
 #include "ftl.h"
 #include "ftl-internal.h"
 
+/* order buffer entries by logical page number */
+int comp_buffer(const void *a, const void *b)
+{
+    return ((buffer_entry *)a)->lpn - ((buffer_entry *)b)->lpn;
+}
+
+static bool buffer_enabled(struct ssd *ssd)
+{
+    return ssd->sp.buffer_size > 0 && ssd->wb_tree != NULL;
+}
+
+static bool buffer_full(struct ssd *ssd)
+{
+    return ssd->sp.buffer_size * ssd->sp.buffer_thres_pcent <=
+           ssd->write_buffer_cnt;
+}
+
+/* take the least recently written page out of the buffer */
+static bool buffer_select_victim(struct ssd *ssd, uint64_t *lpn)
+{
+    struct buffer_entry *victim = QTAILQ_FIRST(&ssd->write_buffer);
+
+    if (!victim) {
+        return false;
+    }
+
+    *lpn = victim->lpn;
+    QTAILQ_REMOVE(&ssd->write_buffer, victim, b_entry);
+    g_tree_remove(ssd->wb_tree, victim);
+    free(victim);
+    ssd->write_buffer_cnt--;
+
+    return true;
+}
+
+/* returns true when the page was already buffered, so this write hits */
+static bool buffer_insert_entry(struct ssd *ssd, struct buffer_entry *entry)
+{
+    struct buffer_entry *old = g_tree_lookup(ssd->wb_tree, entry);
+
+    if (old) {
+        g_tree_remove(ssd->wb_tree, old);
+        QTAILQ_REMOVE(&ssd->write_buffer, old, b_entry);
+        free(old);
+        g_tree_insert(ssd->wb_tree, entry, entry);
+        QTAILQ_INSERT_TAIL(&ssd->write_buffer, entry, b_entry);
+        return true;
+    }
+
+    g_tree_insert(ssd->wb_tree, entry, entry);
+    QTAILQ_INSERT_TAIL(&ssd->write_buffer, entry, b_entry);
+    ssd->write_buffer_cnt++;
+
+    return false;
+}
+
+/* a read served from the buffer does not reach the media */
+static bool buffer_hit(struct ssd *ssd, uint64_t lpn)
+{
+    struct buffer_entry target;
+
+    target.lpn = lpn;
+
+    return g_tree_lookup(ssd->wb_tree, &target) != NULL;
+}
+
+/*
+ * Program one logical page: choose placement through the mapping scheme,
+ * commit it, and charge the media. Shared by the ordinary write path and by
+ * the eviction of a buffered page, so both cost the same.
+ */
+static uint64_t ssd_program_lpn(struct ssd *ssd, uint64_t lpn, uint64_t stime)
+{
+    struct map_write_plan plan;
+    struct nand_cmd swr;
+    struct ppa ppa;
+
+    /* log the overwrite before commit_write invalidates the old mapping */
+    if (exp_lpn_watched(lpn)) {
+        struct ppa old = ssd->mapping->translate(ssd, lpn);
+        if (mapped_ppa(&old))
+            EXP_LOG("[INVALIDATE:overwrite] lpn=%lu old " PPA_FMT "\n",
+                    lpn, PPA_ARG(&old));
+    }
+
+    /* mapping scheme picks placement (page/dftl: data class, no reclaim) */
+    plan = ssd->mapping->prepare_write(ssd, lpn, USER_IO);
+
+    /* the page content changes: drop any stale read-cache entry for it */
+    rcache_invalidate(ssd, lpn);
+
+    /* allocate from the class the scheme asked for and commit the mapping */
+    ppa = get_new_page_class(ssd, plan.target_class);
+    ssd->mapping->commit_write(ssd, lpn, &ppa);
+
+    mark_page_valid(ssd, &ppa);
+    ssd->host_write_pages++; /* write amplification: a host-programmed page */
+    /* only log + track pages that carry the marker string */
+    if (femu_dbg_lpn_has_secret(ssd, lpn)) {
+        exp_watch_lpn_add(lpn);
+        exp_watch_blk[ppa.g.blk] = 1;
+        EXP_LOG("[WRITE] lpn=%lu -> " PPA_FMT " (secret)\n",
+                lpn, PPA_ARG(&ppa));
+    }
+
+    /* need to advance the write pointer here */
+    ssd_advance_write_pointer_class(ssd, plan.target_class);
+
+    swr.type = USER_IO;
+    swr.cmd = NAND_WRITE;
+    swr.stime = stime;
+
+    return ssd_advance_status(ssd, &ppa, &swr);
+}
+
 uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
 {
     struct ssdparams *spp = &ssd->sp;
@@ -19,6 +134,7 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
     uint64_t end_lpn = (lba + nsecs - 1) / spp->secs_per_pg;
     uint64_t lpn;
     uint64_t sublat, maxlat = 0;
+    bool all_buffered = true;
 
     if (end_lpn >= spp->tt_pgs) {
         ftl_err("read past device geometry: end_lpn=%"PRIu64" tt_pgs=%d\n",
@@ -28,7 +144,14 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
     }
 
     /* normal IO read path */
+    ssd->sp.read_cnt++;
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
+        /* a page still in the write buffer is served from there */
+        if (buffer_enabled(ssd) && buffer_hit(ssd, lpn)) {
+            continue;
+        }
+        all_buffered = false;
+
         /* dump the FEMU_DUMP_LPN page on every read (config read once at init) */
         if (exp_dump_lpn_set && lpn == exp_dump_lpn)
             femu_dbg_dump_lpn(ssd, lpn);
@@ -66,6 +189,10 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
         maxlat = (sublat > maxlat) ? sublat : maxlat;
     }
 
+    if (all_buffered) {
+        ssd->sp.read_hit_cnt++;
+    }
+
     return maxlat;
 }
 
@@ -76,7 +203,6 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     int len = req->nlb;
     uint64_t start_lpn = lba / spp->secs_per_pg;
     uint64_t end_lpn = (lba + len - 1) / spp->secs_per_pg;
-    struct ppa ppa;
     uint64_t lpn;
     uint64_t curlat = 0, maxlat = 0;
     int r;
@@ -95,6 +221,34 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
             break;
     }
 
+    /*
+     * With a write buffer configured the pages are held rather than programmed,
+     * and what gets programmed is whatever they displace. Without one the loop
+     * below programs each page directly, exactly as it always has.
+     */
+    if (buffer_enabled(ssd)) {
+        uint64_t victim_lpn;
+        bool all_hit = true;
+
+        while (buffer_full(ssd) && buffer_select_victim(ssd, &victim_lpn)) {
+            curlat = ssd_program_lpn(ssd, victim_lpn, req->stime);
+            maxlat = (curlat > maxlat) ? curlat : maxlat;
+        }
+
+        ssd->sp.write_cnt++;
+        for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
+            struct buffer_entry *entry = malloc(sizeof(*entry));
+
+            entry->lpn = lpn;
+            all_hit = buffer_insert_entry(ssd, entry) && all_hit;
+        }
+        if (all_hit) {
+            ssd->sp.write_hit_cnt++;
+        }
+
+        return maxlat;
+    }
+
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
         /* dftl: charge the demand-cache translation cost (no-op when disabled) */
         if (ssd->cmt.capacity) {
@@ -102,43 +256,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
             maxlat = (clat > maxlat) ? clat : maxlat;
         }
 
-        /* log the overwrite before commit_write invalidates the old mapping */
-        if (exp_lpn_watched(lpn)) {
-            struct ppa old = ssd->mapping->translate(ssd, lpn);
-            if (mapped_ppa(&old))
-                EXP_LOG("[INVALIDATE:overwrite] lpn=%lu old " PPA_FMT "\n",
-                        lpn, PPA_ARG(&old));
-        }
-
-        /* mapping scheme picks placement (page/dftl: data class, no reclaim) */
-        struct map_write_plan plan = ssd->mapping->prepare_write(ssd, lpn, USER_IO);
-
-        /* the page content changes: drop any stale read-cache entry for it */
-        rcache_invalidate(ssd, lpn);
-
-        /* allocate from the class the scheme asked for and commit the mapping */
-        ppa = get_new_page_class(ssd, plan.target_class);
-        ssd->mapping->commit_write(ssd, lpn, &ppa);
-
-        mark_page_valid(ssd, &ppa);
-        ssd->host_write_pages++; /* write amplification: a host-programmed page */
-        /* only log + track pages that carry the marker string */
-        if (femu_dbg_lpn_has_secret(ssd, lpn)) {
-            exp_watch_lpn_add(lpn);
-            exp_watch_blk[ppa.g.blk] = 1;
-            EXP_LOG("[WRITE] lpn=%lu -> " PPA_FMT " (secret)\n",
-                    lpn, PPA_ARG(&ppa));
-        }
-
-        /* need to advance the write pointer here */
-        ssd_advance_write_pointer_class(ssd, plan.target_class);
-
-        struct nand_cmd swr;
-        swr.type = USER_IO;
-        swr.cmd = NAND_WRITE;
-        swr.stime = req->stime;
-        /* get latency statistics */
-        curlat = ssd_advance_status(ssd, &ppa, &swr);
+        curlat = ssd_program_lpn(ssd, lpn, req->stime);
         maxlat = (curlat > maxlat) ? curlat : maxlat;
     }
 

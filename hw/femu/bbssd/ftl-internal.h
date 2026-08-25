@@ -222,6 +222,9 @@ static inline uint64_t ssd_ns_lba_base(struct ssd *ssd, NvmeRequest *req)
     return req->ns->backend_offset / ssd->sp.secsz;
 }
 
+/* DRAM write buffer ordering (hw/femu/bbssd/ftl-datapath.c) */
+int comp_buffer(const void *a, const void *b);
+
 /* non-FDP host datapath (hw/femu/bbssd/ftl-datapath.c) */
 uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req);
 uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req);

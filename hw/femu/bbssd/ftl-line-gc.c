@@ -87,6 +87,11 @@ void ssd_init_write_pointer(struct ssd *ssd)
     wpp->pg = 0;
     wpp->blk = 0;
     wpp->pl = 0;
+
+    /* DRAM write buffer: LRU queue plus a tree for lookup by page number */
+    QTAILQ_INIT(&ssd->write_buffer);
+    ssd->write_buffer_cnt = 0;
+    ssd->wb_tree = ssd->sp.buffer_size > 0 ? g_tree_new(comp_buffer) : NULL;
 }
 
 
