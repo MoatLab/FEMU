@@ -46,12 +46,29 @@ static struct ppa femu_map_page_translate(struct ssd *ssd, uint64_t lpn)
     return get_maptbl_ent(ssd, lpn);
 }
 
-/* page/dftl prepare_write: always place in the data class. */
+/*
+ * page/dftl prepare_write: the data class, or hot/cold separated when asked.
+ * An already-mapped page is an overwrite, the cheapest signal that it will be
+ * overwritten again; keeping those in their own lines means a line fills with
+ * pages that die together, so GC victims are mostly invalid rather than mixed.
+ */
 static struct map_write_plan femu_map_page_prepare_write(struct ssd *ssd,
                                                          uint64_t lpn, int io_type)
 {
-    (void)ssd; (void)lpn; (void)io_type;
-    return (struct map_write_plan){ .target_class = FEMU_MAP_CLASS_DATA };
+    struct ppa old;
+
+    (void)io_type;
+
+    if (!ssd->sp.hot_cold_sep) {
+        return (struct map_write_plan){ .target_class = FEMU_MAP_CLASS_DATA };
+    }
+
+    old = get_maptbl_ent(ssd, lpn);
+
+    return (struct map_write_plan){
+        .target_class = mapped_ppa(&old) ? FEMU_MAP_CLASS_HOT
+                                         : FEMU_MAP_CLASS_DATA,
+    };
 }
 
 /*

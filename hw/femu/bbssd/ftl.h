@@ -180,6 +180,8 @@ struct ssdparams {
 
     int tt_luns;      /* total # of LUNs in the SSD */
 
+    bool hot_cold_sep;  /* place overwrites in blocks of their own */
+
     /* DRAM write buffer: pages held before they are programmed */
     int buffer_size;
     double buffer_thres_pcent;
@@ -345,11 +347,12 @@ struct femu_ftl_policy_ops {
 };
 
 /*
- * Allocation class chosen for a new write. Page and dftl only ever use DATA;
- * a log-block scheme puts its overwrites in LOG so they land in blocks of
- * their own rather than mixed in with the data blocks.
+ * Allocation class chosen for a new write. Page and dftl use DATA, or DATA and
+ * HOT when hot/cold separation is on; a log-block scheme puts its overwrites in
+ * LOG so they land in blocks of their own rather than mixed in with data.
  */
-enum { FEMU_MAP_CLASS_DATA = 0, FEMU_MAP_CLASS_LOG = 1 };
+enum { FEMU_MAP_CLASS_DATA = 0, FEMU_MAP_CLASS_LOG = 1,
+       FEMU_MAP_CLASS_HOT = 2 };
 
 struct map_write_plan {
     int target_class;      /* allocation class for the new page */
@@ -426,6 +429,7 @@ struct ssd {
     GTree *wb_tree;                                         /* lpn lookup */
     int write_buffer_cnt;
     struct write_pointer log_wp; /* LOG class; its line is taken on first use */
+    struct write_pointer hot_wp; /* HOT class; likewise */
     struct line_mgmt lm;
 
     /* lockless ring for communication with NVMe IO thread */

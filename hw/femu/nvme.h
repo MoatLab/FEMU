@@ -1625,6 +1625,7 @@ typedef struct BbCtrlParams {
     int gc_thres_pcent;
     int gc_thres_pcent_high;
 
+    bool hot_cold_sep;        /* separate overwrites from write-once pages */
     int buffer_size;          /* pages held in the write buffer */
     int buffer_thres_pcent;   /* fill level at which eviction starts */
     int gc_strategy; /* FDP GC strategy: 0=greedy, 1=cost-benefit, 2=random */

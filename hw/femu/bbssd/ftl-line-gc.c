@@ -168,14 +168,15 @@ static void ssd_advance_write_pointer_common(struct ssd *ssd,
     }
 }
 
-/* the LOG class takes its own line, the first time something is written to it */
-static void ssd_init_log_write_pointer(struct ssd *ssd)
+/* take a line for a class that allocates one lazily (LOG, HOT) */
+static void ssd_init_class_write_pointer(struct ssd *ssd,
+                                         struct write_pointer *wpp,
+                                         const char *what)
 {
-    struct write_pointer *wpp = &ssd->log_wp;
     struct line *curline = get_next_free_line(ssd);
 
     if (!curline) {
-        ftl_err("no free line for the log class in [%s]\n", ssd->ssdname);
+        ftl_err("no free line for the %s class in [%s]\n", what, ssd->ssdname);
         return;
     }
 
@@ -191,15 +192,27 @@ static void ssd_init_log_write_pointer(struct ssd *ssd)
 static struct write_pointer *ssd_write_pointer_for_class(struct ssd *ssd,
                                                          int klass)
 {
+    struct write_pointer *wpp = NULL;
+    const char *what = NULL;
+
     if (klass == FEMU_MAP_CLASS_LOG) {
-        if (!ssd->log_wp.curline) {
-            ssd_init_log_write_pointer(ssd);
+        wpp = &ssd->log_wp;
+        what = "log";
+    } else if (klass == FEMU_MAP_CLASS_HOT) {
+        wpp = &ssd->hot_wp;
+        what = "hot";
+    }
+
+    if (wpp) {
+        if (!wpp->curline) {
+            ssd_init_class_write_pointer(ssd, wpp, what);
         }
-        if (ssd->log_wp.curline) {
-            return &ssd->log_wp;
+        if (wpp->curline) {
+            return wpp;
         }
     }
 
+    /* no line to be had for the class; fall back to the data pointer */
     return &ssd->wp;
 }
 

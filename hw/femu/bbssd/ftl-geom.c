@@ -129,6 +129,7 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     /* DRAM write buffer */
     spp->buffer_size = n->bb_params.buffer_size;
     spp->buffer_thres_pcent = n->bb_params.buffer_thres_pcent / 100.0;
+    spp->hot_cold_sep = n->bb_params.hot_cold_sep;
     spp->read_hit_cnt = 0;
     spp->read_cnt = 0;
     spp->write_hit_cnt = 0;
