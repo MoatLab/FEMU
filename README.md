@@ -380,6 +380,18 @@ Data units follow the spec's unit of a thousand 512 byte units, rounded up.
 sudo nvme smart-log /dev/nvme0        # Data Units Written, host_write_commands, ...
 ```
 
+**DRAM write buffer.** `buffer_size` holds that many pages in DRAM instead of
+programming them, the way a real drive absorbs host writes; `buffer_thres_pcent`
+is the fill level at which a write starts evicting the least recently written
+pages, and it is those evictions that reach the media and are charged for. A
+read of a page still held is served without touching the media. Deallocating a
+held page drops it rather than writing it out later.
+
+It defaults to 0, which programs every write directly and leaves timing as it
+was. Note that with a buffer configured a write that is absorbed costs nothing
+and the cost appears later on whichever write evicts it, so per-request latency
+is redistributed rather than reduced.
+
 **Write amplification.** The device reports amplification in the vendor area of
 the SMART log: the factor scaled by 1000 at byte 192, host-programmed pages at
 200, and relocated pages at 208.

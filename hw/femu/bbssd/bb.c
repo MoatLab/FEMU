@@ -132,6 +132,25 @@ static void bb_flip(FemuCtrl *n, NvmeCmd *cmd)
     }
 }
 
+/*
+ * Release what the namespace's FTL still holds. Reached for the mode the
+ * controller itself runs; a namespace running bbssd underneath a controller of
+ * another mode is not dispatched an exit at all, which is a gap in the generic
+ * teardown rather than one here.
+ */
+static void bb_exit(FemuCtrl *n)
+{
+    int i;
+
+    for (i = 0; i < n->num_namespaces; i++) {
+        struct ssd *ssd = n->namespaces[i].ssd;
+
+        if (ssd) {
+            ssd_free_write_buffer(ssd);
+        }
+    }
+}
+
 static uint16_t bb_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                            NvmeRequest *req)
 {
@@ -166,7 +185,7 @@ int nvme_register_bbssd(FemuCtrl *n)
     n->ext_ops = (FemuExtCtrlOps) {
         .state            = NULL,
         .init             = bb_init,
-        .exit             = NULL,
+        .exit             = bb_exit,
         .rw_check_req     = NULL,
         .admin_cmd        = bb_admin_cmd,
         .io_cmd           = bb_io_cmd,

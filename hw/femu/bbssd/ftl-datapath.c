@@ -9,10 +9,21 @@
 #include "ftl.h"
 #include "ftl-internal.h"
 
-/* order buffer entries by logical page number */
+/*
+ * Order buffer entries by logical page number. Compared rather than
+ * subtracted: a page number is 64-bit and the difference between two of them
+ * does not fit the int this has to return, so subtracting misorders the tree
+ * for pages far enough apart and loses entries that are still in it.
+ */
 int comp_buffer(const void *a, const void *b)
 {
-    return ((buffer_entry *)a)->lpn - ((buffer_entry *)b)->lpn;
+    uint64_t la = ((const struct buffer_entry *)a)->lpn;
+    uint64_t lb = ((const struct buffer_entry *)b)->lpn;
+
+    if (la < lb) {
+        return -1;
+    }
+    return la > lb;
 }
 
 static bool buffer_enabled(struct ssd *ssd)
@@ -38,7 +49,7 @@ static bool buffer_select_victim(struct ssd *ssd, uint64_t *lpn)
     *lpn = victim->lpn;
     QTAILQ_REMOVE(&ssd->write_buffer, victim, b_entry);
     g_tree_remove(ssd->wb_tree, victim);
-    free(victim);
+    g_free(victim);
     ssd->write_buffer_cnt--;
 
     return true;
@@ -52,7 +63,7 @@ static bool buffer_insert_entry(struct ssd *ssd, struct buffer_entry *entry)
     if (old) {
         g_tree_remove(ssd->wb_tree, old);
         QTAILQ_REMOVE(&ssd->write_buffer, old, b_entry);
-        free(old);
+        g_free(old);
         g_tree_insert(ssd->wb_tree, entry, entry);
         QTAILQ_INSERT_TAIL(&ssd->write_buffer, entry, b_entry);
         return true;
@@ -65,6 +76,28 @@ static bool buffer_insert_entry(struct ssd *ssd, struct buffer_entry *entry)
     return false;
 }
 
+/*
+ * Drop a page from the buffer without programming it. Deallocating a page the
+ * buffer still holds has to remove it: otherwise the eventual eviction writes
+ * it back out, and data the host discarded reappears.
+ */
+static void buffer_discard(struct ssd *ssd, uint64_t lpn)
+{
+    struct buffer_entry target;
+    struct buffer_entry *held;
+
+    target.lpn = lpn;
+    held = g_tree_lookup(ssd->wb_tree, &target);
+    if (!held) {
+        return;
+    }
+
+    QTAILQ_REMOVE(&ssd->write_buffer, held, b_entry);
+    g_tree_remove(ssd->wb_tree, held);
+    g_free(held);
+    ssd->write_buffer_cnt--;
+}
+
 /* a read served from the buffer does not reach the media */
 static bool buffer_hit(struct ssd *ssd, uint64_t lpn)
 {
@@ -73,6 +106,22 @@ static bool buffer_hit(struct ssd *ssd, uint64_t lpn)
     target.lpn = lpn;
 
     return g_tree_lookup(ssd->wb_tree, &target) != NULL;
+}
+
+/* release every page the buffer still holds, without programming them */
+void ssd_free_write_buffer(struct ssd *ssd)
+{
+    struct buffer_entry *entry;
+
+    while ((entry = QTAILQ_FIRST(&ssd->write_buffer)) != NULL) {
+        QTAILQ_REMOVE(&ssd->write_buffer, entry, b_entry);
+        g_free(entry);
+    }
+    ssd->write_buffer_cnt = 0;
+    if (ssd->wb_tree) {
+        g_tree_destroy(ssd->wb_tree);
+        ssd->wb_tree = NULL;
+    }
 }
 
 /*
@@ -237,7 +286,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 
         ssd->sp.write_cnt++;
         for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
-            struct buffer_entry *entry = malloc(sizeof(*entry));
+            struct buffer_entry *entry = g_new0(struct buffer_entry, 1);
 
             entry->lpn = lpn;
             all_hit = buffer_insert_entry(ssd, entry) && all_hit;
@@ -353,6 +402,11 @@ uint64_t ssd_trim(struct ssd *ssd, NvmeRequest *req)
 
             /* drop any stale read-cache entry for the trimmed page */
             rcache_invalidate(ssd, lpn);
+
+            /* and any copy the write buffer is still holding */
+            if (buffer_enabled(ssd)) {
+                buffer_discard(ssd, lpn);
+            }
 
             trimmed_pages++;
         }

@@ -1482,7 +1482,8 @@ static const Property femu_props[] = {
                       bb_params.fdp_trim_erase_all, 0),
     DEFINE_PROP_LINK("subsys", FemuCtrl, subsys, TYPE_NVME_SUBSYS,
                      NvmeSubsystem *),
-    DEFINE_PROP_INT32("buffer_size", FemuCtrl, bb_params.buffer_size, 10000),
+    /* pages held in the DRAM write buffer; 0 programs every write directly */
+    DEFINE_PROP_INT32("buffer_size", FemuCtrl, bb_params.buffer_size, 0),
     DEFINE_PROP_INT32("buffer_thres_pcent", FemuCtrl,
                       bb_params.buffer_thres_pcent, 90),
 };
