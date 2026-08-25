@@ -996,6 +996,7 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
     uint32_t trans_len;
     time_t current_seconds;
     NvmeSmartLog smart;
+    int i;
 
     trans_len = MIN(sizeof(smart), buf_len);
     memset(&smart, 0x0, sizeof(smart));
@@ -1026,8 +1027,24 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
     smart.temperature[0] = n->temperature & 0xff;
     smart.temperature[1] = (n->temperature >> 8) & 0xff;
 
-    /* healthy by default; bbssd derives it from the factory bad-block fraction */
-    smart.available_spare = (BBSSD(n) && n->ssd) ? ssd_available_spare(n->ssd) : 100;
+    /*
+     * Healthy by default; bbssd derives it from the factory bad-block fraction.
+     * With several bbssd namespaces report the worst of them, since this is a
+     * controller-wide field.
+     */
+    smart.available_spare = 100;
+    for (i = 0; n->namespaces && i < n->num_namespaces; i++) {
+        NvmeNamespace *ns = &n->namespaces[i];
+        uint8_t spare;
+
+        if (!NS_BBSSD(ns) || !ns->ssd) {
+            continue;
+        }
+        spare = ssd_available_spare(ns->ssd);
+        if (spare < smart.available_spare) {
+            smart.available_spare = spare;
+        }
+    }
 
     /*
      * Reading this log without Retain Asynchronous Event is what clears a
@@ -1048,16 +1065,33 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
      * Host pages and programmed pages differ only when a write buffer is
      * configured: it is the gap between them that a buffer exists to open.
      */
-    if (BBSSD(n) && n->ssd) {
-        uint32_t waf = cpu_to_le32(ssd_waf_x1000(n->ssd));
-        uint64_t hw = cpu_to_le64(ssd_host_write_pages(n->ssd));
-        uint64_t gw = cpu_to_le64(ssd_gc_write_pages(n->ssd));
-        uint64_t nw = cpu_to_le64(ssd_nand_write_pages(n->ssd));
+    {
+        uint64_t host = 0, gc = 0, nand = 0;
+        uint32_t waf;
 
-        memcpy(&smart.reserved2[0], &waf, sizeof(waf));
-        memcpy(&smart.reserved2[8], &hw, sizeof(hw));
-        memcpy(&smart.reserved2[16], &gw, sizeof(gw));
-        memcpy(&smart.reserved2[24], &nw, sizeof(nw));
+        /* summed over the bbssd namespaces, as this log page is device-wide */
+        for (i = 0; n->namespaces && i < n->num_namespaces; i++) {
+            NvmeNamespace *ns = &n->namespaces[i];
+
+            if (!NS_BBSSD(ns) || !ns->ssd) {
+                continue;
+            }
+            host += ssd_host_write_pages(ns->ssd);
+            gc   += ssd_gc_write_pages(ns->ssd);
+            nand += ssd_nand_write_pages(ns->ssd);
+        }
+
+        if (host) {
+            waf = cpu_to_le32((uint32_t)(((nand + gc) * 1000ull) / host));
+            host = cpu_to_le64(host);
+            gc = cpu_to_le64(gc);
+            nand = cpu_to_le64(nand);
+
+            memcpy(&smart.reserved2[0], &waf, sizeof(waf));
+            memcpy(&smart.reserved2[8], &host, sizeof(host));
+            memcpy(&smart.reserved2[16], &gc, sizeof(gc));
+            memcpy(&smart.reserved2[24], &nand, sizeof(nand));
+        }
     }
 
     current_seconds = time(NULL);
