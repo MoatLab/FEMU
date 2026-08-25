@@ -28,6 +28,12 @@ void nvme_mark_written(NvmeNamespace *ns, uint64_t slba, uint32_t nlb)
 /*
  * Deallocate [slba, slba+nlb): clear the util bits and zero the backing store so
  * later reads return deterministic zeros. Bounded to the requested range.
+ *
+ * The backing store is one flat allocation shared by every namespace, so the
+ * memset has to be addressed within this namespace's slice of it the same way
+ * nvme_rw() addresses reads and writes. backend_offset is 0 for the first
+ * namespace; without it a deallocate on any later namespace zeroes another
+ * namespace's data.
  */
 void nvme_deallocate_range(FemuCtrl *n, NvmeNamespace *ns, uint64_t slba,
                            uint32_t nlb)
@@ -38,7 +44,7 @@ void nvme_deallocate_range(FemuCtrl *n, NvmeNamespace *ns, uint64_t slba,
     if (n->mbe && n->mbe->logical_space) {
         uint8_t lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
         uint8_t data_shift = ns->id_ns.lbaf[lba_index].lbads;
-        uint64_t off = slba << data_shift;
+        uint64_t off = ns->backend_offset + (slba << data_shift);
         uint64_t len = (uint64_t)nlb << data_shift;
         memset((uint8_t *)n->mbe->logical_space + off, 0, len);
     }

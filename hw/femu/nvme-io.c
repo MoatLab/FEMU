@@ -762,7 +762,8 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint8_t lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
     uint8_t data_shift = ns->id_ns.lbaf[lba_index].lbads;
     uint64_t data_size = nlb << data_shift;
-    uint64_t offset  = slba << data_shift;
+    /* address the media within this namespace's slice, as nvme_rw() does */
+    uint64_t offset  = ns->backend_offset + (slba << data_shift);
 
     if ((slba + nlb) > le64_to_cpu(ns->id_ns.nsze)) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
