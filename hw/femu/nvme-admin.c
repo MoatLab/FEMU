@@ -1041,17 +1041,23 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
      * Vendor-specific area: report the write-amplification factor (scaled by
      * 1000) and the raw page counters, so a workload can read amplification
      * straight out of `nvme smart-log -o binary`. reserved2 begins at byte 192
-     * of the log, putting the factor at 192, host pages at 200 and relocated
-     * pages at 208. The standard fields above are untouched.
+     * of the log, putting the factor at 192, host pages at 200, relocated pages
+     * at 208 and programmed user pages at 216. The standard fields above are
+     * untouched.
+     *
+     * Host pages and programmed pages differ only when a write buffer is
+     * configured: it is the gap between them that a buffer exists to open.
      */
     if (BBSSD(n) && n->ssd) {
         uint32_t waf = cpu_to_le32(ssd_waf_x1000(n->ssd));
         uint64_t hw = cpu_to_le64(ssd_host_write_pages(n->ssd));
         uint64_t gw = cpu_to_le64(ssd_gc_write_pages(n->ssd));
+        uint64_t nw = cpu_to_le64(ssd_nand_write_pages(n->ssd));
 
         memcpy(&smart.reserved2[0], &waf, sizeof(waf));
         memcpy(&smart.reserved2[8], &hw, sizeof(hw));
         memcpy(&smart.reserved2[16], &gw, sizeof(gw));
+        memcpy(&smart.reserved2[24], &nw, sizeof(nw));
     }
 
     current_seconds = time(NULL);

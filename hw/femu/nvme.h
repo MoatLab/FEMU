@@ -2095,6 +2095,7 @@ uint8_t ssd_available_spare(struct ssd *ssd);
 uint32_t ssd_waf_x1000(struct ssd *ssd);
 uint64_t ssd_host_write_pages(struct ssd *ssd);
 uint64_t ssd_gc_write_pages(struct ssd *ssd);
+uint64_t ssd_nand_write_pages(struct ssd *ssd);
 
 static inline uint64_t ns_blks(NvmeNamespace *ns, uint8_t lba_idx)
 {

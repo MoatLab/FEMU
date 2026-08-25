@@ -75,6 +75,7 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
         }
     }
     ssd->host_write_pages = 0;
+    ssd->nand_write_pages = 0;
     ssd->gc_write_pages = 0;
 
     ssd->bad_blocks = n->nand_bad_blocks;
@@ -154,13 +155,18 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
 
 /*
  * Write-amplification factor scaled by 1000, so it needs no floating point on
- * the read path: (host + relocated) / host. Reads 1000 (a factor of 1.0) before
- * the host has written anything.
+ * the read path: pages written to NAND over pages the host wrote. Reads 1000
+ * (a factor of 1.0) before the host has written anything.
+ *
+ * The denominator is what the host wrote, not what reached the media, so a
+ * write buffer that absorbs repeated writes to the same page shows up as the
+ * reduction in amplification that it is. With no buffer configured the two are
+ * equal and this is the same ratio it has always been.
  */
 uint32_t ssd_waf_x1000(struct ssd *ssd)
 {
     uint64_t host = ssd->host_write_pages;
-    uint64_t total = host + ssd->gc_write_pages;
+    uint64_t total = ssd->nand_write_pages + ssd->gc_write_pages;
 
     if (host == 0) {
         return 1000;
@@ -178,6 +184,11 @@ uint64_t ssd_host_write_pages(struct ssd *ssd)
 uint64_t ssd_gc_write_pages(struct ssd *ssd)
 {
     return ssd->gc_write_pages;
+}
+
+uint64_t ssd_nand_write_pages(struct ssd *ssd)
+{
+    return ssd->nand_write_pages;
 }
 
 /*
@@ -235,6 +246,47 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
     }
 
     switch (req->cmd.opcode) {
+    case NVME_CMD_FLUSH:
+        /*
+         * Commit what the write buffer is holding. The buffer is the only state
+         * a bbssd namespace keeps back from the media, so a flush is a full
+         * write-back of it, and the cost of programming those pages is charged
+         * here -- which is where a real device charges it too.
+         *
+         * Handled here rather than in the I/O layer because the buffer, the
+         * mapping and the line management belong to this thread; draining them
+         * from the poller would race everything else the FTL is doing. The
+         * request reaches the FTL ring like any other, so no extra plumbing is
+         * needed to get here.
+         *
+         * What this guarantees: a completion is only posted after the FTL has
+         * processed the request, so every write the host has seen complete is
+         * already in the buffer by the time a later flush is dequeued, and the
+         * write-back covers it. That is what the NVM Command Set asks of Flush.
+         * It says nothing about writes still in flight on another poller ring,
+         * which the host has not been told are complete and which the FTL
+         * thread may not have reached yet -- those are unordered against this
+         * flush, as they are against each other.
+         *
+         * Drained whether or not the cache is currently advertised or enabled:
+         * if pages are being held back, a flush has to write them out. Doing
+         * this only for an enabled cache would let the host disable the cache
+         * and then be told a flush succeeded with pages still buffered.
+         */
+        lat = ssd_buffer_destage(ssd, 0, req->stime);
+        break;
+    case NVME_CMD_WRITE_ZEROES:
+        /*
+         * FDP keeps its own reclaim-unit valid/invalid accounting and needs
+         * mark_page_invalid_fdp() to maintain it, as the FDP deallocate path
+         * above does. Routing Write Zeroes through the flat path would corrupt
+         * that accounting, so under FDP this is left as it was: the I/O layer
+         * has already zeroed the blocks, and the FTL mapping is not updated.
+         */
+        if (!ssd->fdp_enabled) {
+            lat = ssd_write_zeroes(ssd, req);
+        }
+        break;
     case NVME_CMD_WRITE:
         if (ssd->fdp_enabled) {
             lat = nvme_do_write_fdp(n, req, req->slba, req->nlb);

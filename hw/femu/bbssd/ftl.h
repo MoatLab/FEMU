@@ -184,10 +184,11 @@ struct ssdparams {
     int buffer_size;
     double buffer_thres_pcent;
 
-    int read_hit_cnt;
-    int read_cnt;
-    int write_hit_cnt;
-    int write_cnt;
+    /* buffer/cache effectiveness; 64-bit, a long run overflows an int */
+    uint64_t read_hit_cnt;
+    uint64_t read_cnt;
+    uint64_t write_hit_cnt;
+    uint64_t write_cnt;
 
     /* FDP: reclaim unit geometry */
     int lines_per_ru;
@@ -495,8 +496,9 @@ struct ssd {
      * host, and pages programmed to relocate data the device already held. WAF
      * is (host + relocated) / host.
      */
-    uint64_t host_write_pages;
-    uint64_t gc_write_pages;
+    uint64_t host_write_pages;  /* pages the host wrote (WAF denominator) */
+    uint64_t nand_write_pages;  /* user pages programmed into NAND */
+    uint64_t gc_write_pages;    /* pages the device relocated itself */
 
     bool debug_ftl; /* check FTL invariants on the GC path (off by default) */
 
@@ -517,6 +519,8 @@ struct ssd {
 
 int bb_check_geometry(FemuCtrl *n, Error **errp);
 void ssd_free_write_buffer(struct ssd *ssd);
+uint64_t ssd_buffer_destage(struct ssd *ssd, int budget, uint64_t stime);
+uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req);
 void ssd_init(FemuCtrl *n, NvmeNamespace *ns);
 
 /* NAND media-layer bridge (hw/femu/bbssd/ftl-media.c) */

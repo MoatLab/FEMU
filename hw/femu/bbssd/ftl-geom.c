@@ -59,9 +59,9 @@ int bb_check_geometry(FemuCtrl *n, Error **errp)
     }
 
     /*
-     * The write buffer evicts once it passes buffer_thres_pcent of its size, so
-     * a level above 100 would never trigger and the buffer would grow without
-     * bound, and one of zero would evict a page as soon as it arrived.
+     * The write buffer starts writing pages back once it reaches
+     * buffer_thres_pcent of its size, so a level above 100 would never be
+     * reached and the buffer would grow without bound.
      */
     if (p->buffer_size < 0) {
         error_setg(errp, "FEMU bbssd: buffer_size must not be negative");
