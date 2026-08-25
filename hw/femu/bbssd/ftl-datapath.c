@@ -192,23 +192,22 @@ static uint64_t buffer_hit_lat(struct ssd *ssd)
 }
 
 /*
- * Teardown deliberately does not touch the buffer.
- *
- * femu_exit() runs the extension exit hook before nvme_clear_ctrl() stops the
- * dataplane, and the FTL thread has no stop condition and is never joined, so
- * it can still be inside a lookup, an insert or a write-back here. Freeing the
- * entries, or the tree, from the exit path is a use-after-free -- not merely a
- * loss of the pages the buffer still owes. Those pages are meaningless at this
- * point anyway: the backing store is volatile and goes with the device.
- *
- * Releasing this safely needs a shutdown protocol that quiesces and joins the
- * FTL thread before anything it owns is freed. That is a gap in the generic
- * teardown -- the same thread also outlives the rings, the namespaces and the
- * backend that femu_exit() frees straight after this -- and belongs with that
- * fix rather than here.
+ * Release the buffer. Safe only because femu_exit() joins the FTL thread first;
+ * the pages it still owes are meaningless once the volatile backing store goes.
  */
 void ssd_free_write_buffer(struct ssd *ssd)
 {
+    struct buffer_entry *entry;
+
+    while ((entry = QTAILQ_FIRST(&ssd->write_buffer)) != NULL) {
+        QTAILQ_REMOVE(&ssd->write_buffer, entry, b_entry);
+        g_free(entry);
+    }
+    ssd->write_buffer_cnt = 0;
+    if (ssd->wb_tree) {
+        g_tree_destroy(ssd->wb_tree);
+        ssd->wb_tree = NULL;
+    }
 }
 
 /*

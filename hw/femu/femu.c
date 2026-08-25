@@ -1078,10 +1078,13 @@ static void *femu_ftl_thread(void *arg)
     int rc, i;
 
     while (!n->dataplane_started) {
+        if (n->ftl_stopping) {
+            return NULL;
+        }
         usleep(100000);
     }
 
-    while (1) {
+    while (!n->ftl_stopping) {
         for (i = 1; i <= n->nr_pollers; i++) {
             if (!n->to_ftl[i] || !femu_ring_count(n->to_ftl[i])) {
                 continue;
@@ -1280,7 +1283,24 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     if (femu_needs_ftl_thread(n)) {
         qemu_thread_create(&n->ftl_thread, "FEMU-FTL-Thread", femu_ftl_thread,
                            n, QEMU_THREAD_JOINABLE);
+        n->ftl_thread_running = true;
     }
+}
+
+/*
+ * Stop and join the FTL thread. The rings, namespaces, FTL state and backend it
+ * works on are all freed right after this, so it must no longer be running.
+ */
+static void femu_stop_ftl_thread(FemuCtrl *n)
+{
+    if (!n->ftl_thread_running) {
+        return;
+    }
+
+    n->ftl_stopping = true;
+    smp_mb();   /* publish the flag before waiting on the thread to see it */
+    qemu_thread_join(&n->ftl_thread);
+    n->ftl_thread_running = false;
 }
 
 static void nvme_destroy_poller(FemuCtrl *n)
@@ -1305,15 +1325,49 @@ static void nvme_destroy_poller(FemuCtrl *n)
     n->poller_ctr = NULL;
 }
 
+/*
+ * Run each mode's exit once. A namespace may run a mode other than the
+ * controller's, and every mode's exit walks the namespaces itself, so dispatch
+ * over the distinct handlers rather than once per namespace.
+ */
+static void femu_exit_extensions(FemuCtrl *n)
+{
+    void (*seen[FEMU_NR_MODES])(struct FemuCtrl *);
+    int nseen = 0, i, j;
+
+    if (n->ext_ops.exit) {
+        seen[nseen++] = n->ext_ops.exit;
+    }
+
+    for (i = 0; n->namespaces && i < n->num_namespaces; i++) {
+        void (*ex)(struct FemuCtrl *) = n->namespaces[i].ext_ops.exit;
+
+        if (!ex) {
+            continue;
+        }
+        for (j = 0; j < nseen; j++) {
+            if (seen[j] == ex) {
+                break;
+            }
+        }
+        if (j == nseen && nseen < (int)ARRAY_SIZE(seen)) {
+            seen[nseen++] = ex;
+        }
+    }
+
+    for (j = 0; j < nseen; j++) {
+        seen[j](n);
+    }
+}
+
 static void femu_exit(PCIDevice *pci_dev)
 {
     FemuCtrl *n = FEMU(pci_dev);
 
     femu_debug("femu_exit starting!\n");
 
-    if (n->ext_ops.exit) {
-        n->ext_ops.exit(n);
-    }
+    femu_stop_ftl_thread(n);
+    femu_exit_extensions(n);
 
     nvme_clear_ctrl(n, true);
     nvme_destroy_poller(n);

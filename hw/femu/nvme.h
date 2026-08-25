@@ -1733,6 +1733,8 @@ typedef struct FemuCtrl {
     uint8_t         csi;
     ZNSCtrlParams zns_params;
     QemuThread      ftl_thread; /* one FTL thread serving every namespace */
+    bool            ftl_thread_running;
+    bool            ftl_stopping;   /* asks the FTL thread to leave its loop */
 
     /* Coperd: OC2.0 FIXME */
     NvmeParams  params;
@@ -1932,6 +1934,7 @@ enum {
     FEMU_CSD_MODE = 4,
     FEMU_KVSSD_MODE = 5,
     FEMU_SMARTSSD_MODE,
+    FEMU_NR_MODES,
 };
 
 enum {
