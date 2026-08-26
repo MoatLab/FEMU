@@ -63,6 +63,20 @@ int bb_check_geometry(FemuCtrl *n, Error **errp)
      * buffer_thres_pcent of its size, so a level above 100 would never be
      * reached and the buffer would grow without bound.
      */
+    /*
+     * The write pointer only ever allocates plane 0 -- get_new_page() asserts
+     * it -- so a second plane would be counted into the capacity and never
+     * written, and the device would run out of lines while the geometry still
+     * claimed room. Refuse it rather than hand out a shape the allocator
+     * cannot honour. The media layer's multi-plane op is waiting on the same
+     * addressing work.
+     */
+    if (p->pls_per_lun != 1) {
+        error_setg(errp, "FEMU bbssd: pls_per_lun must be 1, got %d; "
+                   "multi-plane addressing is not implemented", p->pls_per_lun);
+        return -1;
+    }
+
     if (p->buffer_size < 0) {
         error_setg(errp, "FEMU bbssd: buffer_size must not be negative");
         return -1;

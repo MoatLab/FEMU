@@ -153,11 +153,19 @@ void nand_media_init(NandMedia *m, const NandMediaConfig *cfg);
 NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
                                NandMediaOp op, uint64_t stime);
 
-/* multi-plane group: one parallel array op + per-plane bus + inter-plane busy */
+/*
+ * Multi-plane group: one parallel array op + per-plane bus + inter-plane busy.
+ * No caller yet -- the bbssd write pointer only ever allocates plane 0, so
+ * there is no way to build a group. Waiting on plane addressing in the FTL.
+ */
 NandOpCompletion nand_media_multiplane(NandMedia *m, const NandLoc *locs, int nlocs,
                                        NandMediaOp op, uint64_t stime);
 
-/* on-chip copyback: src read + dst program, skips the bus when configured */
+/*
+ * On-chip copyback: src read + dst program, skips the bus when configured.
+ * No caller yet -- GC picks its destination from the striped write pointer, so
+ * source and destination almost never share a LUN, which copyback requires.
+ */
 NandOpCompletion nand_media_copyback(NandMedia *m, const NandLoc *src,
                                      const NandLoc *dst, uint64_t stime);
 
