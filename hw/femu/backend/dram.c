@@ -96,6 +96,18 @@ int backend_rw(SsdDramBackend *b, QEMUSGList *qsg, uint64_t *lbal, bool is_write
     while (sg_cur_index < qsg->nsg) {
         cur_addr = qsg->sg[sg_cur_index].base + sg_cur_byte;
         cur_len = qsg->sg[sg_cur_index].len - sg_cur_byte;
+        /*
+         * The offset comes from a mode's own address translation. Refuse one
+         * that leaves the backing store rather than reading or writing past it,
+         * which corrupts the heap and takes QEMU down with it.
+         */
+        if (mb_oft > (uint64_t)b->size ||
+            cur_len > (uint64_t)b->size - mb_oft) {
+            femu_err("backend: %" PRIu64 "+%" PRIu64 " is outside the %" PRId64
+                     " byte backing store\n", (uint64_t)mb_oft,
+                     (uint64_t)cur_len, b->size);
+            return -1;
+        }
         if (dma_memory_rw(qsg->as, cur_addr, mb + mb_oft, cur_len, dir, MEMTXATTRS_UNSPECIFIED)) {
             femu_err("dma_memory_rw error\n");
         }

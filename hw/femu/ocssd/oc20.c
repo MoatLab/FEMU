@@ -354,7 +354,18 @@ static uint16_t oc20_rw_check_chunk_read(FemuCtrl *n, NvmeCmd *cmd,
     uint64_t sectr, mw_cunits, wp;
     uint8_t state;
 
-    Oc20CS *cnk = oc20_chunk_get_state(n, req->ns, lba);
+    Oc20CS *cnk;
+
+    /*
+     * An address outside the geometry is not addressable at all, which is a
+     * range error, not an unwritten block: reporting it as unwritten let the
+     * read carry on to a transfer the media has no room for.
+     */
+    if (!oc20_lba_valid(n, req->ns, lba)) {
+        return NVME_LBA_RANGE | NVME_DNR;
+    }
+
+    cnk = oc20_chunk_get_state(n, req->ns, lba);
     if (!cnk) {
         return NVME_DULB;
     }
@@ -753,9 +764,26 @@ static uint16_t oc20_rw(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req, bool vector
 #ifdef DEBUG_OC20
         pr_lba(lns, ((uint64_t *)req->slba)[i]);
 #endif
-        aio_sector_list[i] = (((uint64_t *)req->slba)[i] << lbads);
+        /*
+         * The address is sparse -- group/punit/chunk/sector sit at fixed bit
+         * offsets -- so it has to be turned into a position before it can index
+         * the flat backing store. Shifting the raw value ran far past the end
+         * of it and wrote over whatever followed.
+         */
+        uint64_t sect = oc20_lba_to_sector_index(n, ns,
+                                                 ((uint64_t *)req->slba)[i]);
+
+        aio_sector_list[i] = sect << lbads;
     }
-    backend_rw(n->mbe, &req->qsg, aio_sector_list, req->is_write);
+    /*
+     * The geometry can describe more media than devsz_mb backs, in which case a
+     * perfectly valid address still has nowhere to land. Fail the command
+     * rather than report success for a transfer that never happened.
+     */
+    if (backend_rw(n->mbe, &req->qsg, aio_sector_list, req->is_write)) {
+        err = NVME_LBA_RANGE | NVME_DNR;
+        goto fail_free;
+    }
 
     oc20_advance_status(n, ns, cmd, req);
 
