@@ -276,14 +276,10 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
         lat = ssd_buffer_destage(ssd, 0, req->stime);
         break;
     case NVME_CMD_WRITE_ZEROES:
-        /*
-         * FDP keeps its own reclaim-unit valid/invalid accounting and needs
-         * mark_page_invalid_fdp() to maintain it, as the FDP deallocate path
-         * above does. Routing Write Zeroes through the flat path would corrupt
-         * that accounting, so under FDP this is left as it was: the I/O layer
-         * has already zeroed the blocks, and the FTL mapping is not updated.
-         */
-        if (!ssd->fdp_enabled) {
+        /* FDP keeps its own reclaim-unit accounting and needs its own path */
+        if (ssd->fdp_enabled) {
+            ssd_write_zeroes_fdp_style(n, req);
+        } else {
             lat = ssd_write_zeroes(ssd, req);
         }
         break;

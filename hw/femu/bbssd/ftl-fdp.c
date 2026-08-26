@@ -1558,6 +1558,35 @@ static void ssd_reset_maptbl(struct ssd *ssd)
 }
 
 /*
+ * Deallocate [start_lpn, end_lpn] under FDP: invalidate through the FDP path so
+ * the reclaim unit's valid/invalid counts and victim state stay right, then
+ * unmap. Shared by DSM Deallocate and Write Zeroes with the Deallocate bit.
+ */
+static int ssd_deallocate_fdp_lpns(struct ssd *ssd, uint64_t start_lpn,
+                                   uint64_t end_lpn, int *already_invalid)
+{
+    int deallocated = 0;
+    uint64_t lpn;
+
+    for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
+        struct ppa ppa = get_maptbl_ent(ssd, lpn);
+
+        if (!mapped_ppa(&ppa) || !valid_ppa(ssd, &ppa)) {
+            (*already_invalid)++;
+            continue;
+        }
+        mark_page_invalid_fdp(ssd, &ppa);
+        set_rmap_ent(ssd, INVALID_LPN, &ppa);
+        ppa.ppa = UNMAPPED_PPA;
+        set_maptbl_ent(ssd, lpn, &ppa);
+        rcache_invalidate(ssd, lpn);
+        deallocated++;
+    }
+
+    return deallocated;
+}
+
+/*
  * ssd_trim_fdp_range - FDP DSM deallocate (default). Invalidate only the logical
  * pages covered by the requested LBA ranges: mark each mapped page invalid via
  * the FDP path (which decrements RU/line vpc and moves the RU onto the victim
@@ -1571,8 +1600,6 @@ static void ssd_trim_fdp_range(FemuCtrl *n, NvmeRequest *req)
     struct ssdparams *spp = &ssd->sp;
     NvmeDsmRange *ranges = req->dsm_ranges;
     int nr_ranges = req->dsm_nr_ranges;
-    struct ppa ppa;
-    uint64_t lpn;
     int total_trimmed_pages = 0;
     int total_already_invalid = 0;
 
@@ -1592,24 +1619,38 @@ static void ssd_trim_fdp_range(FemuCtrl *n, NvmeRequest *req)
             continue;
         }
 
-        for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
-            ppa = get_maptbl_ent(ssd, lpn);
-            if (!mapped_ppa(&ppa) || !valid_ppa(ssd, &ppa)) {
-                total_already_invalid++;
-                continue;
-            }
-            mark_page_invalid_fdp(ssd, &ppa);
-            set_rmap_ent(ssd, INVALID_LPN, &ppa);
-            ppa.ppa = UNMAPPED_PPA;
-            set_maptbl_ent(ssd, lpn, &ppa);
-            /* drop any stale read-cache entry for the trimmed page */
-            rcache_invalidate(ssd, lpn);
-            total_trimmed_pages++;
-        }
+        total_trimmed_pages += ssd_deallocate_fdp_lpns(ssd, start_lpn, end_lpn,
+                                                      &total_already_invalid);
     }
 
     ftl_debug("FDP TRIM: %d pages trimmed, %d already invalid across %d ranges\n",
               total_trimmed_pages, total_already_invalid, nr_ranges);
+}
+
+/*
+ * FDP Write Zeroes with the Deallocate bit: the blocks become deallocated, so
+ * the FTL owes the same unmap DSM Deallocate does. Without the bit they hold
+ * written zeros instead and the mapping is left alone.
+ */
+void ssd_write_zeroes_fdp_style(FemuCtrl *n, NvmeRequest *req)
+{
+    struct ssd *ssd = (req->ns && req->ns->ssd) ? req->ns->ssd : n->ssd;
+    struct ssdparams *spp = &ssd->sp;
+    const NvmeRwCmd *rw = (const NvmeRwCmd *)&req->cmd;
+    uint64_t lba = le64_to_cpu(rw->slba) + ssd_ns_lba_base(ssd, req);
+    uint32_t nlb = le16_to_cpu(rw->nlb) + 1;
+    uint64_t start_lpn = lba / spp->secs_per_pg;
+    uint64_t end_lpn = (lba + nlb - 1) / spp->secs_per_pg;
+    int already_invalid = 0;
+
+    if (!(le16_to_cpu(rw->control) & NVME_WZ_DEAC)) {
+        return;
+    }
+    if (end_lpn >= spp->tt_pgs) {
+        return;
+    }
+
+    ssd_deallocate_fdp_lpns(ssd, start_lpn, end_lpn, &already_invalid);
 }
 
 /*

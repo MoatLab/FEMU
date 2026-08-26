@@ -241,6 +241,7 @@ void femu_fdp_ssd_init_reclaim_group(FemuCtrl *n, struct ssd *ssd);
 void femu_fdp_ssd_init_ru_handles(FemuCtrl *n, struct ssd *ssd);
 /* nvme_do_write_fdp() is declared in nvme.h (included via ftl.h) */
 int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid, bool force);
+void ssd_write_zeroes_fdp_style(FemuCtrl *n, NvmeRequest *req);
 void ssd_trim_fdp_style(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
                         uint32_t nlb);
 
