@@ -43,18 +43,26 @@
 /*
  * QLC NAND latency numbers in nanoseconds
  *
- * Read Latency is extrapolated from TLC drives based on Micron FMS'19
- * presentation: "Component-Level Characterization of 3D TLC, QLC, and
- *                Low-Latency NAND"
+ * Read Latency is measured, at 16 KB per page. The four values are the four
+ * page types of a QLC wordline, fast to slow; relative to the fastest they are
+ * 1 : 1.59 : 2.81 : 4.76, mean 121.70 us.
  *
- * Write Latency is increased similar to read latencies, but may be higher in
- * practice.
+ * These replace an extrapolation from TLC (Micron FMS'19, "Component-Level
+ * Characterization of 3D TLC, QLC, and Low-Latency NAND"), which gave
+ * 59.33 / 85.25 / 127.20 / 169.60 us. That vector is both faster in the mean
+ * (110.34 us) and narrower in spread (1 : 1.44 : 2.14 : 2.86), so it understates
+ * what page placement is worth: a bit-plane layout that gains 1.346x under the
+ * measured vector gains only 1.221x under the extrapolated one.
+ *
+ * Write Latency is still the TLC extrapolation - it was not measured. Our
+ * workload writes once and then only reads, so program time does not enter the
+ * result; revisit before running anything write-sensitive.
  */
 
-#define QLC_LOWER_PAGE_READ_LATENCY_NS          (TLC_LOWER_PAGE_READ_LATENCY_NS * 1.05)
-#define QLC_CENTER_LOWER_PAGE_READ_LATENCY_NS   (TLC_CENTER_PAGE_READ_LATENCY_NS * 1.1)
-#define QLC_CENTER_UPPER_PAGE_READ_LATENCY_NS   (TLC_UPPER_PAGE_READ_LATENCY_NS * 1.2)
-#define QLC_UPPER_PAGE_READ_LATENCY_NS          (TLC_UPPER_PAGE_READ_LATENCY_NS * 1.6)
+#define QLC_LOWER_PAGE_READ_LATENCY_NS          (47900)
+#define QLC_CENTER_LOWER_PAGE_READ_LATENCY_NS   (76200)
+#define QLC_CENTER_UPPER_PAGE_READ_LATENCY_NS   (134600)
+#define QLC_UPPER_PAGE_READ_LATENCY_NS          (228100)
 
 #define QLC_LOWER_PAGE_WRITE_LATENCY_NS         (TLC_LOWER_PAGE_WRITE_LATENCY_NS * 1.05)
 #define QLC_CENTER_LOWER_PAGE_WRITE_LATENCY_NS  (TLC_CENTER_PAGE_WRITE_LATENCY_NS * 1.1)
