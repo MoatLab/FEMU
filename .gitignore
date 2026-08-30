@@ -133,3 +133,4 @@ trace-ust-all.c
 build-femu/
 build/
 *.md
+subprojects/.wraplock

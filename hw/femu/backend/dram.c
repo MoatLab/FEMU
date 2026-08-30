@@ -63,9 +63,33 @@ int init_dram_backend(SsdDramBackend **mbe, int64_t nbytes)
     mbe_numa_bind(b->logical_space, nbytes);
 
     if (mlock(b->logical_space, nbytes) == -1) {
-        femu_err("Failed to pin the memory backend to the host DRAM\n");
-        g_free(b->logical_space);
-        abort();
+        /*
+         * Pinning keeps the backing store out of swap so a page fault cannot show
+         * up inside an emulated NAND access. It needs RLIMIT_MEMLOCK >= the device
+         * size, which an unprivileged user often cannot raise (the hard limit is
+         * commonly 64 MB and only root can lift it).
+         *
+         * FEMU_ALLOW_UNPINNED=1 downgrades the failure to a warning. Only set it
+         * on a host with no memory pressure -- check that `vmstat` reports si/so
+         * at 0 and that free RAM comfortably exceeds the device size. Swap that is
+         * merely *occupied* by stale pages is fine; swap that is *active* is not,
+         * because a fault during an emulated access lands directly in the measured
+         * latency. Default behaviour is unchanged.
+         */
+        if (getenv("FEMU_ALLOW_UNPINNED")) {
+            femu_err("WARNING: memory backend is NOT pinned (mlock: %s).\n",
+                     strerror(errno));
+            femu_err("WARNING: FEMU_ALLOW_UNPINNED=1 is set, continuing anyway. "
+                     "Latency measurements are only trustworthy while the host "
+                     "is not swapping.\n");
+        } else {
+            femu_err("Failed to pin the memory backend to the host DRAM\n");
+            femu_err("Raise RLIMIT_MEMLOCK (ulimit -l) to at least %" PRId64
+                     " MB, or set FEMU_ALLOW_UNPINNED=1 to continue unpinned.\n",
+                     nbytes >> 20);
+            g_free(b->logical_space);
+            abort();
+        }
     }
 
     return 0;
