@@ -10,12 +10,59 @@ static void bb_init_ctrl_str(FemuCtrl *n)
     nvme_set_ctrl_name(n, vbbssd_mn, vbbssd_sn, &fsid_vbb);
 }
 
+/*
+ * A line is only reclaimable by relocating its valid pages somewhere else, so
+ * part of the NAND has to stay unexposed. Expose all of it and a host that
+ * fills the namespace leaves garbage collection nothing to free: the write
+ * path then runs out of lines and aborts mid-run. Refuse the geometry instead,
+ * and say what would fit.
+ */
+static int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
+{
+    BbCtrlParams *p = &n->bb_params;
+    uint64_t page_bytes = (uint64_t)p->secs_per_pg * p->secsz;
+    uint64_t pgs_per_line = (uint64_t)p->nchs * p->luns_per_ch * p->pgs_per_blk;
+    uint64_t tt_lines = (uint64_t)p->blks_per_pl * p->pls_per_lun;
+    uint64_t reserve_lines, usable_pgs, exposed_pgs;
+
+    /* the free lines GC insists on, plus one for the open write pointer */
+    reserve_lines = (uint64_t)((1 - p->gc_thres_pcent_high / 100.0) * tt_lines);
+    reserve_lines += 1;
+
+    if (tt_lines <= reserve_lines) {
+        error_setg(errp, "FEMU bbssd: the geometry has only %" PRIu64 " lines, "
+                   "fewer than the %" PRIu64 " garbage collection needs free",
+                   tt_lines, reserve_lines);
+        return -1;
+    }
+
+    usable_pgs = (tt_lines - reserve_lines) * pgs_per_line;
+    exposed_pgs = ns->size / page_bytes;
+
+    if (exposed_pgs > usable_pgs) {
+        error_setg(errp, "FEMU bbssd: namespace %u exposes %" PRIu64 " MiB of "
+                   "the %" PRIu64 " MiB this geometry has, leaving garbage "
+                   "collection no room; expose at most %" PRIu64 " MiB per "
+                   "namespace (lower devsz_mb, or set op_pcent)",
+                   ns->id, ns->size >> 20,
+                   (tt_lines * pgs_per_line * page_bytes) >> 20,
+                   (usable_pgs * page_bytes) >> 20);
+        return -1;
+    }
+
+    return 0;
+}
+
 /* bb <=> black-box */
 static void bb_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 {
     struct ssd *ssd;
 
     if (bb_check_geometry(n, errp)) {
+        return;
+    }
+
+    if (bb_check_capacity(n, ns, errp)) {
         return;
     }
 
