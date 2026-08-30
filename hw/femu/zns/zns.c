@@ -1647,6 +1647,26 @@ static void zns_init_params(FemuCtrl *n, NvmeNamespace *ns)
     id_zns->timing.blk_er_lat[QLC] = QLC_BLOCK_ERASE_LATENCY_NS;
 
     /*
+     * The values above are the built-in figures for each cell type. bbssd takes
+     * its timing from properties and ZNS did not, which left no way to model a
+     * different part -- or an erase at all -- without editing the source. A
+     * non-zero knob overrides the entry for the configured cell type; 0 keeps
+     * the built-in one, so an unset device behaves exactly as before.
+     */
+    if (n->zns_params.zns_pg_rd_lat) {
+        id_zns->timing.pg_rd_lat[id_zns->flash_type] =
+            n->zns_params.zns_pg_rd_lat;
+    }
+    if (n->zns_params.zns_pg_wr_lat) {
+        id_zns->timing.pg_wr_lat[id_zns->flash_type] =
+            n->zns_params.zns_pg_wr_lat;
+    }
+    if (n->zns_params.zns_blk_er_lat) {
+        id_zns->timing.blk_er_lat[id_zns->flash_type] =
+            n->zns_params.zns_blk_er_lat;
+    }
+
+    /*
      * Optional write-fault injection. One write in N fails and takes its zone
      * read only, which is a change the host did not ask for and so is the one
      * thing that belongs in the Changed Zone List. Counted rather than drawn at

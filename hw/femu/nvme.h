@@ -1658,6 +1658,10 @@ typedef struct ZNSCtrlParams {
      * no zone-descriptor extension). Non-zero activates the already-present
      * active/open-zone accounting and the zone-descriptor extension area.
      */
+    /* NAND timing overrides for the configured cell type; 0 = built-in value */
+    int64_t zns_pg_rd_lat;
+    int64_t zns_pg_wr_lat;
+    int64_t zns_blk_er_lat;
     uint32_t zns_max_active;  /* max active zones (0 = unlimited) */
     uint32_t zns_max_open;    /* max open zones (0 = unlimited) */
     uint32_t zns_zd_ext_size; /* per-zone descriptor extension bytes (0 = none) */
