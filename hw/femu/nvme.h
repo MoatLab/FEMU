@@ -1744,6 +1744,13 @@ typedef struct FemuCtrl {
     /* Coperd: OC2.0 FIXME */
     NvmeParams  params;
     FemuExtCtrlOps ext_ops;
+    /*
+     * Controller-wide CSD state. Kept out of ext_ops.state because that slot is
+     * shared with whatever other mode a namespace runs: CSD claimed it
+     * unconditionally at init and overwrote a KV namespace's, after which a KV
+     * admin command naming no namespace read the CSD state as its own type.
+     */
+    void           *csd_ctrl_state;
 
     time_t      start_time;
     uint16_t    temperature;

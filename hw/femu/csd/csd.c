@@ -86,7 +86,7 @@ static void csd_check_size(void)
 
 static FemuCsdState *csd_state(FemuCtrl *n)
 {
-    return n->ext_ops.state;
+    return n->csd_ctrl_state;
 }
 
 static void csd_afdm_free(gpointer opaque)
@@ -210,7 +210,7 @@ static void csd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     csd->mrs = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL,
                                      csd_mrs_free);
     qemu_mutex_init(&csd->lock);
-    n->ext_ops.state = csd;
+    n->csd_ctrl_state = csd;
 
     femu_log("%s,CSD mode initialized: fdm=%" PRIu64 "MB, "
              "nr_cu=%u, nr_thread=%u\n",
@@ -232,7 +232,7 @@ static void csd_exit(FemuCtrl *n)
     g_hash_table_destroy(csd->mrs);
     qemu_mutex_destroy(&csd->lock);
     g_free(csd);
-    n->ext_ops.state = NULL;
+    n->csd_ctrl_state = NULL;
 }
 
 static FemuCsdProgram *csd_get_program_locked(FemuCsdState *csd, uint32_t id)
