@@ -1541,6 +1541,8 @@ static const Property femu_props[] = {
                      NvmeSubsystem *),
     /* pages held in the DRAM write buffer; 0 programs every write directly */
     DEFINE_PROP_BOOL("hot_cold_sep", FemuCtrl, bb_params.hot_cold_sep, false),
+    DEFINE_PROP_INT32("read_reclaim_limit", FemuCtrl,
+                      bb_params.read_reclaim_limit, 0),
     DEFINE_PROP_INT32("buffer_size", FemuCtrl, bb_params.buffer_size, 0),
     DEFINE_PROP_INT32("buffer_thres_pcent", FemuCtrl,
                       bb_params.buffer_thres_pcent, 90),

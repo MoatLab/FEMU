@@ -248,10 +248,11 @@ run_smart_checks() {
     waf=$(od -An -tu4 -j192 -N4 "$bin" | tr -d ' ')
     host=$(od -An -tu8 -j200 -N8 "$bin" | tr -d ' ')
     nand=$(od -An -tu8 -j216 -N8 "$bin" | tr -d ' ')
-    local mbr
+    local mbr rrc
     mbr=$(od -An -tu8 -j224 -N8 "$bin" | tr -d ' ')
+    rrc=$(od -An -tu8 -j232 -N8 "$bin" | tr -d ' ')
     echo "  waf_x1000=$waf host_pages=$host nand_pages=$nand" \
-         "max_block_reads=$mbr"
+         "max_block_reads=$mbr read_reclaims=$rrc"
     if [[ "${host:-0}" -gt 0 ]]; then
         ok "host writes counted"
         [[ "${waf:-0}" -gt 0 ]] && ok "write amplification reported" \

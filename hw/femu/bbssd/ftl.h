@@ -188,6 +188,8 @@ struct ssdparams {
     int tt_luns;      /* total # of LUNs in the SSD */
 
     bool hot_cold_sep;  /* place overwrites in blocks of their own */
+    /* reads a block may take before its line is rewritten; 0 = never */
+    int read_reclaim_limit;
 
     /* DRAM write buffer: pages held before they are programmed */
     int buffer_size;
@@ -215,6 +217,8 @@ typedef struct line {
     FemuReclaimUnit *my_ru;
     /* time the line filled, in ns; used by age-based GC policies */
     uint64_t close_time;
+    /* set while the line is being rewritten, so it stays out of the lists */
+    bool reclaiming;
 } line;
 
 /* wp: record next write addr */
@@ -507,6 +511,8 @@ struct ssd {
      * host, and pages programmed to relocate data the device already held. WAF
      * is (host + relocated) / host.
      */
+    struct line *read_reclaim_line; /* line the read path asked to rewrite */
+    uint64_t read_reclaims;         /* lines rewritten for read stress */
     uint64_t host_write_pages;  /* pages the host wrote (WAF denominator) */
     uint64_t nand_write_pages;  /* user pages programmed into NAND */
     uint64_t gc_write_pages;    /* pages the device relocated itself */

@@ -403,6 +403,7 @@ the SMART log:
 | 208 | 8 | pages garbage collection relocated |
 | 216 | 8 | user pages programmed into NAND |
 | 224 | 8 | reads taken by the most-read block since its erase |
+| 232 | 8 | lines rewritten because of read stress |
 
 ```bash
 sudo nvme smart-log /dev/nvme0 -o binary | od -An -tu4 -j192 -N4   # WAF x1000
@@ -412,8 +413,23 @@ sudo nvme smart-log /dev/nvme0 -o binary | od -An -tu8 -j200 -N8   # host pages
 Amplification is `(programmed + relocated) / host`, so a write buffer that
 absorbs repeated writes to the same page shows up as a factor below 1. Bytes 200
 and 216 are equal when no buffer is configured. The read count at 224 is the
-stress a real device watches to decide when data must be rewritten; nothing in
-FEMU acts on it yet.
+stress a real device watches to decide when data must be rewritten.
+
+**Read stress.** Reading a page disturbs the others in its block, so a block read
+many times without being rewritten drifts towards errors. Set
+`read_reclaim_limit` to the number of reads a block may take before its line is
+refreshed:
+
+```
+-device femu,...,femu_mode=1,read_reclaim_limit=100000
+```
+
+The line is chosen on the read but rewritten on a following write, where
+relocation already costs something, rather than stalling a read behind a whole
+line of it; one line is refreshed per write at most. The cost shows up as write
+amplification, which is how a read-heavy workload comes to have a write cost at
+all. Measured on a 512 MiB region read six times over with a low limit: 5 lines
+refreshed, 77824 pages relocated, amplification 1.000 -> 1.542. Off by default.
 
 These are summed across the bbssd namespaces of the controller, and are populated
 in FDP mode as well as plain block mode.

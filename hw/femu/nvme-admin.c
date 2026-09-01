@@ -1066,7 +1066,7 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
      * configured: it is the gap between them that a buffer exists to open.
      */
     {
-        uint64_t host = 0, gc = 0, nand = 0, maxreads = 0;
+        uint64_t host = 0, gc = 0, nand = 0, maxreads = 0, rreclaims = 0;
         uint32_t waf;
 
         /* summed over the bbssd namespaces, as this log page is device-wide */
@@ -1082,6 +1082,7 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
             if (ssd_max_block_reads(ns->ssd) > maxreads) {
                 maxreads = ssd_max_block_reads(ns->ssd);
             }
+            rreclaims += ssd_read_reclaims(ns->ssd);
         }
 
         if (host) {
@@ -1098,6 +1099,10 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
             /* reads against the most-read block since its erase, at byte 224 */
             maxreads = cpu_to_le64(maxreads);
             memcpy(&smart.reserved2[32], &maxreads, sizeof(maxreads));
+
+            /* lines rewritten because of read stress, at byte 232 */
+            rreclaims = cpu_to_le64(rreclaims);
+            memcpy(&smart.reserved2[40], &rreclaims, sizeof(rreclaims));
         }
     }
 

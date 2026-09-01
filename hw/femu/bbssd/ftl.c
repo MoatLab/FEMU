@@ -196,6 +196,11 @@ uint64_t ssd_nand_write_pages(struct ssd *ssd)
  * stress accumulates far enough to cost it; this is the number that decision
  * would be made on.
  */
+uint64_t ssd_read_reclaims(struct ssd *ssd)
+{
+    return ssd->read_reclaims;
+}
+
 uint64_t ssd_max_block_reads(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;

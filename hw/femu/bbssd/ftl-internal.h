@@ -199,6 +199,7 @@ void mark_block_free(struct ssd *ssd, struct ppa *ppa);
 void mark_line_free(struct ssd *ssd, struct ppa *ppa);
 void gc_read_page(struct ssd *ssd, struct ppa *ppa);
 int do_gc(struct ssd *ssd, bool force);
+int do_read_reclaim(struct ssd *ssd);
 const struct femu_ftl_policy_ops *femu_ftl_policy_lookup(const char *name);
 
 /* log-block mapping schemes (hw/femu/bbssd/ftl-map-hybrid.c) */

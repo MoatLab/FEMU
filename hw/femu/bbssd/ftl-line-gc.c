@@ -300,7 +300,7 @@ void mark_page_invalid(struct ssd *ssd, struct ppa *ppa)
         line->vpc--;
     }
 
-    if (was_full_line) {
+    if (was_full_line && !line->reclaiming) {
         /* move line: "full" -> "victim" */
         QTAILQ_REMOVE(&lm->full_line_list, line, entry);
         lm->full_line_cnt--;
@@ -623,6 +623,15 @@ void mark_line_free(struct ssd *ssd, struct ppa *ppa)
 {
     struct line_mgmt *lm = &ssd->lm;
     struct line *line = get_line(ssd, ppa);
+    /*
+     * If the read path had queued this line for a refresh, that request dies
+     * with the line: it is about to be erased and recycled, which is exactly
+     * what the refresh would have achieved.
+     */
+    if (ssd->read_reclaim_line == line) {
+        ssd->read_reclaim_line = NULL;
+    }
+
     line->ipc = 0;
     line->vpc = 0;
     line->close_time = 0;
@@ -631,23 +640,15 @@ void mark_line_free(struct ssd *ssd, struct ppa *ppa)
     lm->free_line_cnt++;
 }
 
-int do_gc(struct ssd *ssd, bool force)
+/* relocate a line's valid pages, erase it, and return it to the free list */
+static void reclaim_line(struct ssd *ssd, struct line *victim_line)
 {
-    struct line *victim_line = NULL;
     struct ssdparams *spp = &ssd->sp;
     struct nand_lun *lunp;
     struct ppa ppa;
     int ch, lun;
 
-    victim_line = ssd->policy->select_victim_line(ssd, force);
-    if (!victim_line) {
-        return -1;
-    }
-
     ppa.g.blk = victim_line->id;
-    ftl_debug("GC-ing line:%d,ipc=%d,victim=%d,full=%d,free=%d\n", ppa.g.blk,
-              victim_line->ipc, ssd->lm.victim_line_cnt, ssd->lm.full_line_cnt,
-              ssd->lm.free_line_cnt);
 
     /* copy back valid data */
     for (ch = 0; ch < spp->nchs; ch++) {
@@ -673,6 +674,84 @@ int do_gc(struct ssd *ssd, bool force)
 
     /* update line status */
     mark_line_free(ssd, &ppa);
+}
+
+int do_gc(struct ssd *ssd, bool force)
+{
+    struct line *victim_line = ssd->policy->select_victim_line(ssd, force);
+
+    if (!victim_line) {
+        return -1;
+    }
+
+    ftl_debug("GC-ing line:%d,ipc=%d,victim=%d,full=%d,free=%d\n",
+              victim_line->id, victim_line->ipc, ssd->lm.victim_line_cnt,
+              ssd->lm.full_line_cnt, ssd->lm.free_line_cnt);
+
+    reclaim_line(ssd, victim_line);
+
+    return 0;
+}
+
+/*
+ * Rewrite a line whose blocks have taken enough reads to be worth refreshing.
+ *
+ * Reading a page stresses the others in its block, so a block read many times
+ * without being rewritten drifts towards errors. Real devices watch for that
+ * and rewrite the data before it decays; the cost is relocation, which is why
+ * this shows up as write amplification in a read-heavy workload rather than as
+ * anything the host sees directly.
+ *
+ * The line is chosen by the read path and rewritten here, on a write, because
+ * this is where collection already happens and where the cost belongs. Doing it
+ * inside the read would stall a read behind a whole line of relocation.
+ *
+ * Relocation goes through the ordinary data write pointer. An earlier attempt
+ * at static wear levelling gave itself a dedicated pointer, which pinned a line
+ * out of circulation and drove the device into a collection death spiral; there
+ * is no reason to repeat that here.
+ */
+int do_read_reclaim(struct ssd *ssd)
+{
+    struct line *line = ssd->read_reclaim_line;
+
+    if (!line) {
+        return -1;
+    }
+
+    /*
+     * Only with lines to spare. The test is the high watermark, not
+     * should_gc(): a busy device sits below should_gc() permanently, so testing
+     * that would disable this outright.
+     */
+    if (should_gc_high(ssd) || ssd->lm.free_line_cnt < 2) {
+        return -1;
+    }
+
+    ssd->read_reclaim_line = NULL;
+
+    /*
+     * A heavily read line is usually full, and invalidating the first page of a
+     * full line moves it from full_line_list into the victim queue half way
+     * through the rewrite. Take it out and mark it so that does not happen;
+     * a line from select_victim_line() already arrives in no list.
+     */
+    if (line->vpc == ssd->sp.pgs_per_line) {
+        QTAILQ_REMOVE(&ssd->lm.full_line_list, line, entry);
+        ssd->lm.full_line_cnt--;
+    } else if (line->pos) {
+        pqueue_remove(ssd->lm.victim_line_pq, line);
+        line->pos = 0;
+        ssd->lm.victim_line_cnt--;
+    } else {
+        /* being written to right now: leave it alone */
+        return -1;
+    }
+
+    line->reclaiming = true;
+    reclaim_line(ssd, line);
+    line->reclaiming = false;
+    ssd->read_reclaims++;
 
     return 0;
 }

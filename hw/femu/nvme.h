@@ -1626,6 +1626,7 @@ typedef struct BbCtrlParams {
     int gc_thres_pcent_high;
 
     bool hot_cold_sep;        /* separate overwrites from write-once pages */
+    int read_reclaim_limit;   /* reads before a line is rewritten; 0 = never */
     int buffer_size;          /* pages held in the write buffer */
     int buffer_thres_pcent;   /* fill level at which eviction starts */
     int gc_strategy; /* FDP GC strategy: 0=greedy, 1=cost-benefit, 2=random */
@@ -2117,6 +2118,7 @@ uint64_t ssd_host_write_pages(struct ssd *ssd);
 uint64_t ssd_gc_write_pages(struct ssd *ssd);
 uint64_t ssd_nand_write_pages(struct ssd *ssd);
 uint64_t ssd_max_block_reads(struct ssd *ssd);
+uint64_t ssd_read_reclaims(struct ssd *ssd);
 
 static inline uint64_t ns_blks(NvmeNamespace *ns, uint8_t lba_idx)
 {

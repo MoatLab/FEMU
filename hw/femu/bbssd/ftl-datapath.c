@@ -392,6 +392,18 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
         srd.stime = req->stime;
         sublat = ssd_advance_status(ssd, &ppa, &srd);
         maxlat = (sublat > maxlat) ? sublat : maxlat;
+
+        /*
+         * Enough reads against this block to be worth refreshing the line it
+         * belongs to. Only note it here -- the rewrite happens on a write,
+         * where relocation already costs something, rather than stalling this
+         * read behind a whole line of it. One line is queued at a time, which
+         * is the rate limit.
+         */
+        if (spp->read_reclaim_limit && !ssd->read_reclaim_line &&
+            get_blk(ssd, &ppa)->read_cnt >= (uint64_t)spp->read_reclaim_limit) {
+            ssd->read_reclaim_line = get_line(ssd, &ppa);
+        }
     }
 
     return maxlat;
@@ -423,6 +435,9 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         if (r == -1)
             break;
     }
+
+    /* refresh at most one read-stressed line per write */
+    do_read_reclaim(ssd);
 
     /* pages the host wrote, whether or not the buffer absorbs them */
     ssd->host_write_pages += end_lpn - start_lpn + 1;
