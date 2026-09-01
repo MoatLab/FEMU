@@ -858,6 +858,13 @@ total_capacity = total_pages × secs_per_pg × secsz
 # 8 × 8 × 1 × 256 × 256 × 8 × 512 = 68,719,476,736 bytes (~64GB raw)
 ```
 
+`pls_per_lun` above 1 is addressed: a line spans one block index across every
+channel, LUN and plane, so the planes add capacity and are collected together.
+They share their LUN's timing gate, so they do not yet add parallelism -- the
+media layer has a multi-plane operation but nothing batches a request's pages
+into one. FDP keeps its own reclaim-unit allocator, which still assumes a single
+plane, so that combination is refused at startup.
+
 ### Performance Tuning
 
 **For Realistic Simulation:**

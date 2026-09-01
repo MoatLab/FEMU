@@ -64,16 +64,14 @@ int bb_check_geometry(FemuCtrl *n, Error **errp)
      * reached and the buffer would grow without bound.
      */
     /*
-     * The write pointer only ever allocates plane 0 -- get_new_page() asserts
-     * it -- so a second plane would be counted into the capacity and never
-     * written, and the device would run out of lines while the geometry still
-     * claimed room. Refuse it rather than hand out a shape the allocator
-     * cannot honour. The media layer's multi-plane op is waiting on the same
-     * addressing work.
+     * FDP keeps its own allocator and reclaim-unit pointers, which still assume
+     * a single plane. The rest of bbssd addresses planes, so only refuse the
+     * combination.
      */
-    if (p->pls_per_lun != 1) {
-        error_setg(errp, "FEMU bbssd: pls_per_lun must be 1, got %d; "
-                   "multi-plane addressing is not implemented", p->pls_per_lun);
+    if (p->pls_per_lun != 1 && n->subsys && n->subsys->params.fdp.enabled) {
+        error_setg(errp, "FEMU bbssd: pls_per_lun must be 1 under FDP, got %d; "
+                   "the reclaim-unit allocator does not address planes",
+                   p->pls_per_lun);
         return -1;
     }
 
@@ -175,11 +173,15 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
 
     spp->tt_luns = spp->luns_per_ch * spp->nchs;
 
-    /* line is special, put it at the end */
-    spp->blks_per_line = spp->tt_luns; /* TODO: to fix under multiplanes */
+    /*
+     * A line is one block index taken across every channel, LUN and plane, so
+     * there are as many lines as a plane has blocks. With one plane per LUN
+     * these are the same numbers as before: blks_per_lun == blks_per_pl.
+     */
+    spp->blks_per_line = spp->tt_luns * spp->pls_per_lun;
     spp->pgs_per_line = spp->blks_per_line * spp->pgs_per_blk;
     spp->secs_per_line = spp->pgs_per_line * spp->secs_per_pg;
-    spp->tt_lines = spp->blks_per_lun; /* TODO: to fix under multiplanes */
+    spp->tt_lines = spp->blks_per_pl;
 
     spp->gc_thres_pcent = n->bb_params.gc_thres_pcent/100.0;
     spp->gc_thres_lines = (int)((1 - spp->gc_thres_pcent) * spp->tt_lines);

@@ -155,8 +155,9 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
 
 /*
  * Multi-plane group: one parallel array op + per-plane bus + inter-plane busy.
- * No caller yet -- the bbssd write pointer only ever allocates plane 0, so
- * there is no way to build a group. Waiting on plane addressing in the FTL.
+ * No caller yet. The bbssd allocator addresses planes now, so a group can be
+ * built; what is still missing is batching the pages of one request that land
+ * in different planes of a LUN into a single operation.
  */
 NandOpCompletion nand_media_multiplane(NandMedia *m, const NandLoc *locs, int nlocs,
                                        NandMediaOp op, uint64_t stime);

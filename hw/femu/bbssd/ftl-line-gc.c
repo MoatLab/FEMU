@@ -126,6 +126,13 @@ static void ssd_advance_write_pointer_common(struct ssd *ssd,
         /* in this case, we should go to next lun */
         if (wpp->lun == spp->luns_per_ch) {
             wpp->lun = 0;
+            /* then the next plane of the LUN, before moving down the block */
+            check_addr(wpp->pl, spp->pls_per_lun);
+            wpp->pl++;
+            if (wpp->pl < spp->pls_per_lun) {
+                return;
+            }
+            wpp->pl = 0;
             /* go to next page in the block */
             check_addr(wpp->pg, spp->pgs_per_blk);
             wpp->pg++;
@@ -237,7 +244,6 @@ struct ppa get_new_page_class(struct ssd *ssd, int klass)
     ppa.g.pg = wpp->pg;
     ppa.g.blk = wpp->blk;
     ppa.g.pl = wpp->pl;
-    ftl_assert(ppa.g.pl == 0);
 
     return ppa;
 }
@@ -252,7 +258,6 @@ struct ppa get_new_page(struct ssd *ssd)
     ppa.g.pg = wpp->pg;
     ppa.g.blk = wpp->blk;
     ppa.g.pl = wpp->pl;
-    ftl_assert(ppa.g.pl == 0);
 
     return ppa;
 }
@@ -653,22 +658,26 @@ static void reclaim_line(struct ssd *ssd, struct line *victim_line)
     /* copy back valid data */
     for (ch = 0; ch < spp->nchs; ch++) {
         for (lun = 0; lun < spp->luns_per_ch; lun++) {
-            ppa.g.ch = ch;
-            ppa.g.lun = lun;
-            ppa.g.pl = 0;
-            lunp = get_lun(ssd, &ppa);
-            clean_one_block(ssd, &ppa);
-            mark_block_free(ssd, &ppa);
+            int pl;
 
-            if (spp->enable_gc_delay) {
-                struct nand_cmd gce;
-                gce.type = GC_IO;
-                gce.cmd = NAND_ERASE;
-                gce.stime = 0;
-                ssd_advance_status(ssd, &ppa, &gce);
+            for (pl = 0; pl < spp->pls_per_lun; pl++) {
+                ppa.g.ch = ch;
+                ppa.g.lun = lun;
+                ppa.g.pl = pl;
+                lunp = get_lun(ssd, &ppa);
+                clean_one_block(ssd, &ppa);
+                mark_block_free(ssd, &ppa);
+
+                if (spp->enable_gc_delay) {
+                    struct nand_cmd gce;
+                    gce.type = GC_IO;
+                    gce.cmd = NAND_ERASE;
+                    gce.stime = 0;
+                    ssd_advance_status(ssd, &ppa, &gce);
+                }
+
+                lunp->gc_endtime = lunp->next_lun_avail_time;
             }
-
-            lunp->gc_endtime = lunp->next_lun_avail_time;
         }
     }
 
