@@ -95,6 +95,13 @@ struct nand_block {
     int ipc; /* invalid page count */
     int vpc; /* valid page count */
     int erase_cnt;
+    /*
+     * Reads of this block since it was last erased. Reading a page stresses the
+     * others in the block, so this is the pressure a real device watches to
+     * decide when data has to be rewritten before it decays. Reported only; no
+     * behaviour hangs off it yet.
+     */
+    uint64_t read_cnt;
     int wp; /* current write pointer */
 };
 

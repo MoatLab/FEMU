@@ -766,7 +766,9 @@ ssd-config: config rejected; see the warnings above
 
 `hw/femu/scripts/femu-test.sh` runs inside the guest and checks that the
 emulated device still behaves: data survives the FTL, deallocate works, the
-counters move, and the mode-specific surface answers. What it runs depends on
+counters move, and the mode-specific surface answers. `max_block_reads` is the
+reads taken by the most-read block since it was last erased -- the read stress a
+real device watches to decide when data must be rewritten. What it runs depends on
 what the device reports itself to be, so the same script covers a block, zoned
 or key-value namespace. A key-value namespace is not block addressable, so it
 has no block node at all and is driven through the controller instead.
@@ -783,7 +785,7 @@ sudo ./femu-test.sh --yes /dev/nvme0n1
   PASS  deallocate accepted
   PASS  mapping still sound after deallocate
 == counters ==
-  waf_x1000=935 host_pages=40960 nand_pages=38335
+  waf_x1000=935 host_pages=40960 nand_pages=38335 max_block_reads=807
   PASS  host writes counted
 
 FEMU_TEST pass=7 fail=0 skip=0

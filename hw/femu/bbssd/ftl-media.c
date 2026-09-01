@@ -170,6 +170,17 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
         ftl_err("Unsupported NAND command: 0x%x\n", ncmd->cmd);
         return 0;
     }
+    /*
+     * Count the read against its block. Every bbssd NAND read passes through
+     * here, host or collection, and a read stresses the other pages in the
+     * block -- so this is the pressure a device watches to decide when data
+     * must be rewritten. Reads answered from the write buffer or the read cache
+     * never reach the media and correctly do not count.
+     */
+    if (op == NAND_MEDIA_READ) {
+        get_blk(ssd, ppa)->read_cnt++;
+    }
+
     loc = bb_decode_loc(ssd, ppa);
     return nand_media_op(&ssd->media, &loc, op, stime).latency_ns;
 }

@@ -1066,7 +1066,7 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
      * configured: it is the gap between them that a buffer exists to open.
      */
     {
-        uint64_t host = 0, gc = 0, nand = 0;
+        uint64_t host = 0, gc = 0, nand = 0, maxreads = 0;
         uint32_t waf;
 
         /* summed over the bbssd namespaces, as this log page is device-wide */
@@ -1079,6 +1079,9 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
             host += ssd_host_write_pages(ns->ssd);
             gc   += ssd_gc_write_pages(ns->ssd);
             nand += ssd_nand_write_pages(ns->ssd);
+            if (ssd_max_block_reads(ns->ssd) > maxreads) {
+                maxreads = ssd_max_block_reads(ns->ssd);
+            }
         }
 
         if (host) {
@@ -1091,6 +1094,10 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
             memcpy(&smart.reserved2[8], &host, sizeof(host));
             memcpy(&smart.reserved2[16], &gc, sizeof(gc));
             memcpy(&smart.reserved2[24], &nand, sizeof(nand));
+
+            /* reads against the most-read block since its erase, at byte 224 */
+            maxreads = cpu_to_le64(maxreads);
+            memcpy(&smart.reserved2[32], &maxreads, sizeof(maxreads));
         }
     }
 

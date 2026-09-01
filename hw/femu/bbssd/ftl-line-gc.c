@@ -353,6 +353,7 @@ void mark_block_free(struct ssd *ssd, struct ppa *ppa)
     blk->ipc = 0;
     blk->vpc = 0;
     blk->erase_cnt++;
+    blk->read_cnt = 0; /* the stress an erase clears */
     if (exp_watch_blk[ppa->g.blk])
         EXP_LOG("[ERASE] " PPA_FMT " erase_cnt=%d (vpc/ipc reset)\n",
                 PPA_ARG(ppa), blk->erase_cnt);
