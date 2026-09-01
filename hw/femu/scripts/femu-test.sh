@@ -29,6 +29,11 @@ for a in "$@"; do
     esac
 done
 CTRL="/dev/$(basename "$DEV" | sed 's/n[0-9]*$//')"
+# the namespace id is the trailing number: /dev/nvme0n2 is namespace 2. Commands
+# that go through the controller need it named explicitly, and assuming 1 tests
+# the wrong namespace on a device that has several.
+NSID="$(basename "$DEV" | sed 's/.*n//')"
+[[ "$NSID" =~ ^[0-9]+$ ]] || NSID=1
 
 pass=0; fail=0; skip=0
 ok()   { echo "  PASS  $*"; pass=$((pass + 1)); }
@@ -153,27 +158,70 @@ run_kv_checks() {
     local vsz=4096
     head -c "$vsz" /dev/urandom > "$val"
 
-    nvme io-passthru "$CTRL" -O 0x01 -n 1 --cdw10=$vsz --cdw11=4 --cdw2=$key \
+    nvme io-passthru "$CTRL" -O 0x01 -n "$NSID" --cdw10=$vsz --cdw11=4 --cdw2=$key \
         -l "$vsz" -w -i "$val" >/dev/null 2>&1 \
         && ok "store a key" || { bad "store a key"; return; }
 
-    nvme io-passthru "$CTRL" -O 0x14 -n 1 --cdw11=4 --cdw2=$key >/dev/null 2>&1 \
+    nvme io-passthru "$CTRL" -O 0x14 -n "$NSID" --cdw11=4 --cdw2=$key >/dev/null 2>&1 \
         && ok "the key exists" || bad "the key exists"
 
-    nvme io-passthru "$CTRL" -O 0x02 -n 1 --cdw10=$vsz --cdw11=4 --cdw2=$key \
+    nvme io-passthru "$CTRL" -O 0x02 -n "$NSID" --cdw10=$vsz --cdw11=4 --cdw2=$key \
         -l "$vsz" -r -b 2>/dev/null > "$ret"
     cmp -s "$val" "$ret" && ok "the value reads back byte for byte" \
                          || bad "the value reads back byte for byte"
 
-    nvme io-passthru "$CTRL" -O 0x10 -n 1 --cdw11=4 --cdw2=$key >/dev/null 2>&1 \
+    nvme io-passthru "$CTRL" -O 0x10 -n "$NSID" --cdw11=4 --cdw2=$key >/dev/null 2>&1 \
         && ok "delete the key" || bad "delete the key"
 
     # a deleted key must be reported missing, not silently succeed
-    if nvme io-passthru "$CTRL" -O 0x14 -n 1 --cdw11=4 --cdw2=$key >/dev/null 2>&1; then
+    if nvme io-passthru "$CTRL" -O 0x14 -n "$NSID" --cdw11=4 --cdw2=$key >/dev/null 2>&1; then
         bad "a deleted key is reported missing"
     else
         ok "a deleted key is reported missing"
     fi
+}
+
+# ------------------------------------------------------------------ csd
+# Computational storage adds vendor-specific commands on top of a normal block
+# namespace, so these run alongside the block checks when the mode is present.
+csd_present() {
+    # Allocating a zero-byte function data memory is refused by a CSD device and
+    # unrecognised by anything else; either way it does not allocate.
+    #
+    # Capture before matching: nvme exits non-zero on an NVMe error status, and
+    # under pipefail that makes "nvme ... | grep" non-zero even when grep found
+    # what it wanted.
+    local out
+    out=$(nvme io-passthru "$DEV" -O 0xb0 -n "$NSID" \
+          --cdw10=0 --cdw11=0 --cdw12=0 2>&1)
+    grep -qiE "Success|Invalid Field" <<<"$out"
+}
+
+run_csd_checks() {
+    echo "== computational storage =="
+    local out id got
+    out=$(nvme io-passthru "$DEV" -O 0xb0 -n "$NSID" --cdw10=4096 --cdw11=0 --cdw12=0 2>&1)
+    if ! grep -qi Success <<<"$out"; then
+        na "function data memory allocated (device declined)"; return
+    fi
+    id=$(grep -oiE "result:? *0x[0-9a-f]+" <<<"$out" | grep -oiE "0x[0-9a-f]+" | head -1)
+    [[ -n "$id" ]] || id=1
+    ok "function data memory allocated (id $id)"
+
+    # put a known page on the namespace, copy it into the memory, read it back
+    local pat tmp
+    tmp=$(mktemp); trap 'rm -f "$tmp"' RETURN
+    tr '\0' '\103' < /dev/zero | head -c 4096 > "$tmp"
+    dd if="$tmp" of="$DEV" bs=4k count=1 oflag=direct status=none 2>/dev/null
+
+    nvme io-passthru "$DEV" -O 0xd0 -n "$NSID" --cdw10=0 --cdw11=0 --cdw12=0 \
+        --cdw13=$((id)) --cdw14=0 --cdw15=0 >/dev/null 2>&1 \
+        && ok "namespace data copied into it" || bad "namespace data copied into it"
+
+    got=$(nvme io-passthru "$DEV" -O 0xf2 -n "$NSID" --cdw10=0 --cdw11=0 --cdw12=512 \
+          --cdw13=0 --cdw14=$((id)) -l 4096 -r -b 2>/dev/null | head -c 4)
+    [[ "$got" == "CCCC" ]] && ok "and reads back as what the namespace holds" \
+                           || bad "and reads back as what the namespace holds (got '${got:-nothing}')"
 }
 
 # ------------------------------------------------------------------ fdp
@@ -203,7 +251,9 @@ run_fdp_checks() {
         bad "configuration log readable"; return
     fi
 
-    nvme fdp status "$DEV" 2>&1 | grep -qi "Reclaim Unit Handle" \
+    local ruhs
+    ruhs=$(nvme fdp status "$DEV" 2>&1)
+    grep -qi "Reclaim Unit Handle" <<<"$ruhs" \
         && ok "reclaim unit handle status readable" \
         || bad "reclaim unit handle status readable"
 
@@ -271,6 +321,7 @@ elif [[ "$ZONED" == "host-managed" || "$ZONED" == "host-aware" ]]; then
 else
     run_block_checks
     fdp_supported && run_fdp_checks
+    csd_present && run_csd_checks
 fi
 run_smart_checks
 
