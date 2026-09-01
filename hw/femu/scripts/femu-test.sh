@@ -148,17 +148,20 @@ run_kv_checks() {
     fi
     val=$(mktemp); ret=$(mktemp)
     trap 'rm -f "$val" "$ret"' RETURN
-    head -c 64 /dev/urandom > "$val"
+    # A page-sized value, not a token one: the SMART byte counters are in units
+    # of 512, so a 64-byte value rounds to nothing and cannot show they work.
+    local vsz=4096
+    head -c "$vsz" /dev/urandom > "$val"
 
-    nvme io-passthru "$CTRL" -O 0x01 -n 1 --cdw10=64 --cdw11=4 --cdw2=$key \
-        -l 64 -w -i "$val" >/dev/null 2>&1 \
+    nvme io-passthru "$CTRL" -O 0x01 -n 1 --cdw10=$vsz --cdw11=4 --cdw2=$key \
+        -l "$vsz" -w -i "$val" >/dev/null 2>&1 \
         && ok "store a key" || { bad "store a key"; return; }
 
     nvme io-passthru "$CTRL" -O 0x14 -n 1 --cdw11=4 --cdw2=$key >/dev/null 2>&1 \
         && ok "the key exists" || bad "the key exists"
 
-    nvme io-passthru "$CTRL" -O 0x02 -n 1 --cdw10=64 --cdw11=4 --cdw2=$key \
-        -l 64 -r -b 2>/dev/null > "$ret"
+    nvme io-passthru "$CTRL" -O 0x02 -n 1 --cdw10=$vsz --cdw11=4 --cdw2=$key \
+        -l "$vsz" -r -b 2>/dev/null > "$ret"
     cmp -s "$val" "$ret" && ok "the value reads back byte for byte" \
                          || bad "the value reads back byte for byte"
 
