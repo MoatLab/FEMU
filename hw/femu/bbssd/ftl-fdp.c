@@ -750,6 +750,7 @@ static void gc_write_page_fdp_style(struct ssd *ssd, struct ppa *old_ppa,
     set_maptbl_ent(ssd, lpn, &new_ppa);
     set_rmap_ent(ssd, lpn, &new_ppa);
     mark_page_valid_fdp(ssd, &new_ppa, dest_ru);
+    ssd->gc_write_pages++; /* a page the device relocated itself */
 
     // FDP_TRACE(ssd, "GC_MIGRATE lpn=%lu src(ch=%u/lun=%u/blk=%u/pg=%u) "
     //           "dst(ch=%u/lun=%u/blk=%u/pg=%u) dest_ruhid=%u\n",
@@ -1194,6 +1195,9 @@ static uint64_t ssd_stream_write(FemuCtrl *n, struct ssd *ssd,
         }
     }
 
+    /* pages the host wrote; the WAF denominator, as on the non-FDP path */
+    ssd->host_write_pages += end_lpn - start_lpn + 1;
+
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
         /*
          * Updating curr_ru should be handled by fdp_advance_ru_pointer() naturally.
@@ -1223,6 +1227,7 @@ static uint64_t ssd_stream_write(FemuCtrl *n, struct ssd *ssd,
         set_maptbl_ent(ssd, lpn, &ppa);
         set_rmap_ent(ssd, lpn, &ppa);
         mark_page_valid_fdp(ssd, &ppa, ru);
+        ssd->nand_write_pages++; /* a user page programmed into NAND */
 
         /* decrement ruamw for this RU */
         if (ru->nvme_ru && ru->nvme_ru->ruamw > 0) {

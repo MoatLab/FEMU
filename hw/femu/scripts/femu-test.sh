@@ -173,6 +173,49 @@ run_kv_checks() {
     fi
 }
 
+# ------------------------------------------------------------------ fdp
+# Flexible Data Placement rides on top of a block namespace, so these run in
+# addition to the block checks when the controller advertises it (CTRATT bit 19).
+fdp_supported() {
+    local ctratt
+    ctratt=$(nvme id-ctrl "$CTRL" 2>/dev/null | sed -n 's/^ctratt *: *//p' | head -1)
+    [[ -n "$ctratt" ]] || return 1
+    (( (ctratt & 0x80000) != 0 ))
+}
+
+run_fdp_checks() {
+    echo "== flexible data placement =="
+    local eg=1 cfg before after
+    if ! nvme help 2>&1 | grep -q '^  fdp'; then
+        na "FDP checks (nvme-cli has no fdp subcommand)"; return
+    fi
+
+    # the endurance group has to be named; without -e nvme-cli just complains
+    cfg=$(nvme fdp configs "$CTRL" -e "$eg" 2>&1)
+    if grep -qi "Reclaim Unit Handles" <<<"$cfg"; then
+        local nruh
+        nruh=$(sed -n 's/.*Number of Reclaim Unit Handles: *//p' <<<"$cfg" | head -1)
+        ok "configuration log readable ($nruh handles)"
+    else
+        bad "configuration log readable"; return
+    fi
+
+    nvme fdp status "$DEV" 2>&1 | grep -qi "Reclaim Unit Handle" \
+        && ok "reclaim unit handle status readable" \
+        || bad "reclaim unit handle status readable"
+
+    # The interesting part is not that the log exists but that it moves: write a
+    # little and the host/media byte counters should follow.
+    before=$(nvme fdp stats "$CTRL" -e "$eg" 2>/dev/null | sed -n 's/.*(HBMW): *//p' | head -1)
+    dd if=/dev/zero of="$DEV" bs=1M count=16 oflag=direct status=none 2>/dev/null
+    after=$(nvme fdp stats "$CTRL" -e "$eg" 2>/dev/null | sed -n 's/.*(HBMW): *//p' | head -1)
+    if [[ -n "${before:-}" && -n "${after:-}" ]] && (( after > before )); then
+        ok "statistics advance with host writes ($before -> $after)"
+    else
+        bad "statistics advance with host writes ($before -> $after)"
+    fi
+}
+
 # ------------------------------------------------------------------ counters
 run_smart_checks() {
     echo "== counters =="
@@ -206,6 +249,7 @@ elif [[ "$ZONED" == "host-managed" || "$ZONED" == "host-aware" ]]; then
     run_zns_checks
 else
     run_block_checks
+    fdp_supported && run_fdp_checks
 fi
 run_smart_checks
 
