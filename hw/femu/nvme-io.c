@@ -168,8 +168,21 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
          */
         if (status == NVME_SUCCESS && req->ns) {
             FemuPollerCtr *ctr = &n->poller_ctr[index_poller];
-            uint64_t bytes = (uint64_t)req->nlb <<
-                req->ns->id_ns.lbaf[NVME_ID_NS_FLBAS_INDEX(req->ns->id_ns.flbas)].lbads;
+            uint64_t bytes;
+
+            /*
+             * A key-value command carries the size of its value in CDW10 and
+             * never sets nlb, so the block arithmetic below yields zero for it.
+             * Store and Retrieve share their opcodes with Write and Read, so
+             * they are counted as commands either way; without this they were
+             * counted as commands that moved no data at all.
+             */
+            if (NS_KVSSD(req->ns)) {
+                bytes = le32_to_cpu(cmd.cdw10);
+            } else {
+                bytes = (uint64_t)req->nlb <<
+                    req->ns->id_ns.lbaf[NVME_ID_NS_FLBAS_INDEX(req->ns->id_ns.flbas)].lbads;
+            }
 
             switch (req->cmd_opcode) {
             case NVME_CMD_READ:

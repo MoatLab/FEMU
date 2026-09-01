@@ -1984,6 +1984,11 @@ static inline bool NS_ZNSSD(NvmeNamespace *ns)
     return (ns->femu_mode == FEMU_ZNSSD_MODE);
 }
 
+static inline bool NS_KVSSD(NvmeNamespace *ns)
+{
+    return (ns->femu_mode == FEMU_KVSSD_MODE);
+}
+
 static inline bool NS_CSD(NvmeNamespace *ns)
 {
     return (ns->femu_mode == FEMU_CSD_MODE);

@@ -226,6 +226,20 @@ run_smart_checks() {
     fi
     [[ $(stat -c %s "$bin") -ge 512 ]] && ok "SMART log readable" || { bad "SMART log readable"; return; }
 
+    # The standard fields first: these are mode-independent, so a mode that
+    # counts commands but not their bytes (or the reverse) shows up here.
+    local duw hwc
+    duw=$(od -An -tu8 -j48 -N8 "$bin" | tr -d ' ')
+    hwc=$(od -An -tu8 -j80 -N8 "$bin" | tr -d ' ')
+    echo "  data_units_written=$duw host_write_commands=$hwc"
+    if [[ "${hwc:-0}" -gt 0 ]]; then
+        ok "host write commands counted"
+        [[ "${duw:-0}" -gt 0 ]] && ok "the bytes those commands wrote are counted" \
+                                || bad "the bytes those commands wrote are counted"
+    else
+        na "host write commands counted (nothing written yet)"
+    fi
+
     # FEMU reports write amplification and its page counters in the vendor area:
     # 192 WAF x1000, 200 host pages, 208 relocated pages, 216 programmed pages.
     waf=$(od -An -tu4 -j192 -N4 "$bin" | tr -d ' ')
