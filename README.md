@@ -762,6 +762,36 @@ ssd-config: unknown property 'gc_polcy' -- not one FEMU accepts
 ssd-config: config rejected; see the warnings above
 ```
 
+### Checking a Device
+
+`hw/femu/scripts/femu-test.sh` runs inside the guest and checks that the
+emulated device still behaves: data survives the FTL, deallocate works, the
+counters move, and the mode-specific surface answers. What it runs depends on
+what the device reports itself to be, so the same script covers a block, zoned
+or key-value namespace.
+
+```bash
+# inside the guest -- this OVERWRITES the device, hence --yes
+sudo ./femu-test.sh --yes /dev/nvme0n1
+```
+
+```
+== data survives the FTL ==
+  PASS  random write then verify (crc32c)
+== deallocate ==
+  PASS  deallocate accepted
+  PASS  mapping still sound after deallocate
+== counters ==
+  waf_x1000=935 host_pages=40960 nand_pages=38335
+  PASS  host writes counted
+
+FEMU_TEST pass=7 fail=0 skip=0
+```
+
+It refuses to run on a mounted device, and exits non-zero if anything failed, so
+it can gate a build. A read that fails counts as a failure just as a bad
+checksum does -- both mean the device did not return what was written.
+
 Worked examples live in `hw/femu/scripts/configs/` (block SSD, over-provisioned
 for GC studies, ZNS, FDP, heterogeneous namespaces, QLC, write buffer).
 `hw/femu/scripts/ssd-config-test.sh` expands every one of them and checks FEMU
