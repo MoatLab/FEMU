@@ -74,6 +74,20 @@ jobs:
           echo "✓ FEMU mode ${mode} instantiation test completed"
         done
 
+    - name: Validate the config-file interface
+      run: |
+        chmod +x hw/femu/scripts/ssd-config.sh hw/femu/scripts/ssd-config-test.sh
+        # Expands every example config and checks FEMU accepts the result, so a
+        # property that is renamed or removed breaks here rather than in
+        # somebody's run script. Carries its own negative control, so a check
+        # that stopped detecting bad arguments fails instead of passing
+        # everything. Runs here rather than in compatibility-test because that
+        # job installs no dependencies, so the binary cannot start there.
+        ./hw/femu/scripts/ssd-config-test.sh "$PWD/build-femu/qemu-system-x86_64"
+
+    - name: Check the guest device test parses
+      run: bash -n hw/femu/scripts/femu-test.sh
+
     - name: Archive build artifacts
       uses: actions/upload-artifact@v4
       if: success()
@@ -111,17 +125,6 @@ jobs:
           bash -n "$script"
           echo "✓ $script syntax check passed"
         done
-
-    - name: Validate the config-file interface
-      run: |
-        chmod +x hw/femu/scripts/ssd-config.sh hw/femu/scripts/ssd-config-test.sh
-        # Expands every example config and checks FEMU accepts the result, so a
-        # property that is renamed or removed breaks here rather than in
-        # somebody's run script. Includes its own negative control.
-        ./hw/femu/scripts/ssd-config-test.sh "$PWD/build-femu/qemu-system-x86_64"
-
-    - name: Check the guest device test parses
-      run: bash -n hw/femu/scripts/femu-test.sh
 
     - name: Validate FEMU configuration parameters
       run: |

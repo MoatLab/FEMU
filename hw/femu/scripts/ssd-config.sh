@@ -86,7 +86,9 @@ props_of() {
 }
 
 FEMU="$(find_femu_bin)"
-declare -A DEV_PROPS SUBSYS_PROPS
+# assigned, not merely declared: "set -u" trips on ${#arr[@]} of an unset array,
+# which is what happens when the emulator cannot be queried
+declare -A DEV_PROPS=() SUBSYS_PROPS=()
 if [[ -n "$FEMU" ]]; then
     while read -r p; do [[ -n "$p" ]] && DEV_PROPS["$p"]=1; done < <(props_of femu)
     while read -r p; do [[ -n "$p" ]] && SUBSYS_PROPS["$p"]=1; done < <(props_of femu-subsys)
