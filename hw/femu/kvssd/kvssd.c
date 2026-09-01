@@ -2,6 +2,7 @@
 
 #include "kvssd.h"
 #include "../nvme.h"
+#include "../bbssd/ftl.h"
 
 /*
  * FEMU Key Value SSD mode.
@@ -289,6 +290,11 @@ static void kvssd_init_ctrl_str(FemuCtrl *n)
 static void kvssd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 {
     FemuKvssdState *kvssd;
+
+    /* Same shared geometry, same bounds check as bbssd (see csd_init). */
+    if (bb_check_geometry(n, errp)) {
+        return;
+    }
 
     /*
      * Every namespace running the KV command set reports it, whether or not it

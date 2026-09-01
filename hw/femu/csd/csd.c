@@ -160,6 +160,12 @@ static void csd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 
     csd_check_size();
 
+    /* CSD builds a bbssd ssd from the shared geometry, so it needs the same
+     * bounds check bbssd does; without it an oversized axis aliases in the PPA. */
+    if (bb_check_geometry(n, errp)) {
+        return;
+    }
+
     if (n->csd_params.fdm_size_mb == 0) {
         error_setg(errp, "CSD mode requires fdm_size to be non-zero");
         return;
