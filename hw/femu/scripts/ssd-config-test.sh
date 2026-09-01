@@ -34,8 +34,12 @@ bad()  { echo "  FAIL  $*"; fail=$((fail + 1)); }
 # later failure -- pinning the memory backend, no KVM -- means the arguments
 # themselves were fine, which is all this is testing.
 rejects() {
-    local out
-    out="$(timeout 15 "$FEMU" -machine q35 $1 -S -no-user-config -nodefaults \
+    local out args
+    # Shrink the capacity for the check. What is being tested is whether FEMU
+    # accepts the properties, not whether this host can hold the device, and a
+    # config sized for real use would have the check allocating gigabytes.
+    args="$(sed -E 's/devsz_mb=[0-9]+/devsz_mb=512/' <<<"$1")"
+    out="$(timeout 15 "$FEMU" -machine q35 $args -S -no-user-config -nodefaults \
            -display none </dev/null 2>&1)"
     if grep -qE "Property '[^']*' not found|invalid parameter|short-form boolean option|can't apply global|Parameter '[^']*' expects|does not exist" <<<"$out"; then
         grep -m1 -E "Property|invalid parameter|short-form|Parameter" <<<"$out" | sed 's/^/        /'

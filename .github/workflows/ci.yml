@@ -112,6 +112,17 @@ jobs:
           echo "✓ $script syntax check passed"
         done
 
+    - name: Validate the config-file interface
+      run: |
+        chmod +x hw/femu/scripts/ssd-config.sh hw/femu/scripts/ssd-config-test.sh
+        # Expands every example config and checks FEMU accepts the result, so a
+        # property that is renamed or removed breaks here rather than in
+        # somebody's run script. Includes its own negative control.
+        ./hw/femu/scripts/ssd-config-test.sh "$PWD/build-femu/qemu-system-x86_64"
+
+    - name: Check the guest device test parses
+      run: bash -n hw/femu/scripts/femu-test.sh
+
     - name: Validate FEMU configuration parameters
       run: |
         cd build-femu
