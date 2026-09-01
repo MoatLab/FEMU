@@ -431,6 +431,13 @@ amplification, which is how a read-heavy workload comes to have a write cost at
 all. Measured on a 512 MiB region read six times over with a low limit: 5 lines
 refreshed, 77824 pages relocated, amplification 1.000 -> 1.542. Off by default.
 
+The rate is bounded by how often the host writes, not by how hard it reads: one
+line is queued at a time and at most one is refreshed per write. That keeps an
+aggressive setting from running away -- dropping the limit from 500 to 10 moves
+amplification only 1.542 to 1.628 -- but it also means a workload that never
+writes never refreshes anything, where a real device would do this in the
+background. Model reads-only ageing some other way.
+
 These are summed across the bbssd namespaces of the controller, and are populated
 in FDP mode as well as plain block mode.
 
