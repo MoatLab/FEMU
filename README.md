@@ -393,13 +393,30 @@ was. Note that with a buffer configured a write that is absorbed costs nothing
 and the cost appears later on whichever write evicts it, so per-request latency
 is redistributed rather than reduced.
 
-**Write amplification.** The device reports amplification in the vendor area of
-the SMART log: the factor scaled by 1000 at byte 192, host-programmed pages at
-200, and relocated pages at 208.
+**Write amplification and wear.** The device reports these in the vendor area of
+the SMART log:
+
+| byte | width | meaning |
+|---|---|---|
+| 192 | 4 | write amplification, scaled by 1000 |
+| 200 | 8 | pages the host wrote (the denominator) |
+| 208 | 8 | pages garbage collection relocated |
+| 216 | 8 | user pages programmed into NAND |
+| 224 | 8 | reads taken by the most-read block since its erase |
 
 ```bash
-sudo nvme smart-log /dev/nvme0n1 -o binary | od -An -tu4 -j192 -N4   # WAF x1000
+sudo nvme smart-log /dev/nvme0 -o binary | od -An -tu4 -j192 -N4   # WAF x1000
+sudo nvme smart-log /dev/nvme0 -o binary | od -An -tu8 -j200 -N8   # host pages
 ```
+
+Amplification is `(programmed + relocated) / host`, so a write buffer that
+absorbs repeated writes to the same page shows up as a factor below 1. Bytes 200
+and 216 are equal when no buffer is configured. The read count at 224 is the
+stress a real device watches to decide when data must be rewritten; nothing in
+FEMU acts on it yet.
+
+These are summed across the bbssd namespaces of the controller, and are populated
+in FDP mode as well as plain block mode.
 
 **Use Cases:**
 - Commercial SSD simulation research
