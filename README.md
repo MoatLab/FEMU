@@ -33,6 +33,7 @@
   - [NoSSD Mode](#nossd-mode)
   - [Computational Storage Mode (CSD)](#computational-storage-mode-csd)
 - [Configuration](#configuration)
+  - [Config Files](#config-files)
 - [Development](#development)
 - [Troubleshooting](#troubleshooting)
 - [Research & Citation](#research--citation)
@@ -703,6 +704,68 @@ mode is upstreamed.
 ---
 
 ## Configuration
+
+### Config Files
+
+FEMU has well over a hundred device properties, so writing them out as a single
+`-device femu,a=,b=,c=,...` line makes a run script that nobody can read.
+`hw/femu/scripts/ssd-config.sh` expands a config file into those arguments
+instead:
+
+```bash
+./hw/femu/scripts/ssd-config.sh hw/femu/scripts/configs/bbssd.conf
+# -device femu,id=nvme0,devsz_mb=4096,namespaces=1,secsz=512,...,femu_mode=1
+```
+
+so a run script can say:
+
+```bash
+QEMU_ARGS=$(./hw/femu/scripts/ssd-config.sh my-ssd.conf)
+qemu-system-x86_64 -enable-kvm -cpu host -smp 8 -m 8G $QEMU_ARGS ...
+```
+
+The format is INI-ish. Keys are FEMU device properties and mean exactly what
+they mean in `qemu-system-x86_64 -device femu,help`; `#` and `;` start comments,
+section headers are labels for the reader, and a key with an empty value is
+ignored:
+
+```ini
+[device]
+mode        = bbssd        # friendly name for femu_mode
+devsz_mb    = 4096
+
+[geometry]
+secs_per_pg = 8            # 4 KiB pages
+luns_per_ch = 8
+nchs        = 8
+
+[timing]
+pg_rd_lat   = 40000        # ns
+pg_wr_lat   = 200000
+```
+
+Two things it handles that are easy to get wrong by hand:
+
+- **`[subsys]`** properties are emitted as a separate `-device femu-subsys,...`
+  and wired to the SSD. FDP lives on the subsystem object rather than on the
+  `femu` device, which is the usual stumbling block when setting it up.
+- **List values** such as `namespace_modes = bbssd,znssd,nossd` get their commas
+  escaped for QEMU automatically.
+
+Keys are checked against the emulator itself, so a typo is reported rather than
+silently dropped, and the checking cannot fall behind the properties
+FEMU actually has:
+
+```
+$ ./hw/femu/scripts/ssd-config.sh my-ssd.conf
+ssd-config: unknown property 'gc_polcy' -- not one FEMU accepts
+ssd-config: config rejected; see the warnings above
+```
+
+Worked examples live in `hw/femu/scripts/configs/` (block SSD, over-provisioned
+for GC studies, ZNS, FDP, heterogeneous namespaces, QLC, write buffer).
+`hw/femu/scripts/ssd-config-test.sh` expands every one of them and checks FEMU
+accepts the result.
 
 ### SSD Layout Parameters
 
