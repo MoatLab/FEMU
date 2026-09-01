@@ -187,19 +187,23 @@ static uint64_t kv_reclaim_empty_lines(FemuKvssdState *s, NvmeRequest *req)
         for (int ch = 0; ch < spp->nchs; ch++) {
             for (int lun = 0; lun < spp->luns_per_ch; lun++) {
                 struct nand_lun *lunp;
+                struct ppa ppas[1 << PL_BITS];
+                uint64_t sub;
 
                 ppa.g.ch = ch;
                 ppa.g.lun = lun;
+                ppa.g.pl = 0;
                 lunp = get_lun(ssd, &ppa);
                 for (int pl = 0; pl < spp->pls_per_lun; pl++) {
-                    uint64_t sub;
-
                     ppa.g.pl = pl;
                     ppa.g.pg = 0;
                     mark_block_free(ssd, &ppa);
-                    sub = ssd_advance_status(ssd, &ppa, &c);
-                    lat = sub > lat ? sub : lat;
+                    ppas[pl] = ppa;
                 }
+                /* same block on every plane: one erase, not one per plane */
+                sub = ssd_advance_status_multiplane(ssd, ppas, spp->pls_per_lun,
+                                                    &c);
+                lat = sub > lat ? sub : lat;
                 lunp->gc_endtime = lunp->next_lun_avail_time;
             }
         }

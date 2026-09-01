@@ -658,26 +658,34 @@ static void reclaim_line(struct ssd *ssd, struct line *victim_line)
     /* copy back valid data */
     for (ch = 0; ch < spp->nchs; ch++) {
         for (lun = 0; lun < spp->luns_per_ch; lun++) {
+            struct ppa ppas[1 << PL_BITS];
             int pl;
 
+            ppa.g.ch = ch;
+            ppa.g.lun = lun;
+            ppa.g.pl = 0;
+            lunp = get_lun(ssd, &ppa);
+
             for (pl = 0; pl < spp->pls_per_lun; pl++) {
-                ppa.g.ch = ch;
-                ppa.g.lun = lun;
                 ppa.g.pl = pl;
-                lunp = get_lun(ssd, &ppa);
                 clean_one_block(ssd, &ppa);
                 mark_block_free(ssd, &ppa);
-
-                if (spp->enable_gc_delay) {
-                    struct nand_cmd gce;
-                    gce.type = GC_IO;
-                    gce.cmd = NAND_ERASE;
-                    gce.stime = 0;
-                    ssd_advance_status(ssd, &ppa, &gce);
-                }
-
-                lunp->gc_endtime = lunp->next_lun_avail_time;
+                ppas[pl] = ppa;
             }
+
+            /*
+             * A line holds the same block index on every plane, so the die can
+             * erase them in one operation instead of one after another.
+             */
+            if (spp->enable_gc_delay) {
+                struct nand_cmd gce;
+                gce.type = GC_IO;
+                gce.cmd = NAND_ERASE;
+                gce.stime = 0;
+                ssd_advance_status_multiplane(ssd, ppas, spp->pls_per_lun, &gce);
+            }
+
+            lunp->gc_endtime = lunp->next_lun_avail_time;
         }
     }
 

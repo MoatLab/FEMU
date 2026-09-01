@@ -261,12 +261,15 @@ NandOpCompletion nand_media_multiplane(NandMedia *m, const NandLoc *locs, int nl
         }
     }
 
-    /* one array op in parallel across all planes; gate on LUN + every plane */
+    /*
+     * One array op in parallel across all planes, gated on every resource the
+     * configured gate covers. Going through array_gate_start/array_commit rather
+     * than reaching for the accumulators directly is what lets a LUN-only caller
+     * (bbssd) use this: it leaves plane_avail untouched when the gate excludes it.
+     */
     uint64_t start = t;
-    uint64_t *lun = m->cfg.timeline->lun_avail(m->cfg.timeline_opaque, &locs[0]);
-    start = mx(start, *lun);
     for (i = 0; i < nlocs; i++) {
-        start = mx(start, *m->cfg.timeline->plane_avail(m->cfg.timeline_opaque, &locs[i]));
+        start = mx(start, array_gate_start(m, &locs[i], start));
     }
     uint64_t alat;
     if (op == NAND_MEDIA_READ) {
@@ -288,9 +291,8 @@ NandOpCompletion nand_media_multiplane(NandMedia *m, const NandLoc *locs, int nl
         alat = array_lat(m, &locs[0], op);
     }
     uint64_t done = start + alat;
-    *lun = done;
     for (i = 0; i < nlocs; i++) {
-        *m->cfg.timeline->plane_avail(m->cfg.timeline_opaque, &locs[i]) = done;
+        array_commit(m, &locs[i], done);
     }
 
     t = done;

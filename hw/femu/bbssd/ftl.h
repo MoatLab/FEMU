@@ -545,6 +545,8 @@ void bb_nand_media_init(struct ssd *ssd);
 void bb_nand_media_refresh_timing(struct ssd *ssd);
 uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
                             struct nand_cmd *ncmd);
+uint64_t ssd_advance_status_multiplane(struct ssd *ssd, struct ppa *ppas,
+                                       int nppas, struct nand_cmd *ncmd);
 
 #ifdef FEMU_DEBUG_FTL
 #define ftl_debug(fmt, ...) \

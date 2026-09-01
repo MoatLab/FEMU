@@ -184,3 +184,47 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
     loc = bb_decode_loc(ssd, ppa);
     return nand_media_op(&ssd->media, &loc, op, stime).latency_ns;
 }
+
+/*
+ * Multi-plane variant: one command sequence addressing the same block on every
+ * plane of a LUN, which real NAND runs as a single array operation rather than
+ * one erase after another. GC erase is the caller that benefits -- it reclaims
+ * the same block index on every plane, exactly the shape the die can batch.
+ *
+ * With one plane there is nothing to batch, so this is the ordinary single-op
+ * path and the default configuration is untouched.
+ */
+uint64_t ssd_advance_status_multiplane(struct ssd *ssd, struct ppa *ppas,
+                                       int nppas, struct nand_cmd *ncmd)
+{
+    NandLoc locs[1 << PL_BITS];
+    uint64_t stime;
+    NandMediaOp op;
+    int i;
+
+    if (nppas <= 1) {
+        return ssd_advance_status(ssd, &ppas[0], ncmd);
+    }
+    ftl_assert(nppas <= (1 << PL_BITS));
+
+    switch (ncmd->cmd) {
+    case NAND_READ:  op = NAND_MEDIA_READ;    break;
+    case NAND_WRITE: op = NAND_MEDIA_PROGRAM; break;
+    case NAND_ERASE: op = NAND_MEDIA_ERASE;   break;
+    default:
+        ftl_err("Unsupported NAND command: 0x%x\n", ncmd->cmd);
+        return 0;
+    }
+
+    stime = (ncmd->stime == 0) ?
+        qemu_clock_get_ns(QEMU_CLOCK_REALTIME) : ncmd->stime;
+
+    for (i = 0; i < nppas; i++) {
+        if (op == NAND_MEDIA_READ) {
+            get_blk(ssd, &ppas[i])->read_cnt++;
+        }
+        locs[i] = bb_decode_loc(ssd, &ppas[i]);
+    }
+
+    return nand_media_multiplane(&ssd->media, locs, nppas, op, stime).latency_ns;
+}
