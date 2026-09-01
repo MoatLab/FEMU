@@ -37,28 +37,35 @@ na()   { echo "  SKIP  $*"; skip=$((skip + 1)); }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # ------------------------------------------------------------------ safety
-[[ -b "$DEV" ]] || { echo "not a block device: $DEV" >&2; exit 1; }
-if lsblk -nro MOUNTPOINT "$DEV" 2>/dev/null | grep -q .; then
+have nvme || { echo "need nvme-cli" >&2; exit 1; }
+# A key-value namespace is not block addressable, so the kernel makes no block
+# node for it -- only the controller. Missing block device is therefore a hint
+# about what this is, not an error.
+BLOCK=0
+[[ -b "$DEV" ]] && BLOCK=1
+if [[ $BLOCK -eq 0 && ! -c "$CTRL" ]]; then
+    echo "found neither a block device at $DEV nor a controller at $CTRL" >&2
+    exit 1
+fi
+if [[ $BLOCK -eq 1 ]] && lsblk -nro MOUNTPOINT "$DEV" 2>/dev/null | grep -q .; then
     echo "refusing: $DEV or one of its partitions is mounted" >&2; exit 1
 fi
 if [[ $CONFIRM -ne 1 ]]; then
-    echo "This overwrites everything on $DEV. Re-run with --yes if that is what you want." >&2
+    echo "This overwrites everything on ${DEV}. Re-run with --yes if that is what you want." >&2
     exit 1
 fi
-have nvme || { echo "need nvme-cli" >&2; exit 1; }
 
 # ------------------------------------------------------------------ identify
 echo "== device =="
-SIZE=$(blockdev --getsize64 "$DEV" 2>/dev/null || echo 0)
-ZONED=$(cat "/sys/block/$(basename "$DEV")/queue/zoned" 2>/dev/null || echo none)
-CSI=$(nvme id-ns "$DEV" 2>/dev/null | grep -ci . || echo 0)
-echo "  device=$DEV controller=$CTRL size=$((SIZE / 1024 / 1024)) MiB zoned=$ZONED"
-[[ "$SIZE" -gt 0 ]] && ok "namespace has a usable size" || bad "namespace has a usable size"
-
-# key-value namespaces answer neither a normal read nor id-ns the usual way
-KV=0
-if nvme id-ctrl "$CTRL" 2>/dev/null | grep -qi "kv"; then KV=1; fi
-[[ "$CSI" -eq 0 ]] && KV=1
+SIZE=0; ZONED=none
+if [[ $BLOCK -eq 1 ]]; then
+    SIZE=$(blockdev --getsize64 "$DEV" 2>/dev/null || echo 0)
+    ZONED=$(cat "/sys/block/$(basename "$DEV")/queue/zoned" 2>/dev/null || echo none)
+fi
+echo "  controller=$CTRL block=$([[ $BLOCK -eq 1 ]] && echo "$DEV" || echo none)" \
+     "size=$((SIZE / 1024 / 1024)) MiB zoned=$ZONED"
+nvme id-ctrl "$CTRL" >/dev/null 2>&1 && ok "controller answers Identify" \
+                                     || bad "controller answers Identify"
 
 # Write, read back and compare. A device can fail this two ways -- the data
 # comes back wrong, or the read fails outright -- and both have to count. fio
@@ -131,13 +138,39 @@ run_zns_checks() {
 # ------------------------------------------------------------------ kv
 run_kv_checks() {
     echo "== key-value =="
-    local key=0x46454d55 tmp out
-    tmp=$(mktemp); trap 'rm -f "$tmp"' RETURN
-    head -c 64 /dev/urandom > "$tmp"
-    if ! nvme io-passthru "$DEV" --help >/dev/null 2>&1; then
-        na "key-value checks (nvme-cli lacks io-passthru)"; return
+    # NVMe-KV commands are not in the block path, so they go through
+    # io-passthru: Store 01h, Retrieve 02h, Delete 10h, Exist 14h. The key sits
+    # in CDW2/3 and its length in CDW11.
+    local key=0x46454d55 val ret
+    # nvme-cli exits non-zero from "--help", so ask the command list instead
+    if ! nvme help 2>&1 | grep -q io-passthru; then
+        na "key-value checks (nvme-cli has no io-passthru)"; return
     fi
-    na "key-value checks (needs the KV opcodes; see hw/femu/scripts/kv-probe.c)"
+    val=$(mktemp); ret=$(mktemp)
+    trap 'rm -f "$val" "$ret"' RETURN
+    head -c 64 /dev/urandom > "$val"
+
+    nvme io-passthru "$CTRL" -O 0x01 -n 1 --cdw10=64 --cdw11=4 --cdw2=$key \
+        -l 64 -w -i "$val" >/dev/null 2>&1 \
+        && ok "store a key" || { bad "store a key"; return; }
+
+    nvme io-passthru "$CTRL" -O 0x14 -n 1 --cdw11=4 --cdw2=$key >/dev/null 2>&1 \
+        && ok "the key exists" || bad "the key exists"
+
+    nvme io-passthru "$CTRL" -O 0x02 -n 1 --cdw10=64 --cdw11=4 --cdw2=$key \
+        -l 64 -r -b 2>/dev/null > "$ret"
+    cmp -s "$val" "$ret" && ok "the value reads back byte for byte" \
+                         || bad "the value reads back byte for byte"
+
+    nvme io-passthru "$CTRL" -O 0x10 -n 1 --cdw11=4 --cdw2=$key >/dev/null 2>&1 \
+        && ok "delete the key" || bad "delete the key"
+
+    # a deleted key must be reported missing, not silently succeed
+    if nvme io-passthru "$CTRL" -O 0x14 -n 1 --cdw11=4 --cdw2=$key >/dev/null 2>&1; then
+        bad "a deleted key is reported missing"
+    else
+        ok "a deleted key is reported missing"
+    fi
 }
 
 # ------------------------------------------------------------------ counters
@@ -166,10 +199,11 @@ run_smart_checks() {
 }
 
 # ------------------------------------------------------------------ run
-if [[ "$ZONED" == "host-managed" || "$ZONED" == "host-aware" ]]; then
-    run_zns_checks
-elif [[ "$KV" -eq 1 ]]; then
+if [[ $BLOCK -eq 0 ]]; then
+    # no block node: key-value is the mode that looks like this
     run_kv_checks
+elif [[ "$ZONED" == "host-managed" || "$ZONED" == "host-aware" ]]; then
+    run_zns_checks
 else
     run_block_checks
 fi

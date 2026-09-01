@@ -768,7 +768,8 @@ ssd-config: config rejected; see the warnings above
 emulated device still behaves: data survives the FTL, deallocate works, the
 counters move, and the mode-specific surface answers. What it runs depends on
 what the device reports itself to be, so the same script covers a block, zoned
-or key-value namespace.
+or key-value namespace. A key-value namespace is not block addressable, so it
+has no block node at all and is driven through the controller instead.
 
 ```bash
 # inside the guest -- this OVERWRITES the device, hence --yes
