@@ -299,6 +299,14 @@ static bool kv_advance_write_pointer(FemuKvssdState *s, NvmeRequest *req,
     }
     wpp->lun = 0;
 
+    /* then the next plane of the LUN, before moving down the block */
+    check_addr(wpp->pl, spp->pls_per_lun);
+    wpp->pl++;
+    if (wpp->pl != spp->pls_per_lun) {
+        return true;
+    }
+    wpp->pl = 0;
+
     check_addr(wpp->pg, spp->pgs_per_blk);
     wpp->pg++;
     if (wpp->pg != spp->pgs_per_blk) {
