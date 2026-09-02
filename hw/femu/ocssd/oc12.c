@@ -369,7 +369,7 @@ static int oc12_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         ppa = req->slba;
         lun = PPA_LUN(ln, ppa);
         ch = PPA_CH(ln, ppa);
-        lunid = ch * c->num_ch + lun;
+        lunid = ch * c->num_lun + lun;
 
         req->expire_time = advance_chip_timestamp(n, lunid, now, opcode, 0);
         return 0;
@@ -944,7 +944,14 @@ static int oc12_init_more(FemuCtrl *n)
         c->num_lun = lps->num_lun;
         c->num_pln = lps->num_pln;
 
-        assert(c->num_ch <= FEMU_MAX_NUM_CHNLS && c->num_lun <= FEMU_MAX_NUM_CHIPS);
+        /*
+         * The timing model indexes its chip array by the flat LUN id,
+         * ch * num_lun + lun, so it is the product that has to fit. Bounding
+         * each axis on its own lets a legal-looking geometry index past the
+         * end of the array.
+         */
+        assert(c->num_ch <= FEMU_MAX_NUM_CHNLS &&
+               c->num_ch * c->num_lun <= FEMU_MAX_NUM_CHIPS);
 
         c->num_blk = cpu_to_le16(chnl_blks) / (c->num_lun * c->num_pln);
         c->num_pg = cpu_to_le16(lps->pgs_per_blk);

@@ -179,7 +179,6 @@ static int oc20_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     int64_t io_done_ts = 0;
     int64_t total_time_need_to_emulate = 0;
     int64_t cur_time_need_to_emulate;
-    int num_ch = lns->id_ctrl.geo.num_chk;
     int num_lun = lns->id_ctrl.geo.num_lun;
     Oc20AddrF *addrf = &lns->lbaf;
     int i;
@@ -194,7 +193,7 @@ static int oc20_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             lba = ((uint64_t *)req->slba)[i];
             ch = OC20_LBA_GET_GROUP(addrf, lba);
             lun = OC20_LBA_GET_PUNIT(addrf, lba);
-            lunid = ch * num_ch + lun;
+            lunid = ch * num_lun + lun;
 
             int64_t ts = advance_chip_timestamp(n, lunid, now, opcode, 0);
             if (ts > req->expire_time) {
@@ -1067,6 +1066,13 @@ static void femu_oc20_init_id_ctrl(FemuCtrl *n, NvmeNamespace *ns,
     uint8_t num_ch = n->oc_params.num_ch;
     uint8_t num_lun = n->oc_params.num_lun;
     uint8_t num_pln = n->oc_params.num_pln;
+
+    /*
+     * The timing model indexes its chip array by the flat LUN id,
+     * group * num_lun + punit, so the product is what has to fit.
+     */
+    assert(num_ch <= FEMU_MAX_NUM_CHNLS &&
+           num_ch * num_lun <= FEMU_MAX_NUM_CHIPS);
 
     /* 
      * Byte 0: Major Version Number (MJR)
