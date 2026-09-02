@@ -179,6 +179,38 @@ run_kv_checks() {
     else
         ok "a deleted key is reported missing"
     fi
+
+    # One key exercises one page. The write pointer only leaves the first
+    # channel after a key per channel and LUN, and only reaches the second
+    # plane after a key per channel, LUN and plane, so a single store cannot
+    # tell a device that walks its geometry from one that writes page zero
+    # forever. Store enough to cross those boundaries, then read back from
+    # both ends of the run.
+    local n=0 want=256 first=0x4b565f30
+    while [ $n -lt $want ]; do
+        nvme io-passthru "$CTRL" -O 0x01 -n "$NSID" --cdw10=$vsz --cdw11=4 \
+            --cdw2=$((first + n)) -l "$vsz" -w -i "$val" >/dev/null 2>&1 || break
+        n=$((n + 1))
+    done
+    if [ $n -lt 2 ]; then
+        na "many keys span the geometry (only $n fit)"
+    else
+        ok "many keys span the geometry ($n stored)"
+        local bad_rd=0 k
+        for k in 0 $((n / 2)) $((n - 1)); do
+            nvme io-passthru "$CTRL" -O 0x02 -n "$NSID" --cdw10=$vsz --cdw11=4 \
+                --cdw2=$((first + k)) -l "$vsz" -r -b 2>/dev/null > "$ret"
+            cmp -s "$val" "$ret" || bad_rd=$((bad_rd + 1))
+        done
+        [ $bad_rd -eq 0 ] && ok "keys read back from across the run" \
+                          || bad "keys read back from across the run ($bad_rd of 3 wrong)"
+    fi
+    # leave the device as found, so a second run has the same room as the first
+    while [ $n -gt 0 ]; do
+        n=$((n - 1))
+        nvme io-passthru "$CTRL" -O 0x10 -n "$NSID" --cdw11=4 \
+            --cdw2=$((first + n)) >/dev/null 2>&1
+    done
 }
 
 # ------------------------------------------------------------------ csd
