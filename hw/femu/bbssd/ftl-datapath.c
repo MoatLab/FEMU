@@ -403,6 +403,26 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
         if (spp->read_reclaim_limit && !ssd->read_reclaim_line &&
             get_blk(ssd, &ppa)->read_cnt >= (uint64_t)spp->read_reclaim_limit) {
             ssd->read_reclaim_line = get_line(ssd, &ppa);
+            ssd->reclaim_by_age = false;
+        }
+
+        /*
+         * Charge leaks out of a cell whether or not anything reads it, so data
+         * that has merely sat programmed long enough is refreshed as well. A
+         * line's close_time is when it was filled; one still being written has
+         * none yet and cannot be old. Queued here and rewritten on a write for
+         * the same reason as read stress: that is where relocation belongs.
+         */
+        if (spp->retention_limit_sec && !ssd->read_reclaim_line) {
+            struct line *aged = get_line(ssd, &ppa);
+            uint64_t limit = (uint64_t)spp->retention_limit_sec *
+                             NANOSECONDS_PER_SECOND;
+
+            if (aged->close_time && req->stime > aged->close_time &&
+                req->stime - aged->close_time >= limit) {
+                ssd->read_reclaim_line = aged;
+                ssd->reclaim_by_age = true;
+            }
         }
     }
 

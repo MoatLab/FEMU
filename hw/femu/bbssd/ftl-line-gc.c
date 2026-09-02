@@ -635,6 +635,7 @@ void mark_line_free(struct ssd *ssd, struct ppa *ppa)
      */
     if (ssd->read_reclaim_line == line) {
         ssd->read_reclaim_line = NULL;
+        ssd->reclaim_by_age = false;
     }
 
     line->ipc = 0;
@@ -711,13 +712,20 @@ int do_gc(struct ssd *ssd, bool force)
 }
 
 /*
- * Rewrite a line whose blocks have taken enough reads to be worth refreshing.
+ * Rewrite a line whose data has become worth refreshing, for either reason.
  *
  * Reading a page stresses the others in its block, so a block read many times
- * without being rewritten drifts towards errors. Real devices watch for that
+ * without being rewritten drifts towards errors. Charge also leaks out of a
+ * cell on its own, so data that has simply sat programmed long enough drifts
+ * the same way whether or not anything reads it. Real devices watch for both
  * and rewrite the data before it decays; the cost is relocation, which is why
- * this shows up as write amplification in a read-heavy workload rather than as
- * anything the host sees directly.
+ * this shows up as write amplification rather than as anything the host sees
+ * directly. The two are counted apart -- read_reclaims and retention_refreshes
+ * -- so a workload can tell which pressure it is paying for.
+ *
+ * A line nothing ever reads is never refreshed here: both triggers sit on the
+ * read path. Modelling the background media scan a real device runs would need
+ * a timer of its own, which this deliberately does not add.
  *
  * The line is chosen by the read path and rewritten here, on a write, because
  * this is where collection already happens and where the cost belongs. Doing it
@@ -731,6 +739,7 @@ int do_gc(struct ssd *ssd, bool force)
 int do_read_reclaim(struct ssd *ssd)
 {
     struct line *line = ssd->read_reclaim_line;
+    bool by_age;
 
     if (!line) {
         return -1;
@@ -746,6 +755,8 @@ int do_read_reclaim(struct ssd *ssd)
     }
 
     ssd->read_reclaim_line = NULL;
+    by_age = ssd->reclaim_by_age;
+    ssd->reclaim_by_age = false;
 
     /*
      * A heavily read line is usually full, and invalidating the first page of a
@@ -768,7 +779,11 @@ int do_read_reclaim(struct ssd *ssd)
     line->reclaiming = true;
     reclaim_line(ssd, line);
     line->reclaiming = false;
-    ssd->read_reclaims++;
+    if (by_age) {
+        ssd->retention_refreshes++;
+    } else {
+        ssd->read_reclaims++;
+    }
 
     return 0;
 }

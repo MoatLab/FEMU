@@ -1059,14 +1059,16 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
      * 1000) and the raw page counters, so a workload can read amplification
      * straight out of `nvme smart-log -o binary`. reserved2 begins at byte 192
      * of the log, putting the factor at 192, host pages at 200, relocated pages
-     * at 208 and programmed user pages at 216. The standard fields above are
-     * untouched.
+     * at 208, programmed user pages at 216, the most-read block's read count at
+     * 224, lines rewritten for read stress at 232 and lines rewritten for
+     * retention age at 240. The standard fields above are untouched.
      *
      * Host pages and programmed pages differ only when a write buffer is
      * configured: it is the gap between them that a buffer exists to open.
      */
     {
         uint64_t host = 0, gc = 0, nand = 0, maxreads = 0, rreclaims = 0;
+        uint64_t refreshes = 0;
         uint32_t waf;
 
         /* summed over the bbssd namespaces, as this log page is device-wide */
@@ -1083,6 +1085,7 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
                 maxreads = ssd_max_block_reads(ns->ssd);
             }
             rreclaims += ssd_read_reclaims(ns->ssd);
+            refreshes += ssd_retention_refreshes(ns->ssd);
         }
 
         if (host) {
@@ -1103,6 +1106,10 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
             /* lines rewritten because of read stress, at byte 232 */
             rreclaims = cpu_to_le64(rreclaims);
             memcpy(&smart.reserved2[40], &rreclaims, sizeof(rreclaims));
+
+            /* lines rewritten because of retention age, at byte 240 */
+            refreshes = cpu_to_le64(refreshes);
+            memcpy(&smart.reserved2[48], &refreshes, sizeof(refreshes));
         }
     }
 

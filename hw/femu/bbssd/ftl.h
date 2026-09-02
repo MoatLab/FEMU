@@ -190,6 +190,8 @@ struct ssdparams {
     bool hot_cold_sep;  /* place overwrites in blocks of their own */
     /* reads a block may take before its line is rewritten; 0 = never */
     int read_reclaim_limit;
+    /* seconds a line may hold data before it is rewritten; 0 = never */
+    int retention_limit_sec;
 
     /* DRAM write buffer: pages held before they are programmed */
     int buffer_size;
@@ -512,7 +514,9 @@ struct ssd {
      * is (host + relocated) / host.
      */
     struct line *read_reclaim_line; /* line the read path asked to rewrite */
+    bool reclaim_by_age;            /* that line was queued by age, not reads */
     uint64_t read_reclaims;         /* lines rewritten for read stress */
+    uint64_t retention_refreshes;   /* lines rewritten for retention age */
     uint64_t host_write_pages;  /* pages the host wrote (WAF denominator) */
     uint64_t nand_write_pages;  /* user pages programmed into NAND */
     uint64_t gc_write_pages;    /* pages the device relocated itself */

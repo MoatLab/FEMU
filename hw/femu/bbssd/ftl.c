@@ -201,6 +201,12 @@ uint64_t ssd_read_reclaims(struct ssd *ssd)
     return ssd->read_reclaims;
 }
 
+/* Lines rewritten because their data had sat programmed past the retention limit. */
+uint64_t ssd_retention_refreshes(struct ssd *ssd)
+{
+    return ssd->retention_refreshes;
+}
+
 uint64_t ssd_max_block_reads(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;

@@ -62,6 +62,11 @@ int bb_check_geometry(FemuCtrl *n, Error **errp)
         error_setg(errp, "FEMU bbssd: read_reclaim_limit must not be negative");
         return -1;
     }
+
+    if (p->retention_limit_sec < 0) {
+        error_setg(errp, "FEMU bbssd: retention_limit_sec must not be negative");
+        return -1;
+    }
     if (p->buffer_size < 0) {
         error_setg(errp, "FEMU bbssd: buffer_size must not be negative");
         return -1;
@@ -135,6 +140,7 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->buffer_thres_pcent = n->bb_params.buffer_thres_pcent / 100.0;
     spp->hot_cold_sep = n->bb_params.hot_cold_sep;
     spp->read_reclaim_limit = n->bb_params.read_reclaim_limit;
+    spp->retention_limit_sec = n->bb_params.retention_limit_sec;
     spp->read_hit_cnt = 0;
     spp->read_cnt = 0;
     spp->write_hit_cnt = 0;
