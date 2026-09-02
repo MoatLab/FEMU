@@ -58,23 +58,6 @@ int bb_check_geometry(FemuCtrl *n, Error **errp)
         }
     }
 
-    /*
-     * The write buffer starts writing pages back once it reaches
-     * buffer_thres_pcent of its size, so a level above 100 would never be
-     * reached and the buffer would grow without bound.
-     */
-    /*
-     * FDP keeps its own allocator and reclaim-unit pointers, which still assume
-     * a single plane. The rest of bbssd addresses planes, so only refuse the
-     * combination.
-     */
-    if (p->pls_per_lun != 1 && n->subsys && n->subsys->params.fdp.enabled) {
-        error_setg(errp, "FEMU bbssd: pls_per_lun must be 1 under FDP, got %d; "
-                   "the reclaim-unit allocator does not address planes",
-                   p->pls_per_lun);
-        return -1;
-    }
-
     if (p->read_reclaim_limit < 0) {
         error_setg(errp, "FEMU bbssd: read_reclaim_limit must not be negative");
         return -1;
@@ -83,6 +66,11 @@ int bb_check_geometry(FemuCtrl *n, Error **errp)
         error_setg(errp, "FEMU bbssd: buffer_size must not be negative");
         return -1;
     }
+    /*
+     * The write buffer starts writing pages back once it reaches
+     * buffer_thres_pcent of its size, so a level above 100 would never be
+     * reached and the buffer would grow without bound.
+     */
     if (p->buffer_size > 0 &&
         (p->buffer_thres_pcent <= 0 || p->buffer_thres_pcent > 100)) {
         error_setg(errp, "FEMU bbssd: buffer_thres_pcent must be between 1 and "

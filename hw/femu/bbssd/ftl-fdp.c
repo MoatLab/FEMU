@@ -193,7 +193,6 @@ static struct ppa fdp_get_new_page(struct ssd *ssd, FemuReclaimUnit *ru)
     ppa.g.pg = wpp->pg;
     ppa.g.blk = wpp->blk;
     ppa.g.pl = wpp->pl;
-    ftl_assert(ppa.g.pl == 0);
 
     return ppa;
 }
@@ -223,6 +222,13 @@ static FemuReclaimUnit *fdp_advance_ru_pointer(struct ssd *ssd,
         wpp->lun++;
         if (wpp->lun == spp->luns_per_ch) {
             wpp->lun = 0;
+            /* then the next plane of the LUN, before moving down the block */
+            check_addr(wpp->pl, spp->pls_per_lun);
+            wpp->pl++;
+            if (wpp->pl < spp->pls_per_lun) {
+                return ru;
+            }
+            wpp->pl = 0;
             check_addr(wpp->pg, spp->pgs_per_blk);
             wpp->pg++;
             if (wpp->pg == spp->pgs_per_blk) {
@@ -846,10 +852,12 @@ static void mark_ru_free(struct ssd *ssd, uint16_t rgid,
         ppa.g.blk = ru->lines[i]->id;
         for (int ch = 0; ch < spp->nchs; ch++) {
             for (int lun = 0; lun < spp->luns_per_ch; lun++) {
-                ppa.g.ch = ch;
-                ppa.g.lun = lun;
-                ppa.g.pl = 0;
-                mark_block_free(ssd, &ppa);
+                for (int pl = 0; pl < spp->pls_per_lun; pl++) {
+                    ppa.g.ch = ch;
+                    ppa.g.lun = lun;
+                    ppa.g.pl = pl;
+                    mark_block_free(ssd, &ppa);
+                }
             }
         }
     }
@@ -994,21 +1002,29 @@ int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid,
         ppa.g.blk = victim_line->id;
         for (int ch = 0; ch < spp->nchs; ch++) {
             for (int lun = 0; lun < spp->luns_per_ch; lun++) {
+                struct ppa ppas[1 << PL_BITS];
+
                 ppa.g.ch = ch;
                 ppa.g.lun = lun;
                 ppa.g.pl = 0;
                 lunp = get_lun(ssd, &ppa);
 
-                vpc_cnt += clean_one_block_fdp_style(ssd, &ppa, dest_ruh);
-                
-                blk_cnt++;
-                mark_block_free(ssd, &ppa);
+                for (int pl = 0; pl < spp->pls_per_lun; pl++) {
+                    ppa.g.pl = pl;
+                    vpc_cnt += clean_one_block_fdp_style(ssd, &ppa, dest_ruh);
+                    blk_cnt++;
+                    mark_block_free(ssd, &ppa);
+                    ppas[pl] = ppa;
+                }
+
+                /* the die erases the line's planes in one operation */
                 if (spp->enable_gc_delay) {
                     struct nand_cmd gce;
                     gce.type = GC_IO;
                     gce.cmd = NAND_ERASE;
                     gce.stime = 0;
-                    ssd_advance_status(ssd, &ppa, &gce);
+                    ssd_advance_status_multiplane(ssd, ppas, spp->pls_per_lun,
+                                                  &gce);
                 }
                 lunp->gc_endtime = lunp->next_lun_avail_time;
             }
@@ -1682,18 +1698,27 @@ static void ssd_trim_fdp_reset_all(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
     for (int ch = 0; ch < spp->nchs; ch++) {
         for (int lun = 0; lun < spp->luns_per_ch; lun++) {
             for (int blk = 0; blk < spp->blks_per_pl; blk++) {
+                struct ppa ppas[1 << PL_BITS];
+
                 ppa.g.ch = ch;
                 ppa.g.lun = lun;
                 ppa.g.pl = 0;
                 ppa.g.blk = blk;
                 lunp = get_lun(ssd, &ppa);
-                mark_block_free(ssd, &ppa);
+
+                for (int pl = 0; pl < spp->pls_per_lun; pl++) {
+                    ppa.g.pl = pl;
+                    mark_block_free(ssd, &ppa);
+                    ppas[pl] = ppa;
+                }
+
                 if (spp->enable_gc_delay) {
                     struct nand_cmd gce;
                     gce.type = GC_IO;
                     gce.cmd = NAND_ERASE;
                     gce.stime = 0;
-                    ssd_advance_status(ssd, &ppa, &gce);
+                    ssd_advance_status_multiplane(ssd, ppas, spp->pls_per_lun,
+                                                  &gce);
                 }
                 lunp->gc_endtime = lunp->next_lun_avail_time;
             }
