@@ -167,11 +167,11 @@ static FemuReclaimUnit *fdp_get_new_ru(struct ssd *ssd, uint16_t rgidx,
     fdp_set_ru_write_pointer(ssd, new_ru);
     eruh->ru_in_use_cnt++;
 
-    /* update NvmeRuHandle to reflect the new active RU's ruamw */
-    if (eruh->ruh && eruh->ruh->rus) {
-        eruh->ruh->rus[rgidx] = new_ru->nvme_ru;
-    }
-
+    /*
+     * The host-visible active RU (NvmeRuHandle.rus) is published by the
+     * caller that makes this the handle's current RU; a collection
+     * destination allocated here must not replace it.
+     */
     ftl_assert(new_ru->ruh == eruh);
     return new_ru;
 }
@@ -576,10 +576,39 @@ static FemuReclaimUnit *select_victim_ru(struct ssd *ssd, uint16_t rgid,
         victim_ru = pqueue_pop(rm->victim_ru_pq);
         break;
 
-    case GC_GLOBAL_CB:
-        victim_ru = pqueue_pop(rm->victim_ru_cb);
+    case GC_GLOBAL_CB: {
+        /*
+         * Cost-benefit weighs the space a reclaim frees against the copying
+         * it costs, by how long the data has sat: (1 - u) * age / u. The age
+         * only means something at selection time, so scan the heap here as
+         * the line GC does rather than trust a priority fixed at insertion.
+         */
+        pqueue_t *pq = rm->victim_ru_cb;
+        uint64_t now = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+        double best = -1.0;
+        bool best_free = false;
 
+        for (size_t i = 1; i < pq->size; i++) {
+            FemuReclaimUnit *ru = pq->d[i];
+            double u = ru->utilization;
+            double age = (double)(now - ru->last_invalidated_time) + 1.0;
+            double score = (1.0 - u) * age / (u + 1e-6);
+
+            if (ru->vpc == 0) {
+                if (!best_free) {
+                    best_free = true;
+                    victim_ru = ru;
+                }
+            } else if (!best_free && score > best) {
+                best = score;
+                victim_ru = ru;
+            }
+        }
+        if (victim_ru) {
+            pqueue_remove(pq, victim_ru);
+        }
         break;
+    }
 
     case GC_GLOBAL_RAND:
         victim_ru = pqueue_randpop(rm->victim_ru_pq);
@@ -1245,9 +1274,10 @@ static uint64_t ssd_stream_write(FemuCtrl *n, struct ssd *ssd,
         mark_page_valid_fdp(ssd, &ppa, ru);
         ssd->nand_write_pages++; /* a user page programmed into NAND */
 
-        /* decrement ruamw for this RU */
-        if (ru->nvme_ru && ru->nvme_ru->ruamw > 0) {
-            ru->nvme_ru->ruamw--; //TODO ? Does this really decrements page KiB?
+        /* RUAMW counts logical blocks; a page holds secs_per_pg of them */
+        if (ru->nvme_ru) {
+            ru->nvme_ru->ruamw -= MIN(ru->nvme_ru->ruamw,
+                                      (uint64_t)spp->secs_per_pg);
         }
 
         /* advance RU write pointer; may allocate new RU */
