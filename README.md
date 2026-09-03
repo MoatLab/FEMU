@@ -299,6 +299,9 @@ nchs=8                 # Number of channels
 pg_rd_lat=40000        # Page read latency (ns)
 pg_wr_lat=200000       # Page write latency (ns)
 blk_er_lat=2000000     # Block erase latency (ns)
+cmd_addr_lat=0         # Channel bus phases (ns): command/address cycle,
+pg_xfer_lat=0          #   page data transfer, status read. Any non-zero
+status_lat=0           #   value adds a shared per-channel bus to the model
 
 # Garbage Collection
 gc_thres_pcent=75      # GC trigger threshold (percent of lines in use)

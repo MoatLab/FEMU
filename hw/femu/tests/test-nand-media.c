@@ -141,6 +141,58 @@ static void test_ecc(void)
     check("their sum shares one cap", read_lat(&cfg, 2250, 30), 10000 + 4 * 200000);
 }
 
+/* one op on an idle array and bus, latency only */
+static uint64_t staged_lat(const NandMediaConfig *cfg, NandMediaOp op)
+{
+    NandMedia m;
+    NandLoc loc;
+
+    reset_timelines();
+    nand_media_init(&m, cfg);
+    memset(&loc, 0, sizeof(loc));
+    return nand_media_op(&m, &loc, op, 1000000000ULL).latency_ns;
+}
+
+static void test_staged_channel(void)
+{
+    NandMediaConfig cfg;
+    NandMedia m;
+    NandLoc a, b;
+    uint64_t first, second;
+
+    puts("staged channel bus");
+    bb_config(&cfg);
+    cfg.policy.channel_mode = NAND_CH_STAGED;
+    cfg.timing.cmd_addr_ns = 300;
+    cfg.timing.page_xfer_ns = 20000;
+    cfg.timing.status_ns = 100;
+    check("read = command + array + transfer + status",
+          staged_lat(&cfg, NAND_MEDIA_READ), 300 + 10000 + 20000 + 100);
+    check("program = command + transfer + array",
+          staged_lat(&cfg, NAND_MEDIA_PROGRAM), 300 + 20000 + 40000);
+    check("erase = command + array + status",
+          staged_lat(&cfg, NAND_MEDIA_ERASE), 300 + 2000000 + 100);
+
+    /* two reads on one channel but different LUNs share the bus, not the array */
+    reset_timelines();
+    nand_media_init(&m, &cfg);
+    memset(&a, 0, sizeof(a));
+    memset(&b, 0, sizeof(b));
+    b.lun = 1;
+    first = nand_media_op(&m, &a, NAND_MEDIA_READ, 1000000000ULL).latency_ns;
+    second = nand_media_op(&m, &b, NAND_MEDIA_READ, 1000000000ULL).latency_ns;
+    check("the second read queues on the channel behind the first",
+          second, 2 * first);
+
+    /* with the phases unset the plain gate is used and the bus never queues */
+    bb_config(&cfg);
+    reset_timelines();
+    nand_media_init(&m, &cfg);
+    first = nand_media_op(&m, &a, NAND_MEDIA_READ, 1000000000ULL).latency_ns;
+    second = nand_media_op(&m, &b, NAND_MEDIA_READ, 1000000000ULL).latency_ns;
+    check("channel off: another LUN's read costs the same", second, first);
+}
+
 static void test_multiplane_erase(void)
 {
     NandMediaConfig cfg;
@@ -243,6 +295,7 @@ static void test_copyback(void)
 int main(void)
 {
     test_ecc();
+    test_staged_channel();
     test_multiplane_erase();
     test_copyback();
     if (failures) {

@@ -94,7 +94,9 @@ void bb_nand_media_init(struct ssd *ssd)
     /* optional finer NAND timing; every knob defaults to 0, leaving these zero
      * and the behavior bit-identical to the flat model. */
     cfg.timing.cmd_addr_ns = spp->cmd_addr_lat;
-    cfg.timing.page_xfer_ns = spp->pg_xfer_lat;
+    /* ch_xfer_lat is the older name for the data transfer phase */
+    cfg.timing.page_xfer_ns = spp->pg_xfer_lat ? spp->pg_xfer_lat :
+                                                 spp->ch_xfer_lat;
     cfg.timing.status_ns = spp->status_lat;
     cfg.timing.tplpbsy_ns = spp->tplpbsy;
     cfg.timing.tplrbsy_ns = spp->tplrbsy;
@@ -147,7 +149,13 @@ void bb_nand_media_init(struct ssd *ssd)
     }
 
     cfg.policy.array_gate = NAND_GATE_LUN_ONLY;
-    cfg.policy.channel_mode = NAND_CH_OFF;
+    /*
+     * The channel bus phases only exist in the staged model. Select it when
+     * a phase has a duration, so the unset default keeps the plain array gate
+     * and its exact timing.
+     */
+    cfg.policy.channel_mode = (cfg.timing.cmd_addr_ns || cfg.timing.page_xfer_ns ||
+                               cfg.timing.status_ns) ? NAND_CH_STAGED : NAND_CH_OFF;
     cfg.timeline = &bb_timeline_ops;
     cfg.timeline_opaque = ssd;
     nand_media_init(&ssd->media, &cfg);
