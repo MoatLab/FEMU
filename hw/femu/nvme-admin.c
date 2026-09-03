@@ -755,7 +755,13 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
                 ((n->nr_io_queues - 1) << 16));
         break;
     case NVME_TEMPERATURE_THRESHOLD:
-        cqe->n.result = cpu_to_le32(n->features.temp_thresh);
+        /* one composite sensor; THSEL picks the over or under threshold */
+        if (((dw11 >> 16) & 0xf) != 0 && ((dw11 >> 16) & 0xf) != 0xf) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        cqe->n.result = cpu_to_le32((dw11 & (1 << 20)) ?
+                                    n->features.temp_thresh_under :
+                                    n->features.temp_thresh);
         break;
     case NVME_ERROR_RECOVERY:
         cqe->n.result = cpu_to_le32(n->features.err_rec);
@@ -871,7 +877,19 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
                 ((n->nr_io_queues - 1) << 16));
         break;
     case NVME_TEMPERATURE_THRESHOLD:
-        n->features.temp_thresh = dw11;
+        /*
+         * dw11 carries the threshold in its low half and, above it, which
+         * sensor (TMPSEL) and which side (THSEL) it applies to. There is one
+         * composite sensor, and only its over threshold feeds the warning.
+         */
+        if (((dw11 >> 16) & 0xf) != 0 && ((dw11 >> 16) & 0xf) != 0xf) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        if (dw11 & (1 << 20)) {
+            n->features.temp_thresh_under = dw11 & 0xffff;
+            break;
+        }
+        n->features.temp_thresh = dw11 & 0xffff;
         /*
          * Crossing the threshold raises a SMART event once, pointing the host
          * at the health log. It is armed again when the threshold moves back

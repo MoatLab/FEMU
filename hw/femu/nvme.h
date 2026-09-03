@@ -1147,7 +1147,8 @@ enum NvmeIdCtrlLpa {
 typedef struct NvmeFeatureVal {
     uint32_t    arbitration;
     uint32_t    power_mgmt;
-    uint32_t    temp_thresh;
+    uint32_t    temp_thresh;        /* over-temperature threshold, K */
+    uint32_t    temp_thresh_under;  /* under-temperature threshold, K */
     uint32_t    err_rec;
     uint32_t    volatile_wc;
     uint32_t    nr_io_queues;
