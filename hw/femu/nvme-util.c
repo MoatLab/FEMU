@@ -213,7 +213,10 @@ uint16_t femu_nvme_rw_check_req(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                                 uint64_t meta_size)
 {
 
-    if (elba > le64_to_cpu(ns->id_ns.nsze)) {
+    uint64_t nsze = le64_to_cpu(ns->id_ns.nsze);
+
+    /* slba + nlb wraps for an slba near the top; test it in a form that cannot */
+    if (slba > nsze || nlb > nsze - slba) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
                             offsetof(NvmeRwCmd, nlb), elba, ns->id);
         return NVME_LBA_RANGE | NVME_DNR;

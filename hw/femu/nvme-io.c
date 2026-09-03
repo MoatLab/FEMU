@@ -778,7 +778,8 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     /* address the media within this namespace's slice, as nvme_rw() does */
     uint64_t offset  = ns->backend_offset + (slba << data_shift);
 
-    if ((slba + nlb) > le64_to_cpu(ns->id_ns.nsze)) {
+    if (slba > le64_to_cpu(ns->id_ns.nsze) ||
+        nlb > le64_to_cpu(ns->id_ns.nsze) - slba) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
                             offsetof(NvmeRwCmd, nlb), elba, ns->id);
         return NVME_LBA_RANGE;
@@ -883,7 +884,8 @@ static uint16_t nvme_write_uncor(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t slba = le64_to_cpu(rw->slba);
     uint32_t nlb  = le16_to_cpu(rw->nlb) + 1;
 
-    if ((slba + nlb) > ns->id_ns.nsze) {
+    if (slba > le64_to_cpu(ns->id_ns.nsze) ||
+        nlb > le64_to_cpu(ns->id_ns.nsze) - slba) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
                             offsetof(NvmeRwCmd, nlb), slba + nlb, ns->id);
         return NVME_LBA_RANGE | NVME_DNR;
