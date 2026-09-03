@@ -19,6 +19,12 @@ jobs:
       with:
         submodules: recursive
 
+    - name: NAND media-layer unit tests
+      run: |
+        # Milliseconds, no QEMU build needed, so failures show up before the
+        # 20-minute build rather than after it.
+        make -C hw/femu/tests check
+
     - name: Install dependencies
       run: |
         sudo apt update
