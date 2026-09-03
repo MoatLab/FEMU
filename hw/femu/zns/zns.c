@@ -1641,7 +1641,8 @@ static void zns_init_params(FemuCtrl *n, NvmeNamespace *ns)
     }
 
     //Misao: init sram
-    id_zns->program_unit = ZNS_PAGE_SIZE*id_zns->flash_type*2; //PAGE_SIZE*flash_type*2 planes
+    /* one program covers every plane of a die; the flush walks the same set */
+    id_zns->program_unit = ZNS_PAGE_SIZE * id_zns->flash_type * id_zns->num_plane;
     id_zns->stripe_unit = id_zns->program_unit*id_zns->num_ch*id_zns->num_lun;
     id_zns->cache.num_wc = ZNS_DEFAULT_NUM_WRITE_CACHE;
     id_zns->cache.write_cache = g_malloc0(sizeof(struct zns_write_cache) * id_zns->cache.num_wc);

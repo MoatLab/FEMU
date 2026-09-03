@@ -327,11 +327,21 @@ static void zns_reset_block_state(struct zns_ssd *zns, uint32_t zone_idx)
 uint64_t zns_zone_reset(struct zns_ssd *zns, uint32_t zone_idx,
                         uint64_t zone_size_lbas, uint64_t lbasz, uint64_t stime)
 {
-    int ch, lun, pl;
+    uint64_t cpz = zns->chnls_per_zone;
+    uint64_t groups = (cpz && cpz < zns->num_ch) ? zns->num_ch / cpz : 1;
+    uint32_t blk_idx = zone_idx;
+    int ch, lun, pl, ch_lo = 0, ch_hi = zns->num_ch;
     struct ppa ppa;
     struct nand_cmd erase_cmd;
     uint64_t sublat, maxlat = 0;
     uint64_t total_blocks_erased = 0;
+
+    /* erase the blocks the zone owns: see zns_reset_block_state() */
+    if (groups > 1) {
+        blk_idx = zone_idx / groups;
+        ch_lo = (zone_idx % groups) * cpz;
+        ch_hi = ch_lo + cpz;
+    }
 
     ftl_debug("=== Zone Reset Started for Zone %u ===\n", zone_idx);
 
@@ -349,14 +359,14 @@ uint64_t zns_zone_reset(struct zns_ssd *zns, uint32_t zone_idx,
     erase_cmd.cmd = NAND_ERASE;
     erase_cmd.stime = stime;
 
-    for (ch = 0; ch < zns->num_ch; ch++) {
+    for (ch = ch_lo; ch < ch_hi; ch++) {
         for (lun = 0; lun < zns->num_lun; lun++) {
             for (pl = 0; pl < zns->num_plane; pl++) {
                 ppa.ppa = 0;
                 ppa.g.ch = ch;
                 ppa.g.fc = lun;
                 ppa.g.pl = pl;
-                ppa.g.blk = zone_idx;
+                ppa.g.blk = blk_idx;
                 ppa.g.pg = 0;
                 ppa.g.spg = 0;
 
