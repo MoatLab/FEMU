@@ -29,6 +29,31 @@ static uint64_t advance_chnl(NandMedia *m, uint32_t ch, uint64_t earliest,
     return *cha;
 }
 
+/*
+ * Extra read time spent on error correction. Both wear and retention age push a
+ * block towards more correction work, so their tiers add and are capped
+ * together. Returns 0 unless the caller enabled the model and gave a step.
+ */
+static uint64_t ecc_extra_ns(NandMedia *m, const NandLoc *loc)
+{
+    const NandMediaTiming *t = &m->cfg.timing;
+    uint64_t tiers = 0;
+
+    if (!m->cfg.policy.ecc_on_read || !t->ecc_step_ns) {
+        return 0;
+    }
+    if (t->ecc_pe_per_tier) {
+        tiers += loc->pe_cycles / (uint32_t)t->ecc_pe_per_tier;
+    }
+    if (t->ecc_retention_per_tier_sec) {
+        tiers += loc->age_sec / (uint32_t)t->ecc_retention_per_tier_sec;
+    }
+    if (tiers > (uint64_t)t->ecc_max_tiers) {
+        tiers = t->ecc_max_tiers;
+    }
+    return (uint64_t)t->ecc_step_ns * tiers;
+}
+
 /* per-op array latency, honoring flat vs table + bbssd page-type multiplier */
 static uint64_t array_lat(NandMedia *m, const NandLoc *loc, NandMediaOp op)
 {
@@ -41,11 +66,7 @@ static uint64_t array_lat(NandMedia *m, const NandLoc *loc, NandMediaOp op)
     if (op == NAND_MEDIA_READ) {
         lat = m->cfg.policy.use_flat_timing ?
               t->rd_ns : t->rd_table_ns[loc->flash_type][loc->page_type];
-        if (m->cfg.policy.ecc_on_read && t->ecc_step_ns) {
-            uint64_t tiers = loc->pe_cycles / t->ecc_pe_per_tier;
-            if (tiers > (uint64_t)t->ecc_max_tiers) tiers = t->ecc_max_tiers;
-            lat += (uint64_t)t->ecc_step_ns * tiers;
-        }
+        lat += ecc_extra_ns(m, loc);
         return lat;
     }
     /* program */
@@ -276,17 +297,13 @@ NandOpCompletion nand_media_multiplane(NandMedia *m, const NandLoc *locs, int nl
         alat = m->cfg.policy.use_flat_timing ?
                m->cfg.timing.rd_ns :
                m->cfg.timing.rd_table_ns[locs[0].flash_type][locs[0].page_type];
-        if (m->cfg.policy.ecc_on_read && m->cfg.timing.ecc_step_ns) {
-            uint64_t worst = 0;
-            for (i = 0; i < nlocs; i++) {
-                uint64_t tiers = locs[i].pe_cycles / m->cfg.timing.ecc_pe_per_tier;
-                if (tiers > (uint64_t)m->cfg.timing.ecc_max_tiers)
-                    tiers = m->cfg.timing.ecc_max_tiers;
-                uint64_t extra = (uint64_t)m->cfg.timing.ecc_step_ns * tiers;
-                if (extra > worst) worst = extra;
-            }
-            alat += worst;
+        /* the plane needing the most correction paces the whole operation */
+        uint64_t worst = 0;
+        for (i = 0; i < nlocs; i++) {
+            uint64_t extra = ecc_extra_ns(m, &locs[i]);
+            if (extra > worst) worst = extra;
         }
+        alat += worst;
     } else {
         alat = array_lat(m, &locs[0], op);
     }

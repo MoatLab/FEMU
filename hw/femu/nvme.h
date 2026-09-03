@@ -1639,6 +1639,7 @@ typedef struct BbCtrlParams {
     int cell_pages;   /* pages per wordline = bits/cell: 1 SLC..5 PLC; 0 = off */
     int pgtype_lat;   /* model per-page-type program latency; 0 = off */
     int ecc_step_ns;  /* per-tier ECC read-latency adder vs P/E wear; 0 = off */
+    int ecc_retention_sec; /* retention age per ECC tier (s); 0 = age adds none */
     int cmd_addr_lat; /* command+address bus phase (ns); 0 = off */
     int pg_xfer_lat;  /* page data-in/data-out bus phase (ns); 0 = off */
     int status_lat;   /* status/ready-poll bus phase (ns); 0 = off */

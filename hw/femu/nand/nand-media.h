@@ -58,6 +58,7 @@ typedef struct NandLoc {
     uint8_t  flash_type;
     uint8_t  page_type;
     uint32_t pe_cycles;
+    uint32_t age_sec;   /* seconds since the data was programmed; 0 = untracked */
 } NandLoc;
 
 typedef struct NandMediaTiming {
@@ -86,6 +87,7 @@ typedef struct NandMediaTiming {
     int64_t ecc_step_ns;
     int32_t ecc_pe_per_tier;
     int32_t ecc_max_tiers;
+    int32_t ecc_retention_per_tier_sec;
     /* program/erase suspend overhead (ns) for an urgent read to preempt an in-flight P/E */
     int64_t tsusp_ns;
 } NandMediaTiming;

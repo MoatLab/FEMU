@@ -11,7 +11,7 @@
 #include "ftl-internal.h"
 
 /* Decode a bbssd ppa into the media's normalized NandLoc. */
-static NandLoc bb_decode_loc(struct ssd *ssd, struct ppa *ppa)
+static NandLoc bb_decode_loc(struct ssd *ssd, struct ppa *ppa, uint64_t stime)
 {
     int ct = (ssd->n) ? ssd->n->nand_cell_type : 0;
     NandLoc loc = {
@@ -34,7 +34,21 @@ static NandLoc bb_decode_loc(struct ssd *ssd, struct ppa *ppa)
          */
         .pe_cycles = ssd->sp.ecc_step_ns ?
                      (uint32_t)get_blk(ssd, ppa)->erase_cnt : 0,
+        .age_sec = 0,
     };
+
+    /*
+     * Charge leaks with time as well as with wear, so how long the data has sat
+     * programmed feeds the same correction model. close_time is when the line
+     * filled; a line still being written has none yet.
+     */
+    if (ssd->sp.ecc_step_ns && ssd->sp.ecc_retention_sec) {
+        uint64_t closed = get_line(ssd, ppa)->close_time;
+
+        if (closed && stime > closed) {
+            loc.age_sec = (uint32_t)((stime - closed) / NANOSECONDS_PER_SECOND);
+        }
+    }
     return loc;
 }
 
@@ -89,6 +103,7 @@ void bb_nand_media_init(struct ssd *ssd)
     cfg.timing.ecc_step_ns = spp->ecc_step_ns;
     cfg.timing.ecc_pe_per_tier = FEMU_ECC_PE_PER_TIER;
     cfg.timing.ecc_max_tiers = FEMU_ECC_MAX_TIERS;
+    cfg.timing.ecc_retention_per_tier_sec = spp->ecc_retention_sec;
     /*
      * The media layer gates the ECC read adder on this as well as on
      * ecc_step_ns. Nothing ever set it, so ecc_step_ns has been inert; the
@@ -187,7 +202,7 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
         get_blk(ssd, ppa)->read_cnt++;
     }
 
-    loc = bb_decode_loc(ssd, ppa);
+    loc = bb_decode_loc(ssd, ppa, stime);
     return nand_media_op(&ssd->media, &loc, op, stime).latency_ns;
 }
 
@@ -229,7 +244,7 @@ uint64_t ssd_advance_status_multiplane(struct ssd *ssd, struct ppa *ppas,
         if (op == NAND_MEDIA_READ) {
             get_blk(ssd, &ppas[i])->read_cnt++;
         }
-        locs[i] = bb_decode_loc(ssd, &ppas[i]);
+        locs[i] = bb_decode_loc(ssd, &ppas[i], stime);
     }
 
     return nand_media_multiplane(&ssd->media, locs, nppas, op, stime).latency_ns;

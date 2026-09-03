@@ -1517,6 +1517,8 @@ static const Property femu_props[] = {
     DEFINE_PROP_INT32("cell_pages", FemuCtrl, bb_params.cell_pages, 0),
     DEFINE_PROP_INT32("pgtype_lat", FemuCtrl, bb_params.pgtype_lat, 0),
     DEFINE_PROP_INT32("ecc_step_ns", FemuCtrl, bb_params.ecc_step_ns, 0),
+    DEFINE_PROP_INT32("ecc_retention_sec", FemuCtrl,
+                      bb_params.ecc_retention_sec, 0),
     DEFINE_PROP_INT32("cmd_addr_lat", FemuCtrl, bb_params.cmd_addr_lat, 0),
     DEFINE_PROP_INT32("pg_xfer_lat", FemuCtrl, bb_params.pg_xfer_lat, 0),
     DEFINE_PROP_INT32("status_lat", FemuCtrl, bb_params.status_lat, 0),

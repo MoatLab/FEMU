@@ -126,6 +126,7 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->cell_pages = n->bb_params.cell_pages;
     spp->pgtype_lat = n->bb_params.pgtype_lat;
     spp->ecc_step_ns = n->bb_params.ecc_step_ns;
+    spp->ecc_retention_sec = n->bb_params.ecc_retention_sec;
     spp->cmd_addr_lat = n->bb_params.cmd_addr_lat;
     spp->pg_xfer_lat = n->bb_params.pg_xfer_lat;
     spp->status_lat = n->bb_params.status_lat;
