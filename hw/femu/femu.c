@@ -1096,7 +1096,7 @@ static uint64_t femu_ftl_process_req(FemuCtrl *n, NvmeRequest *req)
     if (NS_ZNSSD(ns)) {
         return zns_ftl_process_req(ns, req);
     }
-    if (NS_BBSSD(ns)) {
+    if (NS_BBSSD(ns) || NS_CSD(ns)) {
         return bb_ftl_process_req(n, ns, req);
     }
 
@@ -1157,7 +1157,7 @@ static bool femu_needs_ftl_thread(FemuCtrl *n)
     for (i = 0; i < n->num_namespaces; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
 
-        if (NS_BBSSD(ns) || NS_ZNSSD(ns)) {
+        if (NS_BBSSD(ns) || NS_ZNSSD(ns) || NS_CSD(ns)) {
             return true;
         }
     }
@@ -1319,7 +1319,8 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
      * all namespaces are built, so it never runs against half-initialized state,
      * and only once every geometry check has passed.
      */
-    if (femu_needs_ftl_thread(n)) {
+    n->use_ftl_thread = femu_needs_ftl_thread(n);
+    if (n->use_ftl_thread) {
         qemu_thread_create(&n->ftl_thread, "FEMU-FTL-Thread", femu_ftl_thread,
                            n, QEMU_THREAD_JOINABLE);
         n->ftl_thread_running = true;

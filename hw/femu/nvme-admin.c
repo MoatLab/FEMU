@@ -1071,11 +1071,11 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
         uint64_t refreshes = 0;
         uint32_t waf;
 
-        /* summed over the bbssd namespaces, as this log page is device-wide */
+        /* summed over the FTL-backed namespaces, as this log page is device-wide */
         for (i = 0; n->namespaces && i < n->num_namespaces; i++) {
             NvmeNamespace *ns = &n->namespaces[i];
 
-            if (!NS_BBSSD(ns) || !ns->ssd) {
+            if (!(NS_BBSSD(ns) || NS_CSD(ns)) || !ns->ssd) {
                 continue;
             }
             host += ssd_host_write_pages(ns->ssd);

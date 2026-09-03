@@ -1743,6 +1743,12 @@ typedef struct FemuCtrl {
     QemuThread      ftl_thread; /* one FTL thread serving every namespace */
     bool            ftl_thread_running;
     bool            ftl_stopping;   /* asks the FTL thread to leave its loop */
+    /*
+     * Fixed at realize from the namespace modes, not the controller mode,
+     * since namespaces may run different modes: completions then arrive
+     * through to_poller rather than straight off to_ftl.
+     */
+    bool            use_ftl_thread;
 
     /* Coperd: OC2.0 FIXME */
     NvmeParams  params;

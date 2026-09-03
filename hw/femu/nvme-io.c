@@ -83,7 +83,8 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
      * dominant serialization point. When enabled, complete each request
      * directly in this sweep and batch one interrupt at the end. Only ever
      * true for NoSSD; every other mode keeps the FTL-thread completion path
-     * untouched.
+     * untouched. A namespace of another mode on a NoSSD controller is
+     * checked per request below and takes the FTL path.
      */
     bool inline_mode = NOSSD(n) && n->hiops_inline;
     bool did_isr = false;
@@ -208,7 +209,7 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
             }
         }
 
-        if (inline_mode) {
+        if (inline_mode && req->ns && NS_NOSSD(req->ns)) {
             /*
              * Inline completion: NoSSD has zero latency, so the request is
              * ready now. Post the CQE directly here instead of bouncing it
@@ -300,7 +301,7 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
     int rc;
     int i;
 
-    if (BBSSD(n) || ZNSSD(n) || CSD(n)) {
+    if (n->use_ftl_thread) {
         rp = n->to_poller[index_poller];
     }
 
@@ -591,7 +592,8 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
         uint64_t off0 = prp1 & (pg - 1);
         uint64_t len0 = MIN(data_size, pg - off0);
         uint64_t rem = data_size - len0;
-        if (rem == 0 || (rem <= pg && prp2 && (prp2 & (pg - 1)) == 0)) {
+        if (NS_NOSSD(ns) &&
+            (rem == 0 || (rem <= pg && prp2 && (prp2 & (pg - 1)) == 0))) {
             DMADirection dir = req->is_write ? DMA_DIRECTION_TO_DEVICE
                                              : DMA_DIRECTION_FROM_DEVICE;
             AddressSpace *as = pci_get_address_space(&n->parent_obj);
