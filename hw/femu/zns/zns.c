@@ -701,6 +701,10 @@ static uint64_t zns_advance_zone_wp(NvmeNamespace *ns, NvmeZone *zone, uint32_t 
      * open with its ZRWA held, so there is no state transition to make either.
      */
     if (zone->d.za & NVME_ZA_ZRWA_VALID) {
+        if (zns_get_zone_state(zone) == NVME_ZONE_STATE_CLOSED) {
+            zns_aor_inc_open(ns);
+            zns_assign_zone_state(ns, zone, NVME_ZONE_STATE_IMPLICITLY_OPEN);
+        }
         return result;
     }
 
@@ -1083,6 +1087,7 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint32_t nlb = (uint32_t)le16_to_cpu(rw->nlb) + 1;
     uint64_t data_size = zns_l2b(ns, nlb);
     uint64_t data_offset;
+    uint64_t wp;
     uint16_t status;
 
     NvmeZone *zone;
@@ -1109,17 +1114,25 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             femu_err("Misao check zone write failed with status (%u)\n",status);
             goto err;
         }
-        if(append)
-        {
-             status = (zone->d.za & NVME_ZA_ZRWA_VALID) ? NVME_SUCCESS :
-                      zns_auto_open_zone(ns, zone);
-             if(status)
-             {
+        /*
+         * A write to an empty or closed zone opens it, which takes an open
+         * (and for an empty zone an active) resource; make room or refuse
+         * before anything moves. A conventional zone has no such state.
+         */
+        if (zone->d.zt != NVME_ZONE_TYPE_CONVENTIONAL) {
+            status = zns_auto_open_zone(ns, zone);
+            if (status) {
                 goto err;
-             }
-             slba = zone->w_ptr;
+            }
         }
-        res->slba = zns_advance_zone_wp(ns, zone, nlb);
+        if (append) {
+            slba = zone->w_ptr;
+        }
+        wp = zns_advance_zone_wp(ns, zone, nlb);
+        /* only an append reports where it landed; DW0/1 are reserved otherwise */
+        if (append) {
+            res->slba = cpu_to_le64(wp);
+        }
     }
     else
     {
