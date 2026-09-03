@@ -32,6 +32,7 @@ enum {
 enum {
     USER_IO = 0,
     GC_IO = 1,
+    MAP_IO = 2,     /* translation-page traffic of the DFTL cache */
 };
 
 enum {

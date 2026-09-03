@@ -196,9 +196,11 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
      * here, host or collection, and a read stresses the other pages in the
      * block -- so this is the pressure a device watches to decide when data
      * must be rewritten. Reads answered from the write buffer or the read cache
-     * never reach the media and correctly do not count.
+     * never reach the media and correctly do not count, and a translation-page
+     * read is only charged for time: it addresses a placeholder block, whose
+     * data pages it does not disturb.
      */
-    if (op == NAND_MEDIA_READ) {
+    if (op == NAND_MEDIA_READ && ncmd->type != MAP_IO) {
         get_blk(ssd, ppa)->read_cnt++;
     }
 

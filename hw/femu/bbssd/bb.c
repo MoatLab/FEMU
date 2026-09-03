@@ -21,8 +21,10 @@ static int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 {
     BbCtrlParams *p = &n->bb_params;
     uint64_t page_bytes = (uint64_t)p->secs_per_pg * p->secsz;
-    uint64_t pgs_per_line = (uint64_t)p->nchs * p->luns_per_ch * p->pgs_per_blk;
-    uint64_t tt_lines = (uint64_t)p->blks_per_pl * p->pls_per_lun;
+    /* a line is one block on every plane of every LUN, as the FTL builds it */
+    uint64_t pgs_per_line = (uint64_t)p->nchs * p->luns_per_ch *
+                            p->pls_per_lun * p->pgs_per_blk;
+    uint64_t tt_lines = (uint64_t)p->blks_per_pl;
     uint64_t reserve_lines, usable_pgs, exposed_pgs;
 
     /* the free lines GC insists on, plus one for the open write pointer */

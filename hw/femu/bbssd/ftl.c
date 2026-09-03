@@ -211,15 +211,17 @@ uint64_t ssd_max_block_reads(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;
     uint64_t most = 0;
-    int ch, lun, blk;
+    int ch, lun, pl, blk;
 
     for (ch = 0; ch < spp->nchs; ch++) {
         for (lun = 0; lun < spp->luns_per_ch; lun++) {
-            struct nand_plane *pl = &ssd->ch[ch].lun[lun].pl[0];
+            for (pl = 0; pl < spp->pls_per_lun; pl++) {
+                struct nand_plane *plane = &ssd->ch[ch].lun[lun].pl[pl];
 
-            for (blk = 0; blk < spp->blks_per_pl; blk++) {
-                if (pl->blk[blk].read_cnt > most) {
-                    most = pl->blk[blk].read_cnt;
+                for (blk = 0; blk < spp->blks_per_pl; blk++) {
+                    if (plane->blk[blk].read_cnt > most) {
+                        most = plane->blk[blk].read_cnt;
+                    }
                 }
             }
         }
