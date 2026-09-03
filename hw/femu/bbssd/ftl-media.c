@@ -89,6 +89,12 @@ void bb_nand_media_init(struct ssd *ssd)
     cfg.timing.ecc_step_ns = spp->ecc_step_ns;
     cfg.timing.ecc_pe_per_tier = FEMU_ECC_PE_PER_TIER;
     cfg.timing.ecc_max_tiers = FEMU_ECC_MAX_TIERS;
+    /*
+     * The media layer gates the ECC read adder on this as well as on
+     * ecc_step_ns. Nothing ever set it, so ecc_step_ns has been inert; the
+     * adder itself is still off unless ecc_step_ns is given a value.
+     */
+    cfg.policy.ecc_on_read = true;
     cfg.timing.pgtype_lat = (spp->pgtype_lat != 0);
     /* page-type program multipliers (x1000): SLC..PLC rows, picked by cell_pages.
      * Only consulted when pgtype_lat is set, so this is inert by default. */
