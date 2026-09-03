@@ -1404,7 +1404,8 @@ static uint16_t zns_zone_mgmt_recv(FemuCtrl *n, NvmeRequest *req)
     uint32_t zone_idx, zra, zrasf, partial;
     uint64_t max_zones, nr_zones = 0;
     uint16_t status;
-    uint64_t slba, capacity = zns_ns_nlbas(ns);
+    uint64_t slba;
+    uint32_t i;
     NvmeZoneDescr *z;
     NvmeZone *zone;
     NvmeZoneReportHeader *header;
@@ -1450,12 +1451,15 @@ static uint16_t zns_zone_mgmt_recv(FemuCtrl *n, NvmeRequest *req)
     max_zones = (data_size - sizeof(NvmeZoneReportHeader)) / zone_entry_sz;
     buf = g_malloc0(data_size);
 
-    zone = &ns->zone_array[zone_idx];
-    for (; slba < capacity; slba += ns->zone_size) {
+    /*
+     * Count over the zones that exist. The namespace may hold a partial zone's
+     * worth of blocks past the last whole zone, which is not in zone_array.
+     */
+    for (i = zone_idx; i < ns->num_zones; i++) {
         if (partial && nr_zones >= max_zones) {
             break;
         }
-        if (zns_zone_matches_filter(zrasf, zone++)) {
+        if (zns_zone_matches_filter(zrasf, &ns->zone_array[i])) {
             nr_zones++;
         }
     }
