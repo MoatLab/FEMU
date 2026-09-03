@@ -1,6 +1,21 @@
 #include "./nvme.h"
 
 static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
+
+/*
+ * DSM hands its range list to whichever mode serves the namespace; bbssd frees
+ * it once the ranges are applied, the others never did. Release whatever is
+ * still attached when the request goes back on the free list.
+ */
+static inline void nvme_req_release_ranges(NvmeRequest *req)
+{
+    if (req->dsm_ranges) {
+        g_free(req->dsm_ranges);
+        req->dsm_ranges = NULL;
+        req->dsm_nr_ranges = 0;
+    }
+}
+
 static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req);
 
 static void nvme_update_sq_eventidx(const NvmeSQueue *sq)
@@ -226,6 +241,7 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
                 did_isr = true;
                 n->poller_ctr[index_poller].nr_tt_ios++;
             }
+            nvme_req_release_ranges(req);
             QTAILQ_INSERT_TAIL(&sq->req_list, req, entry);
         } else {
             /*
@@ -372,6 +388,7 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
 
         pqueue_pop(pq);
         cq = n->cq[req->sq->sqid];
+        nvme_req_release_ranges(req);
         if (!cq->is_active) {
             /* CQ inactive: return request to SQ free list to avoid leak */
             QTAILQ_INSERT_TAIL(&req->sq->req_list, req, entry);
