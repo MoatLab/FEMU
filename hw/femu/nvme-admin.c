@@ -1546,7 +1546,6 @@ static uint16_t nvme_abort_req(FemuCtrl *n, NvmeCmd *cmd, uint32_t *result)
     uint16_t sqid = cmd->cdw10 & 0xffff;
     uint16_t cid = (cmd->cdw10 >> 16) & 0xffff;
     NvmeSQueue *sq;
-    NvmeRequest *req;
 
     *result = 1;
     if (nvme_check_sqid(n, sqid)) {
@@ -1568,15 +1567,11 @@ static uint16_t nvme_abort_req(FemuCtrl *n, NvmeCmd *cmd, uint32_t *result)
         }
         nvme_addr_read(n, addr, (void *)&abort_cmd, sizeof(abort_cmd));
         if (abort_cmd.cid == cid) {
+            /*
+             * Mark the entry; the poller completes it as aborted when it
+             * reaches it, with a request taken from the free list then.
+             */
             *result = 0;
-            req = QTAILQ_FIRST(&sq->req_list);
-            QTAILQ_REMOVE(&sq->req_list, req, entry);
-            QTAILQ_INSERT_TAIL(&sq->out_req_list, req, entry);
-
-            memset(&req->cqe, 0, sizeof(req->cqe));
-            req->cqe.cid = cid;
-            req->status = NVME_CMD_ABORT_REQ;
-
             abort_cmd.opcode = NVME_OP_ABORTED;
             nvme_addr_write(n, addr, (void *)&abort_cmd,
                 sizeof(abort_cmd));

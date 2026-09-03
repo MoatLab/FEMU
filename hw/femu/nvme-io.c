@@ -1201,6 +1201,8 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     req->ns = ns = &n->namespaces[nsid - 1];
 
     switch (cmd->opcode) {
+    case NVME_OP_ABORTED:
+        return NVME_CMD_ABORT_REQ;
     case NVME_CMD_FLUSH:
         if (!n->id_ctrl.vwc || !n->features.volatile_wc) {
             return NVME_SUCCESS;
