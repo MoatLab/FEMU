@@ -585,6 +585,25 @@ static void zns_auto_transition_zone(NvmeNamespace *ns)
     }
 }
 
+/* Move a zone to Full, giving back the open and active resources it holds. */
+static void zns_zone_set_full(NvmeNamespace *ns, NvmeZone *zone)
+{
+    switch (zns_get_zone_state(zone)) {
+    case NVME_ZONE_STATE_IMPLICITLY_OPEN:
+    case NVME_ZONE_STATE_EXPLICITLY_OPEN:
+        zns_aor_dec_open(ns);
+        /* fall through */
+    case NVME_ZONE_STATE_CLOSED:
+        zns_aor_dec_active(ns);
+        /* fall through */
+    case NVME_ZONE_STATE_EMPTY:
+        zns_assign_zone_state(ns, zone, NVME_ZONE_STATE_FULL);
+        break;
+    default:
+        break;
+    }
+}
+
 static uint16_t zns_auto_open_zone(NvmeNamespace *ns, NvmeZone *zone)
 {
     uint16_t status = NVME_SUCCESS;
@@ -643,7 +662,7 @@ static void zns_finalize_zoned_write(NvmeNamespace *ns, NvmeRequest *req, bool f
         }
         if (zone->w_ptr >= zns_zone_wr_boundary(zone)) {
             zns_zrwa_release(ns, zone);
-            zns_assign_zone_state(ns, zone, NVME_ZONE_STATE_FULL);
+            zns_zone_set_full(ns, zone);
         }
         return;
     }
@@ -655,22 +674,7 @@ static void zns_finalize_zoned_write(NvmeNamespace *ns, NvmeRequest *req, bool f
     }
 
     if (zone->d.wp == zns_zone_wr_boundary(zone)) {
-        switch (zns_get_zone_state(zone)) {
-        case NVME_ZONE_STATE_IMPLICITLY_OPEN:
-        case NVME_ZONE_STATE_EXPLICITLY_OPEN:
-            zns_aor_dec_open(ns);
-            /* fall through */
-        case NVME_ZONE_STATE_CLOSED:
-            zns_aor_dec_active(ns);
-            /* fall through */
-        case NVME_ZONE_STATE_EMPTY:
-            zns_assign_zone_state(ns, zone, NVME_ZONE_STATE_FULL);
-            /* fall through */
-        case NVME_ZONE_STATE_FULL:
-            break;
-        default:
-            assert(false);
-        }
+        zns_zone_set_full(ns, zone);
     }
 }
 
@@ -1292,6 +1296,10 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
         }
         /* flushing a closed zone brings it back to implicitly open */
         if (zns_get_zone_state(zone) == NVME_ZONE_STATE_CLOSED) {
+            status = zns_auto_open_zone(ns, zone);
+            if (status) {
+                return status;
+            }
             zns_aor_inc_open(ns);
             zns_assign_zone_state(ns, zone, NVME_ZONE_STATE_IMPLICITLY_OPEN);
         }
@@ -1299,7 +1307,7 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
         zone->d.wp = zone->w_ptr;
         if (zone->w_ptr >= zns_zone_wr_boundary(zone)) {
             zns_zrwa_release(ns, zone);
-            zns_assign_zone_state(ns, zone, NVME_ZONE_STATE_FULL);
+            zns_zone_set_full(ns, zone);
         }
         status = NVME_SUCCESS;
         break;
@@ -1325,7 +1333,7 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
         *resets = 1;
         status = zns_do_zone_op(ns, zone, proc_mask, zns_reset_zone, req);
         (*resets)--;
-        return NVME_SUCCESS;
+        break;
     case NVME_ZONE_ACTION_OFFLINE:
         if (all) {
             proc_mask = NVME_PROC_READ_ONLY_ZONES;
