@@ -225,10 +225,11 @@ static uint16_t nvme_del_cq(FemuCtrl *n, NvmeCmd *cmd)
 
     cq = n->cq[qid];
     assert(cq->is_active == true);
-    cq->is_active = false;
+    /* refused while a submission queue still uses it, and then left as it was */
     if (!QTAILQ_EMPTY(&cq->sq_list)) {
         return NVME_INVALID_QUEUE_DEL;
     }
+    cq->is_active = false;
 
     nvme_free_cq(cq, n);
 
@@ -365,6 +366,10 @@ static uint16_t nvme_set_db_memory(FemuCtrl *n, const NvmeCmd *cmd)
             eis_addr & (n->page_size - 1)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
+    /* the buffers are set once per controller enable; a second one is refused */
+    if (n->dataplane_started) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
 
     n->dbs_addr = dbs_addr;
     n->eis_addr = eis_addr;
@@ -395,7 +400,6 @@ static uint16_t nvme_set_db_memory(FemuCtrl *n, const NvmeCmd *cmd)
         }
     }
 
-    assert(n->dataplane_started == false);
     if (!n->poller_on) {
         /* Coperd: make sure this only runs once across all controller resets */
         nvme_init_poller(n);
@@ -968,8 +972,12 @@ static uint16_t nvme_fw_log_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
     uint32_t trans_len;
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
-    NvmeFwSlotInfoLog fw_log;
+    NvmeFwSlotInfoLog fw_log = {0};
 
+    /* one firmware slot, active, carrying the revision Identify reports */
+    fw_log.afi = 0x1;
+    memcpy(fw_log.frs1, n->id_ctrl.fr, MIN(sizeof(fw_log.frs1),
+                                          sizeof(n->id_ctrl.fr)));
     trans_len = MIN(sizeof(fw_log), buf_len);
 
     return dma_read_prp(n, (uint8_t *)&fw_log, trans_len, prp1, prp2);
@@ -981,7 +989,7 @@ static uint16_t nvme_error_log_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
 
-    trans_len = MIN(sizeof(*n->elpes) * n->elpe, buf_len);
+    trans_len = MIN(sizeof(*n->elpes) * (n->elpe + 1), buf_len);
     n->aer_mask &= ~(1 << NVME_AER_TYPE_ERROR);
 
     return dma_read_prp(n, (uint8_t *)n->elpes, trans_len, prp1, prp2);

@@ -14,7 +14,8 @@ void nvme_addr_read(FemuCtrl *n, hwaddr addr, void *buf, int size)
 void nvme_addr_write(FemuCtrl *n, hwaddr addr, void *buf, int size)
 {
     if (n->cmbsz && addr >= n->ctrl_mem.addr &&
-        addr < (n->ctrl_mem.addr + int128_get64(n->ctrl_mem.size))) {
+        addr < (n->ctrl_mem.addr + int128_get64(n->ctrl_mem.size)) &&
+        (uint64_t)size <= (n->ctrl_mem.addr + int128_get64(n->ctrl_mem.size)) - addr) {
         memcpy((void *)&n->cmbuf[addr - n->ctrl_mem.addr], buf, size);
     } else {
         pci_dma_write(&n->parent_obj, addr, buf, size);

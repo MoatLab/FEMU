@@ -199,11 +199,12 @@ void nvme_set_error_page(FemuCtrl *n, uint16_t sqid, uint16_t cid, uint16_t
     elp->error_count = n->error_count++;
     elp->sqid = sqid;
     elp->cid = cid;
-    elp->status_field = status;
+    /* bits 15:1 carry the status; bit 0 is the phase tag */
+    elp->status_field = cpu_to_le16(status << 1);
     elp->param_error_location = location;
     elp->lba = lba;
     elp->nsid = nsid;
-    n->elp_index = (n->elp_index + 1) % n->elpe;
+    n->elp_index = (n->elp_index + 1) % (n->elpe + 1);
     ++n->num_errors;
 }
 
