@@ -1624,12 +1624,6 @@ static void zns_init_params(FemuCtrl *n, NvmeNamespace *ns)
      */
     id_zns->chnls_per_zone = ns->zns_chnls_per_zone ? ns->zns_chnls_per_zone :
                                                       id_zns->num_ch;
-    if (id_zns->num_ch % id_zns->chnls_per_zone != 0) {
-        femu_err("zns_chnls_per_zone=%" PRIu64 " must divide zns_num_ch=%" PRIu64
-                 "; using full width\n",
-                 id_zns->chnls_per_zone, id_zns->num_ch);
-        id_zns->chnls_per_zone = id_zns->num_ch;
-    }
 
     id_zns->ch = g_malloc0(sizeof(struct zns_ch) * id_zns->num_ch);
     for (i =0; i < id_zns->num_ch; i++) {
@@ -1771,10 +1765,66 @@ static int zns_start_ctrl(FemuCtrl *n)
     return 0;
 }
 
+/*
+ * Refuse a geometry the PPA fields cannot hold or the timing tables cannot
+ * serve. Checked before anything is derived from it: an oversized axis
+ * would wrap in the PPA and silently alias onto lower indices, and a cell
+ * type outside the tables would index past them.
+ */
+static bool zns_check_params(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
+{
+    ZNSCtrlParams *p = &n->zns_params;
+    uint64_t dies;
+
+    /* the LUN and block counts are 8-bit properties and always fit their fields */
+    if (p->zns_num_ch < 1 || p->zns_num_ch > (1 << CH_BITS) ||
+        p->zns_num_lun < 1 ||
+        p->zns_num_plane < 1 || p->zns_num_plane > (1 << PL_BITS) ||
+        p->zns_num_blk < 1) {
+        error_setg(errp, "zns geometry out of range: zns_num_ch in [1, %d], "
+                   "zns_num_lun >= 1, zns_num_plane in [1, %d], "
+                   "zns_num_blk >= 1", 1 << CH_BITS, 1 << PL_BITS);
+        return false;
+    }
+    dies = (uint64_t)p->zns_num_ch * p->zns_num_lun * p->zns_num_blk;
+    if (ns->size / ZNS_PAGE_SIZE / dies < 1 ||
+        ns->size / ZNS_PAGE_SIZE / dies > (1 << PG_BITS)) {
+        error_setg(errp, "zns geometry gives %" PRIu64 " pages per block; "
+                   "must be in [1, %d]", ns->size / ZNS_PAGE_SIZE / dies,
+                   1 << PG_BITS);
+        return false;
+    }
+    if (ns->zns_chnls_per_zone && p->zns_num_ch % ns->zns_chnls_per_zone) {
+        error_setg(errp, "zns_chnls_per_zone %u must divide zns_num_ch %u",
+                   ns->zns_chnls_per_zone, p->zns_num_ch);
+        return false;
+    }
+    if (p->zns_flash_type < SLC || p->zns_flash_type >= MAX_FLASH_TYPE) {
+        error_setg(errp, "zns_flash_type must be in [%d, %d]", SLC, PLC);
+        return false;
+    }
+
+    return true;
+}
+
 static void zns_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 {
+    if (!zns_check_params(n, ns, errp)) {
+        return;
+    }
+
     zns_set_ctrl(n);
     zns_init_params(n, ns);
+
+    /* only SLC, TLC and QLC have built-in figures; the rest need all three knobs */
+    if (!ns->zns->timing.pg_rd_lat[ns->zns->flash_type] ||
+        !ns->zns->timing.pg_wr_lat[ns->zns->flash_type] ||
+        !ns->zns->timing.blk_er_lat[ns->zns->flash_type]) {
+        error_setg(errp, "zns_flash_type %d has no built-in timing; set "
+                   "zns_pg_rd_lat, zns_pg_wr_lat and zns_blk_er_lat",
+                   ns->zns->flash_type);
+        return;
+    }
 
     zns_init_zone_cap(n, ns);
 
