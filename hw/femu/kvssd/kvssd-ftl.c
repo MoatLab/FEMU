@@ -1016,9 +1016,9 @@ static void kvssd_free_ssd(FemuKvssdState *s)
     s->ssd = NULL;
 }
 
-static bool kvssd_init_timing_ssd(FemuKvssdState *s, FemuCtrl *n)
+static bool kvssd_init_timing_ssd(FemuKvssdState *s, FemuCtrl *n,
+                                  NvmeNamespace *ns)
 {
-    NvmeNamespace *ns = &n->namespaces[0];
     struct ssd *ssd = g_try_new0(struct ssd, 1);
 
     if (!ssd) {
@@ -1075,7 +1075,8 @@ FemuKvssdState *kvssd_ftl_alloc(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
      * Built before the arena so the value capacity can be clamped to the physical
      * NAND size.
      */
-    if (!kvssd_init_timing_ssd(s, n)) {
+    s->ns = ns;
+    if (!kvssd_init_timing_ssd(s, n, ns)) {
         error_setg(errp, "KVSSD NAND timing allocation failed");
         g_free(s);
         return NULL;
@@ -1470,8 +1471,11 @@ void kvssd_ftl_selftest(FemuKvssdState *s)
     s->nand_wr_pages = 0;
     s->gc_wr_pages = 0;
     if (n) {
+        if (n->ssd == s->ssd) {
+            n->ssd = NULL;
+        }
         kvssd_free_ssd(s);
-        if (!kvssd_init_timing_ssd(s, n)) {
+        if (!kvssd_init_timing_ssd(s, n, s->ns)) {
             fails++;
             femu_err("KVSELFTEST FAIL reset-timing-ssd\n");
         }

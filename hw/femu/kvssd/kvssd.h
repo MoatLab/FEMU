@@ -75,6 +75,7 @@ typedef struct FemuKvssdState {
     /* NAND timing engine: a full bbssd ssd (channels/LUNs/planes + allocator),
      * reused only for value-page placement + latency, not block L2P. */
     struct ssd *ssd;
+    NvmeNamespace *ns;      /* the namespace this state serves */
     int pgsz;                          /* value page size in bytes */
 
     /* stats */
