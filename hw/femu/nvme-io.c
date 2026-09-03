@@ -224,7 +224,12 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
             }
         }
 
-        if (inline_mode && req->ns && NS_NOSSD(req->ns)) {
+        /*
+         * The host-link and controller-CPU models are applied on the ring
+         * path, so a request that should pay them cannot complete inline.
+         */
+        if (inline_mode && !n->pcie_enabled && !n->fw_cpu_ns &&
+            req->ns && NS_NOSSD(req->ns)) {
             /*
              * Inline completion: NoSSD has zero latency, so the request is
              * ready now. Post the CQE directly here instead of bouncing it
