@@ -215,11 +215,6 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
 
 static void ssd_init_nand_page(struct nand_page *pg, struct ssdparams *spp)
 {
-    pg->nsecs = spp->secs_per_pg;
-    pg->sec = g_malloc0(sizeof(nand_sec_status_t) * pg->nsecs);
-    for (int i = 0; i < pg->nsecs; i++) {
-        pg->sec[i] = SEC_FREE;
-    }
     pg->status = PG_FREE;
 }
 

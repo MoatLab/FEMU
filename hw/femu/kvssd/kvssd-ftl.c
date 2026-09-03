@@ -999,9 +999,6 @@ static void kvssd_free_ssd(FemuKvssdState *s)
                     for (int blk = 0; blk < plane->nblks; blk++) {
                         struct nand_block *block = &plane->blk[blk];
 
-                        for (int pg = 0; pg < block->npgs; pg++) {
-                            g_free(block->pg[pg].sec);
-                        }
                         g_free(block->pg);
                     }
                     g_free(plane->blk);

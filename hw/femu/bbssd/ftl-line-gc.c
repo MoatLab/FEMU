@@ -349,7 +349,6 @@ void mark_block_free(struct ssd *ssd, struct ppa *ppa)
     for (int i = 0; i < spp->pgs_per_blk; i++) {
         /* reset page status */
         pg = &blk->pg[i];
-        ftl_assert(pg->nsecs == spp->secs_per_pg);
         pg->status = PG_FREE;
     }
 

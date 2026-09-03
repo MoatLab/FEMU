@@ -81,11 +81,7 @@ struct ppa {
     };
 };
 
-typedef int nand_sec_status_t;
-
 struct nand_page {
-    nand_sec_status_t *sec;
-    int nsecs;
     int status;
 };
 
