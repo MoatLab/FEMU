@@ -594,35 +594,74 @@ static const MemoryRegionOps nvme_mmio_ops = {
     },
 };
 
-static int nvme_check_constraints(FemuCtrl *n)
+static bool nvme_check_constraints(FemuCtrl *n, Error **errp)
 {
-    if ((n->num_namespaces == 0 || n->num_namespaces > NVME_MAX_NUM_NAMESPACES)
-        || (n->nr_io_queues < 1 || n->nr_io_queues > NVME_MAX_QS) ||
-        (n->db_stride > NVME_MAX_STRIDE) ||
-        (n->max_q_ents < 1) ||
-        (n->max_sqes > NVME_MAX_QUEUE_ES || n->max_cqes > NVME_MAX_QUEUE_ES ||
-         n->max_sqes < NVME_MIN_SQUEUE_ES || n->max_cqes < NVME_MIN_CQUEUE_ES) ||
-        (n->vwc > 1 || n->intc > 1 || n->cqr > 1 || n->extended > 1) ||
-        (n->nlbaf > 16) ||
-        (n->lba_index >= n->nlbaf) ||
-        (n->meta && !n->mc) ||
-        (n->extended && !(NVME_ID_NS_MC_EXTENDED(n->mc))) ||
-        (!n->extended && n->meta && !(NVME_ID_NS_MC_SEPARATE(n->mc))) ||
-        (n->dps && n->meta < 8) ||
-        (n->dps && ((n->dps & DPS_FIRST_EIGHT) &&
-                    !NVME_ID_NS_DPC_FIRST_EIGHT(n->dpc))) ||
+    if (n->num_namespaces == 0 ||
+        n->num_namespaces > NVME_MAX_NUM_NAMESPACES) {
+        error_setg(errp, "namespaces must be in [1, %d]",
+                   NVME_MAX_NUM_NAMESPACES);
+        return false;
+    }
+    if (n->nr_io_queues < 1 || n->nr_io_queues > NVME_MAX_QS) {
+        error_setg(errp, "queues must be in [1, %d]", NVME_MAX_QS);
+        return false;
+    }
+    if (n->db_stride > NVME_MAX_STRIDE) {
+        error_setg(errp, "stride must not exceed %d", NVME_MAX_STRIDE);
+        return false;
+    }
+    if (n->max_q_ents < 1) {
+        error_setg(errp, "entries must be at least 1");
+        return false;
+    }
+    if (n->max_sqes > NVME_MAX_QUEUE_ES || n->max_cqes > NVME_MAX_QUEUE_ES ||
+        n->max_sqes < NVME_MIN_SQUEUE_ES || n->max_cqes < NVME_MIN_CQUEUE_ES) {
+        error_setg(errp, "max_sqes must be in [%d, %d] and max_cqes in [%d, %d]",
+                   NVME_MIN_SQUEUE_ES, NVME_MAX_QUEUE_ES,
+                   NVME_MIN_CQUEUE_ES, NVME_MAX_QUEUE_ES);
+        return false;
+    }
+    if (n->vwc > 1 || n->intc > 1 || n->cqr > 1 || n->extended > 1) {
+        error_setg(errp, "vwc, intc, cqr and extended are single bits");
+        return false;
+    }
+    if (n->nlbaf > 16 || n->lba_index >= n->nlbaf) {
+        error_setg(errp, "nlbaf must be in [1, 16] and lba_index below it");
+        return false;
+    }
+    if ((n->meta && !n->mc) ||
+        (n->extended && !NVME_ID_NS_MC_EXTENDED(n->mc)) ||
+        (!n->extended && n->meta && !NVME_ID_NS_MC_SEPARATE(n->mc))) {
+        error_setg(errp, "meta/extended need a matching metadata capability (mc)");
+        return false;
+    }
+    if ((n->dps && n->meta < 8) ||
+        (n->dps && (n->dps & DPS_FIRST_EIGHT) &&
+         !NVME_ID_NS_DPC_FIRST_EIGHT(n->dpc)) ||
         (n->dps && !(n->dps & DPS_FIRST_EIGHT) &&
          !NVME_ID_NS_DPC_LAST_EIGHT(n->dpc)) ||
-        (n->dps & DPS_TYPE_MASK && !((n->dpc & NVME_ID_NS_DPC_TYPE_MASK) &
-                                     (1 << ((n->dps & DPS_TYPE_MASK) - 1)))) ||
-        (n->mpsmax > 0xf || n->mpsmax > n->mpsmin) ||
-        (n->oacs & ~(NVME_OACS_FORMAT)) ||
-        (n->oncs & ~(NVME_ONCS_COMPARE | NVME_ONCS_WRITE_UNCORR |
-                     NVME_ONCS_DSM | NVME_ONCS_WRITE_ZEROS))) {
-                         return -1;
-     }
+        ((n->dps & DPS_TYPE_MASK) &&
+         !((n->dpc & NVME_ID_NS_DPC_TYPE_MASK) &
+           (1 << ((n->dps & DPS_TYPE_MASK) - 1))))) {
+        error_setg(errp, "dps needs 8 bytes of metadata and a matching dpc");
+        return false;
+    }
+    if (n->mpsmax > 0xf || n->mpsmax < n->mpsmin) {
+        error_setg(errp, "mpsmax must be in [mpsmin, 15]");
+        return false;
+    }
+    if (n->oacs & ~NVME_OACS_FORMAT) {
+        error_setg(errp, "oacs may only set Format NVM (0x%x)", NVME_OACS_FORMAT);
+        return false;
+    }
+    if (n->oncs & ~(NVME_ONCS_COMPARE | NVME_ONCS_WRITE_UNCORR |
+                    NVME_ONCS_DSM | NVME_ONCS_WRITE_ZEROS)) {
+        error_setg(errp, "oncs may only set Compare, Write Uncorrectable, "
+                   "DSM and Write Zeroes");
+        return false;
+    }
 
-    return 0;
+    return true;
 }
 
 static void nvme_ns_init_identify(FemuCtrl *n, NvmeIdNs *id_ns)
@@ -1183,7 +1222,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
 
     nvme_check_size();
 
-    if (nvme_check_constraints(n)) {
+    if (!nvme_check_constraints(n, errp)) {
         return;
     }
 
