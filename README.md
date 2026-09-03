@@ -720,11 +720,13 @@ with `femu_mode=4` and keeps CSD-specific code under `hw/femu/csd/`.
 **Key Parameters:**
 ```bash
 fdm_size=64            # Functional data memory size (MB), required
-nr_cu=4                # Number of compute units
-nr_thread=4            # Number of functional simulation threads
-time_slice=200000      # Scheduler time slice (ns)
-context_switch_time=200 # Context switch time (ns)
-csf_runtime_scale=3    # Runtime scaling factor
+nr_cu=4                # Compute units; programs queue for the first free one
+csf_runtime_scale=3    # A program that names no runtime is charged its host
+                       #   run time times this (a load's own scale, in tenths,
+                       #   takes precedence)
+nr_thread=4            # Accepted for CEMU config compatibility only: the
+time_slice=200000      #   threaded scheduler they configure is not part of
+context_switch_time=200 #  this port, so they have no effect
 ```
 
 **Current Scope:**

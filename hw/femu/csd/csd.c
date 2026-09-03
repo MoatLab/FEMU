@@ -65,6 +65,7 @@ typedef struct FemuCsdState {
     GHashTable *groups;
     GHashTable *mrs;
     QemuMutex lock;
+    uint64_t *cu_next_avail;    /* when each compute unit is free again */
 } FemuCsdState;
 
 static void csd_check_size(void)
@@ -215,6 +216,7 @@ static void csd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
                                         g_free);
     csd->mrs = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL,
                                      csd_mrs_free);
+    csd->cu_next_avail = g_new0(uint64_t, csd->params.nr_cu);
     qemu_mutex_init(&csd->lock);
     n->csd_ctrl_state = csd;
 
@@ -237,6 +239,7 @@ static void csd_exit(FemuCtrl *n)
     g_hash_table_destroy(csd->groups);
     g_hash_table_destroy(csd->mrs);
     qemu_mutex_destroy(&csd->lock);
+    g_free(csd->cu_next_avail);
     g_free(csd);
     n->csd_ctrl_state = NULL;
 }
@@ -713,7 +716,7 @@ static uint16_t csd_exec(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     uint64_t cparam1 = le64_to_cpu(exec->cparam1);
     uint64_t cparam2 = le64_to_cpu(exec->cparam2);
     uint32_t group_id = exec->group;
-    uint32_t runtime = le32_to_cpu(exec->runtime);
+    uint64_t runtime = le32_to_cpu(exec->runtime);
     uint64_t prp1 = le64_to_cpu(exec->prp1);
     uint64_t prp2 = le64_to_cpu(exec->prp2);
     FemuCsdProgram *program;
@@ -725,6 +728,7 @@ static uint16_t csd_exec(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     long long *mr_len = NULL;
     FemuCsdArgs args = { 0 };
     int64_t result = 0;
+    int64_t host_ns;
     uint16_t status = NVME_SUCCESS;
 
     if (dlen == 0 && numr > 0) {
@@ -800,6 +804,7 @@ static uint16_t csd_exec(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     args.buffer_len = args.data_buffer ?
                       dlen - numr * sizeof(NvmeCsdMemoryRange) : 0;
 
+    host_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     switch (program->type) {
     case NVME_CSD_CSF_TYPE_PHANTOM:
         if (args.numr >= 2) {
@@ -841,20 +846,50 @@ static uint16_t csd_exec(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         status = NVME_INVALID_FIELD | NVME_DNR;
         break;
     }
+    host_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - host_ns;
     if (!status) {
         req->cqe.n.result = result > UINT32_MAX ? UINT32_MAX : result;
     }
     g_free(mr_addr);
     g_free(mr_len);
+
+    /*
+     * A program that names no runtime is charged the time it took the host
+     * to run it, scaled: by the program's own factor (tenths) when it gave
+     * one, else by the device's csf_runtime_scale.
+     */
+    if (!status && !runtime) {
+        uint64_t scale10 = program->runtime_scale ? program->runtime_scale :
+                           (uint64_t)csd->params.csf_runtime_scale * 10;
+
+        runtime = host_ns > 0 ? host_ns * scale10 / 10 : 0;
+    }
+
+    /*
+     * The program runs on the compute unit that frees up first, and holds
+     * it for its runtime; nr_cu bounds how many run at once.
+     */
+    if (!status && runtime) {
+        uint64_t start = req->expire_time;
+        uint32_t cu = 0;
+        uint32_t i;
+
+        for (i = 1; i < csd->params.nr_cu; i++) {
+            if (csd->cu_next_avail[i] < csd->cu_next_avail[cu]) {
+                cu = i;
+            }
+        }
+        if (csd->cu_next_avail[cu] > start) {
+            start = csd->cu_next_avail[cu];
+        }
+        csd->cu_next_avail[cu] = start + runtime;
+        req->reqlat += csd->cu_next_avail[cu] - req->expire_time;
+        req->expire_time = csd->cu_next_avail[cu];
+    }
     qemu_mutex_unlock(&csd->lock);
 
     if (status) {
         goto out;
-    }
-
-    if (runtime) {
-        req->reqlat += runtime;
-        req->expire_time += runtime;
     }
 
 out:
