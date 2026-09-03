@@ -712,6 +712,20 @@ static uint16_t nvme_identify(FemuCtrl *n, NvmeCmd *cmd)
     }
 }
 
+/* true when some namespace answers the key-value command set */
+static bool nvme_has_kv_ns(FemuCtrl *n)
+{
+    int i;
+
+    for (i = 0; i < n->num_namespaces; i++) {
+        if (NS_KVSSD(&n->namespaces[i])) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
 {
     NvmeRangeType *rt;
@@ -722,7 +736,7 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
 
     /* Key Value Configuration is answered by the mode that owns the namespace */
-    if ((dw10 & 0xff) == NVME_KV_FEAT_CONFIG && KVSSD(n)) {
+    if ((dw10 & 0xff) == NVME_KV_FEAT_CONFIG && nvme_has_kv_ns(n)) {
         NvmeNamespace *kv_ns;
 
         if (!nvme_nsid_valid(n, nsid) || nsid == NVME_NSID_BROADCAST) {
@@ -842,7 +856,7 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
 
     /* Key Value Configuration is handled by FID, whatever the save bit says */
-    if ((dw10 & 0xff) == NVME_KV_FEAT_CONFIG && KVSSD(n)) {
+    if ((dw10 & 0xff) == NVME_KV_FEAT_CONFIG && nvme_has_kv_ns(n)) {
         NvmeNamespace *kv_ns;
 
         if (!nvme_nsid_valid(n, nsid) || nsid == NVME_NSID_BROADCAST) {
