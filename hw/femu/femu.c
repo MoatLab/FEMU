@@ -550,7 +550,7 @@ static void nvme_mmio_write(void *opaque, hwaddr addr, uint64_t data, unsigned s
     FemuCtrl *n = (FemuCtrl *)opaque;
     if (addr < sizeof(n->bar)) {
         nvme_write_bar(n, addr, data, size);
-    } else if (addr >= 0x1000 && addr < 0x1008) {
+    } else if (addr >= 0x1000 && addr < 0x1000 + 2 * (4 << n->db_stride)) {
         nvme_process_db_admin(n, addr, data);
     } else {
         nvme_process_db_io(n, addr, data);
@@ -970,7 +970,7 @@ static void nvme_init_ctrl(FemuCtrl *n)
     id->ieee[2]      = 0xb3;
     id->cmic         = 0;
     id->mdts         = n->mdts;
-    id->ver          = 0x00010300;
+    id->ver          = NVME_SPEC_VER;
 
     /* FDP: set Controller Attributes for FDP support */
     if (n->subsys && n->subsys->endgrp.fdp.enabled) {
@@ -1255,7 +1255,8 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
 
     n->completed = 0;
     n->start_time = time(NULL);
-    n->reg_size = pow2ceil(0x1004 + 2 * (n->nr_io_queues + 1) * 4);
+    /* doorbells start at 0x1000, two per queue, each 4 << stride bytes apart */
+    n->reg_size = pow2ceil(0x1000 + 2 * (n->nr_io_queues + 1) * (4 << n->db_stride));
     /* ns_size is the per-namespace share of the exposed capacity */
     n->ns_size = bs_size / (uint64_t)n->num_namespaces;
     if (BBSSD(n) && n->op_pcent) {

@@ -1400,9 +1400,24 @@ static uint16_t nvme_cmd_effects(FemuCtrl *n, NvmeCmd *cmd, uint8_t csi,
     }
 
     memcpy(log.acs, nvme_cse_acs, sizeof(nvme_cse_acs));
+    /* the optional commands are reported as OACS and ONCS actually offer them */
+    if (n->oacs & NVME_OACS_FORMAT) {
+        log.acs[NVME_ADM_CMD_FORMAT_NVM] = NVME_CMD_EFF_CSUPP |
+                                           NVME_CMD_EFF_LBCC | NVME_CMD_EFF_NCC;
+    }
+    log.acs[NVME_ADM_CMD_SET_DB_MEMORY] = NVME_CMD_EFF_CSUPP;
 
     if (src_iocs) {
         memcpy(log.iocs, src_iocs, sizeof(log.iocs));
+        if (!(n->oncs & NVME_ONCS_COMPARE)) {
+            log.iocs[NVME_CMD_COMPARE] = 0;
+        }
+        if (!(n->oncs & NVME_ONCS_WRITE_ZEROS)) {
+            log.iocs[NVME_CMD_WRITE_ZEROES] = 0;
+        }
+        if (!(n->oncs & NVME_ONCS_DSM)) {
+            log.iocs[NVME_CMD_DSM] = 0;
+        }
     }
 
     trans_len = MIN(sizeof(log) - off, buf_len);
