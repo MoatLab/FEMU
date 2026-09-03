@@ -888,8 +888,15 @@ static uint16_t zns_reset_zone(NvmeNamespace *ns, NvmeZone *zone,
 
     erase_lat = zns_aio_zone_reset_cb(req, zone);
 
-    req->reqlat = erase_lat;
-    req->expire_time += erase_lat;
+    /*
+     * The erase latency counts from the command's start and already includes
+     * waiting for the planes, which the zones of one command serialise on;
+     * the command ends with its last erase, not with the sum of all of them.
+     */
+    if (req->stime + erase_lat > req->expire_time) {
+        req->expire_time = req->stime + erase_lat;
+    }
+    req->reqlat = req->expire_time - req->stime;
 
     return NVME_SUCCESS;
 }
