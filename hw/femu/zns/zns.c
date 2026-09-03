@@ -503,6 +503,10 @@ static uint16_t zns_check_zone_write(FemuCtrl *n, NvmeNamespace *ns,
             if (zns_l2b(ns, nlb) > (n->page_size << n->zasl)) {
                 status = NVME_INVALID_FIELD;
             }
+            /* an append lands at the write pointer, so bound it there too */
+            if (unlikely(zone->w_ptr + nlb > zns_zone_wr_boundary(zone))) {
+                status = NVME_ZONE_BOUNDARY_ERROR;
+            }
         } else if (unlikely(slba != zone->w_ptr)) {
             status = NVME_ZONE_INVALID_WRITE;
         }
