@@ -333,17 +333,18 @@ NandOpCompletion nand_media_copyback(NandMedia *m, const NandLoc *src,
                                      const NandLoc *dst, uint64_t stime)
 {
     NandOpCompletion c;
-    uint64_t *slun = m->cfg.timeline->lun_avail(m->cfg.timeline_opaque, src);
-    uint64_t *spl  = m->cfg.timeline->plane_avail(m->cfg.timeline_opaque, src);
-    uint64_t *dlun = m->cfg.timeline->lun_avail(m->cfg.timeline_opaque, dst);
-    uint64_t *dpl  = m->cfg.timeline->plane_avail(m->cfg.timeline_opaque, dst);
     uint64_t s;
 
-    /* on-chip read then program; no bus phases (copyback_skips_bus) */
-    s = mx(*slun, *spl) + array_lat(m, src, NAND_MEDIA_READ);
-    *slun = s; *spl = s;
-    s = mx(s, mx(*dlun, *dpl)) + array_lat(m, dst, NAND_MEDIA_PROGRAM);
-    *dlun = s; *dpl = s;
+    /*
+     * On-chip read then program; no bus phases (copyback_skips_bus). Gated like
+     * every other op here: an operation cannot begin before it was requested,
+     * and it goes through the configured gate rather than the accumulators
+     * directly, so a LUN-only caller's unset plane_avail is never read.
+     */
+    s = array_gate_start(m, src, stime) + array_lat(m, src, NAND_MEDIA_READ);
+    array_commit(m, src, s);
+    s = array_gate_start(m, dst, s) + array_lat(m, dst, NAND_MEDIA_PROGRAM);
+    array_commit(m, dst, s);
 
     c.done_ns = s;
     c.latency_ns = 0; /* GC-internal; host effect is via freed channel + LUN busy */

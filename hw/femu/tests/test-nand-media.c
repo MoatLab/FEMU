@@ -27,6 +27,11 @@ static const NandTimelineOps timeline = {
     .ch_avail = t_ch, .lun_avail = t_lun, .plane_avail = t_pl,
 };
 
+/* what bbssd actually registers: no plane_avail, because its gate is LUN-only */
+static const NandTimelineOps lun_only_timeline = {
+    .ch_avail = t_ch, .lun_avail = t_lun,
+};
+
 static int failures;
 
 static void reset_timelines(void)
@@ -185,10 +190,61 @@ static void test_multiplane_erase(void)
     check("the batch is one erase, not two", batched, cfg.timing.er_ns);
 }
 
+static void test_copyback(void)
+{
+    NandMediaConfig cfg;
+    NandMedia m;
+    NandLoc src, dst;
+    NandOpCompletion c;
+
+    puts("on-chip copyback");
+
+    /*
+     * A LUN-only caller (bbssd) leaves plane_avail unset. Reading it would be a
+     * NULL call, which is what kept the multi-plane path unusable; copyback had
+     * the same defect. Reaching the check below at all is the regression guard.
+     */
+    bb_config(&cfg);
+    cfg.timeline = &lun_only_timeline;
+    nand_media_init(&m, &cfg);
+    memset(&src, 0, sizeof(src));
+    memset(&dst, 0, sizeof(dst));
+    dst.lun = 1;
+    c = nand_media_copyback(&m, &src, &dst, 1000000000ULL);
+    check("LUN-only gate does not touch plane state",
+          c.done_ns, 1000000000ULL + 10000 + 40000);
+
+    /*
+     * An op cannot start before it was requested. With idle resources whose
+     * timestamps sit in the past, the old code started at the resource time and
+     * returned a completion earlier than stime.
+     */
+    bb_config(&cfg);
+    nand_media_init(&m, &cfg);
+    memset(&src, 0, sizeof(src));
+    memset(&dst, 0, sizeof(dst));
+    dst.lun = 1;
+    c = nand_media_copyback(&m, &src, &dst, 5000000000ULL);
+    check("idle array still starts at stime, not in the past",
+          c.done_ns, 5000000000ULL + 10000 + 40000);
+
+    /* a busy destination LUN pushes the program out */
+    bb_config(&cfg);
+    nand_media_init(&m, &cfg);
+    memset(&src, 0, sizeof(src));
+    memset(&dst, 0, sizeof(dst));
+    dst.lun = 1;
+    lun_avail[1] = 5000000000ULL + 500000;
+    c = nand_media_copyback(&m, &src, &dst, 5000000000ULL);
+    check("a busy destination LUN delays the program",
+          c.done_ns, 5000000000ULL + 500000 + 40000);
+}
+
 int main(void)
 {
     test_ecc();
     test_multiplane_erase();
+    test_copyback();
     if (failures) {
         printf("\n%d FAILURE(S)\n", failures);
         return 1;
