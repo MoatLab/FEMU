@@ -58,6 +58,31 @@ int bb_check_geometry(FemuCtrl *n, Error **errp)
         }
     }
 
+    /* the page-type model has multiplier rows for one to five bits per cell */
+    if (p->cell_pages < 0 || p->cell_pages > NAND_MEDIA_MAX_PGTYPE - 1) {
+        error_setg(errp, "FEMU bbssd: cell_pages must be in [0, %d]",
+                   NAND_MEDIA_MAX_PGTYPE - 1);
+        return -1;
+    }
+
+    /* the per-cell-type page tables index by page number within the block */
+    if (n->nand_cell_type && p->pgs_per_blk > MAX_SUPPORTED_PAGES_PER_BLOCK) {
+        error_setg(errp, "FEMU bbssd: nand_cell_type supports at most %d "
+                   "pgs_per_blk", MAX_SUPPORTED_PAGES_PER_BLOCK);
+        return -1;
+    }
+
+    /* the other FDP strategy numbers fall back to greedy or never collect */
+    if (p->gc_strategy != GC_GLOBAL_GREEDY && p->gc_strategy != GC_GLOBAL_CB &&
+        p->gc_strategy != GC_GLOBAL_RAND &&
+        p->gc_strategy != GC_NOISY_RUH_CUSTOM) {
+        error_setg(errp, "FEMU bbssd: gc_strategy must be %d (greedy), %d "
+                   "(cost-benefit), %d (random) or %d (per-handle)",
+                   GC_GLOBAL_GREEDY, GC_GLOBAL_CB, GC_GLOBAL_RAND,
+                   GC_NOISY_RUH_CUSTOM);
+        return -1;
+    }
+
     if (p->read_reclaim_limit < 0) {
         error_setg(errp, "FEMU bbssd: read_reclaim_limit must not be negative");
         return -1;

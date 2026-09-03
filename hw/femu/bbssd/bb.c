@@ -66,6 +66,37 @@ static void bb_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         return;
     }
 
+    /*
+     * FDP keeps its own write and reclaim path, which none of these knobs
+     * reach; refuse them rather than accept them silently.
+     */
+    if (n->subsys && n->subsys->endgrp.fdp.enabled) {
+        const BbCtrlParams *p = &n->bb_params;
+        const char *knob = NULL;
+
+        if (p->buffer_size) {
+            knob = "buffer_size";
+        } else if (p->hot_cold_sep) {
+            knob = "hot_cold_sep";
+        } else if (p->read_reclaim_limit) {
+            knob = "read_reclaim_limit";
+        } else if (p->retention_limit_sec) {
+            knob = "retention_limit_sec";
+        } else if (p->ecc_retention_sec) {
+            knob = "ecc_retention_sec";
+        } else if (p->trim_lat_ns) {
+            knob = "trim_lat_ns";
+        } else if (p->mapping_scheme && strcmp(p->mapping_scheme, "page")) {
+            knob = "mapping";
+        } else if (p->gc_policy && strcmp(p->gc_policy, "greedy")) {
+            knob = "gc_policy";
+        }
+        if (knob) {
+            error_setg(errp, "FEMU bbssd: %s has no effect under FDP", knob);
+            return;
+        }
+    }
+
     ssd = ns->ssd = g_malloc0(sizeof(struct ssd));
 
     bb_init_ctrl_str(n);

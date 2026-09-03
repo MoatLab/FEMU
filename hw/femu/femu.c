@@ -629,6 +629,11 @@ static bool nvme_check_constraints(FemuCtrl *n, Error **errp)
         error_setg(errp, "nlbaf must be in [1, 16] and lba_index below it");
         return false;
     }
+    if (n->meta) {
+        error_setg(errp, "meta: LBA metadata is not supported, every I/O "
+                   "would be rejected");
+        return false;
+    }
     if ((n->meta && !n->mc) ||
         (n->extended && !NVME_ID_NS_MC_EXTENDED(n->mc)) ||
         (!n->extended && n->meta && !NVME_ID_NS_MC_SEPARATE(n->mc))) {
