@@ -392,7 +392,14 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
         }
 
         pqueue_pop(pq);
-        cq = n->cq[req->sq->sqid];
+        /*
+         * A submission queue names the completion queue it reports to, and the
+         * two need not share a number. Indexing by the submission queue's own
+         * id sends the completion to whichever queue happens to carry that
+         * number -- the wrong one, with its phase tag and its interrupt -- or
+         * to none at all when no such queue exists.
+         */
+        cq = n->cq[req->sq->cqid];
         nvme_req_release_ranges(req);
         if (!cq->is_active) {
             /* CQ inactive: return request to SQ free list to avoid leak */
@@ -413,7 +420,7 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
                            n->poller_ctr[index_poller].nr_tt_ios);
             }
         }
-        n->should_isr[req->sq->sqid] = true;
+        n->should_isr[req->sq->cqid] = true;
     }
 
     if (processed == 0)
