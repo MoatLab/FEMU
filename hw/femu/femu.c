@@ -661,9 +661,10 @@ static bool nvme_check_constraints(FemuCtrl *n, Error **errp)
         return false;
     }
     if (n->oncs & ~(NVME_ONCS_COMPARE | NVME_ONCS_WRITE_UNCORR |
-                    NVME_ONCS_DSM | NVME_ONCS_WRITE_ZEROS)) {
+                    NVME_ONCS_DSM | NVME_ONCS_WRITE_ZEROS |
+                    NVME_ONCS_FEATURES)) {
         error_setg(errp, "oncs may only set Compare, Write Uncorrectable, "
-                   "DSM and Write Zeroes");
+                   "DSM, Write Zeroes and Save/Select Feature Support");
         return false;
     }
 
@@ -1493,7 +1494,13 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT32("cmbsz", FemuCtrl, cmbsz, 0),
     DEFINE_PROP_UINT32("cmbloc", FemuCtrl, cmbloc, 0),
     DEFINE_PROP_UINT16("oacs", FemuCtrl, oacs, NVME_OACS_FORMAT),
-    DEFINE_PROP_UINT16("oncs", FemuCtrl, oncs, NVME_ONCS_DSM),
+    /*
+     * Save/Select Feature Support is how a host learns it may use the Select
+     * field and the Save bit of Get/Set Features, which the controller serves,
+     * so it is on by default; the rest stay opt-in.
+     */
+    DEFINE_PROP_UINT16("oncs", FemuCtrl, oncs,
+                       NVME_ONCS_DSM | NVME_ONCS_FEATURES),
     DEFINE_PROP_BOOL("sgl", FemuCtrl, sgl, false),
     DEFINE_PROP_UINT16("vid", FemuCtrl, vid, 0x1d1d),
     DEFINE_PROP_UINT16("did", FemuCtrl, did, 0x1f1f),

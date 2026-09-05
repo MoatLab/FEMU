@@ -3,10 +3,15 @@
 
 #define NVME_IDENTIFY_DATA_SIZE 4096
 
-#if 0
+/*
+ * Which features the controller answers, and what a host may do with each.
+ * Nothing is saveable: there is no persistent store behind Set Features, so
+ * Select = Saved reads the defaults, as it does in hw/nvme.
+ */
 static const bool nvme_feature_support[NVME_FID_MAX] = {
     [NVME_ARBITRATION]              = true,
     [NVME_POWER_MANAGEMENT]         = true,
+    [NVME_LBA_RANGE_TYPE]           = true,
     [NVME_TEMPERATURE_THRESHOLD]    = true,
     [NVME_ERROR_RECOVERY]           = true,
     [NVME_VOLATILE_WRITE_CACHE]     = true,
@@ -15,20 +20,28 @@ static const bool nvme_feature_support[NVME_FID_MAX] = {
     [NVME_INTERRUPT_VECTOR_CONF]    = true,
     [NVME_WRITE_ATOMICITY]          = true,
     [NVME_ASYNCHRONOUS_EVENT_CONF]  = true,
-    [NVME_TIMESTAMP]                = true,
+    [NVME_FDP_MODE]                 = true,
+    [NVME_FDP_EVENTS]               = true,
+    [NVME_KV_FEAT_CONFIG]           = true,
+    [NVME_SOFTWARE_PROGRESS_MARKER] = true,
 };
-#endif
 
-#if 0
 static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
+    [NVME_ARBITRATION]              = NVME_FEAT_CAP_CHANGE,
+    [NVME_POWER_MANAGEMENT]         = NVME_FEAT_CAP_CHANGE,
+    [NVME_LBA_RANGE_TYPE]           = NVME_FEAT_CAP_CHANGE | NVME_FEAT_CAP_NS,
     [NVME_TEMPERATURE_THRESHOLD]    = NVME_FEAT_CAP_CHANGE,
     [NVME_ERROR_RECOVERY]           = NVME_FEAT_CAP_CHANGE | NVME_FEAT_CAP_NS,
     [NVME_VOLATILE_WRITE_CACHE]     = NVME_FEAT_CAP_CHANGE,
     [NVME_NUMBER_OF_QUEUES]         = NVME_FEAT_CAP_CHANGE,
+    [NVME_INTERRUPT_COALESCING]     = NVME_FEAT_CAP_CHANGE,
+    [NVME_INTERRUPT_VECTOR_CONF]    = NVME_FEAT_CAP_CHANGE,
+    [NVME_WRITE_ATOMICITY]          = NVME_FEAT_CAP_CHANGE,
     [NVME_ASYNCHRONOUS_EVENT_CONF]  = NVME_FEAT_CAP_CHANGE,
-    [NVME_TIMESTAMP]                = NVME_FEAT_CAP_CHANGE,
+    [NVME_FDP_EVENTS]               = NVME_FEAT_CAP_CHANGE | NVME_FEAT_CAP_NS,
+    [NVME_KV_FEAT_CONFIG]           = NVME_FEAT_CAP_CHANGE | NVME_FEAT_CAP_NS,
+    [NVME_SOFTWARE_PROGRESS_MARKER] = NVME_FEAT_CAP_CHANGE,
 };
-#endif
 
 static const uint32_t nvme_cse_acs[256] = {
     [NVME_ADM_CMD_DELETE_SQ]        = NVME_CMD_EFF_CSUPP,
@@ -756,17 +769,65 @@ static uint16_t nvme_identify(FemuCtrl *n, NvmeCmd *cmd)
 }
 
 /* true when some namespace answers the key-value command set */
-static bool nvme_has_kv_ns(FemuCtrl *n)
+/*
+ * The value a feature has before the host changes it: what realize set, so
+ * Select = Default agrees with the first Get after a reset.
+ */
+static uint16_t nvme_get_feature_default(FemuCtrl *n, NvmeCmd *cmd,
+                                         uint8_t fid, uint32_t dw11,
+                                         NvmeCqe *cqe)
 {
-    int i;
+    uint32_t result = 0;
 
-    for (i = 0; i < n->num_namespaces; i++) {
-        if (NS_KVSSD(&n->namespaces[i])) {
-            return true;
+    switch (fid) {
+    case NVME_LBA_RANGE_TYPE: {
+        /*
+         * This feature answers with a descriptor list rather than a value, so
+         * it has to transfer one here too. Reporting success without writing
+         * the buffer would leave the host parsing whatever it had there, and
+         * the count in dword 0 is 0's based, so zero still claims one entry.
+         * The default state is a single unused range.
+         */
+        NvmeRangeType rt;
+
+        memset(&rt, 0, sizeof(rt));
+        cqe->n.result = 0;
+        return dma_read_prp(n, (uint8_t *)&rt,
+                            MIN(sizeof(rt), (dw11 & 0x3f) * sizeof(rt)),
+                            le64_to_cpu(cmd->dptr.prp1),
+                            le64_to_cpu(cmd->dptr.prp2));
+    }
+    case NVME_ARBITRATION:
+        result = 0x1f0f0706;
+        break;
+    case NVME_TEMPERATURE_THRESHOLD:
+        result = (dw11 & (1 << 20)) ? 0 : 0x14d;
+        break;
+    case NVME_VOLATILE_WRITE_CACHE:
+        result = n->vwc;
+        break;
+    case NVME_NUMBER_OF_QUEUES:
+        result = (n->nr_io_queues - 1) | ((n->nr_io_queues - 1) << 16);
+        break;
+    case NVME_INTERRUPT_COALESCING:
+        result = n->intc_thresh | (n->intc_time << 8);
+        break;
+    case NVME_INTERRUPT_VECTOR_CONF:
+        if ((dw11 & 0xffff) > n->nr_io_queues) {
+            return NVME_INVALID_FIELD | NVME_DNR;
         }
+        result = (dw11 & 0xffff) | (n->intc << 16);
+        break;
+    case NVME_FDP_MODE:
+        result = (n->subsys && n->subsys->endgrp.fdp.enabled) ? 1 : 0;
+        break;
+    default:
+        /* every other feature starts at zero, including an empty event list */
+        break;
     }
 
-    return false;
+    cqe->n.result = cpu_to_le32(result);
+    return NVME_SUCCESS;
 }
 
 static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
@@ -777,22 +838,46 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     uint32_t nsid = le32_to_cpu(cmd->nsid);
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
+    uint8_t fid = NVME_GETSETFEAT_FID(dw10);
+    uint8_t sel = NVME_GETFEAT_SELECT(dw10);
 
-    /* Key Value Configuration is answered by the mode that owns the namespace */
-    if ((dw10 & 0xff) == NVME_KV_FEAT_CONFIG && nvme_has_kv_ns(n)) {
-        NvmeNamespace *kv_ns;
+    if (!nvme_feature_support[fid]) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
 
+    if (nvme_feature_cap[fid] & NVME_FEAT_CAP_NS) {
         if (!nvme_nsid_valid(n, nsid) || nsid == NVME_NSID_BROADCAST) {
             return NVME_INVALID_NSID | NVME_DNR;
         }
-        kv_ns = nvme_ns(n, nsid);
+        if (!nvme_ns(n, nsid)) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+    }
+
+    switch (sel) {
+    case NVME_GETFEAT_SELECT_CURRENT:
+        break;
+    case NVME_GETFEAT_SELECT_SAVED:
+        /* nothing is saved, so the saved value is the default */
+    case NVME_GETFEAT_SELECT_DEFAULT:
+        return nvme_get_feature_default(n, cmd, fid, dw11, cqe);
+    case NVME_GETFEAT_SELECT_CAP:
+        cqe->n.result = cpu_to_le32(nvme_feature_cap[fid]);
+        return NVME_SUCCESS;
+    default:
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    switch (fid) {
+    case NVME_KV_FEAT_CONFIG: {
+        /* the mode that owns the namespace answers this one */
+        NvmeNamespace *kv_ns = nvme_ns(n, nsid);
+
         if (!kv_ns || kv_ns->csi != NVME_CSI_KV) {
             return NVME_INVALID_FIELD | NVME_DNR;
         }
         return kvssd_get_feature(n, kv_ns, cmd, cqe);
     }
-
-    switch (dw10) {
     case NVME_ARBITRATION:
         cqe->n.result = cpu_to_le32(n->features.arbitration);
         break;
@@ -800,9 +885,6 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         cqe->n.result = cpu_to_le32(n->features.power_mgmt);
         break;
     case NVME_LBA_RANGE_TYPE:
-        if (nsid == 0 || nsid > n->num_namespaces) {
-            return NVME_INVALID_NSID | NVME_DNR;
-        }
         rt = n->namespaces[nsid - 1].lba_range;
         return dma_read_prp(n, (uint8_t *)rt,
                 MIN(sizeof(*rt), (dw11 & 0x3f) * sizeof(*rt)),
@@ -897,32 +979,56 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     uint32_t nsid = le32_to_cpu(cmd->nsid);
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
+    uint8_t fid = NVME_GETSETFEAT_FID(dw10);
+    uint8_t save = NVME_SETFEAT_SAVE(dw10);
 
-    /* Key Value Configuration is handled by FID, whatever the save bit says */
-    if ((dw10 & 0xff) == NVME_KV_FEAT_CONFIG && nvme_has_kv_ns(n)) {
-        NvmeNamespace *kv_ns;
+    if (save && !(nvme_feature_cap[fid] & NVME_FEAT_CAP_SAVE)) {
+        return NVME_FID_NOT_SAVEABLE | NVME_DNR;
+    }
 
-        if (!nvme_nsid_valid(n, nsid) || nsid == NVME_NSID_BROADCAST) {
+    if (!nvme_feature_support[fid]) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    if (nvme_feature_cap[fid] & NVME_FEAT_CAP_NS) {
+        if (nsid != NVME_NSID_BROADCAST) {
+            if (!nvme_nsid_valid(n, nsid)) {
+                return NVME_INVALID_NSID | NVME_DNR;
+            }
+            if (!nvme_ns(n, nsid)) {
+                return NVME_INVALID_FIELD | NVME_DNR;
+            }
+        }
+    } else if (nsid && nsid != NVME_NSID_BROADCAST) {
+        if (!nvme_nsid_valid(n, nsid)) {
             return NVME_INVALID_NSID | NVME_DNR;
         }
-        kv_ns = nvme_ns(n, nsid);
+        return NVME_FID_NOT_NSID_SPEC | NVME_DNR;
+    }
+
+    if (!(nvme_feature_cap[fid] & NVME_FEAT_CAP_CHANGE)) {
+        return NVME_FEAT_NOT_CHANGEABLE | NVME_DNR;
+    }
+
+    switch (fid) {
+    case NVME_KV_FEAT_CONFIG: {
+        /* the mode that owns the namespace handles this one */
+        NvmeNamespace *kv_ns = nvme_ns(n, nsid);
+
         if (!kv_ns || kv_ns->csi != NVME_CSI_KV) {
             return NVME_INVALID_FIELD | NVME_DNR;
         }
         return kvssd_set_feature(n, kv_ns, cmd, cqe);
     }
-
-    switch (dw10) {
     case NVME_ARBITRATION:
-        cqe->n.result = cpu_to_le32(n->features.arbitration);
         n->features.arbitration = dw11;
         break;
     case NVME_POWER_MANAGEMENT:
         n->features.power_mgmt = dw11;
         break;
     case NVME_LBA_RANGE_TYPE:
-        if (nsid == 0 || nsid > n->num_namespaces) {
-            return NVME_INVALID_NSID | NVME_DNR;
+        if (nsid == NVME_NSID_BROADCAST) {
+            return NVME_INVALID_FIELD | NVME_DNR;
         }
         rt = n->namespaces[nsid - 1].lba_range;
         return dma_write_prp(n, (uint8_t *)rt,
@@ -988,12 +1094,6 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         break;
     case NVME_SOFTWARE_PROGRESS_MARKER:
         n->features.sw_prog_marker = dw11;
-        break;
-    case NVME_FDP_MODE:
-        if (!n->subsys || !n->subsys->endgrp.fdp.enabled) {
-            return NVME_INVALID_FIELD | NVME_DNR;
-        }
-        /* FDP mode is read-only in our implementation */
         break;
     case NVME_FDP_EVENTS: {
         if (!n->subsys || !n->subsys->endgrp.fdp.enabled) {

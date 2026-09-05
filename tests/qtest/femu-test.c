@@ -121,8 +121,15 @@ static void femu_submit(FemuCtrlState *c, FemuQueue *q, NvmeCmd *cmd)
     qpci_io_writel(c->pdev, c->bar, femu_sq_doorbell(c, q->qid), q->sq_tail);
 }
 
-/* wait for the next completion, return its status with the phase bit removed */
-static uint16_t femu_complete(FemuCtrlState *c, FemuQueue *q, uint16_t *cid)
+/* status codes come back with the phase bit dropped; this strips DNR too */
+#define FEMU_SC(status)     ((status) & 0x7ff)
+
+/*
+ * Wait for the next completion and return its status with the phase bit
+ * removed; hand back the identifier and dword 0 when asked.
+ */
+static uint16_t femu_complete(FemuCtrlState *c, FemuQueue *q, uint16_t *cid,
+                              uint32_t *result)
 {
     NvmeCqe cqe;
     int waited = 0;
@@ -141,6 +148,9 @@ static uint16_t femu_complete(FemuCtrlState *c, FemuQueue *q, uint16_t *cid)
 
     if (cid) {
         *cid = le16_to_cpu(cqe.cid);
+    }
+    if (result) {
+        *result = le32_to_cpu(cqe.result);
     }
     q->cq_head = (q->cq_head + 1) % FEMU_QSIZE;
     if (q->cq_head == 0) {
@@ -161,17 +171,23 @@ static uint16_t femu_complete(FemuCtrlState *c, FemuQueue *q, uint16_t *cid)
     return le16_to_cpu(cqe.status) >> 1;
 }
 
-static uint16_t femu_admin(FemuCtrlState *c, NvmeCmd *cmd)
+static uint16_t femu_admin_result(FemuCtrlState *c, NvmeCmd *cmd,
+                                  uint32_t *result)
 {
     uint16_t want = c->cid;
     uint16_t got;
     uint16_t status;
 
     femu_submit(c, &c->admin, cmd);
-    status = femu_complete(c, &c->admin, &got);
+    status = femu_complete(c, &c->admin, &got, result);
     g_assert_cmpint(got, ==, want);
 
     return status;
+}
+
+static uint16_t femu_admin(FemuCtrlState *c, NvmeCmd *cmd)
+{
+    return femu_admin_result(c, cmd, NULL);
 }
 
 static void femu_enable(FemuCtrlState *c, QPCIDevice *pdev,
@@ -255,7 +271,7 @@ static uint16_t femu_rw(FemuCtrlState *c, uint8_t opcode, uint64_t slba,
     rw.nlb = cpu_to_le16(FEMU_DATA_SIZE / 512 - 1);
 
     femu_submit(c, &c->io, cmd);
-    status = femu_complete(c, &c->io, &got);
+    status = femu_complete(c, &c->io, &got, NULL);
     g_assert_cmpint(got, ==, want);
 
     return status;
@@ -376,6 +392,151 @@ static void femu_test_io_by_shadow_doorbell(void *obj, void *data,
     femu_disable(&c);
 }
 
+static uint16_t femu_get_feature(FemuCtrlState *c, uint8_t fid, uint8_t sel,
+                                 uint32_t nsid, uint32_t dw11,
+                                 uint32_t *result)
+{
+    NvmeCmd cmd;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_GET_FEATURES;
+    cmd.nsid = cpu_to_le32(nsid);
+    cmd.cdw10 = cpu_to_le32(fid | (sel << 8));
+    cmd.cdw11 = cpu_to_le32(dw11);
+    return femu_admin_result(c, &cmd, result);
+}
+
+static uint16_t femu_set_feature(FemuCtrlState *c, uint8_t fid, bool save,
+                                 uint32_t nsid, uint32_t dw11,
+                                 uint32_t *result)
+{
+    NvmeCmd cmd;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_SET_FEATURES;
+    cmd.nsid = cpu_to_le32(nsid);
+    cmd.cdw10 = cpu_to_le32(fid | (save ? 1u << 31 : 0));
+    cmd.cdw11 = cpu_to_le32(dw11);
+    return femu_admin_result(c, &cmd, result);
+}
+
+/*
+ * Get and Set Features carry the identifier in the low byte of CDW10 and a
+ * selector or the save bit above it. The selector chooses the current,
+ * default, saved or capability value; a save request must be refused rather
+ * than obeyed, and an identifier the controller does not implement is an
+ * invalid field.
+ */
+static void femu_test_features(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint32_t result;
+
+    femu_enable(&c, &femu->dev, alloc);
+
+    g_assert_cmpint(FEMU_SC(femu_get_feature(&c, NVME_TEMPERATURE_THRESHOLD,
+                            NVME_GETFEAT_SELECT_CURRENT, 0, 0, &result)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpint(result, ==, 0x14d);
+
+    g_assert_cmpint(FEMU_SC(femu_get_feature(&c, NVME_TEMPERATURE_THRESHOLD,
+                            NVME_GETFEAT_SELECT_CAP, 0, 0, &result)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpint(result & NVME_FEAT_CAP_CHANGE, !=, 0);
+    g_assert_cmpint(result & NVME_FEAT_CAP_SAVE, ==, 0);
+
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_TEMPERATURE_THRESHOLD,
+                            false, 0, 0x150, NULL)), ==, NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_get_feature(&c, NVME_TEMPERATURE_THRESHOLD,
+                            NVME_GETFEAT_SELECT_CURRENT, 0, 0, &result)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpint(result, ==, 0x150);
+    g_assert_cmpint(FEMU_SC(femu_get_feature(&c, NVME_TEMPERATURE_THRESHOLD,
+                            NVME_GETFEAT_SELECT_DEFAULT, 0, 0, &result)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpint(result, ==, 0x14d);
+    g_assert_cmpint(FEMU_SC(femu_get_feature(&c, NVME_TEMPERATURE_THRESHOLD,
+                            NVME_GETFEAT_SELECT_SAVED, 0, 0, &result)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpint(result, ==, 0x14d);
+
+    /* nothing is saveable */
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_TEMPERATURE_THRESHOLD,
+                            true, 0, 0x150, NULL)),
+                    ==, NVME_FID_NOT_SAVEABLE);
+
+    /* a selector the specification does not define */
+    g_assert_cmpint(FEMU_SC(femu_get_feature(&c, NVME_TEMPERATURE_THRESHOLD,
+                            4, 0, 0, &result)), ==, NVME_INVALID_FIELD);
+
+    /* autonomous power state transitions are not implemented */
+    g_assert_cmpint(FEMU_SC(femu_get_feature(&c, 0x0c,
+                            NVME_GETFEAT_SELECT_CURRENT, 0, 0, &result)),
+                    ==, NVME_INVALID_FIELD);
+
+    /* a controller-wide feature addressed to one namespace */
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_VOLATILE_WRITE_CACHE,
+                            false, 1, 0, NULL)),
+                    ==, NVME_FEAT_NOT_NS_SPEC);
+
+    /*
+     * A host learns it may use the Select field and the Save bit from
+     * Save/Select Feature Support in Identify Controller. Serving them while
+     * reporting the bit clear leaves the whole path unreachable for a host
+     * that checks first.
+     */
+    {
+        uint64_t buf = guest_alloc(alloc, 4096);
+        NvmeIdCtrl id;
+        NvmeCmd cmd;
+
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_ADM_CMD_IDENTIFY;
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.cdw10 = cpu_to_le32(NVME_ID_CNS_CTRL);
+        g_assert_cmpint(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_SUCCESS);
+        qtest_memread(c.pdev->bus->qts, buf, &id, sizeof(id));
+        g_assert_cmpint(le16_to_cpu(id.oncs) & NVME_ONCS_FEATURES, !=, 0);
+        guest_free(alloc, buf);
+    }
+
+    /*
+     * LBA Range Type answers with a descriptor list, not a value, so the
+     * default and saved selectors have to transfer one. Returning success
+     * without writing the buffer leaves the host parsing what was already
+     * there.
+     */
+    {
+        uint64_t buf = guest_alloc(alloc, 4096);
+        uint8_t rt[64];
+        NvmeCmd cmd;
+        int i;
+
+        qtest_memset(c.pdev->bus->qts, buf, 0xff, sizeof(rt));
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_ADM_CMD_GET_FEATURES;
+        cmd.nsid = cpu_to_le32(1);
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.cdw10 = cpu_to_le32(NVME_LBA_RANGE_TYPE |
+                                (NVME_GETFEAT_SELECT_DEFAULT << 8));
+        cmd.cdw11 = cpu_to_le32(1);
+        g_assert_cmpint(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_SUCCESS);
+        qtest_memread(c.pdev->bus->qts, buf, rt, sizeof(rt));
+        for (i = 0; i < (int)sizeof(rt); i++) {
+            g_assert_cmpint(rt[i], ==, 0);
+        }
+        guest_free(alloc, buf);
+    }
+
+    /* the queue count comes back in dword 0 of the completion */
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_NUMBER_OF_QUEUES,
+                            false, 0, 0x00030003, &result)), ==, NVME_SUCCESS);
+    g_assert_cmpint(result & 0xffff, ==, (result >> 16) & 0xffff);
+
+    femu_disable(&c);
+}
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -391,6 +552,7 @@ static void femu_register_nodes(void)
     qos_add_test("io-by-doorbell", "femu", femu_test_io_by_doorbell, NULL);
     qos_add_test("io-by-shadow-doorbell", "femu",
                  femu_test_io_by_shadow_doorbell, NULL);
+    qos_add_test("features", "femu", femu_test_features, NULL);
 }
 
 libqos_init(femu_register_nodes);

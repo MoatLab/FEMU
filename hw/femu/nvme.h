@@ -890,6 +890,7 @@ enum NvmeStatusCodes {
     NVME_FW_REQ_RESET           = 0x010b,
     NVME_INVALID_QUEUE_DEL      = 0x010c,
     NVME_FID_NOT_SAVEABLE       = 0x010d,
+    NVME_FEAT_NOT_CHANGEABLE    = 0x010e,
     NVME_FID_NOT_NSID_SPEC      = 0x010f,
     NVME_FW_REQ_SUSYSTEM_RESET  = 0x0110,
     NVME_CONFLICTING_ATTRS      = 0x0180,
@@ -1203,6 +1204,11 @@ typedef enum NvmeGetFeatureSelect {
     NVME_GETFEAT_SELECT_SAVED   = 0x2,
     NVME_GETFEAT_SELECT_CAP     = 0x3,
 } NvmeGetFeatureSelect;
+
+/* CDW10 of Get/Set Features: the identifier, the selector, the save bit */
+#define NVME_GETSETFEAT_FID(dw10)   ((dw10) & 0xff)
+#define NVME_GETFEAT_SELECT(dw10)   (((dw10) >> 8) & 0x7)
+#define NVME_SETFEAT_SAVE(dw10)     (((dw10) >> 31) & 0x1)
 
 typedef struct NvmeRangeType {
     uint8_t     type;
