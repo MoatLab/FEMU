@@ -7,10 +7,13 @@
  * end-to-end measurement was the only evidence available: an ECC adder that
  * could never run, and a multi-plane gate that read state its caller leaves
  * unset. Both are asserted below.
+ *
+ * Output is TAP, so the same binary runs under meson (make check-unit) and
+ * from hw/femu/tests/Makefile, which builds it in milliseconds against a stub
+ * osdep.h before the QEMU build exists.
  */
-#include <stdio.h>
-#include <string.h>
-#include "nand-media.h"
+#include "qemu/osdep.h"
+#include "hw/femu/nand/nand-media.h"
 
 /* sizes for this test's fake timelines; the media layer has no opinion */
 #define NAND_TEST_CHS  8
@@ -33,6 +36,7 @@ static const NandTimelineOps lun_only_timeline = {
 };
 
 static int failures;
+static int ntests;
 
 static void reset_timelines(void)
 {
@@ -43,23 +47,25 @@ static void reset_timelines(void)
 
 static void check(const char *what, uint64_t got, uint64_t want)
 {
+    ntests++;
     if (got == want) {
-        printf("  ok    %-52s %lu\n", what, (unsigned long)got);
+        printf("ok %d - %s (%llu)\n", ntests, what, (unsigned long long)got);
     } else {
-        printf("  FAIL  %-52s got %lu want %lu\n", what,
-               (unsigned long)got, (unsigned long)want);
+        printf("not ok %d - %s: got %llu want %llu\n", ntests, what,
+               (unsigned long long)got, (unsigned long long)want);
         failures++;
     }
 }
 
 static void check_lt(const char *what, uint64_t got, uint64_t bound)
 {
+    ntests++;
     if (got < bound) {
-        printf("  ok    %-52s %lu < %lu\n", what, (unsigned long)got,
-               (unsigned long)bound);
+        printf("ok %d - %s (%llu < %llu)\n", ntests, what,
+               (unsigned long long)got, (unsigned long long)bound);
     } else {
-        printf("  FAIL  %-52s %lu not < %lu\n", what, (unsigned long)got,
-               (unsigned long)bound);
+        printf("not ok %d - %s: %llu not < %llu\n", ntests, what,
+               (unsigned long long)got, (unsigned long long)bound);
         failures++;
     }
 }
@@ -107,7 +113,7 @@ static void test_ecc(void)
 {
     NandMediaConfig cfg;
 
-    puts("ECC read adder");
+    printf("# ECC read adder\n");
     bb_config(&cfg);
     check("fresh, unworn read is just the array latency", read_lat(&cfg, 0, 0), 10000);
 
@@ -160,7 +166,7 @@ static void test_staged_channel(void)
     NandLoc a, b;
     uint64_t first, second;
 
-    puts("staged channel bus");
+    printf("# staged channel bus\n");
     bb_config(&cfg);
     cfg.policy.channel_mode = NAND_CH_STAGED;
     cfg.timing.cmd_addr_ns = 300;
@@ -306,7 +312,7 @@ static void test_multiplane_erase(void)
     uint64_t one, batched, serial;
     int i;
 
-    puts("multi-plane erase");
+    printf("# multi-plane erase\n");
 
     /*
      * One plane must be identical to the single-op path. A commit claimed this
@@ -354,7 +360,7 @@ static void test_copyback(void)
     NandLoc src, dst;
     NandOpCompletion c;
 
-    puts("on-chip copyback");
+    printf("# on-chip copyback\n");
 
     /*
      * A LUN-only caller (bbssd) leaves plane_avail unset. Reading it would be a
@@ -399,15 +405,19 @@ static void test_copyback(void)
 
 int main(void)
 {
+    /*
+     * Under meson the output goes through a pipe, so stdout is fully buffered
+     * and an abort -- an armed assertion, a sanitizer report -- would discard
+     * every TAP line written so far, leaving an empty log for the failure that
+     * matters most. Line buffering costs nothing here and keeps the record.
+     */
+    setvbuf(stdout, NULL, _IOLBF, 0);
+
     test_ecc();
     test_staged_channel();
     test_plane_gate_with_channel();
     test_multiplane_erase();
     test_copyback();
-    if (failures) {
-        printf("\n%d FAILURE(S)\n", failures);
-        return 1;
-    }
-    puts("\nall checks passed");
-    return 0;
+    printf("1..%d\n", ntests);
+    return failures ? 1 : 0;
 }

@@ -29,8 +29,13 @@ uint64_t zns_zone_reset(struct zns_ssd *zns, uint32_t zone_idx,
     do { printf("[Misao] ZFTL-Log: " fmt, ## __VA_ARGS__); } while (0)
 
 
-/* FEMU assert() */
-#ifdef FEMU_DEBUG_FTL
+/*
+ * FTL invariant checks. Off in the normal build to keep the I/O path
+ * short; FEMU_DEBUG_FTL arms them together with the debug chatter, and
+ * FEMU_FTL_ASSERT arms them alone, which is what the sanitizer build in
+ * CI uses so a bound violation aborts instead of corrupting state.
+ */
+#if defined(FEMU_DEBUG_FTL) || defined(FEMU_FTL_ASSERT)
 #define ftl_assert(expression) assert(expression)
 #else
 #define ftl_assert(expression)

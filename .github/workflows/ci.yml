@@ -57,6 +57,15 @@ jobs:
         time ./femu-compile.sh
         echo "Build completed at $(date)"
 
+    - name: Run the FEMU unit tests through meson
+      run: |
+        cd build-femu
+        # The same tests the standalone step ran, now built with QEMU's own
+        # flags and headers, so a test that only passes against the stub
+        # osdep.h is caught here.
+        ./pyvenv/bin/meson test test-femu-nand-media test-femu-pqueue \
+          --print-errorlogs
+
     - name: Verify FEMU device registration
       run: |
         cd build-femu
@@ -104,6 +113,87 @@ jobs:
           build-femu/config-host.mak
           build-femu/run-*.sh
         retention-days: 7
+
+  # A second build with the FTL's invariant checks compiled in and the address
+  # and undefined-behaviour sanitizers on. In the normal build ftl_assert() is
+  # empty, so a bound violation in the FTL corrupts state silently; here it
+  # aborts, and so does a heap overrun in the controller.
+  debug-build:
+    runs-on: ubuntu-24.04
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Install dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y build-essential pkg-config libglib2.0-dev \
+          libpixman-1-dev libfdt-dev zlib1g-dev libaio-dev \
+          libcap-ng-dev libattr1-dev ninja-build python3-pip \
+          libslirp-dev libseccomp-dev libcurl4-gnutls-dev \
+          libssh-dev liblzo2-dev libsnappy-dev libbz2-dev \
+          liblzma-dev libzstd-dev libgcrypt20-dev libgnutls28-dev \
+          uuid-dev libcap-dev libxml2-dev libmount-dev \
+          liburing-dev flex bison
+
+    - name: Build with FTL asserts and sanitizers
+      run: |
+        mkdir build-debug
+        cd build-debug
+        ../configure --enable-kvm --target-list=x86_64-softmmu --enable-slirp \
+          --disable-libnfs --disable-libiscsi --disable-curl \
+          --enable-asan --enable-ubsan --extra-cflags=-DFEMU_FTL_ASSERT
+        make -j "$(nproc)"
+
+    - name: Run the FEMU unit tests under the sanitizers
+      run: |
+        cd build-debug
+        ./pyvenv/bin/meson test test-femu-nand-media test-femu-pqueue \
+          --print-errorlogs
+
+    - name: Instantiate every mode with the checks armed
+      env:
+        # QEMU frees little at exit by design; only real errors should fail.
+        ASAN_OPTIONS: detect_leaks=0
+        UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+      run: |
+        cd build-debug
+        # Plain `timeout` reports 124 whenever it had to signal the child, so a
+        # child that dies of SIGABRT while handling SIGTERM -- an armed
+        # assertion firing on the way out -- is indistinguishable from a clean
+        # run. --preserve-status passes the child's own status through instead:
+        # 143 is our SIGTERM, 0 is an early clean exit, and anything else, 134
+        # for an abort above all, is a failure. The output is checked as well,
+        # because a sanitizer reports without dying.
+        for mode in 0 1 2 3 4 5; do
+          extra=""
+          # computational storage refuses to start without a data memory size
+          [ "$mode" -eq 4 ] && extra=",fdm_size=64"
+          rc=0
+          timeout --preserve-status 20s ./qemu-system-x86_64 \
+            -device "femu,devsz_mb=1024,femu_mode=${mode},serial=dbg${mode}${extra}" \
+            -nographic -M accel=qtest > mode${mode}.log 2>&1 || rc=$?
+          if [ "$rc" -ne 143 ] && [ "$rc" -ne 0 ]; then
+            echo "mode ${mode} exited with ${rc}"; cat mode${mode}.log; exit 1
+          fi
+          if grep -qE "Sanitizer|runtime error:|Assertion.*failed" mode${mode}.log; then
+            echo "mode ${mode} reported an error:"; cat mode${mode}.log; exit 1
+          fi
+          echo "mode ${mode} came up with the checks armed"
+        done
+
+    - name: Expand every example config with the checks armed
+      env:
+        # QEMU builds without -fno-sanitize-recover, so an undefined-behaviour
+        # report would otherwise print and let the process exit 0. The script
+        # turns leak detection off itself: QEMU frees little at exit by design.
+        UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+      run: |
+        chmod +x hw/femu/scripts/ssd-config.sh hw/femu/scripts/ssd-config-test.sh
+        ./hw/femu/scripts/ssd-config-test.sh "$PWD/build-debug/qemu-system-x86_64"
 
   compatibility-test:
     runs-on: ubuntu-latest  # Standard runners

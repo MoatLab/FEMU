@@ -40,6 +40,7 @@ tests = {
   'test-bitops': [],
   'test-bitcnt': [],
   'test-femu-pqueue': [meson.project_source_root() / 'hw/femu/lib/pqueue.c'],
+  'test-femu-nand-media': [meson.project_source_root() / 'hw/femu/nand/nand-media.c'],
   'test-qgraph': ['../qtest/libqos/qgraph.c'],
   'check-qom-interface': [qom],
   'check-qom-proplist': [qom],
