@@ -1,0 +1,396 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+/*
+ * QTest testcase for the FEMU SSD emulator
+ *
+ * Drives the controller the way a host without the shadow doorbell buffer
+ * does: queues are created through admin commands, commands are submitted by
+ * writing the doorbell registers, and completions are found by polling the
+ * completion queue in guest memory. No interrupt is enabled, so the test
+ * depends on nothing but the memory-mapped register interface.
+ */
+
+#include "qemu/osdep.h"
+#include "qemu/module.h"
+#include "libqtest.h"
+#include "libqos/qgraph.h"
+#include "libqos/pci.h"
+#include "libqos/libqos-malloc.h"
+#include "block/nvme.h"
+
+#define FEMU_QSIZE          16
+#define FEMU_DATA_SIZE      4096
+#define FEMU_POLL_LIMIT_MS  10000
+
+typedef struct QFemu QFemu;
+
+struct QFemu {
+    QOSGraphObject obj;
+    QPCIDevice dev;
+};
+
+/* one submission/completion pair and where its cursors are */
+typedef struct FemuQueue {
+    uint16_t qid;
+    uint64_t sq_addr;
+    uint64_t cq_addr;
+    uint16_t sq_tail;
+    uint16_t cq_head;
+    uint8_t phase;
+} FemuQueue;
+
+typedef struct FemuCtrlState {
+    QPCIDevice *pdev;
+    QPCIBar bar;
+    QGuestAllocator *alloc;
+    uint32_t db_stride;
+    uint16_t cid;
+    FemuQueue admin;
+    FemuQueue io;
+    /* shadow doorbell pages, once Doorbell Buffer Config has been issued */
+    uint64_t dbs_addr;
+} FemuCtrlState;
+
+static void *femu_get_driver(void *obj, const char *interface)
+{
+    QFemu *femu = obj;
+
+    if (!g_strcmp0(interface, "pci-device")) {
+        return &femu->dev;
+    }
+
+    fprintf(stderr, "%s not present in femu\n", interface);
+    g_assert_not_reached();
+}
+
+static void *femu_create(void *pci_bus, QGuestAllocator *alloc, void *addr)
+{
+    QFemu *femu = g_new0(QFemu, 1);
+    QPCIBus *bus = pci_bus;
+
+    qpci_device_init(&femu->dev, bus, addr);
+    femu->obj.get_driver = femu_get_driver;
+
+    return &femu->obj;
+}
+
+static uint64_t femu_sq_doorbell(FemuCtrlState *c, uint16_t qid)
+{
+    return 0x1000 + (2 * qid) * (4 << c->db_stride);
+}
+
+static uint64_t femu_cq_doorbell(FemuCtrlState *c, uint16_t qid)
+{
+    return 0x1000 + (2 * qid + 1) * (4 << c->db_stride);
+}
+
+static void femu_queue_init(FemuCtrlState *c, FemuQueue *q, uint16_t qid)
+{
+    q->qid = qid;
+    q->sq_addr = guest_alloc(c->alloc, FEMU_QSIZE * sizeof(NvmeCmd));
+    q->cq_addr = guest_alloc(c->alloc, FEMU_QSIZE * sizeof(NvmeCqe));
+    q->sq_tail = 0;
+    q->cq_head = 0;
+    q->phase = 1;
+    qtest_memset(c->pdev->bus->qts, q->cq_addr, 0,
+                 FEMU_QSIZE * sizeof(NvmeCqe));
+}
+
+static void femu_queue_free(FemuCtrlState *c, FemuQueue *q)
+{
+    guest_free(c->alloc, q->sq_addr);
+    guest_free(c->alloc, q->cq_addr);
+}
+
+/* queue the command and ring the controller, by register or by shadow */
+static void femu_submit(FemuCtrlState *c, FemuQueue *q, NvmeCmd *cmd)
+{
+    cmd->cid = cpu_to_le16(c->cid++);
+    qtest_memwrite(c->pdev->bus->qts,
+                   q->sq_addr + q->sq_tail * sizeof(NvmeCmd), cmd,
+                   sizeof(*cmd));
+    q->sq_tail = (q->sq_tail + 1) % FEMU_QSIZE;
+
+    if (c->dbs_addr && q->qid) {
+        uint32_t tail = q->sq_tail;
+
+        qtest_memwrite(c->pdev->bus->qts,
+                       c->dbs_addr + femu_sq_doorbell(c, q->qid) - 0x1000,
+                       &tail, sizeof(tail));
+        return;
+    }
+    qpci_io_writel(c->pdev, c->bar, femu_sq_doorbell(c, q->qid), q->sq_tail);
+}
+
+/* wait for the next completion, return its status with the phase bit removed */
+static uint16_t femu_complete(FemuCtrlState *c, FemuQueue *q, uint16_t *cid)
+{
+    NvmeCqe cqe;
+    int waited = 0;
+
+    for (;;) {
+        qtest_memread(c->pdev->bus->qts,
+                      q->cq_addr + q->cq_head * sizeof(NvmeCqe), &cqe,
+                      sizeof(cqe));
+        if ((le16_to_cpu(cqe.status) & 1) == q->phase) {
+            break;
+        }
+        g_assert_cmpint(waited, <, FEMU_POLL_LIMIT_MS);
+        g_usleep(1000);
+        waited++;
+    }
+
+    if (cid) {
+        *cid = le16_to_cpu(cqe.cid);
+    }
+    q->cq_head = (q->cq_head + 1) % FEMU_QSIZE;
+    if (q->cq_head == 0) {
+        q->phase ^= 1;
+    }
+
+    if (c->dbs_addr && q->qid) {
+        uint32_t head = q->cq_head;
+
+        qtest_memwrite(c->pdev->bus->qts,
+                       c->dbs_addr + femu_cq_doorbell(c, q->qid) - 0x1000,
+                       &head, sizeof(head));
+    } else {
+        qpci_io_writel(c->pdev, c->bar, femu_cq_doorbell(c, q->qid),
+                       q->cq_head);
+    }
+
+    return le16_to_cpu(cqe.status) >> 1;
+}
+
+static uint16_t femu_admin(FemuCtrlState *c, NvmeCmd *cmd)
+{
+    uint16_t want = c->cid;
+    uint16_t got;
+    uint16_t status;
+
+    femu_submit(c, &c->admin, cmd);
+    status = femu_complete(c, &c->admin, &got);
+    g_assert_cmpint(got, ==, want);
+
+    return status;
+}
+
+static void femu_enable(FemuCtrlState *c, QPCIDevice *pdev,
+                        QGuestAllocator *alloc)
+{
+    uint64_t cap;
+    uint32_t csts;
+    int waited = 0;
+
+    c->pdev = pdev;
+    c->alloc = alloc;
+    qpci_device_enable(pdev);
+    c->bar = qpci_iomap(pdev, 0, NULL);
+
+    cap = qpci_io_readq(pdev, c->bar, 0x0);
+    c->db_stride = (cap >> 32) & 0xf;
+
+    femu_queue_init(c, &c->admin, 0);
+    qpci_io_writel(pdev, c->bar, 0x24,
+                   ((FEMU_QSIZE - 1) << 16) | (FEMU_QSIZE - 1));
+    qpci_io_writeq(pdev, c->bar, 0x28, c->admin.sq_addr);
+    qpci_io_writeq(pdev, c->bar, 0x30, c->admin.cq_addr);
+
+    /* enable, NVM command set, 4 KiB pages, 64-byte SQEs, 16-byte CQEs */
+    qpci_io_writel(pdev, c->bar, 0x14, (6 << 16) | (4 << 20) | 1);
+    for (;;) {
+        csts = qpci_io_readl(pdev, c->bar, 0x1c);
+        if (csts & NVME_CSTS_READY) {
+            break;
+        }
+        g_assert_cmpint(csts & NVME_CSTS_FAILED, ==, 0);
+        g_assert_cmpint(waited, <, FEMU_POLL_LIMIT_MS);
+        g_usleep(1000);
+        waited++;
+    }
+}
+
+static void femu_disable(FemuCtrlState *c)
+{
+    qpci_io_writel(c->pdev, c->bar, 0x14, 0);
+    femu_queue_free(c, &c->admin);
+    qpci_iounmap(c->pdev, c->bar);
+}
+
+/* one I/O queue pair with interrupts left off: completions are polled */
+static void femu_create_io_queues(FemuCtrlState *c)
+{
+    NvmeCmd cmd;
+
+    femu_queue_init(c, &c->io, 1);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_CREATE_CQ;
+    cmd.dptr.prp1 = cpu_to_le64(c->io.cq_addr);
+    cmd.cdw10 = cpu_to_le32(((FEMU_QSIZE - 1) << 16) | c->io.qid);
+    cmd.cdw11 = cpu_to_le32(NVME_CQ_PC);
+    g_assert_cmpint(femu_admin(c, &cmd), ==, NVME_SUCCESS);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_CREATE_SQ;
+    cmd.dptr.prp1 = cpu_to_le64(c->io.sq_addr);
+    cmd.cdw10 = cpu_to_le32(((FEMU_QSIZE - 1) << 16) | c->io.qid);
+    cmd.cdw11 = cpu_to_le32((c->io.qid << 16) | NVME_SQ_PC);
+    g_assert_cmpint(femu_admin(c, &cmd), ==, NVME_SUCCESS);
+}
+
+static uint16_t femu_rw(FemuCtrlState *c, uint8_t opcode, uint64_t slba,
+                        uint64_t data)
+{
+    NvmeRwCmd rw;
+    NvmeCmd *cmd = (NvmeCmd *)&rw;
+    uint16_t want = c->cid;
+    uint16_t got;
+    uint16_t status;
+
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = opcode;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(data);
+    rw.slba = cpu_to_le64(slba);
+    rw.nlb = cpu_to_le16(FEMU_DATA_SIZE / 512 - 1);
+
+    femu_submit(c, &c->io, cmd);
+    status = femu_complete(c, &c->io, &got);
+    g_assert_cmpint(got, ==, want);
+
+    return status;
+}
+
+/* write a pattern, read it back, and expect the same bytes */
+static void femu_round_trip(FemuCtrlState *c, uint8_t seed)
+{
+    uint64_t data = guest_alloc(c->alloc, FEMU_DATA_SIZE);
+    uint8_t *wbuf = g_malloc(FEMU_DATA_SIZE);
+    uint8_t *rbuf = g_malloc0(FEMU_DATA_SIZE);
+    int i;
+
+    for (i = 0; i < FEMU_DATA_SIZE; i++) {
+        wbuf[i] = (uint8_t)(seed + i * 7);
+    }
+    qtest_memwrite(c->pdev->bus->qts, data, wbuf, FEMU_DATA_SIZE);
+    g_assert_cmpint(femu_rw(c, NVME_CMD_WRITE, 8 * seed, data), ==,
+                    NVME_SUCCESS);
+
+    qtest_memset(c->pdev->bus->qts, data, 0, FEMU_DATA_SIZE);
+    g_assert_cmpint(femu_rw(c, NVME_CMD_READ, 8 * seed, data), ==,
+                    NVME_SUCCESS);
+    qtest_memread(c->pdev->bus->qts, data, rbuf, FEMU_DATA_SIZE);
+    g_assert_cmpint(memcmp(wbuf, rbuf, FEMU_DATA_SIZE), ==, 0);
+
+    g_free(rbuf);
+    g_free(wbuf);
+    guest_free(c->alloc, data);
+}
+
+/*
+ * A host that never issues Doorbell Buffer Config must still get its I/O
+ * served. The controller used to start its data path only from that command.
+ */
+static void femu_test_io_by_doorbell(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_round_trip(&c, 1);
+    femu_round_trip(&c, 2);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
+ * The shadow doorbell path must keep working once the host configures it:
+ * after Doorbell Buffer Config the queue is driven from the shadow page and
+ * the register writes are ignored.
+ */
+static void femu_test_io_by_shadow_doorbell(void *obj, void *data,
+                                            QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    NvmeCmd cmd;
+    uint64_t eis_addr;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_round_trip(&c, 3);
+
+    c.dbs_addr = guest_alloc(alloc, 4096);
+    eis_addr = guest_alloc(alloc, 4096);
+    qtest_memset(c.pdev->bus->qts, c.dbs_addr, 0, 4096);
+    qtest_memset(c.pdev->bus->qts, eis_addr, 0, 4096);
+
+    /*
+     * The buffer handed over is zeroed while the queue has already advanced
+     * through the registers, so the controller has to publish the current
+     * cursors into it. If it does not, it reads a stale zero and replays
+     * every command submitted so far.
+     */
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_DBBUF_CONFIG;
+    cmd.dptr.prp1 = cpu_to_le64(c.dbs_addr);
+    cmd.dptr.prp2 = cpu_to_le64(eis_addr);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+
+    /* a second configuration is refused */
+    g_assert_cmpint(femu_admin(&c, &cmd), !=, NVME_SUCCESS);
+
+    /* the controller published the cursors rather than leaving them zero */
+    {
+        uint32_t tail = 0, head = 0;
+
+        qtest_memread(c.pdev->bus->qts,
+                      c.dbs_addr + femu_sq_doorbell(&c, 1) - 0x1000,
+                      &tail, sizeof(tail));
+        qtest_memread(c.pdev->bus->qts,
+                      c.dbs_addr + femu_cq_doorbell(&c, 1) - 0x1000,
+                      &head, sizeof(head));
+        g_assert_cmpint(tail, ==, c.io.sq_tail);
+        g_assert_cmpint(head, ==, c.io.cq_head);
+    }
+
+    /* an address the controller cannot map is refused, not accepted */
+    {
+        NvmeCmd bad;
+
+        memset(&bad, 0, sizeof(bad));
+        bad.opcode = NVME_ADM_CMD_DBBUF_CONFIG;
+        bad.dptr.prp1 = cpu_to_le64(0xffffffff00000000ULL);
+        bad.dptr.prp2 = cpu_to_le64(0xffffffff00001000ULL);
+        g_assert_cmpint(femu_admin(&c, &bad), !=, NVME_SUCCESS);
+    }
+
+    femu_round_trip(&c, 4);
+    femu_round_trip(&c, 5);
+
+    guest_free(alloc, eis_addr);
+    guest_free(alloc, c.dbs_addr);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+static void femu_register_nodes(void)
+{
+    QOSGraphEdgeOptions opts = {
+        .extra_device_opts = "addr=04.0,devsz_mb=64,femu_mode=2,serial=femu0",
+    };
+
+    add_qpci_address(&opts, &(QPCIAddress) { .devfn = QPCI_DEVFN(4, 0) });
+
+    qos_node_create_driver("femu", femu_create);
+    qos_node_consumes("femu", "pci-bus", &opts);
+    qos_node_produces("femu", "pci-device");
+
+    qos_add_test("io-by-doorbell", "femu", femu_test_io_by_doorbell, NULL);
+    qos_add_test("io-by-shadow-doorbell", "femu",
+                 femu_test_io_by_shadow_doorbell, NULL);
+}
+
+libqos_init(femu_register_nodes);

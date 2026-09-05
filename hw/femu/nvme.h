@@ -2049,6 +2049,7 @@ void nvme_update_cq_head(NvmeCQueue *cq);
 void nvme_update_cq_eventidx(NvmeCQueue *cq);
 uint8_t nvme_cq_full(NvmeCQueue *cq);
 uint8_t nvme_sq_empty(NvmeSQueue *sq);
+void nvme_start_dataplane(FemuCtrl *n);
 void nvme_update_sq_tail(NvmeSQueue *sq);
 uint16_t nvme_init_sq(NvmeSQueue *sq, FemuCtrl *n, uint64_t dma_addr, uint16_t
                       sqid, uint16_t cqid, uint16_t size, enum NvmeQueueFlags

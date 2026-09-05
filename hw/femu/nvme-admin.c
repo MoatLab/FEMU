@@ -349,6 +349,22 @@ static void nvme_init_poller(FemuCtrl *n)
     }
 }
 
+/*
+ * Start serving the I/O queues. Called when the host enables the controller:
+ * the shadow doorbell buffer is an optional host optimisation, and a host that
+ * never configures one drives the doorbell registers instead. The poller
+ * threads are created once and survive a reset, which only clears
+ * dataplane_started until the next enable.
+ */
+void nvme_start_dataplane(FemuCtrl *n)
+{
+    if (!n->poller_on) {
+        nvme_init_poller(n);
+        n->poller_on = true;
+    }
+    n->dataplane_started = true;
+}
+
 static uint16_t nvme_set_db_memory(FemuCtrl *n, const NvmeCmd *cmd)
 {
     uint64_t dbs_addr = le64_to_cpu(cmd->dptr.prp1);
@@ -356,6 +372,7 @@ static uint16_t nvme_set_db_memory(FemuCtrl *n, const NvmeCmd *cmd)
     uint8_t stride = n->db_stride;
     int dbbuf_entry_sz = 1 << (2 + stride);
     AddressSpace *as = pci_get_address_space(&n->parent_obj);
+    void *dbs_hva, *eis_hva;
     int i;
 
 
@@ -367,14 +384,38 @@ static uint16_t nvme_set_db_memory(FemuCtrl *n, const NvmeCmd *cmd)
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     /* the buffers are set once per controller enable; a second one is refused */
-    if (n->dataplane_started) {
+    if (n->dbs_addr) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    dbs_hva = dma_memory_map(as, dbs_addr, &dbs_tlen, DMA_DIRECTION_FROM_DEVICE,
+                             MEMTXATTRS_UNSPECIFIED);
+    eis_hva = dma_memory_map(as, eis_addr, &eis_tlen, DMA_DIRECTION_FROM_DEVICE,
+                             MEMTXATTRS_UNSPECIFIED);
+    /*
+     * The host may name an address that cannot be mapped, or one backed by
+     * something that does not hand out a whole page. Refuse the command in
+     * that case: the pollers dereference these pointers on every sweep, so
+     * accepting a short or absent mapping is a wild write from a guest
+     * command. Nothing is recorded until both succeed, so the host can retry.
+     */
+    if (!dbs_hva || !eis_hva || dbs_tlen < n->page_size ||
+        eis_tlen < n->page_size) {
+        if (dbs_hva) {
+            dma_memory_unmap(as, dbs_hva, dbs_tlen,
+                             DMA_DIRECTION_FROM_DEVICE, 0);
+        }
+        if (eis_hva) {
+            dma_memory_unmap(as, eis_hva, eis_tlen,
+                             DMA_DIRECTION_FROM_DEVICE, 0);
+        }
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
     n->dbs_addr = dbs_addr;
     n->eis_addr = eis_addr;
-    n->dbs_addr_hva = (uint64_t)dma_memory_map(as, dbs_addr, &dbs_tlen, 0, MEMTXATTRS_UNSPECIFIED);
-    n->eis_addr_hva = (uint64_t)dma_memory_map(as, eis_addr, &eis_tlen, 0, MEMTXATTRS_UNSPECIFIED);
+    n->dbs_addr_hva = (uint64_t)dbs_hva;
+    n->eis_addr_hva = (uint64_t)eis_hva;
 
     for (i = 1; i <= n->nr_io_queues; i++) {
         NvmeSQueue *sq = n->sq[i];
@@ -386,6 +427,13 @@ static uint16_t nvme_set_db_memory(FemuCtrl *n, const NvmeCmd *cmd)
             sq->db_addr_hva = n->dbs_addr_hva + 2 * i * dbbuf_entry_sz;
             sq->eventidx_addr = eis_addr + 2 * i * dbbuf_entry_sz;
             sq->eventidx_addr_hva = n->eis_addr_hva + 2 * i * dbbuf_entry_sz;
+            /*
+             * The buffer the host just handed over is zeroed, but the queue
+             * may already have advanced through the doorbell registers.
+             * Publish where it actually stands, or the controller reads a
+             * stale zero and re-executes everything submitted so far.
+             */
+            *((uint32_t *)sq->db_addr_hva) = sq->tail;
             femu_debug("DBBUF,sq[%d]:db=%" PRIu64 ",ei=%" PRIu64 "\n", i,
                     sq->db_addr, sq->eventidx_addr);
         }
@@ -395,17 +443,12 @@ static uint16_t nvme_set_db_memory(FemuCtrl *n, const NvmeCmd *cmd)
             cq->db_addr_hva = n->dbs_addr_hva + (2 * i + 1) * dbbuf_entry_sz;
             cq->eventidx_addr = eis_addr + (2 * i + 1) * dbbuf_entry_sz;
             cq->eventidx_addr_hva = n->eis_addr_hva + (2 * i + 1) * dbbuf_entry_sz;
+            *((uint32_t *)cq->db_addr_hva) = cq->head;
             femu_debug("DBBUF,cq[%d]:db=%" PRIu64 ",ei=%" PRIu64 "\n", i,
                     cq->db_addr, cq->eventidx_addr);
         }
     }
 
-    if (!n->poller_on) {
-        /* Coperd: make sure this only runs once across all controller resets */
-        nvme_init_poller(n);
-        n->poller_on = true;
-    }
-    n->dataplane_started = true;
     femu_debug("nvme_set_db_memory returns SUCCESS!\n");
 
     return NVME_SUCCESS;

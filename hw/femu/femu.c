@@ -379,6 +379,8 @@ static int nvme_start_ctrl(FemuCtrl *n)
         n->ext_ops.start_ctrl(n);
     }
 
+    nvme_start_dataplane(n);
+
     return 0;
 }
 
@@ -500,10 +502,6 @@ static void nvme_process_db_io(FemuCtrl *n, hwaddr addr, int val)
     uint16_t new_val = val & 0xffff;
     NvmeSQueue *sq;
 
-    if (n->dataplane_started) {
-        return;
-    }
-
     if (addr & ((1 << (2 + n->db_stride)) - 1)) {
         return;
     }
@@ -518,13 +516,15 @@ static void nvme_process_db_io(FemuCtrl *n, hwaddr addr, int val)
         }
 
         cq = n->cq[qid];
+        /* a queue with a shadow doorbell is driven from the shadow instead */
+        if (cq->db_addr) {
+            return;
+        }
         if (new_val >= cq->size) {
             return;
         }
 
-        if (!cq->db_addr) {
-            cq->head = new_val;
-        }
+        cq->head = new_val;
 
         if (cq->tail != cq->head) {
             nvme_isr_notify_io(cq);
@@ -535,13 +535,14 @@ static void nvme_process_db_io(FemuCtrl *n, hwaddr addr, int val)
             return;
         }
         sq = n->sq[qid];
+        if (sq->db_addr) {
+            return;
+        }
         if (new_val >= sq->size) {
             return;
         }
 
-        if (!sq->db_addr) {
-            sq->tail = new_val;
-        }
+        sq->tail = new_val;
     }
 }
 

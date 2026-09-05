@@ -81,13 +81,31 @@ jobs:
     - name: Check FEMU modes
       run: |
         cd build-femu
-        # Verify all major FEMU modes can be instantiated
-        for mode in 0 1 2 3; do
-          timeout 5s ./qemu-system-x86_64 \
-            -device femu,devsz_mb=1024,femu_mode=${mode},serial=test${mode} \
-            -nographic -M accel=qtest || true
-          echo "✓ FEMU mode ${mode} instantiation test completed"
+        # Every mode must come up. The process is expected to run until the
+        # timeout kills it (124); any other exit is a failure. This used to
+        # accept every outcome, which hid that an unprivileged runner could
+        # not pin the memory backend and the device aborted in every mode.
+        for mode in 0 1 2 3 4 5; do
+          extra=""
+          # computational storage refuses to start without a data memory size
+          [ "$mode" -eq 4 ] && extra=",fdm_size=64"
+          rc=0
+          timeout 10s ./qemu-system-x86_64 \
+            -device "femu,devsz_mb=1024,femu_mode=${mode},serial=test${mode}${extra}" \
+            -nographic -M accel=qtest || rc=$?
+          if [ "$rc" -ne 124 ] && [ "$rc" -ne 0 ]; then
+            echo "mode ${mode} exited with ${rc}"; exit "$rc"
+          fi
+          echo "✓ FEMU mode ${mode} ran until timeout"
         done
+
+    - name: Run the FEMU qtests
+      run: |
+        cd build-femu
+        # Drives the controller through the doorbell registers alone and then
+        # through the shadow doorbell buffer; neither needs KVM or a guest.
+        QTEST_QEMU_BINARY=./qemu-system-x86_64 ./tests/qtest/qos-test -m quick \
+          -p /x86_64/pc/i440FX-pcihost/pci-bus-pc/pci-bus/femu/femu-tests
 
     - name: Validate the config-file interface
       run: |
