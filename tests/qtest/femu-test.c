@@ -46,6 +46,8 @@ typedef struct FemuCtrlState {
     uint16_t cid;
     FemuQueue admin;
     FemuQueue io;
+    /* bytes per logical block of namespace 1, as last formatted */
+    uint32_t lba_size;
     /* shadow doorbell pages, once Doorbell Buffer Config has been issued */
     uint64_t dbs_addr;
 } FemuCtrlState;
@@ -204,6 +206,7 @@ static void femu_enable(FemuCtrlState *c, QPCIDevice *pdev,
 
     cap = qpci_io_readq(pdev, c->bar, 0x0);
     c->db_stride = (cap >> 32) & 0xf;
+    c->lba_size = 512;
 
     femu_queue_init(c, &c->admin, 0);
     qpci_io_writel(pdev, c->bar, 0x24,
@@ -268,7 +271,7 @@ static uint16_t femu_rw(FemuCtrlState *c, uint8_t opcode, uint64_t slba,
     rw.nsid = cpu_to_le32(1);
     rw.dptr.prp1 = cpu_to_le64(data);
     rw.slba = cpu_to_le64(slba);
-    rw.nlb = cpu_to_le16(FEMU_DATA_SIZE / 512 - 1);
+    rw.nlb = cpu_to_le16(FEMU_DATA_SIZE / c->lba_size - 1);
 
     femu_submit(c, &c->io, cmd);
     status = femu_complete(c, &c->io, &got, NULL);
@@ -537,6 +540,122 @@ static void femu_test_features(void *obj, void *data, QGuestAllocator *alloc)
     femu_disable(&c);
 }
 
+static uint16_t femu_format(FemuCtrlState *c, uint32_t nsid, uint8_t lba_idx,
+                            uint8_t ses)
+{
+    NvmeCmd cmd;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_FORMAT_NVM;
+    cmd.nsid = cpu_to_le32(nsid);
+    cmd.cdw10 = cpu_to_le32(lba_idx | (ses << 9));
+    return femu_admin(c, &cmd);
+}
+
+/* Identify Namespace: the logical block count and the size of one block */
+static void femu_identify_ns(FemuCtrlState *c, uint64_t *nsze,
+                             uint32_t *lba_size)
+{
+    NvmeCmd cmd;
+    uint64_t buf = guest_alloc(c->alloc, 4096);
+    NvmeIdNs id;
+    uint8_t idx;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_IDENTIFY;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(NVME_ID_CNS_NS);
+    g_assert_cmpint(FEMU_SC(femu_admin(c, &cmd)), ==, NVME_SUCCESS);
+    qtest_memread(c->pdev->bus->qts, buf, &id, sizeof(id));
+    guest_free(c->alloc, buf);
+
+    idx = NVME_ID_NS_FLBAS_INDEX(id.flbas);
+    *nsze = le64_to_cpu(id.nsze);
+    *lba_size = 1u << id.lbaf[idx].ds;
+}
+
+/*
+ * Format NVM changes the logical block size, so the block count and the
+ * per-block bookkeeping the controller keeps must follow it, and the data
+ * that was there must be gone.
+ *
+ * The namespace starts with 4 KiB blocks here (lba_index=3) so that
+ * formatting to 512-byte blocks multiplies the block count by eight. The
+ * per-LBA bitmaps were sized once at realize, so a write near the end of the
+ * larger space used to run off them.
+ */
+static void femu_test_format(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t nsze_4k, nsze_512;
+    uint32_t lba_size;
+    uint64_t buf;
+    uint8_t *rbuf = g_malloc(FEMU_DATA_SIZE);
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    femu_identify_ns(&c, &nsze_4k, &lba_size);
+    g_assert_cmpint(lba_size, ==, 4096);
+    c.lba_size = lba_size;
+
+    femu_round_trip(&c, 1);
+
+    /* an index past the formats the namespace offers */
+    g_assert_cmpint(FEMU_SC(femu_format(&c, 1, 15, 0)), ==,
+                    NVME_INVALID_FORMAT);
+
+    /* the same format again: the data must not survive */
+    g_assert_cmpint(FEMU_SC(femu_format(&c, 1, 3, 0)), ==, NVME_SUCCESS);
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    qtest_memset(c.pdev->bus->qts, buf, 0xa5, FEMU_DATA_SIZE);
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_READ, 8, buf), ==, NVME_SUCCESS);
+    qtest_memread(c.pdev->bus->qts, buf, rbuf, FEMU_DATA_SIZE);
+    for (i = 0; i < FEMU_DATA_SIZE; i++) {
+        g_assert_cmpint(rbuf[i], ==, 0);
+    }
+    guest_free(alloc, buf);
+
+    /* 512-byte blocks: eight times the count, and I/O at the new size works */
+    g_assert_cmpint(FEMU_SC(femu_format(&c, 1, 0, 0)), ==, NVME_SUCCESS);
+    femu_identify_ns(&c, &nsze_512, &lba_size);
+    g_assert_cmpint(lba_size, ==, 512);
+    g_assert_cmpint(nsze_512, ==, nsze_4k * 8);
+    c.lba_size = lba_size;
+    femu_round_trip(&c, 2);
+
+    /*
+     * The last blocks of the grown space are the ones the old bookkeeping did
+     * not cover. Writing and reading them is what walks off the bitmaps.
+     */
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE,
+                            nsze_512 - FEMU_DATA_SIZE / 512, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_READ,
+                            nsze_512 - FEMU_DATA_SIZE / 512, buf), ==,
+                    NVME_SUCCESS);
+    /* and one block past the end is refused */
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, nsze_512, buf)), ==,
+                    NVME_LBA_RANGE);
+    guest_free(alloc, buf);
+
+    /* back to 4 KiB blocks: the smaller count returns */
+    g_assert_cmpint(FEMU_SC(femu_format(&c, 1, 3, 0)), ==, NVME_SUCCESS);
+    femu_identify_ns(&c, &nsze_512, &lba_size);
+    g_assert_cmpint(lba_size, ==, 4096);
+    g_assert_cmpint(nsze_512, ==, nsze_4k);
+    c.lba_size = lba_size;
+    femu_round_trip(&c, 3);
+
+    g_free(rbuf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -553,6 +672,11 @@ static void femu_register_nodes(void)
     qos_add_test("io-by-shadow-doorbell", "femu",
                  femu_test_io_by_shadow_doorbell, NULL);
     qos_add_test("features", "femu", femu_test_features, NULL);
+    qos_add_test("format", "femu", femu_test_format,
+                 &(QOSGraphTestOptions) {
+        /* start with 4 KiB blocks so a format to 512 grows the block count */
+        .edge.extra_device_opts = "lba_index=3"
+    });
 }
 
 libqos_init(femu_register_nodes);

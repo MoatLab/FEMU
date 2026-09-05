@@ -78,6 +78,60 @@ int nvme_check_cqid(FemuCtrl *n, uint16_t cqid)
     return cqid <= n->nr_io_queues && n->cq[cqid] != NULL ? 0 : -1;
 }
 
+/*
+ * Hold the pollers off the queues and the namespace bookkeeping.
+ *
+ * A poller checks dataplane_started at the top of every sweep and publishes
+ * poller_in_sweep while it is inside one, so clearing the flag and then waiting
+ * for every sweep to end leaves a window in which no poller is in flight. That
+ * is what an admin command needs before it frees or replaces state the I/O path
+ * indexes on each request -- the per-LBA bitmaps of a namespace being
+ * formatted, or a queue being deleted.
+ *
+ * Callers run on the vCPU thread, where the admin queue is processed. Returns
+ * whether the data plane was running, which nvme_resume_pollers() takes back.
+ */
+bool nvme_pause_pollers(FemuCtrl *n)
+{
+    bool was_started = n->dataplane_started;
+    int p;
+    bool busy;
+
+    if (!was_started) {
+        return false;
+    }
+
+    n->dataplane_started = false;
+    smp_mb();   /* publish the flag before reading anyone's sweep state */
+
+    if (n->poller_on && n->poller_in_sweep) {
+        do {
+            busy = false;
+            for (p = 1; p <= (int)n->nr_pollers; p++) {
+                if (n->poller_in_sweep[p]) {
+                    busy = true;
+                    break;
+                }
+            }
+            if (busy) {
+                usleep(100);
+            }
+        } while (busy);
+    }
+
+    return was_started;
+}
+
+void nvme_resume_pollers(FemuCtrl *n, bool was_started)
+{
+    if (!was_started) {
+        return;
+    }
+
+    smp_mb();   /* land every change before a poller can observe the flag */
+    n->dataplane_started = true;
+}
+
 void nvme_inc_cq_tail(NvmeCQueue *cq)
 {
     cq->tail++;

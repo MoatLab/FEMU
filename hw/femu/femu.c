@@ -197,6 +197,43 @@ static const TypeInfo nvme_subsys_info = {
 
 /* ========== FDP Namespace Init ========== */
 
+/*
+ * Reclaim units are measured in logical blocks, so a format that changes the
+ * block size changes how many of them a unit holds. Recompute the sizes the
+ * placement handles were given at init; leaving them makes a unit look eight
+ * times smaller than it is after a 4 KiB namespace is reformatted to 512
+ * bytes, and the write that crosses it rotates a unit early ever after.
+ *
+ * A format ends the life of the data, so the remaining-write counters go back
+ * to a full unit along with the sizes.
+ */
+void nvme_ns_refresh_fdp(NvmeNamespace *ns)
+{
+    NvmeEnduranceGroup *endgrp = ns->endgrp;
+    uint8_t lbafi = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
+    NvmeRuHandle *ruh;
+
+    if (!endgrp || !endgrp->fdp.enabled || !ns->fdp.phs) {
+        return;
+    }
+
+    for (uint16_t i = 0; i < ns->fdp.nphs; i++) {
+        ruh = &endgrp->fdp.ruhs[i];
+        if (ruh->ruha != NVME_RUHA_HOST) {
+            continue;
+        }
+
+        ruh->lbafi = lbafi;
+        ruh->ruamw = endgrp->fdp.runs >> ns->lbaf.lbads;
+
+        for (uint16_t rg = 0; rg < endgrp->fdp.nrg; rg++) {
+            for (uint64_t j = 0; j < endgrp->fdp.nru; j++) {
+                endgrp->fdp.rus[rg][j].ruamw = ruh->ruamw;
+            }
+        }
+    }
+}
+
 static bool nvme_ns_init_fdp(NvmeNamespace *ns, Error **errp)
 {
     NvmeEnduranceGroup *endgrp = ns->endgrp;

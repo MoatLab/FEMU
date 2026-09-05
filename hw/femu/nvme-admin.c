@@ -1728,16 +1728,60 @@ static uint16_t nvme_abort_req(FemuCtrl *n, NvmeCmd *cmd, uint32_t *result)
     return NVME_SUCCESS;
 }
 
-static uint16_t nvme_format_namespace(NvmeNamespace *ns, uint8_t lba_idx,
-                                      uint8_t meta_loc, uint8_t pil, uint8_t pi,
-                                      uint8_t sec_erase)
+/*
+ * A format changes how many logical blocks the namespace has, so everything
+ * sized in blocks has to be rebuilt: the per-block bitmaps are indexed by LBA
+ * on every read and write, and a format from a large block size to a small one
+ * used to leave them sized for the smaller count, which the next write walked
+ * past.
+ */
+static uint16_t nvme_format_resize(NvmeNamespace *ns, uint64_t blks)
 {
-    NvmeIdNs *id_ns = &ns->id_ns;
-    uint16_t ms = le16_to_cpu(ns->id_ns.lbaf[lba_idx].ms);
+    unsigned long *util, *uncorrectable;
+
+    util = bitmap_new(blks);
+    uncorrectable = bitmap_new(blks);
+    if (!util || !uncorrectable) {
+        g_free(util);
+        g_free(uncorrectable);
+        return NVME_INTERNAL_DEV_ERROR | NVME_DNR;
+    }
+
+    g_free(ns->util);
+    g_free(ns->uncorrectable);
+    ns->util = util;
+    ns->uncorrectable = uncorrectable;
+
+    return NVME_SUCCESS;
+}
+
+/*
+ * Whether this namespace can be formatted as asked, decided without changing
+ * anything. Every namespace a command names is put through this before any of
+ * them is touched, so a refusal cannot leave some already reformatted.
+ */
+static uint16_t nvme_format_check(NvmeNamespace *ns, uint8_t lba_idx,
+                                  uint8_t meta_loc, uint8_t pil, uint8_t pi)
+{
+    uint16_t ms;
+
+    /*
+     * A format redefines the namespace in terms of logical blocks, which only
+     * a plain block namespace is described by. Every other mode derives its
+     * capacity from a geometry of its own -- zones, key space, or the physical
+     * addresses an open-channel host manages itself -- and reformatting it
+     * would leave the two disagreeing, or hand the host a size its own address
+     * space does not have.
+     */
+    if (!NS_BBSSD(ns) && !NS_NOSSD(ns)) {
+        return NVME_INVALID_FORMAT | NVME_DNR;
+    }
 
     if (lba_idx > ns->id_ns.nlbaf) {
         return NVME_INVALID_FORMAT | NVME_DNR;
     }
+
+    ms = le16_to_cpu(ns->id_ns.lbaf[lba_idx].ms);
     if (pi) {
         if (pil && !NVME_ID_NS_DPC_LAST_EIGHT(ns->id_ns.dpc)) {
             return NVME_INVALID_FORMAT | NVME_DNR;
@@ -1756,12 +1800,49 @@ static uint16_t nvme_format_namespace(NvmeNamespace *ns, uint8_t lba_idx,
         return NVME_INVALID_FORMAT | NVME_DNR;
     }
 
+    return NVME_SUCCESS;
+}
+
+static uint16_t nvme_format_namespace(NvmeNamespace *ns, uint8_t lba_idx,
+                                      uint8_t meta_loc, uint8_t pil, uint8_t pi,
+                                      uint8_t sec_erase)
+{
+    NvmeIdNs *id_ns = &ns->id_ns;
+    FemuCtrl *n = ns->ctrl;
+    uint64_t blks;
+    uint16_t status;
+
+    blks = ns->size / (1 << id_ns->lbaf[lba_idx].lbads);
+    status = nvme_format_resize(ns, blks);
+    if (status != NVME_SUCCESS) {
+        return status;
+    }
+
+    /*
+     * The block count and the state sized to it are changed together. Nothing
+     * observes them half-updated because the caller holds the pollers off for
+     * the whole of this; without that, a shrinking format would expose a window
+     * where the host still reads the old count against the new bitmaps.
+     */
+    id_ns->nuse = id_ns->ncap = id_ns->nsze = cpu_to_le64(blks);
     ns->id_ns.flbas = lba_idx | meta_loc;
     ns->id_ns.dps = pil | pi;
-
-    femu_debug("nvme_format_namespace\n");
+    /* the copy Flexible Data Placement derives its unit sizes from */
+    ns->lbaf = id_ns->lbaf[lba_idx];
     ns->ns_blks = ns_blks(ns, lba_idx);
-    id_ns->nuse = id_ns->ncap = id_ns->nsze = cpu_to_le64(ns->ns_blks);
+    nvme_ns_refresh_fdp(ns);
+
+    /*
+     * A format ends the life of the data whatever the erase settings say, so
+     * a read of any block must not return what was written before it. The
+     * bitmaps above are already clear, which makes every block deallocated;
+     * clear the backing store with them so a controller with the
+     * deallocated-block error disabled reads zeros rather than stale data.
+     */
+    if (n->mbe && n->mbe->logical_space) {
+        memset((uint8_t *)n->mbe->logical_space + ns->backend_offset, 0,
+               ns->size);
+    }
 
     return NVME_SUCCESS;
 }
@@ -1769,6 +1850,8 @@ static uint16_t nvme_format_namespace(NvmeNamespace *ns, uint8_t lba_idx,
 static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
 {
     NvmeNamespace *ns;
+    uint16_t status;
+    bool resume;
     uint32_t dw10 = le32_to_cpu(cmd->cdw10);
     uint32_t nsid = le32_to_cpu(cmd->nsid);
 
@@ -1778,27 +1861,57 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
     uint8_t pi = (dw10 >> 5) & 0x7;
     uint8_t sec_erase = (dw10 >> 8) & 0x7;
 
-    if (nsid == 0xffffffff) {
-        uint16_t ret = NVME_SUCCESS;
-
-        for (uint32_t i = 0; i < n->num_namespaces; ++i) {
-            ns = &n->namespaces[i];
-            ret = nvme_format_namespace(ns, lba_idx, meta_loc, pil, pi,
-                    sec_erase);
-            if (ret != NVME_SUCCESS) {
-                return ret;
-            }
-        }
-        return ret;
-    }
-
-    if (nsid == 0 || nsid > n->num_namespaces) {
+    if (nsid != 0xffffffff && (nsid == 0 || nsid > n->num_namespaces)) {
         return NVME_INVALID_NSID | NVME_DNR;
     }
 
-    ns = &n->namespaces[nsid - 1];
+    /*
+     * Decide on every namespace before touching any of them. This used to
+     * format each in turn and return on the first refusal, so a controller
+     * mixing command sets could lose the data of the namespaces already done
+     * and still report that the command failed.
+     */
+    if (nsid == 0xffffffff) {
+        for (uint32_t i = 0; i < n->num_namespaces; ++i) {
+            status = nvme_format_check(&n->namespaces[i], lba_idx, meta_loc,
+                                       pil, pi);
+            if (status != NVME_SUCCESS) {
+                return status;
+            }
+        }
+    } else {
+        status = nvme_format_check(&n->namespaces[nsid - 1], lba_idx, meta_loc,
+                                   pil, pi);
+        if (status != NVME_SUCCESS) {
+            return status;
+        }
+    }
 
-    return nvme_format_namespace(ns, lba_idx, meta_loc, pil, pi, sec_erase);
+    /*
+     * The bitmaps about to be replaced are indexed by every read and write, so
+     * no poller may be inside a sweep while they are swapped and the backing
+     * store is cleared.
+     */
+    resume = nvme_pause_pollers(n);
+
+    if (nsid == 0xffffffff) {
+        for (uint32_t i = 0; i < n->num_namespaces; ++i) {
+            ns = &n->namespaces[i];
+            status = nvme_format_namespace(ns, lba_idx, meta_loc, pil, pi,
+                                           sec_erase);
+            if (status != NVME_SUCCESS) {
+                break;
+            }
+        }
+    } else {
+        ns = &n->namespaces[nsid - 1];
+        status = nvme_format_namespace(ns, lba_idx, meta_loc, pil, pi,
+                                       sec_erase);
+    }
+
+    nvme_resume_pollers(n, resume);
+
+    return status;
 }
 
 static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
