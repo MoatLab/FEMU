@@ -203,6 +203,19 @@ jobs:
           echo "mode ${mode} came up with the checks armed"
         done
 
+    - name: Run the FEMU qtests under the sanitizers
+      env:
+        ASAN_OPTIONS: detect_leaks=0
+        UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+      run: |
+        cd build-debug
+        # The same tests the release job runs, on a binary that reports a bad
+        # access instead of continuing past it. This is what makes an
+        # out-of-bounds index deterministic: without the sanitizers it lands
+        # somewhere in the allocator and the test still passes.
+        QTEST_QEMU_BINARY=./qemu-system-x86_64 ./tests/qtest/qos-test -m quick \
+          -p /x86_64/pc/i440FX-pcihost/pci-bus-pc/pci-bus/femu/femu-tests
+
     - name: Expand every example config with the checks armed
       env:
         # QEMU builds without -fno-sanitize-recover, so an undefined-behaviour
