@@ -62,10 +62,16 @@ int init_dram_backend(SsdDramBackend **mbe, int64_t nbytes)
     /* bind to the requested NUMA node before mlock faults the pages in */
     mbe_numa_bind(b->logical_space, nbytes);
 
+    /*
+     * Pinning keeps page faults out of the emulated latency, but it needs
+     * RLIMIT_MEMLOCK to cover the backend, which an unprivileged run rarely
+     * has. Say what that costs and carry on rather than refuse to start: the
+     * device works either way, only its timing is then subject to faults.
+     */
     if (mlock(b->logical_space, nbytes) == -1) {
-        femu_err("Failed to pin the memory backend to the host DRAM\n");
-        g_free(b->logical_space);
-        abort();
+        femu_err("cannot pin the %" PRId64 " MiB memory backend (%s); "
+                 "latencies may jitter until RLIMIT_MEMLOCK allows it\n",
+                 nbytes / MiB, strerror(errno));
     }
 
     return 0;
