@@ -181,8 +181,14 @@ static void test_staged_channel(void)
     b.lun = 1;
     first = nand_media_op(&m, &a, NAND_MEDIA_READ, 1000000000ULL).latency_ns;
     second = nand_media_op(&m, &b, NAND_MEDIA_READ, 1000000000ULL).latency_ns;
-    check("the second read queues on the channel behind the first",
-          second, 2 * first);
+    /*
+     * The second read's command goes out while the first is still in its
+     * array time (the bus is idle then); only its data-out queues behind the
+     * first's transfer and status, which end at 30400: 300 cmd, 10000 array,
+     * wait until 30400, 20000 transfer, 100 status.
+     */
+    check("the second read queues only its transfer behind the first",
+          second, 300 + 10000 + (30400 - 10300) + 20000 + 100);
 
     /* with the phases unset the plain gate is used and the bus never queues */
     bb_config(&cfg);
@@ -237,7 +243,37 @@ static void test_plane_gate_with_channel(void)
     first = nand_media_op(&m, &a, NAND_MEDIA_READ, 1000000000ULL).latency_ns;
     second = nand_media_op(&m, &b, NAND_MEDIA_READ, 1000000000ULL).latency_ns;
     check_lt("the first read pays no bus wait", first, 65000 + 25000 + 1);
-    check_lt("the second read queues on the shared bus", first, second);
+    check("the second read waits only for the first transfer",
+          second, first + 25000);
+
+    /* a program on the same channel uses the bus while the read's array is busy */
+    reset_timelines();
+    nand_media_init(&m, &cfg);
+    b.lun = 1;
+    first = nand_media_op(&m, &a, NAND_MEDIA_READ, 1000000000ULL).latency_ns;
+    second = nand_media_op(&m, &b, NAND_MEDIA_PROGRAM, 1000000000ULL).latency_ns;
+    check("a program backfills the bus during the read's tR",
+          second, 25000 + 450000);
+
+    /* eight reads on one plane pipeline their transfers behind the array */
+    reset_timelines();
+    nand_media_init(&m, &cfg);
+    {
+        uint64_t last = 0;
+        int i;
+        for (i = 0; i < 8; i++) {
+            last = nand_media_op(&m, &a, NAND_MEDIA_READ, 1000000000ULL).latency_ns;
+        }
+        check("eight same-plane reads = 8 x tR + one transfer",
+              last, 8 * 65000 + 25000);
+        /* more reads than the window list holds: past windows are pruned */
+        for (; i < 3 * NAND_BUS_RES_MAX; i++) {
+            last = nand_media_op(&m, &a, NAND_MEDIA_READ,
+                                 1000000000ULL + i * 65000ULL).latency_ns;
+        }
+        check("a long stream of reads keeps pipelining", last,
+              (uint64_t)65000 + 25000);
+    }
 
     /* the same two reads on different channels do not interact */
     reset_timelines();
