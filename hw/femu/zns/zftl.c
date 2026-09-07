@@ -88,9 +88,10 @@ static const NandTimelineOps zns_timeline_ops = {
 
 /*
  * Configure the shared NAND media layer to reproduce the ZNS timing exactly:
- * the array is gated on the plane alone with no channel accounting, which is
- * what the enum's PLANE_ONLY and CH_OFF modes were named for, and the per-op
- * latency comes from the same per-flash-type values the device already carries.
+ * the array is gated on the plane alone, which is what the enum's PLANE_ONLY
+ * mode was named for, and the per-op latency comes from the same
+ * per-flash-type values the device already carries. The channel bus is off
+ * unless a bus phase is configured.
  * Page type is left at 0 so a flash type resolves to one latency, as before.
  */
 void zns_nand_media_init(struct zns_ssd *zns)
@@ -109,7 +110,16 @@ void zns_nand_media_init(struct zns_ssd *zns)
     }
     cfg.policy.use_flat_timing = false;
     cfg.policy.array_gate = NAND_GATE_PLANE_ONLY;
-    cfg.policy.channel_mode = NAND_CH_OFF;
+    /*
+     * The bus phases select the staged channel model the same way bbssd does:
+     * any non-zero phase turns it on, all zero keeps CH_OFF and the timing
+     * bit-identical to before. The plane gate is unchanged either way.
+     */
+    cfg.timing.cmd_addr_ns = zns->timing.cmd_addr_lat;
+    cfg.timing.page_xfer_ns = zns->timing.pg_xfer_lat;
+    cfg.timing.status_ns = zns->timing.status_lat;
+    cfg.policy.channel_mode = (cfg.timing.cmd_addr_ns || cfg.timing.page_xfer_ns ||
+                               cfg.timing.status_ns) ? NAND_CH_STAGED : NAND_CH_OFF;
     cfg.timeline = &zns_timeline_ops;
     cfg.timeline_opaque = zns;
 

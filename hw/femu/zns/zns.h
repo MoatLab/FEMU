@@ -120,6 +120,10 @@ typedef struct SSDNandFlashTiming {
     uint64_t pg_rd_lat[MAX_FLASH_TYPE];  /* NAND page read latency in nanoseconds */
     uint64_t pg_wr_lat[MAX_FLASH_TYPE]; /* NAND page program latency in nanoseconds */
     uint64_t blk_er_lat[MAX_FLASH_TYPE]; /* NAND block erase latency in nanoseconds */
+    /* channel bus phases shared by every die on a channel; all 0 = no bus */
+    uint64_t cmd_addr_lat;  /* command and address cycles */
+    uint64_t pg_xfer_lat;   /* page data-in (program) / data-out (read) */
+    uint64_t status_lat;    /* status read after a read or erase */
 } SSDNandFlashTiming;
 
 struct zns_write_cache{

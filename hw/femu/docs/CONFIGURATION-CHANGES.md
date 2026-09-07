@@ -35,6 +35,9 @@ If one of these stops a run, remove the property. It was not doing anything.
   which costs throughput; leaving them unset keeps the previous path.
 - `cmd_addr_lat`, `pg_xfer_lat`, `status_lat` and `ch_xfer_lat` now add channel
   bus time on bbssd. The bundled run scripts pass 0 and are unaffected.
+- `zns_cmd_addr_lat`, `zns_pg_xfer_lat` and `zns_status_lat` add the same
+  channel bus to ZNS. They default to 0, which leaves ZNS timing exactly as it
+  was; a negative value is refused at realize.
 - Temperature threshold Set Features accepts only TMPSEL 0 and Fh; other
   selectors are rejected rather than stored as part of the value.
 - An aborted command completes as Command Abort Requested rather than Invalid
