@@ -32,6 +32,7 @@
   - [Zoned Namespace SSD Mode (ZNSSD)](#zoned-namespace-ssd-mode-znssd)
   - [NoSSD Mode](#nossd-mode)
   - [Computational Storage Mode (CSD)](#computational-storage-mode-csd)
+  - [Key-Value SSD Mode (KVSSD)](#key-value-ssd-mode-kvssd)
 - [Configuration](#configuration)
   - [Config Files](#config-files)
 - [Development](#development)
@@ -64,12 +65,19 @@ FEMU bridges the gap between SSD hardware platforms and SSD simulators by provid
 
 ## Features
 
-| Feature | BlackBox | WhiteBox | ZNS | NoSSD | CSD |
-|---------|----------|----------|-----|--------|-----|
-| **FTL Management** | Device-side | Host-side | Zone-based | None | Device-side |
-| **Use Cases** | Commercial SSD simulation | OpenChannel SSD research | ZNS research | SCM emulation | Computational storage research |
-| **Latency Model** | Realistic NAND | Realistic NAND | Zone-optimized | Ultra-low (sub-10μs) | Realistic NAND + compute runtime |
-| **Guest Support** | Full NVMe | OpenChannel 1.2/2.0 | NVMe ZNS | NVMe basic | Full NVMe + CSD commands |
+| Feature | BlackBox | WhiteBox | ZNS | NoSSD | CSD | KVSSD |
+|---------|----------|----------|-----|--------|-----|-------|
+| **`femu_mode`** | 1 | 0 | 3 | 2 | 4 | 5 |
+| **FTL Management** | Device-side | Host-side | Zone-based | None | Device-side | Key-indexed log |
+| **Use Cases** | Commercial SSD simulation | OpenChannel SSD research | ZNS research | SCM emulation | Computational storage research | Key-value store research |
+| **Latency Model** | Realistic NAND | Realistic NAND | Zone-optimized | Ultra-low (sub-10μs) | Realistic NAND + compute runtime | Realistic NAND per value |
+| **Guest Support** | Full NVMe | OpenChannel 1.2/2.0 | NVMe ZNS | NVMe basic | Full NVMe + CSD commands | Passthrough only |
+
+Flexible Data Placement is not a separate mode: it is BlackBox with `fdp=on`
+set on the subsystem. See `run-blackbox-fdp.sh`.
+
+OpenChannel needs a host that speaks it. LightNVM was removed from Linux in
+5.15, so this mode has no in-tree driver on a current kernel.
 
 ---
 
@@ -100,7 +108,7 @@ FEMU bridges the gap between SSD hardware platforms and SSD simulators by provid
 
 ### Core Components
 
-- **NVMe Controller**: Standards-compliant NVMe 1.3+ implementation
+- **NVMe Controller**: NVMe 1.4 controller, reported as version 1.4.0
 - **SSD Modes**: Pluggable backends for different SSD architectures
 - **Timing Model**: Configurable latency simulation for realistic performance
 - **Memory Backend**: DRAM-based storage emulation
@@ -263,6 +271,16 @@ sudo reboot
 ./run-blackbox.sh
 ```
 
+> **The emulated device lives in memory.** FEMU allocates its backing store when
+> the device is created; it is not a file, and nothing written to the emulated
+> SSD survives shutting the VM down. Size the host accordingly -- a 32 GiB
+> emulated SSD needs 32 GiB of host memory -- and copy anything you want to keep
+> out of the guest before you stop it.
+>
+> FEMU also tries to pin that memory so page faults do not distort the emulated
+> latency. Where `RLIMIT_MEMLOCK` does not allow it, the device still starts and
+> says so; raise the limit (`ulimit -l`) if timing precision matters.
+
 ### 4. Access the VM
 
 The VM will start in text mode. You can also SSH into the VM:
@@ -327,7 +345,32 @@ fw_cpu_ns=0            # controller CPU time charged per command, ns
 # DRAM Read Cache (optional; default off)
 read_cache_mb=0        # Read-cache size in MiB (0 disables it)
 cache_evict=clock      # Eviction policy: clock (default), random, lru, arc
+
+# Write buffer (optional; default off)
+buffer_size=0          # Device write-buffer size in MiB (0 disables it)
+buffer_thres_pcent=90  # Occupancy at which the buffer starts flushing
+
+# NAND media (optional)
+nand_cell_type=        # slc, mlc, tlc, qlc or plc; selects the page-type table
+op_pcent=0             # Over-provisioning withheld from the host, percent
+pls_per_lun=1          # Planes per LUN; above one, a line erases across planes
+nand_bad_blocks=0      # Blocks marked bad at init, reflected in available spare
+trim_lat_ns=0          # Latency charged per TRIM range
+
+# Wear, disturb and retention (optional; all default off)
+read_reclaim_limit=0   # Reads a block may take before its line is refreshed
+retention_limit_sec=0  # Seconds data may sit programmed before a read refreshes it
+ecc_step_ns=0          # Extra read latency per correction tier as a block ages
+ecc_retention_sec=0    # Seconds of data age per correction tier
+
+# Placement (optional)
+hot_cold_sep=false     # Keep frequently and rarely rewritten data on separate lines
 ```
+
+The wear and retention knobs are all off by default and are read-triggered: a
+line is queued for refresh when something reads it, so a region nothing ever
+reads is never refreshed. That is a deliberate limitation, not an oversight --
+modelling a background media scan would need a timer the emulator does not run.
 
 **Mapping schemes.** `mapping=` selects how the FTL translates logical to
 physical pages:
@@ -972,11 +1015,12 @@ so the historical `cd build-femu && ../femu-scripts/...` workflow still works.
 
 Docs under `hw/femu/docs/`:
 - `HIOPS.md` — NoSSD high-IOPS optimizations, results, and reproduction.
-- `FEMU-Master-Roadmap.md` — design roadmap.
+- `CONFIGURATION-CHANGES.md` — configuration changes that affect existing runs.
 
 Scripts under `hw/femu/scripts/` (run from your `build-femu/` dir):
 - `femu-compile.sh`, `femu-copy-scripts.sh` — build and stage the run scripts.
 - `run-{blackbox,whitebox,zns,nossd,csd}.sh` — per-mode launchers.
+- `run-blackbox-fdp.sh` — BlackBox with Flexible Data Placement enabled.
 - `hiops/` — the socket-isolation high-IOPS benchmark harness.
 
 ### Adding New Features
