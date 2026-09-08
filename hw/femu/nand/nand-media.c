@@ -23,6 +23,22 @@ void nand_media_init(NandMedia *m, const NandMediaConfig *cfg)
     }
 }
 
+/*
+ * Release what nand_media_init() took. The staged channel model keeps a
+ * per-channel reservation list; without this it is leaked for the lifetime of
+ * the process, which a device that is unplugged and replaced does notice.
+ * Safe to call on a media that was never initialised for a staged bus, and
+ * safe to call twice.
+ */
+void nand_media_destroy(NandMedia *m)
+{
+    if (!m) {
+        return;
+    }
+    free(m->bus_res);
+    m->bus_res = NULL;
+}
+
 static inline uint64_t mx(uint64_t a, uint64_t b) { return a > b ? a : b; }
 
 /*

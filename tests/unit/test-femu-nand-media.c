@@ -106,7 +106,12 @@ static uint64_t read_lat(const NandMediaConfig *cfg, uint32_t pe, uint32_t age)
     memset(&loc, 0, sizeof(loc));
     loc.pe_cycles = pe;
     loc.age_sec = age;
-    return nand_media_op(&m, &loc, NAND_MEDIA_READ, 1000000000ULL).latency_ns;
+    {
+        uint64_t lat = nand_media_op(&m, &loc, NAND_MEDIA_READ,
+                                     1000000000ULL).latency_ns;
+        nand_media_destroy(&m);
+        return lat;
+    }
 }
 
 static void test_ecc(void)
@@ -156,7 +161,11 @@ static uint64_t staged_lat(const NandMediaConfig *cfg, NandMediaOp op)
     reset_timelines();
     nand_media_init(&m, cfg);
     memset(&loc, 0, sizeof(loc));
-    return nand_media_op(&m, &loc, op, 1000000000ULL).latency_ns;
+    {
+        uint64_t lat = nand_media_op(&m, &loc, op, 1000000000ULL).latency_ns;
+        nand_media_destroy(&m);
+        return lat;
+    }
 }
 
 static void test_staged_channel(void)
@@ -199,10 +208,12 @@ static void test_staged_channel(void)
     /* with the phases unset the plain gate is used and the bus never queues */
     bb_config(&cfg);
     reset_timelines();
+    nand_media_destroy(&m);
     nand_media_init(&m, &cfg);
     first = nand_media_op(&m, &a, NAND_MEDIA_READ, 1000000000ULL).latency_ns;
     second = nand_media_op(&m, &b, NAND_MEDIA_READ, 1000000000ULL).latency_ns;
     check("channel off: another LUN's read costs the same", second, first);
+    nand_media_destroy(&m);
 }
 
 /* the configuration zns_nand_media_init() builds once a bus phase is set */
@@ -231,7 +242,7 @@ static void test_plane_gate_with_channel(void)
     NandLoc a, b;
     uint64_t first, second;
 
-    puts("plane gate with the channel bus (ZNS)");
+    printf("# plane gate with the channel bus (ZNS)\n");
     zns_config(&cfg);
     check("read = array + transfer",
           staged_lat(&cfg, NAND_MEDIA_READ), 65000 + 25000);
@@ -254,6 +265,7 @@ static void test_plane_gate_with_channel(void)
 
     /* a program on the same channel uses the bus while the read's array is busy */
     reset_timelines();
+    nand_media_destroy(&m);
     nand_media_init(&m, &cfg);
     b.lun = 1;
     first = nand_media_op(&m, &a, NAND_MEDIA_READ, 1000000000ULL).latency_ns;
@@ -263,6 +275,7 @@ static void test_plane_gate_with_channel(void)
 
     /* eight reads on one plane pipeline their transfers behind the array */
     reset_timelines();
+    nand_media_destroy(&m);
     nand_media_init(&m, &cfg);
     {
         uint64_t last = 0;
@@ -283,6 +296,7 @@ static void test_plane_gate_with_channel(void)
 
     /* the same two reads on different channels do not interact */
     reset_timelines();
+    nand_media_destroy(&m);
     nand_media_init(&m, &cfg);
     b.lun = 0;
     b.ch = 1;
@@ -295,6 +309,7 @@ static void test_plane_gate_with_channel(void)
     cfg.timing.page_xfer_ns = 0;
     cfg.policy.channel_mode = NAND_CH_OFF;
     reset_timelines();
+    nand_media_destroy(&m);
     nand_media_init(&m, &cfg);
     b.ch = 0;
     b.lun = 1;
@@ -302,6 +317,7 @@ static void test_plane_gate_with_channel(void)
     second = nand_media_op(&m, &b, NAND_MEDIA_READ, 1000000000ULL).latency_ns;
     check("channel off: reads on one channel cost the same", second, first);
     check("channel off: a read is the array time alone", first, 65000);
+    nand_media_destroy(&m);
 }
 
 static void test_multiplane_erase(void)
@@ -323,6 +339,7 @@ static void test_multiplane_erase(void)
     memset(locs, 0, sizeof(locs));
     one = nand_media_op(&m, &locs[0], NAND_MEDIA_ERASE, 0).latency_ns;
     bb_config(&cfg);
+    nand_media_destroy(&m);
     nand_media_init(&m, &cfg);
     memset(locs, 0, sizeof(locs));
     batched = nand_media_multiplane(&m, locs, 1, NAND_MEDIA_ERASE, 0).latency_ns;
@@ -335,6 +352,7 @@ static void test_multiplane_erase(void)
      */
     bb_config(&cfg);
     cfg.planes_per_lun = 2;
+    nand_media_destroy(&m);
     nand_media_init(&m, &cfg);
     memset(locs, 0, sizeof(locs));
     locs[1].pl = 1;
@@ -342,6 +360,7 @@ static void test_multiplane_erase(void)
 
     bb_config(&cfg);
     cfg.planes_per_lun = 2;
+    nand_media_destroy(&m);
     nand_media_init(&m, &cfg);
     memset(locs, 0, sizeof(locs));
     locs[1].pl = 1;
@@ -351,6 +370,7 @@ static void test_multiplane_erase(void)
     }
     check_lt("two planes batch cheaper than two serial erases", batched, serial);
     check("the batch is one erase, not two", batched, cfg.timing.er_ns);
+    nand_media_destroy(&m);
 }
 
 static void test_copyback(void)
@@ -383,6 +403,7 @@ static void test_copyback(void)
      * returned a completion earlier than stime.
      */
     bb_config(&cfg);
+    nand_media_destroy(&m);
     nand_media_init(&m, &cfg);
     memset(&src, 0, sizeof(src));
     memset(&dst, 0, sizeof(dst));
@@ -393,6 +414,7 @@ static void test_copyback(void)
 
     /* a busy destination LUN pushes the program out */
     bb_config(&cfg);
+    nand_media_destroy(&m);
     nand_media_init(&m, &cfg);
     memset(&src, 0, sizeof(src));
     memset(&dst, 0, sizeof(dst));
@@ -401,6 +423,7 @@ static void test_copyback(void)
     c = nand_media_copyback(&m, &src, &dst, 5000000000ULL);
     check("a busy destination LUN delays the program",
           c.done_ns, 5000000000ULL + 500000 + 40000);
+    nand_media_destroy(&m);
 }
 
 int main(void)
