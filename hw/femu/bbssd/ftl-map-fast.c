@@ -280,7 +280,21 @@ static void femu_map_fast_trim(struct ssd *ssd, uint64_t lpn)
     }
 }
 
+static void femu_map_fast_exit(struct ssd *ssd)
+{
+    struct femu_map_fast *f = ssd->map_priv;
+
+    if (!f) {
+        return;
+    }
+    g_free(f->lbn_dirty);
+    g_free(f->dirty_list);
+    g_free(f);
+    ssd->map_priv = NULL;
+}
+
 const struct femu_mapping_ops femu_mapping_fast_ops = {
+    .exit           = femu_map_fast_exit,
     .uses_log_class = true,
     .name               = "fast",
     .uses_cmt           = false,

@@ -229,16 +229,28 @@ static void bb_flip(FemuCtrl *n, NvmeCmd *cmd)
  * another mode is not dispatched an exit at all, which is a gap in the generic
  * teardown rather than one here.
  */
+/*
+ * Release the FTL this mode built. Each mode allocates its own ns->ssd and
+ * frees the ones its namespaces own, so a controller mixing modes tears each
+ * down exactly once. n->ssd aliases the first namespace's, so clear it before
+ * the memory goes.
+ */
 static void bb_exit(FemuCtrl *n)
 {
     int i;
 
     for (i = 0; i < n->num_namespaces; i++) {
-        struct ssd *ssd = n->namespaces[i].ssd;
+        NvmeNamespace *ns = &n->namespaces[i];
 
-        if (ssd) {
-            ssd_free_write_buffer(ssd);
+        if (!NS_BBSSD(ns) || !ns->ssd) {
+            continue;
         }
+        if (n->ssd == ns->ssd) {
+            n->ssd = NULL;
+        }
+        ssd_free(ns->ssd);
+        g_free(ns->ssd);
+        ns->ssd = NULL;
     }
 }
 

@@ -922,93 +922,23 @@ static void kvssd_reset_table(FemuKvssdState *s)
     s->value_reclaimable = 0;
 }
 
-static void kvssd_free_ru_mgmt(struct ru_mgmt *rm)
-{
-    if (!rm) {
-        return;
-    }
-    if (rm->victim_ru_pq) {
-        pqueue_free(rm->victim_ru_pq);
-    }
-    if (rm->victim_ru_cb) {
-        pqueue_free(rm->victim_ru_cb);
-    }
-    g_free(rm);
-}
 
-static void kvssd_free_fdp_state(struct ssd *ssd)
-{
-    if (ssd->ruhs) {
-        for (uint64_t i = 0; i < ssd->nruhs; i++) {
-            g_free(ssd->ruhs[i].rus);
-            kvssd_free_ru_mgmt(ssd->ruhs[i].ru_mgmt);
-        }
-        g_free(ssd->ruhs);
-    }
-    if (ssd->rg) {
-        for (uint64_t i = 0; i < ssd->nrg; i++) {
-            FemuReclaimGroup *rg = &ssd->rg[i];
-
-            if (rg->rus) {
-                for (int j = 0; j < rg->tt_nru; j++) {
-                    g_free(rg->rus[j].ssd_wptr);
-                    g_free(rg->rus[j].lines);
-                }
-            }
-            kvssd_free_ru_mgmt(rg->ru_mgmt);
-        }
-        if (ssd->rus) {
-            for (uint64_t i = 0; i < ssd->nrg; i++) {
-                g_free(ssd->rus[i]);
-            }
-            g_free(ssd->rus);
-        }
-        g_free(ssd->rg);
-    }
-}
 
 static void kvssd_free_ssd(FemuKvssdState *s)
 {
     struct ssd *ssd = s->ssd;
-    struct ssdparams *spp;
 
     if (!ssd) {
         return;
     }
-    spp = &ssd->sp;
-    kvssd_free_fdp_state(ssd);
-    g_free(ssd->cmt.slots);
-    g_free(ssd->cmt.hash);
-    g_free(ssd->rcache.slots);
-    g_free(ssd->rcache.hash);
-    g_free(ssd->map_priv);
-    if (ssd->lm.victim_line_pq) {
-        pqueue_free(ssd->lm.victim_line_pq);
-    }
-    g_free(ssd->lm.lines);
-    g_free(ssd->maptbl);
-    g_free(ssd->rmap);
-    if (ssd->ch) {
-        for (int ch = 0; ch < spp->nchs; ch++) {
-            for (int lun = 0; lun < ssd->ch[ch].nluns; lun++) {
-                struct nand_lun *lunp = &ssd->ch[ch].lun[lun];
 
-                for (int pl = 0; pl < lunp->npls; pl++) {
-                    struct nand_plane *plane = &lunp->pl[pl];
-
-                    for (int blk = 0; blk < plane->nblks; blk++) {
-                        struct nand_block *block = &plane->blk[blk];
-
-                        g_free(block->pg);
-                    }
-                    g_free(plane->blk);
-                }
-                g_free(lunp->pl);
-            }
-            g_free(ssd->ch[ch].lun);
-        }
-        g_free(ssd->ch);
-    }
+    /*
+     * The same teardown the other FTL-backed modes use. This mode used to
+     * carry its own copy, which had drifted: it never released the media
+     * layer, and it freed the mapping scheme's private state with a flat
+     * g_free() that missed the allocations hanging off it.
+     */
+    ssd_free(ssd);
     g_free(ssd);
     s->ssd = NULL;
 }

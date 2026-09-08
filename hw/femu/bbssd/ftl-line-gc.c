@@ -791,3 +791,18 @@ int do_read_reclaim(struct ssd *ssd)
 
     return 0;
 }
+
+/* release what ssd_init_lines() took */
+void ssd_free_lines(struct ssd *ssd)
+{
+    struct line_mgmt *lm = &ssd->lm;
+
+    pqueue_free(lm->victim_line_pq);
+    lm->victim_line_pq = NULL;
+    g_free(lm->lines);
+    lm->lines = NULL;
+    lm->tt_lines = 0;
+    lm->free_line_cnt = 0;
+    lm->victim_line_cnt = 0;
+    lm->full_line_cnt = 0;
+}

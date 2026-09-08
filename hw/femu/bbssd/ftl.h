@@ -539,6 +539,7 @@ struct ssd {
 
 int bb_check_geometry(FemuCtrl *n, Error **errp);
 void ssd_free_write_buffer(struct ssd *ssd);
+void ssd_free(struct ssd *ssd);
 
 /* true when the named mapping scheme allocates through the LOG write pointer */
 bool femu_mapping_name_uses_log_class(const char *name);

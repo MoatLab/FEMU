@@ -261,3 +261,35 @@ void ssd_init_ch(struct ssd_channel *ch, struct ssdparams *spp)
     ch->next_ch_avail_time = 0;
     ch->busy = 0;
 }
+
+/* release what ssd_init_ch() built, in the reverse order */
+void ssd_free_ch(struct ssd_channel *ch, struct ssdparams *spp)
+{
+    int lun, pl;
+
+    if (!ch->lun) {
+        return;
+    }
+    for (lun = 0; lun < spp->luns_per_ch; lun++) {
+        struct nand_lun *l = &ch->lun[lun];
+
+        if (!l->pl) {
+            continue;
+        }
+        for (pl = 0; pl < spp->pls_per_lun; pl++) {
+            struct nand_plane *p = &l->pl[pl];
+            int blk;
+
+            if (!p->blk) {
+                continue;
+            }
+            for (blk = 0; blk < spp->blks_per_pl; blk++) {
+                g_free(p->blk[blk].pg);
+            }
+            g_free(p->blk);
+        }
+        g_free(l->pl);
+    }
+    g_free(ch->lun);
+    ch->lun = NULL;
+}

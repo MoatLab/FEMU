@@ -229,6 +229,27 @@ static void csd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 static void csd_exit(FemuCtrl *n)
 {
     FemuCsdState *csd = csd_state(n);
+    int i;
+
+    /*
+     * A computational namespace runs the black-box FTL through its own
+     * ns->ssd, allocated here rather than by bbssd, so this mode releases it.
+     * A controller with no black-box namespace never dispatches bb_exit(), so
+     * leaving it to that one leaked the whole FTL.
+     */
+    for (i = 0; i < n->num_namespaces; i++) {
+        NvmeNamespace *ns = &n->namespaces[i];
+
+        if (!NS_CSD(ns) || !ns->ssd) {
+            continue;
+        }
+        if (n->ssd == ns->ssd) {
+            n->ssd = NULL;
+        }
+        ssd_free(ns->ssd);
+        g_free(ns->ssd);
+        ns->ssd = NULL;
+    }
 
     if (!csd) {
         return;

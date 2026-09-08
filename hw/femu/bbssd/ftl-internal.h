@@ -249,6 +249,11 @@ void rcache_invalidate(struct ssd *ssd, uint64_t lpn);
 void ssd_init_fdp_params(struct ssdparams *spp, FemuCtrl *n);
 void femu_fdp_ssd_init_reclaim_group(FemuCtrl *n, struct ssd *ssd);
 void femu_fdp_ssd_init_ru_handles(FemuCtrl *n, struct ssd *ssd);
+void femu_fdp_ssd_free(struct ssd *ssd);
+void rcache_destroy(struct ssd *ssd);
+void cmt_destroy(struct ssd *ssd);
+void ssd_free_lines(struct ssd *ssd);
+void ssd_free_ch(struct ssd_channel *ch, struct ssdparams *spp);
 /* nvme_do_write_fdp() is declared in nvme.h (included via ftl.h) */
 int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid, bool force);
 void ssd_write_zeroes_fdp_style(FemuCtrl *n, NvmeRequest *req);

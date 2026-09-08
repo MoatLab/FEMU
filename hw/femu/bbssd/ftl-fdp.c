@@ -1857,3 +1857,65 @@ void ssd_trim_fdp_style(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
     req->dsm_nr_ranges = 0;
     req->dsm_attributes = 0;
 }
+
+/*
+ * femu_fdp_ssd_free - release what the two FDP init functions took
+ *
+ * ssd->rus[i] and rg->rus are the same allocation, and a handle's rus[] holds
+ * pointers into those arrays rather than reclaim units of its own, so each is
+ * freed exactly once from the side that allocated it.
+ */
+void femu_fdp_ssd_free(struct ssd *ssd)
+{
+    uint64_t i;
+
+    if (ssd->ruhs) {
+        for (i = 0; i < ssd->nruhs; i++) {
+            struct ru_mgmt *rm = ssd->ruhs[i].ru_mgmt;
+
+            if (rm) {
+                pqueue_free(rm->victim_ru_pq);
+                pqueue_free(rm->victim_ru_cb);
+                g_free(rm);
+            }
+            g_free(ssd->ruhs[i].rus);
+        }
+        g_free(ssd->ruhs);
+        ssd->ruhs = NULL;
+        ssd->nruhs = 0;
+    }
+
+    if (ssd->rg) {
+        for (i = 0; i < ssd->nrg; i++) {
+            FemuReclaimGroup *rg = &ssd->rg[i];
+            struct ru_mgmt *rm = rg->ru_mgmt;
+            uint64_t r;
+
+            /*
+             * The array holds total_ru_cnt entries even though a group hands
+             * out only its share, and an untouched entry is zeroed, so walk
+             * the allocation rather than the group's count.
+             */
+            for (r = 0; rg->rus && r < ssd->sp.total_ru_cnt; r++) {
+                g_free(rg->rus[r].ssd_wptr);
+                g_free(rg->rus[r].lines);
+            }
+            if (rm) {
+                pqueue_free(rm->victim_ru_pq);
+                pqueue_free(rm->victim_ru_cb);
+                g_free(rm);
+            }
+        }
+        g_free(ssd->rg);
+        ssd->rg = NULL;
+    }
+
+    if (ssd->rus) {
+        for (i = 0; i < ssd->nrg; i++) {
+            g_free(ssd->rus[i]);
+        }
+        g_free(ssd->rus);
+        ssd->rus = NULL;
+    }
+    ssd->nrg = 0;
+}

@@ -297,7 +297,21 @@ static void femu_map_hybrid_trim(struct ssd *ssd, uint64_t lpn)
     }
 }
 
+static void femu_map_hybrid_exit(struct ssd *ssd)
+{
+    struct femu_map_hybrid *h = ssd->map_priv;
+
+    if (!h) {
+        return;
+    }
+    g_free(h->logs);
+    g_free(h->lbn_to_log);
+    g_free(h);
+    ssd->map_priv = NULL;
+}
+
 const struct femu_mapping_ops femu_mapping_hybrid_ops = {
+    .exit           = femu_map_hybrid_exit,
     .uses_log_class = true,
     .name               = "hybrid",
     .uses_cmt           = false,

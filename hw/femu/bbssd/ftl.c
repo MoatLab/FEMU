@@ -379,3 +379,51 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
 
     return lat;
 }
+
+/*
+ * ssd_free - release everything ssd_init() built, in the reverse order
+ *
+ * Every mode that allocates an ns->ssd runs it through ssd_init(), so one
+ * teardown serves bbssd, CSD and KV. The struct itself belongs to whichever
+ * mode allocated it, and that mode frees it after calling this.
+ */
+void ssd_free(struct ssd *ssd)
+{
+    struct ssdparams *spp;
+    int i;
+
+    if (!ssd) {
+        return;
+    }
+    spp = &ssd->sp;
+
+    /*
+     * Guarded on the pointers rather than fdp_enabled: KV builds the same
+     * structures without setting the flag, and freeing nothing is cheap.
+     */
+    femu_fdp_ssd_free(ssd);
+
+    if (ssd->mapping && ssd->mapping->exit) {
+        ssd->mapping->exit(ssd);
+    }
+
+    rcache_destroy(ssd);
+    cmt_destroy(ssd);
+    ssd_free_lines(ssd);
+    ssd_free_write_buffer(ssd);
+
+    g_free(ssd->rmap);
+    ssd->rmap = NULL;
+    g_free(ssd->maptbl);
+    ssd->maptbl = NULL;
+
+    nand_media_destroy(&ssd->media);
+
+    if (ssd->ch) {
+        for (i = 0; i < spp->nchs; i++) {
+            ssd_free_ch(&ssd->ch[i], spp);
+        }
+        g_free(ssd->ch);
+        ssd->ch = NULL;
+    }
+}

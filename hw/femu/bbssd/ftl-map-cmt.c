@@ -173,3 +173,13 @@ void cmt_init(struct ssd *ssd, uint32_t cache_mb)
     ssd->cmt.used = ssd->cmt.hand = 0;
     ssd->cmt.hits = ssd->cmt.misses = 0;
 }
+
+/* release what cmt_init() took */
+void cmt_destroy(struct ssd *ssd)
+{
+    g_free(ssd->cmt.slots);
+    g_free(ssd->cmt.hash);
+    ssd->cmt.slots = NULL;
+    ssd->cmt.hash = NULL;
+    ssd->cmt.capacity = 0;
+}
