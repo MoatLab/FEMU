@@ -3349,6 +3349,7 @@ sub process {
 						g_test_trap_assert_stderr|
 						g_test_trap_assert_stderr_unmatched}x;
 		if ($realfile !~ /^tests\// &&
+			$realfile !~ /^hw\/femu\/tests\// &&
 			$line =~ /\b(?:$non_exit_glib_asserts)\(/) {
 			ERROR("Use g_assert or g_assert_not_reached\n". $herecurr);
 		}
