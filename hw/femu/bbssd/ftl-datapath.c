@@ -646,13 +646,39 @@ uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req)
     int already_invalid = 0;
 
     if (!(le16_to_cpu(rw->control) & NVME_WZ_DEAC)) {
+        uint64_t lpn, curlat, maxlat = 0;
+
         /*
          * Without the bit the blocks hold written zeros rather than becoming
-         * deallocated. The I/O layer writes them to the backing store, but the
-         * FTL does not model them as programmed pages; that gap predates the
-         * write buffer and is left alone here.
+         * deallocated: the host reads zeros back, so the device has to put
+         * them somewhere. Program the range as a write would. The I/O layer
+         * has already zeroed the backing store; what is owed here is the media
+         * cost and the page counts, which the command used to escape entirely.
+         *
+         * It goes straight to the media rather than through the write buffer,
+         * since the host handed over no data to hold.
          */
-        return 0;
+        if (end_lpn >= spp->tt_pgs) {
+            return 0;
+        }
+
+        while (should_gc_high(ssd)) {
+            if (do_gc(ssd, true) == -1) {
+                break;
+            }
+        }
+
+        ssd->host_write_pages += end_lpn - start_lpn + 1;
+        for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
+            if (ssd_out_of_lines(ssd)) {
+                req->status = NVME_CAP_EXCEEDED | NVME_DNR;
+                break;
+            }
+            curlat = ssd_program_lpn(ssd, lpn, req->stime);
+            maxlat = (curlat > maxlat) ? curlat : maxlat;
+        }
+
+        return maxlat;
     }
 
     if (end_lpn >= spp->tt_pgs) {
