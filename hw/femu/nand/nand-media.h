@@ -140,8 +140,29 @@ typedef struct NandMediaConfig {
     void                  *timeline_opaque;
 } NandMediaConfig;
 
+/*
+ * A read's data-out is booked on the channel for the window in which it will
+ * happen, [array done, +xfer), not from the moment the read was issued. The
+ * windows live here, per channel; the controller's ch_avail accumulator keeps
+ * meaning "the bus is busy until", for phases that use it now. Bounded so the
+ * lookup stays a short scan; a channel that has more reads in flight than this
+ * falls back to booking the bus from now, as before.
+ */
+#define NAND_BUS_RES_MAX 32
+
+typedef struct NandBusRes {
+    uint64_t start;
+    uint64_t end;
+} NandBusRes;
+
+typedef struct NandBusResList {
+    NandBusRes r[NAND_BUS_RES_MAX];
+    int n;
+} NandBusResList;
+
 typedef struct NandMedia {
     NandMediaConfig cfg;
+    NandBusResList *bus_res;   /* nchs entries; NULL unless NAND_CH_STAGED */
 } NandMedia;
 
 typedef struct NandOpCompletion {

@@ -4,9 +4,11 @@
  * gating + page-type program latency + ECC-wear-on-read + cache-read pipeline +
  * multi-plane + copyback. ZNS/OCSSD use strict config subsets of the same code.
  *
- * Bit-identical contract: the max() ordering and the per-op phase sequence below
- * mirror hw/femu/bbssd/ftl.c ssd_advance_status / ssd_advance_multiplane /
- * ssd_advance_copyback exactly. Do not reorder the gate/reservation steps.
+ * Bit-identical contract for the channel-off modes: the max() ordering and the
+ * per-op phase sequence below mirror hw/femu/bbssd/ftl.c ssd_advance_status /
+ * ssd_advance_multiplane / ssd_advance_copyback exactly. The staged channel
+ * model books a read's data-out for the window in which it happens (see the
+ * bus_* helpers); it is opt-in and was never on by default.
  */
 
 #include "qemu/osdep.h"
@@ -15,17 +17,115 @@
 void nand_media_init(NandMedia *m, const NandMediaConfig *cfg)
 {
     m->cfg = *cfg;
+    m->bus_res = NULL;
+    if (cfg->policy.channel_mode == NAND_CH_STAGED && cfg->nchs) {
+        m->bus_res = calloc(cfg->nchs, sizeof(*m->bus_res));
+    }
 }
 
 static inline uint64_t mx(uint64_t a, uint64_t b) { return a > b ? a : b; }
 
-/* one typed bus phase on the channel (shared per-channel timeline) */
-static uint64_t advance_chnl(NandMedia *m, uint32_t ch, uint64_t earliest,
-                             uint64_t xfer_ns)
+/*
+ * Channel bus bookkeeping. Two kinds of phase share one bus:
+ *
+ *  - phases that happen when the op reaches them: command/address, a program's
+ *    data-in, and any status read. These queue FIFO behind the bus's busy-until
+ *    accumulator (the controller's ch_avail) and advance it.
+ *  - a read's data-out, which happens only once the array has finished (tR
+ *    later) and is therefore booked as a window in the future. It does not
+ *    advance busy-until: the bus is idle until the window opens and another
+ *    die's phase may use it in the gap.
+ *
+ * Both kinds avoid every booked window. A zero-length phase touches nothing;
+ * booking it was what made a read's command wait for another read's transfer.
+ */
+static void bus_prune(NandBusResList *l, uint64_t now)
+{
+    int i, j = 0;
+    for (i = 0; i < l->n; i++) {
+        if (l->r[i].end > now) {
+            l->r[j++] = l->r[i];
+        }
+    }
+    l->n = j;
+}
+
+/* earliest s >= start such that [s, s + len) overlaps no booked window */
+static uint64_t bus_fit(const NandBusResList *l, uint64_t start, uint64_t len)
+{
+    int i;
+    for (i = 0; i < l->n; i++) {          /* windows are kept sorted by start */
+        if (l->r[i].end <= start) {
+            continue;
+        }
+        if (l->r[i].start >= start + len) {
+            break;
+        }
+        start = l->r[i].end;
+    }
+    return start;
+}
+
+static bool bus_book(NandBusResList *l, uint64_t start, uint64_t end)
+{
+    int i;
+    if (l->n == NAND_BUS_RES_MAX) {
+        return false;
+    }
+    for (i = l->n; i > 0 && l->r[i - 1].start > start; i--) {
+        l->r[i] = l->r[i - 1];
+    }
+    l->r[i].start = start;
+    l->r[i].end = end;
+    l->n++;
+    return true;
+}
+
+/*
+ * Windows that ended before the op now being timed started can no longer be
+ * hit: every later op starts no earlier than this one. Pruning on the op's
+ * own start time is what keeps the list short; the accumulator cannot be used
+ * for that because it does not move when the immediate phases are zero.
+ */
+
+/* a phase that happens now: FIFO on the bus, around any booked window */
+static uint64_t bus_now(NandMedia *m, uint32_t ch, uint64_t now,
+                        uint64_t earliest, uint64_t len)
 {
     uint64_t *cha = m->cfg.timeline->ch_avail(m->cfg.timeline_opaque, ch);
-    uint64_t start = mx(earliest, *cha);
-    *cha = start + xfer_ns;
+    uint64_t start;
+
+    if (!len) {
+        return earliest;
+    }
+    start = mx(earliest, *cha);
+    if (m->bus_res) {
+        bus_prune(&m->bus_res[ch], now);
+        start = bus_fit(&m->bus_res[ch], start, len);
+    }
+    *cha = start + len;
+    return *cha;
+}
+
+/* a phase that happens later (a read's data-out): booked, busy-until untouched */
+static uint64_t bus_later(NandMedia *m, uint32_t ch, uint64_t now,
+                          uint64_t earliest, uint64_t len)
+{
+    uint64_t *cha = m->cfg.timeline->ch_avail(m->cfg.timeline_opaque, ch);
+    uint64_t start;
+
+    if (!len) {
+        return earliest;
+    }
+    start = mx(earliest, *cha);
+    if (m->bus_res) {
+        bus_prune(&m->bus_res[ch], now);
+        start = bus_fit(&m->bus_res[ch], start, len);
+        if (bus_book(&m->bus_res[ch], start, start + len)) {
+            return start + len;
+        }
+    }
+    *cha = start + len;   /* no room to book: bus held from now, as before */
     return *cha;
 }
 
@@ -190,7 +290,7 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
         m->cfg.timeline->lock_lun(m->cfg.timeline_opaque, loc);
     }
     if (op == NAND_MEDIA_READ) {
-        t = advance_chnl(m, loc->ch, t, m->cfg.timing.cmd_addr_ns);
+        t = bus_now(m, loc->ch, stime, t, m->cfg.timing.cmd_addr_ns);
         /*
          * Program/erase suspend: if the LUN is mid-P/E when this read arrives, real NAND
          * lets the read preempt the slow operation. Model it by starting the read after a
@@ -209,12 +309,12 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
                     uint64_t *prr =
                         m->cfg.timeline->page_reg_ready(m->cfg.timeline_opaque, loc);
                     uint64_t dout = mx(*prr, done);
-                    t = advance_chnl(m, loc->ch, dout, m->cfg.timing.page_xfer_ns);
+                    t = bus_later(m, loc->ch, stime, dout, m->cfg.timing.page_xfer_ns);
                     *prr = t;
                 } else {
-                    t = advance_chnl(m, loc->ch, done, m->cfg.timing.page_xfer_ns);
+                    t = bus_later(m, loc->ch, stime, done, m->cfg.timing.page_xfer_ns);
                 }
-                t = advance_chnl(m, loc->ch, t, m->cfg.timing.status_ns);
+                t = bus_later(m, loc->ch, stime, t, m->cfg.timing.status_ns);
                 c.done_ns = t;
                 c.latency_ns = c.done_ns - stime;
                 if (m->cfg.timeline->unlock_lun) {
@@ -231,26 +331,26 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
             *m->cfg.timeline->lun_avail(m->cfg.timeline_opaque, loc) = s + rcbsy;
             uint64_t *prr = m->cfg.timeline->page_reg_ready(m->cfg.timeline_opaque, loc);
             uint64_t dout = mx(*prr, done);
-            t = advance_chnl(m, loc->ch, dout, m->cfg.timing.page_xfer_ns);
+            t = bus_later(m, loc->ch, stime, dout, m->cfg.timing.page_xfer_ns);
             *prr = t;
         } else {
-            t = advance_chnl(m, loc->ch, done, m->cfg.timing.page_xfer_ns);
+            t = bus_later(m, loc->ch, stime, done, m->cfg.timing.page_xfer_ns);
         }
-        t = advance_chnl(m, loc->ch, t, m->cfg.timing.status_ns);
+        t = bus_later(m, loc->ch, stime, t, m->cfg.timing.status_ns);
         c.done_ns = t;
     } else if (op == NAND_MEDIA_PROGRAM) {
-        t = advance_chnl(m, loc->ch, t, m->cfg.timing.cmd_addr_ns);
-        t = advance_chnl(m, loc->ch, t, m->cfg.timing.page_xfer_ns);
+        t = bus_now(m, loc->ch, stime, t, m->cfg.timing.cmd_addr_ns);
+        t = bus_now(m, loc->ch, stime, t, m->cfg.timing.page_xfer_ns);
         uint64_t s = array_gate_start(m, loc, t);
         uint64_t done = s + alat;
         array_commit(m, loc, done);
         c.done_ns = done;
     } else { /* erase */
-        t = advance_chnl(m, loc->ch, t, m->cfg.timing.cmd_addr_ns);
+        t = bus_now(m, loc->ch, stime, t, m->cfg.timing.cmd_addr_ns);
         uint64_t s = array_gate_start(m, loc, t);
         uint64_t done = s + alat;
         array_commit(m, loc, done);
-        t = advance_chnl(m, loc->ch, done, m->cfg.timing.status_ns);
+        t = bus_later(m, loc->ch, stime, done, m->cfg.timing.status_ns);
         c.done_ns = t;
     }
     if (m->cfg.timeline->unlock_lun) {
@@ -273,9 +373,9 @@ NandOpCompletion nand_media_multiplane(NandMedia *m, const NandLoc *locs, int nl
 
     /* per-plane command/address (+ data-in for programs) serialized on the bus */
     for (i = 0; i < nlocs; i++) {
-        t = advance_chnl(m, ch, t, m->cfg.timing.cmd_addr_ns);
+        t = bus_now(m, ch, stime, t, m->cfg.timing.cmd_addr_ns);
         if (op == NAND_MEDIA_PROGRAM) {
-            t = advance_chnl(m, ch, t, m->cfg.timing.page_xfer_ns);
+            t = bus_now(m, ch, stime, t, m->cfg.timing.page_xfer_ns);
         }
         if (i < nlocs - 1) {
             t += plbusy;
@@ -315,13 +415,13 @@ NandOpCompletion nand_media_multiplane(NandMedia *m, const NandLoc *locs, int nl
     t = done;
     if (op == NAND_MEDIA_READ) {
         if (m->cfg.timing.status_ns)
-            t = advance_chnl(m, ch, t, m->cfg.timing.status_ns);
+            t = bus_later(m, ch, stime, t, m->cfg.timing.status_ns);
         for (i = 0; i < nlocs; i++) {
-            t = advance_chnl(m, ch, t, m->cfg.timing.cmd_addr_ns);
-            t = advance_chnl(m, ch, t, m->cfg.timing.page_xfer_ns);
+            t = bus_later(m, ch, stime, t, m->cfg.timing.cmd_addr_ns);
+            t = bus_later(m, ch, stime, t, m->cfg.timing.page_xfer_ns);
         }
     } else if (m->cfg.timing.status_ns) {
-        t = advance_chnl(m, ch, t, m->cfg.timing.status_ns);
+        t = bus_later(m, ch, stime, t, m->cfg.timing.status_ns);
     }
 
     c.done_ns = t;
