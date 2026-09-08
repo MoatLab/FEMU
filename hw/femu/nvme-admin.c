@@ -87,13 +87,24 @@ static uint16_t nvme_del_sq(FemuCtrl *n, NvmeCmd *cmd)
     NvmeSQueue *sq;
     NvmeCQueue *cq;
     uint16_t qid = le16_to_cpu(c->qid);
+    bool resume;
 
     if (!qid || nvme_check_sqid(n, qid)) {
         return NVME_INVALID_QID | NVME_DNR;
     }
 
     sq = n->sq[qid];
-    assert(sq->is_active == true);
+    if (!sq->is_active) {
+        return NVME_INVALID_QID | NVME_DNR;
+    }
+
+    /*
+     * Stop the dataplane before taking the queue apart. The request array
+     * about to be freed is reachable from the rings and from the poller's
+     * pending completions, and the FTL thread may be holding one of its
+     * requests right now.
+     */
+    resume = nvme_pause_pollers(n);
     sq->is_active = false;
     if (!nvme_check_cqid(n, sq->cqid)) {
         cq = n->cq[sq->cqid];
@@ -108,7 +119,10 @@ static uint16_t nvme_del_sq(FemuCtrl *n, NvmeCmd *cmd)
         }
     }
 
+    nvme_drain_sq(n, sq);
     nvme_free_sq(sq, n);
+    nvme_resume_pollers(n, resume);
+
     return NVME_SUCCESS;
 }
 

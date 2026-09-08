@@ -702,6 +702,82 @@ static void femu_test_format(void *obj, void *data, QGuestAllocator *alloc)
     femu_disable(&c);
 }
 
+static uint16_t femu_delete_sq(FemuCtrlState *c, uint16_t qid)
+{
+    NvmeCmd cmd;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_DELETE_SQ;
+    cmd.cdw10 = cpu_to_le32(qid);
+    return femu_admin(c, &cmd);
+}
+
+/*
+ * Delete a submission queue while its commands are still in flight.
+ *
+ * The controller frees the queue's request array as part of the delete. A
+ * request from that queue can still be sitting in a poller's completion
+ * priority queue or in the ring between the poller and the FTL, so the next
+ * sweep pops a pointer into freed memory. The test does not assert on the
+ * outcome of the outstanding commands -- they are allowed to be lost -- only
+ * that the controller survives, which under a sanitizer build means the freed
+ * memory was never touched again.
+ */
+static void femu_test_delete_sq_in_flight(void *obj, void *data,
+                                          QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+    NvmeRwCmd rw;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    qtest_memset(c.pdev->bus->qts, buf, 0x5a, FEMU_DATA_SIZE);
+
+    /*
+     * Fill the queue without collecting any completion, so the commands are
+     * still outstanding when the delete arrives.
+     */
+    for (i = 0; i < FEMU_QSIZE - 2; i++) {
+        memset(&rw, 0, sizeof(rw));
+        rw.opcode = NVME_CMD_WRITE;
+        rw.nsid = cpu_to_le32(1);
+        rw.dptr.prp1 = cpu_to_le64(buf);
+        rw.slba = cpu_to_le64(8 * i);
+        rw.nlb = cpu_to_le16(FEMU_DATA_SIZE / c.lba_size - 1);
+        femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    }
+
+    g_assert_cmpint(FEMU_SC(femu_delete_sq(&c, c.io.qid)), ==, NVME_SUCCESS);
+
+    /*
+     * Give the pollers a chance to sweep after the free. Without the drain
+     * this is where the freed request array is read.
+     */
+    g_usleep(200000);
+
+    /* the controller is still answering, which is the whole point */
+    {
+        NvmeCmd cmd;
+        uint64_t idbuf = guest_alloc(alloc, 4096);
+
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_ADM_CMD_IDENTIFY;
+        cmd.dptr.prp1 = cpu_to_le64(idbuf);
+        cmd.cdw10 = cpu_to_le32(NVME_ID_CNS_CTRL);
+        g_assert_cmpint(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_SUCCESS);
+        guest_free(alloc, idbuf);
+    }
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -718,6 +794,19 @@ static void femu_register_nodes(void)
     qos_add_test("io-by-shadow-doorbell", "femu",
                  femu_test_io_by_shadow_doorbell, NULL);
     qos_add_test("features", "femu", femu_test_features, NULL);
+    qos_add_test("delete-sq-in-flight", "femu",
+                 femu_test_delete_sq_in_flight, &(QOSGraphTestOptions) {
+        /*
+         * A black-box device, because that is the mode whose requests travel
+         * through the poller's priority queue and the rings to the FTL. The
+         * default no-SSD device completes inline and never reaches them.
+         * The geometry holds 80 MiB so the 64 MiB namespace leaves garbage
+         * collection somewhere to work.
+         */
+        .edge.extra_device_opts =
+            "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4"
+    });
     qos_add_test("format", "femu", femu_test_format,
                  &(QOSGraphTestOptions) {
         /* start with 4 KiB blocks so a format to 512 grows the block count */

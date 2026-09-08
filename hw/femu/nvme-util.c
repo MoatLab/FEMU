@@ -104,20 +104,28 @@ bool nvme_pause_pollers(FemuCtrl *n)
     n->dataplane_started = false;
     smp_mb();   /* publish the flag before reading anyone's sweep state */
 
-    if (n->poller_on && n->poller_in_sweep) {
-        do {
-            busy = false;
+    do {
+        busy = false;
+        if (n->poller_on && n->poller_in_sweep) {
             for (p = 1; p <= (int)n->nr_pollers; p++) {
                 if (n->poller_in_sweep[p]) {
                     busy = true;
                     break;
                 }
             }
-            if (busy) {
-                usleep(100);
-            }
-        } while (busy);
-    }
+        }
+        /*
+         * The FTL thread holds requests too, and for longer than a poller
+         * does, so waiting only for the pollers leaves it free to touch state
+         * the caller is about to release.
+         */
+        if (n->ftl_thread_running && n->ftl_in_sweep) {
+            busy = true;
+        }
+        if (busy) {
+            usleep(100);
+        }
+    } while (busy);
 
     return was_started;
 }
@@ -308,6 +316,80 @@ uint16_t femu_nvme_rw_check_req(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
 
     return 0;
+}
+
+/*
+ * Drop every request that belongs to sq from the dataplane's queues.
+ *
+ * Deleting a submission queue frees the request array that backs it, but
+ * requests from it may still be sitting in the ring towards the FTL, the ring
+ * back from it, or the poller's queue of completions waiting for their due
+ * time. Freeing the array while any of those still point into it leaves the
+ * next sweep reading memory that is gone.
+ *
+ * The caller must have paused the dataplane, so nothing is in flight and these
+ * structures are stable while they are rewritten. The requests dropped here
+ * are not completed: the host asked for the queue to go away, and the
+ * specification lets their commands be lost with it.
+ */
+void nvme_drain_sq(FemuCtrl *n, NvmeSQueue *sq)
+{
+    NvmeRequest *req;
+    void **kept;
+    size_t count, i, nkept;
+    int p;
+
+    for (p = 1; p <= (int)n->nr_pollers; p++) {
+        struct rte_ring *rings[2];
+        int r;
+
+        rings[0] = n->to_ftl ? n->to_ftl[p] : NULL;
+        rings[1] = n->to_poller ? n->to_poller[p] : NULL;
+
+        for (r = 0; r < 2; r++) {
+            if (!rings[r]) {
+                continue;
+            }
+            count = femu_ring_count(rings[r]);
+            if (!count) {
+                continue;
+            }
+            kept = g_new(void *, count);
+            nkept = 0;
+            for (i = 0; i < count; i++) {
+                if (femu_ring_dequeue(rings[r], (void **)&req, 1) != 1) {
+                    break;
+                }
+                if (req->sq != sq) {
+                    kept[nkept++] = req;
+                }
+            }
+            /* put the survivors back in the order they were taken */
+            for (i = 0; i < nkept; i++) {
+                femu_ring_enqueue(rings[r], &kept[i], 1);
+            }
+            g_free(kept);
+        }
+
+        if (!n->pq || !n->pq[p]) {
+            continue;
+        }
+        count = pqueue_size(n->pq[p]);
+        if (!count) {
+            continue;
+        }
+        kept = g_new(void *, count);
+        nkept = 0;
+        while (nkept < count && (req = pqueue_pop(n->pq[p])) != NULL) {
+            if (req->sq != sq) {
+                kept[nkept++] = req;
+            }
+        }
+        for (i = 0; i < nkept; i++) {
+            pqueue_insert(n->pq[p], kept[i]);
+        }
+        g_free(kept);
+    }
 }
 
 void nvme_free_sq(NvmeSQueue *sq, FemuCtrl *n)

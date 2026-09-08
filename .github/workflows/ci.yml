@@ -205,7 +205,10 @@ jobs:
 
     - name: Run the FEMU qtests under the sanitizers
       env:
-        ASAN_OPTIONS: detect_leaks=0
+        # abort_on_error is what makes a report a failure. Without it the
+        # sanitizer prints the diagnosis and the test still says ok, which is
+        # how a use-after-free on the queue-delete path went unnoticed.
+        ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
         UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
       run: |
         cd build-debug

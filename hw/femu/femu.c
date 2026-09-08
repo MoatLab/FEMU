@@ -1167,14 +1167,40 @@ static void *femu_ftl_thread(void *arg)
     }
 
     while (!n->ftl_stopping) {
+        /*
+         * Pair with nvme_pause_pollers(): publish that this pass is running,
+         * then re-read the flag, so a caller that cleared it either sees this
+         * pass and waits for it, or is seen here and the pass is skipped. An
+         * admin command that frees queue state relies on that to know nothing
+         * holds a request.
+         */
+        if (!n->dataplane_started) {
+            n->ftl_in_sweep = false;
+            usleep(100);
+            continue;
+        }
+
         for (i = 1; i <= n->nr_pollers; i++) {
             if (!n->to_ftl[i] || !femu_ring_count(n->to_ftl[i])) {
                 continue;
             }
 
+            /*
+             * Publish the flag only around a request actually being handled.
+             * Doing it once per pass would put a barrier in the idle spin,
+             * which changes how this thread and the pollers interleave.
+             */
+            n->ftl_in_sweep = true;
+            smp_mb();   /* publish the flag before re-reading the pause state */
+            if (!n->dataplane_started) {
+                n->ftl_in_sweep = false;
+                break;
+            }
+
             rc = femu_ring_dequeue(n->to_ftl[i], (void *)&req, 1);
             if (rc != 1) {
                 femu_err("FEMU: FTL to_ftl dequeue failed\n");
+                n->ftl_in_sweep = false;
                 continue;
             }
 
@@ -1186,6 +1212,8 @@ static void *femu_ftl_thread(void *arg)
             if (rc != 1) {
                 femu_err("FEMU: FTL to_poller enqueue failed\n");
             }
+
+            n->ftl_in_sweep = false;
         }
     }
 

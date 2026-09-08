@@ -1943,6 +1943,12 @@ typedef struct FemuCtrl {
      * poller indices; NULL until pollers init.
      */
     volatile bool   *poller_in_sweep;
+    /*
+     * The same handshake for the FTL thread: it publishes this while it holds
+     * a request, so a caller that has cleared dataplane_started can wait until
+     * the thread is between requests and touching nothing.
+     */
+    volatile bool   ftl_in_sweep;
 
     /* Nand Flash Type: SLC/MLC/TLC/QLC/PLC */
     uint8_t         flash_type;
@@ -2068,6 +2074,7 @@ void nvme_update_sq_tail(NvmeSQueue *sq);
 uint16_t nvme_init_sq(NvmeSQueue *sq, FemuCtrl *n, uint64_t dma_addr, uint16_t
                       sqid, uint16_t cqid, uint16_t size, enum NvmeQueueFlags
                       prio, int contig);
+void nvme_drain_sq(FemuCtrl *n, NvmeSQueue *sq);
 void nvme_free_sq(NvmeSQueue *sq, FemuCtrl *n);
 void nvme_free_cq(NvmeCQueue *cq, FemuCtrl *n);
 uint16_t nvme_init_cq(NvmeCQueue *cq, FemuCtrl *n, uint64_t dma_addr, uint16_t
