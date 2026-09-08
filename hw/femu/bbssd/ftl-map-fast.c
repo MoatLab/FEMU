@@ -281,6 +281,7 @@ static void femu_map_fast_trim(struct ssd *ssd, uint64_t lpn)
 }
 
 const struct femu_mapping_ops femu_mapping_fast_ops = {
+    .uses_log_class = true,
     .name               = "fast",
     .uses_cmt           = false,
     .init               = femu_map_fast_init,

@@ -379,6 +379,7 @@ struct map_write_plan {
 struct femu_mapping_ops {
     const char *name;
     bool uses_cmt;          /* dftl-style demand-cached translation table */
+    bool uses_log_class;    /* allocates through the LOG write pointer */
 
     /* allocate and release scheme-private state in ssd->map_priv */
     void (*init)(struct ssd *ssd);
@@ -538,6 +539,9 @@ struct ssd {
 
 int bb_check_geometry(FemuCtrl *n, Error **errp);
 void ssd_free_write_buffer(struct ssd *ssd);
+
+/* true when the named mapping scheme allocates through the LOG write pointer */
+bool femu_mapping_name_uses_log_class(const char *name);
 uint64_t ssd_buffer_destage(struct ssd *ssd, int budget, uint64_t stime);
 uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req);
 void ssd_init(FemuCtrl *n, NvmeNamespace *ns);

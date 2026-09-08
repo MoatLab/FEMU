@@ -27,9 +27,20 @@ static int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     uint64_t tt_lines = (uint64_t)p->blks_per_pl;
     uint64_t reserve_lines, usable_pgs, exposed_pgs;
 
-    /* the free lines GC insists on, plus one for the open write pointer */
+    /*
+     * The free lines GC insists on, plus one for every write pointer this
+     * configuration can hold open at once. Counting only the data pointer
+     * leaves a device that hot/cold separation or a log-block scheme can run
+     * out of lines on, which used to be fatal and is now a refused write.
+     */
     reserve_lines = (uint64_t)((1 - p->gc_thres_pcent_high / 100.0) * tt_lines);
-    reserve_lines += 1;
+    reserve_lines += 1;                      /* the data write pointer */
+    if (p->hot_cold_sep) {
+        reserve_lines += 1;                  /* the hot write pointer */
+    }
+    if (femu_mapping_name_uses_log_class(p->mapping_scheme)) {
+        reserve_lines += 1;                  /* the log write pointer */
+    }
 
     if (tt_lines <= reserve_lines) {
         error_setg(errp, "FEMU bbssd: the geometry has only %" PRIu64 " lines, "

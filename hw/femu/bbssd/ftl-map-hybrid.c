@@ -298,6 +298,7 @@ static void femu_map_hybrid_trim(struct ssd *ssd, uint64_t lpn)
 }
 
 const struct femu_mapping_ops femu_mapping_hybrid_ops = {
+    .uses_log_class = true,
     .name               = "hybrid",
     .uses_cmt           = false,
     .init               = femu_map_hybrid_init,
