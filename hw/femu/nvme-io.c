@@ -14,6 +14,9 @@ static inline void nvme_req_release_ranges(NvmeRequest *req)
         req->dsm_ranges = NULL;
         req->dsm_nr_ranges = 0;
     }
+    g_free(req->zone_resets);
+    req->zone_resets = NULL;
+    req->nr_zone_resets = 0;
 }
 
 static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req);
@@ -162,6 +165,8 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
         req->dsm_ranges = NULL;
         req->dsm_nr_ranges = 0;
         req->dsm_attributes = 0;
+        req->zone_resets = NULL;
+        req->nr_zone_resets = 0;
         /* Coperd: record req->stime at earliest convenience */
         req->expire_time = req->stime = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
         req->cqe.cid = cmd.cid;

@@ -1385,6 +1385,13 @@ typedef struct NvmeRequest {
     int             dsm_nr_ranges;
     uint32_t        dsm_attributes;
 
+    /*
+     * Zones whose media reset the poller deferred to the FTL thread. See
+     * zns_zone_reset_state().
+     */
+    uint32_t        *zone_resets;
+    uint32_t        nr_zone_resets;
+
     /* FDP (Flexible Data Placement) */
     uint16_t        fdp_dspec;
     uint8_t         fdp_dtype;

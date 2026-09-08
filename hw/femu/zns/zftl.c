@@ -546,12 +546,57 @@ static uint64_t zns_write(struct zns_ssd *zns, NvmeRequest *req)
  * to charge it. The controller's FTL thread calls this once it has picked out
  * the namespace, so one controller can serve namespaces of different modes.
  */
+/*
+ * The media half of Zone Reset, deferred here by zns_zone_reset_state() so it
+ * runs on the thread that owns the mapping table and the plane timelines. One
+ * command may reset many zones; they share the planes, so the command ends
+ * with the last erase rather than the sum of them.
+ */
+static uint64_t zns_zone_reset_deferred(NvmeNamespace *ns, struct zns_ssd *zns,
+                                        NvmeRequest *req)
+{
+    uint64_t maxlat = 0;
+    uint32_t i;
+
+    for (i = 0; i < req->nr_zone_resets; i++) {
+        uint32_t zone_idx = req->zone_resets[i];
+        uint64_t lat;
+
+        lat = zns_zone_reset(zns, zone_idx, ns->zone_size, zns->lbasz,
+                             req->stime);
+        if (lat > maxlat) {
+            maxlat = lat;
+        }
+
+        /* the allocator restarts this zone from the first channel and LUN */
+        if (zns->active_zone == zone_idx) {
+            zns->wp.ch = 0;
+            zns->wp.lun = 0;
+        }
+    }
+
+    return maxlat;
+}
+
 uint64_t zns_ftl_process_req(NvmeNamespace *ns, NvmeRequest *req)
 {
     struct zns_ssd *zns = ns->zns;
     uint64_t lat = 0;
 
-    if (!zns || req->status != NVME_SUCCESS) {
+    if (!zns) {
+        return 0;
+    }
+
+    /*
+     * A zone the poller has already moved to Empty must be erased even when
+     * the command as a whole failed part way through, or the descriptor reads
+     * empty while the mapping still points at the old data.
+     */
+    if (req->nr_zone_resets) {
+        return zns_zone_reset_deferred(ns, zns, req);
+    }
+
+    if (req->status != NVME_SUCCESS) {
         return 0;
     }
 

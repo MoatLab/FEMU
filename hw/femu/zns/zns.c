@@ -734,12 +734,19 @@ struct zns_zone_reset_ctx {
     NvmeZone    *zone;
 };
 
-static uint64_t zns_aio_zone_reset_cb(NvmeRequest *req, NvmeZone *zone)
+/*
+ * Move the zone descriptor to Empty and record the zone for the FTL thread.
+ *
+ * This runs on a poller thread. The zone descriptors are read and written only
+ * from there, so they are safe to change here, but the mapping table, the
+ * block write pointers and the plane timelines belong to the FTL thread, which
+ * may be part way through a read or a write on this zone. Those are erased in
+ * zns_ftl_process_req() instead, where the rest of the media work happens.
+ */
+static void zns_zone_reset_state(NvmeRequest *req, NvmeZone *zone)
 {
     NvmeNamespace *ns = req->ns;
-    struct zns_ssd *zns = ns->zns;
     uint32_t zone_idx = zns_zone_idx(ns, zone->d.zslba);
-    uint64_t erase_latency = 0;
 
     switch (zns_get_zone_state(zone)) {
     case NVME_ZONE_STATE_EXPLICITLY_OPEN:
@@ -759,15 +766,9 @@ static uint64_t zns_aio_zone_reset_cb(NvmeRequest *req, NvmeZone *zone)
         break;
     }
 
-    erase_latency = zns_zone_reset(zns, zone_idx, ns->zone_size, zns->lbasz, req->stime);
-
-    /* Reset write pointer if this was the active zone */
-    if (zns->active_zone == zone_idx) {
-        zns->wp.ch = 0;
-        zns->wp.lun = 0;
-    }
-
-    return erase_latency;
+    req->zone_resets = g_renew(uint32_t, req->zone_resets,
+                               req->nr_zone_resets + 1);
+    req->zone_resets[req->nr_zone_resets++] = zone_idx;
 }
 
 typedef uint16_t (*op_handler_t)(NvmeNamespace *, NvmeZone *, NvmeZoneState,
@@ -870,8 +871,6 @@ static uint16_t zns_finish_zone(NvmeNamespace *ns, NvmeZone *zone,
 static uint16_t zns_reset_zone(NvmeNamespace *ns, NvmeZone *zone,
                                NvmeZoneState state, NvmeRequest *req)
 {
-    uint64_t erase_lat = 0;
-
     zns_zrwa_release(ns, zone);
 
     switch (state) {
@@ -886,17 +885,13 @@ static uint16_t zns_reset_zone(NvmeNamespace *ns, NvmeZone *zone,
         return NVME_ZONE_INVAL_TRANSITION;
     }
 
-    erase_lat = zns_aio_zone_reset_cb(req, zone);
-
     /*
      * The erase latency counts from the command's start and already includes
-     * waiting for the planes, which the zones of one command serialise on;
-     * the command ends with its last erase, not with the sum of all of them.
+     * waiting for the planes, which the zones of one command serialise on, so
+     * the command ends with its last erase rather than the sum of all of them.
+     * The FTL thread returns that maximum and the caller adds it to stime.
      */
-    if (req->stime + erase_lat > req->expire_time) {
-        req->expire_time = req->stime + erase_lat;
-    }
-    req->reqlat = req->expire_time - req->stime;
+    zns_zone_reset_state(req, zone);
 
     return NVME_SUCCESS;
 }
