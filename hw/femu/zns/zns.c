@@ -321,20 +321,79 @@ static void zns_zoned_ns_shutdown(NvmeNamespace *ns)
 
 void zns_ns_shutdown(NvmeNamespace *ns)
 {
-    FemuCtrl *n = ns->ctrl;
-    if (n->zoned) {
+    if (NS_ZNSSD(ns)) {
         zns_zoned_ns_shutdown(ns);
     }
 }
 
+/* mirrors zns_init_ch() */
+static void zns_free_ch(struct zns_ch *ch, uint64_t num_lun, uint64_t num_plane)
+{
+    uint64_t lun, pl;
+
+    if (!ch->fc) {
+        return;
+    }
+
+    for (lun = 0; lun < num_lun; lun++) {
+        struct zns_fc *fc = &ch->fc[lun];
+
+        if (!fc->plane) {
+            continue;
+        }
+        for (pl = 0; pl < num_plane; pl++) {
+            g_free(fc->plane[pl].blk);
+        }
+        g_free(fc->plane);
+    }
+    g_free(ch->fc);
+}
+
+/* mirrors zns_init_params() */
+static void zns_free_params(NvmeNamespace *ns)
+{
+    struct zns_ssd *zns = ns->zns;
+    uint64_t i;
+
+    if (!zns) {
+        return;
+    }
+
+    if (zns->ch) {
+        for (i = 0; i < zns->num_ch; i++) {
+            zns_free_ch(&zns->ch[i], zns->num_lun, zns->num_plane);
+        }
+        g_free(zns->ch);
+    }
+
+    if (zns->cache.write_cache) {
+        for (i = 0; i < zns->cache.num_wc; i++) {
+            g_free(zns->cache.write_cache[i].lpns);
+        }
+        g_free(zns->cache.write_cache);
+    }
+
+    nand_media_destroy(&zns->media);
+    g_free(zns->maptbl);
+    g_free(zns->zone_wp_slot);
+    g_free(zns);
+    ns->zns = NULL;
+}
+
 void zns_ns_cleanup(NvmeNamespace *ns)
 {
-    FemuCtrl *n = ns->ctrl;
-    if (n->zoned) {
-        g_free(ns->id_ns_zoned);
-        g_free(ns->zone_array);
-        g_free(ns->zd_extensions);
+    if (!NS_ZNSSD(ns)) {
+        return;
     }
+
+    g_free(ns->id_ns_zoned);
+    g_free(ns->zone_array);
+    g_free(ns->zd_extensions);
+    ns->id_ns_zoned = NULL;
+    ns->zone_array = NULL;
+    ns->zd_extensions = NULL;
+
+    zns_free_params(ns);
 }
 
 /*
@@ -1853,11 +1912,21 @@ static void zns_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     zns_init_zone_identify(n, ns, 0);
 }
 
+/*
+ * Release what ZNS mode allocated. Reached from device_del; the namespaces are
+ * walked individually because a controller may serve zoned and unzoned ones
+ * side by side.
+ */
 static void zns_exit(FemuCtrl *n)
 {
-    /*
-     * Release any extra resource (zones) allocated for ZNS mode
-     */
+    int i;
+
+    for (i = 0; i < n->num_namespaces; i++) {
+        NvmeNamespace *ns = &n->namespaces[i];
+
+        zns_ns_shutdown(ns);
+        zns_ns_cleanup(ns);
+    }
 }
 
 #define ZNS_CHANGED_ZONE_LOG_SIZE 4096   /* 8 byte header + 511 x 8 byte ZSLBA */
