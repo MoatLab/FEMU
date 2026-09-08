@@ -788,7 +788,7 @@ context_switch_time=200 #  this port, so they have no effect
 - Optional uBPF CSF support via `./femu-compile.sh --enable-csd-ubpf`
   or `./femu-compile.sh --enable-csd-ubpf=/path/to/ubpf-cemu`
 - Group/QoS command metadata
-- Guest-side passthrough tests in `tests/femu-csd/`
+- Guest-side passthrough tests in `hw/femu/tests/csd/`
 
 The initial CSD path does not require a CEMU-specific Linux kernel, FDMFS, or a
 fixed VM image. Advanced CEMU features such as VM freezing, virtual clock
@@ -1011,6 +1011,7 @@ hw/femu/                    # Main FEMU implementation
 ├── lib/                    # Utility libraries
 ├── inc/                    # Shared headers (rings, pqueue, ...)
 ├── scripts/                # Build + run scripts (see below)
+├── tests/                  # FEMU's own tests (unit, qtest, guest-side CSD)
 └── docs/                   # FEMU documentation
 ```
 

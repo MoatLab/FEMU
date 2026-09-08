@@ -11,7 +11,7 @@
 CFLAGS_TEST ?= -O2 -Wall -Wextra -Werror -std=gnu11
 CFLAGS_LIB  ?= -O2 -Wall -std=gnu11
 ROOT = ../../..
-TEST_SRC = $(ROOT)/tests/unit/test-femu-nand-media.c
+TEST_SRC = unit/test-nand-media.c
 # the stub directory first, so qemu/osdep.h resolves here and not in QEMU
 INCLUDES = -I. -I$(ROOT) -I../nand
 

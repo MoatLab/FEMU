@@ -4628,6 +4628,8 @@ subdir('docs')
 # supported by emscripten (e.g. fork and unix socket).
 if host_os != 'emscripten'
   subdir('tests')
+  # FEMU keeps its own tests under hw/femu/; see hw/femu/tests/meson.build
+  subdir('hw/femu/tests')
 endif
 if gtk.found()
   subdir('po')
