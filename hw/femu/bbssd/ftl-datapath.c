@@ -278,6 +278,15 @@ uint64_t ssd_buffer_destage(struct ssd *ssd, int budget, uint64_t stime)
     int done = 0;
 
     while (budget <= 0 || done < budget) {
+        /*
+         * Tested before a victim is chosen: selecting one removes it from the
+         * buffer, and a page taken out but not programmed would be lost from
+         * the occupancy count for nothing.
+         */
+        if (ssd_out_of_lines(ssd)) {
+            break;
+        }
+
         if (!buffer_select_victim(ssd, &lpn)) {
             break;
         }
@@ -287,10 +296,10 @@ uint64_t ssd_buffer_destage(struct ssd *ssd, int budget, uint64_t stime)
          * accepted, so a long write-back has to keep checking rather than rely
          * on the single check the host write already made.
          *
-         * As on the direct write path, a GC that cannot make progress does not
-         * stop the program that follows: there is nowhere to put the page back.
-         * Turning that into real backpressure means being able to refuse a
-         * write, which no path here can do yet.
+         * A GC that cannot make progress leaves nowhere to put the page. The
+         * buffer holds page numbers rather than data and the backend already
+         * has the contents, so stopping here costs the timing of a program,
+         * not the write itself.
          */
         while (should_gc_high(ssd)) {
             if (do_gc(ssd, true) == -1) {
@@ -524,6 +533,16 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     }
 
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
+        /*
+         * Garbage collection above could not free a line, so there is nowhere
+         * to put this page. Tell the host instead of programming through a
+         * write pointer that no longer addresses anything.
+         */
+        if (ssd_out_of_lines(ssd)) {
+            req->status = NVME_CAP_EXCEEDED | NVME_DNR;
+            break;
+        }
+
         /* dftl: charge the demand-cache translation cost (no-op when disabled) */
         if (ssd->cmt.capacity) {
             uint64_t clat = cmt_touch(ssd, lpn, req->stime, true);

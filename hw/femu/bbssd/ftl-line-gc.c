@@ -159,8 +159,13 @@ static void ssd_advance_write_pointer_common(struct ssd *ssd,
                 wpp->curline = NULL;
                 wpp->curline = get_next_free_line(ssd);
                 if (!wpp->curline) {
-                    /* TODO */
-                    abort();
+                    /*
+                     * Nothing left to program into, and get_next_free_line()
+                     * has said so. Leave the pointer without a line rather
+                     * than taking the process down under a running guest: the
+                     * write paths test for that and refuse the command.
+                     */
+                    return;
                 }
                 wpp->blk = wpp->curline->id;
                 check_addr(wpp->blk, spp->blks_per_pl);

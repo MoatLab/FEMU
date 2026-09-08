@@ -151,6 +151,15 @@ bool femu_dbg_lpn_has_secret(struct ssd *ssd, uint64_t lpn);
 #define PPA_ARG(p) (unsigned)(p)->g.ch, (unsigned)(p)->g.lun, \
                    (unsigned)(p)->g.pl, (unsigned)(p)->g.blk, (unsigned)(p)->g.pg
 
+/*
+ * True when the data write pointer has no line to program into. Every
+ * allocation class falls back to that pointer, so this covers all of them.
+ */
+static inline bool ssd_out_of_lines(struct ssd *ssd)
+{
+    return ssd->wp.curline == NULL;
+}
+
 /* GC trigger predicates (used by the datapath and GC) */
 static inline bool should_gc(struct ssd *ssd)
 {
