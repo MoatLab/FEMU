@@ -137,7 +137,16 @@ static void bb_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
  */
 static void bb_flip_apply(FemuCtrl *n, int64_t cdw10)
 {
+    bool resume;
     int i;
+
+    /*
+     * These are the timings the FTL thread reads on every request, and the
+     * media layer is rebuilt from them below. Stop the dataplane first: this
+     * runs on the thread that took the admin command, so nothing else keeps
+     * the fields still.
+     */
+    resume = nvme_pause_pollers(n);
 
     for (i = 0; i < n->num_namespaces; i++) {
         struct ssd *ssd = n->namespaces[i].ssd;
@@ -173,6 +182,8 @@ static void bb_flip_apply(FemuCtrl *n, int64_t cdw10)
             break;
         }
     }
+
+    nvme_resume_pollers(n, resume);
 }
 
 static void bb_flip(FemuCtrl *n, NvmeCmd *cmd)

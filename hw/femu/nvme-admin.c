@@ -1120,9 +1120,18 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         }
         nvme_ns(n, nsid)->err_rec = dw11;
         break;
-    case NVME_VOLATILE_WRITE_CACHE:
+    case NVME_VOLATILE_WRITE_CACHE: {
+        /*
+         * buffer_enabled() reads this on the FTL thread to decide whether the
+         * write buffer may still accept pages, so change it with the dataplane
+         * stopped rather than under a request in flight.
+         */
+        bool resume = nvme_pause_pollers(n);
+
         n->features.volatile_wc = dw11;
+        nvme_resume_pollers(n, resume);
         break;
+    }
     case NVME_INTERRUPT_COALESCING:
         n->features.int_coalescing = dw11;
         break;
