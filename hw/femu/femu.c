@@ -1053,7 +1053,6 @@ static void nvme_init_ctrl(FemuCtrl *n)
     n->features.arbitration     = 0x1f0f0706;
     n->features.power_mgmt      = 0;
     n->features.temp_thresh     = 0x14d;
-    n->features.err_rec         = 0;
     n->features.volatile_wc     = n->vwc;
     n->features.nr_io_queues   = ((n->nr_io_queues - 1) | ((n->nr_io_queues -
                                                               1) << 16));

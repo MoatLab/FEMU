@@ -532,6 +532,40 @@ static void femu_test_features(void *obj, void *data, QGuestAllocator *alloc)
         guest_free(alloc, buf);
     }
 
+    /*
+     * Only the composite sensor exists, so every other selector's default is
+     * zero rather than the composite's threshold.
+     */
+    g_assert_cmpint(FEMU_SC(femu_get_feature(&c, NVME_TEMPERATURE_THRESHOLD,
+                            NVME_GETFEAT_SELECT_DEFAULT, 0, 3 << 16, &result)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpint(result, ==, 0);
+
+    /*
+     * Error Recovery is namespace-scoped, so a value set on one namespace must
+     * not be what another reads back. This device has one namespace, so the
+     * check that survives here is that the value round-trips through it.
+     */
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_ERROR_RECOVERY,
+                            false, 1, 0x10005, NULL)), ==, NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_get_feature(&c, NVME_ERROR_RECOVERY,
+                            NVME_GETFEAT_SELECT_CURRENT, 1, 0, &result)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpint(result, ==, 0x10005);
+    /* and its default is still zero */
+    g_assert_cmpint(FEMU_SC(femu_get_feature(&c, NVME_ERROR_RECOVERY,
+                            NVME_GETFEAT_SELECT_DEFAULT, 1, 0, &result)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpint(result, ==, 0);
+
+    /* a device with no Flexible Data Placement refuses the feature outright */
+    g_assert_cmpint(FEMU_SC(femu_get_feature(&c, NVME_FDP_MODE,
+                            NVME_GETFEAT_SELECT_CURRENT, 0, 0, &result)),
+                    ==, NVME_INVALID_FIELD);
+    g_assert_cmpint(FEMU_SC(femu_get_feature(&c, NVME_FDP_MODE,
+                            NVME_GETFEAT_SELECT_DEFAULT, 0, 0, &result)),
+                    ==, NVME_INVALID_FIELD);
+
     /* the queue count comes back in dword 0 of the completion */
     g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_NUMBER_OF_QUEUES,
                             false, 0, 0x00030003, &result)), ==, NVME_SUCCESS);

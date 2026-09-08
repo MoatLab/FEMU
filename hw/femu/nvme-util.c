@@ -59,7 +59,7 @@ void nvme_deallocate_range(FemuCtrl *n, NvmeNamespace *ns, uint64_t slba,
 uint16_t nvme_check_dulbe(FemuCtrl *n, NvmeNamespace *ns, uint64_t slba,
                           uint64_t elba)
 {
-    if (!ns->util || !NVME_ERR_REC_DULBE(n->features.err_rec)) {
+    if (!ns->util || !NVME_ERR_REC_DULBE(ns->err_rec)) {
         return 0;
     }
     if (find_next_zero_bit(ns->util, elba, slba) < elba) {

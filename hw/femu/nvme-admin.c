@@ -38,6 +38,7 @@ static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
     [NVME_INTERRUPT_VECTOR_CONF]    = NVME_FEAT_CAP_CHANGE,
     [NVME_WRITE_ATOMICITY]          = NVME_FEAT_CAP_CHANGE,
     [NVME_ASYNCHRONOUS_EVENT_CONF]  = NVME_FEAT_CAP_CHANGE,
+    [NVME_FDP_MODE]                 = NVME_FEAT_CAP_CHANGE,
     [NVME_FDP_EVENTS]               = NVME_FEAT_CAP_CHANGE | NVME_FEAT_CAP_NS,
     [NVME_KV_FEAT_CONFIG]           = NVME_FEAT_CAP_CHANGE | NVME_FEAT_CAP_NS,
     [NVME_SOFTWARE_PROGRESS_MARKER] = NVME_FEAT_CAP_CHANGE,
@@ -801,7 +802,15 @@ static uint16_t nvme_get_feature_default(FemuCtrl *n, NvmeCmd *cmd,
         result = 0x1f0f0706;
         break;
     case NVME_TEMPERATURE_THRESHOLD:
-        result = (dw11 & (1 << 20)) ? 0 : 0x14d;
+        /*
+         * Only the composite sensor is implemented, so every other one reads
+         * zero, and the under-temperature threshold starts there too.
+         */
+        if (((dw11 >> 16) & 0xf) != 0 || (dw11 & (1 << 20))) {
+            result = 0;
+            break;
+        }
+        result = 0x14d;
         break;
     case NVME_VOLATILE_WRITE_CACHE:
         result = n->vwc;
@@ -819,7 +828,11 @@ static uint16_t nvme_get_feature_default(FemuCtrl *n, NvmeCmd *cmd,
         result = (dw11 & 0xffff) | (n->intc << 16);
         break;
     case NVME_FDP_MODE:
-        result = (n->subsys && n->subsys->endgrp.fdp.enabled) ? 1 : 0;
+        /* the same gate the current-value path applies */
+        if (!n->subsys || !n->subsys->endgrp.fdp.enabled) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        result = 1;
         break;
     default:
         /* every other feature starts at zero, including an empty event list */
@@ -903,7 +916,7 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
                                     n->features.temp_thresh);
         break;
     case NVME_ERROR_RECOVERY:
-        cqe->n.result = cpu_to_le32(n->features.err_rec);
+        cqe->n.result = cpu_to_le32(nvme_ns(n, nsid)->err_rec);
         break;
     case NVME_VOLATILE_WRITE_CACHE:
         cqe->n.result = cpu_to_le32(n->features.volatile_wc);
@@ -930,8 +943,11 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         if (!n->subsys || !n->subsys->endgrp.fdp.enabled) {
             return NVME_INVALID_FIELD | NVME_DNR;
         }
-        cqe->n.result = cpu_to_le32(n->subsys->endgrp.fdp.enabled ? 1 : 0);
-        break;
+        /*
+         * The mode may only change while the endurance group holds no
+         * namespaces, and FEMU builds them at realize, so it never can.
+         */
+        return NVME_CMD_SEQ_ERROR | NVME_DNR;
     case NVME_FDP_EVENTS: {
         if (!n->subsys || !n->subsys->endgrp.fdp.enabled) {
             return NVME_INVALID_FIELD | NVME_DNR;
@@ -1072,7 +1088,13 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         }
         break;
     case NVME_ERROR_RECOVERY:
-        n->features.err_rec = dw11;
+        if (nsid == NVME_NSID_BROADCAST) {
+            for (uint32_t i = 0; i < n->num_namespaces; i++) {
+                n->namespaces[i].err_rec = dw11;
+            }
+            break;
+        }
+        nvme_ns(n, nsid)->err_rec = dw11;
         break;
     case NVME_VOLATILE_WRITE_CACHE:
         n->features.volatile_wc = dw11;

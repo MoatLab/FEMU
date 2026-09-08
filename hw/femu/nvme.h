@@ -1150,7 +1150,6 @@ typedef struct NvmeFeatureVal {
     uint32_t    power_mgmt;
     uint32_t    temp_thresh;        /* over-temperature threshold, K */
     uint32_t    temp_thresh_under;  /* under-temperature threshold, K */
-    uint32_t    err_rec;
     uint32_t    volatile_wc;
     uint32_t    nr_io_queues;
     uint32_t    int_coalescing;
@@ -1472,6 +1471,12 @@ typedef struct NvmeNamespace {
     NvmeIdNs        id_ns;
     NvmeLBAF        lbaf;
     NvmeRangeType   lba_range[64];
+    /*
+     * Error Recovery is a namespace-scoped feature, so each namespace keeps
+     * its own. Holding one copy on the controller meant a setting made on one
+     * namespace was read back on every other.
+     */
+    uint32_t        err_rec;
     unsigned long   *util;
     unsigned long   *uncorrectable;
     uint32_t        id;

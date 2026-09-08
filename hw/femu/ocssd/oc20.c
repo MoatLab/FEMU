@@ -513,7 +513,7 @@ static uint16_t oc20_rw_check_req(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
             if (err) {
                 if (err & NVME_DULB) {
                     req->predef = slba + i;
-                    if (NVME_ERR_REC_DULBE(n->features.err_rec)) {
+                    if (NVME_ERR_REC_DULBE(req->ns->err_rec)) {
                         return NVME_DULB | NVME_DNR;
                     }
 

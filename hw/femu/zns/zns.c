@@ -1160,7 +1160,7 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
            deallocate logical blocks in the volume using the NVMe Dataset
            Management command.
         */
-        if (NVME_ERR_REC_DULBE(n->features.err_rec)) { status =
+        if (NVME_ERR_REC_DULBE(ns->err_rec)) { status =
             zns_check_dulbe(ns, slba, nlb); if (status) { goto err; } } }
 
     /*
