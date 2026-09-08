@@ -434,30 +434,40 @@ static uint16_t nvme_set_db_memory(FemuCtrl *n, const NvmeCmd *cmd)
     for (i = 1; i <= n->nr_io_queues; i++) {
         NvmeSQueue *sq = n->sq[i];
         NvmeCQueue *cq = n->cq[i];
+        uint64_t db_hva, eventidx_hva;
 
         if (sq) {
             /* Submission queue tail pointer location, 2 * QID * stride. */
-            sq->db_addr = dbs_addr + 2 * i * dbbuf_entry_sz;
-            sq->db_addr_hva = n->dbs_addr_hva + 2 * i * dbbuf_entry_sz;
-            sq->eventidx_addr = eis_addr + 2 * i * dbbuf_entry_sz;
-            sq->eventidx_addr_hva = n->eis_addr_hva + 2 * i * dbbuf_entry_sz;
+            db_hva = n->dbs_addr_hva + 2 * i * dbbuf_entry_sz;
+            eventidx_hva = n->eis_addr_hva + 2 * i * dbbuf_entry_sz;
             /*
              * The buffer the host just handed over is zeroed, but the queue
-             * may already have advanced through the doorbell registers.
-             * Publish where it actually stands, or the controller reads a
-             * stale zero and re-executes everything submitted so far.
+             * may already have advanced through the doorbell registers, so
+             * seed it with where the queue actually stands. Seed before
+             * publishing: a poller reads the shadow from the moment
+             * db_addr_hva is set, and one that sweeps in between takes the
+             * zero as the tail, overwrites sq->tail with it and leaves the
+             * queue stalled until the host submits again.
              */
-            *((uint32_t *)sq->db_addr_hva) = sq->tail;
+            *((uint32_t *)db_hva) = sq->tail;
+            smp_wmb();  /* seed the shadow before a poller can find it */
+            sq->eventidx_addr = eis_addr + 2 * i * dbbuf_entry_sz;
+            sq->eventidx_addr_hva = eventidx_hva;
+            sq->db_addr = dbs_addr + 2 * i * dbbuf_entry_sz;
+            sq->db_addr_hva = db_hva;
             femu_debug("DBBUF,sq[%d]:db=%" PRIu64 ",ei=%" PRIu64 "\n", i,
                     sq->db_addr, sq->eventidx_addr);
         }
         if (cq) {
             /* Completion queue head pointer location, (2 * QID + 1) * stride. */
-            cq->db_addr = dbs_addr + (2 * i + 1) * dbbuf_entry_sz;
-            cq->db_addr_hva = n->dbs_addr_hva + (2 * i + 1) * dbbuf_entry_sz;
+            db_hva = n->dbs_addr_hva + (2 * i + 1) * dbbuf_entry_sz;
+            eventidx_hva = n->eis_addr_hva + (2 * i + 1) * dbbuf_entry_sz;
+            *((uint32_t *)db_hva) = cq->head;
+            smp_wmb();  /* seed the shadow before a poller can find it */
             cq->eventidx_addr = eis_addr + (2 * i + 1) * dbbuf_entry_sz;
-            cq->eventidx_addr_hva = n->eis_addr_hva + (2 * i + 1) * dbbuf_entry_sz;
-            *((uint32_t *)cq->db_addr_hva) = cq->head;
+            cq->eventidx_addr_hva = eventidx_hva;
+            cq->db_addr = dbs_addr + (2 * i + 1) * dbbuf_entry_sz;
+            cq->db_addr_hva = db_hva;
             femu_debug("DBBUF,cq[%d]:db=%" PRIu64 ",ei=%" PRIu64 "\n", i,
                     cq->db_addr, cq->eventidx_addr);
         }
