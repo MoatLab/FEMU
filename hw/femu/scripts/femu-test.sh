@@ -339,8 +339,13 @@ run_smart_checks() {
         ok "host writes counted"
         [[ "${waf:-0}" -gt 0 ]] && ok "write amplification reported" \
                                 || bad "write amplification reported"
+    elif [[ $BLOCK -eq 0 ]]; then
+        # A key-value namespace has an FTL and this run just stored keys
+        # through it, so zero here means the counters are not being kept --
+        # not that the mode has none to keep.
+        bad "host writes counted (key-value namespace reports none)"
     else
-        na "host writes counted (not a bbssd namespace)"
+        na "host writes counted (mode keeps no page counters)"
     fi
 }
 

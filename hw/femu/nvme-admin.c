@@ -1304,7 +1304,7 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
         for (i = 0; n->namespaces && i < n->num_namespaces; i++) {
             NvmeNamespace *ns = &n->namespaces[i];
 
-            if (!(NS_BBSSD(ns) || NS_CSD(ns)) || !ns->ssd) {
+            if (!(NS_BBSSD(ns) || NS_CSD(ns) || NS_KVSSD(ns)) || !ns->ssd) {
                 continue;
             }
             host += ssd_host_write_pages(ns->ssd);

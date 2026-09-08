@@ -399,9 +399,19 @@ static uint16_t kv_program_ppas(FemuKvssdState *s, NvmeRequest *req,
         ppas[i] = ppa;
         if (io_type == GC_IO) {
             s->gc_wr_pages++;
+            ssd->gc_write_pages++;
         } else {
             s->nand_wr_pages++;
+            ssd->host_write_pages++;
         }
+        /*
+         * Counted on the ssd as well as in this mode's own state, because the
+         * health log reads the counters every FTL-backed mode keeps there.
+         * A key-value store writes whole pages, so a page programmed is a page
+         * the host asked for; the two differ only where a write buffer sits
+         * between them, which this mode does not have.
+         */
+        ssd->nand_write_pages++;
 
         if (!kv_advance_write_pointer(s, req, lat, i + 1 < pages)) {
             kv_invalidate_ppa_array(s, ppas, i + 1);
