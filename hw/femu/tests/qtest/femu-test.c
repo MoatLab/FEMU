@@ -133,15 +133,27 @@ static void femu_submit(FemuCtrlState *c, FemuQueue *q, NvmeCmd *cmd)
 static uint16_t femu_complete(FemuCtrlState *c, FemuQueue *q, uint16_t *cid,
                               uint32_t *result)
 {
-    NvmeCqe cqe;
+    uint64_t slot = q->cq_addr + q->cq_head * sizeof(NvmeCqe);
+    NvmeCqe cqe, again;
     int waited = 0;
 
+    /*
+     * The controller writes the whole entry, phase bit included, with no
+     * ordering between the fields, so seeing the phase flip does not mean the
+     * rest of the entry has landed. Reading it once can return a new phase
+     * beside a stale identifier -- which happens on a machine with few cores,
+     * where the poller and this thread interleave more finely.
+     *
+     * Wait for the phase, then require two consecutive reads to agree before
+     * believing the contents.
+     */
     for (;;) {
-        qtest_memread(c->pdev->bus->qts,
-                      q->cq_addr + q->cq_head * sizeof(NvmeCqe), &cqe,
-                      sizeof(cqe));
+        qtest_memread(c->pdev->bus->qts, slot, &cqe, sizeof(cqe));
         if ((le16_to_cpu(cqe.status) & 1) == q->phase) {
-            break;
+            qtest_memread(c->pdev->bus->qts, slot, &again, sizeof(again));
+            if (memcmp(&cqe, &again, sizeof(cqe)) == 0) {
+                break;
+            }
         }
         g_assert_cmpint(waited, <, FEMU_POLL_LIMIT_MS);
         g_usleep(1000);
