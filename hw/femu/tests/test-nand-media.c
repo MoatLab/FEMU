@@ -193,6 +193,75 @@ static void test_staged_channel(void)
     check("channel off: another LUN's read costs the same", second, first);
 }
 
+/* the configuration zns_nand_media_init() builds once a bus phase is set */
+static void zns_config(NandMediaConfig *cfg)
+{
+    memset(cfg, 0, sizeof(*cfg));
+    reset_timelines();
+    cfg->nchs = 8;
+    cfg->luns_per_ch = 4;
+    cfg->planes_per_lun = 2;
+    cfg->timing.rd_table_ns[0][0] = 65000;
+    cfg->timing.wr_table_ns[0][0] = 450000;
+    cfg->timing.er_table_ns[0] = 2000000;
+    cfg->policy.use_flat_timing = false;
+    cfg->policy.array_gate = NAND_GATE_PLANE_ONLY;
+    cfg->policy.channel_mode = NAND_CH_STAGED;
+    cfg->timing.page_xfer_ns = 25000;
+    cfg->timeline = &timeline;
+    cfg->timeline_opaque = NULL;
+}
+
+static void test_plane_gate_with_channel(void)
+{
+    NandMediaConfig cfg;
+    NandMedia m;
+    NandLoc a, b;
+    uint64_t first, second;
+
+    puts("plane gate with the channel bus (ZNS)");
+    zns_config(&cfg);
+    check("read = array + transfer",
+          staged_lat(&cfg, NAND_MEDIA_READ), 65000 + 25000);
+    check("program = transfer + array",
+          staged_lat(&cfg, NAND_MEDIA_PROGRAM), 25000 + 450000);
+    check("erase is array only when no command phase is set",
+          staged_lat(&cfg, NAND_MEDIA_ERASE), 2000000);
+
+    /* two reads on different planes of one channel share the bus, not the array */
+    reset_timelines();
+    nand_media_init(&m, &cfg);
+    memset(&a, 0, sizeof(a));
+    memset(&b, 0, sizeof(b));
+    b.lun = 1;
+    first = nand_media_op(&m, &a, NAND_MEDIA_READ, 1000000000ULL).latency_ns;
+    second = nand_media_op(&m, &b, NAND_MEDIA_READ, 1000000000ULL).latency_ns;
+    check_lt("the first read pays no bus wait", first, 65000 + 25000 + 1);
+    check_lt("the second read queues on the shared bus", first, second);
+
+    /* the same two reads on different channels do not interact */
+    reset_timelines();
+    nand_media_init(&m, &cfg);
+    b.lun = 0;
+    b.ch = 1;
+    first = nand_media_op(&m, &a, NAND_MEDIA_READ, 1000000000ULL).latency_ns;
+    second = nand_media_op(&m, &b, NAND_MEDIA_READ, 1000000000ULL).latency_ns;
+    check("another channel's read costs the same", second, first);
+
+    /* all phases zero: CH_OFF, and the plane gate alone decides */
+    zns_config(&cfg);
+    cfg.timing.page_xfer_ns = 0;
+    cfg.policy.channel_mode = NAND_CH_OFF;
+    reset_timelines();
+    nand_media_init(&m, &cfg);
+    b.ch = 0;
+    b.lun = 1;
+    first = nand_media_op(&m, &a, NAND_MEDIA_READ, 1000000000ULL).latency_ns;
+    second = nand_media_op(&m, &b, NAND_MEDIA_READ, 1000000000ULL).latency_ns;
+    check("channel off: reads on one channel cost the same", second, first);
+    check("channel off: a read is the array time alone", first, 65000);
+}
+
 static void test_multiplane_erase(void)
 {
     NandMediaConfig cfg;
@@ -296,6 +365,7 @@ int main(void)
 {
     test_ecc();
     test_staged_channel();
+    test_plane_gate_with_channel();
     test_multiplane_erase();
     test_copyback();
     if (failures) {

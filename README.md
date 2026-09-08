@@ -567,6 +567,12 @@ zns_zd_ext_size=0      # Zone-descriptor extension bytes (0 = none)
 zns_num_conv_zones=0   # Leading conventional zones (0 = all sequential)
 zns_zone_cap=0         # Usable bytes per zone (0 = the whole zone)
 zns_chnls_per_zone=0   # Channels a zone spans (0 = all of them)
+zns_pg_rd_lat=0        # NAND read / program / erase time (ns) for the
+zns_pg_wr_lat=0        #   configured cell type; 0 keeps the built-in value
+zns_blk_er_lat=0
+zns_cmd_addr_lat=0     # Channel bus phases (ns): command/address cycle,
+zns_pg_xfer_lat=0      #   page data transfer, status read. Any non-zero
+zns_status_lat=0       #   value adds a shared per-channel bus to the model
 zns_zrwa_size=0        # ZRWA window in LBAs (0 = ZRWA disabled)
 zns_zrwafg_size=0      # ZRWA flush granularity in LBAs
 zns_zrwa_num=0         # Zones that may hold a ZRWA at once

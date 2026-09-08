@@ -1698,6 +1698,17 @@ static void zns_init_params(FemuCtrl *n, NvmeNamespace *ns)
     }
 
     /*
+     * Channel bus phases. The array timing above is per die; the bus is
+     * shared by every die on a channel, so a non-zero phase makes reads and
+     * programs on one channel queue for the transfer even when they land on
+     * different planes. All three default to 0, which leaves the bus out of
+     * the model as before.
+     */
+    id_zns->timing.cmd_addr_lat = n->zns_params.zns_cmd_addr_lat;
+    id_zns->timing.pg_xfer_lat = n->zns_params.zns_pg_xfer_lat;
+    id_zns->timing.status_lat = n->zns_params.zns_status_lat;
+
+    /*
      * Optional write-fault injection. One write in N fails and takes its zone
      * read only, which is a change the host did not ask for and so is the one
      * thing that belongs in the Changed Zone List. Counted rather than drawn at
@@ -1802,6 +1813,12 @@ static bool zns_check_params(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     }
     if (p->zns_flash_type < SLC || p->zns_flash_type >= MAX_FLASH_TYPE) {
         error_setg(errp, "zns_flash_type must be in [%d, %d]", SLC, PLC);
+        return false;
+    }
+    if (p->zns_pg_rd_lat < 0 || p->zns_pg_wr_lat < 0 || p->zns_blk_er_lat < 0 ||
+        p->zns_cmd_addr_lat < 0 || p->zns_pg_xfer_lat < 0 ||
+        p->zns_status_lat < 0) {
+        error_setg(errp, "zns NAND timing knobs must not be negative");
         return false;
     }
 

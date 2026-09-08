@@ -1666,6 +1666,10 @@ typedef struct ZNSCtrlParams {
     int64_t zns_pg_rd_lat;
     int64_t zns_pg_wr_lat;
     int64_t zns_blk_er_lat;
+    /* channel bus phases (ns); any non-zero value turns the shared bus on */
+    int64_t zns_cmd_addr_lat;
+    int64_t zns_pg_xfer_lat;
+    int64_t zns_status_lat;
     uint32_t zns_max_active;  /* max active zones (0 = unlimited) */
     uint32_t zns_max_open;    /* max open zones (0 = unlimited) */
     uint32_t zns_zd_ext_size; /* per-zone descriptor extension bytes (0 = none) */
