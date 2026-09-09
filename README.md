@@ -799,6 +799,12 @@ mode is upstreamed.
 
 ## Configuration
 
+Every property FEMU accepts is listed in
+[`hw/femu/docs/properties.md`](hw/femu/docs/properties.md), with its type,
+default and the line of source it comes from. That file is generated from the
+property tables, so it covers all 135 of them rather than the handful this
+README walks through below.
+
 ### Config Files
 
 FEMU has well over a hundred device properties, so writing them out as a single
