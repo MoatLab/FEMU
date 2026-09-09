@@ -888,6 +888,29 @@ static int nvme_resolve_ns_sizes(FemuCtrl *n, uint64_t total, uint64_t *out_size
     return 0;
 }
 
+/*
+ * Report the total and unallocated NVM capacity, in bytes, as Identify
+ * Controller asks for them: 128-bit little-endian. Called once the namespaces
+ * are sized, since nvme_init_ctrl() runs before that and would only ever see
+ * zero -- which is what `nvme id-ctrl` used to print.
+ *
+ * Every namespace is created at realize and none can be added later, so no
+ * capacity is left unallocated.
+ */
+static void nvme_set_ctrl_capacity(FemuCtrl *n)
+{
+    uint64_t total = 0;
+    int i;
+
+    for (i = 0; i < n->num_namespaces; i++) {
+        total += n->namespaces[i].size;
+    }
+
+    memset(n->id_ctrl.tnvmcap, 0, sizeof(n->id_ctrl.tnvmcap));
+    memset(n->id_ctrl.unvmcap, 0, sizeof(n->id_ctrl.unvmcap));
+    stq_le_p(n->id_ctrl.tnvmcap, total);
+}
+
 static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
 {
     uint64_t *ns_sizes;
@@ -994,6 +1017,8 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
     }
     g_free(ns_sizes);
     g_free(ns_modes);
+
+    nvme_set_ctrl_capacity(n);
 
     return 0;
 }
