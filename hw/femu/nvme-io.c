@@ -1,5 +1,20 @@
 #include "./nvme.h"
 
+/*
+ * Compare, Write Zeroes, Write Uncorrectable and Dataset Management belong to
+ * the NVM command set. A key-value namespace does not implement it: these
+ * opcodes were reaching the generic handlers, which addressed the value store
+ * as though it were an array of logical blocks.
+ *
+ * Zoned namespaces are left alone. The zoned command set does include these,
+ * with zone semantics on top, so refusing them there would be wrong; that they
+ * currently run without updating any zone state is a separate gap.
+ */
+static bool nvme_ns_has_nvm_cmd_set(NvmeNamespace *ns)
+{
+    return ns->csi != NVME_CSI_KV;
+}
+
 static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
 
 /*
@@ -1221,22 +1236,22 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         }
         return nvme_flush(n, ns, cmd, req);
     case NVME_CMD_DSM:
-        if (NVME_ONCS_DSM & n->oncs) {
+        if ((NVME_ONCS_DSM & n->oncs) && nvme_ns_has_nvm_cmd_set(ns)) {
             return nvme_dsm(n, ns, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
     case NVME_CMD_COMPARE:
-        if (NVME_ONCS_COMPARE & n->oncs) {
+        if ((NVME_ONCS_COMPARE & n->oncs) && nvme_ns_has_nvm_cmd_set(ns)) {
             return nvme_compare(n, ns, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
     case NVME_CMD_WRITE_ZEROES:
-        if (NVME_ONCS_WRITE_ZEROS & n->oncs) {
+        if ((NVME_ONCS_WRITE_ZEROS & n->oncs) && nvme_ns_has_nvm_cmd_set(ns)) {
             return nvme_write_zeros(n, ns, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
     case NVME_CMD_WRITE_UNCOR:
-        if (NVME_ONCS_WRITE_UNCORR & n->oncs) {
+        if ((NVME_ONCS_WRITE_UNCORR & n->oncs) && nvme_ns_has_nvm_cmd_set(ns)) {
             return nvme_write_uncor(n, ns, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
