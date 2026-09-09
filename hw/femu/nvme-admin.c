@@ -193,8 +193,12 @@ static uint16_t nvme_create_cq(FemuCtrl *n, NvmeCmd *cmd)
     uint16_t qflags = le16_to_cpu(c->cq_flags);
     uint64_t prp1 = le64_to_cpu(c->prp1);
 
-    /* Bound cqid before it indexes n->cq (sized nr_io_queues + 1); see the
-     * matching note in nvme_create_sq(). */
+    /*
+     * Bound cqid before it indexes n->cq (sized nr_io_queues + 1); see the
+     * matching note in nvme_create_sq(). nvme_check_cqid() returns 0 when the
+     * queue already exists, so this also rejects a duplicate identifier, and
+     * the slot is guaranteed free below.
+     */
     if (!cqid || cqid > n->nr_io_queues || !nvme_check_cqid(n, cqid)) {
         return NVME_INVALID_CQID | NVME_DNR;
     }
@@ -219,10 +223,6 @@ static uint16_t nvme_create_cq(FemuCtrl *n, NvmeCmd *cmd)
     }
     if (!(NVME_CQ_FLAGS_PC(qflags)) && NVME_CAP_CQR(n->bar.cap)) {
         return NVME_INVALID_FIELD | NVME_DNR;
-    }
-
-    if (n->cq[cqid] != NULL) {
-        nvme_free_cq(n->cq[cqid], n);
     }
 
     cq = g_malloc0(sizeof(*cq));
