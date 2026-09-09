@@ -245,11 +245,10 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
          * commits done = max(t, lun_at_commit) + alat, recomputed from the value
          * it actually observed, so the result matches some valid serial ordering
          * and is bit-identical to a plain locked read-max-add-store, without the
-         * mutex. Falls through to the locked path for LUN_AND_PLANE (two words,
-         * not atomically CAS-able) and busy-extend.
+         * mutex. Falls through to the locked path for LUN_AND_PLANE, which is
+         * two words and not atomically CAS-able.
          */
-        if (m->cfg.policy.array_gate == NAND_GATE_LUN_ONLY &&
-            !m->cfg.policy.array_busy_extends) {
+        if (m->cfg.policy.array_gate == NAND_GATE_LUN_ONLY) {
             uint64_t *lun = m->cfg.timeline->lun_avail(m->cfg.timeline_opaque, loc);
             uint64_t old = __atomic_load_n(lun, __ATOMIC_RELAXED);
             for (;;) {
@@ -274,16 +273,7 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
         if (m->cfg.timeline->lock_lun) {
             m->cfg.timeline->lock_lun(m->cfg.timeline_opaque, loc);
         }
-        if (m->cfg.policy.array_busy_extends) {
-            /* gate is the LUN only in this mode (OCSSD has no plane accumulator) */
-            uint64_t *lun = m->cfg.timeline->lun_avail(m->cfg.timeline_opaque, loc);
-            if (t < *lun) {
-                *lun += alat;
-            } else {
-                *lun = t + alat;
-            }
-            done = *lun;
-        } else {
+        {
             uint64_t s = array_gate_start(m, loc, t);
             done = s + alat;
             array_commit(m, loc, done);
@@ -452,7 +442,7 @@ NandOpCompletion nand_media_copyback(NandMedia *m, const NandLoc *src,
     uint64_t s;
 
     /*
-     * On-chip read then program; no bus phases (copyback_skips_bus). Gated like
+     * On-chip read then program; no bus phases. Gated like
      * every other op here: an operation cannot begin before it was requested,
      * and it goes through the configured gate rather than the accumulators
      * directly, so a LUN-only caller's unset plane_avail is never read.

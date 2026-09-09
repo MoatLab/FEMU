@@ -97,22 +97,8 @@ typedef struct NandMediaPolicy {
     NandChannelMode channel_mode;
     bool            cache_read;
     bool            pe_suspend;   /* reads preempt an in-flight program/erase on the LUN */
-    bool            copyback_skips_bus;
     bool            ecc_on_read;
     bool            use_flat_timing;  /* true: scalar fields; false: table */
-    /*
-     * Array busy-extend semantics (OCSSD): when the resource is busy at op arrival,
-     * extend its availability by the full op latency (avail += lat) instead of the
-     * default avail = max(now, avail) + lat. Both reduce to now+lat when idle; they
-     * differ only when now > avail after a gap. Default false (max model).
-     */
-    bool            array_busy_extends;
-    /*
-     * page_type provided by the caller in NandLoc.page_type (used for the latency
-     * table index). When false the media derives nothing; callers using the flat
-     * timing path leave page_type 0.
-     */
-    bool            caller_page_type;
 } NandMediaPolicy;
 
 /*
