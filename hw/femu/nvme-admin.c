@@ -845,8 +845,7 @@ static uint16_t nvme_get_feature_default(FemuCtrl *n, NvmeCmd *cmd,
 
         memset(&rt, 0, sizeof(rt));
         cqe->n.result = 0;
-        return dma_read_prp(n, (uint8_t *)&rt,
-                            MIN(sizeof(rt), (dw11 & 0x3f) * sizeof(rt)),
+        return dma_read_prp(n, (uint8_t *)&rt, sizeof(rt),
                             le64_to_cpu(cmd->dptr.prp1),
                             le64_to_cpu(cmd->dptr.prp2));
     }
@@ -1241,32 +1240,48 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     return NVME_SUCCESS;
 }
 
-static uint16_t nvme_fw_log_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
+static uint16_t nvme_fw_log_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
+                                 uint64_t off)
 {
     uint32_t trans_len;
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
     NvmeFwSlotInfoLog fw_log = {0};
 
+    if (off >= sizeof(fw_log)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
     /* one firmware slot, active, carrying the revision Identify reports */
     fw_log.afi = 0x1;
     memcpy(fw_log.frs1, n->id_ctrl.fr, MIN(sizeof(fw_log.frs1),
                                           sizeof(n->id_ctrl.fr)));
-    trans_len = MIN(sizeof(fw_log), buf_len);
+    trans_len = MIN(sizeof(fw_log) - off, buf_len);
 
-    return dma_read_prp(n, (uint8_t *)&fw_log, trans_len, prp1, prp2);
+    return dma_read_prp(n, (uint8_t *)&fw_log + off, trans_len, prp1, prp2);
 }
 
-static uint16_t nvme_error_log_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
+static uint16_t nvme_error_log_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
+                                    uint64_t off)
 {
     uint32_t trans_len;
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
+    uint64_t log_len = sizeof(*n->elpes) * (n->elpe + 1);
 
-    trans_len = MIN(sizeof(*n->elpes) * (n->elpe + 1), buf_len);
+    /*
+     * The offset in Get Log Page is how a host reads a page in pieces, and this
+     * one ignored it: every chunk came back as the first. The other pages apply
+     * it; these two were missed.
+     */
+    if (off >= log_len) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    trans_len = MIN(log_len - off, buf_len);
     n->aer_mask &= ~(1 << NVME_AER_TYPE_ERROR);
 
-    return dma_read_prp(n, (uint8_t *)n->elpes, trans_len, prp1, prp2);
+    return dma_read_prp(n, (uint8_t *)n->elpes + off, trans_len, prp1, prp2);
 }
 
 /*
@@ -1892,13 +1907,13 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
     case NVME_LOG_SUPPORTED:
         return nvme_supported_log_pages(n, cmd, len, off);
     case NVME_LOG_ERROR_INFO:
-        return nvme_error_log_info(n, cmd, len);
+        return nvme_error_log_info(n, cmd, len, off);
     case NVME_LOG_SMART_INFO:
         return nvme_smart_info(n, cmd, len, off, rae);
     case NVME_LOG_FEMU_STATS:
         return nvme_femu_stats_info(n, cmd, len, off);
     case NVME_LOG_FW_SLOT_INFO:
-        return nvme_fw_log_info(n, cmd, len);
+        return nvme_fw_log_info(n, cmd, len, off);
     case NVME_LOG_CMD_EFFECTS:
         return nvme_cmd_effects(n, cmd, csi, len, off);
     case NVME_LOG_ENDGRP:

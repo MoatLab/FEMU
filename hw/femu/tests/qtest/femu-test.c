@@ -945,10 +945,30 @@ static void femu_test_log_pages(void *obj, void *data, QGuestAllocator *alloc)
     qtest_memread(femu->dev.bus->qts, buf, slice, sizeof(slice));
     g_assert_cmpint(memcmp(slice, page + 4, sizeof(slice)), ==, 0);
 
+    /*
+     * The firmware slot log the same way. Its active-slot byte is at the front
+     * and the revision string eight bytes in, so a read from eight starts on
+     * something different from a read from zero -- which the first assertion
+     * below establishes before the second relies on it.
+     */
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_FW_SLOT_INFO, buf,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(femu->dev.bus->qts, buf, page, sizeof(page));
+    g_assert_cmpint(page[8], !=, page[0]);
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_FW_SLOT_INFO, buf,
+                                         sizeof(slice), 8)), ==, NVME_SUCCESS);
+    qtest_memread(femu->dev.bus->qts, buf, slice, sizeof(slice));
+    g_assert_cmpint(memcmp(slice, page + 8, sizeof(slice)), ==, 0);
+
     /* an offset past the end is a bad field, not a wrapped read */
     g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_SMART_INFO, buf, 64,
                                          4096)), ==, NVME_INVALID_FIELD);
     g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, buf, 64,
+                                         4096)), ==, NVME_INVALID_FIELD);
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_FW_SLOT_INFO, buf, 64,
+                                         4096)), ==, NVME_INVALID_FIELD);
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_ERROR_INFO, buf, 64,
                                          4096)), ==, NVME_INVALID_FIELD);
 
     guest_free(alloc, buf);
