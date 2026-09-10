@@ -426,21 +426,33 @@ static uint16_t oc12_read(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 {
     Oc12Ctrl *ln = n->oc12_ctrl;
     Oc12RwCmd *ocrw = (Oc12RwCmd *)cmd;
-    uint16_t nlb  = le16_to_cpu(ocrw->nlb) + 1;     /* # of logical blocks */
+    uint32_t nlb  = le16_to_cpu(ocrw->nlb) + 1;     /* # of logical blocks */
     uint64_t prp1 = le64_to_cpu(ocrw->prp1);        /* PRP1 */
     uint64_t prp2 = le64_to_cpu(ocrw->prp2);        /* PRP2 */
     uint64_t meta = le64_to_cpu(ocrw->metadata);    /* OOB */
     const uint8_t lbaid = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
     const uint8_t lbads = NVME_ID_NS_LBAF_DS(ns, lbaid);
     const uint16_t ms = NVME_ID_NS_LBAF_MS(ns, lbaid);
-    uint64_t data_size = nlb << lbads;
-    uint64_t meta_size = nlb * ms;
+    uint64_t data_size = (uint64_t)nlb << lbads;
+    uint64_t meta_size = (uint64_t)nlb * ms;
     uint64_t *psl;
     uint64_t ppa;
     void *msl;
     uint16_t err;
     int i;
 
+
+    /*
+     * The count is 0's based and reaches 65536, which did not fit the 16 bit
+     * variable it was kept in: at the top of the range it wrapped to zero, the
+     * list below was allocated empty, and the helper that fills it -- which
+     * computes the same count in 32 bits -- wrote half a megabyte into it.
+     * The device would refuse a request this size anyway, but only after the
+     * list had been filled, so refuse it here instead.
+     */
+    if (nlb > ln->params.max_sec_per_rq) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
     req->is_write = false;
     req->slba = (uint64_t)g_malloc0(sizeof(uint64_t) * nlb);
     /* To save some ugly type casts later */
@@ -505,21 +517,33 @@ static uint16_t oc12_write(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 {
     Oc12Ctrl *ln = n->oc12_ctrl;
     Oc12RwCmd *ocrw = (Oc12RwCmd *)cmd;
-    uint16_t nlb  = le16_to_cpu(ocrw->nlb) + 1;     /* # of logical blocks */
+    uint32_t nlb  = le16_to_cpu(ocrw->nlb) + 1;     /* # of logical blocks */
     uint64_t prp1 = le64_to_cpu(ocrw->prp1);        /* PRP1 */
     uint64_t prp2 = le64_to_cpu(ocrw->prp2);        /* PRP2 */
     uint64_t meta = le64_to_cpu(ocrw->metadata);    /* OOB */
     const uint8_t lbaid = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
     const uint8_t lbads = NVME_ID_NS_LBAF_DS(ns, lbaid);
     const uint16_t ms = NVME_ID_NS_LBAF_MS(ns, lbaid);
-    uint64_t data_size = nlb << lbads;
-    uint64_t meta_size = nlb * ms;
+    uint64_t data_size = (uint64_t)nlb << lbads;
+    uint64_t meta_size = (uint64_t)nlb * ms;
     uint64_t *psl;
     uint64_t ppa;
     void *msl;
     uint16_t err;
     int i;
 
+
+    /*
+     * The count is 0's based and reaches 65536, which did not fit the 16 bit
+     * variable it was kept in: at the top of the range it wrapped to zero, the
+     * list below was allocated empty, and the helper that fills it -- which
+     * computes the same count in 32 bits -- wrote half a megabyte into it.
+     * The device would refuse a request this size anyway, but only after the
+     * list had been filled, so refuse it here instead.
+     */
+    if (nlb > ln->params.max_sec_per_rq) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
     req->is_write = true;
     req->slba = (uint64_t)g_malloc0(sizeof(uint64_t) * nlb);
     psl = (uint64_t *)req->slba;
