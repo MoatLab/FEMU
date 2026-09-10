@@ -802,23 +802,36 @@ static void gc_write_page_fdp_style(struct ssd *ssd, struct ppa *old_ppa,
      * right after the advance.
      */
 
-    if(dest_ruh->ruh_type == NVME_RUHT_PERSISTENTLY_ISOLATED ){
-        // handle ruh->ru pointer after adv
-        if( (ret_ru = fdp_advance_ru_pointer(ssd, &ssd->rg[dest_ru->rgidx], dest_ru->ruh, dest_ru)) != dest_ru){
+    /*
+     * Advancing hands back NULL when there is no free reclaim unit left, which
+     * is what a full device looks like from here. The initially-isolated arm
+     * dereferenced that straight away, and the only thing standing between it
+     * and a null pointer was an ftl_assert, which is compiled out. Neither arm
+     * can do anything useful without a unit, so leave the write frontier where
+     * it is and let the caller run out of room.
+     */
+    if (dest_ruh->ruh_type == NVME_RUHT_PERSISTENTLY_ISOLATED) {
+        ret_ru = fdp_advance_ru_pointer(ssd, &ssd->rg[dest_ru->rgidx],
+                                        dest_ru->ruh, dest_ru);
+        if (ret_ru && ret_ru != dest_ru) {
             dest_ruh->gc_ru = ret_ru;
         }
-    }else if (dest_ruh->ruh_type == NVME_RUHT_INITIALLY_ISOLATED ){
-        int gcruh_id = ssd->nruhs-1;
-        ftl_assert( dest_ruh->ruhid == gcruh_id );
-        if( (ret_ru = fdp_advance_ru_pointer(ssd, &ssd->rg[dest_ru->rgidx], dest_ruh, dest_ru)) != dest_ru ) {
-            //Do ugly updates
+    } else if (dest_ruh->ruh_type == NVME_RUHT_INITIALLY_ISOLATED) {
+        int gcruh_id = ssd->nruhs - 1;
+
+        ftl_assert(dest_ruh->ruhid == gcruh_id);
+        ret_ru = fdp_advance_ru_pointer(ssd, &ssd->rg[dest_ru->rgidx],
+                                        dest_ruh, dest_ru);
+        if (ret_ru && ret_ru != dest_ru) {
             ssd->ruhs[gcruh_id].rus[dest_ru->rgidx] = ret_ru;
             ssd->ruhs[gcruh_id].curr_ru = ret_ru;
             ssd->ruhs[gcruh_id].ruh->rus[dest_ru->rgidx] = ret_ru->nvme_ru;
-        } 
+        }
     }
-    
-    ftl_assert((ret_ru != NULL));
+
+    if (!ret_ru) {
+        ftl_err("FDP: no free reclaim unit while relocating; device is full\n");
+    }
 
     if (ssd->sp.enable_gc_delay) {
         struct nand_cmd gcw;
