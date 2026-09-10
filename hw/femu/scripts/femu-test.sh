@@ -101,13 +101,17 @@ run_block_checks() {
     fi
 
     echo "== deallocate =="
-    if have blkdiscard && blkdiscard -o 0 -l $((256 * 1024 * 1024)) "$DEV" >/dev/null 2>&1; then
+    # A missing tool is not applicable; a device that declines is a failure.
+    # Reporting both the same way meant this check could not fail.
+    if ! have blkdiscard; then
+        na "deallocate (needs blkdiscard from util-linux)"
+    elif blkdiscard -o 0 -l $((256 * 1024 * 1024)) "$DEV" >/dev/null 2>&1; then
         ok "deallocate accepted"
         if have fio; then
             verify_io "mapping still sound after deallocate" 32M 256M
         fi
     else
-        na "deallocate (device declined, or no blkdiscard)"
+        bad "deallocate accepted"
     fi
 }
 
@@ -253,8 +257,10 @@ run_csd_checks() {
     echo "== computational storage =="
     local out id got
     out=$(nvme io-passthru "$DEV" -O 0xb0 -n "$NSID" --cdw10=4096 --cdw11=0 --cdw12=0 2>&1)
+    # csd_present() has already established this is a computational namespace,
+    # so a refusal here is the device failing, not a mode that has no opinion.
     if ! grep -qi Success <<<"$out"; then
-        na "function data memory allocated (device declined)"; return
+        bad "function data memory allocated"; return
     fi
     id=$(grep -oiE "result:? *0x[0-9a-f]+" <<<"$out" | grep -oiE "0x[0-9a-f]+" | head -1)
     [[ -n "$id" ]] || id=1
