@@ -828,26 +828,41 @@ static uint16_t oc20_erase(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     uint32_t nlb = le16_to_cpu(dm->nlb) + 1;
     int i;
 
+    uint16_t status = NVME_SUCCESS;
+
+    /*
+     * The count is 0's based and reaches 65536; read and write refuse more
+     * than the device accepts before allocating, and erase did not, so a
+     * single command could ask for half a megabyte of address list.
+     */
+    if (nlb > OC20_CMD_MAX_LBAS) {
+        nvme_set_error_page(n, req->sq->sqid, req->cqe.cid, NVME_INVALID_FIELD,
+                            offsetof(Oc20RwCmd, lbal), 0, req->ns->id);
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
     req->nlb = nlb;
     req->slba = (uint64_t)g_malloc0(nlb * sizeof(uint64_t));
 
     if (nlb > 1) {
-        nvme_addr_read(n, lbal, (void *) req->slba, nlb * sizeof(void *));
+        nvme_addr_read(n, lbal, (void *) req->slba, nlb * sizeof(uint64_t));
     } else {
         ((uint64_t *)req->slba)[0] = lbal;
     }
 
+    /* the address list belongs to this command, as it does for read/write */
     for (i = 0; i < nlb; i++) {
         Oc20CS *cs;
         if (NULL == (cs = oc20_chunk_get_state(n, req->ns, ((uint64_t *)
                                                             req->slba)[i]))) {
-            return OC20_INVALID_RESET;
+            status = OC20_INVALID_RESET;
+            break;
         }
 
-        int err = oc20_chunk_set_free(n, req->ns, ((uint64_t *) req->slba)[i],
-                                      mptr, req);
-        if (err) {
-            return err;
+        status = oc20_chunk_set_free(n, req->ns, ((uint64_t *) req->slba)[i],
+                                     mptr, req);
+        if (status) {
+            break;
         }
 
         if (mptr) {
@@ -855,7 +870,10 @@ static uint16_t oc20_erase(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         }
     }
 
-    return NVME_SUCCESS;
+    g_free((void *)req->slba);
+    req->slba = 0;
+
+    return status;
 }
 
 static uint16_t oc20_chunk_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
