@@ -405,9 +405,13 @@ static int nvme_start_ctrl(FemuCtrl *n)
     nvme_init_sq(&n->admin_sq, n, n->bar.asq, 0, 0, NVME_AQA_ASQS(n->bar.aqa) +
                  1, NVME_Q_PRIO_HIGH, 1);
 
-    /* Currently only used by FEMU ZNS extension */
-    if (n->ext_ops.start_ctrl) {
-        n->ext_ops.start_ctrl(n);
+    /*
+     * A mode that cannot serve the settings the host has chosen says so here,
+     * and the controller must then not come ready. The result used to be
+     * discarded, so it started anyway.
+     */
+    if (n->ext_ops.start_ctrl && n->ext_ops.start_ctrl(n)) {
+        return -1;
     }
 
     nvme_start_dataplane(n);

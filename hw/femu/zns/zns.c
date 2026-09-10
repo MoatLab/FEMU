@@ -1830,8 +1830,17 @@ static int zns_init_zone_cap(FemuCtrl *n, NvmeNamespace *ns)
 
 static int zns_start_ctrl(FemuCtrl *n)
 {
-    /* Coperd: let's fail early before anything crazy happens */
-    assert(n->page_size == 4096);
+    /*
+     * This mode is written around a 4 KiB page. The size comes from CC.MPS,
+     * which the host chooses up to the mpsmax the controller advertises, so
+     * asserting on it let a guest kill the process; refuse to become ready
+     * instead, which is what the host is told a rejected CC means.
+     */
+    if (n->page_size != 4096) {
+        femu_err("zoned mode needs a 4 KiB memory page; the host asked for "
+                 "%u via CC.MPS\n", n->page_size);
+        return -1;
+    }
 
     if (!n->zasl_bs) {
         n->zasl = n->mdts;
