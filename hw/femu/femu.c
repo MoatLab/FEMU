@@ -1539,11 +1539,16 @@ static void femu_exit(PCIDevice *pci_dev)
     g_free(n->elpes);
     g_free(n->cq);
     g_free(n->sq);
+    /*
+     * The BAR regions are owned by this device and were never referenced by
+     * it, so there is nothing here to release: a memory region holds a
+     * reference on its owner, not the other way round. Dropping one per BAR
+     * took the controller's reference count below what the address space
+     * still held, and the flatview that outlives the eject then finalized the
+     * device from inside its own teardown loop, freeing this object while it
+     * was still walking regions embedded in it.
+     */
     msix_uninit_exclusive_bar(pci_dev);
-    memory_region_unref(&n->iomem);
-    if (n->cmbsz) {
-        memory_region_unref(&n->ctrl_mem);
-    }
 }
 
 static const Property femu_props[] = {
