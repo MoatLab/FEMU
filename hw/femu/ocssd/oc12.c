@@ -68,15 +68,57 @@ static void pr_ppa(Oc12Ctrl *ln, uint64_t ppa)
 }
 #endif
 
- /* Write a single out-of-bound (OOB) area entry */
-static int oc12_write_oob_meta(Oc12Ctrl *ln, uint64_t ppa, void *meta)
+/*
+ * Is every axis of this address inside the geometry the device reported? The
+ * only check on a host-supplied address was a comparison of the whole packed
+ * value against the sector count, which says nothing about the individual
+ * fields: a geometry whose axis counts are not powers of two leaves values
+ * that are representable and out of range, and those reached the timing
+ * model's per-chip array and the metadata buffer.
+ */
+static bool oc12_ppa_in_geometry(Oc12Ctrl *ln, uint64_t ppa)
+{
+    Oc12IdGroup *c = &ln->id_ctrl.groups[0];
+
+    return PPA_CH(ln, ppa)  < c->num_ch &&
+           PPA_LUN(ln, ppa) < c->num_lun &&
+           PPA_PLN(ln, ppa) < c->num_pln &&
+           PPA_BLK(ln, ppa) < c->num_blk &&
+           PPA_PG(ln, ppa)  < c->num_pg &&
+           PPA_SEC(ln, ppa) < ln->params.sec_per_pg;
+}
+
+/*
+ * ppa2secidx() hands back ~0 for an address outside the geometry. Multiplying
+ * that by the entry size wraps to an offset far past the metadata buffer, and
+ * these used to assert on it: a host could kill the process with one badly
+ * formed address, and with assertions compiled out it would have been a write
+ * at a wild offset instead. Refuse the access and leave the metadata alone;
+ * the data side of the same command is caught by the backend's own range
+ * check.
+ */
+static bool oc12_meta_offset(Oc12Ctrl *ln, uint64_t ppa, uint64_t extra,
+                             uint64_t len, uint64_t *oft)
 {
     uint64_t sec_idx = ppa2secidx(ln, ppa);
-    uint64_t oft = sec_idx * ln->meta_len + ln->int_meta_size;
-    uint8_t *tgt_sos_meta_buf = &ln->meta_buf[oft];
 
-    assert(oft + ln->params.sos < ln->meta_tbytes);
-    memcpy(tgt_sos_meta_buf, meta, ln->params.sos);
+    if (sec_idx == ~(0ULL) || sec_idx > ln->meta_tbytes / ln->meta_len) {
+        return false;
+    }
+    *oft = sec_idx * ln->meta_len + extra;
+
+    return *oft <= ln->meta_tbytes && len <= ln->meta_tbytes - *oft;
+}
+
+/* Write a single out-of-bound (OOB) area entry */
+static int oc12_write_oob_meta(Oc12Ctrl *ln, uint64_t ppa, void *meta)
+{
+    uint64_t oft;
+
+    if (!oc12_meta_offset(ln, ppa, ln->int_meta_size, ln->params.sos, &oft)) {
+        return 1;
+    }
+    memcpy(&ln->meta_buf[oft], meta, ln->params.sos);
 
     return 0;
 }
@@ -84,25 +126,25 @@ static int oc12_write_oob_meta(Oc12Ctrl *ln, uint64_t ppa, void *meta)
 /* Read a single out-of-bound (OOB) area entry */
 static int oc12_read_oob_meta(Oc12Ctrl *ln, uint64_t ppa, void *meta)
 {
-    uint64_t sec_idx = ppa2secidx(ln, ppa);
-    uint64_t oft = sec_idx * ln->meta_len + ln->int_meta_size;
-    uint8_t *tgt_sos_meta_buf = &ln->meta_buf[oft];
+    uint64_t oft;
 
-    assert(oft + ln->params.sos < ln->meta_tbytes);
-    memcpy(meta, tgt_sos_meta_buf, ln->params.sos);
+    if (!oc12_meta_offset(ln, ppa, ln->int_meta_size, ln->params.sos, &oft)) {
+        return 1;
+    }
+    memcpy(meta, &ln->meta_buf[oft], ln->params.sos);
 
     return 0;
 }
 
 static int oc12_meta_state_get(Oc12Ctrl *ln, uint64_t ppa, uint32_t *state)
 {
-    uint64_t sec_idx = ppa2secidx(ln, ppa);
-    uint64_t oft = sec_idx * ln->meta_len;
-    uint8_t *tgt_sec_meta_buf = &ln->meta_buf[oft];
+    uint64_t oft;
 
-    assert(oft + ln->meta_len < ln->meta_tbytes);
+    if (!oc12_meta_offset(ln, ppa, 0, ln->meta_len, &oft)) {
+        return 1;
+    }
     /* Only need the internal oob area */
-    memcpy(state, tgt_sec_meta_buf, ln->int_meta_size);
+    memcpy(state, &ln->meta_buf[oft], ln->int_meta_size);
 
     return 0;
 }
@@ -203,8 +245,11 @@ static int oc12_meta_blk_set_erased(NvmeNamespace *ns, Oc12Ctrl *ln,
                     ppa_sec |= sec << ln->ppaf.sec_offset;
 
                     //pr_ppa(ln, ppa_sec);
-                    off = ppa2secidx(ln, ppa_sec);
-                    memcpy(&ln->meta_buf[off * ln->meta_len], &state, ln->int_meta_size);
+                    if (!oc12_meta_offset(ln, ppa_sec, 0, ln->meta_len,
+                                          &off)) {
+                        continue;
+                    }
+                    memcpy(&ln->meta_buf[off], &state, ln->int_meta_size);
                 }
             }
         }
@@ -216,13 +261,15 @@ static int oc12_meta_blk_set_erased(NvmeNamespace *ns, Oc12Ctrl *ln,
 /* Internal metadata to track NAND program/erase status */
 static int oc12_meta_state_set_written(Oc12Ctrl *ln, uint64_t ppa)
 {
-    /* The n-th sector in the flat addr space */
-    uint64_t sec_idx = ppa2secidx(ln, ppa);
-    uint64_t oft = sec_idx * ln->meta_len;
     uint32_t new_state = OC12_SEC_WRITTEN;
-    uint8_t *tgt_sec_meta_buf = &ln->meta_buf[oft];
+    uint8_t *tgt_sec_meta_buf;
+    uint64_t oft;
 
-    assert(oft + ln->meta_len < ln->meta_tbytes);
+    if (!oc12_meta_offset(ln, ppa, 0, ln->meta_len, &oft)) {
+        return 1;
+    }
+    tgt_sec_meta_buf = &ln->meta_buf[oft];
+
     /* Make sure it was not already written */
 #if 0
     uint32_t cur_state = ((uint32_t *)tgt_sec_meta_buf)[0];
@@ -274,7 +321,8 @@ static uint16_t oc12_rw_check_req(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
 
     for (i = 0; i < nr_pages; i++) {
-        if (psl[i] > le64_to_cpu(ns->id_ns.nsze)) {
+        if (psl[i] > le64_to_cpu(ns->id_ns.nsze) ||
+            !oc12_ppa_in_geometry(ln, psl[i])) {
             return NVME_LBA_RANGE | NVME_DNR;
         }
     }
