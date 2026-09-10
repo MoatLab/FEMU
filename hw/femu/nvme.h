@@ -1000,6 +1000,7 @@ enum {
 };
 
 enum NvmeLogIdentifier {
+    NVME_LOG_SUPPORTED      = 0x00,
     NVME_LOG_ERROR_INFO     = 0x01,
     NVME_LOG_SMART_INFO     = 0x02,
     NVME_LOG_FW_SLOT_INFO   = 0x03,
@@ -1011,6 +1012,11 @@ enum NvmeLogIdentifier {
     NVME_LOG_FDP_EVENTS     = 0x23,
     NVME_LOG_CHANGED_ZONE_LIST  = 0xbf,
     NVME_LOG_FEMU_STATS         = 0xc0,
+};
+
+/* LID Supported and Effects data structure, one per log page identifier */
+enum NvmeLidSupport {
+    NVME_LIDS_LSUPP = 1 << 0,   /* the controller answers this identifier */
 };
 
 /*

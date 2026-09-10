@@ -207,6 +207,10 @@ They were previously written into the SMART log from byte 192, which NVMe Base
 2.0 assigned to the composite temperature times, the temperature sensors and
 the thermal transition counts.
 
+`nvme get-log /dev/nvme0 --log-id=0 --log-len=1024 -b` lists every log page the
+controller answers, four bytes per identifier with bit 0 set for the ones it
+supports, so this page can be discovered rather than assumed.
+
 ---
 
 75 of 136 properties carry a description today. The rest are listed with their type and default only; filling them in is tracked as documentation work.

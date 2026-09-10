@@ -1226,6 +1226,62 @@ static uint16_t nvme_error_log_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
 }
 
 /*
+ * Supported Log Pages (00h): one 32 bit LID Supported and Effects structure
+ * per log page identifier, with bit 0 set for each identifier this controller
+ * answers. NVMe Base 2.3 lists the page as mandatory, and it is how a host
+ * finds the vendor page without being told about it out of band.
+ *
+ * A page is reported as supported only where it would really answer: the
+ * endurance group and placement pages need a subsystem, and the changed zone
+ * list needs a zoned namespace.
+ */
+static uint16_t nvme_supported_log_pages(FemuCtrl *n, NvmeCmd *cmd,
+                                         uint32_t buf_len, uint64_t off)
+{
+    uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
+    uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
+    uint32_t lids[256] = {};
+    uint32_t trans_len;
+    bool zoned = false;
+    int i;
+
+    QEMU_BUILD_BUG_ON(sizeof(lids) != 1024);
+
+    if (off >= sizeof(lids)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    lids[NVME_LOG_SUPPORTED]    = cpu_to_le32(NVME_LIDS_LSUPP);
+    lids[NVME_LOG_ERROR_INFO]   = cpu_to_le32(NVME_LIDS_LSUPP);
+    lids[NVME_LOG_SMART_INFO]   = cpu_to_le32(NVME_LIDS_LSUPP);
+    lids[NVME_LOG_FW_SLOT_INFO] = cpu_to_le32(NVME_LIDS_LSUPP);
+    lids[NVME_LOG_CMD_EFFECTS]  = cpu_to_le32(NVME_LIDS_LSUPP);
+    lids[NVME_LOG_FEMU_STATS]   = cpu_to_le32(NVME_LIDS_LSUPP);
+
+    if (n->subsys) {
+        lids[NVME_LOG_ENDGRP]        = cpu_to_le32(NVME_LIDS_LSUPP);
+        lids[NVME_LOG_FDP_CONFS]     = cpu_to_le32(NVME_LIDS_LSUPP);
+        lids[NVME_LOG_FDP_RUH_USAGE] = cpu_to_le32(NVME_LIDS_LSUPP);
+        lids[NVME_LOG_FDP_STATS]     = cpu_to_le32(NVME_LIDS_LSUPP);
+        lids[NVME_LOG_FDP_EVENTS]    = cpu_to_le32(NVME_LIDS_LSUPP);
+    }
+
+    for (i = 0; n->namespaces && i < n->num_namespaces; i++) {
+        if (NS_ZNSSD(&n->namespaces[i])) {
+            zoned = true;
+            break;
+        }
+    }
+    if (zoned) {
+        lids[NVME_LOG_CHANGED_ZONE_LIST] = cpu_to_le32(NVME_LIDS_LSUPP);
+    }
+
+    trans_len = MIN(sizeof(lids) - off, buf_len);
+
+    return dma_read_prp(n, (uint8_t *)lids + off, trans_len, prp1, prp2);
+}
+
+/*
  * Host and media totals, as the SMART log, the vendor counter page and the
  * endurance group log all report them. Host figures come from the per-poller
  * shards the I/O path keeps; media figures from the namespaces that have an
@@ -1780,6 +1836,8 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
     }
 
     switch (lid) {
+    case NVME_LOG_SUPPORTED:
+        return nvme_supported_log_pages(n, cmd, len, off);
     case NVME_LOG_ERROR_INFO:
         return nvme_error_log_info(n, cmd, len);
     case NVME_LOG_SMART_INFO:

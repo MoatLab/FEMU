@@ -595,6 +595,112 @@ static void femu_test_features(void *obj, void *data, QGuestAllocator *alloc)
     femu_disable(&c);
 }
 
+/*
+ * Log page identifiers as hw/femu/nvme.h numbers them. This test compiles
+ * against QEMU's own block/nvme.h, which names neither the mandatory
+ * supported-pages list nor FEMU's vendor page.
+ */
+#define FEMU_LOG_SUPPORTED          0x00
+#define FEMU_LOG_CHANGED_ZONE_LIST  0xbf
+#define FEMU_LOG_FEMU_STATS         0xc0
+#define FEMU_LIDS_LSUPP             (1u << 0)   /* LID Supported */
+
+/*
+ * Get Log Page. Length is a 0's based dword count split across two command
+ * fields, and the offset is a byte offset split the same way.
+ */
+static uint16_t femu_get_log(FemuCtrlState *c, uint8_t lid, uint64_t buf,
+                             uint32_t len, uint64_t off)
+{
+    uint32_t numd = (len >> 2) - 1;
+    NvmeCmd cmd;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+    cmd.nsid = cpu_to_le32(NVME_NSID_BROADCAST);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(lid | ((numd & 0xffff) << 16));
+    cmd.cdw11 = cpu_to_le32((numd >> 16) & 0xffff);
+    cmd.cdw12 = cpu_to_le32((uint32_t)off);
+    cmd.cdw13 = cpu_to_le32((uint32_t)(off >> 32));
+
+    return femu_admin(c, &cmd);
+}
+
+/*
+ * Supported Log Pages says which identifiers the controller answers, and the
+ * media counters live on their own page rather than in the SMART log's
+ * temperature fields. Both must agree with what Get Log Page actually does,
+ * and both must serve a request from the offset it was given -- returning the
+ * start of the page whatever was asked for is the failure this covers.
+ */
+static void femu_test_log_pages(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { .pdev = &femu->dev, .alloc = alloc };
+    uint64_t buf;
+    uint32_t lids[256];
+    uint8_t page[512], slice[64];
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    buf = guest_alloc(alloc, 4096);
+
+    /* the supported-pages list itself */
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_SUPPORTED, buf,
+                                         sizeof(lids), 0)), ==, NVME_SUCCESS);
+    qtest_memread(femu->dev.bus->qts, buf, lids, sizeof(lids));
+
+    g_assert_cmpint(le32_to_cpu(lids[FEMU_LOG_SUPPORTED]) & FEMU_LIDS_LSUPP,
+                    ==, FEMU_LIDS_LSUPP);
+    g_assert_cmpint(le32_to_cpu(lids[NVME_LOG_SMART_INFO]) & FEMU_LIDS_LSUPP,
+                    ==, FEMU_LIDS_LSUPP);
+    g_assert_cmpint(le32_to_cpu(lids[FEMU_LOG_FEMU_STATS]) & FEMU_LIDS_LSUPP,
+                    ==, FEMU_LIDS_LSUPP);
+    /*
+     * This controller has no subsystem and no zoned namespace, so the pages
+     * that need one must be reported as unsupported rather than listed
+     * unconditionally.
+     */
+    g_assert_cmpint(le32_to_cpu(lids[NVME_LOG_ENDGRP]), ==, 0);
+    g_assert_cmpint(le32_to_cpu(lids[FEMU_LOG_CHANGED_ZONE_LIST]), ==, 0);
+
+    /* every identifier claimed must actually answer */
+    for (i = 0; i < 256; i++) {
+        if (!(le32_to_cpu(lids[i]) & FEMU_LIDS_LSUPP)) {
+            continue;
+        }
+        g_assert_cmpint(FEMU_SC(femu_get_log(&c, i, buf, 512, 0)),
+                        ==, NVME_SUCCESS);
+    }
+
+    /*
+     * A read from an offset must start there. Use the SMART log rather than
+     * the counter page: this controller has no FTL, so every counter is zero
+     * and comparing one run of zeroes against another proves nothing. SMART
+     * carries the spare figures, so the assertion below has something to bite
+     * on -- which the check right after it confirms before relying on it.
+     */
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_SMART_INFO, buf,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(femu->dev.bus->qts, buf, page, sizeof(page));
+    g_assert_cmpint(page[4], !=, page[0]);
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_SMART_INFO, buf,
+                                         sizeof(slice), 4)), ==, NVME_SUCCESS);
+    qtest_memread(femu->dev.bus->qts, buf, slice, sizeof(slice));
+    g_assert_cmpint(memcmp(slice, page + 4, sizeof(slice)), ==, 0);
+
+    /* an offset past the end is a bad field, not a wrapped read */
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_SMART_INFO, buf, 64,
+                                         4096)), ==, NVME_INVALID_FIELD);
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, buf, 64,
+                                         4096)), ==, NVME_INVALID_FIELD);
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
 static uint16_t femu_format(FemuCtrlState *c, uint32_t nsid, uint8_t lba_idx,
                             uint8_t ses)
 {
@@ -821,6 +927,7 @@ static void femu_register_nodes(void)
         /* start with 4 KiB blocks so a format to 512 grows the block count */
         .edge.extra_device_opts = "lba_index=3"
     });
+    qos_add_test("log-pages", "femu", femu_test_log_pages, NULL);
 }
 
 libqos_init(femu_register_nodes);
