@@ -28,6 +28,9 @@
 #define FEMU_CSI_KV         0x01    /* key-value command set */
 #define FEMU_ZONE_ACTION_RESET  0x04
 #define FEMU_DSM_AD             0x04    /* Dataset Management: deallocate */
+#define FEMU_OC20_IDENTIFY      0xe2    /* Open-Channel 2.0 geometry */
+#define FEMU_OC20_VECT_WRITE    0x91
+#define FEMU_OC20_VECT_READ     0x92
 #define FEMU_CNS_CS_CTRL    0x06    /* command-set controller identify */
 #define FEMU_CSI_ZONED      0x02    /* zoned namespace command set */
 #define FEMU_CQ_IEN         0x02    /* Create CQ: interrupts enabled */
@@ -710,6 +713,144 @@ static void femu_test_zoned_format_index(void *obj, void *data,
     g_assert_cmpint(le64_to_cpu(zsze), >, 0);
 
     guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/*
+ * Open-Channel 2.0's vector read and write, which nothing has ever driven: the
+ * mode presents no block device to a modern Linux, so the guest cells reach its
+ * admin surface only and every memory-safety fix on this path was made by
+ * reading it. The address format comes from the geometry the device reports, so
+ * the test does not have to rederive it from the properties.
+ */
+static void femu_test_oc20_vector_io(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    NvmeCmd cmd;
+    uint64_t geo, buf, lba, other, outside;
+    uint8_t g[128], out[4096];
+    uint8_t grp_len, lun_len, chk_len, sec_len;
+    uint16_t num_grp, want, got;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    geo = guest_alloc(alloc, 4096);
+    qtest_memset(femu->dev.bus->qts, geo, 0, 4096);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_OC20_IDENTIFY;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(geo);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+    qtest_memread(femu->dev.bus->qts, geo, g, sizeof(g));
+
+    grp_len = g[8];
+    lun_len = g[9];
+    chk_len = g[10];
+    sec_len = g[11];
+    num_grp = lduw_le_p(g + 64);
+
+    /*
+     * The out-of-geometry address below is only representable when the group
+     * count is not a power of two -- with powers of two every field of any
+     * address is inside the geometry and the check would prove nothing.
+     */
+    g_assert_cmpint(sec_len, >, 0);
+    g_assert_cmpint(num_grp, >, 0);
+    g_assert_cmpint(num_grp, <, 1 << grp_len);
+    g_assert_cmpint(lun_len, >, 0);
+
+    lba = 0;                /* group 0, unit 0, chunk 0, sector 0 */
+    /*
+     * The first sector of the next parallel unit. An address is sparse -- the
+     * fields sit at fixed bit offsets with gaps the geometry does not fill --
+     * so it has to be turned into a position before it can index the backing
+     * store, and for this one the raw value and the position differ. Both
+     * addresses are written with their own pattern and both are read back, so
+     * using the raw value shows up either as one overwriting the other or as a
+     * transfer past the end of the store.
+     *
+     * The geometry can describe more media than the device backs, so stay
+     * inside the first group, which is the part that is certainly backed.
+     */
+    other = (uint64_t)1 << (sec_len + chk_len);
+    outside = (uint64_t)num_grp << (sec_len + chk_len + lun_len);
+
+    buf = guest_alloc(alloc, 4096);
+    qtest_memset(femu->dev.bus->qts, buf, 0x6b, 4096);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_OC20_VECT_WRITE;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32((uint32_t)lba);
+    cmd.cdw11 = cpu_to_le32((uint32_t)(lba >> 32));
+    want = c.cid;
+    femu_submit(&c, &c.io, &cmd);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(got, ==, want);
+
+    /* a different pattern at the same sector of the next group */
+    qtest_memset(femu->dev.bus->qts, buf, 0x3c, 4096);
+    cmd.cdw10 = cpu_to_le32((uint32_t)other);
+    cmd.cdw11 = cpu_to_le32((uint32_t)(other >> 32));
+    want = c.cid;
+    femu_submit(&c, &c.io, &cmd);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(got, ==, want);
+
+    /* each address gives back its own sector, not the other's */
+    cmd.opcode = FEMU_OC20_VECT_READ;
+    qtest_memset(femu->dev.bus->qts, buf, 0, 4096);
+    cmd.cdw10 = cpu_to_le32((uint32_t)lba);
+    cmd.cdw11 = cpu_to_le32((uint32_t)(lba >> 32));
+    want = c.cid;
+    femu_submit(&c, &c.io, &cmd);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(got, ==, want);
+    qtest_memread(femu->dev.bus->qts, buf, out, sizeof(out));
+    g_assert_cmpint(out[0], ==, 0x6b);
+    g_assert_cmpint(out[sizeof(out) - 1], ==, 0x6b);
+
+    qtest_memset(femu->dev.bus->qts, buf, 0, 4096);
+    cmd.cdw10 = cpu_to_le32((uint32_t)other);
+    cmd.cdw11 = cpu_to_le32((uint32_t)(other >> 32));
+    want = c.cid;
+    femu_submit(&c, &c.io, &cmd);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(got, ==, want);
+    qtest_memread(femu->dev.bus->qts, buf, out, sizeof(out));
+    g_assert_cmpint(out[0], ==, 0x3c);
+    g_assert_cmpint(out[sizeof(out) - 1], ==, 0x3c);
+
+    /*
+     * An address the geometry does not have must be refused with nothing
+     * transferred. A bitmask test on the helper's status let such a read come
+     * back with another sector's data and a success code.
+     */
+    qtest_memset(femu->dev.bus->qts, buf, 0, 4096);
+    cmd.cdw10 = cpu_to_le32((uint32_t)outside);
+    cmd.cdw11 = cpu_to_le32((uint32_t)(outside >> 32));
+    want = c.cid;
+    femu_submit(&c, &c.io, &cmd);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), !=,
+                    NVME_SUCCESS);
+    g_assert_cmpint(got, ==, want);
+    qtest_memread(femu->dev.bus->qts, buf, out, sizeof(out));
+    for (i = 0; i < (int)sizeof(out); i++) {
+        g_assert_cmpint(out[i], ==, 0);
+    }
+
+    guest_free(alloc, buf);
+    guest_free(alloc, geo);
+    femu_queue_free(&c, &c.io);
     femu_disable(&c);
 }
 
@@ -1458,6 +1599,17 @@ static void femu_register_nodes(void)
         /* a zoned namespace on a controller whose own mode is a black box */
         .edge.extra_device_opts =
             "devsz_mb=128,femu_mode=1,namespaces=2,namespace_modes=bbssd,,znssd"
+    });
+    qos_add_test("oc20-vector-io", "femu", femu_test_oc20_vector_io,
+                 &(QOSGraphTestOptions) {
+        /*
+         * Three groups and five units, neither a power of two, so an address
+         * outside the geometry is representable. One gigabyte leaves the
+         * geometry eight chunks per unit.
+         */
+        .edge.extra_device_opts =
+            "devsz_mb=1024,femu_mode=0,lver=2,lnum_ch=3,lnum_lun=5,"
+            "lsecs_per_pg=4,lpgs_per_blk=256"
     });
     qos_add_test("zoned-format-index", "femu", femu_test_zoned_format_index,
                  &(QOSGraphTestOptions) {
