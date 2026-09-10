@@ -1039,7 +1039,11 @@ typedef struct FemuStatsLog {
     uint64_t    max_block_reads;  /* reads of the most-read block since erase */
     uint64_t    read_reclaims;    /* lines rewritten because of read stress */
     uint64_t    retention_refreshes; /* lines rewritten because of age */
-    uint8_t     rsvd56[456];
+    uint64_t    buffer_reads;     /* host read pages the buffer saw */
+    uint64_t    buffer_read_hits; /* of those, the pages it held */
+    uint64_t    buffer_writes;    /* host write pages */
+    uint64_t    buffer_write_hits; /* of those, the pages it already held */
+    uint8_t     rsvd88[424];
 } FemuStatsLog;
 
 typedef struct NvmePSD {
@@ -2213,6 +2217,12 @@ uint64_t ssd_nand_write_pages(struct ssd *ssd);
 uint64_t ssd_max_block_reads(struct ssd *ssd);
 uint64_t ssd_read_reclaims(struct ssd *ssd);
 uint64_t ssd_retention_refreshes(struct ssd *ssd);
+
+/* write buffer: host pages seen and the pages it answered without the media */
+uint64_t ssd_buffer_reads(struct ssd *ssd);
+uint64_t ssd_buffer_read_hits(struct ssd *ssd);
+uint64_t ssd_buffer_writes(struct ssd *ssd);
+uint64_t ssd_buffer_write_hits(struct ssd *ssd);
 
 static inline uint64_t ns_blks(NvmeNamespace *ns, uint8_t lba_idx)
 {

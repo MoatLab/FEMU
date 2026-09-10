@@ -872,6 +872,68 @@ static void femu_test_media_counters(void *obj, void *data,
     /* the factor is (programmed + relocated) / host, scaled by a thousand */
     g_assert_cmpint(waf, ==, ((nand + gc) * 1000ull) / host);
 
+    /*
+     * This device has no write buffer, so it is the control for the buffered
+     * test below: the pages the buffer would have been asked about are still
+     * counted, and none of them can be a hit.
+     */
+    g_assert_cmpint(ldq_le_p(page + 72), ==, host);
+    g_assert_cmpint(ldq_le_p(page + 80), ==, 0);
+    g_assert_cmpint(ldq_le_p(page + 56), ==, 0);
+
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, buf,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(femu->dev.bus->qts, buf, page, sizeof(page));
+    g_assert_cmpint(ldq_le_p(page + 56), >, 0);
+    g_assert_cmpint(ldq_le_p(page + 64), ==, 0);
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/*
+ * The same counters on a device that has a write buffer. Rewriting a page the
+ * buffer is still holding owes no extra program, and reading it is answered
+ * without the media; both show up as hits, which the unbuffered test above
+ * requires to stay at zero.
+ */
+static void femu_test_buffer_counters(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf, pattern;
+    uint8_t page[512];
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    buf = guest_alloc(alloc, sizeof(page));
+    pattern = guest_alloc(alloc, FEMU_DATA_SIZE);
+    qtest_memset(femu->dev.bus->qts, pattern, 0xa5, FEMU_DATA_SIZE);
+
+    /* the same page four times: three of them find it already held */
+    for (i = 0; i < 4; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, pattern)), ==,
+                        NVME_SUCCESS);
+    }
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, pattern)), ==,
+                    NVME_SUCCESS);
+    guest_free(alloc, pattern);
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, buf,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(femu->dev.bus->qts, buf, page, sizeof(page));
+
+    g_assert_cmpint(ldq_le_p(page + 72), >, 0);
+    g_assert_cmpint(ldq_le_p(page + 80), >, 0);
+    g_assert_cmpint(ldq_le_p(page + 80), <=, ldq_le_p(page + 72));
+    g_assert_cmpint(ldq_le_p(page + 64), >, 0);
+    g_assert_cmpint(ldq_le_p(page + 64), <=, ldq_le_p(page + 56));
+
     guest_free(alloc, buf);
     femu_disable(&c);
 }
@@ -996,6 +1058,13 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4"
+    });
+    qos_add_test("buffer-counters", "femu", femu_test_buffer_counters,
+                 &(QOSGraphTestOptions) {
+        /* the same device with a buffer large enough that nothing destages */
+        .edge.extra_device_opts =
+            "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,buffer_size=64"
     });
 }
 

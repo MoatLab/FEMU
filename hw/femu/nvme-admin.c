@@ -1313,6 +1313,7 @@ typedef struct FemuMediaStats {
     uint64_t rd_bytes, wr_bytes, rd_cmds, wr_cmds;
     uint64_t host_pages, gc_pages, nand_pages;
     uint64_t max_block_reads, read_reclaims, retention_refreshes;
+    uint64_t buf_reads, buf_read_hits, buf_writes, buf_write_hits;
     uint64_t media_errors;      /* summed over every namespace */
     uint64_t media_bytes;       /* host and relocated writes, in bytes */
     uint8_t  available_spare;   /* worst namespace */
@@ -1367,6 +1368,10 @@ static void nvme_collect_media_stats(FemuCtrl *n, FemuMediaStats *st)
         }
         st->read_reclaims += ssd_read_reclaims(ns->ssd);
         st->retention_refreshes += ssd_retention_refreshes(ns->ssd);
+        st->buf_reads += ssd_buffer_reads(ns->ssd);
+        st->buf_read_hits += ssd_buffer_read_hits(ns->ssd);
+        st->buf_writes += ssd_buffer_writes(ns->ssd);
+        st->buf_write_hits += ssd_buffer_write_hits(ns->ssd);
     }
 }
 
@@ -1406,6 +1411,10 @@ static uint16_t nvme_femu_stats_info(FemuCtrl *n, NvmeCmd *cmd,
     stats.max_block_reads = cpu_to_le64(st.max_block_reads);
     stats.read_reclaims = cpu_to_le64(st.read_reclaims);
     stats.retention_refreshes = cpu_to_le64(st.retention_refreshes);
+    stats.buffer_reads = cpu_to_le64(st.buf_reads);
+    stats.buffer_read_hits = cpu_to_le64(st.buf_read_hits);
+    stats.buffer_writes = cpu_to_le64(st.buf_writes);
+    stats.buffer_write_hits = cpu_to_le64(st.buf_write_hits);
 
     return dma_read_prp(n, (uint8_t *)&stats + off, trans_len, prp1, prp2);
 }

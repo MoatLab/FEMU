@@ -205,17 +205,17 @@ uint64_t ssd_read_reclaims(struct ssd *ssd)
     return ssd->read_reclaims;
 }
 
-/*
- * Media and data integrity errors, as SMART counts them: the reads and writes
- * the device failed and reported to the host. Only fault insertion produces
- * them, so a device with none configured reports none.
- */
 /* Bytes in one NAND page, for counters the host wants in bytes. */
 uint32_t ssd_page_size(struct ssd *ssd)
 {
     return (uint32_t)ssd->sp.secs_per_pg * (uint32_t)ssd->sp.secsz;
 }
 
+/*
+ * Media and data integrity errors, as SMART counts them: the reads and writes
+ * the device failed and reported to the host. Only fault insertion produces
+ * them, so a device with none configured reports none.
+ */
 uint64_t ssd_media_errors(struct ssd *ssd)
 {
     return ssd->err_read_injected + ssd->err_write_injected;
@@ -225,6 +225,33 @@ uint64_t ssd_media_errors(struct ssd *ssd)
 uint64_t ssd_retention_refreshes(struct ssd *ssd)
 {
     return ssd->retention_refreshes;
+}
+
+/*
+ * Write buffer effectiveness. The hit counts are the pages the buffer answered
+ * without touching the media: a read it still held, and a write that superseded
+ * a page it already held and so owed no extra program. Reported against the
+ * host totals so the ratio is computable, since the buffer is only configured
+ * on some devices and a zero denominator means it was never exercised.
+ */
+uint64_t ssd_buffer_reads(struct ssd *ssd)
+{
+    return ssd->sp.read_cnt;
+}
+
+uint64_t ssd_buffer_read_hits(struct ssd *ssd)
+{
+    return ssd->sp.read_hit_cnt;
+}
+
+uint64_t ssd_buffer_writes(struct ssd *ssd)
+{
+    return ssd->sp.write_cnt;
+}
+
+uint64_t ssd_buffer_write_hits(struct ssd *ssd)
+{
+    return ssd->sp.write_hit_cnt;
 }
 
 /*
