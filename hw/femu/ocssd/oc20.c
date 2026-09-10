@@ -124,6 +124,44 @@ static uint16_t oc20_advance_wp(FemuCtrl *n, NvmeNamespace *ns, uint64_t lba,
     return NVME_SUCCESS;
 }
 
+/*
+ * Advance the write pointer of every chunk the command touched, each by the
+ * run of addresses that landed in it. The validation above already splits the
+ * list this way, because a vector write is allowed to span chunks; this used
+ * to be called once with the first address and the whole length, which pushed
+ * the first chunk's pointer past its capacity -- so it never closed and later
+ * writes to it were refused -- and left every other chunk at zero, so reads of
+ * data that really was written came back as unwritten.
+ */
+static uint16_t oc20_advance_wp_all(FemuCtrl *n, NvmeNamespace *ns,
+                                    NvmeRequest *req)
+{
+    uint64_t lba = ((uint64_t *)req->slba)[0];
+    uint64_t cidx = oc20_lba_to_chunk_index(n, ns, lba);
+    uint16_t ws = 1;
+    uint16_t err;
+    uint16_t i;
+
+    for (i = 1; i < req->nlb; i++) {
+        uint64_t next_lba = ((uint64_t *)req->slba)[i];
+        uint64_t next_cidx = oc20_lba_to_chunk_index(n, ns, next_lba);
+
+        if (cidx != next_cidx) {
+            err = oc20_advance_wp(n, ns, lba, ws, req);
+            if (err) {
+                return err;
+            }
+            lba = next_lba;
+            cidx = next_cidx;
+            ws = 1;
+            continue;
+        }
+        ws++;
+    }
+
+    return oc20_advance_wp(n, ns, lba, ws, req);
+}
+
 #define max_sec_per_rq (64)
 
 /*
@@ -809,7 +847,10 @@ static uint16_t oc20_rw(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req, bool vector
     oc20_advance_status(n, ns, cmd, req);
 
     if (req->is_write) {
-        oc20_advance_wp(n, ns, ((uint64_t *)req->slba)[0], nlb, req);
+        err = oc20_advance_wp_all(n, ns, req);
+        if (err) {
+            goto fail_free;
+        }
     }
 
     g_free((void *)req->slba);
