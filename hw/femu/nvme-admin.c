@@ -927,11 +927,21 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     case NVME_POWER_MANAGEMENT:
         cqe->n.result = cpu_to_le32(n->features.power_mgmt);
         break;
-    case NVME_LBA_RANGE_TYPE:
-        rt = n->namespaces[nsid - 1].lba_range;
+    case NVME_LBA_RANGE_TYPE: {
+        /*
+         * The number of ranges is a 0's based count, so a host asking for one
+         * range put zero in the field and this transferred nothing at all.
+         * The cap was one range's worth rather than the whole table, so a
+         * host asking for more than one got only the first either way.
+         */
+        NvmeNamespace *rt_ns = &n->namespaces[nsid - 1];
+        uint32_t nr = (dw11 & 0x3f) + 1;
+
+        rt = rt_ns->lba_range;
         return dma_read_prp(n, (uint8_t *)rt,
-                MIN(sizeof(*rt), (dw11 & 0x3f) * sizeof(*rt)),
+                MIN(sizeof(rt_ns->lba_range), nr * sizeof(*rt)),
                 prp1, prp2);
+    }
     case NVME_NUMBER_OF_QUEUES:
         cqe->n.result = cpu_to_le32((n->nr_io_queues - 1) |
                 ((n->nr_io_queues - 1) << 16));
@@ -1076,10 +1086,16 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         if (nsid == NVME_NSID_BROADCAST) {
             return NVME_INVALID_FIELD | NVME_DNR;
         }
-        rt = n->namespaces[nsid - 1].lba_range;
-        return dma_write_prp(n, (uint8_t *)rt,
-                MIN(sizeof(*rt), (dw11 & 0x3f) * sizeof(*rt)),
-                prp1, prp2);
+        {
+            /* the same 0's based count, see the matching get above */
+            NvmeNamespace *rt_ns = &n->namespaces[nsid - 1];
+            uint32_t nr = (dw11 & 0x3f) + 1;
+
+            rt = rt_ns->lba_range;
+            return dma_write_prp(n, (uint8_t *)rt,
+                    MIN(sizeof(rt_ns->lba_range), nr * sizeof(*rt)),
+                    prp1, prp2);
+        }
     case NVME_NUMBER_OF_QUEUES:
         /* Coperd: nr_io_queues is 0-based */
         cqe->n.result = cpu_to_le32((n->nr_io_queues - 1) |
