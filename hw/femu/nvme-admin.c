@@ -1553,6 +1553,7 @@ static uint16_t nvme_fdp_events(FemuCtrl *n, uint32_t endgrpid,
     NvmeEnduranceGroup *endgrp;
     bool host_events = (le32_to_cpu(cmd->cdw10) >> 8) & 0x1;
     uint32_t log_size, trans_len;
+    unsigned int nelems, start, next;
     NvmeFdpEventBuffer *ebuf;
     g_autofree NvmeFdpEventsLog *elog = NULL;
     NvmeFdpEvent *event;
@@ -1575,24 +1576,44 @@ static uint16_t nvme_fdp_events(FemuCtrl *n, uint32_t endgrpid,
         ebuf = &endgrp->fdp.ctrl_events;
     }
 
-    log_size = sizeof(NvmeFdpEventsLog) + ebuf->nelems * sizeof(NvmeFdpEvent);
+    /*
+     * Take the ring's three indices once. Events are appended by a poller
+     * thread and by the FTL thread, so reading nelems to size the buffer and
+     * then reading start and next again to size the copy let an append that
+     * landed in between drive the copy past the allocation.
+     */
+    nelems = ebuf->nelems;
+    start = ebuf->start;
+    next = ebuf->next;
+    if (nelems > NVME_FDP_MAX_EVENTS) {
+        nelems = NVME_FDP_MAX_EVENTS;
+    }
+    if (start >= NVME_FDP_MAX_EVENTS || next > NVME_FDP_MAX_EVENTS) {
+        return NVME_INTERNAL_DEV_ERROR | NVME_DNR;
+    }
+
+    log_size = sizeof(NvmeFdpEventsLog) + nelems * sizeof(NvmeFdpEvent);
     if (off >= log_size) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     trans_len = MIN(log_size - off, buf_len);
     elog = g_malloc0(log_size);
-    elog->num_events = cpu_to_le32(ebuf->nelems);
+    elog->num_events = cpu_to_le32(nelems);
     event = (NvmeFdpEvent *)(elog + 1);
 
-    if (ebuf->nelems && ebuf->start == ebuf->next) {
-        unsigned int nelems = NVME_FDP_MAX_EVENTS - ebuf->start;
-        memcpy(event, &ebuf->events[ebuf->start],
-               sizeof(NvmeFdpEvent) * nelems);
-        memcpy(event + nelems, ebuf->events,
-               sizeof(NvmeFdpEvent) * ebuf->next);
-    } else if (ebuf->start < ebuf->next) {
-        memcpy(event, &ebuf->events[ebuf->start],
-               sizeof(NvmeFdpEvent) * (ebuf->next - ebuf->start));
+    /* every copy below is bounded by the nelems the buffer was sized for */
+    if (nelems && start == next) {
+        unsigned int first = MIN(NVME_FDP_MAX_EVENTS - start, nelems);
+
+        memcpy(event, &ebuf->events[start], sizeof(NvmeFdpEvent) * first);
+        if (nelems > first) {
+            memcpy(event + first, ebuf->events,
+                   sizeof(NvmeFdpEvent) * (nelems - first));
+        }
+    } else if (start < next) {
+        unsigned int cnt = MIN(next - start, nelems);
+
+        memcpy(event, &ebuf->events[start], sizeof(NvmeFdpEvent) * cnt);
     }
 
     return dma_read_prp(n, (uint8_t *)elog + off, trans_len, prp1, prp2);
