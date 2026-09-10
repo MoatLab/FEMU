@@ -1266,16 +1266,17 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
     smart.temperature[1] = (n->temperature >> 8) & 0xff;
 
     /*
-     * Healthy by default; bbssd derives it from the factory bad-block fraction.
-     * With several bbssd namespaces report the worst of them, since this is a
-     * controller-wide field.
+     * Healthy by default; the spare comes from the factory bad-block fraction
+     * the FTL was built with. Computational and key-value namespaces run the
+     * same FTL and keep the same figure, so ask every namespace that has one
+     * and report the worst, since this is a controller-wide field.
      */
     smart.available_spare = 100;
     for (i = 0; n->namespaces && i < n->num_namespaces; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
         uint8_t spare;
 
-        if (!NS_BBSSD(ns) || !ns->ssd) {
+        if (!ns->ssd) {
             continue;
         }
         spare = ssd_available_spare(ns->ssd);
