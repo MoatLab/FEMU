@@ -27,6 +27,8 @@
 #define FEMU_CNS_CS_NS_FMT  0x0a    /* command-set NS for a format index */
 #define FEMU_CSI_KV         0x01    /* key-value command set */
 #define FEMU_ZONE_ACTION_RESET  0x04
+#define FEMU_CNS_CS_CTRL    0x06    /* command-set controller identify */
+#define FEMU_CSI_ZONED      0x02    /* zoned namespace command set */
 
 typedef struct QFemu QFemu;
 
@@ -531,6 +533,39 @@ static void femu_test_io_by_shadow_doorbell(void *obj, void *data,
     guest_free(alloc, eis_addr);
     guest_free(alloc, c.dbs_addr);
     femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
+ * The zone append size limit is derived when the controller starts, by the hook
+ * belonging to the mode that needs it. Only the controller's own hook was ever
+ * called, so on a controller whose mode is something else the limit stayed at
+ * zero -- which Identify reports as no limit at all while the write path
+ * rejects anything over one host page.
+ */
+static void femu_test_zoned_append_limit(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    NvmeCmd cmd;
+    uint64_t buf;
+    uint8_t page[64];
+
+    femu_enable(&c, &femu->dev, alloc);
+    buf = guest_alloc(alloc, 4096);
+    qtest_memset(femu->dev.bus->qts, buf, 0xff, 4096);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_IDENTIFY;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(FEMU_CNS_CS_CTRL);
+    cmd.cdw11 = cpu_to_le32(FEMU_CSI_ZONED << 24);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+    qtest_memread(femu->dev.bus->qts, buf, page, sizeof(page));
+    g_assert_cmpint(page[0], >, 0);
+
+    guest_free(alloc, buf);
     femu_disable(&c);
 }
 
@@ -1211,6 +1246,12 @@ static void femu_register_nodes(void)
                  femu_test_io_by_shadow_doorbell, NULL);
     qos_add_test("features", "femu", femu_test_features, NULL);
     qos_add_test("queue-mapping", "femu", femu_test_queue_mapping, NULL);
+    qos_add_test("zoned-append-limit", "femu", femu_test_zoned_append_limit,
+                 &(QOSGraphTestOptions) {
+        /* a zoned namespace on a controller whose own mode is a black box */
+        .edge.extra_device_opts =
+            "devsz_mb=128,femu_mode=1,namespaces=2,namespace_modes=bbssd,,znssd"
+    });
     qos_add_test("zone-reset", "femu", femu_test_zone_reset,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "femu_mode=3,secsz=512"

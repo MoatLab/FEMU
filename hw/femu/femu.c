@@ -391,6 +391,49 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
     n->eis_addr_hva = 0;
 }
 
+/*
+ * Every distinct mode the controller serves gets a say in whether it can run
+ * with the settings the host has chosen, and derives from them what it needs.
+ * Only the controller's own hook was called, so a namespace whose mode differs
+ * from the controller's never ran: a zoned namespace on a controller in any
+ * other mode came ready with a zero append limit, which rejects every append
+ * larger than one host page while Identify reports no limit at all, and without
+ * the memory-page size it refuses.
+ */
+static int femu_start_ctrl_extensions(FemuCtrl *n)
+{
+    int (*seen[FEMU_NR_MODES])(struct FemuCtrl *);
+    int nseen = 0, i, j;
+
+    if (n->ext_ops.start_ctrl) {
+        seen[nseen++] = n->ext_ops.start_ctrl;
+    }
+
+    for (i = 0; n->namespaces && i < n->num_namespaces; i++) {
+        int (*sc)(struct FemuCtrl *) = n->namespaces[i].ext_ops.start_ctrl;
+
+        if (!sc) {
+            continue;
+        }
+        for (j = 0; j < nseen; j++) {
+            if (seen[j] == sc) {
+                break;
+            }
+        }
+        if (j == nseen && nseen < (int)ARRAY_SIZE(seen)) {
+            seen[nseen++] = sc;
+        }
+    }
+
+    for (j = 0; j < nseen; j++) {
+        if (seen[j](n)) {
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
 static int nvme_start_ctrl(FemuCtrl *n)
 {
     uint32_t page_bits = NVME_CC_MPS(n->bar.cc) + 12;
@@ -425,7 +468,7 @@ static int nvme_start_ctrl(FemuCtrl *n)
      * and the controller must then not come ready. The result used to be
      * discarded, so it started anyway.
      */
-    if (n->ext_ops.start_ctrl && n->ext_ops.start_ctrl(n)) {
+    if (femu_start_ctrl_extensions(n)) {
         return -1;
     }
 
