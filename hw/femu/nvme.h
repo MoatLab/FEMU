@@ -1919,6 +1919,7 @@ typedef struct FemuCtrl {
     uint64_t        dbs_addr_hva;
     uint64_t        eis_addr_hva;
     uint64_t        dbbuf_map_len;  /* bytes mapped for each of the two above */
+    void            *poller_args;   /* what each poller thread was handed */
 
     uint8_t         femu_mode;
     uint8_t         lver; /* Coperd: OCSSD version, 0x1 -> OC1.2, 0x2 -> OC2.0 */

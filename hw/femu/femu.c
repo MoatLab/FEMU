@@ -577,6 +577,7 @@ static uint64_t nvme_mmio_read(void *opaque, hwaddr addr, unsigned size)
 
 static void femu_aer_bh(void *opaque);
 static void femu_exit_extensions(FemuCtrl *n);
+static void femu_free_namespace_bitmaps(FemuCtrl *n);
 
 static void nvme_process_db_admin(FemuCtrl *n, hwaddr addr, int val)
 {
@@ -1488,6 +1489,7 @@ static void femu_realize_undo(FemuCtrl *n)
         g_free(n->namespaces[i].fdp.phs);
         n->namespaces[i].fdp.phs = NULL;
     }
+    femu_free_namespace_bitmaps(n);
     g_free(n->aer_held);
     n->aer_held = NULL;
     g_free(n->elpes);
@@ -1671,11 +1673,37 @@ static void nvme_destroy_poller(FemuCtrl *n)
         femu_ring_free(n->to_ftl[i]);
     }
 
+    g_free(n->pq);
+    n->pq = NULL;
+    g_free(n->to_poller);
+    n->to_poller = NULL;
+    g_free(n->to_ftl);
+    n->to_ftl = NULL;
+    /* the threads are joined by now, so what they were reading can go */
+    g_free(n->poller_args);
+    n->poller_args = NULL;
     g_free(n->should_isr);
     g_free((void *)n->poller_in_sweep);
     n->poller_in_sweep = NULL;
     qemu_vfree(n->poller_ctr);   /* allocated with qemu_memalign */
     n->poller_ctr = NULL;
+}
+
+/*
+ * The allocation map and the uncorrectable-block map of every namespace. They
+ * are sized from the block count, so a large device leaks tens of megabytes per
+ * add and remove without this.
+ */
+static void femu_free_namespace_bitmaps(FemuCtrl *n)
+{
+    int i;
+
+    for (i = 0; n->namespaces && i < n->num_namespaces; i++) {
+        g_free(n->namespaces[i].util);
+        n->namespaces[i].util = NULL;
+        g_free(n->namespaces[i].uncorrectable);
+        n->namespaces[i].uncorrectable = NULL;
+    }
 }
 
 /*
@@ -1752,6 +1780,9 @@ static void femu_exit(PCIDevice *pci_dev)
             g_free(n->namespaces[i].fdp.phs);
         }
     }
+    femu_free_namespace_bitmaps(n);
+    pthread_spin_destroy(&n->pcie_lock);
+    pthread_spin_destroy(&n->fw_cpu_lock);
 
     /* FDP: unregister controller from subsystem */
     if (n->subsys) {

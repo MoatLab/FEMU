@@ -374,8 +374,14 @@ static void nvme_init_poller(FemuCtrl *n)
     }
 
     n->poller = g_malloc0(sizeof(QemuThread) * (n->nr_pollers + 1));
-    NvmePollerThreadArgument *args = malloc(sizeof(NvmePollerThreadArgument) *
-                                            (n->nr_pollers + 1));
+    /*
+     * The threads read this for as long as they run, so it is released with
+     * them rather than here; it used to be released nowhere.
+     */
+    NvmePollerThreadArgument *args = g_malloc0(
+        sizeof(NvmePollerThreadArgument) * (n->nr_pollers + 1));
+
+    n->poller_args = args;
     for (i = 1; i <= n->nr_pollers; i++) {
         args[i].n = n;
         args[i].index = i;
