@@ -898,7 +898,17 @@ uint16_t kvssd_ftl_list(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
     uint32_t nrk = 0;
     uint16_t status;
     uint64_t lat;
-    (void)n;
+
+    /*
+     * The host buffer size is taken straight from the command and used to
+     * size the list this builds, so without a bound a host could ask for four
+     * gigabytes at a time. The maximum data transfer the controller
+     * advertises is the limit that already applies to the transfer itself.
+     */
+    status = nvme_check_mdts(n, hbs);
+    if (status) {
+        return status;
+    }
 
     qemu_mutex_lock(&s->lock);
     status = kv_build_list_locked(s, start_key, start_len, hbs, &buf, &len, &nrk);
