@@ -1078,6 +1078,7 @@ static void nvme_init_ctrl(FemuCtrl *n)
     }
     subnqn           = g_strdup_printf("nqn.2019-08.org.qemu:%s", n->serial);
     strpadcpy((char *)id->subnqn, sizeof(id->subnqn), subnqn, '\0');
+    g_free(subnqn);
     id->fuses        = cpu_to_le16(0);
     id->fna          = 0;
     id->vwc          = n->vwc;
@@ -1340,6 +1341,8 @@ static void nvme_register_extensions_ns(FemuCtrl *n, NvmeNamespace *ns)
  */
 static void femu_realize_undo(FemuCtrl *n)
 {
+    int i;
+
     /*
      * Namespaces that did come up own an FTL and its channel tree, which is
      * the largest allocation here. Every mode's exit tests the state it frees
@@ -1358,6 +1361,12 @@ static void femu_realize_undo(FemuCtrl *n)
     }
     g_free(n->features.int_vector_config);
     n->features.int_vector_config = NULL;
+    g_free(n->cmbuf);
+    n->cmbuf = NULL;
+    for (i = 0; n->namespaces && i < n->num_namespaces; i++) {
+        g_free(n->namespaces[i].fdp.phs);
+        n->namespaces[i].fdp.phs = NULL;
+    }
     g_free(n->aer_held);
     n->aer_held = NULL;
     g_free(n->elpes);
@@ -1629,6 +1638,7 @@ static void femu_exit(PCIDevice *pci_dev)
     }
 
     g_free(n->namespaces);
+    g_free(n->cmbuf);   /* the controller memory buffer, if configured */
     g_free(n->features.int_vector_config);
     {
         NvmeAsyncEvent *event;
