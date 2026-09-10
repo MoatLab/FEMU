@@ -941,6 +941,21 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
             g_free(ns_modes);
             return 1;
         }
+        /*
+         * The same tables are reached through the controller's handler table,
+         * which namespace_modes does not change. Naming ocssd for a namespace
+         * of a controller in another mode therefore looks up another mode's
+         * state and dereferences it as its own, and naming another mode for
+         * every namespace of an ocssd controller leaves those tables
+         * uninitialized under the admin commands that still read them.
+         */
+        if ((ns_modes[i] == FEMU_OCSSD_MODE) != OCSSD(n)) {
+            error_setg(errp, "ocssd is a controller mode: femu_mode and "
+                       "namespace_modes must both select it, or neither");
+            g_free(ns_sizes);
+            g_free(ns_modes);
+            return 1;
+        }
     }
 
     /*
