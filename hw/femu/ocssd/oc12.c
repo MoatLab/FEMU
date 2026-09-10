@@ -420,14 +420,32 @@ static int oc12_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t ppa;
     int i;
 
-    /* Erase */
+    /*
+     * Erase. The address list is the one the erase handler read from the
+     * command, the same way read and write pass theirs; this used to read
+     * req->slba, which erase never sets, so the chip it charged came from
+     * whatever the previous command on this request left behind -- a freed
+     * list pointer, whose address bits are not a chip of this device. Every
+     * block in the list is erased, so every chip it names is busy, not just
+     * the first.
+     */
     if (opcode == OC12_CMD_ERASE) {
-        ppa = req->slba;
-        lun = PPA_LUN(ln, ppa);
-        ch = PPA_CH(ln, ppa);
-        lunid = ch * c->num_lun + lun;
+        uint32_t nlb = le16_to_cpu(ocrw->nlb) + 1;
 
-        req->expire_time = advance_chip_timestamp(n, lunid, now, opcode, 0);
+        for (i = 0; i < nlb; i++) {
+            int64_t ts;
+
+            ppa = ((uint64_t *)req->slba)[i];
+            lun = PPA_LUN(ln, ppa);
+            ch = PPA_CH(ln, ppa);
+            lunid = ch * c->num_lun + lun;
+
+            ts = advance_chip_timestamp(n, lunid, now, opcode, 0);
+            if (ts > req->expire_time) {
+                req->expire_time = ts;
+            }
+        }
+
         return 0;
     }
 
@@ -574,12 +592,14 @@ static uint16_t oc12_read(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     g_free(msl);
     g_free((void *)req->slba);
+    req->slba = 0;
 
     return NVME_SUCCESS;
 
 fail_free:
     g_free(msl);
     g_free((void *)req->slba);
+    req->slba = 0;
 
     return err;
 }
@@ -685,12 +705,14 @@ static uint16_t oc12_write(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     g_free(msl);
     g_free((void *)req->slba);
+    req->slba = 0;
 
     return NVME_SUCCESS;
 
 fail_free:
     g_free(msl);
     g_free((void *)req->slba);
+    req->slba = 0;
 
     return err;
 }
@@ -895,6 +917,7 @@ static uint16_t oc12_erase_async(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     Oc12RwCmd *dm = (Oc12RwCmd *)cmd;
     uint32_t nlb = le16_to_cpu(dm->nlb) + 1;
     uint64_t *psl;
+    uint32_t i;
 
     /*
      * The list below holds max_sec_per_rq entries while nlb comes from the
@@ -909,9 +932,25 @@ static uint16_t oc12_erase_async(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     oc12_read_ppa_list(n, dm, psl);
 
+    /*
+     * Read and write check every address against the geometry; erase never
+     * did, and the timing model turns the channel and lun fields into an
+     * index into its per-chip array. A geometry whose axis counts are not
+     * powers of two leaves those fields holding values the device does not
+     * have, and the product of the two maxima can exceed the array.
+     */
+    for (i = 0; i < nlb; i++) {
+        if (!oc12_ppa_in_geometry(ln, psl[i])) {
+            g_free(psl);
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+    }
+
     oc12_meta_blk_set_erased(ns, ln, psl, nlb);
 
+    req->slba = (uint64_t)psl;
     oc12_advance_status(n, ns, cmd, req);
+    req->slba = 0;
 
     g_free(psl);
     return NVME_SUCCESS;
