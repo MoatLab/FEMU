@@ -210,6 +210,12 @@ uint64_t ssd_read_reclaims(struct ssd *ssd)
  * the device failed and reported to the host. Only fault insertion produces
  * them, so a device with none configured reports none.
  */
+/* Bytes in one NAND page, for counters the host wants in bytes. */
+uint32_t ssd_page_size(struct ssd *ssd)
+{
+    return (uint32_t)ssd->sp.secs_per_pg * (uint32_t)ssd->sp.secsz;
+}
+
 uint64_t ssd_media_errors(struct ssd *ssd)
 {
     return ssd->err_read_injected + ssd->err_write_injected;
@@ -265,13 +271,18 @@ uint64_t ssd_max_block_reads(struct ssd *ssd)
 uint8_t ssd_percentage_used(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;
-    uint64_t avg, pct;
+    uint64_t denom, pct;
 
     if (!ssd->rated_pe_cycles || spp->tt_blks <= 0) {
         return 0;
     }
-    avg = ssd->total_erases / (uint64_t)spp->tt_blks;
-    pct = (avg * 100ull) / ssd->rated_pe_cycles;
+    /*
+     * Divide once. Taking the average first threw the fraction away, so a
+     * device half way through its first cycle across every block -- a third
+     * of a ten-cycle rating, say -- still reported nothing used.
+     */
+    denom = (uint64_t)spp->tt_blks * ssd->rated_pe_cycles;
+    pct = (ssd->total_erases * 100ull) / denom;
 
     return pct > 255 ? 255 : (uint8_t)pct;
 }

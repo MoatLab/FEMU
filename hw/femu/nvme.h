@@ -2196,6 +2196,7 @@ uint64_t zns_ftl_process_req(NvmeNamespace *ns, NvmeRequest *req);
 uint8_t ssd_available_spare(struct ssd *ssd);
 uint8_t ssd_percentage_used(struct ssd *ssd);
 uint64_t ssd_media_errors(struct ssd *ssd);
+uint32_t ssd_page_size(struct ssd *ssd);
 uint64_t zns_media_errors(NvmeNamespace *ns);
 
 /* write amplification: factor scaled by 1000, plus the raw page counters */
