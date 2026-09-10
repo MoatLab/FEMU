@@ -427,6 +427,14 @@ static uint16_t nvme_set_db_memory(FemuCtrl *n, const NvmeCmd *cmd)
     if (n->dbs_addr) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
+    /*
+     * Each buffer is one memory page and holds two entries per queue plus the
+     * admin pair, so a controller with more queues than fit cannot use them.
+     * The loop below wrote past the mapping rather than saying so.
+     */
+    if ((2ULL * n->nr_io_queues + 1) * dbbuf_entry_sz > n->page_size) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
 
     dbs_hva = dma_memory_map(as, dbs_addr, &dbs_tlen, DMA_DIRECTION_FROM_DEVICE,
                              MEMTXATTRS_UNSPECIFIED);
@@ -456,6 +464,7 @@ static uint16_t nvme_set_db_memory(FemuCtrl *n, const NvmeCmd *cmd)
     n->eis_addr = eis_addr;
     n->dbs_addr_hva = (uint64_t)dbs_hva;
     n->eis_addr_hva = (uint64_t)eis_hva;
+    n->dbbuf_map_len = n->page_size;
 
     for (i = 1; i <= n->nr_io_queues; i++) {
         NvmeSQueue *sq = n->sq[i];
@@ -1154,15 +1163,24 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
             n->temp_warn_issued = 0;
         }
         break;
-    case NVME_ERROR_RECOVERY:
+    case NVME_ERROR_RECOVERY: {
+        /*
+         * The read path tests this on the pollers to decide whether an
+         * unwritten block is an error, so change it with the dataplane
+         * stopped, as the write cache setting alongside does.
+         */
+        bool resume = nvme_pause_pollers(n);
+
         if (nsid == NVME_NSID_BROADCAST) {
             for (uint32_t i = 0; i < n->num_namespaces; i++) {
                 n->namespaces[i].err_rec = dw11;
             }
-            break;
+        } else {
+            nvme_ns(n, nsid)->err_rec = dw11;
         }
-        nvme_ns(n, nsid)->err_rec = dw11;
+        nvme_resume_pollers(n, resume);
         break;
+    }
     case NVME_VOLATILE_WRITE_CACHE: {
         /*
          * buffer_enabled() reads this on the FTL thread to decide whether the

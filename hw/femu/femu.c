@@ -385,10 +385,24 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
     n->bar.cc = 0;
     n->features.temp_thresh = 0x14d;
     n->temp_warn_issued = 0;
+    /*
+     * Release the doorbell buffers as well as forgetting them: each enable and
+     * configure took a mapping reference that only the device going away gave
+     * back, so a guest that resets repeatedly kept one reference per cycle.
+     */
+    if (n->dbs_addr_hva) {
+        AddressSpace *as = pci_get_address_space(&n->parent_obj);
+
+        dma_memory_unmap(as, (void *)n->dbs_addr_hva, n->dbbuf_map_len,
+                         DMA_DIRECTION_FROM_DEVICE, 0);
+        dma_memory_unmap(as, (void *)n->eis_addr_hva, n->dbbuf_map_len,
+                         DMA_DIRECTION_FROM_DEVICE, 0);
+    }
     n->dbs_addr = 0;
     n->dbs_addr_hva = 0;
     n->eis_addr = 0;
     n->eis_addr_hva = 0;
+    n->dbbuf_map_len = 0;
 }
 
 /*

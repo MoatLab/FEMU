@@ -538,6 +538,42 @@ static void femu_test_io_by_shadow_doorbell(void *obj, void *data,
 }
 
 /*
+ * The shadow doorbell buffers are one memory page each, holding two entries per
+ * queue. A controller with more queues than a page holds cannot use them, and
+ * the seeding loop wrote past the mapping instead of saying so.
+ */
+static void femu_test_dbbuf_too_many_queues(void *obj, void *data,
+                                            QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    NvmeCmd cmd;
+    uint64_t dbs, eis;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    dbs = guest_alloc(alloc, 4096);
+    eis = guest_alloc(alloc, 4096);
+    qtest_memset(femu->dev.bus->qts, dbs, 0, 4096);
+    qtest_memset(femu->dev.bus->qts, eis, 0, 4096);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_DBBUF_CONFIG;
+    cmd.dptr.prp1 = cpu_to_le64(dbs);
+    cmd.dptr.prp2 = cpu_to_le64(eis);
+    g_assert_cmpint(femu_admin(&c, &cmd), !=, NVME_SUCCESS);
+
+    /* the registers still drive the queue */
+    femu_round_trip(&c, 1);
+
+    guest_free(alloc, eis);
+    guest_free(alloc, dbs);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
  * Creating and deleting a completion queue repeatedly must not cost the host
  * anything that it keeps. Each create took an interrupt route and a file
  * descriptor and only the controller shutdown gave them back, and the delete
@@ -1306,6 +1342,11 @@ static void femu_register_nodes(void)
     qos_add_test("features", "femu", femu_test_features, NULL);
     qos_add_test("queue-mapping", "femu", femu_test_queue_mapping, NULL);
     qos_add_test("cq-churn", "femu", femu_test_cq_churn, NULL);
+    qos_add_test("dbbuf-too-many-queues", "femu",
+                 femu_test_dbbuf_too_many_queues, &(QOSGraphTestOptions) {
+        /* two entries per queue at four bytes each is past a 4 KiB page */
+        .edge.extra_device_opts = "queues=1024"
+    });
     qos_add_test("zoned-append-limit", "femu", femu_test_zoned_append_limit,
                  &(QOSGraphTestOptions) {
         /* a zoned namespace on a controller whose own mode is a black box */
