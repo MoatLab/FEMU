@@ -306,8 +306,18 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
     NvmeAsyncEvent *event;
     int i;
 
-    /* Coperd: pause nvme poller at earliest convenience */
-    n->dataplane_started = false;
+    /*
+     * Stop the dataplane before anything below runs. Waiting for the pollers
+     * alone is not enough: the FTL thread holds a request for the whole of its
+     * media-latency calculation, and requests sit in each poller's pending
+     * list, so the request arrays freed further down stay reachable from both.
+     *
+     * nvme_pause_pollers() clears dataplane_started itself and then waits for
+     * both to go quiet. Clearing the flag here first made it return at its own
+     * first line without waiting for anything, which is what this call was
+     * added to do.
+     */
+    nvme_pause_pollers(n);
 
     /*
      * Drop every Async Event Request the controller was holding, along with any
@@ -326,17 +336,6 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
     n->aer_mask = 0;
     n->outstanding_aers = 0;
     n->temp_warn_issued = 0;
-
-    /*
-     * Stop the dataplane before freeing the queues and unmapping the shadow
-     * doorbell regions below. Waiting for the pollers alone is not enough: the
-     * FTL thread holds a request for the whole of its media-latency
-     * calculation, and requests sit in each poller's pending list, so the
-     * request arrays freed below stay reachable from both. Delete I/O
-     * Submission Queue already pauses and drains for exactly this; a reset
-     * frees every queue at once and kept its own weaker, poller-only wait.
-     */
-    nvme_pause_pollers(n);
 
     if (shutdown) {
         femu_debug("shutting down NVMe Controller ...\n");
