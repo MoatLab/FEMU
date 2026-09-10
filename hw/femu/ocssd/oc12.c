@@ -1091,7 +1091,7 @@ static int oc12_init_params(FemuCtrl *n)
     return 0;
 }
 
-static int oc12_init_more(FemuCtrl *n)
+static int oc12_init_more(FemuCtrl *n, Error **errp)
 {
     Oc12Ctrl *ln;
     Oc12IdGroup *c;
@@ -1099,6 +1099,7 @@ static int oc12_init_more(FemuCtrl *n)
     struct Oc12IdAddrFormat *ppaf;
     Oc12Params *lps;
     uint64_t chnl_blks;
+    uint64_t blks_per_lun;
     int ret = 0;
     int i;
 
@@ -1108,11 +1109,22 @@ static int oc12_init_more(FemuCtrl *n)
 
     oc12_init_params(n);
 
-    if (lps->mtype != 0)
-        femu_err("FEMU: Only NAND Flash Memory supported at the moment\n");
-
-    if ((lps->num_pln > 4) || (lps->num_pln == 3))
-        femu_err("FEMU: Only 1/2/4-plane modes supported\n");
+    /*
+     * These used to print and carry on, and the failures further down returned
+     * an error nobody looked at, so the device realized with an address format
+     * of all zeroes and no bad block table. Every address then decoded to the
+     * first sector and the first bad block table command dereferenced a null
+     * pointer. Refuse the device instead.
+     */
+    if (lps->mtype != 0) {
+        error_setg(errp, "FEMU ocssd: only NAND flash memory is supported");
+        return -1;
+    }
+    if (lps->num_pln > 4 || lps->num_pln == 3) {
+        error_setg(errp, "FEMU ocssd: lnum_pln must be 1, 2 or 4, got %d",
+                   lps->num_pln);
+        return -1;
+    }
 
     oc12_init_misc(n);
 
@@ -1133,7 +1145,20 @@ static int oc12_init_more(FemuCtrl *n)
         c->num_lun = lps->num_lun;
         c->num_pln = lps->num_pln;
 
-        c->num_blk = cpu_to_le16(chnl_blks) / (c->num_lun * c->num_pln);
+        /*
+         * The count is reported in a 16 bit field, so it has to fit in one:
+         * passing a 64 bit value through the byte swap before dividing silently
+         * described a fraction of the media on a large device, and gave the
+         * wrong answer on a big-endian host for any size.
+         */
+        blks_per_lun = chnl_blks / ((uint64_t)c->num_lun * c->num_pln);
+        if (!blks_per_lun || blks_per_lun > UINT16_MAX) {
+            error_setg(errp, "FEMU ocssd: the geometry gives %" PRIu64
+                       " blocks per lun; it must be in [1, %u]",
+                       blks_per_lun, UINT16_MAX);
+            return -1;
+        }
+        c->num_blk = cpu_to_le16((uint16_t)blks_per_lun);
         c->num_pg = cpu_to_le16(lps->pgs_per_blk);
         c->csecs = cpu_to_le16(lps->sec_size);
         c->fpg_sz = cpu_to_le16(lps->sec_size * lps->sec_per_pg);
@@ -1162,15 +1187,18 @@ static int oc12_init_more(FemuCtrl *n)
             c->mpos = cpu_to_le32(0x40404); /* quad plane */
             break;
         default:
-            femu_err("Unsupported NAND plane type (%d)\n", c->num_pln);
-            return -EINVAL;
+            error_setg(errp, "FEMU ocssd: unsupported NAND plane count %d",
+                       c->num_pln);
+            return -1;
         }
 
         c->cpar = cpu_to_le16(0);
         c->mccap = 1;
         ret = oc12_init_bbtbl(n, ns);
-        if (ret)
+        if (ret) {
+            error_setg(errp, "FEMU ocssd: could not build the bad block table");
             return ret;
+        }
 
         /* calculated values */
         lps->sec_per_pl = lps->sec_per_pg * c->num_pln;
@@ -1216,7 +1244,7 @@ static int oc12_init_more(FemuCtrl *n)
 
         ns->tbl_entries = ns->ns_blks;
         if (ns->tbl) {
-            g_free(ns->tbl);
+            qemu_vfree(ns->tbl);
         }
         ns->tbl = qemu_memalign(4096, oc12_tbl_size(ns));
         oc12_tbl_initialize(ns);
@@ -1226,13 +1254,13 @@ static int oc12_init_more(FemuCtrl *n)
 
     ret = oc12_init_meta(ln);
     if (ret) {
-        femu_err("oc12_init_meta failed\n");
+        error_setg(errp, "FEMU ocssd: could not build the metadata area");
         return ret;
     }
 
     ret = (n->oc12_ctrl->read_l2p_tbl) ? oc12_read_tbls(n) : 0;
     if (ret) {
-        femu_err("read_l2p_tbl failed\n");
+        error_setg(errp, "FEMU ocssd: could not read the translation tables");
         return ret;
     }
 
@@ -1241,7 +1269,38 @@ static int oc12_init_more(FemuCtrl *n)
 
 static void oc12_exit(FemuCtrl *n)
 {
+    Oc12Ctrl *ln = n->oc12_ctrl;
+    int i;
+
     oc12_release_locks(n);
+
+    /*
+     * Everything the setup allocated: the per-lun bad block tables, the
+     * translation table of each namespace and the metadata area. None of it was
+     * released, so each add and remove of the device cost tens of megabytes.
+     */
+    for (i = 0; ln && n->namespaces && i < n->num_namespaces; i++) {
+        NvmeNamespace *ns = &n->namespaces[i];
+        Oc12IdGroup *c = &ln->id_ctrl.groups[0];
+        int nr_luns = c->num_ch * c->num_lun;
+        int j;
+
+        for (j = 0; ns->bbtbl && j < nr_luns; j++) {
+            g_free(ns->bbtbl[j]);
+        }
+        g_free(ns->bbtbl);
+        ns->bbtbl = NULL;
+        qemu_vfree(ns->tbl);
+        ns->tbl = NULL;
+        ns->tbl_entries = 0;
+    }
+
+    if (ln) {
+        g_free(ln->meta_buf);
+        ln->meta_buf = NULL;
+    }
+    g_free(n->oc12_ctrl);
+    n->oc12_ctrl = NULL;
 }
 
 static uint16_t oc12_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
@@ -1297,7 +1356,9 @@ static void oc12_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         id_ns->vs[0] = 0x1;
     }
 
-    oc12_init_more(n);
+    if (oc12_init_more(n, errp)) {
+        return;
+    }
 }
 
 int nvme_register_ocssd12(FemuCtrl *n)
