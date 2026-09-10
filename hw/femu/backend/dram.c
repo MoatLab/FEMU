@@ -129,7 +129,14 @@ int backend_rw(SsdDramBackend *b, QEMUSGList *qsg, uint64_t *lbal, bool is_write
         }
 
         if (b->femu_mode == FEMU_OCSSD_MODE) {
-            mb_oft = lbal[sg_cur_index];
+            /*
+             * One offset per scatter-gather entry. Reading the next one after
+             * the index has passed the last entry reads one element off the
+             * end of the list: the value went unused, but the read did not.
+             */
+            if (sg_cur_index < qsg->nsg) {
+                mb_oft = lbal[sg_cur_index];
+            }
         } else if (b->femu_mode == FEMU_BBSSD_MODE ||
                    b->femu_mode == FEMU_NOSSD_MODE ||
                    b->femu_mode == FEMU_ZNSSD_MODE ||
