@@ -25,7 +25,6 @@ static void oc12_tbl_initialize(NvmeNamespace *ns)
 
 static uint64_t ppa2secidx(Oc12Ctrl *ln, uint64_t ppa)
 {
-    Oc12IdGroup *c = &ln->id_ctrl.groups[0];
     uint64_t ch, lun, pln, blk, pg, sec;
     uint64_t r;
 
@@ -36,14 +35,23 @@ static uint64_t ppa2secidx(Oc12Ctrl *ln, uint64_t ppa)
     pg  = PPA_PG(ln, ppa);
     sec = PPA_SEC(ln, ppa);
 
+    /*
+     * Flatten the address, sector fastest, then plane, page, block, lun and
+     * channel. The strides for that are worked out once at start-up and kept
+     * in params; this multiplied each axis by its own count instead, which is
+     * not a stride at all and is not even injective -- with three channels
+     * and four sectors to a page, channel 1 sector 0 and channel 0 sector 3
+     * both come to 3, so metadata stored against one sector reads back
+     * against another.
+     */
     r  = sec;
-    r += ch * c->num_ch;
-    r += lun * c->num_lun;
-    r += pln * c->num_pln;
-    r += blk * c->num_blk;
-    r += pg * c->num_pg;
+    r += pln * ln->params.pl_units;
+    r += pg  * ln->params.pg_units;
+    r += blk * ln->params.blk_units;
+    r += lun * ln->params.lun_units;
+    r += ch  * ln->params.ch_units;
 
-    if (r > ln->params.total_units) {
+    if (r >= ln->params.total_units) {
         femu_err("Out-of-range PPA detected!"
                  "ch:%lu,lun:%lu,blk:%lu,pg:%lu,pl:%lu,sec:%lu\n", ch, lun, blk,
                  pg, pln, sec);
