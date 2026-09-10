@@ -804,6 +804,27 @@ struct zns_zone_reset_ctx {
 };
 
 /*
+ * A zone that has gone back to Empty or Offline holds no data: the spec has its
+ * logical blocks deallocated, and this controller reports that a deallocated
+ * block reads as zeros. The read path goes straight to the backing store by
+ * logical block, so the store is what has to be cleared -- the same thing the
+ * NVM path's deallocate does, and the write pointer alone does not do it.
+ */
+static void zns_deallocate_zone(NvmeNamespace *ns, NvmeZone *zone)
+{
+    uint64_t slba = zone->d.zslba;
+    uint64_t left = ns->zone_size;
+
+    while (left) {
+        uint32_t nlb = left > UINT32_MAX ? UINT32_MAX : (uint32_t)left;
+
+        nvme_deallocate_range(ns->ctrl, ns, slba, nlb);
+        slba += nlb;
+        left -= nlb;
+    }
+}
+
+/*
  * Move the zone descriptor to Empty and record the zone for the FTL thread.
  *
  * This runs on a poller thread. The zone descriptors are read and written only
@@ -830,6 +851,7 @@ static void zns_zone_reset_state(NvmeRequest *req, NvmeZone *zone)
         zone->w_ptr = zone->d.zslba;
         zone->d.wp = zone->w_ptr;
         zns_assign_zone_state(ns, zone, NVME_ZONE_STATE_EMPTY);
+        zns_deallocate_zone(ns, zone);
         break;
     default:
         break;
@@ -971,6 +993,7 @@ static uint16_t zns_offline_zone(NvmeNamespace *ns, NvmeZone *zone,
     switch (state) {
     case NVME_ZONE_STATE_READ_ONLY:
         zns_assign_zone_state(ns, zone, NVME_ZONE_STATE_OFFLINE);
+        zns_deallocate_zone(ns, zone);
         /* fall through */
     case NVME_ZONE_STATE_OFFLINE:
         return NVME_SUCCESS;
@@ -1134,11 +1157,6 @@ static inline uint16_t zns_check_bounds(NvmeNamespace *ns, uint64_t slba,
     return NVME_SUCCESS;
 }
 
-static uint16_t zns_check_dulbe(NvmeNamespace *ns, uint64_t slba, uint32_t nlb)
-{
-    return NVME_SUCCESS;
-}
-
 static uint16_t zns_map_dptr(FemuCtrl *n, size_t len, NvmeRequest *req)
 {
     uint64_t prp1, prp2;
@@ -1226,7 +1244,7 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
            Management command.
         */
         if (NVME_ERR_REC_DULBE(ns->err_rec)) {
-            status = zns_check_dulbe(ns, slba, nlb);
+            status = nvme_check_dulbe(n, ns, slba, slba + nlb);
             if (status) {
                 goto err;
             }
@@ -1255,6 +1273,13 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     {
         struct zns_ssd *zns = ns->zns;
 
+        /*
+         * Record the blocks as written, as the NVM path does. Without it the
+         * allocation map stays empty for a zoned namespace, so the
+         * deallocated-or-unwritten error the controller advertises could never
+         * be reported for any block, written or not.
+         */
+        nvme_mark_written(ns, slba, nlb);
         zns_finalize_zoned_write(ns, req, false);
 
         /*

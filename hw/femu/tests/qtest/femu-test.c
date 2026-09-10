@@ -26,6 +26,7 @@
 /* not in QEMU's own block/nvme.h */
 #define FEMU_CNS_CS_NS_FMT  0x0a    /* command-set NS for a format index */
 #define FEMU_CSI_KV         0x01    /* key-value command set */
+#define FEMU_ZONE_ACTION_RESET  0x04
 
 typedef struct QFemu QFemu;
 
@@ -529,6 +530,61 @@ static void femu_test_io_by_shadow_doorbell(void *obj, void *data,
 
     guest_free(alloc, eis_addr);
     guest_free(alloc, c.dbs_addr);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
+ * A zone that has been reset holds no data. This controller reports that a
+ * deallocated block reads as zeros, and the read path goes straight to the
+ * backing store by logical block, so resetting the write pointer alone leaves
+ * the old content there to be read back.
+ */
+static void femu_test_zone_reset(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    NvmeCmd cmd;
+    uint64_t buf;
+    uint8_t out[FEMU_DATA_SIZE];
+    uint16_t want, got;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    qtest_memset(femu->dev.bus->qts, buf, 0x5a, FEMU_DATA_SIZE);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+
+    qtest_memset(femu->dev.bus->qts, buf, 0, FEMU_DATA_SIZE);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                    NVME_SUCCESS);
+    qtest_memread(femu->dev.bus->qts, buf, out, sizeof(out));
+    g_assert_cmpint(out[0], ==, 0x5a);
+    g_assert_cmpint(out[FEMU_DATA_SIZE - 1], ==, 0x5a);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_CMD_ZONE_MGMT_SEND;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.cdw13 = cpu_to_le32(FEMU_ZONE_ACTION_RESET);
+    want = c.cid;
+    femu_submit(&c, &c.io, &cmd);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(got, ==, want);
+
+    qtest_memset(femu->dev.bus->qts, buf, 0xff, FEMU_DATA_SIZE);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                    NVME_SUCCESS);
+    qtest_memread(femu->dev.bus->qts, buf, out, sizeof(out));
+    for (i = 0; i < FEMU_DATA_SIZE; i++) {
+        g_assert_cmpint(out[i], ==, 0);
+    }
+
+    guest_free(alloc, buf);
     femu_queue_free(&c, &c.io);
     femu_disable(&c);
 }
@@ -1155,6 +1211,10 @@ static void femu_register_nodes(void)
                  femu_test_io_by_shadow_doorbell, NULL);
     qos_add_test("features", "femu", femu_test_features, NULL);
     qos_add_test("queue-mapping", "femu", femu_test_queue_mapping, NULL);
+    qos_add_test("zone-reset", "femu", femu_test_zone_reset,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=3,secsz=512"
+    });
     qos_add_test("identify-other-csi", "femu", femu_test_identify_other_csi,
                  &(QOSGraphTestOptions) {
         /* Open-Channel 2.0, whose state object is far smaller than KV's */
