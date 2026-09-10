@@ -84,6 +84,21 @@ static bool nvme_subsys_setup_fdp(NvmeSubsystem *subsys, Error **errp)
     endgrp->fdp.runs = subsys->params.fdp.runs;
     endgrp->fdp.nru = subsys->params.fdp.nru;
 
+    /*
+     * One active reclaim unit per placement handle, not one per handle and
+     * reclaim group. A write that names a group other than the first is given
+     * the first group's unit anyway -- the assignment that reads the named
+     * group is overwritten on the next line -- and that unit is then filed in
+     * the named group's queue, where its recorded position indexes a heap it
+     * does not belong to. The check that would have caught it is an ftl_assert,
+     * which is compiled out. Until the model holds a unit per handle and group,
+     * say so rather than corrupt the queues quietly.
+     */
+    if (subsys->params.fdp.nrg > 1) {
+        error_setg(errp, "fdp.nrg must be 1: placement into a reclaim group "
+                   "other than the first is not implemented");
+        return false;
+    }
     if (!subsys->params.fdp.nrg) {
         error_setg(errp, "fdp.nrg must be non-zero");
         return false;
