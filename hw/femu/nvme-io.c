@@ -687,7 +687,24 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
     }
 
 mapped:
-    assert(((uint64_t)nlb << data_shift) == req->qsg.size);
+    /*
+     * A data buffer in the controller memory buffer is described by an iovec
+     * rather than a scatter list, and the media path below takes the scatter
+     * list, so the transfer would move nothing. The assertion that the two
+     * agree aborted the process on a guest command instead of refusing it.
+     */
+    if (!req->qsg.nsg) {
+        qemu_iovec_destroy(&req->iov);
+        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
+                            offsetof(NvmeRwCmd, prp1), 0, ns->id);
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    if (((uint64_t)nlb << data_shift) != req->qsg.size) {
+        qemu_sglist_destroy(&req->qsg);
+        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
+                            offsetof(NvmeRwCmd, prp1), 0, ns->id);
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
 
     req->slba = slba;
     req->status = NVME_SUCCESS;
@@ -862,6 +879,15 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     } else if (nvme_map_prp(&req->qsg, &req->iov, prp1, prp2, data_size, n)) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
                             offsetof(NvmeRwCmd, prp1), 0, ns->id);
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    /*
+     * Same as the read and write path: a buffer in the controller memory buffer
+     * comes back as an iovec, and the loop below walks the scatter list. With
+     * none it compared nothing at all and reported a match.
+     */
+    if (!req->qsg.nsg) {
+        qemu_iovec_destroy(&req->iov);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     if (find_next_bit(ns->uncorrectable, elba, slba) < elba) {

@@ -612,6 +612,40 @@ static void femu_test_cq_churn(void *obj, void *data, QGuestAllocator *alloc)
 }
 
 /*
+ * A data buffer inside the controller memory buffer is described by an iovec
+ * rather than a scatter list, and the media path takes the scatter list, so the
+ * transfer moves nothing. The assertion that the two agreed aborted the process
+ * on a guest command; it has to be refused.
+ */
+static void femu_test_cmb_data_buffer(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    QPCIBar cmb;
+    uint64_t buf;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    cmb = qpci_iomap(&femu->dev, 2, NULL);
+
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, cmb.addr)), !=,
+                    NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, cmb.addr)), !=,
+                    NVME_SUCCESS);
+
+    /* an ordinary buffer on the same controller still works */
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    qtest_memset(femu->dev.bus->qts, buf, 0x33, FEMU_DATA_SIZE);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
  * The zone append size limit is derived when the controller starts, by the hook
  * belonging to the mode that needs it. Only the controller's own hook was ever
  * called, so on a controller whose mode is something else the limit stayed at
@@ -1376,6 +1410,11 @@ static void femu_register_nodes(void)
     qos_add_test("features", "femu", femu_test_features, NULL);
     qos_add_test("queue-mapping", "femu", femu_test_queue_mapping, NULL);
     qos_add_test("cq-churn", "femu", femu_test_cq_churn, NULL);
+    qos_add_test("cmb-data-buffer", "femu", femu_test_cmb_data_buffer,
+                 &(QOSGraphTestOptions) {
+        /* four megabytes of controller memory on base address register two */
+        .edge.extra_device_opts = "cmbsz=0x400000,cmbloc=2"
+    });
     qos_add_test("dbbuf-too-many-queues", "femu",
                  femu_test_dbbuf_too_many_queues, &(QOSGraphTestOptions) {
         /* two entries per queue at four bytes each is past a 4 KiB page */

@@ -1,10 +1,30 @@
 #include "./nvme.h"
 
+/*
+ * Does this transfer land inside the controller memory buffer? The buffer is a
+ * base address register, so it has no address until the host maps it, and an
+ * unmapped region reports zero: without the mapped test every guest address
+ * below the buffer's size was taken as an offset into it, so a queue or a list
+ * the host had put in low memory was read and written from the wrong place and
+ * the controller simply stopped answering.
+ */
+bool nvme_addr_is_cmb(FemuCtrl *n, uint64_t addr, uint64_t len)
+{
+    uint64_t base, size;
+
+    if (!n->cmbsz || !memory_region_is_mapped(&n->ctrl_mem)) {
+        return false;
+    }
+
+    base = n->ctrl_mem.addr;
+    size = int128_get64(n->ctrl_mem.size);
+
+    return addr >= base && addr - base < size && len <= size - (addr - base);
+}
+
 void nvme_addr_read(FemuCtrl *n, hwaddr addr, void *buf, int size)
 {
-    if (n->cmbsz && addr >= n->ctrl_mem.addr &&
-        addr < (n->ctrl_mem.addr + int128_get64(n->ctrl_mem.size)) &&
-        (uint64_t)size <= (n->ctrl_mem.addr + int128_get64(n->ctrl_mem.size)) - addr) {
+    if (nvme_addr_is_cmb(n, addr, size)) {
         memcpy(buf, (void *)&n->cmbuf[addr - n->ctrl_mem.addr], size);
     } else {
         pci_dma_read(&n->parent_obj, addr, buf, size);
@@ -13,9 +33,7 @@ void nvme_addr_read(FemuCtrl *n, hwaddr addr, void *buf, int size)
 
 void nvme_addr_write(FemuCtrl *n, hwaddr addr, void *buf, int size)
 {
-    if (n->cmbsz && addr >= n->ctrl_mem.addr &&
-        addr < (n->ctrl_mem.addr + int128_get64(n->ctrl_mem.size)) &&
-        (uint64_t)size <= (n->ctrl_mem.addr + int128_get64(n->ctrl_mem.size)) - addr) {
+    if (nvme_addr_is_cmb(n, addr, size)) {
         memcpy((void *)&n->cmbuf[addr - n->ctrl_mem.addr], buf, size);
     } else {
         pci_dma_write(&n->parent_obj, addr, buf, size);
@@ -32,13 +50,10 @@ void nvme_addr_write(FemuCtrl *n, hwaddr addr, void *buf, int size)
 static bool nvme_cmb_iovec_add(FemuCtrl *n, QEMUIOVector *iov, uint64_t addr,
                                uint64_t len)
 {
-    uint64_t base = n->ctrl_mem.addr;
-    uint64_t size = int128_get64(n->ctrl_mem.size);
-
-    if (addr < base || addr - base >= size || len > size - (addr - base)) {
+    if (!nvme_addr_is_cmb(n, addr, len)) {
         return false;
     }
-    qemu_iovec_add(iov, (void *)&n->cmbuf[addr - base], len);
+    qemu_iovec_add(iov, (void *)&n->cmbuf[addr - n->ctrl_mem.addr], len);
 
     return true;
 }
@@ -53,8 +68,7 @@ uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
 
     if (!prp1) {
         return NVME_INVALID_FIELD | NVME_DNR;
-    } else if (n->cmbsz && prp1 >= n->ctrl_mem.addr &&
-               prp1 < n->ctrl_mem.addr + int128_get64(n->ctrl_mem.size)) {
+    } else if (nvme_addr_is_cmb(n, prp1, 1)) {
         cmb = true;
         qsg->nsg = 0;
         qemu_iovec_init(iov, num_prps);

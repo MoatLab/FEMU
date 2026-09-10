@@ -2152,6 +2152,7 @@ void nvme_remove_kvm_msi_virq(NvmeCQueue *cq);
 int nvme_clear_virq(FemuCtrl *n);
 
 /* Public DMA APIs from dma.c */
+bool     nvme_addr_is_cmb(FemuCtrl *n, uint64_t addr, uint64_t len);
 void     nvme_addr_read(FemuCtrl *n, hwaddr addr, void *buf, int size);
 void     nvme_addr_write(FemuCtrl *n, hwaddr addr, void *buf, int size);
 uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
