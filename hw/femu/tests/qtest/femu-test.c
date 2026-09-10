@@ -645,6 +645,40 @@ static void femu_test_zoned_append_limit(void *obj, void *data,
 }
 
 /*
+ * The zone size lives in the entry for the format index the namespace is
+ * formatted to. It was written into the first entry whatever the index, so a
+ * namespace formatted to any other index reported a zone size of zero, which a
+ * host reads as a namespace it cannot use.
+ */
+static void femu_test_zoned_format_index(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    NvmeCmd cmd;
+    uint64_t buf, zsze = 0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    buf = guest_alloc(alloc, 4096);
+    qtest_memset(femu->dev.bus->qts, buf, 0, 4096);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_IDENTIFY;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(NVME_ID_CNS_CS_NS);
+    cmd.cdw11 = cpu_to_le32(FEMU_CSI_ZONED << 24);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+
+    /* lbafe starts at 2816, sixteen bytes an entry; the device uses index 1 */
+    qtest_memread(femu->dev.bus->qts, buf + 2816 + 16, &zsze, sizeof(zsze));
+    g_assert_cmpint(le64_to_cpu(zsze), >, 0);
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/*
  * A zone that has been reset holds no data. This controller reports that a
  * deallocated block reads as zeros, and the read path goes straight to the
  * backing store by logical block, so resetting the write pointer alone leaves
@@ -1352,6 +1386,10 @@ static void femu_register_nodes(void)
         /* a zoned namespace on a controller whose own mode is a black box */
         .edge.extra_device_opts =
             "devsz_mb=128,femu_mode=1,namespaces=2,namespace_modes=bbssd,,znssd"
+    });
+    qos_add_test("zoned-format-index", "femu", femu_test_zoned_format_index,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=3,lba_index=1"
     });
     qos_add_test("zone-reset", "femu", femu_test_zone_reset,
                  &(QOSGraphTestOptions) {

@@ -1980,7 +1980,16 @@ static bool zns_check_params(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         error_setg(errp, "zns NAND timing knobs must not be negative");
         return false;
     }
-
+    /*
+     * The media model divides a 4 KiB logical page by the block size, so a
+     * block larger than that gives no sectors per page and divides by zero on
+     * the first read or write.
+     */
+    if (zns_ns_lbads(ns) > 12) {
+        error_setg(errp, "zoned namespaces need a logical block of 4 KiB or "
+                   "less; lba_index selects %u bytes", 1u << zns_ns_lbads(ns));
+        return false;
+    }
     return true;
 }
 
@@ -2009,7 +2018,13 @@ static void zns_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         return;
     }
 
-    zns_init_zone_identify(n, ns, 0);
+    /*
+     * The format index the namespace is actually formatted to, not the first
+     * one: the host reads the zone size out of the entry for its own index, so
+     * with any other lba_index it read a zone size of zero and refused the
+     * namespace outright.
+     */
+    zns_init_zone_identify(n, ns, NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas));
 }
 
 /*
@@ -2064,19 +2079,30 @@ static uint16_t zns_changed_zone_list(FemuCtrl *n, NvmeNamespace *ns,
     uint32_t trans_len;
     uint16_t status;
     uint8_t *log;
-    uint32_t i;
+    uint32_t i, nr;
 
     if (off >= ZNS_CHANGED_ZONE_LOG_SIZE) {
         return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    /*
+     * The count is taken once and bounded here. It is written on a poller and
+     * read on this thread, so re-reading it as the loop condition lets the
+     * emitter run past the end of a page that holds exactly as many entries as
+     * the array does.
+     */
+    nr = zns->nr_changed_zones;
+    if (nr > ARRAY_SIZE(zns->changed_zones)) {
+        nr = ARRAY_SIZE(zns->changed_zones);
     }
 
     log = g_malloc0(ZNS_CHANGED_ZONE_LOG_SIZE);
     if (zns->changed_zone_overflow) {
         stq_le_p(log, 0xffff);
     } else {
-        stq_le_p(log, zns->nr_changed_zones);
+        stq_le_p(log, nr);
     }
-    for (i = 0; i < zns->nr_changed_zones; i++) {
+    for (i = 0; i < nr; i++) {
         stq_le_p(log + 8 + i * 8, zns->changed_zones[i]);
     }
     /*

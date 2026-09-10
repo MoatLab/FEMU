@@ -2411,6 +2411,13 @@ void nvme_clear_events(FemuCtrl *n, uint8_t event_type)
 
     n->aer_mask &= ~(1 << event_type);
 
+    /*
+     * Every other place that touches the queue holds this, because a poller
+     * can be appending to it: the zoned mode reports a zone taken read only
+     * from there. Walking it unlocked can free an entry the bottom half is
+     * about to post and leaves the count out of step with the list.
+     */
+    qemu_mutex_lock(&n->aer_lock);
     QSIMPLEQ_FOREACH_SAFE(event, &n->aer_queue, entry, next) {
         if (event->result.event_type == event_type) {
             QSIMPLEQ_REMOVE(&n->aer_queue, event, NvmeAsyncEvent, entry);
@@ -2418,6 +2425,7 @@ void nvme_clear_events(FemuCtrl *n, uint8_t event_type)
             g_free(event);
         }
     }
+    qemu_mutex_unlock(&n->aer_lock);
 }
 
 void nvme_process_sq_admin(void *opaque)
