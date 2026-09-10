@@ -31,6 +31,7 @@
 #define FEMU_OC20_IDENTIFY      0xe2    /* Open-Channel 2.0 geometry */
 #define FEMU_OC20_VECT_WRITE    0x91
 #define FEMU_OC20_VECT_READ     0x92
+#define FEMU_KV_CMD_STORE       0x01
 #define FEMU_CNS_CS_CTRL    0x06    /* command-set controller identify */
 #define FEMU_CSI_ZONED      0x02    /* zoned namespace command set */
 #define FEMU_CQ_IEN         0x02    /* Create CQ: interrupts enabled */
@@ -757,6 +758,74 @@ static void femu_test_zoned_format_index(void *obj, void *data,
     g_assert_cmpint(le64_to_cpu(zsze), >, 0);
 
     guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/* the key-value Identify reports a namespace's used bytes at offset 16 */
+static uint64_t femu_kv_ns_used(FemuCtrlState *c, uint64_t buf, uint32_t nsid)
+{
+    NvmeCmd cmd;
+    uint64_t nuse = 0;
+
+    qtest_memset(c->pdev->bus->qts, buf, 0xff, 4096);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_IDENTIFY;
+    cmd.nsid = cpu_to_le32(nsid);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(NVME_ID_CNS_CS_NS);
+    cmd.cdw11 = cpu_to_le32(FEMU_CSI_KV << 24);
+    g_assert_cmpint(femu_admin(c, &cmd), ==, NVME_SUCCESS);
+    qtest_memread(c->pdev->bus->qts, buf + 16, &nuse, sizeof(nuse));
+
+    return le64_to_cpu(nuse);
+}
+
+/*
+ * Each key-value namespace owns its own key space and value store. The state
+ * slot was copied into the namespace before its own setup ran, and a setup that
+ * takes a filled slot as "already done" then left two namespaces sharing one
+ * store, so a key stored on either overwrote the other's.
+ */
+static void femu_test_kv_namespaces_are_separate(void *obj, void *data,
+                                                 QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    NvmeCmd cmd;
+    uint64_t buf, id, used1, used2;
+    uint16_t want, got;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    buf = guest_alloc(alloc, 4096);
+    qtest_memset(femu->dev.bus->qts, buf, 0x71, 4096);
+
+    /* store one key with a page of value on the first namespace only */
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_KV_CMD_STORE;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.res1 = cpu_to_le64(0x4b4b4b4b4b4b4b4bULL);   /* the key */
+    cmd.cdw10 = cpu_to_le32(4096);                   /* value bytes */
+    cmd.cdw11 = cpu_to_le32(8);                      /* key bytes */
+    want = c.cid;
+    femu_submit(&c, &c.io, &cmd);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(got, ==, want);
+
+    id = guest_alloc(alloc, 4096);
+    used1 = femu_kv_ns_used(&c, id, 1);
+    used2 = femu_kv_ns_used(&c, id, 2);
+
+    /* the store landed on the first namespace and nowhere else */
+    g_assert_cmpint(used1, >, 0);
+    g_assert_cmpint(used2, ==, 0);
+
+    guest_free(alloc, id);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
     femu_disable(&c);
 }
 
@@ -1645,6 +1714,11 @@ static void femu_register_nodes(void)
         /* a zoned namespace on a controller whose own mode is a black box */
         .edge.extra_device_opts =
             "devsz_mb=128,femu_mode=1,namespaces=2,namespace_modes=bbssd,,znssd"
+    });
+    qos_add_test("kv-namespaces", "femu",
+                 femu_test_kv_namespaces_are_separate,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "devsz_mb=512,femu_mode=5,namespaces=2"
     });
     qos_add_test("oc20-vector-io", "femu", femu_test_oc20_vector_io,
                  &(QOSGraphTestOptions) {

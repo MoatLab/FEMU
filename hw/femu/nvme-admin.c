@@ -811,9 +811,27 @@ static uint16_t nvme_identify(FemuCtrl *n, NvmeCmd *cmd)
          * handed that mode's state object.
          */
         if (c->csi == NVME_CSI_KV) {
-            for (int i = 0; i < n->num_namespaces; i++) {
-                if (NS_KVSSD(&n->namespaces[i])) {
-                    return kvssd_identify_ns_csi_fmt(n, &n->namespaces[i], cmd);
+            uint32_t kv_nsid = le32_to_cpu(c->nsid);
+            NvmeNamespace *kv_ns = nvme_ns(n, kv_nsid);
+
+            /*
+             * A host that names a namespace gets that namespace's structure --
+             * it carries the namespace's own size and use, so answering from
+             * another one over-commits its key space. A host that names none
+             * gets the first key-value namespace, which is how the format index
+             * this command selects is reported.
+             */
+            if (kv_ns) {
+                return NS_KVSSD(kv_ns) ?
+                       kvssd_identify_ns_csi_fmt(n, kv_ns, cmd) :
+                       NVME_INVALID_FIELD | NVME_DNR;
+            }
+            if (!kv_nsid) {
+                for (int i = 0; i < n->num_namespaces; i++) {
+                    if (NS_KVSSD(&n->namespaces[i])) {
+                        return kvssd_identify_ns_csi_fmt(n, &n->namespaces[i],
+                                                         cmd);
+                    }
                 }
             }
         }

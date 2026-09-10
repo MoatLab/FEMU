@@ -1421,6 +1421,13 @@ static int nvme_register_extensions(FemuCtrl *n)
  * into the controller, so borrow it for the namespace's mode and take a copy;
  * the controller keeps the table for its own mode, which still answers the
  * admin and start-up paths.
+ *
+ * The state slot holds a per-namespace object and is left empty for the
+ * namespace's own init to fill. Copying it gave the second namespace of a mode
+ * the first one's before its init ran, and an init that reads a filled slot as
+ * already done then left the two sharing one object -- for the key-value mode
+ * one key space and one value store behind two namespaces, so a key stored on
+ * either overwrote the other's.
  */
 static void nvme_register_extensions_ns(FemuCtrl *n, NvmeNamespace *ns)
 {
@@ -1434,12 +1441,14 @@ static void nvme_register_extensions_ns(FemuCtrl *n, NvmeNamespace *ns)
          * state it would allocate a second copy that nothing ever reads.
          */
         ns->ext_ops = n->ext_ops;
+        ns->ext_ops.state = NULL;
         return;
     }
 
     n->femu_mode = ns->femu_mode;
     nvme_register_extensions(n);
     ns->ext_ops = n->ext_ops;
+    ns->ext_ops.state = NULL;
 
     n->femu_mode = saved_mode;
     n->ext_ops = saved_ops;
