@@ -141,6 +141,8 @@ static uint16_t kvssd_store(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         return status;
     }
 
+    req->xfer_bytes = vsize;
+    req->is_write = 1;
     req->cqe.n.result = cpu_to_le32(vsize);
     return NVME_SUCCESS;
 }
@@ -175,6 +177,8 @@ static uint16_t kvssd_retrieve(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
      * Spec: CQE Dword0 reports the FULL KV value size in bytes. If HBS < value,
      * the host receives the leading HBS bytes and re-issues with a larger buffer.
      */
+    req->xfer_bytes = MIN(hbs, full_len);
+    req->is_write = 0;
     req->cqe.n.result = cpu_to_le32(full_len);
     return NVME_SUCCESS;
 }

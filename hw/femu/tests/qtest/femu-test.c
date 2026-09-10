@@ -32,6 +32,8 @@
 #define FEMU_OC20_VECT_WRITE    0x91
 #define FEMU_OC20_VECT_READ     0x92
 #define FEMU_KV_CMD_STORE       0x01
+#define FEMU_KV_CMD_RETRIEVE    0x02
+#define FEMU_KV_CMD_EXIST       0x14
 #define FEMU_CNS_CS_CTRL    0x06    /* command-set controller identify */
 #define FEMU_CSI_ZONED      0x02    /* zoned namespace command set */
 #define FEMU_CQ_IEN         0x02    /* Create CQ: interrupts enabled */
@@ -1273,6 +1275,108 @@ static uint16_t femu_get_log(FemuCtrlState *c, uint8_t lid, uint64_t buf,
 }
 
 /*
+ * What the health log says a key-value namespace read, and what the most-read
+ * block figure says it touched. The size field in a retrieve is the host's
+ * buffer, not what the device put in it, and the per-command base cost was
+ * charged as a read of block zero.
+ */
+static void femu_test_kv_accounting(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    NvmeCmd cmd;
+    uint64_t buf, log, units_before, units_after, most_reads;
+    uint8_t page[512];
+    uint16_t want, got;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    buf = guest_alloc(alloc, 4096);
+    log = guest_alloc(alloc, 4096);
+    qtest_memset(femu->dev.bus->qts, buf, 0x71, 4096);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_KV_CMD_STORE;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.res1 = cpu_to_le64(0x4b4b4b4b4b4b4b4bULL);
+    cmd.cdw10 = cpu_to_le32(4096);
+    cmd.cdw11 = cpu_to_le32(8);
+    want = c.cid;
+    femu_submit(&c, &c.io, &cmd);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(got, ==, want);
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_SMART_INFO, log,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(femu->dev.bus->qts, log, page, sizeof(page));
+    units_before = ldq_le_p(page + 32);
+
+    /* four retrieves of the same page, each naming a four-gigabyte buffer */
+    for (i = 0; i < 4; i++) {
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = FEMU_KV_CMD_RETRIEVE;
+        cmd.nsid = cpu_to_le32(1);
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.res1 = cpu_to_le64(0x4b4b4b4b4b4b4b4bULL);
+        cmd.cdw10 = cpu_to_le32(0xffffffffU);
+        cmd.cdw11 = cpu_to_le32(8);
+        want = c.cid;
+        femu_submit(&c, &c.io, &cmd);
+        g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpint(got, ==, want);
+    }
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_SMART_INFO, log,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(femu->dev.bus->qts, log, page, sizeof(page));
+    units_after = ldq_le_p(page + 32);
+
+    /*
+     * Sixteen kilobytes really moved, which is under one reported unit. With
+     * the buffer size counted instead this grows by millions.
+     */
+    g_assert_cmpint(units_after - units_before, <, 1000);
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, log,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(femu->dev.bus->qts, log, page, sizeof(page));
+    most_reads = ldq_le_p(page + 32);
+
+    /* a lookup for a key that is not there reads nothing from the media */
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_KV_CMD_EXIST;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.res1 = cpu_to_le64(0x6d6d6d6d6d6d6d6dULL);
+    cmd.cdw11 = cpu_to_le32(8);
+    want = c.cid;
+    femu_submit(&c, &c.io, &cmd);
+    femu_complete(&c, &c.io, &got, NULL);
+    g_assert_cmpint(got, ==, want);
+
+    /*
+     * The figure counts reads of the most-read block, and the value above does
+     * live in a block, so it is not expected to be zero -- only not to move for
+     * a command that reads no data. The per-command base cost was charged as a
+     * user read of block zero, so it moved for every command.
+     */
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, log,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(femu->dev.bus->qts, log, page, sizeof(page));
+    g_assert_cmpint(ldq_le_p(page + 32), ==, most_reads);
+
+    guest_free(alloc, log);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
  * Supported Log Pages says which identifiers the controller answers, and the
  * media counters live on their own page rather than in the SMART log's
  * temperature fields. Both must agree with what Get Log Page actually does,
@@ -1714,6 +1818,10 @@ static void femu_register_nodes(void)
         /* a zoned namespace on a controller whose own mode is a black box */
         .edge.extra_device_opts =
             "devsz_mb=128,femu_mode=1,namespaces=2,namespace_modes=bbssd,,znssd"
+    });
+    qos_add_test("kv-accounting", "femu", femu_test_kv_accounting,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "devsz_mb=512,femu_mode=5"
     });
     qos_add_test("kv-namespaces", "femu",
                  femu_test_kv_namespaces_are_separate,

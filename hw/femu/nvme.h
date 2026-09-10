@@ -1389,6 +1389,11 @@ typedef struct NvmeRequest {
     uint64_t                slba;
     uint16_t                is_write;
     uint16_t                nlb;
+    /*
+     * Bytes this command really moved, for the modes whose transfer size is not
+     * a block count. Zero everywhere else; the block arithmetic applies there.
+     */
+    uint64_t                xfer_bytes;
     uint16_t                ctrl;
     uint64_t                meta_size;
     uint64_t                mptr;

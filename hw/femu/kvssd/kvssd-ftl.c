@@ -461,7 +461,15 @@ static uint16_t kv_read_ppas(FemuKvssdState *s, NvmeRequest *req,
 static uint64_t kv_charge_base(FemuKvssdState *s, NvmeRequest *req)
 {
     struct ssd *ssd = s->ssd;
-    struct nand_cmd c = { .type = USER_IO, .cmd = NAND_READ, .stime = req->stime };
+    /*
+     * A cost, not a read of a block: the address is a placeholder, so charge it
+     * the way a translation-page read is charged. As user traffic it counted
+     * against block zero's read total, which is what the most-read-block figure
+     * reports, so a command that touches no data -- an exist for a key that is
+     * not there -- drove that figure up.
+     */
+    struct nand_cmd c = { .type = MAP_IO, .cmd = NAND_READ,
+                          .stime = req->stime };
     struct ppa ppa = { .ppa = 0 };
     return ssd_advance_status(ssd, &ppa, &c);
 }

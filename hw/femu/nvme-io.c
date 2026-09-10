@@ -183,6 +183,7 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
          * append, feature get) overwrite it explicitly.
          */
         req->cqe.res64 = 0;
+        req->xfer_bytes = 0;
         req->dsm_ranges = NULL;
         req->dsm_nr_ranges = 0;
         req->dsm_attributes = 0;
@@ -220,7 +221,13 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
              * counted as commands that moved no data at all.
              */
             if (NS_KVSSD(req->ns)) {
-                bytes = le32_to_cpu(cmd.cdw10);
+                /*
+                 * The field in the command is the size of the host's buffer,
+                 * not what the device put in it, so a retrieve naming a buffer
+                 * of four gigabytes for a one-byte value used to add four
+                 * gigabytes to the figure the health log reports.
+                 */
+                bytes = req->xfer_bytes;
             } else {
                 bytes = (uint64_t)req->nlb <<
                     req->ns->id_ns.lbaf[NVME_ID_NS_FLBAS_INDEX(req->ns->id_ns.flbas)].lbads;
@@ -373,7 +380,13 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
              req->cmd_opcode == NVME_CMD_WRITE)) {
             uint8_t lbads = req->ns->id_ns.lbaf[
                 NVME_ID_NS_FLBAS_INDEX(req->ns->id_ns.flbas)].lbads;
-            uint64_t data_size = (uint64_t)req->nlb << lbads;
+            /*
+             * A key-value store and retrieve share these opcodes and carry no
+             * block count, so the link was charged for whatever the previous
+             * command in this request slot moved, in its direction.
+             */
+            uint64_t data_size = NS_KVSSD(req->ns) ? req->xfer_bytes :
+                                 (uint64_t)req->nlb << lbads;
             uint64_t trans_ns = n->pcie_bandwidth_mbps ?
                 data_size * 1000 / n->pcie_bandwidth_mbps : 0;
             uint64_t *next, start;
