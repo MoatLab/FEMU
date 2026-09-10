@@ -58,6 +58,31 @@ int bb_check_geometry(FemuCtrl *n, Error **errp)
         }
     }
 
+    /*
+     * The collection watermarks are percentages of the line count, and both
+     * are turned into a line count by (1 - pcent/100) * tt_lines. Outside
+     * [1, 100] that expression is negative, and converting a negative double
+     * to the unsigned the reserve calculation uses is undefined; on this
+     * compiler it produced a reserve of nearly 2^64 and a message about
+     * needing 18446744073709551614 free lines. A high watermark below the low
+     * one also means forced collection starts before background collection,
+     * which is not what either is for.
+     */
+    if (p->gc_thres_pcent < 1 || p->gc_thres_pcent > 100 ||
+        p->gc_thres_pcent_high < 1 || p->gc_thres_pcent_high > 100) {
+        error_setg(errp, "FEMU bbssd: gc_thres_pcent and gc_thres_pcent_high "
+                   "must be in [1, 100], got %d and %d", p->gc_thres_pcent,
+                   p->gc_thres_pcent_high);
+        return -1;
+    }
+    if (p->gc_thres_pcent_high < p->gc_thres_pcent) {
+        error_setg(errp, "FEMU bbssd: gc_thres_pcent_high (%d) must not be "
+                   "below gc_thres_pcent (%d); the forced watermark is reached "
+                   "after the background one, not before",
+                   p->gc_thres_pcent_high, p->gc_thres_pcent);
+        return -1;
+    }
+
     /* the page-type model has multiplier rows for one to five bits per cell */
     if (p->cell_pages < 0 || p->cell_pages > NAND_MEDIA_MAX_PGTYPE - 1) {
         error_setg(errp, "FEMU bbssd: cell_pages must be in [0, %d]",

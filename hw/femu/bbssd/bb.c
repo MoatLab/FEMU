@@ -17,7 +17,7 @@ static void bb_init_ctrl_str(FemuCtrl *n)
  * path then runs out of lines and aborts mid-run. Refuse the geometry instead,
  * and say what would fit.
  */
-static int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
+int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 {
     BbCtrlParams *p = &n->bb_params;
     uint64_t page_bytes = (uint64_t)p->secs_per_pg * p->secsz;

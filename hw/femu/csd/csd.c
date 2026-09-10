@@ -167,6 +167,17 @@ static void csd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         return;
     }
 
+    /*
+     * And the same capacity check. This mode runs the black-box FTL verbatim
+     * -- the request router sends both through it -- so it needs the reserve
+     * that check enforces just as much. Without it a namespace exposing the
+     * whole of the media was accepted here while black box refused it, and
+     * the collector then had nowhere to relocate to.
+     */
+    if (bb_check_capacity(n, ns, errp)) {
+        return;
+    }
+
     if (n->csd_params.fdm_size_mb == 0) {
         error_setg(errp, "CSD mode requires fdm_size to be non-zero");
         return;
