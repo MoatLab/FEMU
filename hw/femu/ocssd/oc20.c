@@ -1155,13 +1155,6 @@ static void femu_oc20_init_id_ctrl(FemuCtrl *n, NvmeNamespace *ns,
     uint8_t num_lun = n->oc_params.num_lun;
     uint8_t num_pln = n->oc_params.num_pln;
 
-    /*
-     * The timing model indexes its chip array by the flat LUN id,
-     * group * num_lun + punit, so the product is what has to fit.
-     */
-    assert(num_ch <= FEMU_MAX_NUM_CHNLS &&
-           num_ch * num_lun <= FEMU_MAX_NUM_CHIPS);
-
     /* 
      * Byte 0: Major Version Number (MJR)
      * - Value 1: OCSSD Revision 1.2
@@ -1486,9 +1479,15 @@ static void oc20_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 {
     (void)ns;
 
+    if (!oc_timing_geometry_ok(n, errp)) {
+        return;
+    }
+
     NVME_CAP_SET_OC(n->bar.cap, 1);
     oc20_set_ctrl_str(n);
-    oc20_init_namespaces(n, errp);
+    if (oc20_init_namespaces(n, errp)) {
+        return;
+    }
 
     oc20_init_misc(n);
 }

@@ -1133,15 +1133,6 @@ static int oc12_init_more(FemuCtrl *n)
         c->num_lun = lps->num_lun;
         c->num_pln = lps->num_pln;
 
-        /*
-         * The timing model indexes its chip array by the flat LUN id,
-         * ch * num_lun + lun, so it is the product that has to fit. Bounding
-         * each axis on its own lets a legal-looking geometry index past the
-         * end of the array.
-         */
-        assert(c->num_ch <= FEMU_MAX_NUM_CHNLS &&
-               c->num_ch * c->num_lun <= FEMU_MAX_NUM_CHIPS);
-
         c->num_blk = cpu_to_le16(chnl_blks) / (c->num_lun * c->num_pln);
         c->num_pg = cpu_to_le16(lps->pgs_per_blk);
         c->csecs = cpu_to_le16(lps->sec_size);
@@ -1292,6 +1283,10 @@ static void oc12_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     (void)ns;
 
     int i;
+
+    if (!oc_timing_geometry_ok(n, errp)) {
+        return;
+    }
 
     NVME_CAP_SET_OC(n->bar.cap, 1);
     oc12_set_ctrl_str(n);

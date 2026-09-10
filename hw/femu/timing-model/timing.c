@@ -1,5 +1,36 @@
 #include "../nvme.h"
 
+/*
+ * The per-chip arrays this model locks and stamps are fixed-size members of the
+ * controller, indexed by the flat LUN id -- channel * num_lun + lun -- so it is
+ * the product that has to fit. Bounding each axis on its own lets a geometry
+ * that looks legal stamp past the end of the array and into the rest of the
+ * controller. The counts also divide the namespace size when the geometry is
+ * built, so a zero is a division fault at realize rather than a wrong answer.
+ */
+bool oc_timing_geometry_ok(FemuCtrl *n, Error **errp)
+{
+    unsigned ch = n->oc_params.num_ch;
+    unsigned lun = n->oc_params.num_lun;
+
+    if (!ch || !lun || !n->oc_params.num_pln || !n->oc_params.secs_per_pg ||
+        !n->oc_params.pgs_per_blk || !n->oc_params.sec_size) {
+        error_setg(errp, "FEMU ocssd: lnum_ch, lnum_lun, lnum_pln, "
+                   "lsecs_per_pg, lpgs_per_blk and lsec_size must all be "
+                   "greater than zero");
+        return false;
+    }
+
+    if (ch > FEMU_MAX_NUM_CHNLS || ch * lun > FEMU_MAX_NUM_CHIPS) {
+        error_setg(errp, "FEMU ocssd: lnum_ch must not exceed %d and "
+                   "lnum_ch * lnum_lun must not exceed %d, got %u and %u",
+                   FEMU_MAX_NUM_CHNLS, FEMU_MAX_NUM_CHIPS, ch, lun);
+        return false;
+    }
+
+    return true;
+}
+
 void set_latency(FemuCtrl *n)
 {
     if (n->flash_type == TLC) {
