@@ -233,6 +233,11 @@ static uint16_t nvme_create_cq(FemuCtrl *n, NvmeCmd *cmd)
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
+    /*
+     * A failure here means no interrupt route of its own: without KVM there is
+     * none to take, and the completion path then notifies through MSI-X
+     * directly. The queue is still usable, so the command is not refused.
+     */
     nvme_setup_virq(n, cq);
 
     assert(cq->is_active == false);
@@ -246,6 +251,7 @@ static uint16_t nvme_del_cq(FemuCtrl *n, NvmeCmd *cmd)
     NvmeDeleteQ *c = (NvmeDeleteQ *)cmd;
     NvmeCQueue *cq;
     uint16_t qid = le16_to_cpu(c->qid);
+    bool resume;
 
     if (!qid || nvme_check_cqid(n, qid)) {
         return NVME_INVALID_CQID | NVME_DNR;
@@ -257,9 +263,15 @@ static uint16_t nvme_del_cq(FemuCtrl *n, NvmeCmd *cmd)
     if (!QTAILQ_EMPTY(&cq->sq_list)) {
         return NVME_INVALID_QUEUE_DEL;
     }
+    /*
+     * The pollers reach this queue through n->cq[], so take the dataplane down
+     * before it goes, exactly as deleting a submission queue does. Without it
+     * a poller can load the pointer and read through it after the free.
+     */
+    resume = nvme_pause_pollers(n);
     cq->is_active = false;
-
     nvme_free_cq(cq, n);
+    nvme_resume_pollers(n, resume);
 
     return NVME_SUCCESS;
 }

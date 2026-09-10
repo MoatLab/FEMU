@@ -29,6 +29,7 @@
 #define FEMU_ZONE_ACTION_RESET  0x04
 #define FEMU_CNS_CS_CTRL    0x06    /* command-set controller identify */
 #define FEMU_CSI_ZONED      0x02    /* zoned namespace command set */
+#define FEMU_CQ_IEN         0x02    /* Create CQ: interrupts enabled */
 
 typedef struct QFemu QFemu;
 
@@ -532,6 +533,44 @@ static void femu_test_io_by_shadow_doorbell(void *obj, void *data,
 
     guest_free(alloc, eis_addr);
     guest_free(alloc, c.dbs_addr);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
+ * Creating and deleting a completion queue repeatedly must not cost the host
+ * anything that it keeps. Each create took an interrupt route and a file
+ * descriptor and only the controller shutdown gave them back, and the delete
+ * freed the queue while the pollers could still reach it.
+ */
+static void femu_test_cq_churn(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    NvmeCmd cmd;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_round_trip(&c, 1);
+
+    for (i = 0; i < 64; i++) {
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_ADM_CMD_CREATE_CQ;
+        cmd.dptr.prp1 = cpu_to_le64(c.io.cq_addr);
+        cmd.cdw10 = cpu_to_le32(((FEMU_QSIZE - 1) << 16) | 2);
+        cmd.cdw11 = cpu_to_le32(NVME_CQ_PC | FEMU_CQ_IEN);
+        g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_ADM_CMD_DELETE_CQ;
+        cmd.cdw10 = cpu_to_le32(2);
+        g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+    }
+
+    /* the queue that was there all along still works */
+    femu_round_trip(&c, 2);
+
     femu_queue_free(&c, &c.io);
     femu_disable(&c);
 }
@@ -1246,6 +1285,7 @@ static void femu_register_nodes(void)
                  femu_test_io_by_shadow_doorbell, NULL);
     qos_add_test("features", "femu", femu_test_features, NULL);
     qos_add_test("queue-mapping", "femu", femu_test_queue_mapping, NULL);
+    qos_add_test("cq-churn", "femu", femu_test_cq_churn, NULL);
     qos_add_test("zoned-append-limit", "femu", femu_test_zoned_append_limit,
                  &(QOSGraphTestOptions) {
         /* a zoned namespace on a controller whose own mode is a black box */

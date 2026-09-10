@@ -2147,6 +2147,7 @@ void nvme_set_ctrl_name(FemuCtrl *n, const char *mn, const char *sn, int *dev_id
 void nvme_isr_notify_admin(void *opaque);
 void nvme_isr_notify_io(void *opaque);
 int nvme_setup_virq(FemuCtrl *n, NvmeCQueue *cq);
+void nvme_remove_kvm_msi_virq(NvmeCQueue *cq);
 int nvme_clear_virq(FemuCtrl *n);
 
 /* Public DMA APIs from dma.c */

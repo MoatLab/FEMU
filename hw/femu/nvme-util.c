@@ -539,6 +539,7 @@ uint16_t nvme_init_cq(NvmeCQueue *cq, FemuCtrl *n, uint64_t dma_addr, uint16_t
     cq->vector = vector;
     cq->head = cq->tail = 0;
     cq->phys_contig = contig;
+    cq->virq = -1;
 
     uint8_t stride = n->db_stride;
     int dbbuf_entry_sz = 1 << (2 + stride);
@@ -586,6 +587,15 @@ uint16_t nvme_init_cq(NvmeCQueue *cq, FemuCtrl *n, uint64_t dma_addr, uint16_t
 void nvme_free_cq(NvmeCQueue *cq, FemuCtrl *n)
 {
     n->cq[cq->cqid] = NULL;
+    /*
+     * The route and its notifier belong to this queue, and only the controller
+     * shutdown path used to give them back: a guest that created and deleted a
+     * queue in a loop leaked one interrupt id and one file descriptor each time
+     * until the host had neither left.
+     */
+    if (cq->irq_enabled && cq->virq > 0) {
+        nvme_remove_kvm_msi_virq(cq);
+    }
     if (cq->dma_addr_hva) {
         dma_memory_unmap(pci_get_address_space(&n->parent_obj),
                          (void *)cq->dma_addr_hva, cq->dma_map_len, 1,
