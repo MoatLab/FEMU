@@ -255,16 +255,19 @@ jobs:
       run: |
         # This job runs a binary built on another runner image and installed
         # nothing for it, so it could not load at all. Every step that ran it
-        # discarded the outcome, so nothing said so. The development packages
-        # are the same list the build job uses and pull in the runtime
-        # libraries, whose own package names differ between releases.
+        # discarded the outcome, so nothing said so. Install exactly what the
+        # build job installs: the runtime libraries come with those packages,
+        # and their own names differ between releases.
         sudo apt update
-        sudo apt install -y pkg-config libglib2.0-dev libpixman-1-dev \
-          libfdt-dev zlib1g-dev libaio-dev libcap-ng-dev libattr1-dev \
-          libslirp-dev libseccomp-dev libcurl4-gnutls-dev liblzo2-dev \
-          libsnappy-dev libbz2-dev liblzma-dev libzstd-dev \
-          libgcrypt20-dev libgnutls28-dev uuid-dev libcap-dev \
-          libxml2-dev libmount-dev
+        sudo apt install -y build-essential pkg-config libglib2.0-dev \
+          libpixman-1-dev libfdt-dev zlib1g-dev libaio-dev \
+          libcap-ng-dev libattr1-dev ninja-build python3-pip \
+          libslirp-dev libseccomp-dev libcurl4-gnutls-dev \
+          libiscsi-dev libnfs-dev librbd-dev librados-dev \
+          libssh-dev liblzo2-dev libsnappy-dev libbz2-dev \
+          liblzma-dev libzstd-dev libgcrypt20-dev libgnutls28-dev \
+          uuid-dev libcap-dev libxml2-dev libmount-dev \
+          liburing-dev flex bison
 
     - name: Make binary executable
       run: chmod +x build-femu/qemu-system-x86_64
