@@ -1549,9 +1549,13 @@ static void femu_exit(PCIDevice *pci_dev)
      * Stop every thread first. femu_exit_extensions() releases each mode's FTL
      * and namespace state, which the pollers read on the I/O path, and
      * nvme_destroy_poller() then frees the rings and joins nothing.
+     *
+     * Pollers before the FTL thread: they are what feeds it, so stopping the
+     * consumer first leaves them enqueueing into a ring nothing drains, which
+     * fills and then complains once per request.
      */
-    femu_stop_ftl_thread(n);
     femu_stop_pollers(n);
+    femu_stop_ftl_thread(n);
     femu_exit_extensions(n);
 
     nvme_clear_ctrl(n, true);
