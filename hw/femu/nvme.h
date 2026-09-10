@@ -1743,6 +1743,7 @@ typedef struct CsdCtrlParams {
     uint64_t time_slice;
     uint64_t context_switch_time;
     uint16_t csf_runtime_scale;
+    char     *program_dir;       /* where a loadable program may come from */
 } CsdCtrlParams;
 
 typedef struct OcCtrlParams {

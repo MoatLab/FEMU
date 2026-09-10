@@ -1776,6 +1776,7 @@ static const Property femu_props[] = {
                        csd_params.context_switch_time, 200),
     DEFINE_PROP_UINT16("csf_runtime_scale", FemuCtrl,
                        csd_params.csf_runtime_scale, 3),
+    DEFINE_PROP_STRING("csd_program_dir", FemuCtrl, csd_params.program_dir),
     DEFINE_PROP_UINT8("zns_num_ch", FemuCtrl, zns_params.zns_num_ch, 2),
     DEFINE_PROP_UINT8("zns_num_lun", FemuCtrl, zns_params.zns_num_lun, 4),
     DEFINE_PROP_UINT8("zns_num_plane", FemuCtrl, zns_params.zns_num_plane, 2),

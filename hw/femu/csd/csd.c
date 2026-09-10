@@ -13,6 +13,15 @@ typedef int64_t (*FemuCsdSharedLibFn)(FemuCsdArgs *args);
 
 #define CSD_EXEC_DATA_MAX (1U << 20)
 
+/*
+ * A program is held whole in host memory while it loads, and the load command
+ * carries its size in a 32-bit field, so an unbounded one lets the guest ask
+ * for four gigabytes per program index and there are 65535 of those. Cap what
+ * one program may be and what all of them together may be.
+ */
+#define CSD_PROGRAM_MAX (16U << 20)
+#define CSD_PROGRAM_TOTAL_MAX (64U << 20)
+
 typedef struct FemuCsdAfdm {
     uint32_t id;
     uint64_t size;
@@ -57,6 +66,7 @@ typedef struct FemuCsdState {
     CsdCtrlParams params;
     uint64_t fdm_capacity;
     uint64_t fdm_used;
+    uint64_t prog_used;         /* bytes held by loaded programs */
     uint32_t next_afdm_id;
     uint32_t next_group_id;
     uint32_t next_rsid;
@@ -400,14 +410,65 @@ static uint16_t csd_check_nvm_ftl_range(NvmeNamespace *ns, uint64_t slba,
     return NVME_SUCCESS;
 }
 
-static uint16_t csd_load_shared_lib(FemuCsdProgram *program)
+/*
+ * The name in a program comes from the guest, and loading one means the host
+ * process opens that file and calls a symbol out of it. A guest must not be
+ * able to name any file on the host, so the operator says where programs live
+ * and the guest may only name one of the files in it: no separator, no parent
+ * directory, no symbolic link out. With no directory configured the device
+ * accepts only the program type that runs nothing.
+ */
+static uint16_t csd_program_path(FemuCtrl *n, const char *name, char **path)
 {
-    const char *path;
+    const char *dir = n->csd_params.program_dir;
+    g_autofree char *joined = NULL;
+    g_autofree char *real = NULL;
+    g_autofree char *realdir = NULL;
+
+    if (!dir || !dir[0]) {
+        femu_err("CSD: loading a program needs csd_program_dir to be set\n");
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    if (!name[0] || strchr(name, '/') || !strcmp(name, ".") ||
+        !strcmp(name, "..")) {
+        femu_err("CSD: a program name must be a file in csd_program_dir, "
+                 "got \"%s\"\n", name);
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    joined = g_build_filename(dir, name, NULL);
+    real = realpath(joined, NULL);
+    realdir = realpath(dir, NULL);
+    if (!real || !realdir || !g_str_has_prefix(real, realdir) ||
+        real[strlen(realdir)] != '/') {
+        femu_err("CSD: %s does not resolve inside csd_program_dir\n", joined);
+        free(real);
+        free(realdir);
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    *path = g_strdup(real);
+    free(real);
+    free(realdir);
+
+    return NVME_SUCCESS;
+}
+
+static uint16_t csd_load_shared_lib(FemuCtrl *n, FemuCsdProgram *program)
+{
+    const char *name;
     const char *symbol;
+    g_autofree char *path = NULL;
     gpointer fn = NULL;
     uint16_t status;
 
-    status = csd_parse_program(program, &path, &symbol);
+    status = csd_parse_program(program, &name, &symbol);
+    if (status) {
+        return status;
+    }
+
+    status = csd_program_path(n, name, &path);
     if (status) {
         return status;
     }
@@ -430,18 +491,24 @@ static uint16_t csd_load_shared_lib(FemuCsdProgram *program)
     return NVME_SUCCESS;
 }
 
-static uint16_t csd_load_ubpf(FemuCsdProgram *program, bool jit)
+static uint16_t csd_load_ubpf(FemuCtrl *n, FemuCsdProgram *program, bool jit)
 {
 #ifdef CONFIG_FEMU_CSD_UBPF
-    const char *path;
+    const char *name;
     const char *symbol;
+    g_autofree char *path = NULL;
     g_autofree char *elf = NULL;
     gsize elf_size = 0;
     g_autoptr(GError) err = NULL;
     char *errmsg = NULL;
     uint16_t status;
 
-    status = csd_parse_program(program, &path, &symbol);
+    status = csd_parse_program(program, &name, &symbol);
+    if (status) {
+        return status;
+    }
+
+    status = csd_program_path(n, name, &path);
     if (status) {
         return status;
     }
@@ -478,19 +545,21 @@ static uint16_t csd_load_ubpf(FemuCsdProgram *program, bool jit)
 
     return NVME_SUCCESS;
 #else
+    (void)n;
     return NVME_INVALID_FIELD | NVME_DNR;
 #endif
 }
 
-static uint16_t csd_load_program_data(FemuCsdProgram *program, bool jit)
+static uint16_t csd_load_program_data(FemuCtrl *n, FemuCsdProgram *program,
+                                      bool jit)
 {
     switch (program->type) {
     case NVME_CSD_CSF_TYPE_PHANTOM:
         return NVME_SUCCESS;
     case NVME_CSD_CSF_TYPE_SHARED_LIB:
-        return csd_load_shared_lib(program);
+        return csd_load_shared_lib(n, program);
     case NVME_CSD_CSF_TYPE_EBPF:
-        return csd_load_ubpf(program, jit);
+        return csd_load_ubpf(n, program, jit);
     default:
         return NVME_INVALID_FIELD | NVME_DNR;
     }
@@ -510,7 +579,7 @@ static uint16_t csd_compute_load(FemuCtrl *n, NvmeCmd *cmd)
     FemuCsdProgram *program;
     uint16_t status = NVME_SUCCESS;
 
-    if (pind == 0 || psize > UINT32_MAX || loff > psize ||
+    if (pind == 0 || psize > CSD_PROGRAM_MAX || loff > psize ||
         numb > psize - loff) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
@@ -527,12 +596,25 @@ static uint16_t csd_compute_load(FemuCtrl *n, NvmeCmd *cmd)
             qemu_mutex_unlock(&csd->lock);
             return NVME_INVALID_FIELD | NVME_DNR;
         }
+        csd->prog_used -= program->size;
         g_hash_table_remove(csd->programs, GUINT_TO_POINTER((uint32_t)pind));
         qemu_mutex_unlock(&csd->lock);
         return NVME_SUCCESS;
     }
 
     if (loff == 0) {
+        FemuCsdProgram *held = csd_get_program_locked(csd, pind);
+
+        /* the replace below frees whatever this index already held */
+        if (held) {
+            csd->prog_used -= held->size;
+        }
+        if (psize > CSD_PROGRAM_TOTAL_MAX - csd->prog_used) {
+            qemu_mutex_unlock(&csd->lock);
+            return NVME_CAP_EXCEEDED | NVME_DNR;
+        }
+        csd->prog_used += psize;
+
         program = g_new0(FemuCsdProgram, 1);
         program->id = pind;
         program->type = load->ptype;
@@ -567,7 +649,7 @@ static uint16_t csd_compute_load(FemuCtrl *n, NvmeCmd *cmd)
     }
 
     if (program->load_size == program->size) {
-        status = csd_load_program_data(program, load->jit);
+        status = csd_load_program_data(n, program, load->jit);
         if (!status) {
             program->loading = false;
             program->active = false;
