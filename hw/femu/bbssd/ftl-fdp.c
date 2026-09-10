@@ -504,24 +504,31 @@ static int check_gc_ruh_available(struct ssd *ssd, FemuRuHandle * ruh){
         return -1;
     }
     if(ruh->ruh_type == NVME_RUHT_INITIALLY_ISOLATED){
-        if(ssd->ruhs[ssd->nruhs - 1].curr_ru == NULL){
-            ssd->ruhs[ssd->nruhs - 1].curr_ru = fdp_get_new_ru(ssd, ruh->curr_ru->rgidx, ruh->ruhid);
-            ssd->ruhs[ssd->nruhs - 1].rus[ssd->ruhs[ssd->nruhs - 1].curr_ru->rgidx] = ssd->ruhs[ssd->nruhs - 1].curr_ru;
-            //Not neccesary I think for now
-            ssd->ruhs[ssd->nruhs - 1].ruh->rus[ssd->ruhs[ssd->nruhs - 1].curr_ru->rgidx] = ssd->ruhs[ssd->nruhs - 1].curr_ru->nvme_ru;  //qemu-system-x86_64: ../hw/femu/bbssd/ftl.c:2106: select_victim_ru: Assertion `victim_ru != ((void *)0)' failed.
-        }
-        if (ssd->ruhs[ssd->nruhs - 1].curr_ru == NULL){
-            //This means no space left
-            return -1;
-        }
+        FemuRuHandle *gcruh = &ssd->ruhs[ssd->nruhs - 1];
 
+        if (gcruh->curr_ru == NULL) {
+            /*
+             * The unit belongs to the collection handle, so it is allocated
+             * under that handle's identifier -- charged to the victim's, every
+             * page later relocated into it counted against a handle the data
+             * does not belong to. And the result is tested before it is used:
+             * the test used to come two dereferences too late.
+             */
+            FemuReclaimUnit *new_ru = fdp_get_new_ru(ssd, ruh->curr_ru->rgidx,
+                                                     gcruh->ruhid);
+
+            if (!new_ru) {
+                return -1;
+            }
+            gcruh->curr_ru = new_ru;
+            gcruh->rus[new_ru->rgidx] = new_ru;
+            gcruh->ruh->rus[new_ru->rgidx] = new_ru->nvme_ru;
+        }
     }
     else if(ruh->ruh_type == NVME_RUHT_PERSISTENTLY_ISOLATED){
         if(ruh->gc_ru == NULL){
             ruh->gc_ru = fdp_get_new_ru(ssd, ruh->curr_ru->rgidx, ruh->ruhid);
-            ftl_debug("check_gc_ruh_available ruh %d gc_ru idx %d , %p call new ru  \n", ruh->ruhid, ruh->gc_ru->ruidx, ruh->gc_ru );
             if (ruh->gc_ru == NULL){
-                //assert(ruh->gc_ru != NULL);//This means no space left
                 return -1;
             }
         }
@@ -758,9 +765,11 @@ static FemuReclaimUnit *select_victim_ru(struct ssd *ssd, uint16_t rgid,
 }
 
 /*
- * gc_write_page_fdp_style - relocate a valid page to a GC destination RU
+ * gc_write_page_fdp_style - relocate a valid page to a GC destination RU.
+ * Returns false when there is nowhere to put it, which leaves the page where it
+ * is: the caller must then not erase the block it came from.
  */
-static void gc_write_page_fdp_style(struct ssd *ssd, struct ppa *old_ppa,
+static bool gc_write_page_fdp_style(struct ssd *ssd, struct ppa *old_ppa,
                                     FemuRuHandle *dest_ruh)
 {
     struct ppa new_ppa;
@@ -779,6 +788,16 @@ static void gc_write_page_fdp_style(struct ssd *ssd, struct ppa *old_ppa,
     }else{
         ftl_err("Unidentified ruht. ");
         ftl_assert(false && __LINE__);
+    }
+
+    /*
+     * An earlier pass can have left the frontier without a unit: advancing it
+     * hands back nothing when the free list is empty. There is no page to take,
+     * and the only thing between here and a null pointer was an assertion that
+     * is compiled out.
+     */
+    if (!dest_ru) {
+        return false;
     }
 
     new_ppa = fdp_get_new_page(ssd, dest_ru);
@@ -811,10 +830,20 @@ static void gc_write_page_fdp_style(struct ssd *ssd, struct ppa *old_ppa,
      * it is and let the caller run out of room.
      */
     if (dest_ruh->ruh_type == NVME_RUHT_PERSISTENTLY_ISOLATED) {
+        FemuReclaimUnit *host_ru = dest_ru->ruh->curr_ru;
+
         ret_ru = fdp_advance_ru_pointer(ssd, &ssd->rg[dest_ru->rgidx],
                                         dest_ru->ruh, dest_ru);
         if (ret_ru && ret_ru != dest_ru) {
             dest_ruh->gc_ru = ret_ru;
+        } else if (!ret_ru) {
+            /*
+             * Advancing clears the handle's host write frontier when it cannot
+             * allocate, but what ran out here is the collection frontier. Put
+             * the host's back: cleared, the next host write to this handle
+             * would take a null unit into the page allocator.
+             */
+            dest_ru->ruh->curr_ru = host_ru;
         }
     } else if (dest_ruh->ruh_type == NVME_RUHT_INITIALLY_ISOLATED) {
         int gcruh_id = ssd->nruhs - 1;
@@ -843,6 +872,9 @@ static void gc_write_page_fdp_style(struct ssd *ssd, struct ppa *old_ppa,
 
     new_lun = get_lun(ssd, &new_ppa);
     new_lun->gc_endtime = new_lun->next_lun_avail_time;
+
+    /* this page is relocated; whether the next one can be is the next call */
+    return true;
 }
 
 /*
@@ -866,7 +898,14 @@ static int clean_one_block_fdp_style(struct ssd *ssd, struct ppa *ppa,
         ftl_assert(pg_iter->status != PG_FREE);
         if (pg_iter->status == PG_VALID) {
             gc_read_page(ssd, ppa);
-            gc_write_page_fdp_style(ssd, ppa, dest_ruh);
+            /*
+             * Nowhere to put this one. Stop here and say so: the pages already
+             * moved keep their new home, and the ones still in this block have
+             * to keep theirs, so the block must not be erased.
+             */
+            if (!gc_write_page_fdp_style(ssd, ppa, dest_ruh)) {
+                return -1;
+            }
             cnt++;
         }
     }
@@ -1045,8 +1084,20 @@ int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid,
                 lunp = get_lun(ssd, &ppa);
 
                 for (int pl = 0; pl < spp->pls_per_lun; pl++) {
+                    int moved;
+
                     ppa.g.pl = pl;
-                    vpc_cnt += clean_one_block_fdp_style(ssd, &ppa, dest_ruh);
+                    moved = clean_one_block_fdp_style(ssd, &ppa, dest_ruh);
+                    if (moved < 0) {
+                        /*
+                         * The destination ran out part way. Leave the rest of
+                         * the victim where it is and put it back on the queue
+                         * rather than erasing a block that still holds data.
+                         */
+                        reinsert_victim_ru(ssd, victim_ru);
+                        return -1;
+                    }
+                    vpc_cnt += moved;
                     blk_cnt++;
                     mark_block_free(ssd, &ppa);
                     ppas[pl] = ppa;
