@@ -547,6 +547,22 @@ static uint16_t oc12_read(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         err = NVME_INVALID_FIELD | NVME_DNR;
         goto fail_free;
     }
+
+    /*
+     * The offset list holds one entry per address, and the backend walks it
+     * one entry per scatter-gather entry. Those agree only while each entry
+     * covers exactly one sector, which a data pointer that is not page
+     * aligned breaks: the first entry is then a part page and the mapping
+     * produces one entry more than there are addresses, so the backend reads
+     * past the end of the list -- and pairs every address with the wrong
+     * piece of the transfer besides.
+     */
+    if (req->qsg.nsg != nlb) {
+        femu_err("%s: %d data segments for %u addresses\n", __func__,
+                 req->qsg.nsg, nlb);
+        err = NVME_INVALID_FIELD | NVME_DNR;
+        goto fail_free;
+    }
     /* an address the backing store does not cover must fail, not succeed */
     if (backend_rw(n->mbe, &req->qsg, psl, req->is_write)) {
         err = NVME_LBA_RANGE | NVME_DNR;
@@ -639,6 +655,22 @@ static uint16_t oc12_write(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     /* DMA user data */
     if (nvme_map_prp(&req->qsg, &req->iov, prp1, prp2, data_size, n)) {
         femu_err("oc12_write: malformed prp (sz:%lu)\n", data_size);
+        err = NVME_INVALID_FIELD | NVME_DNR;
+        goto fail_free;
+    }
+
+    /*
+     * The offset list holds one entry per address, and the backend walks it
+     * one entry per scatter-gather entry. Those agree only while each entry
+     * covers exactly one sector, which a data pointer that is not page
+     * aligned breaks: the first entry is then a part page and the mapping
+     * produces one entry more than there are addresses, so the backend reads
+     * past the end of the list -- and pairs every address with the wrong
+     * piece of the transfer besides.
+     */
+    if (req->qsg.nsg != nlb) {
+        femu_err("%s: %d data segments for %u addresses\n", __func__,
+                 req->qsg.nsg, nlb);
         err = NVME_INVALID_FIELD | NVME_DNR;
         goto fail_free;
     }
