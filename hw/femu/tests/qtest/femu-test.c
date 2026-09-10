@@ -434,6 +434,16 @@ static void femu_test_admin_queue_refused(void *obj, void *data,
         waited++;
     }
 
+    /*
+     * Leave the controller as it was found. A disable is a reset, so the fatal
+     * status goes with it and the next test on this machine can enable -- the
+     * tests share one QEMU when they share device options, which is how this
+     * test left the one after it unable to start.
+     */
+    qpci_io_writel(pdev, bar, 0x14, 0);
+    csts = qpci_io_readl(pdev, bar, 0x1c);
+    g_assert_cmpint(csts & NVME_CSTS_FAILED, ==, 0);
+
     guest_free(alloc, sq_addr);
 }
 

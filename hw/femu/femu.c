@@ -531,7 +531,15 @@ static void nvme_write_bar(FemuCtrl *n, hwaddr offset, uint64_t data, unsigned s
             }
         } else if (!NVME_CC_EN(data) && NVME_CC_EN(n->bar.cc)) {
             nvme_clear_ctrl(n, false);
-            n->bar.csts &= ~NVME_CSTS_READY;
+            /*
+             * A disable is a controller reset, which is what clears the fatal
+             * status. Left set, a controller that failed to start could not be
+             * recovered: the host's next enable is not a transition from
+             * disabled, so nothing recomputed the status and it read as failed
+             * for the life of the device.
+             */
+            n->bar.csts &= ~(NVME_CSTS_READY | NVME_CSTS_FAILED);
+            n->bar.cc = data;
         }
         if (NVME_CC_SHN(data) && !(NVME_CC_SHN(n->bar.cc))) {
             nvme_clear_ctrl(n, true);
