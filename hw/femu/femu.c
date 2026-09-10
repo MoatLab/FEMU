@@ -488,6 +488,7 @@ static uint64_t nvme_mmio_read(void *opaque, hwaddr addr, unsigned size)
 }
 
 static void femu_aer_bh(void *opaque);
+static void femu_exit_extensions(FemuCtrl *n);
 
 static void nvme_process_db_admin(FemuCtrl *n, hwaddr addr, int val)
 {
@@ -1336,13 +1337,17 @@ static void nvme_register_extensions_ns(FemuCtrl *n, NvmeNamespace *ns)
  * device that never realized, and a device_add that fails validation is an
  * ordinary outcome -- the monitor reports it and the user tries again -- so a
  * rejected configuration otherwise kept its whole memory backend, pinned.
- *
- * Mode state from a mode init that failed part way is not covered: a mode's
- * exit assumes its init finished, and some would destroy locks that were
- * never created.
  */
 static void femu_realize_undo(FemuCtrl *n)
 {
+    /*
+     * Namespaces that did come up own an FTL and its channel tree, which is
+     * the largest allocation here. Every mode's exit tests the state it frees
+     * before touching it, so running them over a controller that got part way
+     * is safe, and it has to happen before the namespace array goes.
+     */
+    femu_exit_extensions(n);
+
     if (n->subsys) {
         femu_subsys_unregister_ctrl(n->subsys, n);
     }
