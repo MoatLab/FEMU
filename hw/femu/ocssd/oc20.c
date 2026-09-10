@@ -410,7 +410,13 @@ static uint16_t oc20_rw_check_read_req(FemuCtrl *n, NvmeCmd *cmd,
     for (i = 0; i < req->nlb; i++) {
         err = oc20_rw_check_chunk_read(n, cmd, req, ((uint64_t *) req->slba)[i]);
         if (err) {
-            if (err & NVME_DULB) {
+            /*
+             * Only an unwritten block may be skipped. The range error added
+             * beside it also has the DULB bits set, so a bitmask test let an
+             * address outside the geometry carry on into the transfer and
+             * return whatever sector the dense index landed on.
+             */
+            if (err == NVME_DULB) {
                 req->predef |= (1 << i);
                 continue;
             }
@@ -511,7 +517,7 @@ static uint16_t oc20_rw_check_req(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         for (i = 0; i < nlb; i++) {
             err = oc20_rw_check_chunk_read(n, cmd, req, slba + i);
             if (err) {
-                if (err & NVME_DULB) {
+                if (err == NVME_DULB) {
                     req->predef = slba + i;
                     if (NVME_ERR_REC_DULBE(req->ns->err_rec)) {
                         return NVME_DULB | NVME_DNR;
@@ -863,7 +869,6 @@ static uint16_t oc20_chunk_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
 
     nsid = le32_to_cpu(cmd->nsid);
     if (unlikely(nsid == 0 || nsid > n->num_namespaces)) {
-        abort();
         return NVME_INVALID_NSID | NVME_DNR;
     }
 
@@ -874,8 +879,12 @@ static uint16_t oc20_chunk_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
     log_len = lns->chks_total * sizeof(Oc20CS);
     trans_len = MIN(log_len, buf_len);
 
+    /*
+     * A host that reads this log in fixed-size chunks asks for the last one
+     * past the end. That is a bad field, not a reason to take the process
+     * down with it.
+     */
     if (unlikely(log_len < off + buf_len)) {
-        abort();
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
