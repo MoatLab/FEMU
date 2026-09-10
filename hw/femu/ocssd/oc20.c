@@ -764,6 +764,22 @@ static uint16_t oc20_rw(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req, bool vector
         goto fail_free;
     }
 
+    /*
+     * The offset list holds one entry per address, and the backend walks it
+     * one entry per scatter-gather entry. Those agree only while each entry
+     * covers exactly one sector, which a data pointer that is not page
+     * aligned breaks: the first entry is then a part page and the mapping
+     * produces one entry more than there are addresses, so the backend reads
+     * past the end of the list -- and pairs every address with the wrong
+     * piece of the transfer besides.
+     */
+    if (req->qsg.nsg != nlb) {
+        femu_err("%s: %d data segments for %u addresses\n", __func__,
+                 req->qsg.nsg, nlb);
+        err = NVME_INVALID_FIELD | NVME_DNR;
+        goto fail_free;
+    }
+
     uint64_t aio_sector_list[OC20_CMD_MAX_LBAS];
     for (i = 0; i < nlb; i++) {
 #ifdef DEBUG_OC20
@@ -882,7 +898,8 @@ static uint16_t oc20_chunk_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
     NvmeNamespace *ns;
     Oc20Namespace *lns;
     uint8_t *log_page;
-    uint32_t log_len, trans_len, nsid;
+    uint64_t log_len;
+    uint32_t trans_len, nsid;
     uint16_t ret;
 
     nsid = le32_to_cpu(cmd->nsid);
@@ -894,17 +911,23 @@ static uint16_t oc20_chunk_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
 
     lns = ns->state;
 
-    log_len = lns->chks_total * sizeof(Oc20CS);
-    trans_len = MIN(log_len, buf_len);
+    log_len = (uint64_t)lns->chks_total * sizeof(Oc20CS);
 
     /*
      * A host that reads this log in fixed-size chunks asks for the last one
      * past the end. That is a bad field, not a reason to take the process
      * down with it.
+     *
+     * Test the offset on its own before going near the length. Comparing
+     * their sum instead let the sum wrap: an offset just below 2^64 with a
+     * small length came to nearly zero, passed, and then moved the pointer
+     * to before the buffer -- which the set direction of this command writes
+     * the host's own bytes through.
      */
-    if (unlikely(log_len < off + buf_len)) {
+    if (unlikely(off >= log_len || buf_len > log_len - off)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
+    trans_len = buf_len;
 
     log_page = (uint8_t *) lns->chunk_info + off;
 
