@@ -75,7 +75,14 @@ jobs:
     - name: Run basic functionality test
       run: |
         cd build-femu
-        timeout 10s ./qemu-system-x86_64 -device femu,help || true
+        # The listing has to list something. Discarding the outcome meant this
+        # step passed on an empty listing, or on no listing at all.
+        out=$(timeout 10s ./qemu-system-x86_64 -device femu,help 2>&1 || true)
+        echo "$out" | head -20
+        for prop in femu_mode devsz_mb namespaces; do
+          echo "$out" | grep -q "^  ${prop}=" || {
+            echo "device help did not list ${prop}"; exit 1; }
+        done
         echo "✓ FEMU device parameters accessible"
 
     - name: Check FEMU modes
@@ -259,12 +266,19 @@ jobs:
     - name: Validate FEMU configuration parameters
       run: |
         cd build-femu
-        # Test different SSD configurations
-        ./qemu-system-x86_64 \
-          -device femu,devsz_mb=2048,secsz=512,secs_per_pg=8,pgs_per_blk=256 \
-          -M accel=qtest -nographic &
-        sleep 2
-        kill %1 2>/dev/null || true
+        # A geometry the device refuses has to fail this step. Backgrounding
+        # the process, sleeping and killing it reported success whether or not
+        # the device ever realized. As above, the timeout killing it (124) is
+        # the expected outcome and anything else is a failure.
+        # femu_mode=1 so the geometry is the black-box FTL's and actually
+        # gets checked; the default mode ignores it entirely.
+        rc=0
+        timeout 10s ./qemu-system-x86_64 \
+          -device femu,devsz_mb=2048,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=256 \
+          -M accel=qtest -nographic || rc=$?
+        if [ "$rc" -ne 124 ] && [ "$rc" -ne 0 ]; then
+          echo "the device did not accept the geometry (exit ${rc})"; exit "$rc"
+        fi
         echo "✓ FEMU SSD parameter validation completed"
 
   code-quality:
