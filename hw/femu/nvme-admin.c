@@ -779,9 +779,19 @@ static uint16_t nvme_identify(FemuCtrl *n, NvmeCmd *cmd)
     case NVME_ID_CNS_CS_CTRL:
         return nvme_identify_ctrl_csi(n, cmd);
     case NVME_ID_CNS_CS_NS_FMT:
-        /* key-value format-index identify: NSID 0, format index in CDW11 */
+        /*
+         * Key-value format-index identify: the command names a format index in
+         * CDW11 rather than a namespace, so it is answered from the first
+         * key-value namespace the controller has. Namespace zero is not one on
+         * a controller in another mode, and the key-value code would then be
+         * handed that mode's state object.
+         */
         if (c->csi == NVME_CSI_KV) {
-            return kvssd_identify_ns_csi_fmt(n, &n->namespaces[0], cmd);
+            for (int i = 0; i < n->num_namespaces; i++) {
+                if (NS_KVSSD(&n->namespaces[i])) {
+                    return kvssd_identify_ns_csi_fmt(n, &n->namespaces[i], cmd);
+                }
+            }
         }
         return NVME_INVALID_FIELD | NVME_DNR;
     case NVME_ID_CNS_NS_ACTIVE_LIST:

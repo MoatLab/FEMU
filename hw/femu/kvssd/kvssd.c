@@ -67,10 +67,18 @@ static inline uint32_t kv_value_size(const NvmeCmd *cmd)
 
 FemuKvssdState *kvssd_ns_state(FemuCtrl *n, NvmeNamespace *ns)
 {
-    if (ns && ns->ext_ops.state) {
-        return ns->ext_ops.state;
+    /*
+     * Every mode keeps its own controller-wide object in this one slot, so on a
+     * controller that is not key-value it holds something else entirely --
+     * Open-Channel 2.0's is a header a fraction of the size of this state.
+     * Reading and locking that through here runs far past the end of it, so
+     * answer only where the state really is this one.
+     */
+    if (ns) {
+        return NS_KVSSD(ns) ? ns->ext_ops.state : NULL;
     }
-    return n->ext_ops.state;
+
+    return KVSSD(n) ? n->ext_ops.state : NULL;
 }
 
 static FemuKvssdState *kvssd_state(FemuCtrl *n, NvmeNamespace *ns)

@@ -23,6 +23,10 @@
 /* the femu device's queues property default, which these tests do not set */
 #define FEMU_DEFAULT_IO_QUEUES  8
 
+/* not in QEMU's own block/nvme.h */
+#define FEMU_CNS_CS_NS_FMT  0x0a    /* command-set NS for a format index */
+#define FEMU_CSI_KV         0x01    /* key-value command set */
+
 typedef struct QFemu QFemu;
 
 struct QFemu {
@@ -343,6 +347,41 @@ static void femu_test_io_by_doorbell(void *obj, void *data,
  * after Doorbell Buffer Config the queue is driven from the shadow page and
  * the register writes are ignored.
  */
+/*
+ * Identify for a command set the controller does not implement must be refused.
+ * The format-index query names a format rather than a namespace, and answering
+ * it from namespace zero handed the key-value code whatever object the mode
+ * this controller really runs keeps in the same slot.
+ */
+static void femu_test_identify_other_csi(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    NvmeCmd cmd;
+    uint64_t buf;
+
+    femu_enable(&c, &femu->dev, alloc);
+    buf = guest_alloc(alloc, 4096);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_IDENTIFY;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(FEMU_CNS_CS_NS_FMT);
+    cmd.cdw11 = cpu_to_le32(FEMU_CSI_KV << 24);
+    g_assert_cmpint(femu_admin(&c, &cmd), !=, NVME_SUCCESS);
+
+    /* the controller is still answering, so it did not take the bad path */
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_IDENTIFY;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(NVME_ID_CNS_CTRL);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
 /*
  * A queue the controller cannot map must be refused. The ring is addressed
  * through a host pointer the mapping returns, so accepting the command leaves
@@ -1116,6 +1155,11 @@ static void femu_register_nodes(void)
                  femu_test_io_by_shadow_doorbell, NULL);
     qos_add_test("features", "femu", femu_test_features, NULL);
     qos_add_test("queue-mapping", "femu", femu_test_queue_mapping, NULL);
+    qos_add_test("identify-other-csi", "femu", femu_test_identify_other_csi,
+                 &(QOSGraphTestOptions) {
+        /* Open-Channel 2.0, whose state object is far smaller than KV's */
+        .edge.extra_device_opts = "femu_mode=0,lver=2"
+    });
     qos_add_test("delete-sq-in-flight", "femu",
                  femu_test_delete_sq_in_flight, &(QOSGraphTestOptions) {
         /*
