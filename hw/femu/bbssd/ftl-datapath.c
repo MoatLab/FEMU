@@ -689,6 +689,22 @@ uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req)
         }
 
         ssd->host_write_pages += end_lpn - start_lpn + 1;
+        /* the pair an ordinary write bumps; these pages are programmed too */
+        ssd->sp.write_cnt += end_lpn - start_lpn + 1;
+
+        /*
+         * This goes straight to the media, so anything the buffer is holding
+         * for these pages has to go first, exactly as the direct write path
+         * does: leaving it there programs the superseded version afterwards,
+         * which is one more program per page than the media owes and shows up
+         * as amplification the workload did not cause.
+         */
+        if (ssd->write_buffer_cnt) {
+            for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
+                buffer_discard(ssd, lpn);
+            }
+        }
+
         for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
             if (ssd_out_of_lines(ssd)) {
                 req->status = NVME_CAP_EXCEEDED | NVME_DNR;
