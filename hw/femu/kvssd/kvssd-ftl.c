@@ -949,6 +949,20 @@ static void kvssd_free_ssd(FemuKvssdState *s)
      * layer, and it freed the mapping scheme's private state with a flat
      * g_free() that missed the allocations hanging off it.
      */
+    /*
+     * The namespace and the controller point at this FTL too, and the other
+     * FTL-backed modes clear both when they release theirs. Leaving them set
+     * left every reader that tests ns->ssd -- the SMART and endurance counters
+     * among them -- looking at freed memory.
+     */
+    if (s->ns) {
+        if (s->ns->ctrl && s->ns->ctrl->ssd == ssd) {
+            s->ns->ctrl->ssd = NULL;
+        }
+        if (s->ns->ssd == ssd) {
+            s->ns->ssd = NULL;
+        }
+    }
     ssd_free(ssd);
     g_free(ssd);
     s->ssd = NULL;
