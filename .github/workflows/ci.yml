@@ -251,8 +251,30 @@ jobs:
         name: femu-binary-ubuntu-22.04
         path: build-femu/
 
+    - name: Install the libraries the binary links against
+      run: |
+        # This job runs a binary built on another runner image and installed
+        # nothing for it, so it could not load at all. Every step that ran it
+        # discarded the outcome, so nothing said so. The development packages
+        # are the same list the build job uses and pull in the runtime
+        # libraries, whose own package names differ between releases.
+        sudo apt update
+        sudo apt install -y pkg-config libglib2.0-dev libpixman-1-dev \
+          libfdt-dev zlib1g-dev libaio-dev libcap-ng-dev libattr1-dev \
+          libslirp-dev libseccomp-dev libcurl4-gnutls-dev liblzo2-dev \
+          libsnappy-dev libbz2-dev liblzma-dev libzstd-dev \
+          libgcrypt20-dev libgnutls28-dev uuid-dev libcap-dev \
+          libxml2-dev libmount-dev
+
     - name: Make binary executable
       run: chmod +x build-femu/qemu-system-x86_64
+
+    - name: Check the binary can run at all
+      run: |
+        cd build-femu
+        # Everything below runs this binary. If it cannot load its libraries,
+        # say so here rather than in the middle of a device test.
+        ./qemu-system-x86_64 --version
 
     - name: Test run scripts syntax
       run: |
