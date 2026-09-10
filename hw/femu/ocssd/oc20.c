@@ -1138,22 +1138,6 @@ static uint64_t nvme_ns_calc_blks(FemuCtrl *n, NvmeNamespace *ns)
     return n->ns_size / ((1 << NVME_ID_NS_LBADS(ns)) + NVME_ID_NS_MS(ns));
 }
 
-static void nvme_ns_init_predef(FemuCtrl *n, NvmeNamespace *ns)
-{
-    uint8_t *pbuf = g_malloc(NVME_ID_NS_LBADS_BYTES(ns));
-
-    switch (n->params.dlfeat) {
-    case 0x1:
-        memset(pbuf, 0x00, NVME_ID_NS_LBADS_BYTES(ns));
-        break;
-    case 0x2:
-        pbuf = g_malloc(NVME_ID_NS_LBADS_BYTES(ns));
-        memset(pbuf, 0xff, NVME_ID_NS_LBADS_BYTES(ns));
-        break;
-    default:
-        break;
-    }
-}
 
 static void femu_oc20_init_id_ctrl(FemuCtrl *n, NvmeNamespace *ns,
                                    Oc20NamespaceGeometry *ln)
@@ -1344,7 +1328,15 @@ static int oc20_init_namespace(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         lns->chunkinfo_size;
     ns->blk.meta = ns->blk.data + NVME_ID_NS_LBADS_BYTES(ns) * ns->ns_blks;
 
-    nvme_ns_init_predef(n, ns);
+    /*
+     * A read of a block that was never written should come back as the
+     * pattern the specification defines, and this mode does not do that: it
+     * marks such blocks on the read path and then transfers whatever the
+     * media holds. What used to be here allocated a pattern buffer, filled
+     * it, and dropped it -- leaking it once per namespace, twice for one
+     * setting of dlfeat -- without storing it anywhere. Removed rather than
+     * left looking like the feature exists.
+     */
 
     if (params->early_reset) {
         params->mccap |= OC20_PARAMS_MCCAP_EARLY_RESET;
