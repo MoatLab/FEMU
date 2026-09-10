@@ -1859,6 +1859,15 @@ typedef struct FemuCtrl {
     NvmeIdCtrl      id_ctrl;
 
     QSIMPLEQ_HEAD(aer_queue, NvmeAsyncEvent) aer_queue;
+    /*
+     * An asynchronous event can be raised from a poller thread, which must not
+     * write the admin completion queue: that queue is served by the vCPU
+     * thread, and two writers corrupt its tail and phase. A poller appends
+     * under aer_lock and wakes aer_bh; the bottom half runs in the main loop
+     * and is the only place events are posted from.
+     */
+    QemuMutex       aer_lock;
+    QEMUBH          *aer_bh;
     QEMUTimer       *aer_timer;
     uint8_t         aer_mask;
 

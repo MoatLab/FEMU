@@ -316,11 +316,13 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
      * reclaimed -- which the driver takes as a completion for a request it no
      * longer owns.
      */
+    qemu_mutex_lock(&n->aer_lock);
     while ((event = QSIMPLEQ_FIRST(&n->aer_queue)) != NULL) {
         QSIMPLEQ_REMOVE_HEAD(&n->aer_queue, entry);
         g_free(event);
     }
     n->aer_queued = 0;
+    qemu_mutex_unlock(&n->aer_lock);
     n->aer_mask = 0;
     n->outstanding_aers = 0;
     n->temp_warn_issued = 0;
@@ -492,6 +494,8 @@ static uint64_t nvme_mmio_read(void *opaque, hwaddr addr, unsigned size)
 
     return val;
 }
+
+static void femu_aer_bh(void *opaque);
 
 static void nvme_process_db_admin(FemuCtrl *n, hwaddr addr, int val)
 {
@@ -1368,6 +1372,9 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     n->elpes = g_malloc0(sizeof(*n->elpes) * (n->elpe + 1));
     n->aer_held = g_malloc0(sizeof(*n->aer_held) * (n->aerl + 1));
     QSIMPLEQ_INIT(&n->aer_queue);
+    qemu_mutex_init(&n->aer_lock);
+    n->aer_bh = qemu_bh_new_guarded(femu_aer_bh, n,
+                                    &DEVICE(n)->mem_reentrancy_guard);
     n->features.int_vector_config = g_malloc0(sizeof(*n->features.int_vector_config) * (n->nr_io_queues + 1));
 
     nvme_init_pci(n);
@@ -1467,6 +1474,12 @@ static void nvme_destroy_poller(FemuCtrl *n)
  * controller's, and every mode's exit walks the namespaces itself, so dispatch
  * over the distinct handlers rather than once per namespace.
  */
+/* Post whatever events are queued, from the main loop rather than a poller. */
+static void femu_aer_bh(void *opaque)
+{
+    nvme_process_aers(opaque);
+}
+
 static void femu_exit_extensions(FemuCtrl *n)
 {
     void (*seen[FEMU_NR_MODES])(struct FemuCtrl *);
@@ -1508,6 +1521,10 @@ static void femu_exit(PCIDevice *pci_dev)
 
     nvme_clear_ctrl(n, true);
     nvme_destroy_poller(n);
+    /* the pollers are gone, so nothing can wake the bottom half any more */
+    qemu_bh_delete(n->aer_bh);
+    n->aer_bh = NULL;
+    qemu_mutex_destroy(&n->aer_lock);
     free_dram_backend(n->mbe);
 
     /* FDP: free namespace FDP placement handles */

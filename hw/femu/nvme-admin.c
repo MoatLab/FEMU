@@ -2097,20 +2097,36 @@ static void nvme_post_held_cqe(FemuCtrl *n, const NvmeAerHold *hold,
  * event pointed at. Until then further events of that type stay queued, so the
  * host is not told the same thing twice before it has looked.
  */
+/*
+ * Post queued events. Only ever called from the vCPU thread or from the
+ * aer_bh bottom half, both of which hold the BQL, so outstanding_aers,
+ * aer_mask and aer_held need no lock of their own. aer_lock covers just the
+ * queue and its count, which a poller thread also appends to.
+ */
 void nvme_process_aers(FemuCtrl *n)
 {
-    NvmeAsyncEvent *event, *next;
+    for (;;) {
+        NvmeAsyncEvent *event = NULL, *cand, *next;
 
-    QSIMPLEQ_FOREACH_SAFE(event, &n->aer_queue, entry, next) {
-        if (!n->outstanding_aers) {
-            break;              /* nothing to complete it with */
+        qemu_mutex_lock(&n->aer_lock);
+        QSIMPLEQ_FOREACH_SAFE(cand, &n->aer_queue, entry, next) {
+            if (!n->outstanding_aers) {
+                break;          /* nothing to complete it with */
+            }
+            if (n->aer_mask & (1 << cand->result.event_type)) {
+                continue;       /* already reported, awaiting the log read */
+            }
+            QSIMPLEQ_REMOVE(&n->aer_queue, cand, NvmeAsyncEvent, entry);
+            n->aer_queued--;
+            event = cand;
+            break;
         }
-        if (n->aer_mask & (1 << event->result.event_type)) {
-            continue;           /* already reported, awaiting the log read */
+        qemu_mutex_unlock(&n->aer_lock);
+
+        if (!event) {
+            return;
         }
 
-        QSIMPLEQ_REMOVE(&n->aer_queue, event, NvmeAsyncEvent, entry);
-        n->aer_queued--;
         n->aer_mask |= 1 << event->result.event_type;
         n->outstanding_aers--;
 
@@ -2126,19 +2142,27 @@ void nvme_enqueue_event(FemuCtrl *n, uint8_t event_type, uint8_t event_info,
 {
     NvmeAsyncEvent *event;
 
-    if (n->aer_queued >= FEMU_AER_MAX_QUEUED) {
-        return;
-    }
-
     event = g_new0(NvmeAsyncEvent, 1);
     event->result.event_type = event_type;
     event->result.event_info = event_info;
     event->result.log_page = log_page;
 
+    qemu_mutex_lock(&n->aer_lock);
+    if (n->aer_queued >= FEMU_AER_MAX_QUEUED) {
+        qemu_mutex_unlock(&n->aer_lock);
+        g_free(event);
+        return;
+    }
     QSIMPLEQ_INSERT_TAIL(&n->aer_queue, event, entry);
     n->aer_queued++;
+    qemu_mutex_unlock(&n->aer_lock);
 
-    nvme_process_aers(n);
+    /*
+     * Posting happens in the bottom half. A zoned namespace raises events from
+     * its I/O handler, which runs on a poller thread, and that thread must not
+     * touch the admin completion queue the vCPU thread is serving.
+     */
+    qemu_bh_schedule(n->aer_bh);
 }
 
 /*
