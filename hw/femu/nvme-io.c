@@ -1270,7 +1270,17 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         }
         return nvme_flush(n, ns, cmd, req);
     case NVME_CMD_DSM:
-        if ((NVME_ONCS_DSM & n->oncs) && nvme_ns_has_nvm_cmd_set(ns)) {
+        /*
+         * This and the two below change logical blocks without going through
+         * the zone state machine. A deallocate over a full sequential zone
+         * zeroed its data while the descriptor still reported the zone full
+         * with its write pointer at capacity -- a rewrite out of order that
+         * the host is told nothing about. Refuse them on a zoned namespace
+         * until they honour the zone state; the zoned command effects log no
+         * longer claims them either.
+         */
+        if ((NVME_ONCS_DSM & n->oncs) && nvme_ns_has_nvm_cmd_set(ns) &&
+            !NS_ZNSSD(ns)) {
             return nvme_dsm(n, ns, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
@@ -1280,12 +1290,14 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
     case NVME_CMD_WRITE_ZEROES:
-        if ((NVME_ONCS_WRITE_ZEROS & n->oncs) && nvme_ns_has_nvm_cmd_set(ns)) {
+        if ((NVME_ONCS_WRITE_ZEROS & n->oncs) && nvme_ns_has_nvm_cmd_set(ns) &&
+            !NS_ZNSSD(ns)) {
             return nvme_write_zeros(n, ns, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
     case NVME_CMD_WRITE_UNCOR:
-        if ((NVME_ONCS_WRITE_UNCORR & n->oncs) && nvme_ns_has_nvm_cmd_set(ns)) {
+        if ((NVME_ONCS_WRITE_UNCORR & n->oncs) && nvme_ns_has_nvm_cmd_set(ns) &&
+            !NS_ZNSSD(ns)) {
             return nvme_write_uncor(n, ns, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;

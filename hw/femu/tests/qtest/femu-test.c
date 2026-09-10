@@ -27,6 +27,7 @@
 #define FEMU_CNS_CS_NS_FMT  0x0a    /* command-set NS for a format index */
 #define FEMU_CSI_KV         0x01    /* key-value command set */
 #define FEMU_ZONE_ACTION_RESET  0x04
+#define FEMU_DSM_AD             0x04    /* Dataset Management: deallocate */
 #define FEMU_CNS_CS_CTRL    0x06    /* command-set controller identify */
 #define FEMU_CSI_ZONED      0x02    /* zoned namespace command set */
 #define FEMU_CQ_IEN         0x02    /* Create CQ: interrupts enabled */
@@ -743,6 +744,38 @@ static void femu_test_zone_reset(void *obj, void *data,
     qtest_memread(femu->dev.bus->qts, buf, out, sizeof(out));
     g_assert_cmpint(out[0], ==, 0x5a);
     g_assert_cmpint(out[FEMU_DATA_SIZE - 1], ==, 0x5a);
+
+    /*
+     * Deallocate is the other way to make blocks read as zeros, and it does not
+     * go through the zone state machine: accepted, it zeroed a sequential
+     * zone's data while the descriptor still reported the write pointer.
+     * It has to be refused, and the data has to survive the refusal.
+     */
+    {
+        uint64_t ranges = guest_alloc(alloc, 4096);
+        uint8_t desc[16] = { 0 };
+
+        stl_le_p(desc + 4, FEMU_DATA_SIZE / c.lba_size);
+        qtest_memwrite(femu->dev.bus->qts, ranges, desc, sizeof(desc));
+
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_CMD_DSM;
+        cmd.nsid = cpu_to_le32(1);
+        cmd.dptr.prp1 = cpu_to_le64(ranges);
+        cmd.cdw11 = cpu_to_le32(FEMU_DSM_AD);
+        want = c.cid;
+        femu_submit(&c, &c.io, &cmd);
+        g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), !=,
+                        NVME_SUCCESS);
+        g_assert_cmpint(got, ==, want);
+        guest_free(alloc, ranges);
+    }
+
+    qtest_memset(femu->dev.bus->qts, buf, 0, FEMU_DATA_SIZE);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                    NVME_SUCCESS);
+    qtest_memread(femu->dev.bus->qts, buf, out, sizeof(out));
+    g_assert_cmpint(out[0], ==, 0x5a);
 
     memset(&cmd, 0, sizeof(cmd));
     cmd.opcode = NVME_CMD_ZONE_MGMT_SEND;
