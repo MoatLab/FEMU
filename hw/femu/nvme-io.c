@@ -681,7 +681,7 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
     }
 
 mapped:
-    assert((nlb << data_shift) == req->qsg.size);
+    assert(((uint64_t)nlb << data_shift) == req->qsg.size);
 
     req->slba = slba;
     req->status = NVME_SUCCESS;
@@ -827,7 +827,7 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t elba = slba + nlb;
     uint8_t lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
     uint8_t data_shift = ns->id_ns.lbaf[lba_index].lbads;
-    uint64_t data_size = nlb << data_shift;
+    uint64_t data_size = (uint64_t)nlb << data_shift;
     /* address the media within this namespace's slice, as nvme_rw() does */
     uint64_t offset  = ns->backend_offset + (slba << data_shift);
 
