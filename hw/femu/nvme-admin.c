@@ -1329,7 +1329,7 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
     smart.available_spare = 100;
     for (i = 0; n->namespaces && i < n->num_namespaces; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
-        uint8_t spare;
+        uint8_t spare, used;
 
         if (!ns->ssd) {
             continue;
@@ -1337,6 +1337,15 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
         spare = ssd_available_spare(ns->ssd);
         if (spare < smart.available_spare) {
             smart.available_spare = spare;
+        }
+        /*
+         * Life used is the same kind of controller-wide field, so report the
+         * most worn namespace. It stays zero unless the device was given an
+         * endurance rating to measure its erases against.
+         */
+        used = ssd_percentage_used(ns->ssd);
+        if (used > smart.percentage_used) {
+            smart.percentage_used = used;
         }
     }
 

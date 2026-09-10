@@ -1717,6 +1717,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_STRING("mapping", FemuCtrl, bb_params.mapping_scheme),
     DEFINE_PROP_UINT32("mapping_cache_mb", FemuCtrl, mapping_cache_mb, 0),
     DEFINE_PROP_UINT8("nand_cell_type", FemuCtrl, nand_cell_type, 0),
+    DEFINE_PROP_UINT32("pe_cycles_rated", FemuCtrl, pe_cycles_rated, 0),
     DEFINE_PROP_INT32("cell_pages", FemuCtrl, bb_params.cell_pages, 0),
     DEFINE_PROP_INT32("pgtype_lat", FemuCtrl, bb_params.pgtype_lat, 0),
     DEFINE_PROP_INT32("ecc_step_ns", FemuCtrl, bb_params.ecc_step_ns, 0),

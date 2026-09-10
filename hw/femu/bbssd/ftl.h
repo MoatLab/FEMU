@@ -520,6 +520,15 @@ struct ssd {
     uint64_t nand_write_pages;  /* user pages programmed into NAND */
     uint64_t gc_write_pages;    /* pages the device relocated itself */
 
+    /*
+     * Wear: erases summed over every block, kept as a running total so the
+     * average cycle count does not cost a walk of the geometry, and the
+     * endurance that average is measured against. A zero rating means the
+     * device was given no endurance figure and reports no life estimate.
+     */
+    uint64_t total_erases;
+    uint32_t rated_pe_cycles;
+
     bool debug_ftl; /* check FTL invariants on the GC path (off by default) */
 
     /*

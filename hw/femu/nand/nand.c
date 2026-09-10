@@ -39,6 +39,29 @@ int64_t get_blk_erase_latency(int flash_type)
 }
 
 /*
+ * Endurance the cell type is rated for. Zero for a device that was not told
+ * what its media is, which is how the caller knows it has no life estimate to
+ * report rather than an estimate of zero.
+ */
+uint32_t get_rated_pe_cycles(int flash_type)
+{
+    switch (flash_type) {
+    case SLC:
+        return SLC_RATED_PE_CYCLES;
+    case MLC:
+        return MLC_RATED_PE_CYCLES;
+    case TLC:
+        return TLC_RATED_PE_CYCLES;
+    case QLC:
+        return QLC_RATED_PE_CYCLES;
+    case PLC:
+        return PLC_RATED_PE_CYCLES;
+    default:
+        return 0;
+    }
+}
+
+/*
  * Lower/Upper page pairing in one block
  * Shadow page programming sequence to reduce cell-to-cell interference
  */

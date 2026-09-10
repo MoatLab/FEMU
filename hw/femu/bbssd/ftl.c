@@ -83,6 +83,14 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
         ssd->bad_blocks = (uint32_t)spp->tt_blks;
     }
 
+    /*
+     * An explicit rating wins; otherwise take the one the cell type implies.
+     * A device configured with neither keeps zero and reports no life estimate.
+     */
+    ssd->total_erases = 0;
+    ssd->rated_pe_cycles = n->pe_cycles_rated ? n->pe_cycles_rated :
+                           get_rated_pe_cycles(n->nand_cell_type);
+
     /* configure the NAND media-layer timing (reads spp, points at ssd->ch) */
     bb_nand_media_init(ssd);
 
@@ -235,6 +243,28 @@ uint64_t ssd_max_block_reads(struct ssd *ssd)
  * bad-block fraction (bad_blocks / tt_blks) as bad blocks consume the
  * over-provisioned reserve. A reported value only -- placement is unaffected.
  */
+/*
+ * SMART percentage_used: the average program/erase cycles a block has taken,
+ * as a percentage of what the media is rated for. The specification allows
+ * values above 100 and caps the reported figure at 255. Zero when the device
+ * was given no endurance rating, which means no estimate rather than a new
+ * device -- a new device also reports zero, and the two are indistinguishable
+ * in this field by design.
+ */
+uint8_t ssd_percentage_used(struct ssd *ssd)
+{
+    struct ssdparams *spp = &ssd->sp;
+    uint64_t avg, pct;
+
+    if (!ssd->rated_pe_cycles || spp->tt_blks <= 0) {
+        return 0;
+    }
+    avg = ssd->total_erases / (uint64_t)spp->tt_blks;
+    pct = (avg * 100ull) / ssd->rated_pe_cycles;
+
+    return pct > 255 ? 255 : (uint8_t)pct;
+}
+
 uint8_t ssd_available_spare(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;

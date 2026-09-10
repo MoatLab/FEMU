@@ -1907,6 +1907,8 @@ typedef struct FemuCtrl {
     uint32_t        read_cache_mb; /* bbssd DRAM read cache size (0 = off) */
     uint32_t        mapping_cache_mb; /* bbssd DFTL translation cache size (0 = off) */
     uint8_t         nand_cell_type; /* bbssd NAND cell type: 0=off(flat), 1 SLC..4 QLC */
+    /* program/erase cycles the media is rated for; 0 takes the cell type's */
+    uint32_t        pe_cycles_rated;
     uint32_t        nand_bad_blocks; /* bbssd factory bad blocks reported via SMART; 0 = none */
     uint32_t        op_pcent; /* bbssd over-provisioning percent (0 = use devsz_mb) */
     bool            debug_ftl; /* check bbssd FTL invariants on the GC path */
@@ -2192,6 +2194,7 @@ uint64_t zns_ftl_process_req(NvmeNamespace *ns, NvmeRequest *req);
 
 /* bbssd SMART available-spare (100% healthy, reduced by the factory bad-block fraction) */
 uint8_t ssd_available_spare(struct ssd *ssd);
+uint8_t ssd_percentage_used(struct ssd *ssd);
 
 /* write amplification: factor scaled by 1000, plus the raw page counters */
 uint32_t ssd_waf_x1000(struct ssd *ssd);
