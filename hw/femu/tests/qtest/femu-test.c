@@ -20,6 +20,8 @@
 #define FEMU_QSIZE          16
 #define FEMU_DATA_SIZE      4096
 #define FEMU_POLL_LIMIT_MS  10000
+/* the femu device's queues property default, which these tests do not set */
+#define FEMU_DEFAULT_IO_QUEUES  8
 
 typedef struct QFemu QFemu;
 
@@ -578,10 +580,17 @@ static void femu_test_features(void *obj, void *data, QGuestAllocator *alloc)
                             NVME_GETFEAT_SELECT_DEFAULT, 0, 0, &result)),
                     ==, NVME_INVALID_FIELD);
 
-    /* the queue count comes back in dword 0 of the completion */
+    /*
+     * The queue count comes back in dword 0 of the completion, as the number
+     * allocated rather than the number asked for, and 0's based in both
+     * halves. This controller allocates its queues property's worth however
+     * many the host requests, so ask for four and expect the default eight.
+     * Comparing the two halves to each other passes on a pair of zeroes.
+     */
     g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_NUMBER_OF_QUEUES,
                             false, 0, 0x00030003, &result)), ==, NVME_SUCCESS);
-    g_assert_cmpint(result & 0xffff, ==, (result >> 16) & 0xffff);
+    g_assert_cmpint(result, ==, (FEMU_DEFAULT_IO_QUEUES - 1) |
+                                ((FEMU_DEFAULT_IO_QUEUES - 1) << 16));
 
     femu_disable(&c);
 }

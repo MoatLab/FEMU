@@ -112,6 +112,12 @@ run_block_checks() {
 }
 
 # ------------------------------------------------------------------ zoned
+# write pointer of zone 0, as blkzone reports it
+zone0_wptr() {
+    blkzone report -c 1 "$DEV" 2>/dev/null |
+        sed -n 's/.*wptr \([0-9a-fx]*\).*/\1/p'
+}
+
 run_zns_checks() {
     echo "== zones =="
     have blkzone || { na "zone checks (need blkzone from util-linux)"; return; }
@@ -122,21 +128,35 @@ run_zns_checks() {
 
     blkzone reset "$DEV" >/dev/null 2>&1 && ok "reset all zones" || bad "reset all zones"
     z0=$(blkzone report -c 1 "$DEV" 2>/dev/null | head -1)
-    wp0=$(sed -n 's/.*wptr \([0-9a-fx]*\).*/\1/p' <<<"$z0")
+    wp0=$(zone0_wptr)
 
     dd if=/dev/zero of="$DEV" bs=4k count=64 oflag=direct status=none 2>/dev/null \
         && ok "sequential write into zone 0" || bad "sequential write into zone 0"
-    wp1=$(blkzone report -c 1 "$DEV" 2>/dev/null | sed -n 's/.*wptr \([0-9a-fx]*\).*/\1/p')
+    wp1=$(zone0_wptr)
     [[ "$wp0" != "$wp1" ]] && ok "write pointer advanced ($wp0 -> $wp1)" \
                            || bad "write pointer advanced (stuck at $wp0)"
 
-    # Zone Append: the device picks the LBA, so the write pointer must move and
-    # the command must report where the data landed.
+    # Zone Append: the device picks the LBA, so the write pointer must move.
+    # A tool without the subcommand is skipped, but once the command exists a
+    # rejection is a failure -- reporting both as "not applicable" meant this
+    # check could not fail.
+    if ! nvme zns zone-append --help >/dev/null 2>&1; then
+        na "zone append (nvme-cli has no zns zone-append)"
+        return
+    fi
+    local wp2
     if nvme zns zone-append "$DEV" --zslba=0 --data-size=4096 \
          --data=/dev/zero >/dev/null 2>&1; then
         ok "zone append accepted"
     else
-        na "zone append (nvme-cli too old, or unsupported)"
+        bad "zone append accepted"
+        return
+    fi
+    wp2=$(zone0_wptr)
+    if [[ "$wp2" != "$wp1" ]]; then
+        ok "append moved the write pointer ($wp1 -> $wp2)"
+    else
+        bad "append moved the write pointer (stuck at $wp1)"
     fi
 }
 
