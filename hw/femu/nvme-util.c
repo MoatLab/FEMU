@@ -427,6 +427,12 @@ void nvme_drain_sq(FemuCtrl *n, NvmeSQueue *sq)
 void nvme_free_sq(NvmeSQueue *sq, FemuCtrl *n)
 {
     n->sq[sq->sqid] = NULL;
+    if (sq->dma_addr_hva) {
+        dma_memory_unmap(pci_get_address_space(&n->parent_obj),
+                         (void *)sq->dma_addr_hva, sq->dma_map_len, 0, 0);
+        sq->dma_addr_hva = 0;
+        sq->dma_map_len = 0;
+    }
     g_free(sq->io_req);
     if (sq->prp_list) {
         g_free(sq->prp_list);
@@ -443,7 +449,8 @@ uint16_t nvme_init_sq(NvmeSQueue *sq, FemuCtrl *n, uint64_t dma_addr, uint16_t
     uint8_t stride = n->db_stride;
     int dbbuf_entry_sz = 1 << (2 + stride);
     AddressSpace *as = pci_get_address_space(&n->parent_obj);
-    dma_addr_t sqsz = (dma_addr_t)size;
+    dma_addr_t want = (dma_addr_t)size * n->sqe_size;
+    dma_addr_t sqsz = want;
     NvmeCQueue *cq;
 
     sq->ctrl = n;
@@ -453,8 +460,25 @@ uint16_t nvme_init_sq(NvmeSQueue *sq, FemuCtrl *n, uint64_t dma_addr, uint16_t
     sq->head = sq->tail = 0;
     sq->phys_contig = contig;
     if (sq->phys_contig) {
+        void *hva = dma_memory_map(as, dma_addr, &sqsz, 0,
+                                   MEMTXATTRS_UNSPECIFIED);
+
+        /*
+         * The length here is bytes, not entries, and the mapping may cover
+         * less than was asked for -- a queue placed anywhere but plain memory
+         * gets a bounce buffer of exactly what the call could take. Asking for
+         * the entry count meant a queue of 2048 entries was mapped 2048 bytes
+         * and the ring was then indexed by the full entry stride.
+         */
+        if (!hva || sqsz != want) {
+            if (hva) {
+                dma_memory_unmap(as, hva, sqsz, 0, 0);
+            }
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
         sq->dma_addr = dma_addr;
-        sq->dma_addr_hva = (uint64_t)dma_memory_map(as, dma_addr, &sqsz, 0, MEMTXATTRS_UNSPECIFIED);
+        sq->dma_addr_hva = (uint64_t)hva;
+        sq->dma_map_len = want;
     } else {
         sq->prp_list = nvme_setup_discontig(n, dma_addr, size, n->sqe_size);
         if (!sq->prp_list) {
@@ -519,11 +543,23 @@ uint16_t nvme_init_cq(NvmeCQueue *cq, FemuCtrl *n, uint64_t dma_addr, uint16_t
     uint8_t stride = n->db_stride;
     int dbbuf_entry_sz = 1 << (2 + stride);
     AddressSpace *as = pci_get_address_space(&n->parent_obj);
-    dma_addr_t cqsz = (dma_addr_t)size;
+    dma_addr_t want = (dma_addr_t)size * n->cqe_size;
+    dma_addr_t cqsz = want;
 
     if (cq->phys_contig) {
+        void *hva = dma_memory_map(as, dma_addr, &cqsz, 1,
+                                   MEMTXATTRS_UNSPECIFIED);
+
+        /* bytes, not entries, and the whole ring or nothing -- see the SQ */
+        if (!hva || cqsz != want) {
+            if (hva) {
+                dma_memory_unmap(as, hva, cqsz, 1, 0);
+            }
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
         cq->dma_addr = dma_addr;
-        cq->dma_addr_hva = (uint64_t)dma_memory_map(as, dma_addr, &cqsz, 1, MEMTXATTRS_UNSPECIFIED);
+        cq->dma_addr_hva = (uint64_t)hva;
+        cq->dma_map_len = want;
     } else {
         cq->prp_list = nvme_setup_discontig(n, dma_addr, size, n->cqe_size);
         if (!cq->prp_list) {
@@ -550,6 +586,13 @@ uint16_t nvme_init_cq(NvmeCQueue *cq, FemuCtrl *n, uint64_t dma_addr, uint16_t
 void nvme_free_cq(NvmeCQueue *cq, FemuCtrl *n)
 {
     n->cq[cq->cqid] = NULL;
+    if (cq->dma_addr_hva) {
+        dma_memory_unmap(pci_get_address_space(&n->parent_obj),
+                         (void *)cq->dma_addr_hva, cq->dma_map_len, 1,
+                         cq->dma_map_len);
+        cq->dma_addr_hva = 0;
+        cq->dma_map_len = 0;
+    }
     msix_vector_unuse(&n->parent_obj, cq->vector);
     if (cq->prp_list) {
         g_free(cq->prp_list);

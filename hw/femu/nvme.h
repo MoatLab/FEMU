@@ -1450,6 +1450,7 @@ typedef struct NvmeSQueue {
     uint32_t    size;
     uint64_t    dma_addr;
     uint64_t    dma_addr_hva;
+    uint64_t    dma_map_len;    /* bytes mapped at dma_addr_hva */
     uint64_t    completed;
     uint64_t    *prp_list;
     NvmeRequest *io_req;
@@ -1476,6 +1477,7 @@ typedef struct NvmeCQueue {
     uint32_t    size;
     uint64_t    dma_addr;
     uint64_t    dma_addr_hva;
+    uint64_t    dma_map_len;    /* bytes mapped at dma_addr_hva */
     uint64_t    *prp_list;
     EventNotifier guest_notifier;
     QEMUTimer   *timer;

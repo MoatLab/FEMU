@@ -343,6 +343,64 @@ static void femu_test_io_by_doorbell(void *obj, void *data,
  * after Doorbell Buffer Config the queue is driven from the shadow page and
  * the register writes are ignored.
  */
+/*
+ * A queue the controller cannot map must be refused. The ring is addressed
+ * through a host pointer the mapping returns, so accepting the command leaves
+ * the poller writing completions through whatever came back -- a null pointer
+ * for an address that is not memory at all, and a short mapping for one that
+ * is not all memory.
+ */
+static void femu_test_queue_mapping(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    NvmeCmd cmd;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_queue_init(&c, &c.io, 1);
+
+    /*
+     * Nothing is assigned at this address, so the whole ring cannot be mapped:
+     * a thousand entries of sixteen bytes is past what a bounce buffer holds.
+     * Asking for the entry count instead of the byte length made a ring this
+     * size fit in its own entry count of bytes and the command was accepted.
+     */
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_CREATE_CQ;
+    cmd.dptr.prp1 = cpu_to_le64(0xffffffff00000000ULL);
+    cmd.cdw10 = cpu_to_le32((1023 << 16) | c.io.qid);
+    cmd.cdw11 = cpu_to_le32(NVME_CQ_PC);
+    g_assert_cmpint(femu_admin(&c, &cmd), !=, NVME_SUCCESS);
+
+    /* the real one still works, so the refusal above left nothing behind */
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_CREATE_CQ;
+    cmd.dptr.prp1 = cpu_to_le64(c.io.cq_addr);
+    cmd.cdw10 = cpu_to_le32(((FEMU_QSIZE - 1) << 16) | c.io.qid);
+    cmd.cdw11 = cpu_to_le32(NVME_CQ_PC);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_CREATE_SQ;
+    cmd.dptr.prp1 = cpu_to_le64(0xffffffff00000000ULL);
+    cmd.cdw10 = cpu_to_le32((1023 << 16) | c.io.qid);
+    cmd.cdw11 = cpu_to_le32((c.io.qid << 16) | NVME_SQ_PC);
+    g_assert_cmpint(femu_admin(&c, &cmd), !=, NVME_SUCCESS);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_CREATE_SQ;
+    cmd.dptr.prp1 = cpu_to_le64(c.io.sq_addr);
+    cmd.cdw10 = cpu_to_le32(((FEMU_QSIZE - 1) << 16) | c.io.qid);
+    cmd.cdw11 = cpu_to_le32((c.io.qid << 16) | NVME_SQ_PC);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+
+    femu_round_trip(&c, 1);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 static void femu_test_io_by_shadow_doorbell(void *obj, void *data,
                                             QGuestAllocator *alloc)
 {
@@ -1057,6 +1115,7 @@ static void femu_register_nodes(void)
     qos_add_test("io-by-shadow-doorbell", "femu",
                  femu_test_io_by_shadow_doorbell, NULL);
     qos_add_test("features", "femu", femu_test_features, NULL);
+    qos_add_test("queue-mapping", "femu", femu_test_queue_mapping, NULL);
     qos_add_test("delete-sq-in-flight", "femu",
                  femu_test_delete_sq_in_flight, &(QOSGraphTestOptions) {
         /*
