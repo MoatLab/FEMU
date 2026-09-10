@@ -1476,21 +1476,42 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
         }
         status = zns_do_zone_op(ns, zone, proc_mask, zns_offline_zone, req);
         break;
-    case NVME_ZONE_ACTION_SET_ZD_EXT:
+    case NVME_ZONE_ACTION_SET_ZD_EXT: {
+        g_autofree uint8_t *staged = NULL;
+
         if (all || !ns->zd_extension_size) {
             return NVME_INVALID_FIELD | NVME_DNR;
         }
-        zd_ext = zns_get_zd_extension(ns, zone_idx);
-        status = dma_write_prp(n, (uint8_t *)zd_ext, ns->zd_extension_size, prp1,
-                               prp2);
+        /*
+         * This is the one action that does not go through zns_do_zone_op(),
+         * which is where a conventional zone is refused. Accepted, it took the
+         * zone to Closed holding an active resource nothing gives back: a
+         * conventional zone's writes never touch the state machine that would,
+         * so it stays Closed, and a later Finish of all zones walks that list
+         * and leaves it Full, after which it takes no writes at all.
+         */
+        if (zone->d.zt == NVME_ZONE_TYPE_CONVENTIONAL) {
+            return NVME_ZONE_INVAL_TRANSITION | NVME_DNR;
+        }
+        /*
+         * Into a buffer of its own first. The transfer used to land in the
+         * extension itself before the state was tested, so a command that came
+         * back refused had already replaced what the host reads in an extended
+         * report.
+         */
+        staged = g_malloc0(ns->zd_extension_size);
+        status = dma_write_prp(n, staged, ns->zd_extension_size, prp1, prp2);
         if (status) {
             return status;
         }
         status = zns_set_zd_ext(ns, zone);
         if (status == NVME_SUCCESS) {
+            zd_ext = zns_get_zd_extension(ns, zone_idx);
+            memcpy(zd_ext, staged, ns->zd_extension_size);
             return status;
         }
         break;
+    }
     default:
         status = NVME_INVALID_FIELD;
     }
