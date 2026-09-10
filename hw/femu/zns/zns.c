@@ -380,6 +380,16 @@ static void zns_free_params(NvmeNamespace *ns)
     ns->zns = NULL;
 }
 
+/* Writes this zoned namespace failed and reported to the host. */
+uint64_t zns_media_errors(NvmeNamespace *ns)
+{
+    if (!NS_ZNSSD(ns) || !ns->zns) {
+        return 0;
+    }
+
+    return ns->zns->err_write_injected;
+}
+
 void zns_ns_cleanup(NvmeNamespace *ns)
 {
     if (!NS_ZNSSD(ns)) {

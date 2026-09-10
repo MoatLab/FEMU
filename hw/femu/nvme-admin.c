@@ -1235,6 +1235,7 @@ typedef struct FemuMediaStats {
     uint64_t rd_bytes, wr_bytes, rd_cmds, wr_cmds;
     uint64_t host_pages, gc_pages, nand_pages;
     uint64_t max_block_reads, read_reclaims, retention_refreshes;
+    uint64_t media_errors;      /* summed over every namespace */
     uint8_t  available_spare;   /* worst namespace */
     uint8_t  percentage_used;   /* most worn namespace */
 } FemuMediaStats;
@@ -1258,9 +1259,12 @@ static void nvme_collect_media_stats(FemuCtrl *n, FemuMediaStats *st)
         NvmeNamespace *ns = &n->namespaces[i];
         uint8_t spare, used;
 
+        st->media_errors += zns_media_errors(ns);
+
         if (!ns->ssd) {
             continue;
         }
+        st->media_errors += ssd_media_errors(ns->ssd);
         spare = ssd_available_spare(ns->ssd);
         if (spare < st->available_spare) {
             st->available_spare = spare;
@@ -1349,6 +1353,7 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
     smart.host_write_commands[0] = cpu_to_le64(st.wr_cmds);
 
     smart.number_of_error_log_entries[0] = cpu_to_le64(n->num_errors);
+    smart.media_errors[0] = cpu_to_le64(st.media_errors);
     smart.temperature[0] = n->temperature & 0xff;
     smart.temperature[1] = (n->temperature >> 8) & 0xff;
 
@@ -1428,6 +1433,7 @@ static uint16_t nvme_endgrp_info(FemuCtrl *n, uint32_t buf_len,
     info.media_units_written[0] = cpu_to_le64(st.nand_pages + st.gc_pages);
     info.host_read_commands[0] = cpu_to_le64(st.rd_cmds);
     info.host_write_commands[0] = cpu_to_le64(st.wr_cmds);
+    info.media_integrity_errors[0] = cpu_to_le64(st.media_errors);
     info.no_err_info_log_entries[0] = cpu_to_le64(n->num_errors);
 
     buf_len = MIN(sizeof(info) - off, buf_len);

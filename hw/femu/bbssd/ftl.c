@@ -199,14 +199,20 @@ uint64_t ssd_nand_write_pages(struct ssd *ssd)
     return ssd->nand_write_pages;
 }
 
-/*
- * The most-read block since its last erase. A device rewrites data before read
- * stress accumulates far enough to cost it; this is the number that decision
- * would be made on.
- */
+/* Lines rewritten because a block of theirs passed the read stress limit. */
 uint64_t ssd_read_reclaims(struct ssd *ssd)
 {
     return ssd->read_reclaims;
+}
+
+/*
+ * Media and data integrity errors, as SMART counts them: the reads and writes
+ * the device failed and reported to the host. Only fault insertion produces
+ * them, so a device with none configured reports none.
+ */
+uint64_t ssd_media_errors(struct ssd *ssd)
+{
+    return ssd->err_read_injected + ssd->err_write_injected;
 }
 
 /* Lines rewritten because their data had sat programmed past the retention limit. */
@@ -215,6 +221,11 @@ uint64_t ssd_retention_refreshes(struct ssd *ssd)
     return ssd->retention_refreshes;
 }
 
+/*
+ * The most-read block since its last erase. A device rewrites data before read
+ * stress accumulates far enough to cost it; this is the number that decision
+ * would be made on.
+ */
 uint64_t ssd_max_block_reads(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;
