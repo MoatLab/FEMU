@@ -1211,7 +1211,13 @@ static uint16_t nvme_io_mgmt_send_ruh_update(FemuCtrl *n, NvmeRequest *req)
     NvmeCmd *cmd = &req->cmd;
     NvmeNamespace *ns = req->ns;
     uint32_t cdw10 = le32_to_cpu(cmd->cdw10);
-    uint32_t npid = (cdw10 >> 1) + 1;
+    /*
+     * The count of placement identifiers is the field at bits 31:16; the
+     * management operation occupies bits 7:0 of the same dword, so shifting by
+     * one mixed the operation into the count and every update naming more than
+     * one identifier was refused.
+     */
+    uint32_t npid = (cdw10 >> 16) + 1;
     unsigned int i;
     g_autofree uint16_t *pids = NULL;
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);

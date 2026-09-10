@@ -1062,7 +1062,10 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         memset(edescr, 0, sizeof(edescr));
 
         /* report enabled event types for this RUH */
-        for (int ev = 0; ev < FDP_EVT_MAX && nentries < 6; ev++) {
+        for (int i = 0; i < (int)ARRAY_SIZE(nvme_fdp_events_supported) &&
+                        nentries < 6; i++) {
+            uint8_t ev = nvme_fdp_events_supported[i];
+
             if ((ruh->event_filter >> nvme_fdp_evf_shifts[ev]) & 0x1) {
                 edescr[nentries].evt = ev;
                 edescr[nentries].evta = 1;
@@ -1265,14 +1268,14 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
             }
             for (int i = 0; i < (int)MIN(nevents, 6); i++) {
                 uint8_t ev = edescr[i].evt;
-                if (ev < FDP_EVT_MAX) {
-                    if (enable) {
-                        ruh->event_filter |=
-                            (1ULL << nvme_fdp_evf_shifts[ev]);
-                    } else {
-                        ruh->event_filter &=
-                            ~(1ULL << nvme_fdp_evf_shifts[ev]);
-                    }
+
+                if (!nvme_fdp_event_supported(ev)) {
+                    return NVME_INVALID_FIELD | NVME_DNR;
+                }
+                if (enable) {
+                    ruh->event_filter |= (1ULL << nvme_fdp_evf_shifts[ev]);
+                } else {
+                    ruh->event_filter &= ~(1ULL << nvme_fdp_evf_shifts[ev]);
                 }
             }
         }

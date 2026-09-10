@@ -299,6 +299,35 @@ static const uint8_t nvme_fdp_evf_shifts[FDP_EVT_MAX] = {
     [FDP_EVT_RUH_IMPLICIT_RU_CHANGE] = 33,
 };
 
+/*
+ * The event types this controller has. The shift table above is indexed by the
+ * type and is sparse -- the types are not consecutive -- so every index it does
+ * not name reads as the shift of event zero. Walking the whole range therefore
+ * reported types that do not exist and let a host turn off event zero by
+ * naming one of them, so both directions walk this list instead.
+ */
+static const uint8_t nvme_fdp_events_supported[] = {
+    FDP_EVT_RU_NOT_FULLY_WRITTEN,
+    FDP_EVT_RU_ATL_EXCEEDED,
+    FDP_EVT_CTRL_RESET_RUH,
+    FDP_EVT_INVALID_PID,
+    FDP_EVT_MEDIA_REALLOC,
+    FDP_EVT_RUH_IMPLICIT_RU_CHANGE,
+};
+
+static inline bool nvme_fdp_event_supported(uint8_t evt)
+{
+    int i;
+
+    for (i = 0; i < (int)ARRAY_SIZE(nvme_fdp_events_supported); i++) {
+        if (nvme_fdp_events_supported[i] == evt) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 static inline void nvme_fdp_stat_inc(uint64_t *a, uint64_t b)
 {
     uint64_t ret = *a + b;
