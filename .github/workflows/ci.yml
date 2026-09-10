@@ -297,8 +297,12 @@ jobs:
         # the expected outcome and anything else is a failure.
         # femu_mode=1 so the geometry is the black-box FTL's and actually
         # gets checked; the default mode ignores it entirely.
+        # The artifact is the binary alone. It finds its firmware through a
+        # link tree in the build directory that is not part of the artifact,
+        # so name the images in the source this job checks out; without that
+        # it cannot start a machine at all.
         rc=0
-        timeout 10s ./qemu-system-x86_64 \
+        timeout 10s ./qemu-system-x86_64 -L "$GITHUB_WORKSPACE/pc-bios" \
           -device femu,devsz_mb=2048,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=256 \
           -M accel=qtest -nographic || rc=$?
         if [ "$rc" -ne 124 ] && [ "$rc" -ne 0 ]; then
