@@ -79,10 +79,14 @@ int init_dram_backend(SsdDramBackend **mbe, int64_t nbytes)
 
 void free_dram_backend(SsdDramBackend *b)
 {
+    if (!b) {
+        return;
+    }
     if (b->logical_space) {
         munlock(b->logical_space, b->size);
         g_free(b->logical_space);
     }
+    g_free(b);
 }
 
 int backend_rw(SsdDramBackend *b, QEMUSGList *qsg, uint64_t *lbal, bool is_write)

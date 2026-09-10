@@ -34,8 +34,15 @@ int femu_subsys_register_ctrl(FemuCtrl *n)
 
 void femu_subsys_unregister_ctrl(NvmeSubsystem *subsys, FemuCtrl *n)
 {
-    subsys->ctrls[n->cntlid] = NULL;
-    n->cntlid = -1;
+    /*
+     * Clear only the slot this controller actually holds. cntlid is unsigned,
+     * so the -1 this used to leave behind reads back as 65535, and a second
+     * call -- a controller that never registered, or one torn down twice --
+     * indexed past the array.
+     */
+    if (n->cntlid < NVME_MAX_CONTROLLERS && subsys->ctrls[n->cntlid] == n) {
+        subsys->ctrls[n->cntlid] = NULL;
+    }
 }
 
 static bool nvme_calc_rgif(uint16_t nruh, uint16_t nrg, uint8_t *rgif)
@@ -1324,6 +1331,42 @@ static void nvme_register_extensions_ns(FemuCtrl *n, NvmeNamespace *ns)
     n->ext_ops = saved_ops;
 }
 
+/*
+ * Give back what realize has taken. QEMU does not call the exit callback for a
+ * device that never realized, and a device_add that fails validation is an
+ * ordinary outcome -- the monitor reports it and the user tries again -- so a
+ * rejected configuration otherwise kept its whole memory backend, pinned.
+ *
+ * Mode state from a mode init that failed part way is not covered: a mode's
+ * exit assumes its init finished, and some would destroy locks that were
+ * never created.
+ */
+static void femu_realize_undo(FemuCtrl *n)
+{
+    if (n->subsys) {
+        femu_subsys_unregister_ctrl(n->subsys, n);
+    }
+    if (n->aer_bh) {
+        qemu_bh_delete(n->aer_bh);
+        n->aer_bh = NULL;
+        qemu_mutex_destroy(&n->aer_lock);
+    }
+    g_free(n->features.int_vector_config);
+    n->features.int_vector_config = NULL;
+    g_free(n->aer_held);
+    n->aer_held = NULL;
+    g_free(n->elpes);
+    n->elpes = NULL;
+    g_free(n->namespaces);
+    n->namespaces = NULL;
+    g_free(n->cq);
+    n->cq = NULL;
+    g_free(n->sq);
+    n->sq = NULL;
+    free_dram_backend(n->mbe);
+    n->mbe = NULL;
+}
+
 static void femu_realize(PCIDevice *pci_dev, Error **errp)
 {
     FemuCtrl *n = FEMU(pci_dev);
@@ -1392,6 +1435,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     /* FDP: register controller with subsystem if linked */
     if (nvme_init_subsys(n)) {
         error_setg(errp, "failed to register controller with subsystem");
+        femu_realize_undo(n);
         return;
     }
 
@@ -1403,6 +1447,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
      * carry an error.
      */
     if (nvme_init_namespaces(n, errp)) {
+        femu_realize_undo(n);
         return;
     }
 
@@ -1423,6 +1468,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
             ns->ext_ops.init(n, ns, &local_err);
             if (local_err) {
                 error_propagate(errp, local_err);
+                femu_realize_undo(n);
                 return;
             }
         }
