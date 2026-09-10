@@ -726,6 +726,15 @@ static uint16_t oc12_bbt_get(FemuCtrl *n, NvmeCmd *cmd)
     }
 
     ns = &n->namespaces[nsid - 1];
+    /*
+     * The table is one entry per lun, and the lun comes out of the address the
+     * host supplied. Nothing checked it, so an address outside the geometry
+     * read a pointer from past the end of that array and then transferred
+     * whatever it pointed at back to the host.
+     */
+    if (!oc12_ppa_in_geometry(ln, ppa)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
     ch = (ppa & ln->ppaf.ch_mask) >> ln->ppaf.ch_offset;
     lun = (ppa & ln->ppaf.lun_mask) >> ln->ppaf.lun_offset;
     lunid = ch * c->num_lun + lun;
@@ -762,7 +771,16 @@ static uint16_t oc12_bbt_set(FemuCtrl *n, NvmeCmd *cmd)
 
     ns = &n->namespaces[nsid - 1];
 
+    /*
+     * Both indexes below come from the address the host supplied, and neither
+     * was checked: an address outside the geometry picked a pointer from past
+     * the end of the per-lun table and then wrote the host's byte through it.
+     */
     if (nlb == 1) {
+        if (!oc12_ppa_in_geometry(ln, spba)) {
+            g_free(ppas);
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
         ppas[0] = spba;
         ch = (ppas[0] & ln->ppaf.ch_mask) >> ln->ppaf.ch_offset;
         lun = (ppas[0] & ln->ppaf.lun_mask) >> ln->ppaf.lun_offset;
@@ -782,6 +800,10 @@ static uint16_t oc12_bbt_set(FemuCtrl *n, NvmeCmd *cmd)
         }
 
         for (i = 0; i < nlb; i++) {
+            if (!oc12_ppa_in_geometry(ln, ppas[i])) {
+                g_free(ppas);
+                return NVME_INVALID_FIELD | NVME_DNR;
+            }
             ch = (ppas[i] & ln->ppaf.ch_mask) >> ln->ppaf.ch_offset;
             lun = (ppas[i] & ln->ppaf.lun_mask) >> ln->ppaf.lun_offset;
             blk = (ppas[i] & ln->ppaf.blk_mask) >> ln->ppaf.blk_offset;
