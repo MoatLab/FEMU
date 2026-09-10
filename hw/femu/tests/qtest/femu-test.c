@@ -817,6 +817,65 @@ static void femu_test_format(void *obj, void *data, QGuestAllocator *alloc)
     femu_disable(&c);
 }
 
+/*
+ * The media counters are the emulator's own numbers, and the vendor page is
+ * the only place they are reported. A page that answers with zeroes looks the
+ * same as one that answers correctly on a device that has done no work, so
+ * this writes first and then requires the counters to have moved -- and
+ * requires the amplification factor to be consistent with them, which is what
+ * a caller actually reads the page for.
+ */
+static void femu_test_media_counters(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf, pattern;
+    uint32_t waf;
+    uint64_t host, gc, nand;
+    uint8_t page[512];
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    buf = guest_alloc(alloc, sizeof(page));
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, buf,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(femu->dev.bus->qts, buf, page, sizeof(page));
+    host = ldq_le_p(page + 8);
+    g_assert_cmpint(host, ==, 0);
+
+    /* enough writes that the counter cannot stay where it was */
+    pattern = guest_alloc(alloc, FEMU_DATA_SIZE);
+    qtest_memset(femu->dev.bus->qts, pattern, 0x5a, FEMU_DATA_SIZE);
+    for (i = 0; i < 16; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        i * (FEMU_DATA_SIZE / c.lba_size),
+                                        pattern)), ==, NVME_SUCCESS);
+    }
+    guest_free(alloc, pattern);
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, buf,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(femu->dev.bus->qts, buf, page, sizeof(page));
+
+    waf  = ldl_le_p(page);
+    host = ldq_le_p(page + 8);
+    gc   = ldq_le_p(page + 16);
+    nand = ldq_le_p(page + 24);
+
+    g_assert_cmpint(host, >, 0);
+    g_assert_cmpint(nand, >=, host);
+    /* nothing has been rewritten yet, so the device has relocated nothing */
+    g_assert_cmpint(gc, ==, 0);
+    /* the factor is (programmed + relocated) / host, scaled by a thousand */
+    g_assert_cmpint(waf, ==, ((nand + gc) * 1000ull) / host);
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
 static uint16_t femu_delete_sq(FemuCtrlState *c, uint16_t qid)
 {
     NvmeCmd cmd;
@@ -928,6 +987,16 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts = "lba_index=3"
     });
     qos_add_test("log-pages", "femu", femu_test_log_pages, NULL);
+    qos_add_test("media-counters", "femu", femu_test_media_counters,
+                 &(QOSGraphTestOptions) {
+        /*
+         * A black-box device, because the counters come from its FTL. The
+         * default no-SSD device has none and would report zeroes forever.
+         */
+        .edge.extra_device_opts =
+            "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4"
+    });
 }
 
 libqos_init(femu_register_nodes);
