@@ -566,7 +566,6 @@ static uint16_t nvme_identify_ns_csi(FemuCtrl *n, NvmeCmd *cmd)
     uint32_t nsid = le32_to_cpu(c->nsid);
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
-    int pgsz = n->page_size;
 
     if (!nvme_nsid_valid(n, nsid) || nsid == NVME_NSID_BROADCAST) {
         return NVME_INVALID_NSID | NVME_DNR;
@@ -580,7 +579,14 @@ static uint16_t nvme_identify_ns_csi(FemuCtrl *n, NvmeCmd *cmd)
     if (c->csi == NVME_CSI_NVM && nvme_csi_has_nvm_support(ns)) {
         return nvme_rpt_empty_id_struct(n, cmd);
     } else if (c->csi == NVME_CSI_ZONED && ns->csi == NVME_CSI_ZONED) {
-        return dma_read_prp(n, (uint8_t *)ns->id_ns_zoned, pgsz, prp1, prp2);
+        /*
+         * An Identify data structure is 4096 bytes. This transferred the
+         * host's memory page size instead, which a guest sets through CC.MPS
+         * and can raise above that whenever the controller advertises it,
+         * reading past the end of the structure.
+         */
+        return dma_read_prp(n, (uint8_t *)ns->id_ns_zoned,
+                            NVME_IDENTIFY_DATA_SIZE, prp1, prp2);
     } else if (c->csi == NVME_CSI_KV && ns->csi == NVME_CSI_KV) {
         return kvssd_identify_ns_csi(n, ns, cmd);
     }
