@@ -328,30 +328,15 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
     n->temp_warn_issued = 0;
 
     /*
-     * Quiesce the pollers before freeing queues / unmapping the dbbuf shadow
-     * regions below. Without this, a poller mid-sweep can write a freed
-     * eventidx_addr_hva (use-after-free segfault on guest reboot / controller
-     * reset). Pair with the Dekker-style handshake in nvme_poller():
-     * dataplane_started is now false + barrier, so any poller will observe it
-     * and clear its in_sweep flag; wait here until all are idle.
+     * Stop the dataplane before freeing the queues and unmapping the shadow
+     * doorbell regions below. Waiting for the pollers alone is not enough: the
+     * FTL thread holds a request for the whole of its media-latency
+     * calculation, and requests sit in each poller's pending list, so the
+     * request arrays freed below stay reachable from both. Delete I/O
+     * Submission Queue already pauses and drains for exactly this; a reset
+     * frees every queue at once and kept its own weaker, poller-only wait.
      */
-    smp_mb();
-    if (n->poller_on && n->poller_in_sweep) {
-        int p;
-        bool busy;
-        do {
-            busy = false;
-            for (p = 1; p <= (int)n->nr_pollers; p++) {
-                if (n->poller_in_sweep[p]) {
-                    busy = true;
-                    break;
-                }
-            }
-            if (busy) {
-                usleep(100);
-            }
-        } while (busy);
-    }
+    nvme_pause_pollers(n);
 
     if (shutdown) {
         femu_debug("shutting down NVMe Controller ...\n");
@@ -366,6 +351,7 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
 
     for (i = 0; i <= n->nr_io_queues; i++) {
         if (n->sq[i] != NULL) {
+            nvme_drain_sq(n, n->sq[i]);
             nvme_free_sq(n->sq[i], n);
         }
     }
