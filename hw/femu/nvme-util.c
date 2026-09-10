@@ -154,27 +154,46 @@ void nvme_inc_sq_head(NvmeSQueue *sq)
     sq->head = (sq->head + 1) % sq->size;
 }
 
+/*
+ * A doorbell is a position in the ring, so a value at or past the queue size is
+ * not one. The register path drops such a write; these read the same position
+ * out of the shadow doorbell the guest owns, and took whatever was there. A
+ * tail past the end makes the queue never look empty, so the poller consumes
+ * ring slots until the free list is gone, and the Abort walk -- which steps a
+ * modulo index towards the tail -- never reaches it. Keep the last position the
+ * guest gave instead, which is what ignoring the write amounts to.
+ */
 void nvme_update_sq_tail(NvmeSQueue *sq)
 {
+    uint32_t pos;
+
     if (sq->db_addr_hva) {
-        sq->tail = *((uint32_t *)sq->db_addr_hva);
+        pos = *((uint32_t *)sq->db_addr_hva);
+    } else if (sq->db_addr) {
+        nvme_addr_read(sq->ctrl, sq->db_addr, &pos, sizeof(pos));
+    } else {
         return;
     }
 
-    if (sq->db_addr) {
-        nvme_addr_read(sq->ctrl, sq->db_addr, &sq->tail, sizeof(sq->tail));
+    if (pos < sq->size) {
+        sq->tail = pos;
     }
 }
 
 void nvme_update_cq_head(NvmeCQueue *cq)
 {
+    uint32_t pos;
+
     if (cq->db_addr_hva) {
-        cq->head = *(uint32_t *)(cq->db_addr_hva);
+        pos = *(uint32_t *)(cq->db_addr_hva);
+    } else if (cq->db_addr) {
+        nvme_addr_read(cq->ctrl, cq->db_addr, &pos, sizeof(pos));
+    } else {
         return;
     }
 
-    if (cq->db_addr) {
-        nvme_addr_read(cq->ctrl, cq->db_addr, &cq->head, sizeof(cq->head));
+    if (pos < cq->size) {
+        cq->head = pos;
     }
 }
 

@@ -123,7 +123,13 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
     bool did_isr = false;
 
     nvme_update_sq_tail(sq);
-    while (!(nvme_sq_empty(sq))) {
+    /*
+     * One request per ring slot, handed to the FTL and only returned on
+     * completion, so a guest that keeps submitting without waiting empties the
+     * free list. Leave the rest of the burst unconsumed for the next sweep
+     * rather than taking a request that is not there.
+     */
+    while (!nvme_sq_empty(sq) && !QTAILQ_EMPTY(&sq->req_list)) {
         /*
          * Inline mode completes into the CQ within this same sweep, so unlike
          * the FTL path (which is latency-throttled and drip-feeds completions

@@ -400,6 +400,33 @@ static void femu_test_io_by_shadow_doorbell(void *obj, void *data,
         g_assert_cmpint(femu_admin(&c, &bad), !=, NVME_SUCCESS);
     }
 
+    /*
+     * A doorbell is a position in the ring. The register path drops a write at
+     * or past the queue size; the shadow doorbell is guest memory, so the same
+     * value can be put there directly. Abort walks the ring towards the tail
+     * one slot at a time, so a tail outside it is never reached and the walk
+     * runs on the thread holding the big lock: the command has to come back.
+     */
+    {
+        uint32_t bogus = 0xffffffffU;
+        uint32_t good;
+        NvmeCmd abort;
+
+        good = c.io.sq_tail;
+        qtest_memwrite(c.pdev->bus->qts,
+                       c.dbs_addr + femu_sq_doorbell(&c, 1) - 0x1000,
+                       &bogus, sizeof(bogus));
+
+        memset(&abort, 0, sizeof(abort));
+        abort.opcode = NVME_ADM_CMD_ABORT;
+        abort.cdw10 = cpu_to_le32(1);
+        g_assert_cmpint(femu_admin(&c, &abort), ==, NVME_SUCCESS);
+
+        qtest_memwrite(c.pdev->bus->qts,
+                       c.dbs_addr + femu_sq_doorbell(&c, 1) - 0x1000,
+                       &good, sizeof(good));
+    }
+
     femu_round_trip(&c, 4);
     femu_round_trip(&c, 5);
 

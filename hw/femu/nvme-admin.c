@@ -1927,7 +1927,12 @@ static uint16_t nvme_abort_req(FemuCtrl *n, NvmeCmd *cmd, uint32_t *result)
 
     sq = n->sq[sqid];
 
-    while ((sq->head + index) % sq->size != sq->tail) {
+    /*
+     * Step at most once round the ring: the modulo index below only ever takes
+     * values inside it, so a tail outside it would never be reached and this
+     * runs on the thread holding the big lock.
+     */
+    while (index < sq->size && (sq->head + index) % sq->size != sq->tail) {
         NvmeCmd abort_cmd;
         hwaddr addr;
 
