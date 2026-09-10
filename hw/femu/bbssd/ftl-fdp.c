@@ -278,10 +278,12 @@ static FemuReclaimUnit *fdp_advance_ru_pointer(struct ssd *ssd,
                         /*
                          * Signal device pressure: clear curr_ru so
                          * callers know no active write frontier exists.
+                         * A full device is an ordinary outcome the callers
+                         * turn into a capacity error, not a bug -- the
+                         * assertion that used to stand here aborted the
+                         * process in the build that arms assertions.
                          */
                         ruh->curr_ru = NULL;
-                        ftl_assert(false && __LINE__ );
-                        /* TODO */
                         return NULL;
                     }
                     FDP_TRACE(ssd, "RU_ROTATE ruhid=%u(curr_ru %u) old_ru=%u "
