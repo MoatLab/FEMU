@@ -234,11 +234,19 @@ static uint64_t femu_map_hybrid_reclaim(struct ssd *ssd, int budget)
                 if (!mapped_ppa(&old) || !valid_ppa(ssd, &old)) {
                     continue;
                 }
+                /*
+                 * Allocate before invalidating the old copy: with nowhere to
+                 * put the merged page, invalidating first would drop the only
+                 * copy of the data on the floor.
+                 */
+                struct ppa new = get_new_page_class(ssd, FEMU_MAP_CLASS_DATA);
+                if (!mapped_ppa(&new)) {
+                    break;
+                }
                 lat += hybrid_charge(ssd, &old, NAND_READ);   /* read valid page */
                 mark_page_invalid(ssd, &old);
                 set_rmap_ent(ssd, INVALID_LPN, &old);
 
-                struct ppa new = get_new_page_class(ssd, FEMU_MAP_CLASS_DATA);
                 set_maptbl_ent(ssd, lpn, &new);
                 set_rmap_ent(ssd, lpn, &new);
                 mark_page_valid(ssd, &new);

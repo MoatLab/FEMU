@@ -306,6 +306,15 @@ uint64_t ssd_buffer_destage(struct ssd *ssd, int budget, uint64_t stime)
                 break;
             }
         }
+        /*
+         * The collection above is what consumes the last line, so ask again:
+         * the check at the top of the pass was made before it ran. The page
+         * stays selected and its contents are already in the backend, so what
+         * is lost is the timing of a program, not the write.
+         */
+        if (ssd_out_of_lines(ssd)) {
+            break;
+        }
 
         /* dftl: demand-cache translation cost (no-op when disabled) */
         if (ssd->cmt.capacity) {
@@ -497,6 +506,17 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
             if (!buffer_hit(ssd, lpn) && buffer_at_watermark(ssd)) {
                 curlat = ssd_buffer_destage(ssd, batch, req->stime);
                 maxlat = (curlat > maxlat) ? curlat : maxlat;
+                /*
+                 * The write-back could not free anything, so the buffer is at
+                 * its limit and the media is full. Accepting more here would
+                 * grow it past its configured size and report success for
+                 * pages that can never be programmed; the direct path tells
+                 * the host instead, and so does this one.
+                 */
+                if (ssd_out_of_lines(ssd) && buffer_at_watermark(ssd)) {
+                    req->status = NVME_CAP_EXCEEDED | NVME_DNR;
+                    break;
+                }
             }
 
             if (buffer_insert(ssd, lpn)) {

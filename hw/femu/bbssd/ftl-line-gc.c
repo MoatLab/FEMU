@@ -243,6 +243,12 @@ struct ppa get_new_page_class(struct ssd *ssd, int klass)
     struct write_pointer *wpp = ssd_write_pointer_for_class(ssd, klass);
     struct ppa ppa;
 
+    /* no line on this pointer, no page -- see get_new_page() */
+    if (!wpp->curline) {
+        ppa.ppa = INVALID_PPA;
+        return ppa;
+    }
+
     ppa.ppa = 0;
     ppa.g.ch = wpp->ch;
     ppa.g.lun = wpp->lun;
@@ -257,6 +263,19 @@ struct ppa get_new_page(struct ssd *ssd)
 {
     struct write_pointer *wpp = &ssd->wp;
     struct ppa ppa;
+
+    /*
+     * The pointer is left without a line when nothing is free, and its block
+     * field still names the line that has just closed -- so building an
+     * address from it here hands back page zero of a line that is already
+     * fully programmed. Say there is no page instead, and let the caller
+     * decide; every allocation goes through here, so no path can miss it.
+     */
+    if (!wpp->curline) {
+        ppa.ppa = INVALID_PPA;
+        return ppa;
+    }
+
     ppa.ppa = 0;
     ppa.g.ch = wpp->ch;
     ppa.g.lun = wpp->lun;
@@ -382,7 +401,8 @@ void gc_read_page(struct ssd *ssd, struct ppa *ppa)
 }
 
 /* move valid page data (already in DRAM) from victim line to a new page */
-static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
+/* true when the page was relocated; false when there is nowhere to put it */
+static bool gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
 {
     struct ppa new_ppa;
     struct nand_lun *new_lun;
@@ -390,6 +410,15 @@ static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
 
     ftl_assert(valid_lpn(ssd, lpn));
     new_ppa = get_new_page(ssd);
+    if (!mapped_ppa(&new_ppa)) {
+        /*
+         * Relocating with nowhere to relocate to used to mark a page valid a
+         * second time, which carried the line's valid count past its capacity
+         * -- and the test that returns a line to collection is an equality,
+         * so that line was never collected again. Leave the page where it is.
+         */
+        return false;
+    }
     /* commit the relocated mapping through the active scheme (maptbl + rmap) */
     ssd->mapping->gc_relocate_commit(ssd, lpn, old_ppa, &new_ppa);
     if (exp_lpn_watched(lpn)) {
@@ -421,7 +450,7 @@ static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
     new_lun = get_lun(ssd, &new_ppa);
     new_lun->gc_endtime = new_lun->next_lun_avail_time;
 
-    return 0;
+    return true;
 }
 
 static struct line *select_victim_line(struct ssd *ssd, bool force)
@@ -621,7 +650,10 @@ static void clean_one_block(struct ssd *ssd, struct ppa *ppa)
         if (pg_iter->status == PG_VALID) {
             gc_read_page(ssd, ppa);
             /* delay the maptbl update until "write" happens */
-            gc_write_page(ssd, ppa);
+            if (!gc_write_page(ssd, ppa)) {
+                /* nowhere to put it; leave the rest of the line alone */
+                return;
+            }
             cnt++;
         }
     }
