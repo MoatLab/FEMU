@@ -691,6 +691,15 @@ static void reclaim_line(struct ssd *ssd, struct line *victim_line)
     struct ppa ppa;
     int ch, lun;
 
+    /*
+     * Only some fields are filled in below, so start from zero rather than
+     * from the stack: the sector and reserved fields are copied into the
+     * batch this builds and passed on to mark_line_free(). Nothing reads
+     * them today, but valid_ppa() does check the sector, so the day anything
+     * calls it on one of these the answer would come from whatever the stack
+     * happened to hold.
+     */
+    ppa.ppa = 0;
     ppa.g.blk = victim_line->id;
 
     /* copy back valid data */
