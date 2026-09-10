@@ -649,6 +649,30 @@ static bool nvme_check_constraints(FemuCtrl *n, Error **errp)
         error_setg(errp, "entries must be at least 1");
         return false;
     }
+    /*
+     * The controller memory buffer becomes a PCI base address register, which
+     * has to be a non-zero power of two, and the register field the size comes
+     * from is a count of units rather than a size. A cmbsz whose count field
+     * is zero or is not a power of two tripped an assertion inside
+     * pci_register_bar() and killed the process at realize.
+     */
+    if (n->cmbsz) {
+        uint64_t cmb_size = NVME_CMBSZ_GETSIZE(n->cmbsz);
+        uint8_t bir = NVME_CMBLOC_BIR(n->cmbloc);
+
+        if (!cmb_size || !is_power_of_2(cmb_size)) {
+            error_setg(errp, "cmbsz describes a %" PRIu64 " byte buffer; the "
+                       "size field (bits 31:12) times the unit (bits 11:8) "
+                       "must come to a non-zero power of two", cmb_size);
+            return false;
+        }
+        if (bir < 2 || bir > 5) {
+            error_setg(errp, "cmbloc selects base address register %u; the "
+                       "controller registers occupy 0 and 1, so it must be "
+                       "in [2, 5]", bir);
+            return false;
+        }
+    }
     if (n->max_sqes > NVME_MAX_QUEUE_ES || n->max_cqes > NVME_MAX_QUEUE_ES ||
         n->max_sqes < NVME_MIN_SQUEUE_ES || n->max_cqes < NVME_MIN_CQUEUE_ES) {
         error_setg(errp, "max_sqes must be in [%d, %d] and max_cqes in [%d, %d]",
