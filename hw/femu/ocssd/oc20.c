@@ -178,7 +178,7 @@ static void oc20_parse_lba_list(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     Oc20RwCmd *ocrw = (Oc20RwCmd *)cmd;
     Oc20Namespace *lns = ns->state;
     Oc20AddrF *addrf = &lns->lbaf;
-    uint16_t nlb  = le16_to_cpu(ocrw->nlb) + 1;
+    uint32_t nlb  = le16_to_cpu(ocrw->nlb) + 1;   /* 0's based, reaches 65536 */
     uint64_t cur_pg_addr, prev_pg_addr = ~(0ULL);
     int secs_idx = -1;
     uint64_t lba;
@@ -212,7 +212,7 @@ static int oc20_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     Oc20Namespace *lns = ns->state;
     Oc20RwCmd *ocrw = (Oc20RwCmd *)cmd;
     uint8_t opcode = ocrw->opcode;
-    uint16_t nlb = le16_to_cpu(ocrw->nlb) + 1;
+    uint32_t nlb = le16_to_cpu(ocrw->nlb) + 1;    /* 0's based, reaches 65536 */
     int ch, lun, lunid;
     int64_t io_done_ts = 0;
     int64_t total_time_need_to_emulate = 0;
@@ -455,7 +455,14 @@ static uint16_t oc20_rw_check_read_req(FemuCtrl *n, NvmeCmd *cmd,
              * return whatever sector the dense index landed on.
              */
             if (err == NVME_DULB) {
-                req->predef |= (1 << i);
+                /*
+                 * The count reaches 64, so the bit has to be shifted in a
+                 * 64 bit value. Nothing reads this yet -- an unwritten block
+                 * should come back as the pattern the specification defines
+                 * and instead comes back as whatever the media holds -- but
+                 * an int shift of 31 or more is undefined either way.
+                 */
+                req->predef |= 1ULL << i;
                 continue;
             }
 

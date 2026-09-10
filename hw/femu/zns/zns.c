@@ -1110,7 +1110,8 @@ static uint16_t zns_get_mgmt_zone_slba_idx(FemuCtrl *n, NvmeNamespace *ns,
     }
 
     *slba = ((uint64_t)dw11) << 32 | dw10;
-    if (unlikely(*slba >= ns->id_ns.nsze)) {
+    /* the stored size is little-endian, as zns_check_bounds() reads it */
+    if (unlikely(*slba >= le64_to_cpu(ns->id_ns.nsze))) {
         *slba = 0;
         return NVME_LBA_RANGE | NVME_DNR;
     }
