@@ -1226,6 +1226,65 @@ static uint16_t nvme_error_log_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
 }
 
 /*
+ * Host and media totals, as the SMART log, the vendor counter page and the
+ * endurance group log all report them. Host figures come from the per-poller
+ * shards the I/O path keeps; media figures from the namespaces that have an
+ * FTL, since this is device-wide.
+ */
+typedef struct FemuMediaStats {
+    uint64_t rd_bytes, wr_bytes, rd_cmds, wr_cmds;
+    uint64_t host_pages, gc_pages, nand_pages;
+    uint64_t max_block_reads, read_reclaims, retention_refreshes;
+    uint8_t  available_spare;   /* worst namespace */
+    uint8_t  percentage_used;   /* most worn namespace */
+} FemuMediaStats;
+
+static void nvme_collect_media_stats(FemuCtrl *n, FemuMediaStats *st)
+{
+    uint32_t p;
+    int i;
+
+    memset(st, 0, sizeof(*st));
+    st->available_spare = 100;
+
+    for (p = 1; n->poller_ctr && p <= n->nr_pollers; p++) {
+        st->rd_cmds  += n->poller_ctr[p].nr_host_rd_cmds;
+        st->wr_cmds  += n->poller_ctr[p].nr_host_wr_cmds;
+        st->rd_bytes += n->poller_ctr[p].nr_host_rd_bytes;
+        st->wr_bytes += n->poller_ctr[p].nr_host_wr_bytes;
+    }
+
+    for (i = 0; n->namespaces && i < n->num_namespaces; i++) {
+        NvmeNamespace *ns = &n->namespaces[i];
+        uint8_t spare, used;
+
+        if (!ns->ssd) {
+            continue;
+        }
+        spare = ssd_available_spare(ns->ssd);
+        if (spare < st->available_spare) {
+            st->available_spare = spare;
+        }
+        used = ssd_percentage_used(ns->ssd);
+        if (used > st->percentage_used) {
+            st->percentage_used = used;
+        }
+
+        if (!(NS_BBSSD(ns) || NS_CSD(ns) || NS_KVSSD(ns))) {
+            continue;
+        }
+        st->host_pages += ssd_host_write_pages(ns->ssd);
+        st->gc_pages   += ssd_gc_write_pages(ns->ssd);
+        st->nand_pages += ssd_nand_write_pages(ns->ssd);
+        if (ssd_max_block_reads(ns->ssd) > st->max_block_reads) {
+            st->max_block_reads = ssd_max_block_reads(ns->ssd);
+        }
+        st->read_reclaims += ssd_read_reclaims(ns->ssd);
+        st->retention_refreshes += ssd_retention_refreshes(ns->ssd);
+    }
+}
+
+/*
  * Vendor-specific log page C0h: the emulator's media counters. Read it with
  *   nvme get-log /dev/nvme0 --log-id=0xc0 --log-len=512 -b
  * and the fields sit at the offsets FemuStatsLog declares.
@@ -1235,47 +1294,29 @@ static uint16_t nvme_femu_stats_info(FemuCtrl *n, NvmeCmd *cmd,
 {
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
-    uint64_t host = 0, gc = 0, nand = 0, maxreads = 0, rreclaims = 0;
-    uint64_t refreshes = 0;
+    FemuMediaStats st;
     FemuStatsLog stats;
     uint32_t trans_len;
-    int i;
 
     trans_len = MIN(sizeof(stats), buf_len);
     memset(&stats, 0x0, sizeof(stats));
-
-    /* summed over the FTL-backed namespaces, as this log page is device-wide */
-    for (i = 0; n->namespaces && i < n->num_namespaces; i++) {
-        NvmeNamespace *ns = &n->namespaces[i];
-
-        if (!(NS_BBSSD(ns) || NS_CSD(ns) || NS_KVSSD(ns)) || !ns->ssd) {
-            continue;
-        }
-        host += ssd_host_write_pages(ns->ssd);
-        gc   += ssd_gc_write_pages(ns->ssd);
-        nand += ssd_nand_write_pages(ns->ssd);
-        if (ssd_max_block_reads(ns->ssd) > maxreads) {
-            maxreads = ssd_max_block_reads(ns->ssd);
-        }
-        rreclaims += ssd_read_reclaims(ns->ssd);
-        refreshes += ssd_retention_refreshes(ns->ssd);
-    }
+    nvme_collect_media_stats(n, &st);
 
     /*
      * Amplification needs a host write to divide by; the rest are counts and
      * are reported whether or not anything has been written, so a read-only
      * workload can still read its block read counts back.
      */
-    if (host) {
-        stats.waf_x1000 = cpu_to_le32((uint32_t)(((nand + gc) * 1000ull) /
-                                                 host));
+    if (st.host_pages) {
+        stats.waf_x1000 = cpu_to_le32((uint32_t)
+            (((st.nand_pages + st.gc_pages) * 1000ull) / st.host_pages));
     }
-    stats.host_write_pages = cpu_to_le64(host);
-    stats.gc_write_pages = cpu_to_le64(gc);
-    stats.nand_write_pages = cpu_to_le64(nand);
-    stats.max_block_reads = cpu_to_le64(maxreads);
-    stats.read_reclaims = cpu_to_le64(rreclaims);
-    stats.retention_refreshes = cpu_to_le64(refreshes);
+    stats.host_write_pages = cpu_to_le64(st.host_pages);
+    stats.gc_write_pages = cpu_to_le64(st.gc_pages);
+    stats.nand_write_pages = cpu_to_le64(st.nand_pages);
+    stats.max_block_reads = cpu_to_le64(st.max_block_reads);
+    stats.read_reclaims = cpu_to_le64(st.read_reclaims);
+    stats.retention_refreshes = cpu_to_le64(st.retention_refreshes);
 
     return dma_read_prp(n, (uint8_t *)&stats, trans_len, prp1, prp2);
 }
@@ -1288,66 +1329,32 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
 
     uint32_t trans_len;
     time_t current_seconds;
+    FemuMediaStats st;
     NvmeSmartLog smart;
-    int i;
 
     trans_len = MIN(sizeof(smart), buf_len);
     memset(&smart, 0x0, sizeof(smart));
+    nvme_collect_media_stats(n, &st);
 
     /*
-     * Host I/O totals, summed from the per-poller shards the I/O path keeps.
      * The log reports data units in thousands of 512 byte units, rounded up,
      * so a workload that moved anything at all reports at least one unit
      * rather than the zero these fields used to carry.
      */
-    {
-        uint64_t rd_bytes = 0, wr_bytes = 0, rd_cmds = 0, wr_cmds = 0;
-        uint32_t p;
-
-        for (p = 1; n->poller_ctr && p <= n->nr_pollers; p++) {
-            rd_cmds  += n->poller_ctr[p].nr_host_rd_cmds;
-            wr_cmds  += n->poller_ctr[p].nr_host_wr_cmds;
-            rd_bytes += n->poller_ctr[p].nr_host_rd_bytes;
-            wr_bytes += n->poller_ctr[p].nr_host_wr_bytes;
-        }
-        smart.data_units_read[0] = cpu_to_le64(DIV_ROUND_UP(rd_bytes / 512, 1000));
-        smart.data_units_written[0] = cpu_to_le64(DIV_ROUND_UP(wr_bytes / 512, 1000));
-        smart.host_read_commands[0] = cpu_to_le64(rd_cmds);
-        smart.host_write_commands[0] = cpu_to_le64(wr_cmds);
-    }
+    smart.data_units_read[0] =
+        cpu_to_le64(DIV_ROUND_UP(st.rd_bytes / 512, 1000));
+    smart.data_units_written[0] =
+        cpu_to_le64(DIV_ROUND_UP(st.wr_bytes / 512, 1000));
+    smart.host_read_commands[0] = cpu_to_le64(st.rd_cmds);
+    smart.host_write_commands[0] = cpu_to_le64(st.wr_cmds);
 
     smart.number_of_error_log_entries[0] = cpu_to_le64(n->num_errors);
     smart.temperature[0] = n->temperature & 0xff;
     smart.temperature[1] = (n->temperature >> 8) & 0xff;
 
-    /*
-     * Healthy by default; the spare comes from the factory bad-block fraction
-     * the FTL was built with. Computational and key-value namespaces run the
-     * same FTL and keep the same figure, so ask every namespace that has one
-     * and report the worst, since this is a controller-wide field.
-     */
-    smart.available_spare = 100;
-    for (i = 0; n->namespaces && i < n->num_namespaces; i++) {
-        NvmeNamespace *ns = &n->namespaces[i];
-        uint8_t spare, used;
-
-        if (!ns->ssd) {
-            continue;
-        }
-        spare = ssd_available_spare(ns->ssd);
-        if (spare < smart.available_spare) {
-            smart.available_spare = spare;
-        }
-        /*
-         * Life used is the same kind of controller-wide field, so report the
-         * most worn namespace. It stays zero unless the device was given an
-         * endurance rating to measure its erases against.
-         */
-        used = ssd_percentage_used(ns->ssd);
-        if (used > smart.percentage_used) {
-            smart.percentage_used = used;
-        }
-    }
+    /* both are controller-wide, so the worst namespace speaks for the device */
+    smart.available_spare = st.available_spare;
+    smart.percentage_used = st.percentage_used;
 
     /*
      * Reading this log without Retain Asynchronous Event is what clears a
@@ -1391,6 +1398,7 @@ static uint16_t nvme_endgrp_info(FemuCtrl *n, uint32_t buf_len,
     uint32_t dw11 = le32_to_cpu(cmd->cdw11);
     uint16_t endgrpid = (dw11 >> 16) & 0xffff;
     NvmeEndGrpLog info = {};
+    FemuMediaStats st;
 
     if (!n->subsys || endgrpid != 0x1) {
         return NVME_INVALID_FIELD | NVME_DNR;
@@ -1399,6 +1407,28 @@ static uint16_t nvme_endgrp_info(FemuCtrl *n, uint32_t buf_len,
     if (off >= sizeof(info)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
+
+    /*
+     * One endurance group covers the whole device here, so it reports the
+     * same totals the SMART log does. The page used to come back as zeroes.
+     * Media units written is what actually reached the flash, relocations
+     * included, which is the difference this log is for.
+     */
+    nvme_collect_media_stats(n, &st);
+    info.avail_spare = st.available_spare;
+    info.avail_spare_thres = NVME_SPARE_THRESHOLD;
+    info.percet_used = st.percentage_used;
+    if (st.available_spare <= NVME_SPARE_THRESHOLD) {
+        info.critical_warning |= NVME_SMART_SPARE;
+    }
+    info.data_units_read[0] =
+        cpu_to_le64(DIV_ROUND_UP(st.rd_bytes / 512, 1000));
+    info.data_units_written[0] =
+        cpu_to_le64(DIV_ROUND_UP(st.wr_bytes / 512, 1000));
+    info.media_units_written[0] = cpu_to_le64(st.nand_pages + st.gc_pages);
+    info.host_read_commands[0] = cpu_to_le64(st.rd_cmds);
+    info.host_write_commands[0] = cpu_to_le64(st.wr_cmds);
+    info.no_err_info_log_entries[0] = cpu_to_le64(n->num_errors);
 
     buf_len = MIN(sizeof(info) - off, buf_len);
     return dma_read_prp(n, (uint8_t *)&info + off, buf_len, prp1, prp2);
