@@ -484,7 +484,7 @@ void *nvme_poller(void *arg)
 
     switch (n->multipoller_enabled) {
     case 1:
-        while (1) {
+        while (!n->poller_stopping) {
             if ((!n->dataplane_started)) {
                 n->poller_in_sweep[index] = false;
                 usleep(1000);
@@ -541,7 +541,7 @@ void *nvme_poller(void *arg)
         }
         break;
     default:
-        while (1) {
+        while (!n->poller_stopping) {
             if ((!n->dataplane_started)) {
                 n->poller_in_sweep[index] = false;
                 usleep(1000);
@@ -574,6 +574,8 @@ void *nvme_poller(void *arg)
         }
         break;
     }
+
+    n->poller_in_sweep[index] = false;
 
     return NULL;
 }

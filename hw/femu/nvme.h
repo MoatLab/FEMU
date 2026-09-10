@@ -1965,6 +1965,11 @@ typedef struct FemuCtrl {
      * the thread is between requests and touching nothing.
      */
     volatile bool   ftl_in_sweep;
+    /*
+     * Asks the poller threads to leave their loop. They run until the device
+     * goes away, so without this the join in teardown never returns.
+     */
+    volatile bool   poller_stopping;
 
     /* Nand Flash Type: SLC/MLC/TLC/QLC/PLC */
     uint8_t         flash_type;

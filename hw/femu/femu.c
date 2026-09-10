@@ -1433,14 +1433,32 @@ static void femu_stop_ftl_thread(FemuCtrl *n)
     n->ftl_thread_running = false;
 }
 
+/*
+ * Stop and join the poller threads. Everything they reach -- the queues, the
+ * rings, and each namespace's mode state -- is freed during teardown, so they
+ * must be gone before any of it is released.
+ */
+static void femu_stop_pollers(FemuCtrl *n)
+{
+    int i;
+
+    if (!n->poller) {
+        return;   /* the host never enabled the controller */
+    }
+
+    n->poller_stopping = true;
+    smp_mb();   /* publish the flag before waiting on the threads to see it */
+    for (i = 1; i <= n->nr_pollers; i++) {
+        qemu_thread_join(&n->poller[i]);
+    }
+    g_free(n->poller);
+    n->poller = NULL;
+}
+
 static void nvme_destroy_poller(FemuCtrl *n)
 {
     int i;
     femu_debug("Destroying NVMe poller !!\n");
-
-    for (i = 1; i <= n->nr_pollers; i++) {
-        qemu_thread_join(&n->poller[i]);
-    }
 
     for (i = 1; i <= n->nr_pollers; i++) {
         pqueue_free(n->pq[i]);
@@ -1502,7 +1520,13 @@ static void femu_exit(PCIDevice *pci_dev)
 
     femu_debug("femu_exit starting!\n");
 
+    /*
+     * Stop every thread first. femu_exit_extensions() releases each mode's FTL
+     * and namespace state, which the pollers read on the I/O path, and
+     * nvme_destroy_poller() then frees the rings and joins nothing.
+     */
     femu_stop_ftl_thread(n);
+    femu_stop_pollers(n);
     femu_exit_extensions(n);
 
     nvme_clear_ctrl(n, true);
