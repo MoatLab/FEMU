@@ -1307,6 +1307,16 @@ static void nvme_register_extensions_ns(FemuCtrl *n, NvmeNamespace *ns)
     FemuExtCtrlOps saved_ops = n->ext_ops;
     uint8_t saved_mode = n->femu_mode;
 
+    if (ns->femu_mode == n->femu_mode) {
+        /*
+         * Registering the controller's own mode a second time would build the
+         * same table again, and for a mode that allocates controller-wide
+         * state it would allocate a second copy that nothing ever reads.
+         */
+        ns->ext_ops = n->ext_ops;
+        return;
+    }
+
     n->femu_mode = ns->femu_mode;
     nvme_register_extensions(n);
     ns->ext_ops = n->ext_ops;

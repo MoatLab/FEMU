@@ -1003,8 +1003,14 @@ static void oc20_free_namespace(FemuCtrl *n, NvmeNamespace *ns)
 {
     Oc20Namespace *lns = ns->state;
 
+    if (!lns) {
+        return;
+    }
     g_free(lns->writefail);
     g_free(lns->resetfail);
+    g_free(lns->chunk_info);
+    g_free(lns);
+    ns->state = NULL;
 }
 
 static void oc20_nvme_ns_init_identify(FemuCtrl *n, NvmeIdNs *id_ns)
@@ -1416,6 +1422,9 @@ static void oc20_exit(FemuCtrl *n)
     }
 
     oc20_release_locks(n);
+
+    g_free(n->ext_ops.state);
+    n->ext_ops.state = NULL;
 }
 
 int nvme_register_ocssd20(FemuCtrl *n)
