@@ -1236,6 +1236,7 @@ typedef struct FemuMediaStats {
     uint64_t host_pages, gc_pages, nand_pages;
     uint64_t max_block_reads, read_reclaims, retention_refreshes;
     uint64_t media_errors;      /* summed over every namespace */
+    uint64_t media_bytes;       /* host and relocated writes, in bytes */
     uint8_t  available_spare;   /* worst namespace */
     uint8_t  percentage_used;   /* most worn namespace */
 } FemuMediaStats;
@@ -1280,6 +1281,9 @@ static void nvme_collect_media_stats(FemuCtrl *n, FemuMediaStats *st)
         st->host_pages += ssd_host_write_pages(ns->ssd);
         st->gc_pages   += ssd_gc_write_pages(ns->ssd);
         st->nand_pages += ssd_nand_write_pages(ns->ssd);
+        st->media_bytes += (ssd_nand_write_pages(ns->ssd) +
+                            ssd_gc_write_pages(ns->ssd)) *
+                           (uint64_t)ssd_page_size(ns->ssd);
         if (ssd_max_block_reads(ns->ssd) > st->max_block_reads) {
             st->max_block_reads = ssd_max_block_reads(ns->ssd);
         }
@@ -1294,7 +1298,7 @@ static void nvme_collect_media_stats(FemuCtrl *n, FemuMediaStats *st)
  * and the fields sit at the offsets FemuStatsLog declares.
  */
 static uint16_t nvme_femu_stats_info(FemuCtrl *n, NvmeCmd *cmd,
-                                     uint32_t buf_len)
+                                     uint32_t buf_len, uint64_t off)
 {
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
@@ -1302,7 +1306,10 @@ static uint16_t nvme_femu_stats_info(FemuCtrl *n, NvmeCmd *cmd,
     FemuStatsLog stats;
     uint32_t trans_len;
 
-    trans_len = MIN(sizeof(stats), buf_len);
+    if (off >= sizeof(stats)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    trans_len = MIN(sizeof(stats) - off, buf_len);
     memset(&stats, 0x0, sizeof(stats));
     nvme_collect_media_stats(n, &st);
 
@@ -1322,11 +1329,11 @@ static uint16_t nvme_femu_stats_info(FemuCtrl *n, NvmeCmd *cmd,
     stats.read_reclaims = cpu_to_le64(st.read_reclaims);
     stats.retention_refreshes = cpu_to_le64(st.retention_refreshes);
 
-    return dma_read_prp(n, (uint8_t *)&stats, trans_len, prp1, prp2);
+    return dma_read_prp(n, (uint8_t *)&stats + off, trans_len, prp1, prp2);
 }
 
 static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
-                                bool rae)
+                                uint64_t off, bool rae)
 {
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
@@ -1336,7 +1343,15 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
     FemuMediaStats st;
     NvmeSmartLog smart;
 
-    trans_len = MIN(sizeof(smart), buf_len);
+    /*
+     * A host may read a log page in pieces, from the offset in the command.
+     * Both of these used to hand back the start of the page whatever was
+     * asked for, so a second read returned the first bytes again.
+     */
+    if (off >= sizeof(smart)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    trans_len = MIN(sizeof(smart) - off, buf_len);
     memset(&smart, 0x0, sizeof(smart));
     nvme_collect_media_stats(n, &st);
 
@@ -1383,7 +1398,7 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
 
     n->aer_mask &= ~(1 << NVME_AER_TYPE_SMART);
 
-    return dma_read_prp(n, (uint8_t *)&smart, trans_len, prp1, prp2);
+    return dma_read_prp(n, (uint8_t *)&smart + off, trans_len, prp1, prp2);
 }
 
 /* ========== FDP Log Pages ========== */
@@ -1426,11 +1441,17 @@ static uint16_t nvme_endgrp_info(FemuCtrl *n, uint32_t buf_len,
     if (st.available_spare <= NVME_SPARE_THRESHOLD) {
         info.critical_warning |= NVME_SMART_SPARE;
     }
+    /*
+     * This log counts bytes in billions, rounded up -- not the thousands of
+     * 512 byte units the SMART log uses. Media units written covers what the
+     * device actually programmed, relocations included.
+     */
     info.data_units_read[0] =
-        cpu_to_le64(DIV_ROUND_UP(st.rd_bytes / 512, 1000));
+        cpu_to_le64(DIV_ROUND_UP(st.rd_bytes, 1000000000));
     info.data_units_written[0] =
-        cpu_to_le64(DIV_ROUND_UP(st.wr_bytes / 512, 1000));
-    info.media_units_written[0] = cpu_to_le64(st.nand_pages + st.gc_pages);
+        cpu_to_le64(DIV_ROUND_UP(st.wr_bytes, 1000000000));
+    info.media_units_written[0] =
+        cpu_to_le64(DIV_ROUND_UP(st.media_bytes, 1000000000));
     info.host_read_commands[0] = cpu_to_le64(st.rd_cmds);
     info.host_write_commands[0] = cpu_to_le64(st.wr_cmds);
     info.media_integrity_errors[0] = cpu_to_le64(st.media_errors);
@@ -1762,9 +1783,9 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
     case NVME_LOG_ERROR_INFO:
         return nvme_error_log_info(n, cmd, len);
     case NVME_LOG_SMART_INFO:
-        return nvme_smart_info(n, cmd, len, rae);
+        return nvme_smart_info(n, cmd, len, off, rae);
     case NVME_LOG_FEMU_STATS:
-        return nvme_femu_stats_info(n, cmd, len);
+        return nvme_femu_stats_info(n, cmd, len, off);
     case NVME_LOG_FW_SLOT_INFO:
         return nvme_fw_log_info(n, cmd, len);
     case NVME_LOG_CMD_EFFECTS:
