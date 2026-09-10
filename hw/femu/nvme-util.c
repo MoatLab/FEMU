@@ -230,14 +230,27 @@ uint64_t *nvme_setup_discontig(FemuCtrl *n, uint64_t prp_addr, uint16_t
     uint64_t *prp_list = g_malloc0(total_prps * sizeof(*prp_list));
     int i;
 
+    /*
+     * Each page of the list is read from guest memory and its entries are the
+     * queue's pages. This wrote instead of read, and wrote the address of the
+     * local pointer rather than the buffer behind it, so it put a host heap
+     * address into guest memory and left the buffer empty -- which then failed
+     * every entry's validity check, so a discontiguous queue never came up at
+     * all. It also skipped the load for the final page, so a queue whose list
+     * fits in one page never read anything.
+     *
+     * A list longer than one page chains through the last entry of each full
+     * page. Reaching that needs a queue of more than prps_per_page pages, which
+     * the entries property cannot currently reach, and it is not exercised.
+     */
     for (i = 0; i < total_prps; i++) {
-        if (i % prps_per_page == 0 && i < total_prps - 1) {
+        if (i % prps_per_page == 0) {
             if (!prp_addr || prp_addr & (n->page_size - 1)) {
                 g_free(prp);
                 g_free(prp_list);
                 return NULL;
             }
-            nvme_addr_write(n, prp_addr, (uint8_t *)&prp, sizeof(prp));
+            nvme_addr_read(n, prp_addr, (uint8_t *)prp, n->page_size);
             prp_addr = le64_to_cpu(prp[prps_per_page - 1]);
         }
         prp_list[i] = le64_to_cpu(prp[i % prps_per_page]);
