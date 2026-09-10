@@ -62,6 +62,7 @@ There are 135 of them. Most have a default that leaves the feature off, so a wor
 | `ecc_step_ns` | int32 | `0` | Extra read latency per correction tier, charged as the block wears or its data ages. Zero disables it. |
 | `ecc_retention_sec` | int32 | `0` | Seconds of data age per correction tier, alongside the wear-driven tiers. |
 | `nand_bad_blocks` | uint32 | `0` | Blocks marked bad at initialisation, which the SMART available-spare figure then reflects. |
+| `pe_cycles_rated` | uint32 | `0` | Program/erase cycles the media is rated for, which SMART percentage-used measures the average block's erase count against. Zero takes the figure `nand_cell_type` implies, and with neither set the device reports no life estimate. |
 | `err_read_unc_ppm` | uint32 | `0` | Uncorrectable reads injected per million, reported to the host as a media error. |
 | `err_write_fail_ppm` | uint32 | `0` | Write failures injected per million. On a zoned namespace the zone goes read-only. |
 | `read_reclaim_limit` | int32 | `0` | Reads a block may take before its line is refreshed. Zero disables read-disturb reclaim. |
@@ -187,6 +188,25 @@ Properties that mostly mirror the NVMe identify fields, the OpenChannel geometry
 | `zns_zrwa_size` | uint64 | `0` | ZRWA window in LBAs (0 = ZRWA disabled) | set on `-device femu,...` |
 | `zns_zrwafg_size` | uint64 | `0` | ZRWA flush granularity in LBAs | set on `-device femu,...` |
 
+## Vendor log page C0h
+
+`nvme get-log /dev/nvme0 --log-id=0xc0 --log-len=512 -b` returns the emulator's
+own media counters, little-endian at these offsets:
+
+| Offset | Size | Field |
+| --- | --- | --- |
+| 0 | 4 | Write amplification factor, scaled by 1000 |
+| 8 | 8 | Pages the host asked to program |
+| 16 | 8 | Pages relocated by garbage collection |
+| 24 | 8 | Pages actually programmed |
+| 32 | 8 | Reads of the most-read block since its erase |
+| 40 | 8 | Lines rewritten because of read stress |
+| 48 | 8 | Lines rewritten because of retention age |
+
+They were previously written into the SMART log from byte 192, which NVMe Base
+2.0 assigned to the composite temperature times, the temperature sensors and
+the thermal transition counts.
+
 ---
 
-74 of 135 properties carry a description today. The rest are listed with their type and default only; filling them in is tracked as documentation work.
+75 of 136 properties carry a description today. The rest are listed with their type and default only; filling them in is tracked as documentation work.
