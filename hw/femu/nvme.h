@@ -1010,7 +1010,31 @@ enum NvmeLogIdentifier {
     NVME_LOG_FDP_STATS      = 0x22,
     NVME_LOG_FDP_EVENTS     = 0x23,
     NVME_LOG_CHANGED_ZONE_LIST  = 0xbf,
+    NVME_LOG_FEMU_STATS         = 0xc0,
 };
+
+/*
+ * Vendor-specific log page C0h: the emulator's own media counters. These used
+ * to be written into the reserved area of the SMART log, which since NVMe Base
+ * 2.0 is not reserved -- bytes 192 to 231 carry the composite temperature
+ * times, the eight temperature sensors and the thermal transition counts, so
+ * `nvme smart-log` reported page counters as temperatures.
+ *
+ * The field offsets within the page are the ones the counters had within that
+ * reserved area, so a reader changes the log it asks for and the base it
+ * counts from, and nothing else.
+ */
+typedef struct FemuStatsLog {
+    uint32_t    waf_x1000;        /* write amplification, scaled by 1000 */
+    uint8_t     rsvd4[4];
+    uint64_t    host_write_pages; /* pages the host asked to program */
+    uint64_t    gc_write_pages;   /* pages relocated by garbage collection */
+    uint64_t    nand_write_pages; /* pages actually programmed */
+    uint64_t    max_block_reads;  /* reads of the most-read block since erase */
+    uint64_t    read_reclaims;    /* lines rewritten because of read stress */
+    uint64_t    retention_refreshes; /* lines rewritten because of age */
+    uint8_t     rsvd56[456];
+} FemuStatsLog;
 
 typedef struct NvmePSD {
     uint16_t    mp;
@@ -1319,6 +1343,7 @@ static inline void nvme_check_size(void)
     QEMU_BUILD_BUG_ON(sizeof(NvmeErrorLog) != 64);
     QEMU_BUILD_BUG_ON(sizeof(NvmeFwSlotInfoLog) != 512);
     QEMU_BUILD_BUG_ON(sizeof(NvmeSmartLog) != 512);
+    QEMU_BUILD_BUG_ON(sizeof(FemuStatsLog) != 512);
     QEMU_BUILD_BUG_ON(sizeof(NvmeIdCtrl) != 4096);
     QEMU_BUILD_BUG_ON(sizeof(NvmeIdNs) != 4096);
 

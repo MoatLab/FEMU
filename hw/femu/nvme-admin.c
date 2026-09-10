@@ -1225,6 +1225,61 @@ static uint16_t nvme_error_log_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
     return dma_read_prp(n, (uint8_t *)n->elpes, trans_len, prp1, prp2);
 }
 
+/*
+ * Vendor-specific log page C0h: the emulator's media counters. Read it with
+ *   nvme get-log /dev/nvme0 --log-id=0xc0 --log-len=512 -b
+ * and the fields sit at the offsets FemuStatsLog declares.
+ */
+static uint16_t nvme_femu_stats_info(FemuCtrl *n, NvmeCmd *cmd,
+                                     uint32_t buf_len)
+{
+    uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
+    uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
+    uint64_t host = 0, gc = 0, nand = 0, maxreads = 0, rreclaims = 0;
+    uint64_t refreshes = 0;
+    FemuStatsLog stats;
+    uint32_t trans_len;
+    int i;
+
+    trans_len = MIN(sizeof(stats), buf_len);
+    memset(&stats, 0x0, sizeof(stats));
+
+    /* summed over the FTL-backed namespaces, as this log page is device-wide */
+    for (i = 0; n->namespaces && i < n->num_namespaces; i++) {
+        NvmeNamespace *ns = &n->namespaces[i];
+
+        if (!(NS_BBSSD(ns) || NS_CSD(ns) || NS_KVSSD(ns)) || !ns->ssd) {
+            continue;
+        }
+        host += ssd_host_write_pages(ns->ssd);
+        gc   += ssd_gc_write_pages(ns->ssd);
+        nand += ssd_nand_write_pages(ns->ssd);
+        if (ssd_max_block_reads(ns->ssd) > maxreads) {
+            maxreads = ssd_max_block_reads(ns->ssd);
+        }
+        rreclaims += ssd_read_reclaims(ns->ssd);
+        refreshes += ssd_retention_refreshes(ns->ssd);
+    }
+
+    /*
+     * Amplification needs a host write to divide by; the rest are counts and
+     * are reported whether or not anything has been written, so a read-only
+     * workload can still read its block read counts back.
+     */
+    if (host) {
+        stats.waf_x1000 = cpu_to_le32((uint32_t)(((nand + gc) * 1000ull) /
+                                                 host));
+    }
+    stats.host_write_pages = cpu_to_le64(host);
+    stats.gc_write_pages = cpu_to_le64(gc);
+    stats.nand_write_pages = cpu_to_le64(nand);
+    stats.max_block_reads = cpu_to_le64(maxreads);
+    stats.read_reclaims = cpu_to_le64(rreclaims);
+    stats.retention_refreshes = cpu_to_le64(refreshes);
+
+    return dma_read_prp(n, (uint8_t *)&stats, trans_len, prp1, prp2);
+}
+
 static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
                                 bool rae)
 {
@@ -1291,65 +1346,6 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
      */
     if (!rae) {
         nvme_clear_events(n, NVME_AER_TYPE_SMART);
-    }
-
-    /*
-     * Vendor-specific area: report the write-amplification factor (scaled by
-     * 1000) and the raw page counters, so a workload can read amplification
-     * straight out of `nvme smart-log -o binary`. reserved2 begins at byte 192
-     * of the log, putting the factor at 192, host pages at 200, relocated pages
-     * at 208, programmed user pages at 216, the most-read block's read count at
-     * 224, lines rewritten for read stress at 232 and lines rewritten for
-     * retention age at 240. The standard fields above are untouched.
-     *
-     * Host pages and programmed pages differ only when a write buffer is
-     * configured: it is the gap between them that a buffer exists to open.
-     */
-    {
-        uint64_t host = 0, gc = 0, nand = 0, maxreads = 0, rreclaims = 0;
-        uint64_t refreshes = 0;
-        uint32_t waf;
-
-        /* summed over the FTL-backed namespaces, as this log page is device-wide */
-        for (i = 0; n->namespaces && i < n->num_namespaces; i++) {
-            NvmeNamespace *ns = &n->namespaces[i];
-
-            if (!(NS_BBSSD(ns) || NS_CSD(ns) || NS_KVSSD(ns)) || !ns->ssd) {
-                continue;
-            }
-            host += ssd_host_write_pages(ns->ssd);
-            gc   += ssd_gc_write_pages(ns->ssd);
-            nand += ssd_nand_write_pages(ns->ssd);
-            if (ssd_max_block_reads(ns->ssd) > maxreads) {
-                maxreads = ssd_max_block_reads(ns->ssd);
-            }
-            rreclaims += ssd_read_reclaims(ns->ssd);
-            refreshes += ssd_retention_refreshes(ns->ssd);
-        }
-
-        if (host) {
-            waf = cpu_to_le32((uint32_t)(((nand + gc) * 1000ull) / host));
-            host = cpu_to_le64(host);
-            gc = cpu_to_le64(gc);
-            nand = cpu_to_le64(nand);
-
-            memcpy(&smart.reserved2[0], &waf, sizeof(waf));
-            memcpy(&smart.reserved2[8], &host, sizeof(host));
-            memcpy(&smart.reserved2[16], &gc, sizeof(gc));
-            memcpy(&smart.reserved2[24], &nand, sizeof(nand));
-
-            /* reads against the most-read block since its erase, at byte 224 */
-            maxreads = cpu_to_le64(maxreads);
-            memcpy(&smart.reserved2[32], &maxreads, sizeof(maxreads));
-
-            /* lines rewritten because of read stress, at byte 232 */
-            rreclaims = cpu_to_le64(rreclaims);
-            memcpy(&smart.reserved2[40], &rreclaims, sizeof(rreclaims));
-
-            /* lines rewritten because of retention age, at byte 240 */
-            refreshes = cpu_to_le64(refreshes);
-            memcpy(&smart.reserved2[48], &refreshes, sizeof(refreshes));
-        }
     }
 
     current_seconds = time(NULL);
@@ -1722,6 +1718,8 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
         return nvme_error_log_info(n, cmd, len);
     case NVME_LOG_SMART_INFO:
         return nvme_smart_info(n, cmd, len, rae);
+    case NVME_LOG_FEMU_STATS:
+        return nvme_femu_stats_info(n, cmd, len);
     case NVME_LOG_FW_SLOT_INFO:
         return nvme_fw_log_info(n, cmd, len);
     case NVME_LOG_CMD_EFFECTS:

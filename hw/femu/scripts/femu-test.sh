@@ -325,14 +325,22 @@ run_smart_checks() {
         na "host write commands counted (nothing written yet)"
     fi
 
-    # FEMU reports write amplification and its page counters in the vendor area:
-    # 192 WAF x1000, 200 host pages, 208 relocated pages, 216 programmed pages.
-    waf=$(od -An -tu4 -j192 -N4 "$bin" | tr -d ' ')
-    host=$(od -An -tu8 -j200 -N8 "$bin" | tr -d ' ')
-    nand=$(od -An -tu8 -j216 -N8 "$bin" | tr -d ' ')
+    # FEMU reports write amplification and its page counters on its own log
+    # page, C0h: 0 WAF x1000, 8 host pages, 16 relocated pages, 24 programmed
+    # pages, 32 the most-read block's reads, 40 lines rewritten for read stress.
+    local vnd
+    vnd=$(mktemp); trap 'rm -f "$bin" "$vnd"' RETURN
+    if ! nvme get-log "$CTRL" --log-id=0xc0 --log-len=512 -b \
+            > "$vnd" 2>/dev/null || [[ $(stat -c %s "$vnd") -lt 512 ]]; then
+        na "media counters readable"; return
+    fi
+    ok "media counters readable"
+    waf=$(od -An -tu4 -j0 -N4 "$vnd" | tr -d ' ')
+    host=$(od -An -tu8 -j8 -N8 "$vnd" | tr -d ' ')
+    nand=$(od -An -tu8 -j24 -N8 "$vnd" | tr -d ' ')
     local mbr rrc
-    mbr=$(od -An -tu8 -j224 -N8 "$bin" | tr -d ' ')
-    rrc=$(od -An -tu8 -j232 -N8 "$bin" | tr -d ' ')
+    mbr=$(od -An -tu8 -j32 -N8 "$vnd" | tr -d ' ')
+    rrc=$(od -An -tu8 -j40 -N8 "$vnd" | tr -d ' ')
     echo "  waf_x1000=$waf host_pages=$host nand_pages=$nand" \
          "max_block_reads=$mbr read_reclaims=$rrc"
     if [[ "${host:-0}" -gt 0 ]]; then
