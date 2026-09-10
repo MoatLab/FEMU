@@ -391,6 +391,50 @@ static void femu_test_identify_other_csi(void *obj, void *data,
 }
 
 /*
+ * An admin queue the controller cannot map whole must stop it coming ready. The
+ * host chooses both addresses and both sizes, so a completion queue that failed
+ * left the submission queue asserting on it and took the process down.
+ */
+static void femu_test_admin_queue_refused(void *obj, void *data,
+                                          QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QPCIDevice *pdev = &femu->dev;
+    QPCIBar bar;
+    uint64_t sq_addr;
+    uint32_t csts;
+    int waited = 0;
+
+    qpci_device_enable(pdev);
+    bar = qpci_iomap(pdev, 0, NULL);
+
+    sq_addr = guest_alloc(alloc, 4096);
+    qtest_memset(femu->dev.bus->qts, sq_addr, 0, 4096);
+
+    /*
+     * A completion queue of four thousand entries is sixty-four kilobytes, and
+     * nothing is assigned at this address, so the whole ring cannot be mapped.
+     */
+    qpci_io_writel(pdev, bar, 0x24, (4095 << 16) | (FEMU_QSIZE - 1));
+    qpci_io_writeq(pdev, bar, 0x28, sq_addr);
+    qpci_io_writeq(pdev, bar, 0x30, 0xffffffff00000000ULL);
+    qpci_io_writel(pdev, bar, 0x14, (6 << 16) | (4 << 20) | 1);
+
+    for (;;) {
+        csts = qpci_io_readl(pdev, bar, 0x1c);
+        if (csts & NVME_CSTS_FAILED) {
+            break;
+        }
+        g_assert_cmpint(csts & NVME_CSTS_READY, ==, 0);
+        g_assert_cmpint(waited, <, FEMU_POLL_LIMIT_MS);
+        qtest_clock_step(femu->dev.bus->qts, 1000000);
+        waited++;
+    }
+
+    guest_free(alloc, sq_addr);
+}
+
+/*
  * A queue the controller cannot map must be refused. The ring is addressed
  * through a host pointer the mapping returns, so accepting the command leaves
  * the poller writing completions through whatever came back -- a null pointer
@@ -1583,6 +1627,8 @@ static void femu_register_nodes(void)
                  femu_test_io_by_shadow_doorbell, NULL);
     qos_add_test("features", "femu", femu_test_features, NULL);
     qos_add_test("queue-mapping", "femu", femu_test_queue_mapping, NULL);
+    qos_add_test("admin-queue-refused", "femu", femu_test_admin_queue_refused,
+                 NULL);
     qos_add_test("cq-churn", "femu", femu_test_cq_churn, NULL);
     qos_add_test("cmb-data-buffer", "femu", femu_test_cmb_data_buffer,
                  &(QOSGraphTestOptions) {

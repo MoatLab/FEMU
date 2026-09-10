@@ -472,10 +472,22 @@ static int nvme_start_ctrl(FemuCtrl *n)
     n->cqe_size = 1 << NVME_CC_IOCQES(n->bar.cc);
     n->sqe_size = 1 << NVME_CC_IOSQES(n->bar.cc);
 
-    nvme_init_cq(&n->admin_cq, n, n->bar.acq, 0, 0, NVME_AQA_ACQS(n->bar.aqa) +
-                 1, 1, 1);
-    nvme_init_sq(&n->admin_sq, n, n->bar.asq, 0, 0, NVME_AQA_ASQS(n->bar.aqa) +
-                 1, NVME_Q_PRIO_HIGH, 1);
+    /*
+     * Either admin queue can fail to come up: the host chooses both addresses
+     * and both sizes, and a ring that cannot be mapped whole is refused. The
+     * results were discarded, so a completion queue that failed left the
+     * submission queue asserting on it, and a submission queue that failed let
+     * the controller report itself ready with no queue to take commands.
+     */
+    if (nvme_init_cq(&n->admin_cq, n, n->bar.acq, 0, 0,
+                     NVME_AQA_ACQS(n->bar.aqa) + 1, 1, 1)) {
+        return -1;
+    }
+    if (nvme_init_sq(&n->admin_sq, n, n->bar.asq, 0, 0,
+                     NVME_AQA_ASQS(n->bar.aqa) + 1, NVME_Q_PRIO_HIGH, 1)) {
+        nvme_free_cq(&n->admin_cq, n);
+        return -1;
+    }
 
     /*
      * A mode that cannot serve the settings the host has chosen says so here,
