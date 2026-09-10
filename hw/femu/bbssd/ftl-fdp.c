@@ -868,27 +868,20 @@ static int clean_one_block_fdp_style(struct ssd *ssd, struct ppa *ppa,
 static void mark_ru_free(struct ssd *ssd, uint16_t rgid,
                          FemuReclaimUnit *ru)
 {
-    struct ssdparams *spp = &ssd->sp;
     struct ru_mgmt *rm = ssd->rg[rgid].ru_mgmt;
-    struct ppa ppa;
 
     ftl_assert(ru != NULL);
 
+    /*
+     * The blocks are already erased. Every caller walks them itself first,
+     * with the erase timing the die owes, and this ran the same walk again:
+     * resetting page state a second time is harmless, but each block was
+     * counted as erased twice, which is what wears the media in the model.
+     */
     for (int i = 0; i < ru->n_lines; i++) {
         ru->lines[i]->ipc = 0;
         ru->lines[i]->vpc = 0;
         ru->lines[i]->pos = 0;
-        ppa.g.blk = ru->lines[i]->id;
-        for (int ch = 0; ch < spp->nchs; ch++) {
-            for (int lun = 0; lun < spp->luns_per_ch; lun++) {
-                for (int pl = 0; pl < spp->pls_per_lun; pl++) {
-                    ppa.g.ch = ch;
-                    ppa.g.lun = lun;
-                    ppa.g.pl = pl;
-                    mark_block_free(ssd, &ppa);
-                }
-            }
-        }
     }
 
     ru->vpc = 0;
