@@ -934,6 +934,30 @@ static void zns_zrwa_release(NvmeNamespace *ns, NvmeZone *zone)
     }
 }
 
+/*
+ * Give back whatever the state a zone is leaving was holding. The transitions a
+ * host drives walk this ladder themselves on the way through; the two that take
+ * a zone out of service do not reach a state that holds anything, so they have
+ * to do it here. Call before the state changes: the ladder is chosen by the
+ * state the zone is in now.
+ */
+static void zns_release_zone_resources(NvmeNamespace *ns, NvmeZone *zone)
+{
+    switch (zns_get_zone_state(zone)) {
+    case NVME_ZONE_STATE_EXPLICITLY_OPEN:
+    case NVME_ZONE_STATE_IMPLICITLY_OPEN:
+        zns_aor_dec_open(ns);
+        /* fall through */
+    case NVME_ZONE_STATE_CLOSED:
+        zns_aor_dec_active(ns);
+        break;
+    default:
+        break;
+    }
+
+    zns_zrwa_release(ns, zone);
+}
+
 static uint16_t zns_finish_zone(NvmeNamespace *ns, NvmeZone *zone,
                                 NvmeZoneState state, NvmeRequest *req)
 {
@@ -992,6 +1016,7 @@ static uint16_t zns_offline_zone(NvmeNamespace *ns, NvmeZone *zone,
 {
     switch (state) {
     case NVME_ZONE_STATE_READ_ONLY:
+        zns_release_zone_resources(ns, zone);
         zns_assign_zone_state(ns, zone, NVME_ZONE_STATE_OFFLINE);
         zns_deallocate_zone(ns, zone);
         /* fall through */
@@ -1296,6 +1321,15 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
             if (failed && zns_get_zone_state(failed) !=
                           NVME_ZONE_STATE_READ_ONLY) {
+                /*
+                 * Read only is the end of the line for the zone, so the open
+                 * and active resources it held have to go back. Left counted,
+                 * they exhaust the namespace's budget for zones that can never
+                 * be opened again, and the shutdown walk -- which finds the
+                 * zone on no list -- ends on an assertion that the open count
+                 * reached zero.
+                 */
+                zns_release_zone_resources(ns, failed);
                 zns_assign_zone_state(ns, failed, NVME_ZONE_STATE_READ_ONLY);
                 zns_record_changed_zone(ns, failed->d.zslba);
                 zns->err_write_injected++;
