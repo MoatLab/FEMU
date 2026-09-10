@@ -699,6 +699,11 @@ static uint16_t oc12_bbt_set(FemuCtrl *n, NvmeCmd *cmd)
         ns->bbtbl[lunid]->blk[blk] = value;
 
     } else {
+        /* same short list as the erase path above */
+        if (nlb > ln->params.max_sec_per_rq) {
+            g_free(ppas);
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
         if (dma_write_prp(n, (uint8_t *)ppas, nlb * 8, spba, prp2)) {
             g_free(ppas);
             return NVME_INVALID_FIELD | NVME_DNR;
@@ -755,7 +760,18 @@ static uint16_t oc12_erase_async(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     Oc12Ctrl *ln = n->oc12_ctrl;
     Oc12RwCmd *dm = (Oc12RwCmd *)cmd;
     uint32_t nlb = le16_to_cpu(dm->nlb) + 1;
-    uint64_t *psl = g_malloc0(sizeof(uint64_t) * ln->params.max_sec_per_rq);
+    uint64_t *psl;
+
+    /*
+     * The list below holds max_sec_per_rq entries while nlb comes from the
+     * command and reaches 65536. Read and write size their own list by nlb;
+     * this path does not, so refuse a request larger than the list.
+     */
+    if (nlb > ln->params.max_sec_per_rq) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    psl = g_malloc0(sizeof(uint64_t) * ln->params.max_sec_per_rq);
 
     oc12_read_ppa_list(n, dm, psl);
 
