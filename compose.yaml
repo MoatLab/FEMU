@@ -1,0 +1,75 @@
+services:
+  femu:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        BUILD_JOBS: ${FEMU_BUILD_JOBS:-8}
+    image: ${FEMU_DOCKER_IMAGE:-femu-qlc:latest}
+    container_name: ${FEMU_CONTAINER_NAME:-femu}
+    devices:
+      - /dev/kvm:/dev/kvm
+    cap_add:
+      - IPC_LOCK
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - ${FEMU_GUEST_DIR:-../images}:/guest
+      - ${FEMU_DATA_DIR:-./docker-data}:/data
+    ports:
+      - "${FEMU_SSH_PORT:-2222}:2222"
+    environment:
+      FEMU_MODE: ${FEMU_MODE:-bbssd}
+      FEMU_IMAGE: /guest/${FEMU_IMAGE_NAME:-u20s.qcow2}
+      FEMU_KERNEL: ${FEMU_KERNEL:-}
+      FEMU_INITRD: ${FEMU_INITRD:-}
+      FEMU_KERNEL_APPEND: ${FEMU_KERNEL_APPEND:-root=LABEL=rootfs console=ttyS0}
+      FEMU_MEMORY: ${FEMU_MEMORY:-6G}
+      FEMU_CPUS: ${FEMU_CPUS:-6}
+      FEMU_GUEST_SSH_PORT: 2222
+      FEMU_NAND_CELL_TYPE: ${FEMU_NAND_CELL_TYPE:-4}
+      # Counter-validated pilot geometry. 7,168 MiB is large enough to hold the
+      # complete 5,760-object routed-expert catalog (about 6.23 GB).
+      FEMU_SSD_SIZE_MB: ${FEMU_SSD_SIZE_MB:-7168}
+      FEMU_SECTORS_PER_PAGE: ${FEMU_SECTORS_PER_PAGE:-32}
+      FEMU_PAGES_PER_BLOCK: ${FEMU_PAGES_PER_BLOCK:-256}
+      FEMU_BLOCKS_PER_PLANE: ${FEMU_BLOCKS_PER_PLANE:-48}
+      FEMU_PLANES_PER_LUN: ${FEMU_PLANES_PER_LUN:-1}
+      FEMU_LUNS_PER_CHANNEL: ${FEMU_LUNS_PER_CHANNEL:-8}
+      FEMU_CHANNELS: ${FEMU_CHANNELS:-8}
+      FEMU_QLC_STATS_PATH: ${FEMU_QLC_STATS_PATH:-/data/qlc_counts.csv}
+      # 에너지 계수 (milli-pJ/bit). peripheral + array 분해 모델:
+      #   peripheral = P_fix + rho_p * t_R(c),  P_fix=1.273  rho_p=0.668
+      #   array      = E_fix + (n(c)-1) * E_sense,  E_fix=0.551  E_sense=0.494
+      #   n(c) = 1/2/4/8 은 class 별 sensing 횟수 추정값 (인용값 아님)
+      FEMU_E_READ_C0: ${FEMU_E_READ_C0:-33821}
+      FEMU_E_READ_C1: ${FEMU_E_READ_C1:-53220}
+      FEMU_E_READ_C2: ${FEMU_E_READ_C2:-93219}
+      FEMU_E_READ_C3: ${FEMU_E_READ_C3:-157653}
+      FEMU_E_ARRAY_C0: ${FEMU_E_ARRAY_C0:-551}
+      FEMU_E_ARRAY_C1: ${FEMU_E_ARRAY_C1:-1045}
+      FEMU_E_ARRAY_C2: ${FEMU_E_ARRAY_C2:-2033}
+      FEMU_E_ARRAY_C3: ${FEMU_E_ARRAY_C3:-4009}
+      FEMU_E_XFER: ${FEMU_E_XFER:-28100}
+      FEMU_STATS_FLUSH_MS: ${FEMU_STATS_FLUSH_MS:-0}
+      FEMU_IMAGE_FORMAT: ${FEMU_IMAGE_FORMAT:-qcow2}
+      FEMU_EXTRA_DEVICE_OPTS: ${FEMU_EXTRA_DEVICE_OPTS:-}
+      # Extra guest disks, ';'-separated QEMU -drive specs. A replay payload
+      # is far too large for a cloud-init seed and the guest has no network,
+      # so it comes in as a read-only disk and is copied in from inside.
+      FEMU_EXTRA_DRIVES: ${FEMU_EXTRA_DRIVES:-}
+      # FEMU_EXP_LOG switches the [EXP] log on; FEMU_SECRET is the marker
+      # string it looks for. Together they make FEMU report lpn -> PPA for every
+      # page whose content carries the marker, which is the only way to read the
+      # real address mapping instead of inferring it from read latency.
+      FEMU_EXP_LOG: ${FEMU_EXP_LOG:-}
+      FEMU_SECRET: ${FEMU_SECRET:-}
+      FEMU_DUMP_LPN: ${FEMU_DUMP_LPN:-}
+      FEMU_QMP_SOCKET: /data/qmp.sock
+      FEMU_ALLOW_UNPINNED: ${FEMU_ALLOW_UNPINNED:-}
+    command: ["${FEMU_MODE:-bbssd}"]
+    stdin_open: true
+    tty: true
+    stop_grace_period: 30s
