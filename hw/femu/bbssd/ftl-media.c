@@ -213,6 +213,30 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
     }
 
     loc = bb_decode_loc(ssd, ppa, stime);
+
+    /*
+     * Count physical QLC page reads at the NAND boundary. This includes host,
+     * mapping-table and GC reads, which is the correct boundary for NAND-core
+     * energy. Queueing time is deliberately excluded from active_ns; it records
+     * the raw PACA array latency selected for this page class.
+     */
+    if (op == NAND_MEDIA_READ && loc.flash_type == QLC && loc.page_type < 4) {
+        uint64_t page_bytes = (uint64_t)ssd->sp.secsz * ssd->sp.secs_per_pg;
+        uint64_t active_ns =
+            ssd->media.cfg.timing.rd_table_ns[loc.flash_type][loc.page_type];
+
+        if (!__atomic_load_n(&ssd->qlc_first_read_ns, __ATOMIC_RELAXED)) {
+            __atomic_store_n(&ssd->qlc_first_read_ns,
+                             qemu_clock_get_ns(QEMU_CLOCK_REALTIME),
+                             __ATOMIC_RELAXED);
+        }
+        __atomic_fetch_add(&ssd->qlc_read_pages[loc.page_type], 1,
+                           __ATOMIC_RELAXED);
+        __atomic_fetch_add(&ssd->qlc_read_bytes[loc.page_type], page_bytes,
+                           __ATOMIC_RELAXED);
+        __atomic_fetch_add(&ssd->qlc_read_active_ns[loc.page_type], active_ns,
+                           __ATOMIC_RELAXED);
+    }
     return nand_media_op(&ssd->media, &loc, op, stime).latency_ns;
 }
 

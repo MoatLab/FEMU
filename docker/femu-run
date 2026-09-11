@@ -1,0 +1,193 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage: femu-run MODE [additional QEMU options]
+
+MODE:
+  bbssd    Run a BlackBox SSD (default cell type: QLC)
+  zns      Run a Zoned Namespace SSD (default flash type: QLC)
+  shell    Open a shell in the container
+  version  Print the FEMU/QEMU version
+  help     Show this message
+
+Required runtime input:
+  FEMU_IMAGE=/guest/u20s.qcow2
+
+Common environment variables:
+  FEMU_KERNEL=/guest/kernel    Optional external guest kernel
+  FEMU_INITRD=/guest/initrd    Optional initrd used with FEMU_KERNEL
+  FEMU_KERNEL_APPEND=...       Kernel command line
+  FEMU_MEMORY=4G              Guest RAM
+  FEMU_CPUS=4                 Guest vCPUs
+  FEMU_NAND_CELL_TYPE=4       1=SLC, 2=MLC, 3=TLC, 4=QLC
+  FEMU_SSD_SIZE_MB=16384      Emulated SSD capacity
+  FEMU_QLC_STATS_PATH=...     Write page-class read counters as CSV on shutdown
+  FEMU_E_READ_C0..C3=...      Read energy per page class, milli-pJ/bit
+                              (default 33821/53220/93219/157653)
+  FEMU_E_ARRAY_C0..C3=...     Array share of that coefficient; the rest is
+                              peripheral, which scales with read latency
+  FEMU_E_XFER=28100           Channel transfer energy, milli-pJ/bit
+  FEMU_STATS_FLUSH_MS=0       Rewrite the CSV every N ms while running (0 = on exit only)
+  FEMU_GUEST_SSH_PORT=2222    Port inside the container forwarded to guest :22
+  FEMU_EXTRA_DEVICE_OPTS=...  Extra comma-separated femu device properties
+  FEMU_EXTRA_DRIVES=...       Extra guest disks, one QEMU -drive spec each,
+                              separated by ';'. The payload image a replay
+                              experiment loads onto the emulated SSD is far too
+                              large for a cloud-init seed, so it is attached as a
+                              read-only disk and copied in from inside the guest.
+  FEMU_ALLOW_TCG=1            Permit slow TCG fallback when /dev/kvm is absent
+EOF
+}
+
+mode="${1:-${FEMU_MODE:-bbssd}}"
+if [[ $# -gt 0 ]]; then
+    shift
+fi
+
+case "${mode}" in
+    help|-h|--help)
+        usage
+        exit 0
+        ;;
+    version)
+        exec qemu-system-x86_64 --version
+        ;;
+    shell|bash)
+        exec /bin/bash "$@"
+        ;;
+    bbssd|zns)
+        ;;
+    *)
+        echo "femu-run: unsupported mode '${mode}'" >&2
+        usage >&2
+        exit 2
+        ;;
+esac
+
+femu_image="${FEMU_IMAGE:-/guest/u20s.qcow2}"
+if [[ ! -f "${femu_image}" ]]; then
+    echo "femu-run: guest image not found: ${femu_image}" >&2
+    echo "Mount the host guest directory at /guest or set FEMU_IMAGE." >&2
+    exit 1
+fi
+
+boot_args=()
+femu_kernel="${FEMU_KERNEL:-}"
+femu_initrd="${FEMU_INITRD:-}"
+if [[ -n "${femu_kernel}" ]]; then
+    if [[ ! -f "${femu_kernel}" ]]; then
+        echo "femu-run: guest kernel not found: ${femu_kernel}" >&2
+        exit 1
+    fi
+    boot_args+=(-kernel "${femu_kernel}")
+    if [[ -n "${femu_initrd}" ]]; then
+        if [[ ! -f "${femu_initrd}" ]]; then
+            echo "femu-run: guest initrd not found: ${femu_initrd}" >&2
+            exit 1
+        fi
+        boot_args+=(-initrd "${femu_initrd}")
+    fi
+    boot_args+=(-append "${FEMU_KERNEL_APPEND:-root=LABEL=rootfs console=ttyS0}")
+fi
+
+accel_args=()
+if [[ -c /dev/kvm && -r /dev/kvm && -w /dev/kvm ]]; then
+    accel_args=(-enable-kvm -cpu host)
+elif [[ "${FEMU_ALLOW_TCG:-0}" == "1" ]]; then
+    echo "femu-run: warning: /dev/kvm unavailable; using slow TCG emulation" >&2
+    accel_args=(-accel tcg -cpu max)
+else
+    echo "femu-run: /dev/kvm is unavailable or not accessible" >&2
+    echo "Start the container with: --device /dev/kvm" >&2
+    echo "Set FEMU_ALLOW_TCG=1 only if slow software emulation is acceptable." >&2
+    exit 1
+fi
+
+cell_type="${FEMU_NAND_CELL_TYPE:-4}"
+if [[ ! "${cell_type}" =~ ^[1-4]$ ]]; then
+    echo "femu-run: FEMU_NAND_CELL_TYPE must be 1, 2, 3, or 4" >&2
+    exit 2
+fi
+
+ssd_size_mb="${FEMU_SSD_SIZE_MB:-16384}"
+extra_device_opts="${FEMU_EXTRA_DEVICE_OPTS:-}"
+
+if [[ "${mode}" == "bbssd" ]]; then
+    device="femu,devsz_mb=${ssd_size_mb},namespaces=1,femu_mode=1"
+    device+=",secsz=${FEMU_SECTOR_SIZE:-512}"
+    device+=",secs_per_pg=${FEMU_SECTORS_PER_PAGE:-8}"
+    device+=",pgs_per_blk=${FEMU_PAGES_PER_BLOCK:-256}"
+    device+=",blks_per_pl=${FEMU_BLOCKS_PER_PLANE:-256}"
+    device+=",pls_per_lun=${FEMU_PLANES_PER_LUN:-1}"
+    device+=",luns_per_ch=${FEMU_LUNS_PER_CHANNEL:-8}"
+    device+=",nchs=${FEMU_CHANNELS:-8}"
+    device+=",gc_thres_pcent=${FEMU_GC_THRESHOLD:-75}"
+    device+=",gc_thres_pcent_high=${FEMU_GC_THRESHOLD_HIGH:-95}"
+    device+=",nand_cell_type=${cell_type}"
+    device+=",e_read_c0_mpj=${FEMU_E_READ_C0:-34000}"
+    device+=",e_read_c1_mpj=${FEMU_E_READ_C1:-54000}"
+    device+=",e_read_c2_mpj=${FEMU_E_READ_C2:-95400}"
+    device+=",e_read_c3_mpj=${FEMU_E_READ_C3:-161700}"
+    device+=",e_array_c0_mpj=${FEMU_E_ARRAY_C0:-551}"
+    device+=",e_array_c1_mpj=${FEMU_E_ARRAY_C1:-1045}"
+    device+=",e_array_c2_mpj=${FEMU_E_ARRAY_C2:-2033}"
+    device+=",e_array_c3_mpj=${FEMU_E_ARRAY_C3:-4009}"
+    device+=",e_xfer_mpj=${FEMU_E_XFER:-28100}"
+    device+=",stats_flush_ms=${FEMU_STATS_FLUSH_MS:-0}"
+else
+    # The supplied FEMU ZNS model supports SLC, TLC, and QLC (not MLC).
+    if [[ "${cell_type}" == "2" ]]; then
+        echo "femu-run: the ZNS model does not support MLC (cell type 2)" >&2
+        exit 2
+    fi
+    device="femu,devsz_mb=${ssd_size_mb},namespaces=1,femu_mode=3"
+    device+=",zns_num_ch=${FEMU_ZNS_CHANNELS:-8}"
+    device+=",zns_num_lun=${FEMU_ZNS_LUNS_PER_CHANNEL:-4}"
+    device+=",zns_num_plane=${FEMU_ZNS_PLANES_PER_LUN:-2}"
+    device+=",zns_num_blk=${FEMU_ZNS_BLOCKS_PER_PLANE:-32}"
+    device+=",zns_flash_type=${cell_type}"
+fi
+
+if [[ -n "${extra_device_opts}" ]]; then
+    device+=",${extra_device_opts#,}"
+fi
+
+memory="${FEMU_MEMORY:-4G}"
+cpus="${FEMU_CPUS:-4}"
+ssh_port="${FEMU_GUEST_SSH_PORT:-2222}"
+qmp_socket="${FEMU_QMP_SOCKET:-/data/qmp.sock}"
+image_format="${FEMU_IMAGE_FORMAT:-qcow2}"
+
+# Extra disks, if any. Split on ';' rather than whitespace: a -drive spec is a
+# comma-separated list that may itself contain paths with spaces.
+extra_drive_args=()
+if [[ -n "${FEMU_EXTRA_DRIVES:-}" ]]; then
+    # `read` returns non-zero on a final line with no newline, which would end
+    # the loop before that last spec is used, so terminate the stream explicitly.
+    while IFS= read -r spec; do
+        [[ -z "${spec}" ]] && continue
+        extra_drive_args+=(-drive "${spec}")
+    done < <(printf '%s\n' "${FEMU_EXTRA_DRIVES}" | tr ';' '\n')
+fi
+
+echo "FEMU mode=${mode}, NAND cell type=${cell_type}, image=${femu_image}"
+echo "Guest SSH is forwarded to container port ${ssh_port}"
+
+exec qemu-system-x86_64 \
+    -name "FEMU-${mode^^}-VM" \
+    "${accel_args[@]}" \
+    -smp "${cpus}" \
+    -m "${memory}" \
+    "${boot_args[@]}" \
+    -device virtio-scsi-pci,id=scsi0 \
+    -device scsi-hd,drive=hd0 \
+    -drive "file=${femu_image},if=none,aio=native,cache=none,format=${image_format},id=hd0" \
+    -device "${device}" \
+    "${extra_drive_args[@]}" \
+    -netdev "user,id=net0,hostfwd=tcp::${ssh_port}-:22" \
+    -device virtio-net-pci,netdev=net0 \
+    -nographic \
+    -qmp "unix:${qmp_socket},server=on,wait=off" \
+    "$@"

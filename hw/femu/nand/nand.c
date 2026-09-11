@@ -134,7 +134,13 @@ static void init_qlc_page_pairing(FemuCtrl *n)
     for (i = 0; i < sizeof(centerup)/sizeof(centerup[0]); i++)
         qlc_tbl[centerup[i]] = QLC_UPPER_CENTER_PAGE;
 
-    for (i = 0; i < rows - 3; i++) {
+    /*
+     * The cycle starts at page 8, so it needs (rows - 1) iterations to reach
+     * the last page; rows - 3 stops at index 495 and leaves pages 496..511 at
+     * their zero-initialised value, which reads as QLC_LOWER_PAGE. That is
+     * invisible while pgs_per_blk <= 496, and wrong above it.
+     */
+    for (i = 0; i < rows - 1; i++) {
         for (j = 0; j < page_per_row; j += 2) {
             int idx = 8 + (i * page_per_row) + j;
             qlc_tbl[idx] = qlc_tbl[idx+1] = lpflag;

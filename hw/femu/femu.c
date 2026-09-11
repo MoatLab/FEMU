@@ -1,6 +1,8 @@
 #include "qemu/osdep.h"
 #include "qemu/cutils.h"
+#include "qemu/timer.h"
 #include "hw/qdev-properties.h"
+#include "system/system.h"
 
 #include "./nvme.h"
 
@@ -1463,6 +1465,29 @@ static void nvme_register_extensions_ns(FemuCtrl *n, NvmeNamespace *ns)
     n->ext_ops = saved_ops;
 }
 
+static void femu_flush_extension_stats(FemuCtrl *n);
+
+static void femu_process_exit_notify(Notifier *notifier, void *data)
+{
+    FemuCtrl *n = container_of(notifier, FemuCtrl, process_exit_notifier);
+
+    femu_flush_extension_stats(n);
+}
+
+/*
+ * Periodic snapshot so a long run can be watched while it is still going.
+ * Re-arms itself; the snapshot path does not free or reset any state, so the
+ * counters keep accumulating and the file is simply rewritten each tick.
+ */
+static void femu_stats_timer_cb(void *opaque)
+{
+    FemuCtrl *n = opaque;
+
+    femu_flush_extension_stats(n);
+    timer_mod(n->stats_timer,
+              qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + n->stats_flush_ms);
+}
+
 /*
  * Give back what realize has taken. QEMU does not call the exit callback for a
  * device that never realized, and a device_add that fails validation is an
@@ -1630,6 +1655,20 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
                            n, QEMU_THREAD_JOINABLE);
         n->ftl_thread_running = true;
     }
+
+    /* PCI exit is not guaranteed on whole-process shutdown. Keep experiment
+     * counters observable on normal guest poweroff and QMP quit as well. */
+    n->process_exit_notifier.notify = femu_process_exit_notify;
+    qemu_add_exit_notifier(&n->process_exit_notifier);
+    n->process_exit_notifier_registered = true;
+
+    if (n->stats_flush_ms) {
+        n->stats_timer = timer_new_ms(QEMU_CLOCK_REALTIME,
+                                      femu_stats_timer_cb, n);
+        timer_mod(n->stats_timer,
+                  qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + n->stats_flush_ms);
+        femu_log("QLC stats snapshot every %u ms\n", n->stats_flush_ms);
+    }
 }
 
 /*
@@ -1755,6 +1794,38 @@ static void femu_exit_extensions(FemuCtrl *n)
     }
 }
 
+/* Run each distinct mode's lightweight stats snapshot without freeing state. */
+static void femu_flush_extension_stats(FemuCtrl *n)
+{
+    void (*seen[FEMU_NR_MODES])(struct FemuCtrl *);
+    int nseen = 0, i, j;
+
+    if (n->ext_ops.stats_flush) {
+        seen[nseen++] = n->ext_ops.stats_flush;
+    }
+
+    for (i = 0; n->namespaces && i < n->num_namespaces; i++) {
+        void (*flush)(struct FemuCtrl *) =
+            n->namespaces[i].ext_ops.stats_flush;
+
+        if (!flush) {
+            continue;
+        }
+        for (j = 0; j < nseen; j++) {
+            if (seen[j] == flush) {
+                break;
+            }
+        }
+        if (j == nseen && nseen < (int)ARRAY_SIZE(seen)) {
+            seen[nseen++] = flush;
+        }
+    }
+
+    for (j = 0; j < nseen; j++) {
+        seen[j](n);
+    }
+}
+
 static void femu_exit(PCIDevice *pci_dev)
 {
     FemuCtrl *n = FEMU(pci_dev);
@@ -1772,6 +1843,14 @@ static void femu_exit(PCIDevice *pci_dev)
      */
     femu_stop_pollers(n);
     femu_stop_ftl_thread(n);
+    if (n->stats_timer) {
+        timer_free(n->stats_timer);
+        n->stats_timer = NULL;
+    }
+    if (n->process_exit_notifier_registered) {
+        qemu_remove_exit_notifier(&n->process_exit_notifier);
+        n->process_exit_notifier_registered = false;
+    }
     femu_exit_extensions(n);
 
     nvme_clear_ctrl(n, true);
@@ -1942,6 +2021,33 @@ static const Property femu_props[] = {
     DEFINE_PROP_STRING("mapping", FemuCtrl, bb_params.mapping_scheme),
     DEFINE_PROP_UINT32("mapping_cache_mb", FemuCtrl, mapping_cache_mb, 0),
     DEFINE_PROP_UINT8("nand_cell_type", FemuCtrl, nand_cell_type, 0),
+    /* QLC page-class read energy, milli-pJ/bit. docs/25 SS5.1 primary profile. */
+    /*
+     * Read energy per class, milli-pJ/bit, as peripheral + array:
+     *   peripheral = P_fix + rho_p * t_R(c),  P_fix = 1.273, rho_p = 0.668
+     *   array      = E_fix + (n(c) - 1) * E_sense
+     * with t_R(c) the measured class read latencies this device already models.
+     * The peripheral term therefore tracks read latency and, at 97-98% of the
+     * total, dominates it; see e_array_c*_mpj for the other half.
+     */
+    DEFINE_PROP_UINT32("e_read_c0_mpj", FemuCtrl, e_read_mpj[0], 33821),
+    DEFINE_PROP_UINT32("e_read_c1_mpj", FemuCtrl, e_read_mpj[1], 53220),
+    DEFINE_PROP_UINT32("e_read_c2_mpj", FemuCtrl, e_read_mpj[2], 93219),
+    DEFINE_PROP_UINT32("e_read_c3_mpj", FemuCtrl, e_read_mpj[3], 157653),
+    /*
+     * Array share of each read coefficient, milli-pJ/bit:
+     *   E_fix + (n(c) - 1) * E_sense,  E_fix = 0.551, E_sense = 0.494 pJ/bit,
+     *   n(c) = 1 / 2 / 4 / 8 senses.
+     * n(c) is an estimate of per-class sensing complexity, not a cited figure;
+     * the read latencies it sits beside are measured. Peripheral energy is the
+     * remainder, e_read_mpj - e_array_mpj.
+     */
+    DEFINE_PROP_UINT32("e_array_c0_mpj", FemuCtrl, e_array_mpj[0], 551),
+    DEFINE_PROP_UINT32("e_array_c1_mpj", FemuCtrl, e_array_mpj[1], 1045),
+    DEFINE_PROP_UINT32("e_array_c2_mpj", FemuCtrl, e_array_mpj[2], 2033),
+    DEFINE_PROP_UINT32("e_array_c3_mpj", FemuCtrl, e_array_mpj[3], 4009),
+    DEFINE_PROP_UINT32("e_xfer_mpj", FemuCtrl, e_xfer_mpj, 28100),
+    DEFINE_PROP_UINT32("stats_flush_ms", FemuCtrl, stats_flush_ms, 0),
     DEFINE_PROP_UINT32("pe_cycles_rated", FemuCtrl, pe_cycles_rated, 0),
     DEFINE_PROP_INT32("cell_pages", FemuCtrl, bb_params.cell_pages, 0),
     DEFINE_PROP_INT32("pgtype_lat", FemuCtrl, bb_params.pgtype_lat, 0),
