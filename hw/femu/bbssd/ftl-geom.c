@@ -117,6 +117,29 @@ int bb_check_geometry(FemuCtrl *n, Error **errp)
         error_setg(errp, "FEMU bbssd: retention_limit_sec must not be negative");
         return -1;
     }
+    /*
+     * A name the device does not have used to fall back to the default without
+     * a word, so a misspelt scheme or policy ran a different one and a
+     * measurement taken through it described something else entirely.
+     */
+    if (!femu_mapping_scheme_known(p->mapping_scheme)) {
+        error_setg(errp, "FEMU bbssd: unknown mapping \"%s\"",
+                   p->mapping_scheme);
+        return -1;
+    }
+    if (!femu_ftl_policy_known(p->gc_policy)) {
+        error_setg(errp, "FEMU bbssd: unknown gc_policy \"%s\"",
+                   p->gc_policy);
+        return -1;
+    }
+    if (p->cache_evict && p->cache_evict[0] &&
+        strcmp(p->cache_evict, "clock") && strcmp(p->cache_evict, "random") &&
+        strcmp(p->cache_evict, "lru") && strcmp(p->cache_evict, "arc")) {
+        error_setg(errp, "FEMU bbssd: unknown cache_evict \"%s\"; use clock, "
+                   "random, lru or arc", p->cache_evict);
+        return -1;
+    }
+
     if (p->buffer_size < 0) {
         error_setg(errp, "FEMU bbssd: buffer_size must not be negative");
         return -1;

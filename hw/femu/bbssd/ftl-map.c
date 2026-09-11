@@ -147,6 +147,31 @@ const struct femu_mapping_ops *femu_mapping_scheme_lookup(const char *name)
     return &femu_mapping_schemes[0]; /* default: page-level */
 }
 
+/*
+ * Is this a scheme the device has? The lookup falls back to page mapping for a
+ * name it does not know, which is the right behaviour once realize has accepted
+ * the configuration and the wrong behaviour before: a misspelt scheme ran a
+ * different one without a word.
+ */
+bool femu_mapping_scheme_known(const char *name)
+{
+    if (!name || !name[0]) {
+        return true;                    /* unset means the default */
+    }
+    for (size_t i = 0; i < ARRAY_SIZE(femu_mapping_schemes); i++) {
+        if (!strcmp(name, femu_mapping_schemes[i].name)) {
+            return true;
+        }
+    }
+    for (size_t i = 0; i < ARRAY_SIZE(femu_mapping_extra); i++) {
+        if (!strcmp(name, femu_mapping_extra[i]->name)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 bool femu_mapping_name_uses_log_class(const char *name)
 {
     return femu_mapping_scheme_lookup(name)->uses_log_class;

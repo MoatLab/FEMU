@@ -635,6 +635,21 @@ const struct femu_ftl_policy_ops *femu_ftl_policy_lookup(const char *name)
     return &femu_ftl_policies[0]; /* greedy */
 }
 
+/* Is this a collection policy the device has? See femu_mapping_scheme_known. */
+bool femu_ftl_policy_known(const char *name)
+{
+    if (!name || !name[0]) {
+        return true;
+    }
+    for (size_t i = 0; i < ARRAY_SIZE(femu_ftl_policies); i++) {
+        if (!strcmp(name, femu_ftl_policies[i].name)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 /* here ppa identifies the block we want to clean */
 static void clean_one_block(struct ssd *ssd, struct ppa *ppa)
 {

@@ -556,6 +556,8 @@ void ssd_free(struct ssd *ssd);
 
 /* true when the named mapping scheme allocates through the LOG write pointer */
 bool femu_mapping_name_uses_log_class(const char *name);
+bool femu_mapping_scheme_known(const char *name);
+bool femu_ftl_policy_known(const char *name);
 uint64_t ssd_buffer_destage(struct ssd *ssd, int budget, uint64_t stime);
 uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req);
 void ssd_init(FemuCtrl *n, NvmeNamespace *ns);
