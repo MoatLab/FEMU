@@ -83,6 +83,14 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
         ssd->bad_blocks = (uint32_t)spp->tt_blks;
     }
 
+    /*
+     * An explicit rating wins; otherwise take the one the cell type implies.
+     * A device configured with neither keeps zero and reports no life estimate.
+     */
+    ssd->total_erases = 0;
+    ssd->rated_pe_cycles = n->pe_cycles_rated ? n->pe_cycles_rated :
+                           get_rated_pe_cycles(n->nand_cell_type);
+
     /* configure the NAND media-layer timing (reads spp, points at ssd->ch) */
     bb_nand_media_init(ssd);
 
@@ -191,11 +199,121 @@ uint64_t ssd_nand_write_pages(struct ssd *ssd)
     return ssd->nand_write_pages;
 }
 
+/* Lines rewritten because a block of theirs passed the read stress limit. */
+uint64_t ssd_read_reclaims(struct ssd *ssd)
+{
+    return ssd->read_reclaims;
+}
+
+/* Bytes in one NAND page, for counters the host wants in bytes. */
+uint32_t ssd_page_size(struct ssd *ssd)
+{
+    return (uint32_t)ssd->sp.secs_per_pg * (uint32_t)ssd->sp.secsz;
+}
+
+/*
+ * Media and data integrity errors, as SMART counts them: the reads and writes
+ * the device failed and reported to the host. Only fault insertion produces
+ * them, so a device with none configured reports none.
+ */
+uint64_t ssd_media_errors(struct ssd *ssd)
+{
+    return ssd->err_read_injected + ssd->err_write_injected;
+}
+
+/* Lines rewritten because their data had sat programmed past the retention limit. */
+uint64_t ssd_retention_refreshes(struct ssd *ssd)
+{
+    return ssd->retention_refreshes;
+}
+
+/*
+ * Write buffer effectiveness. The hit counts are the pages the buffer answered
+ * without touching the media: a read it still held, and a write that superseded
+ * a page it already held and so owed no extra program. Reported against the
+ * host totals so the ratio is computable, since the buffer is only configured
+ * on some devices and a zero denominator means it was never exercised.
+ */
+uint64_t ssd_buffer_reads(struct ssd *ssd)
+{
+    return ssd->sp.read_cnt;
+}
+
+uint64_t ssd_buffer_read_hits(struct ssd *ssd)
+{
+    return ssd->sp.read_hit_cnt;
+}
+
+uint64_t ssd_buffer_writes(struct ssd *ssd)
+{
+    return ssd->sp.write_cnt;
+}
+
+uint64_t ssd_buffer_write_hits(struct ssd *ssd)
+{
+    return ssd->sp.write_hit_cnt;
+}
+
+/*
+ * The most-read block since its last erase. A device rewrites data before read
+ * stress accumulates far enough to cost it; this is the number that decision
+ * would be made on.
+ */
+uint64_t ssd_max_block_reads(struct ssd *ssd)
+{
+    struct ssdparams *spp = &ssd->sp;
+    uint64_t most = 0;
+    int ch, lun, pl, blk;
+
+    for (ch = 0; ch < spp->nchs; ch++) {
+        for (lun = 0; lun < spp->luns_per_ch; lun++) {
+            for (pl = 0; pl < spp->pls_per_lun; pl++) {
+                struct nand_plane *plane = &ssd->ch[ch].lun[lun].pl[pl];
+
+                for (blk = 0; blk < spp->blks_per_pl; blk++) {
+                    if (plane->blk[blk].read_cnt > most) {
+                        most = plane->blk[blk].read_cnt;
+                    }
+                }
+            }
+        }
+    }
+
+    return most;
+}
+
 /*
  * SMART available_spare: 100% on a healthy device, reduced by the factory
  * bad-block fraction (bad_blocks / tt_blks) as bad blocks consume the
  * over-provisioned reserve. A reported value only -- placement is unaffected.
  */
+/*
+ * SMART percentage_used: the average program/erase cycles a block has taken,
+ * as a percentage of what the media is rated for. The specification allows
+ * values above 100 and caps the reported figure at 255. Zero when the device
+ * was given no endurance rating, which means no estimate rather than a new
+ * device -- a new device also reports zero, and the two are indistinguishable
+ * in this field by design.
+ */
+uint8_t ssd_percentage_used(struct ssd *ssd)
+{
+    struct ssdparams *spp = &ssd->sp;
+    uint64_t denom, pct;
+
+    if (!ssd->rated_pe_cycles || spp->tt_blks <= 0) {
+        return 0;
+    }
+    /*
+     * Divide once. Taking the average first threw the fraction away, so a
+     * device half way through its first cycle across every block -- a third
+     * of a ten-cycle rating, say -- still reported nothing used.
+     */
+    denom = (uint64_t)spp->tt_blks * ssd->rated_pe_cycles;
+    pct = (ssd->total_erases * 100ull) / denom;
+
+    return pct > 255 ? 255 : (uint8_t)pct;
+}
+
 uint8_t ssd_available_spare(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;
@@ -339,4 +457,52 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
     }
 
     return lat;
+}
+
+/*
+ * ssd_free - release everything ssd_init() built, in the reverse order
+ *
+ * Every mode that allocates an ns->ssd runs it through ssd_init(), so one
+ * teardown serves bbssd, CSD and KV. The struct itself belongs to whichever
+ * mode allocated it, and that mode frees it after calling this.
+ */
+void ssd_free(struct ssd *ssd)
+{
+    struct ssdparams *spp;
+    int i;
+
+    if (!ssd) {
+        return;
+    }
+    spp = &ssd->sp;
+
+    /*
+     * Guarded on the pointers rather than fdp_enabled: KV builds the same
+     * structures without setting the flag, and freeing nothing is cheap.
+     */
+    femu_fdp_ssd_free(ssd);
+
+    if (ssd->mapping && ssd->mapping->exit) {
+        ssd->mapping->exit(ssd);
+    }
+
+    rcache_destroy(ssd);
+    cmt_destroy(ssd);
+    ssd_free_lines(ssd);
+    ssd_free_write_buffer(ssd);
+
+    g_free(ssd->rmap);
+    ssd->rmap = NULL;
+    g_free(ssd->maptbl);
+    ssd->maptbl = NULL;
+
+    nand_media_destroy(&ssd->media);
+
+    if (ssd->ch) {
+        for (i = 0; i < spp->nchs; i++) {
+            ssd_free_ch(&ssd->ch[i], spp);
+        }
+        g_free(ssd->ch);
+        ssd->ch = NULL;
+    }
 }

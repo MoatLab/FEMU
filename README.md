@@ -32,7 +32,9 @@
   - [Zoned Namespace SSD Mode (ZNSSD)](#zoned-namespace-ssd-mode-znssd)
   - [NoSSD Mode](#nossd-mode)
   - [Computational Storage Mode (CSD)](#computational-storage-mode-csd)
+  - [Key-Value SSD Mode (KVSSD)](#key-value-ssd-mode-kvssd)
 - [Configuration](#configuration)
+  - [Config Files](#config-files)
 - [Development](#development)
 - [Troubleshooting](#troubleshooting)
 - [Research & Citation](#research--citation)
@@ -63,12 +65,19 @@ FEMU bridges the gap between SSD hardware platforms and SSD simulators by provid
 
 ## Features
 
-| Feature | BlackBox | WhiteBox | ZNS | NoSSD | CSD |
-|---------|----------|----------|-----|--------|-----|
-| **FTL Management** | Device-side | Host-side | Zone-based | None | Device-side |
-| **Use Cases** | Commercial SSD simulation | OpenChannel SSD research | ZNS research | SCM emulation | Computational storage research |
-| **Latency Model** | Realistic NAND | Realistic NAND | Zone-optimized | Ultra-low (sub-10μs) | Realistic NAND + compute runtime |
-| **Guest Support** | Full NVMe | OpenChannel 1.2/2.0 | NVMe ZNS | NVMe basic | Full NVMe + CSD commands |
+| Feature | BlackBox | WhiteBox | ZNS | NoSSD | CSD | KVSSD |
+|---------|----------|----------|-----|--------|-----|-------|
+| **`femu_mode`** | 1 | 0 | 3 | 2 | 4 | 5 |
+| **FTL Management** | Device-side | Host-side | Zone-based | None | Device-side | Key-indexed log |
+| **Use Cases** | Commercial SSD simulation | OpenChannel SSD research | ZNS research | SCM emulation | Computational storage research | Key-value store research |
+| **Latency Model** | Realistic NAND | Realistic NAND | Zone-optimized | Ultra-low (sub-10μs) | Realistic NAND + compute runtime | Realistic NAND per value |
+| **Guest Support** | Full NVMe | OpenChannel 1.2/2.0 | NVMe ZNS | NVMe basic | Full NVMe + CSD commands | Passthrough only |
+
+Flexible Data Placement is not a separate mode: it is BlackBox with `fdp=on`
+set on the subsystem. See `run-blackbox-fdp.sh`.
+
+OpenChannel needs a host that speaks it. LightNVM was removed from Linux in
+5.15, so this mode has no in-tree driver on a current kernel.
 
 ---
 
@@ -99,7 +108,7 @@ FEMU bridges the gap between SSD hardware platforms and SSD simulators by provid
 
 ### Core Components
 
-- **NVMe Controller**: Standards-compliant NVMe 1.3+ implementation
+- **NVMe Controller**: NVMe 1.4 controller, reported as version 1.4.0
 - **SSD Modes**: Pluggable backends for different SSD architectures
 - **Timing Model**: Configurable latency simulation for realistic performance
 - **Memory Backend**: DRAM-based storage emulation
@@ -262,6 +271,16 @@ sudo reboot
 ./run-blackbox.sh
 ```
 
+> **The emulated device lives in memory.** FEMU allocates its backing store when
+> the device is created; it is not a file, and nothing written to the emulated
+> SSD survives shutting the VM down. Size the host accordingly -- a 32 GiB
+> emulated SSD needs 32 GiB of host memory -- and copy anything you want to keep
+> out of the guest before you stop it.
+>
+> FEMU also tries to pin that memory so page faults do not distort the emulated
+> latency. Where `RLIMIT_MEMLOCK` does not allow it, the device still starts and
+> says so; raise the limit (`ulimit -l`) if timing precision matters.
+
 ### 4. Access the VM
 
 The VM will start in text mode. You can also SSH into the VM:
@@ -298,6 +317,9 @@ nchs=8                 # Number of channels
 pg_rd_lat=40000        # Page read latency (ns)
 pg_wr_lat=200000       # Page write latency (ns)
 blk_er_lat=2000000     # Block erase latency (ns)
+cmd_addr_lat=0         # Channel bus phases (ns): command/address cycle,
+pg_xfer_lat=0          #   page data transfer, status read. Any non-zero
+status_lat=0           #   value adds a shared per-channel bus to the model
 
 # Garbage Collection
 gc_thres_pcent=75      # GC trigger threshold (percent of lines in use)
@@ -323,7 +345,32 @@ fw_cpu_ns=0            # controller CPU time charged per command, ns
 # DRAM Read Cache (optional; default off)
 read_cache_mb=0        # Read-cache size in MiB (0 disables it)
 cache_evict=clock      # Eviction policy: clock (default), random, lru, arc
+
+# Write buffer (optional; default off)
+buffer_size=0          # Device write-buffer size in MiB (0 disables it)
+buffer_thres_pcent=90  # Occupancy at which the buffer starts flushing
+
+# NAND media (optional)
+nand_cell_type=        # slc, mlc, tlc, qlc or plc; selects the page-type table
+op_pcent=0             # Over-provisioning withheld from the host, percent
+pls_per_lun=1          # Planes per LUN; above one, a line erases across planes
+nand_bad_blocks=0      # Blocks marked bad at init, reflected in available spare
+trim_lat_ns=0          # Latency charged per TRIM range
+
+# Wear, disturb and retention (optional; all default off)
+read_reclaim_limit=0   # Reads a block may take before its line is refreshed
+retention_limit_sec=0  # Seconds data may sit programmed before a read refreshes it
+ecc_step_ns=0          # Extra read latency per correction tier as a block ages
+ecc_retention_sec=0    # Seconds of data age per correction tier
+
+# Placement (optional)
+hot_cold_sep=false     # Keep frequently and rarely rewritten data on separate lines
 ```
+
+The wear and retention knobs are all off by default and are read-triggered: a
+line is queued for refresh when something reads it, so a region nothing ever
+reads is never refreshed. That is a deliberate limitation, not an oversight --
+modelling a background media scan would need a timer the emulator does not run.
 
 **Mapping schemes.** `mapping=` selects how the FTL translates logical to
 physical pages:
@@ -392,13 +439,53 @@ was. Note that with a buffer configured a write that is absorbed costs nothing
 and the cost appears later on whichever write evicts it, so per-request latency
 is redistributed rather than reduced.
 
-**Write amplification.** The device reports amplification in the vendor area of
-the SMART log: the factor scaled by 1000 at byte 192, host-programmed pages at
-200, and relocated pages at 208.
+**Write amplification and wear.** The device reports these in the vendor area of
+the SMART log:
+
+| byte | width | meaning |
+|---|---|---|
+| 192 | 4 | write amplification, scaled by 1000 |
+| 200 | 8 | pages the host wrote (the denominator) |
+| 208 | 8 | pages garbage collection relocated |
+| 216 | 8 | user pages programmed into NAND |
+| 224 | 8 | reads taken by the most-read block since its erase |
+| 232 | 8 | lines rewritten because of read stress |
 
 ```bash
-sudo nvme smart-log /dev/nvme0n1 -o binary | od -An -tu4 -j192 -N4   # WAF x1000
+sudo nvme smart-log /dev/nvme0 -o binary | od -An -tu4 -j192 -N4   # WAF x1000
+sudo nvme smart-log /dev/nvme0 -o binary | od -An -tu8 -j200 -N8   # host pages
 ```
+
+Amplification is `(programmed + relocated) / host`, so a write buffer that
+absorbs repeated writes to the same page shows up as a factor below 1. Bytes 200
+and 216 are equal when no buffer is configured. The read count at 224 is the
+stress a real device watches to decide when data must be rewritten.
+
+**Read stress.** Reading a page disturbs the others in its block, so a block read
+many times without being rewritten drifts towards errors. Set
+`read_reclaim_limit` to the number of reads a block may take before its line is
+refreshed:
+
+```
+-device femu,...,femu_mode=1,read_reclaim_limit=100000
+```
+
+The line is chosen on the read but rewritten on a following write, where
+relocation already costs something, rather than stalling a read behind a whole
+line of it; one line is refreshed per write at most. The cost shows up as write
+amplification, which is how a read-heavy workload comes to have a write cost at
+all. Measured on a 512 MiB region read six times over with a low limit: 5 lines
+refreshed, 77824 pages relocated, amplification 1.000 -> 1.542. Off by default.
+
+The rate is bounded by how often the host writes, not by how hard it reads: one
+line is queued at a time and at most one is refreshed per write. That keeps an
+aggressive setting from running away -- dropping the limit from 500 to 10 moves
+amplification only 1.542 to 1.628 -- but it also means a workload that never
+writes never refreshes anything, where a real device would do this in the
+background. Model reads-only ageing some other way.
+
+These are summed across the bbssd namespaces of the controller, and are populated
+in FDP mode as well as plain block mode.
 
 **Use Cases:**
 - Commercial SSD simulation research
@@ -480,6 +567,12 @@ zns_zd_ext_size=0      # Zone-descriptor extension bytes (0 = none)
 zns_num_conv_zones=0   # Leading conventional zones (0 = all sequential)
 zns_zone_cap=0         # Usable bytes per zone (0 = the whole zone)
 zns_chnls_per_zone=0   # Channels a zone spans (0 = all of them)
+zns_pg_rd_lat=0        # NAND read / program / erase time (ns) for the
+zns_pg_wr_lat=0        #   configured cell type; 0 keeps the built-in value
+zns_blk_er_lat=0
+zns_cmd_addr_lat=0     # Channel bus phases (ns): command/address cycle,
+zns_pg_xfer_lat=0      #   page data transfer, status read. Any non-zero
+zns_status_lat=0       #   value adds a shared per-channel bus to the model
 zns_zrwa_size=0        # ZRWA window in LBAs (0 = ZRWA disabled)
 zns_zrwafg_size=0      # ZRWA flush granularity in LBAs
 zns_zrwa_num=0         # Zones that may hold a ZRWA at once
@@ -676,11 +769,13 @@ with `femu_mode=4` and keeps CSD-specific code under `hw/femu/csd/`.
 **Key Parameters:**
 ```bash
 fdm_size=64            # Functional data memory size (MB), required
-nr_cu=4                # Number of compute units
-nr_thread=4            # Number of functional simulation threads
-time_slice=200000      # Scheduler time slice (ns)
-context_switch_time=200 # Context switch time (ns)
-csf_runtime_scale=3    # Runtime scaling factor
+nr_cu=4                # Compute units; programs queue for the first free one
+csf_runtime_scale=3    # A program that names no runtime is charged its host
+                       #   run time times this (a load's own scale, in tenths,
+                       #   takes precedence)
+nr_thread=4            # Accepted for CEMU config compatibility only: the
+time_slice=200000      #   threaded scheduler they configure is not part of
+context_switch_time=200 #  this port, so they have no effect
 ```
 
 **Current Scope:**
@@ -693,7 +788,7 @@ csf_runtime_scale=3    # Runtime scaling factor
 - Optional uBPF CSF support via `./femu-compile.sh --enable-csd-ubpf`
   or `./femu-compile.sh --enable-csd-ubpf=/path/to/ubpf-cemu`
 - Group/QoS command metadata
-- Guest-side passthrough tests in `tests/femu-csd/`
+- Guest-side passthrough tests in `hw/femu/tests/csd/`
 
 The initial CSD path does not require a CEMU-specific Linux kernel, FDMFS, or a
 fixed VM image. Advanced CEMU features such as VM freezing, virtual clock
@@ -703,6 +798,107 @@ mode is upstreamed.
 ---
 
 ## Configuration
+
+Every property FEMU accepts is listed in
+[`hw/femu/docs/properties.md`](hw/femu/docs/properties.md), with its type,
+default and the line of source it comes from. That file is generated from the
+property tables, so it covers all 135 of them rather than the handful this
+README walks through below.
+
+### Config Files
+
+FEMU has well over a hundred device properties, so writing them out as a single
+`-device femu,a=,b=,c=,...` line makes a run script that nobody can read.
+`hw/femu/scripts/ssd-config.sh` expands a config file into those arguments
+instead:
+
+```bash
+./hw/femu/scripts/ssd-config.sh hw/femu/scripts/configs/bbssd.conf
+# -device femu,id=nvme0,devsz_mb=4096,namespaces=1,secsz=512,...,femu_mode=1
+```
+
+so a run script can say:
+
+```bash
+QEMU_ARGS=$(./hw/femu/scripts/ssd-config.sh my-ssd.conf)
+qemu-system-x86_64 -enable-kvm -cpu host -smp 8 -m 8G $QEMU_ARGS ...
+```
+
+The format is INI-ish. Keys are FEMU device properties and mean exactly what
+they mean in `qemu-system-x86_64 -device femu,help`; `#` and `;` start comments,
+section headers are labels for the reader, and a key with an empty value is
+ignored:
+
+```ini
+[device]
+mode        = bbssd        # friendly name for femu_mode
+devsz_mb    = 4096
+
+[geometry]
+secs_per_pg = 8            # 4 KiB pages
+luns_per_ch = 8
+nchs        = 8
+
+[timing]
+pg_rd_lat   = 40000        # ns
+pg_wr_lat   = 200000
+```
+
+Two things it handles that are easy to get wrong by hand:
+
+- **`[subsys]`** properties are emitted as a separate `-device femu-subsys,...`
+  and wired to the SSD. FDP lives on the subsystem object rather than on the
+  `femu` device, which is the usual stumbling block when setting it up.
+- **List values** such as `namespace_modes = bbssd,znssd,nossd` get their commas
+  escaped for QEMU automatically.
+
+Keys are checked against the emulator itself, so a typo is reported rather than
+silently dropped, and the checking cannot fall behind the properties
+FEMU actually has:
+
+```
+$ ./hw/femu/scripts/ssd-config.sh my-ssd.conf
+ssd-config: unknown property 'gc_polcy' -- not one FEMU accepts
+ssd-config: config rejected; see the warnings above
+```
+
+### Checking a Device
+
+`hw/femu/scripts/femu-test.sh` runs inside the guest and checks that the
+emulated device still behaves: data survives the FTL, deallocate works, the
+counters move, and the mode-specific surface answers. `max_block_reads` is the
+reads taken by the most-read block since it was last erased -- the read stress a
+real device watches to decide when data must be rewritten. What it runs depends on
+what the device reports itself to be, so the same script covers a block, zoned
+or key-value namespace. A key-value namespace is not block addressable, so it
+has no block node at all and is driven through the controller instead.
+
+```bash
+# inside the guest -- this OVERWRITES the device, hence --yes
+sudo ./femu-test.sh --yes /dev/nvme0n1
+```
+
+```
+== data survives the FTL ==
+  PASS  random write then verify (crc32c)
+== deallocate ==
+  PASS  deallocate accepted
+  PASS  mapping still sound after deallocate
+== counters ==
+  waf_x1000=935 host_pages=40960 nand_pages=38335 max_block_reads=807
+  PASS  host writes counted
+
+FEMU_TEST pass=7 fail=0 skip=0
+```
+
+It refuses to run on a mounted device, and exits non-zero if anything failed, so
+it can gate a build. A read that fails counts as a failure just as a bad
+checksum does -- both mean the device did not return what was written.
+
+Worked examples live in `hw/femu/scripts/configs/` (block SSD, over-provisioned
+for GC studies, ZNS, FDP, heterogeneous namespaces, QLC, write buffer).
+`hw/femu/scripts/ssd-config-test.sh` expands every one of them and checks FEMU
+accepts the result.
 
 ### SSD Layout Parameters
 
@@ -721,6 +917,13 @@ total_capacity = total_pages × secs_per_pg × secsz
 # Example:
 # 8 × 8 × 1 × 256 × 256 × 8 × 512 = 68,719,476,736 bytes (~64GB raw)
 ```
+
+`pls_per_lun` above 1 is addressed: a line spans one block index across every
+channel, LUN and plane, so the planes add capacity and are collected together.
+They share their LUN's timing gate, so they do not yet add parallelism -- the
+media layer has a multi-plane operation but nothing batches a request's pages
+into one. FDP keeps its own reclaim-unit allocator, which still assumes a single
+plane, so that combination is refused at startup.
 
 ### Performance Tuning
 
@@ -814,6 +1017,7 @@ hw/femu/                    # Main FEMU implementation
 ├── lib/                    # Utility libraries
 ├── inc/                    # Shared headers (rings, pqueue, ...)
 ├── scripts/                # Build + run scripts (see below)
+├── tests/                  # FEMU's own tests (unit, qtest, guest-side CSD)
 └── docs/                   # FEMU documentation
 ```
 
@@ -824,11 +1028,12 @@ so the historical `cd build-femu && ../femu-scripts/...` workflow still works.
 
 Docs under `hw/femu/docs/`:
 - `HIOPS.md` — NoSSD high-IOPS optimizations, results, and reproduction.
-- `FEMU-Master-Roadmap.md` — design roadmap.
+- `CONFIGURATION-CHANGES.md` — configuration changes that affect existing runs.
 
 Scripts under `hw/femu/scripts/` (run from your `build-femu/` dir):
 - `femu-compile.sh`, `femu-copy-scripts.sh` — build and stage the run scripts.
 - `run-{blackbox,whitebox,zns,nossd,csd}.sh` — per-mode launchers.
+- `run-blackbox-fdp.sh` — BlackBox with Flexible Data Placement enabled.
 - `hiops/` — the socket-isolation high-IOPS benchmark harness.
 
 ### Adding New Features

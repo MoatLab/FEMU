@@ -4,9 +4,11 @@
  * gating + page-type program latency + ECC-wear-on-read + cache-read pipeline +
  * multi-plane + copyback. ZNS/OCSSD use strict config subsets of the same code.
  *
- * Bit-identical contract: the max() ordering and the per-op phase sequence below
- * mirror hw/femu/bbssd/ftl.c ssd_advance_status / ssd_advance_multiplane /
- * ssd_advance_copyback exactly. Do not reorder the gate/reservation steps.
+ * Bit-identical contract for the channel-off modes: the max() ordering and the
+ * per-op phase sequence below mirror hw/femu/bbssd/ftl.c ssd_advance_status /
+ * ssd_advance_multiplane / ssd_advance_copyback exactly. The staged channel
+ * model books a read's data-out for the window in which it happens (see the
+ * bus_* helpers); it is opt-in and was never on by default.
  */
 
 #include "qemu/osdep.h"
@@ -15,18 +17,157 @@
 void nand_media_init(NandMedia *m, const NandMediaConfig *cfg)
 {
     m->cfg = *cfg;
+    m->bus_res = NULL;
+    if (cfg->policy.channel_mode == NAND_CH_STAGED && cfg->nchs) {
+        m->bus_res = calloc(cfg->nchs, sizeof(*m->bus_res));
+    }
+}
+
+/*
+ * Release what nand_media_init() took. The staged channel model keeps a
+ * per-channel reservation list; without this it is leaked for the lifetime of
+ * the process, which a device that is unplugged and replaced does notice.
+ * Safe to call on a media that was never initialised for a staged bus, and
+ * safe to call twice.
+ */
+void nand_media_destroy(NandMedia *m)
+{
+    if (!m) {
+        return;
+    }
+    free(m->bus_res);
+    m->bus_res = NULL;
 }
 
 static inline uint64_t mx(uint64_t a, uint64_t b) { return a > b ? a : b; }
 
-/* one typed bus phase on the channel (shared per-channel timeline) */
-static uint64_t advance_chnl(NandMedia *m, uint32_t ch, uint64_t earliest,
-                             uint64_t xfer_ns)
+/*
+ * Channel bus bookkeeping. Two kinds of phase share one bus:
+ *
+ *  - phases that happen when the op reaches them: command/address, a program's
+ *    data-in, and any status read. These queue FIFO behind the bus's busy-until
+ *    accumulator (the controller's ch_avail) and advance it.
+ *  - a read's data-out, which happens only once the array has finished (tR
+ *    later) and is therefore booked as a window in the future. It does not
+ *    advance busy-until: the bus is idle until the window opens and another
+ *    die's phase may use it in the gap.
+ *
+ * Both kinds avoid every booked window. A zero-length phase touches nothing;
+ * booking it was what made a read's command wait for another read's transfer.
+ */
+static void bus_prune(NandBusResList *l, uint64_t now)
+{
+    int i, j = 0;
+    for (i = 0; i < l->n; i++) {
+        if (l->r[i].end > now) {
+            l->r[j++] = l->r[i];
+        }
+    }
+    l->n = j;
+}
+
+/* earliest s >= start such that [s, s + len) overlaps no booked window */
+static uint64_t bus_fit(const NandBusResList *l, uint64_t start, uint64_t len)
+{
+    int i;
+    for (i = 0; i < l->n; i++) {          /* windows are kept sorted by start */
+        if (l->r[i].end <= start) {
+            continue;
+        }
+        if (l->r[i].start >= start + len) {
+            break;
+        }
+        start = l->r[i].end;
+    }
+    return start;
+}
+
+static bool bus_book(NandBusResList *l, uint64_t start, uint64_t end)
+{
+    int i;
+    if (l->n == NAND_BUS_RES_MAX) {
+        return false;
+    }
+    for (i = l->n; i > 0 && l->r[i - 1].start > start; i--) {
+        l->r[i] = l->r[i - 1];
+    }
+    l->r[i].start = start;
+    l->r[i].end = end;
+    l->n++;
+    return true;
+}
+
+/*
+ * Windows that ended before the op now being timed started can no longer be
+ * hit: every later op starts no earlier than this one. Pruning on the op's
+ * own start time is what keeps the list short; the accumulator cannot be used
+ * for that because it does not move when the immediate phases are zero.
+ */
+
+/* a phase that happens now: FIFO on the bus, around any booked window */
+static uint64_t bus_now(NandMedia *m, uint32_t ch, uint64_t now,
+                        uint64_t earliest, uint64_t len)
 {
     uint64_t *cha = m->cfg.timeline->ch_avail(m->cfg.timeline_opaque, ch);
-    uint64_t start = mx(earliest, *cha);
-    *cha = start + xfer_ns;
+    uint64_t start;
+
+    if (!len) {
+        return earliest;
+    }
+    start = mx(earliest, *cha);
+    if (m->bus_res) {
+        bus_prune(&m->bus_res[ch], now);
+        start = bus_fit(&m->bus_res[ch], start, len);
+    }
+    *cha = start + len;
     return *cha;
+}
+
+/* a phase that happens later (a read's data-out): booked, busy-until untouched */
+static uint64_t bus_later(NandMedia *m, uint32_t ch, uint64_t now,
+                          uint64_t earliest, uint64_t len)
+{
+    uint64_t *cha = m->cfg.timeline->ch_avail(m->cfg.timeline_opaque, ch);
+    uint64_t start;
+
+    if (!len) {
+        return earliest;
+    }
+    start = mx(earliest, *cha);
+    if (m->bus_res) {
+        bus_prune(&m->bus_res[ch], now);
+        start = bus_fit(&m->bus_res[ch], start, len);
+        if (bus_book(&m->bus_res[ch], start, start + len)) {
+            return start + len;
+        }
+    }
+    *cha = start + len;   /* no room to book: bus held from now, as before */
+    return *cha;
+}
+
+/*
+ * Extra read time spent on error correction. Both wear and retention age push a
+ * block towards more correction work, so their tiers add and are capped
+ * together. Returns 0 unless the caller enabled the model and gave a step.
+ */
+static uint64_t ecc_extra_ns(NandMedia *m, const NandLoc *loc)
+{
+    const NandMediaTiming *t = &m->cfg.timing;
+    uint64_t tiers = 0;
+
+    if (!m->cfg.policy.ecc_on_read || !t->ecc_step_ns) {
+        return 0;
+    }
+    if (t->ecc_pe_per_tier) {
+        tiers += loc->pe_cycles / (uint32_t)t->ecc_pe_per_tier;
+    }
+    if (t->ecc_retention_per_tier_sec) {
+        tiers += loc->age_sec / (uint32_t)t->ecc_retention_per_tier_sec;
+    }
+    if (tiers > (uint64_t)t->ecc_max_tiers) {
+        tiers = t->ecc_max_tiers;
+    }
+    return (uint64_t)t->ecc_step_ns * tiers;
 }
 
 /* per-op array latency, honoring flat vs table + bbssd page-type multiplier */
@@ -41,11 +182,7 @@ static uint64_t array_lat(NandMedia *m, const NandLoc *loc, NandMediaOp op)
     if (op == NAND_MEDIA_READ) {
         lat = m->cfg.policy.use_flat_timing ?
               t->rd_ns : t->rd_table_ns[loc->flash_type][loc->page_type];
-        if (m->cfg.policy.ecc_on_read && t->ecc_step_ns) {
-            uint64_t tiers = loc->pe_cycles / t->ecc_pe_per_tier;
-            if (tiers > (uint64_t)t->ecc_max_tiers) tiers = t->ecc_max_tiers;
-            lat += (uint64_t)t->ecc_step_ns * tiers;
-        }
+        lat += ecc_extra_ns(m, loc);
         return lat;
     }
     /* program */
@@ -108,11 +245,10 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
          * commits done = max(t, lun_at_commit) + alat, recomputed from the value
          * it actually observed, so the result matches some valid serial ordering
          * and is bit-identical to a plain locked read-max-add-store, without the
-         * mutex. Falls through to the locked path for LUN_AND_PLANE (two words,
-         * not atomically CAS-able) and busy-extend.
+         * mutex. Falls through to the locked path for LUN_AND_PLANE, which is
+         * two words and not atomically CAS-able.
          */
-        if (m->cfg.policy.array_gate == NAND_GATE_LUN_ONLY &&
-            !m->cfg.policy.array_busy_extends) {
+        if (m->cfg.policy.array_gate == NAND_GATE_LUN_ONLY) {
             uint64_t *lun = m->cfg.timeline->lun_avail(m->cfg.timeline_opaque, loc);
             uint64_t old = __atomic_load_n(lun, __ATOMIC_RELAXED);
             for (;;) {
@@ -137,16 +273,7 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
         if (m->cfg.timeline->lock_lun) {
             m->cfg.timeline->lock_lun(m->cfg.timeline_opaque, loc);
         }
-        if (m->cfg.policy.array_busy_extends) {
-            /* gate is the LUN only in this mode (OCSSD has no plane accumulator) */
-            uint64_t *lun = m->cfg.timeline->lun_avail(m->cfg.timeline_opaque, loc);
-            if (t < *lun) {
-                *lun += alat;
-            } else {
-                *lun = t + alat;
-            }
-            done = *lun;
-        } else {
+        {
             uint64_t s = array_gate_start(m, loc, t);
             done = s + alat;
             array_commit(m, loc, done);
@@ -169,7 +296,7 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
         m->cfg.timeline->lock_lun(m->cfg.timeline_opaque, loc);
     }
     if (op == NAND_MEDIA_READ) {
-        t = advance_chnl(m, loc->ch, t, m->cfg.timing.cmd_addr_ns);
+        t = bus_now(m, loc->ch, stime, t, m->cfg.timing.cmd_addr_ns);
         /*
          * Program/erase suspend: if the LUN is mid-P/E when this read arrives, real NAND
          * lets the read preempt the slow operation. Model it by starting the read after a
@@ -188,12 +315,12 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
                     uint64_t *prr =
                         m->cfg.timeline->page_reg_ready(m->cfg.timeline_opaque, loc);
                     uint64_t dout = mx(*prr, done);
-                    t = advance_chnl(m, loc->ch, dout, m->cfg.timing.page_xfer_ns);
+                    t = bus_later(m, loc->ch, stime, dout, m->cfg.timing.page_xfer_ns);
                     *prr = t;
                 } else {
-                    t = advance_chnl(m, loc->ch, done, m->cfg.timing.page_xfer_ns);
+                    t = bus_later(m, loc->ch, stime, done, m->cfg.timing.page_xfer_ns);
                 }
-                t = advance_chnl(m, loc->ch, t, m->cfg.timing.status_ns);
+                t = bus_later(m, loc->ch, stime, t, m->cfg.timing.status_ns);
                 c.done_ns = t;
                 c.latency_ns = c.done_ns - stime;
                 if (m->cfg.timeline->unlock_lun) {
@@ -210,26 +337,26 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
             *m->cfg.timeline->lun_avail(m->cfg.timeline_opaque, loc) = s + rcbsy;
             uint64_t *prr = m->cfg.timeline->page_reg_ready(m->cfg.timeline_opaque, loc);
             uint64_t dout = mx(*prr, done);
-            t = advance_chnl(m, loc->ch, dout, m->cfg.timing.page_xfer_ns);
+            t = bus_later(m, loc->ch, stime, dout, m->cfg.timing.page_xfer_ns);
             *prr = t;
         } else {
-            t = advance_chnl(m, loc->ch, done, m->cfg.timing.page_xfer_ns);
+            t = bus_later(m, loc->ch, stime, done, m->cfg.timing.page_xfer_ns);
         }
-        t = advance_chnl(m, loc->ch, t, m->cfg.timing.status_ns);
+        t = bus_later(m, loc->ch, stime, t, m->cfg.timing.status_ns);
         c.done_ns = t;
     } else if (op == NAND_MEDIA_PROGRAM) {
-        t = advance_chnl(m, loc->ch, t, m->cfg.timing.cmd_addr_ns);
-        t = advance_chnl(m, loc->ch, t, m->cfg.timing.page_xfer_ns);
+        t = bus_now(m, loc->ch, stime, t, m->cfg.timing.cmd_addr_ns);
+        t = bus_now(m, loc->ch, stime, t, m->cfg.timing.page_xfer_ns);
         uint64_t s = array_gate_start(m, loc, t);
         uint64_t done = s + alat;
         array_commit(m, loc, done);
         c.done_ns = done;
     } else { /* erase */
-        t = advance_chnl(m, loc->ch, t, m->cfg.timing.cmd_addr_ns);
+        t = bus_now(m, loc->ch, stime, t, m->cfg.timing.cmd_addr_ns);
         uint64_t s = array_gate_start(m, loc, t);
         uint64_t done = s + alat;
         array_commit(m, loc, done);
-        t = advance_chnl(m, loc->ch, done, m->cfg.timing.status_ns);
+        t = bus_later(m, loc->ch, stime, done, m->cfg.timing.status_ns);
         c.done_ns = t;
     }
     if (m->cfg.timeline->unlock_lun) {
@@ -252,57 +379,55 @@ NandOpCompletion nand_media_multiplane(NandMedia *m, const NandLoc *locs, int nl
 
     /* per-plane command/address (+ data-in for programs) serialized on the bus */
     for (i = 0; i < nlocs; i++) {
-        t = advance_chnl(m, ch, t, m->cfg.timing.cmd_addr_ns);
+        t = bus_now(m, ch, stime, t, m->cfg.timing.cmd_addr_ns);
         if (op == NAND_MEDIA_PROGRAM) {
-            t = advance_chnl(m, ch, t, m->cfg.timing.page_xfer_ns);
+            t = bus_now(m, ch, stime, t, m->cfg.timing.page_xfer_ns);
         }
         if (i < nlocs - 1) {
             t += plbusy;
         }
     }
 
-    /* one array op in parallel across all planes; gate on LUN + every plane */
+    /*
+     * One array op in parallel across all planes, gated on every resource the
+     * configured gate covers. Going through array_gate_start/array_commit rather
+     * than reaching for the accumulators directly is what lets a LUN-only caller
+     * (bbssd) use this: it leaves plane_avail untouched when the gate excludes it.
+     */
     uint64_t start = t;
-    uint64_t *lun = m->cfg.timeline->lun_avail(m->cfg.timeline_opaque, &locs[0]);
-    start = mx(start, *lun);
     for (i = 0; i < nlocs; i++) {
-        start = mx(start, *m->cfg.timeline->plane_avail(m->cfg.timeline_opaque, &locs[i]));
+        start = mx(start, array_gate_start(m, &locs[i], start));
     }
     uint64_t alat;
     if (op == NAND_MEDIA_READ) {
         alat = m->cfg.policy.use_flat_timing ?
                m->cfg.timing.rd_ns :
                m->cfg.timing.rd_table_ns[locs[0].flash_type][locs[0].page_type];
-        if (m->cfg.policy.ecc_on_read && m->cfg.timing.ecc_step_ns) {
-            uint64_t worst = 0;
-            for (i = 0; i < nlocs; i++) {
-                uint64_t tiers = locs[i].pe_cycles / m->cfg.timing.ecc_pe_per_tier;
-                if (tiers > (uint64_t)m->cfg.timing.ecc_max_tiers)
-                    tiers = m->cfg.timing.ecc_max_tiers;
-                uint64_t extra = (uint64_t)m->cfg.timing.ecc_step_ns * tiers;
-                if (extra > worst) worst = extra;
-            }
-            alat += worst;
+        /* the plane needing the most correction paces the whole operation */
+        uint64_t worst = 0;
+        for (i = 0; i < nlocs; i++) {
+            uint64_t extra = ecc_extra_ns(m, &locs[i]);
+            if (extra > worst) worst = extra;
         }
+        alat += worst;
     } else {
         alat = array_lat(m, &locs[0], op);
     }
     uint64_t done = start + alat;
-    *lun = done;
     for (i = 0; i < nlocs; i++) {
-        *m->cfg.timeline->plane_avail(m->cfg.timeline_opaque, &locs[i]) = done;
+        array_commit(m, &locs[i], done);
     }
 
     t = done;
     if (op == NAND_MEDIA_READ) {
         if (m->cfg.timing.status_ns)
-            t = advance_chnl(m, ch, t, m->cfg.timing.status_ns);
+            t = bus_later(m, ch, stime, t, m->cfg.timing.status_ns);
         for (i = 0; i < nlocs; i++) {
-            t = advance_chnl(m, ch, t, m->cfg.timing.cmd_addr_ns);
-            t = advance_chnl(m, ch, t, m->cfg.timing.page_xfer_ns);
+            t = bus_later(m, ch, stime, t, m->cfg.timing.cmd_addr_ns);
+            t = bus_later(m, ch, stime, t, m->cfg.timing.page_xfer_ns);
         }
     } else if (m->cfg.timing.status_ns) {
-        t = advance_chnl(m, ch, t, m->cfg.timing.status_ns);
+        t = bus_later(m, ch, stime, t, m->cfg.timing.status_ns);
     }
 
     c.done_ns = t;
@@ -314,17 +439,18 @@ NandOpCompletion nand_media_copyback(NandMedia *m, const NandLoc *src,
                                      const NandLoc *dst, uint64_t stime)
 {
     NandOpCompletion c;
-    uint64_t *slun = m->cfg.timeline->lun_avail(m->cfg.timeline_opaque, src);
-    uint64_t *spl  = m->cfg.timeline->plane_avail(m->cfg.timeline_opaque, src);
-    uint64_t *dlun = m->cfg.timeline->lun_avail(m->cfg.timeline_opaque, dst);
-    uint64_t *dpl  = m->cfg.timeline->plane_avail(m->cfg.timeline_opaque, dst);
     uint64_t s;
 
-    /* on-chip read then program; no bus phases (copyback_skips_bus) */
-    s = mx(*slun, *spl) + array_lat(m, src, NAND_MEDIA_READ);
-    *slun = s; *spl = s;
-    s = mx(s, mx(*dlun, *dpl)) + array_lat(m, dst, NAND_MEDIA_PROGRAM);
-    *dlun = s; *dpl = s;
+    /*
+     * On-chip read then program; no bus phases. Gated like
+     * every other op here: an operation cannot begin before it was requested,
+     * and it goes through the configured gate rather than the accumulators
+     * directly, so a LUN-only caller's unset plane_avail is never read.
+     */
+    s = array_gate_start(m, src, stime) + array_lat(m, src, NAND_MEDIA_READ);
+    array_commit(m, src, s);
+    s = array_gate_start(m, dst, s) + array_lat(m, dst, NAND_MEDIA_PROGRAM);
+    array_commit(m, dst, s);
 
     c.done_ns = s;
     c.latency_ns = 0; /* GC-internal; host effect is via freed channel + LUN busy */

@@ -25,7 +25,6 @@ static void oc12_tbl_initialize(NvmeNamespace *ns)
 
 static uint64_t ppa2secidx(Oc12Ctrl *ln, uint64_t ppa)
 {
-    Oc12IdGroup *c = &ln->id_ctrl.groups[0];
     uint64_t ch, lun, pln, blk, pg, sec;
     uint64_t r;
 
@@ -36,14 +35,23 @@ static uint64_t ppa2secidx(Oc12Ctrl *ln, uint64_t ppa)
     pg  = PPA_PG(ln, ppa);
     sec = PPA_SEC(ln, ppa);
 
+    /*
+     * Flatten the address, sector fastest, then plane, page, block, lun and
+     * channel. The strides for that are worked out once at start-up and kept
+     * in params; this multiplied each axis by its own count instead, which is
+     * not a stride at all and is not even injective -- with three channels
+     * and four sectors to a page, channel 1 sector 0 and channel 0 sector 3
+     * both come to 3, so metadata stored against one sector reads back
+     * against another.
+     */
     r  = sec;
-    r += ch * c->num_ch;
-    r += lun * c->num_lun;
-    r += pln * c->num_pln;
-    r += blk * c->num_blk;
-    r += pg * c->num_pg;
+    r += pln * ln->params.pl_units;
+    r += pg  * ln->params.pg_units;
+    r += blk * ln->params.blk_units;
+    r += lun * ln->params.lun_units;
+    r += ch  * ln->params.ch_units;
 
-    if (r > ln->params.total_units) {
+    if (r >= ln->params.total_units) {
         femu_err("Out-of-range PPA detected!"
                  "ch:%lu,lun:%lu,blk:%lu,pg:%lu,pl:%lu,sec:%lu\n", ch, lun, blk,
                  pg, pln, sec);
@@ -68,15 +76,57 @@ static void pr_ppa(Oc12Ctrl *ln, uint64_t ppa)
 }
 #endif
 
- /* Write a single out-of-bound (OOB) area entry */
-static int oc12_write_oob_meta(Oc12Ctrl *ln, uint64_t ppa, void *meta)
+/*
+ * Is every axis of this address inside the geometry the device reported? The
+ * only check on a host-supplied address was a comparison of the whole packed
+ * value against the sector count, which says nothing about the individual
+ * fields: a geometry whose axis counts are not powers of two leaves values
+ * that are representable and out of range, and those reached the timing
+ * model's per-chip array and the metadata buffer.
+ */
+static bool oc12_ppa_in_geometry(Oc12Ctrl *ln, uint64_t ppa)
+{
+    Oc12IdGroup *c = &ln->id_ctrl.groups[0];
+
+    return PPA_CH(ln, ppa)  < c->num_ch &&
+           PPA_LUN(ln, ppa) < c->num_lun &&
+           PPA_PLN(ln, ppa) < c->num_pln &&
+           PPA_BLK(ln, ppa) < c->num_blk &&
+           PPA_PG(ln, ppa)  < c->num_pg &&
+           PPA_SEC(ln, ppa) < ln->params.sec_per_pg;
+}
+
+/*
+ * ppa2secidx() hands back ~0 for an address outside the geometry. Multiplying
+ * that by the entry size wraps to an offset far past the metadata buffer, and
+ * these used to assert on it: a host could kill the process with one badly
+ * formed address, and with assertions compiled out it would have been a write
+ * at a wild offset instead. Refuse the access and leave the metadata alone;
+ * the data side of the same command is caught by the backend's own range
+ * check.
+ */
+static bool oc12_meta_offset(Oc12Ctrl *ln, uint64_t ppa, uint64_t extra,
+                             uint64_t len, uint64_t *oft)
 {
     uint64_t sec_idx = ppa2secidx(ln, ppa);
-    uint64_t oft = sec_idx * ln->meta_len + ln->int_meta_size;
-    uint8_t *tgt_sos_meta_buf = &ln->meta_buf[oft];
 
-    assert(oft + ln->params.sos < ln->meta_tbytes);
-    memcpy(tgt_sos_meta_buf, meta, ln->params.sos);
+    if (sec_idx == ~(0ULL) || sec_idx > ln->meta_tbytes / ln->meta_len) {
+        return false;
+    }
+    *oft = sec_idx * ln->meta_len + extra;
+
+    return *oft <= ln->meta_tbytes && len <= ln->meta_tbytes - *oft;
+}
+
+/* Write a single out-of-bound (OOB) area entry */
+static int oc12_write_oob_meta(Oc12Ctrl *ln, uint64_t ppa, void *meta)
+{
+    uint64_t oft;
+
+    if (!oc12_meta_offset(ln, ppa, ln->int_meta_size, ln->params.sos, &oft)) {
+        return 1;
+    }
+    memcpy(&ln->meta_buf[oft], meta, ln->params.sos);
 
     return 0;
 }
@@ -84,25 +134,25 @@ static int oc12_write_oob_meta(Oc12Ctrl *ln, uint64_t ppa, void *meta)
 /* Read a single out-of-bound (OOB) area entry */
 static int oc12_read_oob_meta(Oc12Ctrl *ln, uint64_t ppa, void *meta)
 {
-    uint64_t sec_idx = ppa2secidx(ln, ppa);
-    uint64_t oft = sec_idx * ln->meta_len + ln->int_meta_size;
-    uint8_t *tgt_sos_meta_buf = &ln->meta_buf[oft];
+    uint64_t oft;
 
-    assert(oft + ln->params.sos < ln->meta_tbytes);
-    memcpy(meta, tgt_sos_meta_buf, ln->params.sos);
+    if (!oc12_meta_offset(ln, ppa, ln->int_meta_size, ln->params.sos, &oft)) {
+        return 1;
+    }
+    memcpy(meta, &ln->meta_buf[oft], ln->params.sos);
 
     return 0;
 }
 
 static int oc12_meta_state_get(Oc12Ctrl *ln, uint64_t ppa, uint32_t *state)
 {
-    uint64_t sec_idx = ppa2secidx(ln, ppa);
-    uint64_t oft = sec_idx * ln->meta_len;
-    uint8_t *tgt_sec_meta_buf = &ln->meta_buf[oft];
+    uint64_t oft;
 
-    assert(oft + ln->meta_len < ln->meta_tbytes);
+    if (!oc12_meta_offset(ln, ppa, 0, ln->meta_len, &oft)) {
+        return 1;
+    }
     /* Only need the internal oob area */
-    memcpy(state, tgt_sec_meta_buf, ln->int_meta_size);
+    memcpy(state, &ln->meta_buf[oft], ln->int_meta_size);
 
     return 0;
 }
@@ -203,8 +253,11 @@ static int oc12_meta_blk_set_erased(NvmeNamespace *ns, Oc12Ctrl *ln,
                     ppa_sec |= sec << ln->ppaf.sec_offset;
 
                     //pr_ppa(ln, ppa_sec);
-                    off = ppa2secidx(ln, ppa_sec);
-                    memcpy(&ln->meta_buf[off * ln->meta_len], &state, ln->int_meta_size);
+                    if (!oc12_meta_offset(ln, ppa_sec, 0, ln->meta_len,
+                                          &off)) {
+                        continue;
+                    }
+                    memcpy(&ln->meta_buf[off], &state, ln->int_meta_size);
                 }
             }
         }
@@ -216,13 +269,15 @@ static int oc12_meta_blk_set_erased(NvmeNamespace *ns, Oc12Ctrl *ln,
 /* Internal metadata to track NAND program/erase status */
 static int oc12_meta_state_set_written(Oc12Ctrl *ln, uint64_t ppa)
 {
-    /* The n-th sector in the flat addr space */
-    uint64_t sec_idx = ppa2secidx(ln, ppa);
-    uint64_t oft = sec_idx * ln->meta_len;
     uint32_t new_state = OC12_SEC_WRITTEN;
-    uint8_t *tgt_sec_meta_buf = &ln->meta_buf[oft];
+    uint8_t *tgt_sec_meta_buf;
+    uint64_t oft;
 
-    assert(oft + ln->meta_len < ln->meta_tbytes);
+    if (!oc12_meta_offset(ln, ppa, 0, ln->meta_len, &oft)) {
+        return 1;
+    }
+    tgt_sec_meta_buf = &ln->meta_buf[oft];
+
     /* Make sure it was not already written */
 #if 0
     uint32_t cur_state = ((uint32_t *)tgt_sec_meta_buf)[0];
@@ -274,7 +329,8 @@ static uint16_t oc12_rw_check_req(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
 
     for (i = 0; i < nr_pages; i++) {
-        if (psl[i] > le64_to_cpu(ns->id_ns.nsze)) {
+        if (psl[i] > le64_to_cpu(ns->id_ns.nsze) ||
+            !oc12_ppa_in_geometry(ln, psl[i])) {
             return NVME_LBA_RANGE | NVME_DNR;
         }
     }
@@ -364,14 +420,32 @@ static int oc12_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t ppa;
     int i;
 
-    /* Erase */
+    /*
+     * Erase. The address list is the one the erase handler read from the
+     * command, the same way read and write pass theirs; this used to read
+     * req->slba, which erase never sets, so the chip it charged came from
+     * whatever the previous command on this request left behind -- a freed
+     * list pointer, whose address bits are not a chip of this device. Every
+     * block in the list is erased, so every chip it names is busy, not just
+     * the first.
+     */
     if (opcode == OC12_CMD_ERASE) {
-        ppa = req->slba;
-        lun = PPA_LUN(ln, ppa);
-        ch = PPA_CH(ln, ppa);
-        lunid = ch * c->num_ch + lun;
+        uint32_t nlb = le16_to_cpu(ocrw->nlb) + 1;
 
-        req->expire_time = advance_chip_timestamp(n, lunid, now, opcode, 0);
+        for (i = 0; i < nlb; i++) {
+            int64_t ts;
+
+            ppa = ((uint64_t *)req->slba)[i];
+            lun = PPA_LUN(ln, ppa);
+            ch = PPA_CH(ln, ppa);
+            lunid = ch * c->num_lun + lun;
+
+            ts = advance_chip_timestamp(n, lunid, now, opcode, 0);
+            if (ts > req->expire_time) {
+                req->expire_time = ts;
+            }
+        }
+
         return 0;
     }
 
@@ -426,21 +500,33 @@ static uint16_t oc12_read(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 {
     Oc12Ctrl *ln = n->oc12_ctrl;
     Oc12RwCmd *ocrw = (Oc12RwCmd *)cmd;
-    uint16_t nlb  = le16_to_cpu(ocrw->nlb) + 1;     /* # of logical blocks */
+    uint32_t nlb  = le16_to_cpu(ocrw->nlb) + 1;     /* # of logical blocks */
     uint64_t prp1 = le64_to_cpu(ocrw->prp1);        /* PRP1 */
     uint64_t prp2 = le64_to_cpu(ocrw->prp2);        /* PRP2 */
     uint64_t meta = le64_to_cpu(ocrw->metadata);    /* OOB */
     const uint8_t lbaid = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
     const uint8_t lbads = NVME_ID_NS_LBAF_DS(ns, lbaid);
     const uint16_t ms = NVME_ID_NS_LBAF_MS(ns, lbaid);
-    uint64_t data_size = nlb << lbads;
-    uint64_t meta_size = nlb * ms;
+    uint64_t data_size = (uint64_t)nlb << lbads;
+    uint64_t meta_size = (uint64_t)nlb * ms;
     uint64_t *psl;
     uint64_t ppa;
     void *msl;
     uint16_t err;
     int i;
 
+
+    /*
+     * The count is 0's based and reaches 65536, which did not fit the 16 bit
+     * variable it was kept in: at the top of the range it wrapped to zero, the
+     * list below was allocated empty, and the helper that fills it -- which
+     * computes the same count in 32 bits -- wrote half a megabyte into it.
+     * The device would refuse a request this size anyway, but only after the
+     * list had been filled, so refuse it here instead.
+     */
+    if (nlb > ln->params.max_sec_per_rq) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
     req->is_write = false;
     req->slba = (uint64_t)g_malloc0(sizeof(uint64_t) * nlb);
     /* To save some ugly type casts later */
@@ -479,6 +565,22 @@ static uint16_t oc12_read(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         err = NVME_INVALID_FIELD | NVME_DNR;
         goto fail_free;
     }
+
+    /*
+     * The offset list holds one entry per address, and the backend walks it
+     * one entry per scatter-gather entry. Those agree only while each entry
+     * covers exactly one sector, which a data pointer that is not page
+     * aligned breaks: the first entry is then a part page and the mapping
+     * produces one entry more than there are addresses, so the backend reads
+     * past the end of the list -- and pairs every address with the wrong
+     * piece of the transfer besides.
+     */
+    if (req->qsg.nsg != nlb) {
+        femu_err("%s: %d data segments for %u addresses\n", __func__,
+                 req->qsg.nsg, nlb);
+        err = NVME_INVALID_FIELD | NVME_DNR;
+        goto fail_free;
+    }
     /* an address the backing store does not cover must fail, not succeed */
     if (backend_rw(n->mbe, &req->qsg, psl, req->is_write)) {
         err = NVME_LBA_RANGE | NVME_DNR;
@@ -490,12 +592,14 @@ static uint16_t oc12_read(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     g_free(msl);
     g_free((void *)req->slba);
+    req->slba = 0;
 
     return NVME_SUCCESS;
 
 fail_free:
     g_free(msl);
     g_free((void *)req->slba);
+    req->slba = 0;
 
     return err;
 }
@@ -505,21 +609,33 @@ static uint16_t oc12_write(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 {
     Oc12Ctrl *ln = n->oc12_ctrl;
     Oc12RwCmd *ocrw = (Oc12RwCmd *)cmd;
-    uint16_t nlb  = le16_to_cpu(ocrw->nlb) + 1;     /* # of logical blocks */
+    uint32_t nlb  = le16_to_cpu(ocrw->nlb) + 1;     /* # of logical blocks */
     uint64_t prp1 = le64_to_cpu(ocrw->prp1);        /* PRP1 */
     uint64_t prp2 = le64_to_cpu(ocrw->prp2);        /* PRP2 */
     uint64_t meta = le64_to_cpu(ocrw->metadata);    /* OOB */
     const uint8_t lbaid = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
     const uint8_t lbads = NVME_ID_NS_LBAF_DS(ns, lbaid);
     const uint16_t ms = NVME_ID_NS_LBAF_MS(ns, lbaid);
-    uint64_t data_size = nlb << lbads;
-    uint64_t meta_size = nlb * ms;
+    uint64_t data_size = (uint64_t)nlb << lbads;
+    uint64_t meta_size = (uint64_t)nlb * ms;
     uint64_t *psl;
     uint64_t ppa;
     void *msl;
     uint16_t err;
     int i;
 
+
+    /*
+     * The count is 0's based and reaches 65536, which did not fit the 16 bit
+     * variable it was kept in: at the top of the range it wrapped to zero, the
+     * list below was allocated empty, and the helper that fills it -- which
+     * computes the same count in 32 bits -- wrote half a megabyte into it.
+     * The device would refuse a request this size anyway, but only after the
+     * list had been filled, so refuse it here instead.
+     */
+    if (nlb > ln->params.max_sec_per_rq) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
     req->is_write = true;
     req->slba = (uint64_t)g_malloc0(sizeof(uint64_t) * nlb);
     psl = (uint64_t *)req->slba;
@@ -562,6 +678,22 @@ static uint16_t oc12_write(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         err = NVME_INVALID_FIELD | NVME_DNR;
         goto fail_free;
     }
+
+    /*
+     * The offset list holds one entry per address, and the backend walks it
+     * one entry per scatter-gather entry. Those agree only while each entry
+     * covers exactly one sector, which a data pointer that is not page
+     * aligned breaks: the first entry is then a part page and the mapping
+     * produces one entry more than there are addresses, so the backend reads
+     * past the end of the list -- and pairs every address with the wrong
+     * piece of the transfer besides.
+     */
+    if (req->qsg.nsg != nlb) {
+        femu_err("%s: %d data segments for %u addresses\n", __func__,
+                 req->qsg.nsg, nlb);
+        err = NVME_INVALID_FIELD | NVME_DNR;
+        goto fail_free;
+    }
     /* an address the backing store does not cover must fail, not succeed */
     if (backend_rw(n->mbe, &req->qsg, psl, req->is_write)) {
         err = NVME_LBA_RANGE | NVME_DNR;
@@ -573,12 +705,14 @@ static uint16_t oc12_write(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     g_free(msl);
     g_free((void *)req->slba);
+    req->slba = 0;
 
     return NVME_SUCCESS;
 
 fail_free:
     g_free(msl);
     g_free((void *)req->slba);
+    req->slba = 0;
 
     return err;
 }
@@ -654,6 +788,15 @@ static uint16_t oc12_bbt_get(FemuCtrl *n, NvmeCmd *cmd)
     }
 
     ns = &n->namespaces[nsid - 1];
+    /*
+     * The table is one entry per lun, and the lun comes out of the address the
+     * host supplied. Nothing checked it, so an address outside the geometry
+     * read a pointer from past the end of that array and then transferred
+     * whatever it pointed at back to the host.
+     */
+    if (!oc12_ppa_in_geometry(ln, ppa)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
     ch = (ppa & ln->ppaf.ch_mask) >> ln->ppaf.ch_offset;
     lun = (ppa & ln->ppaf.lun_mask) >> ln->ppaf.lun_offset;
     lunid = ch * c->num_lun + lun;
@@ -690,7 +833,16 @@ static uint16_t oc12_bbt_set(FemuCtrl *n, NvmeCmd *cmd)
 
     ns = &n->namespaces[nsid - 1];
 
+    /*
+     * Both indexes below come from the address the host supplied, and neither
+     * was checked: an address outside the geometry picked a pointer from past
+     * the end of the per-lun table and then wrote the host's byte through it.
+     */
     if (nlb == 1) {
+        if (!oc12_ppa_in_geometry(ln, spba)) {
+            g_free(ppas);
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
         ppas[0] = spba;
         ch = (ppas[0] & ln->ppaf.ch_mask) >> ln->ppaf.ch_offset;
         lun = (ppas[0] & ln->ppaf.lun_mask) >> ln->ppaf.lun_offset;
@@ -699,12 +851,21 @@ static uint16_t oc12_bbt_set(FemuCtrl *n, NvmeCmd *cmd)
         ns->bbtbl[lunid]->blk[blk] = value;
 
     } else {
+        /* same short list as the erase path above */
+        if (nlb > ln->params.max_sec_per_rq) {
+            g_free(ppas);
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
         if (dma_write_prp(n, (uint8_t *)ppas, nlb * 8, spba, prp2)) {
             g_free(ppas);
             return NVME_INVALID_FIELD | NVME_DNR;
         }
 
         for (i = 0; i < nlb; i++) {
+            if (!oc12_ppa_in_geometry(ln, ppas[i])) {
+                g_free(ppas);
+                return NVME_INVALID_FIELD | NVME_DNR;
+            }
             ch = (ppas[i] & ln->ppaf.ch_mask) >> ln->ppaf.ch_offset;
             lun = (ppas[i] & ln->ppaf.lun_mask) >> ln->ppaf.lun_offset;
             blk = (ppas[i] & ln->ppaf.blk_mask) >> ln->ppaf.blk_offset;
@@ -755,13 +916,41 @@ static uint16_t oc12_erase_async(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     Oc12Ctrl *ln = n->oc12_ctrl;
     Oc12RwCmd *dm = (Oc12RwCmd *)cmd;
     uint32_t nlb = le16_to_cpu(dm->nlb) + 1;
-    uint64_t *psl = g_malloc0(sizeof(uint64_t) * ln->params.max_sec_per_rq);
+    uint64_t *psl;
+    uint32_t i;
+
+    /*
+     * The list below holds max_sec_per_rq entries while nlb comes from the
+     * command and reaches 65536. Read and write size their own list by nlb;
+     * this path does not, so refuse a request larger than the list.
+     */
+    if (nlb > ln->params.max_sec_per_rq) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    psl = g_malloc0(sizeof(uint64_t) * ln->params.max_sec_per_rq);
 
     oc12_read_ppa_list(n, dm, psl);
 
+    /*
+     * Read and write check every address against the geometry; erase never
+     * did, and the timing model turns the channel and lun fields into an
+     * index into its per-chip array. A geometry whose axis counts are not
+     * powers of two leaves those fields holding values the device does not
+     * have, and the product of the two maxima can exceed the array.
+     */
+    for (i = 0; i < nlb; i++) {
+        if (!oc12_ppa_in_geometry(ln, psl[i])) {
+            g_free(psl);
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+    }
+
     oc12_meta_blk_set_erased(ns, ln, psl, nlb);
 
+    req->slba = (uint64_t)psl;
     oc12_advance_status(n, ns, cmd, req);
+    req->slba = 0;
 
     g_free(psl);
     return NVME_SUCCESS;
@@ -902,7 +1091,7 @@ static int oc12_init_params(FemuCtrl *n)
     return 0;
 }
 
-static int oc12_init_more(FemuCtrl *n)
+static int oc12_init_more(FemuCtrl *n, Error **errp)
 {
     Oc12Ctrl *ln;
     Oc12IdGroup *c;
@@ -910,6 +1099,7 @@ static int oc12_init_more(FemuCtrl *n)
     struct Oc12IdAddrFormat *ppaf;
     Oc12Params *lps;
     uint64_t chnl_blks;
+    uint64_t blks_per_lun;
     int ret = 0;
     int i;
 
@@ -919,11 +1109,22 @@ static int oc12_init_more(FemuCtrl *n)
 
     oc12_init_params(n);
 
-    if (lps->mtype != 0)
-        femu_err("FEMU: Only NAND Flash Memory supported at the moment\n");
-
-    if ((lps->num_pln > 4) || (lps->num_pln == 3))
-        femu_err("FEMU: Only 1/2/4-plane modes supported\n");
+    /*
+     * These used to print and carry on, and the failures further down returned
+     * an error nobody looked at, so the device realized with an address format
+     * of all zeroes and no bad block table. Every address then decoded to the
+     * first sector and the first bad block table command dereferenced a null
+     * pointer. Refuse the device instead.
+     */
+    if (lps->mtype != 0) {
+        error_setg(errp, "FEMU ocssd: only NAND flash memory is supported");
+        return -1;
+    }
+    if (lps->num_pln > 4 || lps->num_pln == 3) {
+        error_setg(errp, "FEMU ocssd: lnum_pln must be 1, 2 or 4, got %d",
+                   lps->num_pln);
+        return -1;
+    }
 
     oc12_init_misc(n);
 
@@ -944,9 +1145,20 @@ static int oc12_init_more(FemuCtrl *n)
         c->num_lun = lps->num_lun;
         c->num_pln = lps->num_pln;
 
-        assert(c->num_ch <= FEMU_MAX_NUM_CHNLS && c->num_lun <= FEMU_MAX_NUM_CHIPS);
-
-        c->num_blk = cpu_to_le16(chnl_blks) / (c->num_lun * c->num_pln);
+        /*
+         * The count is reported in a 16 bit field, so it has to fit in one:
+         * passing a 64 bit value through the byte swap before dividing silently
+         * described a fraction of the media on a large device, and gave the
+         * wrong answer on a big-endian host for any size.
+         */
+        blks_per_lun = chnl_blks / ((uint64_t)c->num_lun * c->num_pln);
+        if (!blks_per_lun || blks_per_lun > UINT16_MAX) {
+            error_setg(errp, "FEMU ocssd: the geometry gives %" PRIu64
+                       " blocks per lun; it must be in [1, %u]",
+                       blks_per_lun, UINT16_MAX);
+            return -1;
+        }
+        c->num_blk = cpu_to_le16((uint16_t)blks_per_lun);
         c->num_pg = cpu_to_le16(lps->pgs_per_blk);
         c->csecs = cpu_to_le16(lps->sec_size);
         c->fpg_sz = cpu_to_le16(lps->sec_size * lps->sec_per_pg);
@@ -975,15 +1187,18 @@ static int oc12_init_more(FemuCtrl *n)
             c->mpos = cpu_to_le32(0x40404); /* quad plane */
             break;
         default:
-            femu_err("Unsupported NAND plane type (%d)\n", c->num_pln);
-            return -EINVAL;
+            error_setg(errp, "FEMU ocssd: unsupported NAND plane count %d",
+                       c->num_pln);
+            return -1;
         }
 
         c->cpar = cpu_to_le16(0);
         c->mccap = 1;
         ret = oc12_init_bbtbl(n, ns);
-        if (ret)
+        if (ret) {
+            error_setg(errp, "FEMU ocssd: could not build the bad block table");
             return ret;
+        }
 
         /* calculated values */
         lps->sec_per_pl = lps->sec_per_pg * c->num_pln;
@@ -1029,7 +1244,7 @@ static int oc12_init_more(FemuCtrl *n)
 
         ns->tbl_entries = ns->ns_blks;
         if (ns->tbl) {
-            g_free(ns->tbl);
+            qemu_vfree(ns->tbl);
         }
         ns->tbl = qemu_memalign(4096, oc12_tbl_size(ns));
         oc12_tbl_initialize(ns);
@@ -1039,13 +1254,13 @@ static int oc12_init_more(FemuCtrl *n)
 
     ret = oc12_init_meta(ln);
     if (ret) {
-        femu_err("oc12_init_meta failed\n");
+        error_setg(errp, "FEMU ocssd: could not build the metadata area");
         return ret;
     }
 
     ret = (n->oc12_ctrl->read_l2p_tbl) ? oc12_read_tbls(n) : 0;
     if (ret) {
-        femu_err("read_l2p_tbl failed\n");
+        error_setg(errp, "FEMU ocssd: could not read the translation tables");
         return ret;
     }
 
@@ -1054,7 +1269,38 @@ static int oc12_init_more(FemuCtrl *n)
 
 static void oc12_exit(FemuCtrl *n)
 {
+    Oc12Ctrl *ln = n->oc12_ctrl;
+    int i;
+
     oc12_release_locks(n);
+
+    /*
+     * Everything the setup allocated: the per-lun bad block tables, the
+     * translation table of each namespace and the metadata area. None of it was
+     * released, so each add and remove of the device cost tens of megabytes.
+     */
+    for (i = 0; ln && n->namespaces && i < n->num_namespaces; i++) {
+        NvmeNamespace *ns = &n->namespaces[i];
+        Oc12IdGroup *c = &ln->id_ctrl.groups[0];
+        int nr_luns = c->num_ch * c->num_lun;
+        int j;
+
+        for (j = 0; ns->bbtbl && j < nr_luns; j++) {
+            g_free(ns->bbtbl[j]);
+        }
+        g_free(ns->bbtbl);
+        ns->bbtbl = NULL;
+        qemu_vfree(ns->tbl);
+        ns->tbl = NULL;
+        ns->tbl_entries = 0;
+    }
+
+    if (ln) {
+        g_free(ln->meta_buf);
+        ln->meta_buf = NULL;
+    }
+    g_free(n->oc12_ctrl);
+    n->oc12_ctrl = NULL;
 }
 
 static uint16_t oc12_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
@@ -1097,6 +1343,10 @@ static void oc12_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 
     int i;
 
+    if (!oc_timing_geometry_ok(n, errp)) {
+        return;
+    }
+
     NVME_CAP_SET_OC(n->bar.cap, 1);
     oc12_set_ctrl_str(n);
 
@@ -1106,7 +1356,9 @@ static void oc12_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         id_ns->vs[0] = 0x1;
     }
 
-    oc12_init_more(n);
+    if (oc12_init_more(n, errp)) {
+        return;
+    }
 }
 
 int nvme_register_ocssd12(FemuCtrl *n)

@@ -36,8 +36,15 @@ int femu_subsys_register_ctrl(FemuCtrl *n)
 
 void femu_subsys_unregister_ctrl(NvmeSubsystem *subsys, FemuCtrl *n)
 {
-    subsys->ctrls[n->cntlid] = NULL;
-    n->cntlid = -1;
+    /*
+     * Clear only the slot this controller actually holds. cntlid is unsigned,
+     * so the -1 this used to leave behind reads back as 65535, and a second
+     * call -- a controller that never registered, or one torn down twice --
+     * indexed past the array.
+     */
+    if (n->cntlid < NVME_MAX_CONTROLLERS && subsys->ctrls[n->cntlid] == n) {
+        subsys->ctrls[n->cntlid] = NULL;
+    }
 }
 
 static bool nvme_calc_rgif(uint16_t nruh, uint16_t nrg, uint8_t *rgif)
@@ -79,6 +86,21 @@ static bool nvme_subsys_setup_fdp(NvmeSubsystem *subsys, Error **errp)
     endgrp->fdp.runs = subsys->params.fdp.runs;
     endgrp->fdp.nru = subsys->params.fdp.nru;
 
+    /*
+     * One active reclaim unit per placement handle, not one per handle and
+     * reclaim group. A write that names a group other than the first is given
+     * the first group's unit anyway -- the assignment that reads the named
+     * group is overwritten on the next line -- and that unit is then filed in
+     * the named group's queue, where its recorded position indexes a heap it
+     * does not belong to. The check that would have caught it is an ftl_assert,
+     * which is compiled out. Until the model holds a unit per handle and group,
+     * say so rather than corrupt the queues quietly.
+     */
+    if (subsys->params.fdp.nrg > 1) {
+        error_setg(errp, "fdp.nrg must be 1: placement into a reclaim group "
+                   "other than the first is not implemented");
+        return false;
+    }
     if (!subsys->params.fdp.nrg) {
         error_setg(errp, "fdp.nrg must be non-zero");
         return false;
@@ -199,6 +221,43 @@ static const TypeInfo nvme_subsys_info = {
 
 /* ========== FDP Namespace Init ========== */
 
+/*
+ * Reclaim units are measured in logical blocks, so a format that changes the
+ * block size changes how many of them a unit holds. Recompute the sizes the
+ * placement handles were given at init; leaving them makes a unit look eight
+ * times smaller than it is after a 4 KiB namespace is reformatted to 512
+ * bytes, and the write that crosses it rotates a unit early ever after.
+ *
+ * A format ends the life of the data, so the remaining-write counters go back
+ * to a full unit along with the sizes.
+ */
+void nvme_ns_refresh_fdp(NvmeNamespace *ns)
+{
+    NvmeEnduranceGroup *endgrp = ns->endgrp;
+    uint8_t lbafi = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
+    NvmeRuHandle *ruh;
+
+    if (!endgrp || !endgrp->fdp.enabled || !ns->fdp.phs) {
+        return;
+    }
+
+    for (uint16_t i = 0; i < ns->fdp.nphs; i++) {
+        ruh = &endgrp->fdp.ruhs[i];
+        if (ruh->ruha != NVME_RUHA_HOST) {
+            continue;
+        }
+
+        ruh->lbafi = lbafi;
+        ruh->ruamw = endgrp->fdp.runs >> ns->lbaf.lbads;
+
+        for (uint16_t rg = 0; rg < endgrp->fdp.nrg; rg++) {
+            for (uint64_t j = 0; j < endgrp->fdp.nru; j++) {
+                endgrp->fdp.rus[rg][j].ruamw = ruh->ruamw;
+            }
+        }
+    }
+}
+
 static bool nvme_ns_init_fdp(NvmeNamespace *ns, Error **errp)
 {
     NvmeEnduranceGroup *endgrp = ns->endgrp;
@@ -271,8 +330,18 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
     NvmeAsyncEvent *event;
     int i;
 
-    /* Coperd: pause nvme poller at earliest convenience */
-    n->dataplane_started = false;
+    /*
+     * Stop the dataplane before anything below runs. Waiting for the pollers
+     * alone is not enough: the FTL thread holds a request for the whole of its
+     * media-latency calculation, and requests sit in each poller's pending
+     * list, so the request arrays freed further down stay reachable from both.
+     *
+     * nvme_pause_pollers() clears dataplane_started itself and then waits for
+     * both to go quiet. Clearing the flag here first made it return at its own
+     * first line without waiting for anything, which is what this call was
+     * added to do.
+     */
+    nvme_pause_pollers(n);
 
     /*
      * Drop every Async Event Request the controller was holding, along with any
@@ -281,40 +350,16 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
      * reclaimed -- which the driver takes as a completion for a request it no
      * longer owns.
      */
+    qemu_mutex_lock(&n->aer_lock);
     while ((event = QSIMPLEQ_FIRST(&n->aer_queue)) != NULL) {
         QSIMPLEQ_REMOVE_HEAD(&n->aer_queue, entry);
         g_free(event);
     }
     n->aer_queued = 0;
+    qemu_mutex_unlock(&n->aer_lock);
     n->aer_mask = 0;
     n->outstanding_aers = 0;
     n->temp_warn_issued = 0;
-
-    /*
-     * Quiesce the pollers before freeing queues / unmapping the dbbuf shadow
-     * regions below. Without this, a poller mid-sweep can write a freed
-     * eventidx_addr_hva (use-after-free segfault on guest reboot / controller
-     * reset). Pair with the Dekker-style handshake in nvme_poller():
-     * dataplane_started is now false + barrier, so any poller will observe it
-     * and clear its in_sweep flag; wait here until all are idle.
-     */
-    smp_mb();
-    if (n->poller_on && n->poller_in_sweep) {
-        int p;
-        bool busy;
-        do {
-            busy = false;
-            for (p = 1; p <= (int)n->nr_pollers; p++) {
-                if (n->poller_in_sweep[p]) {
-                    busy = true;
-                    break;
-                }
-            }
-            if (busy) {
-                usleep(100);
-            }
-        } while (busy);
-    }
 
     if (shutdown) {
         femu_debug("shutting down NVMe Controller ...\n");
@@ -329,6 +374,7 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
 
     for (i = 0; i <= n->nr_io_queues; i++) {
         if (n->sq[i] != NULL) {
+            nvme_drain_sq(n, n->sq[i]);
             nvme_free_sq(n->sq[i], n);
         }
     }
@@ -341,10 +387,67 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
     n->bar.cc = 0;
     n->features.temp_thresh = 0x14d;
     n->temp_warn_issued = 0;
+    /*
+     * Release the doorbell buffers as well as forgetting them: each enable and
+     * configure took a mapping reference that only the device going away gave
+     * back, so a guest that resets repeatedly kept one reference per cycle.
+     */
+    if (n->dbs_addr_hva) {
+        AddressSpace *as = pci_get_address_space(&n->parent_obj);
+
+        dma_memory_unmap(as, (void *)n->dbs_addr_hva, n->dbbuf_map_len,
+                         DMA_DIRECTION_FROM_DEVICE, 0);
+        dma_memory_unmap(as, (void *)n->eis_addr_hva, n->dbbuf_map_len,
+                         DMA_DIRECTION_FROM_DEVICE, 0);
+    }
     n->dbs_addr = 0;
     n->dbs_addr_hva = 0;
     n->eis_addr = 0;
     n->eis_addr_hva = 0;
+    n->dbbuf_map_len = 0;
+}
+
+/*
+ * Every distinct mode the controller serves gets a say in whether it can run
+ * with the settings the host has chosen, and derives from them what it needs.
+ * Only the controller's own hook was called, so a namespace whose mode differs
+ * from the controller's never ran: a zoned namespace on a controller in any
+ * other mode came ready with a zero append limit, which rejects every append
+ * larger than one host page while Identify reports no limit at all, and without
+ * the memory-page size it refuses.
+ */
+static int femu_start_ctrl_extensions(FemuCtrl *n)
+{
+    int (*seen[FEMU_NR_MODES])(struct FemuCtrl *);
+    int nseen = 0, i, j;
+
+    if (n->ext_ops.start_ctrl) {
+        seen[nseen++] = n->ext_ops.start_ctrl;
+    }
+
+    for (i = 0; n->namespaces && i < n->num_namespaces; i++) {
+        int (*sc)(struct FemuCtrl *) = n->namespaces[i].ext_ops.start_ctrl;
+
+        if (!sc) {
+            continue;
+        }
+        for (j = 0; j < nseen; j++) {
+            if (seen[j] == sc) {
+                break;
+            }
+        }
+        if (j == nseen && nseen < (int)ARRAY_SIZE(seen)) {
+            seen[nseen++] = sc;
+        }
+    }
+
+    for (j = 0; j < nseen; j++) {
+        if (seen[j](n)) {
+            return -1;
+        }
+    }
+
+    return 0;
 }
 
 static int nvme_start_ctrl(FemuCtrl *n)
@@ -371,15 +474,33 @@ static int nvme_start_ctrl(FemuCtrl *n)
     n->cqe_size = 1 << NVME_CC_IOCQES(n->bar.cc);
     n->sqe_size = 1 << NVME_CC_IOSQES(n->bar.cc);
 
-    nvme_init_cq(&n->admin_cq, n, n->bar.acq, 0, 0, NVME_AQA_ACQS(n->bar.aqa) +
-                 1, 1, 1);
-    nvme_init_sq(&n->admin_sq, n, n->bar.asq, 0, 0, NVME_AQA_ASQS(n->bar.aqa) +
-                 1, NVME_Q_PRIO_HIGH, 1);
-
-    /* Currently only used by FEMU ZNS extension */
-    if (n->ext_ops.start_ctrl) {
-        n->ext_ops.start_ctrl(n);
+    /*
+     * Either admin queue can fail to come up: the host chooses both addresses
+     * and both sizes, and a ring that cannot be mapped whole is refused. The
+     * results were discarded, so a completion queue that failed left the
+     * submission queue asserting on it, and a submission queue that failed let
+     * the controller report itself ready with no queue to take commands.
+     */
+    if (nvme_init_cq(&n->admin_cq, n, n->bar.acq, 0, 0,
+                     NVME_AQA_ACQS(n->bar.aqa) + 1, 1, 1)) {
+        return -1;
     }
+    if (nvme_init_sq(&n->admin_sq, n, n->bar.asq, 0, 0,
+                     NVME_AQA_ASQS(n->bar.aqa) + 1, NVME_Q_PRIO_HIGH, 1)) {
+        nvme_free_cq(&n->admin_cq, n);
+        return -1;
+    }
+
+    /*
+     * A mode that cannot serve the settings the host has chosen says so here,
+     * and the controller must then not come ready. The result used to be
+     * discarded, so it started anyway.
+     */
+    if (femu_start_ctrl_extensions(n)) {
+        return -1;
+    }
+
+    nvme_start_dataplane(n);
 
     return 0;
 }
@@ -412,7 +533,15 @@ static void nvme_write_bar(FemuCtrl *n, hwaddr offset, uint64_t data, unsigned s
             }
         } else if (!NVME_CC_EN(data) && NVME_CC_EN(n->bar.cc)) {
             nvme_clear_ctrl(n, false);
-            n->bar.csts &= ~NVME_CSTS_READY;
+            /*
+             * A disable is a controller reset, which is what clears the fatal
+             * status. Left set, a controller that failed to start could not be
+             * recovered: the host's next enable is not a transition from
+             * disabled, so nothing recomputed the status and it read as failed
+             * for the life of the device.
+             */
+            n->bar.csts &= ~(NVME_CSTS_READY | NVME_CSTS_FAILED);
+            n->bar.cc = data;
         }
         if (NVME_CC_SHN(data) && !(NVME_CC_SHN(n->bar.cc))) {
             nvme_clear_ctrl(n, true);
@@ -455,6 +584,10 @@ static uint64_t nvme_mmio_read(void *opaque, hwaddr addr, unsigned size)
 
     return val;
 }
+
+static void femu_aer_bh(void *opaque);
+static void femu_exit_extensions(FemuCtrl *n);
+static void femu_free_namespace_bitmaps(FemuCtrl *n);
 
 static void nvme_process_db_admin(FemuCtrl *n, hwaddr addr, int val)
 {
@@ -502,10 +635,6 @@ static void nvme_process_db_io(FemuCtrl *n, hwaddr addr, int val)
     uint16_t new_val = val & 0xffff;
     NvmeSQueue *sq;
 
-    if (n->dataplane_started) {
-        return;
-    }
-
     if (addr & ((1 << (2 + n->db_stride)) - 1)) {
         return;
     }
@@ -520,13 +649,15 @@ static void nvme_process_db_io(FemuCtrl *n, hwaddr addr, int val)
         }
 
         cq = n->cq[qid];
+        /* a queue with a shadow doorbell is driven from the shadow instead */
+        if (cq->db_addr) {
+            return;
+        }
         if (new_val >= cq->size) {
             return;
         }
 
-        if (!cq->db_addr) {
-            cq->head = new_val;
-        }
+        cq->head = new_val;
 
         if (cq->tail != cq->head) {
             nvme_isr_notify_io(cq);
@@ -537,13 +668,14 @@ static void nvme_process_db_io(FemuCtrl *n, hwaddr addr, int val)
             return;
         }
         sq = n->sq[qid];
+        if (sq->db_addr) {
+            return;
+        }
         if (new_val >= sq->size) {
             return;
         }
 
-        if (!sq->db_addr) {
-            sq->tail = new_val;
-        }
+        sq->tail = new_val;
     }
 }
 
@@ -552,7 +684,7 @@ static void nvme_mmio_write(void *opaque, hwaddr addr, uint64_t data, unsigned s
     FemuCtrl *n = (FemuCtrl *)opaque;
     if (addr < sizeof(n->bar)) {
         nvme_write_bar(n, addr, data, size);
-    } else if (addr >= 0x1000 && addr < 0x1008) {
+    } else if (addr >= 0x1000 && addr < 0x1000 + 2 * (4 << n->db_stride)) {
         nvme_process_db_admin(n, addr, data);
     } else {
         nvme_process_db_io(n, addr, data);
@@ -596,35 +728,104 @@ static const MemoryRegionOps nvme_mmio_ops = {
     },
 };
 
-static int nvme_check_constraints(FemuCtrl *n)
+static bool nvme_check_constraints(FemuCtrl *n, Error **errp)
 {
-    if ((n->num_namespaces == 0 || n->num_namespaces > NVME_MAX_NUM_NAMESPACES)
-        || (n->nr_io_queues < 1 || n->nr_io_queues > NVME_MAX_QS) ||
-        (n->db_stride > NVME_MAX_STRIDE) ||
-        (n->max_q_ents < 1) ||
-        (n->max_sqes > NVME_MAX_QUEUE_ES || n->max_cqes > NVME_MAX_QUEUE_ES ||
-         n->max_sqes < NVME_MIN_SQUEUE_ES || n->max_cqes < NVME_MIN_CQUEUE_ES) ||
-        (n->vwc > 1 || n->intc > 1 || n->cqr > 1 || n->extended > 1) ||
-        (n->nlbaf > 16) ||
-        (n->lba_index >= n->nlbaf) ||
-        (n->meta && !n->mc) ||
-        (n->extended && !(NVME_ID_NS_MC_EXTENDED(n->mc))) ||
-        (!n->extended && n->meta && !(NVME_ID_NS_MC_SEPARATE(n->mc))) ||
-        (n->dps && n->meta < 8) ||
-        (n->dps && ((n->dps & DPS_FIRST_EIGHT) &&
-                    !NVME_ID_NS_DPC_FIRST_EIGHT(n->dpc))) ||
+    if (n->num_namespaces == 0 ||
+        n->num_namespaces > NVME_MAX_NUM_NAMESPACES) {
+        error_setg(errp, "namespaces must be in [1, %d]",
+                   NVME_MAX_NUM_NAMESPACES);
+        return false;
+    }
+    if (n->nr_io_queues < 1 || n->nr_io_queues > NVME_MAX_QS) {
+        error_setg(errp, "queues must be in [1, %d]", NVME_MAX_QS);
+        return false;
+    }
+    if (n->db_stride > NVME_MAX_STRIDE) {
+        error_setg(errp, "stride must not exceed %d", NVME_MAX_STRIDE);
+        return false;
+    }
+    if (n->max_q_ents < 1) {
+        error_setg(errp, "entries must be at least 1");
+        return false;
+    }
+    /*
+     * The controller memory buffer becomes a PCI base address register, which
+     * has to be a non-zero power of two, and the register field the size comes
+     * from is a count of units rather than a size. A cmbsz whose count field
+     * is zero or is not a power of two tripped an assertion inside
+     * pci_register_bar() and killed the process at realize.
+     */
+    if (n->cmbsz) {
+        uint64_t cmb_size = NVME_CMBSZ_GETSIZE(n->cmbsz);
+        uint8_t bir = NVME_CMBLOC_BIR(n->cmbloc);
+
+        if (!cmb_size || !is_power_of_2(cmb_size)) {
+            error_setg(errp, "cmbsz describes a %" PRIu64 " byte buffer; the "
+                       "size field (bits 31:12) times the unit (bits 11:8) "
+                       "must come to a non-zero power of two", cmb_size);
+            return false;
+        }
+        if (bir < 2 || bir > 5) {
+            error_setg(errp, "cmbloc selects base address register %u; the "
+                       "controller registers occupy 0 and 1, so it must be "
+                       "in [2, 5]", bir);
+            return false;
+        }
+    }
+    if (n->max_sqes > NVME_MAX_QUEUE_ES || n->max_cqes > NVME_MAX_QUEUE_ES ||
+        n->max_sqes < NVME_MIN_SQUEUE_ES || n->max_cqes < NVME_MIN_CQUEUE_ES) {
+        error_setg(errp, "max_sqes must be in [%d, %d] and max_cqes in [%d, %d]",
+                   NVME_MIN_SQUEUE_ES, NVME_MAX_QUEUE_ES,
+                   NVME_MIN_CQUEUE_ES, NVME_MAX_QUEUE_ES);
+        return false;
+    }
+    if (n->vwc > 1 || n->intc > 1 || n->cqr > 1 || n->extended > 1) {
+        error_setg(errp, "vwc, intc, cqr and extended are single bits");
+        return false;
+    }
+    if (n->nlbaf > 16 || n->lba_index >= n->nlbaf) {
+        error_setg(errp, "nlbaf must be in [1, 16] and lba_index below it");
+        return false;
+    }
+    if (n->meta) {
+        error_setg(errp, "meta: LBA metadata is not supported, every I/O "
+                   "would be rejected");
+        return false;
+    }
+    if ((n->meta && !n->mc) ||
+        (n->extended && !NVME_ID_NS_MC_EXTENDED(n->mc)) ||
+        (!n->extended && n->meta && !NVME_ID_NS_MC_SEPARATE(n->mc))) {
+        error_setg(errp, "meta/extended need a matching metadata capability (mc)");
+        return false;
+    }
+    if ((n->dps && n->meta < 8) ||
+        (n->dps && (n->dps & DPS_FIRST_EIGHT) &&
+         !NVME_ID_NS_DPC_FIRST_EIGHT(n->dpc)) ||
         (n->dps && !(n->dps & DPS_FIRST_EIGHT) &&
          !NVME_ID_NS_DPC_LAST_EIGHT(n->dpc)) ||
-        (n->dps & DPS_TYPE_MASK && !((n->dpc & NVME_ID_NS_DPC_TYPE_MASK) &
-                                     (1 << ((n->dps & DPS_TYPE_MASK) - 1)))) ||
-        (n->mpsmax > 0xf || n->mpsmax > n->mpsmin) ||
-        (n->oacs & ~(NVME_OACS_FORMAT)) ||
-        (n->oncs & ~(NVME_ONCS_COMPARE | NVME_ONCS_WRITE_UNCORR |
-                     NVME_ONCS_DSM | NVME_ONCS_WRITE_ZEROS))) {
-                         return -1;
-     }
+        ((n->dps & DPS_TYPE_MASK) &&
+         !((n->dpc & NVME_ID_NS_DPC_TYPE_MASK) &
+           (1 << ((n->dps & DPS_TYPE_MASK) - 1))))) {
+        error_setg(errp, "dps needs 8 bytes of metadata and a matching dpc");
+        return false;
+    }
+    if (n->mpsmax > 0xf || n->mpsmax < n->mpsmin) {
+        error_setg(errp, "mpsmax must be in [mpsmin, 15]");
+        return false;
+    }
+    if (n->oacs & ~NVME_OACS_FORMAT) {
+        error_setg(errp, "oacs may only set Format NVM (0x%x)", NVME_OACS_FORMAT);
+        return false;
+    }
+    if (n->oncs & ~(NVME_ONCS_COMPARE | NVME_ONCS_WRITE_UNCORR |
+                    NVME_ONCS_DSM | NVME_ONCS_WRITE_ZEROS |
+                    NVME_ONCS_FEATURES)) {
+        error_setg(errp, "oncs may only set Compare, Write Uncorrectable, "
+                   "DSM, Write Zeroes and Save/Select Feature Support");
+        return false;
+    }
 
-    return 0;
+    return true;
 }
 
 static void nvme_ns_init_identify(FemuCtrl *n, NvmeIdNs *id_ns)
@@ -807,6 +1008,29 @@ static int nvme_resolve_ns_sizes(FemuCtrl *n, uint64_t total, uint64_t *out_size
     return 0;
 }
 
+/*
+ * Report the total and unallocated NVM capacity, in bytes, as Identify
+ * Controller asks for them: 128-bit little-endian. Called once the namespaces
+ * are sized, since nvme_init_ctrl() runs before that and would only ever see
+ * zero -- which is what `nvme id-ctrl` used to print.
+ *
+ * Every namespace is created at realize and none can be added later, so no
+ * capacity is left unallocated.
+ */
+static void nvme_set_ctrl_capacity(FemuCtrl *n)
+{
+    uint64_t total = 0;
+    int i;
+
+    for (i = 0; i < n->num_namespaces; i++) {
+        total += n->namespaces[i].size;
+    }
+
+    memset(n->id_ctrl.tnvmcap, 0, sizeof(n->id_ctrl.tnvmcap));
+    memset(n->id_ctrl.unvmcap, 0, sizeof(n->id_ctrl.unvmcap));
+    stq_le_p(n->id_ctrl.tnvmcap, total);
+}
+
 static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
 {
     uint64_t *ns_sizes;
@@ -843,6 +1067,21 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
          */
         if (n->num_namespaces > 1 && ns_modes[i] == FEMU_OCSSD_MODE) {
             error_setg(errp, "ocssd supports a single namespace");
+            g_free(ns_sizes);
+            g_free(ns_modes);
+            return 1;
+        }
+        /*
+         * The same tables are reached through the controller's handler table,
+         * which namespace_modes does not change. Naming ocssd for a namespace
+         * of a controller in another mode therefore looks up another mode's
+         * state and dereferences it as its own, and naming another mode for
+         * every namespace of an ocssd controller leaves those tables
+         * uninitialized under the admin commands that still read them.
+         */
+        if ((ns_modes[i] == FEMU_OCSSD_MODE) != OCSSD(n)) {
+            error_setg(errp, "ocssd is a controller mode: femu_mode and "
+                       "namespace_modes must both select it, or neither");
             g_free(ns_sizes);
             g_free(ns_modes);
             return 1;
@@ -914,6 +1153,8 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
     g_free(ns_sizes);
     g_free(ns_modes);
 
+    nvme_set_ctrl_capacity(n);
+
     return 0;
 }
 
@@ -933,7 +1174,7 @@ static void nvme_init_ctrl(FemuCtrl *n)
     id->ieee[2]      = 0xb3;
     id->cmic         = 0;
     id->mdts         = n->mdts;
-    id->ver          = 0x00010300;
+    id->ver          = NVME_SPEC_VER;
 
     /* FDP: set Controller Attributes for FDP support */
     if (n->subsys && n->subsys->endgrp.fdp.enabled) {
@@ -960,6 +1201,7 @@ static void nvme_init_ctrl(FemuCtrl *n)
     }
     subnqn           = g_strdup_printf("nqn.2019-08.org.qemu:%s", n->serial);
     strpadcpy((char *)id->subnqn, sizeof(id->subnqn), subnqn, '\0');
+    g_free(subnqn);
     id->fuses        = cpu_to_le16(0);
     id->fna          = 0;
     id->vwc          = n->vwc;
@@ -972,7 +1214,6 @@ static void nvme_init_ctrl(FemuCtrl *n)
     n->features.arbitration     = 0x1f0f0706;
     n->features.power_mgmt      = 0;
     n->features.temp_thresh     = 0x14d;
-    n->features.err_rec         = 0;
     n->features.volatile_wc     = n->vwc;
     n->features.nr_io_queues   = ((n->nr_io_queues - 1) | ((n->nr_io_queues -
                                                               1) << 16));
@@ -1059,7 +1300,7 @@ static uint64_t femu_ftl_process_req(FemuCtrl *n, NvmeRequest *req)
     if (NS_ZNSSD(ns)) {
         return zns_ftl_process_req(ns, req);
     }
-    if (NS_BBSSD(ns)) {
+    if (NS_BBSSD(ns) || NS_CSD(ns)) {
         return bb_ftl_process_req(n, ns, req);
     }
 
@@ -1087,14 +1328,40 @@ static void *femu_ftl_thread(void *arg)
     }
 
     while (!n->ftl_stopping) {
+        /*
+         * Pair with nvme_pause_pollers(): publish that this pass is running,
+         * then re-read the flag, so a caller that cleared it either sees this
+         * pass and waits for it, or is seen here and the pass is skipped. An
+         * admin command that frees queue state relies on that to know nothing
+         * holds a request.
+         */
+        if (!n->dataplane_started) {
+            n->ftl_in_sweep = false;
+            usleep(100);
+            continue;
+        }
+
         for (i = 1; i <= n->nr_pollers; i++) {
             if (!n->to_ftl[i] || !femu_ring_count(n->to_ftl[i])) {
                 continue;
             }
 
+            /*
+             * Publish the flag only around a request actually being handled.
+             * Doing it once per pass would put a barrier in the idle spin,
+             * which changes how this thread and the pollers interleave.
+             */
+            n->ftl_in_sweep = true;
+            smp_mb();   /* publish the flag before re-reading the pause state */
+            if (!n->dataplane_started) {
+                n->ftl_in_sweep = false;
+                break;
+            }
+
             rc = femu_ring_dequeue(n->to_ftl[i], (void *)&req, 1);
             if (rc != 1) {
                 femu_err("FEMU: FTL to_ftl dequeue failed\n");
+                n->ftl_in_sweep = false;
                 continue;
             }
 
@@ -1106,6 +1373,8 @@ static void *femu_ftl_thread(void *arg)
             if (rc != 1) {
                 femu_err("FEMU: FTL to_poller enqueue failed\n");
             }
+
+            n->ftl_in_sweep = false;
         }
     }
 
@@ -1120,7 +1389,7 @@ static bool femu_needs_ftl_thread(FemuCtrl *n)
     for (i = 0; i < n->num_namespaces; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
 
-        if (NS_BBSSD(ns) || NS_ZNSSD(ns)) {
+        if (NS_BBSSD(ns) || NS_ZNSSD(ns) || NS_CSD(ns)) {
             return true;
         }
     }
@@ -1163,15 +1432,34 @@ static int nvme_register_extensions(FemuCtrl *n)
  * into the controller, so borrow it for the namespace's mode and take a copy;
  * the controller keeps the table for its own mode, which still answers the
  * admin and start-up paths.
+ *
+ * The state slot holds a per-namespace object and is left empty for the
+ * namespace's own init to fill. Copying it gave the second namespace of a mode
+ * the first one's before its init ran, and an init that reads a filled slot as
+ * already done then left the two sharing one object -- for the key-value mode
+ * one key space and one value store behind two namespaces, so a key stored on
+ * either overwrote the other's.
  */
 static void nvme_register_extensions_ns(FemuCtrl *n, NvmeNamespace *ns)
 {
     FemuExtCtrlOps saved_ops = n->ext_ops;
     uint8_t saved_mode = n->femu_mode;
 
+    if (ns->femu_mode == n->femu_mode) {
+        /*
+         * Registering the controller's own mode a second time would build the
+         * same table again, and for a mode that allocates controller-wide
+         * state it would allocate a second copy that nothing ever reads.
+         */
+        ns->ext_ops = n->ext_ops;
+        ns->ext_ops.state = NULL;
+        return;
+    }
+
     n->femu_mode = ns->femu_mode;
     nvme_register_extensions(n);
     ns->ext_ops = n->ext_ops;
+    ns->ext_ops.state = NULL;
 
     n->femu_mode = saved_mode;
     n->ext_ops = saved_ops;
@@ -1200,6 +1488,55 @@ static void femu_stats_timer_cb(void *opaque)
               qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + n->stats_flush_ms);
 }
 
+/*
+ * Give back what realize has taken. QEMU does not call the exit callback for a
+ * device that never realized, and a device_add that fails validation is an
+ * ordinary outcome -- the monitor reports it and the user tries again -- so a
+ * rejected configuration otherwise kept its whole memory backend, pinned.
+ */
+static void femu_realize_undo(FemuCtrl *n)
+{
+    int i;
+
+    /*
+     * Namespaces that did come up own an FTL and its channel tree, which is
+     * the largest allocation here. Every mode's exit tests the state it frees
+     * before touching it, so running them over a controller that got part way
+     * is safe, and it has to happen before the namespace array goes.
+     */
+    femu_exit_extensions(n);
+
+    if (n->subsys) {
+        femu_subsys_unregister_ctrl(n->subsys, n);
+    }
+    if (n->aer_bh) {
+        qemu_bh_delete(n->aer_bh);
+        n->aer_bh = NULL;
+        qemu_mutex_destroy(&n->aer_lock);
+    }
+    g_free(n->features.int_vector_config);
+    n->features.int_vector_config = NULL;
+    g_free(n->cmbuf);
+    n->cmbuf = NULL;
+    for (i = 0; n->namespaces && i < n->num_namespaces; i++) {
+        g_free(n->namespaces[i].fdp.phs);
+        n->namespaces[i].fdp.phs = NULL;
+    }
+    femu_free_namespace_bitmaps(n);
+    g_free(n->aer_held);
+    n->aer_held = NULL;
+    g_free(n->elpes);
+    n->elpes = NULL;
+    g_free(n->namespaces);
+    n->namespaces = NULL;
+    g_free(n->cq);
+    n->cq = NULL;
+    g_free(n->sq);
+    n->sq = NULL;
+    free_dram_backend(n->mbe);
+    n->mbe = NULL;
+}
+
 static void femu_realize(PCIDevice *pci_dev, Error **errp)
 {
     FemuCtrl *n = FEMU(pci_dev);
@@ -1208,7 +1545,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
 
     nvme_check_size();
 
-    if (nvme_check_constraints(n)) {
+    if (!nvme_check_constraints(n, errp)) {
         return;
     }
 
@@ -1241,7 +1578,8 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
 
     n->completed = 0;
     n->start_time = time(NULL);
-    n->reg_size = pow2ceil(0x1004 + 2 * (n->nr_io_queues + 1) * 4);
+    /* doorbells start at 0x1000, two per queue, each 4 << stride bytes apart */
+    n->reg_size = pow2ceil(0x1000 + 2 * (n->nr_io_queues + 1) * (4 << n->db_stride));
     /* ns_size is the per-namespace share of the exposed capacity */
     n->ns_size = bs_size / (uint64_t)n->num_namespaces;
     if (BBSSD(n) && n->op_pcent) {
@@ -1257,6 +1595,9 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     n->elpes = g_malloc0(sizeof(*n->elpes) * (n->elpe + 1));
     n->aer_held = g_malloc0(sizeof(*n->aer_held) * (n->aerl + 1));
     QSIMPLEQ_INIT(&n->aer_queue);
+    qemu_mutex_init(&n->aer_lock);
+    n->aer_bh = qemu_bh_new_guarded(femu_aer_bh, n,
+                                    &DEVICE(n)->mem_reentrancy_guard);
     n->features.int_vector_config = g_malloc0(sizeof(*n->features.int_vector_config) * (n->nr_io_queues + 1));
 
     nvme_init_pci(n);
@@ -1264,6 +1605,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     /* FDP: register controller with subsystem if linked */
     if (nvme_init_subsys(n)) {
         error_setg(errp, "failed to register controller with subsystem");
+        femu_realize_undo(n);
         return;
     }
 
@@ -1275,6 +1617,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
      * carry an error.
      */
     if (nvme_init_namespaces(n, errp)) {
+        femu_realize_undo(n);
         return;
     }
 
@@ -1295,6 +1638,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
             ns->ext_ops.init(n, ns, &local_err);
             if (local_err) {
                 error_propagate(errp, local_err);
+                femu_realize_undo(n);
                 return;
             }
         }
@@ -1305,7 +1649,8 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
      * all namespaces are built, so it never runs against half-initialized state,
      * and only once every geometry check has passed.
      */
-    if (femu_needs_ftl_thread(n)) {
+    n->use_ftl_thread = femu_needs_ftl_thread(n);
+    if (n->use_ftl_thread) {
         qemu_thread_create(&n->ftl_thread, "FEMU-FTL-Thread", femu_ftl_thread,
                            n, QEMU_THREAD_JOINABLE);
         n->ftl_thread_running = true;
@@ -1342,14 +1687,32 @@ static void femu_stop_ftl_thread(FemuCtrl *n)
     n->ftl_thread_running = false;
 }
 
+/*
+ * Stop and join the poller threads. Everything they reach -- the queues, the
+ * rings, and each namespace's mode state -- is freed during teardown, so they
+ * must be gone before any of it is released.
+ */
+static void femu_stop_pollers(FemuCtrl *n)
+{
+    int i;
+
+    if (!n->poller) {
+        return;   /* the host never enabled the controller */
+    }
+
+    n->poller_stopping = true;
+    smp_mb();   /* publish the flag before waiting on the threads to see it */
+    for (i = 1; i <= n->nr_pollers; i++) {
+        qemu_thread_join(&n->poller[i]);
+    }
+    g_free(n->poller);
+    n->poller = NULL;
+}
+
 static void nvme_destroy_poller(FemuCtrl *n)
 {
     int i;
     femu_debug("Destroying NVMe poller !!\n");
-
-    for (i = 1; i <= n->nr_pollers; i++) {
-        qemu_thread_join(&n->poller[i]);
-    }
 
     for (i = 1; i <= n->nr_pollers; i++) {
         pqueue_free(n->pq[i]);
@@ -1357,6 +1720,15 @@ static void nvme_destroy_poller(FemuCtrl *n)
         femu_ring_free(n->to_ftl[i]);
     }
 
+    g_free(n->pq);
+    n->pq = NULL;
+    g_free(n->to_poller);
+    n->to_poller = NULL;
+    g_free(n->to_ftl);
+    n->to_ftl = NULL;
+    /* the threads are joined by now, so what they were reading can go */
+    g_free(n->poller_args);
+    n->poller_args = NULL;
     g_free(n->should_isr);
     g_free((void *)n->poller_in_sweep);
     n->poller_in_sweep = NULL;
@@ -1365,10 +1737,33 @@ static void nvme_destroy_poller(FemuCtrl *n)
 }
 
 /*
+ * The allocation map and the uncorrectable-block map of every namespace. They
+ * are sized from the block count, so a large device leaks tens of megabytes per
+ * add and remove without this.
+ */
+static void femu_free_namespace_bitmaps(FemuCtrl *n)
+{
+    int i;
+
+    for (i = 0; n->namespaces && i < n->num_namespaces; i++) {
+        g_free(n->namespaces[i].util);
+        n->namespaces[i].util = NULL;
+        g_free(n->namespaces[i].uncorrectable);
+        n->namespaces[i].uncorrectable = NULL;
+    }
+}
+
+/*
  * Run each mode's exit once. A namespace may run a mode other than the
  * controller's, and every mode's exit walks the namespaces itself, so dispatch
  * over the distinct handlers rather than once per namespace.
  */
+/* Post whatever events are queued, from the main loop rather than a poller. */
+static void femu_aer_bh(void *opaque)
+{
+    nvme_process_aers(opaque);
+}
+
 static void femu_exit_extensions(FemuCtrl *n)
 {
     void (*seen[FEMU_NR_MODES])(struct FemuCtrl *);
@@ -1437,6 +1832,16 @@ static void femu_exit(PCIDevice *pci_dev)
 
     femu_debug("femu_exit starting!\n");
 
+    /*
+     * Stop every thread first. femu_exit_extensions() releases each mode's FTL
+     * and namespace state, which the pollers read on the I/O path, and
+     * nvme_destroy_poller() then frees the rings and joins nothing.
+     *
+     * Pollers before the FTL thread: they are what feeds it, so stopping the
+     * consumer first leaves them enqueueing into a ring nothing drains, which
+     * fills and then complains once per request.
+     */
+    femu_stop_pollers(n);
     femu_stop_ftl_thread(n);
     if (n->stats_timer) {
         timer_free(n->stats_timer);
@@ -1450,6 +1855,10 @@ static void femu_exit(PCIDevice *pci_dev)
 
     nvme_clear_ctrl(n, true);
     nvme_destroy_poller(n);
+    /* the pollers are gone, so nothing can wake the bottom half any more */
+    qemu_bh_delete(n->aer_bh);
+    n->aer_bh = NULL;
+    qemu_mutex_destroy(&n->aer_lock);
     free_dram_backend(n->mbe);
 
     /* FDP: free namespace FDP placement handles */
@@ -1458,6 +1867,9 @@ static void femu_exit(PCIDevice *pci_dev)
             g_free(n->namespaces[i].fdp.phs);
         }
     }
+    femu_free_namespace_bitmaps(n);
+    pthread_spin_destroy(&n->pcie_lock);
+    pthread_spin_destroy(&n->fw_cpu_lock);
 
     /* FDP: unregister controller from subsystem */
     if (n->subsys) {
@@ -1465,6 +1877,7 @@ static void femu_exit(PCIDevice *pci_dev)
     }
 
     g_free(n->namespaces);
+    g_free(n->cmbuf);   /* the controller memory buffer, if configured */
     g_free(n->features.int_vector_config);
     {
         NvmeAsyncEvent *event;
@@ -1478,11 +1891,16 @@ static void femu_exit(PCIDevice *pci_dev)
     g_free(n->elpes);
     g_free(n->cq);
     g_free(n->sq);
+    /*
+     * The BAR regions are owned by this device and were never referenced by
+     * it, so there is nothing here to release: a memory region holds a
+     * reference on its owner, not the other way round. Dropping one per BAR
+     * took the controller's reference count below what the address space
+     * still held, and the flatview that outlives the eject then finalized the
+     * device from inside its own teardown loop, freeing this object while it
+     * was still walking regions embedded in it.
+     */
     msix_uninit_exclusive_bar(pci_dev);
-    memory_region_unref(&n->iomem);
-    if (n->cmbsz) {
-        memory_region_unref(&n->ctrl_mem);
-    }
 }
 
 static const Property femu_props[] = {
@@ -1525,7 +1943,13 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT32("cmbsz", FemuCtrl, cmbsz, 0),
     DEFINE_PROP_UINT32("cmbloc", FemuCtrl, cmbloc, 0),
     DEFINE_PROP_UINT16("oacs", FemuCtrl, oacs, NVME_OACS_FORMAT),
-    DEFINE_PROP_UINT16("oncs", FemuCtrl, oncs, NVME_ONCS_DSM),
+    /*
+     * Save/Select Feature Support is how a host learns it may use the Select
+     * field and the Save bit of Get/Set Features, which the controller serves,
+     * so it is on by default; the rest stay opt-in.
+     */
+    DEFINE_PROP_UINT16("oncs", FemuCtrl, oncs,
+                       NVME_ONCS_DSM | NVME_ONCS_FEATURES),
     DEFINE_PROP_BOOL("sgl", FemuCtrl, sgl, false),
     DEFINE_PROP_UINT16("vid", FemuCtrl, vid, 0x1d1d),
     DEFINE_PROP_UINT16("did", FemuCtrl, did, 0x1f1f),
@@ -1548,11 +1972,18 @@ static const Property femu_props[] = {
                        csd_params.context_switch_time, 200),
     DEFINE_PROP_UINT16("csf_runtime_scale", FemuCtrl,
                        csd_params.csf_runtime_scale, 3),
+    DEFINE_PROP_STRING("csd_program_dir", FemuCtrl, csd_params.program_dir),
     DEFINE_PROP_UINT8("zns_num_ch", FemuCtrl, zns_params.zns_num_ch, 2),
     DEFINE_PROP_UINT8("zns_num_lun", FemuCtrl, zns_params.zns_num_lun, 4),
     DEFINE_PROP_UINT8("zns_num_plane", FemuCtrl, zns_params.zns_num_plane, 2),
     DEFINE_PROP_UINT8("zns_num_blk", FemuCtrl, zns_params.zns_num_blk, 32),
     DEFINE_PROP_INT32("zns_flash_type", FemuCtrl, zns_params.zns_flash_type, QLC),
+    DEFINE_PROP_INT64("zns_pg_rd_lat", FemuCtrl, zns_params.zns_pg_rd_lat, 0),
+    DEFINE_PROP_INT64("zns_pg_wr_lat", FemuCtrl, zns_params.zns_pg_wr_lat, 0),
+    DEFINE_PROP_INT64("zns_blk_er_lat", FemuCtrl, zns_params.zns_blk_er_lat, 0),
+    DEFINE_PROP_INT64("zns_cmd_addr_lat", FemuCtrl, zns_params.zns_cmd_addr_lat, 0),
+    DEFINE_PROP_INT64("zns_pg_xfer_lat", FemuCtrl, zns_params.zns_pg_xfer_lat, 0),
+    DEFINE_PROP_INT64("zns_status_lat", FemuCtrl, zns_params.zns_status_lat, 0),
     DEFINE_PROP_UINT32("zns_max_active", FemuCtrl, zns_params.zns_max_active, 0),
     DEFINE_PROP_UINT32("zns_max_open", FemuCtrl, zns_params.zns_max_open, 0),
     DEFINE_PROP_UINT32("zns_zd_ext_size", FemuCtrl, zns_params.zns_zd_ext_size, 0),
@@ -1617,9 +2048,12 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT32("e_array_c3_mpj", FemuCtrl, e_array_mpj[3], 4009),
     DEFINE_PROP_UINT32("e_xfer_mpj", FemuCtrl, e_xfer_mpj, 28100),
     DEFINE_PROP_UINT32("stats_flush_ms", FemuCtrl, stats_flush_ms, 0),
+    DEFINE_PROP_UINT32("pe_cycles_rated", FemuCtrl, pe_cycles_rated, 0),
     DEFINE_PROP_INT32("cell_pages", FemuCtrl, bb_params.cell_pages, 0),
     DEFINE_PROP_INT32("pgtype_lat", FemuCtrl, bb_params.pgtype_lat, 0),
     DEFINE_PROP_INT32("ecc_step_ns", FemuCtrl, bb_params.ecc_step_ns, 0),
+    DEFINE_PROP_INT32("ecc_retention_sec", FemuCtrl,
+                      bb_params.ecc_retention_sec, 0),
     DEFINE_PROP_INT32("cmd_addr_lat", FemuCtrl, bb_params.cmd_addr_lat, 0),
     DEFINE_PROP_INT32("pg_xfer_lat", FemuCtrl, bb_params.pg_xfer_lat, 0),
     DEFINE_PROP_INT32("status_lat", FemuCtrl, bb_params.status_lat, 0),
@@ -1644,6 +2078,10 @@ static const Property femu_props[] = {
                      NvmeSubsystem *),
     /* pages held in the DRAM write buffer; 0 programs every write directly */
     DEFINE_PROP_BOOL("hot_cold_sep", FemuCtrl, bb_params.hot_cold_sep, false),
+    DEFINE_PROP_INT32("read_reclaim_limit", FemuCtrl,
+                      bb_params.read_reclaim_limit, 0),
+    DEFINE_PROP_INT32("retention_limit_sec", FemuCtrl,
+                      bb_params.retention_limit_sec, 0),
     DEFINE_PROP_INT32("buffer_size", FemuCtrl, bb_params.buffer_size, 0),
     DEFINE_PROP_INT32("buffer_thres_pcent", FemuCtrl,
                       bb_params.buffer_thres_pcent, 90),

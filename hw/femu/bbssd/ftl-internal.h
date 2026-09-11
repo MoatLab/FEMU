@@ -151,6 +151,15 @@ bool femu_dbg_lpn_has_secret(struct ssd *ssd, uint64_t lpn);
 #define PPA_ARG(p) (unsigned)(p)->g.ch, (unsigned)(p)->g.lun, \
                    (unsigned)(p)->g.pl, (unsigned)(p)->g.blk, (unsigned)(p)->g.pg
 
+/*
+ * True when the data write pointer has no line to program into. Every
+ * allocation class falls back to that pointer, so this covers all of them.
+ */
+static inline bool ssd_out_of_lines(struct ssd *ssd)
+{
+    return ssd->wp.curline == NULL;
+}
+
 /* GC trigger predicates (used by the datapath and GC) */
 static inline bool should_gc(struct ssd *ssd)
 {
@@ -199,6 +208,7 @@ void mark_block_free(struct ssd *ssd, struct ppa *ppa);
 void mark_line_free(struct ssd *ssd, struct ppa *ppa);
 void gc_read_page(struct ssd *ssd, struct ppa *ppa);
 int do_gc(struct ssd *ssd, bool force);
+int do_read_reclaim(struct ssd *ssd);
 const struct femu_ftl_policy_ops *femu_ftl_policy_lookup(const char *name);
 
 /* log-block mapping schemes (hw/femu/bbssd/ftl-map-hybrid.c) */
@@ -239,6 +249,11 @@ void rcache_invalidate(struct ssd *ssd, uint64_t lpn);
 void ssd_init_fdp_params(struct ssdparams *spp, FemuCtrl *n);
 void femu_fdp_ssd_init_reclaim_group(FemuCtrl *n, struct ssd *ssd);
 void femu_fdp_ssd_init_ru_handles(FemuCtrl *n, struct ssd *ssd);
+void femu_fdp_ssd_free(struct ssd *ssd);
+void rcache_destroy(struct ssd *ssd);
+void cmt_destroy(struct ssd *ssd);
+void ssd_free_lines(struct ssd *ssd);
+void ssd_free_ch(struct ssd_channel *ch, struct ssdparams *spp);
 /* nvme_do_write_fdp() is declared in nvme.h (included via ftl.h) */
 int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid, bool force);
 void ssd_write_zeroes_fdp_style(FemuCtrl *n, NvmeRequest *req);

@@ -278,6 +278,15 @@ uint64_t ssd_buffer_destage(struct ssd *ssd, int budget, uint64_t stime)
     int done = 0;
 
     while (budget <= 0 || done < budget) {
+        /*
+         * Tested before a victim is chosen: selecting one removes it from the
+         * buffer, and a page taken out but not programmed would be lost from
+         * the occupancy count for nothing.
+         */
+        if (ssd_out_of_lines(ssd)) {
+            break;
+        }
+
         if (!buffer_select_victim(ssd, &lpn)) {
             break;
         }
@@ -287,15 +296,24 @@ uint64_t ssd_buffer_destage(struct ssd *ssd, int budget, uint64_t stime)
          * accepted, so a long write-back has to keep checking rather than rely
          * on the single check the host write already made.
          *
-         * As on the direct write path, a GC that cannot make progress does not
-         * stop the program that follows: there is nowhere to put the page back.
-         * Turning that into real backpressure means being able to refuse a
-         * write, which no path here can do yet.
+         * A GC that cannot make progress leaves nowhere to put the page. The
+         * buffer holds page numbers rather than data and the backend already
+         * has the contents, so stopping here costs the timing of a program,
+         * not the write itself.
          */
         while (should_gc_high(ssd)) {
             if (do_gc(ssd, true) == -1) {
                 break;
             }
+        }
+        /*
+         * The collection above is what consumes the last line, so ask again:
+         * the check at the top of the pass was made before it ran. The page
+         * stays selected and its contents are already in the backend, so what
+         * is lost is the timing of a program, not the write.
+         */
+        if (ssd_out_of_lines(ssd)) {
+            break;
         }
 
         /* dftl: demand-cache translation cost (no-op when disabled) */
@@ -392,6 +410,38 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
         srd.stime = req->stime;
         sublat = ssd_advance_status(ssd, &ppa, &srd);
         maxlat = (sublat > maxlat) ? sublat : maxlat;
+
+        /*
+         * Enough reads against this block to be worth refreshing the line it
+         * belongs to. Only note it here -- the rewrite happens on a write,
+         * where relocation already costs something, rather than stalling this
+         * read behind a whole line of it. One line is queued at a time, which
+         * is the rate limit.
+         */
+        if (spp->read_reclaim_limit && !ssd->read_reclaim_line &&
+            get_blk(ssd, &ppa)->read_cnt >= (uint64_t)spp->read_reclaim_limit) {
+            ssd->read_reclaim_line = get_line(ssd, &ppa);
+            ssd->reclaim_by_age = false;
+        }
+
+        /*
+         * Charge leaks out of a cell whether or not anything reads it, so data
+         * that has merely sat programmed long enough is refreshed as well. A
+         * line's close_time is when it was filled; one still being written has
+         * none yet and cannot be old. Queued here and rewritten on a write for
+         * the same reason as read stress: that is where relocation belongs.
+         */
+        if (spp->retention_limit_sec && !ssd->read_reclaim_line) {
+            struct line *aged = get_line(ssd, &ppa);
+            uint64_t limit = (uint64_t)spp->retention_limit_sec *
+                             NANOSECONDS_PER_SECOND;
+
+            if (aged->close_time && req->stime > aged->close_time &&
+                req->stime - aged->close_time >= limit) {
+                ssd->read_reclaim_line = aged;
+                ssd->reclaim_by_age = true;
+            }
+        }
     }
 
     return maxlat;
@@ -424,6 +474,9 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
             break;
     }
 
+    /* refresh at most one read-stressed line per write */
+    do_read_reclaim(ssd);
+
     /* pages the host wrote, whether or not the buffer absorbs them */
     ssd->host_write_pages += end_lpn - start_lpn + 1;
     ssd->sp.write_cnt += end_lpn - start_lpn + 1;
@@ -453,6 +506,17 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
             if (!buffer_hit(ssd, lpn) && buffer_at_watermark(ssd)) {
                 curlat = ssd_buffer_destage(ssd, batch, req->stime);
                 maxlat = (curlat > maxlat) ? curlat : maxlat;
+                /*
+                 * The write-back could not free anything, so the buffer is at
+                 * its limit and the media is full. Accepting more here would
+                 * grow it past its configured size and report success for
+                 * pages that can never be programmed; the direct path tells
+                 * the host instead, and so does this one.
+                 */
+                if (ssd_out_of_lines(ssd) && buffer_at_watermark(ssd)) {
+                    req->status = NVME_CAP_EXCEEDED | NVME_DNR;
+                    break;
+                }
             }
 
             if (buffer_insert(ssd, lpn)) {
@@ -489,6 +553,16 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     }
 
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
+        /*
+         * Garbage collection above could not free a line, so there is nowhere
+         * to put this page. Tell the host instead of programming through a
+         * write pointer that no longer addresses anything.
+         */
+        if (ssd_out_of_lines(ssd)) {
+            req->status = NVME_CAP_EXCEEDED | NVME_DNR;
+            break;
+        }
+
         /* dftl: charge the demand-cache translation cost (no-op when disabled) */
         if (ssd->cmt.capacity) {
             uint64_t clat = cmt_touch(ssd, lpn, req->stime, true);
@@ -592,13 +666,55 @@ uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req)
     int already_invalid = 0;
 
     if (!(le16_to_cpu(rw->control) & NVME_WZ_DEAC)) {
+        uint64_t lpn, curlat, maxlat = 0;
+
         /*
          * Without the bit the blocks hold written zeros rather than becoming
-         * deallocated. The I/O layer writes them to the backing store, but the
-         * FTL does not model them as programmed pages; that gap predates the
-         * write buffer and is left alone here.
+         * deallocated: the host reads zeros back, so the device has to put
+         * them somewhere. Program the range as a write would. The I/O layer
+         * has already zeroed the backing store; what is owed here is the media
+         * cost and the page counts, which the command used to escape entirely.
+         *
+         * It goes straight to the media rather than through the write buffer,
+         * since the host handed over no data to hold.
          */
-        return 0;
+        if (end_lpn >= spp->tt_pgs) {
+            return 0;
+        }
+
+        while (should_gc_high(ssd)) {
+            if (do_gc(ssd, true) == -1) {
+                break;
+            }
+        }
+
+        ssd->host_write_pages += end_lpn - start_lpn + 1;
+        /* the pair an ordinary write bumps; these pages are programmed too */
+        ssd->sp.write_cnt += end_lpn - start_lpn + 1;
+
+        /*
+         * This goes straight to the media, so anything the buffer is holding
+         * for these pages has to go first, exactly as the direct write path
+         * does: leaving it there programs the superseded version afterwards,
+         * which is one more program per page than the media owes and shows up
+         * as amplification the workload did not cause.
+         */
+        if (ssd->write_buffer_cnt) {
+            for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
+                buffer_discard(ssd, lpn);
+            }
+        }
+
+        for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
+            if (ssd_out_of_lines(ssd)) {
+                req->status = NVME_CAP_EXCEEDED | NVME_DNR;
+                break;
+            }
+            curlat = ssd_program_lpn(ssd, lpn, req->stime);
+            maxlat = (curlat > maxlat) ? curlat : maxlat;
+        }
+
+        return maxlat;
     }
 
     if (end_lpn >= spp->tt_pgs) {

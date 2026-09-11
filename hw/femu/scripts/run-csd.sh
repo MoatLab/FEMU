@@ -11,7 +11,7 @@ secsz=512 # sector size in bytes
 secs_per_pg=8 # number of sectors in a flash page
 pgs_per_blk=256 # number of pages per flash block
 blks_per_pl=256 # number of blocks per plane
-pls_per_lun=1 # keep it at one, no multiplanes support
+pls_per_lun=1 # planes per LUN
 luns_per_ch=8 # number of chips per channel
 nchs=8 # number of channels
 ssd_size=4096 # in megabytes
@@ -26,7 +26,9 @@ ch_xfer_lat=0 # channel transfer time, ignored for now
 gc_thres_pcent=75
 gc_thres_pcent_high=95
 
-# FEMU CSD parameters
+# FEMU CSD parameters. nr_thread, time_slice and context_switch_time are
+# accepted for CEMU config compatibility but configure a scheduler this port
+# does not carry, so they have no effect.
 fdm_size=64
 nr_cu=4
 nr_thread=4

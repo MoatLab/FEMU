@@ -59,28 +59,73 @@ int bb_check_geometry(FemuCtrl *n, Error **errp)
     }
 
     /*
-     * The write buffer starts writing pages back once it reaches
-     * buffer_thres_pcent of its size, so a level above 100 would never be
-     * reached and the buffer would grow without bound.
+     * The collection watermarks are percentages of the line count, and both
+     * are turned into a line count by (1 - pcent/100) * tt_lines. Outside
+     * [1, 100] that expression is negative, and converting a negative double
+     * to the unsigned the reserve calculation uses is undefined; on this
+     * compiler it produced a reserve of nearly 2^64 and a message about
+     * needing 18446744073709551614 free lines. A high watermark below the low
+     * one also means forced collection starts before background collection,
+     * which is not what either is for.
      */
-    /*
-     * The write pointer only ever allocates plane 0 -- get_new_page() asserts
-     * it -- so a second plane would be counted into the capacity and never
-     * written, and the device would run out of lines while the geometry still
-     * claimed room. Refuse it rather than hand out a shape the allocator
-     * cannot honour. The media layer's multi-plane op is waiting on the same
-     * addressing work.
-     */
-    if (p->pls_per_lun != 1) {
-        error_setg(errp, "FEMU bbssd: pls_per_lun must be 1, got %d; "
-                   "multi-plane addressing is not implemented", p->pls_per_lun);
+    if (p->gc_thres_pcent < 1 || p->gc_thres_pcent > 100 ||
+        p->gc_thres_pcent_high < 1 || p->gc_thres_pcent_high > 100) {
+        error_setg(errp, "FEMU bbssd: gc_thres_pcent and gc_thres_pcent_high "
+                   "must be in [1, 100], got %d and %d", p->gc_thres_pcent,
+                   p->gc_thres_pcent_high);
+        return -1;
+    }
+    if (p->gc_thres_pcent_high < p->gc_thres_pcent) {
+        error_setg(errp, "FEMU bbssd: gc_thres_pcent_high (%d) must not be "
+                   "below gc_thres_pcent (%d); the forced watermark is reached "
+                   "after the background one, not before",
+                   p->gc_thres_pcent_high, p->gc_thres_pcent);
         return -1;
     }
 
+    /* the page-type model has multiplier rows for one to five bits per cell */
+    if (p->cell_pages < 0 || p->cell_pages > NAND_MEDIA_MAX_PGTYPE - 1) {
+        error_setg(errp, "FEMU bbssd: cell_pages must be in [0, %d]",
+                   NAND_MEDIA_MAX_PGTYPE - 1);
+        return -1;
+    }
+
+    /* the per-cell-type page tables index by page number within the block */
+    if (n->nand_cell_type && p->pgs_per_blk > MAX_SUPPORTED_PAGES_PER_BLOCK) {
+        error_setg(errp, "FEMU bbssd: nand_cell_type supports at most %d "
+                   "pgs_per_blk", MAX_SUPPORTED_PAGES_PER_BLOCK);
+        return -1;
+    }
+
+    /* the other FDP strategy numbers fall back to greedy or never collect */
+    if (p->gc_strategy != GC_GLOBAL_GREEDY && p->gc_strategy != GC_GLOBAL_CB &&
+        p->gc_strategy != GC_GLOBAL_RAND &&
+        p->gc_strategy != GC_NOISY_RUH_CUSTOM) {
+        error_setg(errp, "FEMU bbssd: gc_strategy must be %d (greedy), %d "
+                   "(cost-benefit), %d (random) or %d (per-handle)",
+                   GC_GLOBAL_GREEDY, GC_GLOBAL_CB, GC_GLOBAL_RAND,
+                   GC_NOISY_RUH_CUSTOM);
+        return -1;
+    }
+
+    if (p->read_reclaim_limit < 0) {
+        error_setg(errp, "FEMU bbssd: read_reclaim_limit must not be negative");
+        return -1;
+    }
+
+    if (p->retention_limit_sec < 0) {
+        error_setg(errp, "FEMU bbssd: retention_limit_sec must not be negative");
+        return -1;
+    }
     if (p->buffer_size < 0) {
         error_setg(errp, "FEMU bbssd: buffer_size must not be negative");
         return -1;
     }
+    /*
+     * The write buffer starts writing pages back once it reaches
+     * buffer_thres_pcent of its size, so a level above 100 would never be
+     * reached and the buffer would grow without bound.
+     */
     if (p->buffer_size > 0 &&
         (p->buffer_thres_pcent <= 0 || p->buffer_thres_pcent > 100)) {
         error_setg(errp, "FEMU bbssd: buffer_thres_pcent must be between 1 and "
@@ -131,6 +176,7 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->cell_pages = n->bb_params.cell_pages;
     spp->pgtype_lat = n->bb_params.pgtype_lat;
     spp->ecc_step_ns = n->bb_params.ecc_step_ns;
+    spp->ecc_retention_sec = n->bb_params.ecc_retention_sec;
     spp->cmd_addr_lat = n->bb_params.cmd_addr_lat;
     spp->pg_xfer_lat = n->bb_params.pg_xfer_lat;
     spp->status_lat = n->bb_params.status_lat;
@@ -144,6 +190,8 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->buffer_size = n->bb_params.buffer_size;
     spp->buffer_thres_pcent = n->bb_params.buffer_thres_pcent / 100.0;
     spp->hot_cold_sep = n->bb_params.hot_cold_sep;
+    spp->read_reclaim_limit = n->bb_params.read_reclaim_limit;
+    spp->retention_limit_sec = n->bb_params.retention_limit_sec;
     spp->read_hit_cnt = 0;
     spp->read_cnt = 0;
     spp->write_hit_cnt = 0;
@@ -170,11 +218,15 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
 
     spp->tt_luns = spp->luns_per_ch * spp->nchs;
 
-    /* line is special, put it at the end */
-    spp->blks_per_line = spp->tt_luns; /* TODO: to fix under multiplanes */
+    /*
+     * A line is one block index taken across every channel, LUN and plane, so
+     * there are as many lines as a plane has blocks. With one plane per LUN
+     * these are the same numbers as before: blks_per_lun == blks_per_pl.
+     */
+    spp->blks_per_line = spp->tt_luns * spp->pls_per_lun;
     spp->pgs_per_line = spp->blks_per_line * spp->pgs_per_blk;
     spp->secs_per_line = spp->pgs_per_line * spp->secs_per_pg;
-    spp->tt_lines = spp->blks_per_lun; /* TODO: to fix under multiplanes */
+    spp->tt_lines = spp->blks_per_pl;
 
     spp->gc_thres_pcent = n->bb_params.gc_thres_pcent/100.0;
     spp->gc_thres_lines = (int)((1 - spp->gc_thres_pcent) * spp->tt_lines);
@@ -188,11 +240,6 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
 
 static void ssd_init_nand_page(struct nand_page *pg, struct ssdparams *spp)
 {
-    pg->nsecs = spp->secs_per_pg;
-    pg->sec = g_malloc0(sizeof(nand_sec_status_t) * pg->nsecs);
-    for (int i = 0; i < pg->nsecs; i++) {
-        pg->sec[i] = SEC_FREE;
-    }
     pg->status = PG_FREE;
 }
 
@@ -238,4 +285,36 @@ void ssd_init_ch(struct ssd_channel *ch, struct ssdparams *spp)
     }
     ch->next_ch_avail_time = 0;
     ch->busy = 0;
+}
+
+/* release what ssd_init_ch() built, in the reverse order */
+void ssd_free_ch(struct ssd_channel *ch, struct ssdparams *spp)
+{
+    int lun, pl;
+
+    if (!ch->lun) {
+        return;
+    }
+    for (lun = 0; lun < spp->luns_per_ch; lun++) {
+        struct nand_lun *l = &ch->lun[lun];
+
+        if (!l->pl) {
+            continue;
+        }
+        for (pl = 0; pl < spp->pls_per_lun; pl++) {
+            struct nand_plane *p = &l->pl[pl];
+            int blk;
+
+            if (!p->blk) {
+                continue;
+            }
+            for (blk = 0; blk < spp->blks_per_pl; blk++) {
+                g_free(p->blk[blk].pg);
+            }
+            g_free(p->blk);
+        }
+        g_free(l->pl);
+    }
+    g_free(ch->lun);
+    ch->lun = NULL;
 }

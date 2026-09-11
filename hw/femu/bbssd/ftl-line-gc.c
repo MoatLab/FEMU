@@ -126,6 +126,13 @@ static void ssd_advance_write_pointer_common(struct ssd *ssd,
         /* in this case, we should go to next lun */
         if (wpp->lun == spp->luns_per_ch) {
             wpp->lun = 0;
+            /* then the next plane of the LUN, before moving down the block */
+            check_addr(wpp->pl, spp->pls_per_lun);
+            wpp->pl++;
+            if (wpp->pl < spp->pls_per_lun) {
+                return;
+            }
+            wpp->pl = 0;
             /* go to next page in the block */
             check_addr(wpp->pg, spp->pgs_per_blk);
             wpp->pg++;
@@ -152,8 +159,13 @@ static void ssd_advance_write_pointer_common(struct ssd *ssd,
                 wpp->curline = NULL;
                 wpp->curline = get_next_free_line(ssd);
                 if (!wpp->curline) {
-                    /* TODO */
-                    abort();
+                    /*
+                     * Nothing left to program into, and get_next_free_line()
+                     * has said so. Leave the pointer without a line rather
+                     * than taking the process down under a running guest: the
+                     * write paths test for that and refuse the command.
+                     */
+                    return;
                 }
                 wpp->blk = wpp->curline->id;
                 check_addr(wpp->blk, spp->blks_per_pl);
@@ -231,13 +243,18 @@ struct ppa get_new_page_class(struct ssd *ssd, int klass)
     struct write_pointer *wpp = ssd_write_pointer_for_class(ssd, klass);
     struct ppa ppa;
 
+    /* no line on this pointer, no page -- see get_new_page() */
+    if (!wpp->curline) {
+        ppa.ppa = INVALID_PPA;
+        return ppa;
+    }
+
     ppa.ppa = 0;
     ppa.g.ch = wpp->ch;
     ppa.g.lun = wpp->lun;
     ppa.g.pg = wpp->pg;
     ppa.g.blk = wpp->blk;
     ppa.g.pl = wpp->pl;
-    ftl_assert(ppa.g.pl == 0);
 
     return ppa;
 }
@@ -246,13 +263,25 @@ struct ppa get_new_page(struct ssd *ssd)
 {
     struct write_pointer *wpp = &ssd->wp;
     struct ppa ppa;
+
+    /*
+     * The pointer is left without a line when nothing is free, and its block
+     * field still names the line that has just closed -- so building an
+     * address from it here hands back page zero of a line that is already
+     * fully programmed. Say there is no page instead, and let the caller
+     * decide; every allocation goes through here, so no path can miss it.
+     */
+    if (!wpp->curline) {
+        ppa.ppa = INVALID_PPA;
+        return ppa;
+    }
+
     ppa.ppa = 0;
     ppa.g.ch = wpp->ch;
     ppa.g.lun = wpp->lun;
     ppa.g.pg = wpp->pg;
     ppa.g.blk = wpp->blk;
     ppa.g.pl = wpp->pl;
-    ftl_assert(ppa.g.pl == 0);
 
     return ppa;
 }
@@ -300,7 +329,7 @@ void mark_page_invalid(struct ssd *ssd, struct ppa *ppa)
         line->vpc--;
     }
 
-    if (was_full_line) {
+    if (was_full_line && !line->reclaiming) {
         /* move line: "full" -> "victim" */
         QTAILQ_REMOVE(&lm->full_line_list, line, entry);
         lm->full_line_cnt--;
@@ -344,7 +373,6 @@ void mark_block_free(struct ssd *ssd, struct ppa *ppa)
     for (int i = 0; i < spp->pgs_per_blk; i++) {
         /* reset page status */
         pg = &blk->pg[i];
-        ftl_assert(pg->nsecs == spp->secs_per_pg);
         pg->status = PG_FREE;
     }
 
@@ -353,6 +381,8 @@ void mark_block_free(struct ssd *ssd, struct ppa *ppa)
     blk->ipc = 0;
     blk->vpc = 0;
     blk->erase_cnt++;
+    ssd->total_erases++;
+    blk->read_cnt = 0; /* the stress an erase clears */
     if (exp_watch_blk[ppa->g.blk])
         EXP_LOG("[ERASE] " PPA_FMT " erase_cnt=%d (vpc/ipc reset)\n",
                 PPA_ARG(ppa), blk->erase_cnt);
@@ -371,7 +401,8 @@ void gc_read_page(struct ssd *ssd, struct ppa *ppa)
 }
 
 /* move valid page data (already in DRAM) from victim line to a new page */
-static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
+/* true when the page was relocated; false when there is nowhere to put it */
+static bool gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
 {
     struct ppa new_ppa;
     struct nand_lun *new_lun;
@@ -379,6 +410,15 @@ static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
 
     ftl_assert(valid_lpn(ssd, lpn));
     new_ppa = get_new_page(ssd);
+    if (!mapped_ppa(&new_ppa)) {
+        /*
+         * Relocating with nowhere to relocate to used to mark a page valid a
+         * second time, which carried the line's valid count past its capacity
+         * -- and the test that returns a line to collection is an equality,
+         * so that line was never collected again. Leave the page where it is.
+         */
+        return false;
+    }
     /* commit the relocated mapping through the active scheme (maptbl + rmap) */
     ssd->mapping->gc_relocate_commit(ssd, lpn, old_ppa, &new_ppa);
     if (exp_lpn_watched(lpn)) {
@@ -410,7 +450,7 @@ static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
     new_lun = get_lun(ssd, &new_ppa);
     new_lun->gc_endtime = new_lun->next_lun_avail_time;
 
-    return 0;
+    return true;
 }
 
 static struct line *select_victim_line(struct ssd *ssd, bool force)
@@ -610,7 +650,10 @@ static void clean_one_block(struct ssd *ssd, struct ppa *ppa)
         if (pg_iter->status == PG_VALID) {
             gc_read_page(ssd, ppa);
             /* delay the maptbl update until "write" happens */
-            gc_write_page(ssd, ppa);
+            if (!gc_write_page(ssd, ppa)) {
+                /* nowhere to put it; leave the rest of the line alone */
+                return;
+            }
             cnt++;
         }
     }
@@ -622,6 +665,16 @@ void mark_line_free(struct ssd *ssd, struct ppa *ppa)
 {
     struct line_mgmt *lm = &ssd->lm;
     struct line *line = get_line(ssd, ppa);
+    /*
+     * If the read path had queued this line for a refresh, that request dies
+     * with the line: it is about to be erased and recycled, which is exactly
+     * what the refresh would have achieved.
+     */
+    if (ssd->read_reclaim_line == line) {
+        ssd->read_reclaim_line = NULL;
+        ssd->reclaim_by_age = false;
+    }
+
     line->ipc = 0;
     line->vpc = 0;
     line->close_time = 0;
@@ -630,40 +683,53 @@ void mark_line_free(struct ssd *ssd, struct ppa *ppa)
     lm->free_line_cnt++;
 }
 
-int do_gc(struct ssd *ssd, bool force)
+/* relocate a line's valid pages, erase it, and return it to the free list */
+static void reclaim_line(struct ssd *ssd, struct line *victim_line)
 {
-    struct line *victim_line = NULL;
     struct ssdparams *spp = &ssd->sp;
     struct nand_lun *lunp;
     struct ppa ppa;
     int ch, lun;
 
-    victim_line = ssd->policy->select_victim_line(ssd, force);
-    if (!victim_line) {
-        return -1;
-    }
-
+    /*
+     * Only some fields are filled in below, so start from zero rather than
+     * from the stack: the sector and reserved fields are copied into the
+     * batch this builds and passed on to mark_line_free(). Nothing reads
+     * them today, but valid_ppa() does check the sector, so the day anything
+     * calls it on one of these the answer would come from whatever the stack
+     * happened to hold.
+     */
+    ppa.ppa = 0;
     ppa.g.blk = victim_line->id;
-    ftl_debug("GC-ing line:%d,ipc=%d,victim=%d,full=%d,free=%d\n", ppa.g.blk,
-              victim_line->ipc, ssd->lm.victim_line_cnt, ssd->lm.full_line_cnt,
-              ssd->lm.free_line_cnt);
 
     /* copy back valid data */
     for (ch = 0; ch < spp->nchs; ch++) {
         for (lun = 0; lun < spp->luns_per_ch; lun++) {
+            struct ppa ppas[1 << PL_BITS];
+            int pl;
+
             ppa.g.ch = ch;
             ppa.g.lun = lun;
             ppa.g.pl = 0;
             lunp = get_lun(ssd, &ppa);
-            clean_one_block(ssd, &ppa);
-            mark_block_free(ssd, &ppa);
 
+            for (pl = 0; pl < spp->pls_per_lun; pl++) {
+                ppa.g.pl = pl;
+                clean_one_block(ssd, &ppa);
+                mark_block_free(ssd, &ppa);
+                ppas[pl] = ppa;
+            }
+
+            /*
+             * A line holds the same block index on every plane, so the die can
+             * erase them in one operation instead of one after another.
+             */
             if (spp->enable_gc_delay) {
                 struct nand_cmd gce;
                 gce.type = GC_IO;
                 gce.cmd = NAND_ERASE;
                 gce.stime = 0;
-                ssd_advance_status(ssd, &ppa, &gce);
+                ssd_advance_status_multiplane(ssd, ppas, spp->pls_per_lun, &gce);
             }
 
             lunp->gc_endtime = lunp->next_lun_avail_time;
@@ -672,6 +738,113 @@ int do_gc(struct ssd *ssd, bool force)
 
     /* update line status */
     mark_line_free(ssd, &ppa);
+}
+
+int do_gc(struct ssd *ssd, bool force)
+{
+    struct line *victim_line = ssd->policy->select_victim_line(ssd, force);
+
+    if (!victim_line) {
+        return -1;
+    }
+
+    ftl_debug("GC-ing line:%d,ipc=%d,victim=%d,full=%d,free=%d\n",
+              victim_line->id, victim_line->ipc, ssd->lm.victim_line_cnt,
+              ssd->lm.full_line_cnt, ssd->lm.free_line_cnt);
+
+    reclaim_line(ssd, victim_line);
 
     return 0;
+}
+
+/*
+ * Rewrite a line whose data has become worth refreshing, for either reason.
+ *
+ * Reading a page stresses the others in its block, so a block read many times
+ * without being rewritten drifts towards errors. Charge also leaks out of a
+ * cell on its own, so data that has simply sat programmed long enough drifts
+ * the same way whether or not anything reads it. Real devices watch for both
+ * and rewrite the data before it decays; the cost is relocation, which is why
+ * this shows up as write amplification rather than as anything the host sees
+ * directly. The two are counted apart -- read_reclaims and retention_refreshes
+ * -- so a workload can tell which pressure it is paying for.
+ *
+ * A line nothing ever reads is never refreshed here: both triggers sit on the
+ * read path. Modelling the background media scan a real device runs would need
+ * a timer of its own, which this deliberately does not add.
+ *
+ * The line is chosen by the read path and rewritten here, on a write, because
+ * this is where collection already happens and where the cost belongs. Doing it
+ * inside the read would stall a read behind a whole line of relocation.
+ *
+ * Relocation goes through the ordinary data write pointer. An earlier attempt
+ * at static wear levelling gave itself a dedicated pointer, which pinned a line
+ * out of circulation and drove the device into a collection death spiral; there
+ * is no reason to repeat that here.
+ */
+int do_read_reclaim(struct ssd *ssd)
+{
+    struct line *line = ssd->read_reclaim_line;
+    bool by_age;
+
+    if (!line) {
+        return -1;
+    }
+
+    /*
+     * Only with lines to spare. The test is the high watermark, not
+     * should_gc(): a busy device sits below should_gc() permanently, so testing
+     * that would disable this outright.
+     */
+    if (should_gc_high(ssd) || ssd->lm.free_line_cnt < 2) {
+        return -1;
+    }
+
+    ssd->read_reclaim_line = NULL;
+    by_age = ssd->reclaim_by_age;
+    ssd->reclaim_by_age = false;
+
+    /*
+     * A heavily read line is usually full, and invalidating the first page of a
+     * full line moves it from full_line_list into the victim queue half way
+     * through the rewrite. Take it out and mark it so that does not happen;
+     * a line from select_victim_line() already arrives in no list.
+     */
+    if (line->vpc == ssd->sp.pgs_per_line) {
+        QTAILQ_REMOVE(&ssd->lm.full_line_list, line, entry);
+        ssd->lm.full_line_cnt--;
+    } else if (line->pos) {
+        pqueue_remove(ssd->lm.victim_line_pq, line);
+        line->pos = 0;
+        ssd->lm.victim_line_cnt--;
+    } else {
+        /* being written to right now: leave it alone */
+        return -1;
+    }
+
+    line->reclaiming = true;
+    reclaim_line(ssd, line);
+    line->reclaiming = false;
+    if (by_age) {
+        ssd->retention_refreshes++;
+    } else {
+        ssd->read_reclaims++;
+    }
+
+    return 0;
+}
+
+/* release what ssd_init_lines() took */
+void ssd_free_lines(struct ssd *ssd)
+{
+    struct line_mgmt *lm = &ssd->lm;
+
+    pqueue_free(lm->victim_line_pq);
+    lm->victim_line_pq = NULL;
+    g_free(lm->lines);
+    lm->lines = NULL;
+    lm->tt_lines = 0;
+    lm->free_line_cnt = 0;
+    lm->victim_line_cnt = 0;
+    lm->full_line_cnt = 0;
 }

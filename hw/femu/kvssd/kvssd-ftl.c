@@ -187,19 +187,23 @@ static uint64_t kv_reclaim_empty_lines(FemuKvssdState *s, NvmeRequest *req)
         for (int ch = 0; ch < spp->nchs; ch++) {
             for (int lun = 0; lun < spp->luns_per_ch; lun++) {
                 struct nand_lun *lunp;
+                struct ppa ppas[1 << PL_BITS];
+                uint64_t sub;
 
                 ppa.g.ch = ch;
                 ppa.g.lun = lun;
+                ppa.g.pl = 0;
                 lunp = get_lun(ssd, &ppa);
                 for (int pl = 0; pl < spp->pls_per_lun; pl++) {
-                    uint64_t sub;
-
                     ppa.g.pl = pl;
                     ppa.g.pg = 0;
                     mark_block_free(ssd, &ppa);
-                    sub = ssd_advance_status(ssd, &ppa, &c);
-                    lat = sub > lat ? sub : lat;
+                    ppas[pl] = ppa;
                 }
+                /* same block on every plane: one erase, not one per plane */
+                sub = ssd_advance_status_multiplane(ssd, ppas, spp->pls_per_lun,
+                                                    &c);
+                lat = sub > lat ? sub : lat;
                 lunp->gc_endtime = lunp->next_lun_avail_time;
             }
         }
@@ -295,6 +299,14 @@ static bool kv_advance_write_pointer(FemuKvssdState *s, NvmeRequest *req,
     }
     wpp->lun = 0;
 
+    /* then the next plane of the LUN, before moving down the block */
+    check_addr(wpp->pl, spp->pls_per_lun);
+    wpp->pl++;
+    if (wpp->pl != spp->pls_per_lun) {
+        return true;
+    }
+    wpp->pl = 0;
+
     check_addr(wpp->pg, spp->pgs_per_blk);
     wpp->pg++;
     if (wpp->pg != spp->pgs_per_blk) {
@@ -385,10 +397,21 @@ static uint16_t kv_program_ppas(FemuKvssdState *s, NvmeRequest *req,
         sub = ssd_advance_status(ssd, &ppa, &c);
         *lat = sub > *lat ? sub : *lat;
         ppas[i] = ppa;
+        /*
+         * Counted on the ssd as well as in this mode's own state, because the
+         * health log reads the counters every FTL-backed mode keeps there.
+         * The two are split the way the black-box mode splits them:
+         * nand_write_pages counts a page the host asked for, gc_write_pages a
+         * page the device relocated. Counting a relocated page in both would
+         * put it in the amplification numerator twice.
+         */
         if (io_type == GC_IO) {
             s->gc_wr_pages++;
+            ssd->gc_write_pages++;
         } else {
             s->nand_wr_pages++;
+            ssd->host_write_pages++;
+            ssd->nand_write_pages++;
         }
 
         if (!kv_advance_write_pointer(s, req, lat, i + 1 < pages)) {
@@ -438,7 +461,15 @@ static uint16_t kv_read_ppas(FemuKvssdState *s, NvmeRequest *req,
 static uint64_t kv_charge_base(FemuKvssdState *s, NvmeRequest *req)
 {
     struct ssd *ssd = s->ssd;
-    struct nand_cmd c = { .type = USER_IO, .cmd = NAND_READ, .stime = req->stime };
+    /*
+     * A cost, not a read of a block: the address is a placeholder, so charge it
+     * the way a translation-page read is charged. As user traffic it counted
+     * against block zero's read total, which is what the most-read-block figure
+     * reports, so a command that touches no data -- an exist for a key that is
+     * not there -- drove that figure up.
+     */
+    struct nand_cmd c = { .type = MAP_IO, .cmd = NAND_READ,
+                          .stime = req->stime };
     struct ppa ppa = { .ppa = 0 };
     return ssd_advance_status(ssd, &ppa, &c);
 }
@@ -875,7 +906,17 @@ uint16_t kvssd_ftl_list(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
     uint32_t nrk = 0;
     uint16_t status;
     uint64_t lat;
-    (void)n;
+
+    /*
+     * The host buffer size is taken straight from the command and used to
+     * size the list this builds, so without a bound a host could ask for four
+     * gigabytes at a time. The maximum data transfer the controller
+     * advertises is the limit that already applies to the transfer itself.
+     */
+    status = nvme_check_mdts(n, hbs);
+    if (status) {
+        return status;
+    }
 
     qemu_mutex_lock(&s->lock);
     status = kv_build_list_locked(s, start_key, start_len, hbs, &buf, &len, &nrk);
@@ -910,103 +951,44 @@ static void kvssd_reset_table(FemuKvssdState *s)
     s->value_reclaimable = 0;
 }
 
-static void kvssd_free_ru_mgmt(struct ru_mgmt *rm)
-{
-    if (!rm) {
-        return;
-    }
-    if (rm->victim_ru_pq) {
-        pqueue_free(rm->victim_ru_pq);
-    }
-    if (rm->victim_ru_cb) {
-        pqueue_free(rm->victim_ru_cb);
-    }
-    g_free(rm);
-}
 
-static void kvssd_free_fdp_state(struct ssd *ssd)
-{
-    if (ssd->ruhs) {
-        for (uint64_t i = 0; i < ssd->nruhs; i++) {
-            g_free(ssd->ruhs[i].rus);
-            kvssd_free_ru_mgmt(ssd->ruhs[i].ru_mgmt);
-        }
-        g_free(ssd->ruhs);
-    }
-    if (ssd->rg) {
-        for (uint64_t i = 0; i < ssd->nrg; i++) {
-            FemuReclaimGroup *rg = &ssd->rg[i];
-
-            if (rg->rus) {
-                for (int j = 0; j < rg->tt_nru; j++) {
-                    g_free(rg->rus[j].ssd_wptr);
-                    g_free(rg->rus[j].lines);
-                }
-            }
-            kvssd_free_ru_mgmt(rg->ru_mgmt);
-        }
-        if (ssd->rus) {
-            for (uint64_t i = 0; i < ssd->nrg; i++) {
-                g_free(ssd->rus[i]);
-            }
-            g_free(ssd->rus);
-        }
-        g_free(ssd->rg);
-    }
-}
 
 static void kvssd_free_ssd(FemuKvssdState *s)
 {
     struct ssd *ssd = s->ssd;
-    struct ssdparams *spp;
 
     if (!ssd) {
         return;
     }
-    spp = &ssd->sp;
-    kvssd_free_fdp_state(ssd);
-    g_free(ssd->cmt.slots);
-    g_free(ssd->cmt.hash);
-    g_free(ssd->rcache.slots);
-    g_free(ssd->rcache.hash);
-    g_free(ssd->map_priv);
-    if (ssd->lm.victim_line_pq) {
-        pqueue_free(ssd->lm.victim_line_pq);
-    }
-    g_free(ssd->lm.lines);
-    g_free(ssd->maptbl);
-    g_free(ssd->rmap);
-    if (ssd->ch) {
-        for (int ch = 0; ch < spp->nchs; ch++) {
-            for (int lun = 0; lun < ssd->ch[ch].nluns; lun++) {
-                struct nand_lun *lunp = &ssd->ch[ch].lun[lun];
 
-                for (int pl = 0; pl < lunp->npls; pl++) {
-                    struct nand_plane *plane = &lunp->pl[pl];
-
-                    for (int blk = 0; blk < plane->nblks; blk++) {
-                        struct nand_block *block = &plane->blk[blk];
-
-                        for (int pg = 0; pg < block->npgs; pg++) {
-                            g_free(block->pg[pg].sec);
-                        }
-                        g_free(block->pg);
-                    }
-                    g_free(plane->blk);
-                }
-                g_free(lunp->pl);
-            }
-            g_free(ssd->ch[ch].lun);
+    /*
+     * The same teardown the other FTL-backed modes use. This mode used to
+     * carry its own copy, which had drifted: it never released the media
+     * layer, and it freed the mapping scheme's private state with a flat
+     * g_free() that missed the allocations hanging off it.
+     */
+    /*
+     * The namespace and the controller point at this FTL too, and the other
+     * FTL-backed modes clear both when they release theirs. Leaving them set
+     * left every reader that tests ns->ssd -- the SMART and endurance counters
+     * among them -- looking at freed memory.
+     */
+    if (s->ns) {
+        if (s->ns->ctrl && s->ns->ctrl->ssd == ssd) {
+            s->ns->ctrl->ssd = NULL;
         }
-        g_free(ssd->ch);
+        if (s->ns->ssd == ssd) {
+            s->ns->ssd = NULL;
+        }
     }
+    ssd_free(ssd);
     g_free(ssd);
     s->ssd = NULL;
 }
 
-static bool kvssd_init_timing_ssd(FemuKvssdState *s, FemuCtrl *n)
+static bool kvssd_init_timing_ssd(FemuKvssdState *s, FemuCtrl *n,
+                                  NvmeNamespace *ns)
 {
-    NvmeNamespace *ns = &n->namespaces[0];
     struct ssd *ssd = g_try_new0(struct ssd, 1);
 
     if (!ssd) {
@@ -1063,7 +1045,8 @@ FemuKvssdState *kvssd_ftl_alloc(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
      * Built before the arena so the value capacity can be clamped to the physical
      * NAND size.
      */
-    if (!kvssd_init_timing_ssd(s, n)) {
+    s->ns = ns;
+    if (!kvssd_init_timing_ssd(s, n, ns)) {
         error_setg(errp, "KVSSD NAND timing allocation failed");
         g_free(s);
         return NULL;
@@ -1458,8 +1441,11 @@ void kvssd_ftl_selftest(FemuKvssdState *s)
     s->nand_wr_pages = 0;
     s->gc_wr_pages = 0;
     if (n) {
+        if (n->ssd == s->ssd) {
+            n->ssd = NULL;
+        }
         kvssd_free_ssd(s);
-        if (!kvssd_init_timing_ssd(s, n)) {
+        if (!kvssd_init_timing_ssd(s, n, s->ns)) {
             fails++;
             femu_err("KVSELFTEST FAIL reset-timing-ssd\n");
         }

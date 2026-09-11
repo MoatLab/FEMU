@@ -62,6 +62,14 @@ int init_dram_backend(SsdDramBackend **mbe, int64_t nbytes)
     /* bind to the requested NUMA node before mlock faults the pages in */
     mbe_numa_bind(b->logical_space, nbytes);
 
+    /*
+     * Pinning keeps page faults out of the emulated latency, but it needs
+     * RLIMIT_MEMLOCK to cover the backend, which an unprivileged run rarely
+     * has. Upstream warns and carries on; this fork refuses instead, because
+     * the emulated latency is the measurement, and a fault landing inside one
+     * is indistinguishable from the NAND time it is supposed to be reporting.
+     * FEMU_ALLOW_UNPINNED=1 opts back into upstream's behaviour.
+     */
     if (mlock(b->logical_space, nbytes) == -1) {
         /*
          * Pinning keeps the backing store out of swap so a page fault cannot show
@@ -99,10 +107,14 @@ int init_dram_backend(SsdDramBackend **mbe, int64_t nbytes)
 
 void free_dram_backend(SsdDramBackend *b)
 {
+    if (!b) {
+        return;
+    }
     if (b->logical_space) {
         munlock(b->logical_space, b->size);
         g_free(b->logical_space);
     }
+    g_free(b);
 }
 
 int backend_rw(SsdDramBackend *b, QEMUSGList *qsg, uint64_t *lbal, bool is_write)
@@ -145,7 +157,14 @@ int backend_rw(SsdDramBackend *b, QEMUSGList *qsg, uint64_t *lbal, bool is_write
         }
 
         if (b->femu_mode == FEMU_OCSSD_MODE) {
-            mb_oft = lbal[sg_cur_index];
+            /*
+             * One offset per scatter-gather entry. Reading the next one after
+             * the index has passed the last entry reads one element off the
+             * end of the list: the value went unused, but the read did not.
+             */
+            if (sg_cur_index < qsg->nsg) {
+                mb_oft = lbal[sg_cur_index];
+            }
         } else if (b->femu_mode == FEMU_BBSSD_MODE ||
                    b->femu_mode == FEMU_NOSSD_MODE ||
                    b->femu_mode == FEMU_ZNSSD_MODE ||

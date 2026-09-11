@@ -2,6 +2,7 @@
 
 #include "kvssd.h"
 #include "../nvme.h"
+#include "../bbssd/ftl.h"
 
 /*
  * FEMU Key Value SSD mode.
@@ -66,10 +67,18 @@ static inline uint32_t kv_value_size(const NvmeCmd *cmd)
 
 FemuKvssdState *kvssd_ns_state(FemuCtrl *n, NvmeNamespace *ns)
 {
-    if (ns && ns->ext_ops.state) {
-        return ns->ext_ops.state;
+    /*
+     * Every mode keeps its own controller-wide object in this one slot, so on a
+     * controller that is not key-value it holds something else entirely --
+     * Open-Channel 2.0's is a header a fraction of the size of this state.
+     * Reading and locking that through here runs far past the end of it, so
+     * answer only where the state really is this one.
+     */
+    if (ns) {
+        return NS_KVSSD(ns) ? ns->ext_ops.state : NULL;
     }
-    return n->ext_ops.state;
+
+    return KVSSD(n) ? n->ext_ops.state : NULL;
 }
 
 static FemuKvssdState *kvssd_state(FemuCtrl *n, NvmeNamespace *ns)
@@ -132,6 +141,8 @@ static uint16_t kvssd_store(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         return status;
     }
 
+    req->xfer_bytes = vsize;
+    req->is_write = 1;
     req->cqe.n.result = cpu_to_le32(vsize);
     return NVME_SUCCESS;
 }
@@ -166,6 +177,8 @@ static uint16_t kvssd_retrieve(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
      * Spec: CQE Dword0 reports the FULL KV value size in bytes. If HBS < value,
      * the host receives the leading HBS bytes and re-issues with a larger buffer.
      */
+    req->xfer_bytes = MIN(hbs, full_len);
+    req->is_write = 0;
     req->cqe.n.result = cpu_to_le32(full_len);
     return NVME_SUCCESS;
 }
@@ -289,6 +302,11 @@ static void kvssd_init_ctrl_str(FemuCtrl *n)
 static void kvssd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 {
     FemuKvssdState *kvssd;
+
+    /* Same shared geometry, same bounds check as bbssd (see csd_init). */
+    if (bb_check_geometry(n, errp)) {
+        return;
+    }
 
     /*
      * Every namespace running the KV command set reports it, whether or not it

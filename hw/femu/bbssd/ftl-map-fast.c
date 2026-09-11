@@ -171,11 +171,19 @@ static uint64_t fast_merge_one_lbn(struct ssd *ssd, int64_t lbn, int *relocated)
         if (!mapped_ppa(&old) || !valid_ppa(ssd, &old)) {
             continue;
         }
+        /*
+         * Allocate before invalidating the old copy: with nowhere to put the
+         * merged page, invalidating first would drop the only copy of the
+         * data on the floor.
+         */
+        struct ppa new = get_new_page_class(ssd, FEMU_MAP_CLASS_DATA);
+        if (!mapped_ppa(&new)) {
+            break;
+        }
         lat += fast_charge(ssd, &old, NAND_READ);
         mark_page_invalid(ssd, &old);
         set_rmap_ent(ssd, INVALID_LPN, &old);
 
-        struct ppa new = get_new_page_class(ssd, FEMU_MAP_CLASS_DATA);
         set_maptbl_ent(ssd, lpn, &new);
         set_rmap_ent(ssd, lpn, &new);
         mark_page_valid(ssd, &new);
@@ -280,7 +288,22 @@ static void femu_map_fast_trim(struct ssd *ssd, uint64_t lpn)
     }
 }
 
+static void femu_map_fast_exit(struct ssd *ssd)
+{
+    struct femu_map_fast *f = ssd->map_priv;
+
+    if (!f) {
+        return;
+    }
+    g_free(f->lbn_dirty);
+    g_free(f->dirty_list);
+    g_free(f);
+    ssd->map_priv = NULL;
+}
+
 const struct femu_mapping_ops femu_mapping_fast_ops = {
+    .exit           = femu_map_fast_exit,
+    .uses_log_class = true,
     .name               = "fast",
     .uses_cmt           = false,
     .init               = femu_map_fast_init,

@@ -124,6 +124,44 @@ static uint16_t oc20_advance_wp(FemuCtrl *n, NvmeNamespace *ns, uint64_t lba,
     return NVME_SUCCESS;
 }
 
+/*
+ * Advance the write pointer of every chunk the command touched, each by the
+ * run of addresses that landed in it. The validation above already splits the
+ * list this way, because a vector write is allowed to span chunks; this used
+ * to be called once with the first address and the whole length, which pushed
+ * the first chunk's pointer past its capacity -- so it never closed and later
+ * writes to it were refused -- and left every other chunk at zero, so reads of
+ * data that really was written came back as unwritten.
+ */
+static uint16_t oc20_advance_wp_all(FemuCtrl *n, NvmeNamespace *ns,
+                                    NvmeRequest *req)
+{
+    uint64_t lba = ((uint64_t *)req->slba)[0];
+    uint64_t cidx = oc20_lba_to_chunk_index(n, ns, lba);
+    uint16_t ws = 1;
+    uint16_t err;
+    uint16_t i;
+
+    for (i = 1; i < req->nlb; i++) {
+        uint64_t next_lba = ((uint64_t *)req->slba)[i];
+        uint64_t next_cidx = oc20_lba_to_chunk_index(n, ns, next_lba);
+
+        if (cidx != next_cidx) {
+            err = oc20_advance_wp(n, ns, lba, ws, req);
+            if (err) {
+                return err;
+            }
+            lba = next_lba;
+            cidx = next_cidx;
+            ws = 1;
+            continue;
+        }
+        ws++;
+    }
+
+    return oc20_advance_wp(n, ns, lba, ws, req);
+}
+
 #define max_sec_per_rq (64)
 
 /*
@@ -140,7 +178,7 @@ static void oc20_parse_lba_list(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     Oc20RwCmd *ocrw = (Oc20RwCmd *)cmd;
     Oc20Namespace *lns = ns->state;
     Oc20AddrF *addrf = &lns->lbaf;
-    uint16_t nlb  = le16_to_cpu(ocrw->nlb) + 1;
+    uint32_t nlb  = le16_to_cpu(ocrw->nlb) + 1;   /* 0's based, reaches 65536 */
     uint64_t cur_pg_addr, prev_pg_addr = ~(0ULL);
     int secs_idx = -1;
     uint64_t lba;
@@ -174,12 +212,11 @@ static int oc20_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     Oc20Namespace *lns = ns->state;
     Oc20RwCmd *ocrw = (Oc20RwCmd *)cmd;
     uint8_t opcode = ocrw->opcode;
-    uint16_t nlb = le16_to_cpu(ocrw->nlb) + 1;
+    uint32_t nlb = le16_to_cpu(ocrw->nlb) + 1;    /* 0's based, reaches 65536 */
     int ch, lun, lunid;
     int64_t io_done_ts = 0;
     int64_t total_time_need_to_emulate = 0;
     int64_t cur_time_need_to_emulate;
-    int num_ch = lns->id_ctrl.geo.num_chk;
     int num_lun = lns->id_ctrl.geo.num_lun;
     Oc20AddrF *addrf = &lns->lbaf;
     int i;
@@ -194,7 +231,7 @@ static int oc20_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             lba = ((uint64_t *)req->slba)[i];
             ch = OC20_LBA_GET_GROUP(addrf, lba);
             lun = OC20_LBA_GET_PUNIT(addrf, lba);
-            lunid = ch * num_ch + lun;
+            lunid = ch * num_lun + lun;
 
             int64_t ts = advance_chip_timestamp(n, lunid, now, opcode, 0);
             if (ts > req->expire_time) {
@@ -411,8 +448,21 @@ static uint16_t oc20_rw_check_read_req(FemuCtrl *n, NvmeCmd *cmd,
     for (i = 0; i < req->nlb; i++) {
         err = oc20_rw_check_chunk_read(n, cmd, req, ((uint64_t *) req->slba)[i]);
         if (err) {
-            if (err & NVME_DULB) {
-                req->predef |= (1 << i);
+            /*
+             * Only an unwritten block may be skipped. The range error added
+             * beside it also has the DULB bits set, so a bitmask test let an
+             * address outside the geometry carry on into the transfer and
+             * return whatever sector the dense index landed on.
+             */
+            if (err == NVME_DULB) {
+                /*
+                 * The count reaches 64, so the bit has to be shifted in a
+                 * 64 bit value. Nothing reads this yet -- an unwritten block
+                 * should come back as the pattern the specification defines
+                 * and instead comes back as whatever the media holds -- but
+                 * an int shift of 31 or more is undefined either way.
+                 */
+                req->predef |= 1ULL << i;
                 continue;
             }
 
@@ -512,9 +562,9 @@ static uint16_t oc20_rw_check_req(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         for (i = 0; i < nlb; i++) {
             err = oc20_rw_check_chunk_read(n, cmd, req, slba + i);
             if (err) {
-                if (err & NVME_DULB) {
+                if (err == NVME_DULB) {
                     req->predef = slba + i;
-                    if (NVME_ERR_REC_DULBE(n->features.err_rec)) {
+                    if (NVME_ERR_REC_DULBE(req->ns->err_rec)) {
                         return NVME_DULB | NVME_DNR;
                     }
 
@@ -759,6 +809,22 @@ static uint16_t oc20_rw(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req, bool vector
         goto fail_free;
     }
 
+    /*
+     * The offset list holds one entry per address, and the backend walks it
+     * one entry per scatter-gather entry. Those agree only while each entry
+     * covers exactly one sector, which a data pointer that is not page
+     * aligned breaks: the first entry is then a part page and the mapping
+     * produces one entry more than there are addresses, so the backend reads
+     * past the end of the list -- and pairs every address with the wrong
+     * piece of the transfer besides.
+     */
+    if (req->qsg.nsg != nlb) {
+        femu_err("%s: %d data segments for %u addresses\n", __func__,
+                 req->qsg.nsg, nlb);
+        err = NVME_INVALID_FIELD | NVME_DNR;
+        goto fail_free;
+    }
+
     uint64_t aio_sector_list[OC20_CMD_MAX_LBAS];
     for (i = 0; i < nlb; i++) {
 #ifdef DEBUG_OC20
@@ -788,7 +854,10 @@ static uint16_t oc20_rw(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req, bool vector
     oc20_advance_status(n, ns, cmd, req);
 
     if (req->is_write) {
-        oc20_advance_wp(n, ns, ((uint64_t *)req->slba)[0], nlb, req);
+        err = oc20_advance_wp_all(n, ns, req);
+        if (err) {
+            goto fail_free;
+        }
     }
 
     g_free((void *)req->slba);
@@ -823,26 +892,41 @@ static uint16_t oc20_erase(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     uint32_t nlb = le16_to_cpu(dm->nlb) + 1;
     int i;
 
+    uint16_t status = NVME_SUCCESS;
+
+    /*
+     * The count is 0's based and reaches 65536; read and write refuse more
+     * than the device accepts before allocating, and erase did not, so a
+     * single command could ask for half a megabyte of address list.
+     */
+    if (nlb > OC20_CMD_MAX_LBAS) {
+        nvme_set_error_page(n, req->sq->sqid, req->cqe.cid, NVME_INVALID_FIELD,
+                            offsetof(Oc20RwCmd, lbal), 0, req->ns->id);
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
     req->nlb = nlb;
     req->slba = (uint64_t)g_malloc0(nlb * sizeof(uint64_t));
 
     if (nlb > 1) {
-        nvme_addr_read(n, lbal, (void *) req->slba, nlb * sizeof(void *));
+        nvme_addr_read(n, lbal, (void *) req->slba, nlb * sizeof(uint64_t));
     } else {
         ((uint64_t *)req->slba)[0] = lbal;
     }
 
+    /* the address list belongs to this command, as it does for read/write */
     for (i = 0; i < nlb; i++) {
         Oc20CS *cs;
         if (NULL == (cs = oc20_chunk_get_state(n, req->ns, ((uint64_t *)
                                                             req->slba)[i]))) {
-            return OC20_INVALID_RESET;
+            status = OC20_INVALID_RESET;
+            break;
         }
 
-        int err = oc20_chunk_set_free(n, req->ns, ((uint64_t *) req->slba)[i],
-                                      mptr, req);
-        if (err) {
-            return err;
+        status = oc20_chunk_set_free(n, req->ns, ((uint64_t *) req->slba)[i],
+                                     mptr, req);
+        if (status) {
+            break;
         }
 
         if (mptr) {
@@ -850,7 +934,10 @@ static uint16_t oc20_erase(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         }
     }
 
-    return NVME_SUCCESS;
+    g_free((void *)req->slba);
+    req->slba = 0;
+
+    return status;
 }
 
 static uint16_t oc20_chunk_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
@@ -859,12 +946,12 @@ static uint16_t oc20_chunk_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
     NvmeNamespace *ns;
     Oc20Namespace *lns;
     uint8_t *log_page;
-    uint32_t log_len, trans_len, nsid;
+    uint64_t log_len;
+    uint32_t trans_len, nsid;
     uint16_t ret;
 
     nsid = le32_to_cpu(cmd->nsid);
     if (unlikely(nsid == 0 || nsid > n->num_namespaces)) {
-        abort();
         return NVME_INVALID_NSID | NVME_DNR;
     }
 
@@ -872,13 +959,23 @@ static uint16_t oc20_chunk_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
 
     lns = ns->state;
 
-    log_len = lns->chks_total * sizeof(Oc20CS);
-    trans_len = MIN(log_len, buf_len);
+    log_len = (uint64_t)lns->chks_total * sizeof(Oc20CS);
 
-    if (unlikely(log_len < off + buf_len)) {
-        abort();
+    /*
+     * A host that reads this log in fixed-size chunks asks for the last one
+     * past the end. That is a bad field, not a reason to take the process
+     * down with it.
+     *
+     * Test the offset on its own before going near the length. Comparing
+     * their sum instead let the sum wrap: an offset just below 2^64 with a
+     * small length came to nearly zero, passed, and then moved the pointer
+     * to before the buffer -- which the set direction of this command writes
+     * the host's own bytes through.
+     */
+    if (unlikely(off >= log_len || buf_len > log_len - off)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
+    trans_len = buf_len;
 
     log_page = (uint8_t *) lns->chunk_info + off;
 
@@ -995,8 +1092,14 @@ static void oc20_free_namespace(FemuCtrl *n, NvmeNamespace *ns)
 {
     Oc20Namespace *lns = ns->state;
 
+    if (!lns) {
+        return;
+    }
     g_free(lns->writefail);
     g_free(lns->resetfail);
+    g_free(lns->chunk_info);
+    g_free(lns);
+    ns->state = NULL;
 }
 
 static void oc20_nvme_ns_init_identify(FemuCtrl *n, NvmeIdNs *id_ns)
@@ -1035,22 +1138,6 @@ static uint64_t nvme_ns_calc_blks(FemuCtrl *n, NvmeNamespace *ns)
     return n->ns_size / ((1 << NVME_ID_NS_LBADS(ns)) + NVME_ID_NS_MS(ns));
 }
 
-static void nvme_ns_init_predef(FemuCtrl *n, NvmeNamespace *ns)
-{
-    uint8_t *pbuf = g_malloc(NVME_ID_NS_LBADS_BYTES(ns));
-
-    switch (n->params.dlfeat) {
-    case 0x1:
-        memset(pbuf, 0x00, NVME_ID_NS_LBADS_BYTES(ns));
-        break;
-    case 0x2:
-        pbuf = g_malloc(NVME_ID_NS_LBADS_BYTES(ns));
-        memset(pbuf, 0xff, NVME_ID_NS_LBADS_BYTES(ns));
-        break;
-    default:
-        break;
-    }
-}
 
 static void femu_oc20_init_id_ctrl(FemuCtrl *n, NvmeNamespace *ns,
                                    Oc20NamespaceGeometry *ln)
@@ -1234,7 +1321,15 @@ static int oc20_init_namespace(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         lns->chunkinfo_size;
     ns->blk.meta = ns->blk.data + NVME_ID_NS_LBADS_BYTES(ns) * ns->ns_blks;
 
-    nvme_ns_init_predef(n, ns);
+    /*
+     * A read of a block that was never written should come back as the
+     * pattern the specification defines, and this mode does not do that: it
+     * marks such blocks on the read path and then transfers whatever the
+     * media holds. What used to be here allocated a pattern buffer, filled
+     * it, and dropped it -- leaking it once per namespace, twice for one
+     * setting of dlfeat -- without storing it anywhere. Removed rather than
+     * left looking like the feature exists.
+     */
 
     if (params->early_reset) {
         params->mccap |= OC20_PARAMS_MCCAP_EARLY_RESET;
@@ -1384,9 +1479,15 @@ static void oc20_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 {
     (void)ns;
 
+    if (!oc_timing_geometry_ok(n, errp)) {
+        return;
+    }
+
     NVME_CAP_SET_OC(n->bar.cap, 1);
     oc20_set_ctrl_str(n);
-    oc20_init_namespaces(n, errp);
+    if (oc20_init_namespaces(n, errp)) {
+        return;
+    }
 
     oc20_init_misc(n);
 }
@@ -1401,6 +1502,9 @@ static void oc20_exit(FemuCtrl *n)
     }
 
     oc20_release_locks(n);
+
+    g_free(n->ext_ops.state);
+    n->ext_ops.state = NULL;
 }
 
 int nvme_register_ocssd20(FemuCtrl *n)

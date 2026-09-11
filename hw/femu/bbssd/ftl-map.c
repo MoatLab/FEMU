@@ -147,6 +147,11 @@ const struct femu_mapping_ops *femu_mapping_scheme_lookup(const char *name)
     return &femu_mapping_schemes[0]; /* default: page-level */
 }
 
+bool femu_mapping_name_uses_log_class(const char *name)
+{
+    return femu_mapping_scheme_lookup(name)->uses_log_class;
+}
+
 bool femu_mapping_scheme_uses_cmt(const struct femu_mapping_ops *ops)
 {
     return ops && ops->uses_cmt;

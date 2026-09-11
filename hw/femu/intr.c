@@ -33,7 +33,7 @@ static int nvme_add_kvm_msi_virq(FemuCtrl *n, NvmeCQueue *cq)
     return 0;
 }
 
-static void nvme_remove_kvm_msi_virq(NvmeCQueue *cq)
+void nvme_remove_kvm_msi_virq(NvmeCQueue *cq)
 {
     kvm_irqchip_remove_irqfd_notifier_gsi(kvm_state, &cq->guest_notifier, cq->virq);
     kvm_irqchip_release_virq(kvm_state, cq->virq);
@@ -53,13 +53,20 @@ static void nvme_clear_guest_notifier(FemuCtrl *n)
     NvmeCQueue *cq;
     int qid;
 
+    /*
+     * Keep going past a queue the guest has deleted -- stopping there left the
+     * routes of every queue above it in place -- and release only a route that
+     * was really taken. A queue whose route could not be added keeps the id it
+     * was allocated with, and releasing that releases an interrupt this device
+     * does not own.
+     */
     for (qid = 1; qid <= n->nr_io_queues; qid++) {
         cq = n->cq[qid];
         if (!cq) {
-            break;
+            continue;
         }
 
-        if (cq->irq_enabled) {
+        if (cq->irq_enabled && cq->virq > 0) {
             nvme_remove_kvm_msi_virq(cq);
         }
     }
@@ -80,7 +87,8 @@ static int nvme_vector_unmask(PCIDevice *dev, unsigned vector, MSIMessage msg)
 
     for (qid = 1; qid <= n->nr_io_queues; qid++) {
         cq = n->cq[qid];
-        if (!cq) {
+        /* a queue with no route of its own has no notifier to move either */
+        if (!cq || !cq->irq_enabled || cq->virq <= 0) {
             continue;
         }
 
@@ -119,7 +127,7 @@ static void nvme_vector_mask(PCIDevice *dev, unsigned vector)
 
     for (uint32_t qid = 1; qid <= n->nr_io_queues; qid++) {
         cq = n->cq[qid];
-        if (!cq) {
+        if (!cq || !cq->irq_enabled || cq->virq <= 0) {
             continue;
         }
 
@@ -144,7 +152,7 @@ static void nvme_vector_poll(PCIDevice *dev, unsigned int vector_start, unsigned
 
     for (uint32_t qid = 1; qid <= n->nr_io_queues; qid++) {
         cq = n->cq[qid];
-        if (!cq) {
+        if (!cq || !cq->irq_enabled || cq->virq <= 0) {
             continue;
         }
 

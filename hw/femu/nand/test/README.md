@@ -9,7 +9,7 @@ the FEMU checkout root.
 
 ```bash
 mkdir -p /tmp/nandtest/qemu
-printf '#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n#include <string.h>\n' \
+printf '#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n#include <string.h>\n#include <stdlib.h>\n' \
     > /tmp/nandtest/qemu/osdep.h
 gcc -c -I/tmp/nandtest -Ihw/femu/nand -o /tmp/nandtest/nand-media.o hw/femu/nand/nand-media.c
 gcc -I/tmp/nandtest -Ihw/femu/nand -o /tmp/nandtest/t \
@@ -42,6 +42,31 @@ valid-looking `QLC_LOWER_PAGE`. That is invisible at `pgs_per_blk <= 496` — wh
 is why the earlier 256-page runs were unaffected — and wrong at the 512 pages the
 QLC-aligned expert layout requires. Against the unpatched source this test reports
 `FAIL pg 496` and counts `128 124 122 122`.
+
+## test_channel: STAGED assertions are stale, deliberately
+
+Since the merge of upstream's channel rework, `test_channel` reports six
+failures. They are not a regression in anything this fork measures, and they
+are not to be "fixed" by adjusting the numbers until it passes.
+
+Case [1]'s OFF assertions still pass, and OFF is what bbssd selects here: every
+channel knob (`pg_xfer_lat`, `ch_xfer_lat`, `cmd_addr_lat`, `status_lat`)
+defaults to 0 and the run environment sets none of them, so
+`cfg.policy.channel_mode` resolves to `NAND_CH_OFF`. An OFF-mode replay of 4,096
+reads over this geometry (2 ch x 4 LUN) completes at the same nanosecond on both
+sides of the merge, so the measurements taken before it stand.
+
+Cases [2]-[4] run `NAND_CH_STAGED`, and upstream changed what that model does.
+It used to serialise the LUNs on a channel completely -- case [3] asserted
+exactly that, calling it out as unlike real NAND -- and case [4] therefore saw
+the same 1.219x page-mapping gain at every LUN count. Sensing now overlaps
+across LUNs and only data-out is serialised on the bus, so the gain varies with
+LUN count as the analytical model always assumed it should.
+
+So the old expectations encoded a defect. Rewriting them is a decision about
+what the staged model ought to do, not a mechanical update, and nothing here
+uses the staged model yet. Deferred until something does: at that point rebuild
+the expectations from the intended physics, not from whatever the code prints.
 
 ## What the timing tests establish
 

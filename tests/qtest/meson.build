@@ -300,6 +300,7 @@ qos_test_ss.add(
   'ne2000-test.c',
   'tulip-test.c',
   'nvme-test.c',
+  meson.project_source_root() / 'hw/femu/tests/qtest/femu-test.c',
   'pca9552-test.c',
   'pci-test.c',
   'pcnet-test.c',

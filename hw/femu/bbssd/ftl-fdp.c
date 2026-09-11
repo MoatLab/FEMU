@@ -167,11 +167,11 @@ static FemuReclaimUnit *fdp_get_new_ru(struct ssd *ssd, uint16_t rgidx,
     fdp_set_ru_write_pointer(ssd, new_ru);
     eruh->ru_in_use_cnt++;
 
-    /* update NvmeRuHandle to reflect the new active RU's ruamw */
-    if (eruh->ruh && eruh->ruh->rus) {
-        eruh->ruh->rus[rgidx] = new_ru->nvme_ru;
-    }
-
+    /*
+     * The host-visible active RU (NvmeRuHandle.rus) is published by the
+     * caller that makes this the handle's current RU; a collection
+     * destination allocated here must not replace it.
+     */
     ftl_assert(new_ru->ruh == eruh);
     return new_ru;
 }
@@ -193,7 +193,6 @@ static struct ppa fdp_get_new_page(struct ssd *ssd, FemuReclaimUnit *ru)
     ppa.g.pg = wpp->pg;
     ppa.g.blk = wpp->blk;
     ppa.g.pl = wpp->pl;
-    ftl_assert(ppa.g.pl == 0);
 
     return ppa;
 }
@@ -223,6 +222,13 @@ static FemuReclaimUnit *fdp_advance_ru_pointer(struct ssd *ssd,
         wpp->lun++;
         if (wpp->lun == spp->luns_per_ch) {
             wpp->lun = 0;
+            /* then the next plane of the LUN, before moving down the block */
+            check_addr(wpp->pl, spp->pls_per_lun);
+            wpp->pl++;
+            if (wpp->pl < spp->pls_per_lun) {
+                return ru;
+            }
+            wpp->pl = 0;
             check_addr(wpp->pg, spp->pgs_per_blk);
             wpp->pg++;
             if (wpp->pg == spp->pgs_per_blk) {
@@ -272,10 +278,12 @@ static FemuReclaimUnit *fdp_advance_ru_pointer(struct ssd *ssd,
                         /*
                          * Signal device pressure: clear curr_ru so
                          * callers know no active write frontier exists.
+                         * A full device is an ordinary outcome the callers
+                         * turn into a capacity error, not a bug -- the
+                         * assertion that used to stand here aborted the
+                         * process in the build that arms assertions.
                          */
                         ruh->curr_ru = NULL;
-                        ftl_assert(false && __LINE__ );
-                        /* TODO */
                         return NULL;
                     }
                     FDP_TRACE(ssd, "RU_ROTATE ruhid=%u(curr_ru %u) old_ru=%u "
@@ -498,24 +506,31 @@ static int check_gc_ruh_available(struct ssd *ssd, FemuRuHandle * ruh){
         return -1;
     }
     if(ruh->ruh_type == NVME_RUHT_INITIALLY_ISOLATED){
-        if(ssd->ruhs[ssd->nruhs - 1].curr_ru == NULL){
-            ssd->ruhs[ssd->nruhs - 1].curr_ru = fdp_get_new_ru(ssd, ruh->curr_ru->rgidx, ruh->ruhid);
-            ssd->ruhs[ssd->nruhs - 1].rus[ssd->ruhs[ssd->nruhs - 1].curr_ru->rgidx] = ssd->ruhs[ssd->nruhs - 1].curr_ru;
-            //Not neccesary I think for now
-            ssd->ruhs[ssd->nruhs - 1].ruh->rus[ssd->ruhs[ssd->nruhs - 1].curr_ru->rgidx] = ssd->ruhs[ssd->nruhs - 1].curr_ru->nvme_ru;  //qemu-system-x86_64: ../hw/femu/bbssd/ftl.c:2106: select_victim_ru: Assertion `victim_ru != ((void *)0)' failed.
-        }
-        if (ssd->ruhs[ssd->nruhs - 1].curr_ru == NULL){
-            //This means no space left
-            return -1;
-        }
+        FemuRuHandle *gcruh = &ssd->ruhs[ssd->nruhs - 1];
 
+        if (gcruh->curr_ru == NULL) {
+            /*
+             * The unit belongs to the collection handle, so it is allocated
+             * under that handle's identifier -- charged to the victim's, every
+             * page later relocated into it counted against a handle the data
+             * does not belong to. And the result is tested before it is used:
+             * the test used to come two dereferences too late.
+             */
+            FemuReclaimUnit *new_ru = fdp_get_new_ru(ssd, ruh->curr_ru->rgidx,
+                                                     gcruh->ruhid);
+
+            if (!new_ru) {
+                return -1;
+            }
+            gcruh->curr_ru = new_ru;
+            gcruh->rus[new_ru->rgidx] = new_ru;
+            gcruh->ruh->rus[new_ru->rgidx] = new_ru->nvme_ru;
+        }
     }
     else if(ruh->ruh_type == NVME_RUHT_PERSISTENTLY_ISOLATED){
         if(ruh->gc_ru == NULL){
             ruh->gc_ru = fdp_get_new_ru(ssd, ruh->curr_ru->rgidx, ruh->ruhid);
-            ftl_debug("check_gc_ruh_available ruh %d gc_ru idx %d , %p call new ru  \n", ruh->ruhid, ruh->gc_ru->ruidx, ruh->gc_ru );
             if (ruh->gc_ru == NULL){
-                //assert(ruh->gc_ru != NULL);//This means no space left
                 return -1;
             }
         }
@@ -570,10 +585,39 @@ static FemuReclaimUnit *select_victim_ru(struct ssd *ssd, uint16_t rgid,
         victim_ru = pqueue_pop(rm->victim_ru_pq);
         break;
 
-    case GC_GLOBAL_CB:
-        victim_ru = pqueue_pop(rm->victim_ru_cb);
+    case GC_GLOBAL_CB: {
+        /*
+         * Cost-benefit weighs the space a reclaim frees against the copying
+         * it costs, by how long the data has sat: (1 - u) * age / u. The age
+         * only means something at selection time, so scan the heap here as
+         * the line GC does rather than trust a priority fixed at insertion.
+         */
+        pqueue_t *pq = rm->victim_ru_cb;
+        uint64_t now = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+        double best = -1.0;
+        bool best_free = false;
 
+        for (size_t i = 1; i < pq->size; i++) {
+            FemuReclaimUnit *ru = pq->d[i];
+            double u = ru->utilization;
+            double age = (double)(now - ru->last_invalidated_time) + 1.0;
+            double score = (1.0 - u) * age / (u + 1e-6);
+
+            if (ru->vpc == 0) {
+                if (!best_free) {
+                    best_free = true;
+                    victim_ru = ru;
+                }
+            } else if (!best_free && score > best) {
+                best = score;
+                victim_ru = ru;
+            }
+        }
+        if (victim_ru) {
+            pqueue_remove(pq, victim_ru);
+        }
         break;
+    }
 
     case GC_GLOBAL_RAND:
         victim_ru = pqueue_randpop(rm->victim_ru_pq);
@@ -723,9 +767,11 @@ static FemuReclaimUnit *select_victim_ru(struct ssd *ssd, uint16_t rgid,
 }
 
 /*
- * gc_write_page_fdp_style - relocate a valid page to a GC destination RU
+ * gc_write_page_fdp_style - relocate a valid page to a GC destination RU.
+ * Returns false when there is nowhere to put it, which leaves the page where it
+ * is: the caller must then not erase the block it came from.
  */
-static void gc_write_page_fdp_style(struct ssd *ssd, struct ppa *old_ppa,
+static bool gc_write_page_fdp_style(struct ssd *ssd, struct ppa *old_ppa,
                                     FemuRuHandle *dest_ruh)
 {
     struct ppa new_ppa;
@@ -746,10 +792,21 @@ static void gc_write_page_fdp_style(struct ssd *ssd, struct ppa *old_ppa,
         ftl_assert(false && __LINE__);
     }
 
+    /*
+     * An earlier pass can have left the frontier without a unit: advancing it
+     * hands back nothing when the free list is empty. There is no page to take,
+     * and the only thing between here and a null pointer was an assertion that
+     * is compiled out.
+     */
+    if (!dest_ru) {
+        return false;
+    }
+
     new_ppa = fdp_get_new_page(ssd, dest_ru);
     set_maptbl_ent(ssd, lpn, &new_ppa);
     set_rmap_ent(ssd, lpn, &new_ppa);
     mark_page_valid_fdp(ssd, &new_ppa, dest_ru);
+    ssd->gc_write_pages++; /* a page the device relocated itself */
 
     // FDP_TRACE(ssd, "GC_MIGRATE lpn=%lu src(ch=%u/lun=%u/blk=%u/pg=%u) "
     //           "dst(ch=%u/lun=%u/blk=%u/pg=%u) dest_ruhid=%u\n",
@@ -766,23 +823,46 @@ static void gc_write_page_fdp_style(struct ssd *ssd, struct ppa *old_ppa,
      * right after the advance.
      */
 
-    if(dest_ruh->ruh_type == NVME_RUHT_PERSISTENTLY_ISOLATED ){
-        // handle ruh->ru pointer after adv
-        if( (ret_ru = fdp_advance_ru_pointer(ssd, &ssd->rg[dest_ru->rgidx], dest_ru->ruh, dest_ru)) != dest_ru){
+    /*
+     * Advancing hands back NULL when there is no free reclaim unit left, which
+     * is what a full device looks like from here. The initially-isolated arm
+     * dereferenced that straight away, and the only thing standing between it
+     * and a null pointer was an ftl_assert, which is compiled out. Neither arm
+     * can do anything useful without a unit, so leave the write frontier where
+     * it is and let the caller run out of room.
+     */
+    if (dest_ruh->ruh_type == NVME_RUHT_PERSISTENTLY_ISOLATED) {
+        FemuReclaimUnit *host_ru = dest_ru->ruh->curr_ru;
+
+        ret_ru = fdp_advance_ru_pointer(ssd, &ssd->rg[dest_ru->rgidx],
+                                        dest_ru->ruh, dest_ru);
+        if (ret_ru && ret_ru != dest_ru) {
             dest_ruh->gc_ru = ret_ru;
+        } else if (!ret_ru) {
+            /*
+             * Advancing clears the handle's host write frontier when it cannot
+             * allocate, but what ran out here is the collection frontier. Put
+             * the host's back: cleared, the next host write to this handle
+             * would take a null unit into the page allocator.
+             */
+            dest_ru->ruh->curr_ru = host_ru;
         }
-    }else if (dest_ruh->ruh_type == NVME_RUHT_INITIALLY_ISOLATED ){
-        int gcruh_id = ssd->nruhs-1;
-        ftl_assert( dest_ruh->ruhid == gcruh_id );
-        if( (ret_ru = fdp_advance_ru_pointer(ssd, &ssd->rg[dest_ru->rgidx], dest_ruh, dest_ru)) != dest_ru ) {
-            //Do ugly updates
+    } else if (dest_ruh->ruh_type == NVME_RUHT_INITIALLY_ISOLATED) {
+        int gcruh_id = ssd->nruhs - 1;
+
+        ftl_assert(dest_ruh->ruhid == gcruh_id);
+        ret_ru = fdp_advance_ru_pointer(ssd, &ssd->rg[dest_ru->rgidx],
+                                        dest_ruh, dest_ru);
+        if (ret_ru && ret_ru != dest_ru) {
             ssd->ruhs[gcruh_id].rus[dest_ru->rgidx] = ret_ru;
             ssd->ruhs[gcruh_id].curr_ru = ret_ru;
             ssd->ruhs[gcruh_id].ruh->rus[dest_ru->rgidx] = ret_ru->nvme_ru;
-        } 
+        }
     }
-    
-    ftl_assert((ret_ru != NULL));
+
+    if (!ret_ru) {
+        ftl_err("FDP: no free reclaim unit while relocating; device is full\n");
+    }
 
     if (ssd->sp.enable_gc_delay) {
         struct nand_cmd gcw;
@@ -794,6 +874,9 @@ static void gc_write_page_fdp_style(struct ssd *ssd, struct ppa *old_ppa,
 
     new_lun = get_lun(ssd, &new_ppa);
     new_lun->gc_endtime = new_lun->next_lun_avail_time;
+
+    /* this page is relocated; whether the next one can be is the next call */
+    return true;
 }
 
 /*
@@ -817,7 +900,14 @@ static int clean_one_block_fdp_style(struct ssd *ssd, struct ppa *ppa,
         ftl_assert(pg_iter->status != PG_FREE);
         if (pg_iter->status == PG_VALID) {
             gc_read_page(ssd, ppa);
-            gc_write_page_fdp_style(ssd, ppa, dest_ruh);
+            /*
+             * Nowhere to put this one. Stop here and say so: the pages already
+             * moved keep their new home, and the ones still in this block have
+             * to keep theirs, so the block must not be erased.
+             */
+            if (!gc_write_page_fdp_style(ssd, ppa, dest_ruh)) {
+                return -1;
+            }
             cnt++;
         }
     }
@@ -832,25 +922,20 @@ static int clean_one_block_fdp_style(struct ssd *ssd, struct ppa *ppa,
 static void mark_ru_free(struct ssd *ssd, uint16_t rgid,
                          FemuReclaimUnit *ru)
 {
-    struct ssdparams *spp = &ssd->sp;
     struct ru_mgmt *rm = ssd->rg[rgid].ru_mgmt;
-    struct ppa ppa;
 
     ftl_assert(ru != NULL);
 
+    /*
+     * The blocks are already erased. Every caller walks them itself first,
+     * with the erase timing the die owes, and this ran the same walk again:
+     * resetting page state a second time is harmless, but each block was
+     * counted as erased twice, which is what wears the media in the model.
+     */
     for (int i = 0; i < ru->n_lines; i++) {
         ru->lines[i]->ipc = 0;
         ru->lines[i]->vpc = 0;
         ru->lines[i]->pos = 0;
-        ppa.g.blk = ru->lines[i]->id;
-        for (int ch = 0; ch < spp->nchs; ch++) {
-            for (int lun = 0; lun < spp->luns_per_ch; lun++) {
-                ppa.g.ch = ch;
-                ppa.g.lun = lun;
-                ppa.g.pl = 0;
-                mark_block_free(ssd, &ppa);
-            }
-        }
     }
 
     ru->vpc = 0;
@@ -993,21 +1078,41 @@ int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid,
         ppa.g.blk = victim_line->id;
         for (int ch = 0; ch < spp->nchs; ch++) {
             for (int lun = 0; lun < spp->luns_per_ch; lun++) {
+                struct ppa ppas[1 << PL_BITS];
+
                 ppa.g.ch = ch;
                 ppa.g.lun = lun;
                 ppa.g.pl = 0;
                 lunp = get_lun(ssd, &ppa);
 
-                vpc_cnt += clean_one_block_fdp_style(ssd, &ppa, dest_ruh);
-                
-                blk_cnt++;
-                mark_block_free(ssd, &ppa);
+                for (int pl = 0; pl < spp->pls_per_lun; pl++) {
+                    int moved;
+
+                    ppa.g.pl = pl;
+                    moved = clean_one_block_fdp_style(ssd, &ppa, dest_ruh);
+                    if (moved < 0) {
+                        /*
+                         * The destination ran out part way. Leave the rest of
+                         * the victim where it is and put it back on the queue
+                         * rather than erasing a block that still holds data.
+                         */
+                        reinsert_victim_ru(ssd, victim_ru);
+                        return -1;
+                    }
+                    vpc_cnt += moved;
+                    blk_cnt++;
+                    mark_block_free(ssd, &ppa);
+                    ppas[pl] = ppa;
+                }
+
+                /* the die erases the line's planes in one operation */
                 if (spp->enable_gc_delay) {
                     struct nand_cmd gce;
                     gce.type = GC_IO;
                     gce.cmd = NAND_ERASE;
                     gce.stime = 0;
-                    ssd_advance_status(ssd, &ppa, &gce);
+                    ssd_advance_status_multiplane(ssd, ppas, spp->pls_per_lun,
+                                                  &gce);
                 }
                 lunp->gc_endtime = lunp->next_lun_avail_time;
             }
@@ -1194,6 +1299,9 @@ static uint64_t ssd_stream_write(FemuCtrl *n, struct ssd *ssd,
         }
     }
 
+    /* pages the host wrote; the WAF denominator, as on the non-FDP path */
+    ssd->host_write_pages += end_lpn - start_lpn + 1;
+
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
         /*
          * Updating curr_ru should be handled by fdp_advance_ru_pointer() naturally.
@@ -1223,10 +1331,12 @@ static uint64_t ssd_stream_write(FemuCtrl *n, struct ssd *ssd,
         set_maptbl_ent(ssd, lpn, &ppa);
         set_rmap_ent(ssd, lpn, &ppa);
         mark_page_valid_fdp(ssd, &ppa, ru);
+        ssd->nand_write_pages++; /* a user page programmed into NAND */
 
-        /* decrement ruamw for this RU */
-        if (ru->nvme_ru && ru->nvme_ru->ruamw > 0) {
-            ru->nvme_ru->ruamw--; //TODO ? Does this really decrements page KiB?
+        /* RUAMW counts logical blocks; a page holds secs_per_pg of them */
+        if (ru->nvme_ru) {
+            ru->nvme_ru->ruamw -= MIN(ru->nvme_ru->ruamw,
+                                      (uint64_t)spp->secs_per_pg);
         }
 
         /* advance RU write pointer; may allocate new RU */
@@ -1677,18 +1787,27 @@ static void ssd_trim_fdp_reset_all(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
     for (int ch = 0; ch < spp->nchs; ch++) {
         for (int lun = 0; lun < spp->luns_per_ch; lun++) {
             for (int blk = 0; blk < spp->blks_per_pl; blk++) {
+                struct ppa ppas[1 << PL_BITS];
+
                 ppa.g.ch = ch;
                 ppa.g.lun = lun;
                 ppa.g.pl = 0;
                 ppa.g.blk = blk;
                 lunp = get_lun(ssd, &ppa);
-                mark_block_free(ssd, &ppa);
+
+                for (int pl = 0; pl < spp->pls_per_lun; pl++) {
+                    ppa.g.pl = pl;
+                    mark_block_free(ssd, &ppa);
+                    ppas[pl] = ppa;
+                }
+
                 if (spp->enable_gc_delay) {
                     struct nand_cmd gce;
                     gce.type = GC_IO;
                     gce.cmd = NAND_ERASE;
                     gce.stime = 0;
-                    ssd_advance_status(ssd, &ppa, &gce);
+                    ssd_advance_status_multiplane(ssd, ppas, spp->pls_per_lun,
+                                                  &gce);
                 }
                 lunp->gc_endtime = lunp->next_lun_avail_time;
             }
@@ -1796,4 +1915,66 @@ void ssd_trim_fdp_style(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
     req->dsm_ranges = NULL;
     req->dsm_nr_ranges = 0;
     req->dsm_attributes = 0;
+}
+
+/*
+ * femu_fdp_ssd_free - release what the two FDP init functions took
+ *
+ * ssd->rus[i] and rg->rus are the same allocation, and a handle's rus[] holds
+ * pointers into those arrays rather than reclaim units of its own, so each is
+ * freed exactly once from the side that allocated it.
+ */
+void femu_fdp_ssd_free(struct ssd *ssd)
+{
+    uint64_t i;
+
+    if (ssd->ruhs) {
+        for (i = 0; i < ssd->nruhs; i++) {
+            struct ru_mgmt *rm = ssd->ruhs[i].ru_mgmt;
+
+            if (rm) {
+                pqueue_free(rm->victim_ru_pq);
+                pqueue_free(rm->victim_ru_cb);
+                g_free(rm);
+            }
+            g_free(ssd->ruhs[i].rus);
+        }
+        g_free(ssd->ruhs);
+        ssd->ruhs = NULL;
+        ssd->nruhs = 0;
+    }
+
+    if (ssd->rg) {
+        for (i = 0; i < ssd->nrg; i++) {
+            FemuReclaimGroup *rg = &ssd->rg[i];
+            struct ru_mgmt *rm = rg->ru_mgmt;
+            uint64_t r;
+
+            /*
+             * The array holds total_ru_cnt entries even though a group hands
+             * out only its share, and an untouched entry is zeroed, so walk
+             * the allocation rather than the group's count.
+             */
+            for (r = 0; rg->rus && r < ssd->sp.total_ru_cnt; r++) {
+                g_free(rg->rus[r].ssd_wptr);
+                g_free(rg->rus[r].lines);
+            }
+            if (rm) {
+                pqueue_free(rm->victim_ru_pq);
+                pqueue_free(rm->victim_ru_cb);
+                g_free(rm);
+            }
+        }
+        g_free(ssd->rg);
+        ssd->rg = NULL;
+    }
+
+    if (ssd->rus) {
+        for (i = 0; i < ssd->nrg; i++) {
+            g_free(ssd->rus[i]);
+        }
+        g_free(ssd->rus);
+        ssd->rus = NULL;
+    }
+    ssd->nrg = 0;
 }

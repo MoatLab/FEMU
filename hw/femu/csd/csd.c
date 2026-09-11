@@ -13,6 +13,15 @@ typedef int64_t (*FemuCsdSharedLibFn)(FemuCsdArgs *args);
 
 #define CSD_EXEC_DATA_MAX (1U << 20)
 
+/*
+ * A program is held whole in host memory while it loads, and the load command
+ * carries its size in a 32-bit field, so an unbounded one lets the guest ask
+ * for four gigabytes per program index and there are 65535 of those. Cap what
+ * one program may be and what all of them together may be.
+ */
+#define CSD_PROGRAM_MAX (16U << 20)
+#define CSD_PROGRAM_TOTAL_MAX (64U << 20)
+
 typedef struct FemuCsdAfdm {
     uint32_t id;
     uint64_t size;
@@ -57,6 +66,7 @@ typedef struct FemuCsdState {
     CsdCtrlParams params;
     uint64_t fdm_capacity;
     uint64_t fdm_used;
+    uint64_t prog_used;         /* bytes held by loaded programs */
     uint32_t next_afdm_id;
     uint32_t next_group_id;
     uint32_t next_rsid;
@@ -65,6 +75,7 @@ typedef struct FemuCsdState {
     GHashTable *groups;
     GHashTable *mrs;
     QemuMutex lock;
+    uint64_t *cu_next_avail;    /* when each compute unit is free again */
 } FemuCsdState;
 
 static void csd_check_size(void)
@@ -86,7 +97,7 @@ static void csd_check_size(void)
 
 static FemuCsdState *csd_state(FemuCtrl *n)
 {
-    return n->ext_ops.state;
+    return n->csd_ctrl_state;
 }
 
 static void csd_afdm_free(gpointer opaque)
@@ -160,6 +171,23 @@ static void csd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 
     csd_check_size();
 
+    /* CSD builds a bbssd ssd from the shared geometry, so it needs the same
+     * bounds check bbssd does; without it an oversized axis aliases in the PPA. */
+    if (bb_check_geometry(n, errp)) {
+        return;
+    }
+
+    /*
+     * And the same capacity check. This mode runs the black-box FTL verbatim
+     * -- the request router sends both through it -- so it needs the reserve
+     * that check enforces just as much. Without it a namespace exposing the
+     * whole of the media was accepted here while black box refused it, and
+     * the collector then had nowhere to relocate to.
+     */
+    if (bb_check_capacity(n, ns, errp)) {
+        return;
+    }
+
     if (n->csd_params.fdm_size_mb == 0) {
         error_setg(errp, "CSD mode requires fdm_size to be non-zero");
         return;
@@ -209,8 +237,9 @@ static void csd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
                                         g_free);
     csd->mrs = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL,
                                      csd_mrs_free);
+    csd->cu_next_avail = g_new0(uint64_t, csd->params.nr_cu);
     qemu_mutex_init(&csd->lock);
-    n->ext_ops.state = csd;
+    n->csd_ctrl_state = csd;
 
     femu_log("%s,CSD mode initialized: fdm=%" PRIu64 "MB, "
              "nr_cu=%u, nr_thread=%u\n",
@@ -221,6 +250,27 @@ static void csd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 static void csd_exit(FemuCtrl *n)
 {
     FemuCsdState *csd = csd_state(n);
+    int i;
+
+    /*
+     * A computational namespace runs the black-box FTL through its own
+     * ns->ssd, allocated here rather than by bbssd, so this mode releases it.
+     * A controller with no black-box namespace never dispatches bb_exit(), so
+     * leaving it to that one leaked the whole FTL.
+     */
+    for (i = 0; i < n->num_namespaces; i++) {
+        NvmeNamespace *ns = &n->namespaces[i];
+
+        if (!NS_CSD(ns) || !ns->ssd) {
+            continue;
+        }
+        if (n->ssd == ns->ssd) {
+            n->ssd = NULL;
+        }
+        ssd_free(ns->ssd);
+        g_free(ns->ssd);
+        ns->ssd = NULL;
+    }
 
     if (!csd) {
         return;
@@ -231,8 +281,9 @@ static void csd_exit(FemuCtrl *n)
     g_hash_table_destroy(csd->groups);
     g_hash_table_destroy(csd->mrs);
     qemu_mutex_destroy(&csd->lock);
+    g_free(csd->cu_next_avail);
     g_free(csd);
-    n->ext_ops.state = NULL;
+    n->csd_ctrl_state = NULL;
 }
 
 static FemuCsdProgram *csd_get_program_locked(FemuCsdState *csd, uint32_t id)
@@ -359,14 +410,65 @@ static uint16_t csd_check_nvm_ftl_range(NvmeNamespace *ns, uint64_t slba,
     return NVME_SUCCESS;
 }
 
-static uint16_t csd_load_shared_lib(FemuCsdProgram *program)
+/*
+ * The name in a program comes from the guest, and loading one means the host
+ * process opens that file and calls a symbol out of it. A guest must not be
+ * able to name any file on the host, so the operator says where programs live
+ * and the guest may only name one of the files in it: no separator, no parent
+ * directory, no symbolic link out. With no directory configured the device
+ * accepts only the program type that runs nothing.
+ */
+static uint16_t csd_program_path(FemuCtrl *n, const char *name, char **path)
 {
-    const char *path;
+    const char *dir = n->csd_params.program_dir;
+    g_autofree char *joined = NULL;
+    g_autofree char *real = NULL;
+    g_autofree char *realdir = NULL;
+
+    if (!dir || !dir[0]) {
+        femu_err("CSD: loading a program needs csd_program_dir to be set\n");
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    if (!name[0] || strchr(name, '/') || !strcmp(name, ".") ||
+        !strcmp(name, "..")) {
+        femu_err("CSD: a program name must be a file in csd_program_dir, "
+                 "got \"%s\"\n", name);
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    joined = g_build_filename(dir, name, NULL);
+    real = realpath(joined, NULL);
+    realdir = realpath(dir, NULL);
+    if (!real || !realdir || !g_str_has_prefix(real, realdir) ||
+        real[strlen(realdir)] != '/') {
+        femu_err("CSD: %s does not resolve inside csd_program_dir\n", joined);
+        free(real);
+        free(realdir);
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    *path = g_strdup(real);
+    free(real);
+    free(realdir);
+
+    return NVME_SUCCESS;
+}
+
+static uint16_t csd_load_shared_lib(FemuCtrl *n, FemuCsdProgram *program)
+{
+    const char *name;
     const char *symbol;
+    g_autofree char *path = NULL;
     gpointer fn = NULL;
     uint16_t status;
 
-    status = csd_parse_program(program, &path, &symbol);
+    status = csd_parse_program(program, &name, &symbol);
+    if (status) {
+        return status;
+    }
+
+    status = csd_program_path(n, name, &path);
     if (status) {
         return status;
     }
@@ -389,18 +491,24 @@ static uint16_t csd_load_shared_lib(FemuCsdProgram *program)
     return NVME_SUCCESS;
 }
 
-static uint16_t csd_load_ubpf(FemuCsdProgram *program, bool jit)
+static uint16_t csd_load_ubpf(FemuCtrl *n, FemuCsdProgram *program, bool jit)
 {
 #ifdef CONFIG_FEMU_CSD_UBPF
-    const char *path;
+    const char *name;
     const char *symbol;
+    g_autofree char *path = NULL;
     g_autofree char *elf = NULL;
     gsize elf_size = 0;
     g_autoptr(GError) err = NULL;
     char *errmsg = NULL;
     uint16_t status;
 
-    status = csd_parse_program(program, &path, &symbol);
+    status = csd_parse_program(program, &name, &symbol);
+    if (status) {
+        return status;
+    }
+
+    status = csd_program_path(n, name, &path);
     if (status) {
         return status;
     }
@@ -437,19 +545,21 @@ static uint16_t csd_load_ubpf(FemuCsdProgram *program, bool jit)
 
     return NVME_SUCCESS;
 #else
+    (void)n;
     return NVME_INVALID_FIELD | NVME_DNR;
 #endif
 }
 
-static uint16_t csd_load_program_data(FemuCsdProgram *program, bool jit)
+static uint16_t csd_load_program_data(FemuCtrl *n, FemuCsdProgram *program,
+                                      bool jit)
 {
     switch (program->type) {
     case NVME_CSD_CSF_TYPE_PHANTOM:
         return NVME_SUCCESS;
     case NVME_CSD_CSF_TYPE_SHARED_LIB:
-        return csd_load_shared_lib(program);
+        return csd_load_shared_lib(n, program);
     case NVME_CSD_CSF_TYPE_EBPF:
-        return csd_load_ubpf(program, jit);
+        return csd_load_ubpf(n, program, jit);
     default:
         return NVME_INVALID_FIELD | NVME_DNR;
     }
@@ -469,7 +579,7 @@ static uint16_t csd_compute_load(FemuCtrl *n, NvmeCmd *cmd)
     FemuCsdProgram *program;
     uint16_t status = NVME_SUCCESS;
 
-    if (pind == 0 || psize > UINT32_MAX || loff > psize ||
+    if (pind == 0 || psize > CSD_PROGRAM_MAX || loff > psize ||
         numb > psize - loff) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
@@ -486,12 +596,25 @@ static uint16_t csd_compute_load(FemuCtrl *n, NvmeCmd *cmd)
             qemu_mutex_unlock(&csd->lock);
             return NVME_INVALID_FIELD | NVME_DNR;
         }
+        csd->prog_used -= program->size;
         g_hash_table_remove(csd->programs, GUINT_TO_POINTER((uint32_t)pind));
         qemu_mutex_unlock(&csd->lock);
         return NVME_SUCCESS;
     }
 
     if (loff == 0) {
+        FemuCsdProgram *held = csd_get_program_locked(csd, pind);
+
+        /* the replace below frees whatever this index already held */
+        if (held) {
+            csd->prog_used -= held->size;
+        }
+        if (psize > CSD_PROGRAM_TOTAL_MAX - csd->prog_used) {
+            qemu_mutex_unlock(&csd->lock);
+            return NVME_CAP_EXCEEDED | NVME_DNR;
+        }
+        csd->prog_used += psize;
+
         program = g_new0(FemuCsdProgram, 1);
         program->id = pind;
         program->type = load->ptype;
@@ -526,7 +649,7 @@ static uint16_t csd_compute_load(FemuCtrl *n, NvmeCmd *cmd)
     }
 
     if (program->load_size == program->size) {
-        status = csd_load_program_data(program, load->jit);
+        status = csd_load_program_data(n, program, load->jit);
         if (!status) {
             program->loading = false;
             program->active = false;
@@ -707,7 +830,7 @@ static uint16_t csd_exec(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     uint64_t cparam1 = le64_to_cpu(exec->cparam1);
     uint64_t cparam2 = le64_to_cpu(exec->cparam2);
     uint32_t group_id = exec->group;
-    uint32_t runtime = le32_to_cpu(exec->runtime);
+    uint64_t runtime = le32_to_cpu(exec->runtime);
     uint64_t prp1 = le64_to_cpu(exec->prp1);
     uint64_t prp2 = le64_to_cpu(exec->prp2);
     FemuCsdProgram *program;
@@ -719,6 +842,7 @@ static uint16_t csd_exec(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     long long *mr_len = NULL;
     FemuCsdArgs args = { 0 };
     int64_t result = 0;
+    int64_t host_ns;
     uint16_t status = NVME_SUCCESS;
 
     if (dlen == 0 && numr > 0) {
@@ -794,6 +918,7 @@ static uint16_t csd_exec(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     args.buffer_len = args.data_buffer ?
                       dlen - numr * sizeof(NvmeCsdMemoryRange) : 0;
 
+    host_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     switch (program->type) {
     case NVME_CSD_CSF_TYPE_PHANTOM:
         if (args.numr >= 2) {
@@ -835,20 +960,50 @@ static uint16_t csd_exec(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         status = NVME_INVALID_FIELD | NVME_DNR;
         break;
     }
+    host_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - host_ns;
     if (!status) {
         req->cqe.n.result = result > UINT32_MAX ? UINT32_MAX : result;
     }
     g_free(mr_addr);
     g_free(mr_len);
+
+    /*
+     * A program that names no runtime is charged the time it took the host
+     * to run it, scaled: by the program's own factor (tenths) when it gave
+     * one, else by the device's csf_runtime_scale.
+     */
+    if (!status && !runtime) {
+        uint64_t scale10 = program->runtime_scale ? program->runtime_scale :
+                           (uint64_t)csd->params.csf_runtime_scale * 10;
+
+        runtime = host_ns > 0 ? host_ns * scale10 / 10 : 0;
+    }
+
+    /*
+     * The program runs on the compute unit that frees up first, and holds
+     * it for its runtime; nr_cu bounds how many run at once.
+     */
+    if (!status && runtime) {
+        uint64_t start = req->expire_time;
+        uint32_t cu = 0;
+        uint32_t i;
+
+        for (i = 1; i < csd->params.nr_cu; i++) {
+            if (csd->cu_next_avail[i] < csd->cu_next_avail[cu]) {
+                cu = i;
+            }
+        }
+        if (csd->cu_next_avail[cu] > start) {
+            start = csd->cu_next_avail[cu];
+        }
+        csd->cu_next_avail[cu] = start + runtime;
+        req->reqlat += csd->cu_next_avail[cu] - req->expire_time;
+        req->expire_time = csd->cu_next_avail[cu];
+    }
     qemu_mutex_unlock(&csd->lock);
 
     if (status) {
         goto out;
-    }
-
-    if (runtime) {
-        req->reqlat += runtime;
-        req->expire_time += runtime;
     }
 
 out:

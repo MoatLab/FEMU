@@ -58,6 +58,7 @@ typedef struct NandLoc {
     uint8_t  flash_type;
     uint8_t  page_type;
     uint32_t pe_cycles;
+    uint32_t age_sec;   /* seconds since the data was programmed; 0 = untracked */
 } NandLoc;
 
 typedef struct NandMediaTiming {
@@ -86,6 +87,7 @@ typedef struct NandMediaTiming {
     int64_t ecc_step_ns;
     int32_t ecc_pe_per_tier;
     int32_t ecc_max_tiers;
+    int32_t ecc_retention_per_tier_sec;
     /* program/erase suspend overhead (ns) for an urgent read to preempt an in-flight P/E */
     int64_t tsusp_ns;
 } NandMediaTiming;
@@ -95,22 +97,8 @@ typedef struct NandMediaPolicy {
     NandChannelMode channel_mode;
     bool            cache_read;
     bool            pe_suspend;   /* reads preempt an in-flight program/erase on the LUN */
-    bool            copyback_skips_bus;
     bool            ecc_on_read;
     bool            use_flat_timing;  /* true: scalar fields; false: table */
-    /*
-     * Array busy-extend semantics (OCSSD): when the resource is busy at op arrival,
-     * extend its availability by the full op latency (avail += lat) instead of the
-     * default avail = max(now, avail) + lat. Both reduce to now+lat when idle; they
-     * differ only when now > avail after a gap. Default false (max model).
-     */
-    bool            array_busy_extends;
-    /*
-     * page_type provided by the caller in NandLoc.page_type (used for the latency
-     * table index). When false the media derives nothing; callers using the flat
-     * timing path leave page_type 0.
-     */
-    bool            caller_page_type;
 } NandMediaPolicy;
 
 /*
@@ -138,8 +126,29 @@ typedef struct NandMediaConfig {
     void                  *timeline_opaque;
 } NandMediaConfig;
 
+/*
+ * A read's data-out is booked on the channel for the window in which it will
+ * happen, [array done, +xfer), not from the moment the read was issued. The
+ * windows live here, per channel; the controller's ch_avail accumulator keeps
+ * meaning "the bus is busy until", for phases that use it now. Bounded so the
+ * lookup stays a short scan; a channel that has more reads in flight than this
+ * falls back to booking the bus from now, as before.
+ */
+#define NAND_BUS_RES_MAX 32
+
+typedef struct NandBusRes {
+    uint64_t start;
+    uint64_t end;
+} NandBusRes;
+
+typedef struct NandBusResList {
+    NandBusRes r[NAND_BUS_RES_MAX];
+    int n;
+} NandBusResList;
+
 typedef struct NandMedia {
     NandMediaConfig cfg;
+    NandBusResList *bus_res;   /* nchs entries; NULL unless NAND_CH_STAGED */
 } NandMedia;
 
 typedef struct NandOpCompletion {
@@ -148,6 +157,7 @@ typedef struct NandOpCompletion {
 } NandOpCompletion;
 
 void nand_media_init(NandMedia *m, const NandMediaConfig *cfg);
+void nand_media_destroy(NandMedia *m);
 
 /* single-chip op; returns completion (done_ns absolute, latency_ns = done - stime) */
 NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
@@ -155,8 +165,9 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
 
 /*
  * Multi-plane group: one parallel array op + per-plane bus + inter-plane busy.
- * No caller yet -- the bbssd write pointer only ever allocates plane 0, so
- * there is no way to build a group. Waiting on plane addressing in the FTL.
+ * No caller yet. The bbssd allocator addresses planes now, so a group can be
+ * built; what is still missing is batching the pages of one request that land
+ * in different planes of a LUN into a single operation.
  */
 NandOpCompletion nand_media_multiplane(NandMedia *m, const NandLoc *locs, int nlocs,
                                        NandMediaOp op, uint64_t stime);

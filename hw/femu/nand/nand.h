@@ -82,6 +82,18 @@ enum {
     QLC_UPPER_PAGE        = 3,
 };
 
+/*
+ * Rated program/erase endurance per cell type, in cycles. Each extra bit per
+ * cell costs roughly a factor of three; these are the usual published orders
+ * of magnitude rather than any one part's datasheet. SMART's percentage_used
+ * divides the rating into the cycles the media has actually taken.
+ */
+#define SLC_RATED_PE_CYCLES     (100000)
+#define MLC_RATED_PE_CYCLES     (3000)
+#define TLC_RATED_PE_CYCLES     (1000)
+#define QLC_RATED_PE_CYCLES     (300)
+#define PLC_RATED_PE_CYCLES     (100)
+
 typedef enum FlashType {
     SLC            = 1,
     MLC            = 2,
@@ -136,6 +148,7 @@ uint8_t get_page_type(int flash_type, int pg);
 int64_t get_page_read_latency(int flash_type, int page_type);
 int64_t get_page_write_latency(int flash_type, int page_type);
 int64_t get_blk_erase_latency(int flash_type);
+uint32_t get_rated_pe_cycles(int flash_type);
 
 int init_nand_flash(void *opaque);
 

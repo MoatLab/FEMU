@@ -1,6 +1,39 @@
 #include "./nvme.h"
 
+/*
+ * Compare, Write Zeroes, Write Uncorrectable and Dataset Management belong to
+ * the NVM command set. A key-value namespace does not implement it: these
+ * opcodes were reaching the generic handlers, which addressed the value store
+ * as though it were an array of logical blocks.
+ *
+ * Zoned namespaces are left alone. The zoned command set does include these,
+ * with zone semantics on top, so refusing them there would be wrong; that they
+ * currently run without updating any zone state is a separate gap.
+ */
+static bool nvme_ns_has_nvm_cmd_set(NvmeNamespace *ns)
+{
+    return ns->csi != NVME_CSI_KV;
+}
+
 static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
+
+/*
+ * DSM hands its range list to whichever mode serves the namespace; bbssd frees
+ * it once the ranges are applied, the others never did. Release whatever is
+ * still attached when the request goes back on the free list.
+ */
+static inline void nvme_req_release_ranges(NvmeRequest *req)
+{
+    if (req->dsm_ranges) {
+        g_free(req->dsm_ranges);
+        req->dsm_ranges = NULL;
+        req->dsm_nr_ranges = 0;
+    }
+    g_free(req->zone_resets);
+    req->zone_resets = NULL;
+    req->nr_zone_resets = 0;
+}
+
 static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req);
 
 static void nvme_update_sq_eventidx(const NvmeSQueue *sq)
@@ -83,13 +116,20 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
      * dominant serialization point. When enabled, complete each request
      * directly in this sweep and batch one interrupt at the end. Only ever
      * true for NoSSD; every other mode keeps the FTL-thread completion path
-     * untouched.
+     * untouched. A namespace of another mode on a NoSSD controller is
+     * checked per request below and takes the FTL path.
      */
     bool inline_mode = NOSSD(n) && n->hiops_inline;
     bool did_isr = false;
 
     nvme_update_sq_tail(sq);
-    while (!(nvme_sq_empty(sq))) {
+    /*
+     * One request per ring slot, handed to the FTL and only returned on
+     * completion, so a guest that keeps submitting without waiting empties the
+     * free list. Leave the rest of the burst unconsumed for the next sweep
+     * rather than taking a request that is not there.
+     */
+    while (!nvme_sq_empty(sq) && !QTAILQ_EMPTY(&sq->req_list)) {
         /*
          * Inline mode completes into the CQ within this same sweep, so unlike
          * the FTL path (which is latency-throttled and drip-feeds completions
@@ -143,9 +183,12 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
          * append, feature get) overwrite it explicitly.
          */
         req->cqe.res64 = 0;
+        req->xfer_bytes = 0;
         req->dsm_ranges = NULL;
         req->dsm_nr_ranges = 0;
         req->dsm_attributes = 0;
+        req->zone_resets = NULL;
+        req->nr_zone_resets = 0;
         /* Coperd: record req->stime at earliest convenience */
         req->expire_time = req->stime = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
         req->cqe.cid = cmd.cid;
@@ -168,8 +211,27 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
          */
         if (status == NVME_SUCCESS && req->ns) {
             FemuPollerCtr *ctr = &n->poller_ctr[index_poller];
-            uint64_t bytes = (uint64_t)req->nlb <<
-                req->ns->id_ns.lbaf[NVME_ID_NS_FLBAS_INDEX(req->ns->id_ns.flbas)].lbads;
+            uint64_t bytes;
+
+            /*
+             * A key-value command carries the size of its value in CDW10 and
+             * never sets nlb, so the block arithmetic below yields zero for it.
+             * Store and Retrieve share their opcodes with Write and Read, so
+             * they are counted as commands either way; without this they were
+             * counted as commands that moved no data at all.
+             */
+            if (NS_KVSSD(req->ns)) {
+                /*
+                 * The field in the command is the size of the host's buffer,
+                 * not what the device put in it, so a retrieve naming a buffer
+                 * of four gigabytes for a one-byte value used to add four
+                 * gigabytes to the figure the health log reports.
+                 */
+                bytes = req->xfer_bytes;
+            } else {
+                bytes = (uint64_t)req->nlb <<
+                    req->ns->id_ns.lbaf[NVME_ID_NS_FLBAS_INDEX(req->ns->id_ns.flbas)].lbads;
+            }
 
             switch (req->cmd_opcode) {
             case NVME_CMD_READ:
@@ -195,7 +257,12 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
             }
         }
 
-        if (inline_mode) {
+        /*
+         * The host-link and controller-CPU models are applied on the ring
+         * path, so a request that should pay them cannot complete inline.
+         */
+        if (inline_mode && !n->pcie_enabled && !n->fw_cpu_ns &&
+            req->ns && NS_NOSSD(req->ns)) {
             /*
              * Inline completion: NoSSD has zero latency, so the request is
              * ready now. Post the CQE directly here instead of bouncing it
@@ -212,6 +279,7 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
                 did_isr = true;
                 n->poller_ctr[index_poller].nr_tt_ios++;
             }
+            nvme_req_release_ranges(req);
             QTAILQ_INSERT_TAIL(&sq->req_list, req, entry);
         } else {
             /*
@@ -287,7 +355,7 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
     int rc;
     int i;
 
-    if (BBSSD(n) || ZNSSD(n) || CSD(n)) {
+    if (n->use_ftl_thread) {
         rp = n->to_poller[index_poller];
     }
 
@@ -312,7 +380,13 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
              req->cmd_opcode == NVME_CMD_WRITE)) {
             uint8_t lbads = req->ns->id_ns.lbaf[
                 NVME_ID_NS_FLBAS_INDEX(req->ns->id_ns.flbas)].lbads;
-            uint64_t data_size = (uint64_t)req->nlb << lbads;
+            /*
+             * A key-value store and retrieve share these opcodes and carry no
+             * block count, so the link was charged for whatever the previous
+             * command in this request slot moved, in its direction.
+             */
+            uint64_t data_size = NS_KVSSD(req->ns) ? req->xfer_bytes :
+                                 (uint64_t)req->nlb << lbads;
             uint64_t trans_ns = n->pcie_bandwidth_mbps ?
                 data_size * 1000 / n->pcie_bandwidth_mbps : 0;
             uint64_t *next, start;
@@ -357,7 +431,15 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
         }
 
         pqueue_pop(pq);
-        cq = n->cq[req->sq->sqid];
+        /*
+         * A submission queue names the completion queue it reports to, and the
+         * two need not share a number. Indexing by the submission queue's own
+         * id sends the completion to whichever queue happens to carry that
+         * number -- the wrong one, with its phase tag and its interrupt -- or
+         * to none at all when no such queue exists.
+         */
+        cq = n->cq[req->sq->cqid];
+        nvme_req_release_ranges(req);
         if (!cq->is_active) {
             /* CQ inactive: return request to SQ free list to avoid leak */
             QTAILQ_INSERT_TAIL(&req->sq->req_list, req, entry);
@@ -377,7 +459,7 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
                            n->poller_ctr[index_poller].nr_tt_ios);
             }
         }
-        n->should_isr[req->sq->sqid] = true;
+        n->should_isr[req->sq->cqid] = true;
     }
 
     if (processed == 0)
@@ -421,7 +503,7 @@ void *nvme_poller(void *arg)
 
     switch (n->multipoller_enabled) {
     case 1:
-        while (1) {
+        while (!n->poller_stopping) {
             if ((!n->dataplane_started)) {
                 n->poller_in_sweep[index] = false;
                 usleep(1000);
@@ -478,7 +560,7 @@ void *nvme_poller(void *arg)
         }
         break;
     default:
-        while (1) {
+        while (!n->poller_stopping) {
             if ((!n->dataplane_started)) {
                 n->poller_in_sweep[index] = false;
                 usleep(1000);
@@ -511,6 +593,8 @@ void *nvme_poller(void *arg)
         }
         break;
     }
+
+    n->poller_in_sweep[index] = false;
 
     return NULL;
 }
@@ -578,7 +662,8 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
         uint64_t off0 = prp1 & (pg - 1);
         uint64_t len0 = MIN(data_size, pg - off0);
         uint64_t rem = data_size - len0;
-        if (rem == 0 || (rem <= pg && prp2 && (prp2 & (pg - 1)) == 0)) {
+        if (NS_NOSSD(ns) &&
+            (rem == 0 || (rem <= pg && prp2 && (prp2 & (pg - 1)) == 0))) {
             DMADirection dir = req->is_write ? DMA_DIRECTION_TO_DEVICE
                                              : DMA_DIRECTION_FROM_DEVICE;
             AddressSpace *as = pci_get_address_space(&n->parent_obj);
@@ -615,7 +700,24 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
     }
 
 mapped:
-    assert((nlb << data_shift) == req->qsg.size);
+    /*
+     * A data buffer in the controller memory buffer is described by an iovec
+     * rather than a scatter list, and the media path below takes the scatter
+     * list, so the transfer would move nothing. The assertion that the two
+     * agree aborted the process on a guest command instead of refusing it.
+     */
+    if (!req->qsg.nsg) {
+        qemu_iovec_destroy(&req->iov);
+        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
+                            offsetof(NvmeRwCmd, prp1), 0, ns->id);
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    if (((uint64_t)nlb << data_shift) != req->qsg.size) {
+        qemu_sglist_destroy(&req->qsg);
+        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
+                            offsetof(NvmeRwCmd, prp1), 0, ns->id);
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
 
     req->slba = slba;
     req->status = NVME_SUCCESS;
@@ -761,11 +863,12 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t elba = slba + nlb;
     uint8_t lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
     uint8_t data_shift = ns->id_ns.lbaf[lba_index].lbads;
-    uint64_t data_size = nlb << data_shift;
+    uint64_t data_size = (uint64_t)nlb << data_shift;
     /* address the media within this namespace's slice, as nvme_rw() does */
     uint64_t offset  = ns->backend_offset + (slba << data_shift);
 
-    if ((slba + nlb) > le64_to_cpu(ns->id_ns.nsze)) {
+    if (slba > le64_to_cpu(ns->id_ns.nsze) ||
+        nlb > le64_to_cpu(ns->id_ns.nsze) - slba) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
                             offsetof(NvmeRwCmd, nlb), elba, ns->id);
         return NVME_LBA_RANGE;
@@ -789,6 +892,15 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     } else if (nvme_map_prp(&req->qsg, &req->iov, prp1, prp2, data_size, n)) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
                             offsetof(NvmeRwCmd, prp1), 0, ns->id);
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    /*
+     * Same as the read and write path: a buffer in the controller memory buffer
+     * comes back as an iovec, and the loop below walks the scatter list. With
+     * none it compared nothing at all and reported a match.
+     */
+    if (!req->qsg.nsg) {
+        qemu_iovec_destroy(&req->iov);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     if (find_next_bit(ns->uncorrectable, elba, slba) < elba) {
@@ -870,7 +982,8 @@ static uint16_t nvme_write_uncor(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t slba = le64_to_cpu(rw->slba);
     uint32_t nlb  = le16_to_cpu(rw->nlb) + 1;
 
-    if ((slba + nlb) > ns->id_ns.nsze) {
+    if (slba > le64_to_cpu(ns->id_ns.nsze) ||
+        nlb > le64_to_cpu(ns->id_ns.nsze) - slba) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
                             offsetof(NvmeRwCmd, nlb), slba + nlb, ns->id);
         return NVME_LBA_RANGE | NVME_DNR;
@@ -1098,7 +1211,13 @@ static uint16_t nvme_io_mgmt_send_ruh_update(FemuCtrl *n, NvmeRequest *req)
     NvmeCmd *cmd = &req->cmd;
     NvmeNamespace *ns = req->ns;
     uint32_t cdw10 = le32_to_cpu(cmd->cdw10);
-    uint32_t npid = (cdw10 >> 1) + 1;
+    /*
+     * The count of placement identifiers is the field at bits 31:16; the
+     * management operation occupies bits 7:0 of the same dword, so shifting by
+     * one mixed the operation into the count and every update naming more than
+     * one identifier was refused.
+     */
+    uint32_t npid = (cdw10 >> 16) + 1;
     unsigned int i;
     g_autofree uint16_t *pids = NULL;
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
@@ -1162,28 +1281,42 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     req->ns = ns = &n->namespaces[nsid - 1];
 
     switch (cmd->opcode) {
+    case NVME_OP_ABORTED:
+        return NVME_CMD_ABORT_REQ;
     case NVME_CMD_FLUSH:
         if (!n->id_ctrl.vwc || !n->features.volatile_wc) {
             return NVME_SUCCESS;
         }
         return nvme_flush(n, ns, cmd, req);
     case NVME_CMD_DSM:
-        if (NVME_ONCS_DSM & n->oncs) {
+        /*
+         * This and the two below change logical blocks without going through
+         * the zone state machine. A deallocate over a full sequential zone
+         * zeroed its data while the descriptor still reported the zone full
+         * with its write pointer at capacity -- a rewrite out of order that
+         * the host is told nothing about. Refuse them on a zoned namespace
+         * until they honour the zone state; the zoned command effects log no
+         * longer claims them either.
+         */
+        if ((NVME_ONCS_DSM & n->oncs) && nvme_ns_has_nvm_cmd_set(ns) &&
+            !NS_ZNSSD(ns)) {
             return nvme_dsm(n, ns, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
     case NVME_CMD_COMPARE:
-        if (NVME_ONCS_COMPARE & n->oncs) {
+        if ((NVME_ONCS_COMPARE & n->oncs) && nvme_ns_has_nvm_cmd_set(ns)) {
             return nvme_compare(n, ns, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
     case NVME_CMD_WRITE_ZEROES:
-        if (NVME_ONCS_WRITE_ZEROS & n->oncs) {
+        if ((NVME_ONCS_WRITE_ZEROS & n->oncs) && nvme_ns_has_nvm_cmd_set(ns) &&
+            !NS_ZNSSD(ns)) {
             return nvme_write_zeros(n, ns, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
     case NVME_CMD_WRITE_UNCOR:
-        if (NVME_ONCS_WRITE_UNCORR & n->oncs) {
+        if ((NVME_ONCS_WRITE_UNCORR & n->oncs) && nvme_ns_has_nvm_cmd_set(ns) &&
+            !NS_ZNSSD(ns)) {
             return nvme_write_uncor(n, ns, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;

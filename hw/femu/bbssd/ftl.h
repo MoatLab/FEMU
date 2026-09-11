@@ -32,6 +32,7 @@ enum {
 enum {
     USER_IO = 0,
     GC_IO = 1,
+    MAP_IO = 2,     /* translation-page traffic of the DFTL cache */
 };
 
 enum {
@@ -95,11 +96,7 @@ struct ppa {
     };
 };
 
-typedef int nand_sec_status_t;
-
 struct nand_page {
-    nand_sec_status_t *sec;
-    int nsecs;
     int status;
 };
 
@@ -109,6 +106,13 @@ struct nand_block {
     int ipc; /* invalid page count */
     int vpc; /* valid page count */
     int erase_cnt;
+    /*
+     * Reads of this block since it was last erased. Reading a page stresses the
+     * others in the block, so this is the pressure a real device watches to
+     * decide when data has to be rewritten before it decays. Reported only; no
+     * behaviour hangs off it yet.
+     */
+    uint64_t read_cnt;
     int wp; /* current write pointer */
 };
 
@@ -153,6 +157,7 @@ struct ssdparams {
     int cell_pages;   /* pages per wordline = bits/cell: 1 SLC..5 PLC; 0 = off */
     int pgtype_lat;   /* model per-page-type (LSB/CSB/MSB) program latency, 0=off */
     int ecc_step_ns;  /* per-tier ECC read-latency adder vs P/E wear, 0=off */
+    int ecc_retention_sec; /* retention age per ECC tier (s), 0=age adds none */
     int cmd_addr_lat; /* command+address bus phase (ns); 0 = off */
     int pg_xfer_lat;  /* page data-in/data-out bus phase (ns); 0 = off */
     int status_lat;   /* status/ready-poll bus phase (ns); 0 = off */
@@ -195,6 +200,10 @@ struct ssdparams {
     int tt_luns;      /* total # of LUNs in the SSD */
 
     bool hot_cold_sep;  /* place overwrites in blocks of their own */
+    /* reads a block may take before its line is rewritten; 0 = never */
+    int read_reclaim_limit;
+    /* seconds a line may hold data before it is rewritten; 0 = never */
+    int retention_limit_sec;
 
     /* DRAM write buffer: pages held before they are programmed */
     int buffer_size;
@@ -222,6 +231,8 @@ typedef struct line {
     FemuReclaimUnit *my_ru;
     /* time the line filled, in ns; used by age-based GC policies */
     uint64_t close_time;
+    /* set while the line is being rewritten, so it stays out of the lists */
+    bool reclaiming;
 } line;
 
 /* wp: record next write addr */
@@ -382,6 +393,7 @@ struct map_write_plan {
 struct femu_mapping_ops {
     const char *name;
     bool uses_cmt;          /* dftl-style demand-cached translation table */
+    bool uses_log_class;    /* allocates through the LOG write pointer */
 
     /* allocate and release scheme-private state in ssd->map_priv */
     void (*init)(struct ssd *ssd);
@@ -514,6 +526,10 @@ struct ssd {
      * host, and pages programmed to relocate data the device already held. WAF
      * is (host + relocated) / host.
      */
+    struct line *read_reclaim_line; /* line the read path asked to rewrite */
+    bool reclaim_by_age;            /* that line was queued by age, not reads */
+    uint64_t read_reclaims;         /* lines rewritten for read stress */
+    uint64_t retention_refreshes;   /* lines rewritten for retention age */
     uint64_t host_write_pages;  /* pages the host wrote (WAF denominator) */
     uint64_t nand_write_pages;  /* user pages programmed into NAND */
     uint64_t gc_write_pages;    /* pages the device relocated itself */
@@ -531,6 +547,15 @@ struct ssd {
      * LUN parallelism. The controller is one resource, so its energy has to be
      * charged against elapsed time instead - this is what makes that available. */
     uint64_t qlc_first_read_ns;
+
+    /*
+     * Wear: erases summed over every block, kept as a running total so the
+     * average cycle count does not cost a walk of the geometry, and the
+     * endurance that average is measured against. A zero rating means the
+     * device was given no endurance figure and reports no life estimate.
+     */
+    uint64_t total_erases;
+    uint32_t rated_pe_cycles;
 
     bool debug_ftl; /* check FTL invariants on the GC path (off by default) */
 
@@ -550,7 +575,13 @@ struct ssd {
 };
 
 int bb_check_geometry(FemuCtrl *n, Error **errp);
+/* the reserve the collector needs; computational storage runs the same FTL */
+int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp);
 void ssd_free_write_buffer(struct ssd *ssd);
+void ssd_free(struct ssd *ssd);
+
+/* true when the named mapping scheme allocates through the LOG write pointer */
+bool femu_mapping_name_uses_log_class(const char *name);
 uint64_t ssd_buffer_destage(struct ssd *ssd, int budget, uint64_t stime);
 uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req);
 void ssd_init(FemuCtrl *n, NvmeNamespace *ns);
@@ -560,6 +591,8 @@ void bb_nand_media_init(struct ssd *ssd);
 void bb_nand_media_refresh_timing(struct ssd *ssd);
 uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
                             struct nand_cmd *ncmd);
+uint64_t ssd_advance_status_multiplane(struct ssd *ssd, struct ppa *ppas,
+                                       int nppas, struct nand_cmd *ncmd);
 
 #ifdef FEMU_DEBUG_FTL
 #define ftl_debug(fmt, ...) \
@@ -576,8 +609,13 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
     do { printf("[FEMU] FTL-Log: " fmt, ## __VA_ARGS__); } while (0)
 
 
-/* FEMU assert() */
-#ifdef FEMU_DEBUG_FTL
+/*
+ * FTL invariant checks. Off in the normal build to keep the I/O path
+ * short; FEMU_DEBUG_FTL arms them together with the debug chatter, and
+ * FEMU_FTL_ASSERT arms them alone, which is what the sanitizer build in
+ * CI uses so a bound violation aborts instead of corrupting state.
+ */
+#if defined(FEMU_DEBUG_FTL) || defined(FEMU_FTL_ASSERT)
 #define ftl_assert(expression) assert(expression)
 #else
 #define ftl_assert(expression)

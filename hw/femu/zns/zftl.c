@@ -88,9 +88,10 @@ static const NandTimelineOps zns_timeline_ops = {
 
 /*
  * Configure the shared NAND media layer to reproduce the ZNS timing exactly:
- * the array is gated on the plane alone with no channel accounting, which is
- * what the enum's PLANE_ONLY and CH_OFF modes were named for, and the per-op
- * latency comes from the same per-flash-type values the device already carries.
+ * the array is gated on the plane alone, which is what the enum's PLANE_ONLY
+ * mode was named for, and the per-op latency comes from the same
+ * per-flash-type values the device already carries. The channel bus is off
+ * unless a bus phase is configured.
  * Page type is left at 0 so a flash type resolves to one latency, as before.
  */
 void zns_nand_media_init(struct zns_ssd *zns)
@@ -109,7 +110,16 @@ void zns_nand_media_init(struct zns_ssd *zns)
     }
     cfg.policy.use_flat_timing = false;
     cfg.policy.array_gate = NAND_GATE_PLANE_ONLY;
-    cfg.policy.channel_mode = NAND_CH_OFF;
+    /*
+     * The bus phases select the staged channel model the same way bbssd does:
+     * any non-zero phase turns it on, all zero keeps CH_OFF and the timing
+     * bit-identical to before. The plane gate is unchanged either way.
+     */
+    cfg.timing.cmd_addr_ns = zns->timing.cmd_addr_lat;
+    cfg.timing.page_xfer_ns = zns->timing.pg_xfer_lat;
+    cfg.timing.status_ns = zns->timing.status_lat;
+    cfg.policy.channel_mode = (cfg.timing.cmd_addr_ns || cfg.timing.page_xfer_ns ||
+                               cfg.timing.status_ns) ? NAND_CH_STAGED : NAND_CH_OFF;
     cfg.timeline = &zns_timeline_ops;
     cfg.timeline_opaque = zns;
 
@@ -327,11 +337,21 @@ static void zns_reset_block_state(struct zns_ssd *zns, uint32_t zone_idx)
 uint64_t zns_zone_reset(struct zns_ssd *zns, uint32_t zone_idx,
                         uint64_t zone_size_lbas, uint64_t lbasz, uint64_t stime)
 {
-    int ch, lun, pl;
+    uint64_t cpz = zns->chnls_per_zone;
+    uint64_t groups = (cpz && cpz < zns->num_ch) ? zns->num_ch / cpz : 1;
+    uint32_t blk_idx = zone_idx;
+    int ch, lun, pl, ch_lo = 0, ch_hi = zns->num_ch;
     struct ppa ppa;
     struct nand_cmd erase_cmd;
     uint64_t sublat, maxlat = 0;
     uint64_t total_blocks_erased = 0;
+
+    /* erase the blocks the zone owns: see zns_reset_block_state() */
+    if (groups > 1) {
+        blk_idx = zone_idx / groups;
+        ch_lo = (zone_idx % groups) * cpz;
+        ch_hi = ch_lo + cpz;
+    }
 
     ftl_debug("=== Zone Reset Started for Zone %u ===\n", zone_idx);
 
@@ -349,14 +369,14 @@ uint64_t zns_zone_reset(struct zns_ssd *zns, uint32_t zone_idx,
     erase_cmd.cmd = NAND_ERASE;
     erase_cmd.stime = stime;
 
-    for (ch = 0; ch < zns->num_ch; ch++) {
+    for (ch = ch_lo; ch < ch_hi; ch++) {
         for (lun = 0; lun < zns->num_lun; lun++) {
             for (pl = 0; pl < zns->num_plane; pl++) {
                 ppa.ppa = 0;
                 ppa.g.ch = ch;
                 ppa.g.fc = lun;
                 ppa.g.pl = pl;
-                ppa.g.blk = zone_idx;
+                ppa.g.blk = blk_idx;
                 ppa.g.pg = 0;
                 ppa.g.spg = 0;
 
@@ -526,12 +546,57 @@ static uint64_t zns_write(struct zns_ssd *zns, NvmeRequest *req)
  * to charge it. The controller's FTL thread calls this once it has picked out
  * the namespace, so one controller can serve namespaces of different modes.
  */
+/*
+ * The media half of Zone Reset, deferred here by zns_zone_reset_state() so it
+ * runs on the thread that owns the mapping table and the plane timelines. One
+ * command may reset many zones; they share the planes, so the command ends
+ * with the last erase rather than the sum of them.
+ */
+static uint64_t zns_zone_reset_deferred(NvmeNamespace *ns, struct zns_ssd *zns,
+                                        NvmeRequest *req)
+{
+    uint64_t maxlat = 0;
+    uint32_t i;
+
+    for (i = 0; i < req->nr_zone_resets; i++) {
+        uint32_t zone_idx = req->zone_resets[i];
+        uint64_t lat;
+
+        lat = zns_zone_reset(zns, zone_idx, ns->zone_size, zns->lbasz,
+                             req->stime);
+        if (lat > maxlat) {
+            maxlat = lat;
+        }
+
+        /* the allocator restarts this zone from the first channel and LUN */
+        if (zns->active_zone == zone_idx) {
+            zns->wp.ch = 0;
+            zns->wp.lun = 0;
+        }
+    }
+
+    return maxlat;
+}
+
 uint64_t zns_ftl_process_req(NvmeNamespace *ns, NvmeRequest *req)
 {
     struct zns_ssd *zns = ns->zns;
     uint64_t lat = 0;
 
-    if (!zns || req->status != NVME_SUCCESS) {
+    if (!zns) {
+        return 0;
+    }
+
+    /*
+     * A zone the poller has already moved to Empty must be erased even when
+     * the command as a whole failed part way through, or the descriptor reads
+     * empty while the mapping still points at the old data.
+     */
+    if (req->nr_zone_resets) {
+        return zns_zone_reset_deferred(ns, zns, req);
+    }
+
+    if (req->status != NVME_SUCCESS) {
         return 0;
     }
 

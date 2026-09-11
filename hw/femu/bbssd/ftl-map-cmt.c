@@ -105,7 +105,7 @@ uint64_t cmt_touch(struct ssd *ssd, uint64_t lpn, uint64_t stime, bool is_write)
             struct ppa vppa = {.ppa = 0};
             vppa.g.ch = vhome / spp->luns_per_ch;
             vppa.g.lun = vhome % spp->luns_per_ch;
-            struct nand_cmd twr = {.type = USER_IO, .cmd = NAND_WRITE,
+            struct nand_cmd twr = {.type = MAP_IO, .cmd = NAND_WRITE,
                                    .stime = stime};
             wb_lat = ssd_advance_status(ssd, &vppa, &twr);
         }
@@ -116,7 +116,7 @@ uint64_t cmt_touch(struct ssd *ssd, uint64_t lpn, uint64_t stime, bool is_write)
     struct ppa tppa = {.ppa = 0};
     tppa.g.ch = home / spp->luns_per_ch;
     tppa.g.lun = home % spp->luns_per_ch;
-    struct nand_cmd trd = {.type = USER_IO, .cmd = NAND_READ,
+    struct nand_cmd trd = {.type = MAP_IO, .cmd = NAND_READ,
                            .stime = stime + wb_lat};
     lat = wb_lat + ssd_advance_status(ssd, &tppa, &trd);
 
@@ -172,4 +172,14 @@ void cmt_init(struct ssd *ssd, uint32_t cache_mb)
     }
     ssd->cmt.used = ssd->cmt.hand = 0;
     ssd->cmt.hits = ssd->cmt.misses = 0;
+}
+
+/* release what cmt_init() took */
+void cmt_destroy(struct ssd *ssd)
+{
+    g_free(ssd->cmt.slots);
+    g_free(ssd->cmt.hash);
+    ssd->cmt.slots = NULL;
+    ssd->cmt.hash = NULL;
+    ssd->cmt.capacity = 0;
 }

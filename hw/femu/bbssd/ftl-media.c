@@ -11,7 +11,7 @@
 #include "ftl-internal.h"
 
 /* Decode a bbssd ppa into the media's normalized NandLoc. */
-static NandLoc bb_decode_loc(struct ssd *ssd, struct ppa *ppa)
+static NandLoc bb_decode_loc(struct ssd *ssd, struct ppa *ppa, uint64_t stime)
 {
     int ct = (ssd->n) ? ssd->n->nand_cell_type : 0;
     NandLoc loc = {
@@ -34,7 +34,21 @@ static NandLoc bb_decode_loc(struct ssd *ssd, struct ppa *ppa)
          */
         .pe_cycles = ssd->sp.ecc_step_ns ?
                      (uint32_t)get_blk(ssd, ppa)->erase_cnt : 0,
+        .age_sec = 0,
     };
+
+    /*
+     * Charge leaks with time as well as with wear, so how long the data has sat
+     * programmed feeds the same correction model. close_time is when the line
+     * filled; a line still being written has none yet.
+     */
+    if (ssd->sp.ecc_step_ns && ssd->sp.ecc_retention_sec) {
+        uint64_t closed = get_line(ssd, ppa)->close_time;
+
+        if (closed && stime > closed) {
+            loc.age_sec = (uint32_t)((stime - closed) / NANOSECONDS_PER_SECOND);
+        }
+    }
     return loc;
 }
 
@@ -80,7 +94,9 @@ void bb_nand_media_init(struct ssd *ssd)
     /* optional finer NAND timing; every knob defaults to 0, leaving these zero
      * and the behavior bit-identical to the flat model. */
     cfg.timing.cmd_addr_ns = spp->cmd_addr_lat;
-    cfg.timing.page_xfer_ns = spp->pg_xfer_lat;
+    /* ch_xfer_lat is the older name for the data transfer phase */
+    cfg.timing.page_xfer_ns = spp->pg_xfer_lat ? spp->pg_xfer_lat :
+                                                 spp->ch_xfer_lat;
     cfg.timing.status_ns = spp->status_lat;
     cfg.timing.tplpbsy_ns = spp->tplpbsy;
     cfg.timing.tplrbsy_ns = spp->tplrbsy;
@@ -89,6 +105,13 @@ void bb_nand_media_init(struct ssd *ssd)
     cfg.timing.ecc_step_ns = spp->ecc_step_ns;
     cfg.timing.ecc_pe_per_tier = FEMU_ECC_PE_PER_TIER;
     cfg.timing.ecc_max_tiers = FEMU_ECC_MAX_TIERS;
+    cfg.timing.ecc_retention_per_tier_sec = spp->ecc_retention_sec;
+    /*
+     * The media layer gates the ECC read adder on this as well as on
+     * ecc_step_ns. Nothing ever set it, so ecc_step_ns has been inert; the
+     * adder itself is still off unless ecc_step_ns is given a value.
+     */
+    cfg.policy.ecc_on_read = true;
     cfg.timing.pgtype_lat = (spp->pgtype_lat != 0);
     /* page-type program multipliers (x1000): SLC..PLC rows, picked by cell_pages.
      * Only consulted when pgtype_lat is set, so this is inert by default. */
@@ -126,7 +149,13 @@ void bb_nand_media_init(struct ssd *ssd)
     }
 
     cfg.policy.array_gate = NAND_GATE_LUN_ONLY;
-    cfg.policy.channel_mode = NAND_CH_OFF;
+    /*
+     * The channel bus phases only exist in the staged model. Select it when
+     * a phase has a duration, so the unset default keeps the plain array gate
+     * and its exact timing.
+     */
+    cfg.policy.channel_mode = (cfg.timing.cmd_addr_ns || cfg.timing.page_xfer_ns ||
+                               cfg.timing.status_ns) ? NAND_CH_STAGED : NAND_CH_OFF;
     cfg.timeline = &bb_timeline_ops;
     cfg.timeline_opaque = ssd;
     nand_media_init(&ssd->media, &cfg);
@@ -170,7 +199,20 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
         ftl_err("Unsupported NAND command: 0x%x\n", ncmd->cmd);
         return 0;
     }
-    loc = bb_decode_loc(ssd, ppa);
+    /*
+     * Count the read against its block. Every bbssd NAND read passes through
+     * here, host or collection, and a read stresses the other pages in the
+     * block -- so this is the pressure a device watches to decide when data
+     * must be rewritten. Reads answered from the write buffer or the read cache
+     * never reach the media and correctly do not count, and a translation-page
+     * read is only charged for time: it addresses a placeholder block, whose
+     * data pages it does not disturb.
+     */
+    if (op == NAND_MEDIA_READ && ncmd->type != MAP_IO) {
+        get_blk(ssd, ppa)->read_cnt++;
+    }
+
+    loc = bb_decode_loc(ssd, ppa, stime);
 
     /*
      * Count physical QLC page reads at the NAND boundary. This includes host,
@@ -195,6 +237,49 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
         __atomic_fetch_add(&ssd->qlc_read_active_ns[loc.page_type], active_ns,
                            __ATOMIC_RELAXED);
     }
-
     return nand_media_op(&ssd->media, &loc, op, stime).latency_ns;
+}
+
+/*
+ * Multi-plane variant: one command sequence addressing the same block on every
+ * plane of a LUN, which real NAND runs as a single array operation rather than
+ * one erase after another. GC erase is the caller that benefits -- it reclaims
+ * the same block index on every plane, exactly the shape the die can batch.
+ *
+ * With one plane there is nothing to batch, so this is the ordinary single-op
+ * path and the default configuration is untouched.
+ */
+uint64_t ssd_advance_status_multiplane(struct ssd *ssd, struct ppa *ppas,
+                                       int nppas, struct nand_cmd *ncmd)
+{
+    NandLoc locs[1 << PL_BITS];
+    uint64_t stime;
+    NandMediaOp op;
+    int i;
+
+    if (nppas <= 1) {
+        return ssd_advance_status(ssd, &ppas[0], ncmd);
+    }
+    ftl_assert(nppas <= (1 << PL_BITS));
+
+    switch (ncmd->cmd) {
+    case NAND_READ:  op = NAND_MEDIA_READ;    break;
+    case NAND_WRITE: op = NAND_MEDIA_PROGRAM; break;
+    case NAND_ERASE: op = NAND_MEDIA_ERASE;   break;
+    default:
+        ftl_err("Unsupported NAND command: 0x%x\n", ncmd->cmd);
+        return 0;
+    }
+
+    stime = (ncmd->stime == 0) ?
+        qemu_clock_get_ns(QEMU_CLOCK_REALTIME) : ncmd->stime;
+
+    for (i = 0; i < nppas; i++) {
+        if (op == NAND_MEDIA_READ) {
+            get_blk(ssd, &ppas[i])->read_cnt++;
+        }
+        locs[i] = bb_decode_loc(ssd, &ppas[i], stime);
+    }
+
+    return nand_media_multiplane(&ssd->media, locs, nppas, op, stime).latency_ns;
 }

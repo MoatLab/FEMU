@@ -321,20 +321,89 @@ static void zns_zoned_ns_shutdown(NvmeNamespace *ns)
 
 void zns_ns_shutdown(NvmeNamespace *ns)
 {
-    FemuCtrl *n = ns->ctrl;
-    if (n->zoned) {
+    if (NS_ZNSSD(ns)) {
         zns_zoned_ns_shutdown(ns);
     }
 }
 
+/* mirrors zns_init_ch() */
+static void zns_free_ch(struct zns_ch *ch, uint64_t num_lun, uint64_t num_plane)
+{
+    uint64_t lun, pl;
+
+    if (!ch->fc) {
+        return;
+    }
+
+    for (lun = 0; lun < num_lun; lun++) {
+        struct zns_fc *fc = &ch->fc[lun];
+
+        if (!fc->plane) {
+            continue;
+        }
+        for (pl = 0; pl < num_plane; pl++) {
+            g_free(fc->plane[pl].blk);
+        }
+        g_free(fc->plane);
+    }
+    g_free(ch->fc);
+}
+
+/* mirrors zns_init_params() */
+static void zns_free_params(NvmeNamespace *ns)
+{
+    struct zns_ssd *zns = ns->zns;
+    uint64_t i;
+
+    if (!zns) {
+        return;
+    }
+
+    if (zns->ch) {
+        for (i = 0; i < zns->num_ch; i++) {
+            zns_free_ch(&zns->ch[i], zns->num_lun, zns->num_plane);
+        }
+        g_free(zns->ch);
+    }
+
+    if (zns->cache.write_cache) {
+        for (i = 0; i < zns->cache.num_wc; i++) {
+            g_free(zns->cache.write_cache[i].lpns);
+        }
+        g_free(zns->cache.write_cache);
+    }
+
+    nand_media_destroy(&zns->media);
+    g_free(zns->maptbl);
+    g_free(zns->zone_wp_slot);
+    g_free(zns);
+    ns->zns = NULL;
+}
+
+/* Writes this zoned namespace failed and reported to the host. */
+uint64_t zns_media_errors(NvmeNamespace *ns)
+{
+    if (!NS_ZNSSD(ns) || !ns->zns) {
+        return 0;
+    }
+
+    return ns->zns->err_write_injected;
+}
+
 void zns_ns_cleanup(NvmeNamespace *ns)
 {
-    FemuCtrl *n = ns->ctrl;
-    if (n->zoned) {
-        g_free(ns->id_ns_zoned);
-        g_free(ns->zone_array);
-        g_free(ns->zd_extensions);
+    if (!NS_ZNSSD(ns)) {
+        return;
     }
+
+    g_free(ns->id_ns_zoned);
+    g_free(ns->zone_array);
+    g_free(ns->zd_extensions);
+    ns->id_ns_zoned = NULL;
+    ns->zone_array = NULL;
+    ns->zd_extensions = NULL;
+
+    zns_free_params(ns);
 }
 
 /*
@@ -503,6 +572,10 @@ static uint16_t zns_check_zone_write(FemuCtrl *n, NvmeNamespace *ns,
             if (zns_l2b(ns, nlb) > (n->page_size << n->zasl)) {
                 status = NVME_INVALID_FIELD;
             }
+            /* an append lands at the write pointer, so bound it there too */
+            if (unlikely(zone->w_ptr + nlb > zns_zone_wr_boundary(zone))) {
+                status = NVME_ZONE_BOUNDARY_ERROR;
+            }
         } else if (unlikely(slba != zone->w_ptr)) {
             status = NVME_ZONE_INVALID_WRITE;
         }
@@ -581,6 +654,25 @@ static void zns_auto_transition_zone(NvmeNamespace *ns)
     }
 }
 
+/* Move a zone to Full, giving back the open and active resources it holds. */
+static void zns_zone_set_full(NvmeNamespace *ns, NvmeZone *zone)
+{
+    switch (zns_get_zone_state(zone)) {
+    case NVME_ZONE_STATE_IMPLICITLY_OPEN:
+    case NVME_ZONE_STATE_EXPLICITLY_OPEN:
+        zns_aor_dec_open(ns);
+        /* fall through */
+    case NVME_ZONE_STATE_CLOSED:
+        zns_aor_dec_active(ns);
+        /* fall through */
+    case NVME_ZONE_STATE_EMPTY:
+        zns_assign_zone_state(ns, zone, NVME_ZONE_STATE_FULL);
+        break;
+    default:
+        break;
+    }
+}
+
 static uint16_t zns_auto_open_zone(NvmeNamespace *ns, NvmeZone *zone)
 {
     uint16_t status = NVME_SUCCESS;
@@ -639,7 +731,7 @@ static void zns_finalize_zoned_write(NvmeNamespace *ns, NvmeRequest *req, bool f
         }
         if (zone->w_ptr >= zns_zone_wr_boundary(zone)) {
             zns_zrwa_release(ns, zone);
-            zns_assign_zone_state(ns, zone, NVME_ZONE_STATE_FULL);
+            zns_zone_set_full(ns, zone);
         }
         return;
     }
@@ -651,22 +743,7 @@ static void zns_finalize_zoned_write(NvmeNamespace *ns, NvmeRequest *req, bool f
     }
 
     if (zone->d.wp == zns_zone_wr_boundary(zone)) {
-        switch (zns_get_zone_state(zone)) {
-        case NVME_ZONE_STATE_IMPLICITLY_OPEN:
-        case NVME_ZONE_STATE_EXPLICITLY_OPEN:
-            zns_aor_dec_open(ns);
-            /* fall through */
-        case NVME_ZONE_STATE_CLOSED:
-            zns_aor_dec_active(ns);
-            /* fall through */
-        case NVME_ZONE_STATE_EMPTY:
-            zns_assign_zone_state(ns, zone, NVME_ZONE_STATE_FULL);
-            /* fall through */
-        case NVME_ZONE_STATE_FULL:
-            break;
-        default:
-            assert(false);
-        }
+        zns_zone_set_full(ns, zone);
     }
 }
 
@@ -697,6 +774,10 @@ static uint64_t zns_advance_zone_wp(NvmeNamespace *ns, NvmeZone *zone, uint32_t 
      * open with its ZRWA held, so there is no state transition to make either.
      */
     if (zone->d.za & NVME_ZA_ZRWA_VALID) {
+        if (zns_get_zone_state(zone) == NVME_ZONE_STATE_CLOSED) {
+            zns_aor_inc_open(ns);
+            zns_assign_zone_state(ns, zone, NVME_ZONE_STATE_IMPLICITLY_OPEN);
+        }
         return result;
     }
 
@@ -722,12 +803,40 @@ struct zns_zone_reset_ctx {
     NvmeZone    *zone;
 };
 
-static uint64_t zns_aio_zone_reset_cb(NvmeRequest *req, NvmeZone *zone)
+/*
+ * A zone that has gone back to Empty or Offline holds no data: the spec has its
+ * logical blocks deallocated, and this controller reports that a deallocated
+ * block reads as zeros. The read path goes straight to the backing store by
+ * logical block, so the store is what has to be cleared -- the same thing the
+ * NVM path's deallocate does, and the write pointer alone does not do it.
+ */
+static void zns_deallocate_zone(NvmeNamespace *ns, NvmeZone *zone)
+{
+    uint64_t slba = zone->d.zslba;
+    uint64_t left = ns->zone_size;
+
+    while (left) {
+        uint32_t nlb = left > UINT32_MAX ? UINT32_MAX : (uint32_t)left;
+
+        nvme_deallocate_range(ns->ctrl, ns, slba, nlb);
+        slba += nlb;
+        left -= nlb;
+    }
+}
+
+/*
+ * Move the zone descriptor to Empty and record the zone for the FTL thread.
+ *
+ * This runs on a poller thread. The zone descriptors are read and written only
+ * from there, so they are safe to change here, but the mapping table, the
+ * block write pointers and the plane timelines belong to the FTL thread, which
+ * may be part way through a read or a write on this zone. Those are erased in
+ * zns_ftl_process_req() instead, where the rest of the media work happens.
+ */
+static void zns_zone_reset_state(NvmeRequest *req, NvmeZone *zone)
 {
     NvmeNamespace *ns = req->ns;
-    struct zns_ssd *zns = ns->zns;
     uint32_t zone_idx = zns_zone_idx(ns, zone->d.zslba);
-    uint64_t erase_latency = 0;
 
     switch (zns_get_zone_state(zone)) {
     case NVME_ZONE_STATE_EXPLICITLY_OPEN:
@@ -742,20 +851,15 @@ static uint64_t zns_aio_zone_reset_cb(NvmeRequest *req, NvmeZone *zone)
         zone->w_ptr = zone->d.zslba;
         zone->d.wp = zone->w_ptr;
         zns_assign_zone_state(ns, zone, NVME_ZONE_STATE_EMPTY);
+        zns_deallocate_zone(ns, zone);
         break;
     default:
         break;
     }
 
-    erase_latency = zns_zone_reset(zns, zone_idx, ns->zone_size, zns->lbasz, req->stime);
-
-    /* Reset write pointer if this was the active zone */
-    if (zns->active_zone == zone_idx) {
-        zns->wp.ch = 0;
-        zns->wp.lun = 0;
-    }
-
-    return erase_latency;
+    req->zone_resets = g_renew(uint32_t, req->zone_resets,
+                               req->nr_zone_resets + 1);
+    req->zone_resets[req->nr_zone_resets++] = zone_idx;
 }
 
 typedef uint16_t (*op_handler_t)(NvmeNamespace *, NvmeZone *, NvmeZoneState,
@@ -830,6 +934,30 @@ static void zns_zrwa_release(NvmeNamespace *ns, NvmeZone *zone)
     }
 }
 
+/*
+ * Give back whatever the state a zone is leaving was holding. The transitions a
+ * host drives walk this ladder themselves on the way through; the two that take
+ * a zone out of service do not reach a state that holds anything, so they have
+ * to do it here. Call before the state changes: the ladder is chosen by the
+ * state the zone is in now.
+ */
+static void zns_release_zone_resources(NvmeNamespace *ns, NvmeZone *zone)
+{
+    switch (zns_get_zone_state(zone)) {
+    case NVME_ZONE_STATE_EXPLICITLY_OPEN:
+    case NVME_ZONE_STATE_IMPLICITLY_OPEN:
+        zns_aor_dec_open(ns);
+        /* fall through */
+    case NVME_ZONE_STATE_CLOSED:
+        zns_aor_dec_active(ns);
+        break;
+    default:
+        break;
+    }
+
+    zns_zrwa_release(ns, zone);
+}
+
 static uint16_t zns_finish_zone(NvmeNamespace *ns, NvmeZone *zone,
                                 NvmeZoneState state, NvmeRequest *req)
 {
@@ -858,8 +986,6 @@ static uint16_t zns_finish_zone(NvmeNamespace *ns, NvmeZone *zone,
 static uint16_t zns_reset_zone(NvmeNamespace *ns, NvmeZone *zone,
                                NvmeZoneState state, NvmeRequest *req)
 {
-    uint64_t erase_lat = 0;
-
     zns_zrwa_release(ns, zone);
 
     switch (state) {
@@ -874,10 +1000,13 @@ static uint16_t zns_reset_zone(NvmeNamespace *ns, NvmeZone *zone,
         return NVME_ZONE_INVAL_TRANSITION;
     }
 
-    erase_lat = zns_aio_zone_reset_cb(req, zone);
-
-    req->reqlat = erase_lat;
-    req->expire_time += erase_lat;
+    /*
+     * The erase latency counts from the command's start and already includes
+     * waiting for the planes, which the zones of one command serialise on, so
+     * the command ends with its last erase rather than the sum of all of them.
+     * The FTL thread returns that maximum and the caller adds it to stime.
+     */
+    zns_zone_reset_state(req, zone);
 
     return NVME_SUCCESS;
 }
@@ -887,7 +1016,9 @@ static uint16_t zns_offline_zone(NvmeNamespace *ns, NvmeZone *zone,
 {
     switch (state) {
     case NVME_ZONE_STATE_READ_ONLY:
+        zns_release_zone_resources(ns, zone);
         zns_assign_zone_state(ns, zone, NVME_ZONE_STATE_OFFLINE);
+        zns_deallocate_zone(ns, zone);
         /* fall through */
     case NVME_ZONE_STATE_OFFLINE:
         return NVME_SUCCESS;
@@ -1027,7 +1158,8 @@ static uint16_t zns_get_mgmt_zone_slba_idx(FemuCtrl *n, NvmeNamespace *ns,
     }
 
     *slba = ((uint64_t)dw11) << 32 | dw10;
-    if (unlikely(*slba >= ns->id_ns.nsze)) {
+    /* the stored size is little-endian, as zns_check_bounds() reads it */
+    if (unlikely(*slba >= le64_to_cpu(ns->id_ns.nsze))) {
         *slba = 0;
         return NVME_LBA_RANGE | NVME_DNR;
     }
@@ -1047,11 +1179,6 @@ static inline uint16_t zns_check_bounds(NvmeNamespace *ns, uint64_t slba,
         return NVME_LBA_RANGE | NVME_DNR;
     }
 
-    return NVME_SUCCESS;
-}
-
-static uint16_t zns_check_dulbe(NvmeNamespace *ns, uint64_t slba, uint32_t nlb)
-{
     return NVME_SUCCESS;
 }
 
@@ -1079,6 +1206,7 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint32_t nlb = (uint32_t)le16_to_cpu(rw->nlb) + 1;
     uint64_t data_size = zns_l2b(ns, nlb);
     uint64_t data_offset;
+    uint64_t wp;
     uint16_t status;
 
     NvmeZone *zone;
@@ -1105,17 +1233,25 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             femu_err("Misao check zone write failed with status (%u)\n",status);
             goto err;
         }
-        if(append)
-        {
-             status = (zone->d.za & NVME_ZA_ZRWA_VALID) ? NVME_SUCCESS :
-                      zns_auto_open_zone(ns, zone);
-             if(status)
-             {
+        /*
+         * A write to an empty or closed zone opens it, which takes an open
+         * (and for an empty zone an active) resource; make room or refuse
+         * before anything moves. A conventional zone has no such state.
+         */
+        if (zone->d.zt != NVME_ZONE_TYPE_CONVENTIONAL) {
+            status = zns_auto_open_zone(ns, zone);
+            if (status) {
                 goto err;
-             }
-             slba = zone->w_ptr;
+            }
         }
-        res->slba = zns_advance_zone_wp(ns, zone, nlb);
+        if (append) {
+            slba = zone->w_ptr;
+        }
+        wp = zns_advance_zone_wp(ns, zone, nlb);
+        /* only an append reports where it landed; DW0/1 are reserved otherwise */
+        if (append) {
+            res->slba = cpu_to_le64(wp);
+        }
     }
     else
     {
@@ -1132,8 +1268,13 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
            deallocate logical blocks in the volume using the NVMe Dataset
            Management command.
         */
-        if (NVME_ERR_REC_DULBE(n->features.err_rec)) { status =
-            zns_check_dulbe(ns, slba, nlb); if (status) { goto err; } } }
+        if (NVME_ERR_REC_DULBE(ns->err_rec)) {
+            status = nvme_check_dulbe(n, ns, slba, slba + nlb);
+            if (status) {
+                goto err;
+            }
+        }
+    }
 
     /*
      * Address the backend within this namespace's slice, as the NVM path does.
@@ -1157,6 +1298,13 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     {
         struct zns_ssd *zns = ns->zns;
 
+        /*
+         * Record the blocks as written, as the NVM path does. Without it the
+         * allocation map stays empty for a zoned namespace, so the
+         * deallocated-or-unwritten error the controller advertises could never
+         * be reported for any block, written or not.
+         */
+        nvme_mark_written(ns, slba, nlb);
         zns_finalize_zoned_write(ns, req, false);
 
         /*
@@ -1173,6 +1321,15 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
             if (failed && zns_get_zone_state(failed) !=
                           NVME_ZONE_STATE_READ_ONLY) {
+                /*
+                 * Read only is the end of the line for the zone, so the open
+                 * and active resources it held have to go back. Left counted,
+                 * they exhaust the namespace's budget for zones that can never
+                 * be opened again, and the shutdown walk -- which finds the
+                 * zone on no list -- ends on an assertion that the open count
+                 * reached zero.
+                 */
+                zns_release_zone_resources(ns, failed);
                 zns_assign_zone_state(ns, failed, NVME_ZONE_STATE_READ_ONLY);
                 zns_record_changed_zone(ns, failed->d.zslba);
                 zns->err_write_injected++;
@@ -1275,6 +1432,10 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
         }
         /* flushing a closed zone brings it back to implicitly open */
         if (zns_get_zone_state(zone) == NVME_ZONE_STATE_CLOSED) {
+            status = zns_auto_open_zone(ns, zone);
+            if (status) {
+                return status;
+            }
             zns_aor_inc_open(ns);
             zns_assign_zone_state(ns, zone, NVME_ZONE_STATE_IMPLICITLY_OPEN);
         }
@@ -1282,7 +1443,7 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
         zone->d.wp = zone->w_ptr;
         if (zone->w_ptr >= zns_zone_wr_boundary(zone)) {
             zns_zrwa_release(ns, zone);
-            zns_assign_zone_state(ns, zone, NVME_ZONE_STATE_FULL);
+            zns_zone_set_full(ns, zone);
         }
         status = NVME_SUCCESS;
         break;
@@ -1308,28 +1469,49 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
         *resets = 1;
         status = zns_do_zone_op(ns, zone, proc_mask, zns_reset_zone, req);
         (*resets)--;
-        return NVME_SUCCESS;
+        break;
     case NVME_ZONE_ACTION_OFFLINE:
         if (all) {
             proc_mask = NVME_PROC_READ_ONLY_ZONES;
         }
         status = zns_do_zone_op(ns, zone, proc_mask, zns_offline_zone, req);
         break;
-    case NVME_ZONE_ACTION_SET_ZD_EXT:
+    case NVME_ZONE_ACTION_SET_ZD_EXT: {
+        g_autofree uint8_t *staged = NULL;
+
         if (all || !ns->zd_extension_size) {
             return NVME_INVALID_FIELD | NVME_DNR;
         }
-        zd_ext = zns_get_zd_extension(ns, zone_idx);
-        status = dma_write_prp(n, (uint8_t *)zd_ext, ns->zd_extension_size, prp1,
-                               prp2);
+        /*
+         * This is the one action that does not go through zns_do_zone_op(),
+         * which is where a conventional zone is refused. Accepted, it took the
+         * zone to Closed holding an active resource nothing gives back: a
+         * conventional zone's writes never touch the state machine that would,
+         * so it stays Closed, and a later Finish of all zones walks that list
+         * and leaves it Full, after which it takes no writes at all.
+         */
+        if (zone->d.zt == NVME_ZONE_TYPE_CONVENTIONAL) {
+            return NVME_ZONE_INVAL_TRANSITION | NVME_DNR;
+        }
+        /*
+         * Into a buffer of its own first. The transfer used to land in the
+         * extension itself before the state was tested, so a command that came
+         * back refused had already replaced what the host reads in an extended
+         * report.
+         */
+        staged = g_malloc0(ns->zd_extension_size);
+        status = dma_write_prp(n, staged, ns->zd_extension_size, prp1, prp2);
         if (status) {
             return status;
         }
         status = zns_set_zd_ext(ns, zone);
         if (status == NVME_SUCCESS) {
+            zd_ext = zns_get_zd_extension(ns, zone_idx);
+            memcpy(zd_ext, staged, ns->zd_extension_size);
             return status;
         }
         break;
+    }
     default:
         status = NVME_INVALID_FIELD;
     }
@@ -1379,7 +1561,8 @@ static uint16_t zns_zone_mgmt_recv(FemuCtrl *n, NvmeRequest *req)
     uint32_t zone_idx, zra, zrasf, partial;
     uint64_t max_zones, nr_zones = 0;
     uint16_t status;
-    uint64_t slba, capacity = zns_ns_nlbas(ns);
+    uint64_t slba;
+    uint32_t i;
     NvmeZoneDescr *z;
     NvmeZone *zone;
     NvmeZoneReportHeader *header;
@@ -1425,12 +1608,15 @@ static uint16_t zns_zone_mgmt_recv(FemuCtrl *n, NvmeRequest *req)
     max_zones = (data_size - sizeof(NvmeZoneReportHeader)) / zone_entry_sz;
     buf = g_malloc0(data_size);
 
-    zone = &ns->zone_array[zone_idx];
-    for (; slba < capacity; slba += ns->zone_size) {
+    /*
+     * Count over the zones that exist. The namespace may hold a partial zone's
+     * worth of blocks past the last whole zone, which is not in zone_array.
+     */
+    for (i = zone_idx; i < ns->num_zones; i++) {
         if (partial && nr_zones >= max_zones) {
             break;
         }
-        if (zns_zone_matches_filter(zrasf, zone++)) {
+        if (zns_zone_matches_filter(zrasf, &ns->zone_array[i])) {
             nr_zones++;
         }
     }
@@ -1588,12 +1774,6 @@ static void zns_init_params(FemuCtrl *n, NvmeNamespace *ns)
      */
     id_zns->chnls_per_zone = ns->zns_chnls_per_zone ? ns->zns_chnls_per_zone :
                                                       id_zns->num_ch;
-    if (id_zns->num_ch % id_zns->chnls_per_zone != 0) {
-        femu_err("zns_chnls_per_zone=%" PRIu64 " must divide zns_num_ch=%" PRIu64
-                 "; using full width\n",
-                 id_zns->chnls_per_zone, id_zns->num_ch);
-        id_zns->chnls_per_zone = id_zns->num_ch;
-    }
 
     id_zns->ch = g_malloc0(sizeof(struct zns_ch) * id_zns->num_ch);
     for (i =0; i < id_zns->num_ch; i++) {
@@ -1611,7 +1791,8 @@ static void zns_init_params(FemuCtrl *n, NvmeNamespace *ns)
     }
 
     //Misao: init sram
-    id_zns->program_unit = ZNS_PAGE_SIZE*id_zns->flash_type*2; //PAGE_SIZE*flash_type*2 planes
+    /* one program covers every plane of a die; the flush walks the same set */
+    id_zns->program_unit = ZNS_PAGE_SIZE * id_zns->flash_type * id_zns->num_plane;
     id_zns->stripe_unit = id_zns->program_unit*id_zns->num_ch*id_zns->num_lun;
     id_zns->cache.num_wc = ZNS_DEFAULT_NUM_WRITE_CACHE;
     id_zns->cache.write_cache = g_malloc0(sizeof(struct zns_write_cache) * id_zns->cache.num_wc);
@@ -1645,6 +1826,37 @@ static void zns_init_params(FemuCtrl *n, NvmeNamespace *ns)
     id_zns->timing.blk_er_lat[SLC] = SLC_BLOCK_ERASE_LATENCY_NS;
     id_zns->timing.blk_er_lat[TLC] = TLC_BLOCK_ERASE_LATENCY_NS;
     id_zns->timing.blk_er_lat[QLC] = QLC_BLOCK_ERASE_LATENCY_NS;
+
+    /*
+     * The values above are the built-in figures for each cell type. bbssd takes
+     * its timing from properties and ZNS did not, which left no way to model a
+     * different part -- or an erase at all -- without editing the source. A
+     * non-zero knob overrides the entry for the configured cell type; 0 keeps
+     * the built-in one, so an unset device behaves exactly as before.
+     */
+    if (n->zns_params.zns_pg_rd_lat) {
+        id_zns->timing.pg_rd_lat[id_zns->flash_type] =
+            n->zns_params.zns_pg_rd_lat;
+    }
+    if (n->zns_params.zns_pg_wr_lat) {
+        id_zns->timing.pg_wr_lat[id_zns->flash_type] =
+            n->zns_params.zns_pg_wr_lat;
+    }
+    if (n->zns_params.zns_blk_er_lat) {
+        id_zns->timing.blk_er_lat[id_zns->flash_type] =
+            n->zns_params.zns_blk_er_lat;
+    }
+
+    /*
+     * Channel bus phases. The array timing above is per die; the bus is
+     * shared by every die on a channel, so a non-zero phase makes reads and
+     * programs on one channel queue for the transfer even when they land on
+     * different planes. All three default to 0, which leaves the bus out of
+     * the model as before.
+     */
+    id_zns->timing.cmd_addr_lat = n->zns_params.zns_cmd_addr_lat;
+    id_zns->timing.pg_xfer_lat = n->zns_params.zns_pg_xfer_lat;
+    id_zns->timing.status_lat = n->zns_params.zns_status_lat;
 
     /*
      * Optional write-fault injection. One write in N fails and takes its zone
@@ -1699,8 +1911,17 @@ static int zns_init_zone_cap(FemuCtrl *n, NvmeNamespace *ns)
 
 static int zns_start_ctrl(FemuCtrl *n)
 {
-    /* Coperd: let's fail early before anything crazy happens */
-    assert(n->page_size == 4096);
+    /*
+     * This mode is written around a 4 KiB page. The size comes from CC.MPS,
+     * which the host chooses up to the mpsmax the controller advertises, so
+     * asserting on it let a guest kill the process; refuse to become ready
+     * instead, which is what the host is told a rejected CC means.
+     */
+    if (n->page_size != 4096) {
+        femu_err("zoned mode needs a 4 KiB memory page; the host asked for "
+                 "%u via CC.MPS\n", n->page_size);
+        return -1;
+    }
 
     if (!n->zasl_bs) {
         n->zasl = n->mdts;
@@ -1715,10 +1936,81 @@ static int zns_start_ctrl(FemuCtrl *n)
     return 0;
 }
 
+/*
+ * Refuse a geometry the PPA fields cannot hold or the timing tables cannot
+ * serve. Checked before anything is derived from it: an oversized axis
+ * would wrap in the PPA and silently alias onto lower indices, and a cell
+ * type outside the tables would index past them.
+ */
+static bool zns_check_params(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
+{
+    ZNSCtrlParams *p = &n->zns_params;
+    uint64_t dies;
+
+    /* the LUN and block counts are 8-bit properties and always fit their fields */
+    if (p->zns_num_ch < 1 || p->zns_num_ch > (1 << CH_BITS) ||
+        p->zns_num_lun < 1 ||
+        p->zns_num_plane < 1 || p->zns_num_plane > (1 << PL_BITS) ||
+        p->zns_num_blk < 1) {
+        error_setg(errp, "zns geometry out of range: zns_num_ch in [1, %d], "
+                   "zns_num_lun >= 1, zns_num_plane in [1, %d], "
+                   "zns_num_blk >= 1", 1 << CH_BITS, 1 << PL_BITS);
+        return false;
+    }
+    dies = (uint64_t)p->zns_num_ch * p->zns_num_lun * p->zns_num_blk;
+    if (ns->size / ZNS_PAGE_SIZE / dies < 1 ||
+        ns->size / ZNS_PAGE_SIZE / dies > (1 << PG_BITS)) {
+        error_setg(errp, "zns geometry gives %" PRIu64 " pages per block; "
+                   "must be in [1, %d]", ns->size / ZNS_PAGE_SIZE / dies,
+                   1 << PG_BITS);
+        return false;
+    }
+    if (ns->zns_chnls_per_zone && p->zns_num_ch % ns->zns_chnls_per_zone) {
+        error_setg(errp, "zns_chnls_per_zone %u must divide zns_num_ch %u",
+                   ns->zns_chnls_per_zone, p->zns_num_ch);
+        return false;
+    }
+    if (p->zns_flash_type < SLC || p->zns_flash_type >= MAX_FLASH_TYPE) {
+        error_setg(errp, "zns_flash_type must be in [%d, %d]", SLC, PLC);
+        return false;
+    }
+    if (p->zns_pg_rd_lat < 0 || p->zns_pg_wr_lat < 0 || p->zns_blk_er_lat < 0 ||
+        p->zns_cmd_addr_lat < 0 || p->zns_pg_xfer_lat < 0 ||
+        p->zns_status_lat < 0) {
+        error_setg(errp, "zns NAND timing knobs must not be negative");
+        return false;
+    }
+    /*
+     * The media model divides a 4 KiB logical page by the block size, so a
+     * block larger than that gives no sectors per page and divides by zero on
+     * the first read or write.
+     */
+    if (zns_ns_lbads(ns) > 12) {
+        error_setg(errp, "zoned namespaces need a logical block of 4 KiB or "
+                   "less; lba_index selects %u bytes", 1u << zns_ns_lbads(ns));
+        return false;
+    }
+    return true;
+}
+
 static void zns_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 {
+    if (!zns_check_params(n, ns, errp)) {
+        return;
+    }
+
     zns_set_ctrl(n);
     zns_init_params(n, ns);
+
+    /* only SLC, TLC and QLC have built-in figures; the rest need all three knobs */
+    if (!ns->zns->timing.pg_rd_lat[ns->zns->flash_type] ||
+        !ns->zns->timing.pg_wr_lat[ns->zns->flash_type] ||
+        !ns->zns->timing.blk_er_lat[ns->zns->flash_type]) {
+        error_setg(errp, "zns_flash_type %d has no built-in timing; set "
+                   "zns_pg_rd_lat, zns_pg_wr_lat and zns_blk_er_lat",
+                   ns->zns->flash_type);
+        return;
+    }
 
     zns_init_zone_cap(n, ns);
 
@@ -1726,14 +2018,30 @@ static void zns_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         return;
     }
 
-    zns_init_zone_identify(n, ns, 0);
+    /*
+     * The format index the namespace is actually formatted to, not the first
+     * one: the host reads the zone size out of the entry for its own index, so
+     * with any other lba_index it read a zone size of zero and refused the
+     * namespace outright.
+     */
+    zns_init_zone_identify(n, ns, NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas));
 }
 
+/*
+ * Release what ZNS mode allocated. Reached from device_del; the namespaces are
+ * walked individually because a controller may serve zoned and unzoned ones
+ * side by side.
+ */
 static void zns_exit(FemuCtrl *n)
 {
-    /*
-     * Release any extra resource (zones) allocated for ZNS mode
-     */
+    int i;
+
+    for (i = 0; i < n->num_namespaces; i++) {
+        NvmeNamespace *ns = &n->namespaces[i];
+
+        zns_ns_shutdown(ns);
+        zns_ns_cleanup(ns);
+    }
 }
 
 #define ZNS_CHANGED_ZONE_LOG_SIZE 4096   /* 8 byte header + 511 x 8 byte ZSLBA */
@@ -1771,19 +2079,30 @@ static uint16_t zns_changed_zone_list(FemuCtrl *n, NvmeNamespace *ns,
     uint32_t trans_len;
     uint16_t status;
     uint8_t *log;
-    uint32_t i;
+    uint32_t i, nr;
 
     if (off >= ZNS_CHANGED_ZONE_LOG_SIZE) {
         return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    /*
+     * The count is taken once and bounded here. It is written on a poller and
+     * read on this thread, so re-reading it as the loop condition lets the
+     * emitter run past the end of a page that holds exactly as many entries as
+     * the array does.
+     */
+    nr = zns->nr_changed_zones;
+    if (nr > ARRAY_SIZE(zns->changed_zones)) {
+        nr = ARRAY_SIZE(zns->changed_zones);
     }
 
     log = g_malloc0(ZNS_CHANGED_ZONE_LOG_SIZE);
     if (zns->changed_zone_overflow) {
         stq_le_p(log, 0xffff);
     } else {
-        stq_le_p(log, zns->nr_changed_zones);
+        stq_le_p(log, nr);
     }
-    for (i = 0; i < zns->nr_changed_zones; i++) {
+    for (i = 0; i < nr; i++) {
         stq_le_p(log + 8 + i * 8, zns->changed_zones[i]);
     }
     /*

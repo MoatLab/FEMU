@@ -300,6 +300,35 @@ static const uint8_t nvme_fdp_evf_shifts[FDP_EVT_MAX] = {
     [FDP_EVT_RUH_IMPLICIT_RU_CHANGE] = 33,
 };
 
+/*
+ * The event types this controller has. The shift table above is indexed by the
+ * type and is sparse -- the types are not consecutive -- so every index it does
+ * not name reads as the shift of event zero. Walking the whole range therefore
+ * reported types that do not exist and let a host turn off event zero by
+ * naming one of them, so both directions walk this list instead.
+ */
+static const uint8_t nvme_fdp_events_supported[] = {
+    FDP_EVT_RU_NOT_FULLY_WRITTEN,
+    FDP_EVT_RU_ATL_EXCEEDED,
+    FDP_EVT_CTRL_RESET_RUH,
+    FDP_EVT_INVALID_PID,
+    FDP_EVT_MEDIA_REALLOC,
+    FDP_EVT_RUH_IMPLICIT_RU_CHANGE,
+};
+
+static inline bool nvme_fdp_event_supported(uint8_t evt)
+{
+    int i;
+
+    for (i = 0; i < (int)ARRAY_SIZE(nvme_fdp_events_supported); i++) {
+        if (nvme_fdp_events_supported[i] == evt) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 static inline void nvme_fdp_stat_inc(uint64_t *a, uint64_t b)
 {
     uint64_t ret = *a + b;
@@ -891,6 +920,7 @@ enum NvmeStatusCodes {
     NVME_FW_REQ_RESET           = 0x010b,
     NVME_INVALID_QUEUE_DEL      = 0x010c,
     NVME_FID_NOT_SAVEABLE       = 0x010d,
+    NVME_FEAT_NOT_CHANGEABLE    = 0x010e,
     NVME_FID_NOT_NSID_SPEC      = 0x010f,
     NVME_FW_REQ_SUSYSTEM_RESET  = 0x0110,
     NVME_CONFLICTING_ATTRS      = 0x0180,
@@ -1000,6 +1030,7 @@ enum {
 };
 
 enum NvmeLogIdentifier {
+    NVME_LOG_SUPPORTED      = 0x00,
     NVME_LOG_ERROR_INFO     = 0x01,
     NVME_LOG_SMART_INFO     = 0x02,
     NVME_LOG_FW_SLOT_INFO   = 0x03,
@@ -1010,7 +1041,40 @@ enum NvmeLogIdentifier {
     NVME_LOG_FDP_STATS      = 0x22,
     NVME_LOG_FDP_EVENTS     = 0x23,
     NVME_LOG_CHANGED_ZONE_LIST  = 0xbf,
+    NVME_LOG_FEMU_STATS         = 0xc0,
 };
+
+/* LID Supported and Effects data structure, one per log page identifier */
+enum NvmeLidSupport {
+    NVME_LIDS_LSUPP = 1 << 0,   /* the controller answers this identifier */
+};
+
+/*
+ * Vendor-specific log page C0h: the emulator's own media counters. These used
+ * to be written into the reserved area of the SMART log, which since NVMe Base
+ * 2.0 is not reserved -- bytes 192 to 231 carry the composite temperature
+ * times, the eight temperature sensors and the thermal transition counts, so
+ * `nvme smart-log` reported page counters as temperatures.
+ *
+ * The field offsets within the page are the ones the counters had within that
+ * reserved area, so a reader changes the log it asks for and the base it
+ * counts from, and nothing else.
+ */
+typedef struct FemuStatsLog {
+    uint32_t    waf_x1000;        /* write amplification, scaled by 1000 */
+    uint8_t     rsvd4[4];
+    uint64_t    host_write_pages; /* pages the host asked to program */
+    uint64_t    gc_write_pages;   /* pages relocated by garbage collection */
+    uint64_t    nand_write_pages; /* pages actually programmed */
+    uint64_t    max_block_reads;  /* reads of the most-read block since erase */
+    uint64_t    read_reclaims;    /* lines rewritten because of read stress */
+    uint64_t    retention_refreshes; /* lines rewritten because of age */
+    uint64_t    buffer_reads;     /* host read pages the buffer saw */
+    uint64_t    buffer_read_hits; /* of those, the pages it held */
+    uint64_t    buffer_writes;    /* host write pages */
+    uint64_t    buffer_write_hits; /* of those, the pages it already held */
+    uint8_t     rsvd88[424];
+} FemuStatsLog;
 
 typedef struct NvmePSD {
     uint16_t    mp;
@@ -1148,8 +1212,8 @@ enum NvmeIdCtrlLpa {
 typedef struct NvmeFeatureVal {
     uint32_t    arbitration;
     uint32_t    power_mgmt;
-    uint32_t    temp_thresh;
-    uint32_t    err_rec;
+    uint32_t    temp_thresh;        /* over-temperature threshold, K */
+    uint32_t    temp_thresh_under;  /* under-temperature threshold, K */
     uint32_t    volatile_wc;
     uint32_t    nr_io_queues;
     uint32_t    int_coalescing;
@@ -1203,6 +1267,11 @@ typedef enum NvmeGetFeatureSelect {
     NVME_GETFEAT_SELECT_SAVED   = 0x2,
     NVME_GETFEAT_SELECT_CAP     = 0x3,
 } NvmeGetFeatureSelect;
+
+/* CDW10 of Get/Set Features: the identifier, the selector, the save bit */
+#define NVME_GETSETFEAT_FID(dw10)   ((dw10) & 0xff)
+#define NVME_GETFEAT_SELECT(dw10)   (((dw10) >> 8) & 0x7)
+#define NVME_SETFEAT_SAVE(dw10)     (((dw10) >> 31) & 0x1)
 
 typedef struct NvmeRangeType {
     uint8_t     type;
@@ -1314,6 +1383,7 @@ static inline void nvme_check_size(void)
     QEMU_BUILD_BUG_ON(sizeof(NvmeErrorLog) != 64);
     QEMU_BUILD_BUG_ON(sizeof(NvmeFwSlotInfoLog) != 512);
     QEMU_BUILD_BUG_ON(sizeof(NvmeSmartLog) != 512);
+    QEMU_BUILD_BUG_ON(sizeof(FemuStatsLog) != 512);
     QEMU_BUILD_BUG_ON(sizeof(NvmeIdCtrl) != 4096);
     QEMU_BUILD_BUG_ON(sizeof(NvmeIdNs) != 4096);
 
@@ -1349,6 +1419,11 @@ typedef struct NvmeRequest {
     uint64_t                slba;
     uint16_t                is_write;
     uint16_t                nlb;
+    /*
+     * Bytes this command really moved, for the modes whose transfer size is not
+     * a block count. Zero everywhere else; the block arithmetic applies there.
+     */
+    uint64_t                xfer_bytes;
     uint16_t                ctrl;
     uint64_t                meta_size;
     uint64_t                mptr;
@@ -1380,6 +1455,13 @@ typedef struct NvmeRequest {
     int             dsm_nr_ranges;
     uint32_t        dsm_attributes;
 
+    /*
+     * Zones whose media reset the poller deferred to the FTL thread. See
+     * zns_zone_reset_state().
+     */
+    uint32_t        *zone_resets;
+    uint32_t        nr_zone_resets;
+
     /* FDP (Flexible Data Placement) */
     uint16_t        fdp_dspec;
     uint8_t         fdp_dtype;
@@ -1403,6 +1485,7 @@ typedef struct NvmeSQueue {
     uint32_t    size;
     uint64_t    dma_addr;
     uint64_t    dma_addr_hva;
+    uint64_t    dma_map_len;    /* bytes mapped at dma_addr_hva */
     uint64_t    completed;
     uint64_t    *prp_list;
     NvmeRequest *io_req;
@@ -1429,6 +1512,7 @@ typedef struct NvmeCQueue {
     uint32_t    size;
     uint64_t    dma_addr;
     uint64_t    dma_addr_hva;
+    uint64_t    dma_map_len;    /* bytes mapped at dma_addr_hva */
     uint64_t    *prp_list;
     EventNotifier guest_notifier;
     QEMUTimer   *timer;
@@ -1467,6 +1551,12 @@ typedef struct NvmeNamespace {
     NvmeIdNs        id_ns;
     NvmeLBAF        lbaf;
     NvmeRangeType   lba_range[64];
+    /*
+     * Error Recovery is a namespace-scoped feature, so each namespace keeps
+     * its own. Holding one copy on the controller meant a setting made on one
+     * namespace was read back on every other.
+     */
+    uint32_t        err_rec;
     unsigned long   *util;
     unsigned long   *uncorrectable;
     uint32_t        id;
@@ -1628,6 +1718,8 @@ typedef struct BbCtrlParams {
     int gc_thres_pcent_high;
 
     bool hot_cold_sep;        /* separate overwrites from write-once pages */
+    int read_reclaim_limit;   /* reads before a line is rewritten; 0 = never */
+    int retention_limit_sec;  /* age before programmed data is refreshed; 0 = never */
     int buffer_size;          /* pages held in the write buffer */
     int buffer_thres_pcent;   /* fill level at which eviction starts */
     int gc_strategy; /* FDP GC strategy: 0=greedy, 1=cost-benefit, 2=random */
@@ -1639,6 +1731,7 @@ typedef struct BbCtrlParams {
     int cell_pages;   /* pages per wordline = bits/cell: 1 SLC..5 PLC; 0 = off */
     int pgtype_lat;   /* model per-page-type program latency; 0 = off */
     int ecc_step_ns;  /* per-tier ECC read-latency adder vs P/E wear; 0 = off */
+    int ecc_retention_sec; /* retention age per ECC tier (s); 0 = age adds none */
     int cmd_addr_lat; /* command+address bus phase (ns); 0 = off */
     int pg_xfer_lat;  /* page data-in/data-out bus phase (ns); 0 = off */
     int status_lat;   /* status/ready-poll bus phase (ns); 0 = off */
@@ -1660,6 +1753,14 @@ typedef struct ZNSCtrlParams {
      * no zone-descriptor extension). Non-zero activates the already-present
      * active/open-zone accounting and the zone-descriptor extension area.
      */
+    /* NAND timing overrides for the configured cell type; 0 = built-in value */
+    int64_t zns_pg_rd_lat;
+    int64_t zns_pg_wr_lat;
+    int64_t zns_blk_er_lat;
+    /* channel bus phases (ns); any non-zero value turns the shared bus on */
+    int64_t zns_cmd_addr_lat;
+    int64_t zns_pg_xfer_lat;
+    int64_t zns_status_lat;
     uint32_t zns_max_active;  /* max active zones (0 = unlimited) */
     uint32_t zns_max_open;    /* max open zones (0 = unlimited) */
     uint32_t zns_zd_ext_size; /* per-zone descriptor extension bytes (0 = none) */
@@ -1680,6 +1781,7 @@ typedef struct CsdCtrlParams {
     uint64_t time_slice;
     uint64_t context_switch_time;
     uint16_t csf_runtime_scale;
+    char     *program_dir;       /* where a loadable program may come from */
 } CsdCtrlParams;
 
 typedef struct OcCtrlParams {
@@ -1738,12 +1840,25 @@ typedef struct FemuCtrl {
     QemuThread      ftl_thread; /* one FTL thread serving every namespace */
     bool            ftl_thread_running;
     bool            ftl_stopping;   /* asks the FTL thread to leave its loop */
+    /*
+     * Fixed at realize from the namespace modes, not the controller mode,
+     * since namespaces may run different modes: completions then arrive
+     * through to_poller rather than straight off to_ftl.
+     */
+    bool            use_ftl_thread;
 
     /* Coperd: OC2.0 FIXME */
     NvmeParams  params;
     FemuExtCtrlOps ext_ops;
     Notifier    process_exit_notifier;
     bool        process_exit_notifier_registered;
+    /*
+     * Controller-wide CSD state. Kept out of ext_ops.state because that slot is
+     * shared with whatever other mode a namespace runs: CSD claimed it
+     * unconditionally at init and overwrote a KV namespace's, after which a KV
+     * admin command naming no namespace read the CSD state as its own type.
+     */
+    void           *csd_ctrl_state;
 
     time_t      start_time;
     uint16_t    temperature;
@@ -1820,6 +1935,15 @@ typedef struct FemuCtrl {
     NvmeIdCtrl      id_ctrl;
 
     QSIMPLEQ_HEAD(aer_queue, NvmeAsyncEvent) aer_queue;
+    /*
+     * An asynchronous event can be raised from a poller thread, which must not
+     * write the admin completion queue: that queue is served by the vCPU
+     * thread, and two writers corrupt its tail and phase. A poller appends
+     * under aer_lock and wakes aer_bh; the bottom half runs in the main loop
+     * and is the only place events are posted from.
+     */
+    QemuMutex       aer_lock;
+    QEMUBH          *aer_bh;
     QEMUTimer       *aer_timer;
     uint8_t         aer_mask;
 
@@ -1827,6 +1951,8 @@ typedef struct FemuCtrl {
 	uint64_t		eis_addr;
     uint64_t        dbs_addr_hva;
     uint64_t        eis_addr_hva;
+    uint64_t        dbbuf_map_len;  /* bytes mapped for each of the two above */
+    void            *poller_args;   /* what each poller thread was handed */
 
     uint8_t         femu_mode;
     uint8_t         lver; /* Coperd: OCSSD version, 0x1 -> OC1.2, 0x2 -> OC2.0 */
@@ -1855,6 +1981,8 @@ typedef struct FemuCtrl {
     uint32_t        e_xfer_mpj;     /* channel transfer, milli-pJ/bit */
     uint32_t        stats_flush_ms; /* periodic stats snapshot; 0 = on exit only */
     QEMUTimer       *stats_timer;
+    /* program/erase cycles the media is rated for; 0 takes the cell type's */
+    uint32_t        pe_cycles_rated;
     uint32_t        nand_bad_blocks; /* bbssd factory bad blocks reported via SMART; 0 = none */
     uint32_t        op_pcent; /* bbssd over-provisioning percent (0 = use devsz_mb) */
     bool            debug_ftl; /* check bbssd FTL invariants on the GC path */
@@ -1932,6 +2060,17 @@ typedef struct FemuCtrl {
      * poller indices; NULL until pollers init.
      */
     volatile bool   *poller_in_sweep;
+    /*
+     * The same handshake for the FTL thread: it publishes this while it holds
+     * a request, so a caller that has cleared dataplane_started can wait until
+     * the thread is between requests and touching nothing.
+     */
+    volatile bool   ftl_in_sweep;
+    /*
+     * Asks the poller threads to leave their loop. They run until the device
+     * goes away, so without this the join in teardown never returns.
+     */
+    volatile bool   poller_stopping;
 
     /* Nand Flash Type: SLC/MLC/TLC/QLC/PLC */
     uint8_t         flash_type;
@@ -1998,6 +2137,11 @@ static inline bool NS_ZNSSD(NvmeNamespace *ns)
     return (ns->femu_mode == FEMU_ZNSSD_MODE);
 }
 
+static inline bool NS_KVSSD(NvmeNamespace *ns)
+{
+    return (ns->femu_mode == FEMU_KVSSD_MODE);
+}
+
 static inline bool NS_CSD(NvmeNamespace *ns)
 {
     return (ns->femu_mode == FEMU_CSD_MODE);
@@ -2044,10 +2188,15 @@ void nvme_update_cq_head(NvmeCQueue *cq);
 void nvme_update_cq_eventidx(NvmeCQueue *cq);
 uint8_t nvme_cq_full(NvmeCQueue *cq);
 uint8_t nvme_sq_empty(NvmeSQueue *sq);
+void nvme_start_dataplane(FemuCtrl *n);
+bool nvme_pause_pollers(FemuCtrl *n);
+void nvme_ns_refresh_fdp(NvmeNamespace *ns);
+void nvme_resume_pollers(FemuCtrl *n, bool was_started);
 void nvme_update_sq_tail(NvmeSQueue *sq);
 uint16_t nvme_init_sq(NvmeSQueue *sq, FemuCtrl *n, uint64_t dma_addr, uint16_t
                       sqid, uint16_t cqid, uint16_t size, enum NvmeQueueFlags
                       prio, int contig);
+void nvme_drain_sq(FemuCtrl *n, NvmeSQueue *sq);
 void nvme_free_sq(NvmeSQueue *sq, FemuCtrl *n);
 void nvme_free_cq(NvmeCQueue *cq, FemuCtrl *n);
 uint16_t nvme_init_cq(NvmeCQueue *cq, FemuCtrl *n, uint64_t dma_addr, uint16_t
@@ -2059,9 +2208,11 @@ void nvme_set_ctrl_name(FemuCtrl *n, const char *mn, const char *sn, int *dev_id
 void nvme_isr_notify_admin(void *opaque);
 void nvme_isr_notify_io(void *opaque);
 int nvme_setup_virq(FemuCtrl *n, NvmeCQueue *cq);
+void nvme_remove_kvm_msi_virq(NvmeCQueue *cq);
 int nvme_clear_virq(FemuCtrl *n);
 
 /* Public DMA APIs from dma.c */
+bool     nvme_addr_is_cmb(FemuCtrl *n, uint64_t addr, uint64_t len);
 void     nvme_addr_read(FemuCtrl *n, hwaddr addr, void *buf, int size);
 void     nvme_addr_write(FemuCtrl *n, hwaddr addr, void *buf, int size);
 uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
@@ -2119,12 +2270,25 @@ uint64_t zns_ftl_process_req(NvmeNamespace *ns, NvmeRequest *req);
 
 /* bbssd SMART available-spare (100% healthy, reduced by the factory bad-block fraction) */
 uint8_t ssd_available_spare(struct ssd *ssd);
+uint8_t ssd_percentage_used(struct ssd *ssd);
+uint64_t ssd_media_errors(struct ssd *ssd);
+uint32_t ssd_page_size(struct ssd *ssd);
+uint64_t zns_media_errors(NvmeNamespace *ns);
 
 /* write amplification: factor scaled by 1000, plus the raw page counters */
 uint32_t ssd_waf_x1000(struct ssd *ssd);
 uint64_t ssd_host_write_pages(struct ssd *ssd);
 uint64_t ssd_gc_write_pages(struct ssd *ssd);
 uint64_t ssd_nand_write_pages(struct ssd *ssd);
+uint64_t ssd_max_block_reads(struct ssd *ssd);
+uint64_t ssd_read_reclaims(struct ssd *ssd);
+uint64_t ssd_retention_refreshes(struct ssd *ssd);
+
+/* write buffer: host pages seen and the pages it answered without the media */
+uint64_t ssd_buffer_reads(struct ssd *ssd);
+uint64_t ssd_buffer_read_hits(struct ssd *ssd);
+uint64_t ssd_buffer_writes(struct ssd *ssd);
+uint64_t ssd_buffer_write_hits(struct ssd *ssd);
 
 static inline uint64_t ns_blks(NvmeNamespace *ns, uint8_t lba_idx)
 {

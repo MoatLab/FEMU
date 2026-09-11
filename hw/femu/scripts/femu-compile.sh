@@ -22,7 +22,12 @@ done
 
 make clean
 # --disable-werror --extra-cflags=-w --disable-git-update
-../configure --enable-kvm --target-list=x86_64-softmmu --enable-slirp ${FEMU_CONFIGURE_OPTS} || {
+# FEMU emulates an SSD; none of QEMU's network block drivers are used, and their
+# headers move under us -- libnfs 6 changed nfs_pread_async and broke the build
+# on newer distributions. Leave them out.
+../configure --enable-kvm --target-list=x86_64-softmmu --enable-slirp \
+             --disable-libnfs --disable-libiscsi --disable-curl \
+             ${FEMU_CONFIGURE_OPTS} || {
     echo "===> FEMU configure failed"
     exit 1
 }

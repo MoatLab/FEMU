@@ -295,3 +295,13 @@ void rcache_init(struct ssd *ssd, uint32_t read_cache_mb, uint32_t evict_policy)
         ssd->rcache.hash[i] = -1;
     }
 }
+
+/* release what rcache_init() took */
+void rcache_destroy(struct ssd *ssd)
+{
+    g_free(ssd->rcache.slots);
+    g_free(ssd->rcache.hash);
+    ssd->rcache.slots = NULL;
+    ssd->rcache.hash = NULL;
+    ssd->rcache.capacity = 0;
+}

@@ -10,6 +10,62 @@ static void bb_init_ctrl_str(FemuCtrl *n)
     nvme_set_ctrl_name(n, vbbssd_mn, vbbssd_sn, &fsid_vbb);
 }
 
+/*
+ * A line is only reclaimable by relocating its valid pages somewhere else, so
+ * part of the NAND has to stay unexposed. Expose all of it and a host that
+ * fills the namespace leaves garbage collection nothing to free: the write
+ * path then runs out of lines and aborts mid-run. Refuse the geometry instead,
+ * and say what would fit.
+ */
+int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
+{
+    BbCtrlParams *p = &n->bb_params;
+    uint64_t page_bytes = (uint64_t)p->secs_per_pg * p->secsz;
+    /* a line is one block on every plane of every LUN, as the FTL builds it */
+    uint64_t pgs_per_line = (uint64_t)p->nchs * p->luns_per_ch *
+                            p->pls_per_lun * p->pgs_per_blk;
+    uint64_t tt_lines = (uint64_t)p->blks_per_pl;
+    uint64_t reserve_lines, usable_pgs, exposed_pgs;
+
+    /*
+     * The free lines GC insists on, plus one for every write pointer this
+     * configuration can hold open at once. Counting only the data pointer
+     * leaves a device that hot/cold separation or a log-block scheme can run
+     * out of lines on, which used to be fatal and is now a refused write.
+     */
+    reserve_lines = (uint64_t)((1 - p->gc_thres_pcent_high / 100.0) * tt_lines);
+    reserve_lines += 1;                      /* the data write pointer */
+    if (p->hot_cold_sep) {
+        reserve_lines += 1;                  /* the hot write pointer */
+    }
+    if (femu_mapping_name_uses_log_class(p->mapping_scheme)) {
+        reserve_lines += 1;                  /* the log write pointer */
+    }
+
+    if (tt_lines <= reserve_lines) {
+        error_setg(errp, "FEMU bbssd: the geometry has only %" PRIu64 " lines, "
+                   "fewer than the %" PRIu64 " garbage collection needs free",
+                   tt_lines, reserve_lines);
+        return -1;
+    }
+
+    usable_pgs = (tt_lines - reserve_lines) * pgs_per_line;
+    exposed_pgs = ns->size / page_bytes;
+
+    if (exposed_pgs > usable_pgs) {
+        error_setg(errp, "FEMU bbssd: namespace %u exposes %" PRIu64 " MiB of "
+                   "the %" PRIu64 " MiB this geometry has, leaving garbage "
+                   "collection no room; expose at most %" PRIu64 " MiB per "
+                   "namespace (lower devsz_mb, or set op_pcent)",
+                   ns->id, ns->size >> 20,
+                   (tt_lines * pgs_per_line * page_bytes) >> 20,
+                   (usable_pgs * page_bytes) >> 20);
+        return -1;
+    }
+
+    return 0;
+}
+
 /* bb <=> black-box */
 static void bb_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 {
@@ -17,6 +73,41 @@ static void bb_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 
     if (bb_check_geometry(n, errp)) {
         return;
+    }
+
+    if (bb_check_capacity(n, ns, errp)) {
+        return;
+    }
+
+    /*
+     * FDP keeps its own write and reclaim path, which none of these knobs
+     * reach; refuse them rather than accept them silently.
+     */
+    if (n->subsys && n->subsys->endgrp.fdp.enabled) {
+        const BbCtrlParams *p = &n->bb_params;
+        const char *knob = NULL;
+
+        if (p->buffer_size) {
+            knob = "buffer_size";
+        } else if (p->hot_cold_sep) {
+            knob = "hot_cold_sep";
+        } else if (p->read_reclaim_limit) {
+            knob = "read_reclaim_limit";
+        } else if (p->retention_limit_sec) {
+            knob = "retention_limit_sec";
+        } else if (p->ecc_retention_sec) {
+            knob = "ecc_retention_sec";
+        } else if (p->trim_lat_ns) {
+            knob = "trim_lat_ns";
+        } else if (p->mapping_scheme && strcmp(p->mapping_scheme, "page")) {
+            knob = "mapping";
+        } else if (p->gc_policy && strcmp(p->gc_policy, "greedy")) {
+            knob = "gc_policy";
+        }
+        if (knob) {
+            error_setg(errp, "FEMU bbssd: %s has no effect under FDP", knob);
+            return;
+        }
     }
 
     ssd = ns->ssd = g_malloc0(sizeof(struct ssd));
@@ -48,7 +139,16 @@ static void bb_flush_stats(FemuCtrl *n);
 
 static void bb_flip_apply(FemuCtrl *n, int64_t cdw10)
 {
+    bool resume;
     int i;
+
+    /*
+     * These are the timings the FTL thread reads on every request, and the
+     * media layer is rebuilt from them below. Stop the dataplane first: this
+     * runs on the thread that took the admin command, so nothing else keeps
+     * the fields still.
+     */
+    resume = nvme_pause_pollers(n);
 
     for (i = 0; i < n->num_namespaces; i++) {
         struct ssd *ssd = n->namespaces[i].ssd;
@@ -84,6 +184,8 @@ static void bb_flip_apply(FemuCtrl *n, int64_t cdw10)
             break;
         }
     }
+
+    nvme_resume_pollers(n, resume);
 }
 
 static void bb_flip(FemuCtrl *n, NvmeCmd *cmd)
@@ -303,17 +405,35 @@ static void bb_flush_stats(FemuCtrl *n)
     }
 }
 
+/*
+ * Release what the namespace's FTL still holds. Reached for the mode the
+ * controller itself runs; a namespace running bbssd underneath a controller of
+ * another mode is not dispatched an exit at all, which is a gap in the generic
+ * teardown rather than one here.
+ */
+/*
+ * Release the FTL this mode built. Each mode allocates its own ns->ssd and
+ * frees the ones its namespaces own, so a controller mixing modes tears each
+ * down exactly once. n->ssd aliases the first namespace's, so clear it before
+ * the memory goes.
+ */
 static void bb_exit(FemuCtrl *n)
 {
     int i;
 
     bb_flush_stats(n);
     for (i = 0; i < n->num_namespaces; i++) {
-        struct ssd *ssd = n->namespaces[i].ssd;
+        NvmeNamespace *ns = &n->namespaces[i];
 
-        if (ssd) {
-            ssd_free_write_buffer(ssd);
+        if (!NS_BBSSD(ns) || !ns->ssd) {
+            continue;
         }
+        if (n->ssd == ns->ssd) {
+            n->ssd = NULL;
+        }
+        ssd_free(ns->ssd);
+        g_free(ns->ssd);
+        ns->ssd = NULL;
     }
 }
 
