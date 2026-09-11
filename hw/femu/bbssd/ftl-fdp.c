@@ -1184,6 +1184,7 @@ static uint64_t ssd_stream_write(FemuCtrl *n, struct ssd *ssd,
     struct ppa ppa;
     uint64_t lpn;
     uint64_t curlat = 0, maxlat = 0;
+    uint64_t written = 0;
     int r;
 
     /* parse placement info from request */
@@ -1299,9 +1300,6 @@ static uint64_t ssd_stream_write(FemuCtrl *n, struct ssd *ssd,
         }
     }
 
-    /* pages the host wrote; the WAF denominator, as on the non-FDP path */
-    ssd->host_write_pages += end_lpn - start_lpn + 1;
-
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
         /*
          * Updating curr_ru should be handled by fdp_advance_ru_pointer() naturally.
@@ -1332,6 +1330,14 @@ static uint64_t ssd_stream_write(FemuCtrl *n, struct ssd *ssd,
         set_rmap_ent(ssd, lpn, &ppa);
         mark_page_valid_fdp(ssd, &ppa, ru);
         ssd->nand_write_pages++; /* a user page programmed into NAND */
+        /*
+         * Counted here rather than for the whole command before the loop: the
+         * loop stops when the device runs out of room, so a command that wrote
+         * part of itself used to add all of its pages to the denominator the
+         * amplification figure divides by.
+         */
+        ssd->host_write_pages++;
+        written++;
 
         /* RUAMW counts logical blocks; a page holds secs_per_pg of them */
         if (ru->nvme_ru) {
@@ -1362,6 +1368,9 @@ static uint64_t ssd_stream_write(FemuCtrl *n, struct ssd *ssd,
         maxlat = (curlat > maxlat) ? curlat : maxlat;
     }
 
+    /* what the caller charges its byte counters with */
+    req->xfer_bytes = written * (uint64_t)spp->secs_per_pg * spp->secsz;
+
     return maxlat;
 }
 
@@ -1373,18 +1382,16 @@ uint64_t nvme_do_write_fdp(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
 {
     NvmeNamespace *ns = req->ns;
     struct ssd *ssd = n->ssd;
-    struct ssdparams *spp = &ssd->sp;
     uint64_t data_bytes;
-
-    /* update FDP host bytes written stats */
-    data_bytes = (uint64_t)nlb * spp->secsz;
-    nvme_fdp_stat_inc(&ns->endgrp->fdp.hbmw, data_bytes);
-    nvme_fdp_stat_inc(&ns->endgrp->fdp.mbmw, data_bytes);
+    uint64_t lat;
 
     /* per-RUH stats */
     uint16_t pid = req->fdp_dspec;
     uint8_t dtype = req->fdp_dtype;
     uint16_t ph, rg, ruhid;
+
+    (void)slba;
+    (void)nlb;
 
     if (dtype != NVME_DIRECTIVE_DATA_PLACEMENT ||
         !nvme_parse_pid(ns, pid, &ph, &rg)) {
@@ -1392,12 +1399,27 @@ uint64_t nvme_do_write_fdp(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
         rg = 0;
     }
     ruhid = ns->fdp.phs[ph];
+
+    lat = ssd_stream_write(n, ssd, req);
+
+    /*
+     * Charged from what the write actually programmed, after the fact. The
+     * command's own length was charged before the attempt, so a write the
+     * device had no room for still added its bytes to both the host and the
+     * media totals -- which is how the reported amplification fell below one.
+     */
+    data_bytes = req->xfer_bytes;
+    if (!data_bytes) {
+        return lat;
+    }
+    nvme_fdp_stat_inc(&ns->endgrp->fdp.hbmw, data_bytes);
+    nvme_fdp_stat_inc(&ns->endgrp->fdp.mbmw, data_bytes);
     nvme_fdp_stat_inc(&ssd->ruhs[ruhid].hbmw, data_bytes);
     nvme_fdp_stat_inc(&ssd->ruhs[ruhid].ruh->hbmw, data_bytes);
     nvme_fdp_stat_inc(&ssd->ruhs[ruhid].mbmw, data_bytes);
     nvme_fdp_stat_inc(&ssd->ruhs[ruhid].ruh->mbmw, data_bytes);
 
-    return ssd_stream_write(n, ssd, req);
+    return lat;
 }
 
 /* ========== FDP Init Functions ========== */
