@@ -255,7 +255,14 @@ static uint64_t kv_write_pointer_remaining(FemuKvssdState *s)
     if (!wpp->curline) {
         return 0;
     }
-    idx = (uint64_t)wpp->pg * stride +
+    /*
+     * The pointer walks channel, then lun, then plane, then page, so the plane
+     * is part of the position. Leaving it out reported up to half a line more
+     * room than the media has once a lun holds more than one plane, and the
+     * checks that ask how much room is left then pass when it is not there.
+     */
+    idx = (uint64_t)wpp->pg * stride * spp->pls_per_lun +
+          (uint64_t)wpp->pl * stride +
           (uint64_t)wpp->lun * spp->nchs + wpp->ch;
     return idx < (uint64_t)spp->pgs_per_line ?
            (uint64_t)spp->pgs_per_line - idx : 0;
@@ -495,6 +502,21 @@ static uint64_t kv_charge_index(FemuKvssdState *s, NvmeRequest *req,
     return maxlat;
 }
 
+/*
+ * The base cost and the index probe both measure from the request's own start
+ * time, so each already contains any wait the chip was under. Adding them
+ * counted that wait twice, which made the modelled latency grow faster than the
+ * load. The command costs the longer of the two.
+ */
+static uint64_t kv_charge_stages(FemuKvssdState *s, NvmeRequest *req,
+                                 const uint8_t *key, uint8_t kl)
+{
+    uint64_t base = kv_charge_base(s, req);
+    uint64_t index = kv_charge_index(s, req, key, kl);
+
+    return MAX(base, index);
+}
+
 static void kv_apply_lat(NvmeRequest *req, uint64_t lat)
 {
     req->reqlat += lat;
@@ -645,7 +667,7 @@ uint16_t kvssd_ftl_exist(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
     (void)n;
     qemu_mutex_lock(&s->lock);
     found = s->index->find(s, key, kl, NULL) >= 0;
-    lat = kv_charge_base(s, req) + kv_charge_index(s, req, key, kl);
+    lat = kv_charge_stages(s, req, key, kl);
     qemu_mutex_unlock(&s->lock);
     kv_apply_lat(req, lat);
     return found ? NVME_SUCCESS : (NVME_KV_KEY_NOT_EXIST | NVME_DNR);
@@ -668,20 +690,20 @@ uint16_t kvssd_ftl_store(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
 
     existing = s->index->find(s, key, kl, NULL);
     if (sike && existing < 0) {
-        lat = kv_charge_base(s, req) + kv_charge_index(s, req, key, kl);
+        lat = kv_charge_stages(s, req, key, kl);
         qemu_mutex_unlock(&s->lock);
         kv_apply_lat(req, lat);
         return NVME_KV_KEY_NOT_EXIST | NVME_DNR;
     }
     if (sinke && existing >= 0) {
-        lat = kv_charge_base(s, req) + kv_charge_index(s, req, key, kl);
+        lat = kv_charge_stages(s, req, key, kl);
         qemu_mutex_unlock(&s->lock);
         kv_apply_lat(req, lat);
         return NVME_KV_KEY_EXISTS | NVME_DNR;
     }
     if (existing < 0 && ((s->kv_max_keys && s->nr_entries >= s->kv_max_keys) ||
                          s->nr_entries >= s->hash_slots)) {
-        lat = kv_charge_base(s, req) + kv_charge_index(s, req, key, kl);
+        lat = kv_charge_stages(s, req, key, kl);
         qemu_mutex_unlock(&s->lock);
         kv_apply_lat(req, lat);
         return NVME_CAP_EXCEEDED | NVME_DNR;
@@ -690,7 +712,7 @@ uint16_t kvssd_ftl_store(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
         old = s->table[existing];
     }
     if (!kv_logical_capacity_ok(s, existing >= 0 ? &old : NULL, kl, vsize)) {
-        lat = kv_charge_base(s, req) + kv_charge_index(s, req, key, kl);
+        lat = kv_charge_stages(s, req, key, kl);
         qemu_mutex_unlock(&s->lock);
         kv_apply_lat(req, lat);
         return NVME_CAP_EXCEEDED | NVME_DNR;
@@ -747,8 +769,7 @@ uint16_t kvssd_ftl_store(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
     s->key_used += kl;
 
     /* command/index base cost + value-page program timing through the NAND model */
-    lat += kv_charge_base(s, req);
-    lat += kv_charge_index(s, req, key, kl);
+    lat = MAX(lat, kv_charge_stages(s, req, key, kl));
 
     qemu_mutex_unlock(&s->lock);
     kv_apply_lat(req, lat);
@@ -767,7 +788,7 @@ uint16_t kvssd_ftl_retrieve(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
     qemu_mutex_lock(&s->lock);
     slot = s->index->find(s, key, kl, NULL);
     if (slot < 0) {
-        lat = kv_charge_base(s, req) + kv_charge_index(s, req, key, kl);
+        lat = kv_charge_stages(s, req, key, kl);
         qemu_mutex_unlock(&s->lock);
         kv_apply_lat(req, lat);
         *full_len = 0;
@@ -779,13 +800,13 @@ uint16_t kvssd_ftl_retrieve(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
     *full_len = (uint32_t)vlen;         /* but report the FULL size in CQE Dword0 */
 
     /* base + read of the value pages actually touched (the transferred span) */
-    lat += kv_charge_base(s, req);
+    lat = MAX(lat, kv_charge_base(s, req));
     status = kv_read_ppas(s, req, &s->table[slot], xfer, &lat);
     if (status) {
         qemu_mutex_unlock(&s->lock);
         return status;
     }
-    lat += kv_charge_index(s, req, key, kl);
+    lat = MAX(lat, kv_charge_index(s, req, key, kl));
     if (xfer) {
         status = dma_read_prp(n, s->values + off, (uint32_t)xfer, prp1, prp2);
         if (status) {
@@ -1036,7 +1057,7 @@ FemuKvssdState *kvssd_ftl_alloc(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     s->value_capacity = cap;
     s->kv_key_max = KV_DEFAULT_KEY_MAX;
     s->kv_value_max = KV_DEFAULT_VALUE_MAX;
-    s->kv_max_keys = 0;                /* unlimited (bounded by capacity) */
+    s->kv_max_keys = 0;                /* set below, once the index is sized */
     s->ednek = false;                 /* spec default: delete-missing succeeds */
 
     /*
@@ -1094,6 +1115,13 @@ FemuKvssdState *kvssd_ftl_alloc(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         slots = 1024;
     }
     s->hash_slots = slots;
+    /*
+     * The index is what actually caps the key count, and the format reported a
+     * maximum of zero -- which the field defines as no maximum -- so a host was
+     * told it could store keys the device then refused for want of capacity.
+     * Report the limit that is enforced.
+     */
+    s->kv_max_keys = s->hash_slots - 1;
     s->index = &kv_index_hash;
 
     s->table = g_try_new0(FemuKvssdMappingEntry, s->hash_slots);

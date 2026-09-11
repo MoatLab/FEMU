@@ -1358,6 +1358,34 @@ static void femu_test_kv_accounting(void *obj, void *data,
     qtest_memread(femu->dev.bus->qts, log, page, sizeof(page));
     most_reads = ldq_le_p(page + 32);
 
+    /*
+     * The format reports the key limit the device enforces. Reported as zero,
+     * which the field defines as no maximum, a host is told it may store keys
+     * the device then refuses for want of capacity.
+     */
+    {
+        uint64_t idbuf = guest_alloc(alloc, 4096);
+        uint8_t kvfmt[128];
+        NvmeCmd id;
+
+        qtest_memset(femu->dev.bus->qts, idbuf, 0, 4096);
+        memset(&id, 0, sizeof(id));
+        id.opcode = NVME_ADM_CMD_IDENTIFY;
+        id.nsid = cpu_to_le32(1);
+        id.dptr.prp1 = cpu_to_le64(idbuf);
+        id.cdw10 = cpu_to_le32(NVME_ID_CNS_CS_NS);
+        id.cdw11 = cpu_to_le32(FEMU_CSI_KV << 24);
+        g_assert_cmpint(femu_admin(&c, &id), ==, NVME_SUCCESS);
+        qtest_memread(femu->dev.bus->qts, idbuf, kvfmt, sizeof(kvfmt));
+        /*
+         * The format array starts at 72 and the key count is eight bytes into
+         * its first entry, after the key length, the options byte and the value
+         * length.
+         */
+        g_assert_cmpint(ldl_le_p(kvfmt + 72 + 8), >, 0);
+        guest_free(alloc, idbuf);
+    }
+
     /* a lookup for a key that is not there reads nothing from the media */
     memset(&cmd, 0, sizeof(cmd));
     cmd.opcode = FEMU_KV_CMD_EXIST;
