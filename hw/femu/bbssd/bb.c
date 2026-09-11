@@ -49,6 +49,29 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         return -1;
     }
 
+    /*
+     * Under placement the reclaim units are what the write path draws from, and
+     * one is held open per handle with another for the unit being collected
+     * into. Fewer than that and the very first setup asks for a unit that is
+     * not there, which the handle initialisation dereferences without looking.
+     */
+    if (n->subsys && n->subsys->endgrp.fdp.enabled) {
+        NvmeEnduranceGroup *endgrp = &n->subsys->endgrp;
+        uint64_t pool = endgrp->fdp.nru ? MIN(tt_lines, endgrp->fdp.nru) :
+                                          tt_lines;
+        uint64_t needed = (uint64_t)endgrp->fdp.nruh * endgrp->fdp.nrg +
+                          endgrp->fdp.nruh + 1;
+
+        if (pool < needed) {
+            error_setg(errp, "FEMU bbssd: placement needs %" PRIu64 " reclaim "
+                       "units for %u handles across %u groups and this geometry "
+                       "gives %" PRIu64 "; raise blks_per_pl or fdp.nru, or "
+                       "lower fdp.nruh", needed, endgrp->fdp.nruh,
+                       endgrp->fdp.nrg, pool);
+            return -1;
+        }
+    }
+
     usable_pgs = (tt_lines - reserve_lines) * pgs_per_line;
     exposed_pgs = ns->size / page_bytes;
 

@@ -287,6 +287,12 @@ typedef struct QEMU_PACKED NvmeRuhStatusDescr {
     uint8_t  rsvd16[16];
 } NvmeRuhStatusDescr;
 
+/*
+ * The most reclaim units a subsystem may be configured with. A device cannot
+ * have more than it has lines, and a block index in an address is sixteen bits.
+ */
+#define NVME_FDP_MAX_NRU (1u << 16)
+
 /* FDP event filter shift table */
 static const uint8_t nvme_fdp_evf_shifts[FDP_EVT_MAX] = {
     /* Host events */

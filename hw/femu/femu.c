@@ -114,6 +114,17 @@ static bool nvme_subsys_setup_fdp(NvmeSubsystem *subsys, Error **errp)
                    subsys->params.fdp.nruh, tt_nru);
         return false;
     }
+    /*
+     * The count sizes an array per reclaim group straight away, and the device
+     * cannot have more reclaim units than it has lines -- a block index in an
+     * address is sixteen bits. Unbounded, a mistyped property was an allocation
+     * failure at realize rather than a refusal.
+     */
+    if (tt_nru > NVME_FDP_MAX_NRU) {
+        error_setg(errp, "fdp.nru (%"PRIu64") must not exceed %u", tt_nru,
+                   NVME_FDP_MAX_NRU);
+        return false;
+    }
     endgrp->fdp.nruh = subsys->params.fdp.nruh;
 
     if (!nvme_calc_rgif(endgrp->fdp.nruh, endgrp->fdp.nrg,
@@ -1080,6 +1091,22 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
         if ((ns_modes[i] == FEMU_OCSSD_MODE) != OCSSD(n)) {
             error_setg(errp, "ocssd is a controller mode: femu_mode and "
                        "namespace_modes must both select it, or neither");
+            g_free(ns_sizes);
+            g_free(ns_modes);
+            return 1;
+        }
+        /*
+         * Placement takes every line for its reclaim units and leaves the
+         * single write pointer the key-value store uses without one, so every
+         * store of a value fails for want of capacity on an empty namespace
+         * while Identify reports the whole of it free. Refuse the pair rather
+         * than present a namespace that cannot be written.
+         */
+        if (ns_modes[i] == FEMU_KVSSD_MODE && n->subsys &&
+            n->subsys->params.fdp.enabled) {
+            error_setg(errp, "the key-value command set and FDP cannot share a "
+                       "controller: placement owns every reclaim unit and the "
+                       "key-value store is left with no write pointer");
             g_free(ns_sizes);
             g_free(ns_modes);
             return 1;
