@@ -43,20 +43,13 @@
 /*
  * QLC NAND latency numbers in nanoseconds
  *
- * Read Latency is measured, at 16 KB per page. The four values are the four
- * page types of a QLC wordline, fast to slow; relative to the fastest they are
- * 1 : 1.59 : 2.81 : 4.76, mean 121.70 us.
+ * Measured on Intel 96-layer 3D QLC gen3 (1024Q3D3A):
+ *   Q. Chen et al., "PACA: A Page Type Aware Read Cache Scheme in QLC
+ *   Flash-based SSDs", ICCD 2022, Fig. 2 and Table I.
  *
- * These replace an extrapolation from TLC (Micron FMS'19, "Component-Level
- * Characterization of 3D TLC, QLC, and Low-Latency NAND"), which gave
- * 59.33 / 85.25 / 127.20 / 169.60 us. That vector is both faster in the mean
- * (110.34 us) and narrower in spread (1 : 1.44 : 2.14 : 2.86), so it understates
- * what page placement is worth: a bit-plane layout that gains 1.346x under the
- * measured vector gains only 1.221x under the extrapolated one.
- *
- * Write Latency is still the TLC extrapolation - it was not measured. Our
- * workload writes once and then only reads, so program time does not enter the
- * result; revisit before running anything write-sensitive.
+ * PACA reports one average program latency rather than a value for each page
+ * class. Keep the four program entries equal so only measured page-class
+ * variation is represented.
  */
 
 #define QLC_LOWER_PAGE_READ_LATENCY_NS          (47900)
@@ -64,13 +57,14 @@
 #define QLC_CENTER_UPPER_PAGE_READ_LATENCY_NS   (134600)
 #define QLC_UPPER_PAGE_READ_LATENCY_NS          (228100)
 
-#define QLC_LOWER_PAGE_WRITE_LATENCY_NS         (TLC_LOWER_PAGE_WRITE_LATENCY_NS * 1.05)
-#define QLC_CENTER_LOWER_PAGE_WRITE_LATENCY_NS  (TLC_CENTER_PAGE_WRITE_LATENCY_NS * 1.1)
-#define QLC_CENTER_UPPER_PAGE_WRITE_LATENCY_NS  (TLC_UPPER_PAGE_WRITE_LATENCY_NS * 1.2)
-#define QLC_UPPER_PAGE_WRITE_LATENCY_NS         (TLC_UPPER_PAGE_WRITE_LATENCY_NS * 1.6)
+#define QLC_LOWER_PAGE_WRITE_LATENCY_NS         (1860000)
+#define QLC_CENTER_LOWER_PAGE_WRITE_LATENCY_NS  (1860000)
+#define QLC_CENTER_UPPER_PAGE_WRITE_LATENCY_NS  (1860000)
+#define QLC_UPPER_PAGE_WRITE_LATENCY_NS         (1860000)
 
-#define QLC_CHNL_PAGE_TRANSFER_LATENCY_NS	    (52433)
-#define QLC_BLOCK_ERASE_LATENCY_NS              (3000000)
+/* 16 KiB at 800 MT/s. Sweep 40960/20480/13653 ns for 400/800/1200 MT/s. */
+#define QLC_CHNL_PAGE_TRANSFER_LATENCY_NS        (20480)
+#define QLC_BLOCK_ERASE_LATENCY_NS               (6340000)
 
 enum {
     SLC_PAGE              = 0,
@@ -146,4 +140,3 @@ int64_t get_blk_erase_latency(int flash_type);
 int init_nand_flash(void *opaque);
 
 #endif
-

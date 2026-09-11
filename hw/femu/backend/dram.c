@@ -76,7 +76,9 @@ int init_dram_backend(SsdDramBackend **mbe, int64_t nbytes)
          * because a fault during an emulated access lands directly in the measured
          * latency. Default behaviour is unchanged.
          */
-        if (getenv("FEMU_ALLOW_UNPINNED")) {
+        const char *allow_unpinned = getenv("FEMU_ALLOW_UNPINNED");
+        if (allow_unpinned && allow_unpinned[0] &&
+            strcmp(allow_unpinned, "0") != 0) {
             femu_err("WARNING: memory backend is NOT pinned (mlock: %s).\n",
                      strerror(errno));
             femu_err("WARNING: FEMU_ALLOW_UNPINNED=1 is set, continuing anyway. "
