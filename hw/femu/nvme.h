@@ -6,6 +6,7 @@
 #include "qemu/units.h"
 #include "qemu/cutils.h"
 #include "qemu/memalign.h"
+#include "qemu/notify.h"
 #include "hw/pci/msix.h"
 #include "hw/pci/msi.h"
 #include "hw/virtio/vhost.h"
@@ -1452,6 +1453,7 @@ typedef struct FemuExtCtrlOps {
     void     *state;
     void     (*init)(struct FemuCtrl *, NvmeNamespace *, Error **);
     void     (*exit)(struct FemuCtrl *);
+    void     (*stats_flush)(struct FemuCtrl *);
     uint16_t (*rw_check_req)(struct FemuCtrl *, NvmeCmd *, NvmeRequest *);
     int      (*start_ctrl)(struct FemuCtrl *);
     uint16_t (*admin_cmd)(struct FemuCtrl *, NvmeCmd *);
@@ -1740,6 +1742,8 @@ typedef struct FemuCtrl {
     /* Coperd: OC2.0 FIXME */
     NvmeParams  params;
     FemuExtCtrlOps ext_ops;
+    Notifier    process_exit_notifier;
+    bool        process_exit_notifier_registered;
 
     time_t      start_time;
     uint16_t    temperature;
@@ -1830,6 +1834,27 @@ typedef struct FemuCtrl {
     uint32_t        read_cache_mb; /* bbssd DRAM read cache size (0 = off) */
     uint32_t        mapping_cache_mb; /* bbssd DFTL translation cache size (0 = off) */
     uint8_t         nand_cell_type; /* bbssd NAND cell type: 0=off(flat), 1 SLC..4 QLC */
+
+    /*
+     * Read-energy coefficients for the QLC page-class accounting, in
+     * milli-pJ/bit (34000 = 34.0 pJ/bit). Integers because QEMU device
+     * properties carry no floating point. Defaults are the cited profile:
+     * MCFlash energy density 0.709 pJ/bit/us x PACA measured tR.
+     * The emitted CSV records the coefficients actually used, so the
+     * energy columns stay auditable and reproducible offline.
+     */
+    uint32_t        e_read_mpj[4];
+    /*
+     * The array half of the read coefficient: base sensing plus (n-1) extra
+     * senses for a class that needs n of them. The rest of e_read_mpj is
+     * peripheral, which scales with the class read latency. Splitting the two
+     * is what shows that the peripheral term dominates -- reporting only the
+     * total leaves that as an offline assertion instead of a measurement.
+     */
+    uint32_t        e_array_mpj[4];
+    uint32_t        e_xfer_mpj;     /* channel transfer, milli-pJ/bit */
+    uint32_t        stats_flush_ms; /* periodic stats snapshot; 0 = on exit only */
+    QEMUTimer       *stats_timer;
     uint32_t        nand_bad_blocks; /* bbssd factory bad blocks reported via SMART; 0 = none */
     uint32_t        op_pcent; /* bbssd over-provisioning percent (0 = use devsz_mb) */
     bool            debug_ftl; /* check bbssd FTL invariants on the GC path */
