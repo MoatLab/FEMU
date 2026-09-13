@@ -137,4 +137,11 @@ build/
 # drops documentation. The harness's own docs are the part a reader needs
 # most, so they are excepted rather than force-added one at a time.
 !moe-harness/**/*.md
+# and the documentation at the root, which is the first thing a reader opens.
+# README.md predates the rule above and is tracked; without this the next
+# document beside it would be dropped without a word, as RUNNING.md was.
+!/*.md
+# What the container writes: counter CSVs, console logs, the QMP socket. The
+# compose default puts it beside the checkout, so it needs naming here.
+/docker-data/
 subprojects/.wraplock

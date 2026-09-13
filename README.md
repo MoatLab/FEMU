@@ -165,6 +165,10 @@ OpenChannel needs a host that speaks it. LightNVM was removed from Linux in
 
 ## Running it in a container
 
+Commands, with their real output, are in [RUNNING.md](RUNNING.md). The short
+version and the reasoning follow.
+
+
 `femu-scripts/femu-docker.sh` is the path below done in a container. Two
 separate things push it there.
 
