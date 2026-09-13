@@ -163,6 +163,49 @@ OpenChannel needs a host that speaks it. LightNVM was removed from Linux in
 
 ---
 
+## Running it in a container
+
+`femu-scripts/femu-docker.sh` is the path below done in a container, for hosts
+where the path below cannot run. Two steps of it need root: `pkgdep.sh`
+installs packages, and `run-blackbox.sh` launches QEMU under `sudo` because
+FEMU pins its memory backend, which needs `RLIMIT_MEMLOCK` raised past the
+device size. A host that allows the usual 64 MiB cannot start a 64 GiB device
+at all.
+
+The container gets `IPC_LOCK` and an unlimited memlock without the host
+granting root to anyone. The steps map one to one:
+
+| this README | container |
+|---|---|
+| `sudo ./pkgdep.sh` | `docker/Dockerfile`, builder stage |
+| `./femu-compile.sh` | `docker/Dockerfile`, builder stage |
+| `./qemu-system-x86_64 -device femu,help` | `femu-docker.sh verify` |
+| `./run-blackbox.sh` | `femu-docker.sh run` |
+
+```bash
+./femu-scripts/femu-docker.sh build     # dependencies and compile, inside
+./femu-scripts/femu-docker.sh verify    # did the femu device register
+./femu-scripts/femu-docker.sh image     # guest overlay + cloud-init seed
+./femu-scripts/femu-docker.sh run       # start the device, boot the guest
+./femu-scripts/femu-docker.sh ssh       # a shell in the guest
+./femu-scripts/femu-docker.sh stop
+```
+
+One difference worth knowing: this README has you build a VM image by hand and
+reuse it. `image` cuts a copy-on-write overlay per instance instead and writes
+a cloud-init seed that authorises your ssh key, so the base image is never
+written and a broken guest is one file to delete. The cloud image ships no
+password, so without that seed there is no way in.
+
+The device is the same on both paths -- geometry, cell type and the read-energy
+coefficients come from `compose.yaml`, whose defaults are the configuration the
+measurements in this repository were taken on. `femu-docker.sh status` prints
+what the instance would get.
+
+Running an actual measurement is a different entry point, because it needs a
+payload image, a compiled trace and the placement checks: see
+[moe-harness/README.md](moe-harness/README.md).
+
 ## Installation
 
 ### Build FEMU
