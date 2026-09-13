@@ -133,4 +133,8 @@ trace-ust-all.c
 build-femu/
 build/
 *.md
+# The blanket *.md above came in with the QEMU 10.1.0 upgrade and silently
+# drops documentation. The harness's own docs are the part a reader needs
+# most, so they are excepted rather than force-added one at a time.
+!moe-harness/**/*.md
 subprojects/.wraplock
