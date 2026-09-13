@@ -17,7 +17,9 @@ set -uo pipefail
 
 TAG=${1:?usage: drive_multi.sh DEVICE_TAG SPECFILE}
 SPEC=${2:?usage: drive_multi.sh DEVICE_TAG SPECFILE}
-ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+# Everything this script touches is data -- counters, records, replay binaries
+# -- so it follows the project root, not where the script itself lives.
+ROOT=${FEMU_PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}
 CSV=$ROOT/runs/femu/${TAG}_qlc.csv
 RECORDS=$ROOT/exp/moe_bcq/femu_run/records
 # -n on every ssh that is not being fed a file: without it ssh inherits the
