@@ -1,0 +1,13 @@
+.git
+.github
+build
+build-femu
+build-docker
+roms
+*.qcow2
+*.img
+*.iso
+*.log
+docker-data
+images
+guest

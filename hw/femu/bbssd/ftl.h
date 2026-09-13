@@ -55,6 +55,20 @@ enum {
     FEMU_RESET_ACCT = 5,
     FEMU_ENABLE_LOG = 6,
     FEMU_DISABLE_LOG = 7,
+
+    /*
+     * The QLC read counters start at zero when the device is created, so a
+     * dump at process exit covers everything the device ever did: the guest
+     * probing it at boot, the catalog fill, FTL and GC traffic, the workload,
+     * and shutdown. Nothing in that total distinguishes the part under study.
+     *
+     * FEMU_RESET_QLC zeroes them without touching stored data, the LBA-to-PPA
+     * map or the page layout -- it resets the meter, not the drive. Issue it
+     * after the fill and before the workload; FEMU_SNAP_QLC writes the counters
+     * out at a chosen instant rather than waiting for teardown.
+     */
+    FEMU_RESET_QLC = 8,
+    FEMU_SNAP_QLC = 9,
 };
 
 
@@ -519,6 +533,20 @@ struct ssd {
     uint64_t host_write_pages;  /* pages the host wrote (WAF denominator) */
     uint64_t nand_write_pages;  /* user pages programmed into NAND */
     uint64_t gc_write_pages;    /* pages the device relocated itself */
+
+    /*
+     * QLC read-energy accounting. FEMU records physical media activity only;
+     * cited energy coefficients are applied offline so model assumptions stay
+     * explicit and replaceable. Index is QLC page class 0..3.
+     */
+    uint64_t qlc_read_pages[4];
+    uint64_t qlc_read_bytes[4];
+    uint64_t qlc_read_active_ns[4];
+    /* First counted NAND read, QEMU_CLOCK_REALTIME ns; 0 until the first one.
+     * Sum(t_active) adds per-LUN service time, so it exceeds elapsed time by the
+     * LUN parallelism. The controller is one resource, so its energy has to be
+     * charged against elapsed time instead - this is what makes that available. */
+    uint64_t qlc_first_read_ns;
 
     /*
      * Wear: erases summed over every block, kept as a running total so the
