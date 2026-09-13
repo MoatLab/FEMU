@@ -165,15 +165,27 @@ OpenChannel needs a host that speaks it. LightNVM was removed from Linux in
 
 ## Running it in a container
 
-`femu-scripts/femu-docker.sh` is the path below done in a container, for hosts
-where the path below cannot run. Two steps of it need root: `pkgdep.sh`
-installs packages, and `run-blackbox.sh` launches QEMU under `sudo` because
-FEMU pins its memory backend, which needs `RLIMIT_MEMLOCK` raised past the
-device size. A host that allows the usual 64 MiB cannot start a 64 GiB device
-at all.
+`femu-scripts/femu-docker.sh` is the path below done in a container. Two
+separate things push it there.
 
-The container gets `IPC_LOCK` and an unlimited memlock without the host
-granting root to anyone. The steps map one to one:
+**The host cannot run the path below.** `pkgdep.sh` installs packages, and
+`run-blackbox.sh` launches QEMU under `sudo` because FEMU pins its memory
+backend, which needs `RLIMIT_MEMLOCK` raised past the device size. A host
+allowing the usual 64 MiB cannot start a 64 GiB device at all, and raising it
+needs root. The container gets `IPC_LOCK` and an unlimited memlock without the
+host granting root to anyone.
+
+**Inside the container that argument stops applying, and a different one
+starts.** The container runs as root, so `sudo` would be moot there -- it is not
+even installed. What makes `run-blackbox.sh` unusable in it is that the SSD
+layout is written into the file: `pgs_per_blk=256`, `luns_per_ch=8`, `nchs=8`,
+`ssd_size=12288`, a fixed `u20s.qcow2`. It reads no environment, so there is no
+way to hand it this fork's geometry, a different guest disk, a payload disk or
+a counter path per run. `docker/femu-run` is that same script with those
+constants lifted out into environment variables; the steps it performs are
+unchanged.
+
+The steps map one to one:
 
 | this README | container |
 |---|---|

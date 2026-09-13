@@ -2,14 +2,20 @@
 # The README's build-and-run path, done in a container.
 #
 # The README tells you to install dependencies with sudo, compile into
-# build-femu/, and launch with run-blackbox.sh. Step one does not work on the
-# host this fork is measured on -- there is no passwordless sudo -- and step
-# three would not either: run-blackbox.sh launches QEMU under sudo, and FEMU
-# pins its memory backend, which needs RLIMIT_MEMLOCK raised. This host allows
-# 64 MiB against a 64 GiB device.
+# build-femu/, and launch with run-blackbox.sh. That path does not run on the
+# host this fork is measured on: there is no passwordless sudo for pkgdep.sh,
+# and FEMU pins its memory backend, which needs RLIMIT_MEMLOCK raised past the
+# device size -- this host allows 64 MiB against 64 GiB.
 #
-# So the same three steps happen in a container, which gets IPC_LOCK and an
-# unlimited memlock without the host granting root to anyone:
+# Inside the container neither of those bites: it runs as root and compose
+# gives it IPC_LOCK with an unlimited memlock. run-blackbox.sh still is not
+# what runs there, for an unrelated reason -- it writes the SSD layout into
+# itself (pgs_per_blk=256, luns_per_ch=8, nchs=8, ssd_size=12288, a fixed
+# u20s.qcow2) and reads no environment, so a run cannot be given this fork's
+# geometry, its guest disk, its payload disk or its counter path. femu-run is
+# that script with those constants lifted into environment variables.
+#
+# The steps themselves are unchanged:
 #
 #     README                      here
 #     sudo ./pkgdep.sh            docker/Dockerfile, builder stage
