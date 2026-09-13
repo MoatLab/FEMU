@@ -26,15 +26,32 @@ tooling) stays there, because it needs the model weights and a GPU.
 
     exp/moe_bcq/femu_handoff/packages/
       replay_v1.c                 the guest replayer, QD=32 O_DIRECT AIO
-      qlc_aligned_mapper.py       plan / validate / materialize an image
-      trace_compiler.py           mapped JSONL -> replay_qd32.bin
-      layer_read_groups.py        trace -> per-layer read groups under a cache
-      bundle.py, logical_reads.py payload access
+      REPLAYER_V1.md              the binary format it consumes
 
     exp/gating_nand/femu/make_seed.py   cloud-init seed carrying the binaries
     scripts/femu_compose.sh            compose wrapper
     scripts/build_replay.sh            builds the guest replayer
     runs/femu/run01.env                per-run environment template
+
+## Where the rest lives
+
+Three things are kept apart by who owns them, because the copies that used to
+exist on both hosts drifted -- one pair of mapper copies ended up 64 lines
+apart, and an edit to run_policy.sh was reverted twice by a sync.
+
+| | |
+|---|---|
+| this repository | the harness, `replay_v1.c`, the emulator |
+| `MoE_Trace` | the mapper, `bundle.py`, the rest of the trace tooling |
+| neither, they are data | payload, layouts, `replay_qd32.bin`, images |
+
+The split has a consequence worth stating plainly: **building an image needs
+`MoE_Trace`.** `qlc_aligned_mapper.py materialize` turns a layout and a payload
+into the image this harness fills a device from, and it is not in this
+repository. Clone `MoE_Trace` alongside, or have the image built where that
+tooling already is and shipped as data.
+
+Nothing here calls it, so the harness runs without it once an image exists.
 
 ## What it needs that is not here
 
