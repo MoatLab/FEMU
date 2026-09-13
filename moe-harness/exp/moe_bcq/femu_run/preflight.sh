@@ -17,8 +17,8 @@
 set -uo pipefail
 
 CANON=${FEMU_CANONICAL_DIR:-$HOME/.femu_canonical}
-ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
-TARGET=$ROOT/exp/moe_bcq/femu_run/run_policy.sh
+HARNESS=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+TARGET=$HARNESS/exp/moe_bcq/femu_run/run_policy.sh
 
 [ -f "$CANON/SHA256SUMS" ] || { echo "preflight: no canonical copy at $CANON"; exit 1; }
 want=$(awk '$2=="run_policy.sh"{print $1}' "$CANON/SHA256SUMS")

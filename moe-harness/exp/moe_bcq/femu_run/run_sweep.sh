@@ -10,8 +10,9 @@
 # (see preflight.sh). Going through here means no sweep can start on a reverted
 # script, and a revert mid-sweep is caught at the next policy.
 set -uo pipefail
-ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
-HERE=$ROOT/exp/moe_bcq/femu_run
+HARNESS=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+ROOT=${FEMU_PROJECT_ROOT:-$HARNESS}
+HERE=$HARNESS/exp/moe_bcq/femu_run
 
 BUNDLE=${1:?usage: run_sweep.sh BUNDLE LAYOUT_PREFIX IMG_PREFIX TAG_PREFIX [policy ...]}
 LAYOUT_PREFIX=${2:?}; IMG_PREFIX=${3:?}; TAG_PREFIX=${4:?}

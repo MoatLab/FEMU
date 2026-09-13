@@ -15,7 +15,7 @@ set -uo pipefail
 RUN=${1:?usage: drive_run.sh RUN_TAG}
 # Derive the checkout root from this script rather than naming it, so the same
 # script drives a run on whichever machine it was copied to.
-ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+ROOT=${FEMU_PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}
 CSV=$ROOT/runs/femu/${RUN}_qlc.csv
 OUT=$ROOT/runs/femu/$RUN
 SSH="ssh -p ${SSH_PORT:-2222} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 femu@127.0.0.1"
