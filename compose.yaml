@@ -26,19 +26,30 @@ services:
       FEMU_KERNEL: ${FEMU_KERNEL:-}
       FEMU_INITRD: ${FEMU_INITRD:-}
       FEMU_KERNEL_APPEND: ${FEMU_KERNEL_APPEND:-root=LABEL=rootfs console=ttyS0}
-      FEMU_MEMORY: ${FEMU_MEMORY:-6G}
+      FEMU_MEMORY: ${FEMU_MEMORY:-8G}
       FEMU_CPUS: ${FEMU_CPUS:-6}
       FEMU_GUEST_SSH_PORT: 2222
       FEMU_NAND_CELL_TYPE: ${FEMU_NAND_CELL_TYPE:-4}
-      # Counter-validated pilot geometry. 7,168 MiB is large enough to hold the
-      # complete 5,760-object routed-expert catalog (about 6.23 GB).
-      FEMU_SSD_SIZE_MB: ${FEMU_SSD_SIZE_MB:-7168}
+      # The QLC-aligned expert placement geometry: 64 GiB over 2 channels x 4
+      # LUNs, 512 pages per block. These are defaults, not a suggestion -- they
+      # are the device the measurements in this repository were taken on, and
+      # a run that leaves them alone reproduces it.
+      #
+      # 512 pages per block is the part that matters most. The QLC pairing table
+      # only covers pages 0..495 upstream, so at the old 256-page default every
+      # page class is correct and the bug this fork fixes (nand.c, rows - 1)
+      # cannot appear. Same source, different physics, silently.
+      #
+      # op_pcent=7 is over-provisioning: it sets the exposed namespace to 59.8 G
+      # of the 64 GiB raw, which is the capacity every layout here is planned
+      # against.
+      FEMU_SSD_SIZE_MB: ${FEMU_SSD_SIZE_MB:-65536}
       FEMU_SECTORS_PER_PAGE: ${FEMU_SECTORS_PER_PAGE:-32}
-      FEMU_PAGES_PER_BLOCK: ${FEMU_PAGES_PER_BLOCK:-256}
-      FEMU_BLOCKS_PER_PLANE: ${FEMU_BLOCKS_PER_PLANE:-48}
+      FEMU_PAGES_PER_BLOCK: ${FEMU_PAGES_PER_BLOCK:-512}
+      FEMU_BLOCKS_PER_PLANE: ${FEMU_BLOCKS_PER_PLANE:-1024}
       FEMU_PLANES_PER_LUN: ${FEMU_PLANES_PER_LUN:-1}
-      FEMU_LUNS_PER_CHANNEL: ${FEMU_LUNS_PER_CHANNEL:-8}
-      FEMU_CHANNELS: ${FEMU_CHANNELS:-8}
+      FEMU_LUNS_PER_CHANNEL: ${FEMU_LUNS_PER_CHANNEL:-4}
+      FEMU_CHANNELS: ${FEMU_CHANNELS:-2}
       FEMU_QLC_STATS_PATH: ${FEMU_QLC_STATS_PATH:-/data/qlc_counts.csv}
       # 에너지 계수 (milli-pJ/bit). peripheral + array 분해 모델:
       #   peripheral = P_fix + rho_p * t_R(c),  P_fix=1.273  rho_p=0.668
@@ -55,7 +66,7 @@ services:
       FEMU_E_XFER: ${FEMU_E_XFER:-28100}
       FEMU_STATS_FLUSH_MS: ${FEMU_STATS_FLUSH_MS:-0}
       FEMU_IMAGE_FORMAT: ${FEMU_IMAGE_FORMAT:-qcow2}
-      FEMU_EXTRA_DEVICE_OPTS: ${FEMU_EXTRA_DEVICE_OPTS:-}
+      FEMU_EXTRA_DEVICE_OPTS: ${FEMU_EXTRA_DEVICE_OPTS:-op_pcent=7}
       # Extra guest disks, ';'-separated QEMU -drive specs. A replay payload
       # is far too large for a cloud-init seed and the guest has no network,
       # so it comes in as a read-only disk and is copied in from inside.
