@@ -356,6 +356,8 @@ op_pcent=0             # Over-provisioning withheld from the host, percent
 pls_per_lun=1          # Planes per LUN; above one, a line erases across planes
 nand_bad_blocks=0      # Blocks marked bad at init, reflected in available spare
 trim_lat_ns=0          # Latency charged per TRIM range
+pe_suspend=0           # Reads preempt a program or erase in flight on their LUN
+tsusp_ns=0             #   (program/erase suspend); overhead each such read pays, ns
 
 # Wear, disturb and retention (optional; all default off)
 read_reclaim_limit=0   # Reads a block may take before its line is refreshed
@@ -573,6 +575,8 @@ zns_blk_er_lat=0
 zns_cmd_addr_lat=0     # Channel bus phases (ns): command/address cycle,
 zns_pg_xfer_lat=0      #   page data transfer, status read. Any non-zero
 zns_status_lat=0       #   value adds a shared per-channel bus to the model
+zns_pe_suspend=0       # Reads preempt a program or erase in flight on their plane
+zns_tsusp_ns=0         #   (program/erase suspend); overhead each such read pays, ns
 zns_zrwa_size=0        # ZRWA window in LBAs (0 = ZRWA disabled)
 zns_zrwafg_size=0      # ZRWA flush granularity in LBAs
 zns_zrwa_num=0         # Zones that may hold a ZRWA at once

@@ -426,6 +426,98 @@ static void test_copyback(void)
     nand_media_destroy(&m);
 }
 
+/*
+ * Program/erase suspend. Off (the default) a read queues behind whatever the
+ * LUN or plane is doing; on, it starts after tsusp and the suspended
+ * operation resumes after it, so the LUN frees that much later. The same
+ * rule has to hold on the lock-free LUN gate (bbssd), the plane gate (ZNS)
+ * and the staged channel path, which is why each is checked.
+ */
+static void test_pe_suspend(void)
+{
+    NandMediaConfig cfg;
+    NandMedia m;
+    NandLoc a;
+    const uint64_t t0 = 1000000000ULL;
+    uint64_t lat;
+
+    printf("# program/erase suspend\n");
+    memset(&a, 0, sizeof(a));
+
+    /* lun-only gate, suspend off: the read waits out the program */
+    bb_config(&cfg);
+    nand_media_init(&m, &cfg);
+    nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
+    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    check("suspend off: read queues behind the program", lat, (40000 - 1000) + 10000);
+    nand_media_destroy(&m);
+
+    /* lun-only gate, suspend on: read after tsusp, program resumes after it */
+    bb_config(&cfg);
+    cfg.policy.pe_suspend = true;
+    cfg.timing.tsusp_ns = 5000;
+    nand_media_init(&m, &cfg);
+    nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
+    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    check("suspend on: read = tsusp + array", lat, 5000 + 10000);
+    /* the program now ends at t0 + 40000 + 10000 + 5000; a second program
+     * issued right after the read queues behind that */
+    lat = nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0 + 1000).latency_ns;
+    check("suspended program resumes after the read",
+          lat, (40000 + 10000 + 5000 - 1000) + 40000);
+    nand_media_destroy(&m);
+
+    /* an idle LUN pays no suspend overhead */
+    bb_config(&cfg);
+    cfg.policy.pe_suspend = true;
+    cfg.timing.tsusp_ns = 5000;
+    nand_media_init(&m, &cfg);
+    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0).latency_ns;
+    check("suspend on, idle LUN: plain read", lat, 10000);
+    nand_media_destroy(&m);
+
+    /* only reads preempt: a program behind an erase still waits */
+    bb_config(&cfg);
+    cfg.policy.pe_suspend = true;
+    cfg.timing.tsusp_ns = 5000;
+    nand_media_init(&m, &cfg);
+    nand_media_op(&m, &a, NAND_MEDIA_ERASE, t0);
+    lat = nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0 + 1000).latency_ns;
+    check("suspend on: a program does not preempt", lat, (2000000 - 1000) + 40000);
+    nand_media_destroy(&m);
+
+    /* plane gate without a channel (ZNS default): a read preempts an erase */
+    zns_config(&cfg);
+    cfg.policy.channel_mode = NAND_CH_OFF;
+    cfg.policy.pe_suspend = true;
+    cfg.timing.tsusp_ns = 5000;
+    nand_media_init(&m, &cfg);
+    nand_media_op(&m, &a, NAND_MEDIA_ERASE, t0);
+    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    check("plane gate: read preempts the erase", lat, 5000 + 65000);
+    lat = nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0 + 1000).latency_ns;
+    check("plane gate: erase resumes after the read",
+          lat, (2000000 + 65000 + 5000 - 1000) + 450000);
+    nand_media_destroy(&m);
+
+    /* staged channel: the existing suspend branch, now reachable */
+    bb_config(&cfg);
+    cfg.policy.channel_mode = NAND_CH_STAGED;
+    cfg.timing.cmd_addr_ns = 300;
+    cfg.timing.page_xfer_ns = 20000;
+    cfg.timing.status_ns = 100;
+    cfg.policy.pe_suspend = true;
+    cfg.timing.tsusp_ns = 5000;
+    nand_media_init(&m, &cfg);
+    nand_media_op(&m, &a, NAND_MEDIA_ERASE, t0);
+    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    /* command 300, then suspend 5000 + array 10000, then data-out 20000
+     * (the bus is idle: the erase moved no data) and status 100 */
+    check("staged: read = cmd + tsusp + array + xfer + status",
+          lat, 300 + 5000 + 10000 + 20000 + 100);
+    nand_media_destroy(&m);
+}
+
 int main(void)
 {
     /*
@@ -441,6 +533,7 @@ int main(void)
     test_plane_gate_with_channel();
     test_multiplane_erase();
     test_copyback();
+    test_pe_suspend();
     printf("1..%d\n", ntests);
     return failures ? 1 : 0;
 }

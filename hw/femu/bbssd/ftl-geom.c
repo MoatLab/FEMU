@@ -184,6 +184,8 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->tplrbsy = n->bb_params.tplrbsy;
     spp->tplebsy = n->bb_params.tplebsy;
     spp->trcbsy = n->bb_params.trcbsy;
+    spp->pe_suspend = n->bb_params.pe_suspend;
+    spp->tsusp_ns = n->bb_params.tsusp_ns;
     spp->trim_lat_ns = n->bb_params.trim_lat_ns;
 
     /* DRAM write buffer */
