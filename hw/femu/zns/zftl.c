@@ -503,19 +503,16 @@ static uint64_t zns_write(struct zns_ssd *zns, NvmeRequest *req)
 
     if(wcidx==-1)
     {
-        //need flush
-        wcidx = 0;
-        uint64_t t_used = zns->cache.write_cache[wcidx].used;
-        for(i = 1;i < zns->cache.num_wc;i++)
-        {
-            if(zns->cache.write_cache[i].used==0)
-            {
+        /* take an empty cache; failing that, evict the fullest one */
+        uint64_t t_used = 0;
+        wcidx = -1;
+        for (i = 0; i < zns->cache.num_wc; i++) {
+            if (zns->cache.write_cache[i].used == 0) {
                 t_used = 0;
-                wcidx = i; //free wc！
+                wcidx = i;
                 break;
             }
-            if(zns->cache.write_cache[i].used > t_used)
-            {
+            if (wcidx < 0 || zns->cache.write_cache[i].used > t_used) {
                 t_used = zns->cache.write_cache[i].used;
                 wcidx = i;
             }
