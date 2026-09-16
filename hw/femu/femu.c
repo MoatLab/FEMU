@@ -1907,6 +1907,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_INT64("zns_status_lat", FemuCtrl, zns_params.zns_status_lat, 0),
     DEFINE_PROP_UINT32("zns_max_active", FemuCtrl, zns_params.zns_max_active, 0),
     DEFINE_PROP_UINT32("zns_max_open", FemuCtrl, zns_params.zns_max_open, 0),
+    DEFINE_PROP_UINT32("zns_num_wc", FemuCtrl, zns_params.zns_num_wc, 0),
     DEFINE_PROP_UINT32("zns_zd_ext_size", FemuCtrl, zns_params.zns_zd_ext_size, 0),
     DEFINE_PROP_UINT32("zns_num_conv_zones", FemuCtrl,
                        zns_params.zns_num_conv_zones, 0),
