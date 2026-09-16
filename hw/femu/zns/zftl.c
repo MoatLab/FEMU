@@ -441,11 +441,22 @@ static uint64_t zns_wc_flush(struct zns_ssd* zns, int wcidx, int type,uint64_t s
     while(i < zns->cache.write_cache[wcidx].used)
     {
         for(p = 0;p<zns->num_plane;p++){
+            /*
+             * A partial cache (evicted before its stripe filled) programs
+             * only the pages that hold data; the untouched planes and
+             * pages of the stripe stay free for the zone's later writes.
+             */
+            if (i >= zns->cache.write_cache[wcidx].used) {
+                break;
+            }
             /* new write */
             ppa = get_new_page(zns, zone_idx);
             ppa.g.pl = p;
             for(j = 0; j < flash_type ;j++)
             {
+                if (i >= zns->cache.write_cache[wcidx].used) {
+                    break;
+                }
                 ppa.g.pg = get_blk(zns,&ppa)->page_wp;
                 get_blk(zns,&ppa)->page_wp++;
                 for(subpage = 0;subpage < ZNS_PAGE_SIZE/LOGICAL_PAGE_SIZE;subpage++)
