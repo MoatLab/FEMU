@@ -1875,9 +1875,9 @@ typedef struct FemuCtrl {
 
     time_t      start_time;
     uint16_t    temperature;
-    uint16_t    page_size;
+    uint32_t    page_size;
     uint16_t    page_bits;
-    uint16_t    max_prp_ents;
+    uint32_t    max_prp_ents;
     uint16_t    cqe_size;
     uint16_t    sqe_size;
     uint16_t    oacs;
@@ -2297,21 +2297,23 @@ static inline uint64_t ns_blks(NvmeNamespace *ns, uint8_t lba_idx)
     return ns_size / lba_sz;
 }
 
-static inline hwaddr nvme_discontig(uint64_t *dma_addr, uint16_t queue_idx,
-                                    uint16_t page_size, uint16_t entry_size)
+/* Pages reach 2^27 bytes (CC.MPS 15), so sizes are not narrowed here */
+static inline hwaddr nvme_discontig(uint64_t *dma_addr, uint32_t queue_idx,
+                                    uint32_t page_size, uint32_t entry_size)
 {
-    uint16_t entries_per_page = page_size / entry_size;
-    uint16_t prp_index = queue_idx / entries_per_page;
-    uint16_t index_in_prp = queue_idx % entries_per_page;
+    uint32_t entries_per_page = page_size / entry_size;
+    uint32_t prp_index = queue_idx / entries_per_page;
+    uint32_t index_in_prp = queue_idx % entries_per_page;
 
-    return dma_addr[prp_index] + index_in_prp * entry_size;
+    return dma_addr[prp_index] + (hwaddr)index_in_prp * entry_size;
 }
 
-static inline uint16_t nvme_check_mdts(FemuCtrl *n, size_t len)
+static inline uint16_t nvme_check_mdts(FemuCtrl *n, uint64_t len)
 {
-    uint8_t mdts = n->mdts;
+    unsigned shift = n->page_bits + n->mdts;
 
-    if (mdts && len > n->page_size << mdts) {
+    /* A limit at or past 2^64 bytes is no limit at all */
+    if (n->mdts && shift < 64 && len > UINT64_C(1) << shift) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 

@@ -243,11 +243,20 @@ uint8_t nvme_sq_empty(NvmeSQueue *sq)
 uint64_t *nvme_setup_discontig(FemuCtrl *n, uint64_t prp_addr, uint16_t
                                queue_depth, uint16_t entry_size)
 {
-    uint16_t prps_per_page = n->page_size >> 3;
-    uint64_t *prp = g_malloc0(sizeof(uint64_t) * prps_per_page);
-    uint16_t total_prps = DIV_ROUND_UP(queue_depth * entry_size, n->page_size);
-    uint64_t *prp_list = g_malloc0(total_prps * sizeof(*prp_list));
-    int i;
+    uint32_t prps_per_page = n->page_size >> 3;
+    uint64_t *prp;
+    uint64_t total_prps;
+    uint64_t *prp_list;
+    uint64_t i;
+
+    /* nvme_discontig() divides by the entries per page */
+    if (!entry_size || entry_size > n->page_size) {
+        return NULL;
+    }
+    total_prps = DIV_ROUND_UP((uint64_t)queue_depth * entry_size,
+                              n->page_size);
+    prp = g_malloc0(sizeof(uint64_t) * prps_per_page);
+    prp_list = g_malloc0(total_prps * sizeof(*prp_list));
 
     /*
      * Each page of the list is read from guest memory and its entries are the
@@ -316,7 +325,7 @@ uint16_t femu_nvme_rw_check_req(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                             offsetof(NvmeRwCmd, nlb), elba, ns->id);
         return NVME_LBA_RANGE | NVME_DNR;
     }
-    if (n->id_ctrl.mdts && data_size > n->page_size * (1 << n->id_ctrl.mdts)) {
+    if (nvme_check_mdts(n, data_size)) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
                             offsetof(NvmeRwCmd, nlb), nlb, ns->id);
         return NVME_INVALID_FIELD | NVME_DNR;

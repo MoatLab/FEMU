@@ -224,8 +224,8 @@ static uint16_t femu_admin(FemuCtrlState *c, NvmeCmd *cmd)
     return femu_admin_result(c, cmd, NULL);
 }
 
-static void femu_enable(FemuCtrlState *c, QPCIDevice *pdev,
-                        QGuestAllocator *alloc)
+static void femu_enable_cc(FemuCtrlState *c, QPCIDevice *pdev,
+                           QGuestAllocator *alloc, uint32_t cc)
 {
     uint64_t cap;
     uint32_t csts;
@@ -240,14 +240,12 @@ static void femu_enable(FemuCtrlState *c, QPCIDevice *pdev,
     c->db_stride = (cap >> 32) & 0xf;
     c->lba_size = 512;
 
-    femu_queue_init(c, &c->admin, 0);
     qpci_io_writel(pdev, c->bar, 0x24,
                    ((FEMU_QSIZE - 1) << 16) | (FEMU_QSIZE - 1));
     qpci_io_writeq(pdev, c->bar, 0x28, c->admin.sq_addr);
     qpci_io_writeq(pdev, c->bar, 0x30, c->admin.cq_addr);
 
-    /* enable, NVM command set, 4 KiB pages, 64-byte SQEs, 16-byte CQEs */
-    qpci_io_writel(pdev, c->bar, 0x14, (6 << 16) | (4 << 20) | 1);
+    qpci_io_writel(pdev, c->bar, 0x14, cc);
     for (;;) {
         csts = qpci_io_readl(pdev, c->bar, 0x1c);
         if (csts & NVME_CSTS_READY) {
@@ -258,6 +256,16 @@ static void femu_enable(FemuCtrlState *c, QPCIDevice *pdev,
         g_usleep(1000);
         waited++;
     }
+}
+
+/* enable, NVM command set, 4 KiB pages, 64-byte SQEs, 16-byte CQEs */
+static void femu_enable(FemuCtrlState *c, QPCIDevice *pdev,
+                        QGuestAllocator *alloc)
+{
+    c->pdev = pdev;
+    c->alloc = alloc;
+    femu_queue_init(c, &c->admin, 0);
+    femu_enable_cc(c, pdev, alloc, (6 << 16) | (4 << 20) | 1);
 }
 
 static void femu_disable(FemuCtrlState *c)
@@ -448,6 +456,86 @@ static void femu_test_admin_queue_refused(void *obj, void *data,
     g_assert_cmpint(csts & NVME_CSTS_FAILED, ==, 0);
 
     guest_free(alloc, sq_addr);
+}
+
+/*
+ * A non-contiguous queue divides by the entries per page, and a 64 KiB page
+ * truncated to zero in a 16-bit field.
+ */
+#define FEMU_64K    0x10000ULL
+
+static uint64_t femu_alloc_64k(QGuestAllocator *alloc, uint64_t *raw)
+{
+    *raw = guest_alloc(alloc, 4 * FEMU_64K);
+    return (*raw + FEMU_64K - 1) & ~(FEMU_64K - 1);
+}
+
+static void femu_test_discontig_64k_pages(void *obj, void *data,
+                                          QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    NvmeCmd cmd;
+    uint64_t raw[5];
+    uint64_t list, cq_page;
+    uint64_t entry;
+    uint16_t want, got;
+
+    /* every queue page sits on a 64 KiB boundary; the helpers align to 4 KiB */
+    c.pdev = &femu->dev;
+    c.alloc = alloc;
+    c.admin.qid = 0;
+    c.admin.sq_addr = femu_alloc_64k(alloc, &raw[0]);
+    c.admin.cq_addr = femu_alloc_64k(alloc, &raw[1]);
+    c.admin.phase = 1;
+    qtest_memset(qts, c.admin.cq_addr, 0, FEMU_QSIZE * sizeof(NvmeCqe));
+
+    /* 64-byte SQEs, 16-byte CQEs, memory page size 2^(12 + 4) */
+    femu_enable_cc(&c, &femu->dev, alloc, (6 << 16) | (4 << 20) | (4 << 7) | 1);
+
+    /* a one-page list naming the page the completion queue lives on */
+    list = femu_alloc_64k(alloc, &raw[2]);
+    cq_page = femu_alloc_64k(alloc, &raw[3]);
+    qtest_memset(qts, list, 0, 64);
+    qtest_memset(qts, cq_page, 0, FEMU_QSIZE * sizeof(NvmeCqe));
+    entry = cpu_to_le64(cq_page);
+    qtest_memwrite(qts, list, &entry, sizeof(entry));
+
+    c.io.qid = 1;
+    c.io.sq_addr = femu_alloc_64k(alloc, &raw[4]);
+    c.io.cq_addr = cq_page;
+    c.io.phase = 1;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_CREATE_CQ;
+    cmd.dptr.prp1 = cpu_to_le64(list);
+    cmd.cdw10 = cpu_to_le32(((FEMU_QSIZE - 1) << 16) | c.io.qid);
+    cmd.cdw11 = 0;                          /* not physically contiguous */
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_CREATE_SQ;
+    cmd.dptr.prp1 = cpu_to_le64(c.io.sq_addr);
+    cmd.cdw10 = cpu_to_le32(((FEMU_QSIZE - 1) << 16) | c.io.qid);
+    cmd.cdw11 = cpu_to_le32((c.io.qid << 16) | NVME_SQ_PC);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+
+    /* the completion lands on the listed page, entry zero */
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_CMD_FLUSH;
+    cmd.nsid = cpu_to_le32(1);
+    want = c.cid;
+    femu_submit(&c, &c.io, &cmd);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(got, ==, want);
+
+    qpci_io_writel(c.pdev, c.bar, 0x14, 0);
+    qpci_iounmap(c.pdev, c.bar);
+    for (int i = 0; i < 5; i++) {
+        guest_free(alloc, raw[i]);
+    }
 }
 
 /*
@@ -1920,6 +2008,11 @@ static void femu_register_nodes(void)
                  femu_test_io_by_shadow_doorbell, NULL);
     qos_add_test("features", "femu", femu_test_features, NULL);
     qos_add_test("queue-mapping", "femu", femu_test_queue_mapping, NULL);
+    qos_add_test("discontig-64k-pages", "femu",
+                 femu_test_discontig_64k_pages, &(QOSGraphTestOptions) {
+        /* non-contiguous queues allowed, memory pages up to 64 KiB */
+        .edge.extra_device_opts = "cqr=0,mpsmax=4"
+    });
     qos_add_test("admin-queue-refused", "femu", femu_test_admin_queue_refused,
                  NULL);
     qos_add_test("cq-churn", "femu", femu_test_cq_churn, NULL);

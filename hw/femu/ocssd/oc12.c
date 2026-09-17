@@ -334,7 +334,7 @@ static uint16_t oc12_rw_check_req(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             return NVME_LBA_RANGE | NVME_DNR;
         }
     }
-    if (n->id_ctrl.mdts && data_size > n->page_size * (1 << n->id_ctrl.mdts)) {
+    if (nvme_check_mdts(n, data_size)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     if (meta_size) {
