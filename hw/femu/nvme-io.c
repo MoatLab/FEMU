@@ -17,26 +17,6 @@ static bool nvme_ns_has_nvm_cmd_set(NvmeNamespace *ns)
 
 static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
 
-/*
- * DSM hands its range list to whichever mode serves the namespace; bbssd frees
- * it once the ranges are applied, the others never did. Release whatever is
- * still attached when the request goes back on the free list.
- */
-static inline void nvme_req_release_ranges(NvmeRequest *req)
-{
-    if (req->dsm_ranges) {
-        g_free(req->dsm_ranges);
-        req->dsm_ranges = NULL;
-        req->dsm_nr_ranges = 0;
-    }
-    g_free(req->zone_resets);
-    req->zone_resets = NULL;
-    req->nr_zone_resets = 0;
-    g_free(req->fdp_pids);
-    req->fdp_pids = NULL;
-    req->nr_fdp_pids = 0;
-}
-
 static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req);
 
 static void nvme_update_sq_eventidx(const NvmeSQueue *sq)

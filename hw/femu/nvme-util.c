@@ -442,6 +442,10 @@ void nvme_free_sq(NvmeSQueue *sq, FemuCtrl *n)
         sq->dma_addr_hva = 0;
         sq->dma_map_len = 0;
     }
+    /* commands dropped in flight still hold what the mode had not freed */
+    for (int i = 0; sq->io_req && i < sq->size; i++) {
+        nvme_req_release_ranges(&sq->io_req[i]);
+    }
     g_free(sq->io_req);
     if (sq->prp_list) {
         g_free(sq->prp_list);

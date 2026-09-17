@@ -2214,6 +2214,25 @@ int nvme_clear_virq(FemuCtrl *n);
 bool     nvme_addr_is_cmb(FemuCtrl *n, uint64_t addr, uint64_t len);
 void     nvme_addr_read(FemuCtrl *n, hwaddr addr, void *buf, int size);
 void     nvme_addr_write(FemuCtrl *n, hwaddr addr, void *buf, int size);
+
+/*
+ * DSM hands its range list to whichever mode serves the namespace; bbssd frees
+ * it once the ranges are applied, the others never did. Release whatever is
+ * still attached when the request goes back on the free list.
+ */
+static inline void nvme_req_release_ranges(NvmeRequest *req)
+{
+    g_free(req->dsm_ranges);
+    req->dsm_ranges = NULL;
+    req->dsm_nr_ranges = 0;
+    g_free(req->zone_resets);
+    req->zone_resets = NULL;
+    req->nr_zone_resets = 0;
+    g_free(req->fdp_pids);
+    req->fdp_pids = NULL;
+    req->nr_fdp_pids = 0;
+}
+
 uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
                       uint64_t prp2, uint32_t len, FemuCtrl *n);
 uint16_t nvme_map_sgl(QEMUSGList *qsg, QEMUIOVector *iov,
