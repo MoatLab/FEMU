@@ -584,6 +584,26 @@ void *nvme_poller(void *arg)
     return NULL;
 }
 
+/*
+ * Map an SGL data pointer. A controller without SGLs, or a reserved PSDT, is an
+ * invalid field; a malformed list reports the status the mapper chose.
+ */
+static uint16_t nvme_rw_map_sgl(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
+                                NvmeRequest *req, uint64_t data_size)
+{
+    uint16_t status = NVME_INVALID_FIELD | NVME_DNR;
+
+    if (n->sgl && cmd->psdt <= NVME_PSDT_SGL_MPTR_SGL) {
+        status = nvme_map_sgl(&req->qsg, &req->iov, cmd->dptr.sgl, data_size,
+                              n);
+    }
+    if (status) {
+        nvme_set_error_page(n, req->sq->sqid, cmd->cid, status & ~NVME_DNR,
+                            offsetof(NvmeRwCmd, prp1), 0, ns->id);
+    }
+    return status;
+}
+
 uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
 {
     NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
@@ -619,11 +639,9 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
      * shared backend path below, bypassing the PRP fast path and PRP mapper.
      */
     if (cmd->psdt) {
-        if (!n->sgl || cmd->psdt > NVME_PSDT_SGL_MPTR_SGL ||
-            nvme_map_sgl(&req->qsg, &req->iov, cmd->dptr.sgl, data_size, n)) {
-            nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
-                                offsetof(NvmeRwCmd, prp1), 0, ns->id);
-            return NVME_INVALID_FIELD | NVME_DNR;
+        err = nvme_rw_map_sgl(n, ns, cmd, req, data_size);
+        if (err) {
+            return err;
         }
         goto mapped;
     }
@@ -868,11 +886,10 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     if (cmd->psdt) {
-        if (!n->sgl || cmd->psdt > NVME_PSDT_SGL_MPTR_SGL ||
-            nvme_map_sgl(&req->qsg, &req->iov, cmd->dptr.sgl, data_size, n)) {
-            nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
-                                offsetof(NvmeRwCmd, prp1), 0, ns->id);
-            return NVME_INVALID_FIELD | NVME_DNR;
+        uint16_t sc = nvme_rw_map_sgl(n, ns, cmd, req, data_size);
+
+        if (sc) {
+            return sc;
         }
     } else if (nvme_map_prp(&req->qsg, &req->iov, prp1, prp2, data_size, n)) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,

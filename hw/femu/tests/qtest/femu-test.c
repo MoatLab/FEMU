@@ -2148,18 +2148,23 @@ static void femu_test_sgl(void *obj, void *data, QGuestAllocator *alloc)
 
     /* a segment length that is not a whole number of descriptors */
     seg.len = cpu_to_le32(sizeof(blk) + 4);
-    g_assert_cmpint(femu_sgl_write(&c, &seg), ==, NVME_INVALID_FIELD);
+    g_assert_cmpint(femu_sgl_write(&c, &seg), ==, NVME_INVALID_SGL_SEG_DESCR);
     seg.len = cpu_to_le32(sizeof(blk));
+
+    /* a block shorter than the transfer, with nothing after it */
+    blk.len = cpu_to_le32(FEMU_DATA_SIZE / 2);
+    g_assert_cmpint(femu_sgl_write(&c, &blk), ==, NVME_DATA_SGL_LEN_INVALID);
+    blk.len = cpu_to_le32(FEMU_DATA_SIZE);
 
     /* the offset subtype, which only fabrics define, directly and listed */
     blk.type = 0x1;
-    g_assert_cmpint(femu_sgl_write(&c, &blk), ==, NVME_INVALID_FIELD);
+    g_assert_cmpint(femu_sgl_write(&c, &blk), ==, NVME_SGL_DESCR_TYPE_INVALID);
     qtest_memwrite(qts, list, &blk, sizeof(blk));
-    g_assert_cmpint(femu_sgl_write(&c, &seg), ==, NVME_INVALID_FIELD);
+    g_assert_cmpint(femu_sgl_write(&c, &seg), ==, NVME_SGL_DESCR_TYPE_INVALID);
     seg.type |= 0x1;
     blk.type = 0;
     qtest_memwrite(qts, list, &blk, sizeof(blk));
-    g_assert_cmpint(femu_sgl_write(&c, &seg), ==, NVME_INVALID_FIELD);
+    g_assert_cmpint(femu_sgl_write(&c, &seg), ==, NVME_SGL_DESCR_TYPE_INVALID);
 
     guest_free(alloc, list);
     guest_free(alloc, buf);

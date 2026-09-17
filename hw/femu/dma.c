@@ -167,6 +167,7 @@ uint16_t nvme_map_sgl(QEMUSGList *qsg, QEMUIOVector *iov,
     const int max_descrs = 4096; /* guard against a runaway/looping SGL */
     int nsegs = 0;
     bool inited = false;
+    uint16_t status = NVME_SGL_DESCR_TYPE_INVALID;
 
     /* worst case one descriptor per controller page; grow lazily */
     pci_dma_sglist_init(qsg, &n->parent_obj, (len >> n->page_bits) + 1);
@@ -176,23 +177,19 @@ uint16_t nvme_map_sgl(QEMUSGList *qsg, QEMUIOVector *iov,
         uint8_t type = NVME_SGL_TYPE(sgl.type);
 
         if (NVME_SGL_SUBTYPE(sgl.type)) {
+            status = NVME_SGL_DESCR_TYPE_INVALID;
             goto inval;
         }
         if (type == NVME_SGL_DESCR_TYPE_DATA_BLOCK) {
             uint32_t dlen = le32_to_cpu(sgl.len);
 
-            if (!dlen || dlen > len) {
+            /* a bare data block must describe the whole transfer */
+            if (dlen != len) {
+                status = NVME_DATA_SGL_LEN_INVALID;
                 goto inval;
             }
             qemu_sglist_add(qsg, le64_to_cpu(sgl.addr), dlen);
-            len -= dlen;
-            if (++nsegs > max_descrs) {
-                goto inval;
-            }
-            /* a bare data block must consume the whole transfer */
-            if (len) {
-                goto inval;
-            }
+            len = 0;
             break;
         } else if (type == NVME_SGL_DESCR_TYPE_SEGMENT ||
                    type == NVME_SGL_DESCR_TYPE_LAST_SEGMENT) {
@@ -204,8 +201,12 @@ uint16_t nvme_map_sgl(QEMUSGList *qsg, QEMUIOVector *iov,
             int i;
             bool chained = false;
 
-            if (!ndesc || ndesc > max_descrs ||
-                seg_bytes % sizeof(NvmeSglDescriptor)) {
+            if (!ndesc || seg_bytes % sizeof(NvmeSglDescriptor)) {
+                status = NVME_INVALID_SGL_SEG_DESCR;
+                goto inval;
+            }
+            if (ndesc > max_descrs) {
+                status = NVME_INVALID_NUM_SGL_DESCRS;
                 goto inval;
             }
             descs = g_malloc(seg_bytes);
@@ -215,18 +216,21 @@ uint16_t nvme_map_sgl(QEMUSGList *qsg, QEMUIOVector *iov,
                 uint32_t dl = le32_to_cpu(descs[i].len);
 
                 if (NVME_SGL_SUBTYPE(descs[i].type)) {
+                    status = NVME_SGL_DESCR_TYPE_INVALID;
                     g_free(descs);
                     goto inval;
                 }
                 /* only the final entry of a non-last segment may chain */
                 if (dt == NVME_SGL_DESCR_TYPE_DATA_BLOCK) {
                     if (!dl || dl > len) {
+                        status = NVME_DATA_SGL_LEN_INVALID;
                         g_free(descs);
                         goto inval;
                     }
                     qemu_sglist_add(qsg, le64_to_cpu(descs[i].addr), dl);
                     len -= dl;
                     if (++nsegs > max_descrs) {
+                        status = NVME_INVALID_NUM_SGL_DESCRS;
                         g_free(descs);
                         goto inval;
                     }
@@ -237,6 +241,7 @@ uint16_t nvme_map_sgl(QEMUSGList *qsg, QEMUIOVector *iov,
                      * Count the follow so a cyclic segment list cannot spin
                      * the poller forever. */
                     if (++nsegs > max_descrs) {
+                        status = NVME_INVALID_NUM_SGL_DESCRS;
                         g_free(descs);
                         goto inval;
                     }
@@ -244,6 +249,11 @@ uint16_t nvme_map_sgl(QEMUSGList *qsg, QEMUIOVector *iov,
                     chained = true;
                     break;
                 } else {
+                    /* a segment anywhere but last, or an unsupported type */
+                    status = (dt == NVME_SGL_DESCR_TYPE_SEGMENT ||
+                              dt == NVME_SGL_DESCR_TYPE_LAST_SEGMENT) ?
+                             NVME_INVALID_SGL_SEG_DESCR :
+                             NVME_SGL_DESCR_TYPE_INVALID;
                     g_free(descs);
                     goto inval;
                 }
@@ -253,15 +263,19 @@ uint16_t nvme_map_sgl(QEMUSGList *qsg, QEMUIOVector *iov,
                 break;
             }
             if (!chained) {
-                goto inval;   /* a non-last segment must chain from its end */
+                /* a non-last segment must chain from its end */
+                status = NVME_INVALID_SGL_SEG_DESCR;
+                goto inval;
             }
         } else {
-            goto inval; /* bit-bucket, keyed, vendor: unsupported */
+            status = NVME_SGL_DESCR_TYPE_INVALID; /* bit-bucket, keyed, ... */
+            goto inval;
         }
     }
 
     if (len) {
-        goto inval; /* under-described transfer */
+        status = NVME_DATA_SGL_LEN_INVALID; /* under-described transfer */
+        goto inval;
     }
     (void)iov;
     return NVME_SUCCESS;
@@ -270,7 +284,7 @@ inval:
     if (inited) {
         qemu_sglist_destroy(qsg);
     }
-    return NVME_INVALID_FIELD | NVME_DNR;
+    return status | NVME_DNR;
 }
 
 uint16_t dma_write_prp(FemuCtrl *n, uint8_t *ptr, uint32_t len, uint64_t prp1,
