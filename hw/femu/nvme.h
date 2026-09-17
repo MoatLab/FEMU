@@ -1738,6 +1738,8 @@ typedef struct BbCtrlParams {
     int tplebsy;      /* multi-plane erase inter-plane busy (ns); 0 = off */
     int trcbsy;       /* cache read busy (next-page array overlap), ns; 0 = off */
     int trim_lat_ns;  /* modeled cost per processed DSM/TRIM range, ns; 0 = off */
+    int pe_suspend;   /* reads preempt an in-flight program/erase on the LUN; 0 = off */
+    int tsusp_ns;     /* suspend overhead per preempting read (ns) */
 } BbCtrlParams;
 
 typedef struct ZNSCtrlParams {
@@ -1759,6 +1761,9 @@ typedef struct ZNSCtrlParams {
     int64_t zns_cmd_addr_lat;
     int64_t zns_pg_xfer_lat;
     int64_t zns_status_lat;
+    /* program/erase suspend: reads preempt a busy plane (0 = off), overhead ns */
+    int32_t zns_pe_suspend;
+    int64_t zns_tsusp_ns;
     uint32_t zns_max_active;  /* max active zones (0 = unlimited) */
     uint32_t zns_max_open;    /* max open zones (0 = unlimited) */
     uint32_t zns_zd_ext_size; /* per-zone descriptor extension bytes (0 = none) */

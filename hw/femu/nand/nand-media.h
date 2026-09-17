@@ -88,7 +88,8 @@ typedef struct NandMediaTiming {
     int32_t ecc_pe_per_tier;
     int32_t ecc_max_tiers;
     int32_t ecc_retention_per_tier_sec;
-    /* program/erase suspend overhead (ns) for an urgent read to preempt an in-flight P/E */
+    /* program/erase suspend overhead (ns) paid by a read that preempts an
+     * in-flight P/E on its LUN/plane (policy.pe_suspend); 0 = free suspend */
     int64_t tsusp_ns;
 } NandMediaTiming;
 
@@ -96,7 +97,8 @@ typedef struct NandMediaPolicy {
     NandArrayGate   array_gate;
     NandChannelMode channel_mode;
     bool            cache_read;
-    bool            pe_suspend;   /* reads preempt an in-flight program/erase on the LUN */
+    bool            pe_suspend;   /* reads preempt an in-flight program/erase on the
+                                   * LUN/plane (all gates, staged or plain channel) */
     bool            ecc_on_read;
     bool            use_flat_timing;  /* true: scalar fields; false: table */
 } NandMediaPolicy;

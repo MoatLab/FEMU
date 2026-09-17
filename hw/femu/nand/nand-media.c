@@ -211,6 +211,30 @@ static uint64_t array_gate_start(NandMedia *m, const NandLoc *loc, uint64_t t)
     return s;
 }
 
+/*
+ * A read that preempted an in-flight P/E: push back every gated timeline that
+ * was busy at t by the read's occupancy, so the suspended operation finishes
+ * that much later. Timelines that were already idle at t are left alone.
+ */
+static void array_suspend_extend(NandMedia *m, const NandLoc *loc, uint64_t t,
+                                 uint64_t shift)
+{
+    if (m->cfg.policy.array_gate == NAND_GATE_LUN_ONLY ||
+        m->cfg.policy.array_gate == NAND_GATE_LUN_AND_PLANE) {
+        uint64_t *lun = m->cfg.timeline->lun_avail(m->cfg.timeline_opaque, loc);
+        if (*lun > t) {
+            *lun += shift;
+        }
+    }
+    if (m->cfg.policy.array_gate == NAND_GATE_PLANE_ONLY ||
+        m->cfg.policy.array_gate == NAND_GATE_LUN_AND_PLANE) {
+        uint64_t *pl = m->cfg.timeline->plane_avail(m->cfg.timeline_opaque, loc);
+        if (*pl > t) {
+            *pl += shift;
+        }
+    }
+}
+
 static void array_commit(NandMedia *m, const NandLoc *loc, uint64_t done)
 {
     if (m->cfg.policy.array_gate == NAND_GATE_LUN_ONLY ||
@@ -251,16 +275,33 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
         if (m->cfg.policy.array_gate == NAND_GATE_LUN_ONLY) {
             uint64_t *lun = m->cfg.timeline->lun_avail(m->cfg.timeline_opaque, loc);
             uint64_t old = __atomic_load_n(lun, __ATOMIC_RELAXED);
+            bool susp = m->cfg.policy.pe_suspend && op == NAND_MEDIA_READ;
             for (;;) {
-                uint64_t s = (t > old) ? t : old;
-                done = s + alat;
+                uint64_t s, avail;
+                if (susp && t < old) {
+                    /*
+                     * Program/erase suspend on the plain LUN gate: the read
+                     * starts after the suspend overhead instead of waiting out
+                     * the busy LUN, and whatever the LUN was doing resumes
+                     * after the read, so its completion slides by the read's
+                     * array time plus the overhead. Same arithmetic as the
+                     * staged path below.
+                     */
+                    s = t + m->cfg.timing.tsusp_ns;
+                    done = s + alat;
+                    avail = old + alat + m->cfg.timing.tsusp_ns;
+                } else {
+                    s = (t > old) ? t : old;
+                    done = s + alat;
+                    avail = done;
+                }
                 /*
                  * x86-64: inlines to `lock cmpxchg` (no libatomic call). On
                  * success `old` is unchanged and we stop; on failure the
                  * builtin writes the observed value back into `old` and we
                  * retry with it (recomputing done from what we actually saw).
                  */
-                if (__atomic_compare_exchange_n(lun, &old, done, false,
+                if (__atomic_compare_exchange_n(lun, &old, avail, false,
                                                 __ATOMIC_ACQ_REL,
                                                 __ATOMIC_RELAXED)) {
                     break;
@@ -275,8 +316,20 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
         }
         {
             uint64_t s = array_gate_start(m, loc, t);
-            done = s + alat;
-            array_commit(m, loc, done);
+            if (m->cfg.policy.pe_suspend && op == NAND_MEDIA_READ && s > t) {
+                /*
+                 * Suspend on the plane / lun+plane gate (ZNS, OCSSD): the
+                 * read goes first, and every gated timeline that was busy
+                 * resumes its work after the read.
+                 */
+                uint64_t shift = alat + m->cfg.timing.tsusp_ns;
+                s = t + m->cfg.timing.tsusp_ns;
+                done = s + alat;
+                array_suspend_extend(m, loc, t, shift);
+            } else {
+                done = s + alat;
+                array_commit(m, loc, done);
+            }
         }
         if (m->cfg.timeline->unlock_lun) {
             m->cfg.timeline->unlock_lun(m->cfg.timeline_opaque, loc);

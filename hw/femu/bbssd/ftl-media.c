@@ -102,6 +102,8 @@ void bb_nand_media_init(struct ssd *ssd)
     cfg.timing.tplrbsy_ns = spp->tplrbsy;
     cfg.timing.tplebsy_ns = spp->tplebsy;
     cfg.timing.trcbsy_ns = spp->trcbsy;
+    cfg.policy.pe_suspend = (spp->pe_suspend != 0);
+    cfg.timing.tsusp_ns = spp->tsusp_ns;
     cfg.timing.ecc_step_ns = spp->ecc_step_ns;
     cfg.timing.ecc_pe_per_tier = FEMU_ECC_PE_PER_TIER;
     cfg.timing.ecc_max_tiers = FEMU_ECC_MAX_TIERS;

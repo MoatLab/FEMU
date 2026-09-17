@@ -124,6 +124,9 @@ typedef struct SSDNandFlashTiming {
     uint64_t cmd_addr_lat;  /* command and address cycles */
     uint64_t pg_xfer_lat;   /* page data-in (program) / data-out (read) */
     uint64_t status_lat;    /* status read after a read or erase */
+    /* program/erase suspend: a read preempts a busy plane (0 = off) */
+    bool     pe_suspend;
+    uint64_t tsusp_ns;
 } SSDNandFlashTiming;
 
 struct zns_write_cache{

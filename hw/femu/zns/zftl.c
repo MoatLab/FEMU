@@ -118,6 +118,8 @@ void zns_nand_media_init(struct zns_ssd *zns)
     cfg.timing.cmd_addr_ns = zns->timing.cmd_addr_lat;
     cfg.timing.page_xfer_ns = zns->timing.pg_xfer_lat;
     cfg.timing.status_ns = zns->timing.status_lat;
+    cfg.policy.pe_suspend = zns->timing.pe_suspend;
+    cfg.timing.tsusp_ns = zns->timing.tsusp_ns;
     cfg.policy.channel_mode = (cfg.timing.cmd_addr_ns || cfg.timing.page_xfer_ns ||
                                cfg.timing.status_ns) ? NAND_CH_STAGED : NAND_CH_OFF;
     cfg.timeline = &zns_timeline_ops;
