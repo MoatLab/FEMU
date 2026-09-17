@@ -82,6 +82,17 @@ static int zns_init_zone_geometry(NvmeNamespace *ns, Error **errp)
         }
     }
 
+    /*
+     * A write cache serves one zone, so a count the user asks for above the
+     * zone count names caches that can never be used. Only an explicit count
+     * is held to this: the default of three predates the property, and a
+     * device with fewer zones than that has always come up with it.
+     */
+    if (ns->ctrl->zns_params.zns_num_wc > ns->num_zones) {
+        error_setg(errp, "zns_num_wc value %u exceeds the number of zones %u",
+                   ns->ctrl->zns_params.zns_num_wc, ns->num_zones);
+        return -1;
+    }
     if (ns->max_open_zones > ns->num_zones) {
         error_setg(errp, "max_open_zones value %u exceeds the number of zones %u",
                    ns->max_open_zones, ns->num_zones);
@@ -1988,6 +1999,18 @@ static bool zns_check_params(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     }
     if (p->zns_flash_type < SLC || p->zns_flash_type >= MAX_FLASH_TYPE) {
         error_setg(errp, "zns_flash_type must be in [%d, %d]", SLC, PLC);
+        return false;
+    }
+    /*
+     * The caches are allocated before the zone count is known, so bound the
+     * count here by the most zones this geometry could have; the exact bound
+     * is applied once the zones exist. Unbounded, a large value failed the
+     * allocation and aborted.
+     */
+    if (p->zns_num_wc > (uint64_t)p->zns_num_ch * p->zns_num_blk) {
+        error_setg(errp, "zns_num_wc (%u) exceeds the %u zones this geometry "
+                   "can have at most", p->zns_num_wc,
+                   (unsigned)(p->zns_num_ch * p->zns_num_blk));
         return false;
     }
     if (p->zns_pg_rd_lat < 0 || p->zns_pg_wr_lat < 0 || p->zns_blk_er_lat < 0 ||
