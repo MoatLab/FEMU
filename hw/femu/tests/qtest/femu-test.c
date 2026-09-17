@@ -34,6 +34,8 @@
 #define FEMU_KV_CMD_STORE       0x01
 #define FEMU_CMD_IO_MGMT_SEND   0x1d
 #define FEMU_IOMS_RUH_UPDATE    0x01
+#define FEMU_CMD_IO_MGMT_RECV   0x12
+#define FEMU_IOMR_RUH_STATUS    0x01
 #define FEMU_FDP_EVT_RU_NOT_FULLY_WRITTEN 0x00
 #define FEMU_KV_CMD_RETRIEVE    0x02
 #define FEMU_KV_CMD_EXIST       0x14
@@ -1983,6 +1985,97 @@ static void femu_test_delete_sq_in_flight(void *obj, void *data,
     femu_disable(&c);
 }
 
+/*
+ * The FTL maps bytes, so an 8 KiB write is two 4 KiB pages whatever the block
+ * size, and a placement handle loses one block of writable capacity per block
+ * written. Both used to take a block for a 512-byte sector.
+ */
+typedef struct FemuWideLba {
+    uint8_t lbads;
+    bool fdp;
+} FemuWideLba;
+
+static FemuWideLba femu_wide_4k = { .lbads = 12 };
+static FemuWideLba femu_wide_8k = { .lbads = 13 };
+static FemuWideLba femu_wide_fdp = { .lbads = 12, .fdp = true };
+
+static uint64_t femu_ruh0_ruamw(FemuCtrlState *c, uint64_t buf)
+{
+    NvmeCmd cmd;
+    uint8_t st[16 + 32];
+    uint16_t want, got;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_CMD_IO_MGMT_RECV;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(FEMU_IOMR_RUH_STATUS);
+    cmd.cdw11 = cpu_to_le32(sizeof(st) / 4 - 1);
+    want = c->cid;
+    femu_submit(c, &c->io, &cmd);
+    g_assert_cmpint(FEMU_SC(femu_complete(c, &c->io, &got, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(got, ==, want);
+    qtest_memread(c->pdev->bus->qts, buf, st, sizeof(st));
+    /* the first descriptor is placement id 0, where unplaced writes go */
+    g_assert_cmpint(lduw_le_p(st + 16), ==, 0);
+    return ldq_le_p(st + 16 + 8);
+}
+
+static void femu_test_wide_lba(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const FemuWideLba *w = data;
+    FemuCtrlState c = { 0 };
+    NvmeRwCmd rw;
+    uint64_t buf, log;
+    uint64_t ruamw = 0;
+    uint32_t nlb = 8192 >> w->lbads;
+    uint8_t page[512];
+    uint16_t want, got;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    buf = guest_alloc(alloc, 2 * 4096);
+    log = guest_alloc(alloc, sizeof(page));
+    if (w->fdp) {
+        ruamw = femu_ruh0_ruamw(&c, log);
+        g_assert_cmpint(ruamw, ==, (96ull << 20) >> w->lbads);
+    }
+
+    /* 8 KiB at block 1, so the first page of the device is not touched */
+    qtest_memset(qts, buf, 0x5a, 2 * 4096);
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.dptr.prp2 = cpu_to_le64(buf + 4096);
+    rw.slba = cpu_to_le64(1);
+    rw.nlb = cpu_to_le16(nlb - 1);
+    want = c.cid;
+    femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(got, ==, want);
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, log,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, page, sizeof(page));
+    g_assert_cmpint(ldq_le_p(page + 8), ==, 2);
+    g_assert_cmpint(ldq_le_p(page + 24), ==, 2);
+
+    if (w->fdp) {
+        g_assert_cmpint(femu_ruh0_ruamw(&c, log), ==, ruamw - nlb);
+    }
+
+    guest_free(alloc, log);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -2101,6 +2194,28 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4"
+    });
+    qos_add_test("wide-lba-4k", "femu", femu_test_wide_lba,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,lba_index=3",
+        .arg = &femu_wide_4k,
+    });
+    qos_add_test("wide-lba-8k", "femu", femu_test_wide_lba,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,lba_index=4",
+        .arg = &femu_wide_8k,
+    });
+    qos_add_test("wide-lba-fdp", "femu", femu_test_wide_lba,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,lba_index=3,"
+            "subsys=fdpsub",
+        .arg = &femu_wide_fdp,
     });
     qos_add_test("buffer-counters", "femu", femu_test_buffer_counters,
                  &(QOSGraphTestOptions) {

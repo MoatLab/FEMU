@@ -891,7 +891,7 @@ static int nvme_init_namespace(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     ns->util = bitmap_new(num_blks);
     ns->uncorrectable = bitmap_new(num_blks);
 
-    /* FDP: cache lbaf for this namespace */
+    /* the block format the FTL and Flexible Data Placement size units by */
     ns->lbaf = id_ns->lbaf[lba_index];
 
     /* FDP: connect subsystem and endurance group, then init FDP state */

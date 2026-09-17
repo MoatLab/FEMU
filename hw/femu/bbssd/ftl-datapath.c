@@ -344,13 +344,12 @@ uint64_t ssd_buffer_destage(struct ssd *ssd, int budget, uint64_t stime)
 uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
 {
     struct ssdparams *spp = &ssd->sp;
-    uint64_t lba = req->slba + ssd_ns_lba_base(ssd, req);
-    int nsecs = req->nlb;
     struct ppa ppa;
-    uint64_t start_lpn = lba / spp->secs_per_pg;
-    uint64_t end_lpn = (lba + nsecs - 1) / spp->secs_per_pg;
+    uint64_t start_lpn, end_lpn;
     uint64_t lpn;
     uint64_t sublat, maxlat = 0;
+
+    ssd_lpn_range(ssd, req, req->slba, req->nlb, &start_lpn, &end_lpn);
 
     if (end_lpn >= spp->tt_pgs) {
         ftl_err("read past device geometry: end_lpn=%"PRIu64" tt_pgs=%d\n",
@@ -449,16 +448,15 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
 
 uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 {
-    uint64_t lba = req->slba + ssd_ns_lba_base(ssd, req);
     struct ssdparams *spp = &ssd->sp;
-    int len = req->nlb;
-    uint64_t start_lpn = lba / spp->secs_per_pg;
-    uint64_t end_lpn = (lba + len - 1) / spp->secs_per_pg;
+    uint64_t start_lpn, end_lpn;
     uint64_t lpn;
     uint64_t curlat = 0, maxlat = 0;
     const NvmeRwCmd *rw = (const NvmeRwCmd *)&req->cmd;
     bool fua = le16_to_cpu(rw->control) & NVME_RW_FUA;
     int r;
+
+    ssd_lpn_range(ssd, req, req->slba, req->nlb, &start_lpn, &end_lpn);
 
     if (end_lpn >= spp->tt_pgs) {
         ftl_err("write past device geometry: end_lpn=%"PRIu64" tt_pgs=%d\n",
@@ -659,11 +657,11 @@ uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req)
 {
     struct ssdparams *spp = &ssd->sp;
     const NvmeRwCmd *rw = (const NvmeRwCmd *)&req->cmd;
-    uint64_t lba = le64_to_cpu(rw->slba) + ssd_ns_lba_base(ssd, req);
-    uint32_t nlb = le16_to_cpu(rw->nlb) + 1;
-    uint64_t start_lpn = lba / spp->secs_per_pg;
-    uint64_t end_lpn = (lba + nlb - 1) / spp->secs_per_pg;
+    uint64_t start_lpn, end_lpn;
     int already_invalid = 0;
+
+    ssd_lpn_range(ssd, req, le64_to_cpu(rw->slba), le16_to_cpu(rw->nlb) + 1,
+                  &start_lpn, &end_lpn);
 
     if (!(le16_to_cpu(rw->control) & NVME_WZ_DEAC)) {
         uint64_t lpn, curlat, maxlat = 0;
@@ -745,19 +743,12 @@ uint64_t ssd_trim(struct ssd *ssd, NvmeRequest *req)
     // printf("TRIM: Processing %d ranges (attributes=0x%x)\n", nr_ranges, attributes);
     
     for (int range_idx = 0; range_idx < nr_ranges; range_idx++) {
-        /* shift into this namespace's slice of the FTL, as read and write do */
-        uint64_t slba = le64_to_cpu(ranges[range_idx].slba) +
-                        ssd_ns_lba_base(ssd, req);
-        uint32_t nlb = le32_to_cpu(ranges[range_idx].nlb);
-        // uint32_t cattr = le32_to_cpu(ranges[range_idx].cattr);
-        
-        uint64_t start_lpn = slba / spp->secs_per_pg;
-        uint64_t end_lpn = (slba + nlb - 1) / spp->secs_per_pg;
+        uint64_t start_lpn, end_lpn;
         int trimmed_pages;
         int already_invalid = 0;
 
-        // ftl_debug("TRIM Range %d: LBA %lu + %u sectors, LPN range %lu-%lu (%lu pages), cattr=0x%x\n", 
-        //        range_idx, slba, nlb, start_lpn, end_lpn, end_lpn - start_lpn + 1, cattr);
+        ssd_lpn_range(ssd, req, le64_to_cpu(ranges[range_idx].slba),
+                      le32_to_cpu(ranges[range_idx].nlb), &start_lpn, &end_lpn);
 
         // Boundary check
         if (end_lpn >= spp->tt_pgs) {

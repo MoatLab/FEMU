@@ -1152,15 +1152,16 @@ static uint64_t ssd_stream_write(FemuCtrl *n, struct ssd *ssd,
     FemuRuHandle *ruh;
     FemuReclaimUnit *ru;
 
-    uint64_t lba = req->slba;
-    int len = req->nlb;
-    uint64_t start_lpn = lba / spp->secs_per_pg;
-    uint64_t end_lpn = (lba + len - 1) / spp->secs_per_pg;
+    uint64_t pg = (uint64_t)spp->secsz * spp->secs_per_pg;
+    uint64_t start_lpn, end_lpn;
+    uint64_t media = 0;
     struct ppa ppa;
     uint64_t lpn;
     uint64_t curlat = 0, maxlat = 0;
     uint64_t written = 0;
     int r;
+
+    ssd_lpn_range(ssd, req, req->slba, req->nlb, &start_lpn, &end_lpn);
 
     /* parse placement info from request */
     uint16_t pid = req->fdp_dspec;
@@ -1316,11 +1317,14 @@ static uint64_t ssd_stream_write(FemuCtrl *n, struct ssd *ssd,
         ssd->host_write_pages++;
         written++;
 
-        /* RUAMW counts logical blocks; a page holds secs_per_pg of them */
+        /* RUAMW counts blocks, and a page may hold several or half of one */
         if (ru->nvme_ru) {
-            ru->nvme_ru->ruamw -= MIN(ru->nvme_ru->ruamw,
-                                      (uint64_t)spp->secs_per_pg);
+            uint64_t blks = ((media + pg) >> ns->lbaf.lbads) -
+                            (media >> ns->lbaf.lbads);
+
+            ru->nvme_ru->ruamw -= MIN(ru->nvme_ru->ruamw, blks);
         }
+        media += pg;
 
         /* advance RU write pointer; may allocate new RU */
         FemuReclaimUnit *ret = fdp_advance_ru_pointer(ssd, rg, ruh, ru);
@@ -1717,10 +1721,10 @@ static void ssd_trim_fdp_range(FemuCtrl *n, NvmeRequest *req)
     }
 
     for (int range_idx = 0; range_idx < nr_ranges; range_idx++) {
-        uint64_t r_slba = le64_to_cpu(ranges[range_idx].slba);
-        uint32_t r_nlb = le32_to_cpu(ranges[range_idx].nlb);
-        uint64_t start_lpn = r_slba / spp->secs_per_pg;
-        uint64_t end_lpn = (r_slba + r_nlb - 1) / spp->secs_per_pg;
+        uint64_t start_lpn, end_lpn;
+
+        ssd_lpn_range(ssd, req, le64_to_cpu(ranges[range_idx].slba),
+                      le32_to_cpu(ranges[range_idx].nlb), &start_lpn, &end_lpn);
 
         if (end_lpn >= spp->tt_pgs) {
             ftl_err("FDP TRIM: range %d exceeds capacity (end_lpn=%lu "
@@ -1746,15 +1750,14 @@ void ssd_write_zeroes_fdp_style(FemuCtrl *n, NvmeRequest *req)
     struct ssd *ssd = (req->ns && req->ns->ssd) ? req->ns->ssd : n->ssd;
     struct ssdparams *spp = &ssd->sp;
     const NvmeRwCmd *rw = (const NvmeRwCmd *)&req->cmd;
-    uint64_t lba = le64_to_cpu(rw->slba) + ssd_ns_lba_base(ssd, req);
-    uint32_t nlb = le16_to_cpu(rw->nlb) + 1;
-    uint64_t start_lpn = lba / spp->secs_per_pg;
-    uint64_t end_lpn = (lba + nlb - 1) / spp->secs_per_pg;
+    uint64_t start_lpn, end_lpn;
     int already_invalid = 0;
 
     if (!(le16_to_cpu(rw->control) & NVME_WZ_DEAC)) {
         return;
     }
+    ssd_lpn_range(ssd, req, le64_to_cpu(rw->slba), le16_to_cpu(rw->nlb) + 1,
+                  &start_lpn, &end_lpn);
     if (end_lpn >= spp->tt_pgs) {
         return;
     }

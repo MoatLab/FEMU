@@ -216,20 +216,21 @@ extern const struct femu_mapping_ops femu_mapping_hybrid_ops;
 extern const struct femu_mapping_ops femu_mapping_fast_ops;
 
 /*
- * Base LBA of a request's namespace inside the FTL address space. One FTL maps a
- * single flat logical page space over the whole device, so each namespace has to
- * be shifted into its own slice; otherwise namespaces would map onto the same
- * logical pages and overwrite each other. The slice offset is a byte count, and
- * the FTL treats an LBA as a sector of spp->secsz, so convert between the two.
- * Returns 0 for the first namespace, leaving single-namespace mapping unchanged.
+ * The logical pages blocks [slba, slba + nlb) cover. One FTL maps the whole
+ * device, so each namespace sits at its byte offset in it, and a block is
+ * whatever size the namespace was formatted with, not a sector of secsz.
  */
-static inline uint64_t ssd_ns_lba_base(struct ssd *ssd, NvmeRequest *req)
+static inline void ssd_lpn_range(struct ssd *ssd, NvmeRequest *req,
+                                 uint64_t slba, uint64_t nlb,
+                                 uint64_t *start_lpn, uint64_t *end_lpn)
 {
-    if (!req->ns || req->ns->backend_offset == 0) {
-        return 0;
-    }
+    uint64_t pg = (uint64_t)ssd->sp.secsz * ssd->sp.secs_per_pg;
+    uint8_t lbads = req->ns ? req->ns->lbaf.lbads : BDRV_SECTOR_BITS;
+    uint64_t off = req->ns ? req->ns->backend_offset : 0;
 
-    return req->ns->backend_offset / ssd->sp.secsz;
+    off += slba << lbads;
+    *start_lpn = off / pg;
+    *end_lpn = (off + (nlb << lbads) - 1) / pg;
 }
 
 /* DRAM write buffer ordering (hw/femu/bbssd/ftl-datapath.c) */
