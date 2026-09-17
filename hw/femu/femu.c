@@ -1538,6 +1538,17 @@ static void femu_realize_undo(FemuCtrl *n)
     n->sq = NULL;
     free_dram_backend(n->mbe);
     n->mbe = NULL;
+
+    /*
+     * QEMU frees only the config space of a device whose realize failed, and
+     * the interrupt table regions MSI-X adds under its exclusive bar each hold
+     * a reference on the controller they belong to. Left in place, a refused
+     * device_add never reached finalize at all, so the whole object leaked,
+     * not only the tables.
+     */
+    if (msix_present(&n->parent_obj)) {
+        msix_uninit_exclusive_bar(&n->parent_obj);
+    }
 }
 
 static void femu_realize(PCIDevice *pci_dev, Error **errp)
