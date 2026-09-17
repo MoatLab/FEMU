@@ -787,11 +787,16 @@ static bool nvme_check_constraints(FemuCtrl *n, Error **errp)
             return false;
         }
     }
-    if (n->max_sqes > NVME_MAX_QUEUE_ES || n->max_cqes > NVME_MAX_QUEUE_ES ||
-        n->max_sqes < NVME_MIN_SQUEUE_ES || n->max_cqes < NVME_MIN_CQUEUE_ES) {
-        error_setg(errp, "max_sqes must be in [%d, %d] and max_cqes in [%d, %d]",
-                   NVME_MIN_SQUEUE_ES, NVME_MAX_QUEUE_ES,
-                   NVME_MIN_CQUEUE_ES, NVME_MAX_QUEUE_ES);
+    /*
+     * Queues are indexed as 64- and 16-byte entries throughout, and admin
+     * queues were addressed with the I/O sizes, so larger entries misplaced
+     * completions.
+     */
+    if (n->max_sqes != NVME_MIN_SQUEUE_ES ||
+        n->max_cqes != NVME_MIN_CQUEUE_ES) {
+        error_setg(errp, "max_sqes must be %d and max_cqes %d, the entry sizes "
+                   "of the NVM command set", NVME_MIN_SQUEUE_ES,
+                   NVME_MIN_CQUEUE_ES);
         return false;
     }
     if (n->vwc > 1 || n->intc > 1 || n->cqr > 1 || n->extended > 1) {
