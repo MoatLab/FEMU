@@ -2076,6 +2076,78 @@ static void femu_test_wide_lba(void *obj, void *data, QGuestAllocator *alloc)
     femu_disable(&c);
 }
 
+/*
+ * An SGL descriptor has its type in the high nibble and a subtype in the low
+ * one, and over PCIe only the address subtype exists; a segment is a whole
+ * number of 16-byte descriptors. Lists breaking either rule were mapped.
+ */
+static uint16_t femu_sgl_write(FemuCtrlState *c, const NvmeSglDescriptor *sgl)
+{
+    NvmeRwCmd rw;
+    uint16_t want = c->cid;
+    uint16_t got;
+    uint16_t status;
+
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = NVME_CMD_WRITE;
+    rw.flags = 1 << 6;                      /* PSDT: SGL */
+    rw.nsid = cpu_to_le32(1);
+    memcpy(&rw.dptr.sgl, sgl, sizeof(*sgl));
+    rw.nlb = cpu_to_le16(FEMU_DATA_SIZE / c->lba_size - 1);
+
+    femu_submit(c, &c->io, (NvmeCmd *)&rw);
+    status = femu_complete(c, &c->io, &got, NULL);
+    g_assert_cmpint(got, ==, want);
+    return FEMU_SC(status);
+}
+
+static void femu_test_sgl(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    NvmeSglDescriptor blk = { 0 };
+    NvmeSglDescriptor seg = { 0 };
+    uint64_t buf, list;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    list = guest_alloc(alloc, 4096);
+    qtest_memset(qts, buf, 0x5a, FEMU_DATA_SIZE);
+
+    /* one data block, then the same block through a last segment */
+    blk.addr = cpu_to_le64(buf);
+    blk.len = cpu_to_le32(FEMU_DATA_SIZE);
+    g_assert_cmpint(femu_sgl_write(&c, &blk), ==, NVME_SUCCESS);
+    qtest_memwrite(qts, list, &blk, sizeof(blk));
+    seg.addr = cpu_to_le64(list);
+    seg.len = cpu_to_le32(sizeof(blk));
+    seg.type = NVME_SGL_DESCR_TYPE_LAST_SEGMENT << 4;
+    g_assert_cmpint(femu_sgl_write(&c, &seg), ==, NVME_SUCCESS);
+
+    /* a segment length that is not a whole number of descriptors */
+    seg.len = cpu_to_le32(sizeof(blk) + 4);
+    g_assert_cmpint(femu_sgl_write(&c, &seg), ==, NVME_INVALID_FIELD);
+    seg.len = cpu_to_le32(sizeof(blk));
+
+    /* the offset subtype, which only fabrics define, directly and listed */
+    blk.type = 0x1;
+    g_assert_cmpint(femu_sgl_write(&c, &blk), ==, NVME_INVALID_FIELD);
+    qtest_memwrite(qts, list, &blk, sizeof(blk));
+    g_assert_cmpint(femu_sgl_write(&c, &seg), ==, NVME_INVALID_FIELD);
+    seg.type |= 0x1;
+    blk.type = 0;
+    qtest_memwrite(qts, list, &blk, sizeof(blk));
+    g_assert_cmpint(femu_sgl_write(&c, &seg), ==, NVME_INVALID_FIELD);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -2194,6 +2266,9 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4"
+    });
+    qos_add_test("sgl", "femu", femu_test_sgl, &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "sgl=on"
     });
     qos_add_test("wide-lba-4k", "femu", femu_test_wide_lba,
                  &(QOSGraphTestOptions) {

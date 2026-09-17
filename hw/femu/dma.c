@@ -155,7 +155,8 @@ unmap:
  * Map an NVMe SGL into a QEMUSGList, the PRP-path equivalent of nvme_map_prp.
  * Supports address SGLs: DATA_BLOCK descriptors (a direct segment) and
  * SEGMENT / LAST_SEGMENT descriptors (which point at a further array of
- * descriptors in guest memory). Bit-bucket and keyed SGLs are rejected.
+ * descriptors in guest memory). Bit-bucket and keyed SGLs are rejected, and
+ * so is any subtype but address: the offset one exists only for fabrics.
  * CMB-resident SGLs are not special-cased (rare); the descriptors are read
  * from guest memory via nvme_addr_read. Builds the same qsg the backend_rw
  * path consumes, so no other code path changes.
@@ -174,6 +175,9 @@ uint16_t nvme_map_sgl(QEMUSGList *qsg, QEMUIOVector *iov,
     while (len) {
         uint8_t type = NVME_SGL_TYPE(sgl.type);
 
+        if (NVME_SGL_SUBTYPE(sgl.type)) {
+            goto inval;
+        }
         if (type == NVME_SGL_DESCR_TYPE_DATA_BLOCK) {
             uint32_t dlen = le32_to_cpu(sgl.len);
 
@@ -200,7 +204,8 @@ uint16_t nvme_map_sgl(QEMUSGList *qsg, QEMUIOVector *iov,
             int i;
             bool chained = false;
 
-            if (!ndesc || ndesc > max_descrs) {
+            if (!ndesc || ndesc > max_descrs ||
+                seg_bytes % sizeof(NvmeSglDescriptor)) {
                 goto inval;
             }
             descs = g_malloc(seg_bytes);
@@ -209,6 +214,10 @@ uint16_t nvme_map_sgl(QEMUSGList *qsg, QEMUIOVector *iov,
                 uint8_t dt = NVME_SGL_TYPE(descs[i].type);
                 uint32_t dl = le32_to_cpu(descs[i].len);
 
+                if (NVME_SGL_SUBTYPE(descs[i].type)) {
+                    g_free(descs);
+                    goto inval;
+                }
                 /* only the final entry of a non-last segment may chain */
                 if (dt == NVME_SGL_DESCR_TYPE_DATA_BLOCK) {
                     if (!dl || dl > len) {
