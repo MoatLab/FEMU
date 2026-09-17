@@ -588,8 +588,13 @@ static uint64_t nvme_mmio_read(void *opaque, hwaddr addr, unsigned size)
     uint8_t *ptr = (uint8_t *)&n->bar;
     uint64_t val = 0;
 
+    /*
+     * The core widens a one-byte access to this region's two-byte minimum, so
+     * a read of the last register byte asks for one byte past the block. Copy
+     * only the bytes that exist; the caller keeps just the one it asked for.
+     */
     if (addr < sizeof(n->bar)) {
-        memcpy(&val, ptr + addr, size);
+        memcpy(&val, ptr + addr, MIN(size, sizeof(n->bar) - addr));
     }
 
     return val;
