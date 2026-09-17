@@ -1518,6 +1518,26 @@ static void femu_test_kv_accounting(void *obj, void *data,
  * it is the field at bits 31:16, and reading it from the wrong bits refused
  * every update that named more than one.
  */
+/* a Reclaim Unit Handle Update naming npid identifiers listed at pids */
+static uint16_t femu_ruh_update(FemuCtrlState *c, uint64_t pids, uint16_t npid)
+{
+    NvmeCmd cmd;
+    uint16_t want = c->cid;
+    uint16_t got;
+    uint16_t status;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_CMD_IO_MGMT_SEND;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(pids);
+    /* the count is 0's based */
+    cmd.cdw10 = cpu_to_le32(FEMU_IOMS_RUH_UPDATE | ((npid - 1) << 16));
+    femu_submit(c, &c->io, &cmd);
+    status = femu_complete(c, &c->io, &got, NULL);
+    g_assert_cmpint(got, ==, want);
+    return FEMU_SC(status);
+}
+
 static void femu_test_fdp_events(void *obj, void *data, QGuestAllocator *alloc)
 {
     QFemu *femu = obj;
@@ -1526,7 +1546,6 @@ static void femu_test_fdp_events(void *obj, void *data, QGuestAllocator *alloc)
     uint64_t pids, log;
     uint16_t list[2] = { cpu_to_le16(0), cpu_to_le16(1) };
     uint8_t buf[64 + 2 * 64];
-    uint16_t want, got;
     uint32_t numd = sizeof(buf) / 4 - 1;
     int i;
 
@@ -1535,17 +1554,7 @@ static void femu_test_fdp_events(void *obj, void *data, QGuestAllocator *alloc)
 
     pids = guest_alloc(alloc, 4096);
     qtest_memwrite(femu->dev.bus->qts, pids, list, sizeof(list));
-    memset(&cmd, 0, sizeof(cmd));
-    cmd.opcode = FEMU_CMD_IO_MGMT_SEND;
-    cmd.nsid = cpu_to_le32(1);
-    cmd.dptr.prp1 = cpu_to_le64(pids);
-    /* the count is 0's based: one means two identifiers */
-    cmd.cdw10 = cpu_to_le32(FEMU_IOMS_RUH_UPDATE | (1 << 16));
-    want = c.cid;
-    femu_submit(&c, &c.io, &cmd);
-    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
-                    NVME_SUCCESS);
-    g_assert_cmpint(got, ==, want);
+    g_assert_cmpint(femu_ruh_update(&c, pids, 2), ==, NVME_SUCCESS);
 
     log = guest_alloc(alloc, 4096);
     qtest_memset(femu->dev.bus->qts, log, 0xff, 4096);
@@ -2022,18 +2031,38 @@ static uint64_t femu_ruh0_ruamw(FemuCtrlState *c, uint64_t buf)
     return ldq_le_p(st + 16 + 8);
 }
 
+/* nlb blocks at slba, from the two 4 KiB pages at buf */
+static uint16_t femu_write_8k(FemuCtrlState *c, uint64_t buf, uint64_t slba,
+                              uint32_t nlb)
+{
+    NvmeRwCmd rw;
+    uint16_t want = c->cid;
+    uint16_t got;
+    uint16_t status;
+
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.dptr.prp2 = cpu_to_le64(buf + 4096);
+    rw.slba = cpu_to_le64(slba);
+    rw.nlb = cpu_to_le16(nlb - 1);
+    femu_submit(c, &c->io, (NvmeCmd *)&rw);
+    status = femu_complete(c, &c->io, &got, NULL);
+    g_assert_cmpint(got, ==, want);
+    return FEMU_SC(status);
+}
+
 static void femu_test_wide_lba(void *obj, void *data, QGuestAllocator *alloc)
 {
     QFemu *femu = obj;
     QTestState *qts = femu->dev.bus->qts;
     const FemuWideLba *w = data;
     FemuCtrlState c = { 0 };
-    NvmeRwCmd rw;
     uint64_t buf, log;
     uint64_t ruamw = 0;
     uint32_t nlb = 8192 >> w->lbads;
     uint8_t page[512];
-    uint16_t want, got;
 
     femu_enable(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
@@ -2048,18 +2077,7 @@ static void femu_test_wide_lba(void *obj, void *data, QGuestAllocator *alloc)
 
     /* 8 KiB at block 1, so the first page of the device is not touched */
     qtest_memset(qts, buf, 0x5a, 2 * 4096);
-    memset(&rw, 0, sizeof(rw));
-    rw.opcode = NVME_CMD_WRITE;
-    rw.nsid = cpu_to_le32(1);
-    rw.dptr.prp1 = cpu_to_le64(buf);
-    rw.dptr.prp2 = cpu_to_le64(buf + 4096);
-    rw.slba = cpu_to_le64(1);
-    rw.nlb = cpu_to_le16(nlb - 1);
-    want = c.cid;
-    femu_submit(&c, &c.io, (NvmeCmd *)&rw);
-    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
-                    NVME_SUCCESS);
-    g_assert_cmpint(got, ==, want);
+    g_assert_cmpint(femu_write_8k(&c, buf, 1, nlb), ==, NVME_SUCCESS);
 
     g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, log,
                                          sizeof(page), 0)), ==, NVME_SUCCESS);
@@ -2144,6 +2162,109 @@ static void femu_test_sgl(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmpint(femu_sgl_write(&c, &seg), ==, NVME_INVALID_FIELD);
 
     guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
+ * A handle update moves the handle to a fresh reclaim unit. Only the unit's
+ * remaining-writes count used to be reset, while the FTL went on writing into
+ * the old unit, so the count ran out of step with the media. Units left part
+ * written are then collected like any other.
+ */
+static void femu_test_fdp_ruh_update(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint16_t all[4] = {
+        cpu_to_le16(0), cpu_to_le16(1), cpu_to_le16(2), cpu_to_le16(3)
+    };
+    uint64_t buf, log, pids;
+    uint64_t full, i;
+    uint8_t page[512];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    buf = guest_alloc(alloc, 2 * 4096);
+    log = guest_alloc(alloc, 4096);
+    pids = guest_alloc(alloc, 4096);
+    qtest_memset(qts, buf, 0x5a, 2 * 4096);
+    qtest_memwrite(qts, pids, all, sizeof(all));
+
+    full = femu_ruh0_ruamw(&c, log);
+    g_assert_cmpint(femu_write_8k(&c, buf, 0, 2), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_ruh0_ruamw(&c, log), ==, full - 2);
+
+    /* every handle at once, which the advertised count allows */
+    g_assert_cmpint(femu_ruh_update(&c, pids, 4), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_ruh0_ruamw(&c, log), ==, full);
+
+    /* the old unit had room for all of these; the new one keeps two blocks */
+    for (i = 2; i < full; i += 2) {
+        g_assert_cmpint(femu_write_8k(&c, buf, i, 2), ==, NVME_SUCCESS);
+    }
+    g_assert_cmpint(femu_ruh0_ruamw(&c, log), ==, 2);
+
+    /* one block per unit, until collection has to take those units back */
+    for (i = 0; i < 100; i++) {
+        g_assert_cmpint(femu_write_8k(&c, buf, full + i, 1), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpint(femu_ruh_update(&c, pids, 1), ==, NVME_SUCCESS);
+    }
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, log,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, page, sizeof(page));
+    g_assert_cmpint(ldq_le_p(page + 16), >, 0);
+
+    guest_free(alloc, pids);
+    guest_free(alloc, log);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
+ * With collection held off until no unit is free, an update eventually finds
+ * none to move to. It must then fail: it used to report success and leave the
+ * handle writing into the unit it had been asked to leave.
+ */
+static void femu_test_fdp_ruh_update_full(void *obj, void *data,
+                                          QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint16_t pid0 = cpu_to_le16(0);
+    uint64_t buf, log, pids;
+    uint64_t full, i;
+    uint16_t sc = NVME_SUCCESS;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    buf = guest_alloc(alloc, 2 * 4096);
+    log = guest_alloc(alloc, 4096);
+    pids = guest_alloc(alloc, 4096);
+    qtest_memset(qts, buf, 0x5a, 2 * 4096);
+    qtest_memwrite(qts, pids, &pid0, sizeof(pid0));
+    full = femu_ruh0_ruamw(&c, log);
+
+    for (i = 0; i < 4096; i++) {
+        g_assert_cmpint(femu_write_8k(&c, buf, i, 1), ==, NVME_SUCCESS);
+        sc = femu_ruh_update(&c, pids, 1);
+        if (sc != NVME_SUCCESS) {
+            break;
+        }
+        g_assert_cmpint(femu_ruh0_ruamw(&c, log), ==, full);
+    }
+    g_assert_cmpint(sc, ==, NVME_CAP_EXCEEDED);
+
+    guest_free(alloc, pids);
+    guest_free(alloc, log);
     guest_free(alloc, buf);
     femu_queue_free(&c, &c.io);
     femu_disable(&c);
@@ -2267,6 +2388,20 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4"
+    });
+    qos_add_test("fdp-ruh-update", "femu", femu_test_fdp_ruh_update,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,lba_index=3,"
+            "subsys=fdpsub",
+    });
+    qos_add_test("fdp-ruh-update-full", "femu", femu_test_fdp_ruh_update_full,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,lba_index=3,"
+            "gc_thres_pcent=100,gc_thres_pcent_high=100,subsys=fdpsub",
     });
     qos_add_test("sgl", "femu", femu_test_sgl, &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "sgl=on"

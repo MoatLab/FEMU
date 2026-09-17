@@ -171,6 +171,51 @@ static struct ppa fdp_get_new_page(struct ssd *ssd, FemuReclaimUnit *ru)
 }
 
 /*
+ * fdp_retire_ru - file a unit that takes no more writes: on the full list if
+ * every page it holds is valid, otherwise as a collection victim. Returns
+ * whether it went on the full list.
+ */
+static bool fdp_retire_ru(struct ssd *ssd, FemuReclaimUnit *ru)
+{
+    struct ssdparams *spp = &ssd->sp;
+    struct ru_mgmt *rm = ssd->rg[ru->rgidx].ru_mgmt;
+    bool is_full = true;
+
+    ru->vpc = 0;
+    for (int i = 0; i < ru->n_lines; i++) {
+        if (ru->lines[i]->vpc != spp->pgs_per_line) {
+            is_full = false;
+        }
+        ru->vpc += ru->lines[i]->vpc;
+    }
+
+    if (is_full) {
+        QTAILQ_INSERT_TAIL(&rm->full_ru_list, ru, entry);
+        rm->full_ru_cnt++;
+        return true;
+    }
+
+    ru->utilization = (float)ru->vpc / ru->npages;
+    if (rm->mgmt_type == GC_GLOBAL_CB) {
+        if (ru->utilization < 1.0f && ru->last_invalidated_time > 0) {
+            ru->my_cb = (uint64_t)(100000.0f * ru->utilization /
+                ((1.0f - ru->utilization + 0.001f) *
+                (float)ru->last_invalidated_time));
+        }
+        pqueue_insert(rm->victim_ru_cb, ru);
+    } else {
+        pqueue_insert(rm->victim_ru_pq, ru);
+    }
+    rm->victim_ru_cnt++;
+    /* the per-handle policy picks from the handle's own queue first */
+    if (rm->mgmt_type == GC_NOISY_RUH_CUSTOM && ru->ruh && ru->ruh->ru_mgmt) {
+        pqueue_insert(ru->ruh->ru_mgmt->victim_ru_pq, ru);
+        ru->ruh->ru_mgmt->victim_ru_cnt++;
+    }
+    return false;
+}
+
+/*
  * fdp_advance_ru_pointer - advance RU write pointer. When RU fills up,
  * move it to victim/full list and allocate a new RU for the RUH.
  * Returns the (possibly new) current RU.
@@ -184,7 +229,7 @@ static FemuReclaimUnit *fdp_advance_ru_pointer(struct ssd *ssd,
     struct ru_mgmt *rm = rg->ru_mgmt;
     struct write_pointer *wpp = ru->ssd_wptr;
     FemuReclaimUnit *new_ru = NULL;
-    bool is_full = true;
+    bool is_full;
     bool ru_exhausted = false; /* set when we cross the RU boundary */
 
     check_addr(wpp->ch, spp->nchs);
@@ -208,38 +253,7 @@ static FemuReclaimUnit *fdp_advance_ru_pointer(struct ssd *ssd,
                 //if (ru->next_line_index == ru->n_lines) { - TODO when ru 1->1..* mutliple lines
                 wpp->pg = 0;
                 ru_exhausted = true;
-                /* RU's line(s) are fully written - classify it */
-                for (int i = 0; i < ru->n_lines; i++) {
-                    struct line *line = ru->lines[i];
-                    if (line->vpc != spp->pgs_per_line) {
-                        is_full = false;
-                    }
-                }
-
-                /* update RU vpc from its lines */
-                ru->vpc = 0;
-                for (int i = 0; i < ru->n_lines; i++) {
-                    ru->vpc += ru->lines[i]->vpc;
-                }
-
-                if (is_full) {
-                    QTAILQ_INSERT_TAIL(&rm->full_ru_list, ru, entry);
-                    rm->full_ru_cnt++;
-                } else {
-                    ru->utilization = (float)ru->vpc / ru->npages;
-                    if (rm->mgmt_type == GC_GLOBAL_CB){ 
-                        if (ru->utilization < 1.0f && ru->last_invalidated_time > 0) {
-                        ru->my_cb = (uint64_t)(100000.0f * ru->utilization /
-                            ((1.0f - ru->utilization + 0.001f) *
-                            (float)ru->last_invalidated_time));
-                        }
-                        pqueue_insert(rm->victim_ru_cb, ru);
-                    }else{
-                        pqueue_insert(rm->victim_ru_pq, ru);
-                        //TODO per ruh victim queue - experimental
-                    }
-                    rm->victim_ru_cnt++;
-                }
+                is_full = fdp_retire_ru(ssd, ru);
 
                 /* allocate a new RU for this RUH cuase ruh->curr_ru is full */
                 if (ruh != NULL) {
@@ -870,7 +884,7 @@ static int clean_one_block_fdp_style(struct ssd *ssd, struct ppa *ppa,
     for (int pg = 0; pg < spp->pgs_per_blk; pg++) {
         ppa->g.pg = pg;
         pg_iter = get_pg(ssd, ppa);
-        ftl_assert(pg_iter->status != PG_FREE);
+        /* a unit a handle update closed early has pages never written */
         if (pg_iter->status == PG_VALID) {
             gc_read_page(ssd, ppa);
             /*
@@ -1353,6 +1367,59 @@ static uint64_t ssd_stream_write(FemuCtrl *n, struct ssd *ssd,
     req->xfer_bytes = written * (uint64_t)spp->secs_per_pg * spp->secsz;
 
     return maxlat;
+}
+
+static bool fdp_ru_unwritten(FemuReclaimUnit *ru)
+{
+    struct write_pointer *wpp = ru->ssd_wptr;
+
+    return wpp->curline == ru->lines[0] && !wpp->ch && !wpp->lun &&
+           !wpp->pl && !wpp->pg;
+}
+
+/*
+ * ssd_fdp_update_ruhs - Reclaim Unit Handle Update: each named handle moves to
+ * a fresh unit and the one it leaves is collected like any other. A unit that
+ * was never written is as good as a fresh one and is kept. If collection
+ * cannot free a unit either, the command fails rather than claim a move.
+ */
+void ssd_fdp_update_ruhs(FemuCtrl *n, NvmeRequest *req)
+{
+    struct ssd *ssd = n->ssd;
+    NvmeNamespace *ns = req->ns;
+
+    for (uint32_t i = 0; i < req->nr_fdp_pids; i++) {
+        uint16_t pid = req->fdp_pids[i];
+        uint16_t ph, rgid;
+        FemuRuHandle *ruh;
+        FemuReclaimUnit *old, *fresh;
+
+        /* the poller refused the command if any of these was invalid */
+        nvme_parse_pid(ns, pid, &ph, &rgid);
+        ruh = &ssd->ruhs[ns->fdp.phs[ph]];
+        old = ruh->curr_ru;
+        if (!old) {
+            continue;
+        }
+        if (fdp_ru_unwritten(old)) {
+            nvme_fdp_note_ru_left(n, ns, pid, old->nvme_ru);
+            continue;
+        }
+
+        fresh = fdp_get_new_ru(ssd, rgid, ruh->ruhid);
+        if (!fresh && do_gc_fdp_style(ssd, rgid, ruh->ruhid, true) != -1) {
+            fresh = fdp_get_new_ru(ssd, rgid, ruh->ruhid);
+        }
+        if (!fresh) {
+            req->status = NVME_CAP_EXCEEDED | NVME_DNR;
+            return;
+        }
+        nvme_fdp_note_ru_left(n, ns, pid, old->nvme_ru);
+        fdp_retire_ru(ssd, old);
+        ruh->rus[rgid] = fresh;
+        ruh->curr_ru = fresh;
+        ruh->ruh->rus[rgid] = fresh->nvme_ru;
+    }
 }
 
 /*

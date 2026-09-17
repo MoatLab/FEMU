@@ -1472,6 +1472,13 @@ typedef struct NvmeRequest {
     uint32_t        *zone_resets;
     uint32_t        nr_zone_resets;
 
+    /*
+     * Placement identifiers a Reclaim Unit Handle Update named, in host order,
+     * for the FTL thread, which owns the units behind them.
+     */
+    uint16_t        *fdp_pids;
+    uint32_t        nr_fdp_pids;
+
     /* FDP (Flexible Data Placement) */
     uint16_t        fdp_dspec;
     uint8_t         fdp_dtype;
@@ -2245,6 +2252,8 @@ uint16_t nvme_pid2rg(NvmeNamespace *ns, uint16_t pid);
 bool nvme_parse_pid(NvmeNamespace *ns, uint16_t pid,
                     uint16_t *ph, uint16_t *rg);
 bool nvme_update_ruh(FemuCtrl *n, NvmeNamespace *ns, uint16_t pid);
+void nvme_fdp_note_ru_left(FemuCtrl *n, NvmeNamespace *ns, uint16_t pid,
+                           const NvmeReclaimUnit *ru);
 void nvme_fdp_record_event(FemuCtrl *n, NvmeEnduranceGroup *eg, bool host,
                            const NvmeFdpEvent *ev);
 uint64_t nvme_do_write_fdp(FemuCtrl *n, NvmeRequest *req,

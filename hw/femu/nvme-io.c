@@ -32,6 +32,9 @@ static inline void nvme_req_release_ranges(NvmeRequest *req)
     g_free(req->zone_resets);
     req->zone_resets = NULL;
     req->nr_zone_resets = 0;
+    g_free(req->fdp_pids);
+    req->fdp_pids = NULL;
+    req->nr_fdp_pids = 0;
 }
 
 static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req);
@@ -189,6 +192,8 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
         req->dsm_attributes = 0;
         req->zone_resets = NULL;
         req->nr_zone_resets = 0;
+        req->fdp_pids = NULL;
+        req->nr_fdp_pids = 0;
         /* Coperd: record req->stime at earliest convenience */
         req->expire_time = req->stime = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
         req->cqe.cid = cmd.cid;
@@ -1103,36 +1108,45 @@ void nvme_fdp_record_event(FemuCtrl *n, NvmeEnduranceGroup *eg, bool host,
     qemu_mutex_unlock(&eg->fdp.events_lock);
 }
 
-bool nvme_update_ruh(FemuCtrl *n, NvmeNamespace *ns, uint16_t pid)
+/* Report that the unit a handle is leaving still had room for writes */
+void nvme_fdp_note_ru_left(FemuCtrl *n, NvmeNamespace *ns, uint16_t pid,
+                           const NvmeReclaimUnit *ru)
 {
     NvmeEnduranceGroup *endgrp = ns->endgrp;
+    uint16_t ph, rg, ruhid;
+
+    if (!ru->ruamw || !nvme_parse_pid(ns, pid, &ph, &rg)) {
+        return;
+    }
+    ruhid = ns->fdp.phs[ph];
+    if (log_event(&endgrp->fdp.ruhs[ruhid], FDP_EVT_RU_NOT_FULLY_WRITTEN)) {
+        NvmeFdpEvent e = {
+            .type = FDP_EVT_RU_NOT_FULLY_WRITTEN,
+            .flags = FDPEF_PIV | FDPEF_NSIDV | FDPEF_LV,
+            .pid = cpu_to_le16(pid),
+            .nsid = cpu_to_le32(ns->id),
+            .rgid = cpu_to_le16(rg),
+            .ruhid = ruhid,
+        };
+
+        nvme_fdp_record_event(n, endgrp, true, &e);
+    }
+}
+
+/* A handle with no media behind it leaves its unit by starting it afresh */
+bool nvme_update_ruh(FemuCtrl *n, NvmeNamespace *ns, uint16_t pid)
+{
     NvmeRuHandle *ruh;
     NvmeReclaimUnit *ru;
-    uint16_t ph, rg, ruhid;
+    uint16_t ph, rg;
 
     if (!nvme_parse_pid(ns, pid, &ph, &rg)) {
         return false;
     }
 
-    ruhid = ns->fdp.phs[ph];
-    ruh = &endgrp->fdp.ruhs[ruhid];
+    ruh = &ns->endgrp->fdp.ruhs[ns->fdp.phs[ph]];
     ru = ruh->rus[rg];
-
-    if (ru->ruamw) {
-        if (log_event(ruh, FDP_EVT_RU_NOT_FULLY_WRITTEN)) {
-            NvmeFdpEvent e = {
-                .type = FDP_EVT_RU_NOT_FULLY_WRITTEN,
-                .flags = FDPEF_PIV | FDPEF_NSIDV | FDPEF_LV,
-                .pid = cpu_to_le16(pid),
-                .nsid = cpu_to_le32(ns->id),
-                .rgid = cpu_to_le16(rg),
-                .ruhid = ruhid,
-            };
-
-            nvme_fdp_record_event(n, endgrp, true, &e);
-        }
-    }
-
+    nvme_fdp_note_ru_left(n, ns, pid, ru);
     ru->ruamw = ruh->ruamw;
 
     return true;
@@ -1231,6 +1245,7 @@ static uint16_t nvme_io_mgmt_send_ruh_update(FemuCtrl *n, NvmeRequest *req)
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
     uint32_t maxnpid;
+    uint16_t ph, rg;
     uint16_t ret;
 
     if (!n->subsys || !n->subsys->endgrp.fdp.enabled) {
@@ -1238,7 +1253,8 @@ static uint16_t nvme_io_mgmt_send_ruh_update(FemuCtrl *n, NvmeRequest *req)
     }
 
     maxnpid = n->subsys->endgrp.fdp.nrg * n->subsys->endgrp.fdp.nruh;
-    if (unlikely(npid >= MIN(NVME_FDP_MAXPIDS, maxnpid))) {
+    /* MAXPIDS is 0's based in the log, and naming every handle is allowed */
+    if (unlikely(npid > MIN(NVME_FDP_MAXPIDS, maxnpid))) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
@@ -1249,10 +1265,23 @@ static uint16_t nvme_io_mgmt_send_ruh_update(FemuCtrl *n, NvmeRequest *req)
         return ret;
     }
 
+    /* nothing changes unless every identifier is valid */
     for (i = 0; i < npid; i++) {
-        if (!nvme_update_ruh(n, ns, pids[i])) {
+        pids[i] = le16_to_cpu(pids[i]);
+        if (!nvme_parse_pid(ns, pids[i], &ph, &rg)) {
             return NVME_INVALID_FIELD | NVME_DNR;
         }
+    }
+
+    /* units with media behind them belong to the FTL thread */
+    if (NS_BBSSD(ns)) {
+        req->nr_fdp_pids = npid;
+        req->fdp_pids = g_steal_pointer(&pids);
+        return NVME_SUCCESS;
+    }
+
+    for (i = 0; i < npid; i++) {
+        nvme_update_ruh(n, ns, pids[i]);
     }
 
     return NVME_SUCCESS;

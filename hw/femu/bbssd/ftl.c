@@ -426,6 +426,11 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
             ssd->err_read_injected++;
         }
         break;
+    case NVME_CMD_IO_MGMT_SEND:
+        if (ssd->fdp_enabled && req->fdp_pids) {
+            ssd_fdp_update_ruhs(n, req);
+        }
+        break;
     case NVME_CMD_DSM:
         if (ssd->fdp_enabled) {
             ssd_trim_fdp_style(n, req, req->slba, req->nlb);
