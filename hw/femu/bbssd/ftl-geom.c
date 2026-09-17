@@ -113,6 +113,12 @@ int bb_check_geometry(FemuCtrl *n, Error **errp)
         return -1;
     }
 
+    /* a negative overhead would start a preempting read before it arrived */
+    if (p->tsusp_ns < 0) {
+        error_setg(errp, "FEMU bbssd: tsusp_ns must not be negative");
+        return -1;
+    }
+
     if (p->retention_limit_sec < 0) {
         error_setg(errp, "FEMU bbssd: retention_limit_sec must not be negative");
         return -1;
