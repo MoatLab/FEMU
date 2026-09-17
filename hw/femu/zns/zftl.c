@@ -443,11 +443,22 @@ static uint64_t zns_wc_flush(struct zns_ssd* zns, int wcidx, int type,uint64_t s
     while(i < zns->cache.write_cache[wcidx].used)
     {
         for(p = 0;p<zns->num_plane;p++){
+            /*
+             * A partial cache (evicted before its stripe filled) programs
+             * only the pages that hold data; the untouched planes and
+             * pages of the stripe stay free for the zone's later writes.
+             */
+            if (i >= zns->cache.write_cache[wcidx].used) {
+                break;
+            }
             /* new write */
             ppa = get_new_page(zns, zone_idx);
             ppa.g.pl = p;
             for(j = 0; j < flash_type ;j++)
             {
+                if (i >= zns->cache.write_cache[wcidx].used) {
+                    break;
+                }
                 ppa.g.pg = get_blk(zns,&ppa)->page_wp;
                 get_blk(zns,&ppa)->page_wp++;
                 for(subpage = 0;subpage < ZNS_PAGE_SIZE/LOGICAL_PAGE_SIZE;subpage++)
@@ -505,19 +516,16 @@ static uint64_t zns_write(struct zns_ssd *zns, NvmeRequest *req)
 
     if(wcidx==-1)
     {
-        //need flush
-        wcidx = 0;
-        uint64_t t_used = zns->cache.write_cache[wcidx].used;
-        for(i = 1;i < zns->cache.num_wc;i++)
-        {
-            if(zns->cache.write_cache[i].used==0)
-            {
+        /* take an empty cache; failing that, evict the fullest one */
+        uint64_t t_used = 0;
+        wcidx = -1;
+        for (i = 0; i < zns->cache.num_wc; i++) {
+            if (zns->cache.write_cache[i].used == 0) {
                 t_used = 0;
-                wcidx = i; //free wc！
+                wcidx = i;
                 break;
             }
-            if(zns->cache.write_cache[i].used > t_used)
-            {
+            if (wcidx < 0 || zns->cache.write_cache[i].used > t_used) {
                 t_used = zns->cache.write_cache[i].used;
                 wcidx = i;
             }

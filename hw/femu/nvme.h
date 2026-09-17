@@ -1766,6 +1766,7 @@ typedef struct ZNSCtrlParams {
     int64_t zns_tsusp_ns;
     uint32_t zns_max_active;  /* max active zones (0 = unlimited) */
     uint32_t zns_max_open;    /* max open zones (0 = unlimited) */
+    uint32_t zns_num_wc;      /* write caches (0 = zns_max_open, or 3 when unlimited) */
     uint32_t zns_zd_ext_size; /* per-zone descriptor extension bytes (0 = none) */
     uint32_t zns_num_conv_zones; /* leading conventional zones (0 = all sequential) */
     uint64_t zns_zone_cap;       /* usable bytes per zone; 0 = the whole zone */

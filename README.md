@@ -565,6 +565,8 @@ Emulates NVMe ZNS SSDs with zone-based interface.
 ```bash
 zns_max_active=0       # Max active zones (0 = unlimited)
 zns_max_open=0         # Max open zones (0 = unlimited)
+zns_num_wc=0           # Write caches, one per zone being written
+                       #   (0 = zns_max_open, or 3 when that is unlimited)
 zns_zd_ext_size=0      # Zone-descriptor extension bytes (0 = none)
 zns_num_conv_zones=0   # Leading conventional zones (0 = all sequential)
 zns_zone_cap=0         # Usable bytes per zone (0 = the whole zone)
