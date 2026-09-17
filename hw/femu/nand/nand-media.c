@@ -18,8 +18,15 @@ void nand_media_init(NandMedia *m, const NandMediaConfig *cfg)
 {
     m->cfg = *cfg;
     m->bus_res = NULL;
+    m->susp = NULL;
     if (cfg->policy.channel_mode == NAND_CH_STAGED && cfg->nchs) {
         m->bus_res = calloc(cfg->nchs, sizeof(*m->bus_res));
+    }
+    /* suspend needs the geometry to keep its per-position state */
+    if (cfg->policy.pe_suspend &&
+        cfg->nchs && cfg->luns_per_ch && cfg->planes_per_lun) {
+        m->susp = calloc((size_t)cfg->nchs * cfg->luns_per_ch *
+                         cfg->planes_per_lun, sizeof(*m->susp));
     }
 }
 
@@ -37,6 +44,8 @@ void nand_media_destroy(NandMedia *m)
     }
     free(m->bus_res);
     m->bus_res = NULL;
+    free(m->susp);
+    m->susp = NULL;
 }
 
 static inline uint64_t mx(uint64_t a, uint64_t b) { return a > b ? a : b; }
@@ -247,6 +256,76 @@ static void array_commit(NandMedia *m, const NandLoc *loc, uint64_t done)
     }
 }
 
+/*
+ * The suspend state for an array position: the plane under a plane-only gate,
+ * otherwise the LUN, since a LUN gate makes the whole LUN one position.
+ */
+static NandSuspendState *suspend_state(NandMedia *m, const NandLoc *loc)
+{
+    const NandMediaConfig *c = &m->cfg;
+    uint64_t idx;
+
+    if (!m->susp || loc->ch >= c->nchs || loc->lun >= c->luns_per_ch ||
+        loc->pl >= c->planes_per_lun) {
+        return NULL;
+    }
+    idx = (uint64_t)loc->ch * c->luns_per_ch + loc->lun;
+    if (c->policy.array_gate == NAND_GATE_PLANE_ONLY) {
+        idx = idx * c->planes_per_lun + loc->pl;
+    }
+
+    return &m->susp[idx];
+}
+
+/* record what an operation that went through the ordinary gate occupies */
+static void suspend_note(NandMedia *m, const NandLoc *loc, NandMediaOp op,
+                         uint64_t done)
+{
+    NandSuspendState *st = suspend_state(m, loc);
+
+    if (!st) {
+        return;
+    }
+    if (op == NAND_MEDIA_READ) {
+        st->rd_end = mx(st->rd_end, done);
+    } else {
+        st->pe_end = mx(st->pe_end, done);
+    }
+}
+
+/*
+ * Where a read starts under program/erase suspend, given the time the array is
+ * busy until. Only a program or erase is suspended: a read that finds the array
+ * busy with other reads queues behind them, and one that finds a suspension
+ * already open joins it behind the reads in it without paying the overhead a
+ * second time. Returns false to leave the read to the ordinary gate; otherwise
+ * sets *start, and *shift, how far the suspended work slides.
+ *
+ * The state is read and written without a lock, so the caller must serialize
+ * the operations on a position -- bbssd and ZNS run them on one FTL thread.
+ */
+static bool suspend_read_start(NandMedia *m, const NandLoc *loc, uint64_t t,
+                               uint64_t busy_until, uint64_t alat,
+                               uint64_t *start, uint64_t *shift)
+{
+    NandSuspendState *st = suspend_state(m, loc);
+
+    if (!st || t >= busy_until || t >= st->pe_end) {
+        return false;
+    }
+    if (st->rd_end > t) {
+        *start = st->rd_end;
+        *shift = alat;
+    } else {
+        *start = t + m->cfg.timing.tsusp_ns;
+        *shift = alat + m->cfg.timing.tsusp_ns;
+    }
+    st->pe_end += *shift;
+    st->rd_end = *start + alat;
+
+    return true;
+}
+
 NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
                                NandMediaOp op, uint64_t stime)
 {
@@ -272,36 +351,23 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
          * mutex. Falls through to the locked path for LUN_AND_PLANE, which is
          * two words and not atomically CAS-able.
          */
-        if (m->cfg.policy.array_gate == NAND_GATE_LUN_ONLY) {
+        /*
+         * Suspend keeps state beside the timeline that one CAS cannot update
+         * with it, so a device with suspend on takes the general path below.
+         */
+        if (m->cfg.policy.array_gate == NAND_GATE_LUN_ONLY && !m->susp) {
             uint64_t *lun = m->cfg.timeline->lun_avail(m->cfg.timeline_opaque, loc);
             uint64_t old = __atomic_load_n(lun, __ATOMIC_RELAXED);
-            bool susp = m->cfg.policy.pe_suspend && op == NAND_MEDIA_READ;
             for (;;) {
-                uint64_t s, avail;
-                if (susp && t < old) {
-                    /*
-                     * Program/erase suspend on the plain LUN gate: the read
-                     * starts after the suspend overhead instead of waiting out
-                     * the busy LUN, and whatever the LUN was doing resumes
-                     * after the read, so its completion slides by the read's
-                     * array time plus the overhead. Same arithmetic as the
-                     * staged path below.
-                     */
-                    s = t + m->cfg.timing.tsusp_ns;
-                    done = s + alat;
-                    avail = old + alat + m->cfg.timing.tsusp_ns;
-                } else {
-                    s = (t > old) ? t : old;
-                    done = s + alat;
-                    avail = done;
-                }
+                uint64_t s = (t > old) ? t : old;
+                done = s + alat;
                 /*
                  * x86-64: inlines to `lock cmpxchg` (no libatomic call). On
                  * success `old` is unchanged and we stop; on failure the
                  * builtin writes the observed value back into `old` and we
                  * retry with it (recomputing done from what we actually saw).
                  */
-                if (__atomic_compare_exchange_n(lun, &old, avail, false,
+                if (__atomic_compare_exchange_n(lun, &old, done, false,
                                                 __ATOMIC_ACQ_REL,
                                                 __ATOMIC_RELAXED)) {
                     break;
@@ -316,19 +382,20 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
         }
         {
             uint64_t s = array_gate_start(m, loc, t);
-            if (m->cfg.policy.pe_suspend && op == NAND_MEDIA_READ && s > t) {
+            uint64_t rs, shift;
+
+            if (op == NAND_MEDIA_READ &&
+                suspend_read_start(m, loc, t, s, alat, &rs, &shift)) {
                 /*
-                 * Suspend on the plane / lun+plane gate (ZNS, OCSSD): the
-                 * read goes first, and every gated timeline that was busy
-                 * resumes its work after the read.
+                 * The read goes ahead of the program or erase, and every gated
+                 * timeline that was busy resumes its work after it.
                  */
-                uint64_t shift = alat + m->cfg.timing.tsusp_ns;
-                s = t + m->cfg.timing.tsusp_ns;
-                done = s + alat;
+                done = rs + alat;
                 array_suspend_extend(m, loc, t, shift);
             } else {
                 done = s + alat;
                 array_commit(m, loc, done);
+                suspend_note(m, loc, op, done);
             }
         }
         if (m->cfg.timeline->unlock_lun) {
@@ -351,19 +418,19 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
     if (op == NAND_MEDIA_READ) {
         t = bus_now(m, loc->ch, stime, t, m->cfg.timing.cmd_addr_ns);
         /*
-         * Program/erase suspend: if the LUN is mid-P/E when this read arrives, real NAND
-         * lets the read preempt the slow operation. Model it by starting the read after a
-         * small suspend overhead (tsusp) instead of waiting out the whole P/E, then pushing
-         * the suspended op's completion back by the read's array occupancy (it resumes after
-         * the read). Default off (pe_suspend=false) => identical to the plain gate.
+         * Program/erase suspend: a read that finds its array mid-program or
+         * mid-erase starts after a small suspend overhead instead of waiting
+         * the operation out, and the suspended operation resumes after it.
+         * Default off (pe_suspend=false) => identical to the plain gate.
          */
-        if (m->cfg.policy.pe_suspend) {
-            uint64_t *lun = m->cfg.timeline->lun_avail(m->cfg.timeline_opaque, loc);
-            if (t < *lun) {
-                uint64_t s = t + m->cfg.timing.tsusp_ns;
-                uint64_t done = s + alat;
-                /* suspended P/E resumes after the read: its remaining work shifts later */
-                *lun += (alat + m->cfg.timing.tsusp_ns);
+        {
+            uint64_t busy = array_gate_start(m, loc, t);
+            uint64_t rs, shift;
+
+            if (suspend_read_start(m, loc, t, busy, alat, &rs, &shift)) {
+                uint64_t done = rs + alat;
+
+                array_suspend_extend(m, loc, t, shift);
                 if (m->cfg.policy.cache_read && m->cfg.timeline->page_reg_ready) {
                     uint64_t *prr =
                         m->cfg.timeline->page_reg_ready(m->cfg.timeline_opaque, loc);
@@ -385,6 +452,7 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
         uint64_t s = array_gate_start(m, loc, t);
         uint64_t done = s + alat;
         array_commit(m, loc, done);
+        suspend_note(m, loc, op, done);
         if (m->cfg.policy.cache_read && m->cfg.timeline->page_reg_ready) {
             uint64_t rcbsy = m->cfg.timing.trcbsy_ns ? m->cfg.timing.trcbsy_ns : alat;
             *m->cfg.timeline->lun_avail(m->cfg.timeline_opaque, loc) = s + rcbsy;
@@ -403,12 +471,14 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
         uint64_t s = array_gate_start(m, loc, t);
         uint64_t done = s + alat;
         array_commit(m, loc, done);
+        suspend_note(m, loc, op, done);
         c.done_ns = done;
     } else { /* erase */
         t = bus_now(m, loc->ch, stime, t, m->cfg.timing.cmd_addr_ns);
         uint64_t s = array_gate_start(m, loc, t);
         uint64_t done = s + alat;
         array_commit(m, loc, done);
+        suspend_note(m, loc, op, done);
         t = bus_later(m, loc->ch, stime, done, m->cfg.timing.status_ns);
         c.done_ns = t;
     }
@@ -469,6 +539,7 @@ NandOpCompletion nand_media_multiplane(NandMedia *m, const NandLoc *locs, int nl
     uint64_t done = start + alat;
     for (i = 0; i < nlocs; i++) {
         array_commit(m, &locs[i], done);
+        suspend_note(m, &locs[i], op, done);
     }
 
     t = done;
@@ -502,8 +573,11 @@ NandOpCompletion nand_media_copyback(NandMedia *m, const NandLoc *src,
      */
     s = array_gate_start(m, src, stime) + array_lat(m, src, NAND_MEDIA_READ);
     array_commit(m, src, s);
+    /* the on-chip read is part of the program, so it is suspended with it */
+    suspend_note(m, src, NAND_MEDIA_PROGRAM, s);
     s = array_gate_start(m, dst, s) + array_lat(m, dst, NAND_MEDIA_PROGRAM);
     array_commit(m, dst, s);
+    suspend_note(m, dst, NAND_MEDIA_PROGRAM, s);
 
     c.done_ns = s;
     c.latency_ns = 0; /* GC-internal; host effect is via freed channel + LUN busy */

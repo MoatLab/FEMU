@@ -500,6 +500,71 @@ static void test_pe_suspend(void)
           lat, (2000000 + 65000 + 5000 - 1000) + 450000);
     nand_media_destroy(&m);
 
+    /*
+     * Only a program or erase is suspended. A read that finds the LUN busy with
+     * another read queues behind it: two reads cannot hold one array at once.
+     */
+    bb_config(&cfg);
+    cfg.policy.pe_suspend = true;
+    cfg.timing.tsusp_ns = 5000;
+    nand_media_init(&m, &cfg);
+    nand_media_op(&m, &a, NAND_MEDIA_READ, t0);
+    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    check("suspend on: a read queues behind a read",
+          lat, (10000 - 1000) + 10000);
+    nand_media_destroy(&m);
+
+    /*
+     * Two reads inside one suspension: the second waits for the first and pays
+     * no second overhead, and the program slides by both reads.
+     */
+    bb_config(&cfg);
+    cfg.policy.pe_suspend = true;
+    cfg.timing.tsusp_ns = 5000;
+    nand_media_init(&m, &cfg);
+    nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
+    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    check("first read in a suspension: tsusp + array", lat, 5000 + 10000);
+    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 2000).latency_ns;
+    check("second read in the same suspension: behind the first",
+          lat, (1000 + 5000 + 10000 - 2000) + 10000);
+    lat = nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0 + 2000).latency_ns;
+    check("the program slides by the overhead and both reads",
+          lat, (40000 + 5000 + 10000 + 10000 - 2000) + 40000);
+    nand_media_destroy(&m);
+
+    /*
+     * A read that arrives after an earlier read but before a program queued
+     * behind it goes after the read and ahead of the program.
+     */
+    bb_config(&cfg);
+    cfg.policy.pe_suspend = true;
+    cfg.timing.tsusp_ns = 5000;
+    nand_media_init(&m, &cfg);
+    nand_media_op(&m, &a, NAND_MEDIA_READ, t0);
+    nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0 + 500);
+    lat = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    check("read between a read and a queued program: after the read",
+          lat, (10000 - 1000) + 10000);
+    nand_media_destroy(&m);
+
+    /* a multi-plane erase is suspended the same way (the collector's erase) */
+    bb_config(&cfg);
+    cfg.planes_per_lun = 2;
+    cfg.policy.pe_suspend = true;
+    cfg.timing.tsusp_ns = 5000;
+    nand_media_init(&m, &cfg);
+    {
+        NandLoc pls[2];
+
+        memset(pls, 0, sizeof(pls));
+        pls[1].pl = 1;
+        nand_media_multiplane(&m, pls, 2, NAND_MEDIA_ERASE, t0);
+        lat = nand_media_op(&m, &pls[1], NAND_MEDIA_READ, t0 + 1000).latency_ns;
+        check("read preempts a multi-plane erase", lat, 5000 + 10000);
+    }
+    nand_media_destroy(&m);
+
     /* staged channel: the existing suspend branch, now reachable */
     bb_config(&cfg);
     cfg.policy.channel_mode = NAND_CH_STAGED;

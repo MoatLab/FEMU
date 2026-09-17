@@ -148,9 +148,21 @@ typedef struct NandBusResList {
     int n;
 } NandBusResList;
 
+/*
+ * What occupies an array position, which the busy-until timelines do not say:
+ * when the latest program or erase there ends, and when the latest read there
+ * ends. Program/erase suspend needs both to let a read preempt only a program
+ * or erase. One per LUN, or per plane under a plane-only gate.
+ */
+typedef struct NandSuspendState {
+    uint64_t pe_end;
+    uint64_t rd_end;
+} NandSuspendState;
+
 typedef struct NandMedia {
     NandMediaConfig cfg;
     NandBusResList *bus_res;   /* nchs entries; NULL unless NAND_CH_STAGED */
+    NandSuspendState *susp;    /* NULL unless policy.pe_suspend */
 } NandMedia;
 
 typedef struct NandOpCompletion {
