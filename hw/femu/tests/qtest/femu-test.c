@@ -32,6 +32,9 @@
 #define FEMU_OC20_VECT_WRITE    0x91
 #define FEMU_OC20_VECT_READ     0x92
 #define FEMU_KV_CMD_STORE       0x01
+#define FEMU_CMD_IO_MGMT_SEND   0x1d
+#define FEMU_IOMS_RUH_UPDATE    0x01
+#define FEMU_FDP_EVT_RU_NOT_FULLY_WRITTEN 0x00
 #define FEMU_KV_CMD_RETRIEVE    0x02
 #define FEMU_KV_CMD_EXIST       0x14
 #define FEMU_CNS_CS_CTRL    0x06    /* command-set controller identify */
@@ -1260,6 +1263,7 @@ static void femu_test_features(void *obj, void *data, QGuestAllocator *alloc)
 #define FEMU_LOG_SUPPORTED          0x00
 #define FEMU_LOG_CHANGED_ZONE_LIST  0xbf
 #define FEMU_LOG_FEMU_STATS         0xc0
+#define FEMU_LOG_FDP_EVENTS         0x23
 #define FEMU_LIDS_LSUPP             (1u << 0)   /* LID Supported */
 
 /*
@@ -1410,6 +1414,76 @@ static void femu_test_kv_accounting(void *obj, void *data,
 
     guest_free(alloc, log);
     guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
+ * Flexible Data Placement events reach the host through a ring that a poller
+ * and the FTL thread both append to. A reclaim unit handle update that names
+ * handles whose units are not yet full records one event per handle; both must
+ * arrive whole, in order, and stamped.
+ *
+ * The update names two identifiers, which also covers the count's decoding:
+ * it is the field at bits 31:16, and reading it from the wrong bits refused
+ * every update that named more than one.
+ */
+static void femu_test_fdp_events(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    NvmeCmd cmd;
+    uint64_t pids, log;
+    uint16_t list[2] = { cpu_to_le16(0), cpu_to_le16(1) };
+    uint8_t buf[64 + 2 * 64];
+    uint16_t want, got;
+    uint32_t numd = sizeof(buf) / 4 - 1;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    pids = guest_alloc(alloc, 4096);
+    qtest_memwrite(femu->dev.bus->qts, pids, list, sizeof(list));
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_CMD_IO_MGMT_SEND;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(pids);
+    /* the count is 0's based: one means two identifiers */
+    cmd.cdw10 = cpu_to_le32(FEMU_IOMS_RUH_UPDATE | (1 << 16));
+    want = c.cid;
+    femu_submit(&c, &c.io, &cmd);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(got, ==, want);
+
+    log = guest_alloc(alloc, 4096);
+    qtest_memset(femu->dev.bus->qts, log, 0xff, 4096);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+    cmd.nsid = cpu_to_le32(NVME_NSID_BROADCAST);
+    cmd.dptr.prp1 = cpu_to_le64(log);
+    /* host events (LSP bit 0); endurance group 1 in the specific identifier */
+    cmd.cdw10 = cpu_to_le32(FEMU_LOG_FDP_EVENTS | (1 << 8) |
+                            ((numd & 0xffff) << 16));
+    cmd.cdw11 = cpu_to_le32(1 << 16);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+    qtest_memread(femu->dev.bus->qts, log, buf, sizeof(buf));
+
+    g_assert_cmpint(ldl_le_p(buf), ==, 2);
+    for (i = 0; i < 2; i++) {
+        const uint8_t *ev = buf + 64 + i * 64;
+
+        g_assert_cmpint(ev[0], ==, FEMU_FDP_EVT_RU_NOT_FULLY_WRITTEN);
+        /* placement id, namespace id and reclaim unit fields are all valid */
+        g_assert_cmpint(ev[1], ==, 0x7);
+        g_assert_cmpint(lduw_le_p(ev + 2), ==, i);
+        g_assert_cmpint(ldq_le_p(ev + 4) & ((1ull << 48) - 1), !=, 0);
+        g_assert_cmpint(ldl_le_p(ev + 12), ==, 1);
+    }
+
+    guest_free(alloc, log);
+    guest_free(alloc, pids);
     femu_queue_free(&c, &c.io);
     femu_disable(&c);
 }
@@ -1825,6 +1899,14 @@ static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
         .extra_device_opts = "addr=04.0,devsz_mb=64,femu_mode=2,serial=femu0",
+        /*
+         * A placement-enabled subsystem for the tests that link to it. It has
+         * to be on the command line before the controller, which a test's own
+         * options cannot arrange, and it is inert for a controller that does
+         * not name it.
+         */
+        .before_cmd_line =
+            "-device femu-subsys,id=fdpsub,nqn=fdpsub,fdp=on,fdp.nruh=4",
     };
 
     add_qpci_address(&opts, &(QPCIAddress) { .devfn = QPCI_DEVFN(4, 0) });
@@ -1856,6 +1938,14 @@ static void femu_register_nodes(void)
         /* a zoned namespace on a controller whose own mode is a black box */
         .edge.extra_device_opts =
             "devsz_mb=128,femu_mode=1,namespaces=2,namespace_modes=bbssd,,znssd"
+    });
+    qos_add_test("fdp-events", "femu", femu_test_fdp_events,
+                 &(QOSGraphTestOptions) {
+        /* the placement-enabled subsystem every controller node declares */
+        .edge.extra_device_opts =
+            "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
+            "subsys=fdpsub"
     });
     qos_add_test("kv-accounting", "femu", femu_test_kv_accounting,
                  &(QOSGraphTestOptions) {

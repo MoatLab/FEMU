@@ -214,6 +214,11 @@ typedef struct NvmeEnduranceGroup {
 
     struct {
         NvmeFdpEventBuffer host_events, ctrl_events;
+        /*
+         * Held across every append to either ring and across the log read: a
+         * poller, the FTL thread and the admin path all reach them.
+         */
+        QemuMutex events_lock;
 
         uint16_t nruh;
         uint16_t nrg;
@@ -2240,6 +2245,8 @@ uint16_t nvme_pid2rg(NvmeNamespace *ns, uint16_t pid);
 bool nvme_parse_pid(NvmeNamespace *ns, uint16_t pid,
                     uint16_t *ph, uint16_t *rg);
 bool nvme_update_ruh(FemuCtrl *n, NvmeNamespace *ns, uint16_t pid);
+void nvme_fdp_record_event(FemuCtrl *n, NvmeEnduranceGroup *eg, bool host,
+                           const NvmeFdpEvent *ev);
 uint64_t nvme_do_write_fdp(FemuCtrl *n, NvmeRequest *req,
                            uint64_t slba, uint32_t nlb);
 

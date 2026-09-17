@@ -15,33 +15,6 @@ static void mark_page_valid_fdp(struct ssd *ssd, struct ppa *ppa,
 static void mark_page_invalid_fdp(struct ssd *ssd, struct ppa *ppa);
 static void ssd_reset_maptbl(struct ssd *ssd);
 
-/*
- * ftl_fdp_alloc_event - allocate an FDP event from the FTL layer
- * Used by GC to generate controller events.
- */
-static NvmeFdpEvent *ftl_fdp_alloc_event(struct ssd *ssd,
-                                          NvmeFdpEventBuffer *ebuf)
-{
-    NvmeFdpEvent *ret;
-    bool is_full = ebuf->next == ebuf->start && ebuf->nelems;
-
-    ret = &ebuf->events[ebuf->next++];
-    if (unlikely(ebuf->next == NVME_FDP_MAX_EVENTS)) {
-        ebuf->next = 0;
-    }
-    if (is_full) {
-        ebuf->start = ebuf->next;
-    } else {
-        ebuf->nelems++;
-    }
-
-    memset(ret, 0, sizeof(NvmeFdpEvent));
-    return ret;
-}
-
-
-
-
 /* FDP: victim RU priority queue callbacks (greedy by vpc) */
 static inline int victim_ru_cmp_pri(pqueue_pri_t next, pqueue_pri_t curr)
 {
@@ -1146,12 +1119,14 @@ int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid,
         if (nvme_ruh &&
             (nvme_ruh->event_filter >>
              nvme_fdp_evf_shifts[FDP_EVT_RUH_IMPLICIT_RU_CHANGE]) & 0x1) {
-            NvmeFdpEvent *e = ftl_fdp_alloc_event(ssd,
-                                    &endgrp->fdp.ctrl_events);
-            e->type = FDP_EVT_RUH_IMPLICIT_RU_CHANGE;
-            e->flags = FDPEF_LV;
-            e->rgid = cpu_to_le16(victim_ru->rgidx);
-            e->ruhid = victim_ru->ruh->ruhid;
+            NvmeFdpEvent e = {
+                .type = FDP_EVT_RUH_IMPLICIT_RU_CHANGE,
+                .flags = FDPEF_LV,
+                .rgid = cpu_to_le16(victim_ru->rgidx),
+                .ruhid = victim_ru->ruh->ruhid,
+            };
+
+            nvme_fdp_record_event(ssd->n, endgrp, false, &e);
         }
     }
 
@@ -1200,12 +1175,14 @@ static uint64_t ssd_stream_write(FemuCtrl *n, struct ssd *ssd,
             NvmeRuHandle *def_ruh = &endgrp->fdp.ruhs[ns->fdp.phs[0]];
             if ((def_ruh->event_filter >>
                  nvme_fdp_evf_shifts[FDP_EVT_INVALID_PID]) & 0x1) {
-                NvmeFdpEvent *e = ftl_fdp_alloc_event(ssd,
-                                        &endgrp->fdp.host_events);
-                e->type = FDP_EVT_INVALID_PID;
-                e->flags = FDPEF_PIV | FDPEF_NSIDV;
-                e->pid = cpu_to_le16(pid);
-                e->nsid = cpu_to_le32(ns->id);
+                NvmeFdpEvent e = {
+                    .type = FDP_EVT_INVALID_PID,
+                    .flags = FDPEF_PIV | FDPEF_NSIDV,
+                    .pid = cpu_to_le16(pid),
+                    .nsid = cpu_to_le32(ns->id),
+                };
+
+                nvme_fdp_record_event(ssd->n, endgrp, true, &e);
             }
         }
         ph = 0;

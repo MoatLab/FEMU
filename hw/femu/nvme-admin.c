@@ -1812,11 +1812,10 @@ static uint16_t nvme_fdp_events(FemuCtrl *n, uint32_t endgrpid,
     }
 
     /*
-     * Take the ring's three indices once. Events are appended by a poller
-     * thread and by the FTL thread, so reading nelems to size the buffer and
-     * then reading start and next again to size the copy let an append that
-     * landed in between drive the copy past the allocation.
+     * A poller and the FTL thread append to the ring, so the indices and the
+     * events they describe are read under the lock the appenders hold.
      */
+    qemu_mutex_lock(&endgrp->fdp.events_lock);
     nelems = ebuf->nelems;
     start = ebuf->start;
     next = ebuf->next;
@@ -1824,11 +1823,13 @@ static uint16_t nvme_fdp_events(FemuCtrl *n, uint32_t endgrpid,
         nelems = NVME_FDP_MAX_EVENTS;
     }
     if (start >= NVME_FDP_MAX_EVENTS || next > NVME_FDP_MAX_EVENTS) {
+        qemu_mutex_unlock(&endgrp->fdp.events_lock);
         return NVME_INTERNAL_DEV_ERROR | NVME_DNR;
     }
 
     log_size = sizeof(NvmeFdpEventsLog) + nelems * sizeof(NvmeFdpEvent);
     if (off >= log_size) {
+        qemu_mutex_unlock(&endgrp->fdp.events_lock);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     trans_len = MIN(log_size - off, buf_len);
@@ -1850,6 +1851,7 @@ static uint16_t nvme_fdp_events(FemuCtrl *n, uint32_t endgrpid,
 
         memcpy(event, &ebuf->events[start], sizeof(NvmeFdpEvent) * cnt);
     }
+    qemu_mutex_unlock(&endgrp->fdp.events_lock);
 
     return dma_read_prp(n, (uint8_t *)elog + off, trans_len, prp1, prp2);
 }

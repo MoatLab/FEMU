@@ -1075,26 +1075,32 @@ static inline int log_event(NvmeRuHandle *ruh, uint8_t event_type)
     return (ruh->event_filter >> nvme_fdp_evf_shifts[event_type]) & 0x1;
 }
 
-static NvmeFdpEvent *nvme_fdp_alloc_event(FemuCtrl *n,
-                                          NvmeFdpEventBuffer *ebuf)
+/*
+ * Append one event to a ring of the endurance group. A poller and the FTL
+ * thread both append and the admin path reads, and each append used to run the
+ * index arithmetic unlocked: between the increment and the wrap the next index
+ * briefly held the ring's length, so a second writer that read it then wrote a
+ * whole event past the end of the array. The caller builds the event first, so
+ * the copy under the lock never leaves a half-filled entry for the reader.
+ */
+void nvme_fdp_record_event(FemuCtrl *n, NvmeEnduranceGroup *eg, bool host,
+                           const NvmeFdpEvent *ev)
 {
-    NvmeFdpEvent *ret = NULL;
-    bool is_full = ebuf->next == ebuf->start && ebuf->nelems;
+    NvmeFdpEventBuffer *ebuf = host ? &eg->fdp.host_events :
+                                      &eg->fdp.ctrl_events;
+    unsigned int slot;
 
-    ret = &ebuf->events[ebuf->next++];
-    if (unlikely(ebuf->next == NVME_FDP_MAX_EVENTS)) {
-        ebuf->next = 0;
-    }
-    if (is_full) {
-        ebuf->start = ebuf->next;
+    qemu_mutex_lock(&eg->fdp.events_lock);
+    slot = ebuf->next;
+    ebuf->events[slot] = *ev;
+    ebuf->events[slot].timestamp = nvme_get_timestamp(n);
+    ebuf->next = (slot + 1) % NVME_FDP_MAX_EVENTS;
+    if (ebuf->nelems == NVME_FDP_MAX_EVENTS) {
+        ebuf->start = ebuf->next;   /* full: the oldest is overwritten */
     } else {
         ebuf->nelems++;
     }
-
-    memset(ret, 0, sizeof(NvmeFdpEvent));
-    ret->timestamp = nvme_get_timestamp(n);
-
-    return ret;
+    qemu_mutex_unlock(&eg->fdp.events_lock);
 }
 
 bool nvme_update_ruh(FemuCtrl *n, NvmeNamespace *ns, uint16_t pid)
@@ -1102,7 +1108,6 @@ bool nvme_update_ruh(FemuCtrl *n, NvmeNamespace *ns, uint16_t pid)
     NvmeEnduranceGroup *endgrp = ns->endgrp;
     NvmeRuHandle *ruh;
     NvmeReclaimUnit *ru;
-    NvmeFdpEvent *e = NULL;
     uint16_t ph, rg, ruhid;
 
     if (!nvme_parse_pid(ns, pid, &ph, &rg)) {
@@ -1115,13 +1120,16 @@ bool nvme_update_ruh(FemuCtrl *n, NvmeNamespace *ns, uint16_t pid)
 
     if (ru->ruamw) {
         if (log_event(ruh, FDP_EVT_RU_NOT_FULLY_WRITTEN)) {
-            e = nvme_fdp_alloc_event(n, &endgrp->fdp.host_events);
-            e->type = FDP_EVT_RU_NOT_FULLY_WRITTEN;
-            e->flags = FDPEF_PIV | FDPEF_NSIDV | FDPEF_LV;
-            e->pid = cpu_to_le16(pid);
-            e->nsid = cpu_to_le32(ns->id);
-            e->rgid = cpu_to_le16(rg);
-            e->ruhid = cpu_to_le16(ruhid);
+            NvmeFdpEvent e = {
+                .type = FDP_EVT_RU_NOT_FULLY_WRITTEN,
+                .flags = FDPEF_PIV | FDPEF_NSIDV | FDPEF_LV,
+                .pid = cpu_to_le16(pid),
+                .nsid = cpu_to_le32(ns->id),
+                .rgid = cpu_to_le16(rg),
+                .ruhid = ruhid,
+            };
+
+            nvme_fdp_record_event(n, endgrp, true, &e);
         }
     }
 
