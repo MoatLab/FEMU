@@ -127,7 +127,7 @@ Properties that mostly mirror the NVMe identify fields, the OpenChannel geometry
 | `fdp.nrg` | uint32 | `1` | Number of reclaim groups. | set on `-device femu-subsys,...` |
 | `fdp.nru` | uint64 | `128` | Reclaim units per group. | set on `-device femu-subsys,...` |
 | `fdp.nruh` | uint16 | `0` | Number of reclaim unit handles the subsystem exposes. | set on `-device femu-subsys,...` |
-| `fdp.runs` | size | `NVME_DEFAULT_RU_SIZE` | Size of one reclaim unit in bytes. | set on `-device femu-subsys,...` |
+| `fdp.runs` | size | `0` | Size of one reclaim unit in bytes. Unset, a bbssd controller uses one superblock (the only size it accepts) and other modes 96 MiB. | set on `-device femu-subsys,...` |
 | `fdp_trim_erase_all` | int32 | `0` | _undocumented_ | set on `-device femu,...` |
 | `hiops_inline` | bool | `true` | _undocumented_ | set on `-device femu,...` |
 | `intc` | uint8 | `0` | _undocumented_ | set on `-device femu,...` |

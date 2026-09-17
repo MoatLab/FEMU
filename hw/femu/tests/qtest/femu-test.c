@@ -2042,7 +2042,8 @@ static void femu_test_wide_lba(void *obj, void *data, QGuestAllocator *alloc)
     log = guest_alloc(alloc, sizeof(page));
     if (w->fdp) {
         ruamw = femu_ruh0_ruamw(&c, log);
-        g_assert_cmpint(ruamw, ==, (96ull << 20) >> w->lbads);
+        /* a unit is one superblock: 16 LUNs of 16 pages of 4 KiB */
+        g_assert_cmpint(ruamw, ==, (16ull * 16 * 4096) >> w->lbads);
     }
 
     /* 8 KiB at block 1, so the first page of the device is not touched */

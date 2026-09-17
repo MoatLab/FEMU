@@ -62,6 +62,17 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         uint64_t needed = (uint64_t)endgrp->fdp.nruh * endgrp->fdp.nrg +
                           endgrp->fdp.nruh + 1;
 
+        /*
+         * The FTL's reclaim unit is one superblock, and the host sizes its
+         * placement by the unit it is told about.
+         */
+        if (n->subsys->params.fdp.runs &&
+            n->subsys->params.fdp.runs != pgs_per_line * page_bytes) {
+            error_setg(errp, "FEMU bbssd: fdp.runs must be %" PRIu64 ", the "
+                       "size of one superblock of this geometry, or unset",
+                       pgs_per_line * page_bytes);
+            return -1;
+        }
         if (pool < needed) {
             error_setg(errp, "FEMU bbssd: placement needs %" PRIu64 " reclaim "
                        "units for %u handles across %u groups and this geometry "
@@ -131,6 +142,15 @@ static void bb_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
             error_setg(errp, "FEMU bbssd: %s has no effect under FDP", knob);
             return;
         }
+    }
+
+    if (n->subsys && n->subsys->endgrp.fdp.enabled) {
+        const BbCtrlParams *p = &n->bb_params;
+
+        n->subsys->endgrp.fdp.runs = (uint64_t)p->nchs * p->luns_per_ch *
+                                     p->pls_per_lun * p->pgs_per_blk *
+                                     p->secs_per_pg * p->secsz;
+        nvme_ns_refresh_fdp(ns);
     }
 
     ssd = ns->ssd = g_malloc0(sizeof(struct ssd));

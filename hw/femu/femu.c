@@ -77,11 +77,8 @@ static bool nvme_subsys_setup_fdp(NvmeSubsystem *subsys, Error **errp)
     uint64_t tt_nru = subsys->params.fdp.nru;
     uint16_t ruhid;
 
-    if (!subsys->params.fdp.runs) {
-        error_setg(errp, "fdp.runs must be non-zero");
-        return false;
-    }
-    endgrp->fdp.runs = subsys->params.fdp.runs;
+    /* zero lets the controller say; a bbssd controller uses its superblock */
+    endgrp->fdp.runs = subsys->params.fdp.runs ?: NVME_DEFAULT_RU_SIZE;
     endgrp->fdp.nru = subsys->params.fdp.nru;
 
     /*
@@ -203,8 +200,7 @@ static void nvme_subsys_realize(DeviceState *dev, Error **errp)
 static const Property nvme_subsystem_props[] = {
     DEFINE_PROP_STRING("nqn", NvmeSubsystem, params.nqn),
     DEFINE_PROP_BOOL("fdp", NvmeSubsystem, params.fdp.enabled, false),
-    DEFINE_PROP_SIZE("fdp.runs", NvmeSubsystem, params.fdp.runs,
-                     NVME_DEFAULT_RU_SIZE),
+    DEFINE_PROP_SIZE("fdp.runs", NvmeSubsystem, params.fdp.runs, 0),
     DEFINE_PROP_UINT32("fdp.nrg", NvmeSubsystem, params.fdp.nrg, 1),
     DEFINE_PROP_UINT16("fdp.nruh", NvmeSubsystem, params.fdp.nruh, 0),
     DEFINE_PROP_UINT64("fdp.nru", NvmeSubsystem, params.fdp.nru, 128),
@@ -315,7 +311,7 @@ static bool nvme_ns_init_fdp(NvmeNamespace *ns, Error **errp)
 
 /* ========== FDP Subsystem Registration ========== */
 
-static int nvme_init_subsys(FemuCtrl *n)
+static int nvme_init_subsys(FemuCtrl *n, Error **errp)
 {
     int cntlid;
 
@@ -323,8 +319,24 @@ static int nvme_init_subsys(FemuCtrl *n)
         return 0;
     }
 
+    /*
+     * The reclaim units and handles hold one controller's FTL state, reclaim
+     * unit size included; a second controller would rebuild them over the
+     * first one's.
+     */
+    if (n->subsys->endgrp.fdp.enabled) {
+        for (cntlid = 0; cntlid < ARRAY_SIZE(n->subsys->ctrls); cntlid++) {
+            if (n->subsys->ctrls[cntlid]) {
+                error_setg(errp, "femu-subsys with fdp=on takes a single "
+                           "controller");
+                return -1;
+            }
+        }
+    }
+
     cntlid = femu_subsys_register_ctrl(n);
     if (cntlid < 0) {
+        error_setg(errp, "failed to register controller with subsystem");
         return -1;
     }
 
@@ -1627,8 +1639,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     nvme_init_pci(n);
 
     /* FDP: register controller with subsystem if linked */
-    if (nvme_init_subsys(n)) {
-        error_setg(errp, "failed to register controller with subsystem");
+    if (nvme_init_subsys(n, errp)) {
         femu_realize_undo(n);
         return;
     }
