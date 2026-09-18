@@ -160,6 +160,14 @@ struct zns_ssd {
      * them. The list holds ZSLBAs; a full page is reported as an overflow so
      * the host rescans rather than trusting a truncated list.
      */
+    /*
+     * Zone descriptors, the lists and counters behind them, and the changed
+     * list below are read and written by whichever poller thread holds the
+     * queue a command arrived on, and read by the thread serving Get Log Page.
+     * Nothing orders those against each other, so they take this.
+     */
+    QemuMutex zone_lock;
+
     uint64_t changed_zones[511];
     uint32_t nr_changed_zones;
     bool     changed_zone_overflow;

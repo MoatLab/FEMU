@@ -1,4 +1,5 @@
 #include "./zns.h"
+#include "qemu/lockable.h"
 
 #define MIN_DISCARD_GRANULARITY     (4 * KiB)
 #define NVME_DEFAULT_ZONE_SIZE      (128 * MiB)
@@ -369,6 +370,8 @@ static void zns_free_params(NvmeNamespace *ns)
     if (!zns) {
         return;
     }
+
+    qemu_mutex_destroy(&zns->zone_lock);
 
     if (zns->ch) {
         for (i = 0; i < zns->num_ch; i++) {
@@ -1217,11 +1220,13 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint32_t nlb = (uint32_t)le16_to_cpu(rw->nlb) + 1;
     uint64_t data_size = zns_l2b(ns, nlb);
     uint64_t data_offset;
-    uint64_t wp;
+    uint64_t wp = 0;
     uint16_t status;
 
     NvmeZone *zone;
     NvmeZonedResult *res = (NvmeZonedResult *)&req->cqe;
+    bool fault = false;
+
     assert(n->zoned);
     // Fix zone append not working as expected
     req->is_write = ((rw->opcode == NVME_CMD_WRITE) || (rw->opcode == NVME_CMD_ZONE_APPEND)) ? 1 : 0;
@@ -1238,27 +1243,35 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     if(req->is_write)
     {
-        zone = zns_get_zone_by_slba(ns, slba);
-        status = zns_check_zone_write(n, ns, zone, slba, nlb, append);
-        if (status) {
-            femu_err("Misao check zone write failed with status (%u)\n",status);
-            goto err;
-        }
         /*
-         * A write to an empty or closed zone opens it, which takes an open
-         * (and for an empty zone an active) resource; make room or refuse
-         * before anything moves. A conventional zone has no such state.
+         * Placing the write is one step: an append reads the write pointer to
+         * decide where it lands and then moves it. Two appends on queues that
+         * different pollers serve otherwise read the same pointer and are
+         * placed on top of each other.
          */
-        if (zone->d.zt != NVME_ZONE_TYPE_CONVENTIONAL) {
-            status = zns_auto_open_zone(ns, zone);
-            if (status) {
-                goto err;
+        WITH_QEMU_LOCK_GUARD(&ns->zns->zone_lock) {
+            zone = zns_get_zone_by_slba(ns, slba);
+            status = zns_check_zone_write(n, ns, zone, slba, nlb, append);
+            /*
+             * A write to an empty or closed zone opens it, which takes an open
+             * (and for an empty zone an active) resource; make room or refuse
+             * before anything moves. A conventional zone has no such state.
+             */
+            if (!status && zone->d.zt != NVME_ZONE_TYPE_CONVENTIONAL) {
+                status = zns_auto_open_zone(ns, zone);
+            }
+            if (!status) {
+                if (append) {
+                    slba = zone->w_ptr;
+                }
+                wp = zns_advance_zone_wp(ns, zone, nlb);
             }
         }
-        if (append) {
-            slba = zone->w_ptr;
+        if (status) {
+            femu_err("Misao check zone write failed with status (%u)\n",
+                     status);
+            goto err;
         }
-        wp = zns_advance_zone_wp(ns, zone, nlb);
         /* only an append reports where it landed; DW0/1 are reserved otherwise */
         if (append) {
             res->slba = cpu_to_le64(wp);
@@ -1316,35 +1329,44 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
          * be reported for any block, written or not.
          */
         nvme_mark_written(ns, slba, nlb);
-        zns_finalize_zoned_write(ns, req, false);
 
-        /*
-         * Take the zone read only on every Nth write. A real controller does
-         * this when it can no longer program the zone; here it is the only
-         * change a host does not cause, so it is what gives the Changed Zone
-         * List and its notice something to carry. The failing write itself is
-         * reported as a write fault, and later writes to the zone are refused
-         * as read only by the state machine.
-         */
-        if (zns->err_write_fail_period &&
-            (++zns->err_write_counter % zns->err_write_fail_period) == 0) {
-            NvmeZone *failed = zns_get_zone_by_slba(ns, slba);
+        WITH_QEMU_LOCK_GUARD(&zns->zone_lock) {
+            zns_finalize_zoned_write(ns, req, false);
 
-            if (failed && zns_get_zone_state(failed) !=
-                          NVME_ZONE_STATE_READ_ONLY) {
-                /*
-                 * Read only is the end of the line for the zone, so the open
-                 * and active resources it held have to go back. Left counted,
-                 * they exhaust the namespace's budget for zones that can never
-                 * be opened again, and the shutdown walk -- which finds the
-                 * zone on no list -- ends on an assertion that the open count
-                 * reached zero.
-                 */
-                zns_release_zone_resources(ns, failed);
-                zns_assign_zone_state(ns, failed, NVME_ZONE_STATE_READ_ONLY);
-                zns_record_changed_zone(ns, failed->d.zslba);
-                zns->err_write_injected++;
+            /*
+             * Take the zone read only on every Nth write. A real controller
+             * does this when it can no longer program the zone; here it is
+             * the only change a host does not cause, so it is what gives the
+             * Changed Zone List and its notice something to carry. The
+             * failing write itself is reported as a write fault, and later
+             * writes to the zone are refused as read only by the state
+             * machine.
+             */
+            if (zns->err_write_fail_period &&
+                (++zns->err_write_counter % zns->err_write_fail_period) == 0) {
+                NvmeZone *failed = zns_get_zone_by_slba(ns, slba);
+
+                if (failed && zns_get_zone_state(failed) !=
+                              NVME_ZONE_STATE_READ_ONLY) {
+                    /*
+                     * Read only is the end of the line for the zone, so the
+                     * open and active resources it held have to go back. Left
+                     * counted, they exhaust the namespace's budget for zones
+                     * that can never be opened again, and the shutdown walk
+                     * -- which finds the zone on no list -- ends on an
+                     * assertion that the open count reached zero.
+                     */
+                    zns_release_zone_resources(ns, failed);
+                    zns_assign_zone_state(ns, failed,
+                                          NVME_ZONE_STATE_READ_ONLY);
+                    zns_record_changed_zone(ns, failed->d.zslba);
+                    zns->err_write_injected++;
+                }
+                fault = true;
             }
+        }
+
+        if (fault) {
             return NVME_WRITE_FAULT | NVME_DNR;
         }
     }
@@ -1376,6 +1398,9 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
     all = dw13 & 0x100;
 
     req->status = NVME_SUCCESS;
+
+    /* every action here moves zones between the state lists */
+    QEMU_LOCK_GUARD(&ns->zns->zone_lock);
 
     if (!all) {
         status = zns_get_mgmt_zone_slba_idx(n, ns, cmd, &slba, &zone_idx);
@@ -1581,6 +1606,9 @@ static uint16_t zns_zone_mgmt_recv(FemuCtrl *n, NvmeRequest *req)
     size_t zone_entry_sz;
 
     req->status = NVME_SUCCESS;
+
+    /* the report is a snapshot, so no write may land in the middle of it */
+    QEMU_LOCK_GUARD(&ns->zns->zone_lock);
 
     status = zns_get_mgmt_zone_slba_idx(n, ns, cmd, &slba, &zone_idx);
     if (status) {
@@ -1911,6 +1939,7 @@ static void zns_init_params(FemuCtrl *n, NvmeNamespace *ns)
     zns_nand_media_init(id_zns);
 
     ns->zns = id_zns;
+    qemu_mutex_init(&id_zns->zone_lock);
 }
 
 static int zns_init_zone_cap(FemuCtrl *n, NvmeNamespace *ns)
@@ -2130,6 +2159,8 @@ static uint16_t zns_changed_zone_list(FemuCtrl *n, NvmeNamespace *ns,
      * emitter run past the end of a page that holds exactly as many entries as
      * the array does.
      */
+    QEMU_LOCK_GUARD(&zns->zone_lock);
+
     nr = zns->nr_changed_zones;
     if (nr > ARRAY_SIZE(zns->changed_zones)) {
         nr = ARRAY_SIZE(zns->changed_zones);
