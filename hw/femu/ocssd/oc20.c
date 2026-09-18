@@ -958,6 +958,11 @@ static uint16_t oc20_erase(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         }
     }
 
+    /*
+     * Erasing a block takes the die for the length of an erase, and the
+     * address list is what says which dies. The model for it was here from
+     * the start and nothing called it, so a chunk reset cost nothing at all.
+     */
     g_free((void *)req->slba);
     req->slba = 0;
 
@@ -1512,6 +1517,14 @@ static void oc20_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     if (oc20_init_namespaces(n, errp)) {
         return;
     }
+
+    /*
+     * The page and block timings every command is charged from. Open-Channel
+     * 1.2 fills them at init and this mode never did, so the whole table read
+     * as zero: reads, writes and erases all completed as fast as the software
+     * could run, whatever the media was set to.
+     */
+    init_nand_flash(n);
 
     oc20_init_misc(n);
 }
