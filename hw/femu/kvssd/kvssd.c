@@ -20,15 +20,6 @@
  * call the FTL.
  */
 
-/* NVMe-KV 1.3 Figure 5: opcodes for the Key Value Command Set */
-enum NvmeKvOpcode {
-    NVME_KV_CMD_STORE    = 0x01,
-    NVME_KV_CMD_RETRIEVE = 0x02,
-    NVME_KV_CMD_LIST     = 0x06,
-    NVME_KV_CMD_DELETE   = 0x10,
-    NVME_KV_CMD_EXIST    = 0x14,
-};
-
 /* Store Option (CDW11[15:8]) bits (Figure 30) */
 #define NVME_KV_STORE_SIKE   (1 << 0)   /* bit 8: store only if key exists */
 #define NVME_KV_STORE_SINKE  (1 << 1)   /* bit 9: store only if key absent */

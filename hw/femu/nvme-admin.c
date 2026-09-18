@@ -83,6 +83,18 @@ static const uint32_t nvme_cse_iocs_zoned[256] = {
     [NVME_CMD_ZONE_MGMT_RECV]       = NVME_CMD_EFF_CSUPP,
 };
 
+/*
+ * The Key Value command set. A key is not a logical block, so the commands
+ * that replace or remove a value are the ones that change what a read returns.
+ */
+static const uint32_t nvme_cse_iocs_kv[256] = {
+    [NVME_KV_CMD_STORE]             = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
+    [NVME_KV_CMD_RETRIEVE]          = NVME_CMD_EFF_CSUPP,
+    [NVME_KV_CMD_LIST]              = NVME_CMD_EFF_CSUPP,
+    [NVME_KV_CMD_DELETE]            = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
+    [NVME_KV_CMD_EXIST]             = NVME_CMD_EFF_CSUPP,
+};
+
 static uint16_t nvme_del_sq(FemuCtrl *n, NvmeCmd *cmd)
 {
     NvmeDeleteQ *c = (NvmeDeleteQ *)cmd;
@@ -788,6 +800,7 @@ static uint16_t nvme_identify_cmd_set(FemuCtrl *n, NvmeCmd *cmd)
 
     NVME_SET_CSI(*list, NVME_CSI_NVM);
     NVME_SET_CSI(*list, NVME_CSI_ZONED);
+    NVME_SET_CSI(*list, NVME_CSI_KV);
 
     return dma_read_prp(n, list, data_len, prp1, prp2);
 }
@@ -1883,6 +1896,9 @@ static uint16_t nvme_cmd_effects(FemuCtrl *n, NvmeCmd *cmd, uint8_t csi,
             break;
         case NVME_CSI_ZONED:
             src_iocs = nvme_cse_iocs_zoned;
+            break;
+        case NVME_CSI_KV:
+            src_iocs = nvme_cse_iocs_kv;
             break;
         }
     }

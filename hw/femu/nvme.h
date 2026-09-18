@@ -711,6 +711,15 @@ enum NvmeIoCommands {
     NVME_CMD_ZONE_MGMT_SEND     = 0x79,
     NVME_CMD_ZONE_MGMT_RECV     = 0x7a,
     NVME_CMD_ZONE_APPEND        = 0x7d,
+};
+
+/* NVMe-KV 1.3 Figure 5: opcodes for the Key Value Command Set */
+enum NvmeKvOpcode {
+    NVME_KV_CMD_STORE           = 0x01,
+    NVME_KV_CMD_RETRIEVE        = 0x02,
+    NVME_KV_CMD_LIST            = 0x06,
+    NVME_KV_CMD_DELETE          = 0x10,
+    NVME_KV_CMD_EXIST           = 0x14,
     NVME_CMD_OC_ERASE           = 0x90,
     NVME_CMD_OC_WRITE           = 0x91,
     NVME_CMD_OC_READ            = 0x92,

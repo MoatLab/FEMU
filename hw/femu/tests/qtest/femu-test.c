@@ -39,8 +39,14 @@
 #define FEMU_FDP_EVT_RU_NOT_FULLY_WRITTEN 0x00
 #define FEMU_KV_CMD_RETRIEVE    0x02
 #define FEMU_KV_CMD_EXIST       0x14
+#define FEMU_KV_CMD_LIST        0x06
+#define FEMU_KV_CMD_DELETE      0x10
 #define FEMU_CNS_CS_CTRL    0x06    /* command-set controller identify */
 #define FEMU_CSI_ZONED      0x02    /* zoned namespace command set */
+#define FEMU_CSI_KV         0x01    /* key value command set */
+#define FEMU_CNS_IO_CMD_SET 0x1c    /* the command sets the controller has */
+#define FEMU_LOG_CMD_EFFECTS 0x05
+#define FEMU_CC_CSS_CSI     0x06    /* CC.CSS: a command set is selected */
 #define FEMU_CQ_IEN         0x02    /* Create CQ: interrupts enabled */
 
 typedef struct QFemu QFemu;
@@ -2439,6 +2445,67 @@ static void femu_test_zone_append_parallel(void *obj, void *data,
     femu_disable(&c);
 }
 
+/*
+ * A host finds the Key Value command set by asking which sets the controller
+ * has, then what the commands of that set do. Neither answered: the set was
+ * missing from the list, and its effects log came back with no command
+ * supported at all, which is a host's cue to issue none of them.
+ */
+static void femu_test_kv_discovery(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    NvmeCmd cmd;
+    uint64_t buf;
+    uint8_t sets[8];
+    uint32_t eff;
+
+    c.pdev = &femu->dev;
+    c.alloc = alloc;
+    femu_queue_init(&c, &c.admin, 0);
+    /* enable with a command set selected, which is how anything but NVM runs */
+    femu_enable_cc(&c, &femu->dev, alloc,
+                   (6 << 16) | (4 << 20) | (FEMU_CC_CSS_CSI << 4) | 1);
+
+    buf = guest_alloc(alloc, 4096);
+    qtest_memset(qts, buf, 0, 4096);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_IDENTIFY;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(FEMU_CNS_IO_CMD_SET);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, sets, sizeof(sets));
+    /* one bit per command set identifier: NVM, key value, zoned */
+    g_assert_cmpint(sets[0] & 0x7, ==, 0x7);
+
+    qtest_memset(qts, buf, 0, 4096);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+    cmd.nsid = cpu_to_le32(NVME_NSID_BROADCAST);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(FEMU_LOG_CMD_EFFECTS | ((1024 - 1) << 16));
+    cmd.cdw14 = cpu_to_le32(FEMU_CSI_KV << 24);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+
+    /* the per-command entries follow the 256 admin ones */
+#define FEMU_KV_EFF(op) \
+    ({ qtest_memread(qts, buf + 1024 + 4 * (op), &eff, sizeof(eff)); \
+       le32_to_cpu(eff); })
+    /* supported, and the two that replace or remove a value change data */
+    g_assert_cmpint(FEMU_KV_EFF(FEMU_KV_CMD_STORE), ==, 0x3);
+    g_assert_cmpint(FEMU_KV_EFF(FEMU_KV_CMD_RETRIEVE), ==, 0x1);
+    g_assert_cmpint(FEMU_KV_EFF(FEMU_KV_CMD_LIST), ==, 0x1);
+    g_assert_cmpint(FEMU_KV_EFF(FEMU_KV_CMD_DELETE), ==, 0x3);
+    g_assert_cmpint(FEMU_KV_EFF(FEMU_KV_CMD_EXIST), ==, 0x1);
+#undef FEMU_KV_EFF
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -2497,6 +2564,10 @@ static void femu_register_nodes(void)
             "subsys=fdpsub"
     });
     qos_add_test("kv-accounting", "femu", femu_test_kv_accounting,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "devsz_mb=512,femu_mode=5"
+    });
+    qos_add_test("kv-discovery", "femu", femu_test_kv_discovery,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "devsz_mb=512,femu_mode=5"
     });
