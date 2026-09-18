@@ -963,6 +963,10 @@ static uint16_t oc20_erase(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
      * address list is what says which dies. The model for it was here from
      * the start and nothing called it, so a chunk reset cost nothing at all.
      */
+    if (status == NVME_SUCCESS) {
+        oc20_advance_status(n, req->ns, cmd, req);
+    }
+
     g_free((void *)req->slba);
     req->slba = 0;
 

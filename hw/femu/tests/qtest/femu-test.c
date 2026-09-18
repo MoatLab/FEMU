@@ -1104,6 +1104,46 @@ static void femu_test_oc20_vector_io(void *obj, void *data,
     g_assert_cmpint(out[sizeof(out) - 1], ==, 0);
 
     /*
+     * Erasing a block takes the die for as long as an erase takes, so resets
+     * of chunks on one parallel unit queue up behind each other. They used to
+     * cost nothing: the model was there but the reset path never called it.
+     */
+    {
+        int64_t start;
+        uint64_t chunk;
+
+        for (i = 0; i < 8; i++) {
+            chunk = (uint64_t)(i + 1) << sec_len;
+            cmd.opcode = FEMU_OC20_VECT_WRITE;
+            cmd.dptr.prp1 = cpu_to_le64(buf);
+            cmd.cdw10 = cpu_to_le32((uint32_t)chunk);
+            cmd.cdw11 = cpu_to_le32((uint32_t)(chunk >> 32));
+            want = c.cid;
+            femu_submit(&c, &c.io, &cmd);
+            g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                            NVME_SUCCESS);
+            g_assert_cmpint(got, ==, want);
+        }
+
+        start = g_get_monotonic_time();
+        for (i = 0; i < 8; i++) {
+            chunk = (uint64_t)(i + 1) << sec_len;
+            memset(&cmd, 0, sizeof(cmd));
+            cmd.opcode = FEMU_OC20_VECT_ERASE;
+            cmd.nsid = cpu_to_le32(1);
+            cmd.cdw10 = cpu_to_le32((uint32_t)chunk);
+            cmd.cdw11 = cpu_to_le32((uint32_t)(chunk >> 32));
+            want = c.cid;
+            femu_submit(&c, &c.io, &cmd);
+            g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                            NVME_SUCCESS);
+            g_assert_cmpint(got, ==, want);
+        }
+        /* eight erases of one unit, each milliseconds long on this media */
+        g_assert_cmpint(g_get_monotonic_time() - start, >, 8000);
+    }
+
+    /*
      * An address the geometry does not have must be refused with nothing
      * transferred. A bitmask test on the helper's status let such a read come
      * back with another sector's data and a success code.
