@@ -1945,6 +1945,12 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT8("lnum_lun", FemuCtrl, oc_params.num_lun, 8),
     DEFINE_PROP_UINT8("lnum_pln", FemuCtrl, oc_params.num_pln, 2),
     DEFINE_PROP_UINT16("lmetasize", FemuCtrl, oc_params.sos, 16),
+    /*
+     * Open-Channel 2.0 lets a host reset a chunk it has not filled only when
+     * the controller says it can. The capability was built but nothing could
+     * turn it on, so every such reset was refused.
+     */
+    DEFINE_PROP_UINT8("learly_reset", FemuCtrl, params.oc20.early_reset, 0),
     DEFINE_PROP_UINT64("fdm_size", FemuCtrl, csd_params.fdm_size_mb, 0),
     DEFINE_PROP_UINT8("nr_cu", FemuCtrl, csd_params.nr_cu, 4),
     DEFINE_PROP_UINT8("nr_thread", FemuCtrl, csd_params.nr_thread, 4),
