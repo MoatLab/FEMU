@@ -1941,6 +1941,16 @@ static void ssd_trim_fdp_reset_all(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
         ssd->ruhs[i].hbmw = 0;
         ssd->ruhs[i].mbmw = 0;
         ssd->ruhs[i].mbe = 0;
+        /*
+         * The collection destination is a frontier like curr_ru, on no queue
+         * the drain above walks. Left as it was, it points at a unit this
+         * reset has handed back, which the next allocation gives to another
+         * handle to write into at the same time.
+         */
+        if (ssd->ruhs[i].gc_ru && ssd->ruhs[i].gc_ru != ssd->ruhs[i].curr_ru) {
+            mark_ru_free(ssd, ssd->ruhs[i].gc_ru->rgidx, ssd->ruhs[i].gc_ru);
+        }
+        ssd->ruhs[i].gc_ru = NULL;
         if (ssd->ruhs[i].curr_ru) {
             mark_ru_free(ssd, ssd->ruhs[i].curr_ru->rgidx,
                          ssd->ruhs[i].curr_ru);
