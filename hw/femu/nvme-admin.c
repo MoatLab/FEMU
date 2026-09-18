@@ -23,6 +23,7 @@ static const bool nvme_feature_support[NVME_FID_MAX] = {
     [NVME_FDP_MODE]                 = true,
     [NVME_FDP_EVENTS]               = true,
     [NVME_KV_FEAT_CONFIG]           = true,
+    [NVME_COMMAND_SET_PROFILE]      = true,
     [NVME_SOFTWARE_PROGRESS_MARKER] = true,
 };
 
@@ -33,6 +34,7 @@ static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
     [NVME_TEMPERATURE_THRESHOLD]    = NVME_FEAT_CAP_CHANGE,
     [NVME_ERROR_RECOVERY]           = NVME_FEAT_CAP_CHANGE | NVME_FEAT_CAP_NS,
     [NVME_VOLATILE_WRITE_CACHE]     = NVME_FEAT_CAP_CHANGE,
+    [NVME_COMMAND_SET_PROFILE]      = NVME_FEAT_CAP_CHANGE,
     [NVME_NUMBER_OF_QUEUES]         = NVME_FEAT_CAP_CHANGE,
     [NVME_INTERRUPT_COALESCING]     = NVME_FEAT_CAP_CHANGE,
     [NVME_INTERRUPT_VECTOR_CONF]    = NVME_FEAT_CAP_CHANGE,
@@ -934,6 +936,10 @@ static uint16_t nvme_get_feature_default(FemuCtrl *n, NvmeCmd *cmd,
         }
         result = 1;
         break;
+    case NVME_COMMAND_SET_PROFILE:
+        /* one combination, index zero, holding every command set at once */
+        result = 0;
+        break;
     default:
         /* every other feature starts at zero, including an empty event list */
         break;
@@ -1048,6 +1054,10 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         break;
     case NVME_SOFTWARE_PROGRESS_MARKER:
         cqe->n.result = cpu_to_le32(n->features.sw_prog_marker);
+        break;
+    case NVME_COMMAND_SET_PROFILE:
+        /* the only combination there is, and the only one selectable */
+        cqe->n.result = 0;
         break;
     case NVME_FDP_MODE:
         if (!n->subsys || !n->subsys->endgrp.fdp.enabled) {
@@ -1294,6 +1304,16 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         }
         break;
     }
+    case NVME_COMMAND_SET_PROFILE:
+        /*
+         * The controller offers a single combination, so the host may select
+         * index zero and nothing else. Refusing index zero as well left a host
+         * that asks for what it already has with an error.
+         */
+        if (dw11 & 0x1ff) {
+            return NVME_IOCS_COMBINATION_REJECTED | NVME_DNR;
+        }
+        break;
     default:
         return NVME_INVALID_FIELD | NVME_DNR;
     }

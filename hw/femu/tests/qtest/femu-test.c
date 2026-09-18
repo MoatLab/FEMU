@@ -47,6 +47,8 @@
 #define FEMU_CNS_IO_CMD_SET 0x1c    /* the command sets the controller has */
 #define FEMU_LOG_CMD_EFFECTS 0x05
 #define FEMU_CC_CSS_CSI     0x06    /* CC.CSS: a command set is selected */
+#define FEMU_FEAT_CMD_SET_PROFILE       0x19
+#define FEMU_IOCS_COMBINATION_REJECTED  0x12b
 #define FEMU_CQ_IEN         0x02    /* Create CQ: interrupts enabled */
 
 typedef struct QFemu QFemu;
@@ -1212,6 +1214,17 @@ static void femu_test_features(void *obj, void *data, QGuestAllocator *alloc)
                             NVME_GETFEAT_SELECT_CURRENT, 0, 0, &result)),
                     ==, NVME_SUCCESS);
     g_assert_cmpint(result, ==, 0x14d);
+
+    /* the one command set combination there is may be selected, no other */
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, FEMU_FEAT_CMD_SET_PROFILE,
+                            false, 0, 0, NULL)), ==, NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, FEMU_FEAT_CMD_SET_PROFILE,
+                            false, 0, 1, NULL)), ==,
+                    FEMU_IOCS_COMBINATION_REJECTED);
+    g_assert_cmpint(FEMU_SC(femu_get_feature(&c, FEMU_FEAT_CMD_SET_PROFILE,
+                            NVME_GETFEAT_SELECT_CURRENT, 0, 0, &result)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpint(result, ==, 0);
 
     g_assert_cmpint(FEMU_SC(femu_get_feature(&c, NVME_TEMPERATURE_THRESHOLD,
                             NVME_GETFEAT_SELECT_CAP, 0, 0, &result)),
