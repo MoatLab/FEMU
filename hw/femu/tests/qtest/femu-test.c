@@ -2275,6 +2275,170 @@ static void femu_test_fdp_ruh_update_full(void *obj, void *data,
     femu_disable(&c);
 }
 
+/*
+ * A Zone Append reads the zone's write pointer to decide where it lands and
+ * then moves it. On queues that different pollers serve, two of them read the
+ * same pointer unless the zone state is held still, and the controller reports
+ * the same blocks to both: one write is lost. Appending from two queues at
+ * once reported a duplicate on half the runs before the zone state took a
+ * lock.
+ */
+/* entries per queue, so 255 commands can be in flight on each */
+#define ZAP_QDEPTH  256
+#define ZAP_PER_Q   (ZAP_QDEPTH - 1)
+#define ZAP_ROUNDS  150
+
+/*
+ * A queue pair of its own depth, deep enough to keep a poller working while
+ * the other one is given its own batch. The shared helpers are fixed at
+ * FEMU_QSIZE entries, so this test carries its own submit and collect.
+ */
+static void femu_zap_create_queue(FemuCtrlState *c, FemuQueue *q, uint16_t qid)
+{
+    NvmeCmd cmd;
+
+    q->qid = qid;
+    q->sq_addr = guest_alloc(c->alloc, ZAP_QDEPTH * sizeof(NvmeCmd));
+    q->cq_addr = guest_alloc(c->alloc, ZAP_QDEPTH * sizeof(NvmeCqe));
+    q->sq_tail = 0;
+    q->cq_head = 0;
+    q->phase = 1;
+    qtest_memset(c->pdev->bus->qts, q->cq_addr, 0,
+                 ZAP_QDEPTH * sizeof(NvmeCqe));
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_CREATE_CQ;
+    cmd.dptr.prp1 = cpu_to_le64(q->cq_addr);
+    cmd.cdw10 = cpu_to_le32(((ZAP_QDEPTH - 1) << 16) | qid);
+    cmd.cdw11 = cpu_to_le32(NVME_CQ_PC);
+    g_assert_cmpint(femu_admin(c, &cmd), ==, NVME_SUCCESS);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_CREATE_SQ;
+    cmd.dptr.prp1 = cpu_to_le64(q->sq_addr);
+    cmd.cdw10 = cpu_to_le32(((ZAP_QDEPTH - 1) << 16) | qid);
+    cmd.cdw11 = cpu_to_le32((qid << 16) | NVME_SQ_PC);
+    g_assert_cmpint(femu_admin(c, &cmd), ==, NVME_SUCCESS);
+}
+
+/* collect one completion from a deep queue and hand back dword 0 */
+static uint16_t femu_zap_complete(FemuCtrlState *c, FemuQueue *q,
+                                  uint32_t *result)
+{
+    uint64_t slot = q->cq_addr + q->cq_head * sizeof(NvmeCqe);
+    NvmeCqe cqe, again;
+    int waited = 0;
+
+    for (;;) {
+        qtest_memread(c->pdev->bus->qts, slot, &cqe, sizeof(cqe));
+        if ((le16_to_cpu(cqe.status) & 1) == q->phase) {
+            qtest_memread(c->pdev->bus->qts, slot, &again, sizeof(again));
+            if (memcmp(&cqe, &again, sizeof(cqe)) == 0) {
+                break;
+            }
+        }
+        g_assert_cmpint(waited, <, FEMU_POLL_LIMIT_MS);
+        g_usleep(1000);
+        waited++;
+    }
+
+    if (result) {
+        *result = le32_to_cpu(cqe.result);
+    }
+    q->cq_head = (q->cq_head + 1) % ZAP_QDEPTH;
+    if (q->cq_head == 0) {
+        q->phase ^= 1;
+    }
+    qpci_io_writel(c->pdev, c->bar, femu_cq_doorbell(c, q->qid), q->cq_head);
+
+    return FEMU_SC(le16_to_cpu(cqe.status) >> 1);
+}
+
+/* queue a command without ringing, so a whole batch can start at once */
+static void femu_zap_queue(FemuCtrlState *c, FemuQueue *q, NvmeCmd *cmd)
+{
+    cmd->cid = cpu_to_le16(c->cid++);
+    qtest_memwrite(c->pdev->bus->qts,
+                   q->sq_addr + q->sq_tail * sizeof(NvmeCmd), cmd,
+                   sizeof(*cmd));
+    q->sq_tail = (q->sq_tail + 1) % ZAP_QDEPTH;
+}
+
+static void femu_zap_ring(FemuCtrlState *c, FemuQueue *q)
+{
+    qpci_io_writel(c->pdev, c->bar, femu_sq_doorbell(c, q->qid), q->sq_tail);
+}
+
+static void femu_test_zone_append_parallel(void *obj, void *data,
+                                           QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    FemuQueue q1, q2;
+    NvmeCmd cmd;
+    uint64_t buf;
+    uint32_t *seen = g_new(uint32_t, 2 * ZAP_PER_Q);
+    int round, i, j;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_zap_create_queue(&c, &q1, 1);
+    femu_zap_create_queue(&c, &q2, 2);
+
+    buf = guest_alloc(alloc, 4096);
+    qtest_memset(qts, buf, 0x5a, 4096);
+
+    for (round = 0; round < ZAP_ROUNDS; round++) {
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_CMD_ZONE_APPEND;
+        cmd.nsid = cpu_to_le32(1);
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.cdw10 = 0;                 /* zone 0 starts at LBA 0 */
+        cmd.cdw11 = 0;
+        cmd.cdw12 = 0;                 /* one block */
+
+        for (i = 0; i < ZAP_PER_Q; i++) {
+            femu_zap_queue(&c, &q1, &cmd);
+            femu_zap_queue(&c, &q2, &cmd);
+        }
+        femu_zap_ring(&c, &q1);
+        femu_zap_ring(&c, &q2);
+        for (i = 0; i < ZAP_PER_Q; i++) {
+            uint32_t r1 = 0, r2 = 0;
+
+            g_assert_cmpint(femu_zap_complete(&c, &q1, &r1), ==, NVME_SUCCESS);
+            g_assert_cmpint(femu_zap_complete(&c, &q2, &r2), ==, NVME_SUCCESS);
+            seen[2 * i] = r1;
+            seen[2 * i + 1] = r2;
+        }
+        /* every append must have been placed on a block of its own */
+        for (i = 0; i < 2 * ZAP_PER_Q; i++) {
+            for (j = i + 1; j < 2 * ZAP_PER_Q; j++) {
+                if (seen[i] == seen[j]) {
+                    g_test_message("round %d: appends %d and %d both at %u",
+                                   round, i, j, seen[i]);
+                }
+                g_assert_cmpint(seen[i], !=, seen[j]);
+            }
+            g_assert_cmpint(seen[i], <, 2 * ZAP_PER_Q);
+        }
+        /* start the next round from an empty zone, well short of capacity */
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_CMD_ZONE_MGMT_SEND;
+        cmd.nsid = cpu_to_le32(1);
+        cmd.cdw13 = cpu_to_le32(NVME_ZONE_ACTION_RESET);
+        femu_zap_queue(&c, &q1, &cmd);
+        femu_zap_ring(&c, &q1);
+        g_assert_cmpint(femu_zap_complete(&c, &q1, NULL), ==, NVME_SUCCESS);
+    }
+
+    g_free(seen);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &q2);
+    femu_queue_free(&c, &q1);
+    femu_disable(&c);
+}
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -2355,6 +2519,11 @@ static void femu_register_nodes(void)
     qos_add_test("zoned-format-index", "femu", femu_test_zoned_format_index,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "femu_mode=3,lba_index=1"
+    });
+    qos_add_test("zone-append-parallel", "femu",
+                 femu_test_zone_append_parallel, &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=3,secsz=512,multipoller_enabled=1,poller_ratio=1"
     });
     qos_add_test("zone-reset", "femu", femu_test_zone_reset,
                  &(QOSGraphTestOptions) {
