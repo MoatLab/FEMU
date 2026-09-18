@@ -455,13 +455,7 @@ static uint16_t oc20_rw_check_read_req(FemuCtrl *n, NvmeCmd *cmd,
              * return whatever sector the dense index landed on.
              */
             if (err == NVME_DULB) {
-                /*
-                 * The count reaches 64, so the bit has to be shifted in a
-                 * 64 bit value. Nothing reads this yet -- an unwritten block
-                 * should come back as the pattern the specification defines
-                 * and instead comes back as whatever the media holds -- but
-                 * an int shift of 31 or more is undefined either way.
-                 */
+                /* one bit per address, and the count reaches 64 */
                 req->predef |= 1ULL << i;
                 continue;
             }
@@ -563,12 +557,11 @@ static uint16_t oc20_rw_check_req(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
             err = oc20_rw_check_chunk_read(n, cmd, req, slba + i);
             if (err) {
                 if (err == NVME_DULB) {
-                    req->predef = slba + i;
                     if (NVME_ERR_REC_DULBE(req->ns->err_rec)) {
                         return NVME_DULB | NVME_DNR;
                     }
-
-                    break;
+                    req->predef |= 1ULL << i;
+                    continue;
                 }
 
                 return err;
@@ -846,9 +839,40 @@ static uint16_t oc20_rw(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req, bool vector
      * perfectly valid address still has nowhere to land. Fail the command
      * rather than report success for a transfer that never happened.
      */
+    /*
+     * A block that was never written holds nothing, so the host is owed the
+     * pattern the namespace reports in its deallocated block features rather
+     * than whatever the media holds there -- which, once the chunk it sits in
+     * has been reset, is the data written before that reset. The transfer
+     * below consumes the scatter list, so note where those blocks land first.
+     */
+    ScatterGatherEntry predef_sg[OC20_CMD_MAX_LBAS];
+    int npredef = 0;
+
+    if (!req->is_write) {
+        for (i = 0; i < nlb; i++) {
+            if (req->predef & (1ULL << i)) {
+                predef_sg[npredef++] = req->qsg.sg[i];
+            }
+        }
+    }
+
     if (backend_rw(n->mbe, &req->qsg, aio_sector_list, req->is_write)) {
         err = NVME_LBA_RANGE | NVME_DNR;
         goto fail_free;
+    }
+
+    if (npredef) {
+        AddressSpace *as = pci_get_address_space(&n->parent_obj);
+        uint8_t pattern = (ns->id_ns.dlfeat & 0x7) == 0x2 ? 0xff : 0x00;
+
+        for (i = 0; i < npredef; i++) {
+            if (dma_memory_set(as, predef_sg[i].base, pattern,
+                               predef_sg[i].len, MEMTXATTRS_UNSPECIFIED)) {
+                err = NVME_DATA_TRAS_ERROR | NVME_DNR;
+                goto fail_free;
+            }
+        }
     }
 
     oc20_advance_status(n, ns, cmd, req);

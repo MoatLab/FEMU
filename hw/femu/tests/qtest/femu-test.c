@@ -31,6 +31,9 @@
 #define FEMU_OC20_IDENTIFY      0xe2    /* Open-Channel 2.0 geometry */
 #define FEMU_OC20_VECT_WRITE    0x91
 #define FEMU_OC20_VECT_READ     0x92
+#define FEMU_OC20_VECT_ERASE    0x90
+/* sectors the write cache holds back before a read can see them */
+#define FEMU_OC20_MW_CUNITS     24
 #define FEMU_KV_CMD_STORE       0x01
 #define FEMU_CMD_IO_MGMT_SEND   0x1d
 #define FEMU_IOMS_RUH_UPDATE    0x01
@@ -1008,27 +1011,37 @@ static void femu_test_oc20_vector_io(void *obj, void *data,
     buf = guest_alloc(alloc, 4096);
     qtest_memset(femu->dev.bus->qts, buf, 0x6b, 4096);
 
+    /*
+     * A sector is only readable once the write pointer has moved MW_CUNITS
+     * sectors past it -- until then it is still in the device's write cache
+     * and reads of it are answered as unwritten. Write the whole window so
+     * the first sector of each chunk is readable below.
+     */
     memset(&cmd, 0, sizeof(cmd));
     cmd.opcode = FEMU_OC20_VECT_WRITE;
     cmd.nsid = cpu_to_le32(1);
     cmd.dptr.prp1 = cpu_to_le64(buf);
-    cmd.cdw10 = cpu_to_le32((uint32_t)lba);
-    cmd.cdw11 = cpu_to_le32((uint32_t)(lba >> 32));
-    want = c.cid;
-    femu_submit(&c, &c.io, &cmd);
-    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
-                    NVME_SUCCESS);
-    g_assert_cmpint(got, ==, want);
+    for (i = 0; i <= FEMU_OC20_MW_CUNITS; i++) {
+        cmd.cdw10 = cpu_to_le32((uint32_t)(lba + i));
+        cmd.cdw11 = cpu_to_le32((uint32_t)((lba + i) >> 32));
+        want = c.cid;
+        femu_submit(&c, &c.io, &cmd);
+        g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpint(got, ==, want);
+    }
 
-    /* a different pattern at the same sector of the next group */
+    /* a different pattern at the same sectors of the next parallel unit */
     qtest_memset(femu->dev.bus->qts, buf, 0x3c, 4096);
-    cmd.cdw10 = cpu_to_le32((uint32_t)other);
-    cmd.cdw11 = cpu_to_le32((uint32_t)(other >> 32));
-    want = c.cid;
-    femu_submit(&c, &c.io, &cmd);
-    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
-                    NVME_SUCCESS);
-    g_assert_cmpint(got, ==, want);
+    for (i = 0; i <= FEMU_OC20_MW_CUNITS; i++) {
+        cmd.cdw10 = cpu_to_le32((uint32_t)(other + i));
+        cmd.cdw11 = cpu_to_le32((uint32_t)((other + i) >> 32));
+        want = c.cid;
+        femu_submit(&c, &c.io, &cmd);
+        g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpint(got, ==, want);
+    }
 
     /* each address gives back its own sector, not the other's */
     cmd.opcode = FEMU_OC20_VECT_READ;
@@ -1055,6 +1068,40 @@ static void femu_test_oc20_vector_io(void *obj, void *data,
     qtest_memread(femu->dev.bus->qts, buf, out, sizeof(out));
     g_assert_cmpint(out[0], ==, 0x3c);
     g_assert_cmpint(out[sizeof(out) - 1], ==, 0x3c);
+
+    /*
+     * A chunk that has been reset holds nothing, so a read of it owes the
+     * host the pattern the namespace reports, not the data written before the
+     * reset. The address is read back through the same path that just
+     * returned 0x6b from the media.
+     */
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_OC20_VECT_ERASE;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.cdw10 = cpu_to_le32((uint32_t)lba);
+    cmd.cdw11 = cpu_to_le32((uint32_t)(lba >> 32));
+    want = c.cid;
+    femu_submit(&c, &c.io, &cmd);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(got, ==, want);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_OC20_VECT_READ;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    qtest_memset(femu->dev.bus->qts, buf, 0x11, 4096);
+    cmd.cdw10 = cpu_to_le32((uint32_t)lba);
+    cmd.cdw11 = cpu_to_le32((uint32_t)(lba >> 32));
+    want = c.cid;
+    femu_submit(&c, &c.io, &cmd);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(got, ==, want);
+    qtest_memread(femu->dev.bus->qts, buf, out, sizeof(out));
+    /* this namespace reports that a deallocated block reads as zeros */
+    g_assert_cmpint(out[0], ==, 0);
+    g_assert_cmpint(out[sizeof(out) - 1], ==, 0);
 
     /*
      * An address the geometry does not have must be refused with nothing
@@ -2598,7 +2645,7 @@ static void femu_register_nodes(void)
          */
         .edge.extra_device_opts =
             "devsz_mb=1024,femu_mode=0,lver=2,lnum_ch=3,lnum_lun=5,"
-            "lsecs_per_pg=4,lpgs_per_blk=256"
+            "lsecs_per_pg=4,lpgs_per_blk=256,learly_reset=1"
     });
     qos_add_test("zoned-format-index", "femu", femu_test_zoned_format_index,
                  &(QOSGraphTestOptions) {
