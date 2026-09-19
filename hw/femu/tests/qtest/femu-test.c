@@ -359,6 +359,61 @@ static void femu_round_trip(FemuCtrlState *c, uint8_t seed)
     guest_free(c->alloc, data);
 }
 
+/* Writes recover only the invalid blocks they replace (NVM 1.2, 3.3.7). */
+static void femu_uncorrectable_recovery(FemuCtrlState *c)
+{
+    static const uint8_t repair[] = {
+        NVME_CMD_WRITE, NVME_CMD_WRITE_ZEROES,
+    };
+    QTestState *qts = c->pdev->bus->qts;
+    uint64_t buf = guest_alloc(c->alloc, FEMU_DATA_SIZE);
+    uint64_t stride = FEMU_DATA_SIZE / c->lba_size;
+    uint8_t actual[FEMU_DATA_SIZE];
+    NvmeCmd cmd = { 0 };
+    unsigned int i;
+    unsigned int j;
+
+    for (i = 0; i < G_N_ELEMENTS(repair); i++) {
+        qtest_memset(qts, buf, 0x5a, FEMU_DATA_SIZE);
+        for (j = 0; j < 3; j++) {
+            g_assert_cmpint(FEMU_SC(femu_rw(c, NVME_CMD_WRITE_UNCOR,
+                                            j * stride, 0)), ==, NVME_SUCCESS);
+        }
+        g_assert_cmpint(FEMU_SC(femu_rw(c, NVME_CMD_READ, stride, buf)),
+                        ==, NVME_UNRECOVERED_READ);
+        g_assert_cmpint(FEMU_SC(femu_rw(c, repair[i], stride, buf)),
+                        ==, NVME_SUCCESS);
+        qtest_memset(qts, buf, 0xff, FEMU_DATA_SIZE);
+        g_assert_cmpint(FEMU_SC(femu_rw(c, NVME_CMD_READ, stride, buf)),
+                        ==, NVME_SUCCESS);
+        qtest_memread(qts, buf, actual, sizeof(actual));
+        for (j = 0; j < sizeof(actual); j++) {
+            g_assert_cmpint(actual[j], ==,
+                            repair[i] == NVME_CMD_WRITE ? 0x5a : 0);
+        }
+        g_assert_cmpint(FEMU_SC(femu_rw(c, NVME_CMD_COMPARE, stride, buf)),
+                        ==, NVME_SUCCESS);
+        g_assert_cmpint(FEMU_SC(femu_rw(c, NVME_CMD_READ, 0, buf)),
+                        ==, NVME_UNRECOVERED_READ);
+        g_assert_cmpint(FEMU_SC(femu_rw(c, NVME_CMD_READ, 2 * stride, buf)),
+                        ==, NVME_UNRECOVERED_READ);
+    }
+
+    /* An invalid block is allocated, so Compare must not report DULB. */
+    cmd.opcode = NVME_ADM_CMD_SET_FEATURES;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.cdw10 = cpu_to_le32(NVME_ERROR_RECOVERY);
+    cmd.cdw11 = cpu_to_le32(1 << 16);
+    g_assert_cmpint(FEMU_SC(femu_admin(c, &cmd)), ==, NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_rw(c, NVME_CMD_WRITE_UNCOR,
+                                    4 * stride, 0)), ==, NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_rw(c, NVME_CMD_COMPARE, 4 * stride, buf)),
+                    ==, NVME_UNRECOVERED_READ);
+    cmd.cdw11 = 0;
+    g_assert_cmpint(FEMU_SC(femu_admin(c, &cmd)), ==, NVME_SUCCESS);
+    guest_free(c->alloc, buf);
+}
+
 /*
  * A host that never issues Doorbell Buffer Config must still get its I/O
  * served. The controller used to start its data path only from that command.
@@ -373,6 +428,7 @@ static void femu_test_io_by_doorbell(void *obj, void *data,
     femu_create_io_queues(&c);
     femu_round_trip(&c, 1);
     femu_round_trip(&c, 2);
+    femu_uncorrectable_recovery(&c);
     femu_queue_free(&c, &c.io);
     femu_disable(&c);
 }
@@ -2626,7 +2682,10 @@ static void femu_register_nodes(void)
     qos_node_consumes("femu", "pci-bus", &opts);
     qos_node_produces("femu", "pci-device");
 
-    qos_add_test("io-by-doorbell", "femu", femu_test_io_by_doorbell, NULL);
+    qos_add_test("io-by-doorbell", "femu", femu_test_io_by_doorbell,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "oncs=0x1f"
+    });
     qos_add_test("io-by-shadow-doorbell", "femu",
                  femu_test_io_by_shadow_doorbell, NULL);
     qos_add_test("features", "femu", femu_test_features, NULL);

@@ -17,11 +17,14 @@
  * is not enabled the read simply returns the zeros already in the backend.
  */
 
-/* Mark [slba, slba+nlb) as written (allocated). Called on every host write. */
+/* Mark written blocks allocated and clear their invalid status. */
 void nvme_mark_written(NvmeNamespace *ns, uint64_t slba, uint32_t nlb)
 {
     if (ns->util) {
         bitmap_set(ns->util, slba, nlb);
+    }
+    if (ns->uncorrectable) {
+        bitmap_clear(ns->uncorrectable, slba, nlb);
     }
 }
 
