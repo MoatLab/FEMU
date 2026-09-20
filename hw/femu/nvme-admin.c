@@ -1455,6 +1455,7 @@ static void nvme_collect_media_stats(FemuCtrl *n, FemuMediaStats *st)
 
     for (i = 0; n->namespaces && i < n->num_namespaces; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
+        uint64_t reads;
         uint8_t spare, used;
 
         st->media_errors += zns_media_errors(ns);
@@ -1481,8 +1482,13 @@ static void nvme_collect_media_stats(FemuCtrl *n, FemuMediaStats *st)
         st->media_bytes += (ssd_nand_write_pages(ns->ssd) +
                             ssd_gc_write_pages(ns->ssd)) *
                            (uint64_t)ssd_page_size(ns->ssd);
-        if (ssd_max_block_reads(ns->ssd) > st->max_block_reads) {
-            st->max_block_reads = ssd_max_block_reads(ns->ssd);
+        /*
+         * One walk of the media, not two: this is a scan of every block on
+         * the device, and every log page that carries the counters pays it.
+         */
+        reads = ssd_max_block_reads(ns->ssd);
+        if (reads > st->max_block_reads) {
+            st->max_block_reads = reads;
         }
         st->read_reclaims += ssd_read_reclaims(ns->ssd);
         st->retention_refreshes += ssd_retention_refreshes(ns->ssd);
