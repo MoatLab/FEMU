@@ -1157,8 +1157,14 @@ int do_gc_fdp_style(struct ssd *ssd, uint16_t rgid, uint16_t ruhid,
 /*
  * ssd_stream_write - FDP write path: placement-aware page allocation
  */
-static uint64_t ssd_stream_write(FemuCtrl *n, struct ssd *ssd,
-                                 NvmeRequest *req)
+/*
+ * Program [start_lpn, end_lpn] into the reclaim unit the request places into.
+ * Write and Write Zeroes both land here: the second hands over no data, but
+ * the pages it leaves holding zeros are programmed and counted the same way.
+ */
+static uint64_t ssd_stream_write_lpns(FemuCtrl *n, struct ssd *ssd,
+                                      NvmeRequest *req, uint64_t start_lpn,
+                                      uint64_t end_lpn)
 {
     NvmeNamespace *ns = req->ns;
     struct ssdparams *spp = &ssd->sp;
@@ -1167,15 +1173,12 @@ static uint64_t ssd_stream_write(FemuCtrl *n, struct ssd *ssd,
     FemuReclaimUnit *ru;
 
     uint64_t pg = (uint64_t)spp->secsz * spp->secs_per_pg;
-    uint64_t start_lpn, end_lpn;
     uint64_t media = 0;
     struct ppa ppa;
     uint64_t lpn;
     uint64_t curlat = 0, maxlat = 0;
     uint64_t written = 0;
     int r;
-
-    ssd_lpn_range(ssd, req, req->slba, req->nlb, &start_lpn, &end_lpn);
 
     /* parse placement info from request */
     uint16_t pid = req->fdp_dspec;
@@ -1420,6 +1423,16 @@ void ssd_fdp_update_ruhs(FemuCtrl *n, NvmeRequest *req)
         ruh->curr_ru = fresh;
         ruh->ruh->rus[rgid] = fresh->nvme_ru;
     }
+}
+
+static uint64_t ssd_stream_write(FemuCtrl *n, struct ssd *ssd,
+                                NvmeRequest *req)
+{
+    uint64_t start_lpn, end_lpn;
+
+    ssd_lpn_range(ssd, req, req->slba, req->nlb, &start_lpn, &end_lpn);
+
+    return ssd_stream_write_lpns(n, ssd, req, start_lpn, end_lpn);
 }
 
 /*
@@ -1812,7 +1825,7 @@ static void ssd_trim_fdp_range(FemuCtrl *n, NvmeRequest *req)
  * the FTL owes the same unmap DSM Deallocate does. Without the bit they hold
  * written zeros instead and the mapping is left alone.
  */
-void ssd_write_zeroes_fdp_style(FemuCtrl *n, NvmeRequest *req)
+uint64_t ssd_write_zeroes_fdp_style(FemuCtrl *n, NvmeRequest *req)
 {
     struct ssd *ssd = (req->ns && req->ns->ssd) ? req->ns->ssd : n->ssd;
     struct ssdparams *spp = &ssd->sp;
@@ -1820,16 +1833,25 @@ void ssd_write_zeroes_fdp_style(FemuCtrl *n, NvmeRequest *req)
     uint64_t start_lpn, end_lpn;
     int already_invalid = 0;
 
-    if (!(le16_to_cpu(rw->control) & NVME_WZ_DEAC)) {
-        return;
-    }
     ssd_lpn_range(ssd, req, le64_to_cpu(rw->slba), le16_to_cpu(rw->nlb) + 1,
                   &start_lpn, &end_lpn);
     if (end_lpn >= spp->tt_pgs) {
-        return;
+        return 0;
+    }
+
+    /*
+     * Without the deallocate bit the blocks hold written zeros, so the device
+     * has to put them somewhere: program the range into the handle's reclaim
+     * unit, as the non-placement path does, rather than return having neither
+     * charged the media nor counted the pages.
+     */
+    if (!(le16_to_cpu(rw->control) & NVME_WZ_DEAC)) {
+        return ssd_stream_write_lpns(n, ssd, req, start_lpn, end_lpn);
     }
 
     ssd_deallocate_fdp_lpns(ssd, start_lpn, end_lpn, &already_invalid);
+
+    return 0;
 }
 
 /*

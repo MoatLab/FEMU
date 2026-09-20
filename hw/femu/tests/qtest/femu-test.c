@@ -2662,6 +2662,63 @@ static void femu_test_kv_discovery(void *obj, void *data,
     femu_disable(&c);
 }
 
+/*
+ * Write Zeroes without the deallocate bit leaves the blocks holding written
+ * zeros, so the device owes the programs that put them there. The placement
+ * path returned without touching the media at all, so the command cost
+ * nothing and counted nothing, while the ordinary path programmed the range.
+ */
+static void femu_test_fdp_write_zeroes(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    NvmeRwCmd rw;
+    uint64_t buf;
+    uint8_t page[512];
+    uint64_t host_before, nand_before, host_after, nand_after;
+    uint32_t blocks = 32;               /* 32 blocks of 4 KiB is 32 pages */
+    uint16_t want, got;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    c.lba_size = 4096;
+
+    buf = guest_alloc(alloc, 4096);
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, buf,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, page, sizeof(page));
+    host_before = ldq_le_p(page + 8);
+    nand_before = ldq_le_p(page + 24);
+
+    /* no deallocate bit: the blocks keep written zeros */
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = NVME_CMD_WRITE_ZEROES;
+    rw.nsid = cpu_to_le32(1);
+    rw.slba = cpu_to_le64(0);
+    rw.nlb = cpu_to_le16(blocks - 1);
+    want = c.cid;
+    femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(got, ==, want);
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, buf,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, page, sizeof(page));
+    host_after = ldq_le_p(page + 8);
+    nand_after = ldq_le_p(page + 24);
+
+    /* one page per block, programmed and counted like any other write */
+    g_assert_cmpint(host_after - host_before, ==, blocks);
+    g_assert_cmpint(nand_after - nand_before, ==, blocks);
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 static void femu_register_nodes(void)
 {
     QOSGraphEdgeOptions opts = {
@@ -2792,6 +2849,13 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4"
+    });
+    qos_add_test("fdp-write-zeroes", "femu", femu_test_fdp_write_zeroes,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,lba_index=3,"
+            "oncs=0xc,subsys=fdpsub",
     });
     qos_add_test("fdp-ruh-update", "femu", femu_test_fdp_ruh_update,
                  &(QOSGraphTestOptions) {

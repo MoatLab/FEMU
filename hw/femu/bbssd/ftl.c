@@ -396,7 +396,7 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
     case NVME_CMD_WRITE_ZEROES:
         /* FDP keeps its own reclaim-unit accounting and needs its own path */
         if (ssd->fdp_enabled) {
-            ssd_write_zeroes_fdp_style(n, req);
+            lat = ssd_write_zeroes_fdp_style(n, req);
         } else {
             lat = ssd_write_zeroes(ssd, req);
         }
