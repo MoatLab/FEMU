@@ -1427,11 +1427,10 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
          * be a resource left. Check before opening so a rejection leaves the
          * zone closed.
          */
-        if (!all && (dw13 & NVME_ZSFLAG_ZRWA_ALLOC)) {
+        if (!all && (dw13 & NVME_ZSFLAG_ZRWA_ALLOC) &&
+            !(zone->d.za & NVME_ZA_ZRWA_VALID)) {
             if (!ns->zrwa_size || !ns->zrwafg_size || !ns->zrwa_num) {
                 return NVME_INVALID_ZONE_OP | NVME_DNR;
-            } else if (zone->d.za & NVME_ZA_ZRWA_VALID) {
-                return NVME_SUCCESS;
             } else if (zns_get_zone_state(zone) != NVME_ZONE_STATE_EMPTY) {
                 return NVME_INVALID_ZONE_OP | NVME_DNR;
             } else if (zone->w_ptr % ns->zrwafg_size) {
@@ -1445,7 +1444,8 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
         }
         status = zns_do_zone_op(ns, zone, proc_mask, zns_open_zone, req);
         if (status == NVME_SUCCESS && !all &&
-            (dw13 & NVME_ZSFLAG_ZRWA_ALLOC)) {
+            (dw13 & NVME_ZSFLAG_ZRWA_ALLOC) &&
+            !(zone->d.za & NVME_ZA_ZRWA_VALID)) {
             zone->d.za |= NVME_ZA_ZRWA_VALID;
             ns->zrwa_avail--;
         }

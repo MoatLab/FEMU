@@ -1223,6 +1223,78 @@ static void femu_test_oc20_vector_io(void *obj, void *data,
     femu_disable(&c);
 }
 
+static uint16_t femu_zone_action(FemuCtrlState *c, uint64_t slba,
+                                  uint32_t action)
+{
+    NvmeCmd cmd = { 0 };
+    uint16_t got;
+
+    cmd.opcode = NVME_CMD_ZONE_MGMT_SEND;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.cdw10 = cpu_to_le32(slba);
+    cmd.cdw11 = cpu_to_le32(slba >> 32);
+    cmd.cdw13 = cpu_to_le32(action);
+    femu_submit(c, &c->io, &cmd);
+    return FEMU_SC(femu_complete(c, &c->io, &got, NULL));
+}
+
+static void femu_zone_report(FemuCtrlState *c, uint64_t buf, uint8_t *report)
+{
+    NvmeCmd cmd = { 0 };
+    uint16_t got;
+
+    cmd.opcode = NVME_CMD_ZONE_MGMT_RECV;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw12 = cpu_to_le32(47); /* header and two zone descriptors */
+    femu_submit(c, &c->io, &cmd);
+    g_assert_cmpint(FEMU_SC(femu_complete(c, &c->io, &got, NULL)), ==,
+                    NVME_SUCCESS);
+    qtest_memread(c->pdev->bus->qts, buf, report, 192);
+}
+
+static void femu_test_zrwa_reopen(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf, second;
+    uint8_t report[192];
+    uint32_t open = NVME_ZONE_ACTION_OPEN | (NVME_ZSFLAG_ZRWA_ALLOC << 8);
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, 4096);
+    femu_zone_report(&c, buf, report);
+    g_assert_cmpuint(ldq_le_p(report), >=, 2);
+    second = ldq_le_p(report + 128 + 16);
+    g_assert_cmpuint(second, >, 0);
+
+    g_assert_cmpint(femu_zone_action(&c, 0, open), ==, NVME_SUCCESS);
+    for (i = 0; i < 4; i++) {
+        g_assert_cmpint(femu_zone_action(&c, 0, NVME_ZONE_ACTION_CLOSE), ==,
+                        NVME_SUCCESS);
+        femu_zone_report(&c, buf, report);
+        g_assert_cmpint(report[65] >> 4, ==, NVME_ZONE_STATE_CLOSED);
+        g_assert_cmpint(femu_zone_action(&c, 0, open), ==, NVME_SUCCESS);
+        femu_zone_report(&c, buf, report);
+        g_assert_cmpint(report[65] >> 4, ==, NVME_ZONE_STATE_EXPLICITLY_OPEN);
+        g_assert_cmpint(report[66] & NVME_ZA_ZRWA_VALID, !=, 0);
+    }
+    /* Reopening must neither release nor consume another resource. */
+    g_assert_cmpint(femu_zone_action(&c, second, open), ==, NVME_NOZRWA);
+    g_assert_cmpint(femu_zone_action(&c, 0, NVME_ZONE_ACTION_RESET), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(femu_zone_action(&c, second, open), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_zone_action(&c, second, NVME_ZONE_ACTION_RESET), ==,
+                    NVME_SUCCESS);
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 /*
  * A zone that has been reset holds no data. This controller reports that a
  * deallocated block reads as zeros, and the read path goes straight to the
@@ -2924,6 +2996,12 @@ static void femu_register_nodes(void)
                  femu_test_zone_append_parallel, &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
             "femu_mode=3,secsz=512,multipoller_enabled=1,poller_ratio=1"
+    });
+    qos_add_test("zrwa-reopen", "femu", femu_test_zrwa_reopen,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=512,femu_mode=3,secsz=512,zns_chnls_per_zone=1,"
+            "zns_zrwa_size=128,zns_zrwafg_size=32,zns_zrwa_num=1"
     });
     qos_add_test("zone-reset", "femu", femu_test_zone_reset,
                  &(QOSGraphTestOptions) {
