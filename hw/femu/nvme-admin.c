@@ -1973,7 +1973,7 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
     bool rae = (dw10 >> 15) & 0x1;   /* Retain Asynchronous Event */
     uint8_t  csi = le32_to_cpu(cmd->cdw14) >> 24;
     uint16_t lspi = (dw11 >> 16) & 0xffff;
-    uint32_t len;
+    uint64_t len;
     uint64_t off, lpol, lpou;
     uint32_t numdl, numdu;
     int status;
@@ -1983,10 +1983,11 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
     lpol = dw12;
     lpou = dw13;
 
-    len = (((numdu << 16) | numdl) + 1) << 2;
+    len = ((((uint64_t)numdu << 16) | numdl) + 1) << 2;
     off = (lpou << 32ULL) | lpol;
 
-    if (off & 0x3) {
+    /* The log handlers and PRP transfer helpers take a 32-bit length. */
+    if (len > UINT32_MAX || (off & 0x3)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 

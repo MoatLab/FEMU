@@ -1843,6 +1843,71 @@ static void femu_test_log_pages(void *obj, void *data, QGuestAllocator *alloc)
     femu_disable(&c);
 }
 
+/* Large dword counts must not wrap to a small, successful transfer. */
+static void femu_test_log_length(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    NvmeCmd cmd = { 0 };
+    uint64_t buf;
+    const uint32_t counts[] = { 0x40000000, 0x3fffffff, 0xffffffff };
+    size_t i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    buf = guest_alloc(alloc, 4096);
+    qtest_memset(femu->dev.bus->qts, buf, 0xa5, 4096);
+    cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+
+    for (i = 0; i < G_N_ELEMENTS(counts); i++) {
+        cmd.cdw10 = cpu_to_le32(NVME_LOG_SMART_INFO |
+                                ((counts[i] & 0xffff) << 16));
+        cmd.cdw11 = cpu_to_le32(counts[i] >> 16);
+        g_assert_cmpint(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_INVALID_FIELD);
+    }
+    g_assert_cmpint(qtest_readb(femu->dev.bus->qts, buf), ==, 0xa5);
+    cmd.cdw10 = cpu_to_le32(NVME_LOG_SMART_INFO | (127 << 16));
+    cmd.cdw11 = 0;
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+static void femu_test_oc20_log_length(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    NvmeCmd cmd = { 0 };
+    uint64_t buf;
+    const uint32_t counts[] = { 0x40000000, 0x3fffffff, 0xffffffff };
+    size_t i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    buf = guest_alloc(alloc, 4096);
+    cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(0xca | (7 << 16)); /* one chunk descriptor */
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+
+    /* Use the original descriptor so even a broken set leaves it intact. */
+    cmd.opcode = 0xc1; /* Open-Channel Set Log Page */
+    for (i = 0; i < G_N_ELEMENTS(counts); i++) {
+        cmd.cdw10 = cpu_to_le32(0xca | ((counts[i] & 0xffff) << 16));
+        cmd.cdw11 = cpu_to_le32(counts[i] >> 16);
+        g_assert_cmpint(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_INVALID_FIELD);
+    }
+    cmd.cdw10 = cpu_to_le32(0xca | (7 << 16));
+    cmd.cdw11 = 0;
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
 static uint16_t femu_format(FemuCtrlState *c, uint32_t nsid, uint8_t lba_idx,
                             uint8_t ses)
 {
@@ -2840,6 +2905,15 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts = "lba_index=3"
     });
     qos_add_test("log-pages", "femu", femu_test_log_pages, NULL);
+    qos_add_test("log-length", "femu", femu_test_log_length, NULL);
+    qos_add_test("log-length-unlimited", "femu", femu_test_log_length,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "mdts=0"
+    });
+    qos_add_test("oc20-log-length", "femu", femu_test_oc20_log_length,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=0,lver=2"
+    });
     qos_add_test("media-counters", "femu", femu_test_media_counters,
                  &(QOSGraphTestOptions) {
         /*

@@ -973,7 +973,7 @@ static uint16_t oc20_erase(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     return status;
 }
 
-static uint16_t oc20_chunk_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
+static uint16_t oc20_chunk_info(FemuCtrl *n, NvmeCmd *cmd, uint64_t buf_len,
                                 uint64_t off)
 {
     NvmeNamespace *ns;
@@ -1005,7 +1005,8 @@ static uint16_t oc20_chunk_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
      * to before the buffer -- which the set direction of this command writes
      * the host's own bytes through.
      */
-    if (unlikely(off >= log_len || buf_len > log_len - off)) {
+    if (unlikely(buf_len > UINT32_MAX || off >= log_len ||
+                 buf_len > log_len - off)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     trans_len = buf_len;
@@ -1032,7 +1033,8 @@ static uint16_t oc20_get_log(FemuCtrl *n, NvmeCmd *cmd)
     uint32_t dw12 = le32_to_cpu(cmd->cdw12);
     uint32_t dw13 = le32_to_cpu(cmd->cdw13);
     uint16_t lid = dw10 & 0xff;
-    uint32_t numdl, numdu, len;
+    uint32_t numdl, numdu;
+    uint64_t len;
     uint64_t off, lpol, lpou;
 
     numdl = (dw10 >> 16);
@@ -1040,7 +1042,7 @@ static uint16_t oc20_get_log(FemuCtrl *n, NvmeCmd *cmd)
     lpol = dw12;
     lpou = dw13;
 
-    len = (((numdu << 16) | numdl) + 1) << 2;
+    len = ((((uint64_t)numdu << 16) | numdl) + 1) << 2;
     off = (lpou << 32ULL) | lpol;
 
     switch (lid) {
@@ -1058,7 +1060,8 @@ static uint16_t oc20_set_log(FemuCtrl *n, NvmeCmd *cmd)
     uint32_t dw12 = le32_to_cpu(cmd->cdw12);
     uint32_t dw13 = le32_to_cpu(cmd->cdw13);
     uint16_t lid = dw10 & 0xff;
-    uint32_t numdl, numdu, len;
+    uint32_t numdl, numdu;
+    uint64_t len;
     uint64_t off, lpol, lpou;
 
     /* NVMe R1.3 */
@@ -1067,7 +1070,7 @@ static uint16_t oc20_set_log(FemuCtrl *n, NvmeCmd *cmd)
     lpol = dw12;
     lpou = dw13;
 
-    len = (((numdu << 16) | numdl) + 1) << 2;
+    len = ((((uint64_t)numdu << 16) | numdl) + 1) << 2;
     off = (lpou << 32ULL) | lpol;
 
     switch (lid) {
