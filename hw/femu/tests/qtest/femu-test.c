@@ -1908,6 +1908,54 @@ static void femu_test_oc20_log_length(void *obj, void *data,
     femu_disable(&c);
 }
 
+static void femu_test_report_length(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    NvmeCmd cmd = { 0 };
+    bool zoned = data != NULL;
+    uint64_t buf;
+    uint16_t got;
+    const uint32_t counts[] = { 0x4000001f, 0x3fffffff, 0xffffffff };
+    size_t i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, 4096);
+    qtest_memset(femu->dev.bus->qts, buf, 0xa5, 4096);
+    cmd.opcode = zoned ? NVME_CMD_ZONE_MGMT_RECV : FEMU_CMD_IO_MGMT_RECV;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    if (!zoned) {
+        cmd.cdw10 = cpu_to_le32(FEMU_IOMR_RUH_STATUS);
+    }
+    for (i = 0; i < G_N_ELEMENTS(counts); i++) {
+        if (zoned) {
+            cmd.cdw12 = cpu_to_le32(counts[i]);
+        } else {
+            cmd.cdw11 = cpu_to_le32(counts[i]);
+        }
+        femu_submit(&c, &c.io, &cmd);
+        g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                        NVME_INVALID_FIELD);
+    }
+    g_assert_cmpint(qtest_readb(femu->dev.bus->qts, buf), ==, 0xa5);
+    if (zoned) {
+        cmd.cdw12 = cpu_to_le32(127);
+    } else {
+        cmd.cdw11 = cpu_to_le32(127);
+    }
+    femu_submit(&c, &c.io, &cmd);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(qtest_readb(femu->dev.bus->qts, buf), !=, 0xa5);
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 static uint16_t femu_format(FemuCtrlState *c, uint32_t nsid, uint8_t lba_idx,
                             uint8_t ses)
 {
@@ -2906,6 +2954,17 @@ static void femu_register_nodes(void)
     });
     qos_add_test("log-pages", "femu", femu_test_log_pages, NULL);
     qos_add_test("log-length", "femu", femu_test_log_length, NULL);
+    qos_add_test("zone-report-length", "femu", femu_test_report_length,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=3,secsz=512",
+        .arg = GINT_TO_POINTER(1),
+    });
+    qos_add_test("fdp-report-length", "femu", femu_test_report_length,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,subsys=fdpsub",
+    });
     qos_add_test("log-length-unlimited", "femu", femu_test_log_length,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "mdts=0"

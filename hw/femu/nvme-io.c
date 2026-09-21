@@ -1214,12 +1214,15 @@ static uint16_t nvme_io_mgmt_recv(FemuCtrl *n, NvmeRequest *req)
     uint32_t cdw10 = le32_to_cpu(cmd->cdw10);
     uint32_t numd = le32_to_cpu(cmd->cdw11);
     uint8_t mo = (cdw10 & 0xff);
-    size_t len = (numd + 1) << 2;
+    uint64_t len = ((uint64_t)numd + 1) << 2;
 
     switch (mo) {
     case NVME_IOMR_MO_NOP:
         return NVME_SUCCESS;
     case NVME_IOMR_MO_RUH_STATUS:
+        if (len > UINT32_MAX || nvme_check_mdts(n, len)) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
         return nvme_io_mgmt_recv_ruhs(n, req, len);
     default:
         return NVME_INVALID_FIELD | NVME_DNR;

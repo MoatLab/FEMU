@@ -1592,7 +1592,7 @@ static uint16_t zns_zone_mgmt_recv(FemuCtrl *n, NvmeRequest *req)
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
     /* cdw12 is zero-based number of dwords to return. Convert to bytes */
-    uint32_t data_size = (le32_to_cpu(cmd->cdw12) + 1) << 2;
+    uint64_t data_size = ((uint64_t)le32_to_cpu(cmd->cdw12) + 1) << 2;
     uint32_t dw13 = le32_to_cpu(cmd->cdw13);
     uint32_t zone_idx, zra, zrasf, partial;
     uint64_t max_zones, nr_zones = 0;
@@ -1628,7 +1628,7 @@ static uint16_t zns_zone_mgmt_recv(FemuCtrl *n, NvmeRequest *req)
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    if (data_size < sizeof(NvmeZoneReportHeader)) {
+    if (data_size > UINT32_MAX || data_size < sizeof(NvmeZoneReportHeader)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
