@@ -820,8 +820,6 @@ static uint16_t nvme_dsm(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 {
     uint32_t cdw10 = le32_to_cpu(cmd->cdw10);
     uint32_t cdw11 = le32_to_cpu(cmd->cdw11);
-    uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
-    uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
     uint16_t nr_ranges;
     NvmeDsmRange *ranges = NULL;
     int i;
@@ -859,7 +857,7 @@ static uint16_t nvme_dsm(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         return NVME_INTERNAL_DEV_ERROR | NVME_DNR;
     }
 
-    if (dma_write_prp(n, (uint8_t *)ranges, ranges_size, prp1, prp2)) {
+    if (dma_write_cmd(n, cmd, (uint8_t *)ranges, ranges_size)) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
                                 offsetof(NvmeCmd, dptr.prp1), 0, ns->id);
             g_free(ranges);
@@ -1231,8 +1229,6 @@ static uint16_t nvme_io_mgmt_recv_ruhs(FemuCtrl *n, NvmeRequest *req,
     size_t trans_len;
     g_autofree uint8_t *buf = NULL;
     NvmeCmd *cmd = &req->cmd;
-    uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
-    uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
 
     if (!n->subsys) {
         return NVME_INVALID_FIELD | NVME_DNR;
@@ -1274,7 +1270,7 @@ static uint16_t nvme_io_mgmt_recv_ruhs(FemuCtrl *n, NvmeRequest *req,
         }
     }
 
-    return dma_read_prp(n, (uint8_t *)buf, trans_len, prp1, prp2);
+    return dma_read_cmd(n, cmd, (uint8_t *)buf, trans_len);
 }
 
 static uint16_t nvme_io_mgmt_recv(FemuCtrl *n, NvmeRequest *req)
@@ -1312,8 +1308,6 @@ static uint16_t nvme_io_mgmt_send_ruh_update(FemuCtrl *n, NvmeRequest *req)
     uint32_t npid = (cdw10 >> 16) + 1;
     unsigned int i;
     g_autofree uint16_t *pids = NULL;
-    uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
-    uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
     uint32_t maxnpid;
     uint16_t ph, rg;
     uint16_t ret;
@@ -1329,8 +1323,7 @@ static uint16_t nvme_io_mgmt_send_ruh_update(FemuCtrl *n, NvmeRequest *req)
     }
 
     pids = g_new(uint16_t, npid);
-    ret = dma_write_prp(n, (uint8_t *)pids, npid * sizeof(uint16_t),
-                        prp1, prp2);
+    ret = dma_write_cmd(n, cmd, (uint8_t *)pids, npid * sizeof(uint16_t));
     if (ret) {
         return ret;
     }

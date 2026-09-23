@@ -2267,6 +2267,10 @@ uint16_t dma_write_prp(FemuCtrl *n, uint8_t *ptr, uint32_t len, uint64_t
                             prp1, uint64_t prp2);
 uint16_t dma_read_prp(FemuCtrl *n, uint8_t *ptr, uint32_t len, uint64_t
                            prp1, uint64_t prp2);
+uint16_t femu_map_dptr(FemuCtrl *n, NvmeCmd *cmd, QEMUSGList *qsg,
+                       QEMUIOVector *iov, uint32_t len);
+uint16_t dma_write_cmd(FemuCtrl *n, NvmeCmd *cmd, uint8_t *ptr, uint32_t len);
+uint16_t dma_read_cmd(FemuCtrl *n, NvmeCmd *cmd, uint8_t *ptr, uint32_t len);
 
 
 /* Misc */

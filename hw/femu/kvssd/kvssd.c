@@ -106,8 +106,6 @@ static uint16_t kvssd_store(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint8_t key_len = 0;
     uint8_t opt = kv_store_option(cmd);
     uint32_t vsize = kv_value_size(cmd);
-    uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
-    uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
     bool sike = opt & NVME_KV_STORE_SIKE;
     bool sinke = opt & NVME_KV_STORE_SINKE;
     uint16_t status;
@@ -126,7 +124,7 @@ static uint16_t kvssd_store(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     /* The FTL allocates value space, drives the host DMA, programs NAND (and
      * charges its latency on req), and commits the index. */
-    status = kvssd_ftl_store(n, kvssd, req, key, key_len, vsize, prp1, prp2,
+    status = kvssd_ftl_store(n, kvssd, req, key, key_len, vsize,
                              sike, sinke);
     if (status) {
         return status;
@@ -145,8 +143,6 @@ static uint16_t kvssd_retrieve(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint8_t key[NVME_KV_MAX_KEY_LEN];
     uint8_t key_len = 0;
     uint32_t hbs = kv_value_size(cmd);     /* CDW10 = Host Buffer Size */
-    uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
-    uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
     uint32_t full_len = 0;
     uint16_t status;
 
@@ -158,7 +154,7 @@ static uint16_t kvssd_retrieve(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         return status;
     }
 
-    status = kvssd_ftl_retrieve(n, kvssd, req, key, key_len, hbs, prp1, prp2,
+    status = kvssd_ftl_retrieve(n, kvssd, req, key, key_len, hbs,
                                 &full_len);
     if (status) {
         return status;
@@ -243,8 +239,6 @@ static uint16_t kvssd_list(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint8_t kl = kv_key_len(cmd);
     uint8_t start_len = kl;
     uint32_t hbs = kv_value_size(cmd);
-    uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
-    uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
 
     if (!kvssd) {
         return NVME_INTERNAL_DEV_ERROR | NVME_DNR;
@@ -254,7 +248,7 @@ static uint16_t kvssd_list(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
     kv_get_key(cmd, start_key);
 
-    return kvssd_ftl_list(n, kvssd, req, start_key, start_len, hbs, prp1, prp2);
+    return kvssd_ftl_list(n, kvssd, req, start_key, start_len, hbs);
 }
 
 static uint16_t kvssd_io_cmd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,

@@ -300,29 +300,45 @@ inval:
     return status | NVME_DNR;
 }
 
+/* Copy between a buffer and a mapped transfer, then release the mapping. */
+static uint16_t dma_copy(QEMUSGList *qsg, QEMUIOVector *iov, uint8_t *ptr,
+                         uint32_t len, bool to_host)
+{
+    uint16_t status = NVME_SUCCESS;
+
+    if (qsg->nsg > 0) {
+        uint64_t resid = to_host ?
+            dma_buf_read(ptr, len, NULL, qsg, MEMTXATTRS_UNSPECIFIED) :
+            dma_buf_write(ptr, len, NULL, qsg, MEMTXATTRS_UNSPECIFIED);
+
+        if (resid) {
+            status = NVME_INVALID_FIELD | NVME_DNR;
+        }
+        qemu_sglist_destroy(qsg);
+    } else {
+        size_t done = to_host ? qemu_iovec_from_buf(iov, 0, ptr, len) :
+                                qemu_iovec_to_buf(iov, 0, ptr, len);
+
+        if (done != len) {
+            status = NVME_INVALID_FIELD | NVME_DNR;
+        }
+        qemu_iovec_destroy(iov);
+    }
+
+    return status;
+}
+
 uint16_t dma_write_prp(FemuCtrl *n, uint8_t *ptr, uint32_t len, uint64_t prp1,
                        uint64_t prp2)
 {
     QEMUSGList qsg;
     QEMUIOVector iov;
-    uint16_t status = NVME_SUCCESS;
 
     if (nvme_map_prp(&qsg, &iov, prp1, prp2, len, n)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
-    if (qsg.nsg > 0) {
-        if (dma_buf_write(ptr, len, NULL, &qsg, MEMTXATTRS_UNSPECIFIED)) {
-            status = NVME_INVALID_FIELD | NVME_DNR;
-        }
-        qemu_sglist_destroy(&qsg);
-    } else {
-        if (qemu_iovec_from_buf(&iov, 0, ptr, len) != len) {
-            status = NVME_INVALID_FIELD | NVME_DNR;
-        }
-        qemu_iovec_destroy(&iov);
-    }
 
-    return status;
+    return dma_copy(&qsg, &iov, ptr, len, false);
 }
 
 uint16_t dma_read_prp(FemuCtrl *n, uint8_t *ptr, uint32_t len, uint64_t prp1,
@@ -330,22 +346,60 @@ uint16_t dma_read_prp(FemuCtrl *n, uint8_t *ptr, uint32_t len, uint64_t prp1,
 {
     QEMUSGList qsg;
     QEMUIOVector iov;
-    uint16_t status = NVME_SUCCESS;
 
     if (nvme_map_prp(&qsg, &iov, prp1, prp2, len, n)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
-    if (qsg.nsg > 0) {
-        if (dma_buf_read(ptr, len, NULL, &qsg, MEMTXATTRS_UNSPECIFIED)) {
-            status = NVME_INVALID_FIELD | NVME_DNR;
-        }
-        qemu_sglist_destroy(&qsg);
-    } else {
-        if (qemu_iovec_to_buf(&iov, 0, ptr, len) != len) {
-            status = NVME_INVALID_FIELD | NVME_DNR;
-        }
-        qemu_iovec_destroy(&iov);
+
+    return dma_copy(&qsg, &iov, ptr, len, true);
+}
+
+/*
+ * Map the data pointer of an I/O command: a PRP pair, or an SGL descriptor
+ * when PSDT says so. SGL support is reported for the whole controller, so
+ * every I/O command with a data buffer has to honour it, not only Read and
+ * Write.
+ */
+uint16_t femu_map_dptr(FemuCtrl *n, NvmeCmd *cmd, QEMUSGList *qsg,
+                       QEMUIOVector *iov, uint32_t len)
+{
+    if (cmd->psdt == NVME_PSDT_PRP) {
+        return nvme_map_prp(qsg, iov, le64_to_cpu(cmd->dptr.prp1),
+                            le64_to_cpu(cmd->dptr.prp2), len, n);
+    }
+    if (!n->sgl || cmd->psdt > NVME_PSDT_SGL_MPTR_SGL) {
+        return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    return status;
+    return nvme_map_sgl(qsg, iov, cmd->dptr.sgl, len, n);
+}
+
+/* host to controller, through an I/O command's data pointer */
+uint16_t dma_write_cmd(FemuCtrl *n, NvmeCmd *cmd, uint8_t *ptr, uint32_t len)
+{
+    QEMUSGList qsg;
+    QEMUIOVector iov;
+    uint16_t status;
+
+    status = femu_map_dptr(n, cmd, &qsg, &iov, len);
+    if (status) {
+        return status;
+    }
+
+    return dma_copy(&qsg, &iov, ptr, len, false);
+}
+
+/* controller to host, through an I/O command's data pointer */
+uint16_t dma_read_cmd(FemuCtrl *n, NvmeCmd *cmd, uint8_t *ptr, uint32_t len)
+{
+    QEMUSGList qsg;
+    QEMUIOVector iov;
+    uint16_t status;
+
+    status = femu_map_dptr(n, cmd, &qsg, &iov, len);
+    if (status) {
+        return status;
+    }
+
+    return dma_copy(&qsg, &iov, ptr, len, true);
 }

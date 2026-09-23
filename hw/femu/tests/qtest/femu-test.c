@@ -3566,6 +3566,134 @@ static void femu_test_prp_list_offset(void *obj, void *data,
     g_free(wbuf);
 }
 
+/*
+ * Point a command at data through a last segment holding one data block. Read
+ * as PRPs, the descriptor's address is the list, not the data, so a command
+ * that ignores PSDT moves the wrong bytes.
+ */
+static void femu_sgl_segment(FemuCtrlState *c, NvmeCmd *cmd, uint64_t list,
+                             uint64_t data, uint32_t len)
+{
+    NvmeSglDescriptor blk = { 0 };
+    NvmeSglDescriptor seg = { 0 };
+
+    blk.addr = cpu_to_le64(data);
+    blk.len = cpu_to_le32(len);
+    qtest_memwrite(c->pdev->bus->qts, list, &blk, sizeof(blk));
+    seg.addr = cpu_to_le64(list);
+    seg.len = cpu_to_le32(sizeof(blk));
+    seg.type = NVME_SGL_DESCR_TYPE_LAST_SEGMENT << 4;
+    cmd->flags = 1 << 6;                    /* PSDT: SGL */
+    memcpy(&cmd->dptr.sgl, &seg, sizeof(seg));
+}
+
+static uint16_t femu_io(FemuCtrlState *c, NvmeCmd *cmd)
+{
+    uint16_t want = c->cid;
+    uint16_t got;
+    uint16_t status;
+
+    femu_submit(c, &c->io, cmd);
+    status = femu_complete(c, &c->io, &got, NULL);
+    g_assert_cmpint(got, ==, want);
+
+    return FEMU_SC(status);
+}
+
+/*
+ * SGL support is reported for the controller as a whole, so every I/O
+ * command with a data buffer takes one, not only Read and Write.
+ */
+static void femu_test_sgl_zoned(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf, list;
+    NvmeCmd cmd;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    list = guest_alloc(alloc, 4096);
+
+    /* a zoned write, which used to refuse any SGL */
+    qtest_memset(qts, buf, 0x3c, FEMU_DATA_SIZE);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_CMD_WRITE;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.cdw12 = cpu_to_le32(FEMU_DATA_SIZE / c.lba_size - 1);
+    femu_sgl_segment(&c, &cmd, list, buf, FEMU_DATA_SIZE);
+    g_assert_cmpint(femu_io(&c, &cmd), ==, NVME_SUCCESS);
+
+    /* Report Zones lands in the data block: a header, then zone 0 */
+    qtest_memset(qts, buf, 0xff, FEMU_DATA_SIZE);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_CMD_ZONE_MGMT_RECV;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.cdw12 = cpu_to_le32(4096 / 4 - 1);
+    femu_sgl_segment(&c, &cmd, list, buf, 4096);
+    g_assert_cmpint(femu_io(&c, &cmd), ==, NVME_SUCCESS);
+    g_assert_cmpint(qtest_readq(qts, buf), >, 0);
+    g_assert_cmpint(qtest_readq(qts, buf + 64 + 8), >, 0);      /* ZCAP */
+    g_assert_cmpint(qtest_readq(qts, buf + 64 + 24), ==,        /* WP */
+                    FEMU_DATA_SIZE / c.lba_size);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+static void femu_test_sgl_kv(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint8_t *wbuf = g_malloc(4096);
+    uint8_t *rbuf = g_malloc0(4096);
+    uint64_t buf, list;
+    NvmeCmd cmd;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, 4096);
+    list = guest_alloc(alloc, 4096);
+    for (i = 0; i < 4096; i++) {
+        wbuf[i] = (uint8_t)(i * 5 + 1);
+    }
+    qtest_memwrite(qts, buf, wbuf, 4096);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_KV_CMD_STORE;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.res1 = cpu_to_le64(0x5347534753475347ULL);
+    cmd.cdw10 = cpu_to_le32(4096);
+    cmd.cdw11 = cpu_to_le32(8);
+    femu_sgl_segment(&c, &cmd, list, buf, 4096);
+    g_assert_cmpint(femu_io(&c, &cmd), ==, NVME_SUCCESS);
+
+    qtest_memset(qts, buf, 0, 4096);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_KV_CMD_RETRIEVE;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.res1 = cpu_to_le64(0x5347534753475347ULL);
+    cmd.cdw10 = cpu_to_le32(4096);
+    cmd.cdw11 = cpu_to_le32(8);
+    femu_sgl_segment(&c, &cmd, list, buf, 4096);
+    g_assert_cmpint(femu_io(&c, &cmd), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, rbuf, 4096);
+    g_assert_cmpint(memcmp(wbuf, rbuf, 4096), ==, 0);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    g_free(rbuf);
+    g_free(wbuf);
+}
+
 #define FEMU_CSD_COMPUTE_LOAD   0x22
 #define FEMU_CSD_TYPE_SHARED_LIB 0x03
 
@@ -3841,6 +3969,14 @@ static void femu_register_nodes(void)
     qos_add_test("cq-full", "femu", femu_test_cq_full, NULL);
     qos_add_test("io-interrupts", "femu", femu_test_io_interrupts, NULL);
     qos_add_test("dma-error", "femu", femu_test_dma_error, NULL);
+    qos_add_test("sgl-zoned", "femu", femu_test_sgl_zoned,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=3,secsz=512,sgl=on"
+    });
+    qos_add_test("sgl-kv", "femu", femu_test_sgl_kv,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "devsz_mb=512,femu_mode=5,sgl=on"
+    });
     qos_add_test("prp-list-offset", "femu", femu_test_prp_list_offset, NULL);
     qos_add_test("fdp-features", "femu", femu_test_fdp_features,
                  &(QOSGraphTestOptions) {

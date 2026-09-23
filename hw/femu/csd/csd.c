@@ -827,8 +827,6 @@ static uint16_t csd_exec(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     uint64_t cparam2 = le64_to_cpu(exec->cparam2);
     uint32_t group_id = exec->group;
     uint64_t runtime = le32_to_cpu(exec->runtime);
-    uint64_t prp1 = le64_to_cpu(exec->prp1);
-    uint64_t prp2 = le64_to_cpu(exec->prp2);
     FemuCsdProgram *program;
     FemuCsdMrs *mrs = NULL;
     uint64_t copy_size;
@@ -858,7 +856,7 @@ static uint16_t csd_exec(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 
     if (numr) {
         data = g_malloc0(dlen);
-        status = dma_write_prp(n, data, dlen, prp1, prp2);
+        status = dma_write_cmd(n, cmd, data, dlen);
         if (status) {
             g_free(data);
             return status;
@@ -1167,8 +1165,6 @@ static uint16_t csd_read_afdm(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     uint32_t id = le32_to_cpu(read->id);
     uint64_t offset = le64_to_cpu(read->offset);
     uint64_t size = le64_to_cpu(read->size);
-    uint64_t prp1 = le64_to_cpu(read->prp1);
-    uint64_t prp2 = le64_to_cpu(read->prp2);
     FemuCsdAfdm *afdm;
     uint16_t status;
 
@@ -1176,7 +1172,7 @@ static uint16_t csd_read_afdm(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     afdm = csd_get_afdm_locked(csd, id);
     status = csd_check_afdm_range(afdm, offset, size);
     if (!status) {
-        status = dma_read_prp(n, afdm->data + offset, size, prp1, prp2);
+        status = dma_read_cmd(n, cmd, afdm->data + offset, size);
     }
     qemu_mutex_unlock(&csd->lock);
 
@@ -1195,8 +1191,6 @@ static uint16_t csd_write_afdm(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     uint32_t id = le32_to_cpu(write->id);
     uint64_t offset = le64_to_cpu(write->offset);
     uint64_t size = le64_to_cpu(write->size);
-    uint64_t prp1 = le64_to_cpu(write->prp1);
-    uint64_t prp2 = le64_to_cpu(write->prp2);
     FemuCsdAfdm *afdm;
     uint16_t status;
 
@@ -1204,7 +1198,7 @@ static uint16_t csd_write_afdm(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     afdm = csd_get_afdm_locked(csd, id);
     status = csd_check_afdm_range(afdm, offset, size);
     if (!status) {
-        status = dma_write_prp(n, afdm->data + offset, size, prp1, prp2);
+        status = dma_write_cmd(n, cmd, afdm->data + offset, size);
     }
     qemu_mutex_unlock(&csd->lock);
 

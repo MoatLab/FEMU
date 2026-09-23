@@ -103,15 +103,15 @@ uint16_t kvssd_ftl_exist(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
                          const uint8_t *key, uint8_t kl);
 uint16_t kvssd_ftl_store(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
                          const uint8_t *key, uint8_t kl, uint32_t vsize,
-                         uint64_t prp1, uint64_t prp2, bool sike, bool sinke);
+                         bool sike, bool sinke);
 uint16_t kvssd_ftl_retrieve(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
                             const uint8_t *key, uint8_t kl, uint32_t hbs,
-                            uint64_t prp1, uint64_t prp2, uint32_t *full_len);
+                            uint32_t *full_len);
 bool kvssd_ftl_delete(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
                       const uint8_t *key, uint8_t kl);
 uint16_t kvssd_ftl_list(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
-                        const uint8_t *start_key, uint8_t start_len, uint32_t hbs,
-                        uint64_t prp1, uint64_t prp2);
+                        const uint8_t *start_key, uint8_t start_len,
+                        uint32_t hbs);
 void kvssd_ftl_selftest(FemuKvssdState *s);
 
 /* --- KV admin (kvssd-admin.c): Identify CNS 05h/06h/0Ah, Feature 20h --- */

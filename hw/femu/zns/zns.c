@@ -1198,17 +1198,7 @@ static inline uint16_t zns_check_bounds(NvmeNamespace *ns, uint64_t slba,
 
 static uint16_t zns_map_dptr(FemuCtrl *n, size_t len, NvmeRequest *req)
 {
-    uint64_t prp1, prp2;
-
-    switch (req->cmd.psdt) {
-    case NVME_PSDT_PRP:
-        prp1 = le64_to_cpu(req->cmd.dptr.prp1);
-        prp2 = le64_to_cpu(req->cmd.dptr.prp2);
-
-        return nvme_map_prp(&req->qsg, &req->iov, prp1, prp2, len, n);
-    default:
-        return NVME_INVALID_FIELD;
-    }
+    return femu_map_dptr(n, &req->cmd, &req->qsg, &req->iov, len);
 }
 
 /*Misao: backend read/write without latency emulation*/
@@ -1396,8 +1386,6 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
 {
     NvmeCmd *cmd = (NvmeCmd *)&req->cmd;
     NvmeNamespace *ns = req->ns;
-    uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
-    uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
     NvmeZone *zone;
     uintptr_t *resets;
     uint8_t *zd_ext;
@@ -1551,7 +1539,7 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
          * report.
          */
         staged = g_malloc0(ns->zd_extension_size);
-        status = dma_write_prp(n, staged, ns->zd_extension_size, prp1, prp2);
+        status = dma_write_cmd(n, cmd, staged, ns->zd_extension_size);
         if (status) {
             return status;
         }
@@ -1604,8 +1592,6 @@ static uint16_t zns_zone_mgmt_recv(FemuCtrl *n, NvmeRequest *req)
 {
     NvmeCmd *cmd = (NvmeCmd *)&req->cmd;
     NvmeNamespace *ns = req->ns;
-    uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
-    uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
     /* cdw12 is zero-based number of dwords to return. Convert to bytes */
     uint64_t data_size = ((uint64_t)le32_to_cpu(cmd->cdw12) + 1) << 2;
     uint32_t dw13 = le32_to_cpu(cmd->cdw13);
@@ -1708,7 +1694,7 @@ static uint16_t zns_zone_mgmt_recv(FemuCtrl *n, NvmeRequest *req)
         }
     }
 
-    status = dma_read_prp(n, (uint8_t *)buf, data_size, prp1, prp2);
+    status = dma_read_cmd(n, cmd, (uint8_t *)buf, data_size);
 
     g_free(buf);
 

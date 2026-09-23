@@ -675,7 +675,7 @@ uint16_t kvssd_ftl_exist(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
 
 uint16_t kvssd_ftl_store(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
                          const uint8_t *key, uint8_t kl, uint32_t vsize,
-                         uint64_t prp1, uint64_t prp2, bool sike, bool sinke)
+                         bool sike, bool sinke)
 {
     uint64_t off;
     uint64_t lat = 0;
@@ -727,7 +727,7 @@ uint16_t kvssd_ftl_store(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
         /* DMA held under the lock: the arena slot [off,off+vsize) is reserved on
          * the append frontier and a concurrent compaction could relocate it, so
          * the copy must be atomic with the allocation. */
-        status = dma_write_prp(n, s->values + off, vsize, prp1, prp2);
+        status = dma_write_cmd(n, &req->cmd, s->values + off, vsize);
         if (status) {
             s->value_next = off;            /* roll back the append */
             qemu_mutex_unlock(&s->lock);
@@ -778,7 +778,7 @@ uint16_t kvssd_ftl_store(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
 
 uint16_t kvssd_ftl_retrieve(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
                             const uint8_t *key, uint8_t kl, uint32_t hbs,
-                            uint64_t prp1, uint64_t prp2, uint32_t *full_len)
+                            uint32_t *full_len)
 {
     int slot;
     uint64_t off, vlen, xfer, lat = 0;
@@ -808,7 +808,7 @@ uint16_t kvssd_ftl_retrieve(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
     }
     lat = MAX(lat, kv_charge_index(s, req, key, kl));
     if (xfer) {
-        status = dma_read_prp(n, s->values + off, (uint32_t)xfer, prp1, prp2);
+        status = dma_read_cmd(n, &req->cmd, s->values + off, (uint32_t)xfer);
         if (status) {
             qemu_mutex_unlock(&s->lock);
             return status;
@@ -919,8 +919,8 @@ static uint16_t kv_build_list_locked(FemuKvssdState *s, const uint8_t *start_key
 }
 
 uint16_t kvssd_ftl_list(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
-                        const uint8_t *start_key, uint8_t start_len, uint32_t hbs,
-                        uint64_t prp1, uint64_t prp2)
+                        const uint8_t *start_key, uint8_t start_len,
+                        uint32_t hbs)
 {
     uint8_t *buf = NULL;
     uint32_t len = 0;
@@ -948,7 +948,7 @@ uint16_t kvssd_ftl_list(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
     lat = kv_charge_base(s, req) + kv_charge_index(s, req, NULL, 0);
     qemu_mutex_unlock(&s->lock);
 
-    status = dma_read_prp(n, buf, len, prp1, prp2);
+    status = dma_read_cmd(n, &req->cmd, buf, len);
     g_free(buf);
     if (status) {
         return status;

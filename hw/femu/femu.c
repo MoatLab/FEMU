@@ -1256,7 +1256,8 @@ static void nvme_init_ctrl(FemuCtrl *n)
     id->cqes         = (n->max_cqes << 4) | 0x4;
     id->nn           = cpu_to_le32(n->num_namespaces);
     id->oncs         = cpu_to_le16(n->oncs);
-    if (n->sgl) {
+    /* the Open-Channel commands take PRPs only, so they get no SGLs */
+    if (n->sgl && !OCSSD(n)) {
         id->sgls     = cpu_to_le32(0x1);   /* advertise address-SGL support */
     }
     subnqn           = g_strdup_printf("nqn.2019-08.org.qemu:%s", n->serial);
