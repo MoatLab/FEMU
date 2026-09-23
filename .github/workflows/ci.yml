@@ -243,7 +243,9 @@ jobs:
         ./hw/femu/scripts/ssd-config-test.sh "$PWD/build-debug/qemu-system-x86_64"
 
   compatibility-test:
-    runs-on: ubuntu-latest  # Standard runners
+    # The binary comes from the build on the same release: libaio, for one,
+    # has a different soname on 24.04.
+    runs-on: ubuntu-24.04
     needs: build
     if: success()
 
@@ -254,7 +256,7 @@ jobs:
     - name: Download build artifacts
       uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
       with:
-        name: femu-binary-ubuntu-22.04
+        name: femu-binary-ubuntu-24.04
         path: build-femu/
 
     - name: Install the libraries the binary links against
