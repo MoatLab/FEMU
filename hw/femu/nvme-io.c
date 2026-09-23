@@ -365,8 +365,8 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
     if (inline_mode && did_isr) {
         NvmeCQueue *cq = n->cq[sq->cqid];
         if (cq && cq->is_active) {
-            nvme_isr_notify_io(cq);
             nvme_update_cq_eventidx(cq);
+            nvme_isr_notify_io(cq);
         }
     }
 
@@ -530,8 +530,9 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
      */
     for (i = 1; i <= n->nr_io_queues; i++) {
         if (should_isr[i]) {
-            nvme_isr_notify_io(n->cq[i]);
+            /* the host reads EventIdx once interrupted, so publish it first */
             nvme_update_cq_eventidx(n->cq[i]);
+            nvme_isr_notify_io(n->cq[i]);
             should_isr[i] = false;
         }
     }

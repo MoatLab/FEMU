@@ -4859,9 +4859,9 @@ static void femu_test_self_test(void *obj, void *data, QGuestAllocator *alloc)
 
 /*
  * On the pin with shadow doorbells, the host consumes a completion by moving
- * the shadow head and rings the register only when EventIdx asks. That ring
- * has to drop the level: it stayed asserted, the line stormed, and Linux
- * disabled the interrupt and fell back to polling.
+ * the shadow head and rings the register only when EventIdx asks. EventIdx
+ * has to ask, and the ring has to drop the level: otherwise it stays asserted,
+ * the line storms, and Linux disables the interrupt and falls back to polling.
  */
 static void femu_test_intx_shadow_doorbell(void *obj, void *data,
                                            QGuestAllocator *alloc)
@@ -4872,6 +4872,7 @@ static void femu_test_intx_shadow_doorbell(void *obj, void *data,
     uint64_t buf;
     uint64_t eis_addr;
     NvmeCmd cmd;
+    int i;
 
     femu_enable(&c, &femu->dev, alloc);
     buf = guest_alloc(alloc, 4096);
@@ -4887,12 +4888,24 @@ static void femu_test_intx_shadow_doorbell(void *obj, void *data,
     femu_create_io_queues_irq(&c, 0);
     g_assert_false(femu_intx_asserted(&c));
 
-    femu_read_unconsumed(&c, buf);
-    FEMU_WAIT_FOR(femu_intx_asserted(&c));
-    g_assert_cmpint(femu_complete(&c, &c.io, NULL, NULL), ==, NVME_SUCCESS);
-    qpci_io_writel(c.pdev, c.bar, femu_cq_doorbell(&c, c.io.qid),
-                   c.io.cq_head);
-    g_assert_false(femu_intx_asserted(&c));
+    for (i = 0; i < 3; i++) {
+        uint16_t old_head = c.io.cq_head;
+        uint16_t ei;
+
+        femu_read_unconsumed(&c, buf);
+        FEMU_WAIT_FOR(femu_intx_asserted(&c));
+        g_assert_cmpint(femu_complete(&c, &c.io, NULL, NULL), ==,
+                        NVME_SUCCESS);
+        /* ring only when EventIdx asks, as Linux's nvme_dbbuf_need_event() */
+        ei = qtest_readl(qts, eis_addr + femu_cq_doorbell(&c, c.io.qid) -
+                         0x1000);
+        if ((uint16_t)(c.io.cq_head - ei - 1) <
+            (uint16_t)(c.io.cq_head - old_head)) {
+            qpci_io_writel(c.pdev, c.bar, femu_cq_doorbell(&c, c.io.qid),
+                           c.io.cq_head);
+        }
+        g_assert_false(femu_intx_asserted(&c));
+    }
 
     guest_free(alloc, buf);
     femu_queue_free(&c, &c.io);

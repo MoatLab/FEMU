@@ -256,6 +256,18 @@ void nvme_update_cq_eventidx(NvmeCQueue *cq)
     }
     nvme_update_cq_head(cq);
     uint32_t ei = (cq->head + cq->size - 1) % cq->size;
+    PCIDevice *pci = &cq->ctrl->parent_obj;
+
+    /*
+     * The pin is level triggered and is dropped only when the host has
+     * consumed everything, which the controller learns from the head doorbell.
+     * Suppressing that doorbell leaves the level up once the host has caught
+     * up, the line storms, and the host disables it. On the pin, publish the
+     * head itself so the host rings after every batch.
+     */
+    if (!msix_enabled(pci) && !msi_enabled(pci)) {
+        ei = cq->head;
+    }
     if (cq->eventidx_addr_hva) {
         *((uint32_t *)(cq->eventidx_addr_hva)) = ei;
         return;
