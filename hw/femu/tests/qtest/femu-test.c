@@ -5695,6 +5695,109 @@ static void femu_test_io_fuzz(void *obj, void *data, QGuestAllocator *alloc)
     guest_free(alloc, raw);
 }
 
+#define FEMU_LOG_TELEMETRY_HOST 0x07
+#define FEMU_LOG_TELEMETRY_CTRL 0x08
+
+static uint16_t femu_get_telemetry(FemuCtrlState *c, uint8_t lid,
+                                   bool create, uint64_t buf, uint32_t len,
+                                   uint64_t off)
+{
+    uint32_t numd = (len >> 2) - 1;
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(lid | (create ? 1 << 8 : 0) |
+                            ((numd & 0xffff) << 16));
+    cmd.cdw11 = cpu_to_le32((numd >> 16) & 0xffff);
+    cmd.cdw12 = cpu_to_le32((uint32_t)off);
+    cmd.cdw13 = cpu_to_le32((uint32_t)(off >> 32));
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+/*
+ * Telemetry Host-Initiated (07h) and Controller-Initiated (08h) logs (Base
+ * 2.3, 5.2.12.1.8-9): both advertised, a 512-byte header that is always
+ * there, a capture on request whose data stays fixed until the next capture,
+ * and whole blocks only. Data Area 1 carries the emulator's media counters,
+ * the same bytes as the vendor page C0h at the moment of capture.
+ */
+static void femu_test_telemetry(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint8_t hdr[512];
+    uint8_t blk[512];
+    uint8_t c0[512];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    g_assert_cmpint(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(qtest_readb(qts, buf + 261) & (1 << 3), !=, 0); /* LPA */
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, 0x00, buf, 1024, 0)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(qtest_readl(qts, buf + 4 * FEMU_LOG_TELEMETRY_HOST) & 1,
+                    ==, 1);
+    g_assert_cmpint(qtest_readl(qts, buf + 4 * FEMU_LOG_TELEMETRY_CTRL) & 1,
+                    ==, 1);
+
+    /* before any capture: a header and no data */
+    g_assert_cmpint(femu_get_telemetry(&c, FEMU_LOG_TELEMETRY_HOST, false,
+                                       buf, 512, 0), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, hdr, sizeof(hdr));
+    g_assert_cmpint(hdr[0], ==, FEMU_LOG_TELEMETRY_HOST);
+    g_assert_cmpint(lduw_le_p(hdr + 8), ==, 0);
+    g_assert_cmpint(hdr[380], ==, 1);                   /* controller scope */
+    g_assert_cmpint(hdr[381], ==, 0);
+
+    /* something to count, then a capture */
+    femu_round_trip(&c, 3);
+    g_assert_cmpint(femu_get_telemetry(&c, FEMU_LOG_TELEMETRY_HOST, true,
+                                       buf, 1024, 0), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, hdr, sizeof(hdr));
+    qtest_memread(qts, buf + 512, blk, sizeof(blk));
+    g_assert_cmpint(lduw_le_p(hdr + 8), ==, 1);         /* area 1: block 1 */
+    g_assert_cmpint(lduw_le_p(hdr + 10), >=, lduw_le_p(hdr + 8));
+    g_assert_cmpint(lduw_le_p(hdr + 12), >=, lduw_le_p(hdr + 10));
+    g_assert_cmpint(hdr[381], ==, 1);
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, buf, 512,
+                                         0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, c0, sizeof(c0));
+    g_assert_cmpint(memcmp(blk, c0, sizeof(blk)), ==, 0);
+    g_assert_cmpuint(ldq_le_p(blk + 8), >, 0);          /* host pages */
+
+    /* more traffic changes the vendor page but not the captured data */
+    femu_round_trip(&c, 5);
+    g_assert_cmpint(femu_get_telemetry(&c, FEMU_LOG_TELEMETRY_HOST, false,
+                                       buf, 512, 512), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, c0, sizeof(c0));
+    g_assert_cmpint(memcmp(blk, c0, sizeof(blk)), ==, 0);
+    g_assert_cmpint(femu_get_telemetry(&c, FEMU_LOG_TELEMETRY_HOST, true,
+                                       buf, 512, 0), ==, NVME_SUCCESS);
+    g_assert_cmpint(qtest_readb(qts, buf + 381), ==, 2);
+
+    /* only whole blocks */
+    g_assert_cmpint(femu_get_telemetry(&c, FEMU_LOG_TELEMETRY_HOST, false,
+                                       buf, 256, 0), ==, NVME_INVALID_FIELD);
+    g_assert_cmpint(femu_get_telemetry(&c, FEMU_LOG_TELEMETRY_HOST, false,
+                                       buf, 512, 256), ==, NVME_INVALID_FIELD);
+
+    /* the controller never captures on its own */
+    g_assert_cmpint(femu_get_telemetry(&c, FEMU_LOG_TELEMETRY_CTRL, false,
+                                       buf, 512, 0), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, hdr, sizeof(hdr));
+    g_assert_cmpint(hdr[0], ==, FEMU_LOG_TELEMETRY_CTRL);
+    g_assert_cmpint(hdr[380], ==, 1);
+    g_assert_cmpint(hdr[382], ==, 0);                   /* no data available */
+
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
 #define FEMU_KV_FUZZ_KEYS   16
 
 /* Put key @k of the pool into the command, @len bytes of it. */
@@ -6643,6 +6746,13 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts = "lba_index=3"
     });
     qos_add_test("log-pages", "femu", femu_test_log_pages, NULL);
+    qos_add_test("telemetry", "femu", femu_test_telemetry,
+                 &(QOSGraphTestOptions) {
+        /* the captured counters come from the FTL, which NoSSD has none of */
+        .edge.extra_device_opts =
+            "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4"
+    });
     qos_add_test("log-length", "femu", femu_test_log_length, NULL);
     qos_add_test("zone-report-length", "femu", femu_test_report_length,
                  &(QOSGraphTestOptions) {

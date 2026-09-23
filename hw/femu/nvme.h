@@ -1101,6 +1101,8 @@ enum NvmeLogIdentifier {
     NVME_LOG_FW_SLOT_INFO   = 0x03,
     NVME_LOG_CMD_EFFECTS    = 0x05,
     NVME_LOG_DEV_SELF_TEST  = 0x06,
+    NVME_LOG_TELEMETRY_HOST = 0x07,
+    NVME_LOG_TELEMETRY_CTRL = 0x08,
     NVME_LOG_ENDGRP         = 0x09,
     NVME_LOG_FDP_CONFS      = 0x20,
     NVME_LOG_FDP_RUH_USAGE  = 0x21,
@@ -1142,6 +1144,28 @@ typedef struct FemuStatsLog {
     uint64_t    buffer_write_hits; /* of those, the pages it already held */
     uint8_t     rsvd88[424];
 } FemuStatsLog;
+
+/*
+ * The header of the Telemetry Host-Initiated and Controller-Initiated log
+ * pages (Base 2.3, Figures 218 and 220), followed in the log by 512-byte data
+ * blocks.
+ */
+typedef struct QEMU_PACKED NvmeTelemetryLog {
+    uint8_t     lid;
+    uint8_t     rsvd1[4];
+    uint8_t     ieee[3];
+    uint16_t    da1lb;              /* last block of each data area */
+    uint16_t    da2lb;
+    uint16_t    da3lb;
+    uint8_t     rsvd14[2];
+    uint32_t    da4lb;
+    uint8_t     rsvd20[360];
+    uint8_t     scope;              /* 01h: the controller */
+    uint8_t     dgn;                /* data generation number */
+    uint8_t     tcda;               /* controller-initiated data available */
+    uint8_t     tcdgn;
+    uint8_t     rid[128];           /* reason identifier */
+} NvmeTelemetryLog;
 
 typedef struct NvmePSD {
     uint16_t    mp;
@@ -1275,6 +1299,7 @@ enum NvmeIdCtrlLpa {
     NVME_LPA_NS_SMART = 1 << 0,
     NVME_LPA_CSE      = 1 << 1,
     NVME_LPA_EXTENDED = 1 << 2,
+    NVME_LPA_TELEMETRY = 1 << 3,
 };
 
 #define NVME_CTRL_SQES_MIN(sqes) ((sqes) & 0xf)
@@ -1462,6 +1487,7 @@ static inline void nvme_check_size(void)
     QEMU_BUILD_BUG_ON(sizeof(NvmeFwSlotInfoLog) != 512);
     QEMU_BUILD_BUG_ON(sizeof(NvmeSmartLog) != 512);
     QEMU_BUILD_BUG_ON(sizeof(FemuStatsLog) != 512);
+    QEMU_BUILD_BUG_ON(sizeof(NvmeTelemetryLog) != 512);
     QEMU_BUILD_BUG_ON(sizeof(NvmeIdCtrl) != 4096);
     QEMU_BUILD_BUG_ON(sizeof(NvmeIdNs) != 4096);
 
@@ -2012,6 +2038,10 @@ typedef struct FemuCtrl {
     char            *logfile;
     NvmeErrorLog    *elpes;
     NvmeDstResult   dst_results[NVME_DST_RESULTS];  /* newest first */
+    /* the last host-initiated telemetry capture, held until the next one */
+    FemuStatsLog    telemetry_data;
+    bool            telemetry_captured;
+    uint8_t         telemetry_dgn;
     uint16_t        sanitize_sstat;     /* Sanitize Status log SSTAT */
     uint32_t        sanitize_cdw10;     /* of the most recent Sanitize */
     NvmeAerHold     *aer_held;     /* outstanding AERs, aerl + 1 entries */

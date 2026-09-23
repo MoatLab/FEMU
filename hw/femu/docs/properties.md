@@ -207,6 +207,12 @@ They were previously written into the SMART log from byte 192, which NVMe Base
 2.0 assigned to the composite temperature times, the temperature sensors and
 the thermal transition counts.
 
+The same counters can be captured through the standard Telemetry Host-Initiated
+log (07h): `nvme telemetry-log /dev/nvme0 --output-file=telemetry.bin` takes a snapshot and
+saves it. Data Area 1 is one 512-byte block laid out as above, and it stays as
+captured until the next capture. The Controller-Initiated log (08h) never holds
+data, because the controller does not capture on its own.
+
 `nvme get-log /dev/nvme0 --log-id=0 --log-len=1024 -b` lists every log page the
 controller answers, four bytes per identifier with bit 0 set for the ones it
 supports, so this page can be discovered rather than assumed.

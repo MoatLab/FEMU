@@ -1596,6 +1596,8 @@ static uint16_t nvme_supported_log_pages(FemuCtrl *n, NvmeCmd *cmd,
     lids[NVME_LOG_FW_SLOT_INFO] = cpu_to_le32(NVME_LIDS_LSUPP);
     lids[NVME_LOG_CMD_EFFECTS]  = cpu_to_le32(NVME_LIDS_LSUPP);
     lids[NVME_LOG_DEV_SELF_TEST] = cpu_to_le32(NVME_LIDS_LSUPP);
+    lids[NVME_LOG_TELEMETRY_HOST] = cpu_to_le32(NVME_LIDS_LSUPP);
+    lids[NVME_LOG_TELEMETRY_CTRL] = cpu_to_le32(NVME_LIDS_LSUPP);
     if (nvme_can_sanitize(n)) {
         lids[NVME_LOG_SANITIZE] = cpu_to_le32(NVME_LIDS_LSUPP);
     }
@@ -1711,19 +1713,11 @@ static void nvme_collect_media_stats(FemuCtrl *n, FemuMediaStats *st)
  *   nvme get-log /dev/nvme0 --log-id=0xc0 --log-len=512 -b
  * and the fields sit at the offsets FemuStatsLog declares.
  */
-static uint16_t nvme_femu_stats_info(FemuCtrl *n, NvmeCmd *cmd,
-                                     uint32_t buf_len, uint64_t off)
+static void nvme_femu_stats_fill(FemuCtrl *n, FemuStatsLog *log)
 {
-    uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
-    uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
-    FemuMediaStats st;
     FemuStatsLog stats;
-    uint32_t trans_len;
+    FemuMediaStats st;
 
-    if (off >= sizeof(stats)) {
-        return NVME_INVALID_FIELD | NVME_DNR;
-    }
-    trans_len = MIN(sizeof(stats) - off, buf_len);
     memset(&stats, 0x0, sizeof(stats));
     nvme_collect_media_stats(n, &st);
 
@@ -1746,8 +1740,73 @@ static uint16_t nvme_femu_stats_info(FemuCtrl *n, NvmeCmd *cmd,
     stats.buffer_read_hits = cpu_to_le64(st.buf_read_hits);
     stats.buffer_writes = cpu_to_le64(st.buf_writes);
     stats.buffer_write_hits = cpu_to_le64(st.buf_write_hits);
+    *log = stats;
+}
+
+static uint16_t nvme_femu_stats_info(FemuCtrl *n, NvmeCmd *cmd,
+                                     uint32_t buf_len, uint64_t off)
+{
+    uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
+    uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
+    FemuStatsLog stats;
+    uint32_t trans_len;
+
+    if (off >= sizeof(stats)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    trans_len = MIN(sizeof(stats) - off, buf_len);
+    nvme_femu_stats_fill(n, &stats);
 
     return dma_read_prp(n, (uint8_t *)&stats + off, trans_len, prp1, prp2);
+}
+
+/*
+ * Telemetry Host-Initiated (07h) and Controller-Initiated (08h) logs (Base
+ * 2.3, 5.2.12.1.8-9). A host-initiated capture takes the media counters of
+ * the vendor page as Data Area 1, one block, and keeps them until the next
+ * capture; Data Areas 2 and 3 end where it does. The controller never
+ * captures on its own, so its log is a header saying so. Both are read in
+ * whole blocks, and a block past the last one reads as zeroes.
+ */
+static uint16_t nvme_telemetry_log(FemuCtrl *n, NvmeCmd *cmd, uint8_t lid,
+                                   uint32_t buf_len, uint64_t off)
+{
+    uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
+    uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
+    bool create = (le32_to_cpu(cmd->cdw10) >> 8) & 0x1;
+    uint8_t page[sizeof(NvmeTelemetryLog) + sizeof(FemuStatsLog)] = { 0 };
+    NvmeTelemetryLog *hdr = (NvmeTelemetryLog *)page;
+    g_autofree uint8_t *buf = NULL;
+    uint64_t have = sizeof(*hdr);
+
+    if ((off | buf_len) & 511) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    hdr->lid = lid;
+    hdr->scope = 0x1;
+    if (lid == NVME_LOG_TELEMETRY_HOST) {
+        if (create) {
+            nvme_femu_stats_fill(n, &n->telemetry_data);
+            n->telemetry_captured = true;
+            n->telemetry_dgn++;
+        }
+        hdr->dgn = n->telemetry_dgn;
+        if (n->telemetry_captured) {
+            hdr->da1lb = cpu_to_le16(1);
+            hdr->da2lb = cpu_to_le16(1);
+            hdr->da3lb = cpu_to_le16(1);
+            memcpy(page + sizeof(*hdr), &n->telemetry_data,
+                   sizeof(n->telemetry_data));
+            have = sizeof(page);
+        }
+    }
+
+    buf = g_malloc0(buf_len);
+    if (off < have) {
+        memcpy(buf, page + off, MIN(have - off, buf_len));
+    }
+    return dma_read_prp(n, buf, buf_len, prp1, prp2);
 }
 
 static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
@@ -2394,6 +2453,9 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
         return nvme_cmd_effects(n, cmd, csi, len, off);
     case NVME_LOG_DEV_SELF_TEST:
         return nvme_dst_log(n, cmd, len, off);
+    case NVME_LOG_TELEMETRY_HOST:
+    case NVME_LOG_TELEMETRY_CTRL:
+        return nvme_telemetry_log(n, cmd, lid, len, off);
     case NVME_LOG_SANITIZE:
         if (!nvme_can_sanitize(n)) {
             return NVME_INVALID_LOG_ID | NVME_DNR;

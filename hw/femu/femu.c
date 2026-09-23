@@ -1366,7 +1366,8 @@ static void nvme_init_ctrl(FemuCtrl *n)
     id->acl          = n->acl;
     id->aerl         = n->aerl;
     id->frmw         = 7 << 1 | 1;
-    id->lpa          = NVME_LPA_NS_SMART | NVME_LPA_CSE | NVME_LPA_EXTENDED;
+    id->lpa          = NVME_LPA_NS_SMART | NVME_LPA_CSE | NVME_LPA_EXTENDED |
+                       NVME_LPA_TELEMETRY;
     id->elpe         = n->elpe;
     id->npss         = 0;
     id->sqes         = (n->max_sqes << 4) | 0x6;
