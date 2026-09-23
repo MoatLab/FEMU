@@ -970,10 +970,10 @@ static bool nvme_check_constraints(FemuCtrl *n, Error **errp)
     }
     if (n->oncs & ~(NVME_ONCS_COMPARE | NVME_ONCS_WRITE_UNCORR |
                     NVME_ONCS_DSM | NVME_ONCS_WRITE_ZEROS |
-                    NVME_ONCS_FEATURES | NVME_ONCS_VERIFY)) {
+                    NVME_ONCS_FEATURES | NVME_ONCS_VERIFY | NVME_ONCS_COPY)) {
         error_setg(errp, "oncs may only set Compare, Write Uncorrectable, "
-                   "DSM, Write Zeroes, Save/Select Feature Support and "
-                   "Verify");
+                   "DSM, Write Zeroes, Save/Select Feature Support, "
+                   "Verify and Copy");
         return false;
     }
 
@@ -988,6 +988,11 @@ static void nvme_ns_init_identify(FemuCtrl *n, NvmeIdNs *id_ns)
     /* NSFEAT Bit 3: Support the Deallocated or Unwritten Logical Block error */
     id_ns->nsfeat        |= (0x4 | 0x10);
     id_ns->nlbaf         = n->nlbaf - 1;
+    if (n->oncs & NVME_ONCS_COPY) {
+        id_ns->mssrl     = cpu_to_le16(FEMU_COPY_MSSRL);
+        id_ns->mcl       = cpu_to_le32(FEMU_COPY_MCL);
+        id_ns->msrc      = FEMU_COPY_MSRC;
+    }
     id_ns->flbas         = n->lba_index | (n->extended << 4);
     id_ns->mc            = n->mc;
     id_ns->dpc           = n->dpc;
@@ -1337,6 +1342,7 @@ static void nvme_init_ctrl(FemuCtrl *n)
 
     id->rab          = 6;
     id->cntrltype    = 0x1;     /* an I/O controller */
+    id->ocfs         = cpu_to_le16(n->oncs & NVME_ONCS_COPY ? 0x1 : 0);
     id->wctemp       = cpu_to_le16(NVME_TEMPERATURE_WARNING);
     id->cctemp       = cpu_to_le16(NVME_TEMPERATURE_CRITICAL);
     id->ieee[0]      = 0x00;

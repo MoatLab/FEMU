@@ -712,6 +712,7 @@ enum NvmeIoCommands {
     NVME_CMD_DSM                = 0x09,
     NVME_CMD_VERIFY             = 0x0c,
     NVME_CMD_IO_MGMT_RECV       = 0x12,
+    NVME_CMD_COPY               = 0x19,
     NVME_CMD_IO_MGMT_SEND       = 0x1d,
     NVME_CMD_ZONE_MGMT_SEND     = 0x79,
     NVME_CMD_ZONE_MGMT_RECV     = 0x7a,
@@ -862,6 +863,22 @@ enum {
     NVME_DSMGMT_AD  = 1 << 2,
 };
 
+/* Copy source range, descriptor format 0 (NVM 1.2, Figure 39) */
+typedef struct QEMU_PACKED NvmeCopyRange {
+    uint8_t     rsvd0[8];
+    uint64_t    slba;
+    uint16_t    nlb;            /* 0's based */
+    uint8_t     rsvd18[6];
+    uint32_t    eilbrt;
+    uint16_t    elbat;
+    uint16_t    elbatm;
+} NvmeCopyRange;
+
+/* the Copy limits every block namespace reports */
+#define FEMU_COPY_MSSRL     128
+#define FEMU_COPY_MCL       1024
+#define FEMU_COPY_MSRC      127
+
 typedef struct NvmeDsmRange {
     uint32_t    cattr;
     uint32_t    nlb;
@@ -936,6 +953,8 @@ enum NvmeStatusCodes {
     NVME_CAP_EXCEEDED           = 0x0081,
     NVME_NS_NOT_READY           = 0x0082,
     NVME_NS_RESV_CONFLICT       = 0x0083,
+    NVME_CMD_SIZE_LIMIT         = 0x0183,
+    NVME_CMD_OVERLAP_IO_RANGE   = 0x0187,
     NVME_INVALID_CQID           = 0x0100,
     NVME_INVALID_QID            = 0x0101,
     NVME_MAX_QSIZE_EXCEEDED     = 0x0102,
@@ -1218,7 +1237,7 @@ typedef struct QEMU_PACKED NvmeIdCtrl {
     uint8_t     nvscc;
     uint8_t     rsvd531;
     uint16_t    acwu;
-    uint8_t     rsvd534[2];
+    uint16_t    ocfs;           /* Copy descriptor formats offered */
     uint32_t    sgls;
     uint8_t     rsvd540[228];
     uint8_t     subnqn[256];
@@ -1245,6 +1264,7 @@ enum NvmeIdCtrlOncs {
     NVME_ONCS_FEATURES      = 1 << 4,
     NVME_ONCS_RESRVATIONS   = 1 << 5,
     NVME_ONCS_VERIFY        = 1 << 7,
+    NVME_ONCS_COPY          = 1 << 8,
 };
 
 enum NvmeIdCtrlFrmw {
@@ -1371,7 +1391,10 @@ typedef struct NvmeIdNs {
     uint16_t    npdg;
     uint16_t    npda;
     uint16_t    nows;
-    uint8_t     rsvd74[26];
+    uint16_t    mssrl;          /* Copy: blocks in one source range */
+    uint32_t    mcl;            /* Copy: blocks in one command */
+    uint8_t     msrc;           /* Copy: source ranges, 0's based */
+    uint8_t     rsvd81[19];
     uint16_t    nvmsetid;
     uint16_t    endgid;
     uint8_t     nguid[16];

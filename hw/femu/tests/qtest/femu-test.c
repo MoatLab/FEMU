@@ -5035,6 +5035,116 @@ static void femu_test_sanitize(void *obj, void *data, QGuestAllocator *alloc)
     femu_disable(&c);
 }
 
+#define FEMU_CMD_COPY           0x19
+#define FEMU_CMD_SIZE_LIMIT     0x183
+#define FEMU_OVERLAP_IO_RANGE   0x187
+
+/*
+ * Copy of nr ranges; the first ndesc are laid out as format 0 descriptors in
+ * guest memory at list, the rest left zero.
+ */
+static uint16_t femu_copy(FemuCtrlState *c, uint64_t list, uint64_t sdlba,
+                          const uint64_t *slba, const uint16_t *nlb, int ndesc,
+                          int nr, uint32_t dw12_extra)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    NvmeCmd cmd;
+    int i;
+
+    qtest_memset(qts, list, 0, 4096);
+    for (i = 0; i < ndesc; i++) {
+        qtest_writeq(qts, list + i * 32 + 8, slba[i]);
+        qtest_writew(qts, list + i * 32 + 16, nlb[i] - 1);
+    }
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_CMD_COPY;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(list);
+    cmd.cdw10 = cpu_to_le32(sdlba);
+    cmd.cdw11 = cpu_to_le32(sdlba >> 32);
+    cmd.cdw12 = cpu_to_le32((nr - 1) | dw12_extra);
+    return femu_io(c, &cmd);
+}
+
+/*
+ * Copy (NVM 1.2, 3.3.2): the limits Identify reports, two ranges landing back
+ * to back at the destination and read back intact, the FTL charging the
+ * programmed pages as a write would, and the refusals for an overlap, a range
+ * or a command past the limits, and a descriptor format not offered.
+ */
+static void femu_test_copy(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf, list, log;
+    uint64_t slba[2] = { 0, 64 };
+    uint16_t nlb[2] = { 8, 8 };
+    uint64_t host_before;
+    uint8_t page[512];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, 4096);
+    list = guest_alloc(alloc, 4096);
+    log = guest_alloc(alloc, 4096);
+
+    g_assert_cmpint(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(qtest_readw(qts, buf + 534) & 1, ==, 1);    /* OCFS */
+    g_assert_cmpint(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(qtest_readw(qts, buf + 74), ==, 128);       /* MSSRL */
+    g_assert_cmpint(qtest_readl(qts, buf + 76), ==, 1024);      /* MCL */
+    g_assert_cmpint(qtest_readb(qts, buf + 80), ==, 127);       /* MSRC */
+
+    qtest_memset(qts, buf, 0xa1, 4096);
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, 0, buf), ==, NVME_SUCCESS);
+    qtest_memset(qts, buf, 0xb2, 4096);
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, 64, buf), ==, NVME_SUCCESS);
+
+    g_assert_cmpint(femu_get_log(&c, FEMU_LOG_FEMU_STATS, log, sizeof(page),
+                                 0), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, page, sizeof(page));
+    host_before = ldq_le_p(page + 8);
+
+    g_assert_cmpint(femu_copy(&c, list, 256, slba, nlb, 2, 2, 0), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_READ, 256, buf), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf), ==, 0xa1);
+    g_assert_cmphex(qtest_readb(qts, buf + 4095), ==, 0xa1);
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_READ, 264, buf), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf), ==, 0xb2);
+
+    /* the destination was programmed through the FTL: two 4 KiB pages */
+    g_assert_cmpint(femu_get_log(&c, FEMU_LOG_FEMU_STATS, log, sizeof(page),
+                                 0), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, page, sizeof(page));
+    g_assert_cmpint(ldq_le_p(page + 8) - host_before, ==, 2);
+
+    /* a source that runs into the destination */
+    slba[0] = 256;
+    g_assert_cmpint(femu_copy(&c, list, 260, slba, nlb, 1, 1, 0), ==,
+                    FEMU_OVERLAP_IO_RANGE);
+    /* one range past MSSRL, more ranges than MSRC allows */
+    slba[0] = 0;
+    nlb[0] = 129;
+    g_assert_cmpint(femu_copy(&c, list, 512, slba, nlb, 1, 1, 0), ==,
+                    FEMU_CMD_SIZE_LIMIT);
+    nlb[0] = 8;
+    g_assert_cmpint(femu_copy(&c, list, 512, slba, nlb, 1, 256, 0), ==,
+                    FEMU_CMD_SIZE_LIMIT);
+    /* descriptor format 1 is not offered */
+    g_assert_cmpint(femu_copy(&c, list, 512, slba, nlb, 1, 1, 1 << 8), ==,
+                    NVME_INVALID_FIELD);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 #define FEMU_CSD_COMPUTE_LOAD   0x22
 #define FEMU_CSD_TYPE_SHARED_LIB 0x03
 
@@ -5324,6 +5434,19 @@ static void femu_register_nodes(void)
     qos_add_test("prp-status", "femu", femu_test_prp_status, NULL);
     qos_add_test("doorbell-errors", "femu", femu_test_doorbell_errors, NULL);
     qos_add_test("format-ses", "femu", femu_test_format_ses, NULL);
+    qos_add_test("copy", "femu", femu_test_copy,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,oncs=0x104"
+    });
+    qos_add_test("copy-fdp", "femu", femu_test_copy,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,oncs=0x104,"
+            "subsys=fdpsub"
+    });
     qos_add_test("sanitize", "femu", femu_test_sanitize,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =

@@ -200,6 +200,37 @@ uint64_t ssd_nand_write_pages(struct ssd *ssd)
 }
 
 /* Lines rewritten because a block of theirs passed the read stress limit. */
+/*
+ * Copy: read every source range, then program the destination as one write.
+ * The write cannot start before its data has been read, so the latency is the
+ * slowest read plus the write.
+ */
+static uint64_t ssd_copy(FemuCtrl *n, struct ssd *ssd, NvmeRequest *req)
+{
+    uint64_t dslba = req->slba;
+    uint32_t dnlb = req->nlb;
+    uint64_t rlat = 0;
+    uint64_t wlat;
+
+    for (int i = 0; i < req->dsm_nr_ranges; i++) {
+        uint64_t lat;
+
+        req->slba = le64_to_cpu(req->dsm_ranges[i].slba);
+        req->nlb = le32_to_cpu(req->dsm_ranges[i].nlb);
+        lat = ssd_read(ssd, req);
+        rlat = MAX(rlat, lat);
+    }
+    req->slba = dslba;
+    req->nlb = dnlb;
+    if (ssd->fdp_enabled) {
+        wlat = nvme_do_write_fdp(n, req, dslba, dnlb);
+    } else {
+        wlat = ssd_write(ssd, req);
+    }
+
+    return rlat + wlat;
+}
+
 uint64_t ssd_read_reclaims(struct ssd *ssd)
 {
     return ssd->read_reclaims;
@@ -413,6 +444,9 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
             req->status = NVME_WRITE_FAULT;
             ssd->err_write_injected++;
         }
+        break;
+    case NVME_CMD_COPY:
+        lat = ssd_copy(n, ssd, req);
         break;
     case NVME_CMD_READ:
         lat = ssd_read(ssd, req);

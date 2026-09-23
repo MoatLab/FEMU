@@ -948,6 +948,111 @@ static uint16_t nvme_dsm(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     return NVME_SUCCESS;
 }
 
+/*
+ * Copy (NVM 1.2, 3.3.2), descriptor format 0: read the source ranges in order
+ * and write them as one run at the destination. The data moves through a
+ * staging buffer, then the ranges go on the request so the FTL reads the
+ * sources and programs the destination like a write, which is what keeps its
+ * mapping, garbage collection and write amplification right.
+ */
+static uint16_t nvme_copy(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
+                          NvmeRequest *req)
+{
+    uint32_t dw12 = le32_to_cpu(cmd->cdw12);
+    uint64_t sdlba = ((uint64_t)le32_to_cpu(cmd->cdw11) << 32) |
+                     le32_to_cpu(cmd->cdw10);
+    uint32_t nr = (dw12 & 0xff) + 1;
+    uint64_t nsze = le64_to_cpu(ns->id_ns.nsze);
+    uint8_t lbaf = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
+    uint8_t lbads = ns->id_ns.lbaf[lbaf].lbads;
+    g_autofree NvmeCopyRange *ranges = NULL;
+    g_autofree uint8_t *data = NULL;
+    NvmeDsmRange *src;
+    uint8_t *base;
+    uint64_t total = 0;
+    uint64_t done = 0;
+    uint16_t status;
+    uint32_t i;
+
+    if (((dw12 >> 8) & 0xf) != 0) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    if (nr > FEMU_COPY_MSRC + 1) {
+        return NVME_CMD_SIZE_LIMIT | NVME_DNR;
+    }
+
+    ranges = g_new(NvmeCopyRange, nr);
+    status = dma_write_cmd(n, cmd, (uint8_t *)ranges, nr * sizeof(*ranges));
+    if (status) {
+        return status;
+    }
+
+    /* every range is checked before anything moves */
+    for (i = 0; i < nr; i++) {
+        uint64_t slba = le64_to_cpu(ranges[i].slba);
+        uint32_t nlb = le16_to_cpu(ranges[i].nlb) + 1;
+
+        if (nlb > FEMU_COPY_MSSRL) {
+            return NVME_CMD_SIZE_LIMIT | NVME_DNR;
+        }
+        total += nlb;
+        if (total > FEMU_COPY_MCL) {
+            return NVME_CMD_SIZE_LIMIT | NVME_DNR;
+        }
+        if (slba >= nsze || nlb > nsze - slba) {
+            return NVME_LBA_RANGE | NVME_DNR;
+        }
+    }
+    if (sdlba >= nsze || total > nsze - sdlba) {
+        return NVME_LBA_RANGE | NVME_DNR;
+    }
+    for (i = 0; i < nr; i++) {
+        uint64_t slba = le64_to_cpu(ranges[i].slba);
+        uint32_t nlb = le16_to_cpu(ranges[i].nlb) + 1;
+        uint64_t elba = slba + nlb;
+
+        if (slba < sdlba + total && sdlba < elba) {
+            return NVME_CMD_OVERLAP_IO_RANGE | NVME_DNR;
+        }
+        if (find_next_bit(ns->uncorrectable, elba, slba) < elba) {
+            return NVME_UNRECOVERED_READ;
+        }
+        status = nvme_check_dulbe(n, ns, slba, elba);
+        if (status) {
+            return status;
+        }
+    }
+
+    base = (uint8_t *)n->mbe->logical_space + ns->backend_offset;
+    data = g_malloc(total << lbads);
+    src = g_new(NvmeDsmRange, nr);
+    for (i = 0; i < nr; i++) {
+        uint64_t slba = le64_to_cpu(ranges[i].slba);
+        uint32_t nlb = le16_to_cpu(ranges[i].nlb) + 1;
+
+        memcpy(data + (done << lbads), base + (slba << lbads),
+               (uint64_t)nlb << lbads);
+        done += nlb;
+        src[i].cattr = 0;
+        src[i].slba = cpu_to_le64(slba);
+        src[i].nlb = cpu_to_le32(nlb);
+    }
+    memcpy(base + (sdlba << lbads), data, total << lbads);
+    nvme_mark_written(ns, sdlba, total);
+    nvme_note_user_write(n);
+
+    req->dsm_ranges = src;
+    req->dsm_nr_ranges = nr;
+    req->slba = sdlba;
+    req->nlb = total;
+    if (n->subsys && n->subsys->endgrp.fdp.enabled) {
+        req->fdp_dtype = (dw12 >> 20) & 0xf;
+        req->fdp_dspec = le32_to_cpu(cmd->cdw13) >> 16;
+    }
+
+    return NVME_SUCCESS;
+}
+
 static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                              NvmeRequest *req)
 {
@@ -1449,6 +1554,13 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         if ((NVME_ONCS_WRITE_ZEROS & n->oncs) && nvme_ns_has_nvm_cmd_set(ns) &&
             !NS_ZNSSD(ns)) {
             return nvme_write_zeros(n, ns, cmd, req);
+        }
+        return NVME_INVALID_OPCODE | NVME_DNR;
+    case NVME_CMD_COPY:
+        /* zoned destinations carry write pointer rules this does not apply */
+        if ((NVME_ONCS_COPY & n->oncs) && nvme_ns_has_nvm_cmd_set(ns) &&
+            !NS_ZNSSD(ns)) {
+            return nvme_copy(n, ns, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
     case NVME_CMD_VERIFY:
