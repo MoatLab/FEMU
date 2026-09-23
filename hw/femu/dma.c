@@ -90,13 +90,25 @@ uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
             uint32_t nents, prp_trans;
             int i = 0;
 
-            nents = (len + n->page_size - 1) >> n->page_bits;
-            prp_trans = MIN(n->max_prp_ents, nents) * sizeof(uint64_t);
+            /* a list pointer addresses whole entries */
+            if (prp2 & (sizeof(uint64_t) - 1)) {
+                g_free(prp_list);
+                goto unmap;
+            }
+
+            /*
+             * The first list may start part way into its page, and the last
+             * entry before the end of that page is what points at the next
+             * list (Base 2.3, Figure 110), so the page holds fewer entries
+             * than a whole one.
+             */
+            nents = (n->page_size - (prp2 & (n->page_size - 1))) >> 3;
+            prp_trans = nents * sizeof(uint64_t);
             nvme_addr_read(n, prp2, (void *)prp_list, prp_trans);
             while (len != 0) {
                 uint64_t prp_ent = le64_to_cpu(prp_list[i]);
 
-                if (i == n->max_prp_ents - 1 && len > n->page_size) {
+                if (i == nents - 1 && len > n->page_size) {
                     if (!prp_ent || prp_ent & (n->page_size - 1)) {
                         g_free(prp_list);
                         goto unmap;
@@ -104,7 +116,8 @@ uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
 
                     i = 0;
                     nents = (len + n->page_size - 1) >> n->page_bits;
-                    prp_trans = MIN(n->max_prp_ents, nents) * sizeof(uint64_t);
+                    nents = MIN(n->max_prp_ents, nents);
+                    prp_trans = nents * sizeof(uint64_t);
                     nvme_addr_read(n, prp_ent, (void *)prp_list,
                                    prp_trans);
                     prp_ent = le64_to_cpu(prp_list[i]);

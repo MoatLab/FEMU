@@ -3458,6 +3458,114 @@ static void femu_test_fdp_features(void *obj, void *data,
     femu_disable(&c);
 }
 
+#define FEMU_PRP_PAGES      40
+#define FEMU_PRP_LIST_OFF   0xf00
+
+/* one transfer of FEMU_PRP_PAGES pages described by the list set up below */
+static uint16_t femu_prp_list_rw(FemuCtrlState *c, uint8_t opcode,
+                                 uint64_t first, uint64_t list)
+{
+    NvmeRwCmd rw;
+    uint16_t want = c->cid;
+    uint16_t got;
+    uint16_t status;
+
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = opcode;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(first);
+    rw.dptr.prp2 = cpu_to_le64(list);
+    rw.slba = cpu_to_le64(0);
+    rw.nlb = cpu_to_le16(FEMU_PRP_PAGES * 4096 / c->lba_size - 1);
+    femu_submit(c, &c->io, (NvmeCmd *)&rw);
+    status = femu_complete(c, &c->io, &got, NULL);
+    g_assert_cmpint(got, ==, want);
+
+    return status;
+}
+
+/*
+ * A PRP list may start part way into a page, and then the last entry before
+ * the end of that page points at the next list (Base 2.3, Figure 110). The
+ * list here starts 0xf00 into its page, so it holds 31 data pages and the
+ * pointer to a second list with the other 8. Pages are listed in reverse, so
+ * a list read from the wrong place moves data to the wrong place.
+ */
+static void femu_test_prp_list_offset(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    const size_t size = FEMU_PRP_PAGES * 4096;
+    uint8_t *wbuf = g_malloc(size);
+    uint8_t *rbuf = g_malloc0(size);
+    uint64_t pages, list_a, list_b;
+    uint64_t entry;
+    int slots = (4096 - FEMU_PRP_LIST_OFF) / 8;
+    int i;
+    int k;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    pages = guest_alloc(alloc, size);
+    list_a = guest_alloc(alloc, 4096);
+    list_b = guest_alloc(alloc, 4096);
+
+    /* page 0 of the transfer is PRP1; list entry k names transfer page k + 1 */
+    for (k = 0; k < FEMU_PRP_PAGES - 1; k++) {
+        uint64_t slot;
+
+        entry = cpu_to_le64(pages + (FEMU_PRP_PAGES - 1 - k) * 4096);
+        slot = k < slots - 1 ? list_a + FEMU_PRP_LIST_OFF + k * 8
+                             : list_b + (k - (slots - 1)) * 8;
+        qtest_memwrite(qts, slot, &entry, sizeof(entry));
+    }
+    entry = cpu_to_le64(list_b);
+    qtest_memwrite(qts, list_a + 4096 - 8, &entry, sizeof(entry));
+
+    for (i = 0; i < size; i++) {
+        wbuf[i] = (uint8_t)(i / 4096 * 3 + i);
+    }
+    /* transfer page p lives at buffer page 0 for p == 0, else 40 - p */
+    for (k = 0; k < FEMU_PRP_PAGES; k++) {
+        int at = k ? FEMU_PRP_PAGES - k : 0;
+
+        qtest_memwrite(qts, pages + at * 4096, wbuf + k * 4096, 4096);
+    }
+    g_assert_cmpint(femu_prp_list_rw(&c, NVME_CMD_WRITE, pages,
+                                     list_a + FEMU_PRP_LIST_OFF),
+                    ==, NVME_SUCCESS);
+
+    qtest_memset(qts, pages, 0, size);
+    g_assert_cmpint(femu_prp_list_rw(&c, NVME_CMD_READ, pages,
+                                     list_a + FEMU_PRP_LIST_OFF),
+                    ==, NVME_SUCCESS);
+    for (k = 0; k < FEMU_PRP_PAGES; k++) {
+        int at = k ? FEMU_PRP_PAGES - k : 0;
+
+        qtest_memread(qts, pages + at * 4096, rbuf + k * 4096, 4096);
+    }
+    g_assert_cmpint(memcmp(wbuf, rbuf, size), ==, 0);
+
+    /* and the blocks hold the pages in transfer order */
+    memset(rbuf, 0, size);
+    for (k = 0; k < 8; k++) {
+        g_assert_cmpint(femu_rw(&c, NVME_CMD_READ, k * 8, pages),
+                        ==, NVME_SUCCESS);
+        qtest_memread(qts, pages, rbuf + k * 4096, 4096);
+    }
+    g_assert_cmpint(memcmp(wbuf, rbuf, 8 * 4096), ==, 0);
+
+    guest_free(alloc, list_b);
+    guest_free(alloc, list_a);
+    guest_free(alloc, pages);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    g_free(rbuf);
+    g_free(wbuf);
+}
+
 #define FEMU_CSD_COMPUTE_LOAD   0x22
 #define FEMU_CSD_TYPE_SHARED_LIB 0x03
 
@@ -3733,6 +3841,7 @@ static void femu_register_nodes(void)
     qos_add_test("cq-full", "femu", femu_test_cq_full, NULL);
     qos_add_test("io-interrupts", "femu", femu_test_io_interrupts, NULL);
     qos_add_test("dma-error", "femu", femu_test_dma_error, NULL);
+    qos_add_test("prp-list-offset", "femu", femu_test_prp_list_offset, NULL);
     qos_add_test("fdp-features", "femu", femu_test_fdp_features,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
