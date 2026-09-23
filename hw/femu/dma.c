@@ -376,6 +376,38 @@ uint16_t dma_read_prp(FemuCtrl *n, uint8_t *ptr, uint32_t len, uint64_t prp1,
  * every I/O command with a data buffer has to honour it, not only Read and
  * Write.
  */
+/*
+ * Rebuild @qsg with one entry per @unit bytes. The Open-Channel backends pair
+ * each scatter entry with one address, so a page that holds several sectors
+ * has to become one entry per sector. An entry that is not a whole number of
+ * units cannot be paired this way and the list is left as it is, for the
+ * caller's own check to refuse.
+ */
+void femu_sglist_split(FemuCtrl *n, QEMUSGList *qsg, uint32_t unit)
+{
+    QEMUSGList split;
+    dma_addr_t off;
+    int i;
+
+    for (i = 0; i < qsg->nsg; i++) {
+        if (qsg->sg[i].len % unit) {
+            return;
+        }
+    }
+    if (qsg->nsg == 0 || qsg->nsg == qsg->size / unit) {
+        return;
+    }
+
+    pci_dma_sglist_init(&split, &n->parent_obj, qsg->size / unit);
+    for (i = 0; i < qsg->nsg; i++) {
+        for (off = 0; off < qsg->sg[i].len; off += unit) {
+            qemu_sglist_add(&split, qsg->sg[i].base + off, unit);
+        }
+    }
+    qemu_sglist_destroy(qsg);
+    *qsg = split;
+}
+
 uint16_t femu_map_dptr(FemuCtrl *n, NvmeCmd *cmd, QEMUSGList *qsg,
                        QEMUIOVector *iov, uint32_t len)
 {

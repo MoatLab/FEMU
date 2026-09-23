@@ -5880,6 +5880,63 @@ static void femu_test_oc_sgl_refused(void *obj, void *data,
     femu_disable(&c);
 }
 
+/*
+ * An Open-Channel 1.2 namespace with sectors smaller than a page: eight
+ * sectors fit in one page of the host's buffer, so the transfer maps to one
+ * scatter entry for eight addresses. The device pairs addresses with entries
+ * one to one, so it refused every such request rather than split the page.
+ * A buffer that starts part way into a sector still cannot be paired and is
+ * still refused.
+ */
+static void femu_test_oc12_small_sectors(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 2 * 4096);
+    uint64_t ppas = guest_alloc(alloc, 4096);
+    uint8_t wbuf[4096];
+    uint8_t rbuf[4096];
+    NvmeCmd cmd = { 0 };
+    uint64_t e;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = (buf + 4095) & ~4095ULL;
+    for (i = 0; i < 8; i++) {
+        e = cpu_to_le64(i);
+        qtest_memwrite(qts, ppas + 8 * i, &e, sizeof(e));
+    }
+    for (i = 0; i < sizeof(wbuf); i++) {
+        wbuf[i] = (uint8_t)(0x21 + i * 11);
+    }
+    qtest_memwrite(qts, buf, wbuf, sizeof(wbuf));
+
+    cmd.opcode = FEMU_OC20_VECT_WRITE;      /* 91h in 1.2 as well */
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32((uint32_t)ppas);
+    cmd.cdw11 = cpu_to_le32((uint32_t)(ppas >> 32));
+    cmd.cdw12 = cpu_to_le32(7);
+    g_assert_cmpint(femu_io(&c, &cmd), ==, NVME_SUCCESS);
+
+    qtest_memset(qts, buf, 0, sizeof(rbuf));
+    cmd.opcode = FEMU_OC20_VECT_READ;       /* 92h */
+    g_assert_cmpint(femu_io(&c, &cmd), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, rbuf, sizeof(rbuf));
+    g_assert_cmpint(memcmp(wbuf, rbuf, sizeof(rbuf)), ==, 0);
+
+    cmd.opcode = FEMU_OC20_VECT_WRITE;
+    cmd.dptr.prp1 = cpu_to_le64(buf + 256);
+    cmd.dptr.prp2 = cpu_to_le64(buf + 4096);
+    g_assert_cmpint(femu_io(&c, &cmd), ==, NVME_INVALID_FIELD);
+
+    femu_disable(&c);
+    guest_free(alloc, ppas);
+}
+
 #define FEMU_OC_FUZZ_CHUNKS 2
 #define FEMU_OC_FUZZ_MAX    8   /* sectors in one vector command */
 
@@ -6483,6 +6540,10 @@ static void femu_register_nodes(void)
             "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
             "sgl=on,vwc=1,oncs=0x19f,subsys=fdpsub"
+    });
+    qos_add_test("oc12-small-sectors", "femu", femu_test_oc12_small_sectors,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=0,lver=1"
     });
     qos_add_test("oc20-sgl-refused", "femu", femu_test_oc_sgl_refused,
                  &(QOSGraphTestOptions) {

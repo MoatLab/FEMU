@@ -575,7 +575,11 @@ static uint16_t oc12_read(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
      * produces one entry more than there are addresses, so the backend reads
      * past the end of the list -- and pairs every address with the wrong
      * piece of the transfer besides.
+     *
+     * A page that holds several sectors is split into one entry per sector
+     * first; only what still does not pair up is refused.
      */
+    femu_sglist_split(n, &req->qsg, 1U << lbads);
     if (req->qsg.nsg != nlb) {
         femu_err("%s: %d data segments for %u addresses\n", __func__,
                  req->qsg.nsg, nlb);
@@ -691,7 +695,11 @@ static uint16_t oc12_write(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
      * produces one entry more than there are addresses, so the backend reads
      * past the end of the list -- and pairs every address with the wrong
      * piece of the transfer besides.
+     *
+     * A page that holds several sectors is split into one entry per sector
+     * first; only what still does not pair up is refused.
      */
+    femu_sglist_split(n, &req->qsg, 1U << lbads);
     if (req->qsg.nsg != nlb) {
         femu_err("%s: %d data segments for %u addresses\n", __func__,
                  req->qsg.nsg, nlb);
