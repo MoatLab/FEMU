@@ -5475,10 +5475,12 @@ static void femu_zoned_round_trip(FemuCtrlState *c, uint64_t buf)
 typedef struct FemuIoFuzz {
     int min_succeeded;
     bool zoned;         /* writes must land on a write pointer */
+    int nruh;           /* placement handles, when writes may carry one */
 } FemuIoFuzz;
 
-static const FemuIoFuzz femu_io_fuzz_conv = { 8, false };
-static const FemuIoFuzz femu_io_fuzz_zoned = { 5, true };
+static const FemuIoFuzz femu_io_fuzz_conv = { 8, false, 0 };
+static const FemuIoFuzz femu_io_fuzz_zoned = { 5, true, 0 };
+static const FemuIoFuzz femu_io_fuzz_fdp = { 8, false, 4 };
 
 #define FEMU_FUZZ_ZONES     4
 
@@ -5589,6 +5591,18 @@ static void femu_test_io_fuzz(void *obj, void *data, QGuestAllocator *alloc)
                             rw.opcode == NVME_CMD_WRITE_ZEROES ||
                             rw.opcode == NVME_CMD_ZONE_APPEND)) {
             femu_fuzz_aim_zone(&c, rng, zbuf, zsze, &rw);
+        }
+        /* read the placement handles' status (MO 1), the whole buffer */
+        if (rw.opcode == NVME_CMD_IO_MGMT_RECV) {
+            cmd->cdw10 = cpu_to_le32(1);
+            cmd->cdw11 = cpu_to_le32((nlb + 1) * c.lba_size / 4 - 1);
+        }
+        /* half the writes name a placement handle (DTYPE 2, DSPEC) */
+        if (want->nruh && (rw.opcode == NVME_CMD_WRITE ||
+                           rw.opcode == NVME_CMD_WRITE_ZEROES) &&
+            g_rand_boolean(rng)) {
+            rw.control = cpu_to_le16(2 << 4);
+            rw.dsmgmt = cpu_to_le32(g_rand_int_range(rng, 0, want->nruh) << 16);
         }
 
         if (wild) {
@@ -5990,6 +6004,14 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .arg = (void *)&femu_io_fuzz_zoned,
         .edge.extra_device_opts = "femu_mode=3,secsz=512,sgl=on"
+    });
+    qos_add_test("io-fuzz-fdp", "femu", femu_test_io_fuzz,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)&femu_io_fuzz_fdp,
+        .edge.extra_device_opts =
+            "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
+            "sgl=on,vwc=1,oncs=0x19f,subsys=fdpsub"
     });
     qos_add_test("io-fuzz-nossd", "femu", femu_test_io_fuzz,
                  &(QOSGraphTestOptions) {
