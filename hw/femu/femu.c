@@ -484,10 +484,12 @@ static int nvme_start_ctrl(FemuCtrl *n)
         n->bar.asq & (page_size - 1) || n->bar.acq & (page_size - 1) ||
         NVME_CC_MPS(n->bar.cc) < NVME_CAP_MPSMIN(n->bar.cap) ||
         NVME_CC_MPS(n->bar.cc) > NVME_CAP_MPSMAX(n->bar.cap) ||
-        NVME_CC_IOCQES(n->bar.cc) < NVME_CTRL_CQES_MIN(n->id_ctrl.cqes) ||
-        NVME_CC_IOCQES(n->bar.cc) > NVME_CTRL_CQES_MAX(n->id_ctrl.cqes) ||
-        NVME_CC_IOSQES(n->bar.cc) < NVME_CTRL_SQES_MIN(n->id_ctrl.sqes) ||
-        NVME_CC_IOSQES(n->bar.cc) > NVME_CTRL_SQES_MAX(n->id_ctrl.sqes) ||
+        (NVME_CC_IOCQES(n->bar.cc) &&
+         (NVME_CC_IOCQES(n->bar.cc) < NVME_CTRL_CQES_MIN(n->id_ctrl.cqes) ||
+          NVME_CC_IOCQES(n->bar.cc) > NVME_CTRL_CQES_MAX(n->id_ctrl.cqes))) ||
+        (NVME_CC_IOSQES(n->bar.cc) &&
+         (NVME_CC_IOSQES(n->bar.cc) < NVME_CTRL_SQES_MIN(n->id_ctrl.sqes) ||
+          NVME_CC_IOSQES(n->bar.cc) > NVME_CTRL_SQES_MAX(n->id_ctrl.sqes))) ||
         !NVME_AQA_ASQS(n->bar.aqa) || NVME_AQA_ASQS(n->bar.aqa) > 4095 ||
         !NVME_AQA_ACQS(n->bar.aqa) || NVME_AQA_ACQS(n->bar.aqa) > 4095) {
         return -1;
@@ -496,8 +498,13 @@ static int nvme_start_ctrl(FemuCtrl *n)
     n->page_bits = page_bits;
     n->page_size = 1 << n->page_bits;
     n->max_prp_ents = n->page_size / sizeof(uint64_t);
-    n->cqe_size = 1 << NVME_CC_IOCQES(n->bar.cc);
-    n->sqe_size = 1 << NVME_CC_IOSQES(n->bar.cc);
+    /*
+     * The host may leave the I/O entry sizes at 0 until it creates an I/O
+     * queue, and the admin queue's entries have a fixed size anyway. Realize
+     * allows no other size, so every queue uses these.
+     */
+    n->cqe_size = 1 << NVME_MIN_CQUEUE_ES;
+    n->sqe_size = 1 << NVME_MIN_SQUEUE_ES;
 
     /*
      * Either admin queue can fail to come up: the host chooses both addresses
@@ -543,56 +550,76 @@ static void nvme_write_bar(FemuCtrl *n, hwaddr offset, uint64_t data, unsigned s
         n->bar.intmc = n->bar.intms;
         nvme_irq_mask_changed(n, data & 0xffffffff);
         break;
-    case 0x14:
-        /* If first sending data, then sending enable bit */
-        if (!NVME_CC_EN(data) && !NVME_CC_EN(n->bar.cc) &&
-                !NVME_CC_SHN(data) && !NVME_CC_SHN(n->bar.cc))
-        {
-            n->bar.cc = data;
-        }
+    case 0x14: {
+        /*
+         * Compare against the value before this write. Each branch used to
+         * update n->bar.cc before the next one looked at it, so a write that
+         * cleared EN and set SHN at once never reported the shutdown.
+         */
+        uint32_t cc = n->bar.cc;
+        bool reset = !NVME_CC_EN(data) && NVME_CC_EN(cc);
+        bool shutdown = NVME_CC_SHN(data) && !NVME_CC_SHN(cc);
 
-        if (NVME_CC_EN(data) && !NVME_CC_EN(n->bar.cc)) {
+        /* reserved bits, and CRIME, which CAP.CRMS does not offer */
+        data &= 0x00fffff1;
+
+        if (NVME_CC_EN(data) && !NVME_CC_EN(cc)) {
             n->bar.cc = data;
             if (nvme_start_ctrl(n)) {
                 n->bar.csts = NVME_CSTS_FAILED;
             } else {
                 n->bar.csts = NVME_CSTS_READY;
             }
-        } else if (!NVME_CC_EN(data) && NVME_CC_EN(n->bar.cc)) {
-            nvme_clear_ctrl(n, false);
+        } else if (reset) {
             /*
-             * A disable is a controller reset, which is what clears the fatal
-             * status. Left set, a controller that failed to start could not be
-             * recovered: the host's next enable is not a transition from
-             * disabled, so nothing recomputed the status and it read as failed
-             * for the life of the device.
+             * A reset clears the fatal and shutdown status as well as ready;
+             * left set, a controller that failed to start could never be
+             * recovered. A shutdown asked for in the same write still
+             * completes below.
              */
-            n->bar.csts &= ~(NVME_CSTS_READY | NVME_CSTS_FAILED);
+            nvme_clear_ctrl(n, shutdown);
+            n->bar.csts &= ~(NVME_CSTS_READY | NVME_CSTS_FAILED |
+                             (CSTS_SHST_MASK << CSTS_SHST_SHIFT));
+            n->bar.cc = data;
+        } else if (!NVME_CC_EN(data)) {
+            /* the other fields are the host's to set while disabled */
             n->bar.cc = data;
         }
-        if (NVME_CC_SHN(data) && !(NVME_CC_SHN(n->bar.cc))) {
-            nvme_clear_ctrl(n, true);
+
+        if (shutdown) {
+            if (!reset) {
+                nvme_clear_ctrl(n, true);
+            }
             n->bar.cc = data;
             n->bar.csts |= NVME_CSTS_SHST_COMPLETE;
-        } else if (!NVME_CC_SHN(data) && NVME_CC_SHN(n->bar.cc)) {
-            n->bar.csts &= ~NVME_CSTS_SHST_COMPLETE;
+        } else if (!NVME_CC_SHN(data) && NVME_CC_SHN(cc)) {
+            n->bar.csts &= ~(CSTS_SHST_MASK << CSTS_SHST_SHIFT);
             n->bar.cc = data;
         }
         break;
+    }
     case 0x24:
-        n->bar.aqa = data & 0xffffffff;
+        n->bar.aqa = data & 0x0fff0fff;
         break;
+    /*
+     * ASQ and ACQ may be written as two dwords in either order, so each half
+     * keeps the other. The low 12 bits are reserved.
+     */
     case 0x28:
-        n->bar.asq = data;
+        n->bar.asq = size == 8 ? data :
+                     (n->bar.asq & ~0xffffffffULL) | (uint32_t)data;
+        n->bar.asq &= ~0xfffULL;
         break;
     case 0x2c:
-        n->bar.asq |= data << 32;
+        n->bar.asq = (n->bar.asq & 0xffffffffULL) | (data << 32);
         break;
     case 0x30:
-        n->bar.acq = data;
+        n->bar.acq = size == 8 ? data :
+                     (n->bar.acq & ~0xffffffffULL) | (uint32_t)data;
+        n->bar.acq &= ~0xfffULL;
         break;
     case 0x34:
-        n->bar.acq |= data << 32;
+        n->bar.acq = (n->bar.acq & 0xffffffffULL) | (data << 32);
         break;
     default:
         break;
@@ -1298,9 +1325,9 @@ static void nvme_init_ctrl(FemuCtrl *n)
     NVME_CAP_SET_TO(n->bar.cap, 0xf);
     NVME_CAP_SET_DSTRD(n->bar.cap, n->db_stride);
     NVME_CAP_SET_NSSRS(n->bar.cap, 0);
+    /* NVM plus sets chosen by CSI; NOIOCSS would claim no I/O set at all */
     NVME_CAP_SET_CSS(n->bar.cap, 1);
     NVME_CAP_SET_CSS(n->bar.cap, NVME_CAP_CSS_CSI_SUPP);
-    NVME_CAP_SET_CSS(n->bar.cap, NVME_CAP_CSS_ADMIN_ONLY);
 
     NVME_CAP_SET_MPSMIN(n->bar.cap, n->mpsmin);
     NVME_CAP_SET_MPSMAX(n->bar.cap, n->mpsmax);

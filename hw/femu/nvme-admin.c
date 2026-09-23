@@ -168,7 +168,9 @@ static uint16_t nvme_create_sq(FemuCtrl *n, NvmeCmd *cmd)
     if (!sqid || sqid > n->nr_io_queues || !nvme_check_sqid(n, sqid)) {
         return NVME_INVALID_QID | NVME_DNR;
     }
-    if (!qsize || qsize > NVME_CAP_MQES(n->bar.cap)) {
+    /* also before the host has set the entry size (Base 2.3, Figure 510) */
+    if (!qsize || qsize > NVME_CAP_MQES(n->bar.cap) ||
+        !NVME_CC_IOSQES(n->bar.cc)) {
         return NVME_MAX_QSIZE_EXCEEDED | NVME_DNR;
     }
     if (!prp1) {
@@ -225,7 +227,8 @@ static uint16_t nvme_create_cq(FemuCtrl *n, NvmeCmd *cmd)
     if (!cqid || cqid > n->nr_io_queues || !nvme_check_cqid(n, cqid)) {
         return NVME_INVALID_QID | NVME_DNR;
     }
-    if (!qsize || qsize > NVME_CAP_MQES(n->bar.cap)) {
+    if (!qsize || qsize > NVME_CAP_MQES(n->bar.cap) ||
+        !NVME_CC_IOCQES(n->bar.cc)) {
         return NVME_MAX_QSIZE_EXCEEDED | NVME_DNR;
     }
     if (!prp1) {

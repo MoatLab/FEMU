@@ -3771,6 +3771,74 @@ static void femu_test_queue_create_status(void *obj, void *data,
     guest_free(alloc, ring);
 }
 
+#define FEMU_CC_ENABLE      ((6 << 16) | (4 << 20) | 1)
+#define FEMU_CC_SHN_NORMAL  (1 << 14)
+#define FEMU_CSTS_SHST(x)   (((x) >> 2) & 3)
+#define FEMU_INVALID_QSIZE  0x102   /* command specific */
+
+/*
+ * The controller configuration and status registers (Base 2.3, Figures 41-42
+ * and 3.5): a write that disables and shuts down at once does both, a reset
+ * clears the shutdown status, the I/O entry sizes may be left at 0 until an
+ * I/O queue is made, and ASQ may be written as two dwords in either order.
+ */
+static void femu_test_cc_states(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QPCIDevice *dev = &femu->dev;
+    FemuCtrlState c = { 0 };
+    uint64_t ring = guest_alloc(alloc, 2 * 4096);
+    uint64_t page = (ring + 4095) & ~4095ULL;
+    uint32_t csts;
+
+    femu_enable(&c, dev, alloc);
+    qpci_io_writel(dev, c.bar, 0x14, (FEMU_CC_ENABLE & ~1) |
+                   FEMU_CC_SHN_NORMAL);
+    csts = qpci_io_readl(dev, c.bar, 0x1c);
+    g_assert_cmpint(csts & NVME_CSTS_READY, ==, 0);
+    g_assert_cmpint(FEMU_CSTS_SHST(csts), ==, 2);
+    qpci_io_writel(dev, c.bar, 0x14, 0);
+    g_assert_cmpint(FEMU_CSTS_SHST(qpci_io_readl(dev, c.bar, 0x1c)), ==, 0);
+    femu_queue_free(&c, &c.admin);
+    qpci_iounmap(dev, c.bar);
+
+    /* shut down while enabled, then reset with SHN still set */
+    memset(&c, 0, sizeof(c));
+    femu_enable(&c, dev, alloc);
+    qpci_io_writel(dev, c.bar, 0x14, FEMU_CC_ENABLE | FEMU_CC_SHN_NORMAL);
+    g_assert_cmpint(FEMU_CSTS_SHST(qpci_io_readl(dev, c.bar, 0x1c)), ==, 2);
+    qpci_io_writel(dev, c.bar, 0x14, FEMU_CC_SHN_NORMAL);
+    csts = qpci_io_readl(dev, c.bar, 0x1c);
+    g_assert_cmpint(FEMU_CSTS_SHST(csts), ==, 0);
+    g_assert_cmpint(csts & NVME_CSTS_FAILED, ==, 0);
+    qpci_io_writel(dev, c.bar, 0x14, 0);
+    femu_queue_free(&c, &c.admin);
+    qpci_iounmap(dev, c.bar);
+
+    /* no I/O entry sizes yet: ready, but no I/O queue can be made */
+    memset(&c, 0, sizeof(c));
+    c.pdev = dev;
+    c.alloc = alloc;
+    femu_queue_init(&c, &c.admin, 0);
+    femu_enable_cc(&c, dev, alloc, 1);
+    g_assert_cmpint(femu_queue_cmd(&c, NVME_ADM_CMD_CREATE_CQ, 1, page,
+                                   NVME_CQ_PC), ==, FEMU_INVALID_QSIZE);
+    femu_disable(&c);
+
+    /* ASQ high dword first, then low; and the reserved bits of AQA */
+    c.bar = qpci_iomap(dev, 0, NULL);
+    qpci_io_writel(dev, c.bar, 0x2c, 0x1);
+    qpci_io_writel(dev, c.bar, 0x28, 0x2000);
+    g_assert_cmphex(qpci_io_readq(dev, c.bar, 0x28), ==, 0x100002000ULL);
+    qpci_io_writel(dev, c.bar, 0x28, 0x3fff);
+    g_assert_cmphex(qpci_io_readq(dev, c.bar, 0x28), ==, 0x100003000ULL);
+    qpci_io_writel(dev, c.bar, 0x24, 0xffffffff);
+    g_assert_cmphex(qpci_io_readl(dev, c.bar, 0x24), ==, 0x0fff0fff);
+    qpci_iounmap(dev, c.bar);
+
+    guest_free(alloc, ring);
+}
+
 #define FEMU_CSD_COMPUTE_LOAD   0x22
 #define FEMU_CSD_TYPE_SHARED_LIB 0x03
 
@@ -4048,6 +4116,7 @@ static void femu_register_nodes(void)
     qos_add_test("dma-error", "femu", femu_test_dma_error, NULL);
     qos_add_test("queue-create-status", "femu", femu_test_queue_create_status,
                  NULL);
+    qos_add_test("cc-states", "femu", femu_test_cc_states, NULL);
     qos_add_test("sgl-zoned", "femu", femu_test_sgl_zoned,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "femu_mode=3,secsz=512,sgl=on"
