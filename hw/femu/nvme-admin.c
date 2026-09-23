@@ -615,14 +615,9 @@ static uint16_t nvme_identify_ns(FemuCtrl *n, NvmeCmd *cmd)
      * it can attach the namespace and ask for the command-set-specific pages
      * below. Report it for any active namespace rather than only for the command
      * sets built on the NVM one, otherwise a namespace of another kind cannot be
-     * attached at all.
+     * attached at all. CNS 00h does not use the CSI field.
      */
-    if (c->csi == NVME_CSI_NVM) {
-        return dma_read_prp(n, (uint8_t *)&ns->id_ns, sizeof(NvmeIdNs),
-                                 prp1, prp2);
-    }
-
-    return NVME_INVALID_CMD_SET | NVME_DNR;
+    return dma_read_prp(n, (uint8_t *)&ns->id_ns, sizeof(NvmeIdNs), prp1, prp2);
 }
 
 static uint16_t nvme_identify_ns_csi(FemuCtrl *n, NvmeCmd *cmd)
@@ -664,6 +659,9 @@ static uint16_t nvme_identify_ctrl(FemuCtrl *n, NvmeCmd *cmd)
 {
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
+
+    /* assigned when the controller joins its subsystem, after realize */
+    n->id_ctrl.cntlid = cpu_to_le16(n->cntlid);
 
     return dma_read_prp(n, (uint8_t *)&n->id_ctrl, sizeof(n->id_ctrl),
                              prp1, prp2);
@@ -773,6 +771,58 @@ static uint16_t nvme_identify_nslist_csi(FemuCtrl *n, NvmeCmd *cmd)
     return dma_read_prp(n, list, data_len, prp1, prp2);
 }
 
+/*
+ * A namespace with no EUI64 or NGUID needs a UUID of its own (Base 2.3,
+ * 4.7.1.4), and one that survives a restart. Derive it from the serial number
+ * and the namespace ID: RFC 9562 version 8, from a SHA-256 of the two.
+ */
+static void nvme_ns_uuid(FemuCtrl *n, NvmeNamespace *ns, uint8_t *uuid)
+{
+    g_autofree char *name = g_strdup_printf("%.20s:%u", n->id_ctrl.sn,
+                                            ns->id);
+    GChecksum *ck = g_checksum_new(G_CHECKSUM_SHA256);
+    guint8 digest[32];
+    gsize len = sizeof(digest);
+
+    g_checksum_update(ck, (const guchar *)name, strlen(name));
+    g_checksum_get_digest(ck, digest, &len);
+    g_checksum_free(ck);
+
+    memcpy(uuid, digest, NVME_NIDL_UUID);
+    uuid[6] = (uuid[6] & 0x0f) | 0x80;
+    uuid[8] = (uuid[8] & 0x3f) | 0x80;
+}
+
+/*
+ * The I/O Command Set Independent Identify Namespace structure (CNS 08h,
+ * Base 2.3, Figure 335), mandatory with the command sets FEMU offers. Linux
+ * asks for it first and takes readiness, sharing and the endurance group from
+ * it, so NRDY has to be set.
+ */
+static uint16_t nvme_identify_ns_cs_indep(FemuCtrl *n, NvmeCmd *cmd)
+{
+    uint32_t nsid = le32_to_cpu(cmd->nsid);
+    uint8_t id[NVME_IDENTIFY_DATA_SIZE] = {};
+    NvmeNamespace *ns;
+
+    if (!nsid || (nsid != NVME_NSID_BROADCAST && !nvme_nsid_valid(n, nsid))) {
+        return NVME_INVALID_NSID | NVME_DNR;
+    }
+
+    ns = nsid == NVME_NSID_BROADCAST ? NULL : nvme_ns(n, nsid);
+    if (ns) {
+        id[0] = n->vwc ? 0 : 1 << 5;        /* NSFEAT.VWCNP */
+        id[1] = ns->id_ns.nmic;
+        id[2] = ns->id_ns.rescap;
+        id[3] = ns->id_ns.fpi;
+        stw_le_p(&id[12], le16_to_cpu(ns->id_ns.endgid));
+        id[14] = 0x1;                       /* NSTAT.NRDY */
+    }
+
+    return dma_read_prp(n, id, sizeof(id), le64_to_cpu(cmd->dptr.prp1),
+                        le64_to_cpu(cmd->dptr.prp2));
+}
+
 static uint16_t nvme_identify_ns_descr_list(FemuCtrl *n, NvmeCmd *cmd)
 {
     NvmeNamespace *ns;
@@ -806,7 +856,7 @@ static uint16_t nvme_identify_ns_descr_list(FemuCtrl *n, NvmeCmd *cmd)
 
     ns_descrs->uuid.hdr.nidt = NVME_NIDT_UUID;
     ns_descrs->uuid.hdr.nidl = NVME_NIDL_UUID;
-    memcpy(&ns_descrs->uuid.v, n->uuid.data, NVME_NIDL_UUID);
+    nvme_ns_uuid(n, ns, ns_descrs->uuid.v);
 
     ns_descrs->csi.hdr.nidt = NVME_NIDT_CSI;
     ns_descrs->csi.hdr.nidl = NVME_NIDL_CSI;
@@ -832,9 +882,12 @@ static uint16_t nvme_identify_cmd_set(FemuCtrl *n, NvmeCmd *cmd)
 static uint16_t nvme_identify(FemuCtrl *n, NvmeCmd *cmd)
 {
     NvmeIdentify *c = (NvmeIdentify *)cmd;
-    uint32_t cns  = le32_to_cpu(c->cns);
+    /* CNS is bits 7:0; the controller identifier sits above it */
+    uint32_t cns  = le32_to_cpu(c->cns) & 0xff;
 
     switch (cns) {
+    case NVME_ID_CNS_NS_CS_INDEP:
+        return nvme_identify_ns_cs_indep(n, cmd);
     case NVME_ID_CNS_NS:
     case NVME_ID_CNS_NS_PRESENT:
         return nvme_identify_ns(n, cmd);

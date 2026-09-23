@@ -440,6 +440,8 @@ enum NvmeCapMask {
 #define NVME_MIN_SQUEUE_ES      0x6
 #define NVME_SPARE_THRESHOLD    20
 #define NVME_TEMPERATURE        0x143
+#define NVME_TEMPERATURE_WARNING  0x157     /* 70 C */
+#define NVME_TEMPERATURE_CRITICAL 0x175     /* 100 C */
 #define NVME_OP_ABORTED         0xff
 
 #define NVME_CAP_MQES(cap)  (((cap) >> CAP_MQES_SHIFT)   & CAP_MQES_MASK)
@@ -1122,6 +1124,7 @@ enum NvmeIdCns {
     NVME_ID_CNS_NS_DESCR_LIST         = 0x03,
     NVME_ID_CNS_CS_NS                 = 0x05,
     NVME_ID_CNS_CS_CTRL               = 0x06,
+    NVME_ID_CNS_NS_CS_INDEP           = 0x08,
     NVME_ID_CNS_CS_NS_FMT             = 0x0a,  /* CSI-specific NS for a format index */
     NVME_ID_CNS_CS_NS_ACTIVE_LIST     = 0x07,
     NVME_ID_CNS_NS_PRESENT_LIST       = 0x10,
@@ -1147,7 +1150,9 @@ typedef struct QEMU_PACKED NvmeIdCtrl {
     uint32_t    rtd3e;
     uint32_t    oaes;
     uint32_t    ctratt;
-    uint8_t     rsvd100[12];
+    uint16_t    rrls;
+    uint8_t     rsvd102[9];
+    uint8_t     cntrltype;
     uint8_t     fguid[16];
     uint8_t     rsvd128[128];
     uint16_t    oacs;

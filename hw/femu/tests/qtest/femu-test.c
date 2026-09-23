@@ -4014,6 +4014,84 @@ static void femu_test_error_log(void *obj, void *data, QGuestAllocator *alloc)
     femu_disable(&c);
 }
 
+#define FEMU_CNS_NS_CS_INDEP    0x08
+
+static uint16_t femu_identify(FemuCtrlState *c, uint32_t nsid, uint32_t dw10,
+                              uint32_t dw11, uint64_t buf)
+{
+    NvmeCmd cmd;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_IDENTIFY;
+    cmd.nsid = cpu_to_le32(nsid);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(dw10);
+    cmd.cdw11 = cpu_to_le32(dw11);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+/*
+ * Identify fields a version 1.4 controller must fill (Base 2.3, Figure 328),
+ * the command-set-independent namespace structure (CNS 08h, Figure 335) with
+ * the namespace ready, a UUID per namespace that is not zero and does not
+ * change, CNS read from bits 7:0 only, and CNS 00h ignoring CSI.
+ */
+static void femu_test_identify_fields(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint8_t uuid1[16];
+    uint8_t uuid2[16];
+    uint8_t again[16];
+    uint8_t zero[16] = { 0 };
+    uint64_t buf;
+
+    femu_enable(&c, &femu->dev, alloc);
+    buf = guest_alloc(alloc, 4096);
+
+    g_assert_cmpint(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(qtest_readb(qts, buf + 111), ==, 1);        /* CNTRLTYPE */
+    g_assert_cmpint(qtest_readw(qts, buf + 266), !=, 0);        /* WCTEMP */
+    g_assert_cmpint(qtest_readw(qts, buf + 268), >,
+                    qtest_readw(qts, buf + 266));               /* CCTEMP */
+    g_assert_cmpint((qtest_readb(qts, buf + 525) >> 1) & 3, ==, 2);
+
+    qtest_memset(qts, buf, 0, 4096);
+    g_assert_cmpint(femu_identify(&c, 1, FEMU_CNS_NS_CS_INDEP, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(qtest_readb(qts, buf + 14) & 1, ==, 1);     /* NRDY */
+    g_assert_cmpint(femu_identify(&c, 0, FEMU_CNS_NS_CS_INDEP, 0, buf), ==,
+                    FEMU_INVALID_NSID);
+    g_assert_cmpint(femu_identify(&c, 99, FEMU_CNS_NS_CS_INDEP, 0, buf), ==,
+                    FEMU_INVALID_NSID);
+
+    g_assert_cmpint(femu_identify(&c, 1, NVME_ID_CNS_NS_DESCR_LIST, 0, buf),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpint(qtest_readb(qts, buf), ==, 3);              /* NIDT UUID */
+    qtest_memread(qts, buf + 4, uuid1, 16);
+    g_assert_cmpint(femu_identify(&c, 2, NVME_ID_CNS_NS_DESCR_LIST, 0, buf),
+                    ==, NVME_SUCCESS);
+    qtest_memread(qts, buf + 4, uuid2, 16);
+    g_assert_cmpint(femu_identify(&c, 1, NVME_ID_CNS_NS_DESCR_LIST, 0, buf),
+                    ==, NVME_SUCCESS);
+    qtest_memread(qts, buf + 4, again, 16);
+    g_assert_cmpint(memcmp(uuid1, zero, 16), !=, 0);
+    g_assert_cmpint(memcmp(uuid1, uuid2, 16), !=, 0);
+    g_assert_cmpint(memcmp(uuid1, again, 16), ==, 0);
+
+    /* a controller identifier above CNS, and a CSI CNS 00h does not use */
+    g_assert_cmpint(femu_identify(&c, 0, NVME_ID_CNS_CTRL | (5 << 16), 0, buf),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_identify(&c, 1, NVME_ID_CNS_NS, 2 << 24, buf), ==,
+                    NVME_SUCCESS);
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
 #define FEMU_CSD_COMPUTE_LOAD   0x22
 #define FEMU_CSD_TYPE_SHARED_LIB 0x03
 
@@ -4294,6 +4372,10 @@ static void femu_register_nodes(void)
     qos_add_test("cc-states", "femu", femu_test_cc_states, NULL);
     qos_add_test("features-reset", "femu", femu_test_features_reset, NULL);
     qos_add_test("error-log", "femu", femu_test_error_log, NULL);
+    qos_add_test("identify-fields", "femu", femu_test_identify_fields,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "namespaces=2"
+    });
     qos_add_test("features-reset-vwc", "femu", femu_test_features_reset,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "vwc=1",

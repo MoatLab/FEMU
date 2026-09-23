@@ -1288,6 +1288,9 @@ static void nvme_init_ctrl(FemuCtrl *n)
     id->ssvid = cpu_to_le16(pci_get_word(pci_conf + PCI_SUBSYSTEM_VENDOR_ID));
 
     id->rab          = 6;
+    id->cntrltype    = 0x1;     /* an I/O controller */
+    id->wctemp       = cpu_to_le16(NVME_TEMPERATURE_WARNING);
+    id->cctemp       = cpu_to_le16(NVME_TEMPERATURE_CRITICAL);
     id->ieee[0]      = 0x00;
     id->ieee[1]      = 0x02;
     id->ieee[2]      = 0xb3;
@@ -1323,7 +1326,11 @@ static void nvme_init_ctrl(FemuCtrl *n)
     g_free(subnqn);
     id->fuses        = cpu_to_le16(0);
     id->fna          = 0;
-    id->vwc          = n->vwc;
+    /*
+     * Flush Behavior 10b: a Flush to every namespace at once (NSID FFFFFFFFh)
+     * is refused, which is what the I/O path does.
+     */
+    id->vwc          = n->vwc | (0x2 << 1);
     id->awun         = cpu_to_le16(0);
     id->awupf        = cpu_to_le16(0);
     id->psd[0].mp    = cpu_to_le16(0x9c4);

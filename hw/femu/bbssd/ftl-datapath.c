@@ -57,7 +57,7 @@ static bool buffer_enabled(struct ssd *ssd)
      * controller that advertises no cache has nothing for the host to disable
      * and keeps buffering, which is what buffer_size alone has always meant.
      */
-    if (ssd->n && ssd->n->id_ctrl.vwc && !ssd->n->features.volatile_wc) {
+    if (ssd->n && ssd->n->vwc && !ssd->n->features.volatile_wc) {
         return false;
     }
 
