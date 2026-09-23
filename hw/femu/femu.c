@@ -899,10 +899,16 @@ static bool nvme_check_constraints(FemuCtrl *n, Error **errp)
                        "must come to a non-zero power of two", cmb_size);
             return false;
         }
-        if (bir < 2 || bir > 5) {
+        /*
+         * The buffer is a 64-bit BAR, so it takes two slots. The registers
+         * hold 0 and 1 and the MSI-X table 4 and 5, which leaves 2: BAR 4
+         * tripped an assertion in pci_register_bar(), and 3 and 5 overlap the
+         * MSI-X BAR's halves.
+         */
+        if (bir != 2) {
             error_setg(errp, "cmbloc selects base address register %u; the "
-                       "controller registers occupy 0 and 1, so it must be "
-                       "in [2, 5]", bir);
+                       "controller registers use 0 and 1 and the MSI-X "
+                       "table 4 and 5, so it must be 2", bir);
             return false;
         }
     }
