@@ -5189,10 +5189,15 @@ static void femu_test_copy(void *obj, void *data, QGuestAllocator *alloc)
 #define FEMU_FUZZ_ROUNDS    20000
 #define FEMU_ADM_DEBUG      0xee
 
-/* Mostly a value the handler accepts, so the draw gets past its first check. */
-static uint32_t femu_fuzz_field(GRand *rng, uint32_t sane, uint32_t wild)
+/*
+ * Whether a field gets a value the handler accepts, which it mostly does so
+ * the command gets past its first check. Callers draw the value only after
+ * this, inside a conditional, so the order of draws from one seed does not
+ * depend on how a compiler orders function arguments.
+ */
+static bool femu_fuzz_sane(GRand *rng)
 {
-    return g_rand_int_range(rng, 0, 4) ? sane : wild;
+    return g_rand_int_range(rng, 0, 4) != 0;
 }
 
 /*
@@ -5239,19 +5244,21 @@ static void femu_test_admin_fuzz(void *obj, void *data, QGuestAllocator *alloc)
         uint32_t numd;
 
         memset(&cmd, 0, sizeof(cmd));
-        cmd.opcode = femu_fuzz_field(rng,
-                        ops[g_rand_int_range(rng, 0, G_N_ELEMENTS(ops))],
-                        g_rand_int_range(rng, 0, 0x100));
+        cmd.opcode = femu_fuzz_sane(rng) ?
+                     ops[g_rand_int_range(rng, 0, G_N_ELEMENTS(ops))] :
+                     g_rand_int_range(rng, 0, 0x100);
         if (cmd.opcode == NVME_ADM_CMD_ASYNC_EV_REQ ||
             cmd.opcode == NVME_ADM_CMD_DELETE_SQ ||
             cmd.opcode == NVME_ADM_CMD_DELETE_CQ) {
             continue;
         }
-        cmd.nsid = cpu_to_le32(femu_fuzz_field(rng,
-                        nsids[g_rand_int_range(rng, 0, 3)],
-                        g_rand_boolean(rng) ?
-                        nsids[g_rand_int_range(rng, 3, 6)] :
-                        g_rand_int(rng)));
+        if (femu_fuzz_sane(rng)) {
+            cmd.nsid = cpu_to_le32(nsids[g_rand_int_range(rng, 0, 3)]);
+        } else if (g_rand_boolean(rng)) {
+            cmd.nsid = cpu_to_le32(nsids[g_rand_int_range(rng, 3, 6)]);
+        } else {
+            cmd.nsid = cpu_to_le32(g_rand_int(rng));
+        }
         cmd.dptr.prp1 = cpu_to_le64(g_rand_int_range(rng, 0, 4) ? buf :
                                     ptrs[g_rand_int_range(rng, 0, 4)]);
         cmd.dptr.prp2 = cpu_to_le64(g_rand_int_range(rng, 0, 4) ?
@@ -5261,18 +5268,18 @@ static void femu_test_admin_fuzz(void *obj, void *data, QGuestAllocator *alloc)
          * The low byte selects a log ID, CNS or feature ID and the high half
          * is a count, so draw them apart.
          */
-        numd = femu_fuzz_field(rng, g_rand_int_range(rng, 0, 0x400),
-                               counts[g_rand_int_range(rng, 0, 5)]);
+        numd = femu_fuzz_sane(rng) ? g_rand_int_range(rng, 0, 0x400) :
+                                     counts[g_rand_int_range(rng, 0, 5)];
         cmd.cdw10 = cpu_to_le32(numd << 16 |
-                                femu_fuzz_field(rng,
-                                    g_rand_int_range(rng, 0, 0x20),
-                                    g_rand_int_range(rng, 0, 0x10000)));
-        cmd.cdw11 = cpu_to_le32(femu_fuzz_field(rng,
-                        g_rand_int_range(rng, 0, 16), g_rand_int(rng)));
-        cmd.cdw12 = cpu_to_le32(femu_fuzz_field(rng, 0, g_rand_int(rng)));
-        cmd.cdw13 = cpu_to_le32(femu_fuzz_field(rng, 0, g_rand_int(rng)));
-        cmd.cdw14 = cpu_to_le32(femu_fuzz_field(rng, 0, g_rand_int(rng)));
-        cmd.cdw15 = cpu_to_le32(femu_fuzz_field(rng, 0, g_rand_int(rng)));
+                                (femu_fuzz_sane(rng) ?
+                                 g_rand_int_range(rng, 0, 0x20) :
+                                 g_rand_int_range(rng, 0, 0x10000)));
+        cmd.cdw11 = cpu_to_le32(femu_fuzz_sane(rng) ?
+                                g_rand_int_range(rng, 0, 16) : g_rand_int(rng));
+        cmd.cdw12 = cpu_to_le32(femu_fuzz_sane(rng) ? 0 : g_rand_int(rng));
+        cmd.cdw13 = cpu_to_le32(femu_fuzz_sane(rng) ? 0 : g_rand_int(rng));
+        cmd.cdw14 = cpu_to_le32(femu_fuzz_sane(rng) ? 0 : g_rand_int(rng));
+        cmd.cdw15 = cpu_to_le32(femu_fuzz_sane(rng) ? 0 : g_rand_int(rng));
         if (femu_admin(&c, &cmd) == NVME_SUCCESS && !succeeded[cmd.opcode]) {
             succeeded[cmd.opcode] = true;
             distinct++;
@@ -5347,23 +5354,28 @@ static void femu_fuzz_lists(FemuCtrlState *c, GRand *rng, uint64_t region)
 
         memset(&d, 0, sizeof(d));
         if (kind < 4) {
-            d.type = femu_fuzz_field(rng, kind < 2 ?
-                                     NVME_SGL_DESCR_TYPE_SEGMENT << 4 :
-                                     NVME_SGL_DESCR_TYPE_LAST_SEGMENT << 4,
-                                     g_rand_int_range(rng, 0, 0x100));
+            if (!femu_fuzz_sane(rng)) {
+                d.type = g_rand_int_range(rng, 0, 0x100);
+            } else if (kind < 2) {
+                d.type = NVME_SGL_DESCR_TYPE_SEGMENT << 4;
+            } else {
+                d.type = NVME_SGL_DESCR_TYPE_LAST_SEGMENT << 4;
+            }
             d.addr = cpu_to_le64(femu_fuzz_sgl_slot(rng, region));
-            d.len = cpu_to_le32(femu_fuzz_field(rng,
-                        16 * (g_rand_boolean(rng) ? 1 :
-                              g_rand_int_range(rng, 2, 8)),
-                        g_rand_int_range(rng, 0, 0x10000)));
+            if (!femu_fuzz_sane(rng)) {
+                d.len = cpu_to_le32(g_rand_int_range(rng, 0, 0x10000));
+            } else if (g_rand_boolean(rng)) {
+                d.len = cpu_to_le32(16);
+            } else {
+                d.len = cpu_to_le32(16 * g_rand_int_range(rng, 2, 8));
+            }
         } else {
-            d.type = femu_fuzz_field(rng,
-                                     NVME_SGL_DESCR_TYPE_DATA_BLOCK << 4,
-                                     g_rand_int_range(rng, 0, 0x100));
+            d.type = femu_fuzz_sane(rng) ? NVME_SGL_DESCR_TYPE_DATA_BLOCK << 4 :
+                                           g_rand_int_range(rng, 0, 0x100);
             d.addr = cpu_to_le64(femu_fuzz_ptr(rng, region));
-            d.len = cpu_to_le32(femu_fuzz_field(rng,
-                                    512 * g_rand_int_range(rng, 1, 9),
-                                    g_rand_int(rng)));
+            d.len = cpu_to_le32(femu_fuzz_sane(rng) ?
+                                512 * g_rand_int_range(rng, 1, 9) :
+                                g_rand_int(rng));
         }
         qtest_memwrite(qts, sgls + 16ULL * i, &d, sizeof(d));
     }
@@ -5615,9 +5627,13 @@ static void femu_test_io_fuzz(void *obj, void *data, QGuestAllocator *alloc)
                                       g_rand_int_range(rng, 0, 4));
                 break;
             case 2:
-                rw.slba = cpu_to_le64(g_rand_boolean(rng) ?
-                        nsze - g_rand_int_range(rng, 0, 64) :
-                        (uint64_t)g_rand_int(rng) << 32 | g_rand_int(rng));
+                if (g_rand_boolean(rng)) {
+                    rw.slba = cpu_to_le64(nsze - g_rand_int_range(rng, 0, 64));
+                } else {
+                    uint64_t hi = g_rand_int(rng);
+
+                    rw.slba = cpu_to_le64(hi << 32 | g_rand_int(rng));
+                }
                 rw.nlb = cpu_to_le16(g_rand_int_range(rng, 0, 0x10000));
                 break;
             case 3:
@@ -5722,8 +5738,10 @@ static void femu_test_kv_fuzz(void *obj, void *data, QGuestAllocator *alloc)
     femu_create_io_queues(&c);
 
     for (i = 0; i < FEMU_IO_FUZZ_ROUNDS; i++) {
-        uint32_t size = femu_fuzz_field(rng, g_rand_int_range(rng, 1, 16385),
-                                        g_rand_int_range(rng, 1, 4096));
+        int key;
+        uint32_t size = femu_fuzz_sane(rng) ?
+                        g_rand_int_range(rng, 1, 16385) :
+                        g_rand_int_range(rng, 1, 4096);
         uint16_t st;
 
         femu_fuzz_lists(&c, rng, region);
@@ -5731,8 +5749,8 @@ static void femu_test_kv_fuzz(void *obj, void *data, QGuestAllocator *alloc)
         rw.opcode = ops[g_rand_int_range(rng, 0, G_N_ELEMENTS(ops))];
         rw.nsid = cpu_to_le32(1);
         cmd->cdw10 = cpu_to_le32(size);
-        femu_kv_fuzz_key(cmd, g_rand_int_range(rng, 0, FEMU_KV_FUZZ_KEYS),
-                         g_rand_int_range(rng, 4, 17));
+        key = g_rand_int_range(rng, 0, FEMU_KV_FUZZ_KEYS);
+        femu_kv_fuzz_key(cmd, key, g_rand_int_range(rng, 4, 17));
         femu_fuzz_valid_dptr(&c, rng, region, &rw, size);
 
         if (g_rand_int_range(rng, 0, 4) == 0) {
