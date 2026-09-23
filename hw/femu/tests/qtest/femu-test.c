@@ -4358,6 +4358,77 @@ static void femu_test_mdts_unit(void *obj, void *data, QGuestAllocator *alloc)
     guest_free(alloc, raw);
 }
 
+#define FEMU_ADM_DBBUF_CONFIG   0x7c
+
+/* submit an Async Event Request and return the identifier it went out with */
+static uint16_t femu_aer(FemuCtrlState *c)
+{
+    NvmeCmd cmd;
+    uint16_t cid = c->cid;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_ASYNC_EV_REQ;
+    femu_submit(c, &c->admin, &cmd);
+    return cid;
+}
+
+/*
+ * A write to a doorbell that does not exist, or past the end of its queue,
+ * is an Error event, 00h and 01h (Base 2.3, Figure 152). After Doorbell
+ * Buffer Config the admin queue's EventIdx follows the values written, so a
+ * host that consults it keeps ringing (Annex B.5).
+ */
+static void femu_test_doorbell_errors(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t raw = 0;
+    uint64_t pages;
+    uint32_t result;
+    uint16_t cid;
+    uint16_t want;
+    NvmeCmd cmd;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    pages = femu_alloc_64k(alloc, &raw);
+
+    want = femu_aer(&c);
+    qpci_io_writel(c.pdev, c.bar, femu_sq_doorbell(&c, 5), 1);
+    g_assert_cmpint(femu_complete(&c, &c.admin, &cid, &result), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(cid, ==, want);
+    g_assert_cmphex(result & 0xffffff, ==, 0x010000);
+    g_assert_cmpint(femu_log_cmd(&c, 0xffffffff, FEMU_LOG_ERROR_INFO, 0,
+                                 pages, 64), ==, NVME_SUCCESS);
+
+    want = femu_aer(&c);
+    qpci_io_writel(c.pdev, c.bar, femu_sq_doorbell(&c, 1), FEMU_QSIZE + 3);
+    g_assert_cmpint(femu_complete(&c, &c.admin, &cid, &result), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(cid, ==, want);
+    g_assert_cmphex(result & 0xffffff, ==, 0x010100);
+    g_assert_cmpint(femu_log_cmd(&c, 0xffffffff, FEMU_LOG_ERROR_INFO, 0,
+                                 pages, 64), ==, NVME_SUCCESS);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_ADM_DBBUF_CONFIG;
+    cmd.dptr.prp1 = cpu_to_le64(pages + 8192);
+    cmd.dptr.prp2 = cpu_to_le64(pages + 16384);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, pages), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(qtest_readl(qts, pages + 16384), ==, c.admin.sq_tail);
+    g_assert_cmpint(qtest_readl(qts, pages + 16384 + (4 << c.db_stride)), ==,
+                    c.admin.cq_head);
+
+    guest_free(alloc, raw);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 #define FEMU_CSD_COMPUTE_LOAD   0x22
 #define FEMU_CSD_TYPE_SHARED_LIB 0x03
 
@@ -4639,6 +4710,7 @@ static void femu_register_nodes(void)
     qos_add_test("features-reset", "femu", femu_test_features_reset, NULL);
     qos_add_test("error-log", "femu", femu_test_error_log, NULL);
     qos_add_test("prp-status", "femu", femu_test_prp_status, NULL);
+    qos_add_test("doorbell-errors", "femu", femu_test_doorbell_errors, NULL);
     qos_add_test("mdts-unit", "femu", femu_test_mdts_unit,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "mpsmax=4,mdts=1"

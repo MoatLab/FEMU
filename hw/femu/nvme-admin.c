@@ -511,6 +511,15 @@ static uint16_t nvme_set_db_memory(FemuCtrl *n, const NvmeCmd *cmd)
     n->eis_addr_hva = (uint64_t)eis_hva;
     n->dbbuf_map_len = n->page_size;
 
+    /*
+     * The admin pair stays on its doorbell registers, but its EventIdx entries
+     * are kept current so a host that consults them still rings (Annex B.5).
+     */
+    n->sq[0]->eventidx_addr_hva = n->eis_addr_hva;
+    n->cq[0]->eventidx_addr_hva = n->eis_addr_hva + dbbuf_entry_sz;
+    stl_le_p((void *)n->sq[0]->eventidx_addr_hva, n->sq[0]->tail);
+    stl_le_p((void *)n->cq[0]->eventidx_addr_hva, n->cq[0]->head);
+
     for (i = 1; i <= n->nr_io_queues; i++) {
         NvmeSQueue *sq = n->sq[i];
         NvmeCQueue *cq = n->cq[i];

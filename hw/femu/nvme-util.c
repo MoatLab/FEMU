@@ -535,6 +535,9 @@ uint16_t nvme_init_sq(NvmeSQueue *sq, FemuCtrl *n, uint64_t dma_addr, uint16_t
         break;
     }
 
+    /* the admin queue is rebuilt in place, so drop any buffer it had before */
+    sq->db_addr = sq->db_addr_hva = 0;
+    sq->eventidx_addr = sq->eventidx_addr_hva = 0;
     if (sqid && n->dbs_addr && n->eis_addr) {
         sq->db_addr = n->dbs_addr + 2 * sqid * dbbuf_entry_sz;
         sq->db_addr_hva = n->dbs_addr_hva + 2 * sqid * dbbuf_entry_sz;
@@ -596,6 +599,8 @@ uint16_t nvme_init_cq(NvmeCQueue *cq, FemuCtrl *n, uint64_t dma_addr, uint16_t
 
     QTAILQ_INIT(&cq->req_list);
     QTAILQ_INIT(&cq->sq_list);
+    cq->db_addr = cq->db_addr_hva = 0;
+    cq->eventidx_addr = cq->eventidx_addr_hva = 0;
     if (cqid && n->dbs_addr && n->eis_addr) {
         cq->db_addr = n->dbs_addr + (2 * cqid + 1) * dbbuf_entry_sz;
         cq->db_addr_hva = n->dbs_addr_hva + (2 * cqid + 1) * dbbuf_entry_sz;

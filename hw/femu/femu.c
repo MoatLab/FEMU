@@ -676,6 +676,30 @@ static void femu_aer_bh(void *opaque);
 static void femu_exit_extensions(FemuCtrl *n);
 static void femu_free_namespace_bitmaps(FemuCtrl *n);
 
+/*
+ * A write to a doorbell that does not exist, or of a value past the end of the
+ * queue, is reported as an Error event (Base 2.3, Figure 152). It used to be
+ * dropped without a word.
+ */
+static void nvme_bad_doorbell(FemuCtrl *n, uint8_t info)
+{
+    if (n->bar.csts & NVME_CSTS_READY) {
+        nvme_enqueue_event(n, NVME_AER_TYPE_ERROR, info, NVME_LOG_ERROR_INFO);
+    }
+}
+
+/*
+ * The admin queue is driven through its doorbell registers even with a shadow
+ * doorbell buffer, so keep its EventIdx at the value just written: a host
+ * following Annex B.5 then always rings the register.
+ */
+static void nvme_publish_admin_eventidx(uint64_t hva, uint32_t val)
+{
+    if (hva) {
+        stl_le_p((void *)hva, val);
+    }
+}
+
 static void nvme_process_db_admin(FemuCtrl *n, hwaddr addr, int val)
 {
     uint32_t qid;
@@ -688,11 +712,13 @@ static void nvme_process_db_admin(FemuCtrl *n, hwaddr addr, int val)
         qid = ((addr - (0x1000 + (1 << (2 + n->db_stride)))) >> (3 +
                                                                  n->db_stride));
         if (nvme_check_cqid(n, qid)) {
+            nvme_bad_doorbell(n, NVME_AER_INFO_ERR_INVALID_SQ);
             return;
         }
 
         cq = n->cq[qid];
         if (new_val >= cq->size) {
+            nvme_bad_doorbell(n, NVME_AER_INFO_ERR_INVALID_DB);
             return;
         }
 
@@ -703,6 +729,8 @@ static void nvme_process_db_admin(FemuCtrl *n, hwaddr addr, int val)
         }
         nvme_irq_update(n);
 
+        nvme_publish_admin_eventidx(cq->eventidx_addr_hva, cq->head);
+
         /* the host made room: resume what waited for it */
         if (n->sq[0]) {
             nvme_process_sq_admin(n->sq[0]);
@@ -711,15 +739,18 @@ static void nvme_process_db_admin(FemuCtrl *n, hwaddr addr, int val)
     } else {
         qid = (addr - 0x1000) >> (3 + n->db_stride);
         if (nvme_check_sqid(n, qid)) {
+            nvme_bad_doorbell(n, NVME_AER_INFO_ERR_INVALID_SQ);
             return;
         }
         sq = n->sq[qid];
         if (new_val >= sq->size) {
+            nvme_bad_doorbell(n, NVME_AER_INFO_ERR_INVALID_DB);
             return;
         }
 
         sq->tail = new_val;
         nvme_process_sq_admin(sq);
+        nvme_publish_admin_eventidx(sq->eventidx_addr_hva, sq->tail);
     }
 }
 
@@ -739,6 +770,7 @@ static void nvme_process_db_io(FemuCtrl *n, hwaddr addr, int val)
         qid = ((addr - (0x1000 + (1 << (2 + n->db_stride)))) >> (3 +
                                                                  n->db_stride));
         if (nvme_check_cqid(n, qid)) {
+            nvme_bad_doorbell(n, NVME_AER_INFO_ERR_INVALID_SQ);
             return;
         }
 
@@ -748,6 +780,7 @@ static void nvme_process_db_io(FemuCtrl *n, hwaddr addr, int val)
             return;
         }
         if (new_val >= cq->size) {
+            nvme_bad_doorbell(n, NVME_AER_INFO_ERR_INVALID_DB);
             return;
         }
 
@@ -760,6 +793,7 @@ static void nvme_process_db_io(FemuCtrl *n, hwaddr addr, int val)
     } else {
         qid = (addr - 0x1000) >> (3 + n->db_stride);
         if (nvme_check_sqid(n, qid)) {
+            nvme_bad_doorbell(n, NVME_AER_INFO_ERR_INVALID_SQ);
             return;
         }
         sq = n->sq[qid];
@@ -767,6 +801,7 @@ static void nvme_process_db_io(FemuCtrl *n, hwaddr addr, int val)
             return;
         }
         if (new_val >= sq->size) {
+            nvme_bad_doorbell(n, NVME_AER_INFO_ERR_INVALID_DB);
             return;
         }
 
