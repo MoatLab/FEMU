@@ -5937,6 +5937,246 @@ static void femu_test_oc12_small_sectors(void *obj, void *data,
     guest_free(alloc, ppas);
 }
 
+#define FEMU_CSD_ALLOC_FDM   0xb0
+#define FEMU_CSD_DEALLOC     0xc0
+#define FEMU_CSD_NVM_TO_AFDM 0xd0
+#define FEMU_CSD_EXEC        0xe1
+#define FEMU_CSD_READ_AFDM   0xf2
+#define FEMU_CSD_WRITE_AFDM  0xf5
+#define FEMU_CSD_NEW_GROUP   0xf6
+#define FEMU_CSD_SET_QOS     0xf7
+#define FEMU_CSD_DEL_GROUP   0xf8
+#define FEMU_CSD_FUZZ_IDS    8
+
+typedef struct FemuCsdFuzzMem {
+    uint32_t id;
+    uint32_t size;
+} FemuCsdFuzzMem;
+
+/*
+ * Computational storage commands from a fixed seed. The run keeps a small
+ * pool of device memory it has allocated, so reads, writes, copies from the
+ * namespace and frees mostly name live allocations with in-range offsets;
+ * one command in four has a field replaced: an ID that was freed or never
+ * given, an offset or size at or past the end, one that wraps, a data
+ * pointer from the random lists, or another opcode. Every command must
+ * complete, and a fresh allocation must still round-trip data.
+ */
+static void femu_test_csd_fuzz(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    const uint8_t ops[] = {
+        FEMU_CSD_ALLOC_FDM, FEMU_CSD_DEALLOC, FEMU_CSD_NVM_TO_AFDM,
+        FEMU_CSD_EXEC, FEMU_CSD_READ_AFDM, FEMU_CSD_WRITE_AFDM,
+        FEMU_CSD_NEW_GROUP, FEMU_CSD_SET_QOS, FEMU_CSD_DEL_GROUP,
+        NVME_CMD_WRITE, NVME_CMD_READ,
+    };
+    FemuCsdFuzzMem mem[FEMU_CSD_FUZZ_IDS];
+    uint32_t freed[FEMU_CSD_FUZZ_IDS] = { 0 };
+    int nmem = 0;
+    bool succeeded[256] = { false };
+    uint64_t raw = 0;
+    uint64_t region = femu_alloc_64k(alloc, &raw);
+    uint64_t lists = region + 4096ULL * (FEMU_FUZZ_PAGES - FEMU_FUZZ_LISTS);
+    GRand *rng = g_rand_new_with_seed(0x43534446);
+    uint8_t wbuf[4096];
+    uint8_t rbuf[4096];
+    NvmeRwCmd rw;
+    NvmeCmd *cmd = (NvmeCmd *)&rw;
+    int distinct = 0;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    for (i = 0; i < FEMU_IO_FUZZ_ROUNDS; i++) {
+        int pick = nmem ? g_rand_int_range(rng, 0, nmem) : -1;
+        uint32_t id = pick >= 0 ? mem[pick].id : 0;
+        uint32_t msize = pick >= 0 ? mem[pick].size : 0;
+        uint32_t len = 0;
+        uint64_t off = 0;
+        uint16_t st, cid;
+        uint32_t result = 0;
+
+        femu_fuzz_lists(&c, rng, region);
+        memset(&rw, 0, sizeof(rw));
+        rw.opcode = ops[g_rand_int_range(rng, 0, G_N_ELEMENTS(ops))];
+        rw.nsid = cpu_to_le32(1);
+
+        switch (rw.opcode) {
+        case FEMU_CSD_ALLOC_FDM:
+            len = 512 * g_rand_int_range(rng, 1, 129);
+            cmd->cdw10 = cpu_to_le32(len);
+            break;
+        case FEMU_CSD_DEALLOC:
+            cmd->cdw10 = cpu_to_le32(id);
+            break;
+        case FEMU_CSD_READ_AFDM:
+        case FEMU_CSD_WRITE_AFDM:
+            if (msize) {
+                len = g_rand_int_range(rng, 1,
+                                       MIN(msize, 16 * 4096) + 1);
+                off = g_rand_int_range(rng, 0, msize - len + 1);
+            }
+            cmd->cdw10 = cpu_to_le32((uint32_t)off);
+            cmd->cdw12 = cpu_to_le32(len);
+            cmd->cdw14 = cpu_to_le32(id);
+            if (len) {
+                femu_fuzz_valid_dptr(&c, rng, region, &rw, len, true);
+            }
+            break;
+        case FEMU_CSD_NVM_TO_AFDM:
+            len = g_rand_int_range(rng, 1, 9);
+            rw.slba = cpu_to_le64(g_rand_int_range(rng, 0, 1024));
+            cmd->cdw12 = cpu_to_le32(len - 1);
+            cmd->cdw13 = cpu_to_le32(id);
+            if (msize >= len * 512) {
+                off = g_rand_int_range(rng, 0, msize - len * 512 + 1);
+            }
+            cmd->cdw14 = cpu_to_le32((uint32_t)off);
+            break;
+        case NVME_CMD_WRITE:
+        case NVME_CMD_READ:
+            len = g_rand_int_range(rng, 1, 9);
+            rw.slba = cpu_to_le64(g_rand_int_range(rng, 0, 1024));
+            rw.nlb = cpu_to_le16(len - 1);
+            femu_fuzz_valid_dptr(&c, rng, region, &rw, len * 512, true);
+            break;
+        default:
+            /* groups, QoS and execute: small values in every field */
+            cmd->cdw10 = cpu_to_le32(g_rand_int_range(rng, 0, 16));
+            cmd->cdw11 = cpu_to_le32(g_rand_int_range(rng, 0, 1024));
+            cmd->cdw12 = cpu_to_le32(g_rand_int_range(rng, 0, 1024));
+            break;
+        }
+
+        if (g_rand_int_range(rng, 0, 4) == 0) {
+            switch (g_rand_int_range(rng, 0, 7)) {
+            case 0:
+                rw.opcode = g_rand_int_range(rng, 0, 0x100);
+                break;
+            case 1:
+                /* an ID freed earlier, or one never given */
+                cmd->cdw10 = cpu_to_le32(g_rand_boolean(rng) ?
+                        freed[g_rand_int_range(rng, 0,
+                                               FEMU_CSD_FUZZ_IDS)] :
+                        g_rand_int(rng));
+                cmd->cdw13 = cmd->cdw10;
+                cmd->cdw14 = cmd->cdw10;
+                break;
+            case 2:
+                /* an offset at the end, past it, or one that wraps */
+                if (g_rand_boolean(rng)) {
+                    cmd->cdw10 = cpu_to_le32(msize);
+                    cmd->cdw14 = cpu_to_le32(msize);
+                } else {
+                    cmd->cdw10 = cpu_to_le32(g_rand_int(rng));
+                    cmd->cdw11 = cpu_to_le32(0xffffffff);
+                    cmd->cdw15 = cpu_to_le32(0xffffffff);
+                }
+                break;
+            case 3:
+                /* a size of zero, past the end, or near 2^64 */
+                cmd->cdw12 = cpu_to_le32(g_rand_boolean(rng) ? 0 :
+                                         g_rand_int(rng));
+                cmd->cdw13 = cpu_to_le32(g_rand_boolean(rng) ? 0 :
+                                         0xffffffff);
+                break;
+            case 4:
+                rw.flags = 0;
+                rw.dptr.prp1 = cpu_to_le64(femu_fuzz_ptr(rng, region));
+                rw.dptr.prp2 = cpu_to_le64(g_rand_boolean(rng) ?
+                        lists + 8 * g_rand_int_range(rng, 0,
+                                            FEMU_FUZZ_PRP_LISTS * 512) :
+                        femu_fuzz_ptr(rng, region));
+                break;
+            case 5:
+                rw.flags = g_rand_int_range(rng, 1, 4) << 6;
+                qtest_memread(qts, femu_fuzz_sgl_slot(rng, region),
+                              &rw.dptr.sgl, sizeof(rw.dptr.sgl));
+                break;
+            default:
+                cmd->cdw11 = cpu_to_le32(g_rand_int(rng));
+                cmd->cdw12 = cpu_to_le32(g_rand_int(rng));
+                cmd->cdw13 = cpu_to_le32(g_rand_int(rng));
+                break;
+            }
+        }
+
+        femu_submit(&c, &c.io, cmd);
+        st = FEMU_SC(femu_complete(&c, &c.io, &cid, &result));
+        if (st == NVME_SUCCESS && !succeeded[rw.opcode]) {
+            succeeded[rw.opcode] = true;
+            distinct++;
+        }
+
+        /* keep the pool in step with what the device holds */
+        if (st == NVME_SUCCESS && rw.opcode == FEMU_CSD_ALLOC_FDM) {
+            if (nmem == FEMU_CSD_FUZZ_IDS) {
+                NvmeCmd free_cmd = { 0 };
+
+                free_cmd.opcode = FEMU_CSD_DEALLOC;
+                free_cmd.nsid = cpu_to_le32(1);
+                free_cmd.cdw10 = cpu_to_le32(result);
+                g_assert_cmpint(femu_io(&c, &free_cmd), ==, NVME_SUCCESS);
+                freed[i % FEMU_CSD_FUZZ_IDS] = result;
+            } else {
+                mem[nmem].id = result;
+                mem[nmem].size = le32_to_cpu(cmd->cdw10);
+                nmem++;
+            }
+        } else if (st == NVME_SUCCESS && rw.opcode == FEMU_CSD_DEALLOC) {
+            int k;
+
+            for (k = 0; k < nmem; k++) {
+                if (mem[k].id == le32_to_cpu(cmd->cdw10)) {
+                    freed[i % FEMU_CSD_FUZZ_IDS] = mem[k].id;
+                    mem[k] = mem[--nmem];
+                    break;
+                }
+            }
+        }
+    }
+
+    g_assert_cmpint(distinct, >=, 5);
+
+    /* a fresh allocation takes data in and gives it back */
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = FEMU_CSD_ALLOC_FDM;
+    rw.nsid = cpu_to_le32(1);
+    cmd->cdw10 = cpu_to_le32(sizeof(wbuf));
+    femu_submit(&c, &c.io, cmd);
+    {
+        uint16_t cid;
+        uint32_t id = 0;
+
+        g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &cid, &id)), ==,
+                        NVME_SUCCESS);
+        for (i = 0; i < sizeof(wbuf); i++) {
+            wbuf[i] = (uint8_t)(0x6f + i * 9);
+        }
+        qtest_memwrite(qts, region, wbuf, sizeof(wbuf));
+        memset(&rw, 0, sizeof(rw));
+        rw.opcode = FEMU_CSD_WRITE_AFDM;
+        rw.nsid = cpu_to_le32(1);
+        rw.dptr.prp1 = cpu_to_le64(region);
+        cmd->cdw12 = cpu_to_le32(sizeof(wbuf));
+        cmd->cdw14 = cpu_to_le32(id);
+        g_assert_cmpint(femu_io(&c, cmd), ==, NVME_SUCCESS);
+        qtest_memset(qts, region, 0, sizeof(rbuf));
+        rw.opcode = FEMU_CSD_READ_AFDM;
+        g_assert_cmpint(femu_io(&c, cmd), ==, NVME_SUCCESS);
+        qtest_memread(qts, region, rbuf, sizeof(rbuf));
+        g_assert_cmpint(memcmp(wbuf, rbuf, sizeof(rbuf)), ==, 0);
+    }
+
+    femu_disable(&c);
+    g_rand_free(rng);
+    guest_free(alloc, raw);
+}
+
 #define FEMU_OC_FUZZ_CHUNKS 2
 #define FEMU_OC_FUZZ_MAX    8   /* sectors in one vector command */
 
@@ -6553,6 +6793,10 @@ static void femu_register_nodes(void)
     qos_add_test("oc20-fuzz", "femu", femu_test_oc20_fuzz,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "femu_mode=0,lver=2,sgl=on"
+    });
+    qos_add_test("csd-fuzz", "femu", femu_test_csd_fuzz,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=4,fdm_size=16,sgl=on"
     });
     qos_add_test("io-fuzz-nossd", "femu", femu_test_io_fuzz,
                  &(QOSGraphTestOptions) {
