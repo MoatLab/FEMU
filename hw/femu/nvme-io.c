@@ -1405,6 +1405,13 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         return NVME_INVALID_OPCODE | NVME_DNR;
     case NVME_CMD_COMPARE:
         if ((NVME_ONCS_COMPARE & n->oncs) && nvme_ns_has_nvm_cmd_set(ns)) {
+            if (NS_ZNSSD(ns)) {
+                uint16_t status = zns_check_compare(ns, cmd);
+
+                if (status) {
+                    return status;
+                }
+            }
             return nvme_compare(n, ns, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;

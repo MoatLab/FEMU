@@ -1425,6 +1425,7 @@ static inline void nvme_check_size(void)
 
 /* Async Event Configuration, bits 7:0: which SMART warnings raise an event */
 #define NVME_AEC_SMART(aec) ((aec) & 0xff)
+#define NVME_AEC_ZDCN       (1u << 27)  /* Zone Descriptor Changed Notices */
 
 /*
  * An Async Event Request the controller is holding. The admin path builds its
@@ -1441,6 +1442,7 @@ typedef struct NvmeAerHold {
 typedef struct NvmeAsyncEvent {
     QSIMPLEQ_ENTRY(NvmeAsyncEvent) entry;
     NvmeAerResult result;
+    uint32_t nsid;      /* completion dword 1, for an event about a namespace */
 } NvmeAsyncEvent;
 
 typedef struct NvmeRequest {
@@ -2280,6 +2282,8 @@ uint16_t dma_write_cmd(FemuCtrl *n, NvmeCmd *cmd, uint8_t *ptr, uint32_t len);
 uint16_t dma_read_cmd(FemuCtrl *n, NvmeCmd *cmd, uint8_t *ptr, uint32_t len);
 
 
+uint16_t zns_check_compare(NvmeNamespace *ns, NvmeCmd *cmd);
+
 /* Misc */
 uint64_t *nvme_setup_discontig(FemuCtrl *n, uint64_t prp_addr, uint16_t
                                queue_depth, uint16_t entry_size);
@@ -2296,6 +2300,9 @@ void nvme_process_aers(FemuCtrl *n);
 void nvme_enqueue_event(FemuCtrl *n, uint8_t event_type, uint8_t event_info,
                         uint8_t log_page);
 void nvme_clear_events(FemuCtrl *n, uint8_t event_type);
+void nvme_enqueue_ns_event(FemuCtrl *n, uint8_t event_type, uint8_t event_info,
+                           uint8_t log_page, uint32_t nsid);
+void nvme_clear_ns_events(FemuCtrl *n, uint8_t event_type, uint32_t nsid);
 void nvme_post_cqes_io(void *opaque);
 void *nvme_poller(void *arg);
 

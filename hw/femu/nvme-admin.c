@@ -662,6 +662,11 @@ static uint16_t nvme_identify_ctrl(FemuCtrl *n, NvmeCmd *cmd)
 
     /* assigned when the controller joins its subsystem, after realize */
     n->id_ctrl.cntlid = cpu_to_le16(n->cntlid);
+    for (int i = 0; i < n->num_namespaces; i++) {
+        if (NS_ZNSSD(&n->namespaces[i])) {
+            n->id_ctrl.oaes |= cpu_to_le32(NVME_AEC_ZDCN);
+        }
+    }
 
     return dma_read_prp(n, (uint8_t *)&n->id_ctrl, sizeof(n->id_ctrl),
                              prp1, prp2);
@@ -2549,7 +2554,7 @@ static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
 
 /* Post one admin completion for an entry the controller had been holding. */
 static void nvme_post_held_cqe(FemuCtrl *n, const NvmeAerHold *hold,
-                               const NvmeAerResult *result)
+                               const NvmeAerResult *result, uint32_t nsid)
 {
     NvmeCQueue *cq = n->cq[hold->cqid];
     NvmeSQueue *sq = n->sq[hold->sqid];
@@ -2567,6 +2572,7 @@ static void nvme_post_held_cqe(FemuCtrl *n, const NvmeAerHold *hold,
 
     memset(&cqe, 0, sizeof(cqe));
     memcpy(&cqe.n.result, result, sizeof(*result));
+    cqe.n.rsvd = cpu_to_le32(nsid);
     cqe.cid = hold->cid;
     cqe.status = cpu_to_le16(NVME_SUCCESS << 1 | cq->phase);
     cqe.sq_id = cpu_to_le16(hold->sqid);
@@ -2635,14 +2641,17 @@ void nvme_process_aers(FemuCtrl *n)
         n->outstanding_aers--;
 
         nvme_post_held_cqe(n, &n->aer_held[n->outstanding_aers],
-                           &event->result);
+                           &event->result, event->nsid);
         g_free(event);
     }
 }
 
-/* Raise an asynchronous event, reporting it as soon as an AER is available. */
-void nvme_enqueue_event(FemuCtrl *n, uint8_t event_type, uint8_t event_info,
-                        uint8_t log_page)
+/*
+ * Raise an asynchronous event, reporting it as soon as an AER is available. An
+ * event about one namespace names it in dword 1 of the completion.
+ */
+void nvme_enqueue_ns_event(FemuCtrl *n, uint8_t event_type, uint8_t event_info,
+                           uint8_t log_page, uint32_t nsid)
 {
     NvmeAsyncEvent *event;
 
@@ -2650,6 +2659,7 @@ void nvme_enqueue_event(FemuCtrl *n, uint8_t event_type, uint8_t event_info,
     event->result.event_type = event_type;
     event->result.event_info = event_info;
     event->result.log_page = log_page;
+    event->nsid = nsid;
 
     qemu_mutex_lock(&n->aer_lock);
     if (n->aer_queued >= FEMU_AER_MAX_QUEUED) {
@@ -2669,11 +2679,40 @@ void nvme_enqueue_event(FemuCtrl *n, uint8_t event_type, uint8_t event_info,
     qemu_bh_schedule(n->aer_bh);
 }
 
+void nvme_enqueue_event(FemuCtrl *n, uint8_t event_type, uint8_t event_info,
+                        uint8_t log_page)
+{
+    nvme_enqueue_ns_event(n, event_type, event_info, log_page, 0);
+}
+
 /*
  * The host has read the log page an event pointed at, so that type may be
  * reported again. Drop any still-queued events of the type as well: the host
  * has just seen the state they describe.
  */
+/*
+ * The host has read the log behind one namespace's event: that type may be
+ * reported again, and events for the other namespaces still queued go out.
+ */
+void nvme_clear_ns_events(FemuCtrl *n, uint8_t event_type, uint32_t nsid)
+{
+    NvmeAsyncEvent *event, *next;
+
+    n->aer_mask &= ~(1 << event_type);
+
+    qemu_mutex_lock(&n->aer_lock);
+    QSIMPLEQ_FOREACH_SAFE(event, &n->aer_queue, entry, next) {
+        if (event->result.event_type == event_type && event->nsid == nsid) {
+            QSIMPLEQ_REMOVE(&n->aer_queue, event, NvmeAsyncEvent, entry);
+            n->aer_queued--;
+            g_free(event);
+        }
+    }
+    qemu_mutex_unlock(&n->aer_lock);
+
+    nvme_process_aers(n);
+}
+
 void nvme_clear_events(FemuCtrl *n, uint8_t event_type)
 {
     NvmeAsyncEvent *event, *next;

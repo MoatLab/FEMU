@@ -4092,6 +4092,192 @@ static void femu_test_identify_fields(void *obj, void *data,
     femu_disable(&c);
 }
 
+#define FEMU_ZONE_ACTION_CLOSE  0x01
+#define FEMU_ZONE_ACTION_OPEN   0x03
+#define FEMU_ZONE_SELECT_ALL    (1 << 8)
+#define FEMU_ZS_IMP_OPEN        0x2
+#define FEMU_ZS_EXP_OPEN        0x3
+#define FEMU_ZS_CLOSED          0x4
+#define FEMU_TOO_MANY_OPEN      0x1be   /* command specific */
+
+/* the state of the first four zones, and where zone 1 starts */
+static void femu_zone_states(FemuCtrlState *c, uint64_t buf, uint8_t *zs,
+                             uint64_t *zsze)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    NvmeCmd cmd = { 0 };
+    int i;
+
+    cmd.opcode = NVME_CMD_ZONE_MGMT_RECV;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw12 = cpu_to_le32((64 + 4 * 64) / 4 - 1);
+    g_assert_cmpint(femu_io(c, &cmd), ==, NVME_SUCCESS);
+    for (i = 0; i < 4; i++) {
+        zs[i] = qtest_readb(qts, buf + 64 + i * 64 + 1) >> 4;
+    }
+    *zsze = qtest_readq(qts, buf + 64 + 64 + 16);
+}
+
+/*
+ * With two zones allowed open: an explicit open at the limit closes an
+ * implicitly opened zone rather than failing (ZNS 1.4, 2.1.1.4), and Open with
+ * Select All that cannot open every closed zone opens none (3.4.3.1.4).
+ */
+static void femu_test_zone_open_limits(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+    uint64_t zsze;
+    uint8_t zs[4];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, 4096);
+    femu_zone_states(&c, buf, zs, &zsze);
+
+    /* zones 0 and 1 implicitly opened by a write each */
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, zsze, buf), ==, NVME_SUCCESS);
+    femu_zone_states(&c, buf, zs, &zsze);
+    g_assert_cmpint(zs[0], ==, FEMU_ZS_IMP_OPEN);
+    g_assert_cmpint(zs[1], ==, FEMU_ZS_IMP_OPEN);
+
+    /* explicitly opening zone 2 closes one of them */
+    g_assert_cmpint(femu_zone_action(&c, 2 * zsze, FEMU_ZONE_ACTION_OPEN), ==,
+                    NVME_SUCCESS);
+    femu_zone_states(&c, buf, zs, &zsze);
+    g_assert_cmpint(zs[2], ==, FEMU_ZS_EXP_OPEN);
+    g_assert_cmpint((zs[0] == FEMU_ZS_CLOSED) + (zs[1] == FEMU_ZS_CLOSED), ==,
+                    1);
+
+    /* two closed zones and one open do not fit in two: nothing changes */
+    g_assert_cmpint(femu_zone_action(&c, zs[0] == FEMU_ZS_CLOSED ? zsze : 0,
+                                     FEMU_ZONE_ACTION_CLOSE), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_zone_action(&c, 0, FEMU_ZONE_ACTION_OPEN |
+                                     FEMU_ZONE_SELECT_ALL), ==,
+                    FEMU_TOO_MANY_OPEN);
+    femu_zone_states(&c, buf, zs, &zsze);
+    g_assert_cmpint(zs[0], ==, FEMU_ZS_CLOSED);
+    g_assert_cmpint(zs[1], ==, FEMU_ZS_CLOSED);
+    g_assert_cmpint(zs[2], ==, FEMU_ZS_EXP_OPEN);
+
+    /* back to empty for whatever runs next on this device */
+    g_assert_cmpint(femu_zone_action(&c, 0, FEMU_ZONE_ACTION_RESET |
+                                     FEMU_ZONE_SELECT_ALL), ==, NVME_SUCCESS);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+#define FEMU_ZONE_BOUNDARY_ERROR    0x1b8   /* command specific */
+
+/* Compare reads a zone, so it may not run across a zone boundary either */
+static void femu_test_zoned_compare(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    NvmeRwCmd rw;
+    uint64_t buf;
+    uint64_t zsze;
+    uint8_t zs[4];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, 4096);
+    femu_zone_states(&c, buf, zs, &zsze);
+
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = NVME_CMD_COMPARE;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.slba = cpu_to_le64(zsze - 1);
+    rw.nlb = cpu_to_le16(1);
+    g_assert_cmpint(femu_io(&c, (NvmeCmd *)&rw), ==,
+                    FEMU_ZONE_BOUNDARY_ERROR);
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+#define FEMU_LOG_CHANGED_ZONES  0xbf
+#define FEMU_AEC_ZDCN           (1u << 27)
+
+/*
+ * A zone the controller takes read only is reported in the Changed Zone List
+ * whatever the host asked for, but announced with an Async Event only when
+ * the host enabled Zone Descriptor Changed Notices, which Identify has to
+ * offer (ZNS 1.4, Figures 44-45). The notice names the namespace in dword 1.
+ * Reporting zones by attribute (Zone Receive Action Specific 9h) is valid.
+ */
+static void femu_test_zone_change_notice(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+    uint64_t zsze;
+    uint32_t result;
+    uint16_t aer_cid;
+    uint16_t cid;
+    uint8_t zs[4];
+    NvmeCmd cmd;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, 4096);
+    femu_zone_states(&c, buf, zs, &zsze);
+
+    g_assert_cmpint(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 92) & FEMU_AEC_ZDCN, ==,
+                    FEMU_AEC_ZDCN);
+
+    /* notices off: the write faults, the zone is listed, nothing is raised */
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_ASYNC_EV_REQ;
+    aer_cid = c.cid;
+    femu_submit(&c, &c.admin, &cmd);
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, 0, buf), !=, NVME_SUCCESS);
+    g_usleep(100 * 1000);
+    g_assert_cmpint(femu_log_cmd(&c, 1, FEMU_LOG_CHANGED_ZONES, 0, buf, 4096),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpint(qtest_readw(qts, buf), ==, 1);
+    g_assert_cmpint(qtest_readq(qts, buf + 8), ==, 0);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_CMD_ZONE_MGMT_RECV;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw12 = cpu_to_le32(4096 / 4 - 1);
+    cmd.cdw13 = cpu_to_le32(0x9 << 8);
+    g_assert_cmpint(femu_io(&c, &cmd), ==, NVME_SUCCESS);
+
+    /* notices on: the next zone taken read only is announced */
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_ASYNCHRONOUS_EVENT_CONF,
+                                             false, 0, FEMU_AEC_ZDCN, NULL)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, zsze, buf), !=, NVME_SUCCESS);
+    g_assert_cmpint(femu_complete(&c, &c.admin, &cid, &result), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(cid, ==, aer_cid);
+    g_assert_cmphex(result & 0xffffff, ==, 0xbfef02);
+    g_assert_cmpint(qtest_readl(qts, c.admin.cq_addr +
+                    ((c.admin.cq_head + FEMU_QSIZE - 1) % FEMU_QSIZE) *
+                    sizeof(NvmeCqe) + 4), ==, 1);
+
+    g_assert_cmpint(femu_log_cmd(&c, 1, FEMU_LOG_CHANGED_ZONES, 0, buf, 4096),
+                    ==, NVME_SUCCESS);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 #define FEMU_CSD_COMPUTE_LOAD   0x22
 #define FEMU_CSD_TYPE_SHARED_LIB 0x03
 
@@ -4372,6 +4558,19 @@ static void femu_register_nodes(void)
     qos_add_test("cc-states", "femu", femu_test_cc_states, NULL);
     qos_add_test("features-reset", "femu", femu_test_features_reset, NULL);
     qos_add_test("error-log", "femu", femu_test_error_log, NULL);
+    qos_add_test("zone-change-notice", "femu", femu_test_zone_change_notice,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=3,secsz=512,err_write_fail_ppm=1000000"
+    });
+    qos_add_test("zoned-compare", "femu", femu_test_zoned_compare,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=3,secsz=512,oncs=0x1"
+    });
+    qos_add_test("zone-open-limits", "femu", femu_test_zone_open_limits,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=3,secsz=512,zns_max_open=2"
+    });
     qos_add_test("identify-fields", "femu", femu_test_identify_fields,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "namespaces=2"

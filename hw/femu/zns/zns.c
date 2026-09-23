@@ -449,9 +449,12 @@ static void zns_record_changed_zone(NvmeNamespace *ns, uint64_t zslba)
         zns->changed_zones[zns->nr_changed_zones++] = zslba;
     }
 
-    nvme_enqueue_event(ns->ctrl, NVME_AER_TYPE_NOTICE,
-                       NVME_AER_INFO_NOTICE_ZONE_DESCR_CHANGED,
-                       NVME_LOG_CHANGED_ZONE_LIST);
+    /* the list is kept either way; the notice only when the host asked */
+    if (ns->ctrl->features.async_config & NVME_AEC_ZDCN) {
+        nvme_enqueue_ns_event(ns->ctrl, NVME_AER_TYPE_NOTICE,
+                              NVME_AER_INFO_NOTICE_ZONE_DESCR_CHANGED,
+                              NVME_LOG_CHANGED_ZONE_LIST, ns->id);
+    }
 }
 
 static void zns_assign_zone_state(NvmeNamespace *ns, NvmeZone *zone, NvmeZoneState state)
@@ -650,6 +653,27 @@ static uint16_t zns_check_zone_read(NvmeNamespace *ns, uint64_t slba, uint32_t n
     }
 
     return status;
+}
+
+/*
+ * Compare reads the zone the way Read does, so it answers to the same checks:
+ * an offline zone and a read across a zone boundary are refused (ZNS 1.4,
+ * 2.1.1.2.1.2).
+ */
+uint16_t zns_check_compare(NvmeNamespace *ns, NvmeCmd *cmd)
+{
+    NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
+    uint64_t slba = le64_to_cpu(rw->slba);
+    uint32_t nlb = le16_to_cpu(rw->nlb) + 1;
+    uint64_t nsze = le64_to_cpu(ns->id_ns.nsze);
+    uint16_t status;
+
+    if (slba >= nsze || nlb > nsze - slba) {
+        return NVME_LBA_RANGE | NVME_DNR;
+    }
+    status = zns_check_zone_read(ns, slba, nlb);
+
+    return status ? status | NVME_DNR : NVME_SUCCESS;
 }
 
 static void zns_auto_transition_zone(NvmeNamespace *ns)
@@ -891,6 +915,14 @@ static uint16_t zns_open_zone(NvmeNamespace *ns, NvmeZone *zone,
                               NvmeZoneState state, NvmeRequest *req)
 {
     uint16_t status;
+
+    /*
+     * At the open limit an explicit open closes an implicitly opened zone to
+     * make room, as a write does (ZNS 1.4, 2.1.1.4).
+     */
+    if (state == NVME_ZONE_STATE_EMPTY || state == NVME_ZONE_STATE_CLOSED) {
+        zns_auto_transition_zone(ns);
+    }
 
     switch (state) {
     case NVME_ZONE_STATE_EMPTY:
@@ -1443,6 +1475,21 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
             }
         }
         if (all) {
+            NvmeZone *closed;
+            uint32_t nr_closed = 0;
+
+            /*
+             * Open with Select All opens every closed zone or none: stopping
+             * at the first that does not fit left the earlier ones open
+             * (ZNS 1.4, 3.4.3.1.4).
+             */
+            QTAILQ_FOREACH(closed, &ns->closed_zones, entry) {
+                nr_closed++;
+            }
+            if (ns->max_open_zones &&
+                ns->nr_open_zones + nr_closed > ns->max_open_zones) {
+                return NVME_ZONE_TOO_MANY_OPEN | NVME_DNR;
+            }
             proc_mask = NVME_PROC_CLOSED_ZONES;
         }
         status = zns_do_zone_op(ns, zone, proc_mask, zns_open_zone, req);
@@ -1459,7 +1506,11 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
          * boundary, which must sit inside the active window and end on a flush
          * granularity. Only meaningful on a zone that holds a ZRWA.
          */
-        if (all || !(zone->d.za & NVME_ZA_ZRWA_VALID)) {
+        /* Select All is not defined for this action (ZNS 1.4, 3.4.3.1.3) */
+        if (all) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        if (!(zone->d.za & NVME_ZA_ZRWA_VALID)) {
             return NVME_INVALID_ZONE_OP | NVME_DNR;
         }
         if (slba < zone->w_ptr || slba >= zone->w_ptr + ns->zrwa_size ||
@@ -1562,6 +1613,9 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
     return status;
 }
 
+/* Zone Receive Action Specific 9h: zones with one of the attributes below */
+#define ZNS_ZONE_REPORT_ATTRS   0x9
+
 static bool zns_zone_matches_filter(uint32_t zafs, NvmeZone *zl)
 {
     NvmeZoneState zs = zns_get_zone_state(zl);
@@ -1583,6 +1637,9 @@ static bool zns_zone_matches_filter(uint32_t zafs, NvmeZone *zl)
         return zs == NVME_ZONE_STATE_READ_ONLY;
     case NVME_ZONE_REPORT_OFFLINE:
         return zs == NVME_ZONE_STATE_OFFLINE;
+    case ZNS_ZONE_REPORT_ATTRS:
+        /* Zone Finished by Controller, Finish or Reset Zone Recommended */
+        return zl->d.za & 0x7;
     default:
         return false;
     }
@@ -1625,7 +1682,7 @@ static uint16_t zns_zone_mgmt_recv(FemuCtrl *n, NvmeRequest *req)
     }
 
     zrasf = (dw13 >> 8) & 0xff;
-    if (zrasf > NVME_ZONE_REPORT_OFFLINE) {
+    if (zrasf > NVME_ZONE_REPORT_OFFLINE && zrasf != ZNS_ZONE_REPORT_ATTRS) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
@@ -2168,13 +2225,14 @@ static uint16_t zns_changed_zone_list(FemuCtrl *n, NvmeNamespace *ns,
     }
 
     log = g_malloc0(ZNS_CHANGED_ZONE_LOG_SIZE);
+    /* when full, the list says so and lists nothing (ZNS 1.4, 4.1.4.1) */
     if (zns->changed_zone_overflow) {
         stq_le_p(log, 0xffff);
     } else {
         stq_le_p(log, nr);
-    }
-    for (i = 0; i < nr; i++) {
-        stq_le_p(log + 8 + i * 8, zns->changed_zones[i]);
+        for (i = 0; i < nr; i++) {
+            stq_le_p(log + 8 + i * 8, zns->changed_zones[i]);
+        }
     }
     /*
      * Reading without Retain Asynchronous Event is what clears the event: the
@@ -2183,7 +2241,7 @@ static uint16_t zns_changed_zone_list(FemuCtrl *n, NvmeNamespace *ns,
     if (!rae) {
         zns->nr_changed_zones = 0;
         zns->changed_zone_overflow = false;
-        nvme_clear_events(n, NVME_AER_TYPE_NOTICE);
+        nvme_clear_ns_events(n, NVME_AER_TYPE_NOTICE, ns->id);
     }
 
     trans_len = MIN(len, ZNS_CHANGED_ZONE_LOG_SIZE - off);
