@@ -4429,6 +4429,56 @@ static void femu_test_doorbell_errors(void *obj, void *data,
     femu_disable(&c);
 }
 
+#define FEMU_LOG_SUPPORTED      0x00
+
+/*
+ * Commands Supported and Effects lists every I/O command the controller
+ * dispatches (Base 2.3, 5.2.12.1.6): Write Uncorrectable when ONCS offers it,
+ * and I/O Management Receive and Send while placement is on.
+ */
+static void femu_test_log_contents_fdp(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+
+    femu_enable(&c, &femu->dev, alloc);
+    buf = guest_alloc(alloc, 4096);
+    g_assert_cmpint(femu_log_cmd(&c, 0, FEMU_LOG_CMD_EFFECTS, 0, buf, 4096),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpint(qtest_readl(qts, buf + 1024 + 4 * 0x04) & 1, ==, 1);
+    g_assert_cmpint(qtest_readl(qts, buf + 1024 + 4 * 0x12) & 1, ==, 1);
+    g_assert_cmpint(qtest_readl(qts, buf + 1024 + 4 * 0x1d) & 1, ==, 1);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/* the Changed Zone List belongs to the zoned command set's list of pages */
+static void femu_test_log_contents_zoned(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+
+    femu_enable(&c, &femu->dev, alloc);
+    buf = guest_alloc(alloc, 4096);
+    g_assert_cmpint(femu_log_cmd(&c, 0, FEMU_LOG_SUPPORTED, 0, buf, 1024),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpint(qtest_readl(qts, buf + 4 * FEMU_LOG_CHANGED_ZONES), ==, 0);
+    g_assert_cmpint(qtest_readl(qts, buf + 4 * 0x02) & 1, ==, 1);
+    g_assert_cmpint(femu_log_cmd(&c, 0, FEMU_LOG_SUPPORTED,
+                                 (uint32_t)FEMU_CSI_ZONED << 24, buf, 1024),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpint(qtest_readl(qts, buf + 4 * FEMU_LOG_CHANGED_ZONES) & 1,
+                    ==, 1);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
 #define FEMU_CSD_COMPUTE_LOAD   0x22
 #define FEMU_CSD_TYPE_SHARED_LIB 0x03
 
@@ -4711,6 +4761,17 @@ static void femu_register_nodes(void)
     qos_add_test("error-log", "femu", femu_test_error_log, NULL);
     qos_add_test("prp-status", "femu", femu_test_prp_status, NULL);
     qos_add_test("doorbell-errors", "femu", femu_test_doorbell_errors, NULL);
+    qos_add_test("log-contents-fdp", "femu", femu_test_log_contents_fdp,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
+            "subsys=fdpsub,oncs=0x2"
+    });
+    qos_add_test("log-contents-zoned", "femu", femu_test_log_contents_zoned,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=3,secsz=512"
+    });
     qos_add_test("mdts-unit", "femu", femu_test_mdts_unit,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "mpsmax=4,mdts=1"

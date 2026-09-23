@@ -1563,6 +1563,7 @@ static uint16_t nvme_supported_log_pages(FemuCtrl *n, NvmeCmd *cmd,
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
     uint32_t lids[256] = {};
     uint32_t trans_len;
+    uint8_t csi = le32_to_cpu(cmd->cdw14) >> 24;
     bool zoned = false;
     int i;
 
@@ -1581,6 +1582,9 @@ static uint16_t nvme_supported_log_pages(FemuCtrl *n, NvmeCmd *cmd,
 
     if (n->subsys) {
         lids[NVME_LOG_ENDGRP]        = cpu_to_le32(NVME_LIDS_LSUPP);
+    }
+    /* the placement pages answer only while placement is on */
+    if (n->subsys && n->subsys->endgrp.fdp.enabled) {
         lids[NVME_LOG_FDP_CONFS]     = cpu_to_le32(NVME_LIDS_LSUPP);
         lids[NVME_LOG_FDP_RUH_USAGE] = cpu_to_le32(NVME_LIDS_LSUPP);
         lids[NVME_LOG_FDP_STATS]     = cpu_to_le32(NVME_LIDS_LSUPP);
@@ -1593,7 +1597,8 @@ static uint16_t nvme_supported_log_pages(FemuCtrl *n, NvmeCmd *cmd,
             break;
         }
     }
-    if (zoned) {
+    /* a command set's own pages are listed for that command set only */
+    if (zoned && csi == NVME_CSI_ZONED) {
         lids[NVME_LOG_CHANGED_ZONE_LIST] = cpu_to_le32(NVME_LIDS_LSUPP);
     }
 
@@ -2140,6 +2145,17 @@ static uint16_t nvme_cmd_effects(FemuCtrl *n, NvmeCmd *cmd, uint8_t csi,
         }
         if (!(n->oncs & NVME_ONCS_DSM)) {
             log.iocs[NVME_CMD_DSM] = 0;
+        }
+        /* and every other command the NVM set dispatches, when it does */
+        if (src_iocs == nvme_cse_iocs_nvm) {
+            if (n->oncs & NVME_ONCS_WRITE_UNCORR) {
+                log.iocs[NVME_CMD_WRITE_UNCOR] = NVME_CMD_EFF_CSUPP |
+                                                 NVME_CMD_EFF_LBCC;
+            }
+            if (n->subsys && n->subsys->endgrp.fdp.enabled) {
+                log.iocs[NVME_CMD_IO_MGMT_RECV] = NVME_CMD_EFF_CSUPP;
+                log.iocs[NVME_CMD_IO_MGMT_SEND] = NVME_CMD_EFF_CSUPP;
+            }
         }
     }
 
