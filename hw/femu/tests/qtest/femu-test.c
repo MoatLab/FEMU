@@ -5247,6 +5247,297 @@ static void femu_test_admin_fuzz(void *obj, void *data, QGuestAllocator *alloc)
     guest_free(alloc, raw);
 }
 
+#define FEMU_IO_FUZZ_ROUNDS 1000
+#define FEMU_FUZZ_PAGES     32
+#define FEMU_FUZZ_LISTS     8
+
+/*
+ * A pointer the data can go to: mostly a page of the fuzz region, sometimes
+ * unaligned, sometimes a list page, sometimes outside guest memory.
+ */
+static uint64_t femu_fuzz_ptr(GRand *rng, uint64_t region)
+{
+    uint64_t page = region + 4096ULL * g_rand_int_range(rng, 0,
+                                     FEMU_FUZZ_PAGES - FEMU_FUZZ_LISTS);
+
+    switch (g_rand_int_range(rng, 0, 8)) {
+    case 0:
+        return page + 4 * g_rand_int_range(rng, 1, 1024);
+    case 1:
+        return region + 4096ULL * (FEMU_FUZZ_PAGES - 1);
+    case 2:
+        return 0xffffffff00000000ULL;
+    default:
+        return page;
+    }
+}
+
+/*
+ * Rewrite the list pages at the top of the fuzz region: the lower half as
+ * PRP entries, the upper half as SGL descriptors of every type. Segments
+ * point back into the upper half and mostly hold one descriptor, so a walk
+ * chains, loops or ends early.
+ */
+#define FEMU_FUZZ_PRP_LISTS (FEMU_FUZZ_LISTS / 2)
+#define FEMU_FUZZ_SGL_DESCS ((FEMU_FUZZ_LISTS - FEMU_FUZZ_PRP_LISTS) * 256)
+
+static uint64_t femu_fuzz_sgl_slot(GRand *rng, uint64_t region)
+{
+    return region + 4096ULL * (FEMU_FUZZ_PAGES - FEMU_FUZZ_LISTS +
+                               FEMU_FUZZ_PRP_LISTS) +
+           16ULL * g_rand_int_range(rng, 0, FEMU_FUZZ_SGL_DESCS);
+}
+
+static void femu_fuzz_lists(FemuCtrlState *c, GRand *rng, uint64_t region)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    uint64_t lists = region + 4096ULL * (FEMU_FUZZ_PAGES - FEMU_FUZZ_LISTS);
+    uint64_t sgls = lists + 4096ULL * FEMU_FUZZ_PRP_LISTS;
+    int i;
+
+    for (i = 0; i < FEMU_FUZZ_PRP_LISTS * 512; i++) {
+        uint64_t e = cpu_to_le64(femu_fuzz_ptr(rng, region));
+
+        qtest_memwrite(qts, lists + 8ULL * i, &e, sizeof(e));
+    }
+    for (i = 0; i < FEMU_FUZZ_SGL_DESCS; i++) {
+        uint32_t kind = g_rand_int_range(rng, 0, 8);
+        NvmeSglDescriptor d;
+
+        memset(&d, 0, sizeof(d));
+        if (kind < 4) {
+            d.type = femu_fuzz_field(rng, kind < 2 ?
+                                     NVME_SGL_DESCR_TYPE_SEGMENT << 4 :
+                                     NVME_SGL_DESCR_TYPE_LAST_SEGMENT << 4,
+                                     g_rand_int_range(rng, 0, 0x100));
+            d.addr = cpu_to_le64(femu_fuzz_sgl_slot(rng, region));
+            d.len = cpu_to_le32(femu_fuzz_field(rng,
+                        16 * (g_rand_boolean(rng) ? 1 :
+                              g_rand_int_range(rng, 2, 8)),
+                        g_rand_int_range(rng, 0, 0x10000)));
+        } else {
+            d.type = femu_fuzz_field(rng,
+                                     NVME_SGL_DESCR_TYPE_DATA_BLOCK << 4,
+                                     g_rand_int_range(rng, 0, 0x100));
+            d.addr = cpu_to_le64(femu_fuzz_ptr(rng, region));
+            d.len = cpu_to_le32(femu_fuzz_field(rng,
+                                    512 * g_rand_int_range(rng, 1, 9),
+                                    g_rand_int(rng)));
+        }
+        qtest_memwrite(qts, sgls + 16ULL * i, &d, sizeof(d));
+    }
+}
+
+/*
+ * A data pointer the command describes correctly: a PRP pair, with a list
+ * when the transfer crosses a page, or one SGL data block. The region's data
+ * pages are contiguous, so one block can cover the whole transfer.
+ */
+static void femu_fuzz_valid_dptr(FemuCtrlState *c, GRand *rng,
+                                 uint64_t region, NvmeRwCmd *rw,
+                                 uint32_t len)
+{
+    uint64_t lists = region + 4096ULL * (FEMU_FUZZ_PAGES - FEMU_FUZZ_LISTS);
+    uint32_t pages = DIV_ROUND_UP(len, 4096);
+    uint64_t data = region + 4096ULL * g_rand_int_range(rng, 0,
+                                FEMU_FUZZ_PAGES - FEMU_FUZZ_LISTS - pages + 1);
+    uint32_t i;
+
+    if (g_rand_boolean(rng)) {
+        NvmeSglDescriptor d = {
+            .addr = cpu_to_le64(data),
+            .len = cpu_to_le32(len),
+            .type = NVME_SGL_DESCR_TYPE_DATA_BLOCK << 4,
+        };
+
+        rw->flags = 1 << 6;
+        memcpy(&rw->dptr.sgl, &d, sizeof(d));
+        return;
+    }
+    rw->dptr.prp1 = cpu_to_le64(data);
+    if (pages == 2) {
+        rw->dptr.prp2 = cpu_to_le64(data + 4096);
+    } else if (pages > 2) {
+        for (i = 1; i < pages; i++) {
+            uint64_t e = cpu_to_le64(data + 4096ULL * i);
+
+            qtest_memwrite(c->pdev->bus->qts, lists + 8 * (i - 1), &e,
+                           sizeof(e));
+        }
+        rw->dptr.prp2 = cpu_to_le64(lists);
+    }
+}
+
+/*
+ * A chain of one-descriptor segments in the SGL half of the list pages that
+ * ends in the command's data block or, half the time, points back into
+ * itself. Returns the descriptor for the command.
+ */
+static NvmeSglDescriptor femu_fuzz_sgl_chain(FemuCtrlState *c, GRand *rng,
+                                             uint64_t region, uint32_t len)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    uint64_t sgls = region + 4096ULL * (FEMU_FUZZ_PAGES - FEMU_FUZZ_LISTS +
+                                        FEMU_FUZZ_PRP_LISTS);
+    int hops = g_rand_int_range(rng, 1, 9);
+    int first = g_rand_int_range(rng, 0, FEMU_FUZZ_SGL_DESCS - hops);
+    bool loop = g_rand_boolean(rng);
+    NvmeSglDescriptor d;
+    int i;
+
+    for (i = 0; i < hops; i++) {
+        memset(&d, 0, sizeof(d));
+        if (i < hops - 1 || loop) {
+            int next = i < hops - 1 ? i + 1 : g_rand_int_range(rng, 0, hops);
+
+            d.type = NVME_SGL_DESCR_TYPE_SEGMENT << 4;
+            d.addr = cpu_to_le64(sgls + 16ULL * (first + next));
+            d.len = cpu_to_le32(16);
+        } else {
+            d.type = NVME_SGL_DESCR_TYPE_DATA_BLOCK << 4;
+            d.addr = cpu_to_le64(region);
+            d.len = cpu_to_le32(len);
+        }
+        qtest_memwrite(qts, sgls + 16ULL * (first + i), &d, sizeof(d));
+    }
+
+    memset(&d, 0, sizeof(d));
+    d.type = NVME_SGL_DESCR_TYPE_SEGMENT << 4;
+    d.addr = cpu_to_le64(sgls + 16ULL * first);
+    d.len = cpu_to_le32(16);
+    return d;
+}
+
+typedef struct FemuIoFuzz {
+    int min_succeeded;
+    bool round_trip;    /* false where writes must land on a write pointer */
+} FemuIoFuzz;
+
+static const FemuIoFuzz femu_io_fuzz_conv = { 8, true };
+static const FemuIoFuzz femu_io_fuzz_zoned = { 3, false };
+
+/*
+ * Random I/O commands from a fixed seed. Most are valid, so they reach the
+ * FTL with real data; one in four has some fields replaced: namespace IDs,
+ * LBA ranges at and past the end, the reserved PSDT, and PRP lists and SGL
+ * segments rebuilt at random, which chain, loop, end early or point outside
+ * memory. All data stays in one region of guest memory, away from the
+ * queues, so a bad pointer can hurt only the device. Each command must
+ * complete, the controller must still answer and, where writes need no write
+ * pointer, round-trip data afterwards. Enough distinct commands have to
+ * succeed for the run to have reached past the first checks.
+ */
+static void femu_test_io_fuzz(void *obj, void *data, QGuestAllocator *alloc)
+{
+    const FemuIoFuzz *want = data;
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    const uint8_t ops[] = {
+        NVME_CMD_FLUSH, NVME_CMD_WRITE, NVME_CMD_READ, NVME_CMD_WRITE_UNCOR,
+        NVME_CMD_COMPARE, NVME_CMD_WRITE_ZEROES, NVME_CMD_DSM,
+        NVME_CMD_VERIFY, NVME_CMD_COPY, NVME_CMD_IO_MGMT_RECV,
+        NVME_CMD_IO_MGMT_SEND, NVME_CMD_ZONE_MGMT_SEND,
+        NVME_CMD_ZONE_MGMT_RECV, NVME_CMD_ZONE_APPEND,
+    };
+    bool succeeded[256] = { false };
+    uint64_t raw = 0;
+    uint64_t region = femu_alloc_64k(alloc, &raw);
+    uint64_t lists = region + 4096ULL * (FEMU_FUZZ_PAGES - FEMU_FUZZ_LISTS);
+    GRand *rng = g_rand_new_with_seed(0x494f4655);
+    uint64_t nsze;
+    NvmeRwCmd rw;
+    NvmeCmd *cmd = (NvmeCmd *)&rw;
+    int distinct = 0;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmpint(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, region), ==,
+                    NVME_SUCCESS);
+    nsze = qtest_readq(c.pdev->bus->qts, region);
+    g_assert_cmpuint(nsze, >, 64);
+
+    for (i = 0; i < FEMU_IO_FUZZ_ROUNDS; i++) {
+        bool wild = g_rand_int_range(rng, 0, 4) == 0;
+        uint32_t nlb = g_rand_int_range(rng, 0, 64);
+        uint16_t st;
+
+        femu_fuzz_lists(&c, rng, region);
+        memset(&rw, 0, sizeof(rw));
+        rw.opcode = ops[g_rand_int_range(rng, 0, G_N_ELEMENTS(ops))];
+        rw.nsid = cpu_to_le32(1);
+        rw.slba = cpu_to_le64(g_rand_int_range(rng, 0,
+                                               MIN(nsze, 1 << 20) - nlb));
+        rw.nlb = cpu_to_le16(nlb);
+        femu_fuzz_valid_dptr(&c, rng, region, &rw, (nlb + 1) * c.lba_size);
+
+        if (wild) {
+            switch (g_rand_int_range(rng, 0, 7)) {
+            case 0:
+                rw.opcode = g_rand_int_range(rng, 0, 0x100);
+                break;
+            case 1:
+                rw.nsid = cpu_to_le32(g_rand_boolean(rng) ? 0xffffffff :
+                                      g_rand_int_range(rng, 0, 4));
+                break;
+            case 2:
+                rw.slba = cpu_to_le64(g_rand_boolean(rng) ?
+                        nsze - g_rand_int_range(rng, 0, 64) :
+                        (uint64_t)g_rand_int(rng) << 32 | g_rand_int(rng));
+                rw.nlb = cpu_to_le16(g_rand_int_range(rng, 0, 0x10000));
+                break;
+            case 3:
+                /* PRPs from the random lists */
+                rw.flags = 0;
+                rw.dptr.prp1 = cpu_to_le64(femu_fuzz_ptr(rng, region));
+                rw.dptr.prp2 = cpu_to_le64(g_rand_boolean(rng) ?
+                        lists + 8 * g_rand_int_range(rng, 0,
+                                            FEMU_FUZZ_PRP_LISTS * 512) :
+                        femu_fuzz_ptr(rng, region));
+                break;
+            case 4:
+                /* an SGL from the random segments, or the reserved PSDT */
+                rw.flags = g_rand_int_range(rng, 1, 4) << 6;
+                qtest_memread(c.pdev->bus->qts,
+                              femu_fuzz_sgl_slot(rng, region),
+                              &rw.dptr.sgl, sizeof(rw.dptr.sgl));
+                break;
+            case 5: {
+                NvmeSglDescriptor d = femu_fuzz_sgl_chain(&c, rng, region,
+                                                (nlb + 1) * c.lba_size);
+
+                rw.flags = 1 << 6;
+                memcpy(&rw.dptr.sgl, &d, sizeof(d));
+                break;
+            }
+            default:
+                rw.control = cpu_to_le16(g_rand_int_range(rng, 0, 0x10000));
+                rw.dsmgmt = cpu_to_le32(g_rand_int(rng));
+                cmd->cdw10 = g_rand_int(rng);
+                cmd->cdw11 = g_rand_int(rng);
+                break;
+            }
+        }
+
+        st = femu_io(&c, cmd);
+        if (st == NVME_SUCCESS && !succeeded[rw.opcode]) {
+            succeeded[rw.opcode] = true;
+            distinct++;
+        }
+    }
+
+    g_assert_cmpint(distinct, >=, want->min_succeeded);
+    /* still answering */
+    g_assert_cmpint(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, region), ==,
+                    NVME_SUCCESS);
+    if (want->round_trip) {
+        femu_round_trip(&c, 0x5a);
+    }
+    femu_disable(&c);
+    g_rand_free(rng);
+    guest_free(alloc, raw);
+}
+
 #define FEMU_CSD_COMPUTE_LOAD   0x22
 #define FEMU_CSD_TYPE_SHARED_LIB 0x03
 
@@ -5562,6 +5853,21 @@ static void femu_register_nodes(void)
             "blks_per_pl=32,pls_per_lun=1,luns_per_ch=4,nchs=4,oacs=0x2"
     });
     qos_add_test("bar0-size", "femu", femu_test_bar0_size, NULL);
+    qos_add_test("io-fuzz", "femu", femu_test_io_fuzz,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)&femu_io_fuzz_conv,
+        .edge.extra_device_opts = "sgl=on,vwc=1,oncs=0x19f"
+    });
+    qos_add_test("io-fuzz-zoned", "femu", femu_test_io_fuzz,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)&femu_io_fuzz_zoned,
+        .edge.extra_device_opts = "femu_mode=3,secsz=512,sgl=on"
+    });
+    qos_add_test("io-fuzz-nossd", "femu", femu_test_io_fuzz,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)&femu_io_fuzz_conv,
+        .edge.extra_device_opts = "femu_mode=2,sgl=on,oncs=0x19f"
+    });
     qos_add_test("admin-fuzz", "femu", femu_test_admin_fuzz,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "namespaces=2,oacs=0x2,oncs=0x19f"
