@@ -976,6 +976,80 @@ static uint16_t oc20_erase(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     return status;
 }
 
+/*
+ * The set direction of the chunk log is FEMU's own, for a host that wants to
+ * put chunks into a given state. The I/O path trusts these descriptors -- it
+ * bounds a sector by cnlb and places writes at wp -- so the host's bytes are
+ * staged and checked first: whole descriptors only, the address and size left
+ * as the controller has them, a defined state and type, and a write pointer
+ * the state allows. Nothing changes unless all of them pass.
+ */
+static uint16_t oc20_set_chunks(FemuCtrl *n, Oc20Namespace *lns, uint64_t off,
+                                uint32_t len, NvmeCmd *cmd)
+{
+    g_autofree Oc20CS *cs = NULL;
+    Oc20CS *cur;
+    uint32_t nr = len / sizeof(Oc20CS);
+    uint16_t ret;
+    bool resume;
+    uint32_t i;
+
+    if (off % sizeof(Oc20CS) || len % sizeof(Oc20CS)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    cs = g_new(Oc20CS, nr);
+    ret = oc20_dma_write(n, (uint8_t *)cs, len, cmd);
+    if (ret) {
+        return ret;
+    }
+
+    cur = lns->chunk_info + off / sizeof(Oc20CS);
+    for (i = 0; i < nr; i++) {
+        uint64_t wp = le64_to_cpu(cs[i].wp);
+        uint64_t cnlb = le64_to_cpu(cs[i].cnlb);
+        bool ok;
+
+        if (le64_to_cpu(cs[i].slba) != cur[i].slba || cnlb != cur[i].cnlb ||
+            (cs[i].type != OC20_CHUNK_TYPE_SEQ &&
+             cs[i].type != OC20_CHUNK_TYPE_RAN)) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        switch (cs[i].state) {
+        case OC20_CHUNK_FREE:
+            ok = wp == 0;
+            break;
+        case OC20_CHUNK_OPEN:
+            ok = wp < cnlb;
+            break;
+        case OC20_CHUNK_CLOSED:
+            ok = wp <= cnlb;
+            break;
+        case OC20_CHUNK_OFFLINE:
+            ok = true;
+            break;
+        default:
+            ok = false;
+            break;
+        }
+        if (!ok) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+    }
+
+    /* the pollers read and advance these descriptors */
+    resume = nvme_pause_pollers(n);
+    for (i = 0; i < nr; i++) {
+        cur[i].state = cs[i].state;
+        cur[i].type = cs[i].type;
+        cur[i].wear_index = cs[i].wear_index;
+        cur[i].wp = le64_to_cpu(cs[i].wp);
+    }
+    nvme_resume_pollers(n, resume);
+
+    return NVME_SUCCESS;
+}
+
 static uint16_t oc20_chunk_info(FemuCtrl *n, NvmeCmd *cmd, uint64_t buf_len,
                                 uint64_t off)
 {
@@ -1020,8 +1094,7 @@ static uint16_t oc20_chunk_info(FemuCtrl *n, NvmeCmd *cmd, uint64_t buf_len,
         return oc20_dma_read(n, log_page, trans_len, cmd);
     }
 
-    /* Coperd: TODO, set_log_page */
-    ret = oc20_dma_write(n, log_page, trans_len, cmd);
+    ret = oc20_set_chunks(n, lns, off, trans_len, cmd);
     if (ret) {
         return ret;
     }

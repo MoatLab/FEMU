@@ -4674,6 +4674,77 @@ static void femu_test_zone_active_limit(void *obj, void *data,
     femu_disable(&c);
 }
 
+/* the Open-Channel 2.0 chunk log, one descriptor, get (0x02) or set (0xc1) */
+static uint16_t femu_oc20_chunk(FemuCtrlState *c, uint8_t opcode, uint64_t buf,
+                                uint32_t off)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = opcode;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(0xca | (7 << 16));
+    cmd.cdw12 = cpu_to_le32(off);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+/*
+ * Setting chunk descriptors takes only whole descriptors that keep the
+ * address and size the controller gave them, with a defined state and a
+ * write pointer that state allows; anything else changes nothing.
+ */
+static void femu_test_oc20_set_chunks(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+    uint64_t cnlb;
+
+    femu_enable(&c, &femu->dev, alloc);
+    buf = guest_alloc(alloc, 4096);
+    g_assert_cmpint(femu_oc20_chunk(&c, 0x02, buf, 0), ==, NVME_SUCCESS);
+    cnlb = qtest_readq(qts, buf + 16);
+    g_assert_cmpint(cnlb, >, 0);
+
+    /* a larger chunk than the controller made */
+    qtest_writeq(qts, buf + 16, cnlb + 1);
+    g_assert_cmpint(femu_oc20_chunk(&c, 0xc1, buf, 0), ==, NVME_INVALID_FIELD);
+    qtest_writeq(qts, buf + 16, cnlb);
+
+    /* a state that is not one of the four, and write pointers past the end */
+    qtest_writeb(qts, buf, 0x10);
+    g_assert_cmpint(femu_oc20_chunk(&c, 0xc1, buf, 0), ==, NVME_INVALID_FIELD);
+    qtest_writeb(qts, buf, 0x2);                /* closed */
+    qtest_writeq(qts, buf + 24, cnlb + 1);
+    g_assert_cmpint(femu_oc20_chunk(&c, 0xc1, buf, 0), ==, NVME_INVALID_FIELD);
+    qtest_writeb(qts, buf, 0x1);                /* free */
+    qtest_writeq(qts, buf + 24, 5);
+    g_assert_cmpint(femu_oc20_chunk(&c, 0xc1, buf, 0), ==, NVME_INVALID_FIELD);
+
+    /* part of a descriptor */
+    g_assert_cmpint(femu_oc20_chunk(&c, 0xc1, buf, 8), ==, NVME_INVALID_FIELD);
+
+    /* none of that stuck; a closed, full chunk does */
+    g_assert_cmpint(femu_oc20_chunk(&c, 0x02, buf, 0), ==, NVME_SUCCESS);
+    g_assert_cmpint(qtest_readq(qts, buf + 16), ==, cnlb);
+    g_assert_cmpint(qtest_readb(qts, buf), ==, 0x1);
+    qtest_writeb(qts, buf, 0x2);
+    qtest_writeq(qts, buf + 24, cnlb);
+    g_assert_cmpint(femu_oc20_chunk(&c, 0xc1, buf, 0), ==, NVME_SUCCESS);
+    qtest_memset(qts, buf, 0, 32);
+    g_assert_cmpint(femu_oc20_chunk(&c, 0x02, buf, 0), ==, NVME_SUCCESS);
+    g_assert_cmpint(qtest_readb(qts, buf), ==, 0x2);
+
+    /* and back to free for whatever runs next on this device */
+    qtest_writeb(qts, buf, 0x1);
+    qtest_writeq(qts, buf + 24, 0);
+    g_assert_cmpint(femu_oc20_chunk(&c, 0xc1, buf, 0), ==, NVME_SUCCESS);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
 #define FEMU_CSD_COMPUTE_LOAD   0x22
 #define FEMU_CSD_TYPE_SHARED_LIB 0x03
 
@@ -4884,6 +4955,10 @@ static void femu_register_nodes(void)
     qos_add_test("log-length-unlimited", "femu", femu_test_log_length,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "mdts=0"
+    });
+    qos_add_test("oc20-set-chunks", "femu", femu_test_oc20_set_chunks,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=0,lver=2"
     });
     qos_add_test("oc20-log-length", "femu", femu_test_oc20_log_length,
                  &(QOSGraphTestOptions) {
