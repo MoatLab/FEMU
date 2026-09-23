@@ -415,6 +415,16 @@ void nvme_drain_sq(FemuCtrl *n, NvmeSQueue *sq)
             g_free(kept);
         }
 
+        if (n->cpl_backlog) {
+            NvmeRequest *next;
+
+            QTAILQ_FOREACH_SAFE(req, &n->cpl_backlog[p], entry, next) {
+                if (req->sq == sq) {
+                    QTAILQ_REMOVE(&n->cpl_backlog[p], req, entry);
+                }
+            }
+        }
+
         if (!n->pq || !n->pq[p]) {
             continue;
         }

@@ -641,6 +641,12 @@ static void nvme_process_db_admin(FemuCtrl *n, hwaddr addr, int val)
         if (cq->tail != cq->head) {
             nvme_isr_notify_admin(cq);
         }
+
+        /* the host made room: resume what waited for it */
+        if (n->sq[0]) {
+            nvme_process_sq_admin(n->sq[0]);
+        }
+        nvme_process_aers(n);
     } else {
         qid = (addr - 0x1000) >> (3 + n->db_stride);
         if (nvme_check_sqid(n, qid)) {
@@ -1751,6 +1757,7 @@ static void nvme_destroy_poller(FemuCtrl *n)
     g_free(n->poller_args);
     n->poller_args = NULL;
     g_free(n->should_isr);
+    g_free(n->cpl_backlog);
     g_free((void *)n->poller_in_sweep);
     n->poller_in_sweep = NULL;
     qemu_vfree(n->poller_ctr);   /* allocated with qemu_memalign */

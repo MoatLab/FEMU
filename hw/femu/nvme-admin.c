@@ -345,6 +345,10 @@ static void nvme_init_poller(FemuCtrl *n)
      */
     n->should_isr = g_malloc0(sizeof(bool) * (n->nr_pollers + 1) *
                               (n->nr_io_queues + 1));
+    n->cpl_backlog = g_new0(union cq_req_list, n->nr_pollers + 1);
+    for (i = 1; i <= n->nr_pollers; i++) {
+        QTAILQ_INIT(&n->cpl_backlog[i]);
+    }
 
     /* poller quiesce flags (1-based poller indices); see poller_in_sweep */
     if (!n->poller_in_sweep) {
@@ -2375,6 +2379,7 @@ static void nvme_post_held_cqe(FemuCtrl *n, const NvmeAerHold *hold,
                                const NvmeAerResult *result)
 {
     NvmeCQueue *cq = n->cq[hold->cqid];
+    NvmeSQueue *sq = n->sq[hold->sqid];
     NvmeCqe cqe;
     hwaddr addr;
 
@@ -2392,7 +2397,8 @@ static void nvme_post_held_cqe(FemuCtrl *n, const NvmeAerHold *hold,
     cqe.cid = hold->cid;
     cqe.status = cpu_to_le16(NVME_SUCCESS << 1 | cq->phase);
     cqe.sq_id = cpu_to_le16(hold->sqid);
-    cqe.sq_head = cpu_to_le16(hold->sq_head);
+    /* where the queue head is now, not where it was when the request came */
+    cqe.sq_head = cpu_to_le16(sq ? sq->head : hold->sq_head);
 
     if (cq->phys_contig) {
         addr = cq->dma_addr + cq->tail * n->cqe_size;
@@ -2423,6 +2429,15 @@ void nvme_process_aers(FemuCtrl *n)
 {
     for (;;) {
         NvmeAsyncEvent *event = NULL, *cand, *next;
+
+        /* a full completion queue takes the event once the host makes room */
+        if (n->outstanding_aers) {
+            NvmeCQueue *cq = n->cq[n->aer_held[n->outstanding_aers - 1].cqid];
+
+            if (cq && nvme_cq_full(cq)) {
+                return;
+            }
+        }
 
         qemu_mutex_lock(&n->aer_lock);
         QSIMPLEQ_FOREACH_SAFE(cand, &n->aer_queue, entry, next) {
@@ -2520,7 +2535,12 @@ void nvme_process_sq_admin(void *opaque)
     NvmeCmd cmd;
     NvmeCqe cqe;
 
-    while (!(nvme_sq_empty(sq))) {
+    /*
+     * A command is only fetched while its completion has somewhere to go. The
+     * rest stay in the queue until the host frees a slot, which resumes this
+     * from the completion queue head doorbell.
+     */
+    while (!nvme_sq_empty(sq) && !nvme_cq_full(cq)) {
         if (sq->phys_contig) {
             addr = sq->dma_addr + sq->head * n->sqe_size;
         } else {

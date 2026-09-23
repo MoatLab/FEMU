@@ -83,6 +83,8 @@ typedef struct FemuCtrlState {
     uint32_t lba_size;
     /* shadow doorbell pages, once Doorbell Buffer Config has been issued */
     uint64_t dbs_addr;
+    /* admin completion queue entries when not FEMU_QSIZE */
+    uint16_t acq_entries;
 } FemuCtrlState;
 
 static void *femu_get_driver(void *obj, const char *interface)
@@ -242,6 +244,7 @@ static void femu_enable_cc(FemuCtrlState *c, QPCIDevice *pdev,
 {
     uint64_t cap;
     uint32_t csts;
+    uint32_t acq;
     int waited = 0;
 
     c->pdev = pdev;
@@ -253,8 +256,8 @@ static void femu_enable_cc(FemuCtrlState *c, QPCIDevice *pdev,
     c->db_stride = (cap >> 32) & 0xf;
     c->lba_size = 512;
 
-    qpci_io_writel(pdev, c->bar, 0x24,
-                   ((FEMU_QSIZE - 1) << 16) | (FEMU_QSIZE - 1));
+    acq = c->acq_entries ? c->acq_entries : FEMU_QSIZE;
+    qpci_io_writel(pdev, c->bar, 0x24, ((acq - 1) << 16) | (FEMU_QSIZE - 1));
     qpci_io_writeq(pdev, c->bar, 0x28, c->admin.sq_addr);
     qpci_io_writeq(pdev, c->bar, 0x30, c->admin.cq_addr);
 
@@ -2974,6 +2977,133 @@ static void femu_test_shared_cq(void *obj, void *data, QGuestAllocator *alloc)
     g_free(wbuf);
 }
 
+/*
+ * Check a completion queue of FEMU_SMALL_CQ entries that the host has not
+ * read from, after more commands than it can hold were submitted: it holds
+ * one entry fewer than its size, the first commands in order, and the last
+ * slot untouched (Base 2.3, 3.3.1.2.1). Then read it one entry at a time,
+ * returning each slot, and expect every command to complete in order.
+ */
+#define FEMU_SMALL_CQ   4
+
+static void femu_check_held_back(FemuCtrlState *c, uint64_t cq_addr,
+                                 uint16_t qid, uint16_t first_cid, int total)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    uint16_t head = 0;
+    uint8_t phase = 1;
+    NvmeCqe cqe;
+    int waited = 0;
+    int i;
+
+    /* wait for the entries that fit, then give the rest time to overrun */
+    for (;;) {
+        qtest_memread(qts, cq_addr + (FEMU_SMALL_CQ - 2) * sizeof(cqe), &cqe,
+                      sizeof(cqe));
+        if (le16_to_cpu(cqe.status) & 1) {
+            break;
+        }
+        g_assert_cmpint(waited, <, FEMU_POLL_LIMIT_MS);
+        g_usleep(1000);
+        waited++;
+    }
+    g_usleep(200 * 1000);
+
+    for (i = 0; i < FEMU_SMALL_CQ - 1; i++) {
+        qtest_memread(qts, cq_addr + i * sizeof(cqe), &cqe, sizeof(cqe));
+        g_assert_cmpint(le16_to_cpu(cqe.status) & 1, ==, 1);
+        g_assert_cmpint(le16_to_cpu(cqe.cid), ==, first_cid + i);
+    }
+    qtest_memread(qts, cq_addr + (FEMU_SMALL_CQ - 1) * sizeof(cqe), &cqe,
+                  sizeof(cqe));
+    g_assert_cmpint(le16_to_cpu(cqe.status), ==, 0);
+    g_assert_cmpint(le16_to_cpu(cqe.cid), ==, 0);
+
+    for (i = 0; i < total; i++) {
+        uint64_t slot = cq_addr + head * sizeof(cqe);
+
+        waited = 0;
+        for (;;) {
+            qtest_memread(qts, slot, &cqe, sizeof(cqe));
+            if ((le16_to_cpu(cqe.status) & 1) == phase) {
+                break;
+            }
+            g_assert_cmpint(waited, <, FEMU_POLL_LIMIT_MS);
+            g_usleep(1000);
+            waited++;
+        }
+        g_assert_cmpint(le16_to_cpu(cqe.cid), ==, first_cid + i);
+        g_assert_cmpint(le16_to_cpu(cqe.status) >> 1, ==, NVME_SUCCESS);
+        head = (head + 1) % FEMU_SMALL_CQ;
+        if (head == 0) {
+            phase ^= 1;
+        }
+        qpci_io_writel(c->pdev, c->bar, femu_cq_doorbell(c, qid), head);
+    }
+}
+
+static void femu_test_cq_full(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { .acq_entries = FEMU_SMALL_CQ };
+    const int total = 8;
+    uint64_t buf;
+    uint16_t first;
+    NvmeCmd cmd;
+    int i;
+
+    /* the admin queue: sixteen submission entries, four completion entries */
+    femu_enable(&c, &femu->dev, alloc);
+    buf = guest_alloc(alloc, 4096);
+    first = c.cid;
+    for (i = 0; i < total; i++) {
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_ADM_CMD_IDENTIFY;
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.cdw10 = cpu_to_le32(NVME_ID_CNS_CTRL);
+        femu_submit(&c, &c.admin, &cmd);
+    }
+    femu_check_held_back(&c, c.admin.cq_addr, 0, first, total);
+    femu_disable(&c);
+
+    /* an I/O queue pair of the same shape */
+    memset(&c, 0, sizeof(c));
+    femu_enable(&c, &femu->dev, alloc);
+    femu_queue_init(&c, &c.io, 1);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_CREATE_CQ;
+    cmd.dptr.prp1 = cpu_to_le64(c.io.cq_addr);
+    cmd.cdw10 = cpu_to_le32(((FEMU_SMALL_CQ - 1) << 16) | c.io.qid);
+    cmd.cdw11 = cpu_to_le32(NVME_CQ_PC);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_CREATE_SQ;
+    cmd.dptr.prp1 = cpu_to_le64(c.io.sq_addr);
+    cmd.cdw10 = cpu_to_le32(((FEMU_QSIZE - 1) << 16) | c.io.qid);
+    cmd.cdw11 = cpu_to_le32((c.io.qid << 16) | NVME_SQ_PC);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+
+    qtest_memset(qts, c.io.cq_addr, 0, FEMU_QSIZE * sizeof(NvmeCqe));
+    first = c.cid;
+    for (i = 0; i < total; i++) {
+        NvmeRwCmd rw;
+
+        memset(&rw, 0, sizeof(rw));
+        rw.opcode = NVME_CMD_READ;
+        rw.nsid = cpu_to_le32(1);
+        rw.dptr.prp1 = cpu_to_le64(buf);
+        rw.slba = cpu_to_le64(i * 8);
+        rw.nlb = cpu_to_le16(7);
+        femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    }
+    femu_check_held_back(&c, c.io.cq_addr, c.io.qid, first, total);
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 #define FEMU_CSD_COMPUTE_LOAD   0x22
 #define FEMU_CSD_TYPE_SHARED_LIB 0x03
 
@@ -3246,6 +3376,7 @@ static void femu_register_nodes(void)
         .arg = &femu_wide_fdp,
     });
     qos_add_test("shared-cq", "femu", femu_test_shared_cq, NULL);
+    qos_add_test("cq-full", "femu", femu_test_cq_full, NULL);
     qos_add_test("shared-cq-pollers", "femu", femu_test_shared_cq,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "multipoller_enabled=1"

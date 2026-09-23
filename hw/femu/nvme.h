@@ -2054,6 +2054,8 @@ typedef struct FemuCtrl {
     struct rte_ring **to_poller;
     pqueue_t        **pq;
     bool            *should_isr;
+    /* per poller: completions waiting for space in their completion queue */
+    union cq_req_list *cpl_backlog;
     bool            poller_on;
 
     FemuPollerCtr   *poller_ctr;   /* per-poller I/O accounting (1-based) */

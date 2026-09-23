@@ -42,6 +42,47 @@ static inline bool *nvme_should_isr(FemuCtrl *n, int index_poller)
     return &n->should_isr[index_poller * (n->nr_io_queues + 1)];
 }
 
+/*
+ * Post a completion unless its queue is full, and report whether it was
+ * posted. A full queue takes nothing until the host frees a slot (Base 2.3,
+ * 3.3.1.2.1); writing anyway overwrites entries it has not read yet.
+ */
+static bool nvme_try_post_cqe(FemuCtrl *n, NvmeCQueue *cq, NvmeRequest *req)
+{
+    bool full;
+
+    nvme_cq_lock(n, cq);
+    full = nvme_cq_full(cq);
+    if (!full) {
+        nvme_post_cqe(cq, req);
+    }
+    nvme_cq_unlock(n, cq);
+
+    return !full;
+}
+
+/* Retry the completions this poller is holding for a full completion queue. */
+static int nvme_post_backlog(FemuCtrl *n, int index_poller, bool *should_isr)
+{
+    union cq_req_list *backlog = &n->cpl_backlog[index_poller];
+    NvmeRequest *req, *next;
+    int posted = 0;
+
+    QTAILQ_FOREACH_SAFE(req, backlog, entry, next) {
+        NvmeCQueue *cq = n->cq[req->sq->cqid];
+
+        if (!nvme_try_post_cqe(n, cq, req)) {
+            continue;
+        }
+        QTAILQ_REMOVE(backlog, req, entry);
+        QTAILQ_INSERT_TAIL(&req->sq->req_list, req, entry);
+        should_isr[cq->cqid] = true;
+        posted++;
+    }
+
+    return posted;
+}
+
 static void nvme_update_sq_eventidx(const NvmeSQueue *sq)
 {
     /*
@@ -281,16 +322,22 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
              * leak hazard that the FTL-ring path guards against does not arise.
              */
             NvmeCQueue *cq = n->cq[sq->cqid];
-            if (cq && cq->is_active) {
-                /* CQ space guaranteed by the nvme_cq_full check at loop top */
-                nvme_cq_lock(n, cq);
-                nvme_post_cqe(cq, req);
-                nvme_cq_unlock(n, cq);
-                did_isr = true;
-                n->poller_ctr[index_poller].nr_tt_ios++;
-            }
+
             nvme_req_release_ranges(req);
-            QTAILQ_INSERT_TAIL(&sq->req_list, req, entry);
+            /*
+             * The check at the top of the loop is taken without the queue
+             * lock, so another poller sharing the queue may have filled it
+             * since: hold the completion for the next sweep then.
+             */
+            if (cq && cq->is_active && !nvme_try_post_cqe(n, cq, req)) {
+                QTAILQ_INSERT_TAIL(&n->cpl_backlog[index_poller], req, entry);
+            } else {
+                if (cq && cq->is_active) {
+                    did_isr = true;
+                    n->poller_ctr[index_poller].nr_tt_ios++;
+                }
+                QTAILQ_INSERT_TAIL(&sq->req_list, req, entry);
+            }
         } else {
             /*
              * Always enqueue to FTL ring for completion. Failed requests
@@ -435,6 +482,10 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
         pqueue_insert(pq, req);
     }
 
+    if (!QTAILQ_EMPTY(&n->cpl_backlog[index_poller])) {
+        processed += nvme_post_backlog(n, index_poller, should_isr);
+    }
+
     while ((req = pqueue_peek(pq))) {
         now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
         if (now < req->expire_time) {
@@ -456,9 +507,10 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
             QTAILQ_INSERT_TAIL(&req->sq->req_list, req, entry);
             continue;
         }
-        nvme_cq_lock(n, cq);
-        nvme_post_cqe(cq, req);
-        nvme_cq_unlock(n, cq);
+        if (!nvme_try_post_cqe(n, cq, req)) {
+            QTAILQ_INSERT_TAIL(&n->cpl_backlog[index_poller], req, entry);
+            continue;
+        }
         QTAILQ_INSERT_TAIL(&req->sq->req_list, req, entry);
         processed++;
         /* per-poller counters: no shared cacheline on the hot path */
