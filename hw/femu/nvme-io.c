@@ -752,12 +752,10 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
             }
 
             if (dma_memory_rw(as, prp1, mb + moff, len0, dir,
-                              MEMTXATTRS_UNSPECIFIED)) {
-                return NVME_DNR;
-            }
-            if (rem && dma_memory_rw(as, prp2, mb + moff + len0, rem, dir,
-                                     MEMTXATTRS_UNSPECIFIED)) {
-                return NVME_DNR;
+                              MEMTXATTRS_UNSPECIFIED) ||
+                (rem && dma_memory_rw(as, prp2, mb + moff + len0, rem, dir,
+                                      MEMTXATTRS_UNSPECIFIED))) {
+                return NVME_DATA_TRAS_ERROR | NVME_DNR;
             }
             if (req->is_write) {
                 nvme_mark_written(ns, slba, nlb);
@@ -813,7 +811,8 @@ mapped:
         return NVME_SUCCESS;
     }
 
-    return NVME_DNR;
+    /* a bare DNR has a status code of zero, which the host reads as success */
+    return nvme_backend_status(ret);
 }
 
 static uint16_t nvme_dsm(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,

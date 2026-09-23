@@ -498,6 +498,7 @@ static int oc12_advance_status(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 static uint16_t oc12_read(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                           NvmeRequest *req)
 {
+    int ret;
     Oc12Ctrl *ln = n->oc12_ctrl;
     Oc12RwCmd *ocrw = (Oc12RwCmd *)cmd;
     uint32_t nlb  = le16_to_cpu(ocrw->nlb) + 1;     /* # of logical blocks */
@@ -582,8 +583,10 @@ static uint16_t oc12_read(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         goto fail_free;
     }
     /* an address the backing store does not cover must fail, not succeed */
-    if (backend_rw(n->mbe, &req->qsg, psl, req->is_write)) {
-        err = NVME_LBA_RANGE | NVME_DNR;
+    ret = backend_rw(n->mbe, &req->qsg, psl, req->is_write);
+    if (ret) {
+        err = ret == -EIO ? NVME_DATA_TRAS_ERROR | NVME_DNR :
+                            NVME_LBA_RANGE | NVME_DNR;
         goto fail_free;
     }
 
@@ -607,6 +610,7 @@ fail_free:
 static uint16_t oc12_write(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                            NvmeRequest *req)
 {
+    int ret;
     Oc12Ctrl *ln = n->oc12_ctrl;
     Oc12RwCmd *ocrw = (Oc12RwCmd *)cmd;
     uint32_t nlb  = le16_to_cpu(ocrw->nlb) + 1;     /* # of logical blocks */
@@ -695,8 +699,10 @@ static uint16_t oc12_write(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         goto fail_free;
     }
     /* an address the backing store does not cover must fail, not succeed */
-    if (backend_rw(n->mbe, &req->qsg, psl, req->is_write)) {
-        err = NVME_LBA_RANGE | NVME_DNR;
+    ret = backend_rw(n->mbe, &req->qsg, psl, req->is_write);
+    if (ret) {
+        err = ret == -EIO ? NVME_DATA_TRAS_ERROR | NVME_DNR :
+                            NVME_LBA_RANGE | NVME_DNR;
         goto fail_free;
     }
 

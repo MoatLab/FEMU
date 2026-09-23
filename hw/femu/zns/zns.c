@@ -1215,6 +1215,7 @@ static uint16_t zns_map_dptr(FemuCtrl *n, size_t len, NvmeRequest *req)
 static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                            NvmeRequest *req,bool append)
 {
+    int ret;
     NvmeRwCmd *rw = (NvmeRwCmd *)&req->cmd; 
     uint64_t slba = le64_to_cpu(rw->slba);
     uint32_t nlb = (uint32_t)le16_to_cpu(rw->nlb) + 1;
@@ -1316,7 +1317,21 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     req->status = NVME_SUCCESS;
     req->nlb = nlb;
 
-    backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
+    ret = backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
+
+    /*
+     * The write pointer moved when the write was accepted, so a write whose
+     * transfer failed still has to be finalized, or the zone would never catch
+     * up with it. Nothing reached the media, so nothing is marked written.
+     */
+    if (ret && req->is_write) {
+        WITH_QEMU_LOCK_GUARD(&ns->zns->zone_lock) {
+            zns_finalize_zoned_write(ns, req, false);
+        }
+    }
+    if (ret) {
+        return nvme_backend_status(ret);
+    }
 
     if(req->is_write)
     {

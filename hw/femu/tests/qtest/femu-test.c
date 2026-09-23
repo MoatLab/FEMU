@@ -3257,6 +3257,47 @@ static void femu_test_io_interrupts(void *obj, void *data,
     guest_free(alloc, buf);
 }
 
+/* guest-physical memory nothing answers at */
+#define FEMU_UNBACKED_GPA   0xffffffff00000000ULL
+
+/*
+ * A transfer whose data pointer names memory that is not there fails with
+ * Data Transfer Error (Base 2.3, Generic Command Status 04h). It used to
+ * complete with a status code of zero, which the host reads as success. On a
+ * zoned namespace the failed write still consumes its blocks, so the next
+ * write lands where the write pointer moved to.
+ */
+static void femu_test_dma_error(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    bool zoned = data && *(bool *)data;
+    uint64_t buf;
+    uint16_t status;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+
+    status = femu_rw(&c, NVME_CMD_WRITE, 0, FEMU_UNBACKED_GPA);
+    g_assert_cmphex(FEMU_SC(status), ==, NVME_DATA_TRAS_ERROR);
+    g_assert_cmphex(status & NVME_DNR, ==, NVME_DNR);
+    status = femu_rw(&c, NVME_CMD_READ, 0, FEMU_UNBACKED_GPA);
+    g_assert_cmphex(FEMU_SC(status), ==, NVME_DATA_TRAS_ERROR);
+
+    if (zoned) {
+        g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, 8, buf), ==, NVME_SUCCESS);
+    } else {
+        femu_round_trip(&c, 4);
+    }
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+static bool femu_zoned = true;
+
 #define FEMU_CSD_COMPUTE_LOAD   0x22
 #define FEMU_CSD_TYPE_SHARED_LIB 0x03
 
@@ -3531,6 +3572,18 @@ static void femu_register_nodes(void)
     qos_add_test("shared-cq", "femu", femu_test_shared_cq, NULL);
     qos_add_test("cq-full", "femu", femu_test_cq_full, NULL);
     qos_add_test("io-interrupts", "femu", femu_test_io_interrupts, NULL);
+    qos_add_test("dma-error", "femu", femu_test_dma_error, NULL);
+    qos_add_test("dma-error-bbssd", "femu", femu_test_dma_error,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4",
+    });
+    qos_add_test("dma-error-zoned", "femu", femu_test_dma_error,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=3,secsz=512",
+        .arg = &femu_zoned,
+    });
     qos_add_test("shared-cq-pollers", "femu", femu_test_shared_cq,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "multipoller_enabled=1"

@@ -89,6 +89,12 @@ void free_dram_backend(SsdDramBackend *b)
     g_free(b);
 }
 
+/*
+ * Copy between guest memory and the backing store. The scatter list is
+ * consumed whatever the outcome. Returns 0, -ERANGE when a mode's address
+ * translation leaves the backing store, or -EIO when guest memory could not
+ * be reached.
+ */
 int backend_rw(SsdDramBackend *b, QEMUSGList *qsg, uint64_t *lbal, bool is_write)
 {
     int sg_cur_index = 0;
@@ -116,10 +122,13 @@ int backend_rw(SsdDramBackend *b, QEMUSGList *qsg, uint64_t *lbal, bool is_write
             femu_err("backend: %" PRIu64 "+%" PRIu64 " is outside the %" PRId64
                      " byte backing store\n", (uint64_t)mb_oft,
                      (uint64_t)cur_len, b->size);
-            return -1;
+            qemu_sglist_destroy(qsg);
+            return -ERANGE;
         }
-        if (dma_memory_rw(qsg->as, cur_addr, mb + mb_oft, cur_len, dir, MEMTXATTRS_UNSPECIFIED)) {
-            femu_err("dma_memory_rw error\n");
+        if (dma_memory_rw(qsg->as, cur_addr, mb + mb_oft, cur_len, dir,
+                          MEMTXATTRS_UNSPECIFIED)) {
+            qemu_sglist_destroy(qsg);
+            return -EIO;
         }
 
         sg_cur_byte += cur_len;

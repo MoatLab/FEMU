@@ -757,6 +757,7 @@ static inline NvmeNamespace *cmd_ns(FemuCtrl *n, NvmeCmd *cmd)
 
 static uint16_t oc20_rw(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req, bool vector)
 {
+    int ret;
     Oc20RwCmd *lrw = (Oc20RwCmd *)cmd;
     NvmeNamespace *ns = cmd_ns(n, cmd);
     uint64_t prp1 = le64_to_cpu(lrw->dptr.prp1);
@@ -857,8 +858,10 @@ static uint16_t oc20_rw(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req, bool vector
         }
     }
 
-    if (backend_rw(n->mbe, &req->qsg, aio_sector_list, req->is_write)) {
-        err = NVME_LBA_RANGE | NVME_DNR;
+    ret = backend_rw(n->mbe, &req->qsg, aio_sector_list, req->is_write);
+    if (ret) {
+        err = ret == -EIO ? NVME_DATA_TRAS_ERROR | NVME_DNR :
+                            NVME_LBA_RANGE | NVME_DNR;
         goto fail_free;
     }
 

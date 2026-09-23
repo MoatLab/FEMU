@@ -2360,6 +2360,16 @@ static inline hwaddr nvme_discontig(uint64_t *dma_addr, uint32_t queue_idx,
     return dma_addr[prp_index] + (hwaddr)index_in_prp * entry_size;
 }
 
+/*
+ * Status for a failed backend_rw(): guest memory the transfer could not reach,
+ * or an address the mode's own translation put outside the backing store.
+ */
+static inline uint16_t nvme_backend_status(int ret)
+{
+    return (ret == -EIO ? NVME_DATA_TRAS_ERROR : NVME_INTERNAL_DEV_ERROR) |
+           NVME_DNR;
+}
+
 static inline uint16_t nvme_check_mdts(FemuCtrl *n, uint64_t len)
 {
     unsigned shift = n->page_bits + n->mdts;
