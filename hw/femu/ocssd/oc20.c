@@ -1182,6 +1182,14 @@ static uint16_t oc20_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 static uint16_t oc20_io_cmd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                             NvmeRequest *req)
 {
+    /*
+     * The data path maps PRPs only. A scatter-gather descriptor read as a PRP
+     * pair turns its length into a page address, so refuse one here.
+     */
+    if (cmd->opcode != OC20_CMD_VECT_ERASE && cmd->psdt != NVME_PSDT_PRP) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
     switch (cmd->opcode) {
     case NVME_CMD_READ:
     case NVME_CMD_WRITE:

@@ -5824,6 +5824,59 @@ static void femu_test_kv_fuzz(void *obj, void *data, QGuestAllocator *alloc)
     guest_free(alloc, raw);
 }
 
+/*
+ * Open-Channel vector commands take their data through PRPs only. With a
+ * scatter-gather list the controller read the list descriptor as a PRP pair,
+ * so the length field became the second page's address: a two-sector write
+ * took its second sector from guest address 0x2000. It has to be refused and
+ * touch nothing outside the buffer it names.
+ */
+static void femu_test_oc_sgl_refused(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint32_t sectors = GPOINTER_TO_UINT(data);
+    uint64_t buf = guest_alloc(alloc, (sectors + 1) * 4096);
+    uint64_t lbas = guest_alloc(alloc, 4096);
+    uint64_t e;
+    uint8_t low[4096];
+    NvmeSglDescriptor d = { 0 };
+    NvmeCmd cmd = { 0 };
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = (buf + 4095) & ~4095ULL;
+    qtest_memset(qts, buf, 0x5c, sectors * 4096);
+    qtest_memset(qts, 0x2000, 0xee, sizeof(low));
+    for (i = 0; i < sectors; i++) {
+        e = cpu_to_le64(i);
+        qtest_memwrite(qts, lbas + 8 * i, &e, sizeof(e));
+    }
+
+    d.addr = cpu_to_le64(buf);
+    d.len = cpu_to_le32(sectors * 4096);
+    d.type = NVME_SGL_DESCR_TYPE_DATA_BLOCK << 4;
+    cmd.opcode = FEMU_OC20_VECT_WRITE;
+    cmd.flags = 1 << 6;
+    cmd.nsid = cpu_to_le32(1);
+    memcpy(&cmd.dptr.sgl, &d, sizeof(d));
+    if (sectors > 1) {
+        cmd.cdw10 = cpu_to_le32((uint32_t)lbas);
+        cmd.cdw11 = cpu_to_le32((uint32_t)(lbas >> 32));
+    }
+    cmd.cdw12 = cpu_to_le32(sectors - 1);
+    g_assert_cmpint(femu_io(&c, &cmd), ==, NVME_INVALID_FIELD);
+
+    qtest_memread(qts, 0x2000, low, sizeof(low));
+    for (i = 0; i < sizeof(low); i++) {
+        g_assert_cmpint(low[i], ==, 0xee);
+    }
+    femu_disable(&c);
+}
+
 #define FEMU_CSD_COMPUTE_LOAD   0x22
 #define FEMU_CSD_TYPE_SHARED_LIB 0x03
 
@@ -6164,6 +6217,11 @@ static void femu_register_nodes(void)
             "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
             "sgl=on,vwc=1,oncs=0x19f,subsys=fdpsub"
+    });
+    qos_add_test("oc20-sgl-refused", "femu", femu_test_oc_sgl_refused,
+                 &(QOSGraphTestOptions) {
+        .arg = GUINT_TO_POINTER(2),
+        .edge.extra_device_opts = "femu_mode=0,lver=2,sgl=on"
     });
     qos_add_test("io-fuzz-nossd", "femu", femu_test_io_fuzz,
                  &(QOSGraphTestOptions) {
