@@ -4857,6 +4857,48 @@ static void femu_test_self_test(void *obj, void *data, QGuestAllocator *alloc)
     femu_disable(&c);
 }
 
+/*
+ * On the pin with shadow doorbells, the host consumes a completion by moving
+ * the shadow head and rings the register only when EventIdx asks. That ring
+ * has to drop the level: it stayed asserted, the line stormed, and Linux
+ * disabled the interrupt and fell back to polling.
+ */
+static void femu_test_intx_shadow_doorbell(void *obj, void *data,
+                                           QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+    uint64_t eis_addr;
+    NvmeCmd cmd;
+
+    femu_enable(&c, &femu->dev, alloc);
+    buf = guest_alloc(alloc, 4096);
+    c.dbs_addr = guest_alloc(alloc, 4096);
+    eis_addr = guest_alloc(alloc, 4096);
+    qtest_memset(qts, c.dbs_addr, 0, 4096);
+    qtest_memset(qts, eis_addr, 0, 4096);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_DBBUF_CONFIG;
+    cmd.dptr.prp1 = cpu_to_le64(c.dbs_addr);
+    cmd.dptr.prp2 = cpu_to_le64(eis_addr);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+    femu_create_io_queues_irq(&c, 0);
+    g_assert_false(femu_intx_asserted(&c));
+
+    femu_read_unconsumed(&c, buf);
+    FEMU_WAIT_FOR(femu_intx_asserted(&c));
+    g_assert_cmpint(femu_complete(&c, &c.io, NULL, NULL), ==, NVME_SUCCESS);
+    qpci_io_writel(c.pdev, c.bar, femu_cq_doorbell(&c, c.io.qid),
+                   c.io.cq_head);
+    g_assert_false(femu_intx_asserted(&c));
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 #define FEMU_CSD_COMPUTE_LOAD   0x22
 #define FEMU_CSD_TYPE_SHARED_LIB 0x03
 
@@ -5135,6 +5177,8 @@ static void femu_register_nodes(void)
     qos_add_test("shared-cq", "femu", femu_test_shared_cq, NULL);
     qos_add_test("cq-full", "femu", femu_test_cq_full, NULL);
     qos_add_test("io-interrupts", "femu", femu_test_io_interrupts, NULL);
+    qos_add_test("intx-shadow-doorbell", "femu",
+                 femu_test_intx_shadow_doorbell, NULL);
     qos_add_test("dma-error", "femu", femu_test_dma_error, NULL);
     qos_add_test("queue-create-status", "femu", femu_test_queue_create_status,
                  NULL);

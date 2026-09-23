@@ -775,8 +775,14 @@ static void nvme_process_db_io(FemuCtrl *n, hwaddr addr, int val)
         }
 
         cq = n->cq[qid];
-        /* a queue with a shadow doorbell is driven from the shadow instead */
+        /*
+         * A queue with a shadow doorbell is driven from the shadow instead.
+         * The host still rings the register when EventIdx asks it to, and on
+         * the pin that is the moment to drop the level: left asserted after
+         * the host has caught up, the line storms and the host disables it.
+         */
         if (cq->db_addr) {
+            nvme_irq_update(n);
             return;
         }
         if (new_val >= cq->size) {
