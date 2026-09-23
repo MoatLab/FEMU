@@ -171,8 +171,12 @@ static uint16_t nvme_create_sq(FemuCtrl *n, NvmeCmd *cmd)
     if (!qsize || qsize > NVME_CAP_MQES(n->bar.cap)) {
         return NVME_MAX_QSIZE_EXCEEDED | NVME_DNR;
     }
-    if (!prp1 || prp1 & (n->page_size - 1)) {
+    if (!prp1) {
         return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    /* the ring or its list starts on a page (Base 2.3, Figure 506) */
+    if (prp1 & (n->page_size - 1)) {
+        return NVME_INVALID_PRP_OFFSET | NVME_DNR;
     }
     if (!(NVME_SQ_FLAGS_PC(qflags)) && NVME_CAP_CQR(n->bar.cap)) {
         return NVME_INVALID_FIELD | NVME_DNR;
@@ -219,13 +223,16 @@ static uint16_t nvme_create_cq(FemuCtrl *n, NvmeCmd *cmd)
      * the slot is guaranteed free below.
      */
     if (!cqid || cqid > n->nr_io_queues || !nvme_check_cqid(n, cqid)) {
-        return NVME_INVALID_CQID | NVME_DNR;
+        return NVME_INVALID_QID | NVME_DNR;
     }
     if (!qsize || qsize > NVME_CAP_MQES(n->bar.cap)) {
         return NVME_MAX_QSIZE_EXCEEDED | NVME_DNR;
     }
     if (!prp1) {
         return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    if (prp1 & (n->page_size - 1)) {
+        return NVME_INVALID_PRP_OFFSET | NVME_DNR;
     }
     if (vector > n->nr_io_queues) {
         return NVME_INVALID_IRQ_VECTOR | NVME_DNR;
@@ -273,7 +280,7 @@ static uint16_t nvme_del_cq(FemuCtrl *n, NvmeCmd *cmd)
     bool resume;
 
     if (!qid || nvme_check_cqid(n, qid)) {
-        return NVME_INVALID_CQID | NVME_DNR;
+        return NVME_INVALID_QID | NVME_DNR;
     }
 
     cq = n->cq[qid];
@@ -1236,11 +1243,24 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
                     MIN(sizeof(rt_ns->lba_range), nr * sizeof(*rt)),
                     prp1, prp2);
         }
-    case NVME_NUMBER_OF_QUEUES:
-        /* Coperd: nr_io_queues is 0-based */
+    case NVME_NUMBER_OF_QUEUES: {
+        int q;
+
+        /* 65535 would ask for 65536 queues, which no identifier can name */
+        if ((dw11 & 0xffff) == 0xffff || (dw11 >> 16) == 0xffff) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        /* only before any I/O queue exists (Base 2.3, 5.2.26.2.1) */
+        for (q = 1; q <= n->nr_io_queues; q++) {
+            if (n->sq[q] || n->cq[q]) {
+                return NVME_CMD_SEQ_ERROR | NVME_DNR;
+            }
+        }
+        /* nr_io_queues is 0-based in the result */
         cqe->n.result = cpu_to_le32((n->nr_io_queues - 1) |
                 ((n->nr_io_queues - 1) << 16));
         break;
+    }
     case NVME_TEMPERATURE_THRESHOLD:
         /*
          * dw11 carries the threshold in its low half and, above it, which

@@ -784,8 +784,12 @@ static bool nvme_check_constraints(FemuCtrl *n, Error **errp)
         error_setg(errp, "stride must not exceed %d", NVME_MAX_STRIDE);
         return false;
     }
-    if (n->max_q_ents < 1) {
-        error_setg(errp, "entries must be at least 1");
+    /*
+     * CAP.MQES is 0's based and a queue's size is kept in 16 bits, so a queue
+     * of MQES + 1 entries has to fit in them.
+     */
+    if (n->max_q_ents < 1 || n->max_q_ents > 0xfffe) {
+        error_setg(errp, "entries must be in [1, 65534]");
         return false;
     }
     /*

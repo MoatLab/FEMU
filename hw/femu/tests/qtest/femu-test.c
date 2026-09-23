@@ -3694,6 +3694,83 @@ static void femu_test_sgl_kv(void *obj, void *data, QGuestAllocator *alloc)
     g_free(wbuf);
 }
 
+#define FEMU_INVALID_QID        0x101   /* command specific */
+#define FEMU_INVALID_PRP_OFFSET 0x13
+#define FEMU_CMD_SEQ_ERROR      0x0c
+#define FEMU_FEAT_NUM_QUEUES    0x07
+
+static uint16_t femu_queue_cmd(FemuCtrlState *c, uint8_t opcode, uint16_t qid,
+                               uint64_t prp1, uint32_t dw11)
+{
+    NvmeCmd cmd;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = opcode;
+    cmd.dptr.prp1 = cpu_to_le64(prp1);
+    cmd.cdw10 = cpu_to_le32(((FEMU_QSIZE - 1) << 16) | qid);
+    cmd.cdw11 = cpu_to_le32(dw11);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+/*
+ * The status each queue command returns for what it refuses (Base 2.3,
+ * Figures 505, 510, 512 and 514), and Number of Queues, which may only be
+ * set before any I/O queue exists (5.2.26.2.1).
+ */
+static void femu_test_queue_create_status(void *obj, void *data,
+                                          QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t ring = guest_alloc(alloc, 2 * 4096);
+    uint64_t page = (ring + 4095) & ~4095ULL;
+
+    femu_enable(&c, &femu->dev, alloc);
+
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, FEMU_FEAT_NUM_QUEUES, false,
+                                             0, 0xffff, NULL)),
+                    ==, NVME_INVALID_FIELD);
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, FEMU_FEAT_NUM_QUEUES, false,
+                                             0, 0, NULL)),
+                    ==, NVME_SUCCESS);
+
+    /* completion queues: the admin id, one out of range, a base mid page */
+    g_assert_cmpint(femu_queue_cmd(&c, NVME_ADM_CMD_CREATE_CQ, 0, page,
+                                   NVME_CQ_PC), ==, FEMU_INVALID_QID);
+    g_assert_cmpint(femu_queue_cmd(&c, NVME_ADM_CMD_CREATE_CQ,
+                                   FEMU_DEFAULT_IO_QUEUES + 1, page,
+                                   NVME_CQ_PC), ==, FEMU_INVALID_QID);
+    g_assert_cmpint(femu_queue_cmd(&c, NVME_ADM_CMD_CREATE_CQ, 1, page + 0x200,
+                                   NVME_CQ_PC), ==, FEMU_INVALID_PRP_OFFSET);
+    g_assert_cmpint(femu_queue_cmd(&c, NVME_ADM_CMD_CREATE_CQ, 1, page,
+                                   NVME_CQ_PC), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_queue_cmd(&c, NVME_ADM_CMD_CREATE_CQ, 1, page,
+                                   NVME_CQ_PC), ==, FEMU_INVALID_QID);
+
+    /* a submission queue whose base is not on a page */
+    g_assert_cmpint(femu_queue_cmd(&c, NVME_ADM_CMD_CREATE_SQ, 1,
+                                   page + 0x200, (1 << 16) | NVME_SQ_PC),
+                    ==, FEMU_INVALID_PRP_OFFSET);
+
+    /* and now that an I/O queue exists, the queue count is fixed */
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, FEMU_FEAT_NUM_QUEUES, false,
+                                             0, 0, NULL)),
+                    ==, FEMU_CMD_SEQ_ERROR);
+
+    /* deleting the admin queue, or one that was never made */
+    g_assert_cmpint(femu_queue_cmd(&c, NVME_ADM_CMD_DELETE_CQ, 0, 0, 0),
+                    ==, FEMU_INVALID_QID);
+    g_assert_cmpint(femu_queue_cmd(&c, NVME_ADM_CMD_DELETE_CQ, 5, 0, 0),
+                    ==, FEMU_INVALID_QID);
+    g_assert_cmpint(femu_queue_cmd(&c, NVME_ADM_CMD_DELETE_SQ, 5, 0, 0),
+                    ==, FEMU_INVALID_QID);
+    g_assert_cmpint(femu_queue_cmd(&c, NVME_ADM_CMD_DELETE_CQ, 1, 0, 0),
+                    ==, NVME_SUCCESS);
+
+    femu_disable(&c);
+    guest_free(alloc, ring);
+}
+
 #define FEMU_CSD_COMPUTE_LOAD   0x22
 #define FEMU_CSD_TYPE_SHARED_LIB 0x03
 
@@ -3969,6 +4046,8 @@ static void femu_register_nodes(void)
     qos_add_test("cq-full", "femu", femu_test_cq_full, NULL);
     qos_add_test("io-interrupts", "femu", femu_test_io_interrupts, NULL);
     qos_add_test("dma-error", "femu", femu_test_dma_error, NULL);
+    qos_add_test("queue-create-status", "femu", femu_test_queue_create_status,
+                 NULL);
     qos_add_test("sgl-zoned", "femu", femu_test_sgl_zoned,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "femu_mode=3,secsz=512,sgl=on"
