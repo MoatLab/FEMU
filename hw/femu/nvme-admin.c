@@ -1443,12 +1443,15 @@ static uint16_t nvme_fw_log_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
 }
 
 static uint16_t nvme_error_log_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
-                                    uint64_t off)
+                                    uint64_t off, bool rae)
 {
     uint32_t trans_len;
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
     uint64_t log_len = sizeof(*n->elpes) * (n->elpe + 1);
+    g_autofree NvmeErrorLog *log = g_new0(NvmeErrorLog, n->elpe + 1);
+    uint16_t status;
+    int i;
 
     /*
      * The offset in Get Log Page is how a host reads a page in pieces, and this
@@ -1459,10 +1462,21 @@ static uint16_t nvme_error_log_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    trans_len = MIN(log_len - off, buf_len);
-    n->aer_mask &= ~(1 << NVME_AER_TYPE_ERROR);
+    /* the most recent error first (Base 2.3, 5.2.12.1.2) */
+    qemu_spin_lock(&n->elp_lock);
+    for (i = 0; i <= n->elpe; i++) {
+        log[i] = n->elpes[(n->elp_index + n->elpe - i) % (n->elpe + 1)];
+    }
+    qemu_spin_unlock(&n->elp_lock);
 
-    return dma_read_prp(n, (uint8_t *)n->elpes + off, trans_len, prp1, prp2);
+    trans_len = MIN(log_len - off, buf_len);
+    status = dma_read_prp(n, (uint8_t *)log + off, trans_len, prp1, prp2);
+    /* as for SMART, Retain Asynchronous Event keeps the event reported */
+    if (!status && !rae) {
+        nvme_clear_events(n, NVME_AER_TYPE_ERROR);
+    }
+
+    return status;
 }
 
 /*
@@ -1649,10 +1663,21 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
 
+    uint32_t nsid = le32_to_cpu(cmd->nsid);
     uint32_t trans_len;
     time_t current_seconds;
     FemuMediaStats st;
     NvmeSmartLog smart;
+    uint16_t status;
+
+    /*
+     * Per-namespace SMART is advertised, and the page holds nothing namespace
+     * specific, so a namespace gets the controller's page; one that does not
+     * exist gets an error (Base 2.3, 5.2.12.1.3).
+     */
+    if (nsid && nsid != NVME_NSID_BROADCAST && !nvme_ns(n, nsid)) {
+        return NVME_INVALID_NSID | NVME_DNR;
+    }
 
     /*
      * A host may read a log page in pieces, from the offset in the command.
@@ -1687,14 +1712,6 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
     smart.available_spare = st.available_spare;
     smart.percentage_used = st.percentage_used;
 
-    /*
-     * Reading this log without Retain Asynchronous Event is what clears a
-     * SMART event: the host has now seen the state the event was pointing at.
-     */
-    if (!rae) {
-        nvme_clear_events(n, NVME_AER_TYPE_SMART);
-    }
-
     current_seconds = time(NULL);
     smart.power_on_hours[0] = cpu_to_le64(
         ((current_seconds - n->start_time) / 60) / 60);
@@ -1707,9 +1724,18 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
         smart.critical_warning |= NVME_SMART_TEMPERATURE;
     }
 
-    n->aer_mask &= ~(1 << NVME_AER_TYPE_SMART);
+    status = dma_read_prp(n, (uint8_t *)&smart + off, trans_len, prp1, prp2);
 
-    return dma_read_prp(n, (uint8_t *)&smart + off, trans_len, prp1, prp2);
+    /*
+     * Reading this log without Retain Asynchronous Event is what clears a
+     * SMART event, once the host really has the state it pointed at. With
+     * RAE set the event stays reported and its type stays masked.
+     */
+    if (!status && !rae) {
+        nvme_clear_events(n, NVME_AER_TYPE_SMART);
+    }
+
+    return status;
 }
 
 /* ========== FDP Log Pages ========== */
@@ -2090,6 +2116,10 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
     if (len > UINT32_MAX || (off & 0x3)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
+    /* an index offset (OT) needs IOS, which no page here reports */
+    if ((le32_to_cpu(cmd->cdw14) >> 23) & 0x1) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
 
     status = nvme_check_mdts(n, len);
     if (status) {
@@ -2100,7 +2130,7 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
     case NVME_LOG_SUPPORTED:
         return nvme_supported_log_pages(n, cmd, len, off);
     case NVME_LOG_ERROR_INFO:
-        return nvme_error_log_info(n, cmd, len, off);
+        return nvme_error_log_info(n, cmd, len, off, rae);
     case NVME_LOG_SMART_INFO:
         return nvme_smart_info(n, cmd, len, off, rae);
     case NVME_LOG_FEMU_STATS:

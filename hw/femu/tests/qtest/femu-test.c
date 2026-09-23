@@ -3900,6 +3900,120 @@ static void femu_test_features_reset(void *obj, void *data,
 
 static bool femu_vwc = true;
 
+#define FEMU_LOG_ERROR_INFO     0x01
+#define FEMU_LOG_SMART          0x02
+#define FEMU_LOG_RAE            (1u << 15)
+#define FEMU_INVALID_NSID       0x0b
+#define FEMU_AEC_TEMPERATURE    0x02
+
+static uint16_t femu_log_cmd(FemuCtrlState *c, uint32_t nsid, uint32_t dw10,
+                             uint32_t dw14, uint64_t buf, uint32_t len)
+{
+    NvmeCmd cmd;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+    cmd.nsid = cpu_to_le32(nsid);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(dw10 | ((len / 4 - 1) << 16));
+    cmd.cdw14 = cpu_to_le32(dw14);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+/*
+ * The Error Information log counts from 1 and lists the newest error first
+ * (Base 2.3, 5.2.12.1.2). Reading SMART or the error log with Retain
+ * Asynchronous Event keeps the event reported, so the same event cannot be
+ * raised again until a read without it; SMART for a namespace that does not
+ * exist is refused; and no log page offers an index offset.
+ */
+static void femu_test_error_log(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+    uint16_t second;
+    uint16_t cid;
+    NvmeCmd aer;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, 4096);
+
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0xfffff000, buf)), ==,
+                    NVME_LBA_RANGE);
+    second = c.cid;
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0xfffff000, buf)), ==,
+                    NVME_LBA_RANGE);
+    g_assert_cmpint(femu_log_cmd(&c, 0xffffffff, FEMU_LOG_ERROR_INFO, 0, buf,
+                                 128), ==, NVME_SUCCESS);
+    g_assert_cmpint(qtest_readq(qts, buf) - qtest_readq(qts, buf + 64), ==, 1);
+    g_assert_cmpint(qtest_readq(qts, buf + 64), >=, 1);
+    g_assert_cmpint(qtest_readw(qts, buf + 10), ==, second);
+
+    g_assert_cmpint(femu_log_cmd(&c, 99, FEMU_LOG_SMART, 0, buf, 512), ==,
+                    FEMU_INVALID_NSID);
+    g_assert_cmpint(femu_log_cmd(&c, 1, FEMU_LOG_SMART, 0, buf, 512), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(femu_log_cmd(&c, 0xffffffff, FEMU_LOG_SMART, 1u << 23,
+                                 buf, 512), ==, NVME_INVALID_FIELD);
+
+    /* a temperature event, reported once to an Async Event Request */
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_ASYNCHRONOUS_EVENT_CONF,
+                                             false, 0, FEMU_AEC_TEMPERATURE,
+                                             NULL)), ==, NVME_SUCCESS);
+    memset(&aer, 0, sizeof(aer));
+    aer.opcode = NVME_ADM_CMD_ASYNC_EV_REQ;
+    femu_submit(&c, &c.admin, &aer);
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_TEMPERATURE_THRESHOLD,
+                                             false, 0, 0, NULL)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_complete(&c, &c.admin, NULL, NULL), ==,
+                    NVME_SUCCESS);
+
+    /*
+     * Read with RAE: the event stays reported, so moving the threshold away
+     * and back does not raise it again. The next completion must be the log
+     * read's own, not the second request's.
+     */
+    memset(&aer, 0, sizeof(aer));
+    aer.opcode = NVME_ADM_CMD_ASYNC_EV_REQ;
+    cid = c.cid;
+    femu_submit(&c, &c.admin, &aer);
+    g_assert_cmpint(femu_log_cmd(&c, 0xffffffff,
+                                 FEMU_LOG_SMART | FEMU_LOG_RAE, 0, buf, 512),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_TEMPERATURE_THRESHOLD,
+                                             false, 0, 0xffff, NULL)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_TEMPERATURE_THRESHOLD,
+                                             false, 0, 0, NULL)),
+                    ==, NVME_SUCCESS);
+    g_usleep(100 * 1000);
+    g_assert_cmpint(femu_log_cmd(&c, 0xffffffff, FEMU_LOG_SMART, 0, buf, 512),
+                    ==, NVME_SUCCESS);
+
+    /* read without RAE: now it can be raised again */
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_TEMPERATURE_THRESHOLD,
+                                             false, 0, 0xffff, NULL)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_TEMPERATURE_THRESHOLD,
+                                             false, 0, 0, NULL)),
+                    ==, NVME_SUCCESS);
+    {
+        uint16_t got;
+
+        g_assert_cmpint(femu_complete(&c, &c.admin, &got, NULL), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpint(got, ==, cid);
+    }
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 #define FEMU_CSD_COMPUTE_LOAD   0x22
 #define FEMU_CSD_TYPE_SHARED_LIB 0x03
 
@@ -4179,6 +4293,7 @@ static void femu_register_nodes(void)
                  NULL);
     qos_add_test("cc-states", "femu", femu_test_cc_states, NULL);
     qos_add_test("features-reset", "femu", femu_test_features_reset, NULL);
+    qos_add_test("error-log", "femu", femu_test_error_log, NULL);
     qos_add_test("features-reset-vwc", "femu", femu_test_features_reset,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "vwc=1",

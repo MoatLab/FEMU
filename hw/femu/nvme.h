@@ -1919,7 +1919,8 @@ typedef struct FemuCtrl {
     uint8_t     acl;
     uint8_t     elpe;
     uint8_t     elp_index;
-    uint8_t     error_count;
+    uint64_t    error_count;    /* the last Error Count reported, from 1 */
+    QemuSpin    elp_lock;       /* pollers record errors too */
     uint8_t     mdts;
     uint8_t     cqr;
     uint8_t     max_sqes;
@@ -1941,7 +1942,7 @@ typedef struct FemuCtrl {
     uint8_t     intc_time;
     uint8_t     outstanding_aers;
     uint8_t     temp_warn_issued;
-    uint8_t     num_errors;
+    uint64_t    num_errors;
     uint8_t     cqes_pending;
     uint16_t    vid;
     uint16_t    did;

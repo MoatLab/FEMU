@@ -301,17 +301,21 @@ void nvme_set_error_page(FemuCtrl *n, uint16_t sqid, uint16_t cid, uint16_t
 {
     NvmeErrorLog *elp;
 
+    qemu_spin_lock(&n->elp_lock);
     elp = &n->elpes[n->elp_index];
-    elp->error_count = n->error_count++;
-    elp->sqid = sqid;
+    memset(elp, 0, sizeof(*elp));
+    /* an Error Count of 0 marks an empty entry, so the first error is 1 */
+    elp->error_count = cpu_to_le64(++n->error_count);
+    elp->sqid = cpu_to_le16(sqid);
     elp->cid = cid;
     /* bits 15:1 carry the status; bit 0 is the phase tag */
     elp->status_field = cpu_to_le16(status << 1);
-    elp->param_error_location = location;
-    elp->lba = lba;
-    elp->nsid = nsid;
+    elp->param_error_location = cpu_to_le16(location);
+    elp->lba = cpu_to_le64(lba);
+    elp->nsid = cpu_to_le32(nsid);
     n->elp_index = (n->elp_index + 1) % (n->elpe + 1);
     ++n->num_errors;
+    qemu_spin_unlock(&n->elp_lock);
 }
 
 uint16_t femu_nvme_rw_check_req(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,

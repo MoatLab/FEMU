@@ -1688,6 +1688,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     n->cq = g_malloc0(sizeof(*n->cq) * (n->nr_io_queues + 1));
     n->namespaces = g_malloc0(sizeof(*n->namespaces) * n->num_namespaces);
     n->elpes = g_malloc0(sizeof(*n->elpes) * (n->elpe + 1));
+    qemu_spin_init(&n->elp_lock);
     n->aer_held = g_malloc0(sizeof(*n->aer_held) * (n->aerl + 1));
     QSIMPLEQ_INIT(&n->aer_queue);
     qemu_mutex_init(&n->aer_lock);
