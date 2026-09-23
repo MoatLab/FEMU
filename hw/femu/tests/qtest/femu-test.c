@@ -4803,6 +4803,60 @@ static void femu_test_verify(void *obj, void *data, QGuestAllocator *alloc)
     femu_disable(&c);
 }
 
+#define FEMU_ADM_DEV_SELF_TEST  0x14
+#define FEMU_LOG_DEV_SELF_TEST  0x06
+
+static uint16_t femu_self_test(FemuCtrlState *c, uint32_t nsid, uint32_t stc)
+{
+    NvmeCmd cmd;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_ADM_DEV_SELF_TEST;
+    cmd.nsid = cpu_to_le32(nsid);
+    cmd.cdw10 = cpu_to_le32(stc);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+/*
+ * Device Self-test (Base 2.3, 5.2.8): OACS offers it, a short or extended test
+ * leaves its result at the head of log 06h, and codes it does not offer, or a
+ * namespace that does not exist, are refused.
+ */
+static void femu_test_self_test(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+
+    femu_enable(&c, &femu->dev, alloc);
+    buf = guest_alloc(alloc, 4096);
+
+    g_assert_cmpint(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(qtest_readw(qts, buf + 256) & (1 << 4), !=, 0);
+    g_assert_cmpint(qtest_readw(qts, buf + 316), !=, 0);        /* EDSTT */
+
+    g_assert_cmpint(femu_self_test(&c, 0, 0x1), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_self_test(&c, NVME_NSID_BROADCAST, 0x2), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(femu_log_cmd(&c, 0, FEMU_LOG_DEV_SELF_TEST, 0, buf, 564),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpint(qtest_readb(qts, buf), ==, 0);      /* none in progress */
+    g_assert_cmphex(qtest_readb(qts, buf + 4), ==, 0x20);
+    g_assert_cmphex(qtest_readl(qts, buf + 4 + 12), ==, NVME_NSID_BROADCAST);
+    g_assert_cmphex(qtest_readb(qts, buf + 4 + 28), ==, 0x10);
+    g_assert_cmphex(qtest_readl(qts, buf + 4 + 28 + 12), ==, 0);
+
+    g_assert_cmpint(femu_self_test(&c, 0, 0xf), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_self_test(&c, 0, 0x3), ==, NVME_INVALID_FIELD);
+    g_assert_cmpint(femu_self_test(&c, 0, 0x0), ==, NVME_INVALID_FIELD);
+    g_assert_cmpint(femu_self_test(&c, 99, 0x1), ==, FEMU_INVALID_NSID);
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
 #define FEMU_CSD_COMPUTE_LOAD   0x22
 #define FEMU_CSD_TYPE_SHARED_LIB 0x03
 
@@ -5091,6 +5145,7 @@ static void femu_register_nodes(void)
     qos_add_test("doorbell-errors", "femu", femu_test_doorbell_errors, NULL);
     qos_add_test("format-ses", "femu", femu_test_format_ses, NULL);
     qos_add_test("bar0-size", "femu", femu_test_bar0_size, NULL);
+    qos_add_test("self-test", "femu", femu_test_self_test, NULL);
     qos_add_test("verify", "femu", femu_test_verify,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "oncs=0x86"

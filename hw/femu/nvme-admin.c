@@ -59,6 +59,7 @@ static const uint32_t nvme_cse_acs[256] = {
     [NVME_ADM_CMD_SET_FEATURES]     = NVME_CMD_EFF_CSUPP,
     [NVME_ADM_CMD_GET_FEATURES]     = NVME_CMD_EFF_CSUPP,
     [NVME_ADM_CMD_ASYNC_EV_REQ]     = NVME_CMD_EFF_CSUPP,
+    [NVME_ADM_CMD_DEV_SELF_TEST]    = NVME_CMD_EFF_CSUPP,
 };
 
 //static const uint32_t nvme_cse_iocs_none[256];
@@ -1578,6 +1579,7 @@ static uint16_t nvme_supported_log_pages(FemuCtrl *n, NvmeCmd *cmd,
     lids[NVME_LOG_SMART_INFO]   = cpu_to_le32(NVME_LIDS_LSUPP);
     lids[NVME_LOG_FW_SLOT_INFO] = cpu_to_le32(NVME_LIDS_LSUPP);
     lids[NVME_LOG_CMD_EFFECTS]  = cpu_to_le32(NVME_LIDS_LSUPP);
+    lids[NVME_LOG_DEV_SELF_TEST] = cpu_to_le32(NVME_LIDS_LSUPP);
     lids[NVME_LOG_FEMU_STATS]   = cpu_to_le32(NVME_LIDS_LSUPP);
 
     if (n->subsys) {
@@ -2171,6 +2173,65 @@ static uint16_t nvme_cmd_effects(FemuCtrl *n, NvmeCmd *cmd, uint8_t csi,
     return dma_read_prp(n, ((uint8_t *)&log) + off, trans_len, prp1, prp2);
 }
 
+/*
+ * Device Self-test (Base 2.3, 5.2.8). A short or extended test of the
+ * controller and the named namespaces finishes before the command completes,
+ * which the specification allows, so none is ever in progress and an abort has
+ * nothing to stop. Each test leaves a result at the head of the log.
+ */
+static uint16_t nvme_dev_self_test(FemuCtrl *n, NvmeCmd *cmd)
+{
+    uint32_t nsid = le32_to_cpu(cmd->nsid);
+    uint8_t stc = le32_to_cpu(cmd->cdw10) & 0xf;
+    NvmeDstResult *r = n->dst_results;
+
+    if (nsid && nsid != NVME_NSID_BROADCAST) {
+        if (!nvme_nsid_valid(n, nsid)) {
+            return NVME_INVALID_NSID | NVME_DNR;
+        }
+        if (!nvme_ns(n, nsid)) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+    }
+
+    switch (stc) {
+    case 0x1:   /* short */
+    case 0x2:   /* extended */
+        break;
+    case 0xf:   /* abort: nothing is ever running */
+        return NVME_SUCCESS;
+    default:    /* host-initiated refresh and vendor tests are not offered */
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    memmove(&r[1], &r[0], sizeof(*r) * (NVME_DST_RESULTS - 1));
+    memset(&r[0], 0, sizeof(*r));
+    r[0].status = stc << 4;                 /* completed without error */
+    r[0].poh = cpu_to_le64((time(NULL) - n->start_time) / 3600);
+    r[0].nsid = cpu_to_le32(nsid);
+
+    return NVME_SUCCESS;
+}
+
+/* Device Self-test log (06h): the current operation, then 20 results */
+static uint16_t nvme_dst_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
+                             uint64_t off)
+{
+    uint8_t log[4 + sizeof(n->dst_results)] = {};
+    uint32_t trans_len;
+
+    QEMU_BUILD_BUG_ON(sizeof(log) != 564);
+
+    if (off >= sizeof(log)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    memcpy(log + 4, n->dst_results, sizeof(n->dst_results));
+    trans_len = MIN(sizeof(log) - off, buf_len);
+
+    return dma_read_prp(n, log + off, trans_len, le64_to_cpu(cmd->dptr.prp1),
+                        le64_to_cpu(cmd->dptr.prp2));
+}
+
 static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
 {
     uint32_t dw10 = le32_to_cpu(cmd->cdw10);
@@ -2229,6 +2290,8 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
         return nvme_fw_log_info(n, cmd, len, off);
     case NVME_LOG_CMD_EFFECTS:
         return nvme_cmd_effects(n, cmd, csi, len, off);
+    case NVME_LOG_DEV_SELF_TEST:
+        return nvme_dst_log(n, cmd, len, off);
     case NVME_LOG_ENDGRP:
         return nvme_endgrp_info(n, len, off, cmd);
     case NVME_LOG_FDP_CONFS:
@@ -2558,6 +2621,8 @@ static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     case NVME_ADM_CMD_SET_DB_MEMORY:
         femu_debug("admin cmd,set_db_memory\n");
         return nvme_set_db_memory(n, cmd);
+    case NVME_ADM_CMD_DEV_SELF_TEST:
+        return nvme_dev_self_test(n, cmd);
     case NVME_ADM_CMD_ASYNC_EV_REQ:
         /*
          * Async Event Request: the controller holds it outstanding until an

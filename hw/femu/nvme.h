@@ -692,6 +692,7 @@ enum NvmeAdminCommands {
     NVME_ADM_CMD_ASYNC_EV_REQ   = 0x0c,
     NVME_ADM_CMD_ACTIVATE_FW    = 0x10,
     NVME_ADM_CMD_DOWNLOAD_FW    = 0x11,
+    NVME_ADM_CMD_DEV_SELF_TEST  = 0x14,
     NVME_ADM_CMD_FORMAT_NVM     = 0x80,
     NVME_ADM_CMD_SECURITY_SEND  = 0x81,
     NVME_ADM_CMD_SECURITY_RECV  = 0x82,
@@ -1001,6 +1002,22 @@ typedef struct NvmeFwSlotInfoLog {
     uint8_t     reserved2[448];
 } NvmeFwSlotInfoLog;
 
+/* one Self-test Result data structure (Base 2.3, Figure 216) */
+typedef struct QEMU_PACKED NvmeDstResult {
+    uint8_t     status;         /* code in 7:4, result in 3:0 */
+    uint8_t     segn;
+    uint8_t     vdinfo;
+    uint8_t     rsvd3;
+    uint64_t    poh;
+    uint32_t    nsid;
+    uint64_t    flba;
+    uint8_t     sct;
+    uint8_t     sc;
+    uint8_t     vs[2];
+} NvmeDstResult;
+
+#define NVME_DST_RESULTS    20
+
 typedef struct NvmeErrorLog {
     uint64_t    error_count;
     uint16_t    sqid;
@@ -1063,6 +1080,7 @@ enum NvmeLogIdentifier {
     NVME_LOG_SMART_INFO     = 0x02,
     NVME_LOG_FW_SLOT_INFO   = 0x03,
     NVME_LOG_CMD_EFFECTS    = 0x05,
+    NVME_LOG_DEV_SELF_TEST  = 0x06,
     NVME_LOG_ENDGRP         = 0x09,
     NVME_LOG_FDP_CONFS      = 0x20,
     NVME_LOG_FDP_RUH_USAGE  = 0x21,
@@ -1212,6 +1230,7 @@ enum NvmeIdCtrlOacs {
     NVME_OACS_FORMAT        = 1 << 1,
     NVME_OACS_FW            = 1 << 2,
     NVME_OACS_NS_MGMT       = 1 << 3,
+    NVME_OACS_DST           = 1 << 4,
     NVME_OACS_DIRECTIVES    = 1 << 5,
     NVME_OACS_DBBUF         = 1 << 8,
 };
@@ -1967,6 +1986,7 @@ typedef struct FemuCtrl {
     char            *serial;
     char            *logfile;
     NvmeErrorLog    *elpes;
+    NvmeDstResult   dst_results[NVME_DST_RESULTS];  /* newest first */
     NvmeAerHold     *aer_held;     /* outstanding AERs, aerl + 1 entries */
     uint32_t        aer_queued;    /* events waiting for an outstanding AER */
 

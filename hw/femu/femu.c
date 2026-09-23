@@ -1348,7 +1348,9 @@ static void nvme_init_ctrl(FemuCtrl *n)
     }
 
     /* TODO: NVME_OACS_NS_MGMT */
-    id->oacs         = cpu_to_le16(n->oacs | NVME_OACS_DBBUF);
+    id->oacs         = cpu_to_le16(n->oacs | NVME_OACS_DBBUF | NVME_OACS_DST);
+    /* an extended self-test takes a minute at most; both complete at once */
+    id->edstt        = cpu_to_le16(1);
     id->acl          = n->acl;
     id->aerl         = n->aerl;
     id->frmw         = 7 << 1 | 1;
@@ -1743,6 +1745,9 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     n->namespaces = g_malloc0(sizeof(*n->namespaces) * n->num_namespaces);
     n->elpes = g_malloc0(sizeof(*n->elpes) * (n->elpe + 1));
     qemu_spin_init(&n->elp_lock);
+    for (int d = 0; d < NVME_DST_RESULTS; d++) {
+        n->dst_results[d].status = 0xf;     /* entry is empty */
+    }
     n->aer_held = g_malloc0(sizeof(*n->aer_held) * (n->aerl + 1));
     QSIMPLEQ_INIT(&n->aer_queue);
     qemu_mutex_init(&n->aer_lock);
