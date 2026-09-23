@@ -5383,12 +5383,13 @@ static void femu_fuzz_lists(FemuCtrlState *c, GRand *rng, uint64_t region)
 
 /*
  * A data pointer the command describes correctly: a PRP pair, with a list
- * when the transfer crosses a page, or one SGL data block. The region's data
- * pages are contiguous, so one block can cover the whole transfer.
+ * when the transfer crosses a page, or, where the command takes one, an SGL
+ * data block. The region's data pages are contiguous, so one block can cover
+ * the whole transfer.
  */
 static void femu_fuzz_valid_dptr(FemuCtrlState *c, GRand *rng,
                                  uint64_t region, NvmeRwCmd *rw,
-                                 uint32_t len)
+                                 uint32_t len, bool sgl_ok)
 {
     uint64_t lists = region + 4096ULL * (FEMU_FUZZ_PAGES - FEMU_FUZZ_LISTS);
     uint32_t pages = DIV_ROUND_UP(len, 4096);
@@ -5396,7 +5397,8 @@ static void femu_fuzz_valid_dptr(FemuCtrlState *c, GRand *rng,
                                 FEMU_FUZZ_PAGES - FEMU_FUZZ_LISTS - pages + 1);
     uint32_t i;
 
-    if (g_rand_boolean(rng)) {
+    /* always drawn, so a run without SGLs keeps the same sequence */
+    if (g_rand_boolean(rng) && sgl_ok) {
         NvmeSglDescriptor d = {
             .addr = cpu_to_le64(data),
             .len = cpu_to_le32(len),
@@ -5598,7 +5600,8 @@ static void femu_test_io_fuzz(void *obj, void *data, QGuestAllocator *alloc)
         rw.slba = cpu_to_le64(g_rand_int_range(rng, 0,
                                                MIN(nsze, 1 << 20) - nlb));
         rw.nlb = cpu_to_le16(nlb);
-        femu_fuzz_valid_dptr(&c, rng, region, &rw, (nlb + 1) * c.lba_size);
+        femu_fuzz_valid_dptr(&c, rng, region, &rw, (nlb + 1) * c.lba_size,
+                             true);
         if (want->zoned && (rw.opcode == NVME_CMD_WRITE ||
                             rw.opcode == NVME_CMD_WRITE_ZEROES ||
                             rw.opcode == NVME_CMD_ZONE_APPEND)) {
@@ -5751,7 +5754,7 @@ static void femu_test_kv_fuzz(void *obj, void *data, QGuestAllocator *alloc)
         cmd->cdw10 = cpu_to_le32(size);
         key = g_rand_int_range(rng, 0, FEMU_KV_FUZZ_KEYS);
         femu_kv_fuzz_key(cmd, key, g_rand_int_range(rng, 4, 17));
-        femu_fuzz_valid_dptr(&c, rng, region, &rw, size);
+        femu_fuzz_valid_dptr(&c, rng, region, &rw, size, true);
 
         if (g_rand_int_range(rng, 0, 4) == 0) {
             switch (g_rand_int_range(rng, 0, 7)) {
@@ -5875,6 +5878,269 @@ static void femu_test_oc_sgl_refused(void *obj, void *data,
         g_assert_cmpint(low[i], ==, 0xee);
     }
     femu_disable(&c);
+}
+
+#define FEMU_OC_FUZZ_CHUNKS 2
+#define FEMU_OC_FUZZ_MAX    8   /* sectors in one vector command */
+
+typedef struct FemuOcGeo {
+    uint8_t sec_len;
+    uint8_t chk_len;
+    uint8_t lun_len;
+    uint32_t num_chk;
+    uint32_t num_pu;
+    uint32_t clba;
+    uint32_t secsz;
+} FemuOcGeo;
+
+/* Sector @sec of chunk @chk in parallel unit @pu of group 0. */
+static uint64_t femu_oc_lba(const FemuOcGeo *g, uint32_t pu, uint32_t chk,
+                            uint32_t sec)
+{
+    return (uint64_t)pu << (g->sec_len + g->chk_len) |
+           (uint64_t)chk << g->sec_len | sec;
+}
+
+/*
+ * The write pointer of a chunk in group 0, from the chunk information log:
+ * sectors written so far, counted from the start of the chunk.
+ */
+static uint64_t femu_oc_wp(FemuCtrlState *c, const FemuOcGeo *g,
+                           uint64_t buf, uint32_t pu, uint32_t chk)
+{
+    uint32_t idx = pu * g->num_chk + chk;
+
+    g_assert_cmpint(femu_oc20_chunk(c, NVME_ADM_CMD_GET_LOG_PAGE, buf,
+                                    idx * 32), ==, NVME_SUCCESS);
+    return qtest_readq(c->pdev->bus->qts, buf + 24);
+}
+
+/*
+ * Open-Channel 2.0 vector commands from a fixed seed over a few chunks of
+ * two parallel units. Valid writes land at the chunk's write pointer, valid
+ * reads only on sectors the write cache has let go of, and a full chunk is
+ * reset before the next write. One in four commands has a field replaced:
+ * opcode, namespace, LBA list entries (outside the geometry, in another
+ * chunk, behind the write pointer), the sector count, the list pointer, or
+ * a data pointer from the random lists. Every command must complete, and a
+ * chunk written afterwards must read back what was written.
+ */
+static void femu_test_oc20_fuzz(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    FemuOcGeo g;
+    uint8_t id[128];
+    bool succeeded[256] = { false };
+    uint64_t raw = 0;
+    uint64_t region = femu_alloc_64k(alloc, &raw);
+    uint64_t lists = region + 4096ULL * (FEMU_FUZZ_PAGES - FEMU_FUZZ_LISTS);
+    uint64_t lbas = guest_alloc(alloc, 4096);
+    uint64_t logbuf = guest_alloc(alloc, 4096);
+    GRand *rng = g_rand_new_with_seed(0x4f433230);
+    uint8_t wbuf[4096];
+    uint8_t rbuf[4096];
+    NvmeRwCmd rw;
+    NvmeCmd *cmd = (NvmeCmd *)&rw;
+    int distinct = 0;
+    int i, j;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = FEMU_OC20_IDENTIFY;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(logbuf);
+    g_assert_cmpint(femu_admin(&c, cmd), ==, NVME_SUCCESS);
+    qtest_memread(qts, logbuf, id, sizeof(id));
+    g.sec_len = id[11];
+    g.chk_len = id[10];
+    g.lun_len = id[9];
+    g.num_pu = lduw_le_p(id + 66);
+    g.num_chk = ldl_le_p(id + 68);
+    g.clba = ldl_le_p(id + 72);
+
+    g_assert_cmpint(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, logbuf), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, logbuf, id, sizeof(id));
+    g.secsz = 1U << qtest_readb(qts, logbuf + 128 + 4 * (id[26] & 0xf) + 2);
+    g_assert_cmpint(g.secsz, ==, 4096);
+    /*
+     * The run uses chunk 0 of units 0 and 1, and chunk 1 of unit 0 is left
+     * for the check after it; the device backs no more than these.
+     */
+    g_assert_cmpint(g.num_pu, >=, FEMU_OC_FUZZ_CHUNKS);
+    g_assert_cmpint(g.num_chk, >=, 2);
+    g_assert_cmpint(g.clba, >, FEMU_OC20_MW_CUNITS + FEMU_OC_FUZZ_MAX);
+
+    /*
+     * A chunk takes thousands of sectors, more than the run writes, so fill
+     * all but the last few of unit 1's first and the run crosses a reset.
+     */
+    for (i = 0; i + FEMU_OC_FUZZ_MAX <= g.clba - 64; i += FEMU_OC_FUZZ_MAX) {
+        for (j = 0; j < FEMU_OC_FUZZ_MAX; j++) {
+            uint64_t e = cpu_to_le64(femu_oc_lba(&g, 1, 0, i + j));
+
+            qtest_memwrite(qts, lbas + 8 * j, &e, sizeof(e));
+        }
+        memset(&rw, 0, sizeof(rw));
+        rw.opcode = FEMU_OC20_VECT_WRITE;
+        rw.nsid = cpu_to_le32(1);
+        cmd->cdw10 = cpu_to_le32((uint32_t)lbas);
+        cmd->cdw11 = cpu_to_le32((uint32_t)(lbas >> 32));
+        cmd->cdw12 = cpu_to_le32(FEMU_OC_FUZZ_MAX - 1);
+        femu_fuzz_valid_dptr(&c, rng, region, &rw,
+                             FEMU_OC_FUZZ_MAX * g.secsz, false);
+        g_assert_cmpint(femu_io(&c, cmd), ==, NVME_SUCCESS);
+    }
+
+    for (i = 0; i < FEMU_IO_FUZZ_ROUNDS; i++) {
+        uint32_t pu = g_rand_int_range(rng, 0, FEMU_OC_FUZZ_CHUNKS);
+        uint32_t chk = 0;
+        uint32_t k = g_rand_int_range(rng, 1, FEMU_OC_FUZZ_MAX + 1);
+        uint32_t kind = g_rand_int_range(rng, 0, 8);
+        uint64_t wp = femu_oc_wp(&c, &g, logbuf, pu, chk);
+        uint64_t first;
+        uint16_t st;
+
+        femu_fuzz_lists(&c, rng, region);
+        memset(&rw, 0, sizeof(rw));
+        rw.nsid = cpu_to_le32(1);
+
+        if (wp == g.clba || kind == 0) {
+            /* valid for a full chunk; an open one must refuse it */
+            rw.opcode = FEMU_OC20_VECT_ERASE;
+            k = 1;
+            first = femu_oc_lba(&g, pu, chk, 0);
+        } else if (kind < 5 || wp < FEMU_OC20_MW_CUNITS + k) {
+            rw.opcode = FEMU_OC20_VECT_WRITE;
+            k = MIN(k, g.clba - wp);
+            first = femu_oc_lba(&g, pu, chk, wp);
+        } else {
+            rw.opcode = FEMU_OC20_VECT_READ;
+            first = femu_oc_lba(&g, pu, chk, g_rand_int_range(rng, 0,
+                                wp - FEMU_OC20_MW_CUNITS - k + 1));
+        }
+
+        for (j = 0; j < k; j++) {
+            uint64_t e = cpu_to_le64(first + j);
+
+            qtest_memwrite(qts, lbas + 8 * j, &e, sizeof(e));
+        }
+        cmd->cdw12 = cpu_to_le32(k - 1);
+        if (k == 1) {
+            cmd->cdw10 = cpu_to_le32((uint32_t)first);
+            cmd->cdw11 = cpu_to_le32((uint32_t)(first >> 32));
+        } else {
+            cmd->cdw10 = cpu_to_le32((uint32_t)lbas);
+            cmd->cdw11 = cpu_to_le32((uint32_t)(lbas >> 32));
+        }
+        if (rw.opcode != FEMU_OC20_VECT_ERASE) {
+            femu_fuzz_valid_dptr(&c, rng, region, &rw, k * g.secsz, false);
+        }
+
+        if (g_rand_int_range(rng, 0, 4) == 0) {
+            switch (g_rand_int_range(rng, 0, 7)) {
+            case 0:
+                rw.opcode = g_rand_int_range(rng, 0, 0x100);
+                break;
+            case 1:
+                rw.nsid = cpu_to_le32(g_rand_boolean(rng) ? 0xffffffff :
+                                      g_rand_int_range(rng, 0, 4));
+                break;
+            case 2: {
+                /* one entry anywhere: past the geometry, another chunk */
+                uint64_t e;
+
+                if (g_rand_boolean(rng)) {
+                    uint64_t hi = g_rand_int(rng);
+
+                    e = hi << 32 | g_rand_int(rng);
+                } else {
+                    e = femu_oc_lba(&g, g_rand_int_range(rng, 0, 1U <<
+                                                         g.lun_len),
+                                    g_rand_int_range(rng, 0, 1U <<
+                                                     g.chk_len), 0);
+                    e |= g_rand_int_range(rng, 0, 1U << g.sec_len);
+                }
+                if (k == 1) {
+                    cmd->cdw10 = cpu_to_le32((uint32_t)e);
+                    cmd->cdw11 = cpu_to_le32((uint32_t)(e >> 32));
+                } else {
+                    e = cpu_to_le64(e);
+                    qtest_memwrite(qts, lbas +
+                                   8 * g_rand_int_range(rng, 0, k),
+                                   &e, sizeof(e));
+                }
+                break;
+            }
+            case 3:
+                /* up to 256 entries; the list page holds only k of them */
+                cmd->cdw12 = cpu_to_le32(g_rand_int_range(rng, 0, 0x10000));
+                break;
+            case 4: {
+                uint64_t p = femu_fuzz_ptr(rng, region);
+
+                cmd->cdw10 = cpu_to_le32((uint32_t)p);
+                cmd->cdw11 = cpu_to_le32((uint32_t)(p >> 32));
+                break;
+            }
+            case 5:
+                rw.flags = 0;
+                rw.dptr.prp1 = cpu_to_le64(femu_fuzz_ptr(rng, region));
+                rw.dptr.prp2 = cpu_to_le64(g_rand_boolean(rng) ?
+                        lists + 8 * g_rand_int_range(rng, 0,
+                                            FEMU_FUZZ_PRP_LISTS * 512) :
+                        femu_fuzz_ptr(rng, region));
+                break;
+            default:
+                rw.flags = g_rand_int_range(rng, 1, 4) << 6;
+                qtest_memread(qts, femu_fuzz_sgl_slot(rng, region),
+                              &rw.dptr.sgl, sizeof(rw.dptr.sgl));
+                break;
+            }
+        }
+
+        st = femu_io(&c, cmd);
+        if (st == NVME_SUCCESS && !succeeded[rw.opcode]) {
+            succeeded[rw.opcode] = true;
+            distinct++;
+        }
+    }
+
+    g_assert_cmpint(distinct, >=, 3);
+
+    /* a chunk the run left alone reads back what is written to it now */
+    for (i = 0; i < 4096; i++) {
+        wbuf[i] = (uint8_t)(0x3d + i * 5);
+    }
+    qtest_memwrite(qts, region, wbuf, sizeof(wbuf));
+    for (i = 0; i <= FEMU_OC20_MW_CUNITS; i++) {
+        uint64_t lba = femu_oc_lba(&g, 0, 1, i);
+
+        memset(&rw, 0, sizeof(rw));
+        rw.opcode = FEMU_OC20_VECT_WRITE;
+        rw.nsid = cpu_to_le32(1);
+        rw.dptr.prp1 = cpu_to_le64(region);
+        cmd->cdw10 = cpu_to_le32((uint32_t)lba);
+        cmd->cdw11 = cpu_to_le32((uint32_t)(lba >> 32));
+        g_assert_cmpint(femu_io(&c, cmd), ==, NVME_SUCCESS);
+    }
+    qtest_memset(qts, region, 0, sizeof(rbuf));
+    rw.opcode = FEMU_OC20_VECT_READ;
+    cmd->cdw10 = cpu_to_le32(femu_oc_lba(&g, 0, 1, 0));
+    cmd->cdw11 = 0;
+    g_assert_cmpint(femu_io(&c, cmd), ==, NVME_SUCCESS);
+    qtest_memread(qts, region, rbuf, sizeof(rbuf));
+    g_assert_cmpint(memcmp(wbuf, rbuf, sizeof(rbuf)), ==, 0);
+
+    femu_disable(&c);
+    g_rand_free(rng);
+    guest_free(alloc, logbuf);
+    guest_free(alloc, lbas);
+    guest_free(alloc, raw);
 }
 
 #define FEMU_CSD_COMPUTE_LOAD   0x22
@@ -6221,6 +6487,10 @@ static void femu_register_nodes(void)
     qos_add_test("oc20-sgl-refused", "femu", femu_test_oc_sgl_refused,
                  &(QOSGraphTestOptions) {
         .arg = GUINT_TO_POINTER(2),
+        .edge.extra_device_opts = "femu_mode=0,lver=2,sgl=on"
+    });
+    qos_add_test("oc20-fuzz", "femu", femu_test_oc20_fuzz,
+                 &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "femu_mode=0,lver=2,sgl=on"
     });
     qos_add_test("io-fuzz-nossd", "femu", femu_test_io_fuzz,
