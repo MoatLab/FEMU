@@ -693,6 +693,7 @@ enum NvmeAdminCommands {
     NVME_ADM_CMD_ACTIVATE_FW    = 0x10,
     NVME_ADM_CMD_DOWNLOAD_FW    = 0x11,
     NVME_ADM_CMD_DEV_SELF_TEST  = 0x14,
+    NVME_ADM_CMD_SANITIZE       = 0x84,
     NVME_ADM_CMD_FORMAT_NVM     = 0x80,
     NVME_ADM_CMD_SECURITY_SEND  = 0x81,
     NVME_ADM_CMD_SECURITY_RECV  = 0x82,
@@ -1087,6 +1088,7 @@ enum NvmeLogIdentifier {
     NVME_LOG_FDP_STATS      = 0x22,
     NVME_LOG_FDP_EVENTS     = 0x23,
     NVME_LOG_CHANGED_ZONE_LIST  = 0xbf,
+    NVME_LOG_SANITIZE           = 0x81,
     NVME_LOG_FEMU_STATS         = 0xc0,
 };
 
@@ -1987,6 +1989,8 @@ typedef struct FemuCtrl {
     char            *logfile;
     NvmeErrorLog    *elpes;
     NvmeDstResult   dst_results[NVME_DST_RESULTS];  /* newest first */
+    uint16_t        sanitize_sstat;     /* Sanitize Status log SSTAT */
+    uint32_t        sanitize_cdw10;     /* of the most recent Sanitize */
     NvmeAerHold     *aer_held;     /* outstanding AERs, aerl + 1 entries */
     uint32_t        aer_queued;    /* events waiting for an outstanding AER */
 
@@ -2306,6 +2310,16 @@ uint16_t dma_read_cmd(FemuCtrl *n, NvmeCmd *cmd, uint8_t *ptr, uint32_t len);
 
 
 uint16_t zns_check_compare(NvmeNamespace *ns, NvmeCmd *cmd);
+
+/* Sanitize Status SSTAT: Global Data Erased, cleared by any write after it */
+#define NVME_SSTAT_GDE          (1 << 8)
+
+static inline void nvme_note_user_write(FemuCtrl *n)
+{
+    if (unlikely(qatomic_read(&n->sanitize_sstat) & NVME_SSTAT_GDE)) {
+        qatomic_and(&n->sanitize_sstat, (uint16_t)~NVME_SSTAT_GDE);
+    }
+}
 void bbssd_deallocate_all(NvmeNamespace *ns);
 
 /* Misc */

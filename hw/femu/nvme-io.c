@@ -691,6 +691,9 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
     int ret;
 
     req->is_write = (rw->opcode == NVME_CMD_WRITE) ? 1 : 0;
+    if (req->is_write) {
+        nvme_note_user_write(n);
+    }
 
     err = femu_nvme_rw_check_req(n, ns, cmd, req, slba, elba, nlb, ctrl,
                                  data_size, meta_size);
@@ -1042,6 +1045,8 @@ static uint16_t nvme_write_zeros(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint32_t nlb  = le16_to_cpu(rw->nlb) + 1;
     uint16_t control = le16_to_cpu(rw->control);
     bool deac = (control & NVME_WZ_DEAC) != 0;
+
+    nvme_note_user_write(n);
 
     /* Non-wrapping bound test: nvme_deallocate_range zeroes the backing store,
      * so slba + nlb must not overflow past the namespace and drive an

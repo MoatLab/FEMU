@@ -1754,6 +1754,8 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     for (int d = 0; d < NVME_DST_RESULTS; d++) {
         n->dst_results[d].status = 0xf;     /* entry is empty */
     }
+    /* the backing store starts empty, as if never written */
+    n->sanitize_sstat = NVME_SSTAT_GDE;
     n->aer_held = g_malloc0(sizeof(*n->aer_held) * (n->aerl + 1));
     QSIMPLEQ_INIT(&n->aer_queue);
     qemu_mutex_init(&n->aer_lock);

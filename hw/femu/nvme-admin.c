@@ -665,6 +665,21 @@ static uint16_t nvme_identify_ns_csi(FemuCtrl *n, NvmeCmd *cmd)
     return NVME_INVALID_FIELD | NVME_DNR;
 }
 
+/*
+ * A block erase sanitizes the whole subsystem, which here means every
+ * namespace, and only block namespaces can be erased the way Format erases
+ * them; the other modes keep geometry of their own. Offer it only then.
+ */
+static bool nvme_can_sanitize(FemuCtrl *n)
+{
+    for (int i = 0; i < n->num_namespaces; i++) {
+        if (!NS_BBSSD(&n->namespaces[i]) && !NS_NOSSD(&n->namespaces[i])) {
+            return false;
+        }
+    }
+    return n->num_namespaces > 0;
+}
+
 static uint16_t nvme_identify_ctrl(FemuCtrl *n, NvmeCmd *cmd)
 {
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
@@ -672,6 +687,7 @@ static uint16_t nvme_identify_ctrl(FemuCtrl *n, NvmeCmd *cmd)
 
     /* assigned when the controller joins its subsystem, after realize */
     n->id_ctrl.cntlid = cpu_to_le16(n->cntlid);
+    n->id_ctrl.sanicap = cpu_to_le32(nvme_can_sanitize(n) ? 1 << 1 : 0);
     for (int i = 0; i < n->num_namespaces; i++) {
         if (NS_ZNSSD(&n->namespaces[i])) {
             n->id_ctrl.oaes |= cpu_to_le32(NVME_AEC_ZDCN);
@@ -1580,6 +1596,9 @@ static uint16_t nvme_supported_log_pages(FemuCtrl *n, NvmeCmd *cmd,
     lids[NVME_LOG_FW_SLOT_INFO] = cpu_to_le32(NVME_LIDS_LSUPP);
     lids[NVME_LOG_CMD_EFFECTS]  = cpu_to_le32(NVME_LIDS_LSUPP);
     lids[NVME_LOG_DEV_SELF_TEST] = cpu_to_le32(NVME_LIDS_LSUPP);
+    if (nvme_can_sanitize(n)) {
+        lids[NVME_LOG_SANITIZE] = cpu_to_le32(NVME_LIDS_LSUPP);
+    }
     lids[NVME_LOG_FEMU_STATS]   = cpu_to_le32(NVME_LIDS_LSUPP);
 
     if (n->subsys) {
@@ -2135,6 +2154,10 @@ static uint16_t nvme_cmd_effects(FemuCtrl *n, NvmeCmd *cmd, uint8_t csi,
         log.acs[NVME_ADM_CMD_FORMAT_NVM] = NVME_CMD_EFF_CSUPP |
                                            NVME_CMD_EFF_LBCC | NVME_CMD_EFF_NCC;
     }
+    if (nvme_can_sanitize(n)) {
+        log.acs[NVME_ADM_CMD_SANITIZE] = NVME_CMD_EFF_CSUPP |
+                                         NVME_CMD_EFF_LBCC;
+    }
     log.acs[NVME_ADM_CMD_SET_DB_MEMORY] = NVME_CMD_EFF_CSUPP;
 
     if (src_iocs) {
@@ -2232,6 +2255,81 @@ static uint16_t nvme_dst_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
                         le64_to_cpu(cmd->dptr.prp2));
 }
 
+/*
+ * Sanitize (Base 2.3, 5.2.24): a block erase of every namespace, done before
+ * the command completes so no sanitize is ever in progress and none can fail.
+ * Media verification, overwrite and cryptographic erase are not offered.
+ */
+static uint16_t nvme_sanitize(FemuCtrl *n, NvmeCmd *cmd)
+{
+    uint32_t dw10 = le32_to_cpu(cmd->cdw10);
+    uint8_t sanact = dw10 & 0x7;
+    bool ndas = dw10 & (1 << 9);
+    bool emvs = dw10 & (1 << 10);
+    bool resume;
+
+    if (!nvme_can_sanitize(n)) {
+        return NVME_INVALID_OPCODE | NVME_DNR;
+    }
+
+    switch (sanact) {
+    case 0x1:   /* exit failure mode: a sanitize here never fails */
+        return NVME_SUCCESS;
+    case 0x2:   /* block erase */
+        if (emvs) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        break;
+    default:
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    resume = nvme_pause_pollers(n);
+    for (int i = 0; i < n->num_namespaces; i++) {
+        NvmeNamespace *ns = &n->namespaces[i];
+
+        bitmap_zero(ns->util, ns->ns_blks);
+        bitmap_zero(ns->uncorrectable, ns->ns_blks);
+        if (n->mbe && n->mbe->logical_space) {
+            memset((uint8_t *)n->mbe->logical_space + ns->backend_offset, 0,
+                   ns->size);
+        }
+        if (NS_BBSSD(ns)) {
+            bbssd_deallocate_all(ns);
+        }
+    }
+    nvme_resume_pollers(n, resume);
+
+    n->sanitize_cdw10 = dw10;
+    /* completed, 001b, or 100b when the host asked for no deallocation */
+    qatomic_set(&n->sanitize_sstat, NVME_SSTAT_GDE | (ndas ? 0x4 : 0x1));
+
+    return NVME_SUCCESS;
+}
+
+/* Sanitize Status (81h): progress, status and the command that ran */
+static uint16_t nvme_sanitize_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
+                                  uint64_t off)
+{
+    uint8_t log[512] = {};
+    uint32_t trans_len;
+
+    if (off >= sizeof(log)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    stw_le_p(log, 0xffff);                      /* SPROG: none in progress */
+    stw_le_p(log + 2, qatomic_read(&n->sanitize_sstat));
+    stl_le_p(log + 4, n->sanitize_cdw10);
+    /* the estimated times, not reported */
+    for (int i = 8; i < 32; i += 4) {
+        stl_le_p(log + i, 0xffffffff);
+    }
+    trans_len = MIN(sizeof(log) - off, buf_len);
+
+    return dma_read_prp(n, log + off, trans_len, le64_to_cpu(cmd->dptr.prp1),
+                        le64_to_cpu(cmd->dptr.prp2));
+}
+
 static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
 {
     uint32_t dw10 = le32_to_cpu(cmd->cdw10);
@@ -2292,6 +2390,11 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
         return nvme_cmd_effects(n, cmd, csi, len, off);
     case NVME_LOG_DEV_SELF_TEST:
         return nvme_dst_log(n, cmd, len, off);
+    case NVME_LOG_SANITIZE:
+        if (!nvme_can_sanitize(n)) {
+            return NVME_INVALID_LOG_ID | NVME_DNR;
+        }
+        return nvme_sanitize_log(n, cmd, len, off);
     case NVME_LOG_ENDGRP:
         return nvme_endgrp_info(n, len, off, cmd);
     case NVME_LOG_FDP_CONFS:
@@ -2625,6 +2728,8 @@ static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     case NVME_ADM_CMD_SET_DB_MEMORY:
         femu_debug("admin cmd,set_db_memory\n");
         return nvme_set_db_memory(n, cmd);
+    case NVME_ADM_CMD_SANITIZE:
+        return nvme_sanitize(n, cmd);
     case NVME_ADM_CMD_DEV_SELF_TEST:
         return nvme_dev_self_test(n, cmd);
     case NVME_ADM_CMD_ASYNC_EV_REQ:

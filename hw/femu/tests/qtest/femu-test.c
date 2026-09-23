@@ -4967,6 +4967,74 @@ static void femu_test_format_ftl(void *obj, void *data, QGuestAllocator *alloc)
     femu_disable(&c);
 }
 
+#define FEMU_ADM_SANITIZE       0x84
+#define FEMU_LOG_SANITIZE       0x81
+
+static uint16_t femu_sanitize(FemuCtrlState *c, uint32_t dw10)
+{
+    NvmeCmd cmd;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_ADM_SANITIZE;
+    cmd.cdw10 = cpu_to_le32(dw10);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+/*
+ * Sanitize block erase (Base 2.3, 5.2.24) on a device of block namespaces:
+ * SANICAP offers it, Global Data Erased holds until a write and again after
+ * an erase, the data reads back as zeros, and the operations not offered are
+ * refused.
+ */
+static void femu_test_sanitize(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+    uint64_t log;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, 4096);
+    log = guest_alloc(alloc, 4096);
+
+    g_assert_cmpint(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 328) & 0x2, ==, 0x2);
+
+    g_assert_cmpint(femu_log_cmd(&c, 0, FEMU_LOG_SANITIZE, 0, log, 512), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readw(qts, log + 2), ==, 0x100);     /* GDE, never */
+
+    qtest_memset(qts, buf, 0x3c, 4096);
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_log_cmd(&c, 0, FEMU_LOG_SANITIZE, 0, log, 512), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readw(qts, log + 2) & 0x100, ==, 0);
+
+    g_assert_cmpint(femu_sanitize(&c, 0x2 | (1 << 10)), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmpint(femu_sanitize(&c, 0x3), ==, NVME_INVALID_FIELD);
+    g_assert_cmpint(femu_sanitize(&c, 0x2), ==, NVME_SUCCESS);
+
+    g_assert_cmpint(femu_log_cmd(&c, 0, FEMU_LOG_SANITIZE, 0, log, 512), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readw(qts, log), ==, 0xffff);        /* SPROG */
+    g_assert_cmphex(qtest_readw(qts, log + 2), ==, 0x101);     /* GDE, done */
+    g_assert_cmphex(qtest_readl(qts, log + 4), ==, 0x2);       /* SCDW10 */
+
+    qtest_memset(qts, buf, 0xff, 4096);
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_READ, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf), ==, 0);
+    g_assert_cmpint(femu_sanitize(&c, 0x1), ==, NVME_SUCCESS);
+
+    guest_free(alloc, log);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 #define FEMU_CSD_COMPUTE_LOAD   0x22
 #define FEMU_CSD_TYPE_SHARED_LIB 0x03
 
@@ -5256,6 +5324,12 @@ static void femu_register_nodes(void)
     qos_add_test("prp-status", "femu", femu_test_prp_status, NULL);
     qos_add_test("doorbell-errors", "femu", femu_test_doorbell_errors, NULL);
     qos_add_test("format-ses", "femu", femu_test_format_ses, NULL);
+    qos_add_test("sanitize", "femu", femu_test_sanitize,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=16,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=32,pls_per_lun=1,luns_per_ch=4,nchs=4"
+    });
     qos_add_test("format-ftl", "femu", femu_test_format_ftl,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
