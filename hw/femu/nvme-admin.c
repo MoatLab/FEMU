@@ -40,8 +40,10 @@ static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
     [NVME_INTERRUPT_VECTOR_CONF]    = NVME_FEAT_CAP_CHANGE,
     [NVME_WRITE_ATOMICITY]          = NVME_FEAT_CAP_CHANGE,
     [NVME_ASYNCHRONOUS_EVENT_CONF]  = NVME_FEAT_CAP_CHANGE,
-    [NVME_FDP_MODE]                 = NVME_FEAT_CAP_CHANGE,
-    [NVME_FDP_EVENTS]               = NVME_FEAT_CAP_CHANGE | NVME_FEAT_CAP_NS,
+    /* configured at realize, which makes it the saved value as well */
+    [NVME_FDP_MODE]                 = NVME_FEAT_CAP_SAVE | NVME_FEAT_CAP_CHANGE,
+    [NVME_FDP_EVENTS]               = NVME_FEAT_CAP_SAVE |
+                                      NVME_FEAT_CAP_CHANGE | NVME_FEAT_CAP_NS,
     [NVME_KV_FEAT_CONFIG]           = NVME_FEAT_CAP_CHANGE | NVME_FEAT_CAP_NS,
     [NVME_SOFTWARE_PROGRESS_MARKER] = NVME_FEAT_CAP_CHANGE,
 };
@@ -887,6 +889,73 @@ static uint16_t nvme_identify(FemuCtrl *n, NvmeCmd *cmd)
  * The value a feature has before the host changes it: what realize set, so
  * Select = Default agrees with the first Get after a reset.
  */
+/*
+ * Flexible Data Placement (1Dh) names an endurance group, and a subsystem has
+ * exactly one, identifier 1. Dword 0 holds FDPE and the configuration index,
+ * which is always 0 (Base 2.3, 5.2.26.1.20).
+ */
+static uint16_t nvme_get_feature_fdp(FemuCtrl *n, uint32_t dw11, bool dflt,
+                                     uint32_t *result)
+{
+    if (!n->subsys || (dw11 & 0xffff) != 1) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    *result = !dflt && n->subsys->endgrp.fdp.enabled ? 1 : 0;
+    return NVME_SUCCESS;
+}
+
+/*
+ * Flexible Data Placement Events (1Eh): the reclaim unit handle behind a
+ * namespace's placement handle (Base 2.3, 5.2.26.1.21).
+ */
+static uint16_t nvme_fdp_events_ruh(FemuCtrl *n, uint32_t nsid, uint32_t dw11,
+                                    NvmeRuHandle **ruh)
+{
+    NvmeNamespace *ns = nvme_ns(n, nsid);
+    uint16_t ph = dw11 & 0xffff;
+
+    if (!n->subsys || !n->subsys->endgrp.fdp.enabled) {
+        return NVME_FDP_DISABLED | NVME_DNR;
+    }
+    if (!ns || !ns->fdp.phs || ph >= ns->fdp.nphs) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    *ruh = &n->subsys->endgrp.fdp.ruhs[ns->fdp.phs[ph]];
+    return NVME_SUCCESS;
+}
+
+/*
+ * Every supported event type in ascending order, each with whether it is
+ * enabled on the handle; dword 0 holds how many there are.
+ */
+static uint16_t nvme_get_feature_fdp_events(FemuCtrl *n, NvmeCmd *cmd,
+                                            uint32_t dw11, NvmeCqe *cqe)
+{
+    NvmeFdpEventDescr edescr[ARRAY_SIZE(nvme_fdp_events_supported)];
+    NvmeRuHandle *ruh;
+    uint16_t status;
+    int i;
+
+    status = nvme_fdp_events_ruh(n, le32_to_cpu(cmd->nsid), dw11, &ruh);
+    if (status) {
+        return status;
+    }
+
+    for (i = 0; i < (int)ARRAY_SIZE(nvme_fdp_events_supported); i++) {
+        uint8_t ev = nvme_fdp_events_supported[i];
+
+        edescr[i].evt = ev;
+        edescr[i].evta = (ruh->event_filter >> nvme_fdp_evf_shifts[ev]) & 1;
+    }
+
+    cqe->n.result = cpu_to_le32(ARRAY_SIZE(edescr));
+    return dma_read_prp(n, (uint8_t *)edescr, sizeof(edescr),
+                        le64_to_cpu(cmd->dptr.prp1),
+                        le64_to_cpu(cmd->dptr.prp2));
+}
+
 static uint16_t nvme_get_feature_default(FemuCtrl *n, NvmeCmd *cmd,
                                          uint8_t fid, uint32_t dw11,
                                          NvmeCqe *cqe)
@@ -939,13 +1008,14 @@ static uint16_t nvme_get_feature_default(FemuCtrl *n, NvmeCmd *cmd,
         }
         result = (dw11 & 0xffff) | (n->intc << 16);
         break;
-    case NVME_FDP_MODE:
-        /* the same gate the current-value path applies */
-        if (!n->subsys || !n->subsys->endgrp.fdp.enabled) {
-            return NVME_INVALID_FIELD | NVME_DNR;
+    case NVME_FDP_MODE: {
+        uint16_t status = nvme_get_feature_fdp(n, dw11, true, &result);
+
+        if (status) {
+            return status;
         }
-        result = 1;
         break;
+    }
     case NVME_COMMAND_SET_PROFILE:
         /* one combination, index zero, holding every command set at once */
         result = 0;
@@ -975,6 +1045,10 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     }
 
     if (nvme_feature_cap[fid] & NVME_FEAT_CAP_NS) {
+        /* the events feature says what an all-namespaces NSID returns */
+        if (fid == NVME_FDP_EVENTS && nsid == NVME_NSID_BROADCAST) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
         if (!nvme_nsid_valid(n, nsid) || nsid == NVME_NSID_BROADCAST) {
             return NVME_INVALID_NSID | NVME_DNR;
         }
@@ -987,7 +1061,12 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     case NVME_GETFEAT_SELECT_CURRENT:
         break;
     case NVME_GETFEAT_SELECT_SAVED:
-        /* nothing is saved, so the saved value is the default */
+        /* placement is configured at realize, which is what persists */
+        if (fid == NVME_FDP_MODE || fid == NVME_FDP_EVENTS) {
+            break;
+        }
+        /* nothing else is saved, so the saved value is the default */
+        /* fall through */
     case NVME_GETFEAT_SELECT_DEFAULT:
         return nvme_get_feature_default(n, cmd, fid, dw11, cqe);
     case NVME_GETFEAT_SELECT_CAP:
@@ -1069,50 +1148,18 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         /* the only combination there is, and the only one selectable */
         cqe->n.result = 0;
         break;
-    case NVME_FDP_MODE:
-        if (!n->subsys || !n->subsys->endgrp.fdp.enabled) {
-            return NVME_INVALID_FIELD | NVME_DNR;
-        }
-        /*
-         * The mode may only change while the endurance group holds no
-         * namespaces, and FEMU builds them at realize, so it never can.
-         */
-        return NVME_CMD_SEQ_ERROR | NVME_DNR;
-    case NVME_FDP_EVENTS: {
-        if (!n->subsys || !n->subsys->endgrp.fdp.enabled) {
-            return NVME_INVALID_FIELD | NVME_DNR;
-        }
-        NvmeEnduranceGroup *endgrp = &n->subsys->endgrp;
-        uint8_t ruhid_idx = dw11 & 0xff;
-        uint32_t nentries = 0;
-        NvmeFdpEventDescr edescr[6];
+    case NVME_FDP_MODE: {
+        uint32_t result;
+        uint16_t status = nvme_get_feature_fdp(n, dw11, false, &result);
 
-        if (ruhid_idx >= endgrp->fdp.nruh) {
-            return NVME_INVALID_FIELD | NVME_DNR;
+        if (status) {
+            return status;
         }
-
-        NvmeRuHandle *ruh = &endgrp->fdp.ruhs[ruhid_idx];
-        memset(edescr, 0, sizeof(edescr));
-
-        /* report enabled event types for this RUH */
-        for (int i = 0; i < (int)ARRAY_SIZE(nvme_fdp_events_supported) &&
-                        nentries < 6; i++) {
-            uint8_t ev = nvme_fdp_events_supported[i];
-
-            if ((ruh->event_filter >> nvme_fdp_evf_shifts[ev]) & 0x1) {
-                edescr[nentries].evt = ev;
-                edescr[nentries].evta = 1;
-                nentries++;
-            }
-        }
-        cqe->n.result = cpu_to_le32(nentries);
-        if (nentries > 0) {
-            uint32_t trans = MIN(nentries * sizeof(NvmeFdpEventDescr),
-                                 (dw11 >> 16) ? (dw11 >> 16) : 4096);
-            return dma_read_prp(n, (uint8_t *)edescr, trans, prp1, prp2);
-        }
+        cqe->n.result = cpu_to_le32(result);
         break;
     }
+    case NVME_FDP_EVENTS:
+        return nvme_get_feature_fdp_events(n, cmd, dw11, cqe);
     default:
         return NVME_INVALID_FIELD | NVME_DNR;
     }
@@ -1274,43 +1321,48 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     case NVME_SOFTWARE_PROGRESS_MARKER:
         n->features.sw_prog_marker = dw11;
         break;
+    case NVME_FDP_MODE:
+        if (!n->subsys || (dw11 & 0xffff) != 1) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        /*
+         * The mode may only change while the endurance group holds no
+         * namespaces, and FEMU builds them at realize, so it never can.
+         */
+        return NVME_CMD_SEQ_ERROR | NVME_DNR;
     case NVME_FDP_EVENTS: {
-        if (!n->subsys || !n->subsys->endgrp.fdp.enabled) {
-            return NVME_INVALID_FIELD | NVME_DNR;
+        /*
+         * NOET in dword 11 counts the one-byte event types in the buffer, and
+         * dword 12 bit 0 enables or disables them (Figures 437-439).
+         */
+        uint8_t noet = (dw11 >> 16) & 0xff;
+        bool enable = le32_to_cpu(cmd->cdw12) & 0x1;
+        uint8_t events[256];
+        uint64_t mask = 0;
+        NvmeRuHandle *ruh;
+        uint16_t status;
+        int i;
+
+        status = nvme_fdp_events_ruh(n, le32_to_cpu(cmd->nsid), dw11, &ruh);
+        if (status) {
+            return status;
         }
-        NvmeEnduranceGroup *endgrp = &n->subsys->endgrp;
-        uint32_t cdw12 = le32_to_cpu(cmd->cdw12);
-        uint8_t ruhid_idx = dw11 & 0xff;
-        uint8_t enable = (dw11 >> 8) & 0x1;
-        uint8_t nevents = (cdw12 >> 16) & 0xff;
-
-        if (ruhid_idx >= endgrp->fdp.nruh) {
-            return NVME_INVALID_FIELD | NVME_DNR;
-        }
-
-        NvmeRuHandle *ruh = &endgrp->fdp.ruhs[ruhid_idx];
-
-        if (nevents > 0) {
-            NvmeFdpEventDescr edescr[6];
-            uint32_t trans = MIN(nevents * sizeof(NvmeFdpEventDescr),
-                                 sizeof(edescr));
-            uint16_t status = dma_write_prp(n, (uint8_t *)edescr, trans,
-                                             prp1, prp2);
+        if (noet) {
+            status = dma_write_prp(n, events, noet, prp1, prp2);
             if (status) {
                 return status;
             }
-            for (int i = 0; i < (int)MIN(nevents, 6); i++) {
-                uint8_t ev = edescr[i].evt;
-
-                if (!nvme_fdp_event_supported(ev)) {
-                    return NVME_INVALID_FIELD | NVME_DNR;
-                }
-                if (enable) {
-                    ruh->event_filter |= (1ULL << nvme_fdp_evf_shifts[ev]);
-                } else {
-                    ruh->event_filter &= ~(1ULL << nvme_fdp_evf_shifts[ev]);
-                }
+        }
+        for (i = 0; i < noet; i++) {
+            if (!nvme_fdp_event_supported(events[i])) {
+                return NVME_INVALID_FIELD | NVME_DNR;
             }
+            mask |= 1ULL << nvme_fdp_evf_shifts[events[i]];
+        }
+        if (enable) {
+            ruh->event_filter |= mask;
+        } else {
+            ruh->event_filter &= ~mask;
         }
         break;
     }

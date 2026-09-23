@@ -279,6 +279,7 @@ static bool nvme_ns_init_fdp(NvmeNamespace *ns, Error **errp)
      * Auto-assign all RUHs to this namespace sequentially.
      * Each RUH gets a placement handle index.
      */
+    ns->id_ns.endgid = cpu_to_le16(1);
     ns->fdp.nphs = endgrp->fdp.nruh;
     ph = ns->fdp.phs = g_new(uint16_t, ns->fdp.nphs);
 
@@ -1239,9 +1240,8 @@ static void nvme_init_ctrl(FemuCtrl *n)
     /* FDP: set Controller Attributes for FDP support */
     if (n->subsys && n->subsys->endgrp.fdp.enabled) {
         id->ctratt = cpu_to_le32(NVME_CTRATT_ENDGRPS | NVME_CTRATT_FDPS);
-        id->endgidmax = cpu_to_le16(0);
-        femu_log("FDP: CTRATT=0x%x (ENDGRPS|FDPS), endgidmax=0\n",
-                 NVME_CTRATT_ENDGRPS | NVME_CTRATT_FDPS);
+        /* the subsystem's one endurance group, which every namespace is in */
+        id->endgidmax = cpu_to_le16(1);
     }
 
     /* TODO: NVME_OACS_NS_MGMT */

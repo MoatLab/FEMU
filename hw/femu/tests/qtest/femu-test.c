@@ -3298,6 +3298,166 @@ static void femu_test_dma_error(void *obj, void *data, QGuestAllocator *alloc)
 
 static bool femu_zoned = true;
 
+#define FEMU_FEAT_FDP           0x1d
+#define FEMU_FEAT_FDP_EVENTS    0x1e
+#define FEMU_ID_CTRL_ENDGIDMAX  340
+#define FEMU_ID_NS_ENDGID       102
+
+/* the host events log's count, and the placement handle of its last entry */
+static uint32_t femu_fdp_host_events(FemuCtrlState *c, uint64_t log,
+                                     uint16_t *last_ph)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    uint8_t buf[64 + 8 * 64];
+    uint32_t numd = sizeof(buf) / 4 - 1;
+    uint32_t count;
+    NvmeCmd cmd;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+    cmd.nsid = cpu_to_le32(NVME_NSID_BROADCAST);
+    cmd.dptr.prp1 = cpu_to_le64(log);
+    cmd.cdw10 = cpu_to_le32(FEMU_LOG_FDP_EVENTS | (1 << 8) |
+                            ((numd & 0xffff) << 16));
+    cmd.cdw11 = cpu_to_le32(1 << 16);
+    g_assert_cmpint(femu_admin(c, &cmd), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, buf, sizeof(buf));
+    count = ldl_le_p(buf);
+    if (count && last_ph) {
+        *last_ph = lduw_le_p(buf + 64 + (MIN(count, 8) - 1) * 64 + 2);
+    }
+    return count;
+}
+
+/*
+ * What a host needs to turn Flexible Data Placement on (Base 2.3, 5.2.26.1.20
+ * and .21): the endurance group in Identify, feature 1Dh reporting FDPE for
+ * it, and feature 1Eh taking one-byte event types in its buffer with the count
+ * in dword 11 and the enable bit in dword 12. Linux reads 1Dh with the
+ * namespace's endurance group before it uses any placement handle.
+ */
+static void femu_test_fdp_features(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint16_t list[2] = { cpu_to_le16(0), cpu_to_le16(1) };
+    uint8_t descr[16];
+    uint64_t buf, log, pids;
+    uint32_t result;
+    uint32_t before;
+    uint16_t ph;
+    NvmeCmd cmd;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, 4096);
+    log = guest_alloc(alloc, 4096);
+    pids = guest_alloc(alloc, 4096);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_IDENTIFY;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(NVME_ID_CNS_CTRL);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+    g_assert_cmpint(qtest_readw(qts, buf + FEMU_ID_CTRL_ENDGIDMAX), ==, 1);
+    cmd.nsid = cpu_to_le32(1);
+    cmd.cdw10 = cpu_to_le32(NVME_ID_CNS_NS);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+    g_assert_cmpint(qtest_readw(qts, buf + FEMU_ID_NS_ENDGID), ==, 1);
+
+    /* 1Dh: enabled now and in the saved value, disabled by default */
+    g_assert_cmpint(femu_get_feature(&c, FEMU_FEAT_FDP, 0, 0, 1, &result),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpint(result & 1, ==, 1);
+    g_assert_cmpint(femu_get_feature(&c, FEMU_FEAT_FDP, 2, 0, 1, &result),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpint(result & 1, ==, 1);
+    g_assert_cmpint(femu_get_feature(&c, FEMU_FEAT_FDP, 1, 0, 1, &result),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpint(result, ==, 0);
+    g_assert_cmpint(FEMU_SC(femu_get_feature(&c, FEMU_FEAT_FDP, 0, 0, 2,
+                                             &result)),
+                    ==, NVME_INVALID_FIELD);
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, FEMU_FEAT_FDP, false, 0, 1,
+                                             &result)),
+                    ==, NVME_CMD_SEQ_ERROR);
+
+    /* 1Eh: every supported type, ascending, with its enable bit */
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_GET_FEATURES;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(FEMU_FEAT_FDP_EVENTS);
+    cmd.cdw11 = cpu_to_le32(0);
+    g_assert_cmpint(femu_admin_result(&c, &cmd, &result), ==, NVME_SUCCESS);
+    g_assert_cmpint(result, >=, 2);
+    g_assert_cmpint(result, <=, sizeof(descr) / 2);
+    qtest_memread(qts, buf, descr, result * 2);
+    for (i = 1; i < result; i++) {
+        g_assert_cmpint(descr[2 * i], >, descr[2 * (i - 1)]);
+    }
+    g_assert_cmpint(descr[0], ==, FEMU_FDP_EVT_RU_NOT_FULLY_WRITTEN);
+    g_assert_cmpint(descr[1] & 1, ==, 1);
+
+    cmd.nsid = cpu_to_le32(NVME_NSID_BROADCAST);
+    g_assert_cmpint(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_INVALID_FIELD);
+    cmd.nsid = cpu_to_le32(1);
+    cmd.cdw11 = cpu_to_le32(99);
+    g_assert_cmpint(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_INVALID_FIELD);
+
+    /* disable one type on placement handle 0 and only that handle */
+    qtest_writeb(qts, buf, FEMU_FDP_EVT_RU_NOT_FULLY_WRITTEN);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_SET_FEATURES;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(FEMU_FEAT_FDP_EVENTS);
+    cmd.cdw11 = cpu_to_le32((1 << 16) | 0);
+    cmd.cdw12 = cpu_to_le32(0);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_GET_FEATURES;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(FEMU_FEAT_FDP_EVENTS);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+    g_assert_cmpint(qtest_readb(qts, buf + 1) & 1, ==, 0);
+    cmd.cdw11 = cpu_to_le32(1);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+    g_assert_cmpint(qtest_readb(qts, buf + 1) & 1, ==, 1);
+
+    /*
+     * Moving both handles now reports only the one still enabled. Tests with
+     * the same options share a subsystem, so count from where the log is.
+     */
+    before = femu_fdp_host_events(&c, log, NULL);
+    qtest_memwrite(qts, pids, list, sizeof(list));
+    g_assert_cmpint(femu_ruh_update(&c, pids, 2), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_fdp_host_events(&c, log, &ph), ==, before + 1);
+    g_assert_cmpint(ph, ==, 1);
+
+    /* and put the handle back the way the next test expects it */
+    qtest_writeb(qts, buf, FEMU_FDP_EVT_RU_NOT_FULLY_WRITTEN);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_SET_FEATURES;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(FEMU_FEAT_FDP_EVENTS);
+    cmd.cdw11 = cpu_to_le32(1 << 16);
+    cmd.cdw12 = cpu_to_le32(1);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+
+    guest_free(alloc, pids);
+    guest_free(alloc, log);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 #define FEMU_CSD_COMPUTE_LOAD   0x22
 #define FEMU_CSD_TYPE_SHARED_LIB 0x03
 
@@ -3573,6 +3733,13 @@ static void femu_register_nodes(void)
     qos_add_test("cq-full", "femu", femu_test_cq_full, NULL);
     qos_add_test("io-interrupts", "femu", femu_test_io_interrupts, NULL);
     qos_add_test("dma-error", "femu", femu_test_dma_error, NULL);
+    qos_add_test("fdp-features", "femu", femu_test_fdp_features,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,"
+            "subsys=fdpsub"
+    });
     qos_add_test("dma-error-bbssd", "femu", femu_test_dma_error,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
