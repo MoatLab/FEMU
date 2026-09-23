@@ -2592,7 +2592,6 @@ static void nvme_post_held_cqe(FemuCtrl *n, const NvmeAerHold *hold,
     NvmeCQueue *cq = n->cq[hold->cqid];
     NvmeSQueue *sq = n->sq[hold->sqid];
     NvmeCqe cqe;
-    hwaddr addr;
 
     /*
      * is_active is not checked here: it marks a queue brought up by Create I/O
@@ -2612,13 +2611,7 @@ static void nvme_post_held_cqe(FemuCtrl *n, const NvmeAerHold *hold,
     /* where the queue head is now, not where it was when the request came */
     cqe.sq_head = cpu_to_le16(sq ? sq->head : hold->sq_head);
 
-    if (cq->phys_contig) {
-        addr = cq->dma_addr + cq->tail * n->cqe_size;
-    } else {
-        addr = nvme_discontig(cq->prp_list, cq->tail, n->page_size,
-                              n->cqe_size);
-    }
-    nvme_addr_write(n, addr, (void *)&cqe, sizeof(cqe));
+    nvme_write_cqe(n, cq, &cqe);
     nvme_inc_cq_tail(cq);
     nvme_isr_notify_admin(cq);
 }
@@ -2823,12 +2816,7 @@ void nvme_process_sq_admin(void *opaque)
         cqe.sq_id = cpu_to_le16(sq->sqid);
         cqe.sq_head = cpu_to_le16(sq->head);
 
-        if (cq->phys_contig) {
-            addr = cq->dma_addr + cq->tail * n->cqe_size;
-        } else {
-            addr = nvme_discontig(cq->prp_list, cq->tail, n->page_size, n->cqe_size);
-        }
-        nvme_addr_write(n, addr, (void *)&cqe, sizeof(cqe));
+        nvme_write_cqe(n, cq, &cqe);
         nvme_inc_cq_tail(cq);
         nvme_isr_notify_admin(cq);
     }

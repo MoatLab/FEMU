@@ -380,7 +380,6 @@ static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
     NvmeSQueue *sq = req->sq;
     NvmeCqe *cqe = &req->cqe;
     uint8_t phase = cq->phase;
-    hwaddr addr;
 
     if (n->print_log) {
         femu_debug("%s,req,lba:%lu,lat:%lu\n", n->devname, req->slba, req->reqlat);
@@ -389,14 +388,7 @@ static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
     cqe->sq_id = cpu_to_le16(sq->sqid);
     cqe->sq_head = cpu_to_le16(sq->head);
 
-    if (cq->phys_contig) {
-        addr = cq->dma_addr + cq->tail * n->cqe_size;
-        ((NvmeCqe *)cq->dma_addr_hva)[cq->tail] = *cqe;
-    } else {
-        addr = nvme_discontig(cq->prp_list, cq->tail, n->page_size, n->cqe_size);
-        nvme_addr_write(n, addr, (void *)cqe, sizeof(*cqe));
-    }
-
+    nvme_write_cqe(n, cq, cqe);
     nvme_inc_cq_tail(cq);
 }
 

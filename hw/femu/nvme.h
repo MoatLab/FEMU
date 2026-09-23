@@ -2213,6 +2213,7 @@ uint16_t nvme_check_dulbe(FemuCtrl *n, NvmeNamespace *ns, uint64_t slba,
 int nvme_check_sqid(FemuCtrl *n, uint16_t sqid);
 int nvme_check_cqid(FemuCtrl *n, uint16_t cqid);
 void nvme_inc_cq_tail(NvmeCQueue *cq);
+void nvme_write_cqe(FemuCtrl *n, NvmeCQueue *cq, const NvmeCqe *cqe);
 void nvme_inc_sq_head(NvmeSQueue *sq);
 void nvme_update_cq_head(NvmeCQueue *cq);
 void nvme_update_cq_eventidx(NvmeCQueue *cq);

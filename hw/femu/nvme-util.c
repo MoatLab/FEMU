@@ -143,6 +143,40 @@ void nvme_resume_pollers(FemuCtrl *n, bool was_started)
     n->dataplane_started = true;
 }
 
+/*
+ * Write the completion entry at the queue's tail with the dword that holds the
+ * phase tag last. A host polling the phase reads the rest of the entry as
+ * soon as it flips, so on a host without strong store ordering a single copy
+ * could show the new phase beside the previous command identifier.
+ */
+void nvme_write_cqe(FemuCtrl *n, NvmeCQueue *cq, const NvmeCqe *cqe)
+{
+    const size_t body = offsetof(NvmeCqe, cid);     /* dwords 0 to 2 */
+    uint32_t dw3;
+    hwaddr addr;
+
+    memcpy(&dw3, &cqe->cid, sizeof(dw3));
+
+    if (cq->phys_contig && cq->dma_addr_hva) {
+        uint8_t *slot = (uint8_t *)cq->dma_addr_hva + cq->tail * n->cqe_size;
+
+        memcpy(slot, cqe, body);
+        smp_wmb();      /* dwords 0-2 visible before the phase flips */
+        qatomic_set((uint32_t *)(slot + body), dw3);
+        return;
+    }
+
+    if (cq->phys_contig) {
+        addr = cq->dma_addr + cq->tail * n->cqe_size;
+    } else {
+        addr = nvme_discontig(cq->prp_list, cq->tail, n->page_size,
+                              n->cqe_size);
+    }
+    nvme_addr_write(n, addr, (void *)cqe, body);
+    smp_wmb();          /* dwords 0-2 visible before the phase flips */
+    nvme_addr_write(n, addr + body, &dw3, sizeof(dw3));
+}
+
 void nvme_inc_cq_tail(NvmeCQueue *cq)
 {
     cq->tail++;
