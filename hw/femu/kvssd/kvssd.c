@@ -121,6 +121,11 @@ static uint16_t kvssd_store(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     if (vsize > kvssd_ftl_max_value(kvssd)) {
         return NVME_KV_INVALID_VALUE_SIZE | NVME_DNR;
     }
+    /* the value is the command's data transfer, so MDTS bounds it */
+    status = nvme_check_mdts(n, vsize);
+    if (status) {
+        return status;
+    }
 
     /* The FTL allocates value space, drives the host DMA, programs NAND (and
      * charges its latency on req), and commits the index. */

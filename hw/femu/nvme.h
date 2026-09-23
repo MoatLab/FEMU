@@ -1947,7 +1947,7 @@ typedef struct FemuCtrl {
     uint8_t     intc;
     uint8_t     intc_thresh;
     uint8_t     intc_time;
-    uint8_t     outstanding_aers;
+    uint16_t    outstanding_aers;   /* up to aerl + 1, which can be 256 */
     uint8_t     temp_warn_issued;
     uint64_t    num_errors;
     uint8_t     cqes_pending;

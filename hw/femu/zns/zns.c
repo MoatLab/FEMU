@@ -586,7 +586,9 @@ static uint16_t zns_check_zone_write(FemuCtrl *n, NvmeNamespace *ns,
             if (unlikely(slba != zone->d.zslba)) {
                 status = NVME_INVALID_FIELD;
             }
-            if (zns_l2b(ns, nlb) > (n->page_size << n->zasl)) {
+            /* ZASL 0 means the limit is MDTS, which 0 in turn lifts */
+            if (n->zasl ? zns_l2b(ns, nlb) > (n->page_size << n->zasl) :
+                nvme_check_mdts(n, zns_l2b(ns, nlb))) {
                 status = NVME_INVALID_FIELD;
             }
             /* an append lands at the write pointer, so bound it there too */

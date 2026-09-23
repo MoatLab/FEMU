@@ -799,6 +799,13 @@ uint16_t kvssd_ftl_retrieve(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
     xfer = MIN(vlen, hbs);              /* spec: return min(HBS, value) bytes */
     *full_len = (uint32_t)vlen;         /* but report the FULL size in CQE Dword0 */
 
+    /* MDTS bounds what moves: the smaller of the buffer and the value */
+    status = nvme_check_mdts(n, xfer);
+    if (status) {
+        qemu_mutex_unlock(&s->lock);
+        return status;
+    }
+
     /* base + read of the value pages actually touched (the transferred span) */
     lat = MAX(lat, kv_charge_base(s, req));
     status = kv_read_ppas(s, req, &s->table[slot], xfer, &lat);

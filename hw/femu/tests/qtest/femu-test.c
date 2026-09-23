@@ -4542,6 +4542,99 @@ static void femu_test_bar0_size(void *obj, void *data, QGuestAllocator *alloc)
     qpci_iounmap(&femu->dev, bar);
 }
 
+#define FEMU_AER_LIMIT_EXCEEDED     0x105   /* command specific */
+
+/*
+ * AERL is 0's based, so 255 allows 256 outstanding requests. The count of
+ * held requests was 8 bits wide and wrapped at the 256th, after which the
+ * next request was taken as well and overwrote the first.
+ */
+static void femu_test_aer_limit(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint16_t want;
+    uint16_t cid;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    for (i = 0; i < 256; i++) {
+        femu_aer(&c);
+    }
+    want = femu_aer(&c);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.admin, &cid, NULL)), ==,
+                    FEMU_AER_LIMIT_EXCEEDED);
+    g_assert_cmpint(cid, ==, want);
+    femu_disable(&c);
+}
+
+/* ZASL 0 means the append limit is MDTS, and MDTS 0 means there is none */
+static void femu_test_zoned_append_mdts0(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+    uint64_t list;
+    uint64_t e;
+    NvmeRwCmd rw;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, 4 * 4096);
+    list = guest_alloc(alloc, 4096);
+
+    /* four pages: the first in PRP1, the other three in a list */
+    for (i = 0; i < 3; i++) {
+        e = cpu_to_le64(buf + (i + 1) * 4096);
+        qtest_memwrite(qts, list + i * 8, &e, sizeof(e));
+    }
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = NVME_CMD_ZONE_APPEND;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.dptr.prp2 = cpu_to_le64(list);
+    rw.nlb = cpu_to_le16(4 * 4096 / c.lba_size - 1);
+    g_assert_cmpint(femu_io(&c, (NvmeCmd *)&rw), ==, NVME_SUCCESS);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
+ * A key value Store moves the value, so MDTS bounds it. (Retrieve moves the
+ * smaller of the buffer and the value, and with MDTS this small no value that
+ * large can be stored to retrieve.)
+ */
+static void femu_test_kv_mdts(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+    NvmeCmd cmd;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, 4 * 4096);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_KV_CMD_STORE;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.res1 = cpu_to_le64(0x4d4d4d4d4d4d4d4dULL);
+    cmd.cdw10 = cpu_to_le32(16384);
+    cmd.cdw11 = cpu_to_le32(8);
+    g_assert_cmpint(femu_io(&c, &cmd), ==, NVME_INVALID_FIELD);
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 #define FEMU_CSD_COMPUTE_LOAD   0x22
 #define FEMU_CSD_TYPE_SHARED_LIB 0x03
 
@@ -4826,6 +4919,18 @@ static void femu_register_nodes(void)
     qos_add_test("doorbell-errors", "femu", femu_test_doorbell_errors, NULL);
     qos_add_test("format-ses", "femu", femu_test_format_ses, NULL);
     qos_add_test("bar0-size", "femu", femu_test_bar0_size, NULL);
+    qos_add_test("aer-limit", "femu", femu_test_aer_limit,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "aerl=255"
+    });
+    qos_add_test("zoned-append-mdts0", "femu", femu_test_zoned_append_mdts0,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=3,secsz=512,mdts=0,zns_zasl_bs=0"
+    });
+    qos_add_test("kv-mdts", "femu", femu_test_kv_mdts,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "devsz_mb=512,femu_mode=5,mdts=1"
+    });
     qos_add_test("kv-identify-reserved", "femu",
                  femu_test_kv_identify_reserved, &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "devsz_mb=512,femu_mode=5"

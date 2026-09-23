@@ -131,13 +131,13 @@ static void nvme_vector_mask(PCIDevice *dev, unsigned vector)
             continue;
         }
 
+        /* every queue on the vector, as unmask adds them all back */
         if (cq->vector == vector) {
             e = &cq->guest_notifier;
             ret = kvm_irqchip_remove_irqfd_notifier_gsi(kvm_state, e, cq->virq);
             if (ret != 0) {
                 femu_err("remove_irqfd_notifier_gsi failed");
             }
-            return;
         }
     }
 }
