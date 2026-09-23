@@ -5449,13 +5449,76 @@ static NvmeSglDescriptor femu_fuzz_sgl_chain(FemuCtrlState *c, GRand *rng,
     return d;
 }
 
+/* Reset zone 0, write its first blocks and read them back. */
+static void femu_zoned_round_trip(FemuCtrlState *c, uint64_t buf)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    uint8_t wbuf[FEMU_DATA_SIZE];
+    uint8_t rbuf[FEMU_DATA_SIZE];
+    int i;
+
+    for (i = 0; i < FEMU_DATA_SIZE; i++) {
+        wbuf[i] = (uint8_t)(0x5a + i * 7);
+    }
+    g_assert_cmpint(femu_zone_action(c, 0, NVME_ZONE_ACTION_RESET), ==,
+                    NVME_SUCCESS);
+    qtest_memwrite(qts, buf, wbuf, FEMU_DATA_SIZE);
+    g_assert_cmpint(FEMU_SC(femu_rw(c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    qtest_memset(qts, buf, 0, FEMU_DATA_SIZE);
+    g_assert_cmpint(FEMU_SC(femu_rw(c, NVME_CMD_READ, 0, buf)), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, rbuf, FEMU_DATA_SIZE);
+    g_assert_cmpint(memcmp(wbuf, rbuf, FEMU_DATA_SIZE), ==, 0);
+}
+
 typedef struct FemuIoFuzz {
     int min_succeeded;
-    bool round_trip;    /* false where writes must land on a write pointer */
+    bool zoned;         /* writes must land on a write pointer */
 } FemuIoFuzz;
 
-static const FemuIoFuzz femu_io_fuzz_conv = { 8, true };
-static const FemuIoFuzz femu_io_fuzz_zoned = { 3, false };
+static const FemuIoFuzz femu_io_fuzz_conv = { 8, false };
+static const FemuIoFuzz femu_io_fuzz_zoned = { 5, true };
+
+#define FEMU_FUZZ_ZONES     4
+
+/* The write pointer and capacity of the zone that starts at @zslba. */
+static uint64_t femu_fuzz_zone_wp(FemuCtrlState *c, uint64_t buf,
+                                  uint64_t zslba, uint64_t *zcap)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = NVME_CMD_ZONE_MGMT_RECV;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(zslba);
+    cmd.cdw11 = cpu_to_le32(zslba >> 32);
+    cmd.cdw12 = cpu_to_le32(31);    /* header and one zone descriptor */
+    g_assert_cmpint(femu_io(c, &cmd), ==, NVME_SUCCESS);
+    *zcap = qtest_readq(c->pdev->bus->qts, buf + 64 + 8);
+    return qtest_readq(c->pdev->bus->qts, buf + 64 + 24);
+}
+
+/*
+ * Aim a valid write at one of the first few zones: at its write pointer,
+ * or at its start for Zone Append, resetting the zone when the write would
+ * not fit in what is left of it.
+ */
+static void femu_fuzz_aim_zone(FemuCtrlState *c, GRand *rng, uint64_t buf,
+                               uint64_t zsze, NvmeRwCmd *rw)
+{
+    uint64_t zslba = zsze * g_rand_int_range(rng, 0, FEMU_FUZZ_ZONES);
+    uint32_t nlb = le16_to_cpu(rw->nlb) + 1;
+    uint64_t zcap;
+    uint64_t wp = femu_fuzz_zone_wp(c, buf, zslba, &zcap);
+
+    if (wp + nlb > zslba + zcap) {
+        g_assert_cmpint(femu_zone_action(c, zslba, NVME_ZONE_ACTION_RESET),
+                        ==, NVME_SUCCESS);
+        wp = zslba;
+    }
+    rw->slba = cpu_to_le64(rw->opcode == NVME_CMD_ZONE_APPEND ? zslba : wp);
+}
 
 /*
  * Random I/O commands from a fixed seed. Most are valid, so they reach the
@@ -5486,6 +5549,8 @@ static void femu_test_io_fuzz(void *obj, void *data, QGuestAllocator *alloc)
     uint64_t lists = region + 4096ULL * (FEMU_FUZZ_PAGES - FEMU_FUZZ_LISTS);
     GRand *rng = g_rand_new_with_seed(0x494f4655);
     uint64_t nsze;
+    uint64_t zsze = 0;
+    uint64_t zbuf = 0;
     NvmeRwCmd rw;
     NvmeCmd *cmd = (NvmeCmd *)&rw;
     int distinct = 0;
@@ -5497,6 +5562,15 @@ static void femu_test_io_fuzz(void *obj, void *data, QGuestAllocator *alloc)
                     NVME_SUCCESS);
     nsze = qtest_readq(c.pdev->bus->qts, region);
     g_assert_cmpuint(nsze, >, 64);
+    if (want->zoned) {
+        uint8_t report[192];
+
+        zbuf = guest_alloc(alloc, 4096);
+        femu_zone_report(&c, zbuf, report);
+        zsze = ldq_le_p(report + 128 + 16);
+        g_assert_cmpuint(zsze, >=, 64);
+        g_assert_cmpuint(zsze * FEMU_FUZZ_ZONES, <=, nsze);
+    }
 
     for (i = 0; i < FEMU_IO_FUZZ_ROUNDS; i++) {
         bool wild = g_rand_int_range(rng, 0, 4) == 0;
@@ -5511,6 +5585,11 @@ static void femu_test_io_fuzz(void *obj, void *data, QGuestAllocator *alloc)
                                                MIN(nsze, 1 << 20) - nlb));
         rw.nlb = cpu_to_le16(nlb);
         femu_fuzz_valid_dptr(&c, rng, region, &rw, (nlb + 1) * c.lba_size);
+        if (want->zoned && (rw.opcode == NVME_CMD_WRITE ||
+                            rw.opcode == NVME_CMD_WRITE_ZEROES ||
+                            rw.opcode == NVME_CMD_ZONE_APPEND)) {
+            femu_fuzz_aim_zone(&c, rng, zbuf, zsze, &rw);
+        }
 
         if (wild) {
             switch (g_rand_int_range(rng, 0, 7)) {
@@ -5571,8 +5650,12 @@ static void femu_test_io_fuzz(void *obj, void *data, QGuestAllocator *alloc)
     /* still answering */
     g_assert_cmpint(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, region), ==,
                     NVME_SUCCESS);
-    if (want->round_trip) {
+    if (!want->zoned) {
         femu_round_trip(&c, 0x5a);
+    } else {
+        /* zone 0 was written at its write pointer; it still reads back */
+        femu_zoned_round_trip(&c, zbuf);
+        guest_free(alloc, zbuf);
     }
     femu_disable(&c);
     g_rand_free(rng);
