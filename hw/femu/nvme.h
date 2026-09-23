@@ -2306,6 +2306,7 @@ uint16_t dma_read_cmd(FemuCtrl *n, NvmeCmd *cmd, uint8_t *ptr, uint32_t len);
 
 
 uint16_t zns_check_compare(NvmeNamespace *ns, NvmeCmd *cmd);
+void bbssd_deallocate_all(NvmeNamespace *ns);
 
 /* Misc */
 uint64_t *nvme_setup_discontig(FemuCtrl *n, uint64_t prp_addr, uint16_t

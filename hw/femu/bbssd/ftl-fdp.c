@@ -1779,6 +1779,16 @@ static int ssd_deallocate_fdp_lpns(struct ssd *ssd, uint64_t start_lpn,
     return deallocated;
 }
 
+/* Deallocate every page under FDP; see bbssd_deallocate_all(). */
+void ssd_deallocate_fdp_all(struct ssd *ssd)
+{
+    int already_invalid = 0;
+
+    if (ssd->sp.tt_pgs) {
+        ssd_deallocate_fdp_lpns(ssd, 0, ssd->sp.tt_pgs - 1, &already_invalid);
+    }
+}
+
 /*
  * ssd_trim_fdp_range - FDP DSM deallocate (default). Invalidate only the logical
  * pages covered by the requested LBA ranges: mark each mapped page invalid via

@@ -560,6 +560,7 @@ bool femu_mapping_scheme_known(const char *name);
 bool femu_ftl_policy_known(const char *name);
 uint64_t ssd_buffer_destage(struct ssd *ssd, int budget, uint64_t stime);
 uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req);
+void ssd_deallocate_fdp_all(struct ssd *ssd);
 void ssd_init(FemuCtrl *n, NvmeNamespace *ns);
 
 /* NAND media-layer bridge (hw/femu/bbssd/ftl-media.c) */

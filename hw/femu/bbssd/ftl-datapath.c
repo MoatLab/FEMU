@@ -724,6 +724,27 @@ uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req)
     return 0;
 }
 
+/*
+ * Drop every mapping the namespace's FTL holds, as Format erases it. The host's
+ * data is gone, so the pages it occupied are invalid: left mapped, garbage
+ * collection would keep relocating data nobody can read any more. The caller
+ * has the dataplane and the FTL thread paused.
+ */
+void bbssd_deallocate_all(NvmeNamespace *ns)
+{
+    struct ssd *ssd = ns->ssd;
+    int already_invalid = 0;
+
+    if (!ssd || !ssd->sp.tt_pgs) {
+        return;
+    }
+    if (ssd->fdp_enabled) {
+        ssd_deallocate_fdp_all(ssd);
+    } else {
+        ssd_deallocate_lpns(ssd, 0, ssd->sp.tt_pgs - 1, &already_invalid);
+    }
+}
+
 uint64_t ssd_trim(struct ssd *ssd, NvmeRequest *req)
 {
     struct ssdparams *spp = &ssd->sp;

@@ -4912,6 +4912,61 @@ static void femu_test_intx_shadow_doorbell(void *obj, void *data,
     femu_disable(&c);
 }
 
+#define FEMU_FMT_NS_PAGES       4096        /* 16 MiB of 4 KiB pages */
+
+/*
+ * A Format erases the namespace, so the FTL has to let go of the old pages.
+ * Kept mapped, garbage collection goes on relocating data nobody can read.
+ *
+ * Fill the namespace with the two halves interleaved, so every line holds
+ * both. Format, then rewrite only the first half until collection runs: the
+ * lines it picks held nothing but erased data, so it should move nothing.
+ */
+static void femu_test_format_ftl(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint32_t spp = 4096 / 512;
+    uint64_t buf;
+    uint8_t page[512];
+    uint64_t gc;
+    int pass;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, 4096);
+    qtest_memset(qts, buf, 0x6b, 4096);
+
+    for (i = 0; i < FEMU_FMT_NS_PAGES / 2; i++) {
+        g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, i * spp, buf), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE,
+                                (i + FEMU_FMT_NS_PAGES / 2) * spp, buf), ==,
+                        NVME_SUCCESS);
+    }
+    g_assert_cmpint(femu_format_dw10(&c, 0), ==, NVME_SUCCESS);
+
+    for (pass = 0; pass < 8; pass++) {
+        for (i = 0; i < FEMU_FMT_NS_PAGES / 2; i++) {
+            g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, i * spp, buf), ==,
+                            NVME_SUCCESS);
+        }
+    }
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, buf,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, page, sizeof(page));
+    gc = ldq_le_p(page + 16);
+    g_assert_cmpint(ldq_le_p(page + 8), >, 0);
+    g_assert_cmpint(gc, ==, 0);
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 #define FEMU_CSD_COMPUTE_LOAD   0x22
 #define FEMU_CSD_TYPE_SHARED_LIB 0x03
 
@@ -5201,6 +5256,12 @@ static void femu_register_nodes(void)
     qos_add_test("prp-status", "femu", femu_test_prp_status, NULL);
     qos_add_test("doorbell-errors", "femu", femu_test_doorbell_errors, NULL);
     qos_add_test("format-ses", "femu", femu_test_format_ses, NULL);
+    qos_add_test("format-ftl", "femu", femu_test_format_ftl,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=16,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+            "blks_per_pl=32,pls_per_lun=1,luns_per_ch=4,nchs=4,oacs=0x2"
+    });
     qos_add_test("bar0-size", "femu", femu_test_bar0_size, NULL);
     qos_add_test("self-test", "femu", femu_test_self_test, NULL);
     qos_add_test("verify", "femu", femu_test_verify,
