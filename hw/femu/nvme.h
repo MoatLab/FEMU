@@ -1555,6 +1555,7 @@ typedef struct NvmeCQueue {
     uint64_t    db_addr_hva;
     uint64_t    eventidx_addr;
     uint64_t    eventidx_addr_hva;
+    QemuSpin    post_lock;      /* held to post when pollers share the queue */
     bool        is_active;
 } NvmeCQueue;
 

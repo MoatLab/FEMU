@@ -19,6 +19,29 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
 
 static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req);
 
+/*
+ * Several submission queues may report to one completion queue, and with more
+ * than one poller two of them can be posting to it at the same time.
+ */
+static inline void nvme_cq_lock(FemuCtrl *n, NvmeCQueue *cq)
+{
+    if (n->nr_pollers > 1) {
+        qemu_spin_lock(&cq->post_lock);
+    }
+}
+
+static inline void nvme_cq_unlock(FemuCtrl *n, NvmeCQueue *cq)
+{
+    if (n->nr_pollers > 1) {
+        qemu_spin_unlock(&cq->post_lock);
+    }
+}
+
+static inline bool *nvme_should_isr(FemuCtrl *n, int index_poller)
+{
+    return &n->should_isr[index_poller * (n->nr_io_queues + 1)];
+}
+
 static void nvme_update_sq_eventidx(const NvmeSQueue *sq)
 {
     /*
@@ -260,7 +283,9 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
             NvmeCQueue *cq = n->cq[sq->cqid];
             if (cq && cq->is_active) {
                 /* CQ space guaranteed by the nvme_cq_full check at loop top */
+                nvme_cq_lock(n, cq);
                 nvme_post_cqe(cq, req);
+                nvme_cq_unlock(n, cq);
                 did_isr = true;
                 n->poller_ctr[index_poller].nr_tt_ios++;
             }
@@ -335,6 +360,7 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
     NvmeRequest *req = NULL;
     struct rte_ring *rp = n->to_ftl[index_poller];
     pqueue_t *pq = n->pq[index_poller];
+    bool *should_isr = nvme_should_isr(n, index_poller);
     uint64_t now;
     int processed = 0;
     int rc;
@@ -430,7 +456,9 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
             QTAILQ_INSERT_TAIL(&req->sq->req_list, req, entry);
             continue;
         }
+        nvme_cq_lock(n, cq);
         nvme_post_cqe(cq, req);
+        nvme_cq_unlock(n, cq);
         QTAILQ_INSERT_TAIL(&req->sq->req_list, req, entry);
         processed++;
         /* per-poller counters: no shared cacheline on the hot path */
@@ -444,39 +472,24 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
                            n->poller_ctr[index_poller].nr_tt_ios);
             }
         }
-        n->should_isr[req->sq->cqid] = true;
+        should_isr[req->sq->cqid] = true;
     }
 
     if (processed == 0)
         return;
 
-    switch (n->multipoller_enabled) {
-    case 1:
-        /*
-         * Fire one ISR per active CQ in this poller's round-robin shard. With
-         * poller_ratio == 1 (nr_pollers == nr_io_queues) the loop runs once for
-         * i == index_poller, identical to the original single-CQ notify; with
-         * M:N this poller owns several CQs and must service each that completed.
-         * publish the CQ eventidx alongside so the guest suppresses its CQ-head
-         * doorbell MMIO (see nvme_update_cq_eventidx).
-         */
-        for (i = index_poller; i <= n->nr_io_queues; i += n->nr_pollers) {
-            if (n->should_isr[i]) {
-                nvme_isr_notify_io(n->cq[i]);
-                nvme_update_cq_eventidx(n->cq[i]);
-                n->should_isr[i] = false;
-            }
+    /*
+     * One interrupt per completion queue this sweep posted to, with the CQ
+     * eventidx published alongside so the guest can skip its CQ-head doorbell
+     * (see nvme_update_cq_eventidx). The queue a completion went to is the one
+     * its submission queue names, which need not be in this poller's shard.
+     */
+    for (i = 1; i <= n->nr_io_queues; i++) {
+        if (should_isr[i]) {
+            nvme_isr_notify_io(n->cq[i]);
+            nvme_update_cq_eventidx(n->cq[i]);
+            should_isr[i] = false;
         }
-        break;
-    default:
-        for (i = 1; i <= n->nr_io_queues; i++) {
-            if (n->should_isr[i]) {
-                nvme_isr_notify_io(n->cq[i]);
-                nvme_update_cq_eventidx(n->cq[i]);
-                n->should_isr[i] = false;
-            }
-        }
-        break;
     }
 }
 
@@ -521,7 +534,7 @@ void *nvme_poller(void *arg)
              */
             for (int q = index; q <= n->nr_io_queues; q += n->nr_pollers) {
                 NvmeSQueue *sq = n->sq[q];
-                NvmeCQueue *cq = n->cq[q];
+                NvmeCQueue *cq = sq ? n->cq[sq->cqid] : NULL;
                 if (sq && sq->is_active && cq && cq->is_active) {
                     /* acquire: pair with the smp_wmb() before is_active=true
                      * in nvme_create_sq so we see a fully-initialized sq/cq */
@@ -560,9 +573,14 @@ void *nvme_poller(void *arg)
                 continue;
             }
 
+            /*
+             * Several submission queues may share one completion queue, so
+             * the queue to check is the one this submission queue names, not
+             * the one that happens to carry the same number.
+             */
             for (i = 1; i <= n->nr_io_queues; i++) {
                 NvmeSQueue *sq = n->sq[i];
-                NvmeCQueue *cq = n->cq[i];
+                NvmeCQueue *cq = sq ? n->cq[sq->cqid] : NULL;
                 if (sq && sq->is_active && cq && cq->is_active) {
                     /* acquire: pair with the smp_wmb() before is_active=true
                      * in nvme_create_sq so we see a fully-initialized sq/cq */

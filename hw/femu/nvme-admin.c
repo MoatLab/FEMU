@@ -322,8 +322,6 @@ static void nvme_init_poller(FemuCtrl *n)
 {
     int i;
 
-    n->should_isr = g_malloc0(sizeof(bool) * (n->nr_io_queues + 1));
-
     /*
      * M:N poller<->queue mapping. With multipoller enabled, spawn
      * nr_pollers = ceil(nr_io_queues / poller_ratio) threads; each poller
@@ -339,6 +337,14 @@ static void nvme_init_poller(FemuCtrl *n)
     } else {
         n->nr_pollers = 1;
     }
+
+    /*
+     * One row of completion-queue flags per poller. A submission queue may
+     * report to a completion queue that another poller also serves, so a
+     * shared row would be written by two threads at once.
+     */
+    n->should_isr = g_malloc0(sizeof(bool) * (n->nr_pollers + 1) *
+                              (n->nr_io_queues + 1));
 
     /* poller quiesce flags (1-based poller indices); see poller_in_sweep */
     if (!n->poller_in_sweep) {

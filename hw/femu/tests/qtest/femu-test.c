@@ -2904,6 +2904,76 @@ static void femu_test_fdp_write_zeroes(void *obj, void *data,
     femu_disable(&c);
 }
 
+/*
+ * Submission queues 1 and 2 both report to completion queue 1, and there is no
+ * completion queue 2 (Base 2.3, 3.3.1). The second queue has to be served
+ * anyway, and its completions have to land in queue 1 naming queue 2.
+ */
+static void femu_test_shared_cq(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    FemuQueue sq2;
+    NvmeRwCmd rw;
+    NvmeCmd cmd;
+    NvmeCqe cqe;
+    uint64_t buf;
+    uint8_t *wbuf = g_malloc(FEMU_DATA_SIZE);
+    uint8_t *rbuf = g_malloc0(FEMU_DATA_SIZE);
+    uint16_t want;
+    uint16_t got;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_queue_init(&c, &sq2, 2);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_CREATE_SQ;
+    cmd.dptr.prp1 = cpu_to_le64(sq2.sq_addr);
+    cmd.cdw10 = cpu_to_le32(((FEMU_QSIZE - 1) << 16) | sq2.qid);
+    cmd.cdw11 = cpu_to_le32((c.io.qid << 16) | NVME_SQ_PC);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    for (i = 0; i < FEMU_DATA_SIZE; i++) {
+        wbuf[i] = (uint8_t)(i * 13 + 5);
+    }
+    qtest_memwrite(qts, buf, wbuf, FEMU_DATA_SIZE);
+
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.slba = cpu_to_le64(64);
+    rw.nlb = cpu_to_le16(FEMU_DATA_SIZE / c.lba_size - 1);
+    want = c.cid;
+    femu_submit(&c, &sq2, (NvmeCmd *)&rw);
+    qtest_memread(qts, c.io.cq_addr + c.io.cq_head * sizeof(NvmeCqe), &cqe,
+                  sizeof(cqe));
+    g_assert_cmpint(femu_complete(&c, &c.io, &got, NULL), ==, NVME_SUCCESS);
+    g_assert_cmpint(got, ==, want);
+    qtest_memread(qts, c.io.cq_addr +
+                  ((c.io.cq_head + FEMU_QSIZE - 1) % FEMU_QSIZE) *
+                  sizeof(NvmeCqe), &cqe, sizeof(cqe));
+    g_assert_cmpint(le16_to_cpu(cqe.sq_id), ==, sq2.qid);
+
+    /* and what went in through queue 2 reads back through queue 1 */
+    qtest_memset(qts, buf, 0, FEMU_DATA_SIZE);
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_READ, 64, buf), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, rbuf, FEMU_DATA_SIZE);
+    g_assert_cmpint(memcmp(wbuf, rbuf, FEMU_DATA_SIZE), ==, 0);
+
+    g_assert_cmpint(femu_delete_sq(&c, sq2.qid), ==, NVME_SUCCESS);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &sq2);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    g_free(rbuf);
+    g_free(wbuf);
+}
+
 #define FEMU_CSD_COMPUTE_LOAD   0x22
 #define FEMU_CSD_TYPE_SHARED_LIB 0x03
 
@@ -3174,6 +3244,11 @@ static void femu_register_nodes(void)
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4,lba_index=3,"
             "subsys=fdpsub",
         .arg = &femu_wide_fdp,
+    });
+    qos_add_test("shared-cq", "femu", femu_test_shared_cq, NULL);
+    qos_add_test("shared-cq-pollers", "femu", femu_test_shared_cq,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "multipoller_enabled=1"
     });
     femu_csd_dir = g_strdup_printf("%s/femu-csd-%d", g_get_tmp_dir(),
                                    (int)getpid());
