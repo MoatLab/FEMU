@@ -59,7 +59,7 @@ static void kvssd_fill_id_ns(FemuKvssdState *s, NvmeIdNsKv *id)
 {
     memset(id, 0, sizeof(*id));
     id->nsze = cpu_to_le64(s->value_capacity);
-    id->ncap = cpu_to_le64(s->value_capacity);
+    /* bytes 15:08 are reserved in a key value namespace (KV 1.3, Figure 41) */
     id->nuse = cpu_to_le64(s->value_used + s->key_used);
     id->nkvf = 0;                      /* one KV format (0's based) */
     id->kvfc = 0;                      /* formatted with KV Format Index 0 */

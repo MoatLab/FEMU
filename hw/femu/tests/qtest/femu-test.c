@@ -4479,6 +4479,56 @@ static void femu_test_log_contents_zoned(void *obj, void *data,
     femu_disable(&c);
 }
 
+/* Format NVM with only CDW10 set, on namespace 1 */
+static uint16_t femu_format_dw10(FemuCtrlState *c, uint32_t dw10)
+{
+    NvmeCmd cmd;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_FORMAT_NVM;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.cdw10 = cpu_to_le32(dw10);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+/*
+ * Secure Erase Settings are bits 11:9 of CDW10 (Base 2.3, Figure 193). No
+ * erase and a user data erase are accepted; a cryptographic erase is not
+ * offered and 011b and above are reserved. Bit 8 is PIL, not part of it.
+ */
+static void femu_test_format_ses(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_format_dw10(&c, 1 << 8), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_format_dw10(&c, 1 << 9), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_format_dw10(&c, 2 << 9), ==, NVME_INVALID_FIELD);
+    g_assert_cmpint(femu_format_dw10(&c, 7 << 9), ==, NVME_INVALID_FIELD);
+    femu_disable(&c);
+}
+
+/* a key value namespace has a size in bytes 7:0 and nothing in 15:8 */
+static void femu_test_kv_identify_reserved(void *obj, void *data,
+                                           QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+
+    femu_enable(&c, &femu->dev, alloc);
+    buf = guest_alloc(alloc, 4096);
+    g_assert_cmpint(femu_identify(&c, 1, NVME_ID_CNS_CS_NS,
+                                  (uint32_t)FEMU_CSI_KV << 24, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(qtest_readq(qts, buf), >, 0);
+    g_assert_cmpint(qtest_readq(qts, buf + 8), ==, 0);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
 #define FEMU_CSD_COMPUTE_LOAD   0x22
 #define FEMU_CSD_TYPE_SHARED_LIB 0x03
 
@@ -4761,6 +4811,11 @@ static void femu_register_nodes(void)
     qos_add_test("error-log", "femu", femu_test_error_log, NULL);
     qos_add_test("prp-status", "femu", femu_test_prp_status, NULL);
     qos_add_test("doorbell-errors", "femu", femu_test_doorbell_errors, NULL);
+    qos_add_test("format-ses", "femu", femu_test_format_ses, NULL);
+    qos_add_test("kv-identify-reserved", "femu",
+                 femu_test_kv_identify_reserved, &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "devsz_mb=512,femu_mode=5"
+    });
     qos_add_test("log-contents-fdp", "femu", femu_test_log_contents_fdp,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =

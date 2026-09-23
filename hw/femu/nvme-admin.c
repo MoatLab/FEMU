@@ -2259,8 +2259,8 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
 static uint16_t nvme_abort_req(FemuCtrl *n, NvmeCmd *cmd, uint32_t *result)
 {
     uint32_t index = 0;
-    uint16_t sqid = cmd->cdw10 & 0xffff;
-    uint16_t cid = (cmd->cdw10 >> 16) & 0xffff;
+    uint16_t sqid = le32_to_cpu(cmd->cdw10) & 0xffff;
+    uint16_t cid = (le32_to_cpu(cmd->cdw10) >> 16) & 0xffff;
     NvmeSQueue *sq;
 
     *result = 1;
@@ -2437,10 +2437,18 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
     uint8_t meta_loc = dw10 & 0x10;
     uint8_t pil = (dw10 >> 5) & 0x8;
     uint8_t pi = (dw10 >> 5) & 0x7;
-    uint8_t sec_erase = (dw10 >> 8) & 0x7;
+    /* SES is bits 11:9; bit 8 is PIL, which used to be read as an erase */
+    uint8_t sec_erase = (dw10 >> 9) & 0x7;
 
     if (nsid != 0xffffffff && (nsid == 0 || nsid > n->num_namespaces)) {
         return NVME_INVALID_NSID | NVME_DNR;
+    }
+    /*
+     * No erase or a user data erase. FNA reports no cryptographic erase, and
+     * 011b and above are reserved (Base 2.3, Figure 193).
+     */
+    if (sec_erase > 1) {
+        return NVME_INVALID_FIELD | NVME_DNR;
     }
 
     /*
