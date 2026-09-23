@@ -156,7 +156,7 @@ Properties that mostly mirror the NVMe identify fields, the OpenChannel geometry
 | `nr_cu` | uint8 | `4` | Compute units; programs queue for the first free one | set on `-device femu,...` |
 | `nr_thread` | uint8 | `4` | Accepted for CEMU config compatibility only: the | set on `-device femu,...` |
 | `oacs` | uint16 | `NVME_OACS_FORMAT` | _undocumented_ | set on `-device femu,...` |
-| `oncs` | uint16 | `NVME_ONCS_DSM | NVME_ONCS_FEATURES` | Optional NVM commands the controller advertises. Compare, Write Zeroes and Write Uncorrectable are off unless named here. | set on `-device femu,...` |
+| `oncs` | uint16 | `NVME_ONCS_DSM | NVME_ONCS_FEATURES` | Optional NVM commands the controller advertises. Compare (0x1), Write Uncorrectable (0x2), Write Zeroes (0x8) and Verify (0x80) are off unless named here. | set on `-device femu,...` |
 | `poller_ratio` | uint32 | `1` | _undocumented_ | set on `-device femu,...` |
 | `sgl` | bool | `false` | _undocumented_ | set on `-device femu,...` |
 | `stride` | uint8 | `0` | _undocumented_ | set on `-device femu,...` |

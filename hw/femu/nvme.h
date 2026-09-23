@@ -708,6 +708,7 @@ enum NvmeIoCommands {
     NVME_CMD_COMPARE            = 0x05,
     NVME_CMD_WRITE_ZEROES       = 0x08,
     NVME_CMD_DSM                = 0x09,
+    NVME_CMD_VERIFY             = 0x0c,
     NVME_CMD_IO_MGMT_RECV       = 0x12,
     NVME_CMD_IO_MGMT_SEND       = 0x1d,
     NVME_CMD_ZONE_MGMT_SEND     = 0x79,
@@ -1222,6 +1223,7 @@ enum NvmeIdCtrlOncs {
     NVME_ONCS_WRITE_ZEROS   = 1 << 3,
     NVME_ONCS_FEATURES      = 1 << 4,
     NVME_ONCS_RESRVATIONS   = 1 << 5,
+    NVME_ONCS_VERIFY        = 1 << 7,
 };
 
 enum NvmeIdCtrlFrmw {

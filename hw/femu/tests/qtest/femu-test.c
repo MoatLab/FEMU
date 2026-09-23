@@ -4745,6 +4745,64 @@ static void femu_test_oc20_set_chunks(void *obj, void *data,
     femu_disable(&c);
 }
 
+#define FEMU_CMD_VERIFY         0x0c
+#define FEMU_UNRECOVERED_READ   0x281   /* media error */
+
+static uint16_t femu_lba_cmd(FemuCtrlState *c, uint8_t opcode, uint64_t slba,
+                             uint32_t nlb)
+{
+    NvmeRwCmd rw;
+
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = opcode;
+    rw.nsid = cpu_to_le32(1);
+    rw.slba = cpu_to_le64(slba);
+    rw.nlb = cpu_to_le16(nlb - 1);
+    return femu_io(c, (NvmeCmd *)&rw);
+}
+
+/*
+ * Verify (NVM 1.2, 3.3.4) moves no data and fails where a Read would: on an
+ * uncorrectable block, and past the end of the namespace. It is listed in the
+ * effects log when ONCS offers it.
+ */
+static void femu_test_verify(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, 4096);
+
+    g_assert_cmpint(femu_lba_cmd(&c, FEMU_CMD_VERIFY, 0, 16), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(femu_lba_cmd(&c, NVME_CMD_WRITE_UNCOR, 8, 8), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(femu_lba_cmd(&c, FEMU_CMD_VERIFY, 0, 16), ==,
+                    FEMU_UNRECOVERED_READ);
+    g_assert_cmpint(femu_lba_cmd(&c, FEMU_CMD_VERIFY, 0, 8), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(femu_lba_cmd(&c, FEMU_CMD_VERIFY, 0xfffff000, 8), ==,
+                    NVME_LBA_RANGE);
+
+    /* a write repairs the blocks, and Verify then passes */
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, 8, buf), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_lba_cmd(&c, FEMU_CMD_VERIFY, 0, 16), ==,
+                    NVME_SUCCESS);
+
+    g_assert_cmpint(femu_log_cmd(&c, 0, FEMU_LOG_CMD_EFFECTS, 0, buf, 4096),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpint(qtest_readl(qts, buf + 1024 + 4 * FEMU_CMD_VERIFY) & 1,
+                    ==, 1);
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
 #define FEMU_CSD_COMPUTE_LOAD   0x22
 #define FEMU_CSD_TYPE_SHARED_LIB 0x03
 
@@ -5033,6 +5091,10 @@ static void femu_register_nodes(void)
     qos_add_test("doorbell-errors", "femu", femu_test_doorbell_errors, NULL);
     qos_add_test("format-ses", "femu", femu_test_format_ses, NULL);
     qos_add_test("bar0-size", "femu", femu_test_bar0_size, NULL);
+    qos_add_test("verify", "femu", femu_test_verify,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "oncs=0x86"
+    });
     qos_add_test("aer-limit", "femu", femu_test_aer_limit,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "aerl=255"

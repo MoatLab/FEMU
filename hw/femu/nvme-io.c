@@ -809,6 +809,36 @@ mapped:
     return nvme_backend_status(ret);
 }
 
+/*
+ * Verify (NVM 1.2, 3.3.4) checks that a range could be read, moving no data: it
+ * reports the blocks a Read would fail on, uncorrectable ones and, with DULBE
+ * set, unwritten ones. A zoned namespace applies its read rules first.
+ */
+static uint16_t nvme_verify(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
+{
+    NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
+    uint64_t slba = le64_to_cpu(rw->slba);
+    uint32_t nlb = le16_to_cpu(rw->nlb) + 1;
+    uint64_t nsze = le64_to_cpu(ns->id_ns.nsze);
+    uint64_t elba = slba + nlb;
+    uint16_t status;
+
+    if (slba > nsze || nlb > nsze - slba) {
+        return NVME_LBA_RANGE | NVME_DNR;
+    }
+    if (NS_ZNSSD(ns)) {
+        status = zns_check_compare(ns, cmd);
+        if (status) {
+            return status;
+        }
+    }
+    if (find_next_bit(ns->uncorrectable, elba, slba) < elba) {
+        return NVME_UNRECOVERED_READ;
+    }
+
+    return nvme_check_dulbe(n, ns, slba, elba);
+}
+
 static uint16_t nvme_dsm(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                          NvmeRequest *req)
 {
@@ -1413,6 +1443,11 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         if ((NVME_ONCS_WRITE_ZEROS & n->oncs) && nvme_ns_has_nvm_cmd_set(ns) &&
             !NS_ZNSSD(ns)) {
             return nvme_write_zeros(n, ns, cmd, req);
+        }
+        return NVME_INVALID_OPCODE | NVME_DNR;
+    case NVME_CMD_VERIFY:
+        if ((NVME_ONCS_VERIFY & n->oncs) && nvme_ns_has_nvm_cmd_set(ns)) {
+            return nvme_verify(n, ns, cmd);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
     case NVME_CMD_WRITE_UNCOR:

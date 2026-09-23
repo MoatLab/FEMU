@@ -964,9 +964,10 @@ static bool nvme_check_constraints(FemuCtrl *n, Error **errp)
     }
     if (n->oncs & ~(NVME_ONCS_COMPARE | NVME_ONCS_WRITE_UNCORR |
                     NVME_ONCS_DSM | NVME_ONCS_WRITE_ZEROS |
-                    NVME_ONCS_FEATURES)) {
+                    NVME_ONCS_FEATURES | NVME_ONCS_VERIFY)) {
         error_setg(errp, "oncs may only set Compare, Write Uncorrectable, "
-                   "DSM, Write Zeroes and Save/Select Feature Support");
+                   "DSM, Write Zeroes, Save/Select Feature Support and "
+                   "Verify");
         return false;
     }
 

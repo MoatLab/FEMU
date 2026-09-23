@@ -2152,6 +2152,13 @@ static uint16_t nvme_cmd_effects(FemuCtrl *n, NvmeCmd *cmd, uint8_t csi,
                 log.iocs[NVME_CMD_WRITE_UNCOR] = NVME_CMD_EFF_CSUPP |
                                                  NVME_CMD_EFF_LBCC;
             }
+        }
+        if (src_iocs == nvme_cse_iocs_nvm || src_iocs == nvme_cse_iocs_zoned) {
+            if (n->oncs & NVME_ONCS_VERIFY) {
+                log.iocs[NVME_CMD_VERIFY] = NVME_CMD_EFF_CSUPP;
+            }
+        }
+        if (src_iocs == nvme_cse_iocs_nvm) {
             if (n->subsys && n->subsys->endgrp.fdp.enabled) {
                 log.iocs[NVME_CMD_IO_MGMT_RECV] = NVME_CMD_EFF_CSUPP;
                 log.iocs[NVME_CMD_IO_MGMT_SEND] = NVME_CMD_EFF_CSUPP;
