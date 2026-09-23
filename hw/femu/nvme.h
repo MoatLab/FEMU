@@ -1547,6 +1547,7 @@ typedef struct NvmeCQueue {
     uint64_t    *prp_list;
     EventNotifier guest_notifier;
     QEMUTimer   *timer;
+    QEMUBH      *irq_bh;        /* notifies when there is no irqfd route */
     QTAILQ_HEAD(sq_list, NvmeSQueue) sq_list;
     QTAILQ_HEAD(cq_req_list, NvmeRequest) req_list;
     int32_t     virq;
@@ -2054,6 +2055,8 @@ typedef struct FemuCtrl {
     struct rte_ring **to_poller;
     pqueue_t        **pq;
     bool            *should_isr;
+    /* pin level in bit 0, or MSI vectors held back by INTMS */
+    uint32_t        irq_status;
     /* per poller: completions waiting for space in their completion queue */
     union cq_req_list *cpl_backlog;
     bool            poller_on;
@@ -2223,6 +2226,10 @@ void nvme_set_ctrl_name(FemuCtrl *n, const char *mn, const char *sn, int *dev_id
 /* Public APIs from intr.c for interrupt operations */
 void nvme_isr_notify_admin(void *opaque);
 void nvme_isr_notify_io(void *opaque);
+void nvme_irq_update(FemuCtrl *n);
+void nvme_irq_mask_changed(FemuCtrl *n, uint32_t unmasked);
+void nvme_cq_irq_init(NvmeCQueue *cq);
+void nvme_cq_irq_cleanup(NvmeCQueue *cq);
 int nvme_setup_virq(FemuCtrl *n, NvmeCQueue *cq);
 void nvme_remove_kvm_msi_virq(NvmeCQueue *cq);
 int nvme_clear_virq(FemuCtrl *n);

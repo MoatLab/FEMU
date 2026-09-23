@@ -16,6 +16,7 @@
 #include "libqos/pci.h"
 #include "libqos/libqos-malloc.h"
 #include "block/nvme.h"
+#include "standard-headers/linux/pci_regs.h"
 
 #define FEMU_QSIZE          16
 #define FEMU_DATA_SIZE      4096
@@ -3104,6 +3105,158 @@ static void femu_test_cq_full(void *obj, void *data, QGuestAllocator *alloc)
     femu_disable(&c);
 }
 
+/* one queue pair whose completion queue interrupts on the given vector */
+static void femu_create_io_queues_irq(FemuCtrlState *c, uint16_t vector)
+{
+    NvmeCmd cmd;
+
+    femu_queue_init(c, &c->io, 1);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_CREATE_CQ;
+    cmd.dptr.prp1 = cpu_to_le64(c->io.cq_addr);
+    cmd.cdw10 = cpu_to_le32(((FEMU_QSIZE - 1) << 16) | c->io.qid);
+    cmd.cdw11 = cpu_to_le32((vector << 16) | NVME_CQ_PC | FEMU_CQ_IEN);
+    g_assert_cmpint(femu_admin(c, &cmd), ==, NVME_SUCCESS);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_CREATE_SQ;
+    cmd.dptr.prp1 = cpu_to_le64(c->io.sq_addr);
+    cmd.cdw10 = cpu_to_le32(((FEMU_QSIZE - 1) << 16) | c->io.qid);
+    cmd.cdw11 = cpu_to_le32((c->io.qid << 16) | NVME_SQ_PC);
+    g_assert_cmpint(femu_admin(c, &cmd), ==, NVME_SUCCESS);
+}
+
+/* submit one read on the I/O queue and wait for its entry, unconsumed */
+static void femu_read_unconsumed(FemuCtrlState *c, uint64_t buf)
+{
+    uint64_t slot = c->io.cq_addr + c->io.cq_head * sizeof(NvmeCqe);
+    NvmeRwCmd rw;
+    uint16_t status;
+    int waited = 0;
+
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = NVME_CMD_READ;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.nlb = cpu_to_le16(7);
+    femu_submit(c, &c->io, (NvmeCmd *)&rw);
+
+    for (;;) {
+        status = qtest_readw(c->pdev->bus->qts, slot + 14);
+        if ((le16_to_cpu(status) & 1) == c->io.phase) {
+            break;
+        }
+        g_assert_cmpint(waited, <, FEMU_POLL_LIMIT_MS);
+        g_usleep(1000);
+        waited++;
+    }
+}
+
+static bool femu_intx_asserted(FemuCtrlState *c)
+{
+    return qpci_config_readw(c->pdev, PCI_STATUS) & PCI_STATUS_INTERRUPT;
+}
+
+/* wait for a condition the main loop makes true from a bottom half */
+#define FEMU_WAIT_FOR(cond)                                 \
+    do {                                                    \
+        int waited_ = 0;                                    \
+        while (!(cond)) {                                   \
+            g_assert_cmpint(waited_, <, FEMU_POLL_LIMIT_MS); \
+            g_usleep(1000);                                 \
+            waited_++;                                      \
+        }                                                   \
+    } while (0)
+
+/*
+ * I/O completions interrupt the host without a KVM route of their own, by
+ * each of the three mechanisms the device offers: the pin, which is level
+ * triggered and masked by INTMS; MSI, held back while INTMS masks its vector;
+ * and MSI-X, which records a masked vector as pending.
+ */
+static void femu_test_io_interrupts(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QPCIDevice *dev = &femu->dev;
+    QTestState *qts = dev->bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+    uint64_t msi_addr;
+    uint8_t msi;
+    uint16_t flags;
+
+    /* pin based */
+    femu_enable(&c, dev, alloc);
+    buf = guest_alloc(alloc, 4096);
+    femu_create_io_queues_irq(&c, 0);
+    g_assert_false(femu_intx_asserted(&c));
+    femu_read_unconsumed(&c, buf);
+    FEMU_WAIT_FOR(femu_intx_asserted(&c));
+    qpci_io_writel(dev, c.bar, 0xc, 1);         /* INTMS */
+    g_assert_false(femu_intx_asserted(&c));
+    qpci_io_writel(dev, c.bar, 0x10, 1);        /* INTMC */
+    g_assert_true(femu_intx_asserted(&c));
+    g_assert_cmpint(femu_complete(&c, &c.io, NULL, NULL), ==, NVME_SUCCESS);
+    g_assert_false(femu_intx_asserted(&c));
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+
+    /* MSI, one vector, delivered into guest memory the test can read */
+    msi = qpci_find_capability(dev, PCI_CAP_ID_MSI, 0);
+    g_assert_cmpint(msi, !=, 0);
+    msi_addr = guest_alloc(alloc, 4096);
+    qtest_writel(qts, msi_addr, 0);
+    qpci_config_writel(dev, msi + PCI_MSI_ADDRESS_LO, (uint32_t)msi_addr);
+    qpci_config_writel(dev, msi + PCI_MSI_ADDRESS_HI, msi_addr >> 32);
+    qpci_config_writew(dev, msi + PCI_MSI_DATA_64, 0x4321);
+    flags = qpci_config_readw(dev, msi + PCI_MSI_FLAGS);
+    qpci_config_writew(dev, msi + PCI_MSI_FLAGS,
+                       (flags & ~PCI_MSI_FLAGS_QSIZE) | PCI_MSI_FLAGS_ENABLE);
+
+    memset(&c, 0, sizeof(c));
+    femu_enable(&c, dev, alloc);
+    femu_create_io_queues_irq(&c, 0);
+    qpci_io_writel(dev, c.bar, 0xc, 1);         /* INTMS */
+    qtest_writel(qts, msi_addr, 0);
+    femu_read_unconsumed(&c, buf);
+    g_usleep(100 * 1000);
+    g_assert_cmphex(qtest_readl(qts, msi_addr), ==, 0);
+    qpci_io_writel(dev, c.bar, 0x10, 1);        /* INTMC */
+    g_assert_cmphex(qtest_readl(qts, msi_addr), ==, 0x4321);
+    qtest_writel(qts, msi_addr, 0);
+    g_assert_cmpint(femu_complete(&c, &c.io, NULL, NULL), ==, NVME_SUCCESS);
+    femu_read_unconsumed(&c, buf);
+    FEMU_WAIT_FOR(qtest_readl(qts, msi_addr) == 0x4321);
+    g_assert_cmpint(femu_complete(&c, &c.io, NULL, NULL), ==, NVME_SUCCESS);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    flags = qpci_config_readw(dev, msi + PCI_MSI_FLAGS);
+    qpci_config_writew(dev, msi + PCI_MSI_FLAGS,
+                       flags & ~PCI_MSI_FLAGS_ENABLE);
+
+    /* MSI-X with the function masked, so a notification shows as pending */
+    qpci_msix_enable(dev);
+    flags = qpci_config_readw(dev, qpci_find_capability(dev, PCI_CAP_ID_MSIX,
+                                                        0) + PCI_MSIX_FLAGS);
+    qpci_config_writew(dev, qpci_find_capability(dev, PCI_CAP_ID_MSIX, 0) +
+                       PCI_MSIX_FLAGS, flags | PCI_MSIX_FLAGS_MASKALL);
+    memset(&c, 0, sizeof(c));
+    femu_enable(&c, dev, alloc);
+    femu_create_io_queues_irq(&c, 1);
+    g_assert_false(qpci_msix_pending(dev, 1));
+    femu_read_unconsumed(&c, buf);
+    FEMU_WAIT_FOR(qpci_msix_pending(dev, 1));
+    g_assert_cmpint(femu_complete(&c, &c.io, NULL, NULL), ==, NVME_SUCCESS);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qpci_msix_disable(dev);
+
+    guest_free(alloc, msi_addr);
+    guest_free(alloc, buf);
+}
+
 #define FEMU_CSD_COMPUTE_LOAD   0x22
 #define FEMU_CSD_TYPE_SHARED_LIB 0x03
 
@@ -3377,6 +3530,7 @@ static void femu_register_nodes(void)
     });
     qos_add_test("shared-cq", "femu", femu_test_shared_cq, NULL);
     qos_add_test("cq-full", "femu", femu_test_cq_full, NULL);
+    qos_add_test("io-interrupts", "femu", femu_test_io_interrupts, NULL);
     qos_add_test("shared-cq-pollers", "femu", femu_test_shared_cq,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "multipoller_enabled=1"

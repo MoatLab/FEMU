@@ -606,6 +606,7 @@ uint16_t nvme_init_cq(NvmeCQueue *cq, FemuCtrl *n, uint64_t dma_addr, uint16_t
                     cq->db_addr, cq->eventidx_addr);
     }
     msix_vector_use(&n->parent_obj, cq->vector);
+    nvme_cq_irq_init(cq);
     n->cq[cqid] = cq;
 
     return NVME_SUCCESS;
@@ -631,6 +632,7 @@ void nvme_free_cq(NvmeCQueue *cq, FemuCtrl *n)
         cq->dma_map_len = 0;
     }
     msix_vector_unuse(&n->parent_obj, cq->vector);
+    nvme_cq_irq_cleanup(cq);
     if (cq->prp_list) {
         g_free(cq->prp_list);
     }

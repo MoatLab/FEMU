@@ -405,6 +405,8 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
             nvme_free_cq(n->cq[i], n);
         }
     }
+    n->irq_status = 0;
+    pci_irq_deassert(&n->parent_obj);
 
     n->bar.cc = 0;
     n->features.temp_thresh = 0x14d;
@@ -533,10 +535,12 @@ static void nvme_write_bar(FemuCtrl *n, hwaddr offset, uint64_t data, unsigned s
     case 0xc:
         n->bar.intms |= data & 0xffffffff;
         n->bar.intmc = n->bar.intms;
+        nvme_irq_mask_changed(n, 0);
         break;
     case 0x10:
         n->bar.intms &= ~(data & 0xffffffff);
         n->bar.intmc = n->bar.intms;
+        nvme_irq_mask_changed(n, data & 0xffffffff);
         break;
     case 0x14:
         /* If first sending data, then sending enable bit */
@@ -641,6 +645,7 @@ static void nvme_process_db_admin(FemuCtrl *n, hwaddr addr, int val)
         if (cq->tail != cq->head) {
             nvme_isr_notify_admin(cq);
         }
+        nvme_irq_update(n);
 
         /* the host made room: resume what waited for it */
         if (n->sq[0]) {
@@ -695,6 +700,7 @@ static void nvme_process_db_io(FemuCtrl *n, hwaddr addr, int val)
         if (cq->tail != cq->head) {
             nvme_isr_notify_io(cq);
         }
+        nvme_irq_update(n);
     } else {
         qid = (addr - 0x1000) >> (3 + n->db_stride);
         if (nvme_check_sqid(n, qid)) {

@@ -6,8 +6,8 @@ static int nvme_add_kvm_msi_virq(FemuCtrl *n, NvmeCQueue *cq)
     int vector_n;
     KVMRouteChange c;
 
+    /* only an MSI-X vector can have a route; others are notified directly */
     if (!msix_enabled(&(n->parent_obj))) {
-        femu_err("MSIX is mandatory for the device");
         return -1;
     }
 
@@ -22,7 +22,7 @@ static int nvme_add_kvm_msi_virq(FemuCtrl *n, NvmeCQueue *cq)
     c = kvm_irqchip_begin_route_changes(kvm_state);
     virq = kvm_irqchip_add_msi_route(&c, vector_n, &n->parent_obj);
     if (virq < 0) {
-        femu_err("Route MSIX vector to KVM failed");
+        femu_debug("no KVM route for MSI-X vector %d\n", vector_n);
         event_notifier_cleanup(&cq->guest_notifier);
         return -1;
     }
@@ -170,22 +170,95 @@ static void nvme_vector_poll(PCIDevice *dev, unsigned int vector_start, unsigned
     }
 }
 
+static bool nvme_irq_by_pin(FemuCtrl *n)
+{
+    PCIDevice *pci = &n->parent_obj;
+
+    return !msix_enabled(pci) && !msi_enabled(pci);
+}
+
+/*
+ * The pin is level triggered: it stays asserted while an interrupt-enabled
+ * completion queue holds entries the host has not consumed and INTMS does not
+ * mask it, and drops once the host has caught up. Called with the BQL held.
+ */
+void nvme_irq_update(FemuCtrl *n)
+{
+    bool pending = false;
+    int qid;
+
+    if (!nvme_irq_by_pin(n)) {
+        return;
+    }
+
+    for (qid = 0; qid <= n->nr_io_queues && !pending; qid++) {
+        NvmeCQueue *cq = n->cq[qid];
+
+        if (!cq || !cq->irq_enabled) {
+            continue;
+        }
+        if (qid) {
+            nvme_update_cq_head(cq);
+        }
+        pending = cq->head != cq->tail;
+    }
+
+    n->irq_status = pending ? 1 : 0;
+    if (~n->bar.intms & n->irq_status) {
+        pci_irq_assert(&n->parent_obj);
+    } else {
+        pci_irq_deassert(&n->parent_obj);
+    }
+}
+
+/* INTMS or INTMC was written; unmasked holds the bits INTMC just cleared */
+void nvme_irq_mask_changed(FemuCtrl *n, uint32_t unmasked)
+{
+    PCIDevice *pci = &n->parent_obj;
+    uint32_t held;
+    int v;
+
+    if (msix_enabled(pci)) {
+        return;
+    }
+    if (!msi_enabled(pci)) {
+        nvme_irq_update(n);
+        return;
+    }
+
+    /* an MSI raised while its vector was masked is sent once it is not */
+    held = n->irq_status & unmasked;
+    n->irq_status &= ~held;
+    for (v = 0; v < 32; v++) {
+        if (held & (1U << v)) {
+            msi_notify(pci, v);
+        }
+    }
+}
+
 static void nvme_isr_notify_legacy(void *opaque)
 {
     NvmeCQueue *cq = opaque;
     FemuCtrl *n = cq->ctrl;
+    PCIDevice *pci = &n->parent_obj;
 
-    if (cq->irq_enabled) {
-        if (msix_enabled(&(n->parent_obj))) {
-            msix_notify(&(n->parent_obj), cq->vector);
-        } else if (msi_enabled(&(n->parent_obj))) {
-            if (cq->vector < msi_nr_vectors_allocated(&(n->parent_obj)) &&
-                !(n->bar.intms & (1U << cq->vector))) {
-                msi_notify(&(n->parent_obj), cq->vector);
-            }
-        } else {
-            //pci_irq_pulse(&n->parent_obj);
+    if (!cq->irq_enabled) {
+        return;
+    }
+
+    if (msix_enabled(pci)) {
+        msix_notify(pci, cq->vector);
+    } else if (msi_enabled(pci)) {
+        if (cq->vector >= msi_nr_vectors_allocated(pci)) {
+            return;
         }
+        if (n->bar.intms & (1U << cq->vector)) {
+            n->irq_status |= 1U << cq->vector;
+        } else {
+            msi_notify(pci, cq->vector);
+        }
+    } else {
+        nvme_irq_update(n);
     }
 }
 
@@ -198,14 +271,35 @@ void nvme_isr_notify_io(void *opaque)
 {
     NvmeCQueue *cq = opaque;
 
-    /* Coperd: utilize irqfd mechanism */
-    if (cq->irq_enabled && cq->virq) {
+    if (!cq->irq_enabled) {
+        return;
+    }
+
+    /* the queue's own KVM route, when it could be set up */
+    if (cq->virq > 0) {
         event_notifier_set(&cq->guest_notifier);
         return;
     }
 
-    /* Coperd: fall back */
-    nvme_isr_notify_legacy(opaque);
+    /*
+     * Without one, the notification goes through the PCI core, which needs the
+     * BQL. A poller thread does not hold it, so leave the rest to a bottom
+     * half on the main loop.
+     */
+    qemu_bh_schedule(cq->irq_bh);
+}
+
+void nvme_cq_irq_init(NvmeCQueue *cq)
+{
+    cq->irq_bh = qemu_bh_new(nvme_isr_notify_legacy, cq);
+}
+
+void nvme_cq_irq_cleanup(NvmeCQueue *cq)
+{
+    if (cq->irq_bh) {
+        qemu_bh_delete(cq->irq_bh);
+        cq->irq_bh = NULL;
+    }
 }
 
 int nvme_setup_virq(FemuCtrl *n, NvmeCQueue *cq)
@@ -215,7 +309,6 @@ int nvme_setup_virq(FemuCtrl *n, NvmeCQueue *cq)
     if (cq->cqid && cq->irq_enabled) {
         ret = nvme_add_kvm_msi_virq(n, cq);
         if (ret < 0) {
-            femu_err("nvme: add kvm msix virq failed\n");
             return -1;
         }
 
