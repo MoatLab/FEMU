@@ -5145,6 +5145,108 @@ static void femu_test_copy(void *obj, void *data, QGuestAllocator *alloc)
     femu_disable(&c);
 }
 
+#define FEMU_FUZZ_ROUNDS    20000
+#define FEMU_ADM_DEBUG      0xee
+
+/* Mostly a value the handler accepts, so the draw gets past its first check. */
+static uint32_t femu_fuzz_field(GRand *rng, uint32_t sane, uint32_t wild)
+{
+    return g_rand_int_range(rng, 0, 4) ? sane : wild;
+}
+
+/*
+ * Random admin commands from a fixed seed, so a failure replays. Admin
+ * commands complete synchronously, which keeps the run deterministic. Each
+ * field is usually valid and sometimes not: namespace IDs around the valid
+ * ones, counts across the whole range, data pointers that are unaligned or
+ * point at nothing. Async Event Requests are left out, since they are held
+ * rather than completed, and so are queue deletions, which would take the
+ * admin queue's partners away. Whatever the statuses, the controller has to
+ * keep answering, and under the sanitizer build nothing may be touched out
+ * of bounds. A run that only ever fails has tested only the first checks,
+ * so enough distinct commands must also succeed.
+ */
+static void femu_test_admin_fuzz(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    const uint32_t nsids[] = { 0, 1, 2, 3, 0xfffffffe, 0xffffffff };
+    const uint8_t ops[] = {
+        NVME_ADM_CMD_CREATE_SQ, NVME_ADM_CMD_GET_LOG_PAGE,
+        NVME_ADM_CMD_CREATE_CQ, NVME_ADM_CMD_IDENTIFY, NVME_ADM_CMD_ABORT,
+        NVME_ADM_CMD_SET_FEATURES, NVME_ADM_CMD_GET_FEATURES,
+        NVME_ADM_CMD_FORMAT_NVM, FEMU_ADM_DBBUF_CONFIG,
+        FEMU_ADM_SANITIZE, FEMU_ADM_DEV_SELF_TEST,
+        NVME_ADM_CMD_ACTIVATE_FW, NVME_ADM_CMD_DOWNLOAD_FW,
+        NVME_ADM_CMD_SECURITY_SEND, NVME_ADM_CMD_SECURITY_RECV,
+        NVME_ADM_CMD_NS_ATTACHMENT, NVME_ADM_CMD_DIRECTIVE_SEND,
+        NVME_ADM_CMD_DIRECTIVE_RECV, FEMU_ADM_DEBUG,
+    };
+    const uint32_t counts[] = { 0, 1, 0x3ff, 0x7fff, 0xffff };
+    bool succeeded[256] = { false };
+    uint64_t raw = 0;
+    uint64_t buf = femu_alloc_64k(alloc, &raw);
+    GRand *rng = g_rand_new_with_seed(0x46454d55);
+    NvmeCmd cmd;
+    int distinct = 0;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+
+    for (i = 0; i < FEMU_FUZZ_ROUNDS; i++) {
+        uint64_t ptrs[] = { buf + 0x800, buf + 1, 0, 0xffffffff00000000ULL };
+        uint32_t numd;
+
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = femu_fuzz_field(rng,
+                        ops[g_rand_int_range(rng, 0, G_N_ELEMENTS(ops))],
+                        g_rand_int_range(rng, 0, 0x100));
+        if (cmd.opcode == NVME_ADM_CMD_ASYNC_EV_REQ ||
+            cmd.opcode == NVME_ADM_CMD_DELETE_SQ ||
+            cmd.opcode == NVME_ADM_CMD_DELETE_CQ) {
+            continue;
+        }
+        cmd.nsid = cpu_to_le32(femu_fuzz_field(rng,
+                        nsids[g_rand_int_range(rng, 0, 3)],
+                        g_rand_boolean(rng) ?
+                        nsids[g_rand_int_range(rng, 3, 6)] :
+                        g_rand_int(rng)));
+        cmd.dptr.prp1 = cpu_to_le64(g_rand_int_range(rng, 0, 4) ? buf :
+                                    ptrs[g_rand_int_range(rng, 0, 4)]);
+        cmd.dptr.prp2 = cpu_to_le64(g_rand_int_range(rng, 0, 4) ?
+                                    buf + 4096 :
+                                    ptrs[g_rand_int_range(rng, 0, 4)]);
+        /*
+         * The low byte selects a log ID, CNS or feature ID and the high half
+         * is a count, so draw them apart.
+         */
+        numd = femu_fuzz_field(rng, g_rand_int_range(rng, 0, 0x400),
+                               counts[g_rand_int_range(rng, 0, 5)]);
+        cmd.cdw10 = cpu_to_le32(numd << 16 |
+                                femu_fuzz_field(rng,
+                                    g_rand_int_range(rng, 0, 0x20),
+                                    g_rand_int_range(rng, 0, 0x10000)));
+        cmd.cdw11 = cpu_to_le32(femu_fuzz_field(rng,
+                        g_rand_int_range(rng, 0, 16), g_rand_int(rng)));
+        cmd.cdw12 = cpu_to_le32(femu_fuzz_field(rng, 0, g_rand_int(rng)));
+        cmd.cdw13 = cpu_to_le32(femu_fuzz_field(rng, 0, g_rand_int(rng)));
+        cmd.cdw14 = cpu_to_le32(femu_fuzz_field(rng, 0, g_rand_int(rng)));
+        cmd.cdw15 = cpu_to_le32(femu_fuzz_field(rng, 0, g_rand_int(rng)));
+        if (femu_admin(&c, &cmd) == NVME_SUCCESS && !succeeded[cmd.opcode]) {
+            succeeded[cmd.opcode] = true;
+            distinct++;
+        }
+    }
+
+    g_assert_cmpint(distinct, >=, 10);
+    /* still answering */
+    g_assert_cmpint(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    femu_disable(&c);
+    g_rand_free(rng);
+    guest_free(alloc, raw);
+}
+
 #define FEMU_CSD_COMPUTE_LOAD   0x22
 #define FEMU_CSD_TYPE_SHARED_LIB 0x03
 
@@ -5460,6 +5562,10 @@ static void femu_register_nodes(void)
             "blks_per_pl=32,pls_per_lun=1,luns_per_ch=4,nchs=4,oacs=0x2"
     });
     qos_add_test("bar0-size", "femu", femu_test_bar0_size, NULL);
+    qos_add_test("admin-fuzz", "femu", femu_test_admin_fuzz,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "namespaces=2,oacs=0x2,oncs=0x19f"
+    });
     qos_add_test("self-test", "femu", femu_test_self_test, NULL);
     qos_add_test("verify", "femu", femu_test_verify,
                  &(QOSGraphTestOptions) {
