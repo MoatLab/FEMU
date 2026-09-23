@@ -4529,6 +4529,19 @@ static void femu_test_kv_identify_reserved(void *obj, void *data,
     femu_disable(&c);
 }
 
+/* BAR0 bits 13:4 are read only, so it is at least 16 KiB (PCIe 1.3, Fig 20) */
+static void femu_test_bar0_size(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QPCIBar bar;
+    uint64_t size = 0;
+
+    qpci_device_enable(&femu->dev);
+    bar = qpci_iomap(&femu->dev, 0, &size);
+    g_assert_cmpint(size, >=, 16384);
+    qpci_iounmap(&femu->dev, bar);
+}
+
 #define FEMU_CSD_COMPUTE_LOAD   0x22
 #define FEMU_CSD_TYPE_SHARED_LIB 0x03
 
@@ -4812,6 +4825,7 @@ static void femu_register_nodes(void)
     qos_add_test("prp-status", "femu", femu_test_prp_status, NULL);
     qos_add_test("doorbell-errors", "femu", femu_test_doorbell_errors, NULL);
     qos_add_test("format-ses", "femu", femu_test_format_ses, NULL);
+    qos_add_test("bar0-size", "femu", femu_test_bar0_size, NULL);
     qos_add_test("kv-identify-reserved", "femu",
                  femu_test_kv_identify_reserved, &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "devsz_mb=512,femu_mode=5"

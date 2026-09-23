@@ -1716,7 +1716,12 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     n->completed = 0;
     n->start_time = time(NULL);
     /* doorbells start at 0x1000, two per queue, each 4 << stride bytes apart */
-    n->reg_size = pow2ceil(0x1000 + 2 * (n->nr_io_queues + 1) * (4 << n->db_stride));
+    /*
+     * The transport makes BAR0 bits 13:4 read only, so the registers take at
+     * least 16 KiB whatever the doorbells need (PCIe Transport 1.3, 3.8.1.10).
+     */
+    n->reg_size = MAX(16 * KiB, pow2ceil(0x1000 + 2 * (n->nr_io_queues + 1) *
+                                         (4 << n->db_stride)));
     /* ns_size is the per-namespace share of the exposed capacity */
     n->ns_size = bs_size / (uint64_t)n->num_namespaces;
     if (BBSSD(n) && n->op_pcent) {
