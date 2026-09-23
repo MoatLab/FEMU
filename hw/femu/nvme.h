@@ -2392,7 +2392,8 @@ static inline uint16_t nvme_backend_status(int ret)
 
 static inline uint16_t nvme_check_mdts(FemuCtrl *n, uint64_t len)
 {
-    unsigned shift = n->page_bits + n->mdts;
+    /* MDTS counts in the minimum memory page size, not the one CC chose */
+    unsigned shift = 12 + NVME_CAP_MPSMIN(n->bar.cap) + n->mdts;
 
     /* A limit at or past 2^64 bytes is no limit at all */
     if (n->mdts && shift < 64 && len > UINT64_C(1) << shift) {

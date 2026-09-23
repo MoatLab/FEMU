@@ -4278,6 +4278,86 @@ static void femu_test_zone_change_notice(void *obj, void *data,
     femu_disable(&c);
 }
 
+#define FEMU_RW_PRACT       (1u << 29)      /* CDW12 */
+
+static uint16_t femu_read_prps(FemuCtrlState *c, uint64_t prp1, uint64_t prp2,
+                               uint32_t blocks, uint32_t dw12_flags)
+{
+    NvmeCmd cmd;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_CMD_READ;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(prp1);
+    cmd.dptr.prp2 = cpu_to_le64(prp2);
+    cmd.cdw12 = cpu_to_le32((blocks - 1) | dw12_flags);
+    return femu_io(c, &cmd);
+}
+
+/*
+ * A PRP entry with an offset it may not have is PRP Offset Invalid (Base 2.3,
+ * Figure 110): the first on a byte that is not a dword, a second entry that is
+ * not a page. PRACT on a namespace without protection information is
+ * ignored rather than refused.
+ */
+static void femu_test_prp_status(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t raw = 0;
+    uint64_t buf;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = femu_alloc_64k(alloc, &raw);
+
+    g_assert_cmpint(femu_read_prps(&c, buf + 1, 0, 1, 0), ==,
+                    FEMU_INVALID_PRP_OFFSET);
+    g_assert_cmpint(femu_read_prps(&c, buf, buf + 4096 + 0x10, 16, 0), ==,
+                    FEMU_INVALID_PRP_OFFSET);
+    g_assert_cmpint(femu_read_prps(&c, buf + 0x200, 0, 1, 0), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(femu_read_prps(&c, buf, 0, 8, FEMU_RW_PRACT), ==,
+                    NVME_SUCCESS);
+
+    guest_free(alloc, raw);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
+ * MDTS is a power of two in units of the minimum page size (CAP.MPSMIN), not
+ * of the page size the host picked. With MDTS 1 and 8 KiB pages chosen, the
+ * limit is still 8 KiB.
+ */
+static void femu_test_mdts_unit(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t raw = 0;
+    uint64_t base = femu_alloc_64k(alloc, &raw);
+    uint32_t mps1 = (6 << 16) | (4 << 20) | (1 << 7) | 1;
+
+    c.pdev = &femu->dev;
+    c.alloc = alloc;
+    c.admin.qid = 0;
+    c.admin.sq_addr = base;
+    c.admin.cq_addr = base + 8192;
+    c.admin.phase = 1;
+    qtest_memset(qts, c.admin.cq_addr, 0, 8192);
+    femu_enable_cc(&c, &femu->dev, alloc, mps1);
+
+    g_assert_cmpint(femu_log_cmd(&c, 0xffffffff, FEMU_LOG_SMART, 0,
+                                 base + 16384, 8192), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_log_cmd(&c, 0xffffffff, FEMU_LOG_SMART, 0,
+                                 base + 16384, 12288), ==, NVME_INVALID_FIELD);
+
+    qpci_io_writel(c.pdev, c.bar, 0x14, 0);
+    qpci_iounmap(c.pdev, c.bar);
+    guest_free(alloc, raw);
+}
+
 #define FEMU_CSD_COMPUTE_LOAD   0x22
 #define FEMU_CSD_TYPE_SHARED_LIB 0x03
 
@@ -4558,6 +4638,11 @@ static void femu_register_nodes(void)
     qos_add_test("cc-states", "femu", femu_test_cc_states, NULL);
     qos_add_test("features-reset", "femu", femu_test_features_reset, NULL);
     qos_add_test("error-log", "femu", femu_test_error_log, NULL);
+    qos_add_test("prp-status", "femu", femu_test_prp_status, NULL);
+    qos_add_test("mdts-unit", "femu", femu_test_mdts_unit,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "mpsmax=4,mdts=1"
+    });
     qos_add_test("zone-change-notice", "femu", femu_test_zone_change_notice,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =

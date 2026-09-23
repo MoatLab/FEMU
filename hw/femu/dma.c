@@ -64,10 +64,15 @@ uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
     hwaddr trans_len = n->page_size - (prp1 % n->page_size);
     trans_len = MIN(len, trans_len);
     int num_prps = (len >> n->page_bits) + 1;
+    uint16_t status = NVME_INVALID_FIELD | NVME_DNR;
     bool cmb = false;
 
     if (!prp1) {
         return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    /* the first entry may start anywhere in its page, but on a dword */
+    if (prp1 & 0x3) {
+        return NVME_INVALID_PRP_OFFSET | NVME_DNR;
     } else if (nvme_addr_is_cmb(n, prp1, 1)) {
         cmb = true;
         qsg->nsg = 0;
@@ -93,6 +98,7 @@ uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
             /* a list pointer addresses whole entries */
             if (prp2 & (sizeof(uint64_t) - 1)) {
                 g_free(prp_list);
+                status = NVME_INVALID_PRP_OFFSET | NVME_DNR;
                 goto unmap;
             }
 
@@ -111,6 +117,9 @@ uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
                 if (i == nents - 1 && len > n->page_size) {
                     if (!prp_ent || prp_ent & (n->page_size - 1)) {
                         g_free(prp_list);
+                        if (prp_ent) {
+                            status = NVME_INVALID_PRP_OFFSET | NVME_DNR;
+                        }
                         goto unmap;
                     }
 
@@ -123,8 +132,12 @@ uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
                     prp_ent = le64_to_cpu(prp_list[i]);
                 }
 
+                /* every entry after the first starts a page (Figure 110) */
                 if (!prp_ent || prp_ent & (n->page_size - 1)) {
                     g_free(prp_list);
+                    if (prp_ent) {
+                        status = NVME_INVALID_PRP_OFFSET | NVME_DNR;
+                    }
                     goto unmap;
                 }
 
@@ -141,6 +154,7 @@ uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
             g_free(prp_list);
         } else {
             if (prp2 & (n->page_size - 1)) {
+                status = NVME_INVALID_PRP_OFFSET | NVME_DNR;
                 goto unmap;
             }
             if (!cmb) {
@@ -161,7 +175,7 @@ unmap:
         qemu_iovec_destroy(iov);
     }
 
-    return NVME_INVALID_FIELD | NVME_DNR;
+    return status;
 }
 
 /*
@@ -312,7 +326,7 @@ static uint16_t dma_copy(QEMUSGList *qsg, QEMUIOVector *iov, uint8_t *ptr,
             dma_buf_write(ptr, len, NULL, qsg, MEMTXATTRS_UNSPECIFIED);
 
         if (resid) {
-            status = NVME_INVALID_FIELD | NVME_DNR;
+            status = NVME_DATA_TRAS_ERROR | NVME_DNR;
         }
         qemu_sglist_destroy(qsg);
     } else {
@@ -333,9 +347,10 @@ uint16_t dma_write_prp(FemuCtrl *n, uint8_t *ptr, uint32_t len, uint64_t prp1,
 {
     QEMUSGList qsg;
     QEMUIOVector iov;
+    uint16_t status = nvme_map_prp(&qsg, &iov, prp1, prp2, len, n);
 
-    if (nvme_map_prp(&qsg, &iov, prp1, prp2, len, n)) {
-        return NVME_INVALID_FIELD | NVME_DNR;
+    if (status) {
+        return status;
     }
 
     return dma_copy(&qsg, &iov, ptr, len, false);
@@ -346,9 +361,10 @@ uint16_t dma_read_prp(FemuCtrl *n, uint8_t *ptr, uint32_t len, uint64_t prp1,
 {
     QEMUSGList qsg;
     QEMUIOVector iov;
+    uint16_t status = nvme_map_prp(&qsg, &iov, prp1, prp2, len, n);
 
-    if (nvme_map_prp(&qsg, &iov, prp1, prp2, len, n)) {
-        return NVME_INVALID_FIELD | NVME_DNR;
+    if (status) {
+        return status;
     }
 
     return dma_copy(&qsg, &iov, ptr, len, true);

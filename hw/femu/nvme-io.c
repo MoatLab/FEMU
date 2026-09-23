@@ -735,7 +735,8 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
         uint64_t off0 = prp1 & (pg - 1);
         uint64_t len0 = MIN(data_size, pg - off0);
         uint64_t rem = data_size - len0;
-        if (NS_NOSSD(ns) &&
+        /* a misaligned first entry takes the checked path below */
+        if (NS_NOSSD(ns) && !(prp1 & 0x3) &&
             (rem == 0 || (rem <= pg && prp2 && (prp2 & (pg - 1)) == 0))) {
             DMADirection dir = req->is_write ? DMA_DIRECTION_TO_DEVICE
                                              : DMA_DIRECTION_FROM_DEVICE;
@@ -764,10 +765,11 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
         }
     }
 
-    if (nvme_map_prp(&req->qsg, &req->iov, prp1, prp2, data_size, n)) {
-        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
+    err = nvme_map_prp(&req->qsg, &req->iov, prp1, prp2, data_size, n);
+    if (err) {
+        nvme_set_error_page(n, req->sq->sqid, cmd->cid, err & ~NVME_DNR,
                             offsetof(NvmeRwCmd, prp1), 0, ns->id);
-        return NVME_INVALID_FIELD | NVME_DNR;
+        return err;
     }
 
 mapped:
@@ -941,7 +943,7 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         nlb > le64_to_cpu(ns->id_ns.nsze) - slba) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
                             offsetof(NvmeRwCmd, nlb), elba, ns->id);
-        return NVME_LBA_RANGE;
+        return NVME_LBA_RANGE | NVME_DNR;
     }
     uint16_t dulbe = nvme_check_dulbe(n, ns, slba, elba);
     if (dulbe) {
