@@ -1257,6 +1257,47 @@ static void femu_zone_report(FemuCtrlState *c, uint64_t buf, uint8_t *report)
     qtest_memread(c->pdev->bus->qts, buf, report, 192);
 }
 
+/*
+ * A zoned write refused for its data pointer wrote nothing, so the zone's
+ * write pointer must not move: the next write at the reported pointer has
+ * to be accepted and land there.
+ */
+static void femu_test_zone_bad_dptr(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    NvmeRwCmd rw;
+    uint8_t report[192];
+    uint64_t buf;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, 3 * 4096);
+    buf = (buf + 4095) & ~4095ULL;
+
+    /* 4 KiB from mid-page needs a second PRP, and this one is unaligned */
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf + 0x800);
+    rw.dptr.prp2 = cpu_to_le64(buf + 4096 + 8);
+    rw.nlb = cpu_to_le16(FEMU_DATA_SIZE / c.lba_size - 1);
+    femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                    NVME_INVALID_PRP_OFFSET);
+
+    femu_zone_report(&c, buf, report);
+    g_assert_cmpuint(ldq_le_p(report + 64 + 24), ==, 0);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    femu_zone_report(&c, buf, report);
+    g_assert_cmpuint(ldq_le_p(report + 64 + 24), ==,
+                     FEMU_DATA_SIZE / c.lba_size);
+
+    femu_disable(&c);
+}
+
 static void femu_test_zrwa_reopen(void *obj, void *data,
                                   QGuestAllocator *alloc)
 {
@@ -5698,6 +5739,10 @@ static void femu_register_nodes(void)
                  femu_test_zone_append_parallel, &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
             "femu_mode=3,secsz=512,multipoller_enabled=1,poller_ratio=1"
+    });
+    qos_add_test("zone-bad-dptr", "femu", femu_test_zone_bad_dptr,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=3,secsz=512"
     });
     qos_add_test("zrwa-reopen", "femu", femu_test_zrwa_reopen,
                  &(QOSGraphTestOptions) {

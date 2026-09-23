@@ -1282,6 +1282,16 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         goto err;
     }
 
+    /*
+     * Map the data pointer before placing a write: placing moves the write
+     * pointer, and a write refused afterwards for its pointer would leave
+     * the zone expecting blocks that never arrive.
+     */
+    status = zns_map_dptr(n, data_size, req);
+    if (status) {
+        goto err;
+    }
+
     if(req->is_write)
     {
         /*
@@ -1311,7 +1321,7 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         if (status) {
             femu_err("Misao check zone write failed with status (%u)\n",
                      status);
-            goto err;
+            goto unmap;
         }
         /* only an append reports where it landed; DW0/1 are reserved otherwise */
         if (append) {
@@ -1322,7 +1332,7 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     {
         status = zns_check_zone_read(ns, slba, nlb);
         if (status) {
-            goto err;
+            goto unmap;
         }
 
         /* Misao
@@ -1336,7 +1346,7 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         if (NVME_ERR_REC_DULBE(ns->err_rec)) {
             status = nvme_check_dulbe(n, ns, slba, slba + nlb);
             if (status) {
-                goto err;
+                goto unmap;
             }
         }
     }
@@ -1348,11 +1358,6 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
      * slot would start at backend offset 0 and overwrite the namespace there.
      */
     data_offset = ns->backend_offset + zns_l2b(ns, slba);
-    status = zns_map_dptr(n, data_size, req);
-    if (status) {
-        goto err;
-    }
-
     req->slba = slba;
     req->status = NVME_SUCCESS;
     req->nlb = nlb;
@@ -1428,6 +1433,12 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     ns->zns->active_zone = zns_zone_idx(ns,slba);
     return NVME_SUCCESS;
+unmap:
+    if (req->qsg.nsg) {
+        qemu_sglist_destroy(&req->qsg);
+    } else {
+        qemu_iovec_destroy(&req->iov);
+    }
 err:
     return status | NVME_DNR;
 }
